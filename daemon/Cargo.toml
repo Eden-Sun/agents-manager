@@ -9,6 +9,7 @@ default = ["embed-ui"]
 embed-ui = []
 
 [dependencies]
+am-base = { path = "../crates/am-base" }
 am-core = { path = "../crates/am-core" }
 am-ports = { path = "../crates/am-ports" }
 am-config = { path = "../crates/am-config" }
@@ -46,5 +47,6 @@ libc = "0.2"
 image = { version = "0.25", default-features = false, features = ["jpeg", "png", "webp", "gif"] }
 
 [dev-dependencies]
+am-base = { path = "../crates/am-base", features = ["test-hooks"] }
 # paused Tokio time for timer tests (lifecycle/queue.rs): same tokio crate, test builds only.
 tokio = { version = "1", features = ["full", "test-util"] }

@@ -3974,7 +3974,7 @@ claude 與 codex **每出一個新版**，自動把那一版的 changelog 逐條
 codex 的新版還沒裝，兩個版本都從 `update_notice` 讀。
 
 **兩層判斷**
-1. **決定性規則**（`daemon/src/release_triage/rules.toml`，`include_str!`；改規則＝改檔）。每條 changelog（`- ` 開頭、續行併入）一個 entry，
+1. **決定性規則**（`crates/am-base/src/release_triage/rules.toml`，`include_str!`；改規則＝改檔）。每條 changelog（`- ` 開頭、續行併入）一個 entry，
    `id = sha1(kind|version|空白正規化後的原文)` 前 10 碼；分三桶並**記下命中的規則名**：`dropped`（不送模型）、`kept`（帶類別：settings／env／hook／session／
    statusline／quota／tui／cli／subagent／auth／instructions，動詞 `Removed`／`Deprecated`／`Changed` 開頭＝`behavior-change`）、`unmatched`（兩邊都沒中，照樣送模型但放第二張清單）。
    drop 分**硬**（`[VSCode]` 等前綴標籤、`gateway`、`marketplace`、`/plugin`、`Windows`／`winget`／`apk`／`WSL`、`/ultrareview`、`Artifact`、`Console sign-in`；連 kept 與動詞規則都輸它）與
@@ -5092,7 +5092,7 @@ daemon 要能在 Linux（目標：Ubuntu，外部編譯主機 192.168.1.46，#67
 
 - Claude Code：`--settings <abs>` 注入 hooks；Stop stdin 見 §4.1。**Stop hook 的 stdout 若是 JSON 會被當決策**，子命令必須空 stdout。
 - codex：`-c 'notify=[…]'` 覆寫 notify，argv 最後一項是 JSON（§4.1）。
-- 資料表 schema 以 `daemon/src/db.rs` 的 migration 為準。
+- 資料表 schema 以 `crates/am-base/src/db.rs` 的 migration 為準。
 
 ## 附錄 E：遠端環境事實
 

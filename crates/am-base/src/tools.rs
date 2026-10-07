@@ -1,0 +1,1138 @@
+//! Per-host CLI detection, per-identity login state and `ccN` alias discovery (see SPEC §16).
+//! Executables are looked up through the user's *login* shell: the daemon / non-interactive ssh has a bare PATH.
+//! Login is asked per host under the identity's env — the credential may live in the Keychain, not a file.
+
+use crate::config::LOCAL_HOST;
+use crate::hosts::sh_quote;
+use anyhow::Result;
+use serde::Serialize;
+use std::collections::BTreeMap;
+use std::sync::Arc;
+use std::time::Duration;
+
+#[derive(Debug, Clone, Serialize, PartialEq)]
+pub struct ToolInfo {
+    pub installed: bool,
+    pub path: Option<String>,
+    pub version: Option<String>,
+    /// `None` = could not tell.
+    pub logged_in: Option<bool>,
+}
+
+impl Default for ToolInfo {
+    fn default() -> Self {
+        Self { installed: false, path: None, version: None, logged_in: None }
+    }
+}
+
+
+/// 偵測（`detect*`）、身分登入驗證、alias 輪詢需要從 `App` 拿的外部事實（`App` 在 `app_ports_p3` 實作）：
+/// 主機表／連線事件（[`HostHooks`]）、偵測結果快取、config 身分表、登入提示與額度的連動，以及寫完偵測結果後的後續動作。
+pub trait ToolsEnv: crate::host_baseline::BaselineEnv + crate::hosts::HostHooks {
+    /// 每台主機的偵測結果（`app.tools`）。
+    fn tools_cache(&self) -> &tokio::sync::Mutex<std::collections::HashMap<String, HostTools>>;
+    /// config 的 `[[identities]]`（讀當下的設定）。
+    fn config_identities(&self) -> impl std::future::Future<Output = Vec<crate::config::IdentityCfg>> + Send;
+    /// 這個身分登入成功了：清掉「請登入」提示。
+    fn clear_login_prompt(&self, host: &str, name: &str);
+    /// 同上，並把清掉之後的狀態推出去（`login_prompt::clear_and_push`）。
+    fn clear_login_prompt_and_push(app: &Arc<Self>, host: &str, name: &str) -> impl std::future::Future<Output = ()> + Send;
+    /// 驗證完登入的 claude 身分重新可用：解除它因為撞限／未登入而被停放的狀態。
+    fn unpark_claude_identity(&self, host: &str, name: &str, env: &std::collections::BTreeMap<String, String>);
+    /// 關掉為了登入／登出開的 shell pane。
+    fn close_login_shell(app: &Arc<Self>, host: &str, pane_id: &str) -> impl std::future::Future<Output = ()> + Send;
+    /// 偵測結果剛寫進快取之後一定要跟著做的事：清 kind 不符的身分、回補 quota 限制、排著的 prompt 撞限。
+    fn host_tools_installed(app: &Arc<Self>, host: &str) -> impl std::future::Future<Output = ()> + Send;
+}
+
+/// One identity as seen *from one host*.
+#[derive(Debug, Clone, Serialize, PartialEq)]
+pub struct IdentityInfo {
+    pub name: String,
+    pub kind: String,
+    /// `None` = could not tell (CLI missing, probe failed, output not understood).
+    pub logged_in: Option<bool>,
+    /// Explicit so a failed probe cannot look like a successful (or empty) status in the UI.
+    pub reason: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub account: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub plan: Option<String>,
+    /// `config` | `shell` (`ccN` alias); only a config one can be edited or deleted.
+    pub source: &'static str,
+    /// Display only — the real env goes through [`identities_for_host`].
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub config_dir: Option<String>,
+}
+
+pub const SOURCE_CONFIG: &str = "config";
+pub const SOURCE_SHELL: &str = "shell";
+
+impl IdentityInfo {
+    pub fn shell(name: &str, kind: &str, config_dir: Option<String>) -> Self {
+        Self::unknown(name, kind, SOURCE_SHELL, config_dir)
+    }
+
+    pub fn unknown(name: &str, kind: &str, source: &'static str, config_dir: Option<String>) -> Self {
+        Self {
+            name: name.to_string(),
+            kind: kind.to_string(),
+            logged_in: None,
+            reason: None,
+            account: None,
+            plan: None,
+            source,
+            config_dir,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct HostTools {
+    pub tools: BTreeMap<String, ToolInfo>,
+    pub identities: BTreeMap<String, IdentityInfo>,
+    /// Re-read on every detection and never written back to `config.toml`.
+    pub shell_identities: Vec<crate::config::IdentityCfg>,
+    /// 那台主機當下的 UTC 偏移（秒，`date +%z`）；codex 撞限橫幅印的是那台的當地時間（#239）。讀不到就是 None，不猜。
+    pub utc_offset_secs: Option<i32>,
+    /// 那台 `herdr --version` 的原文（CLI 版本；server 版本看 ping，見 `herdr_version`）。讀不到＝None。
+    pub herdr_cli: Option<String>,
+    pub checked_at: String,
+}
+
+/// Separate so the poller can re-run just the alias part without a CLI round trip (SPEC §16.5).
+macro_rules! alias_sh {
+    () => {
+        r#"
+al=$( "${SHELL:-/bin/sh}" -lic 'alias' 2>/dev/null )
+[ -n "$al" ] || al=$(cat "$HOME/.zshrc" 2>/dev/null)
+printf '%s\n' "$al" | grep -E "(^|[[:space:]])(alias[[:space:]]+)?cc[0-6]=" | while IFS= read -r line; do
+  printf 'AM_ALIAS %s\n' "$line"
+done
+"#
+    };
+}
+pub const ALIAS_SH: &str = alias_sh!();
+
+/// Lines are `AM_<WHAT> <kind> <value>`. `security` without `-w` needs no unlock but a
+/// non-interactive session can still be refused — reported as unknown, not "not logged in".
+pub const PROBE_SH: &str = concat!(r#"
+# Login-shell `command -v` prints `alias claude=...` when the rc defines one. That string is
+# non-empty, so the fallback was skipped and the case wiped it — the tool looked missing (#666).
+# Only an absolute path counts; anything else is cleared before the non-interactive fallback.
+am_abs() {
+  _p=$( "${SHELL:-/bin/sh}" -lic "command -v $1" 2>/dev/null | tail -1 )
+  case "$_p" in /*) ;; *) _p="" ;; esac
+  [ -n "$_p" ] || _p=$(command -v "$1" 2>/dev/null)
+  case "$_p" in /*) ;; *) _p="" ;; esac
+  printf '%s' "$_p"
+}
+for k in claude codex grok agy; do
+  p=$(am_abs "$k")
+  printf 'AM_PATH %s %s\n' "$k" "$p"
+  if [ -n "$p" ]; then
+    v=$( "$p" --version 2>/dev/null </dev/null | head -1 | tr -d '\r' )
+    printf 'AM_VER %s %s\n' "$k" "$v"
+  fi
+done
+CD="${CLAUDE_CONFIG_DIR:-$HOME/.claude}"
+if [ -f "$CD/.credentials.json" ]; then
+  printf 'AM_LOGIN claude 1\n'
+elif command -v security >/dev/null 2>&1; then
+  out=$(security find-generic-password -s "Claude Code-credentials" 2>&1); rc=$?
+  if [ $rc -eq 0 ]; then printf 'AM_LOGIN claude 1\n'
+  elif printf '%s' "$out" | grep -qi "could not be found"; then printf 'AM_LOGIN claude 0\n'
+  else printf 'AM_LOGIN claude ?\n'; fi
+else
+  printf 'AM_LOGIN claude 0\n'
+fi
+if [ -f "${CODEX_HOME:-$HOME/.codex}/auth.json" ]; then printf 'AM_LOGIN codex 1\n'; else printf 'AM_LOGIN codex 0\n'; fi
+printf 'AM_TZ %s\n' "$(date +%z 2>/dev/null)"
+hp=$(am_abs herdr)
+case "$hp" in /*) printf 'AM_HERDR %s\n' "$( "$hp" --version 2>/dev/null </dev/null | head -1 | tr -d '\r' )" ;; esac
+GH="${GROK_HOME:-$HOME/.grok}"
+if [ -f "$GH/auth.json" ] || ls "$GH"/auth* >/dev/null 2>&1; then printf 'AM_LOGIN grok 1\n'; else printf 'AM_LOGIN grok 0\n'; fi
+# agy 的憑證：Linux 是 600 的檔案；macOS 放 login Keychain（service `gemini`、account `antigravity`），沒有那個檔。
+if [ -s "$HOME/.gemini/antigravity-cli/antigravity-oauth-token" ] || { command -v security >/dev/null 2>&1 && security find-generic-password -s gemini -a antigravity >/dev/null 2>&1; }; then printf 'AM_LOGIN agy 1\n'; else printf 'AM_LOGIN agy 0\n'; fi
+"#, alias_sh!());
+
+/// `AM_TZ +0800` → 28800。不是 `±HHMM` 就是 None。
+pub fn parse_utc_offset(out: &str) -> Option<i32> {
+    let v = out.lines().find_map(|l| l.trim().strip_prefix("AM_TZ "))?.trim();
+    let (sign, d) = match v.as_bytes().first()? {
+        b'+' => (1, &v[1..]),
+        b'-' => (-1, &v[1..]),
+        _ => return None,
+    };
+    if d.len() != 4 || !d.bytes().all(|b| b.is_ascii_digit()) {
+        return None;
+    }
+    let (h, m): (i32, i32) = (d[..2].parse().ok()?, d[2..].parse().ok()?);
+    (h < 24 && m < 60).then_some(sign * (h * 3600 + m * 60))
+}
+
+/// 只問 `herdr --version`（比整套 [`PROBE_SH`] 便宜，定期重探用，#254）。
+pub const HERDR_CLI_SH: &str = r#"hp=$( "${SHELL:-/bin/sh}" -lic "command -v herdr" 2>/dev/null | tail -1 )
+case "$hp" in /*) ;; *) hp="" ;; esac
+[ -n "$hp" ] || hp=$(command -v herdr 2>/dev/null)
+case "$hp" in /*) ;; *) hp="" ;; esac
+case "$hp" in /*) printf 'AM_HERDR %s\n' "$( "$hp" --version 2>/dev/null </dev/null | head -1 | tr -d '\r' )" ;; esac
+"#;
+
+/// `command -v` through a login shell, then the current PATH. An alias line is not a path (#666).
+pub fn login_abs_sh(name: &str) -> String {
+    let name = if name.chars().all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_' || c == '.') {
+        name
+    } else {
+        ""
+    };
+    format!(
+        "p=$( \"${{SHELL:-/bin/sh}}\" -lic \"command -v {name}\" 2>/dev/null | tail -1 ); case \"$p\" in /*) ;; *) p=\"\" ;; esac; [ -n \"$p\" ] || p=$(command -v \"{name}\" 2>/dev/null); case \"$p\" in /*) ;; *) p=\"\" ;; esac"
+    )
+}
+
+/// 重探那台的 herdr CLI 版本；連不上或讀不到＝None（不沿用舊值）。
+pub async fn probe_herdr_cli<H: ToolsEnv>(app: &Arc<H>, host: &str) -> Option<String> {
+    let out = if host == LOCAL_HOST {
+        run_local(HERDR_CLI_SH, PROBE_TIMEOUT).await.ok()?
+    } else {
+        let conn = app.hosts().get(host).await?;
+        if !conn.connected.load(std::sync::atomic::Ordering::Relaxed) {
+            return None;
+        }
+        conn.ssh_exec_path(HERDR_CLI_SH).await.ok()?
+    };
+    parse_herdr_cli(&out)
+}
+
+/// `AM_HERDR herdr 0.9.1` → `herdr 0.9.1`。沒這行或空的＝None。
+pub fn parse_herdr_cli(out: &str) -> Option<String> {
+    let v = out.lines().find_map(|l| l.trim().strip_prefix("AM_HERDR "))?.trim();
+    (!v.is_empty()).then(|| v.to_string())
+}
+
+pub fn parse_probe(out: &str) -> BTreeMap<String, ToolInfo> {
+    let mut m: BTreeMap<String, ToolInfo> = crate::config::KINDS.iter().map(|k| (k.to_string(), ToolInfo::default())).collect();
+    for line in out.lines() {
+        let mut it = line.trim_end().splitn(3, ' ');
+        let (Some(tag), Some(kind)) = (it.next(), it.next()) else { continue };
+        let val = it.next().unwrap_or("").trim();
+        let Some(t) = m.get_mut(kind) else { continue };
+        match tag {
+            "AM_PATH" => {
+                if !val.is_empty() {
+                    t.installed = true;
+                    t.path = Some(val.to_string());
+                }
+            }
+            "AM_VER" => {
+                if !val.is_empty() {
+                    t.version = Some(val.to_string());
+                }
+            }
+            "AM_LOGIN" => {
+                t.logged_in = match val {
+                    "1" => Some(true),
+                    "0" => Some(false),
+                    _ => None,
+                }
+            }
+            _ => {}
+        }
+    }
+    // Keep a not-installed tool's login answer only when positive (credentials may survive an uninstall).
+    for t in m.values_mut() {
+        if !t.installed && t.logged_in == Some(false) {
+            t.logged_in = None;
+        }
+    }
+    m
+}
+
+pub const SHELL_IDENTITY_NAMES: [&str; 7] = ["cc0", "cc1", "cc2", "cc3", "cc4", "cc5", "cc6"];
+
+fn unquote(s: &str) -> &str {
+    let t = s.trim();
+    for q in ['\'', '"'] {
+        if t.len() >= 2 && t.starts_with(q) && t.ends_with(q) {
+            return &t[1..t.len() - 1];
+        }
+    }
+    t
+}
+
+/// `CLAUDE_CONFIG_DIR=$HOME/.claude-cc1 claude …` → `$HOME/.claude-cc1`.
+/// Only a leading assignment counts (the only place a shell honours it); the flags are not ours.
+fn config_dir_of(cmd: &str) -> Option<String> {
+    const KEY: &str = "CLAUDE_CONFIG_DIR=";
+    let at = cmd.find(KEY)?;
+    // Only `VAR=value` before it; `env …` or a dir set after the binary is skipped, not guessed.
+    if cmd[..at].split_whitespace().any(|w| !w.contains('=')) {
+        return None;
+    }
+    let rest = &cmd[at + KEY.len()..];
+    let val = match rest.chars().next() {
+        Some(q @ ('\'' | '"')) => rest[1..].split(q).next().unwrap_or(""),
+        _ => rest.split_whitespace().next().unwrap_or(""),
+    };
+    let val = val.trim();
+    (!val.is_empty()).then(|| val.to_string())
+}
+
+/// An alias without `CLAUDE_CONFIG_DIR` becomes an **empty env** identity — the default account
+/// (folded onto the bare `claude` quota key).
+pub fn parse_shell_identities(out: &str) -> Vec<crate::config::IdentityCfg> {
+    let mut found: BTreeMap<String, crate::config::IdentityCfg> = BTreeMap::new();
+    for line in out.lines() {
+        let Some(rest) = line.trim().strip_prefix("AM_ALIAS ") else { continue };
+        let rest = rest.trim().strip_prefix("alias ").unwrap_or(rest.trim());
+        let Some((name, body)) = rest.split_once('=') else { continue };
+        let name = name.trim();
+        if !SHELL_IDENTITY_NAMES.contains(&name) {
+            continue;
+        }
+        let cmd = unquote(body).trim().to_string();
+        if !cmd.split_whitespace().any(|w| w == "claude" || w.ends_with("/claude")) {
+            continue;
+        }
+        let mut env = BTreeMap::new();
+        match config_dir_of(&cmd) {
+            Some(dir) => {
+                env.insert("CLAUDE_CONFIG_DIR".to_string(), dir);
+            }
+            // Picks a config dir in a shape we don't read: treating it as default would run bots
+            // on the wrong login — skip rather than guess.
+            None if cmd.contains("CLAUDE_CONFIG_DIR=") => continue,
+            None => {}
+        }
+        // Later definitions win, like the shell.
+        found.insert(
+            name.to_string(),
+            crate::config::IdentityCfg { name: name.to_string(), kind: "claude".into(), host: None, env, args: vec![] },
+        );
+    }
+    SHELL_IDENTITY_NAMES.iter().filter_map(|n| found.remove(*n)).collect()
+}
+
+/// 一台主機看得到哪些身分，照優先序合併（SPEC §16.2）。**只有這一份規則**：啟動 bot 的
+/// [`identities_for_host`] 與偵測登入狀態的 `detect_identities` 都走它。`shell` 是那台讀到的 `ccN`，`None`＝還沒偵測過。
+///
+/// 1. config 裡**明寫這一台**的。
+/// 2. 本機：沒寫 host 的 config 身分——現行 config.toml 在本機的行為一個字都沒變。
+/// 3. 那台自己的 shell `ccN`。
+/// 4. 遠端：沒寫 host 的 config 身分，**讓位給**那台同名的身分。名字是 `ccN` 時還要等那台的 alias 讀過才給：
+///    偵測前不知道那台有沒有自己的 `cc1`，先給就是注入一個那台不存在的設定目錄（26a14c2 要擋的遮蔽）。
+///
+/// 以前第 4 條不存在（沒寫 host＝只適用本機）：codex／grok 身分只可能寫在 config 裡，升級後遠端 bot 一啟動就 409
+/// `identity is not known on this host`（review 2026-09-16 M6）。
+pub fn merge_identities(
+    config: &[crate::config::IdentityCfg],
+    host: &str,
+    shell: Option<&[crate::config::IdentityCfg]>,
+) -> Vec<(crate::config::IdentityCfg, &'static str)> {
+    let host = if host.is_empty() { LOCAL_HOST } else { host };
+    let mut out: Vec<(crate::config::IdentityCfg, &'static str)> = Vec::new();
+    let push = |out: &mut Vec<(crate::config::IdentityCfg, &'static str)>, i: &crate::config::IdentityCfg, src: &'static str| {
+        if !out.iter().any(|(x, _)| x.name == i.name) {
+            out.push((i.clone(), src));
+        }
+    };
+    for i in config.iter().filter(|i| !i.is_hostless() && i.host_or_local() == host) {
+        push(&mut out, i, SOURCE_CONFIG);
+    }
+    if host == LOCAL_HOST {
+        for i in config.iter().filter(|i| i.is_hostless()) {
+            push(&mut out, i, SOURCE_CONFIG);
+        }
+    }
+    for i in shell.unwrap_or_default() {
+        push(&mut out, i, SOURCE_SHELL);
+    }
+    if host != LOCAL_HOST {
+        for i in config.iter().filter(|i| i.is_hostless()) {
+            if shell.is_none() && SHELL_IDENTITY_NAMES.contains(&i.name.as_str()) {
+                continue;
+            }
+            push(&mut out, i, SOURCE_CONFIG);
+        }
+    }
+    out
+}
+
+/// Hand-written `[[identities]]` win over a colliding `ccN` alias on the host they are written for
+/// (see [`merge_identities`]).
+pub async fn identities_for_host<H: ToolsEnv>(app: &Arc<H>, host: &str) -> Vec<crate::config::IdentityCfg> {
+    identities_for_host_ref(app.as_ref(), host).await
+}
+
+/// Borrowed variant for adapters that implement ToolsEnv directly on their composition root.
+pub async fn identities_for_host_ref<H: ToolsEnv>(app: &H, host: &str) -> Vec<crate::config::IdentityCfg> {
+    let identities = app.config_identities().await;
+    let tools = app.tools_cache().lock().await;
+    let shell = tools.get(host).map(|t| t.shell_identities.as_slice());
+    merge_identities(&identities, host, shell).into_iter().map(|(i, _)| i).collect()
+}
+
+pub async fn identity_for_host<H: ToolsEnv>(app: &Arc<H>, host: &str, name: &str) -> Option<crate::config::IdentityCfg> {
+    identity_for_host_ref(app.as_ref(), host, name).await
+}
+
+/// Borrowed variant for callers whose ports do not need to retain the App allocation.
+pub async fn identity_for_host_ref<H: ToolsEnv>(app: &H, host: &str, name: &str) -> Option<crate::config::IdentityCfg> {
+    identities_for_host_ref(app, host).await.into_iter().find(|i| i.name == name)
+}
+
+/// Deliberately *not* a file check: a claude account can live in the Keychain with no `.credentials.json`.
+/// claude is **remote-only excluded**: over non-login ssh it can't read the Keychain and says
+/// `loggedIn: false`, so remote claude is still asked in a pane ([`crate::quota_claude`] →
+/// [`record_identity_login`]); locally `auth status --json` is authoritative and per config dir.
+/// grok has no `status` subcommand, so `models` is used.
+pub fn login_status_args(kind: &str) -> Option<&'static [&'static str]> {
+    match kind {
+        "codex" => Some(&["login", "status"]),
+        "grok" => Some(&["models"]),
+        _ => None,
+    }
+}
+
+/// What the periodic pass may ask on this host. claude only locally (see [`login_status_args`]).
+pub fn login_probe_args(kind: &str, host: &str) -> Option<&'static [&'static str]> {
+    if kind == "claude" {
+        return (host == LOCAL_HOST).then_some(CLAUDE_LOGIN_ARGS);
+    }
+    login_status_args(kind)
+}
+
+pub const CLAUDE_LOGIN_ARGS: &[&str] = &["auth", "status", "--json"];
+
+/// Sent to a temporary host shell so the device code / URL stays terminal output visible only to
+/// the UI. Identity env is quoted as shell data; never logged or persisted by this path.
+/// claude 用 `auth login` 子命令（2.1.281：開瀏覽器、印網址、等貼 code，登完就結束），不用 `claude /login`：
+/// 那會起一整個 REPL、登完也不退出，[`spawn_identity_login_watch`] 等不到 CLI 結束，pane 要掛滿 15 分鐘。
+pub fn identity_login_command(kind: &str, env: &BTreeMap<String, String>) -> Option<String> {
+    let login = match kind {
+        "claude" => "claude auth login",
+        "codex" => "codex login",
+        "grok" => "grok login",
+        _ => return None,
+    };
+    Some(with_identity_env(login, env))
+}
+
+/// 登出，跟 [`identity_login_command`] 對稱：三家都用自己的子命令（claude `auth logout`）。帳號的認證資料在那個身份的設定目錄裡，
+/// 所以環境變數前綴跟登入完全一樣——少帶一個就會去登出**別的**帳號。
+pub fn identity_logout_command(kind: &str, env: &BTreeMap<String, String>) -> Option<String> {
+    let logout = match kind {
+        "claude" => "claude auth logout",
+        "codex" => "codex logout",
+        "grok" => "grok logout",
+        _ => return None,
+    };
+    Some(with_identity_env(logout, env))
+}
+
+fn with_identity_env(cmd: &str, env: &BTreeMap<String, String>) -> String {
+    let prefix = env
+        .iter()
+        .filter(|(k, _)| valid_env_name(k))
+        .map(|(k, v)| format!("{k}={}", sh_quote(v)))
+        .collect::<Vec<_>>();
+    if prefix.is_empty() {
+        cmd.to_string()
+    } else {
+        format!("env {} {cmd}", prefix.join(" "))
+    }
+}
+
+/// Returns whether anything changed, so the caller only pushes `host_changed` when needed.
+/// The authority must be captured before the observation that produced these values (#347).
+pub async fn record_identity_login_fenced<H: ToolsEnv>(
+    app: &Arc<H>,
+    host: &str,
+    name: &str,
+    fence: &crate::hosts::HostFence,
+    logged_in: Option<bool>,
+    account: Option<String>,
+    plan: Option<String>,
+) -> bool {
+    let mut all = app.tools_cache().lock().await;
+    if !app.hosts().is_current(fence).await {
+        return false;
+    }
+    let Some(ht) = all.get_mut(host) else { return false };
+    let Some(info) = ht.identities.get_mut(name) else { return false };
+    // A pane answer of "could not tell" must not erase what we already knew.
+    if logged_in.is_none() && account.is_none() && plan.is_none() {
+        return false;
+    }
+    let before = (info.logged_in, info.account.clone(), info.plan.clone());
+    if logged_in.is_some() {
+        info.logged_in = logged_in;
+    }
+    if account.is_some() {
+        info.account = account;
+    }
+    if plan.is_some() {
+        info.plan = plan;
+    }
+    let changed = before != (info.logged_in, info.account.clone(), info.plan.clone());
+    // 從非已登入變成已登入：回合授權失敗記下的「要重新登入」（`login_prompt`）到此為止。呼叫端因為 `changed` 會推快照。
+    if info.logged_in == Some(true) && before.0 != Some(true) {
+        app.clear_login_prompt(host, name);
+    }
+    changed
+}
+
+/// 這次重驗的答案要不要寫回快取。遠端讀到「未登入」只有 **claude** 不可信（ssh 沒有 GUI session、
+/// 讀不到 Keychain）；codex／grok 的 `login status` 在遠端照樣準——一律丟掉的話，在遠端主機按「登出」
+/// 之後列上還是「已登入」、登出鈕也還在，要等手動重新偵測或 daemon 重啟（review3 c5 L3）。
+pub fn login_answer_to_cache(local: bool, kind: &str, logged_in: bool) -> Option<bool> {
+    if !local && !logged_in && kind == "claude" {
+        return None;
+    }
+    Some(logged_in)
+}
+
+/// 登出的 pane 收尾時要往快取寫什麼：重驗說還登著就照實（登出沒成功），問不出來就記未登入——
+/// 剛剛才親手下過登出指令，寧可顯示未登入也不要留一個按不完的登出鈕（review3 c5 L3）。
+pub fn logout_result(recheck: Option<bool>) -> Option<bool> {
+    match recheck {
+        Some(true) => Some(true),
+        _ => Some(false),
+    }
+}
+
+/// 記下「這個身分已登出」：`account`／`plan` 一起清掉，否則列上會是「未登入」配著上一個帳號。
+async fn record_identity_logged_out<H: ToolsEnv>(app: &Arc<H>, host: &str, name: &str, reason: &str, fence: &crate::hosts::HostFence) -> bool {
+    let mut all = app.tools_cache().lock().await;
+    if !app.hosts().is_current(fence).await {
+        return false;
+    }
+    let Some(ht) = all.get_mut(host) else { return false };
+    let Some(info) = ht.identities.get_mut(name) else { return false };
+    let before = (info.logged_in, info.account.clone(), info.plan.clone());
+    info.logged_in = Some(false);
+    info.account = None;
+    info.plan = None;
+    info.reason = Some(reason.to_string());
+    before != (info.logged_in, info.account.clone(), info.plan.clone())
+}
+
+/// The poller parks a logged-out identity for 30 min, so after a login the cache stays stale;
+/// `start_bot` rechecks before warning.
+pub async fn recheck_identity_login<H: ToolsEnv>(app: &Arc<H>, host: &str, name: &str) -> Option<bool> {
+    let fence = app.hosts().fence(host).await?;
+    recheck_identity_login_fenced(app, host, name, &fence).await
+}
+
+/// The same host authority is used for the probe and its cache write (#347).
+async fn recheck_identity_login_fenced<H: ToolsEnv>(app: &Arc<H>, host: &str, name: &str, fence: &crate::hosts::HostFence) -> Option<bool> {
+    if !app.hosts().is_current(fence).await {
+        return None;
+    }
+    let idn = identity_for_host(app, host, name).await?;
+    if !app.hosts().is_current(fence).await {
+        return None;
+    }
+    let args: Vec<&str> = match idn.kind.as_str() {
+        "claude" => CLAUDE_LOGIN_ARGS.to_vec(),
+        k => login_status_args(k)?.to_vec(),
+    };
+    let bin = cached_path(app, host, &idn.kind).await.unwrap_or_else(|| idn.kind.clone());
+    let home = match crate::hosts::home_for_fence(fence).await {
+        Ok(home) => home,
+        Err(e) => {
+            tracing::warn!(host, identity = name, error = %e, "skipping identity login recheck because the host HOME is unreadable");
+            return None;
+        }
+    };
+    if !app.hosts().is_current(fence).await {
+        return None;
+    }
+    let mut script = String::new();
+    for (k, v) in &idn.env {
+        if valid_env_name(k) {
+            script.push_str(&format!("export {k}={}\n", sh_quote(&crate::config::expand_home(v, &home))));
+        }
+    }
+    script.push_str(&format!("{} {} 2>/dev/null </dev/null", sh_quote(&bin), args.iter().map(|a| sh_quote(a)).collect::<Vec<_>>().join(" ")));
+    let out = if host == LOCAL_HOST {
+        run_local(&script, Duration::from_secs(20)).await.ok()?
+    } else {
+        fence.conn().ssh_exec_path(&script).await.ok()?
+    };
+    let (logged_in, account, plan) = read_login_answer(&idn.kind, &out);
+    let logged_in = logged_in?;
+    let to_cache = login_answer_to_cache(host == LOCAL_HOST, &idn.kind, logged_in)?;
+    if record_identity_login_fenced(app, host, name, fence, Some(to_cache), account, plan).await {
+        H::host_changed(app, fence).await;
+    }
+    if !app.hosts().is_current(fence).await {
+        return None;
+    }
+    if logged_in && idn.kind == "claude" {
+        app.unpark_claude_identity(host, name, &idn.env);
+    }
+    Some(logged_in)
+}
+
+/// Never copies the login pane's terminal output anywhere else.
+///
+/// `logout`＝這個 pane 下的是登出指令：CLI 跑完之後重驗問不出來（遠端 claude 一律問不出來）就直接記未登入，
+/// 不然列上會一直顯示「已登入」、登出鈕也還按得下去（review3 c5 L3）。
+///
+/// `fence` 是開 pane 之前記下的主機權威（#347）：watcher 最多活 15 分鐘、每一輪都用主機**名字**重新解析，
+/// 途中同名主機重連或改指到另一台，就不能再看新機器上同 id 的 pane、把答案記到新機器的身分、或關掉新機器的 pane——
+/// 一發現權威換了就整個放手（舊機器上的 pane 留著，連線已經不是它的了）。
+pub fn spawn_identity_login_watch<H: ToolsEnv>(
+    app: Arc<H>,
+    host: String,
+    pane_id: String,
+    name: String,
+    kind: String,
+    logout: bool,
+    fence: crate::hosts::HostFence,
+) {
+    tokio::spawn(async move {
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(15 * 60);
+        let startup_deadline = tokio::time::Instant::now() + Duration::from_secs(12);
+        let mut saw_cli = false;
+        let close = || async {
+            if app.hosts().is_current(&fence).await {
+                H::close_login_shell(&app, &host, &pane_id).await;
+            }
+        };
+        loop {
+            tokio::time::sleep(Duration::from_secs(1)).await;
+            if !app.hosts().is_current(&fence).await {
+                tracing::info!(%host, %pane_id, identity = %name, "host was reconnected/reconfigured; login watcher gives up on the old connection");
+                return;
+            }
+            let client = fence.conn().client.clone();
+            let Ok(processes) = client.pane_process_info(&pane_id).await else {
+                if tokio::time::Instant::now() >= deadline {
+                    close().await;
+                    return;
+                }
+                continue;
+            };
+            let cli_active = processes.iter().any(|p| {
+                p.argv.iter().chain(p.argv0.iter()).any(|arg| {
+                    std::path::Path::new(arg).file_name().and_then(|v| v.to_str()) == Some(kind.as_str())
+                })
+            });
+            saw_cli |= cli_active;
+            if (saw_cli && !cli_active) || (!saw_cli && tokio::time::Instant::now() >= startup_deadline) {
+                let after = recheck_identity_login_fenced(&app, &host, &name, &fence).await;
+                // 登入跑完、重驗說已登入：提示到此為止（快取原本就是已登入時 `record` 不會動它，這裡補清）。
+                if !logout && after == Some(true) {
+                    H::clear_login_prompt_and_push(&app, &host, &name).await;
+                }
+                if logout && logout_result(after) == Some(false) {
+                    let changed =
+                        record_identity_logged_out(&app, &host, &name, "剛剛在這台主機登出（重驗問不出來時照登出算）", &fence).await;
+                    if changed {
+                        H::host_changed(&app, &fence).await;
+                    }
+                }
+                close().await;
+                return;
+            }
+            if tokio::time::Instant::now() >= deadline {
+                close().await;
+                return;
+            }
+        }
+    });
+}
+
+/// Headless `claude auth login` never marks onboarding done, so interactive `claude` opens on
+/// 「Select login method」 despite being logged in (cc2, 2026-09-08). Local host only.
+pub fn ensure_claude_onboarded(config_dir: &std::path::Path) -> bool {
+    let path = config_dir.join(".claude.json");
+    let Ok(text) = std::fs::read_to_string(&path) else { return false };
+    let Ok(mut v) = serde_json::from_str::<serde_json::Value>(&text) else { return false };
+    let Some(obj) = v.as_object_mut() else { return false };
+    if obj.get("hasCompletedOnboarding").and_then(|x| x.as_bool()) == Some(true) {
+        return false;
+    }
+    if obj.get("oauthAccount").map(|a| a.is_object()).unwrap_or(false) == false {
+        return false;
+    }
+    obj.insert("hasCompletedOnboarding".into(), serde_json::Value::Bool(true));
+    let Ok(out) = serde_json::to_string_pretty(&v) else { return false };
+    let tmp = path.with_extension("json.am-tmp");
+    if std::fs::write(&tmp, out).is_err() {
+        return false;
+    }
+    std::fs::rename(&tmp, &path).is_ok()
+}
+
+#[derive(Debug, Clone)]
+pub struct IdentityProbe {
+    pub name: String,
+    pub kind: String,
+    /// Absolute path: the probe runs in a bare PATH.
+    pub bin: String,
+    /// `$HOME` expanded against *this* host's home.
+    pub env: BTreeMap<String, String>,
+    /// What to ask this CLI; `None` = this kind's default ([`login_status_args`]).
+    pub args: Option<Vec<&'static str>>,
+}
+
+/// Config is user-written and `export`ed into a script, so invalid names are dropped, not quoted.
+pub fn valid_env_name(k: &str) -> bool {
+    !k.is_empty()
+        && !k.starts_with(|c: char| c.is_ascii_digit())
+        && k.chars().all(|c| c.is_ascii_alphanumeric() || c == '_')
+}
+
+/// Each call in its own subshell (env never leaks to the next) with stdin closed (no TTY wait).
+pub fn identity_probe_sh(items: &[IdentityProbe]) -> String {
+    let mut s = String::new();
+    for it in items {
+        let Some(args) = it.args.clone().or_else(|| login_status_args(&it.kind).map(<[&str]>::to_vec)) else { continue };
+        let args = args.as_slice();
+        s.push_str(&format!("printf 'AM_IDENT_BEGIN %s\\n' {}\n", sh_quote(&it.name)));
+        s.push('(');
+        for (k, v) in it.env.iter().filter(|(k, _)| valid_env_name(k)) {
+            s.push_str(&format!(" {k}={}; export {k};", sh_quote(v)));
+        }
+        s.push_str(" __AM_IDENT_BODY=$( ");
+        s.push_str(&format!(" {}", sh_quote(&it.bin)));
+        for a in args {
+            s.push(' ');
+            s.push_str(&sh_quote(a));
+        }
+        s.push_str(" 2>/dev/null </dev/null ); __AM_IDENT_RC=$?; printf '%s\\n' \"$__AM_IDENT_BODY\" | sed 's/^/AM_IDENT_OUT /'; printf '\\nAM_IDENT_RC %s %s\\n' ");
+        s.push_str(&format!("{} \"$__AM_IDENT_RC\" )\n", sh_quote(&it.name)));
+        // The leading newline keeps the fence on its own line when the CLI ends without one.
+        s.push_str(&format!("printf '\\nAM_IDENT_END %s\\n' {}\n", sh_quote(&it.name)));
+    }
+    s
+}
+
+/// Anything unrecognised stays `None` ("could not tell"), never `Some(false)`.
+pub fn read_login_answer(kind: &str, body: &str) -> (Option<bool>, Option<String>, Option<String>) {
+    let text = body.trim();
+    if text.is_empty() {
+        return (None, None, None);
+    }
+    match kind {
+        "claude" => {
+            let (Some(i), Some(j)) = (text.find('{'), text.rfind('}')) else { return (None, None, None) };
+            if j < i {
+                return (None, None, None);
+            }
+            let Ok(v) = serde_json::from_str::<serde_json::Value>(&text[i..=j]) else { return (None, None, None) };
+            let li = v.get("loggedIn").or_else(|| v.get("logged_in")).and_then(|x| x.as_bool());
+            let account = v.get("email").and_then(|x| x.as_str()).map(str::to_string);
+            let plan = v.get("subscriptionType").and_then(|x| x.as_str()).map(str::to_string);
+            (li, account, plan)
+        }
+        "codex" => {
+            let low = text.to_ascii_lowercase();
+            if low.contains("not logged in") {
+                return (Some(false), None, None);
+            }
+            if let Some(line) = text.lines().find(|l| l.to_ascii_lowercase().contains("logged in")) {
+                let account = line.split_once(" using ").map(|(_, r)| r.trim().trim_end_matches('.').to_string());
+                return (Some(true), account.filter(|s| !s.is_empty()), None);
+            }
+            (None, None, None)
+        }
+        "grok" => {
+            let low = text.to_ascii_lowercase();
+            if low.contains("not authenticated") || low.contains("not logged in") {
+                return (Some(false), None, None);
+            }
+            if let Some(line) = text.lines().find(|l| l.to_ascii_lowercase().contains("logged in")) {
+                let account = line.split_once(" with ").map(|(_, r)| r.trim().trim_end_matches('.').to_string());
+                return (Some(true), account.filter(|s| !s.is_empty()), None);
+            }
+            (None, None, None)
+        }
+        _ => (None, None, None),
+    }
+}
+
+pub fn parse_identity_probe(out: &str, kinds: &BTreeMap<String, String>) -> BTreeMap<String, IdentityInfo> {
+    let mut m = BTreeMap::new();
+    let mut cur: Option<(String, String, Option<i32>)> = None;
+    for line in out.lines() {
+        let l = line.trim_end();
+        if let Some(name) = l.strip_prefix("AM_IDENT_BEGIN ") {
+            cur = Some((name.trim().to_string(), String::new(), None));
+            continue;
+        }
+        if let Some(name) = l.strip_prefix("AM_IDENT_END ") {
+            let Some((open, body, rc)) = cur.take() else { continue };
+            if open != name.trim() {
+                continue;
+            }
+            let Some(kind) = kinds.get(&open) else { continue };
+            let (logged_in, account, plan) = read_login_answer(kind, &body);
+            let reason = if rc.is_some_and(|code| code != 0) {
+                Some(format!("auth status 指令失敗（exit code {}）", rc.unwrap_or_default()))
+            } else if rc.is_none() {
+                Some("auth status probe 沒有完成".into())
+            } else if logged_in.is_none() {
+                Some("auth status 輸出無法解析".into())
+            } else {
+                None
+            };
+            // `source` / `config_dir` are filled in by the caller.
+            m.insert(
+                open.clone(),
+                IdentityInfo {
+                    name: open,
+                    kind: kind.clone(),
+                    logged_in,
+                    reason,
+                    account,
+                    plan,
+                    source: SOURCE_CONFIG,
+                    config_dir: None,
+                },
+            );
+            continue;
+        }
+        if let Some(rest) = l.strip_prefix("AM_IDENT_RC ") {
+            if let Some((open, _, rc)) = cur.as_mut() {
+                let mut fields = rest.split_whitespace();
+                if fields.next() == Some(open.as_str()) {
+                    *rc = fields.next().and_then(|v| v.parse::<i32>().ok());
+                }
+            }
+            continue;
+        }
+        if let Some(answer_line) = l.strip_prefix("AM_IDENT_OUT ") {
+            if let Some((_, body, _)) = cur.as_mut() {
+                body.push_str(answer_line);
+                body.push('\n');
+            }
+            continue;
+        }
+        if cur.is_some() {
+            // Raw lines inside a block are not CLI output. The shell wrapper prefixes each
+            // captured CLI line so its text cannot impersonate these control records.
+            continue;
+        }
+    }
+    m
+}
+
+pub(crate) async fn host_home<H: ToolsEnv>(app: &Arc<H>, host: &str) -> Result<String> {
+    let fence = app.hosts().fence(host).await.ok_or_else(|| anyhow::anyhow!("unknown host `{host}`"))?;
+    crate::hosts::home_for_fence(&fence).await
+}
+
+/// Never fails: a missing CLI or failed probe is reported as unknown.
+pub async fn detect_identities<H: ToolsEnv>(
+    app: &Arc<H>,
+    host: &str,
+    fence: &crate::hosts::HostFence,
+    tools: &BTreeMap<String, ToolInfo>,
+    shell: &[crate::config::IdentityCfg],
+) -> BTreeMap<String, IdentityInfo> {
+    let identities = app.config_identities().await;
+    // Same precedence as [`identities_for_host`], which is what actually starts the bots. 以前這裡把 config 裡
+    // **每一台**的身分都列進來（包括明寫給別台的），用這台的 env 去問登入狀態。
+    let all = merge_identities(&identities, host, Some(shell));
+    if all.is_empty() {
+        return BTreeMap::new();
+    }
+    let home = match crate::hosts::home_for_fence(fence).await {
+        Ok(home) => home,
+        Err(e) => {
+            let reason = format!("host HOME 讀取失敗：{e}");
+            tracing::warn!(host, error = %e, "identity detection skipped because the host HOME is unreadable");
+            let known = app.tools_cache().lock().await.get(host).map(|t| t.identities.clone()).unwrap_or_default();
+            let mut out: BTreeMap<String, IdentityInfo> = all
+                .iter()
+                .map(|(i, src)| (i.name.clone(), IdentityInfo::unknown(&i.name, &i.kind, src, None)))
+                .collect();
+            for (name, info) in &mut out {
+                carry_over(info, known.get(name));
+                info.reason = Some(reason.clone());
+            }
+            return out;
+        }
+    };
+    if !app.hosts().is_current(fence).await {
+        return BTreeMap::new();
+    }
+    let dir_of = |i: &crate::config::IdentityCfg| {
+        i.env.get("CLAUDE_CONFIG_DIR").map(|v| crate::config::expand_home(v, &home))
+    };
+    let mut out: BTreeMap<String, IdentityInfo> = all
+        .iter()
+        .map(|(i, src)| {
+            let mut info = IdentityInfo::unknown(&i.name, &i.kind, src, dir_of(i));
+            info.reason = Some(match tools.get(&i.kind).and_then(|t| t.path.as_ref()) {
+                Some(_) if login_probe_args(&i.kind, host).is_some() => "auth status 尚未取得結果".into(),
+                // 遠端 claude 讀不到 Keychain，只能等 pane 探測（`quota_claude`）。
+                Some(_) if i.kind == "claude" => "遠端 claude 的登入狀態要等 pane 探測".into(),
+                Some(_) => "這個 kind 沒有可用的 auth status 探測".into(),
+                None => format!("{} CLI 不在 PATH", i.kind),
+            });
+            (i.name.clone(), info)
+        })
+        .collect();
+    if out.is_empty() {
+        return out;
+    }
+    let mut items = Vec::new();
+    for (i, _) in &all {
+        let Some(args) = login_probe_args(&i.kind, host) else { continue };
+        let Some(bin) = tools.get(&i.kind).and_then(|t| t.path.clone()) else { continue };
+        let env = i
+            .env
+            .iter()
+            .filter(|(k, _)| valid_env_name(k))
+            .map(|(k, v)| (k.clone(), crate::config::expand_home(v, &home)))
+            .collect();
+        items.push(IdentityProbe { name: i.name.clone(), kind: i.kind.clone(), bin, env, args: Some(args.to_vec()) });
+    }
+    if items.is_empty() {
+        return out;
+    }
+    let kinds: BTreeMap<String, String> = items.iter().map(|i| (i.name.clone(), i.kind.clone())).collect();
+    let script = identity_probe_sh(&items);
+    let res = if host == LOCAL_HOST {
+        run_local(&script, IDENTITY_PROBE_TIMEOUT).await
+    } else {
+        // The 30 s default is too short for many identities, and a timeout marks *every* one unprobed.
+        fence.conn().ssh_exec_path_timeout(&script, IDENTITY_PROBE_TIMEOUT).await
+    };
+    // 重新偵測會整張表重建：這一輪問不到的，沿用上一輪知道的答案，否則每次重探都會把 claude 身分
+    // 打回「未知」，UI 看起來就像帳號自己登出了（2026-09-16 使用者）。
+    let known = app.tools_cache().lock().await.get(host).map(|t| t.identities.clone()).unwrap_or_default();
+    match res {
+        Ok(o) => {
+            for (name, mut info) in parse_identity_probe(&o, &kinds) {
+                if let Some(prev) = out.get(&name) {
+                    info.source = prev.source;
+                    info.config_dir = prev.config_dir.clone();
+                }
+                carry_over(&mut info, known.get(&name));
+                out.insert(name, info);
+            }
+        }
+        Err(e) => {
+            let reason = format!("auth status 探測失敗：{e}");
+            for info in out.values_mut() {
+                info.reason = Some(reason.clone());
+            }
+            tracing::warn!(host, error = %e, "identity login detection failed")
+        }
+    }
+    for (name, info) in out.iter_mut() {
+        carry_over(info, known.get(name));
+    }
+    out
+}
+
+/// Keep the last known answer when this pass could not tell. A fresh `Some(false)` still wins —
+/// that is a real logout; only "問不到" falls back.
+pub fn carry_over(info: &mut IdentityInfo, prev: Option<&IdentityInfo>) {
+    let Some(prev) = prev else { return };
+    if info.logged_in.is_none() && prev.logged_in.is_some() {
+        info.logged_in = prev.logged_in;
+        info.reason = prev.reason.clone().or_else(|| info.reason.clone());
+    }
+    if info.account.is_none() {
+        info.account = prev.account.clone();
+    }
+    if info.plan.is_none() {
+        info.plan = prev.plan.clone();
+    }
+}
+
+const PROBE_TIMEOUT: Duration = Duration::from_secs(40);
+const IDENTITY_PROBE_TIMEOUT: Duration = Duration::from_secs(90);
+
+async fn run_local(script: &str, budget: Duration) -> Result<String> {
+    let o = crate::hosts::sh_local(script, budget).await?.ok_or_else(|| anyhow::anyhow!("local probe timed out"))?;
+    Ok(String::from_utf8_lossy(&o.stdout).to_string())
+}
+
+/// On error the cache is left untouched; the identity pass never fails the whole detection.
+///
+/// 偵測要花幾十秒，這中間同名主機可能已重連或改指到另一台（#347）：開頭先記下 [`crate::hosts::HostFence`]，
+/// 寫進 `app.tools` 前確認它還是這台主機的權威，不是就整個丟掉（[`Superseded`]）——舊機器的事實不能覆寫新機器的。
+pub async fn detect<H: ToolsEnv>(app: &Arc<H>, host: &str) -> Result<HostTools> {
+    let fence = app.hosts().fence(host).await.ok_or_else(|| anyhow::anyhow!("unknown host `{host}`"))?;
+    detect_with_fence(app, host, &fence).await
+}
+
+/// Run detection and retain the authority token so its caller can publish the matching snapshot.
+pub async fn detect_with_fence<H: ToolsEnv>(app: &Arc<H>, host: &str, fence: &crate::hosts::HostFence) -> Result<HostTools> {
+    if fence.conn().name != host {
+        anyhow::bail!("host fence for `{}` cannot detect `{host}`", fence.conn().name);
+    }
+    // 一趟探測帶著 #719 的一致性檢查（只讀），不多一次 ssh。
+    let script = format!("{PROBE_SH}\n{}", crate::host_baseline::BASELINE_SH);
+    let probed = if host == LOCAL_HOST { run_local(&script, PROBE_TIMEOUT).await } else { fence.conn().ssh_exec_path(&script).await };
+    let out = match probed {
+        Ok(out) => out,
+        Err(e) => {
+            // 連不上／逾時：留著的舊 baseline 標上失敗（不能讓它看起來像剛量的），並推給網頁。
+            crate::host_baseline::note_failure(&**app, host, &e).await;
+            H::host_changed(app, fence).await;
+            return Err(e);
+        }
+    };
+    let baseline = crate::host_baseline::BaselineReport {
+        os: crate::host_baseline::os_of(&out),
+        issues: crate::host_baseline::evaluate(&out),
+        checked_at: crate::db::now(),
+        failed_at: None,
+        error: None,
+        stale: false,
+    };
+    let tools = parse_probe(&out);
+    let shell_identities = parse_shell_identities(&out);
+    let identities = detect_identities(app, host, fence, &tools, &shell_identities).await;
+    let utc_offset_secs = parse_utc_offset(&out);
+    let herdr_cli = parse_herdr_cli(&out);
+    let ht = HostTools { tools, identities, shell_identities, utc_offset_secs, herdr_cli, checked_at: crate::db::now() };
+    if !install_host_tools_fenced(app, host, ht.clone(), fence).await {
+        return Err(anyhow::Error::new(Superseded { host: host.to_string() }));
+    }
+    app.baseline_cache().lock().await.insert(host.to_string(), baseline.clone());
+    crate::host_baseline::notify(&**app, host, &baseline).await;
+    tracing::info!(
+        host,
+        tools = ?ht.tools.iter().map(|(k, t)| (k.clone(), t.installed, t.logged_in)).collect::<Vec<_>>(),
+        identities = ?ht.identities.values().map(|i| (i.name.clone(), i.source, i.logged_in)).collect::<Vec<_>>(),
+        "tools detected"
+    );
+    Ok(ht)
+}
+
+/// 偵測開始後主機已重連／改設定／被移除，或有更新的偵測先寫了：結果作廢，沒有動任何狀態。
+#[derive(Debug)]
+pub struct Superseded {
+    pub host: String,
+}
+
+impl std::fmt::Display for Superseded {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "host `{}` was reconnected/reconfigured during detection; stale result discarded", self.host)
+    }
+}
+
+impl std::error::Error for Superseded {}
+
+/// [`install_host_tools`]，但只在 `fence` 仍是這台主機的權威、且沒有更新的偵測已經寫過時才寫；
+/// 檢查與寫入在同一把 `app.tools` 鎖裡，後續的身分清理／額度回填也只跟著成功的那次。回傳有沒有寫。
+pub async fn install_host_tools_fenced<H: ToolsEnv>(app: &Arc<H>, host: &str, ht: HostTools, fence: &crate::hosts::HostFence) -> bool {
+    {
+        let mut tools = app.tools_cache().lock().await;
+        if !app.hosts().is_current(fence).await || !fence.claim_publish() {
+            return false;
+        }
+        tools.insert(host.to_string(), ht);
+    }
+    follow_up_host_tools(app, host).await;
+    true
+}
+
+/// 偵測結果寫進 `app.tools`，以及寫完之後一定要跟著做的事（抽出來，測試不必真的跑 shell 探測）。
+#[cfg(any(test, feature = "test-hooks"))]
+pub async fn install_host_tools<H: ToolsEnv>(app: &Arc<H>, host: &str, ht: HostTools) {
+    app.tools_cache().lock().await.insert(host.to_string(), ht);
+    follow_up_host_tools(app, host).await;
+}
+
+async fn follow_up_host_tools<H: ToolsEnv>(app: &Arc<H>, host: &str) {
+    H::host_tools_installed(app, host).await;
+}
+
+pub fn spawn_detect<H: ToolsEnv>(app: Arc<H>, host: String) {
+    tokio::spawn(async move {
+        let Some(fence) = app.hosts().fence(&host).await else { return };
+        match detect_with_fence(&app, &host, &fence).await {
+            Ok(_) => {
+                H::host_changed(&app, &fence).await;
+            }
+            Err(e) if e.is::<Superseded>() => tracing::info!(host, "{e}"),
+            Err(e) => tracing::warn!(host, error = %e, "tool detection failed"),
+        }
+    });
+}
+
+/// Cheap (one login shell, no CLI), so a new alias shows up within a minute, not at restart.
+const ALIAS_POLL_EVERY: Duration = Duration::from_secs(60);
+
+async fn poll_aliases<H: ToolsEnv>(app: &Arc<H>, host: &str) -> Option<Vec<crate::config::IdentityCfg>> {
+    let out = if host == LOCAL_HOST {
+        run_local(ALIAS_SH, PROBE_TIMEOUT).await
+    } else {
+        let conn = app.hosts().get(host).await?;
+        if !conn.connected.load(std::sync::atomic::Ordering::Relaxed) {
+            return None;
+        }
+        conn.ssh_exec_path(ALIAS_SH).await
+    };
+    match out {
+        Ok(o) => Some(parse_shell_identities(&o)),
+        Err(e) => {
+            tracing::debug!(host, error = %e, "alias poll failed");
+            None
+        }
+    }
+}
+
+/// Full [`detect`] only when the alias set changed; uncached hosts wait for their on-connect detection.
+pub fn spawn_alias_poller<H: ToolsEnv>(app: Arc<H>) {
+    tokio::spawn(async move {
+        loop {
+            tokio::time::sleep(ALIAS_POLL_EVERY).await;
+            for name in app.hosts().names().await {
+                let Some(cached) = app.tools_cache().lock().await.get(&name).map(|t| t.shell_identities.clone()) else { continue };
+                let Some(now) = poll_aliases(&app, &name).await else { continue };
+                if now == cached {
+                    continue;
+                }
+                tracing::info!(host = %name, before = ?cached.iter().map(|i| &i.name).collect::<Vec<_>>(),
+                    after = ?now.iter().map(|i| &i.name).collect::<Vec<_>>(), "ccN aliases changed; re-detecting");
+                spawn_detect(app.clone(), name);
+            }
+        }
+    });
+}
+
+pub async fn cached_path<H: ToolsEnv>(app: &Arc<H>, host: &str, kind: &str) -> Option<String> {
+    app.tools_cache().lock().await.get(host).and_then(|h| h.tools.get(kind)).and_then(|t| t.path.clone())
+}
+
+pub fn install_prompt(kind: &str) -> Option<String> {
+    let (name, install, login) = match kind {
+        "claude" => (
+            "Claude Code",
+            "curl -fsSL https://claude.ai/install.sh | bash   （官方安裝腳本；若失敗可改用 npm i -g @anthropic-ai/claude-code）",
+            "claude   （首次啟動會進入登入流程）",
+        ),
+        "codex" => ("OpenAI Codex CLI", "npm i -g @openai/codex   （官方安裝方式）", "codex login"),
+        "grok" => ("xAI Grok CLI", "curl -fsSL https://x.ai/cli/install.sh | bash   （官方安裝腳本）", "grok login"),
+        _ => return None,
+    };
+    Some(format!(
+        "請在這台機器上安裝並登入 {name}，步驟如下，逐步執行並回報每一步的輸出：\n\
+         1. 安裝：`{install}`。\n\
+         2. 確認安裝成功：執行 `{kind} --version` 並印出結果（若找不到指令，檢查安裝腳本輸出的安裝路徑並加入 PATH，例如 ~/.local/bin 或 ~/.{kind}/bin）。\n\
+         3. 登入：執行 `{login}`。這是互動式流程，會顯示一個登入 URL（或裝置代碼）；請把該 URL 原封不動、完整地印出來給我，然後停在那裡等待我在瀏覽器完成登入，不要自行中斷或略過。\n\
+         4. 登入完成後再執行一次 `{kind} --version` 確認，並回報「{kind} 已安裝並登入」。",
+    ))
+}
+
+
+/// #666：登入 shell 回 `alias claude=...` 時不能當成沒安裝，備援要找到 PATH 上的真執行檔。
+
+
+/// 每台主機的 CLI／身分偵測結果。（欄位在 `App`，由 composition 層 `app_ports_p0` 實作這個窄能力。）
+pub trait ToolsTable: Send + Sync {
+    fn tools(&self) -> &tokio::sync::Mutex<std::collections::HashMap<String, crate::tools::HostTools>>;
+}

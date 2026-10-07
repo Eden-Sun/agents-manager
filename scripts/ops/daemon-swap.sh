@@ -374,7 +374,7 @@ GOT=$(shasum -a 256 "$BAK" | cut -c1-16)
 log "rollback binary $BAK verified ($OLDHASH)"
 
 # 預期的 schema 版本**從 checkout 讀**，不寫死：SCHEMA_HISTORY 的最後一項就是這顆 binary 認得的版本。
-EXP_UV=$("$PYTHON" - "$CHECKOUT/daemon/src/db.rs" <<'PY'
+EXP_UV=$("$PYTHON" - "$CHECKOUT/crates/am-base/src/db.rs" <<'PY'
 import re, sys
 src = open(sys.argv[1]).read()
 m = re.search(r"SCHEMA_HISTORY[^=]*=\s*&?\s*\[(.*?)\];", src, re.S)

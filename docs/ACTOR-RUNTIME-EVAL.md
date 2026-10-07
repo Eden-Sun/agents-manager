@@ -37,7 +37,7 @@ trigger 或純函式），但**執行**轉移的程式碼——`queue::flush_que
 明白：「start / stop / prompt / hook matching / spool replay / reconcile all take it.」。這聽起來
 像是問題，但**真正扛住正確性的不是這把鎖**：
 
-- `turns_one_in_flight`／`turns_one_queued` 這兩個 UNIQUE INDEX（`daemon/src/db.rs`）讓「兩邊都以為
+- `turns_one_in_flight`／`turns_one_queued` 這兩個 UNIQUE INDEX（`crates/am-base/src/db.rs`）讓「兩邊都以為
   自己搶到了」變成 SQL 錯誤，不是靜默的資料損毀——`queue.rs:5-8` 的 doc comment 直接寫「the one-in-flight
   / one-queued unique indexes make a lost race an error」。
 - 今晚新增的 `turns_status_transition` trigger 讓「非法轉移」不管從哪條路徑來都是 `RAISE(ABORT)`。

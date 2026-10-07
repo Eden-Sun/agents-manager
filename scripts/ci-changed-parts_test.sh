@@ -47,7 +47,7 @@ check "ops" "scripts/ops/browser-gc-task.md"
 # 反方向：web 的測試讀 daemon 的 fixtures；ops 的 project-transfer 測試從 daemon 的 schema 原始碼抽欄位。
 check "web daemon" "daemon/src/lifecycle/fixtures/codex-0.155-draft.ansi"
 check "daemon" "daemon/src/release_triage/fixtures/claude_2.1.276-278.md"
-for f in daemon/src/db.rs daemon/src/supervisor/store.rs daemon/src/supervisor/roles.rs daemon/src/mission/store.rs; do
+for f in crates/am-base/src/db.rs daemon/src/supervisor/store.rs daemon/src/supervisor/roles.rs daemon/src/mission/store.rs; do
     check "daemon ops" "$f"
 done
 check "daemon" "daemon/src/api.rs"

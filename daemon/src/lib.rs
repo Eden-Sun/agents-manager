@@ -1,64 +1,143 @@
-//! agents-managerd 的函式庫（crate 拆分第 2 步：lib＋薄 bin）。
-//!
-//! 所有模組住在這裡（單元測試照舊在各模組內）；`main.rs` 只做 CLI 解析與派發，
-//! 開機流程在 [`serve`]。只有 bin 用得到的模組才 `pub`，其餘維持 crate 私有。
+//! agents-managerd 的函式庫；`am-base` 模組由此 re-export，`main.rs` 只做 CLI 解析與派發。
 
 
-mod ask_answers;
 pub mod runners;
+pub use am_base::config;
+pub use am_base::{
+    agent_relay,
+    agy_remote,
+    agy_screen,
+    agy_support,
+    assets,
+    attach,
+    background_hook,
+    background_loop,
+    bot_input,
+    bot_trash,
+    build_scheduler,
+    bulk_restart,
+    cache_clock,
+    capabilities,
+    capture,
+    cargo_shim,
+    changelog,
+    child_reconcile_safety,
+    child_runtime,
+    claude_live,
+    claude_mode,
+    codex_update,
+    composer_parse,
+    config_audit,
+    codex_status,
+    credential_spawn,
+    db,
+    exec_retry,
+    fork_ops,
+    git_sh,
+    github,
+    herdr,
+    herdr_maintenance,
+    herdr_shim,
+    herdr_unit,
+    herdr_update,
+    herdr_version,
+    home,
+    hook_body,
+    hook_cmd,
+    hook_inbox,
+    host_baseline,
+    hosts,
+    kids_cache,
+    kind_probe,
+    launch_rev,
+    lc_error,
+    linux_proc,
+    local_image,
+    local_sh,
+    login_assist,
+    login_prompt,
+    memproc,
+    memstat,
+    models,
+    outbox,
+    outbox_remote,
+    pane_identity,
+    pasted_content,
+    pending_question,
+    preview_bind,
+    primary_keep_warm,
+    private_files,
+    probe_ws,
+    prompt_cache,
+    prompt_suggestion,
+    quota,
+    quota_agy,
+    quota_claude,
+    quota_grok,
+    release_triage,
+    remote_health,
+    remote_purge,
+    remote_trash,
+    restart_coalesce,
+    restart_intents,
+    rewind,
+    session_paused,
+    shared_host,
+    shim_path,
+    shim_refresh,
+    spawn_hints,
+    statusline_cmd,
+    supervisor_inbox,
+    tools,
+    transcript_read,
+    trust,
+    trusted_open,
+    update_watch,
+    upstream_update,
+};
+
+
+#[cfg(test)]
+pub use am_base::race_point;
+mod ask_answers;
+mod identity_kind;
 mod blocked_reason;
-mod bot_input;
-mod cache_clock;
-mod kids_cache;
-mod prompt_cache;
-mod bot_trash;
+mod child_alerts;
+mod child_done;
+mod child_retire;
+pub mod daemon_notice;
+mod dangerous_rm;
+mod default_session;
+mod due_actions;
+mod events;
+mod handoff;
+mod tui_prompts;
+mod background_jobs;
+mod codex_live;
+mod codex_model_migration;
+mod panes;
+mod projection;
+mod supervisor_owned;
+mod relay_auth;
 mod deleted_bots;
 mod build_info;
-mod build_scheduler;
-mod exec_retry;
-mod cargo_shim;
-mod agent_relay;
 mod app_ports_r2a9;
 mod api;
 #[cfg(test)]
 mod bot_read_scope_tests;
 mod bot_state;
-mod pending_question;
-mod identity_kind;
 mod intents;
-mod restart_intents;
 mod delete_intents;
 mod deploy_now;
 mod deploy_wait;
 mod drafts;
-mod launch_rev;
 mod promote_intents;
-mod assets;
-mod background_hook;
-mod background_jobs;
-mod background_loop;
-mod claude_live;
-mod claude_mode;
 mod autostart_revive;
-mod attach;
-mod bulk_restart;
-mod changelog;
 mod claude_review;
 mod cli_update;
-mod codex_update;
-mod child_alerts;
-mod child_done;
-mod child_reconcile_safety;
-mod child_retire;
-mod credential_spawn;
 mod codex_history;
-mod codex_live;
-mod child_runtime;
-mod agy_screen;
-mod agy_support;
 mod app_ports_p0;
 mod app_ports_p1;
-mod capabilities;
 mod app_ports_p10;
 pub(crate) mod app_ports_p9;
 mod app_ports_p12;
@@ -67,99 +146,31 @@ mod app_ports_p3;
 mod app_ports_p5;
 pub(crate) mod app_ports_p8;
 mod app_ports_r2a8;
-pub mod composer_parse;
-pub mod daemon_notice;
 mod grok_live;
-pub mod hook_body;
-pub mod pasted_content;
-#[cfg(test)]
-pub mod race_point;
-mod codex_model_migration;
-use am_config as config;
-mod config_audit;
-mod capture;
-mod dangerous_rm;
-mod session_paused;
-mod default_session;
-mod db;
-mod due_actions;
-mod events;
 mod fork;
-mod fork_ops;
-mod remote_purge;
 mod remote_perms;
-mod remote_trash;
 mod promote;
 mod gh_auth;
 mod git_quick;
-mod git_sh;
-mod github;
 mod group;
-mod handoff;
-mod shared_host;
 mod share;
-mod herdr;
-mod herdr_shim;
-mod herdr_maintenance;
-mod herdr_unit;
-pub mod herdr_update;
 mod herdr_upgrade;
-mod herdr_version;
-mod home;
-pub mod hook_cmd;
-mod hook_inbox;
 mod judge;
 mod hookrecv;
-mod hosts;
-mod kind_probe;
-pub mod lc_error;
 mod lifecycle;
-mod linux_proc;
-mod local_image;
-mod local_sh;
-mod memproc;
-mod memstat;
-mod outbox;
-mod outbox_remote;
 mod swap_window;
 mod mission;
-mod models;
-mod pane_identity;
 mod preview;
-mod preview_bind;
-mod primary_keep_warm;
 mod primary_order;
-mod login_assist;
-mod login_prompt;
 mod pane_probe;
-mod prompt_suggestion;
-mod probe_ws;
-mod shim_path;
-mod shim_refresh;
-mod panes;
-mod private_files;
-mod projection;
-mod quota;
-mod quota_claude;
-pub mod release_triage;
-mod quota_agy;
 mod agy_install;
-mod agy_remote;
-mod quota_grok;
 mod read_marks;
-mod rewind;
 pub mod remote_cargo;
-mod remote_health;
 mod reconcile;
-mod relay_auth;
-mod spawn_hints;
 mod state;
 mod supervisor;
-mod supervisor_owned;
 mod supervisor_evidence;
-pub mod supervisor_inbox;
 mod startup;
-pub mod statusline_cmd;
 mod service_auth;
 #[cfg(test)]
 mod testing;
@@ -169,16 +180,7 @@ mod test_home;
 mod timestamp_compat_tests;
 #[cfg(test)]
 mod same_ms_order_tests;
-mod host_baseline;
-mod restart_coalesce;
-mod tools;
-mod transcript_read;
-mod trust;
-mod trusted_open;
-mod tui_prompts;
 mod turn_error;
-mod update_watch;
-mod upstream_update;
 pub mod serve;
 pub mod cli;
 pub use cli::{Cli, Cmd};

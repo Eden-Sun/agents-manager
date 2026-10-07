@@ -249,7 +249,7 @@ equals "跑完鎖不留下" "$([ -e "$ROOT/agm/browser-gc.lock" ] && echo yes ||
 teardown
 
 # 9. `--request-id` 要維持分鐘級：turns_client_req 是 (conversation_id, client_request_id) 上
-#    **沒有時間範圍**的唯一索引（daemon/src/db.rs:105），換成日期級會讓一天只派得出第一輪。
+#    **沒有時間範圍**的唯一索引（crates/am-base/src/db.rs:105），換成日期級會讓一天只派得出第一輪。
 equals "request-id 仍含 %H%M" "$(grep -c 'request-id "agm-browser-gc-$(date +%Y%m%d-%H%M)"' "$HERE/browser-gc-kick.sh")" "1"
 
 echo "$PASS passed, $FAIL failed"

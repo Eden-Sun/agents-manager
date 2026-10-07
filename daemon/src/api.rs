@@ -28,16 +28,6 @@ fn any_err<E: std::fmt::Display>(e: E) -> LcError {
     LcError::Upstream(e.to_string())
 }
 
-impl From<crate::github::GithubError> for LcError {
-    fn from(error: crate::github::GithubError) -> Self {
-        match error {
-            crate::github::GithubError::NotFound(what) => LcError::NotFound(what),
-            crate::github::GithubError::Bad(message) => LcError::Bad(message),
-            crate::github::GithubError::Upstream(message) => LcError::Upstream(message),
-        }
-    }
-}
-
 /// 寫設定的路徑專用：`ConfigStore::update` 在落盤前驗不過時回 **400 `config_invalid`**，而不是 502。
 ///
 /// 502 的定義是「herdr／DB 出錯」（SPEC §3.1）；設定不合法是**請求的問題**，混成同一個碼，呼叫端分不出
@@ -4369,7 +4359,7 @@ mod project_tests {
     async fn the_shared_session_flag_is_listed_live_and_kept_when_a_host_update_omits_it() {
         let e = crate::testing::env().await;
         let app = e.app.clone();
-        crate::shared_host::tests::shared_host(&e, true).await;
+        crate::runners::am_base_tests::shared_host::tests::shared_host(&e, true).await;
         let flag = |app: Arc<App>| async move {
             hosts_list(&app).await.into_iter().find(|h| h["name"] == "sh1").unwrap()["shared_session"].clone()
         };

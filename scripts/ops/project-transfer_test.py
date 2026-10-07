@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """scripts/ops/project-transfer 的隔離測試（issue #710）：假 DB、假 config、暫存目錄，不碰正式資料。
 
-schema 直接從 daemon/src/db.rs 的 `SCHEMA` 與 additive ALTER 名單抽出來建，daemon 加欄時這裡跟著變。
+schema 直接從 crates/am-base/src/db.rs 的 `SCHEMA` 與 additive ALTER 名單抽出來建，daemon 加欄時這裡跟著變。
 """
 
 import datetime
@@ -28,7 +28,7 @@ DELETED_ROWS = {"r-dead", "r-dead-kid", "t-dead", "m-dead", "m-dead-kid", "a-dea
 
 
 def schema_statements():
-    with open(os.path.join(ROOT, "daemon/src/db.rs"), encoding="utf-8") as f:
+    with open(os.path.join(ROOT, "crates/am-base/src/db.rs"), encoding="utf-8") as f:
         src = f.read()
     body = re.search(r'pub const SCHEMA: &str = r#"(.*?)"#;', src, re.S).group(1)
     stmts = [s.strip() for s in body.split(";\n") if s.strip()]

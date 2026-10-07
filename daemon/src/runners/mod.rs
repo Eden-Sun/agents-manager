@@ -49,3 +49,7 @@ pub mod session_paused;
 pub mod tui_prompts;
 pub mod update_watch;
 pub mod upstream_update;
+
+#[cfg(test)]
+#[path = "am_base_tests.rs"]
+pub(crate) mod am_base_tests;
