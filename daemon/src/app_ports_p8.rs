@@ -341,7 +341,7 @@ impl HostSidePort for Arc<App> {
         crate::state::set_default_connected(self, connected).await
     }
     async fn drain_remote_coalesced(&self, host: &str, bot_id: &str) -> Result<usize> {
-        crate::hookrecv::drain_remote_coalesced(self, host, bot_id).await
+        crate::runners::hookrecv::drain_remote_coalesced(self, host, bot_id).await
     }
 }
 

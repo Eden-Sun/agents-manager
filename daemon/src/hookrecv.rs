@@ -6,13 +6,21 @@ use crate::db;
 use crate::config::{valid_id, ID_RE};
 use crate::lifecycle;
 use crate::hosts::sh_quote;
+// 測試模組（`use super::*`）還在用整個 daemon 的型別、以及搬到 `runners/hookrecv.rs` 的組裝函式；測試檔之後再改成自己 import。
+#[cfg(test)]
 use crate::state::App;
-use anyhow::Result;
+#[cfg(test)]
+use crate::runners::hookrecv::{receive, replay_host, spawn_spool_scanner, statusline_tasks_spawned};
+#[cfg(test)]
 use axum::extract::{Path, State};
+#[cfg(test)]
 use axum::http::{HeaderMap, StatusCode};
+#[cfg(test)]
 use axum::Json;
-use serde_json::{json, Value};
+#[cfg(test)]
 use std::sync::Arc;
+use anyhow::Result;
+use serde_json::{json, Value};
 
 pub use crate::hook_body::HookBody;
 
@@ -26,93 +34,6 @@ pub use crate::hook_body::HookBody;
 /// hook 的 provider（URL 那一段或 body 的 `provider`）必須就是這顆 bot 的 kind。空的 kind（舊資料）不擋。
 pub(crate) fn provider_matches_kind(provider: &str, kind: &str) -> bool {
     kind.is_empty() || provider.eq_ignore_ascii_case(kind)
-}
-
-pub async fn receive(
-    State(app): State<Arc<App>>,
-    Path(provider): Path<String>,
-    headers: HeaderMap,
-    Json(body): Json<HookBody>,
-) -> (StatusCode, Json<Value>) {
-    let token = headers.get("X-AM-Bot-Token").and_then(|v| v.to_str().ok()).unwrap_or("");
-    // 分不出「沒這顆 bot」與「token 不對」（#304）：先驗 token，410 只給 token 正確者。
-    let unauthorized = || (StatusCode::UNAUTHORIZED, Json(json!({"error": "unknown bot or bad token"})));
-    let bot = match db::bot(&app.db, &body.bot_id).await {
-        Ok(Some(b)) => b,
-        _ => return unauthorized(),
-    };
-    if token.is_empty() || !app.ct_eq(token, &bot.hook_token) {
-        return unauthorized();
-    }
-    // A3: a deleted bot's surviving agent must not be able to create turns / messages.
-    if bot.deleted_at.is_some() {
-        return (StatusCode::GONE, Json(json!({"error": "bot deleted"})));
-    }
-    let provider = if body.provider.is_empty() { provider } else { body.provider.clone() }.to_ascii_lowercase();
-    // provider 要跟這顆 bot 的 kind 一致：claude bot 的 pane 裡跑 `codex exec -c notify=[… --bot $AM_BOT_ID …]`，
-    // token／run id 都是從 pane 環境繼承來的、全對，codex 的 thread-id 就被當成這顆 claude bot 的 session
-    // 記成 native_session_id 還標 verified（2026-09-22 AM-issuers-XH：DB 記了一個不存在的 UUIDv7，
-    // restart --resume native 兩次都起不來）。
-    if !provider_matches_kind(&provider, &bot.kind) {
-        tracing::warn!(bot = %bot.name, kind = %bot.kind, %provider, "hook from another provider; ignored");
-        return (StatusCode::CONFLICT, Json(json!({"error": "provider_mismatch", "bot_kind": bot.kind, "provider": provider})));
-    }
-    let mut b = body;
-    b.provider = provider;
-
-    // 單槽、最新的贏的訊號：不進佇列，掉一格只是晚一次重繪（`hook_inbox` 模組說明）。
-    if matches!(classify(&b.provider, &b.payload), HookKind::StatusLine) {
-        spawn_statusline(&app, b);
-        return (StatusCode::OK, Json(json!({})));
-    }
-
-    match crate::hook_inbox::accept(&app.db, &b, crate::hook_inbox::Source::Http).await {
-        Ok(accepted) => {
-            // commit 之後才叫醒 worker：醒來一定看得到那一列。
-            app.hook_inbox_wake.notify_one();
-            (StatusCode::OK, Json(json!({"stored": accepted.is_new()})))
-        }
-        Err(e) => {
-            tracing::error!(error = ?e, bot = %b.bot_id, "hook not persisted; telling the sender to spool it");
-            (StatusCode::SERVICE_UNAVAILABLE, Json(json!({"error": "not persisted"})))
-        }
-    }
-}
-
-/// 每顆 bot 在等處理的最新一則 StatusLine。
-fn status_slots() -> &'static std::sync::Mutex<std::collections::HashMap<String, HookBody>> {
-    static SLOTS: std::sync::OnceLock<std::sync::Mutex<std::collections::HashMap<String, HookBody>>> = std::sync::OnceLock::new();
-    SLOTS.get_or_init(Default::default)
-}
-
-#[cfg(test)]
-static STATUSLINE_TASKS: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
-#[cfg(test)]
-fn statusline_tasks_spawned() -> usize {
-    STATUSLINE_TASKS.load(std::sync::atomic::Ordering::SeqCst)
-}
-
-/// StatusLine 是「最新的贏」的單槽訊號：處理它要拿 bot 鎖，鎖被長操作握著時，每一則各丟一個 task 排隊就會一路疊上去
-/// （每個 task 抱一份 body，高頻 × 慢鎖＝記憶體與排隊都無上限）。同一顆 bot 只留一格：槽裡已經有一則在等，
-/// 後到的直接取代它（等的那個 task 醒來處理的就是最新的）；槽是空的才起一個 task。所以每顆 bot 最多一個在處理、一個在等。
-fn spawn_statusline(app: &Arc<App>, b: HookBody) {
-    let bot_id = b.bot_id.clone();
-    let replaced = status_slots().lock().unwrap_or_else(|e| e.into_inner()).insert(bot_id.clone(), b).is_some();
-    if replaced {
-        return;
-    }
-    #[cfg(test)]
-    STATUSLINE_TASKS.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-    let app = app.clone();
-    tokio::spawn(async move {
-        // 先排隊等鎖、拿到鎖才把槽裡「當下最新」的那則取走：等鎖期間到的都已經取代過了。
-        let lock = app.bot_lock(&bot_id).await;
-        let _g = lock.lock().await;
-        let Some(b) = status_slots().lock().unwrap_or_else(|e| e.into_inner()).remove(&bot_id) else { return };
-        if let Err(e) = process_locked(&app, &b).await {
-            tracing::error!(error = ?e, "statusline processing failed");
-        }
-    });
 }
 
 /// 這句 prompt 回音是別的 agent 打進來的嗎？（見 SPEC §6.5d）
@@ -165,7 +86,7 @@ async fn relay_source(app: &impl crate::capabilities::Db, run: Option<&db::Run>,
     crate::agent_relay::claim(&host, agent, echo)
 }
 
-enum HookKind {
+pub(crate) enum HookKind {
     /// Never creates a Turn.
     Identity { session_id: Option<String>, transcript_path: Option<String> },
     TurnComplete {
@@ -397,7 +318,7 @@ fn hook_session_id(p: &Value) -> Option<&str> {
         .filter(|s| !s.is_empty())
 }
 
-fn classify(provider: &str, p: &Value) -> HookKind {
+pub(crate) fn classify(provider: &str, p: &Value) -> HookKind {
     let s = |k: &str| p.get(k).and_then(|v| v.as_str()).map(String::from);
     // shim 自己的事件，不分 claude／codex（寄件的 bot 可以是任何一種）。
     if p.get("hook_event_name").and_then(Value::as_str) == Some(RELAY_ANNOUNCE_EVENT) {
@@ -633,7 +554,7 @@ mod classify_tests {
 
 /// SPEC §6.7, executed under the per-bot lock.
 #[allow(dead_code)]
-pub async fn process(app: &Arc<App>, body: &HookBody) -> Result<()> {
+pub(crate) async fn process<H: HookHost>(app: &H, body: &HookBody) -> Result<()> {
     process_for(app, body, None).await
 }
 
@@ -643,12 +564,12 @@ pub async fn process(app: &Arc<App>, body: &HookBody) -> Result<()> {
 /// 帶得到 native turn id 的 hook 靠 `(native_session_id, native_turn_id)` 去重；沒有的（遠端、舊版、手寫 body）以前沒有任何
 /// 穩定的鑰匙，重播就再開一個外部回合與訊息。這把 id 跟回合同一個交易寫進 `turns.source_event_id`（唯一索引），
 /// 重播先查它：命中就只把 commit 後才發的通知補發一次（`message_added` 靠 id 去重、回合事件本來就是 at-least-once）。
-pub async fn process_for(app: &Arc<App>, body: &HookBody, event_id: Option<&str>) -> Result<()> {
+pub(crate) async fn process_for<H: HookHost>(app: &H, body: &HookBody, event_id: Option<&str>) -> Result<()> {
     let lock = app.bot_lock(&body.bot_id).await;
     let _g = lock.lock().await;
     process_locked_for(app, body, event_id).await?;
     // 回合收完（含終端打字開的外部回合）之後才補：這時候「這一回合」才一定存在。
-    crate::runners::ask_answers::after_turn_end(app, body).await;
+    app.after_turn_end(body).await;
     Ok(())
 }
 
@@ -1133,9 +1054,9 @@ async fn native_evidence<'a>(
 
 /// hook 是 pane 裡的行程送進來的：`transcript_path` 要在這顆 bot 自己的 `projects/`（codex：`sessions/`）底下才收進 `runs`，
 /// 不然 daemon 之後每次輪詢都會去讀一個任意的檔（別顆 bot 的對話、`/etc/passwd`…）。不合就當沒帶（沿用原本的值）。
-async fn vetted_transcript(app: &Arc<App>, bot: &db::Bot, path: Option<&str>) -> Option<String> {
+pub(crate) async fn vetted_transcript<H: HookHost>(app: &H, bot: &db::Bot, path: Option<&str>) -> Option<String> {
     let path = path.filter(|p| !p.trim().is_empty())?;
-    if crate::app_ports_p5::transcript_allowed(app, bot, path).await {
+    if app.transcript_allowed(bot, path).await {
         Some(path.to_string())
     } else {
         tracing::warn!(bot = %bot.name, path, "ignoring a hook transcript_path outside the bot's own transcript directory");
@@ -1143,12 +1064,12 @@ async fn vetted_transcript(app: &Arc<App>, bot: &db::Bot, path: Option<&str>) ->
     }
 }
 
-pub async fn process_locked(app: &Arc<App>, body: &HookBody) -> Result<()> {
+pub(crate) async fn process_locked<H: HookHost>(app: &H, body: &HookBody) -> Result<()> {
     process_locked_for(app, body, None).await
 }
 
-async fn process_locked_for(app: &Arc<App>, body: &HookBody, event_id: Option<&str>) -> Result<()> {
-    let Some(bot) = db::bot(&app.db, &body.bot_id).await? else { return Ok(()) };
+pub(crate) async fn process_locked_for<H: HookHost>(app: &H, body: &HookBody, event_id: Option<&str>) -> Result<()> {
+    let Some(bot) = db::bot(app.db(), &body.bot_id).await? else { return Ok(()) };
     // A3: also guards the spool-replay path, where nothing checked the token.
     if bot.deleted_at.is_some() {
         tracing::info!(bot = %bot.name, "hook for a deleted bot; ignored");
@@ -1156,7 +1077,7 @@ async fn process_locked_for(app: &Arc<App>, body: &HookBody, event_id: Option<&s
     }
     // #708：移交出去的專案，hook 的事歸接手的 daemon；記一行就丟（spool 重播、spawn hint 也一樣）。
     // 讀不到＝`projects` 那一列讀不到：往下走，後面讀主機的那幾步照它們自己的規則 fail closed（欠著的撞限、收件匣重試）。
-    match app.db.bot_handed_off_to(&bot.id).await {
+    match app.db().bot_handed_off_to(&bot.id).await {
         Ok(None) => {}
         Ok(Some(to)) => {
             tracing::info!(bot = %bot.name, provider = %body.provider, handed_off_to = %to, "hook for a handed-off project; ignored");
@@ -1172,8 +1093,8 @@ async fn process_locked_for(app: &Arc<App>, body: &HookBody, event_id: Option<&s
     // Provider matching is case-insensitive for compatibility; dispatch must use that same
     // canonical spelling or an accepted `Claude` event is consumed as an unknown event.
     let provider = body.provider.to_ascii_lowercase();
-    let conv = db::conversation_id(&app.db, &bot.id).await?;
-    let run = db::active_run(&app.db, &bot.id).await?;
+    let conv = db::conversation_id(app.db(), &bot.id).await?;
+    let run = db::active_run(app.db(), &bot.id).await?;
     let kind = classify(&provider, &body.payload);
     if matches!(kind, HookKind::StatusLine) {
         tracing::debug!(bot = %bot.name, "statusline received");
@@ -1187,7 +1108,7 @@ async fn process_locked_for(app: &Arc<App>, body: &HookBody, event_id: Option<&s
     let mut admitted = None;
     if let Some(r) = &run {
         let ev = crate::lifecycle::fence::EventIdentity { run_id: body.run_id.as_deref(), session_id: hook_session_id(&body.payload) };
-        let owner = app.db.classify_event_owner(&bot.id, r, ev).await;
+        let owner = app.db().classify_event_owner(&bot.id, r, ev).await;
         if !owner.may_mutate() {
             let (prior_run_id, why) = match &owner {
                 crate::lifecycle::fence::Ownership::Stale { prior_run_id, why } => (prior_run_id.as_str(), *why),
@@ -1218,7 +1139,7 @@ async fn process_locked_for(app: &Arc<App>, body: &HookBody, event_id: Option<&s
     // 放在世代圍籬之後：上一代的 Stop 不能改這一代的帳。
     if provider == "claude" && matches!(&kind, HookKind::TurnComplete { .. }) {
         if let Some(r) = run.as_ref() {
-            crate::runners::background_hook::on_stop(app, r, &body.payload).await;
+            app.background_stop(r, &body.payload).await;
         }
     }
 
@@ -1284,7 +1205,7 @@ async fn process_locked_for(app: &Arc<App>, body: &HookBody, event_id: Option<&s
                 .bind(&bot.id)
                     .bind(sid)
                     .bind(tid)
-                    .fetch_optional(&app.db)
+                    .fetch_optional(app.db())
                     .await?,
                 _ => None,
             };
@@ -1304,7 +1225,7 @@ async fn process_locked_for(app: &Arc<App>, body: &HookBody, event_id: Option<&s
                 }
             }
             if let Some(r) = &run {
-                let in_flight = db::in_flight_turn(&app.db, &r.id).await?;
+                let in_flight = db::in_flight_turn(app.db(), &r.id).await?;
                 let ev = lifecycle::InterruptFailureEvidence {
                     session_id: session_id.as_deref(),
                     prompt_id: turn_id.as_deref(),
@@ -1328,7 +1249,7 @@ async fn process_locked_for(app: &Arc<App>, body: &HookBody, event_id: Option<&s
                 .bind(&session_id)
                 .bind(&transcript_path)
                 .bind(&r.id)
-                .execute(&app.db)
+                .execute(app.db())
                 .await?;
             }
             // 同一筆送兩次（重試、spool 重播）不再收第二次——跟 `TurnComplete` 同一把鎖。
@@ -1340,7 +1261,7 @@ async fn process_locked_for(app: &Arc<App>, body: &HookBody, event_id: Option<&s
                 tracing::info!(bot = %bot.name, ?reason, "StopFailure 但這顆 bot 沒有活著的 run：沒有回合可收");
                 return Ok(());
             };
-            let Some(t) = db::in_flight_turn(&app.db, &r.id).await? else {
+            let Some(t) = db::in_flight_turn(app.db(), &r.id).await? else {
                 tracing::info!(bot = %bot.name, ?reason, "StopFailure 但沒有 in-flight turn：後到的訊號，不開新回合");
                 return Ok(());
             };
@@ -1348,7 +1269,7 @@ async fn process_locked_for(app: &Arc<App>, body: &HookBody, event_id: Option<&s
             // 不會變成第二次收尾（issue #79 驗收第二條）。`delivery` 不動——字是送出去了，失敗的是回合。
             // 收尾（連同當作去重鑰匙的 native id）與說明同一個交易（#115）：說明寫不進去時整筆回滾，
             // 收件匣的重試才不會被去重擋掉、留下一筆沒有原因的失敗回合。
-            let mut tx = app.db.begin().await?;
+            let mut tx = app.db().begin().await?;
             let native = native_evidence(app, &bot.id, session_id.as_deref(), turn_id.as_deref()).await?;
             let claimed = tx.fail_with_native_evidence(&t.id, admitted, native).await?;
             if claimed != lifecycle::turn_controller::Outcome::Applied {
@@ -1379,7 +1300,7 @@ async fn process_locked_for(app: &Arc<App>, body: &HookBody, event_id: Option<&s
                     .bind(conv)
                     .bind(&r.id)
                     .bind(conv)
-                    .execute(&app.db)
+                    .execute(app.db())
                     .await?;
                 if result.rows_affected() > 0 {
                     app.emit_bot_status(&bot.id).await;
@@ -1390,7 +1311,7 @@ async fn process_locked_for(app: &Arc<App>, body: &HookBody, event_id: Option<&s
         HookKind::StatusLine => {
             // 讀不到主機就丟掉這一份，下一次重繪會再來（#108 重開）：退回 local 會把遠端的讀數寫進本機那一格，
             // 還會拿它去校正、作廢本機身分真的撞限（`quota::set`）。
-            let host = db::bot_host(&app.db, &bot.id).await?;
+            let host = db::bot_host(app.db(), &bot.id).await?;
             // 讀數是這個 run 的 pane 送來的：帳號是它起來時的身分（issue #238），不是剛改、還沒重啟生效的設定。
             let identity = crate::quota::identity_for_run(&bot, run.as_ref());
             let identity = identity.as_deref();
@@ -1418,7 +1339,7 @@ async fn process_locked_for(app: &Arc<App>, body: &HookBody, event_id: Option<&s
                         .bind(text)
                         .bind(&rich)
                         .bind(&r.id)
-                        .execute(&app.db)
+                        .execute(app.db())
                         .await;
                     app.emit_bot_status(&bot.id).await;
                 }
@@ -1442,7 +1363,7 @@ async fn process_locked_for(app: &Arc<App>, body: &HookBody, event_id: Option<&s
                 let _ = sqlx::query("UPDATE runs SET native_session_id = COALESCE(native_session_id, ?) WHERE id = ?")
                     .bind(sid)
                     .bind(&r.id)
-                    .execute(&app.db)
+                    .execute(app.db())
                     .await;
             }
             Ok(())
@@ -1463,7 +1384,7 @@ async fn process_locked_for(app: &Arc<App>, body: &HookBody, event_id: Option<&s
                 sqlx::query("UPDATE runs SET subagent_json = ? WHERE id = ?")
                     .bind(snapshot.to_string())
                     .bind(&r.id)
-                    .execute(&app.db)
+                    .execute(app.db())
                     .await?;
             }
             Ok(())
@@ -1486,7 +1407,7 @@ async fn process_locked_for(app: &Arc<App>, body: &HookBody, event_id: Option<&s
         // 收件方的回音常常比這則報備先到，所以除了照常記下，也回頭補標已經存下的那一則。
         HookKind::RelayAnnounce { to_agent, text } => {
             // 讀不到寄件者的主機就不記（記了也沒人認得出是哪台）；補標那邊同樣要讀主機，會一起報錯。
-            let host = db::bot_host(&app.db, &bot.id).await?;
+            let host = db::bot_host(app.db(), &bot.id).await?;
             crate::agent_relay::announce(&host, &bot.id, &to_agent, &text);
             relay_backfill(app, &bot.id, &to_agent, &text).await
         }
@@ -1506,7 +1427,7 @@ async fn process_locked_for(app: &Arc<App>, body: &HookBody, event_id: Option<&s
                 .bind(&session_id)
                 .bind(&transcript_path)
                 .bind(&r.id)
-                .execute(&app.db)
+                .execute(app.db())
                 .await?;
                 app.emit_bot_status(&bot.id).await;
             }
@@ -1517,7 +1438,7 @@ async fn process_locked_for(app: &Arc<App>, body: &HookBody, event_id: Option<&s
             let transcript_path = vetted_transcript(app, &bot, transcript_path.as_deref()).await;
             // Remote paths are retained for SSH-side transcript transfer, never opened on this host.
             let transcript_read_path = if let Some(path) = transcript_path.as_deref() {
-                if crate::app_ports_p5::local_transcript_allowed(app, &bot, path).await { Some(path.to_string()) } else { None }
+                if app.local_transcript_allowed(&bot, path).await { Some(path.to_string()) } else { None }
             } else {
                 None
             };
@@ -1532,7 +1453,7 @@ async fn process_locked_for(app: &Arc<App>, body: &HookBody, event_id: Option<&s
                     let model = r.runtime_model.as_deref().or(bot.model.as_deref());
                     if let Some(json) = crate::agy_support::status_json(model, body.payload.get("lastInputTokens").and_then(Value::as_i64)) {
                         if r.status_json.as_deref() != Some(json.as_str()) {
-                            sqlx::query("UPDATE runs SET status_json = ? WHERE id = ?").bind(&json).bind(&r.id).execute(&app.db).await?;
+                            sqlx::query("UPDATE runs SET status_json = ? WHERE id = ?").bind(&json).bind(&r.id).execute(app.db()).await?;
                             app.emit_bot_status(&bot.id).await;
                         }
                     }
@@ -1547,13 +1468,13 @@ async fn process_locked_for(app: &Arc<App>, body: &HookBody, event_id: Option<&s
                 .bind(&session_id)
                 .bind(&transcript_path)
                 .bind(&r.id)
-                .execute(&app.db)
+                .execute(app.db())
                 .await?;
             }
 
             // 3a. 收件匣重播：這一則已經收成回合了（commit 之後、標 processed_at 之前重啟）。不再開第二個，只補發通知。
             if let Some(event) = event_id {
-                if let Some(turn) = turn_of_event(&app.db, event).await? {
+                if let Some(turn) = turn_of_event(app.db(), event).await? {
                     tracing::info!(turn = %turn, event, "inbox replay of an already-applied hook ignored; re-announcing");
                     reannounce_turn(app, &bot.id, &turn).await;
                     return Ok(());
@@ -1570,7 +1491,7 @@ async fn process_locked_for(app: &Arc<App>, body: &HookBody, event_id: Option<&s
                     .bind(&bot.id)
                         .bind(sid)
                         .bind(tid)
-                        .fetch_optional(&app.db)
+                        .fetch_optional(app.db())
                         .await?;
                 if let Some(existing) = dup {
                     tracing::info!(turn = %existing, "duplicate hook ignored");
@@ -1580,7 +1501,7 @@ async fn process_locked_for(app: &Arc<App>, body: &HookBody, event_id: Option<&s
 
             // 4. the run's single in-flight Turn
             let target = match &run {
-                Some(r) => db::in_flight_turn(&app.db, &r.id).await?,
+                Some(r) => db::in_flight_turn(app.db(), &r.id).await?,
                 None => None,
             };
             // `unknown`＝打字進去但沒有證據。這時 hook 若看得到**別句**使用者訊息，那是使用者在終端手打的另一句：
@@ -1625,7 +1546,7 @@ async fn process_locked_for(app: &Arc<App>, body: &HookBody, event_id: Option<&s
             if let (Some(t), Some(admitted)) = (target, &admitted) {
                 // 收尾（連同當作去重鑰匙的 native id）與訊息同一個交易（#115）：訊息寫不進去時整筆回滾，
                 // 收件匣重試時才不會被去重擋掉、留下一筆沒有回覆的 completed 回合。
-                let mut tx = app.db.begin().await?;
+                let mut tx = app.db().begin().await?;
                 let native = native_evidence(app, &bot.id, session_id.as_deref(), turn_id.as_deref()).await?;
                 let claimed = tx.complete_with_native_evidence(&t.id, admitted, native).await?;
                 match &claimed {
@@ -1711,7 +1632,7 @@ async fn process_locked_for(app: &Arc<App>, body: &HookBody, event_id: Option<&s
             // 5. external turn：回合（帶去重用的 native id）與它的訊息同一個交易（#115）。
             let tid = db::ulid();
             let native = native_evidence(app, &bot.id, session_id.as_deref(), turn_id.as_deref()).await?;
-            let mut tx = app.db.begin().await?;
+            let mut tx = app.db().begin().await?;
             sqlx::query(
                 "INSERT INTO turns (id, conversation_id, run_id, origin, status, delivery, native_session_id, native_turn_id, created_at, completed_at, source_event_id)
                  VALUES (?,?,?,'external','completed','ok',?,?,?,?,?)",
@@ -1789,13 +1710,13 @@ const STATUS_MARKER: &str = "---AM-STATUS---";
 /// 所以就地印一行（後面接 `.claim` 的位元組數），不必多一趟 ssh。
 const FOLD_STUCK_MARKER: &str = "AM_FOLD_STUCK";
 
-const DRAIN_WINDOW: std::time::Duration = std::time::Duration::from_secs(1);
+pub(crate) const DRAIN_WINDOW: std::time::Duration = std::time::Duration::from_secs(1);
 
 /// The event can beat the spool write; retry once, still ahead of the 5s terminal fallback.
-const DRAIN_RETRY: std::time::Duration = std::time::Duration::from_secs(2);
+pub(crate) const DRAIN_RETRY: std::time::Duration = std::time::Duration::from_secs(2);
 
 /// Catches status events that never arrived (§11.4.4).
-const SCAN_EVERY: std::time::Duration = std::time::Duration::from_secs(30);
+pub(crate) const SCAN_EVERY: std::time::Duration = std::time::Duration::from_secs(30);
 
 #[derive(Default)]
 struct Drained<'a> {
@@ -1869,17 +1790,17 @@ mod spool_log_privacy_tests {
 }
 
 /// SPEC §11.4.3.
-pub async fn drain_remote(app: &Arc<App>, host: &str, bot_id: &str) -> Result<usize> {
+pub(crate) async fn drain_remote<H: HookHost>(app: &H, host: &str, bot_id: &str) -> Result<usize> {
     if !valid_id(bot_id) {
         anyhow::bail!("invalid bot id `{bot_id}` (must match {ID_RE})");
     }
     let lock = app.bot_lock(bot_id).await;
     let _g = lock.lock().await;
-    let Some(conn) = app.hosts.get(host).await else { return Ok(0) };
+    let Some(conn) = app.hosts().get(host).await else { return Ok(0) };
     if !conn.is_connected() {
         return Ok(0);
     }
-    let root = crate::startup::remote_root_for(app.instance().as_deref());
+    let root = crate::hosts::remote_root_for(app.instance().as_deref());
     // 第一趟：claim（`mv` 成 `.replaying` 再 `cat`），**不刪**。遠端那份是唯一的副本。
     let text = conn.ssh_exec(&claim_script(bot_id, &root)?).await?;
     let drained = parse_drain_output(&text);
@@ -1895,7 +1816,7 @@ pub async fn drain_remote(app: &Arc<App>, host: &str, bot_id: &str) -> Result<us
                 }
                 // 收不下就整個放棄這一輪：`.replaying` 留在遠端，下一次 claim 會再讀到它。
                 // 重讀不會變成兩筆——`hook_inbox` 的 dedupe_key 擋掉（issue #70 的去重規則）。
-                crate::hook_inbox::accept(&app.db, &b, crate::hook_inbox::Source::Remote).await?;
+                crate::hook_inbox::accept(app.db(), &b, crate::hook_inbox::Source::Remote).await?;
                 n += 1;
             }
             // A4: 解不開的行再 claim 幾次也一樣，留著只會擋住 ack；記一筆丟掉。
@@ -1905,7 +1826,7 @@ pub async fn drain_remote(app: &Arc<App>, host: &str, bot_id: &str) -> Result<us
     // 第二趟：本機已經 commit 了，才准刪遠端那份。ack 失敗＝`.replaying` 還在，下一輪重來。
     conn.ssh_exec(&ack_script(bot_id, &root)?).await?;
     if n > 0 {
-        app.hook_inbox_wake.notify_one();
+        app.wake_hook_inbox();
     }
     if let Some(raw) = status {
         match status_body(bot_id, &raw) {
@@ -2044,12 +1965,12 @@ fn status_body(bot_id: &str, raw: &str) -> Option<HookBody> {
 }
 
 #[derive(Default)]
-struct DrainGate {
+pub(crate) struct DrainGate {
     last: Option<std::time::Instant>,
     again: bool,
 }
 
-fn drain_gates() -> &'static std::sync::Mutex<std::collections::HashMap<String, DrainGate>> {
+pub(crate) fn drain_gates() -> &'static std::sync::Mutex<std::collections::HashMap<String, DrainGate>> {
     static G: std::sync::OnceLock<std::sync::Mutex<std::collections::HashMap<String, DrainGate>>> =
         std::sync::OnceLock::new();
     G.get_or_init(Default::default)
@@ -2057,7 +1978,7 @@ fn drain_gates() -> &'static std::sync::Mutex<std::collections::HashMap<String, 
 
 /// `true` when this trigger owns the next ssh; `false` when it was merged into the drain that
 /// is still inside the window (which then runs once more on its way out).
-fn gate_admit(g: &mut DrainGate, now: std::time::Instant) -> bool {
+pub(crate) fn gate_admit(g: &mut DrainGate, now: std::time::Instant) -> bool {
     if let Some(last) = g.last {
         if now.duration_since(last) < DRAIN_WINDOW {
             g.again = true;
@@ -2073,119 +1994,16 @@ fn gate_admit(g: &mut DrainGate, now: std::time::Instant) -> bool {
 /// 過了這麼久沒再用、也沒有欠著的補跑，就把格子帶走（下次來是全新的格子，照樣放行）。
 const DRAIN_GATE_KEEP: std::time::Duration = std::time::Duration::from_secs(600);
 
-fn prune_gates(g: &mut std::collections::HashMap<String, DrainGate>, now: std::time::Instant) {
+pub(crate) fn prune_gates(g: &mut std::collections::HashMap<String, DrainGate>, now: std::time::Instant) {
     g.retain(|_, e| e.again || e.last.is_some_and(|t| now.duration_since(t) < DRAIN_GATE_KEEP));
 }
 
-fn gate_take_again(g: &mut DrainGate) -> bool {
+pub(crate) fn gate_take_again(g: &mut DrainGate) -> bool {
     std::mem::take(&mut g.again)
 }
 
-/// SPEC §11.4.4.
-pub async fn drain_remote_coalesced(app: &Arc<App>, host: &str, bot_id: &str) -> Result<usize> {
-    {
-        let mut g = drain_gates().lock().unwrap();
-        let now = std::time::Instant::now();
-        prune_gates(&mut g, now);
-        let e = g.entry(bot_id.to_string()).or_default();
-        if !gate_admit(e, now) {
-            tracing::debug!(bot_id, host, "drain merged into the one in the window");
-            return Ok(0);
-        }
-    }
-    let n = drain_remote(app, host, bot_id).await?;
-    let again = {
-        let mut g = drain_gates().lock().unwrap();
-        gate_take_again(g.entry(bot_id.to_string()).or_default())
-    };
-    // An empty drain may mean the hook is still writing its line (§11.4.4).
-    let delay = if again {
-        Some(DRAIN_WINDOW)
-    } else if n == 0 {
-        Some(DRAIN_RETRY)
-    } else {
-        None
-    };
-    if let Some(d) = delay {
-        let (app2, host2, bot2) = (app.clone(), host.to_string(), bot_id.to_string());
-        let tasks = app.background_tasks.clone();
-        tasks.spawn(async move {
-            tokio::select! {
-                _ = app2.shutdown.cancelled() => return,
-                _ = tokio::time::sleep(d) => {}
-            }
-            let drained = tokio::select! {
-                _ = app2.shutdown.cancelled() => return,
-                result = drain_remote(&app2, &host2, &bot2) => result,
-            };
-            if let Err(e) = drained {
-                tracing::debug!(bot_id = %bot2, host = %host2, error = ?e, "follow-up drain failed");
-            }
-        });
-    }
-    Ok(n)
-}
-
-/// SPEC §11.4.4.
-pub fn spawn_spool_scanner(app: Arc<App>) {
-    let loop_app = app.clone();
-    crate::background_loop::spawn_restartable(&app, "remote spool scanner", move || {
-        let app = loop_app.clone();
-        async move { spool_scanner_loop(app).await }
-    });
-}
-
-async fn spool_scanner_loop(app: Arc<App>) {
-        loop {
-            tokio::select! {
-                _ = app.shutdown.cancelled() => return,
-                _ = tokio::time::sleep(SCAN_EVERY) => {}
-            }
-            for conn in app.hosts.list().await {
-                if app.shutdown.is_cancelled() {
-                    return;
-                }
-                if conn.is_local() || !conn.is_connected() {
-                    continue;
-                }
-                let root = crate::startup::remote_root_for(app.instance().as_deref());
-                let script = scan_script(&root);
-                let pending = match tokio::select! {
-                    _ = app.shutdown.cancelled() => return,
-                    result = conn.ssh_exec(&script) => result,
-                } {
-                    Ok(t) => t,
-                    Err(e) => {
-                        tracing::debug!(host = %conn.name, error = ?e, "spool scan failed");
-                        continue;
-                    }
-                };
-                let ids: std::collections::HashSet<&str> =
-                    pending.lines().map(str::trim).filter(|s| !s.is_empty()).collect();
-                if ids.is_empty() {
-                    continue;
-                }
-                for b in db::live_bots_on_host(&app.db, &conn.name).await.unwrap_or_default() {
-                    if app.shutdown.is_cancelled() {
-                        return;
-                    }
-                    if !ids.contains(b.id.as_str()) {
-                        continue;
-                    }
-                    let drained = tokio::select! {
-                        _ = app.shutdown.cancelled() => return,
-                        result = drain_remote_coalesced(&app, &conn.name, &b.id) => result,
-                    };
-                    if let Err(e) = drained {
-                        tracing::debug!(bot = %b.name, host = %conn.name, error = ?e, "scanned drain failed");
-                    }
-                }
-            }
-        }
-}
-
-/// 掃遠端還有誰欠著 spool。根目錄跟著實例走（`App::instance`）。
-fn scan_script(root: &str) -> String {
+/// 掃遠端還有誰欠著 spool。根目錄跟著實例走（`HostInstance::instance`）。
+pub(crate) fn scan_script(root: &str) -> String {
     format!(
         "am_pending() {{\n\
          [ -f \"$1hook-spool.jsonl\" ] && return 0\n\
@@ -2227,15 +2045,15 @@ fn fold_spool(src: &std::path::Path, dst: &std::path::Path) -> std::io::Result<(
 }
 
 /// SPEC §4.4.6.
-pub async fn replay_spool(app: &Arc<App>, bot_id: &str) -> Result<usize> {
+pub(crate) async fn replay_spool<H: HookHost>(app: &H, bot_id: &str) -> Result<usize> {
     // 讀不到 host 不等於本機（#243）：退回 local 會去讀本機 spool、遠端那份留著沒人排。回錯讓呼叫端重試。
-    let host = db::bot_host(&app.db, bot_id).await?;
+    let host = db::bot_host(app.db(), bot_id).await?;
     if host != crate::config::LOCAL_HOST {
         return drain_remote(app, &host, bot_id).await;
     }
     let lock = app.bot_lock(bot_id).await;
     let _g = lock.lock().await;
-    let dir = app.bot_dir(bot_id)?;
+    let dir = app.hook_bot_dir(bot_id)?;
     let spool = dir.join("hook-spool.jsonl");
     let claim = dir.join("hook-spool.jsonl.claim");
     let staging = dir.join("hook-spool.jsonl.replaying");
@@ -2273,7 +2091,7 @@ pub async fn replay_spool(app: &Arc<App>, bot_id: &str) -> Result<usize> {
                 }
                 // 同遠端：收進收件匣、commit 成功才算數。失敗就整個放棄這一輪，`.replaying`
                 // 留在檔案系統上（上面那段會把它併回來），下一次重放再讀一次；dedupe 擋重複。
-                crate::hook_inbox::accept(&app.db, &b, crate::hook_inbox::Source::Spool).await?;
+                crate::hook_inbox::accept(app.db(), &b, crate::hook_inbox::Source::Spool).await?;
                 n += 1;
             }
             Err(_) => tracing::warn!(record = %spool_line_log_context(line), "unparseable spool line"),
@@ -2282,91 +2100,12 @@ pub async fn replay_spool(app: &Arc<App>, bot_id: &str) -> Result<usize> {
     // 只有在上面每一行都 commit 進 hook_events 之後，才刪掉這份唯一的副本。
     std::fs::remove_file(&staging).ok();
     if n > 0 {
-        app.hook_inbox_wake.notify_one();
+        app.wake_hook_inbox();
         tracing::info!(bot_id, accepted = n, "hook spool accepted into the inbox");
     }
     Ok(n)
 }
 
-#[allow(dead_code)]
-pub async fn replay_all(app: &Arc<App>) {
-    for host in app.hosts.names().await {
-        replay_host(app, &host).await;
-    }
-}
-
-/// 重放一台 host 的 spool。列舉 bot 讀不到、或某顆 bot 的重放失敗，都不能當成「沒有 spool」：
-/// 記下來、背景重試到補齊為止（#243），沒有新的 reconnect／status 事件也會補。
-pub async fn replay_host(app: &Arc<App>, host: &str) {
-    if app.shutdown.is_cancelled() {
-        return;
-    }
-    let passed = tokio::select! {
-        _ = app.shutdown.cancelled() => return,
-        passed = replay_host_pass(app, host) => passed,
-    };
-    if passed {
-        return;
-    }
-    let (app, host) = (app.clone(), host.to_string());
-    let loop_app = app.clone();
-    crate::background_loop::spawn_restartable(&app, "remote spool replay retry", move || {
-        let app = loop_app.clone();
-        let host = host.clone();
-        async move {
-            for _ in 0..REPLAY_RETRIES {
-                tokio::select! {
-                    _ = app.shutdown.cancelled() => return,
-                    _ = tokio::time::sleep(REPLAY_RETRY_EVERY) => {}
-                }
-                if replay_host_pass(&app, &host).await {
-                    return;
-                }
-            }
-            tracing::error!(host, "spool replay still failing after retries; spools stay on the host until the next reconnect");
-        }
-    });
-}
-
-#[cfg(not(test))]
-const REPLAY_RETRIES: u32 = 40;
-// 測試的間隔是 50ms，40 次只撐 2 秒：runner 負載高時，測試執行緒從 `replay_host` 到把表改回
-// 可讀之間就可能超過，背景重試先放棄，spool 永遠收不進來（#255 的另一個偶發來源）。
-#[cfg(test)]
-const REPLAY_RETRIES: u32 = 400;
-#[cfg(not(test))]
-const REPLAY_RETRY_EVERY: std::time::Duration = std::time::Duration::from_secs(15);
-#[cfg(test)]
-const REPLAY_RETRY_EVERY: std::time::Duration = std::time::Duration::from_millis(50);
-
-/// 一輪；全部成功才回 true。
-async fn replay_host_pass(app: &Arc<App>, host: &str) -> bool {
-    if app.shutdown.is_cancelled() {
-        return false;
-    }
-    let bots = match db::live_bots_on_host(&app.db, host).await {
-        Ok(b) => b,
-        Err(e) => {
-            tracing::warn!(host, error = ?e, "spool replay: could not list the host's bots; will retry");
-            return false;
-        }
-    };
-    let mut ok = true;
-    for b in bots {
-        if app.shutdown.is_cancelled() {
-            return false;
-        }
-        let replayed = tokio::select! {
-            _ = app.shutdown.cancelled() => return false,
-            result = replay_spool(app, &b.id) => result,
-        };
-        if let Err(e) = replayed {
-            tracing::warn!(bot = %b.name, host, error = ?e, "spool replay failed; will retry");
-            ok = false;
-        }
-    }
-    ok
-}
 
 #[cfg(test)]
 mod drain_tests {
@@ -6692,4 +6431,36 @@ pub trait SpoolFoldStuck: Send + Sync {
 /// hook 失敗分類的計數。（欄位在 `App`，由 composition 層 `app_ports_p0` 實作這個窄能力。）
 pub trait ClassifyFailures: Send + Sync {
     fn classify_failures(&self) -> &std::sync::atomic::AtomicU32;
+}
+
+/// hook 收件／重放核心需要的宿主能力：一組窄 trait（`capabilities`、`events::ports`…）加上少數 `App` 才有的動作。
+/// 核心（`process*`、`drain_remote`、`replay_spool`）對它泛型，不知道 `App`；`impl HookHost for Arc<App>` 在 `runners/hookrecv.rs`。
+pub(crate) trait HookHost:
+    crate::capabilities::Db
+    + crate::capabilities::Emit
+    + crate::capabilities::BotLocks
+    + crate::capabilities::BotStatusEmit
+    + crate::hosts::HostsAccess
+    + crate::hosts::HostInstance
+    + crate::tools::ToolsTable
+    + SpoolFoldStuck
+    + ClassifyFailures
+    + TurnCommands
+    + QuotaCommands
+    + ProviderPort
+    + ApiPort
+    + Send
+    + Sync
+{
+    /// 叫醒 durable hook 收件匣的 worker（commit 之後才叫）。
+    fn wake_hook_inbox(&self);
+    /// 本機這顆 bot 的資料夾（spool 在裡面）。
+    fn hook_bot_dir(&self, bot_id: &str) -> Result<std::path::PathBuf>;
+    /// 回合結束 hook 處理完之後補讀 AskUserQuestion 的答案。
+    fn after_turn_end<'a>(&'a self, body: &'a HookBody) -> impl std::future::Future<Output = ()> + Send + 'a;
+    /// claude Stop hook 帶來的背景工作數字。
+    fn background_stop<'a>(&'a self, run: &'a db::Run, payload: &'a Value) -> impl std::future::Future<Output = ()> + Send + 'a;
+    /// transcript 路徑是不是這顆 bot 讀得的（遠端／本機分別把關）。
+    fn transcript_allowed<'a>(&'a self, bot: &'a db::Bot, path: &'a str) -> impl std::future::Future<Output = bool> + Send + 'a;
+    fn local_transcript_allowed<'a>(&'a self, bot: &'a db::Bot, path: &'a str) -> impl std::future::Future<Output = bool> + Send + 'a;
 }

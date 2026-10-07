@@ -221,7 +221,7 @@ pub(crate) async fn resolve(pool: &SqlitePool, token: &str) -> Result<Option<Str
     .bind(&want)
     .fetch_optional(pool)
     .await?;
-    Ok(row.filter(|(_, have)| crate::api::ct_eq(have, &want)).map(|(id, _)| id))
+    Ok(row.filter(|(_, have)| crate::agent_relay::ct_eq(have, &want)).map(|(id, _)| id))
 }
 
 /// 記「最後一次有人用」，一分鐘最多寫一次。

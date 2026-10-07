@@ -5,36 +5,17 @@
 //! - `POST /api/bots/{id}/share` `{"enabled":true|false}` → 開（已經開著就沿用同一條）／關（清掉 token）
 //! - `POST /api/bots/{id}/share/rotate` → 換新 token，舊連結當下失效，回新的 `url`
 
-use std::sync::Arc;
-
-use axum::extract::{Path, State};
-use axum::{Extension, Json};
-use serde::Deserialize;
 use serde_json::{json, Value};
 
-use crate::api::RequestPrincipal;
 use crate::lifecycle::LcError;
 use crate::share::store;
-use crate::state::App;
 
-#[derive(Deserialize)]
-pub struct ShareIn {
-    enabled: bool,
-}
-
-fn user_only(principal: &RequestPrincipal) -> Result<(), LcError> {
-    if *principal != RequestPrincipal::User {
-        return Err(LcError::Forbidden(json!({"error": "forbidden", "reason": "user_only"})));
-    }
-    Ok(())
-}
-
-fn db_err(e: sqlx::Error) -> LcError {
+pub(crate) fn db_err(e: sqlx::Error) -> LcError {
     LcError::Upstream(format!("share store: {e}"))
 }
 
 /// 活著、而且是分享用 bot（受限或信任分享）。不存在 404；不是分享用 bot 409 `not_shareable`。
-async fn shareable_bot(app: &impl crate::capabilities::Db, id: &str) -> Result<bool, LcError> {
+pub(crate) async fn shareable_bot(app: &impl crate::capabilities::Db, id: &str) -> Result<bool, LcError> {
     let bot = crate::db::bot(app.db(), id).await.map_err(|e| LcError::Upstream(e.to_string()))?.filter(|b| b.deleted_at.is_none()).ok_or_else(|| LcError::NotFound("bot".into()))?;
     let project = crate::db::project(app.db(), &bot.project_id).await.map_err(|e| LcError::Upstream(e.to_string()))?;
     if project.is_none_or(|p| p.deleted_at.is_some()) {
@@ -43,14 +24,14 @@ async fn shareable_bot(app: &impl crate::capabilities::Db, id: &str) -> Result<b
     store::is_share_bot(app.db(), id).await.map_err(db_err)
 }
 
-fn not_shareable(id: &str) -> LcError {
+pub(crate) fn not_shareable(id: &str) -> LcError {
     LcError::conflict(
         "not_shareable",
         json!({"bot_id": id, "message": "只有建立時選「分享用（受限）」或「信任分享」的 bot 能分享；既有 bot 不能切換，要分享請新建一顆"}),
     )
 }
 
-async fn base_url(app: &impl crate::capabilities::Cfg) -> Result<String, LcError> {
+pub(crate) async fn base_url(app: &impl crate::capabilities::Cfg) -> Result<String, LcError> {
     app.cfg().get().await.share.base().ok_or_else(|| {
         LcError::conflict(
             "share_not_configured",
@@ -60,7 +41,7 @@ async fn base_url(app: &impl crate::capabilities::Cfg) -> Result<String, LcError
 }
 
 /// 目前的分享狀態。開著就從 DB 存的 token 組完整網址；`base_url` 沒設時 `url:null`（開不了新的，但舊列照樣報狀態）。
-async fn state(app: &(impl crate::capabilities::Cfg + crate::capabilities::Db), id: &str) -> Result<Value, LcError> {
+pub(crate) async fn state(app: &(impl crate::capabilities::Cfg + crate::capabilities::Db), id: &str) -> Result<Value, LcError> {
     let row = store::share(app.db(), id).await.map_err(db_err)?;
     let base = app.cfg().get().await.share.base();
     let url = row.as_ref().and_then(|r| r.token.as_deref()).zip(base).map(|(t, b)| format!("{b}/s/{t}"));
@@ -74,70 +55,6 @@ async fn state(app: &(impl crate::capabilities::Cfg + crate::capabilities::Db), 
         "created_at": row.as_ref().map(|r| r.created_at.clone()),
         "last_used_at": row.as_ref().and_then(|r| r.last_used_at.clone()),
     }))
-}
-
-pub async fn get_share(
-    State(app): State<Arc<App>>,
-    Path(id): Path<String>,
-    Extension(principal): Extension<RequestPrincipal>,
-) -> Result<Json<Value>, LcError> {
-    user_only(&principal)?;
-    let lock = app.bot_lock(&id).await;
-    let _guard = lock.lock_owned().await;
-    if !shareable_bot(&app, &id).await? {
-        return Ok(Json(json!({"shareable": false, "enabled": false, "url": null, "needs_rotate": false, "token_hint": null, "created_at": null, "last_used_at": null})));
-    }
-    Ok(Json(state(&app, &id).await?))
-}
-
-pub async fn post_share(
-    State(app): State<Arc<App>>,
-    Path(id): Path<String>,
-    Extension(principal): Extension<RequestPrincipal>,
-    Json(body): Json<ShareIn>,
-) -> Result<Json<Value>, LcError> {
-    user_only(&principal)?;
-    #[cfg(test)]
-    crate::lifecycle::race_point::hit("share_admin_before_lock", &id).await;
-    let lock = app.bot_lock(&id).await;
-    let _guard = lock.lock_owned().await;
-    if !shareable_bot(&app, &id).await? {
-        return Err(not_shareable(&id));
-    }
-    if !body.enabled {
-        store::disable(&app.db, &id).await.map_err(db_err)?;
-        crate::share::portal::kick(&id);
-        app.emit("bot_share_changed", json!({"bot_id": id, "enabled": false})).await;
-        return Ok(Json(state(&app, &id).await?));
-    }
-    base_url(&app).await?;
-    // 已經開著：不換 token（已經發出去的連結照樣能用），回的是同一條網址。
-    if store::enable(&app.db, &id).await.map_err(db_err)?.is_some() {
-        app.emit("bot_share_changed", json!({"bot_id": id, "enabled": true})).await;
-    }
-    Ok(Json(state(&app, &id).await?))
-}
-
-pub async fn post_rotate(
-    State(app): State<Arc<App>>,
-    Path(id): Path<String>,
-    Extension(principal): Extension<RequestPrincipal>,
-) -> Result<Json<Value>, LcError> {
-    user_only(&principal)?;
-    #[cfg(test)]
-    crate::lifecycle::race_point::hit("share_admin_before_lock", &id).await;
-    let lock = app.bot_lock(&id).await;
-    let _guard = lock.lock_owned().await;
-    if !shareable_bot(&app, &id).await? {
-        return Err(not_shareable(&id));
-    }
-    base_url(&app).await?;
-    if store::rotate(&app.db, &id).await.map_err(db_err)?.is_none() {
-        return Err(LcError::conflict("share_disabled", json!({"bot_id": id, "message": "分享沒開著，先開分享"})));
-    }
-    crate::share::portal::kick(&id);
-    app.emit("bot_share_changed", json!({"bot_id": id, "enabled": true})).await;
-    Ok(Json(state(&app, &id).await?))
 }
 
 /// 建分享用 bot（受限或信任分享）的前半：決定資料夾（新資料夾就建出來）、`shared_bots` 記下來（在寫 config 之前）。
@@ -180,7 +97,7 @@ pub(crate) async fn reserve_share_bot(
 }
 
 #[cfg(test)]
-pub(crate) async fn reserve_restricted(app: &Arc<App>, bot_id: &str, folder: &crate::share::folder::ShareFolderIn, replay: bool) -> Result<(String, bool), LcError> {
+pub(crate) async fn reserve_restricted(app: &(impl crate::capabilities::Cfg + crate::capabilities::DataDir + crate::capabilities::Db), bot_id: &str, folder: &crate::share::folder::ShareFolderIn, replay: bool) -> Result<(String, bool), LcError> {
     reserve_share_bot(app, bot_id, store::PROFILE_RESTRICTED, folder, replay).await
 }
 
