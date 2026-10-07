@@ -515,7 +515,7 @@ mod tests {
     const CHILD_CWD: &str = "/tmp/promote-child-worktree";
 
     struct OneEnv(std::collections::BTreeMap<String, String>);
-    impl crate::pane_identity::ProcEnv for OneEnv {
+    impl crate::runners::pane_identity::ProcEnv for OneEnv {
         fn env_of<'a>(&'a self, _: &'a Arc<App>, _: &'a str, _: i64) -> futures::future::BoxFuture<'a, Option<std::collections::BTreeMap<String, String>>> {
             Box::pin(async move { Some(self.0.clone()) })
         }

@@ -12,13 +12,11 @@
 //! * 對帳那頭只有「這一輪自己記下 exited」才算遺失（`AlreadyEnded`＝別的路先收了，不是 herdr 掉的）；補開丟到背景一顆一顆做，不卡對帳。
 //! * 退避：同一顆 bot 30 分鐘內最多重開 3 次；herdr 一直掛時只通知、不再開（避免無限重開）。
 //! * 每次遺失都推一則 supervisor inbox `bot_lost`（巡檢收、叫醒），帶 `outcome`：`restarted`／`failed`／`backoff`，不等探針。
-use crate::events::ports::{HostSidePort, SupervisorRepo, TurnCommands};
 use crate::db;
-use crate::state::{App, AutostartHostStatus};
-use serde_json::json;
-use std::collections::HashMap;
-use std::sync::{Arc, Mutex, OnceLock};
 use std::time::Duration;
+
+#[cfg(test)]
+pub(crate) use crate::runners::autostart_revive::quiesce;
 
 /// 這一輪對帳收掉的 autostart bot（原因是 agent 不見）。
 #[derive(Debug, Clone)]
@@ -28,13 +26,13 @@ pub(crate) struct Lost {
 }
 
 /// 對帳收掉 run 時記的退出原因（`reconcile.rs`）；只有這個原因才是「herdr 掉了 agent」。
-const LOST_REASON: &str = "agent not found during reconcile";
+pub(crate) const LOST_REASON: &str = "agent not found during reconcile";
 
-const MAX_RESTARTS: usize = 3;
-const WINDOW: Duration = Duration::from_secs(30 * 60);
+pub(crate) const MAX_RESTARTS: usize = 3;
+pub(crate) const WINDOW: Duration = Duration::from_secs(30 * 60);
 
 /// 30 分鐘內的啟動嘗試記在 durable `bot_lost` inbox 事件裡；daemon 重啟不能把退避額度歸零。
-async fn take_slot(app: &impl crate::capabilities::Db, bot_id: &str) -> anyhow::Result<bool> {
+pub(crate) async fn take_slot(app: &impl crate::capabilities::Db, bot_id: &str) -> anyhow::Result<bool> {
     let cutoff = db::iso_in(-(WINDOW.as_secs() as i64));
     let hits: i64 = sqlx::query_scalar(
         "SELECT COUNT(*) FROM supervisor_inbox
@@ -48,128 +46,10 @@ async fn take_slot(app: &impl crate::capabilities::Db, bot_id: &str) -> anyhow::
     Ok(hits < MAX_RESTARTS as i64)
 }
 
-/// 還沒做完的背景補開，依 `App` 分開記（測試用它等補開收尾；平行的測試各有各的 `App`，不能共用一個計數）。
-static PENDING: OnceLock<Mutex<HashMap<usize, usize>>> = OnceLock::new();
-
-fn pending() -> &'static Mutex<HashMap<usize, usize>> {
-    PENDING.get_or_init(Default::default)
-}
-
-fn pending_key(app: &Arc<App>) -> usize {
-    Arc::as_ptr(app) as usize
-}
-
-/// 對帳一輪做完（host 的 pass 鎖已放開）之後呼叫：**丟到背景**，不讓對帳呼叫端等。
-///
-/// 補開是一顆一顆 `start_bot`（每顆要開 pane、等 CLI 起來，遠端還要 ssh，一顆動輒十幾秒）。對帳是 supervisor 連上之後的第一步：
-/// 後面的全域事件訂閱、spool 補放、工具偵測、autostart 都排在它後面，herdr 一次更新掉了十顆 bot 的話，
-/// 同步等著補開就是整台主機的事件訂閱晚好幾分鐘才建。一顆一顆補（不並行）是刻意的：不要同時對 herdr 與額度開十個 CLI。
-pub(crate) fn spawn_revive(app: &Arc<App>, host: &str, lost: Vec<Lost>) {
-    if lost.is_empty() {
-        return;
-    }
-    let key = pending_key(app);
-    *pending().lock().unwrap_or_else(|e| e.into_inner()).entry(key).or_default() += 1;
-    let (app, host) = (app.clone(), host.to_string());
-    tokio::spawn(async move {
-        revive(&app, &host, lost).await;
-        let mut map = pending().lock().unwrap_or_else(|e| e.into_inner());
-        if let Some(n) = map.get_mut(&key) {
-            *n -= 1;
-            if *n == 0 {
-                map.remove(&key);
-            }
-        }
-    });
-}
-
-/// 測試：這個 `App` 還有幾輪背景補開沒做完。
-#[cfg(test)]
-pub(crate) fn pending_count(app: &Arc<App>) -> usize {
-    pending().lock().unwrap_or_else(|e| e.into_inner()).get(&pending_key(app)).copied().unwrap_or(0)
-}
-
-/// 測試：等這個 `App` 的背景補開做完（上限 60 秒）。
-#[cfg(test)]
-pub(crate) async fn quiesce(app: &Arc<App>) {
-    for _ in 0..6000 {
-        if pending_count(app) == 0 {
-            return;
-        }
-        tokio::time::sleep(Duration::from_millis(10)).await;
-    }
-    panic!("背景補開 60 秒還沒做完");
-}
-
-/// 對帳一輪做完（host 的 pass 鎖已放開）之後呼叫。
-pub(crate) async fn revive(app: &Arc<App>, host: &str, lost: Vec<Lost>) {
-    if lost.is_empty() {
-        return;
-    }
-    let boot_pass_done = app.autostart_hosts.lock().unwrap_or_else(|e| e.into_inner()).get(host) == Some(&AutostartHostStatus::Done);
-    if !boot_pass_done {
-        return;
-    }
-    match app.herdr_maintenance_active().await {
-        Ok(None) => {}
-        Ok(Some(_)) => return,
-        Err(e) => {
-            tracing::warn!(host, error = ?e, "autostart revive: cannot read the herdr maintenance state; leaving the lost bots to the bot_stopped probe");
-            return;
-        }
-    }
-    for l in lost {
-        if let Err(e) = revive_one(app, host, &l).await {
-            tracing::warn!(host, bot = %l.bot_id, error = ?e, "autostart revive: could not decide for this bot; leaving it to the bot_stopped probe");
-        }
-    }
-}
-
-async fn revive_one(app: &Arc<App>, host: &str, l: &Lost) -> anyhow::Result<()> {
-    // Check once before the lock to keep the common no-op path cheap, then check again while holding
-    // the per-bot lock. A user start/stop in between must cancel this background recovery.
-    if eligible_lost_bot(app, host, l).await?.is_none() {
-        return Ok(());
-    }
-    #[cfg(test)]
-    crate::race_point::hit("autostart_revive_before_start", &l.bot_id).await;
-
-    let lock = app.bot_lock(&l.bot_id).await;
-    let guard = lock.lock_owned().await;
-    let Some(bot) = eligible_lost_bot(app, host, l).await? else { return Ok(()) };
-    let (outcome, error) = if !take_slot(app, &bot.id).await? {
-        drop(guard);
-        tracing::warn!(host, bot = %bot.name, "autostart revive: lost again within the backoff window; not restarting, only reporting");
-        ("backoff", None)
-    } else {
-        tracing::info!(host, bot = %bot.name, "autostart revive: the agent was lost (herdr restart or reconnect); starting it again");
-        // The detached start owns the bot lock through pane creation; cancelling this caller must
-        // not leave an unguarded start that can race a user stop.
-        let (start_app, bot_id) = (app.clone(), bot.id.clone());
-        match tokio::spawn(async move {
-            let _guard = guard;
-            start_app.start_bot_locked(&bot_id).await
-        })
-        .await
-        {
-            Ok(Ok(_)) => ("restarted", None),
-            Ok(Err(e)) => ("failed", Some(format!("{e:?}"))),
-            Err(e) => ("failed", Some(e.to_string())),
-        }
-    };
-    let payload = json!({
-        "bot_id": bot.id, "name": bot.name, "host": host, "lost_run_id": l.run_id,
-        "reason": "agent_not_found_during_reconcile", "outcome": outcome, "error": error,
-    });
-    if let Err(e) = app.db.push_inbox(&format!("bot_lost:{}:{}", bot.id, l.run_id), "bot_lost", None, Some(&bot.id), None, &payload).await {
-        tracing::warn!(bot = %bot.name, error = ?e, "autostart revive: could not write the bot_lost inbox event");
-    }
-    Ok(())
-}
-
 /// Only the run reconcile just lost, still on the same host, is eligible for revival. Call before
 /// and after acquiring the bot lock.
-async fn eligible_lost_bot(app: &(impl crate::capabilities::Db + crate::capabilities::HerdrRoutes), host: &str, l: &Lost) -> anyhow::Result<Option<db::Bot>> {
+pub(crate) async fn eligible_lost_bot(app: &(impl crate::capabilities::Db + crate::capabilities::HerdrRoutes), host: &str, l: &Lost) -> anyhow::Result<Option<db::Bot>> {
+
     let Some(bot) = db::bot(app.db(), &l.bot_id).await? else { return Ok(None) };
     if bot.deleted_at.is_some() || bot.autostart != 1 || bot.managed_by == "child" {
         return Ok(None);
@@ -191,6 +71,7 @@ async fn eligible_lost_bot(app: &(impl crate::capabilities::Db + crate::capabili
 
 #[cfg(test)]
 mod tests {
+    use crate::runners::autostart_revive as runner;
     use crate::state::AutostartHostStatus;
     use crate::testing as tt;
     use crate::{config, db};
@@ -339,11 +220,11 @@ mod tests {
             .await
             .expect("對帳不能等補開")
             .unwrap();
-        assert_eq!(super::pending_count(&env.app), 1, "對帳回來的時候補開還沒做完");
+        assert_eq!(runner::pending_count(&env.app), 1, "對帳回來的時候補開還沒做完");
         assert!(db::active_run(&env.app.db, &bot.id).await.unwrap().is_none(), "還在等鎖：沒有新 run");
 
         release.notify_one();
-        super::quiesce(&env.app).await;
+        runner::quiesce(&env.app).await;
         let events = bot_lost_events(&env.app, &bot.id).await;
         assert_eq!(events.len(), 1, "補開照樣做完：{events:?}");
         assert_eq!(events[0]["outcome"], "restarted");
@@ -401,7 +282,7 @@ mod tests {
         crate::lifecycle::race_point::arm("autostart_revive_before_start", &bot.id, move || async move {
             conn_after_check.connected.store(false, Ordering::SeqCst);
         });
-        super::revive(&env.app, host, vec![super::Lost { bot_id: bot.id.clone(), run_id }]).await;
+        runner::revive(&env.app, host, vec![super::Lost { bot_id: bot.id.clone(), run_id }]).await;
 
         assert_eq!(runs(&env.app, &bot.id).await.len(), 1, "offline host is not restarted");
         assert!(bot_lost_events(&env.app, &bot.id).await.is_empty(), "offline is skipped, not counted as a failed attempt");
@@ -418,7 +299,7 @@ mod tests {
         let run = db::active_run(&env.app.db, &bot.id).await.unwrap().unwrap().id;
         crate::lifecycle::mark_run_exited(&env.app, &run, "pane exited").await;
 
-        super::revive(&env.app, config::LOCAL_HOST, vec![super::Lost { bot_id: bot.id.clone(), run_id: run.clone() }]).await;
+        runner::revive(&env.app, config::LOCAL_HOST, vec![super::Lost { bot_id: bot.id.clone(), run_id: run.clone() }]).await;
 
         assert_eq!(runs(&env.app, &bot.id).await.len(), 1, "原因是 pane exited：不拉起來");
         assert!(bot_lost_events(&env.app, &bot.id).await.is_empty());
@@ -440,7 +321,7 @@ mod tests {
             crate::lifecycle::stop_bot(&app, &bot_id).await.unwrap();
             assert_ne!(user_run, "");
         });
-        super::revive(&env.app, config::LOCAL_HOST, vec![super::Lost { bot_id: bot.id.clone(), run_id: lost_run }]).await;
+        runner::revive(&env.app, config::LOCAL_HOST, vec![super::Lost { bot_id: bot.id.clone(), run_id: lost_run }]).await;
 
         assert_eq!(runs(&env.app, &bot.id).await.len(), 2, "補開不能多啟動第三個 run");
         assert!(db::active_run(&env.app.db, &bot.id).await.unwrap().is_none(), "使用者的 stop 保持有效");

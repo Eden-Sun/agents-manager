@@ -52,7 +52,7 @@ impl HostHooks for App {
             if reconciled {
                 crate::lifecycle::relay_watch::rearm_host(&app, &host).await;
             }
-            crate::events::spawn_global_for_host(app.clone(), host.clone()).await;
+            crate::runners::events::spawn_global_for_host(app.clone(), host.clone()).await;
             crate::hookrecv::replay_host(&app, &host).await;
             crate::tools::spawn_detect(app.clone(), host.clone());
             // 刪除 handler 的一次性 ssh purge 若在送出前 daemon 就死了，這台的已刪 bot 目錄靠連上時再掃一次收掉（#349）。

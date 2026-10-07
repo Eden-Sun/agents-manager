@@ -425,7 +425,7 @@ pub async fn close_confirmed(app: &Arc<App>, host: &str, pane_id: &str, confirme
     let (client, _) = client_for(app, host).await?;
     let Some(shell) = app.host_shells.lock().await.iter().find(|s| s.host == host && s.pane_id == pane_id).cloned()
     else {
-        return match crate::panes::close_tracked(app, host, pane_id, confirmed).await {
+        return match crate::runners::panes::close_tracked(app, host, pane_id, confirmed).await {
             Err(LcError::NotFound(_)) => Err(LcError::NotFound("shell".into())),
             other => other.map(|_| ()),
         };

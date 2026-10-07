@@ -22,10 +22,9 @@
 //! 只標、不自動殺行程。開始時間在記憶體：daemon 重啟後從重啟後第一次看到算起（下限，不是真的開始時間）。
 
 use crate::db;
-use crate::state::App;
 use serde_json::Value;
 use std::collections::{HashMap, HashSet};
-use std::sync::{Arc, Mutex};
+use std::sync::Mutex;
 use std::time::Duration;
 
 /// 畫面底部看幾個非空行：claude 的模式列在最後一兩行；codex 的背景行上面還有額度警告、輸入框、狀態列、快捷鍵提示。
@@ -99,7 +98,7 @@ fn codex_terminals(line: &str) -> Option<u32> {
 }
 
 #[cfg(test)]
-pub fn get(app: &App, run_id: &str) -> u32 {
+pub fn get(app: &impl crate::background_jobs::JobCounts, run_id: &str) -> u32 {
     known(app, run_id).unwrap_or(0)
 }
 
@@ -185,42 +184,6 @@ pub(crate) async fn services(app: &(impl crate::capabilities::Db + crate::hosts:
     service_shells(&ps, &listening_pids(&listen), shell as i32)
 }
 
-/// 巡邏讀到一份畫面：數字變了才記、才推 `bot_status`。
-pub async fn observe(app: &Arc<App>, run: &db::Run, kind: &str, screen: &str, client: &crate::herdr::HerdrClient, pane: &str) {
-    let raw = parse(kind, screen);
-    let mut n = raw;
-    if n > 0 && kind == "claude" {
-        n = n.saturating_sub(services(app, run, client, pane).await);
-    }
-    // claude 的 Stop hook 自己報過背景工作（`background_hook.rs`）就以它為準；沒報過（舊版）才是畫面的數字。
-    if kind == "claude" {
-        n = crate::background_hook::reconcile(app, &run.id, n);
-    }
-    let changed = {
-        let mut m = app.background_jobs.lock().unwrap_or_else(|e| e.into_inner());
-        // 0 也記：「看過、乾淨」跟「沒看過」不同（#767）。從沒看過到第一次看過也算變了，要推，前端才把「未知」換掉。
-        // 數字沒變、但這一輪跨過「可能卡住」門檻（#774）也算變了。
-        record(&mut m, &run.id, n)
-    };
-    if changed {
-        tracing::info!(run = %run.id, bot = %run.bot_id, kind, background_jobs = n, "background jobs changed");
-        app.emit_bot_status(&run.bot_id).await;
-    }
-}
-
-/// 現場讀一次這個 run 的畫面並記帳（一鍵重啟在計畫時與輪到時用）。巡邏每 30 秒才一輪：回合剛結束、背景工作剛丟出去的
-/// 那幾秒，帳上是「沒看過」或上一輪的 0，不能拿來當乾淨的證據。讀不到（沒有 pane、主機沒連、herdr 讀失敗）就維持原帳——
-/// 沒有新證據不改舊證據。
-pub async fn refresh(app: &Arc<App>, run: &db::Run, kind: &str) {
-    if run.state != "running" || !matches!(kind, "claude" | "codex") {
-        return;
-    }
-    let Some(pane) = run.pane_id.as_deref() else { return };
-    let Some(client) = app.herdr_for_run(run).await else { return };
-    let Ok(read) = client.pane_read(pane, "visible", 80).await else { return };
-    observe(app, run, kind, &read.text, &client, pane).await;
-}
-
 /// 這一輪沒看到的 run（結束了）不留帳。
 pub fn retain_runs(app: &(impl crate::background_hook::HookSnapshots + crate::background_jobs::JobCounts), active: &[String]) {
     app.background_jobs().lock().unwrap_or_else(|e| e.into_inner()).retain(|id, _| active.contains(id));
@@ -258,6 +221,7 @@ pub fn run_json<T: serde::Serialize>(app: &(impl crate::background_hook::HookSna
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::runners::background_jobs::observe;
 
     fn fixture(name: &str) -> String {
         std::fs::read_to_string(format!("{}/src/lifecycle/fixtures/{name}", env!("CARGO_MANIFEST_DIR"))).unwrap()

@@ -1,24 +1,41 @@
-//! 上層 runner / handler 聚合模組（r5a9）。
+//! 上層 runner / handler 聚合模組（r5a8 + r5a9）。
 //!
 //! 封裝對 `App` 與 composition 的依賴，作為背景工作與 HTTP 路由入口，
 //! 下層模組只保留核心邏輯。
 
 pub mod ask_answers;
+pub mod autostart_revive;
+pub mod background_hook;
+pub mod background_jobs;
+pub mod build_scheduler;
+pub mod child_alerts;
+pub mod child_done;
+pub mod child_retire;
 pub mod codex_live;
+pub mod codex_model_migration;
 pub mod credential_spawn;
 pub mod dangerous_rm;
 pub mod default_session;
+pub mod events;
+pub mod herdr_maintenance;
 pub mod hook_inbox;
 pub mod judge;
 pub mod login_assist;
 pub mod login_prompt;
+pub mod models;
+pub mod pane_identity;
+pub mod panes;
 pub mod pending_question;
 pub mod primary_keep_warm;
+pub mod prompt_cache;
 pub mod prompt_suggestion;
+pub mod quota;
+pub mod quota_claude;
 pub mod quota_grok;
 pub mod reconcile;
 pub mod release_triage;
 pub mod rewind;
 pub mod session_paused;
 pub mod tui_prompts;
-
+pub mod update_watch;
+pub mod upstream_update;

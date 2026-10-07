@@ -11,8 +11,6 @@ use anyhow::Result;
 use serde_json::{json, Value};
 use sqlx::SqlitePool;
 
-use crate::state::App;
-
 pub async fn migrate(pool: &SqlitePool) -> Result<()> {
     sqlx::query(
         "CREATE TABLE IF NOT EXISTS panes (
@@ -252,7 +250,7 @@ async fn scan_host(app: &(impl crate::capabilities::Cfg + crate::capabilities::D
             None
         }
     };
-    let client = crate::bot_trash::app_ports_p11::client_for(app, host).await.ok().map(|(c, _)| c);
+    let client = crate::api::shell::client_for(app, host).await.ok().map(|(c, _)| c);
     let mut observed: HashMap<String, Option<Observed>> = HashMap::new();
     for p in &non_agent {
         let Some(pane_id) = p.get("pane_id").and_then(Value::as_str) else { continue };
@@ -281,7 +279,7 @@ const RESCAN_INTERVAL: std::time::Duration = std::time::Duration::from_secs(60);
 
 /// 單獨重掃一台主機的 pane（不動 agent pane 的對帳、不跑 GC 與通知——那兩件事仍跟著對帳）。
 pub async fn rescan(app: &(impl crate::capabilities::Cfg + crate::capabilities::Db + crate::capabilities::Emit + crate::capabilities::HerdrRoutes + crate::hosts::HostsAccess + crate::shared_host::SharedHostEnv), host: &str) -> Result<ScanOutcome> {
-    let (client, _) = crate::bot_trash::app_ports_p11::client_for(app, host).await.map_err(|e| anyhow::anyhow!("{e:?}"))?;
+    let (client, _) = crate::api::shell::client_for(app, host).await.map_err(|e| anyhow::anyhow!("{e:?}"))?;
     let snapshot = client.snapshot().await?;
     // 同 reconcile 的規則：連 key 都沒有＝不認得的形狀，當成空的會把整台的列清光。
     if !snapshot.get("panes").is_some_and(Value::is_array) {
@@ -753,7 +751,7 @@ async fn close_if_still_idle(
 ) -> Result<bool> {
     // 1. 重新取前景／行程樹：**讀不到就不關**（讀不到不等於是空的）。
     let dump = crate::memproc::dump(app, host).await?;
-    let (client, _) = crate::bot_trash::app_ports_p11::client_for(app, host).await.map_err(|e| anyhow::anyhow!("{e:?}"))?;
+    let (client, _) = crate::api::shell::client_for(app, host).await.map_err(|e| anyhow::anyhow!("{e:?}"))?;
     let Some(f) = read_facts(Some(&client), Some(&dump), pane_id).await else {
         tracing::info!(host, pane_id, "GC 前讀不到這顆 pane 的行程樹，這一輪不關");
         return Ok(false);
@@ -772,7 +770,7 @@ async fn close_if_still_idle(
         .map(|r| r.text.lines().rev().take(log_lines as usize).collect::<Vec<_>>().into_iter().rev().collect::<Vec<_>>().join("\n"))
         .unwrap_or_else(|e| format!("（讀不到畫面：{e}）"));
     tracing::info!(host, pane_id, workspace_id, tab_id, screen_tail = %tail, "pane GC：閒置太久，關掉這顆 shell pane");
-    crate::bot_trash::app_ports_p11::close_pane_and_tab(&client, workspace_id, tab_id, pane_id).await;
+    crate::lifecycle::close_pane_and_tab(&client, workspace_id, tab_id, pane_id).await;
     sqlx::query("DELETE FROM panes WHERE host=? AND pane_id=?").bind(host).bind(pane_id).execute(app.db()).await?;
     Ok(true)
 }
@@ -811,7 +809,7 @@ pub async fn notify_unowned_and_orphans(app: &impl crate::capabilities::Db, host
             "message": message,
         });
         let key = format!("{event}:{host}:{pane_id}:{first_seen}");
-        if crate::bot_trash::app_ports_p11::push_inbox(app.db(), &key, event, None, None, None, &payload).await?.is_some() {
+        if crate::supervisor::store::push_inbox(app.db(), &key, event, None, None, None, &payload).await?.is_some() {
             sent += 1;
         }
         sqlx::query(&format!("UPDATE panes SET {column}=? WHERE host=? AND pane_id=?"))
@@ -859,6 +857,11 @@ pub fn row_json(r: &sqlx::sqlite::SqliteRow) -> Value {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use axum::extract::{Path, Query, State};
+    use axum::Json;
+    use crate::lc_error::LcError;
+    use crate::runners::panes::{adopt, close, list_all, list_for_project, AdoptIn};
+    use crate::state::App;
 
     /// 2026-09-16 實測：herdr 0.8.2 的 revision 對一直在輸出的 pane 也不動。量不到的 pane 不能被當成閒置關掉。
     #[test]
@@ -1714,208 +1717,4 @@ mod tests {
     }
 }
 
-// ------------------------------------------------------------------ API
 
-use axum::extract::{Path, Query, State};
-use axum::Json;
-
-use crate::lifecycle::LcError;
-
-/// `GET /api/projects/{id}/panes`：這個專案的非 agent pane。**沒歸屬的不在這裡**（SPEC §6.5e：它不屬於任何專案，
-/// 掛在每個專案底下會重複出現、看起來像那個專案的東西）；它們走 `GET /api/panes?unowned=1`。
-pub async fn list_for_project(
-    State(app): State<Arc<App>>,
-    Path(id): Path<String>,
-) -> Result<Json<Value>, LcError> {
-    let up = |e: anyhow::Error| LcError::Upstream(e.to_string());
-    let sql = |e: sqlx::Error| LcError::Upstream(e.to_string());
-    let project = crate::db::project(&app.db, &id).await.map_err(up)?.ok_or_else(|| LcError::NotFound("project".into()))?;
-    let rows = sqlx::query(
-        "SELECT * FROM panes WHERE host=? AND project_id=? ORDER BY kind, pane_id",
-    )
-    .bind(&project.host)
-    .bind(&id)
-    .fetch_all(&app.db)
-    .await
-    .map_err(sql)?;
-    let panes: Vec<Value> = rows.iter().map(row_json).collect();
-    Ok(Json(json!({"project_id": id, "host": project.host, "panes": panes})))
-}
-
-#[derive(serde::Deserialize, Default)]
-pub struct AdoptIn {
-    pub owner_bot_id: Option<String>,
-    pub purpose: Option<String>,
-    /// 使用者手開的 pane 只有這個明確帶 true 才會變成可自動關（§6.5e）。
-    #[serde(default)]
-    pub allow_gc: bool,
-}
-
-/// `GET /api/panes?unowned=1`：全機的非 agent pane；`unowned=1` 只回「連專案都對不到」的那些（§6.5e）。
-/// 哪一顆是 scratch 由 daemon 標（`scratch`），前端不自己重算。
-pub async fn list_all(State(app): State<Arc<App>>, Query(q): Query<HashMap<String, String>>) -> Result<Json<Value>, LcError> {
-    let sql = |e: sqlx::Error| LcError::Upstream(e.to_string());
-    let only_unowned = q.get("unowned").map(|v| v == "1" || v == "true").unwrap_or(false);
-    let rows = if only_unowned {
-        sqlx::query("SELECT * FROM panes WHERE owned_by='none' ORDER BY host, scratch DESC, pane_id").fetch_all(&app.db).await
-    } else {
-        sqlx::query("SELECT * FROM panes ORDER BY host, kind, pane_id").fetch_all(&app.db).await
-    }
-    .map_err(sql)?;
-    Ok(Json(json!({"panes": rows.iter().map(row_json).collect::<Vec<_>>()})))
-}
-
-/// `POST /api/panes/{id}/focus?host=local`：把 herdr 的焦點切到這顆 pane。只動焦點，不改內容。
-pub async fn focus(
-    State(app): State<Arc<App>>,
-    Path(pane_id): Path<String>,
-    Query(q): Query<HashMap<String, String>>,
-) -> Result<Json<Value>, LcError> {
-    let host = q.get("host").cloned().unwrap_or_else(|| crate::config::LOCAL_HOST.to_string());
-    let (client, _) = crate::api::shell::client_for(&app, &host).await?;
-    client.pane_focus(&pane_id).await.map_err(|e| LcError::Upstream(format!("{e:#}")))?;
-    Ok(Json(json!({"focused": true, "pane_id": pane_id})))
-}
-
-/// `POST /api/panes/{id}/adopt`：補 owner／purpose。不會偷偷讓使用者的 pane 變成可 GC。
-pub async fn adopt(
-    State(app): State<Arc<App>>,
-    Path(pane_id): Path<String>,
-    Query(q): Query<HashMap<String, String>>,
-    body: Option<Json<AdoptIn>>,
-) -> Result<Json<Value>, LcError> {
-    let up = |e: anyhow::Error| LcError::Upstream(e.to_string());
-    let sql = |e: sqlx::Error| LcError::Upstream(e.to_string());
-    let b = body.map(|Json(b)| b).unwrap_or_default();
-    let host = q.get("host").cloned().unwrap_or_else(|| crate::config::LOCAL_HOST.to_string());
-    let project = match b.owner_bot_id.as_deref() {
-        Some(bot) => Some(
-            crate::db::bot(&app.db, bot)
-                .await
-                .map_err(up)?
-                .ok_or_else(|| LcError::NotFound("bot".into()))?
-                .project_id,
-        ),
-        None => None,
-    };
-    let n = sqlx::query(
-        "UPDATE panes SET owner_bot_id=COALESCE(?, owner_bot_id), project_id=COALESCE(?, project_id),
-                          owner_adopted=CASE WHEN ? IS NULL THEN owner_adopted ELSE 1 END,
-                          purpose=COALESCE(?, purpose), gc_optin=CASE WHEN ? THEN 1 ELSE gc_optin END,
-                          orphan_notified_at=NULL
-          WHERE host=? AND pane_id=?",
-    )
-    .bind(b.owner_bot_id.as_deref())
-    .bind(project.as_deref())
-    .bind(b.owner_bot_id.as_deref())
-    .bind(b.purpose.as_deref())
-    .bind(b.allow_gc)
-    .bind(&host)
-    .bind(&pane_id)
-    .execute(&app.db)
-    .await
-    .map_err(sql)?
-    .rows_affected();
-    if n == 0 {
-        return Err(LcError::NotFound("pane".into()));
-    }
-    let row = sqlx::query("SELECT * FROM panes WHERE host=? AND pane_id=?")
-        .bind(&host)
-        .bind(&pane_id)
-        .fetch_one(&app.db)
-        .await
-        .map_err(sql)?;
-    tracing::info!(host, pane_id, owner = ?b.owner_bot_id, purpose = ?b.purpose, allow_gc = b.allow_gc, "pane adopted");
-    announce_if_changed(&app, &host).await;
-    Ok(Json(row_json(&row)))
-}
-
-/// `POST /api/panes/{id}/close`：人按的關閉。服務 pane 要帶 `confirm=true`（UI 會先顯示 port）。
-///
-/// 表上的 kind 是掃描的快取（review 2026-09-16 core 4），所以關之前即時再看一次：
-/// - 有 active run、或 herdr 說裡面現在有 agent → 403 `agent_pane`（比照打字那條線；agent 走 bot 的 stop）。
-/// - herdr 說 pane 已經不在 → 刪列、404。
-/// - 現在是 service（前景有非 shell 程式或 listen port），或**讀不到**事實 → 沒帶 confirm 就 409 `service_pane`，
-///   body 的 `pane` 換成即時的 kind／前景／port；讀不到時多一個 `unverified: true`。
-pub async fn close(
-    State(app): State<Arc<App>>,
-    Path(pane_id): Path<String>,
-    Query(q): Query<HashMap<String, String>>,
-) -> Result<Json<Value>, LcError> {
-    let host = q.get("host").cloned().unwrap_or_else(|| crate::config::LOCAL_HOST.to_string());
-    let confirmed = q.get("confirm").map(|v| v == "true" || v == "1").unwrap_or(false);
-    close_tracked(&app, &host, &pane_id, confirmed).await.map(Json)
-}
-
-/// [`close`] 的本體；`DELETE /api/hosts/{name}/shells/{pane_id}` 找不到記憶體那份時也走這裡（web review M2）。
-pub(crate) async fn close_tracked(app: &Arc<App>, host: &str, pane_id: &str, confirmed: bool) -> Result<Value, LcError> {
-    let (app, host, pane_id) = (app.clone(), host.to_string(), pane_id.to_string());
-    let sql = |e: sqlx::Error| LcError::Upstream(e.to_string());
-    let up = |e: anyhow::Error| LcError::Upstream(format!("{e:#}"));
-    let row = sqlx::query("SELECT * FROM panes WHERE host=? AND pane_id=?")
-        .bind(&host)
-        .bind(&pane_id)
-        .fetch_optional(&app.db)
-        .await
-        .map_err(sql)?
-        .ok_or_else(|| LcError::NotFound("pane".into()))?;
-    let mut info = row_json(&row);
-    let agent_pane = || LcError::Forbidden(json!({"error": "agent_pane", "message": "這顆 pane 正在跑 agent，請從 bot 停掉"}));
-    let session = app.session_for_host(&host).await.unwrap_or_default();
-    if !crate::db::active_runs_for_pane(&app.db, &host, &pane_id, &session, &session).await.map_err(up)?.is_empty() {
-        return Err(agent_pane());
-    }
-    let (client, _) = crate::bot_trash::app_ports_p11::client_for(&app, &host).await?;
-    match client.pane_get(&pane_id).await.map_err(up)? {
-        None => {
-            sqlx::query("DELETE FROM panes WHERE host=? AND pane_id=?").bind(&host).bind(&pane_id).execute(&app.db).await.map_err(sql)?;
-            announce_if_changed(&app, &host).await;
-            return Err(LcError::NotFound("pane".into()));
-        }
-        Some(p) if p.agent.as_deref().is_some_and(|a| !a.is_empty()) => return Err(agent_pane()),
-        Some(_) => {}
-    }
-    let probe = app.probe();
-    let live = match (probe.dump(&app, &host).await, client.pane_shell(&pane_id).await) {
-        (Ok(dump), Ok(shell)) => match facts_from(&shell, &dump, &pane_id) {
-            Some(f) => probe.listen_ports(&host, &f.listen_pids).await.map(|ports| (f, ports)),
-            None => None,
-        },
-        _ => None,
-    };
-    let needs_confirm = match &live {
-        Some((f, ports)) => {
-            let kind = classify(f.foreground.as_deref(), ports);
-            info["kind"] = json!(kind);
-            info["foreground"] = json!(f.foreground);
-            info["read_only"] = json!(!ports.is_empty());
-            info["listen_ports"] = json!(ports);
-            kind == "service"
-        }
-        None => true,
-    };
-    if needs_confirm && !confirmed {
-        // 關掉服務 pane 會殺掉裡面在跑的東西：要人看過 port 再點一次。
-        return Err(LcError::conflict(
-            "service pane needs confirm=true",
-            json!({"reason": "service_pane", "pane": info, "unverified": live.is_none()}),
-        ));
-    }
-    crate::bot_trash::app_ports_p11::close_pane_and_tab(
-        &client,
-        info["workspace_id"].as_str(),
-        info["tab_id"].as_str(),
-        &pane_id,
-    )
-    .await;
-    sqlx::query("DELETE FROM panes WHERE host=? AND pane_id=?")
-        .bind(&host)
-        .bind(&pane_id)
-        .execute(&app.db)
-        .await
-        .map_err(sql)?;
-    app.pane_live.lock().await.remove(&(host.clone(), pane_id.clone()));
-    announce_if_changed(&app, &host).await;
-    tracing::info!(host, pane_id, kind = %info["kind"], "pane closed by request");
-    Ok(json!({"closed": true, "pane": info}))
-}

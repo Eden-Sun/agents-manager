@@ -333,11 +333,11 @@ mod tests {
         sqlx::query("UPDATE projects SET workspace_id = 'w9' WHERE id = ?").bind(&env.project_id).execute(&app.db).await.unwrap();
         hand_off(&app, &env.project_id, Some("agm-host")).await;
         let ev = crate::herdr::Event { event: "workspace_closed".into(), data: json!({"workspace_id": "w9"}) };
-        crate::events::handle_global(&app, LOCAL_HOST, "test", &ev).await;
+        crate::runners::events::handle_global(&app, LOCAL_HOST, "test", &ev).await;
         assert_eq!(db::project(&app.db, &env.project_id).await.unwrap().unwrap().workspace_id.as_deref(), Some("w9"));
 
         hand_off(&app, &env.project_id, None).await;
-        crate::events::handle_global(&app, LOCAL_HOST, "test", &ev).await;
+        crate::runners::events::handle_global(&app, LOCAL_HOST, "test", &ev).await;
         assert!(db::project(&app.db, &env.project_id).await.unwrap().unwrap().workspace_id.is_none());
     }
 
@@ -391,11 +391,11 @@ mod tests {
             event: "pane_agent_status_changed".into(),
             data: json!({"pane_id": format!("pane-{}", bot.id), "agent_status": "blocked"}),
         };
-        crate::events::handle_status(&app, LOCAL_HOST, "test", &ev).await;
+        crate::runners::events::handle_status(&app, LOCAL_HOST, "test", &ev).await;
         assert_eq!(db::run(&app.db, &run).await.unwrap().unwrap().agent_status, "idle");
 
         hand_off(&app, &env.project_id, None).await;
-        crate::events::handle_status(&app, LOCAL_HOST, "test", &ev).await;
+        crate::runners::events::handle_status(&app, LOCAL_HOST, "test", &ev).await;
         assert_eq!(db::run(&app.db, &run).await.unwrap().unwrap().agent_status, "blocked");
     }
 
@@ -517,7 +517,7 @@ mod tests {
         hand_off(&app, &env.project_id, Some("agm-host")).await;
         let reads = || env.herdr.calls_to("pane.read").into_iter().filter(|p| p["pane_id"] == pane.as_str()).count();
 
-        crate::quota::refresh_codex_from_panes(&app, LOCAL_HOST).await;
+        crate::runners::quota::refresh_codex_from_panes(&app, LOCAL_HOST).await;
         assert_eq!(reads(), 0, "額度不讀它的狀態列");
         crate::reconcile::reconcile_host(&app, LOCAL_HOST).await.unwrap();
         assert_eq!(reads(), 0, "對帳不補它的 runtime");

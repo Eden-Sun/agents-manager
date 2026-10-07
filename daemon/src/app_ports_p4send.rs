@@ -122,7 +122,7 @@ impl PaneWatchPort for Arc<App> {
 
 impl CodexSendPort for Arc<App> {
     async fn observe_codex_screen(&self, run: &db::Run, screen: &str) {
-        crate::codex_model_migration::observe_screen(self, run, screen).await
+        crate::runners::codex_model_migration::observe_screen(self, run, screen).await
     }
     async fn close_codex_picker(&self, client: &crate::herdr::HerdrClient, pane_id: &str) -> bool {
         crate::codex_live::close_picker(client, pane_id).await

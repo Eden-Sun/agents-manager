@@ -594,7 +594,7 @@ async fn codex_banner_until(app: &Arc<App>, bot: &db::Bot, notice: &str) -> Opti
     if let Some(until) = offset.and_then(|o| crate::lifecycle::parse_codex_try_again_offset(notice, o)) {
         return Some(until);
     }
-    if let Some(until) = crate::quota::next_reset_for_bot(app, bot).await {
+    if let Some(until) = crate::runners::quota::next_reset_for_bot(app, bot).await {
         return Some(until);
     }
     Some(db::iso_at(chrono::Utc::now() + chrono::Duration::hours(5)))
@@ -1093,13 +1093,13 @@ mod quota_limit_tests {
         assert!(mark_claude_limit_hit(&app, &bot, LIMIT).await.is_err(), "記不進去就是錯");
         assert_eq!(hits(&app).await, vec![], "哪一格都沒寫，尤其不是本機的 `claude`");
         assert!(owes_limit_hit(&app, &bot.id));
-        let owed = crate::quota::limit_hit_for_bot(&app, &bot).await.expect("欠著的那一筆照擋（派送前讀的就是這支）");
+        let owed = crate::runners::quota::limit_hit_for_bot(&app, &bot).await.expect("欠著的那一筆照擋（派送前讀的就是這支）");
         assert_eq!(owed.bucket.as_deref(), Some("five_hour"));
-        assert!(crate::quota::try_limit_hit_for_bot(&app, &bot).await.unwrap().is_some(), "flush 的閘門也一樣");
+        assert!(crate::runners::quota::try_limit_hit_for_bot(&app, &bot).await.unwrap().is_some(), "flush 的閘門也一樣");
         assert!(hold_on(&app, &queued).await.is_none(), "還沒寫成");
 
         sqlx::query("ALTER TABLE projects_unreadable RENAME TO projects").execute(&app.db).await.unwrap();
-        let hit = crate::quota::try_limit_hit_for_bot(&app, &bot).await.unwrap().expect("補上之後照一般的查法擋");
+        let hit = crate::runners::quota::try_limit_hit_for_bot(&app, &bot).await.unwrap().expect("補上之後照一般的查法擋");
         assert!(!owes_limit_hit(&app, &bot.id), "補上了");
         assert_eq!(hits(&app).await, vec![("remote1/claude".to_string(), owed.at.clone())], "寫進遠端那一格，撞限時刻不變");
         assert_eq!(hit.at, owed.at);
@@ -1119,7 +1119,7 @@ mod quota_limit_tests {
         sqlx::query("ALTER TABLE projects_unreadable RENAME TO projects").execute(&app.db).await.unwrap();
         mark_claude_limit_hit(&app, &bot, "You've hit your weekly limit · resets Sep 25").await.unwrap();
         assert!(!owes_limit_hit(&app, &bot.id), "較舊的那筆一併結清");
-        let hit = crate::quota::try_limit_hit_for_bot(&app, &bot).await.unwrap().expect("照擋");
+        let hit = crate::runners::quota::try_limit_hit_for_bot(&app, &bot).await.unwrap().expect("照擋");
         assert_eq!(hit.bucket.as_deref(), Some("seven_day"), "記憶體留著較新的那筆，沒被舊的蓋回去");
     }
 
@@ -1154,7 +1154,7 @@ mod quota_limit_tests {
         let (bot, queued) = bot_with_a_queued_prompt(&env, crate::config::LOCAL_HOST, None).await;
         crate::quota::set(&app, crate::config::LOCAL_HOST, "claude", reading()).await;
         mark_claude_limit_hit(&app, &bot, "You've hit your limit · resets 5pm (Asia/Taipei)").await.unwrap();
-        let hit = crate::quota::try_limit_hit_for_bot(&app, &bot).await.unwrap().expect("撞限要擋住，不能一記下就過期");
+        let hit = crate::runners::quota::try_limit_hit_for_bot(&app, &bot).await.unwrap().expect("撞限要擋住，不能一記下就過期");
         assert_eq!(hit.until.as_deref(), Some(week_reset.as_str()), "5h 窗閒著：到期借 7d 的重置時間");
         let held = hold_on(&app, &queued).await.expect("排著的那一則蓋上了憑據");
         assert!(later_than(&held["until"].as_str().map(String::from), 99), "憑據上的到期也不能是過去：{held}");
@@ -1164,7 +1164,7 @@ mod quota_limit_tests {
         let (bot, _queued) = bot_with_a_queued_prompt(&env, crate::config::LOCAL_HOST, None).await;
         crate::quota::set(&app, crate::config::LOCAL_HOST, "claude", reading()).await;
         mark_claude_limit_hit(&app, &bot, LIMIT).await.unwrap();
-        let hit = crate::quota::try_limit_hit_for_bot(&app, &bot).await.unwrap().expect("session 撞限要擋住");
+        let hit = crate::runners::quota::try_limit_hit_for_bot(&app, &bot).await.unwrap().expect("session 撞限要擋住");
         assert!(later_than(&hit.until, 4), "5h 窗的讀數過期了：保底 5 小時，不是過去的時間：{hit:?}");
     }
 
@@ -1177,14 +1177,14 @@ mod quota_limit_tests {
         let (bot, _queued) = bot_with_a_queued_prompt(&env, crate::config::LOCAL_HOST, Some("cc0")).await;
         assert!(mark_claude_limit_hit(&app, &bot, LIMIT).await.is_err());
         assert_eq!(hits(&app).await, vec![], "沒有猜一格 `claude:cc0`");
-        assert!(crate::quota::try_limit_hit_for_bot(&app, &bot).await.unwrap().is_some(), "欠著照擋");
+        assert!(crate::runners::quota::try_limit_hit_for_bot(&app, &bot).await.unwrap().is_some(), "欠著照擋");
 
         let cc0 = crate::config::IdentityCfg { name: "cc0".into(), kind: "claude".into(), host: None, env: Default::default(), args: vec![] };
         app.tools.lock().await.insert(
             crate::config::LOCAL_HOST.to_string(),
             crate::tools::HostTools { tools: Default::default(), identities: Default::default(), shell_identities: vec![cc0], utc_offset_secs: None, herdr_cli: None, checked_at: db::now() },
         );
-        assert!(crate::quota::try_limit_hit_for_bot(&app, &bot).await.unwrap().is_some());
+        assert!(crate::runners::quota::try_limit_hit_for_bot(&app, &bot).await.unwrap().is_some());
         assert!(!owes_limit_hit(&app, &bot.id));
         assert_eq!(hits(&app).await.into_iter().map(|(k, _)| k).collect::<Vec<_>>(), vec!["claude".to_string()], "補進裸 `claude`");
     }
@@ -1213,12 +1213,12 @@ mod quota_limit_tests {
         let (bot, _q) = codex_bot_with_a_queued_prompt(&env, "remote1", None).await;
         set_remote_offset(&app, "remote1", Some(-5 * 3600)).await;
         mark_codex_limit_hit(&app, &bot, CODEX_LIMIT).await.unwrap();
-        assert_eq!(crate::quota::limit_hit_for_bot(&app, &bot).await.and_then(|h| h.until).as_deref(), Some("2099-09-19T23:43:00.000Z"));
+        assert_eq!(crate::runners::quota::limit_hit_for_bot(&app, &bot).await.and_then(|h| h.until).as_deref(), Some("2099-09-19T23:43:00.000Z"));
 
         let (bot2, _q) = codex_bot_with_a_queued_prompt(&env, "remote2", None).await;
         set_remote_offset(&app, "remote2", None).await;
         mark_codex_limit_hit(&app, &bot2, CODEX_LIMIT).await.unwrap();
-        let until = crate::quota::limit_hit_for_bot(&app, &bot2).await.and_then(|h| h.until).expect("保底到期");
+        let until = crate::runners::quota::limit_hit_for_bot(&app, &bot2).await.and_then(|h| h.until).expect("保底到期");
         assert!(chrono::DateTime::parse_from_rfc3339(&until).unwrap() < chrono::Utc::now() + chrono::Duration::hours(6), "保底約 5 小時，不是 2099 年的橫幅時間");
     }
 
@@ -1235,14 +1235,14 @@ mod quota_limit_tests {
         assert!(mark_codex_limit_hit(&app, &bot, CODEX_LIMIT).await.is_err(), "記不進去就是錯");
         assert_eq!(hits(&app).await, vec![], "哪一格都沒寫，尤其不是本機的 `codex`");
         assert!(owes_limit_hit(&app, &bot.id));
-        let owed = crate::quota::limit_hit_for_bot(&app, &bot).await.expect("欠著的那一筆照擋（派送前讀的就是這支）");
-        assert!(crate::quota::try_limit_hit_for_bot(&app, &bot).await.unwrap().is_some(), "flush 的閘門也一樣");
+        let owed = crate::runners::quota::limit_hit_for_bot(&app, &bot).await.expect("欠著的那一筆照擋（派送前讀的就是這支）");
+        assert!(crate::runners::quota::try_limit_hit_for_bot(&app, &bot).await.unwrap().is_some(), "flush 的閘門也一樣");
         let soon = chrono::Utc::now() + chrono::Duration::hours(6);
         assert!(owed.until.as_deref().is_some_and(|u| chrono::DateTime::parse_from_rfc3339(u).unwrap() < soon), "讀不到主機就不猜橫幅的時區：保底到期（#239）：{owed:?}");
         assert!(hold_on(&app, &queued).await.is_none(), "還沒寫成");
 
         sqlx::query("ALTER TABLE projects_unreadable RENAME TO projects").execute(&app.db).await.unwrap();
-        let hit = crate::quota::try_limit_hit_for_bot(&app, &bot).await.unwrap().expect("補上之後照一般的查法擋");
+        let hit = crate::runners::quota::try_limit_hit_for_bot(&app, &bot).await.unwrap().expect("補上之後照一般的查法擋");
         assert!(!owes_limit_hit(&app, &bot.id), "補上了");
         assert_eq!(hits(&app).await, vec![("remote1/codex".to_string(), owed.at.clone())], "寫進遠端那一格，撞限時刻不變");
         assert_eq!((hit.at.as_str(), hit.until.as_deref()), (owed.at.as_str(), owed.until.as_deref()));
@@ -1258,14 +1258,14 @@ mod quota_limit_tests {
         let (bot, _queued) = codex_bot_with_a_queued_prompt(&env, crate::config::LOCAL_HOST, Some("cx0")).await;
         assert!(mark_codex_limit_hit(&app, &bot, CODEX_LIMIT).await.is_err());
         assert_eq!(hits(&app).await, vec![], "沒有猜一格 `codex:cx0`");
-        assert!(crate::quota::try_limit_hit_for_bot(&app, &bot).await.unwrap().is_some(), "欠著照擋");
+        assert!(crate::runners::quota::try_limit_hit_for_bot(&app, &bot).await.unwrap().is_some(), "欠著照擋");
 
         let cx0 = crate::config::IdentityCfg { name: "cx0".into(), kind: "codex".into(), host: None, env: Default::default(), args: vec![] };
         app.tools.lock().await.insert(
             crate::config::LOCAL_HOST.to_string(),
             crate::tools::HostTools { tools: Default::default(), identities: Default::default(), shell_identities: vec![cx0], utc_offset_secs: None, herdr_cli: None, checked_at: db::now() },
         );
-        assert!(crate::quota::try_limit_hit_for_bot(&app, &bot).await.unwrap().is_some());
+        assert!(crate::runners::quota::try_limit_hit_for_bot(&app, &bot).await.unwrap().is_some());
         assert!(!owes_limit_hit(&app, &bot.id));
         assert_eq!(hits(&app).await.into_iter().map(|(k, _)| k).collect::<Vec<_>>(), vec!["codex".to_string()], "補進裸 `codex`");
     }
@@ -1287,8 +1287,8 @@ mod quota_limit_tests {
         mark_codex_limit_hit(&app, &grok, "You hit your weekly limit.").await.unwrap();
 
         let keys: Vec<String> = hits(&app).await.into_iter().map(|(k, _)| k).collect();
-        let codex_blocked = crate::quota::limit_hit_for_bot(&app, &codex).await.is_some();
-        let grok_blocked = crate::quota::limit_hit_for_bot(&app, &grok).await.is_some();
+        let codex_blocked = crate::runners::quota::limit_hit_for_bot(&app, &codex).await.is_some();
+        let grok_blocked = crate::runners::quota::limit_hit_for_bot(&app, &grok).await.is_some();
         assert_eq!((keys, codex_blocked, grok_blocked), (vec!["grok".to_string()], false, true));
         assert_eq!(app.quotas.lock().await.get("grok").map(|q| q.source.clone()).as_deref(), Some("grok-limit-hit"));
         assert!(hold_on(&app, &queued).await.is_some(), "撞限當下排著的那一則蓋上憑據");
@@ -1398,7 +1398,7 @@ mod quota_limit_tests {
         assert!(hold_on(&app, &queued).await.is_none());
 
         sqlx::query("DROP TRIGGER refuse_quota_hold").execute(&app.db).await.unwrap();
-        assert!(crate::quota::try_limit_hit_for_bot(&app, &bot).await.unwrap().is_some());
+        assert!(crate::runners::quota::try_limit_hit_for_bot(&app, &bot).await.unwrap().is_some());
         assert!(!owes_limit_hit(&app, &bot.id));
         let held = hold_on(&app, &queued).await.expect("補的時候蓋上了");
         assert_eq!(held["boot"].as_str(), Some(app.boot_id.as_str()));

@@ -430,12 +430,12 @@ async fn steps(app: &Arc<App>, ops: &dyn Ops, timing: Timing, ctx: &Ctx) -> Outc
     let (window, plan) = loop {
         match affected(app, &ctx.host).await {
             Ok(a) if a.busy.is_empty() => {
-                match crate::herdr_maintenance::open_as(app, crate::herdr_maintenance::MAX_MINUTES, "herdr_update", &format!("herdr 一鍵更新 → {}", ctx.target)).await {
+                match crate::runners::herdr_maintenance::open_as(app, crate::herdr_maintenance::MAX_MINUTES, "herdr_update", &format!("herdr 一鍵更新 → {}", ctx.target)).await {
                     Ok(Some(w)) => match affected(app, &ctx.host).await {
                         Ok(a) if a.busy.is_empty() => break (w, a),
                         recheck => {
                             log_line(app, ctx, "waiting_idle", &format!("開窗口時又忙起來了：{:?}", recheck.map(|a| a.busy)));
-                            let _ = crate::herdr_maintenance::close_as(app, &w, "herdr_update", Some("又忙起來了，晚點再試")).await;
+                            let _ = crate::runners::herdr_maintenance::close_as(app, &w, "herdr_update", Some("又忙起來了，晚點再試")).await;
                         }
                     },
                     Ok(None) => return out.fail("maintenance_busy", "已經有別人開著 herdr 維護窗口；什麼都沒動"),
@@ -467,7 +467,7 @@ async fn steps(app: &Arc<App>, ops: &dyn Ops, timing: Timing, ctx: &Ctx) -> Outc
     let backup = match swapped {
         Ok(b) => b,
         Err(e) => {
-            let _ = crate::herdr_maintenance::close_as(app, &window, "herdr_update", Some("換 binary 失敗，沒有重啟")).await;
+            let _ = crate::runners::herdr_maintenance::close_as(app, &window, "herdr_update", Some("換 binary 失敗，沒有重啟")).await;
             return out.fail("swap_failed", format!("{e}；server 沒有重啟"));
         }
     };
@@ -523,7 +523,7 @@ async fn steps(app: &Arc<App>, ops: &dyn Ops, timing: Timing, ctx: &Ctx) -> Outc
     }
 
     // 7. 關窗口（沒接回的子 agent 由它照原規則退休）。
-    match crate::herdr_maintenance::close_as(app, &window, "herdr_update", Some("herdr 一鍵更新結束")).await {
+    match crate::runners::herdr_maintenance::close_as(app, &window, "herdr_update", Some("herdr 一鍵更新結束")).await {
         Ok(retired) => log_line(app, ctx, "resuming", &format!("維護窗口關了；退休的子 agent：{retired:?}")),
         Err(e) => log_line(app, ctx, "resuming", &format!("關維護窗口失敗（{e:#}），會在截止時間自己結束")),
     }
@@ -1014,7 +1014,7 @@ mod tests {
     }
 
     async fn window_open(app: &Arc<App>) -> bool {
-        crate::herdr_maintenance::active(app).await.unwrap().is_some()
+        crate::runners::herdr_maintenance::active(app).await.unwrap().is_some()
     }
 
     #[tokio::test]

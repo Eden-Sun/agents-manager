@@ -162,7 +162,7 @@ async fn cand_of(app: &Arc<App>, run: &db::Run, bot: &db::Bot) -> anyhow::Result
         && !crate::bot_trash::app_ports_p11::in_default_session(run)
         && bot.herdr_session.as_deref() != Some("default");
     if may_restart {
-        crate::background_jobs::refresh(app, run, &bot.kind).await;
+        crate::runners::background_jobs::refresh(app, run, &bot.kind).await;
     }
     Ok(Cand {
         bot_id: bot.id.clone(),
@@ -1082,7 +1082,7 @@ mod tests {
         let run = db::run(&app.db, &run_id).await.unwrap().unwrap();
         let hook_app = app.clone();
         crate::lifecycle::race_point::arm("stop_before_stopping", &bot_id, move || async move {
-            crate::background_hook::on_stop(
+            crate::runners::background_hook::on_stop(
                 &hook_app,
                 &run,
                 &json!({"background_tasks": [{"id": "agent-1", "type": "subagent", "status": "running", "description": "review"}]}),

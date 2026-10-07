@@ -27,7 +27,7 @@ pub fn spawn_survey_watcher(app: Arc<App>) {
                     crate::runners::session_paused::observe(&app, &run).await;
                 }
                 // Codex 在 starting／working 狀態也可能停在啟動遷移框；只查畫面，不替使用者選。
-                crate::codex_model_migration::observe(&app, &run).await;
+                crate::runners::codex_model_migration::observe(&app, &run).await;
                 // claude 停在一般權限確認選單：事件那一刻漏掉、或選單換了一種工具，這裡每輪重讀一次（只看、不按鍵）。
                 if run.agent_status == "blocked" {
                     crate::blocked_reason::observe(&app, &run).await;

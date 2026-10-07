@@ -13,8 +13,8 @@ const MERGED_ROUTE_SOURCES: &[(&str, &str)] = &[
         include_str!("../src/runners/release_triage.rs"),
     ),
     (
-        "crate::upstream_update",
-        include_str!("../src/upstream_update.rs"),
+        "crate::runners::upstream_update",
+        include_str!("../src/runners/upstream_update.rs"),
     ),
     ("crate::runners::judge", include_str!("../src/runners/judge.rs")),
     (

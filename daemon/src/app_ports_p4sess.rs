@@ -103,7 +103,7 @@ impl SessionProviderPort for Arc<App> {
         crate::claude_live::start_fresh(run_id)
     }
     async fn models_list(&self, host: &str, kind: &str, identity: Option<&str>, refresh: bool) -> Result<Value> {
-        crate::models::list(self, host, kind, identity, refresh).await
+        crate::runners::models::list(self, host, kind, identity, refresh).await
     }
 }
 

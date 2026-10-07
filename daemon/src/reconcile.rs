@@ -3105,7 +3105,7 @@ mod compat_tests {
         asked: std::sync::Mutex<Vec<i64>>,
     }
 
-    impl crate::pane_identity::ProcEnv for FakeProcEnv {
+    impl crate::runners::pane_identity::ProcEnv for FakeProcEnv {
         fn env_of<'a>(
             &'a self,
             _app: &'a Arc<App>,

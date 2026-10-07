@@ -190,7 +190,7 @@ impl TurnFenceOps for SqlitePool {
 
 impl QuotaCommands for Arc<App> {
     async fn clear_limit_hit_for_bot(&self, bot: &db::Bot) {
-        quota::clear_limit_hit_for_bot(self, bot).await
+        crate::runners::quota::clear_limit_hit_for_bot(self, bot).await
     }
     async fn quota_base_for_host(&self, host: &str, kind: &str, identity: Option<&str>) -> String {
         quota::quota_base_for_host(self, host, kind, identity).await
@@ -289,7 +289,7 @@ impl HostSidePort for Arc<App> {
         crate::herdr_version::refresh(self, host).await
     }
     async fn herdr_maintenance_active(&self) -> Result<Option<Window>> {
-        crate::herdr_maintenance::active(self).await
+        crate::runners::herdr_maintenance::active(self).await
     }
     fn spawn_detect_github_host(&self, host: String) {
         crate::github::spawn_detect_host(self.clone(), host)
@@ -316,7 +316,7 @@ impl ProviderPort for Arc<App> {
         crate::runners::login_prompt::on_turn_ok(self, bot).await
     }
     fn codex_migration_on_blocked(&self, run: &db::Run) {
-        crate::codex_model_migration::on_blocked(self, run)
+        crate::runners::codex_model_migration::on_blocked(self, run)
     }
     fn prompt_suggestion_on_idle(&self, run: &db::Run) {
         crate::runners::prompt_suggestion::on_idle(self, run)
@@ -355,10 +355,10 @@ impl ReconcileCommands for Arc<App> {
 
 impl IngressCommands for Arc<App> {
     async fn watch_pane_on_session(&self, host: &str, session: &str, pane_id: &str) {
-        crate::events::watch_pane_on_session(self, host, session, pane_id).await
+        crate::runners::events::watch_pane_on_session(self, host, session, pane_id).await
     }
     async fn unwatch_pane_on_session(&self, host: &str, session: &str, pane_id: &str) {
-        crate::events::unwatch_pane_on_session(self, host, session, pane_id).await
+        crate::events::unwatch_pane_on_session(&**self, host, session, pane_id).await
     }
     #[track_caller]
     fn retire_child<'a>(
@@ -367,7 +367,7 @@ impl IngressCommands for Arc<App> {
         why: &'static str,
         mode: crate::child_retire::Mode,
     ) -> impl Future<Output = Result<crate::child_retire::Outcome>> + 'a {
-        crate::child_retire::retire(self, bot_id, why, mode)
+        crate::runners::child_retire::retire(self, bot_id, why, mode)
     }
     async fn retirement_block(&self, bot_id: &str) -> Result<Option<String>> {
         crate::child_reconcile_safety::retirement_block(&self.db, bot_id).await

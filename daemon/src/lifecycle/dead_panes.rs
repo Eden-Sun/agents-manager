@@ -61,7 +61,7 @@ pub(crate) async fn pane_target_stale(client: &HerdrClient, run: &db::Run) -> bo
 /// 掃所有 running 的 run，pane 明確不在的收成 exited；回收掉的 run id。
 pub(crate) async fn sweep(app: &Arc<App>) -> Vec<String> {
     // 讀不到維護狀態就不動：寧可晚收，不在 herdr 重啟中把整批活的 run 收掉。
-    if !matches!(crate::herdr_maintenance::active(app).await, Ok(None)) {
+    if !matches!(crate::runners::herdr_maintenance::active(app).await, Ok(None)) {
         return Vec::new();
     }
     let Ok(runs) = db::all_active_runs(&app.db).await else { return Vec::new() };

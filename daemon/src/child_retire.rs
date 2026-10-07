@@ -14,11 +14,11 @@
 //!   「換版弄丟的」，判斷見 [`cause`]。
 
 use crate::events::ports::{BotOpsRepo, HandoffConnRepo, HandoffRepo, IntentConnRepo, SupervisorRepo};
-use crate::{db, state::App};
+use crate::db;
 use serde_json::json;
 use std::future::Future;
 use std::panic::Location;
-use std::sync::Arc;
+
 
 /// 誰要退役這顆 child。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -49,23 +49,35 @@ pub(crate) enum Outcome {
 
 /// 退役 `bot_id` 這顆 child。DB 寫不進去回 `Err`（呼叫端各自決定重試或回滾）；守衛擋下、讀不到擁有關係不是錯誤。
 #[track_caller]
-pub(crate) fn retire<'a>(app: &'a Arc<App>, bot_id: &'a str, why: &'static str, mode: Mode) -> impl Future<Output = anyhow::Result<Outcome>> + 'a {
+pub(crate) fn retire<'a, C>(
+    app: &'a C,
+    bot_id: &'a str,
+    why: &'static str,
+    mode: Mode,
+) -> impl Future<Output = anyhow::Result<Outcome>> + 'a
+where
+    C: crate::capabilities::Db
+        + crate::capabilities::Emit
+        + crate::capabilities::BootId
+        + crate::capabilities::HerdrRoutes
+        + 'a,
+{
     let at = Location::caller();
     async move {
-        let Some(bot) = db::bot(&app.db, bot_id).await? else { return Ok(Outcome::AlreadyGone) };
+        let Some(bot) = db::bot(app.db(), bot_id).await? else { return Ok(Outcome::AlreadyGone) };
         if bot.deleted_at.is_some() {
             return Ok(Outcome::AlreadyGone);
         }
         // #708：移交出去的專案，child 在不在歸接手的 daemon 判斷；這裡不退役。
         if mode == Mode::Implicit {
-            if let Some(to) = app.db.bot_handed_off_to(&bot.id).await? {
+            if let Some(to) = app.db().bot_handed_off_to(&bot.id).await? {
                 tracing::info!(bot = %bot.name, bot_id = %bot.id, why, handed_off_to = %to, "child not retired: the project was handed off");
                 return Ok(Outcome::HandedOff);
             }
         }
         // 2026-10-04 使用者：「let AGM 不清除這類 bot」。分享用 bot 不會是 child（建 bot 時才選、managed_by=user），
         // 這裡是唯一入口上的保險：哪天有一條路誤把它當 child，也不會被隱式軟刪。讀不到＝不退役。
-        if mode == Mode::Implicit && !matches!(app.db.is_share_bot(&bot.id).await, Ok(false)) {
+        if mode == Mode::Implicit && !matches!(app.db().is_share_bot(&bot.id).await, Ok(false)) {
             tracing::info!(bot = %bot.name, bot_id = %bot.id, why, "bot not retired: it is a share bot (or that could not be read)");
             return Ok(Outcome::ShareBot);
         }
@@ -75,13 +87,13 @@ pub(crate) fn retire<'a>(app: &'a Arc<App>, bot_id: &'a str, why: &'static str, 
                 other => return Ok(other),
             }
         }
-        let host = db::bot_host(&app.db, &bot.id).await?;
+        let host = db::bot_host(app.db(), &bot.id).await?;
         let record = record_payload(app, &bot, why, mode, &at.to_string()).await?;
         #[cfg(test)]
         crate::race_point::hit("child_retire_before_transaction", bot_id).await;
         // `deleted_at` 與紀錄同生共死（#554）：同一筆交易先寫紀錄再退役，寫不進紀錄就不退役，
         // 也不讓資料庫 trigger 或讀者先看見 child 消失、稍後才有原因。
-        let mut tx = db::begin_write(&app.db).await?;
+        let mut tx = db::begin_write(app.db()).await?;
         if mode == Mode::Implicit {
             match tx.bot_handed_off_to_on(&bot.id).await {
                 Ok(Some(to)) => {

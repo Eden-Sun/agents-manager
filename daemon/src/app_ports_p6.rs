@@ -75,10 +75,10 @@ impl TurnOps for Arc<App> {
 
 impl QuotaOps for Arc<App> {
     async fn try_limit_hit_for_bot(&self, bot: &db::Bot) -> anyhow::Result<Option<LimitHit>> {
-        quota::try_limit_hit_for_bot(self, bot).await
+        crate::runners::quota::try_limit_hit_for_bot(self, bot).await
     }
     async fn next_reset_for_bot(&self, bot: &db::Bot) -> Option<String> {
-        quota::next_reset_for_bot(self, bot).await
+        crate::runners::quota::next_reset_for_bot(self, bot).await
     }
     async fn billing_identity(&self, bot: &db::Bot) -> anyhow::Result<Option<String>> {
         quota::billing_identity(self, bot).await
@@ -93,7 +93,7 @@ impl QuotaOps for Arc<App> {
         quota::running_model(self, bot).await
     }
     async fn limit_cleared_since(&self, bot: &db::Bot, since: chrono::DateTime<chrono::Utc>) -> bool {
-        quota::limit_cleared_since(self, bot, since).await
+        crate::runners::quota::limit_cleared_since(self, bot, since).await
     }
     async fn quota_snapshot_json(&self) -> Value {
         quota::snapshot(self).await

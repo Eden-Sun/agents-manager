@@ -544,7 +544,7 @@ mod tests {
         crate::tools::install_host_tools(&old, LOCAL_HOST, shell_cc0()).await;
         let until = later(2);
         assert!(crate::quota::seed_limit_hit(&old, LOCAL_HOST, "claude", &until, "You've hit your session limit", Some("five_hour".into())).await);
-        let hit_at = crate::quota::limit_hit_for_bot(&old, &q.bot).await.unwrap().at;
+        let hit_at = crate::runners::quota::limit_hit_for_bot(&old, &q.bot).await.unwrap().at;
         flush(&old, &q.bot.id).await;
         let (blocked, held) = state(&old, &q.turn).await;
         let held = held.expect("擋下的當下寫進那一列");
@@ -553,7 +553,7 @@ mod tests {
 
         forget_held(&q.bot.id);
         let app = tt::restart_app(&q.env).await;
-        assert!(crate::quota::limit_hit_for_bot(&app, &q.bot).await.is_none(), "新行程：記憶體是空的");
+        assert!(crate::runners::quota::limit_hit_for_bot(&app, &q.bot).await.is_none(), "新行程：記憶體是空的");
         flush(&app, &q.bot.id).await;
         assert!(state(&app, &q.turn).await.0, "身分偵測之前：看那一列的憑據，照樣擋");
         assert!(recently_held(&q.bot.id), "保險絲看得到正在擋");
@@ -566,7 +566,7 @@ mod tests {
             assert_eq!((restored.until.as_deref(), restored.at.as_str(), restored.bucket.as_deref()), (Some(until.as_str()), hit_at.as_str(), Some("five_hour")), "原樣種回");
             assert!(quotas.get("claude:cc0").is_none(), "不能生出一格沒人讀的 claude:cc0");
         }
-        assert!(crate::quota::limit_hit_for_bot(&app, &q.bot).await.is_some(), "派送前也看得到");
+        assert!(crate::runners::quota::limit_hit_for_bot(&app, &q.bot).await.is_some(), "派送前也看得到");
         flush(&app, &q.bot.id).await;
         assert!(state(&app, &q.turn).await.0, "回填之後照樣擋");
 
@@ -627,7 +627,7 @@ mod tests {
         flush(&app, &q.bot.id).await;
         assert!(state(&app, &q.turn).await.0);
         let bot = db::bot(&app.db, &q.bot.id).await.unwrap().unwrap();
-        crate::quota::clear_limit_hit_for_bot(&app, &bot).await;
+        crate::runners::quota::clear_limit_hit_for_bot(&app, &bot).await;
         flush(&app, &q.bot.id).await;
         assert!(!state(&app, &q.turn).await.0, "成功回合清過那把 key：放行");
         forget_queue_retry_timer(&q.bot.id);
@@ -658,17 +658,17 @@ mod tests {
         put_hold(&app, &a.turn, &old_hold(Some("cc-a"), None, None)).await;
         put_hold(&app, &switched_turn, &old_hold(Some("cc-b"), Some(later(2)), None)).await;
         put_hold(&app, &cleared_turn, &old_hold(Some("cc-d"), Some(later(2)), None)).await;
-        crate::quota::clear_limit_hit_for_bot(&app, &cleared).await;
+        crate::runners::quota::clear_limit_hit_for_bot(&app, &cleared).await;
 
         backfill_once(&app, LOCAL_HOST).await;
-        let hit = crate::quota::limit_hit_for_bot(&app, &a.bot).await.expect("種回來了");
+        let hit = crate::runners::quota::limit_hit_for_bot(&app, &a.bot).await.expect("種回來了");
         assert_eq!(hit.until, None, "沒寫時間的照樣黏著");
-        assert!(crate::quota::limit_hit_for_bot(&app, &switched).await.is_none(), "身分換掉了：不種");
-        assert!(crate::quota::limit_hit_for_bot(&app, &cleared).await.is_none(), "之後有成功回合清過：不種");
+        assert!(crate::runners::quota::limit_hit_for_bot(&app, &switched).await.is_none(), "身分換掉了：不種");
+        assert!(crate::runners::quota::limit_hit_for_bot(&app, &cleared).await.is_none(), "之後有成功回合清過：不種");
 
-        crate::quota::clear_limit_hit_for_bot(&app, &a.bot).await;
+        crate::runners::quota::clear_limit_hit_for_bot(&app, &a.bot).await;
         backfill_once(&app, LOCAL_HOST).await;
-        assert!(crate::quota::limit_hit_for_bot(&app, &a.bot).await.is_none(), "同一輪開機只回填一次，不把清掉的種回去");
+        assert!(crate::runners::quota::limit_hit_for_bot(&app, &a.bot).await.is_none(), "同一輪開機只回填一次，不把清掉的種回去");
         flush(&app, &a.bot.id).await;
         assert!(!state(&app, &a.turn).await.0, "回填跑完之後記憶體說了算");
         forget_queue_retry_timer(&a.bot.id);
@@ -735,8 +735,8 @@ mod tests {
         // 回填：same 種回，moved 另一則的憑據不種。
         backfill_once(&app, same).await;
         backfill_once(&app, moved).await;
-        assert!(crate::quota::limit_hit_for_bot(&app, &same_bot).await.is_some(), "重連：種回來");
-        assert!(crate::quota::limit_hit_for_bot(&app, &moved_bot).await.is_none(), "改指到另一台：不種回新機器");
+        assert!(crate::runners::quota::limit_hit_for_bot(&app, &same_bot).await.is_some(), "重連：種回來");
+        assert!(crate::runners::quota::limit_hit_for_bot(&app, &moved_bot).await.is_none(), "改指到另一台：不種回新機器");
         for b in [&same_bot, &flushed_bot, &moved_bot] {
             forget_queue_retry_timer(&b.id);
             forget_held(&b.id);
@@ -839,13 +839,13 @@ mod tests {
         backfill_once(&app, LOCAL_HOST).await;
         rename(&app, "conversations_unreadable", "conversations").await;
         assert!(!backfilled(&app, LOCAL_HOST), "沒讀到：不算回填過");
-        assert!(crate::quota::limit_hit_for_bot(&app, &q.bot).await.is_none());
+        assert!(crate::runners::quota::limit_hit_for_bot(&app, &q.bot).await.is_none());
         flush(&app, &q.bot.id).await;
         assert!(state(&app, &q.turn).await.0, "照那一列自己的憑據擋");
 
         backfill_once(&app, LOCAL_HOST).await;
         assert!(backfilled(&app, LOCAL_HOST), "讀得到了：再跑一次就跑完");
-        assert!(crate::quota::limit_hit_for_bot(&app, &q.bot).await.is_some(), "種回記憶體");
+        assert!(crate::runners::quota::limit_hit_for_bot(&app, &q.bot).await.is_some(), "種回記憶體");
         forget_queue_retry_timer(&q.bot.id);
         forget_held(&q.bot.id);
     }

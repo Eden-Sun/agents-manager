@@ -71,7 +71,7 @@ impl crate::share::cage::CageEnv for Arc<App> {
     fn claude_models(&self, identity: Option<&str>) -> impl Future<Output = Result<Value, String>> + Send {
         let identity = identity.map(str::to_string);
         async move {
-            crate::models::list(self, crate::config::LOCAL_HOST, "claude", identity.as_deref(), false).await.map_err(|e| e.to_string())
+            crate::runners::models::list(self, crate::config::LOCAL_HOST, "claude", identity.as_deref(), false).await.map_err(|e| e.to_string())
         }
     }
 }

@@ -746,7 +746,7 @@ mod tests {
         crate::hookrecv::process(&app, &stop_failure(&bot.id, "p-b", Some(QUOTA), t0 + chrono::Duration::seconds(40))).await.unwrap();
 
         assert_eq!(status_of(&app, &b).await, "failed", "A 的 Esc 不是 B 這則 StopFailure 的來源");
-        assert!(crate::quota::limit_hit_for_bot(&app, &bot).await.is_some(), "B 撞的額度要記下來");
+        assert!(crate::runners::quota::limit_hit_for_bot(&app, &bot).await.is_some(), "B 撞的額度要記下來");
     }
 
     /// 遠端 hook 走 spool，回聲可能在 B 已經開始之後才到（30 秒以上）。認它靠的是它**在 Esc 當下被擷取**，
@@ -776,7 +776,7 @@ mod tests {
 
         crate::hookrecv::process(&app, &stop_failure(&bot.id, "p-b", Some(QUOTA), t0 + chrono::Duration::seconds(40))).await.unwrap();
         assert_eq!(status_of(&app, &b).await, "failed");
-        assert!(crate::quota::limit_hit_for_bot(&app, &bot).await.is_some());
+        assert!(crate::runners::quota::limit_hit_for_bot(&app, &bot).await.is_some());
     }
 
     /// 本機 claude 讀得到 transcript：記下被中斷那一則 prompt 的 id（hook 的 `prompt_id` 就是它），
@@ -844,7 +844,7 @@ mod tests {
         crate::hookrecv::process(&app, &stop_failure(&bot.id, "p-b", Some(QUOTA), t0 + chrono::Duration::milliseconds(1500))).await.unwrap();
 
         assert_eq!(status_of(&app, &b).await, "failed");
-        assert!(crate::quota::limit_hit_for_bot(&app, &bot).await.is_some());
+        assert!(crate::runners::quota::limit_hit_for_bot(&app, &bot).await.is_some());
     }
 
     #[test]

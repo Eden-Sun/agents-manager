@@ -305,8 +305,8 @@ mod tests {
             event: "pane_agent_status_changed".into(),
             data: serde_json::json!({"pane_id": pane, "agent_status": status}),
         };
-        crate::events::handle_status(&app, crate::config::LOCAL_HOST, "test", &event("working")).await;
-        crate::events::handle_status(&app, crate::config::LOCAL_HOST, "test", &event("blocked")).await;
+        crate::runners::events::handle_status(&app, crate::config::LOCAL_HOST, "test", &event("working")).await;
+        crate::runners::events::handle_status(&app, crate::config::LOCAL_HOST, "test", &event("blocked")).await;
         assert_eq!(run_of(&app, &run_id).await.agent_status, "blocked", "herdr's question must remain blocked");
 
         observe_screen(&app, &run_of(&app, &run_id).await, DANGEROUS_RM_AUTO_DENIED).await;
