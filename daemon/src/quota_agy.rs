@@ -162,8 +162,8 @@ pub fn parse_usage(stdout: &str) -> Option<Vec<(&'static str, Quota)>> {
 /// 遠端探測的 pane：macOS 的 agy 憑證在 login Keychain，純 ssh 讀不到（`security` 回 `User interaction is not allowed`，
 /// `agy -p /usage` 印 `Authentication required` 然後卡住），所以跟 claude 的額度探測一樣，在那台 herdr 的 pane 裡跑
 /// （herdr server 由 launchd 起，pane 在 GUI session 底下、讀得到 Keychain）。標記拆成 `printf` 參數，shell 回顯的指令才不會長得像標記。
-const PANE_BEGIN: &str = "AM_AGY_BEGIN";
-const PANE_DONE: &str = "AM_AGY_DONE=";
+pub(crate) const PANE_BEGIN: &str = "AM_AGY_BEGIN";
+pub(crate) const PANE_DONE: &str = "AM_AGY_DONE=";
 /// pane 探測 workspace 的 label 前綴（claude 的是 `am-quota-claude`）：各自清各自的殘留，不互相把對方正在跑的收掉。
 pub(crate) const PROBE_LABEL_PREFIX: &str = "am-quota-agy";
 

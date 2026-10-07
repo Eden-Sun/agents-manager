@@ -277,6 +277,35 @@ async fn remote(e: &tt::Env, detect_out: &'static str) -> String {
     host
 }
 
+/// [`remote`]，另外那台的 herdr 是假的（額度探測在 pane 裡跑，不走 ssh：macOS 的 Keychain 純 ssh 讀不到）；遠端 home 先記好，不讀 ssh。
+async fn remote_with_herdr(e: &tt::Env, detect_out: &'static str) -> (String, tt::MockHerdr, PathBuf) {
+    let host = format!("agy-inst-{}", crate::db::ulid().to_ascii_lowercase());
+    let dir = tt::track(std::env::temp_dir().join(format!("am-agy-inst-{}", crate::db::ulid())));
+    std::fs::create_dir_all(&dir).unwrap();
+    let sock = dir.join("herdr.sock");
+    let herdr = tt::MockHerdr::start(sock.clone());
+    let conn = e
+        .app
+        .hosts
+        .insert_remote_with_client_for_test(
+            crate::config::HostCfg {
+                shared_session: false,
+                name: host.clone(),
+                ssh: "unused".into(),
+                ssh_port: 22,
+                ssh_opts: vec![],
+                herdr_session: "agents-manager".into(),
+                remote_path: String::new(),
+            },
+            crate::herdr::HerdrClient::new(sock),
+        )
+        .await;
+    conn.connected.store(true, Ordering::SeqCst);
+    *conn.remote_home.lock().await = Some("/Users/m4p".into());
+    crate::hosts::set_ssh_fake(&host, move |_| Ok(detect_out.to_string()));
+    (host, herdr, dir)
+}
+
 async fn agy_tool(app: &Arc<App>, host: &str) -> Option<crate::tools::ToolInfo> {
     app.tools.lock().await.get(host).and_then(|h| h.tools.get("agy").cloned())
 }
@@ -421,7 +450,7 @@ async fn unknown_and_disconnected_hosts_are_refused_before_any_command() {
 #[tokio::test]
 async fn a_remote_watcher_flips_to_logged_in_when_the_token_shows_up_and_probes_the_quota() {
     let e = tt::env().await;
-    let host = remote(&e, DETECT_WITH_AGY).await;
+    let (host, herdr, _dir) = remote_with_herdr(&e, DETECT_WITH_AGY).await;
     seed_agy(&e.app, &host, "1.3.0").await;
     e.app.tools.lock().await.get_mut(&host).unwrap().tools.get_mut("agy").unwrap().logged_in = Some(false);
     let present = Arc::new(std::sync::atomic::AtomicBool::new(false));
@@ -431,11 +460,11 @@ async fn a_remote_watcher_flips_to_logged_in_when_the_token_shows_up_and_probes_
         {"id": "gemini-weekly", "window": "weekly", "remaining_fraction": 0.9, "reset_time": "2026-10-11T00:00:00Z"},
         {"id": "gemini-5h", "window": "five_hour", "remaining_fraction": 0.5, "reset_time": "2026-10-06T20:00:00Z"}]}]}}})
     .to_string();
+    // 額度探測在 pane 裡跑（畫面是 agy 的 JSON 夾在標記中間）；ssh 只剩「憑證在不在」那個小問題。
+    herdr.set_screen("*", &format!("{}\n{usage}\n{}0\n", crate::quota_agy::PANE_BEGIN, crate::quota_agy::PANE_DONE));
     crate::hosts::set_ssh_fake(&host, move |script| {
         s2.lock().unwrap().push(script.to_string());
-        if script.contains("-p /usage") {
-            Ok(usage.clone())
-        } else if script.contains("antigravity-oauth-token") {
+        if script.contains("antigravity-oauth-token") {
             Ok(if p2.load(Ordering::SeqCst) { "AM_YES\n" } else { "AM_NO\n" }.into())
         } else {
             Ok(DETECT_WITH_AGY.into())
@@ -444,12 +473,14 @@ async fn a_remote_watcher_flips_to_logged_in_when_the_token_shows_up_and_probes_
 
     crate::quota_agy::login_watch_once(&e.app, &host).await;
     assert_eq!(agy_tool(&e.app, &host).await.unwrap().logged_in, Some(false), "憑證檔還沒出現：不動");
-    assert!(!scripts.lock().unwrap().iter().any(|s| s.contains("-p /usage")), "未登入不探測額度");
+    assert!(herdr.calls_to("workspace.create").is_empty(), "未登入不探測額度");
 
     present.store(true, Ordering::SeqCst);
     crate::quota_agy::login_watch_once(&e.app, &host).await;
     assert_eq!(agy_tool(&e.app, &host).await.unwrap().logged_in, Some(true));
-    let probe = scripts.lock().unwrap().iter().find(|s| s.contains("-p /usage")).cloned().expect("登入後立刻探測一次額度");
-    assert!(probe.contains("AGY_CLI_DISABLE_AUTO_UPDATE=true") && probe.contains("/Users/m4p/.local/bin/agy"), "{probe}");
+    assert!(!scripts.lock().unwrap().iter().any(|s| s.contains("-p /usage")), "額度探測不走 ssh（Keychain 純 ssh 讀不到）");
+    assert_eq!(herdr.calls_to("workspace.create").len(), 1, "登入後立刻在那台的 pane 探測一次額度");
+    let probe: String = herdr.calls_to("pane.send_text").iter().filter_map(|c| c["text"].as_str().map(String::from)).collect();
+    assert!(probe.contains("AGY_CLI_DISABLE_AUTO_UPDATE=true") && probe.contains("/Users/m4p/.local/bin/agy") && probe.contains("-p /usage"), "{probe}");
     assert!(e.app.quotas.lock().await.contains_key(&format!("{host}/agy")), "遠端的讀數記在 <host>/agy");
 }
