@@ -98,6 +98,7 @@ pub mod trust;
 pub mod trusted_open;
 pub mod update_watch;
 pub mod upstream_update;
+pub mod ws_event;
 
 #[cfg(any(test, feature = "test-hooks"))]
 pub mod race_point;

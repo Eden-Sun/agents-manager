@@ -29,6 +29,7 @@ use axum::response::sse::{Event, KeepAlive, Sse};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
 use axum::{Json, Router};
+use am_base::ws_event::WsEvent;
 use serde::Deserialize;
 use serde_json::{json, Value};
 use tokio::sync::{broadcast, OwnedMutexGuard, Semaphore};
@@ -95,7 +96,7 @@ pub(crate) trait PortalEnv: crate::share::svg_check::SvgCheckEnv {
     /// 狀態燈（working／idle／starting／offline／blocked／unknown）。
     fn share_status(&self, bot_id: &str) -> impl std::future::Future<Output = &'static str> + Send;
     /// 訂閱 daemon 的事件匯流排。
-    fn subscribe_events(&self) -> broadcast::Receiver<crate::state::WsEvent>;
+    fn subscribe_events(&self) -> broadcast::Receiver<WsEvent>;
     /// 把分享使用者的訊息送給 bot（走一般的 prompt／排隊路徑，並在 bot 鎖底下再驗一次 token）。
     fn send_share_message(
         app: &Arc<Self>,
@@ -762,7 +763,7 @@ pub(crate) struct Stream<H: PortalEnv> {
     bot_id: String,
     token_lookups: Arc<Semaphore>,
     limits: Arc<Limits>,
-    rx: broadcast::Receiver<crate::state::WsEvent>,
+    rx: broadcast::Receiver<WsEvent>,
     kicks: broadcast::Receiver<String>,
     _slot: tokio::sync::OwnedSemaphorePermit,
     _share_slot: ShareStreamPermit,
@@ -829,7 +830,7 @@ impl<H: PortalEnv> Stream<H> {
         }
     }
 
-    async fn map(&mut self, ev: &crate::state::WsEvent) -> Option<Event> {
+    async fn map(&mut self, ev: &WsEvent) -> Option<Event> {
         if ev.data.get("bot_id").and_then(Value::as_str) != Some(self.bot_id.as_str()) {
             return None;
         }
@@ -900,7 +901,7 @@ pub(crate) async fn next_for_test<H: PortalEnv>(stream: &mut Stream<H>) -> Optio
 }
 
 #[cfg(test)]
-pub(crate) async fn map_for_test<H: PortalEnv>(stream: &mut Stream<H>, ev: &crate::state::WsEvent) -> Option<Event> {
+pub(crate) async fn map_for_test<H: PortalEnv>(stream: &mut Stream<H>, ev: &WsEvent) -> Option<Event> {
     stream.map(ev).await
 }
 
