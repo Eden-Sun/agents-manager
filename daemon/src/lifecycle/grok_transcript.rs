@@ -32,6 +32,8 @@ pub(crate) struct Exchange {
     pub reply: Option<String>,
     /// 這一問已經結束：有了最終回覆，或後面已經接了下一問（被打斷）。
     pub closed: bool,
+    /// 這一問寫進對話檔的時間（RFC 3339，UTC；claude 的 `timestamp`）。其他來源沒有＝None。
+    pub at: Option<String>,
 }
 
 impl Exchange {
@@ -88,7 +90,7 @@ pub(crate) fn parse_chat_history(text: &str) -> Vec<Exchange> {
                 if let Some(prev) = out.last_mut() {
                     prev.closed = true;
                 }
-                out.push(Exchange { prompt, prompt_index: v.get("prompt_index").and_then(Value::as_u64), reply: None, closed: false });
+                out.push(Exchange { prompt, prompt_index: v.get("prompt_index").and_then(Value::as_u64), reply: None, closed: false, at: None });
             }
             Some("assistant") => {
                 if gap {
@@ -271,7 +273,7 @@ pub(crate) async fn sync_locked(app: &impl GrokTranscriptContext, run_id: &str) 
         app.agy_session_record_status(&bot, &run, &text).await;
         let turns = crate::agy_support::parse_turns(&text)
             .into_iter()
-            .map(|t| Exchange { prompt: t.prompt, prompt_index: Some(t.step_index), reply: t.reply, closed: t.closed })
+            .map(|t| Exchange { prompt: t.prompt, prompt_index: Some(t.step_index), reply: t.reply, closed: t.closed, at: None })
             .collect();
         (sid, turns)
     } else if bot.kind == "claude" {
@@ -293,10 +295,19 @@ pub(crate) async fn sync_locked(app: &impl GrokTranscriptContext, run_id: &str) 
             .into_iter()
             .collect();
     let last_closed = exchanges.iter().rposition(|e| e.closed);
+    // claude 的對話檔是整段 session：第一次接上時（重啟換版、重新認領）裡面早就有已經處理過的歷史，不能當成新回合重發 child_done
+    // （issue #879）。第一次只建基準，之後只記基準之後才開始的問。
+    let cutoff = if bot.kind == "claude" { baseline_at(app, &run.id).await? } else { None };
+    let first = bot.kind == "claude" && cutoff.is_none();
     let mut imported = 0;
     for (i, ex) in exchanges.iter().enumerate() {
         if !ex.closed {
             continue;
+        }
+        if let (Some(c), Some(at)) = (cutoff.as_deref(), ex.at.as_deref()) {
+            if at <= c {
+                continue;
+            }
         }
         let mut key = ex.key();
         if done.contains(&key) {
@@ -309,12 +320,25 @@ pub(crate) async fn sync_locked(app: &impl GrokTranscriptContext, run_id: &str) 
                 continue;
             }
         }
-        if import(app, &bot, &run, &host, &sid, ex, &key, Some(i) == last_closed).await? {
+        // 基準那一輪還在問的那一句（pending）才是現在的工作：檔裡最新的歷史問答不能收下 working 時開的那筆在飛回合。
+        let newest = Some(i) == last_closed && !(first && pending.is_some());
+        if import(app, &bot, &run, &host, &sid, ex, &key, newest, first).await? {
             imported += 1;
             done.insert(key);
         }
     }
+    if first {
+        // 基準＝這一輪讀到、已經結束的最後一問的時間；空字串＝檔裡還沒有任何一問（之後的問都算新的）。
+        let at = exchanges.iter().filter(|e| e.closed).filter_map(|e| e.at.as_deref()).max().unwrap_or("");
+        sqlx::query("UPDATE runs SET transcript_baseline_at = ? WHERE id = ? AND transcript_baseline_at IS NULL").bind(at).bind(&run.id).execute(app.db()).await?;
+        tracing::info!(run = %run.id, session = %sid, baseline = %at, "claude transcript: baseline taken; existing exchanges are not turns");
+    }
     Ok(Synced::Read { imported, pending })
+}
+
+/// `runs.transcript_baseline_at`：NULL＝這個 run 還沒讀過對話檔（下一次讀就是第一次）。
+async fn baseline_at(app: &impl crate::capabilities::Db, run_id: &str) -> anyhow::Result<Option<String>> {
+    Ok(sqlx::query_scalar::<_, Option<String>>("SELECT transcript_baseline_at FROM runs WHERE id = ?").bind(run_id).fetch_optional(app.db()).await?.flatten())
 }
 
 /// 這個 run 裡還沒綁 native id 的回合，依建立順序，帶著它的使用者訊息。
@@ -352,7 +376,7 @@ async fn recorded_prompt_matches(app: &impl crate::capabilities::Db, sid: &str, 
     Ok(stored.as_deref().is_some_and(|s| s.trim() == prompt.trim()))
 }
 
-async fn import(app: &impl GrokTranscriptContext, bot: &db::Bot, run: &db::Run, host: &str, sid: &str, ex: &Exchange, key: &str, newest: bool) -> anyhow::Result<bool> {
+async fn import(app: &impl GrokTranscriptContext, bot: &db::Bot, run: &db::Run, host: &str, sid: &str, ex: &Exchange, key: &str, newest: bool, baseline: bool) -> anyhow::Result<bool> {
     // 壓縮重寫會丟掉 prompt_index，同一句換成內容鑰匙。已經記在這個 run 的不再開一筆。
     let prior_users: Vec<(String, String)> = sqlx::query_as(
         "SELECT t.id, m.content FROM turns t JOIN messages m ON m.turn_id = t.id
@@ -405,6 +429,10 @@ async fn import(app: &impl GrokTranscriptContext, bot: &db::Bot, run: &db::Run, 
                 newest && t.status == "in_flight" && t.origin == "external" && users.is_empty() && t.prompt_text.is_none()
             })
         });
+    // 第一次接上對話檔：對不上任何既有回合的歷史問答只算基準，不開新回合、不通知（issue #879）。
+    if baseline && matched.is_none() {
+        return Ok(false);
+    }
     let conv = db::conversation_id(app.db(), &bot.id).await?;
     // 已經收好的回合（`completed_fallback`、使用者那句已是原文）第一句是讀它的回覆、之後才寫：deferred 的話讀完之後
     // 別的 writer 一 commit 就 517，這一問這一輪記不進去（#831）。

@@ -11,6 +11,10 @@ fn user(uuid: &str, text: &str) -> String {
     json!({"type": "user", "uuid": uuid, "isSidechain": false, "message": {"role": "user", "content": text}}).to_string()
 }
 
+fn user_at(uuid: &str, text: &str, at: &str) -> String {
+    json!({"type": "user", "uuid": uuid, "timestamp": at, "isSidechain": false, "message": {"role": "user", "content": text}}).to_string()
+}
+
 fn assistant(text: &str, stop: Option<&str>, tool: bool) -> String {
     let mut content = vec![json!({"type": "text", "text": text})];
     if tool {
@@ -174,6 +178,19 @@ fn write_log(config_dir: &std::path::Path, sid: &str, text: &str) -> PathBuf {
     path
 }
 
+/// 這個 run 已經建過基準（空字串＝當時檔裡沒有任何一問）：測試要的是「之後的內容照記」，不是第一次接上的行為。
+async fn baselined(app: &Arc<App>, run_id: &str) {
+    sqlx::query("UPDATE runs SET transcript_baseline_at = '' WHERE id = ?").bind(run_id).execute(&app.db).await.unwrap();
+}
+
+async fn baseline(app: &Arc<App>, run_id: &str) -> Option<String> {
+    sqlx::query_scalar::<_, Option<String>>("SELECT transcript_baseline_at FROM runs WHERE id = ?").bind(run_id).fetch_one(&app.db).await.unwrap()
+}
+
+async fn turn_count(app: &Arc<App>, conv: &str) -> i64 {
+    sqlx::query_scalar("SELECT COUNT(*) FROM turns WHERE conversation_id = ?").bind(conv).fetch_one(&app.db).await.unwrap()
+}
+
 async fn messages(app: &Arc<App>, conv: &str) -> Vec<(String, String, String)> {
     sqlx::query_as("SELECT role, content, source FROM messages WHERE conversation_id = ? ORDER BY id").bind(conv).fetch_all(&app.db).await.unwrap()
 }
@@ -196,6 +213,7 @@ async fn a_hookless_claude_child_records_its_exchanges_from_its_transcript() {
     let c = claude_child(Some(&cfg), None).await;
     let app = c.env.app.clone();
     let path = write_log(&cfg, "sess-1", &two_exchanges());
+    baselined(&app, &c.run_id).await;
     c.env.herdr.set_agent("hub-midplat", &c.pane, true);
     c.env.herdr.set_screen(&c.pane, "⏺ 我先讀那份 brief。\n");
 
@@ -230,6 +248,7 @@ async fn the_session_is_found_by_pane_id_when_herdr_dropped_the_agent_name() {
     let c = claude_child(Some(&cfg), None).await;
     let app = c.env.app.clone();
     write_log(&cfg, "sess-9", &two_exchanges());
+    baselined(&app, &c.run_id).await;
     c.env.herdr.set_unnamed_agent(&c.pane, Some("sess-9"));
 
     assert_eq!(sync_locked(&app, &c.run_id).await.unwrap(), Synced::Read { imported: 2, pending: None });
@@ -318,6 +337,7 @@ async fn a_remote_claude_child_reads_its_transcript_over_ssh() {
     });
 
     let app = c.env.app.clone();
+    baselined(&app, &c.run_id).await;
     assert_eq!(sync_locked(&app, &c.run_id).await.unwrap(), Synced::Read { imported: 2, pending: None });
     let scripts = seen.lock().unwrap().clone();
     assert!(scripts.iter().any(|s| s.contains(&format!("projects/*/{SID}.jsonl")) && s.contains("/Users/m4p/.claude")), "{scripts:?}");
@@ -327,4 +347,119 @@ async fn a_remote_claude_child_reads_its_transcript_over_ssh() {
     let msgs = messages(&app, &c.conv).await;
     assert_eq!(msgs.len(), 4, "{msgs:?}");
     assert!(msgs.iter().all(|(_, _, source)| source == "transcript"));
+}
+
+fn history() -> Vec<String> {
+    vec![
+        user_at("u1", "早就處理過的一問", "2026-10-07T10:00:00.000Z"),
+        assistant("早就處理過的回覆。", Some("end_turn"), false),
+        user_at("u2", "另一個早就處理過的一問", "2026-10-07T11:00:00.000Z"),
+        assistant("另一個早就處理過的回覆。", Some("end_turn"), false),
+    ]
+}
+
+/// #879：daemon 換版後第一次接上對話檔，裡面整段歷史（含已經回報過的）不能被當成新回合、不能再發 child_done。
+#[tokio::test]
+async fn the_first_read_only_takes_a_baseline_and_makes_no_turns() {
+    let cfg = tt::track(std::env::temp_dir().join(format!("am-claude-cfg-{}", db::ulid())));
+    let c = claude_child(Some(&cfg), None).await;
+    let app = c.env.app.clone();
+    write_log(&cfg, "sess-1", &log(&history()));
+    c.env.herdr.set_agent("hub-midplat", &c.pane, true);
+    assert_eq!(baseline(&app, &c.run_id).await, None);
+
+    assert_eq!(sync_locked(&app, &c.run_id).await.unwrap(), Synced::Read { imported: 0, pending: None });
+    assert_eq!(turn_count(&app, &c.conv).await, 0, "歷史不生回合");
+    assert!(messages(&app, &c.conv).await.is_empty());
+    assert_eq!(baseline(&app, &c.run_id).await.as_deref(), Some("2026-10-07T11:00:00.000Z"));
+
+    // 再讀（輪詢、再一次重啟）：基準之前的還是不記。
+    for _ in 0..2 {
+        assert_eq!(sync_locked(&app, &c.run_id).await.unwrap(), Synced::Read { imported: 0, pending: None });
+    }
+    assert_eq!(turn_count(&app, &c.conv).await, 0);
+}
+
+/// 基準之後才開始的問照記：歷史不記，新的一問結束時記成一個回合。
+#[tokio::test]
+async fn exchanges_after_the_baseline_are_recorded() {
+    let cfg = tt::track(std::env::temp_dir().join(format!("am-claude-cfg-{}", db::ulid())));
+    let c = claude_child(Some(&cfg), None).await;
+    let app = c.env.app.clone();
+    let mut lines = history();
+    write_log(&cfg, "sess-1", &log(&lines));
+    c.env.herdr.set_agent("hub-midplat", &c.pane, true);
+    sync_locked(&app, &c.run_id).await.unwrap();
+
+    lines.push(user_at("u3", "基準之後的新問題", "2026-10-07T12:00:00.000Z"));
+    write_log(&cfg, "sess-1", &log(&lines));
+    assert_eq!(sync_locked(&app, &c.run_id).await.unwrap(), Synced::Read { imported: 0, pending: Some("基準之後的新問題".into()) }, "還沒答完：不記");
+
+    lines.push(assistant("新問題的回覆。", Some("end_turn"), false));
+    write_log(&cfg, "sess-1", &log(&lines));
+    assert_eq!(sync_locked(&app, &c.run_id).await.unwrap(), Synced::Read { imported: 1, pending: None });
+    let got: Vec<(String, String)> = messages(&app, &c.conv).await.into_iter().map(|(r, t, _)| (r, t)).collect();
+    assert_eq!(got, vec![("user".into(), "基準之後的新問題".into()), ("assistant".into(), "新問題的回覆。".into())]);
+    assert_eq!(turn_count(&app, &c.conv).await, 1);
+}
+
+/// 第一次讀到時正在跑的一問（基準時還沒結束）：不在基準裡，結束時照記。
+#[tokio::test]
+async fn the_exchange_running_at_the_baseline_is_still_recorded_when_it_ends() {
+    let cfg = tt::track(std::env::temp_dir().join(format!("am-claude-cfg-{}", db::ulid())));
+    let c = claude_child(Some(&cfg), None).await;
+    let app = c.env.app.clone();
+    let mut lines = history();
+    lines.push(user_at("u3", "第一次讀到時正在跑", "2026-10-07T12:00:00.000Z"));
+    write_log(&cfg, "sess-1", &log(&lines));
+    c.env.herdr.set_agent("hub-midplat", &c.pane, true);
+    assert_eq!(sync_locked(&app, &c.run_id).await.unwrap(), Synced::Read { imported: 0, pending: Some("第一次讀到時正在跑".into()) });
+    assert_eq!(baseline(&app, &c.run_id).await.as_deref(), Some("2026-10-07T11:00:00.000Z"));
+
+    lines.push(assistant("跑完了。", Some("end_turn"), false));
+    write_log(&cfg, "sess-1", &log(&lines));
+    assert_eq!(sync_locked(&app, &c.run_id).await.unwrap(), Synced::Read { imported: 1, pending: None });
+    assert_eq!(turn_count(&app, &c.conv).await, 1);
+}
+
+/// 第一次讀到時，派工開的在飛回合對得上檔裡的那一問：照舊收掉它（回覆補進去），只是歷史不另開回合。
+#[tokio::test]
+async fn the_baseline_still_settles_the_turn_that_was_dispatched() {
+    let cfg = tt::track(std::env::temp_dir().join(format!("am-claude-cfg-{}", db::ulid())));
+    let c = claude_child(Some(&cfg), None).await;
+    let app = c.env.app.clone();
+    let mut lines = history();
+    lines.push(user_at("u3", "請讀 brief 並開工", "2026-10-07T12:00:00.000Z"));
+    lines.push(assistant("開工，做完了。", Some("end_turn"), false));
+    write_log(&cfg, "sess-1", &log(&lines));
+    c.env.herdr.set_agent("hub-midplat", &c.pane, true);
+    let parent = tt::claude_bot(&app, &c.env.project_id, "parent").await;
+    let run = db::run(&app.db, &c.run_id).await.unwrap().unwrap();
+    let tid = crate::lifecycle::relay_watch::open_turn(&app, &run, &parent.id, "請讀 brief 並開工").await.unwrap();
+
+    assert_eq!(sync_locked(&app, &c.run_id).await.unwrap(), Synced::Read { imported: 1, pending: None });
+    assert_eq!(turn_count(&app, &c.conv).await, 1, "只有派工開的那一筆");
+    let (status, reply): (String, String) = sqlx::query_as(
+        "SELECT t.status, (SELECT content FROM messages WHERE turn_id = t.id AND role = 'assistant') FROM turns t WHERE t.id = ?",
+    )
+    .bind(&tid)
+    .fetch_one(&app.db)
+    .await
+    .unwrap();
+    assert_eq!((status.as_str(), reply.as_str()), ("completed", "開工，做完了。"));
+}
+
+/// 檔裡還沒有任何一問就建基準（空字串）：之後的問全部算新的。
+#[tokio::test]
+async fn an_empty_transcript_baseline_lets_every_later_exchange_through() {
+    let cfg = tt::track(std::env::temp_dir().join(format!("am-claude-cfg-{}", db::ulid())));
+    let c = claude_child(Some(&cfg), None).await;
+    let app = c.env.app.clone();
+    write_log(&cfg, "sess-1", "");
+    c.env.herdr.set_agent("hub-midplat", &c.pane, true);
+    assert_eq!(sync_locked(&app, &c.run_id).await.unwrap(), Synced::Read { imported: 0, pending: None });
+    assert_eq!(baseline(&app, &c.run_id).await.as_deref(), Some(""));
+
+    write_log(&cfg, "sess-1", &log(&[user_at("u1", "第一問", "2026-10-07T09:00:00.000Z"), assistant("第一答。", Some("end_turn"), false)]));
+    assert_eq!(sync_locked(&app, &c.run_id).await.unwrap(), Synced::Read { imported: 1, pending: None });
 }
