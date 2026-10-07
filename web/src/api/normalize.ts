@@ -244,11 +244,14 @@ export function toToolMap(raw: unknown): ToolMap {
   const one = (v: unknown): ToolStatus => {
     if (!isRec(v)) return TOOL_UNKNOWN
     const li = pick(v, 'logged_in')
+    const qe = pick(v, 'quota_error')
+    const reason = isRec(qe) ? str(pick(qe, 'reason')) : ''
     return {
       installed: bool(pick(v, 'installed'), true),
       path: optStr(pick(v, 'path')),
       version: optStr(pick(v, 'version')),
       logged_in: typeof li === 'boolean' ? li : null,
+      ...(isRec(qe) && reason ? { quota_error: { reason, message: str(pick(qe, 'message')), at: str(pick(qe, 'at')) } } : {}),
     }
   }
   const out = {} as ToolMap

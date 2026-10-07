@@ -15,7 +15,8 @@ use std::time::Duration;
 
 /// 每次探測要起一個約 200 MB 的執行檔。
 pub const AGY_POLL: Duration = Duration::from_secs(300);
-const PROBE_TIMEOUT: Duration = Duration::from_secs(40);
+/// 測試縮短（探測逾時的測試不必真的等 40 秒）。
+const PROBE_TIMEOUT: Duration = if cfg!(test) { Duration::from_secs(3) } else { Duration::from_secs(40) };
 const RETRY_AFTER_FAILURE: Duration = Duration::from_secs(15 * 60);
 
 /// 探測指令（本機與遠端同一份）：拋棄式 cwd、不讀 stdin、關自動更新、跑完刪目錄。`exe` 是偵測到的絕對路徑，沒有就用 PATH 上的 `agy`。
@@ -158,7 +159,205 @@ pub fn parse_usage(stdout: &str) -> Option<Vec<(&'static str, Quota)>> {
     parse_group_usage(&v, &now).or_else(|| parse_legacy_usage(&v, &now))
 }
 
-/// `Ok(false)` ＝這台主機沒裝 agy（不探測、不報錯）。
+/// 遠端探測的 pane：macOS 的 agy 憑證在 login Keychain，純 ssh 讀不到（`security` 回 `User interaction is not allowed`，
+/// `agy -p /usage` 印 `Authentication required` 然後卡住），所以跟 claude 的額度探測一樣，在那台 herdr 的 pane 裡跑
+/// （herdr server 由 launchd 起，pane 在 GUI session 底下、讀得到 Keychain）。標記拆成 `printf` 參數，shell 回顯的指令才不會長得像標記。
+const PANE_BEGIN: &str = "AM_AGY_BEGIN";
+const PANE_DONE: &str = "AM_AGY_DONE=";
+/// pane 探測 workspace 的 label 前綴（claude 的是 `am-quota-claude`）：各自清各自的殘留，不互相把對方正在跑的收掉。
+pub(crate) const PROBE_LABEL_PREFIX: &str = "am-quota-agy";
+
+pub(crate) fn is_probe_label(l: &str) -> bool {
+    l == PROBE_LABEL_PREFIX
+}
+
+/// 在 pane 的 shell 裡打的那一行：拋棄式 cwd、不讀 stdin、關自動更新，stdout 與 stderr 都留在畫面上（`Authentication required` 在那裡）。
+pub fn pane_probe_command(exe: Option<&str>) -> String {
+    let exe = crate::hosts::sh_quote(exe.unwrap_or("agy"));
+    format!(
+        "d=$(mktemp -d 2>/dev/null) && cd \"$d\" && {{ printf '\\nAM_AGY_%s\\n' BEGIN; \
+         AGY_CLI_DISABLE_AUTO_UPDATE=true {exe} -p /usage --output-format json </dev/null 2>&1; rc=$?; cd /; rm -rf \"$d\"; \
+         printf '\\nAM_AGY_%s=%s\\n' DONE \"$rc\"; }} || printf '\\nAM_AGY_%s=%s\\n' DONE 1"
+    )
+}
+
+/// 畫面最後一次 `AM_AGY_BEGIN` 之後的部分（沒有就整個畫面）。
+fn after_begin(screen: &str) -> &str {
+    screen.rfind(PANE_BEGIN).map_or(screen, |i| &screen[i + PANE_BEGIN.len()..])
+}
+
+/// 指令跑完：`(結束碼, BEGIN 到 DONE 之間的輸出)`。從**尾端**找：重打過的指令會在捲動緩衝區留下兩輪，只有最後一輪是完整的。
+fn pane_done(screen: &str) -> Option<(i32, String)> {
+    let done = screen.rfind(PANE_DONE)?;
+    let rc = screen[done + PANE_DONE.len()..].lines().next().and_then(|l| l.trim().parse::<i32>().ok()).unwrap_or(1);
+    let head = &screen[..done];
+    let body = head.rfind(PANE_BEGIN).map_or("", |i| &head[i + PANE_BEGIN.len()..]);
+    Some((rc, body.trim().to_string()))
+}
+
+/// agy 沒有憑證可用時印的字（Keychain 讀不到、token 過期都一樣）；它接著會等人去開網址，不會自己結束。
+fn auth_required(text: &str) -> bool {
+    let t = text.to_ascii_lowercase();
+    t.contains("authentication required") || t.contains("please visit the url to log in")
+}
+
+/// 輸出裡的 JSON 那一行（`2>&1` 之後前後可能有警告）；`agy -p /usage --output-format json` 的 JSON 是單行。
+fn json_line(text: &str) -> Option<&str> {
+    text.lines().map(str::trim).find(|l| l.starts_with('{') && l.ends_with('}'))
+}
+
+/// 探測失敗的分類：`AuthRequired` 是 agy 明說沒憑證（探測所在的環境讀得到 Keychain 時，這就是真的沒登入）；
+/// 其餘是「已登入但額度這次拿不到」，帶一個固定的 `reason` 給網頁翻成人話。
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) enum ProbeFail {
+    AuthRequired,
+    Other { reason: &'static str, message: String },
+}
+
+impl ProbeFail {
+    fn other(reason: &'static str, message: impl Into<String>) -> Self {
+        Self::Other { reason, message: message.into() }
+    }
+}
+
+fn tail(text: &str, n: usize) -> String {
+    let t = text.trim();
+    let skip = t.chars().count().saturating_sub(n);
+    t.chars().skip(skip).collect()
+}
+
+/// 讀 agy 的 `/usage` 輸出（pane 的 BEGIN–DONE 之間，或本機的 stdout）：讀得到額度就回，否則說明為什麼沒有。
+fn read_usage(host: &str, rc: Option<i32>, text: &str) -> Result<Vec<(&'static str, Quota)>, ProbeFail> {
+    if let Some(found) = json_line(text).and_then(parse_usage).or_else(|| parse_usage(text)) {
+        return Ok(found);
+    }
+    if auth_required(text) {
+        return Err(ProbeFail::AuthRequired);
+    }
+    match rc {
+        Some(rc) if rc != 0 => Err(ProbeFail::other("exit", format!("`agy -p /usage` on {host} exited with {rc}: {}", tail(text, 200)))),
+        _ => Err(ProbeFail::other("unreadable", format!("`agy -p /usage` on {host} printed no readable quota window: {}", tail(text, 200)))),
+    }
+}
+
+async fn pane_probe(app: &Arc<App>, host: &str, fence: &crate::hosts::HostFence, exe: &str) -> Result<Vec<(&'static str, Quota)>, ProbeFail> {
+    let client = crate::quota_claude::client_for_fence(host, fence).await.map_err(|e| ProbeFail::other("not_connected", format!("{e:#}")))?;
+    let home = crate::hosts::home_for_fence(fence).await.map_err(|e| ProbeFail::other("pane", format!("{e:#}")))?;
+    if !app.hosts.is_current(fence).await {
+        return Err(ProbeFail::other("superseded", format!("host `{host}` changed before its agy quota probe")));
+    }
+    let label = crate::quota_claude::tagged_probe_label(app, host, PROBE_LABEL_PREFIX.to_string()).await;
+    let cmd = pane_probe_command(Some(exe));
+    let run = crate::quota_claude::run_marked_pane(
+        &client,
+        &home,
+        &label,
+        serde_json::json!({}),
+        &cmd,
+        PROBE_TIMEOUT,
+        PANE_BEGIN,
+        is_probe_label,
+        pane_done,
+        |screen| auth_required(after_begin(screen)),
+    )
+    .await
+    .map_err(|e| ProbeFail::other("pane", format!("could not run the agy quota probe pane on {host}: {e:#}")))?;
+    if !app.hosts.is_current(fence).await {
+        return Err(ProbeFail::other("superseded", format!("host `{host}` was reconnected/reconfigured during the agy quota probe; stale result discarded")));
+    }
+    use crate::quota_claude::MarkedRun;
+    match run {
+        MarkedRun::Done((rc, text)) => read_usage(host, Some(rc), &text),
+        MarkedRun::Early(_) => Err(ProbeFail::AuthRequired),
+        MarkedRun::TimedOut(screen) => Err(ProbeFail::other(
+            "timeout",
+            format!("`agy -p /usage` on {host} did not finish within {}s; screen: {}", PROBE_TIMEOUT.as_secs(), tail(after_begin(&screen), 200)),
+        )),
+    }
+}
+
+/// 探測這一輪失敗的原因（每台主機一筆，成功或判定為未登入就清掉）：網頁在「已登入、但額度暫時拿不到」那一格講清楚，
+/// 不再停在永遠的「背景查詢中」。只在記憶體：重啟就當沒失敗過，下一輪探測自然會再記。
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct ProbeError {
+    pub reason: &'static str,
+    pub message: String,
+    pub at: String,
+}
+
+fn probe_errors() -> &'static std::sync::Mutex<std::collections::HashMap<String, ProbeError>> {
+    static M: std::sync::OnceLock<std::sync::Mutex<std::collections::HashMap<String, ProbeError>>> = std::sync::OnceLock::new();
+    M.get_or_init(Default::default)
+}
+
+/// 換掉那台主機記著的失敗（`None`＝清掉）；回傳內容有沒有變（沒變就不用再推 `host_changed`）。
+fn set_probe_error(host: &str, err: Option<ProbeError>) -> bool {
+    let mut m = probe_errors().lock().unwrap();
+    let same = match (&err, m.get(host)) {
+        (None, None) => true,
+        (Some(a), Some(b)) => a.reason == b.reason && a.message == b.message,
+        _ => false,
+    };
+    if same {
+        return false;
+    }
+    match err {
+        Some(e) => m.insert(host.to_string(), e),
+        None => m.remove(host),
+    };
+    true
+}
+
+/// `tools` 的 JSON，`agy` 那筆帶上 `quota_error`（`{reason, message, at}`）；沒有失敗記錄就跟 `json!(tools)` 一模一樣。
+/// 偵測結果（`app.tools`）會被整份換掉，失敗記錄放在這裡，序列化時才合進去。
+pub fn tools_json(host: &str, tools: &std::collections::BTreeMap<String, crate::tools::ToolInfo>) -> serde_json::Value {
+    let mut v = serde_json::json!(tools);
+    if let Some(e) = probe_errors().lock().unwrap().get(host) {
+        if let Some(agy) = v.get_mut("agy").and_then(|a| a.as_object_mut()) {
+            agy.insert("quota_error".into(), serde_json::json!({"reason": e.reason, "message": e.message, "at": e.at}));
+        }
+    }
+    v
+}
+
+/// agy 明說沒憑證之後，登入偵測（[`login_watch_once`]）暫時不要又因為 Keychain 裡有項目而把旗標翻回已登入、再開一次 pane。
+const AUTH_DENIED_COOLDOWN: Duration = Duration::from_secs(5 * 60);
+
+fn auth_denied() -> &'static std::sync::Mutex<std::collections::HashMap<String, std::time::Instant>> {
+    static M: std::sync::OnceLock<std::sync::Mutex<std::collections::HashMap<String, std::time::Instant>>> = std::sync::OnceLock::new();
+    M.get_or_init(Default::default)
+}
+
+fn auth_denied_active(key: &str) -> bool {
+    auth_denied().lock().unwrap().get(key).is_some_and(|t| *t > std::time::Instant::now())
+}
+
+/// 把這一輪的結果記下來：成功清掉失敗、未登入翻旗標、其他失敗留下原因；有變就推 `host_changed`。
+async fn record_probe_result(app: &Arc<App>, host: &str, fence: &crate::hosts::HostFence, result: &Result<(), ProbeFail>) {
+    let key = crate::quota::quota_key(host, "agy");
+    let mut changed = false;
+    match result {
+        Ok(()) => {
+            auth_denied().lock().unwrap().remove(&key);
+            changed |= set_probe_error(host, None);
+            // 探測讀得到額度＝這台已登入（登入後第一次探測成功就把「未登入」翻回來）。
+            changed |= set_logged_in_quiet(app, host, fence, true).await;
+        }
+        Err(ProbeFail::AuthRequired) => {
+            auth_denied().lock().unwrap().insert(key, std::time::Instant::now() + AUTH_DENIED_COOLDOWN);
+            changed |= set_probe_error(host, None);
+            changed |= set_logged_in_quiet(app, host, fence, false).await;
+        }
+        Err(ProbeFail::Other { reason, message }) => {
+            changed |= set_probe_error(host, Some(ProbeError { reason, message: message.clone(), at: crate::db::now() }));
+        }
+    }
+    if changed {
+        crate::state::emit_host_changed(app, fence).await;
+    }
+}
+
+/// `Ok(false)` ＝這台主機沒裝 agy（不探測、不報錯）。失敗時錯誤訊息就是原因（同時記在 [`tools_json`] 的 `quota_error`）。
 pub async fn refresh_agy(app: &Arc<App>, host: &str) -> Result<bool> {
     let _guard = crate::quota::probe_lock(&format!("{host}#agy")).await;
     let fence = app.hosts.fence(host).await.ok_or_else(|| anyhow!("unknown host `{host}`"))?;
@@ -169,20 +368,31 @@ pub async fn refresh_agy(app: &Arc<App>, host: &str) -> Result<bool> {
         bail!("host `{host}` changed before its agy quota probe");
     }
     let Some(exe) = crate::tools::cached_path(app, host, "agy").await else { return Ok(false) };
-    let script = probe_script(Some(&exe));
-    let stdout = if fence.conn().is_local() {
-        crate::hosts::sh_local_stdout(&script, PROBE_TIMEOUT, "`agy -p /usage`").await?
+    let parsed = if fence.conn().is_local() {
+        match crate::hosts::sh_local_stdout(&probe_script(Some(&exe)), PROBE_TIMEOUT, "`agy -p /usage`").await {
+            Ok(stdout) => read_usage(host, None, &stdout),
+            Err(e) => Err(ProbeFail::other("timeout", format!("{e:#}"))),
+        }
     } else {
-        fence.conn().ssh_exec_path_timeout(&script, PROBE_TIMEOUT).await?
+        pane_probe(app, host, &fence, &exe).await
     };
-    let Some(buckets) = parse_usage(&stdout) else {
-        bail!("`agy -p /usage` on {host} printed no readable quota window: {}", stdout.chars().take(200).collect::<String>());
+    let buckets = match parsed {
+        Ok(b) => b,
+        Err(fail) => {
+            // 主機換掉了：這個結果不屬於現在這台，別記。
+            if !matches!(&fail, ProbeFail::Other { reason: "superseded", .. }) {
+                record_probe_result(app, host, &fence, &Err(fail.clone())).await;
+            }
+            return Err(match fail {
+                ProbeFail::AuthRequired => anyhow!("agy on {host} is not logged in (`agy -p /usage` printed `Authentication required`)"),
+                ProbeFail::Other { message, .. } => anyhow!(message),
+            });
+        }
     };
     for (key, q) in buckets {
         crate::quota::set_fenced(app, host, key, q, &fence).await?;
     }
-    // 探測讀得到額度＝這台已登入（登入後第一次探測成功就把「未登入」翻回來）。
-    set_logged_in(app, host, &fence, true).await;
+    record_probe_result(app, host, &fence, &Ok(())).await;
     Ok(true)
 }
 
@@ -239,23 +449,26 @@ const REMOTE_PRESENT_SCRIPT: &str = "if [ -s \"$HOME/.gemini/antigravity-cli/ant
 
 /// 把 `tools.agy.logged_in` 寫成 `logged_in`（已知有裝 agy 才寫），有變就推 `host_changed`。額度那格的「未登入」與登入鈕吃這個旗標（網頁 `useLoggedOut`）。
 async fn set_logged_in(app: &Arc<App>, host: &str, fence: &crate::hosts::HostFence, logged_in: bool) -> bool {
-    let changed = {
-        let mut all = app.tools.lock().await;
-        if !app.hosts.is_current(fence).await {
-            return false;
-        }
-        match all.get_mut(host).and_then(|h| h.tools.get_mut("agy")) {
-            Some(t) if t.installed && t.logged_in != Some(logged_in) => {
-                t.logged_in = Some(logged_in);
-                true
-            }
-            _ => false,
-        }
-    };
+    let changed = set_logged_in_quiet(app, host, fence, logged_in).await;
     if changed {
         crate::state::emit_host_changed(app, fence).await;
     }
     changed
+}
+
+/// 同上但不推：呼叫端還有別的東西要一起變（[`record_probe_result`] 一輪只推一次）。
+async fn set_logged_in_quiet(app: &Arc<App>, host: &str, fence: &crate::hosts::HostFence, logged_in: bool) -> bool {
+    let mut all = app.tools.lock().await;
+    if !app.hosts.is_current(fence).await {
+        return false;
+    }
+    match all.get_mut(host).and_then(|h| h.tools.get_mut("agy")) {
+        Some(t) if t.installed && t.logged_in != Some(logged_in) => {
+            t.logged_in = Some(logged_in);
+            true
+        }
+        _ => false,
+    }
 }
 
 async fn agy_state(app: &impl crate::tools::ToolsTable, host: &str) -> Option<(bool, Option<bool>)> {
@@ -366,7 +579,8 @@ pub async fn login_watch_once(app: &Arc<App>, host: &str) {
     let Some(fence) = app.hosts.fence(host).await else { return };
     let key = crate::quota::quota_key(host, "agy");
     if !logged_in {
-        if token_present(&fence).await != Some(true) {
+        // agy 剛明說沒憑證：Keychain 裡有項目（可能是過期的 token）不算登好了，冷卻期內不翻回去、不再開 pane。
+        if auth_denied_active(&key) || token_present(&fence).await != Some(true) {
             return;
         }
         set_logged_in(app, host, &fence, true).await;
@@ -553,35 +767,6 @@ mod tests {
         e.app.tools.lock().await.insert(LOCAL_HOST.into(), tools(false));
         assert!(!refresh_agy(&e.app, LOCAL_HOST).await.expect("no agy: Ok(false), no error"));
         assert!(e.app.quotas.lock().await.get("agy").is_none());
-
-        // 遠端：沒裝＝不碰 ssh；有裝＝跑同一段 script，Gemini 的兩個窗口記在 `<host>/agy`。
-        let host = format!("agy-remote-{}", crate::db::ulid().to_ascii_lowercase());
-        let conn = e.app.hosts.insert_remote_for_test(crate::config::HostCfg {
-            shared_session: false,
-            name: host.clone(),
-            ssh: "unused".into(),
-            ssh_port: 22,
-            ssh_opts: vec![],
-            herdr_session: "agents-manager".into(),
-            remote_path: String::new(),
-        }).await;
-        conn.connected.store(true, std::sync::atomic::Ordering::SeqCst);
-        let calls = Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
-        let calls2 = calls.clone();
-        crate::hosts::set_ssh_fake(&host, move |script| {
-            calls2.lock().unwrap().push(script.to_string());
-            Ok(real())
-        });
-        e.app.tools.lock().await.insert(host.clone(), tools(false));
-        assert!(!refresh_agy(&e.app, &host).await.unwrap());
-        assert!(calls.lock().unwrap().is_empty(), "沒裝 agy 的遠端不探測");
-        e.app.tools.lock().await.insert(host.clone(), tools(true));
-        assert!(refresh_agy(&e.app, &host).await.unwrap());
-        assert!(calls.lock().unwrap()[0].contains("'/opt/agy' -p /usage --output-format json"));
-        let q = e.app.quotas.lock().await;
-        assert!(q.contains_key(&format!("{host}/agy")), "{:?}", q.keys().collect::<Vec<_>>());
-        assert!(!q.contains_key(&format!("{host}/agy:claude-gpt")), "Claude/GPT 額度不可另存");
-        assert!(!q.contains_key("agy"), "遠端的讀數不能落在本機那格");
     }
 
     #[tokio::test]
@@ -840,5 +1025,243 @@ mod login_tests {
         let e = tt::env().await;
         install_agy(&e.app, Some(false)).await;
         assert!(matches!(refresh_agy_if_due(&e.app, LOCAL_HOST).await, Ok(None)));
+    }
+}
+
+/// 遠端額度探測走那台 herdr 的 pane（macOS 的 Keychain 純 ssh 讀不到）：用假 herdr 驗開 pane、讀畫面、失敗原因與登入旗標。
+#[cfg(test)]
+mod pane_tests {
+    use super::*;
+    use crate::herdr::HerdrClient;
+    use crate::testing::MockHerdr;
+    use serde_json::json;
+
+    struct Remote {
+        host: String,
+        herdr: MockHerdr,
+        ssh_calls: Arc<std::sync::Mutex<Vec<String>>>,
+        _dir: std::path::PathBuf,
+    }
+
+    async fn remote(app: &Arc<App>, logged_in: Option<bool>) -> Remote {
+        let host = format!("agy-pane-{}", crate::db::ulid().to_ascii_lowercase());
+        let dir = crate::testing::track(std::env::temp_dir().join(format!("am-agy-pane-{}", crate::db::ulid())));
+        std::fs::create_dir_all(&dir).unwrap();
+        let sock = dir.join("herdr.sock");
+        let herdr = MockHerdr::start(sock.clone());
+        let conn = app
+            .hosts
+            .insert_remote_with_client_for_test(
+                crate::config::HostCfg {
+                    shared_session: false,
+                    name: host.clone(),
+                    ssh: "unused".into(),
+                    ssh_port: 22,
+                    ssh_opts: vec![],
+                    herdr_session: "agents-manager".into(),
+                    remote_path: String::new(),
+                },
+                HerdrClient::new(sock),
+            )
+            .await;
+        conn.connected.store(true, std::sync::atomic::Ordering::SeqCst);
+        *conn.remote_home.lock().await = Some("/Users/m4p".into());
+        // 純 ssh 讀不到 Keychain：探測**不能**走 ssh（記下任何 ssh 呼叫）。
+        let ssh_calls = Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
+        let calls = ssh_calls.clone();
+        crate::hosts::set_ssh_fake(&host, move |script| {
+            calls.lock().unwrap().push(script.to_string());
+            Err(anyhow!("ssh must not be used for the agy quota probe"))
+        });
+        let ht = crate::tools::HostTools {
+            tools: [("agy".to_string(), crate::tools::ToolInfo { installed: true, path: Some("/Users/m4p/.local/bin/agy".into()), version: None, logged_in })].into(),
+            identities: Default::default(),
+            shell_identities: vec![],
+            utc_offset_secs: None,
+            herdr_cli: None,
+            checked_at: crate::db::now(),
+        };
+        app.tools.lock().await.insert(host.clone(), ht);
+        Remote { host, herdr, ssh_calls, _dir: dir }
+    }
+
+    fn screen(body: &str, rc: i32) -> String {
+        format!("{PANE_BEGIN}\n{body}\n{PANE_DONE}{rc}\n")
+    }
+
+    fn usage_json() -> String {
+        json!({"status": "SUCCESS", "command": {"data": {"groups": [{"name": "Gemini Models", "buckets": [
+            {"id": "gemini-weekly", "window": "weekly", "remaining_fraction": 0.98, "reset_time": "2026-10-11T15:39:29Z"},
+            {"id": "gemini-5h", "window": "five_hour", "remaining_fraction": 0.23, "reset_time": "2026-10-05T15:00:00Z"}
+        ]}]}}})
+        .to_string()
+    }
+
+    async fn agy_flag(app: &Arc<App>, host: &str) -> Option<bool> {
+        app.tools.lock().await[host].tools["agy"].logged_in
+    }
+
+    async fn open_workspaces(h: &MockHerdr) -> usize {
+        for _ in 0..40 {
+            if h.workspaces.lock().unwrap().is_empty() {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+        h.workspaces.lock().unwrap().len()
+    }
+
+    fn quota_error_of(app_tools: &crate::tools::HostTools, host: &str) -> serde_json::Value {
+        tools_json(host, &app_tools.tools)["agy"]["quota_error"].clone()
+    }
+
+    #[tokio::test]
+    async fn a_remote_probe_runs_in_a_pane_not_over_ssh_and_stores_both_gemini_windows() {
+        let app = crate::testing::env().await.app.clone();
+        let r = remote(&app, Some(true)).await;
+        r.herdr.set_screen("*", &screen(&usage_json(), 0));
+        assert!(refresh_agy(&app, &r.host).await.unwrap());
+        let q = app.quotas.lock().await;
+        let got = &q[&format!("{}/agy", r.host)];
+        assert!(got.five_hour.is_some() && got.seven_day.is_some(), "{got:?}");
+        assert!(!q.contains_key("agy"), "遠端的讀數不能落在本機那格");
+        drop(q);
+        assert_eq!(r.ssh_calls.lock().unwrap().len(), 0, "不走 ssh（macOS 的 Keychain 純 ssh 讀不到）");
+        let creates = r.herdr.calls_to("workspace.create");
+        assert_eq!(creates.len(), 1, "{creates:?}");
+        assert_eq!(creates[0]["cwd"], "/Users/m4p", "在遠端 home 開 pane");
+        let typed: String = r.herdr.calls_to("pane.send_text").iter().filter_map(|c| c["text"].as_str().map(String::from)).collect();
+        assert!(typed.contains("'/Users/m4p/.local/bin/agy' -p /usage --output-format json"), "{typed}");
+        assert_eq!(open_workspaces(&r.herdr).await, 0, "探測完 workspace 關掉");
+        assert_eq!(agy_flag(&app, &r.host).await, Some(true));
+        assert!(quota_error_of(&app.tools.lock().await[&r.host], &r.host).is_null());
+    }
+
+    /// agy 在 pane 裡明說沒憑證：不等到逾時，旗標翻成未登入（網頁出現登入鈕），不留「額度暫時拿不到」的錯誤，
+    /// 而且登入偵測冷卻期內不把旗標又翻回去。
+    #[tokio::test]
+    async fn authentication_required_in_the_pane_marks_logged_out_at_once() {
+        let app = crate::testing::env().await.app.clone();
+        let r = remote(&app, Some(true)).await;
+        r.herdr.set_screen("*", &format!("{PANE_BEGIN}\nAuthentication required. Please visit the URL to log in\nhttps://accounts.example/x\n"));
+        let started = std::time::Instant::now();
+        let err = refresh_agy(&app, &r.host).await.unwrap_err();
+        assert!(started.elapsed() < Duration::from_secs(2), "不必等逾時：{:?}", started.elapsed());
+        assert!(err.to_string().contains("not logged in"), "{err:#}");
+        assert_eq!(agy_flag(&app, &r.host).await, Some(false));
+        assert!(quota_error_of(&app.tools.lock().await[&r.host], &r.host).is_null(), "未登入由旗標表達，不另記額度錯誤");
+        assert_eq!(open_workspaces(&r.herdr).await, 0, "卡在登入畫面的 pane 也關掉");
+        assert_eq!(r.ssh_calls.lock().unwrap().len(), 0);
+
+        // 冷卻期內：Keychain 裡有項目也不翻回去、不再開 pane。
+        let before = r.herdr.calls_to("workspace.create").len();
+        login_watch_once(&app, &r.host).await;
+        assert_eq!(agy_flag(&app, &r.host).await, Some(false));
+        assert_eq!(r.herdr.calls_to("workspace.create").len(), before);
+    }
+
+    /// 已登入但這次拿不到額度：原因記起來、跟 `tools.agy` 一起送出去（網頁寫「已登入，額度暫時拿不到」），旗標不動；下一次成功就清掉。
+    #[tokio::test]
+    async fn a_probe_that_times_out_keeps_logged_in_and_reports_why_until_it_recovers() {
+        let app = crate::testing::env().await.app.clone();
+        let r = remote(&app, Some(true)).await;
+        let mut rx = app.subscribe();
+        r.herdr.set_screen("*", &format!("{PANE_BEGIN}\n"));
+        let err = refresh_agy(&app, &r.host).await.unwrap_err();
+        assert!(err.to_string().contains("did not finish"), "{err:#}");
+        assert_eq!(agy_flag(&app, &r.host).await, Some(true), "逾時不等於未登入");
+        let e = quota_error_of(&app.tools.lock().await[&r.host], &r.host);
+        assert_eq!(e["reason"], "timeout", "{e}");
+        assert!(e["message"].as_str().unwrap().contains(&r.host) && e["at"].is_string(), "{e}");
+        let mut pushed = false;
+        while let Ok(ev) = rx.try_recv() {
+            pushed |= ev.kind == "host_changed" && ev.data["name"] == r.host.as_str() && ev.data["tools"]["agy"]["quota_error"]["reason"] == "timeout";
+        }
+        assert!(pushed, "失敗原因要推 host_changed，網頁才換掉「背景查詢中」");
+
+        // 恢復：下一次讀得到，錯誤清掉並再推一次。
+        r.herdr.set_screen("*", &screen(&usage_json(), 0));
+        assert!(refresh_agy(&app, &r.host).await.unwrap());
+        assert!(quota_error_of(&app.tools.lock().await[&r.host], &r.host).is_null());
+        let mut cleared = false;
+        while let Ok(ev) = rx.try_recv() {
+            cleared |= ev.kind == "host_changed" && ev.data["tools"]["agy"].get("quota_error").is_none();
+        }
+        assert!(cleared, "成功後清掉並推出去");
+    }
+
+    #[tokio::test]
+    async fn an_unreadable_or_failing_agy_names_its_reason() {
+        let app = crate::testing::env().await.app.clone();
+        let r = remote(&app, Some(true)).await;
+        r.herdr.set_screen("*", &screen("{\"status\":\"SUCCESS\"}", 0));
+        refresh_agy(&app, &r.host).await.unwrap_err();
+        assert_eq!(quota_error_of(&app.tools.lock().await[&r.host], &r.host)["reason"], "unreadable");
+        r.herdr.set_screen("*", &screen("agy: command not found", 127));
+        let err = refresh_agy(&app, &r.host).await.unwrap_err();
+        assert!(err.to_string().contains("exited with 127"), "{err:#}");
+        assert_eq!(quota_error_of(&app.tools.lock().await[&r.host], &r.host)["reason"], "exit");
+        assert_eq!(agy_flag(&app, &r.host).await, Some(true));
+    }
+
+    #[test]
+    fn the_failure_record_does_not_touch_other_hosts_or_other_tools() {
+        let tools: std::collections::BTreeMap<String, crate::tools::ToolInfo> =
+            [("agy".to_string(), Default::default()), ("claude".to_string(), Default::default())].into();
+        let host = format!("agy-json-{}", crate::db::ulid().to_ascii_lowercase());
+        assert_eq!(tools_json(&host, &tools), json!(tools), "沒有失敗記錄：跟原本的序列化一模一樣");
+        assert!(set_probe_error(&host, Some(ProbeError { reason: "timeout", message: "m".into(), at: "t".into() })));
+        assert!(!set_probe_error(&host, Some(ProbeError { reason: "timeout", message: "m".into(), at: "later".into() })), "同樣的原因不重複推");
+        let v = tools_json(&host, &tools);
+        assert_eq!(v["agy"]["quota_error"]["reason"], "timeout");
+        assert!(v["claude"].get("quota_error").is_none());
+        assert_eq!(tools_json("other-host", &tools), json!(tools));
+        assert!(set_probe_error(&host, None));
+        assert_eq!(tools_json(&host, &tools), json!(tools));
+    }
+
+    #[test]
+    fn the_pane_output_parsers_read_the_last_complete_run_and_spot_the_login_wall() {
+        // 指令重打過：捲動緩衝區有兩輪，只認最後那輪完整的。
+        let two = format!("{PANE_BEGIN}\nold\n{PANE_BEGIN}\n{{\"a\":1}}\n{PANE_DONE}0\n");
+        assert_eq!(pane_done(&two), Some((0, "{\"a\":1}".to_string())));
+        assert_eq!(pane_done(&format!("{PANE_BEGIN}\nstill running")), None, "沒有 DONE＝還沒結束");
+        assert_eq!(pane_done(&format!("{PANE_DONE}1\n")), Some((1, String::new())), "mktemp 失敗：只有 DONE");
+        assert_eq!(pane_done(&format!("{PANE_BEGIN}\nx\n{PANE_DONE}zz\n")).map(|x| x.0), Some(1), "結束碼讀不懂當失敗");
+        assert!(auth_required("Authentication required. Please visit the URL to log in"));
+        assert!(auth_required("AUTHENTICATION REQUIRED"));
+        assert!(!auth_required("{\"status\":\"SUCCESS\"}"));
+        assert_eq!(json_line("warning: x\n  {\"a\":1}  \ntrailer"), Some("{\"a\":1}"));
+        assert_eq!(json_line("no json here"), None);
+        // 登入牆只看最後一次 BEGIN 之後：之前畫面上的字不算。
+        assert!(!auth_required(after_begin(&format!("Authentication required\n{PANE_BEGIN}\nok\n"))));
+    }
+
+    /// 真的把 pane 那一行丟給 sh：假 agy 在別的目錄跑、目錄用完就刪、標記與結束碼印得出來；壞掉的 agy 結束碼傳得出來。
+    #[test]
+    fn the_pane_command_runs_in_a_throwaway_dir_and_prints_the_markers() {
+        let dir = crate::testing::scratch_dir("am-agy-pane-cmd");
+        let seen = dir.join("seen.txt");
+        let fake = dir.join("agy");
+        crate::testing::write_exec(&fake, format!("#!/bin/sh\npwd > {s}\necho \"$AGY_CLI_DISABLE_AUTO_UPDATE $*\" >> {s}\nprintf '%s\\n' '{j}'\nexit 3\n", s = seen.display(), j = usage_json()));
+        let out = crate::exec_retry::output(std::process::Command::new("/bin/sh").arg("-c").arg(pane_probe_command(fake.to_str()))).unwrap();
+        let text = String::from_utf8_lossy(&out.stdout).to_string();
+        let (rc, body) = pane_done(&text).expect(&text);
+        assert_eq!(rc, 3, "agy 的結束碼傳得出來");
+        assert!(read_usage("h", Some(rc), &body).is_ok(), "JSON 那行照樣讀得到");
+        let seen = std::fs::read_to_string(&seen).unwrap();
+        let mut lines = seen.lines();
+        let cwd = lines.next().unwrap();
+        assert!(!cwd.starts_with(dir.to_str().unwrap()) && !std::path::Path::new(cwd).exists(), "拋棄式 cwd 用完刪掉：{cwd}");
+        assert_eq!(lines.next().unwrap(), "true -p /usage --output-format json");
+        assert!(!pane_probe_command(None).contains(PANE_BEGIN) && !pane_probe_command(None).contains(PANE_DONE), "回顯的指令不能長得像標記");
+    }
+
+    /// claude 與 agy 的探測 workspace 各清各的殘留：同台主機同時跑時，不能互相收掉對方正在跑的。
+    #[test]
+    fn claude_and_agy_probe_labels_do_not_sweep_each_other() {
+        assert!(is_probe_label("am-quota-agy") && !is_probe_label("am-quota-claude") && !is_probe_label("am-quota-claude-cc1") && !is_probe_label("am-quota-grok"));
+        assert!(crate::shared_host::sweepable("am-quota-agy@t", Some("t"), is_probe_label));
+        assert!(!crate::shared_host::sweepable("am-quota-agy@other", Some("t"), is_probe_label));
     }
 }
