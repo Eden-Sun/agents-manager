@@ -276,7 +276,8 @@ pub fn is_status_chrome(s: &str) -> bool {
         || s.starts_with("Tip:")
         || s.starts_with("⎿")
         || s.contains("Auto-update failed")
-        || (s.contains(" | ") && (s.contains("5h:") || s.contains("7d:")))
+        // 額度段：舊格式 `5h:96%`；2.1.290 起 `~/.claude/statusline-command.sh` 印 `5h left 96%`（#876）。
+        || (s.contains(" | ") && ["5h:", "7d:", "5h left", "7d left"].iter().any(|k| s.contains(k)))
         || (s.contains(" · ") && s.contains("% left"))
 }
 
