@@ -11,7 +11,7 @@ fn remote_root() -> String {
 
 /// 將遠端 bot 目錄送進回收區。
 pub async fn move_in(conn: &crate::hosts::HostConn, bot_id: &str) -> Result<Option<String>> {
-    let dir = crate::lifecycle::remote_bot_dir(conn, bot_id).await?.dir;
+    let dir = crate::runners::s6_l::remote_bot_dir(conn, bot_id).await?.dir;
     crate::remote_trash::move_in(conn, bot_id, &dir, &remote_root()).await
 }
 
@@ -30,7 +30,7 @@ pub async fn restore_for(app: &Arc<App>, bot_id: &str) {
         tracing::warn!(host, bot = %bot_id, "unknown host; remote bot dir not restored from bots-trash");
         return;
     };
-    let dir = match crate::lifecycle::remote_bot_dir(&conn, bot_id).await {
+    let dir = match crate::runners::s6_l::remote_bot_dir(&conn, bot_id).await {
         Ok(paths) => paths.dir,
         Err(e) => {
             tracing::warn!(host, bot = %bot_id, error = %format!("{e:#}"), "could not resolve remote bot directory for restore");

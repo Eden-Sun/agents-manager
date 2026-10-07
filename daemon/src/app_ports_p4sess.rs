@@ -11,20 +11,26 @@ use super::ports::{
 };
 use crate::lifecycle::LcResult;
 use crate::state::App;
+#[cfg(test)]
 use am_core::{BotId, PortError};
-use am_ports::{BotLock, BotLockGuard};
+#[cfg(test)]
+use am_ports::BotLock;
+use am_ports::BotLockGuard;
 use anyhow::Result;
 use serde_json::Value;
 use sqlx::SqlitePool;
+#[cfg(test)]
 use std::future::Future;
 use std::sync::Arc;
 
 /// `am_ports::BotLock` 的 App 實作：就是 `App::bot_lock` 那把 per-bot 互斥鎖（同一格 `Arc<Mutex<()>>`）。
 /// 守衛持有 `OwnedMutexGuard`，所以 `App::retain_bot_locks` 看到的 `Arc` 計數跟原本握著 `lock` 的寫法一樣（有人握著或等著就不清）。
+#[cfg(test)]
 pub(crate) struct AppBotLock<'a, A> {
     app: &'a A,
 }
 
+#[cfg(test)]
 impl<'a, A: crate::capabilities::BotLocks> AppBotLock<'a, A> {
     pub(crate) fn new(app: &'a A) -> Self {
         Self { app }
@@ -34,12 +40,18 @@ impl<'a, A: crate::capabilities::BotLocks> AppBotLock<'a, A> {
 struct Held(#[allow(dead_code)] tokio::sync::OwnedMutexGuard<()>);
 impl BotLockGuard for Held {}
 
+/// Acquire the same owned per-bot lock for lifecycle code that holds it across its full operation.
+pub(crate) async fn lock_bot_owned(app: &impl crate::capabilities::BotLocks, bot_id: &str) -> Box<dyn BotLockGuard + 'static> {
+    let lock = app.bot_lock(bot_id).await;
+    Box::new(Held(lock.lock_owned().await))
+}
+
+#[cfg(test)]
 impl<A: crate::capabilities::BotLocks> BotLock for AppBotLock<'_, A> {
     fn lock_bot<'a>(&'a self, bot: &'a BotId) -> impl Future<Output = std::result::Result<Box<dyn BotLockGuard + 'a>, PortError>> + Send + 'a {
         async move {
-            let lock = self.app.bot_lock(bot).await;
-            let guard = lock.lock_owned().await;
-            Ok(Box::new(Held(guard)) as Box<dyn BotLockGuard + 'a>)
+            let guard = lock_bot_owned(self.app, bot.as_str()).await;
+            Ok(guard)
         }
     }
 }
@@ -125,7 +137,7 @@ impl ShimInstallPort for Arc<App> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::lifecycle::app_ports_p4::AppEventSink;
+    use crate::app_ports_p4::AppEventSink;
     use crate::testing as tt;
     use serde_json::json;
 

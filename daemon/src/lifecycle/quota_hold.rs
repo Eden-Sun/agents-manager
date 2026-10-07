@@ -31,7 +31,8 @@
 //! 圍籬做完：記憶體照擋，很快再寫一次。回填讀不到就不算回填過，回填時**憑據解不開**的那顆 bot 也不算
 //! （issue #522）——它的撞限沒被種回記憶體，「記憶體說不擋」對它不是證據，照舊問那一列自己的憑據。
 
-use super::run_state::app_ports_p4state;
+use crate::capabilities::{BootId, Db};
+use crate::lifecycle::s6_ports::QuotaHoldContext;
 use super::*;
 use std::collections::HashMap;
 use std::sync::{Mutex, OnceLock};
@@ -67,7 +68,7 @@ impl Held {
             at: hit.at.clone(),
             bucket: hit.bucket.clone(),
             held_at: db::now(),
-            boot: app_ports_p4state::boot_id(app),
+            boot: app.boot_id().to_string(),
         }
     }
 
@@ -100,14 +101,14 @@ fn unverified(bot: &db::Bot, e: &anyhow::Error) -> crate::quota::LimitHit {
 /// 判準跟派送前同一支 [`crate::quota::try_limit_hit_for_bot`]。記憶體說擋就把憑據記在這一列上；記憶體說不擋，
 /// 而這一列帶著**上一輪開機**的憑據、這台主機的開機回填還沒跑完（重啟後記憶體是空的）時不算數，改看憑據。
 /// 任何一步讀不到都照擋（[`unverified`]），不當作「沒撞限」。
-pub(crate) async fn blocking_hit(app: &Arc<App>, bot: &db::Bot, turn_id: &str) -> Option<crate::quota::LimitHit> {
-    match app_ports_p4state::try_limit_hit_for_bot(app, bot).await {
+pub(crate) async fn blocking_hit(app: &impl QuotaHoldContext, bot: &db::Bot, turn_id: &str) -> Option<crate::quota::LimitHit> {
+    match app.try_limit_hit_for_bot(bot).await {
         Ok(Some(hit)) => {
             // 這一輪靠記憶體擋著，憑據卻沒落地：圍籬還沒做完，很快再寫一次（`arm_queue_retry` 留較早的那個 timer）。
             // 寫成之前 daemon 重啟的話，只剩撞限當下蓋上的那一份（`stamp_queued`）。
             if let Err(e) = remember(app, turn_id, bot, &hit).await {
                 tracing::warn!(turn = %turn_id, error = %e, "could not persist the quota hold of a queued prompt; retrying soon");
-                super::schedule_flush_retry(app, &bot.id, PERSIST_RETRY);
+                app.schedule_flush_retry(&bot.id, PERSIST_RETRY);
             }
             return Some(hit);
         }
@@ -117,7 +118,7 @@ pub(crate) async fn blocking_hit(app: &Arc<App>, bot: &db::Bot, turn_id: &str) -
     // 查完撞限、再讀一次主機之前（測試在這裡讓前一次讀不到的 DB 恢復）。
     #[cfg(test)]
     super::race_point::hit("quota_hold_after_lookup", &bot.id).await;
-    let host = match db::bot_host(&app.db, &bot.id).await {
+    let host = match db::bot_host(app.db(), &bot.id).await {
         Ok(h) => h,
         Err(e) => return Some(unverified(bot, &e)),
     };
@@ -136,57 +137,57 @@ pub(crate) async fn blocking_hit(app: &Arc<App>, bot: &db::Bot, turn_id: &str) -
 
 /// 這一列上一輪開機的憑據對這顆 bot **現在**還擋不擋：身分沒換、還沒到期、之後沒有成功回合清過那把 key、
 /// 撞的桶管得到它在跑的模型。讀不到那一列、或憑據解不開，回錯（呼叫端照擋）。
-async fn held_on_turn(app: &Arc<App>, bot: &db::Bot, turn_id: &str) -> anyhow::Result<Option<crate::quota::LimitHit>> {
-    let raw: Option<Option<String>> = sqlx::query_scalar("SELECT quota_hold FROM turns WHERE id=?").bind(turn_id).fetch_optional(&app.db).await?;
+async fn held_on_turn(app: &impl QuotaHoldContext, bot: &db::Bot, turn_id: &str) -> anyhow::Result<Option<crate::quota::LimitHit>> {
+    let raw: Option<Option<String>> = sqlx::query_scalar("SELECT quota_hold FROM turns WHERE id=?").bind(turn_id).fetch_optional(app.db()).await?;
     let Some(raw) = raw.flatten() else { return Ok(None) };
     let held: Held = serde_json::from_str(&raw).map_err(|e| anyhow::anyhow!("the quota hold on turn {turn_id} is unreadable: {e}"))?;
-    if held.boot == app_ports_p4state::boot_id(app) || !still_holds(app, bot, &held).await? {
+    if held.boot == app.boot_id() || !still_holds(app, bot, &held).await? {
         return Ok(None);
     }
     let hit = held.hit();
-    let model = app_ports_p4state::running_model(app, bot).await;
+    let model = app.running_model(bot).await;
     Ok(crate::quota::limit_hit_blocks_model(&hit, model.as_deref()).then_some(hit))
 }
 
 /// 憑據還算數：身分沒換、還沒到期、寫下之後同一把 key 沒有被成功回合清過撞限。身分是這顆 bot 現在實際跑的那個
 /// （[`crate::quota::billing_identity`]，issue #238）；讀不到回錯（呼叫端照擋）。
-async fn still_holds(app: &Arc<App>, bot: &db::Bot, held: &Held) -> anyhow::Result<bool> {
-    if held.identity != app_ports_p4state::billing_identity(app, bot).await? || crate::quota::limit_hit_expired(Some(&held.hit())) {
+async fn still_holds(app: &impl QuotaHoldContext, bot: &db::Bot, held: &Held) -> anyhow::Result<bool> {
+    if held.identity != app.billing_identity(bot).await? || crate::quota::limit_hit_expired(Some(&held.hit())) {
         return Ok(false);
     }
     // 寫下之後這個主機名改指到另一台（#347）：那是另一台機器上的帳號，撞限不跟過去。主機不在設定裡不算「換了」——
     // 讀不到不放行，跟上面讀不到身分一樣。單純重連不改設定，照樣算數。
     if let Some(then) = held.target.as_deref() {
-        let host = db::bot_host(&app.db, &bot.id).await?;
+        let host = db::bot_host(app.db(), &bot.id).await?;
         if host_target(app, &host).await.is_some_and(|now| now != then) {
             return Ok(false);
         }
     }
     Ok(match chrono::DateTime::parse_from_rfc3339(&held.held_at) {
-        Ok(t) => !app_ports_p4state::limit_cleared_since(app, bot, t.with_timezone(&chrono::Utc)).await,
+        Ok(t) => !app.limit_cleared_since(bot, t.with_timezone(&chrono::Utc)).await,
         Err(_) => true,
     })
 }
 
 /// 這個主機名**現在**指到哪台機器：本機是 `local`；遠端是 ssh 目標、port、herdr session（同 `api::repoints_host` 認的三項）。
 /// 不在設定裡回 `None`。
-async fn host_target(app: &impl crate::hosts::HostsAccess, host: &str) -> Option<String> {
-    app_ports_p4state::host_target(app, host).await
+async fn host_target(app: &impl super::s6_ports::QuotaHoldServices, host: &str) -> Option<String> {
+    app.host_target(host).await
 }
 
-async fn remember(app: &Arc<App>, turn_id: &str, bot: &db::Bot, hit: &crate::quota::LimitHit) -> anyhow::Result<()> {
-    let identity = app_ports_p4state::billing_identity(app, bot).await?;
-    let target = host_target(app, &db::bot_host(&app.db, &bot.id).await?).await;
+async fn remember(app: &impl QuotaHoldContext, turn_id: &str, bot: &db::Bot, hit: &crate::quota::LimitHit) -> anyhow::Result<()> {
+    let identity = app.billing_identity(bot).await?;
+    let target = host_target(app, &db::bot_host(app.db(), &bot.id).await?).await;
     let json = serde_json::to_string(&Held::new(app, identity.as_deref(), target, hit))?;
-    sqlx::query("UPDATE turns SET quota_hold=? WHERE id=? AND status='queued'").bind(&json).bind(turn_id).execute(&app.db).await?;
+    sqlx::query("UPDATE turns SET quota_hold=? WHERE id=? AND status='queued'").bind(&json).bind(turn_id).execute(app.db()).await?;
     Ok(())
 }
 
 /// 撞限剛記下（`turn_error::mark_claude_limit_hit`）：這顆 bot 現在排著的每一則當場帶上憑據（#108 重開），不等下一次
 /// flush 擋下才寫——記下到擋下之間 daemon 死掉、或 flush 那一下寫不進去，重啟之後都還有憑據。寫不進去回錯：撞限那條路
 /// 會把它記成欠著、`StopFailure` 由收件匣重試。
-pub(crate) async fn stamp_queued(app: &Arc<App>, bot_id: &str, identity: Option<&str>, hit: &crate::quota::LimitHit) -> anyhow::Result<()> {
-    let target = host_target(app, &db::bot_host(&app.db, bot_id).await?).await;
+pub(crate) async fn stamp_queued(app: &(impl Db + BootId + super::s6_ports::QuotaHoldServices), bot_id: &str, identity: Option<&str>, hit: &crate::quota::LimitHit) -> anyhow::Result<()> {
+    let target = host_target(app, &db::bot_host(app.db(), bot_id).await?).await;
     let json = serde_json::to_string(&Held::new(app, identity, target, hit))?;
     sqlx::query(
         "UPDATE turns SET quota_hold=? WHERE status='queued'
@@ -194,7 +195,7 @@ pub(crate) async fn stamp_queued(app: &Arc<App>, bot_id: &str, identity: Option<
     )
     .bind(&json)
     .bind(bot_id)
-    .execute(&app.db)
+    .execute(app.db())
     .await?;
     Ok(())
 }
@@ -215,7 +216,7 @@ fn backfill_state() -> &'static Mutex<HashMap<String, bool>> {
 }
 
 fn backfill_key(app: &impl crate::capabilities::BootId, host: &str) -> String {
-    format!("{}\u{0}{host}", app_ports_p4state::boot_id(app))
+    format!("{}\u{0}{host}", app.boot_id())
 }
 
 /// 回填時憑據解不開的 bot（鍵同樣帶 `boot_id`）：對它們而言「這台回填完了」不成立，`blocking_hit` 照舊
@@ -246,7 +247,7 @@ fn backfilled(app: &impl crate::capabilities::BootId, host: &str) -> bool {
 /// 讀不到就**不算回填過**（#108 重開）：以前讀不到那幾列當作沒有、照樣標成跑完，flush 從此只看空的記憶體，重啟前記下的
 /// 撞限就這樣放行。現在跑到一半讀不到就拿掉標記——flush 繼續看每一列自己的憑據（照擋），[`BACKFILL_RETRY`] 之後
 /// （或那台主機下一次偵測完）再回填一次。已經種回去的留著（`restore_limit_hit` 只留較晚的，重來不會疊）。
-pub(crate) async fn backfill_once(app: &Arc<App>, host: &str) {
+pub(crate) async fn backfill_once(app: &impl QuotaHoldContext, host: &str) {
     let key = backfill_key(app, host);
     {
         let Ok(mut m) = backfill_state().lock() else { return };
@@ -261,7 +262,7 @@ pub(crate) async fn backfill_once(app: &Arc<App>, host: &str) {
                 m.insert(key, true);
             }
             for bot_id in woken {
-                schedule_flush_queued(app, &bot_id);
+                app.schedule_queue_flush(&bot_id);
             }
         }
         Err(e) => {
@@ -277,7 +278,7 @@ pub(crate) async fn backfill_once(app: &Arc<App>, host: &str) {
 /// 回填讀不到之後多久再試。
 const BACKFILL_RETRY: Duration = Duration::from_secs(30);
 
-fn retry_backfill(app: &Arc<App>, host: &str) {
+fn retry_backfill(app: &impl QuotaHoldContext, host: &str) {
     if cfg!(test) {
         return;
     }
@@ -289,17 +290,17 @@ fn retry_backfill(app: &Arc<App>, host: &str) {
 }
 
 /// 回填本身：回傳要叫醒 flush 的 bot。任何一步讀不到就回錯。
-async fn backfill(app: &Arc<App>, host: &str) -> anyhow::Result<Vec<String>> {
+async fn backfill(app: &impl QuotaHoldContext, host: &str) -> anyhow::Result<Vec<String>> {
     let rows: Vec<(String, String)> = sqlx::query_as(
         "SELECT c.bot_id, t.quota_hold FROM turns t JOIN conversations c ON c.id = t.conversation_id
           WHERE t.status = 'queued' AND t.quota_hold IS NOT NULL",
     )
-    .fetch_all(&app.db)
+    .fetch_all(app.db())
     .await?;
     let mut woken = Vec::new();
     for (bot_id, raw) in rows {
-        let Some(bot) = db::bot(&app.db, &bot_id).await? else { continue };
-        if db::bot_host(&app.db, &bot.id).await? != host {
+        let Some(bot) = db::bot(app.db(), &bot_id).await? else { continue };
+        if db::bot_host(app.db(), &bot.id).await? != host {
             continue;
         }
         // 解不開的憑據（不是讀不到，是內容壞了）重來也一樣：跳過它，不讓它擋住整台主機的回填。
@@ -316,12 +317,12 @@ async fn backfill(app: &Arc<App>, host: &str) -> anyhow::Result<Vec<String>> {
             }
         };
         woken.push(bot.id.clone());
-        if held.boot == app_ports_p4state::boot_id(app) || !still_holds(app, &bot, &held).await? {
+        if held.boot == app.boot_id() || !still_holds(app, &bot, &held).await? {
             continue;
         }
         // 種回撞到的那個帳號（憑據上記的身分；`still_holds` 已經確認它就是這顆 bot 現在實際跑的，issue #238）。
-        let base = app_ports_p4state::quota_base_for_host(app, host, &bot.kind, held.identity.as_deref()).await;
-        if app_ports_p4state::restore_limit_hit(app, host, &base, held.hit()).await {
+        let base = app.quota_base_for_host(host, &bot.kind, held.identity.as_deref()).await;
+        if app.restore_limit_hit(host, &base, held.hit()).await {
             tracing::info!(host, bot = %bot.id, until = ?held.until, "重啟回填：排著的 prompt 記下的撞限補回記憶體");
         }
     }
@@ -415,13 +416,13 @@ mod tests {
         let app = env.app.clone();
         let bot = tt::claude_bot(&app, &env.project_id, "no-quota").await;
         let run = tt::fake_run(&app, &bot.id).await;
-        let conv = db::conversation_id(&app.db, &bot.id).await.unwrap();
+        let conv = db::conversation_id(app.db(), &bot.id).await.unwrap();
         let turn = db::ulid();
         sqlx::query("INSERT INTO turns (id, conversation_id, origin, status, delivery, prompt_text, created_at) VALUES (?,?,'web','queued','pending','派工',?)")
             .bind(&turn)
             .bind(&conv)
             .bind(db::now())
-            .execute(&app.db)
+            .execute(app.db())
             .await
             .unwrap();
         let until = db::iso_at(chrono::Utc::now() + chrono::Duration::hours(2));
@@ -430,7 +431,7 @@ mod tests {
         forget_held(&bot.id);
 
         flush_queued_locked(&app, &bot.id).await.unwrap();
-        let t: (String, i64, Option<String>) = sqlx::query_as("SELECT status, flush_retries, run_id FROM turns WHERE id=?").bind(&turn).fetch_one(&app.db).await.unwrap();
+        let t: (String, i64, Option<String>) = sqlx::query_as("SELECT status, flush_retries, run_id FROM turns WHERE id=?").bind(&turn).fetch_one(app.db()).await.unwrap();
         assert_eq!(t, ("queued".to_string(), 0, None), "沒額度：不 claim、不花重試");
         assert!(!env.herdr.methods().iter().any(|m| m == "pane.send_text" || m == "agent.prompt"), "一個字都沒打");
         assert_eq!(queue_retry_timer_left(&bot.id).map(|d| d <= RECHECK_MAX), Some(true), "掛了 timer，最多五分鐘再看");
@@ -439,7 +440,7 @@ mod tests {
         crate::quota::clear_limit_hit(&app, LOCAL_HOST, "claude").await;
         forget_queue_retry_timer(&bot.id);
         flush_queued_locked(&app, &bot.id).await.unwrap();
-        let t: (String, i64) = sqlx::query_as("SELECT status, flush_retries FROM turns WHERE id=?").bind(&turn).fetch_one(&app.db).await.unwrap();
+        let t: (String, i64) = sqlx::query_as("SELECT status, flush_retries FROM turns WHERE id=?").bind(&turn).fetch_one(app.db()).await.unwrap();
         assert!(t.0 != "queued" || t.1 > 0, "額度回來：往下送（這裡沒有真的 pane，會被放回並花一次重試）：{t:?}");
         let _ = run;
         forget_queue_retry_timer(&bot.id);
@@ -467,16 +468,16 @@ mod tests {
         let env = tt::env().await;
         let app = env.app.clone();
         let bot = tt::claude_bot(&app, &env.project_id, name).await;
-        sqlx::query("UPDATE bots SET identity=? WHERE id=?").bind(identity).bind(&bot.id).execute(&app.db).await.unwrap();
-        let bot = db::bot(&app.db, &bot.id).await.unwrap().unwrap();
+        sqlx::query("UPDATE bots SET identity=? WHERE id=?").bind(identity).bind(&bot.id).execute(app.db()).await.unwrap();
+        let bot = db::bot(app.db(), &bot.id).await.unwrap().unwrap();
         tt::fake_run(&app, &bot.id).await;
-        let conv = db::conversation_id(&app.db, &bot.id).await.unwrap();
+        let conv = db::conversation_id(app.db(), &bot.id).await.unwrap();
         let turn = db::ulid();
         sqlx::query("INSERT INTO turns (id, conversation_id, origin, status, delivery, prompt_text, created_at) VALUES (?,?,'web','queued','pending','派工',?)")
             .bind(&turn)
             .bind(&conv)
             .bind(db::now())
-            .execute(&app.db)
+            .execute(app.db())
             .await
             .unwrap();
         forget_queue_retry_timer(&bot.id);
@@ -492,7 +493,7 @@ mod tests {
     /// `(還排著而且沒花重試＝被額度擋, 身上的憑據)`。過了閘門的在測試裡沒有真的 pane，會被放回並花一次重試。
     async fn state(app: &Arc<App>, turn: &str) -> (bool, Option<Held>) {
         let (status, retries, raw): (String, i64, Option<String>) =
-            sqlx::query_as("SELECT status, flush_retries, quota_hold FROM turns WHERE id=?").bind(turn).fetch_one(&app.db).await.unwrap();
+            sqlx::query_as("SELECT status, flush_retries, quota_hold FROM turns WHERE id=?").bind(turn).fetch_one(app.db()).await.unwrap();
         (status == "queued" && retries == 0, raw.map(|r| serde_json::from_str(&r).unwrap()))
     }
 
@@ -523,7 +524,7 @@ mod tests {
                     .await
                     .unwrap();
             }
-            sqlx::query("UPDATE runs SET runtime_identity='cc1' WHERE bot_id=?").bind(&q.bot.id).execute(&app.db).await.unwrap();
+            sqlx::query("UPDATE runs SET runtime_identity='cc1' WHERE bot_id=?").bind(&q.bot.id).execute(app.db()).await.unwrap();
             assert!(crate::quota::seed_limit_hit(&app, crate::config::LOCAL_HOST, hit_on, &later(2), "You've hit your session limit", Some("five_hour".into())).await);
             flush(&app, &q.bot.id).await;
             let (was_held, hold) = state(&app, &q.turn).await;
@@ -579,7 +580,7 @@ mod tests {
     }
 
     async fn put_hold(app: &Arc<App>, turn: &str, held: &Held) {
-        sqlx::query("UPDATE turns SET quota_hold=? WHERE id=?").bind(serde_json::to_string(held).unwrap()).bind(turn).execute(&app.db).await.unwrap();
+        sqlx::query("UPDATE turns SET quota_hold=? WHERE id=?").bind(serde_json::to_string(held).unwrap()).bind(turn).execute(app.db()).await.unwrap();
     }
 
     fn old_hold(identity: Option<&str>, until: Option<String>, bucket: Option<&str>) -> Held {
@@ -611,8 +612,8 @@ mod tests {
             ("這一輪自己寫的：記憶體說了算", Held { boot: app.boot_id.clone(), ..old_hold(Some("cc-a"), Some(later(2)), None) }, None, false),
         ];
         for (why, held, model, want) in cases {
-            sqlx::query("UPDATE turns SET status='queued', run_id=NULL, flush_retries=0, next_flush_at=NULL WHERE id=?").bind(&q.turn).execute(&app.db).await.unwrap();
-            sqlx::query("UPDATE bots SET model=? WHERE id=?").bind(model).bind(&q.bot.id).execute(&app.db).await.unwrap();
+            sqlx::query("UPDATE turns SET status='queued', run_id=NULL, flush_retries=0, next_flush_at=NULL WHERE id=?").bind(&q.turn).execute(app.db()).await.unwrap();
+            sqlx::query("UPDATE bots SET model=? WHERE id=?").bind(model).bind(&q.bot.id).execute(app.db()).await.unwrap();
             put_hold(&app, &q.turn, &held).await;
             flush(&app, &q.bot.id).await;
             let (blocked, left) = state(&app, &q.turn).await;
@@ -621,12 +622,12 @@ mod tests {
         }
 
         // 寫下之後同一把 key 有一回合真的答完（`clear_limit_hit` 記下的時刻）：額度回來的直接證據。
-        sqlx::query("UPDATE turns SET status='queued', run_id=NULL, flush_retries=0, next_flush_at=NULL WHERE id=?").bind(&q.turn).execute(&app.db).await.unwrap();
-        sqlx::query("UPDATE bots SET model=NULL WHERE id=?").bind(&q.bot.id).execute(&app.db).await.unwrap();
+        sqlx::query("UPDATE turns SET status='queued', run_id=NULL, flush_retries=0, next_flush_at=NULL WHERE id=?").bind(&q.turn).execute(app.db()).await.unwrap();
+        sqlx::query("UPDATE bots SET model=NULL WHERE id=?").bind(&q.bot.id).execute(app.db()).await.unwrap();
         put_hold(&app, &q.turn, &old_hold(Some("cc-a"), Some(later(2)), None)).await;
         flush(&app, &q.bot.id).await;
         assert!(state(&app, &q.turn).await.0);
-        let bot = db::bot(&app.db, &q.bot.id).await.unwrap().unwrap();
+        let bot = db::bot(app.db(), &q.bot.id).await.unwrap().unwrap();
         crate::runners::quota::clear_limit_hit_for_bot(&app, &bot).await;
         flush(&app, &q.bot.id).await;
         assert!(!state(&app, &q.turn).await.0, "成功回合清過那把 key：放行");
@@ -645,12 +646,12 @@ mod tests {
             let pid = a.env.project_id.clone();
             async move {
                 let bot = tt::claude_bot(&app, &pid, name).await;
-                sqlx::query("UPDATE bots SET identity=? WHERE id=?").bind(identity).bind(&bot.id).execute(&app.db).await.unwrap();
-                let conv = db::conversation_id(&app.db, &bot.id).await.unwrap();
+                sqlx::query("UPDATE bots SET identity=? WHERE id=?").bind(identity).bind(&bot.id).execute(app.db()).await.unwrap();
+                let conv = db::conversation_id(app.db(), &bot.id).await.unwrap();
                 let turn = db::ulid();
                 sqlx::query("INSERT INTO turns (id, conversation_id, origin, status, delivery, prompt_text, created_at) VALUES (?,?,'web','queued','pending','派工',?)")
-                    .bind(&turn).bind(&conv).bind(db::now()).execute(&app.db).await.unwrap();
-                (db::bot(&app.db, &bot.id).await.unwrap().unwrap(), turn)
+                    .bind(&turn).bind(&conv).bind(db::now()).execute(app.db()).await.unwrap();
+                (db::bot(app.db(), &bot.id).await.unwrap().unwrap(), turn)
             }
         };
         let (switched, switched_turn) = add("bf-switched", "cc-c").await;
@@ -698,15 +699,15 @@ mod tests {
             async move {
                 let pid = db::ulid();
                 sqlx::query("INSERT INTO projects (id, path, label, host, created_at) VALUES (?, ?, ?, ?, ?)")
-                    .bind(&pid).bind(format!("/x/{name}")).bind(name).bind(host).bind(db::now()).execute(&app.db).await.unwrap();
+                    .bind(&pid).bind(format!("/x/{name}")).bind(name).bind(host).bind(db::now()).execute(app.db()).await.unwrap();
                 let bot = tt::claude_bot(&app, &pid, name).await;
-                sqlx::query("UPDATE bots SET identity='cc-a' WHERE id=?").bind(&bot.id).execute(&app.db).await.unwrap();
-                let bot = db::bot(&app.db, &bot.id).await.unwrap().unwrap();
+                sqlx::query("UPDATE bots SET identity='cc-a' WHERE id=?").bind(&bot.id).execute(app.db()).await.unwrap();
+                let bot = db::bot(app.db(), &bot.id).await.unwrap().unwrap();
                 tt::fake_run(&app, &bot.id).await;
-                let conv = db::conversation_id(&app.db, &bot.id).await.unwrap();
+                let conv = db::conversation_id(app.db(), &bot.id).await.unwrap();
                 let turn = db::ulid();
                 sqlx::query("INSERT INTO turns (id, conversation_id, origin, status, delivery, prompt_text, created_at) VALUES (?,?,'web','queued','pending','派工',?)")
-                    .bind(&turn).bind(&conv).bind(db::now()).execute(&app.db).await.unwrap();
+                    .bind(&turn).bind(&conv).bind(db::now()).execute(app.db()).await.unwrap();
                 // 走正式的寫入路徑（撞限當下蓋上），再當成上一輪開機寫的。
                 stamp_queued(&app, &bot.id, Some("cc-a"), &hit(Some(&later(2)))).await.unwrap();
                 let (_, held) = state(&app, &turn).await;
@@ -744,7 +745,7 @@ mod tests {
     }
 
     async fn rename(app: &Arc<App>, from: &str, to: &str) {
-        sqlx::query(&format!("ALTER TABLE {from} RENAME TO {to}")).execute(&app.db).await.unwrap();
+        sqlx::query(&format!("ALTER TABLE {from} RENAME TO {to}")).execute(app.db()).await.unwrap();
     }
 
     /// #108 重開：判斷擋不擋要的狀態讀不到，照擋、短時間後再看——不是「沒撞限」。
@@ -775,12 +776,12 @@ mod tests {
         // 「回填跳過它之後只看記憶體」——而那正是放行：解不開的憑據沒被種回記憶體，空的記憶體不是
         // 「沒撞限」的證據，照那條走會把唯一的證據 `forget` 掉、再把那一則送進還沒額度的身分。
         // 跟上面一格（那一列讀不到 → 照擋）也自相矛盾：同樣是「證明不了」，不該一個擋一個放。
-        sqlx::query("UPDATE turns SET quota_hold='not json' WHERE id=?").bind(&q.turn).execute(&app.db).await.unwrap();
+        sqlx::query("UPDATE turns SET quota_hold='not json' WHERE id=?").bind(&q.turn).execute(app.db()).await.unwrap();
         assert!(blocking_hit(&app, &q.bot, &q.turn).await.is_some(), "解不開：回填之前照擋");
         backfill_once(&app, LOCAL_HOST).await;
         assert!(blocking_hit(&app, &q.bot, &q.turn).await.is_some(), "解不開：回填之後照樣擋（#522）");
         // 這裡不能用 `state`（它會把憑據 parse 回 `Held`，而這一格正是故意壞的）：直接看那一欄還在不在。
-        let raw: Option<String> = sqlx::query_scalar("SELECT quota_hold FROM turns WHERE id=?").bind(&q.turn).fetch_one(&app.db).await.unwrap();
+        let raw: Option<String> = sqlx::query_scalar("SELECT quota_hold FROM turns WHERE id=?").bind(&q.turn).fetch_one(app.db()).await.unwrap();
         assert_eq!(raw.as_deref(), Some("not json"), "唯一的證據不准被 forget 掉");
         forget_queue_retry_timer(&q.bot.id);
         forget_held(&q.bot.id);
@@ -811,7 +812,7 @@ mod tests {
         let app = q.env.app.clone();
         assert!(crate::quota::seed_limit_hit(&app, LOCAL_HOST, "claude", &later(2), "You've hit your session limit", Some("five_hour".into())).await);
         sqlx::query("CREATE TRIGGER refuse_quota_hold BEFORE UPDATE OF quota_hold ON turns BEGIN SELECT RAISE(ABORT, 'injected'); END")
-            .execute(&app.db)
+            .execute(app.db())
             .await
             .unwrap();
         flush(&app, &q.bot.id).await;
@@ -819,7 +820,7 @@ mod tests {
         assert!(blocked && held.is_none(), "照擋，憑據還沒落地");
         assert!(queue_retry_timer_left(&q.bot.id).is_some_and(|d| d <= PERSIST_RETRY), "很快再寫一次：{:?}", queue_retry_timer_left(&q.bot.id));
 
-        sqlx::query("DROP TRIGGER refuse_quota_hold").execute(&app.db).await.unwrap();
+        sqlx::query("DROP TRIGGER refuse_quota_hold").execute(app.db()).await.unwrap();
         flush(&app, &q.bot.id).await;
         let (blocked, held) = state(&app, &q.turn).await;
         assert!(blocked && held.is_some(), "寫成了");

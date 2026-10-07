@@ -80,7 +80,7 @@ fn annotate_cleanup(err: LcError, restored: bool) -> LcError {
 
 /// `expect_text`＝網頁看到的那句；`expect_run_id`＝網頁看到它的那個 run。
 pub async fn accept(
-    app: &Arc<App>,
+    app: &impl super::s6_ports::SuggestionContext,
     bot_id: &str,
     expect_text: &str,
     expect_run_id: Option<&str>,
@@ -102,23 +102,23 @@ pub async fn accept(
     if let Err(e) = super::owed_delivery::settle_locked(app, bot_id).await {
         tracing::warn!(bot = %bot_id, error = %e, "欠著的送達結果還是寫不進去");
     }
-    let bot = db::bot(&app.db, bot_id).await.map_err(up)?.filter(|b| b.deleted_at.is_none()).ok_or_else(|| LcError::NotFound("bot".into()))?;
+    let bot = db::bot(app.db(), bot_id).await.map_err(up)?.filter(|b| b.deleted_at.is_none()).ok_or_else(|| LcError::NotFound("bot".into()))?;
     if bot.kind != "claude" {
         return Err(LcError::conflict("suggestion_unsupported", json!({"kind": bot.kind, "sent": false})));
     }
-    let conv = db::conversation_id(&app.db, bot_id).await.map_err(up)?;
+    let conv = db::conversation_id(app.db(), bot_id).await.map_err(up)?;
     // 同一個 client_request_id 重送：回原本那一筆（網頁逾時重試不會多送一次）。
     if let Some(t) = sqlx::query_as::<_, db::Turn>("SELECT * FROM turns WHERE conversation_id=? AND client_request_id=?")
         .bind(&conv)
         .bind(client_request_id)
-        .fetch_optional(&app.db)
+        .fetch_optional(app.db())
         .await
         .map_err(up)?
     {
         return answer_for_turn(app, &t).await;
     }
     // ---- 按 Tab 之前：全是看、一個鍵都不按 ----
-    let run = composer_draft::submit_gates(app, bot_id, &bot, &conv).await?;
+    let run = app.submit_gates(bot_id, &bot, &conv).await?;
     if expect_run_id.is_some_and(|id| id != run.id) {
         return Err(LcError::conflict("run mismatch", json!({"run_id": run.id, "sent": false})));
     }
@@ -128,7 +128,7 @@ pub async fn accept(
             json!({"run_id": run.id, "agent_status": run.agent_status, "sent": false}),
         ));
     }
-    let client = client_for_run(app, &run).await?;
+    let client = app.client_for_run(&run).await?;
     let Some(pane) = composer_draft::pane_of(&run) else {
         return Err(not_attempted_error(&run.id, Delivered::NotAttempted { reason: "no_pane_to_type_into", retry: true }));
     };
@@ -201,7 +201,7 @@ pub async fn accept(
 
     // ---- Enter：框裡就是那一句，走「送出框裡那段」的既有流程 ----
     let token = composer_draft::draft_token(&run.id, &pane, &draft);
-    match composer_draft::submit_locked(app, bot_id, &token, client_request_id).await {
+    match app.submit_locked(bot_id, &token, client_request_id).await {
         Ok(out) => Ok(out),
         Err(composer_draft::SubmitDraftError::EnterMayHaveBeenSent(e)) => {
             // Enter 已送或可能已送：絕不清理輸入框，避免打斷已送出的回合。
@@ -209,11 +209,11 @@ pub async fn accept(
         }
         Err(composer_draft::SubmitDraftError::NoKeySent(err)) => {
             // Enter 確定尚未送出：若輸入框仍是原建議且無回合擁有它，清框還原。
-            let turn_owned = db::in_flight_turn(&app.db, &run.id).await.unwrap_or(None).is_some()
+            let turn_owned = db::in_flight_turn(app.db(), &run.id).await.unwrap_or(None).is_some()
                 || sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM turns WHERE conversation_id = ? AND client_request_id = ?")
                     .bind(&conv)
                     .bind(client_request_id)
-                    .fetch_one(&app.db)
+                    .fetch_one(app.db())
                     .await
                     .unwrap_or(1)
                     > 0;

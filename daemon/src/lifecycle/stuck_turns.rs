@@ -17,8 +17,9 @@
 //!
 //! idle 計時放記憶體：daemon 重啟後從第一次看到 idle 重新算，寧可晚收，不要誤收。
 
-use super::run_state::app_ports_p4state;
-use am_ports::BotLock;
+#[cfg(test)]
+use crate::capabilities::{BotLocks, Db};
+use super::s6_ports::{StuckTurnContext, StuckTurnServices};
 use super::*;
 use std::collections::HashMap;
 use std::sync::{Mutex, OnceLock};
@@ -70,13 +71,13 @@ fn prune<V>(map: &mut HashMap<String, V>, active: &[String]) {
 }
 
 /// 巡邏每輪把已經不 active 的 run 的行程級帳（idle 計時、閒置回收看的最後狀態）帶走。讀不到 DB 就這輪不清。
-async fn forget_ended_runs(app: &impl crate::capabilities::Db) {
+async fn forget_ended_runs(app: &(impl crate::capabilities::Db + StuckTurnServices)) {
     let ids: Result<Vec<String>, _> =
         sqlx::query_scalar(&format!("SELECT id FROM runs WHERE state IN {}", db::ACTIVE_STATES)).fetch_all(app.db()).await;
     match ids {
         Ok(ids) => {
             retain_runs(&ids);
-            crate::supervisor::idle_sleep::retain_runs(&ids);
+            app.retain_supervisor_runs(&ids);
         }
         Err(e) => tracing::warn!(error = ?e, "could not list active runs; per-run idle state not pruned this round"),
     }
@@ -117,7 +118,7 @@ fn wall_at(now: Instant) -> chrono::DateTime<chrono::Utc> {
 }
 
 /// 每 [`SWEEP_EVERY`] 掃一次所有主機。
-pub fn spawn_stuck_turn_sweeper(app: Arc<App>) {
+pub fn spawn_stuck_turn_sweeper(app: impl StuckTurnContext) {
     tokio::spawn(async move {
         loop {
             tokio::time::sleep(SWEEP_EVERY).await;
@@ -127,19 +128,19 @@ pub fn spawn_stuck_turn_sweeper(app: Arc<App>) {
             // run 早就結束卻還排著的 queued（含這個版本上線前留下來的）：沒有人會送，收掉。
             revoke_all_orphaned_queued_turns(&app).await;
             // 停在提問的子 agent 的通知不只靠那一條 blocked 邊（#192）。
-            crate::runners::child_alerts::sweep(&app).await;
+            app.sweep_child_alerts().await;
             // 完成通知也用持久 turn 記錄補上漏掉的事件或 daemon 中斷。
-            crate::runners::child_done::sweep(&app).await;
+            app.sweep_child_done().await;
         }
     });
 }
 
 /// 收掉卡住的 turn。`host` 給了只看那一台（reconcile 那一輪用），`None` 全部。回傳收掉的 turn id。
-pub async fn sweep(app: &Arc<App>, host: Option<&str>) -> Vec<String> {
+pub async fn sweep(app: &impl StuckTurnContext, host: Option<&str>) -> Vec<String> {
     sweep_at(app, host, Instant::now(), idle_threshold()).await
 }
 
-pub(crate) async fn sweep_at(app: &Arc<App>, host: Option<&str>, now: Instant, threshold: Duration) -> Vec<String> {
+pub(crate) async fn sweep_at(app: &impl StuckTurnContext, host: Option<&str>, now: Instant, threshold: Duration) -> Vec<String> {
     let rows: Vec<(String, String, String, String)> = match sqlx::query_as(
         "SELECT t.id, r.id, r.bot_id, r.agent_status
            FROM turns t
@@ -151,7 +152,7 @@ pub(crate) async fn sweep_at(app: &Arc<App>, host: Option<&str>, now: Instant, t
     )
     .bind(host)
     .bind(host)
-    .fetch_all(&app.db)
+    .fetch_all(app.db())
     .await
     {
         Ok(rows) => rows,
@@ -167,16 +168,16 @@ pub(crate) async fn sweep_at(app: &Arc<App>, host: Option<&str>, now: Instant, t
         if !idle_for(&run_id, now).is_some_and(|d| d >= threshold) {
             continue;
         }
-        let bot_lock = app_ports_p4state::AppBotLock::new(app);
-        let _g = bot_lock.lock_bot(&bot_id).await;
+        let bot_lock = app.bot_lock(&bot_id).await;
+        let _g = bot_lock.lock().await;
         // 等鎖的時候狀態可能變了：鎖內重讀，run 不是 idle、turn 已經不是那一筆就不動。
-        let Ok(Some(run)) = db::run(&app.db, &run_id).await else { continue };
+        let Ok(Some(run)) = db::run(app.db(), &run_id).await else { continue };
         observe_at(&run_id, &run.agent_status, now);
         if run.state != "running" || run.agent_status != "idle" {
             continue;
         }
         let Some(idle) = idle_for(&run_id, now).filter(|d| *d >= threshold) else { continue };
-        let Ok(Some(turn)) = db::in_flight_turn(&app.db, &run_id).await else { continue };
+        let Ok(Some(turn)) = db::in_flight_turn(app.db(), &run_id).await else { continue };
         if turn.id != turn_id {
             continue;
         }
@@ -189,7 +190,7 @@ pub(crate) async fn sweep_at(app: &Arc<App>, host: Option<&str>, now: Instant, t
             Ok(true) => {
                 closed.push(turn.id.clone());
                 // 卡住的就是排在後面的那一筆：同一把鎖裡馬上送，不等下一次喚醒。
-                if let Err(e) = app_ports_p4state::flush_queued_locked(app, &bot_id).await {
+                if let Err(e) = super::flush_queued_locked(app, &bot_id).await {
                     tracing::warn!(bot = %bot_id, error = ?e, "queued prompt flush after closing a stuck turn failed");
                 }
             }
@@ -211,21 +212,21 @@ pub(crate) enum CloseWhy {
 /// 不等 5 分鐘的閒置門檻（2026-09-26 使用者：「判斷為等待中，實際上並沒有再輸出」）。選了「換模型重試」的話
 /// claude 會接著跑同一回合、herdr 報 working，這裡在鎖內重讀看到不是 idle 就不動。舊 turn 已結束或 turn id 改變也不動。
 /// 回傳收掉的 turn id。
-pub(crate) async fn close_after_session_paused(app: &Arc<App>, run_id: &str, expected_turn_id: &str) -> Option<String> {
-    let run = db::run(&app.db, run_id).await.ok()??;
-    let bot_lock = app_ports_p4state::AppBotLock::new(app);
-    let _g = bot_lock.lock_bot(&run.bot_id).await;
-    let run = db::run(&app.db, run_id).await.ok()??;
+pub(crate) async fn close_after_session_paused(app: &impl StuckTurnContext, run_id: &str, expected_turn_id: &str) -> Option<String> {
+    let run = db::run(app.db(), run_id).await.ok()??;
+    let bot_lock = app.bot_lock(&run.bot_id).await;
+    let _g = bot_lock.lock().await;
+    let run = db::run(app.db(), run_id).await.ok()??;
     if run.state != "running" || run.agent_status != "idle" {
         return None;
     }
-    let turn = db::in_flight_turn(&app.db, run_id).await.ok()??;
+    let turn = db::in_flight_turn(app.db(), run_id).await.ok()??;
     if turn.id != expected_turn_id {
         return None;
     }
     match close_locked(app, &run, &turn, CloseWhy::SessionPaused).await {
         Ok(true) => {
-            if let Err(e) = app_ports_p4state::flush_queued_locked(app, &run.bot_id).await {
+            if let Err(e) = super::flush_queued_locked(app, &run.bot_id).await {
                 tracing::warn!(bot = %run.bot_id, error = ?e, "queued prompt flush after a session-paused close failed");
             }
             Some(turn.id)
@@ -239,13 +240,13 @@ pub(crate) async fn close_after_session_paused(app: &Arc<App>, run_id: &str, exp
 }
 
 /// 收一筆。`Ok(false)`：CAS 沒搶到（別的路剛好收掉了）。
-async fn close_locked(app: &Arc<App>, run: &db::Run, turn: &db::Turn, why: CloseWhy) -> anyhow::Result<bool> {
-    let Some(bot) = db::bot(&app.db, &run.bot_id).await? else { return Ok(false) };
+async fn close_locked(app: &impl StuckTurnContext, run: &db::Run, turn: &db::Turn, why: CloseWhy) -> anyhow::Result<bool> {
+    let Some(bot) = db::bot(app.db(), &run.bot_id).await? else { return Ok(false) };
     let reply = proven_reply(app, &bot, run, turn).await?;
     let already_answered: bool =
         sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM messages WHERE turn_id = ? AND role = 'assistant')")
             .bind(&turn.id)
-            .fetch_one(&app.db)
+            .fetch_one(app.db())
             .await?;
     let mins = match why {
         CloseWhy::Idle(idle) => idle.as_secs() / 60,
@@ -253,7 +254,7 @@ async fn close_locked(app: &Arc<App>, run: &db::Run, turn: &db::Turn, why: Close
     };
     let status = if reply.is_some() { "completed" } else { "completed_fallback" };
 
-    let mut tx = app.db.begin().await?;
+    let mut tx = app.db().begin().await?;
     // 這裡的終點是**算出來的**（有證得出來的回覆就 `completed`，否則 `completed_fallback`），
     // 所以要走 controller：它會先擋掉不合法的終點，而不是讓一個綁錯的字串直接寫進 DB（issue #68）。
     let claimed =
@@ -264,7 +265,7 @@ async fn close_locked(app: &Arc<App>, run: &db::Run, turn: &db::Turn, why: Close
     let message = match reply.as_deref() {
         // 回覆已經有一份（例如 hook 寫了訊息卻沒收掉 turn）：不再寫第二份。
         Some(_) if already_answered => None,
-        Some(text) => Some(app_ports_p4state::insert_message_tx(&mut tx, &turn.conversation_id, Some(&turn.id), "assistant", text, "transcript", false, None).await?),
+        Some(text) => Some(insert_message_tx(&mut tx, &turn.conversation_id, Some(&turn.id), "assistant", text, "transcript", false, None).await?),
         None => {
             let why = match why {
                 CloseWhy::SessionPaused => "claude 的 Session paused 選單關掉了、這個回合沒有回覆（被暫停），直接收尾，不再顯示等待中。".to_string(),
@@ -273,15 +274,15 @@ async fn close_locked(app: &Arc<App>, run: &db::Run, turn: &db::Turn, why: Close
                      transcript 證不出這則 prompt 之後有完整回覆，所以標成 completed_fallback（不是失敗）。"
                 ),
             };
-            Some(app_ports_p4state::insert_message_tx(&mut tx, &turn.conversation_id, Some(&turn.id), "system", &why, "system", false, None).await?)
+            Some(insert_message_tx(&mut tx, &turn.conversation_id, Some(&turn.id), "system", &why, "system", false, None).await?)
         }
     };
     tx.commit().await?;
     tracing::warn!(turn = %turn.id, bot = %bot.name, status, idle_mins = mins, "closed a turn stuck in flight after the agent went idle");
     if let Some(m) = message {
-        app_ports_p4state::emit_message_added(app, &bot.id, m).await;
+        emit_message_added(app, &bot.id, m).await;
     }
-    app_ports_p4state::emit_turn(app, &turn.id).await;
+    app.emit_turn(&turn.id).await;
     Ok(true)
 }
 
@@ -289,8 +290,8 @@ async fn close_locked(app: &Arc<App>, run: &db::Run, turn: &db::Turn, why: Close
 ///
 /// 讀不到主機、讀不到送了什麼都回錯（#193），這一輪不收、下一輪再看：以前當成「證不出回覆」，照樣收成
 /// `completed_fallback`，transcript 裡那份完整的回覆就沒存。
-async fn proven_reply(app: &Arc<App>, bot: &db::Bot, run: &db::Run, turn: &db::Turn) -> anyhow::Result<Option<String>> {
-    if db::bot_host(&app.db, &bot.id).await? != LOCAL_HOST {
+async fn proven_reply(app: &impl StuckTurnContext, bot: &db::Bot, run: &db::Run, turn: &db::Turn) -> anyhow::Result<Option<String>> {
+    if db::bot_host(app.db(), &bot.id).await? != LOCAL_HOST {
         return Ok(None);
     }
     let mut sent = turn_echo_texts(app, &turn.id).await?;
@@ -303,11 +304,11 @@ async fn proven_reply(app: &Arc<App>, bot: &db::Bot, run: &db::Run, turn: &db::T
     Ok(logged_reply(app, bot, run, &sent).await)
 }
 
-async fn logged_reply(app: &Arc<App>, bot: &db::Bot, run: &db::Run, sent: &[String]) -> Option<String> {
+async fn logged_reply(app: &impl StuckTurnContext, bot: &db::Bot, run: &db::Run, sent: &[String]) -> Option<String> {
     match bot.kind.as_str() {
         "claude" => {
             let raw_path = run.transcript_path.as_deref().filter(|p| !p.trim().is_empty())?;
-            if !crate::app_ports_p5::local_transcript_allowed(app, bot, raw_path).await {
+            if !app.local_transcript_allowed(bot, raw_path).await {
                 return None;
             }
             let path = std::path::PathBuf::from(raw_path);
@@ -316,10 +317,10 @@ async fn logged_reply(app: &Arc<App>, bot: &db::Bot, run: &db::Run, sent: &[Stri
         }
         "codex" => {
             // #749：先問 codex 自己的 thread 歷史（正確綁定 thread／turn 的最終回覆）；沒有證據才讀 rollout。
-            if let Some(reply) = crate::codex_history::exact_reply(app, bot, run, sent).await {
+            if let Some(reply) = app.codex_exact_reply(bot, run, sent).await {
                 return Some(reply);
             }
-            let home = codex_home(app, bot).await?;
+            let home = app.codex_home(bot).await?;
             let session = run.native_session_id.clone().filter(|s| !s.trim().is_empty())?;
             let log = tokio::task::spawn_blocking(move || {
                 let path = codex_session_log(&home, &session)?;
@@ -428,10 +429,10 @@ mod tests {
         sqlx::query("UPDATE runs SET transcript_path=? WHERE id=?")
             .bind(outside.to_string_lossy())
             .bind(&run_id)
-            .execute(&app.db)
+            .execute(app.db())
             .await
             .unwrap();
-        let run = db::run(&app.db, &run_id).await.unwrap().unwrap();
+        let run = db::run(app.db(), &run_id).await.unwrap().unwrap();
 
         let reply = logged_reply(&app, &bot, &run, &["requested prompt".into()]).await;
         assert_eq!(reply, None, "任意本機 JSONL 不能冒充 bot 的回覆證據");
@@ -457,24 +458,24 @@ mod tests {
         let app = env.app.clone();
         let bot = tt::claude_bot(&app, &env.project_id, "alfa").await;
         let run = tt::fake_run(&app, &bot.id).await;
-        let conv = crate::db::conversation_id(&app.db, &bot.id).await.unwrap();
+        let conv = crate::db::conversation_id(app.db(), &bot.id).await.unwrap();
         let turn = crate::db::ulid();
         sqlx::query("INSERT INTO turns (id, conversation_id, run_id, origin, status, delivery, prompt_text, created_at) VALUES (?,?,?,'web','in_flight','ok','x',?)")
             .bind(&turn)
             .bind(&conv)
             .bind(&run)
             .bind(crate::db::iso_in(-3600))
-            .execute(&app.db)
+            .execute(app.db())
             .await
             .unwrap();
         let status = |app: Arc<App>, turn: String| async move {
-            sqlx::query_scalar::<_, String>("SELECT status FROM turns WHERE id = ?").bind(turn).fetch_one(&app.db).await.unwrap()
+            sqlx::query_scalar::<_, String>("SELECT status FROM turns WHERE id = ?").bind(turn).fetch_one(app.db()).await.unwrap()
         };
-        sqlx::query("UPDATE projects SET handed_off_to = 'agm-host' WHERE id = ?").bind(&env.project_id).execute(&app.db).await.unwrap();
+        sqlx::query("UPDATE projects SET handed_off_to = 'agm-host' WHERE id = ?").bind(&env.project_id).execute(app.db()).await.unwrap();
         sweep_at(&app, None, Instant::now(), Duration::ZERO).await;
         assert_eq!(status(app.clone(), turn.clone()).await, "in_flight");
 
-        sqlx::query("UPDATE projects SET handed_off_to = NULL WHERE id = ?").bind(&env.project_id).execute(&app.db).await.unwrap();
+        sqlx::query("UPDATE projects SET handed_off_to = NULL WHERE id = ?").bind(&env.project_id).execute(app.db()).await.unwrap();
         sweep_at(&app, None, Instant::now(), Duration::ZERO).await;
         assert_ne!(status(app.clone(), turn.clone()).await, "in_flight", "收回之後照常收");
     }
@@ -557,10 +558,10 @@ mod tests {
         .bind(&run_id)
         .bind(&bot.id)
         .bind(db::now())
-        .execute(&app.db)
+        .execute(app.db())
         .await
         .unwrap();
-        let conv = db::conversation_id(&app.db, &bot.id).await.unwrap();
+        let conv = db::conversation_id(app.db(), &bot.id).await.unwrap();
         let turn_id = db::ulid();
         sqlx::query(
             "INSERT INTO turns (id, conversation_id, run_id, origin, status, delivery, created_at)
@@ -570,7 +571,7 @@ mod tests {
         .bind(&conv)
         .bind(&run_id)
         .bind(db::now())
-        .execute(&app.db)
+        .execute(app.db())
         .await
         .unwrap();
         insert_message(&app, &conv, Some(&turn_id), "user", prompt, "web", false, None).await.unwrap();
@@ -582,7 +583,7 @@ mod tests {
         sqlx::query("UPDATE bots SET env_json=? WHERE id=?")
             .bind(serde_json::json!({"CLAUDE_CONFIG_DIR": config_dir.to_string_lossy()}).to_string())
             .bind(&f.bot_id)
-            .execute(&f.env.app.db)
+            .execute(f.env.app.db())
             .await
             .unwrap();
         let dir = config_dir.join("projects/-test");
@@ -608,7 +609,7 @@ mod tests {
     async fn a_session_paused_turn_that_resumed_is_left_open() {
         let f = stuck("換模型重試那則").await;
         let app = f.env.app.clone();
-        sqlx::query("UPDATE runs SET agent_status='working' WHERE id=?").bind(&f.run_id).execute(&app.db).await.unwrap();
+        sqlx::query("UPDATE runs SET agent_status='working' WHERE id=?").bind(&f.run_id).execute(app.db()).await.unwrap();
         assert_eq!(close_after_session_paused(&app, &f.run_id, &f.turn_id).await, None);
         assert_eq!(turn(&app, &f.turn_id).await.status, "in_flight");
         let _ = &f.bot_id;
@@ -622,12 +623,12 @@ mod tests {
         let app = f.env.app.clone();
 
         assert_eq!(
-            super::super::turn_controller::set_status(&app.db, &f.turn_id, "in_flight", "completed", "Stop hook").await.unwrap(),
+            super::super::turn_controller::set_status(app.db(), &f.turn_id, "in_flight", "completed", "Stop hook").await.unwrap(),
             super::super::turn_controller::Outcome::Applied,
             "T1 由正常 Stop hook 路徑先收尾"
         );
 
-        let conversation_id = db::conversation_id(&app.db, &f.bot_id).await.unwrap();
+        let conversation_id = db::conversation_id(app.db(), &f.bot_id).await.unwrap();
         let next_turn_id = db::ulid();
         sqlx::query(
             "INSERT INTO turns (id, conversation_id, run_id, origin, status, delivery, created_at)
@@ -637,12 +638,12 @@ mod tests {
         .bind(&conversation_id)
         .bind(&f.run_id)
         .bind(db::now())
-        .execute(&app.db)
+        .execute(app.db())
         .await
         .unwrap();
         let run_status: String = sqlx::query_scalar("SELECT agent_status FROM runs WHERE id=?")
             .bind(&f.run_id)
-            .fetch_one(&app.db)
+            .fetch_one(app.db())
             .await
             .unwrap();
         assert_eq!(run_status, "idle", "T2 已在 DB 開始，herdr working 事件尚未到");
@@ -653,13 +654,13 @@ mod tests {
     }
 
     async fn turn(app: &Arc<App>, id: &str) -> db::Turn {
-        sqlx::query_as::<_, db::Turn>("SELECT * FROM turns WHERE id = ?").bind(id).fetch_one(&app.db).await.unwrap()
+        sqlx::query_as::<_, db::Turn>("SELECT * FROM turns WHERE id = ?").bind(id).fetch_one(app.db()).await.unwrap()
     }
 
     async fn messages(app: &Arc<App>, turn_id: &str) -> Vec<(String, String, String)> {
         sqlx::query_as("SELECT role, source, content FROM messages WHERE turn_id = ? ORDER BY created_at, rowid")
             .bind(turn_id)
-            .fetch_all(&app.db)
+            .fetch_all(app.db())
             .await
             .unwrap()
     }
@@ -672,11 +673,11 @@ mod tests {
     async fn an_idle_run_past_the_threshold_closes_its_turn_as_fallback_with_a_reason() {
         let f = stuck("部署 6b84fa5").await;
         let app = f.env.app.clone();
-        let a = crate::supervisor::store::insert_assignment(&app.db, None, &f.bot_id, "crid-stuck", "部署 6b84fa5", &[], None, true)
+        let a = crate::supervisor::store::insert_assignment(app.db(), None, &f.bot_id, "crid-stuck", "部署 6b84fa5", &[], None, true)
             .await
             .unwrap()
             .id;
-        crate::supervisor::store::mark_delivered(&app.db, &a, &f.turn_id, "ok").await.unwrap();
+        crate::supervisor::store::mark_delivered(app.db(), &a, &f.turn_id, "ok").await.unwrap();
         let mut events = app.subscribe_turns();
 
         let t0 = Instant::now();
@@ -694,7 +695,7 @@ mod tests {
         let ev = events.try_recv().expect("收尾有推 turn 事件");
         assert_eq!((ev.turn_id.as_str(), ev.status.as_str()), (f.turn_id.as_str(), "completed_fallback"));
         crate::supervisor::controller::reconcile(&app).await;
-        let row = crate::supervisor::store::assignment(&app.db, &a).await.unwrap().unwrap();
+        let row = crate::supervisor::store::assignment(app.db(), &a).await.unwrap().unwrap();
         assert_eq!(row.status, "awaiting_review", "交辦照一般回合結束流程，不留在 delivered");
 
         // 已經收掉的不會再收一次。
@@ -717,7 +718,7 @@ mod tests {
             .bind(&sent)
             .bind(&sent)
             .bind(&f.turn_id)
-            .execute(&app.db)
+            .execute(app.db())
             .await
             .unwrap();
 
@@ -748,7 +749,7 @@ mod tests {
         ]
         .join("\n");
         std::fs::write(&path, log + "\n").unwrap();
-        sqlx::query("UPDATE runs SET transcript_path = ? WHERE id = ?").bind(path.to_string_lossy()).bind(&f.run_id).execute(&app.db).await.unwrap();
+        sqlx::query("UPDATE runs SET transcript_path = ? WHERE id = ?").bind(path.to_string_lossy()).bind(&f.run_id).execute(app.db()).await.unwrap();
 
         let t0 = Instant::now();
         observe_at(&f.run_id, "idle", t0);
@@ -770,7 +771,7 @@ mod tests {
         let log: Vec<&str> = include_str!("fixtures/claude_2.1.278_pasted_content.jsonl").lines().take(2).collect();
         assert!(log[0].contains("<pasted_content id=\\\"c4ab\\\">"), "fixture 第一列就是包起來的那一則");
         std::fs::write(&path, log.join("\n") + "\n").unwrap();
-        sqlx::query("UPDATE runs SET transcript_path = ? WHERE id = ?").bind(path.to_string_lossy()).bind(&f.run_id).execute(&app.db).await.unwrap();
+        sqlx::query("UPDATE runs SET transcript_path = ? WHERE id = ?").bind(path.to_string_lossy()).bind(&f.run_id).execute(app.db()).await.unwrap();
 
         let t0 = Instant::now();
         observe_at(&f.run_id, "idle", t0);
@@ -789,13 +790,13 @@ mod tests {
         let path = own_transcript(&f).await;
         let log = [claude_user("部署 6b84fa5"), claude_assistant("end_turn", json!([{"type": "text", "text": "部署完成：pid 42894"}]))].join("\n");
         std::fs::write(&path, log + "\n").unwrap();
-        sqlx::query("UPDATE runs SET transcript_path = ? WHERE id = ?").bind(path.to_string_lossy()).bind(&f.run_id).execute(&app.db).await.unwrap();
-        let run = db::run(&app.db, &f.run_id).await.unwrap().unwrap();
+        sqlx::query("UPDATE runs SET transcript_path = ? WHERE id = ?").bind(path.to_string_lossy()).bind(&f.run_id).execute(app.db()).await.unwrap();
+        let run = db::run(app.db(), &f.run_id).await.unwrap().unwrap();
         let t = turn(&app, &f.turn_id).await;
 
-        sqlx::query("ALTER TABLE projects RENAME TO projects_unreadable").execute(&app.db).await.unwrap();
+        sqlx::query("ALTER TABLE projects RENAME TO projects_unreadable").execute(app.db()).await.unwrap();
         assert!(close_locked(&app, &run, &t, CloseWhy::Idle(6 * MIN)).await.is_err(), "讀不到主機是錯，不是「證不出來」");
-        sqlx::query("ALTER TABLE projects_unreadable RENAME TO projects").execute(&app.db).await.unwrap();
+        sqlx::query("ALTER TABLE projects_unreadable RENAME TO projects").execute(app.db()).await.unwrap();
         assert_eq!(turn(&app, &f.turn_id).await.status, "in_flight", "這一輪不收");
 
         assert!(close_locked(&app, &run, &t, CloseWhy::Idle(6 * MIN)).await.unwrap(), "讀得到了：照常收");
@@ -813,13 +814,13 @@ mod tests {
         observe_at(&f.run_id, "idle", t0);
 
         for status in ["working", "blocked"] {
-            sqlx::query("UPDATE runs SET agent_status = ? WHERE id = ?").bind(status).bind(&f.run_id).execute(&app.db).await.unwrap();
+            sqlx::query("UPDATE runs SET agent_status = ? WHERE id = ?").bind(status).bind(&f.run_id).execute(app.db()).await.unwrap();
             assert!(sweep_at(&app, None, t0 + 30 * MIN, 5 * MIN).await.is_empty(), "{status} 不收");
             assert_eq!(turn(&app, &f.turn_id).await.status, "in_flight");
         }
 
         // 回到 idle：計時從這一刻重新算，不接著之前那 30 分鐘。
-        sqlx::query("UPDATE runs SET agent_status = 'idle' WHERE id = ?").bind(&f.run_id).execute(&app.db).await.unwrap();
+        sqlx::query("UPDATE runs SET agent_status = 'idle' WHERE id = ?").bind(&f.run_id).execute(app.db()).await.unwrap();
         let back = t0 + 30 * MIN;
         observe_at(&f.run_id, "idle", back);
         assert!(sweep_at(&app, None, back + 4 * MIN, 5 * MIN).await.is_empty(), "重算後才四分鐘");
@@ -841,7 +842,7 @@ mod tests {
             let app = app.clone();
             let run = f.run_id.clone();
             async move {
-                sqlx::query("UPDATE runs SET agent_status = ? WHERE id = ?").bind(status).bind(&run).execute(&app.db).await.unwrap();
+                sqlx::query("UPDATE runs SET agent_status = ? WHERE id = ?").bind(status).bind(&run).execute(app.db()).await.unwrap();
             }
         };
         set("working").await;
@@ -864,7 +865,7 @@ mod tests {
         let app2 = app.clone();
         let sweeping = tokio::spawn(async move { sweep_at(&app2, None, t0 + 6 * MIN, 5 * MIN).await });
         tokio::time::sleep(Duration::from_millis(300)).await;
-        sqlx::query("UPDATE runs SET agent_status = 'blocked' WHERE id = ?").bind(&f.run_id).execute(&app.db).await.unwrap();
+        sqlx::query("UPDATE runs SET agent_status = 'blocked' WHERE id = ?").bind(&f.run_id).execute(app.db()).await.unwrap();
         drop(held);
         assert!(sweeping.await.unwrap().is_empty());
         assert_eq!(turn(&app, &f.turn_id).await.status, "in_flight");
@@ -889,7 +890,7 @@ mod tests {
         let f = stuck("部署").await;
         let app = f.env.app.clone();
         f.env.herdr.live_pane("pane-1", tt::LivePane { width: Some(120), ..Default::default() });
-        let conv = db::conversation_id(&app.db, &f.bot_id).await.unwrap();
+        let conv = db::conversation_id(app.db(), &f.bot_id).await.unwrap();
         let queued = db::ulid();
         sqlx::query(
             "INSERT INTO turns (id, conversation_id, origin, status, delivery, prompt_text, created_at)
@@ -898,7 +899,7 @@ mod tests {
         .bind(&queued)
         .bind(&conv)
         .bind(db::now())
-        .execute(&app.db)
+        .execute(app.db())
         .await
         .unwrap();
         flush_queued_locked(&app, &f.bot_id).await.unwrap();

@@ -13,7 +13,7 @@
 //! 開機時（對帳之前，那會把舊 run 收尾並撤孤兒）[`adopt_open_intents`] 把每件還開著的 `restart` intent 灌成一個 hold，
 //! recovery 把那件 intent 收尾（done／abandoned／failed／過期）才放掉；補不成的重試期間 hold 也留著。
 
-use super::run_state::app_ports_p4state;
+use crate::app_ports_p4state;
 use std::collections::HashMap;
 use std::sync::{Mutex, OnceLock};
 

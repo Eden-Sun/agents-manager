@@ -10,7 +10,10 @@
 //!
 //! 每一步都是 [`step`]：時間由呼叫端傳進來（測試不睡覺），pane 走 app 的 herdr client（測試用 MockHerdr）。
 
+#[cfg(test)]
+use crate::capabilities::Db;
 use super::*;
+use super::s6_ports::RelayWatchContext;
 use std::time::Instant;
 
 /// 字留在輸入列、agent 還是 idle 多久才補 Enter：給 TUI 自己畫完、bracketed paste 收尾的時間。
@@ -19,14 +22,14 @@ pub(crate) const NUDGE_AFTER: Duration = Duration::from_secs(4);
 const MAX_NUDGES: u32 = 2;
 /// 整段盯多久：這之後字既不在輸入列、agent 也沒接手，就當沒送達。
 pub(crate) const GIVE_UP_AFTER: Duration = Duration::from_secs(90);
-const POLL: Duration = Duration::from_secs(2);
+pub(crate) const POLL: Duration = Duration::from_secs(2);
 
 /// 一條進行中的盯梢。
 pub(crate) struct Watch {
-    pub run_id: String,
-    pub bot_id: String,
-    pub text: String,
-    pub turn_id: Option<String>,
+    pub(crate) run_id: String,
+    pub(crate) bot_id: String,
+    pub(crate) text: String,
+    pub(crate) turn_id: Option<String>,
     started: Instant,
     /// 宣告的字第一次被看到留在輸入列（agent idle）的時刻；看不到就清掉。
     held_since: Option<Instant>,
@@ -82,7 +85,7 @@ pub(crate) async fn resolve(app: &(impl crate::capabilities::Db + crate::capabil
 }
 
 /// 開進行中的回合。已經有回合在飛（收件方正忙，字會排在它後面）就不開，UI 本來就看得到。寫不進去只記 log，不擋補 Enter。
-pub(super) async fn open_turn(app: &Arc<App>, run: &db::Run, from_bot: &str, text: &str) -> Option<String> {
+pub(super) async fn open_turn(app: &impl RelayWatchContext, run: &db::Run, from_bot: &str, text: &str) -> Option<String> {
     match try_open_turn(app, run, from_bot, text).await {
         Ok(tid) => tid,
         Err(e) => {
@@ -92,30 +95,30 @@ pub(super) async fn open_turn(app: &Arc<App>, run: &db::Run, from_bot: &str, tex
     }
 }
 
-async fn try_open_turn(app: &Arc<App>, run: &db::Run, from_bot: &str, text: &str) -> anyhow::Result<Option<String>> {
+async fn try_open_turn(app: &impl RelayWatchContext, run: &db::Run, from_bot: &str, text: &str) -> anyhow::Result<Option<String>> {
     let lock = app.bot_lock(&run.bot_id).await;
     let _g = lock.lock().await;
-    let Some(run) = db::run(&app.db, &run.id).await? else { return Ok(None) };
+    let Some(run) = db::run(app.db(), &run.id).await? else { return Ok(None) };
     if run.state != "running" {
         return Ok(None);
     }
     // 沒有 hook 的 grok 由它的對話檔記回合（§12.5）：slash 指令不是對話；收件方忙著時這句先記下，等對話檔出現它再收進自己的回合。
-    let transcript = run.adopted != 0 && db::bot(&app.db, &run.bot_id).await?.is_some_and(|b| matches!(b.kind.as_str(), "grok" | "agy") && b.inject_hooks == 0);
+    let transcript = run.adopted != 0 && db::bot(app.db(), &run.bot_id).await?.is_some_and(|b| matches!(b.kind.as_str(), "grok" | "agy") && b.inject_hooks == 0);
     if transcript && super::grok_transcript::is_slash_command(text) {
         return Ok(None);
     }
-    let conv = db::conversation_id(&app.db, &run.bot_id).await?;
-    if db::in_flight_turn(&app.db, &run.id).await?.is_some() {
+    let conv = db::conversation_id(app.db(), &run.bot_id).await?;
+    if db::in_flight_turn(app.db(), &run.id).await?.is_some() {
         if transcript {
-            let mut tx = app.db.begin().await?;
+            let mut tx = app.db().begin().await?;
             let msg = insert_message_relayed_tx(&mut tx, &conv, None, "user", text, "hook", false, None, Some(from_bot)).await?;
             tx.commit().await?;
-            emit_message_added(app, &run.bot_id, msg).await;
+            super::messages::emit_message_added(app, &run.bot_id, msg).await;
         }
         return Ok(None);
     }
     let tid = db::ulid();
-    let mut tx = app.db.begin().await?;
+    let mut tx = app.db().begin().await?;
     sqlx::query("INSERT INTO turns (id, conversation_id, run_id, origin, status, delivery, created_at) VALUES (?,?,?,'external','in_flight','ok',?)")
         .bind(&tid)
         .bind(&conv)
@@ -125,16 +128,16 @@ async fn try_open_turn(app: &Arc<App>, run: &db::Run, from_bot: &str, text: &str
         .await?;
     let msg = insert_message_relayed_tx(&mut tx, &conv, Some(&tid), "user", text, "hook", false, None, Some(from_bot)).await?;
     tx.commit().await?;
-    emit_message_added(app, &run.bot_id, msg).await;
-    emit_turn(app, &tid).await;
-    arm_progress(app, &run.id, &run.bot_id, &tid).await;
+    super::messages::emit_message_added(app, &run.bot_id, msg).await;
+    app.turn_changed(&tid).await;
+    app.arm_progress(&run.id, &run.bot_id, &tid).await;
     tracing::info!(run = %run.id, turn = %tid, from = from_bot, "agent-to-agent prompt: opened an in-flight turn");
     Ok(Some(tid))
 }
 
 /// 看一次。`now` 由呼叫端給。
-pub(crate) async fn step(app: &Arc<App>, w: &mut Watch, now: Instant) -> Step {
-    let run = match db::run(&app.db, &w.run_id).await {
+pub(crate) async fn step(app: &impl RelayWatchContext, w: &mut Watch, now: Instant) -> Step {
+    let run = match db::run(app.db(), &w.run_id).await {
         Ok(Some(run)) => run,
         Ok(None) => return Step::Done,
         Err(error) => {
@@ -147,7 +150,7 @@ pub(crate) async fn step(app: &Arc<App>, w: &mut Watch, now: Instant) -> Step {
     }
     if let Some(t) = &w.turn_id {
         // 收掉了（hook 或終端備援）＝送達、答完了。
-        match db::in_flight_turn(&app.db, &w.run_id).await {
+        match db::in_flight_turn(app.db(), &w.run_id).await {
             Ok(Some(cur)) if &cur.id == t => {}
             Ok(_) => return Step::Done,
             Err(error) => {
@@ -162,10 +165,10 @@ pub(crate) async fn step(app: &Arc<App>, w: &mut Watch, now: Instant) -> Step {
     }
     // pane 或 agent 已經不在：不對死掉的 pane 重試；把 run 收掉，回合失敗（不是「沒送達」，是收件方沒了）。
     if super::dead_panes::pane_gone(app, &run).await {
-        mark_run_exited(app, &w.run_id, "pane gone").await;
+        app.mark_run_exited(&w.run_id, "pane gone").await;
         return Step::Done;
     }
-    let bot = match db::bot(&app.db, &w.bot_id).await {
+    let bot = match db::bot(app.db(), &w.bot_id).await {
         Ok(Some(bot)) => bot,
         Ok(None) => return Step::Done,
         Err(error) => {
@@ -210,16 +213,16 @@ pub(crate) async fn step(app: &Arc<App>, w: &mut Watch, now: Instant) -> Step {
     Step::Nudged
 }
 
-async fn give_up(app: &Arc<App>, w: &Watch) -> Step {
+async fn give_up(app: &impl RelayWatchContext, w: &Watch) -> Step {
     let Some(turn_id) = w.turn_id.as_deref() else { return Step::Done };
     let why = "別的 agent 交辦的這句話沒有被收下：字沒進輸入列，或補了 Enter 也沒有反應（畫面沒有重繪），agent 沒有接手，這一回合不會有回覆。";
     let res: anyhow::Result<Option<db::Message>> = async {
-        let mut tx = app.db.begin().await?;
+        let mut tx = app.db().begin().await?;
         let out = turn_controller::fail_on(&mut tx, turn_id, turn_controller::DeliveryOnFail::Failed, "交辦沒有送達").await?;
         if out != turn_controller::Outcome::Applied {
             return Ok(None);
         }
-        let conv = db::conversation_id(&app.db, &w.bot_id).await?;
+        let conv = db::conversation_id(app.db(), &w.bot_id).await?;
         let m = insert_message_tx(&mut tx, &conv, Some(turn_id), "system", why, "system", false, None).await?;
         tx.commit().await?;
         Ok(Some(m))
@@ -227,8 +230,8 @@ async fn give_up(app: &Arc<App>, w: &Watch) -> Step {
     .await;
     match res {
         Ok(Some(m)) => {
-            emit_message_added(app, &w.bot_id, m).await;
-            emit_turn(app, turn_id).await;
+            super::messages::emit_message_added(app, &w.bot_id, m).await;
+            app.turn_changed(turn_id).await;
         }
         Ok(None) => {}
         Err(e) => tracing::warn!(error = ?e, turn = turn_id, "could not fail an undelivered relayed turn"),
@@ -239,7 +242,7 @@ async fn give_up(app: &Arc<App>, w: &Watch) -> Step {
 /// Start the watch only after the caller has completed [`resolve`] successfully. The announce API
 /// does this synchronously before acknowledging the shim, so a DB failure cannot be mistaken for
 /// an unmanaged target and followed by an unobserved direct prompt.
-pub(crate) async fn on_resolved_announce(app: &Arc<App>, from_bot: &str, text: &str, run: Option<db::Run>) {
+pub(crate) async fn on_resolved_announce(app: &impl RelayWatchContext, from_bot: &str, text: &str, run: Option<db::Run>) {
     if text.trim().is_empty() {
         return;
     }
@@ -249,7 +252,7 @@ pub(crate) async fn on_resolved_announce(app: &Arc<App>, from_bot: &str, text: &
     }
     // 收件方的 pane 早就不在了（側欄還畫成活的）：收掉 run，不開回合、不盯（字打進去也沒人會送）。
     if super::dead_panes::pane_gone(app, &run).await {
-        super::dead_panes::sweep(app).await;
+        app.sweep_dead_panes().await;
         return;
     }
     let turn_id = open_turn(app, &run, from_bot, text).await;
@@ -260,7 +263,7 @@ pub(crate) async fn on_resolved_announce(app: &Arc<App>, from_bot: &str, text: &
 }
 
 /// Restore composer delivery watchers from the durable relay turns after startup or host reconnect.
-pub(crate) async fn rearm_host(app: &Arc<App>, host: &str) {
+pub(crate) async fn rearm_host(app: &impl RelayWatchContext, host: &str) {
     match restore_open_watches(app, host).await {
         Ok(watches) => {
             for watch in watches {
@@ -300,45 +303,8 @@ async fn restore_open_watches(app: &impl crate::capabilities::Db, host: &str) ->
         .collect())
 }
 
-fn spawn_watch(app: &Arc<App>, mut watch: Watch) {
-    if app.shutdown.is_cancelled() {
-        return;
-    }
-    let key = watch.turn_id.clone().unwrap_or_else(|| format!("{}:{}", watch.run_id, db::ulid()));
-    {
-        let mut active = app.relay_watchers.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
-        if !active.insert(key.clone()) {
-            return;
-        }
-    }
-    let app = app.clone();
-    let tasks = app.background_tasks.clone();
-    tasks.spawn(async move {
-        let _registration = WatchRegistration { app: app.clone(), key };
-        loop {
-            tokio::select! {
-                _ = app.shutdown.cancelled() => return,
-                _ = tokio::time::sleep(POLL) => {}
-            }
-            // Do not cancel an in-flight pane RPC or DB update: graceful shutdown joins this
-            // tracked task after the current tick completes, then it exits without another poll.
-            let result = step(&app, &mut watch, Instant::now()).await;
-            if app.shutdown.is_cancelled() || matches!(result, Step::Done | Step::GaveUp) {
-                return;
-            }
-        }
-    });
-}
-
-struct WatchRegistration {
-    app: Arc<App>,
-    key: String,
-}
-
-impl Drop for WatchRegistration {
-    fn drop(&mut self) {
-        self.app.relay_watchers.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).remove(&self.key);
-    }
+fn spawn_watch(app: &impl RelayWatchContext, watch: Watch) {
+    app.spawn_relay_watch(watch);
 }
 
 #[cfg(test)]
@@ -374,7 +340,7 @@ mod tests {
     }
 
     async fn status_of(f: &F, turn: &str) -> String {
-        sqlx::query_scalar("SELECT status FROM turns WHERE id=?").bind(turn).fetch_one(&f.env.app.db).await.unwrap()
+        sqlx::query_scalar("SELECT status FROM turns WHERE id=?").bind(turn).fetch_one(f.env.app.db()).await.unwrap()
     }
 
     /// 名字對得到在跑的 bot：開進行中的回合，使用者訊息標 `relay_from`；已經有回合在飛就不重開。
@@ -383,12 +349,12 @@ mod tests {
         let f = fixture("insurer-mt").await;
         let app = f.env.app.clone();
         let sender = tt::claude_bot(&app, &f.env.project_id, "console-fetures").await;
-        let run = db::run(&app.db, &f.run_id).await.unwrap().unwrap();
+        let run = db::run(app.db(), &f.run_id).await.unwrap().unwrap();
 
         let tid = open_turn(&app, &run, &sender.id, TEXT).await.expect("開了回合");
         assert_eq!(status_of(&f, &tid).await, "in_flight");
         let (content, from): (String, Option<String>) =
-            sqlx::query_as("SELECT content, relay_from FROM messages WHERE turn_id=? AND role='user'").bind(&tid).fetch_one(&app.db).await.unwrap();
+            sqlx::query_as("SELECT content, relay_from FROM messages WHERE turn_id=? AND role='user'").bind(&tid).fetch_one(app.db()).await.unwrap();
         assert_eq!((content.as_str(), from.as_deref()), (TEXT, Some(sender.id.as_str())));
         assert!(open_turn(&app, &run, &sender.id, "第二句").await.is_none(), "已經有回合在飛：不重開");
 
@@ -402,7 +368,7 @@ mod tests {
         let f = fixture("tracked-relay-watch").await;
         let app = f.env.app.clone();
         let sender = tt::claude_bot(&app, &f.env.project_id, "tracked-relay-sender").await;
-        let run = db::run(&app.db, &f.run_id).await.unwrap().unwrap();
+        let run = db::run(app.db(), &f.run_id).await.unwrap().unwrap();
 
         on_resolved_announce(&app, &sender.id, TEXT, Some(run)).await;
         assert_eq!(app.background_tasks.len(), 1, "the delivery watcher must belong to the daemon shutdown barrier");
@@ -420,7 +386,7 @@ mod tests {
         let f = fixture("rearmed-relay-watch").await;
         let app = f.env.app.clone();
         let sender = tt::claude_bot(&app, &f.env.project_id, "rearmed-relay-sender").await;
-        let run = db::run(&app.db, &f.run_id).await.unwrap().unwrap();
+        let run = db::run(app.db(), &f.run_id).await.unwrap().unwrap();
         let turn_id = open_turn(&app, &run, &sender.id, TEXT).await.expect("persist the external turn before shutdown");
         f.env.herdr.live_pane(&f.pane, tt::LivePane { composer: vec![TEXT.into()], width: Some(120), ..Default::default() });
 
@@ -446,7 +412,7 @@ mod tests {
             .bind(&remote_project)
             .bind(format!("{}/remote", f.env.dir.display()))
             .bind(db::now())
-            .execute(&app.db)
+            .execute(app.db())
             .await
             .unwrap();
         let remote = tt::claude_bot(&app, &remote_project, "remote-collision").await;
@@ -454,7 +420,7 @@ mod tests {
         sqlx::query("UPDATE runs SET pane_id = ?, started_at = '9999' WHERE id = ?")
             .bind(&f.pane)
             .bind(&remote_run)
-            .execute(&app.db)
+            .execute(app.db())
             .await
             .unwrap();
 
@@ -463,7 +429,7 @@ mod tests {
         sqlx::query("UPDATE runs SET pane_id = ?, herdr_session = 'default', started_at = '9998' WHERE id = ?")
             .bind(&f.pane)
             .bind(&other_session_run)
-            .execute(&app.db)
+            .execute(app.db())
             .await
             .unwrap();
 
@@ -482,7 +448,7 @@ mod tests {
         sqlx::query("UPDATE runs SET pane_id = ?, started_at = '9999' WHERE id = ?")
             .bind(&f.pane)
             .bind(&second_run)
-            .execute(&app.db)
+            .execute(app.db())
             .await
             .unwrap();
 
@@ -539,7 +505,7 @@ mod tests {
         }
         assert_eq!(keys_sent(&f), 1);
 
-        sqlx::query("UPDATE runs SET agent_status='working' WHERE id=?").bind(&f.run_id).execute(&app.db).await.unwrap();
+        sqlx::query("UPDATE runs SET agent_status='working' WHERE id=?").bind(&f.run_id).execute(app.db()).await.unwrap();
         assert_eq!(step(&app, &mut w, at).await, Step::Done);
     }
 
@@ -549,7 +515,7 @@ mod tests {
         let f = fixture("never-arrived").await;
         let app = f.env.app.clone();
         let sender = tt::claude_bot(&app, &f.env.project_id, "sender").await;
-        let run = db::run(&app.db, &f.run_id).await.unwrap().unwrap();
+        let run = db::run(app.db(), &f.run_id).await.unwrap().unwrap();
         f.env.herdr.live_pane(&f.pane, tt::LivePane { width: Some(120), ..Default::default() });
         let tid = open_turn(&app, &run, &sender.id, TEXT).await.unwrap();
         let t0 = Instant::now();
@@ -559,7 +525,7 @@ mod tests {
         assert_eq!(status_of(&f, &tid).await, "in_flight");
         assert_eq!(step(&app, &mut w, t0 + GIVE_UP_AFTER).await, Step::GaveUp);
         assert_eq!(status_of(&f, &tid).await, "failed");
-        let notes: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM messages WHERE turn_id=? AND role='system'").bind(&tid).fetch_one(&app.db).await.unwrap();
+        let notes: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM messages WHERE turn_id=? AND role='system'").bind(&tid).fetch_one(app.db()).await.unwrap();
         assert_eq!(notes, 1);
         assert_eq!(step(&app, &mut w, t0 + GIVE_UP_AFTER).await, Step::Done, "回合已經收了");
     }
@@ -569,7 +535,7 @@ mod tests {
     }
 
     async fn run_state(f: &F) -> String {
-        sqlx::query_scalar("SELECT state FROM runs WHERE id=?").bind(&f.run_id).fetch_one(&f.env.app.db).await.unwrap()
+        sqlx::query_scalar("SELECT state FROM runs WHERE id=?").bind(&f.run_id).fetch_one(f.env.app.db()).await.unwrap()
     }
 
     /// #380 實測：pane 早就 `pane_not_found`，run 卻還是 running。盯梢看到就收掉 run，一個鍵都不按。
@@ -612,7 +578,7 @@ mod tests {
         let app = f.env.app.clone();
         f.env.herdr.live_pane(&f.pane, tt::LivePane { composer: vec![TEXT.into()], width: Some(120), ..Default::default() });
         let sender = tt::claude_bot(&app, &f.env.project_id, "turn-read-sender").await;
-        let run = db::run(&app.db, &f.run_id).await.unwrap().unwrap();
+        let run = db::run(app.db(), &f.run_id).await.unwrap().unwrap();
         let turn_id = open_turn(&app, &run, &sender.id, TEXT).await.unwrap();
         let t0 = Instant::now();
         let mut w = watch(&f, Some(turn_id), t0);
@@ -680,7 +646,7 @@ mod tests {
         let run = resolve(&app, &sender.id, "agent").await.unwrap();
         on_resolved_announce(&app, &sender.id, TEXT, run).await;
         assert_eq!(run_state(&f).await, "exited");
-        let turns: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM turns WHERE run_id=?").bind(&f.run_id).fetch_one(&app.db).await.unwrap();
+        let turns: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM turns WHERE run_id=?").bind(&f.run_id).fetch_one(app.db()).await.unwrap();
         assert_eq!(turns, 0);
     }
 }

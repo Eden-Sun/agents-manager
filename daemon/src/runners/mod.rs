@@ -48,6 +48,7 @@ pub mod rewind;
 pub mod shim_refresh;
 pub mod session_paused;
 pub mod share_admin;
+pub(crate) mod s6_l;
 pub mod tui_prompts;
 pub mod update_watch;
 pub mod upstream_update;

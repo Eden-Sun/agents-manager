@@ -1,12 +1,13 @@
 //! Delivering a prompt: the turn row, the pane write, and the queued path.
 
+use crate::state::App;
 use super::*;
 use super::send_now::ports::{AttachConnPort, AttachSendPort, CodexSendPort, HandoffSendRepo, IdleSleepPort, SendEnvPort, ShareSendRepo, emit_object, turn_changed};
-use super::app_ports_p4::{AppEventSink, AppTurnEvents};
-use super::send_now::app_ports_p4send::AppBotLock;
+use crate::app_ports_p4::{AppEventSink, AppTurnEvents};
+use crate::app_ports_p4send::AppBotLock;
 use am_ports::BotLock;
 
-pub(super) async fn emit_prompt_message(app: &(impl crate::capabilities::Db + crate::capabilities::Emit + crate::capabilities::BotStatusEmit), bot_id: &str, message_id: &str) {
+pub(crate) async fn emit_prompt_message(app: &(impl crate::capabilities::Db + crate::capabilities::Emit + crate::capabilities::BotStatusEmit), bot_id: &str, message_id: &str) {
     if let Ok(Some(m)) = sqlx::query_as::<_, db::Message>("SELECT *, rowid AS seq FROM messages WHERE id=?")
         .bind(message_id)
         .fetch_optional(app.db())
@@ -513,7 +514,7 @@ pub(crate) fn queue_insert_error(bot_id: &str, conv: &str, e: sqlx::Error) -> Lc
     }
 }
 
-pub(super) async fn queue_for_next_turn(
+pub(crate) async fn queue_for_next_turn(
     app: &Arc<App>,
     conv: &str,
     bot_id: &str,

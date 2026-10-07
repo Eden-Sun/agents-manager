@@ -1,19 +1,14 @@
 //! Bot / Run lifecycle (SPEC §6.2–§6.4, §4.3). Every public entry point takes the per-bot lock.
 
-// P4 composition adapter: App is the only layer that translates the narrow turn port into the
-// existing lifecycle entry points. Keep the adapter outside this directory while assigning it
-// to the lifecycle seam; App/state itself remains untouched.
-// P6 will be the first in-tree consumer; until then this crate-local adapter is intentionally unused.
-#[allow(dead_code)]
-#[path = "../app_ports_p4.rs"]
-pub mod app_ports_p4;
-
 use crate::capture::Capture;
 use crate::config::{valid_id, ID_RE, LOCAL_HOST};
 use crate::db;
 use crate::herdr::{AgentStatus, HerdrClient, HerdrError};
 use crate::hosts::{sh_quote, HostConn, HostFence};
+#[cfg(test)]
 use crate::state::App;
+#[cfg(test)]
+pub(crate) use crate::app_ports_p4;
 use serde_json::{json, Value};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -35,10 +30,11 @@ impl std::ops::Deref for RunClient {
     }
 }
 
-mod messages;
+pub(crate) mod messages;
 pub(crate) mod relay_watch;
 pub(crate) mod dead_panes;
-mod queue;
+pub(crate) mod s6_ports;
+pub(crate) mod queue;
 pub(crate) mod setup;
 pub(crate) mod agent_md;
 pub(crate) mod grok_hook;
@@ -56,16 +52,16 @@ mod stop;
 mod deferred_live;
 mod live_apply_debt;
 mod slash;
-mod delivery;
+pub(crate) mod delivery;
 mod codex_banner;
-mod composer_draft;
+pub(crate) mod composer_draft;
 mod suggestion;
 mod busy_send;
 /// 「輸入框有沒有字」的同一支判斷，給 lifecycle 以外的地方（judge 的卡住畫面）用。
 pub(crate) use delivery::{plain_without_hints, read_styled};
 #[allow(unused_imports)]
 pub(crate) use crate::composer_parse::{composer_text, composer_text_whole, prompt_suggestion};
-mod prompt;
+pub(crate) mod prompt;
 pub(crate) async fn rearm_queued_prompt_restamps(app: &(impl crate::capabilities::Db + crate::capabilities::Emit + crate::capabilities::Emit + crate::capabilities::BotStatusEmit)) -> anyhow::Result<()> {
     prompt::rearm_queued_prompt_restamps(app).await
 }
@@ -81,7 +77,7 @@ mod limit_banner;
 mod stuck_turns;
 pub(crate) mod fence;
 pub(crate) mod turn_controller;
-mod interrupt_grace;
+pub(crate) mod interrupt_grace;
 pub(crate) mod resume_gate;
 /// 忙到一半被重啟的 claude 接回後補一句續行提示（claude 2.1.281 不再補隱藏的 Continue）。
 mod resume_nudge;
@@ -90,15 +86,15 @@ pub(crate) use crate::daemon_notice;
 pub(crate) use resume_nudge::poke as poke_resume_nudge;
 pub(crate) mod restart_hold;
 /// `runs.state` 轉移的唯一寫法，與寫不進去之後的重試（#135／#145／#146）。
-mod run_state;
+pub(crate) mod run_state;
 pub(crate) mod quota_hold;
 pub(crate) mod start_send;
 pub(crate) mod send_now;
 /// codex 的 send_now：steer 進進行中的回合（issue #748，預設關的 canary）。
 mod codex_steer;
-mod interruption;
+pub(crate) mod interruption;
 /// 送達結果寫不回 DB 時欠著的那一筆（#149）。
-mod owed_delivery;
+pub(crate) mod owed_delivery;
 /// claude 把貼上的 prompt 包成 `<pasted_content>` 寫進 transcript（#218）。
 pub(crate) use crate::pasted_content;
 pub(crate) mod paste_check;
@@ -185,7 +181,7 @@ pub(crate) use deferred_live::{defer_live, is_busy_reason, is_deferred, schedule
 #[cfg(test)]
 pub(crate) use deferred_live::apply_deferred_once;
 
-pub(crate) async fn recover_live_apply_debts(app: &Arc<App>) {
+pub(crate) async fn recover_live_apply_debts(app: &impl s6_ports::LiveApplyDebtContext) {
     live_apply_debt::recover(app).await;
 }
 
@@ -197,7 +193,7 @@ pub(crate) use start_send::{prompt_starting_or_queue, prompt_starting_or_queue_w
 pub(crate) use composer_draft::submit as submit_composer_draft;
 pub(crate) use suggestion::accept as accept_prompt_suggestion;
 pub(crate) use stop::*;
-pub(crate) use interrupt_grace::{note_user_interrupt_of, settle_interrupt_echo, FailureEvidence as InterruptFailureEvidence};
+pub(crate) use interrupt_grace::{settle_interrupt_echo, FailureEvidence as InterruptFailureEvidence};
 pub(crate) use interruption::{adopt_interrupted_on_restart, adopt_turns_of_ended_runs, adopt_unbound_send_nows, settle_locked as settle_interruption, Evidence as InterruptEvidence};
 pub(crate) use owed_delivery::{owed_as_unknown, settle_locked as settle_owed_deliveries};
 #[cfg(test)]
@@ -222,7 +218,7 @@ fn pane_not_ready(e: &anyhow::Error) -> bool {
     s.contains("agent_pane_busy") || s.contains("not an available shell")
 }
 
-async fn client_for_run(app: &(impl crate::capabilities::Db + crate::capabilities::HerdrRoutes + crate::hosts::HostsAccess), run: &db::Run) -> LcResult<RunClient> {
+pub(crate) async fn client_for_run(app: &(impl crate::capabilities::Db + crate::capabilities::HerdrRoutes + crate::hosts::HostsAccess), run: &db::Run) -> LcResult<RunClient> {
     let no_client = || {
         LcError::Upstream(format!(
             "no Herdr session is available for run `{}`",

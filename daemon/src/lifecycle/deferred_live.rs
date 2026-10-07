@@ -7,10 +7,9 @@
 //! 尚未套用的 TUI 工作只記在記憶體；readback 成功後會先把 runtime snapshot 寫進 durable
 //! bookkeeping debt，因此 daemon 重啟只需補 DB，不會重送 slash 或 picker 操作。
 
-use super::run_state::app_ports_p4state;
-use crate::state::App;
+use crate::lifecycle::s6_ports::DeferredLiveContext;
 use std::collections::HashMap;
-use std::sync::{Arc, Mutex, OnceLock};
+use std::sync::{Mutex, OnceLock};
 use std::time::Duration;
 
 /// A queued TUI change keeps the first pre-patch revision and the latest target revision together
@@ -77,11 +76,11 @@ fn take(bot_id: &str) -> Option<PendingLive> {
 }
 
 /// idle 邊叫一次：沒有排著的東西就什麼都不做。等一小段讓回合收尾（Stop hook、回讀狀態列）再套。
-pub(crate) fn schedule_deferred_live(app: &Arc<App>, bot_id: &str) {
+pub(crate) fn schedule_deferred_live<A: DeferredLiveContext>(app: &A, bot_id: &str) {
     if !is_deferred(bot_id) {
         return;
     }
-    let (app, bot_id) = (app.clone(), bot_id.to_string());
+    let (app, bot_id) = ((*app).clone(), bot_id.to_string());
     tokio::spawn(async move {
         tokio::time::sleep(Duration::from_millis(1500)).await;
         let _ = apply_deferred_once(&app, &bot_id).await;
@@ -91,13 +90,12 @@ pub(crate) fn schedule_deferred_live(app: &Arc<App>, bot_id: &str) {
 /// Apply the current pending item without the production idle-edge delay. Kept as a helper so the
 /// retry path can be tested at the exact handoff point without sleeping through a scheduler timer.
 pub(crate) async fn apply_deferred_once(
-    app: &Arc<App>,
+    app: &impl DeferredLiveContext,
     bot_id: &str,
 ) -> Option<super::LiveApplyOutcome> {
     let queued = take(bot_id)?;
     let fields = queued.fields.to_vec();
-    let outcome = app_ports_p4state::apply_live_setting_with_revision(
-        app,
+    let outcome = app.apply_live_setting_with_revision(
         bot_id,
         &fields,
         &queued.baseline_rev,
@@ -124,7 +122,7 @@ pub(crate) async fn apply_deferred_once(
             tracing::info!(bot = %bot_id, ?fields, reason = %why, "deferred live apply failed; the restart badge stays")
         }
     }
-    app_ports_p4state::emit_bot_changed(app, bot_id).await;
+    app.emit("bot_changed", serde_json::json!({"bot_id": bot_id})).await;
     Some(outcome)
 }
 

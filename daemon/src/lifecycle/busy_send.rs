@@ -1,8 +1,10 @@
 //! Persist user prompts accepted while a running agent is busy (#733).
 
+#[cfg(test)]
+use crate::capabilities::Db;
 use super::{prompt, *};
-use super::send_now::ports::{AttachTxPort, SupervisorSendRepo, turn_changed};
-use super::app_ports_p4::{AppTurnEvents};
+use super::send_now::ports::{AttachTxPort, SupervisorSendRepo};
+use super::s6_ports::BusySendServices;
 use crate::attach::Attachment;
 
 /// 409 `queue_slot_taken`：唯一的 queued 槽被 `turn_id` 那一筆佔著，`holder` 說是誰（web 才講得出人話）。
@@ -72,7 +74,7 @@ pub(super) async fn refuse_if_slot_taken(app: &impl crate::capabilities::Db, con
 /// The caller holds the per-bot lock and has already resolved/validated the attachments.
 #[allow(clippy::too_many_arguments)]
 pub(super) async fn queue_awaiting_idle(
-    app: &Arc<App>,
+    app: &(impl crate::capabilities::Db + BusySendServices),
     conversation_id: &str,
     bot_id: &str,
     text: &str,
@@ -84,7 +86,7 @@ pub(super) async fn queue_awaiting_idle(
 ) -> LcResult<prompt::PromptOut> {
     // 先讀槽再寫：bot 鎖只排得住這顆 bot 自己，擋不住別的 writer（對帳、收件匣）在讀與寫之間 commit；deferred 交易
     // 這時升級寫鎖直接 517，空著的槽也把使用者的 prompt 拒掉（#821）。
-    let mut tx = db::begin_write(&app.db).await.map_err(up)?;
+    let mut tx = db::begin_write(app.db()).await.map_err(up)?;
     let existing: Option<String> = sqlx::query_scalar(
         "SELECT id FROM turns WHERE conversation_id=? AND status='queued' AND awaits_idle=1 ORDER BY created_at, id LIMIT 1",
     )
@@ -119,7 +121,7 @@ pub(super) async fn queue_awaiting_idle(
             drop(tx);
             let occupant: Option<String> = sqlx::query_scalar("SELECT id FROM turns WHERE conversation_id=? AND status='queued' ORDER BY created_at, id LIMIT 1")
                 .bind(conversation_id)
-                .fetch_optional(&app.db)
+                .fetch_optional(app.db())
                 .await
                 .ok()
                 .flatten();
@@ -151,8 +153,8 @@ pub(super) async fn queue_awaiting_idle(
         .map_err(up)?;
 
     tx.commit().await.map_err(up)?;
-    prompt::emit_prompt_message(app, bot_id, &message_id).await;
-    turn_changed(&AppTurnEvents::new(app), &turn_id).await;
+    app.prompt_message_added(bot_id, &message_id).await;
+    app.turn_changed(&turn_id).await;
     tracing::info!(bot = %bot_id, turn = %turn_id, "使用者 prompt 已持久排入忙碌 bot 的佇列");
     Ok(prompt::PromptOut {
         turn_id,
@@ -179,7 +181,7 @@ mod tests {
         )
         .bind(conv)
         .bind(conv)
-        .fetch_one(&app.db)
+        .fetch_one(app.db())
         .await
         .unwrap()
     }
@@ -190,7 +192,7 @@ mod tests {
     async fn an_unrelated_writer_between_the_slot_read_and_the_insert_does_not_refuse_the_prompt() {
         let e = tt::env().await;
         let bot = tt::claude_bot(&e.app, &e.project_id, "busy-831").await;
-        let conv = db::conversation_id(&e.app.db, &bot.id).await.unwrap();
+        let conv = db::conversation_id(e.app.db(), &bot.id).await.unwrap();
         let other = tt::arm_app_foreign_writer(&e.app, "busy_queue_after_slot_read", &conv);
 
         let out = admit(&e.app, &conv, &bot.id, "稍後送出", "busy-831-1").await.expect("a free slot must not be refused because another writer committed");
@@ -205,7 +207,7 @@ mod tests {
     async fn a_second_request_racing_for_the_slot_still_gets_queue_slot_taken() {
         let e = tt::env().await;
         let bot = tt::claude_bot(&e.app, &e.project_id, "busy-831-race").await;
-        let conv = db::conversation_id(&e.app.db, &bot.id).await.unwrap();
+        let conv = db::conversation_id(e.app.db(), &bot.id).await.unwrap();
         let second = Arc::new(StdMutex::new(None));
         let (app, c, b, slot) = (e.app.clone(), conv.clone(), bot.id.clone(), second.clone());
         race_point::arm("busy_queue_after_slot_read", &conv, move || async move {

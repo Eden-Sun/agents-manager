@@ -1,5 +1,6 @@
 //! Message and turn rows: insert, group, and the events they emit.
 
+use crate::state::App;
 use super::*;
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
