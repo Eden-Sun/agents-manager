@@ -766,7 +766,7 @@ pub async fn emit_host_changed(app: &Arc<App>, fence: &crate::hosts::HostFence) 
             ev.insert("herdr".into(), crate::herdr_version::for_host(conn, connected, detected.as_ref()));
             // Absent, not null: a client treats a present-but-empty `tools` as "nothing installed".
             if let Some(d) = detected {
-                ev.insert("tools".into(), json!(d.tools));
+                ev.insert("tools".into(), crate::quota_agy::tools_json(&conn.name, &d.tools));
                 ev.insert("identities".into(), crate::login_prompt::identities_json(app, &conn.name, &d.identities));
                 ev.insert("shell_identities".into(), json!(d.shell_identities));
                 ev.insert("tools_checked_at".into(), json!(d.checked_at));

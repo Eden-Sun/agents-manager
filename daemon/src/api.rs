@@ -1288,7 +1288,7 @@ async fn hosts_list(app: &Arc<App>) -> Vec<Value> {
             // 遠端斷線起點；連著／本機為 null（UI 的離線警示條算「離線多久」）。
             "disconnected_since": c.disconnected_since(),
             "attach_command": crate::config::attach_command(c.cfg.as_ref(), &app.herdr_session),
-            "tools": t.map(|x| json!(x.tools)),
+            "tools": t.map(|x| crate::quota_agy::tools_json(&c.name, &x.tools)),
             // Login state *on this host*, `[[identities]]` + this host's `ccN` aliases (SPEC §16).
             "identities": t.map(|x| crate::login_prompt::identities_json(app, &c.name, &x.identities)),
             // Env unexpanded, as written.
@@ -3380,7 +3380,7 @@ async fn refresh_tools(
         StatusCode::OK,
         Json(json!({
             "name": name,
-            "tools": ht.tools,
+            "tools": crate::quota_agy::tools_json(&name, &ht.tools),
             "identities": crate::login_prompt::identities_json(&app, &name, &ht.identities),
             "shell_identities": ht.shell_identities,
             "tools_checked_at": ht.checked_at,

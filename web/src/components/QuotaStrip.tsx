@@ -16,6 +16,7 @@ import { QuotaLoginShell } from './QuotaLoginShell'
 import { IdentityCliLogin, QuotaLoginSlash } from './QuotaLoginSlash'
 import { UpdateQuotaChip } from './UpdateQuotaChip'
 import { AgyLogoutButton, AgyLogoutDialog } from './AgyLogout'
+import { agyQuotaErrorText } from '../lib/agyQuotaError'
 import { useAgyMissing } from './agyInstallState'
 import { RULE_5H, RULE_WEEKLY, resetBadge } from '../lib/quotaReset'
 import { cliLoginCommand, identityEnv, shouldUseIdentityLogin } from '../lib/quotaLogin'
@@ -753,6 +754,8 @@ function PopRow({ entry, host, onAgyLogout }: { entry: QuotaEntry; host: string;
   // 這台沒裝 agy：額度永遠不會有讀數，不要一直寫「背景查詢中」，給安裝鈕。
   const agyMissing = useAgyMissing(host) && entry.kind === 'agy' && !entry.identity
   const agyLogoutBusy = useStore((s) => s.busy[`agy-logout:${host || 'local'}`] === true)
+  // 已登入、但這一輪額度探測失敗：把原因講出來（登入與否是另一件事，不再混成「背景查詢中」）。
+  const agyQuotaError = useStore((s) => (entry.kind === 'agy' && !entry.identity ? toolsOfHost(s, host).agy?.quota_error ?? null : null))
   const five = remaining(q?.five_hour)
   const seven = remaining(q?.seven_day)
   const disabledMap = useDisabledQuota()
@@ -789,13 +792,14 @@ function PopRow({ entry, host, onAgyLogout }: { entry: QuotaEntry; host: string;
         </>
       ) : !known || (five === null && seven === null) ? (
         <>
-          <p className={`quota-pop-note${loggedOut ? ' warn' : ''}`}>
-            {/* 登入偵測在該主機 herdr pane 裡跑、看得到 Keychain，所以「沒登入」可信。 */}
+          <p className={`quota-pop-note${loggedOut || agyQuotaError ? ' warn' : ''}`}>
             {loggedOut
               ? `${hostLabel(host)} 上這個帳號未登入。`
-              : entry.kind === 'agy' || weeklyOnlyKind(entry.kind)
-                ? '背景查詢中'
-                : `尚未取得（啟動一個 ${KIND_LABEL[entry.kind]} bot 後回報）`}
+              : agyQuotaError
+                ? `已登入，但額度暫時拿不到：${agyQuotaErrorText(agyQuotaError)}（${fmtTime(agyQuotaError.at)} 起；會自動重試）`
+                : entry.kind === 'agy' || weeklyOnlyKind(entry.kind)
+                  ? '背景查詢中'
+                  : `尚未取得（啟動一個 ${KIND_LABEL[entry.kind]} bot 後回報）`}
           </p>
           {loggedOut ? (
             entry.kind === 'codex' ? (

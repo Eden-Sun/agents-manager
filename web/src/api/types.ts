@@ -113,6 +113,11 @@ export interface ToolStatus {
   path: string | null
   version: string | null
   logged_in: boolean | null
+  /**
+   * 只有 agy：額度探測這一輪失敗的原因（已登入、但額度暫時拿不到）；沒失敗或舊 daemon 不帶。
+   * `reason` 是固定代碼（timeout／unreadable／exit／pane／not_connected），`message` 是 daemon 的原文。
+   */
+  quota_error?: { reason: string; message: string; at: string }
 }
 
 export type ToolMap = Record<BotKind, ToolStatus>

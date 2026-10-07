@@ -2094,6 +2094,7 @@ UI token 會取得 Project 底下所有存活 bot 的訊息合併。Bot token �
 - `hosts[].identities.<name>` 的 `logged_in`/`account`/`plan` 另一條路：codex、grok 走 ssh（`codex login status` / `grok models`，遠端回「未登入」照樣寫回快取）；**claude 不走 ssh**（讀不到 Keychain 會誤答 false，遠端讀到的 false 一律丟掉），
   搭 §12.4 的 `claude-usage` 探測拿，所以第一輪額度輪詢（≤ 60 秒）後才從 `null` 變真答案，變了推 `host_changed`。
 - 尚未偵測時 `tools`、`tools_checked_at` 為 `null`。
+- `tools.agy.quota_error`（只有 agy，選填）：這台 agy 額度探測**最近一次失敗**的原因 `{"reason":"timeout"|"unreadable"|"exit"|"pane"|"not_connected","message","at"}`；已登入（`logged_in:true`）但額度暫時拿不到時才有，下一次探測成功就消失（有變就推 `host_changed`）。agy 明說沒憑證不算這個，改成 `logged_in:false`。只在 daemon 記憶體，重啟後清空。
 - `hosts[].baseline`（issue #719，SPEC §16.7）：工作環境一致性檢查，**只讀、只報告**：`{"issues": null | [{"id","severity":"critical"|"warn","message"}], "checked_at", "os": "Linux"|"Darwin"|null}`。
   過期標記：`checked_at` 是**最後一次成功**偵測的時間；偵測失敗（ssh 逾時、連不上、探測腳本沒跑起來）時舊結果原封不動留著，另帶
   `failed_at`（最後一次失敗的時間，之後成功就清成 `null`）與 `error`（失敗原因第一行，最多 200 字），並推 `host_changed`；`stale: true` ＝

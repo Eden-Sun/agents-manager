@@ -250,7 +250,7 @@ pub fn parse_claude_usage(screen: &str, now: DateTime<Local>, account: Option<&s
 
 /// Local uses the dedicated `am-quota` session (SPEC §12.6); a remote host has only one
 /// forwarded socket (the daemon's session), and the probe workspace isn't in the DB so reconcile ignores it.
-async fn client_for_fence(host: &str, fence: &crate::hosts::HostFence) -> Result<HerdrClient> {
+pub(crate) async fn client_for_fence(host: &str, fence: &crate::hosts::HostFence) -> Result<HerdrClient> {
     if host == LOCAL_HOST {
         return probe_client().await;
     }
@@ -295,7 +295,9 @@ pub async fn sweep_stale(app: &(impl crate::capabilities::HerdrRoutes + crate::h
 async fn sweep_stale_on_hosts(app: &(impl crate::capabilities::HerdrRoutes + crate::hosts::HostsAccess + crate::shared_host::SharedHostEnv)) {
     for host in crate::quota::pollable_hosts(app).await {
         if let Some(c) = app.herdr_for(&host).await {
-            sweep_probes(&c, crate::shared_host::probe_tag(app, &host).await.as_deref(), "stale").await;
+            let tag = crate::shared_host::probe_tag(app, &host).await;
+            sweep_probes(&c, tag.as_deref(), "stale").await;
+            sweep_probes_with(&c, tag.as_deref(), "stale", crate::quota_agy::is_probe_label).await;
         }
     }
 }
@@ -454,12 +456,17 @@ async fn send_line(client: &HerdrClient, pane_id: &str, line: &str) -> Result<()
 /// 上一輪 `workspace.close` 失敗（ssh 斷一下）留下的 claude 探測 workspace：開新的之前先收，
 /// 不然要等 daemon 重啟的 [`sweep_stale`] 才收，中間每一輪都可能再多留一個（#408）。
 /// 呼叫端握著這台的 `probe_lock`，同一台同時只有一個 claude 探測在跑，所以此刻同前綴的一定是殘留。
-async fn sweep_leftovers(client: &HerdrClient, label: &str) {
+async fn sweep_leftovers(client: &HerdrClient, label: &str, is_label: fn(&str) -> bool) {
     // #709：這一輪的 label 帶 `@<標記>`＝共用 session 的主機，只清同一個標記的（別顆 daemon 的探測可能正在跑）。
-    sweep_probes(client, label.rsplit_once('@').map(|(_, tag)| tag), "leftover").await
+    sweep_probes_with(client, label.rsplit_once('@').map(|(_, tag)| tag), "leftover", is_label).await
 }
 
 async fn sweep_probes(client: &HerdrClient, own_tag: Option<&str>, what: &str) {
+    sweep_probes_with(client, own_tag, what, is_probe_label).await
+}
+
+/// `is_label` 認「哪一種探測的 label」：claude 與 agy 的探測各自一個前綴、各自的鎖，不能互相把對方正在跑的 workspace 收掉。
+pub(crate) async fn sweep_probes_with(client: &HerdrClient, own_tag: Option<&str>, what: &str, is_label: fn(&str) -> bool) {
     let list = match client.workspace_list().await {
         Ok(l) => l,
         Err(e) => {
@@ -467,7 +474,7 @@ async fn sweep_probes(client: &HerdrClient, own_tag: Option<&str>, what: &str) {
             return;
         }
     };
-    for ws in list.iter().filter(|w| w.label.as_deref().is_some_and(|l| crate::shared_host::sweepable(l, own_tag, is_probe_label))) {
+    for ws in list.iter().filter(|w| w.label.as_deref().is_some_and(|l| crate::shared_host::sweepable(l, own_tag, is_label))) {
         match client.workspace_close(&ws.workspace_id).await {
             Ok(()) => tracing::info!(workspace = %ws.workspace_id, what, "closed a claude quota probe left behind"),
             Err(e) => tracing::warn!(workspace = %ws.workspace_id, what, error = %e, "claude probe left behind not closed"),
@@ -481,6 +488,11 @@ async fn probe_label(app: &impl crate::shared_host::SharedHostEnv, host: &str, a
         Some(a) if !a.is_empty() => format!("{PROBE_LABEL_PREFIX}-{a}"),
         _ => PROBE_LABEL_PREFIX.to_string(),
     };
+    tagged_probe_label(app, host, base).await
+}
+
+/// 同上，agy 的探測（`quota_agy`）用自己的前綴。
+pub(crate) async fn tagged_probe_label(app: &impl crate::shared_host::SharedHostEnv, host: &str, base: String) -> String {
     match crate::shared_host::probe_tag(app, host).await {
         Some(tag) => crate::shared_host::tagged_label(&base, &tag),
         None => base,
@@ -498,17 +510,31 @@ enum PaneRun {
     TimedOut(String),
 }
 
-/// 在 `client` 上開一個探測 workspace、打 `cmd`、等到標記或 `timeout`。不論成功、RPC 失敗、逾時，
-/// 或整個 future 被丟棄（[`Probe`] 的 `Drop`），這個 workspace 都會關掉（#408）。
-async fn run_probe_pane(
+/// [`run_marked_pane`] 的結果：`done` 認得輸出、`early` 提早判定失敗（帶當時的畫面），或時間到了（帶最後一次讀到的畫面）。
+#[derive(Debug)]
+pub(crate) enum MarkedRun<T> {
+    Done(T),
+    Early(String),
+    TimedOut(String),
+}
+
+/// 在 `client` 上開一個探測 workspace、打 `cmd`、等到 `done` 認得畫面、`early` 說可以提早放棄、或 `timeout`。不論成功、RPC 失敗、
+/// 逾時，或整個 future 被丟棄（[`Probe`] 的 `Drop`），這個 workspace 都會關掉（#408）。`begin` 是指令印出的開頭標記：
+/// 打完指令一直看不到它，就當 shell 吞掉了指令、重打（最多三次）。claude 與 agy 的探測共用這一段。
+#[allow(clippy::too_many_arguments)]
+pub(crate) async fn run_marked_pane<T>(
     client: &HerdrClient,
     cwd: &str,
     label: &str,
     env_json: Value,
     cmd: &str,
     timeout: Duration,
-) -> Result<PaneRun> {
-    sweep_leftovers(client, label).await;
+    begin: &str,
+    is_label: fn(&str) -> bool,
+    done: impl Fn(&str) -> Option<T>,
+    early: impl Fn(&str) -> bool,
+) -> Result<MarkedRun<T>> {
+    sweep_leftovers(client, label, is_label).await;
     let (ws, pane) = client.workspace_create(cwd, label, env_json).await?;
     let probe = Probe {
         client: client.clone(),
@@ -529,19 +555,38 @@ async fn run_probe_pane(
     while tokio::time::Instant::now() < deadline {
         tokio::time::sleep(Duration::from_millis(700)).await;
         last = client.pane_read(&pane_id, "recent_unwrapped", 400).await?.text;
-        if let Some((auth, usage)) = split_probe_output(&last) {
+        if let Some(found) = done(&last) {
             probe.close().await;
-            return Ok(PaneRun::Done(auth, usage));
+            return Ok(MarkedRun::Done(found));
         }
-        if sends < 3 && !last.contains(AUTH_BEGIN) && sent_at.elapsed() > Duration::from_secs(5) {
-            tracing::debug!(label, sends, "claude probe pane swallowed the command; retyping");
+        if early(&last) {
+            probe.close().await;
+            return Ok(MarkedRun::Early(last));
+        }
+        if sends < 3 && !last.contains(begin) && sent_at.elapsed() > Duration::from_secs(5) {
+            tracing::debug!(label, sends, "quota probe pane swallowed the command; retyping");
             let _ = send_line(client, &pane_id, cmd).await;
             sends += 1;
             sent_at = tokio::time::Instant::now();
         }
     }
     probe.close().await;
-    Ok(PaneRun::TimedOut(last))
+    Ok(MarkedRun::TimedOut(last))
+}
+
+/// claude 的探測：[`run_marked_pane`] 配上 `AM_AUTH_*`／`AM_USAGE_DONE` 標記。
+async fn run_probe_pane(
+    client: &HerdrClient,
+    cwd: &str,
+    label: &str,
+    env_json: Value,
+    cmd: &str,
+    timeout: Duration,
+) -> Result<PaneRun> {
+    Ok(match run_marked_pane(client, cwd, label, env_json, cmd, timeout, AUTH_BEGIN, is_probe_label, split_probe_output, |_| false).await? {
+        MarkedRun::Done((auth, usage)) => PaneRun::Done(auth, usage),
+        MarkedRun::TimedOut(last) | MarkedRun::Early(last) => PaneRun::TimedOut(last),
+    })
 }
 
 /// `Ok(None)` = claude not installed. Caller must hold [`crate::quota::probe_lock`] for that host.
