@@ -214,6 +214,10 @@ pub(crate) trait GrokTranscriptServices: Send + Sync {
     fn consume_resume_session(&self, bot: &db::Bot, run: &db::Run, session: Option<&str>) -> impl Future<Output = anyhow::Result<()>> + Send;
     fn agy_session_record_status(&self, bot: &db::Bot, run: &db::Run, transcript: &str) -> impl Future<Output = ()> + Send;
     fn emit_turn(&self, turn_id: &str) -> impl Future<Output = ()> + Send;
+    /// herdr 綁在這顆 run 的 claude agent 上的 session id（沒綁＝`None`；#878）。
+    fn claude_herdr_session(&self, run: &db::Run) -> impl Future<Output = Option<String>> + Send;
+    /// 這顆 claude run 的 config 目錄候選（`projects/` 的上一層），依序找（#878）。
+    fn claude_config_roots(&self, bot: &db::Bot, run: &db::Run, host: &str) -> impl Future<Output = Vec<String>> + Send;
 }
 
 pub(crate) trait GrokTranscriptContext:

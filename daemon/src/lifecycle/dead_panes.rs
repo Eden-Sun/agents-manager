@@ -39,9 +39,33 @@ pub(crate) async fn pane_id_reused(client: &HerdrClient, run: &db::Run) -> bool 
         return false;
     }
     match client.agent_get(pane).await {
-        Ok(Some(other)) => other.name.as_deref() != Some(name),
+        Ok(Some(other)) => other_agent_is_foreign(&other, name, run.native_session_id.as_deref()),
         _ => false,
     }
+}
+
+/// 這顆 pane 上、查不到我方名字時看到的 agent，是不是「別人」。
+///
+/// **沒有名字不算別人**（#878）：herdr 的 `agent start` 等不到 agent 準備好（30 秒）就把名字從 pane 上拿掉，pane 與裡面的 CLI
+/// 卻好端端還在跑；以前這裡把「名字不是我」連「沒有名字」一起當成被別人佔走，29 秒後整顆 run 被收成 `pane gone`。
+/// 有名字而且不是我，才是 pane id 被別的 agent 重用；沒有名字時只有兩邊的 session 都知道、而且對不上才算別人。
+fn other_agent_is_foreign(other: &crate::herdr::AgentInfo, name: &str, known_session: Option<&str>) -> bool {
+    match other.name.as_deref().map(str::trim).filter(|n| !n.is_empty()) {
+        Some(n) => n != name,
+        None => match (known_session.filter(|s| !s.is_empty()), herdr_session_id(other)) {
+            (Some(ours), Some(theirs)) => ours != theirs,
+            _ => false,
+        },
+    }
+}
+
+/// herdr 綁在 agent 上的 CLI session id（`agent_session.kind = "id"`）。沒綁或不是 id 形狀＝`None`。
+pub(crate) fn herdr_session_id(agent: &crate::herdr::AgentInfo) -> Option<String> {
+    let s = agent.agent_session.as_ref()?;
+    if s.get("kind").and_then(Value::as_str).is_some_and(|k| k != "id") {
+        return None;
+    }
+    s.get("value").and_then(Value::as_str).map(str::trim).filter(|v| !v.is_empty()).map(str::to_string)
 }
 
 /// 這個 pane id 不能再收這顆 run 的字：被別的 agent 佔走，或自己的 agent 已經在別的 pane。

@@ -120,7 +120,7 @@ pub(crate) struct ActiveSession {
 }
 
 /// session id 會被拼進 shell glob：只收 grok 實際用的字元（UUID）。
-fn valid_session_id(s: &str) -> bool {
+pub(crate) fn valid_session_id(s: &str) -> bool {
     !s.is_empty() && s.len() <= 64 && s.chars().all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
 }
 
@@ -252,7 +252,7 @@ pub(crate) enum Synced {
 }
 
 fn is_transcript_run(bot: &db::Bot, run: &db::Run) -> bool {
-    matches!(bot.kind.as_str(), "grok" | "agy") && run.adopted != 0 && bot.inject_hooks == 0 && run.state == "running"
+    matches!(bot.kind.as_str(), "grok" | "agy" | "claude") && run.adopted != 0 && bot.inject_hooks == 0 && run.state == "running"
 }
 
 /// 讀這個 run 的 grok 對話檔，把結束了的每一問記成回合。呼叫端拿著 bot 鎖。
@@ -274,6 +274,10 @@ pub(crate) async fn sync_locked(app: &impl GrokTranscriptContext, run_id: &str) 
             .map(|t| Exchange { prompt: t.prompt, prompt_index: Some(t.step_index), reply: t.reply, closed: t.closed })
             .collect();
         (sid, turns)
+    } else if bot.kind == "claude" {
+        // claude（SPEC §12.5b）：session 從 herdr 的 agent_session 來，對話在 `projects/*/<session>.jsonl`；本機與遠端同一條路。
+        let Some((sid, text)) = super::claude_child_log::load(app, &bot, &run, &host).await? else { return Ok(Synced::Unavailable) };
+        (sid, super::claude_child_log::parse_exchanges(&text))
     } else {
         let grok_home = grok_home_for(app, &bot, &host).await?;
         let Some(sid) = session_for(app, &bot, &run, &host, &grok_home).await? else { return Ok(Synced::Unavailable) };

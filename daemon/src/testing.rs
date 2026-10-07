@@ -833,6 +833,20 @@ impl MockHerdr {
         self.agents.lock().unwrap().push(Value::Object(agent));
     }
 
+    /// herdr 把名字從 pane 上拿掉之後的樣子（`agent start` 等不到準備好）：agent 還在、`agent.get <pane>` 查得到，沒有 `name`。
+    pub fn set_unnamed_agent(&self, pane_id: &str, session: Option<&str>) {
+        let mut agent = serde_json::Map::new();
+        agent.insert("agent".into(), json!("claude"));
+        agent.insert("agent_status".into(), json!("working"));
+        agent.insert("workspace_id".into(), json!("ws-1"));
+        agent.insert("tab_id".into(), json!("tab-1"));
+        agent.insert("pane_id".into(), json!(pane_id));
+        if let Some(sid) = session {
+            agent.insert("agent_session".into(), json!({"agent": "claude", "kind": "id", "value": sid}));
+        }
+        self.agents.lock().unwrap().push(Value::Object(agent));
+    }
+
     pub fn set_screen(&self, pane_id: &str, text: &str) {
         self.screens.lock().unwrap().insert(pane_id.to_string(), text.to_string());
     }

@@ -333,6 +333,14 @@ impl s6_ports::GrokTranscriptServices for Arc<App> {
     async fn emit_turn(&self, turn_id: &str) {
         crate::lifecycle::emit_turn(self, turn_id).await;
     }
+
+    async fn claude_herdr_session(&self, run: &crate::db::Run) -> Option<String> {
+        crate::runners::claude_child_log::herdr_session(self, run).await
+    }
+
+    async fn claude_config_roots(&self, bot: &crate::db::Bot, run: &crate::db::Run, host: &str) -> Vec<String> {
+        crate::runners::claude_child_log::config_roots(self, bot, run, host).await
+    }
 }
 
 impl s6_ports::BusySendServices for Arc<App> {

@@ -171,6 +171,33 @@
         }
     }
 
+    /// #878：終端擷取收下的「開場白」回合不是結尾——子 agent 還在 working／blocked 時不通知 parent，停下來之後 sweep 再報。
+    #[tokio::test]
+    async fn a_terminal_fallback_turn_is_not_reported_while_the_child_is_still_working() {
+        let f = fixture("terminal_fallback", "completed_fallback").await;
+        make_parent_busy(&f, "parent-working-fallback").await;
+        for busy in ["working", "blocked"] {
+            sqlx::query("UPDATE runs SET agent_status = ? WHERE id = ?").bind(busy).bind(&f.child_run).execute(&f.env.app.db).await.unwrap();
+            notify_turn(&f.env.app, &f.child_turn).await.unwrap();
+            assert_eq!(notice_count(&f).await, 0, "child is {busy}: no notice yet");
+            assert_eq!(sweep(&f.env.app).await, 1, "the sweep still sees it as unreported");
+            assert_eq!(notice_count(&f).await, 0, "child is {busy}: the sweep does not report it either");
+        }
+        sqlx::query("UPDATE runs SET agent_status = 'idle' WHERE id = ?").bind(&f.child_run).execute(&f.env.app.db).await.unwrap();
+        sweep(&f.env.app).await;
+        assert_eq!(notice_count(&f).await, 1, "once the child stops, the sweep reports it");
+    }
+
+    /// 同樣在忙，hook 收的回合照舊立刻報（只有畫面備援不可信）。
+    #[tokio::test]
+    async fn a_hook_turn_is_still_reported_immediately_while_the_child_works_on() {
+        let f = fixture("hook", "completed").await;
+        make_parent_busy(&f, "parent-working-hook").await;
+        sqlx::query("UPDATE runs SET agent_status = 'working' WHERE id = ?").bind(&f.child_run).execute(&f.env.app.db).await.unwrap();
+        notify_turn(&f.env.app, &f.child_turn).await.unwrap();
+        assert_eq!(notice_count(&f).await, 1);
+    }
+
     #[tokio::test]
     async fn a_parent_mid_turn_gets_the_completion_notice_queued() {
         let f = fixture("terminal_fallback", "completed_fallback").await;
