@@ -20,7 +20,7 @@
 //! 同一個時刻另記一筆**被中斷的是哪一回合**（[`InterruptedTurn`]），給 `StopFailure` 認 Esc 的回聲用
 //! （#117）。兩筆各自清：回聲到了只結清回聲那筆，排隊寬限照舊。
 
-use crate::app_ports_p4state;
+#[cfg(test)]
 use crate::state::App;
 use super::stuck_turns::{idle_for, observe_at};
 use super::*;
@@ -116,7 +116,7 @@ pub(crate) fn pending_echo(bot_id: &str) -> Option<InterruptedTurn> {
 }
 
 /// `interrupt_bot`／`abort_turns` 送完 Esc、收 in-flight **之前**呼叫：記排隊寬限，也記下被中斷的是哪一回合。
-pub(crate) async fn note_user_interrupt_of(app: &Arc<App>, bot: &db::Bot, run: &db::Run, in_flight: Option<&db::Turn>) {
+pub(crate) async fn note_user_interrupt_of(app: &impl LcHost, bot: &db::Bot, run: &db::Run, in_flight: Option<&db::Turn>) {
     note_user_interrupt(&bot.id);
     let prompt_id = claude_prompt_id(app, bot, run).await;
     expect_interrupt_echo(
@@ -204,7 +204,7 @@ pub(crate) fn echo_verdict(
 /// 回聲就是 Esc 已經生效的證據：那次打斷欠著／待證的收尾（`interruption`，#147）在這裡補上，**補上了才結清標記**——
 /// 寫不進去時回 `Err`，這一則 hook 由收件匣重試，重試時標記還在、還認得它是回聲，不會被當成真的失敗收掉。
 pub(crate) async fn settle_interrupt_echo(
-    app: &Arc<App>,
+    app: &impl LcHost,
     bot_id: &str,
     run_id: &str,
     ev: &FailureEvidence<'_>,
@@ -248,12 +248,12 @@ pub(crate) fn claude_last_prompt_id(log: &str) -> Option<String> {
         .find_map(|v| v.get("promptId").and_then(Value::as_str).map(str::trim).filter(|p| !p.is_empty()).map(String::from))
 }
 
-async fn claude_prompt_id(app: &Arc<App>, bot: &db::Bot, run: &db::Run) -> Option<String> {
-    if bot.kind != "claude" || db::bot_host(&app.db, &bot.id).await.ok()? != LOCAL_HOST {
+async fn claude_prompt_id(app: &impl LcHost, bot: &db::Bot, run: &db::Run) -> Option<String> {
+    if bot.kind != "claude" || db::bot_host(app.db(), &bot.id).await.ok()? != LOCAL_HOST {
         return None;
     }
     let raw_path = run.transcript_path.as_deref().filter(|p| !p.trim().is_empty())?;
-    if !app_ports_p4state::local_transcript_allowed(app, bot, raw_path).await {
+    if !crate::lifecycle::s6_ports::StuckTurnServices::local_transcript_allowed(app, bot, raw_path).await {
         return None;
     }
     let path = std::path::PathBuf::from(raw_path);
@@ -365,21 +365,21 @@ fn read_tail(path: &std::path::Path) -> Option<String> {
 }
 
 /// 這顆 bot 的 session log 尾端：本機 claude 的 transcript、codex 的 rollout。其他（遠端、grok）讀不到。
-async fn session_log(app: &Arc<App>, bot: &db::Bot, run: &db::Run) -> Option<String> {
-    if db::bot_host(&app.db, &bot.id).await.ok()? != LOCAL_HOST {
+async fn session_log(app: &impl LcHost, bot: &db::Bot, run: &db::Run) -> Option<String> {
+    if db::bot_host(app.db(), &bot.id).await.ok()? != LOCAL_HOST {
         return None;
     }
     match bot.kind.as_str() {
         "claude" => {
             let raw_path = run.transcript_path.as_deref().filter(|p| !p.trim().is_empty())?;
-            if !app_ports_p4state::local_transcript_allowed(app, bot, raw_path).await {
+            if !crate::lifecycle::s6_ports::StuckTurnServices::local_transcript_allowed(app, bot, raw_path).await {
                 return None;
             }
             let path = std::path::PathBuf::from(raw_path);
             tokio::task::spawn_blocking(move || read_tail(&path)).await.ok()?
         }
         "codex" => {
-            let home = app_ports_p4state::codex_home(app, bot).await?;
+            let home = crate::lifecycle::s6_ports::StuckTurnServices::codex_home(app, bot).await?;
             let session = run.native_session_id.clone().filter(|s| !s.trim().is_empty())?;
             tokio::task::spawn_blocking(move || read_tail(&codex_session_log(&home, &session)?)).await.ok()?
         }
@@ -388,7 +388,7 @@ async fn session_log(app: &Arc<App>, bot: &db::Bot, run: &db::Run) -> Option<Str
 }
 
 /// 使用者直接在 pane 裡按 Esc：讀這顆 bot 的 log。本機 claude／codex 才讀得到。
-async fn log_interrupted_at(app: &Arc<App>, bot: &db::Bot, run: &db::Run) -> Option<DateTime<Utc>> {
+async fn log_interrupted_at(app: &impl LcHost, bot: &db::Bot, run: &db::Run) -> Option<DateTime<Utc>> {
     let log = session_log(app, bot, run).await?;
     match bot.kind.as_str() {
         "claude" => claude_interrupted_at(&log),
@@ -435,9 +435,9 @@ pub(crate) fn codex_interrupted_after(log: &str, sent: &[String]) -> bool {
 }
 
 /// 這一筆（`sent`）在這顆 bot 的 session log 裡是不是已經被使用者按停了（#235，重啟時用）。讀不到＝不知道＝`false`。
-pub(crate) async fn log_interrupted_after(app: &Arc<App>, bot: &db::Bot, run: &db::Run, sent: &[String]) -> bool {
+pub(crate) async fn log_interrupted_after(app: &impl LcHost, bot: &db::Bot, run: &db::Run, sent: &[String]) -> bool {
     // #749：codex 先看 thread 歷史裡那個 turn 的狀態；只有明說 interrupted 才算數，其餘照舊讀 rollout。
-    if bot.kind == "codex" && app_ports_p4state::codex_interrupted_after(app, bot, run, sent).await {
+    if bot.kind == "codex" && crate::lifecycle::s6_ports::InterruptGraceHostServices::codex_interrupted_after(app, bot, run, sent).await {
         return true;
     }
     let Some(log) = session_log(app, bot, run).await else { return false };
@@ -450,7 +450,7 @@ pub(crate) async fn log_interrupted_after(app: &Arc<App>, bot: &db::Bot, run: &d
 /// `since` 之後這顆 bot 的 session log 裡有沒有使用者送出 `text` 這一則（#229：重啟後補證插隊送出的鍵生效了沒有——
 /// 平常那份 `SentProof` 只活在上一個行程的記憶體裡）。claude 可能把貼上的字包成 `<pasted_content>`（#218）；codex 逐字。
 /// 沒有時間的列不算。讀不到＝沒有證據。
-pub(crate) async fn log_shows_prompt_since(app: &Arc<App>, bot: &db::Bot, run: &db::Run, text: &str, since: DateTime<Utc>) -> bool {
+pub(crate) async fn log_shows_prompt_since(app: &impl LcHost, bot: &db::Bot, run: &db::Run, text: &str, since: DateTime<Utc>) -> bool {
     let Some(log) = session_log(app, bot, run).await else { return false };
     let claude = bot.kind == "claude";
     log.lines().any(|line| {
@@ -467,7 +467,7 @@ pub(crate) async fn log_shows_prompt_since(app: &Arc<App>, bot: &db::Bot, run: &
 }
 
 /// `since` 之後這顆 bot 的 log 裡有沒有使用者中斷的紀錄（#223）。讀不到＝沒有證據。
-pub(crate) async fn log_interrupted_since(app: &Arc<App>, bot: &db::Bot, run: &db::Run, since: DateTime<Utc>) -> bool {
+pub(crate) async fn log_interrupted_since(app: &impl LcHost, bot: &db::Bot, run: &db::Run, since: DateTime<Utc>) -> bool {
     let Some(log) = session_log(app, bot, run).await else { return false };
     match bot.kind.as_str() {
         "claude" => claude_interrupted_since(&log, since),
@@ -476,12 +476,12 @@ pub(crate) async fn log_interrupted_since(app: &Arc<App>, bot: &db::Bot, run: &d
 }
 
 /// 送出前問一次：要不要先讓使用者拿回輸入框。`Some(還要等多久)`＝先不送；`None`＝照一般規則。
-pub(crate) async fn hold(app: &Arc<App>, bot: &db::Bot, run: &db::Run, conv: &str) -> Option<Duration> {
+pub(crate) async fn hold(app: &impl LcHost, bot: &db::Bot, run: &db::Run, conv: &str) -> Option<Duration> {
     hold_at(app, bot, run, conv, Instant::now(), Utc::now(), interrupt_grace()).await
 }
 
 pub(crate) async fn hold_at(
-    app: &Arc<App>,
+    app: &impl LcHost,
     bot: &db::Bot,
     run: &db::Run,
     conv: &str,
@@ -502,7 +502,7 @@ pub(crate) async fn hold_at(
     )
     .bind(conv)
     .bind(interrupted_at.to_rfc3339_opts(chrono::SecondsFormat::Millis, true))
-    .fetch_one(&app.db)
+    .fetch_one(app.db())
     .await
     .unwrap_or(false);
     // 連續 idle 多久：跟 stuck_turns 同一份計時（還沒記過就從現在起算）。

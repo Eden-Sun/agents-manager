@@ -1,5 +1,6 @@
 //! Keystrokes, text and slash commands sent straight at a live pane.
 
+#[cfg(test)]
 use crate::state::App;
 use super::*;
 
@@ -132,7 +133,7 @@ fn live_slash_command(kind: &str, field: &str, value: &str, effort: Option<&str>
 /// 選擇存成帳號之後新 session 的預設。
 /// 回傳 `None` = 已套用；`Some(理由)` = 退回重啟。理由一路帶回 `live_apply` 並寫 log——
 /// 2026-09-13 使用者問 codex 改 effort 為何重啟，當時每個失敗出口都是靜默的。
-pub async fn apply_live_setting(app: &Arc<App>, bot_id: &str, fields: &[&str]) -> Option<String> {
+pub async fn apply_live_setting(app: &impl LcHost, bot_id: &str, fields: &[&str]) -> Option<String> {
     match apply_live_setting_with_run(app, bot_id, fields).await {
         LiveApplyOutcome::Applied { .. } => None,
         LiveApplyOutcome::BookkeepingPending { reason, .. } => Some(reason),
@@ -162,13 +163,13 @@ struct RuntimeSnapshot {
 
 /// 帶回實際執行 slash/picker 的 run；呼叫端的 PATCH 快照可能已經過時。
 async fn apply_live_setting_with_run(
-    app: &Arc<App>,
+    app: &impl LcHost,
     bot_id: &str,
     fields: &[&str],
 ) -> LiveApplyOutcome {
     let lock = app.bot_lock(bot_id).await;
     let _guard = lock.lock().await;
-    let bot = match db::bot(&app.db, bot_id).await {
+    let bot = match db::bot(app.db(), bot_id).await {
         Ok(Some(bot)) => bot,
         Ok(None) => return LiveApplyOutcome::Failed("bot_missing".into()),
         Err(error) => return LiveApplyOutcome::Failed(format!("bot_read_failed: {error}")),
@@ -180,7 +181,7 @@ async fn apply_live_setting_with_run(
 }
 
 pub(crate) async fn apply_live_setting_with_revision(
-    app: &Arc<App>,
+    app: &impl LcHost,
     bot_id: &str,
     fields: &[&str],
     baseline_rev: &str,
@@ -192,13 +193,13 @@ pub(crate) async fn apply_live_setting_with_revision(
 }
 
 async fn apply_live_setting_locked(
-    app: &Arc<App>,
+    app: &impl LcHost,
     bot_id: &str,
     fields: &[&str],
     baseline_rev: &str,
     target_rev: &str,
 ) -> LiveApplyOutcome {
-    match db::active_run(&app.db, bot_id).await {
+    match db::active_run(app.db(), bot_id).await {
         Ok(Some(run)) => {
             if let Err(error) = super::live_apply_debt::retry_once(app, &run.id).await {
                 return LiveApplyOutcome::BookkeepingPending {
@@ -400,7 +401,7 @@ async fn apply_live_setting_inner(
 /// 不再補 `/effort`：那個 slash 會把 `[models] default_reasoning_effort` 寫進使用者的 `GROK_HOME`。
 /// 參數留著是因為 start 仍會呼叫；送 slash 的舊路徑（#215）已停用。
 pub(crate) async fn apply_grok_startup_effort(
-    _app: &Arc<App>,
+    _app: &impl LcHost,
     _bot: &db::Bot,
     _run_id: &str,
     _pane_id: &str,

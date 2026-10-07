@@ -13,7 +13,7 @@
 //! 開機時（對帳之前，那會把舊 run 收尾並撤孤兒）[`adopt_open_intents`] 把每件還開著的 `restart` intent 灌成一個 hold，
 //! recovery 把那件 intent 收尾（done／abandoned／failed／過期）才放掉；補不成的重試期間 hold 也留著。
 
-use crate::app_ports_p4state;
+use super::LcHost;
 use std::collections::HashMap;
 use std::sync::{Mutex, OnceLock};
 
@@ -58,8 +58,8 @@ fn adopted() -> &'static Mutex<HashMap<(String, String), Hold>> {
 
 /// 開機（**對帳之前**）把還開著的 `restart` intent 各灌一個 hold。讀不到 DB 只能記 log（此時什麼都撤不了以外的事無從判斷），
 /// 之後 `recover_host` 照樣會補完，只是這段視窗沒有保護。
-pub(crate) async fn adopt_open_intents(app: &(impl crate::capabilities::DataDir + crate::capabilities::Db)) {
-    match app_ports_p4state::open_restart_intents(app.db()).await {
+pub(crate) async fn adopt_open_intents(app: &impl LcHost) {
+    match crate::lifecycle::s6_ports::RestartHoldHostServices::open_restart_intents(app).await {
         Ok(open) => {
             for i in open.into_iter().filter(|i| i.kind == "restart") {
                 let hold = begin(&i.subject_id);
@@ -79,7 +79,7 @@ pub(crate) fn release_intent(app: &impl crate::capabilities::DataDir, intent_id:
 }
 
 fn owner(app: &impl crate::capabilities::DataDir) -> String {
-    app_ports_p4state::owner_id(app)
+    crate::capabilities::DataDir::data_dir(app).display().to_string()
 }
 
 /// 只留還開著的 intent 的 hold；其餘（例如過期被收掉的）放掉。

@@ -1,11 +1,9 @@
 //! Delivering a prompt: the turn row, the pane write, and the queued path.
 
+#[cfg(test)]
 use crate::state::App;
 use super::*;
-use super::send_now::ports::{AttachConnPort, AttachSendPort, CodexSendPort, HandoffSendRepo, IdleSleepPort, SendEnvPort, ShareSendRepo, emit_object, turn_changed};
-use crate::app_ports_p4::{AppEventSink, AppTurnEvents};
-use crate::app_ports_p4send::AppBotLock;
-use am_ports::BotLock;
+use super::send_now::ports::{AttachConnPort, HandoffSendRepo, ShareSendRepo};
 
 pub(crate) async fn emit_prompt_message(app: &(impl crate::capabilities::Db + crate::capabilities::Emit + crate::capabilities::BotStatusEmit), bot_id: &str, message_id: &str) {
     if let Ok(Some(m)) = sqlx::query_as::<_, db::Message>("SELECT *, rowid AS seq FROM messages WHERE id=?")
@@ -13,7 +11,7 @@ pub(crate) async fn emit_prompt_message(app: &(impl crate::capabilities::Db + cr
         .fetch_optional(app.db())
         .await
     {
-        emit_object(&AppEventSink::new(app), "message_added", None, json!({"bot_id": bot_id, "message": m})).await;
+        crate::capabilities::Emit::emit(app, "message_added", json!({"bot_id": bot_id, "message": m})).await;
     }
 }
 
@@ -144,7 +142,7 @@ async fn restamp_queued_prompt(app: &(impl crate::capabilities::Db + crate::capa
     tx.commit().await?;
 
     for message in messages {
-        emit_object(&AppEventSink::new(app), "message_added", None, json!({"bot_id": bot_id, "message": message})).await;
+        crate::capabilities::Emit::emit(app, "message_added", json!({"bot_id": bot_id, "message": message})).await;
     }
     // Keep the marker through emission. A crash before this write replays the same id and first
     // timestamp on recovery; clients upsert by message id.
@@ -171,7 +169,7 @@ pub(crate) async fn rearm_queued_prompt_restamps(app: &(impl crate::capabilities
 }
 
 fn schedule_restamp_retry(app: &Arc<impl crate::capabilities::Db + crate::capabilities::Emit + crate::capabilities::Emit + crate::capabilities::BotStatusEmit + 'static>, turn_id: &str) {
-    let app = app.clone();
+    let app = (*app).clone();
     let turn_id = turn_id.to_string();
     tokio::spawn(async move {
         let mut attempt = 0;
@@ -250,9 +248,9 @@ pub(super) enum Retraction {
 /// 刪之前先確認 turn 還是 `in_flight`，而且跟刪訊息在同一個交易裡：`fail_in_flight` 不拿 per-bot 鎖，
 /// 會在「turn 已 commit、第一個字還沒打」這個窄窗裡把它標成 failed 並插一則「run ended」說明。訊息那句
 /// 原本不帶條件，於是使用者那顆泡泡跟那則說明被一起刪掉，只留下一個空的 failed 回合（review3 L4）。
-pub(super) async fn retract_unsent_turn(app: &Arc<App>, bot_id: &str, turn_id: &str, msg_id: &str) -> Result<Retraction, Unretracted> {
+pub(super) async fn retract_unsent_turn(app: &impl LcHost, bot_id: &str, turn_id: &str, msg_id: &str) -> Result<Retraction, Unretracted> {
     let res = async {
-        let mut tx = app.db.begin().await?;
+        let mut tx = app.db().begin().await?;
         // 訊息要先刪（`messages.turn_id` 指著 turns，反過來會踩到外鍵），turn 那句才是把關的：
         // 刪不到就 rollback，連訊息那句一起退掉——效果就是「turn 不是 in_flight 時一個字都不刪」。
         // 附件的 message_id 指著這則訊息、沒有 ON DELETE。先解開再刪，不然帶圖的撤回會外鍵失敗，
@@ -284,13 +282,13 @@ pub(super) async fn retract_unsent_turn(app: &Arc<App>, bot_id: &str, turn_id: &
             Err(Unretracted { cause: e, owed })
         }
     };
-    turn_changed(&AppTurnEvents::new(app), turn_id).await;
+    crate::lifecycle::s6_ports::QueueServices::turn_changed(app, turn_id).await;
     if out.as_ref().map(|r| *r == Retraction::Withdrawn).unwrap_or(false) {
         // 事件模型只有「新增／更新」，沒有「刪除」：`message_added` 與 `turn_updated` 已經廣播出去了，
         // 每個客戶端都收下了那顆泡泡與那筆進行中的回合，而 `emit_turn` 對已刪除的列是 no-op。
         // 不補一次重讀的話，畫面會留著一顆送不出去的幽靈泡泡與一個永遠不會結束的回合（review 2026-09-16）。
         // 沒刪成的兩條路沒有幽靈列要收，`emit_turn` 就夠了。
-        emit_object(&AppEventSink::new(app), "resync", None, json!({"reason": "turn_retracted", "turn_id": turn_id})).await;
+        crate::capabilities::Emit::emit(app, "resync", json!({"reason": "turn_retracted", "turn_id": turn_id})).await;
     }
     out
 }
@@ -361,7 +359,7 @@ pub(super) async fn maintenance_refusal(app: &impl crate::lifecycle::send_now::p
     }
 }
 
-pub async fn prompt(app: &Arc<App>, bot_id: &str, text: &str, client_request_id: &str) -> LcResult<PromptOut> {
+pub async fn prompt(app: &impl LcHost, bot_id: &str, text: &str, client_request_id: &str) -> LcResult<PromptOut> {
     prompt_grouped(app, bot_id, text, client_request_id, None, None, &[], None).await
 }
 
@@ -394,7 +392,7 @@ impl<'a> RelaySrc<'a> {
 
 /// 同 `prompt_with`，記下 `relay_from`（bot id 或哨符 `daemon`）；UI 靠它把泡泡畫在左邊。
 pub async fn prompt_relayed(
-    app: &Arc<App>,
+    app: &impl LcHost,
     bot_id: &str,
     text: &str,
     client_request_id: &str,
@@ -407,7 +405,7 @@ pub async fn prompt_relayed(
 /// `POST /bots/{id}/prompt`：一般送出（`send_now=false`）或插隊送出，來源已由 `relay_auth` 驗過（issue #339）。
 #[allow(clippy::too_many_arguments)]
 pub async fn prompt_from_api(
-    app: &Arc<App>,
+    app: &impl LcHost,
     bot_id: &str,
     text: &str,
     client_request_id: &str,
@@ -423,7 +421,7 @@ pub async fn prompt_from_api(
 /// `POST /prompt` with `queue_if_busy:true`: queue a user prompt only while the active run is busy.
 #[allow(clippy::too_many_arguments)]
 pub async fn prompt_from_api_queue_if_busy(
-    app: &Arc<App>,
+    app: &impl LcHost,
     bot_id: &str,
     text: &str,
     client_request_id: &str,
@@ -453,7 +451,7 @@ pub async fn prompt_from_api_queue_if_busy(
 
 /// Share-portal prompt route. The capability is checked inside `prompt_inner` after taking the bot lock.
 pub async fn prompt_from_share_with_token(
-    app: &Arc<App>,
+    app: &impl LcHost,
     bot_id: &str,
     text: &str,
     client_request_id: &str,
@@ -487,7 +485,7 @@ pub async fn prompt_from_share_with_token(
 /// `queue::flush_queued_locked` 在回合結束時送出，送達判定與證據記錄完全沿用（`Handed`／`auto_resend` 不變）。
 /// 回傳 `delivery = "queued"` 代表「已排隊、還沒送」。
 pub async fn prompt_relayed_queueable(
-    app: &Arc<App>,
+    app: &impl LcHost,
     bot_id: &str,
     text: &str,
     client_request_id: &str,
@@ -515,7 +513,7 @@ pub(crate) fn queue_insert_error(bot_id: &str, conv: &str, e: sqlx::Error) -> Lc
 }
 
 pub(crate) async fn queue_for_next_turn(
-    app: &Arc<App>,
+    app: &impl LcHost,
     conv: &str,
     bot_id: &str,
     text: &str,
@@ -526,7 +524,7 @@ pub(crate) async fn queue_for_next_turn(
 ) -> LcResult<PromptOut> {
     let turn_id = db::ulid();
     let msg_id = db::ulid();
-    let mut tx = app.db.begin().await.map_err(up)?;
+    let mut tx = app.db().begin().await.map_err(up)?;
     let queued = sqlx::query(
         "INSERT INTO turns (id, conversation_id, run_id, origin, status, delivery, client_request_id, created_at, prompt_text)
          VALUES (?,?,NULL,'web','queued','pending',?,?,?)",
@@ -557,7 +555,7 @@ pub(crate) async fn queue_for_next_turn(
     .map_err(up)?;
     tx.commit().await.map_err(up)?;
     emit_prompt_message(app, bot_id, &msg_id).await;
-    turn_changed(&AppTurnEvents::new(app), &turn_id).await;
+    crate::lifecycle::s6_ports::QueueServices::turn_changed(app, &turn_id).await;
     tracing::info!(bot = %bot_id, turn = %turn_id, "對方回合中：prompt 排進佇列，等回合結束再送");
     Ok(PromptOut { turn_id, message_id: msg_id, delivery: "queued".into(), send_now: None })
 }
@@ -593,7 +591,7 @@ fn agent_prompt_dialog_reason(kind: &str, screen: &str) -> Option<&'static str> 
 
 /// Last read-only fence for the `agent.prompt` route, which otherwise bypasses the pane composer.
 pub(crate) async fn final_agent_prompt_guard(
-    app: &Arc<App>,
+    app: &impl LcHost,
     client: &super::RunClient,
     run: &db::Run,
     bot: &db::Bot,
@@ -601,10 +599,10 @@ pub(crate) async fn final_agent_prompt_guard(
 ) -> Result<(), &'static str> {
     // Read authority before any final run/pane inspection; these reads and the eventual RPC use the
     // client captured from this exact HostConn, never a fresh lookup by host name.
-    if !app.hosts.is_current(&client.fence).await {
+    if !app.hosts().is_current(&client.fence).await {
         return Err("host_changed");
     }
-    let current = match db::active_run(&app.db, &run.bot_id).await {
+    let current = match db::active_run(app.db(), &run.bot_id).await {
         Ok(Some(current)) => current,
         _ => return Err("run_unreadable"),
     };
@@ -648,7 +646,7 @@ pub(crate) async fn final_agent_prompt_guard(
     Ok(())
 }
 
-pub(crate) async fn pane_ready_for_prompt(app: &Arc<App>, bot: &db::Bot, run: &db::Run, conv: &str) -> LcResult<()> {
+pub(crate) async fn pane_ready_for_prompt(app: &impl LcHost, bot: &db::Bot, run: &db::Run, conv: &str) -> LcResult<()> {
     let pane = match run.pane_id.as_deref().map(str::trim) {
         Some("") => return Err(pane_guard_retry(run, "pane_unreadable")),
         Some(pane) => Some(pane),
@@ -740,10 +738,10 @@ pub(crate) async fn pane_ready_for_prompt(app: &Arc<App>, bot: &db::Bot, run: &d
             #[cfg(test)]
             super::race_point::hit("grok_trust_before_host", &bot.id).await;
             let authority = async {
-                let host = db::bot_host(&app.db, &bot.id).await?;
+                let host = db::bot_host(app.db(), &bot.id).await?;
                 let cwd = match bot.cwd.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
                     Some(c) => c.to_string(),
-                    None => db::project(&app.db, &bot.project_id).await?.map(|p| p.path).unwrap_or_default(),
+                    None => db::project(app.db(), &bot.project_id).await?.map(|p| p.path).unwrap_or_default(),
                 };
                 anyhow::Ok((host, cwd))
             };
@@ -758,7 +756,7 @@ pub(crate) async fn pane_ready_for_prompt(app: &Arc<App>, bot: &db::Bot, run: &d
             if cwd.is_empty() {
                 tracing::warn!(bot = %bot.name, host, "grok 的信任目錄查不出來，只能按 y");
             } else {
-                for warning in crate::trust::pretrust_for_start(app, bot, &host, &cwd).await {
+                for warning in crate::lifecycle::s6_ports::StartServices::pretrust_for_start(app, bot, &host, &cwd).await {
                     tracing::warn!(bot = %bot.name, host, cwd, warning = %warning, "could not record grok folder trust");
                 }
             }
@@ -816,7 +814,7 @@ pub(crate) async fn pane_ready_for_prompt(app: &Arc<App>, bot: &db::Bot, run: &d
 }
 
 pub async fn prompt_grouped(
-    app: &Arc<App>,
+    app: &impl LcHost,
     bot_id: &str,
     text: &str,
     client_request_id: &str,
@@ -849,7 +847,7 @@ pub async fn prompt_send_now(
 /// daemon 自己的控制面 prompt（AGM／協調者啟動時的握手）：不受維護窗口的入場閘門管（issue #86）。
 /// 只有 `supervisor` 那兩條啟動路徑用得到；一般送入一律走 [`prompt_relayed`]。
 pub async fn prompt_control_plane(
-    app: &Arc<App>,
+    app: &impl LcHost,
     bot_id: &str,
     text: &str,
     client_request_id: &str,
@@ -860,7 +858,7 @@ pub async fn prompt_control_plane(
 
 #[allow(clippy::too_many_arguments)]
 async fn prompt_inner(
-    app: &Arc<App>,
+    app: &impl LcHost,
     bot_id: &str,
     text: &str,
     client_request_id: &str,
@@ -885,18 +883,16 @@ async fn prompt_inner(
     let deliver = deliver.unwrap_or(text);
     #[cfg(test)]
     super::race_point::hit("prompt_before_bot_lock", bot_id).await;
-    let locks = AppBotLock::new(app);
-    let locked_bot = bot_id.to_string();
-    let _g = locks.lock_bot(&locked_bot).await.map_err(|e| LcError::Upstream(e.to_string()))?;
+    let _g = crate::lifecycle::s6_ports::StartServices::lock_bot_for_start(app, bot_id).await;
     if let Some(token) = share_token {
-        let valid = app.db.resolve_share_token(token).await.map_err(up)?;
+        let valid = app.db().resolve_share_token(token).await.map_err(up)?;
         if valid.as_deref() != Some(bot_id) {
             return Err(LcError::NotFound("bot".into()));
         }
-        app.db.touch_share(bot_id).await;
+        app.db().touch_share(bot_id).await;
     }
     // #708：移交出去的專案不收 prompt（也不排隊）：送到了也是另一顆 daemon 的回合。
-    app.db.refuse_handed_off(bot_id).await?;
+    app.db().refuse_handed_off(bot_id).await?;
     // 這顆如果是 AGM 因為閒置收起來的（§6.11），先用 `--resume` 把它叫醒再送——「下次要用再叫醒」
     // 的那個「下次要用」就是這裡。**在鎖裡**做（issue #123）：巡邏收機器也在同一把鎖裡判斷＋寫標記＋停機，
     // 叫醒放在鎖外的話，會夾在「叫醒檢查過、沒睡」與「拿到鎖」之間被收掉，接著只會看到 409 沒有 active run。
@@ -919,15 +915,15 @@ async fn prompt_inner(
         return Err(LcError::Bad("client_request_id must not be empty".into()));
     }
     // 已軟刪的 bot 不收 prompt（#338）：pane 可能還活著（停機中、停機失敗保留 run），打進去是打進使用者已經刪掉的東西。
-    let bot = db::bot(&app.db, bot_id).await.map_err(up)?.filter(|b| b.deleted_at.is_none()).ok_or_else(|| LcError::NotFound("bot".into()))?;
+    let bot = db::bot(app.db(), bot_id).await.map_err(up)?.filter(|b| b.deleted_at.is_none()).ok_or_else(|| LcError::NotFound("bot".into()))?;
     // 專案刪除時的 child 清理可能因 DB 暫時故障而重試：那段期間 child row 可能仍是 live，但
     // 專案已定案刪除。檢查放在 per-bot 鎖內，避免驗過之後剛好被 delete_project 軟刪仍送進舊 pane。
-    db::project(&app.db, &bot.project_id)
+    db::project(app.db(), &bot.project_id)
         .await
         .map_err(up)?
         .filter(|p| p.deleted_at.is_none())
         .ok_or_else(|| LcError::NotFound("project".into()))?;
-    let conv = db::conversation_id(&app.db, bot_id).await.map_err(up)?;
+    let conv = db::conversation_id(app.db(), bot_id).await.map_err(up)?;
     // Resolve first so an unknown id is a plain 400, not an undelivered turn.
     let files = app.resolve_attachments(bot_id, attachment_ids)
         .await
@@ -942,7 +938,7 @@ async fn prompt_inner(
     if let Some(t) = sqlx::query_as::<_, db::Turn>("SELECT * FROM turns WHERE conversation_id=? AND client_request_id=?")
         .bind(&conv)
         .bind(client_request_id)
-        .fetch_optional(&app.db)
+        .fetch_optional(app.db())
         .await
         .map_err(up)?
     {
@@ -965,14 +961,14 @@ async fn prompt_inner(
     }
 
     // 1. preconditions
-    let run = db::active_run(&app.db, bot_id).await.map_err(up)?.ok_or_else(|| {
+    let run = db::active_run(app.db(), bot_id).await.map_err(up)?.ok_or_else(|| {
         LcError::conflict("bot has no active run", json!({}))
     })?;
     if run.state != "running" {
         return Err(LcError::conflict("run is not running", json!({"run_id": run.id, "state": run.state})));
     }
     if queue_awaits_idle {
-        let in_flight = db::in_flight_turn(&app.db, &run.id).await.map_err(up)?;
+        let in_flight = db::in_flight_turn(app.db(), &run.id).await.map_err(up)?;
         if in_flight.is_some() || run.agent_status != "idle" {
             return super::busy_send::queue_awaiting_idle(app, &conv, bot_id, text, &deliver, client_request_id, group_id, relay, &files).await;
         }
@@ -983,7 +979,7 @@ async fn prompt_inner(
     // issue #103：插隊送出。先問這顆 run 認不認得 send-now 鍵，**再**決定要不要打斷——不合資格時
     // 一個鍵都不按，照原本的路回 409，只是把原因一起講出來。
     // issue #748：codex 另有一條 steer（`[codex] instant_interrupt` 旗標＋跑著的版本 >= 0.159.0），旗標預設關。
-    let codex_on = want_send_now && bot.kind == "codex" && app.cfg.get().await.codex.instant_interrupt;
+    let codex_on = want_send_now && bot.kind == "codex" && app.cfg().get().await.codex.instant_interrupt;
     let gate = want_send_now.then(|| {
         let codex_running = app.codex_running_version(&run.id);
         send_now::gate(&bot.kind, run.status_json.as_deref(), codex_running.as_deref(), codex_on)
@@ -995,7 +991,7 @@ async fn prompt_inner(
     };
     let send_now_ok = want_send_now && refused.is_none();
     // 打斷哪一筆。**現在不收**：計畫失敗（框裡有字、證據讀不到）時一個鍵都還沒按，不該先把人家的回合收掉。
-    let interrupted = match db::in_flight_turn(&app.db, &run.id).await.map_err(up)? {
+    let interrupted = match db::in_flight_turn(app.db(), &run.id).await.map_err(up)? {
         Some(t) if send_now_ok => Some(t),
         Some(t) => {
             if queue_if_busy {
@@ -1059,7 +1055,7 @@ async fn prompt_inner(
         "SELECT * FROM turns WHERE conversation_id=? AND delivery='unknown' AND status='in_flight' LIMIT 1",
     )
     .bind(&conv)
-    .fetch_optional(&app.db)
+    .fetch_optional(app.db())
     .await
     .map_err(up)?
     {
@@ -1101,7 +1097,7 @@ async fn prompt_inner(
     // stall 重送、畫面比對、hook 對 prompt 都讀它，不讀泡泡原文（review3 c3 M4）。
     // `auto_resend=0` 在打字之前寫死：送出之後結果寫不回來（#149），這一筆也不會變成可以自動重送；寫回時照證據打開。
     let turn_id = db::ulid();
-    let mut tx = app.db.begin().await.map_err(up)?;
+    let mut tx = app.db().begin().await.map_err(up)?;
     let inserted = sqlx::query(
         "INSERT INTO turns (id, conversation_id, run_id, origin, status, delivery, client_request_id, created_at, prompt_text, auto_resend)
          SELECT ?, ?, ?, 'web', 'in_flight', 'pending', ?, ?, ?, 0
@@ -1162,7 +1158,7 @@ async fn prompt_inner(
         };
     }
     emit_prompt_message(app, bot_id, &msg_id).await;
-    turn_changed(&AppTurnEvents::new(app), &turn_id).await;
+    crate::lifecycle::s6_ports::QueueServices::turn_changed(app, &turn_id).await;
 
     // 窄窗：閘門讀完之後、這一筆 commit 之前，窗口才被拿走。一個字都還沒打，所以撤回這一筆再回 409。
     // 另一邊（`store::acquire_lease`）的條件式寫入保證它看不到已經 commit 的 turn，兩句都是單句寫入、
@@ -1264,7 +1260,7 @@ async fn prompt_inner(
 /// 正在跑的那一回合原封不動；新的那一則收成 failed（不佔 run 的 in-flight 名額），送達記成 `failed`／`unknown`，
 /// 並說清楚字可能還留在輸入框裡。收不成就記成欠著、回 503（#158）：不留一筆 run_id 為空的 in_flight 沒人收。
 async fn send_now_fell_through(
-    app: &Arc<App>,
+    app: &impl LcHost,
     bot_id: &str,
     run_id: &str,
     turn_id: &str,

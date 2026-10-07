@@ -34,6 +34,8 @@ pub(crate) mod messages;
 pub(crate) mod relay_watch;
 pub(crate) mod dead_panes;
 pub(crate) mod s6_ports;
+mod lc_host;
+pub(crate) use lc_host::LcHost;
 pub(crate) mod queue;
 pub(crate) mod setup;
 pub(crate) mod agent_md;

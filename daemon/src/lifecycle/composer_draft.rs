@@ -9,6 +9,7 @@
 //! 帶新的草稿與 token，一個鍵都不按。按鍵前再檢查 pane revision、完整草稿和 run/session；Herdr 尚無條件按鍵 API，最後重讀
 //! 到 key 實際送達之間仍留有一個很短、無法原子封閉的窗口。
 
+#[cfg(test)]
 use crate::state::App;
 use super::*;
 use sha2::{Digest, Sha256};
@@ -213,15 +214,15 @@ pub(crate) async fn clear(
 /// 出現**一則新的使用者訊息**。框裡的字是從畫面讀的，不能拿來逐字比對（`delivery` 開頭：軟換行、空白、摺起來的貼上），
 /// 所以比的是「多了一則」而不是「多了這一則」——閒著的 bot、框裡只有這一段，Enter 送出去的就是它。
 /// 其他情況沒有無損證據：框在 Enter 後清空就是 `Unverified`。
-async fn draft_proof(app: &Arc<App>, client: &HerdrClient, run: &db::Run, bot: &db::Bot, pane: &str, draft: &str) -> LcResult<Proof> {
-    let host_is_local = match db::project(&app.db, &bot.project_id).await {
+async fn draft_proof(app: &impl LcHost, client: &HerdrClient, run: &db::Run, bot: &db::Bot, pane: &str, draft: &str) -> LcResult<Proof> {
+    let host_is_local = match db::project(app.db(), &bot.project_id).await {
         Ok(p) => p.is_some_and(|p| p.host == LOCAL_HOST),
         Err(_) => return Err(not_attempted_error(&run.id, Delivered::NotAttempted { reason: "host_unreadable", retry: true })),
     };
     let transcript_path = if let Some(path) = run.transcript_path.as_deref() {
         if bot.kind == "claude"
             && host_is_local
-            && !crate::app_ports_p5::local_transcript_allowed(app, bot, path).await
+            && !crate::lifecycle::s6_ports::StuckTurnServices::local_transcript_allowed(app, bot, path).await
         {
             None
         } else {
@@ -231,7 +232,7 @@ async fn draft_proof(app: &Arc<App>, client: &HerdrClient, run: &db::Run, bot: &
         None
     };
     let codex_log = match (bot.kind.as_str(), host_is_local, run.native_session_id.as_deref()) {
-        ("codex", true, Some(session)) => match codex_home(app, bot).await {
+        ("codex", true, Some(session)) => match crate::lifecycle::s6_ports::StuckTurnServices::codex_home(app, bot).await {
             Some(h) => codex_session_log_async(h, session.to_string()).await,
             None => None,
         },
@@ -335,7 +336,7 @@ impl From<SubmitDraftError> for LcError {
 }
 
 /// Remove the provisional DB turn if the last pre-key fence decides nothing was submitted.
-async fn withdraw_unsubmitted(app: &Arc<App>, bot_id: &str, run: &db::Run, turn_id: &str, msg_id: &str, rejection: LcError) -> Result<PromptOut, SubmitDraftError> {
+async fn withdraw_unsubmitted(app: &impl LcHost, bot_id: &str, run: &db::Run, turn_id: &str, msg_id: &str, rejection: LcError) -> Result<PromptOut, SubmitDraftError> {
     match retract_unsent_turn(app, bot_id, turn_id, msg_id).await {
         Ok(Retraction::Withdrawn) => Err(SubmitDraftError::NoKeySent(rejection)),
         Ok(Retraction::AlreadySettled) => answer_for_turn_id(app, turn_id).await.map_err(SubmitDraftError::EnterMayHaveBeenSent),
@@ -345,18 +346,18 @@ async fn withdraw_unsubmitted(app: &Arc<App>, bot_id: &str, run: &db::Run, turn_
 
 /// 送出框裡那段（或接受建議）之前的閘門：維護窗口、run 在跑、不在對話框、沒有進行中的回合、接回已驗證、畫面可送、沒有送達不明的回合。
 /// 一個鍵都不按；回傳要送進去的那個 run。接受建議在按 Tab **之前**先過一次，不然閘門擋下時框裡已經多了一段字。
-pub(crate) async fn submit_gates(app: &Arc<App>, bot_id: &str, bot: &db::Bot, conv: &str) -> LcResult<db::Run> {
+pub(crate) async fn submit_gates(app: &impl LcHost, bot_id: &str, bot: &db::Bot, conv: &str) -> LcResult<db::Run> {
     if let Some(refusal) = maintenance_refusal(app, Admission::Gated).await {
         return Err(refusal);
     }
-    let run = db::active_run(&app.db, bot_id).await.map_err(up)?.ok_or_else(|| LcError::conflict("bot has no active run", json!({})))?;
+    let run = db::active_run(app.db(), bot_id).await.map_err(up)?.ok_or_else(|| LcError::conflict("bot has no active run", json!({})))?;
     if run.state != "running" {
         return Err(LcError::conflict("run is not running", json!({"run_id": run.id, "state": run.state})));
     }
     if run.agent_status == "blocked" {
         return Err(LcError::conflict("agent is blocked; answer the prompt first", json!({"run_id": run.id})));
     }
-    if let Some(t) = db::in_flight_turn(&app.db, &run.id).await.map_err(up)? {
+    if let Some(t) = db::in_flight_turn(app.db(), &run.id).await.map_err(up)? {
         return Err(LcError::conflict("a turn is already in flight", json!({"turn_id": t.id})));
     }
     if let super::resume_gate::Gate::Waiting { expected, left } = super::resume_gate::check(app, bot, &run, conv).await {
@@ -370,7 +371,7 @@ pub(crate) async fn submit_gates(app: &Arc<App>, bot_id: &str, bot: &db::Bot, co
         "SELECT * FROM turns WHERE conversation_id=? AND delivery='unknown' AND status='in_flight' LIMIT 1",
     )
     .bind(&conv)
-    .fetch_optional(&app.db)
+    .fetch_optional(app.db())
     .await
     .map_err(up)?
     {
@@ -381,14 +382,14 @@ pub(crate) async fn submit_gates(app: &Arc<App>, bot_id: &str, bot: &db::Bot, co
 
 /// `POST /bots/{id}/prompt` 帶 `submit_draft`：送出框裡那段。跟一般 prompt 同一套前提（冪等、維護窗口、回合在飛、
 /// 接回未驗證、畫面上開著的選單、unknown 回合）；差別只在不打字、改按 Enter，訊息內容是框裡那段。
-pub async fn submit(app: &Arc<App>, bot_id: &str, expect_token: &str, client_request_id: &str) -> LcResult<PromptOut> {
+pub async fn submit(app: &impl LcHost, bot_id: &str, expect_token: &str, client_request_id: &str) -> LcResult<PromptOut> {
     let lock = app.bot_lock(bot_id).await;
     let _g = lock.lock().await;
     submit_locked(app, bot_id, expect_token, client_request_id).await.map_err(Into::into)
 }
 
 /// [`submit`]，呼叫端已經握著這顆 bot 的鎖（接受建議下一句：先按 Tab、確認框裡就是那句，再在同一把鎖裡送出，`suggestion.rs`）。
-pub(crate) async fn submit_locked(app: &Arc<App>, bot_id: &str, expect_token: &str, client_request_id: &str) -> Result<PromptOut, SubmitDraftError> {
+pub(crate) async fn submit_locked(app: &impl LcHost, bot_id: &str, expect_token: &str, client_request_id: &str) -> Result<PromptOut, SubmitDraftError> {
     if let Err(e) = super::interruption::settle_locked(app, bot_id, super::interruption::Evidence::Nothing).await {
         tracing::warn!(bot = %bot_id, error = %e, "上一次打斷欠著的收尾還是寫不進去");
     }
@@ -401,20 +402,20 @@ pub(crate) async fn submit_locked(app: &Arc<App>, bot_id: &str, expect_token: &s
     if expect_token.trim().is_empty() {
         return Err(SubmitDraftError::NoKeySent(LcError::Bad("submit_draft needs the expect_draft_token the 409 showed".into())));
     }
-    let bot = db::bot(&app.db, bot_id)
+    let bot = db::bot(app.db(), bot_id)
         .await
         .map_err(up)
         .map_err(SubmitDraftError::NoKeySent)?
         .filter(|b| b.deleted_at.is_none())
         .ok_or_else(|| SubmitDraftError::NoKeySent(LcError::NotFound("bot".into())))?;
-    let conv = db::conversation_id(&app.db, bot_id)
+    let conv = db::conversation_id(app.db(), bot_id)
         .await
         .map_err(up)
         .map_err(SubmitDraftError::NoKeySent)?;
     if let Some(t) = sqlx::query_as::<_, db::Turn>("SELECT * FROM turns WHERE conversation_id=? AND client_request_id=?")
         .bind(&conv)
         .bind(client_request_id)
-        .fetch_optional(&app.db)
+        .fetch_optional(app.db())
         .await
         .map_err(up)
         .map_err(SubmitDraftError::NoKeySent)?
@@ -460,7 +461,7 @@ pub(crate) async fn submit_locked(app: &Arc<App>, bot_id: &str, expect_token: &s
     // 不會有「再打一次」這回事。
     let turn_id = db::ulid();
     let msg_id = db::ulid();
-    let mut tx = app.db.begin().await.map_err(up).map_err(SubmitDraftError::NoKeySent)?;
+    let mut tx = app.db().begin().await.map_err(up).map_err(SubmitDraftError::NoKeySent)?;
     sqlx::query(
         "INSERT INTO turns (id, conversation_id, run_id, origin, status, delivery, client_request_id, created_at, prompt_text, auto_resend)
          VALUES (?,?,?,'web','in_flight','pending',?,?,?,0)",
@@ -493,7 +494,7 @@ pub(crate) async fn submit_locked(app: &Arc<App>, bot_id: &str, expect_token: &s
         Some(refusal)
     } else {
         crate::lifecycle::remember_pane_typed(&run.id);
-        db::set_pane_typed(&app.db, &run.id)
+        db::set_pane_typed(app.db(), &run.id)
             .await
             .err()
             .map(|_| not_attempted_error(&run.id, Delivered::NotAttempted { reason: "pane_typed_unwritable", retry: true }))

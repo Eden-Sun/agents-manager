@@ -9,8 +9,6 @@
 //! * 讀的是 `…/brain/<id>/.system_generated/logs/transcript_full.jsonl` 的尾巴（`agy_support::parse_turns`）。
 
 use super::*;
-use super::start::ports::{bot_status};
-use crate::app_ports_p4::{AppEventSink};
 use std::path::Path;
 
 const MAX_READ_BYTES: u64 = 8 * 1024 * 1024;
@@ -79,7 +77,7 @@ pub(crate) async fn record_status(app: &(impl crate::capabilities::Db + crate::c
         return;
     }
     if sqlx::query("UPDATE runs SET status_json = ? WHERE id = ?").bind(&json).bind(&run.id).execute(app.db()).await.is_ok() {
-        bot_status(&AppEventSink::new(app), &bot.id).await;
+        crate::capabilities::BotStatusEmit::emit_bot_status(app, &bot.id).await;
     }
 }
 

@@ -32,9 +32,9 @@ pub(crate) trait MaintenancePort {
 
 /// 閒置休眠的叫醒（原 `supervisor::idle_sleep`）。
 pub(crate) trait IdleSleepPort {
-    async fn idle_sleep_wake(&self, bot_id: &str, why: &str) -> Result<bool>;
+    fn idle_sleep_wake<'a>(&'a self, bot_id: &'a str, why: &'a str) -> impl std::future::Future<Output = Result<bool>> + Send + 'a;
     /// 呼叫端已握著這顆 bot 的鎖。
-    async fn idle_sleep_wake_locked(&self, bot_id: &str, why: &str) -> Result<bool>;
+    fn idle_sleep_wake_locked<'a>(&'a self, bot_id: &'a str, why: &'a str) -> impl std::future::Future<Output = Result<bool>> + Send + 'a;
 }
 
 /// supervisor／交辦的讀庫（原 `supervisor::store`、`supervisor_owned`）。實作在 `SqlitePool` 上。
@@ -89,8 +89,13 @@ pub(crate) trait CodexSendPort {
     /// `codex_live::close_picker`：關掉 pane 裡的選單（只送 Escape 類的鍵，回有沒有關成）。
     async fn close_codex_picker(&self, client: &crate::herdr::HerdrClient, pane_id: &str) -> bool;
     fn codex_running_version(&self, run_id: &str) -> Option<String>;
-    async fn codex_history_mark(&self, bot: &db::Bot, run: &db::Run) -> Option<Mark>;
-    async fn codex_prompt_landed(&self, mark: &Mark, conn: &mut Option<Box<dyn crate::codex_history::HistoryConn>>, text: &str) -> bool;
+    fn codex_history_mark<'a>(&'a self, bot: &'a db::Bot, run: &'a db::Run) -> impl std::future::Future<Output = Option<Mark>> + Send + 'a;
+    fn codex_prompt_landed<'a>(
+        &'a self,
+        mark: &'a Mark,
+        conn: &'a mut Option<Box<dyn crate::codex_history::HistoryConn>>,
+        text: &'a str,
+    ) -> impl std::future::Future<Output = bool> + Send + 'a;
 }
 
 /// 送出前後會碰到的其他 feature（原 `dangerous_rm`、`primary_keep_warm`）。

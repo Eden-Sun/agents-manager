@@ -7,6 +7,7 @@
 #[path = "../app_ports_p4obs.rs"]
 pub(crate) mod app_ports_p4obs;
 
+#[cfg(test)]
 use crate::state::App;
 use super::*;
 
@@ -106,15 +107,15 @@ fn poll_unreadable(turn_id: &str, failures: u32, e: &anyhow::Error) -> u32 {
 
 /// While a turn is in flight, poll the pane and push partial replies as `turn_progress`. Also the
 /// idle-prompt safety net that calls `try_fallback` (see below). Stops once the turn leaves `in_flight`.
-pub async fn arm_progress(app: &Arc<App>, run_id: &str, bot_id: &str, turn_id: &str) {
+pub async fn arm_progress(app: &impl LcHost, run_id: &str, bot_id: &str, turn_id: &str) {
     // A new turn is starting: whatever cut the *previous* one short is history (§4.3a). 清不掉就在 poller 裡
     // 再清：留著的話，這一回合斷在同一句錯誤上會被「同一則只記一次」吞掉（#193）。
     let mut error_cleared = app_ports_p4obs::clear_turn_error(app, run_id, bot_id).await.is_ok();
-    let mut pollers = app.progress_pollers.lock().await;
+    let mut pollers = app.progress_pollers().lock().await;
     if let Some(h) = pollers.remove(run_id) {
         h.abort();
     }
-    let app2 = app.clone();
+    let app2 = (*app).clone();
     let run_id = run_id.to_string();
     let bot_id = bot_id.to_string();
     let turn_id = turn_id.to_string();
@@ -174,7 +175,7 @@ pub async fn arm_progress(app: &Arc<App>, run_id: &str, bot_id: &str, turn_id: &
             // §4.3's fallback is armed by herdr's `working -> idle`; when that sticks (2026-09-06: grok
             // idle at an empty composer, herdr still `working`) nothing closes the turn. So trust the
             // pane too: empty composer + no change = wants input. `blocked` excluded (a modal isn't an end).
-            let agent_status = match db::run(&app2.db, &run_id).await {
+            let agent_status = match db::run(app2.db(), &run_id).await {
                 Ok(Some(r)) => r.agent_status,
                 Ok(None) => break,
                 // 不知道是不是 `blocked`（對話框）：這一輪不算閒著，也不歸零（#193）。以前當成空字串，照樣累計。
@@ -226,7 +227,7 @@ pub async fn arm_progress(app: &Arc<App>, run_id: &str, bot_id: &str, turn_id: &
             }
         }
         flush_progress(&app2, &run_id, &mut pending, true).await;
-        app2.progress_pollers.lock().await.remove(&run_id);
+        app2.progress_pollers().lock().await.remove(&run_id);
     });
     pollers.insert(key, h);
 }
@@ -235,19 +236,19 @@ pub async fn arm_progress(app: &Arc<App>, run_id: &str, bot_id: &str, turn_id: &
 /// The user typed straight into the pane: open the `external` turn on the `-> working` edge so it
 /// gets the same live bubble / progress as a web prompt. `delivery='ok'` so the §4.3 fallback
 /// (which ignores other values) can still close it if the Stop hook never comes.
-pub async fn begin_external_turn(app: &Arc<App>, run: &db::Run) {
+pub async fn begin_external_turn(app: &impl LcHost, run: &db::Run) {
     let lock = app.bot_lock(&run.bot_id).await;
     let _g = lock.lock().await;
     // Re-read under the lock: `prompt()` may have opened a turn, and the watcher is armed before
     // the run is `running`, so a boot-time `-> working` blip is not the user typing.
-    let Ok(Some(run)) = db::run(&app.db, &run.id).await else { return };
+    let Ok(Some(run)) = db::run(app.db(), &run.id).await else { return };
     if run.state != "running" {
         return;
     }
-    if !matches!(db::in_flight_turn(&app.db, &run.id).await, Ok(None)) {
+    if !matches!(db::in_flight_turn(app.db(), &run.id).await, Ok(None)) {
         return;
     }
-    let conv = match db::conversation_id(&app.db, &run.bot_id).await {
+    let conv = match db::conversation_id(app.db(), &run.bot_id).await {
         Ok(conv) => conv,
         Err(error) => {
             tracing::warn!(error = ?error, bot = %run.bot_id, "could not get conversation for external turn");
@@ -263,7 +264,7 @@ pub async fn begin_external_turn(app: &Arc<App>, run: &db::Run) {
     .bind(&conv)
     .bind(&run.id)
     .bind(db::now())
-    .execute(&app.db)
+    .execute(app.db())
     .await
     {
         // Losing the `turns_one_in_flight` race means someone else opened it — fine.
@@ -274,7 +275,7 @@ pub async fn begin_external_turn(app: &Arc<App>, run: &db::Run) {
     // No echo on screen: open the turn anyway rather than invent a user message.
     // claude 自己起頭的回合（背景 shell 的 task notification）畫面上沒有新的回音，最後一個是上一則使用者 prompt，
     // 已經記在上一回合底下——不是這一回合的 user 訊息（issue #224，`transcript_origin`）。
-    let by_the_cli = match db::bot(&app.db, &run.bot_id).await {
+    let by_the_cli = match db::bot(app.db(), &run.bot_id).await {
         Ok(Some(bot)) => super::transcript_origin::started_by_the_cli_itself(app, &bot, run.transcript_path.as_deref()).await,
         _ => false,
     };
@@ -285,7 +286,7 @@ pub async fn begin_external_turn(app: &Arc<App>, run: &db::Run) {
     // 判不出是不是 CLI 自己起頭的（遠端 bot 的 transcript 在那台，這裡讀不到）時，畫面上最後一則回音可能就是上一則
     // 已經回答過的 prompt（2026-10-01 wits-ops-web：「去我的ego 開新身份」又出現一次）。跟它一樣就不存。
     let echo = match echo {
-        Some(text) => match app.db.acquire().await {
+        Some(text) => match app.db().acquire().await {
             Ok(mut conn) => match app_ports_p4obs::repeats_answered_prompt(&mut conn, &conv, &tid, &text).await {
                 Ok(true) => {
                     tracing::info!(turn = %tid, "external turn: the echo on screen is the previous, answered prompt; not storing it again");
@@ -820,9 +821,9 @@ const RESEND_RETRY_SECS: u64 = 3;
 
 /// Re-deliver a prompt that never reached the pane, at most [`MAX_PROMPT_RESENDS`] times per turn.
 /// Same guards as [`nudge_unsent_prompt`]; every reason to do nothing is `Skipped`.
-async fn resend_lost_prompt(app: &Arc<App>, run_id: &str, turn_id: &str, sent: &[String]) -> Resend {
+async fn resend_lost_prompt(app: &impl LcHost, run_id: &str, turn_id: &str, sent: &[String]) -> Resend {
     // DB 讀不到是 `Unreadable`，不是 `Skipped`（#193）：`Skipped` 之後 watchdog 就判失敗了。
-    let run = match db::run(&app.db, run_id).await {
+    let run = match db::run(app.db(), run_id).await {
         Ok(Some(run)) => run,
         Ok(None) => return Resend::Skipped,
         Err(e) => return resend_unreadable(turn_id, &e),
@@ -832,12 +833,12 @@ async fn resend_lost_prompt(app: &Arc<App>, run_id: &str, turn_id: &str, sent: &
     }
     // 重送看 `auto_resend`，不看有沒有證據（AGM 2026-09-16）：打過字但證不明的那條路重送會重複派工，
     // 所以它是 0；`agent.prompt` 一樣沒有證據，但它沒送進去才會走到這裡，重送是安全的。
-    match db::in_flight_turn(&app.db, run_id).await {
+    match db::in_flight_turn(app.db(), run_id).await {
         Ok(Some(t)) if t.id == turn_id && t.delivery == "ok" && t.auto_resend != 0 => {}
         Ok(_) => return Resend::Skipped,
         Err(e) => return resend_unreadable(turn_id, &e),
     }
-    let bot = match db::bot(&app.db, &run.bot_id).await {
+    let bot = match db::bot(app.db(), &run.bot_id).await {
         Ok(Some(bot)) => bot,
         Ok(None) => return Resend::Skipped,
         Err(e) => return resend_unreadable(turn_id, &e),
@@ -853,7 +854,7 @@ async fn resend_lost_prompt(app: &Arc<App>, run_id: &str, turn_id: &str, sent: &
     let Some(text) = sent.first() else { return Resend::Skipped };
     // The claim is the lock and it lives in the DB: a queue flush and this watchdog cannot both
     // resend, and a daemon restart does not hand the same turn a fresh budget (sol review #3).
-    match db::claim_resend(&app.db, turn_id, MAX_PROMPT_RESENDS).await {
+    match db::claim_resend(app.db(), turn_id, MAX_PROMPT_RESENDS).await {
         Ok(true) => {}
         Ok(false) => return Resend::Skipped,
         Err(e) => return resend_unreadable(turn_id, &e),
@@ -873,7 +874,7 @@ async fn resend_lost_prompt(app: &Arc<App>, run_id: &str, turn_id: &str, sent: &
         Ok(Delivered::NotAttempted { reason, retry }) => {
             // 一個字都沒寫進去（`NotAttempted` 的契約），所以這次不該算進唯一一次重送額度：
             // 擋下它的原因（框裡剛好有字）通常兩秒後就消失了——呼叫端（`arm_stall`）會再試一次。
-            db::refund_resend(&app.db, turn_id).await;
+            db::refund_resend(app.db(), turn_id).await;
             tracing::warn!(run_id, turn = %turn_id, reason, "re-delivery was not attempted; the resend budget is given back");
             Resend::Blocked { reason, retry }
         }
@@ -890,7 +891,7 @@ async fn resend_lost_prompt(app: &Arc<App>, run_id: &str, turn_id: &str, sent: &
 }
 
 /// 重送打過字、證明不了：記成 `delivery='unknown'`；寫不進去就欠著（`UnprovenOwed`，#193）。
-async fn unproven(app: &Arc<App>, bot_id: &str, turn_id: &str, why: &'static str) -> Resend {
+async fn unproven(app: &impl LcHost, bot_id: &str, turn_id: &str, why: &'static str) -> Resend {
     match mark_resend_unproven(app, bot_id, turn_id, why).await {
         Ok(()) => Resend::Unproven,
         Err(e) => {
@@ -904,13 +905,13 @@ async fn unproven(app: &Arc<App>, bot_id: &str, turn_id: &str, why: &'static str
 /// 兩種都不是「agent 沒反應」，判 failed 會讓交辦跟著失敗、AGM 重派同一件事（review3 c3 M5）。
 /// 照 §6「Unproven 才會變成 unknown」記成 `delivery='unknown'`，並留一則說明；hook 來了照樣認領，
 /// 真的沒人收由 §4.3b 收尾。寫不進去回錯（#193）：呼叫端記成欠著，補上之前不判失敗。
-async fn mark_resend_unproven(app: &Arc<App>, bot_id: &str, turn_id: &str, why: &str) -> anyhow::Result<()> {
+async fn mark_resend_unproven(app: &impl LcHost, bot_id: &str, turn_id: &str, why: &str) -> anyhow::Result<()> {
     let text = format!(
         "（畫面上完全沒有這則訊息，已自動重打一次，但證明不了有送出（{why}）：字可能還留在輸入框裡，也可能已經被收下、排在後面。\
          這一則先記成「送達不明」，不判失敗。請到終端看一下——還在框裡就按 Enter 或清掉；已經在跑就等它回完。）"
     );
     let res = async {
-        let mut tx = app.db.begin().await?;
+        let mut tx = app.db().begin().await?;
         let moved = sqlx::query(
             "UPDATE turns SET delivery='unknown', delivery_verified=0 WHERE id=? AND status='in_flight' AND delivery='ok'",
         )
@@ -940,7 +941,7 @@ async fn mark_resend_unproven(app: &Arc<App>, bot_id: &str, turn_id: &str, why: 
 /// and nothing re-arms a watchdog later (review2 deliv #4). `None` = the stall timer was replaced
 /// meanwhile (the caller stops); otherwise `(what the last try came to, what blocked a try)`.
 async fn resend_with_retry(
-    app: &Arc<App>,
+    app: &impl LcHost,
     run_id: &str,
     bot_id: &str,
     turn_id: &str,
@@ -956,7 +957,7 @@ async fn resend_with_retry(
         }
         let lock = app.bot_lock(bot_id).await;
         let _g = lock.lock().await;
-        if app.stall_timers.lock().await.get(run_id) != Some(&generation) {
+        if app.stall_timers().lock().await.get(run_id) != Some(&generation) {
             return None;
         }
         last = resend_lost_prompt(app, run_id, turn_id, sent).await;
@@ -976,12 +977,12 @@ async fn resend_with_retry(
 
 /// The agent must leave `idle` within `STALL_SECS` after delivery, or the Turn sits `in_flight`
 /// forever (not logged in, invisible modal). Cancelled by the first `working` / `blocked` event.
-pub async fn arm_stall(app: &Arc<App>, run_id: &str, bot_id: &str, turn_id: &str) {
-    let mut timers = app.stall_timers.lock().await;
+pub async fn arm_stall(app: &impl LcHost, run_id: &str, bot_id: &str, turn_id: &str) {
+    let mut timers = app.stall_timers().lock().await;
     static NEXT_GENERATION: AtomicU64 = AtomicU64::new(0);
     let generation = NEXT_GENERATION.fetch_add(1, Ordering::Relaxed);
     timers.insert(run_id.to_string(), generation);
-    let app2 = app.clone();
+    let app2 = (*app).clone();
     let run_id = run_id.to_string();
     let bot_id = bot_id.to_string();
     let turn_id = turn_id.to_string();
@@ -992,7 +993,7 @@ pub async fn arm_stall(app: &Arc<App>, run_id: &str, bot_id: &str, turn_id: &str
         {
             let lock = app2.bot_lock(&bot_id).await;
             let _g = lock.lock().await;
-            if app2.stall_timers.lock().await.get(&run_id) != Some(&generation) {
+            if app2.stall_timers().lock().await.get(&run_id) != Some(&generation) {
                 return;
             }
             // 早看的這一眼讀不到就算了：期限那一輪會再看，那一輪讀不到才擋著不判失敗。
@@ -1009,7 +1010,7 @@ pub async fn arm_stall(app: &Arc<App>, run_id: &str, bot_id: &str, turn_id: &str
                 StallRound::Done => break,
             }
         }
-        let mut timers = app2.stall_timers.lock().await;
+        let mut timers = app2.stall_timers().lock().await;
         if timers.get(&run_id) == Some(&generation) {
             timers.remove(&run_id);
         }
@@ -1047,7 +1048,7 @@ fn stall_unsure(turn_id: &str, e: &anyhow::Error) -> bool {
 /// 哪一步讀不到（#193）都不當成「不在框裡」「不必重送」接著判失敗——以前送了什麼讀不到就當成什麼都沒送，框裡的字
 /// 不補 Enter、沒到的不重送，回合直接判 failed；重送打過字卻記不成 `unknown` 也照樣判 failed，AGM 重派同一件事。
 async fn stall_round(
-    app: &Arc<App>,
+    app: &impl LcHost,
     run_id: &str,
     bot_id: &str,
     turn_id: &str,
@@ -1060,7 +1061,7 @@ async fn stall_round(
     {
         let lock = app.bot_lock(bot_id).await;
         let _g = lock.lock().await;
-        if app.stall_timers.lock().await.get(run_id) != Some(&generation) {
+        if app.stall_timers().lock().await.get(run_id) != Some(&generation) {
             return StallRound::Replaced;
         }
         match nudge_if_unsent(app, run_id, turn_id, &mut st.sent).await {
@@ -1097,7 +1098,7 @@ async fn stall_round(
     if resent_now {
         let lock = app.bot_lock(bot_id).await;
         let _g = lock.lock().await;
-        if app.stall_timers.lock().await.get(run_id) != Some(&generation) {
+        if app.stall_timers().lock().await.get(run_id) != Some(&generation) {
             return StallRound::Replaced;
         }
         match nudge_if_unsent(app, run_id, turn_id, &mut st.sent).await {
@@ -1111,7 +1112,7 @@ async fn stall_round(
     }
     let lock = app.bot_lock(bot_id).await;
     let _g = lock.lock().await;
-    if app.stall_timers.lock().await.get(run_id) != Some(&generation) {
+    if app.stall_timers().lock().await.get(run_id) != Some(&generation) {
         return StallRound::Replaced;
     }
     if let Some(why) = st.owed_unproven {
@@ -1134,7 +1135,7 @@ pub async fn cancel_stall(app: &impl crate::lifecycle::poller::StallTimers, run_
 }
 
 async fn fail_stalled_turn(
-    app: &Arc<App>,
+    app: &impl LcHost,
     run_id: &str,
     bot_id: &str,
     turn_id: &str,
@@ -1142,11 +1143,11 @@ async fn fail_stalled_turn(
     resent: bool,
     resend_blocked: Option<&str>,
 ) -> anyhow::Result<()> {
-    let Some(run) = db::run(&app.db, run_id).await? else { return Ok(()) };
+    let Some(run) = db::run(app.db(), run_id).await? else { return Ok(()) };
     if run.agent_status == "working" || run.agent_status == "blocked" {
         return Ok(());
     }
-    let Some(turn) = db::in_flight_turn(&app.db, run_id).await? else { return Ok(()) };
+    let Some(turn) = db::in_flight_turn(app.db(), run_id).await? else { return Ok(()) };
     if turn.id != turn_id || turn.delivery != "ok" {
         return Ok(());
     }
@@ -1168,7 +1169,7 @@ async fn fail_stalled_turn(
         // 以前這種情況的訊息完全不提試過重送：看起來像 agent 沒反應，其實是重送被擋下（review2 deliv #4）。
         reason.push_str(&format!("\n（畫面上完全沒有這則訊息；試著自動重送時被擋下（{why}），一個字都沒打，所以沒有送出。清掉擋住的東西後請重送。）"));
     }
-    let mut tx = app.db.begin().await?;
+    let mut tx = app.db().begin().await?;
     let res = super::turn_controller::fail_on(&mut tx, turn_id, super::turn_controller::DeliveryOnFail::Keep, "重送用盡").await?;
     if res != super::turn_controller::Outcome::Applied {
         return Ok(());
@@ -1226,30 +1227,30 @@ pub(crate) fn stall_reason(hints: &[String], nudged: bool) -> String {
     )
 }
 
-pub async fn abandon_turn(app: &Arc<App>, turn_id: &str) -> LcResult<()> {
+pub async fn abandon_turn(app: &impl LcHost, turn_id: &str) -> LcResult<()> {
     let conversation_id = sqlx::query_scalar::<_, String>("SELECT conversation_id FROM turns WHERE id=?")
         .bind(turn_id)
-        .fetch_optional(&app.db)
+        .fetch_optional(app.db())
         .await
         .map_err(up)?
         .ok_or_else(|| LcError::NotFound("turn".into()))?;
     let bot_id = sqlx::query_scalar::<_, String>("SELECT bot_id FROM conversations WHERE id=?")
         .bind(&conversation_id)
-        .fetch_one(&app.db)
+        .fetch_one(app.db())
         .await
         .map_err(up)?;
     let lock = app.bot_lock(&bot_id).await;
     let _g = lock.lock().await;
     let t = sqlx::query_as::<_, db::Turn>("SELECT * FROM turns WHERE id=?")
         .bind(turn_id)
-        .fetch_optional(&app.db)
+        .fetch_optional(app.db())
         .await
         .map_err(up)?
         .ok_or_else(|| LcError::NotFound("turn".into()))?;
     if t.status != "in_flight" {
         return Err(LcError::conflict("turn is neither in-flight nor of unknown delivery", json!({"turn_id": t.id})));
     }
-    let res = super::turn_controller::fail(&app.db, turn_id, super::turn_controller::DeliveryOnFail::FailedIfUnknown, "使用者放棄這一回合")
+    let res = super::turn_controller::fail(app.db(), turn_id, super::turn_controller::DeliveryOnFail::FailedIfUnknown, "使用者放棄這一回合")
         .await
         .map_err(up)?;
     if res != super::turn_controller::Outcome::Applied {
@@ -1269,31 +1270,31 @@ const FALLBACK_DELAY: Duration = Duration::from_secs(5);
 /// 計時器綁定**排定當下**在飛的那一回合（issue #216）：到點只收那一回合。上一回合已經被 Stop hook 收掉、這 5 秒內
 /// 使用者又送出新的一則（CLI 還沒畫 spinner、herdr 還沒報 working），到點時「在飛的」是新回合，畫面上最後一段回覆卻是上一則的——
 /// 不綁的話會把上一則的回覆收給剛送出的那一則，真正的回覆只能落到另一個外部回合。
-pub async fn arm_fallback(app: &Arc<App>, run_id: &str, bot_id: &str) {
+pub async fn arm_fallback(app: &impl LcHost, run_id: &str, bot_id: &str) {
     arm_fallback_after(app, run_id, bot_id, FALLBACK_DELAY).await
 }
 
-async fn arm_fallback_after(app: &Arc<App>, run_id: &str, bot_id: &str, delay: Duration) {
+async fn arm_fallback_after(app: &impl LcHost, run_id: &str, bot_id: &str, delay: Duration) {
     // 讀不到就不排：排了也不知道要收哪一回合，收錯比不收糟（這一回合有 poller 的閒置備援與 stuck watchdog 兜著）。
-    let armed_for = match db::in_flight_turn(&app.db, run_id).await {
+    let armed_for = match db::in_flight_turn(app.db(), run_id).await {
         Ok(turn) => turn.map(|t| t.id),
         Err(e) => {
             tracing::warn!(run_id, error = ?e, "cannot tell which turn the terminal fallback is for; not arming it");
             return;
         }
     };
-    let mut timers = app.fallback_timers.lock().await;
+    let mut timers = app.fallback_timers().lock().await;
     static NEXT_GENERATION: AtomicU64 = AtomicU64::new(0);
     let generation = NEXT_GENERATION.fetch_add(1, Ordering::Relaxed);
     timers.insert(run_id.to_string(), generation);
-    let app2 = app.clone();
+    let app2 = (*app).clone();
     let run_id = run_id.to_string();
     let bot_id = bot_id.to_string();
     tokio::spawn(async move {
         tokio::time::sleep(delay).await;
         let lock = app2.bot_lock(&bot_id).await;
         let _g = lock.lock().await;
-        if app2.fallback_timers.lock().await.get(&run_id) != Some(&generation) {
+        if app2.fallback_timers().lock().await.get(&run_id) != Some(&generation) {
             return;
         }
         match try_fallback(&app2, &run_id, armed_for.as_deref()).await {
@@ -1314,7 +1315,7 @@ async fn arm_fallback_after(app: &Arc<App>, run_id: &str, bot_id: &str, delay: D
         if let Err(e) = crate::turn_error::capture(&app2, &bot_id, &run_id).await {
             tracing::debug!(error = ?e, "turn error capture failed");
         }
-        let mut timers = app2.fallback_timers.lock().await;
+        let mut timers = app2.fallback_timers().lock().await;
         if timers.get(&run_id) == Some(&generation) {
             timers.remove(&run_id);
         }
@@ -1326,9 +1327,9 @@ async fn arm_fallback_after(app: &Arc<App>, run_id: &str, bot_id: &str, delay: D
 ///
 /// `expected_turn`：呼叫端排定（或輪詢）當下看的那一回合，`None`＝排定當下沒有回合在飛。到點時在飛的不是它（排定之後才開的新回合）就不收
 /// ——畫面上最後一段回覆屬於上一回合，留給新回合自己的 hook／下一次 edge／poller（issue #216）。
-pub(super) async fn try_fallback(app: &Arc<App>, run_id: &str, expected_turn: Option<&str>) -> anyhow::Result<bool> {
-    let Some(run) = db::run(&app.db, run_id).await? else { return Ok(false) };
-    let Some(turn) = db::in_flight_turn(&app.db, run_id).await? else { return Ok(false) };
+pub(super) async fn try_fallback(app: &impl LcHost, run_id: &str, expected_turn: Option<&str>) -> anyhow::Result<bool> {
+    let Some(run) = db::run(app.db(), run_id).await? else { return Ok(false) };
+    let Some(turn) = db::in_flight_turn(app.db(), run_id).await? else { return Ok(false) };
     if expected_turn != Some(turn.id.as_str()) {
         tracing::debug!(run_id, turn = %turn.id, expected = ?expected_turn, "the turn in flight is not the one the fallback was armed for; leaving it");
         return Ok(false);
@@ -1336,7 +1337,7 @@ pub(super) async fn try_fallback(app: &Arc<App>, run_id: &str, expected_turn: Op
     if turn.delivery != "ok" {
         return Ok(false);
     }
-    let Some(bot) = db::bot(&app.db, &run.bot_id).await? else { return Ok(false) };
+    let Some(bot) = db::bot(app.db(), &run.bot_id).await? else { return Ok(false) };
     // §12.5：沒有 hook 的 grok 先問它自己的對話檔，畫面只是備援。
     if let Some(done) = super::grok_transcript::settle_in_flight(app, &bot, &run, &turn).await {
         return Ok(done);
@@ -1432,7 +1433,7 @@ pub(super) async fn try_fallback(app: &Arc<App>, run_id: &str, expected_turn: Op
     };
 
     // CAS claim + reply in one transaction, so a completed turn never lacks its reply.
-    let mut tx = app.db.begin().await?;
+    let mut tx = app.db().begin().await?;
     // 撞限直接 `in_flight -> failed`：先落在 `completed_fallback` 再改 failed 不是合法邊，trigger 會把整個交易擋掉（#109）。
     let res = if codex_hit.is_some() {
         super::turn_controller::fail_on(&mut tx, &turn.id, super::turn_controller::DeliveryOnFail::Keep, "§4.3 備援看到撞限橫幅").await?
@@ -1539,9 +1540,9 @@ const ADOPTED_CAPTURE_DELAY: Duration = Duration::from_secs(2);
 /// up mid-answer, so `working -> idle` arrives with no turn in flight and the reply was dropped.
 /// `seed` (adoption-time capture) only writes into an empty conversation, since re-adoption
 /// happens on every restart / reconnect. Caller holds the bot lock; returns whether stored.
-pub(super) async fn capture_hookless_turn_locked(app: &Arc<App>, run_id: &str, seed: bool) -> anyhow::Result<bool> {
-    let Some(run) = db::run(&app.db, run_id).await? else { return Ok(false) };
-    let Some(bot) = db::bot(&app.db, &run.bot_id).await? else { return Ok(false) };
+pub(super) async fn capture_hookless_turn_locked(app: &impl LcHost, run_id: &str, seed: bool) -> anyhow::Result<bool> {
+    let Some(run) = db::run(app.db(), run_id).await? else { return Ok(false) };
+    let Some(bot) = db::bot(app.db(), &run.bot_id).await? else { return Ok(false) };
     if !is_hookless(&bot, &run) || run.state != "running" {
         return Ok(false);
     }
@@ -1550,7 +1551,7 @@ pub(super) async fn capture_hookless_turn_locked(app: &Arc<App>, run_id: &str, s
         return Ok(false);
     }
     // An in-flight turn belongs to `try_fallback`; capturing too would store it twice.
-    if db::in_flight_turn(&app.db, run_id).await?.is_some() {
+    if db::in_flight_turn(app.db(), run_id).await?.is_some() {
         return Ok(false);
     }
     // §12.5：grok 的對話檔讀得到就不刮畫面。
@@ -1562,7 +1563,7 @@ pub(super) async fn capture_hookless_turn_locked(app: &Arc<App>, run_id: &str, s
         }
     }
     let Some(pane_id) = run.pane_id.clone() else { return Ok(false) };
-    let conv = db::conversation_id(&app.db, &run.bot_id).await?;
+    let conv = db::conversation_id(app.db(), &run.bot_id).await?;
     if seed && conversation_message_count(app, &conv).await? > 0 {
         return Ok(false);
     }
@@ -1614,7 +1615,7 @@ pub(super) async fn capture_hookless_turn_locked(app: &Arc<App>, run_id: &str, s
     .bind(run_id)
     .bind(&now)
     .bind(&now)
-    .execute(&app.db)
+    .execute(app.db())
     .await?;
     if let Some(text) = echo.as_deref() {
         insert_message(app, &conv, Some(&tid), "user", text, "terminal_fallback", false, None).await?;
@@ -1629,7 +1630,7 @@ pub(super) async fn capture_hookless_turn_locked(app: &Arc<App>, run_id: &str, s
 }
 
 /// [`capture_hookless_turn_locked`] for a caller that does not already hold the bot lock.
-async fn capture_hookless_turn(app: &Arc<App>, run_id: &str, bot_id: &str, seed: bool) -> anyhow::Result<bool> {
+async fn capture_hookless_turn(app: &impl LcHost, run_id: &str, bot_id: &str, seed: bool) -> anyhow::Result<bool> {
     let lock = app.bot_lock(bot_id).await;
     let _g = lock.lock().await;
     capture_hookless_turn_locked(app, run_id, seed).await
@@ -1637,11 +1638,11 @@ async fn capture_hookless_turn(app: &Arc<App>, run_id: &str, bot_id: &str, seed:
 
 /// Adopted hookless run (called by `reconcile`, off its task since both take the bot lock):
 /// still `working` → open the `external` turn now; already `idle` → store the exchange once (`seed`).
-pub fn spawn_adopted_capture(app: &Arc<App>, run_id: &str, bot_id: &str) {
-    let (app, run_id, bot_id) = (app.clone(), run_id.to_string(), bot_id.to_string());
+pub fn spawn_adopted_capture(app: &impl LcHost, run_id: &str, bot_id: &str) {
+    let (app, run_id, bot_id) = ((*app).clone(), run_id.to_string(), bot_id.to_string());
     tokio::spawn(async move {
         tokio::time::sleep(ADOPTED_CAPTURE_DELAY).await;
-        let (Ok(Some(run)), Ok(Some(bot))) = (db::run(&app.db, &run_id).await, db::bot(&app.db, &bot_id).await) else {
+        let (Ok(Some(run)), Ok(Some(bot))) = (db::run(app.db(), &run_id).await, db::bot(app.db(), &bot_id).await) else {
             return;
         };
         if !is_hookless(&bot, &run) {
@@ -4174,4 +4175,9 @@ pub trait StallTimers: Send + Sync {
 /// run 最近一次推進度的時間。（欄位在 `App`，由 composition 層 `app_ports_p0` 實作這個窄能力。）
 pub trait ProgressEmitted: Send + Sync {
     fn progress_emitted(&self) -> &tokio::sync::Mutex<std::collections::HashMap<String, std::time::Instant>>;
+}
+
+/// Fallback timers for hookless completion capture.
+pub trait FallbackTimers: Send + Sync {
+    fn fallback_timers(&self) -> &tokio::sync::Mutex<std::collections::HashMap<String, u64>>;
 }

@@ -127,15 +127,19 @@ mod tests {
         for (name, src) in sources {
             assert!(src.contains("bot_lock("), "設計文件說 {name} 有呼叫 bot_lock，現在沒有了——評估的『ingress 分散在 N 個檔案』這個說法要重算");
         }
-        // `lifecycle/prompt.rs`（文件列的第 11 個檔案）自 P4send 起不直接呼叫 `bot_lock(`：它走 am-ports 的 `BotLock`（`lock_bot(`），
-        // 真正的 `App::bot_lock` 呼叫搬到 `AppBotLock` adapter。同一個 ingress、同一把鎖，只是多一層窄介面——兩邊都釘住。
+        // `lifecycle/prompt.rs`（文件列的第 11 個檔案）經 `StartServices::lock_bot_for_start` 取得 per-bot 鎖；
+        // runners adapter 委派到 `lock_bot_owned`，仍是同一個 `BotLocks::bot_lock` ingress。
         assert!(
-            include_str!("prompt.rs").contains("lock_bot("),
-            "設計文件說 lifecycle/prompt.rs 持有 bot 鎖（P4send 後經 `BotLock::lock_bot`），現在沒有了——評估的『ingress 分散在 N 個檔案』這個說法要重算"
+            include_str!("prompt.rs").contains("StartServices::lock_bot_for_start("),
+            "設計文件說 lifecycle/prompt.rs 持有 bot 鎖（現在經 `StartServices::lock_bot_for_start`），現在沒有了——評估的『ingress 分散在 N 個檔案』這個說法要重算"
         );
         assert!(
-            include_str!("../app_ports_p4send.rs").contains("self.app.bot_lock("),
-            "`BotLock` 的 App adapter 不再呼叫 `App::bot_lock`——prompt.rs 的鎖不再是 per-bot 那把，docs/ACTOR-RUNTIME-EVAL.md 的 lock ordering 說法要重看"
+            include_str!("../runners/s6_l.rs").contains("app_ports_p4sess::lock_bot_owned(self, bot_id)"),
+            "`StartServices` 的 App adapter 不再委派到 per-bot bot_lock——prompt.rs 的鎖與其他 ingress 不同，docs/ACTOR-RUNTIME-EVAL.md 的 lock ordering 說法要重看"
+        );
+        assert!(
+            include_str!("../app_ports_p4sess.rs").contains("app.bot_lock(bot_id).await"),
+            "`lock_bot_owned` 不再取得 `BotLocks::bot_lock`——prompt.rs 的鎖與其他 ingress 不同，docs/ACTOR-RUNTIME-EVAL.md 的 lock ordering 說法要重看"
         );
         assert!(
             include_str!("../api.rs").contains("依 id 排序、一次拿齊"),

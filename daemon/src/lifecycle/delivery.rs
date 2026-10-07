@@ -18,9 +18,9 @@
 //! `Submitted`; `NotAttempted` — **nothing was sent**, the turn must not be left in flight; and
 //! `Unproven` — keys were sent and the result cannot be proven, which is what `unknown` means.
 
+#[cfg(test)]
 use crate::state::App;
 use super::*;
-use super::send_now::ports::{CodexSendPort};
 use std::time::Duration;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -465,7 +465,7 @@ async fn agent_prompt_usable(client: &HerdrClient, target: &str) -> bool {
 
 /// 打第一個字之前的輸入框判斷（計畫、準備、貼字前三處共用）。codex 的帳號安全提醒橫幅開著時框看起來是空的，但打進去的
 /// 開頭數字會被當成選項吃掉（#782）：整則不送、可重試，第一次看到時通知人；不按 Esc 或任何鍵。
-async fn composer_ready(app: &Arc<App>, run: &db::Run, kind: &str, screen: &str) -> Result<(), Delivered> {
+async fn composer_ready(app: &impl LcHost, run: &db::Run, kind: &str, screen: &str) -> Result<(), Delivered> {
     if kind == "codex" {
         let banner = super::codex_banner::blocks_typing(screen);
         super::codex_banner::observe(app, run, banner).await;
@@ -483,7 +483,7 @@ async fn composer_ready(app: &Arc<App>, run: &db::Run, kind: &str, screen: &str)
 /// Decide how to deliver, touching nothing: the route, the evidence and an empty box. Callers run
 /// this **before** committing a turn, so a prompt that cannot be sent never becomes one.
 pub(crate) async fn plan_delivery(
-    app: &Arc<App>,
+    app: &impl LcHost,
     client: &HerdrClient,
     run: &db::Run,
     bot: &db::Bot,
@@ -493,7 +493,7 @@ pub(crate) async fn plan_delivery(
 ) -> anyhow::Result<Result<Plan, Delivered>> {
     let target = db::run_target(run, bot);
     let marked = crate::lifecycle::pane_typed_memo(&run.id)
-        || match db::pane_typed(&app.db, &run.id).await {
+        || match db::pane_typed(app.db(), &run.id).await {
             Ok(v) => v,
             Err(e) => {
                 tracing::warn!(run = %run.id, error = %e, "could not read runs.pane_typed; assuming this pane needs typing");
@@ -507,7 +507,7 @@ pub(crate) async fn plan_delivery(
         return Ok(Err(Delivered::NotAttempted { reason: "no_pane_to_type_into", retry: true }));
     };
     // 讀不到主機就不送（#198）：當成遠端會跳過本機 transcript／rollout 這種無損證據，改成盲打；一個字都還沒打，可重試。
-    let host_is_local = match db::project(&app.db, &bot.project_id).await {
+    let host_is_local = match db::project(app.db(), &bot.project_id).await {
         Ok(p) => p.is_some_and(|p| p.host == LOCAL_HOST),
         Err(e) => {
             tracing::warn!(run = %run.id, error = %e, "cannot read the bot's host; not typing without knowing which evidence applies");
@@ -517,7 +517,7 @@ pub(crate) async fn plan_delivery(
     let transcript_path = if let Some(path) = run.transcript_path.as_deref() {
         if matches!(bot.kind.as_str(), "claude" | "agy")
             && host_is_local
-            && !crate::app_ports_p5::local_transcript_allowed(app, bot, path).await
+            && !crate::lifecycle::s6_ports::StuckTurnServices::local_transcript_allowed(app, bot, path).await
         {
             None
         } else {
@@ -528,7 +528,7 @@ pub(crate) async fn plan_delivery(
     };
     let pane_cols = client.pane_size(&pane).await.ok().flatten().map(|(w, _)| w);
     let codex_log = match (bot.kind.as_str(), host_is_local, run.native_session_id.as_deref()) {
-        ("codex", true, Some(session)) => match codex_home(app, bot).await {
+        ("codex", true, Some(session)) => match crate::lifecycle::s6_ports::StuckTurnServices::codex_home(app, bot).await {
             Some(h) => codex_session_log_async(h, session.to_string()).await,
             None => None,
         },
@@ -603,7 +603,7 @@ pub(crate) async fn same_session(app: &impl crate::capabilities::Db, run_id: &st
 /// Carry out a plan. Up to the first keystroke every give-up is `NotAttempted`; after it, every
 /// give-up is `Unproven`. Read failures are errors, never empty screens.
 pub(crate) async fn execute_delivery(
-    app: &Arc<App>,
+    app: &impl LcHost,
     client: &super::RunClient,
     run: &db::Run,
     bot: &db::Bot,
@@ -626,7 +626,7 @@ pub(crate) enum Ready {
 /// 每一種放棄都是 `NotAttempted`（一個鍵都還沒按）。拆出來是給插隊送出用的（#120）：它要在這一段
 /// 成功之後才收掉被打斷的那一回合——先收再被擋下的話，claude 其實還在跑，對話裡卻多一筆假的「被打斷」。
 pub(crate) async fn prepare_delivery(
-    app: &Arc<App>,
+    app: &impl LcHost,
     client: &HerdrClient,
     run: &db::Run,
     bot: &db::Bot,
@@ -646,7 +646,7 @@ pub(crate) async fn prepare_delivery(
     // 寫不進去時一個字都還沒打：跟其他「打第一個字之前」的失敗一樣是可重試的 NotAttempted。以前回 `Err`，
     // 直接送與排隊都被記成 `delivery='unknown'`，5 分鐘後被 stuck_turns 收成 completed_fallback——工作根本沒送出去
     // （review3 c4 L5）。
-    if let Err(e) = db::set_pane_typed(&app.db, &run.id).await {
+    if let Err(e) = db::set_pane_typed(app.db(), &run.id).await {
         tracing::warn!(run = %run.id, error = %e, "could not record runs.pane_typed before typing; nothing was typed");
         return Err(Delivered::NotAttempted { reason: "pane_typed_unwritable", retry: true });
     }
@@ -688,7 +688,7 @@ pub(crate) async fn prepare_delivery(
 
 /// [`execute_delivery`] 準備完成後的派送。`type_text` 貼字前仍會重讀 composer；那一刻看到草稿還是 `NotAttempted`。
 pub(crate) async fn type_prepared(
-    app: &Arc<App>,
+    app: &impl LcHost,
     client: &super::RunClient,
     run: &db::Run,
     bot: &db::Bot,
@@ -732,7 +732,7 @@ fn typed_tail(text: &str) -> usize {
 
 /// 打字、看框（必要時重貼一次），停在送出鍵之前。插隊送出要在送出鍵上判斷有沒有打斷（#120），所以跟按鍵分開。
 pub(crate) async fn type_text(
-    app: &Arc<App>,
+    app: &impl LcHost,
     client: &super::RunClient,
     run: &db::Run,
     bot: &db::Bot,
@@ -757,7 +757,7 @@ pub(crate) async fn type_text(
             // The guard performs read-only RPCs which can yield. Recheck the same generation at the
             // last point before submission; there is no client re-resolution between this check and
             // invoking agent.prompt, so a replacement connection can never inherit this request.
-            if !app.hosts.is_current(&client.fence).await {
+            if !app.hosts().is_current(&client.fence).await {
                 return Ok(Typing::Done(Delivered::NotAttempted {
                     reason: "host_changed",
                     retry: true,
@@ -995,7 +995,7 @@ impl SentProof {
 
 /// Plan and execute in one go, for callers that have no turn to hold back (queue flush, resend).
 pub(crate) async fn deliver_prompt(
-    app: &Arc<App>,
+    app: &impl LcHost,
     client: &super::RunClient,
     run: &db::Run,
     bot: &db::Bot,
