@@ -3,8 +3,13 @@
 //! - 狀態機：[`FakeTui`] 照實機的樣子畫選單／確認頁、照實機的規則處理按鍵，可以注入各種壞掉的情況；不碰真 herdr、真 claude。
 
 use super::*;
-use crate::lifecycle;
+use std::sync::Arc;
+use crate::db;
+use crate::lifecycle::{self, LcError, LcResult};
+use crate::runners::rewind::{rewind, rewind_with};
+use crate::state::App;
 use crate::testing as tt;
+use serde_json::{json, Value};
 use std::sync::Mutex as StdMutex;
 
 const IDLE: &str = include_str!("claude_2.1.280_rewind_idle.txt");

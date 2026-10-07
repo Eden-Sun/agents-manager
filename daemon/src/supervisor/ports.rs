@@ -262,7 +262,7 @@ mod tests {
     #[test]
     fn the_adapter_still_calls_what_the_guard_forbids_elsewhere() {
         let adapter = include_str!("../app_ports_p6.rs");
-        for pat in ["lifecycle::stop_bot(", "quota::try_limit_hit_for_bot(", "mission::workflow::wake_stalled(", "judge::report::shadow_settled(", "memproc::dump("] {
+        for pat in ["lifecycle::stop_bot(", "quota::try_limit_hit_for_bot(", "mission::workflow::wake_stalled(", "runners::judge::shadow_settled(", "memproc::dump("] {
             assert!(adapter.contains(pat), "{pat} 應該在 app_ports_p6.rs");
         }
         assert!(test_mask("fn a() {}\n#[cfg(test)]\nmod t {\n    fn b() {}\n}\nfn c() {}\n") == vec![false, true, true, true, true, false]);

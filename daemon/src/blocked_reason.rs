@@ -26,6 +26,7 @@ fn permission() -> &'static Mutex<HashMap<String, String>> {
 }
 
 /// 不在 `active` 裡的 run（結束了）不留記錄。
+#[allow(dead_code)]
 pub fn retain_runs(active: &[String]) {
     permission().lock().unwrap_or_else(|e| e.into_inner()).retain(|id, _| active.contains(id));
 }

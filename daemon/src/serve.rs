@@ -189,7 +189,7 @@ pub async fn serve(config_path: Option<PathBuf>, dev_watch_all_panes: bool) -> R
     app.hosts.apply_config(&app, &host_cfg).await;
 
     // §6.1.3 reconcile, §6.1.4 event connections, §6.1.5 spool replay, §6.1.6 autostart.
-    let local_reconciled = match reconcile::reconcile_host(&app, config::LOCAL_HOST).await {
+    let local_reconciled = match crate::runners::reconcile::reconcile_host(&app, config::LOCAL_HOST).await {
         Ok(()) => true,
         Err(e) => {
             tracing::error!(error = ?e, "initial reconcile failed");
@@ -197,7 +197,7 @@ pub async fn serve(config_path: Option<PathBuf>, dev_watch_all_panes: bool) -> R
         }
     };
     // Runs are adopted by now, so any Turn that outlived the restart can get its poller back.
-    reconcile::rearm_progress(&app).await;
+    crate::runners::reconcile::rearm_progress(&app).await;
     lifecycle::relay_watch::rearm_host(&app, config::LOCAL_HOST).await;
     // #564：上一顆 daemon 沒收尾的 codex 安裝，等那台的安裝鎖放掉再收尾（不重跑安裝）。
     cli_update::recover_at_startup(&app).await;
@@ -227,7 +227,7 @@ pub async fn serve(config_path: Option<PathBuf>, dev_watch_all_panes: bool) -> R
         }
         events::spawn_global_for_session(app.clone(), config::LOCAL_HOST.to_string(), default_session::SESSION.to_string()).await;
     }
-    default_session::spawn_poller(app.clone());
+    runners::default_session::spawn_poller(app.clone());
 
     if dev_watch_all_panes {
         if let Ok(panes) = app.herdr.pane_list(None).await {
@@ -254,7 +254,7 @@ pub async fn serve(config_path: Option<PathBuf>, dev_watch_all_panes: bool) -> R
     quota::spawn_codex_poller(app.clone());
     memstat::spawn_poller(app.clone());
     quota_claude::spawn_claude_poller(app.clone());
-    quota_grok::spawn_grok_poller(app.clone());
+    runners::quota_grok::spawn_grok_poller(app.clone());
     quota_agy::spawn_agy_poller(app.clone());
     quota_agy::spawn_agy_login_watcher(app.clone());
     github::spawn_detect_all(app.clone());
@@ -270,13 +270,13 @@ pub async fn serve(config_path: Option<PathBuf>, dev_watch_all_panes: bool) -> R
     mission::relay::spawn(app.clone());
     // Agent titles have no herdr event, so they are polled.
     events::spawn_title_poller(app.clone());
-    tui_prompts::spawn_survey_watcher(app.clone());
+    runners::tui_prompts::spawn_survey_watcher(app.clone());
     lifecycle::spawn_stuck_turn_sweeper(app.clone());
     update_watch::spawn_update_watcher(app.clone());
     // issue #707：claude／codex 上游有新版、磁碟上還沒有（跟上面的「重啟套用」分開）。
     upstream_update::spawn(app.clone());
     // SPEC §11.4.4: remote hook spools whose status event never arrived (one ssh per host, 30s).
-    hook_inbox::spawn_worker(app.clone());
+    runners::hook_inbox::spawn_worker(app.clone());
     hookrecv::spawn_spool_scanner(app.clone());
     // §6.5e：pane 裡開始跑 dev server 沒有任何 herdr 事件，對帳又不定期跑；表上的 kind／port 靠這個跟上。
     panes::spawn_scanner(app.clone());
@@ -295,7 +295,7 @@ pub async fn serve(config_path: Option<PathBuf>, dev_watch_all_panes: bool) -> R
         // 這一輪只起本機：遠端一律由 `hosts.rs` 在那台連上並對帳成功之後跑。
         // API 先 ready，bot 啟動時寫入的 hooks／relay 才不會撞上 startup 503。
         let app2 = app.clone();
-        tokio::spawn(async move { reconcile::autostart_after_reconcile(&app2, config::LOCAL_HOST, local_reconciled).await });
+        tokio::spawn(async move { crate::runners::reconcile::autostart_after_reconcile(&app2, config::LOCAL_HOST, local_reconciled).await });
     }
     tracing::info!(%addr, "listening");
     // 分享入口（SPEC §20）：`[share] listen` 有設才開，獨立的 port 與 router，跟上面的管理 API 完全分開。

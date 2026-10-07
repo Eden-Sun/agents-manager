@@ -1311,7 +1311,7 @@ mod tests {
         let pass = tokio::spawn(async move {
             let _ = started_tx.send(());
             pass_app.wait_until_startup_ready().await;
-            crate::reconcile::autostart_after_reconcile(&pass_app, host, true).await
+            crate::runners::reconcile::autostart_after_reconcile(&pass_app, host, true).await
         });
 
         started_rx.await.unwrap();
@@ -1759,7 +1759,7 @@ mod tests {
             app.models_cache.lock().await.insert(format!("{h}/codex/"), (std::time::Instant::now(), json!({})));
             app.host_shells.lock().await.push(shell(h));
             if h == "inv-347" {
-                crate::login_assist::reserve(app, h, "cc9").unwrap().register("w1:p1", &shell(h).created_at);
+                crate::runners::login_assist::reserve(app, h, "cc9").unwrap().register("w1:p1", &shell(h).created_at);
             }
         }
         let cached_rows = |key: &'static str| async move {

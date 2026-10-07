@@ -211,13 +211,13 @@ mod blocked_screens {
         let run_of = || async { sqlx::query_as::<_, crate::db::Run>("SELECT * FROM runs WHERE id=?").bind(&run_id).fetch_one(&app.db).await.unwrap() };
         let login = "Welcome to the Antigravity CLI. You are currently not signed in.\n\nSelect login method:\n\n> 1. Google OAuth\n  2. Use a Google Cloud project\n";
 
-        crate::session_paused::observe_agy_screen(&app, &run_of().await, login).await;
+        crate::runners::session_paused::observe_agy_screen(&app, &run_of().await, login).await;
         assert_eq!(run_of().await.agent_status, "blocked");
         let reason = crate::blocked_reason::of(&run_id).expect("a reason for the blocked run");
         assert_eq!(reason.code, "agy_dialog");
         assert!(reason.text.contains("登入"), "{}", reason.text);
 
-        crate::session_paused::observe_agy_screen(&app, &run_of().await, "> \n").await;
+        crate::runners::session_paused::observe_agy_screen(&app, &run_of().await, "> \n").await;
         assert_eq!(run_of().await.agent_status, "idle", "框關掉：還原成補標前的狀態");
         assert!(crate::blocked_reason::of(&run_id).is_none());
         assert!(e.herdr.calls_to("pane.send_keys").is_empty() && e.herdr.calls_to("pane.send_text").is_empty(), "一個鍵都不按");

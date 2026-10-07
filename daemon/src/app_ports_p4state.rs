@@ -174,7 +174,7 @@ impl TurnEvents for AppTurnEvents<'_> {
 
 // 1. Reconcile
 pub async fn reconcile_host(app: &Arc<App>, host: &str) -> anyhow::Result<()> {
-    crate::reconcile::reconcile_host(app, host).await.map(|_| ())
+    crate::runners::reconcile::reconcile_host(app, host).await.map(|_| ())
 }
 
 // 2. Lifecycle finish_stop

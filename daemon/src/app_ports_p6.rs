@@ -143,10 +143,10 @@ impl MissionOps for Arc<App> {
 
 impl JudgeOps for Arc<App> {
     async fn judge_shadow_settled(&self, assignment_id: &str, bot_id: &str, turn_id: Option<&str>, turn_status: &str, result: Option<&str>) {
-        crate::judge::report::shadow_settled(self, assignment_id, bot_id, turn_id, turn_status, result).await
+        crate::runners::judge::shadow_settled(self, assignment_id, bot_id, turn_id, turn_status, result).await
     }
     fn judge_stuck_sweep(&self) {
-        crate::judge::stuck::sweep(self)
+        crate::runners::judge::sweep(self)
     }
     async fn judge_schedule_assignment(&self, assignment_id: &str) {
         crate::judge::collision::schedule_assignment(self, assignment_id).await
@@ -174,7 +174,7 @@ impl HostProbes for Arc<App> {
         crate::due_actions::snapshot(self).await
     }
     fn primary_keep_warm_tick(&self) {
-        crate::primary_keep_warm::tick(self)
+        crate::runners::primary_keep_warm::tick(self)
     }
     async fn restart_loop<F, Fut>(&self, name: &'static str, factory: F)
     where

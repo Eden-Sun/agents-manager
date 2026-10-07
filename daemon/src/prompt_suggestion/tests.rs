@@ -1,6 +1,7 @@
 //! 建議下一句的記憶帳、投影與讀取（畫面辨識本身的測試在 `lifecycle/delivery.rs`，一鍵送出在 `lifecycle/suggestion_tests.rs`）。
 
 use super::*;
+use crate::runners::prompt_suggestion::observe;
 use crate::testing as tt;
 use serde_json::json;
 

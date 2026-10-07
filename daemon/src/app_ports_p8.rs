@@ -310,16 +310,16 @@ impl ProviderPort for Arc<App> {
         crate::claude_live::adopt_statusline_model(self, run, payload).await
     }
     async fn login_on_auth_failure(&self, bot: &db::Bot) {
-        crate::login_prompt::on_auth_failure(self, bot).await
+        crate::runners::login_prompt::on_auth_failure(self, bot).await
     }
     async fn login_on_turn_ok(&self, bot: &db::Bot) {
-        crate::login_prompt::on_turn_ok(self, bot).await
+        crate::runners::login_prompt::on_turn_ok(self, bot).await
     }
     fn codex_migration_on_blocked(&self, run: &db::Run) {
         crate::codex_model_migration::on_blocked(self, run)
     }
     fn prompt_suggestion_on_idle(&self, run: &db::Run) {
-        crate::prompt_suggestion::on_idle(self, run)
+        crate::runners::prompt_suggestion::on_idle(self, run)
     }
     async fn dismiss_survey_if_shown(&self, run: &db::Run) -> bool {
         crate::tui_prompts::dismiss_if_survey(self, run).await
@@ -337,19 +337,19 @@ impl ApiPort for Arc<App> {
 
 impl ReconcileCommands for Arc<App> {
     async fn reconcile_host(&self, host: &str) -> Result<()> {
-        crate::reconcile::reconcile_host(self, host).await
+        crate::runners::reconcile::reconcile_host(self, host).await
     }
     async fn autostart_after_reconcile(&self, host: &str, reconciled: bool) -> bool {
-        crate::reconcile::autostart_after_reconcile(self, host, reconciled).await
+        crate::runners::reconcile::autostart_after_reconcile(self, host, reconciled).await
     }
     fn schedule_deferred_pass(&self, host: &str) {
-        crate::reconcile::schedule_deferred_pass(self, host)
+        crate::runners::reconcile::schedule_deferred_pass(self, host)
     }
     async fn sync_default_session(&self) -> Result<()> {
         crate::default_session::sync(self).await
     }
     fn session_paused_on_idle(&self, run: &db::Run) {
-        crate::session_paused::on_idle(self, run)
+        crate::runners::session_paused::on_idle(self, run)
     }
 }
 

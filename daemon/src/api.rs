@@ -163,7 +163,7 @@ pub fn router(app: Arc<App>) -> Router {
         .route("/bots/{id}/fork", post(crate::fork::fork_bot))
         .route("/bots/{id}/promote", post(crate::promote::promote_bot))
         .route("/bots/{id}/stop", post(stop_bot))
-        .route("/bots/{id}/rewind", post(crate::rewind::post_rewind))
+        .route("/bots/{id}/rewind", post(crate::runners::rewind::post_rewind))
         .route("/bots/{id}/preview", get(preview_get).post(preview_start).delete(preview_stop))
         .route("/bots/{id}/interrupt", post(interrupt_bot))
         .route("/bots/{id}/login", post(login_bot))
@@ -186,7 +186,7 @@ pub fn router(app: Arc<App>) -> Router {
         .route("/bots/{id}/suggestion/accept", post(accept_suggestion))
         .route("/bots/{id}/messages", get(get_messages))
         .route("/bots/{id}/terminal", get(get_terminal))
-        .route("/bots/{id}/pending-question", get(crate::pending_question::get_pending_question))
+        .route("/bots/{id}/pending-question", get(crate::runners::pending_question::get_pending_question))
         .route("/bots/{id}/local-image", get(crate::app_ports_p10::get))
         // bot 交給使用者的檔案（§6.5f）：只讀 outbox。scratchpad 不再給使用者，舊路徑明確 404。
         .route("/bots/{id}/outbox", get(crate::app_ports_p10::list))
@@ -312,9 +312,9 @@ pub fn router(app: Arc<App>) -> Router {
         .route("/supervisor/ops-alerts", post(crate::supervisor::api::post_ops_alert).layer(agm_gate!(app)))
         .route("/supervisor/evidence", get(crate::supervisor_evidence::search).layer(agm_gate!(app)))
         .merge(crate::supervisor::responder_api::routes(app.clone()))
-        .merge(crate::release_triage::http::routes())
+        .merge(crate::runners::release_triage::routes())
         .merge(crate::upstream_update::routes())
-        .merge(crate::judge::http::routes())
+        .merge(crate::runners::judge::routes())
         .merge(crate::deleted_bots::routes())
         .route("/bots/{id}/restore", post(restore_bot))
         .route("/identities", post(create_identity))
@@ -339,9 +339,9 @@ pub fn router(app: Arc<App>) -> Router {
         .route("/hook/{provider}", post(crate::hookrecv::receive))
         .route("/relay/announce", post(relay_announce))
         // Credential-bearing pane creation is fenced against concurrent credential rotation.
-        .route("/relay/spawn/begin", post(crate::credential_spawn::begin))
-        .route("/relay/spawn/finish", post(crate::credential_spawn::finish))
-        .route("/relay/spawn/abort", post(crate::credential_spawn::abort))
+        .route("/relay/spawn/begin", post(crate::runners::credential_spawn::begin))
+        .route("/relay/spawn/finish", post(crate::runners::credential_spawn::finish))
+        .route("/relay/spawn/abort", post(crate::runners::credential_spawn::abort))
         // §6.5e：bot 開完 pane 後回報用途（歸屬另外從行程環境推斷）。
         .route("/relay/pane", post(relay_pane))
         // 母 bot 的 `herdr agent list` 附上子 agent 的 cache 還熱多久（kids_cache）。
@@ -1824,7 +1824,7 @@ async fn patch_project(
             if let Ok(Some(p)) = db::project(&app.db, &id).await {
                 let app = app.clone();
                 tokio::spawn(async move {
-                    if let Err(e) = crate::reconcile::reconcile_host(&app, &p.host).await {
+                    if let Err(e) = crate::runners::reconcile::reconcile_host(&app, &p.host).await {
                         tracing::warn!(host = %p.host, error = ?e, "reconcile after taking a project back failed");
                     }
                 });
@@ -3493,7 +3493,7 @@ async fn identity_auth(app: Arc<App>, name: String, identity: String, logout: bo
             .ok_or_else(|| LcError::Bad(format!("kind {} 沒有登入指令", idn.kind)))?
     };
     let login_reservation = if !logout && idn.kind == "claude" {
-        Some(crate::login_assist::reserve(&app, &name, &identity)?)
+        Some(crate::runners::login_assist::reserve(&app, &name, &identity)?)
     } else {
         None
     };
@@ -4066,7 +4066,7 @@ async fn host_shell_login_status(
     Extension(principal): Extension<RequestPrincipal>,
 ) -> Result<Response, LcError> {
     require_user(&principal)?;
-    let v = crate::login_assist::status(&app, &name, &pane_id).await?;
+    let v = crate::runners::login_assist::status(&app, &name, &pane_id).await?;
     Ok(([(header::CACHE_CONTROL, "no-store")], Json(v)).into_response())
 }
 
@@ -4083,7 +4083,7 @@ async fn host_shell_login_code(
     Json(b): Json<LoginCodeIn>,
 ) -> Result<Response, LcError> {
     require_user(&principal)?;
-    let v = crate::login_assist::submit_code(&app, &name, &pane_id, &b.code).await?;
+    let v = crate::runners::login_assist::submit_code(&app, &name, &pane_id, &b.code).await?;
     Ok(([(header::CACHE_CONTROL, "no-store")], Json(v)).into_response())
 }
 
@@ -4629,7 +4629,7 @@ async fn get_quota(State(app): State<Arc<App>>, Query(q): Query<HashMap<String, 
                     let (codex, claude, grok, agy) = tokio::join!(
                         crate::quota::refresh_codex(&app, &host),
                         crate::quota_claude::refresh_claude(&app, &host),
-                        crate::quota_grok::refresh_grok(&app, &host),
+                        crate::runners::quota_grok::refresh_grok(&app, &host),
                         crate::quota_agy::refresh_agy(&app, &host),
                     );
                     for (kind, res) in [("codex", codex), ("claude", claude), ("grok", grok), ("agy", agy)] {
@@ -5149,7 +5149,7 @@ async fn rotate_bot_credential(
     // herdr creates panes outside SQLite and bot_lock. The shim's spawn permit shares this gate:
     // once the fence is visible, new pane / child-agent creation fails closed; an operation already
     // in herdr makes this rotation refuse before touching the proof.
-    let rotation_fence = match crate::credential_spawn::RotationFence::begin(&app, &id) {
+    let rotation_fence = match crate::runners::credential_spawn::RotationFence::begin(&app, &id) {
         Ok(fence) => fence,
         Err(crate::credential_spawn::FenceError::AlreadyRotating) => {
             return Err(LcError::conflict("credential rotation is already checking child panes", json!({"reason": "credential_rotation_pending", "bot_id": id})));

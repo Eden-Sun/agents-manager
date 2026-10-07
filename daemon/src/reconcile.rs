@@ -1,218 +1,62 @@
 //! Reconciliation (SPEC §6.5, §11.3.4). Always scoped to **one host**: pane / workspace /
 //! agent ids are only unique within a host's herdr session.
 
-use crate::events::ports::{BotOpsPort, BotOpsRepo, HandoffRepo, HostSidePort, IngressCommands, TurnCommands};
-use crate::config::LOCAL_HOST;
+use crate::events::ports::{BotOpsPort, BotOpsRepo, HandoffRepo, HostSidePort, IngressCommands, ReconcileCommands, TurnCommands};
+use crate::capabilities::{BotLocks, BotStatusEmit, DataDir, Db, Emit, HerdrRoutes, Isolation};
 use crate::db;
-use crate::state::{App, AutostartHostStatus};
 use anyhow::Result;
 use serde_json::json;
 use std::collections::HashMap;
 use std::sync::Arc;
 
-#[allow(dead_code)]
-pub async fn reconcile(app: &Arc<App>) -> Result<()> {
-    let mut first_err = None;
-    for host in app.hosts.names().await {
-        if let Err(e) = reconcile_host(app, &host).await {
-            tracing::error!(host = %host, error = ?e, "reconcile failed");
-            if host == LOCAL_HOST && first_err.is_none() {
-                first_err = Some(e);
-            }
-        }
-    }
-    match first_err {
-        Some(e) => Err(e),
-        None => Ok(()),
-    }
+#[cfg(test)]
+pub(crate) use crate::runners::reconcile::{
+    autostart_after_reconcile, rearm_progress, reconcile_host, AutostartClaim,
+};
+
+pub trait PaneIdentitySync: Send + Sync {
+    fn sync_child_identity(&self, host: &str, bot: &crate::db::Bot, pane_id: &str, pid: Option<i64>) -> impl std::future::Future<Output = ()> + Send;
+    fn claude_default_effort(&self, host: &str, identity: Option<&str>, alias: &str) -> impl std::future::Future<Output = anyhow::Result<String>> + Send;
 }
 
-/// `host` 上 `autostart = true` 且沒有 active Run 的 bot 走 §6.2，一輪。回 `true`＝每一顆都判斷完了。
-///
-/// 一定要在對帳**之後**才叫：否則會把 herdr 上還活著、只是 DB 還沒認回來的那顆再開一次。
-///
-/// 讀不到不當成沒有（#209）：清單讀不到＝這一輪一顆都不起、`owed` 維持原樣；某顆讀不到就只跳過那顆、記進 `owed`，
-/// 其他照起。`owed`：`None`＝清單還沒讀到過（全部都要看）；`Some`＝上一輪沒判斷完的那幾顆，這一輪只看它們。
-async fn autostart_pass(app: &Arc<App>, host: &str, owed: &mut Option<std::collections::HashSet<String>>, since: &str) -> bool {
-    let bots = match db::live_bots(&app.db).await {
-        Ok(b) => b,
-        Err(e) => {
-            tracing::warn!(host, error = ?e, "autostart: cannot list bots; none started this pass, will try again");
-            return false;
-        }
-    };
-    let mut still = std::collections::HashSet::new();
-    for bot in bots {
-        if bot.autostart != 1 || owed.as_ref().is_some_and(|o| !o.contains(&bot.id)) {
-            continue;
-        }
-        if let Err(e) = autostart_one(app, host, &bot, since).await {
-            tracing::warn!(host, bot = %bot.name, error = ?e, "autostart: cannot tell whether this bot should start; will look again");
-            still.insert(bot.id.clone());
-        }
-    }
-    let done = still.is_empty();
-    *owed = Some(still);
-    done
-}
+pub trait ReconcileHostEnv:
+    DataDir
+    + Db
+    + Emit
+    + BotLocks
+    + BotStatusEmit
+    + Isolation
+    + HerdrRoutes
+    + BotOpsPort
+    + HostSidePort
+    + TurnCommands
+    + IngressCommands
+    + ReconcileCommands
+    + crate::shared_host::SharedHostEnv
+    + PaneIdentitySync
+    + Send
+    + Sync
+{}
 
-/// 一顆 bot 要不要起、起它。`Err`＝判斷要用的東西讀不到（起失敗不算：那是 `start_bot` 的結論，照舊只記 log）。
-async fn autostart_one(app: &Arc<App>, host: &str, bot: &db::Bot, since: &str) -> Result<()> {
-    // 讀不到主機不能當成本機：那會在本機這一輪對別台的 bot 下 `start_bot`，而那台可能還沒連上、還沒對帳。
-    let bot_host = db::bot_host(&app.db, &bot.id).await?;
-    if bot_host != host {
-        return Ok(());
-    }
-    if !app.host_connected(host).await {
-        tracing::info!(bot = %bot.name, host, "autostart skipped: host not connected");
-        return Err(anyhow::anyhow!("host is not connected"));
-    }
-    // 讀不到 active run 也不能當成沒在跑。
-    if db::active_run(&app.db, &bot.id).await?.is_some() {
-        return Ok(());
-    }
-    // 第一次嘗試之後才有 run 的：使用者（或別的路）已經動過它，重試不再替它啟動——停掉的就是要它停。
-    let touched: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM runs WHERE bot_id = ? AND started_at >= ?")
-        .bind(&bot.id)
-        .bind(since)
-        .fetch_one(&app.db)
-        .await?;
-    if touched > 0 {
-        return Ok(());
-    }
-    tracing::info!(bot = %bot.name, host, "autostart");
-    // Keep startup independent from the reconcile/supervisor task. Aborting that task while
-    // start_bot is between inserting its `starting` run and completing setup would strand it.
-    let start_app = app.clone();
-    let bot_id = bot.id.clone();
-    match tokio::spawn(async move { start_app.start_bot(&bot_id).await }).await {
-        Ok(Ok(_)) => {}
-        Ok(Err(e)) => {
-            tracing::error!(bot = %bot.name, error = ?e, "autostart failed");
-            if !app.host_connected(host).await {
-                return Err(anyhow::anyhow!("host disconnected while starting bot"));
-            }
-        }
-        Err(e) => return Err(e.into()),
-    }
-    Ok(())
-}
-
-struct AutostartClaim {
-    app: Arc<App>,
-    host: String,
-    since: String,
-    completed: bool,
-}
-
-impl AutostartClaim {
-    fn begin(app: &Arc<App>, host: &str) -> Option<Self> {
-        let mut statuses = app.autostart_hosts.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
-        if statuses.contains_key(host) {
-            return None;
-        }
-        let since = app
-            .autostart_since
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .entry(host.to_string())
-            .or_insert_with(db::now)
-            .clone();
-        statuses.insert(host.to_string(), AutostartHostStatus::InProgress);
-        Some(Self { app: app.clone(), host: host.to_string(), since, completed: false })
-    }
-
-    fn complete(mut self) {
-        self.app
-            .autostart_hosts
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .insert(self.host.clone(), AutostartHostStatus::Done);
-        self.app.autostart_since.lock().unwrap_or_else(std::sync::PoisonError::into_inner).remove(&self.host);
-        self.completed = true;
-    }
-}
-
-impl Drop for AutostartClaim {
-    fn drop(&mut self) {
-        if self.completed {
-            return;
-        }
-        let mut statuses = self.app.autostart_hosts.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
-        if statuses.get(&self.host) == Some(&AutostartHostStatus::InProgress) {
-            statuses.remove(&self.host);
-        }
-    }
-}
-
-/// 對帳做完之後才叫的 autostart 入口（§6.1 第 6 步，review 2026-09-16 core 5）。回 `true`＝這次真的跑了。
-///
-/// - **對帳沒成功就不跑**：不知道 herdr 上哪些 agent 其實還活著，開下去就是同一顆 bot 兩個 agent。
-/// - **每台主機在這顆 daemon 的一生只跑一次**：遠端 ssh 斷線重連會再走一次「連上」，而 `stop` 不會改 `autostart`——
-///   使用者停掉的 autostart bot 在筆電睡醒重連後被重開、開始吃額度，本機同樣設定的卻不會。對帳失敗不算數，之後任一次成功的對帳（supervisor 連上、或全域訂閱建好後那次，#259）補跑。
-pub async fn autostart_after_reconcile(app: &Arc<App>, host: &str, reconciled: bool) -> bool {
-    if !reconciled {
-        tracing::warn!(host, "autostart skipped: reconcile did not succeed; will retry on the next successful connect");
-        return false;
-    }
-    // 被打斷的重啟先補完（#355 P2）：要在下面 autostart 判斷「使用者停掉的」之前——不然剛停掉的那顆會被當成使用者要它停。
-    // 每次對帳成功都做（重啟 intent 隨時可能產生），不受下面「每台主機一生一次」限制。
-    app.recover_restart_intents(host).await;
-    app.recover_delete_intents(host).await;
-    app.recover_promote_intents(host).await;
-    let Some(claim) = AutostartClaim::begin(app, host) else {
-        tracing::info!(host, "autostart already ran for this host in this daemon's lifetime; not restarting stopped bots");
-        return false;
-    };
-    // 讀不到的部分背景補到判斷完（#209）：本機不會有「下次連上」，只等重連的話 AGM 在內的 autostart bot 要到下次重啟才起。
-    // 主機照樣只算跑過一次：補的只是這一次還沒判斷完的，已經判斷過（起了、或本來就在跑）的不再碰。
-    let since = claim.since.clone();
-    let mut owed = None;
-    if !autostart_pass(app, host, &mut owed, &since).await {
-        let (app, host) = (app.clone(), host.to_string());
-        tokio::spawn(async move {
-            let claim = claim;
-            for attempt in 0.. {
-                tokio::time::sleep(recovery_retry_delay(attempt)).await;
-                if autostart_pass(&app, &host, &mut owed, &since).await {
-                    tracing::info!(host = %host, "autostart caught up");
-                    claim.complete();
-                    return;
-                }
-            }
-        });
-    } else {
-        claim.complete();
-    }
-    // bot 沒在跑時收下、還在等它起來的訊息（issue #122）：重啟前那次啟動可能沒做完，這裡再替它起一次。
-    app.resume_after_boot(host).await;
-    true
-}
-
-/// A Turn that outlives a restart has no poller: no live bubble, and nothing completes it if its
-/// hook never arrives. Re-arm every in-flight Turn once the runs are adopted.
-///
-/// 開機只跑這一次，所以**讀不到不算做完**（#75 重開）：真相都在 DB（in-flight 回合、`next_flush_at`、送到一半的那一筆），
-/// 把它變回 poller／timer 的卻只有這一步——這一步讀不到，那個回合重啟後就沒人盯，閒著的 bot 也不會再有事件叫醒排著的那一則。
-/// 讀不到的部分記成欠著，背景照退避一直補到做完。做完的不再碰（poller／watchdog 各只掛一次）；重啟之後才開始的 run、
-/// 之後才建立或才結束的回合是這個行程自己的，補收不碰。
-pub async fn rearm_progress(app: &Arc<App>) {
-    let mut owed = Recovery::new();
-    if owed.pass(app).await {
-        return;
-    }
-    tracing::warn!("startup recovery could not read everything it needs; retrying in the background until it can");
-    let app = app.clone();
-    tokio::spawn(async move {
-        for attempt in 0.. {
-            tokio::time::sleep(recovery_retry_delay(attempt)).await;
-            if owed.pass(&app).await {
-                tracing::info!(retries = attempt + 1, "startup recovery caught up");
-                return;
-            }
-        }
-    });
-}
+impl<T> ReconcileHostEnv for T where
+    T: DataDir
+        + Db
+        + Emit
+        + BotLocks
+        + BotStatusEmit
+        + Isolation
+        + HerdrRoutes
+        + BotOpsPort
+        + HostSidePort
+        + TurnCommands
+        + IngressCommands
+        + ReconcileCommands
+        + crate::shared_host::SharedHostEnv
+        + PaneIdentitySync
+        + Send
+        + Sync
+        + ?Sized
+{}
 
 /// 開機恢復讀不到之後，第 `attempt` 次重試前等多久：很快就好的多半是 busy，一直讀不到就放慢到每分鐘一次。
 pub(crate) fn recovery_retry_delay(attempt: usize) -> std::time::Duration {
@@ -224,7 +68,7 @@ pub(crate) fn recovery_retry_delay(attempt: usize) -> std::time::Duration {
 }
 
 /// 開機恢復還欠著的部分。
-struct Recovery {
+pub(crate) struct Recovery {
     /// 開機那一刻。之後才開始的 run、之後才建立的插隊送出、之後才結束的 run 都是這個行程自己的帳。
     boot: String,
     /// 還沒把 in-flight 回合接回來的 run；`None`＝連 run 清單都還沒讀到。
@@ -236,12 +80,12 @@ struct Recovery {
 }
 
 impl Recovery {
-    fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self { boot: db::now(), runs: None, queue: true, send_nows: true, ended_runs: true, queued_prompt_restamps: true }
     }
 
     /// 補一輪；回 `true`＝什麼都不欠了。
-    async fn pass(&mut self, app: &(impl crate::capabilities::BotLocks + crate::capabilities::Db + crate::events::ports::TurnCommands)) -> bool {
+    pub(crate) async fn pass(&mut self, app: &(impl crate::capabilities::BotLocks + crate::capabilities::Db + crate::events::ports::TurnCommands)) -> bool {
         // 插隊送出途中停掉、還沒掛上 run 的那一則（#120）。排在接回 poller 之前：鍵其實生效了的那一則會在這裡掛上 run（#229），
         // 接回的才是它、不是已經被它打斷的那一筆。
         if self.send_nows {
@@ -483,9 +327,9 @@ async fn refresh_child_kind(app: &(impl crate::capabilities::Db + crate::capabil
 
 /// 兩條退休路徑真正寫 `deleted_at` 的地方：走 `child_retire` 的唯一入口（#413：記呼叫端；AGM 的 child 不隱式退役）。
 /// 讀不到誰是 AGM 的就排延後那一輪再看。
-async fn retire_child(app: &Arc<App>, host: &str, bot: &db::Bot, why: &'static str) -> Result<()> {
+async fn retire_child(app: &impl ReconcileHostEnv, host: &str, bot: &db::Bot, why: &'static str) -> Result<()> {
     if app.retire_child(&bot.id, why, crate::child_retire::Mode::Implicit).await? == crate::child_retire::Outcome::Unreadable {
-        schedule_deferred_pass(app, host);
+        app.schedule_deferred_pass(host);
     }
     Ok(())
 }
@@ -494,7 +338,7 @@ async fn retire_child(app: &Arc<App>, host: &str, bot: &db::Bot, why: &'static s
 ///
 /// 只有**確定沒在維護**才可以：herdr 重啟的那幾分鐘正是所有 pane 同時消失的時候，這時讀不到維護狀態就當成
 /// 「沒在維護」，子 bot 被軟刪，pane 回來之後也接不回原對話與血緣。讀不到＝這一輪留著、晚一點再看。
-async fn may_retire_child(app: &Arc<App>, host: &str, bot: &db::Bot) -> bool {
+async fn may_retire_child(app: &impl ReconcileHostEnv, host: &str, bot: &db::Bot) -> bool {
     match app.retirement_block(&bot.id).await {
         Ok(Some(reason)) => {
             tracing::info!(host, bot = %bot.name, reason, "reconcile: child kept by a persisted restore/restart guard");
@@ -503,7 +347,7 @@ async fn may_retire_child(app: &Arc<App>, host: &str, bot: &db::Bot) -> bool {
         Ok(None) => {}
         Err(e) => {
             tracing::warn!(host, bot = %bot.name, error = ?e, "reconcile: cannot read child retirement guards; child kept this pass");
-            schedule_deferred_pass(app, host);
+            app.schedule_deferred_pass(host);
             return false;
         }
     }
@@ -516,7 +360,7 @@ async fn may_retire_child(app: &Arc<App>, host: &str, bot: &db::Bot) -> bool {
         Err(e) => {
             tracing::warn!(host, bot = %bot.name, error = ?e,
                 "reconcile: cannot read the herdr maintenance state; child kept this pass, will look again");
-            schedule_deferred_pass(app, host);
+            app.schedule_deferred_pass(host);
             false
         }
     }
@@ -590,55 +434,16 @@ async fn parent_replaced_child(
     Ok(false)
 }
 
-/// 延後的那一輪多久之後補跑。
-const DEFERRED_PASS_DELAY: std::time::Duration =
-    if cfg!(test) { std::time::Duration::from_millis(50) } else { std::time::Duration::from_secs(15) };
-
-/// 這一輪有一件事因為讀不到而延後了（#94、#191）。對帳平常只在事件上跑（連上、`pane.agent_detected`、子 agent 的
-/// pane 關掉），延後的那一件若等不到下一個事件就一直掛著——排一輪晚一點的補跑。同一台主機同時只排一輪；補跑還是
-/// 讀不到就會再排，整輪失敗（DB、herdr）也再排；那台主機斷線或不在設定裡就停，重新連上時本來就會對帳。
-pub(crate) fn schedule_deferred_pass(app: &Arc<App>, host: &str) {
-    static PENDING: std::sync::OnceLock<std::sync::Mutex<std::collections::HashSet<String>>> = std::sync::OnceLock::new();
-    let pending = PENDING.get_or_init(Default::default);
-    // 測試共用這個行程：key 帶資料目錄，不同的 App 才不會互相吃掉。
-    let key = format!("{}\u{0}{host}", app.data_dir.display());
-    if !pending.lock().unwrap_or_else(|e| e.into_inner()).insert(key.clone()) {
-        return;
-    }
-    let (app, host) = (app.clone(), host.to_string());
-    tokio::spawn(async move {
-        tokio::time::sleep(DEFERRED_PASS_DELAY).await;
-        pending.lock().unwrap_or_else(|e| e.into_inner()).remove(&key);
-        if let Err(e) = reconcile_host(&app, &host).await {
-            if app.session_for_host(&host).await.is_some() && app.host_connected(&host).await {
-                tracing::warn!(host = %host, error = ?e, "deferred reconcile pass failed; trying again");
-                schedule_deferred_pass(&app, &host);
-            }
-        }
-    });
-}
-
 /// 同一台主機的對帳**一輪一輪來**：事件驅動的一輪與延後補跑的一輪（`schedule_deferred_pass`）在負載高時會重疊，後到的那一輪
 /// `claimed` 讀在前一輪認領之前、spawn hint 卻讀在前一輪 `consume` 之後，就退回同 tab 推斷——已經認領的子 agent 又掛到別顆底下、
 /// 因為短名字被占用長出重複 bot（`proj-xxxx-k2`）。key 帶資料目錄：測試共用同一個行程，不同的 App 不能互相排隊。
-async fn host_pass_lock(app: &impl crate::capabilities::DataDir, host: &str) -> Arc<tokio::sync::Mutex<()>> {
+pub(crate) async fn host_pass_lock(app: &impl crate::capabilities::DataDir, host: &str) -> Arc<tokio::sync::Mutex<()>> {
     static LOCKS: std::sync::OnceLock<std::sync::Mutex<HashMap<String, Arc<tokio::sync::Mutex<()>>>>> = std::sync::OnceLock::new();
     let key = format!("{}\u{0}{host}", app.data_dir().display());
     LOCKS.get_or_init(Default::default).lock().unwrap_or_else(|e| e.into_inner()).entry(key).or_default().clone()
 }
 
-pub async fn reconcile_host(app: &Arc<App>, host: &str) -> Result<()> {
-    let lost = {
-        let lock = host_pass_lock(app, host).await;
-        let _pass = lock.lock().await;
-        reconcile_host_locked(app, host).await?
-    };
-    // 這一輪收掉的 autostart bot：pass 鎖放開之後才起（起的過程會碰 herdr 與 DB，不能卡著下一輪對帳）。
-    crate::autostart_revive::spawn_revive(app, host, lost);
-    Ok(())
-}
-
-async fn reconcile_host_locked(app: &Arc<App>, host: &str) -> Result<Vec<crate::autostart_revive::Lost>> {
+pub(crate) async fn reconcile_host_locked(app: &impl ReconcileHostEnv, host: &str) -> Result<Vec<crate::autostart_revive::Lost>> {
     let Some(session) = app.session_for_host(host).await else {
         anyhow::bail!("unknown host `{host}`");
     };
@@ -695,22 +500,22 @@ async fn reconcile_host_locked(app: &Arc<App>, host: &str) -> Result<Vec<crate::
         })
         .unwrap_or_default();
 
-    let projects: Vec<db::Project> = db::live_projects(&app.db).await?.into_iter().filter(|p| p.host == host).collect();
+    let projects: Vec<db::Project> = db::live_projects(app.db()).await?.into_iter().filter(|p| p.host == host).collect();
     let project_labels: HashMap<String, String> = projects.iter().map(|p| (p.id.clone(), p.label.clone())).collect();
     // #708：移交出去的專案整個不碰——workspace 映射、run、child、pane 都歸接手的 daemon。
     let handed_off: std::collections::HashSet<&str> =
         projects.iter().filter(|p| p.handed_off_to.is_some()).map(|p| p.id.as_str()).collect();
-    let handed_off_footprint = app.db.handoff_footprint(host).await?;
+    let handed_off_footprint = app.db().handoff_footprint(host).await?;
     for p in projects.iter().filter(|p| p.handed_off_to.is_none()) {
         if let Some(ws) = p.workspace_id.as_deref() {
             if !live_ws.contains(&ws.to_string()) {
-                sqlx::query("UPDATE projects SET workspace_id=NULL WHERE id=?").bind(&p.id).execute(&app.db).await?;
+                sqlx::query("UPDATE projects SET workspace_id=NULL WHERE id=?").bind(&p.id).execute(app.db()).await?;
                 tracing::info!(host, project = %p.label, "workspace disappeared; mapping cleared");
             }
         }
     }
 
-    let bots = db::live_bots_on_host(&app.db, host).await?;
+    let bots = db::live_bots_on_host(app.db(), host).await?;
     // Read hints before retiring missing children: a fresh hint is the direct evidence that the
     // still-running parent launched the pane which this same pass will adopt as its successor.
     // Keep read failure distinct from an empty result; adoption is already fail-closed below.
@@ -730,7 +535,7 @@ async fn reconcile_host_locked(app: &Arc<App>, host: &str) -> Result<Vec<crate::
         }
         let lock = app.bot_lock(&bot.id).await;
         let _g = lock.lock().await;
-        let active = db::active_run(&app.db, &bot.id).await?;
+        let active = db::active_run(app.db(), &bot.id).await?;
         if active
             .as_ref()
             .and_then(|r| r.herdr_session.as_deref())
@@ -739,9 +544,9 @@ async fn reconcile_host_locked(app: &Arc<App>, host: &str) -> Result<Vec<crate::
         {
             continue;
         }
-        let computed = db::agent_name_for_bot(&app.db, &bot).await?;
+        let computed = db::agent_name_for_bot(app.db(), &bot).await?;
         let preserve_stopping = match &active {
-            Some(run) if run.state == "stopping" => app.db.has_open_restart_for_run(host, &bot.id, &run.id).await?,
+            Some(run) if run.state == "stopping" => app.db().has_open_restart_for_run(host, &bot.id, &run.id).await?,
             _ => false,
         };
         let mut candidates: Vec<String> = Vec::new();
@@ -755,7 +560,7 @@ async fn reconcile_host_locked(app: &Arc<App>, host: &str) -> Result<Vec<crate::
                 "SELECT agent_name FROM runs WHERE bot_id = ? ORDER BY started_at DESC LIMIT 1",
             )
             .bind(&bot.id)
-            .fetch_optional(&app.db)
+            .fetch_optional(app.db())
             .await?
             .flatten()
             .filter(|s| !s.is_empty())
@@ -868,7 +673,7 @@ async fn reconcile_host_locked(app: &Arc<App>, host: &str) -> Result<Vec<crate::
                     .bind(&session)
                     .bind(preserve_stopping)
                     .bind(&run.id)
-                    .execute(&app.db)
+                    .execute(app.db())
                     .await?;
                 if run.pane_id.as_deref() != Some(agent.pane_id.as_str()) {
                     if let Some(old) = run.pane_id.as_deref() {
@@ -910,7 +715,7 @@ async fn reconcile_host_locked(app: &Arc<App>, host: &str) -> Result<Vec<crate::
                                 .bind(&status)
                                 .bind(preserve_stopping)
                                 .bind(&run.id)
-                                .execute(&app.db)
+                                .execute(app.db())
                                 .await?;
                             claimed.insert(name);
                             app.emit_bot_status(&bot.id).await;
@@ -934,7 +739,7 @@ async fn reconcile_host_locked(app: &Arc<App>, host: &str) -> Result<Vec<crate::
                 // 晚一點再對一次帳：結束寫得進去之後，子 agent 走下面的 `(None, None)` 退休。
                 if exit == crate::lc_error::RunExit::NotRecorded {
                     tracing::warn!(host, bot = %bot.name, run = %run.id, "reconcile: the run's exit was not recorded; bot left as is, will look again");
-                    schedule_deferred_pass(app, host);
+                    app.schedule_deferred_pass(host);
                 } else if bot.managed_by != "child"
                     && bot.autostart == 1
                     && matches!(exit, crate::lc_error::RunExit::Recorded | crate::lc_error::RunExit::TurnOwed)
@@ -987,12 +792,12 @@ async fn reconcile_host_locked(app: &Arc<App>, host: &str) -> Result<Vec<crate::
                 .bind(&found_name)
                 .bind(&session)
                 .bind(db::now())
-                .execute(&app.db)
+                .execute(app.db())
                 .await?;
                 sqlx::query("UPDATE projects SET workspace_id=? WHERE id=? AND workspace_id IS NULL")
                     .bind(&agent.workspace_id)
                     .bind(&bot.project_id)
-                    .execute(&app.db)
+                    .execute(app.db())
                     .await?;
                 app.watch_pane_on_session(host, &session, &agent.pane_id).await;
                 if bot.kind == "codex" {
@@ -1010,7 +815,7 @@ async fn reconcile_host_locked(app: &Arc<App>, host: &str) -> Result<Vec<crate::
                         "SELECT COUNT(*) FROM runs WHERE bot_id = ? AND state NOT IN ('starting','running','stopping')",
                     )
                     .bind(&bot.id)
-                    .fetch_one(&app.db)
+                    .fetch_one(app.db())
                     .await?;
                     if ended > 0 {
                         let why = if let Ok(hints) = &spawn_hints {
@@ -1059,7 +864,7 @@ async fn reconcile_host_locked(app: &Arc<App>, host: &str) -> Result<Vec<crate::
             Err(e) => {
                 if agents.iter().any(|a| a.name.as_deref().is_some_and(|n| !claimed.contains(n))) {
                     tracing::warn!(host, error = ?e, "reconcile: cannot read spawn hints; adopting no new child this pass, will look again");
-                    schedule_deferred_pass(app, host);
+                    app.schedule_deferred_pass(host);
                 }
                 (HashMap::new(), &[][..])
             }
@@ -1156,7 +961,7 @@ async fn reconcile_host_locked(app: &Arc<App>, host: &str) -> Result<Vec<crate::
     .bind(host)
     .bind(&session)
     .bind(&session)
-    .fetch_all(&app.db)
+    .fetch_all(app.db())
     .await?;
     // #709：共用 session 上 pane id 也會被別顆 daemon 的新 pane 用到：只關還在自己 workspace／tab 裡的。
     let not_ours = |pane: &str| {
@@ -1205,7 +1010,7 @@ async fn reconcile_host_locked(app: &Arc<App>, host: &str) -> Result<Vec<crate::
 /// to the full herdr agent name (unique).
 #[allow(clippy::too_many_arguments)]
 async fn adopt_child(
-    app: &Arc<App>,
+    app: &impl ReconcileHostEnv,
     host: &str,
     client: &crate::herdr::HerdrClient,
     session: &str,
@@ -1228,7 +1033,7 @@ async fn adopt_child(
         "SELECT b.project_id, b.deleted_at, p.deleted_at FROM bots b JOIN projects p ON p.id = b.project_id WHERE b.id = ?",
     )
     .bind(&parent.id)
-    .fetch_optional(&app.db)
+    .fetch_optional(app.db())
     .await?;
     if !matches!(owner, Some((ref project_id, None, None)) if project_id == &parent.project_id) {
         anyhow::bail!("parent bot or project was deleted before adopting `{child_name}`");
@@ -1246,12 +1051,12 @@ async fn adopt_child(
     .bind(&full_name)
     .bind(child_name)
     .bind(raw_child_name)
-    .fetch_optional(&app.db)
+    .fetch_optional(app.db())
     .await?;
     let bot_id = match existing {
         Some(id) => {
             // The per-bot loop sorts that run out first; adopting now would trip `runs_one_active`.
-            if let Some(r) = db::active_run(&app.db, &id).await? {
+            if let Some(r) = db::active_run(app.db(), &id).await? {
                 anyhow::bail!("child `{child_name}` still has active run `{}` under agent `{:?}`", r.id, r.agent_name);
             }
             // kind 換了就把舊 identity 丟掉（SQLite 的 SET 右邊讀的是舊列值）：身分有 kind，
@@ -1271,13 +1076,13 @@ async fn adopt_child(
                 .bind(kind)
                 .bind(kind)
                 .bind(&id)
-                .execute(&app.db)
+                .execute(app.db())
                 .await?;
             id
         }
         None => {
             let taken = |n: String| {
-                let db = app.db.clone();
+                let db = app.db().clone();
                 let project = parent.project_id.clone();
                 async move {
                     sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM bots WHERE project_id = ? AND name = ? AND deleted_at IS NULL")
@@ -1315,7 +1120,7 @@ async fn adopt_child(
             .bind(&parent.id)
             .bind(db::ulid())
             .bind(&now)
-            .execute(&app.db)
+            .execute(app.db())
             .await?;
             bot_id
         }
@@ -1335,12 +1140,12 @@ async fn adopt_child(
     .bind(name)
     .bind(session)
     .bind(&now)
-    .execute(&app.db)
+    .execute(app.db())
     .await?;
     app.watch_pane_on_session(host, session, &agent.pane_id).await;
     // The pane is the only source for both its conversation (§4.3) and its model (argv).
     app.spawn_adopted_capture(&run_id, &bot_id);
-    if let Ok(Some(child)) = db::bot(&app.db, &bot_id).await {
+    if let Ok(Some(child)) = db::bot(app.db(), &bot_id).await {
         sync_pane_model(app, host, client, &child, agent).await;
     }
     Ok(bot_id)
@@ -1378,7 +1183,7 @@ async fn fill_codex_runtime(app: &(impl crate::capabilities::BotStatusEmit + cra
 /// * **children only**: other bots' model is user config, projected back to `config.toml`.
 /// * **fills, never corrects**: argv cannot see a later `/model`. Unparsed stays NULL.
 /// `identity` does correct: nobody set a child's account, the adopt copied the parent's.
-async fn sync_pane_model(app: &Arc<App>, host: &str, client: &crate::herdr::HerdrClient, bot: &db::Bot, agent: &crate::herdr::AgentInfo) {
+async fn sync_pane_model(app: &impl ReconcileHostEnv, host: &str, client: &crate::herdr::HerdrClient, bot: &db::Bot, agent: &crate::herdr::AgentInfo) {
     if bot.managed_by != "child" {
         return;
     }
@@ -1404,7 +1209,7 @@ async fn sync_pane_model(app: &Arc<App>, host: &str, client: &crate::herdr::Herd
         .find(|p| kind_from_argv(&p.argv) == Some(bot.kind.as_str()))
         .or_else(|| procs.iter().find(|p| !p.argv.is_empty()));
     if want_identity {
-        crate::pane_identity::sync_child_identity(app, host, bot, &agent.pane_id, cli.and_then(|p| p.pid)).await;
+        app.sync_child_identity(host, bot, &agent.pane_id, cli.and_then(|p| p.pid)).await;
     }
     if !want_model && !want_fast {
         return;
@@ -1423,7 +1228,7 @@ async fn sync_pane_model(app: &Arc<App>, host: &str, client: &crate::herdr::Herd
     if bot.kind == "claude" && effort.is_none() && bot.effort.is_none() {
         if let Some(alias) = model.as_deref().or(bot.model.as_deref()) {
             // 讀不到設定檔就留空、下一輪對帳再讀：記下內建預設值等於把猜的當成事實，之後沒人會再改它（#268）。
-            match crate::models::claude_default_effort(app, host, bot.identity.as_deref(), alias).await {
+            match app.claude_default_effort(host, bot.identity.as_deref(), alias).await {
                 Ok(e) => effort = Some(e),
                 Err(e) => tracing::warn!(bot = %bot.name, host, error = %format!("{e:#}"), "cannot read the claude settings; child effort left unset"),
             }
@@ -1434,7 +1239,7 @@ async fn sync_pane_model(app: &Arc<App>, host: &str, client: &crate::herdr::Herd
         let _ = sqlx::query("UPDATE runs SET runtime_model = ? WHERE bot_id = ? AND state IN ('starting','running') AND runtime_model IS NULL")
             .bind(m)
             .bind(&bot.id)
-            .execute(&app.db)
+            .execute(app.db())
             .await;
     }
     let model = model.filter(|_| bot.model.is_none());
@@ -1447,7 +1252,7 @@ async fn sync_pane_model(app: &Arc<App>, host: &str, client: &crate::herdr::Herd
         .bind(&effort)
         .bind(fast)
         .bind(&bot.id)
-        .execute(&app.db)
+        .execute(app.db())
         .await
     {
         tracing::warn!(bot = %bot.name, error = ?e, "cannot record the model a child agent is running");

@@ -63,7 +63,7 @@ pub async fn insert_system_message(app: &(impl crate::capabilities::Db + crate::
 
 /// 記錄 shadow limit hit（裁判）。
 pub async fn shadow_limit_hit(app: &Arc<App>, sample: crate::judge::Sample) {
-    crate::judge::shadow_limit_hit(app, sample).await;
+    crate::runners::judge::shadow_limit_hit(app, sample).await;
 }
 
 /// 標註 codex limit hit 錯誤。

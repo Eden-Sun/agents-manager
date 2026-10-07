@@ -14,17 +14,12 @@
 //! 讀不到畫面什麼都不動：讀不到不等於建議消失了。
 
 use crate::db;
-use crate::state::App;
 use am_core::PaneReadSource;
 use am_ports::{DbContext, EventSink, StyledRunPaneReader};
 use serde_json::Value;
 use std::collections::HashMap;
-use std::sync::{Arc, Mutex, OnceLock};
-use std::time::Duration;
+use std::sync::{Mutex, OnceLock};
 use sqlx::SqlitePool;
-
-/// idle 邊之後第幾毫秒補讀一次：建議句的產生要一點時間（另一次模型呼叫），畫面也要畫完。
-const BURST: [u64; 4] = [1500, 3500, 7000, 14000];
 
 fn store() -> &'static Mutex<HashMap<String, String>> {
     static S: OnceLock<Mutex<HashMap<String, String>>> = OnceLock::new();
@@ -61,11 +56,6 @@ pub fn json(run_id: &str, agent_status: Option<&str>) -> Value {
         return Value::Null;
     }
     of(run_id).into()
-}
-
-/// 讀一次樣式畫面、照結果記下或清掉建議（idle 邊補讀用）。回傳現在有沒有建議；讀不到回 `None`（什麼都不動）。
-pub async fn observe(app: &Arc<App>, run: &db::Run) -> Option<bool> {
-    crate::app_ports_r2a8::prompt_suggestion_observe(app, run).await
 }
 
 /// Run-scoped suggestion observation. The App wrapper only assembles the DB, styled pane reader,
@@ -112,27 +102,6 @@ async fn record<E: EventSink>(events: &E, run: &db::Run, styled: &str) -> bool {
         emit_bot_status(events, &run.bot_id).await;
     }
     has
-}
-
-/// herdr 轉成 `idle` 那一刻（[`crate::events`]）：在 [`BURST`] 的幾個時間點各看一次，看到建議或不再 idle 就停。
-/// 自己開背景工作，不擋事件迴圈。
-pub fn on_idle(app: &Arc<App>, run: &db::Run) {
-    let (app, run_id) = (app.clone(), run.id.clone());
-    tokio::spawn(async move {
-        let db = DbContext::new(app.db.clone());
-        let mut waited = 0;
-        for at in BURST {
-            tokio::time::sleep(Duration::from_millis(at - waited)).await;
-            waited = at;
-            // 事件帶來的 Run 是更新前的複本：每次重讀，狀態才是現在的。
-            let Ok(Some(run)) = db::run(db.pool(), &run_id).await else { return };
-            match observe(&app, &run).await {
-                Some(true) => return,
-                _ if run.state != "running" || run.agent_status != "idle" => return,
-                _ => {}
-            }
-        }
-    });
 }
 
 /// 30 秒畫面巡邏的一個 claude run：`plain` 是巡邏已經讀到的純文字畫面。

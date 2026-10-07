@@ -9,36 +9,12 @@
 use crate::config::{self, LOCAL_HOST};
 use crate::db;
 use crate::herdr::AgentInfo;
-use crate::state::App;
 use anyhow::Result;
 use serde_json::json;
 use std::collections::HashSet;
 use std::path::PathBuf;
-use std::sync::Arc;
-use std::time::Duration;
 
 pub const SESSION: &str = "default";
-const POLL_INTERVAL: Duration = Duration::from_secs(8);
-
-/// Poll as a backstop for agents started after the daemon and for Herdr versions that do not
-/// emit `pane.agent_detected` for every launch.
-pub fn spawn_poller(app: Arc<App>) {
-    tokio::spawn(async move {
-        let mut last_error = None;
-        loop {
-            tokio::time::sleep(POLL_INTERVAL).await;
-            if let Err(e) = sync(&app).await {
-                let message = format!("{e:#}");
-                if last_error.as_deref() != Some(message.as_str()) {
-                    tracing::warn!(session = SESSION, error = %message, "default session poll failed");
-                    last_error = Some(message);
-                }
-            } else {
-                last_error = None;
-            }
-        }
-    });
-}
 
 /// Observe the default session and import matching agents into the existing Project list.
 ///

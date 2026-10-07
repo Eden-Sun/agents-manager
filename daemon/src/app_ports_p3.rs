@@ -42,7 +42,7 @@ impl HostHooks for App {
 
     fn host_connected(app: Arc<Self>, host: String) -> impl Future<Output = ()> + Send {
         async move {
-            let reconciled = match crate::reconcile::reconcile_host(&app, &host).await {
+            let reconciled = match crate::runners::reconcile::reconcile_host(&app, &host).await {
                 Ok(()) => true,
                 Err(e) => {
                     tracing::error!(host = %host, error = ?e, "reconcile after connect failed");
@@ -64,7 +64,7 @@ impl HostHooks for App {
             // 開機那一輪跑的時候這台還沒連上，它的 autostart bot 因此從來沒被起過（review 2026-09-16）。
             // 對帳成功才跑、每台一生一次：重連不能把使用者停掉的 bot 再開起來（core 5）。
             app.wait_until_startup_ready().await;
-            crate::reconcile::autostart_after_reconcile(&app, &host, reconciled).await;
+            crate::runners::reconcile::autostart_after_reconcile(&app, &host, reconciled).await;
         }
     }
 
@@ -226,7 +226,7 @@ impl crate::tools::ToolsEnv for App {
     fn clear_login_prompt_and_push(app: &Arc<Self>, host: &str, name: &str) -> impl Future<Output = ()> + Send {
         let app = app.clone();
         let (host, name) = (host.to_string(), name.to_string());
-        async move { crate::login_prompt::clear_and_push(&app, &host, &name).await }
+        async move { crate::runners::login_prompt::clear_and_push(&app, &host, &name).await }
     }
 
     fn unpark_claude_identity(&self, host: &str, name: &str, env: &std::collections::BTreeMap<String, String>) {

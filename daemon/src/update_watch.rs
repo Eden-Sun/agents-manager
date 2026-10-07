@@ -170,7 +170,7 @@ async fn sweep_runs(app: &Arc<App>, runs: anyhow::Result<Vec<db::Run>>) {
         }
         if kind == "codex" {
             // 狀態列是 runtime 的權威，每輪校正（讀不到就不動）。
-            crate::codex_live::sync_runtime(app, &client, &run.bot_id, &run.id, &pane, Some(&read.text)).await;
+            crate::runners::codex_live::sync_runtime(app, &client, &run.bot_id, &run.id, &pane, Some(&read.text)).await;
             // 輸入框上方的快取／context 提示：讀 rollout 新增的 token_count（`prompt_cache`）。
             crate::prompt_cache::refresh_codex(app, &run).await;
         }

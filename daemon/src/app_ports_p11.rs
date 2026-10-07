@@ -182,11 +182,11 @@ pub mod test_helpers {
     }
 
     pub async fn reconcile_host(app: &Arc<App>, host: &str) -> anyhow::Result<()> {
-        crate::reconcile::reconcile_host(app, host).await
+        crate::runners::reconcile::reconcile_host(app, host).await
     }
 
     pub async fn autostart_after_reconcile(app: &Arc<App>, host: &str, caught_up: bool) {
-        crate::reconcile::autostart_after_reconcile(app, host, caught_up).await;
+        crate::runners::reconcile::autostart_after_reconcile(app, host, caught_up).await;
     }
 
     pub async fn supervisor_store_inbox(pool: &sqlx::SqlitePool, limit: i64) -> anyhow::Result<Vec<crate::supervisor::store::InboxEvent>> {

@@ -4,16 +4,10 @@
 //! 畫面上沒有的東西，網頁怎麼 parse 都拿不到；但 transcript 裡那個 `tool_use` 有完整的題目與選項。
 //! 這裡找「最後一個還沒被回答的 `AskUserQuestion`」：有 `tool_use`、之後沒有對應 `tool_use_id` 的 `tool_result`。
 
-use crate::db;
-use crate::lc_error::LcError;
-use crate::state::App;
-use axum::extract::{Path, State};
-use axum::Json;
-use serde_json::{json, Value};
-use std::sync::Arc;
+use serde_json::Value;
 
 /// 讀 transcript 最後這麼多位元組就夠：題目是最後幾筆訊息之一，不需要整份（長 session 的檔動輒幾十 MB）。
-const TAIL_BYTES: u64 = 512 * 1024;
+pub(crate) const TAIL_BYTES: u64 = 512 * 1024;
 
 /// 最後一個還沒被回答的 `AskUserQuestion` 的 `input`（含 `questions`），沒有就 `None`。
 ///
@@ -47,33 +41,10 @@ pub(crate) fn read_tail(path: &std::path::Path, max: u64) -> Option<String> {
     crate::transcript_read::read_tail(path, max)
 }
 
-/// `GET /api/bots/{id}/pending-question`：`200 {"questions": [...] | null}`。
-///
-/// 只有本機的 claude bot 讀得到（transcript 在這台）；遠端、非 claude、沒有 transcript、沒在等題目都回 `null`，
-/// 不是錯誤——網頁拿不到就照舊用畫面。bot 或 run 不存在 404。
-pub async fn get_pending_question(State(app): State<Arc<App>>, Path(id): Path<String>) -> Result<Json<Value>, LcError> {
-    let up = |e: anyhow::Error| LcError::Upstream(e.to_string());
-    let bot = db::bot(&app.db, &id).await.map_err(up)?.ok_or_else(|| LcError::NotFound("bot".into()))?;
-    let run = db::active_run(&app.db, &id).await.map_err(up)?.ok_or_else(|| LcError::NotFound("run".into()))?;
-    if bot.kind != "claude" || db::bot_host(&app.db, &id).await.map_err(up)? != crate::config::LOCAL_HOST {
-        return Ok(Json(json!({"questions": null})));
-    }
-    let Some(path) = run.transcript_path.clone().filter(|p| !p.trim().is_empty()) else {
-        return Ok(Json(json!({"questions": null})));
-    };
-    if !crate::app_ports_p5::local_transcript_allowed(&app, &bot, &path).await {
-        return Ok(Json(json!({"questions": null})));
-    }
-    let input = tokio::task::spawn_blocking(move || read_tail(std::path::Path::new(&path), TAIL_BYTES).and_then(|log| pending_ask(&log)))
-        .await
-        .ok()
-        .flatten();
-    Ok(Json(json!({"questions": input.and_then(|i| i.get("questions").cloned())})))
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
+    use serde_json::json;
 
     fn ask(id: &str, question: &str) -> String {
         json!({"type": "assistant", "message": {"content": [{"type": "tool_use", "id": id, "name": "AskUserQuestion",
@@ -119,30 +90,3 @@ mod tests {
     }
 }
 
-#[cfg(test)]
-mod path_guard_tests {
-    use super::*;
-
-    /// The read endpoint must reject a legacy or poisoned DB path outside this bot's projects
-    /// tree, even when that path points to a valid JSONL file on the daemon host.
-    #[tokio::test]
-    async fn a_pending_question_is_not_read_from_outside_the_bots_projects_dir() {
-        let env = crate::testing::env().await;
-        let app = env.app.clone();
-        let bot = crate::testing::claude_bot(&app, &env.project_id, "pending-path-guard").await;
-        let run_id = crate::testing::fake_run(&app, &bot.id).await;
-        let scratch = crate::testing::track(std::env::temp_dir().join(format!("am-pending-path-{}", db::ulid())));
-        std::fs::create_dir_all(&scratch).unwrap();
-        let outside = scratch.join("foreign.jsonl");
-        std::fs::write(&outside, json!({"type":"assistant","message":{"content":[{"type":"tool_use","id":"foreign-question","name":"AskUserQuestion","input":{"questions":[{"question":"FOREIGN-QUESTION-7741","options":[{"label":"secret"}]}]}}]}}).to_string()).unwrap();
-        sqlx::query("UPDATE runs SET transcript_path=? WHERE id=?")
-            .bind(outside.to_string_lossy())
-            .bind(&run_id)
-            .execute(&app.db)
-            .await
-            .unwrap();
-
-        let Json(body) = get_pending_question(State(app), Path(bot.id)).await.unwrap();
-        assert_eq!(body["questions"], Value::Null, "未驗證的舊路徑不能讓任意本機 JSONL 內容出現在 API 回應");
-    }
-}

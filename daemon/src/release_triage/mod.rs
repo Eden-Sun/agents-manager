@@ -11,7 +11,6 @@
 //! 版本比較、標題解析一律重用 `changelog.rs`（`parse_changelog`／`pick_sections`／`parse_version`），
 //! 不另寫一套。
 
-pub mod http;
 pub mod issue;
 pub mod ledger;
 pub mod rules;
