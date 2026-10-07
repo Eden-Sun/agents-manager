@@ -1,9 +1,10 @@
 import { useEffect, useId, useMemo, useRef, useState, type KeyboardEvent as ReactKeyboardEvent } from 'react'
-import { listDirs } from '../api'
+import { createDir, listDirs } from '../api'
 import { createLatestOnly } from '../lib/latestOnly'
 import { isImeEnter } from '../lib/ime'
 import { keyBelongsToControl } from '../lib/domEvents'
-import type { DirListing } from '../api/types'
+import { ApiError, type DirListing } from '../api/types'
+import { newDirNameProblem } from '../lib/newDirName'
 import './dirPicker.css'
 
 /**
@@ -36,10 +37,16 @@ export function DirPicker({
   /** The crumb bar turns into a text field while the user types a path by hand. */
   const [editing, setEditing] = useState(false)
   const [manual, setManual] = useState('')
+  /** 「新資料夾」的內嵌表單（issue #877）：在目前瀏覽的這一層建一個資料夾，建好直接選取。 */
+  const [creating, setCreating] = useState(false)
+  const [newName, setNewName] = useState('')
+  const [createError, setCreateError] = useState<string | null>(null)
+  const [createBusy, setCreateBusy] = useState(false)
   const remote = host && host !== 'local' ? host : null
 
   const filterRef = useRef<HTMLInputElement>(null)
   const manualRef = useRef<HTMLInputElement>(null)
+  const newNameRef = useRef<HTMLInputElement>(null)
   const listRef = useRef<HTMLDivElement>(null)
   const listId = useId()
   const optId = (i: number) => `${listId}-opt-${i}`
@@ -78,6 +85,39 @@ export function DirPicker({
   useEffect(() => {
     if (editing) manualRef.current?.select()
   }, [editing])
+  useEffect(() => {
+    if (creating) newNameRef.current?.focus()
+  }, [creating])
+
+  const closeCreate = () => {
+    setCreating(false)
+    setNewName('')
+    setCreateError(null)
+    filterRef.current?.focus()
+  }
+  const submitCreate = () => {
+    if (!listing || createBusy) return
+    // 這一層已經列得到同名的（不分大小寫也提示，macOS／Windows 的檔案系統會撞）：不必等 daemon 回 409。
+    const problem =
+      newDirNameProblem(newName) ??
+      (listing.entries.some((e) => e.name.toLowerCase() === newName.trim().toLowerCase()) ? `「${newName.trim()}」已經存在，換一個名稱，或直接選那個資料夾` : null)
+    if (problem) {
+      setCreateError(problem)
+      return
+    }
+    setCreateBusy(true)
+    setCreateError(null)
+    createDir(listing.path, newName.trim(), host)
+      .then((made) => {
+        // 建好就是要它：直接當 Project 路徑，不再多走一步。
+        onPick(made.path)
+      })
+      .catch((e: unknown) => {
+        // 409 的訊息在 body.message（`ApiError.message` 優先講 reason，那是機器碼）。
+        setCreateError(e instanceof ApiError && typeof e.body.message === 'string' ? e.body.message : e instanceof Error ? e.message : String(e))
+      })
+      .finally(() => setCreateBusy(false))
+  }
 
   const entries = useMemo(() => {
     const q = filter.trim().toLowerCase()
@@ -118,6 +158,14 @@ export function DirPicker({
 
   const onKeyDown = (e: ReactKeyboardEvent) => {
     if (busy) return
+    if (creating) {
+      // 名稱輸入框自己管鍵盤；只有 Esc 退回清單。
+      if (e.key === 'Escape') {
+        e.preventDefault()
+        closeCreate()
+      }
+      return
+    }
     if (editing) {
       // The path field owns its own keys; only Esc escapes back to the crumb bar.
       if (e.key === 'Escape') {
@@ -258,6 +306,16 @@ export function DirPicker({
             setSel(e.target.value ? 0 : -1)
           }}
         />
+        <button
+          type="button"
+          className="btn dirpicker-newbtn"
+          aria-expanded={creating}
+          title="在這一層建一個新資料夾，建好直接選取"
+          disabled={!listing || busy || creating}
+          onClick={() => setCreating(true)}
+        >
+          ＋ 新資料夾
+        </button>
         <label className="dirpicker-hidden" title="也列出 .開頭 的資料夾">
           <input
             type="checkbox"
@@ -271,6 +329,52 @@ export function DirPicker({
           <span>隱藏資料夾</span>
         </label>
       </div>
+
+      {creating ? (
+        <form
+          className="dirpicker-new"
+          aria-label="新資料夾"
+          onSubmit={(e) => {
+            e.preventDefault()
+            submitCreate()
+          }}
+        >
+          <div className="dirpicker-new-row">
+            <input
+              ref={newNameRef}
+              type="text"
+              value={newName}
+              spellCheck={false}
+              disabled={createBusy}
+              placeholder="新資料夾名稱"
+              aria-label="新資料夾名稱"
+              aria-invalid={createError ? true : undefined}
+              onChange={(e) => {
+                setNewName(e.target.value)
+                setCreateError(null)
+              }}
+              onKeyDown={(e) => {
+                // 輸入法選字的 Enter 不是送出。
+                if (e.key === 'Enter' && isImeEnter(e.nativeEvent)) e.preventDefault()
+              }}
+            />
+            <button type="submit" className="btn primary" disabled={createBusy || !newName.trim()}>
+              {createBusy ? '建立中…' : '建立並選取'}
+            </button>
+            <button type="button" className="btn" disabled={createBusy} onClick={closeCreate}>
+              取消
+            </button>
+          </div>
+          <div className="dirpicker-new-hint" title={listing?.path}>
+            建在 {listing?.path}
+          </div>
+          {createError ? (
+            <div className="dirpicker-empty err" role="alert">
+              {createError}
+            </div>
+          ) : null}
+        </form>
+      ) : null}
 
       {/* option 裡不能有按鈕，› 只是滑鼠捷徑；沒有資料夾時不掛 listbox。 */}
       <div className="dirpicker-list" ref={listRef} id={listId} role={entries.length > 0 ? 'listbox' : undefined} aria-label="子資料夾">

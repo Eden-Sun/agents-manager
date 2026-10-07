@@ -177,6 +177,16 @@ pub(crate) fn create_dir_entry_in(dir: &File, name: &OsStr, mode: u32) -> io::Re
     open_dir_entry_in(dir, name)
 }
 
+/// 在 `dir` 底下新建一個**還不存在**的子目錄（`mkdirat`，不 `-p`、不跟 symlink）。已存在（含同名檔案、指向別處的 symlink）回
+/// `AlreadyExists`，不像 [`create_dir_entry_in`] 會把既有的當成功開起來——使用者要的是「新資料夾」，不是「進去那個」。
+pub(crate) fn make_new_dir_in(dir: &File, name: &OsStr, mode: u32) -> io::Result<File> {
+    let c = entry_cstr(name)?;
+    if unsafe { libc::mkdirat(dir.as_raw_fd(), c.as_ptr(), mode as libc::mode_t) } != 0 {
+        return Err(io::Error::last_os_error());
+    }
+    open_dir_entry_in(dir, name)
+}
+
 pub(crate) fn remove_tree_in(dir: &File, name: &OsStr) -> io::Result<()> {
     let c = entry_cstr(name)?;
     let mut st: libc::stat = unsafe { std::mem::zeroed() };

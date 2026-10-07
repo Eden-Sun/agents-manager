@@ -978,6 +978,7 @@ export class MockTransport implements Transport {
         return { ok: true, pane_id: pane }
       } }
     if (method === 'POST' && rawPath === '/order') return this.saveOrder(b)
+    if (method === 'POST' && rawPath === '/fs/dirs') return this.makeDir(b)
     if (method === 'GET' && rawPath === '/fs/dirs') {
       return this.dirs(q.get('path') ?? '', q.get('host') ?? '', q.get('hidden') === '1')
     }
@@ -1401,6 +1402,30 @@ export class MockTransport implements Transport {
     }
   }
 
+  /** 「新資料夾」建出來的（key＝上層路徑）；`dirs()` 的固定樹之外的部分。 */
+  private madeDirs = new Map<string, string[]>()
+
+  /** `POST /api/fs/dirs`（issue #877）：規則與 daemon 一致——單一一段名字、同名 409、憑證目錄 403。 */
+  private makeDir(b: Record<string, unknown>) {
+    const host = String(b.host ?? '')
+    const name = String(b.name ?? '').trim()
+    // eslint-disable-next-line no-control-regex
+    if (!name || name === '.' || name === '..' || name.includes('/') || /[\u0000-\u001f\u007f]/.test(name)) {
+      throw new ApiError(400, { error: 'bad_request', message: `folder name is not a single plain name: ${JSON.stringify(name)}` }, 'bad request')
+    }
+    const listing = this.dirs(String(b.parent ?? ''), host, true)
+    const parent = listing.path
+    if (/\/\.(ssh|gnupg|aws|kube|codex|grok|claude(-[^/]*)?)(\/|$)/.test(`${parent === '/' ? '' : parent}/${name}`)) {
+      throw new ApiError(403, { error: 'forbidden', reason: 'directory_not_browsable' }, 'forbidden')
+    }
+    if (listing.entries.some((e) => e.name === name)) {
+      throw new ApiError(409, { error: 'conflict', reason: 'already_exists', name, parent, message: `\`${name}\` already exists in ${parent}; pick another name or choose that folder` }, 'conflict')
+    }
+    this.madeDirs.set(parent, [...(this.madeDirs.get(parent) ?? []), name])
+    const path = parent === '/' ? `/${name}` : `${parent}/${name}`
+    return { path, name, parent }
+  }
+
   /** SPEC §11.5. */
   private dirs(path: string, host: string, hidden = false) {
     const remote = host && host !== 'local' ? this.host(host) : null
@@ -1435,8 +1460,8 @@ export class MockTransport implements Transport {
     const gitDirs = remote
       ? new Set([`${home}/work/api-server`, `${home}/work/web-client`, `${home}/src/herdr`])
       : new Set(['/Users/me/project/foo', '/Users/me/project/agents-manager'])
-    const cur = path && (path in tree || path.startsWith(`${home}/`)) ? path : home
-    const kids = (tree[cur] ?? []).filter((n) => hidden || !n.startsWith('.'))
+    const cur = path && (path in tree || this.madeDirs.has(path) || path.startsWith(`${home}/`)) ? path : home
+    const kids = [...(tree[cur] ?? []), ...(this.madeDirs.get(cur) ?? [])].filter((n) => hidden || !n.startsWith('.'))
     const parent = cur === '/' ? null : cur.slice(0, cur.lastIndexOf('/')) || '/'
     return {
       path: cur,

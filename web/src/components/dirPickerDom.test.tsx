@@ -3,8 +3,10 @@
  * Esc 不管焦點在哪都是離開（輸入過濾字時先清過濾）、Enter／⌘Enter 在清單上是「進入」／「直接選」。
  */
 import test, { after, afterEach, before } from 'node:test'
+import { act } from 'react'
 import assert from 'node:assert/strict'
-import { click, fakeApi, keydown, mount, settle, setupDom, teardownDom, unmountAll } from '../testing/domHarness'
+import { click, fakeApi, keydown, mockApi, mount, settle, setupDom, teardownDom, typeInto, unmountAll } from '../testing/domHarness'
+import { ApiError } from '../api/types'
 import { DirPicker } from './DirPicker'
 
 afterEach(unmountAll)
@@ -79,4 +81,90 @@ test('沒被截斷就不顯示那句', async () => {
   await mount(<DirPicker initial="/home/u" onPick={() => {}} onCancel={() => {}} />)
   await settle()
   assert.doesNotMatch(document.querySelector('[role=dialog]')!.textContent ?? '', /只列出前/)
+})
+
+// ───────── 新資料夾（issue #877） ─────────
+
+async function openNew(host?: string, route?: (req: { method: string; path: string; body: unknown }) => unknown) {
+  const requests = fakeApi((req) => {
+    if (req.method === 'POST' && req.path.endsWith('/fs/dirs')) return route?.(req) ?? { path: `${(req.body as { parent: string }).parent}/${(req.body as { name: string }).name}`, name: (req.body as { name: string }).name, parent: (req.body as { parent: string }).parent }
+    return req.path.includes('/fs/dirs') ? listing('/home/u') : undefined
+  })
+  const picked: string[] = []
+  let cancelled = 0
+  await mount(<DirPicker initial="/home/u" host={host} onPick={(p) => picked.push(p)} onCancel={() => cancelled++} />)
+  await settle()
+  const dialog = document.querySelector<HTMLElement>('[role=dialog]')!
+  const button = (label: string) => [...dialog.querySelectorAll('button')].find((b) => b.textContent?.includes(label))!
+  await click(button('新資料夾'))
+  const input = dialog.querySelector<HTMLInputElement>('input[aria-label="新資料夾名稱"]')!
+  const submit = async () => {
+    await act(async () => dialog.querySelector('form[aria-label="新資料夾"]')!.dispatchEvent(new Event('submit', { bubbles: true, cancelable: true })))
+    await settle()
+  }
+  return { requests, picked, cancelled: () => cancelled, dialog, button, input, submit }
+}
+
+test('新資料夾：在目前這一層建好就直接選取成 Project 路徑（本機請求不帶 host）', async () => {
+  const d = await openNew()
+  assert.match(d.dialog.textContent ?? '', /建在 \/home\/u/)
+  await typeInto(d.input, '  my-new  ')
+  await d.submit()
+  const post = d.requests.find((r) => r.method === 'POST')!
+  assert.deepEqual(post.body, { parent: '/home/u', name: 'my-new' })
+  assert.deepEqual(d.picked, ['/home/u/my-new'], '建好直接選取，不是只回到清單')
+})
+
+test('新資料夾：遠端主機要帶 host', async () => {
+  const d = await openNew('m4p')
+  await typeInto(d.input, 'remote-proj')
+  await d.submit()
+  const post = d.requests.find((r) => r.method === 'POST')!
+  assert.deepEqual(post.body, { parent: '/home/u', name: 'remote-proj', host: 'm4p' })
+  assert.deepEqual(d.picked, ['/home/u/remote-proj'])
+})
+
+test('新資料夾：這一層已經有同名的、或名字不合法：當場提示，不送請求、不選取', async () => {
+  const d = await openNew()
+  for (const [name, hint] of [['alpha', /已經存在/], ['BETA', /已經存在/], ['a/b', /一次只建一層/], ['..', /不能是/], ['   ', /請輸入/]] as const) {
+    await typeInto(d.input, name)
+    await d.submit()
+    assert.match(d.dialog.querySelector('[role=alert]')?.textContent ?? '', hint, name)
+  }
+  assert.equal(d.requests.filter((r) => r.method === 'POST').length, 0)
+  assert.deepEqual(d.picked, [])
+})
+
+test('新資料夾：daemon 回 409 已存在，畫面顯示 daemon 的說明（不是機器碼），仍停在表單', async () => {
+  mockApi({
+    async request(method, path, body) {
+      if (method === 'POST' && path === '/fs/dirs') {
+        throw new ApiError(409, { error: 'conflict', reason: 'already_exists', message: '`taken` already exists in /home/u; pick another name or choose that folder' }, 'conflict')
+      }
+      return { path: '/home/u', parent: '/home', home: '/home/u', entries: [], truncated: false, body }
+    },
+    async upload() {
+      return {}
+    },
+  })
+  const picked: string[] = []
+  await mount(<DirPicker initial="/home/u" onPick={(p) => picked.push(p)} onCancel={() => {}} />)
+  await settle()
+  const dialog = document.querySelector<HTMLElement>('[role=dialog]')!
+  await click([...dialog.querySelectorAll('button')].find((b) => b.textContent?.includes('新資料夾'))!)
+  await typeInto(dialog.querySelector<HTMLInputElement>('input[aria-label="新資料夾名稱"]')!, 'taken')
+  await act(async () => dialog.querySelector('form[aria-label="新資料夾"]')!.dispatchEvent(new Event('submit', { bubbles: true, cancelable: true })))
+  await settle()
+  assert.match(dialog.querySelector('[role=alert]')?.textContent ?? '', /already exists in \/home\/u/)
+  assert.deepEqual(picked, [])
+  assert.ok(dialog.querySelector('form[aria-label="新資料夾"]'), '還在表單裡，可以改名再試')
+})
+
+test('新資料夾：Esc 先收起表單、不是離開整個對話框；再按一次 Esc 才離開', async () => {
+  const d = await openNew()
+  await keydown(d.input, 'Escape')
+  assert.equal(d.dialog.querySelector('form[aria-label="新資料夾"]'), null)
+  assert.equal(d.cancelled(), 0)
+  await keydown(d.dialog, 'Escape')
+  assert.equal(d.cancelled(), 1)
 })

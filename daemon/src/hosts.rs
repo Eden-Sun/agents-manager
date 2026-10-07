@@ -1277,6 +1277,72 @@ pub async fn remote_list_dirs(conn: &HostConn, path: Option<&str>, hidden: bool)
     parse_dir_listing(&out, hidden)
 }
 
+/// 遠端「新資料夾」的結果。
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) enum MakeDirOutcome {
+    /// 建好了，`pwd -P` 解開後的完整路徑。
+    Created(String),
+    /// 同名的東西（資料夾、檔案、符號連結）已經在那裡：什麼都沒動。
+    Exists,
+}
+
+/// 在 `parent` 底下新建 `name`（單一一段、已過 `bot_input::check_new_dir_name`）的 sh。規則跟 [`dir_list_script`] 同一份：
+/// `parent` 解開後在憑證／設定目錄底下、或新路徑本身就是那些目錄 → `forbidden directory`；路徑含控制字元 → 錯。
+/// `mkdir`（不 `-p`）自己判斷「已經有了」：先 `-e/-L` 看一眼只是為了給乾淨的 `AM_EXISTS`，真正擋重複的是 `mkdir` 失敗後的再看一次。
+pub(crate) fn make_dir_script(parent: &str, name: &str) -> String {
+    let target = match parent.trim() {
+        "" | "~" => "\"$HOME\"".to_string(),
+        // Tail is user input: must be quoted; only `"$HOME"` stays outside.
+        p if p.starts_with("~/") => format!("\"$HOME\"/{}", sh_quote(&p[2..])),
+        p => sh_quote(p),
+    };
+    let name = sh_quote(name);
+    format!(
+        r#"cd -- {target} 2>/dev/null || {{ printf 'AM_ERR=no such directory\n'; exit 0; }}
+P=$(pwd -P)
+case "$P" in *[[:cntrl:]]*) printf 'AM_ERR=directory name has control characters\n'; exit 0;; esac
+H=$(cd -- "$HOME" 2>/dev/null && pwd -P || printf '%s' "$HOME")
+for S in "$H"/.ssh "$H"/.gnupg "$H"/.aws "$H"/.kube "$H"/.config/agents-manager "$H"/.claude "$H"/.claude-* "$H"/.codex "$H"/.grok; do
+  [ -d "$S" ] || continue
+  R=$(cd -- "$S" 2>/dev/null && pwd -P) || continue
+  case "$P" in "$R"|"$R"/*) printf 'AM_ERR=forbidden directory\n'; exit 0;; esac
+done
+if [ "$P" = / ]; then N=/{name}; else N="$P"/{name}; fi
+case "$N" in "$H"/.ssh|"$H"/.gnupg|"$H"/.aws|"$H"/.kube|"$H"/.config/agents-manager|"$H"/.claude|"$H"/.claude-*|"$H"/.codex|"$H"/.grok) printf 'AM_ERR=forbidden directory\n'; exit 0;; esac
+if [ -e {name} ] || [ -L {name} ]; then printf 'AM_EXISTS=1\n'; exit 0; fi
+if ! mkdir -- {name} 2>/dev/null; then
+  if [ -e {name} ] || [ -L {name} ]; then printf 'AM_EXISTS=1\n'; else printf 'AM_ERR=cannot create directory (permission denied or read-only)\n'; fi
+  exit 0
+fi
+printf 'AM_PATH=%s\n' "$(cd -- {name} && pwd -P)"
+"#
+    )
+}
+
+/// [`make_dir_script`] 的輸出。
+pub(crate) fn parse_make_dir(out: &str) -> Result<MakeDirOutcome> {
+    let mut path: Option<String> = None;
+    for line in out.lines() {
+        if line == "AM_EXISTS=1" {
+            return Ok(MakeDirOutcome::Exists);
+        } else if let Some(e) = line.strip_prefix("AM_ERR=") {
+            bail!("{}", e.trim());
+        } else if let Some(v) = line.strip_prefix("AM_PATH=") {
+            path = Some(v.trim_end().to_string());
+        }
+    }
+    match path.filter(|p| !p.is_empty()) {
+        Some(p) => Ok(MakeDirOutcome::Created(p)),
+        None => bail!("remote mkdir produced no path:\n{}", out.trim()),
+    }
+}
+
+/// `POST /api/fs/dirs` 的遠端那一半（§11.5）。
+pub(crate) async fn remote_make_dir(conn: &HostConn, parent: &str, name: &str) -> Result<MakeDirOutcome> {
+    let out = conn.ssh_exec(&make_dir_script(parent, name)).await?;
+    parse_make_dir(&out)
+}
+
 pub async fn remote_canonical_dir(conn: &HostConn, path: &str) -> Result<String> {
     let target = if path == "~" {
         "\"$HOME\"".to_string()

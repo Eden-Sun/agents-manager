@@ -87,6 +87,7 @@ fn rules() -> Vec<Rule> {
         principal_allow_rule("POST", "/api/services/daemon-swap/restart-window", "This operation is allowed only to the daemon-swap Service principal; a Bot credential must be rejected."),
         rule("GET", "/api/missions/{id}/pick", Expect::Forbidden, None),
         rule("GET", "/api/fs/dirs", Expect::Forbidden, None),
+        rule("POST", "/api/fs/dirs", Expect::UserOnly, None),
         rule("GET", "/api/supervisor/persona", Expect::RoleRequired, None),
         deny_rule("PUT", "/api/supervisor/persona", Expect::RoleRequired, "Persona is supervisory configuration; only User or a registered AGM role may change it."),
         rule("GET", "/api/judge/shadow", Expect::UserOnly, None),

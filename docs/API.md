@@ -279,6 +279,7 @@ A 組與 `git/push` 標「待裁示」的原因：這幾支唯一的呼叫端是
 | POST | `/api/deploy/wait/escalate` | User-only；一般 Bot 與 AGM role Bot 均 → 403 `user_only` |
 | POST | `/api/deploy/wait/dismiss` | User-only；一般 Bot 與 AGM role Bot 均 → 403 `user_only` |
 | POST | `/api/hosts` | User-only；一般 Bot → 403 `user_only`；已登記 AGM 角色略過共用 fence，仍受既有路由／資源權限限制 |
+| POST | `/api/fs/dirs` | User-only；Bot 與 AGM role 均 → 403 `user_only`；Service 依明列 path scope（本路徑未授權）；在上層目錄新建單一資料夾，不能借名字跳出上層，也不能在憑證／設定目錄底下建 |
 | POST | `/api/hosts/{name}/cli-update` | User-only；Bot → 403 `ui_only` |
 | POST | `/api/hosts/{name}/gh/cancel` | User-only；一般 Bot → 403 `user_only`；已登記 AGM 角色略過共用 fence，仍受既有路由／資源權限限制 |
 | POST | `/api/hosts/{name}/gh/login` | User-only；一般 Bot → 403 `user_only`；已登記 AGM 角色略過共用 fence，仍受既有路由／資源權限限制 |
@@ -928,7 +929,7 @@ UI 標籤：`hook` 不標；`terminal_fallback` 或 `incomplete = 1` 標「終�
 4. 選 bot 時 `GET /api/bots/{id}/messages?limit=100`。
 5. `POST /api/bots/{id}/prompt`（自帶 `client_request_id`）；user 氣泡經 `message_added` 推回，用 `message.id` 去重，不做本地暫存氣泡。
 
-## 目錄瀏覽 `GET /api/fs/dirs?host=&path=&hidden=`
+## 目錄瀏覽 `GET /api/fs/dirs?host=&path=&hidden=`、新資料夾 `POST /api/fs/dirs`
 
 新增 Project 的目錄選擇器。`path` 空白為家目錄，支援 `~`；只列子目錄（含指向目錄的 symlink）。`.` 開頭預設略過，`hidden=1|true|yes` 才列。`host` 省略 = 本機，遠端見 SPEC §11.5。
 
@@ -942,6 +943,22 @@ UI 標籤：`hook` 不標；`terminal_fallback` 或 `incomplete = 1` 標「終�
 - **憑證與設定目錄不給進**：`~/.ssh`、`~/.gnupg`、`~/.aws`、`~/.kube`、`~/.config/agents-manager`、daemon 的資料目錄、`~/.claude`／`~/.claude-*`／`~/.codex`／`~/.grok`（含底下所有層）→ `403 {"reason":"directory_not_browsable"}`（遠端同一份規則，回 502 帶 `forbidden directory`）。
 - **名字含控制字元（換行、tab、CR…）的目錄不列**，目前路徑含控制字元回錯誤：遠端的 sh 輸出靠 `AM_*` 行解析，一個叫 `a\nAM_PATH=/etc` 的目錄就能偽造「目前路徑」。
 - **最多列 2000 個子目錄**，超過 `truncated:true`（本機與遠端同一個上限；上限內依名字不分大小寫排序）。
+
+### 新資料夾 `POST /api/fs/dirs`（issue #877）
+
+目錄選擇器的「新資料夾」：在目前瀏覽的上層目錄底下建一個資料夾，UI 建好後直接把回傳的 `path` 當成 Project 路徑。本機與遠端主機（`host`，ssh）同一份規則。
+
+```json
+{"host":"m4p","parent":"/Users/me/work","name":"new-proj"}
+→ 200 {"path":"/Users/me/work/new-proj","name":"new-proj","parent":"/Users/me/work"}
+```
+
+- `host` 省略＝本機；`parent` 省略＝家目錄，支援 `~`、`~/x`（本機先 canonicalize，沿路不跟 symlink 開；遠端 `cd … && pwd -P`）。上層不存在或不是目錄 → 400。
+- **名字是單一一段**（`bot_input::check_new_dir_name`）：去頭尾空白後不能是空的、`.`、`..`，不能含 `/`（不能借名字跳出上層，也不能一次建好幾層）、NUL、控制字元（遠端 sh 輸出靠 `AM_*` 行解析，換行會偽造）、不可見的方向控制字元，最長 255 位元組 → 400。以 `.` 或 `-` 開頭的名字可以（不特別處理）。
+- **已經有同名的東西**（資料夾、檔案、符號連結）→ `409 {"error":"conflict","reason":"already_exists","name","parent","message"}`，什麼都不動、也不會「進去那個」。
+- **只有 User principal**：Bot、AGM role 與 service token 一律 `403 {"reason":"user_only"}`。
+- **跟 `GET` 同一份不給進的規則**：上層或新路徑落在 `~/.ssh`、`~/.gnupg`、`~/.aws`、`~/.kube`、`~/.config/agents-manager`、daemon 資料目錄、`~/.claude`／`~/.claude-*`／`~/.codex`／`~/.grok` 底下（含「在家目錄建 `.ssh`」）→ 本機 `403 directory_not_browsable`，遠端 502 帶 `forbidden directory`。
+- 遠端建不出來（沒有權限、唯讀）→ 502 帶原因；本機建不出來 → 400 帶系統錯誤。
 
 ### `GET /api/search/messages?q=<文字>&limit=200`
 側欄搜尋用的**命中計數**：回 `{q, bots:[{bot_id, bot_deleted, hits, snippet}]}`——每顆 bot 幾則命中，外加最新那一則的片段
