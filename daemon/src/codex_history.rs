@@ -25,7 +25,6 @@ use serde_json::{json, Value};
 
 use crate::config::LOCAL_HOST;
 use crate::db;
-use crate::state::App;
 
 /// 一頁最多拿幾筆、最多翻幾頁（基準之後的新東西一定很少；翻不到基準就當證不出來）。
 const PAGE_LIMIT: u32 = 50;
@@ -103,7 +102,16 @@ pub trait HistoryConn: Send {
 pub trait HistorySource: Send + Sync {
     /// 這台主機讀得到嗎（真的 source 只認本機）。
     fn supports(&self, host: &str) -> bool;
-    fn open<'a>(&'a self, app: &'a Arc<App>, binding: &'a Binding) -> BoxFuture<'a, Result<Box<dyn HistoryConn>, HistoryError>>;
+    fn open<'a>(&'a self, binding: &'a Binding, program: &'a str) -> BoxFuture<'a, Result<Box<dyn HistoryConn>, HistoryError>>;
+}
+
+/// Structured-history inputs supplied by the daemon composition adapter.
+pub trait CodexHistoryHost: Send + Sync {
+    fn enabled(&self) -> impl std::future::Future<Output = bool> + Send + '_;
+    fn source(&self) -> Option<Arc<dyn HistorySource>>;
+    fn bot_host<'a>(&'a self, bot_id: &'a str) -> impl std::future::Future<Output = Option<String>> + Send + 'a;
+    fn codex_home<'a>(&'a self, bot: &'a db::Bot) -> impl std::future::Future<Output = Option<PathBuf>> + Send + 'a;
+    fn codex_program(&self) -> impl std::future::Future<Output = String> + Send + '_;
 }
 
 /// `App` 上可換的 source，同 `kind_probe::KindProbeHook`。測試 build 預設是關的。
@@ -286,20 +294,20 @@ async fn items_since(conn: &mut dyn HistoryConn, after: Option<&str>) -> Result<
 
 /// 這顆 bot 現在能不能用結構化歷史：開著、是 codex、有 session、source 支援這台主機。
 /// 回 `(source, binding)`；任何一項不成立＝`None`（照舊走 rollout／畫面）。
-pub async fn eligible(app: &Arc<impl crate::capabilities::Cfg + crate::capabilities::Db + crate::codex_history::CodexHistoryState + crate::tools::ToolsEnv + 'static>, bot: &db::Bot, run: &db::Run) -> Option<(Arc<dyn HistorySource>, Binding)> {
-    if bot.kind != "codex" || !app.cfg().get().await.codex_history.enabled {
+pub async fn eligible(host_env: &impl CodexHistoryHost, bot: &db::Bot, run: &db::Run) -> Option<(Arc<dyn HistorySource>, Binding)> {
+    if bot.kind != "codex" || !host_env.enabled().await {
         return None;
     }
-    let source = app.codex_history().get()?;
+    let source = host_env.source()?;
     let thread_id = run.native_session_id.as_deref().map(str::trim).filter(|s| !s.is_empty())?;
     if !thread_id.chars().all(|c| c.is_ascii_alphanumeric() || c == '-') {
         return None;
     }
-    let host = db::bot_host(app.db(), &bot.id).await.ok()?;
+    let host = host_env.bot_host(&bot.id).await?;
     if !source.supports(&host) {
         return None;
     }
-    let codex_home = if host == LOCAL_HOST { crate::app_ports_p13::codex_home(app, bot).await } else { None };
+    let codex_home = if host == LOCAL_HOST { host_env.codex_home(bot).await } else { None };
     Some((source, Binding { host, codex_home, thread_id: thread_id.to_string() }))
 }
 
@@ -307,9 +315,10 @@ pub async fn eligible(app: &Arc<impl crate::capabilities::Cfg + crate::capabilit
 ///
 /// thread 看起來是空的也是 `None`：空歷史跟「投影停住、什麼都沒回」分不出來，而停住的投影之後恢復會一次吐出整份舊歷史，
 /// 裡面若有一模一樣的舊 prompt 就會被當成這一次的證據。沒有真的基準 item，就不給 positive evidence。
-pub async fn mark(app: &Arc<App>, bot: &db::Bot, run: &db::Run) -> Option<Mark> {
-    let (source, binding) = eligible(app, bot, run).await?;
-    let mut conn = match source.open(app, &binding).await {
+pub async fn mark(host_env: &impl CodexHistoryHost, bot: &db::Bot, run: &db::Run) -> Option<Mark> {
+    let (source, binding) = eligible(host_env, bot, run).await?;
+    let program = host_env.codex_program().await;
+    let mut conn = match source.open(&binding, &program).await {
         Ok(c) => c,
         Err(e) => {
             note_miss("mark", &e.to_string());
@@ -330,10 +339,11 @@ pub async fn mark(app: &Arc<App>, bot: &db::Bot, run: &db::Run) -> Option<Mark> 
 }
 
 /// 基準之後，歷史裡有沒有出現這則 prompt（positive proof）。連線在 `conn` 裡重用；任何錯誤＝`false`。
-pub async fn prompt_landed(app: &Arc<App>, mark: &Mark, conn: &mut Option<Box<dyn HistoryConn>>, text: &str) -> bool {
-    let Some(source) = app.codex_history.get() else { return false };
+pub async fn prompt_landed(host_env: &impl CodexHistoryHost, mark: &Mark, conn: &mut Option<Box<dyn HistoryConn>>, text: &str) -> bool {
+    let Some(source) = host_env.source() else { return false };
     if conn.is_none() {
-        match source.open(app, &mark.binding).await {
+        let program = host_env.codex_program().await;
+        match source.open(&mark.binding, &program).await {
             Ok(c) => *conn = Some(c),
             Err(e) => {
                 note_miss("delivery", &e.to_string());
@@ -394,10 +404,11 @@ async fn read_back_to(conn: &mut dyn HistoryConn, sent: &[String]) -> Result<Vec
 }
 
 /// 補回覆：我們送的那則（`sent`）在 thread 歷史裡的最終回覆。沒有證據＝`None`（呼叫端讀 rollout）。
-pub async fn exact_reply(app: &Arc<App>, bot: &db::Bot, run: &db::Run, sent: &[String]) -> Option<String> {
-    let (source, binding) = eligible(app, bot, run).await?;
+pub async fn exact_reply(host_env: &impl CodexHistoryHost, bot: &db::Bot, run: &db::Run, sent: &[String]) -> Option<String> {
+    let (source, binding) = eligible(host_env, bot, run).await?;
     let result = async {
-        let mut conn = source.open(app, &binding).await?;
+        let program = host_env.codex_program().await;
+        let mut conn = source.open(&binding, &program).await?;
         let items = read_back_to(conn.as_mut(), sent).await?;
         Ok::<_, HistoryError>(reply_after(&items, sent))
     }
@@ -420,10 +431,11 @@ pub async fn exact_reply(app: &Arc<App>, bot: &db::Bot, run: &db::Run, sent: &[S
 
 /// 我們那則 prompt 的那個 turn 是不是被使用者中斷了（`turn.status = interrupted`）。
 /// 只回 positive：`true`＝歷史明說中斷；其他（沒找到、仍在跑、讀不到）都是 `false`＝沒有證據。
-pub async fn interrupted_after(app: &Arc<App>, bot: &db::Bot, run: &db::Run, sent: &[String]) -> bool {
-    let Some((source, binding)) = eligible(app, bot, run).await else { return false };
+pub async fn interrupted_after(host_env: &impl CodexHistoryHost, bot: &db::Bot, run: &db::Run, sent: &[String]) -> bool {
+    let Some((source, binding)) = eligible(host_env, bot, run).await else { return false };
     let result = async {
-        let mut conn = source.open(app, &binding).await?;
+        let program = host_env.codex_program().await;
+        let mut conn = source.open(&binding, &program).await?;
         let items = read_back_to(conn.as_mut(), sent).await?;
         let Some(ours) = items.iter().find(|i| sent.iter().any(|s| is_user_text(i, s))) else { return Ok(false) };
         let mut cursor: Option<String> = None;
@@ -466,10 +478,9 @@ impl HistorySource for AppServerSource {
         host == LOCAL_HOST
     }
 
-    fn open<'a>(&'a self, app: &'a Arc<App>, binding: &'a Binding) -> BoxFuture<'a, Result<Box<dyn HistoryConn>, HistoryError>> {
+    fn open<'a>(&'a self, binding: &'a Binding, program: &'a str) -> BoxFuture<'a, Result<Box<dyn HistoryConn>, HistoryError>> {
         Box::pin(async move {
-            let program = crate::tools::cached_path(app, LOCAL_HOST, "codex").await.unwrap_or_else(|| "codex".to_string());
-            let conn = tokio::time::timeout(CALL_TIMEOUT, AppServerConn::start(&program, binding))
+            let conn = tokio::time::timeout(CALL_TIMEOUT, AppServerConn::start(program, binding))
                 .await
                 .map_err(|_| HistoryError::Rpc("app-server start timed out".into()))??;
             Ok(Box::new(conn) as Box<dyn HistoryConn>)
@@ -671,7 +682,7 @@ impl HistorySource for Arc<StubSource> {
     fn supports(&self, host: &str) -> bool {
         host == LOCAL_HOST || self.inner.lock().unwrap().remote_ok
     }
-    fn open<'a>(&'a self, _app: &'a Arc<App>, binding: &'a Binding) -> BoxFuture<'a, Result<Box<dyn HistoryConn>, HistoryError>> {
+    fn open<'a>(&'a self, binding: &'a Binding, _program: &'a str) -> BoxFuture<'a, Result<Box<dyn HistoryConn>, HistoryError>> {
         Box::pin(async move {
             let n = self.opens.fetch_add(1, Ordering::Relaxed) + 1;
             if self.inner.lock().unwrap().fail {

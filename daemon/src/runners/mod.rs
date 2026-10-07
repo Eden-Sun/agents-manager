@@ -16,6 +16,7 @@ pub(crate) mod claude_child_log;
 pub mod child_done;
 pub mod child_retire;
 pub mod codex_live;
+pub mod codex_history;
 pub mod codex_model_migration;
 pub mod credential_spawn;
 pub mod dangerous_rm;
