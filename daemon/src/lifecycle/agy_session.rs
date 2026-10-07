@@ -10,7 +10,7 @@
 
 use super::*;
 use super::start::ports::{bot_status};
-use super::app_ports_p4::{AppEventSink};
+use crate::app_ports_p4::{AppEventSink};
 use std::path::Path;
 
 const MAX_READ_BYTES: u64 = 8 * 1024 * 1024;

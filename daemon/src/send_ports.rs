@@ -27,7 +27,7 @@ use serde_json::Value;
 pub(crate) trait MaintenancePort {
     /// 讀不到窗口時呼叫端的重試間隔（秒）：`supervisor::maintenance::UNREADABLE_RETRY_SECS`。
     const UNREADABLE_RETRY_SECS: i64;
-    async fn window_held(&self) -> std::result::Result<Option<WindowHeld>, WindowUnreadable>;
+    fn window_held(&self) -> impl std::future::Future<Output = std::result::Result<Option<WindowHeld>, WindowUnreadable>> + Send;
 }
 
 /// 閒置休眠的叫醒（原 `supervisor::idle_sleep`）。
@@ -75,7 +75,12 @@ pub(crate) trait AttachConnPort {
 
 /// pane 的 watch（原 `events::unwatch_pane_on_session`）。
 pub(crate) trait PaneWatchPort {
-    async fn unwatch_pane_on_session(&self, host: &str, session: &str, pane_id: &str);
+    fn unwatch_pane_on_session(
+        &self,
+        host: &str,
+        session: &str,
+        pane_id: &str,
+    ) -> impl std::future::Future<Output = ()> + Send;
 }
 
 /// codex 的選單／歷史（原 `codex_live`、`codex_update`、`codex_model_migration`、`codex_history`）。

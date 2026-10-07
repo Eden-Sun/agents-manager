@@ -14,9 +14,6 @@ use super::*;
 /// am-turn-send（P4send）對其他 feature 的窄介面與 `App` 端實作（crate 拆分第 3 步）；檔案在 `daemon/src/`，不碰 `lifecycle/mod.rs`。
 #[path = "../send_ports.rs"]
 pub(crate) mod ports;
-#[path = "../app_ports_p4send.rs"]
-pub(crate) mod app_ports_p4send;
-
 /// 有 send-now 鍵的最低 claude 版本。低於它的 run 照舊排隊／409。
 pub(crate) const MIN_VERSION: &str = "2.1.275";
 
@@ -139,7 +136,7 @@ pub(crate) enum Outcome {
 /// 空檔跟一般送出一樣短。
 #[allow(clippy::too_many_arguments)]
 pub(crate) async fn deliver(
-    app: &Arc<App>,
+    app: &impl super::s6_ports::SendNowContext,
     client: &super::RunClient,
     run: &db::Run,
     bot: &db::Bot,
@@ -149,11 +146,11 @@ pub(crate) async fn deliver(
     new_turn: &str,
 ) -> Outcome {
     use super::interruption::{key_fate, KeyFate};
-    let ready = match prepare_delivery(app, client, run, bot, text, plan).await {
+    let ready = match app.prepare_delivery(client, run, bot, text, plan).await {
         Ok(r) => r,
         Err(not) => return Outcome::NotAttempted(not),
     };
-    let typed = match type_text(app, client, run, bot, text, ready).await {
+    let typed = match app.type_delivery_text(client, run, bot, text, ready).await {
         Ok(Typing::Ready(t)) => t,
         Ok(Typing::Done(not @ Delivered::NotAttempted { .. })) => return Outcome::NotAttempted(not),
         // 證據在按送出鍵之前就長出來了：不是我們按的鍵送的，舊回合怎樣了不知道。
@@ -178,7 +175,7 @@ pub(crate) async fn deliver(
         match fate {
             KeyFate::Applied => break None,
             KeyFate::NotApplied => return Outcome::NotSent("herdr_refused_key"),
-            KeyFate::Unknown => match submit_landed(app, client, run, bot, text, &typed).await {
+            KeyFate::Unknown => match app.send_now_landed(client, run, bot, text, &typed).await {
                 Landed::Yes(d) => break Some(d),
                 Landed::No if presses < 2 => {
                     tracing::warn!(bot = %bot.name, "插隊送出：送出鍵沒有回、字還在框裡——鍵沒生效，再按一次");
@@ -194,7 +191,7 @@ pub(crate) async fn deliver(
     let committed = super::interruption::send_now_interrupted(app, &bot.id, &run.id, &interrupted.id, new_turn).await;
     let delivered = match proven {
         Some(d) => Ok(d),
-        None => confirm_submitted(app, client, run, bot, text, &typed).await,
+        None => app.confirm_send_now(client, run, bot, text, &typed).await,
     };
     match committed {
         Ok(()) => Outcome::Interrupted(delivered),

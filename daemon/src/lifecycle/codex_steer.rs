@@ -36,7 +36,7 @@ fn memo() -> &'static Mutex<HashMap<(String, String), Steered>> {
 /// 同一把 bot 鎖裡呼叫（`prompt_inner` 已持有）。`turn` 是被 steer 的進行中回合。
 #[allow(clippy::too_many_arguments)]
 pub(crate) async fn steer(
-    app: &Arc<App>,
+    app: &impl super::s6_ports::CodexSteerContext,
     client: &RunClient,
     run: &db::Run,
     bot: &db::Bot,
@@ -55,11 +55,11 @@ pub(crate) async fn steer(
         return finish(app, bot, key, prior).await;
     }
     // 一般送出的同一套圍籬：框裡有人的草稿就不打（`composer_busy`），讀不到框就不打。
-    let plan = match plan_delivery(app, client, run, bot, deliver, true, false).await.map_err(up)? {
+    let plan = match app.plan_delivery(client, run, bot, deliver, true, false).await.map_err(up)? {
         Ok(plan) => plan,
         Err(not) => return Err(super::composer_draft::with_draft(client, run, bot, not_attempted_error(&run.id, not)).await),
     };
-    let delivery = match execute_delivery(app, client, run, bot, deliver, plan).await {
+    let delivery = match app.execute_delivery(client, run, bot, deliver, plan).await {
         Ok(Delivered::Submitted) => "ok",
         Ok(Delivered::Handed | Delivered::Unverified) => "unverified",
         Ok(Delivered::Unproven(why)) => {
@@ -88,7 +88,7 @@ pub(crate) async fn steer(
 }
 
 /// 字已經打進去了：把它記成進行中回合的補充訊息（補過的不重記）。寫不進去回 503、記憶體帳留著，同一個 request id 重送只重寫訊息。
-async fn finish(app: &(impl crate::capabilities::Db + crate::capabilities::Emit), bot: &db::Bot, key: (String, String), mut state: Steered) -> LcResult<PromptOut> {
+async fn finish(app: &impl super::s6_ports::CodexSteerContext, bot: &db::Bot, key: (String, String), mut state: Steered) -> LcResult<PromptOut> {
     if state.message_id.is_none() {
         let turn = sqlx::query_as::<_, db::Turn>("SELECT * FROM turns WHERE id = ?").bind(&state.turn_id).fetch_optional(app.db()).await;
         let inserted = match turn {

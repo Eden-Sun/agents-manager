@@ -10,6 +10,8 @@
 //! （同一筆還有 `promptSource: "system"`、`turnOrigin: "task_notification"`，前面另有 `queue-operation` enqueue／dequeue）。
 //! 回合中間的工具結果也是 `type == "user"`，但沒有 `origin`，不算起點。
 
+#[cfg(test)]
+use crate::capabilities::Db;
 use serde_json::Value;
 
 /// transcript 尾巴（一次讀這麼多；一回合的起點一定在最後幾百 KB 裡，同 `hookrecv::last_transcript_user_text`）。
@@ -54,8 +56,8 @@ pub(crate) async fn started_by_the_cli_itself_with(
     matches!(origin_kind.as_deref(), Some(k) if k != "human")
 }
 
-pub(crate) async fn started_by_the_cli_itself(app: &std::sync::Arc<crate::state::App>, bot: &crate::db::Bot, transcript_path: Option<&str>) -> bool {
-    super::poller::app_ports_p4obs::started_by_the_cli_itself(app, bot, transcript_path).await
+pub(crate) async fn started_by_the_cli_itself(app: &impl super::s6_ports::TranscriptOriginServices, bot: &crate::db::Bot, transcript_path: Option<&str>) -> bool {
+    app.started_by_the_cli_itself(bot, transcript_path).await
 }
 
 #[cfg(test)]
@@ -93,31 +95,31 @@ mod tests {
         sqlx::query("UPDATE bots SET env_json=? WHERE id=?")
             .bind(serde_json::json!({"CLAUDE_CONFIG_DIR":config_dir.to_string_lossy()}).to_string())
             .bind(&bot.id)
-            .execute(&app.db)
+            .execute(app.db())
             .await
             .unwrap();
         let run_id = tt::fake_run(&app, &bot.id).await;
         let path = config_dir.join("projects/-test/session.jsonl");
         std::fs::create_dir_all(path.parent().unwrap()).unwrap();
         std::fs::write(&path, log).unwrap();
-        sqlx::query("UPDATE runs SET transcript_path=? WHERE id=?").bind(path.to_string_lossy().to_string()).bind(&run_id).execute(&app.db).await.unwrap();
+        sqlx::query("UPDATE runs SET transcript_path=? WHERE id=?").bind(path.to_string_lossy().to_string()).bind(&run_id).execute(app.db()).await.unwrap();
         env.herdr.set_screen(&format!("pane-{}", bot.id), SCREEN_AFTER_A_NOTIFICATION_TURN);
-        let run = db::run(&app.db, &run_id).await.unwrap().unwrap();
+        let run = db::run(app.db(), &run_id).await.unwrap().unwrap();
         (env, run, bot.id)
     }
 
     async fn user_messages(env: &tt::Env, bot_id: &str) -> Vec<String> {
-        let conv = db::conversation_id(&env.app.db, bot_id).await.unwrap();
+        let conv = db::conversation_id(env.app.db(), bot_id).await.unwrap();
         sqlx::query_scalar("SELECT content FROM messages WHERE conversation_id=? AND role='user' ORDER BY created_at")
             .bind(conv)
-            .fetch_all(&env.app.db)
+            .fetch_all(env.app.db())
             .await
             .unwrap()
     }
 
     async fn external_turns(env: &tt::Env, bot_id: &str) -> Vec<(String, String)> {
-        let conv = db::conversation_id(&env.app.db, bot_id).await.unwrap();
-        sqlx::query_as("SELECT origin, status FROM turns WHERE conversation_id=?").bind(conv).fetch_all(&env.app.db).await.unwrap()
+        let conv = db::conversation_id(env.app.db(), bot_id).await.unwrap();
+        sqlx::query_as("SELECT origin, status FROM turns WHERE conversation_id=?").bind(conv).fetch_all(env.app.db()).await.unwrap()
     }
 
     /// 事故（2026-09-19 真機，#224）：claude 自己接的回合（背景 shell 完成的通知）開出外部回合時，畫面上最後一個 `❯` 回音是上一則
@@ -153,7 +155,7 @@ mod tests {
 
         let (env, mut run, bot_id) = with_transcript(SAMPLE).await;
         run.transcript_path = None;
-        sqlx::query("UPDATE runs SET transcript_path=NULL WHERE id=?").bind(&run.id).execute(&env.app.db).await.unwrap();
+        sqlx::query("UPDATE runs SET transcript_path=NULL WHERE id=?").bind(&run.id).execute(env.app.db()).await.unwrap();
         crate::lifecycle::begin_external_turn(&env.app, &run).await;
         assert_eq!(user_messages(&env, &bot_id).await.len(), 1, "run 沒有 transcript 路徑：照舊");
     }
@@ -164,19 +166,19 @@ mod tests {
     async fn without_a_transcript_the_previous_answered_prompt_is_not_stored_again() {
         let (env, mut run, bot_id) = with_transcript("").await;
         run.transcript_path = None;
-        sqlx::query("UPDATE runs SET transcript_path=NULL WHERE id=?").bind(&run.id).execute(&env.app.db).await.unwrap();
-        let conv = db::conversation_id(&env.app.db, &bot_id).await.unwrap();
+        sqlx::query("UPDATE runs SET transcript_path=NULL WHERE id=?").bind(&run.id).execute(env.app.db()).await.unwrap();
+        let conv = db::conversation_id(env.app.db(), &bot_id).await.unwrap();
         let answered = db::ulid();
         sqlx::query("INSERT INTO turns (id, conversation_id, run_id, origin, status, delivery, created_at) VALUES (?,?,?,'web','in_flight','ok',?)")
-            .bind(&answered).bind(&conv).bind(&run.id).bind(db::now()).execute(&env.app.db).await.unwrap();
+            .bind(&answered).bind(&conv).bind(&run.id).bind(db::now()).execute(env.app.db()).await.unwrap();
         crate::lifecycle::insert_message(&env.app, &conv, Some(&answered), "user", "用 Bash 工具的 run_in_background 參數跑一個背景指令：sleep 20; echo done", "web", false, None).await.unwrap();
-        sqlx::query("UPDATE turns SET status='completed' WHERE id=?").bind(&answered).execute(&env.app.db).await.unwrap();
+        sqlx::query("UPDATE turns SET status='completed' WHERE id=?").bind(&answered).execute(env.app.db()).await.unwrap();
 
         crate::lifecycle::begin_external_turn(&env.app, &run).await;
         assert_eq!(user_messages(&env, &bot_id).await.len(), 1, "畫面上的回音是上一則：不再存一次");
 
         // 收掉這一輪，換成使用者在 pane 裡打了新的一句：照存。
-        sqlx::query("UPDATE turns SET status='completed' WHERE origin='external'").execute(&env.app.db).await.unwrap();
+        sqlx::query("UPDATE turns SET status='completed' WHERE origin='external'").execute(env.app.db()).await.unwrap();
         env.herdr.set_screen(&format!("pane-{bot_id}"), SCREEN_TYPED_IN_THE_PANE);
         crate::lifecycle::begin_external_turn(&env.app, &run).await;
         assert_eq!(user_messages(&env, &bot_id).await.last().map(String::as_str), Some("順便看一下 lint"));
@@ -189,10 +191,10 @@ mod tests {
         let (env, run, bot_id) = with_transcript(SAMPLE).await;
         sqlx::query("UPDATE projects SET host='remote-test' WHERE id=?")
             .bind(&env.project_id)
-            .execute(&env.app.db)
+            .execute(env.app.db())
             .await
             .unwrap();
-        let bot = db::bot(&env.app.db, &bot_id).await.unwrap().unwrap();
+        let bot = db::bot(env.app.db(), &bot_id).await.unwrap().unwrap();
 
         assert!(!started_by_the_cli_itself(&env.app, &bot, run.transcript_path.as_deref()).await,
             "遠端 transcript 的本機同路徑檔案不能控制 prompt 分類");
@@ -202,7 +204,7 @@ mod tests {
     #[tokio::test]
     async fn only_claude_transcripts_are_read() {
         let (env, run, bot_id) = with_transcript(SAMPLE).await;
-        let bot = db::bot(&env.app.db, &bot_id).await.unwrap().unwrap();
+        let bot = db::bot(env.app.db(), &bot_id).await.unwrap().unwrap();
         assert!(started_by_the_cli_itself(&env.app, &bot, run.transcript_path.as_deref()).await);
         let mut codex = bot.clone();
         codex.kind = "codex".into();

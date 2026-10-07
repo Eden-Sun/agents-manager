@@ -9,6 +9,7 @@
 //! 帶新的草稿與 token，一個鍵都不按。按鍵前再檢查 pane revision、完整草稿和 run/session；Herdr 尚無條件按鍵 API，最後重讀
 //! 到 key 實際送達之間仍留有一個很短、無法原子封閉的窗口。
 
+use crate::state::App;
 use super::*;
 use sha2::{Digest, Sha256};
 
@@ -320,7 +321,7 @@ async fn record_exact_text(app: &impl crate::capabilities::Db, turn_id: &str, ms
 }
 
 #[derive(Debug)]
-pub(super) enum SubmitDraftError {
+pub(crate) enum SubmitDraftError {
     NoKeySent(LcError),
     EnterMayHaveBeenSent(LcError),
 }
@@ -344,7 +345,7 @@ async fn withdraw_unsubmitted(app: &Arc<App>, bot_id: &str, run: &db::Run, turn_
 
 /// 送出框裡那段（或接受建議）之前的閘門：維護窗口、run 在跑、不在對話框、沒有進行中的回合、接回已驗證、畫面可送、沒有送達不明的回合。
 /// 一個鍵都不按；回傳要送進去的那個 run。接受建議在按 Tab **之前**先過一次，不然閘門擋下時框裡已經多了一段字。
-pub(super) async fn submit_gates(app: &Arc<App>, bot_id: &str, bot: &db::Bot, conv: &str) -> LcResult<db::Run> {
+pub(crate) async fn submit_gates(app: &Arc<App>, bot_id: &str, bot: &db::Bot, conv: &str) -> LcResult<db::Run> {
     if let Some(refusal) = maintenance_refusal(app, Admission::Gated).await {
         return Err(refusal);
     }
@@ -387,7 +388,7 @@ pub async fn submit(app: &Arc<App>, bot_id: &str, expect_token: &str, client_req
 }
 
 /// [`submit`]，呼叫端已經握著這顆 bot 的鎖（接受建議下一句：先按 Tab、確認框裡就是那句，再在同一把鎖裡送出，`suggestion.rs`）。
-pub(super) async fn submit_locked(app: &Arc<App>, bot_id: &str, expect_token: &str, client_request_id: &str) -> Result<PromptOut, SubmitDraftError> {
+pub(crate) async fn submit_locked(app: &Arc<App>, bot_id: &str, expect_token: &str, client_request_id: &str) -> Result<PromptOut, SubmitDraftError> {
     if let Err(e) = super::interruption::settle_locked(app, bot_id, super::interruption::Evidence::Nothing).await {
         tracing::warn!(bot = %bot_id, error = %e, "上一次打斷欠著的收尾還是寫不進去");
     }

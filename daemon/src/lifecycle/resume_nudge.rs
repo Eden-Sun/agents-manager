@@ -30,8 +30,9 @@
 //! （transcript 在那台機器上，這裡讀不到尾巴，跟 `stuck_turns` 一樣只讀本機）。同一個 run 只補一次
 //! （`client_request_id = resume-nudge:<run_id>`）。等待記在這個行程的記憶體裡，daemon 在這段時間重啟就不補。
 
-use super::run_state::app_ports_p4state;
-use am_ports::BotLock;
+#[cfg(test)]
+use crate::capabilities::Db;
+use super::s6_ports::ResumeNudgeContext;
 use super::*;
 use std::collections::HashMap;
 use std::sync::{Mutex, OnceLock};
@@ -176,9 +177,9 @@ fn disarm(bot_id: &str, run_id: &str) {
 
 /// 新 run 起來之後記成候選，**不排佇列**。只在真的帶了 `--resume` 時記（接不回、開了新對話就沒有原本的工作）。
 /// 呼叫端持 bot 鎖，而且已經用 [`busy_before_restart`]／[`prior_run_ended_busy`] 濾過。
-pub(crate) async fn arm(app: &Arc<App>, bot: &db::Bot, run_id: &str, busy: &str) {
+pub(crate) async fn arm(app: &impl ResumeNudgeContext, bot: &db::Bot, run_id: &str, busy: &str) {
     let resumed: Option<(Option<String>, Option<String>)> =
-        sqlx::query_as("SELECT resume_session_id, resume_outcome FROM runs WHERE id = ?").bind(run_id).fetch_optional(&app.db).await.ok().flatten();
+        sqlx::query_as("SELECT resume_session_id, resume_outcome FROM runs WHERE id = ?").bind(run_id).fetch_optional(app.db()).await.ok().flatten();
     let resumed = match resumed {
         Some((Some(_), _)) => true,
         Some((None, Some(o))) => o == "verified",
@@ -195,18 +196,18 @@ pub(crate) async fn arm(app: &Arc<App>, bot: &db::Bot, run_id: &str, busy: &str)
 }
 
 /// 狀態事件（`idle`／`working`／`blocked`）或接回結論進來時叫：這顆 bot 有候選才再看一次。
-pub(crate) fn poke(app: &Arc<App>, bot_id: &str) {
+pub(crate) fn poke(app: &impl ResumeNudgeContext, bot_id: &str) {
     if armed_run(bot_id).is_some() {
         schedule(app, bot_id, Duration::ZERO);
     }
 }
 
 /// 測試裡不排：測試直接叫 [`check_at`]、自己帶時間（同 `schedule_flush_queued`）。
-fn schedule(app: &Arc<App>, bot_id: &str, delay: Duration) {
+fn schedule<C: ResumeNudgeContext>(app: &C, bot_id: &str, delay: Duration) {
     if cfg!(test) {
         return;
     }
-    let app = app.clone();
+    let app = (*app).clone();
     let bot_id = bot_id.to_string();
     tokio::spawn(async move {
         if delay.is_zero() {
@@ -214,8 +215,8 @@ fn schedule(app: &Arc<App>, bot_id: &str, delay: Duration) {
         } else {
             tokio::time::sleep(delay).await;
         }
-        let bot_lock = app_ports_p4state::AppBotLock::new(&app);
-        let _g = bot_lock.lock_bot(&bot_id).await;
+        let lock = app.bot_lock(&bot_id).await;
+        let _g = lock.lock_owned().await;
         check_at(&app, &bot_id, Instant::now()).await;
     });
 }
@@ -273,7 +274,7 @@ async fn verdict(app: &impl crate::capabilities::Db, bot_id: &str, run_id: &str)
 
 /// 候選再看一次（呼叫端持 bot 鎖）。第一次看到 [`Verdict::Idle`] 起算 [`IDLE_WAIT`]，一路都沒被取消、時間到了、
 /// transcript 尾巴是被砍的工具，才排續行提示。回 `true`＝排進去了。
-pub(crate) async fn check_at(app: &Arc<App>, bot_id: &str, now: Instant) -> bool {
+pub(crate) async fn check_at(app: &impl ResumeNudgeContext, bot_id: &str, now: Instant) -> bool {
     let Some(run_id) = armed_run(bot_id) else { return false };
     match verdict(app, bot_id, &run_id).await {
         Verdict::Wait => return false,
@@ -297,7 +298,7 @@ pub(crate) async fn check_at(app: &Arc<App>, bot_id: &str, now: Instant) -> bool
         return false;
     }
     disarm(bot_id, &run_id);
-    let (Ok(Some(bot)), Ok(Some(run))) = (db::bot(&app.db, bot_id).await, db::run(&app.db, &run_id).await) else { return false };
+    let (Ok(Some(bot)), Ok(Some(run))) = (db::bot(app.db(), bot_id).await, db::run(app.db(), &run_id).await) else { return false };
     match transcript_ends_mid_tool(app, &bot, &run).await {
         Ok(true) => queue(app, &bot, &run_id).await,
         Ok(false) => {
@@ -319,7 +320,7 @@ fn account_transcript(config_dir: &str, recorded: &str, session: &str) -> Option
 }
 
 /// 接回的那段 transcript 尾巴是不是被砍的工具（[`ends_mid_tool`]）。只讀本機（同 `stuck_turns`）；`Err`＝讀不到。
-async fn transcript_ends_mid_tool(app: &Arc<impl crate::capabilities::Db + crate::hosts::HostsAccess + crate::tools::ToolsEnv + 'static>, bot: &db::Bot, run: &db::Run) -> Result<bool, String> {
+async fn transcript_ends_mid_tool(app: &(impl crate::capabilities::Db + crate::hosts::HostsAccess + super::s6_ports::ResumeNudgeServices), bot: &db::Bot, run: &db::Run) -> Result<bool, String> {
     let host = db::bot_host(app.db(), &bot.id).await.map_err(|e| e.to_string())?;
     if host != LOCAL_HOST {
         return Err(format!("the transcript is on {host}, not readable from here"));
@@ -335,7 +336,7 @@ async fn transcript_ends_mid_tool(app: &Arc<impl crate::capabilities::Db + crate
     .await
     .map_err(|e| e.to_string())?;
     let recorded = recorded.ok_or("no transcript path was ever recorded for this session")?;
-    let config = app_ports_p4state::identity_config_dir(app, &host, bot.identity.as_deref()).await.map_err(|e| e.to_string())?;
+    let config = app.identity_config_dir(&host, bot.identity.as_deref()).await.map_err(|e| e.to_string())?;
     let path = account_transcript(&config, &recorded, &session).ok_or("the recorded transcript path has no cwd directory")?;
     let shown = path.display().to_string();
     let log = tokio::task::spawn_blocking(move || super::transcript_origin::read_tail(&path)).await.ok().flatten();
@@ -343,21 +344,20 @@ async fn transcript_ends_mid_tool(app: &Arc<impl crate::capabilities::Db + crate
 }
 
 /// 排續行提示進佇列（[`check_at`] 確定要送時）。回 `true`＝排進去了；排不進去只記 log。
-async fn queue(app: &Arc<App>, bot: &db::Bot, run_id: &str) -> bool {
-    let conv = match db::conversation_id(&app.db, &bot.id).await {
+async fn queue(app: &impl ResumeNudgeContext, bot: &db::Bot, run_id: &str) -> bool {
+    let conv = match db::conversation_id(app.db(), &bot.id).await {
         Ok(c) => c,
         Err(e) => {
             tracing::warn!(bot = %bot.name, run = run_id, error = %e, "no conversation for the resume nudge");
             return false;
         }
     };
-    let relay = super::prompt::RelaySrc::trusted(Some(crate::agent_relay::DAEMON_SENDER));
     let crid = format!("{CRID_PREFIX}{run_id}");
-    match app_ports_p4state::queue_for_next_turn(app, &conv, &bot.id, NUDGE_TEXT, NUDGE_TEXT, &crid, None, relay).await {
+    match app.queue_nudge(&conv, &bot.id, NUDGE_TEXT, &crid, crate::agent_relay::DAEMON_SENDER).await {
         Ok(out) => {
             tracing::info!(bot = %bot.name, run = run_id, turn = %out.turn_id,
                            "resumed a claude that was killed mid-tool; queued a nudge to continue (2.1.281 no longer adds a hidden Continue)");
-            app_ports_p4state::schedule_flush_queued(app, &bot.id);
+            app.schedule_queue_flush(&bot.id);
             true
         }
         Err(e) => {
@@ -370,7 +370,7 @@ async fn queue(app: &Arc<App>, bot: &db::Bot, run_id: &str) -> bool {
 /// flush 放行前的最後一關（`resume_gate` 開了之後）：這一筆是續行提示的話，只有排它的那個 run、而且
 /// `resume_outcome = verified` 才送；其他一律撤掉並在聊天室說明。回 `true`＝這一筆不送了（撤掉了，或已經不在佇列）。
 /// 不是續行提示的一律 `false`。呼叫端持 bot 鎖。
-pub(crate) async fn withdraw_unless_resumed(app: &Arc<App>, turn: &db::Turn, run: &db::Run) -> anyhow::Result<bool> {
+pub(crate) async fn withdraw_unless_resumed(app: &impl super::s6_ports::QueueContext, turn: &db::Turn, run: &db::Run) -> anyhow::Result<bool> {
     let Some(for_run) = turn.client_request_id.as_deref().and_then(|c| c.strip_prefix(CRID_PREFIX)) else { return Ok(false) };
     let why = if for_run != run.id {
         "續行提示沒有送出：排它的那一次啟動已經不在了（之後又重啟過），接著做什麼交給使用者或 AGM。"
@@ -461,18 +461,18 @@ mod tests {
             })
             .await
             .unwrap();
-        sqlx::query("UPDATE bots SET identity=? WHERE id=?").bind(name).bind(bot_id).execute(&e.app.db).await.unwrap();
+        sqlx::query("UPDATE bots SET identity=? WHERE id=?").bind(name).bind(bot_id).execute(e.app.db()).await.unwrap();
         dir
     }
 
     async fn queued(e: &Env, bot_id: &str) -> Vec<(String, Option<String>)> {
-        let conv = db::conversation_id(&e.app.db, bot_id).await.unwrap();
+        let conv = db::conversation_id(e.app.db(), bot_id).await.unwrap();
         sqlx::query_as(
             "SELECT m.content, m.relay_from FROM turns t JOIN messages m ON m.turn_id = t.id
              WHERE t.conversation_id = ? AND t.status = 'queued'",
         )
         .bind(&conv)
-        .fetch_all(&e.app.db)
+        .fetch_all(e.app.db())
         .await
         .unwrap()
     }
@@ -501,7 +501,7 @@ mod tests {
         .bind(transcript.to_str().unwrap())
         .bind(started_at)
         .bind(turn_error)
-        .execute(&e.app.db)
+        .execute(e.app.db())
         .await
         .unwrap();
     }
@@ -518,7 +518,7 @@ mod tests {
         .bind(outcome)
         .bind(format!("sid-{bot_id}"))
         .bind(run)
-        .execute(&e.app.db)
+        .execute(e.app.db())
         .await
         .unwrap();
     }
@@ -580,7 +580,7 @@ mod tests {
             let bot = claude_bot(&e.app, &e.project_id, &format!("r-{status}")).await;
             resumable(&e, &bot.id, "stopped", "idle").await;
             let run = crate::lifecycle::start_bot_with(&e.app, &bot.id, strict.clone()).await.unwrap();
-            sqlx::query("UPDATE runs SET agent_status=? WHERE id=?").bind(status).bind(&run).execute(&e.app.db).await.unwrap();
+            sqlx::query("UPDATE runs SET agent_status=? WHERE id=?").bind(status).bind(&run).execute(e.app.db()).await.unwrap();
             let run = crate::lifecycle::restart_bot_with(&e.app, &bot.id, strict.clone()).await.unwrap();
             assert!(queued(&e, &bot.id).await.is_empty(), "{status}：啟動當下不佔 queued 槽");
             assert_eq!(armed_run(&bot.id), want.then_some(run), "{status}");
@@ -596,14 +596,14 @@ mod tests {
         let bot = claude_bot(&e.app, &e.project_id, "open-turn").await;
         resumable(&e, &bot.id, "stopped", "idle").await;
         let run = crate::lifecycle::start_bot_with(&e.app, &bot.id, strict.clone()).await.unwrap();
-        sqlx::query("UPDATE runs SET agent_status='idle' WHERE id=?").bind(&run).execute(&e.app.db).await.unwrap();
-        let conv = db::conversation_id(&e.app.db, &bot.id).await.unwrap();
+        sqlx::query("UPDATE runs SET agent_status='idle' WHERE id=?").bind(&run).execute(e.app.db()).await.unwrap();
+        let conv = db::conversation_id(e.app.db(), &bot.id).await.unwrap();
         sqlx::query("INSERT INTO turns (id, conversation_id, run_id, origin, status, delivery, created_at) VALUES (?,?,?,'web','in_flight','ok',?)")
             .bind(db::ulid())
             .bind(&conv)
             .bind(&run)
             .bind(db::now())
-            .execute(&e.app.db)
+            .execute(e.app.db())
             .await
             .unwrap();
         let run = crate::lifecycle::restart_bot_with(&e.app, &bot.id, strict).await.unwrap();
@@ -641,7 +641,7 @@ mod tests {
         let run = crate::lifecycle::start_bot_with(&e.app, &bot.id, strict()).await.unwrap();
         sqlx::query("UPDATE runs SET agent_status='working', turn_error='API Error: 429 rate limit' WHERE id=?")
             .bind(&run)
-            .execute(&e.app.db)
+            .execute(e.app.db())
             .await
             .unwrap();
         crate::lifecycle::restart_bot_with(&e.app, &bot.id, strict()).await.unwrap();
@@ -655,7 +655,7 @@ mod tests {
         let bot = claude_bot(&e.app, &e.project_id, "interrupted").await;
         resumable(&e, &bot.id, "stopped", "idle").await;
         let run = crate::lifecycle::start_bot_with(&e.app, &bot.id, strict()).await.unwrap();
-        sqlx::query("UPDATE runs SET agent_status='working' WHERE id=?").bind(&run).execute(&e.app.db).await.unwrap();
+        sqlx::query("UPDATE runs SET agent_status='working' WHERE id=?").bind(&run).execute(e.app.db()).await.unwrap();
         crate::lifecycle::interrupt_grace::note_user_interrupt(&bot.id);
         crate::lifecycle::restart_bot_with(&e.app, &bot.id, strict()).await.unwrap();
         assert_eq!(armed_run(&bot.id), None);
@@ -696,7 +696,7 @@ mod tests {
                     let t0 = Instant::now();
                     assert!(!check_at(&e.app, &bot.id, t0).await, "{case}：不會馬上送");
                     if queue_in_window {
-                        let conv = db::conversation_id(&e.app.db, &bot.id).await.unwrap();
+                        let conv = db::conversation_id(e.app.db(), &bot.id).await.unwrap();
                         let relay = super::super::prompt::RelaySrc::trusted(Some("agm"));
                         super::super::prompt::queue_for_next_turn(&e.app, &conv, &bot.id, "派工", "派工", "agm-1", None, relay).await.unwrap();
                     }
@@ -728,7 +728,7 @@ mod tests {
         resumable(&e, &bot.id, "exited", "working").await;
         let run = crate::lifecycle::start_bot_with(&e.app, &bot.id, strict()).await.unwrap();
         let t0 = Instant::now();
-        sqlx::query("UPDATE runs SET state='running', agent_status='idle' WHERE id=?").bind(&run).execute(&e.app.db).await.unwrap();
+        sqlx::query("UPDATE runs SET state='running', agent_status='idle' WHERE id=?").bind(&run).execute(e.app.db()).await.unwrap();
         assert!(!check_at(&e.app, &bot.id, t0).await, "接回還沒結論：等");
         assert!(!check_at(&e.app, &bot.id, t0 + IDLE_WAIT * 2).await, "還沒結論就不開始算");
         settle(&e, &bot.id, &run, Some("verified")).await;
@@ -752,19 +752,19 @@ mod tests {
             let t0 = Instant::now();
             assert!(!check_at(&e.app, &bot.id, t0).await);
             if case == "turn" {
-                let conv = db::conversation_id(&e.app.db, &bot.id).await.unwrap();
+                let conv = db::conversation_id(e.app.db(), &bot.id).await.unwrap();
                 sqlx::query("INSERT INTO turns (id, conversation_id, run_id, origin, status, delivery, created_at) VALUES (?,?,?,'web','completed','ok',?)")
                     .bind(db::ulid())
                     .bind(&conv)
                     .bind(&run)
                     .bind(db::now())
-                    .execute(&e.app.db)
+                    .execute(e.app.db())
                     .await
                     .unwrap();
             } else {
-                sqlx::query("UPDATE runs SET agent_status=? WHERE id=?").bind(case).bind(&run).execute(&e.app.db).await.unwrap();
+                sqlx::query("UPDATE runs SET agent_status=? WHERE id=?").bind(case).bind(&run).execute(e.app.db()).await.unwrap();
                 assert!(!check_at(&e.app, &bot.id, t0 + Duration::from_secs(3)).await);
-                sqlx::query("UPDATE runs SET agent_status='idle' WHERE id=?").bind(&run).execute(&e.app.db).await.unwrap();
+                sqlx::query("UPDATE runs SET agent_status='idle' WHERE id=?").bind(&run).execute(e.app.db()).await.unwrap();
             }
             assert!(!check_at(&e.app, &bot.id, t0 + IDLE_WAIT).await, "{case}");
             assert!(queued(&e, &bot.id).await.is_empty(), "{case}");
@@ -791,7 +791,7 @@ mod tests {
             .bind(&bot.id)
             .bind(format!("sid-{}", bot.id))
             .bind(old.to_str().unwrap())
-            .execute(&e.app.db)
+            .execute(e.app.db())
             .await
             .unwrap();
             let account = use_account(&e, &bot.id, &format!("cc-new-{want}")).await;
@@ -814,21 +814,21 @@ mod tests {
             let run = crate::lifecycle::start_bot_with(&e.app, &bot.id, strict()).await.unwrap();
             settle(&e, &bot.id, &run, Some("verified")).await;
             assert!(wait_out(&e, &bot.id).await, "{case}：先排進去");
-            sqlx::query("UPDATE runs SET resume_outcome=? WHERE id=?").bind(outcome).bind(&run).execute(&e.app.db).await.unwrap();
+            sqlx::query("UPDATE runs SET resume_outcome=? WHERE id=?").bind(outcome).bind(&run).execute(e.app.db()).await.unwrap();
             let crid = format!("{CRID_PREFIX}{run}");
             forget_queue_retry_timer(&bot.id);
             flush_queued_locked(&e.app, &bot.id).await.unwrap();
             forget_queue_retry_timer(&bot.id);
-            let conv = db::conversation_id(&e.app.db, &bot.id).await.unwrap();
+            let conv = db::conversation_id(e.app.db(), &bot.id).await.unwrap();
             let t: db::Turn = sqlx::query_as("SELECT * FROM turns WHERE conversation_id=? AND client_request_id=?")
                 .bind(&conv)
                 .bind(&crid)
-                .fetch_one(&e.app.db)
+                .fetch_one(e.app.db())
                 .await
                 .unwrap();
             let notes: Vec<String> = sqlx::query_scalar("SELECT content FROM messages WHERE turn_id=? AND role='system'")
                 .bind(&t.id)
-                .fetch_all(&e.app.db)
+                .fetch_all(e.app.db())
                 .await
                 .unwrap();
             let said = notes.iter().any(|n| n.contains("續行提示沒有送出"));
@@ -852,7 +852,7 @@ mod tests {
         )
         .bind(db::ulid())
         .bind(&bot.id)
-        .execute(&e.app.db)
+        .execute(e.app.db())
         .await
         .unwrap();
         crate::lifecycle::start_bot_with(&e.app, &bot.id, StartOpts { resume_native: true, ..Default::default() }).await.unwrap();
@@ -866,7 +866,7 @@ mod tests {
         let e = env().await;
         let bot = claude_bot(&e.app, &e.project_id, "has-queue").await;
         resumable(&e, &bot.id, "exited", "working").await;
-        let conv = db::conversation_id(&e.app.db, &bot.id).await.unwrap();
+        let conv = db::conversation_id(e.app.db(), &bot.id).await.unwrap();
         let relay = super::super::prompt::RelaySrc::trusted(Some("agm"));
         super::super::prompt::queue_for_next_turn(&e.app, &conv, &bot.id, "派工", "派工", "agm-1", None, relay).await.unwrap();
         let run = crate::lifecycle::start_bot_with(&e.app, &bot.id, strict()).await.unwrap();

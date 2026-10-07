@@ -1,20 +1,18 @@
 //! The queued-prompt flush and the run/turn bookkeeping that frees a slot.
 
+#[cfg(test)]
+use crate::capabilities::Db;
 use super::*;
-use super::send_now::ports::{HandoffSendRepo, MaintenancePort, PaneWatchPort, SupervisorSendRepo, emit_object, bot_status, turn_changed};
-use super::app_ports_p4::{AppEventSink, AppTurnEvents};
-#[cfg(not(test))]
-use super::send_now::app_ports_p4send::AppBotLock;
-#[cfg(not(test))]
-use am_ports::BotLock;
+use super::s6_ports::QueueContext;
+use super::send_now::ports::{HandoffSendRepo, MaintenancePort, SupervisorSendRepo};
 
 /// Hand the oldest queued prompt to the agent, if it can take one now. Caller holds the bot lock
 /// (the one-in-flight / one-queued unique indexes make a lost race an error). Early returns leave
 /// the turn queued; after the claim, any give-up must put it back or fail it — `in_flight` +
 /// `delivery='pending'` has no other way out. 那一句寫不進去就記成欠著（`owed_delivery`），回 `Err`（#158）。
-pub(crate) async fn flush_queued_locked(app: &Arc<App>, bot_id: &str) -> anyhow::Result<()> {
+pub(crate) async fn flush_queued_locked<C: QueueContext>(app: &C, bot_id: &str) -> anyhow::Result<()> {
     // #708：移交出去的專案，佇列原樣留著（收回後照常送），這裡一則都不送。讀不到也留在佇列（不認領、不花重試），稍後再看。
-    match app.db.bot_handed_off_to(bot_id).await {
+    match app.db().bot_handed_off_to(bot_id).await {
         Ok(None) => {}
         Ok(Some(to)) => {
             tracing::info!(bot = %bot_id, handed_off_to = %to, "queued prompts held: the project was handed off");
@@ -22,21 +20,21 @@ pub(crate) async fn flush_queued_locked(app: &Arc<App>, bot_id: &str) -> anyhow:
         }
         Err(e) => {
             tracing::warn!(bot = %bot_id, error = %e, "讀不到專案是否已移交：排著的 prompt 留在佇列，稍後重新判斷");
-            schedule_flush_retry(app, bot_id, std::time::Duration::from_secs(<Arc<App> as MaintenancePort>::UNREADABLE_RETRY_SECS as u64));
+            schedule_flush_retry(app, bot_id, std::time::Duration::from_secs(<C as MaintenancePort>::UNREADABLE_RETRY_SECS as u64));
             return Ok(());
         }
     }
-    let conv = match db::conversation_id(&app.db, bot_id).await {
+    let conv = match db::conversation_id(app.db(), bot_id).await {
         Ok(conv) => conv,
         Err(error) => {
             tracing::warn!(error = ?error, bot = %bot_id, "could not get conversation for queued prompt flush");
             return Ok(());
         }
     };
-    let Some(turn) = db::queued_turn(&app.db, &conv).await? else { return Ok(()) };
+    let Some(turn) = db::queued_turn(app.db(), &conv).await? else { return Ok(()) };
     // 已軟刪的 bot（run 還留著的晚到 child、退役中的 child）不再收字：直送的 prompt 在 #338 就擋了，排隊的不能比較寬鬆。
     // 撤掉而不是留著——bot 回不來，留著只會一直佔住唯一的排隊名額。撤不掉就留在佇列，下一次叫醒再撤。
-    if db::bot(&app.db, bot_id).await?.is_some_and(|b| b.deleted_at.is_some()) {
+    if db::bot(app.db(), bot_id).await?.is_some_and(|b| b.deleted_at.is_some()) {
         revoke_queued_turn(app, &turn.id, "bot 已被刪除，排著的 prompt 不再送出").await?;
         return Ok(());
     }
@@ -72,7 +70,7 @@ pub(crate) async fn flush_queued_locked(app: &Arc<App>, bot_id: &str) -> anyhow:
         }
     }
     // One turn at a time, per SPEC §2: a queued prompt waits for the previous one to finish.
-    let Some(run) = db::active_run(&app.db, bot_id).await? else { return Ok(()) };
+    let Some(run) = db::active_run(app.db(), bot_id).await? else { return Ok(()) };
     // `working` holds the queue too: a prompt pasted while claude is still drawing loses its
     // Enter and stalls (2026-09-07 11:21). The `working -> idle` edge re-schedules this flush.
     if run.state != "running" || run.agent_status == "blocked" || run.agent_status == "working" {
@@ -83,15 +81,15 @@ pub(crate) async fn flush_queued_locked(app: &Arc<App>, bot_id: &str) -> anyhow:
     // admission must not treat `unknown` as proof that the busy agent has finished its turn.
     let awaits_idle: i64 = sqlx::query_scalar("SELECT awaits_idle FROM turns WHERE id = ?")
         .bind(&turn.id)
-        .fetch_one(&app.db)
+        .fetch_one(app.db())
         .await?;
     if awaits_idle == 1 && run.agent_status != "idle" {
         return Ok(());
     }
-    if db::in_flight_turn(&app.db, &run.id).await?.is_some() {
+    if db::in_flight_turn(app.db(), &run.id).await?.is_some() {
         return Ok(());
     }
-    let Some(bot) = db::bot(&app.db, bot_id).await? else { return Ok(()) };
+    let Some(bot) = db::bot(app.db(), bot_id).await? else { return Ok(()) };
     // 維護窗口握著：排隊的這一筆**留在佇列**，不要送進一個正要被重啟的 session（issue #86）。
     // 不算重試、不動 `flush_retries`——擋住它的不是 bot 的狀態，是我們自己開的窗口，不該花掉它的額度。
     // 掛一個到窗口到期為止的 timer：窗口提早 release 時 `drain_queue` 會叫醒 flush，沒有人來收的話
@@ -109,13 +107,13 @@ pub(crate) async fn flush_queued_locked(app: &Arc<App>, bot_id: &str) -> anyhow:
         }
         Err(_) => {
             tracing::warn!(bot = %bot_id, turn = %turn.id, "維護窗口狀態讀不到：排隊的 prompt 留在佇列，稍後重新判斷");
-            schedule_flush_retry(app, bot_id, std::time::Duration::from_secs(<Arc<App> as MaintenancePort>::UNREADABLE_RETRY_SECS as u64));
+            schedule_flush_retry(app, bot_id, std::time::Duration::from_secs(<C as MaintenancePort>::UNREADABLE_RETRY_SECS as u64));
             return Ok(());
         }
     }
     // `--resume` 接回之後還沒證明接回的是原本那段對話（issue #92）：留在佇列，不算重試，掛 timer 到期再來。
     // `SessionStart` 一到，`hookrecv` 那邊會叫醒這裡；到期沒來就由閘門自己走刻意的退路（`resume_gate`）。
-    if let super::resume_gate::Gate::Waiting { expected, left } = super::resume_gate::check(app, &bot, &run, &conv).await {
+    if let super::resume_gate::Gate::Waiting { expected, left } = app.resume_gate(&bot, &run, &conv).await {
         tracing::info!(bot = %bot_id, turn = %turn.id, session = %expected, wait_s = left.as_secs(),
                        "resume 還沒驗證：排隊的 prompt 等 claude 回報 session 再送");
         schedule_flush_retry(app, bot_id, left);
@@ -146,7 +144,7 @@ pub(crate) async fn flush_queued_locked(app: &Arc<App>, bot_id: &str) -> anyhow:
     // 寬限只替使用者擋**別人**的派工；排著的這一則就是使用者自己在網頁送的（沒有轉寄來源）時不擋——那正是他接管後要打的字
     // （2026-10-02 prorosal：Esc 後送的一句卡滿 60 秒才送）。
     if !queued_from_the_user(app, &turn).await {
-    if let Some(left) = super::interrupt_grace::hold(app, &bot, &run, &conv).await {
+        if let Some(left) = app.interrupt_grace_left(&bot, &run, &conv).await {
         tracing::info!(bot = %bot_id, turn = %turn.id, wait_s = left.as_secs(), "使用者剛 interrupt：排隊的派工等寬限結束再送");
         schedule_flush_retry(app, bot_id, left);
         return Ok(());
@@ -156,11 +154,11 @@ pub(crate) async fn flush_queued_locked(app: &Arc<App>, bot_id: &str) -> anyhow:
     if text.trim().is_empty() {
         // Nothing deliverable: drop it rather than leave the queue permanently blocked. 還沒認領：收不成就留在佇列、
         // 掛 timer 稍後再收，不當成丟掉了（#158）。
-        if let Err(e) = super::turn_controller::set_status(&app.db, &turn.id, "queued", "failed", "prompt 是空的，送不出去").await {
+        if let Err(e) = super::turn_controller::set_status(app.db(), &turn.id, "queued", "failed", "prompt 是空的，送不出去").await {
             schedule_flush_retry(app, bot_id, std::time::Duration::from_secs(QUEUE_RETRY_BASE_SECS));
             return Err(e.context("空的 prompt 收不成 failed：留在佇列，稍後再收"));
         }
-        turn_changed(&AppTurnEvents::new(app), &turn.id).await;
+        app.turn_changed(&turn.id).await;
         return Ok(());
     }
 
@@ -172,7 +170,7 @@ pub(crate) async fn flush_queued_locked(app: &Arc<App>, bot_id: &str) -> anyhow:
     // Claim it first. If the CAS loses, another flush got there and this one has nothing to do.
     // 認領只認領到此刻還在跑的 run（issue #125）：讀完 run 之後它被收掉的話，這一筆留在佇列給下一個 run。
     // 掛的交辦也要此刻還要（#159）：上面讀完到這裡之間才被取消的，不被領走；下一輪照它的狀態撤。
-    match super::turn_controller::claim_queued(&mut *app.db.acquire().await?, &turn.id, &run.id).await? {
+    match super::turn_controller::claim_queued(&mut *app.db().acquire().await?, &turn.id, &run.id).await? {
         super::turn_controller::Outcome::Applied => {}
         other => {
             tracing::info!(bot = %bot_id, turn = %turn.id, run = %run.id, ?other, "排隊的 prompt 沒認領到：留在佇列");
@@ -182,13 +180,13 @@ pub(crate) async fn flush_queued_locked(app: &Arc<App>, bot_id: &str) -> anyhow:
             return Ok(());
         }
     }
-    turn_changed(&AppTurnEvents::new(app), &turn.id).await;
+    app.turn_changed(&turn.id).await;
 
     let wait_key = rollout_wait_key(&run);
     // Refused by a screen check → back on the queue **with a timed retry**: a bot left idle on a
     // menu it cannot close produces no `working -> idle` edge, so waiting for one parked the prompt
     // until somebody happened to use the bot (review 2 L2).
-    if let Err(e) = pane_ready_for_prompt(app, &bot, &run, &conv).await {
+    if let Err(e) = app.pane_ready_for_prompt(&bot, &run, &conv).await {
         let why = match &e {
             LcError::Conflict(v) => v.get("reason").and_then(|r| r.as_str()).unwrap_or("conflict").to_string(),
             other => format!("{other:?}"),
@@ -206,7 +204,7 @@ pub(crate) async fn flush_queued_locked(app: &Arc<App>, bot_id: &str) -> anyhow:
     // A queued prompt waits a few put-backs for a codex rollout that is on its way, then goes out
     // with what is available. Counted only for that reason and only for this run and session.
     let waited_for_log = turn.rollout_wait_key.as_deref() == Some(wait_key.as_str()) && turn.rollout_waits >= CODEX_LOG_WAIT_RETRIES;
-    let res = deliver_prompt(app, &client, &run, &bot, &text, false, waited_for_log).await;
+    let res = app.deliver_queued_prompt(&client, &run, &bot, &text, waited_for_log).await;
     // `delivery` 是回給呼叫端／UI 的字；`rec` 是要寫進 DB 的兩個欄位（證據、能不能重送）。
     let mut rec = DeliveryRecord { stored: "unknown", verified: false, auto_resend: true };
     let delivery = match res {
@@ -231,7 +229,7 @@ pub(crate) async fn flush_queued_locked(app: &Arc<App>, bot_id: &str) -> anyhow:
         // with its explanation, instead of retrying forever. 收不成就記成欠著（#158），不回普通的成功。
         Ok(Delivered::NotAttempted { reason, retry: false }) => {
             let hint = format!("沒有送出（{reason}）：這一則在這個 bot 上沒有辦法照原樣送出，所以一個字都沒打。");
-            return super::owed_delivery::closed(app, bot_id, &turn.id, "failed", &hint)
+            return app.close_owed(bot_id, &turn.id, "failed", &hint)
                 .await
                 .map(drop)
                 .map_err(|e| e.context("排隊的 prompt 一個字都沒打、送不出去，回合卻收不成 failed（記成欠著）"));
@@ -244,7 +242,7 @@ pub(crate) async fn flush_queued_locked(app: &Arc<App>, bot_id: &str) -> anyhow:
             let blocked = e.downcast_ref::<HerdrError>().map(|h| h.code == "agent_blocked").unwrap_or(false);
             if blocked {
                 // 收成 failed 寫不進去就記成欠著、之後補（#149），不留一筆永久 in_flight＋pending。
-                return super::owed_delivery::closed(app, bot_id, &turn.id, "failed", &format!("delivery failed: {e}"))
+                return app.close_owed(bot_id, &turn.id, "failed", &format!("delivery failed: {e}"))
                     .await
                     .map(drop)
                     .map_err(|e| e.context("herdr 拒收了排隊的 prompt，回合卻收不成 failed（記成欠著）"));
@@ -256,10 +254,9 @@ pub(crate) async fn flush_queued_locked(app: &Arc<App>, bot_id: &str) -> anyhow:
         }
     };
     // 寫回（寫成才推 `turn_updated`）；寫不進去就記成欠著、之後補（#149），不回普通的成功。watchdog 照樣掛（字真的送出去了）。
-    let written = super::owed_delivery::delivered(app, bot_id, &turn.id, rec).await;
+    let written = app.delivered_owed(bot_id, &turn.id, rec).await;
     if delivery == "ok" || delivery == "unverified" {
-        arm_stall(app, &run.id, bot_id, &turn.id).await;
-        arm_progress(app, &run.id, bot_id, &turn.id).await;
+        app.arm_stall_and_progress(&run.id, bot_id, &turn.id).await;
     }
     written.map_err(|e| e.context("排隊的 prompt 送出去了，送達結果卻寫不進去（記成欠著）"))
 }
@@ -287,7 +284,7 @@ async fn queued_from_the_user(app: &impl crate::capabilities::Db, turn: &db::Tur
 /// the same backoff and retry limit as any other put-back (`defer_queued_turn`). Bot lock held and
 /// only for a turn this flush claimed, so `turns_one_queued` cannot be violated.
 /// 寫不進去回 `Err`，不當成放回去了（#158）：flush 經 [`put_back_or_owe`] 記成欠著，由 `owed_delivery` 補。
-pub(super) async fn put_back(app: &Arc<App>, bot_id: &str, conv: &str, turn_id: &str, reason: &str, wait_key: &str) -> anyhow::Result<()> {
+pub(crate) async fn put_back<C: QueueContext>(app: &C, bot_id: &str, conv: &str, turn_id: &str, reason: &str, wait_key: &str) -> anyhow::Result<()> {
     match defer_queued_turn(app, conv, turn_id, reason, wait_key).await? {
         Deferred::Requeued(delay) => {
             tracing::warn!(bot = %bot_id, turn = %turn_id, %reason, retry_in_s = delay.as_secs(), "queued prompt put back on the queue");
@@ -301,8 +298,8 @@ pub(super) async fn put_back(app: &Arc<App>, bot_id: &str, conv: &str, turn_id: 
 
 /// 認領之後一個字都沒打：放回佇列；那一句寫不進去就記成欠著、之後補（`owed_delivery`），flush 回 `Err`——
 /// 不回普通的成功，那一筆也不會停在 in_flight＋pending 沒人收（#158）。
-async fn put_back_or_owe(app: &Arc<App>, bot_id: &str, conv: &str, turn_id: &str, reason: &str, wait_key: &str) -> anyhow::Result<()> {
-    super::owed_delivery::put_back(app, bot_id, conv, turn_id, reason, wait_key)
+async fn put_back_or_owe<C: QueueContext>(app: &C, bot_id: &str, conv: &str, turn_id: &str, reason: &str, wait_key: &str) -> anyhow::Result<()> {
+    app.put_back_owed(bot_id, conv, turn_id, reason, wait_key)
         .await
         .map_err(|e| e.context("認領了排隊的 prompt、一個字都沒打，卻放不回佇列（記成欠著）"))
 }
@@ -399,7 +396,7 @@ async fn defer_queued_turn(
 }
 
 /// 讀不到交辦、或排著的那一則撤不掉時，flush 多久之後再判斷一次（同維護窗口讀不到的那一條，#127）。
-const WITHDRAWAL_RECHECK: std::time::Duration = std::time::Duration::from_secs(<Arc<App> as MaintenancePort>::UNREADABLE_RETRY_SECS as u64);
+const WITHDRAWAL_RECHECK: std::time::Duration = std::time::Duration::from_secs(10);
 
 /// 掛著這些狀態的交辦，它排著的那一則不送（[`assignment_withdrawal`]；`turn_controller::claim_queued` 認領時也看這張表）。
 pub(crate) const WITHDRAWN_ASSIGNMENT: [&str; 5] = ["cancelled", "superseded", "failed", "blocked", "quota_blocked"];
@@ -425,8 +422,8 @@ pub(crate) async fn assignment_withdrawal(app: &impl crate::capabilities::Db, tu
 
 /// 撤銷一筆還在排隊的 turn：標成 failed、寫明理由、釋放這個對話的 queued 名額，**不送**。
 /// 只動 `queued`——已經 in_flight 或送出的撤不回來，不假裝撤回。`Ok(true)`＝這次真的撤掉了。
-pub(crate) async fn revoke_queued_turn(app: &Arc<App>, turn_id: &str, why: &str) -> anyhow::Result<bool> {
-    let mut tx = app.db.begin().await?;
+pub(crate) async fn revoke_queued_turn<C: QueueContext>(app: &C, turn_id: &str, why: &str) -> anyhow::Result<bool> {
+    let mut tx = app.db().begin().await?;
     let Some(revoked) = revoke_queued_turn_tx(&mut tx, turn_id, why).await? else { return Ok(false) };
     tx.commit().await?;
     announce_revoked(app, turn_id, revoked).await;
@@ -435,8 +432,8 @@ pub(crate) async fn revoke_queued_turn(app: &Arc<App>, turn_id: &str, why: &str)
 
 /// 撤銷已經 commit 之後要推的東西（訊息、turn 事件）。
 pub(crate) struct Revoked {
-    bot_id: String,
-    message: db::Message,
+    pub(crate) bot_id: String,
+    pub(crate) message: db::Message,
 }
 
 /// [`revoke_queued_turn`] 的交易內版本：要跟別的寫入綁在一起時用（例如保險絲「撤成功才標 blocked」）。
@@ -459,10 +456,9 @@ pub(crate) async fn revoke_queued_turn_tx(
     Ok(Some(Revoked { bot_id, message }))
 }
 
-pub(crate) async fn announce_revoked(app: &Arc<App>, turn_id: &str, revoked: Revoked) {
+pub(crate) async fn announce_revoked<C: QueueContext>(app: &C, turn_id: &str, revoked: Revoked) {
     tracing::info!(turn = turn_id, bot = %revoked.bot_id, "revoked a queued prompt that will not be sent");
-    emit_object(&AppEventSink::new(app), "message_added", Some(&revoked.bot_id), json!({ "bot_id": revoked.bot_id, "message": revoked.message })).await;
-    turn_changed(&AppTurnEvents::new(app), turn_id).await;
+    app.announce_revoked(turn_id, revoked).await;
 }
 
 /// 這顆 bot 已經沒有活著的 run：它排著的 queued turn 沒有人會送，收掉（AGM 2026-09-16）。
@@ -470,8 +466,8 @@ pub(crate) async fn announce_revoked(app: &Arc<App>, turn_id: &str, revoked: Rev
 /// 排隊只會發生在「有 running run、正在回合中」的時候（`prompt_inner`），所以沒有 run 的 queued 一定是遺留的；
 /// 留著的話會一直佔 queued 名額，還讓 restart safety 的 `delivery_critical` 永遠判成臨界區。
 /// 還有活著的 run（例如重啟時新的已經起來）就不動——flush 會送。回傳撤掉的 turn id。
-pub(crate) async fn revoke_orphaned_queued_turns(app: &Arc<App>, bot_id: &str, why: &str) -> Vec<String> {
-    if !matches!(db::active_run(&app.db, bot_id).await, Ok(None)) {
+pub(crate) async fn revoke_orphaned_queued_turns<C: QueueContext>(app: &C, bot_id: &str, why: &str) -> Vec<String> {
+    if !matches!(db::active_run(app.db(), bot_id).await, Ok(None)) {
         return Vec::new();
     }
     // 重啟的 stop 與 start 之間（issue #106）：沒有 active run 是暫時的，排著的派工留給新的 run 送。
@@ -481,12 +477,12 @@ pub(crate) async fn revoke_orphaned_queued_turns(app: &Arc<App>, bot_id: &str, w
         return Vec::new();
     }
     // bot 沒在跑時使用者送的（issue #122，`start_send`）不撤：留在佇列等重新啟動或取消，只記下原因。
-    super::start_send::note_run_gone(app, bot_id, why).await;
+    app.note_run_gone(bot_id, why).await;
     let ids: Vec<String> = sqlx::query_scalar(
         "SELECT t.id FROM turns t JOIN conversations c ON c.id = t.conversation_id WHERE c.bot_id = ? AND t.status = 'queued' AND t.awaits_start = 0",
     )
     .bind(bot_id)
-    .fetch_all(&app.db)
+    .fetch_all(app.db())
     .await
     .unwrap_or_default();
     let mut revoked = Vec::new();
@@ -502,13 +498,13 @@ pub(crate) async fn revoke_orphaned_queued_turns(app: &Arc<App>, bot_id: &str, w
 }
 
 /// 全部 bot 掃一次遺留的 queued turn（定時掃描用；也收掉這個版本上線前就留下來的）。
-pub(crate) async fn revoke_all_orphaned_queued_turns(app: &Arc<App>) -> Vec<String> {
+pub(crate) async fn revoke_all_orphaned_queued_turns<C: QueueContext>(app: &C) -> Vec<String> {
     let bots: Vec<String> = sqlx::query_scalar(
         "SELECT DISTINCT c.bot_id FROM turns t JOIN conversations c ON c.id = t.conversation_id
           WHERE t.status = 'queued'
             AND NOT EXISTS (SELECT 1 FROM runs r WHERE r.bot_id = c.bot_id AND r.state IN ('starting','running','stopping'))",
     )
-    .fetch_all(&app.db)
+    .fetch_all(app.db())
     .await
     .unwrap_or_default();
     let mut revoked = Vec::new();
@@ -619,8 +615,8 @@ where
     Ok(armed)
 }
 
-pub async fn rearm_queue_retries(app: &Arc<App>) -> anyhow::Result<usize> {
-    let a = app.clone();
+pub async fn rearm_queue_retries<C: QueueContext>(app: &C) -> anyhow::Result<usize> {
+        let a = (*app).clone();
     rearm_queue_retries_with(app, move |bot| schedule_flush_queued(&a, &bot)).await
 }
 
@@ -657,15 +653,15 @@ pub(crate) fn take_scheduled_flush_count(bot_id: &str) -> usize {
 }
 
 /// Try the queue again after `delay`, for conditions no lifecycle edge will announce.
-pub fn schedule_flush_retry(app: &Arc<App>, bot_id: &str, delay: std::time::Duration) {
-    let app = app.clone();
+pub fn schedule_flush_retry<C: QueueContext>(app: &C, bot_id: &str, delay: std::time::Duration) {
+    let app = (*app).clone();
     let id = bot_id.to_string();
     arm_queue_retry(bot_id, delay, move || schedule_flush_queued(&app, &id));
 }
 
 /// Wake the durable prompt queue after a turn / Run transition. No-op in tests so a background
 /// RPC cannot race the DB state machine they drive.
-pub fn schedule_flush_queued(app: &Arc<App>, bot_id: &str) {
+pub fn schedule_flush_queued<C: QueueContext>(app: &C, bot_id: &str) {
     #[cfg(test)]
     {
         let _ = app;
@@ -676,13 +672,13 @@ pub fn schedule_flush_queued(app: &Arc<App>, bot_id: &str) {
 
     #[cfg(not(test))]
     {
-        let app = app.clone();
+        let app = (*app).clone();
         let bot_id = bot_id.to_string();
         tokio::spawn(async move {
             // Let the caller finish its current event / status write before taking the same lock.
             tokio::task::yield_now().await;
-            let locks = AppBotLock::new(&app);
-            let Ok(_g) = locks.lock_bot(&bot_id).await else { return };
+            let lock = crate::capabilities::BotLocks::bot_lock(&app, &bot_id).await;
+            let _g = lock.lock_owned().await;
             if let Err(e) = flush_queued_locked(&app, &bot_id).await {
                 tracing::warn!(bot = %bot_id, error = ?e, "queued prompt flush failed");
             }
@@ -697,8 +693,8 @@ pub use crate::lc_error::RunExit;
 ///
 /// `exited` 的 durable commit 是後面每一步的前提（#135）：寫不進去就不能當它已經結束——
 /// 收 in-flight、撤佇列、拆 watcher 都留到寫進去之後（重試或下一個 pane 事件）。
-pub async fn mark_run_exited(app: &Arc<App>, run_id: &str, reason: &str) -> RunExit {
-    let run = match db::run(&app.db, run_id).await {
+pub async fn mark_run_exited<C: QueueContext>(app: &C, run_id: &str, reason: &str) -> RunExit {
+    let run = match db::run(app.db(), run_id).await {
         Ok(Some(run)) => run,
         Ok(None) => return RunExit::AlreadyEnded,
         Err(e) => {
@@ -710,7 +706,7 @@ pub async fn mark_run_exited(app: &Arc<App>, run_id: &str, reason: &str) -> RunE
         return RunExit::AlreadyEnded;
     }
     // #708：專案移交出去了，run 的結束歸接手的 daemon 記；這裡一樣都不寫（讀不到就不動）。
-    match app.db.bot_handed_off_to(&run.bot_id).await {
+    match app.db().bot_handed_off_to(&run.bot_id).await {
         Ok(None) => {}
         Ok(Some(to)) => {
             tracing::info!(run = run_id, reason, handed_off_to = %to, "run exit ignored: the project was handed off");
@@ -728,7 +724,7 @@ pub async fn mark_run_exited(app: &Arc<App>, run_id: &str, reason: &str) -> RunE
     }
     // CAS 在 UPDATE 自己身上（#131）：這支不拿 bot 鎖，上面讀完之後使用者的 stop 可能剛寫下 `stopped`，
     // 無條件寫 `exited` 會把「使用者要它停」蓋掉。沒寫到就是別的路徑先收掉了，後續由那條路負責。
-    match super::run_state::transition(&app.db, run_id, super::run_state::LIVE, "exited", None).await {
+    match super::run_state::transition(app.db(), run_id, super::run_state::LIVE, "exited", None).await {
         Ok(super::run_state::Moved::Applied) => {}
         Ok(super::run_state::Moved::Lost) => {
             tracing::info!(run = run_id, reason, "run exit: another path ended the run first (CAS lost); its cleanup is that path's");
@@ -737,14 +733,14 @@ pub async fn mark_run_exited(app: &Arc<App>, run_id: &str, reason: &str) -> RunE
         Err(e) => {
             tracing::warn!(run = run_id, reason, error = %e,
                 "run exit not recorded (DB write failed); in-flight turn, queue and watcher left as they are");
-            super::run_state::schedule_settle(app, run_id, super::run_state::Settle::Reconcile { stuck: run.state.clone() });
+            app.schedule_reconcile_settle(run_id, &run.state);
             return RunExit::NotRecorded;
         }
     }
     // 只有 CAS 真的寫下 exited 的這一條路記原因（每個 run 只會成功一次，後到的在上面就回 AlreadyEnded）。#554：
     // child 退役紀錄靠它分辨 pane 是 herdr 報關掉的還是對帳才發現不見。
     // 記不下來只是少一個證據：退役紀錄讀到 NULL 就當成沒親眼看到，偏向「不算刻意」。
-    if let Err(e) = sqlx::query("UPDATE runs SET exit_reason = ? WHERE id = ?").bind(reason).bind(run_id).execute(&app.db).await {
+    if let Err(e) = sqlx::query("UPDATE runs SET exit_reason = ? WHERE id = ?").bind(reason).bind(run_id).execute(app.db()).await {
         tracing::warn!(run = run_id, reason, error = %e, "run exited but its exit reason could not be recorded");
     }
     // pane 已經沒了，這不是我們能不做的事：回合收不成就記成欠著、之後補（#156），不當成已經收掉。
@@ -760,16 +756,16 @@ pub async fn mark_run_exited(app: &Arc<App>, run_id: &str, reason: &str) -> RunE
     if let Some(p) = run.pane_id.as_deref() {
         // watcher 的 key 是 (host, session, pane)。讀不到主機就不拆（#198）：以前退回 `local`，本機剛好同名 session、同 pane id
         // 的那顆 bot 的 watcher 被拆掉，它的狀態事件從此收不到。留下一個死 pane 的 watcher 無害。
-        match db::bot_host(&app.db, &run.bot_id).await {
+        match db::bot_host(app.db(), &run.bot_id).await {
             Ok(host) => {
-                if let Some(session) = app.session_for_run(&run).await {
+                if let Some(session) = crate::capabilities::HerdrRoutes::session_for_run(app, &run).await {
                     app.unwatch_pane_on_session(&host, &session, p).await;
                 }
             }
             Err(e) => tracing::warn!(run = run_id, error = %e, "cannot read the host of an exited run; its pane watcher is left in place"),
         }
     }
-    bot_status(&AppEventSink::new(app), &run.bot_id).await;
+    app.bot_status_changed(&run.bot_id).await;
     if turn_owed {
         RunExit::TurnOwed
     } else {
@@ -785,28 +781,15 @@ pub async fn mark_run_exited(app: &Arc<App>, run_id: &str, reason: &str) -> RunE
 ///
 /// CAS 在 UPDATE 自己身上（issue #68）：`mark_run_exited` 不拿 per-bot 鎖，SELECT 與 UPDATE 之間 hook 或 §4.3 備援
 /// 把那一筆收掉的話，這裡什麼都不寫（`the_guard_refuses_to_resurrect_a_finished_turn` 與 turn_controller 的測試釘住）。
-pub async fn fail_in_flight(app: &Arc<App>, run_id: &str, note: &str) -> anyhow::Result<()> {
-    let Some((turn, bot)) = in_flight_of(app, run_id).await? else { return Ok(()) };
-    super::interruption::close_turn(app, &bot, run_id, &turn, note).await
+pub async fn fail_in_flight<C: QueueContext>(app: &C, run_id: &str, note: &str) -> anyhow::Result<()> {
+    app.fail_in_flight(run_id, note).await
 }
 
 /// [`fail_in_flight`]，寫不進去時記成欠著的收尾（`interruption` 的帳），之後由定時重試、這顆 bot 的下一則 hook／prompt
 /// 補上；`Err` 照樣回給呼叫端，讓它不回「收尾做完了」。只給外面已經發生、不能不做的那種（run 結束）。
-pub async fn fail_in_flight_or_owe(app: &Arc<App>, run_id: &str, note: &str) -> anyhow::Result<()> {
-    let Some((turn, bot)) = in_flight_of(app, run_id).await? else { return Ok(()) };
-    super::interruption::interrupted(app, &bot, run_id, &turn, note).await
+pub async fn fail_in_flight_or_owe<C: QueueContext>(app: &C, run_id: &str, note: &str) -> anyhow::Result<()> {
+    app.fail_in_flight_or_owe(run_id, note).await
 }
-
-/// 這個 run 在飛的那一筆與它的 bot。讀不到是錯誤，不是「沒有」。
-async fn in_flight_of(app: &impl crate::capabilities::Db, run_id: &str) -> anyhow::Result<Option<(String, String)>> {
-    Ok(sqlx::query_as(
-        "SELECT t.id, c.bot_id FROM turns t JOIN conversations c ON c.id = t.conversation_id WHERE t.run_id = ? AND t.status = 'in_flight'",
-    )
-    .bind(run_id)
-    .fetch_optional(app.db())
-    .await?)
-}
-
 
 #[cfg(test)]
 mod run_exit_race_tests {
@@ -823,16 +806,16 @@ mod run_exit_race_tests {
         let app = env.app.clone();
         let bot = tt::claude_bot(&app, &env.project_id, "stopped-on-purpose").await;
         let run = tt::fake_run(&app, &bot.id).await;
-        sqlx::query("UPDATE runs SET state='stopping' WHERE id=?").bind(&run).execute(&app.db).await.unwrap();
+        sqlx::query("UPDATE runs SET state='stopping' WHERE id=?").bind(&run).execute(app.db()).await.unwrap();
 
         let (app2, run2) = (app.clone(), run.clone());
         super::super::race_point::arm("mark_run_exited_after_read", &run, move || async move {
             // `stop_bot_locked` 的最後一步。
-            sqlx::query("UPDATE runs SET state='stopped', ended_at=? WHERE id=?").bind(db::now()).bind(&run2).execute(&app2.db).await.unwrap();
+            sqlx::query("UPDATE runs SET state='stopped', ended_at=? WHERE id=?").bind(db::now()).bind(&run2).execute(app2.db()).await.unwrap();
         });
         mark_run_exited(&app, &run, "pane exited").await;
 
-        let state: String = sqlx::query_scalar("SELECT state FROM runs WHERE id=?").bind(&run).fetch_one(&app.db).await.unwrap();
+        let state: String = sqlx::query_scalar("SELECT state FROM runs WHERE id=?").bind(&run).fetch_one(app.db()).await.unwrap();
         assert_eq!(state, "stopped", "使用者停的就是停的，不是 pane 自己死掉");
     }
 
@@ -845,13 +828,13 @@ mod run_exit_race_tests {
         let run = tt::fake_run(&app, &bot.id).await;
         mark_run_exited(&app, &run, "pane exited").await;
         let (state, ended): (String, Option<String>) =
-            sqlx::query_as("SELECT state, ended_at FROM runs WHERE id=?").bind(&run).fetch_one(&app.db).await.unwrap();
+            sqlx::query_as("SELECT state, ended_at FROM runs WHERE id=?").bind(&run).fetch_one(app.db()).await.unwrap();
         assert_eq!(state, "exited");
         assert!(ended.is_some());
     }
 
     async fn run_state(app: &Arc<App>, run: &str) -> String {
-        db::run(&app.db, run).await.unwrap().unwrap().state
+        db::run(app.db(), run).await.unwrap().unwrap().state
     }
 
     /// #135：`exited` 寫不進去（SQLite I/O／busy）就還不是 exited——依附這顆 run 的東西一樣都不能先動：
@@ -890,16 +873,16 @@ mod run_exit_race_tests {
         let env = tt::env().await;
         let app = env.app.clone();
         let far = db::ulid();
-        sqlx::query("INSERT INTO projects (id, path, label, host, created_at) VALUES (?, '/r/p', 'r', 'far', ?)").bind(&far).bind(db::now()).execute(&app.db).await.unwrap();
+        sqlx::query("INSERT INTO projects (id, path, label, host, created_at) VALUES (?, '/r/p', 'r', 'far', ?)").bind(&far).bind(db::now()).execute(app.db()).await.unwrap();
         let bot = tt::claude_bot(&app, &far, "remote").await;
         let run = tt::fake_run(&app, &bot.id).await;
         let pane = format!("pane-{}", bot.id);
         let local = (LOCAL_HOST.to_string(), "test".to_string(), pane.clone());
         app.pane_watchers.lock().await.insert(local.clone(), tokio::spawn(std::future::pending::<()>()));
 
-        sqlx::query("ALTER TABLE projects RENAME TO projects_unreadable").execute(&app.db).await.unwrap();
+        sqlx::query("ALTER TABLE projects RENAME TO projects_unreadable").execute(app.db()).await.unwrap();
         mark_run_exited(&app, &run, "pane exited").await;
-        sqlx::query("ALTER TABLE projects_unreadable RENAME TO projects").execute(&app.db).await.unwrap();
+        sqlx::query("ALTER TABLE projects_unreadable RENAME TO projects").execute(app.db()).await.unwrap();
         assert!(rs::watched(&app, &local).await, "本機那顆的 watcher 不是這個 run 的");
     }
 
@@ -929,7 +912,7 @@ mod run_exit_race_tests {
         super::super::interruption::settle_locked(&app, &bot.id, super::super::interruption::Evidence::Nothing).await.unwrap();
         assert_eq!(rs::turn_status(&app, &in_flight).await, "failed", "欠著的收尾補上了");
         assert_eq!(rs::system_notes(&app, &in_flight).await, 1);
-        let note: String = sqlx::query_scalar("SELECT content FROM messages WHERE turn_id=? AND role='system'").bind(&in_flight).fetch_one(&app.db).await.unwrap();
+        let note: String = sqlx::query_scalar("SELECT content FROM messages WHERE turn_id=? AND role='system'").bind(&in_flight).fetch_one(app.db()).await.unwrap();
         assert_eq!(note, "run ended: pane exited");
     }
 
@@ -943,10 +926,10 @@ mod run_exit_race_tests {
         let in_flight = rs::a_turn(&app, &bot.id, Some(&run), "in_flight").await;
         let queued = rs::a_turn(&app, &bot.id, None, "queued").await;
         let watcher = rs::watch_run_pane(&app, &run).await;
-        sqlx::query("UPDATE runs SET state='stopping' WHERE id=?").bind(&run).execute(&app.db).await.unwrap();
+        sqlx::query("UPDATE runs SET state='stopping' WHERE id=?").bind(&run).execute(app.db()).await.unwrap();
         let (app2, run2) = (app.clone(), run.clone());
         super::super::race_point::arm("mark_run_exited_after_read", &run, move || async move {
-            sqlx::query("UPDATE runs SET state='stopped', ended_at=? WHERE id=?").bind(db::now()).bind(&run2).execute(&app2.db).await.unwrap();
+            sqlx::query("UPDATE runs SET state='stopped', ended_at=? WHERE id=?").bind(db::now()).bind(&run2).execute(app2.db()).await.unwrap();
         });
 
         assert_eq!(mark_run_exited(&app, &run, "pane exited").await, RunExit::AlreadyEnded, "CAS 輸了");
@@ -1024,10 +1007,10 @@ mod flush_queue_tests {
         .bind(&env.project_id)
         .bind(kind)
         .bind(db::now())
-        .execute(&app.db)
+        .execute(app.db())
         .await
         .unwrap();
-        let conv = db::conversation_id(&app.db, &bot_id).await.unwrap();
+        let conv = db::conversation_id(app.db(), &bot_id).await.unwrap();
         let run_id = db::ulid();
         sqlx::query(
             "INSERT INTO runs (id, bot_id, state, agent_status, workspace_id, pane_id, agent_name, herdr_session, started_at)
@@ -1037,7 +1020,7 @@ mod flush_queue_tests {
         .bind(&bot_id)
         .bind(session)
         .bind(db::now())
-        .execute(&app.db)
+        .execute(app.db())
         .await
         .unwrap();
         let turn_id = db::ulid();
@@ -1048,7 +1031,7 @@ mod flush_queue_tests {
         .bind(&turn_id)
         .bind(&conv)
         .bind(db::now())
-        .execute(&app.db)
+        .execute(app.db())
         .await
         .unwrap();
         Fixture { env, bot_id, conv, run_id, turn_id }
@@ -1119,7 +1102,7 @@ mod flush_queue_tests {
         let f = queued("test").await;
         let app = f.env.app.clone();
         let until = (chrono::Utc::now() + chrono::Duration::minutes(5)).to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
-        crate::supervisor::store::acquire_lease(&app.db, "restart", "k8bw2f", None, None, &until, false, None, &json!({}))
+        crate::supervisor::store::acquire_lease(app.db(), "restart", "k8bw2f", None, None, &until, false, None, &json!({}))
             .await
             .unwrap()
             .unwrap();
@@ -1135,7 +1118,7 @@ mod flush_queue_tests {
 
         // 窗口過期（沒有人 release）就自動恢復：閘門看 `held_at`，不會鎖死。
         let past = (chrono::Utc::now() - chrono::Duration::minutes(1)).to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
-        sqlx::query("UPDATE supervisor_leases SET expires_at=? WHERE resource='restart'").bind(&past).execute(&app.db).await.unwrap();
+        sqlx::query("UPDATE supervisor_leases SET expires_at=? WHERE resource='restart'").bind(&past).execute(app.db()).await.unwrap();
         forget_queue_retry_timer(&f.bot_id);
         flush_queued_locked(&app, &f.bot_id).await.unwrap();
         let t = turn(&app, &f.turn_id).await;
@@ -1149,11 +1132,11 @@ mod flush_queue_tests {
         let f = queued("test").await;
         let app = f.env.app.clone();
         let until = (chrono::Utc::now() + chrono::Duration::minutes(5)).to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
-        crate::supervisor::store::acquire_lease(&app.db, "restart", "k8bw2f", None, None, &until, false, None, &json!({}))
+        crate::supervisor::store::acquire_lease(app.db(), "restart", "k8bw2f", None, None, &until, false, None, &json!({}))
             .await
             .unwrap()
             .unwrap();
-        crate::supervisor::maintenance::fault::break_lease_reads(&app.db).await;
+        crate::supervisor::maintenance::fault::break_lease_reads(app.db()).await;
         forget_queue_retry_timer(&f.bot_id);
 
         flush_queued_locked(&app, &f.bot_id).await.unwrap();
@@ -1165,9 +1148,9 @@ mod flush_queue_tests {
         assert!(queue_retry_timer_armed(&f.bot_id), "掛了 timer，下一輪重新判斷；不然這筆會一直躺著");
 
         // 讀取恢復、窗口過期（沒有人 release）：照常往下送，不會永久卡住。
-        crate::supervisor::maintenance::fault::restore_lease_reads(&app.db).await;
+        crate::supervisor::maintenance::fault::restore_lease_reads(app.db()).await;
         let past = (chrono::Utc::now() - chrono::Duration::minutes(1)).to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
-        sqlx::query("UPDATE supervisor_leases SET expires_at=? WHERE resource='restart'").bind(&past).execute(&app.db).await.unwrap();
+        sqlx::query("UPDATE supervisor_leases SET expires_at=? WHERE resource='restart'").bind(&past).execute(app.db()).await.unwrap();
         forget_queue_retry_timer(&f.bot_id);
         flush_queued_locked(&app, &f.bot_id).await.unwrap();
         let t = turn(&app, &f.turn_id).await;
@@ -1186,7 +1169,7 @@ mod flush_queue_tests {
         sqlx::query("UPDATE turns SET next_flush_at = ?, flush_retries = 1 WHERE id = ?")
             .bind(&next)
             .bind(&f.turn_id)
-            .execute(&app.db)
+            .execute(app.db())
             .await
             .unwrap();
         // 寬限的 timer 剛剛燒掉並把自己從表上收走：現在這顆 bot 一個 timer 都沒有。
@@ -1204,18 +1187,18 @@ mod flush_queue_tests {
     async fn turn(app: &Arc<App>, id: &str) -> db::Turn {
         sqlx::query_as::<_, db::Turn>("SELECT * FROM turns WHERE id = ?")
             .bind(id)
-            .fetch_one(&app.db)
+            .fetch_one(app.db())
             .await
             .unwrap()
     }
 
     /// 交辦掛上這筆 queued turn（AGM 派工遇到回合中就是這個形狀）。
     async fn queued_assignment(f: &Fixture) -> String {
-        crate::supervisor::store::get_or_init(&f.env.app.db).await.unwrap();
-        let a = crate::supervisor::store::insert_assignment(&f.env.app.db, None, &f.bot_id, "crid-fence", "請釋放 fence 21", &[], None, true)
+        crate::supervisor::store::get_or_init(f.env.app.db()).await.unwrap();
+        let a = crate::supervisor::store::insert_assignment(f.env.app.db(), None, &f.bot_id, "crid-fence", "請釋放 fence 21", &[], None, true)
             .await
             .unwrap();
-        crate::supervisor::store::mark_delivered(&f.env.app.db, &a.id, &f.turn_id, "queued").await.unwrap();
+        crate::supervisor::store::mark_delivered(f.env.app.db(), &a.id, &f.turn_id, "queued").await.unwrap();
         a.id
     }
 
@@ -1234,7 +1217,7 @@ mod flush_queue_tests {
         let f = queued("test").await;
         let app = f.env.app.clone();
         f.env.herdr.live_pane("pane-1", crate::testing::LivePane { width: Some(120), ..Default::default() });
-        sqlx::query("UPDATE turns SET prompt_text = '請釋放 fence 21' WHERE id = ?").bind(&f.turn_id).execute(&app.db).await.unwrap();
+        sqlx::query("UPDATE turns SET prompt_text = '請釋放 fence 21' WHERE id = ?").bind(&f.turn_id).execute(app.db()).await.unwrap();
         let a = queued_assignment(&f).await;
 
         let out = decide(&app, &a, "cancel").await;
@@ -1245,7 +1228,7 @@ mod flush_queue_tests {
         assert_eq!((t.status.as_str(), t.delivery.as_str()), ("failed", "failed"), "終態，不佔名額");
         let why: String = sqlx::query_scalar("SELECT content FROM messages WHERE turn_id = ? AND role = 'system'")
             .bind(&f.turn_id)
-            .fetch_one(&app.db)
+            .fetch_one(app.db())
             .await
             .unwrap();
         assert!(why.contains(&a) && why.contains("已取消") && why.contains("改主意了"), "{why}");
@@ -1255,7 +1238,7 @@ mod flush_queue_tests {
             .bind(db::ulid())
             .bind(&f.conv)
             .bind(db::now())
-            .execute(&app.db)
+            .execute(app.db())
             .await
             .expect("queued 名額已經釋放");
         flush_queued_locked(&app, &f.bot_id).await.unwrap();
@@ -1273,7 +1256,7 @@ mod flush_queue_tests {
             let f = queued("test").await;
             let app = f.env.app.clone();
             f.env.herdr.live_pane("pane-1", crate::testing::LivePane { width: Some(120), ..Default::default() });
-            sqlx::query("UPDATE turns SET prompt_text = '請釋放 fence 21' WHERE id = ?").bind(&f.turn_id).execute(&app.db).await.unwrap();
+            sqlx::query("UPDATE turns SET prompt_text = '請釋放 fence 21' WHERE id = ?").bind(&f.turn_id).execute(app.db()).await.unwrap();
             let a = queued_assignment(&f).await;
             forget_queue_retry_timer(&f.bot_id);
             if why == "讀不到交辦" {
@@ -1281,7 +1264,7 @@ mod flush_queue_tests {
                 super::super::race_point::arm("review_before_revoke", &a, move || async move { break_assignment_reads(&app2).await });
             } else {
                 sqlx::query("CREATE TRIGGER lost_revoke BEFORE UPDATE OF status ON turns WHEN NEW.status = 'failed' BEGIN SELECT RAISE(ABORT, 'disk I/O error'); END")
-                    .execute(&app.db)
+                    .execute(app.db())
                     .await
                     .unwrap();
             }
@@ -1290,7 +1273,7 @@ mod flush_queue_tests {
             if why == "讀不到交辦" {
                 restore_assignment_reads(&app).await;
             } else {
-                sqlx::query("DROP TRIGGER lost_revoke").execute(&app.db).await.unwrap();
+                sqlx::query("DROP TRIGGER lost_revoke").execute(app.db()).await.unwrap();
             }
             assert_eq!(out["status"], "cancelled", "{why}");
             assert!(out.get("revoked_turn_id").is_none(), "{why}：沒撤成：{out}");
@@ -1313,7 +1296,7 @@ mod flush_queue_tests {
         sqlx::query("UPDATE turns SET status = 'in_flight', delivery = 'ok', run_id = ? WHERE id = ?")
             .bind(&f.run_id)
             .bind(&f.turn_id)
-            .execute(&app.db)
+            .execute(app.db())
             .await
             .unwrap();
         let out = decide(&app, &a, "cancel").await;
@@ -1330,7 +1313,7 @@ mod flush_queue_tests {
             let app = f.env.app.clone();
             f.env.herdr.live_pane("pane-1", crate::testing::LivePane { width: Some(120), ..Default::default() });
             let a = queued_assignment(&f).await;
-            sqlx::query("UPDATE supervisor_assignments SET status = ? WHERE id = ?").bind(status).bind(&a).execute(&app.db).await.unwrap();
+            sqlx::query("UPDATE supervisor_assignments SET status = ? WHERE id = ?").bind(status).bind(&a).execute(app.db()).await.unwrap();
             flush_queued_locked(&app, &f.bot_id).await.unwrap();
             assert_eq!(turn(&app, &f.turn_id).await.status, "failed", "{status}");
             assert!(f.env.herdr.pane("pane-1").map_or(true, |p| p.transcript.is_empty()), "{status}：一個字都沒打");
@@ -1346,11 +1329,11 @@ mod flush_queue_tests {
 
     /// 之後每一句讀 `supervisor_assignments` 的都失敗（`no such table`）——DB 出錯的樣子（同 `maintenance::fault`）。
     async fn break_assignment_reads(app: &Arc<App>) {
-        sqlx::query("ALTER TABLE supervisor_assignments RENAME TO supervisor_assignments_unreadable").execute(&app.db).await.unwrap();
+        sqlx::query("ALTER TABLE supervisor_assignments RENAME TO supervisor_assignments_unreadable").execute(app.db()).await.unwrap();
     }
 
     async fn restore_assignment_reads(app: &Arc<App>) {
-        sqlx::query("ALTER TABLE supervisor_assignments_unreadable RENAME TO supervisor_assignments").execute(&app.db).await.unwrap();
+        sqlx::query("ALTER TABLE supervisor_assignments_unreadable RENAME TO supervisor_assignments").execute(app.db()).await.unwrap();
     }
 
     /// #159 驗收一、二、五：交辦已經不要了（cancelled／superseded／failed／blocked／quota_blocked），flush 卻讀不到它——
@@ -1362,9 +1345,9 @@ mod flush_queue_tests {
             let f = queued("test").await;
             let app = f.env.app.clone();
             f.env.herdr.live_pane("pane-1", crate::testing::LivePane { width: Some(120), ..Default::default() });
-            sqlx::query("UPDATE turns SET prompt_text = '請釋放 fence 21' WHERE id = ?").bind(&f.turn_id).execute(&app.db).await.unwrap();
+            sqlx::query("UPDATE turns SET prompt_text = '請釋放 fence 21' WHERE id = ?").bind(&f.turn_id).execute(app.db()).await.unwrap();
             let a = queued_assignment(&f).await;
-            sqlx::query("UPDATE supervisor_assignments SET status = ? WHERE id = ?").bind(status).bind(&a).execute(&app.db).await.unwrap();
+            sqlx::query("UPDATE supervisor_assignments SET status = ? WHERE id = ?").bind(status).bind(&a).execute(app.db()).await.unwrap();
             forget_queue_retry_timer(&f.bot_id);
             break_assignment_reads(&app).await;
 
@@ -1388,12 +1371,12 @@ mod flush_queue_tests {
         let f = queued("test").await;
         let app = f.env.app.clone();
         f.env.herdr.live_pane("pane-1", crate::testing::LivePane { width: Some(120), ..Default::default() });
-        sqlx::query("UPDATE turns SET prompt_text = '請釋放 fence 21' WHERE id = ?").bind(&f.turn_id).execute(&app.db).await.unwrap();
+        sqlx::query("UPDATE turns SET prompt_text = '請釋放 fence 21' WHERE id = ?").bind(&f.turn_id).execute(app.db()).await.unwrap();
         let a = queued_assignment(&f).await;
-        sqlx::query("UPDATE supervisor_assignments SET status = 'cancelled' WHERE id = ?").bind(&a).execute(&app.db).await.unwrap();
+        sqlx::query("UPDATE supervisor_assignments SET status = 'cancelled' WHERE id = ?").bind(&a).execute(app.db()).await.unwrap();
         forget_queue_retry_timer(&f.bot_id);
         sqlx::query("CREATE TRIGGER lost_revoke BEFORE UPDATE OF status ON turns WHEN NEW.status = 'failed' BEGIN SELECT RAISE(ABORT, 'disk I/O error'); END")
-            .execute(&app.db)
+            .execute(app.db())
             .await
             .unwrap();
 
@@ -1402,7 +1385,7 @@ mod flush_queue_tests {
         assert!(queue_retry_timer_armed(&f.bot_id), "掛了 timer，稍後再撤");
         assert_eq!(typed(&f, "fence 21"), 0);
 
-        sqlx::query("DROP TRIGGER lost_revoke").execute(&app.db).await.unwrap();
+        sqlx::query("DROP TRIGGER lost_revoke").execute(app.db()).await.unwrap();
         flush_queued_locked(&app, &f.bot_id).await.unwrap();
         assert_eq!(turn(&app, &f.turn_id).await.status, "failed");
         assert_eq!(typed(&f, "fence 21"), 0, "永遠不送");
@@ -1415,11 +1398,11 @@ mod flush_queue_tests {
         let f = queued("test").await;
         let app = f.env.app.clone();
         f.env.herdr.live_pane("pane-1", crate::testing::LivePane { width: Some(120), ..Default::default() });
-        sqlx::query("UPDATE turns SET prompt_text = '請釋放 fence 21' WHERE id = ?").bind(&f.turn_id).execute(&app.db).await.unwrap();
+        sqlx::query("UPDATE turns SET prompt_text = '請釋放 fence 21' WHERE id = ?").bind(&f.turn_id).execute(app.db()).await.unwrap();
         let a = queued_assignment(&f).await;
         let (app2, a2) = (app.clone(), a.clone());
         super::super::race_point::arm("flush_before_claim", &f.bot_id, move || async move {
-            sqlx::query("UPDATE supervisor_assignments SET status = 'cancelled' WHERE id = ?").bind(&a2).execute(&app2.db).await.unwrap();
+            sqlx::query("UPDATE supervisor_assignments SET status = 'cancelled' WHERE id = ?").bind(&a2).execute(app2.db()).await.unwrap();
         });
 
         flush_queued_locked(&app, &f.bot_id).await.unwrap();
@@ -1444,14 +1427,14 @@ mod flush_queue_tests {
         assert_eq!((t.status.as_str(), t.delivery.as_str()), ("failed", "failed"));
         let why: String = sqlx::query_scalar("SELECT content FROM messages WHERE turn_id = ? AND role = 'system'")
             .bind(&f.turn_id)
-            .fetch_one(&app.db)
+            .fetch_one(app.db())
             .await
             .unwrap();
         assert!(why.contains("pane exited") && why.contains("沒有在跑"), "{why}");
         let ev = events.try_recv().expect("撤銷有推 turn 事件，交辦才會結案");
         assert_eq!((ev.turn_id.as_str(), ev.status.as_str()), (f.turn_id.as_str(), "failed"));
         crate::supervisor::controller::reconcile(&app).await;
-        let row = crate::supervisor::store::assignment(&app.db, &a).await.unwrap().unwrap();
+        let row = crate::supervisor::store::assignment(app.db(), &a).await.unwrap().unwrap();
         assert_ne!(row.status, "delivered", "不留在 delivered 假裝還在路上");
     }
 
@@ -1462,7 +1445,7 @@ mod flush_queue_tests {
         let app = f.env.app.clone();
         stop_bot(&app, &f.bot_id).await.unwrap();
         assert_eq!(turn(&app, &f.turn_id).await.status, "failed");
-        assert!(db::active_run(&app.db, &f.bot_id).await.unwrap().is_none());
+        assert!(db::active_run(app.db(), &f.bot_id).await.unwrap().is_none());
     }
 
     /// 還有活著的 run 就不動（flush 會送）；定時掃描收掉 run 早就不在的遺留（含上線前留下來的）。
@@ -1475,7 +1458,7 @@ mod flush_queue_tests {
         assert_eq!(turn(&app, &f.turn_id).await.status, "queued");
 
         // 模擬舊版本：run 已經結束，但當時沒有撤銷。
-        sqlx::query("UPDATE runs SET state = 'exited', ended_at = ? WHERE id = ?").bind(db::now()).bind(&f.run_id).execute(&app.db).await.unwrap();
+        sqlx::query("UPDATE runs SET state = 'exited', ended_at = ? WHERE id = ?").bind(db::now()).bind(&f.run_id).execute(app.db()).await.unwrap();
         assert_eq!(revoke_all_orphaned_queued_turns(&app).await, vec![f.turn_id.clone()]);
         assert_eq!(turn(&app, &f.turn_id).await.status, "failed");
         assert!(revoke_all_orphaned_queued_turns(&app).await.is_empty(), "撤過的不再撤");
@@ -1488,7 +1471,7 @@ mod flush_queue_tests {
         let app = f.env.app.clone();
         f.env.herdr.live_pane("pane-1", crate::testing::LivePane { width: Some(120), ..Default::default() });
         let a = queued_assignment(&f).await;
-        sqlx::query("UPDATE supervisor_assignments SET status = 'quota_blocked' WHERE id = ?").bind(&a).execute(&app.db).await.unwrap();
+        sqlx::query("UPDATE supervisor_assignments SET status = 'quota_blocked' WHERE id = ?").bind(&a).execute(app.db()).await.unwrap();
         flush_queued_locked(&app, &f.bot_id).await.unwrap();
         assert_eq!(turn(&app, &f.turn_id).await.status, "failed");
         assert!(f.env.herdr.pane("pane-1").map_or(true, |p| p.transcript.is_empty()));
@@ -1508,7 +1491,7 @@ mod flush_queue_tests {
         let f = queued("test").await;
         let app = f.env.app.clone();
         f.env.herdr.live_pane("pane-1", crate::testing::LivePane { width: Some(120), ..Default::default() });
-        sqlx::query("UPDATE turns SET prompt_text = 'AGM 的派工' WHERE id = ?").bind(&f.turn_id).execute(&app.db).await.unwrap();
+        sqlx::query("UPDATE turns SET prompt_text = 'AGM 的派工' WHERE id = ?").bind(&f.turn_id).execute(app.db()).await.unwrap();
         note_user_interrupt(&f.bot_id);
         super::super::stuck_turns::observe_at(&f.run_id, "idle", std::time::Instant::now());
 
@@ -1524,7 +1507,7 @@ mod flush_queue_tests {
         let f = queued("test").await;
         let app = f.env.app.clone();
         f.env.herdr.live_pane("pane-1", crate::testing::LivePane { width: Some(120), ..Default::default() });
-        sqlx::query("UPDATE turns SET prompt_text = 'AGM 的派工' WHERE id = ?").bind(&f.turn_id).execute(&app.db).await.unwrap();
+        sqlx::query("UPDATE turns SET prompt_text = 'AGM 的派工' WHERE id = ?").bind(&f.turn_id).execute(app.db()).await.unwrap();
         super::super::interrupt_grace::note_user_interrupt_at(&f.bot_id, chrono::Utc::now() - chrono::Duration::seconds(300));
 
         // 中斷是五分鐘前，但 bot 十秒前才又閒下來（中間 working 過）：從閒下來那刻算，不送。
@@ -1536,7 +1519,7 @@ mod flush_queue_tests {
         // 連續閒了超過 60 秒：送。
         super::super::stuck_turns::observe_at(&f.run_id, "working", ago(62));
         super::super::stuck_turns::observe_at(&f.run_id, "idle", ago(61));
-        sqlx::query("UPDATE turns SET next_flush_at = NULL WHERE id = ?").bind(&f.turn_id).execute(&app.db).await.unwrap();
+        sqlx::query("UPDATE turns SET next_flush_at = NULL WHERE id = ?").bind(&f.turn_id).execute(app.db()).await.unwrap();
         flush_queued_locked(&app, &f.bot_id).await.unwrap();
         assert_eq!(turn(&app, &f.turn_id).await.status, "in_flight");
         assert_eq!(typed(&f, "AGM 的派工"), 1);
@@ -1548,17 +1531,17 @@ mod flush_queue_tests {
         let f = queued("test").await;
         let app = f.env.app.clone();
         f.env.herdr.live_pane("pane-1", crate::testing::LivePane { width: Some(120), ..Default::default() });
-        sqlx::query("UPDATE turns SET prompt_text = 'AGM 的派工' WHERE id = ?").bind(&f.turn_id).execute(&app.db).await.unwrap();
+        sqlx::query("UPDATE turns SET prompt_text = 'AGM 的派工' WHERE id = ?").bind(&f.turn_id).execute(app.db()).await.unwrap();
         super::super::interrupt_grace::note_user_interrupt_at(&f.bot_id, chrono::Utc::now() - chrono::Duration::seconds(5));
         super::super::stuck_turns::observe_at(&f.run_id, "idle", std::time::Instant::now());
 
         let mine = db::ulid();
         sqlx::query("INSERT INTO turns (id, conversation_id, run_id, origin, status, delivery, created_at) VALUES (?,?,?,'web','in_flight','ok',?)")
-            .bind(&mine).bind(&f.conv).bind(&f.run_id).bind(db::now()).execute(&app.db).await.unwrap();
+            .bind(&mine).bind(&f.conv).bind(&f.run_id).bind(db::now()).execute(app.db()).await.unwrap();
         flush_queued_locked(&app, &f.bot_id).await.unwrap();
         assert_eq!(turn(&app, &f.turn_id).await.status, "queued", "使用者那則在跑，派工排在後面");
 
-        sqlx::query("UPDATE turns SET status = 'completed' WHERE id = ?").bind(&mine).execute(&app.db).await.unwrap();
+        sqlx::query("UPDATE turns SET status = 'completed' WHERE id = ?").bind(&mine).execute(app.db()).await.unwrap();
         flush_queued_locked(&app, &f.bot_id).await.unwrap();
         assert_eq!(turn(&app, &f.turn_id).await.status, "in_flight", "使用者那一回合結束：照一般規則，不等寬限");
     }
@@ -1587,7 +1570,7 @@ mod flush_queue_tests {
             let prompt = json!({"type": "user", "message": {"role": "user", "content": "長回合"}});
             std::fs::write(&path, format!("{prompt}\n{marker}\n")).unwrap();
         };
-        sqlx::query("UPDATE runs SET transcript_path = ? WHERE id = ?").bind(path.to_string_lossy()).bind(&f.run_id).execute(&app.db).await.unwrap();
+        sqlx::query("UPDATE runs SET transcript_path = ? WHERE id = ?").bind(path.to_string_lossy()).bind(&f.run_id).execute(app.db()).await.unwrap();
 
         write(chrono::Utc::now());
         super::super::stuck_turns::observe_at(&f.run_id, "idle", std::time::Instant::now());
@@ -1597,7 +1580,7 @@ mod flush_queue_tests {
         write(chrono::Utc::now() - chrono::Duration::seconds(120));
         super::super::stuck_turns::observe_at(&f.run_id, "working", ago(121));
         super::super::stuck_turns::observe_at(&f.run_id, "idle", ago(120));
-        sqlx::query("UPDATE turns SET next_flush_at = NULL WHERE id = ?").bind(&f.turn_id).execute(&app.db).await.unwrap();
+        sqlx::query("UPDATE turns SET next_flush_at = NULL WHERE id = ?").bind(&f.turn_id).execute(app.db()).await.unwrap();
         flush_queued_locked(&app, &f.bot_id).await.unwrap();
         assert_eq!(turn(&app, &f.turn_id).await.status, "in_flight", "兩分鐘前中斷、之後一直閒著：送");
     }
@@ -1608,7 +1591,7 @@ mod flush_queue_tests {
         let f = queued("test").await;
         let app = f.env.app.clone();
         f.env.herdr.live_pane("pane-1", crate::testing::LivePane { width: Some(120), ..Default::default() });
-        sqlx::query("DELETE FROM turns WHERE id = ?").bind(&f.turn_id).execute(&app.db).await.unwrap();
+        sqlx::query("DELETE FROM turns WHERE id = ?").bind(&f.turn_id).execute(app.db()).await.unwrap();
         note_user_interrupt(&f.bot_id);
         super::super::stuck_turns::observe_at(&f.run_id, "idle", std::time::Instant::now());
         let out = prompt_relayed_queueable(&app, &f.bot_id, "新的派工", "crid-grace", None).await.unwrap();
@@ -1626,7 +1609,7 @@ mod flush_queue_tests {
         let f = queued("test").await;
         let app = f.env.app.clone();
         f.env.herdr.live_pane("pane-1", crate::testing::LivePane { width: Some(120), ..Default::default() });
-        sqlx::query("DELETE FROM turns WHERE id = ?").bind(&f.turn_id).execute(&app.db).await.unwrap();
+        sqlx::query("DELETE FROM turns WHERE id = ?").bind(&f.turn_id).execute(app.db()).await.unwrap();
         note_user_interrupt(&f.bot_id);
         super::super::stuck_turns::observe_at(&f.run_id, "idle", std::time::Instant::now());
         let out = super::super::prompt_from_api_queue_if_busy(&app, &f.bot_id, "用cc1 sonnets", "crid-own", &[], RelaySrc::trusted(None), false, None)
@@ -1643,9 +1626,9 @@ mod flush_queue_tests {
         let app = f.env.app.clone();
         f.env.herdr.live_pane("pane-1", crate::testing::LivePane { width: Some(120), ..Default::default() });
         f.env.herdr.set_agent("agent", "pane-1", true);
-        sqlx::query("UPDATE turns SET prompt_text = 'AGM 的派工' WHERE id = ?").bind(&f.turn_id).execute(&app.db).await.unwrap();
+        sqlx::query("UPDATE turns SET prompt_text = 'AGM 的派工' WHERE id = ?").bind(&f.turn_id).execute(app.db()).await.unwrap();
         sqlx::query("INSERT INTO turns (id, conversation_id, run_id, origin, status, delivery, created_at) VALUES (?,?,?,'web','in_flight','ok',?)")
-            .bind(db::ulid()).bind(&f.conv).bind(&f.run_id).bind(db::now()).execute(&app.db).await.unwrap();
+            .bind(db::ulid()).bind(&f.conv).bind(&f.run_id).bind(db::now()).execute(app.db()).await.unwrap();
         super::super::stuck_turns::observe_at(&f.run_id, "idle", std::time::Instant::now());
 
         interrupt_bot(&app, &f.bot_id).await.unwrap();
@@ -1661,7 +1644,7 @@ mod flush_queue_tests {
         let app = f.env.app.clone();
         f.env.herdr.live_pane("pane-1", crate::testing::LivePane { width: Some(120), ..Default::default() });
         f.env.herdr.set_agent("agent", "pane-1", true);
-        sqlx::query("UPDATE turns SET prompt_text = 'AGM 的派工' WHERE id = ?").bind(&f.turn_id).execute(&app.db).await.unwrap();
+        sqlx::query("UPDATE turns SET prompt_text = 'AGM 的派工' WHERE id = ?").bind(&f.turn_id).execute(app.db()).await.unwrap();
         super::super::stuck_turns::observe_at(&f.run_id, "idle", std::time::Instant::now());
 
         abort_turns(&app, &f.bot_id).await.unwrap();
@@ -1675,8 +1658,8 @@ mod flush_queue_tests {
     async fn a_queued_prompt_waits_for_a_busy_box_and_goes_out_once_it_clears() {
         let f = queued("test").await;
         let app = f.env.app.clone();
-        db::set_pane_typed(&app.db, &f.run_id).await.unwrap();
-        sqlx::query("UPDATE turns SET prompt_text = 'Reply with PONG please' WHERE id = ?").bind(&f.turn_id).execute(&app.db).await.unwrap();
+        db::set_pane_typed(app.db(), &f.run_id).await.unwrap();
+        sqlx::query("UPDATE turns SET prompt_text = 'Reply with PONG please' WHERE id = ?").bind(&f.turn_id).execute(app.db()).await.unwrap();
         f.env.herdr.live_pane(
             "pane-1",
             crate::testing::LivePane { composer: vec!["我自己在打的草稿".into()], width: Some(120), ..Default::default() },
@@ -1693,7 +1676,7 @@ mod flush_queue_tests {
         flush_queued_locked(&app, &f.bot_id).await.unwrap();
         assert_eq!(turn(&app, &f.turn_id).await.status, "queued", "still inside its backoff");
         // 退避時間到了（重試 timer 觸發）。
-        sqlx::query("UPDATE turns SET next_flush_at = NULL WHERE id = ?").bind(&f.turn_id).execute(&app.db).await.unwrap();
+        sqlx::query("UPDATE turns SET next_flush_at = NULL WHERE id = ?").bind(&f.turn_id).execute(app.db()).await.unwrap();
         flush_queued_locked(&app, &f.bot_id).await.unwrap();
         let t = turn(&app, &f.turn_id).await;
         assert_eq!((t.status.as_str(), t.delivery.as_str()), ("in_flight", "ok"));
@@ -1707,8 +1690,8 @@ mod flush_queue_tests {
     async fn a_soft_deleted_bot_never_gets_its_queued_prompt_typed_into_its_pane() {
         let f = queued("test").await;
         let app = f.env.app.clone();
-        db::set_pane_typed(&app.db, &f.run_id).await.unwrap();
-        sqlx::query("UPDATE bots SET deleted_at = ? WHERE id = ?").bind(db::now()).bind(&f.bot_id).execute(&app.db).await.unwrap();
+        db::set_pane_typed(app.db(), &f.run_id).await.unwrap();
+        sqlx::query("UPDATE bots SET deleted_at = ? WHERE id = ?").bind(db::now()).bind(&f.bot_id).execute(app.db()).await.unwrap();
         f.env.herdr.live_pane("pane-1", crate::testing::LivePane { width: Some(120), ..Default::default() });
 
         flush_queued_locked(&app, &f.bot_id).await.unwrap();
@@ -1724,8 +1707,8 @@ mod flush_queue_tests {
     async fn a_queued_prompt_without_lossless_proof_goes_out_marked_unverified() {
         let f = queued_kind("grok", "test").await;
         let app = f.env.app.clone();
-        db::set_pane_typed(&app.db, &f.run_id).await.unwrap();
-        sqlx::query("UPDATE turns SET prompt_text = '第一行\n第二行' WHERE id = ?").bind(&f.turn_id).execute(&app.db).await.unwrap();
+        db::set_pane_typed(app.db(), &f.run_id).await.unwrap();
+        sqlx::query("UPDATE turns SET prompt_text = '第一行\n第二行' WHERE id = ?").bind(&f.turn_id).execute(app.db()).await.unwrap();
         f.env.herdr.live_pane("pane-1", crate::testing::LivePane { width: Some(120), boxed: true, ..Default::default() });
 
         flush_queued_locked(&app, &f.bot_id).await.unwrap();
@@ -1811,7 +1794,7 @@ mod flush_queue_tests {
     async fn a_box_that_never_empties_ends_in_a_failed_turn_with_an_explanation() {
         let f = queued_kind("grok", "test").await;
         let app = f.env.app.clone();
-        db::set_pane_typed(&app.db, &f.run_id).await.unwrap();
+        db::set_pane_typed(app.db(), &f.run_id).await.unwrap();
         f.env.herdr.live_pane(
             "pane-1",
             crate::testing::LivePane { width: Some(120), boxed: true, composer: vec!["草稿".into()], ..Default::default() },
@@ -1825,14 +1808,14 @@ mod flush_queue_tests {
             // 另一次喚醒在 next_flush_at 之前：不動它、不花額度。
             flush_queued_locked(&app, &f.bot_id).await.unwrap();
             assert_eq!(turn(&app, &f.turn_id).await.flush_retries, n, "early wake-ups do not spend retries");
-            sqlx::query("UPDATE turns SET next_flush_at = NULL WHERE id = ?").bind(&f.turn_id).execute(&app.db).await.unwrap();
+            sqlx::query("UPDATE turns SET next_flush_at = NULL WHERE id = ?").bind(&f.turn_id).execute(app.db()).await.unwrap();
         }
         flush_queued_locked(&app, &f.bot_id).await.unwrap();
         let t = turn(&app, &f.turn_id).await;
         assert_eq!((t.status.as_str(), t.delivery.as_str()), ("failed", "failed"));
         let hints: Vec<String> = sqlx::query_scalar("SELECT content FROM messages WHERE turn_id = ? AND role = 'system'")
             .bind(&f.turn_id)
-            .fetch_all(&app.db)
+            .fetch_all(app.db())
             .await
             .unwrap();
         assert_eq!(hints.len(), 1);
@@ -1845,24 +1828,24 @@ mod flush_queue_tests {
     async fn a_queued_codex_prompt_waits_for_its_rollout_then_falls_back() {
         let f = queued_kind("codex", "test").await;
         let app = f.env.app.clone();
-        db::set_pane_typed(&app.db, &f.run_id).await.unwrap();
+        db::set_pane_typed(app.db(), &f.run_id).await.unwrap();
         let home = f.env.dir.join("codex-home-q");
         std::fs::create_dir_all(home.join("sessions")).unwrap();
         sqlx::query("UPDATE bots SET env_json = ? WHERE id = ?")
             .bind(json!({"CODEX_HOME": home.to_str().unwrap()}).to_string())
             .bind(&f.bot_id)
-            .execute(&app.db)
+            .execute(app.db())
             .await
             .unwrap();
-        sqlx::query("UPDATE runs SET native_session_id = 'sess-q' WHERE id = ?").bind(&f.run_id).execute(&app.db).await.unwrap();
-        sqlx::query("UPDATE turns SET prompt_text = '第一行\n第二行' WHERE id = ?").bind(&f.turn_id).execute(&app.db).await.unwrap();
+        sqlx::query("UPDATE runs SET native_session_id = 'sess-q' WHERE id = ?").bind(&f.run_id).execute(app.db()).await.unwrap();
+        sqlx::query("UPDATE turns SET prompt_text = '第一行\n第二行' WHERE id = ?").bind(&f.turn_id).execute(app.db()).await.unwrap();
         f.env.herdr.live_pane("pane-1", crate::testing::LivePane { width: Some(120), codex: true, ..Default::default() });
 
         for n in 1..=CODEX_LOG_WAIT_RETRIES {
             flush_queued_locked(&app, &f.bot_id).await.unwrap();
             let t = turn(&app, &f.turn_id).await;
             assert_eq!((t.status.as_str(), t.flush_retries), ("queued", n), "waiting for the rollout #{n}");
-            sqlx::query("UPDATE turns SET next_flush_at = NULL WHERE id = ?").bind(&f.turn_id).execute(&app.db).await.unwrap();
+            sqlx::query("UPDATE turns SET next_flush_at = NULL WHERE id = ?").bind(&f.turn_id).execute(app.db()).await.unwrap();
         }
         assert_eq!(f.env.herdr.methods().iter().filter(|m| m.starts_with("pane.send")).count(), 0, "等的時候一個字都沒打");
         flush_queued_locked(&app, &f.bot_id).await.unwrap();
@@ -1880,7 +1863,7 @@ mod flush_queue_tests {
     async fn a_backoff_survives_a_restart_and_the_prompt_goes_out_exactly_once() {
         let f = queued_kind("grok", "test").await;
         let app = f.env.app.clone();
-        db::set_pane_typed(&app.db, &f.run_id).await.unwrap();
+        db::set_pane_typed(app.db(), &f.run_id).await.unwrap();
         f.env.herdr.live_pane(
             "pane-1",
             crate::testing::LivePane { width: Some(120), boxed: true, composer: vec!["草稿".into()], ..Default::default() },
@@ -1894,7 +1877,7 @@ mod flush_queue_tests {
         sqlx::query("UPDATE turns SET next_flush_at = ? WHERE id = ?")
             .bind(due_in(chrono::Duration::hours(1)))
             .bind(&f.turn_id)
-            .execute(&app.db)
+            .execute(app.db())
             .await
             .unwrap();
 
@@ -1919,7 +1902,7 @@ mod flush_queue_tests {
         sqlx::query("UPDATE turns SET next_flush_at = ? WHERE id = ?")
             .bind(due_in(chrono::Duration::zero()))
             .bind(&f.turn_id)
-            .execute(&app.db)
+            .execute(app.db())
             .await
             .unwrap();
         assert_eq!(rearm_queue_retries_with(&app, fire).await.unwrap(), 1, "the due one replaces the later timer");
@@ -1940,9 +1923,9 @@ mod flush_queue_tests {
     async fn awaits_idle_queue_turns_wait_for_idle_and_keep_created_at_order() {
         let f = queued("test").await;
         let app = f.env.app.clone();
-        db::set_pane_typed(&app.db, &f.run_id).await.unwrap();
+        db::set_pane_typed(app.db(), &f.run_id).await.unwrap();
         f.env.herdr.live_pane("pane-1", crate::testing::LivePane { width: Some(120), ..Default::default() });
-        sqlx::query("DROP INDEX turns_one_queued").execute(&app.db).await.unwrap();
+        sqlx::query("DROP INDEX turns_one_queued").execute(app.db()).await.unwrap();
 
         let oldest = chrono::Utc::now() - chrono::Duration::seconds(5);
         let created = |seconds: i64| {
@@ -1954,7 +1937,7 @@ mod flush_queue_tests {
         sqlx::query("UPDATE turns SET awaits_idle=1, prompt_text='web waits for idle', created_at=? WHERE id=?")
             .bind(created(0))
             .bind(awaits_idle)
-            .execute(&app.db)
+            .execute(app.db())
             .await
             .unwrap();
         sqlx::query(
@@ -1964,7 +1947,7 @@ mod flush_queue_tests {
         .bind(&assignment_turn)
         .bind(&f.conv)
         .bind(created(1))
-        .execute(&app.db)
+        .execute(app.db())
         .await
         .unwrap();
         sqlx::query(
@@ -1974,12 +1957,12 @@ mod flush_queue_tests {
         .bind(&awaits_start)
         .bind(&f.conv)
         .bind(created(2))
-        .execute(&app.db)
+        .execute(app.db())
         .await
         .unwrap();
-        crate::supervisor::store::get_or_init(&app.db).await.unwrap();
+        crate::supervisor::store::get_or_init(app.db()).await.unwrap();
         let assignment = crate::supervisor::store::insert_assignment(
-            &app.db,
+            app.db(),
             None,
             &f.bot_id,
             "queue-order-agm",
@@ -1990,18 +1973,18 @@ mod flush_queue_tests {
         )
         .await
         .unwrap();
-        crate::supervisor::store::mark_delivered(&app.db, &assignment.id, &assignment_turn, "queued")
+        crate::supervisor::store::mark_delivered(app.db(), &assignment.id, &assignment_turn, "queued")
             .await
             .unwrap();
 
-        sqlx::query("UPDATE runs SET agent_status='unknown' WHERE id=?").bind(&f.run_id).execute(&app.db).await.unwrap();
+        sqlx::query("UPDATE runs SET agent_status='unknown' WHERE id=?").bind(&f.run_id).execute(app.db()).await.unwrap();
         flush_queued_locked(&app, &f.bot_id).await.unwrap();
         assert_eq!(turn(&app, awaits_idle).await.status, "queued", "awaits_idle does not treat unknown as idle");
         assert_eq!(turn(&app, &assignment_turn).await.status, "queued", "a later AGM turn does not pass the queue head");
         assert_eq!(turn(&app, &awaits_start).await.status, "queued", "a later #122 turn does not pass the queue head");
         assert_eq!(typed(&f, "web waits for idle"), 0, "one character is not sent before idle");
 
-        sqlx::query("UPDATE runs SET agent_status='idle' WHERE id=?").bind(&f.run_id).execute(&app.db).await.unwrap();
+        sqlx::query("UPDATE runs SET agent_status='idle' WHERE id=?").bind(&f.run_id).execute(app.db()).await.unwrap();
         for (id, expected) in [
             (awaits_idle.as_str(), "web waits for idle"),
             (assignment_turn.as_str(), "AGM dispatch"),
@@ -2013,7 +1996,7 @@ mod flush_queue_tests {
             sqlx::query("UPDATE turns SET status='completed', completed_at=? WHERE id=?")
                 .bind(db::now())
                 .bind(id)
-                .execute(&app.db)
+                .execute(app.db())
                 .await
                 .unwrap();
         }
@@ -2025,11 +2008,11 @@ mod flush_queue_tests {
     async fn an_awaits_idle_turn_is_flushed_after_daemon_restart() {
         let f = queued("test").await;
         let app = f.env.app.clone();
-        db::set_pane_typed(&app.db, &f.run_id).await.unwrap();
+        db::set_pane_typed(app.db(), &f.run_id).await.unwrap();
         f.env.herdr.live_pane("pane-1", crate::testing::LivePane { width: Some(120), ..Default::default() });
         sqlx::query("UPDATE turns SET awaits_idle=1, prompt_text='after restart', next_flush_at=NULL WHERE id=?")
             .bind(&f.turn_id)
-            .execute(&app.db)
+            .execute(app.db())
             .await
             .unwrap();
         forget_queue_retry_timer(&f.bot_id);
@@ -2060,8 +2043,8 @@ mod flush_queue_tests {
     async fn queued_prompts_survive_a_herdr_without_styled_reads_and_unreadable_panes() {
         let f = queued("test").await;
         let app = f.env.app.clone();
-        db::set_pane_typed(&app.db, &f.run_id).await.unwrap();
-        sqlx::query("UPDATE turns SET prompt_text = 'Reply with PONG please' WHERE id = ?").bind(&f.turn_id).execute(&app.db).await.unwrap();
+        db::set_pane_typed(app.db(), &f.run_id).await.unwrap();
+        sqlx::query("UPDATE turns SET prompt_text = 'Reply with PONG please' WHERE id = ?").bind(&f.turn_id).execute(app.db()).await.unwrap();
         f.env.herdr.reject_ansi.store(true, std::sync::atomic::Ordering::SeqCst);
         f.env.herdr.live_pane("pane-1", crate::testing::LivePane { width: Some(120), ..Default::default() });
         flush_queued_locked(&app, &f.bot_id).await.unwrap();
@@ -2070,8 +2053,8 @@ mod flush_queue_tests {
 
         let f = queued("test").await;
         let app = f.env.app.clone();
-        db::set_pane_typed(&app.db, &f.run_id).await.unwrap();
-        sqlx::query("UPDATE turns SET prompt_text = 'Reply with PONG please' WHERE id = ?").bind(&f.turn_id).execute(&app.db).await.unwrap();
+        db::set_pane_typed(app.db(), &f.run_id).await.unwrap();
+        sqlx::query("UPDATE turns SET prompt_text = 'Reply with PONG please' WHERE id = ?").bind(&f.turn_id).execute(app.db()).await.unwrap();
         f.env.herdr.live_pane("pane-1", crate::testing::LivePane { width: Some(120), ..Default::default() });
         // 讀畫面失敗（兩種讀法都失敗）。
         f.env.herdr.live.lock().unwrap().remove("pane-1");
@@ -2089,16 +2072,16 @@ mod flush_queue_tests {
         use std::os::unix::fs::PermissionsExt;
         let f = queued("test").await;
         let app = f.env.app.clone();
-        db::set_pane_typed(&app.db, &f.run_id).await.unwrap();
+        db::set_pane_typed(app.db(), &f.run_id).await.unwrap();
         let t = f.env.dir.join("locked-q.jsonl");
         std::fs::write(&t, "").unwrap();
         sqlx::query("UPDATE runs SET native_session_id = 's-q', transcript_path = ? WHERE id = ?")
             .bind(t.to_str().unwrap())
             .bind(&f.run_id)
-            .execute(&app.db)
+            .execute(app.db())
             .await
             .unwrap();
-        sqlx::query("UPDATE turns SET prompt_text = '第一行\n第二行' WHERE id = ?").bind(&f.turn_id).execute(&app.db).await.unwrap();
+        sqlx::query("UPDATE turns SET prompt_text = '第一行\n第二行' WHERE id = ?").bind(&f.turn_id).execute(app.db()).await.unwrap();
         f.env.herdr.live_pane("pane-1", crate::testing::LivePane { width: Some(120), ..Default::default() });
         std::fs::set_permissions(&t, std::fs::Permissions::from_mode(0o000)).unwrap();
         flush_queued_locked(&app, &f.bot_id).await.unwrap();
@@ -2111,21 +2094,21 @@ mod flush_queue_tests {
     fn codex_queue_env<'a>(f: &'a Fixture) -> impl std::future::Future<Output = ()> + 'a {
         async move {
             let app = &f.env.app;
-            db::set_pane_typed(&app.db, &f.run_id).await.unwrap();
+            db::set_pane_typed(app.db(), &f.run_id).await.unwrap();
             let home = f.env.dir.join("codex-home-w");
             std::fs::create_dir_all(home.join("sessions")).unwrap();
             sqlx::query("UPDATE bots SET env_json = ? WHERE id = ?")
                 .bind(json!({"CODEX_HOME": home.to_str().unwrap()}).to_string())
                 .bind(&f.bot_id)
-                .execute(&app.db)
+                .execute(app.db())
                 .await
                 .unwrap();
-            sqlx::query("UPDATE turns SET prompt_text = '第一行\n第二行' WHERE id = ?").bind(&f.turn_id).execute(&app.db).await.unwrap();
+            sqlx::query("UPDATE turns SET prompt_text = '第一行\n第二行' WHERE id = ?").bind(&f.turn_id).execute(app.db()).await.unwrap();
         }
     }
 
     async fn clear_backoff(f: &Fixture) {
-        sqlx::query("UPDATE turns SET next_flush_at = NULL WHERE id = ?").bind(&f.turn_id).execute(&f.env.app.db).await.unwrap();
+        sqlx::query("UPDATE turns SET next_flush_at = NULL WHERE id = ?").bind(&f.turn_id).execute(f.env.app.db()).await.unwrap();
     }
 
     /// 先因為框忙放回好幾次，之後 session 已知但 rollout 未寫：rollout 的等待額度不被框忙吃掉，還是要等滿 3 次（sol 第十輪 #2）。
@@ -2144,7 +2127,7 @@ mod flush_queue_tests {
 
         // 框清空了；codex 回報了 session，但 rollout 還沒寫。
         f.env.herdr.live_pane("pane-1", crate::testing::LivePane { width: Some(120), codex: true, ..Default::default() });
-        sqlx::query("UPDATE runs SET native_session_id = 'sess-busy' WHERE id = ?").bind(&f.run_id).execute(&app.db).await.unwrap();
+        sqlx::query("UPDATE runs SET native_session_id = 'sess-busy' WHERE id = ?").bind(&f.run_id).execute(app.db()).await.unwrap();
         for n in 1..=CODEX_LOG_WAIT_RETRIES {
             flush_queued_locked(&app, &f.bot_id).await.unwrap();
             let t = turn(&app, &f.turn_id).await;
@@ -2163,7 +2146,7 @@ mod flush_queue_tests {
         codex_queue_env(&f).await;
         let app = f.env.app.clone();
         f.env.herdr.live_pane("pane-1", crate::testing::LivePane { width: Some(120), codex: true, ..Default::default() });
-        sqlx::query("UPDATE runs SET native_session_id = 'sess-a' WHERE id = ?").bind(&f.run_id).execute(&app.db).await.unwrap();
+        sqlx::query("UPDATE runs SET native_session_id = 'sess-a' WHERE id = ?").bind(&f.run_id).execute(app.db()).await.unwrap();
         for _ in 0..2 {
             flush_queued_locked(&app, &f.bot_id).await.unwrap();
             clear_backoff(&f).await;
@@ -2173,15 +2156,15 @@ mod flush_queue_tests {
         assert_eq!(t.rollout_wait_key.as_deref(), Some(format!("{}:sess-a", f.run_id).as_str()));
 
         // 新 session：前一個 session 等過的兩次不算數。
-        sqlx::query("UPDATE runs SET native_session_id = 'sess-b' WHERE id = ?").bind(&f.run_id).execute(&app.db).await.unwrap();
+        sqlx::query("UPDATE runs SET native_session_id = 'sess-b' WHERE id = ?").bind(&f.run_id).execute(app.db()).await.unwrap();
         flush_queued_locked(&app, &f.bot_id).await.unwrap();
         let t = turn(&app, &f.turn_id).await;
         assert_eq!((t.status.as_str(), t.rollout_waits), ("queued", 1), "counted again from one");
         assert_eq!(t.rollout_wait_key.as_deref(), Some(format!("{}:sess-b", f.run_id).as_str()));
         clear_backoff(&f).await;
         // 已經等滿三次也不能讓換了 session 的 turn 直接送：key 不同就不算等過。
-        sqlx::query("UPDATE turns SET rollout_waits = 9 WHERE id = ?").bind(&f.turn_id).execute(&app.db).await.unwrap();
-        sqlx::query("UPDATE runs SET native_session_id = 'sess-c' WHERE id = ?").bind(&f.run_id).execute(&app.db).await.unwrap();
+        sqlx::query("UPDATE turns SET rollout_waits = 9 WHERE id = ?").bind(&f.turn_id).execute(app.db()).await.unwrap();
+        sqlx::query("UPDATE runs SET native_session_id = 'sess-c' WHERE id = ?").bind(&f.run_id).execute(app.db()).await.unwrap();
         flush_queued_locked(&app, &f.bot_id).await.unwrap();
         assert_eq!(turn(&app, &f.turn_id).await.status, "queued");
         assert_eq!(f.env.herdr.methods().iter().filter(|m| m.starts_with("pane.send")).count(), 0);
@@ -2195,7 +2178,7 @@ mod flush_queue_tests {
         let app = f.env.app.clone();
         sqlx::query("UPDATE turns SET status='queued', run_id=NULL, next_flush_at=NULL, prompt_text='AGM 派的工作' WHERE id=?")
             .bind(&f.turn_id)
-            .execute(&app.db)
+            .execute(app.db())
             .await
             .unwrap();
         forget_queue_retry_timer(&f.bot_id);
@@ -2212,7 +2195,7 @@ mod flush_queue_tests {
     async fn the_startup_path_rearms_a_backoff_on_a_fresh_app() {
         let f = queued_kind("grok", "test").await;
         let app = f.env.app.clone();
-        db::set_pane_typed(&app.db, &f.run_id).await.unwrap();
+        db::set_pane_typed(app.db(), &f.run_id).await.unwrap();
         f.env.herdr.live_pane(
             "pane-1",
             crate::testing::LivePane { width: Some(120), boxed: true, composer: vec!["草稿".into()], ..Default::default() },
@@ -2246,11 +2229,11 @@ mod flush_queue_tests {
         assert_eq!(t.run_id, None, "an undelivered turn does not belong to that run");
         assert!(t.completed_at.is_none(), "it was requeued, not failed");
         assert!(
-            db::in_flight_turn(&app.db, &f.run_id).await.unwrap().is_none(),
+            db::in_flight_turn(app.db(), &f.run_id).await.unwrap().is_none(),
             "nothing is in flight, so the next prompt is not refused with 409",
         );
         assert_eq!(
-            db::queued_turn(&app.db, &f.conv).await.unwrap().map(|q| q.id),
+            db::queued_turn(app.db(), &f.conv).await.unwrap().map(|q| q.id),
             Some(f.turn_id.clone()),
             "the durable queue still holds it, so a later transition retries the delivery",
         );
@@ -2263,13 +2246,13 @@ mod flush_queue_tests {
         f.env.herdr.set_agent("agent", "pane-1", true);
         sqlx::query("UPDATE runs SET herdr_session = 'test' WHERE id = ?")
             .bind(&f.run_id)
-            .execute(&app.db)
+            .execute(app.db())
             .await
             .unwrap();
         // 退避時間到之前的其他喚醒不搶先；timer 到點（清掉 next_flush_at）才送。
         flush_queued_locked(&app, &f.bot_id).await.unwrap();
         assert_eq!(turn(&app, &f.turn_id).await.status, "queued", "still inside its backoff");
-        sqlx::query("UPDATE turns SET next_flush_at = NULL WHERE id = ?").bind(&f.turn_id).execute(&app.db).await.unwrap();
+        sqlx::query("UPDATE turns SET next_flush_at = NULL WHERE id = ?").bind(&f.turn_id).execute(app.db()).await.unwrap();
         flush_queued_locked(&app, &f.bot_id).await.unwrap();
         let t = turn(&app, &f.turn_id).await;
         assert_eq!(t.status, "in_flight", "the retry got to claim it");
@@ -2284,11 +2267,11 @@ mod flush_queue_tests {
         let f = queued("test").await;
         let app = f.env.app.clone();
         f.env.herdr.live_pane("pane-1", crate::testing::LivePane { width: Some(120), ..Default::default() });
-        sqlx::query("UPDATE turns SET prompt_text = '給舊 run 的派工' WHERE id = ?").bind(&f.turn_id).execute(&app.db).await.unwrap();
+        sqlx::query("UPDATE turns SET prompt_text = '給舊 run 的派工' WHERE id = ?").bind(&f.turn_id).execute(app.db()).await.unwrap();
         let (app2, run2) = (app.clone(), f.run_id.clone());
         super::super::race_point::arm("flush_before_claim", &f.bot_id, move || async move {
             // `mark_run_exited` 的第一句寫入。
-            sqlx::query("UPDATE runs SET state='exited', ended_at=? WHERE id=?").bind(db::now()).bind(&run2).execute(&app2.db).await.unwrap();
+            sqlx::query("UPDATE runs SET state='exited', ended_at=? WHERE id=?").bind(db::now()).bind(&run2).execute(app2.db()).await.unwrap();
         });
 
         flush_queued_locked(&app, &f.bot_id).await.unwrap();
@@ -2308,7 +2291,7 @@ mod flush_queue_tests {
         forget_queue_retry_timer(&f.bot_id);
         let (app2, turn2) = (app.clone(), f.turn_id.clone());
         super::super::race_point::arm("defer_before_return", &f.turn_id, move || async move {
-            super::super::turn_controller::fail(&app2.db, &turn2, super::super::turn_controller::DeliveryOnFail::Keep, "run ended")
+            super::super::turn_controller::fail(app2.db(), &turn2, super::super::turn_controller::DeliveryOnFail::Keep, "run ended")
                 .await
                 .unwrap();
         });
@@ -2352,7 +2335,7 @@ mod flush_queue_tests {
         let t = turn(&app, &f.turn_id).await;
         assert_eq!(t.status, "in_flight");
         assert_eq!(t.delivery, "unknown");
-        assert!(db::queued_turn(&app.db, &f.conv).await.unwrap().is_none(), "not put back on the queue");
+        assert!(db::queued_turn(app.db(), &f.conv).await.unwrap().is_none(), "not put back on the queue");
     }
 
     /// The queue gets the live prompt's screen checks (review 2026-09-12 #6): codex on its `/model`
@@ -2371,7 +2354,7 @@ mod flush_queue_tests {
         assert!(!f.env.herdr.methods().iter().any(|m| m == "agent.prompt"), "nothing was typed");
         let hints: Vec<String> = sqlx::query_scalar("SELECT content FROM messages WHERE conversation_id=? AND role='system'")
             .bind(&f.conv)
-            .fetch_all(&app.db)
+            .fetch_all(app.db())
             .await
             .unwrap();
         assert_eq!(hints.len(), 1, "{hints:?}");
@@ -2393,7 +2376,7 @@ mod flush_queue_tests {
         assert!(!f.env.herdr.methods().iter().any(|m| m == "agent.prompt"));
         let hints: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM messages WHERE conversation_id=? AND role='system'")
             .bind(&f.conv)
-            .fetch_one(&app.db)
+            .fetch_one(app.db())
             .await
             .unwrap();
         assert_eq!(hints, 1);
@@ -2423,13 +2406,13 @@ mod flush_queue_tests {
     async fn lose(app: &Arc<App>, name: &str, what: &str) {
         let on = if what == "failed" { "status ON turns WHEN NEW.status = 'failed'" } else { "flush_retries ON turns" };
         sqlx::query(&format!("CREATE TRIGGER {name} BEFORE UPDATE OF {on} BEGIN SELECT RAISE(ABORT, 'disk I/O error'); END"))
-            .execute(&app.db)
+            .execute(app.db())
             .await
             .unwrap();
     }
 
     async fn heal(app: &Arc<App>, name: &str) {
-        sqlx::query(&format!("DROP TRIGGER {name}")).execute(&app.db).await.unwrap();
+        sqlx::query(&format!("DROP TRIGGER {name}")).execute(app.db()).await.unwrap();
     }
 
     /// #158 驗收二：認領之後一個字都沒打就放棄（claude 停在登入選單、herdr client 拿不到），放回佇列那一句卻寫不進去——
@@ -2455,13 +2438,13 @@ mod flush_queue_tests {
             let t = turn(&app, &f.turn_id).await;
             assert_eq!((t.status.as_str(), t.run_id.as_deref(), t.flush_retries), ("queued", None, 1), "{why}：補回佇列，算一次重試");
             assert!(t.next_flush_at.is_some() && queue_retry_timer_armed(&f.bot_id), "{why}：掛了下一次的 timer");
-            assert!(db::in_flight_turn(&app.db, &f.run_id).await.unwrap().is_none(), "{why}：不再擋住下一則");
+            assert!(db::in_flight_turn(app.db(), &f.run_id).await.unwrap().is_none(), "{why}：不再擋住下一則");
 
             // 擋住它的東西沒了、退避到了：照常送出，只送一次。
             f.env.herdr.set_screen("pane-1", "");
             f.env.herdr.set_agent("agent", "pane-1", true);
-            sqlx::query("UPDATE runs SET herdr_session = 'test' WHERE id = ?").bind(&f.run_id).execute(&app.db).await.unwrap();
-            sqlx::query("UPDATE turns SET next_flush_at = NULL WHERE id = ?").bind(&f.turn_id).execute(&app.db).await.unwrap();
+            sqlx::query("UPDATE runs SET herdr_session = 'test' WHERE id = ?").bind(&f.run_id).execute(app.db()).await.unwrap();
+            sqlx::query("UPDATE turns SET next_flush_at = NULL WHERE id = ?").bind(&f.turn_id).execute(app.db()).await.unwrap();
             flush_queued_locked(&app, &f.bot_id).await.unwrap();
             assert_eq!(turn(&app, &f.turn_id).await.status, "in_flight", "{why}");
             assert_eq!(f.env.herdr.calls_to("agent.prompt").len(), 1, "{why}：只送一次");
@@ -2476,7 +2459,7 @@ mod flush_queue_tests {
         let f = queued("test").await;
         let app = f.env.app.clone();
         let huge = "x".repeat(super::super::delivery::MAX_PROVABLE_CHARS + 1);
-        sqlx::query("UPDATE turns SET prompt_text = ? WHERE id = ?").bind(&huge).bind(&f.turn_id).execute(&app.db).await.unwrap();
+        sqlx::query("UPDATE turns SET prompt_text = ? WHERE id = ?").bind(&huge).bind(&f.turn_id).execute(app.db()).await.unwrap();
         lose(&app, "lost_close", "failed").await;
 
         assert!(flush_queued_locked(&app, &f.bot_id).await.is_err(), "收不成 failed：flush 不回普通的成功");
@@ -2489,7 +2472,7 @@ mod flush_queue_tests {
         assert_eq!((t.status.as_str(), t.delivery.as_str()), ("failed", "failed"), "不留永久 in_flight");
         let notes: Vec<String> = sqlx::query_scalar("SELECT content FROM messages WHERE turn_id = ? AND role = 'system'")
             .bind(&f.turn_id)
-            .fetch_all(&app.db)
+            .fetch_all(app.db())
             .await
             .unwrap();
         assert!(notes.len() == 1 && notes[0].contains("prompt_too_long_to_prove"), "{notes:?}");
@@ -2502,7 +2485,7 @@ mod flush_queue_tests {
     async fn an_empty_queued_prompt_that_cannot_be_dropped_stays_queued_and_is_retried() {
         let f = queued("no-such-session").await;
         let app = f.env.app.clone();
-        sqlx::query("UPDATE turns SET prompt_text = '   ' WHERE id = ?").bind(&f.turn_id).execute(&app.db).await.unwrap();
+        sqlx::query("UPDATE turns SET prompt_text = '   ' WHERE id = ?").bind(&f.turn_id).execute(app.db()).await.unwrap();
         forget_queue_retry_timer(&f.bot_id);
         lose(&app, "lost_drop", "failed").await;
 
@@ -2522,7 +2505,7 @@ mod flush_queue_tests {
         let app = f.env.app.clone();
         sqlx::query("UPDATE turns SET prompt_text = '   ' WHERE id = ?")
             .bind(&f.turn_id)
-            .execute(&app.db)
+            .execute(app.db())
             .await
             .unwrap();
 
@@ -2530,6 +2513,6 @@ mod flush_queue_tests {
 
         let t = turn(&app, &f.turn_id).await;
         assert_eq!(t.status, "failed");
-        assert!(db::queued_turn(&app.db, &f.conv).await.unwrap().is_none());
+        assert!(db::queued_turn(app.db(), &f.conv).await.unwrap().is_none());
     }
 }

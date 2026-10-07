@@ -371,6 +371,6 @@ pub fn schedule_flush_queued(app: &Arc<App>, bot_id: &str) {
     crate::lifecycle::schedule_flush_queued(app, bot_id);
 }
 
-pub async fn identity_config_dir(app: &Arc<impl crate::hosts::HostsAccess + crate::tools::ToolsEnv + 'static>, host: &str, identity: Option<&str>) -> anyhow::Result<String> {
+pub async fn identity_config_dir(app: &(impl crate::hosts::HostsAccess + crate::lifecycle::s6_ports::IdentityAccess), host: &str, identity: Option<&str>) -> anyhow::Result<String> {
     crate::lifecycle::start::identity_config_dir(app, host, identity).await
 }

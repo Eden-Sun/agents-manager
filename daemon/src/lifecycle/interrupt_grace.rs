@@ -20,7 +20,8 @@
 //! 同一個時刻另記一筆**被中斷的是哪一回合**（[`InterruptedTurn`]），給 `StopFailure` 認 Esc 的回聲用
 //! （#117）。兩筆各自清：回聲到了只結清回聲那筆，排隊寬限照舊。
 
-use super::run_state::app_ports_p4state;
+use crate::app_ports_p4state;
+use crate::state::App;
 use super::stuck_turns::{idle_for, observe_at};
 use super::*;
 use chrono::{DateTime, Utc};

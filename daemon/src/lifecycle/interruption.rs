@@ -20,8 +20,9 @@
 //! 帳只在記憶體：daemon 重啟就沒了。重啟後還 in_flight 的那一筆照舊由 hook 或閒置 watchdog（`stuck_turns`）收，
 //! 跟記帳之前一樣——不會永遠卡住，只是慢。
 
-use super::run_state::app_ports_p4state;
-use am_ports::BotLock;
+#[cfg(test)]
+use crate::capabilities::Db;
+use super::s6_ports::InterruptionContext;
 use super::*;
 use chrono::{DateTime, Utc};
 use std::collections::HashMap;
@@ -140,7 +141,7 @@ pub(crate) fn owed_turn(bot_id: &str) -> Option<String> {
 
 /// 鍵做了：把 `turn_id` 收成被打斷的 failed（跟說明同一個交易）。寫不進去就記成欠著、排定時重試，回 `Err`——
 /// 呼叫端**不能**回普通的成功。
-pub(crate) async fn interrupted(app: &Arc<App>, bot_id: &str, run_id: &str, turn_id: &str, note: &str) -> anyhow::Result<()> {
+pub(crate) async fn interrupted<C: InterruptionContext>(app: &C, bot_id: &str, run_id: &str, turn_id: &str, note: &str) -> anyhow::Result<()> {
     let p = Pending {
         run_id: run_id.to_string(),
         turn_id: turn_id.to_string(),
@@ -154,7 +155,7 @@ pub(crate) async fn interrupted(app: &Arc<App>, bot_id: &str, run_id: &str, turn
 }
 
 /// 插隊送出的送出鍵生效了：收掉被插隊的那一筆，同一個交易把新的那一則掛上 run（#120）。其餘同 [`interrupted`]。
-pub(crate) async fn send_now_interrupted(app: &Arc<App>, bot_id: &str, run_id: &str, turn_id: &str, new_turn: &str) -> anyhow::Result<()> {
+pub(crate) async fn send_now_interrupted<C: InterruptionContext>(app: &C, bot_id: &str, run_id: &str, turn_id: &str, new_turn: &str) -> anyhow::Result<()> {
     let p = Pending {
         run_id: run_id.to_string(),
         turn_id: turn_id.to_string(),
@@ -176,7 +177,7 @@ pub(crate) fn owe_delivery(bot_id: &str, new_turn: &str, delivery: Option<Delive
     }
 }
 
-async fn owe(app: &Arc<App>, bot_id: &str, mut p: Pending) -> anyhow::Result<()> {
+async fn owe<C: InterruptionContext>(app: &C, bot_id: &str, mut p: Pending) -> anyhow::Result<()> {
     // 這一筆已經欠著插隊送出的收尾（#164）：帳上跟它綁在一起的新那一則要跟著這一次一起收。帳是一筆回合一條，
     // 不帶過來的話，收成了就連它一起 `forget`、收不成就被這一條 `record` 蓋掉——它從此是 run_id 為空的 in_flight。
     if p.new_turn.is_none() {
@@ -207,7 +208,7 @@ const ESC_LOG_SLACK: Duration = Duration::from_secs(1);
 /// 呼叫端握著 bot 鎖，**放鎖之前**呼叫：§4.3 備援計時器等的是同一把鎖，放了鎖它就先把回合收成 `completed_fallback`、
 /// 串流到一半的字當回覆。
 pub(crate) async fn unconfirmed(
-    app: &Arc<App>,
+    app: &impl InterruptionContext,
     bot_id: &str,
     run_id: &str,
     turn_id: &str,
@@ -236,12 +237,12 @@ pub(crate) async fn unconfirmed(
 
 /// 待證的 Esc：log 裡在按鍵之後（而且不早於這一回合開始）出現了使用者中斷的紀錄嗎？讀不到＝沒有證據。
 /// 不早於回合開始：上一回合被按停留下的標記不能拿來證明這一次。
-async fn esc_landed(app: &Arc<App>, bot_id: &str, p: &Pending) -> bool {
+async fn esc_landed(app: &impl InterruptionContext, bot_id: &str, p: &Pending) -> bool {
     let Some(esc_at) = p.esc_at else { return false };
-    let (Ok(Some(bot)), Ok(Some(run))) = (db::bot(&app.db, bot_id).await, db::run(&app.db, &p.run_id).await) else { return false };
+    let (Ok(Some(bot)), Ok(Some(run))) = (db::bot(app.db(), bot_id).await, db::run(app.db(), &p.run_id).await) else { return false };
     let began = sqlx::query_scalar::<_, String>("SELECT created_at FROM turns WHERE id=?")
         .bind(&p.turn_id)
-        .fetch_optional(&app.db)
+        .fetch_optional(app.db())
         .await
         .ok()
         .flatten()
@@ -249,7 +250,7 @@ async fn esc_landed(app: &Arc<App>, bot_id: &str, p: &Pending) -> bool {
         .map(|t| t.with_timezone(&Utc));
     let since = esc_at - chrono::Duration::from_std(ESC_LOG_SLACK).unwrap_or_default();
     let since = began.map_or(since, |b| b.max(since));
-    super::interrupt_grace::log_interrupted_since(app, &bot, &run, since).await
+    app.log_interrupted_since(&bot, &run, since).await
 }
 
 /// 插隊送出的送出鍵不知道生效了沒有（#120）：被插隊的那一筆留在 in_flight，記成待證。`proof` 在的話，之後
@@ -271,7 +272,7 @@ pub(crate) fn unconfirmed_send_now(bot_id: &str, run_id: &str, turn_id: &str, pr
 }
 
 /// 結清這顆 bot 欠著／待證的收尾。呼叫端握著 bot 鎖。`Err`：有一筆 DB 還是寫不進去，那一筆的帳留著（其他的照樣結清）。
-pub(crate) async fn settle_locked(app: &Arc<App>, bot_id: &str, evidence: Evidence) -> anyhow::Result<()> {
+pub(crate) async fn settle_locked<C: InterruptionContext>(app: &C, bot_id: &str, evidence: Evidence) -> anyhow::Result<()> {
     let mut failed = None;
     for p in pending(bot_id) {
         if let Err(e) = settle_one(app, bot_id, &p, evidence).await {
@@ -282,15 +283,15 @@ pub(crate) async fn settle_locked(app: &Arc<App>, bot_id: &str, evidence: Eviden
     failed.map_or(Ok(()), Err)
 }
 
-async fn settle_one(app: &Arc<App>, bot_id: &str, p: &Pending, evidence: Evidence) -> anyhow::Result<()> {
+async fn settle_one<C: InterruptionContext>(app: &C, bot_id: &str, p: &Pending, evidence: Evidence) -> anyhow::Result<()> {
     let now: Option<(String, Option<String>)> =
-        sqlx::query_as("SELECT status, run_id FROM turns WHERE id=?").bind(&p.turn_id).fetch_optional(&app.db).await?;
+        sqlx::query_as("SELECT status, run_id FROM turns WHERE id=?").bind(&p.turn_id).fetch_optional(app.db()).await?;
     let old_in_flight = matches!(&now, Some((status, run)) if status == "in_flight" && run.as_deref() == Some(p.run_id.as_str()));
     // 插隊送出那一則還沒掛上 run：舊的那一筆就算已經被別的路收掉，它也還要有個結果。
     let new_unbound = match &p.new_turn {
         Some(n) => sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM turns WHERE id=? AND status='in_flight' AND run_id IS NULL")
             .bind(&n.id)
-            .fetch_one(&app.db)
+            .fetch_one(app.db())
             .await?
             > 0,
         None => false,
@@ -315,16 +316,15 @@ async fn settle_one(app: &Arc<App>, bot_id: &str, p: &Pending, evidence: Evidenc
 }
 
 /// [`settle_locked`]，自己拿 bot 鎖（定時重試用）。
-async fn settle(app: &Arc<App>, bot_id: &str) -> anyhow::Result<()> {
-    let bot_lock = app_ports_p4state::AppBotLock::new(app);
-    let bot_key = bot_id.to_string();
-    let _g = bot_lock.lock_bot(&bot_key).await;
+async fn settle<C: InterruptionContext>(app: &C, bot_id: &str) -> anyhow::Result<()> {
+    let lock = app.bot_lock(bot_id).await;
+    let _g = lock.lock_owned().await;
     settle_locked(app, bot_id, Evidence::Nothing).await
 }
 
 /// 收掉一筆回合（failed＋說明同一個交易，CAS 在 in_flight），**不記帳**：寫不進去就回 `Err`，由呼叫端決定——
 /// 還沒動外面的（stop、重啟）就不動，已經發生的（run 結束）改用 [`interrupted`] 記成欠著（#156）。
-pub(crate) async fn close_turn(app: &Arc<App>, bot_id: &str, run_id: &str, turn_id: &str, note: &str) -> anyhow::Result<()> {
+pub(crate) async fn close_turn<C: InterruptionContext>(app: &C, bot_id: &str, run_id: &str, turn_id: &str, note: &str) -> anyhow::Result<()> {
     let p = Pending {
         run_id: run_id.to_string(),
         turn_id: turn_id.to_string(),
@@ -345,7 +345,7 @@ async fn shows(proof: Option<SentProof>) -> bool {
 
 /// 收掉那一筆：CAS 在 `status='in_flight'`；贏了才寫說明，兩句同一個交易（說明寫不進去就整筆回滾，下次再試）。
 /// 插隊送出的話，同一個交易把新的那一則掛上 run；掛不上（run 已經不在、另有回合在飛）就把它收成 failed。
-async fn close(app: &Arc<App>, bot_id: &str, p: &Pending) -> anyhow::Result<()> {
+async fn close<C: InterruptionContext>(app: &C, bot_id: &str, p: &Pending) -> anyhow::Result<()> {
     let partial = match codex_partial_for_interruption(app, bot_id, p).await {
         Ok(partial) => partial,
         Err(e) => {
@@ -353,8 +353,8 @@ async fn close(app: &Arc<App>, bot_id: &str, p: &Pending) -> anyhow::Result<()> 
             None
         }
     };
-    let mut tx = app.db.begin().await?;
-    let outcome = app_ports_p4state::turn_fail_on(&mut tx, &p.turn_id, super::turn_controller::DeliveryOnFail::Keep, &p.note).await?;
+    let mut tx = app.db().begin().await?;
+    let outcome = super::turn_controller::fail_on(&mut tx, &p.turn_id, super::turn_controller::DeliveryOnFail::Keep, &p.note).await?;
     let mut notes = Vec::new();
     if outcome == super::turn_controller::Outcome::Applied {
         let conv: String = sqlx::query_scalar("SELECT conversation_id FROM turns WHERE id=?").bind(&p.turn_id).fetch_one(&mut *tx).await?;
@@ -366,7 +366,7 @@ async fn close(app: &Arc<App>, bot_id: &str, p: &Pending) -> anyhow::Result<()> 
                     .await?;
             if !already_answered {
                 notes.push(
-                    app_ports_p4state::insert_message_tx(
+                    super::messages::insert_message_tx(
                         &mut tx,
                         &conv,
                         Some(&p.turn_id),
@@ -380,7 +380,7 @@ async fn close(app: &Arc<App>, bot_id: &str, p: &Pending) -> anyhow::Result<()> 
                 );
             }
         }
-        notes.push(app_ports_p4state::insert_message_tx(&mut tx, &conv, Some(&p.turn_id), "system", &p.note, "system", false, None).await?);
+        notes.push(super::messages::insert_message_tx(&mut tx, &conv, Some(&p.turn_id), "system", &p.note, "system", false, None).await?);
     }
     if let Some(n) = &p.new_turn {
         let bound = sqlx::query(
@@ -398,17 +398,17 @@ async fn close(app: &Arc<App>, bot_id: &str, p: &Pending) -> anyhow::Result<()> 
             > 0;
         if !bound {
             let why = "插隊送出的鍵生效了，但這個 run 已經不在（或另有回合在飛），這一則接不上去。";
-            if app_ports_p4state::turn_fail_on(&mut tx, &n.id, super::turn_controller::DeliveryOnFail::Keep, why).await?
+            if super::turn_controller::fail_on(&mut tx, &n.id, super::turn_controller::DeliveryOnFail::Keep, why).await?
                 == super::turn_controller::Outcome::Applied
             {
                 let conv: String = sqlx::query_scalar("SELECT conversation_id FROM turns WHERE id=?").bind(&n.id).fetch_one(&mut *tx).await?;
-                notes.push(app_ports_p4state::insert_message_tx(&mut tx, &conv, Some(&n.id), "system", why, "system", false, None).await?);
+                notes.push(super::messages::insert_message_tx(&mut tx, &conv, Some(&n.id), "system", why, "system", false, None).await?);
             }
         }
     }
     tx.commit().await?;
     for m in notes {
-        app_ports_p4state::emit_message_added(app, bot_id, m).await;
+        super::messages::emit_message_added(app, bot_id, m).await;
     }
     if let Some(n) = &p.new_turn {
         // 掛不上 run、收成 failed 的那一則也要寫（#163）：送出鍵生效過，字送出去了——送達與回合成敗是兩件事（§4.4a）。
@@ -416,23 +416,24 @@ async fn close(app: &Arc<App>, bot_id: &str, p: &Pending) -> anyhow::Result<()> 
             // 寫不進去就記在送達結果的帳上（#149，`owed_delivery` 自己重試）：這個交易已經 commit，打斷這一半不重來。
             let _ = super::owed_delivery::delivered_at(app, bot_id, &n.id, *rec, at).await;
         }
-        app_ports_p4state::emit_turn(app, &n.id).await;
+        app.turn_changed(&n.id).await;
     }
     // 推回合結束：排著的派工由它叫醒（`fail_in_flight` 一樣靠這個）。
-    app_ports_p4state::emit_turn(app, &p.turn_id).await;
+    app.turn_changed(&p.turn_id).await;
     Ok(())
 }
 
 /// Read Codex's finalized TUI stream after a confirmed interruption. The captured message carries
 /// `incomplete = 1`; failure to read a pane must never keep an already-sent Esc from closing the turn.
-async fn codex_partial_for_interruption(app: &(impl crate::capabilities::Db + crate::capabilities::HerdrRoutes), bot_id: &str, p: &Pending) -> anyhow::Result<Option<(String, String)>> {
+async fn codex_partial_for_interruption(app: &(impl crate::capabilities::Db + crate::capabilities::HerdrRoutes + crate::hosts::HostsAccess), bot_id: &str, p: &Pending) -> anyhow::Result<Option<(String, String)>> {
     let Some(bot) = db::bot(app.db(), bot_id).await? else { return Ok(None) };
     if bot.kind != "codex" {
         return Ok(None);
     }
     let Some(run) = db::run(app.db(), &p.run_id).await? else { return Ok(None) };
     let Some(pane_id) = run.pane_id.as_deref() else { return Ok(None) };
-    let Some(client) = app_ports_p4state::herdr_client_for_run(app, &run).await else { return Ok(None) };
+    let Ok(client) = super::client_for_run(app, &run).await else { return Ok(None) };
+    let client = client.client;
     let read = client.pane_read(pane_id, "recent_unwrapped", 200).await?;
     let sent = super::turn_echo_texts(app, &p.turn_id).await?;
     Ok(super::codex_partial_reply(&read.text, &sent).map(|reply| (reply, read.text)))
@@ -445,10 +446,10 @@ const RESTART_INTERRUPT_NOTE: &str = "interrupted by user（在 daemon 重啟之
 /// 停著的時候直接在 pane 裡按 Esc——claude 2.1.276+ 按 Esc 不送任何 hook（#223），接回 poller 之後它會被 §4.3 備援當成答完了
 /// 收掉，下一句的 Stop 還會認領它。session log 裡我們那一則之後、答完之前有中斷紀錄，就照 Esc 收。
 /// `Ok(true)`＝收掉了，不必接回；`Ok(false)`＝照舊接回（沒有這個證據、讀不到 log、找不到我們那一則）。
-pub(crate) async fn adopt_interrupted_on_restart(app: &Arc<App>, run: &db::Run, turn: &db::Turn) -> anyhow::Result<bool> {
-    let Some(bot) = db::bot(&app.db, &run.bot_id).await? else { return Ok(false) };
+pub(crate) async fn adopt_interrupted_on_restart(app: &impl InterruptionContext, run: &db::Run, turn: &db::Turn) -> anyhow::Result<bool> {
+    let Some(bot) = db::bot(app.db(), &run.bot_id).await? else { return Ok(false) };
     let sent = turn_echo_texts(app, &turn.id).await?;
-    if sent.is_empty() || !super::interrupt_grace::log_interrupted_after(app, &bot, run, &sent).await {
+    if sent.is_empty() || !app.log_interrupted_after(&bot, run, &sent).await {
         return Ok(false);
     }
     close_turn(app, &run.bot_id, &run.id, &turn.id, RESTART_INTERRUPT_NOTE).await?;
@@ -461,7 +462,7 @@ pub(crate) async fn adopt_interrupted_on_restart(app: &Arc<App>, run: &db::Run, 
 ///
 /// 只收 `boot`（開機那一刻）之前就結束的 run：開機恢復讀不到時會在背景重試（#75），那時才結束的 run 的收尾在這個行程
 /// 自己的記憶體帳上，不歸這裡。回 `true`＝都收完了；讀不到或有一筆收不成回 `false`，下一輪再來。
-pub(crate) async fn adopt_turns_of_ended_runs(app: &Arc<App>, boot: &str) -> bool {
+pub(crate) async fn adopt_turns_of_ended_runs(app: &impl InterruptionContext, boot: &str) -> bool {
     let rows: Vec<(String, String, String, String)> = match sqlx::query_as(
         "SELECT t.id, t.run_id, c.bot_id, r.state FROM turns t
            JOIN runs r ON r.id = t.run_id
@@ -470,7 +471,7 @@ pub(crate) async fn adopt_turns_of_ended_runs(app: &Arc<App>, boot: &str) -> boo
             AND (r.ended_at IS NULL OR r.ended_at <= ?)",
     )
     .bind(boot)
-    .fetch_all(&app.db)
+    .fetch_all(app.db())
     .await
     {
         Ok(r) => r,
@@ -481,8 +482,8 @@ pub(crate) async fn adopt_turns_of_ended_runs(app: &Arc<App>, boot: &str) -> boo
     };
     let mut done = true;
     for (turn, run, bot, state) in rows {
-        let bot_lock = app_ports_p4state::AppBotLock::new(app);
-        let _g = bot_lock.lock_bot(&bot).await;
+        let lock = app.bot_lock(&bot).await;
+        let _g = lock.lock_owned().await;
         let note = format!("這一回合的 run 已經結束（{state}），當時沒能把回合收掉；daemon 重啟時補收。");
         match close_turn(app, &bot, &run, &turn, &note).await {
             Ok(()) => tracing::warn!(turn = %turn, run = %run, %state, "closed a turn left in flight on an ended run"),
@@ -501,13 +502,13 @@ pub(crate) async fn adopt_turns_of_ended_runs(app: &Arc<App>, boot: &str) -> boo
 ///
 /// 只收 `boot`（開機那一刻）之前建立的：開機恢復讀不到時會在背景重試（#75），那時這個行程自己正在插隊送出的那一則
 /// 同樣是 in_flight、還沒掛上 run，不能被當成孤兒收掉。回 `true`＝都收完了；讀不到或有一筆收不成回 `false`。
-pub(crate) async fn adopt_unbound_send_nows(app: &Arc<App>, boot: &str) -> bool {
+pub(crate) async fn adopt_unbound_send_nows(app: &impl InterruptionContext, boot: &str) -> bool {
     let rows: Vec<(String, String, String)> = match sqlx::query_as(
         "SELECT t.id, t.conversation_id, c.bot_id FROM turns t JOIN conversations c ON c.id = t.conversation_id
           WHERE t.status = 'in_flight' AND t.run_id IS NULL AND t.created_at <= ?",
     )
     .bind(boot)
-    .fetch_all(&app.db)
+    .fetch_all(app.db())
     .await
     {
         Ok(r) => r,
@@ -519,8 +520,8 @@ pub(crate) async fn adopt_unbound_send_nows(app: &Arc<App>, boot: &str) -> bool 
     let mut done = true;
     let why = "插隊送出途中 daemon 停了：送出鍵有沒有生效不知道。正在跑的那一回合沒有被收掉；這一句若真的送出去了，回覆會以外部回合出現。";
     for (turn, conv, bot) in rows {
-        let bot_lock = app_ports_p4state::AppBotLock::new(app);
-        let _g = bot_lock.lock_bot(&bot).await;
+        let lock = app.bot_lock(&bot).await;
+        let _g = lock.lock_owned().await;
         // 送出鍵其實生效了（#229）：照平常的收尾做，不收成 unknown——不然 claude 替它送的 Stop 會認領被插隊的那一筆。
         match adopt_landed_send_now(app, &bot, &turn).await {
             Ok(true) => {
@@ -535,7 +536,7 @@ pub(crate) async fn adopt_unbound_send_nows(app: &Arc<App>, boot: &str) -> bool 
             }
         }
         let res: anyhow::Result<Option<db::Message>> = async {
-            let mut tx = app.db.begin().await?;
+            let mut tx = app.db().begin().await?;
             if super::turn_controller::fail_on(&mut tx, &turn, super::turn_controller::DeliveryOnFail::Keep, why).await?
                 != super::turn_controller::Outcome::Applied
             {
@@ -550,8 +551,8 @@ pub(crate) async fn adopt_unbound_send_nows(app: &Arc<App>, boot: &str) -> bool 
         match res {
             Ok(Some(m)) => {
                 tracing::warn!(turn = %turn, bot = %bot, "a send-now was mid-delivery when the daemon stopped; closed it as unknown");
-                emit_message_added(app, &bot, m).await;
-                emit_turn(app, &turn).await;
+                super::messages::emit_message_added(app, &bot, m).await;
+                app.turn_changed(&turn).await;
             }
             Ok(None) => {}
             Err(e) => {
@@ -567,16 +568,16 @@ pub(crate) async fn adopt_unbound_send_nows(app: &Arc<App>, boot: &str) -> bool 
 /// 在它建立之後出現了這一句。生效了就照平常的收尾做（[`close`]）：run 上在飛的那一筆收成「被插隊送出打斷」、這一則掛上 run、
 /// 送達記 ok＋有證據——之後 claude 替它送的 Stop 才歸它，不會認領被插隊的那一筆。
 /// `Ok(true)`＝收好了；`Ok(false)`＝看不到證據、讀不到（遠端、grok），或 run 上已經沒有在飛的那一筆：照舊當成不知道。
-async fn adopt_landed_send_now(app: &Arc<App>, bot_id: &str, turn_id: &str) -> anyhow::Result<bool> {
-    let (Some(bot), Some(run)) = (db::bot(&app.db, bot_id).await?, db::active_run(&app.db, bot_id).await?) else { return Ok(false) };
+async fn adopt_landed_send_now(app: &impl InterruptionContext, bot_id: &str, turn_id: &str) -> anyhow::Result<bool> {
+    let (Some(bot), Some(run)) = (db::bot(app.db(), bot_id).await?, db::active_run(app.db(), bot_id).await?) else { return Ok(false) };
     let row: Option<(Option<String>, String)> =
-        sqlx::query_as("SELECT prompt_text, created_at FROM turns WHERE id=?").bind(turn_id).fetch_optional(&app.db).await?;
+        sqlx::query_as("SELECT prompt_text, created_at FROM turns WHERE id=?").bind(turn_id).fetch_optional(app.db()).await?;
     let Some((Some(text), created)) = row else { return Ok(false) };
     let Ok(since) = DateTime::parse_from_rfc3339(&created) else { return Ok(false) };
-    if !super::interrupt_grace::log_shows_prompt_since(app, &bot, &run, &text, since.with_timezone(&Utc)).await {
+    if !app.log_shows_prompt_since(&bot, &run, &text, since.with_timezone(&Utc)).await {
         return Ok(false);
     }
-    let Some(interrupted) = db::in_flight_turn(&app.db, &run.id).await? else { return Ok(false) };
+    let Some(interrupted) = db::in_flight_turn(app.db(), &run.id).await? else { return Ok(false) };
     let p = Pending {
         run_id: run.id.clone(),
         turn_id: interrupted.id,
@@ -591,11 +592,11 @@ async fn adopt_landed_send_now(app: &Arc<App>, bot_id: &str, turn_id: &str) -> a
 }
 
 /// 欠著的帳沒有 hook 也要補上：DB 一時寫不進去多半很快就好。只補欠著的（待證的要證據，不是時間）。
-pub(crate) fn schedule_retry(app: &Arc<App>, bot_id: &str) {
+pub(crate) fn schedule_retry<C: InterruptionContext>(app: &C, bot_id: &str) {
     if cfg!(test) {
         return;
     }
-    let app = app.clone();
+    let app = (*app).clone();
     let bot_id = bot_id.to_string();
     tokio::spawn(async move {
         for secs in RETRY_DELAYS_SECS {
@@ -659,7 +660,7 @@ mod tests {
         let bot = tt::claude_bot(&app, &env.project_id, name).await;
         let run = tt::fake_run(&app, &bot.id).await;
         env.herdr.set_agent("agent", &format!("pane-{}", bot.id), true);
-        let conv = db::conversation_id(&app.db, &bot.id).await.unwrap();
+        let conv = db::conversation_id(app.db(), &bot.id).await.unwrap();
         let turn = db::ulid();
         sqlx::query(
             "INSERT INTO turns (id, conversation_id, run_id, origin, status, delivery, created_at, prompt_text)
@@ -669,7 +670,7 @@ mod tests {
         .bind(&conv)
         .bind(&run)
         .bind(db::now())
-        .execute(&app.db)
+        .execute(app.db())
         .await
         .unwrap();
         Busy { env, bot, run, turn }
@@ -678,23 +679,23 @@ mod tests {
     /// SQLite 這一刻寫不進 `turns.status`（磁碟、鎖、I/O 錯誤）。
     async fn lose_turn_writes(app: &Arc<App>) {
         sqlx::query("CREATE TRIGGER lost_turn_write BEFORE UPDATE OF status ON turns BEGIN SELECT RAISE(ABORT, 'disk I/O error'); END")
-            .execute(&app.db)
+            .execute(app.db())
             .await
             .unwrap();
     }
 
     async fn heal_turn_writes(app: &Arc<App>) {
-        sqlx::query("DROP TRIGGER lost_turn_write").execute(&app.db).await.unwrap();
+        sqlx::query("DROP TRIGGER lost_turn_write").execute(app.db()).await.unwrap();
     }
 
     async fn status_of(app: &Arc<App>, turn: &str) -> String {
-        sqlx::query_scalar("SELECT status FROM turns WHERE id=?").bind(turn).fetch_one(&app.db).await.unwrap()
+        sqlx::query_scalar("SELECT status FROM turns WHERE id=?").bind(turn).fetch_one(app.db()).await.unwrap()
     }
 
     async fn system_notes(app: &Arc<App>, turn: &str) -> Vec<String> {
         sqlx::query_scalar("SELECT content FROM messages WHERE turn_id=? AND role='system' ORDER BY created_at")
             .bind(turn)
-            .fetch_all(&app.db)
+            .fetch_all(app.db())
             .await
             .unwrap()
     }
@@ -703,7 +704,7 @@ mod tests {
     async fn a_codex_interrupt_keeps_the_streamed_plan_marked_incomplete() {
         let b = busy("codex-interrupted-plan").await;
         let app = b.env.app.clone();
-        sqlx::query("UPDATE bots SET kind='codex' WHERE id=?").bind(&b.bot.id).execute(&app.db).await.unwrap();
+        sqlx::query("UPDATE bots SET kind='codex' WHERE id=?").bind(&b.bot.id).execute(app.db()).await.unwrap();
         b.env.herdr.set_screen(
             &format!("pane-{}", b.bot.id),
             "› 跑一下測試\n\n• Proposed Plan\n  Compare the current behavior with the rollout.\n■ Conversation interrupted - tell the model what to do differently.\n",
@@ -716,7 +717,7 @@ mod tests {
             "SELECT role, content, incomplete, source FROM messages WHERE turn_id=? ORDER BY rowid",
         )
         .bind(&b.turn)
-        .fetch_all(&app.db)
+        .fetch_all(app.db())
         .await
         .unwrap();
         assert_eq!(
@@ -829,14 +830,14 @@ mod tests {
         assert_eq!(status_of(&app, &b.turn).await, "failed");
 
         // 下一回合開始了。
-        let conv = db::conversation_id(&app.db, &b.bot.id).await.unwrap();
+        let conv = db::conversation_id(app.db(), &b.bot.id).await.unwrap();
         let next = db::ulid();
         sqlx::query("INSERT INTO turns (id, conversation_id, run_id, origin, status, delivery, created_at) VALUES (?,?,?,'web','in_flight','ok',?)")
             .bind(&next)
             .bind(&conv)
             .bind(&b.run)
             .bind(db::now())
-            .execute(&app.db)
+            .execute(app.db())
             .await
             .unwrap();
         settle(&app, &b.bot.id).await.unwrap();
@@ -921,7 +922,7 @@ mod tests {
     async fn transcript(b: &Busy, lines: &[String]) -> std::path::PathBuf {
         let path = tt::trusted_transcript(&b.env.app, &b.bot.id, &b.env.dir, &format!("t-{}.jsonl", db::ulid())).await;
         std::fs::write(&path, lines.join("\n") + "\n").unwrap();
-        sqlx::query("UPDATE runs SET transcript_path=? WHERE id=?").bind(path.to_string_lossy()).bind(&b.run).execute(&b.env.app.db).await.unwrap();
+        sqlx::query("UPDATE runs SET transcript_path=? WHERE id=?").bind(path.to_string_lossy()).bind(&b.run).execute(b.env.app.db()).await.unwrap();
         path
     }
     fn append(path: &std::path::Path, lines: &[String]) {
@@ -996,7 +997,7 @@ mod tests {
             "SELECT m.turn_id, m.content FROM messages m JOIN turns t ON t.id = m.turn_id WHERE t.run_id=? AND m.role='assistant'",
         )
         .bind(&b.run)
-        .fetch_all(&app.db)
+        .fetch_all(app.db())
         .await
         .unwrap();
         assert_eq!(replies.len(), 1, "{replies:?}");
@@ -1010,7 +1011,7 @@ mod tests {
     async fn an_older_interruption_in_the_transcript_does_not_prove_this_esc() {
         let b = busy("esc-unknown-old-marker").await;
         let app = b.env.app.clone();
-        let began: String = sqlx::query_scalar("SELECT created_at FROM turns WHERE id=?").bind(&b.turn).fetch_one(&app.db).await.unwrap();
+        let began: String = sqlx::query_scalar("SELECT created_at FROM turns WHERE id=?").bind(&b.turn).fetch_one(app.db()).await.unwrap();
         let just_before = (chrono::DateTime::parse_from_rfc3339(&began).unwrap() - chrono::Duration::milliseconds(200))
             .with_timezone(&chrono::Utc)
             .to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
@@ -1048,7 +1049,7 @@ mod tests {
         assert_eq!(system_notes(&app, &b.turn).await, vec![INTERRUPT_NOTE.to_string()]);
         let pinned: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM messages WHERE turn_id=? AND role='assistant'")
             .bind(&b.turn)
-            .fetch_one(&app.db)
+            .fetch_one(app.db())
             .await
             .unwrap();
         assert_eq!(pinned, 0, "下一句的回覆沒有掛到被中斷的回合上");
@@ -1075,13 +1076,13 @@ mod tests {
         let app = b.env.app.clone();
         lose_turn_writes(&app).await;
         interrupt_bot(&app, &b.bot.id).await.expect_err("寫不進去");
-        assert!(db::in_flight_turn(&app.db, &b.run).await.unwrap().is_some(), "還擋著");
+        assert!(db::in_flight_turn(app.db(), &b.run).await.unwrap().is_some(), "還擋著");
 
         settle(&app, &b.bot.id).await.expect_err("DB 還沒好：這一輪補不上，帳留著");
         assert!(owes(&b.bot.id, &b.turn));
         heal_turn_writes(&app).await;
         settle(&app, &b.bot.id).await.expect("定時重試的下一輪");
-        assert!(db::in_flight_turn(&app.db, &b.run).await.unwrap().is_none(), "不再擋著排隊的那一則");
+        assert!(db::in_flight_turn(app.db(), &b.run).await.unwrap().is_none(), "不再擋著排隊的那一則");
         assert!(!owes(&b.bot.id, &b.turn), "帳結清了");
         assert_eq!(escs(&b.env), 1, "重試從不按鍵");
     }
@@ -1122,7 +1123,7 @@ mod tests {
     async fn a_send_now_cut_off_by_a_restart_is_closed_as_unknown() {
         let b = busy("send-now-restart").await;
         let app = b.env.app.clone();
-        let conv = db::conversation_id(&app.db, &b.bot.id).await.unwrap();
+        let conv = db::conversation_id(app.db(), &b.bot.id).await.unwrap();
         let orphan = db::ulid();
         sqlx::query(
             "INSERT INTO turns (id, conversation_id, run_id, origin, status, delivery, created_at, prompt_text)
@@ -1131,7 +1132,7 @@ mod tests {
         .bind(&orphan)
         .bind(&conv)
         .bind(db::now())
-        .execute(&app.db)
+        .execute(app.db())
         .await
         .unwrap();
 
@@ -1139,7 +1140,7 @@ mod tests {
         crate::reconcile::rearm_progress(&fresh).await;
 
         let (status, delivery): (String, String) =
-            sqlx::query_as("SELECT status, delivery FROM turns WHERE id=?").bind(&orphan).fetch_one(&app.db).await.unwrap();
+            sqlx::query_as("SELECT status, delivery FROM turns WHERE id=?").bind(&orphan).fetch_one(app.db()).await.unwrap();
         assert_eq!((status.as_str(), delivery.as_str()), ("failed", "unknown"));
         assert!(system_notes(&app, &orphan).await.iter().any(|n| n.contains("daemon 停了")));
         assert_eq!(status_of(&app, &b.turn).await, "in_flight", "被插隊的那一筆不動");
@@ -1151,7 +1152,7 @@ mod tests {
     async fn after_a_restart_the_send_now_answer_is_not_pinned_on_the_turn_it_interrupted() {
         let b = busy("send-now-restart-answer").await;
         let app = b.env.app.clone();
-        let conv = db::conversation_id(&app.db, &b.bot.id).await.unwrap();
+        let conv = db::conversation_id(app.db(), &b.bot.id).await.unwrap();
         let orphan = db::ulid();
         sqlx::query(
             "INSERT INTO turns (id, conversation_id, run_id, origin, status, delivery, created_at, prompt_text)
@@ -1160,7 +1161,7 @@ mod tests {
         .bind(&orphan)
         .bind(&conv)
         .bind(at(-50))
-        .execute(&app.db)
+        .execute(app.db())
         .await
         .unwrap();
         // send-now 生效時 claude 寫的：中斷標記（帶新那一則的 promptId，#178）緊接著新那一則。
@@ -1170,7 +1171,7 @@ mod tests {
         crate::reconcile::rearm_progress(&fresh).await;
         // transcript 證明送出鍵生效了：照平常的收尾——舊的收掉、新的掛上 run、送達有證據。
         let (status, run, delivery, verified): (String, Option<String>, String, i64) =
-            sqlx::query_as("SELECT status, run_id, delivery, delivery_verified FROM turns WHERE id=?").bind(&orphan).fetch_one(&app.db).await.unwrap();
+            sqlx::query_as("SELECT status, run_id, delivery, delivery_verified FROM turns WHERE id=?").bind(&orphan).fetch_one(app.db()).await.unwrap();
         assert_eq!((status.as_str(), run.as_deref(), delivery.as_str(), verified), ("in_flight", Some(b.run.as_str()), "ok", 1));
         assert_eq!(system_notes(&app, &b.turn).await, vec![SEND_NOW_NOTE.to_string()]);
         let stop = crate::hookrecv::HookBody {
@@ -1186,7 +1187,7 @@ mod tests {
 
         let on_old: Vec<String> = sqlx::query_scalar("SELECT content FROM messages WHERE turn_id=? AND role='assistant'")
             .bind(&b.turn)
-            .fetch_all(&app.db)
+            .fetch_all(app.db())
             .await
             .unwrap();
         assert!(on_old.is_empty(), "新那一則的回覆掛到了被插隊的那一筆上：{on_old:?}");
@@ -1195,7 +1196,7 @@ mod tests {
             "SELECT COUNT(*) FROM messages m JOIN turns t ON t.id = m.turn_id WHERE t.conversation_id=? AND m.role='assistant' AND m.content='新那一則的回覆'",
         )
         .bind(&conv)
-        .fetch_one(&app.db)
+        .fetch_one(app.db())
         .await
         .unwrap();
         assert_eq!(answered, 1, "回覆還在對話裡");
@@ -1208,7 +1209,7 @@ mod tests {
     async fn after_a_restart_a_send_now_without_proof_stays_unknown() {
         let b = busy("send-now-restart-no-proof").await;
         let app = b.env.app.clone();
-        let conv = db::conversation_id(&app.db, &b.bot.id).await.unwrap();
+        let conv = db::conversation_id(app.db(), &b.bot.id).await.unwrap();
         let orphan = db::ulid();
         sqlx::query(
             "INSERT INTO turns (id, conversation_id, run_id, origin, status, delivery, created_at, prompt_text)
@@ -1217,7 +1218,7 @@ mod tests {
         .bind(&orphan)
         .bind(&conv)
         .bind(at(-50))
-        .execute(&app.db)
+        .execute(app.db())
         .await
         .unwrap();
         transcript(&b, &[prompt_line("先看這句", &at(-60_000)), prompt_line("跑一下測試", &at(-5_000))]).await;
@@ -1226,7 +1227,7 @@ mod tests {
         crate::reconcile::rearm_progress(&fresh).await;
 
         let (status, delivery): (String, String) =
-            sqlx::query_as("SELECT status, delivery FROM turns WHERE id=?").bind(&orphan).fetch_one(&app.db).await.unwrap();
+            sqlx::query_as("SELECT status, delivery FROM turns WHERE id=?").bind(&orphan).fetch_one(app.db()).await.unwrap();
         assert_eq!((status.as_str(), delivery.as_str()), ("failed", "unknown"));
         assert_eq!(status_of(&app, &b.turn).await, "in_flight", "被插隊的那一筆不動");
     }
@@ -1263,7 +1264,7 @@ mod tests {
         crate::hookrecv::process(&fresh, &stop).await.unwrap();
         let on_old: Vec<String> = sqlx::query_scalar("SELECT content FROM messages WHERE turn_id=? AND role='assistant'")
             .bind(&b.turn)
-            .fetch_all(&app.db)
+            .fetch_all(app.db())
             .await
             .unwrap();
         assert!(on_old.is_empty(), "下一句的回覆掛到了被按停的那一筆上：{on_old:?}");
@@ -1297,7 +1298,7 @@ mod tests {
     async fn a_turn_left_in_flight_on_an_ended_run_is_closed_after_a_restart() {
         let b = busy("ended-run-turn").await;
         let app = b.env.app.clone();
-        sqlx::query("UPDATE runs SET state='exited', ended_at=? WHERE id=?").bind(db::now()).bind(&b.run).execute(&app.db).await.unwrap();
+        sqlx::query("UPDATE runs SET state='exited', ended_at=? WHERE id=?").bind(db::now()).bind(&b.run).execute(app.db()).await.unwrap();
 
         let fresh = tt::restart_app(&b.env).await;
         crate::reconcile::rearm_progress(&fresh).await;
@@ -1316,14 +1317,14 @@ mod tests {
         assert_eq!(mark_run_exited(&app, &b.run, "pane exited").await, RunExit::TurnOwed);
 
         let second_run = tt::fake_run(&app, &b.bot.id).await;
-        let conv = db::conversation_id(&app.db, &b.bot.id).await.unwrap();
+        let conv = db::conversation_id(app.db(), &b.bot.id).await.unwrap();
         let second = db::ulid();
         sqlx::query("INSERT INTO turns (id, conversation_id, run_id, origin, status, delivery, created_at) VALUES (?,?,?,'web','in_flight','ok',?)")
             .bind(&second)
             .bind(&conv)
             .bind(&second_run)
             .bind(db::now())
-            .execute(&app.db)
+            .execute(app.db())
             .await
             .unwrap();
         assert_eq!(mark_run_exited(&app, &second_run, "pane exited").await, RunExit::TurnOwed);

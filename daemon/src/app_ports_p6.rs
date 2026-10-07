@@ -155,7 +155,7 @@ impl JudgeOps for Arc<App> {
 
 impl HostProbes for Arc<App> {
     async fn pane_shows_login_problem(&self, run: &db::Run) -> Option<bool> {
-        crate::lifecycle::app_ports_p4::shows_login_problem(self, run).await
+        crate::app_ports_p4::shows_login_problem(self, run).await
     }
     async fn process_dump(&self, host: &str) -> anyhow::Result<String> {
         crate::memproc::dump(self, host).await

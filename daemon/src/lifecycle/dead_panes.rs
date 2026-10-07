@@ -5,6 +5,7 @@
 //! （RPC 失敗、遠端斷線都不是證據，同 stop 的判準），而且 herdr 計畫中的維護期間不動（所有 pane 同時消失不是 agent 做完了，§6.5.2）。
 
 use super::*;
+use crate::{capabilities::Db, lifecycle::s6_ports::DeadPanesServices};
 
 /// 這顆 run 的 pane herdr 明確說不在。讀不到（沒 pane id、沒 client、RPC 失敗）＝不知道，回 `false`。
 pub(crate) async fn pane_gone(app: &(impl crate::capabilities::Db + crate::capabilities::HerdrRoutes + crate::hosts::HostsAccess), run: &db::Run) -> bool {
@@ -59,12 +60,12 @@ pub(crate) async fn pane_target_stale(client: &HerdrClient, run: &db::Run) -> bo
 }
 
 /// 掃所有 running 的 run，pane 明確不在的收成 exited；回收掉的 run id。
-pub(crate) async fn sweep(app: &Arc<App>) -> Vec<String> {
+pub(crate) async fn sweep(app: &(impl Db + DeadPanesServices + crate::lifecycle::s6_ports::QueueContext + crate::capabilities::HerdrRoutes + crate::hosts::HostsAccess)) -> Vec<String> {
     // 讀不到維護狀態就不動：寧可晚收，不在 herdr 重啟中把整批活的 run 收掉。
-    if !matches!(crate::runners::herdr_maintenance::active(app).await, Ok(None)) {
+    if app.maintenance_window_active().await {
         return Vec::new();
     }
-    let Ok(runs) = db::all_active_runs(&app.db).await else { return Vec::new() };
+    let Ok(runs) = db::all_active_runs(app.db()).await else { return Vec::new() };
     let mut gone = Vec::new();
     for run in runs.into_iter().filter(|r| r.state == "running") {
         if pane_gone(app, &run).await && mark_run_exited(app, &run.id, "pane gone").await != RunExit::NotRecorded {

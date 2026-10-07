@@ -18,6 +18,7 @@
 //! `Submitted`; `NotAttempted` — **nothing was sent**, the turn must not be left in flight; and
 //! `Unproven` — keys were sent and the result cannot be proven, which is what `unknown` means.
 
+use crate::state::App;
 use super::*;
 use super::send_now::ports::{CodexSendPort};
 use std::time::Duration;

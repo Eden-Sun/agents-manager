@@ -3,13 +3,13 @@
 //! A retry here only writes the observed snapshot to SQLite. It never sends a slash command or
 //! picker key, and every write stays bound to the run that produced the readback.
 
-use super::run_state::app_ports_p4state;
-use am_ports::EventSink;
-use crate::state::App;
+#[cfg(test)]
+use crate::capabilities::Db;
+use crate::lifecycle::s6_ports::LiveApplyDebtContext;
 use sqlx::{FromRow, SqlitePool};
 use std::{
     collections::{HashMap, HashSet},
-    sync::{Arc, Mutex, OnceLock},
+    sync::{Mutex, OnceLock},
     time::Duration,
 };
 
@@ -35,8 +35,8 @@ fn workers() -> &'static Mutex<HashSet<String>> {
     WORKERS.get_or_init(Default::default)
 }
 
-pub(crate) async fn persist_and_commit(app: &Arc<App>, debt: RuntimeDebt) -> Result<(), String> {
-    if let Err(error) = store_debt(&app.db, &debt).await {
+pub(crate) async fn persist_and_commit<A: LiveApplyDebtContext>(app: &A, debt: RuntimeDebt) -> Result<(), String> {
+    if let Err(error) = store_debt(app.db(), &debt).await {
         memory_debts()
             .lock()
             .unwrap_or_else(|e| e.into_inner())
@@ -45,9 +45,9 @@ pub(crate) async fn persist_and_commit(app: &Arc<App>, debt: RuntimeDebt) -> Res
         return Err(format!("live_runtime_debt_store_failed: {error}"));
     }
 
-    match commit_debt(&app.db, &debt.run_id).await {
+    match commit_debt(app.db(), &debt.run_id).await {
         Ok(Some(_)) | Ok(None) => {
-            if let Err(error) = app_ports_p4state::stamp_live_revision(&app.db, &debt.run_id).await {
+            if let Err(error) = app.stamp_live_revision(app.db(), &debt.run_id).await {
                 tracing::warn!(run_id = %debt.run_id, error = %error, "live runtime was stored; launch revision stamp remains retryable");
                 schedule_retry(app, &debt.run_id);
             }
@@ -121,7 +121,7 @@ async fn commit_debt(pool: &SqlitePool, run_id: &str) -> Result<Option<RuntimeDe
 
 /// One DB-only retry step. It is also used by deterministic tests to release an injected SQL fault
 /// without waiting on the background backoff loop.
-pub(crate) async fn retry_once(app: &(impl crate::capabilities::Db + crate::capabilities::Emit + crate::capabilities::BotStatusEmit), run_id: &str) -> Result<bool, sqlx::Error> {
+pub(crate) async fn retry_once(app: &impl LiveApplyDebtContext, run_id: &str) -> Result<bool, sqlx::Error> {
     let memory = memory_debts()
         .lock()
         .unwrap_or_else(|e| e.into_inner())
@@ -137,20 +137,20 @@ pub(crate) async fn retry_once(app: &(impl crate::capabilities::Db + crate::capa
 
     let committed = commit_debt(app.db(), run_id).await?;
     if let Some(committed) = committed {
-        app_ports_p4state::stamp_live_revision(app.db(), run_id).await?;
-        let _ = app_ports_p4state::AppEventSink::new(app).bot_status_changed(&committed.bot_id).await;
+        app.stamp_live_revision(app.db(), run_id).await?;
+        app.emit_bot_status(&committed.bot_id).await;
         return Ok(true);
     }
-    let stamped = app_ports_p4state::stamp_live_revision(app.db(), run_id).await?;
+    let stamped = app.stamp_live_revision(app.db(), run_id).await?;
     if stamped {
         if let Ok(Some(run)) = crate::db::run(app.db(), run_id).await {
-            let _ = app_ports_p4state::AppEventSink::new(app).bot_status_changed(&run.bot_id).await;
+            app.emit_bot_status(&run.bot_id).await;
         }
     }
     Ok(stamped)
 }
 
-fn schedule_retry(app: &Arc<App>, run_id: &str) {
+fn schedule_retry<A: LiveApplyDebtContext>(app: &A, run_id: &str) {
     let should_start = workers()
         .lock()
         .unwrap_or_else(|e| e.into_inner())
@@ -158,7 +158,7 @@ fn schedule_retry(app: &Arc<App>, run_id: &str) {
     if !should_start {
         return;
     }
-    let (app, run_id) = (app.clone(), run_id.to_string());
+    let (app, run_id) = ((*app).clone(), run_id.to_string());
     tokio::spawn(async move {
         let mut delay = Duration::from_millis(250);
         loop {
@@ -184,11 +184,11 @@ fn schedule_retry(app: &Arc<App>, run_id: &str) {
 }
 
 /// Called during daemon startup so debts survive a process restart.
-pub(crate) async fn recover(app: &Arc<App>) {
+pub(crate) async fn recover(app: &impl LiveApplyDebtContext) {
     match sqlx::query_scalar::<_, String>(
         "SELECT run_id FROM live_apply_debts UNION SELECT id FROM runs WHERE live_rev IS NOT NULL",
     )
-    .fetch_all(&app.db)
+    .fetch_all(app.db())
     .await
     {
         Ok(run_ids) => {
@@ -226,9 +226,9 @@ mod tests {
             runtime_fast: None,
             created_at: crate::db::now(),
         };
-        store_debt(&e.app.db, &debt).await.unwrap();
+        store_debt(e.app.db(), &debt).await.unwrap();
 
-        let mut writer = e.app.db.begin_with("BEGIN IMMEDIATE").await.unwrap();
+        let mut writer = e.app.db().begin_with("BEGIN IMMEDIATE").await.unwrap();
         sqlx::query("UPDATE runs SET agent_status = 'working' WHERE id = ?")
             .bind(&run_id)
             .execute(&mut *writer)
@@ -242,7 +242,7 @@ mod tests {
 
         let runtime: Option<String> = sqlx::query_scalar("SELECT runtime_model FROM runs WHERE id = ?")
             .bind(&run_id)
-            .fetch_one(&e.app.db)
+            .fetch_one(e.app.db())
             .await
             .unwrap();
         assert_eq!(runtime.as_deref(), Some("claude-opus-5-5"));

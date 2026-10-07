@@ -1,15 +1,14 @@
 //! Stopping, interrupting and aborting: the ways a run or a turn ends on purpose.
 
+#[cfg(test)]
+use crate::capabilities::{BotLocks, Db};
+use crate::hosts::HostsAccess;
 use super::*;
-use super::start::ports::{HandoffSessionRepo, PaneWatchPort, PreviewPort, ShareSessionRepo, emit_object, bot_status, turn_changed};
-use super::app_ports_p4::{AppEventSink, AppTurnEvents};
-use super::start::app_ports_p4sess::AppBotLock;
-use am_ports::BotLock;
+use super::s6_ports::{StopContext, StopServices};
+use super::start::ports::{HandoffSessionRepo, RemoteCleanupPort, ShareSessionRepo};
 
-pub async fn stop_bot(app: &Arc<App>, bot_id: &str) -> LcResult<bool> {
-    let locks = AppBotLock::new(app);
-    let locked_bot = bot_id.to_string();
-    let _g = locks.lock_bot(&locked_bot).await.map_err(|e| LcError::Upstream(e.to_string()))?;
+pub async fn stop_bot(app: &impl StopContext, bot_id: &str) -> LcResult<bool> {
+    let _g = app.lock_bot_for_stop(bot_id).await;
     stop_bot_locked(app, bot_id).await
 }
 
@@ -21,7 +20,7 @@ pub fn in_default_session(run: &db::Run) -> bool {
 pub(crate) use crate::default_session::refuse_default_session;
 
 /// [`stop_bot`] with the lock already held, so a restart stops and starts under one guard.
-pub async fn stop_bot_locked(app: &Arc<App>, bot_id: &str) -> LcResult<bool> {
+pub async fn stop_bot_locked(app: &impl StopContext, bot_id: &str) -> LcResult<bool> {
     stop_locked(app, bot_id, false, false, false, None).await
 }
 
@@ -32,18 +31,18 @@ pub async fn stop_bot_locked(app: &Arc<App>, bot_id: &str) -> LcResult<bool> {
 /// `agent_status`。巡邏在鎖裡最後一次讀到 idle 之後、停機之前被那一句插進來的話，以前照樣 ctrl+c、關 pane。條件寫在
 /// 同一句 UPDATE 裡，跟那一句寫入由 SQLite 排序：它先落地，這裡 0 rows 不停；這裡先落地，run 已經是 `stopping`，
 /// `begin_external_turn`（在鎖裡看 `state == running`）就不會替一個正在關的 pane 開回合。
-pub async fn stop_bot_locked_if_idle(app: &Arc<App>, bot_id: &str) -> LcResult<bool> {
+pub async fn stop_bot_locked_if_idle(app: &impl StopContext, bot_id: &str) -> LcResult<bool> {
     stop_locked(app, bot_id, false, true, false, None).await
 }
 
 /// 重啟那一半的 stop。差別只在 `stopped` 寫不進去之後的重試：重啟沒把 bot 開回來不是「使用者要它停」
 /// （同 `left_down_by_restart`），所以交給對帳照證據收成 `exited`，不補記 `stopped`。
-pub(crate) async fn stop_for_restart_locked(app: &Arc<App>, bot_id: &str) -> LcResult<bool> {
+pub(crate) async fn stop_for_restart_locked(app: &impl StopContext, bot_id: &str) -> LcResult<bool> {
     stop_locked(app, bot_id, true, false, false, None).await
 }
 
 pub(crate) async fn stop_for_restart_locked_with_host_fence(
-    app: &Arc<App>,
+    app: &impl StopContext,
     bot_id: &str,
     fence: &crate::hosts::HostFence,
 ) -> LcResult<bool> {
@@ -52,12 +51,12 @@ pub(crate) async fn stop_for_restart_locked_with_host_fence(
 
 /// 一鍵重啟（`require_idle`）那一半的 stop：記 `stopping` 的那一步同時是**「還是閒著才准停」的許可**（#346，同 [`stop_bot_locked_if_idle`]），
 /// 使用者剛在 pane 裡打字（`handle_status` 不拿鎖）落在鎖裡看過閒置之後，這一句 UPDATE 輸了、什麼都不動，回 409 `no_longer_idle`。
-pub(crate) async fn stop_for_restart_if_idle_locked(app: &Arc<App>, bot_id: &str, refuse_background_jobs: bool) -> LcResult<bool> {
+pub(crate) async fn stop_for_restart_if_idle_locked(app: &impl StopContext, bot_id: &str, refuse_background_jobs: bool) -> LcResult<bool> {
     stop_locked(app, bot_id, true, true, refuse_background_jobs, None).await
 }
 
 pub(crate) async fn stop_for_restart_if_idle_locked_with_host_fence(
-    app: &Arc<App>,
+    app: &impl StopContext,
     bot_id: &str,
     refuse_background_jobs: bool,
     fence: &crate::hosts::HostFence,
@@ -79,34 +78,34 @@ enum StopOutcome {
 }
 
 async fn stop_locked(
-    app: &Arc<App>,
+    app: &impl StopContext,
     bot_id: &str,
     for_restart: bool,
     only_if_idle: bool,
     refuse_background_jobs: bool,
     host_fence: Option<&crate::hosts::HostFence>,
 ) -> LcResult<bool> {
-    let bot = db::bot(&app.db, bot_id).await.map_err(up)?.ok_or_else(|| LcError::NotFound("bot".into()))?;
+    let bot = db::bot(app.db(), bot_id).await.map_err(up)?.ok_or_else(|| LcError::NotFound("bot".into()))?;
     // #708：移交出去的 bot 不停（閒置回收、批次重啟、codex 升級後的重啟都走這裡）。
-    app.db.refuse_handed_off(bot_id).await?;
-    let Some(run) = db::active_run(&app.db, bot_id).await.map_err(up)? else {
+    app.db().refuse_handed_off(bot_id).await?;
+    let Some(run) = db::active_run(app.db(), bot_id).await.map_err(up)? else {
         // agent 自己退了、預覽還掛著的話也一併收（§6.12）。
         match host_fence {
             Some(fence) => {
                 #[cfg(test)]
                 super::race_point::hit("restart_before_no_run_preview_cleanup", bot_id).await;
-                if app.hosts.run_if_current(fence, app.stop_preview_for_bot(bot_id)).await.is_none() {
+                if !app.stop_preview(bot_id, Some(fence)).await {
                     tracing::warn!(bot = %bot.name, host = %fence.conn().name, reason = "superseded", "skipped preview cleanup because the scoped host authority changed");
                     return Err(LcError::conflict("host_superseded", json!({"bot_id": bot_id, "host": fence.conn().name})));
                 }
             }
             None => {
-                app.stop_preview_for_bot(bot_id).await;
+                let _ = app.stop_preview(bot_id, None).await;
             }
         }
         return Ok(false);
     };
-    let host = db::bot_host(&app.db, bot_id).await.map_err(up)?;
+    let host = db::bot_host(app.db(), bot_id).await.map_err(up)?;
     #[cfg(test)]
     super::race_point::hit("restart_before_stop_client_lookup", bot_id).await;
     let client = match host_fence {
@@ -122,8 +121,8 @@ async fn stop_locked(
     // 鎖內檢查之後、`running → stopping` 之前，畫面或新的 Stop hook 都可能多出背景工作。
     // 先現場 refresh（新鮮 hook 帳仍優先），再看帳本；這一步必須在 CAS 之前。
     if only_if_idle && refuse_background_jobs {
-        crate::runners::background_jobs::refresh(app, &run, &bot.kind).await;
-        if let Some(n) = crate::background_jobs::known(app, &run.id).filter(|n| *n > 0) {
+        app.refresh_background_jobs(&run, &bot.kind).await;
+        if let Some(n) = app.background_jobs_count(&run.id).filter(|n| *n > 0) {
             return Err(LcError::conflict(
                 "not_idle",
                 json!({"bot_id": bot_id, "busy": "background_jobs", "background_jobs": n}),
@@ -136,34 +135,34 @@ async fn stop_locked(
     // 來源含 `stopping`：上一次沒停成（寫不進 `stopped`、agent 沒退出）的 stop 可以原樣再按一次。
     // 使用者的 stop 在同一個交易撤回等它起來才送的那幾則（[`begin_stop`]，#199）。閒置回收的許可本來就要求沒有排著的。
     let (moved, withdrawn) = if only_if_idle {
-        (admit_idle_stop(&app.db, &run.id, bot_id, for_restart).await.map_err(up)?, Vec::new())
+        (admit_idle_stop(app.db(), &run.id, bot_id, for_restart).await.map_err(up)?, Vec::new())
     } else {
         let withdraw = !for_restart && !super::restart_hold::in_progress(bot_id);
         begin_stop(app, &run.id, bot_id, withdraw).await.map_err(up)?
     };
     for (turn_id, revoked) in withdrawn {
-        announce_revoked(app, &turn_id, revoked).await;
+        app.announce_revoked(&turn_id, revoked).await;
     }
     match moved {
         super::run_state::Moved::Applied => {}
         // 閒置回收的許可沒過：它不再閒著（或已經被別的路停掉）。外面一步都沒動。
         super::run_state::Moved::Lost if only_if_idle => {
-            bot_status(&AppEventSink::new(app), bot_id).await;
+            app.notify_bot_status(bot_id).await;
             return Err(LcError::conflict("no_longer_idle", json!({"bot_id": bot_id, "run_id": run.id})));
         }
         super::run_state::Moved::Lost => {
             tracing::info!(bot = %bot.name, run = %run.id, "stop: another path ended the run first; nothing left to stop");
-            bot_status(&AppEventSink::new(app), bot_id).await;
+            app.notify_bot_status(bot_id).await;
             return Ok(false);
         }
     }
-    bot_status(&AppEventSink::new(app), bot_id).await;
+    app.notify_bot_status(bot_id).await;
     let target = db::run_target(&run, &bot);
     // Close the in-flight turn and send ctrl+c as one fenced external handoff. Config replacement
     // uses the same per-host authority gate: it either wins first and this does nothing, or waits
     // while the RPC runs on the captured A client. It cannot resolve H to B in the middle of stop.
     let stop_signal = async {
-        if let Err(e) = fail_in_flight(app, &run.id, "run stopped by user").await {
+        if let Err(e) = app.fail_in_flight(&run.id, "run stopped by user").await {
             return Err(turn_unwritable(app, bot_id, &run.id, "停", e).await);
         }
         for _ in 0..2 {
@@ -173,7 +172,7 @@ async fn stop_locked(
         Ok(())
     };
     let stop_signal = match host_fence {
-        Some(fence) => app.hosts.run_if_current(fence, stop_signal).await,
+        Some(fence) => app.hosts().run_if_current(fence, stop_signal).await,
         None => Some(stop_signal.await),
     };
     match stop_signal {
@@ -181,7 +180,7 @@ async fn stop_locked(
         Some(Err(e)) => return Err(e),
         None => {
             back_to_running(app, &run.id).await;
-            bot_status(&AppEventSink::new(app), bot_id).await;
+            app.notify_bot_status(bot_id).await;
             return Err(LcError::conflict("host_superseded", json!({"bot_id": bot_id, "host": host_fence.unwrap().conn().name})));
         }
     }
@@ -190,12 +189,12 @@ async fn stop_locked(
     // while it closes its pane; a repoint cannot turn this into cleanup on B.
     match host_fence {
         Some(fence) => {
-            if app.hosts.run_if_current(fence, app.stop_preview_for_bot(bot_id)).await.is_none() {
+            if !app.stop_preview(bot_id, Some(fence)).await {
                 tracing::info!(bot = %bot.name, host = %host, "skipped preview cleanup after the scoped host authority was superseded");
             }
         }
         None => {
-            app.stop_preview_for_bot(bot_id).await;
+            let _ = app.stop_preview(bot_id, None).await;
         }
     }
     // 只認 herdr 明確說「不在」：RPC 失敗不是退出的證據。
@@ -246,7 +245,7 @@ async fn stop_locked(
         } else {
             super::run_state::schedule_settle(app, &run.id, super::run_state::Settle::Reconcile { stuck: "stopping".into() });
         }
-        bot_status(&AppEventSink::new(app), bot_id).await;
+        app.notify_bot_status(bot_id).await;
         return Err(LcError::Upstream(format!(
             "stop_not_confirmed: agent `{target}` did not exit ({outcome:?}); the run is not recorded as stopped"
         )));
@@ -272,7 +271,7 @@ async fn stop_locked(
                 super::run_state::Settle::FinishStop
             };
             super::run_state::schedule_settle(app, &run.id, how);
-            bot_status(&AppEventSink::new(app), bot_id).await;
+            app.notify_bot_status(bot_id).await;
             return Err(LcError::uncommitted(
                 "stop_state_uncommitted",
                 &run.id,
@@ -281,7 +280,7 @@ async fn stop_locked(
             ));
         }
     }
-    bot_status(&AppEventSink::new(app), bot_id).await;
+    app.notify_bot_status(bot_id).await;
     Ok(true)
 }
 
@@ -359,9 +358,9 @@ async fn commit_stopped(app: &impl crate::capabilities::Db, run_id: &str, for_re
 }
 
 /// 終態寫進去之後才做的收尾（跟 #135 同一條：先有 durable 的終態，才撤佇列、拆 watcher）。
-async fn after_stop(app: &Arc<App>, bot_id: &str, run: &db::Run, host: &str) {
+async fn after_stop(app: &impl StopContext, bot_id: &str, run: &db::Run, host: &str) {
     // 停掉之後沒有人會送它排著的 queued：收掉，不留著佔名額、擋 restart safety（AGM 2026-09-16）。
-    revoke_orphaned_queued_turns(app, bot_id, "bot 已被停止").await;
+    app.revoke_orphaned_queued_turns(bot_id, "bot 已被停止").await;
     if let Some(p) = run.pane_id.as_deref() {
         if let Some(session) = app.session_for_run(run).await {
             app.unwatch_pane_on_session(host, &session, p).await;
@@ -373,11 +372,11 @@ async fn after_stop(app: &Arc<App>, bot_id: &str, run: &db::Run, host: &str) {
 /// default session 的 run 連對帳都不救（2026-09-12 review #1）。寫不進去就排重試。
 /// 停（或原地重啟）之前，在飛的那一筆收不成（#156）：外面還一步都沒動——agent 沒被打斷、那一回合真的還在跑。
 /// run 放回 running，回 503 可重試。不是 `Uncommitted`：那是「外面已經做了、DB 沒寫成」，這裡外面什麼都還沒做。
-pub(crate) async fn turn_unwritable(app: &Arc<App>, bot_id: &str, run_id: &str, what: &str, e: anyhow::Error) -> LcError {
+pub(crate) async fn turn_unwritable(app: &impl StopContext, bot_id: &str, run_id: &str, what: &str, e: anyhow::Error) -> LcError {
     tracing::warn!(bot = bot_id, run = run_id, error = %e, "the in-flight turn could not be closed; not touching the agent");
     back_to_running(app, run_id).await;
-    bot_status(&AppEventSink::new(app), bot_id).await;
-    let turn = db::in_flight_turn(&app.db, run_id).await.ok().flatten().map(|t| t.id);
+    app.notify_bot_status(bot_id).await;
+    let turn = db::in_flight_turn(app.db(), run_id).await.ok().flatten().map(|t| t.id);
     LcError::Unavailable(json!({
         "error": "turn_state_unwritable", "run_id": run_id, "turn_id": turn, "retryable": true, "retry_after_secs": 5,
         "message": format!("在飛的那一回合寫不進 DB，沒有{what}：agent 照常在跑（那一回合也還在跑），稍後再試。"),
@@ -385,8 +384,8 @@ pub(crate) async fn turn_unwritable(app: &Arc<App>, bot_id: &str, run_id: &str, 
     }))
 }
 
-pub(crate) async fn back_to_running(app: &Arc<App>, run_id: &str) {
-    if let Err(e) = super::run_state::transition(&app.db, run_id, &["stopping"], "running", None).await {
+pub(crate) async fn back_to_running(app: &impl StopContext, run_id: &str) {
+    if let Err(e) = super::run_state::transition(app.db(), run_id, &["stopping"], "running", None).await {
         tracing::warn!(run = run_id, error = %e, "could not put a run that did not stop back to running");
         super::run_state::schedule_settle(app, run_id, super::run_state::Settle::BackToRunning);
     }
@@ -394,12 +393,11 @@ pub(crate) async fn back_to_running(app: &Arc<App>, run_id: &str) {
 
 /// [`run_state::Settle::FinishStop`] 的重試：stop 在外面已經做完，補記 `stopped` 與它之後的收尾。
 /// 在 bot 鎖裡做；只動仍停在 `stopping`（或被 pane-exit 收成 `exited`、還沒改標）的這一顆。
-pub(crate) async fn finish_stop(app: &Arc<App>, run_id: &str) {
-    let Ok(Some(run)) = db::run(&app.db, run_id).await else { return };
-    let locks = AppBotLock::new(app);
-    let Ok(_g) = locks.lock_bot(&run.bot_id).await else { return };
+pub(crate) async fn finish_stop(app: &impl StopContext, run_id: &str) {
+    let Ok(Some(run)) = db::run(app.db(), run_id).await else { return };
+    let _g = app.lock_bot_for_stop(&run.bot_id).await;
     // 收尾要拆那台主機上的 watcher：讀不到主機就這一輪什麼都不寫，下一輪重試（不退回 local——拆錯台，這台的 watcher 就留著）。
-    let host = match db::bot_host(&app.db, &run.bot_id).await {
+    let host = match db::bot_host(app.db(), &run.bot_id).await {
         Ok(h) => h,
         Err(e) => {
             tracing::warn!(run = run_id, error = %e, "cannot read the host of a run whose stop is being recorded; retrying");
@@ -411,7 +409,7 @@ pub(crate) async fn finish_stop(app: &Arc<App>, run_id: &str) {
         Ok(StopCommit::Relabelled | StopCommit::Lost) => {}
         Err(e) => tracing::warn!(run = run_id, error = %e, "retrying the stopped record failed"),
     }
-    bot_status(&AppEventSink::new(app), &run.bot_id).await;
+    app.notify_bot_status(&run.bot_id).await;
 }
 
 /// stop (if running) + start. Used to make edited `model` / `args` / `identity` / `env` take effect.
@@ -430,7 +428,7 @@ pub async fn run_alive(app: &(impl crate::capabilities::Db + crate::capabilities
 
 /// #61: one-time purge of `bots/<id>/` for soft-deleted bots with no live run. Dirs no bot row
 /// claims are left alone (rt-87's `bots-orphan-backup-2026-09-10/` is outside `bots/`).
-pub async fn purge_deleted_bot_dirs(app: &(impl crate::capabilities::DataDir + crate::capabilities::Db)) -> usize {
+pub async fn purge_deleted_bot_dirs(app: &(impl crate::capabilities::DataDir + crate::capabilities::Db + StopServices)) -> usize {
     let mut removed = 0;
     let root = app.data_dir().join("bots");
     if let Ok(entries) = std::fs::read_dir(&root) {
@@ -494,7 +492,7 @@ pub async fn purge_deleted_bot_dirs(app: &(impl crate::capabilities::DataDir + c
             Ok(None) => {}
             _ => continue,
         }
-        if let Some(ws_path) = crate::share::folder::validate_workspace_path(app.data_dir(), &ws) {
+        if let Some(ws_path) = app.validate_workspace_path(app.data_dir(), &ws) {
             match crate::bot_trash::move_in_kind(app.data_dir(), &id, Some(crate::bot_trash::SHARE_WORKSPACE), &ws_path) {
                 Ok(Some(to)) => {
                     tracing::info!(bot = %id, dir = %ws_path.display(), trash = %to.display(), "moved leftover restricted share workspace to bots-trash");
@@ -514,7 +512,7 @@ pub async fn purge_deleted_bot_dirs(app: &(impl crate::capabilities::DataDir + c
 }
 
 /// 回 `true`＝目錄確定沒了（含本來就不在）；`false`＝沒清成（id 不合法、主機不明、ssh 失敗、I/O 錯），呼叫端不能當成清掉了。
-pub async fn purge_bot_dir(app: &(impl crate::capabilities::DataDir + crate::capabilities::Db + crate::hosts::HostsAccess + crate::lifecycle::start::ports::RemoteCleanupPort + crate::shared_host::SharedHostEnv), bot_id: &str, host: &str) -> bool {
+pub async fn purge_bot_dir(app: &(impl crate::capabilities::DataDir + crate::capabilities::Db + HostsAccess + RemoteCleanupPort + StopServices), bot_id: &str, host: &str) -> bool {
     if !valid_id(bot_id) {
         tracing::warn!(host, bot = %bot_id, "invalid bot id; bot config dir left in place");
         return false;
@@ -537,7 +535,7 @@ pub async fn purge_bot_dir(app: &(impl crate::capabilities::DataDir + crate::cap
     // 受限分享用 bot 的工作目錄（`shared_bots.workspace`，issue #828）。
     // 只有 restricted bot 的工作目錄才收進回收區；信任分享（trusted）的工作區是使用者既有目錄，不能動。
     if let Ok(Some(ws)) = app.db().restricted_workspace(bot_id).await {
-        if let Some(ws_path) = crate::share::folder::validate_workspace_path(crate::capabilities::DataDir::data_dir(app), &ws) {
+        if let Some(ws_path) = app.validate_workspace_path(crate::capabilities::DataDir::data_dir(app), &ws) {
             match crate::bot_trash::move_in_kind(crate::capabilities::DataDir::data_dir(app), bot_id, Some(crate::bot_trash::SHARE_WORKSPACE), &ws_path) {
                 Ok(Some(to)) => tracing::info!(bot = %bot_id, dir = %ws_path.display(), trash = %to.display(), "moved restricted share workspace to bots-trash"),
                 Ok(None) => {}
@@ -561,26 +559,26 @@ pub async fn purge_bot_dir(app: &(impl crate::capabilities::DataDir + crate::cap
         };
     }
     // #709：共用 session 的主機上，遠端資料目錄可能是另一顆 daemon 的：不搬，也不記成欠著。
-    if crate::shared_host::is_shared(app, host).await {
+    if app.is_shared_host(host).await {
         tracing::info!(host, bot = %bot_id, "shared-session host; remote bot dir left in place");
         return false;
     }
     let Some(conn) = app.hosts().get(host).await else {
         tracing::warn!(host, bot = %bot_id, "unknown host; remote bot dir left in place");
-        app.record_remote_purge(bot_id, host, false, Some("unknown host")).await;
+        RemoteCleanupPort::record_remote_purge(app, bot_id, host, false, Some("unknown host")).await;
         return false;
     };
     // 遠端也搬進回收區而不是 `rm -rf`（issue #411）：restore 時 ssh 搬得回來。
-    match app.move_remote_bot_dir_to_trash(&conn, bot_id).await {
+    match RemoteCleanupPort::move_remote_bot_dir_to_trash(app, &conn, bot_id).await {
         Ok(to) => {
             tracing::info!(host, bot = %bot_id, trash = ?to, "moved remote bot config dir to bots-trash");
-            app.record_remote_purge(bot_id, host, true, None).await;
+            RemoteCleanupPort::record_remote_purge(app, bot_id, host, true, None).await;
             true
         }
         Err(e) => {
             let msg = format!("{e:#}");
             tracing::warn!(host, bot = %bot_id, error = %msg, "could not move remote bot config dir to bots-trash");
-            app.record_remote_purge(bot_id, host, false, Some(&msg)).await;
+            RemoteCleanupPort::record_remote_purge(app, bot_id, host, false, Some(&msg)).await;
             false
         }
     }
@@ -617,16 +615,14 @@ pub async fn interrupt_bot(app: &Arc<App>, bot_id: &str) -> LcResult<()> {
 /// Esc 與「把回合收成 failed」是兩半（見 `interruption`）：Esc 沒進 pane 就什麼都不動；進了而 DB 寫不進去，
 /// 回 503 `interrupt_state_uncommitted`（不是普通的成功），欠著的收尾之後補——同一筆的重試**不再按** Esc；
 /// 不知道 Esc 進了沒有，回合留在 in_flight，等它的回聲。
-pub async fn interrupt_turn(app: &Arc<App>, bot_id: &str, expect_turn: Option<&str>) -> LcResult<()> {
-    let locks = AppBotLock::new(app);
-    let locked_bot = bot_id.to_string();
-    let _g = locks.lock_bot(&locked_bot).await.map_err(|e| LcError::Upstream(e.to_string()))?;
-    let bot = db::bot(&app.db, bot_id).await.map_err(up)?.ok_or_else(|| LcError::NotFound("bot".into()))?;
-    let run = db::active_run(&app.db, bot_id).await.map_err(up)?.ok_or_else(|| LcError::NotFound("run".into()))?;
+pub async fn interrupt_turn(app: &impl StopContext, bot_id: &str, expect_turn: Option<&str>) -> LcResult<()> {
+    let _g = app.lock_bot_for_stop(bot_id).await;
+    let bot = db::bot(app.db(), bot_id).await.map_err(up)?.ok_or_else(|| LcError::NotFound("bot".into()))?;
+    let run = db::active_run(app.db(), bot_id).await.map_err(up)?.ok_or_else(|| LcError::NotFound("run".into()))?;
     // 上一次打斷欠著的收尾先補：補完之後還在飛的，才是真的還在跑的那一筆。
     let owed = super::interruption::owed_turn(bot_id);
     let settled = super::interruption::settle_locked(app, bot_id, super::interruption::Evidence::Nothing).await;
-    let in_flight = db::in_flight_turn(&app.db, &run.id).await.map_err(up)?;
+    let in_flight = db::in_flight_turn(app.db(), &run.id).await.map_err(up)?;
     // 欠著的那一筆剛剛補上（或已經被別的路收掉）：這一次就是上一次中斷的重試，中斷已經完成——不再按 Esc。
     // 沒指名哪一筆時，只有 run 上已經沒有別的在飛才算（#166）：欠著的帳不一定是 Esc 記的——插隊送出的帳一結清，
     // 新的那一則就掛上 run、claude 正在做它，這一次的 Esc 是要打斷它。
@@ -660,7 +656,7 @@ pub async fn interrupt_turn(app: &Arc<App>, bot_id: &str, expect_turn: Option<&s
     }
     // 先記接管，再收 in-flight：收掉會 emit turn → 觸發 flush，順序反過來排隊的派工就搶進去了。
     // 同時記下被中斷的是哪一回合：它的 `StopFailure` 回聲才認得出來，新回合的失敗不會被當成回聲（#117）。
-    note_user_interrupt_of(app, &bot, &run, in_flight.as_ref()).await;
+    app.note_user_interrupt_of(&bot, &run, in_flight.as_ref()).await;
     if fate == super::interruption::KeyFate::Unknown {
         // 不知道 Esc 進了沒有：不假定打斷。claude 2.1.276～2.1.278 按 Esc 不送任何 hook（#223），回聲等不到——
         // 趁還握著鎖先看 log 裡有沒有這次的中斷紀錄（§4.3 備援等的是同一把鎖）；還看不到就留在 in_flight 等證據。
@@ -781,12 +777,10 @@ fn abort_note(count: usize) -> String {
 /// 強制結束目前回合（`POST /api/bots/:id/abort`）。和 [`interrupt_turn`] 相反，先保證 DB 解開、
 /// 送 `esc` 只是盡力（`keys_sent`）：in-flight 標 failed、`delivery = unknown` 也一併收（§6.3，
 /// 同樣鎖輸入框）。沒有 active run 不算錯——那正是最需要這支的情況。
-pub async fn abort_turns(app: &Arc<App>, bot_id: &str) -> LcResult<Value> {
-    let locks = AppBotLock::new(app);
-    let locked_bot = bot_id.to_string();
-    let _g = locks.lock_bot(&locked_bot).await.map_err(|e| LcError::Upstream(e.to_string()))?;
-    let bot = db::bot(&app.db, bot_id).await.map_err(up)?.ok_or_else(|| LcError::NotFound("bot".into()))?;
-    let run = db::active_run(&app.db, bot_id).await.map_err(up)?;
+pub async fn abort_turns(app: &impl StopContext, bot_id: &str) -> LcResult<Value> {
+    let _g = app.lock_bot_for_stop(bot_id).await;
+    let bot = db::bot(app.db(), bot_id).await.map_err(up)?.ok_or_else(|| LcError::NotFound("bot".into()))?;
+    let run = db::active_run(app.db(), bot_id).await.map_err(up)?;
     // 上一次打斷欠著的先補（#147）；補不上也照樣往下收——強制中止本來就是先保證 DB 解開。
     if let Err(e) = super::interruption::settle_locked(app, bot_id, super::interruption::Evidence::Nothing).await {
         tracing::warn!(bot = %bot.name, error = %e, "上一次打斷欠著的收尾還是寫不進去");
@@ -795,7 +789,7 @@ pub async fn abort_turns(app: &Arc<App>, bot_id: &str) -> LcResult<Value> {
     // 在飛的那一筆在按 esc **之前**讀（#208）：讀不到就一步都不做。以前放在 esc 之後、讀錯當成「沒有」——esc 已經送出去，
     // 打斷的紀錄（`note_user_interrupt_of`、`interrupted`）卻沒記，那一回合的 StopFailure 回聲之後會被當成真的失敗。
     let in_flight = match run.as_ref() {
-        Some(r) => db::in_flight_turn(&app.db, &r.id).await.map_err(up)?,
+        Some(r) => db::in_flight_turn(app.db(), &r.id).await.map_err(up)?,
         None => None,
     };
 
@@ -822,7 +816,7 @@ pub async fn abort_turns(app: &Arc<App>, bot_id: &str) -> LcResult<Value> {
             aborted.push(t.id.clone());
         }
         // 強制中止也是使用者要接手：排著的派工照樣不撤，只是先讓使用者拿回輸入框（§4.4a）。
-        note_user_interrupt_of(app, &bot, r, in_flight.as_ref()).await;
+        app.note_user_interrupt_of(&bot, r, in_flight.as_ref()).await;
         // 收不掉就不是成功（#147）：以前 `fail_in_flight` 把錯吞掉，下面的迴圈又因為它在 `aborted` 裡而跳過它，
         // 回 200 `aborted:[它]`、它卻還在飛。記成欠著，之後補。
         if let Some(t) = &in_flight {
@@ -833,7 +827,7 @@ pub async fn abort_turns(app: &Arc<App>, bot_id: &str) -> LcResult<Value> {
             )
             .bind(bot_id)
             .bind(&t.id)
-            .fetch_one(&app.db)
+            .fetch_one(app.db())
             .await
             .map_err(up)?;
             let note = abort_note(1 + usize::try_from(more).unwrap_or(0));
@@ -851,7 +845,7 @@ pub async fn abort_turns(app: &Arc<App>, bot_id: &str) -> LcResult<Value> {
          WHERE c.bot_id = ? AND (t.status = 'in_flight' OR t.delivery = 'unknown')",
     )
     .bind(bot_id)
-    .fetch_all(&app.db)
+    .fetch_all(app.db())
     .await
     .map_err(up)?;
     // 一次收好幾筆時只寫一則說明、帶筆數（#581：wits-pro 一次收 5 筆，對話裡連著 5 則一樣的話）。在飛的那一筆
@@ -865,7 +859,7 @@ pub async fn abort_turns(app: &Arc<App>, bot_id: &str) -> LcResult<Value> {
         // 把它改寫成 failed 會讓使用者看到一筆「失敗」的回合，而它其實答完了。
         // （`turn_controller` 的轉移表也沒有 `completed_fallback -> failed` 這條邊，issue #68。）
         // 收掉與說明同一個交易（#208，同 `fail_in_flight`）：以前說明寫不進去被 `let _` 吞掉，回合收了、對話裡卻沒有一句話。
-        let mut tx = app.db.begin().await.map_err(up)?;
+        let mut tx = app.db().begin().await.map_err(up)?;
         for t in &turns {
             if t.status == "in_flight" {
                 super::turn_controller::fail_on(&mut tx, &t.id, super::turn_controller::DeliveryOnFail::FailedIfUnknown, "使用者強制中止")
@@ -890,11 +884,11 @@ pub async fn abort_turns(app: &Arc<App>, bot_id: &str) -> LcResult<Value> {
         };
         tx.commit().await.map_err(up)?;
         if let Some(m) = note {
-            emit_object(&AppEventSink::new(app), "message_added", Some(bot_id), json!({ "bot_id": bot_id, "message": m })).await;
+            app.publish_lifecycle_event("message_added", json!({ "bot_id": bot_id, "message": m })).await;
         }
         aborted.extend(fresh.iter().map(|t| t.id.clone()));
         for t in &turns {
-            turn_changed(&AppTurnEvents::new(app), &t.id).await;
+            app.turn_changed(&t.id).await;
         }
     }
 
@@ -905,10 +899,8 @@ pub async fn abort_turns(app: &Arc<App>, bot_id: &str) -> LcResult<Value> {
 /// Give a running pre one-bot-one-tab bot its own tab. A move, not a restart: herdr keeps
 /// `pane_id` across `pane.move` (0.8.2), so mapping, poller and in-flight turn carry on.
 /// Idempotent: re-moving a solo pane would rebuild a tab and renumber the user's tab bar.
-pub async fn move_pane_to_own_tab(app: &(impl crate::capabilities::BotLocks + crate::capabilities::Db + crate::capabilities::Emit + crate::capabilities::BotStatusEmit + crate::capabilities::HerdrRoutes + crate::hosts::HostsAccess), bot_id: &str) -> LcResult<()> {
-    let locks = AppBotLock::new(app);
-    let locked_bot = bot_id.to_string();
-    let _g = locks.lock_bot(&locked_bot).await.map_err(|e| LcError::Upstream(e.to_string()))?;
+pub async fn move_pane_to_own_tab(app: &impl StopContext, bot_id: &str) -> LcResult<()> {
+    let _g = app.lock_bot_for_stop(bot_id).await;
     let bot = db::bot(app.db(), bot_id).await.map_err(up)?.ok_or_else(|| LcError::NotFound("bot".into()))?;
     let run = db::active_run(app.db(), bot_id).await.map_err(up)?.ok_or_else(|| LcError::NotFound("run".into()))?;
     let pane_id = run
@@ -949,7 +941,7 @@ pub async fn move_pane_to_own_tab(app: &(impl crate::capabilities::BotLocks + cr
         .execute(app.db())
         .await
         .map_err(up)?;
-    bot_status(&AppEventSink::new(app), bot_id).await;
+    app.notify_bot_status(bot_id).await;
     Ok(())
 }
 
@@ -985,32 +977,32 @@ mod abort_tests {
         let (pid, bid, rid, cid) = (db::ulid(), db::ulid(), db::ulid(), db::ulid());
         let now = db::now();
         sqlx::query("INSERT INTO projects (id, path, label, host, created_at) VALUES (?,?,?,'local',?)")
-            .bind(&pid).bind("/tmp/p").bind("p").bind(&now).execute(&app.db).await.unwrap();
+            .bind(&pid).bind("/tmp/p").bind("p").bind(&now).execute(app.db()).await.unwrap();
         sqlx::query("INSERT INTO bots (id, project_id, name, kind, hook_token, created_at) VALUES (?,?,?,?,?,?)")
-            .bind(&bid).bind(&pid).bind("b").bind("claude").bind("tok").bind(&now).execute(&app.db).await.unwrap();
+            .bind(&bid).bind(&pid).bind("b").bind("claude").bind("tok").bind(&now).execute(app.db()).await.unwrap();
         sqlx::query("INSERT INTO runs (id, bot_id, state, pane_id, started_at) VALUES (?,?,'running','w1:p1',?)")
-            .bind(&rid).bind(&bid).bind(&now).execute(&app.db).await.unwrap();
+            .bind(&rid).bind(&bid).bind(&now).execute(app.db()).await.unwrap();
         sqlx::query("INSERT INTO conversations (id, bot_id, created_at) VALUES (?,?,?)")
-            .bind(&cid).bind(&bid).bind(&now).execute(&app.db).await.unwrap();
+            .bind(&cid).bind(&bid).bind(&now).execute(app.db()).await.unwrap();
         // Both an in-flight turn and an unknown-delivery one block the next prompt.
         let (t_flight, t_unknown) = (db::ulid(), db::ulid());
         sqlx::query("INSERT INTO turns (id, conversation_id, run_id, origin, status, delivery, created_at) VALUES (?,?,?,'web','in_flight','ok',?)")
-            .bind(&t_flight).bind(&cid).bind(&rid).bind(&now).execute(&app.db).await.unwrap();
+            .bind(&t_flight).bind(&cid).bind(&rid).bind(&now).execute(app.db()).await.unwrap();
         sqlx::query("INSERT INTO turns (id, conversation_id, run_id, origin, status, delivery, created_at) VALUES (?,?,?,'web','failed','unknown',?)")
-            .bind(&t_unknown).bind(&cid).bind(&rid).bind(&now).execute(&app.db).await.unwrap();
+            .bind(&t_unknown).bind(&cid).bind(&rid).bind(&now).execute(app.db()).await.unwrap();
         // §4.3 的備援關掉的回合不會動 `delivery`：這種「已經收好、但 delivery 停在 unknown」的
         // 一樣擋住下一則 prompt，也一樣要被解開——但它的 status 不可以被改寫成 failed
         // （回合其實答完了，而且 `completed_fallback -> failed` 不是合法邊，issue #68）。
         let t_fallback = db::ulid();
         sqlx::query("INSERT INTO turns (id, conversation_id, run_id, origin, status, delivery, completed_at, created_at) VALUES (?,?,?,'web','completed_fallback','unknown',?,?)")
-            .bind(&t_fallback).bind(&cid).bind(&rid).bind(&now).bind(&now).execute(&app.db).await.unwrap();
+            .bind(&t_fallback).bind(&cid).bind(&rid).bind(&now).bind(&now).execute(app.db()).await.unwrap();
 
         let out = abort_turns(&app, &bid).await.expect("abort must not fail just because the keys did");
         assert_eq!(out["keys_sent"], false, "no herdr behind the socket");
         let aborted = out["aborted"].as_array().unwrap();
         assert_eq!(aborted.len(), 3, "in-flight、unknown-delivery 與備援關掉的那一筆: {out}");
         let fallback: (String, String) = sqlx::query_as("SELECT status, delivery FROM turns WHERE id=?")
-            .bind(&t_fallback).fetch_one(&app.db).await.unwrap();
+            .bind(&t_fallback).fetch_one(app.db()).await.unwrap();
         assert_eq!(
             fallback,
             ("completed_fallback".into(), "failed".into()),
@@ -1018,12 +1010,12 @@ mod abort_tests {
         );
 
         let flight: (String, String) = sqlx::query_as("SELECT status, delivery FROM turns WHERE id=?")
-            .bind(&t_flight).fetch_one(&app.db).await.unwrap();
+            .bind(&t_flight).fetch_one(app.db()).await.unwrap();
         assert_eq!(flight, ("failed".into(), "ok".into()), "in-flight turn is closed, delivery untouched");
         let unknown: (String, String) = sqlx::query_as("SELECT status, delivery FROM turns WHERE id=?")
-            .bind(&t_unknown).fetch_one(&app.db).await.unwrap();
+            .bind(&t_unknown).fetch_one(app.db()).await.unwrap();
         assert_eq!(unknown, ("failed".into(), "failed".into()), "unknown delivery is resolved, not left to block");
-        assert!(db::in_flight_turn(&app.db, &rid).await.unwrap().is_none(), "nothing left in flight");
+        assert!(db::in_flight_turn(app.db(), &rid).await.unwrap().is_none(), "nothing left in flight");
 
         // Idempotent: nothing to abort the second time round.
         let again = abort_turns(&app, &bid).await.unwrap();
@@ -1052,7 +1044,7 @@ mod default_session_tests {
         .bind(&bot_id)
         .bind(&env.project_id)
         .bind(db::now())
-        .execute(&app.db)
+        .execute(app.db())
         .await
         .unwrap();
         let run_id = db::ulid();
@@ -1066,7 +1058,7 @@ mod default_session_tests {
         .bind(&pane.tab_id)
         .bind(&pane.pane_id)
         .bind(db::now())
-        .execute(&app.db)
+        .execute(app.db())
         .await
         .unwrap();
         *env.herdr.agents.lock().unwrap() = vec![json!({
@@ -1084,7 +1076,7 @@ mod default_session_tests {
 
         assert!(stop_bot(&app, &bot_id).await.unwrap());
 
-        let run = db::run(&app.db, &run_id).await.unwrap().unwrap();
+        let run = db::run(app.db(), &run_id).await.unwrap().unwrap();
         assert_eq!(run.state, "stopped");
         let methods = env.herdr.methods();
         assert!(methods.iter().any(|m| m == "agent.send_keys"), "the agent was asked to exit");
@@ -1105,14 +1097,14 @@ mod default_session_tests {
         };
         assert_eq!(reason(restart_bot(&app, &bot_id).await.unwrap_err()), "default_session");
         assert_eq!(reason(restart_bot_with(&app, &bot_id, StartOpts { resume_native: true, ..Default::default() }).await.unwrap_err()), "default_session");
-        assert_eq!(db::active_run(&app.db, &bot_id).await.unwrap().map(|r| r.id), Some(run_id.clone()), "still running");
+        assert_eq!(db::active_run(app.db(), &bot_id).await.unwrap().map(|r| r.id), Some(run_id.clone()), "still running");
         assert!(!env.herdr.methods().iter().any(|m| m == "agent.send_keys"), "no ctrl+c was sent");
 
         // With no run at all, `start` is what the sidebar button would call.
         sqlx::query("UPDATE runs SET state='stopped', ended_at=? WHERE id=?")
             .bind(db::now())
             .bind(&run_id)
-            .execute(&app.db)
+            .execute(app.db())
             .await
             .unwrap();
         assert_eq!(reason(start_bot(&app, &bot_id).await.unwrap_err()), "default_session");
@@ -1134,7 +1126,7 @@ mod stop_commit_tests {
     }
 
     async fn state(app: &Arc<App>, run: &str) -> String {
-        db::run(&app.db, run).await.unwrap().unwrap().state
+        db::run(app.db(), run).await.unwrap().unwrap().state
     }
 
     /// 一顆在跑的 bot：自己的 tab、pane、有名字的 agent（mock 收到 ctrl+c 就讓它離開）。不走 `start_bot`：
@@ -1156,7 +1148,7 @@ mod stop_commit_tests {
         .bind(&pane.tab_id)
         .bind(&pane.pane_id)
         .bind(db::now())
-        .execute(&app.db)
+        .execute(app.db())
         .await
         .unwrap();
         env.herdr.agents.lock().unwrap().push(json!({
@@ -1194,7 +1186,7 @@ mod stop_commit_tests {
         let env = tt::env().await;
         let app = env.app.clone();
         let (bot, run) = running_bot(&env).await;
-        let pane = db::run(&app.db, &run).await.unwrap().unwrap().pane_id.unwrap();
+        let pane = db::run(app.db(), &run).await.unwrap().unwrap().pane_id.unwrap();
         let queued = rs::a_turn(&app, &bot, None, "queued").await;
         let watcher = rs::watch_run_pane(&app, &run).await;
         rs::refuse_run_state(&app, "stopped").await;
@@ -1230,9 +1222,9 @@ mod stop_commit_tests {
         assert!(stop_bot(&app, &bot).await.is_err());
         rs::accept_run_state(&app, "stopped").await;
 
-        sqlx::query("ALTER TABLE projects RENAME TO projects_unreadable").execute(&app.db).await.unwrap();
+        sqlx::query("ALTER TABLE projects RENAME TO projects_unreadable").execute(app.db()).await.unwrap();
         assert!(!rs::settle_once(&app, &run, &rs::Settle::FinishStop).await, "讀不到主機：還沒補上");
-        sqlx::query("ALTER TABLE projects_unreadable RENAME TO projects").execute(&app.db).await.unwrap();
+        sqlx::query("ALTER TABLE projects_unreadable RENAME TO projects").execute(app.db()).await.unwrap();
         assert_eq!(state(&app, &run).await, "stopping", "一步都沒寫");
         assert!(rs::watched(&app, &watcher).await);
 
@@ -1251,15 +1243,15 @@ mod stop_commit_tests {
         sqlx::query("INSERT INTO projects (id, path, label, host, created_at) VALUES (?, '/r/p', 'r', 'remote1', ?)")
             .bind(&remote)
             .bind(db::now())
-            .execute(&app.db)
+            .execute(app.db())
             .await
             .unwrap();
         let far = tt::claude_bot(&app, &remote, "far").await;
         let near = tt::claude_bot(&app, &env.project_id, "near").await;
         let far_run = tt::fake_run(&app, &far.id).await;
         let near_run = tt::fake_run(&app, &near.id).await;
-        sqlx::query("UPDATE runs SET pane_id='p-same' WHERE id IN (?, ?)").bind(&far_run).bind(&near_run).execute(&app.db).await.unwrap();
-        sqlx::query("UPDATE runs SET state='stopping' WHERE id=?").bind(&far_run).execute(&app.db).await.unwrap();
+        sqlx::query("UPDATE runs SET pane_id='p-same' WHERE id IN (?, ?)").bind(&far_run).bind(&near_run).execute(app.db()).await.unwrap();
+        sqlx::query("UPDATE runs SET state='stopping' WHERE id=?").bind(&far_run).execute(app.db()).await.unwrap();
         let key = |host: &str| (host.to_string(), "test".to_string(), "p-same".to_string());
         {
             let mut w = app.pane_watchers.lock().await;
@@ -1267,9 +1259,9 @@ mod stop_commit_tests {
             w.insert(key("remote1"), tokio::spawn(std::future::pending::<()>()));
         }
 
-        sqlx::query("ALTER TABLE projects RENAME TO projects_unreadable").execute(&app.db).await.unwrap();
+        sqlx::query("ALTER TABLE projects RENAME TO projects_unreadable").execute(app.db()).await.unwrap();
         assert!(!rs::settle_once(&app, &far_run, &rs::Settle::FinishStop).await, "讀不到主機：這一輪不補");
-        sqlx::query("ALTER TABLE projects_unreadable RENAME TO projects").execute(&app.db).await.unwrap();
+        sqlx::query("ALTER TABLE projects_unreadable RENAME TO projects").execute(app.db()).await.unwrap();
         assert_eq!(state(&app, &far_run).await, "stopping");
         assert!(rs::watched(&app, &key(LOCAL_HOST)).await && rs::watched(&app, &key("remote1")).await, "兩個 watcher 都沒動");
 
@@ -1307,7 +1299,7 @@ mod stop_commit_tests {
         std::fs::create_dir_all(b_socket.parent().unwrap()).unwrap();
         let b_herdr = tt::MockHerdr::start(b_socket);
 
-        sqlx::query("UPDATE projects SET host=? WHERE id=?").bind(host).bind(&env.project_id).execute(&app.db).await.unwrap();
+        sqlx::query("UPDATE projects SET host=? WHERE id=?").bind(host).bind(&env.project_id).execute(app.db()).await.unwrap();
         let bot = tt::claude_bot(&app, &env.project_id, "fenced-stop").await;
         let run = db::ulid();
         sqlx::query(
@@ -1317,7 +1309,7 @@ mod stop_commit_tests {
         .bind(&run)
         .bind(&bot.id)
         .bind(db::now())
-        .execute(&app.db)
+        .execute(app.db())
         .await
         .unwrap();
 
@@ -1337,7 +1329,7 @@ mod stop_commit_tests {
 
         assert!(matches!(result, Err(LcError::Conflict(ref value)) if value["reason"] == "host_superseded"), "stale A authority must be reported as superseded: {result:?}");
         assert!(!b_herdr.methods().iter().any(|method| method == "agent.send_keys"), "B's bot must never receive A's stop: {:?}", b_herdr.methods());
-        assert_eq!(db::run(&app.db, &run).await.unwrap().unwrap().state, "running", "a stale authority must not stop B's active run");
+        assert_eq!(db::run(app.db(), &run).await.unwrap().unwrap().state, "running", "a stale authority must not stop B's active run");
     }
 
     /// The no-run cleanup path can still have a preview pane. If H is repointed before that
@@ -1380,7 +1372,7 @@ mod stop_commit_tests {
         let _tmp_sockets = TmpSockets(vec![a_socket.clone(), b_socket.parent().unwrap().to_path_buf()]);
         let b_herdr = tt::MockHerdr::start(b_socket);
 
-        sqlx::query("UPDATE projects SET host=? WHERE id=?").bind(host).bind(&env.project_id).execute(&app.db).await.unwrap();
+        sqlx::query("UPDATE projects SET host=? WHERE id=?").bind(host).bind(&env.project_id).execute(app.db()).await.unwrap();
         let bot = tt::claude_bot(&app, &env.project_id, "fenced-preview").await;
         sqlx::query(
             "INSERT INTO bot_previews (bot_id, host, pane_id, port, dir, status, updated_at, source)
@@ -1389,7 +1381,7 @@ mod stop_commit_tests {
         .bind(&bot.id)
         .bind(host)
         .bind(db::now())
-        .execute(&app.db)
+        .execute(app.db())
         .await
         .unwrap();
 
@@ -1405,7 +1397,7 @@ mod stop_commit_tests {
 
         assert!(!b_herdr.methods().iter().any(|method| method == "pane.close"), "B's preview pane must not be touched: {:?}", b_herdr.methods());
         assert!(matches!(result, Err(LcError::Conflict(ref value)) if value["reason"] == "host_superseded"), "stale authority must report superseded: {result:?}");
-        let preview = crate::preview::row(&app.db, &bot.id).await.unwrap().unwrap();
+        let preview = crate::preview::row(app.db(), &bot.id).await.unwrap().unwrap();
         assert_eq!(preview.status, "running", "the stale request must leave B's preview row alone");
     }
 
@@ -1418,9 +1410,9 @@ mod stop_commit_tests {
         let (bot, run) = running_bot(&env).await;
         rs::a_turn(&app, &bot, Some(&run), "in_flight").await;
         let n = env.herdr.methods().len();
-        sqlx::query("ALTER TABLE turns RENAME TO turns_unreadable").execute(&app.db).await.unwrap();
+        sqlx::query("ALTER TABLE turns RENAME TO turns_unreadable").execute(app.db()).await.unwrap();
         assert!(abort_turns(&app, &bot).await.is_err());
-        sqlx::query("ALTER TABLE turns_unreadable RENAME TO turns").execute(&app.db).await.unwrap();
+        sqlx::query("ALTER TABLE turns_unreadable RENAME TO turns").execute(app.db()).await.unwrap();
         let calls = since(&env, n);
         assert!(!calls.iter().any(|m| m == "agent.send_keys"), "讀不到就不按 esc：{calls:?}");
     }
@@ -1433,24 +1425,24 @@ mod stop_commit_tests {
         let app = env.app.clone();
         let bot = tt::claude_bot(&app, &env.project_id, "unknown").await;
         let turn = rs::a_turn(&app, &bot.id, None, "failed").await;
-        sqlx::query("UPDATE turns SET delivery='unknown' WHERE id=?").bind(&turn).execute(&app.db).await.unwrap();
+        sqlx::query("UPDATE turns SET delivery='unknown' WHERE id=?").bind(&turn).execute(app.db()).await.unwrap();
         sqlx::query(&format!(
             "CREATE TRIGGER refuse_abort_note BEFORE INSERT ON messages WHEN NEW.turn_id = '{turn}' BEGIN SELECT RAISE(ABORT, 'injected'); END"
         ))
-        .execute(&app.db)
+        .execute(app.db())
         .await
         .unwrap();
         let delivery = || {
             let app = app.clone();
             let turn = turn.clone();
-            async move { sqlx::query_scalar::<_, String>("SELECT delivery FROM turns WHERE id=?").bind(&turn).fetch_one(&app.db).await.unwrap() }
+            async move { sqlx::query_scalar::<_, String>("SELECT delivery FROM turns WHERE id=?").bind(&turn).fetch_one(app.db()).await.unwrap() }
         };
 
         assert!(abort_turns(&app, &bot.id).await.is_err(), "說明寫不進去：不回 aborted");
         assert_eq!(delivery().await, "unknown", "解開也沒發生");
         assert_eq!(rs::system_notes(&app, &turn).await, 0);
 
-        sqlx::query("DROP TRIGGER refuse_abort_note").execute(&app.db).await.unwrap();
+        sqlx::query("DROP TRIGGER refuse_abort_note").execute(app.db()).await.unwrap();
         let out = abort_turns(&app, &bot.id).await.unwrap();
         assert_eq!(out["aborted"], json!([turn.clone()]));
         assert_eq!((delivery().await, rs::system_notes(&app, &turn).await), ("failed".to_string(), 1));
@@ -1468,7 +1460,7 @@ mod stop_commit_tests {
         rs::accept_run_state(&app, "stopped").await;
 
         crate::reconcile::reconcile_host(&app, LOCAL_HOST).await.unwrap();
-        assert!(db::active_run(&app.db, &bot).await.unwrap().is_none(), "不再擋住下一次 start：{}", state(&app, &run).await);
+        assert!(db::active_run(app.db(), &bot).await.unwrap().is_none(), "不再擋住下一次 start：{}", state(&app, &run).await);
     }
 
     /// 驗收 3：default session 的 pane 不能強制關；agent 對 ctrl+c 沒反應、還活著，就不能記成 `stopped`。
@@ -1480,7 +1472,7 @@ mod stop_commit_tests {
         let (ws, _root) = client.workspace_create("/tmp/p", "proj", json!({})).await.unwrap();
         let pane = client.tab_create(&ws.workspace_id, "/tmp/p", "mine", json!({})).await.unwrap();
         let bot = tt::claude_bot(&app, &env.project_id, "mine").await.id;
-        sqlx::query("UPDATE bots SET herdr_session='default' WHERE id=?").bind(&bot).execute(&app.db).await.unwrap();
+        sqlx::query("UPDATE bots SET herdr_session='default' WHERE id=?").bind(&bot).execute(app.db()).await.unwrap();
         let run = db::ulid();
         // herdr 的目標寫成 pane id：mock 只照名字在 ctrl+c 時移除 agent，這顆就像不理 ctrl+c 的 agent。
         sqlx::query(
@@ -1494,7 +1486,7 @@ mod stop_commit_tests {
         .bind(&pane.pane_id)
         .bind(&pane.pane_id)
         .bind(db::now())
-        .execute(&app.db)
+        .execute(app.db())
         .await
         .unwrap();
         *env.herdr.agents.lock().unwrap() = vec![json!({
@@ -1556,9 +1548,9 @@ mod stop_commit_tests {
         let env = tt::env().await;
         let app = env.app.clone();
         let (bot, run) = running_bot(&env).await;
-        sqlx::query("UPDATE bots SET autostart=1 WHERE id=?").bind(&bot).execute(&app.db).await.unwrap();
+        sqlx::query("UPDATE bots SET autostart=1 WHERE id=?").bind(&bot).execute(app.db()).await.unwrap();
         let waiting = rs::a_turn(&app, &bot, None, "queued").await;
-        sqlx::query("UPDATE turns SET awaits_start=1 WHERE id=?").bind(&waiting).execute(&app.db).await.unwrap();
+        sqlx::query("UPDATE turns SET awaits_start=1 WHERE id=?").bind(&waiting).execute(app.db()).await.unwrap();
         let (app2, run2) = (app.clone(), run.clone());
         super::super::race_point::arm("stop_before_stopped", &bot, move || async move {
             mark_run_exited(&app2, &run2, "pane exited").await;
@@ -1604,7 +1596,7 @@ mod stop_commit_tests {
         let app = env.app.clone();
         let (bot, run) = running_bot(&env).await;
         let waiting = rs::a_turn(&app, &bot, None, "queued").await;
-        sqlx::query("UPDATE turns SET awaits_start=1 WHERE id=?").bind(&waiting).execute(&app.db).await.unwrap();
+        sqlx::query("UPDATE turns SET awaits_start=1 WHERE id=?").bind(&waiting).execute(app.db()).await.unwrap();
         rs::refuse_turn_close(&app, &waiting).await;
         let n = env.herdr.methods().len();
 
@@ -1628,7 +1620,7 @@ mod stop_commit_tests {
         let app = env.app.clone();
         let (bot, run) = running_bot(&env).await;
         let waiting = rs::a_turn(&app, &bot, None, "queued").await;
-        sqlx::query("UPDATE turns SET awaits_start=1 WHERE id=?").bind(&waiting).execute(&app.db).await.unwrap();
+        sqlx::query("UPDATE turns SET awaits_start=1 WHERE id=?").bind(&waiting).execute(app.db()).await.unwrap();
         rs::refuse_run_state(&app, "stopped").await;
         assert!(matches!(stop_bot(&app, &bot).await, Err(LcError::Uncommitted(_))));
         assert_eq!((state(&app, &run).await, rs::turn_status(&app, &waiting).await), ("stopping".to_string(), "failed".to_string()));
@@ -1636,7 +1628,7 @@ mod stop_commit_tests {
 
         let fresh = tt::restart_app(&env).await;
         crate::reconcile::reconcile_host(&fresh, LOCAL_HOST).await.unwrap();
-        assert!(db::active_run(&fresh.db, &bot).await.unwrap().is_none(), "開機對帳收掉了卡在 stopping 的 run");
+        assert!(db::active_run(fresh.db(), &bot).await.unwrap().is_none(), "開機對帳收掉了卡在 stopping 的 run");
         assert_eq!(super::super::start_send::resume_after_boot(&fresh, LOCAL_HOST).await, 0, "沒有在等它起來的：不替它啟動");
         assert_eq!(rs::turn_status(&fresh, &waiting).await, "failed");
     }
@@ -1648,7 +1640,7 @@ mod stop_commit_tests {
         let app = env.app.clone();
         let (bot, _run) = running_bot(&env).await;
         let waiting = rs::a_turn(&app, &bot, None, "queued").await;
-        sqlx::query("UPDATE turns SET awaits_start=1 WHERE id=?").bind(&waiting).execute(&app.db).await.unwrap();
+        sqlx::query("UPDATE turns SET awaits_start=1 WHERE id=?").bind(&waiting).execute(app.db()).await.unwrap();
         let restarting = super::super::restart_hold::begin(&bot);
         assert!(stop_for_restart_locked(&app, &bot).await.unwrap());
         drop(restarting);
@@ -1663,7 +1655,7 @@ mod stop_commit_tests {
         let app = env.app.clone();
         let (bot, run) = running_bot(&env).await;
         let waiting = rs::a_turn(&app, &bot, None, "queued").await;
-        sqlx::query("UPDATE turns SET awaits_start=1 WHERE id=?").bind(&waiting).execute(&app.db).await.unwrap();
+        sqlx::query("UPDATE turns SET awaits_start=1 WHERE id=?").bind(&waiting).execute(app.db()).await.unwrap();
         let (app2, run2) = (app.clone(), run.clone());
         super::super::race_point::arm("stop_before_stopped", &bot, move || async move {
             mark_run_exited(&app2, &run2, "pane exited").await;
@@ -1691,7 +1683,7 @@ mod stop_commit_tests {
         .bind(&env.project_id)
         .bind(&parent.id)
         .bind(db::now())
-        .execute(&app.db)
+        .execute(app.db())
         .await
         .unwrap();
         let run = db::ulid();
@@ -1705,7 +1697,7 @@ mod stop_commit_tests {
         .bind(&pane.tab_id)
         .bind(&pane.pane_id)
         .bind(db::now())
-        .execute(&app.db)
+        .execute(app.db())
         .await
         .unwrap();
         *env.herdr.agents.lock().unwrap() = vec![json!({
@@ -1796,7 +1788,7 @@ mod stop_commit_tests {
         let err = restart_child_in_pane(&app, &kid).await.expect_err("舊 run 沒記下 stopped");
         assert!(matches!(&err, LcError::Uncommitted(v) if v["error"] == "stop_state_uncommitted"), "明確擋下，不是撞唯一索引：{err:?}");
         assert!(!env.herdr.methods().iter().any(|m| m == "agent.start"));
-        let runs: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM runs WHERE bot_id=?").bind(&kid).fetch_one(&app.db).await.unwrap();
+        let runs: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM runs WHERE bot_id=?").bind(&kid).fetch_one(app.db()).await.unwrap();
         assert_eq!(runs, 1, "沒有寫新 run");
         assert_eq!(state(&app, &run).await, "stopping");
         assert!(!super::super::restart_hold::in_progress(&kid), "重啟結束了");
@@ -1805,7 +1797,7 @@ mod stop_commit_tests {
 
         rs::accept_run_state(&app, "stopped").await;
         assert!(rs::settle_once(&app, &run, &rs::Settle::Reconcile { stuck: "stopping".into() }).await);
-        assert!(db::active_run(&app.db, &kid).await.unwrap().is_none());
+        assert!(db::active_run(app.db(), &kid).await.unwrap().is_none());
         assert_eq!(rs::turn_status(&app, &queued).await, "failed", "沒開回來：照 #129 撤掉");
     }
 
@@ -1819,7 +1811,7 @@ mod stop_commit_tests {
 
         let err = restart_child_in_pane(&app, &kid).await.expect_err("新 run 沒記下 running");
         assert!(matches!(&err, LcError::Uncommitted(v) if v["error"] == "start_state_uncommitted"), "{err:?}");
-        let fresh = db::active_run(&app.db, &kid).await.unwrap().expect("新 run 還在");
+        let fresh = db::active_run(app.db(), &kid).await.unwrap().expect("新 run 還在");
         assert_eq!(fresh.state, "starting");
         assert_eq!(rs::scheduled(&fresh.id), vec![rs::Settle::Reconcile { stuck: "starting".into() }]);
     }
@@ -1835,7 +1827,7 @@ mod stop_commit_tests {
         rs::refuse_run_state(&app, "running").await;
 
         restart_child_in_pane(&app, &kid).await.expect_err("新 run 沒記下 running");
-        let fresh = db::active_run(&app.db, &kid).await.unwrap().expect("新 run 還在");
+        let fresh = db::active_run(app.db(), &kid).await.unwrap().expect("新 run 還在");
         assert_eq!(rs::turn_status(&app, &queued).await, "queued", "重啟中：不當孤兒撤");
         assert!(super::super::start_send::watching_for_running(&fresh.id), "排了「收成 running 就叫 flush」");
     }

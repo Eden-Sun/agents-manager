@@ -24,7 +24,7 @@
 //!   沒了也不用另外接：`rearm_queue_retries` 開機時本來就把每一筆 queued 叫醒一次，flush 走到這裡會照原本的
 //!   到期時間重新掛上（SPEC「到期動作不靠行程內的 timer 當唯一真相」）。
 
-use super::run_state::app_ports_p4state;
+use crate::app_ports_p4state;
 use super::*;
 
 /// 從 run 開始到 `SessionStart` 進到 daemon 最多等多久。本機通常幾秒；遠端 hook 寫在那台的 spool，

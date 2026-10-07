@@ -9,7 +9,7 @@ use crate::attach::Attachment;
 use crate::codex_history::{HistoryConn, Mark};
 use crate::db;
 use crate::lifecycle::LcResult;
-use super::ports::{
+use crate::lifecycle::send_now::ports::{
     AttachConnPort, AttachSendPort, AttachTxPort, CodexSendPort, HandoffSendRepo, IdleSleepPort, MaintenancePort, PaneWatchPort,
     SendEnvPort, ShareSendRepo, SupervisorSendRepo,
 };
@@ -150,7 +150,7 @@ impl SendEnvPort for Arc<App> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::lifecycle::app_ports_p4::AppEventSink;
+    use crate::app_ports_p4::AppEventSink;
     use crate::testing as tt;
     use serde_json::json;
 

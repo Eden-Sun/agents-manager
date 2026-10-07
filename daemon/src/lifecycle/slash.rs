@@ -1,5 +1,6 @@
 //! Keystrokes, text and slash commands sent straight at a live pane.
 
+use crate::state::App;
 use super::*;
 
 pub async fn send_keys(app: &(impl crate::capabilities::BotLocks + crate::capabilities::Db + crate::capabilities::HerdrRoutes + crate::hosts::HostsAccess), bot_id: &str, keys: Vec<String>, expect_run_id: Option<String>) -> LcResult<()> {

@@ -52,7 +52,7 @@ pub async fn close_pane_and_tab(
 }
 
 /// Purges bot directory (local or remote).
-pub async fn purge_bot_dir(app: &(impl crate::capabilities::DataDir + crate::capabilities::Db + crate::hosts::HostsAccess + crate::lifecycle::start::ports::RemoteCleanupPort + crate::shared_host::SharedHostEnv), bot_id: &str, host: &str) -> bool {
+pub async fn purge_bot_dir(app: &Arc<App>, bot_id: &str, host: &str) -> bool {
     lifecycle::purge_bot_dir(app, bot_id, host).await
 }
 
@@ -66,7 +66,7 @@ pub async fn remote_bot_dir(
     conn: &crate::hosts::HostConn,
     bot_id: &str,
 ) -> anyhow::Result<crate::lifecycle::RemoteHookPaths> {
-    lifecycle::remote_bot_dir(conn, bot_id).await
+    crate::runners::s6_l::remote_bot_dir(conn, bot_id).await
 }
 
 // ============================================================================

@@ -7,6 +7,7 @@
 #[path = "../app_ports_p4obs.rs"]
 pub(crate) mod app_ports_p4obs;
 
+use crate::state::App;
 use super::*;
 
 

@@ -1,7 +1,9 @@
 //! What a pane needs before an agent starts: hooks, shims, skills, persona and argv.
 
+use crate::capabilities::Db;
 use super::*;
 use super::start::ports::ShareSessionRepo;
+use super::s6_ports::SetupShareServices;
 
 /// The hook / statusLine command line for a *local* bot. The token is deliberately **not**
 /// on the argv (issue #43: `ps` shows every user the full command line, and the statusLine
@@ -614,7 +616,7 @@ fn install_local_grok_hook(app: &(impl crate::capabilities::DataDir + crate::cap
 /// Remote grok bot: the same two files, written over ssh after `install_remote_hook`.
 async fn install_remote_grok_hook(conn: &HostConn, env: &Value, instance: Option<&str>) -> anyhow::Result<()> {
     let home = conn.home().await?;
-    let root = crate::startup::remote_root_for(instance);
+    let root = crate::hosts::remote_root_for(instance);
     // 按實例分址：共用一個 dispatcher 的話，兩顆 daemon 會互相把它改寫成指向自己（sol 三輪）。
     let dispatcher = format!("{home}/{root}/{GROK_DISPATCH_SH}");
     let hooks_dir = format!("{}/hooks", grok_home(env, &home));
@@ -715,18 +717,13 @@ pub struct RemoteHookPaths {
     pub settings: String,
 }
 
-/// 沒有 `App` 在手的呼叫端（`stop.rs` 的清目錄）用行程層級的實例名；`App::instance` 也是從它初始化的。
-pub async fn remote_bot_dir(conn: &HostConn, bot_id: &str) -> anyhow::Result<RemoteHookPaths> {
-    remote_bot_dir_for(conn, bot_id, crate::startup::instance().as_deref()).await
-}
-
 pub async fn remote_bot_dir_for(conn: &HostConn, bot_id: &str, instance: Option<&str>) -> anyhow::Result<RemoteHookPaths> {
     if !valid_id(bot_id) {
         anyhow::bail!("invalid bot id `{bot_id}` (must match {ID_RE})");
     }
     let home = conn.home().await?;
     // 隔離實例在遠端也要有自己的根（`instances/<slug>`），否則同 id 的 bot 會共用 spool。
-    let dir = format!("{home}/{}/bots/{bot_id}", crate::startup::remote_root_for(instance));
+    let dir = format!("{home}/{}/bots/{bot_id}", crate::hosts::remote_root_for(instance));
     Ok(RemoteHookPaths { hook_sh: format!("{dir}/hook.sh"), settings: format!("{dir}/claude-settings.json"), dir })
 }
 
@@ -748,7 +745,7 @@ async fn install_remote_hook(conn: &HostConn, bot: &db::Bot, instance: Option<&s
         "set -e\numask 077\nD={dir}\nmkdir -p \"$D\"\nchmod 700 \"$D\"\nchmod go-rwx \"$D\"/* 2>/dev/null || true\ncat > \"$D/hook.sh\" <<'AM_HOOK_EOF'\n{hook}AM_HOOK_EOF\nchmod 700 \"$D/hook.sh\"\ncat > \"$D/claude-settings.json\" <<'AM_SETTINGS_EOF'\n{settings}\nAM_SETTINGS_EOF\nchmod 600 \"$D/claude-settings.json\"\nprintf 'AM_INSTALLED\\n'\n",
         dir = sh_quote(&p.dir),
         // 腳本裡寫的根目錄與上面的安裝位置同一個：事件才會進這個實例自己的 spool。
-        hook = remote_hook_sh(&crate::startup::remote_root_for(instance)),
+        hook = remote_hook_sh(&crate::hosts::remote_root_for(instance)),
         settings = settings_text,
     );
     let out = conn.ssh_exec(&script).await?;
@@ -823,7 +820,7 @@ pub(crate) fn permission_args(kind: &str, auto_approve: bool) -> Vec<String> {
 }
 
 /// Daemon-injected CLI args that go *before* the bot's own; remote projects also upload the hook (§11.4).
-pub(crate) async fn injected_args(app: &(impl crate::capabilities::DataDir + crate::capabilities::Db + crate::capabilities::ExePath + crate::capabilities::ListenPort + crate::hosts::HostInstance + crate::hosts::HostsAccess), bot: &db::Bot, project: &db::Project, env: &Value) -> anyhow::Result<Vec<String>> {
+pub(crate) async fn injected_args(app: &(impl crate::capabilities::DataDir + crate::capabilities::Db + crate::capabilities::ExePath + crate::capabilities::ListenPort + crate::hosts::HostInstance + crate::hosts::HostsAccess + SetupShareServices), bot: &db::Bot, project: &db::Project, env: &Value) -> anyhow::Result<Vec<String>> {
     if !matches!(bot.kind.as_str(), "claude" | "codex" | "grok" | "agy") {
         anyhow::bail!("unknown bot kind {}", bot.kind);
     }
@@ -888,7 +885,7 @@ pub(crate) async fn injected_args(app: &(impl crate::capabilities::DataDir + cra
                 if bot.inject_hooks == 0 {
                     settings = json!({});
                 }
-                crate::share::cage::cage_settings(&mut settings, ws, env);
+                app.cage_settings(&mut settings, ws, env);
             }
             let path = dir.join("claude-settings.json");
             write_private(&path, &serde_json::to_vec_pretty(&settings)?)?;
@@ -2014,7 +2011,7 @@ mod remote_hook_tests {
     impl Sandbox {
         /// `with_herdr = false` is the §11.4.2 "no herdr on this host" path (acceptance H5).
         fn new(with_herdr: bool) -> Self {
-            Self::with_root(with_herdr, crate::startup::REMOTE_ROOT)
+            Self::with_root(with_herdr, crate::hosts::REMOTE_ROOT)
         }
 
         /// 用哪個遠端根產生腳本（正式實例＝`REMOTE_ROOT`，隔離實例＝`instances/<slug>`）。
@@ -2301,12 +2298,12 @@ mod remote_hook_tests {
     /// 真的執行產生出來的腳本：spool 要落在**這個實例**的根底下（sol 三輪）。正式實例的既有路徑不變。
     #[test]
     fn the_generated_hook_spools_under_its_own_instance_root() {
-        let default = super::remote_hook_sh(crate::startup::REMOTE_ROOT);
+        let default = super::remote_hook_sh(crate::hosts::REMOTE_ROOT);
         assert!(default.contains("DIR=\"$HOME/.config/agents-manager/bots/$BOT\""), "正式實例的腳本路徑不能變");
         assert!(!default.contains("__AM_REMOTE_ROOT__"));
 
         for slug in [None, Some("a1b2c3d4")] {
-            let root = crate::startup::remote_root_for(slug);
+            let root = crate::hosts::remote_root_for(slug);
             let sb = Sandbox::with_root(false, &root);
             let (_, ok) = sb.run(&["claude", &sb.bot, "-"], STOP);
             assert!(ok);
@@ -2326,7 +2323,7 @@ mod remote_hook_tests {
     #[test]
     fn neither_grok_dispatcher_puts_the_token_on_the_command_line() {
         for slug in [None, Some("a1b2")] {
-            let root = crate::startup::remote_root_for(slug);
+            let root = crate::hosts::remote_root_for(slug);
             let remote = super::remote_grok_dispatch_sh(&root, slug);
             let local = super::local_grok_dispatch_sh("/x/agents-managerd", "/x/data", slug);
             for s in [&remote, &local] {
@@ -2348,7 +2345,7 @@ mod remote_hook_tests {
     fn each_grok_dispatcher_only_serves_its_own_instance() {
         let home = crate::testing::track(std::env::temp_dir().join(format!("am-grok-{}", crate::db::ulid())));
         let run = |slug: Option<&str>, pane_instance: Option<&str>| -> bool {
-            let root = crate::startup::remote_root_for(slug);
+            let root = crate::hosts::remote_root_for(slug);
             let bot_dir = home.join(&root).join("bots/b1");
             std::fs::create_dir_all(&bot_dir).unwrap();
             let marker = bot_dir.join("called");
@@ -2848,10 +2845,10 @@ mod pane_env_tests {
         sqlx::query("UPDATE bots SET env_json = ? WHERE id = ?")
             .bind(r#"{"AM_OUTBOX":"/elsewhere","FOO":"kept"}"#)
             .bind(&bot.id)
-            .execute(&env.app.db)
+            .execute(env.app.db())
             .await
             .unwrap();
-        let bot = db::bot(&env.app.db, &bot.id).await.unwrap().unwrap();
+        let bot = db::bot(env.app.db(), &bot.id).await.unwrap().unwrap();
         let e = pane_env(&env.app, &bot, LOCAL_HOST, "run-1", "proj-alfa", None).await.unwrap();
         assert_eq!(e["AM_OUTBOX"], json!(want.to_string_lossy()), "bot.env 蓋不過去");
         assert_eq!(e["FOO"], json!("kept"));
@@ -2867,10 +2864,10 @@ mod pane_env_tests {
                 .bind(enabled)
                 .bind(r#"{"AM_BOT_ID":"forged","AM_BOT_TOKEN":"forged","AM_HOOK_TOKEN":"forged"}"#)
                 .bind(&bot.id)
-                .execute(&env.app.db)
+                .execute(env.app.db())
                 .await
                 .unwrap();
-            let current = db::bot(&env.app.db, &bot.id).await.unwrap().unwrap();
+            let current = db::bot(env.app.db(), &bot.id).await.unwrap().unwrap();
             let pane = pane_env(&env.app, &current, LOCAL_HOST, "run-1", "proj-api-token", None).await.unwrap();
             assert_eq!(pane["AM_BOT_ID"], json!(bot.id));
             assert_eq!(pane["AM_BOT_TOKEN"], json!(bot.hook_token), "API identity is always the stored per-bot token");
@@ -2896,10 +2893,10 @@ mod pane_env_tests {
         sqlx::query("UPDATE bots SET env_json = ? WHERE id = ?")
             .bind(r#"{"CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION":"false"}"#)
             .bind(&bot.id)
-            .execute(&env.app.db)
+            .execute(env.app.db())
             .await
             .unwrap();
-        let bot = db::bot(&env.app.db, &bot.id).await.unwrap().unwrap();
+        let bot = db::bot(env.app.db(), &bot.id).await.unwrap().unwrap();
         let e = pane_env(&env.app, &bot, LOCAL_HOST, "run-1", "proj-alfa", None).await.unwrap();
         assert_eq!(e["CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION"], json!("false"), "使用者自己要關就尊重");
     }
@@ -2961,8 +2958,8 @@ mod pane_env_tests {
             });
             Ok(())
         }).await.unwrap();
-        sqlx::query("UPDATE bots SET identity = ? WHERE id = ?").bind("cc1").bind(&bot.id).execute(&app.db).await.unwrap();
-        let bot = db::bot(&app.db, &bot.id).await.unwrap().unwrap();
+        sqlx::query("UPDATE bots SET identity = ? WHERE id = ?").bind("cc1").bind(&bot.id).execute(app.db()).await.unwrap();
+        let bot = db::bot(app.db(), &bot.id).await.unwrap().unwrap();
 
         let calls = Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
         let calls2 = calls.clone();
@@ -3061,10 +3058,10 @@ mod pane_env_tests {
                 .bind(identity)
                 .bind(env_json)
                 .bind(&bot.id)
-                .execute(&env.app.db)
+                .execute(env.app.db())
                 .await
                 .unwrap();
-            let bot = db::bot(&env.app.db, &bot.id).await.unwrap().unwrap();
+            let bot = db::bot(env.app.db(), &bot.id).await.unwrap().unwrap();
             for instance in [None, Some("a1b2".to_string())] {
                 env.app.set_instance(instance.clone());
                 for host in [LOCAL_HOST, "box"] {
@@ -3249,7 +3246,7 @@ mod remote_install_permission_tests {
         });
 
         let bot = tt::claude_bot(&env.app, &env.project_id, "alfa").await;
-        let dir = home.join(crate::startup::REMOTE_ROOT).join("bots").join(&bot.id);
+        let dir = home.join(crate::hosts::REMOTE_ROOT).join("bots").join(&bot.id);
         // 升級前留下來的：目錄 0755、spool 0644。
         std::fs::create_dir_all(&dir).unwrap();
         std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o755)).unwrap();
@@ -3309,7 +3306,7 @@ mod remote_install_permission_tests {
         let installed: Value = serde_json::from_str(&std::fs::read_to_string(&hooks_path).unwrap()).unwrap();
         assert_eq!(mode_of(&hooks_dir), 0o700, "remote hooks directory must not let other users replace commands");
         assert_eq!(mode_of(&hooks_path), 0o600, "remote hook JSON stays private");
-        let dispatcher = home.join(crate::startup::REMOTE_ROOT).join(GROK_DISPATCH_SH);
+        let dispatcher = home.join(crate::hosts::REMOTE_ROOT).join(GROK_DISPATCH_SH);
         assert_eq!(mode_of(&dispatcher), 0o700, "remote dispatcher stays private and executable");
         assert_eq!(installed["user_note"], "keep me");
         assert_eq!(installed["hooks"]["PreToolUse"], existing["hooks"]["PreToolUse"]);

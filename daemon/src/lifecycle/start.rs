@@ -2,20 +2,38 @@
 
 use super::*;
 
-/// am-turn-session（P4sess）對其他 feature 的窄介面與 `App` 端實作（crate 拆分第 3 步）；檔案在 `daemon/src/`，不碰 `lifecycle/mod.rs`。
+/// Session contract used by startup policy.
 #[path = "../session_ports.rs"]
 pub(crate) mod ports;
-#[path = "../app_ports_p4sess.rs"]
-pub(crate) mod app_ports_p4sess;
-use self::ports::{HandoffSessionRepo, RestartIntentRepo, SessionProviderPort, emit_object, bot_status};
-use super::app_ports_p4::{AppEventSink};
-use self::app_ports_p4sess::AppBotLock;
-use am_ports::BotLock;
+use self::ports::{HandoffSessionRepo, RestartIntentRepo, SessionProviderPort};
+use self::ports::{PaneWatchPort, PreviewPort, RemoteCleanupPort, ShimInstallPort};
+use super::s6_ports::{IdentityAccess, StartServices};
+use crate::capabilities::{BootId, BotLocks, BotStatusEmit, Cfg, DataDir, Db, Emit, ExePath, ListenPort};
+use crate::capabilities::HerdrRoutes;
+use crate::hosts::{HostInstance, HostsAccess};
+
+pub(crate) trait StartContext:
+    StartServices + Db + Emit + BotLocks + BotStatusEmit + Cfg + DataDir + ExePath + ListenPort + BootId
+    + HostsAccess + HostInstance + HerdrRoutes + IdentityAccess + SessionProviderPort
+    + ShimInstallPort + RemoteCleanupPort + PreviewPort + PaneWatchPort
+    + crate::background_jobs::JobCounts + crate::kind_probe::KindProbeState + super::s6_ports::StopContext
+    + super::s6_ports::QueueContext + super::s6_ports::ResumeNudgeContext + super::s6_ports::ScreenContext
+    + Clone + Send + Sync + 'static
+{}
+
+impl<T> StartContext for T where
+    T: StartServices + Db + Emit + BotLocks + BotStatusEmit + Cfg + DataDir + ExePath + ListenPort + BootId
+        + HostsAccess + HostInstance + HerdrRoutes + IdentityAccess + SessionProviderPort
+        + ShimInstallPort + RemoteCleanupPort + PreviewPort + PaneWatchPort
+        + crate::background_jobs::JobCounts + crate::kind_probe::KindProbeState + super::s6_ports::StopContext
+        + super::s6_ports::QueueContext + super::s6_ports::ResumeNudgeContext + super::s6_ports::ScreenContext
+        + Clone + Send + Sync + 'static
+{}
 
 /// Identity CLI args on `host`. Discovered `ccN` identities carry none: alias flags are the user's shell habit.
-async fn identity_args(app: &Arc<impl crate::tools::ToolsEnv + 'static>, bot: &db::Bot, host: &str) -> Vec<String> {
+async fn identity_args(app: &impl IdentityAccess, bot: &db::Bot, host: &str) -> Vec<String> {
     let Some(idn) = bot.identity.as_deref().filter(|s| !s.is_empty()) else { return vec![] };
-    crate::tools::identity_for_host(app, host, idn).await.map(|i| i.args).unwrap_or_default()
+    app.identity_for_host(host, idn).await.map(|i| i.args).unwrap_or_default()
 }
 
 /// `-c tui.show_tooltips=false`：codex 0.158 起回合超過 30 秒、以及第三回合起的回合結束後會插一行隨機 tip
@@ -52,8 +70,8 @@ pub struct StartOpts {
 ///
 /// 一鍵重啟在排到這顆時 recheck 過一次，但 recheck 到這裡拿到鎖之間仍有空檔：使用者剛好在那幾毫秒送出一則，
 /// 那一回合會被 ctrl+c 砍掉（review2 quota #5）。鎖內再看一次才真的關掉。
-async fn busy_reason_locked(app: &Arc<App>, bot_id: &str, refuse_background_jobs: bool) -> LcResult<Option<String>> {
-    let Some(run) = db::active_run(&app.db, bot_id).await.map_err(up)? else { return Ok(Some("not_running".into())) };
+async fn busy_reason_locked(app: &impl StartContext, bot_id: &str, refuse_background_jobs: bool) -> LcResult<Option<String>> {
+    let Some(run) = db::active_run(app.db(), bot_id).await.map_err(up)? else { return Ok(Some("not_running".into())) };
     let busy = if run.state != "running" {
         Some("not_running")
     } else if run.agent_status == "working" {
@@ -62,7 +80,7 @@ async fn busy_reason_locked(app: &Arc<App>, bot_id: &str, refuse_background_jobs
         Some("blocked")
     } else if run.agent_status != "idle" {
         Some("unknown_status")
-    } else if db::in_flight_turn(&app.db, &run.id).await.map_err(up)?.is_some() {
+    } else if db::in_flight_turn(app.db(), &run.id).await.map_err(up)?.is_some() {
         Some("turn_in_flight")
     } else {
         None
@@ -71,8 +89,8 @@ async fn busy_reason_locked(app: &Arc<App>, bot_id: &str, refuse_background_jobs
         return Ok(Some(busy.to_string()));
     }
     if refuse_background_jobs {
-        if let Some(bot) = db::bot(&app.db, bot_id).await.map_err(up)? {
-            crate::runners::background_jobs::refresh(app, &run, &bot.kind).await;
+        if let Some(bot) = db::bot(app.db(), bot_id).await.map_err(up)? {
+            app.refresh_background_jobs(&run, &bot.kind).await;
             if let Some(n) = crate::background_jobs::known(app, &run.id).filter(|n| *n > 0) {
                 return Ok(Some(format!("background_jobs:{n}")));
             }
@@ -89,28 +107,27 @@ fn host_superseded(bot_id: &str, host: &str) -> LcError {
     LcError::conflict("host_superseded", json!({"bot_id": bot_id, "host": host}))
 }
 
-pub async fn start_bot(app: &Arc<App>, bot_id: &str) -> LcResult<String> {
+pub async fn start_bot(app: &impl StartContext, bot_id: &str) -> LcResult<String> {
     start_bot_with(app, bot_id, StartOpts::default()).await
 }
 
-pub async fn start_bot_with(app: &Arc<App>, bot_id: &str, opts: StartOpts) -> LcResult<String> {
-    let locks = AppBotLock::new(app);
+pub async fn start_bot_with(app: &impl StartContext, bot_id: &str, opts: StartOpts) -> LcResult<String> {
     let locked_bot = bot_id.to_string();
-    let _g = locks.lock_bot(&locked_bot).await.map_err(|e| LcError::Upstream(e.to_string()))?;
+    let _g = app.lock_bot_for_start(&locked_bot).await;
     start_bot_locked_with(app, bot_id, opts).await
 }
 
-pub async fn start_bot_locked_with(app: &Arc<App>, bot_id: &str, opts: StartOpts) -> LcResult<String> {
+pub async fn start_bot_locked_with(app: &impl StartContext, bot_id: &str, opts: StartOpts) -> LcResult<String> {
     start_bot_locked_with_host_fence(app, bot_id, opts, None).await
 }
 
 async fn start_bot_locked_with_host_fence(
-    app: &Arc<App>,
+    app: &impl StartContext,
     bot_id: &str,
     opts: StartOpts,
     fence: Option<&crate::hosts::HostFence>,
 ) -> LcResult<String> {
-    let bot = db::bot(&app.db, bot_id).await.map_err(up)?.ok_or_else(|| LcError::NotFound("bot".into()))?;
+    let bot = db::bot(app.db(), bot_id).await.map_err(up)?.ok_or_else(|| LcError::NotFound("bot".into()))?;
     if bot.deleted_at.is_some() {
         return Err(LcError::NotFound("bot".into()));
     }
@@ -122,18 +139,18 @@ async fn start_bot_locked_with_host_fence(
         ));
     }
     refuse_default_session(&bot)?;
-    app.db.refuse_handed_off(bot_id).await?;
-    if let Some(existing) = db::active_run(&app.db, bot_id).await.map_err(up)? {
+    app.db().refuse_handed_off(bot_id).await?;
+    if let Some(existing) = db::active_run(app.db(), bot_id).await.map_err(up)? {
         return Err(LcError::conflict("active run already exists", json!({"run_id": existing.id})));
     }
     // 要求接回原對話：在任何副作用（run 列、pane、shim）之前就判斷，接不回就整個不啟動。
     if opts.resume_native && opts.resume_required {
-        let host = db::bot_host(&app.db, bot_id).await.map_err(up)?;
+        let host = db::bot_host(app.db(), bot_id).await.map_err(up)?;
         if let Err(why) = native_resume_plan(app, &bot, &host, false, opts.resume_session.as_deref()).await? {
             return Err(cannot_resume(bot_id, why.reason));
         }
     }
-    let project = db::project(&app.db, &bot.project_id)
+    let project = db::project(app.db(), &bot.project_id)
         .await
         .map_err(up)?
         .ok_or_else(|| LcError::NotFound("project".into()))?;
@@ -148,7 +165,7 @@ async fn start_bot_locked_with_host_fence(
             .ok_or_else(|| LcError::Upstream(format!("host `{}` is not configured", project.host)))?,
     };
     if let Some(fence) = fence {
-        if project.host != fence.conn().name || !app.hosts.is_current(fence).await {
+        if project.host != fence.conn().name || !app.hosts().is_current(fence).await {
             return Err(host_superseded(bot_id, &project.host));
         }
     }
@@ -157,30 +174,23 @@ async fn start_bot_locked_with_host_fence(
     // falling back to the host's default account (GH #83: it used to just warn and start anyway,
     // which quietly billed usage to the wrong account).
     if let Some(idn) = bot.identity.as_deref().filter(|s| !s.is_empty()) {
-        if crate::tools::identity_for_host(app, &project.host, idn).await.is_none() {
+        if app.identity_for_host(&project.host, idn).await.is_none() {
             return Err(LcError::conflict(
                 "identity is not known on this host",
                 json!({"identity": idn, "host": project.host,
                        "hint": format!("主機 {} 沒有 `{idn}` 這個身份（config.toml 的 [[identities]] 或該機 zshrc 的 ccN alias）；先在那台建好，或到主機設定按「重新偵測」", project.host)}),
             ));
         }
-        let mut not_logged_in = app
-            .tools
-            .lock()
-            .await
-            .get(&project.host)
-            .and_then(|t| t.identities.get(idn))
-            .map(|i| i.logged_in == Some(false))
-            .unwrap_or(false);
+        let mut not_logged_in = app.cached_identity_logged_out(&project.host, idn).await;
         // The cache can be ~30 min stale after a login; ask the CLI before saying not logged in.
         if not_logged_in {
-            if let Some(fresh) = crate::tools::recheck_identity_login(app, &project.host, idn).await {
+            if let Some(fresh) = app.recheck_identity_login(&project.host, idn).await {
                 not_logged_in = !fresh;
             }
         }
         if not_logged_in {
             tracing::warn!(bot = %bot.name, identity = idn, host = %project.host, "explicit identity not logged in on host; refusing to start (fail closed)");
-            if let Ok(conv) = db::conversation_id(&app.db, bot_id).await {
+            if let Ok(conv) = db::conversation_id(app.db(), bot_id).await {
                 let _ = insert_message(
                     app,
                     &conv,
@@ -206,7 +216,7 @@ async fn start_bot_locked_with_host_fence(
         }
         // Logged in headlessly but never onboarded: the TUI would open on the login menu.
         if bot.kind == "claude" && project.host == crate::config::LOCAL_HOST {
-            if let Some(i) = crate::tools::identity_for_host(app, &project.host, idn).await {
+            if let Some(i) = app.identity_for_host(&project.host, idn).await {
                 let home = dirs::home_dir().map(|p| p.to_string_lossy().to_string()).unwrap_or_default();
                 let dir = i
                     .env
@@ -236,18 +246,18 @@ async fn start_bot_locked_with_host_fence(
     // 這個 run 載入的啟動設定版本（#353）：之後 config 改了、版本對不上＝需要重啟，不靠 PATCH 回應裡那個會遺失的布林。
     .bind(crate::launch_rev::of(&bot))
     .bind(db::now())
-    .execute(&app.db)
+    .execute(app.db())
     .await;
     if let Err(e) = ins {
         if let Some(dbe) = e.as_database_error() {
             if dbe.is_unique_violation() {
-                let existing = db::active_run(&app.db, bot_id).await.map_err(up)?.map(|r| r.id);
+                let existing = db::active_run(app.db(), bot_id).await.map_err(up)?.map(|r| r.id);
                 return Err(LcError::conflict("active run already exists", json!({ "run_id": existing })));
             }
         }
         return Err(up(e));
     }
-    bot_status(&AppEventSink::new(app), bot_id).await;
+    app.bot_status_changed(bot_id).await;
 
     match start_inner(app, &bot, &project, &run_id, &session, opts.clone(), fence).await {
         Ok(()) => {
@@ -259,17 +269,17 @@ async fn start_bot_locked_with_host_fence(
         // agent 已經在跑，只差 `running` 沒記下（#145）：收成 exited 會留下一顆沒有 run 的活 agent，
         // 交給 `start_inner` 排好的重試照證據收斂。
         Err(e @ LcError::Uncommitted(_)) => {
-            bot_status(&AppEventSink::new(app), bot_id).await;
+            app.bot_status_changed(bot_id).await;
             Err(e)
         }
         Err(e) => {
             // CAS：`start_inner` 途中不拿鎖的 pane-exit 事件已經收掉它的話，不覆寫。寫不進去時 pane 已經收掉了，
             // DB 卻還是 `starting`——不留一顆永遠擋住下一次 start 的 run，排對帳重試（#145 驗收 3）。
-            if let Err(db_err) = super::run_state::transition(&app.db, &run_id, &["starting"], "exited", None).await {
+            if let Err(db_err) = super::run_state::transition(app.db(), &run_id, &["starting"], "exited", None).await {
                 tracing::warn!(bot = %bot.name, run = %run_id, error = %db_err, "failed start could not be recorded as exited");
                 super::run_state::schedule_settle(app, &run_id, super::run_state::Settle::Reconcile { stuck: "starting".into() });
             }
-            bot_status(&AppEventSink::new(app), bot_id).await;
+            app.bot_status_changed(bot_id).await;
             Err(e)
         }
     }
@@ -319,7 +329,7 @@ impl NativeResumeFailure {
 /// `--resume` 在新身分下找不到檔案。先把檔案複製過去再放行，複製不了就回退開新對話，不硬失敗
 /// （2026-09-17 AGM 手動搶救的兩顆 bot：`resume_session_id` 一直是空的）。
 pub(crate) async fn native_resume_plan(
-    app: &Arc<impl crate::capabilities::DataDir + crate::capabilities::Db + crate::capabilities::ExePath + crate::hosts::HostInstance + crate::hosts::HostsAccess + crate::tools::ToolsEnv + 'static>,
+    app: &(impl crate::capabilities::DataDir + crate::capabilities::Db + crate::capabilities::ExePath + crate::hosts::HostInstance + crate::hosts::HostsAccess + IdentityAccess),
     bot: &db::Bot,
     host: &str,
     include_active: bool,
@@ -378,13 +388,13 @@ pub(crate) async fn native_resume_plan(
 }
 
 /// 這個身分實際用的 `CLAUDE_CONFIG_DIR`（沒設、或身分未知都算預設帳號 `~/.claude`）。
-pub(crate) async fn identity_config_dir(app: &Arc<impl crate::hosts::HostsAccess + crate::tools::ToolsEnv + 'static>, host: &str, identity: Option<&str>) -> anyhow::Result<String> {
+pub(crate) async fn identity_config_dir(app: &(impl crate::hosts::HostsAccess + IdentityAccess), host: &str, identity: Option<&str>) -> anyhow::Result<String> {
     let fence = app.hosts().fence(host).await.ok_or_else(|| anyhow::anyhow!("unknown host `{host}`"))?;
     identity_config_dir_for_fence(app, host, identity, &fence).await
 }
 
 pub(crate) async fn identity_config_dir_for_fence(
-    app: &Arc<impl crate::hosts::HostsAccess + crate::tools::ToolsEnv + 'static>,
+    app: &(impl crate::hosts::HostsAccess + IdentityAccess),
     host: &str,
     identity: Option<&str>,
     fence: &crate::hosts::HostFence,
@@ -394,7 +404,7 @@ pub(crate) async fn identity_config_dir_for_fence(
         anyhow::bail!("host `{host}` changed while resolving HOME");
     }
     let dir = match identity.map(str::trim).filter(|s| !s.is_empty()) {
-        Some(name) => crate::tools::identity_for_host(app, host, name)
+        Some(name) => app.identity_for_host(host, name)
             .await
             .and_then(|i| i.env.get("CLAUDE_CONFIG_DIR").map(|v| crate::config::expand_home(v, &home))),
         None => None,
@@ -406,7 +416,7 @@ pub(crate) async fn identity_config_dir_for_fence(
 /// 底下找得到。本機與遠端分開實作：遠端主機上舊/新 `projects/` 都在**那台機器**上，是同機複製，
 /// 透過 ssh 執行一段 shell script，不是本機↔遠端搬檔（issue #95：以前只做本機這半，遠端完全跳過，
 /// 換身分後 `--resume` 在遠端主機上一樣找不到檔案，只是要等 CLI 真的跑起來才會發現）。
-async fn stage_cross_identity_transcript(app: &Arc<impl crate::hosts::HostsAccess + crate::tools::ToolsEnv + 'static>, bot: &db::Bot, host: &str, transcript: &str) -> Result<(), &'static str> {
+async fn stage_cross_identity_transcript(app: &(impl crate::hosts::HostsAccess + IdentityAccess), bot: &db::Bot, host: &str, transcript: &str) -> Result<(), &'static str> {
     // 只有 claude 的 session 檔住在 `<CLAUDE_CONFIG_DIR>/projects/` 底下。codex／grok 的對話檔不歸這個目錄管：
     // 以前照樣複製，把 codex 的 rollout 整份丟進 `<claude 身分>/projects/<日>/`（資料安全審查）。
     if bot.kind != "claude" {
@@ -421,7 +431,7 @@ async fn stage_cross_identity_transcript(app: &Arc<impl crate::hosts::HostsAcces
 
 /// 兩邊 `projects/`（canonicalize 後）本來就是同一份（例如 symlink）時什麼都不做。來源檔不在了，
 /// 或建目錄／複製失敗，都回傳 `transcript_missing` 讓呼叫端退回開新對話，不 panic、不硬擋重啟。
-async fn stage_cross_identity_transcript_local(app: &Arc<impl crate::hosts::HostsAccess + crate::tools::ToolsEnv + 'static>, bot: &db::Bot, transcript: &str) -> Result<(), &'static str> {
+async fn stage_cross_identity_transcript_local(app: &(impl crate::hosts::HostsAccess + IdentityAccess), bot: &db::Bot, transcript: &str) -> Result<(), &'static str> {
     let src = std::path::Path::new(transcript);
     if !src.exists() {
         return Err("transcript_missing");
@@ -500,7 +510,7 @@ fn stage_cross_identity_transcript_local_fs(
 /// 跟 local 版做同一件事，但舊／新 `projects/` 都在**那台遠端主機**上：是同機複製，透過 ssh
 /// 執行一段 shell script，不是本機↔遠端搬檔。主機沒連線／ssh 指令本身失敗都回 `transcript_missing`
 /// ——連不上就假裝已經搬過去，比直接開新對話更糟（會讓 `--resume` 帶著錯的期待送出去）。
-async fn stage_cross_identity_transcript_remote(app: &Arc<impl crate::hosts::HostsAccess + crate::tools::ToolsEnv + 'static>, bot: &db::Bot, host: &str, transcript: &str) -> Result<(), &'static str> {
+async fn stage_cross_identity_transcript_remote(app: &(impl crate::hosts::HostsAccess + IdentityAccess), bot: &db::Bot, host: &str, transcript: &str) -> Result<(), &'static str> {
     // 形狀不對（不是 projects/<key>/<id>.jsonl）就不碰 ssh：路徑是 DB 記的字串，不能拿來叫遠端複製任意檔案。
     if !super::transcript_stage::has_claude_transcript_shape(transcript) {
         tracing::warn!(bot = %bot.name, host, transcript, "identity switch：遠端來源不是 projects/<cwd>/<id>.jsonl，不複製，改開新對話");
@@ -791,7 +801,7 @@ pub(crate) fn fork_args_by_kind(kind: &str, session_id: &str) -> Result<Vec<Stri
 /// （issue #92：換身分接不回原對話那次，靠人工翻 log 才查到；`resume_mismatch`——hook 回報的
 /// session 跟預期的不是同一個——更隱蔽，CLI 自己開了新對話卻沒有任何錯誤）。同一交易寫入系統訊息與
 /// 對應的 session metadata，前端仍直接顯示一般系統訊息。
-pub(crate) async fn context_lost(app: &(impl crate::capabilities::Db + crate::capabilities::Emit + crate::capabilities::BotStatusEmit), bot: &db::Bot, why: &str, failed_session: Option<&str>) -> LcResult<()> {
+pub(crate) async fn context_lost(app: &(impl crate::capabilities::Db + crate::capabilities::Emit + crate::capabilities::BotStatusEmit + StartServices), bot: &db::Bot, why: &str, failed_session: Option<&str>) -> LcResult<()> {
     tracing::warn!(bot = %bot.name, why, failed_session = ?failed_session, "native session continuation unavailable; starting a new conversation");
     let reason = match why {
         "no_session_id" => "沒有記到上一段對話的 session id",
@@ -830,7 +840,7 @@ pub(crate) async fn context_lost(app: &(impl crate::capabilities::Db + crate::ca
     .await
     .map_err(up)?;
     tx.commit().await.map_err(up)?;
-    emit_object(&AppEventSink::new(app), "message_added", Some(&bot.id), json!({ "bot_id": bot.id, "message": msg })).await;
+    app.emit_lifecycle_event("message_added", Some(&bot.id), json!({ "bot_id": bot.id, "message": msg })).await;
 
     Ok(())
 }
@@ -840,7 +850,7 @@ pub(crate) const CONTEXT_LOST_PREFIX: &str = "⚠️ 接不回原本的對話";
 
 /// 之後真的接回了 `session_id` 那段對話（resume 驗證為 `verified`）：那段對話中斷後插的「接不回」通知已經不是事實，撤掉
 /// （issue #852：依 session id 精確撤銷，避免撤掉其他 session 仍有效的 context-loss 警告）。
-pub(crate) async fn retire_context_lost(app: &(impl crate::capabilities::Db + crate::capabilities::Emit + crate::capabilities::BotStatusEmit), bot_id: &str, session_id: &str) {
+pub(crate) async fn retire_context_lost(app: &(impl crate::capabilities::Db + crate::capabilities::Emit + crate::capabilities::BotStatusEmit + StartServices), bot_id: &str, session_id: &str) {
     let session_id = session_id.trim();
     if session_id.is_empty() {
         return;
@@ -909,7 +919,7 @@ pub(crate) async fn retire_context_lost(app: &(impl crate::capabilities::Db + cr
 
     tracing::info!(bot = %bot_id, session = %session_id, n = notes.len(), deleted, "resumed the lost conversation; retired its context-lost notes");
     if deleted > 0 {
-        emit_object(&AppEventSink::new(app), "resync", None, json!({"reason": "context_lost_retired", "bot_id": bot_id})).await;
+        app.emit_lifecycle_event("resync", None, json!({"reason": "context_lost_retired", "bot_id": bot_id})).await;
     }
 }
 
@@ -1032,7 +1042,7 @@ impl<'a> StartPaneGuard<'a> {
 }
 
 async fn start_inner(
-    app: &Arc<App>,
+    app: &impl StartContext,
     bot: &db::Bot,
     project: &db::Project,
     run_id: &str,
@@ -1060,23 +1070,19 @@ async fn start_inner(
     }
     // 1b. preflight: a missing CLI would sit in `launch_pending` for the full 60 s silently.
     if let Err(reason) = ensure_kind_installed(app, &host, &bot.kind).await {
-        let conv = db::conversation_id(&app.db, &bot.id).await.map_err(up)?;
+        let conv = db::conversation_id(app.db(), &bot.id).await.map_err(up)?;
         let _ = insert_message(app, &conv, None, "system", &reason, "system", false, None).await;
         return Err(LcError::Bad(reason));
     }
     let agent = crate::config::agent_name(&project.label, &bot.id);
     // 分享用的受限 bot（SPEC「分享 bot」）：沒有 shim（不能開子 agent）、env 收窄、不讀 agent md／CLAUDE.md、argv 換成籠子那一套。
-    let restricted = crate::share::cage::prepare(app, bot, &host).await?;
+    let restricted = app.prepare_restricted_bot(bot, &host).await?;
     let shim_dir = if restricted.is_some() { None } else { install_shim(app, bot, project).await };
-    let env = match fence {
-        Some(fence) => pane_env_for_fence(app, bot, &host, run_id, &agent, shim_dir.as_deref(), fence).await,
-        None => pane_env(app, bot, &host, run_id, &agent, shim_dir.as_deref()).await,
-    }
-    .map_err(up)?;
+    let env = app.pane_env(bot, &host, run_id, &agent, shim_dir.as_deref(), fence).await.map_err(up)?;
     let env = match &restricted {
         Some(_) => {
             let mut caged = env;
-            crate::share::cage::cage_env(&mut caged, &crate::share::cage::identity_env(app, bot).await, &crate::share::cage::local_home());
+            app.cage_environment(&mut caged, bot).await;
             caged
         }
         None => env,
@@ -1086,7 +1092,7 @@ async fn start_inner(
     if !agent_md.problems.is_empty() {
         let reason = format!("agent md 有問題，這次啟動沒帶到：{}", agent_md.problems.join("；"));
         tracing::warn!(bot = %bot.name, "{reason}");
-        if let Ok(conv) = db::conversation_id(&app.db, &bot.id).await {
+        if let Ok(conv) = db::conversation_id(app.db(), &bot.id).await {
             let _ = insert_message(app, &conv, None, "system", &reason, "system", false, None).await;
         }
     }
@@ -1125,7 +1131,7 @@ async fn start_inner(
     if bot.kind == "grok" && (!child_instructions_ready || grok_rules_file.is_none()) {
         let reason = "無法把 Grok 的完整啟動指示寫進 bot 目錄；拒絕以遭截斷的 --rules 啟動";
         tracing::error!(bot = %bot.name, "{reason}");
-        if let Ok(conv) = db::conversation_id(&app.db, &bot.id).await {
+        if let Ok(conv) = db::conversation_id(app.db(), &bot.id).await {
             let _ = insert_message(app, &conv, None, "system", reason, "system", false, None).await;
         }
         return Err(LcError::Upstream(reason.into()));
@@ -1140,8 +1146,8 @@ async fn start_inner(
     let mut args = injected;
     if let Some(ws) = &restricted {
         // 受限 bot 不吃 bot／身分自訂的 args（那是加 `--dangerously-skip-permissions` 之類旗標的地方）。
-        let prompt = crate::share::cage::install_prompt(app, bot, ws, &env).map_err(up)?;
-        args.extend(crate::share::cage::launch_args(&env, &prompt));
+        let prompt = app.install_restricted_prompt(bot, ws, &env).map_err(up)?;
+        args.extend(app.restricted_launch_args(&env, &prompt));
         args.extend(model_args(&effort_checked(app, bot, &project.host).await));
     } else {
         args.extend(persona_args(bot, &agent, agent_md.configured.then_some(agent_md.text.as_str()), grok_rules_file.as_deref()));
@@ -1190,7 +1196,7 @@ async fn start_inner(
         sqlx::query("UPDATE runs SET resume_session_id = ? WHERE id = ?")
             .bind(&session_id)
             .bind(run_id)
-            .execute(&app.db)
+            .execute(app.db())
             .await
             .map_err(up)?;
     }
@@ -1200,7 +1206,7 @@ async fn start_inner(
     // A new dir opens on "trust this project?" with the cursor on *No*: claude quits, codex eats
     // the first message. Record trust first (local, only when not yet trusted).
     // 遠端也要（#407）：換身分＝換一個從沒信任過的設定目錄，不寫的話每次都停在提示上等人按。
-    for w in crate::trust::pretrust_for_start(app, bot, &project.host, cwd).await {
+    for w in app.pretrust_for_start(bot, &project.host, cwd).await {
         tracing::warn!(bot = %bot.name, cwd, warning = %w, "could not pre-trust the working directory");
     }
 
@@ -1217,7 +1223,7 @@ async fn start_inner(
                 sqlx::query("UPDATE projects SET workspace_id = ? WHERE id = ?")
                     .bind(&ws.workspace_id)
                     .bind(&project.id)
-                    .execute(&app.db)
+                    .execute(app.db())
                     .await
                     .map_err(up)?;
             }
@@ -1240,7 +1246,7 @@ async fn start_inner(
                 .bind(&pane_id)
                 .bind(&tab_id)
                 .bind(run_id)
-                .execute(&app.db)
+                .execute(app.db())
                 .await
                 .map_err(up),
         )
@@ -1252,7 +1258,7 @@ async fn start_inner(
             sqlx::query("UPDATE runs SET agent_name = ? WHERE id = ?")
                 .bind(&agent)
                 .bind(run_id)
-                .execute(&app.db)
+                .execute(app.db())
                 .await
                 .map_err(up),
         )
@@ -1268,7 +1274,7 @@ async fn start_inner(
                 .bind(&rt_effort)
                 .bind(rt_fast)
                 .bind(run_id)
-                .execute(&app.db)
+                .execute(app.db())
                 .await
                 .map_err(up),
         )
@@ -1304,13 +1310,13 @@ async fn start_inner(
             first_agent_start = false;
         }
         if let Some(fence) = fence {
-            if host != fence.conn().name || !app.hosts.is_current(fence).await {
+            if host != fence.conn().name || !app.hosts().is_current(fence).await {
                 pane_guard.cleanup().await;
                 return Err(host_superseded(&bot.id, &host));
             }
         }
         let launch = match fence {
-            Some(fence) => match app.hosts.run_if_current(fence, client.agent_start(&agent, &bot.kind, &pane_id, &args, 60_000)).await {
+            Some(fence) => match app.hosts().run_if_current(fence, client.agent_start(&agent, &bot.kind, &pane_id, &args, 60_000)).await {
                 Some(result) => result,
                 None => {
                     pane_guard.cleanup().await;
@@ -1341,7 +1347,7 @@ async fn start_inner(
     pane_guard.disarm();
 
     // 6. per-run status subscription
-    crate::runners::events::watch_pane_on_session(app, &host, session, &pane_id).await;
+    app.watch_pane_on_session(&host, session, &pane_id).await;
 
     // 7. wait for readiness
     let until = [AgentStatus::Idle, AgentStatus::Done, AgentStatus::Blocked];
@@ -1366,7 +1372,7 @@ async fn start_inner(
     }
     // `running` 是 prompt 准入、UI、restart／reconcile 認的權威（#145）：跨過 `agent.start` 之後寫不進去，
     // 就不能回一般的成功，也不殺掉活著的 agent——回 503、排重試，讓對帳照 herdr 的證據收成 running。
-    match super::run_state::transition(&app.db, run_id, &["starting"], "running", Some(status.as_str())).await {
+    match super::run_state::transition(app.db(), run_id, &["starting"], "running", Some(status.as_str())).await {
         Ok(super::run_state::Moved::Applied) => {}
         // 不拿 bot 鎖的 pane-exit／workspace-closed 事件已經把它收成終態（pane 沒了）：不拉回 running。
         Ok(super::run_state::Moved::Lost) => {
@@ -1390,8 +1396,8 @@ async fn start_inner(
     }
     // 不補 `/effort`：grok 1.0.46 會把該 slash 寫進 config.toml 的 default_reasoning_effort。
     // 這一輪的等級只靠上面 argv 的 `--reasoning-effort`。
-    let _ = super::apply_grok_startup_effort(app, &bot, run_id, &pane_id, &client).await;
-    bot_status(&AppEventSink::new(app), &bot.id).await;
+    let _ = app.apply_grok_startup_effort(&bot, run_id, &pane_id, &client).await;
+    app.bot_status_changed(&bot.id).await;
     Ok(())
 }
 
@@ -1425,21 +1431,21 @@ async fn ensure_kind_installed(app: &(impl crate::hosts::HostsAccess + crate::ki
 
 
 #[cfg(test)]
-pub async fn restart_bot(app: &Arc<App>, bot_id: &str) -> LcResult<String> {
+pub async fn restart_bot(app: &impl StartContext, bot_id: &str) -> LcResult<String> {
     restart_bot_with(app, bot_id, StartOpts::default()).await
 }
 
 /// Stop + start under one hold of the bot's lock. Two holds let a reconcile adopt the just-stopped
 /// agent in between (2026-09-10 23:02, `restart-idle`: AGM + three bots down 5.5 h).
 /// If a run whose pane is gone still blocks the start, it is ended and the start retried once.
-pub async fn restart_bot_with(app: &Arc<App>, bot_id: &str, opts: StartOpts) -> LcResult<String> {
+pub async fn restart_bot_with(app: &impl StartContext, bot_id: &str, opts: StartOpts) -> LcResult<String> {
     restart_bot_with_authority(app, bot_id, opts, None).await
 }
 
 /// The scoped update restart must still belong to the host connection that installed the update.
 /// Recheck after taking the bot lock so a queued restart cannot resolve a repointed host name.
 pub(crate) async fn restart_bot_with_host_fence(
-    app: &Arc<App>,
+    app: &impl StartContext,
     bot_id: &str,
     opts: StartOpts,
     fence: &crate::hosts::HostFence,
@@ -1448,19 +1454,18 @@ pub(crate) async fn restart_bot_with_host_fence(
 }
 
 async fn restart_bot_with_authority(
-    app: &Arc<App>,
+    app: &impl StartContext,
     bot_id: &str,
     opts: StartOpts,
     fence: Option<&crate::hosts::HostFence>,
 ) -> LcResult<String> {
-    let locks = AppBotLock::new(app);
     let locked_bot = bot_id.to_string();
-    let _g = locks.lock_bot(&locked_bot).await.map_err(|e| LcError::Upstream(e.to_string()))?;
+    let _g = app.lock_bot_for_start(&locked_bot).await;
     if let Some(fence) = fence {
         ensure_current_host_fence(app, bot_id, fence).await?;
     }
     // Checked before the stop, or the user's agent gets ctrl+c for nothing.
-    let bot = db::bot(&app.db, bot_id).await.map_err(up)?.ok_or_else(|| LcError::NotFound("bot".into()))?;
+    let bot = db::bot(app.db(), bot_id).await.map_err(up)?.ok_or_else(|| LcError::NotFound("bot".into()))?;
     if let Some(fence) = fence {
         ensure_current_host_fence(app, bot_id, fence).await?;
     }
@@ -1480,21 +1485,21 @@ async fn restart_bot_with_authority(
     }
     // 停之前就確定接得回，免得 ctrl+c 掉之後才發現只能開新對話。
     if opts.resume_native && opts.resume_required {
-        let host = db::bot_host(&app.db, bot_id).await.map_err(up)?;
+        let host = db::bot_host(app.db(), bot_id).await.map_err(up)?;
         if let Err(why) = native_resume_plan(app, &bot, &host, true, opts.resume_session.as_deref()).await? {
             return Err(cannot_resume(bot_id, why.reason));
         }
     }
-    let stopping = db::active_run(&app.db, bot_id).await.map_err(up)?.map(|r| r.id);
+    let stopping = db::active_run(app.db(), bot_id).await.map_err(up)?.map(|r| r.id);
     let nudge = super::resume_nudge::busy_before_restart(app, &bot, &opts).await;
     // 持久 intent（#355 P2）：在第一個不可逆步驟（記 `stopping`）**之前**先 commit，daemon 在 stop 與 start 之間死掉的話，
     // 開機由 `restart_intents::recover_host` 往前補完。寫不進去＝什麼都還沒動，不能開始（fail closed）。
-    let host = db::bot_host(&app.db, bot_id).await.map_err(up)?;
+    let host = db::bot_host(app.db(), bot_id).await.map_err(up)?;
     if let Some(fence) = fence {
         ensure_current_host_fence(app, bot_id, fence).await?;
     }
     let payload = json!({"opts": opts, "from_run_id": stopping, "bot_name": bot.name});
-    let intent_id = app.db.prepare_restart_intent(bot_id, &host, &payload, RESTART_INTENT_TTL_SECS, &app.boot_id)
+    let intent_id = app.db().prepare_restart_intent(bot_id, &host, &payload, RESTART_INTENT_TTL_SECS, app.boot_id())
         .await
         .map_err(|e| LcError::Upstream(format!("cannot record the restart intent: {e:#}")))?;
     #[cfg(test)]
@@ -1541,7 +1546,7 @@ async fn settle_restart_intent(app: &impl crate::capabilities::Db, intent_id: &s
 
 /// 停 → 起（原本 `restart_bot_with` 鎖裡的後半段，行為不變）。
 async fn restart_stop_and_start(
-    app: &Arc<App>,
+    app: &impl StartContext,
     bot_id: &str,
     opts: StartOpts,
     stopping: Option<String>,
@@ -1584,7 +1589,7 @@ async fn restart_stop_and_start(
         // 它起來時的 idle 邊又早在 `starting` 就過了：等它收斂再叫（#165，同 start_send 的 #152）。
         Err(LcError::Uncommitted(v)) => {
             if let Some(run_id) = v.get("run_id").and_then(|r| r.as_str()) {
-                super::start_send::flush_once_running(app, bot_id, run_id);
+                app.flush_once_running(bot_id, run_id);
             }
             Err(LcError::Uncommitted(v))
         }
@@ -1620,11 +1625,11 @@ async fn restart_stop_and_start(
 /// `autostart=1` 的 bot 從此沒在跑、卻永遠不開 `bot_stopped`，health 一直是綠的（review 2026-09-16 c1 L3）。
 ///
 /// 走 `run_state::relabel`（跟 stop 的改標同一支）：寫不進去回錯並排重試（#146 重開 B），不再只看 `Ok(rows>0)`。
-pub(crate) async fn left_down_by_restart(app: &Arc<App>, bot_id: &str, run_id: &str) -> Result<(), sqlx::Error> {
-    match super::run_state::relabel(&app.db, run_id, "stopped", "exited").await {
+pub(crate) async fn left_down_by_restart(app: &impl StartContext, bot_id: &str, run_id: &str) -> Result<(), sqlx::Error> {
+    match super::run_state::relabel(app.db(), run_id, "stopped", "exited").await {
         Ok(super::run_state::Moved::Applied) => {
             tracing::warn!(bot = bot_id, run = run_id, "restart stopped the bot but could not start it again; recorded as exited, not as a user stop");
-            bot_status(&AppEventSink::new(app), bot_id).await;
+            app.bot_status_changed(bot_id).await;
             Ok(())
         }
         Ok(super::run_state::Moved::Lost) => Ok(()),
@@ -1636,17 +1641,17 @@ pub(crate) async fn left_down_by_restart(app: &Arc<App>, bot_id: &str, run_id: &
 }
 
 pub(crate) async fn restart_start(
-    app: &Arc<App>,
+    app: &impl StartContext,
     bot_id: &str,
     opts: StartOpts,
     fence: Option<&crate::hosts::HostFence>,
 ) -> LcResult<String> {
     match start_bot_locked_with_host_fence(app, bot_id, opts.clone(), fence).await {
         Err(LcError::Conflict(v)) if v.get("reason").and_then(|r| r.as_str()) == Some("active run already exists") => {
-            let Some(run) = db::active_run(&app.db, bot_id).await.map_err(up)? else {
+            let Some(run) = db::active_run(app.db(), bot_id).await.map_err(up)? else {
                 return start_bot_locked_with_host_fence(app, bot_id, opts.clone(), fence).await;
             };
-            let bot = db::bot(&app.db, bot_id).await.map_err(up)?.ok_or_else(|| LcError::NotFound("bot".into()))?;
+            let bot = db::bot(app.db(), bot_id).await.map_err(up)?.ok_or_else(|| LcError::NotFound("bot".into()))?;
             if run_alive(app, &run, &bot).await {
                 return Err(LcError::Conflict(v));
             }
@@ -1672,13 +1677,13 @@ fn agent_name_taken(e: &anyhow::Error) -> bool {
 /// （`CLAUDE_CONFIG_DIR`、shim）daemon 重建不了。沒注入 hook，回覆照舊走終端快照。
 /// 過程中 pane 不見了就不重開。
 #[cfg(test)]
-pub async fn restart_child_in_pane(app: &Arc<App>, bot_id: &str) -> LcResult<String> {
+pub async fn restart_child_in_pane(app: &impl StartContext, bot_id: &str) -> LcResult<String> {
     restart_child_in_pane_with(app, bot_id, false).await
 }
 
 /// 同上；`require_idle` 見 [`StartOpts::require_idle`]。
 #[cfg(test)]
-pub async fn restart_child_in_pane_with(app: &Arc<App>, bot_id: &str, require_idle: bool) -> LcResult<String> {
+pub async fn restart_child_in_pane_with(app: &impl StartContext, bot_id: &str, require_idle: bool) -> LcResult<String> {
     let lock = app.bot_lock(bot_id).await;
     let _g = lock.lock().await;
     if require_idle {
@@ -1686,21 +1691,21 @@ pub async fn restart_child_in_pane_with(app: &Arc<App>, bot_id: &str, require_id
             return Err(not_idle(bot_id, &why));
         }
     }
-    let bot = db::bot(&app.db, bot_id).await.map_err(up)?.ok_or_else(|| LcError::NotFound("bot".into()))?;
+    let bot = db::bot(app.db(), bot_id).await.map_err(up)?.ok_or_else(|| LcError::NotFound("bot".into()))?;
     if bot.managed_by != "child" {
         return Err(LcError::Bad("這不是 agent spawn 出來的子 agent".into()));
     }
-    let run = db::active_run(&app.db, bot_id).await.map_err(up)?.ok_or_else(|| LcError::NotFound("run".into()))?;
+    let run = db::active_run(app.db(), bot_id).await.map_err(up)?.ok_or_else(|| LcError::NotFound("run".into()))?;
     let Some(pane_id) = run.pane_id.clone() else {
         return Err(LcError::Bad("這個子 agent 的 run 沒有記到 pane".into()));
     };
-    let host = db::bot_host(&app.db, bot_id).await.map_err(up)?;
+    let host = db::bot_host(app.db(), bot_id).await.map_err(up)?;
     let client = client_for_run(app, &run).await?;
     let agent = run.agent_name.clone().unwrap_or_else(|| bot.name.clone());
 
     // A concurrent reconcile can observe the gap after the old agent exits but before agent.start
     // replies. Guard that hand-off; agent_name_taken below upgrades the temporary guard permanently.
-    crate::child_reconcile_safety::record_retirement_grace(&app.db, bot_id)
+    crate::child_reconcile_safety::record_retirement_grace(app.db(), bot_id)
         .await
         .map_err(|e| LcError::Upstream(format!("cannot record child restart grace: {e:#}")))?;
 
@@ -1718,9 +1723,9 @@ pub async fn restart_child_in_pane_with(app: &Arc<App>, bot_id: &str, require_id
     // 舊 run 跟 stop 走同一套（#146 留言）：先記「正在停」，記不下來就一步都不做；被 pane-exit 事件先收掉就不重開。
     // `require_idle`（一鍵重啟）時這一步同時是「還是閒著才准停」的許可（#346，同 `stop_for_restart_if_idle_locked`）。
     let moved = if require_idle {
-        super::stop::admit_idle_stop(&app.db, &run.id, bot_id, true).await.map_err(up)?
+        super::stop::admit_idle_stop(app.db(), &run.id, bot_id, true).await.map_err(up)?
     } else {
-        super::run_state::transition(&app.db, &run.id, super::run_state::LIVE, "stopping", None).await.map_err(up)?
+        super::run_state::transition(app.db(), &run.id, super::run_state::LIVE, "stopping", None).await.map_err(up)?
     };
     match moved {
         super::run_state::Moved::Applied => {}
@@ -1773,7 +1778,7 @@ pub async fn restart_child_in_pane_with(app: &Arc<App>, bot_id: &str, require_id
     // 排著的派工不是孤兒（#129，跟 #106 同一件事）。寫入新 run 之後就放掉：之後的失敗照舊撤。
     let restarting = super::restart_hold::begin(bot_id);
     // 舊 run 的 `stopped` 寫進去之前不寫新 run、不 `agent.start`（#146 留言）：不靠 active-run 唯一索引碰巧擋住。
-    match super::run_state::transition(&app.db, &run.id, &["stopping"], "stopped", None).await {
+    match super::run_state::transition(app.db(), &run.id, &["stopping"], "stopped", None).await {
         Ok(super::run_state::Moved::Applied) => {}
         // pane-exit 事件先把它收掉了（pane 沒了）：同上面 pane 不見的處理，不在別處重開。
         Ok(super::run_state::Moved::Lost) => {
@@ -1804,7 +1809,7 @@ pub async fn restart_child_in_pane_with(app: &Arc<App>, bot_id: &str, require_id
     // 模型／強度用 `bots` 上 §4.4a 從子 agent argv 讀回的；讀不到就讓 CLI 用預設。
     args.extend(model_args(&effort_checked(app, &bot, &host).await));
     args.extend(bot.args());
-    let resume = match db::last_native_session(&app.db, bot_id).await.map_err(up)? {
+    let resume = match db::last_native_session(app.db(), bot_id).await.map_err(up)? {
         Some((sid, _)) => match resume_args_by_kind(&bot.kind, &sid) {
             Ok(a) => Some((sid, a)),
             // 有記到上一段卻接不回：聊天室要看得見脈絡斷了（以前只有 tracing）。
@@ -1846,7 +1851,7 @@ pub async fn restart_child_in_pane_with(app: &Arc<App>, bot_id: &str, require_id
     .bind(&run.herdr_session)
     .bind(resume.as_ref().map(|(sid, _)| sid.clone()))
     .bind(db::now())
-    .execute(&app.db)
+    .execute(app.db())
     .await
     .map_err(up)?;
     drop(restarting);
@@ -1865,16 +1870,16 @@ pub async fn restart_child_in_pane_with(app: &Arc<App>, bot_id: &str, require_id
             Err(e) if agent_name_taken(&e) => {
                 // 舊 agent 還掛在原 pane（Done、名字沒釋放）：agent 其實還在，新 run 當成收編、記 running；
                 // 不能留成「沒有 active run」——那樣 reconcile 會把子 agent 退役軟刪（2026-09-22 rollout：pvd／rh）。
-                crate::child_reconcile_safety::hold_after_name_taken(&app.db, bot_id, &agent)
+                crate::child_reconcile_safety::hold_after_name_taken(app.db(), bot_id, &agent)
                     .await
                     .map_err(|write| LcError::Upstream(format!("herdr returned agent_name_taken, and the child retirement reason could not be recorded: {write:#}")))?;
-                let _ = super::run_state::transition(&app.db, &run_id, &["starting"], "running", None).await;
+                let _ = super::run_state::transition(app.db(), &run_id, &["starting"], "running", None).await;
                 app.emit_bot_status(bot_id).await;
                 tracing::warn!(bot = %bot.name, run = %run_id, "子 agent 重啟：herdr 說名字還被原 pane 的舊 agent 占著；當作沒重啟、保留 bot");
                 return Err(LcError::conflict("agent_name_taken", json!({"bot_id": bot_id, "run_id": run_id, "message": "舊 agent 還在原 pane，沒有重啟；由父 bot 用 herdr 重開"})));
             }
             Err(e) => {
-                crate::child_reconcile_safety::clear_retirement_grace(&app.db, bot_id)
+                crate::child_reconcile_safety::clear_retirement_grace(app.db(), bot_id)
                     .await
                     .map_err(|write| LcError::Upstream(format!("child restart failed and its grace could not be cleared: {write:#}")))?;
                 mark_run_exited(app, &run_id, "子 agent 重啟時 agent.start 失敗").await;
@@ -1889,7 +1894,7 @@ pub async fn restart_child_in_pane_with(app: &Arc<App>, bot_id: &str, require_id
         return Err(LcError::Upstream(format!("pane {pane_id} never became an available shell")));
     }
     // 同 #145：agent 起來了，`running` 寫不進去就不回成功；pane-exit 事件先收掉的不拉回來。
-    match super::run_state::transition(&app.db, &run_id, &["starting"], "running", None).await {
+    match super::run_state::transition(app.db(), &run_id, &["starting"], "running", None).await {
         Ok(super::run_state::Moved::Applied) => {}
         Ok(super::run_state::Moved::Lost) => {
             app.emit_bot_status(bot_id).await;
@@ -1899,7 +1904,7 @@ pub async fn restart_child_in_pane_with(app: &Arc<App>, bot_id: &str, require_id
             tracing::warn!(bot = %bot.name, run = %run_id, error = %e, "the child is back but its run could not be recorded as running");
             super::run_state::schedule_settle(app, &run_id, super::run_state::Settle::Reconcile { stuck: "starting".into() });
             // 排著的派工留給它（#129），但收成 running 的對帳不叫 flush：等它收斂再叫（#165）。
-            super::start_send::flush_once_running(app, bot_id, &run_id);
+            app.flush_once_running(bot_id, &run_id);
             app.emit_bot_status(bot_id).await;
             return Err(LcError::uncommitted(
                 "start_state_uncommitted",
@@ -1909,10 +1914,10 @@ pub async fn restart_child_in_pane_with(app: &Arc<App>, bot_id: &str, require_id
             ));
         }
     }
-    if let Err(e) = crate::child_reconcile_safety::clear_after_successful_restart(&app.db, bot_id).await {
+    if let Err(e) = crate::child_reconcile_safety::clear_after_successful_restart(app.db(), bot_id).await {
         tracing::warn!(bot = bot_id, error = %e, "child restart succeeded but its prior agent_name_taken hold could not be cleared");
     }
-    if let Err(e) = crate::child_reconcile_safety::clear_retirement_grace(&app.db, bot_id).await {
+    if let Err(e) = crate::child_reconcile_safety::clear_retirement_grace(app.db(), bot_id).await {
         tracing::warn!(bot = bot_id, error = %e, "child restart succeeded but its hand-off grace could not be cleared");
     }
     let until = [AgentStatus::Idle, AgentStatus::Done, AgentStatus::Blocked];
@@ -1925,7 +1930,7 @@ pub async fn restart_child_in_pane_with(app: &Arc<App>, bot_id: &str, require_id
                 if let Err(e) = sqlx::query("UPDATE runs SET agent_status = ? WHERE id = ? AND agent_status = 'unknown'")
                     .bind(ready.as_str())
                     .bind(&run_id)
-                    .execute(&app.db)
+                    .execute(app.db())
                     .await
                 {
                     tracing::warn!(bot = %bot.name, run = %run_id, error = %e, "could not record the restarted child's ready status");
@@ -1935,7 +1940,7 @@ pub async fn restart_child_in_pane_with(app: &Arc<App>, bot_id: &str, require_id
         Err(e) => tracing::warn!(bot = %bot.name, error = %e, "子 agent 重啟後沒等到 ready，run 留著讓對帳接手"),
     }
     // 沒有 hook 的 run，畫面是唯一來源（同收編）。
-    spawn_adopted_capture(app, &run_id, bot_id);
+    app.spawn_adopted_capture(&run_id, bot_id);
     app.emit_bot_status(bot_id).await;
     app.emit("bot_changed", json!({"bot_id": bot_id})).await;
     tracing::info!(bot = %bot.name, pane = %pane_id, run = %run_id, "子 agent 在原本的 pane 裡重啟完成");
@@ -1947,6 +1952,7 @@ pub async fn restart_child_in_pane_with(app: &Arc<App>, bot_id: &str, require_id
 #[cfg(test)]
 mod resume_args_tests {
     use super::{resume_args_by_kind, restart_bot_with, start_bot, start_bot_with, stop_bot, LcError, StartOpts};
+    use crate::capabilities::Db;
     use crate::db;
     use crate::testing::{claude_bot, env, Env};
     use serde_json::Value;
@@ -1988,7 +1994,7 @@ mod resume_args_tests {
         // DB 記了另一段（錯的）也不影響。
         sqlx::query("INSERT INTO runs (id, bot_id, state, agent_status, workspace_id, pane_id, started_at, ended_at, native_session_id)
                      VALUES (?,?,'exited','idle','ws-1','p-old',?,?, '01a0b8c6-wrong')")
-            .bind(db::ulid()).bind(&bot.id).bind(db::now()).bind(db::now()).execute(&e.app.db).await.unwrap();
+            .bind(db::ulid()).bind(&bot.id).bind(db::now()).bind(db::now()).execute(e.app.db()).await.unwrap();
         assert_eq!(super::native_resume_plan(&e.app, &bot, crate::config::LOCAL_HOST, false, Some("246fcf93-real")).await.unwrap().unwrap().0, "246fcf93-real");
         assert_eq!(super::native_resume_plan(&e.app, &bot, crate::config::LOCAL_HOST, false, None).await.unwrap().unwrap().0, "01a0b8c6-wrong");
     }
@@ -2007,7 +2013,7 @@ mod resume_args_tests {
         .bind("native-previous")
         .bind("2026-09-07T00:00:00Z")
         .bind("2026-09-07T00:01:00Z")
-        .execute(&e.app.db)
+        .execute(e.app.db())
         .await
         .unwrap();
 
@@ -2028,7 +2034,7 @@ mod resume_args_tests {
         let bot = claude_bot(&e.app, &e.project_id, "codex").await;
         sqlx::query("UPDATE bots SET kind='codex', identity=NULL, model='gpt-5.6-sol', auto_approve=1 WHERE id=?")
             .bind(&bot.id)
-            .execute(&e.app.db)
+            .execute(e.app.db())
             .await
             .unwrap();
 
@@ -2048,7 +2054,7 @@ mod resume_args_tests {
         )
         .bind(db::ulid())
         .bind(&bot.id)
-        .execute(&e.app.db)
+        .execute(e.app.db())
         .await
         .unwrap();
         start_bot_with(&e.app, &bot.id, StartOpts { resume_native: true, ..Default::default() }).await.unwrap();
@@ -2063,7 +2069,7 @@ mod resume_args_tests {
         let e = env().await;
         let bot = claude_bot(&e.app, &e.project_id, "grok-rules").await;
         let persona = "Keep this configured persona intact: $(echo GROK-PERSONA)";
-        sqlx::query("UPDATE bots SET kind='grok', persona=? WHERE id=?").bind(persona).bind(&bot.id).execute(&e.app.db).await.unwrap();
+        sqlx::query("UPDATE bots SET kind='grok', persona=? WHERE id=?").bind(persona).bind(&bot.id).execute(e.app.db()).await.unwrap();
 
         start_bot(&e.app, &bot.id).await.unwrap();
 
@@ -2084,7 +2090,7 @@ mod resume_args_tests {
     async fn an_agy_bot_with_a_retired_model_starts_on_the_default_model() {
         let e = env().await;
         let bot = claude_bot(&e.app, &e.project_id, "agy-retired").await;
-        sqlx::query("UPDATE bots SET kind='agy', model='gemini-3.1-pro-high', auto_approve=1 WHERE id=?").bind(&bot.id).execute(&e.app.db).await.unwrap();
+        sqlx::query("UPDATE bots SET kind='agy', model='gemini-3.1-pro-high', auto_approve=1 WHERE id=?").bind(&bot.id).execute(e.app.db()).await.unwrap();
 
         start_bot(&e.app, &bot.id).await.expect("拿掉的模型不能讓啟動失敗");
 
@@ -2099,7 +2105,7 @@ mod resume_args_tests {
     async fn agy_start_pins_permissions_model_env_trust_and_hooks_in_the_fake_home() {
         let e = env().await;
         let bot = claude_bot(&e.app, &e.project_id, "agy-start").await;
-        sqlx::query("UPDATE bots SET kind='agy', model='gemini-3.8-flash-high', auto_approve=1 WHERE id=?").bind(&bot.id).execute(&e.app.db).await.unwrap();
+        sqlx::query("UPDATE bots SET kind='agy', model='gemini-3.8-flash-high', auto_approve=1 WHERE id=?").bind(&bot.id).execute(e.app.db()).await.unwrap();
 
         start_bot(&e.app, &bot.id).await.unwrap();
 
@@ -2142,20 +2148,20 @@ mod resume_args_tests {
     async fn codex_resume_and_fork_pin_permissions_to_auto_approve() {
         let e = env().await;
         let bot = claude_bot(&e.app, &e.project_id, "codex").await;
-        sqlx::query("UPDATE bots SET kind='codex', identity=NULL WHERE id=?").bind(&bot.id).execute(&e.app.db).await.unwrap();
+        sqlx::query("UPDATE bots SET kind='codex', identity=NULL WHERE id=?").bind(&bot.id).execute(e.app.db()).await.unwrap();
         sqlx::query(
             "INSERT INTO runs (id, bot_id, state, agent_status, native_session_id, started_at, ended_at)
              VALUES (?,?,'stopped','idle','codex-previous','2026-09-07T00:00:00Z','2026-09-07T00:01:00Z')",
         )
         .bind(db::ulid())
         .bind(&bot.id)
-        .execute(&e.app.db)
+        .execute(e.app.db())
         .await
         .unwrap();
         let sandbox = ["-c", "sandbox_mode=\"workspace-write\""];
         // First resume with Full Access, then turn auto_approve off and resume that same saved session again.
         for auto_approve in [1, 0] {
-            sqlx::query("UPDATE bots SET auto_approve=? WHERE id=?").bind(auto_approve).bind(&bot.id).execute(&e.app.db).await.unwrap();
+            sqlx::query("UPDATE bots SET auto_approve=? WHERE id=?").bind(auto_approve).bind(&bot.id).execute(e.app.db()).await.unwrap();
             let resume = StartOpts { resume_native: true, ..Default::default() };
             let fork = StartOpts { fork_session: Some("codex-source".into()), ..Default::default() };
             for (opts, head) in [(resume, ["resume", "codex-previous"]), (fork, ["fork", "codex-source"])] {
@@ -2198,12 +2204,12 @@ mod resume_args_tests {
         start_bot_with(&e.app, &pm.id, StartOpts { resume_native: true, ..Default::default() }).await.unwrap();
         assert!(!started_args(&e).pop().unwrap().contains(&"--resume".into()), "沒有上一段對話，不該帶 --resume");
 
-        let conv = db::conversation_id(&e.app.db, &pm.id).await.unwrap();
+        let conv = db::conversation_id(e.app.db(), &pm.id).await.unwrap();
         let note: String = sqlx::query_scalar(
             "SELECT content FROM messages WHERE conversation_id=? AND role='system' ORDER BY created_at DESC LIMIT 1",
         )
         .bind(&conv)
-        .fetch_one(&e.app.db)
+        .fetch_one(e.app.db())
         .await
         .unwrap();
         assert!(note.contains("接不回"), "{note}");
@@ -2230,7 +2236,7 @@ mod resume_args_tests {
             })
             .await
             .unwrap();
-        sqlx::query("UPDATE bots SET identity='own' WHERE id=?").bind(&bot.id).execute(&e.app.db).await.unwrap();
+        sqlx::query("UPDATE bots SET identity='own' WHERE id=?").bind(&bot.id).execute(e.app.db()).await.unwrap();
         let path = dir.join("projects/-own").join(format!("{name}.jsonl"));
         std::fs::create_dir_all(path.parent().unwrap()).unwrap();
         path
@@ -2249,7 +2255,7 @@ mod resume_args_tests {
         sqlx::query("UPDATE runs SET native_session_id='sid-742', transcript_path=? WHERE id=?")
             .bind(transcript.to_str().unwrap())
             .bind(&fresh)
-            .execute(&e.app.db)
+            .execute(e.app.db())
             .await
             .unwrap();
         let resumed = restart_bot_with(&e.app, &pm.id, StartOpts { resume_native: true, ..Default::default() }).await.unwrap();
@@ -2272,7 +2278,7 @@ mod resume_args_tests {
             other => panic!("expected 409, got {other:?}"),
         }
         assert!(started_args(&e).is_empty(), "nothing was started");
-        assert!(db::active_run(&e.app.db, &pm.id).await.unwrap().is_none(), "no run row left behind");
+        assert!(db::active_run(e.app.db(), &pm.id).await.unwrap().is_none(), "no run row left behind");
 
         let transcript = own_transcript(&e, &pm, "pm").await;
         std::fs::write(&transcript, "{}\n").unwrap();
@@ -2283,29 +2289,29 @@ mod resume_args_tests {
         .bind(db::ulid())
         .bind(&pm.id)
         .bind(transcript.to_str().unwrap())
-        .execute(&e.app.db)
+        .execute(e.app.db())
         .await
         .unwrap();
         let run_id = start_bot_with(&e.app, &pm.id, strict.clone()).await.unwrap();
         assert!(started_args(&e).pop().unwrap().windows(2).any(|w| w == ["--resume", "sid-pm"]));
-        let sid: Option<String> = sqlx::query_scalar("SELECT resume_session_id FROM runs WHERE id=?").bind(&run_id).fetch_one(&e.app.db).await.unwrap();
+        let sid: Option<String> = sqlx::query_scalar("SELECT resume_session_id FROM runs WHERE id=?").bind(&run_id).fetch_one(e.app.db()).await.unwrap();
         assert_eq!(sid.as_deref(), Some("sid-pm"));
 
         // restart：停之前就判斷（看現在這個 run 的 session），接不回就連停都不停。
-        sqlx::query("UPDATE runs SET native_session_id='sid-live' WHERE id=?").bind(&run_id).execute(&e.app.db).await.unwrap();
+        sqlx::query("UPDATE runs SET native_session_id='sid-live' WHERE id=?").bind(&run_id).execute(e.app.db()).await.unwrap();
         restart_bot_with(&e.app, &pm.id, strict.clone()).await.unwrap();
         assert!(started_args(&e).pop().unwrap().windows(2).any(|w| w == ["--resume", "sid-live"]));
         std::fs::remove_file(&transcript).unwrap();
-        let before = db::active_run(&e.app.db, &pm.id).await.unwrap().unwrap().id;
+        let before = db::active_run(e.app.db(), &pm.id).await.unwrap().unwrap().id;
         sqlx::query("UPDATE runs SET native_session_id='sid-gone', transcript_path=? WHERE id=?")
             .bind(transcript.to_str().unwrap())
             .bind(&before)
-            .execute(&e.app.db)
+            .execute(e.app.db())
             .await
             .unwrap();
         let err = restart_bot_with(&e.app, &pm.id, strict).await.unwrap_err();
         assert!(matches!(err, LcError::Conflict(ref v) if v["resume_reason"] == "transcript_missing"), "{err:?}");
-        assert_eq!(db::active_run(&e.app.db, &pm.id).await.unwrap().map(|r| r.id), Some(before), "the running agent was not stopped");
+        assert_eq!(db::active_run(e.app.db(), &pm.id).await.unwrap().map(|r| r.id), Some(before), "the running agent was not stopped");
         stop_bot(&e.app, &pm.id).await.unwrap();
     }
 
@@ -2327,7 +2333,7 @@ mod resume_args_tests {
             .bind(at.to_string())
         };
         let missing = e.dir.join("never-written.jsonl");
-        ended("sid-unwritten", missing.to_str().unwrap(), "2026-09-11T00:00:00Z").execute(&e.app.db).await.unwrap();
+        ended("sid-unwritten", missing.to_str().unwrap(), "2026-09-11T00:00:00Z").execute(e.app.db()).await.unwrap();
         start_bot_with(&e.app, &pm.id, StartOpts { resume_native: true, ..Default::default() }).await.unwrap();
         let args = started_args(&e).pop().unwrap();
         assert!(!args.contains(&"--resume".into()), "resumed a session that has no transcript: {args:?}");
@@ -2335,7 +2341,7 @@ mod resume_args_tests {
 
         let written = own_transcript(&e, &pm, "written").await;
         std::fs::write(&written, "{}\n").unwrap();
-        ended("sid-written", written.to_str().unwrap(), "2026-09-11T00:10:00Z").execute(&e.app.db).await.unwrap();
+        ended("sid-written", written.to_str().unwrap(), "2026-09-11T00:10:00Z").execute(e.app.db()).await.unwrap();
         start_bot_with(&e.app, &pm.id, StartOpts { resume_native: true, ..Default::default() }).await.unwrap();
         let args = started_args(&e).pop().unwrap();
         assert!(args.windows(2).any(|w| w == ["--resume", "sid-written"]), "{args:?}");
@@ -2388,7 +2394,7 @@ mod resume_args_tests {
             std::fs::create_dir_all(&new_dir).unwrap();
             std::os::unix::fs::symlink(old_dir.join("projects"), new_dir.join("projects")).unwrap();
             set_identity_dir(&e.app, "cc-sym", &new_dir).await;
-            sqlx::query("UPDATE bots SET identity='cc-sym' WHERE id=?").bind(&pm.id).execute(&e.app.db).await.unwrap();
+            sqlx::query("UPDATE bots SET identity='cc-sym' WHERE id=?").bind(&pm.id).execute(e.app.db()).await.unwrap();
 
             sqlx::query(
                 "INSERT INTO runs (id, bot_id, state, agent_status, native_session_id, transcript_path, started_at, ended_at)
@@ -2397,11 +2403,11 @@ mod resume_args_tests {
             .bind(db::ulid())
             .bind(&pm.id)
             .bind(transcript.to_str().unwrap())
-            .execute(&e.app.db)
+            .execute(e.app.db())
             .await
             .unwrap();
 
-            let bot = db::bot(&e.app.db, &pm.id).await.unwrap().unwrap();
+            let bot = db::bot(e.app.db(), &pm.id).await.unwrap().unwrap();
             let plan = native_resume_plan(&e.app, &bot, LOCAL_HOST, false, None).await.unwrap();
             let (sid, args) = plan.expect("resumable");
             assert_eq!(sid, "sid-same");
@@ -2424,7 +2430,7 @@ mod resume_args_tests {
 
             let new_dir = e.dir.join("cc2-new");
             set_identity_dir(&e.app, "cc2", &new_dir).await;
-            sqlx::query("UPDATE bots SET identity='cc2' WHERE id=?").bind(&pm.id).execute(&e.app.db).await.unwrap();
+            sqlx::query("UPDATE bots SET identity='cc2' WHERE id=?").bind(&pm.id).execute(e.app.db()).await.unwrap();
 
             sqlx::query(
                 "INSERT INTO runs (id, bot_id, state, agent_status, native_session_id, transcript_path, started_at, ended_at)
@@ -2433,11 +2439,11 @@ mod resume_args_tests {
             .bind(db::ulid())
             .bind(&pm.id)
             .bind(transcript.to_str().unwrap())
-            .execute(&e.app.db)
+            .execute(e.app.db())
             .await
             .unwrap();
 
-            let bot = db::bot(&e.app.db, &pm.id).await.unwrap().unwrap();
+            let bot = db::bot(e.app.db(), &pm.id).await.unwrap().unwrap();
             let plan = native_resume_plan(&e.app, &bot, LOCAL_HOST, false, None).await.unwrap();
             let (sid, args) = plan.expect("resumable after copy");
             assert_eq!(sid, "sid-move");
@@ -2456,7 +2462,7 @@ mod resume_args_tests {
             let pm = claude_bot(&e.app, &e.project_id, "pm").await;
             let new_dir = e.dir.join("cc3-new");
             set_identity_dir(&e.app, "cc3", &new_dir).await;
-            sqlx::query("UPDATE bots SET identity='cc3' WHERE id=?").bind(&pm.id).execute(&e.app.db).await.unwrap();
+            sqlx::query("UPDATE bots SET identity='cc3' WHERE id=?").bind(&pm.id).execute(e.app.db()).await.unwrap();
 
             let gone = e.dir.join("cc-old3/projects/-Users-m4p-project-z/sid-gone.jsonl");
             sqlx::query(
@@ -2466,11 +2472,11 @@ mod resume_args_tests {
             .bind(db::ulid())
             .bind(&pm.id)
             .bind(gone.to_str().unwrap())
-            .execute(&e.app.db)
+            .execute(e.app.db())
             .await
             .unwrap();
 
-            let bot = db::bot(&e.app.db, &pm.id).await.unwrap().unwrap();
+            let bot = db::bot(e.app.db(), &pm.id).await.unwrap().unwrap();
             let plan = native_resume_plan(&e.app, &bot, LOCAL_HOST, false, None).await.unwrap();
             let failure = plan.unwrap_err();
             assert_eq!(failure.reason, "transcript_missing");
@@ -2485,7 +2491,7 @@ mod resume_args_tests {
         async fn seed(e: &crate::testing::Env, bot: &db::Bot, kind: &str, sid: &str, transcript: &std::path::Path) -> std::path::PathBuf {
             let new_dir = e.dir.join(format!("new-{sid}"));
             set_identity_dir(&e.app, "cc9", &new_dir).await;
-            sqlx::query("UPDATE bots SET identity='cc9', kind=? WHERE id=?").bind(kind).bind(&bot.id).execute(&e.app.db).await.unwrap();
+            sqlx::query("UPDATE bots SET identity='cc9', kind=? WHERE id=?").bind(kind).bind(&bot.id).execute(e.app.db()).await.unwrap();
             sqlx::query(
                 "INSERT INTO runs (id, bot_id, state, agent_status, native_session_id, transcript_path, started_at, ended_at)
                  VALUES (?,?,'stopped','idle',?,?,'2026-09-17T00:00:00Z','2026-09-17T00:01:00Z')",
@@ -2494,14 +2500,14 @@ mod resume_args_tests {
             .bind(&bot.id)
             .bind(sid)
             .bind(transcript.to_str().unwrap())
-            .execute(&e.app.db)
+            .execute(e.app.db())
             .await
             .unwrap();
             new_dir
         }
 
         async fn plan_of(e: &crate::testing::Env, bot: &db::Bot) -> Result<(String, Vec<String>), &'static str> {
-            let bot = db::bot(&e.app.db, &bot.id).await.unwrap().unwrap();
+            let bot = db::bot(e.app.db(), &bot.id).await.unwrap().unwrap();
             native_resume_plan(&e.app, &bot, LOCAL_HOST, false, None).await.unwrap().map_err(|failure| failure.reason)
         }
 
@@ -2553,7 +2559,7 @@ mod resume_args_tests {
             std::fs::create_dir_all(linked.parent().unwrap()).unwrap();
             std::os::unix::fs::symlink(&secret, &linked).unwrap();
             sqlx::query("INSERT INTO runs (id, bot_id, state, agent_status, native_session_id, transcript_path, started_at, ended_at) VALUES (?,?,'stopped','idle','sid-link',?,'2026-09-18T00:00:00Z','2026-09-18T00:01:00Z')")
-                .bind(db::ulid()).bind(&bot.id).bind(linked.to_str().unwrap()).execute(&e.app.db).await.unwrap();
+                .bind(db::ulid()).bind(&bot.id).bind(linked.to_str().unwrap()).execute(e.app.db()).await.unwrap();
             assert_eq!(plan_of(&e, &bot).await, Err("transcript_missing"));
             assert!(files_under(&new_dir).is_empty(), "符號連結被跟著複製：{:?}", files_under(&new_dir));
         }
@@ -3007,11 +3013,11 @@ esac
             .bind(db::ulid())
             .bind(&pm.id)
             .bind(transcript.to_str().unwrap())
-            .execute(&e.app.db)
+            .execute(e.app.db())
             .await
             .unwrap();
 
-            let bot = db::bot(&e.app.db, &pm.id).await.unwrap().unwrap();
+            let bot = db::bot(e.app.db(), &pm.id).await.unwrap().unwrap();
             let plan = native_resume_plan(&e.app, &bot, "no-such-host", false, None).await.unwrap();
             assert_eq!(plan.map_err(|failure| failure.reason), Err("transcript_missing"));
         }
@@ -3085,11 +3091,11 @@ esac
             .bind(db::ulid())
             .bind(&pm.id)
             .bind(transcript.to_str().unwrap())
-            .execute(&e.app.db)
+            .execute(e.app.db())
             .await
             .unwrap();
 
-            let bot = db::bot(&e.app.db, &pm.id).await.unwrap().unwrap();
+            let bot = db::bot(e.app.db(), &pm.id).await.unwrap().unwrap();
             let plan = tokio::time::timeout(Duration::from_secs(20), native_resume_plan(&e.app, &bot, "unreachable-box", false, None))
                 .await
                 .expect("連不上要快速失敗，不能卡住整個重啟流程")
@@ -3125,19 +3131,19 @@ esac
                 Ok(id) => id,
                 Err(e) => panic!("restart {i} was refused while a reconcile was running: {e:?}"),
             };
-            let active = db::active_run(&e.app.db, &pm.id).await.unwrap().expect("a run after the restart");
+            let active = db::active_run(e.app.db(), &pm.id).await.unwrap().expect("a run after the restart");
             assert_eq!(active.id, started, "restart {i}: the active run is the one the restart started, not an adopted leftover");
         }
         stop.store(true, std::sync::atomic::Ordering::SeqCst);
         let rounds = looper.await.unwrap();
         assert!(rounds > 0, "the reconcile loop actually ran alongside the restarts");
 
-        let run = db::active_run(&e.app.db, &pm.id).await.unwrap().unwrap();
-        let bot = db::bot(&e.app.db, &pm.id).await.unwrap().unwrap();
+        let run = db::active_run(e.app.db(), &pm.id).await.unwrap().unwrap();
+        let bot = db::bot(e.app.db(), &pm.id).await.unwrap().unwrap();
         assert!(crate::lifecycle::run_alive(&e.app, &run, &bot).await, "the surviving run has a live pane and agent");
         let live: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM runs WHERE bot_id=? AND state IN ('starting','running','stopping')")
             .bind(&pm.id)
-            .fetch_one(&e.app.db)
+            .fetch_one(e.app.db())
             .await
             .unwrap();
         assert_eq!(live, 1, "exactly one live run");
@@ -3149,6 +3155,7 @@ esac
 #[cfg(test)]
 mod identity_login_gate_tests {
     use super::*;
+    use crate::capabilities::Db;
     use crate::config::IdentityCfg;
     use crate::testing as tt;
     use crate::tools::{HostTools, IdentityInfo, ToolInfo, SOURCE_CONFIG};
@@ -3209,7 +3216,7 @@ mod identity_login_gate_tests {
     async fn an_explicit_logged_out_identity_fails_closed_instead_of_falling_back() {
         let e = tt::env().await;
         let bot = tt::claude_bot(&e.app, &e.project_id, "cc-lock").await;
-        sqlx::query("UPDATE bots SET identity='cc-lock' WHERE id=?").bind(&bot.id).execute(&e.app.db).await.unwrap();
+        sqlx::query("UPDATE bots SET identity='cc-lock' WHERE id=?").bind(&bot.id).execute(e.app.db()).await.unwrap();
         identity_with_recheck_answer(&e.app, &e.dir, "cc-lock", false).await;
 
         let err = start_bot(&e.app, &bot.id).await.expect_err("身分確認未登入：不能啟動");
@@ -3218,15 +3225,15 @@ mod identity_login_gate_tests {
         assert_eq!(body["identity"], "cc-lock");
         assert_eq!(body["host"], "local");
 
-        assert!(db::active_run(&e.app.db, &bot.id).await.unwrap().is_none(), "沒有 run 被建起來");
+        assert!(db::active_run(e.app.db(), &bot.id).await.unwrap().is_none(), "沒有 run 被建起來");
         assert!(e.herdr.methods().is_empty(), "沒有碰 herdr，CLI 沒被啟動：{:?}", e.herdr.methods());
 
-        let conv = db::conversation_id(&e.app.db, &bot.id).await.unwrap();
+        let conv = db::conversation_id(e.app.db(), &bot.id).await.unwrap();
         let note: String = sqlx::query_scalar(
             "SELECT content FROM messages WHERE conversation_id=? AND role='system' ORDER BY created_at DESC LIMIT 1",
         )
         .bind(&conv)
-        .fetch_one(&e.app.db)
+        .fetch_one(e.app.db())
         .await
         .unwrap();
         assert!(note.contains("cc-lock") && note.contains("沒有登入"), "{note}");
@@ -3237,11 +3244,11 @@ mod identity_login_gate_tests {
     async fn a_stale_logged_out_cache_does_not_block_a_start_the_cli_confirms() {
         let e = tt::env().await;
         let bot = tt::claude_bot(&e.app, &e.project_id, "cc-fresh").await;
-        sqlx::query("UPDATE bots SET identity='cc-fresh' WHERE id=?").bind(&bot.id).execute(&e.app.db).await.unwrap();
+        sqlx::query("UPDATE bots SET identity='cc-fresh' WHERE id=?").bind(&bot.id).execute(e.app.db()).await.unwrap();
         identity_with_recheck_answer(&e.app, &e.dir, "cc-fresh", true).await;
 
         start_bot(&e.app, &bot.id).await.expect("CLI 重驗說有登入：照常啟動");
-        assert!(db::active_run(&e.app.db, &bot.id).await.unwrap().is_some());
+        assert!(db::active_run(e.app.db(), &bot.id).await.unwrap().is_some());
     }
 }
 
@@ -3249,6 +3256,7 @@ mod identity_login_gate_tests {
 mod child_restart_tests {
     //! `restart_child_in_pane` when the agent will not leave (review 2026-09-12 #1).
     use super::*;
+    use crate::capabilities::Db;
     use crate::testing as tt;
 
     /// Agent ignores ctrl+c: after 20 polls the `stopping` run must return to `running` (else 409s
@@ -3269,7 +3277,7 @@ mod child_restart_tests {
         .bind(&parent)
         .bind(&env.project_id)
         .bind(db::now())
-        .execute(&app.db)
+        .execute(app.db())
         .await
         .unwrap();
         let kid = db::ulid();
@@ -3281,7 +3289,7 @@ mod child_restart_tests {
         .bind(&env.project_id)
         .bind(&parent)
         .bind(db::now())
-        .execute(&app.db)
+        .execute(app.db())
         .await
         .unwrap();
         let run_id = db::ulid();
@@ -3295,7 +3303,7 @@ mod child_restart_tests {
         .bind(&kid_pane.tab_id)
         .bind(&kid_pane.pane_id)
         .bind(db::now())
-        .execute(&app.db)
+        .execute(app.db())
         .await
         .unwrap();
         // The mock drops an agent on ctrl+c only by name; `name: null` (herdr 0.8.2 after a same-named
@@ -3308,10 +3316,10 @@ mod child_restart_tests {
         let err = restart_child_in_pane(&app, &kid).await.expect_err("the agent never left");
         assert!(matches!(err, LcError::Upstream(_)), "{err:?}");
 
-        let run = db::run(&app.db, &run_id).await.unwrap().unwrap();
+        let run = db::run(app.db(), &run_id).await.unwrap().unwrap();
         assert_eq!(run.state, "running", "the agent is still in its pane, so the run is still live");
         assert!(run.ended_at.is_none());
-        assert_eq!(db::active_run(&app.db, &kid).await.unwrap().map(|r| r.id), Some(run_id));
+        assert_eq!(db::active_run(app.db(), &kid).await.unwrap().map(|r| r.id), Some(run_id));
         // Nothing touched the pane.
         assert!(env.herdr.tab(&kid_pane.tab_id).unwrap().panes.contains(&kid_pane.pane_id));
         assert!(!env.herdr.methods().iter().any(|m| m == "pane.close"));
@@ -3336,7 +3344,7 @@ mod child_restart_tests {
         .bind(&env.project_id)
         .bind(&parent.id)
         .bind(db::now())
-        .execute(&app.db)
+        .execute(app.db())
         .await
         .unwrap();
         sqlx::query(
@@ -3349,7 +3357,7 @@ mod child_restart_tests {
         .bind(&kid_pane.tab_id)
         .bind(&kid_pane.pane_id)
         .bind(db::now())
-        .execute(&app.db)
+        .execute(app.db())
         .await
         .unwrap();
         // 有名字的 agent：mock 收到 ctrl+c 就讓它離開，`agent.start` 再把它放回來。
@@ -3357,13 +3365,13 @@ mod child_restart_tests {
             "name": "proj-alfa-ui", "agent": "claude", "agent_status": "idle",
             "workspace_id": ws.workspace_id, "tab_id": kid_pane.tab_id, "pane_id": kid_pane.pane_id,
             "cwd": "/tmp/p"})];
-        let conv = db::conversation_id(&app.db, &kid).await.unwrap();
+        let conv = db::conversation_id(app.db(), &kid).await.unwrap();
         let queued = db::ulid();
         sqlx::query("INSERT INTO turns (id, conversation_id, origin, status, delivery, prompt_text, created_at) VALUES (?,?,'web','queued','pending','派工',?)")
             .bind(&queued)
             .bind(&conv)
             .bind(db::now())
-            .execute(&app.db)
+            .execute(app.db())
             .await
             .unwrap();
 
@@ -3376,7 +3384,7 @@ mod child_restart_tests {
 
         restart_child_in_pane(&app, &kid).await.expect("子 agent 在原本的 pane 裡回來了");
         assert!(swept.load(std::sync::atomic::Ordering::SeqCst), "sweeper 真的落在停與起之間");
-        let status: String = sqlx::query_scalar("SELECT status FROM turns WHERE id=?").bind(&queued).fetch_one(&app.db).await.unwrap();
+        let status: String = sqlx::query_scalar("SELECT status FROM turns WHERE id=?").bind(&queued).fetch_one(app.db()).await.unwrap();
         assert_eq!(status, "queued", "重啟中的子 agent 不是孤兒：派工留給新的 run 送");
     }
 
@@ -3397,7 +3405,7 @@ mod child_restart_tests {
         .bind(&env.project_id)
         .bind(&parent.id)
         .bind(db::now())
-        .execute(&app.db)
+        .execute(app.db())
         .await
         .unwrap();
         let agent = "proj-alfa-ui";
@@ -3412,7 +3420,7 @@ mod child_restart_tests {
         .bind(&kid_pane.pane_id)
         .bind(agent)
         .bind(db::now())
-        .execute(&app.db)
+        .execute(app.db())
         .await
         .unwrap();
         *env.herdr.agents.lock().unwrap() = vec![json!({
@@ -3453,7 +3461,7 @@ mod child_restart_tests {
         .bind(&env.project_id)
         .bind(&parent.id)
         .bind(db::now())
-        .execute(&app.db)
+        .execute(app.db())
         .await
         .unwrap();
         let agent = "proj-alfa-ui";
@@ -3468,7 +3476,7 @@ mod child_restart_tests {
         .bind(&kid_pane.pane_id)
         .bind(agent)
         .bind(db::now())
-        .execute(&app.db)
+        .execute(app.db())
         .await
         .unwrap();
         *env.herdr.agents.lock().unwrap() = vec![json!({
@@ -3478,7 +3486,7 @@ mod child_restart_tests {
 
         let run_id = restart_child_in_pane(&app, &kid).await.unwrap();
 
-        let status: String = sqlx::query_scalar("SELECT agent_status FROM runs WHERE id=?").bind(&run_id).fetch_one(&app.db).await.unwrap();
+        let status: String = sqlx::query_scalar("SELECT agent_status FROM runs WHERE id=?").bind(&run_id).fetch_one(app.db()).await.unwrap();
         assert_eq!(status, "idle", "ready 之後要記下折過的狀態，不能留在 unknown");
     }
 }
@@ -3488,6 +3496,7 @@ mod tab_tests {
     //! One bot, one tab (and the retrofit). The mock herdr keeps real tab/pane bookkeeping but,
     //! unlike herdr 0.8.2, does not reap empty tabs — so these see whether the daemon tidies up itself.
     use super::*;
+    use crate::capabilities::Db;
     use crate::testing as tt;
 
     async fn a_bot(env: &tt::Env, name: &str) -> String {
@@ -3500,7 +3509,7 @@ mod tab_tests {
         .bind(&env.project_id)
         .bind(name)
         .bind(db::now())
-        .execute(&env.app.db)
+        .execute(env.app.db())
         .await
         .unwrap();
         id
@@ -3515,12 +3524,12 @@ mod tab_tests {
         std::fs::create_dir_all(&own).unwrap();
         let own = own.to_string_lossy().to_string();
         let resp = a_bot(&env, "responder").await;
-        sqlx::query("UPDATE bots SET cwd=? WHERE id=?").bind(&own).bind(&resp).execute(&env.app.db).await.unwrap();
+        sqlx::query("UPDATE bots SET cwd=? WHERE id=?").bind(&own).bind(&resp).execute(env.app.db()).await.unwrap();
 
         start_bot(&env.app, &resp).await.unwrap();
         let root = env.herdr.first_call("workspace.create").expect("the workspace did not exist yet");
         assert_ne!(root["cwd"].as_str(), Some(own.as_str()), "workspace 仍以專案目錄建立");
-        let run = db::active_run(&env.app.db, &resp).await.unwrap().unwrap();
+        let run = db::active_run(env.app.db(), &resp).await.unwrap().unwrap();
         let tab_create = env.herdr.first_call("tab.create").expect("a tab in the bot's own directory");
         assert_eq!(tab_create["cwd"].as_str(), Some(own.as_str()));
         let ws = run.workspace_id.clone().unwrap();
@@ -3546,13 +3555,13 @@ mod tab_tests {
             "CREATE TRIGGER fail_run_mapping BEFORE UPDATE OF workspace_id, pane_id, tab_id ON runs
              BEGIN SELECT RAISE(ABORT, 'forced run mapping failure'); END",
         )
-        .execute(&env.app.db)
+        .execute(env.app.db())
         .await
         .unwrap();
 
         assert!(start_bot(&env.app, &bot_id).await.is_err());
 
-        let workspace_id = db::project(&env.app.db, &env.project_id)
+        let workspace_id = db::project(env.app.db(), &env.project_id)
             .await
             .unwrap()
             .unwrap()
@@ -3565,14 +3574,14 @@ mod tab_tests {
 
         let state: String = sqlx::query_scalar("SELECT state FROM runs WHERE bot_id = ? ORDER BY started_at DESC LIMIT 1")
             .bind(&bot_id)
-            .fetch_one(&env.app.db)
+            .fetch_one(env.app.db())
             .await
             .unwrap();
         assert_eq!(state, "exited");
     }
 
     async fn run_row(app: &Arc<App>, id: &str) -> db::Run {
-        sqlx::query_as::<_, db::Run>("SELECT * FROM runs WHERE id = ?").bind(id).fetch_one(&app.db).await.unwrap()
+        sqlx::query_as::<_, db::Run>("SELECT * FROM runs WHERE id = ?").bind(id).fetch_one(app.db()).await.unwrap()
     }
 
     /// A run that is `running` on `pane_id`, with whatever `tab_id` the caller says.
@@ -3588,7 +3597,7 @@ mod tab_tests {
         .bind(pane)
         .bind(tab)
         .bind(db::now())
-        .execute(&app.db)
+        .execute(app.db())
         .await
         .unwrap();
         id
@@ -3796,7 +3805,7 @@ mod tab_tests {
         .bind(&id)
         .bind(&bot)
         .bind(db::now())
-        .execute(&app.db)
+        .execute(app.db())
         .await
         .unwrap();
         assert!(matches!(move_pane_to_own_tab(&app, &bot).await, Err(LcError::NotFound(_))));
@@ -3807,6 +3816,7 @@ mod tab_tests {
 #[cfg(test)]
 mod idle_restart_tests {
     use super::*;
+    use crate::capabilities::Db;
     use crate::testing as tt;
 
     async fn bot_with_run(env: &tt::Env, managed_by: &str, agent_status: &str) -> (String, String) {
@@ -3821,7 +3831,7 @@ mod idle_restart_tests {
         .bind(format!("busy-{bot_id}"))
         .bind(managed_by)
         .bind(db::now())
-        .execute(&app.db)
+        .execute(app.db())
         .await
         .unwrap();
         let run_id = db::ulid();
@@ -3833,7 +3843,7 @@ mod idle_restart_tests {
         .bind(&bot_id)
         .bind(agent_status)
         .bind(db::now())
-        .execute(&app.db)
+        .execute(app.db())
         .await
         .unwrap();
         (bot_id, run_id)
@@ -3854,17 +3864,17 @@ mod idle_restart_tests {
         let env = tt::env().await;
         let app = env.app.clone();
         let (bot_id, run_id) = bot_with_run(&env, "user", "idle").await;
-        sqlx::query("UPDATE bots SET identity='nope-not-on-this-host', autostart=1 WHERE id=?").bind(&bot_id).execute(&app.db).await.unwrap();
+        sqlx::query("UPDATE bots SET identity='nope-not-on-this-host', autostart=1 WHERE id=?").bind(&bot_id).execute(app.db()).await.unwrap();
         let err = restart_bot(&app, &bot_id).await.expect_err("身分不在這台主機：start 一定失敗");
         assert!(matches!(err, LcError::Conflict(_)), "{err:?}");
-        let state: String = sqlx::query_scalar("SELECT state FROM runs WHERE id=?").bind(&run_id).fetch_one(&app.db).await.unwrap();
+        let state: String = sqlx::query_scalar("SELECT state FROM runs WHERE id=?").bind(&run_id).fetch_one(app.db()).await.unwrap();
         assert_eq!(state, "exited", "重啟沒開回來，不是使用者停的");
-        assert!(db::active_run(&app.db, &bot_id).await.unwrap().is_none());
+        assert!(db::active_run(app.db(), &bot_id).await.unwrap().is_none());
 
         // 對照：使用者自己 stop 的 run 留在 `stopped`。
         let (other, other_run) = bot_with_run(&env, "user", "idle").await;
         stop_bot(&app, &other).await.unwrap();
-        let state: String = sqlx::query_scalar("SELECT state FROM runs WHERE id=?").bind(&other_run).fetch_one(&app.db).await.unwrap();
+        let state: String = sqlx::query_scalar("SELECT state FROM runs WHERE id=?").bind(&other_run).fetch_one(app.db()).await.unwrap();
         assert_eq!(state, "stopped");
     }
 
@@ -3877,7 +3887,7 @@ mod idle_restart_tests {
         let env = tt::env().await;
         let app = env.app.clone();
         let (bot_id, run_id) = bot_with_run(&env, "user", "idle").await;
-        sqlx::query("UPDATE bots SET identity='nope-not-on-this-host', autostart=1 WHERE id=?").bind(&bot_id).execute(&app.db).await.unwrap();
+        sqlx::query("UPDATE bots SET identity='nope-not-on-this-host', autostart=1 WHERE id=?").bind(&bot_id).execute(app.db()).await.unwrap();
         rs::refuse_run_state(&app, "exited").await;
         match restart_bot(&app, &bot_id).await {
             Err(LcError::Uncommitted(v)) => {
@@ -3886,14 +3896,14 @@ mod idle_restart_tests {
             }
             other => panic!("舊 run 還記著使用者要它停，不能只回 start 的錯：{other:?}"),
         }
-        let state: String = sqlx::query_scalar("SELECT state FROM runs WHERE id=?").bind(&run_id).fetch_one(&app.db).await.unwrap();
+        let state: String = sqlx::query_scalar("SELECT state FROM runs WHERE id=?").bind(&run_id).fetch_one(app.db()).await.unwrap();
         assert_eq!(state, "stopped");
         assert_eq!(rs::scheduled(&run_id), vec![rs::Settle::Relabel { from: "stopped", to: "exited" }], "排了改標的重試");
         assert!(!rs::bot_stopped_reported(&app, &bot_id).await, "前提：留著 stopped，探針以為是故意停的");
 
         rs::accept_run_state(&app, "exited").await;
         assert!(rs::settle_once(&app, &run_id, &rs::Settle::Relabel { from: "stopped", to: "exited" }).await);
-        let state: String = sqlx::query_scalar("SELECT state FROM runs WHERE id=?").bind(&run_id).fetch_one(&app.db).await.unwrap();
+        let state: String = sqlx::query_scalar("SELECT state FROM runs WHERE id=?").bind(&run_id).fetch_one(app.db()).await.unwrap();
         assert_eq!(state, "exited", "重啟沒開回來，不是使用者停的");
         assert!(rs::bot_stopped_reported(&app, &bot_id).await, "autostart 的 bot 沒在跑：探針報出來");
     }
@@ -3907,17 +3917,17 @@ mod idle_restart_tests {
             let (bot_id, run_id) = bot_with_run(&env, "user", status).await;
             let opts = StartOpts { resume_native: true, require_idle: true, ..Default::default() };
             assert_eq!(reason(restart_bot_with(&app, &bot_id, opts).await.unwrap_err()), ("not_idle".into(), want.into()));
-            assert_eq!(db::active_run(&app.db, &bot_id).await.unwrap().map(|r| (r.id, r.state)), Some((run_id, "running".into())));
+            assert_eq!(db::active_run(app.db(), &bot_id).await.unwrap().map(|r| (r.id, r.state)), Some((run_id, "running".into())));
         }
         // 閒著但還有一回合沒收掉，也不動。
         let (bot_id, run_id) = bot_with_run(&env, "user", "idle").await;
-        let conv = db::conversation_id(&app.db, &bot_id).await.unwrap();
+        let conv = db::conversation_id(app.db(), &bot_id).await.unwrap();
         sqlx::query("INSERT INTO turns (id, conversation_id, run_id, origin, status, delivery, created_at) VALUES (?,?,?,'web','in_flight','ok',?)")
             .bind(db::ulid())
             .bind(&conv)
             .bind(&run_id)
             .bind(db::now())
-            .execute(&app.db)
+            .execute(app.db())
             .await
             .unwrap();
         let opts = StartOpts { resume_native: true, require_idle: true, ..Default::default() };
@@ -3937,11 +3947,11 @@ mod idle_restart_tests {
         let (kid, run_id) = bot_with_run(&env, "child", "idle").await;
         let (a, r) = (app.clone(), run_id.clone());
         crate::lifecycle::race_point::arm("child_restart_before_stopping", &kid, move || async move {
-            sqlx::query("UPDATE runs SET agent_status='working' WHERE id=?").bind(&r).execute(&a.db).await.unwrap();
+            sqlx::query("UPDATE runs SET agent_status='working' WHERE id=?").bind(&r).execute(a.db()).await.unwrap();
         });
         let err = restart_child_in_pane_with(&app, &kid, true).await.expect_err("剛開始工作的子 agent 不能被重啟");
         assert_eq!(reason(err).0, "not_idle");
-        assert_eq!(db::active_run(&app.db, &kid).await.unwrap().map(|r| (r.id, r.state)), Some((run_id, "running".into())), "run 原封不動");
+        assert_eq!(db::active_run(app.db(), &kid).await.unwrap().map(|r| (r.id, r.state)), Some((run_id, "running".into())), "run 原封不動");
         assert!(!env.herdr.methods().iter().any(|m| m == "agent.send_keys" || m == "pane.close"), "沒有 ctrl+c");
     }
 
@@ -3952,7 +3962,7 @@ mod idle_restart_tests {
         let env = tt::env().await;
         let app = env.app.clone();
         let kid = crate::lifecycle::restart_kind_tests::live_child(&env, "late-hook").await;
-        let run = db::run(&app.db, &kid.run_id).await.unwrap().unwrap();
+        let run = db::run(app.db(), &kid.run_id).await.unwrap().unwrap();
         let hook_app = app.clone();
         crate::lifecycle::race_point::arm("child_restart_before_stopping", &kid.id, move || async move {
             crate::runners::background_hook::on_stop(
@@ -3965,7 +3975,7 @@ mod idle_restart_tests {
 
         let err = restart_child_in_pane_with(&app, &kid.id, true).await.expect_err("new background work blocks the in-pane restart");
         assert_eq!(reason(err).1, "background_jobs");
-        assert_eq!(db::active_run(&app.db, &kid.id).await.unwrap().map(|r| (r.id, r.state)), Some((kid.run_id, "running".into())));
+        assert_eq!(db::active_run(app.db(), &kid.id).await.unwrap().map(|r| (r.id, r.state)), Some((kid.run_id, "running".into())));
         assert!(!env.herdr.methods().iter().any(|m| m == "agent.send_keys" || m == "agent.start"), "background work must not be interrupted");
     }
 
@@ -3979,12 +3989,12 @@ mod idle_restart_tests {
         let (bot_id, run_id) = bot_with_run(&env, "user", "idle").await;
         let (a, r) = (app.clone(), run_id.clone());
         crate::lifecycle::race_point::arm("stop_before_stopping", &bot_id, move || async move {
-            sqlx::query("UPDATE runs SET agent_status='working' WHERE id=?").bind(&r).execute(&a.db).await.unwrap();
+            sqlx::query("UPDATE runs SET agent_status='working' WHERE id=?").bind(&r).execute(a.db()).await.unwrap();
         });
         let opts = StartOpts { resume_native: true, require_idle: true, ..Default::default() };
         let err = restart_bot_with(&app, &bot_id, opts).await.expect_err("剛開始工作的 bot 不能被重啟");
         assert_eq!(reason(err).0, "not_idle");
-        assert_eq!(db::active_run(&app.db, &bot_id).await.unwrap().map(|r| (r.id, r.state)), Some((run_id, "running".into())), "run 原封不動");
+        assert_eq!(db::active_run(app.db(), &bot_id).await.unwrap().map(|r| (r.id, r.state)), Some((run_id, "running".into())), "run 原封不動");
         let methods = env.herdr.methods();
         assert!(!methods.iter().any(|m| m == "agent.send_keys" || m == "pane.close"), "沒有 ctrl+c、沒有關 pane：{methods:?}");
     }
@@ -3995,6 +4005,7 @@ mod run_state_commit_tests {
     //! #145：跨過 `agent.start` 之後，run 狀態寫不進去就不能回「啟動成功」，也不能留下一顆永遠卡住的 run。
     use super::super::run_state as rs;
     use super::*;
+    use crate::capabilities::Db;
     use crate::testing as tt;
 
     fn starts(env: &tt::Env) -> usize {
@@ -4004,7 +4015,7 @@ mod run_state_commit_tests {
     async fn live_runs(app: &Arc<App>, bot_id: &str) -> i64 {
         sqlx::query_scalar("SELECT COUNT(*) FROM runs WHERE bot_id=? AND state IN ('starting','running','stopping')")
             .bind(bot_id)
-            .fetch_one(&app.db)
+            .fetch_one(app.db())
             .await
             .unwrap()
     }
@@ -4021,7 +4032,7 @@ mod run_state_commit_tests {
         let err = start_bot(&app, &bot.id).await.expect_err("DB 沒記下 running，不能回啟動成功");
         // 先看錯誤是哪一種：沒走到 agent.start 就失敗（例如這台沒裝 claude）的話，訊息直接寫在這裡。
         let LcError::Uncommitted(body) = &err else { panic!("要 503 start_state_uncommitted，拿到 {err:?}") };
-        let run = db::active_run(&app.db, &bot.id).await.unwrap().expect("agent 在跑，run 不能被收成 exited");
+        let run = db::active_run(app.db(), &bot.id).await.unwrap().expect("agent 在跑，run 不能被收成 exited");
         assert_eq!((body["error"].as_str(), body["run_id"].as_str()), (Some("start_state_uncommitted"), Some(run.id.as_str())));
         assert_eq!(run.state, "starting");
         let methods = env.herdr.methods();
@@ -4031,7 +4042,7 @@ mod run_state_commit_tests {
 
         rs::accept_run_state(&app, "running").await;
         assert!(rs::settle_once(&app, &run.id, &rs::Settle::Reconcile { stuck: "starting".into() }).await);
-        assert_eq!(db::run(&app.db, &run.id).await.unwrap().unwrap().state, "running", "照 herdr 的證據收斂");
+        assert_eq!(db::run(app.db(), &run.id).await.unwrap().unwrap().state, "running", "照 herdr 的證據收斂");
         assert_eq!(starts(&env), 1, "沒有再開第二顆");
         assert_eq!(live_runs(&app, &bot.id).await, 1);
     }
@@ -4050,7 +4061,7 @@ mod run_state_commit_tests {
 
         let err = restart_bot(&app, &bot.id).await.expect_err("新 run 沒記下 running");
         let LcError::Uncommitted(body) = &err else { panic!("要 503 start_state_uncommitted，拿到 {err:?}") };
-        let run = db::active_run(&app.db, &bot.id).await.unwrap().expect("新 run 停在 starting");
+        let run = db::active_run(app.db(), &bot.id).await.unwrap().expect("新 run 停在 starting");
         assert_eq!((body["run_id"].as_str(), run.state.as_str()), (Some(run.id.as_str()), "starting"));
         assert_eq!(rs::turn_status(&app, &queued).await, "queued", "重啟中：不當孤兒撤");
         assert!(super::super::start_send::watching_for_running(&run.id), "排了「收成 running 就叫 flush」");
@@ -4066,21 +4077,21 @@ mod run_state_commit_tests {
             "CREATE TRIGGER fail_run_mapping BEFORE UPDATE OF workspace_id, pane_id, tab_id ON runs
              BEGIN SELECT RAISE(ABORT, 'forced run mapping failure'); END",
         )
-        .execute(&app.db)
+        .execute(app.db())
         .await
         .unwrap();
         rs::refuse_run_state(&app, "exited").await;
 
         let err = start_bot(&app, &bot.id).await.expect_err("mapping 寫不進去");
         assert!(matches!(&err, LcError::Upstream(m) if m.contains("forced run mapping failure")), "要在 mapping 那一步失敗，拿到 {err:?}");
-        let run = db::active_run(&app.db, &bot.id).await.unwrap().expect("exited 寫不進去，DB 上還是 starting");
+        let run = db::active_run(app.db(), &bot.id).await.unwrap().expect("exited 寫不進去，DB 上還是 starting");
         assert!(env.herdr.methods().iter().any(|m| m == "pane.close"), "pane 照樣收掉");
         assert_eq!(rs::scheduled(&run.id), vec![rs::Settle::Reconcile { stuck: "starting".into() }], "排了重試，不是只吞掉");
 
-        sqlx::query("DROP TRIGGER fail_run_mapping").execute(&app.db).await.unwrap();
+        sqlx::query("DROP TRIGGER fail_run_mapping").execute(app.db()).await.unwrap();
         rs::accept_run_state(&app, "exited").await;
         assert!(rs::settle_once(&app, &run.id, &rs::Settle::Reconcile { stuck: "starting".into() }).await);
-        assert_eq!(db::run(&app.db, &run.id).await.unwrap().unwrap().state, "exited");
+        assert_eq!(db::run(app.db(), &run.id).await.unwrap().unwrap().state, "exited");
         start_bot(&app, &bot.id).await.expect("zombie 清掉之後可以再啟動");
     }
 
@@ -4093,13 +4104,13 @@ mod run_state_commit_tests {
         let bot = tt::claude_bot(&app, &env.project_id, "alfa").await;
         let (app2, bot2) = (app.clone(), bot.id.clone());
         super::super::race_point::arm("start_before_running", &bot.id, move || async move {
-            let run = db::active_run(&app2.db, &bot2).await.unwrap().unwrap();
+            let run = db::active_run(app2.db(), &bot2).await.unwrap().unwrap();
             mark_run_exited(&app2, &run.id, "pane exited").await;
         });
 
         let err = start_bot(&app, &bot.id).await.expect_err("run 已經結束了，不是啟動成功");
         assert!(matches!(&err, LcError::Upstream(m) if m.contains("ended while it was starting")), "要輸在 running 的 CAS，拿到 {err:?}");
-        let state: String = sqlx::query_scalar("SELECT state FROM runs WHERE bot_id=?").bind(&bot.id).fetch_one(&app.db).await.unwrap();
+        let state: String = sqlx::query_scalar("SELECT state FROM runs WHERE bot_id=?").bind(&bot.id).fetch_one(app.db()).await.unwrap();
         assert_eq!(state, "exited", "終態不會被拉回 running");
     }
 }
@@ -4108,6 +4119,7 @@ mod run_state_commit_tests {
 #[cfg(test)]
 mod grok_startup_effort_tests {
     use super::start_bot;
+    use crate::capabilities::Db;
     use crate::db;
     use crate::testing as tt;
 
@@ -4125,10 +4137,10 @@ mod grok_startup_effort_tests {
         .bind("g-effort")
         .bind(effort)
         .bind(db::now())
-        .execute(&app.db)
+        .execute(app.db())
         .await
         .unwrap();
-        db::bot(&app.db, &id).await.unwrap().unwrap()
+        db::bot(app.db(), &id).await.unwrap().unwrap()
     }
 
     fn sent_effort_slash(e: &tt::Env) -> Vec<String> {
@@ -4149,7 +4161,7 @@ mod grok_startup_effort_tests {
         let bot = grok_bot(&e.app, &e.project_id, Some("medium")).await;
         start_bot(&e.app, &bot.id).await.unwrap();
         assert!(sent_effort_slash(&e).is_empty(), "不准送 /effort，那會寫進 ~/.grok/config.toml");
-        let run = db::active_run(&e.app.db, &bot.id).await.unwrap().unwrap();
+        let run = db::active_run(e.app.db(), &bot.id).await.unwrap().unwrap();
         assert_eq!(run.runtime_effort.as_deref(), Some("medium"), "等級只來自 --reasoning-effort");
     }
 
@@ -4175,16 +4187,16 @@ mod grok_startup_effort_tests {
 }
 
 /// Continue a credential-rotation restart while the caller holds the bot lock.
-pub(crate) async fn resume_credential_rotation_locked(app: &Arc<App>, bot_id: &str, opts: StartOpts, from_run: &str) -> LcResult<String> {
-    let bot = db::bot(&app.db, bot_id).await.map_err(up)?.ok_or_else(|| LcError::NotFound("bot".into()))?;
+pub(crate) async fn resume_credential_rotation_locked(app: &impl StartContext, bot_id: &str, opts: StartOpts, from_run: &str) -> LcResult<String> {
+    let bot = db::bot(app.db(), bot_id).await.map_err(up)?.ok_or_else(|| LcError::NotFound("bot".into()))?;
     refuse_default_session(&bot)?;
     restart_stop_and_start(app, bot_id, opts, Some(from_run.to_string()), None).await
 }
 
 /// 開機補完被打斷的重啟（#355 P2）：呼叫端持 bot 鎖，已經決定要往前補。stop 做到一半（`stopping`）先補完它；
 /// 剛停掉的舊 run 由 `stopped`（使用者要它停）改標 `exited`；再照原本的選項 start（不再要求閒置——使用者要的是它回來）。
-pub(crate) async fn resume_restart_locked(app: &Arc<App>, bot_id: &str, opts: StartOpts, from_run: Option<&str>) -> LcResult<String> {
-    if let Some(run) = db::active_run(&app.db, bot_id).await.map_err(up)? {
+pub(crate) async fn resume_restart_locked(app: &impl StartContext, bot_id: &str, opts: StartOpts, from_run: Option<&str>) -> LcResult<String> {
+    if let Some(run) = db::active_run(app.db(), bot_id).await.map_err(up)? {
         if run.state == "stopping" {
             stop_for_restart_locked(app, bot_id).await?;
         }
@@ -4205,11 +4217,12 @@ pub(crate) async fn resume_restart_locked(app: &Arc<App>, bot_id: &str, opts: St
 #[cfg(test)]
 mod retire_context_lost_tests {
     use super::*;
+    use crate::capabilities::Db;
 
     async fn notes(app: &Arc<App>, conv: &str) -> Vec<String> {
         sqlx::query_scalar("SELECT content FROM messages WHERE conversation_id = ? AND role = 'system' ORDER BY created_at, rowid")
             .bind(conv)
-            .fetch_all(&app.db)
+            .fetch_all(app.db())
             .await
             .unwrap()
     }
@@ -4219,7 +4232,7 @@ mod retire_context_lost_tests {
             "SELECT native_session_id FROM context_lost_notices WHERE bot_id = ? AND retired_at IS NULL ORDER BY created_at, rowid",
         )
         .bind(bot_id)
-        .fetch_all(&app.db)
+        .fetch_all(app.db())
         .await
         .unwrap()
     }
@@ -4229,17 +4242,17 @@ mod retire_context_lost_tests {
         let env = crate::testing::env().await;
         let app = env.app.clone();
         let bot = crate::testing::claude_bot(&app, &env.project_id, "rpa").await;
-        let conv = db::conversation_id(&app.db, &bot.id).await.unwrap();
+        let conv = db::conversation_id(app.db(), &bot.id).await.unwrap();
         // 舊版通知沒有 session metadata；保守留下，不從文字或時間猜它屬於哪一段。
         let _ = insert_message(&app, &conv, None, "system", "⚠️ 接不回原本的對話（舊的），已經開了新的對話——前面的脈絡沒有帶過來。", "system", false, None).await;
-        sqlx::query("UPDATE messages SET created_at = '2026-10-01T00:00:00.000Z' WHERE conversation_id = ?").bind(&conv).execute(&app.db).await.unwrap();
+        sqlx::query("UPDATE messages SET created_at = '2026-10-01T00:00:00.000Z' WHERE conversation_id = ?").bind(&conv).execute(app.db()).await.unwrap();
         // 用過 S 的那個 run 在 10-04 00:19:32 結束，緊接著插了失敗通知與一則一般系統訊息。
         sqlx::query(
             "INSERT INTO runs (id, bot_id, state, agent_status, workspace_id, pane_id, agent_name, herdr_session, started_at, ended_at, native_session_id)
              VALUES ('run-old', ?, 'exited', 'idle', 'ws', 'p', 'a', 't', '2026-10-03T02:27:05.470Z', '2026-10-04T00:19:32.795Z', 'S')",
         )
         .bind(&bot.id)
-        .execute(&app.db)
+        .execute(app.db())
         .await
         .unwrap();
         context_lost(&app, &bot, "transcript_missing", Some("S")).await.unwrap();
@@ -4263,13 +4276,13 @@ mod retire_context_lost_tests {
         let env = crate::testing::env().await;
         let app = env.app.clone();
         let bot = crate::testing::claude_bot(&app, &env.project_id, "rpa").await;
-        let conv = db::conversation_id(&app.db, &bot.id).await.unwrap();
+        let conv = db::conversation_id(app.db(), &bot.id).await.unwrap();
         sqlx::query(
             "INSERT INTO runs (id, bot_id, state, agent_status, workspace_id, pane_id, agent_name, herdr_session, started_at, ended_at, native_session_id)
              VALUES ('run-old', ?, 'exited', 'idle', 'ws', 'p', 'a', 't', '2026-10-04T01:00:00.000Z', '2026-10-04T01:10:00.000Z', 'sess-A')",
         )
         .bind(&bot.id)
-        .execute(&app.db)
+        .execute(app.db())
         .await
         .unwrap();
 
@@ -4278,7 +4291,7 @@ mod retire_context_lost_tests {
             "SELECT native_session_id FROM context_lost_notices WHERE bot_id = ? ORDER BY created_at DESC LIMIT 1",
         )
         .bind(&bot.id)
-        .fetch_one(&app.db)
+        .fetch_one(app.db())
         .await
         .unwrap();
         assert_eq!(stored_session, None, "沒有目標 session 時不能猜舊 run 的 id");
@@ -4298,7 +4311,7 @@ mod retire_context_lost_tests {
         let env = crate::testing::env().await;
         let app = env.app.clone();
         let bot = crate::testing::claude_bot(&app, &env.project_id, "rpa").await;
-        let conv = db::conversation_id(&app.db, &bot.id).await.unwrap();
+        let conv = db::conversation_id(app.db(), &bot.id).await.unwrap();
 
         // Run A 結束，接著 context_lost(A)
         sqlx::query(
@@ -4306,7 +4319,7 @@ mod retire_context_lost_tests {
              VALUES ('run-a', ?, 'exited', 'idle', 'ws', 'p', 'a', 't', '2026-10-04T01:00:00.000Z', '2026-10-04T01:10:00.000Z', 'sess-A')",
         )
         .bind(&bot.id)
-        .execute(&app.db)
+        .execute(app.db())
         .await
         .unwrap();
         context_lost(&app, &bot, "transcript_missing", Some("sess-A")).await.unwrap();
@@ -4317,7 +4330,7 @@ mod retire_context_lost_tests {
              VALUES ('run-b', ?, 'exited', 'idle', 'ws', 'p', 'a', 't', '2026-10-04T02:00:00.000Z', '2026-10-04T02:10:00.000Z', 'sess-B')",
         )
         .bind(&bot.id)
-        .execute(&app.db)
+        .execute(app.db())
         .await
         .unwrap();
         context_lost(&app, &bot, "transcript_missing", Some("sess-B")).await.unwrap();
@@ -4344,7 +4357,7 @@ mod retire_context_lost_tests {
         let env = crate::testing::env().await;
         let app = env.app.clone();
         let bot = crate::testing::claude_bot(&app, &env.project_id, "rpa").await;
-        let conv = db::conversation_id(&app.db, &bot.id).await.unwrap();
+        let conv = db::conversation_id(app.db(), &bot.id).await.unwrap();
 
         context_lost(&app, &bot, "transcript_missing", Some("sess-A")).await.unwrap();
         context_lost(&app, &bot, "transcript_missing", Some("sess-B")).await.unwrap();
@@ -4369,7 +4382,7 @@ mod retire_context_lost_tests {
         let env = crate::testing::env().await;
         let app = env.app.clone();
         let bot = crate::testing::claude_bot(&app, &env.project_id, "rpa").await;
-        let conv = db::conversation_id(&app.db, &bot.id).await.unwrap();
+        let conv = db::conversation_id(app.db(), &bot.id).await.unwrap();
 
         context_lost(&app, &bot, "transcript_missing", Some("sess-A")).await.unwrap();
         context_lost(&app, &bot, "resume_mismatch", Some("sess-A")).await.unwrap();
@@ -4393,6 +4406,7 @@ mod retire_context_lost_tests {
 #[cfg(test)]
 mod agy_resume_tests {
     use super::*;
+    use crate::capabilities::Db;
     use crate::testing::{claude_bot, env, Env};
 
     const SID: &str = "5e69519d-5998-496d-aa7a-b7df4383520a";
@@ -4403,10 +4417,10 @@ mod agy_resume_tests {
     }
 
     async fn system_notes(app: &Arc<App>, bot_id: &str) -> Vec<String> {
-        let conv = db::conversation_id(&app.db, bot_id).await.unwrap();
+        let conv = db::conversation_id(app.db(), bot_id).await.unwrap();
         sqlx::query_scalar("SELECT content FROM messages WHERE conversation_id=? AND role='system' ORDER BY created_at")
             .bind(&conv)
-            .fetch_all(&app.db)
+            .fetch_all(app.db())
             .await
             .unwrap()
     }
@@ -4420,7 +4434,7 @@ mod agy_resume_tests {
         .bind(native)
         .bind("2026-10-05T00:00:00Z")
         .bind("2026-10-05T00:01:00Z")
-        .execute(&app.db)
+        .execute(app.db())
         .await
         .unwrap();
     }
@@ -4429,7 +4443,7 @@ mod agy_resume_tests {
     async fn a_resume_native_start_reopens_the_recorded_conversation_and_never_uses_dash_c() {
         let e = env().await;
         let bot = claude_bot(&e.app, &e.project_id, "agy-resume").await;
-        sqlx::query("UPDATE bots SET kind='agy', model='gemini-3.8-flash-low', auto_approve=1 WHERE id=?").bind(&bot.id).execute(&e.app.db).await.unwrap();
+        sqlx::query("UPDATE bots SET kind='agy', model='gemini-3.8-flash-low', auto_approve=1 WHERE id=?").bind(&bot.id).execute(e.app.db()).await.unwrap();
         ended_run(&e.app, &bot.id, Some(SID)).await;
 
         start_bot_with(&e.app, &bot.id, StartOpts { resume_native: true, ..Default::default() }).await.unwrap();
@@ -4439,7 +4453,7 @@ mod agy_resume_tests {
         assert!(!args.iter().any(|a| a == "-c" || a == "--continue"), "-c 只認 cwd 最近一段，同 cwd 的 bot 會互搶：{args:?}");
         let requested: Option<String> = sqlx::query_scalar("SELECT resume_session_id FROM runs WHERE bot_id=? AND state IN ('starting','running') ")
             .bind(&bot.id)
-            .fetch_one(&e.app.db)
+            .fetch_one(e.app.db())
             .await
             .unwrap();
         assert_eq!(requested.as_deref(), Some(SID), "要接的 id 記進 run，hook 回報的才有東西可對");
@@ -4449,7 +4463,7 @@ mod agy_resume_tests {
     async fn without_a_recorded_conversation_agy_starts_fresh_with_a_visible_note() {
         let e = env().await;
         let bot = claude_bot(&e.app, &e.project_id, "agy-fresh").await;
-        sqlx::query("UPDATE bots SET kind='agy', model='gemini-3.8-flash-low', auto_approve=1 WHERE id=?").bind(&bot.id).execute(&e.app.db).await.unwrap();
+        sqlx::query("UPDATE bots SET kind='agy', model='gemini-3.8-flash-low', auto_approve=1 WHERE id=?").bind(&bot.id).execute(e.app.db()).await.unwrap();
         ended_run(&e.app, &bot.id, None).await;
 
         start_bot_with(&e.app, &bot.id, StartOpts { resume_native: true, ..Default::default() }).await.unwrap();
@@ -4476,7 +4490,7 @@ mod agy_resume_tests {
         .bind(&e.project_id)
         .bind(&parent.id)
         .bind(db::now())
-        .execute(&app.db)
+        .execute(app.db())
         .await
         .unwrap();
         ended_run(&app, &kid, Some(recorded)).await;
@@ -4490,7 +4504,7 @@ mod agy_resume_tests {
         .bind(&kid_pane.tab_id)
         .bind(&kid_pane.pane_id)
         .bind(db::now())
-        .execute(&app.db)
+        .execute(app.db())
         .await
         .unwrap();
         *e.herdr.agents.lock().unwrap() = vec![json!({

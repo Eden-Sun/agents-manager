@@ -11,10 +11,9 @@
 //! - `Err(_)`：DB 寫不進去。狀態沒變；不做後續不可逆的動作，錯誤往上傳。外面的副作用已經發生的，
 //!   用 [`schedule_settle`] 排重試，讓狀態照證據收斂，不留一顆永遠卡住的 run。
 
-#[path = "../app_ports_p4state.rs"]
-pub(crate) mod app_ports_p4state;
-
-use am_ports::{BotLock, EventSink};
+#[cfg(test)]
+use crate::capabilities::Db;
+use crate::lifecycle::s6_ports::RunStateServices;
 use super::*;
 
 /// active run 的三個狀態（`db::active_run` 與 active-run 唯一索引的定義）。
@@ -135,7 +134,7 @@ fn settling() -> &'static std::sync::Mutex<std::collections::HashSet<(String, &'
 
 /// 背景重試到這顆 run 離開卡住的狀態。daemon 在那之前重啟的話，開機的對帳照同一份證據收。
 /// 測試裡不開背景 task，只記下排了什麼（[`scheduled`]），由測試自己呼叫 [`settle_once`]。
-pub(crate) fn schedule_settle(app: &Arc<App>, run_id: &str, how: Settle) {
+pub(crate) fn schedule_settle<A: RunStateServices>(app: &A, run_id: &str, how: Settle) {
     tracing::warn!(run = run_id, ?how, "run state is not committed; retrying in the background");
     if cfg!(test) {
         #[cfg(test)]
@@ -146,7 +145,7 @@ pub(crate) fn schedule_settle(app: &Arc<App>, run_id: &str, how: Settle) {
     if !settling().lock().map(|mut s| s.insert(key.clone())).unwrap_or(false) {
         return;
     }
-    let app = app.clone();
+    let app = (*app).clone();
     let run_id = run_id.to_string();
     tokio::spawn(async move {
         let mut settled = false;
@@ -167,37 +166,37 @@ pub(crate) fn schedule_settle(app: &Arc<App>, run_id: &str, how: Settle) {
 }
 
 /// 重試一次；回傳這顆 run 是不是已經不再等這一種重試。
-pub(crate) async fn settle_once(app: &Arc<App>, run_id: &str, how: &Settle) -> bool {
-    let run = match db::run(&app.db, run_id).await {
+pub(crate) async fn settle_once(app: &impl RunStateServices, run_id: &str, how: &Settle) -> bool {
+    let run = match db::run(app.db(), run_id).await {
         Ok(Some(run)) if how.pending(&run.state) => run,
         Ok(_) => return true,
         Err(_) => return false,
     };
     match how {
         Settle::Reconcile { .. } => {
-            let Ok(host) = db::bot_host(&app.db, &run.bot_id).await else { return false };
-            if let Err(e) = app_ports_p4state::reconcile_host(app, &host).await {
+            let Ok(host) = db::bot_host(app.db(), &run.bot_id).await else { return false };
+            if let Err(e) = app.reconcile_host(&host).await {
                 tracing::warn!(run = run_id, host, error = %e, "reconcile retry failed");
             }
         }
         Settle::FinishStop => {
-            app_ports_p4state::finish_stop(app, run_id).await;
+            app.finish_stop(run_id).await;
         }
         Settle::BackToRunning => {
-            let bot_lock = app_ports_p4state::AppBotLock::new(app);
-            let _g = bot_lock.lock_bot(&run.bot_id).await;
-            if transition(&app.db, run_id, &["stopping"], "running", None).await.is_ok() {
-                let _ = app_ports_p4state::AppEventSink::new(app).bot_status_changed(&run.bot_id).await;
+            let lock = app.bot_lock(&run.bot_id).await;
+            let _g = lock.lock().await;
+            if transition(app.db(), run_id, &["stopping"], "running", None).await.is_ok() {
+                app.emit_bot_status(&run.bot_id).await;
             }
         }
         // CAS 輸了（已經不是 `from`、或 bot 有了新的 active run）也算收斂：這一筆已經沒有要改的標籤。
         Settle::Relabel { from, to } => {
-            let bot_lock = app_ports_p4state::AppBotLock::new(app);
-            let _g = bot_lock.lock_bot(&run.bot_id).await;
-            return match relabel(&app.db, run_id, from, to).await {
+            let lock = app.bot_lock(&run.bot_id).await;
+            let _g = lock.lock().await;
+            return match relabel(app.db(), run_id, from, to).await {
                 Ok(Moved::Applied) => {
                     tracing::info!(run = run_id, from, to, "a run's terminal label is now recorded");
-                    let _ = app_ports_p4state::AppEventSink::new(app).bot_status_changed(&run.bot_id).await;
+                    app.emit_bot_status(&run.bot_id).await;
                     true
                 }
                 Ok(Moved::Lost) => true,
@@ -208,7 +207,7 @@ pub(crate) async fn settle_once(app: &Arc<App>, run_id: &str, how: &Settle) -> b
             };
         }
     }
-    match db::run(&app.db, run_id).await {
+    match db::run(app.db(), run_id).await {
         Ok(Some(r)) => !how.pending(&r.state),
         Ok(None) => true,
         Err(_) => false,
@@ -235,7 +234,7 @@ pub(crate) async fn refuse_run_state(app: &Arc<App>, state: &str) {
         "CREATE TRIGGER refuse_run_state_{state} BEFORE UPDATE OF state ON runs WHEN NEW.state = '{state}'
          BEGIN SELECT RAISE(ABORT, 'injected: cannot write runs.state = {state}'); END"
     ))
-    .execute(&app.db)
+    .execute(app.db())
     .await
     .unwrap();
 }
@@ -243,7 +242,7 @@ pub(crate) async fn refuse_run_state(app: &Arc<App>, state: &str) {
 /// 測試用：DB 恢復。
 #[cfg(test)]
 pub(crate) async fn accept_run_state(app: &Arc<App>, state: &str) {
-    sqlx::query(&format!("DROP TRIGGER refuse_run_state_{state}")).execute(&app.db).await.unwrap();
+    sqlx::query(&format!("DROP TRIGGER refuse_run_state_{state}")).execute(app.db()).await.unwrap();
 }
 
 /// 測試用：incident 探針這一輪會不會說這顆 bot「應該在跑卻停了」（`bot_stopped`）——`stopped`／`exited` 標籤的語意就在這裡。
@@ -269,7 +268,7 @@ pub(crate) async fn refuse_turn_close(app: &Arc<App>, turn_id: &str) {
         "CREATE TRIGGER refuse_turn_close BEFORE UPDATE OF status ON turns WHEN OLD.id = '{turn_id}'
          BEGIN SELECT RAISE(ABORT, 'injected: cannot write turns.status'); END"
     ))
-    .execute(&app.db)
+    .execute(app.db())
     .await
     .unwrap();
 }
@@ -277,13 +276,13 @@ pub(crate) async fn refuse_turn_close(app: &Arc<App>, turn_id: &str) {
 /// 測試用：DB 恢復。
 #[cfg(test)]
 pub(crate) async fn accept_turn_close(app: &Arc<App>) {
-    sqlx::query("DROP TRIGGER refuse_turn_close").execute(&app.db).await.unwrap();
+    sqlx::query("DROP TRIGGER refuse_turn_close").execute(app.db()).await.unwrap();
 }
 
 /// 測試用：這顆 bot 的對話裡放一筆回合；`in_flight` 的掛在 `run_id` 底下。
 #[cfg(test)]
 pub(crate) async fn a_turn(app: &Arc<App>, bot_id: &str, run_id: Option<&str>, status: &str) -> String {
-    let conv = db::conversation_id(&app.db, bot_id).await.unwrap();
+    let conv = db::conversation_id(app.db(), bot_id).await.unwrap();
     let id = db::ulid();
     sqlx::query("INSERT INTO turns (id, conversation_id, run_id, origin, status, delivery, prompt_text, created_at) VALUES (?,?,?,'web',?,'ok','派工',?)")
         .bind(&id)
@@ -291,7 +290,7 @@ pub(crate) async fn a_turn(app: &Arc<App>, bot_id: &str, run_id: Option<&str>, s
         .bind(run_id)
         .bind(status)
         .bind(db::now())
-        .execute(&app.db)
+        .execute(app.db())
         .await
         .unwrap();
     id
@@ -299,20 +298,20 @@ pub(crate) async fn a_turn(app: &Arc<App>, bot_id: &str, run_id: Option<&str>, s
 
 #[cfg(test)]
 pub(crate) async fn turn_status(app: &Arc<App>, turn_id: &str) -> String {
-    sqlx::query_scalar("SELECT status FROM turns WHERE id=?").bind(turn_id).fetch_one(&app.db).await.unwrap()
+    sqlx::query_scalar("SELECT status FROM turns WHERE id=?").bind(turn_id).fetch_one(app.db()).await.unwrap()
 }
 
 /// 測試用：這筆回合底下補了幾則系統說明（收掉、撤掉時各補一則）。
 #[cfg(test)]
 pub(crate) async fn system_notes(app: &Arc<App>, turn_id: &str) -> i64 {
-    sqlx::query_scalar("SELECT COUNT(*) FROM messages WHERE turn_id=? AND role='system'").bind(turn_id).fetch_one(&app.db).await.unwrap()
+    sqlx::query_scalar("SELECT COUNT(*) FROM messages WHERE turn_id=? AND role='system'").bind(turn_id).fetch_one(app.db()).await.unwrap()
 }
 
 /// 測試用：替這顆 run 的 pane 登記一個 watcher（`unwatch_pane_on_session` 拆的那一份），回傳它的 key。
 #[cfg(test)]
 pub(crate) async fn watch_run_pane(app: &Arc<App>, run_id: &str) -> (String, String, String) {
-    let run = db::run(&app.db, run_id).await.unwrap().unwrap();
-    let host = db::bot_host(&app.db, &run.bot_id).await.unwrap();
+    let run = db::run(app.db(), run_id).await.unwrap().unwrap();
+    let host = db::bot_host(app.db(), &run.bot_id).await.unwrap();
     let session = app.session_for_run(&run).await.unwrap();
     let key = (host, session, run.pane_id.clone().unwrap());
     app.pane_watchers.lock().await.insert(key.clone(), tokio::spawn(std::future::pending::<()>()));
@@ -330,7 +329,7 @@ mod tests {
     use crate::testing as tt;
 
     async fn state(app: &Arc<App>, run: &str) -> String {
-        sqlx::query_scalar("SELECT state FROM runs WHERE id=?").bind(run).fetch_one(&app.db).await.unwrap()
+        sqlx::query_scalar("SELECT state FROM runs WHERE id=?").bind(run).fetch_one(app.db()).await.unwrap()
     }
 
     /// 三種結果分得開：轉過去、CAS 輸了、DB 寫不進去。
@@ -341,19 +340,19 @@ mod tests {
         let bot = tt::claude_bot(&app, &env.project_id, "cas").await;
         let run = tt::fake_run(&app, &bot.id).await;
 
-        assert_eq!(transition(&app.db, &run, &["starting"], "running", None).await.unwrap(), Moved::Lost, "它是 running，不是 starting");
+        assert_eq!(transition(app.db(), &run, &["starting"], "running", None).await.unwrap(), Moved::Lost, "它是 running，不是 starting");
         assert_eq!(state(&app, &run).await, "running");
 
         refuse_run_state(&app, "stopping").await;
-        assert!(transition(&app.db, &run, LIVE, "stopping", None).await.is_err());
+        assert!(transition(app.db(), &run, LIVE, "stopping", None).await.is_err());
         assert_eq!(state(&app, &run).await, "running", "寫不進去就是沒轉");
         accept_run_state(&app, "stopping").await;
 
-        assert_eq!(transition(&app.db, &run, LIVE, "stopping", None).await.unwrap(), Moved::Applied);
-        assert_eq!(transition(&app.db, &run, &["stopping"], "stopped", None).await.unwrap(), Moved::Applied);
-        let ended: Option<String> = sqlx::query_scalar("SELECT ended_at FROM runs WHERE id=?").bind(&run).fetch_one(&app.db).await.unwrap();
+        assert_eq!(transition(app.db(), &run, LIVE, "stopping", None).await.unwrap(), Moved::Applied);
+        assert_eq!(transition(app.db(), &run, &["stopping"], "stopped", None).await.unwrap(), Moved::Applied);
+        let ended: Option<String> = sqlx::query_scalar("SELECT ended_at FROM runs WHERE id=?").bind(&run).fetch_one(app.db()).await.unwrap();
         assert!(ended.is_some(), "終態補上 ended_at");
-        assert_eq!(transition(&app.db, &run, LIVE, "running", None).await.unwrap(), Moved::Lost, "終態不會被拉回 active");
+        assert_eq!(transition(app.db(), &run, LIVE, "running", None).await.unwrap(), Moved::Lost, "終態不會被拉回 active");
     }
 
     /// 終態改標跟轉移同一套三種結果（#146 重開）：寫不進去是錯、不是「輸了」；這顆 bot 已經有新的 active run 時不動舊的。
@@ -363,17 +362,17 @@ mod tests {
         let app = env.app.clone();
         let bot = tt::claude_bot(&app, &env.project_id, "relabel").await;
         let old = tt::fake_run(&app, &bot.id).await;
-        assert_eq!(transition(&app.db, &old, LIVE, "exited", None).await.unwrap(), Moved::Applied);
+        assert_eq!(transition(app.db(), &old, LIVE, "exited", None).await.unwrap(), Moved::Applied);
 
         refuse_run_state(&app, "stopped").await;
-        assert!(relabel(&app.db, &old, "exited", "stopped").await.is_err(), "寫不進去就是錯");
+        assert!(relabel(app.db(), &old, "exited", "stopped").await.is_err(), "寫不進去就是錯");
         assert_eq!(state(&app, &old).await, "exited");
         accept_run_state(&app, "stopped").await;
-        assert_eq!(relabel(&app.db, &old, "stopped", "exited").await.unwrap(), Moved::Lost, "它是 exited，不是 stopped");
-        assert_eq!(relabel(&app.db, &old, "exited", "stopped").await.unwrap(), Moved::Applied);
+        assert_eq!(relabel(app.db(), &old, "stopped", "exited").await.unwrap(), Moved::Lost, "它是 exited，不是 stopped");
+        assert_eq!(relabel(app.db(), &old, "exited", "stopped").await.unwrap(), Moved::Applied);
 
         let new = tt::fake_run(&app, &bot.id).await;
-        assert_eq!(relabel(&app.db, &old, "stopped", "exited").await.unwrap(), Moved::Lost, "新的 run 起來了：舊 run 的標籤不再代表 bot");
+        assert_eq!(relabel(app.db(), &old, "stopped", "exited").await.unwrap(), Moved::Lost, "新的 run 起來了：舊 run 的標籤不再代表 bot");
         assert_eq!((state(&app, &old).await, state(&app, &new).await), ("stopped".to_string(), "running".to_string()));
     }
 }

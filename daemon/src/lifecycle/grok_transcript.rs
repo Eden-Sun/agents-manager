@@ -16,6 +16,7 @@
 //! - **先認既有回合**：派工開的 in-flight 回合、relay 先記下的使用者訊息、畫面備援收過的回合，prompt 對得上就補進去
 //!   （備援抓的回覆換成原文），對不上才另開一筆 `external` 回合；那句是別的 agent 交辦的就照 §6.5d 標 `relay_from`。
 
+use crate::lifecycle::s6_ports::GrokTranscriptContext;
 use super::*;
 use std::collections::HashSet;
 
@@ -37,7 +38,7 @@ impl Exchange {
     pub(crate) fn key(&self) -> String {
         match self.prompt_index {
             Some(i) => format!("p{i}"),
-            None => format!("q{}", crate::supervisor::cli_refresh::short_hash(self.prompt.trim().as_bytes())),
+            None => format!("q{}", crate::supervisor_inbox::short_hash(self.prompt.trim().as_bytes())),
         }
     }
 }
@@ -176,21 +177,21 @@ pub(crate) fn is_slash_command(text: &str) -> bool {
         })
 }
 
-async fn host_sh(app: &impl crate::hosts::HostsAccess, host: &str, script: &str) -> anyhow::Result<String> {
-    super::poller::app_ports_p4obs::host_sh(app, host, script).await
+async fn host_sh(app: &impl GrokTranscriptContext, host: &str, script: &str) -> anyhow::Result<String> {
+    app.host_shell(host, script).await
 }
 
-async fn grok_home_for(app: &impl crate::hosts::HostsAccess, bot: &db::Bot, host: &str) -> anyhow::Result<String> {
-    super::poller::app_ports_p4obs::grok_home_for(app, bot, host).await
+async fn grok_home_for(app: &impl GrokTranscriptContext, bot: &db::Bot, host: &str) -> anyhow::Result<String> {
+    app.grok_home_for(bot, host).await
 }
 
-async fn read_active(app: &impl crate::hosts::HostsAccess, host: &str, grok_home: &str) -> anyhow::Result<Vec<ActiveSession>> {
+async fn read_active(app: &impl GrokTranscriptContext, host: &str, grok_home: &str) -> anyhow::Result<Vec<ActiveSession>> {
     let out = host_sh(app, host, &format!("cat {}/active_sessions.json 2>/dev/null; :", sh_quote(grok_home))).await?;
     Ok(parse_active(&out))
 }
 
 /// `None`＝這個 session 沒有對話檔（還沒開始、被刪了、不是一般檔）。
-async fn read_history(app: &impl crate::hosts::HostsAccess, host: &str, grok_home: &str, session_id: &str) -> anyhow::Result<Option<String>> {
+async fn read_history(app: &impl GrokTranscriptContext, host: &str, grok_home: &str, session_id: &str) -> anyhow::Result<Option<String>> {
     if !valid_session_id(session_id) {
         return Ok(None);
     }
@@ -206,7 +207,7 @@ async fn read_history(app: &impl crate::hosts::HostsAccess, host: &str, grok_hom
 }
 
 /// 這個 run 的 grok session：記過的優先（還開著、或已經找不到更新的）；沒記過就從行程環境找 pane。
-async fn session_for(app: &(impl crate::capabilities::Db + crate::hosts::HostsAccess), bot: &db::Bot, run: &db::Run, host: &str, grok_home: &str) -> anyhow::Result<Option<String>> {
+async fn session_for(app: &impl GrokTranscriptContext, bot: &db::Bot, run: &db::Run, host: &str, grok_home: &str) -> anyhow::Result<Option<String>> {
     let known = run.native_session_id.clone().filter(|s| valid_session_id(s));
     let active = read_active(app, host, grok_home).await?;
     if let Some(sid) = &known {
@@ -215,7 +216,7 @@ async fn session_for(app: &(impl crate::capabilities::Db + crate::hosts::HostsAc
         }
     }
     let Some(pane) = run.pane_id.as_deref() else { return Ok(known) };
-    let pids = super::poller::app_ports_p4obs::pids_in_pane(app, host, pane, run.herdr_session.as_deref()).await;
+    let pids = app.pids_in_pane(host, pane, run.herdr_session.as_deref()).await;
     let taken: HashSet<String> = sqlx::query_scalar::<_, String>(
         "SELECT native_session_id FROM runs WHERE state = 'running' AND id <> ? AND native_session_id IS NOT NULL",
     )
@@ -255,19 +256,19 @@ fn is_transcript_run(bot: &db::Bot, run: &db::Run) -> bool {
 }
 
 /// 讀這個 run 的 grok 對話檔，把結束了的每一問記成回合。呼叫端拿著 bot 鎖。
-pub(crate) async fn sync_locked(app: &Arc<App>, run_id: &str) -> anyhow::Result<Synced> {
-    let Some(run) = db::run(&app.db, run_id).await? else { return Ok(Synced::Unavailable) };
-    let Some(bot) = db::bot(&app.db, &run.bot_id).await? else { return Ok(Synced::Unavailable) };
+pub(crate) async fn sync_locked(app: &impl GrokTranscriptContext, run_id: &str) -> anyhow::Result<Synced> {
+    let Some(run) = db::run(app.db(), run_id).await? else { return Ok(Synced::Unavailable) };
+    let Some(bot) = db::bot(app.db(), &run.bot_id).await? else { return Ok(Synced::Unavailable) };
     if !is_transcript_run(&bot, &run) {
         return Ok(Synced::Unavailable);
     }
-    let host = db::bot_host(&app.db, &bot.id).await?;
+    let host = db::bot_host(app.db(), &bot.id).await?;
     let (sid, exchanges) = if bot.kind == "agy" {
         // agy（SPEC §12a.9）：session 從 pane 裡行程開著的對話資料庫認，對話在 `transcript_full.jsonl`。
-        let Some((sid, text)) = super::poller::app_ports_p4obs::agy_session_load(app, &run, &host).await? else { return Ok(Synced::Unavailable) };
+        let Some((sid, text)) = app.agy_session_load(&run, &host).await? else { return Ok(Synced::Unavailable) };
         // 沒有 hook 的 agy 子 agent：pane 行程實際開著的對話就是回報；跟 `resume_native` 要接的不是同一段＝`resume_mismatch`。
-        super::poller::app_ports_p4obs::consume_resume_session(app, &bot, &run, Some(&sid)).await?;
-        super::poller::app_ports_p4obs::agy_session_record_status(app, &bot, &run, &text).await;
+        app.consume_resume_session(&bot, &run, Some(&sid)).await?;
+        app.agy_session_record_status(&bot, &run, &text).await;
         let turns = crate::agy_support::parse_turns(&text)
             .into_iter()
             .map(|t| Exchange { prompt: t.prompt, prompt_index: Some(t.step_index), reply: t.reply, closed: t.closed })
@@ -283,7 +284,7 @@ pub(crate) async fn sync_locked(app: &Arc<App>, run_id: &str) -> anyhow::Result<
     let mut done: HashSet<String> =
         sqlx::query_scalar::<_, String>("SELECT native_turn_id FROM turns WHERE native_session_id = ? AND native_turn_id IS NOT NULL")
             .bind(&sid)
-            .fetch_all(&app.db)
+            .fetch_all(app.db())
             .await?
             .into_iter()
             .collect();
@@ -299,7 +300,7 @@ pub(crate) async fn sync_locked(app: &Arc<App>, run_id: &str) -> anyhow::Result<
             if recorded_prompt_matches(app, &sid, &key, &ex.prompt).await? {
                 continue;
             }
-            key = format!("q{}", crate::supervisor::cli_refresh::short_hash(ex.prompt.trim().as_bytes()));
+            key = format!("q{}", crate::supervisor_inbox::short_hash(ex.prompt.trim().as_bytes()));
             if done.contains(&key) {
                 continue;
             }
@@ -347,33 +348,33 @@ async fn recorded_prompt_matches(app: &impl crate::capabilities::Db, sid: &str, 
     Ok(stored.as_deref().is_some_and(|s| s.trim() == prompt.trim()))
 }
 
-async fn import(app: &Arc<App>, bot: &db::Bot, run: &db::Run, host: &str, sid: &str, ex: &Exchange, key: &str, newest: bool) -> anyhow::Result<bool> {
+async fn import(app: &impl GrokTranscriptContext, bot: &db::Bot, run: &db::Run, host: &str, sid: &str, ex: &Exchange, key: &str, newest: bool) -> anyhow::Result<bool> {
     // 壓縮重寫會丟掉 prompt_index，同一句換成內容鑰匙。已經記在這個 run 的不再開一筆。
     let prior_users: Vec<(String, String)> = sqlx::query_as(
         "SELECT t.id, m.content FROM turns t JOIN messages m ON m.turn_id = t.id
           WHERE t.run_id = ? AND m.role = 'user' ORDER BY m.created_at, m.rowid",
     )
     .bind(&run.id)
-    .fetch_all(&app.db)
+    .fetch_all(app.db())
     .await?;
     if let Some((turn_id, _)) = prior_users.iter().find(|(_, c)| c.trim() == ex.prompt.trim()) {
         // SQLite 的 NULL 用 `String` 解會變成 `Some("")`（#833），未綁鑰匙的回合就被當成已綁。
         let bound: Option<String> = sqlx::query_scalar::<_, Option<String>>("SELECT native_turn_id FROM turns WHERE id = ?")
             .bind(turn_id)
-            .fetch_optional(&app.db)
+            .fetch_optional(app.db())
             .await?
             .flatten()
             .filter(|s| !s.is_empty());
         let replies: Vec<String> =
-            sqlx::query_scalar("SELECT content FROM messages WHERE turn_id = ? AND role = 'assistant'").bind(turn_id).fetch_all(&app.db).await?;
+            sqlx::query_scalar("SELECT content FROM messages WHERE turn_id = ? AND role = 'assistant'").bind(turn_id).fetch_all(app.db()).await?;
         // 已綁鑰匙又有回覆：壓縮重播。還沒綁的交給下面，照舊補回合狀態。
         if bound.is_some() {
             if !replies.is_empty() || ex.reply.is_none() {
                 return Ok(false);
             }
-            let conv = db::conversation_id(&app.db, &bot.id).await?;
+            let conv = db::conversation_id(app.db(), &bot.id).await?;
             // 先讀狀態再寫回覆：deferred 的話讀完之後別的 writer 一 commit 就 517，回覆補不上（#831）。
-            let mut tx = db::begin_write(&app.db).await?;
+            let mut tx = db::begin_write(app.db()).await?;
             let status: String = sqlx::query_scalar("SELECT status FROM turns WHERE id = ?").bind(turn_id).fetch_one(&mut *tx).await?;
             #[cfg(test)]
             super::race_point::hit("grok_transcript_after_replay_status_read", turn_id).await;
@@ -383,7 +384,7 @@ async fn import(app: &Arc<App>, bot: &db::Bot, run: &db::Run, host: &str, sid: &
             let msg = insert_message_tx(&mut tx, &conv, Some(turn_id), "assistant", ex.reply.as_deref().unwrap(), "transcript", false, None).await?;
             tx.commit().await?;
             emit_message_added(app, &bot.id, msg).await;
-            emit_turn(app, turn_id).await;
+            app.emit_turn(turn_id).await;
             return Ok(true);
         }
     }
@@ -400,10 +401,10 @@ async fn import(app: &Arc<App>, bot: &db::Bot, run: &db::Run, host: &str, sid: &
                 newest && t.status == "in_flight" && t.origin == "external" && users.is_empty() && t.prompt_text.is_none()
             })
         });
-    let conv = db::conversation_id(&app.db, &bot.id).await?;
+    let conv = db::conversation_id(app.db(), &bot.id).await?;
     // 已經收好的回合（`completed_fallback`、使用者那句已是原文）第一句是讀它的回覆、之後才寫：deferred 的話讀完之後
     // 別的 writer 一 commit 就 517，這一問這一輪記不進去（#831）。
-    let mut tx = db::begin_write(&app.db).await?;
+    let mut tx = db::begin_write(app.db()).await?;
     let mut added: Vec<db::Message> = Vec::new();
     let turn_id = match matched {
         Some((t, users)) => {
@@ -506,7 +507,7 @@ async fn import(app: &Arc<App>, bot: &db::Bot, run: &db::Run, host: &str, sid: &
     for m in added {
         emit_message_added(app, &bot.id, m).await;
     }
-    emit_turn(app, &turn_id).await;
+    app.emit_turn(&turn_id).await;
     tracing::info!(run = %run.id, turn = %turn_id, key, "grok transcript: recorded an exchange from chat_history.jsonl");
     Ok(true)
 }
@@ -518,7 +519,7 @@ fn relay_from(host: &str, run: &db::Run, prompt: &str) -> Option<String> {
 
 /// `try_fallback` 先問這裡。`Some(true)`：回合已經由對話檔收掉；`Some(false)`：對話檔說這一問還沒結束，留在飛；
 /// `None`：對話檔幫不上（讀不到、或這一問不在檔裡），照舊看畫面。
-pub(crate) async fn settle_in_flight(app: &Arc<App>, bot: &db::Bot, run: &db::Run, turn: &db::Turn) -> Option<bool> {
+pub(crate) async fn settle_in_flight(app: &impl GrokTranscriptContext, bot: &db::Bot, run: &db::Run, turn: &db::Turn) -> Option<bool> {
     if !is_transcript_run(bot, run) {
         return None;
     }
@@ -530,7 +531,7 @@ pub(crate) async fn settle_in_flight(app: &Arc<App>, bot: &db::Bot, run: &db::Ru
             return None;
         }
     };
-    match db::in_flight_turn(&app.db, &run.id).await {
+    match db::in_flight_turn(app.db(), &run.id).await {
         Ok(Some(t)) if t.id == turn.id => {}
         Ok(_) => return Some(true),
         Err(_) => return None,
@@ -541,11 +542,11 @@ pub(crate) async fn settle_in_flight(app: &Arc<App>, bot: &db::Bot, run: &db::Ru
             return Some(false);
         }
         // working 時開的、沒有 prompt 的回合，檔裡也沒有還在跑的一問：每一問都已經各自記好了，只收回合、不存畫面。
-        let mut tx = app.db.begin().await.ok()?;
+        let mut tx = app.db().begin().await.ok()?;
         let out = turn_controller::set_status_on(&mut tx, &turn.id, "in_flight", "completed_fallback", "grok chat_history.jsonl 沒有新的一問").await.ok()?;
         tx.commit().await.ok()?;
         if out == turn_controller::Outcome::Applied {
-            emit_turn(app, &turn.id).await;
+            app.emit_turn(&turn.id).await;
         }
         return Some(true);
     }

@@ -16,8 +16,9 @@
 //! 那一句寫不進去時，不回普通的 `failed`／`Ok`，也不讓那一筆停在 in_flight＋pending 沒人收（擋住之後每一則、佔住維護窗口的
 //! 送達臨界區）。記成欠著、照上面同一套補；補的時候同樣從不送。
 
-use super::run_state::app_ports_p4state;
-use am_ports::BotLock;
+#[cfg(test)]
+use crate::capabilities::Db;
+use super::s6_ports::OwedDeliveryContext;
 use super::*;
 use std::collections::HashMap;
 use std::sync::{Mutex, OnceLock};
@@ -98,23 +99,23 @@ fn owed_answer(turn_id: &str) -> Option<&'static str> {
 }
 
 /// 送達之後寫回結果（`at` 取此刻）。寫不進去就記成欠著、排定時重試，回 `Err`——呼叫端**不能**回普通的成功，也不能重送。
-pub(crate) async fn delivered(app: &Arc<App>, bot_id: &str, turn_id: &str, rec: DeliveryRecord) -> anyhow::Result<()> {
+pub(crate) async fn delivered<C: OwedDeliveryContext>(app: &C, bot_id: &str, turn_id: &str, rec: DeliveryRecord) -> anyhow::Result<()> {
     delivered_at(app, bot_id, turn_id, rec, &db::now()).await
 }
 
 /// [`delivered`]，但送出的那一刻早就過了：插隊送出欠著的那一則，補收尾時才寫（#157）。
-pub(crate) async fn delivered_at(app: &Arc<App>, bot_id: &str, turn_id: &str, rec: DeliveryRecord, at: &str) -> anyhow::Result<()> {
+pub(crate) async fn delivered_at<C: OwedDeliveryContext>(app: &C, bot_id: &str, turn_id: &str, rec: DeliveryRecord, at: &str) -> anyhow::Result<()> {
     owe(app, bot_id, Owed { turn_id: turn_id.to_string(), write: Write::Delivered { rec, at: at.to_string() } }).await.map(drop)
 }
 
 /// 收掉一則沒送出（或不知道送出沒有）的回合：failed＋說明，`delivery` 記 `failed`／`unknown`（[`Write::Closed`]）。
 /// 寫不進去同 [`delivered`]。`Ok(false)`：別的路先收掉了——回合怎麼收歸它，送達照樣補成這一次看到的。
-pub(crate) async fn closed(app: &Arc<App>, bot_id: &str, turn_id: &str, delivery: &'static str, note: &str) -> anyhow::Result<bool> {
+pub(crate) async fn closed<C: OwedDeliveryContext>(app: &C, bot_id: &str, turn_id: &str, delivery: &'static str, note: &str) -> anyhow::Result<bool> {
     owe(app, bot_id, Owed { turn_id: turn_id.to_string(), write: Write::Closed { delivery, note: note.to_string() } }).await
 }
 
 /// 認領了排隊的那一筆、一個字都沒打：放回佇列並掛 retry timer。寫不進去同 [`delivered`]（#158）。
-pub(crate) async fn put_back(app: &Arc<App>, bot_id: &str, conv: &str, turn_id: &str, reason: &str, wait_key: &str) -> anyhow::Result<()> {
+pub(crate) async fn put_back<C: OwedDeliveryContext>(app: &C, bot_id: &str, conv: &str, turn_id: &str, reason: &str, wait_key: &str) -> anyhow::Result<()> {
     let write = Write::PutBack { conv: conv.to_string(), reason: reason.to_string(), wait_key: wait_key.to_string() };
     owe(app, bot_id, Owed { turn_id: turn_id.to_string(), write }).await.map(drop)
 }
@@ -123,7 +124,7 @@ pub(crate) async fn put_back(app: &Arc<App>, bot_id: &str, conv: &str, turn_id: 
 /// 那一份再寫一次，蓋掉這之間別的路寫進去的較新結果。送達時間取帳上與這一次較早的那一刻——`delivered_at` 只記第一次，
 /// 先寫成的若是較晚的那一刻，之後就改不回來了。寫帳的路握著 bot 鎖；唯一不拿鎖的（run 結束時補插隊送出的收尾）寫的是
 /// 帳上記著的同一份結果。
-async fn owe(app: &Arc<App>, bot_id: &str, mut o: Owed) -> anyhow::Result<bool> {
+async fn owe<C: OwedDeliveryContext>(app: &C, bot_id: &str, mut o: Owed) -> anyhow::Result<bool> {
     if let Write::Delivered { at, .. } = &mut o.write {
         let earlier = owed(bot_id).into_iter().filter(|x| x.turn_id == o.turn_id).find_map(|x| match x.write {
             Write::Delivered { at: first, .. } if first < *at => Some(first),
@@ -150,7 +151,7 @@ async fn owe(app: &Arc<App>, bot_id: &str, mut o: Owed) -> anyhow::Result<bool> 
 }
 
 /// 結清這顆 bot 欠著的送達結果。呼叫端握著 bot 鎖。`Err`：有一筆還是寫不進去，那一筆的帳留著（其他的照樣結清）。
-pub(crate) async fn settle_locked(app: &Arc<App>, bot_id: &str) -> anyhow::Result<()> {
+pub(crate) async fn settle_locked<C: OwedDeliveryContext>(app: &C, bot_id: &str) -> anyhow::Result<()> {
     let mut failed = None;
     for o in owed(bot_id) {
         match write(app, bot_id, &o).await {
@@ -168,54 +169,53 @@ pub(crate) async fn settle_locked(app: &Arc<App>, bot_id: &str) -> anyhow::Resul
 }
 
 /// [`settle_locked`]，自己拿 bot 鎖（定時重試用）。
-async fn settle(app: &Arc<App>, bot_id: &str) -> anyhow::Result<()> {
-    let bot_lock = app_ports_p4state::AppBotLock::new(app);
-    let bot_key = bot_id.to_string();
-    let _g = bot_lock.lock_bot(&bot_key).await;
+async fn settle<C: OwedDeliveryContext>(app: &C, bot_id: &str) -> anyhow::Result<()> {
+    let lock = app.bot_lock(bot_id).await;
+    let _g = lock.lock_owned().await;
     settle_locked(app, bot_id).await
 }
 
 /// 寫那一句。那一筆已經被別的路收掉（run 結束、watchdog）時，收成 failed 那句 CAS 不到，就不補說明；送達結果照寫
 /// （送達與回合成敗是兩件事）——收掉的那條路若沒動 `delivery`，它不能停在 `pending`。`Ok(false)`＝別的路先收掉了。
-async fn write(app: &Arc<App>, bot_id: &str, o: &Owed) -> anyhow::Result<bool> {
+async fn write<C: OwedDeliveryContext>(app: &C, bot_id: &str, o: &Owed) -> anyhow::Result<bool> {
     let applied = match &o.write {
         Write::Delivered { rec, at } => {
-            app_ports_p4state::mark_delivery(app, &o.turn_id, *rec, at).await?;
+            app.mark_delivery(&o.turn_id, *rec, at).await?;
             true
         }
         Write::Closed { delivery, note } => {
-            let mut tx = app.db.begin().await?;
-            let out = app_ports_p4state::turn_fail_on(&mut tx, &o.turn_id, super::turn_controller::DeliveryOnFail::Keep, note).await?;
+            let mut tx = app.db().begin().await?;
+            let out = super::turn_controller::fail_on(&mut tx, &o.turn_id, super::turn_controller::DeliveryOnFail::Keep, note).await?;
             let applied = out == super::turn_controller::Outcome::Applied;
             let only_pending = if applied { "" } else { " AND delivery='pending'" };
             sqlx::query(&format!("UPDATE turns SET delivery=? WHERE id=?{only_pending}")).bind(*delivery).bind(&o.turn_id).execute(&mut *tx).await?;
             let m = if applied {
                 let conv: String = sqlx::query_scalar("SELECT conversation_id FROM turns WHERE id=?").bind(&o.turn_id).fetch_one(&mut *tx).await?;
-                Some(app_ports_p4state::insert_message_tx(&mut tx, &conv, Some(&o.turn_id), "system", note, "system", false, None).await?)
+                Some(super::messages::insert_message_tx(&mut tx, &conv, Some(&o.turn_id), "system", note, "system", false, None).await?)
             } else {
                 None
             };
             tx.commit().await?;
             if let Some(m) = m {
-                app_ports_p4state::emit_message_added(app, bot_id, m).await;
+                app.message_added(bot_id, m).await;
             }
             applied
         }
         Write::PutBack { conv, reason, wait_key } => {
-            app_ports_p4state::queue_put_back(app, bot_id, conv, &o.turn_id, reason, wait_key).await?;
+            app.queue_put_back(bot_id, conv, &o.turn_id, reason, wait_key).await?;
             true
         }
     };
-    app_ports_p4state::emit_turn(app, &o.turn_id).await;
+    app.turn_changed(&o.turn_id).await;
     Ok(applied)
 }
 
 /// 欠著的帳沒有 hook、也沒有下一則 prompt 時也要補上。
-fn schedule_retry(app: &Arc<App>, bot_id: &str) {
+fn schedule_retry<C: OwedDeliveryContext>(app: &C, bot_id: &str) {
     if cfg!(test) {
         return;
     }
-    let app = app.clone();
+    let app = (*app).clone();
     let bot_id = bot_id.to_string();
     tokio::spawn(async move {
         for secs in RETRY_DELAYS_SECS {
@@ -290,8 +290,8 @@ mod tests {
     async fn idle_bot(env: &tt::Env, kind: &str) -> (String, String, String) {
         let app = &env.app;
         let bot = tt::claude_bot(app, &env.project_id, &format!("owed-{}", db::ulid())).await;
-        sqlx::query("UPDATE bots SET kind=? WHERE id=?").bind(kind).bind(&bot.id).execute(&app.db).await.unwrap();
-        let conv = db::conversation_id(&app.db, &bot.id).await.unwrap();
+        sqlx::query("UPDATE bots SET kind=? WHERE id=?").bind(kind).bind(&bot.id).execute(app.db()).await.unwrap();
+        let conv = db::conversation_id(app.db(), &bot.id).await.unwrap();
         let run = db::ulid();
         sqlx::query(
             "INSERT INTO runs (id, bot_id, state, agent_status, workspace_id, pane_id, agent_name, herdr_session, pane_typed, started_at)
@@ -300,7 +300,7 @@ mod tests {
         .bind(&run)
         .bind(&bot.id)
         .bind(db::now())
-        .execute(&app.db)
+        .execute(app.db())
         .await
         .unwrap();
         (bot.id, conv, run)
@@ -309,17 +309,17 @@ mod tests {
     /// SQLite 這一刻寫不進 `turns.delivery`（磁碟、鎖、I/O 錯誤）：送達結果寫回、收成 `failed`（它也寫 delivery）都寫不進去。
     async fn lose_delivery_writes(app: &Arc<App>) {
         sqlx::query("CREATE TRIGGER lost_delivery_write BEFORE UPDATE OF delivery ON turns BEGIN SELECT RAISE(ABORT, 'disk I/O error'); END")
-            .execute(&app.db)
+            .execute(app.db())
             .await
             .unwrap();
     }
 
     async fn heal_delivery_writes(app: &Arc<App>) {
-        sqlx::query("DROP TRIGGER lost_delivery_write").execute(&app.db).await.unwrap();
+        sqlx::query("DROP TRIGGER lost_delivery_write").execute(app.db()).await.unwrap();
     }
 
     async fn turn(app: &Arc<App>, id: &str) -> db::Turn {
-        sqlx::query_as("SELECT * FROM turns WHERE id=?").bind(id).fetch_one(&app.db).await.unwrap()
+        sqlx::query_as("SELECT * FROM turns WHERE id=?").bind(id).fetch_one(app.db()).await.unwrap()
     }
 
     fn typed(env: &tt::Env) -> usize {
@@ -380,7 +380,7 @@ mod tests {
         assert_eq!((out.turn_id.as_str(), out.delivery.as_str()), (turn_id.as_str(), "unverified"));
         let t = turn(&app, &turn_id).await;
         assert_eq!((t.delivery.as_str(), t.delivery_verified, t.auto_resend), ("ok", 0, 0));
-        let resends: i64 = sqlx::query_scalar("SELECT resend_count FROM turns WHERE id=?").bind(&turn_id).fetch_one(&app.db).await.unwrap();
+        let resends: i64 = sqlx::query_scalar("SELECT resend_count FROM turns WHERE id=?").bind(&turn_id).fetch_one(app.db()).await.unwrap();
         assert_eq!(resends, MAX_PROMPT_RESENDS, "回滾到舊 binary 也不會重打");
         assert_eq!(typed(&env), 1, "從頭到尾只打了一次");
     }
@@ -446,7 +446,7 @@ mod tests {
         let env = tt::env().await;
         let app = env.app.clone();
         let (bot, _conv, run) = idle_bot(&env, "codex").await;
-        sqlx::query("UPDATE runs SET pane_typed=0 WHERE id=?").bind(&run).execute(&app.db).await.unwrap();
+        sqlx::query("UPDATE runs SET pane_typed=0 WHERE id=?").bind(&run).execute(app.db()).await.unwrap();
         env.herdr.set_agent("api-bot", "pane-api", true);
         env.herdr.fail_next("agent.prompt", tt::Fault::RefuseWith("agent_blocked"));
         lose_delivery_writes(&app).await;
@@ -464,7 +464,7 @@ mod tests {
         assert_eq!((t.status.as_str(), t.delivery.as_str()), ("failed", "failed"));
         let notes: Vec<String> = sqlx::query_scalar("SELECT content FROM messages WHERE turn_id=? AND role='system'")
             .bind(&turn_id)
-            .fetch_all(&app.db)
+            .fetch_all(app.db())
             .await
             .unwrap();
         assert!(notes.len() == 1 && notes[0].contains("agent_blocked"), "{notes:?}");
@@ -478,7 +478,7 @@ mod tests {
         let env = tt::env().await;
         let app = env.app.clone();
         let (bot, _conv, run) = idle_bot(&env, "codex").await;
-        sqlx::query("UPDATE runs SET pane_typed=0 WHERE id=?").bind(&run).execute(&app.db).await.unwrap();
+        sqlx::query("UPDATE runs SET pane_typed=0 WHERE id=?").bind(&run).execute(app.db()).await.unwrap();
         env.herdr.set_agent("api-bot", "pane-api", true);
         env.herdr.fail_next("agent.prompt", tt::Fault::RefuseWith("agent_blocked"));
         lose_delivery_writes(&app).await;
@@ -506,7 +506,7 @@ mod tests {
         let env = tt::env().await;
         let app = env.app.clone();
         let (bot, _conv, run) = idle_bot(&env, "codex").await;
-        sqlx::query("UPDATE runs SET pane_typed=0 WHERE id=?").bind(&run).execute(&app.db).await.unwrap();
+        sqlx::query("UPDATE runs SET pane_typed=0 WHERE id=?").bind(&run).execute(app.db()).await.unwrap();
         env.herdr.set_agent("api-bot", "pane-api", true);
         env.herdr.fail_next("agent.prompt", tt::Fault::RefuseWith("agent_blocked"));
         lose_delivery_writes(&app).await;
@@ -514,7 +514,7 @@ mod tests {
         let turn_id = body["turn_id"].as_str().unwrap().to_string();
         heal_delivery_writes(&app).await;
 
-        super::super::turn_controller::fail(&app.db, &turn_id, super::super::turn_controller::DeliveryOnFail::Keep, "run ended").await.unwrap();
+        super::super::turn_controller::fail(app.db(), &turn_id, super::super::turn_controller::DeliveryOnFail::Keep, "run ended").await.unwrap();
         settle(&app, &bot).await.expect("補上");
         let t = turn(&app, &turn_id).await;
         assert_eq!((t.status.as_str(), t.delivery.as_str()), ("failed", "failed"), "一個字都沒進去：送達不留 pending");
@@ -536,12 +536,12 @@ mod tests {
         .bind(&conv)
         .bind(text)
         .bind(db::now())
-        .execute(&app.db)
+        .execute(app.db())
         .await
         .unwrap();
-        crate::supervisor::store::get_or_init(&app.db).await.unwrap();
-        let a = crate::supervisor::store::insert_assignment(&app.db, None, &bot, "crid-q", text, &[], None, true).await.unwrap();
-        crate::supervisor::store::mark_delivered(&app.db, &a.id, &turn_id, "queued").await.unwrap();
+        crate::supervisor::store::get_or_init(app.db()).await.unwrap();
+        let a = crate::supervisor::store::insert_assignment(app.db(), None, &bot, "crid-q", text, &[], None, true).await.unwrap();
+        crate::supervisor::store::mark_delivered(app.db(), &a.id, &turn_id, "queued").await.unwrap();
         (bot, turn_id, a.id)
     }
 
@@ -562,7 +562,7 @@ mod tests {
         let t = turn(&app, &turn_id).await;
         assert_eq!((t.status.as_str(), t.delivery.as_str(), t.auto_resend), ("in_flight", "pending", 0));
         assert_eq!(typed(&env), 1);
-        let row = crate::supervisor::store::assignment(&app.db, &a).await.unwrap().unwrap();
+        let row = crate::supervisor::store::assignment(app.db(), &a).await.unwrap().unwrap();
         assert_eq!((row.status.as_str(), row.delivery.as_deref()), ("delivered", Some("queued")), "交辦不因為這一下變成別的狀態");
 
         tokio::time::sleep(std::time::Duration::from_millis(5)).await;
@@ -582,8 +582,8 @@ mod tests {
         let env = tt::env().await;
         let app = env.app.clone();
         let (bot, turn_id, _a) = queued(&env, "claude", "跑一下測試").await;
-        let run = db::active_run(&app.db, &bot).await.unwrap().unwrap().id;
-        sqlx::query("UPDATE runs SET pane_typed=0 WHERE id=?").bind(&run).execute(&app.db).await.unwrap();
+        let run = db::active_run(app.db(), &bot).await.unwrap().unwrap().id;
+        sqlx::query("UPDATE runs SET pane_typed=0 WHERE id=?").bind(&run).execute(app.db()).await.unwrap();
         env.herdr.set_agent("api-bot", "pane-api", true);
         env.herdr.fail_next("agent.prompt", tt::Fault::RefuseWith("agent_blocked"));
         lose_delivery_writes(&app).await;
@@ -609,27 +609,27 @@ mod tests {
         let (bot, _conv, _run) = idle_bot(&env, "claude").await;
         env.herdr.live_pane("pane-api", tt::LivePane { width: Some(120), ..Default::default() });
         let mgr = tt::claude_bot(&app, &env.project_id, "owed-mgr").await;
-        store::get_or_init(&app.db).await.unwrap();
-        store::set_env(&app.db, &mgr.id, &env.project_id, "/tmp").await.unwrap();
-        let a = store::insert_assignment(&app.db, None, &bot, "crid-assign", "Reply with PONG please", &[], None, true).await.unwrap();
+        store::get_or_init(app.db()).await.unwrap();
+        store::set_env(app.db(), &mgr.id, &env.project_id, "/tmp").await.unwrap();
+        let a = store::insert_assignment(app.db(), None, &bot, "crid-assign", "Reply with PONG please", &[], None, true).await.unwrap();
         lose_delivery_writes(&app).await;
 
         crate::supervisor::controller::dispatch(&app, &a.id).await;
-        let row = store::assignment(&app.db, &a.id).await.unwrap().unwrap();
+        let row = store::assignment(app.db(), &a.id).await.unwrap().unwrap();
         assert_eq!(row.status, "queued", "DB 還是 pending：不記成送達 {:?}", row.delivery);
         assert_eq!(row.attempts, 0, "不花重試額度");
         assert!(row.error.as_deref().is_some_and(|e| e.contains("delivery_state_uncommitted")), "{:?}", row.error);
 
         // 重試額度早就用完的那種也一樣：不判 dispatch_failed。
-        sqlx::query("UPDATE supervisor_assignments SET attempts=5, next_attempt_at=NULL WHERE id=?").bind(&a.id).execute(&app.db).await.unwrap();
+        sqlx::query("UPDATE supervisor_assignments SET attempts=5, next_attempt_at=NULL WHERE id=?").bind(&a.id).execute(app.db()).await.unwrap();
         crate::supervisor::controller::dispatch(&app, &a.id).await;
-        assert_eq!(store::assignment(&app.db, &a.id).await.unwrap().unwrap().status, "queued", "工作可能在跑：不判失敗");
+        assert_eq!(store::assignment(app.db(), &a.id).await.unwrap().unwrap().status, "queued", "工作可能在跑：不判失敗");
         assert_eq!(typed(&env), 1);
 
         heal_delivery_writes(&app).await;
-        sqlx::query("UPDATE supervisor_assignments SET next_attempt_at=NULL WHERE id=?").bind(&a.id).execute(&app.db).await.unwrap();
+        sqlx::query("UPDATE supervisor_assignments SET next_attempt_at=NULL WHERE id=?").bind(&a.id).execute(app.db()).await.unwrap();
         crate::supervisor::controller::dispatch(&app, &a.id).await;
-        let row = store::assignment(&app.db, &a.id).await.unwrap().unwrap();
+        let row = store::assignment(app.db(), &a.id).await.unwrap().unwrap();
         assert_eq!((row.status.as_str(), row.delivery.as_deref()), ("delivered", Some("ok")));
         assert_eq!(turn(&app, row.turn_id.as_deref().unwrap()).await.delivery, "ok", "交辦與 DB 說的是同一件事");
         assert_eq!(typed(&env), 1, "從頭到尾只送一次");
@@ -666,7 +666,7 @@ mod tests {
         let env = tt::env().await;
         let app = env.app.clone();
         let (bot, _conv, run) = idle_bot(&env, "claude").await;
-        sqlx::query("UPDATE runs SET pane_typed=0 WHERE id=?").bind(&run).execute(&app.db).await.unwrap();
+        sqlx::query("UPDATE runs SET pane_typed=0 WHERE id=?").bind(&run).execute(app.db()).await.unwrap();
         env.herdr.set_agent("api-bot", "pane-api", true);
         env.herdr.fail_next("agent.prompt", tt::Fault::RefuseWith("agent_blocked"));
         lose_delivery_writes(&app).await;
@@ -688,7 +688,7 @@ mod tests {
         assert_eq!((t.status.as_str(), t.delivery.as_str()), ("failed", "failed"), "被拒收的就是沒送出去");
         let pinned: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM messages WHERE turn_id=? AND role='assistant'")
             .bind(&turn_id)
-            .fetch_one(&app.db)
+            .fetch_one(app.db())
             .await
             .unwrap();
         assert_eq!(pinned, 0, "別句的回覆沒有掛到它身上");
@@ -711,7 +711,7 @@ mod tests {
         .bind(&conv)
         .bind(&run)
         .bind(db::now())
-        .execute(&app.db)
+        .execute(app.db())
         .await
         .unwrap();
         let sent_at = db::now();
@@ -726,7 +726,7 @@ mod tests {
         assert_eq!(turn(&app, &turn_id).await.delivered_at.as_deref(), Some(sent_at.as_str()), "送達時間是最早送出的那一刻，不是後來寫的時候");
 
         // 之後別的路寫進較新的證據（重送證不明，poller 改記 unknown）：定時重試不能把它蓋回舊的。
-        sqlx::query("UPDATE turns SET delivery='unknown', delivery_verified=0 WHERE id=?").bind(&turn_id).execute(&app.db).await.unwrap();
+        sqlx::query("UPDATE turns SET delivery='unknown', delivery_verified=0 WHERE id=?").bind(&turn_id).execute(app.db()).await.unwrap();
         settle(&app, &bot).await.expect("定時重試");
         let t = turn(&app, &turn_id).await;
         assert_eq!((t.delivery.as_str(), t.delivery_verified), ("unknown", 0), "舊帳不會把較新的結果降回去");
