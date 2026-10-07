@@ -136,22 +136,6 @@ pub(crate) struct Target {
     pub code_sent: bool,
 }
 
-/// 帳上有、而且就是現在這顆 shell（pane id 被重用、shell 已被收掉都算沒有）。
-pub(crate) async fn target(app: &(impl crate::capabilities::Db + crate::login_assist::LoginPanes + crate::quota::QuotaStaleKeys + crate::quota::QuotaTables + crate::api::shell::HostShells), host: &str, pane_id: &str) -> LcResult<Target> {
-    let key = (host.to_string(), pane_id.to_string());
-    let (identity, created, code_sent) = {
-        let m = app.login_panes().lock().unwrap_or_else(|e| e.into_inner());
-        let e = m.get(&key).filter(|e| e.opened.elapsed() < MAX_AGE).ok_or_else(|| LcError::NotFound("login pane".into()))?;
-        (e.identity.clone(), e.shell_created_at.clone(), e.code_sent)
-    };
-    let live = app.host_shells().lock().await.iter().any(|s| s.host == host && s.pane_id == pane_id && s.created_at == created);
-    if !live {
-        forget(app, host, pane_id);
-        return Err(LcError::NotFound("login pane".into()));
-    }
-    Ok(Target { identity, code_sent })
-}
-
 pub(crate) fn code_already_sent() -> LcError {
     LcError::conflict(
         "code_already_sent",

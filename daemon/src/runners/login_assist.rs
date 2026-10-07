@@ -3,8 +3,7 @@
 use crate::api::shell;
 use crate::lc_error::{LcError, LcResult};
 use crate::login_assist::{
-    claim_code_send, parse_screen, target, valid_code, Entry,
-    LoginScreen, MAX_AGE, OUTCOME_POLL, OUTCOME_WAIT, READ_LINES,
+    claim_code_send, parse_screen, valid_code, Entry, LoginScreen, Target, MAX_AGE, OUTCOME_POLL, OUTCOME_WAIT, READ_LINES,
 };
 use crate::state::App;
 use serde_json::{json, Value};
@@ -77,6 +76,22 @@ async fn read_screen(app: &Arc<App>, host: &str, pane_id: &str) -> LcResult<Logi
     let v = shell::read(app, host, pane_id, "recent_unwrapped", READ_LINES).await?;
     let text = v.get("text").and_then(Value::as_str).unwrap_or("");
     Ok(parse_screen(text))
+}
+
+/// 帳上有、而且就是現在這顆 shell（pane id 被重用、shell 已被收掉都算沒有）。
+async fn target(app: &Arc<App>, host: &str, pane_id: &str) -> LcResult<Target> {
+    let key = (host.to_string(), pane_id.to_string());
+    let (identity, created, code_sent) = {
+        let m = app.login_panes.lock().unwrap_or_else(|e| e.into_inner());
+        let e = m.get(&key).filter(|e| e.opened.elapsed() < MAX_AGE).ok_or_else(|| LcError::NotFound("login pane".into()))?;
+        (e.identity.clone(), e.shell_created_at.clone(), e.code_sent)
+    };
+    let live = app.host_shells.lock().await.iter().any(|s| s.host == host && s.pane_id == pane_id && s.created_at == created);
+    if !live {
+        crate::login_assist::forget(app, host, pane_id);
+        return Err(LcError::NotFound("login pane".into()));
+    }
+    Ok(Target { identity, code_sent })
 }
 
 /// `GET /api/hosts/:name/shells/:pane_id/login`

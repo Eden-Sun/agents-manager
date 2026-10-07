@@ -150,7 +150,7 @@ pub async fn open_instance(
 ) -> Result<Instance> {
     let config_given = config_arg.is_some();
     let prepared = prepare(config_arg, env_dir, wait)?;
-    let store = crate::projection::app_ports_p2::load_config(prepared.cfg_path.clone()).await?;
+    let store = crate::runners::app_ports_p2::load_config(prepared.cfg_path.clone()).await?;
     let data_dir_in_cfg = store.get().await.server.data_dir;
     confirm_data_dir(&prepared, data_dir_in_cfg.as_deref(), config_given)?;
     // 只算不設：行程層級的 `set_instance` 由 `serve` 自己叫（測試不該汙染整個行程）。

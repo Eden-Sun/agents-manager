@@ -157,7 +157,7 @@ pub(crate) trait SupervisorRepo {
         turn_id: Option<&str>,
         payload: &Value,
     ) -> Result<Option<String>>;
-    async fn load_owned(&self) -> Result<crate::supervisor_owned::Owned>;
+    async fn load_owned(&self) -> Result<crate::projection::Owned>;
     /// `supervisor::store::sql_list(&OPEN_STATES)`：未結案交辦狀態的 SQL `IN (…)` 清單（清單只准有一份）。
     fn open_states_sql() -> String;
 }

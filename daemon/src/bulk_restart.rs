@@ -159,7 +159,7 @@ async fn cand_of(app: &Arc<App>, run: &db::Run, bot: &db::Bot) -> anyhow::Result
         && !notice.trim().is_empty()
         && bot.managed_by != "child"
         && bot.parent_bot_id.as_deref().is_none_or(str::is_empty)
-        && !crate::bot_trash::app_ports_p11::in_default_session(run)
+        && !crate::runners::app_ports_p11::in_default_session(run)
         && bot.herdr_session.as_deref() != Some("default");
     if may_restart {
         crate::runners::background_jobs::refresh(app, run, &bot.kind).await;
@@ -176,7 +176,7 @@ async fn cand_of(app: &Arc<App>, run: &db::Run, bot: &db::Bot) -> anyhow::Result
         needs_manual_install: matches!(bot.kind.as_str(), "claude" | "codex")
             && notice.contains("需安裝"),
         turn_in_flight: db::in_flight_turn(&app.db, &run.id).await?.is_some(),
-        default_session: crate::bot_trash::app_ports_p11::in_default_session(run) || bot.herdr_session.as_deref() == Some("default"),
+        default_session: crate::runners::app_ports_p11::in_default_session(run) || bot.herdr_session.as_deref() == Some("default"),
         background_jobs: crate::background_jobs::known(app, &run.id),
     })
 }
@@ -632,7 +632,7 @@ async fn run_batch_with_authority(
                 tracing::warn!(bot = %name, error = %msg, "restart for the claude update failed");
                 settle_failed_restart(app, &bot_id).await;
                 // Own kind, not `health_changed`, so the supervisor can tell it from background noise.
-                let _ = crate::bot_trash::app_ports_p11::push_inbox(
+                let _ = crate::runners::app_ports_p11::push_inbox(
                     &app.db,
                     &format!("bot_restart_failed:{batch_id}:{bot_id}"),
                     "bot_restart_failed",
@@ -808,7 +808,7 @@ async fn verify_supervisor_back_with(app: Arc<App>, bot_id: String, name: String
     settle_failed_restart(&app, &bot_id).await;
     // 補啟動之前在 supervisor 鎖裡再讀一次權威意圖（#351）：使用者的停止（`post_stop`）也在這把鎖裡先寫 `desired_running=0`
     // 再停機，所以這裡要嘛看到停止（不啟動），要嘛在它之前啟動、之後被它停掉——不會有「停完又被拉起來」。
-    let _g = crate::bot_trash::app_ports_p11::supervisor_lock().await;
+    let _g = crate::runners::app_ports_p11::supervisor_lock().await;
     if !supervisor_still_wanted(&app, &bot_id).await {
         tracing::info!(bot = %name, "supervisor restart retry cancelled: the supervisor is no longer wanted running");
         return;
@@ -822,7 +822,7 @@ async fn verify_supervisor_back_with(app: Arc<App>, bot_id: String, name: String
         Err(e) => (false, Some(format!("{e:#}"))),
     };
     tracing::info!(bot = %name, ok, ?error, "supervisor restart retry finished");
-    let _ = crate::bot_trash::app_ports_p11::push_inbox(
+    let _ = crate::runners::app_ports_p11::push_inbox(
         &app.db,
         &format!("supervisor_restart_retry:{batch_id}"),
         "supervisor_restart_retry",
@@ -1236,7 +1236,7 @@ mod tests {
         run_batch(&app, "batch-1", vec![(bot.clone(), "alfa".into())], vec![], None).await;
 
         assert!(db::active_run(&app.db, &bot).await.unwrap().is_none(), "no run is left behind for a bot that did not come back");
-        let inbox = crate::bot_trash::app_ports_p11::test_helpers::supervisor_store_inbox(&app.db, 50).await.unwrap();
+        let inbox = crate::runners::app_ports_p11::test_helpers::supervisor_store_inbox(&app.db, 50).await.unwrap();
         let ev = inbox.iter().find(|e| e.kind == "bot_restart_failed").expect("the supervisor is told");
         assert_eq!(ev.bot_id.as_deref(), Some(bot.as_str()));
     }
@@ -1492,7 +1492,7 @@ mod tests {
             .execute(&app.db)
             .await
             .unwrap();
-        crate::bot_trash::app_ports_p11::test_helpers::reconcile_host(&app, crate::config::LOCAL_HOST).await.unwrap();
+        crate::runners::app_ports_p11::test_helpers::reconcile_host(&app, crate::config::LOCAL_HOST).await.unwrap();
         let bot = db::bot(&app.db, &kid.id).await.unwrap().unwrap();
         assert!(bot.deleted_at.is_none(), "reconcile must not retire a child after agent_name_taken");
         let reason: String = sqlx::query_scalar("SELECT body FROM supervisor_notes WHERE supervisor_id=? AND kind='child_retirement_hold' ORDER BY created_at DESC, rowid DESC LIMIT 1")
@@ -1627,9 +1627,9 @@ mod tests {
     /// #351：批次重啟替總管排的「60 秒內沒回來就再啟動一次」是延遲任務，等待期間使用者按了明確的停止
     /// （`desired_running=0` 是看門狗的權威意圖）不能被它拉回來。以前它到期直接 `start_bot_with`，不重讀意圖。
     async fn supervisor_fixture(env: &crate::testing::Env, name: &str) -> String {
-        crate::bot_trash::app_ports_p11::test_helpers::supervisor_store_get_or_init(&env.app.db).await.unwrap();
+        crate::runners::app_ports_p11::test_helpers::supervisor_store_get_or_init(&env.app.db).await.unwrap();
         let bot = crate::testing::claude_bot(&env.app, &env.project_id, name).await;
-        sqlx::query("UPDATE supervisors SET bot_id=?, desired_running=1 WHERE id=?").bind(&bot.id).bind(crate::bot_trash::app_ports_p11::test_helpers::SUPERVISOR_ID).execute(&env.app.db).await.unwrap();
+        sqlx::query("UPDATE supervisors SET bot_id=?, desired_running=1 WHERE id=?").bind(&bot.id).bind(crate::runners::app_ports_p11::test_helpers::SUPERVISOR_ID).execute(&env.app.db).await.unwrap();
         bot.id
     }
 
@@ -1645,7 +1645,7 @@ mod tests {
         let verifier = tokio::spawn(verify_supervisor_back_with(app.clone(), bot.clone(), "agm-a".into(), "batch-1".into(), Duration::from_millis(400), Duration::from_millis(50)));
         tokio::time::sleep(Duration::from_millis(120)).await;
         // 使用者按了停止：意圖先寫進 DB（`stop_requested` 的第一步）。
-        crate::bot_trash::app_ports_p11::test_helpers::supervisor_store_set_desired_running(&app.db, false).await.unwrap();
+        crate::runners::app_ports_p11::test_helpers::supervisor_store_set_desired_running(&app.db, false).await.unwrap();
         verifier.await.unwrap();
         assert_eq!(starts(&env), 0, "使用者明確停掉之後，舊批次的驗證任務不能把它拉回來");
         assert!(db::active_run(&app.db, &bot).await.unwrap().is_none());
@@ -1660,7 +1660,7 @@ mod tests {
         let other = crate::testing::claude_bot(&app, &env.project_id, "agm-other").await;
         let verifier = tokio::spawn(verify_supervisor_back_with(app.clone(), bot.clone(), "agm-b".into(), "batch-2".into(), Duration::from_millis(400), Duration::from_millis(50)));
         tokio::time::sleep(Duration::from_millis(120)).await;
-        sqlx::query("UPDATE supervisors SET bot_id=? WHERE id=?").bind(&other.id).bind(crate::bot_trash::app_ports_p11::test_helpers::SUPERVISOR_ID).execute(&app.db).await.unwrap();
+        sqlx::query("UPDATE supervisors SET bot_id=? WHERE id=?").bind(&other.id).bind(crate::runners::app_ports_p11::test_helpers::SUPERVISOR_ID).execute(&app.db).await.unwrap();
         verifier.await.unwrap();
         assert_eq!(starts(&env), 0, "已經不是總管的 bot 不能被舊批次的驗證任務啟動");
     }

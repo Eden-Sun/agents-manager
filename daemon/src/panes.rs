@@ -5,11 +5,73 @@
 //! 上次動是什麼時候。GC 與孤兒通知是下一步（§6.5e 生命週期），這裡只負責看得見。
 
 use std::collections::HashMap;
+use std::future::Future;
 use std::sync::Arc;
 
 use anyhow::Result;
 use serde_json::{json, Value};
 use sqlx::SqlitePool;
+
+/// Daemon services needed by pane scanning, cleanup and inbox notification.
+pub trait PaneRuntime: Send + Sync {
+    fn pane_host_ownership<'a>(&'a self, host: &'a str) -> impl Future<Output = Result<Option<PaneOwnership>>> + Send + 'a;
+    fn pane_shell_client<'a>(&'a self, host: &'a str) -> impl Future<Output = Result<crate::herdr::HerdrClient>> + Send + 'a;
+    fn close_pane_and_tab<'a>(
+        &'a self,
+        client: &'a crate::herdr::HerdrClient,
+        workspace_id: Option<&'a str>,
+        tab_id: Option<&'a str>,
+        pane_id: &'a str,
+    ) -> impl Future<Output = ()> + Send + 'a;
+    fn push_pane_inbox<'a>(
+        &'a self,
+        key: &'a str,
+        event: &'a str,
+        payload: &'a Value,
+    ) -> impl Future<Output = anyhow::Result<Option<String>>> + Send + 'a;
+}
+
+#[derive(Debug, Default)]
+pub struct PaneOwnership {
+    pub(crate) workspaces: std::collections::HashSet<String>,
+    pub(crate) tabs: std::collections::HashSet<String>,
+    pub(crate) panes: std::collections::HashSet<String>,
+}
+
+impl PaneOwnership {
+    fn covers_pane(&self, p: &Value) -> bool {
+        let field = |k: &str| p.get(k).and_then(Value::as_str);
+        field("pane_id").is_some_and(|v| self.panes.contains(v))
+            || field("tab_id").is_some_and(|v| self.tabs.contains(v))
+            || field("workspace_id").is_some_and(|v| self.workspaces.contains(v))
+    }
+}
+
+impl<T: PaneRuntime + ?Sized> PaneRuntime for Arc<T> {
+    fn pane_host_ownership<'a>(&'a self, host: &'a str) -> impl Future<Output = Result<Option<PaneOwnership>>> + Send + 'a {
+        <T as PaneRuntime>::pane_host_ownership(self.as_ref(), host)
+    }
+    fn pane_shell_client<'a>(&'a self, host: &'a str) -> impl Future<Output = Result<crate::herdr::HerdrClient>> + Send + 'a {
+        <T as PaneRuntime>::pane_shell_client(self.as_ref(), host)
+    }
+    fn close_pane_and_tab<'a>(
+        &'a self,
+        client: &'a crate::herdr::HerdrClient,
+        workspace_id: Option<&'a str>,
+        tab_id: Option<&'a str>,
+        pane_id: &'a str,
+    ) -> impl Future<Output = ()> + Send + 'a {
+        <T as PaneRuntime>::close_pane_and_tab(self.as_ref(), client, workspace_id, tab_id, pane_id)
+    }
+    fn push_pane_inbox<'a>(
+        &'a self,
+        key: &'a str,
+        event: &'a str,
+        payload: &'a Value,
+    ) -> impl Future<Output = anyhow::Result<Option<String>>> + Send + 'a {
+        <T as PaneRuntime>::push_pane_inbox(self.as_ref(), key, event, payload)
+    }
+}
 
 pub async fn migrate(pool: &SqlitePool) -> Result<()> {
     sqlx::query(
@@ -206,7 +268,7 @@ pub fn is_daemon_probe_workspace(label: Option<&str>) -> bool {
 
 /// 掃一台主機的非 agent pane，寫進 `panes`。唯一的入口：從 `session.snapshot` 取 `panes`，
 /// 先拿掉 daemon 自己開的探測 workspace 裡的 pane（label 在同一份 snapshot 的 `workspaces` 上）。
-pub async fn scan_snapshot(app: &(impl crate::capabilities::Cfg + crate::capabilities::Db + crate::capabilities::Emit + crate::capabilities::HerdrRoutes + crate::hosts::HostsAccess + crate::shared_host::SharedHostEnv), host: &str, snapshot: &Value) -> Result<ScanOutcome> {
+pub async fn scan_snapshot(app: &(impl crate::capabilities::Cfg + crate::capabilities::Db + crate::capabilities::Emit + crate::capabilities::HerdrRoutes + crate::hosts::HostsAccess + PaneRuntime), host: &str, snapshot: &Value) -> Result<ScanOutcome> {
     let probe_ws: std::collections::HashSet<&str> = snapshot
         .get("workspaces")
         .and_then(Value::as_array)
@@ -218,7 +280,7 @@ pub async fn scan_snapshot(app: &(impl crate::capabilities::Cfg + crate::capabil
     // #708：移交出去的專案的 pane（它的 workspace／tab／活著的 run 的 pane）不歸這顆 daemon：不記、不 GC、不通知。
     let handed_off = crate::handoff::footprint(app.db(), host).await?;
     // #709：共用 session 的主機只收自己的 pane；別顆 daemon 的不記，也就不 GC、不通知、不當 scratch、不改名。
-    let owned = if crate::shared_host::is_shared(app, host).await { Some(crate::shared_host::owned(app, host).await?) } else { None };
+    let owned = app.pane_host_ownership(host).await?;
     let panes: Vec<Value> = snapshot
         .get("panes")
         .and_then(Value::as_array)
@@ -233,7 +295,7 @@ pub async fn scan_snapshot(app: &(impl crate::capabilities::Cfg + crate::capabil
 }
 
 /// `snapshot_panes` 是 `session.snapshot` 的 `panes` 陣列（已經含 `agent`），所以不用再打一次 RPC。
-async fn scan_host(app: &(impl crate::capabilities::Cfg + crate::capabilities::Db + crate::capabilities::Emit + crate::capabilities::HerdrRoutes + crate::hosts::HostsAccess), host: &str, snapshot_panes: &[Value]) -> Result<ScanOutcome> {
+async fn scan_host(app: &(impl crate::capabilities::Cfg + crate::capabilities::Db + crate::capabilities::Emit + crate::capabilities::HerdrRoutes + crate::hosts::HostsAccess + PaneRuntime), host: &str, snapshot_panes: &[Value]) -> Result<ScanOutcome> {
     // 對帳那一輪與定期那一輪不交錯寫同一張表（兩邊的 DELETE 會互相把對方剛記的列刪掉）。
     static SCAN: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
     let _one_at_a_time = SCAN.lock().await;
@@ -250,7 +312,7 @@ async fn scan_host(app: &(impl crate::capabilities::Cfg + crate::capabilities::D
             None
         }
     };
-    let client = crate::api::shell::client_for(app, host).await.ok().map(|(c, _)| c);
+    let client = app.pane_shell_client(host).await.ok();
     let mut observed: HashMap<String, Option<Observed>> = HashMap::new();
     for p in &non_agent {
         let Some(pane_id) = p.get("pane_id").and_then(Value::as_str) else { continue };
@@ -278,8 +340,8 @@ async fn scan_host(app: &(impl crate::capabilities::Cfg + crate::capabilities::D
 const RESCAN_INTERVAL: std::time::Duration = std::time::Duration::from_secs(60);
 
 /// 單獨重掃一台主機的 pane（不動 agent pane 的對帳、不跑 GC 與通知——那兩件事仍跟著對帳）。
-pub async fn rescan(app: &(impl crate::capabilities::Cfg + crate::capabilities::Db + crate::capabilities::Emit + crate::capabilities::HerdrRoutes + crate::hosts::HostsAccess + crate::shared_host::SharedHostEnv), host: &str) -> Result<ScanOutcome> {
-    let (client, _) = crate::api::shell::client_for(app, host).await.map_err(|e| anyhow::anyhow!("{e:?}"))?;
+pub async fn rescan(app: &(impl crate::capabilities::Cfg + crate::capabilities::Db + crate::capabilities::Emit + crate::capabilities::HerdrRoutes + crate::hosts::HostsAccess + PaneRuntime), host: &str) -> Result<ScanOutcome> {
+    let client = app.pane_shell_client(host).await?;
     let snapshot = client.snapshot().await?;
     // 同 reconcile 的規則：連 key 都沒有＝不認得的形狀，當成空的會把整台的列清光。
     if !snapshot.get("panes").is_some_and(Value::is_array) {
@@ -288,7 +350,7 @@ pub async fn rescan(app: &(impl crate::capabilities::Cfg + crate::capabilities::
     scan_snapshot(app, host, &snapshot).await
 }
 
-pub fn spawn_scanner(app: Arc<impl crate::capabilities::Cfg + crate::capabilities::Db + crate::capabilities::Emit + crate::capabilities::HerdrRoutes + crate::hosts::HostsAccess + crate::shared_host::SharedHostEnv + 'static>) {
+pub fn spawn_scanner(app: Arc<impl crate::capabilities::Cfg + crate::capabilities::Db + crate::capabilities::Emit + crate::capabilities::HerdrRoutes + crate::hosts::HostsAccess + PaneRuntime + 'static>) {
     tokio::spawn(async move {
         loop {
             tokio::time::sleep(RESCAN_INTERVAL).await;
@@ -669,7 +731,7 @@ pub async fn note_purpose(app: &(impl crate::capabilities::Db + crate::capabilit
 /// * 有歸屬（`owned_by='bot'`）、或使用者簽過名（`gc_optin`）、或「多出來的沒歸屬 pane」。
 /// * scratch（沒歸屬的那唯一一顆，名字固定）永不自動關。
 /// 三條守門：行程樹只有 shell、關前重新取值（取不到就不關）、關前把畫面最後幾行記進 log。
-pub async fn gc_host(app: &(impl crate::capabilities::Cfg + crate::capabilities::Db + crate::capabilities::Emit + crate::capabilities::HerdrRoutes + crate::hosts::HostsAccess), host: &str) -> Result<usize> {
+pub async fn gc_host(app: &(impl crate::capabilities::Cfg + crate::capabilities::Db + crate::capabilities::Emit + crate::capabilities::HerdrRoutes + crate::hosts::HostsAccess + PaneRuntime), host: &str) -> Result<usize> {
     let cfg = app.cfg().get().await;
     let idle_limit = cfg.panes.idle_close_secs() as i64;
     let log_lines = cfg.panes.close_log_lines;
@@ -742,7 +804,7 @@ pub(crate) fn seconds_since(at: &str) -> i64 {
 
 /// 關之前再確認一次（§6.5e 的三條守門）。回 `false` = 這一輪不關。
 async fn close_if_still_idle(
-    app: &(impl crate::capabilities::Db + crate::capabilities::HerdrRoutes + crate::hosts::HostsAccess),
+    app: &(impl crate::capabilities::Db + crate::capabilities::HerdrRoutes + crate::hosts::HostsAccess + PaneRuntime),
     host: &str,
     pane_id: &str,
     workspace_id: Option<&str>,
@@ -751,7 +813,7 @@ async fn close_if_still_idle(
 ) -> Result<bool> {
     // 1. 重新取前景／行程樹：**讀不到就不關**（讀不到不等於是空的）。
     let dump = crate::memproc::dump(app, host).await?;
-    let (client, _) = crate::api::shell::client_for(app, host).await.map_err(|e| anyhow::anyhow!("{e:?}"))?;
+    let client = app.pane_shell_client(host).await?;
     let Some(f) = read_facts(Some(&client), Some(&dump), pane_id).await else {
         tracing::info!(host, pane_id, "GC 前讀不到這顆 pane 的行程樹，這一輪不關");
         return Ok(false);
@@ -770,7 +832,7 @@ async fn close_if_still_idle(
         .map(|r| r.text.lines().rev().take(log_lines as usize).collect::<Vec<_>>().into_iter().rev().collect::<Vec<_>>().join("\n"))
         .unwrap_or_else(|e| format!("（讀不到畫面：{e}）"));
     tracing::info!(host, pane_id, workspace_id, tab_id, screen_tail = %tail, "pane GC：閒置太久，關掉這顆 shell pane");
-    crate::lifecycle::close_pane_and_tab(&client, workspace_id, tab_id, pane_id).await;
+    app.close_pane_and_tab(&client, workspace_id, tab_id, pane_id).await;
     sqlx::query("DELETE FROM panes WHERE host=? AND pane_id=?").bind(host).bind(pane_id).execute(app.db()).await?;
     Ok(true)
 }
@@ -782,7 +844,7 @@ async fn close_if_still_idle(
 ///   shell 照 GC）。
 ///
 /// inbox 的 key 帶 `first_seen`：herdr 重開後 pane id 會重用，不能讓舊 pane 用掉的 key 擋住新 pane 的通知。
-pub async fn notify_unowned_and_orphans(app: &impl crate::capabilities::Db, host: &str) -> Result<usize> {
+pub async fn notify_unowned_and_orphans(app: &(impl crate::capabilities::Db + PaneRuntime), host: &str) -> Result<usize> {
     type NotifyRow = (String, String, Option<String>, Option<String>, Option<String>, String, String, Option<String>, Option<String>, bool);
     let rows = sqlx::query_as::<_, NotifyRow>(
         "SELECT pane_id, kind, workspace_id, foreground, listen_ports, last_output_at, first_seen,
@@ -809,7 +871,7 @@ pub async fn notify_unowned_and_orphans(app: &impl crate::capabilities::Db, host
             "message": message,
         });
         let key = format!("{event}:{host}:{pane_id}:{first_seen}");
-        if crate::supervisor::store::push_inbox(app.db(), &key, event, None, None, None, &payload).await?.is_some() {
+        if app.push_pane_inbox(&key, event, &payload).await?.is_some() {
             sent += 1;
         }
         sqlx::query(&format!("UPDATE panes SET {column}=? WHERE host=? AND pane_id=?"))
@@ -964,7 +1026,7 @@ mod tests {
         let dir = crate::testing::track(std::env::temp_dir().join(format!("am-panes-{}", crate::db::ulid())));
         std::fs::create_dir_all(&dir).unwrap();
         let db = crate::app_ports_p1::open(&dir.join("t.sqlite3")).await.unwrap();
-        let cfg = crate::projection::app_ports_p2::load_config(dir.join("config.toml")).await.unwrap();
+        let cfg = crate::runners::app_ports_p2::load_config(dir.join("config.toml")).await.unwrap();
         let client = crate::herdr::HerdrClient::new(dir.join("absent.sock"));
         Arc::new(App::new(db, client.clone(), client, cfg, dir.clone(), dir.join("daemon"), 7799, "test".into(), "test".into(), false))
             .as_ref()
@@ -1716,5 +1778,3 @@ mod tests {
         assert_eq!(classify(user.foreground.as_deref(), &[]), "shell");
     }
 }
-
-

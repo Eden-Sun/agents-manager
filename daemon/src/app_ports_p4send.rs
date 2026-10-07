@@ -67,7 +67,7 @@ impl SupervisorSendRepo for SqlitePool {
     async fn assignment_by_turn(&self, turn_id: &str) -> Result<Option<crate::supervisor::store::Assignment>> {
         crate::supervisor::store::assignment_by_turn(self, turn_id).await
     }
-    async fn load_owned(&self) -> Result<crate::supervisor_owned::Owned> {
+    async fn load_owned(&self) -> Result<crate::projection::Owned> {
         crate::supervisor_owned::load(self).await
     }
 }

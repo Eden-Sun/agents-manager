@@ -3,7 +3,7 @@
 //! （`SupervisorOwnedSource`）；這個檔案是 config 唯一還知道 projection／config_audit／supervisor_owned 的地方
 //! （composition root 側的 adapter，不屬於 am-config）。
 //!
-//! 模組掛在 `projection.rs`（`#[path]`），不碰 `lib.rs`。
+//! 模組掛在 `runners/mod.rs`，projection 本身不宣告 composition adapter。
 
 use crate::config::{ConfigChangeHooks, ConfigFile, ConfigStore};
 use crate::projection::SupervisorOwnedSource;
@@ -39,7 +39,7 @@ pub async fn load_config(path: PathBuf) -> Result<ConfigStore> {
 }
 
 impl SupervisorOwnedSource for SqlitePool {
-    async fn load_owned(&self) -> Result<crate::supervisor_owned::Owned> {
+    async fn load_owned(&self) -> Result<crate::projection::Owned> {
         crate::supervisor_owned::load(self).await
     }
     async fn ops_alert(&self, reason: &str, subject: &str, detail: &str) {
@@ -111,7 +111,7 @@ mod tests {
 
     #[test]
     fn projection_reaches_supervisor_owned_only_through_the_port() {
-        let found = offenders("projection.rs", include_str!("projection.rs"), &["supervisor_owned::load(", "supervisor_owned::alert("]);
+        let found = offenders("projection.rs", include_str!("../projection.rs"), &["supervisor_owned::load(", "supervisor_owned::alert("]);
         assert!(found.is_empty(), "projection 要走 SupervisorOwnedSource：\n{}", found.join("\n"));
     }
 

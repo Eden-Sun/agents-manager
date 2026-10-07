@@ -14,18 +14,8 @@ use crate::db;
 use anyhow::Result;
 use serde_json::json;
 use sqlx::SqlitePool;
-use std::collections::{HashMap, HashSet};
-
-#[derive(Debug, Default, Clone)]
-pub struct Owned {
-    bot_ids: HashSet<String>,
-    project_ids: HashSet<String>,
-    /// 總管／角色本身的 bot id → 給人看的角色名（網頁的二次確認框要寫「這顆是 AGM 的什麼」）。
-    roles: HashMap<String, &'static str>,
-}
-
-pub async fn load(pool: &SqlitePool) -> Result<Owned> {
-    let mut o = Owned::default();
+pub async fn load(pool: &SqlitePool) -> Result<crate::projection::Owned> {
+    let mut o = crate::projection::Owned::default();
     // `supervisors` 那一列就是巡檢本人；`supervisor_roles.role` 是 'patrol' | 'responder'。
     let sup: Vec<(Option<String>, Option<String>)> = sqlx::query_as("SELECT bot_id, project_id FROM supervisors").fetch_all(pool).await?;
     let roles: Vec<(Option<String>, Option<String>, String)> =
@@ -34,31 +24,13 @@ pub async fn load(pool: &SqlitePool) -> Result<Owned> {
     for (bot, project, role) in rows {
         if let Some(bot) = bot.filter(|s| !s.is_empty()) {
             let label = if role == "responder" { "AGM 協調者" } else { "AGM 總管（巡檢）" };
-            o.roles.entry(bot.clone()).or_insert(label);
-            o.bot_ids.insert(bot);
+            o.add_bot(bot, label);
         }
-        o.project_ids.extend(project.filter(|s| !s.is_empty()));
+        if let Some(project) = project.filter(|s| !s.is_empty()) {
+            o.add_project(project);
+        }
     }
     Ok(o)
-}
-
-impl Owned {
-    pub fn owns(&self, b: &db::Bot) -> bool {
-        self.bot_ids.contains(&b.id)
-            || b.parent_bot_id.as_ref().is_some_and(|p| self.bot_ids.contains(p))
-            || self.project_ids.contains(&b.project_id)
-    }
-
-    /// 這顆在 AGM 裡是什麼（只對 [`Self::owns`] 為真的 bot 有意義）。
-    pub fn role(&self, b: &db::Bot) -> &'static str {
-        if let Some(r) = self.roles.get(&b.id) {
-            r
-        } else if b.parent_bot_id.as_ref().is_some_and(|p| self.bot_ids.contains(p)) {
-            "AGM 開出去的子 agent"
-        } else {
-            "AGM 專案裡的常駐工人"
-        }
-    }
 }
 
 /// 推一筆 `ops_alert` 給巡檢。推不進去只記 log：擋下本身已經做完了。
@@ -108,7 +80,7 @@ pub async fn guard_project_delete(pool: &SqlitePool, project_id: &str, confirm: 
     let up = |e: anyhow::Error| crate::lc_error::LcError::Upstream(format!("{e:#}"));
     let owned = load(pool).await.map_err(up)?;
     let bots = db::live_bots(pool).await.map_err(up)?;
-    if !owned.project_ids.contains(project_id) && !bots.iter().any(|b| b.project_id == project_id && owned.owns(b)) {
+    if !owned.owns_project_id(project_id) && !bots.iter().any(|b| b.project_id == project_id && owned.owns(b)) {
         return Ok(());
     }
     refuse_unless_confirmed(pool, confirm, project_id, &format!("專案 `{project_id}`"), json!({"project_id": project_id})).await

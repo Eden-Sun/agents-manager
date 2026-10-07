@@ -147,7 +147,7 @@ pub(crate) async fn close_tracked(app: &Arc<App>, host: &str, pane_id: &str, con
     if !crate::db::active_runs_for_pane(&app.db, &host, &pane_id, &session, &session).await.map_err(up)?.is_empty() {
         return Err(agent_pane());
     }
-    let (client, _) = crate::bot_trash::app_ports_p11::client_for(&app, &host).await?;
+    let (client, _) = crate::runners::app_ports_p11::client_for(&app, &host).await?;
     match client.pane_get(&pane_id).await.map_err(up)? {
         None => {
             sqlx::query("DELETE FROM panes WHERE host=? AND pane_id=?").bind(&host).bind(&pane_id).execute(&app.db).await.map_err(sql)?;
@@ -182,7 +182,7 @@ pub(crate) async fn close_tracked(app: &Arc<App>, host: &str, pane_id: &str, con
             json!({"reason": "service_pane", "pane": info, "unverified": live.is_none()}),
         ));
     }
-    crate::bot_trash::app_ports_p11::close_pane_and_tab(
+    crate::runners::app_ports_p11::close_pane_and_tab(
         &client,
         info["workspace_id"].as_str(),
         info["tab_id"].as_str(),

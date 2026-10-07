@@ -40,7 +40,7 @@ pub(crate) trait IdleSleepPort {
 /// supervisor／交辦的讀庫（原 `supervisor::store`、`supervisor_owned`）。實作在 `SqlitePool` 上。
 pub(crate) trait SupervisorSendRepo {
     async fn assignment_by_turn(&self, turn_id: &str) -> Result<Option<crate::supervisor::store::Assignment>>;
-    async fn load_owned(&self) -> Result<crate::supervisor_owned::Owned>;
+    async fn load_owned(&self) -> Result<crate::projection::Owned>;
 }
 
 /// 專案移交（原 `handoff`）。實作在 `SqlitePool` 上。

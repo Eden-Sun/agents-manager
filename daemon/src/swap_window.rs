@@ -83,8 +83,8 @@ async fn given_back_wait(app: &impl crate::capabilities::Db, owner: &str, actor:
     .fetch_optional(app.db())
     .await?;
     let Some(a) = last else { return Ok(None) };
-    let given_back = a.status == "consumed" && a.reason.as_deref() == Some(crate::bot_trash::app_ports_p11::RELEASED_REASON);
-    let recent = crate::bot_trash::app_ports_p11::waited_secs(&a.updated_at, now) < crate::deploy_wait::STALE_SECS;
+    let given_back = a.status == "consumed" && a.reason.as_deref() == Some(crate::runners::app_ports_p11::RELEASED_REASON);
+    let recent = crate::runners::app_ports_p11::waited_secs(&a.updated_at, now) < crate::deploy_wait::STALE_SECS;
     let swapped = a.target_commit.as_deref().is_some_and(|c| crate::build_info::BUILD_SHA_FULL.starts_with(c));
     Ok(if given_back && recent && !swapped { a.waiting_since().map(String::from) } else { None })
 }
@@ -110,7 +110,7 @@ mod tests {
     /// 與交還超過 [`crate::deploy_wait::STALE_SECS`] 的（那次部署已經放棄）都從頭算。換了 commit 也接得下去。
     #[tokio::test]
     async fn only_a_window_given_back_by_its_holder_carries_the_wait_into_the_next_approval() {
-        use crate::bot_trash::app_ports_p11::{FORCE_RELEASED_REASON, RELEASED_REASON};
+        use crate::runners::app_ports_p11::{FORCE_RELEASED_REASON, RELEASED_REASON};
         let e = tt::env().await;
         let app = &e.app;
         let actor = "service(daemon-swap)";

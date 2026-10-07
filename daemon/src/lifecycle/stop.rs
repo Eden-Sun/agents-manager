@@ -967,7 +967,7 @@ mod abort_tests {
         let dir = crate::testing::track(std::env::temp_dir().join(format!("am-abort-{}", db::ulid())));
         std::fs::create_dir_all(&dir).unwrap();
         let pool = db::open(&dir.join("db.sqlite3")).await.unwrap();
-        let cfg = crate::projection::app_ports_p2::load_config(dir.join("config.toml")).await.unwrap();
+        let cfg = crate::runners::app_ports_p2::load_config(dir.join("config.toml")).await.unwrap();
         let client = crate::herdr::HerdrClient::new(dir.join("herdr.sock"));
         let app = crate::state::App::new(
             pool,

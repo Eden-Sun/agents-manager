@@ -99,7 +99,7 @@ mod tests {
 
     async fn app_for(dir: &std::path::Path) -> Arc<App> {
         let pool = crate::app_ports_p1::open(&dir.join("db.sqlite3")).await.unwrap();
-        let cfg = crate::projection::app_ports_p2::load_config(dir.join("config.toml")).await.unwrap();
+        let cfg = crate::runners::app_ports_p2::load_config(dir.join("config.toml")).await.unwrap();
         let h = crate::herdr::HerdrClient::new(dir.join("herdr.sock"));
         App::new(
             pool,

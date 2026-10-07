@@ -16,7 +16,7 @@ use crate::config::LOCAL_HOST;
 use crate::db;
 use crate::intents::{self, Intent};
 use crate::lifecycle::{self, StartOpts};
-use crate::restart_intents::Outcome;
+use crate::runners::restart_intents::Outcome;
 use crate::state::App;
 use serde_json::json;
 use std::path::PathBuf;
@@ -45,7 +45,7 @@ pub async fn recover_host(app: &Arc<App>, host: &str) {
 
 async fn retry_loop(app: &Arc<App>, id: &str) {
     for attempt in 0.. {
-        tokio::time::sleep(crate::bot_trash::app_ports_p11::recovery_retry_delay(attempt)).await;
+        tokio::time::sleep(crate::runners::app_ports_p11::recovery_retry_delay(attempt)).await;
         if drive_once(app, id).await == Outcome::Finished {
             return;
         }

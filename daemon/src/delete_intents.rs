@@ -10,11 +10,11 @@
 //! 補不成（軟刪寫不進去…）最多試 [`crate::intents::MAX_ATTEMPTS`] 次，用完 `failed` 並同交易推 AGM inbox。目錄清不掉（ssh 失敗、run 還在）不算補不成：
 //! 那條路本來就有自己的帳（`kept_dirs`、開機清掃、`remote_purge`）。
 
-use crate::bot_trash::app_ports_p11 as ports;
-use crate::bot_trash::app_ports_p11::{lock_bots_in_order, soft_delete_child, stop_for_delete_locked};
+use crate::runners::app_ports_p11 as ports;
+use crate::runners::app_ports_p11::{lock_bots_in_order, soft_delete_child, stop_for_delete_locked};
 use crate::db;
 use crate::intents::{self, Inserted, Intent};
-use crate::restart_intents::Outcome;
+use crate::runners::restart_intents::Outcome;
 use crate::state::App;
 use serde_json::{json, Value};
 use std::sync::Arc;

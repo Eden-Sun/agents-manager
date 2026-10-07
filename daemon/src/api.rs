@@ -3196,7 +3196,7 @@ pub(crate) async fn restore_bot(State(app): State<Arc<App>>, Path(id): Path<Stri
             }
         }
     }
-    crate::remote_trash::restore_for(&app, &id).await;
+    crate::runners::remote_trash::restore_for(&app, &id).await;
     app.emit("bot_changed", json!({"bot_id": id})).await;
     app.emit("project_changed", json!({"project_id": bot.project_id})).await;
     Ok((StatusCode::OK, Json(json!({"bot_id": id}))).into_response())
@@ -5324,7 +5324,7 @@ async fn rotate_bot_credential(
                 &id,
                 &host,
                 &payload,
-                crate::restart_intents::ROTATION_INTENT_TTL_SECS,
+                crate::runners::restart_intents::ROTATION_INTENT_TTL_SECS,
             )
             .await
             .map_err(any_err)?,
@@ -5360,25 +5360,25 @@ async fn rotate_bot_credential(
             json!({"reason": "restart_pending", "credential_rotated": true, "restart_pending": true, "bot_id": id, "intent_id": intent_id, "detail": detail}),
         )
     };
-    if let crate::restart_intents::Outcome::Retry(why) = crate::restart_intents::drive_once(&app, &intent_id).await {
-        crate::restart_intents::retry_later(&app, &intent_id);
+    if let crate::runners::restart_intents::Outcome::Retry(why) = crate::runners::restart_intents::drive_once(&app, &intent_id).await {
+        crate::runners::restart_intents::retry_later(&app, &intent_id);
         return Err(pending_error(why));
     }
     let intent = match crate::intents::get(&app.db, &intent_id).await {
         Ok(Some(intent)) => intent,
         Ok(None) => {
-            crate::restart_intents::retry_later(&app, &intent_id);
+            crate::runners::restart_intents::retry_later(&app, &intent_id);
             return Err(pending_error("restart intent could not be read after credential commit".into()));
         }
         Err(e) => {
-            crate::restart_intents::retry_later(&app, &intent_id);
+            crate::runners::restart_intents::retry_later(&app, &intent_id);
             return Err(pending_error(format!("restart intent could not be read after credential commit: {e:#}")));
         }
     };
     if intent.status != "done" {
         let open = matches!(intent.status.as_str(), "pending" | "running");
         if intent.status == "pending" {
-            crate::restart_intents::retry_later(&app, &intent_id);
+            crate::runners::restart_intents::retry_later(&app, &intent_id);
         }
         return Err(LcError::conflict(
             "credential rotated, but restarting the bot did not finish",
@@ -7699,7 +7699,7 @@ mod delete_bot_tests {
             .unwrap();
 
         let app2 = crate::testing::restart_app(&e).await;
-        crate::restart_intents::recover_host(&app2, LOCAL_HOST).await;
+        crate::runners::restart_intents::recover_host(&app2, LOCAL_HOST).await;
         assert_eq!(intent_states(&app2, &parent).await, vec!["running"], "還沒補過就不准收成 failed");
         crate::delete_intents::recover_host(&app2, LOCAL_HOST).await;
         assert!(deleted(&app2, &kid).await, "開機補完：child 收掉了");
@@ -13895,7 +13895,7 @@ mod state_cost_tests {
 
     async fn app_over(dir: &std::path::Path) -> Option<Arc<App>> {
         let pool = crate::app_ports_p1::open(&dir.join("db.sqlite3")).await.ok()?;
-        let cfg = crate::projection::app_ports_p2::load_config(dir.join("config.toml")).await.ok()?;
+        let cfg = crate::runners::app_ports_p2::load_config(dir.join("config.toml")).await.ok()?;
         let client = crate::herdr::HerdrClient::new(dir.join("herdr.sock"));
         let app = App::new(pool, client.clone(), client, cfg, dir.to_path_buf(), dir.join("agents-managerd"), 7799, "t".into(), "test".into(), false);
         app.connected.store(true, Ordering::SeqCst);

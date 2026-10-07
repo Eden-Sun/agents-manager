@@ -150,7 +150,7 @@ mod tests {
     async fn app() -> Arc<App> {
         let dir = crate::testing::scratch_dir("agm-drafts");
         let db = crate::app_ports_p1::open(&dir.join("test.sqlite")).await.unwrap();
-        let cfg = crate::projection::app_ports_p2::load_config(dir.join("config.toml")).await.unwrap();
+        let cfg = crate::runners::app_ports_p2::load_config(dir.join("config.toml")).await.unwrap();
         let client = crate::herdr::HerdrClient::new(dir.join("absent.sock"));
         App::new(db, client.clone(), client, cfg, dir.clone(), dir.join("daemon"), 7799, "test".into(), "test".into(), false)
     }
