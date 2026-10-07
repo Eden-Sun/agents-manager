@@ -180,6 +180,20 @@ pub(crate) fn check(text: &str) -> Result<(), SvgError> {
     Ok(())
 }
 
+/// 先驗原始 bytes 是不是合法 UTF-8，再當 XML 查（issue #866）。分享頁送給瀏覽器的是原始 bytes，
+/// 不能先 `from_utf8_lossy` 把壞位元組換成 `�` 再查——那樣查的是另一份檔。
+pub(crate) fn check_bytes(data: &[u8]) -> Result<(), SvgError> {
+    let text = match std::str::from_utf8(data) {
+        Ok(t) => t,
+        Err(e) => {
+            let at = e.valid_up_to();
+            let valid = std::str::from_utf8(&data[..at]).unwrap_or_default();
+            return Err(err(valid, valid.len(), format!("檔案不是合法 UTF-8 SVG（位元組 0x{:02X} 不是 UTF-8）", data[at])));
+        }
+    };
+    check(text)
+}
+
 /// 給 bot 的那一則（後台，分享頁看不到）。
 pub(crate) fn reminder(name: &str, e: &SvgError) -> String {
     format!(
@@ -293,8 +307,7 @@ pub(crate) async fn check_file<H: SvgCheckEnv>(app: &Arc<H>, bot_id: &str, name:
     if read.data.len() > MAX_CHECK_BYTES {
         return None;
     }
-    let text = String::from_utf8_lossy(&read.data);
-    let e = match check(&text) {
+    let e = match check_bytes(&read.data) {
         Ok(()) => {
             mark_healthy(bot_id, name);
             return None;
@@ -374,6 +387,32 @@ mod tests {
         ] {
             assert_eq!(check(s), Ok(()), "{s}");
         }
+    }
+
+    #[test]
+    fn invalid_utf8_bytes_are_caught_even_when_the_lossy_text_is_well_formed() {
+        // 0xFF 不是合法 UTF-8；lossy 轉成 `�` 後結構完全正確，所以要在 bytes 層擋下來（issue #866）。
+        let prefix = "<svg xmlns=\"http://www.w3.org/2000/svg\"><text>";
+        let mut data = prefix.as_bytes().to_vec();
+        data.extend_from_slice(b"\xFF</text></svg>");
+        assert!(check(&String::from_utf8_lossy(&data)).is_ok(), "lossy 版本本身是 well-formed");
+        let e = check_bytes(&data).expect_err("原始 bytes 不是合法 UTF-8");
+        assert_eq!((e.line, e.col), (1, prefix.chars().count() + 1), "指在 0xFF 那個位置");
+        assert!(e.message.contains("不是合法 UTF-8 SVG") && e.message.contains("0xFF"), "{e:?}");
+    }
+
+    #[test]
+    fn invalid_utf8_with_utf8_encoding_declaration_is_still_caught() {
+        let mut data = b"<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<svg><text>".to_vec();
+        data.extend_from_slice(b"\xC3</text></svg>"); // 截斷的多位元組序列
+        let e = check_bytes(&data).expect_err("宣告 UTF-8 也不能含非法位元組");
+        assert_eq!(e.line, 2, "{e:?}");
+    }
+
+    #[test]
+    fn valid_utf8_bytes_go_through_the_xml_check_unchanged() {
+        assert_eq!(check_bytes("<svg><text>嗨 &amp; ÿ</text></svg>".as_bytes()), Ok(()));
+        assert!(check_bytes(b"<svg><g></svg>").unwrap_err().message.contains("</g>"), "結構錯誤照樣抓");
     }
 
     #[test]

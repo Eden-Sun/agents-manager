@@ -602,6 +602,39 @@ async fn svg_checker_reminds_again_on_regression_after_repair() {
     assert_eq!(reminders[1].1.as_deref(), Some(crate::agent_relay::DAEMON_SENDER));
 }
 
+/// issue #866：結構正確、但文字節點含非法 UTF-8（0xFF）的 svg。分享頁送的是原始 bytes，所以要提醒；
+/// 不能因為 lossy 轉成 `�` 後看起來合法就算健康。修成合法 UTF-8 後變健康，再改壞又要提醒。
+#[tokio::test]
+async fn svg_with_invalid_utf8_bytes_is_reminded_even_though_lossy_text_is_well_formed() {
+    let e = tt::env().await;
+    let b = restricted_bot(&e.app, &e.project_id, "pub").await;
+    let _token = shared(&e.app, &b.id).await;
+    let outbox = crate::outbox::ensure(&e.app.data_dir, &b.id).unwrap();
+    let bad: &[u8] = b"<svg xmlns=\"http://www.w3.org/2000/svg\"><text>\xFF</text></svg>";
+    let good = "<svg xmlns=\"http://www.w3.org/2000/svg\"><text>ÿ</text></svg>".as_bytes();
+
+    std::fs::write(outbox.join("raw.svg"), bad).unwrap();
+    for _ in 0..2 {
+        let err = super::svg_check::check_file(&e.app, &b.id, "raw.svg").await.expect("非法 UTF-8 要報錯");
+        assert_eq!(err.line, 1, "{err:?}");
+        assert!(err.message.contains("不是合法 UTF-8 SVG"), "{err:?}");
+    }
+    let reminders = || async {
+        sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM messages WHERE role = 'user' AND content LIKE '%raw.svg%'").fetch_one(&e.app.db).await.unwrap()
+    };
+    assert_eq!(reminders().await, 1, "同一版同一錯誤只提醒一次");
+
+    std::fs::write(outbox.join("raw.svg"), good).unwrap();
+    assert_eq!(super::svg_check::check_file(&e.app, &b.id, "raw.svg").await, None, "修成合法 UTF-8 就健康");
+    assert_eq!(reminders().await, 1, "修好後不新增提醒");
+
+    // 模擬 bot 結束了修復的那一回合（隊列清空），才送得出下一則提醒。
+    sqlx::query("UPDATE turns SET status='failed' WHERE status='queued'").execute(&e.app.db).await.unwrap();
+    std::fs::write(outbox.join("raw.svg"), bad).unwrap();
+    assert!(super::svg_check::check_file(&e.app, &b.id, "raw.svg").await.is_some(), "再度改壞要報錯");
+    assert_eq!(reminders().await, 2, "新 episode 重新提醒");
+}
+
 #[tokio::test]
 async fn svg_check_exceeding_max_bytes_is_skipped_without_reading_or_reminder() {
     let e = tt::env().await;
