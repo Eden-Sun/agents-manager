@@ -631,6 +631,7 @@ hook body 另外帶 `run_id`＝這個 CLI 行程 pane env 的 `AM_RUN_ID`（本�
   - 沒有游標時要求畫面上有 prompt 回音（否則整個 scrollback 變一則訊息）；擷取不到只推游標、不寫訊息。
   - 去重：游標 + 與上一則 assistant 比對（herdr 同一輪可能報兩次 idle；重啟會讀到同一畫面）；單則上限 6000 字；認領時的補記只在對話為空時做一次。
     上一則讀不到就不寫（#193），不當成「還沒有回覆」。
+  - **claude 子 agent 例外**（#878）：herdr 綁得到 session 時先讀 claude 自己的 `projects/*/<session>.jsonl`（§12.5b，本機與遠端），讀得到就不刮畫面。
   - **grok 例外**：沒有 hook 的 grok run 先讀 grok 自己的 `chat_history.jsonl`（§12.5），讀得到就不刮畫面；找不到 session／檔案時才退回上面這一套，
     而且 grok 的啟動選單（`New worktree ctrl+w`／`Resume session ctrl+r`／`Quit ctrl+q`）不當回覆存。
 
@@ -1752,6 +1753,9 @@ Stop hook 與終端備援提交回覆後都經 `lifecycle::messages::emit_turn` 
 與 assistant message 補送漏掉的事件，避免部署後把較舊的未通知回合整批倒灌。若 child 的 run 已知仍有背景工作，完成回合先保留待 sweep；
 Claude Stop hook 的 `background_tasks`（含 Monitor、subagent、workflow）和既有畫面巡讀數都算訊號。daemon 重啟後帳上未知時會嘗試讀一次現有 pane；
 讀不到訊號就沿用即時通知行為。背景工作歸零後，sweep 優先處理最新完成回合；若它已通知，較舊的延後回合視為被取代，不再逐一補送。
+**終端擷取（`completed_fallback`）收下的回合不保證是結尾**（#878：剛開出來、只回了開場白就通知「已完成一個回合」）：即時通知先等 20 秒；
+通知前（即時與 sweep 都一樣）若這顆 child 的 run 還是 `working`／`blocked`、或畫面上還有進行中的動詞列，就先不報，等它停下來由 sweep 補送（更新的回合已通知時，舊的視為被取代）。
+transcript／hook 收的回合（`completed`）不受影響。
 同一 child 在 5 分鐘內回覆文字正規化後編輯距離不超過 20% 時視為近似通知，只送一則。`client_request_id` 使用
 `child-done:<child bot id>:<turn id>`，同一 turn 只建立一筆通知，並以 DB 唯一鍵處理即時事件與 sweep 競速。無回覆、failed turn、非 child、已刪 child、無 parent
 或 child 已自行回報的 turn 都不通知。daemon 通知重試與撤回辨識也涵蓋 `child-done:` 前綴。
@@ -1872,6 +1876,8 @@ agent 自己 `herdr agent prompt <名字> …` 時 daemon 沒參與，那句話�
    watcher 由 daemon 的 `TaskTracker` 管理；shutdown 會等目前的 pane RPC／DB 更新完成，再停止後續輪詢。未完成的 relay external turn 保留在 DB，daemon 啟動或該 host 重連且完成 reconcile 後，依回合與使用者訊息重建 watcher。
    **死 pane 的 run**（`lifecycle::dead_panes`，隨 60 秒的 stuck-turn sweeper 跑）：herdr 明確回 `pane_not_found` 的 running run 收成 exited。
    pane id 還在、但這顆 run 的 agent 已經不在、而且這個 id 上是別的 agent（herdr 重用 id）也收成 exited；RPC 失敗不是證據。
+   **沒有名字的 agent 不算別的 agent**（#878）：herdr 的 `agent start` 等不到 agent 準備好（約 30 秒）會把名字從 pane 上拿掉，pane 與 CLI 照跑；
+   用名字查不到、改用 pane id 查到一顆沒有名字的 agent 時，只有兩邊的 session id 都知道且對不上才算被別人佔走，否則這顆 run 照活（以前 29 秒就收成 `pane gone`，遠端 child 因此被誤殺）。
    打字（`send_text` 與 prompt 的 type 路徑）在這兩種情況，以及自己的 agent 已經換到別的 pane 時，不把字送進舊 id。
    herdr 計畫中的維護期間不動（§6.5.2）；補上對帳只在開機／重連／事件時才跑、pane-exit 事件漏了就一直畫成活的那個洞。盯梢的時間由呼叫端傳入、pane 走 herdr client，測試不睡覺。
 6. **`POST /api/bots/{id}/prompt` 與 mission 的 `relay_from` 是來源標記，不是 principal**（issue #339、#409、#556，`relay_auth.rs`）：User 沿用共用 UI token；User 未帶 Bot 身分 header 且 prompt `relay_from` 指活 bot 時，一律 403 `relay_from_token_required`（#339 相容期已在 #410 結束；歷史訊息的 `relay_unverified = 1` 保留，UI 照舊標「未驗證」）。Bot principal 必須帶成對 `X-AM-Bot-Id`＋`X-AM-Bot-Token`，後者驗該 bot 現行的 `hook_token`（pane 的 `AM_BOT_TOKEN`；hook 開關另控制 `AM_HOOK_TOKEN`）。`X-AM-Bot-Id` 或 token header 一旦出現就選了 Bot principal；欄位缺少、值錯、或混帶 UI/service 身分都拒絕，不得降為 User。Bot 省略或留空 `relay_from` 時由 daemon 以驗證過的 id 標記；明確自稱別顆 bot 回 403 `relay_from_mismatch`。
@@ -3382,6 +3388,20 @@ bot 用 `herdr agent start --kind grok` 開的子 agent 沒有 hook（pane 環�
 - **呼叫點**：`working → idle` 沒有回合在飛時（`capture_hookless_turn_locked`）先讀檔，讀得到就不刮畫面；有回合在飛時（`try_fallback`）也先讀檔——
   回合被收掉就結束；檔裡這一問還沒結束就留在飛（輪詢器下一輪再看，§4.3b 兜底）；沒有 prompt 的回合、檔裡又沒有在跑的一問，只收回合、不存畫面；
   這一問根本不在檔裡、或讀不到檔，才照 §4.3 看畫面。
+
+### 12.5b 沒有 hook 的 claude 子 agent：讀 `projects/*/<session>.jsonl`（`lifecycle::claude_child_log`，issue #878）
+bot 用 `herdr agent start` 開的 claude 子 agent（本機或遠端）沒有 hook，以前只能刮畫面：`runs.native_session_id`／`transcript_path` 都是空的，
+回覆是折行截斷、標「可能不完整」的終端殘片。現在跟 grok／agy 同一條路（§12.5、`grok_transcript::sync_locked`）：對話檔是主要來源、畫面只是備援。
+
+- **找 session**：herdr `agent.get` 回的 `agent_session`（`kind: "id"`，herdr 從 claude 的 SessionStart 綁的）就是當下的 session id，遠端不必掃行程；
+  先用 run 的 agent 名字查，名字被 herdr 拿掉時改用 pane id 查（`agent.pane_id` 要對得上這顆 pane）。還沒綁就用 `runs.native_session_id` 記過的，兩者都沒有＝照舊看畫面。
+  herdr 的綁定優先於記過的（`/clear`、`--resume` 會換 session）。找到的連同檔案路徑寫進 `runs.native_session_id`／`transcript_path`。
+- **讀檔**：`<root>/projects/*/<session id>.jsonl` 的最後 8 MiB（一般檔、非 symlink；本機與遠端都用 `sh`，遠端走 ssh）。root 依序是 bot 的 `CLAUDE_CONFIG_DIR`、
+  這個身分（`runs.runtime_identity`／`bots.identity`）在該主機的 config 目錄、`~/.claude`；找不到檔＝照舊看畫面。session id 只收英數與 `-`／`_`。
+- **一問一答**：`type: user` 且是人打的字（不是 `tool_result`、`isMeta`、sidechain、slash 指令回音 `<command-name>`／`<local-command-…>`）算一問，`<pasted_content>` 包裝拆回原文；
+  `[Request interrupted by user…]` 結束上一問。回覆是之後 `stop_reason` 不是 `tool_use` 的 assistant 文字（帶 `tool_use` 的旁白不算，沒有 `stop_reason` 的半行不算）；
+  下一問出現也算這一問結束（被打斷、沒有回覆）。回合鑰匙是 user 那行 `uuid` 的 FNV-1a（`native_turn_id = p<n>`），同一句重複打各是一問。
+  記成回合、與備援收過的回合對上、`relay_from` 標記都照 §12.5。
 
 ### 12.6 額度：`/usage` 探測
 grok 沒有 usage 子命令或 RPC，數字只在 TUI 的 `/usage` 對話框裡，所以開**用完即丟**的 workspace 探測，跑在**專屬 herdr session `am-quota`**（需要時起、永不 attach）：

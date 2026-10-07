@@ -636,6 +636,33 @@ mod tests {
         assert_eq!(run_state(&f).await, "exited");
     }
 
+    /// #878：herdr 的 `agent start` 逾時後把名字從 pane 上拿掉，pane 與 CLI 還活著。沒有名字的 agent 不是「別人」，
+    /// 定時掃描不能把這顆 run 收成 `pane gone`，打字也不能被當成打進別人的 pane。
+    #[tokio::test]
+    async fn a_pane_whose_agent_lost_its_herdr_name_is_still_the_run() {
+        let f = fixture("nameless-pane").await;
+        f.env.herdr.set_unnamed_agent(&f.pane, None);
+        assert!(super::super::dead_panes::sweep(&f.env.app).await.is_empty(), "只是沒有名字：pane 還在、不收");
+        assert_eq!(run_state(&f).await, "running");
+        let run = db::run(&f.env.app.db, &f.run_id).await.unwrap().unwrap();
+        let client = f.env.app.herdr_for_run(&run).await.unwrap();
+        assert!(!super::super::dead_panes::pane_target_stale(&client, &run).await, "沒有名字的 agent 不算佔走 pane id");
+    }
+
+    /// 沒有名字時兩邊的 session 都知道、而且對不上，才是別的 agent 佔走了這個 id。
+    #[tokio::test]
+    async fn a_nameless_agent_with_another_session_is_not_the_run() {
+        let f = fixture("nameless-other-session").await;
+        sqlx::query("UPDATE runs SET native_session_id = 'sess-ours' WHERE id = ?").bind(&f.run_id).execute(&f.env.app.db).await.unwrap();
+        f.env.herdr.set_unnamed_agent(&f.pane, Some("sess-theirs"));
+        assert_eq!(super::super::dead_panes::sweep(&f.env.app).await, vec![f.run_id.clone()]);
+
+        let same = fixture("nameless-same-session").await;
+        sqlx::query("UPDATE runs SET native_session_id = 'sess-ours' WHERE id = ?").bind(&same.run_id).execute(&same.env.app.db).await.unwrap();
+        same.env.herdr.set_unnamed_agent(&same.pane, Some("sess-ours"));
+        assert!(super::super::dead_panes::sweep(&same.env.app).await.is_empty(), "同一個 session：還是我");
+    }
+
     /// announce 給一顆 pane 已經不在的收件方：收掉 run、不開回合。
     #[tokio::test]
     async fn an_announce_to_a_dead_pane_opens_no_turn_and_ends_the_run() {

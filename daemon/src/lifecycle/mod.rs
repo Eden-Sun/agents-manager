@@ -43,6 +43,7 @@ pub(crate) mod agy_session;
 #[cfg(test)]
 mod agy_tests;
 pub(crate) mod grok_transcript;
+pub(crate) mod claude_child_log;
 #[cfg(test)]
 mod grok_hook_tests;
 #[cfg(test)]

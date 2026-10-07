@@ -35,6 +35,9 @@ impl Drop for Working {
     }
 }
 
+/// 終端擷取（`completed_fallback`）收下的回合，先等這麼久再通知，讓「剛開出來、只回了開場白」的子 agent 有時間繼續動起來（#878）。
+const FALLBACK_SETTLE: std::time::Duration = std::time::Duration::from_secs(20);
+
 /// Start a best-effort immediate notification after a completed turn has been committed.
 pub fn on_completed_turn(app: &Arc<App>, turn_id: &str) {
     if cfg!(test) {
@@ -46,6 +49,16 @@ pub fn on_completed_turn(app: &Arc<App>, turn_id: &str) {
     let (app, turn_id) = (app.clone(), turn_id.to_string());
     tokio::spawn(async move {
         let _working = working;
+        // 畫面備援收的回合不一定是結尾：先等它安定，notify_turn 再看子 agent 是不是又在忙。
+        let fallback: Option<String> = sqlx::query_scalar("SELECT status FROM turns WHERE id = ? AND status = 'completed_fallback'")
+            .bind(&turn_id)
+            .fetch_optional(&app.db)
+            .await
+            .ok()
+            .flatten();
+        if fallback.is_some() {
+            tokio::time::sleep(FALLBACK_SETTLE).await;
+        }
         if let Err(e) = notify_turn(&app, &turn_id).await {
             tracing::warn!(turn = %turn_id, error = ?e, "could not notify parent about completed child turn; sweep will retry");
         }
@@ -113,6 +126,7 @@ pub async fn sweep(app: &Arc<App>) -> usize {
 #[derive(sqlx::FromRow, Debug)]
 struct CompletedTurn {
     id: String,
+    status: String,
     child_id: String,
     child_name: String,
     parent_id: String,
@@ -126,7 +140,7 @@ struct CompletedTurn {
 pub(crate) async fn notify_turn(app: &Arc<App>, turn_id: &str) -> anyhow::Result<()> {
     let _notification_guard = notification_lock().lock().await;
     let row: Option<CompletedTurn> = sqlx::query_as(
-        "SELECT t.id, b.id AS child_id, b.name AS child_name, b.parent_bot_id AS parent_id,
+        "SELECT t.id, t.status, b.id AS child_id, b.name AS child_name, b.parent_bot_id AS parent_id,
                 t.created_at AS started_at, t.completed_at, t.run_id, b.kind,
                 (SELECT a.content FROM messages a
                   WHERE a.turn_id = t.id AND a.role = 'assistant'
@@ -146,6 +160,12 @@ pub(crate) async fn notify_turn(app: &Arc<App>, turn_id: &str) -> anyhow::Result
     .await?;
     let Some(turn) = row else { return Ok(()) };
     if turn.reply.trim().is_empty() {
+        return Ok(());
+    }
+    // 終端擷取的回合不保證是結尾（剛開出來只回了開場白、工作還在跑）：子 agent 還在忙就先不報，等它真的停下來
+    // （sweep 會再來；那時更新的回合已經在了，舊的由 `superseded` 擋掉）。
+    if turn.status == "completed_fallback" && child_still_active(app, turn.run_id.as_deref()).await {
+        tracing::debug!(child = %turn.child_name, turn = %turn.id, "deferring a terminal-fallback completion notice: the child is still working");
         return Ok(());
     }
 
@@ -242,6 +262,23 @@ pub(crate) async fn notify_turn(app: &Arc<App>, turn_id: &str) -> anyhow::Result
             Ok(())
         }
         Err(e) => Err(anyhow::anyhow!("queueable parent prompt failed: {e:?}")),
+    }
+}
+
+/// 這顆子 agent 的 run 現在還在忙：herdr 狀態是 working／blocked，或畫面上還有進行中的動詞列。讀不到＝當作沒在忙（不擋通知）。
+async fn child_still_active(app: &Arc<App>, run_id: Option<&str>) -> bool {
+    let Some(run_id) = run_id else { return false };
+    let Ok(Some(run)) = crate::db::run(&app.db, run_id).await else { return false };
+    if run.state != "running" {
+        return false;
+    }
+    if matches!(run.agent_status.as_str(), "working" | "blocked") {
+        return true;
+    }
+    let (Some(pane), Some(client)) = (run.pane_id.as_deref(), app.herdr_for_run(&run).await) else { return false };
+    match client.pane_read(pane, "visible", 60).await {
+        Ok(read) => crate::lifecycle::poller::pane_still_busy(&read.text),
+        Err(_) => false,
     }
 }
 
