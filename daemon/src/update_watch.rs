@@ -383,7 +383,7 @@ mod tests {
             .await
             .unwrap();
         seed_disk(&e.app, "local", "claude", "2.1.281 (Claude Code)").await;
-        crate::upstream_update::set_snapshot_for_test(&e.app, crate::upstream_update::build_status(
+        crate::upstream_update::set_snapshot_for_test(&e.app.upstream_watch, crate::upstream_update::build_status(
             "claude",
             &Ok("2.1.284".into()),
             &[("local".into(), Ok("2.1.281 (Claude Code)".into()))],
@@ -427,7 +427,7 @@ mod tests {
             .await
             .unwrap();
         seed_disk(&e.app, "local", "claude", "2.1.284 (Claude Code)").await;
-        crate::upstream_update::set_snapshot_for_test(&e.app, crate::upstream_update::build_status(
+        crate::upstream_update::set_snapshot_for_test(&e.app.upstream_watch, crate::upstream_update::build_status(
             "claude",
             &Ok("2.1.284".into()),
             &[("local".into(), Ok("2.1.284 (Claude Code)".into()))],
@@ -491,7 +491,7 @@ mod tests {
         seed_disk(&e.app, "local", "codex", "codex-cli 0.154.0").await;
         sweep(&e.app).await;
         assert!(notice_of(&e.app, &run).await.is_some());
-        let cands = crate::bulk_restart::candidates(&e.app, None).await.unwrap();
+        let cands = crate::runners::bulk_restart::candidates(&e.app, None).await.unwrap();
         let mine = cands.iter().find(|c| c.bot_id == bot).expect("候選清單有它");
         assert!(mine.has_update && mine.needs_manual_install && crate::bulk_restart::is_candidate(mine));
         let (go, skip) = crate::bulk_restart::plan(&cands);

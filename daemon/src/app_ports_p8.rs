@@ -326,13 +326,13 @@ impl IntentConnRepo for SqliteConnection {
 
 impl HostSidePort for Arc<App> {
     async fn refresh_herdr_version(&self, host: &str) {
-        crate::herdr_version::refresh(self, host).await
+        crate::runners::herdr_version::refresh(self, host).await
     }
     async fn herdr_maintenance_active(&self) -> Result<Option<Window>> {
         crate::runners::herdr_maintenance::active(self).await
     }
     fn spawn_detect_github_host(&self, host: String) {
-        crate::github::spawn_detect_host(self.clone(), host)
+        crate::runners::github::spawn_detect_host(self.clone(), host)
     }
     async fn emit_daemon_status(&self) {
         crate::state::emit_daemon_status(self).await

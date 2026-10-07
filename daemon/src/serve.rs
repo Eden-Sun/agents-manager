@@ -205,7 +205,7 @@ pub async fn serve(config_path: Option<PathBuf>, dev_watch_all_panes: bool) -> R
     lifecycle::purge_deleted_bot_dirs(&app).await;
     // shim 只在 bot 啟動時寫，長跑的 bot 會抱著舊版好幾天（2026-09-18 的 shim 巢狀死鎖就是這樣
     // 在修正上線後還在發生）。開機就地換成這顆 binary 帶的版本，不必重啟任何 pane。
-    shim_refresh::refresh_at_startup(&app).await;
+    runners::shim_refresh::refresh_at_startup(&app).await;
     // grok 的全域 hook 檔若指到別的資料目錄／已刪的腳本（測試或別顆 daemon 寫的），開機就修回來；沒有檔就不建。
     match lifecycle::grok_hook::heal_at_startup(&app, None) {
         Ok(true) => tracing::info!("repaired the grok hooks file at startup"),
@@ -245,7 +245,7 @@ pub async fn serve(config_path: Option<PathBuf>, dev_watch_all_panes: bool) -> R
     build_info::mark_started(&app.data_dir);
     tools::spawn_alias_poller(app.clone());
     host_baseline::spawn_poller(app.clone());
-    herdr_version::spawn_poller(app.clone());
+    crate::runners::herdr_version::spawn_poller(app.clone());
     crate::runners::remote_purge::spawn_poller(app.clone());
     // 連上那趟收權限失敗的主機（#501）：欠著的每 5 分鐘補跑一次，不然一台不重連的主機就一直是 0755（#501 複看）。
     remote_perms::spawn_poller(app.clone());
@@ -255,9 +255,9 @@ pub async fn serve(config_path: Option<PathBuf>, dev_watch_all_panes: bool) -> R
     memstat::spawn_poller(app.clone());
     crate::runners::quota_claude::spawn_claude_poller(app.clone());
     runners::quota_grok::spawn_grok_poller(app.clone());
-    quota_agy::spawn_agy_poller(app.clone());
-    quota_agy::spawn_agy_login_watcher(app.clone());
-    github::spawn_detect_all(app.clone());
+    runners::quota_agy::spawn_agy_poller(app.clone());
+    runners::quota_agy::spawn_agy_login_watcher(app.clone());
+    runners::github::spawn_detect_all(app.clone());
     // 協調者跟巡檢是同一顆總管的兩個角色：舊安裝把它放在自己的專案，開機時併回去（工作目錄仍然分開）。
     if let Err(e) = supervisor::responder::merge_into_manager_project(&app).await {
         tracing::warn!(error = ?e, "AGM 協調者併回巡檢的專案失敗，這一輪維持原樣");

@@ -471,12 +471,12 @@ async fn a_remote_watcher_flips_to_logged_in_when_the_token_shows_up_and_probes_
         }
     });
 
-    crate::quota_agy::login_watch_once(&e.app, &host).await;
+    crate::runners::quota_agy::login_watch_once(&e.app, &host).await;
     assert_eq!(agy_tool(&e.app, &host).await.unwrap().logged_in, Some(false), "憑證檔還沒出現：不動");
     assert!(herdr.calls_to("workspace.create").is_empty(), "未登入不探測額度");
 
     present.store(true, Ordering::SeqCst);
-    crate::quota_agy::login_watch_once(&e.app, &host).await;
+    crate::runners::quota_agy::login_watch_once(&e.app, &host).await;
     assert_eq!(agy_tool(&e.app, &host).await.unwrap().logged_in, Some(true));
     assert!(!scripts.lock().unwrap().iter().any(|s| s.contains("-p /usage")), "額度探測不走 ssh（Keychain 純 ssh 讀不到）");
     assert_eq!(herdr.calls_to("workspace.create").len(), 1, "登入後立刻在那台的 pane 探測一次額度");

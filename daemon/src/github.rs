@@ -4,8 +4,6 @@
 use crate::config::LOCAL_HOST;
 use crate::db;
 use crate::hosts::sh_quote;
-use crate::lifecycle::LcError;
-use crate::state::App;
 use anyhow::{anyhow, Result};
 use serde::Serialize;
 use serde_json::{json, Value};
@@ -14,6 +12,13 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
+#[derive(Debug)]
+pub enum GithubError {
+    NotFound(String),
+    Bad(String),
+    Upstream(String),
+}
+
 pub const ISSUES_TTL: Duration = Duration::from_secs(120);
 const GIT_TIMEOUT: Duration = Duration::from_secs(15);
 const GH_TIMEOUT: Duration = Duration::from_secs(40);
@@ -21,19 +26,19 @@ const EXCERPT_CHARS: usize = 300;
 const ERROR_CHARS: usize = 400;
 
 #[derive(Default)]
-struct HostDetectionRegistry {
+pub(crate) struct HostDetectionRegistry {
     /// 進行中的掃描。`rerun`：這次還沒結束又有人要求掃同一台（例如 repoint 之後）。
     in_flight: std::sync::Mutex<HashMap<(PathBuf, String), bool>>,
 }
 
-struct HostDetectionClaim {
+pub(crate) struct HostDetectionClaim {
     registry: Arc<HostDetectionRegistry>,
     key: (PathBuf, String),
     open: bool,
 }
 
 impl HostDetectionRegistry {
-    fn claim(self: &Arc<Self>, data_dir: &Path, host: &str) -> Option<HostDetectionClaim> {
+    pub(crate) fn claim(self: &Arc<Self>, data_dir: &Path, host: &str) -> Option<HostDetectionClaim> {
         let key = (data_dir.to_path_buf(), host.to_string());
         let mut guard = self.in_flight.lock().unwrap_or_else(|e| e.into_inner());
         if let Some(rerun) = guard.get_mut(&key) {
@@ -47,7 +52,7 @@ impl HostDetectionRegistry {
 
 impl HostDetectionClaim {
     /// 這次掃完。有人在中途又要求一次就回 `true`（名額繼續留著）；否則放掉名額。
-    fn finish(&mut self) -> bool {
+    pub(crate) fn finish(&mut self) -> bool {
         if !self.open {
             return false;
         }
@@ -73,7 +78,7 @@ impl Drop for HostDetectionClaim {
     }
 }
 
-fn host_detection_registry() -> &'static Arc<HostDetectionRegistry> {
+pub(crate) fn host_detection_registry() -> &'static Arc<HostDetectionRegistry> {
     static REGISTRY: std::sync::OnceLock<Arc<HostDetectionRegistry>> = std::sync::OnceLock::new();
     REGISTRY.get_or_init(|| Arc::new(HostDetectionRegistry::default()))
 }
@@ -303,7 +308,7 @@ async fn commit_fenced(app: &(impl crate::github::GithubCache + crate::hosts::Ho
     Some(changed)
 }
 
-async fn detect_host_once(app: &(impl crate::capabilities::Db + crate::capabilities::Emit + crate::github::GithubCache + crate::hosts::HostsAccess), host: &str) {
+pub(crate) async fn detect_host_once(app: &(impl crate::capabilities::Db + crate::capabilities::Emit + crate::github::GithubCache + crate::hosts::HostsAccess), host: &str) {
     let projects = db::live_projects(app.db()).await.unwrap_or_default().into_iter().filter(|p| p.host == host).collect::<Vec<_>>();
     if host == LOCAL_HOST {
         let mut changed = false;
@@ -334,30 +339,8 @@ async fn detect_host_once(app: &(impl crate::capabilities::Db + crate::capabilit
     }
 }
 
-/// Spawned, off the reconcile path.
-pub fn spawn_detect_host(app: Arc<App>, host: String) {
-    // Reconcile can be triggered repeatedly while a host is slow. One in-flight scan per app and
-    // host keeps those passes from building a queue of identical DB reads and `git` processes.
-    // 掃描中又來一次（repoint、重連）不丟掉：這次結束後用當時的連線再掃（#830）。
-    let Some(mut claim) = host_detection_registry().claim(&app.data_dir, &host) else {
-        return;
-    };
-    tokio::spawn(async move {
-        loop {
-            detect_host_once(&app, &host).await;
-            if !claim.finish() {
-                break;
-            }
-        }
-    });
-}
-
-pub fn spawn_detect_all(app: Arc<App>) {
-    spawn_detect_host(app, LOCAL_HOST.to_string());
-}
-
 /// `GET /api/projects/:id/submodules`
-pub async fn list_submodules(app: &(impl crate::github::SubmodulesCache + crate::hosts::HostsAccess), p: &db::Project, refresh: bool) -> Result<Vec<Submodule>, LcError> {
+pub async fn list_submodules(app: &(impl crate::github::SubmodulesCache + crate::hosts::HostsAccess), p: &db::Project, refresh: bool) -> Result<Vec<Submodule>, GithubError> {
     if !refresh {
         if let Some((at, v)) = app.submodules_cache().lock().await.get(&p.id) {
             if at.elapsed() < ISSUES_TTL {
@@ -374,7 +357,7 @@ pub async fn list_submodules(app: &(impl crate::github::SubmodulesCache + crate:
          done",
         sh_quote(&p.path)
     );
-    let out = run_on_host(app, &p.host, &script, GIT_TIMEOUT).await.map_err(|e| LcError::Upstream(e.to_string()))?;
+    let out = run_on_host(app, &p.host, &script, GIT_TIMEOUT).await.map_err(|e| GithubError::Upstream(e.to_string()))?;
     let mut subs = Vec::new();
     for line in strip_ansi(&out).lines() {
         let Some((path, url)) = line.split_once('|') else { continue };
@@ -396,7 +379,7 @@ pub async fn cached(app: &impl crate::github::GithubCache, project_id: &str) -> 
 
 /// gh 失敗的原因分類（看 stderr）：限流、找不到（issue／repo）、沒登入、沒安裝要分開說，不然「找不到那張 issue」會被講成「gh 沒安裝」。
 /// 訊息只留前 [`ERROR_CHARS`] 字：gh 的錯誤有時整份 JSON／HTML 都在裡面。
-fn gh_error(e: impl std::fmt::Display) -> LcError {
+fn gh_error(e: impl std::fmt::Display) -> GithubError {
     let msg: String = e.to_string().chars().take(ERROR_CHARS).collect();
     let low = msg.to_ascii_lowercase();
     let hint = if low.contains("rate limit") || low.contains("secondary rate") || low.contains("abuse detection") {
@@ -414,7 +397,7 @@ fn gh_error(e: impl std::fmt::Display) -> LcError {
     } else {
         "gh 指令失敗"
     };
-    LcError::Upstream(format!("{hint}: {msg}"))
+    GithubError::Upstream(format!("{hint}: {msg}"))
 }
 
 fn excerpt(body: &str) -> String {
@@ -452,28 +435,28 @@ pub fn issue_summary(v: &Value) -> Value {
 
 /// A `repo` that is not a listed submodule is a 400: the list is the only thing that turns a
 /// user-supplied path into a directory git runs in.
-async fn project_with_github(app: &(impl crate::capabilities::Db + crate::github::GithubCache + crate::github::SubmodulesCache + crate::hosts::HostsAccess + crate::models::ModelsCache), project_id: &str, repo: &str) -> Result<(db::Project, GithubInfo), LcError> {
+async fn project_with_github(app: &(impl crate::capabilities::Db + crate::github::GithubCache + crate::github::SubmodulesCache + crate::hosts::HostsAccess + crate::models::ModelsCache), project_id: &str, repo: &str) -> Result<(db::Project, GithubInfo), GithubError> {
     let p = db::project(app.db(), project_id)
         .await
-        .map_err(|e| LcError::Upstream(e.to_string()))?
+        .map_err(|e| GithubError::Upstream(e.to_string()))?
         .filter(|p| p.deleted_at.is_none())
-        .ok_or_else(|| LcError::NotFound("project".into()))?;
+        .ok_or_else(|| GithubError::NotFound("project".into()))?;
     let repo = repo.trim().trim_matches('/');
     if !repo.is_empty() {
         if !valid_repo_rel(repo) {
-            return Err(LcError::Bad(format!("repo `{repo}` is not a relative path")));
+            return Err(GithubError::Bad(format!("repo `{repo}` is not a relative path")));
         }
         let subs = list_submodules(app, &p, false).await?;
         let sub = subs
             .iter()
             .find(|s| s.path == repo)
-            .ok_or_else(|| LcError::Bad(format!("`{repo}` is not a submodule of this project")))?;
-        let gh = sub.github.clone().ok_or_else(|| LcError::Bad(format!("submodule `{repo}` has no GitHub origin")))?;
+            .ok_or_else(|| GithubError::Bad(format!("`{repo}` is not a submodule of this project")))?;
+        let gh = sub.github.clone().ok_or_else(|| GithubError::Bad(format!("submodule `{repo}` has no GitHub origin")))?;
         return Ok((p, gh));
     }
     let gh = match cached(app, &p.id).await {
         Some(g) => g,
-        None => detect_project(app, &p).await.ok_or_else(|| LcError::Bad("project has no GitHub origin".into()))?,
+        None => detect_project(app, &p).await.ok_or_else(|| GithubError::Bad("project has no GitHub origin".into()))?,
     };
     Ok((p, gh))
 }
@@ -487,10 +470,10 @@ pub async fn list_issues(
     limit: u32,
     q: Option<&str>,
     refresh: bool,
-) -> Result<Value, LcError> {
+) -> Result<Value, GithubError> {
     let state = match state {
         "open" | "closed" | "all" => state,
-        _ => return Err(LcError::Bad("state must be open, closed or all".into())),
+        _ => return Err(GithubError::Bad("state must be open, closed or all".into())),
     };
     let limit = limit.clamp(1, 100);
     let q = q.map(str::trim).filter(|s| !s.is_empty());
@@ -535,7 +518,7 @@ fn remember_issues(cache: &mut HashMap<String, (Instant, Value)>, key: String, v
 }
 
 /// `GET /api/projects/:id/issues/:number` — uncached.
-pub async fn get_issue(app: &(impl crate::capabilities::Db + crate::github::GithubCache + crate::github::SubmodulesCache + crate::hosts::HostsAccess + crate::models::ModelsCache), project_id: &str, repo: &str, number: u64) -> Result<Value, LcError> {
+pub async fn get_issue(app: &(impl crate::capabilities::Db + crate::github::GithubCache + crate::github::SubmodulesCache + crate::hosts::HostsAccess + crate::models::ModelsCache), project_id: &str, repo: &str, number: u64) -> Result<Value, GithubError> {
     let (p, gh) = project_with_github(app, project_id, repo).await?;
     let cmd = format!(
         "{PATH_FIX}gh issue view {number} --repo {} --json number,title,state,labels,url,updatedAt,author,body",
@@ -570,6 +553,7 @@ mod issues_cache_tests {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::runners::github::spawn_detect_host;
 
     #[test]
     fn parses_remote_shapes() {
@@ -629,7 +613,7 @@ mod tests {
     #[test]
     fn gh_failures_are_told_apart_and_long_output_is_capped() {
         let msg = |s: &str| match gh_error(s) {
-            LcError::Upstream(m) => m,
+            GithubError::Upstream(m) => m,
             other => panic!("{other:?}"),
         };
         assert!(msg("HTTP 403: API rate limit exceeded for user ID 1").contains("限流"));

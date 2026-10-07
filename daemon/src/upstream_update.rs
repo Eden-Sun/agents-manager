@@ -403,8 +403,8 @@ pub async fn note_installed(app: &(impl crate::capabilities::Emit + crate::upstr
 }
 
 #[cfg(test)]
-pub(crate) async fn set_snapshot_for_test(app: &crate::state::App, status: UpstreamStatus) {
-    app.upstream_watch
+pub(crate) async fn set_snapshot_for_test(watch: &Watch, status: UpstreamStatus) {
+    watch
         .snapshot
         .lock()
         .await
@@ -835,7 +835,7 @@ mod tests {
     #[tokio::test]
     async fn behind_target_is_only_given_for_a_host_that_is_behind() {
         let e = crate::testing::env().await;
-        set_snapshot_for_test(&e.app, build_status(
+        set_snapshot_for_test(&e.app.upstream_watch, build_status(
             "codex-behind-test",
             &Ok("0.159.0".into()),
             &[("bt-old".into(), Ok("codex-cli 0.157.1".into())), ("bt-new".into(), Ok("codex-cli 0.159.0".into()))],
