@@ -12,9 +12,7 @@
 //! `watchdog_next_at`), not in the task: two controller loops of the same generation see the
 //! same count, and a daemon restart does not reset a failure streak to zero.
 
-use crate::state::App;
 use std::collections::HashMap;
-use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use super::store::{self, Supervisor};
@@ -156,11 +154,11 @@ pub fn clear_schedule(app: &impl crate::supervisor::watchdog::WatchdogDeadlines,
 }
 
 /// One controller tick's worth of watching.
-pub async fn tick(app: &Arc<App>) {
-    let Ok(sup) = store::get_or_init(&app.db).await else { return };
+pub async fn tick(app: &(impl crate::capabilities::Db + crate::capabilities::Emit + crate::supervisor::watchdog::WatchdogDeadlines + crate::supervisor::ports::TurnOps + crate::supervisor::ports::MissionOps + crate::supervisor::ports::ControllerRuntime + crate::supervisor::ports::MissionCancellation + crate::supervisor::ports::QuotaOps + crate::supervisor::ports::JudgeOps + Clone + Send + Sync + 'static)) {
+    let Ok(sup) = store::get_or_init(app.db()).await else { return };
     let Some(bot_id) = sup.bot_id.clone() else { return };
     // 讀不到 liveness ＝ 不知道，不是「已停止」：不排程、不計次、不動任何 watchdog 狀態，下一個 tick 再看（#249）。
-    let liveness = match super::manager_liveness(&app.db, &bot_id).await {
+    let liveness = match super::manager_liveness(app.db(), &bot_id).await {
         Ok(v) => v,
         Err(e) => {
             tracing::warn!(error = ?e, "supervisor watchdog cannot read manager liveness; skipping this tick");
@@ -173,7 +171,7 @@ pub async fn tick(app: &Arc<App>) {
             // Seen answering prompts again: the streak is over. `starting` is not enough — a
             // CLI that opens and dies would otherwise reset the count on every attempt.
             if matches!(liveness, "idle" | "busy") && (sup.watchdog_attempts > 0 || sup.watchdog_next_at.is_some()) {
-                let _ = store::set_watchdog(&app.db, 0, None).await;
+                let _ = store::set_watchdog(app.db(), 0, None).await;
                 clear_schedule(app, "patrol");
             }
         }
@@ -181,7 +179,7 @@ pub async fn tick(app: &Arc<App>) {
             let wait = backoff_secs(sup.watchdog_attempts);
             tracing::info!(attempts = sup.watchdog_attempts, wait, "supervisor is down and wanted; scheduling an automatic start");
             let at = iso_in(wait);
-            if store::set_watchdog(&app.db, sup.watchdog_attempts, Some(&at)).await.is_ok() {
+            if store::set_watchdog(app.db(), sup.watchdog_attempts, Some(&at)).await.is_ok() {
                 remember_schedule(app, "patrol", &at, Duration::from_secs(wait));
             }
         }
@@ -247,11 +245,11 @@ async fn report_gave_up(app: &(impl crate::capabilities::Db + crate::capabilitie
     app.emit("supervisor_changed", serde_json::json!({"watchdog": "gave_up", "why": why})).await;
 }
 
-async fn start(app: &Arc<App>, bot_id: &str, failures: i64) {
+async fn start(app: &(impl crate::capabilities::Db + crate::capabilities::Emit + crate::supervisor::watchdog::WatchdogDeadlines + crate::supervisor::ports::TurnOps + crate::supervisor::ports::MissionOps + crate::supervisor::ports::ControllerRuntime + crate::supervisor::ports::MissionCancellation + crate::supervisor::ports::QuotaOps + crate::supervisor::ports::JudgeOps + Clone + Send + Sync + 'static), bot_id: &str, failures: i64) {
     let _g = super::lock().await;
     // Re-read under the lock: `start`, `stop` or a bulk restart may have moved it meanwhile.
-    let Ok(sup) = store::get_or_init(&app.db).await else { return };
-    let Ok(liveness) = super::manager_liveness(&app.db, bot_id).await else { return };
+    let Ok(sup) = store::get_or_init(app.db()).await else { return };
+    let Ok(liveness) = super::manager_liveness(app.db(), bot_id).await else { return };
     if plan(&sup, liveness, |at: &str| scheduled_past(app, "patrol", at)) != Plan::Start {
         return;
     }
@@ -264,7 +262,7 @@ async fn start(app: &Arc<App>, bot_id: &str, failures: i64) {
             // climbing the backoff instead of restarting every 30 seconds.
             let wait = backoff_secs(attempt);
             let at = iso_in(wait);
-            if store::set_watchdog(&app.db, attempt, Some(&at)).await.is_ok() {
+            if store::set_watchdog(app.db(), attempt, Some(&at)).await.is_ok() {
                 remember_schedule(app, "patrol", &at, Duration::from_secs(wait));
             }
         }
@@ -272,17 +270,17 @@ async fn start(app: &Arc<App>, bot_id: &str, failures: i64) {
             let why = format!("{e:?}");
             tracing::warn!(attempt, error = %why, "supervisor watchdog failed to start the manager");
             if attempt >= MAX_ATTEMPTS {
-                let _ = store::set_watchdog(&app.db, attempt, None).await;
+                let _ = store::set_watchdog(app.db(), attempt, None).await;
                 clear_schedule(app, "patrol");
                 // Same reporting as the "started but died" path: one durable event, once.
                 report_gave_up(app, &why).await;
             } else {
                 let wait = backoff_secs(attempt);
                 let at = iso_in(wait);
-                if store::set_watchdog(&app.db, attempt, Some(&at)).await.is_ok() {
+                if store::set_watchdog(app.db(), attempt, Some(&at)).await.is_ok() {
                     remember_schedule(app, "patrol", &at, Duration::from_secs(wait));
                 }
-                let _ = store::set_status_detail(&app.db, Some(&format!("watchdog 自動啟動失敗（第 {attempt} 次）：{why}"))).await;
+                let _ = store::set_status_detail(app.db(), Some(&format!("watchdog 自動啟動失敗（第 {attempt} 次）：{why}"))).await;
             }
         }
     }

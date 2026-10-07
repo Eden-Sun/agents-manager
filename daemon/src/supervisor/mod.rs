@@ -68,7 +68,7 @@ mod notify_crid_tests {
 use crate::lifecycle::LcError;
 use crate::state::App;
 use sqlx::SqlitePool;
-use self::ports::{JudgeOps, MissionOps, TurnOps};
+use self::ports::{CandidateSwitch, ControllerRuntime, JudgeOps, MissionCancellation, MissionOps, QuotaOps, TurnOps};
 use serde_json::{json, Value};
 use std::sync::Arc;
 use std::sync::OnceLock;
@@ -146,7 +146,7 @@ const BOOTSTRAP_PROMPT: &str = r#"這是 AGM 啟動握手，不是新的工作�
 ///
 /// 啟動本身失敗時意圖照樣留著：交給看門狗的有界重試，健康那格也會因為「要它跑卻停著」變成 degraded
 /// （999480e 對協調者的決定，這裡跟它一致）。
-pub async fn start_requested(app: &Arc<App>) -> Result<(), LcError> {
+pub async fn start_requested(app: &(impl crate::capabilities::Db + crate::capabilities::Emit + TurnOps + MissionOps + QuotaOps + JudgeOps + CandidateSwitch + ControllerRuntime + MissionCancellation + Clone + Send + Sync + 'static)) -> Result<(), LcError> {
     // Choose the configured fallback before launching the CLI, so a low Fable bucket starts
     // directly on Opus instead of briefly opening the wrong session.
     if let Err(e) = controller::apply_quota_policy(app).await {
@@ -154,10 +154,10 @@ pub async fn start_requested(app: &Arc<App>) -> Result<(), LcError> {
     }
     // `manager_bot` 建好那一列（`get_or_init`）之後才寫得進去，而且沒設定好就該回 not_configured，
     // 不是留下一個沒有 bot 的「要它跑」。
-    if manager_bot(&app.db).await?.is_none() {
+    if manager_bot(app.db()).await?.is_none() {
         return Err(LcError::conflict("supervisor is not set up", json!({"reason": "not_configured"})));
     }
-    store::set_desired_running(&app.db, true).await.map_err(persist_intent_failed)?;
+    store::set_desired_running(app.db(), true).await.map_err(persist_intent_failed)?;
     start_manager(app, None).await
 }
 
@@ -189,11 +189,11 @@ fn persist_intent_failed<E: std::fmt::Display>(e: E) -> LcError {
 ///
 /// 這裡**不動** `desired_running`：看門狗與換模型重啟都走這條，寫意圖會把看門狗的重試次數歸零
 /// （`set_desired_running` 的語意是「人做了新決定」），有界重試就變成永遠重試。
-pub async fn start_manager(app: &Arc<App>, detail: Option<&str>) -> Result<(), LcError> {
-    let bot = manager_bot(&app.db)
+pub async fn start_manager(app: &(impl crate::capabilities::Db + crate::capabilities::Emit + ports::TurnOps + ports::MissionOps + ports::ControllerRuntime + ports::MissionCancellation + ports::QuotaOps + ports::JudgeOps + Clone + Send + Sync + 'static), detail: Option<&str>) -> Result<(), LcError> {
+    let bot = manager_bot(app.db())
         .await?
         .ok_or_else(|| LcError::conflict("supervisor is not set up", json!({"reason": "not_configured"})))?;
-    if crate::db::active_run(&app.db, &bot.id).await.map_err(up)?.is_none() {
+    if crate::db::active_run(app.db(), &bot.id).await.map_err(up)?.is_none() {
         app.start_bot(&bot.id).await?;
     }
     // A newly spawned CLI is intentionally idle until it receives a first turn. Send one
@@ -213,16 +213,16 @@ pub async fn start_manager(app: &Arc<App>, detail: Option<&str>) -> Result<(), L
     // session actually came up is something only an observation can say, so the status stays
     // `requested` until something verifies it — and it is bound to *this* run, so a later
     // restart cannot inherit the claim (see `remote.rs`).
-    let session = crate::db::active_run(&app.db, &bot.id).await.map_err(up)?.map(|r| r.id);
-    let _ = store::set_remote_observed(&app.db, "requested", None, "argv", session.as_deref(), None, None).await;
-    let _ = store::set_status(&app.db, "", detail).await;
-    let sup = store::get_or_init(&app.db).await.map_err(up)?;
+    let session = crate::db::active_run(app.db(), &bot.id).await.map_err(up)?.map(|r| r.id);
+    let _ = store::set_remote_observed(app.db(), "requested", None, "argv", session.as_deref(), None, None).await;
+    let _ = store::set_status(app.db(), "", detail).await;
+    let sup = store::get_or_init(app.db()).await.map_err(up)?;
     let gen = if sup.generation == 0 {
-        store::bump_generation(&app.db).await.map_err(up)?
+        store::bump_generation(app.db()).await.map_err(up)?
     } else {
         sup.generation
     };
-    controller::spawn(app.clone(), gen);
+    app.spawn_supervisor_controller(gen);
     controller::reconcile(app).await;
     app.emit("supervisor_changed", json!({"started": true})).await;
     Ok(())

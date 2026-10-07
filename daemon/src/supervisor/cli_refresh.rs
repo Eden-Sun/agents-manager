@@ -7,14 +7,14 @@
 //! 協調者那條還會重設身分／model／effort，開機不能走那條。沒設定的角色、不存在的目錄一律跳過，不代建。
 //! 寫不進去只記 warn 並推一則 inbox，daemon 照樣開機。`scripts/ops/*.sh` 沒有內嵌，仍要手動安裝。
 
-use crate::state::App;
+#[cfg(test)]
 use axum::extract::State;
+#[cfg(test)]
 use axum::Json;
 use serde_json::{json, Value};
 use std::io::Write;
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
 
 use super::roles::{self, Role};
 use super::store;
@@ -121,7 +121,7 @@ pub async fn refresh_on_startup(app: &(impl crate::capabilities::DataDir + crate
 /// （`install-manifest.tsv` 明寫「bin/agm 由 daemon 部署，不在這裡」）。於是「腳本比 CLI 新」
 /// 這個組合一律回報 ok，而它正是最會痛的那一種：`daemon-update-kick.sh` 派出的正文用
 /// `--lease-token-file`，舊的 `bin/agm` 不認得就 argparse rc 2，rebuild 窗口沒交還、握到 TTL。
-async fn status(app: &(impl crate::capabilities::DataDir + crate::capabilities::Db), embedded: &str) -> Value {
+pub(crate) async fn status(app: &(impl crate::capabilities::DataDir + crate::capabilities::Db), embedded: &str) -> Value {
     let embedded_hash = short_hash(embedded.as_bytes());
     let mut roles = Vec::new();
     for (role, dir) in configured_dirs(app).await {
@@ -146,22 +146,7 @@ async fn status(app: &(impl crate::capabilities::DataDir + crate::capabilities::
     json!({"embedded_hash": embedded_hash, "roles": roles})
 }
 
-/// `GET /api/supervisor/cli`。
-pub async fn get_cli(State(app): State<Arc<App>>) -> Json<Value> {
-    Json(status(&app, super::setup::AGM_CLI).await)
-}
-
-/// `POST /api/supervisor/cli`：不等下一次開機，現在就把 `bin/agm` 換成內嵌的那份（issue #532）。
-///
-/// 開機是唯一觸發點的時候，「安裝端落後」這件事只能靠重啟 daemon 修——而重啟要另外申請核准，
-/// 於是一個換個檔案就好的問題被綁在整條換版流程上。這條路只做 `refresh_on_startup` 做的事
-/// （只動 `bin/agm`，不碰 persona／runtime.json），回傳更新後的狀態。
-pub async fn post_cli_refresh(State(app): State<Arc<App>>) -> Json<Value> {
-    refresh_with(&app, super::setup::AGM_CLI).await;
-    Json(status(&app, super::setup::AGM_CLI).await)
-}
-
-async fn refresh_with(app: &(impl crate::capabilities::DataDir + crate::capabilities::Db), embedded: &str) {
+pub(crate) async fn refresh_with(app: &(impl crate::capabilities::DataDir + crate::capabilities::Db), embedded: &str) {
     for (role, dir) in configured_dirs(app).await {
         match refresh_cli(&dir, embedded) {
             Ok(Outcome::Refreshed { old_hash, new_hash, backup }) => tracing::info!(
@@ -195,6 +180,9 @@ async fn refresh_with(app: &(impl crate::capabilities::DataDir + crate::capabili
         }
     }
 }
+
+#[cfg(test)]
+pub use crate::runners::supervisor::cli::get_cli;
 
 #[cfg(test)]
 mod tests {

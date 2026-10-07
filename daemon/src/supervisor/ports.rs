@@ -28,7 +28,7 @@ pub trait TurnOps {
     async fn start_bot(&self, bot_id: &str) -> LcResult<String>;
     async fn start_bot_locked_with(&self, bot_id: &str, opts: StartOpts) -> LcResult<String>;
     async fn stop_bot(&self, bot_id: &str) -> LcResult<bool>;
-    async fn stop_bot_locked_if_idle(&self, bot_id: &str) -> LcResult<bool>;
+    fn stop_bot_locked_if_idle<'a>(&'a self, bot_id: &'a str) -> impl Future<Output = LcResult<bool>> + Send + 'a;
     async fn prompt_control_plane(&self, bot_id: &str, text: &str, client_request_id: &str, relay_from: Option<&str>) -> LcResult<PromptOut>;
     async fn prompt_relayed(
         &self,
@@ -40,16 +40,16 @@ pub trait TurnOps {
     ) -> LcResult<PromptOut>;
     async fn prompt_relayed_queueable(&self, bot_id: &str, text: &str, client_request_id: &str, relay_from: Option<&str>) -> LcResult<PromptOut>;
     #[allow(clippy::too_many_arguments)]
-    async fn insert_message(
-        &self,
-        conversation_id: &str,
-        turn_id: Option<&str>,
-        role: &str,
-        content: &str,
-        source: &str,
+    fn insert_message<'a>(
+        &'a self,
+        conversation_id: &'a str,
+        turn_id: Option<&'a str>,
+        role: &'a str,
+        content: &'a str,
+        source: &'a str,
         incomplete: bool,
-        snapshot: Option<&str>,
-    ) -> anyhow::Result<db::Message>;
+        snapshot: Option<&'a str>,
+    ) -> impl Future<Output = anyhow::Result<db::Message>> + Send + 'a;
     async fn revoke_queued_turn(&self, turn_id: &str, why: &str) -> anyhow::Result<bool>;
     async fn announce_revoked(&self, turn_id: &str, revoked: Revoked);
     async fn assignment_withdrawal(&self, turn_id: &str) -> anyhow::Result<Option<String>>;
@@ -106,7 +106,7 @@ pub trait JudgeOps {
 pub trait HostProbes {
     async fn pane_shows_login_problem(&self, run: &db::Run) -> Option<bool>;
     /// `memproc::dump`：整台（或遠端主機）的行程樹文字。
-    async fn process_dump(&self, host: &str) -> anyhow::Result<String>;
+    fn process_dump<'a>(&'a self, host: &'a str) -> impl Future<Output = anyhow::Result<String>> + Send + 'a;
     async fn identity_for_host(&self, host: &str, name: &str) -> Option<IdentityCfg>;
     /// 線上版本落後 main 的資訊（`deploy_now::behind` 對 `deploy_now::Ctx::of(app)` 的 repo 與線上 sha）。
     async fn deploy_behind(&self) -> Result<Value, String>;
@@ -124,7 +124,7 @@ pub trait HostProbes {
     where
         F: Fn() -> Fut + Send + Sync + 'static,
         Fut: Future<Output = ()> + Send + 'static;
-    async fn is_share_bot(&self, bot_id: &str) -> anyhow::Result<bool>;
+    fn is_share_bot<'a>(&'a self, bot_id: &'a str) -> impl Future<Output = anyhow::Result<bool>> + Send + 'a;
 }
 
 /// 本機記憶體帳的唯讀觀察（只讀 `&App`）：背景工作帳（`background_jobs`）與「現在換版」的放寬旗標（`deploy_wait`）。
@@ -133,6 +133,37 @@ pub trait LocalAccountView {
     fn background_jobs_duration(&self, run_id: &str) -> Option<(i64, i64, bool)>;
     /// 使用者按「現在換版」要放寬的那一筆核准（`deploy_wait::user_escalated_for`）。
     fn deploy_user_escalated_for(&self, approval: &crate::supervisor::store::Approval) -> bool;
+}
+
+/// Composition hook for starting the controller loop; the controller core does not know `App` or its event bus.
+pub trait ControllerRuntime {
+    fn spawn_supervisor_controller(&self, generation: i64);
+}
+
+/// Controller reconciliation's composition-only cleanup for cancelled missions.
+pub trait MissionCancellation {
+    async fn collect_cancelled_missions(&self);
+}
+
+/// App-backed pieces required to apply a chosen manager model at runtime.
+pub trait CandidateSwitch {
+    async fn switch_supervisor_candidate(&self, next: &str, reason: &str, reset_at: Option<&str>) -> Result<bool, crate::lifecycle::LcError>;
+}
+
+/// The controller keeps a consecutive classification failure count without depending on hook reception storage.
+pub trait ClassifyFailureState {
+    fn classify_failure_count(&self) -> &std::sync::atomic::AtomicU32;
+}
+
+/// In-memory evidence sampled by the incident probe.
+pub trait IncidentState: ClassifyFailureState {
+    fn spool_fold_stuck(&self) -> &tokio::sync::Mutex<std::collections::HashMap<String, (u32, i64)>>;
+    fn remote_shim_stale(&self) -> &tokio::sync::Mutex<std::collections::HashMap<String, String>>;
+}
+
+/// Whether the daemon's local API connection is considered ready.
+pub trait DaemonConnection {
+    fn daemon_connected(&self) -> bool;
 }
 
 #[cfg(test)]

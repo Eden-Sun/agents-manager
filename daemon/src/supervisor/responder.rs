@@ -12,11 +12,13 @@
 
 use crate::config::{BotCfg, ProjectCfg};
 use crate::lifecycle::{self, LcError};
+#[cfg(test)]
 use crate::state::App;
 use sqlx::SqlitePool;
-use super::ports::TurnOps;
+use super::ports::{ControllerRuntime, TurnOps, QuotaOps};
 use serde_json::{json, Value};
 use std::path::{Path, PathBuf};
+#[cfg(test)]
 use std::sync::Arc;
 
 use super::roles::{self, Role};
@@ -411,12 +413,12 @@ pub async fn apply_persona(app: &(impl crate::capabilities::Cfg + crate::capabil
 /// 跟巡檢那條（`super::start_requested`）同一個規則，理由也一樣：`desired_running` 是看門狗唯一的
 /// 憑據，寫不進去就整個失敗、什麼都不動，不留下「跑著但沒人要它跑」（issue #84）。start 本身失敗時
 /// 意圖留著，交給看門狗的有界重試（999480e）。
-pub async fn start_requested(app: &Arc<App>) -> Result<(), LcError> {
+pub async fn start_requested(app: &(impl crate::capabilities::Db + crate::capabilities::Emit + TurnOps + ControllerRuntime)) -> Result<(), LcError> {
     // 沒設定好就回 not_configured，不要先留下一個沒有 bot 可以對應的「要它跑」。
-    if roles::responder_bot(&app.db).await.map_err(up)?.is_none() {
+    if roles::responder_bot(app.db()).await.map_err(up)?.is_none() {
         return Err(LcError::conflict("responder is not set up", json!({"reason": "responder_not_configured"})));
     }
-    roles::set_desired_running(&app.db, Role::Responder, true)
+    roles::set_desired_running(app.db(), Role::Responder, true)
         .await
         .map_err(|e| LcError::Upstream(format!("could not persist desired_running (nothing was started): {e}")))?;
     start(app, None).await
@@ -424,12 +426,12 @@ pub async fn start_requested(app: &Arc<App>) -> Result<(), LcError> {
 
 /// 啟動協調者。呼叫端持有 [`super::lock`]。使用者按的 start 走 [`start_requested`]；這裡**不動**
 /// `desired_running`，看門狗也走這條，寫意圖會把它的重試次數歸零、有界重試就變成永遠重試。
-pub async fn start(app: &Arc<App>, detail: Option<&str>) -> Result<(), LcError> {
-    let bot = roles::responder_bot(&app.db)
+pub async fn start(app: &(impl crate::capabilities::Db + crate::capabilities::Emit + TurnOps + ControllerRuntime), detail: Option<&str>) -> Result<(), LcError> {
+    let bot = roles::responder_bot(app.db())
         .await
         .map_err(up)?
         .ok_or_else(|| LcError::conflict("responder is not set up", json!({"reason": "responder_not_configured"})))?;
-    if crate::db::active_run(&app.db, &bot.id).await.map_err(up)?.is_none() {
+    if crate::db::active_run(app.db(), &bot.id).await.map_err(up)?.is_none() {
         app.start_bot(&bot.id).await?;
     }
     if let Err(e) =
@@ -438,11 +440,11 @@ pub async fn start(app: &Arc<App>, detail: Option<&str>) -> Result<(), LcError> 
     {
         tracing::warn!(error = ?e, "AGM responder bootstrap prompt was not delivered");
     }
-    let _ = roles::set_status_detail(&app.db, Role::Responder, detail).await;
+    let _ = roles::set_status_detail(app.db(), Role::Responder, detail).await;
     // 協調者的喚醒掛在巡檢的 controller 迴圈上；巡檢還沒起來也要有一條迴圈在跑。
-    let sup = store::get_or_init(&app.db).await.map_err(up)?;
+    let sup = store::get_or_init(app.db()).await.map_err(up)?;
     if sup.bot_id.is_some() {
-        super::controller::spawn(app.clone(), sup.generation);
+        app.spawn_supervisor_controller(sup.generation);
     }
     app.emit("supervisor_changed", json!({"responder": "started"})).await;
     Ok(())
@@ -478,19 +480,19 @@ fn watched(row: &roles::RoleRow, quota_unknown_retry: bool) -> watchdog::Watched
     }
 }
 
-pub async fn watchdog_tick(app: &Arc<App>) {
-    let Ok(row) = roles::get(&app.db, Role::Responder).await else { return };
-    let Ok(bot) = roles::responder_bot(&app.db).await else { return };
+pub async fn watchdog_tick(app: &(impl crate::capabilities::Db + crate::capabilities::Emit + crate::supervisor::watchdog::WatchdogDeadlines + TurnOps + ControllerRuntime + QuotaOps + crate::quota::QuotaStaleKeys + crate::quota::QuotaTables + Clone + Send + Sync + 'static)) {
+    let Ok(row) = roles::get(app.db(), Role::Responder).await else { return };
+    let Ok(bot) = roles::responder_bot(app.db()).await else { return };
     let Some(bot) = bot else {
         // 登記過卻找不到那顆 bot（被刪掉）：看門狗沒有東西可以拉起來，交給巡檢。事件照樣留在
         // 協調者的佇列（SPEC §18.15）——只有等超過 5 分鐘的核准會被 `failover` 改派（issue #421）。
         if row.bot_id.is_some() {
-            report_missing(&app.db, row.bot_id.as_deref().unwrap_or("")).await;
+            report_missing(app.db(), row.bot_id.as_deref().unwrap_or("")).await;
         }
         return;
     };
     // 讀不到 liveness ＝ 不知道，不是「已停止」：這個 tick 不動看門狗狀態（#249）。
-    let Ok(liveness) = super::manager_liveness(&app.db, &bot.id).await else { return };
+    let Ok(liveness) = super::manager_liveness(app.db(), &bot.id).await else { return };
     // 等額度時看門狗不把它拉起來——除非我們其實**不知道**額度狀態（Unknown），而且排定的重試時間已經到了：
     // 那一次重試要有一個活著的協調者才發生得了。協調者在 `waiting_quota` 時 pane 掛掉或主機重開，而這個身分
     // 一直拿不到 5h＋7d 兩格讀數（探測壞掉、身分被停用、帳號本來就沒有那兩個窗）時，以前看門狗不重啟、
@@ -504,14 +506,14 @@ pub async fn watchdog_tick(app: &Arc<App>) {
     match watchdog::plan_for(watched(&row, quota_unknown_retry), liveness, is_past) {
         watchdog::Plan::Idle => {
             if matches!(liveness, "idle" | "busy") && (row.watchdog_attempts > 0 || row.watchdog_next_at.is_some()) {
-                let _ = roles::set_watchdog(&app.db, Role::Responder, 0, None, None).await;
+                let _ = roles::set_watchdog(app.db(), Role::Responder, 0, None, None).await;
                 watchdog::clear_schedule(app, "responder");
             }
         }
         watchdog::Plan::Wait { schedule: true } => {
             let wait = watchdog::backoff_secs(row.watchdog_attempts);
             let at = watchdog::iso_in(wait);
-            if roles::set_watchdog(&app.db, Role::Responder, row.watchdog_attempts, Some(&at), None).await.is_ok() {
+            if roles::set_watchdog(app.db(), Role::Responder, row.watchdog_attempts, Some(&at), None).await.is_ok() {
                 watchdog::remember_schedule(app, "responder", &at, std::time::Duration::from_secs(wait));
             }
         }
@@ -532,8 +534,8 @@ pub async fn watchdog_tick(app: &Arc<App>) {
             // 巡檢那半（`watchdog::start`）一直是這樣防的，這裡以前沒跟上。
             #[cfg(test)]
             crate::lifecycle::race_point::hit("responder_watchdog_start", &bot.id).await;
-            let Ok(row) = roles::get(&app.db, Role::Responder).await else { return };
-            let Ok(liveness) = super::manager_liveness(&app.db, &bot.id).await else { return };
+            let Ok(row) = roles::get(app.db(), Role::Responder).await else { return };
+            let Ok(liveness) = super::manager_liveness(app.db(), &bot.id).await else { return };
             if watchdog::plan_for(watched(&row, quota_unknown_retry), liveness, |at: &str| watchdog::scheduled_past(app, "responder", at)) != watchdog::Plan::Start {
                 tracing::info!(liveness, wanted = row.desired_running, "協調者看門狗放掉這一次自動啟動：拿到鎖時狀態已經變了");
                 return;
@@ -543,7 +545,7 @@ pub async fn watchdog_tick(app: &Arc<App>) {
                 Ok(()) => {
                     let wait = watchdog::backoff_secs(attempt);
                     let at = watchdog::iso_in(wait);
-                    if roles::set_watchdog(&app.db, Role::Responder, attempt, Some(&at), None).await.is_ok() {
+                    if roles::set_watchdog(app.db(), Role::Responder, attempt, Some(&at), None).await.is_ok() {
                         watchdog::remember_schedule(app, "responder", &at, std::time::Duration::from_secs(wait));
                     }
                 }
@@ -552,10 +554,10 @@ pub async fn watchdog_tick(app: &Arc<App>) {
                     if attempt < watchdog::MAX_ATTEMPTS {
                         let wait = watchdog::backoff_secs(attempt);
                         let next = watchdog::iso_in(wait);
-                        if roles::set_watchdog(&app.db, Role::Responder, attempt, Some(&next), Some(&why)).await.is_ok() {
+                        if roles::set_watchdog(app.db(), Role::Responder, attempt, Some(&next), Some(&why)).await.is_ok() {
                             watchdog::remember_schedule(app, "responder", &next, std::time::Duration::from_secs(wait));
                         }
-                    } else if roles::set_watchdog(&app.db, Role::Responder, attempt, None, Some(&why)).await.is_ok() {
+                    } else if roles::set_watchdog(app.db(), Role::Responder, attempt, None, Some(&why)).await.is_ok() {
                         watchdog::clear_schedule(app, "responder");
                     }
                     if attempt >= watchdog::MAX_ATTEMPTS {

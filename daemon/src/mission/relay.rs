@@ -8,35 +8,15 @@
 //! 帶 `assignment_id` 的 `supervisor_changed` 查一次那件交辦掛在哪個任務，有就補推。以後新增的交辦轉換
 //! 只要照慣例發 `supervisor_changed`，任務卡就跟得上。
 
-use super::ports::{EventOps, SupervisorRepo};
-use crate::state::{App, WsEvent};
+use super::ports::SupervisorRepo;
 use serde_json::{json, Value};
-use std::sync::Arc;
-use tokio::sync::broadcast::error::RecvError;
-
-/// 開機時呼叫一次。訂閱在 spawn **之前**完成，之後發的事件一則都不會漏在「還沒訂上」的空窗裡。
-pub fn spawn(app: Arc<App>) {
-    let mut rx = app.subscribe_events();
-    tokio::spawn(async move {
-        loop {
-            match rx.recv().await {
-                Ok(ev) => {
-                    relay(&app, &ev).await;
-                }
-                // 落後就跳過那幾則：前端在重連與 resync 時會整份重抓已載入的任務（`refreshLoadedMissions`）。
-                Err(RecvError::Lagged(n)) => tracing::debug!(skipped = n, "mission relay lagged"),
-                Err(RecvError::Closed) => break,
-            }
-        }
-    });
-}
 
 /// 這則事件是某個任務的交辦改了狀態 → 推 `mission_updated`，回傳推了沒有。
-pub async fn relay(app: &(impl crate::capabilities::Db + crate::mission::ports::EventOps), ev: &WsEvent) -> bool {
-    if ev.kind != "supervisor_changed" {
+pub async fn relay(app: &(impl crate::capabilities::Db + crate::mission::ports::EventOps), kind: &str, data: &Value) -> bool {
+    if kind != "supervisor_changed" {
         return false;
     }
-    let Some(aid) = ev.data.get("assignment_id").and_then(Value::as_str) else { return false };
+    let Some(aid) = data.get("assignment_id").and_then(Value::as_str) else { return false };
     let Ok(Some(a)) = app.db().assignment(aid).await else { return false };
     let Some(mid) = a.mission_id.as_deref() else { return false };
     let Ok(Some(m)) = super::store::get(app.db(), mid).await else { return false };
@@ -51,6 +31,7 @@ pub async fn relay(app: &(impl crate::capabilities::Db + crate::mission::ports::
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::state::WsEvent;
     use std::time::Duration;
 
     async fn next_mission_update(rx: &mut tokio::sync::broadcast::Receiver<WsEvent>) -> Option<Value> {
@@ -91,8 +72,8 @@ mod tests {
         crate::supervisor::store::set_mission_link(&app.db, &linked.id, &m.id, "executor").await.unwrap();
         let loose = crate::supervisor::store::insert_assignment(&app.db, None, &y.id, "crid-loose", "別的事", &[], None, true).await.unwrap();
 
-        spawn(app.clone());
-        let mut rx = app.subscribe_events();
+        crate::runners::mission::spawn_relay(app.clone());
+        let mut rx = app.subscribe();
 
         app.emit("supervisor_changed", json!({"assignment_id": loose.id, "status": "delivered"})).await;
         app.emit("supervisor_changed", json!({"responder": "woken"})).await;

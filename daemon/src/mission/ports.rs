@@ -16,7 +16,7 @@
 //! 而不是 `emit`），免得 inherent 方法優先、呼叫端悄悄繞過這道介面。
 //!
 //! 還沒切掉的邊（型別層，等型別搬進 core／store 再換）：`lifecycle::{LcError, LcResult, PromptOut}`、
-//! `supervisor::store::{Assignment, OPEN_STATES}`、`quota::{Quota, Window, LimitHit, Bucket}`、`state::{App, WsEvent}`、
+//! `supervisor::store::{Assignment, OPEN_STATES}`、`quota::{Quota, Window, LimitHit, Bucket}`、
 //! `config::{LOCAL_HOST, agent_name}`、`herdr::AgentInfo`、`db::*`，以及 `Arc<App>` 出現在 handler／函式簽名上。
 
 #![allow(async_fn_in_trait)]
@@ -24,11 +24,9 @@
 use crate::db;
 use crate::lifecycle::{LcError, LcResult, PromptOut};
 use crate::quota::Quota;
-use crate::state::WsEvent;
 use axum::http::HeaderMap;
 use serde_json::Value;
 use std::future::Future;
-use tokio::sync::broadcast;
 
 /// AGM 的兩個角色（誰是「收 mission 事件的那個 AGM」）。跟 `supervisor::roles::Role` 一一對應，
 /// 但 mission 只認這兩個名字，不認 supervisor 的角色表。
@@ -143,8 +141,6 @@ pub trait MissionGateRules {
 pub trait EventOps {
     /// `App::emit`：發一則 WS 事件（敏感欄位清理、seq、重播環都在原處）。
     async fn emit_event(&self, kind: &str, data: Value);
-    /// `App::subscribe`：訂閱 WS 事件匯流排（relay 迴圈用，要在 spawn 之前訂）。
-    fn subscribe_events(&self) -> broadcast::Receiver<WsEvent>;
 }
 
 /// 群組送字用的回合與訊息操作（原 `lifecycle::{prompt_grouped, owed_as_unknown, insert_message_grouped}`）。

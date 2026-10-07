@@ -137,7 +137,7 @@ impl MissionOps for Arc<App> {
         crate::mission::workflow::wake_stalled(self).await
     }
     async fn mission_sweep_closed_temp_bots(&self) {
-        crate::mission::api::sweep_closed_mission_temp_bots(self).await
+        crate::runners::mission::api::sweep_closed_mission_temp_bots(self).await
     }
 }
 
@@ -216,5 +216,44 @@ impl LocalAccountView for App {
     }
     fn deploy_user_escalated_for(&self, approval: &crate::supervisor::store::Approval) -> bool {
         crate::deploy_wait::user_escalated_for(self, approval)
+    }
+}
+
+impl crate::supervisor::ports::ControllerRuntime for Arc<App> {
+    fn spawn_supervisor_controller(&self, generation: i64) {
+        crate::runners::supervisor::runtime::spawn(self.clone(), generation)
+    }
+}
+
+impl crate::supervisor::ports::ClassifyFailureState for Arc<App> {
+    fn classify_failure_count(&self) -> &std::sync::atomic::AtomicU32 {
+        &self.classify_failures
+    }
+}
+
+impl crate::supervisor::ports::IncidentState for Arc<App> {
+    fn spool_fold_stuck(&self) -> &tokio::sync::Mutex<std::collections::HashMap<String, (u32, i64)>> {
+        &self.spool_fold_stuck
+    }
+    fn remote_shim_stale(&self) -> &tokio::sync::Mutex<std::collections::HashMap<String, String>> {
+        &self.remote_shim_stale
+    }
+}
+
+impl crate::supervisor::ports::DaemonConnection for Arc<App> {
+    fn daemon_connected(&self) -> bool {
+        self.connected.load(std::sync::atomic::Ordering::SeqCst)
+    }
+}
+
+impl crate::supervisor::ports::MissionCancellation for Arc<App> {
+    async fn collect_cancelled_missions(&self) {
+        crate::runners::supervisor::runtime::collect_cancelled_missions(self).await
+    }
+}
+
+impl crate::supervisor::ports::CandidateSwitch for Arc<App> {
+    async fn switch_supervisor_candidate(&self, next: &str, reason: &str, reset_at: Option<&str>) -> Result<bool, crate::lifecycle::LcError> {
+        crate::runners::supervisor::runtime::switch_candidate(self, next, reason, reset_at).await
     }
 }
