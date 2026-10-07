@@ -709,6 +709,14 @@ export interface DirEntry {
   git: boolean
 }
 
+/** `POST /api/fs/dirs`（issue #877）建好的資料夾。 */
+export interface CreatedDir {
+  /** 完整路徑：直接當 Project 路徑。 */
+  path: string
+  name: string
+  parent: string | null
+}
+
 export interface DirListing {
   path: string
   parent: string | null

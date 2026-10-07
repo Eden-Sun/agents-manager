@@ -11,6 +11,7 @@ import type {
   ModelRemap,
   AppState,
   Attachment,
+  CreatedDir,
   DirListing,
   GhLoginMode,
   GhStatus,
@@ -292,6 +293,18 @@ export async function listDirs(path?: string, host?: string, hidden?: boolean): 
     entries: entries.filter(isRec).map((e) => ({ name: str(e.name), path: str(e.path), git: e.git === true })),
     truncated: r.truncated === true,
   }
+}
+
+/**
+ * 目錄選擇器的「新資料夾」（issue #877）：在 `parent` 底下建 `name`。名字不合 400、同名已存在 409 `already_exists`（訊息在 `body.message`）、
+ * 憑證目錄 403——失敗丟 `ApiError`，由呼叫端顯示。
+ */
+export async function createDir(parent: string, name: string, host?: string): Promise<CreatedDir> {
+  const body: Record<string, string> = { parent, name }
+  if (host && host !== 'local') body.host = host
+  const raw = await transport.request('POST', '/fs/dirs', body)
+  const r = isRec(raw) ? raw : {}
+  return { path: str(r.path), name: str(r.name), parent: r.parent == null ? null : str(r.parent) }
 }
 
 // hosts (SPEC §11.6)

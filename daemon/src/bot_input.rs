@@ -90,6 +90,29 @@ pub fn check_project_path(raw: &str) -> Result<(), LcError> {
     Ok(())
 }
 
+/// 目錄選擇器「新資料夾」的名字：單一一段路徑，不是路徑。回去掉頭尾空白後的名字。
+/// 擋：空白名、`.`／`..`、含 `/`（不能借名字跳到別的層，也不能一次建好幾層）、NUL／控制字元（換行會偽造遠端 sh 輸出的 `AM_*` 行）、
+/// 超過 255 位元組（多數檔案系統的單段上限）。已存在不在這裡判（要看檔案系統）。
+pub fn check_new_dir_name(raw: &str) -> Result<String, LcError> {
+    let name = raw.trim();
+    if name.is_empty() {
+        return Err(LcError::Bad("folder name must not be empty".into()));
+    }
+    if name == "." || name == ".." {
+        return Err(LcError::Bad("folder name must not be `.` or `..`".into()));
+    }
+    if name.contains('/') {
+        return Err(LcError::Bad("folder name must not contain `/` (one folder at a time)".into()));
+    }
+    if name.chars().any(|c| c == '\0' || c.is_control() || is_invisible_format_char(c)) {
+        return Err(LcError::Bad("folder name must not contain control or invisible characters".into()));
+    }
+    if name.len() > 255 {
+        return Err(LcError::Bad("folder name is too long (max 255 bytes)".into()));
+    }
+    Ok(name.to_string())
+}
+
 /// `canonical_path` 之後呼叫：解開後必須是目錄。
 pub fn check_is_dir(canonical: &str) -> Result<(), LcError> {
     if std::path::Path::new(canonical).is_dir() {
@@ -115,6 +138,17 @@ mod tests {
         for m in ["opus", "claude-opus-5-5", "gpt-6.1-sol", "opus[1m]", "", "  sonnet  ", "openai/gpt-6:high"] {
             assert!(check_model(m).is_ok(), "{m:?}");
         }
+    }
+
+    #[test]
+    fn new_dir_name_is_a_single_plain_path_segment() {
+        for n in ["", "  ", ".", "..", "a/b", "../x", "/", "a\nb", "a\0b", "\u{202e}rtl", &"x".repeat(256)] {
+            assert!(bad(check_new_dir_name(n).map(|_| ())), "{n:?}");
+        }
+        for (n, want) in [("proj", "proj"), ("  proj  ", "proj"), ("新 專案", "新 專案"), (".hidden", ".hidden"), ("-dash", "-dash"), ("a..b", "a..b")] {
+            assert_eq!(check_new_dir_name(n).unwrap(), want);
+        }
+        assert!(check_new_dir_name(&"x".repeat(255)).is_ok());
     }
 
     #[test]

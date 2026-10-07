@@ -3084,6 +3084,9 @@ claude 的 statusLine 每次重繪都呼叫、沒有回合語意，不進 spool�
 ### 11.5 目錄選擇器
 `GET /api/fs/dirs?host=<name>&path=` 對遠端跑一段 sh（`cd <path> && pwd && for d in */ .[!.]*/; …` 輸出 `名稱\t是否有 .git`），daemon 解析成與本機相同的 JSON
 （`home` 取 `echo $HOME`，`~` 前綴展開）。隱藏目錄預設略過，`hidden=1` 才列。
+「新資料夾」（`POST /api/fs/dirs`，issue #877）走同一條 ssh 路徑：`cd <上層> && pwd -P`、套同一份憑證目錄清單（含「新路徑本身就是 `~/.ssh`」），
+再 `mkdir -- <名字>`（不 `-p`；名字經 `sh_quote`、事先過單一一段的驗證）；同名已存在輸出 `AM_EXISTS=1`，daemon 回 409 `already_exists`。本機用 `mkdirat`
+（沿路 `O_NOFOLLOW` 逐層開、已存在回 `EEXIST`，不把既有的當成功）。
 
 ### 11.6 API 與 UI
 

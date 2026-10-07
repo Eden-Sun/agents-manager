@@ -280,3 +280,61 @@
   font-size: 11px;
   color: var(--text-dim);
 }
+
+/* 「新資料夾」內嵌表單（issue #877）：夾在工具列與清單之間，不開第二層對話框。 */
+.dirpicker-newbtn {
+  flex: 0 0 auto;
+  white-space: nowrap;
+  padding: 3px 8px;
+  font-size: 11.5px;
+}
+
+.dirpicker-new {
+  display: grid;
+  gap: 4px;
+  min-width: 0;
+  padding: 6px 8px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--bg-panel);
+}
+
+.dirpicker-new-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+}
+
+.dirpicker-new-row input {
+  flex: 1;
+  min-width: 0;
+  padding: 4px 8px;
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  font-size: 11.5px;
+}
+
+.dirpicker-new-row input:focus {
+  outline: none;
+  border-color: var(--accent);
+}
+
+.dirpicker-new-row input[aria-invalid='true'] {
+  border-color: #d04a4a;
+}
+
+.dirpicker-new-hint {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 11px;
+  color: var(--text-faint);
+}
+
+.dirpicker-new .dirpicker-empty {
+  padding: 0;
+  text-align: left;
+}

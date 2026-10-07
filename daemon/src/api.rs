@@ -319,7 +319,7 @@ pub fn router(app: Arc<App>) -> Router {
         .route("/bots/{id}/restore", post(restore_bot))
         .route("/identities", post(create_identity))
         .route("/identities/{name}", delete(delete_identity))
-        .route("/fs/dirs", get(list_dirs))
+        .route("/fs/dirs", get(list_dirs).post(make_dir))
         .route("/capabilities", get(get_capabilities))
         .route("/services/daemon-swap/probe/{id}", post(service_daemon_swap_probe))
         .route("/services/daemon-swap/restart-window", post(service_daemon_swap_restart_window))
@@ -778,6 +778,7 @@ const BOT_ROUTE_POLICIES: &[(&str, &str, BotRoutePolicy)] = &[
     ("POST", "/api/projects/{id}/group/read", BotRoutePolicy::UserOnly),
     ("PUT", "/api/drafts/{key}", BotRoutePolicy::UserOnly),
     ("GET", "/api/fs/dirs", BotRoutePolicy::UserOrAgm),
+    ("POST", "/api/fs/dirs", BotRoutePolicy::UserOnly),
     ("GET", "/api/build/remote", BotRoutePolicy::UserOrAgm),
     ("PUT", "/api/build/remote", BotRoutePolicy::UserOrAgm),
     ("POST", "/api/build/remote/test", BotRoutePolicy::UserOrAgm),
@@ -1527,6 +1528,15 @@ struct DirsQuery {
     hidden: Option<String>,
 }
 
+#[derive(Deserialize)]
+struct MkdirIn {
+    host: Option<String>,
+    /// 目前瀏覽的上層目錄（可 `~`／`~/x`）；沒帶＝家目錄。
+    parent: Option<String>,
+    /// 新資料夾的名字：單一一段（`bot_input::check_new_dir_name`）。
+    name: String,
+}
+
 /// 目錄瀏覽不該列的地方（憑證、金鑰、daemon 自己的資料與各 CLI 的設定／身分目錄）。純判斷，可測。
 /// 用 component 比（`.sshx` 不是 `.ssh`，`.claudeish` 不是 `.claude`）；身分目錄 `~/.claude-<名>` 整族都擋。
 fn fs_dir_denied(path: &std::path::Path, home: &std::path::Path, data_dir: &std::path::Path) -> bool {
@@ -1644,6 +1654,71 @@ async fn list_dirs(State(app): State<Arc<App>>, Extension(principal): Extension<
         "entries": rd,
         "truncated": truncated,
     })))
+}
+
+/// 在已經 canonicalize 的 `parent`（沿路 `O_NOFOLLOW` 逐層開，不給「檢查完才被換成 symlink」的空檔）底下新建 `name`。
+/// 已存在（含同名檔案、symlink）回 `AlreadyExists`。
+fn local_make_dir(parent: &std::path::Path, name: &str) -> std::io::Result<()> {
+    let components = if parent == std::path::Path::new("/") {
+        Vec::new()
+    } else {
+        crate::trusted_open::safe_relative_components(parent.strip_prefix("/").map_err(|_| std::io::Error::new(std::io::ErrorKind::InvalidInput, "directory path is not absolute"))?)
+            .ok_or_else(|| std::io::Error::new(std::io::ErrorKind::InvalidInput, "unsafe directory path"))?
+    };
+    let dir = crate::trusted_open::open_bound_dir(std::path::Path::new("/"), &components, None)?;
+    crate::trusted_open::make_new_dir_in(&dir, std::ffi::OsStr::new(name), 0o755).map(|_| ())
+}
+
+/// `POST /api/fs/dirs` `{host?, parent?, name}`：DirPicker 的「新資料夾」。在 `parent` 底下建 `name`，回 `{path, name, parent}`——
+/// UI 直接把 `path` 當成 Project 路徑。只有 User principal；`parent`、新路徑都套 `GET /api/fs/dirs` 同一份「不給進」規則（SPEC §11.5）。
+/// 名字見 `bot_input::check_new_dir_name`（400）；已經有同名的東西 → 409 `already_exists`，什麼都沒動。
+async fn make_dir(State(app): State<Arc<App>>, Extension(principal): Extension<RequestPrincipal>, Json(b): Json<MkdirIn>) -> Result<Json<Value>, LcError> {
+    if principal != RequestPrincipal::User {
+        return Err(LcError::Forbidden(json!({"error": "forbidden", "reason": "user_only"})));
+    }
+    let name = crate::bot_input::check_new_dir_name(&b.name)?;
+    let host = b.host.clone().filter(|s| !s.trim().is_empty()).unwrap_or_else(|| LOCAL_HOST.to_string());
+    let exists = |parent: &str| {
+        LcError::conflict(
+            "already_exists",
+            json!({"name": name, "parent": parent, "message": format!("`{name}` already exists in {parent}; pick another name or choose that folder")}),
+        )
+    };
+    if host != LOCAL_HOST {
+        let conn = app.hosts.get(&host).await.ok_or_else(|| LcError::NotFound("host".into()))?;
+        let parent = b.parent.as_deref().map(str::trim).filter(|s| !s.is_empty()).unwrap_or("~");
+        return match crate::hosts::remote_make_dir(&conn, parent, &name).await.map_err(|e| LcError::Upstream(format!("{e:#}")))? {
+            crate::hosts::MakeDirOutcome::Created(path) => {
+                let parent_path = std::path::Path::new(&path).parent().map(|p| p.to_string_lossy().to_string());
+                Ok(Json(json!({"path": path, "name": name, "parent": parent_path})))
+            }
+            crate::hosts::MakeDirOutcome::Exists => Err(exists(parent)),
+        };
+    }
+    let home = dirs::home_dir().unwrap_or_else(|| std::path::PathBuf::from("/"));
+    let raw = b.parent.filter(|s| !s.trim().is_empty()).unwrap_or_else(|| home.to_string_lossy().to_string());
+    let raw = if let Some(rest) = raw.strip_prefix("~") { format!("{}{}", home.display(), rest) } else { raw };
+    let parent = std::fs::canonicalize(&raw).map_err(|e| LcError::Bad(format!("{raw}: {e}")))?;
+    if !parent.is_dir() {
+        return Err(LcError::Bad(format!("{raw} is not a directory")));
+    }
+    let canon_home = std::fs::canonicalize(&home).unwrap_or_else(|_| home.clone());
+    let canon_data = std::fs::canonicalize(&app.data_dir).unwrap_or_else(|_| app.data_dir.clone());
+    let target = parent.join(&name);
+    if fs_dir_denied(&parent, &canon_home, &canon_data) || fs_dir_denied(&target, &canon_home, &canon_data) {
+        return Err(LcError::Forbidden(json!({"error": "forbidden", "reason": "directory_not_browsable"})));
+    }
+    let made = tokio::task::spawn_blocking({
+        let (parent, name) = (parent.clone(), name.clone());
+        move || local_make_dir(&parent, &name)
+    })
+    .await
+    .map_err(any_err)?;
+    match made {
+        Ok(()) => Ok(Json(json!({"path": target.to_string_lossy(), "name": name, "parent": parent.to_string_lossy()}))),
+        Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => Err(exists(&parent.to_string_lossy())),
+        Err(e) => Err(LcError::Bad(format!("cannot create {}: {e}", target.display()))),
+    }
 }
 
 async fn create_project(State(app): State<Arc<App>>, Json(b): Json<NewProject>) -> Result<Response, LcError> {
@@ -9055,6 +9130,158 @@ mod bot_config_tests {
         let v = crate::hosts::parse_dir_listing(&run(tmp.to_str().unwrap(), true), true).unwrap();
         let names: Vec<&str> = v["entries"].as_array().unwrap().iter().map(|e| e["name"].as_str().unwrap()).collect();
         assert_eq!(names, [".hidden", "ok1"], "hidden=1 才多出隱藏的：{v}");
+    }
+
+    // ───────── 「新資料夾」`POST /fs/dirs`（issue #877） ─────────
+
+    fn mkdir_in(parent: &std::path::Path, name: &str) -> Json<MkdirIn> {
+        Json(MkdirIn { host: None, parent: Some(parent.to_string_lossy().into_owned()), name: name.into() })
+    }
+
+    fn scratch(tag: &str) -> std::path::PathBuf {
+        let tmp = crate::testing::track(std::env::temp_dir().join(format!("am-test-mkdir-{tag}-{}", db::ulid())));
+        std::fs::create_dir_all(&tmp).unwrap();
+        std::fs::canonicalize(&tmp).unwrap()
+    }
+
+    /// 在上層目錄建出新資料夾，回完整路徑（UI 直接拿來當 Project 路徑）；中文與空白的名字也行。
+    #[tokio::test]
+    async fn mkdir_creates_a_folder_under_the_browsed_parent_and_returns_its_path() {
+        let e = env().await;
+        let tmp = scratch("ok");
+        for name in ["new-proj", "新 專案", ".hidden", "-dash", "  padded  "] {
+            let Json(v) = make_dir(State(e.app.clone()), dirs_user(), mkdir_in(&tmp, name)).await.unwrap();
+            let want = tmp.join(name.trim());
+            assert!(want.is_dir(), "{name:?} 沒建出來");
+            assert_eq!(v["path"], json!(want.to_string_lossy()));
+            assert_eq!(v["name"], json!(name.trim()), "名字去掉頭尾空白");
+            assert_eq!(v["parent"], json!(tmp.to_string_lossy()));
+        }
+        // 建好的資料夾本來就能被目錄瀏覽列出來、也能當 Project 路徑。
+        let Json(listing) = list_dirs(State(e.app.clone()), dirs_user(), dirs_query(&tmp)).await.unwrap();
+        assert!(listing["entries"].as_array().unwrap().iter().any(|x| x["name"] == json!("new-proj")));
+    }
+
+    /// 已經有同名的東西（資料夾、檔案、符號連結）→ 409 `already_exists`，一個字都不動。
+    #[tokio::test]
+    async fn mkdir_says_so_when_the_name_already_exists_and_touches_nothing() {
+        let e = env().await;
+        let tmp = scratch("exists");
+        std::fs::create_dir(tmp.join("dir")).unwrap();
+        std::fs::write(tmp.join("file"), "keep").unwrap();
+        let elsewhere = scratch("exists-target");
+        std::os::unix::fs::symlink(&elsewhere, tmp.join("link")).unwrap();
+        for name in ["dir", "file", "link"] {
+            let err = make_dir(State(e.app.clone()), dirs_user(), mkdir_in(&tmp, name)).await.unwrap_err();
+            let LcError::Conflict(v) = err else { panic!("{name}: 要 409") };
+            assert_eq!(v["reason"], json!("already_exists"), "{v}");
+            assert!(v["message"].as_str().unwrap().contains(name), "提示要講是哪個名字：{v}");
+        }
+        assert_eq!(std::fs::read_to_string(tmp.join("file")).unwrap(), "keep");
+        assert!(std::fs::read_dir(&elsewhere).unwrap().next().is_none(), "不能穿過符號連結建到別處");
+    }
+
+    /// 名字驗證：空白、`.`／`..`、含 `/`、控制字元、過長 → 400，而且什麼都沒建（尤其不能靠 `../x` 跳出上層）。
+    #[tokio::test]
+    async fn mkdir_refuses_bad_names_and_never_escapes_the_parent() {
+        let e = env().await;
+        let tmp = scratch("badname");
+        let inner = tmp.join("inner");
+        std::fs::create_dir(&inner).unwrap();
+        let long = "x".repeat(256);
+        for name in ["", "   ", ".", "..", "../escaped", "a/b", "/abs", "a\nb", "a\0b", "tab\tname", long.as_str()] {
+            let err = make_dir(State(e.app.clone()), dirs_user(), mkdir_in(&inner, name)).await.unwrap_err();
+            assert!(matches!(err, LcError::Bad(_)), "{name:?} 要 400：{err:?}");
+        }
+        assert!(!tmp.join("escaped").exists());
+        assert!(std::fs::read_dir(&inner).unwrap().next().is_none(), "被拒的名字不留任何東西");
+    }
+
+    /// 只有 User 能建；bot／service 一律 403；憑證與 daemon 資料目錄不給建（跟列目錄同一份規則）。
+    #[tokio::test]
+    async fn mkdir_is_user_only_and_keeps_the_browse_denylist() {
+        let e = env().await;
+        let tmp = scratch("authz");
+        for principal in [RequestPrincipal::Bot("b1".into()), RequestPrincipal::Service("daemon-swap".into())] {
+            let err = make_dir(State(e.app.clone()), Extension(principal), mkdir_in(&tmp, "x")).await.unwrap_err();
+            assert!(matches!(err, LcError::Forbidden(_)), "{err:?}");
+        }
+        assert!(!tmp.join("x").exists());
+        let err = make_dir(State(e.app.clone()), dirs_user(), mkdir_in(&e.app.data_dir, "x")).await.unwrap_err();
+        assert!(matches!(err, LcError::Forbidden(_)), "daemon 資料目錄底下不能建：{err:?}");
+        // 新路徑本身落在不給進的地方（在家目錄底下建 `.ssh`）也擋：純判斷。
+        let home = std::path::Path::new("/home/u");
+        let data = std::path::Path::new("/srv/am-data");
+        for target in ["/home/u/.ssh", "/home/u/.aws", "/home/u/.claude-cc9", "/home/u/.config/agents-manager"] {
+            assert!(fs_dir_denied(std::path::Path::new(target), home, data), "{target}");
+        }
+    }
+
+    #[tokio::test]
+    async fn mkdir_needs_an_existing_directory_as_parent() {
+        let e = env().await;
+        let tmp = scratch("parent");
+        std::fs::write(tmp.join("f"), "x").unwrap();
+        for parent in [tmp.join("missing"), tmp.join("f")] {
+            let err = make_dir(State(e.app.clone()), dirs_user(), mkdir_in(&parent, "n")).await.unwrap_err();
+            assert!(matches!(err, LcError::Bad(_)), "{parent:?}: {err:?}");
+        }
+        // 上層是符號連結：建在它指到的那一層（canonicalize 之後），不是建在連結本身。
+        let real = scratch("parent-real");
+        let link = tmp.join("lnk");
+        std::os::unix::fs::symlink(&real, &link).unwrap();
+        let Json(v) = make_dir(State(e.app.clone()), dirs_user(), mkdir_in(&link, "via-link")).await.unwrap();
+        assert!(real.join("via-link").is_dir());
+        assert_eq!(v["path"], json!(real.join("via-link").to_string_lossy()));
+    }
+
+    /// 遠端：同一段 sh 在本機的 `sh` 上真的跑（`HOME` 指到暫存目錄，不碰真的家目錄）。
+    #[test]
+    fn mkdir_remote_script_creates_reports_exists_and_refuses_credential_dirs() {
+        let home = scratch("remote-home");
+        std::fs::create_dir_all(home.join("work")).unwrap();
+        std::fs::create_dir_all(home.join(".ssh/inner")).unwrap();
+        let run = |parent: &str, name: &str| {
+            let script = crate::hosts::make_dir_script(parent, name);
+            let out = std::process::Command::new("/bin/sh").arg("-c").arg(script).env("HOME", &home).output().unwrap();
+            crate::hosts::parse_make_dir(&String::from_utf8_lossy(&out.stdout))
+        };
+        let work = home.join("work");
+        // 絕對路徑、`~/`、`~` 三種上層寫法。
+        assert_eq!(run(work.to_str().unwrap(), "a").unwrap(), crate::hosts::MakeDirOutcome::Created(work.join("a").to_string_lossy().into()));
+        assert_eq!(run("~/work", "b").unwrap(), crate::hosts::MakeDirOutcome::Created(work.join("b").to_string_lossy().into()));
+        assert_eq!(run("~", "c").unwrap(), crate::hosts::MakeDirOutcome::Created(home.join("c").to_string_lossy().into()));
+        assert!(work.join("a").is_dir() && work.join("b").is_dir() && home.join("c").is_dir());
+        // 已存在：資料夾、檔案、符號連結。
+        std::fs::write(work.join("file"), "keep").unwrap();
+        std::os::unix::fs::symlink("/tmp", work.join("link")).unwrap();
+        for name in ["a", "file", "link"] {
+            assert_eq!(run("~/work", name).unwrap(), crate::hosts::MakeDirOutcome::Exists, "{name}");
+        }
+        assert_eq!(std::fs::read_to_string(work.join("file")).unwrap(), "keep");
+        // 名字裡的 shell 元字元不能被執行或拆開：整個當成一個名字。
+        for name in ["$(touch pwned)", "a b", "x';touch pwned;'", "`touch pwned`", "*"] {
+            let Ok(crate::hosts::MakeDirOutcome::Created(p)) = run("~/work", name) else { panic!("{name}") };
+            assert_eq!(std::path::Path::new(&p).file_name().unwrap().to_string_lossy(), name);
+        }
+        assert!(!work.join("pwned").exists() && !home.join("pwned").exists(), "名字被當成命令跑了");
+        // 憑證目錄：在底下建、或建出憑證目錄本身都擋；上層不存在回錯。
+        assert!(run("~/.ssh", "x").unwrap_err().to_string().contains("forbidden"));
+        assert!(run("~/.ssh/inner", "x").unwrap_err().to_string().contains("forbidden"));
+        assert!(run("~", ".aws").unwrap_err().to_string().contains("forbidden"), "建出 ~/.aws 本身也擋");
+        assert!(run("~", ".claude-new").unwrap_err().to_string().contains("forbidden"));
+        assert!(!home.join(".aws").exists() && !home.join(".claude-new").exists());
+        assert!(run("~/nope", "x").unwrap_err().to_string().contains("no such directory"));
+    }
+
+    #[test]
+    fn mkdir_remote_output_parser_covers_every_outcome() {
+        use crate::hosts::{parse_make_dir, MakeDirOutcome};
+        assert_eq!(parse_make_dir("AM_PATH=/srv/p/new\n").unwrap(), MakeDirOutcome::Created("/srv/p/new".into()));
+        assert_eq!(parse_make_dir("AM_EXISTS=1\n").unwrap(), MakeDirOutcome::Exists);
+        assert!(parse_make_dir("AM_ERR=forbidden directory\n").unwrap_err().to_string().contains("forbidden"));
+        assert!(parse_make_dir("").is_err(), "沒有任何輸出不能當成功");
+        assert!(parse_make_dir("garbage\n").is_err());
     }
 
     /// 遠端也一樣：憑證目錄不列、超大目錄有上限。
