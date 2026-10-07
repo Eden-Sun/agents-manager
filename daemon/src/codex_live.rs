@@ -172,56 +172,7 @@ pub(crate) async fn hint_moves_runtime(app: &impl crate::capabilities::Db, run_i
         || run.runtime_fast != Some(i64::from(seen.fast))
 }
 
-/// codex status line 上的額度剩餘量：CLI 當下的數字，比每 5 分鐘輪詢的 `account/rateLimits/read`
-/// 新（2026-09-13 使用者截圖兩者差一整輪）。
-#[derive(Debug, Clone, Copy, PartialEq)]
-pub struct CodexStatusQuota {
-    pub five_hour_left: Option<f64>,
-    pub weekly_left: Option<f64>,
-}
-
-impl CodexStatusQuota {
-    pub fn is_empty(&self) -> bool {
-        self.five_hour_left.is_none() && self.weekly_left.is_none()
-    }
-}
-
-/// 窄 pane 會把行尾截成 `weekly 48% …`，所以 `left` 不是必要的字。
-pub fn parse_status_quota(screen: &str) -> Option<CodexStatusQuota> {
-    let mut out = None;
-    for raw in screen.lines() {
-        let line = raw.trim();
-        // fork／resume 起來的 codex 狀態列可能沒有 `Context` 那一段（2026-09-14 實況：
-        // `gpt-5.6-sol medium · ~/project/agents-manager · 5h 82% left · weekly 97% left`），`% left` 也算。
-        if !line.contains('·') || !(line.contains("Context") || line.contains("% left")) {
-            continue;
-        }
-        let q = CodexStatusQuota { five_hour_left: pct_after(line, "5h"), weekly_left: pct_after(line, "weekly") };
-        if !q.is_empty() {
-            // 最後一個相符的才是現在那行（開頭的 banner 有同樣形狀）。
-            out = Some(q);
-        }
-    }
-    out
-}
-
-fn pct_after(line: &str, label: &str) -> Option<f64> {
-    let mut words = line.split_whitespace().peekable();
-    while let Some(w) = words.next() {
-        if !w.eq_ignore_ascii_case(label) {
-            continue;
-        }
-        // 只留開頭數字：截斷時省略號直接黏在 `%` 後（2026-09-13 實機 `weekly 24%…`）。
-        let raw = *words.peek()?;
-        let n: String = raw.chars().take_while(|c| c.is_ascii_digit() || *c == '.').collect();
-        if let Ok(v) = n.parse::<f64>() {
-            if (0.0..=100.0).contains(&v) {
-                return Some(v);
-            }
-        }
-    }
-    None
-}
+pub use am_base::codex_status::{parse_status_quota, CodexStatusQuota};
 
 /// Digit for the one row whose **label** exactly matches `needle`. Descriptions are excluded;
 /// current/default markers are matched separately, and duplicate labels are ambiguous.

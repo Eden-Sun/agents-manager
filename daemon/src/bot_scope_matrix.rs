@@ -749,7 +749,7 @@ async fn bot_a_against_bot_b_matches_the_allow_table() {
 
     // #801 stays deliberately open pending the user's decision, but exercise a real verdict
     // against a seeded ledger row so the matrix proves the write endpoint is reachable.
-    let sections = crate::release_triage::source_sections("claude", include_str!("release_triage/fixtures/claude_2.1.276-278.md"));
+    let sections = crate::release_triage::source_sections("claude", include_str!("../../crates/am-base/src/release_triage/fixtures/claude_2.1.276-278.md"));
     let section = sections.iter().find(|section| section.version == "2.1.277").unwrap();
     let entries = crate::release_triage::build_entries("claude", section).unwrap();
     crate::release_triage::ledger::insert_version(&env.app.db, "claude", "2.1.277", &entries)

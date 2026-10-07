@@ -184,7 +184,7 @@ mod tests {
     async fn verdicts_flow_through_the_real_db_and_stay_ledger_only_by_default() {
         let env = crate::testing::env().await;
         let app = env.app.clone();
-        let sections = source_sections("claude", include_str!("../release_triage/fixtures/claude_2.1.276-278.md"));
+        let sections = source_sections("claude", include_str!("../../../crates/am-base/src/release_triage/fixtures/claude_2.1.276-278.md"));
         let entries = build_entries("claude", sections.iter().find(|s| s.version == "2.1.277").unwrap()).unwrap();
         ledger::insert_version(&app.db, "claude", "2.1.277", &entries).await.unwrap();
 
@@ -235,7 +235,7 @@ mod tests {
     async fn the_publish_filters_are_normalised_and_a_bad_kind_is_rejected() {
         let env = crate::testing::env().await;
         let app = env.app.clone();
-        let sections = source_sections("claude", include_str!("../release_triage/fixtures/claude_2.1.276-278.md"));
+        let sections = source_sections("claude", include_str!("../../../crates/am-base/src/release_triage/fixtures/claude_2.1.276-278.md"));
         let entries = build_entries("claude", sections.iter().find(|s| s.version == "2.1.277").unwrap()).unwrap();
         ledger::insert_version(&app.db, "claude", "2.1.277", &entries).await.unwrap();
         let vs: Vec<EntryVerdict> = entries
@@ -277,7 +277,7 @@ mod tests {
     async fn duplicate_of_must_name_a_release_triage_issue_the_ledger_knows() {
         let env = crate::testing::env().await;
         let app = env.app.clone();
-        let sections = source_sections("claude", include_str!("../release_triage/fixtures/claude_2.1.276-278.md"));
+        let sections = source_sections("claude", include_str!("../../../crates/am-base/src/release_triage/fixtures/claude_2.1.276-278.md"));
         let entries = build_entries("claude", sections.iter().find(|s| s.version == "2.1.277").unwrap()).unwrap();
         ledger::insert_version(&app.db, "claude", "2.1.277", &entries).await.unwrap();
         let vs: Vec<EntryVerdict> = entries
@@ -338,7 +338,7 @@ mod tests {
     async fn a_state_change_during_validation_is_still_the_documented_409() {
         let env = crate::testing::env().await;
         let app = env.app.clone();
-        let sections = source_sections("claude", include_str!("../release_triage/fixtures/claude_2.1.276-278.md"));
+        let sections = source_sections("claude", include_str!("../../../crates/am-base/src/release_triage/fixtures/claude_2.1.276-278.md"));
         let entries = build_entries("claude", sections.iter().find(|s| s.version == "2.1.277").unwrap()).unwrap();
         ledger::insert_version(&app.db, "claude", "2.1.277", &entries).await.unwrap();
         let vs: Vec<EntryVerdict> = entries

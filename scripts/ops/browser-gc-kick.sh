@@ -131,7 +131,7 @@ sys.exit(0 if (b.get('run') or {}).get('state')=='running' else 1)"; then
   sleep 20
 fi
 # `--request-id` **刻意保持分鐘級**（issue #490）：`turns_client_req` 是
-# `(conversation_id, client_request_id)` 上**沒有時間範圍**的唯一索引（`daemon/src/db.rs:105`），
+# `(conversation_id, client_request_id)` 上**沒有時間範圍**的唯一索引（`crates/am-base/src/db.rs:105`），
 # 所以換成日期級的「穩定 key」會讓一天 48 輪只有第一輪派得出去，其餘全被當成重試擋掉。
 # 防重複派工靠的是上面那把鎖——鎖擋住重疊之後，每一輪本來就只會有一個 key。
 bin/agm --compact assign --review-by patrol --bot "$BOT" --text-file browser-gc-task.md \

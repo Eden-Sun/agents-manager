@@ -34,7 +34,7 @@ check "__all__" "daemon/src/test_home.rs"
 check "__all__" "daemon/src/main.rs"
 check "__all__" "daemon/src/lib.rs"
 check "__all__" "daemon/src/lifecycle/fixtures/claude-2.1.281-draft.ansi"
-check "__all__" "daemon/src/release_triage/rules.toml"
+check "__all__" "crates/am-base/src/release_triage/rules.toml"
 check "__all__ lifecycle::queue::" "daemon/build.rs" "daemon/src/lifecycle/queue.rs"
 # 多個檔案：去重、排序。
 check "lifecycle::prompt:: lifecycle::queue::" "daemon/src/lifecycle/queue.rs" "daemon/src/lifecycle/prompt.rs" "daemon/src/lifecycle/queue.rs"

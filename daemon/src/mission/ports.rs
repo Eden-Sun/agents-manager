@@ -191,7 +191,7 @@ mod tests {
         ("mission/store.rs", include_str!("store.rs")),
         ("mission/workflow.rs", include_str!("workflow.rs")),
         ("group.rs", include_str!("../group.rs")),
-        ("agent_relay.rs", include_str!("../agent_relay.rs")),
+        ("agent_relay.rs", include_str!("../../../crates/am-base/src/agent_relay.rs")),
         ("relay_auth.rs", include_str!("../relay_auth.rs")),
         ("handoff.rs", include_str!("../handoff.rs")),
     ];

@@ -57,5 +57,5 @@ pub async fn on_turn_ok(app: &Arc<App>, bot: &db::Bot) {
 }
 
 #[cfg(test)]
-#[path = "../login_prompt/tests.rs"]
+#[path = "../../../crates/am-base/src/login_prompt/tests.rs"]
 mod tests;

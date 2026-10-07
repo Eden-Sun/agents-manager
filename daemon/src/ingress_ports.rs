@@ -262,22 +262,22 @@ mod tests {
     /// 入口那一組與對帳那一組的 production 檔（組內互相呼叫照舊，組與組之間只准走 [`super::ReconcileCommands`]／[`super::IngressCommands`]）。
     const INGRESS: &[(&str, &str)] = &[
         ("ask_answers.rs", include_str!("ask_answers.rs")),
-        ("background_hook.rs", include_str!("background_hook.rs")),
+        ("background_hook.rs", include_str!("../../crates/am-base/src/background_hook.rs")),
         ("background_jobs.rs", include_str!("background_jobs.rs")),
-        ("background_loop.rs", include_str!("background_loop.rs")),
+        ("background_loop.rs", include_str!("../../crates/am-base/src/background_loop.rs")),
         ("blocked_reason.rs", include_str!("blocked_reason.rs")),
         ("bot_state.rs", include_str!("bot_state.rs")),
         ("child_alerts.rs", include_str!("child_alerts.rs")),
         ("child_done.rs", include_str!("child_done.rs")),
-        ("child_reconcile_safety.rs", include_str!("child_reconcile_safety.rs")),
+        ("child_reconcile_safety.rs", include_str!("../../crates/am-base/src/child_reconcile_safety.rs")),
         ("child_retire.rs", include_str!("child_retire.rs")),
-        ("child_runtime.rs", include_str!("child_runtime.rs")),
+        ("child_runtime.rs", include_str!("../../crates/am-base/src/child_runtime.rs")),
         ("events.rs", include_str!("events.rs")),
-        ("hook_cmd.rs", include_str!("hook_cmd.rs")),
-        ("hook_inbox.rs", include_str!("hook_inbox.rs")),
+        ("hook_cmd.rs", include_str!("../../crates/am-base/src/hook_cmd.rs")),
+        ("hook_inbox.rs", include_str!("../../crates/am-base/src/hook_inbox.rs")),
         ("hookrecv.rs", include_str!("hookrecv.rs")),
-        ("pending_question.rs", include_str!("pending_question.rs")),
-        ("spawn_hints.rs", include_str!("spawn_hints.rs")),
+        ("pending_question.rs", include_str!("../../crates/am-base/src/pending_question.rs")),
+        ("spawn_hints.rs", include_str!("../../crates/am-base/src/spawn_hints.rs")),
         ("dangerous_rm.rs", include_str!("dangerous_rm.rs")),
     ];
     const RECONCILE: &[(&str, &str)] = &[
@@ -285,8 +285,8 @@ mod tests {
         ("autostart_revive.rs", include_str!("autostart_revive.rs")),
         ("default_session.rs", include_str!("default_session.rs")),
         ("due_actions.rs", include_str!("due_actions.rs")),
-        ("session_paused.rs", include_str!("session_paused.rs")),
-        ("kids_cache.rs", include_str!("kids_cache.rs")),
+        ("session_paused.rs", include_str!("../../crates/am-base/src/session_paused.rs")),
+        ("kids_cache.rs", include_str!("../../crates/am-base/src/kids_cache.rs")),
         ("read_marks.rs", include_str!("read_marks.rs")),
     ];
 

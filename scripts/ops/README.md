@@ -591,7 +591,7 @@ install -m 755 scripts/ops/herdr-full-restart.sh ~/.config/agents-manager/superv
 流程、改寫規則與拒絕條件見 SPEC §11.9。`export` 只讀來源 DB（先做 backup 快照、讀完刪）；`import` 要**目標 daemon 停著**
 （拿同一把 `daemon.lock`），先 `--dry-run` 看摘要。專案改在目標本機跑：`--host local --path-map /來源=/目標`，原生對話先用下面的 transcript-transfer 搬（SPEC §11.9a）。
 協調者（AGM）的資料：export 與 import 都加 `--with-supervisor`（合併規則見 SPEC §11.9b）；群組任務一律跟著專案走。
-隔離測試：`scripts/ops/project-transfer_test.sh`（假 DB，schema 從 `daemon/src/db.rs` 抽）。
+隔離測試：`scripts/ops/project-transfer_test.sh`（假 DB，schema 從 `crates/am-base/src/db.rs` 抽）。
 
 ## transcript-transfer（issue #717）
 

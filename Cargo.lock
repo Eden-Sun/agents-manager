@@ -24,6 +24,7 @@ dependencies = [
 name = "agents-managerd"
 version = "0.1.0"
 dependencies = [
+ "am-base",
  "am-config",
  "am-core",
  "am-ports",
@@ -87,6 +88,44 @@ name = "allocator-api2"
 version = "0.2.21"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "683d7910e743518b0e34f1186f92494becacb047c7b6bf616c96772180fef923"
+
+[[package]]
+name = "am-base"
+version = "0.1.0"
+dependencies = [
+ "am-config",
+ "am-core",
+ "am-ports",
+ "anyhow",
+ "axum",
+ "base64 0.22.1",
+ "chrono",
+ "chrono-tz",
+ "clap",
+ "dirs 5.0.1",
+ "futures",
+ "image",
+ "libc",
+ "mime_guess",
+ "quick-xml",
+ "rand 0.8.8",
+ "reqwest 0.12.28",
+ "rust-embed",
+ "serde",
+ "serde_ignored",
+ "serde_json",
+ "sha2 0.10.9",
+ "sqlx",
+ "thiserror 2.0.20",
+ "tokio",
+ "tokio-util",
+ "toml 0.8.23",
+ "toml_edit 0.22.27",
+ "tower-http",
+ "tracing",
+ "tracing-subscriber",
+ "ulid",
+]
 
 [[package]]
 name = "am-config"

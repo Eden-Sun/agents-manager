@@ -25,13 +25,13 @@
 
 #![allow(dead_code)]
 
-/// `daemon/src/db.rs` SCHEMA 的 `runs.state` CHECK 約束：唯一合法值集合。
+/// `crates/am-base/src/db.rs` SCHEMA 的 `runs.state` CHECK 約束：唯一合法值集合。
 pub const RUN_STATES: [&str; 5] = ["starting", "running", "stopping", "stopped", "exited"];
 
-/// `daemon/src/db.rs` SCHEMA 的 `turns.status` CHECK 約束。
+/// `crates/am-base/src/db.rs` SCHEMA 的 `turns.status` CHECK 約束。
 pub const TURN_STATUSES: [&str; 5] = ["queued", "in_flight", "completed", "completed_fallback", "failed"];
 
-/// `daemon/src/db.rs` SCHEMA 的 `turns.delivery` CHECK 約束。
+/// `crates/am-base/src/db.rs` SCHEMA 的 `turns.delivery` CHECK 約束。
 pub const TURN_DELIVERIES: [&str; 4] = ["pending", "ok", "unknown", "failed"];
 
 /// 觀察到的 `runs.state` 合法邊。`exited` 不會回到 active（`starting`／`running`／`stopping`）——一顆 run 進了

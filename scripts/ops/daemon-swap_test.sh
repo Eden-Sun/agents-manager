@@ -2,7 +2,7 @@
 # daemon-swap.sh 的隔離測試。
 #
 # 完全不碰正式 daemon／正式 DB／正式 AGM 目錄：每個 case 開一個暫存目錄，放一份假的 checkout
-# （只有 daemon/src/db.rs 與一個假 binary）、假 repo、假 DB，再把 agm／sqlite3／curl／launchctl／
+# （只有 crates/am-base/src/db.rs 與一個假 binary）、假 repo、假 DB，再把 agm／sqlite3／curl／launchctl／
 # pgrep 換成 stub，從 log 檢查腳本做了什麼決定。
 #
 # 測的是 2026-09-20 那次 33 秒停機的四個根因：
@@ -93,7 +93,7 @@ setup() { # setup <checkout 的 SCHEMA_VERSION> <DB 目前的 user_version>
   export HERDR_PANE_ID="w1:pA"          # 預設：pane 裡本來就有；測 current 的 case 會 unset
   export STUB_CAP=service STUB_PANE_LIST_FAIL=""
   export STUB_PANE_READ_OK=1 STUB_PANE_CURRENT="w1:pA" STUB_PROBE='200 {"delivery":"ok"}' 
-  mkdir -p "$AGM_DIR" "$AM_DATA/service-tokens" "$AGM_REPO/target/release" "$CHECKOUT/daemon/src" "$CHECKOUT/target/release" "$ROOT/bin"
+  mkdir -p "$AGM_DIR" "$AM_DATA/service-tokens" "$AGM_REPO/target/release" "$CHECKOUT/crates/am-base/src" "$CHECKOUT/target/release" "$ROOT/bin"
   printf 'test-daemon-swap-service-token\n' > "$AM_DATA/service-tokens/daemon-swap.token"
   chmod 600 "$AM_DATA/service-tokens/daemon-swap.token"
 
@@ -102,7 +102,7 @@ setup() { # setup <checkout 的 SCHEMA_VERSION> <DB 目前的 user_version>
     echo '    (9, "aaa"),'
     echo '    (10, "bbb"),'
     [ "$1" -ge 11 ] && echo "    ($1, \"ccc\"),"
-    echo '];'; } > "$CHECKOUT/daemon/src/db.rs"
+    echo '];'; } > "$CHECKOUT/crates/am-base/src/db.rs"
   # 假 binary 是會答 `--version` 的 shell 腳本（真 binary 的 `--version` 印 `<name> <版本> <完整 sha>[-dirty]`）；
   # 最後一行 `new-binary` 永遠跑不到（上一行 exit），只是讓測試認得「換上去的是新的那顆」。
   { echo '#!/bin/sh'
@@ -587,7 +587,7 @@ unset STUB_MUTATE_DB
 
 # 6. 讀不到 checkout 的 SCHEMA_VERSION：停手，不要拿上一輪的數字猜。
 setup 10 10
-echo 'no schema history here' > "$CHECKOUT/daemon/src/db.rs"
+echo 'no schema history here' > "$CHECKOUT/crates/am-base/src/db.rs"
 rc=$(run)
 check_eq "讀不到版本就中止（rc=3）" "3" "$rc"
 check "講清楚不要用上一輪的數字" "不要用上一輪的數字猜" "$SWAP_LOG"

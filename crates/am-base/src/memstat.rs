@@ -1,0 +1,553 @@
+//! RSS of every herdr process tree (herdr + panes + agent CLIs): the agents are where the memory goes.
+//! `ps` instead of a sysinfo crate: remote hosts go over ssh anyway, same command keeps numbers comparable.
+
+use std::collections::HashMap;
+use std::sync::Arc;
+
+use serde::Serialize;
+use serde_json::{json, Value};
+
+use crate::hosts::HostsAccess;
+
+const SAMPLE_EVERY: std::time::Duration = std::time::Duration::from_secs(15);
+
+/// `-ww` so macOS does not clip long agent argv to the terminal width.
+const PS_CMD: &str = "ps -Awwo pid=,ppid=,rss=,args= 2>/dev/null";
+
+/// 使用者 2026-09-12：「除了已用量，也要能夠 show 出剩餘 ram 量」；同一次 ssh 往返帶回。
+/// macOS 沒有 `/proc/meminfo`，改用 `sysctl hw.memsize` + `vm_stat` 自己算。
+const MACHINE_CMD: &str = "cat /proc/meminfo 2>/dev/null || { sysctl -n hw.memsize 2>/dev/null; vm_stat 2>/dev/null; }";
+
+const MACHINE_MARK: &str = "__AM_MACHINE__";
+const PS_MARK: &str = "__AM_PS__";
+
+fn sample_cmd() -> String {
+    format!("echo {MACHINE_MARK}; {MACHINE_CMD}; echo {PS_MARK}; {PS_CMD}")
+}
+
+/// 找不到分隔線就當整段都是 ps：還沒更新的遠端主機不該讓整格變空白。
+fn split_sample(out: &str) -> (Option<MachineMem>, &str) {
+    let Some(pi) = out.find(PS_MARK) else { return (None, out) };
+    let head = &out[..pi];
+    let machine = match head.find(MACHINE_MARK) {
+        Some(mi) => parse_machine(&head[mi + MACHINE_MARK.len()..]),
+        None => parse_machine(head),
+    };
+    (machine, &out[pi + PS_MARK.len()..])
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+pub struct ProjectMem {
+    pub project_id: String,
+    pub host: String,
+    /// Distinct panes those processes run in.
+    pub panes: u32,
+    pub bytes: u64,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq)]
+pub struct HostMem {
+    pub host: String,
+    pub herdr_bytes: u64,
+    /// Everything underneath herdr (panes, agent CLIs).
+    pub agents_bytes: u64,
+    pub total_bytes: u64,
+    pub processes: u32,
+    /// Set when this host could not be sampled; the other fields are then 0.
+    pub error: Option<String>,
+    /// 2026-09-08: browser tab count is the other big RAM lever; the UI warns when it runs away.
+    #[serde(default)]
+    pub browsers: Vec<BrowserMem>,
+    /// 2026-09-12；量不到就是 `None`。
+    #[serde(default)]
+    pub machine: Option<MachineMem>,
+}
+
+/// SPEC §15。`available` 不是 `total - 我們用掉的`：macOS 快取隨時可回收，算成已用會像見底。
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+pub struct MachineMem {
+    pub total_bytes: u64,
+    /// Linux `MemAvailable`；macOS free + inactive + speculative + purgeable 頁。
+    pub available_bytes: u64,
+}
+
+impl MachineMem {
+    #[cfg(any(test, feature = "test-hooks"))]
+    pub fn used_bytes(&self) -> u64 {
+        self.total_bytes.saturating_sub(self.available_bytes)
+    }
+}
+
+/// 認不出來就回 `None`：少一個數字沒關係，猜一個會誤導。
+pub fn parse_machine(out: &str) -> Option<MachineMem> {
+    let kib = |key: &str| -> Option<u64> {
+        out.lines()
+            .find(|l| l.trim_start().starts_with(key))
+            .and_then(|l| l.split_whitespace().nth(1))
+            .and_then(|n| n.parse::<u64>().ok())
+    };
+    if let (Some(total), Some(avail)) = (kib("MemTotal:"), kib("MemAvailable:")) {
+        if total > 0 {
+            return Some(MachineMem { total_bytes: total * 1024, available_bytes: avail * 1024 });
+        }
+    }
+    // macOS: 第一行是 `sysctl -n hw.memsize` 的裸位元組數，後面是 `vm_stat`。
+    let total = out.lines().map(str::trim).find_map(|l| l.parse::<u64>().ok())?;
+    if total == 0 {
+        return None;
+    }
+    let page = out
+        .lines()
+        .find(|l| l.contains("page size of"))
+        .and_then(|l| l.split_whitespace().rev().nth(1).and_then(|n| n.parse::<u64>().ok()))
+        .unwrap_or(4096);
+    let pages = |key: &str| -> u64 {
+        out.lines()
+            .find(|l| l.trim_start().starts_with(key))
+            .and_then(|l| l.rsplit(':').next())
+            .map(|v| v.trim().trim_end_matches('.').replace(['.', ','], ""))
+            .and_then(|v| v.parse::<u64>().ok())
+            .unwrap_or(0)
+    };
+    let avail = (pages("Pages free") + pages("Pages inactive") + pages("Pages speculative") + pages("Pages purgeable")) * page;
+    Some(MachineMem { total_bytes: total, available_bytes: avail.min(total) })
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+pub struct BrowserMem {
+    pub name: String,
+    /// Renderer processes: not exactly tabs (same-site sharing, extensions) but close enough for a warning.
+    pub tabs: u32,
+    pub bytes: u64,
+    pub processes: u32,
+}
+
+fn browser_of(argv: &str) -> Option<&'static str> {
+    if argv.contains("Google Chrome.app/") || argv.starts_with("/opt/google/chrome/") {
+        Some("Chrome")
+    } else if argv.contains("ego lite.app/") || argv.contains("/ego.app/") {
+        Some("ego")
+    } else {
+        None
+    }
+}
+
+pub fn sum_browsers(out: &str) -> Vec<BrowserMem> {
+    let mut map: std::collections::BTreeMap<&'static str, BrowserMem> = std::collections::BTreeMap::new();
+    for p in parse_ps(out) {
+        let Some(name) = browser_of(&p.argv) else { continue };
+        let e = map.entry(name).or_insert_with(|| BrowserMem { name: name.into(), tabs: 0, bytes: 0, processes: 0 });
+        e.processes += 1;
+        e.bytes += p.rss_kib * 1024;
+        if p.argv.contains("--type=renderer") {
+            e.tabs += 1;
+        }
+    }
+    map.into_values().collect()
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq, Default)]
+pub struct MemSnapshot {
+    pub total_bytes: u64,
+    pub herdr_bytes: u64,
+    pub agents_bytes: u64,
+    pub processes: u32,
+    pub hosts: Vec<HostMem>,
+    /// 2026-09-15 使用者：側欄每個專案標「幾個 pane · 多少 RAM」。只算帶 `AM_BOT_ID` 的程序（該專案的
+    /// bot 與它們的 child）；量不到的主機上的專案不出現，不是 0。
+    #[serde(default)]
+    pub projects: Vec<ProjectMem>,
+}
+
+pub struct Proc {
+    pub pid: i32,
+    pub ppid: i32,
+    pub rss_kib: u64,
+    pub argv: String,
+}
+
+/// `/opt/homebrew/bin/herdr --session x` → `herdr`.
+pub fn exe_name(argv: &str) -> &str {
+    let first = argv.split_whitespace().next().unwrap_or("");
+    first.rsplit('/').next().unwrap_or(first)
+}
+
+pub fn parse_ps(out: &str) -> Vec<Proc> {
+    let mut v = Vec::new();
+    for line in out.lines() {
+        let mut it = line.split_whitespace();
+        let (Some(pid), Some(ppid), Some(rss)) = (it.next(), it.next(), it.next()) else { continue };
+        let (Ok(pid), Ok(ppid), Ok(rss_kib)) = (pid.parse::<i32>(), ppid.parse::<i32>(), rss.parse::<u64>()) else {
+            continue;
+        };
+        let argv = line.split_whitespace().skip(3).collect::<Vec<_>>().join(" ");
+        v.push(Proc { pid, ppid, rss_kib, argv });
+    }
+    v
+}
+
+/// Exe name, not argv substring: `grep herdr` is not herdr.
+pub(crate) fn is_herdr(p: &Proc) -> bool {
+    exe_name(&p.argv) == "herdr"
+}
+
+pub fn child_index(procs: &[Proc]) -> HashMap<i32, Vec<i32>> {
+    let mut children: HashMap<i32, Vec<i32>> = HashMap::new();
+    for p in procs {
+        children.entry(p.ppid).or_default().push(p.pid);
+    }
+    children
+}
+
+/// Only herdr with no herdr ancestor — otherwise a `herdr` shelling out to `herdr` counts twice.
+pub(crate) fn herdr_roots(procs: &[Proc], by_pid: &HashMap<i32, &Proc>) -> Vec<i32> {
+    procs
+        .iter()
+        .filter(|p| {
+            if !is_herdr(p) {
+                return false;
+            }
+            let mut cur = p.ppid;
+            for _ in 0..64 {
+                let Some(parent) = by_pid.get(&cur) else { return true };
+                if is_herdr(parent) {
+                    return false;
+                }
+                cur = parent.ppid;
+            }
+            true
+        })
+        .map(|p| p.pid)
+        .collect()
+}
+
+pub fn sum_herdr(out: &str, host: &str) -> HostMem {
+    let (machine, out) = split_sample(out);
+    let procs = parse_ps(out);
+    let by_pid: HashMap<i32, &Proc> = procs.iter().map(|p| (p.pid, p)).collect();
+    let children = child_index(&procs);
+    let roots = herdr_roots(&procs, &by_pid);
+
+    let mut herdr_bytes = 0u64;
+    let mut agents_bytes = 0u64;
+    let mut processes = 0u32;
+    let mut seen: std::collections::HashSet<i32> = std::collections::HashSet::new();
+
+    for root in roots {
+        let mut stack = vec![root];
+        while let Some(pid) = stack.pop() {
+            if !seen.insert(pid) {
+                continue;
+            }
+            let Some(p) = by_pid.get(&pid) else { continue };
+            processes += 1;
+            if is_herdr(p) {
+                herdr_bytes += p.rss_kib * 1024;
+            } else {
+                agents_bytes += p.rss_kib * 1024;
+            }
+            if let Some(kids) = children.get(&pid) {
+                stack.extend(kids.iter().copied());
+            }
+        }
+    }
+
+    HostMem {
+        host: host.to_string(),
+        herdr_bytes,
+        agents_bytes,
+        total_bytes: herdr_bytes + agents_bytes,
+        processes,
+        error: None,
+        browsers: sum_browsers(out),
+        machine,
+    }
+}
+
+async fn sample_local(host: &str) -> HostMem {
+    let out = crate::local_sh::output(&sample_cmd()).await;
+    match out {
+        Ok(o) if o.status.success() => sum_herdr(&String::from_utf8_lossy(&o.stdout), host),
+        Ok(o) => HostMem {
+            host: host.to_string(),
+            herdr_bytes: 0,
+            agents_bytes: 0,
+            total_bytes: 0,
+            processes: 0,
+            browsers: vec![],
+            machine: None,
+            error: Some(format!("ps exited {}", o.status)),
+        },
+        Err(e) => HostMem {
+            host: host.to_string(),
+            herdr_bytes: 0,
+            agents_bytes: 0,
+            total_bytes: 0,
+            processes: 0,
+            browsers: vec![],
+            machine: None,
+            error: Some(e.to_string()),
+        },
+    }
+}
+
+/// 一顆 bot 在記憶體報表裡要顯示的歸屬。
+pub struct BotRef {
+    pub name: String,
+    pub project_id: String,
+    /// 已刪除的 bot：進程列表照顯示（停掉它是 bot 的事），但專案合計不算。
+    pub deleted: bool,
+}
+
+/// memstat／memproc 需要從 `App` 拿的外部事實（`App` 在 `app_ports_p3` 實作）：主機表、bot 歸屬、`mem_updated` 事件。
+pub trait MemEnv: HostsAccess {
+    fn bot_ref(&self, bot_id: &str) -> impl std::future::Future<Output = Option<BotRef>> + Send;
+    fn emit_mem_updated(&self, snapshot: Value) -> impl std::future::Future<Output = ()> + Send;
+}
+
+impl<T: MemEnv + ?Sized> MemEnv for std::sync::Arc<T> {
+    fn bot_ref(&self, bot_id: &str) -> impl std::future::Future<Output = Option<BotRef>> + Send {
+        (**self).bot_ref(bot_id)
+    }
+    fn emit_mem_updated(&self, snapshot: Value) -> impl std::future::Future<Output = ()> + Send {
+        (**self).emit_mem_updated(snapshot)
+    }
+}
+
+/// A disconnected host gets an `error`, not dropped, so the UI doesn't silently show a smaller number.
+pub async fn sample(app: &impl MemEnv) -> MemSnapshot {
+    let mut hosts = Vec::new();
+    for conn in app.hosts().list().await {
+        let name = conn.name.clone();
+        if conn.is_local() {
+            hosts.push(sample_local(&name).await);
+            continue;
+        }
+        if !conn.connected.load(std::sync::atomic::Ordering::Relaxed) {
+            hosts.push(HostMem {
+                host: name,
+                herdr_bytes: 0,
+                agents_bytes: 0,
+                total_bytes: 0,
+                processes: 0,
+                browsers: vec![],
+                machine: None,
+                error: Some("未連線".into()),
+            });
+            continue;
+        }
+        match conn.ssh_exec(&sample_cmd()).await {
+            Ok(out) => hosts.push(sum_herdr(&out, &name)),
+            Err(e) => hosts.push(HostMem {
+                host: name,
+                herdr_bytes: 0,
+                agents_bytes: 0,
+                total_bytes: 0,
+                processes: 0,
+                browsers: vec![],
+                machine: None,
+                error: Some(format!("{e:#}")),
+            }),
+        }
+    }
+
+    let projects = project_totals(app, &hosts).await;
+    MemSnapshot {
+        projects,
+        total_bytes: hosts.iter().map(|h| h.total_bytes).sum(),
+        herdr_bytes: hosts.iter().map(|h| h.herdr_bytes).sum(),
+        agents_bytes: hosts.iter().map(|h| h.agents_bytes).sum(),
+        processes: hosts.iter().map(|h| h.processes).sum(),
+        hosts,
+    }
+}
+
+/// Per-project totals for every host that sampled cleanly. The environment dump is a second round
+/// trip per host (the plain sample carries no env); a host that fails it just has no project rows.
+async fn project_totals(app: &impl MemEnv, hosts: &[HostMem]) -> Vec<ProjectMem> {
+    let mut acc: HashMap<(String, String), (u64, std::collections::HashSet<String>)> = HashMap::new();
+    let mut project_of: HashMap<String, Option<String>> = HashMap::new();
+    for h in hosts.iter().filter(|h| h.error.is_none()) {
+        let Ok(out) = crate::memproc::dump(app, &h.host).await else { continue };
+        for (bot, (bytes, panes)) in crate::memproc::bot_totals_from_dump(&out) {
+            if !project_of.contains_key(&bot) {
+                let pid = app.bot_ref(&bot).await.filter(|b| !b.deleted).map(|b| b.project_id);
+                project_of.insert(bot.clone(), pid);
+            }
+            let Some(Some(pid)) = project_of.get(&bot) else { continue };
+            let e = acc.entry((pid.clone(), h.host.clone())).or_default();
+            e.0 += bytes;
+            e.1.extend(panes);
+        }
+    }
+    let mut rows: Vec<ProjectMem> = acc
+        .into_iter()
+        .map(|((project_id, host), (bytes, panes))| ProjectMem { project_id, host, panes: panes.len() as u32, bytes })
+        .collect();
+    rows.sort_by(|a, b| a.project_id.cmp(&b.project_id).then(a.host.cmp(&b.host)));
+    rows
+}
+
+/// A project's row moved enough to be worth a frame: pane count changed or ≥1 MiB drift.
+/// 使用者實際在看的那兩個訊號：剩餘 RAM 與瀏覽器分頁數（還有「這台量不到了」）。
+/// 它們跟 herdr 樹的用量無關，所以不能綁在 `total_bytes` 的漂移上。
+fn host_signals_changed(prev: &[HostMem], next: &[HostMem]) -> bool {
+    if prev.len() != next.len() {
+        return true;
+    }
+    prev.iter().zip(next).any(|(a, b)| {
+        a.host != b.host
+            || a.error.is_some() != b.error.is_some()
+            || a.browsers.len() != b.browsers.len()
+            || a.browsers.iter().zip(&b.browsers).any(|(x, y)| x.name != y.name || x.tabs != y.tabs)
+            || match (&a.machine, &b.machine) {
+                (Some(x), Some(y)) => x.available_bytes.abs_diff(y.available_bytes) >= 64 * 1024 * 1024,
+                (x, y) => x.is_some() != y.is_some(),
+            }
+    })
+}
+
+fn projects_changed(prev: &[ProjectMem], next: &[ProjectMem]) -> bool {
+    prev.len() != next.len()
+        || prev.iter().zip(next).any(|(a, b)| {
+            a.project_id != b.project_id || a.host != b.host || a.panes != b.panes || a.bytes.abs_diff(b.bytes) >= 1024 * 1024
+        })
+}
+
+/// Only pushes changes (≥1 MiB drift): a frame per client every 15s for KiB jitter is noise.
+pub fn spawn_poller<H: MemEnv + 'static>(app: Arc<H>) {
+    tokio::spawn(async move {
+        let mut last: Option<MemSnapshot> = None;
+        loop {
+            let snap = sample(&app).await;
+            let changed = match &last {
+                Some(prev) => {
+                    prev.total_bytes.abs_diff(snap.total_bytes) >= 1024 * 1024
+                        || prev.hosts.len() != snap.hosts.len()
+                        || projects_changed(&prev.projects, &snap.projects)
+                        // 剩餘 RAM 與瀏覽器分頁數跟 herdr 樹的用量無關，卻被綁在它身上：
+                        // 晚上沒有 bot 在跑時 herdr 樹幾乎不動，使用者開了四十個分頁、可用記憶體掉到
+                        // 800 MiB，一次事件都不會送——正好在最該示警的時候失效（review 2026-09-16）。
+                        || host_signals_changed(&prev.hosts, &snap.hosts)
+                }
+                None => true,
+            };
+            if changed {
+                app.emit_mem_updated(json!(snap)).await;
+                last = Some(snap);
+            }
+            tokio::time::sleep(SAMPLE_EVERY).await;
+        }
+    });
+}
+
+#[cfg(test)]
+mod tests {
+    /// m4p 實機的 `sysctl -n hw.memsize` + `vm_stat`（2026-09-12）：16 GiB，可回收約 5.5 GiB。
+    #[test]
+    fn macos_machine_memory_comes_from_memsize_and_vm_stat() {
+        let out = "17179869184\n\
+Mach Virtual Memory Statistics: (page size of 16384 bytes)\n\
+Pages free:                                     8261.\n\
+Pages active:                                 329793.\n\
+Pages inactive:                               299465.\n\
+Pages speculative:                             29406.\n\
+Pages throttled:                                   0.\n\
+Pages wired down:                             169646.\n\
+Pages purgeable:                                 809.\n";
+        let m = parse_machine(out).unwrap();
+        assert_eq!(m.total_bytes, 17_179_869_184);
+        assert_eq!(m.available_bytes, (8261 + 299465 + 29406 + 809) * 16384);
+        assert_eq!(m.used_bytes(), m.total_bytes - m.available_bytes);
+    }
+
+    #[test]
+    fn linux_machine_memory_comes_from_meminfo() {
+        let out = "MemTotal:       16316412 kB\nMemFree:          812344 kB\nMemAvailable:    9381234 kB\nBuffers:          123456 kB\n";
+        let m = parse_machine(out).unwrap();
+        assert_eq!(m.total_bytes, 16_316_412 * 1024);
+        assert_eq!(m.available_bytes, 9_381_234 * 1024);
+    }
+
+    #[test]
+    fn an_unreadable_machine_section_is_none() {
+        assert!(parse_machine("").is_none());
+        assert!(parse_machine("sh: sysctl: command not found\n").is_none());
+    }
+
+    #[test]
+    fn one_sample_carries_both_sections_and_the_old_format_still_parses() {
+        let ps = "  100   1  2048 /opt/homebrew/bin/herdr --session x\n";
+        let out = format!("{MACHINE_MARK}\nMemTotal:       1048576 kB\nMemAvailable:    524288 kB\n{PS_MARK}\n{ps}");
+        let h = sum_herdr(&out, "local");
+        assert_eq!(h.herdr_bytes, 2048 * 1024, "ps 那段照樣算");
+        let m = h.machine.expect("機器那段也讀到了");
+        assert_eq!(m.total_bytes, 1_048_576 * 1024);
+        assert_eq!(m.available_bytes, 524_288 * 1024);
+        let old = sum_herdr(ps, "local");
+        assert_eq!(old.herdr_bytes, 2048 * 1024);
+        assert!(old.machine.is_none());
+    }
+    #[test]
+    fn browsers_count_renderers_per_app() {
+        let out = "1 0 100 /Applications/Google Chrome.app/Contents/MacOS/Google Chrome\n\
+2 1 200 /Applications/Google Chrome.app/Contents/Frameworks/Google Chrome Framework.framework/Versions/1/Helpers/Google Chrome Helper (Renderer).app/Contents/MacOS/Google Chrome Helper (Renderer) --type=renderer --x\n\
+3 1 300 /Applications/Google Chrome.app/Contents/Frameworks/x/Google Chrome Helper.app/Contents/MacOS/Google Chrome Helper --type=utility\n\
+4 0 50 /Applications/ego lite.app/Contents/MacOS/ego lite\n\
+5 4 60 /Applications/ego lite.app/Contents/Frameworks/ego Helper (Renderer).app/Contents/MacOS/ego Helper (Renderer) --type=renderer\n\
+6 4 60 /Applications/ego lite.app/Contents/Frameworks/ego Helper (Renderer).app/Contents/MacOS/ego Helper (Renderer) --type=renderer\n\
+7 0 10 /usr/bin/zsh\n";
+        let b = super::sum_browsers(out);
+        assert_eq!(b.len(), 2);
+        assert_eq!((b[0].name.as_str(), b[0].tabs, b[0].processes, b[0].bytes), ("Chrome", 1, 3, 600 * 1024));
+        assert_eq!((b[1].name.as_str(), b[1].tabs, b[1].processes), ("ego", 2, 3));
+    }
+
+    use super::*;
+
+    const PS: &str = "\
+    1     0  12000 /sbin/launchd
+  400     1  48000 /opt/homebrew/bin/herdr --session agents-manager
+  401   400  30000 /bin/zsh -l
+  402   401 820000 claude --dangerously-skip-permissions
+  403   400 640000 codex --yolo
+  500     1  20000 /usr/bin/ssh -N remote
+  600     1   9000 grep herdr
+";
+
+    #[test]
+    fn sums_the_tree_not_just_herdr() {
+        let m = sum_herdr(PS, "local");
+        assert_eq!(m.herdr_bytes, 48_000 * 1024);
+        assert_eq!(m.agents_bytes, (30_000 + 820_000 + 640_000) * 1024);
+        assert_eq!(m.total_bytes, m.herdr_bytes + m.agents_bytes);
+        assert_eq!(m.processes, 4);
+    }
+
+    #[test]
+    fn a_process_merely_mentioning_herdr_is_not_one() {
+        let m = sum_herdr("  600     1   9000 grep herdr\n", "local");
+        assert_eq!(m.total_bytes, 0);
+        assert_eq!(m.processes, 0);
+    }
+
+    #[test]
+    fn nested_herdr_is_counted_once() {
+        let ps = "\
+  400     1  48000 /opt/homebrew/bin/herdr --session a
+  401   400  10000 herdr pane send
+  402   401  5000 sh -c true
+";
+        let m = sum_herdr(ps, "local");
+        assert_eq!(m.herdr_bytes, (48_000 + 10_000) * 1024);
+        assert_eq!(m.agents_bytes, 5_000 * 1024);
+        assert_eq!(m.processes, 3);
+    }
+
+    #[test]
+    fn argv_with_spaces_survives_the_split() {
+        let ps = "  400     1  48000 /opt/homebrew/bin/herdr --session my session\n";
+        let m = sum_herdr(ps, "local");
+        assert_eq!(m.herdr_bytes, 48_000 * 1024);
+    }
+}
