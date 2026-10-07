@@ -9,7 +9,7 @@ use crate::db;
 use crate::lifecycle::{self, LcResult, PromptOut, Revoked, StartOpts};
 use crate::quota::{self, LimitHit, Quota};
 use crate::state::App;
-use crate::supervisor::ports::{HostProbes, JudgeOps, LocalAccountView, MissionOps, QuotaOps, TurnOps};
+use crate::supervisor::ports::{BotLamp, HostProbes, JudgeOps, LocalAccountView, MissionOps, QuotaOps, TurnOps};
 use serde_json::Value;
 use std::future::Future;
 use std::sync::Arc;
@@ -243,6 +243,12 @@ impl crate::supervisor::ports::IncidentState for Arc<App> {
 impl crate::supervisor::ports::DaemonConnection for Arc<App> {
     fn daemon_connected(&self) -> bool {
         self.connected.load(std::sync::atomic::Ordering::SeqCst)
+    }
+}
+
+impl BotLamp for Arc<App> {
+    fn bot_lamp<'a>(&'a self, bot_id: &'a str, run: Option<&'a db::Run>) -> impl Future<Output = &'static str> + Send + 'a {
+        async move { crate::api::lamp(self.bot_connected(bot_id).await, run) }
     }
 }
 

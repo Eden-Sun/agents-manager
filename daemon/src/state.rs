@@ -37,6 +37,8 @@ pub const WS_SEND_TIMEOUT_MS: u64 = 30_000;
 /// client→server 的訊息／幀上限：這個 server 從不看 client 送來的內容（只收 ping），所以給小一點；超過就斷線。
 pub const WS_MAX_INBOUND_BYTES: usize = 64 * 1024;
 
+pub use am_base::ws_event::WsEvent;
+
 pub fn is_ephemeral(kind: &str) -> bool {
     kind == "turn_progress"
 }
@@ -71,14 +73,6 @@ fn scrub_credentials(v: &mut Value) {
         Value::Array(items) => items.iter_mut().for_each(scrub_credentials),
         _ => {}
     }
-}
-
-#[derive(Debug, Clone, Serialize)]
-pub struct WsEvent {
-    pub seq: u64,
-    #[serde(rename = "type")]
-    pub kind: String,
-    pub data: Value,
 }
 
 /// 內部的「這個回合不再 in-flight」通知。刻意**不是** WS 事件：WS 有 200 筆 ring 與 resync，

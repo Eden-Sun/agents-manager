@@ -5,8 +5,8 @@ const DOCS: &str = include_str!("../../docs/API.md");
 
 const MERGED_ROUTE_SOURCES: &[(&str, &str)] = &[
     (
-        "crate::supervisor::responder_api",
-        include_str!("../src/supervisor/responder_api.rs"),
+        "crate::runners::supervisor::responder_api",
+        include_str!("../src/runners/supervisor/responder_api.rs"),
     ),
     (
         "crate::runners::release_triage",

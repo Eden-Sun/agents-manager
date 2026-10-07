@@ -66,11 +66,9 @@ mod notify_crid_tests {
 }
 
 use crate::lifecycle::LcError;
-use crate::state::App;
 use sqlx::SqlitePool;
-use self::ports::{CandidateSwitch, ControllerRuntime, JudgeOps, MissionCancellation, MissionOps, QuotaOps, TurnOps};
+use self::ports::{BotLamp, CandidateSwitch, ControllerRuntime, JudgeOps, MissionCancellation, MissionOps, QuotaOps, TurnOps};
 use serde_json::{json, Value};
-use std::sync::Arc;
 use std::sync::OnceLock;
 use tokio::sync::Mutex;
 
@@ -312,7 +310,7 @@ pub async fn status_json(app: &(impl crate::capabilities::Db + crate::supervisor
 /// 「看完即可」），送到、回合結束就結案，不進 awaiting_review、不會被當成卡住的工作。
 #[allow(clippy::too_many_arguments)]
 pub async fn assign(
-    app: &Arc<App>,
+    app: &(impl crate::capabilities::Db + crate::capabilities::Emit + MissionOps + QuotaOps + TurnOps + JudgeOps),
     target_bot_id: &str,
     text: &str,
     client_request_id: &str,
@@ -346,7 +344,7 @@ pub async fn assign(
     let _g = lock().await;
 
     // A retry of the same request is the same assignment, never a second one.
-    if let Some(a) = store::assignment_by_crid(&app.db, client_request_id).await.map_err(up)? {
+    if let Some(a) = store::assignment_by_crid(app.db(), client_request_id).await.map_err(up)? {
         if a.target_bot_id != target_bot_id {
             return Err(LcError::conflict(
                 "client_request_id already used for another bot",
@@ -387,18 +385,18 @@ pub async fn assign(
         return Ok(a.to_json());
     }
 
-    let sup = store::get_or_init(&app.db).await.map_err(up)?;
+    let sup = store::get_or_init(app.db()).await.map_err(up)?;
     let manager_id = sup.bot_id.clone().ok_or_else(|| {
         LcError::conflict("supervisor is not set up", json!({"reason": "not_configured"}))
     })?;
     // 目標是另一個 AGM 角色：這不是交辦，是**交接**。走跟 bot 申請同一條佇列（批次、節流、
     // 「回覆不再叫醒對方」的規則只有一份），不直接打進對方的 pane（SPEC §18.15）。
-    if let Some(target_role) = roles::role_of_bot(&app.db, target_bot_id).await.map_err(up)? {
+    if let Some(target_role) = roles::role_of_bot(app.db(), target_bot_id).await.map_err(up)? {
         if actor == Some(target_role) || target_bot_id == manager_id && actor.is_none() && target_role == roles::Role::Patrol {
             return Err(LcError::Bad("the supervisor cannot assign work to itself".into()));
         }
         let from = match actor {
-            Some(r) => roles::bot_for(&app.db, r).await.map_err(up)?,
+            Some(r) => roles::bot_for(app.db(), r).await.map_err(up)?,
             None => Some(manager_id.clone()),
         };
         let Some(from) = from else {
@@ -425,7 +423,7 @@ pub async fn assign(
     if reply.is_set() {
         return Err(LcError::Bad("ack / reply_to only apply to a handover between AGM roles".into()));
     }
-    crate::db::bot(&app.db, target_bot_id)
+    crate::db::bot(app.db(), target_bot_id)
         .await
         .map_err(up)?
         .filter(|b| b.deleted_at.is_none())
@@ -433,8 +431,8 @@ pub async fn assign(
 
     // The user's own words behind this assignment, with a stable id to dedupe on. A text hash
     // would not be one — two identical asks are two asks.
-    let (source, source_key, request_text) = source_of(&app.db, &manager_id, source_turn_id, text, actor).await?;
-    let request_id = store::upsert_request(&app.db, source, source_key.as_deref(), &request_text)
+    let (source, source_key, request_text) = source_of(app.db(), &manager_id, source_turn_id, text, actor).await?;
+    let request_id = store::upsert_request(app.db(), source, source_key.as_deref(), &request_text)
         .await
         .map_err(up)?;
 
@@ -447,12 +445,12 @@ pub async fn assign(
     // Who else is already holding these files. Reported, never enforced: the daemon cannot
     // know that two modules are really independent, so this goes to AGM to arbitrate rather
     // than refusing work on a string match (SPEC §18.4).
-    let conflicts = ownership_conflicts(&app.db, ownership, None).await?;
+    let conflicts = ownership_conflicts(app.db(), ownership, None).await?;
 
     // 任務連結與驗收角色跟列**同一句 INSERT**（issue #136）：派送當下撞到額度時 controller 要看得到這件屬於哪個
     // 任務、什麼角色，派工訊息標成哪個角色送的也看這一欄——分開寫的話，後一句失敗會留下一件沒掛任務、照樣被派出去的交辦。
     let a = store::insert_assignment_linked(
-        &app.db,
+        app.db(),
         Some(&request_id),
         target_bot_id,
         client_request_id,
@@ -466,13 +464,13 @@ pub async fn assign(
     .await
     .map_err(up)?;
     if let Some(parent) = follow_up_of {
-        let _ = store::link_followup(&app.db, parent, &a.id).await;
+        let _ = store::link_followup(app.db(), parent, &a.id).await;
     }
     // Best effort: a failure here leaves the row queued, which is the recoverable state.
     controller::dispatch(app, &a.id).await;
     // #557：路徑比對之後才問撞題。只 spawn，不等 Jev（#480）。答案不併進 ownership_conflicts，也不改這筆交辦。
     app.judge_schedule_assignment(&a.id).await;
-    let a = store::assignment(&app.db, &a.id).await.map_err(up)?.unwrap_or(a);
+    let a = store::assignment(app.db(), &a.id).await.map_err(up)?.unwrap_or(a);
     app.emit("supervisor_changed", json!({"assignment_id": a.id, "status": a.status})).await;
     let mut out = a.to_json();
     out["ownership_conflicts"] = json!(conflicts);
@@ -623,7 +621,7 @@ async fn source_of(
 ///
 /// Sanitized on purpose: no env, no hook tokens, no args (an identity's args can name config
 /// directories), no persona text. Enough to pick a bot; nothing that helps exfiltrate an account.
-pub async fn sanitized_state(app: &(impl crate::capabilities::Db + crate::capabilities::HerdrRoutes)) -> Result<Value, LcError> {
+pub async fn sanitized_state(app: &(impl crate::capabilities::Db + crate::capabilities::HerdrRoutes + BotLamp)) -> Result<Value, LcError> {
     let projects = crate::db::live_projects(app.db()).await.map_err(up)?;
     let bots = crate::db::live_bots(app.db()).await.map_err(up)?;
     let sup = store::get_or_init(app.db()).await.map_err(up)?;
@@ -669,7 +667,7 @@ pub async fn sanitized_state(app: &(impl crate::capabilities::Db + crate::capabi
             // 側欄上那顆燈號，跟 `GET /api/state` 同一個函式算的。以前這裡沒有它，`bin/agm`
             // 只好自己從 `host_connected` + `run` 推——而 `lamp` 吃的是 `bot_connected`
             // （bot → host → **herdr session**），同一台主機上 session 掉了的那顆會分岔（issue #514）。
-            "lamp": crate::api::lamp(app.bot_connected(&b.id).await, run.as_ref()),
+            "lamp": app.bot_lamp(&b.id, run.as_ref()).await,
             "queued_turns": queued,
             // 停著但可以叫醒：派工照送就好，`lifecycle::prompt` 會先把它 `--resume` 回來。
             "asleep": asleep.get(&b.id).map(|(at, mins)| json!({"since": at, "idle_minutes": mins})),

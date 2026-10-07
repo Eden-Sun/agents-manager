@@ -166,6 +166,11 @@ pub trait DaemonConnection {
     fn daemon_connected(&self) -> bool;
 }
 
+/// The sidebar lamp value for a bot and its current run.
+pub trait BotLamp: Send + Sync {
+    fn bot_lamp<'a>(&'a self, bot_id: &'a str, run: Option<&'a db::Run>) -> impl Future<Output = &'static str> + Send + 'a;
+}
+
 #[cfg(test)]
 mod tests {
     /// supervisor 的 production 程式碼（不含 `#[cfg(test)]` 的項目）不再直接呼叫其他 feature 的函式：這些呼叫只准出現在
