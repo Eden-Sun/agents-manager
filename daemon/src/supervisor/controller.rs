@@ -4359,7 +4359,7 @@ mod queue_dispatch_tests {
         };
         sqlx::query("UPDATE turns SET quota_hold=? WHERE id=?").bind(hold(now + chrono::Duration::hours(2))).bind(&turn_id).execute(&app.db).await.unwrap();
         let row = crate::db::bot(&app.db, &bot).await.unwrap().unwrap();
-        assert!(crate::quota::limit_hit_for_bot(&app, &row).await.is_none(), "前提：新行程，記憶體裡沒有撞限");
+        assert!(crate::runners::quota::limit_hit_for_bot(&app, &row).await.is_none(), "前提：新行程，記憶體裡沒有撞限");
 
         block_stale_queues(&app).await;
         let turn_status = |app: Arc<App>, id: String| async move {
@@ -4690,7 +4690,7 @@ mod quota_restart_tests {
         assert!(q.get("claude:cc0").is_none(), "不能生出一格沒人讀的 claude:cc0");
         drop(q);
         let b = crate::db::bot(&app.db, "b-cc0").await.unwrap().unwrap();
-        assert!(crate::quota::limit_hit_for_bot(&app, &b).await.is_some(), "dispatch 看得到還在擋");
+        assert!(crate::runners::quota::limit_hit_for_bot(&app, &b).await.is_some(), "dispatch 看得到還在擋");
     }
 
     /// L1／sup 6：回填每台主機每個行程只跑一次。以前綁在 controller 的 `spawn`，AGM 每換一次模型就重跑，
@@ -4759,8 +4759,8 @@ mod quota_restart_tests {
             async move { crate::db::bot(&app.db, id).await.unwrap().unwrap() }
         };
 
-        assert!(crate::quota::limit_hit_for_bot(&app, &get("b-fable").await).await.is_some(), "跑 Fable 的被擋");
-        assert!(crate::quota::limit_hit_for_bot(&app, &get("b-opus").await).await.is_none(), "跑 opus 的不歸 Fable 桶管");
+        assert!(crate::runners::quota::limit_hit_for_bot(&app, &get("b-fable").await).await.is_some(), "跑 Fable 的被擋");
+        assert!(crate::runners::quota::limit_hit_for_bot(&app, &get("b-opus").await).await.is_none(), "跑 opus 的不歸 Fable 桶管");
 
         // 設定是 opus，但 run 上 `/model` 換成了 fable：以實際在跑的為準。
         sqlx::query("INSERT INTO runs (id,bot_id,state,agent_status,runtime_model,started_at) VALUES ('run-o','b-opus','running','idle','fable',?)")
@@ -4768,12 +4768,12 @@ mod quota_restart_tests {
             .execute(&app.db)
             .await
             .unwrap();
-        assert!(crate::quota::limit_hit_for_bot(&app, &get("b-opus").await).await.is_some(), "實際在跑 fable");
+        assert!(crate::runners::quota::limit_hit_for_bot(&app, &get("b-opus").await).await.is_some(), "實際在跑 fable");
 
         // 5h 撞限：兩顆都擋。
         sqlx::query("UPDATE runs SET runtime_model='opus' WHERE id='run-o'").execute(&app.db).await.unwrap();
         set_bucket_hit(&app, "claude:cc2", "five_hour").await;
-        assert!(crate::quota::limit_hit_for_bot(&app, &get("b-opus").await).await.is_some(), "5h 是整個帳號的");
+        assert!(crate::runners::quota::limit_hit_for_bot(&app, &get("b-opus").await).await.is_some(), "5h 是整個帳號的");
     }
 
     /// review3 c3 H2：修好之前被 Fable 撞限停進來的 opus 交辦，`resume_at` 在 Fable 週窗重置（好幾天後）。park 時記的橫幅是

@@ -2745,7 +2745,7 @@ mod limit_hit_quota_tests {
         assert!(capture_codex_usage_notices(&app, &bot.id, &run).await.is_err(), "記不進去要回錯");
         assert_eq!(limit_hits(&app).await, Vec::<String>::new(), "沒有猜一格寫下去");
         assert_eq!(crate::lifecycle::run_state::turn_status(&app, &turn).await, "failed", "回合照樣收");
-        assert!(crate::quota::try_limit_hit_for_bot(&app, &bot).await.unwrap().is_some(), "欠著照擋");
+        assert!(crate::runners::quota::try_limit_hit_for_bot(&app, &bot).await.unwrap().is_some(), "欠著照擋");
     }
 
     /// #198 的留言：通知訊息先寫，之後這一則就不是新的。以前寫完訊息才讀「有沒有回合在飛」，那一下讀錯就回錯——沒有在飛
@@ -2768,7 +2768,7 @@ mod limit_hit_quota_tests {
 
         let notes: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM messages WHERE role='system' AND content LIKE '%hit your usage limit%'").fetch_one(&app.db).await.unwrap();
         assert_eq!(notes, 1, "通知只寫一次");
-        assert!(crate::quota::try_limit_hit_for_bot(&app, &bot).await.unwrap().is_some(), "撞限記下了（或欠著照擋），沒有因為讀錯就丟掉");
+        assert!(crate::runners::quota::try_limit_hit_for_bot(&app, &bot).await.unwrap().is_some(), "撞限記下了（或欠著照擋），沒有因為讀錯就丟掉");
         assert_eq!(limit_hits(&app).await, vec!["codex".to_string()]);
     }
 

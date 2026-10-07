@@ -218,21 +218,21 @@ pub async fn serve(config_path: Option<PathBuf>, dev_watch_all_panes: bool) -> R
     attach::spawn_sweep(app.clone());
     // 預覽（§6.12）：pane 還在不在、port 有沒有在 listen，對回 `bot_previews`。
     preview::reconcile_all(&app).await;
-    events::spawn_global(app.clone()).await;
+    crate::runners::events::spawn_global(app.clone()).await;
 
     // The daemon never spawns the user's default session; watching it is best-effort.
     if app.herdr_session != default_session::SESSION {
         if let Err(e) = default_session::sync(&app).await {
             tracing::debug!(session = default_session::SESSION, error = ?e, "initial default session sync skipped");
         }
-        events::spawn_global_for_session(app.clone(), config::LOCAL_HOST.to_string(), default_session::SESSION.to_string()).await;
+        crate::runners::events::spawn_global_for_session(app.clone(), config::LOCAL_HOST.to_string(), default_session::SESSION.to_string()).await;
     }
     runners::default_session::spawn_poller(app.clone());
 
     if dev_watch_all_panes {
         if let Ok(panes) = app.herdr.pane_list(None).await {
             for p in panes {
-                events::watch_pane(&app, config::LOCAL_HOST, &p.pane_id).await;
+                crate::runners::events::watch_pane(&app, config::LOCAL_HOST, &p.pane_id).await;
             }
             tracing::info!("dev: watching agent status for all existing panes");
         }
@@ -251,9 +251,9 @@ pub async fn serve(config_path: Option<PathBuf>, dev_watch_all_panes: bool) -> R
     remote_perms::spawn_poller(app.clone());
     // #406：回收區不能只在開機收，常駐好幾天會一路長。
     bot_trash::spawn_gc(app.clone());
-    quota::spawn_codex_poller(app.clone());
+    crate::runners::quota::spawn_codex_poller(app.clone());
     memstat::spawn_poller(app.clone());
-    quota_claude::spawn_claude_poller(app.clone());
+    crate::runners::quota_claude::spawn_claude_poller(app.clone());
     runners::quota_grok::spawn_grok_poller(app.clone());
     quota_agy::spawn_agy_poller(app.clone());
     quota_agy::spawn_agy_login_watcher(app.clone());
@@ -269,24 +269,24 @@ pub async fn serve(config_path: Option<PathBuf>, dev_watch_all_panes: bool) -> R
     // 交辦改狀態時補推 mission_updated，任務卡才跟得上（review3 c1 M5）。
     mission::relay::spawn(app.clone());
     // Agent titles have no herdr event, so they are polled.
-    events::spawn_title_poller(app.clone());
+    crate::runners::events::spawn_title_poller(app.clone());
     runners::tui_prompts::spawn_survey_watcher(app.clone());
     lifecycle::spawn_stuck_turn_sweeper(app.clone());
-    update_watch::spawn_update_watcher(app.clone());
+    crate::runners::update_watch::spawn_update_watcher(app.clone());
     // issue #707：claude／codex 上游有新版、磁碟上還沒有（跟上面的「重啟套用」分開）。
-    upstream_update::spawn(app.clone());
+    crate::runners::upstream_update::spawn(app.clone());
     // SPEC §11.4.4: remote hook spools whose status event never arrived (one ssh per host, 30s).
     runners::hook_inbox::spawn_worker(app.clone());
     hookrecv::spawn_spool_scanner(app.clone());
     // §6.5e：pane 裡開始跑 dev server 沒有任何 herdr 事件，對帳又不定期跑；表上的 kind／port 靠這個跟上。
     panes::spawn_scanner(app.clone());
     // issue #90：名額持有者沒續約（掛了、被砍）就收回，不必等下一個人來要才發現。
-    build_scheduler::spawn_sweeper(app.clone());
+    crate::runners::build_scheduler::spawn_sweeper(app.clone());
 
     // Restarting is how a restart window ends: nothing waits out the old lease (SPEC §18.10).
     supervisor::maintenance::release_restart_on_startup(&app).await;
     // 上一顆 daemon 開的 herdr 維護窗口：沒到期就重新排截止，過期就當場收尾（§6.5.2）。
-    herdr_maintenance::arm_on_startup(&app).await;
+    crate::runners::herdr_maintenance::arm_on_startup(&app).await;
     // 上一顆 daemon 等換版窗口等到一半（或就是這次換版）：讀回來，換好了／回滾了要告訴使用者（SPEC §18.10）。
     deploy_wait::startup(&app).await;
     deploy_wait::spawn_ticker(&app);

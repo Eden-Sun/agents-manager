@@ -1218,7 +1218,7 @@ async fn process_locked_for(app: &Arc<App>, body: &HookBody, event_id: Option<&s
     // 放在世代圍籬之後：上一代的 Stop 不能改這一代的帳。
     if provider == "claude" && matches!(&kind, HookKind::TurnComplete { .. }) {
         if let Some(r) = run.as_ref() {
-            crate::background_hook::on_stop(app, r, &body.payload).await;
+            crate::runners::background_hook::on_stop(app, r, &body.payload).await;
         }
     }
 
@@ -4166,7 +4166,7 @@ mod external_claim_tests {
             .await
             .unwrap();
         assert_eq!(turn_row(&app, &turn_id).await.status, "failed");
-        assert!(crate::quota::limit_hit_for_bot(&app, &bot).await.is_none(), "過載不是額度用完");
+        assert!(crate::runners::quota::limit_hit_for_bot(&app, &bot).await.is_none(), "過載不是額度用完");
 
         let (bot_id, _conv, turn_id) = delivered_turn(&app, &env.project_id).await;
         let bot = db::bot(&app.db, &bot_id).await.unwrap().unwrap();
@@ -4175,7 +4175,7 @@ mod external_claim_tests {
             .await
             .unwrap();
         assert_eq!(turn_row(&app, &turn_id).await.status, "failed");
-        let hit = crate::quota::limit_hit_for_bot(&app, &bot).await.expect("撞限記下來了");
+        let hit = crate::runners::quota::limit_hit_for_bot(&app, &bot).await.expect("撞限記下來了");
         assert_eq!(hit.bucket.as_deref(), Some("five_hour"));
         assert!(hit.until.is_some(), "有期限，不會永遠擋著");
     }
@@ -4221,7 +4221,7 @@ mod external_claim_tests {
         assert_eq!(limit_hits().await, Vec::<String>::new(), "哪一格都沒寫，尤其不是本機的 `claude`");
         assert!(crate::turn_error::owes_limit_hit(&app, &bot_id), "撞限記成欠著");
         let bot = db::bot(&app.db, &bot_id).await.unwrap().unwrap();
-        let owed_at = crate::quota::limit_hit_for_bot(&app, &bot).await.expect("派送前照欠著的那一筆擋").at;
+        let owed_at = crate::runners::quota::limit_hit_for_bot(&app, &bot).await.expect("派送前照欠著的那一筆擋").at;
         assert_eq!(turn_row(&app, &turn_id).await.status, "in_flight", "回合不收、不推回合結束");
         // 回合被別的路收掉（卡住的回合被看門狗收了）：沒有在飛的回合擋著，排著的照欠著的那一筆擋。
         let run: String = sqlx::query_scalar("SELECT run_id FROM turns WHERE id=?").bind(&turn_id).fetch_one(&app.db).await.unwrap();
@@ -4310,7 +4310,7 @@ mod external_claim_tests {
             .await
             .unwrap();
         let bot = db::bot(&app.db, &bot_a).await.unwrap().unwrap();
-        assert!(crate::quota::limit_hit_for_bot(&app, &bot).await.is_some(), "沒有回合可掛，撞限照樣記下");
+        assert!(crate::runners::quota::limit_hit_for_bot(&app, &bot).await.is_some(), "沒有回合可掛，撞限照樣記下");
         let after = turn_row(&app, &turn_a).await;
         assert_eq!((after.status, after.completed_at), (closed.status, closed.completed_at), "已經收掉的回合不改");
         // 下一件派工：排在佇列的那一則不會被送進 A。
@@ -4341,7 +4341,7 @@ mod external_claim_tests {
             .unwrap();
         assert_eq!(turn_row(&app, &turn_b).await.status, "in_flight", "回聲：回合不動");
         let bot = db::bot(&app.db, &bot_b).await.unwrap().unwrap();
-        assert!(crate::quota::limit_hit_for_bot(&app, &bot).await.is_some(), "回聲裡的撞額度也是真的");
+        assert!(crate::runners::quota::limit_hit_for_bot(&app, &bot).await.is_some(), "回聲裡的撞額度也是真的");
 
         // (c) 沒有 run：說不準是哪個身分送的（停機後可能換過身分），不記。
         let (bot_c, _c, turn_c) = delivered_turn(&app, &env.project_id).await;
@@ -4352,7 +4352,7 @@ mod external_claim_tests {
             .await
             .unwrap();
         let bot = db::bot(&app.db, &bot_c).await.unwrap().unwrap();
-        assert!(crate::quota::limit_hit_for_bot(&app, &bot).await.is_none(), "沒有 run 的不記到現在的身分上");
+        assert!(crate::runners::quota::limit_hit_for_bot(&app, &bot).await.is_none(), "沒有 run 的不記到現在的身分上");
 
         // (d) 已經收過的同一則重播：不再記一次（不把撞限時刻往後推）。
         let (bot_d, _c, turn_d) = delivered_turn(&app, &env.project_id).await;
@@ -4360,10 +4360,10 @@ mod external_claim_tests {
         process(&app, &ev).await.unwrap();
         assert_eq!(turn_row(&app, &turn_d).await.status, "failed");
         let bot = db::bot(&app.db, &bot_d).await.unwrap().unwrap();
-        let first = crate::quota::limit_hit_for_bot(&app, &bot).await.expect("第一次記下");
-        crate::quota::clear_limit_hit_for_bot(&app, &bot).await;
+        let first = crate::runners::quota::limit_hit_for_bot(&app, &bot).await.expect("第一次記下");
+        crate::runners::quota::clear_limit_hit_for_bot(&app, &bot).await;
         process(&app, &ev).await.unwrap();
-        assert!(crate::quota::limit_hit_for_bot(&app, &bot).await.is_none(), "重播不再記：{first:?}");
+        assert!(crate::runners::quota::limit_hit_for_bot(&app, &bot).await.is_none(), "重播不再記：{first:?}");
     }
 
     /// 分類：rate limit 跟其他錯誤要分得開，中斷排在最前面（寧可少收一次也不要把使用者按的停說成失敗）。

@@ -26,6 +26,23 @@ impl<T: crate::quota::QuotaStaleKeys + ?Sized> crate::quota::QuotaStaleKeys for 
     }
 }
 
+impl crate::quota::HostIdentities for App {
+    async fn identity_for_host(&self, host: &str, name: &str) -> Option<crate::config::IdentityCfg> {
+        crate::tools::identity_for_host_ref(self, host, name).await
+    }
+    async fn host_tools_detected(&self, host: &str) -> bool {
+        self.tools.lock().await.contains_key(host)
+    }
+}
+impl<T: crate::quota::HostIdentities + ?Sized> crate::quota::HostIdentities for Arc<T> {
+    async fn identity_for_host(&self, host: &str, name: &str) -> Option<crate::config::IdentityCfg> {
+        (**self).identity_for_host(host, name).await
+    }
+    async fn host_tools_detected(&self, host: &str) -> bool {
+        (**self).host_tools_detected(host).await
+    }
+}
+
 impl crate::background_jobs::JobCounts for App {
     fn background_jobs(&self) -> &crate::background_jobs::Counts {
         &self.background_jobs
@@ -542,7 +559,7 @@ impl<T: crate::judge::report::ReportNotifier + ?Sized> crate::judge::report::Rep
 
 impl crate::reconcile::PaneIdentitySync for Arc<App> {
     async fn sync_child_identity(&self, host: &str, bot: &crate::db::Bot, pane_id: &str, pid: Option<i64>) {
-        crate::pane_identity::sync_child_identity(self, host, bot, pane_id, pid).await;
+        crate::runners::pane_identity::sync_child_identity(self, host, bot, pane_id, pid).await;
     }
     async fn claude_default_effort(&self, host: &str, identity: Option<&str>, alias: &str) -> anyhow::Result<String> {
         crate::models::claude_default_effort(self, host, identity, alias).await

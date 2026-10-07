@@ -12,14 +12,14 @@
 //! [`TAIL_BYTES`]。記憶體帳，daemon 重啟後第一輪重讀檔尾即可補回；run 結束由巡邏清掉（[`retain_runs`]）。
 
 use crate::db;
-use crate::state::App;
 use am_ports::{CodexRolloutAccess, DbContext, EventSink};
 use serde_json::{json, Value};
+use sqlx::SqlitePool;
 use std::collections::HashMap;
 use std::io::{Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, Mutex, OnceLock};
-use sqlx::SqlitePool;
+use std::sync::{Mutex, OnceLock};
+
 
 /// 第一次（或一輪新增太多）時只讀檔尾這麼多；rollout 一輪 token_count 約幾 KB，256 KB 足夠找到最後一筆。
 const TAIL_BYTES: u64 = 256 * 1024;
@@ -95,12 +95,6 @@ fn read_new(path: &Path, offset: u64) -> std::io::Result<(String, u64)> {
     let from = if mid_line { buf.iter().position(|b| *b == b'\n').map_or(end, |i| i + 1) } else { 0 };
     let text = String::from_utf8_lossy(&buf[from.min(end)..end]).into_owned();
     Ok((text, start + end as u64))
-}
-
-/// 巡邏每輪對每顆 codex run 叫一次：讀 rollout 新增的部分，最後一筆 `token_count` 變了就推 `bot_status`。
-/// 找不到 session／rollout、遠端主機、讀失敗都靜靜跳過（提示而已，不影響任何流程）。
-pub async fn refresh_codex(app: &Arc<App>, run: &db::Run) {
-    crate::app_ports_r2a8::refresh_codex(app, run).await;
 }
 
 /// Run-scoped Codex cache observation. The App wrapper supplies only the database, local rollout

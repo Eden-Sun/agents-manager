@@ -821,7 +821,7 @@ async fn run_with_kind_result(
     if !app.hosts.is_current(&fence).await {
         return finish(superseded("確認通知持久化", json!({"from": before, "to": after, "notices_updated": notices}))).await;
     }
-    crate::update_watch::forget_disk_version(app, host, &kind).await;
+    crate::runners::update_watch::forget_disk_version(app, host, &kind).await;
     if app
         .hosts
         .run_if_current(
@@ -1238,7 +1238,7 @@ async fn recover_with_registry(
     if !app.hosts.is_current(&fence).await || host_target_for_conn(fence.conn()) != host_target {
         return finish(superseded(format!("{host} 在改通知持久化時重連或改設定；沒有發布接手成功"))).await;
     }
-    crate::update_watch::forget_disk_version(app, host, kind).await;
+    crate::runners::update_watch::forget_disk_version(app, host, kind).await;
     if kind == "claude" {
         if app
             .hosts

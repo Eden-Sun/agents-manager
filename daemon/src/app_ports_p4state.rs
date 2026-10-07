@@ -187,7 +187,7 @@ pub async fn try_limit_hit_for_bot(
     app: &Arc<App>,
     bot: &crate::db::Bot,
 ) -> anyhow::Result<Option<crate::quota::LimitHit>> {
-    crate::quota::try_limit_hit_for_bot(app, bot).await
+    crate::runners::quota::try_limit_hit_for_bot(app, bot).await
 }
 
 pub async fn running_model(app: &impl crate::capabilities::Db, bot: &crate::db::Bot) -> Option<String> {
@@ -206,7 +206,7 @@ pub async fn limit_cleared_since(
     bot: &crate::db::Bot,
     since: chrono::DateTime<chrono::Utc>,
 ) -> bool {
-    crate::quota::limit_cleared_since(app, bot, since).await
+    crate::runners::quota::limit_cleared_since(app, bot, since).await
 }
 
 pub async fn quota_base_for_host(

@@ -122,7 +122,7 @@ async fn stop_locked(
     // 鎖內檢查之後、`running → stopping` 之前，畫面或新的 Stop hook 都可能多出背景工作。
     // 先現場 refresh（新鮮 hook 帳仍優先），再看帳本；這一步必須在 CAS 之前。
     if only_if_idle && refuse_background_jobs {
-        crate::background_jobs::refresh(app, &run, &bot.kind).await;
+        crate::runners::background_jobs::refresh(app, &run, &bot.kind).await;
         if let Some(n) = crate::background_jobs::known(app, &run.id).filter(|n| *n > 0) {
             return Err(LcError::conflict(
                 "not_idle",

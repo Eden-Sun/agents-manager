@@ -7,21 +7,16 @@
 
 use crate::config::{expand_home, LOCAL_HOST};
 use crate::hosts::sh_quote;
-use crate::state::App;
 
-use anyhow::{anyhow, bail, Context, Result};
+use anyhow::{anyhow, Context, Result};
 use serde_json::{json, Value};
 use std::collections::BTreeMap;
 use std::sync::Arc;
-use std::time::{Duration, Instant};
-use tokio::io::{AsyncBufReadExt, AsyncWriteExt};
+use std::time::Duration;
 
 pub const CACHE_TTL: Duration = Duration::from_secs(600);
-const LOCAL_RPC_TIMEOUT: Duration = Duration::from_secs(20);
-/// Seconds the remote pipeline keeps stdin open before the server is allowed to exit.
-const REMOTE_RPC_HOLD_SECS: u32 = 6;
 
-const CLIENT_INFO: &str = r#"{"name":"agents-manager","title":"agents-manager","version":"0.1"}"#;
+pub(crate) const CLIENT_INFO: &str = r#"{"name":"agents-manager","title":"agents-manager","version":"0.1"}"#;
 
 /// Read a fresh snapshot without turning an ordinary Bot request into a CLI probe.
 pub async fn cached(app: &impl crate::models::ModelsCache, host: &str, kind: &str, identity: Option<&str>) -> Option<Value> {
@@ -34,7 +29,7 @@ pub async fn cached(app: &impl crate::models::ModelsCache, host: &str, kind: &st
         .map(|(_, value)| value.clone())
 }
 
-fn rpc_lines(id: u64, method: &str, params: &Value) -> Vec<String> {
+pub(crate) fn rpc_lines(id: u64, method: &str, params: &Value) -> Vec<String> {
     vec![
         format!(r#"{{"jsonrpc":"2.0","id":1,"method":"initialize","params":{{"clientInfo":{CLIENT_INFO}}}}}"#),
         r#"{"jsonrpc":"2.0","method":"initialized"}"#.to_string(),
@@ -42,7 +37,7 @@ fn rpc_lines(id: u64, method: &str, params: &Value) -> Vec<String> {
     ]
 }
 
-fn find_response(text: &str, id: u64) -> Option<Result<Value>> {
+pub(crate) fn find_response(text: &str, id: u64) -> Option<Result<Value>> {
     for line in text.lines() {
         let Ok(v) = serde_json::from_str::<Value>(line.trim()) else { continue };
         if v.get("id").and_then(|x| x.as_u64()) == Some(id) {
@@ -55,68 +50,6 @@ fn find_response(text: &str, id: u64) -> Option<Result<Value>> {
     None
 }
 
-pub async fn codex_rpc(app: &Arc<App>, host: &str, method: &str, params: Value) -> Result<Value> {
-    const ID: u64 = 2;
-    let lines = rpc_lines(ID, method, &params);
-    let exe = crate::tools::cached_path(app, host, "codex").await.unwrap_or_else(|| "codex".into());
-
-    if host == LOCAL_HOST {
-        return tokio::time::timeout(LOCAL_RPC_TIMEOUT, codex_rpc_local(&exe, &lines, ID))
-            .await
-            .map_err(|_| anyhow!("codex app-server `{method}` timed out"))?;
-    }
-    let conn = app.hosts.get(host).await.ok_or_else(|| anyhow!("unknown host `{host}`"))?;
-    let printf_args = lines.iter().map(|l| sh_quote(l)).collect::<Vec<_>>().join(" ");
-    let script = format!(
-        "{{ printf '%s\\n' {printf_args}; sleep {REMOTE_RPC_HOLD_SECS}; }} | {exe} app-server 2>/dev/null | awk '{{print}} /\"id\":{ID}[,}}]/ {{exit}}'\n",
-        exe = sh_quote(&exe),
-    );
-    let out = conn.ssh_exec_path(&script).await.with_context(|| format!("codex app-server on {host}"))?;
-    find_response(&out, ID).ok_or_else(|| anyhow!("codex app-server on {host}: no response to `{method}`:\n{}", out.trim()))?
-}
-
-async fn codex_rpc_local(exe: &str, lines: &[String], id: u64) -> Result<Value> {
-    // The daemon's own PATH may lack codex (launchd); resolve through the login shell first.
-    let exe = if exe.contains('/') {
-        exe.to_string()
-    } else {
-        let probe = format!("{}; printf '%s\\n' \"$p\"", crate::tools::login_abs_sh(exe));
-        let o = tokio::process::Command::new("/bin/sh").arg("-c").arg(&probe).output().await?;
-        let p = String::from_utf8_lossy(&o.stdout).trim().to_string();
-        if p.is_empty() {
-            bail!("`{exe}` is not installed on this machine");
-        }
-        p
-    };
-    let mut child = tokio::process::Command::new(&exe)
-        .arg("app-server")
-        .stdin(std::process::Stdio::piped())
-        .stdout(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::null())
-        .kill_on_drop(true)
-        .spawn()
-        .with_context(|| format!("spawn {exe} app-server"))?;
-    let mut stdin = child.stdin.take().ok_or_else(|| anyhow!("no stdin"))?;
-    let stdout = child.stdout.take().ok_or_else(|| anyhow!("no stdout"))?;
-    for l in lines {
-        stdin.write_all(l.as_bytes()).await?;
-        stdin.write_all(b"\n").await?;
-    }
-    stdin.flush().await?;
-    let mut reader = tokio::io::BufReader::new(stdout).lines();
-    let result = loop {
-        match reader.next_line().await? {
-            None => break Err(anyhow!("codex app-server exited before answering")),
-            Some(line) => {
-                if let Some(r) = find_response(&line, id) {
-                    break r;
-                }
-            }
-        }
-    };
-    let _ = child.kill().await;
-    result
-}
 
 pub fn codex_models_from_rpc(result: &Value) -> Vec<Value> {
     result
@@ -285,7 +218,7 @@ fn grok_efforts_from_cache(cache: &Value, model_id: &str) -> Option<(Vec<String>
     Some((sort_grok_efforts(ids), default))
 }
 
-fn enrich_grok_models(mut models: Vec<Value>, cache_text: &str, cfg_text: &str) -> Vec<Value> {
+pub(crate) fn enrich_grok_models(mut models: Vec<Value>, cache_text: &str, cfg_text: &str) -> Vec<Value> {
     let cache: Value = serde_json::from_str(cache_text).unwrap_or(Value::Null);
     let cfg_default = grok_default_effort_from_config(cfg_text);
     for v in &mut models {
@@ -332,7 +265,7 @@ pub fn parse_claude_effort_settings(text: &str) -> (Option<String>, BTreeMap<Str
 }
 
 /// `None` = `~/.claude`; an unknown or non-claude identity silently falls back to that too.
-async fn claude_config_dir(app: &Arc<impl crate::tools::ToolsEnv + 'static>, host: &str, identity: Option<&str>) -> Result<Option<String>> {
+pub(crate) async fn claude_config_dir(app: &Arc<impl crate::tools::ToolsEnv + 'static>, host: &str, identity: Option<&str>) -> Result<Option<String>> {
     let Some(name) = identity else { return Ok(None) };
     let Some(idn) = crate::tools::identity_for_host(app, host, name).await else { return Ok(None) };
     if idn.kind != "claude" {
@@ -350,7 +283,7 @@ fn optional_cat_script(path_expr: &str) -> String {
 /// 讀那台主機上的一個選用設定檔。**缺檔是答案（回空字串），讀不到是錯誤**：以前兩者都變成 `""`，
 /// ssh 逾時／連不上就被當成「沒設定」，接下來拿內建預設值當成事實記下去（#268）。
 /// 遠端 `ssh_exec` 看 exit code，所以缺檔那條要自己收成 0（`|| true`），不然缺檔也是 Err。
-async fn read_optional_text(app: &impl crate::hosts::HostsAccess, host: &str, path_expr: &str) -> Result<String> {
+pub(crate) async fn read_optional_text(app: &impl crate::hosts::HostsAccess, host: &str, path_expr: &str) -> Result<String> {
     let script = optional_cat_script(path_expr);
     if host == LOCAL_HOST {
         let o = tokio::process::Command::new("/bin/sh")
@@ -367,7 +300,7 @@ async fn read_optional_text(app: &impl crate::hosts::HostsAccess, host: &str, pa
     }
 }
 
-async fn read_claude_effort_settings(
+pub(crate) async fn read_claude_effort_settings(
     app: &impl crate::hosts::HostsAccess,
     host: &str,
     config_dir: Option<&str>,
@@ -429,77 +362,6 @@ pub fn agy_static_models() -> Vec<Value> {
         json!({"id": id, "display_name": name, "description": "", "is_default": i == 0, "default_effort": null, "efforts": [], "service_tiers": []})
     })
     .collect()
-}
-
-/// Uncached. `identity` (claude only) picks whose `settings.json` the "預設" hint comes from.
-pub async fn fetch(app: &Arc<App>, host: &str, kind: &str, identity: Option<&str>) -> Result<Value> {
-    let (source, models) = match kind {
-        "codex" => {
-            let r = codex_rpc(app, host, "model/list", json!({"includeHidden": false})).await?;
-            let m = codex_models_from_rpc(&r);
-            if m.is_empty() {
-                bail!("codex app-server returned no models");
-            }
-            ("codex-app-server", m)
-        }
-        "grok" => {
-            let exe = crate::tools::cached_path(app, host, "grok").await.unwrap_or_else(|| "grok".into());
-            let text = if host == LOCAL_HOST {
-                let script = format!(
-                    "( \"${{SHELL:-/bin/sh}}\" -lic {q} 2>/dev/null || {exe} models 2>/dev/null )",
-                    q = sh_quote(&format!("{exe} models")),
-                    exe = sh_quote(&exe)
-                );
-                crate::hosts::sh_local_stdout(&script, Duration::from_secs(30), "`grok models`").await?
-            } else {
-                let conn = app.hosts.get(host).await.ok_or_else(|| anyhow!("unknown host `{host}`"))?;
-                conn.ssh_exec_path(&format!("{} models 2>/dev/null </dev/null\n", sh_quote(&exe))).await?
-            };
-            let m = grok_models_from_text(&text);
-            if m.is_empty() {
-                bail!("could not parse `grok models` output:\n{}", text.trim());
-            }
-            let cfg_text = read_optional_text(app, host, "\"$HOME/.grok/config.toml\"").await?;
-            let cache_text = read_optional_text(app, host, "\"$HOME/.grok/models_cache.json\"").await?;
-            let m = enrich_grok_models(m, &cache_text, &cfg_text);
-            ("grok-cli", m)
-        }
-        "claude" => {
-            let config_dir = claude_config_dir(app, host, identity).await?;
-            let (global, per_model) = read_claude_effort_settings(app, host, config_dir.as_deref()).await?;
-            ("static", claude_static_models(global.as_deref(), &per_model))
-        }
-        "agy" => ("static", agy_static_models()),
-        other => bail!("unknown kind `{other}`"),
-    };
-    Ok(json!({
-        "kind": kind,
-        "host": host,
-        "source": source,
-        "fetched_at": crate::db::now(),
-        "models": models,
-    }))
-}
-
-pub async fn list(app: &Arc<App>, host: &str, kind: &str, identity: Option<&str>, refresh: bool) -> Result<Value> {
-    let key = format!("{host}/{kind}/{}", identity.unwrap_or(""));
-    if !refresh {
-        if let Some((at, v)) = app.models_cache.lock().await.get(&key) {
-            if at.elapsed() < CACHE_TTL {
-                return Ok(v.clone());
-            }
-        }
-    }
-    // 探測可能要好幾秒，途中同名主機可能重連或改指到另一台（#347），`fetch` 裡的各段也各自重新解析主機名：
-    // 開頭記下權威、在快取鎖裡確認沒換才寫。換過就整份作廢——換連線那一側清掉的快取不能被舊機器的清單種回來。
-    let fence = app.hosts.fence(host).await.ok_or_else(|| anyhow!("unknown host `{host}`"))?;
-    let v = fetch(app, host, kind, identity).await?;
-    let mut cache = app.models_cache.lock().await;
-    if !app.hosts.is_current(&fence).await {
-        bail!("host `{host}` was reconnected/reconfigured while listing {kind} models; stale result discarded");
-    }
-    cache.insert(key, (Instant::now(), v.clone()));
-    Ok(v)
 }
 
 /// Inverse of `lifecycle::model_args`, for panes the daemon did not start (adopted /
@@ -644,6 +506,7 @@ pub fn grok_effort_from_screen(screen: &str) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::runners::models::list;
 
     /// 一台設定了、但連不上的遠端主機（沒有人在聽那個 port，connection refused，快速失敗）。
     async fn unreachable_host(e: &crate::testing::Env) -> &'static str {

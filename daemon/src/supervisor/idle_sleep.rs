@@ -1485,7 +1485,7 @@ mod tests {
             event: "pane_agent_status_changed".into(),
             data: json!({"pane_id": format!("pane-{bot}"), "agent_status": "working"}),
         };
-        crate::events::handle_status(&app, crate::config::LOCAL_HOST, "test", &ev).await;
+        crate::runners::events::handle_status(&app, crate::config::LOCAL_HOST, "test", &ev).await;
         for t in ["test_status_down", "test_turns_down"] {
             sqlx::query(&format!("DROP TRIGGER {t}")).execute(&app.db).await.unwrap();
         }
@@ -2011,7 +2011,7 @@ mod tests {
         let (bot, run_id) = idle_bot(&env, "hotel").await;
         let _shell = provably_no_background_work(&env, &bot);
         let run = db::run(&env.app.db, &run_id).await.unwrap().unwrap();
-        crate::background_hook::on_stop(&env.app, &run, &hook(subagent.clone())).await;
+        crate::runners::background_hook::on_stop(&env.app, &run, &hook(subagent.clone())).await;
         sweep(&env.app, 90).await;
         assert_left_running(&env.app, &bot, "hook 報 subagent 還在跑").await;
 
@@ -2028,7 +2028,7 @@ mod tests {
         let (bot, run_id) = idle_bot(&env, "juliet").await;
         let _shell = provably_no_background_work(&env, &bot);
         let run = db::run(&env.app.db, &run_id).await.unwrap().unwrap();
-        crate::background_hook::on_stop(&env.app, &run, &hook(json!([]))).await;
+        crate::runners::background_hook::on_stop(&env.app, &run, &hook(json!([]))).await;
         sweep(&env.app, 90).await;
         assert!(asleep(&env.app, &bot).await.is_some(), "帳上乾淨、行程樹證明沒有：照常收");
 
@@ -2038,7 +2038,7 @@ mod tests {
         env.herdr.set_shell_pid(&format!("pane-{bot}"), 4242);
         let _ps = test_ps::set(&bot, Ok("  900     1  4000 herdr\n 4242   900  8000 -zsh\n 4300  4242  8000 bash -c cargo build\n".to_string()));
         let run = db::run(&env.app.db, &run_id).await.unwrap().unwrap();
-        crate::background_hook::on_stop(&env.app, &run, &hook(json!([]))).await;
+        crate::runners::background_hook::on_stop(&env.app, &run, &hook(json!([]))).await;
         sweep(&env.app, 90).await;
         assert_left_running(&env.app, &bot, "hook 說沒有、行程樹說有").await;
     }
@@ -2053,7 +2053,7 @@ mod tests {
         let run = db::run(&env.app.db, &run_id).await.unwrap().unwrap();
         let app = env.app.clone();
         crate::lifecycle::race_point::arm("idle_sleep_before_sleep_one", &bot, move || async move {
-            crate::background_hook::on_stop(
+            crate::runners::background_hook::on_stop(
                 &app,
                 &run,
                 &json!({"background_tasks": [{"id": "agent-1", "type": "subagent", "status": "running", "description": "review"}]}),

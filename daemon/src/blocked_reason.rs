@@ -120,7 +120,7 @@ mod tests {
         assert_eq!(run_blocked_reason(&env, &bot_id).await, json!(null), "沒卡住：null（欄位在、值是 null）");
 
         let run = crate::db::run(&env.app.db, &run_id).await.unwrap().unwrap();
-        crate::codex_model_migration::observe_screen(&env.app, &run, include_str!("lifecycle/fixtures/codex-0.155-update-menu.txt")).await;
+        crate::runners::codex_model_migration::observe_screen(&env.app, &run, include_str!("lifecycle/fixtures/codex-0.155-update-menu.txt")).await;
         let r = run_blocked_reason(&env, &bot_id).await;
         assert_eq!(r["code"], "codex_update_menu");
         assert!(r["text"].as_str().unwrap().contains("更新"), "{r}");
@@ -133,7 +133,7 @@ mod tests {
 
         // 換成別種畫面，原因跟著換（同一個 run 的 episode 不重講，但原因要對）。
         let run = crate::db::run(&env.app.db, &run_id).await.unwrap().unwrap();
-        crate::codex_model_migration::observe_screen(&env.app, &run, "› Ask Codex to do anything\n").await;
+        crate::runners::codex_model_migration::observe_screen(&env.app, &run, "› Ask Codex to do anything\n").await;
         assert_eq!(run_blocked_reason(&env, &bot_id).await, json!(null), "關掉就清掉");
     }
 
@@ -207,7 +207,7 @@ mod tests {
         ] {
             let (bot_id, run_id) = codex_run(&env, name).await;
             let run = crate::db::run(&env.app.db, &run_id).await.unwrap().unwrap();
-            crate::codex_model_migration::observe_screen(&env.app, &run, screen).await;
+            crate::runners::codex_model_migration::observe_screen(&env.app, &run, screen).await;
             assert_eq!(run_blocked_reason(&env, &bot_id).await["code"], code);
             // herdr 自己報了新的狀態（working）：記憶體裡的 episode 還沒收，但 run 已經不是 blocked——不能還掛著原因。
             sqlx::query("UPDATE runs SET agent_status='working' WHERE id=?").bind(&run_id).execute(&env.app.db).await.unwrap();

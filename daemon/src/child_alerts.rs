@@ -22,15 +22,15 @@
 //! 與 episode 不重講，已經不 blocked 的不補。
 
 use std::collections::HashMap;
-use std::sync::{Arc, Mutex, OnceLock};
+use std::sync::{Mutex, OnceLock};
 use std::time::Duration;
 
 use crate::db;
-use crate::state::App;
 
 /// 轉成 `blocked` 之後等這麼久才看：`dismiss_if_survey` 與 `/model` 確認框都在這段時間內處理完，
 /// 使用者自己在 pane 裡回答掉也來得及。
-const SETTLE: Duration = Duration::from_secs(8);
+pub(crate) const SETTLE: Duration = Duration::from_secs(8);
+
 
 /// 訊息裡最多帶這麼多字的畫面尾段——父 agent 要的是「它在問什麼」，不是整個終端。
 const MAX_QUESTION_CHARS: usize = 500;
@@ -210,19 +210,6 @@ pub fn message_for(child_name: &str, question: &str) -> String {
 }
 
 /// child 轉成 `blocked` 時呼叫（[`crate::events::handle_status`]）。自己開背景工作，不擋事件迴圈。
-pub fn on_child_blocked(app: &Arc<App>, run: &db::Run) {
-    if cfg!(test) {
-        return;
-    }
-    let (app, run) = (app.clone(), run.clone());
-    let working = Working::start(&run.bot_id);
-    tokio::spawn(async move {
-        let _working = working;
-        tokio::time::sleep(SETTLE).await;
-        keep_telling(&app, &run, &RETRY).await;
-    });
-}
-
 /// 哪幾顆 child 現在有通知工作在跑（等 [`SETTLE`]、或在 [`RETRY`] 之間睡著）：[`sweep`] 不替它們再開一個。
 fn working() -> &'static Mutex<HashMap<String, usize>> {
     static V: OnceLock<Mutex<HashMap<String, usize>>> = OnceLock::new();
@@ -230,15 +217,15 @@ fn working() -> &'static Mutex<HashMap<String, usize>> {
 }
 
 /// 一個通知工作還在跑；結束（包括 panic）時自己登出。
-struct Working(String);
+pub(crate) struct Working(String);
 
 impl Working {
-    fn start(bot_id: &str) -> Working {
+    pub(crate) fn start(bot_id: &str) -> Working {
         *working().lock().unwrap().entry(bot_id.to_string()).or_insert(0) += 1;
         Working(bot_id.to_string())
     }
 
-    fn running(bot_id: &str) -> bool {
+    pub(crate) fn running(bot_id: &str) -> bool {
         working().lock().unwrap().get(bot_id).is_some_and(|n| *n > 0)
     }
 }
@@ -256,7 +243,7 @@ impl Drop for Working {
 }
 
 /// 活著、停在 blocked、有 parent 的子 agent（[`parent_to_tell`] 之後會再逐條確認）。
-async fn blocked_children(app: &impl crate::capabilities::Db) -> anyhow::Result<Vec<db::Run>> {
+pub(crate) async fn blocked_children(app: &impl crate::capabilities::Db) -> anyhow::Result<Vec<db::Run>> {
     Ok(sqlx::query_as::<_, db::Run>(
         "SELECT r.* FROM runs r JOIN bots b ON b.id = r.bot_id
           WHERE r.state IN ('starting','running','stopping') AND r.agent_status = 'blocked'
@@ -266,43 +253,9 @@ async fn blocked_children(app: &impl crate::capabilities::Db) -> anyhow::Result<
     .await?)
 }
 
-/// 定時的安全網（#192，跟著卡住回合的定時掃描每分鐘一次）：`blocked` 那條邊是一次性的——那一刻讀不到 run、事件漏了、
-/// 重放也不成，child 停在同一個問題上就不會再有第二個狀態事件，parent 永遠收不到。這裡照 DB 補：活著、blocked、
-/// 沒有通知工作在跑的 child 開一個（不必再等 [`SETTLE`]：它已經 blocked 至少一輪了）。重講不了：同一個問題照
-/// 指紋不再講、同一次 blocked 照 episode 的冪等鍵不多送；已經不 blocked 的不在這一批。回傳開了幾個。
-pub async fn sweep(app: &Arc<App>) -> usize {
-    let runs = match blocked_children(app).await {
-        Ok(r) => r,
-        Err(e) => {
-            tracing::warn!(error = ?e, "child alert sweep: could not list blocked children; next round");
-            return 0;
-        }
-    };
-    let mut started = 0;
-    for run in runs {
-        if Working::running(&run.bot_id) {
-            continue;
-        }
-        started += 1;
-        let working = Working::start(&run.bot_id);
-        if cfg!(test) {
-            // 測試裡就地跑完一輪、不重試：看得到結果，也不留背景工作。
-            keep_telling(app, &run, &[]).await;
-            drop(working);
-            continue;
-        }
-        let app = app.clone();
-        tokio::spawn(async move {
-            let _working = working;
-            keep_telling(&app, &run, &RETRY).await;
-        });
-    }
-    started
-}
-
 /// parent 這一刻收不下這則（409：它唯一的排隊名額被別的佔著、它自己卡在提問、維護窗口…）時，隔多久再試（issue #169）。
 /// child 停在同一個問題上不會再有狀態事件，不自己重試就沒有下一次。加起來約一小時，每一次都先重看 child 還卡不卡著。
-const RETRY: [Duration; 6] = [
+pub(crate) const RETRY: [Duration; 6] = [
     Duration::from_secs(30),
     Duration::from_secs(60),
     Duration::from_secs(120),
@@ -310,6 +263,7 @@ const RETRY: [Duration; 6] = [
     Duration::from_secs(600),
     Duration::from_secs(1800),
 ];
+
 
 /// 8 秒之後的那一段：告訴 parent；這一刻收不下就照 `retry` 的間隔再試。每一次都從頭判斷（child 還卡著嗎、parent
 /// 還在嗎、畫面上是什麼問題），child 被回答、parent 走了就自己停；同一次 blocked 的冪等鍵不變，重試不會變成兩則。
@@ -423,7 +377,7 @@ pub(crate) const CRID_PREFIX: &str = "child-blocked:";
 /// 抽出來是為了讓「排隊而不是插隊」測得到——那條路只碰 DB，不需要 herdr。正式路徑走 [`deliver_attempt`]（#567）。
 #[cfg(test)]
 pub async fn deliver(
-    app: &Arc<App>,
+    app: &impl crate::events::ports::TurnCommands,
     parent_id: &str,
     child_id: &str,
     child_name: &str,
@@ -576,6 +530,10 @@ mod retain_tests {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::runners::child_alerts::sweep;
+    use crate::state::App;
+    use std::sync::Arc;
+
 
     /// 真的在等人回答的畫面：帶得出問題本身，而不是整個終端。
     const PERMISSION: &str = "\
@@ -1201,7 +1159,7 @@ mod tests {
         let (_parent, _conv, kid) = family(&e, "replay").await;
         sqlx::query("ALTER TABLE projects RENAME TO projects_unreadable").execute(&app.db).await.unwrap();
 
-        crate::events::handle_status(&app, crate::config::LOCAL_HOST, "test", &status_event(&kid, "blocked")).await;
+        crate::runners::events::handle_status(&app, crate::config::LOCAL_HOST, "test", &status_event(&kid, "blocked")).await;
         assert_eq!(stored_status(&app, &kid).await, "idle", "前提：這一刻讀不到 run");
         sqlx::query("ALTER TABLE projects_unreadable RENAME TO projects").execute(&app.db).await.unwrap();
 
@@ -1216,11 +1174,11 @@ mod tests {
         let app = e.app.clone();
         let (_parent, _conv, kid) = family(&e, "stale").await;
         sqlx::query("ALTER TABLE projects RENAME TO projects_unreadable").execute(&app.db).await.unwrap();
-        crate::events::handle_status(&app, crate::config::LOCAL_HOST, "test", &status_event(&kid, "blocked")).await;
+        crate::runners::events::handle_status(&app, crate::config::LOCAL_HOST, "test", &status_event(&kid, "blocked")).await;
         sqlx::query("ALTER TABLE projects_unreadable RENAME TO projects").execute(&app.db).await.unwrap();
 
         // 重放之前，同一個 pane 來了新的一則（child 已經被回答）。
-        crate::events::handle_status(&app, crate::config::LOCAL_HOST, "test", &status_event(&kid, "idle")).await;
+        crate::runners::events::handle_status(&app, crate::config::LOCAL_HOST, "test", &status_event(&kid, "idle")).await;
         tokio::time::sleep(Duration::from_millis(400)).await;
         assert_eq!(stored_status(&app, &kid).await, "idle", "舊的那一則不再算數");
     }

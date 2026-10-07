@@ -22,16 +22,13 @@
 //! 全部歸零」可以砍這張表，但目前沒有理由這麼做。
 
 use crate::lc_error::LcError;
-use crate::state::App;
 use anyhow::Result;
-use axum::extract::{Form, State};
 use axum::http::HeaderMap;
-use axum::Json;
 use serde::Deserialize;
 use serde_json::{json, Value};
 use sqlx::SqlitePool;
-use std::sync::Arc;
 use std::time::Duration;
+
 
 pub async fn migrate(pool: &SqlitePool) -> Result<()> {
     sqlx::query(
@@ -59,21 +56,21 @@ const STALE_WAITING: Duration = Duration::from_secs(60);
 
 /// 每顆 bot 同時最多佔幾列（held＋waiting）。`holder` 是呼叫端自己取的，不設上限的話一顆 bot 就能用不同 holder 把佇列塞滿
 /// （FIFO 擋在最前面的是幽靈）、把表撐大。正常用法是每個進行中的 cargo 一列，遠低於這個數字。沒有 bot 身分的人工呼叫不受限。
-const MAX_ROWS_PER_BOT: usize = 32;
+pub(crate) const MAX_ROWS_PER_BOT: usize = 32;
 
 /// holder／purpose／host 的長度上限（字元）：呼叫端給的字串原樣進 DB 再顯示在網頁。
-const MAX_FIELD_CHARS: usize = 200;
+pub(crate) const MAX_FIELD_CHARS: usize = 200;
 
-fn has_oversized_fields(fields: &[&str]) -> bool {
+pub(crate) fn has_oversized_fields(fields: &[&str]) -> bool {
     fields.iter().any(|f| f.chars().count() > MAX_FIELD_CHARS)
 }
 
-fn field_limit_error() -> LcError {
+pub(crate) fn field_limit_error() -> LcError {
     LcError::Bad(format!("build-slot 欄位最多 {MAX_FIELD_CHARS} 個字元"))
 }
 
 /// 背景 sweep 的間隔：跟 `lifecycle::stuck_turns` 的節奏一致（見那邊的說明）。
-const SWEEP_EVERY: Duration = Duration::from_secs(30);
+pub(crate) const SWEEP_EVERY: Duration = Duration::from_secs(30);
 
 #[derive(Debug, Clone, sqlx::FromRow)]
 struct SlotRow {
@@ -294,18 +291,6 @@ pub async fn sweep(app: &(impl crate::build_scheduler::BuildSlotLock + crate::ca
     (held, waiting)
 }
 
-pub fn spawn_sweeper(app: Arc<App>) {
-    tokio::spawn(async move {
-        loop {
-            tokio::time::sleep(SWEEP_EVERY).await;
-            let (held, waiting) = sweep(&app).await;
-            if held > 0 || waiting > 0 {
-                tracing::info!(held, waiting, "build scheduler: 收回沒人續約／沒人再 poll 的名額");
-            }
-        }
-    });
-}
-
 #[derive(Debug, Clone, sqlx::FromRow)]
 struct StatusRow {
     holder: String,
@@ -364,38 +349,38 @@ fn remote_json(remote: &crate::config::BuildRemoteCfg, data_dir: &std::path::Pat
 #[derive(Deserialize)]
 pub struct AcquireIn {
     /// 呼叫端自己保證唯一（shim 用 `<agent 名>:<pid>`）；daemon 不檢查唯一性。
-    holder: String,
-    bot_id: Option<String>,
+    pub(crate) holder: String,
+    pub(crate) bot_id: Option<String>,
     #[serde(default)]
-    purpose: String,
+    pub(crate) purpose: String,
     #[serde(default = "default_host")]
-    host: String,
+    pub(crate) host: String,
 }
 
 #[derive(Deserialize)]
 pub struct RenewIn {
-    holder: String,
-    token: String,
+    pub(crate) holder: String,
+    pub(crate) token: String,
 }
 
 #[derive(Deserialize)]
 pub struct ReleaseIn {
-    holder: String,
-    token: String,
+    pub(crate) holder: String,
+    pub(crate) token: String,
 }
 
 fn default_host() -> String {
     crate::config::LOCAL_HOST.to_string()
 }
 
-fn up<E: std::fmt::Display>(e: E) -> LcError {
+pub(crate) fn up<E: std::fmt::Display>(e: E) -> LcError {
     LcError::Upstream(e.to_string())
 }
 
 /// Bot 請求用該 bot 的 per-bot token；有 `X-AM-Bot-Id` 時還必須與 body `bot_id` 相同。
 /// 舊 shim 在 body 帶 id、只送 `X-AM-Bot-Token`，仍可在相容期間驗證。出現任何 Bot 身分欄位後，
 /// partial／錯誤／混合 UI 憑證都拒絕，不降級成 User。沒有 Bot 身分的人工 host shell 可用 UI token。
-async fn authenticate(app: &(impl crate::capabilities::Db + crate::capabilities::UiToken), headers: &HeaderMap, bot_id: Option<&str>) -> Result<Option<String>, LcError> {
+pub(crate) async fn authenticate(app: &(impl crate::capabilities::Db + crate::capabilities::UiToken), headers: &HeaderMap, bot_id: Option<&str>) -> Result<Option<String>, LcError> {
     let id_header_present = headers.contains_key("X-AM-Bot-Id");
     let token_header_present = headers.contains_key("X-AM-Bot-Token");
     let ui_header_present = headers.contains_key("X-AM-Token");
@@ -430,73 +415,14 @@ async fn authenticate(app: &(impl crate::capabilities::Db + crate::capabilities:
     Err(LcError::Forbidden(json!({"error": "unauthorized", "message": "need a matching X-AM-Bot-Token+bot_id, or X-AM-Token"})))
 }
 
-pub async fn get_status(State(app): State<Arc<App>>) -> Result<Json<Value>, LcError> {
-    Ok(Json(status(&app).await.map_err(up)?))
-}
-
-pub async fn post_acquire(State(app): State<Arc<App>>, headers: HeaderMap, Form(body): Form<AcquireIn>) -> Result<Json<Value>, LcError> {
-    if body.holder.trim().is_empty() {
-        return Err(LcError::Bad("holder 不能是空的".into()));
-    }
-    if has_oversized_fields(&[&body.holder, &body.purpose, &body.host]) {
-        return Err(field_limit_error());
-    }
-    let bot_id = authenticate(&app, &headers, body.bot_id.as_deref()).await?;
-    match acquire(&app, body.holder.trim(), bot_id.as_deref(), body.purpose.trim(), body.host.trim()).await.map_err(up)? {
-        Acquired::Granted { token, expires_at } => {
-            let cfg = app.cfg.build_fresh().await;
-            Ok(Json(json!({"granted": true, "token": token, "expires_at": expires_at, "cargo_jobs": cfg.cargo_jobs, "test_threads": cfg.test_threads(), "lease_ttl_secs": cfg.lease_ttl().map_err(LcError::Bad)?})))
-        }
-        Acquired::Waiting { active, since } => {
-            let cfg = app.cfg.build_fresh().await;
-            Ok(Json(json!({"granted": false, "active": active, "max_concurrent": cfg.max_concurrent(), "since": since, "retry_after_secs": 5})))
-        }
-        Acquired::TooManyForBot => Err(LcError::conflict(
-            "too_many_build_slots",
-            json!({"reason": "too_many_build_slots", "max_per_bot": MAX_ROWS_PER_BOT, "message": "這顆 bot 同時佔著或排著的名額太多了；等手上的 cargo 跑完（或放掉）再要"}),
-        )),
-        Acquired::HolderOwnedByAnotherBot => Err(LcError::Forbidden(json!({
-            "error": "forbidden",
-            "reason": "holder_bot_mismatch",
-            "message": "a bot may only reuse its own build slot holder",
-        }))),
-    }
-}
-
-/// renew／release 不另外驗 bot／UI token：`acquire` 發出來的 `token` 本身就是憑證（跟 lease_token
-/// 同一個道理——知道那個 token 就等於是那個持有者），少一層 header 檢查，shim 續約迴圈也簡單一點。
-pub async fn post_renew(State(app): State<Arc<App>>, Form(body): Form<RenewIn>) -> Result<Json<Value>, LcError> {
-    if has_oversized_fields(&[&body.holder, &body.token]) {
-        return Err(field_limit_error());
-    }
-    match renew(&app, body.holder.trim(), &body.token).await.map_err(up)? {
-        Ok(expires_at) => Ok(Json(json!({"renewed": true, "expires_at": expires_at}))),
-        Err(RenewErr::NotFound) => Err(LcError::NotFound("build_slot".into())),
-        Err(RenewErr::TokenMismatch) => Err(LcError::Forbidden(json!({"error": "token_mismatch"}))),
-    }
-}
-
-pub async fn post_release(State(app): State<Arc<App>>, Form(body): Form<ReleaseIn>) -> (axum::http::StatusCode, Json<Value>) {
-    if has_oversized_fields(&[&body.holder, &body.token]) {
-        return (
-            axum::http::StatusCode::BAD_REQUEST,
-            Json(json!({"released": false, "error": "bad_request", "message": format!("build-slot 欄位最多 {MAX_FIELD_CHARS} 個字元")})),
-        );
-    }
-    // 寫不進去不能回 released:true（#327）：名額會佔到 TTL，呼叫端要知道，才有機會重試；至少 log 留痕。
-    match release(&app, body.holder.trim(), &body.token).await {
-        Ok(()) => (axum::http::StatusCode::OK, Json(json!({"released": true}))),
-        Err(e) => {
-            tracing::error!(holder = %body.holder, error = ?e, "build scheduler: could not release a slot; it stays held until its lease expires");
-            (axum::http::StatusCode::SERVICE_UNAVAILABLE, Json(json!({"released": false})))
-        }
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::runners::build_scheduler::{get_status, post_acquire, post_release, post_renew};
+    use axum::extract::{Form, State};
     use axum::response::IntoResponse;
+    use crate::state::App;
+    use std::sync::Arc;
     use crate::testing as tt;
 
     async fn a_bot(env: &tt::Env, hook_token: &str) -> String {

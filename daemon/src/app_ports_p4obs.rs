@@ -320,7 +320,7 @@ pub async fn consume_resume_session(
 
 #[cfg(test)]
 pub async fn try_limit_hit_for_bot(app: &Arc<App>, bot: &db::Bot) -> Result<Option<crate::quota::LimitHit>> {
-    crate::quota::try_limit_hit_for_bot(app, bot).await
+    crate::runners::quota::try_limit_hit_for_bot(app, bot).await
 }
 
 #[cfg(test)]
@@ -330,5 +330,5 @@ pub async fn set_quota(app: &Arc<App>, host: &str, base: &str, quota: crate::quo
 
 #[cfg(test)]
 pub async fn handle_status(app: &Arc<App>, host: &str, session: &str, event: &crate::herdr::Event) {
-    crate::events::handle_status(app, host, session, event).await;
+    crate::runners::events::handle_status(app, host, session, event).await;
 }

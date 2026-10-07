@@ -72,7 +72,7 @@ async fn busy_reason_locked(app: &Arc<App>, bot_id: &str, refuse_background_jobs
     }
     if refuse_background_jobs {
         if let Some(bot) = db::bot(&app.db, bot_id).await.map_err(up)? {
-            crate::background_jobs::refresh(app, &run, &bot.kind).await;
+            crate::runners::background_jobs::refresh(app, &run, &bot.kind).await;
             if let Some(n) = crate::background_jobs::known(app, &run.id).filter(|n| *n > 0) {
                 return Ok(Some(format!("background_jobs:{n}")));
             }
@@ -1341,7 +1341,7 @@ async fn start_inner(
     pane_guard.disarm();
 
     // 6. per-run status subscription
-    crate::events::watch_pane_on_session(app, &host, session, &pane_id).await;
+    crate::runners::events::watch_pane_on_session(app, &host, session, &pane_id).await;
 
     // 7. wait for readiness
     let until = [AgentStatus::Idle, AgentStatus::Done, AgentStatus::Blocked];
@@ -3955,7 +3955,7 @@ mod idle_restart_tests {
         let run = db::run(&app.db, &kid.run_id).await.unwrap().unwrap();
         let hook_app = app.clone();
         crate::lifecycle::race_point::arm("child_restart_before_stopping", &kid.id, move || async move {
-            crate::background_hook::on_stop(
+            crate::runners::background_hook::on_stop(
                 &hook_app,
                 &run,
                 &json!({"background_tasks": [{"id": "agent-1", "type": "subagent", "status": "running", "description": "review"}]}),

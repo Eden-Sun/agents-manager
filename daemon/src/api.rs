@@ -120,11 +120,11 @@ pub fn router(app: Arc<App>) -> Router {
         .route("/projects/{id}/bots", post(create_bot))
         .route("/projects/{id}/messages", get(get_project_messages))
         // §6.5e：非 agent 的 shell／服務 pane。
-        .route("/projects/{id}/panes", get(crate::panes::list_for_project))
-        .route("/panes/{id}/adopt", post(crate::panes::adopt))
-        .route("/panes/{id}/close", post(crate::panes::close))
-        .route("/panes/{id}/focus", post(crate::panes::focus))
-        .route("/panes", get(crate::panes::list_all))
+        .route("/projects/{id}/panes", get(crate::runners::panes::list_for_project))
+        .route("/panes/{id}/adopt", post(crate::runners::panes::adopt))
+        .route("/panes/{id}/close", post(crate::runners::panes::close))
+        .route("/panes/{id}/focus", post(crate::runners::panes::focus))
+        .route("/panes", get(crate::runners::panes::list_all))
         .route("/projects/{id}/chat", post(project_chat))
         // 群組任務（docs/goals/agm-missions.md）。
         .route(
@@ -227,7 +227,7 @@ pub fn router(app: Arc<App>) -> Router {
         .route("/quota/probe", post(probe_quota))
         // issue #90：build scheduler 的唯讀現況（UI 用一般 X-AM-Token）。acquire／renew／release 見下方
         // 的 `/build-slots/*`（不在 `/api` 底下：bot 的 pane 只有自己的 hook token，拿不到這個）。
-        .route("/build-slots", get(crate::build_scheduler::get_status))
+        .route("/build-slots", get(crate::runners::build_scheduler::get_status))
         // issue #104：開發者專用外部 Cargo worker 設定。密碼只進 data-dir 的 0600 secret file。
         .route(
             "/build/remote",
@@ -313,7 +313,7 @@ pub fn router(app: Arc<App>) -> Router {
         .route("/supervisor/evidence", get(crate::supervisor_evidence::search).layer(agm_gate!(app)))
         .merge(crate::supervisor::responder_api::routes(app.clone()))
         .merge(crate::runners::release_triage::routes())
-        .merge(crate::upstream_update::routes())
+        .merge(crate::runners::upstream_update::routes())
         .merge(crate::runners::judge::routes())
         .merge(crate::deleted_bots::routes())
         .route("/bots/{id}/restore", post(restore_bot))
@@ -325,9 +325,9 @@ pub fn router(app: Arc<App>) -> Router {
         .route("/services/daemon-swap/restart-window", post(service_daemon_swap_restart_window))
         .route("/services/herdr-upgrade/resume/{id}", post(service_herdr_upgrade_resume))
         .route("/services/herdr-upgrade/notify", post(service_herdr_upgrade_notify))
-        .route("/supervisor/herdr-maintenance", get(crate::herdr_maintenance::get).layer(agm_gate!(app)))
-        .route("/supervisor/herdr-maintenance/open", post(crate::herdr_maintenance::open))
-        .route("/supervisor/herdr-maintenance/end", post(crate::herdr_maintenance::end))
+        .route("/supervisor/herdr-maintenance", get(crate::runners::herdr_maintenance::get).layer(agm_gate!(app)))
+        .route("/supervisor/herdr-maintenance/open", post(crate::runners::herdr_maintenance::open))
+        .route("/supervisor/herdr-maintenance/end", post(crate::runners::herdr_maintenance::end))
         .layer(axum::middleware::from_fn_with_state(app.clone(), auth))
         .route("/session", get(get_session))
         // 沒這條路由的 /api/* 要回 JSON 404，不能掉到外層的 SPA fallback（200 的 index.html）。
@@ -347,9 +347,9 @@ pub fn router(app: Arc<App>) -> Router {
         // 母 bot 的 `herdr agent list` 附上子 agent 的 cache 還熱多久（kids_cache）。
         .route("/relay/kids", post(relay_kids))
         // issue #90：cargo shim 用（bot 的 hook token，或人工 host shell 的一般 X-AM-Token）。
-        .route("/build-slots/acquire", post(crate::build_scheduler::post_acquire))
-        .route("/build-slots/renew", post(crate::build_scheduler::post_renew))
-        .route("/build-slots/release", post(crate::build_scheduler::post_release))
+        .route("/build-slots/acquire", post(crate::runners::build_scheduler::post_acquire))
+        .route("/build-slots/renew", post(crate::runners::build_scheduler::post_renew))
+        .route("/build-slots/release", post(crate::runners::build_scheduler::post_release))
         .fallback(get(crate::assets::serve))
         .with_state(app.clone())
         .layer(axum::middleware::from_fn_with_state(app.clone(), startup_readiness))
@@ -4227,7 +4227,7 @@ async fn get_models(
             })));
         }
     }
-    let v = crate::models::list(&app, &host, &q.kind, identity, flag(&q.refresh)).await.map_err(|e| LcError::Upstream(format!("{e:#}")))?;
+    let v = crate::runners::models::list(&app, &host, &q.kind, identity, flag(&q.refresh)).await.map_err(|e| LcError::Upstream(format!("{e:#}")))?;
     Ok(Json(v))
 }
 
@@ -4627,8 +4627,8 @@ async fn get_quota(State(app): State<Arc<App>>, Query(q): Query<HashMap<String, 
                 let app = app2.clone();
                 async move {
                     let (codex, claude, grok, agy) = tokio::join!(
-                        crate::quota::refresh_codex(&app, &host),
-                        crate::quota_claude::refresh_claude(&app, &host),
+                        crate::runners::quota::refresh_codex(&app, &host),
+                        crate::runners::quota_claude::refresh_claude(&app, &host),
                         crate::runners::quota_grok::refresh_grok(&app, &host),
                         crate::quota_agy::refresh_agy(&app, &host),
                     );
@@ -4663,13 +4663,13 @@ async fn probe_quota(State(app): State<Arc<App>>, Query(q): Query<HashMap<String
         return Err(LcError::NotFound("host".into()));
     }
     let account = q.get("account").map(|a| a.trim()).filter(|a| !a.is_empty());
-    match crate::quota_claude::force_probe(&app, host, account).await {
+    match crate::runners::quota_claude::force_probe(&app, host, account).await {
         Ok((key, quota)) => Ok(Json(json!({"key": key, "quota": crate::quota::quota_value(&quota, false)}))),
-        Err(crate::quota_claude::ForceProbeError::UnknownAccount) => Err(LcError::NotFound("identity".into())),
-        Err(crate::quota_claude::ForceProbeError::NotInstalled) => {
+        Err(crate::runners::quota_claude::ForceProbeError::UnknownAccount) => Err(LcError::NotFound("identity".into())),
+        Err(crate::runners::quota_claude::ForceProbeError::NotInstalled) => {
             Err(LcError::conflict("claude_not_installed", json!({"host": host})))
         }
-        Err(crate::quota_claude::ForceProbeError::Failed(m)) => Err(LcError::Upstream(m)),
+        Err(crate::runners::quota_claude::ForceProbeError::Failed(m)) => Err(LcError::Upstream(m)),
     }
 }
 
@@ -9531,7 +9531,7 @@ mod bot_config_tests {
             event: "pane_agent_status_changed".into(),
             data: json!({"pane_id": pane, "agent_status": "idle"}),
         };
-        crate::events::handle_status(&e.app, crate::config::LOCAL_HOST, "test", &ev).await;
+        crate::runners::events::handle_status(&e.app, crate::config::LOCAL_HOST, "test", &ev).await;
         assert!(deferred_taken_within(&id, std::time::Duration::from_secs(6)).await, "blocked → idle 就該套");
     }
 

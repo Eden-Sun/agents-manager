@@ -36,7 +36,7 @@ pub async fn reconcile_host(app: &Arc<App>, host: &str) -> Result<()> {
         let _pass = lock.lock().await;
         crate::reconcile::reconcile_host_locked(app, host).await?
     };
-    crate::autostart_revive::spawn_revive(app, host, lost);
+    crate::runners::autostart_revive::spawn_revive(app, host, lost);
     Ok(())
 }
 

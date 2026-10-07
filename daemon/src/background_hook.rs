@@ -11,11 +11,9 @@
 //! 完全不碰，維持 `background_jobs.rs` 的畫面判斷。畫面判斷也沒拿掉，它仍是巡邏的常規讀法，也用來校正過期的 hook 帳：
 //! 見 [`GRACE`]。常駐服務（背景 shell 子樹在 listen TCP port）照舊不算（SPEC §6.14）。
 
-use crate::db;
-use crate::state::App;
 use serde_json::{json, Value};
 use std::collections::HashMap;
-use std::sync::{Arc, Mutex};
+use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
 /// hook 帳在這段時間內不被畫面推翻（畫面巡邏 30 秒一輪，模式列也可能慢半拍）。超過之後 hook 帳退場，改採目前畫面。
@@ -93,7 +91,7 @@ pub fn parse(payload: &Value) -> Option<Reported> {
 }
 
 impl Reported {
-    fn shells(&self) -> u32 {
+    pub(crate) fn shells(&self) -> u32 {
         self.tasks.iter().filter(|t| t.kind == "shell").count() as u32
     }
 }
@@ -112,51 +110,6 @@ fn clip(s: &str) -> String {
         s.to_string()
     } else {
         format!("{}…", s.chars().take(CLIP).collect::<String>())
-    }
-}
-
-/// claude 的 Stop hook 進來：有 `background_tasks` 就記下並更新 `background_jobs` 的數字（變了推 `bot_status`）。
-/// 沒有這個鍵（舊版 claude）什麼都不做，數字留給畫面判斷。
-pub async fn on_stop(app: &Arc<App>, run: &db::Run, payload: &Value) {
-    let Some(reported) = parse(payload) else { return };
-    let snap = Snapshot { at: Instant::now(), reported, services: None };
-    let (n, had_shells) = (snap.jobs(), snap.reported.shells() > 0);
-    let at = snap.at;
-    let changed = {
-        let mut hook = app.background_hook.lock().unwrap_or_else(|e| e.into_inner());
-        let mut counts = app.background_jobs.lock().unwrap_or_else(|e| e.into_inner());
-        let counted = crate::background_jobs::record(&mut counts, &run.id, n);
-        let before = hook.get(&run.id).map(|s| s.reported.clone());
-        let after = Some(snap.reported.clone());
-        hook.insert(run.id.clone(), snap);
-        counted || before != after
-    };
-    if changed {
-        tracing::info!(run = %run.id, bot = %run.bot_id, background_jobs = n, source = "hook", "background jobs changed");
-        app.emit_bot_status(&run.bot_id).await;
-    }
-    if had_shells {
-        // 常駐服務要看行程樹（本機 ps、遠端 ssh，最多 10 秒）：不卡住 hook 的處理，查到再回頭修正數字。
-        let (app, run) = (app.clone(), run.clone());
-        tokio::spawn(async move { refine_services(&app, &run, at).await });
-    }
-}
-
-async fn refine_services(app: &(impl crate::background_hook::HookSnapshots + crate::background_jobs::JobCounts + crate::capabilities::BotStatusEmit + crate::capabilities::Db + crate::capabilities::HerdrRoutes + crate::hosts::HostsAccess), run: &db::Run, at: Instant) {
-    let Some(pane) = run.pane_id.as_deref() else { return };
-    let Some(client) = app.herdr_for_run(run).await else { return };
-    let services = crate::background_jobs::services(app, run, &client, pane).await;
-    let n = {
-        let mut hook = app.background_hook().lock().unwrap_or_else(|e| e.into_inner());
-        // 這段時間裡來了新的 Stop（或被丟掉）：這份查詢結果不屬於它了。
-        let Some(snap) = hook.get_mut(&run.id).filter(|s| s.at == at) else { return };
-        snap.services = Some(services);
-        snap.jobs()
-    };
-    let changed = crate::background_jobs::record(&mut app.background_jobs().lock().unwrap_or_else(|e| e.into_inner()), &run.id, n);
-    if changed {
-        tracing::info!(run = %run.id, bot = %run.bot_id, background_jobs = n, services, "background jobs changed (resident services deducted)");
-        app.emit_bot_status(&run.bot_id).await;
     }
 }
 
@@ -206,6 +159,8 @@ pub fn retain_runs(app: &impl crate::background_hook::HookSnapshots, active: &[S
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::db;
+    use crate::runners::background_hook::on_stop;
     use crate::testing as tt;
 
     fn fixture() -> Value {

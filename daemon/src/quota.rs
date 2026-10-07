@@ -4,7 +4,6 @@
 //! must never land on the local row.
 
 use crate::config::LOCAL_HOST;
-use crate::state::App;
 use anyhow::Result;
 use serde::ser::SerializeStruct;
 use serde::{Deserialize, Serialize, Serializer};
@@ -12,12 +11,6 @@ use serde_json::{json, Value};
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Duration;
-use crate::app_ports_r2a9::OwedLimitHitProbe;
-
-#[path = "app_ports_p9.rs"]
-pub(crate) mod app_ports_p9;
-#[allow(unused_imports)]
-pub use app_ports_p9::{app_quota_access, AppQuotaAccess};
 
 pub const CODEX_POLL: Duration = Duration::from_secs(300);
 /// 讀 pane 狀態列只是一個 `pane.read`，比 app-server RPC 便宜得多：這個頻率跟上 CLI 自己的數字
@@ -84,9 +77,9 @@ pub fn quota_base_default_aware(kind: &str, identity: Option<&str>, shares_defau
 /// codex statusline、撞限橫幅、claude statusLine、`limit_hit_for_bot`／`next_reset_for_bot`、
 /// supervisor 的額度判讀、mission 挑身分。查不到那個身分就當它有自己的帳號——寧可多開一格，
 /// 也不要把兩個帳號的數字疊在一起。
-pub async fn quota_base_for_host(app: &App, host: &str, kind: &str, identity: Option<&str>) -> String {
+pub async fn quota_base_for_host(app: &impl HostIdentities, host: &str, kind: &str, identity: Option<&str>) -> String {
     let Some(idn) = identity.map(str::trim).filter(|s| !s.is_empty()) else { return kind.to_string() };
-    let found = crate::tools::identity_for_host_ref(app, host, idn).await;
+    let found = app.identity_for_host(host, idn).await;
     // 身分有 kind（`identity_kind`）：別的 kind 的身分（codex bot 身上的 claude `cc1`）根本不是這個 CLI 的
     // 帳號代號，一律寫裸 kind——codex 不該有任何 `codex:ccN`（2026-09-14 使用者指正）。
     // 同 kind 才看 home 變數那條保險；查不到那個身分（主機的身分還沒偵測完）維持分開，免得把兩個
@@ -102,9 +95,9 @@ pub async fn quota_base_for_host(app: &App, host: &str, kind: &str, identity: Op
 /// [`quota_base_for_host`]，但**算不準就回錯**：寫撞限要落在查詢端之後會讀的那一把 key（#108 重開）。
 /// 那台主機的身分表還沒偵測完（重啟後、`tools::detect` 之前）又不是手寫的 `[[identities]]` 時，共用預設帳號的
 /// `cc0` 會被算成 `claude:cc0`：偵測完之後查詢端讀裸 `claude`，那一格的撞限就沒人看得到。
-pub async fn resolve_quota_base(app: &App, host: &str, kind: &str, identity: Option<&str>) -> Result<String> {
+pub async fn resolve_quota_base(app: &impl HostIdentities, host: &str, kind: &str, identity: Option<&str>) -> Result<String> {
     if let Some(idn) = identity.map(str::trim).filter(|s| !s.is_empty()) {
-        if crate::tools::identity_for_host_ref(app, host, idn).await.is_none() && !app.tools.lock().await.contains_key(host) {
+        if app.identity_for_host(host, idn).await.is_none() && !app.host_tools_detected(host).await {
             anyhow::bail!("`{host}` 的身分表還沒偵測完，算不出身分 `{idn}` 的額度 key");
         }
     }
@@ -129,7 +122,7 @@ pub async fn billing_identity(app: &impl crate::capabilities::Db, bot: &crate::d
 
 /// 查詢端：這顆 bot 的讀數在哪幾把 key。先查它自己那一把（收斂規則同寫入端），**只有**收斂到裸 kind
 /// 的身分才會落在裸 key——有自己 home 的身分（cc2 帶 `CODEX_HOME`）不借預設帳號的數字。身分是 [`billing_identity`]。
-async fn keys_for_bot(app: &Arc<App>, host: &str, bot: &crate::db::Bot, identity: Option<&str>) -> Vec<String> {
+pub async fn keys_for_bot(app: &impl HostIdentities, host: &str, bot: &crate::db::Bot, identity: Option<&str>) -> Vec<String> {
     let base = quota_base_for_host(app, host, &bot.kind, identity).await;
     vec![quota_key(host, &base)]
 }
@@ -187,77 +180,7 @@ pub async fn running_model(app: &impl crate::capabilities::Db, bot: &crate::db::
     runtime.or_else(|| bot.model.clone()).filter(|m| !m.trim().is_empty())
 }
 
-/// 擋住這顆 bot 的撞限：沒過期、而且撞的那一桶管得到它在跑的模型（[`bucket_blocks_model`]）。
-///
-/// 讀不到這顆 bot 在哪台主機就回錯（#108 重開）：以前退回 `local`，查錯 key、回「沒撞限」，遠端那個已經用盡的身分
-/// 就被放行。撞限記不進正確那把 key 而欠著的那一筆（`turn_error::owed_limit_hit`）先算。
-pub async fn try_limit_hit_for_bot(app: &Arc<App>, bot: &crate::db::Bot) -> Result<Option<LimitHit>> {
-    let identity = billing_identity(app, bot).await?;
-    if let Some(hit) = app.owed_limit_hit(bot, identity.as_deref()).await {
-        return Ok(Some(hit));
-    }
-    let host = crate::db::bot_host(&app.db, &bot.id).await?;
-    let keys = keys_for_bot(app, &host, bot, identity.as_deref()).await;
-    let model = running_model(app, bot).await;
-    let q = app.quotas.lock().await;
-    for k in keys {
-        if let Some(hit) = q.get(&k).and_then(|x| x.limit_hit.clone()) {
-            if !limit_hit_expired(Some(&hit)) && limit_hit_blocks_model(&hit, model.as_deref()) {
-                return Ok(Some(hit));
-            }
-        }
-    }
-    Ok(None)
-}
 
-/// [`try_limit_hit_for_bot`]，讀不到時回 `None`（記 warn）。只剩 supervisor 的派送／重送在用：那邊拿到撞限會 park、
-/// 群組任務還會換身分，不能拿假的撞限去擋；改用 `try_` 版、讀不到就延後，見 #108 重開時開的 supervisor 票。
-#[cfg(test)]
-pub async fn limit_hit_for_bot(app: &Arc<App>, bot: &crate::db::Bot) -> Option<LimitHit> {
-    match try_limit_hit_for_bot(app, bot).await {
-        Ok(hit) => hit,
-        Err(e) => {
-            tracing::warn!(bot = %bot.id, error = %e, "cannot tell whether this bot's identity has hit its limit");
-            None
-        }
-    }
-}
-
-/// 只回未來的重置時間；CLI 橫幅時間會舊，supervisor 要兩邊都看（2026-09-13：橫幅 22:15、app-server 22:20）。
-/// 讀不到主機回 `None`（沒有這份證據，只看橫幅的時間）：退回 `local` 會拿到本機帳號的重置時間，把重送提早。
-pub async fn next_reset_for_bot(app: &Arc<App>, bot: &crate::db::Bot) -> Option<String> {
-    let host = match crate::db::bot_host(&app.db, &bot.id).await {
-        Ok(h) => h,
-        Err(e) => {
-            tracing::warn!(bot = %bot.id, error = %e, "cannot read the host of a bot; no quota reset time from its readings");
-            return None;
-        }
-    };
-    let identity = match billing_identity(app, bot).await {
-        Ok(i) => i,
-        Err(e) => {
-            tracing::warn!(bot = %bot.id, error = %e, "cannot read the run of a bot; no quota reset time from its readings");
-            return None;
-        }
-    };
-    let keys = keys_for_bot(app, &host, bot, identity.as_deref()).await;
-    let now = chrono::Utc::now();
-    // 時間戳一律走 [`parse_utc`]（#518 收口：散落的 `parse_from_rfc3339` 收成一支，
-    // 才不會有人再寫出一個方向不一樣的解析）。
-    let future = |t: &Option<String>| t.as_deref().and_then(parse_utc).filter(|x| *x > now);
-    let q = app.quotas.lock().await;
-    for k in keys {
-        let Some(entry) = q.get(&k) else { continue };
-        let candidates = [
-            entry.five_hour.as_ref().and_then(|w| future(&w.resets_at)),
-            entry.seven_day.as_ref().and_then(|w| future(&w.resets_at)),
-        ];
-        if let Some(t) = candidates.into_iter().flatten().min() {
-            return Some(crate::db::iso_at(t));
-        }
-    }
-    None
-}
 
 /// Unknown host prefixes fall back to `local`.
 pub fn host_of_key<'a>(key: &'a str, hosts: &[String]) -> (&'a str, &'a str) {
@@ -750,9 +673,9 @@ pub fn quota_from_statusline(payload: &Value, account: Option<&str>) -> Option<Q
 /// 身分偵測完之前寫進分開那一格、現在已經收斂到裸 `kind` 的 key（daemon 重啟那一秒最常見：第一筆 statusline
 /// 比身分偵測先到，[`quota_base_for_host`] 查不到身分就寧可分開）。之後的讀數都寫裸 key，那一格停在啟動當下、
 /// 沒有 Fable，留著就會被讀到（2026-09-16 使用者：「怎麼又看不見 Fable 的剩餘」）。查不到的身分照舊保留。
-async fn stale_split_keys(app: &App, host: &str, kind: &str) -> Vec<String> {
+async fn stale_split_keys(app: &(impl crate::quota::HostIdentities + crate::quota::QuotaTables), host: &str, kind: &str) -> Vec<String> {
     let prefix = quota_key(host, &format!("{kind}:"));
-    let candidates: Vec<String> = app.quotas.lock().await.keys().filter(|k| k.starts_with(&prefix)).cloned().collect();
+    let candidates: Vec<String> = app.quotas().lock().await.keys().filter(|k| k.starts_with(&prefix)).cloned().collect();
     let mut stale = Vec::new();
     for key in candidates {
         if quota_base_for_host(app, host, kind, Some(&key[prefix.len()..])).await == kind {
@@ -766,7 +689,18 @@ async fn stale_split_keys(app: &App, host: &str, kind: &str) -> Vec<String> {
 /// 另一台、或被移除，舊機器的額度就不能寫進新機器（或已移除主機）的 key。不是權威就回 `Err`、什麼都不寫。
 /// 檢查在 `app.quotas` 鎖裡做：主機換連線時會清掉 `<host>/…`（`hosts::forget_host_observations`），檢查放在鎖外的話，
 /// 通過檢查到寫入之間清掉的那份會被舊讀數種回來。
-pub async fn set_fenced(app: &App, host: &str, base: &str, q: Quota, fence: &crate::hosts::HostFence) -> Result<()> {
+pub async fn set_fenced(
+    app: &(impl crate::capabilities::Db
+        + crate::capabilities::Emit
+        + crate::hosts::HostsAccess
+        + crate::quota::HostIdentities
+        + crate::quota::QuotaStaleKeys
+        + crate::quota::QuotaTables),
+    host: &str,
+    base: &str,
+    q: Quota,
+    fence: &crate::hosts::HostFence,
+) -> Result<()> {
     if !set_inner(app, host, base, q, Some(fence)).await {
         anyhow::bail!("host `{host}` was reconnected/reconfigured during the quota probe; stale reading discarded");
     }
@@ -853,17 +787,38 @@ pub fn reading_is_stale(q: &Quota, flagged: bool, now: chrono::DateTime<chrono::
     flagged || parse_utc(&q.updated_at).map_or(true, |at| now - at > STALE_AFTER)
 }
 
-pub async fn set(app: &App, host: &str, base: &str, q: Quota) {
+pub async fn set(
+    app: &(impl crate::capabilities::Db
+        + crate::capabilities::Emit
+        + crate::hosts::HostsAccess
+        + crate::quota::HostIdentities
+        + crate::quota::QuotaStaleKeys
+        + crate::quota::QuotaTables),
+    host: &str,
+    base: &str,
+    q: Quota,
+) {
     set_inner(app, host, base, q, None).await;
 }
 
 /// 回 `false`＝`fence` 已經不是這台主機的權威，什麼都沒寫。
-async fn set_inner(app: &App, host: &str, base: &str, mut q: Quota, fence: Option<&crate::hosts::HostFence>) -> bool {
+async fn set_inner(
+    app: &(impl crate::capabilities::Db
+        + crate::capabilities::Emit
+        + crate::hosts::HostsAccess
+        + crate::quota::HostIdentities
+        + crate::quota::QuotaStaleKeys
+        + crate::quota::QuotaTables),
+    host: &str,
+    base: &str,
+    mut q: Quota,
+    fence: Option<&crate::hosts::HostFence>,
+) -> bool {
     q.host = host.to_string();
     let key = quota_key(host, base);
     if is_retired_agy_quota_key(&key) {
         if let Some(f) = fence {
-            if !app.hosts.is_current(f).await {
+            if !app.hosts().is_current(f).await {
                 return false;
             }
         }
@@ -876,9 +831,9 @@ async fn set_inner(app: &App, host: &str, base: &str, mut q: Quota, fence: Optio
     // 撞限校正只看**這份讀數自己帶來的**窗；下面沿用的舊窗不是新證據。
     let brings_its_own_hit = q.limit_hit.is_some();
     let fresh = q.clone();
-    let mut quotas = app.quotas.lock().await;
+    let mut quotas = app.quotas().lock().await;
     if let Some(f) = fence {
-        if !app.hosts.is_current(f).await {
+        if !app.hosts().is_current(f).await {
             return false;
         }
     }
@@ -954,7 +909,7 @@ async fn set_inner(app: &App, host: &str, base: &str, mut q: Quota, fence: Optio
     quotas.insert(key.clone(), q.clone());
     drop(quotas);
     {
-        let mut stale_flags = app.quota_stale.lock().await;
+        let mut stale_flags = app.quota_stale().lock().await;
         stale_flags.remove(&key);
         for old in &stale {
             stale_flags.remove(old);
@@ -967,8 +922,8 @@ async fn set_inner(app: &App, host: &str, base: &str, mut q: Quota, fence: Optio
     // 寫進記憶體之後、寫快取列之前主機被換掉：換連線那一側已經清過這把 key，這裡剛寫的列會把舊機器的讀數留到下次開機。
     // 讓快取列回到記憶體現在的樣子（被清掉就刪，新連線已寫了就用它的）。
     if let Some(f) = fence {
-        if !app.hosts.is_current(f).await {
-            let now = app.quotas.lock().await.get(&key).cloned();
+        if !app.hosts().is_current(f).await {
+            let now = app.quotas().lock().await.get(&key).cloned();
             match now {
                 Some(cur) => persist_cache(app, &key, &cur).await,
                 None => delete_cache(app, &key).await,
@@ -1049,7 +1004,7 @@ fn guard_statusline_windows(
     None
 }
 
-fn parse_utc(s: &str) -> Option<chrono::DateTime<chrono::Utc>> {
+pub(crate) fn parse_utc(s: &str) -> Option<chrono::DateTime<chrono::Utc>> {
     chrono::DateTime::parse_from_rfc3339(s.trim()).ok().map(|t| t.with_timezone(&chrono::Utc))
 }
 
@@ -1112,66 +1067,14 @@ pub fn limit_hit_expired(hit: Option<&LimitHit>) -> bool {
     }
 }
 
-/// 這顆 bot 真的答完一回合：清掉**它自己那把 key** 的撞限。key 跟寫入端（`apply_codex_limit_hit_quota`）
-/// 與查詢端（[`limit_hit_for_bot`]）走同一支 [`quota_base_for_host`]——以前寫死裸 `codex`，有自己
-/// `CODEX_HOME` 的 `cx2` 一撞限就永遠清不掉，反而把預設帳號真的撞限清掉（review 2026-09-16 H1）。
-///
-/// 讀不到主機就不清（#108 重開）：退回 `local` 會把**本機**那個身分真的撞限清掉。少清一次只是多擋到到期。
-pub async fn clear_limit_hit_for_bot(app: &Arc<App>, bot: &crate::db::Bot) {
-    let host = match crate::db::bot_host(&app.db, &bot.id).await {
-        Ok(h) => h,
-        Err(e) => {
-            tracing::warn!(bot = %bot.id, error = %e, "cannot read the host of a bot; its limit hit is left in place");
-            return;
-        }
-    };
-    // 清的是答完這一回合的那個帳號（issue #238）：run 起來時的身分，不是剛改、還沒生效的設定。
-    let identity = match billing_identity(app, bot).await {
-        Ok(i) => i,
-        Err(e) => {
-            tracing::warn!(bot = %bot.id, error = %e, "cannot read the run of a bot; its limit hit is left in place");
-            return;
-        }
-    };
-    let base = quota_base_for_host(app, &host, &bot.kind, identity.as_deref()).await;
-    clear_limit_hit(app, &host, &base).await;
-    crate::judge::note_cleared(&app.db, &bot.id).await;
-}
-
-/// 每把 key 上一次被成功回合清撞限（[`clear_limit_hit`]）的時刻。只在記憶體：重啟後是空的，意思就是
-/// 「這個行程還沒看過任何成功回合」，parked 的交辦照舊等 `resume_at`（AGM 裁示：記憶體空了不等於額度回來）。
-/// 鍵帶 `data_dir`，一個行程裡的多個 `App`（測試）不會互相看到。
-fn cleared_at() -> &'static std::sync::Mutex<HashMap<String, chrono::DateTime<chrono::Utc>>> {
+pub(crate) fn cleared_at() -> &'static std::sync::Mutex<HashMap<String, chrono::DateTime<chrono::Utc>>> {
     static M: std::sync::OnceLock<std::sync::Mutex<HashMap<String, chrono::DateTime<chrono::Utc>>>> =
         std::sync::OnceLock::new();
     M.get_or_init(Default::default)
 }
 
-fn cleared_at_key(app: &impl crate::capabilities::DataDir, key: &str) -> String {
+pub(crate) fn cleared_at_key(app: &impl crate::capabilities::DataDir, key: &str) -> String {
     format!("{}\u{0}{key}", app.data_dir().display())
-}
-
-/// 這顆 bot 的帳號在 `since` 之後有沒有被成功回合清過撞限。`resume_quota_blocked` 用它分辨
-/// 「記憶體裡沒有撞限是因為真的被清掉了」與「只是重啟後什麼都不記得」（review 2026-09-16 M1）。
-/// 讀不到主機回 `false`（沒有證據說額度回來了）：退回 `local` 會拿本機帳號的成功回合當作這顆的放行證據。
-pub async fn limit_cleared_since(app: &Arc<App>, bot: &crate::db::Bot, since: chrono::DateTime<chrono::Utc>) -> bool {
-    let host = match crate::db::bot_host(&app.db, &bot.id).await {
-        Ok(h) => h,
-        Err(e) => {
-            tracing::warn!(bot = %bot.id, error = %e, "cannot read the host of a bot; no evidence its limit was cleared");
-            return false;
-        }
-    };
-    let identity = match billing_identity(app, bot).await {
-        Ok(i) => i,
-        Err(e) => {
-            tracing::warn!(bot = %bot.id, error = %e, "cannot read the run of a bot; no evidence its limit was cleared");
-            return false;
-        }
-    };
-    let keys = keys_for_bot(app, &host, bot, identity.as_deref()).await;
-    let m = cleared_at().lock().unwrap();
-    keys.iter().any(|k| m.get(&cleared_at_key(app, k)).is_some_and(|t| *t > since))
 }
 
 /// 一回合真的跑完就拿掉「撞上限」，不必等它自己寫的時間。
@@ -1352,14 +1255,14 @@ pub fn quota_from_codex_status(q: &crate::codex_live::CodexStatusQuota, account:
 
 /// 這張狀態列畫面在這個行程裡是第一次看到、跟上次不一樣、還是同一張。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum Sighting {
+pub(crate) enum Sighting {
     New,
     Changed,
     Same,
 }
 
 /// 記在行程裡就夠：daemon 重啟後第一次看到的畫面算 [`Sighting::New`]，年紀另外用回合時間判斷。
-async fn status_line_sighting(host: &str, pane_id: &str, line: &str) -> Sighting {
+pub(crate) async fn status_line_sighting(host: &str, pane_id: &str, line: &str) -> Sighting {
     static SEEN: std::sync::OnceLock<tokio::sync::Mutex<std::collections::HashMap<String, (String, std::time::Instant)>>> =
         std::sync::OnceLock::new();
     let mut map = SEEN.get_or_init(|| tokio::sync::Mutex::new(std::collections::HashMap::new())).lock().await;
@@ -1392,7 +1295,7 @@ fn note_sighting(map: &mut std::collections::HashMap<String, (String, std::time:
 ///   畫面比現在這個窗的起點（`resets_at − 窗長`）還舊 → 不採用；在同一個窗裡 → 用量只增不減，比現有的大才寫
 ///   （app-server 落後時補上，別的 pane 已經用更多時不倒退）。記著的窗已經過了重置時間 → 畫面要晚於那次重置才採用。
 /// - 沒有重置時間（app-server 還沒答過）：只採用這個行程第一次看到的畫面，同一張不重寫。
-fn pane_window_used(
+pub(crate) fn pane_window_used(
     pane_used: Option<f64>,
     stored: Option<&Window>,
     window_len: chrono::Duration,
@@ -1417,115 +1320,7 @@ fn pane_window_used(
     }
 }
 
-/// app-server 讀數會落後 CLI 一整輪（2026-09-13 使用者截圖：量表 5h 100、pane 90% left），CLI 狀態列才是它當下擋你的
-/// 依據。與 app-server 共用同一格；什麼時候採用 pane 上的數字見 [`pane_window_used`]。
-pub async fn refresh_codex_from_panes(app: &Arc<App>, host: &str) -> usize {
-    // 讀 pane 要好幾趟 RPC：途中同名主機被換掉，舊機器 pane 上的讀數不能寫進新機器的 key（#347），所以先記下權威。
-    let Some(fence) = app.hosts.fence(host).await else { return 0 };
-    let rows: Vec<(String, Option<String>, Option<String>)> = match sqlx::query_as(
-        // 最近有動靜的 pane 排前面：它的狀態列最新。閒著的 pane 也會刷新，但剛跑完回合的那顆最準。
-        // 第三欄是那顆 pane 畫面的年紀：最後一回合結束（或開始）的時間，沒有回合就是 run 起來的時間。
-        // run 實際的身分（issue #238）：記了就用它，沒記才用 bot 設定的。
-        "SELECT r.pane_id, CASE WHEN r.runtime_identity IS NULL THEN b.identity ELSE NULLIF(TRIM(r.runtime_identity), '') END,
-                COALESCE((SELECT MAX(COALESCE(t.completed_at, t.created_at)) FROM turns t WHERE t.run_id = r.id), r.started_at)
-           FROM runs r JOIN bots b ON b.id = r.bot_id JOIN projects p ON p.id = b.project_id
-          WHERE p.host = ? AND b.kind = 'codex' AND r.state = 'running' AND r.pane_id IS NOT NULL
-            AND b.deleted_at IS NULL AND p.handed_off_to IS NULL
-          ORDER BY COALESCE((SELECT MAX(t.created_at) FROM turns t WHERE t.run_id = r.id), r.started_at) DESC",
-    )
-    .bind(host)
-    .fetch_all(&app.db)
-    .await
-    {
-        Ok(v) => v,
-        Err(e) => {
-            tracing::debug!(host, error = ?e, "codex statusline quota: query failed");
-            return 0;
-        }
-    };
-    let mut wrote = 0;
-    let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
-    for (pane_id, identity, screen_at) in rows {
-        let base = quota_base_for_host(app, host, "codex", identity.as_deref()).await;
-        // 同一個身分讀到一次就夠——但要「讀到」才算：那顆 pane 正在壓縮對話、捲動中讀不到狀態列時，
-        // 換同帳號的下一顆，而不是整個帳號這輪都停在 app-server 落後的數字（2026-09-15）。
-        if seen.contains(&base) {
-            continue;
-        }
-        let client = fence.conn().client.clone();
-        let Ok(read) = client.pane_read(&pane_id, "visible", 60).await else { continue };
-        let Some(parsed) = crate::codex_live::parse_status_quota(&read.text) else { continue };
-        seen.insert(base.clone());
-        let reading = format!("{:?}/{:?}", parsed.five_hour_left, parsed.weekly_left);
-        let sighting = status_line_sighting(host, &pane_id, &reading).await;
-        let stored = app.quotas.lock().await.get(&quota_key(host, &base)).cloned();
-        let screen_at = screen_at.as_deref().and_then(parse_utc);
-        let now = chrono::Utc::now();
-        let used = |left: Option<f64>| left.map(|l| (100.0 - l).clamp(0.0, 100.0));
-        let five = pane_window_used(used(parsed.five_hour_left), stored.as_ref().and_then(|q| q.five_hour.as_ref()), chrono::Duration::hours(5), screen_at, sighting, now);
-        let weekly = pane_window_used(used(parsed.weekly_left), stored.as_ref().and_then(|q| q.seven_day.as_ref()), chrono::Duration::days(7), screen_at, sighting, now);
-        let status = crate::codex_live::CodexStatusQuota { five_hour_left: five.map(|u| 100.0 - u), weekly_left: weekly.map(|u| 100.0 - u) };
-        let Some(q) = quota_from_codex_status(&status, identity.as_deref()) else { continue };
-        #[cfg(test)]
-        crate::race_point::hit("codex_panes_before_set", host).await;
-        if let Err(e) = set_fenced(app, host, &base, q, &fence).await {
-            tracing::debug!(host, error = %e, "codex statusline quota: host superseded; dropping this round");
-            break;
-        }
-        wrote += 1;
-    }
-    wrote
-}
 
-/// `Ok(false)` = codex not installed there (quota stays null).
-pub async fn refresh_codex(app: &Arc<App>, host: &str) -> Result<bool> {
-    let fence = app.hosts.fence(host).await.ok_or_else(|| anyhow::anyhow!("unknown host `{host}`"))?;
-    let r = crate::models::codex_rpc(app, host, "account/rateLimits/read", json!({})).await;
-    let r = match r {
-        Ok(v) => v,
-        Err(e) if e.to_string().contains("is not installed") => return Ok(false),
-        Err(e) => return Err(e),
-    };
-    match quota_from_codex(&r) {
-        Some(q) => {
-            set_fenced(app, host, "codex", q, &fence).await?;
-            Ok(true)
-        }
-        None => anyhow::bail!("unexpected rateLimits shape: {r}"),
-    }
-}
-
-pub fn spawn_codex_poller(app: Arc<App>) {
-    tokio::spawn(async move {
-        let mut last_server: Option<std::time::Instant> = None;
-        loop {
-            // app-server 每 CODEX_POLL 問一次；狀態列每 CODEX_PANE_POLL 讀一次。同一輪兩個都做時先問 app-server，
-            // 狀態列後到蓋前（CLI 狀態列較即時且分得出身分）。
-            let ask_server = last_server.map_or(true, |t| t.elapsed() >= CODEX_POLL);
-            if ask_server {
-                last_server = Some(std::time::Instant::now());
-            }
-            for_each_host(pollable_hosts(&app).await, |host| {
-                let app = app.clone();
-                async move {
-                    if ask_server {
-                        match refresh_codex(&app, &host).await {
-                            Ok(true) => {}
-                            Ok(false) => tracing::info!(host = %host, "codex not installed; codex quota stays null"),
-                            Err(e) => tracing::warn!(host = %host, error = %e, "codex quota refresh failed"),
-                        }
-                    }
-                    let n = refresh_codex_from_panes(&app, &host).await;
-                    if n > 0 {
-                        tracing::debug!(host = %host, panes = n, "codex quota read off the status line");
-                    }
-                }
-            })
-            .await;
-            tokio::time::sleep(CODEX_PANE_POLL).await;
-        }
-    });
-}
 
 #[cfg(test)]
 mod sighting_tests {
@@ -1547,6 +1342,8 @@ mod sighting_tests {
 
 #[cfg(test)]
 mod tests {
+    use super::*;
+    use crate::runners::quota::{clear_limit_hit_for_bot, limit_hit_for_bot, try_limit_hit_for_bot};
 
     /// issue #464（i407 review）：`Window::exhausted_at` 是三處共用的那一份判斷，
     /// 其中「解不開的時間戳當成已重置」沿用 `supervisor::policy::past` 的先例。
@@ -2004,8 +1801,8 @@ mod tests {
         q
     }
 
-    async fn claude_seven_day(app: &Arc<App>) -> f64 {
-        app.quotas.lock().await.get("claude").unwrap().seven_day.as_ref().unwrap().used_pct
+    async fn claude_seven_day(app: &(impl QuotaTables + ?Sized)) -> f64 {
+        app.quotas().lock().await.get("claude").unwrap().seven_day.as_ref().unwrap().used_pct
     }
 
     /// #404（2026-09-23 14:04Z 誤報 critical）：cc0 的 17 個 session 報 7d 12%，一個閒置很久的 session 報 97%，
@@ -2117,180 +1914,6 @@ mod tests {
         assert!(q.reset_credits.is_some(), "重置券只有 app-server 讀得到，不能被洗掉");
     }
 
-    /// 同帳號有好幾顆 codex pane：先讀最近有動靜的那顆；它讀不到狀態列（壓縮對話中）就換下一顆，
-    /// 不是整個帳號停在舊數字（2026-09-15 使用者：pane 寫 93% left、header 還是 100）。
-    #[tokio::test]
-    async fn the_freshest_readable_codex_pane_sets_the_numbers() {
-        let env = crate::testing::env().await;
-        let app = env.app.clone();
-        let codex = |name: &'static str| {
-            let app = app.clone();
-            let pid = env.project_id.clone();
-            async move {
-                let id = crate::db::ulid();
-                sqlx::query(
-                    "INSERT INTO bots (id, project_id, name, kind, args_json, autostart, inject_hooks, hook_token, managed_by, created_at)
-                     VALUES (?,?,?,'codex','[]',0,1,'tok','user',?)",
-                )
-                .bind(&id)
-                .bind(&pid)
-                .bind(name)
-                .bind(crate::db::now())
-                .execute(&app.db)
-                .await
-                .unwrap();
-                let run = crate::testing::fake_run(&app, &id).await;
-                (id, run)
-            }
-        };
-        let (_old_bot, old_run) = codex("idle-old").await;
-        let (fresh_bot, fresh_run) = codex("busy-fresh").await;
-        let turn = |run: String, bot: String, at: &'static str| {
-            let app = app.clone();
-            async move {
-                let conv = crate::db::conversation_id(&app.db, &bot).await.unwrap();
-                sqlx::query("INSERT INTO turns (id, conversation_id, run_id, origin, status, created_at) VALUES (?,?,?,'web','completed',?)")
-                    .bind(crate::db::ulid())
-                    .bind(conv)
-                    .bind(run)
-                    .bind(at)
-                    .execute(&app.db)
-                    .await
-                    .unwrap();
-            }
-        };
-        turn(old_run.clone(), _old_bot.clone(), "2026-09-15T03:00:00Z").await;
-        turn(fresh_run.clone(), fresh_bot.clone(), "2026-09-15T09:00:00Z").await;
-        let pane = |run: &str| futures::executor::block_on(crate::db::run(&app.db, run)).unwrap().unwrap().pane_id.unwrap();
-        let (old_pane, fresh_pane) = (pane(&old_run), pane(&fresh_run));
-        let line = |five: u32| format!("\n› Ask Codex\n  gpt-6-astra low · /tmp · Context 20% used · 5h {five}% left · weekly 65% left\n");
-
-        // 兩顆都讀得到：最近有動靜的那顆說了算。
-        env.herdr.screens.lock().unwrap().insert(old_pane.clone(), line(100));
-        env.herdr.screens.lock().unwrap().insert(fresh_pane.clone(), line(93));
-        assert_eq!(refresh_codex_from_panes(&app, LOCAL_HOST).await, 1);
-        let used = |app: Arc<App>| async move { app.quotas.lock().await.get("codex").unwrap().five_hour.clone().unwrap().used_pct };
-        assert_eq!(used(app.clone()).await, 7.0, "93% left 那顆較新");
-
-        // 最新那顆正在壓縮、讀不到狀態列：換同帳號的下一顆，不是這輪整個跳過。
-        env.herdr.screens.lock().unwrap().insert(fresh_pane.clone(), "• Compacting context (1m 17s • esc to interrupt)\n".into());
-        env.herdr.screens.lock().unwrap().insert(old_pane.clone(), line(88));
-        assert_eq!(refresh_codex_from_panes(&app, LOCAL_HOST).await, 1);
-        assert_eq!(used(app.clone()).await, 12.0);
-
-        // 同一張沒變過的畫面不是新讀數：再讀一次不該把 `updated_at` 刷新成「剛剛」，
-        // 否則閒著的 pane 每 60 秒就把 app-server 剛寫進去的「視窗重置了」蓋回見底（review 2026-09-16）。
-        let before = app.quotas.lock().await.get("codex").unwrap().updated_at.clone();
-        assert_eq!(refresh_codex_from_panes(&app, LOCAL_HOST).await, 0, "畫面沒變就不算一次讀數");
-        assert_eq!(app.quotas.lock().await.get("codex").unwrap().updated_at, before);
-
-        // 畫面真的變了才是新讀數。
-        env.herdr.screens.lock().unwrap().insert(old_pane, line(70));
-        assert_eq!(refresh_codex_from_panes(&app, LOCAL_HOST).await, 1);
-        assert_eq!(used(app.clone()).await, 30.0);
-    }
-
-    /// M5（review 2026-09-16）：pane 剛跑完回合說 5h 90% left，之後 app-server 寫進落後的「0% 已用」。pane 閒著、畫面沒變，
-    /// 以前就再也沒人蓋回去；現在畫面屬於同一個窗，就把用量補回來（只增不減）。
-    /// 反過來，畫面比現在這個窗還舊（重置之前那一回合）就不採用——那是 2026-09-16 量表在滿與見底之間跳的原因。
-    #[tokio::test]
-    async fn an_idle_codex_pane_corrects_a_lagging_server_but_not_a_newer_window() {
-        let env = crate::testing::env().await;
-        let app = env.app.clone();
-        let bot = crate::db::ulid();
-        sqlx::query(
-            "INSERT INTO bots (id, project_id, name, kind, args_json, autostart, inject_hooks, hook_token, managed_by, created_at)
-             VALUES (?,?,'cx','codex','[]',0,1,'tok','user',?)",
-        )
-        .bind(&bot)
-        .bind(&env.project_id)
-        .bind(crate::db::now())
-        .execute(&app.db)
-        .await
-        .unwrap();
-        let run = crate::testing::fake_run(&app, &bot).await;
-        let now = chrono::Utc::now();
-        let turn_done = |ago: chrono::Duration| {
-            let app = app.clone();
-            let (run, bot) = (run.clone(), bot.clone());
-            async move {
-                sqlx::query("DELETE FROM turns WHERE run_id=?").bind(&run).execute(&app.db).await.unwrap();
-                let conv = crate::db::conversation_id(&app.db, &bot).await.unwrap();
-                let t = iso(now - ago);
-                sqlx::query("INSERT INTO turns (id, conversation_id, run_id, origin, status, created_at, completed_at) VALUES (?,?,?,'web','completed',?,?)")
-                    .bind(crate::db::ulid())
-                    .bind(conv)
-                    .bind(&run)
-                    .bind(&t)
-                    .bind(&t)
-                    .execute(&app.db)
-                    .await
-                    .unwrap();
-            }
-        };
-        let pane = crate::db::run(&app.db, &run).await.unwrap().unwrap().pane_id.unwrap();
-        let screen = |left: u32| format!("\n› Ask Codex\n  gpt-6-astra low · /tmp · Context 20% used · 5h {left}% left · weekly 65% left\n");
-        let server = |used: f64, resets: chrono::DateTime<chrono::Utc>| {
-            let mut q = codex_q("codex-app-server", None);
-            q.five_hour = Some(Window { observed_at: None, used_pct: used, resets_at: Some(iso(resets)) });
-            q.seven_day = Some(Window { observed_at: None, used_pct: 35.0, resets_at: Some(iso(now + chrono::Duration::days(3))) });
-            q
-        };
-        let five_used = |app: Arc<App>| async move { app.quotas.lock().await.get("codex").unwrap().five_hour.clone().unwrap().used_pct };
-
-        // 窗 1 小時前開始；回合 10 分鐘前跑完，pane 說 90% left。
-        turn_done(chrono::Duration::minutes(10)).await;
-        set(&app, LOCAL_HOST, "codex", server(0.0, now + chrono::Duration::hours(4))).await;
-        env.herdr.screens.lock().unwrap().insert(pane.clone(), screen(90));
-        refresh_codex_from_panes(&app, LOCAL_HOST).await;
-        assert_eq!(five_used(app.clone()).await, 10.0);
-        // app-server 落後，又寫回 0%；pane 閒著、畫面沒變——同一個窗，照樣補回來。
-        set(&app, LOCAL_HOST, "codex", server(0.0, now + chrono::Duration::hours(4))).await;
-        assert_eq!(refresh_codex_from_panes(&app, LOCAL_HOST).await, 1);
-        assert_eq!(five_used(app.clone()).await, 10.0, "落後的 app-server 不能讓量表停在偏滿");
-        // 已經是一樣的數字就不重寫（`updated_at` 不被刷成「剛剛」）。
-        assert_eq!(refresh_codex_from_panes(&app, LOCAL_HOST).await, 0);
-
-        // 同一張畫面，但回合是 3 小時前跑的，而 app-server 說窗 1 小時前才重置：畫面屬於上一個窗，不採用。
-        turn_done(chrono::Duration::hours(3)).await;
-        set(&app, LOCAL_HOST, "codex", server(5.0, now + chrono::Duration::hours(4))).await;
-        assert_eq!(refresh_codex_from_panes(&app, LOCAL_HOST).await, 0);
-        assert_eq!(five_used(app.clone()).await, 5.0, "重置之前的畫面不能把量表蓋回去");
-    }
-
-    /// #347：讀 pane 狀態列途中同名主機被換成另一台，舊機器 pane 上的讀數不能寫進新機器的 key
-    /// （換連線那一側已經清過 `<host>/…`，沒有 fence 的 `set` 會把它種回來）。
-    #[tokio::test]
-    async fn a_codex_pane_reading_from_a_superseded_host_is_not_published() {
-        let env = crate::testing::env().await;
-        let app = env.app.clone();
-        let host = format!("cx-{}", crate::db::ulid());
-        let cfg = |ssh: &str| crate::config::HostCfg { name: host.clone(), ssh: ssh.into(), ssh_port: 22, ssh_opts: vec![], herdr_session: "agents-manager".into(), remote_path: String::new(), shared_session: false };
-        let herdr_a = crate::testing::MockHerdr::start(env.dir.join("herdr-cx-a.sock"));
-        app.hosts.insert_remote_with_client_for_test(cfg("target-a"), crate::herdr::HerdrClient::new(env.dir.join("herdr-cx-a.sock"))).await;
-        sqlx::query("UPDATE projects SET host=? WHERE id=?").bind(&host).bind(&env.project_id).execute(&app.db).await.unwrap();
-        let bot = crate::db::ulid();
-        sqlx::query(
-            "INSERT INTO bots (id, project_id, name, kind, args_json, autostart, inject_hooks, hook_token, managed_by, created_at)
-             VALUES (?,?,'cx','codex','[]',0,1,'tok','user',?)",
-        )
-        .bind(&bot)
-        .bind(&env.project_id)
-        .bind(crate::db::now())
-        .execute(&app.db)
-        .await
-        .unwrap();
-        let run = crate::testing::fake_run(&app, &bot).await;
-        let pane = crate::db::run(&app.db, &run).await.unwrap().unwrap().pane_id.unwrap();
-        herdr_a.screens.lock().unwrap().insert(pane, "\n› Ask Codex\n  gpt-6-astra low · /tmp · Context 20% used · 5h 90% left · weekly 65% left\n".into());
-
-        let (a2, cfg_b) = (app.clone(), cfg("target-b"));
-        crate::lifecycle::race_point::arm("codex_panes_before_set", &host, move || async move {
-            a2.hosts.replace_remote_for_test(&a2, cfg_b).await;
-        });
-        assert_eq!(refresh_codex_from_panes(&app, &host).await, 0, "換掉的主機上的讀數不算寫入");
-        assert!(app.quotas.lock().await.get(&format!("{host}/codex")).is_none(), "舊機器的讀數不能種進新機器的 key");
-    }
 
     #[test]
     fn a_pane_window_is_used_only_when_it_belongs_to_the_current_window() {
@@ -2632,15 +2255,15 @@ mod tests {
         set(&app, LOCAL_HOST, "codex", blocked).await;
         let mut poll = codex_q("codex-app-server", None);
         poll.updated_at = "2026-09-13T14:21:00.000Z".into();
-        set(&app, LOCAL_HOST, "codex", poll).await;
-        let got = |app: &std::sync::Arc<crate::state::App>| {
-            let app = app.clone();
-            async move { app.quotas.lock().await.get(&quota_key(LOCAL_HOST, "codex")).cloned().unwrap() }
+        let got_app = app.clone();
+        let got = || {
+            let app = got_app.clone();
+            async move { app.quotas().lock().await.get(&quota_key(LOCAL_HOST, "codex")).cloned().unwrap() }
         };
         // 2026-09-12 不變量：只有 `until` 到了或 `clear_limit_hit` 才能清掉。
-        assert!(got(&app).await.limit_hit.is_some(), "量表滿了不代表 CLI 收得下一句話");
+        assert!(got().await.limit_hit.is_some(), "量表滿了不代表 CLI 收得下一句話");
         clear_limit_hit(&app, LOCAL_HOST, "codex").await;
-        assert!(got(&app).await.limit_hit.is_none());
+        assert!(got().await.limit_hit.is_none());
     }
 
     fn iso(t: chrono::DateTime<chrono::Utc>) -> String {
@@ -2665,8 +2288,12 @@ mod tests {
         banner.five_hour = None;
         banner.seven_day = None;
         set(&app, LOCAL_HOST, "claude:cc1", banner).await;
-        let until = |app: Arc<App>| async move {
-            app.quotas.lock().await.get("claude:cc1").unwrap().limit_hit.as_ref().map(|h| h.until.clone().unwrap())
+        let until_app = app.clone();
+        let until = || {
+            let app = until_app.clone();
+            async move {
+                app.quotas().lock().await.get("claude:cc1").unwrap().limit_hit.as_ref().map(|h| h.until.clone().unwrap())
+            }
         };
 
         // 撞限後讀到的 Fable 窗：還見底，明天 08:00 重置 → 撞限最晚到那時，不是下週。
@@ -2674,19 +2301,19 @@ mod tests {
         let mut usage = codex_q("claude-usage", None);
         usage.fable = Some(Window { observed_at: None, used_pct: 100.0, resets_at: Some(iso(tomorrow)) });
         set(&app, LOCAL_HOST, "claude:cc1", usage.clone()).await;
-        assert_eq!(until(app.clone()).await, Some(iso(tomorrow)), "保底的 7 天要被那一桶自己的重置時間截短");
+        assert_eq!(until().await, Some(iso(tomorrow)), "保底的 7 天要被那一桶自己的重置時間截短");
 
         // 不相干的桶（statusLine 只有 5h／7d）不算那一桶的讀數。
         let mut status = codex_q("statusline", None);
         status.five_hour = Some(Window { observed_at: None, used_pct: 3.0, resets_at: Some(iso(now + chrono::Duration::hours(4))) });
         set(&app, LOCAL_HOST, "claude:cc1", status).await;
-        assert_eq!(until(app.clone()).await, Some(iso(tomorrow)));
+        assert_eq!(until().await, Some(iso(tomorrow)));
 
         // 重置之後的讀數：窗的起點在撞限之後 → 撞限作廢。
         let mut after = codex_q("claude-usage", None);
         after.fable = Some(Window { observed_at: None, used_pct: 0.0, resets_at: Some(iso(at + chrono::Duration::days(7) + chrono::Duration::minutes(1))) });
         set(&app, LOCAL_HOST, "claude:cc1", after).await;
-        assert_eq!(until(app.clone()).await, None, "那一桶重置過了，撞限不能再擋");
+        assert_eq!(until().await, None, "那一桶重置過了，撞限不能再擋");
     }
 
     /// 撞限前就開始、撞限後才回來的讀數（百分比可能還沒到頂）不能把撞限清掉，只能截短時間。
@@ -2929,49 +2556,6 @@ mod tests {
         assert_eq!(host_of_key("gone/claude", &hosts), ("local", "gone/claude"));
     }
 
-    #[tokio::test]
-    async fn snapshot_covers_live_hosts_only() {
-        let dir = crate::testing::track(std::env::temp_dir().join(format!("am-quota-{}", crate::db::ulid())));
-        std::fs::create_dir_all(&dir).unwrap();
-        let pool = crate::app_ports_p1::open(&dir.join("db.sqlite3")).await.unwrap();
-        let cfg = crate::projection::app_ports_p2::load_config(dir.join("config.toml")).await.unwrap();
-        let client = crate::herdr::HerdrClient::new(dir.join("herdr.sock"));
-        let app = App::new(
-            pool,
-            client.clone(),
-            client,
-            cfg,
-            dir.clone(),
-            dir.join("agents-managerd"),
-            7799,
-            "t".into(),
-            "test".into(),
-            false,
-        );
-        let q = Quota {
-            five_hour: Some(Window { observed_at: None, used_pct: 10.0, resets_at: None }),
-            seven_day: None,
-            fable: None,
-            reset_credits: None,
-            limit_hit: None,
-            plan: None,
-            updated_at: crate::db::now(),
-            source: "test".into(),
-            account: None,
-            host: LOCAL_HOST.into(),
-        };
-        set(&app, LOCAL_HOST, "claude:cc1", q.clone()).await;
-        app.quotas.lock().await.insert("gone/claude".into(), q);
-
-        let snap = snapshot(&app).await;
-        let kinds = snap["kinds"].as_object().unwrap().clone();
-        for k in crate::config::KINDS {
-            assert!(kinds.contains_key(k), "missing base kind {k}");
-        }
-        assert_eq!(kinds["claude:cc1"]["host"], "local");
-        assert!(!kinds.contains_key("gone/claude"), "orphan host key was kept");
-        let _ = std::fs::remove_dir_all(&dir);
-    }
 
     /// issue #392：讀數寫入快取，重啟後先以 stale 回填；新的探測成功後才恢復 fresh，過期的舊撞限也不能卡住派送。
     #[tokio::test]
@@ -3099,74 +2683,7 @@ mod tests {
         assert_eq!(app.quotas.lock().await["claude:r4"].five_hour.as_ref().map(|w| w.used_pct), Some(3.0), "讀數不動");
     }
 
-    /// 一顆遠端 bot（`remote1`），它自己的 key 沒有撞限；本機 `claude` 是另一個帳號，有撞限、有讀數。
-    async fn remote_bot_beside_a_local_hit(app: &Arc<App>) -> crate::db::Bot {
-        let pid = crate::db::ulid();
-        sqlx::query("INSERT INTO projects (id, path, label, host, created_at) VALUES (?, '/r/p', 'r', 'remote1', ?)")
-            .bind(&pid)
-            .bind(crate::db::now())
-            .execute(&app.db)
-            .await
-            .unwrap();
-        let bot = crate::testing::claude_bot(app, &pid, "far").await;
-        let later = |h: i64| crate::db::iso_at(chrono::Utc::now() + chrono::Duration::hours(h));
-        let mut local = codex_q("statusline", None);
-        local.five_hour = Some(Window { observed_at: None, used_pct: 40.0, resets_at: Some(later(1)) });
-        set(app, LOCAL_HOST, "claude", local).await;
-        assert!(seed_limit_hit(app, LOCAL_HOST, "claude", &later(2), "You've hit your session limit", Some("five_hour".into())).await);
-        bot
-    }
 
-    async fn projects_unreadable(app: &Arc<App>, unreadable: bool) {
-        let sql = if unreadable { "ALTER TABLE projects RENAME TO projects_unreadable" } else { "ALTER TABLE projects_unreadable RENAME TO projects" };
-        sqlx::query(sql).execute(&app.db).await.unwrap();
-    }
-
-    /// #108 重開：讀不到 bot 在哪台主機不等於它在本機。以前四支都退回 `local`：查本機帳號的撞限回「沒撞限」、拿本機的
-    /// 重置時間把重送提早、把**本機**帳號真的撞限清掉、拿本機的成功回合當放行證據。
-    #[tokio::test]
-    async fn a_bot_whose_host_cannot_be_read_is_never_read_or_cleared_on_the_local_key() {
-        let env_ = crate::testing::env().await;
-        let app = env_.app.clone();
-        let bot = remote_bot_beside_a_local_hit(&app).await;
-        let since = chrono::Utc::now() - chrono::Duration::seconds(1);
-
-        projects_unreadable(&app, true).await;
-        assert!(try_limit_hit_for_bot(&app, &bot).await.is_err(), "讀不到主機是錯，不是「沒撞限」");
-        assert!(limit_hit_for_bot(&app, &bot).await.is_none(), "舊介面（supervisor 用）讀不到記 warn，不拿本機的撞限頂替");
-        assert_eq!(next_reset_for_bot(&app, &bot).await, None, "不拿本機帳號的重置時間");
-        clear_limit_hit_for_bot(&app, &bot).await;
-        assert!(app.quotas.lock().await["claude"].limit_hit.is_some(), "本機帳號的撞限沒被別台 bot 的成功回合清掉");
-        clear_limit_hit(&app, LOCAL_HOST, "claude").await; // 本機帳號自己答完一回合
-        assert!(!limit_cleared_since(&app, &bot, since).await, "本機的成功回合不是遠端這顆的放行證據");
-
-        projects_unreadable(&app, false).await;
-        assert_eq!(try_limit_hit_for_bot(&app, &bot).await.unwrap(), None, "讀得到：看自己那把 `remote1/claude`");
-        assert!(!limit_cleared_since(&app, &bot, since).await);
-    }
-
-    /// 讀不到 run 就不知道它在跑什麼模型：照擋（`None`），不退回設定值——`/model` 換成 fable 的 bot 撞 Fable 桶，
-    /// 設定值還寫 opus，退回設定值就放行了。
-    #[tokio::test]
-    async fn a_model_bucket_hit_holds_a_bot_whose_running_model_cannot_be_read() {
-        let env_ = crate::testing::env().await;
-        let app = env_.app.clone();
-        let bot = crate::testing::claude_bot(&app, &env_.project_id, "switched").await;
-        sqlx::query("UPDATE bots SET model='opus' WHERE id=?").bind(&bot.id).execute(&app.db).await.unwrap();
-        let bot = crate::db::bot(&app.db, &bot.id).await.unwrap().unwrap();
-        let run = crate::testing::fake_run(&app, &bot.id).await;
-        sqlx::query("UPDATE runs SET runtime_model='fable' WHERE id=?").bind(&run).execute(&app.db).await.unwrap();
-        let until = crate::db::iso_at(chrono::Utc::now() + chrono::Duration::hours(2));
-        assert!(seed_limit_hit(&app, LOCAL_HOST, "claude", &until, "You've hit your Fable limit", Some("fable".into())).await);
-        assert!(try_limit_hit_for_bot(&app, &bot).await.unwrap().is_some(), "前提：它實際在跑 fable");
-
-        sqlx::query("ALTER TABLE runs RENAME TO runs_unreadable").execute(&app.db).await.unwrap();
-        assert_eq!(running_model(&app, &bot).await, None, "不知道，不是設定值的 opus");
-        // 讀不到 run 連它用哪個身分起來都不知道（#238）：回錯，呼叫端照擋（hold）。無論如何不能是「沒撞限」。
-        let got = try_limit_hit_for_bot(&app, &bot).await;
-        assert!(!matches!(got, Ok(None)), "不知道在跑什麼：照擋，不是沒撞限：{got:?}");
-        sqlx::query("ALTER TABLE runs_unreadable RENAME TO runs").execute(&app.db).await.unwrap();
-    }
 
     /// 寫撞限要落在查詢端之後讀的那把 key：身分表還沒偵測完、又不是手寫的身分時算不準，回錯（不猜 `claude:cc0`）。
     #[tokio::test]
@@ -3260,12 +2777,19 @@ mod tests {
     }
 }
 
-/// 每個 quota key 的最新額度快照。（欄位在 `App`，由 composition 層 `app_ports_p0` 實作這個窄能力。）
+/// 每個 quota key 的最新額度快照。（欄位在 top state，由 composition 層實作這個窄能力。）
 pub trait QuotaTables: Send + Sync {
     fn quotas(&self) -> &tokio::sync::Mutex<std::collections::BTreeMap<String, crate::quota::Quota>>;
 }
 
-/// 讀數已過期（stale）的 quota key。（欄位在 `App`，由 composition 層 `app_ports_p0` 實作這個窄能力。）
+/// 讀數已過期（stale）的 quota key。（欄位在 top state，由 composition 層實作這個窄能力。）
 pub trait QuotaStaleKeys: Send + Sync {
     fn quota_stale(&self) -> &tokio::sync::Mutex<std::collections::BTreeSet<String>>;
 }
+
+/// 身分表查詢介面，供額度收斂計算身分設定
+pub trait HostIdentities: Send + Sync {
+    fn identity_for_host(&self, host: &str, name: &str) -> impl std::future::Future<Output = Option<crate::config::IdentityCfg>> + Send;
+    fn host_tools_detected(&self, host: &str) -> impl std::future::Future<Output = bool> + Send;
+}
+
