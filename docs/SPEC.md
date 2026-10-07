@@ -3402,6 +3402,10 @@ bot 用 `herdr agent start` 開的 claude 子 agent（本機或遠端）沒有 h
   `[Request interrupted by user…]` 結束上一問。回覆是之後 `stop_reason` 不是 `tool_use` 的 assistant 文字（帶 `tool_use` 的旁白不算，沒有 `stop_reason` 的半行不算）；
   下一問出現也算這一問結束（被打斷、沒有回覆）。回合鑰匙是 user 那行 `uuid` 的 FNV-1a（`native_turn_id = p<n>`），同一句重複打各是一問。
   記成回合、與備援收過的回合對上、`relay_from` 標記都照 §12.5。
+- **第一次接上只建基準**（issue #879）：對話檔是整段 session，daemon 換版、重新認領後第一次讀到時裡面早有處理過、也回報過 `child_done` 的歷史。
+  `runs.transcript_baseline_at` 為 NULL＝這個 run 還沒讀過：第一次讀只把「已經結束的問」當基準——對得上既有回合的（派工開的在飛回合）照舊收掉，
+  其餘不開回合、不通知，基準時間（已結束的最後一問的 user 行 `timestamp`）寫進該欄（檔裡沒有任何一問＝空字串）。之後只記 `timestamp` 比基準晚的問；
+  第一次讀到時還沒結束的那一問不在基準裡，結束時照記。grok／agy 不用基準（它們的 session 是 run 自己開的）。
 
 ### 12.6 額度：`/usage` 探測
 grok 沒有 usage 子命令或 RPC，數字只在 TUI 的 `/usage` 對話框裡，所以開**用完即丟**的 workspace 探測，跑在**專屬 herdr session `am-quota`**（需要時起、永不 attach）：

@@ -93,7 +93,7 @@ pub(crate) fn parse_exchanges(text: &str) -> Vec<Exchange> {
                 }
                 let prompt = crate::pasted_content::original(&raw).trim().to_string();
                 let uuid = v.get("uuid").and_then(Value::as_str).filter(|u| !u.is_empty());
-                out.push(Exchange { prompt, prompt_index: uuid.map(index_of), reply: None, closed: false });
+                out.push(Exchange { prompt, prompt_index: uuid.map(index_of), reply: None, closed: false, at: v.get("timestamp").and_then(Value::as_str).map(str::to_string) });
             }
             Some("assistant") => {
                 if gap {

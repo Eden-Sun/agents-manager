@@ -333,6 +333,8 @@ pub const SCHEMA_HISTORY: &[(i64, &str)] = &[
     (44, "0d15873cf9a77b83"),
     // l8 審查發現 2：`turns.source_event_id`（收這筆回合的 hook 在收件匣的 id）＋唯一索引，重播同一則 hook 不再開第二個外部回合。
     (45, "e88ca2badecc5381"),
+    // issue #879：`runs.transcript_baseline_at`（沒有 hook 的 claude run 第一次讀對話檔的基準，既有歷史不生回合）。
+    (46, "0d415c91ca473b5e"),
 ];
 pub const SCHEMA_VERSION: i64 = SCHEMA_HISTORY[SCHEMA_HISTORY.len() - 1].0;
 
@@ -549,6 +551,9 @@ async fn apply_migrations_inner(pool: &SqlitePool, fail_after_spawn_hints_drop: 
             "ALTER TABLE messages ADD COLUMN sent_via TEXT CHECK (sent_via IN ('send_now','supplement'))",
         ),
         ("runs", "live_rev", "ALTER TABLE runs ADD COLUMN live_rev TEXT"),
+        // issue #879：沒有 hook 的 claude run 第一次讀對話檔時建的基準（那一輪已結束的最後一問的時間）；之後只記比它晚的問。
+        // NULL＝還沒讀過（舊列、剛開的 run）。空字串＝讀過、檔裡當時沒有任何一問。
+        ("runs", "transcript_baseline_at", "ALTER TABLE runs ADD COLUMN transcript_baseline_at TEXT"),
         // 保溫回合（`client_request_id` 以 `keep-warm:`／舊的 `keepalive:` 開頭）留下的訊息＝1：網頁淡化、未讀不計。
         // 新訊息由下面的 trigger 蓋，舊列由下面的回填補。
         ("messages", "keep_warm", "ALTER TABLE messages ADD COLUMN keep_warm INTEGER NOT NULL DEFAULT 0"),
