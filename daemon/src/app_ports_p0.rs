@@ -92,11 +92,6 @@ impl crate::supervisor::role_faults::RoleFaultTable for App {
         &self.role_faults
     }
 }
-impl<T: crate::supervisor::role_faults::RoleFaultTable + ?Sized> crate::supervisor::role_faults::RoleFaultTable for Arc<T> {
-    fn role_faults(&self) -> &tokio::sync::Mutex<std::collections::HashMap<String, crate::supervisor::role_faults::RoleFault>> {
-        (**self).role_faults()
-    }
-}
 
 impl crate::github::GithubCache for App {
     fn github(&self) -> &tokio::sync::Mutex<std::collections::HashMap<String, Option<crate::github::GithubInfo>>> {
@@ -119,11 +114,6 @@ impl crate::build_scheduler::BuildSlotLock for App {
 impl crate::supervisor::watchdog::WatchdogDeadlines for App {
     fn watchdog_deadlines(&self) -> &std::sync::Mutex<crate::supervisor::watchdog::DeadlineCache> {
         &self.watchdog_deadlines
-    }
-}
-impl<T: crate::supervisor::watchdog::WatchdogDeadlines + ?Sized> crate::supervisor::watchdog::WatchdogDeadlines for Arc<T> {
-    fn watchdog_deadlines(&self) -> &std::sync::Mutex<crate::supervisor::watchdog::DeadlineCache> {
-        (**self).watchdog_deadlines()
     }
 }
 

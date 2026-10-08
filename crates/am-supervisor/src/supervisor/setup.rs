@@ -1,0 +1,415 @@
+//! Building the AGM environment: a dedicated directory, project and bot.
+//!
+//! Deliberately *not* the agents-manager checkout: a manager whose cwd is a source tree reads
+//! that tree's CLAUDE.md and starts editing code. It gets its own directory, its own project
+//! row (so config projection and hooks work exactly as for any other bot), and nothing else.
+
+use crate::config::{BotCfg, ProjectCfg};
+use crate::lifecycle::LcError;
+use crate::supervisor::ports::ConfigProjection;
+use sqlx::SqlitePool;
+use serde_json::{json, Value};
+use std::path::{Path, PathBuf};
+
+use super::store;
+
+/// The persona, compiled in from the plan so a deployment cannot drift from the reviewed text.
+pub const PERSONA_DOC: &str = include_str!("../../../../docs/goals/agm-supervisor-persona.md");
+
+pub const BOT_NAME: &str = "AGM";
+pub const REMOTE_NAME: &str = "AGM";
+
+/// Resolve the supervisor candidate and apply the shared retired-model policy before launch.
+pub fn model_arg(candidate: &str) -> &'static str {
+    crate::models::canonical_model("claude", if candidate == "opus" { "opus" } else { "fable" })
+}
+
+pub fn other_candidate(candidate: &str) -> &'static str {
+    if candidate == "fable" {
+        "opus"
+    } else {
+        "fable"
+    }
+}
+
+pub fn agm_dir(app: &impl crate::capabilities::DataDir) -> PathBuf {
+    app.data_dir().join("supervisor").join(BOT_NAME)
+}
+
+/// Everything after the `---` separator: the header above it is guidance for humans reading
+/// the plan, not part of what the manager is told about itself.
+///
+/// This is the *embedded* text — the seed for a first install and nothing more. What the
+/// manager runs on is the stored persona (`supervisors.persona_text`); see `persona.rs`.
+pub fn persona_body() -> String {
+    match PERSONA_DOC.split_once("\n---\n") {
+        Some((_, body)) => body.trim().to_string(),
+        None => PERSONA_DOC.trim().to_string(),
+    }
+}
+
+/// The persona the manager actually runs on: stored if there is one, the embedded text only as
+/// a seed. Returns `(text, seeded)`.
+pub async fn effective_persona(db: &SqlitePool) -> Result<(String, bool), LcError> {
+    let embedded = persona_body();
+    let current = store::get_or_init(db).await.map_err(|e| LcError::Upstream(e.to_string()))?;
+    let legacy = if current.persona_text.as_deref().is_none_or(str::is_empty) {
+        match current.bot_id.as_deref() {
+            Some(id) => crate::db::bot(db, id).await
+                .map_err(|e| LcError::Upstream(e.to_string()))?
+                .and_then(|b| b.persona).filter(|t| !t.trim().is_empty()),
+            None => None,
+        }
+    } else { None };
+    let seeded = match legacy {
+        Some(ref text) => store::seed_persona_from(db, text, "legacy_bot", &embedded).await,
+        None => store::seed_persona_if_empty(db, &embedded).await,
+    }.map_err(|e| LcError::Upstream(e.to_string()))?;
+    let sup = store::get_or_init(db).await.map_err(|e| LcError::Upstream(e.to_string()))?;
+    Ok((sup.persona_text.filter(|t| !t.is_empty()).unwrap_or(embedded), seeded))
+}
+
+fn claude_md(dir: &Path, bot_id: &str, port: u16) -> String {
+    format!(
+        r#"# AGM — agents-manager 總管
+
+你是 AGM。角色前導詞由 daemon 以 persona 注入（同目錄 `persona.md` 是同一份的可讀副本，
+不要再把它整份貼進對話）。
+
+## 執行期
+- AG Man daemon：`http://127.0.0.1:{port}`
+- 你自己的 bot id：`{bot_id}`
+- 工作目錄：`{dir}`
+- 執行期設定：`runtime.json`（沒有 token；CLI 自己去 `GET /api/session` 拿）
+- 管理摘要：`handoff.md`（可重建的副本，權威在資料庫 `GET /api/supervisor/handoff`）
+
+## 可用工具
+- `bin/agm`：結構化 JSON CLI，是你操作 AG Man 的入口。先跑 `bin/agm --help` 看目前**實際**有哪些子命令。
+- 沒有出現在 `--help` 裡的子命令就是還沒實作，不要假設它存在，也不要自己拼 curl 繞過去。
+
+## 恢復流程
+接班或重啟後，依序：讀 `handoff.md` → `bin/agm assignments` 未結案 → `bin/agm inbox` 待處理
+→ 再查即時狀態。舊的 pending 不等於還沒送出，一律先對帳再決定。
+
+## 邊界
+- 這個目錄不是任何專案的原始碼，不要在這裡改程式。
+- 不要把 token、登入秘密或完整環境變數寫進任何檔案或回覆。
+- Remote Control 名稱是 `{REMOTE_NAME}`，由啟動環境建立；不要自己開關。
+"#,
+        dir = dir.display(),
+    )
+}
+
+/// The manager's tool entry point, compiled into the daemon binary. Deploying it from a
+/// path on the build machine would leave every release install without a CLI.
+pub const AGM_CLI: &str = include_str!("../../../../scripts/agm.py");
+
+/// What actually got written, so the caller can report honestly instead of assuming.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct Deployed {
+    pub cwd: String,
+    pub agm_cli: String,
+}
+
+/// The CLI's runtime configuration.
+///
+/// No token, by design: `bin/agm` asks the daemon for one over loopback at run time, so the
+/// credential never sits in a file, in argv, or in a handoff note.
+///
+/// `responder_id`：協調者的 bot（沒建立就是 null）。巡檢目錄的 ops 腳本（`claude-release-kick.sh`）派工給它——
+/// 巡檢不能對自己下交辦。以前只有協調者自己的目錄寫這一欄，全新安裝的巡檢目錄沒有，腳本每一輪都跳過（review2 sup #1）。
+fn runtime_json(port: u16, bot_id: &str, responder_id: Option<&str>, data_dir: &str) -> Value {
+    json!({
+        "daemon_url": format!("http://127.0.0.1:{port}"),
+        "manager_bot_id": bot_id,
+        "responder_bot_id": responder_id,
+        // The CLI also accepts `bot_id`, which an earlier draft wrote. Both are emitted so a
+        // deployment cannot be broken by whichever half is upgraded first.
+        "bot_id": bot_id,
+        // 雙角色（SPEC §18.15）：這個目錄是巡檢的。`bin/agm` 用它決定預設看哪個角色的 inbox、
+        // 回報時以誰的名義；真正的身分驗證靠 pane 環境裡的 bot token，不靠這個字串。
+        "role": "patrol",
+        "self_bot_id": bot_id,
+        "data_dir": data_dir,
+        "supervisor_id": store::SUPERVISOR_ID,
+        "remote_name": REMOTE_NAME,
+    })
+}
+
+/// Write the directory contents. Idempotent: every file is rewritten from the current
+/// daemon, except `handoff.md`, which belongs to the manager once it exists.
+///
+/// `persona` is the **stored** text, passed in rather than read from the binary: `persona.md`
+/// is a readable copy of what the manager is actually running on, and regenerating it from the
+/// embedded default would make the copy disagree with the original.
+pub fn deploy_files(app: &(impl crate::capabilities::DataDir + crate::capabilities::ListenPort), bot_id: &str, responder_id: Option<&str>, persona: &str) -> std::io::Result<Deployed> {
+    let dir = agm_dir(app);
+    std::fs::create_dir_all(dir.join("bin"))?;
+    std::fs::write(dir.join("CLAUDE.md"), claude_md(&dir, bot_id, app.port()))?;
+    std::fs::write(dir.join("persona.md"), persona)?;
+    write_runtime_json(app, bot_id, responder_id)?;
+    if !dir.join("handoff.md").exists() {
+        std::fs::write(dir.join("handoff.md"), "# AGM 管理摘要\n\n（尚未寫入。權威紀錄在 AG Man 資料庫。）\n")?;
+    }
+    // 原子寫（issue #520）：這支 CLI 一直有人在跑（所有 kick 每 5～30 分鐘 exec 一次），
+    // `fs::write` 的 `O_TRUNC` 窗口會讓它們讀到半截的 python。跟 `cli_refresh` 用同一個 helper，
+    // 免得同一個檔兩條路兩種寫法（這正是 #520 的形狀）。
+    let bin = dir.join("bin").join("agm");
+    super::cli_refresh::install_executable(&bin, AGM_CLI.as_bytes())?;
+    Ok(Deployed { cwd: dir.to_string_lossy().to_string(), agm_cli: "deployed".into() })
+}
+
+/// 只重寫巡檢目錄的 `runtime.json`。協調者在巡檢之後才建立時由 `responder::ensure_env` 呼叫，
+/// 巡檢目錄還不存在（沒 setup 過）就什麼都不做。
+pub fn write_runtime_json(app: &(impl crate::capabilities::DataDir + crate::capabilities::ListenPort), bot_id: &str, responder_id: Option<&str>) -> std::io::Result<()> {
+    let dir = agm_dir(app);
+    if !dir.is_dir() {
+        return Ok(());
+    }
+    std::fs::write(
+        dir.join("runtime.json"),
+        serde_json::to_string_pretty(&runtime_json(app.port(), bot_id, responder_id, &app.data_dir().to_string_lossy()))?,
+    )
+}
+
+/// Create (or find) the AGM project and bot in config.toml, then project it into SQLite.
+/// Never starts anything — `POST /api/supervisor/start` is a separate, explicit step.
+pub async fn ensure_env(app: &(impl crate::capabilities::Cfg + crate::capabilities::DataDir + crate::capabilities::Db + crate::capabilities::ListenPort + crate::supervisor::ports::HostProbes + ConfigProjection)) -> Result<(String, String, Deployed), LcError> {
+    let sup = store::get_or_init(app.db()).await.map_err(|e| LcError::Upstream(e.to_string()))?;
+    let dir = agm_dir(app);
+    std::fs::create_dir_all(&dir).map_err(|e| LcError::Bad(format!("{}: {e}", dir.display())))?;
+    let path = crate::config::canonical_path(&dir.to_string_lossy()).map_err(|e| LcError::Bad(e.to_string()))?;
+
+    // The identity has to exist already: silently running the manager under whatever account
+    // happens to be default is exactly the kind of guess that produces a bot nobody can log in.
+    if app.identity_for_host(crate::config::LOCAL_HOST, &sup.identity).await.is_none() {
+        return Err(LcError::conflict(
+            "supervisor identity is not configured on this host",
+            json!({"reason": "identity_missing", "identity": sup.identity}),
+        ));
+    }
+
+    // The persisted ids win over the name. The user may have renamed AGM in the sidebar, and
+    // an unrelated bot may since have been called `AGM` — matching on the name would either
+    // create a duplicate manager or quietly take over somebody else's bot.
+    let known_project = sup.project_id.clone();
+    let known_bot = sup.bot_id.clone();
+    let fresh_project = crate::db::ulid();
+    let fresh_bot = crate::db::ulid();
+    let model = model_arg(&sup.active_model).to_string();
+    // Stored wins. An older binary running `setup` used to write its own compiled-in text back
+    // over the bot, which is how a persona that had just been updated could be silently rolled
+    // back; the embedded copy is now only ever a seed for an install that has none.
+    let (persona, seeded) = effective_persona(app.db()).await?;
+    // The closure below moves its copy into the config update; `persona` itself is still needed
+    // afterwards to write the readable copy.
+    let persona_for_cfg = persona.clone();
+    if seeded {
+        tracing::info!("seeded the AGM persona from the existing bot or embedded first-install default");
+    }
+    let effort = sup.effort.clone();
+    let identity = sup.identity.clone();
+    let p2 = path.clone();
+
+    let (project_id, bot_id) = app.update_and_project(move |cfg| {
+            // Project: persisted id first, then the directory, then a new one.
+            let pidx = cfg
+                .projects
+                .iter()
+                .position(|p| known_project.is_some() && p.id == known_project)
+                .or_else(|| cfg.projects.iter().position(|p| p.path == p2 && p.host == crate::config::LOCAL_HOST));
+            let pidx = match pidx {
+                Some(i) => i,
+                None => {
+                    cfg.projects.push(ProjectCfg {
+                        handed_off_to: None,
+                        id: Some(fresh_project.clone()),
+                        path: p2.clone(),
+                        label: BOT_NAME.to_string(),
+                        host: crate::config::LOCAL_HOST.to_string(),
+                        bots: vec![],
+                    });
+                    cfg.projects.len() - 1
+                }
+            };
+            if cfg.projects[pidx].id.is_none() {
+                cfg.projects[pidx].id = Some(fresh_project.clone());
+            }
+            let project_id = cfg.projects[pidx].id.clone().expect("set above");
+
+            // Bot: only the persisted id identifies the manager. Without one, the name must be
+            // free — an existing `AGM` we have never managed belongs to someone else.
+            let proj = &mut cfg.projects[pidx];
+            let bidx = match known_bot.as_ref() {
+                Some(id) => proj.bots.iter().position(|b| b.id.as_ref() == Some(id)),
+                // 還沒記過 bot：這時找到的專案只會是 daemon 自己目錄裡的那一個，同名的 `AGM` 只可能是上一次設定寫進 config、
+                // 還沒來得及記進角色列就失敗的那一顆——接著用它（issue #181）。當成別人的回 `name_taken`，就永遠設定不起來。
+                // 只認 setup 自己留了記號的那一顆（`bot_requests::ROLE_SETUP_MARK_PREFIX`）：同名但沒記號的是別人建的，不能因為名字就當成總管。
+                None => proj.bots.iter().position(|b| b.name == BOT_NAME && b.create_request_id.as_deref() == Some(super::bot_requests::ROLE_SETUP_MARK_PREFIX_PATROL)),
+            };
+            let bidx = match bidx {
+                Some(i) => i,
+                None => {
+                    if proj.bots.iter().any(|b| b.name == BOT_NAME) {
+                        anyhow::bail!("name-taken");
+                    }
+                    proj.bots.push(BotCfg {
+                        id: Some(fresh_bot.clone()),
+                        name: BOT_NAME.to_string(),
+                        kind: "claude".into(),
+                        model: None,
+                        effort: None,
+                        fast: false,
+                        persona: None,
+                        args: vec![],
+                        autostart: false,
+                        inject_hooks: true,
+                        auto_approve: true,
+                        identity: None,
+                        env: Default::default(),
+                        herdr_session: None,
+                        create_request_id: Some(super::bot_requests::ROLE_SETUP_MARK_PREFIX_PATROL.into()),
+                        create_fingerprint: None,
+                    });
+                    proj.bots.len() - 1
+                }
+            };
+            let bot = &mut proj.bots[bidx];
+            if bot.id.is_none() {
+                bot.id = Some(fresh_bot.clone());
+            }
+            // The name is left alone on purpose: a rename in the sidebar is the user's, and the
+            // supervisor is identified by its id, not by what it is called.
+            bot.kind = "claude".into();
+            bot.model = Some(model.clone());
+            bot.effort = Some(effort.clone());
+            bot.identity = Some(identity.clone());
+            bot.persona = Some(persona_for_cfg.clone());
+            // The Remote Control entry point the phone looks for. Setup only *configures* it;
+            // whether a remote session actually came up is decided by observation, never argv.
+            bot.args = vec!["--remote-control".into(), REMOTE_NAME.into()];
+            // Verified by hand before it is allowed to come back by itself.
+            bot.autostart = false;
+            bot.inject_hooks = true;
+        Ok((project_id, bot.id.clone().expect("set above")))
+    })
+    .await
+    .map_err(|e| {
+        if e.to_string() == "name-taken" {
+            LcError::conflict(
+                "a different bot is already called AGM in the supervisor project",
+                json!({"reason": "name_taken", "name": BOT_NAME}),
+            )
+        } else {
+            LcError::Upstream(e.to_string())
+        }
+    })?;
+
+    let responder = super::roles::responder_bot(app.db()).await.map_err(|e| LcError::Upstream(e.to_string()))?.map(|b| b.id);
+    let deployed = deploy_files(app, &bot_id, responder.as_deref(), &persona).map_err(|e| LcError::Upstream(e.to_string()))?;
+    store::set_env(app.db(), &bot_id, &project_id, &deployed.cwd)
+        .await
+        .map_err(|e| LcError::Upstream(e.to_string()))?;
+    Ok((project_id, bot_id, deployed))
+}
+
+#[cfg(all(test, feature = "daemon-test-harness"))]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn the_persona_body_drops_the_human_preamble() {
+        let body = persona_body();
+        assert!(body.starts_with("你是 AGM"), "persona body starts at the role line: {:?}", &body[..40.min(body.len())]);
+        assert!(!body.contains("以下正文供 AGM bot"), "the note to the human reader is not part of the persona");
+        assert!(body.contains("cc0/fable/low"), "the fixed candidate order survives the split");
+    }
+
+    #[test]
+    fn candidates_stay_aliases_so_a_model_release_cannot_strand_the_supervisor() {
+        assert_eq!(model_arg("fable"), "fable");
+        assert_eq!(model_arg("opus"), "claude-opus-5-5");
+        assert_eq!(other_candidate("fable"), "opus");
+        assert_eq!(other_candidate("opus"), "fable");
+    }
+
+    /// The one file the CLI reads on every call. A token leaking in here would end up in a
+    /// directory the manager itself can read and quote back.
+    #[test]
+    fn the_runtime_file_names_the_manager_and_carries_no_secret() {
+        let v = runtime_json(7788, "botULID", Some("respULID"), "/data");
+        assert_eq!(v["daemon_url"], "http://127.0.0.1:7788");
+        assert_eq!(v["manager_bot_id"], "botULID");
+        assert_eq!(v["responder_bot_id"], "respULID", "巡檢目錄的 ops 腳本派工給協調者要讀得到");
+        assert_eq!(runtime_json(7788, "botULID", None, "/data")["responder_bot_id"], Value::Null, "單角色安裝照實寫 null");
+        assert_eq!(v["bot_id"], "botULID", "the older key stays, so either half can upgrade first");
+        assert_eq!(v["role"], "patrol");
+        assert_eq!(v["self_bot_id"], "botULID");
+        let text = v.to_string().to_lowercase();
+        assert!(!text.contains("token"), "no token, and no field that could hold one: {text}");
+    }
+
+    /// ops 腳本測試用的 runtime.json 必須是**真的** `runtime_json()` 寫出來的形狀：上一輪測試自己造了一份
+    /// 正式安裝根本不存在的形狀，腳本在測試裡綠、在正式環境每一輪跳過（review2 sup #1）。
+    /// 形狀一變這裡就紅；照訊息把 fixture 換成新的輸出，bash 測試才會跟著吃到。
+    #[test]
+    fn the_ops_script_fixture_is_what_setup_actually_writes() {
+        let path = concat!(env!("CARGO_MANIFEST_DIR"), "/../../scripts/ops/fixtures/patrol-runtime.json");
+        let want = runtime_json(7788, "bot-agm", Some("bot-resp"), "/data");
+        let have: Value = serde_json::from_str(&std::fs::read_to_string(path).expect("fixture exists")).expect("fixture is JSON");
+        assert_eq!(have, want, "scripts/ops/fixtures/patrol-runtime.json 要換成：\n{}", serde_json::to_string_pretty(&want).unwrap());
+    }
+
+    /// 協調者在巡檢之後才建立：巡檢目錄的 runtime.json 要補上它；巡檢還沒 setup 過就什麼都不寫。
+    #[tokio::test]
+    async fn the_patrol_runtime_file_learns_about_a_responder_set_up_later() {
+        let env = crate::testing::env().await;
+        let app = env.app.clone();
+        let file = agm_dir(&app).join("runtime.json");
+        write_runtime_json(&app, "bot-agm", Some("bot-resp")).unwrap();
+        assert!(!file.exists(), "巡檢目錄不存在時不替它建");
+        std::fs::create_dir_all(agm_dir(&app)).unwrap();
+        write_runtime_json(&app, "bot-agm", None).unwrap();
+        let v: Value = serde_json::from_str(&std::fs::read_to_string(&file).unwrap()).unwrap();
+        assert_eq!(v["responder_bot_id"], Value::Null);
+        write_runtime_json(&app, "bot-agm", Some("bot-resp")).unwrap();
+        let v: Value = serde_json::from_str(&std::fs::read_to_string(&file).unwrap()).unwrap();
+        assert_eq!((v["manager_bot_id"].as_str(), v["responder_bot_id"].as_str()), (Some("bot-agm"), Some("bot-resp")));
+    }
+
+    /// 設定 AGM 做到一半失敗：config 已經寫進 `AGM` 這顆 bot，之後部署檔案（或把 bot 記進 supervisor 列）那一步失敗。
+    /// 再按一次設定要能接著做完。以前重跑時 supervisor 列還沒記 bot id，找到的是上一次自己寫進去的那顆 `AGM`，被當成
+    /// 「別的 bot 已經叫 AGM」回 409 `name_taken`——之後永遠設定不起來，只能手動改 config（issue #181）。
+    #[tokio::test]
+    async fn a_setup_that_failed_halfway_can_be_run_again() {
+        let env = crate::testing::env().await;
+        let app = env.app.clone();
+        let sup = store::get_or_init(&app.db).await.unwrap();
+        app.tools.lock().await.insert(
+            crate::config::LOCAL_HOST.to_string(),
+            crate::tools::HostTools {
+                tools: Default::default(),
+                identities: Default::default(),
+                shell_identities: vec![crate::config::IdentityCfg { name: sup.identity.clone(), kind: "claude".into(), host: None, env: Default::default(), args: vec![] }],
+                utc_offset_secs: None, herdr_cli: None, checked_at: crate::db::now(),
+            },
+        );
+        // 部署檔案那一步失敗：`bin` 被一個檔案佔住。
+        let bin = agm_dir(&app).join("bin");
+        std::fs::create_dir_all(agm_dir(&app)).unwrap();
+        std::fs::write(&bin, "not a directory").unwrap();
+        assert!(ensure_env(&app).await.is_err(), "前提：做到一半失敗");
+        std::fs::remove_file(&bin).unwrap();
+
+        let (_, bot_id, _) = ensure_env(&app).await.map_err(|e| format!("{e:?}")).expect("再跑一次要能做完");
+        let agms: Vec<String> =
+            app.cfg.get().await.projects.iter().flat_map(|p| p.bots.iter()).filter(|b| b.name == BOT_NAME).filter_map(|b| b.id.clone()).collect();
+        assert_eq!(agms, vec![bot_id.clone()], "接著用上一次寫進去的那一顆，不另外長一顆");
+        assert_eq!(store::get_or_init(&app.db).await.unwrap().bot_id.as_deref(), Some(bot_id.as_str()));
+    }
+
+    #[test]
+    fn the_cli_is_compiled_in_not_read_off_the_build_machine() {
+        assert!(AGM_CLI.contains("add_parser(\"assignments\""), "the deployed CLI is the real agm.py");
+    }
+}

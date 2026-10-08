@@ -338,10 +338,10 @@ pub fn update_and_project<'a, F, T>(
     store: &'a ConfigStore,
     pool: &'a SqlitePool,
     f: F,
-) -> impl std::future::Future<Output = Result<T>> + 'a
+) -> impl std::future::Future<Output = Result<T>> + Send + 'a
 where
-    F: FnOnce(&mut crate::config::ConfigFile) -> Result<T> + 'a,
-    T: 'a,
+    F: FnOnce(&mut crate::config::ConfigFile) -> Result<T> + Send + 'a,
+    T: Send + 'a,
 {
     let at = Location::caller();
     async move { update_and_project_at(at, store, pool, f).await }

@@ -9,6 +9,9 @@ mod am_lifecycle_arc_ports;
 #[cfg(test)]
 #[path = "../../crates/am-lifecycle/src/ports_impl.rs"]
 mod am_lifecycle_ports_impl;
+#[cfg(test)]
+#[path = "../../crates/am-supervisor/src/app_arc_ports.rs"]
+mod am_supervisor_arc_ports;
 #[cfg(not(test))]
 pub use am_lifecycle::{
     ask_answers,
@@ -30,6 +33,8 @@ pub use am_lifecycle::{
     tui_prompts,
     turn_error,
 };
+#[cfg(not(test))]
+pub use am_supervisor::{build_info, mission, relay_auth, supervisor};
 // App-backed unit tests still belong to the daemon crate. Under `cargo test`, compile the same
 // source modules at the crate root so their `crate::` paths and the App adapters share one set of
 // types. Production builds use the extracted crate re-exports above.
@@ -189,9 +194,15 @@ mod child_retire;
 pub mod due_actions;
 mod panes;
 mod supervisor_owned;
-mod relay_auth;
 mod deleted_bots;
-mod build_info;
+mod app_ports_p6;
+mod app_ports_p7;
+#[cfg(test)]
+#[path = "../../crates/am-supervisor/src/build_info.rs"]
+pub mod build_info;
+#[cfg(test)]
+#[path = "../../crates/am-supervisor/src/relay_auth.rs"]
+pub mod relay_auth;
 mod app_ports_r2a9;
 mod api;
 #[cfg(test)]
@@ -230,7 +241,9 @@ mod group;
 mod share;
 mod herdr_upgrade;
 mod swap_window;
-mod mission;
+#[cfg(test)]
+#[path = "../../crates/am-supervisor/src/mission/mod.rs"]
+pub mod mission;
 mod preview;
 mod primary_order;
 mod pane_probe;
@@ -239,7 +252,9 @@ mod read_marks;
 pub mod remote_cargo;
 mod reconcile;
 mod state;
-mod supervisor;
+#[cfg(test)]
+#[path = "../../crates/am-supervisor/src/supervisor/mod.rs"]
+pub mod supervisor;
 mod supervisor_evidence;
 mod startup;
 mod service_auth;

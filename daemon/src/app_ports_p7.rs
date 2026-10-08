@@ -6,20 +6,15 @@
 
 use crate::db;
 use crate::lifecycle::{self, LcError, LcResult, PromptOut};
-use crate::mission::ports::{
-    AgmRole, CallerOps, EventOps, GroupTurnOps, IdentityOps, KnownIdentity, MissionGateRules, SupervisorOps, SupervisorRepo,
-};
+use crate::mission::ports::{AgmRole, CallerOps, EventOps, GroupTurnOps, IdentityOps, KnownIdentity, SupervisorOps};
 use crate::quota::{self, Quota};
 use crate::state::App;
 use crate::supervisor::roles::{self, Role};
-use crate::supervisor::store as supervisor_store;
 use axum::extract::{Path, State};
 use axum::http::HeaderMap;
 use axum::Json;
 use serde_json::Value;
-use sqlx::SqlitePool;
 use std::future::Future;
-use std::sync::Arc;
 
 fn agm_role(r: Role) -> AgmRole {
     match r {
@@ -28,19 +23,19 @@ fn agm_role(r: Role) -> AgmRole {
     }
 }
 
-impl IdentityOps for Arc<App> {
+impl IdentityOps for App {
     async fn billing_identity(&self, bot: &db::Bot) -> anyhow::Result<Option<String>> {
-        quota::billing_identity(self, bot).await
+        quota::billing_identity(&self.shared(), bot).await
     }
     async fn known_identities(&self, host: &str) -> Vec<KnownIdentity> {
-        crate::tools::identities_for_host(self, host)
+        crate::tools::identities_for_host(&self.shared(), host)
             .await
             .into_iter()
             .map(|i| KnownIdentity { shares_default: quota::identity_shares_default(&i.kind, &i.env), kind: i.kind, name: i.name })
             .collect()
     }
     async fn quota_base_for_host(&self, host: &str, kind: &str, identity: Option<&str>) -> String {
-        quota::quota_base_for_host(self, host, kind, identity).await
+        quota::quota_base_for_host(&self.shared(), host, kind, identity).await
     }
     async fn quota_readings(&self, host: &str, bases: &[String]) -> Vec<Option<Quota>> {
         let quotas = self.quotas.lock().await;
@@ -48,12 +43,12 @@ impl IdentityOps for Arc<App> {
     }
 }
 
-impl CallerOps for Arc<App> {
+impl CallerOps for App {
     async fn verified_bot_id(&self, headers: &HeaderMap) -> Result<Option<String>, LcError> {
-        crate::supervisor::bot_requests::verified_bot_id(self, headers).await
+        crate::supervisor::bot_requests::verified_bot_id(&self.shared(), headers).await
     }
     async fn actor_role(&self, headers: &HeaderMap) -> Result<Option<AgmRole>, LcError> {
-        Ok(crate::supervisor::bot_requests::actor_role(self, headers).await?.map(agm_role))
+        Ok(crate::supervisor::bot_requests::actor_role(&self.shared(), headers).await?.map(agm_role))
     }
     async fn role_of_bot(&self, bot_id: &str) -> anyhow::Result<Option<AgmRole>> {
         Ok(roles::role_of_bot(&self.db, bot_id).await?.map(agm_role))
@@ -66,7 +61,7 @@ impl CallerOps for Arc<App> {
     }
 }
 
-impl SupervisorOps for Arc<App> {
+impl SupervisorOps for App {
     type OpGuard = crate::supervisor::OpGuard;
     #[track_caller]
     fn supervisor_lock(&self) -> impl Future<Output = Self::OpGuard> {
@@ -84,64 +79,22 @@ impl SupervisorOps for Arc<App> {
             followup_bot_id: None,
             ownership: Vec::new(),
         };
-        crate::runners::supervisor::api::post_review(State(self.clone()), Path(assignment_id.to_string()), headers.clone(), Json(review))
+        crate::runners::supervisor::api::post_review(State(self.shared()), Path(assignment_id.to_string()), headers.clone(), Json(review))
             .await
             .map(|Json(v)| v)
     }
     async fn delete_bot(&self, bot_id: &str) -> Result<(), String> {
-        crate::api::delete_bot(State(self.clone()), Path(bot_id.to_string())).await.map(|_| ()).map_err(|e| format!("{e:?}"))
+        crate::api::delete_bot(State(self.shared()), Path(bot_id.to_string())).await.map(|_| ()).map_err(|e| format!("{e:?}"))
     }
 }
 
-impl SupervisorRepo for SqlitePool {
-    const SUPERVISOR_ID: &'static str = supervisor_store::SUPERVISOR_ID;
-    async fn mission_assignments(&self, mission_id: &str) -> anyhow::Result<Vec<supervisor_store::Assignment>> {
-        supervisor_store::mission_assignments(self, mission_id).await
-    }
-    async fn assignment(&self, id: &str) -> anyhow::Result<Option<supervisor_store::Assignment>> {
-        supervisor_store::assignment(self, id).await
-    }
-    async fn push_inbox(
-        &self,
-        event_key: &str,
-        kind: &str,
-        assignment_id: Option<&str>,
-        bot_id: Option<&str>,
-        turn_id: Option<&str>,
-        payload: &Value,
-    ) -> anyhow::Result<Option<String>> {
-        supervisor_store::push_inbox(self, event_key, kind, assignment_id, bot_id, turn_id, payload).await
-    }
-    async fn review_assignment(
-        &self,
-        id: &str,
-        decision: &str,
-        actor: &str,
-        source: &str,
-        reason: Option<&str>,
-        evidence: Option<&str>,
-        followup_assignment_id: Option<&str>,
-    ) -> anyhow::Result<Option<supervisor_store::Assignment>> {
-        supervisor_store::review(self, id, decision, actor, source, reason, evidence, followup_assignment_id).await
-    }
-}
-
-impl MissionGateRules for SqlitePool {
-    fn user_pause_reason(paused_reason: Option<&str>) -> Option<&str> {
-        crate::supervisor::api::user_pause_reason(paused_reason)
-    }
-    fn mission_gate(m: &crate::mission::store::Mission) -> Result<(), LcError> {
-        crate::supervisor::api::mission_gate(m)
-    }
-}
-
-impl EventOps for Arc<App> {
+impl EventOps for App {
     async fn emit_event(&self, kind: &str, data: Value) {
         self.emit(kind, data).await
     }
 }
 
-impl GroupTurnOps for Arc<App> {
+impl GroupTurnOps for App {
     async fn prompt_grouped(
         &self,
         bot_id: &str,
@@ -152,7 +105,7 @@ impl GroupTurnOps for Arc<App> {
         attachment_ids: &[String],
         relay_from: Option<&str>,
     ) -> LcResult<PromptOut> {
-        lifecycle::prompt_grouped(self, bot_id, text, client_request_id, group_id, deliver, attachment_ids, relay_from).await
+        lifecycle::prompt_grouped(&self.shared(), bot_id, text, client_request_id, group_id, deliver, attachment_ids, relay_from).await
     }
     fn owed_as_unknown(&self, res: LcResult<PromptOut>) -> LcResult<PromptOut> {
         lifecycle::owed_as_unknown(res)
@@ -168,28 +121,20 @@ impl GroupTurnOps for Arc<App> {
         snapshot: Option<&str>,
         group_id: Option<&str>,
     ) -> anyhow::Result<db::Message> {
-        lifecycle::insert_message_grouped(self, conversation_id, turn_id, role, content, source, incomplete, snapshot, group_id).await
+        lifecycle::insert_message_grouped(&self.shared(), conversation_id, turn_id, role, content, source, incomplete, snapshot, group_id).await
     }
     fn cursor_not_found(&self, reason: &str, message_id: &str) -> LcError {
         crate::api::cursor_not_found(reason, message_id)
     }
 }
 
-impl<T: crate::mission::ports::CallerOps + Send + Sync> crate::relay_auth::RelayTokenVerify for T {
-    fn ct_eq(&self, a: &str, b: &str) -> bool {
-        crate::mission::ports::CallerOps::ct_eq(self, a, b)
-    }
-}
-
-impl<T: crate::mission::ports::CallerOps + Send + Sync> crate::relay_auth::RelayAuthOps for T {
-    async fn is_agm_role(&self, headers: &axum::http::HeaderMap) -> Result<bool, LcError> {
-        Ok(crate::mission::ports::CallerOps::actor_role(self, headers).await?.is_some())
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::mission::ports::MissionGateRules;
+    use crate::mission::ports::SupervisorRepo;
+    use crate::supervisor::store as supervisor_store;
+    use sqlx::SqlitePool;
 
     #[test]
     fn the_supervisor_id_the_mission_queries_bind_is_the_supervisors_own() {

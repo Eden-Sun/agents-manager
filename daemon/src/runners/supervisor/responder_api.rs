@@ -36,7 +36,7 @@ pub fn routes(app: Arc<App>) -> Router<Arc<App>> {
 }
 
 async fn get_responder(State(app): State<Arc<App>>) -> Result<Json<Value>, LcError> {
-    Ok(Json(responder::status_json(&app).await?))
+    Ok(Json(responder::status_json(app.as_ref()).await?))
 }
 
 #[derive(Deserialize, Default)]
@@ -54,9 +54,9 @@ async fn post_setup(State(app): State<Arc<App>>, body: Option<Json<SetupIn>>) ->
     let b = body.map(|Json(b)| b).unwrap_or_default();
     let _g = super::lock().await;
     let (_project, bot_id, deployed) =
-        responder::ensure_env(&app, b.identity.as_deref(), b.model.as_deref(), b.effort.as_deref()).await?;
+        responder::ensure_env(app.as_ref(), b.identity.as_deref(), b.model.as_deref(), b.effort.as_deref()).await?;
     app.emit("supervisor_changed", json!({"responder_bot_id": bot_id})).await;
-    let mut out = responder::status_json(&app).await?;
+    let mut out = responder::status_json(app.as_ref()).await?;
     out["deployed"] = serde_json::to_value(&deployed).unwrap_or(Value::Null);
     Ok(Json(out))
 }
@@ -66,8 +66,8 @@ async fn post_setup(State(app): State<Arc<App>>, body: Option<Json<SetupIn>>) ->
 /// 順序與「寫不進去就什麼都不做」住在 `responder::start_requested`，不由這裡維護（issue #84）。
 async fn post_start(State(app): State<Arc<App>>) -> Result<Json<Value>, LcError> {
     let _g = super::lock().await;
-    responder::start_requested(&app).await?;
-    Ok(Json(responder::status_json(&app).await?))
+    responder::start_requested(app.as_ref()).await?;
+    Ok(Json(responder::status_json(app.as_ref()).await?))
 }
 
 #[cfg(test)]
@@ -119,8 +119,8 @@ mod tests {
 
 async fn post_stop(State(app): State<Arc<App>>) -> Result<Json<Value>, LcError> {
     let _g = super::lock().await;
-    responder::stop(&app).await?;
-    Ok(Json(responder::status_json(&app).await?))
+    responder::stop(app.as_ref()).await?;
+    Ok(Json(responder::status_json(app.as_ref()).await?))
 }
 
 async fn get_persona(State(app): State<Arc<App>>) -> Result<Json<Value>, LcError> {
@@ -169,7 +169,7 @@ async fn put_persona(State(app): State<Arc<App>>, headers: HeaderMap, Json(b): J
     let _g = super::lock().await;
     let previous = roles::get(&app.db, Role::Responder).await.map_err(up)?.persona_text;
     let version = responder::set_persona(&app.db, text, b.expected_version).await?;
-    responder::apply_persona(&app, text).await.map_err(|e| {
+    responder::apply_persona(app.as_ref(), text).await.map_err(|e| {
         LcError::conflict(
             "persona stored but projection sync is incomplete; retry the same text to repair",
             json!({"reason": "persona_sync_incomplete", "stored": true, "version": version, "sync_error": format!("{e:?}")}),

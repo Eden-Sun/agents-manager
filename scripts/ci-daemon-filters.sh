@@ -55,6 +55,16 @@ while IFS= read -r f; do
                 *) printf '__all__\n' ;;
             esac
             ;;
+        crates/am-supervisor/src/*)
+            rel="${f#crates/am-supervisor/src/}"
+            case "$rel" in
+                *.rs) ;;
+                *) printf '__all__\n'; continue ;;
+            esac
+            mod="${rel%.rs}"
+            mod="${mod%/mod}"
+            printf '%s::\n' "${mod//\//::}"
+            ;;
         scripts/check.sh) echo 'cargo_shim::' ;;
         scripts/ops/lint-shell-vars.sh) echo 'herdr_shim::' ;;
         scripts/ops/claude-release-task.md | scripts/ops/codex-release-task.md) echo 'claude_review::' ;;

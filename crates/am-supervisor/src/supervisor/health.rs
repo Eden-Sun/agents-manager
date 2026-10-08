@@ -1,0 +1,649 @@
+//! Cheap, deterministic health summary for AGM and the UI.
+
+use crate::lifecycle::LcError;
+use sqlx::SqlitePool;
+use serde_json::{json, Value};
+
+/// `gh auth status` 要打網路，health 又常被輪詢：60 秒內沿用上一次的結果。
+async fn release_triage_health(app: &(impl crate::capabilities::Cfg + crate::supervisor::ports::HostProbes)) -> Value {
+    static CACHE: tokio::sync::Mutex<Option<(std::time::Instant, Value)>> = tokio::sync::Mutex::const_new(None);
+    let cfg = app.cfg().get().await.release_triage;
+    let mut c = CACHE.lock().await;
+    if let Some((at, v)) = c.as_ref() {
+        if at.elapsed() < std::time::Duration::from_secs(60) {
+            return v.clone();
+        }
+    }
+    let v = app.release_triage_health_probe(&cfg).await.unwrap_or(Value::Null);
+    *c = Some((std::time::Instant::now(), v.clone()));
+    v
+}
+
+/// 一顆角色 bot（巡檢／協調者）現在能不能用，給「核准該不該改派」這類決定當依據（issue #421）。
+///
+/// #420 之後 daemon 已經看得出協調者停在登入失效（`responder::notify` 送不出去時讀畫面，
+/// 標 `supervisor_roles.status = 'needs_login'`），但只有一個字串，呼叫端要自己拼判斷。
+/// 這裡把它收成一個型別，重點是**四個值**而不是 bool。
+///
+/// `Unknown` 一定要跟 `Unavailable` 分開：沒有證據就把核准從一顆健康的協調者手上搬走，
+/// 比晚幾分鐘更糟。呼叫端只在 `Unavailable` 動作，`Unknown` 當作「這一拍不動」。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RoleState {
+    /// 這個角色還沒建立：核准本來就歸巡檢，沒有東西要改派。
+    NotConfigured,
+    Available,
+    /// 不可用，附一個**穩定的**原因字串（見 `REASON_*`）——會被寫進 inbox payload 與 SPEC，別改字。
+    Unavailable(&'static str),
+    /// 讀不到（DB 錯）。不是「它壞了」，也不是「它好了」。
+    Unknown,
+}
+
+/// claude 停在 `Not logged in · Please run /login`（或 Keychain 鎖著）。
+/// 由 `responder::notify` 在送不出去時看畫面判定（#420）；**看不到畫面時它不會標**，
+/// 所以這裡讀到的「沒有 needs_login」是「沒有證據說它壞了」，不是「證明它是好的」。
+pub const REASON_NEEDS_LOGIN: &str = "needs_login";
+/// 撞額度。
+pub const REASON_WAITING_QUOTA: &str = "waiting_quota";
+/// 登記過、卻沒有 active run。
+pub const REASON_NO_RUN: &str = "no_run";
+
+/// 協調者能不能用。
+pub async fn responder_state(app: &(impl crate::capabilities::Db + crate::supervisor::role_faults::RoleFaultTable)) -> RoleState {
+    role_state(app, crate::supervisor::roles::Role::Responder).await
+}
+
+/// 巡檢與協調者共用同一套判斷。順序是「最確定的證據先講」。
+///
+/// 只讀 DB 與記憶體，**不在這裡讀畫面**：`/api/supervisor/health` 與 `/api/supervisor/responder`
+/// 都會被 UI 高頻輪詢，每次都去抓一次 pane 會把 herdr 打爆。畫面有兩條路看：`responder::notify`
+/// 在**送不出去時**看一次（結論落在 `supervisor_roles.status`，#420），以及 health 的 30 秒 tick
+/// 對兩個角色各看一次（結論落在 `App.role_faults`，#427——巡檢只有這一條路看得到）。
+pub async fn role_state(app: &(impl crate::capabilities::Db + crate::supervisor::role_faults::RoleFaultTable), role: crate::supervisor::roles::Role) -> RoleState {
+    let row = match crate::supervisor::roles::record(app.db(), role).await {
+        Ok(row) => row,
+        // 讀不到不是「它好了」，也不是「它壞了」。
+        Err(e) => {
+            tracing::warn!(role = role.as_str(), error = ?e, "role_state：讀不到角色狀態");
+            return RoleState::Unknown;
+        }
+    };
+    let Some(bot_id) = row.bot_id.clone() else { return RoleState::NotConfigured };
+    match row.status.as_str() {
+        "needs_login" => return RoleState::Unavailable(REASON_NEEDS_LOGIN),
+        "waiting_quota" => return RoleState::Unavailable(REASON_WAITING_QUOTA),
+        _ => {}
+    }
+    // 登記過、但那顆 bot 已經被軟刪：`db::active_run` 只看 `runs`，不看 bot 還在不在，
+    // 所以「bot 已軟刪、run 那一列還掛著 running」的窗口會被讀成還活著（#421 指出）。
+    // 那正是這支函式要擋的那種錯：閘門說「它可以裁示」，而它根本不存在，核准就靜靜躺著。
+    match crate::db::bot(app.db(), &bot_id).await {
+        Ok(Some(bot)) if bot.deleted_at.is_none() => {}
+        // 登記過卻找不到（或已軟刪）＝沒有東西在跑。沿用 `no_run`，不新增原因字串：
+        // 那幾個字是對外契約（#421 已經接線、SPEC 與 persona 都列舉了）。
+        Ok(_) => return RoleState::Unavailable(REASON_NO_RUN),
+        Err(e) => {
+            tracing::warn!(role = role.as_str(), error = ?e, "role_state：讀不到那顆 bot");
+            return RoleState::Unknown;
+        }
+    }
+    // 要它跑卻沒有 active run。`desired_running=0`（使用者自己停的）不是系統故障，
+    // 但對「核准該給誰」來說一樣是不可用——沒有在跑的協調者不會裁示任何東西。
+    match crate::db::active_run(app.db(), &bot_id).await {
+        Ok(Some(_)) => {}
+        Ok(None) => return RoleState::Unavailable(REASON_NO_RUN),
+        Err(e) => {
+            tracing::warn!(role = role.as_str(), error = ?e, "role_state：讀不到 active run");
+            return RoleState::Unknown;
+        }
+    }
+    // #427：health 的 30 秒 tick 看畫面看到的（`role_faults::refresh`；巡檢也看），加上 notify
+    // 連續沒完成。**排在 `active_run` 之後**：記憶體那張表會過期——bot 一停掉或重啟，上一輪的
+    // `needs_login` 還留著，排在前面會讓一顆已經停掉的協調者回 `needs_login` 而事實是 `no_run`。
+    // 兩個都是不可用，所以改派的決定不會錯，但那個字串會被原樣寫進 inbox payload 與 incident detail，
+    // 之後查事故的人會被它帶偏（i266 2026-09-24）。
+    //
+    // 空表（daemon 剛起來、第一拍還沒跑）與讀不到畫面都是 `None`：退回上面只看 DB 的結論，
+    // **不會**憑空變成 `Unavailable`（#421 的不變量）。這裡仍然不打 herdr，只讀記憶體。
+    if let Some(reason) = crate::supervisor::role_faults::reason(app, role).await {
+        return RoleState::Unavailable(reason);
+    }
+    RoleState::Available
+}
+
+impl RoleState {
+    /// 不可用的原因，給 API／incident detail／inbox payload 用。只有 `Unavailable` 有值。
+    pub fn reason(self) -> Option<&'static str> {
+        match self {
+            RoleState::Unavailable(r) => Some(r),
+            _ => None,
+        }
+    }
+
+    /// 可以拿它當「改派」的依據嗎。`Unknown` 與 `NotConfigured` 都是 `false`：
+    /// 前者沒有證據，後者本來就沒有東西要改派。
+    pub fn is_unavailable(self) -> bool {
+        matches!(self, RoleState::Unavailable(_))
+    }
+}
+
+pub async fn snapshot(app: &(impl crate::capabilities::DataDir + crate::capabilities::Db + crate::capabilities::Cfg + crate::hosts::HostsAccess + crate::supervisor::ports::HostProbes + crate::supervisor::ports::QuotaOps + crate::supervisor::ports::LocalAccountView + crate::supervisor::role_faults::RoleFaultTable + crate::supervisor::ports::DaemonConnection)) -> Result<Value, LcError> {
+    let bots = crate::db::live_bots(app.db()).await.map_err(|e| LcError::Upstream(e.to_string()))?;
+    let mut running = 0usize;
+    let mut busy = 0usize;
+    let mut stopped = 0usize;
+    let mut background_stuck = Vec::new();
+    for bot in &bots {
+        match crate::db::active_run(app.db(), &bot.id).await.map_err(|e| LcError::Upstream(e.to_string()))? {
+            Some(run) => {
+                running += 1;
+                if run.agent_status == "working" || run.agent_status == "blocked" { busy += 1; }
+                if let Some(v) = background_stuck_entry(app, bot, &run) { background_stuck.push(v); }
+            }
+            None => stopped += 1,
+        }
+    }
+    let supervisor = crate::supervisor::status_json(app).await?;
+    let supervisor_status = supervisor.get("status").and_then(Value::as_str).unwrap_or("unknown");
+    let manager_severity = if supervisor_status == "failed" || supervisor_status == "waiting_quota" {
+        "critical"
+    } else if supervisor_status == "not_configured" || supervisor_status == "stopped" || !app.daemon_connected() {
+        "degraded"
+    } else { "healthy" };
+    // 協調者自己一格，跟巡檢分開：協調者等額度或倒了，不是「AGM 不能用」——使用者入口還在。
+    let responder = supervisor.get("responder").cloned().unwrap_or(Value::Null);
+    let responder_status = responder.get("status").and_then(Value::as_str).unwrap_or("not_configured");
+    let responder_severity = responder_severity(&responder);
+    let hosts = app.hosts().list().await;
+    let disconnected_hosts = hosts.iter().filter(|h| !h.is_connected()).count();
+    let system = crate::supervisor::incidents::system_health(app).await;
+    let system_severity = system.get("status").and_then(Value::as_str).unwrap_or("unknown");
+    // The compat projection. `status` used to mean "is AGM all right", and a caller that only
+    // reads this field must not be told everything is fine while a host is down — so it is now
+    // the worse of the two halves, and the halves are published next to it. See docs/SPEC.md §18.
+    // 協調者也算進頂層：它是 bot 申請、核准請求與所有 mission 事件的**唯一**收件人，
+    // 它卡住時使用者入口顯示 healthy、沒有任何人被叫醒，申請可以躺好幾天（review 2026-09-16）。
+    // 「兩個問題兩個答案」的分格照舊留著，頂層只是不再漏掉這一半。
+    let core = crate::supervisor::incidents::worst(manager_severity, system_severity);
+    let severity = crate::supervisor::incidents::worst(&core, responder_severity);
+    Ok(json!({
+        "status": severity,
+        "checked_at": crate::db::now(),
+        // Two questions, two answers: whether the manager can work, and whether the system
+        // around it is intact. Folding them into one number is what let `healthy` mean neither.
+        "manager_health": {
+            "status": manager_severity,
+            "supervisor_status": supervisor_status,
+            "daemon_connected": app.daemon_connected(),
+        },
+        "system_health": system,
+        "responder_health": {
+            "status": responder_severity,
+            "responder_status": responder_status,
+            // #454：`responder_status` 在 `notify_stalled` 時還是 `idle`，原因只有這一欄帶得出來。
+            "unavailable_reason": responder.get("unavailable_reason"),
+            "inbox_open": responder.get("inbox_open"),
+            "wake_pending": responder.get("wake_pending"),
+            "retry_at": responder.pointer("/stats/notify_next_at"),
+        },
+        "daemon": {"connected": app.daemon_connected()},
+        "supervisor": supervisor,
+        "bots": {"total": bots.len(), "running": running, "busy": busy, "stopped": stopped},
+        // issue #774：背景工作標著超過門檻（claude 2.1.288 起終端 session 的背景指令沒有時間上限）。只是露出，
+        // 不進 `status`、不自動殺：可能是正常的長工作，要人或 AGM 去看。
+        "background_stuck": background_stuck,
+        "quota": app.quota_snapshot_json().await,
+        // 「接下來要做什麼、什麼一直做不成」。到期動作本來就都落在 DB 上（各自掛在自己那張表），
+        // 只是以前要看得翻六張表；issue #75 驗收第 5 條。
+        "due_actions": app.due_actions_snapshot().await,
+        // Two numbers, not one sum: an assignment still running and a notification nobody
+        // acked are different kinds of "owed", and adding them hid a 464-event backlog.
+        "pending_assignments": crate::supervisor::store::open_assignment_count(app.db()).await.map_err(|e| LcError::Upstream(e.to_string()))?,
+        "awaiting_review": crate::supervisor::store::awaiting_review_count(app.db()).await.map_err(|e| LcError::Upstream(e.to_string()))?,
+        "inbox_open": crate::supervisor::store::open_inbox_count(app.db()).await.map_err(|e| LcError::Upstream(e.to_string()))?,
+        "hosts": {"total": hosts.len(), "disconnected": disconnected_hosts},
+        // issue #204：`[release_triage] publish = true` 時 gh 沒登入要在這裡看得到（publish = false 為 null）。
+        "release_triage": release_triage_health(app).await,
+        // issue #473：controller tick 每一段與全域鎖的耗時（最近一小時的 p50／p95／max）。
+        // 只是量測，沒有嚴重度、不進 `status`——要先有數字才談得上改結構。
+        "timing": crate::supervisor::timing::snapshot(),
+    }))
+}
+
+/// 一顆 bot 的背景工作標著「可能卡住」（`background_jobs::STUCK_AFTER_SECS`）時的一列；沒有就是 `None`。
+fn background_stuck_entry(app: &impl crate::supervisor::ports::LocalAccountView, bot: &crate::db::Bot, run: &crate::db::Run) -> Option<Value> {
+    let n = app.background_jobs_known(&run.id).filter(|n| *n > 0)?;
+    let (since, secs, stuck) = app.background_jobs_duration(&run.id)?;
+    stuck.then(|| {
+        let since = chrono::DateTime::from_timestamp_millis(since).map(|t| t.to_rfc3339_opts(chrono::SecondsFormat::Millis, true));
+        json!({"bot_id": bot.id, "name": bot.name, "kind": bot.kind, "run_id": run.id, "background_jobs": n, "since": since, "secs": secs})
+    })
+}
+
+/// 協調者那一格的嚴重度。
+///
+/// 「建立過」就一直攔 bot 的申請（SPEC §18.15），所以它**沒在跑**時——setup 完還沒 start、start 失敗、
+/// 使用者手動 stop、bot 被刪——只要佇列裡有會叫醒它的事件，就是有人在等而沒有人會被叫醒。以前這種
+/// 狀態只要 `desired_running=0` 就算 healthy，申請、核准、mission 事件無限期累積（review 2026-09-16 c3 M1）。
+/// degraded 會讓 `health_changed` 入列並叫醒巡檢。
+pub fn responder_severity(responder: &Value) -> &'static str {
+    let status = responder.get("status").and_then(Value::as_str).unwrap_or("not_configured");
+    let waiting = responder.get("wake_pending").and_then(Value::as_i64).unwrap_or(0) > 0;
+    // #454：#427 的兩個訊號只有 `unavailable_reason` 帶得出來（`status` 在 `notify_stalled` 時還是
+    // `idle`／`busy`——DB 那一欄從來不寫這個值）。不讀它的話，核准已經在改派、incident 已經開了，
+    // 這一格還是 healthy。
+    let reason = responder.get("unavailable_reason").and_then(Value::as_str);
+    match (status, reason) {
+        // 停在登入要人動手（從別的終端 `security unlock-keychain` 或跑 `/login`），期間所有核准與
+        // bot 申請都沒有人裁示，而且**不會自己好**。incident 開的就是 critical（`incidents.rs`），
+        // 兩個面板講同一件事就該同一個嚴重度（#454）。撞限不一樣：那是等得到的，維持 degraded。
+        (_, Some(r)) if r == REASON_NEEDS_LOGIN => "critical",
+        ("needs_login", _) => "critical",
+        // `no_run` 不是新消息——`status` 已經是 stopped／missing／not_configured，而下面那兩條規則
+        // 分得更細：**停著、又沒有人在等，本來就不算故障**（review 2026-09-16 c3 M1）。
+        // 這裡一律 degraded 會把那個判斷蓋掉，讓剛 setup 完還沒 start 的協調者被當成壞的。
+        (_, Some(r)) if r == REASON_NO_RUN => match () {
+            _ if responder.pointer("/desired_running").and_then(Value::as_bool) == Some(true) => "degraded",
+            _ if waiting => "degraded",
+            _ => "healthy",
+        },
+        (_, Some(_)) => "degraded",
+        ("not_configured" | "idle" | "busy" | "starting", _) => "healthy",
+        ("waiting_quota", _) => "degraded",
+        _ if responder.pointer("/desired_running").and_then(Value::as_bool) == Some(true) => "degraded",
+        _ if waiting => "degraded",
+        _ => "healthy",
+    }
+}
+
+/// What the inbox debounce keys on. `idle` and `busy` are one state here: the manager going
+/// busy on its own turn is not news the manager needs an inbox event about.
+pub fn inbox_state(supervisor_status: &str) -> &str {
+    match supervisor_status {
+        "idle" | "busy" => "running",
+        other => other,
+    }
+}
+
+/// What a `health_changed` inbox event is keyed on: the manager's severity **and** the responder's.
+///
+/// The responder is the only recipient of bot requests, approvals and mission events. Keying on the
+/// manager alone meant a responder stuck on `waiting_quota` turned the UI `degraded` while no event
+/// was ever queued and nobody was woken — requests could sit for days (review 2026-09-16 #7).
+/// A snapshot from before `responder_health` existed reads as `healthy` there.
+pub fn inbox_severity(snapshot: &Value) -> String {
+    let manager = snapshot.pointer("/manager_health/status").and_then(Value::as_str).unwrap_or("unknown");
+    let responder = snapshot.pointer("/responder_health/status").and_then(Value::as_str).unwrap_or("healthy");
+    format!("{manager}/{responder}")
+}
+
+/// No one is there to read an event: it is not queued, and whatever changed meanwhile is
+/// folded into the one snapshot sent when the manager is back.
+fn manager_down(inbox_state: &str) -> bool {
+    matches!(inbox_state, "stopped" | "starting" | "not_configured")
+}
+
+/// Decides which health ticks become `health_changed` inbox events.
+///
+/// 2026-09-10: the fingerprint included the busy / running / pending counters, so a night of
+/// bots starting and finishing put 464 events in front of a manager that was not even up. Only
+/// the severity and the manager's own state count now, and nothing is queued while it is down.
+#[derive(Debug, Default)]
+pub struct Debounce {
+    last_pushed: Option<(String, String)>,
+    /// A state waiting for its durable inbox write. Keep its key stable across retries so an
+    /// ambiguous commit cannot turn one transition into several events.
+    pending: Option<PendingHealth>,
+    /// Something changed while the manager was down; it gets one snapshot when it is back.
+    suppressed: bool,
+}
+
+#[derive(Debug)]
+struct PendingHealth {
+    state: (String, String),
+    event_key: String,
+}
+
+impl Debounce {
+    /// `true` = queue this tick's snapshot.
+    pub fn observe(&mut self, severity: &str, supervisor_status: &str) -> bool {
+        let state = inbox_state(supervisor_status);
+        let key = (severity.to_string(), state.to_string());
+        let changed = self.last_pushed.as_ref() != Some(&key);
+        if manager_down(state) {
+            if changed || self.pending.is_some() {
+                self.suppressed = true;
+            }
+            return false;
+        }
+        if self.pending.as_ref().is_some_and(|p| p.state == key) {
+            return true;
+        }
+        if changed || self.suppressed {
+            self.pending = Some(PendingHealth {
+                event_key: format!("health:{}:{}:{}", key.0, key.1, crate::db::ulid()),
+                state: key,
+            });
+            return true;
+        }
+        self.pending = None;
+        false
+    }
+
+    fn pending_event_key(&self) -> Option<&str> {
+        self.pending.as_ref().map(|p| p.event_key.as_str())
+    }
+
+    /// Only call after `push_inbox` confirms the event is durable (including an already-present key).
+    fn acknowledge(&mut self) {
+        if let Some(pending) = self.pending.take() {
+            self.last_pushed = Some(pending.state);
+            self.suppressed = false;
+        }
+    }
+}
+
+pub async fn queue_health_change(db: &SqlitePool, debounce: &mut Debounce, snapshot: &Value, severity: &str, sup_status: &str) -> bool {
+    if !debounce.observe(severity, sup_status) {
+        return false;
+    }
+    let Some(key) = debounce.pending_event_key().map(str::to_owned) else { return false };
+    let bot_id = snapshot.pointer("/supervisor/bot_id").and_then(Value::as_str);
+    match crate::supervisor::store::push_inbox(
+        db, &key, "health_changed", None, bot_id, None, snapshot,
+    ).await {
+        Ok(_) => {
+            debounce.acknowledge();
+            let status = snapshot.get("status").and_then(Value::as_str).unwrap_or("unknown");
+            tracing::info!(status, supervisor = %sup_status, "supervisor health changed");
+            true
+        }
+        Err(e) => {
+            tracing::warn!(error = ?e, status = ?snapshot.get("status"), supervisor = %sup_status, "health_changed inbox write failed; retrying next tick");
+            false
+        }
+    }
+}
+
+/// The polling loop is composed in `runners::supervisor::health`.
+
+#[cfg(all(test, feature = "daemon-test-harness"))]
+mod tests {
+    use super::*;
+
+    /// 真的把 `role_state` 跑起來：這四個值是 #421 決定「要不要把核准改派給巡檢」的唯一依據，
+    /// 而最貴的錯誤是**在沒有證據的時候回 Unavailable**。用真的 DB 走一遍，不是只測純函式。
+    #[tokio::test]
+    async fn role_state_reads_the_evidence_and_says_unknown_when_there_is_none() {
+        let env = crate::testing::env().await;
+        let app = env.app.clone();
+        let role = crate::supervisor::roles::Role::Responder;
+
+        // 還沒建立：核准本來就歸巡檢，沒有東西要改派。
+        assert_eq!(role_state(&app, role).await, RoleState::NotConfigured);
+        assert!(!role_state(&app, role).await.is_unavailable());
+
+        crate::supervisor::roles::set_env(&app.db, role, "resp-bot", "proj", "/tmp").await.unwrap();
+        // 登記了、但沒有 active run：它不會裁示任何東西。
+        assert_eq!(role_state(&app, role).await, RoleState::Unavailable(REASON_NO_RUN));
+
+        // #420 在送不出去時看畫面寫下的那個字，要被讀成 needs_login（字不一樣就永遠判不出來）。
+        crate::supervisor::roles::set_status(&app.db, role, "needs_login", None, None).await.unwrap();
+        assert_eq!(role_state(&app, role).await, RoleState::Unavailable(REASON_NEEDS_LOGIN));
+        // 撞限是另一個原因，但一樣是不可用。
+        crate::supervisor::roles::set_status(&app.db, role, "waiting_quota", None, None).await.unwrap();
+        assert_eq!(role_state(&app, role).await, RoleState::Unavailable(REASON_WAITING_QUOTA));
+
+        // 狀態清掉之後又回到「沒有 active run」——不是 Available：這一層只讀 DB，
+        // 「沒有 needs_login」的意思是沒有證據說它壞了，不是證明它是好的。
+        crate::supervisor::roles::set_status(&app.db, role, "", None, None).await.unwrap();
+        assert_eq!(role_state(&app, role).await, RoleState::Unavailable(REASON_NO_RUN));
+
+        // 真的種一顆 bot＋一個 running 的 run，這時候才會是 Available。
+        // project_id 要用 env 真的建出來的那一個：`bots.project_id` 有外鍵，寫死字串會在 INSERT 就炸。
+        let bot = crate::testing::claude_bot(&app, &env.project_id, "AGM-responder").await;
+        crate::testing::fake_run(&app, &bot.id).await;
+        crate::supervisor::roles::set_env(&app.db, role, &bot.id, &env.project_id, "/tmp").await.unwrap();
+        assert_eq!(role_state(&app, role).await, RoleState::Available);
+
+        // bot 被軟刪、但 run 那一列還掛著 running（刪除到停機之間的窗口，#421 指出）：
+        // `db::active_run` 只看 runs，不看 bot 還在不在，所以這裡如果不另外查一次，
+        // 閘門會說「它可以裁示」而它根本不存在，核准就靜靜躺著——正是這支函式要擋的那種錯。
+        sqlx::query("UPDATE bots SET deleted_at = ? WHERE id = ?")
+            .bind(crate::db::now())
+            .bind(&bot.id)
+            .execute(&app.db)
+            .await
+            .unwrap();
+        assert_eq!(role_state(&app, role).await, RoleState::Unavailable(REASON_NO_RUN), "軟刪掉的 bot 不能被當成還能裁示");
+
+        // 巡檢是另一列，不會被協調者的狀態汙染。
+        assert_eq!(role_state(&app, crate::supervisor::roles::Role::Patrol).await, RoleState::NotConfigured);
+
+        // #421 呼叫的是 responder_state()，它就是 role_state(Responder) 的別名，不能有第二套判斷。
+        assert_eq!(responder_state(&app).await, role_state(&app, role).await);
+    }
+
+    /// #427：`role_state` 除了 DB，還要讀 health tick 每 30 秒看畫面得到的那張記憶體表。
+    /// 三件事一起釘：**空表不是故障**（daemon 剛起來那一分鐘不能把等著的核准全部改派一輪）、
+    /// 記憶體那份要**排在 `active_run` 之後**（停掉的角色要回 `no_run`，不是上一輪留下的
+    /// `needs_login`——兩個都是不可用，但錯的字串會被原樣寫進 inbox payload 帶偏事後追查），
+    /// 以及 `notify_stalled` 要真的走得通到 `is_unavailable()`（#421 靠它改派）。
+    #[tokio::test]
+    async fn role_state_also_reads_the_screen_conclusions_but_an_empty_table_is_not_a_fault() {
+        let env = crate::testing::env().await;
+        let app = env.app.clone();
+        let role = crate::supervisor::roles::Role::Responder;
+        // `runs` 對 `bots` 有 FK，所以這裡要真的把那顆 bot 建出來（不像只讀 DB 那條測試）。
+        sqlx::query("INSERT INTO projects (id,path,label,created_at) VALUES ('proj','/tmp','proj',?)")
+            .bind(crate::db::now())
+            .execute(&app.db)
+            .await
+            .unwrap();
+        sqlx::query("INSERT INTO bots (id,project_id,name,kind,hook_token,created_at) VALUES ('resp-bot','proj','AGM-responder','claude','tok',?)")
+            .bind(crate::db::now())
+            .execute(&app.db)
+            .await
+            .unwrap();
+        crate::supervisor::roles::set_env(&app.db, role, "resp-bot", "proj", "/tmp").await.unwrap();
+        sqlx::query("INSERT INTO runs (id,bot_id,state,agent_status,started_at) VALUES ('run-resp','resp-bot','running','idle',?)")
+            .bind(crate::db::now())
+            .execute(&app.db)
+            .await
+            .unwrap();
+
+        // 表還沒被填過＝還沒有結論，不是「它壞了」。
+        assert_eq!(role_state(&app, role).await, RoleState::Available);
+
+        // 記憶體說 notify 一直沒跑完（那條路不會為巡檢寫 DB，只有這張表看得到）。
+        let failed = ["t1", "t2", "t3"].into_iter().map(str::to_string).collect();
+        crate::supervisor::role_faults::note_notify_round(&app, "responder", failed, false).await;
+        crate::supervisor::role_faults::refresh(&app).await;
+        let state = role_state(&app, role).await;
+        assert_eq!(state, RoleState::Unavailable(crate::supervisor::role_faults::REASON_NOTIFY_STALLED));
+        assert!(state.is_unavailable(), "#421 靠這個改派");
+
+        // bot 停掉：記憶體那份還留著上一輪的結論，但答案必須是 no_run，不是那個陳舊的原因。
+        sqlx::query("UPDATE runs SET state='stopped' WHERE id='run-resp'").execute(&app.db).await.unwrap();
+        assert_eq!(role_state(&app, role).await, RoleState::Unavailable(REASON_NO_RUN));
+
+        // DB 的 needs_login 仍然最權威（送不出去時寫的），排在記憶體那份前面。
+        sqlx::query("UPDATE runs SET state='running' WHERE id='run-resp'").execute(&app.db).await.unwrap();
+        crate::supervisor::roles::set_status(&app.db, role, "needs_login", None, None).await.unwrap();
+        assert_eq!(role_state(&app, role).await, RoleState::Unavailable(REASON_NEEDS_LOGIN));
+    }
+
+    /// 這三個字串是 #421 要寫進 inbox payload（`reassigned_reason`）與 SPEC 的對外契約，改了要一起改。
+    #[test]
+    fn the_unavailable_reasons_are_a_stable_contract() {
+        assert_eq!([REASON_NEEDS_LOGIN, REASON_WAITING_QUOTA, REASON_NO_RUN], ["needs_login", "waiting_quota", "no_run"]);
+        // `needs_login` 與 `waiting_quota` 必須跟 `supervisor_roles.status` 寫進去的字一模一樣，
+        // 否則 `role_state` 會永遠判不出不可用（#420 寫的是這兩個字）。
+        assert_eq!(REASON_NEEDS_LOGIN, "needs_login");
+        assert_eq!(REASON_WAITING_QUOTA, "waiting_quota");
+    }
+
+    /// 只有 `Unavailable` 能拿來當改派的依據。`Unknown`（讀不到）與 `NotConfigured`（沒建立）
+    /// 都不行——沒有證據就把核准從一顆健康的協調者手上搬走，比晚幾分鐘更糟。
+    #[test]
+    fn only_unavailable_is_grounds_for_reassigning() {
+        assert!(RoleState::Unavailable(REASON_NEEDS_LOGIN).is_unavailable());
+        assert_eq!(RoleState::Unavailable(REASON_NEEDS_LOGIN).reason(), Some("needs_login"));
+        for state in [RoleState::Unknown, RoleState::Available, RoleState::NotConfigured] {
+            assert!(!state.is_unavailable(), "{state:?} 不該被當成不可用");
+            assert_eq!(state.reason(), None, "{state:?} 不該有原因");
+        }
+    }
+
+    #[test]
+    fn counters_do_not_make_events_only_state_does() {
+        let mut d = Debounce::default();
+        assert!(observe_and_ack(&mut d, "healthy", "idle"), "the first reading after boot is news");
+        // Ticks with different bot counts land here as the same (severity, state): nothing.
+        assert!(!observe_and_ack(&mut d, "healthy", "idle"));
+        assert!(!observe_and_ack(&mut d, "healthy", "busy"), "the manager's own busy/idle is not a state change");
+        assert!(observe_and_ack(&mut d, "degraded", "idle"));
+        assert!(observe_and_ack(&mut d, "healthy", "idle"));
+        assert!(observe_and_ack(&mut d, "critical", "waiting_quota"));
+    }
+
+    #[test]
+    fn a_health_transition_is_retried_until_its_inbox_write_succeeds() {
+        let mut d = Debounce::default();
+        assert!(d.observe("degraded", "idle"));
+        assert!(d.observe("degraded", "idle"), "a failed durable write must remain due");
+        let first_key = d.pending_event_key().unwrap().to_owned();
+        assert_eq!(d.pending_event_key(), Some(first_key.as_str()), "retries must reuse the idempotency key");
+        d.acknowledge();
+        assert!(!d.observe("degraded", "idle"), "after persistence it is debounced");
+    }
+
+    fn observe_and_ack(d: &mut Debounce, severity: &str, supervisor_status: &str) -> bool {
+        let due = d.observe(severity, supervisor_status);
+        if due {
+            d.acknowledge();
+        }
+        due
+    }
+
+    #[tokio::test]
+    async fn a_failed_health_inbox_insert_retries_the_same_event_once() {
+        let env = crate::testing::env().await;
+        let app = env.app.clone();
+        crate::supervisor::store::get_or_init(&app.db).await.unwrap();
+        let snapshot = json!({"status":"degraded", "supervisor":{"status":"idle"}});
+        let mut debounce = Debounce::default();
+        sqlx::query("CREATE TRIGGER fail_health_changed BEFORE INSERT ON supervisor_inbox WHEN NEW.kind='health_changed' BEGIN SELECT RAISE(ABORT, 'injected health inbox failure'); END")
+            .execute(&app.db)
+            .await
+            .unwrap();
+        assert!(!queue_health_change(&app.db, &mut debounce, &snapshot, "degraded/healthy", "idle").await);
+        let retry_key = debounce.pending_event_key().unwrap().to_owned();
+        sqlx::query("DROP TRIGGER fail_health_changed").execute(&app.db).await.unwrap();
+        assert!(queue_health_change(&app.db, &mut debounce, &snapshot, "degraded/healthy", "idle").await);
+        let stored: Option<String> = sqlx::query_scalar("SELECT event_key FROM supervisor_inbox WHERE kind='health_changed'")
+            .fetch_optional(&app.db)
+            .await
+            .unwrap();
+        assert_eq!(stored.as_deref(), Some(retry_key.as_str()), "retry keeps the original idempotency key");
+        assert!(!queue_health_change(&app.db, &mut debounce, &snapshot, "degraded/healthy", "idle").await);
+        let n: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM supervisor_inbox WHERE kind='health_changed'")
+            .fetch_one(&app.db)
+            .await
+            .unwrap();
+        assert_eq!(n, 1, "a successful retry is delivered once");
+    }
+
+    #[test]
+    fn nothing_is_queued_while_the_manager_is_down_and_one_snapshot_when_it_is_back() {
+        let mut d = Debounce::default();
+        assert!(observe_and_ack(&mut d, "healthy", "idle"));
+        // 5.5 hours of 30-second ticks against a dead manager: zero events, not 464.
+        for _ in 0..660 {
+            assert!(!observe_and_ack(&mut d, "degraded", "stopped"));
+        }
+        assert!(!observe_and_ack(&mut d, "degraded", "starting"));
+        assert!(observe_and_ack(&mut d, "healthy", "idle"), "one snapshot once it is back, even to the same state");
+        assert!(!observe_and_ack(&mut d, "healthy", "idle"));
+    }
+
+    /// 協調者卡在 `waiting_quota`（degraded）而巡檢好好的：以前 debounce 只看巡檢那一半，一則事件都不會有。
+    #[test]
+    fn a_responder_going_degraded_is_news_even_when_the_manager_is_fine() {
+        let snap = |m: &str, r: Option<&str>| {
+            let mut v = json!({"manager_health": {"status": m}});
+            if let Some(r) = r {
+                v["responder_health"] = json!({"status": r});
+            }
+            v
+        };
+        let mut d = Debounce::default();
+        assert!(observe_and_ack(&mut d, &inbox_severity(&snap("healthy", Some("healthy"))), "idle"));
+        assert!(observe_and_ack(&mut d, &inbox_severity(&snap("healthy", Some("degraded"))), "idle"), "responder waiting_quota must queue an event");
+        assert!(!observe_and_ack(&mut d, &inbox_severity(&snap("healthy", Some("degraded"))), "busy"));
+        assert!(observe_and_ack(&mut d, &inbox_severity(&snap("healthy", Some("healthy"))), "idle"), "and its recovery too");
+        // 舊 snapshot 沒有 responder_health：當 healthy，不會憑空多一則。
+        assert_eq!(inbox_severity(&snap("healthy", None)), inbox_severity(&snap("healthy", Some("healthy"))));
+    }
+
+    /// 協調者建立過但沒在跑（setup 完沒 start、start 失敗、手動 stop、bot 被刪）：佇列裡有會叫醒它的事件
+    /// 就不是 healthy——沒有人會被叫醒（review 2026-09-16 c3 M1）。沒有待辦的停著仍是 healthy。
+    #[test]
+    fn a_responder_that_is_not_running_while_requests_wait_is_degraded() {
+        let r = |status: &str, desired: bool, waiting: i64| json!({"status": status, "desired_running": desired, "wake_pending": waiting});
+        assert_eq!(responder_severity(&r("stopped", false, 0)), "healthy", "停著、沒人在等：不是故障");
+        assert_eq!(responder_severity(&r("stopped", false, 2)), "degraded");
+        assert_eq!(responder_severity(&r("missing", false, 1)), "degraded");
+        assert_eq!(responder_severity(&r("stopped", true, 0)), "degraded", "想要它跑卻停著，照舊是 degraded");
+        assert_eq!(responder_severity(&r("idle", false, 5)), "healthy", "在跑就會被叫醒");
+        assert_eq!(responder_severity(&r("not_configured", false, 3)), "healthy", "沒建立：事件歸巡檢");
+        assert_eq!(responder_severity(&json!({"status": "stopped"})), "healthy", "舊形狀沒有 wake_pending");
+    }
+
+    /// #454：#427 判出來的不可用只在記憶體，`status` 不會變（`notify_stalled` 從來不寫 DB），
+    /// 所以這一格要讀 `unavailable_reason`——不讀的話「核准正在被改派、incident 已經開了，
+    /// 面板說 healthy」，正是 #420 要消滅的症狀換一條路又出現一次。
+    #[test]
+    fn a_responder_that_is_being_bypassed_is_never_healthy() {
+        let with = |status: &str, reason: Value| json!({"status": status, "unavailable_reason": reason, "wake_pending": 0});
+        // notify 連續沒完成：status 照樣是 idle，只有原因看得出來。
+        assert_eq!(responder_severity(&with("idle", json!("notify_stalled"))), "degraded");
+        assert_eq!(responder_severity(&with("busy", json!("notify_stalled"))), "degraded");
+        // `no_run` 交還給既有那兩條規則：停著、沒有人在等，本來就不是故障（別把剛 setup 完的當壞的）。
+        assert_eq!(responder_severity(&with("stopped", json!("no_run"))), "healthy");
+        assert_eq!(
+            responder_severity(&json!({"status": "stopped", "unavailable_reason": "no_run", "wake_pending": 2})),
+            "degraded",
+            "有人在等就還是 degraded"
+        );
+        // 停在登入要人動手、不會自己好：跟 incident 那邊一樣算 critical（兩個面板同一件事同一個嚴重度）。
+        assert_eq!(responder_severity(&with("needs_login", json!("needs_login"))), "critical");
+        assert_eq!(responder_severity(&with("idle", json!("needs_login"))), "critical", "原因先於 status");
+        // 撞限是等得到的，維持 degraded。
+        assert_eq!(responder_severity(&with("waiting_quota", json!("waiting_quota"))), "degraded");
+        // 沒有原因就照舊。
+        assert_eq!(responder_severity(&with("idle", Value::Null)), "healthy");
+    }
+
+    /// 端到端：setup 過、從沒 start，bot 送來一筆申請 → 健康頂層不再是 healthy。
+    #[tokio::test]
+    async fn a_request_queued_for_a_responder_that_never_started_shows_up_in_health() {
+        use crate::supervisor::bot_requests::{self, flow_tests, ReplyMark};
+        let app = flow_tests::app().await;
+        flow_tests::configure_responder(&app).await;
+        let snap = snapshot(&app).await.unwrap();
+        assert_eq!(snap.pointer("/responder_health/status").and_then(Value::as_str), Some("healthy"));
+        bot_requests::intercept(&app, "patrol", "w1", "請核准重建 abc", Some("r-1"), &[], true, "api", ReplyMark::default()).await.unwrap().unwrap();
+        let snap = snapshot(&app).await.unwrap();
+        assert_eq!(snap.pointer("/responder_health/status").and_then(Value::as_str), Some("degraded"), "{snap}");
+        assert_eq!(snap.pointer("/responder_health/wake_pending").and_then(Value::as_i64), Some(1));
+        assert_ne!(snap.get("status").and_then(Value::as_str), Some("healthy"));
+    }
+
+    #[test]
+    fn a_manager_that_was_never_up_gets_its_first_snapshot_when_it_is() {
+        let mut d = Debounce::default();
+        assert!(!d.observe("degraded", "not_configured"));
+        assert!(!d.observe("degraded", "stopped"));
+        assert!(d.observe("healthy", "busy"));
+    }
+}

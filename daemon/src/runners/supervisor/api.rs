@@ -25,11 +25,11 @@ fn up<E: std::fmt::Display>(e: E) -> LcError {
 }
 
 pub async fn get_supervisor(State(app): State<Arc<App>>) -> Result<Json<Value>, LcError> {
-    Ok(Json(super::status_json(&app).await?))
+    Ok(Json(super::status_json(app.as_ref()).await?))
 }
 
 pub async fn get_health(State(app): State<Arc<App>>) -> Result<Json<Value>, LcError> {
-    Ok(Json(health_core::snapshot(&app).await?))
+    Ok(Json(health_core::snapshot(app.as_ref()).await?))
 }
 
 /// Build the environment. Idempotent, and deliberately does **not** start anything: a manager
@@ -37,16 +37,16 @@ pub async fn get_health(State(app): State<Arc<App>>) -> Result<Json<Value>, LcEr
 /// session nobody verified.
 pub async fn post_setup(State(app): State<Arc<App>>) -> Result<Json<Value>, LcError> {
     let _g = super::lock().await;
-    let (_project_id, bot_id, deployed) = setup::ensure_env(&app).await?;
+    let (_project_id, bot_id, deployed) = setup::ensure_env(app.as_ref()).await?;
     let sup = store::get_or_init(&app.db).await.map_err(up)?;
     // Bringing the environment back up is a new generation: an old controller (from a config
     // that pointed at a bot which no longer exists) must not keep sending notifications.
     if sup.generation == 0 {
         super::runtime::respawn(&app).await;
     }
-    controller::reconcile(&app).await;
+    controller::reconcile(app.as_ref()).await;
     app.emit("supervisor_changed", json!({"bot_id": bot_id})).await;
-    let mut out = super::status_json(&app).await?;
+    let mut out = super::status_json(app.as_ref()).await?;
     out["deployed"] = serde_json::to_value(&deployed).unwrap_or(Value::Null);
     Ok(Json(out))
 }
@@ -56,13 +56,13 @@ pub async fn post_setup(State(app): State<Arc<App>>) -> Result<Json<Value>, LcEr
 pub async fn post_start(State(app): State<Arc<App>>) -> Result<Json<Value>, LcError> {
     let _g = super::lock().await;
     super::start_requested(&app).await?;
-    Ok(Json(super::status_json(&app).await?))
+    Ok(Json(super::status_json(app.as_ref()).await?))
 }
 
 pub async fn post_stop(State(app): State<Arc<App>>) -> Result<Json<Value>, LcError> {
     let _g = super::lock().await;
-    super::stop_requested(&app).await?;
-    Ok(Json(super::status_json(&app).await?))
+    super::stop_requested(app.as_ref()).await?;
+    Ok(Json(super::status_json(app.as_ref()).await?))
 }
 
 /// Switch to the other fixed candidate. Bounded: see `runtime::switch_candidate`.

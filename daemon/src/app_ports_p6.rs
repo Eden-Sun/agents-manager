@@ -5,31 +5,31 @@
 //! 模組掛在 `supervisor/mod.rs`（`#[path]`），不碰 `lib.rs`，免得跟其他包各自加 `mod` 行互相衝突。
 
 use crate::config::IdentityCfg;
+use crate::capabilities::{Cfg, Db};
 use crate::db;
 use crate::lifecycle::{self, LcResult, PromptOut, Revoked, StartOpts};
 use crate::quota::{self, LimitHit, Quota};
 use crate::state::App;
-use crate::supervisor::ports::{BotLamp, HostProbes, JudgeOps, LocalAccountView, MissionOps, QuotaOps, TurnOps};
+use crate::supervisor::ports::{BotLamp, ConfigProjection, HostProbes, JudgeOps, LocalAccountView, MissionOps, QuotaOps, TurnOps};
 use serde_json::Value;
 use std::future::Future;
-use std::sync::Arc;
 use std::time::Duration;
 
-impl TurnOps for Arc<App> {
+impl TurnOps for App {
     async fn start_bot(&self, bot_id: &str) -> LcResult<String> {
-        lifecycle::start_bot(self, bot_id).await
+        lifecycle::start_bot(&self.shared(), bot_id).await
     }
     async fn start_bot_locked_with(&self, bot_id: &str, opts: StartOpts) -> LcResult<String> {
-        lifecycle::start_bot_locked_with(self, bot_id, opts).await
+        lifecycle::start_bot_locked_with(&self.shared(), bot_id, opts).await
     }
     async fn stop_bot(&self, bot_id: &str) -> LcResult<bool> {
-        lifecycle::stop_bot(self, bot_id).await
+        lifecycle::stop_bot(&self.shared(), bot_id).await
     }
     async fn stop_bot_locked_if_idle(&self, bot_id: &str) -> LcResult<bool> {
-        lifecycle::stop_bot_locked_if_idle(self, bot_id).await
+        lifecycle::stop_bot_locked_if_idle(&self.shared(), bot_id).await
     }
     async fn prompt_control_plane(&self, bot_id: &str, text: &str, client_request_id: &str, relay_from: Option<&str>) -> LcResult<PromptOut> {
-        lifecycle::prompt_control_plane(self, bot_id, text, client_request_id, relay_from).await
+        lifecycle::prompt_control_plane(&self.shared(), bot_id, text, client_request_id, relay_from).await
     }
     async fn prompt_relayed(
         &self,
@@ -39,10 +39,10 @@ impl TurnOps for Arc<App> {
         attachment_ids: &[String],
         relay_from: Option<&str>,
     ) -> LcResult<PromptOut> {
-        lifecycle::prompt_relayed(self, bot_id, text, client_request_id, attachment_ids, relay_from).await
+        lifecycle::prompt_relayed(&self.shared(), bot_id, text, client_request_id, attachment_ids, relay_from).await
     }
     async fn prompt_relayed_queueable(&self, bot_id: &str, text: &str, client_request_id: &str, relay_from: Option<&str>) -> LcResult<PromptOut> {
-        lifecycle::prompt_relayed_queueable(self, bot_id, text, client_request_id, relay_from).await
+        lifecycle::prompt_relayed_queueable(&self.shared(), bot_id, text, client_request_id, relay_from).await
     }
     async fn insert_message(
         &self,
@@ -54,64 +54,74 @@ impl TurnOps for Arc<App> {
         incomplete: bool,
         snapshot: Option<&str>,
     ) -> anyhow::Result<db::Message> {
-        lifecycle::insert_message(self, conversation_id, turn_id, role, content, source, incomplete, snapshot).await
+        lifecycle::insert_message(&self.shared(), conversation_id, turn_id, role, content, source, incomplete, snapshot).await
     }
     async fn revoke_queued_turn(&self, turn_id: &str, why: &str) -> anyhow::Result<bool> {
-        lifecycle::revoke_queued_turn(self, turn_id, why).await
+        lifecycle::revoke_queued_turn(&self.shared(), turn_id, why).await
     }
     async fn announce_revoked(&self, turn_id: &str, revoked: Revoked) {
-        lifecycle::announce_revoked(self, turn_id, revoked).await
+        lifecycle::announce_revoked(&self.shared(), turn_id, revoked).await
     }
     async fn assignment_withdrawal(&self, turn_id: &str) -> anyhow::Result<Option<String>> {
-        lifecycle::assignment_withdrawal(self, turn_id).await
+        lifecycle::assignment_withdrawal(&self.shared(), turn_id).await
     }
     fn schedule_flush_retry(&self, bot_id: &str, delay: Duration) {
-        lifecycle::schedule_flush_retry(self, bot_id, delay)
+        lifecycle::schedule_flush_retry(&self.shared(), bot_id, delay)
     }
     async fn blocking_quota_hit(&self, bot: &db::Bot, turn_id: &str) -> Option<LimitHit> {
-        lifecycle::quota_hold::blocking_hit(self, bot, turn_id).await
+        lifecycle::quota_hold::blocking_hit(&self.shared(), bot, turn_id).await
     }
 }
 
-impl QuotaOps for Arc<App> {
+impl ConfigProjection for App {
+    fn update_and_project<'a, F, T>(&'a self, f: F) -> std::pin::Pin<Box<dyn Future<Output = anyhow::Result<T>> + Send + 'a>>
+    where
+        F: FnOnce(&mut crate::config::ConfigFile) -> anyhow::Result<T> + Send + 'a,
+        T: Send + 'a,
+    {
+        Box::pin(crate::projection::update_and_project(self.cfg(), self.db(), f))
+    }
+}
+
+impl QuotaOps for App {
     async fn try_limit_hit_for_bot(&self, bot: &db::Bot) -> anyhow::Result<Option<LimitHit>> {
-        crate::runners::quota::try_limit_hit_for_bot(self, bot).await
+        crate::runners::quota::try_limit_hit_for_bot(&self.shared(), bot).await
     }
     async fn next_reset_for_bot(&self, bot: &db::Bot) -> Option<String> {
-        crate::runners::quota::next_reset_for_bot(self, bot).await
+        crate::runners::quota::next_reset_for_bot(&self.shared(), bot).await
     }
     async fn billing_identity(&self, bot: &db::Bot) -> anyhow::Result<Option<String>> {
-        quota::billing_identity(self, bot).await
+        quota::billing_identity(&self.shared(), bot).await
     }
     async fn quota_base_for_host(&self, host: &str, kind: &str, identity: Option<&str>) -> String {
-        quota::quota_base_for_host(self, host, kind, identity).await
+        quota::quota_base_for_host(&self.shared(), host, kind, identity).await
     }
     async fn seed_limit_hit(&self, host: &str, base: &str, until: &str, message: &str, bucket: Option<String>) -> bool {
-        quota::seed_limit_hit(self, host, base, until, message, bucket).await
+        quota::seed_limit_hit(&self.shared(), host, base, until, message, bucket).await
     }
     async fn running_model(&self, bot: &db::Bot) -> Option<String> {
-        quota::running_model(self, bot).await
+        quota::running_model(&self.shared(), bot).await
     }
     async fn limit_cleared_since(&self, bot: &db::Bot, since: chrono::DateTime<chrono::Utc>) -> bool {
-        crate::runners::quota::limit_cleared_since(self, bot, since).await
+        crate::runners::quota::limit_cleared_since(&self.shared(), bot, since).await
     }
     async fn quota_snapshot_json(&self) -> Value {
-        quota::snapshot(self).await
+        quota::snapshot(&self.shared()).await
     }
     async fn quota_reading(&self, key: &str) -> Option<Quota> {
         self.quotas.lock().await.get(key).cloned()
     }
 }
 
-impl MissionOps for Arc<App> {
+impl MissionOps for App {
     async fn mission(&self, mission_id: &str) -> anyhow::Result<Option<crate::mission::store::Mission>> {
         crate::mission::store::get(&self.db, mission_id).await
     }
     async fn mission_candidates(&self, host: &str, kind: &str) -> anyhow::Result<Vec<(String, bool, Option<Quota>)>> {
-        crate::mission::candidates(self, host, kind).await
+        crate::mission::candidates(&self.shared(), host, kind).await
     }
     async fn mission_billing_identity(&self, host: &str, bot: &db::Bot) -> anyhow::Result<Option<String>> {
-        crate::mission::billing_identity_named(self, host, bot).await
+        crate::mission::billing_identity_named(&self.shared(), host, bot).await
     }
     async fn mission_add_event(&self, mission_id: &str, kind: &str, text: &str, relay_from: Option<&str>, payload: &Value) -> anyhow::Result<()> {
         crate::mission::store::add_event(&self.db, mission_id, kind, text, relay_from, payload).await.map(|_| ())
@@ -128,53 +138,53 @@ impl MissionOps for Arc<App> {
         crate::mission::store::pause_on(tx, mission_id, reason, detail, text, payload).await
     }
     async fn ensure_can_assign(&self, mission_id: &str, role: &str) -> Result<(), crate::lifecycle::LcError> {
-        crate::mission::workflow::ensure_can_assign(self, mission_id, role).await
+        crate::mission::workflow::ensure_can_assign(&self.shared(), mission_id, role).await
     }
     async fn mission_next_json(&self, mission_id: &str) -> Value {
-        crate::mission::workflow::next_json(self, mission_id).await
+        crate::mission::workflow::next_json(&self.shared(), mission_id).await
     }
     async fn mission_wake_stalled(&self) {
-        crate::mission::workflow::wake_stalled(self).await
+        crate::mission::workflow::wake_stalled(&self.shared()).await
     }
     async fn mission_sweep_closed_temp_bots(&self) {
-        crate::runners::mission::api::sweep_closed_mission_temp_bots(self).await
+        crate::runners::mission::api::sweep_closed_mission_temp_bots(&self.shared()).await
     }
 }
 
-impl JudgeOps for Arc<App> {
+impl JudgeOps for App {
     async fn judge_shadow_settled(&self, assignment_id: &str, bot_id: &str, turn_id: Option<&str>, turn_status: &str, result: Option<&str>) {
-        crate::runners::judge::shadow_settled(self, assignment_id, bot_id, turn_id, turn_status, result).await
+        crate::runners::judge::shadow_settled(&self.shared(), assignment_id, bot_id, turn_id, turn_status, result).await
     }
     fn judge_stuck_sweep(&self) {
-        crate::runners::judge::sweep(self)
+        crate::runners::judge::sweep(&self.shared())
     }
     async fn judge_schedule_assignment(&self, assignment_id: &str) {
-        crate::judge::collision::schedule_assignment(self, assignment_id).await
+        crate::judge::collision::schedule_assignment(&self.shared(), assignment_id).await
     }
 }
 
-impl HostProbes for Arc<App> {
+impl HostProbes for App {
     async fn pane_shows_login_problem(&self, run: &db::Run) -> Option<bool> {
-        crate::app_ports_p4::shows_login_problem(self, run).await
+        crate::app_ports_p4::shows_login_problem(&self.shared(), run).await
     }
     async fn process_dump(&self, host: &str) -> anyhow::Result<String> {
-        crate::memproc::dump(self, host).await
+        crate::memproc::dump(&self.shared(), host).await
     }
     async fn identity_for_host(&self, host: &str, name: &str) -> Option<IdentityCfg> {
-        crate::tools::identity_for_host(self, host, name).await
+        crate::tools::identity_for_host(&self.shared(), host, name).await
     }
     async fn deploy_behind(&self) -> Result<Value, String> {
-        let ctx = crate::deploy_now::Ctx::of(self);
+        let ctx = crate::deploy_now::Ctx::of(&self.shared());
         crate::deploy_now::behind(&ctx.repo, &ctx.live_sha).await
     }
     async fn release_triage_health_probe(&self, cfg: &crate::config::ReleaseTriageCfg) -> Option<Value> {
         crate::release_triage::issue::health_probe(cfg).await
     }
     async fn due_actions_snapshot(&self) -> Value {
-        crate::due_actions::snapshot(self).await
+        crate::due_actions::snapshot(&self.shared()).await
     }
     fn primary_keep_warm_tick(&self) {
-        crate::runners::primary_keep_warm::tick(self)
+        crate::runners::primary_keep_warm::tick(&self.shared())
     }
     async fn restart_loop<F, Fut>(&self, name: &'static str, factory: F)
     where
@@ -188,22 +198,10 @@ impl HostProbes for Arc<App> {
         F: Fn() -> Fut + Send + Sync + 'static,
         Fut: Future<Output = ()> + Send + 'static,
     {
-        crate::background_loop::spawn_restartable(self, name, factory)
+        crate::background_loop::spawn_restartable(&self.shared(), name, factory)
     }
     async fn is_share_bot(&self, bot_id: &str) -> anyhow::Result<bool> {
         Ok(crate::share::store::is_share_bot(&self.db, bot_id).await?)
-    }
-}
-
-impl<T: LocalAccountView + ?Sized> LocalAccountView for Arc<T> {
-    fn background_jobs_known(&self, run_id: &str) -> Option<u32> {
-        (**self).background_jobs_known(run_id)
-    }
-    fn background_jobs_duration(&self, run_id: &str) -> Option<(i64, i64, bool)> {
-        (**self).background_jobs_duration(run_id)
-    }
-    fn deploy_user_escalated_for(&self, approval: &crate::supervisor::store::Approval) -> bool {
-        (**self).deploy_user_escalated_for(approval)
     }
 }
 
@@ -219,19 +217,19 @@ impl LocalAccountView for App {
     }
 }
 
-impl crate::supervisor::ports::ControllerRuntime for Arc<App> {
+impl crate::supervisor::ports::ControllerRuntime for App {
     fn spawn_supervisor_controller(&self, generation: i64) {
-        crate::runners::supervisor::runtime::spawn(self.clone(), generation)
+        crate::runners::supervisor::runtime::spawn(self.shared(), generation)
     }
 }
 
-impl crate::supervisor::ports::ClassifyFailureState for Arc<App> {
+impl crate::supervisor::ports::ClassifyFailureState for App {
     fn classify_failure_count(&self) -> &std::sync::atomic::AtomicU32 {
         &self.classify_failures
     }
 }
 
-impl crate::supervisor::ports::IncidentState for Arc<App> {
+impl crate::supervisor::ports::IncidentState for App {
     fn spool_fold_stuck(&self) -> &tokio::sync::Mutex<std::collections::HashMap<String, (u32, i64)>> {
         &self.spool_fold_stuck
     }
@@ -240,26 +238,26 @@ impl crate::supervisor::ports::IncidentState for Arc<App> {
     }
 }
 
-impl crate::supervisor::ports::DaemonConnection for Arc<App> {
+impl crate::supervisor::ports::DaemonConnection for App {
     fn daemon_connected(&self) -> bool {
         self.connected.load(std::sync::atomic::Ordering::SeqCst)
     }
 }
 
-impl BotLamp for Arc<App> {
+impl BotLamp for App {
     fn bot_lamp<'a>(&'a self, bot_id: &'a str, run: Option<&'a db::Run>) -> impl Future<Output = &'static str> + Send + 'a {
         async move { crate::api::lamp(self.bot_connected(bot_id).await, run) }
     }
 }
 
-impl crate::supervisor::ports::MissionCancellation for Arc<App> {
+impl crate::supervisor::ports::MissionCancellation for App {
     async fn collect_cancelled_missions(&self) {
-        crate::runners::supervisor::runtime::collect_cancelled_missions(self).await
+        crate::runners::supervisor::runtime::collect_cancelled_missions(&self.shared()).await
     }
 }
 
-impl crate::supervisor::ports::CandidateSwitch for Arc<App> {
+impl crate::supervisor::ports::CandidateSwitch for App {
     async fn switch_supervisor_candidate(&self, next: &str, reason: &str, reset_at: Option<&str>) -> Result<bool, crate::lifecycle::LcError> {
-        crate::runners::supervisor::runtime::switch_candidate(self, next, reason, reset_at).await
+        crate::runners::supervisor::runtime::switch_candidate(&self.shared(), next, reason, reset_at).await
     }
 }
