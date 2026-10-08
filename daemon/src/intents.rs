@@ -302,6 +302,22 @@ pub async fn record_failure(pool: &SqlitePool, id: &str, err: &str) -> Result<bo
     Ok(false)
 }
 
+/// `record_failure` 自己出錯（例如 DB 暫時寫不進）後的補記：只動「這顆 boot 自己擁有的 `running`」，翻回 `pending` 並記原因，
+/// 讓下一輪 `claim` 拿得到。不碰 attempts 與通知——到期放棄仍由 `record_failure`／`claim` 的計數負責。回 true＝真的翻了。
+pub async fn record_failure_on_owned(pool: &SqlitePool, id: &str, boot: &str, err: &str) -> Result<bool> {
+    let n = sqlx::query(
+        "UPDATE intents SET status = 'pending', last_error = ?, updated_at = ? WHERE id = ? AND status = 'running' AND owner_boot = ?",
+    )
+    .bind(err)
+    .bind(crate::db::now())
+    .bind(id)
+    .bind(boot)
+    .execute(pool)
+    .await?
+    .rows_affected();
+    Ok(n == 1)
+}
+
 /// 開著的（`pending`／`running`），舊的先。
 pub async fn open(pool: &SqlitePool) -> Result<Vec<Intent>> {
     Ok(sqlx::query_as("SELECT * FROM intents WHERE status IN ('pending','running') ORDER BY created_at").fetch_all(pool).await?)
