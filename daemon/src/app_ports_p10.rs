@@ -56,11 +56,12 @@ impl crate::outbox_remote::OutboxRemoteEnv for App {
     }
 }
 
-impl crate::share::cage::CageEnv for Arc<App> {
-    fn local_identity_env(&self, identity: &str) -> impl Future<Output = std::collections::BTreeMap<String, String>> + Send {
+impl crate::share::cage::CageEnv for App {
+    fn local_identity_env(app: &Arc<Self>, identity: &str) -> impl Future<Output = std::collections::BTreeMap<String, String>> + Send {
+        let app = app.clone();
         let identity = identity.to_string();
         async move {
-            crate::tools::identity_for_host(self, crate::config::LOCAL_HOST, &identity).await.map(|i| i.env).unwrap_or_default()
+            crate::tools::identity_for_host(&app, crate::config::LOCAL_HOST, &identity).await.map(|i| i.env).unwrap_or_default()
         }
     }
 
@@ -68,10 +69,11 @@ impl crate::share::cage::CageEnv for Arc<App> {
         App::bot_dir(self, bot_id)
     }
 
-    fn claude_models(&self, identity: Option<&str>) -> impl Future<Output = Result<Value, String>> + Send {
+    fn claude_models(app: &Arc<Self>, identity: Option<&str>) -> impl Future<Output = Result<Value, String>> + Send {
+        let app = app.clone();
         let identity = identity.map(str::to_string);
         async move {
-            crate::runners::models::list(self, crate::config::LOCAL_HOST, "claude", identity.as_deref(), false).await.map_err(|e| e.to_string())
+            crate::runners::models::list(&app, crate::config::LOCAL_HOST, "claude", identity.as_deref(), false).await.map_err(|e| e.to_string())
         }
     }
 }

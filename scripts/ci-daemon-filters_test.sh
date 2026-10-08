@@ -41,6 +41,8 @@ check "lifecycle::" "crates/am-lifecycle/src/lifecycle/mod.rs"
 check "__all__" "crates/am-lifecycle/src/lifecycle/fixtures/capture.txt"
 check "mission::ports_impl::" "crates/am-supervisor/src/mission/ports_impl.rs"
 check "build_info::" "crates/am-supervisor/src/build_info.rs"
+check "share::portal::" "crates/am-share/src/share/portal.rs"
+check "share::" "crates/am-share/src/share/mod.rs"
 check "__all__ lifecycle::queue::" "daemon/build.rs" "daemon/src/lifecycle/queue.rs"
 # 多個檔案：去重、排序。
 check "lifecycle::prompt:: lifecycle::queue::" "daemon/src/lifecycle/queue.rs" "daemon/src/lifecycle/prompt.rs" "daemon/src/lifecycle/queue.rs"

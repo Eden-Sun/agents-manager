@@ -2,7 +2,7 @@
 //! 沒有拉 form 解析的相依（離線也編得過）：只認標準形狀，任何不合的地方一律拒絕，不猜。
 
 /// `(檔名, 內容)`。檔名是呼叫端給的原字串，還要交給 `clean_upload_name` 清。
-pub(crate) fn file_part<'a>(content_type: &str, body: &'a [u8]) -> Result<(String, &'a [u8]), &'static str> {
+pub fn file_part<'a>(content_type: &str, body: &'a [u8]) -> Result<(String, &'a [u8]), &'static str> {
     let boundary = boundary(content_type).ok_or("bad_multipart")?;
     let delim = [b"--".as_slice(), boundary.as_bytes()].concat();
     let mut at = find(body, &delim, 0).ok_or("bad_multipart")? + delim.len();

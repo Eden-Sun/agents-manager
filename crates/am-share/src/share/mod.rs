@@ -9,23 +9,26 @@
 //! - [`admin`]：主 API（7788，只收 UI token）上開／關／重產連結、隨時拿回完整連結（DB 存 token 原文與 SHA-256，入口用 hash 查）。
 //! - [`portal`]：獨立 listener（`[share] listen`），router 上只有 `/s/{token}/…` 與分享頁的靜態檔，沒有 fallback 到主 API。
 
-pub(crate) mod admin;
-pub(crate) mod cage;
-pub(crate) mod compose;
-pub(crate) mod folder;
-pub(crate) mod multipart;
-pub(crate) mod portal;
-pub(crate) mod store;
-pub(crate) mod svg_check;
+pub mod admin;
+pub mod cage;
+pub mod compose;
+pub mod folder;
+pub mod multipart;
+pub mod portal;
+pub mod store;
+pub mod svg_check;
 
 #[cfg(test)]
+mod test_dirs;
+
+#[cfg(all(test, feature = "daemon-test-harness"))]
 mod tests;
 
-pub(crate) use crate::agent_relay::SHARE_SENDER;
+pub use crate::agent_relay::SHARE_SENDER;
 
 /// daemon 開機時替每顆分享用 bot 的 outbox 補上不清的標記（`outbox-gc.sh` 看它）：開機前就在跑、這次沒重起的那幾顆也算。
 /// 遠端的不管（分享用 bot 只給本機）。讀不到就記 warning，下次啟動那顆 bot 時 `cage::prepare` 會補。
-pub(crate) async fn keep_share_outboxes(app: &impl crate::outbox::ShareStorage) {
+pub async fn keep_share_outboxes(app: &impl crate::outbox::ShareStorage) {
     let live = sqlx::query_scalar::<_, String>(
         "SELECT r.bot_id FROM shared_bots r JOIN bots b ON b.id = r.bot_id AND b.deleted_at IS NULL
            JOIN projects p ON p.id = b.project_id AND p.deleted_at IS NULL AND p.host = 'local'",
@@ -39,14 +42,14 @@ pub(crate) async fn keep_share_outboxes(app: &impl crate::outbox::ShareStorage) 
 }
 
 /// Revoke a bot's public share link after its lifecycle has been decided.
-pub(crate) async fn revoke_bot_share(app: &impl crate::outbox::ShareStorage, bot_id: &str) -> Result<(), sqlx::Error> {
+pub async fn revoke_bot_share(app: &impl crate::outbox::ShareStorage, bot_id: &str) -> Result<(), sqlx::Error> {
     portal::kick(bot_id);
     crate::outbox::unmark_share_keep(app.data_dir(), bot_id);
     store::revoke_bot(app.db_pool(), bot_id).await
 }
 
 /// Revoke all share links in a deleted project and close their active event streams.
-pub(crate) async fn revoke_project_shares(app: &impl crate::outbox::ShareStorage, project_id: &str) -> Result<(), sqlx::Error> {
+pub async fn revoke_project_shares(app: &impl crate::outbox::ShareStorage, project_id: &str) -> Result<(), sqlx::Error> {
     let ids = store::project_share_ids(app.db_pool(), project_id).await?;
     for bot_id in ids {
         portal::kick(&bot_id);
@@ -63,7 +66,7 @@ pub(crate) async fn revoke_project_shares(app: &impl crate::outbox::ShareStorage
 /// 拿 bot 身分打 API 的（實際上只有 AGM 角色過得了 `UserOrAgm` 那道）不能刪、不能停分享用 bot，也不能刪裝著它的專案
 /// （2026-10-04 使用者：「let AGM 不清除這類 bot」——它是給外部 end user 隨時來用的）。使用者自己（UI token）照常。
 /// 回 `Some(bot_id)`＝擋下；讀不到也擋（fail closed，跟 [`refuses_bot_principal`] 同一個規矩）。重啟不擋：停了會自己起回來。
-pub(crate) async fn guards_from_bot_principal(db: &sqlx::SqlitePool, method: &str, path: &str) -> Option<String> {
+pub async fn guards_from_bot_principal(db: &sqlx::SqlitePool, method: &str, path: &str) -> Option<String> {
     let segs: Vec<&str> = path.trim_end_matches('/').split('/').skip(1).collect();
     let protected = |id: String| async move { (!matches!(store::is_share_bot(db, &id).await, Ok(false))).then_some(id) };
     match (method, segs.as_slice()) {
@@ -84,4 +87,4 @@ pub(crate) async fn guards_from_bot_principal(db: &sqlx::SqlitePool, method: &st
     }
 }
 
-pub(crate) use crate::db::refuses_bot_principal;
+pub use crate::db::refuses_bot_principal;

@@ -1,23 +1,21 @@
 [package]
-name = "agents-managerd"
+name = "am-share"
 version = "0.1.0"
 edition = "2021"
 
 [features]
-default = ["embed-ui", "daemon-test-harness"]
+default = ["embed-ui"]
 # Enabled for the release build once `web/dist` exists (M8).
 embed-ui = []
-# Compile App-backed tests for extracted lifecycle modules in the daemon harness.
+# App-backed share tests are compiled by agents-managerd's composition test harness.
 daemon-test-harness = []
 
 [dependencies]
-am-base = { path = "../crates/am-base" }
-am-lifecycle = { path = "../crates/am-lifecycle" }
-am-share = { path = "../crates/am-share" }
-am-core = { path = "../crates/am-core" }
-am-ports = { path = "../crates/am-ports" }
-am-config = { path = "../crates/am-config" }
-am-supervisor = { path = "../crates/am-supervisor", features = ["daemon-test-harness"] }
+am-base = { path = "../am-base" }
+am-lifecycle = { path = "../am-lifecycle" }
+am-core = { path = "../am-core" }
+am-ports = { path = "../am-ports" }
+am-config = { path = "../am-config" }
 axum = { version = "0.8", features = ["ws", "macros"] }
 base64 = "0.22"
 tokio = { version = "1", features = ["full"] }
@@ -52,6 +50,6 @@ libc = "0.2"
 image = { version = "0.25", default-features = false, features = ["jpeg", "png", "webp", "gif"] }
 
 [dev-dependencies]
-am-base = { path = "../crates/am-base", features = ["test-hooks"] }
+am-base = { path = "../am-base", features = ["test-hooks"] }
 # paused Tokio time for timer tests (lifecycle/queue.rs): same tokio crate, test builds only.
 tokio = { version = "1", features = ["full", "test-util"] }

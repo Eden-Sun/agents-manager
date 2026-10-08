@@ -4945,7 +4945,7 @@ daemon 要能在 Linux（目標：Ubuntu，外部編譯主機 192.168.1.46，#67
 ## 20. 分享 bot（使用者 2026-10-03）
 
 把一顆**專用的受限 bot** 單獨開給 end user：一條連結、一頁獨立的分享頁，只能對話與交換檔案。拿到連結的人＝網路上任何人，
-所以下面每一條都有測試釘住（`daemon/src/share/tests.rs`、`daemon/src/share/portal_upload_tests.rs`）。對外走 Tailscale Funnel，只把分享入口那個 port 給 Funnel；管理 API（7788）照舊只聽本機。
+所以下面每一條都有測試釘住（`crates/am-share/src/share/tests.rs`、`crates/am-share/src/share/portal_upload_tests.rs`）。對外走 Tailscale Funnel，只把分享入口那個 port 給 Funnel；管理 API（7788）照舊只聽本機。
 
 ### 20.1 受限 bot（`share_profile = "restricted"`）
 

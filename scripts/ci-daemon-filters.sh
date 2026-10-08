@@ -4,7 +4,7 @@
 #
 # 為什麼要有：`changed` 以前對 daemon 只做 `cargo check --all-targets`，測試要自己記得用 CHECK_TESTS 挑——一天內好幾次
 # 靠另外跑測試才抓到壞掉的 commit。整包 daemon 測試要十幾分鐘不能放進收尾，所以挑「改到的模組自己的測試」：
-#   - daemon/src/a/b.rs → `a::b::`；a/mod.rs → `a::`；頂層 x.rs → `x::`；am-base Rust 模組 → daemon composition harness；am-lifecycle Rust 模組沿用原 daemon 路徑。
+#   - daemon/src/a/b.rs → `a::b::`；a/mod.rs → `a::`；頂層 x.rs → `x::`；am-base Rust 模組 → daemon composition harness；am-lifecycle／am-share Rust 模組沿用原 daemon 路徑（share/…→`share::…::`）。
 #   - build scripts、crate wiring、共用測試 helper、被嵌入的非 Rust 資料與 daemon/tests 變更，回報 `__all__` 跑全套。
 #   - daemon 以外、但 daemon 的測試會在執行期讀的檔案（跟 ci-changed-parts.sh 同一份清單，兩邊要一起改）：
 #     scripts/check.sh → cargo_shim、lint-shell-vars.sh → herdr_shim、release-task.md → claude_review、
@@ -44,8 +44,8 @@ while IFS= read -r f; do
                 *) printf '__all__\n' ;;
             esac
             ;;
-        crates/am-lifecycle/src/*)
-            rel="${f#crates/am-lifecycle/src/}"
+        crates/am-lifecycle/src/* | crates/am-share/src/*)
+            rel="${f#crates/*/src/}"
             case "$rel" in
                 *.rs)
                     mod="${rel%.rs}"

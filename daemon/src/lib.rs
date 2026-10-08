@@ -238,7 +238,13 @@ mod promote;
 mod gh_auth;
 mod git_quick;
 mod group;
-mod share;
+#[cfg(not(test))]
+pub use am_share::share;
+// App-backed share tests (tests.rs etc.) belong to the daemon crate: under `cargo test` compile the
+// same sources at the crate root so `crate::` paths and the App adapters share one set of types.
+#[cfg(test)]
+#[path = "../../crates/am-share/src/share/mod.rs"]
+pub mod share;
 mod herdr_upgrade;
 mod swap_window;
 #[cfg(test)]

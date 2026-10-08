@@ -19,8 +19,8 @@ use sqlx::SqlitePool;
 
 use crate::db;
 
-pub(crate) const PROFILE_RESTRICTED: &str = "restricted";
-pub(crate) const PROFILE_TRUSTED: &str = "trusted";
+pub const PROFILE_RESTRICTED: &str = "restricted";
+pub const PROFILE_TRUSTED: &str = "trusted";
 
 const SHARED_BOTS_SQL: &str = "CREATE TABLE IF NOT EXISTS shared_bots (
            bot_id TEXT PRIMARY KEY,
@@ -31,7 +31,7 @@ const SHARED_BOTS_SQL: &str = "CREATE TABLE IF NOT EXISTS shared_bots (
            created_at TEXT NOT NULL
          )";
 /// token 原文的長度（32 bytes → base64url 無 padding）。
-pub(crate) const TOKEN_LEN: usize = 43;
+pub const TOKEN_LEN: usize = 43;
 
 pub async fn migrate(pool: &SqlitePool) -> Result<()> {
     // 只收 'restricted' 的舊表：SQLite 改不了 CHECK，換名、照新定義建、搬資料、刪舊表（同一個交易）。
@@ -81,36 +81,36 @@ pub async fn migrate(pool: &SqlitePool) -> Result<()> {
 }
 
 #[allow(unused_imports)]
-pub(crate) use crate::db::{caged_workspace, is_caged, is_share_bot, share_workspace as workspace};
+pub use crate::db::{caged_workspace, is_caged, is_share_bot, share_workspace as workspace};
 
 /// 同 [`caged_workspace`]：受限分享 bot 的工作目錄（issue #828）。
-pub(crate) async fn restricted_workspace(pool: &SqlitePool, bot_id: &str) -> Result<Option<String>, sqlx::Error> {
+pub async fn restricted_workspace(pool: &SqlitePool, bot_id: &str) -> Result<Option<String>, sqlx::Error> {
     caged_workspace(pool, bot_id).await
 }
 
 /// 每顆分享用 bot 的種類（`restricted`／`trusted`）；投影給主 UI 的 `share_profile`。
-pub(crate) async fn profiles(pool: &SqlitePool) -> Result<std::collections::HashMap<String, String>, sqlx::Error> {
+pub async fn profiles(pool: &SqlitePool) -> Result<std::collections::HashMap<String, String>, sqlx::Error> {
     Ok(sqlx::query_as::<_, (String, String)>("SELECT bot_id, profile FROM shared_bots").fetch_all(pool).await?.into_iter().collect())
 }
 
 /// 擁有者這一則送給分享 bot 的訊息：這一回合 bot 的回覆照樣給分享頁看。
-pub(crate) async fn mark_reply_visible(pool: &SqlitePool, message_id: &str) -> Result<(), sqlx::Error> {
+pub async fn mark_reply_visible(pool: &SqlitePool, message_id: &str) -> Result<(), sqlx::Error> {
     sqlx::query("INSERT OR IGNORE INTO share_reply_visible (message_id, created_at) VALUES (?,?)").bind(message_id).bind(db::now()).execute(pool).await.map(|_| ())
 }
 
 /// 分享開著的 bot（`bot_shares` 有一列）；側欄的 🔗 亮不亮用。
-pub(crate) async fn shared_ids(pool: &SqlitePool) -> Result<HashSet<String>, sqlx::Error> {
+pub async fn shared_ids(pool: &SqlitePool) -> Result<HashSet<String>, sqlx::Error> {
     Ok(sqlx::query_scalar::<_, String>("SELECT bot_id FROM bot_shares").fetch_all(pool).await?.into_iter().collect())
 }
 
 #[cfg(test)]
-pub(crate) async fn insert_restricted(pool: &SqlitePool, bot_id: &str, workspace: &str) -> Result<(), sqlx::Error> {
+pub async fn insert_restricted(pool: &SqlitePool, bot_id: &str, workspace: &str) -> Result<(), sqlx::Error> {
     insert_share_bot(pool, bot_id, PROFILE_RESTRICTED, workspace).await
 }
 
 /// 建 bot **之前**先記下來：config 一寫進去、投影出那一列之後，任何一次啟動都已經是受限的，沒有「先當一般 bot 起來」的空窗。
 /// `profile` 是 [`PROFILE_RESTRICTED`] 或 [`PROFILE_TRUSTED`]。
-pub(crate) async fn insert_share_bot(pool: &SqlitePool, bot_id: &str, profile: &str, workspace: &str) -> Result<(), sqlx::Error> {
+pub async fn insert_share_bot(pool: &SqlitePool, bot_id: &str, profile: &str, workspace: &str) -> Result<(), sqlx::Error> {
     sqlx::query("INSERT INTO shared_bots (bot_id, profile, workspace, created_at) VALUES (?,?,?,?)")
         .bind(bot_id)
         .bind(profile)
@@ -122,14 +122,14 @@ pub(crate) async fn insert_share_bot(pool: &SqlitePool, bot_id: &str, profile: &
 }
 
 /// 建 bot 失敗時收回 [`insert_share_bot`]。
-pub(crate) async fn delete_restricted(pool: &SqlitePool, bot_id: &str) -> Result<(), sqlx::Error> {
+pub async fn delete_restricted(pool: &SqlitePool, bot_id: &str) -> Result<(), sqlx::Error> {
     sqlx::query("DELETE FROM shared_bots WHERE bot_id = ?").bind(bot_id).execute(pool).await?;
     sqlx::query("DELETE FROM bot_shares WHERE bot_id = ?").bind(bot_id).execute(pool).await?;
     Ok(())
 }
 
 #[derive(Debug, Clone, sqlx::FromRow)]
-pub(crate) struct ShareRow {
+pub struct ShareRow {
     pub token_hint: String,
     pub created_at: String,
     pub last_used_at: Option<String>,
@@ -137,22 +137,22 @@ pub(crate) struct ShareRow {
     pub token: Option<String>,
 }
 
-pub(crate) async fn share(pool: &SqlitePool, bot_id: &str) -> Result<Option<ShareRow>, sqlx::Error> {
+pub async fn share(pool: &SqlitePool, bot_id: &str) -> Result<Option<ShareRow>, sqlx::Error> {
     sqlx::query_as("SELECT token_hint, created_at, last_used_at, token FROM bot_shares WHERE bot_id = ?").bind(bot_id).fetch_optional(pool).await
 }
 
-pub(crate) fn new_token() -> String {
+pub fn new_token() -> String {
     let mut bytes = [0u8; 32];
     rand::rngs::OsRng.fill_bytes(&mut bytes);
     base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(bytes)
 }
 
-pub(crate) fn token_hash(token: &str) -> String {
+pub fn token_hash(token: &str) -> String {
     sha2::Sha256::digest(token.as_bytes()).iter().map(|b| format!("{b:02x}")).collect()
 }
 
 /// 只認我們發得出來的形狀：43 字 base64url。其他一律不查 DB。
-pub(crate) fn token_shape_ok(token: &str) -> bool {
+pub fn token_shape_ok(token: &str) -> bool {
     token.len() == TOKEN_LEN && token.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_')
 }
 
@@ -161,7 +161,7 @@ fn hint(token: &str) -> String {
 }
 
 /// 開分享。已經開著就不動（回 `None`，網址照 [`share`] 存的拿）：重按開關不該讓已經發出去的連結失效，要換請走 [`rotate`]。
-pub(crate) async fn enable(pool: &SqlitePool, bot_id: &str) -> Result<Option<String>, sqlx::Error> {
+pub async fn enable(pool: &SqlitePool, bot_id: &str) -> Result<Option<String>, sqlx::Error> {
     let token = new_token();
     let done = sqlx::query(
         "INSERT OR IGNORE INTO bot_shares (bot_id, token_hash, token_hint, created_at, token)
@@ -182,7 +182,7 @@ pub(crate) async fn enable(pool: &SqlitePool, bot_id: &str) -> Result<Option<Str
 }
 
 /// 換新 token：舊的 hash 與原文一起被蓋掉，同一刻起舊連結 404。沒開著＝`None`。
-pub(crate) async fn rotate(pool: &SqlitePool, bot_id: &str) -> Result<Option<String>, sqlx::Error> {
+pub async fn rotate(pool: &SqlitePool, bot_id: &str) -> Result<Option<String>, sqlx::Error> {
     let token = new_token();
     let done = sqlx::query(
         "UPDATE bot_shares SET token_hash = ?, token_hint = ?, token = ?, rotated_at = ? WHERE bot_id = ? AND EXISTS (
@@ -200,13 +200,13 @@ pub(crate) async fn rotate(pool: &SqlitePool, bot_id: &str) -> Result<Option<Str
     Ok((done.rows_affected() == 1).then_some(token))
 }
 
-pub(crate) async fn disable(pool: &SqlitePool, bot_id: &str) -> Result<(), sqlx::Error> {
+pub async fn disable(pool: &SqlitePool, bot_id: &str) -> Result<(), sqlx::Error> {
     sqlx::query("DELETE FROM bot_shares WHERE bot_id = ?").bind(bot_id).execute(pool).await.map(|_| ())
 }
 
 /// token → bot id。分享關了、bot 刪了、不是受限 bot（不該發生，但不信任單一張表）一律 `None`。
 /// 用 hash 查表，查到之後再常數時間比一次 hash（不靠 SQLite 的字串比較當最後一道）。
-pub(crate) async fn resolve(pool: &SqlitePool, token: &str) -> Result<Option<String>, sqlx::Error> {
+pub async fn resolve(pool: &SqlitePool, token: &str) -> Result<Option<String>, sqlx::Error> {
     if !token_shape_ok(token) {
         return Ok(None);
     }
@@ -225,7 +225,7 @@ pub(crate) async fn resolve(pool: &SqlitePool, token: &str) -> Result<Option<Str
 }
 
 /// 記「最後一次有人用」，一分鐘最多寫一次。
-pub(crate) async fn touch(pool: &SqlitePool, bot_id: &str) {
+pub async fn touch(pool: &SqlitePool, bot_id: &str) {
     let _ = sqlx::query("UPDATE bot_shares SET last_used_at = ? WHERE bot_id = ? AND (last_used_at IS NULL OR last_used_at < ?)")
         .bind(db::now())
         .bind(bot_id)
@@ -235,11 +235,11 @@ pub(crate) async fn touch(pool: &SqlitePool, bot_id: &str) {
 }
 
 /// Permanently revoke the current public capability while retaining the restricted-bot profile.
-pub(crate) async fn revoke_bot(pool: &SqlitePool, bot_id: &str) -> Result<(), sqlx::Error> {
+pub async fn revoke_bot(pool: &SqlitePool, bot_id: &str) -> Result<(), sqlx::Error> {
     sqlx::query("DELETE FROM bot_shares WHERE bot_id = ?").bind(bot_id).execute(pool).await.map(|_| ())
 }
 
-pub(crate) async fn project_share_ids(pool: &SqlitePool, project_id: &str) -> Result<Vec<String>, sqlx::Error> {
+pub async fn project_share_ids(pool: &SqlitePool, project_id: &str) -> Result<Vec<String>, sqlx::Error> {
     sqlx::query_scalar::<_, String>(
         "SELECT s.bot_id FROM bot_shares s JOIN bots b ON b.id = s.bot_id WHERE b.project_id = ?",
     )
@@ -248,7 +248,7 @@ pub(crate) async fn project_share_ids(pool: &SqlitePool, project_id: &str) -> Re
     .await
 }
 
-pub(crate) async fn revoke_project(pool: &SqlitePool, project_id: &str) -> Result<(), sqlx::Error> {
+pub async fn revoke_project(pool: &SqlitePool, project_id: &str) -> Result<(), sqlx::Error> {
     sqlx::query("DELETE FROM bot_shares WHERE bot_id IN (SELECT id FROM bots WHERE project_id = ?)")
         .bind(project_id)
         .execute(pool)

@@ -38,17 +38,17 @@ use crate::db;
 use crate::share::{multipart, store, SHARE_SENDER};
 
 /// 一則訊息的字數上限。
-pub(crate) const MAX_TEXT_CHARS: usize = 8000;
+pub const MAX_TEXT_CHARS: usize = 8000;
 /// 每個分享（每顆 bot）每分鐘最多送幾則。
-pub(crate) const MESSAGES_PER_MIN: usize = 10;
+pub const MESSAGES_PER_MIN: usize = 10;
 /// 單檔上限 25 MiB。
-pub(crate) const MAX_UPLOAD: usize = 25 * 1024 * 1024;
+pub const MAX_UPLOAD: usize = 25 * 1024 * 1024;
 /// 每分鐘最多上傳幾個檔。分享頁一次選一整批手機照片是常態（客訴 2026-10-04：選 3 張以上就「傳得太快了」），
 /// 一則最多 [`MAX_ATTACHMENTS`] 張，再留一倍給重傳；分享頁遇到 429 會照 `Retry-After` 自己等、自己重試。
-pub(crate) const UPLOADS_PER_MIN: usize = 40;
+pub const UPLOADS_PER_MIN: usize = 40;
 /// `inbox/` 的總量上限（位元組、檔數）：滿了要等 bot 的主人清掉。
-pub(crate) const INBOX_MAX_BYTES: u64 = 200 * 1024 * 1024;
-pub(crate) const INBOX_MAX_FILES: usize = 300;
+pub const INBOX_MAX_BYTES: u64 = 200 * 1024 * 1024;
+pub const INBOX_MAX_FILES: usize = 300;
 /// 一則訊息最多帶幾個附件：手機相簿一次選十幾張照片要能一則送出（原本 10，2026-10-04 調高）。
 const MAX_ATTACHMENTS: usize = 20;
 /// 全站同時讀取幾個上傳 body（每個最多 [`MAX_UPLOAD`]，佔記憶體）。
@@ -63,7 +63,7 @@ const UPLOAD_QUEUE_MAX: usize = 64;
 /// 同時開著的 SSE 連線（全部分享加起來）。
 const MAX_STREAMS: usize = 32;
 /// 單一分享同時開著的 SSE 連線；避免一個連結佔滿全部全域名額。
-pub(crate) const MAX_STREAMS_PER_SHARE: usize = 4;
+pub const MAX_STREAMS_PER_SHARE: usize = 4;
 /// 進 token DB 查詢之前可同時佔用的全域名額。
 const MAX_TOKEN_LOOKUPS: usize = 8;
 /// SSE 每隔多久重新確認一次 token 還有效（關分享／重產時另外會被 [`kick`] 叫醒）。
@@ -72,10 +72,10 @@ const STREAM_RECHECK: Duration = Duration::from_secs(30);
 /// 每則分享使用者的訊息一律以這個開頭再打進 TUI。claude 的輸入框把**第一個字**當模式切換：`!` 是 bash 模式
 /// （2026-10-03 實測：`--restricted --tools … --permission-mode dontAsk`、settings 也 deny Bash，`!echo … > 檔` 照樣真的跑了），
 /// `/` 是 slash 指令（`/permissions`、`/add-dir`、`/login`…），`#` 是記憶。工具白名單管不到這一層，所以不讓 end user 的字出現在第一個字。
-pub(crate) const SHARE_PREFIX: &str = "〔分享使用者〕 ";
+pub const SHARE_PREFIX: &str = "〔分享使用者〕 ";
 
 /// 送給 bot 的訊息裡，附件清單前面的那一行。對話列表靠它把附件從文字裡拆出來（[`split_attachments`]）。
-pub(crate) const ATTACH_MARK: &str = "〔分享使用者上傳的檔案，在工作目錄的 inbox/ 底下〕";
+pub const ATTACH_MARK: &str = "〔分享使用者上傳的檔案，在工作目錄的 inbox/ 底下〕";
 
 /// `?inline=1` 的圖片回應用這份 CSP，取代頁面的 [`CSP`]：網址被直接開成文件時（SVG 會是一份 DOM），
 /// `sandbox` 不帶 `allow-scripts` 讓裡面的 script 不跑、origin 變成 opaque，碰不到分享頁的 token。
@@ -86,7 +86,7 @@ const CSP: &str = "default-src 'self'; script-src 'self'; style-src 'self'; img-
 
 /// 分享入口從 `App` 拿的外部事實（`App` 在 `app_ports_p10` 實作）：資料目錄與 DB（[`ShareStorage`]）、讀分享檔、SVG 提醒（[`SvgCheckEnv`]），
 /// 加上 `[share]` 設定、bot 互斥鎖、狀態燈、事件匯流排與「把分享使用者的訊息送給 bot」。授權檢查（token 解析、權威鎖、撞號後重驗）全在這個檔，不經過 trait。
-pub(crate) trait PortalEnv: crate::share::svg_check::SvgCheckEnv {
+pub trait PortalEnv: crate::share::svg_check::SvgCheckEnv {
     /// `[share] base_url`（讀當下的設定）。
     fn share_base_url(&self) -> impl std::future::Future<Output = Option<String>> + Send;
     /// `[share] listen`（讀當下的設定）。
@@ -108,7 +108,7 @@ pub(crate) trait PortalEnv: crate::share::svg_check::SvgCheckEnv {
 }
 
 /// [`PortalEnv::send_share_message`] 的結果；細節（pane、run、herdr）不給外面看。
-pub(crate) enum SendOutcome {
+pub enum SendOutcome {
     Accepted { message_id: String, delivery: String },
     NotFound,
     /// 現在收不下（例如上一則還在等回覆）；`Value` 只進 log。
@@ -116,7 +116,7 @@ pub(crate) enum SendOutcome {
     Failed(String),
 }
 
-pub(crate) struct Portal<H: PortalEnv> {
+pub struct Portal<H: PortalEnv> {
     app: Arc<H>,
     limits: Arc<Limits>,
     uploads: Arc<Semaphore>,
@@ -200,13 +200,13 @@ async fn resolve_token(pool: &sqlx::SqlitePool, slots: &Arc<Semaphore>, token: &
 
 /// 固定視窗的計數（每顆 bot、每種動作一個佇列）。只在記憶體裡：daemon 重啟就歸零，這是防灌爆，不是帳本。
 #[derive(Default)]
-pub(crate) struct Limits {
+pub struct Limits {
     hits: Mutex<HashMap<(String, &'static str), VecDeque<Instant>>>,
 }
 
 impl Limits {
     /// 還沒到上限就記一筆、回 `None`；到了回還要等幾秒。
-    pub(crate) fn take(&self, bot: &str, bucket: &'static str, max: usize, window: Duration) -> Option<u64> {
+    pub fn take(&self, bot: &str, bucket: &'static str, max: usize, window: Duration) -> Option<u64> {
         let now = Instant::now();
         let mut hits = self.hits.lock().unwrap_or_else(|e| e.into_inner());
         let q = hits.entry((bot.to_string(), bucket)).or_default();
@@ -228,7 +228,7 @@ fn kicks() -> &'static broadcast::Sender<String> {
 }
 
 /// 關分享／重產連結之後叫醒這顆 bot 開著的 SSE，讓它們當下重新確認 token（舊 token 的就斷掉）。
-pub(crate) fn kick(bot_id: &str) {
+pub fn kick(bot_id: &str) {
     let _ = kicks().send(bot_id.to_string());
 }
 
@@ -438,7 +438,7 @@ async fn upload_admission<H: PortalEnv>(State(st): State<Portal<H>>, Path(token)
         Err(response) => return response,
     };
     #[cfg(test)]
-    crate::lifecycle::race_point::hit("share_upload_after_bot_for", &bot_id).await;
+    crate::race_point::hit("share_upload_after_bot_for", &bot_id).await;
     // 全域上傳名額滿了就排隊等（分享頁一次選好幾張照片時會同時送來）。等的時候還沒讀 body，不算一次上傳嘗試，
     // 否則別的分享占滿名額時，重試會把這顆 bot 的每分鐘額度扣光。排隊的人太多、或等太久才 429。
     let _permit = match st.uploads.clone().try_acquire_owned() {
@@ -507,7 +507,7 @@ async fn info<H: PortalEnv>(State(st): State<Portal<H>>, Path(token): Path<Strin
 }
 
 /// 我們自己在送出時加在文字後面的附件清單拆回來：`(文字, [檔名])`。
-pub(crate) fn split_attachments(content: &str) -> (String, Vec<String>) {
+pub fn split_attachments(content: &str) -> (String, Vec<String>) {
     match content.split_once(&format!("\n\n{ATTACH_MARK}\n")) {
         Some((text, list)) => {
             let names = list.lines().filter_map(|l| l.strip_prefix("- inbox/")).map(|n| display_name(n).to_string()).collect();
@@ -526,7 +526,7 @@ fn display_name(stored: &str) -> &str {
 }
 
 /// 這則 user 訊息給不給分享頁看：只有 end user 自己送的；倒回的、擁有者（或別顆 bot）送的都不給。
-pub(crate) fn shown_to_share(role: &str, relay_from: Option<&str>, rewound_at: Option<&str>) -> bool {
+pub fn shown_to_share(role: &str, relay_from: Option<&str>, rewound_at: Option<&str>) -> bool {
     rewound_at.is_none() && role == "user" && relay_from == Some(SHARE_SENDER)
 }
 
@@ -536,7 +536,7 @@ pub(crate) fn shown_to_share(role: &str, relay_from: Option<&str>, rewound_at: O
 ///   後台交代 bot 的「ok」不該出現在 end user 的對話裡）。觸發訊息＝同一個 turn 的第一則 user；沒有 turn 的看它前面最近一則 user。
 ///   前面沒有任何 user（開場白）照樣給。
 /// 倒回的一律不給。`'share'` 是 [`SHARE_SENDER`]（測試釘住兩者一致）。
-pub(crate) const VISIBLE_SQL: &str = "m.rewound_at IS NULL AND (
+pub const VISIBLE_SQL: &str = "m.rewound_at IS NULL AND (
        (m.role = 'user' AND m.relay_from = 'share')
        OR (m.role = 'assistant' AND COALESCE((
              SELECT IFNULL(t.relay_from, '') = 'share' OR EXISTS (SELECT 1 FROM share_reply_visible v WHERE v.message_id = t.id)
@@ -558,7 +558,7 @@ fn strip_internal_marks(text: &str) -> String {
 }
 
 /// 一則訊息對外的樣子：只有這幾個欄位。工具細節、turn、終端快照、系統訊息、轉寄來源的 bot id 都不給。
-pub(crate) fn public_message(id: &str, role: &str, content: &str, attachments_json: Option<&str>, relay_from: Option<&str>, at: &str) -> Value {
+pub fn public_message(id: &str, role: &str, content: &str, attachments_json: Option<&str>, relay_from: Option<&str>, at: &str) -> Value {
     let (text, mut names) = if role == "user" { split_attachments(content) } else { (content.to_string(), Vec::new()) };
     let text = match (role, relay_from) {
         ("user", Some(SHARE_SENDER)) => text.strip_prefix(SHARE_PREFIX).map(str::to_string).unwrap_or(text),
@@ -644,7 +644,7 @@ struct SendIn {
 }
 
 /// 上傳後存進 `inbox/` 的名字（`<ulid>-<清過的檔名>`）。只認這個形狀，送訊息時帶來的附件 id 也用它驗。
-pub(crate) fn stored_name_ok(name: &str) -> bool {
+pub fn stored_name_ok(name: &str) -> bool {
     name.len() <= 200
         && !name.starts_with('.')
         && !name.contains('/')
@@ -659,7 +659,7 @@ async fn send_message<H: PortalEnv>(State(st): State<Portal<H>>, Path(token): Pa
         Err(r) => return r,
     };
     #[cfg(test)]
-    crate::lifecycle::race_point::hit("share_send_after_bot_for", &bot_id).await;
+    crate::race_point::hit("share_send_after_bot_for", &bot_id).await;
     let authority = match authority_lock(&st, &token, &bot_id).await {
         Ok(g) => g,
         Err(r) => return r,
@@ -757,7 +757,7 @@ async fn events<H: PortalEnv>(State(st): State<Portal<H>>, Path(token): Path<Str
     Sse::new(stream).keep_alive(KeepAlive::new().interval(Duration::from_secs(20))).into_response()
 }
 
-pub(crate) struct Stream<H: PortalEnv> {
+pub struct Stream<H: PortalEnv> {
     app: Arc<H>,
     token: String,
     bot_id: String,
@@ -878,7 +878,7 @@ impl<H: PortalEnv> Stream<H> {
 }
 
 #[cfg(test)]
-pub(crate) fn stream_for_test<H: PortalEnv>(app: &Arc<H>, token: &str, bot_id: &str, pending: Option<Value>) -> Stream<H> {
+pub fn stream_for_test<H: PortalEnv>(app: &Arc<H>, token: &str, bot_id: &str, pending: Option<Value>) -> Stream<H> {
     Stream {
         app: app.clone(),
         token: token.to_string(),
@@ -896,18 +896,18 @@ pub(crate) fn stream_for_test<H: PortalEnv>(app: &Arc<H>, token: &str, bot_id: &
 }
 
 #[cfg(test)]
-pub(crate) async fn next_for_test<H: PortalEnv>(stream: &mut Stream<H>) -> Option<Event> {
+pub async fn next_for_test<H: PortalEnv>(stream: &mut Stream<H>) -> Option<Event> {
     stream.next().await
 }
 
 #[cfg(test)]
-pub(crate) async fn map_for_test<H: PortalEnv>(stream: &mut Stream<H>, ev: &WsEvent) -> Option<Event> {
+pub async fn map_for_test<H: PortalEnv>(stream: &mut Stream<H>, ev: &WsEvent) -> Option<Event> {
     stream.map(ev).await
 }
 
 /// 收得下的檔案種類：副檔名決定，內容要對得上（圖片／PDF／Office 看檔頭，文字檔要是 UTF-8、不能有 NUL）。
 /// 呼叫端給的 Content-Type 不採信。
-pub(crate) fn classify_upload(name: &str, data: &[u8]) -> Result<&'static str, &'static str> {
+pub fn classify_upload(name: &str, data: &[u8]) -> Result<&'static str, &'static str> {
     let ext = name.rsplit_once('.').map(|(_, e)| e.to_ascii_lowercase()).unwrap_or_default();
     let starts = |m: &[u8]| data.starts_with(m);
     let kind = match ext.as_str() {
@@ -927,7 +927,7 @@ pub(crate) fn classify_upload(name: &str, data: &[u8]) -> Result<&'static str, &
 }
 
 /// 使用者給的檔名清成安全的：只取最後一段，去掉控制字元與路徑符號，不能是隱藏檔，長度有上限。
-pub(crate) fn clean_upload_name(raw: &str) -> Option<String> {
+pub fn clean_upload_name(raw: &str) -> Option<String> {
     let base = raw.rsplit(['/', '\\']).next().unwrap_or("").trim();
     let cleaned: String = base
         .chars()
@@ -979,13 +979,13 @@ async fn upload<H: PortalEnv>(
         }
     };
     #[cfg(test)]
-    crate::lifecycle::race_point::hit("share_upload_before_authority_lock", &format!("{bot_id}:{name}")).await;
+    crate::race_point::hit("share_upload_before_authority_lock", &format!("{bot_id}:{name}")).await;
     let _authority = match authority_lock(&st, &token, &bot_id).await {
         Ok(g) => g,
         Err(r) => return r,
     };
     #[cfg(test)]
-    crate::lifecycle::race_point::hit("share_upload_after_authority_lock", &bot_id).await;
+    crate::race_point::hit("share_upload_after_authority_lock", &bot_id).await;
     let stored = format!("{}-{name}", db::ulid());
     let Some(folder) = folder_of(&st.app, &bot_id).await else { return unavailable() };
     let (file_name, len) = (stored.clone(), data.len());
@@ -1074,7 +1074,7 @@ struct FileQuery {
 
 /// `?inline=1` 能 inline 的圖片：副檔名 → 正確的 MIME。白名單以外（HTML、PDF、文字…）照樣是附件，
 /// 分享頁用 `<img>` 預覽 bot 做的圖卡要靠這個（SVG 平常的下載是 `application/octet-stream`，`<img>` 畫不出來）。
-pub(crate) fn inline_image(name: &str) -> Option<&'static str> {
+pub fn inline_image(name: &str) -> Option<&'static str> {
     let ext = std::path::Path::new(name).extension().and_then(OsStr::to_str)?.to_ascii_lowercase();
     Some(match ext.as_str() {
         "svg" => "image/svg+xml",
@@ -1142,7 +1142,7 @@ async fn embed_photos<H: PortalEnv>(app: &Arc<H>, bot_id: &str, res: Response) -
 
 /// `[share] listen` 有設就開分享入口。只准 loopback（Tailscale Funnel 從本機轉進來），不能跟管理 API 同一個 port；
 /// 開不起來只記 error，不擋 daemon 開機（管理介面照常）。設定改了要重啟 daemon 才生效。
-pub(crate) async fn spawn_listener<H: PortalEnv>(app: &Arc<H>, main_port: u16) {
+pub async fn spawn_listener<H: PortalEnv>(app: &Arc<H>, main_port: u16) {
     let Some(listen) = app.share_listen().await.filter(|s| !s.trim().is_empty()) else { return };
     let addr = match check_listen(&listen, main_port) {
         Ok(a) => a,
@@ -1167,7 +1167,7 @@ pub(crate) async fn spawn_listener<H: PortalEnv>(app: &Arc<H>, main_port: u16) {
     });
 }
 
-pub(crate) fn check_listen(listen: &str, main_port: u16) -> Result<std::net::SocketAddr, String> {
+pub fn check_listen(listen: &str, main_port: u16) -> Result<std::net::SocketAddr, String> {
     let addr: std::net::SocketAddr = listen.trim().parse().map_err(|e| format!("`{listen}` is not ip:port ({e})"))?;
     if !addr.ip().is_loopback() {
         return Err("must be a loopback address (127.0.0.1 / ::1); expose it with tailscale funnel".into());
@@ -1181,6 +1181,6 @@ pub(crate) fn check_listen(listen: &str, main_port: u16) -> Result<std::net::Soc
 #[path = "portal_ooxml.rs"]
 mod ooxml;
 
-#[cfg(test)]
+#[cfg(all(test, feature = "daemon-test-harness"))]
 #[path = "portal_upload_tests.rs"]
 mod upload_tests;
