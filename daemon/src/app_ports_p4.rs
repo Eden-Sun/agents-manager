@@ -58,16 +58,23 @@ impl TurnControl for AppTurnControl<'_> {
     ) -> impl Future<Output = Result<TurnId, TurnError>> + Send + '_ {
         async move {
             let request_id = request.client_request_id.unwrap_or_else(crate::db::ulid);
-            lifecycle::prompt(self.app, &request.bot_id, &request.text, &request_id)
-                .await
-                .map(|out| out.turn_id)
-                .map_err(|err| map_error(&request.bot_id, err))
+            let sent = match request.expected_run_id.as_deref() {
+                Some(run_id) => {
+                    lifecycle::prompt_expect_run(self.app, &request.bot_id, &request.text, &request_id, run_id).await
+                }
+                None => lifecycle::prompt(self.app, &request.bot_id, &request.text, &request_id).await,
+            };
+            sent.map(|out| out.turn_id).map_err(|err| map_error(&request.bot_id, err))
         }
     }
 
-    fn compact_bot(&self, bot: BotId) -> impl Future<Output = Result<(), TurnError>> + Send + '_ {
+    fn compact_bot(
+        &self,
+        bot: BotId,
+        expected_run_id: Option<RunId>,
+    ) -> impl Future<Output = Result<(), TurnError>> + Send + '_ {
         async move {
-            lifecycle::compact(self.app, &bot)
+            lifecycle::compact(self.app, &bot, expected_run_id.as_deref())
                 .await
                 .map(|_| ())
                 .map_err(|err| map_error(&bot, err))

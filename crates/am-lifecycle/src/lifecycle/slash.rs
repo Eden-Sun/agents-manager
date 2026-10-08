@@ -644,7 +644,9 @@ pub fn compact_slash_command(kind: &str) -> Option<&'static str> {
 
 /// 對正在跑、閒著的 bot 送 `/compact`。跟 [`login`] 同一個 gate（沒在跑、忙著、回合在飛、找不到 pane 都不送，回 409 說理由）
 /// 與打字節奏；daemon 不等壓縮做完——之後的 statusLine 會回報新的 context 用量。
-pub async fn compact(app: &(impl crate::capabilities::BotLocks + crate::capabilities::Db + crate::capabilities::HerdrRoutes + crate::hosts::HostsAccess), bot_id: &str) -> LcResult<LoginOut> {
+///
+/// `expected_run_id`（#872，主力熱壓）：計畫當時的 active run；鎖內 active run 已換掉或不再 idle 就回 409 `superseded_run`，一個鍵都不打。
+pub async fn compact(app: &(impl crate::capabilities::BotLocks + crate::capabilities::Db + crate::capabilities::HerdrRoutes + crate::hosts::HostsAccess), bot_id: &str, expected_run_id: Option<&str>) -> LcResult<LoginOut> {
     let lock = app.bot_lock(bot_id).await;
     let _g = lock.lock().await;
     let bot = db::bot(app.db(), bot_id).await.map_err(up)?.ok_or_else(|| LcError::NotFound("bot".into()))?;
@@ -658,6 +660,14 @@ pub async fn compact(app: &(impl crate::capabilities::BotLocks + crate::capabili
     let run = db::active_run(app.db(), bot_id).await.map_err(up)?.ok_or_else(|| {
         LcError::conflict(SlashBlocked::NotRunning.reason(), json!({ "bot_id": bot_id }))
     })?;
+    if let Some(want) = expected_run_id {
+        if run.id != want || run.agent_status != "idle" {
+            return Err(LcError::conflict(
+                "superseded_run",
+                json!({"expected_run_id": want, "run_id": run.id, "agent_status": run.agent_status}),
+            ));
+        }
+    }
     let in_flight = db::in_flight_turn(app.db(), &run.id).await.map_err(up)?.is_some();
     let pane_id = slash_gate(&run, in_flight)
         .map_err(|b| LcError::conflict(b.reason(), json!({"bot_id": bot_id, "run_id": run.id})))?;
@@ -684,6 +694,34 @@ mod compact_tests {
 mod live_slash_tests {
     use super::{composer_settled, grok_model_from_screen, live_slash_command};
     use crate::testing as tt;
+
+    /// #872：計畫綁 run A、鎖內 active 已是 B（或 A 不再 idle）→ `compact` 回 409 `superseded_run`，假 herdr 一個字、一個鍵都沒收到。
+    #[tokio::test]
+    async fn compact_with_a_stale_expected_run_types_nothing() {
+        use crate::lifecycle::LcError;
+        let env = tt::env().await;
+        let bot = tt::claude_bot(&env.app, &env.project_id, "compact-stale").await;
+        let run_a = tt::fake_run(&env.app, &bot.id).await;
+        sqlx::query("UPDATE runs SET state = 'exited', ended_at = ? WHERE id = ?").bind(crate::db::now()).bind(&run_a).execute(&env.app.db).await.unwrap();
+        let run_b = tt::fake_run(&env.app, &bot.id).await;
+
+        match super::compact(&env.app, &bot.id, Some(&run_a)).await.err().expect("superseded") {
+            LcError::Conflict(v) => {
+                assert_eq!(v["reason"], "superseded_run", "{v}");
+                assert_eq!(v["run_id"], run_b.as_str());
+            }
+            other => panic!("{other:?}"),
+        }
+        assert!(env.herdr.calls_to("pane.send_text").is_empty() && env.herdr.calls_to("pane.send_keys").is_empty(), "一個字、一個鍵都沒打");
+
+        // B 不再 idle：就算 expected 對得上也不送。
+        sqlx::query("UPDATE runs SET agent_status = 'working' WHERE id = ?").bind(&run_b).execute(&env.app.db).await.unwrap();
+        match super::compact(&env.app, &bot.id, Some(&run_b)).await.err().expect("not idle") {
+            LcError::Conflict(v) => assert_eq!(v["reason"], "superseded_run", "{v}"),
+            other => panic!("{other:?}"),
+        }
+        assert!(env.herdr.calls_to("pane.send_text").is_empty() && env.herdr.calls_to("pane.send_keys").is_empty());
+    }
 
     const SWITCH_MODEL: &str = "Switch model?\nYour next response will be slower\n❯ 1. Yes, switch to Claude Opus 5.5\n  2. No, go back\n";
 

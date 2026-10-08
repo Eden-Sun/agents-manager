@@ -16,7 +16,12 @@ pub trait TurnControl: Send + Sync {
         request: PromptRequest,
     ) -> impl Future<Output = Result<TurnId, TurnError>> + Send + '_;
 
-    fn compact_bot(&self, bot: BotId) -> impl Future<Output = Result<(), TurnError>> + Send + '_;
+    /// `expected_run_id`：計畫當時的 active run；bot 鎖內 active run 已換掉或不再 idle 就拒絕，一個鍵都不打。
+    fn compact_bot(
+        &self,
+        bot: BotId,
+        expected_run_id: Option<RunId>,
+    ) -> impl Future<Output = Result<(), TurnError>> + Send + '_;
 
     fn interrupt(
         &self,

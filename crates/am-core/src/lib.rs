@@ -77,6 +77,8 @@ pub struct PromptRequest {
     pub bot_id: BotId,
     pub text: String,
     pub client_request_id: Option<String>,
+    /// 計畫當時看到的 active run：bot 鎖內若 active run 已換掉（或不再 idle），就不送（`superseded_run`）。`None`＝不檢查。
+    pub expected_run_id: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
