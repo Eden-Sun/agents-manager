@@ -13,6 +13,9 @@ use crate::hosts::sh_quote;
 /// bot 目錄裡給子 agent 讀的那份（AG Man 規則 + agent md，不含母 bot 自己的 persona）。
 pub const CHILD_FILE: &str = "instructions.md";
 pub const GROK_RULES_FILE: &str = "grok-rules.md";
+/// claude 母 bot 的完整啟動指示（AG Man 規則 + agent md + persona）：argv 只帶 `--append-system-prompt-file <這個檔>`，
+/// 因為 herdr 把整條指令壓在 900 bytes 內，整份放進 argv 會被砍成「…（後略）」。
+pub const PERSONA_FILE: &str = "persona.md";
 
 /// 讀出來的 agent md。`problems` 是讀不到或空的檔：bot 照開，但要讓人看得到少了什麼。
 /// `configured`＝`[agents]` 有指定檔：只有這時才關掉 CLI 自己的指示檔——沒設定就維持 CLI 原本的行為，
@@ -103,6 +106,80 @@ pub async fn install_grok_rules(
     install_named(app, bot, project, shim_dir, GROK_RULES_FILE, text).await
 }
 
+/// claude 母 bot 的完整 persona 寫進 bot 目錄（同 [`install_grok_rules`]）；回傳路徑給 `--append-system-prompt-file`。
+pub async fn install_persona(
+    app: &impl crate::hosts::HostsAccess,
+    bot: &db::Bot,
+    project: &db::Project,
+    shim_dir: Option<&str>,
+    text: &str,
+) -> Option<String> {
+    install_named(app, bot, project, shim_dir, PERSONA_FILE, text).await
+}
+
+/// 母 bot 的 codex profile 名：`am-bot-` 前綴跟 shim 的 `am-child-` 分開（shim 的 sweep 只清 `am-child-*`）。
+/// bot id 只留 `[A-Za-z0-9_-]`，其餘換成 `_`（跟 shim 的 `tr -c 'A-Za-z0-9_-' '_'` 同一招）。
+pub fn codex_profile_name(bot_id: &str) -> String {
+    let id: String = bot_id.chars().map(|c| if c.is_ascii_alphanumeric() || c == '_' || c == '-' { c } else { '_' }).collect();
+    format!("am-bot-{id}")
+}
+
+/// codex 沒有「從檔案讀 developer_instructions」的參數：寫成 `<codex_home>/<profile>.config.toml`（0600，內容是 AG Man 的規則），
+/// argv 只帶 `-p <profile>`。跟 shim 的 `am_codex_instructions_profile` 是同一種檔，只是名字前綴不同。
+/// 本機或遠端依 `project.host`；回傳 profile 名，寫不進去回 None。
+pub async fn install_codex_profile(
+    app: &impl crate::hosts::HostsAccess,
+    bot: &db::Bot,
+    project: &db::Project,
+    codex_home: &str,
+    text: &str,
+) -> Option<String> {
+    let name = codex_profile_name(&bot.id);
+    let path = format!("{}/{name}.config.toml", codex_home.trim_end_matches('/'));
+    let body = format!("developer_instructions = {}\n", super::setup::toml_basic_string(text));
+    let result = if project.host == LOCAL_HOST {
+        write_private_atomic(std::path::Path::new(&path), &body).map_err(anyhow::Error::from)
+    } else {
+        match app.hosts().get(&project.host).await {
+            Some(conn) => install_remote_mode(&conn, &path, &body, Some("600")).await,
+            None => Err(anyhow::anyhow!("unknown host `{}`", project.host)),
+        }
+    };
+    match result {
+        Ok(()) => Some(name),
+        Err(e) => {
+            tracing::warn!(bot = %bot.name, host = %project.host, error = ?e, "could not write the codex persona profile");
+            None
+        }
+    }
+}
+
+/// 同目錄暫存檔（0600 建立）＋ rename：不會有人讀到寫一半的檔，也不會有先 0644 再 chmod 的空窗。
+fn write_private_atomic(path: &std::path::Path, content: &str) -> std::io::Result<()> {
+    use std::io::Write as _;
+    let dir = path.parent().unwrap_or(std::path::Path::new("."));
+    std::fs::create_dir_all(dir)?;
+    let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("profile");
+    let tmp = dir.join(format!(".{name}.tmp-{}", db::ulid()));
+    let result = (|| {
+        let mut opts = std::fs::OpenOptions::new();
+        opts.write(true).create_new(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt as _;
+            opts.mode(0o600);
+        }
+        let mut file = opts.open(&tmp)?;
+        file.write_all(content.as_bytes())?;
+        drop(file);
+        std::fs::rename(&tmp, path)
+    })();
+    if result.is_err() {
+        let _ = std::fs::remove_file(&tmp);
+    }
+    result
+}
+
 async fn install_named(
     app: &impl crate::hosts::HostsAccess,
     bot: &db::Bot,
@@ -133,10 +210,14 @@ async fn install_named(
 const REMOTE_EOF: &str = "AM_AGENT_MD_EOF";
 
 async fn install_remote(conn: &crate::hosts::HostConn, path: &str, text: &str) -> anyhow::Result<()> {
+    install_remote_mode(conn, path, text, None).await
+}
+
+async fn install_remote_mode(conn: &crate::hosts::HostConn, path: &str, text: &str, mode: Option<&str>) -> anyhow::Result<()> {
     if text.lines().any(|l| l == REMOTE_EOF) {
         anyhow::bail!("instructions contain the heredoc terminator `{REMOTE_EOF}`");
     }
-    let script = remote_script(path, text);
+    let script = remote_script_mode(path, text, mode);
     let out = conn.ssh_exec(&script).await?;
     if !out.contains("AM_AGENT_MD_OK") {
         anyhow::bail!("remote instructions install did not confirm:\n{}", out.trim());
@@ -145,9 +226,19 @@ async fn install_remote(conn: &crate::hosts::HostConn, path: &str, text: &str) -
 }
 
 /// 暫存檔 + `cmp`：內容一樣就不動 mtime，跟 herdr skill 的遠端安裝同一招。
+#[cfg_attr(not(test), allow(dead_code))]
 fn remote_script(path: &str, text: &str) -> String {
+    remote_script_mode(path, text, None)
+}
+
+/// `mode` 有值（例如 `600`）時用 `umask 077` 建暫存檔，並在換上之後把目標也 chmod 成該權限（內容一樣不換檔時照樣修權限）。
+fn remote_script_mode(path: &str, text: &str, mode: Option<&str>) -> String {
+    let (umask, chmod) = match mode {
+        Some(m) => ("umask 077\n".to_string(), format!("chmod {} \"$F\"\n", sh_quote(m))),
+        None => (String::new(), String::new()),
+    };
     format!(
-        "set -e\nF={f}\nmkdir -p \"$(dirname \"$F\")\"\ncat > \"$F.new\" <<'{REMOTE_EOF}'\n{text}\n{REMOTE_EOF}\nif cmp -s \"$F.new\" \"$F\" 2>/dev/null; then rm -f \"$F.new\"; else mv \"$F.new\" \"$F\"; fi\nprintf 'AM_AGENT_MD_OK\\n'\n",
+        "set -e\n{umask}F={f}\nmkdir -p \"$(dirname \"$F\")\"\ncat > \"$F.new\" <<'{REMOTE_EOF}'\n{text}\n{REMOTE_EOF}\nif cmp -s \"$F.new\" \"$F\" 2>/dev/null; then rm -f \"$F.new\"; else mv \"$F.new\" \"$F\"; fi\n{chmod}printf 'AM_AGENT_MD_OK\\n'\n",
         f = sh_quote(path),
         text = text.trim_end(),
     )

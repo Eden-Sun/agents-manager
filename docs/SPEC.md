@@ -2340,6 +2340,14 @@ pt-hub = ["~/project/pt/CLAUDE.md", "~/project/pt/AGENTS.md"]      # 多份照�
 
 - **注入順序**：`child_agent_rules`（§6.5c）→ 全域 agent md → 專案 agent md → bot 自己的 persona。三種 kind 同一份文字（claude `--append-system-prompt`、
   codex `developer_instructions`、grok `--rules`）。全域那份在 daemon 這台機器上讀；專案那份跟 repo 放在一起，在**專案所在的主機**上讀（遠端走 ssh，`~` 用那台的 HOME 展開）。每次啟動 bot 重讀，改檔不必重啟 daemon，重啟 bot 就生效。
+- **母 bot 的完整指示走檔案或 profile，不放 argv（#769）**：herdr 把整條指令壓在 900 bytes 內（`MAX_COMMAND_BYTES`），最長的參數會被砍成「…（後略）」，
+  整份 persona 放進 argv 時母 bot 只拿到 AG Man 規則的前約 600 bytes，agent md 與 persona 一個字都沒帶到。所以：claude 寫成 bot 目錄的 `persona.md`、argv 帶
+  `--append-system-prompt-file <路徑>`；grok 寫成 `grok-rules.md`、`--rules` 帶一句指向它的話；codex 在**母 bot 那台主機**的 CODEX_HOME（pane env 合併身分與 bot 自己的
+  `CODEX_HOME`，都沒有才用 `<那台的 HOME>/.codex`）寫 `am-bot-<bot id>.config.toml`（0600，`developer_instructions` 是 TOML 基本字串；`am-bot-` 前綴跟子 agent 的 `am-child-`
+  分開，shim 的 sweep 不會清到），argv 帶 `-p am-bot-<id>`（設了 agent md 另加 `-c project_doc_max_bytes=0`）。**fail closed**：寫不進去（沒有 bot 目錄、遠端 HOME 讀不到、
+  ssh 失敗）就寫一則 system 訊息「無法把 <kind> 的完整啟動指示寫進 bot 目錄；拒絕以遭截斷的系統提示啟動」並拒絕啟動（`Upstream`），不退回截斷的 argv。
+  例外：codex bot 自己的參數（bot args 或身分 args）已有 `-p`／`--profile` 時不寫 profile、不覆蓋它的設定，指示仍以 `-c developer_instructions=` 放 argv（會被截斷），
+  並寫一則 system 訊息說明。受限 bot（分享）不走這條，用 cage 自己的檔。
 - **CLI 自己的指示檔一律關掉**（這個專案有任一份 agent md 時）：pane env `CLAUDE_CODE_DISABLE_CLAUDE_MDS=1`（claude 不讀任何 CLAUDE.md，帳號層與 repo 都是；
   不分 kind 都設，別種 bot 開出來的 claude 子 agent 也繼承）、codex 加 `-c project_doc_max_bytes=0`（不讀 AGENTS.md）。
   **沒設定的專案維持 CLI 原本的行為**：換版之後、設定寫好之前，bot 不會兩邊都讀不到。
