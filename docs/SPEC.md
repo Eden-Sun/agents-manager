@@ -1581,7 +1581,7 @@ herdr server 重啟會讓**所有** pane 同時消失。照 §6.5 的規則，�
    **讀不到維護狀態不等於沒在維護**（#191）：只有確定沒有窗口（`Ok(None)`）才退休；讀不到（DB busy／I/O）這一輪留著，
    run 的結束沒寫進去時也留著（DB 裡它還在跑）。兩種都排一輪 15 秒後的補跑對帳（同一台主機同時只排一輪，那一輪還是
    讀不到就再排；主機斷線或不在設定裡就停），不必等下一個 herdr 事件。
-3. **維護結束或逾時**：這段期間被標 `exited`、到那一刻仍沒有 active run 的子 agent，照原規則退休；接回來的留著。非維護期間行為完全不變。
+3. **維護結束或逾時**：這段期間被標 `exited`、到那一刻仍沒有 active run 的子 agent，照原規則退休；接回來的留著。收尾順序：先退休（某顆退休失敗＝繼續下一顆、整體回錯，窗口保留，到期計時器以退避重試），全部成功後才在同一個交易刪窗口並寫 end／expired note（#890）。非維護期間行為完全不變。
 4. **接回對話**：`POST /api/bots/{id}/start?resume=native`（或 `restart?resume=native`）用 DB 記的 native session 啟動；
    接不回就回 `409 cannot_resume`、**不開新對話**。argv：claude `--resume <sid>`、grok `--resume <sid>`、codex `resume <sid>`（子命令排最前）。
    `GET /api/capabilities` 宣告 `resume_native_start`。

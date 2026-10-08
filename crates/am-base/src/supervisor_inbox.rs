@@ -274,6 +274,16 @@ pub async fn push_inbox(
 
 /// 一筆 append-only 的稽核紀錄。強制釋放這種「可以做、但要留下是誰為什麼」的動作走這裡。
 pub async fn add_note(pool: &SqlitePool, kind: &str, body: &Value) -> Result<String> {
+    let mut conn = pool.acquire().await?;
+    add_note_on(&mut conn, kind, body).await
+}
+
+/// 同 [`add_note`]，但寫在呼叫端的交易裡：要跟別的寫入一起成功或一起回滾（issue #890）。
+pub async fn add_note_tx(tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>, kind: &str, body: &Value) -> Result<String> {
+    add_note_on(&mut **tx, kind, body).await
+}
+
+async fn add_note_on(conn: &mut sqlx::SqliteConnection, kind: &str, body: &Value) -> Result<String> {
     let id = crate::db::ulid();
     sqlx::query("INSERT INTO supervisor_notes (id, supervisor_id, kind, body, version, created_at) VALUES (?,?,?,?,1,?)")
         .bind(&id)
@@ -281,7 +291,7 @@ pub async fn add_note(pool: &SqlitePool, kind: &str, body: &Value) -> Result<Str
         .bind(kind)
         .bind(body.to_string())
         .bind(crate::db::now())
-        .execute(pool)
+        .execute(conn)
         .await?;
     Ok(id)
 }
