@@ -263,20 +263,8 @@ pub fn codex_user_text(line: &str) -> Option<String> {
 
 pub fn transcript_user_text(line: &str) -> Option<String> {
     let v: Value = serde_json::from_str(line).ok()?;
-    if v.get("type").and_then(Value::as_str) != Some("user") || v.get("isMeta").and_then(Value::as_bool) == Some(true) {
-        return None;
-    }
-    let content = v.get("message")?.get("content")?;
-    match content {
-        Value::String(s) => Some(s.clone()),
-        Value::Array(parts) => {
-            if parts.iter().any(|p| p.get("type").and_then(Value::as_str) != Some("text")) {
-                return None;
-            }
-            Some(parts.iter().filter_map(|p| p.get("text").and_then(Value::as_str)).collect::<Vec<_>>().join("\n"))
-        }
-        _ => None,
-    }
+    // 原樣的文字（可能被 CLI 包成 `<pasted_content>`，`is_sent` 會處理）；compact 摘要、指令回音、sidechain 不算一問（#910）。
+    super::claude_child_log::user_prompt_raw(&v)
 }
 
 pub fn transcript_len(path: &std::path::Path) -> std::io::Result<u64> {
@@ -1416,6 +1404,28 @@ mod tests {
         std::fs::write(&path, "").unwrap();
         assert!(transcript_hits_since(&path, offset, code).is_err());
         assert!(transcript_hits_since(&dir.join("missing.jsonl"), 0, code).is_err());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// #910：送達驗證數的是人打的行。compact 摘要、slash 指令回音不算——有它們在檔裡，真正送出的那句的計數不變。
+    #[test]
+    fn compact_summaries_and_command_echoes_do_not_change_the_delivery_count() {
+        let dir = crate::testing::track(std::env::temp_dir().join(format!("am-transcript-{}", db::ulid())));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("t.jsonl");
+        std::fs::write(&path, "").unwrap();
+        let summary = json!({"type": "user", "isCompactSummary": true, "isVisibleInTranscriptOnly": true,
+            "message": {"role": "user", "content": "This session is being continued from a previous conversation. Summary: ..."}})
+        .to_string();
+        let echo = user_entry(json!("<command-name>/compact</command-name>\n<command-args></command-args>"));
+        std::fs::write(&path, [summary.clone(), echo.clone(), user_entry(json!("送出的那句")), summary.clone()].join("\n") + "\n").unwrap();
+        assert_eq!(transcript_hits_since(&path, 0, "送出的那句").unwrap(), 1);
+        // 摘要與回音本身也不會被當成「我們送的字」數進去（就算送出的字剛好一樣）。
+        let same_text = json!({"type": "user", "isCompactSummary": true, "message": {"role": "user", "content": "送出的那句"}}).to_string();
+        std::fs::write(&path, [same_text, user_entry(json!("送出的那句"))].join("\n") + "\n").unwrap();
+        assert_eq!(transcript_hits_since(&path, 0, "送出的那句").unwrap(), 1);
+        assert_eq!(transcript_user_text(&summary), None);
+        assert_eq!(transcript_user_text(&echo), None);
         let _ = std::fs::remove_dir_all(&dir);
     }
 

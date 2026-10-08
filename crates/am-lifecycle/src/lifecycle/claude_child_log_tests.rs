@@ -80,6 +80,55 @@ fn slash_echoes_meta_sidechain_and_interrupts_are_not_prompts() {
     assert_eq!(ex[1].reply.as_deref(), Some("好"));
 }
 
+fn compact_summary() -> String {
+    json!({"type": "user", "uuid": "sum", "isCompactSummary": true, "isVisibleInTranscriptOnly": true,
+        "message": {"role": "user", "content": "This session is being continued from a previous conversation that ran out of context. Summary:\n1. ..."}})
+    .to_string()
+}
+
+/// #910：auto-compact 的摘要列是 `type:"user"` 的字串 content，卻不是人打的一問；它也不能讓後面的 assistant 接回上一問蓋掉回覆。
+#[test]
+fn a_compact_summary_row_is_not_a_prompt_and_does_not_steal_the_next_reply() {
+    let ex = parse_exchanges(&log(&[user("uA", "做 A"), assistant("A 做完了", Some("end_turn"), false), compact_summary(), assistant("接著的旁白 B", Some("end_turn"), false)]));
+    assert_eq!(ex.len(), 1, "{ex:#?}");
+    assert_eq!(ex[0].prompt, "做 A");
+    assert_eq!(ex[0].reply.as_deref(), Some("A 做完了"));
+    assert!(ex[0].closed);
+    assert_eq!(crate::lifecycle::transcript_user_text(&compact_summary()), None);
+    assert_eq!(is_human_prompt_row(&serde_json::from_str(&compact_summary()).unwrap()), None);
+    // 摘要之後使用者再打一句，照常成為新的一問。
+    let ex = parse_exchanges(&log(&[user("uA", "做 A"), assistant("A 做完了", Some("end_turn"), false), compact_summary(), user("uB", "做 B"), assistant("B 做完了", Some("end_turn"), false)]));
+    assert_eq!(ex.iter().map(|e| (e.prompt.as_str(), e.reply.as_deref())).collect::<Vec<_>>(), vec![("做 A", Some("A 做完了")), ("做 B", Some("B 做完了"))]);
+}
+
+/// 帶圖片之類非純文字的 user 行不是這裡能記的一問，但它一樣截斷上一問：後面的回覆不能記到上一問。
+#[test]
+fn a_skipped_user_row_closes_the_previous_exchange() {
+    let image = json!({"type": "user", "uuid": "img", "message": {"role": "user", "content": [{"type": "image", "source": {"type": "base64", "data": "AAAA"}}]}}).to_string();
+    let ex = parse_exchanges(&log(&[user("uA", "做 A"), assistant("A 做完了", Some("end_turn"), false), image, assistant("B 的回覆", Some("end_turn"), false)]));
+    assert_eq!(ex.len(), 1, "{ex:#?}");
+    assert_eq!(ex[0].reply.as_deref(), Some("A 做完了"), "B 的回覆不能蓋掉 A");
+    assert!(ex[0].closed);
+    // 工具結果是同一回合中途的 user 行，不能截斷（旁白→工具→最終回覆）。
+    let ex = parse_exchanges(&log(&[user("uA", "做 A"), assistant("先讀檔", Some("tool_use"), true), tool_result(), assistant("讀完了", Some("end_turn"), false)]));
+    assert_eq!(ex[0].reply.as_deref(), Some("讀完了"));
+}
+
+#[test]
+fn a_slash_command_echo_is_not_the_last_user_text() {
+    let echo = user("c1", "<command-name>/usage</command-name>\n<command-message>usage</command-message>\n<command-args></command-args>");
+    assert_eq!(crate::lifecycle::transcript_user_text(&echo), None);
+    assert_eq!(is_human_prompt_row(&serde_json::from_str(&echo).unwrap()), None);
+    let typed = user("u1", "真正的一問");
+    assert_eq!(crate::lifecycle::transcript_user_text(&typed).as_deref(), Some("真正的一問"));
+    assert_eq!(is_human_prompt_row(&serde_json::from_str(&typed).unwrap()).as_deref(), Some("真正的一問"));
+    // 送達驗證比對的是原樣文字（CLI 包過的 `<pasted_content>` 由 `is_sent` 還原），人打的行回原樣、人格式的中斷標記不算一問。
+    let wrapped = user("u2", "\n\n<pasted_content id=\"c4ab\">\n長長的一段\n</pasted_content id=\"c4ab\">\n");
+    assert!(crate::lifecycle::transcript_user_text(&wrapped).unwrap().contains("<pasted_content"));
+    assert_eq!(is_human_prompt_row(&serde_json::from_str(&wrapped).unwrap()).as_deref(), Some("長長的一段"));
+    assert_eq!(is_human_prompt_row(&serde_json::from_str(&user("i1", "[Request interrupted by user]")).unwrap()), None);
+}
+
 #[test]
 fn a_pasted_content_wrapper_is_unwrapped_to_what_was_sent() {
     let wrapped = "\n\n<pasted_content id=\"c4ab\">\n長長的一段\n</pasted_content id=\"c4ab\">\n";
