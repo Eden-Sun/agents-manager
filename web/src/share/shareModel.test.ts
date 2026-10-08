@@ -57,6 +57,7 @@ test('錯誤給 end user 的話：404＝連結失效、429 帶秒數、不洩漏
   assert.equal(shareErrorText(new ShareHttpError(404), 'load'), '這個分享連結已失效。')
   assert.match(shareErrorText(new ShareHttpError(429, 30), 'send'), /30 秒/)
   assert.match(shareErrorText(new ShareHttpError(413), 'upload'), /25 MB/)
+  assert.match(shareErrorText(new ShareHttpError(507), 'send'), /空間滿了/)
   assert.doesNotMatch(shareErrorText(new Error('ECONNREFUSED 127.0.0.1:7790'), 'send'), /127\.0\.0\.1/)
 })
 
