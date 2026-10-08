@@ -511,24 +511,39 @@ check_file "新版留下的 -shm 要清掉" no "$DAEMON_DB-shm"
 check_eq "binary 換回舊的" "old-binary" "$(cat "$AGM_REPO/target/release/agents-managerd")"
 teardown
 
-# 5. 沒升 schema 時出事：照舊直接回滾，不繞往前修那條路。
+# 5. 沒升 schema 時出事：直接回滾（不繞往前修），只換 binary 回去，DB 原樣保留（issue #902）：
+#    新 daemon 跑的這段時間 DB 已經寫進新資料，還原備份會把它們抹掉，而舊 binary 開得了現在的 DB。
 setup 10 10
 printf 'older-backup\n' > "$DAEMON_DB.bak-20000101-0000"
 export STUB_SUPERVISOR=stopped
 rc=$(run)
 check_eq "沒升 schema 的失敗走回滾（rc=7）" "7" "$rc"
 check_no "不會講往前修" "forward-fix" "$SWAP_LOG"
+check_no "沒升 schema 不還原 DB" "db restored" "$SWAP_LOG"
+check "說明 DB 原樣保留" "db left as is" "$SWAP_LOG"
 check_eq "binary 換回舊的" "old-binary" "$(cat "$AGM_REPO/target/release/agents-managerd")"
+check_eq "DB 沒被動" "db@10" "$(cat "$DAEMON_DB")"
+check_eq "-wal 原樣保留" "stale-wal" "$(cat "$DAEMON_DB-wal" 2>/dev/null)"
+check_eq "-shm 原樣保留" "stale-shm" "$(cat "$DAEMON_DB-shm" 2>/dev/null)"
 check_file "回滾後保留這趟 DB 備份" yes "$(logged_db_backup)"
 check_file "回滾後保留舊 DB 備份" yes "$DAEMON_DB.bak-20000101-0000"
 check_eq "回滾後保留新舊兩份 DB 備份" "2" "$(db_backup_count)"
-check_file "-wal 一樣要清掉" no "$DAEMON_DB-wal"
 teardown
+
+# 5a. 沒升 schema 的回滾：新 daemon 寫進 DB 的資料要留著（不是還原成 db@10）。
+setup 10 10
+export STUB_SUPERVISOR=stopped STUB_MUTATE_DB=1
+rc=$(run)
+check_eq "沒升 schema 的回滾 rc=7" "7" "$rc"
+check_eq "新 daemon 寫過的 DB 內容保留" "mutated-by-new-binary" "$(cat "$DAEMON_DB")"
+check_eq "舊 binary 被起回來" "old-binary" "$(tail -1 "$AGM_DIR/started-binary.log")"
+teardown
+unset STUB_MUTATE_DB
 
 # 5b. 回滾還原 DB 要原子：先寫同目錄暫存檔、fsync，再暫存 sidecar，最後用 rename 覆蓋主檔。
 #     以前 `rm -f -wal -shm; cp backup DB`：cp 中途失敗（磁碟滿、被殺）就是「原 DB 被截斷＋它的 WAL 已經刪了」。
-setup 10 10
-export STUB_SUPERVISOR=stopped STUB_MUTATE_DB=1
+setup 11 10
+export STUB_SUPERVISOR=stopped STUB_SESSION_OK_AFTER_FORWARD="" STUB_MUTATE_DB=1
 rc=$(run)
 check_eq "原子還原：回滾 rc=7" "7" "$rc"
 check_eq "DB 內容是備份的（新版寫的被還原掉）" "db@10" "$(cat "$DAEMON_DB")"
@@ -541,8 +556,8 @@ teardown
 
 # 5c. 還原的 cp 中途失敗：原 DB 與它的 -wal／-shm 一個位元組都不能動（WAL 裡還有 commit 過、沒 checkpoint 的資料），
 #     不留暫存檔，log 講清楚還原失敗。
-setup 10 10
-export STUB_SUPERVISOR=stopped STUB_MUTATE_DB=1
+setup 11 10
+export STUB_SUPERVISOR=stopped STUB_SESSION_OK_AFTER_FORWARD="" STUB_MUTATE_DB=1
 mkdir -p "$ROOT/fakecp"
 cat > "$ROOT/fakecp/cp" <<'STUB'
 #!/bin/bash
@@ -566,8 +581,8 @@ teardown
 unset STUB_MUTATE_DB
 
 # 5d. 暫存檔已備好，但替換主 DB 的 rename 失敗：原 DB 與 sidecar 都必須保留。
-setup 10 10
-export STUB_SUPERVISOR=stopped STUB_MUTATE_DB=1
+setup 11 10
+export STUB_SUPERVISOR=stopped STUB_SESSION_OK_AFTER_FORWARD="" STUB_MUTATE_DB=1
 mkdir -p "$ROOT/fakemv"
 cat > "$ROOT/fakemv/mv" <<'STUB'
 #!/bin/bash
@@ -584,6 +599,27 @@ check_eq "rename 失敗保留 SHM" "stale-shm" "$(cat "$DAEMON_DB-shm" 2>/dev/nu
 check "rename 失敗有講清楚 DB 還原失敗" "DB 還原失敗" "$SWAP_LOG"
 teardown
 unset STUB_MUTATE_DB
+
+# 5e. 舊 binary 的備份檔名撞名（PREV 已存在）：舊 daemon 此時已停，要先起回來、交還窗口再 rc=5，不能留一個停著的 daemon（issue #902）。
+setup 10 10
+mkdir -p "$ROOT/fakedate"
+cat > "$ROOT/fakedate/date" <<'STUB'
+#!/bin/bash
+case "$*" in
+  *%Y%m%d-%H%M%S*) echo 20000101-000000 ;;
+  *) exec /bin/date "$@" ;;
+esac
+STUB
+chmod +x "$ROOT/fakedate/date"
+export SWAP_PREV_NONCE=fixed
+printf 'squatter\n' > "$AGM_REPO/target/release/agents-managerd.prev-$OLD-20000101-000000-fixed"
+rc=$(PATH="$ROOT/fakedate:$PATH" run)
+unset SWAP_PREV_NONCE
+check_eq "PREV 撞名 rc=5" "5" "$rc"
+check_eq "舊 daemon 被起回來（binary 仍是舊的）" "old-binary" "$(tail -1 "$AGM_DIR/started-binary.log")"
+check "撞名後有交還窗口" "restart 窗口已交還" "$SWAP_LOG"
+check_eq "正式 binary 沒被換" "old-binary" "$(cat "$AGM_REPO/target/release/agents-managerd")"
+teardown
 
 # 6. 讀不到 checkout 的 SCHEMA_VERSION：停手，不要拿上一輪的數字猜。
 setup 10 10
@@ -1366,8 +1402,10 @@ check_eq "父 row 存在但沒有 active run：child 仍回滾（rc=7）" "7" "$
 check "沒有 active parent run 時 child 保持 missing" 'missing=\[kid \]' "$SWAP_LOG"
 teardown
 
-# 35. rollback 還原 DB 前要辨認窗口中新 daemon 收編的 child，並在還原後明確警示它仍有 live pane。
-setup 10 10
+# 35. rollback 還原 DB 前要辨認窗口中新 daemon 收編的 child，並在還原後明確警示它仍有 live pane
+#     （只有升過 schema、往前修失敗才會還原 DB，所以這案用 setup 11 10）。
+setup 11 10
+export STUB_SESSION_OK_AFTER_FORWARD=""
 export STUB_NAMES_BEFORE='["mom","kid"]' STUB_NAMES_AFTER='["mom","new-kid"]'
 seed_audit "INSERT INTO bots (id,name,project_id,deleted_at) VALUES ('id-mom','mom','p1',NULL), ('id-kid','kid','p1',NULL);
   INSERT INTO bots (id,name,project_id,deleted_at,managed_by,parent_bot_id,created_at)
@@ -1379,8 +1417,8 @@ check_eq "binary 照常還原" "old-binary" "$(cat "$AGM_REPO/target/release/age
 teardown
 
 # 39. #726：rollback 首次執行時，必須已定義用來記錄新收編 child 的 helper。
-setup 10 10
-export STUB_SUPERVISOR=stopped
+setup 11 10
+export STUB_SUPERVISOR=stopped STUB_SESSION_OK_AFTER_FORWARD=""
 rc=$(run_capture)
 check_eq "forced rollback 完成（rc=7）" "7" "$rc"
 check_no "rollback 時 helper 已定義" "rollback_new_children: command not found" "$ROOT/swap.out"
