@@ -1442,12 +1442,15 @@ esac
     fn a_shim_whose_caller_is_gone_stops_waiting_for_a_slot() {
         let s = Sandbox::new();
         // 每一輪 acquire 記一行：判定「shim 有沒有發現呼叫端不在了」用**輪數**，不用牆鐘時間（整套平行跑時機器忙，同樣的一輪可以慢十倍）。
+        // release 也記下來：放棄等待要把號碼牌退掉（空 token 的 release，issue #913）。
         s.install_fake_curl(&format!(
             r#"case "$*" in
   *acquire*) echo x >> '{}'; printf '{{"granted":false,"active":2,"retry_after_secs":0}}' ;;
+  *release*) echo "$*" >> '{}'; printf '{{}}' ;;
   *) printf '{{}}' ;;
 esac"#,
-            s.dir.join("acquire.log").display()
+            s.dir.join("acquire.log").display(),
+            s.dir.join("release.log").display()
         ));
         let env = lease_env(&s);
         // 外層是 `sh -c`（不是 shim 本身），所以不走 `s.command()`——但同樣清掉呼叫端所有的 `AM_*`。
@@ -1469,6 +1472,43 @@ esac"#,
         let group = outer.id() as i32;
         assert!(outer.wait().unwrap().success());
         assert_shim_gives_up_once_caller_is_gone(&s, group, &err_path);
+        let released = std::fs::read_to_string(s.dir.join("release.log")).unwrap_or_default();
+        assert!(released.contains("/build-slots/release") && released.contains("token="), "放棄等待要用空 token 退號碼牌：{released:?}");
+    }
+
+    /// issue #913：等名額的 shim 被 TERM（Ctrl-C 也是同一條路）要先退號碼牌再退出 130，不能讓後面的人空等 daemon 的 60 秒 stale。
+    #[test]
+    fn a_waiting_shim_that_is_terminated_cancels_its_place() {
+        let s = Sandbox::new();
+        s.install_fake_curl(&format!(
+            r#"case "$*" in
+  *acquire*) echo x >> '{}'; printf '{{"granted":false,"active":2,"retry_after_secs":1}}' ;;
+  *release*) echo "$*" >> '{}'; printf '{{}}' ;;
+  *) printf '{{}}' ;;
+esac"#,
+            s.dir.join("acquire.log").display(),
+            s.dir.join("release.log").display()
+        ));
+        let env = lease_env(&s);
+        let mut cmd = s.command(&format!("{}:{}:/usr/bin:/bin", s.dir.join("bin").display(), s.dir.join("real").display()));
+        cmd.args(["build"]);
+        for (k, v) in &env {
+            cmd.env(k, v);
+        }
+        let (mut shim, _, _) = s.start_group(&mut cmd, false);
+        let group = shim.id() as i32;
+        let up = std::time::Instant::now();
+        while !s.dir.join("acquire.log").exists() {
+            assert!(up.elapsed() < std::time::Duration::from_secs(30), "shim 沒開始排隊");
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+        unsafe { libc::kill(shim.id() as i32, libc::SIGTERM) };
+        let status = shim.wait().unwrap();
+        s.assert_group_gone(group);
+        let released = std::fs::read_to_string(s.dir.join("release.log")).unwrap_or_default();
+        assert!(released.contains("/build-slots/release") && released.contains("token="), "TERM 要退號碼牌：{released:?}");
+        assert!(released.contains("bot_id=b1"), "取消等待要帶 bot 身分（daemon 只讓自己取消自己的）：{released:?}");
+        assert_eq!(status.code(), Some(130), "退出碼 130");
     }
 
     /// 呼叫端不在之後，shim 最多再問 `MAX_ROUNDS_AFTER_GONE` 輪 acquire 就要自己講一句並退出。

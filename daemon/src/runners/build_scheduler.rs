@@ -4,7 +4,7 @@ use axum::http::HeaderMap;
 use axum::Json;
 use serde_json::{json, Value};
 use crate::build_scheduler::{
-    acquire, authenticate, field_limit_error, has_oversized_fields, release, renew, status,
+    acquire, authenticate, field_limit_error, has_oversized_fields, release_as, renew, status,
     sweep, up, AcquireIn, Acquired, ReleaseIn, RenewErr, RenewIn, MAX_FIELD_CHARS,
     MAX_ROWS_PER_BOT, SWEEP_EVERY,
 };
@@ -102,6 +102,7 @@ pub async fn post_renew(
 
 pub async fn post_release(
     State(app): State<Arc<App>>,
+    headers: HeaderMap,
     Form(body): Form<ReleaseIn>,
 ) -> (axum::http::StatusCode, Json<Value>) {
     if has_oversized_fields(&[&body.holder, &body.token]) {
@@ -114,7 +115,22 @@ pub async fn post_release(
             })),
         );
     }
-    match release(app.as_ref(), body.holder.trim(), &body.token).await {
+    // 空 token＝取消等待（#913）：沒有 token 可以證明這個 holder 是你的，所以要驗身分，而且只能取消自己的號碼牌。
+    // 帶 token 的放名額維持原樣（token 本身就是憑證，shim 的 `trap … EXIT` 不用帶標頭）。
+    let bot_id = if body.token.is_empty() {
+        match authenticate(app.as_ref(), &headers, body.bot_id.as_deref()).await {
+            Ok(id) => id,
+            Err(_) => {
+                return (
+                    axum::http::StatusCode::FORBIDDEN,
+                    Json(json!({"released": false, "error": "unauthorized", "message": "取消等待要帶 bot 身分或 UI token"})),
+                )
+            }
+        }
+    } else {
+        None
+    };
+    match release_as(app.as_ref(), body.holder.trim(), &body.token, bot_id.as_deref()).await {
         Ok(()) => (axum::http::StatusCode::OK, Json(json!({"released": true}))),
         Err(e) => {
             tracing::error!(holder = %body.holder, error = ?e, "build scheduler: could not release a slot; it stays held until its lease expires");

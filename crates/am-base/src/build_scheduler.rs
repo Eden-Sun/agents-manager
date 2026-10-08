@@ -273,7 +273,24 @@ pub async fn renew(app: &(impl crate::build_scheduler::BuildSlotLock + crate::ca
 /// 放：一律幂等（找不到、已經過期、token 對不上都當作「已經不是你的事了」，回成功——釋放路徑
 /// 不該因為競態或重送就報錯，讓呼叫端的 `trap ... EXIT` 永遠可以放心呼叫）。
 pub async fn release(app: &(impl crate::build_scheduler::BuildSlotLock + crate::capabilities::Db), holder: &str, token: &str) -> Result<()> {
+    release_as(app, holder, token, None).await
+}
+
+/// [`release`]，多一個驗過身分的呼叫端 `bot_id`。
+///
+/// **token 是空字串＝取消等待**（issue #913）：`waiting` 列沒有 token，等名額途中被中斷（Ctrl-C、被砍、呼叫端走了）的 shim
+/// 沒東西可以拿來放，以前號碼牌就一直留到 `STALE_WAITING`（60 秒）才被收，排在後面的人有空名額也要空等。
+/// 這時只刪該 holder 的 `waiting` 列；`bot_id` 有值時列的 `bot_id` 要相符（別顆 bot 的號碼牌不能被取消，跟 `acquire` 的
+/// `HolderOwnedByAnotherBot` 同一道守衛，靜默當成沒事），沒有值（UI token 的人工呼叫）則不限。`held` 列永遠不會被空 token 刪到。
+pub async fn release_as(app: &(impl crate::build_scheduler::BuildSlotLock + crate::capabilities::Db), holder: &str, token: &str, bot_id: Option<&str>) -> Result<()> {
     let _g = app.build_slot_lock().lock().await;
+    if token.is_empty() {
+        match bot_id {
+            Some(bot) => sqlx::query("DELETE FROM build_slots WHERE holder = ? AND status = 'waiting' AND bot_id = ?").bind(holder).bind(bot).execute(app.db()).await?,
+            None => sqlx::query("DELETE FROM build_slots WHERE holder = ? AND status = 'waiting'").bind(holder).execute(app.db()).await?,
+        };
+        return Ok(());
+    }
     sqlx::query("DELETE FROM build_slots WHERE holder = ? AND status = 'held' AND token = ?")
         .bind(holder)
         .bind(token)
@@ -366,7 +383,11 @@ pub struct RenewIn {
 #[derive(Deserialize)]
 pub struct ReleaseIn {
     pub holder: String,
+    /// 空字串＝取消這個 holder 的 `waiting` 列（見 [`release_as`]）；此時要帶 bot 身分（同 acquire）或 UI token。
     pub token: String,
+    /// 只有空 token（取消等待）才看；跟 acquire 的 `bot_id` 同一套驗證。
+    #[serde(default)]
+    pub bot_id: Option<String>,
 }
 
 fn default_host() -> String {
