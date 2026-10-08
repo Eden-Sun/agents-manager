@@ -29,23 +29,35 @@ pub async fn active(app: &Arc<App>) -> Result<Option<Window>> {
     Ok(None)
 }
 
+/// 順序（issue #890）：先確認窗口還是同一個 → 退役沒接回的子 agent（失敗＝整個回錯、窗口保留，下次重試）→
+/// 同一個交易刪窗口與寫 note。退役是冪等的（已退役的不會再被選到），所以中途失敗、窗口留著重來不會重複。
 async fn close(app: &Arc<App>, w: &Window, kind: &str, actor: &str, reason: Option<&str>) -> Result<Vec<String>> {
-    let gone = sqlx::query("DELETE FROM herdr_maintenance WHERE id = 1 AND opened_at = ?")
+    let same: Option<i64> = sqlx::query_scalar("SELECT 1 FROM herdr_maintenance WHERE id = 1 AND opened_at = ?")
         .bind(&w.opened_at)
-        .execute(&app.db)
-        .await?
-        .rows_affected();
-    if gone == 0 {
+        .fetch_optional(&app.db)
+        .await?;
+    if same.is_none() {
         return Ok(vec![]); // 別人先關了
     }
     let retired = retire_unreturned_children(app, &w.opened_at).await?;
-    crate::supervisor_inbox::add_note(
-        &app.db,
+    let mut tx = app.db.begin().await?;
+    let gone = sqlx::query("DELETE FROM herdr_maintenance WHERE id = 1 AND opened_at = ?")
+        .bind(&w.opened_at)
+        .execute(&mut *tx)
+        .await?
+        .rows_affected();
+    if gone == 0 {
+        tx.rollback().await?;
+        return Ok(retired); // 別人先關了；退役的結果照回
+    }
+    crate::supervisor_inbox::add_note_tx(
+        &mut tx,
         kind,
         &json!({"opened_at": w.opened_at, "until": w.until, "opened_by": w.opened_by, "closed_by": actor,
                 "reason": reason, "retired_children": retired}),
     )
     .await?;
+    tx.commit().await?;
     tracing::info!(kind, actor, retired = retired.len(), "herdr maintenance closed");
     Ok(retired)
 }
@@ -62,6 +74,8 @@ async fn retire_unreturned_children(app: &Arc<App>, since: &str) -> Result<Vec<S
     .fetch_all(&app.db)
     .await?;
     let mut names = Vec::new();
+    // 一顆退役失敗不擋後面的：記下第一個錯、跑完整輪再回錯（窗口保留、下次重試；已退役的不會再被選到）。
+    let mut first_err: Option<anyhow::Error> = None;
     for (id, name, host) in kids {
         match crate::child_reconcile_safety::retirement_block(&app.db, &id).await {
             Ok(Some(reason)) => {
@@ -77,12 +91,22 @@ async fn retire_unreturned_children(app: &Arc<App>, since: &str) -> Result<Vec<S
         }
         // 走退役的唯一入口（#413）：記呼叫端；AGM 的 child 不在這裡被隱式退役，擋下來、推一則給巡檢。
         use crate::child_retire::{retire, Mode, Outcome};
-        if retire(app, &id, "herdr_maintenance_closed", Mode::Implicit).await? == Outcome::Retired {
-            tracing::info!(bot = %name, "herdr maintenance over: child never came back, retired");
-            names.push(name);
+        match retire(app, &id, "herdr_maintenance_closed", Mode::Implicit).await {
+            Ok(Outcome::Retired) => {
+                tracing::info!(bot = %name, "herdr maintenance over: child never came back, retired");
+                names.push(name);
+            }
+            Ok(_) => {}
+            Err(e) => {
+                tracing::warn!(host = %host, bot = %name, error = ?e, "herdr maintenance: could not retire a child; the window stays open for a retry");
+                first_err.get_or_insert(e);
+            }
         }
     }
-    Ok(names)
+    match first_err {
+        Some(e) => Err(e),
+        None => Ok(names),
+    }
 }
 
 /// 到截止時間自己收尾，不必等下一次 reconcile 剛好來查。
@@ -92,8 +116,15 @@ fn arm_expiry(app: &Arc<App>, until: &str) {
     let app = app.clone();
     tokio::spawn(async move {
         tokio::time::sleep(wait).await;
-        if let Err(e) = active(&app).await {
-            tracing::warn!(error = ?e, "herdr maintenance expiry check failed");
+        // 讀不到或收尾失敗（窗口還在）就退避重試，直到 `active` 成功。
+        for attempt in 0.. {
+            match active(&app).await {
+                Ok(_) => return,
+                Err(e) => {
+                    tracing::warn!(error = ?e, attempt, "herdr maintenance expiry check failed; retrying");
+                    tokio::time::sleep(crate::reconcile::recovery_retry_delay(attempt)).await;
+                }
+            }
         }
     });
 }

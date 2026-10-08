@@ -194,7 +194,7 @@
 
         sqlx::query("ALTER TABLE herdr_maintenance_unreadable RENAME TO herdr_maintenance").execute(&app.db).await.unwrap();
         // 等的是 `close()` 的**最後一步**（寫 note），不是中間那步（退休子 agent）：`close()` 的順序是
-        // 刪窗口 → 退休沒接回的子 agent → 寫 note，兩者之間有 await。只等「子 agent 被退休」的話，慢的
+        // 退休沒接回的子 agent → （同一交易）刪窗口＋寫 note，兩者之間有 await。只等「子 agent 被退休」的話，慢的
         // runner 上會在寫 note 之前就去數 note，數到 0（#274，跟 #255 同一族）。
         let _ = crate::testing::eventually!(notes(&app, "herdr_maintenance_expired").await == 1);
         assert!(deleted(&app, &lost).await, "讀得到之後自己接手：過期的窗口收尾、沒接回的子 agent 退休");
@@ -212,4 +212,42 @@
         assert!(active(&app).await.unwrap().is_none(), "過了截止就不算維護中");
         assert_eq!(notes(&app, "herdr_maintenance_expired").await, 1);
         assert!(deleted(&app, &lost).await);
+    }
+
+    /// issue #890：退役失敗時窗口保留、不寫 end note；失敗原因排除後再關一次，退役、note、刪窗口一次完成。
+    #[tokio::test]
+    async fn a_failed_retirement_keeps_the_window_until_a_retry_can_finish() {
+        let env = tt::env().await;
+        let app = env.app.clone();
+        let w = open_as(&app, 10, "AGM", "retire failure").await.unwrap().unwrap();
+        let lost = child_with_ended_run(&env, &crate::db::now()).await;
+        sqlx::query("CREATE TRIGGER fail_retire BEFORE UPDATE OF deleted_at ON bots BEGIN SELECT RAISE(ABORT, 'retire boom'); END")
+            .execute(&app.db)
+            .await
+            .unwrap();
+        assert!(close_as(&app, &w, "AGM", None).await.is_err(), "退役寫不進去：整個回錯");
+        assert!(row(&app.db).await.unwrap().is_some(), "窗口保留，下次重試");
+        assert_eq!(notes(&app, "herdr_maintenance_end").await, 0);
+        assert!(!deleted(&app, &lost).await);
+
+        sqlx::query("DROP TRIGGER fail_retire").execute(&app.db).await.unwrap();
+        let retired = close_as(&app, &w, "AGM", None).await.unwrap();
+        assert_eq!(retired.len(), 1);
+        assert!(deleted(&app, &lost).await);
+        assert_eq!(notes(&app, "herdr_maintenance_end").await, 1);
+        assert!(row(&app.db).await.unwrap().is_none());
+    }
+
+    /// issue #890：同時兩個 `close_as`，窗口只刪一次、note 只寫一筆。
+    #[tokio::test]
+    async fn two_concurrent_closes_write_a_single_note() {
+        let env = tt::env().await;
+        let app = env.app.clone();
+        let w = open_as(&app, 10, "AGM", "concurrent close").await.unwrap().unwrap();
+        let _lost = child_with_ended_run(&env, &crate::db::now()).await;
+        let (a, b) = tokio::join!(close_as(&app, &w, "AGM", None), close_as(&app, &w, "AGM", None));
+        a.unwrap();
+        b.unwrap();
+        assert_eq!(notes(&app, "herdr_maintenance_end").await, 1);
+        assert!(row(&app.db).await.unwrap().is_none());
     }
