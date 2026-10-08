@@ -8,7 +8,11 @@
  *   其餘都套用。自己的回音（同 `client_id`）只記 rev，不重套。
  * - `rev` 是 daemon 每個 key 單調遞增的版本：小於等於已知的 rev 一律當舊事件丟掉（WS 重播、GET 與事件交錯都靠它）。
  * - PUT 失敗（斷線）：維持 dirty、稍後重試；重連時 `load()` 重拉全部、再把還 dirty 的送出去。
+ * - PUT 被 daemon 拒絕（400／413，例如超過 256 KB）：重試也不會成功，不再排重送、記進 `rejected`（草稿只留在本機），
+ *   `load()` 不把它當「daemon 沒有」清掉；本機再改字、或別台寫了新版本才解除。
  */
+
+import { ApiError } from '../api/types'
 
 export interface DraftWire {
   key: string
@@ -34,6 +38,8 @@ export interface DraftSyncDeps {
   keys: () => string[]
   debounceMs?: number
   retryMs?: number
+  /** PUT 被 daemon 拒絕、重試無意義（400／413）。呼叫端自己去重提示。 */
+  onRejected?: (key: string, error: unknown) => void
 }
 
 export const DRAFT_DEBOUNCE_MS = 400
@@ -46,6 +52,8 @@ export class DraftSync {
   private readonly dirty = new Set<string>()
   private readonly timers = new Map<string, Timer>()
   private readonly inflight = new Set<string>()
+  /** daemon 拒收（太大…）的 key：草稿只在本機，不重送、`load()` 也不清。 */
+  private readonly rejected = new Set<string>()
   /** `load()` 在飛的時候本機碰過的 key：GET 的回應比這些寫入舊，不能拿來判「daemon 沒有它＝被刪了」。 */
   private touched: Set<string> | null = null
   private loading: Promise<void> | null = null
@@ -65,6 +73,7 @@ export class DraftSync {
 
   /** 本機改了這個輸入框（打字、倒回放回原文、退回排隊那則…）。 */
   localChange(key: string, text: string): void {
+    this.rejected.delete(key)
     this.dirty.add(key)
     this.touched?.add(key)
     this.schedule(key, text === '' ? 0 : this.debounceMs)
@@ -99,7 +108,7 @@ export class DraftSync {
         }
         // daemon 沒有的＝已刪（清空送出、bot 被刪）：本機沒有待送的修改才跟著清。
         for (const key of this.deps.keys()) {
-          if (seen.has(key) || touched.has(key) || this.dirty.has(key) || this.inflight.has(key)) continue
+          if (seen.has(key) || touched.has(key) || this.dirty.has(key) || this.inflight.has(key) || this.rejected.has(key)) continue
           this.deps.write(key, '')
         }
       } finally {
@@ -120,6 +129,7 @@ export class DraftSync {
   forget(key: string): void {
     this.cancel(key)
     this.dirty.delete(key)
+    this.rejected.delete(key)
   }
 
   dispose(): void {
@@ -134,6 +144,7 @@ export class DraftSync {
     if (this.dirty.has(key) && this.deps.focused(key)) return
     this.cancel(key)
     this.dirty.delete(key)
+    this.rejected.delete(key)
     if (this.deps.read(key) !== text) this.deps.write(key, text)
   }
 
@@ -166,8 +177,15 @@ export class DraftSync {
       this.touched?.add(key)
       if (this.deps.read(key) === text) this.dirty.delete(key)
       else this.schedule(key, this.deps.read(key) === '' ? 0 : this.debounceMs)
-    } catch {
-      this.schedule(key, this.retryMs)
+    } catch (e) {
+      if (e instanceof ApiError && (e.status === 400 || e.status === 413)) {
+        // 重送一模一樣的字只會一直被拒：停下來，等本機改字再試。
+        this.dirty.delete(key)
+        this.rejected.add(key)
+        this.deps.onRejected?.(key, e)
+      } else {
+        this.schedule(key, this.retryMs)
+      }
     } finally {
       this.inflight.delete(key)
     }

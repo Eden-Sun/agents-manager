@@ -1,6 +1,7 @@
 import test, { afterEach, beforeEach } from 'node:test'
 import assert from 'node:assert/strict'
 import { installManualTimers } from '../testing/manualTimers'
+import { ApiError } from '../api/types'
 import { DraftSync, type DraftWire } from './draftSync'
 
 // debounce／重試是 `setTimeout`：換成手動時鐘，`tick(ms)` 才是「過了 ms 毫秒」而不是「睡 ms 毫秒然後祈禱」。
@@ -17,7 +18,8 @@ function rig(opts: { debounceMs?: number } = {}) {
   const focus = new Set<string>()
   const server = new Map<string, { text: string; rev: number }>()
   const puts: { key: string; text: string; clientId: string }[] = []
-  const gate = { hold: null as null | Promise<void>, fail: false, serverList: null as null | DraftWire[] }
+  const rejected: string[] = []
+  const gate = { hold: null as null | Promise<void>, fail: false, failWith: null as unknown, serverList: null as null | DraftWire[] }
   const sync = new DraftSync({
     clientId: 'me',
     debounceMs: opts.debounceMs ?? 400,
@@ -29,9 +31,11 @@ function rig(opts: { debounceMs?: number } = {}) {
     },
     focused: (k) => focus.has(k),
     keys: () => Object.keys(local),
+    onRejected: (key) => rejected.push(key),
     put: async (key, text, clientId) => {
       puts.push({ key, text, clientId })
       if (gate.hold) await gate.hold
+      if (gate.failWith) throw gate.failWith
       if (gate.fail) throw new Error('offline')
       const cur = server.get(key)
       if (cur && cur.text === text) return { rev: cur.rev }
@@ -46,7 +50,7 @@ function rig(opts: { debounceMs?: number } = {}) {
     else delete local[key]
     sync.localChange(key, text)
   }
-  return { sync, local, focus, server, puts, gate, type }
+  return { sync, local, focus, server, puts, gate, type, rejected }
 }
 
 /** 虛擬時間過 `ms`，並讓 PUT 的 promise 鏈跑完。 */
@@ -203,4 +207,47 @@ test('forget：bot 被刪後不再送', async () => {
   r.sync.forget('bot:a')
   await tick(30)
   assert.equal(r.puts.length, 0)
+})
+
+test('草稿太大（400）：不重送、不當成 daemon 沒有，本機改短再照常同步（#894）', async () => {
+  const r = rig({ debounceMs: 10 })
+  r.gate.failWith = new ApiError(400, { error: 'draft_too_large' }, 'draft_too_large')
+  r.type('bot:a', 'x'.repeat(300_000))
+  await tick(30)
+  await tick(30_000)
+  assert.equal(r.puts.length, 1, '被拒絕後不再每 3 秒重送')
+  assert.equal(r.sync.isDirty('bot:a'), false)
+  assert.deepEqual(r.rejected, ['bot:a'])
+
+  await r.sync.load() // fetchAll 回 []：本機那份大草稿不能被清成 ''
+  assert.equal(r.local['bot:a']?.length, 300_000)
+
+  r.gate.failWith = null
+  r.type('bot:a', '短了')
+  await tick(30)
+  assert.deepEqual(r.puts.map((p) => p.text).slice(-1), ['短了'])
+  assert.equal(r.server.get('bot:a')?.text, '短了')
+  assert.equal(r.sync.isDirty('bot:a'), false)
+})
+
+test('413 也一樣不重送', async () => {
+  const r = rig({ debounceMs: 10 })
+  r.gate.failWith = new ApiError(413, {}, 'too large')
+  r.type('bot:a', 'big')
+  await tick(30)
+  await tick(30_000)
+  assert.equal(r.puts.length, 1)
+  assert.deepEqual(r.rejected, ['bot:a'])
+})
+
+test('斷線（TypeError）照舊 3 秒後重送', async () => {
+  const r = rig({ debounceMs: 10 })
+  r.gate.failWith = new TypeError('Failed to fetch')
+  r.type('bot:a', 'x')
+  await tick(30)
+  assert.equal(r.puts.length, 1)
+  await tick(3000)
+  assert.equal(r.puts.length, 2)
+  assert.equal(r.sync.isDirty('bot:a'), true)
+  assert.deepEqual(r.rejected, [])
 })
