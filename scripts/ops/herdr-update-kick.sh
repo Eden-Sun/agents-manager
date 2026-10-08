@@ -35,6 +35,8 @@ LOG="$DIR/herdr-update.log"
 STATE="$DIR/herdr-update.last"       # 已經派過工的版本（should_notify 的去重就是靠比對這個檔）
 FAILS="$DIR/herdr-update.fails"      # 連續幾輪沒能完成檢查（完成一次就清掉）
 OWNER="${AM_AGENT_NAME:-herdr-update-kick}"
+# darwin／linux：升級後的驗收只有 macOS 有「本機網路」授權這回事（#886）。AGM_OPS_PLATFORM 只給測試蓋掉（同 daemon-swap.sh）。
+PLATFORM="${AGM_OPS_PLATFORM:-$(uname -s | tr 'A-Z' 'a-z')}"
 FAIL_ALERT_AFTER=${AGM_FAIL_ALERT_AFTER:-2}
 
 log() { echo "$(date '+%F %T') $*" >> "$LOG"; }
@@ -204,7 +206,11 @@ BODY=$(mktemp "${TMPDIR:-/tmp}/agm-herdr-update.XXXXXX"); TMPS+=("$BODY"); TMPS_
   printf '%s' "$BRIEF"
   printf '\n---\n本機 `herdr --version`：%s ｜ 最新穩定版（gh release list -R %s）：%s\nCHANGELOG：%s\n' \
     "$INSTALLED_LINE" "$HERDR_REPO" "$LATEST_TAG" "$CHANGELOG_URL"
-  printf '\n--- 升級後強制驗收 ---\n核准並完成 herdr 維護窗口後，依 scripts/ops/herdr-upgrade-runbook.md：從 herdr pane 跑 `bash scripts/ops/herdr-lan-check.sh /opt/homebrew/bin/herdr`（第一個參數一定要寫真 binary 的路徑；不帶參數在 bot pane 裡會抓到沒簽章的 per-bot shim）。必須用新 binary 的 codesign -dv identifier 查本機網路授權表，再用 node 連區網；Apple 內建 nc、python3、curl 不可代驗。任何失敗或 node 缺少都停下，回報「需要使用者授權本機網路」，不要靠重啟硬試。\n'
+  if [ "$PLATFORM" = darwin ]; then
+    printf '\n--- 升級後強制驗收 ---\n核准並完成 herdr 維護窗口後，依 scripts/ops/herdr-upgrade-runbook.md：從 herdr pane 跑 `bash scripts/ops/herdr-lan-check.sh /opt/homebrew/bin/herdr`（第一個參數一定要寫真 binary 的路徑；不帶參數在 bot pane 裡會抓到沒簽章的 per-bot shim）。必須用新 binary 的 codesign -dv identifier 查本機網路授權表，再用 node 連區網；Apple 內建 nc、python3、curl 不可代驗。任何失敗或 node 缺少都停下，回報「需要使用者授權本機網路」，不要靠重啟硬試。\n'
+  else
+    printf '\n--- 升級後驗收 ---\n核准並完成 herdr 維護窗口後，在 herdr pane 確認：`herdr --version` 是 %s、`herdr pane list` 正常、對一顆 idle bot 送一句 prompt 能回。這台是 %s：沒有 macOS 的本機網路授權，不要跑 herdr-lan-check.sh（也不要依 herdr-upgrade-runbook.md 的 codesign／授權步驟，那份只適用 macOS 主機）。任何一項失敗就停下回報，不要靠重啟硬試。\n' "$LATEST_VERSION" "$PLATFORM"
+  fi
 } > "$BODY"
 
 # 旗標是 `--request-id`（不是 --client-request-id）：拼錯 argparse 直接 exit 2

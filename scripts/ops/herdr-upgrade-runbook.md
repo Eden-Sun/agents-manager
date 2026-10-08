@@ -1,5 +1,7 @@
 # herdr 升級 runbook
 
+**本 runbook 只適用 macOS 主機**（codesign、本機網路授權、`herdr-lan-check.sh` 都是 macOS 專屬）；Linux 主機升級後只需確認 `herdr --version`、`herdr pane list` 與一顆 idle bot 能回 prompt。
+
 這份 runbook 是 AGM 已核准維護窗口後的人工操作步驟。`herdr-update-kick.sh` 只偵測／派工，
 不會升級、不會重啟 server；正式操作前仍要取得部署租約、使用者同意與 AGM 排定的維護窗口。
 

@@ -3,6 +3,14 @@
 # 這支腳本必須從 herdr pane 執行；Apple 內建 nc/python3/curl 不可作為驗證工具。
 set -u
 
+# macOS 的「本機網路」授權只有 macOS 需要（#886）：其他平台沒有東西可驗，不能讓 Linux 上的派工驗收被它擋成紅。
+# AGM_OPS_PLATFORM 只給測試蓋掉（同 daemon-swap.sh）。
+PLATFORM="${AGM_OPS_PLATFORM:-$(uname -s | tr 'A-Z' 'a-z')}"
+if [ "$PLATFORM" != darwin ]; then
+  echo "SKIP: macOS 本機網路授權只在 macOS 需要（平台 ${PLATFORM}）"
+  exit 0
+fi
+
 BINARY="${1:-}"
 HOST="${2:-${HERDR_LAN_HOST:-192.168.1.1}}"
 PORT="${3:-${HERDR_LAN_PORT:-80}}"
