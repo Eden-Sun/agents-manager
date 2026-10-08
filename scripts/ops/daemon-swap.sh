@@ -38,7 +38,18 @@ PLATFORM="${AGM_OPS_PLATFORM:-$(uname -s | tr 'A-Z' 'a-z')}"
 PGREP="${PGREP_BIN:-pgrep}"
 PYTHON="${PYTHON_BIN:-python3}"
 HERDR="${HERDR_BIN:-herdr}"
-PROBE_BOT="${SWAP_PROBE_BOT:-01M248GA4H1TAHJCZRKVR73S3C}"   # AGM 的 browser-gc child（3b 自測對象）
+# 3b 自測對象，順序：SWAP_PROBE_BOT ＞ $AGM_DIR/runtime.json 的 swap_probe_bot_id ＞ 舊常數（AGM 的 browser-gc child，搬家後常常不在，issue #882）。
+PROBE_BOT="${SWAP_PROBE_BOT:-}"
+if [ -z "$PROBE_BOT" ]; then
+    PROBE_BOT=$("$PYTHON" -c 'import json,sys
+try:
+    v = json.load(open(sys.argv[1])).get("swap_probe_bot_id")
+except Exception:
+    v = None
+print(v.strip() if isinstance(v, str) and v.strip() and len(v.split()) == 1 else "")' "$AGM_DIR/runtime.json" 2>/dev/null) || PROBE_BOT=""
+fi
+[ -n "$PROBE_BOT" ] || PROBE_BOT="01M248GA4H1TAHJCZRKVR73S3C"
+PROBE_SKIPS="$AGM_DIR/daemon-swap.probe-skips"   # 連續略過 3b 自測的次數（daemon-update-kick 讀它喊人）
 PROBE_TRIES="${SWAP_PROBE_TRIES:-12}"   # 對方正在跑回合時，等它結束重送的次數上限
 SETTLE="${SWAP_SETTLE_SECS:-45}"          # 重啟後等多久再看 supervisor／名單（測試會調小）
 WINDOW_TRIES="${SWAP_WINDOW_TRIES:-12}"   # 拿不到窗口時重試幾次（12 × 15 秒＝3 分鐘；一次 409 就 DEFER 會
@@ -444,9 +455,12 @@ while [ "$i" -lt "$PROBE_TRIES" ]; do
     esac
 done
 case "$PROBE" in
-    200*) log "3b self probe ok: $(printf '%s' "$PROBE" | head -c 120)" ;;
+    200*) log "3b self probe ok: $(printf '%s' "$PROBE" | head -c 120)"; rm -f "$PROBE_SKIPS" ;;
     *) if [ "$PROBE_SKIPPED" = yes ]; then
            log "3b 自測略過：$PROBE_BOT 沒有在跑（no active run），沒有東西可以送"
+           _skips=$(cat "$PROBE_SKIPS" 2>/dev/null)
+           case "$_skips" in ''|*[!0-9]*) _skips=0 ;; esac
+           echo $((_skips + 1)) > "$PROBE_SKIPS.tmp" && mv -f "$PROBE_SKIPS.tmp" "$PROBE_SKIPS"
        else
            log "ABORT: 自測對象一直在跑回合，送不進去"; exit 3
        fi ;;

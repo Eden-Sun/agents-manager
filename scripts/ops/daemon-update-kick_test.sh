@@ -381,6 +381,22 @@ check_eq "建置失敗 3 次收掉請求檔" "no" "$([ -f "$AGM_DIR/daemon-updat
 check "建置失敗推 now_failed" "now_failed" "$AGM_DIR/alerts.log"
 teardown
 
+# 16h. 3b 自測連續略過（daemon-swap 寫的計數檔）≥3：換版回來後推 swap_probe_skipped；不到 3 不推（issue #882）。
+setup
+ci "$C3" success
+echo 3 > "$AGM_DIR/daemon-swap.probe-skips"
+export STUB_SWAP_RC=0
+run >/dev/null
+check "略過 3 次推 swap_probe_skipped" "swap_probe_skipped" "$AGM_DIR/alerts.log"
+check "alert 內容帶次數" "連續 3 次略過" "$(LOG)"
+teardown
+setup
+ci "$C3" success
+echo 2 > "$AGM_DIR/daemon-swap.probe-skips"
+run >/dev/null
+check_no "略過 2 次不推" "swap_probe_skipped" "$AGM_DIR/alerts.log"
+teardown
+
 # 17. 殘留鎖（執行者已不在）超過門檻就回收；還活著的執行者則跳過。
 setup
 ci "$C3" success

@@ -395,4 +395,10 @@ case "$SWAP_RC" in
     now_fail "rc=${SWAP_RC}"
     ;;
 esac
+# 3b 自測對象沒有 run、被連續略過：換版前的送達自測形同沒做，要有人去設 swap_probe_bot_id（issue #882）。
+_skips=$(cat "$DIR/daemon-swap.probe-skips" 2>/dev/null)
+case "$_skips" in ''|*[!0-9]*) _skips=0 ;; esac
+if [ "$_skips" -ge 3 ]; then
+  alert swap_probe_skipped "換版前的送達自測已連續 ${_skips} 次略過（對象沒有 run）：在 ${DIR}/runtime.json 設 swap_probe_bot_id 指到一顆常駐、會回 ok 的 bot"
+fi
 exit 0

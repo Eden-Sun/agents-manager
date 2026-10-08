@@ -1022,6 +1022,54 @@ check "log 講清楚略過的原因" "3b 自測略過" "$SWAP_LOG"
 check "照樣換了 binary" "new-binary" "$AGM_DIR/started-binary.log"
 teardown
 
+# 16f-2. 略過自測要留下連續計數（issue #882）：略過 +1，自測 200 成功就清掉，daemon-update-kick 讀它喊人。
+#        每趟換版會換掉正式 binary，所以每一趟各自 setup，計數檔靠 $AGM_DIR 外的變數帶過去。
+setup 10 10
+export STUB_PROBE='404 {"error":"not_found","reason":"no active run"}'
+rc=$(run)
+check_eq "略過計數：第一趟 rc=0" "0" "$rc"
+check_eq "略過計數：第一趟是 1" "1" "$(cat "$AGM_DIR/daemon-swap.probe-skips" 2>/dev/null)"
+SKIPS=$(cat "$AGM_DIR/daemon-swap.probe-skips")
+teardown
+setup 10 10
+echo "$SKIPS" > "$AGM_DIR/daemon-swap.probe-skips"
+export STUB_PROBE='404 {"error":"not_found","reason":"no active run"}'
+rc=$(run)
+check_eq "略過計數：第二趟 rc=0" "0" "$rc"
+check_eq "略過計數：第二趟是 2" "2" "$(cat "$AGM_DIR/daemon-swap.probe-skips" 2>/dev/null)"
+SKIPS=$(cat "$AGM_DIR/daemon-swap.probe-skips")
+teardown
+setup 10 10
+echo "$SKIPS" > "$AGM_DIR/daemon-swap.probe-skips"
+export STUB_PROBE='200 {"delivery":"ok"}'
+rc=$(run)
+check_eq "略過計數：自測成功 rc=0" "0" "$rc"
+check_file "自測 200 成功就清掉計數檔" no "$AGM_DIR/daemon-swap.probe-skips"
+teardown
+
+# 16f-3. 自測對象的來源：SWAP_PROBE_BOT ＞ runtime.json 的 swap_probe_bot_id ＞ 舊常數。
+setup 10 10
+unset SWAP_PROBE_BOT
+printf '{"swap_probe_bot_id": "bot-from-runtime"}\n' > "$AGM_DIR/runtime.json"
+rc=$(run)
+check_eq "runtime.json 指定自測對象：rc=0" "0" "$rc"
+check "自測送給 runtime.json 的 bot" "bot-from-runtime" "$AGM_DIR/probe.log"
+teardown
+setup 10 10
+unset SWAP_PROBE_BOT
+printf '{"swap_probe_bot_id": ""}\n' > "$AGM_DIR/runtime.json"
+rc=$(run)
+check_eq "runtime.json 的值是空：rc=0" "0" "$rc"
+check "空值退回舊常數" "01M248GA4H1TAHJCZRKVR73S3C" "$AGM_DIR/probe.log"
+teardown
+setup 10 10
+printf '{"swap_probe_bot_id": "bot-from-runtime"}\n' > "$AGM_DIR/runtime.json"
+rc=$(run)
+check_eq "環境變數與 runtime.json 並存：rc=0" "0" "$rc"
+check "環境變數 SWAP_PROBE_BOT 優先" "bot-probe" "$AGM_DIR/probe.log"
+check_no "不用 runtime.json 的值" "bot-from-runtime" "$AGM_DIR/probe.log"
+teardown
+
 # 16d. 排程（timer／launchd）跑的沒有 pane：改用 herdr pane list 確認 socket 通，不是中止。
 setup 10 10
 unset HERDR_PANE_ID
