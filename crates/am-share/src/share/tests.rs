@@ -2126,5 +2126,31 @@ async fn deleting_a_bot_on_an_existing_folder_leaves_the_folder_alone() {
     }
 }
 
+/// 全站 compose 名額（#842）：名額被占走時，含 `<image href="inbox/…">` 的 SVG 不解碼、回 503；放回後同一請求 200 並嵌好。
+/// （測試版的名額是每個測試自己一份，所以不會跟別的測試互搶。）
+#[tokio::test]
+async fn compose_waits_for_the_global_slot() {
+    let e = tt::env().await;
+    let b = restricted_bot(&e.app, &e.project_id, "poster").await;
+    let token = shared(&e.app, &b.id).await;
+    let ws = std::path::PathBuf::from(store::workspace(&e.app.db, &b.id).await.unwrap().unwrap());
+    std::fs::create_dir_all(ws.join("inbox")).unwrap();
+    let mut photo = Vec::new();
+    image::DynamicImage::new_rgb8(400, 300).write_to(&mut std::io::Cursor::new(&mut photo), image::ImageFormat::Jpeg).unwrap();
+    std::fs::write(ws.join("inbox/p.jpg"), &photo).unwrap();
+    let outbox = crate::outbox::ensure(&e.app.data_dir, &b.id).unwrap();
+    std::fs::write(outbox.join("poster.svg"), r#"<svg xmlns="http://www.w3.org/2000/svg"><image href="inbox/p.jpg"/></svg>"#).unwrap();
+    let base = serve(portal::router(e.app.clone())).await;
+    let c = client();
+    let permit = super::compose::slots().acquire_owned().await.unwrap();
+    let r = c.get(format!("{base}/s/{token}/api/files/poster.svg")).send().await.unwrap();
+    assert_eq!(r.status(), 503, "名額被占走時不解碼");
+    assert_eq!(r.headers()["retry-after"], "5");
+    drop(permit);
+    let r = c.get(format!("{base}/s/{token}/api/files/poster.svg")).send().await.unwrap();
+    assert_eq!(r.status(), 200);
+    assert!(r.text().await.unwrap().contains(r#"<image href="data:image/jpeg;base64,"#));
+}
+
 #[path = "trusted_tests.rs"]
 mod trusted;
