@@ -749,3 +749,38 @@ AM_USAGE_DONE=0
         unpark_identity(&host, "cc0", true);
         assert!(!cooling_down(&bare, false, false), "共用預設帳號的身分重驗成功要收掉裸 key 的退避");
     }
+
+    /// #892：移除／改指主機要把那台的探測退避與 usage_seen 清掉，其他主機與本機不受影響。
+    #[test]
+    fn forgetting_a_host_drops_only_its_backoff_and_usage_seen() {
+        let host = format!("m4p-{}", crate::db::ulid());
+        let other = format!("other-{}", crate::db::ulid());
+        let mine = format!("{host}/claude:cc1");
+        let mine_bare = format!("{host}/claude");
+        let theirs = format!("{other}/claude");
+        let local = format!("claude:cc-{}", crate::db::ulid());
+        park(&mine, true);
+        mark_usage_seen(&mine_bare);
+        park(&theirs, false);
+        park(&local, false);
+        mark_usage_seen(&theirs);
+        assert!(cooling_down(&mine, false, false) && usage_fresh(&mine_bare));
+        forget_host(&host);
+        assert!(!cooling_down(&mine, false, false), "那台的退避要清掉");
+        assert!(!usage_fresh(&mine_bare), "那台的 usage_seen 要清掉");
+        assert!(cooling_down(&theirs, false, false), "別台不動");
+        assert!(usage_fresh(&theirs));
+        assert!(cooling_down(&local, false, false), "本機不動");
+        // 主機名是別台的前綴也不誤清（`m4` 不能清 `m4p/…`）。
+        let short = &host[..2];
+        forget_host(short);
+        park(&mine, true);
+        forget_host(short);
+        assert!(cooling_down(&mine, false, false), "前綴相同但不是同一台不能誤清");
+        // 本機：只清不帶 `/` 的 key。
+        forget_host(LOCAL_HOST);
+        assert!(!cooling_down(&local, false, false));
+        assert!(cooling_down(&mine, false, false), "遠端不受本機 forget 影響");
+        unpark(&mine);
+        unpark(&theirs);
+    }

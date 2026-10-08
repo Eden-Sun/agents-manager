@@ -700,6 +700,22 @@ pub fn unpark(key: &str) {
     backoff_map().lock().unwrap().remove(key);
 }
 
+/// 這個 key 屬於 `host` 嗎：遠端是 `<host>/…`，本機的 key 不帶 `/`。
+fn key_of_host(key: &str, host: &str) -> bool {
+    if host == LOCAL_HOST {
+        !key.contains('/')
+    } else {
+        key.strip_prefix(host).is_some_and(|rest| rest.starts_with('/'))
+    }
+}
+
+/// 主機被移除或改指到別台時，丟掉那台的探測退避與 `/usage` 讀到時刻（#892）：
+/// 這兩張表只在記憶體、以主機名為鍵，不清的話新連線繼承舊機器的退避（該探的不探）與「剛讀過」（該重讀的不讀）。
+pub fn forget_host(host: &str) {
+    backoff_map().lock().unwrap().retain(|k, _| !key_of_host(k, host));
+    usage_seen().lock().unwrap().retain(|k, _| !key_of_host(k, host));
+}
+
 /// After a login recheck, so the popover isn't wrong for the 30-minute logged-out park.
 /// `shares_default`：這個身分用的是預設帳號（[`crate::quota::identity_shares_default`]），它的探測退避記在裸 `claude` 那把 key。
 pub fn unpark_identity(host: &str, name: &str, shares_default: bool) {
