@@ -84,7 +84,7 @@ async fn controller_loop(app: Arc<App>, generation: i64) {
         // 回填掛在 `tools::detect` 之後（`backfill_quota_limits_once`）；回填之前 `resume_quota_blocked`
         // 照樣不會把 `resume_at` 還沒到的交辦放出去。
         // Startup reconciliation: results that arrived while the daemon was down.
-        reconcile(&app).await;
+        reconcile(app.as_ref()).await;
         loop {
             match current(&app.db, generation).await {
                 Ok(true) => {}
@@ -111,8 +111,8 @@ async fn controller_loop(app: Arc<App>, generation: i64) {
                             // Ignore the manager's own turns: a notification about its own
                             // reply is how you build an agent that talks to itself forever.
                             if !is_manager(&app.db, &ev.bot_id).await {
-                                on_turn_done(&app, &ev.turn_id, &ev.status).await;
-                                late_reply_for_turn(&app, &ev.turn_id, &ev.status).await;
+                                on_turn_done(app.as_ref(), &ev.turn_id, &ev.status).await;
+                                late_reply_for_turn(app.as_ref(), &ev.turn_id, &ev.status).await;
                             }
                         }
                     }
@@ -120,7 +120,7 @@ async fn controller_loop(app: Arc<App>, generation: i64) {
                     // never does.
                     Err(tokio::sync::broadcast::error::RecvError::Lagged(n)) => {
                         tracing::warn!(dropped = n, "supervisor missed turn events; reconciling from the database");
-                        reconcile(&app).await;
+                        reconcile(app.as_ref()).await;
                     }
                     Err(_) => return,
                 },
@@ -128,25 +128,25 @@ async fn controller_loop(app: Arc<App>, generation: i64) {
                     // issue #473：每一段與整拍各記一次耗時。`timing::seg` 只是在原地 await 同一個
                     // future，順序、鎖的範圍一個字都沒變；超標才寫 log（見 `supervisor/timing.rs`）。
                     let tick_started = std::time::Instant::now();
-                    super::timing::seg(&app, "quota_policy", async {
+                    super::timing::seg(app.as_ref(), "quota_policy", async {
                         let _g = super::lock().await;
-                        match apply_quota_policy(&app).await {
+                        match apply_quota_policy(app.as_ref()).await {
                             // Mid-turn: the next tick asks again.
                             Err(LcError::Conflict(_)) | Ok(_) => {}
                             Err(e) => tracing::warn!(error = ?e, "supervisor quota policy failed"),
                         }
                     }).await;
-                    super::timing::seg(&app, "reconcile", reconcile(&app)).await;
-                    super::timing::seg(&app, "resume_quota_blocked", resume_quota_blocked(&app)).await;
-                    super::timing::seg(&app, "block_stale_queues", block_stale_queues(&app)).await;
+                    super::timing::seg(app.as_ref(), "reconcile", reconcile(app.as_ref())).await;
+                    super::timing::seg(app.as_ref(), "resume_quota_blocked", resume_quota_blocked(app.as_ref())).await;
+                    super::timing::seg(app.as_ref(), "block_stale_queues", block_stale_queues(app.as_ref())).await;
                     // 丟背景（issue #480）：一輪要做 herdr 讀畫面與外部 Jev 呼叫，await 會拖住整拍。
                     // timing 的區段留著（i406 的量測靠它列齊每一段），現在量到的是「派出去」本身，
                     // 幾乎是 0——那就是實話，這一段不再佔 tick 的時間了。
-                    super::timing::seg(&app, "judge_stuck_sweep", async { app.judge_stuck_sweep() }).await;
-                    super::timing::seg(&app, "drain_queue", drain_queue(&app)).await;
+                    super::timing::seg(app.as_ref(), "judge_stuck_sweep", async { app.as_ref().judge_stuck_sweep() }).await;
+                    super::timing::seg(app.as_ref(), "drain_queue", drain_queue(app.as_ref())).await;
                     // Before pushing anything new: give back the notifications that went out
                     // and were never answered. A delivered event nobody acked is still owed.
-                    super::timing::seg(&app, "recover_unacked", recover_unacked(&app)).await;
+                    super::timing::seg(app.as_ref(), "recover_unacked", recover_unacked(app.as_ref())).await;
                     // 先分角色、合併重複，再各自決定要不要叫醒（roles.rs）。沒有要叫醒的事件時，
                     // 這一段只讀寫資料庫，不開任何模型回合。
                     // 失敗要記，而且**這一拍照跑下去**（#472）：這兩支失敗時，事件會留在
@@ -155,30 +155,30 @@ async fn controller_loop(app: Arc<App>, generation: i64) {
                     // （走不到 `notify_exhausted`）。以前這裡是 `let _ =`，連一行 log 都沒有。
                     // 整拍不因此中止：後面幾段（watchdog、mission、idle_sleep）跟分類無關，
                     // 為了一個分類失敗把它們一起停掉只會多壞一件事。
-                    note_classify_result(&app, super::timing::seg(&app, "roles_classify", super::roles::classify(&app.db)).await);
-                    if let Err(e) = super::timing::seg(&app, "roles_coalesce_patrol", super::roles::coalesce_patrol(&app.db)).await {
+                    note_classify_result(app.as_ref(), super::timing::seg(app.as_ref(), "roles_classify", super::roles::classify(&app.db)).await);
+                    if let Err(e) = super::timing::seg(app.as_ref(), "roles_coalesce_patrol", super::roles::coalesce_patrol(&app.db)).await {
                         // 合併失敗只是「重複的 health_changed 沒被收掉」，事件本身照樣送得出去，
                         // 所以記一行就好，不進 incident。
                         tracing::warn!(error = ?e, "巡檢的重複事件沒合併成功（roles::coalesce_patrol 失敗）");
                     }
                     // issue #421：協調者不可用而核准等超過 5 分鐘 → 改派給巡檢並叫醒它。
                     // 放在 notify 之前：改派完這一拍就由巡檢的 notify 送出去，不必再等一拍。
-                    let unavailable = super::timing::seg(&app, "responder_unavailable", super::failover::responder_unavailable(&app)).await;
-                    super::timing::seg(&app, "reassign_stale_approvals", super::failover::reassign_stale_approvals(&app, unavailable)).await;
-                    super::timing::seg(&app, "notify", notify(&app)).await;
-                    super::timing::seg(&app, "responder_notify", super::responder::notify(&app)).await;
+                    let unavailable = super::timing::seg(app.as_ref(), "responder_unavailable", super::failover::responder_unavailable(app.as_ref())).await;
+                    super::timing::seg(app.as_ref(), "reassign_stale_approvals", super::failover::reassign_stale_approvals(app.as_ref(), unavailable)).await;
+                    super::timing::seg(app.as_ref(), "notify", notify(app.as_ref())).await;
+                    super::timing::seg(app.as_ref(), "responder_notify", super::responder::notify(app.as_ref())).await;
                     super::timing::seg(&app, "watchdog", super::watchdog::tick(&app)).await;
                     super::timing::seg(&app, "responder_watchdog", super::responder::watchdog_tick(&app)).await;
                     // 群組任務停在「輪到 AGM」很久沒動靜（重啟、回合中斷）：照持久狀態推出的下一步叫醒它（issue #74）。
-                    super::timing::seg(&app, "mission_wake_stalled", app.mission_wake_stalled()).await;
+                    super::timing::seg(app.as_ref(), "mission_wake_stalled", app.as_ref().mission_wake_stalled()).await;
                     // 結案時沒收乾淨的臨時 bot（當機、一時讀不到狀態、遠端斷線）在這裡補收（issue #343）。
-                    super::timing::seg(&app, "mission_sweep_temp_bots", app.mission_sweep_closed_temp_bots()).await;
+                    super::timing::seg(app.as_ref(), "mission_sweep_temp_bots", app.as_ref().mission_sweep_closed_temp_bots()).await;
                     // 閒置太久的 bot 收起來省 RAM（§6.11）。巡邏自己節流成每分鐘一次，
                     // 而且丟到背景跑——停一顆最久要等 agent 十秒，不能卡住這條迴圈。
                     super::timing::seg(&app, "idle_sleep", async { super::idle_sleep::tick(&app) }).await;
                     // 主力 bot 的 prompt cache 保溫（58 分）與熱壓（110 分），SPEC §6.5k。自己節流成 30 秒一次、丟背景跑。
-                    super::timing::seg(&app, "primary_keep_warm", async { app.primary_keep_warm_tick() }).await;
-                    super::timing::note_tick(&app, tick_started.elapsed()).await;
+                    super::timing::seg(app.as_ref(), "primary_keep_warm", async { app.as_ref().primary_keep_warm_tick() }).await;
+                    super::timing::note_tick(app.as_ref(), tick_started.elapsed()).await;
                 }
             }
         }

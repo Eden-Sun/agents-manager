@@ -16,6 +16,7 @@ am-lifecycle = { path = "../crates/am-lifecycle" }
 am-core = { path = "../crates/am-core" }
 am-ports = { path = "../crates/am-ports" }
 am-config = { path = "../crates/am-config" }
+am-supervisor = { path = "../crates/am-supervisor", features = ["daemon-test-harness"] }
 axum = { version = "0.8", features = ["ws", "macros"] }
 base64 = "0.22"
 tokio = { version = "1", features = ["full"] }

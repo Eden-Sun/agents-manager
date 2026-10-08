@@ -17,8 +17,8 @@ check() {
 # 模組路徑：daemon/src/a/b.rs → a::b::；mod.rs 就是目錄本身；頂層 x.rs → x::。
 check "lifecycle::queue::" "daemon/src/lifecycle/queue.rs"
 check "api::" "daemon/src/api.rs"
-check "supervisor::" "daemon/src/supervisor/mod.rs"
-check "supervisor::controller::" "daemon/src/supervisor/controller.rs"
+check "supervisor::" "crates/am-supervisor/src/supervisor/mod.rs"
+check "supervisor::controller::" "crates/am-supervisor/src/supervisor/controller.rs"
 # 測試檔就在自己的模組底下（foo/tests.rs → foo::tests::，包含在 foo:: 裡）。
 check "host_baseline::tests::" "daemon/src/host_baseline/tests.rs"
 # Build inputs, crate wiring, shared test helpers, and include data can affect tests across modules.
@@ -33,12 +33,14 @@ check "__all__" "daemon/src/testing.rs"
 check "__all__" "daemon/src/test_home.rs"
 check "__all__" "daemon/src/main.rs"
 check "__all__" "daemon/src/lib.rs"
-check "__all__" "daemon/src/lifecycle/fixtures/claude-2.1.281-draft.ansi"
+check "__all__" "crates/am-lifecycle/src/lifecycle/fixtures/claude-2.1.281-draft.ansi"
 check "__all__" "crates/am-base/src/release_triage/rules.toml"
 check "lifecycle::queue::" "crates/am-lifecycle/src/lifecycle/queue.rs"
 check "codex_history::" "crates/am-lifecycle/src/codex_history.rs"
 check "lifecycle::" "crates/am-lifecycle/src/lifecycle/mod.rs"
 check "__all__" "crates/am-lifecycle/src/lifecycle/fixtures/capture.txt"
+check "mission::ports_impl::" "crates/am-supervisor/src/mission/ports_impl.rs"
+check "build_info::" "crates/am-supervisor/src/build_info.rs"
 check "__all__ lifecycle::queue::" "daemon/build.rs" "daemon/src/lifecycle/queue.rs"
 # 多個檔案：去重、排序。
 check "lifecycle::prompt:: lifecycle::queue::" "daemon/src/lifecycle/queue.rs" "daemon/src/lifecycle/prompt.rs" "daemon/src/lifecycle/queue.rs"

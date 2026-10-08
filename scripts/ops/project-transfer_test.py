@@ -42,7 +42,7 @@ def schema_statements():
 
 # 協調者與群組任務的表（#720）：各模組自己的 `DDL` 常數＋migrate 裡的 ALTER／額外索引。
 # 先建表、再補欄、最後建索引（有些索引用到 ALTER 才加的欄，例如 supervisor_inbox.role）。
-MODULES = ["daemon/src/supervisor/store.rs", "daemon/src/supervisor/roles.rs", "daemon/src/mission/store.rs"]
+MODULES = ["crates/am-supervisor/src/supervisor/store.rs", "crates/am-supervisor/src/supervisor/roles.rs", "crates/am-supervisor/src/mission/store.rs"]
 
 
 def module_statements():

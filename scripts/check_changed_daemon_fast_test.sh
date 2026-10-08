@@ -130,7 +130,7 @@ unset AM_TEST_CARGO_ZERO_TESTS
 # Build scripts, manifests, common test helpers, and embedded fixture/data edits need the whole suite.
 for path in daemon/build.rs Cargo.toml Cargo.lock .cargo/config.toml rust-toolchain.toml daemon/Cargo.toml \
     daemon/src/testing.rs daemon/src/lib.rs daemon/tests/fixtures/capture/claude/input.txt \
-    daemon/src/lifecycle/fixtures/codex-0.157-model-migration.txt crates/am-base/src/release_triage/rules.toml; do
+    crates/am-lifecycle/src/lifecycle/fixtures/codex-0.157-model-migration.txt crates/am-base/src/release_triage/rules.toml; do
     : >"$AM_TEST_CARGO_LOG"
     export AM_TEST_DIFF_HEAD="$path"
     output="$(changed 2>&1)" || fail "$path 的 changed 失敗：$output"
