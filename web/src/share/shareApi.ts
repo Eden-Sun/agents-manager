@@ -15,9 +15,16 @@ export interface ShareEvents {
   onUp?: () => void
 }
 
+/** `POST /messages` 的回應（API.md §5.6）：`delivery` 是 bot 到底有沒有收到（`failed`／`unknown` 要讓人知道），`messageId` 是這一則 user 訊息的 id。 */
+export interface ShareSendResult {
+  delivery?: string
+  messageId?: string
+}
+
 export interface ShareClient {
   messages(before?: string): Promise<SharePage>
-  send(text: string, clientRequestId: string, attachments: string[]): Promise<void>
+  /** 回應可省（舊 client、mock）：呼叫端把 `undefined` 當成「照舊，沒有額外資訊」。 */
+  send(text: string, clientRequestId: string, attachments: string[]): Promise<ShareSendResult | void>
   upload(file: File): Promise<{ id: string; name: string }>
   files(): Promise<ShareFile[]>
   fileUrl(name: string): string
@@ -47,11 +54,16 @@ export function httpShareClient(token: string): ShareClient {
       return toSharePage(await json(`/messages?${q}`))
     },
     async send(text, clientRequestId, attachments) {
-      await json('/messages', {
+      const res = await json('/messages', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ text, client_request_id: clientRequestId, ...(attachments.length ? { attachments } : {}) }),
       })
+      const o = res && typeof res === 'object' ? (res as Record<string, unknown>) : {}
+      return {
+        delivery: typeof o.delivery === 'string' ? o.delivery : undefined,
+        messageId: typeof o.message_id === 'string' && o.message_id ? o.message_id : undefined,
+      }
     },
     async upload(file) {
       const fd = new FormData()
