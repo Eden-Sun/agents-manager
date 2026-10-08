@@ -5,6 +5,9 @@ use crate::config::LOCAL_HOST;
 use crate::quota::{Quota, Window};
 use anyhow::{anyhow, Result};
 
+#[path = "../../../../crates/am-base/src/quota_agy.daemon-tests-backoff_tests.rs"]
+mod backoff_tests;
+
 #[path = "../../../../crates/am-base/src/quota_agy.daemon-tests-login_tests.rs"]
 mod login_tests;
 

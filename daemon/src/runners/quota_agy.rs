@@ -3,7 +3,7 @@
 use crate::quota::Quota;
 use crate::quota_agy::*;
 use crate::state::App;
-use anyhow::{anyhow, bail, Result};
+use anyhow::{anyhow, Result};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -84,15 +84,37 @@ async fn record_probe_result(app: &Arc<App>, host: &str, fence: &crate::hosts::H
     }
 }
 
+/// 一輪探測失敗的原因。`superseded`＝主機在途中換了主機或重連（這個失敗不屬於現在這台，不該記冷卻）。
+pub(crate) struct RefreshFail {
+    pub error: anyhow::Error,
+    pub superseded: bool,
+}
+
+impl From<anyhow::Error> for RefreshFail {
+    fn from(error: anyhow::Error) -> Self {
+        Self { error, superseded: false }
+    }
+}
+
 /// `Ok(false)` ＝這台主機沒裝 agy（不探測、不報錯）。失敗時錯誤訊息就是原因（同時記在 [`tools_json`] 的 `quota_error`）。
 pub async fn refresh_agy(app: &Arc<App>, host: &str) -> Result<bool> {
+    refresh_agy_fenced(app, host).await.1.map_err(|f| f.error)
+}
+
+/// 同 [`refresh_agy`]，另外回傳這一輪真正用到的 fence（`None` ＝主機不存在），讓呼叫端把冷卻綁在同一個世代上（#873）。
+pub(crate) async fn refresh_agy_fenced(app: &Arc<App>, host: &str) -> (Option<crate::hosts::HostFence>, Result<bool, RefreshFail>) {
     let _guard = crate::quota::probe_lock(&format!("{host}#agy")).await;
-    let fence = app.hosts.fence(host).await.ok_or_else(|| anyhow!("unknown host `{host}`"))?;
+    let Some(fence) = app.hosts.fence(host).await else { return (None, Err(anyhow!("unknown host `{host}`").into())) };
+    let result = refresh_with_fence(app, host, &fence).await;
+    (Some(fence), result)
+}
+
+async fn refresh_with_fence(app: &Arc<App>, host: &str, fence: &crate::hosts::HostFence) -> Result<bool, RefreshFail> {
     if !app.tools.lock().await.contains_key(host) {
         crate::tools::detect(app, host).await?;
     }
-    if !app.hosts.is_current(&fence).await {
-        bail!("host `{host}` changed before its agy quota probe");
+    if !app.hosts.is_current(fence).await {
+        return Err(RefreshFail { error: anyhow!("host `{host}` changed before its agy quota probe"), superseded: true });
     }
     let Some(exe) = crate::tools::cached_path(app, host, "agy").await else { return Ok(false) };
     let parsed = if fence.conn().is_local() {
@@ -101,25 +123,28 @@ pub async fn refresh_agy(app: &Arc<App>, host: &str) -> Result<bool> {
             Err(e) => Err(ProbeFail::other("timeout", format!("{e:#}"))),
         }
     } else {
-        pane_probe(app, host, &fence, &exe).await
+        pane_probe(app, host, fence, &exe).await
     };
     let buckets = match parsed {
         Ok(b) => b,
         Err(fail) => {
             // 主機換掉了：這個結果不屬於現在這台，別記。
-            if !matches!(&fail, ProbeFail::Other { reason: "superseded", .. }) {
-                record_probe_result(app, host, &fence, &Err(fail.clone())).await;
+            let superseded = matches!(&fail, ProbeFail::Other { reason: "superseded", .. });
+            if !superseded {
+                record_probe_result(app, host, fence, &Err(fail.clone())).await;
             }
-            return Err(match fail {
+            let error = match fail {
                 ProbeFail::AuthRequired => anyhow!("agy on {host} is not logged in (`agy -p /usage` printed `Authentication required`)"),
                 ProbeFail::Other { message, .. } => anyhow!(message),
-            });
+            };
+            return Err(RefreshFail { error, superseded });
         }
     };
     for (key, q) in buckets {
-        crate::quota::set_fenced(app, host, key, q, &fence).await?;
+        // 寫入被擋＝途中換代，同樣不屬於現在這台。
+        crate::quota::set_fenced(app, host, key, q, fence).await.map_err(|error| RefreshFail { error, superseded: true })?;
     }
-    record_probe_result(app, host, &fence, &Ok(())).await;
+    record_probe_result(app, host, fence, &Ok(())).await;
     Ok(true)
 }
 
@@ -259,9 +284,51 @@ pub(crate) struct BackoffEntry {
     pub authority: crate::hosts::HostAuthorityKey,
 }
 
-pub(crate) fn backoff() -> &'static std::sync::Mutex<std::collections::HashMap<String, std::time::Instant>> {
-    static M: std::sync::OnceLock<std::sync::Mutex<std::collections::HashMap<String, std::time::Instant>>> = std::sync::OnceLock::new();
+pub(crate) fn backoff() -> &'static std::sync::Mutex<std::collections::HashMap<String, BackoffEntry>> {
+    static M: std::sync::OnceLock<std::sync::Mutex<std::collections::HashMap<String, BackoffEntry>>> = std::sync::OnceLock::new();
     M.get_or_init(Default::default)
+}
+
+/// 這個世代還在冷卻嗎？世代對不上的紀錄屬於舊主機，順手丟掉。
+pub(crate) fn backoff_active(key: &str, fence: &crate::hosts::HostFence) -> bool {
+    let mut map = backoff().lock().unwrap();
+    match map.get(key) {
+        Some(entry) if entry.authority.matches(fence) => entry.until > std::time::Instant::now(),
+        Some(_) => {
+            map.remove(key);
+            false
+        }
+        None => false,
+    }
+}
+
+/// 只有「主機還是這個世代」才記冷卻；換代的失敗（`superseded`）不記。回 true ＝寫進去了。
+pub(crate) async fn note_failure(app: &Arc<App>, host: &str, fence: &crate::hosts::HostFence) -> bool {
+    let key = crate::quota::quota_key(host, "agy");
+    app.hosts
+        .run_if_current(fence, async {
+            backoff().lock().unwrap().insert(key, BackoffEntry { until: std::time::Instant::now() + RETRY_AFTER_FAILURE, authority: fence.authority_key() });
+        })
+        .await
+        .is_some()
+}
+
+/// 登入偵測發現已登入時清冷卻：只清自己這個世代寫的那筆。
+pub(crate) async fn clear_backoff(app: &Arc<App>, host: &str, fence: &crate::hosts::HostFence) {
+    let key = crate::quota::quota_key(host, "agy");
+    app.hosts
+        .run_if_current(fence, async {
+            let mut map = backoff().lock().unwrap();
+            if map.get(&key).is_some_and(|entry| entry.authority.matches(fence)) {
+                map.remove(&key);
+            }
+        })
+        .await;
+}
+
+/// 這個失敗要不要開始冷卻：換代造成的失敗不算。
+pub(crate) fn starts_backoff(fail: &RefreshFail) -> bool {
+    !fail.superseded
 }
 
 /// `None` ＝這一輪跳過（上次失敗還在冷卻）。`GET /api/quota?refresh=1` 不走這裡，一律真的探測。
@@ -271,14 +338,18 @@ pub async fn refresh_agy_if_due(app: &Arc<App>, host: &str) -> Result<Option<boo
         return Ok(None);
     }
     let key = crate::quota::quota_key(host, "agy");
-    if backoff().lock().unwrap().get(&key).is_some_and(|t| *t > std::time::Instant::now()) {
+    let Some(cur) = app.hosts.fence(host).await else { return Ok(None) };
+    if backoff_active(&key, &cur) {
         return Ok(None);
     }
-    match refresh_agy(app, host).await {
+    let (fence, result) = refresh_agy_fenced(app, host).await;
+    match result {
         Ok(v) => Ok(Some(v)),
-        Err(e) => {
-            backoff().lock().unwrap().insert(key, std::time::Instant::now() + RETRY_AFTER_FAILURE);
-            Err(e)
+        Err(fail) => {
+            if let Some(fence) = fence.as_ref().filter(|_| starts_backoff(&fail)) {
+                note_failure(app, host, fence).await;
+            }
+            Err(fail.error)
         }
     }
 }
@@ -318,7 +389,7 @@ pub async fn login_watch_once(app: &Arc<App>, host: &str) {
             return;
         }
         set_logged_in(app, host, &fence, true).await;
-        backoff().lock().unwrap().remove(&key);
+        clear_backoff(app, host, &fence).await;
     } else if app.quotas.lock().await.contains_key(&key) {
         return;
     }
