@@ -27,6 +27,7 @@ dependencies = [
  "am-base",
  "am-config",
  "am-core",
+ "am-lifecycle",
  "am-ports",
  "anyhow",
  "axum",
@@ -147,6 +148,45 @@ dependencies = [
 [[package]]
 name = "am-core"
 version = "0.1.0"
+
+[[package]]
+name = "am-lifecycle"
+version = "0.1.0"
+dependencies = [
+ "am-base",
+ "am-config",
+ "am-core",
+ "am-ports",
+ "anyhow",
+ "axum",
+ "base64 0.22.1",
+ "chrono",
+ "chrono-tz",
+ "clap",
+ "dirs 5.0.1",
+ "futures",
+ "image",
+ "libc",
+ "mime_guess",
+ "quick-xml",
+ "rand 0.8.8",
+ "reqwest 0.12.28",
+ "rust-embed",
+ "serde",
+ "serde_ignored",
+ "serde_json",
+ "sha2 0.10.9",
+ "sqlx",
+ "thiserror 2.0.20",
+ "tokio",
+ "tokio-util",
+ "toml 0.8.23",
+ "toml_edit 0.22.27",
+ "tower-http",
+ "tracing",
+ "tracing-subscriber",
+ "ulid",
+]
 
 [[package]]
 name = "am-ports"

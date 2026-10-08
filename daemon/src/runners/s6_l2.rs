@@ -1,14 +1,12 @@
 //! Composition adapters for lifecycle's final `App` boundary.
 
-use crate::{app_ports_p4state, lifecycle::{self, s6_ports}, state::App};
+use crate::{app_ports_p4state, lifecycle::s6_ports, state::App};
 use crate::capabilities::Db;
-use std::{future::Future, sync::Arc};
+use std::future::Future;
 
-impl lifecycle::LcHost for Arc<App> {}
-
-impl s6_ports::TurnEventHostServices for Arc<App> {
+impl s6_ports::TurnEventHostServices for App {
     fn child_done_after_completed_turn(&self, turn_id: &str) {
-        crate::runners::child_done::on_completed_turn(self, turn_id);
+        crate::runners::child_done::on_completed_turn(&self.shared(), turn_id);
     }
 
     fn publish_lifecycle_turn(&self, bot_id: &str, turn_id: &str, status: &str, delivery: &str) {
@@ -21,18 +19,18 @@ impl s6_ports::TurnEventHostServices for Arc<App> {
     }
 }
 
-impl s6_ports::InterruptGraceHostServices for Arc<App> {
+impl s6_ports::InterruptGraceHostServices for App {
     fn codex_interrupted_after<'a>(
         &'a self,
         bot: &'a crate::db::Bot,
         run: &'a crate::db::Run,
         sent: &'a [String],
     ) -> impl Future<Output = bool> + Send + 'a {
-        async move { app_ports_p4state::codex_interrupted_after(self, bot, run, sent).await }
+        async move { app_ports_p4state::codex_interrupted_after(&self.shared(), bot, run, sent).await }
     }
 }
 
-impl s6_ports::RestartHoldHostServices for Arc<App> {
+impl s6_ports::RestartHoldHostServices for App {
     fn open_restart_intents(&self) -> impl Future<Output = anyhow::Result<Vec<s6_ports::OpenRestartIntent>>> + Send {
         async move {
             Ok(app_ports_p4state::open_restart_intents(self.db())

@@ -159,7 +159,7 @@ impl Source {
     fn filter_sql(&self) -> String {
         self.filter.replace(
             "{open}",
-            &<sqlx::SqlitePool as SupervisorRepo>::open_states_sql(),
+            &<crate::state::App as SupervisorRepo>::open_states_sql(),
         )
     }
 

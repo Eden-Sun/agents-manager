@@ -30,11 +30,6 @@ impl crate::background_jobs::JobCounts for App {
         &self.background_jobs
     }
 }
-impl<T: crate::background_jobs::JobCounts + ?Sized> crate::background_jobs::JobCounts for Arc<T> {
-    fn background_jobs(&self) -> &crate::background_jobs::Counts {
-        (**self).background_jobs()
-    }
-}
 
 impl crate::background_hook::HookSnapshots for App {
     fn background_hook(&self) -> &crate::background_hook::Snapshots {
@@ -92,12 +87,6 @@ impl crate::judge::JudgeFuse for App {
         &self.judge_fuse
     }
 }
-impl<T: crate::judge::JudgeFuse + ?Sized> crate::judge::JudgeFuse for Arc<T> {
-    fn judge_fuse(&self) -> &tokio::sync::Mutex<()> {
-        (**self).judge_fuse()
-    }
-}
-
 impl crate::supervisor::role_faults::RoleFaultTable for App {
     fn role_faults(&self) -> &tokio::sync::Mutex<std::collections::HashMap<String, crate::supervisor::role_faults::RoleFault>> {
         &self.role_faults
@@ -149,11 +138,6 @@ impl crate::tui_prompts::SurveyRevisions for App {
         &self.survey_revisions
     }
 }
-impl<T: crate::tui_prompts::SurveyRevisions + ?Sized> crate::tui_prompts::SurveyRevisions for Arc<T> {
-    fn survey_revisions(&self) -> &tokio::sync::Mutex<std::collections::HashMap<String, u64>> {
-        (**self).survey_revisions()
-    }
-}
 
 impl crate::shim_refresh::RemoteShimStale for App {
     fn remote_shim_stale(&self) -> &tokio::sync::Mutex<std::collections::HashMap<String, String>> {
@@ -164,11 +148,6 @@ impl crate::shim_refresh::RemoteShimStale for App {
 impl crate::lifecycle::poller::ProgressPollers for App {
     fn progress_pollers(&self) -> &tokio::sync::Mutex<std::collections::HashMap<String, tokio::task::JoinHandle<()>>> {
         &self.progress_pollers
-    }
-}
-impl<T: crate::lifecycle::poller::ProgressPollers + ?Sized> crate::lifecycle::poller::ProgressPollers for Arc<T> {
-    fn progress_pollers(&self) -> &tokio::sync::Mutex<std::collections::HashMap<String, tokio::task::JoinHandle<()>>> {
-        (**self).progress_pollers()
     }
 }
 
@@ -187,11 +166,6 @@ impl crate::changelog::ChangelogState for App {
 impl crate::events::PaneWatchers for App {
     fn pane_watchers(&self) -> &tokio::sync::Mutex<std::collections::HashMap<(String, String, String), tokio::task::JoinHandle<()>>> {
         &self.pane_watchers
-    }
-}
-impl<T: crate::events::PaneWatchers + ?Sized> crate::events::PaneWatchers for Arc<T> {
-    fn pane_watchers(&self) -> &tokio::sync::Mutex<std::collections::HashMap<(String, String, String), tokio::task::JoinHandle<()>>> {
-        (**self).pane_watchers()
     }
 }
 
@@ -213,11 +187,6 @@ impl crate::lifecycle::poller::StallTimers for App {
         &self.stall_timers
     }
 }
-impl<T: crate::lifecycle::poller::StallTimers + ?Sized> crate::lifecycle::poller::StallTimers for Arc<T> {
-    fn stall_timers(&self) -> &tokio::sync::Mutex<std::collections::HashMap<String, u64>> {
-        (**self).stall_timers()
-    }
-}
 
 
 impl crate::lifecycle::poller::ProgressEmitted for App {
@@ -225,20 +194,10 @@ impl crate::lifecycle::poller::ProgressEmitted for App {
         &self.progress_emitted
     }
 }
-impl<T: crate::lifecycle::poller::ProgressEmitted + ?Sized> crate::lifecycle::poller::ProgressEmitted for Arc<T> {
-    fn progress_emitted(&self) -> &tokio::sync::Mutex<std::collections::HashMap<String, std::time::Instant>> {
-        (**self).progress_emitted()
-    }
-}
 
 impl crate::lifecycle::poller::FallbackTimers for App {
     fn fallback_timers(&self) -> &tokio::sync::Mutex<std::collections::HashMap<String, u64>> {
         &self.fallback_timers
-    }
-}
-impl<T: crate::lifecycle::poller::FallbackTimers + ?Sized> crate::lifecycle::poller::FallbackTimers for Arc<T> {
-    fn fallback_timers(&self) -> &tokio::sync::Mutex<std::collections::HashMap<String, u64>> {
-        (**self).fallback_timers()
     }
 }
 
@@ -257,11 +216,6 @@ impl crate::hookrecv::SpoolFoldStuck for App {
         &self.spool_fold_stuck
     }
 }
-impl<T: crate::hookrecv::SpoolFoldStuck + ?Sized> crate::hookrecv::SpoolFoldStuck for Arc<T> {
-    fn spool_fold_stuck(&self) -> &tokio::sync::Mutex<std::collections::HashMap<String, (u32, i64)>> {
-        (**self).spool_fold_stuck()
-    }
-}
 
 impl crate::login_assist::LoginReservations for App {
     fn login_reservations(&self) -> &crate::login_assist::Reservations {
@@ -276,11 +230,6 @@ impl crate::hookrecv::ClassifyFailures for App {
         &self.classify_failures
     }
 }
-impl<T: crate::hookrecv::ClassifyFailures + ?Sized> crate::hookrecv::ClassifyFailures for Arc<T> {
-    fn classify_failures(&self) -> &std::sync::atomic::AtomicU32 {
-        (**self).classify_failures()
-    }
-}
 
 impl crate::host_baseline::HostBaselineTable for App {
     fn host_baseline(&self) -> &tokio::sync::Mutex<std::collections::HashMap<String, crate::host_baseline::BaselineReport>> {
@@ -293,9 +242,21 @@ impl crate::default_session::DefaultSyncLock for App {
         &self.default_sync_lock
     }
 }
-impl<T: crate::default_session::DefaultSyncLock + ?Sized> crate::default_session::DefaultSyncLock for Arc<T> {
-    fn default_sync_lock(&self) -> &tokio::sync::Mutex<()> {
-        (**self).default_sync_lock()
+
+impl crate::default_session::DefaultSessionProjection for App {
+    fn update_and_project<'a, T, F>(
+        &'a self,
+        update: F,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = anyhow::Result<T>> + Send + 'a>>
+    where
+        F: FnOnce(&mut crate::config::ConfigFile) -> anyhow::Result<T> + Send + 'a,
+        T: Send + 'a,
+    {
+        Box::pin(crate::projection::update_and_project(
+            <App as crate::capabilities::Cfg>::cfg(self),
+            <App as crate::capabilities::Db>::db(self),
+            update,
+        ))
     }
 }
 
@@ -325,11 +286,6 @@ impl crate::kind_probe::KindProbeState for App {
 impl crate::codex_history::CodexHistoryState for App {
     fn codex_history(&self) -> &crate::codex_history::HistoryHook {
         &self.codex_history
-    }
-}
-impl<T: crate::codex_history::CodexHistoryState + ?Sized> crate::codex_history::CodexHistoryState for Arc<T> {
-    fn codex_history(&self) -> &crate::codex_history::HistoryHook {
-        (**self).codex_history()
     }
 }
 
@@ -442,20 +398,10 @@ impl crate::judge::stuck::StuckPaneReader for App {
         crate::app_ports_p12::read_pane_plain_text(client, pane_id, kind).await
     }
 }
-impl<T: crate::judge::stuck::StuckPaneReader + ?Sized> crate::judge::stuck::StuckPaneReader for Arc<T> {
-    async fn read_pane_plain_text(&self, client: &crate::herdr::HerdrClient, pane_id: &str, kind: &str) -> anyhow::Result<String> {
-        (**self).read_pane_plain_text(client, pane_id, kind).await
-    }
-}
 
 impl crate::judge::report::ReportNotifier for App {
     async fn insert_system_message(&self, conv_id: &str, note: &str) -> anyhow::Result<crate::db::Message> {
         crate::app_ports_p12::insert_system_message(self, conv_id, note).await
-    }
-}
-impl<T: crate::judge::report::ReportNotifier + ?Sized> crate::judge::report::ReportNotifier for Arc<T> {
-    async fn insert_system_message(&self, conv_id: &str, note: &str) -> anyhow::Result<crate::db::Message> {
-        (**self).insert_system_message(conv_id, note).await
     }
 }
 
@@ -467,5 +413,3 @@ impl crate::reconcile::PaneIdentitySync for Arc<App> {
         crate::models::claude_default_effort(self, host, identity, alias).await
     }
 }
-
-

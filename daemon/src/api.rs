@@ -358,7 +358,7 @@ pub fn router(app: Arc<App>) -> Router {
 }
 
 async fn reject_rebound_host(State(app): State<Arc<App>>, req: axum::extract::Request, next: Next) -> Response {
-    if !origin_is_local(req.headers(), app.port, app.allow_lan) {
+    if !origin_is_local(req.headers(), app.port, app.allow_lan()) {
         return (StatusCode::FORBIDDEN, Json(json!({"error": "bad origin"}))).into_response();
     }
     next.run(req).await
@@ -890,7 +890,7 @@ async fn startup_readiness(State(app): State<Arc<App>>, req: axum::extract::Requ
 
 async fn auth(State(app): State<Arc<App>>, mut req: axum::extract::Request, next: Next) -> Response {
     let headers = req.headers().clone();
-    if !origin_is_local(&headers, app.port, app.allow_lan) {
+    if !origin_is_local(&headers, app.port, app.allow_lan()) {
         return (StatusCode::FORBIDDEN, Json(json!({"error": "bad origin"}))).into_response();
     }
     let has_bot = headers.contains_key("X-AM-Bot-Id") || headers.contains_key("X-AM-Bot-Token");
@@ -1207,7 +1207,7 @@ async fn get_session(
     {
         return (StatusCode::FORBIDDEN, Json(json!({"error": "forbidden", "reason": "user_only"}))).into_response();
     }
-    if !peer_is_local(&peer, app.allow_lan) || !origin_is_local(&headers, app.port, app.allow_lan) {
+    if !peer_is_local(&peer, app.allow_lan()) || !origin_is_local(&headers, app.port, app.allow_lan()) {
         return (StatusCode::FORBIDDEN, Json(json!({"error": "non-local request"}))).into_response();
     }
     Json(json!({"token": app.ui_token, "port": app.port})).into_response()
@@ -6115,7 +6115,7 @@ async fn ws_handler(
     headers: HeaderMap,
     ws: WebSocketUpgrade,
 ) -> Response {
-    if !origin_is_local(&headers, app.port, app.allow_lan) {
+    if !origin_is_local(&headers, app.port, app.allow_lan()) {
         return (StatusCode::FORBIDDEN, "bad origin").into_response();
     }
     // `/ws` is outside the `/api` auth middleware, but it is still a User-only endpoint.
@@ -9610,8 +9610,8 @@ mod bot_config_tests {
         );
     }
 
-    const CODEX_WORKING_ANSI: &str = include_str!("lifecycle/fixtures/codex-0.155-working.ansi");
-    const CODEX_DRAFT_ANSI: &str = include_str!("lifecycle/fixtures/codex-0.155-draft.ansi");
+    const CODEX_WORKING_ANSI: &str = include_str!("../../crates/am-lifecycle/src/lifecycle/fixtures/codex-0.155-working.ansi");
+    const CODEX_DRAFT_ANSI: &str = include_str!("../../crates/am-lifecycle/src/lifecycle/fixtures/codex-0.155-draft.ansi");
 
     /// 真的回合中畫面（輸入框空的），最後一列換成 0.157 的狀態列：印的是顯示名 `GPT-6-Luna`，不是 id。
     fn codex_working_screen(status: &str) -> String {

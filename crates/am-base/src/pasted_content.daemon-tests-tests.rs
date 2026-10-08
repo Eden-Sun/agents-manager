@@ -2,7 +2,7 @@
     use super::*;
 
     /// 2026-09-19 zz-r3-paste（2.1.278，session `2c0bdae3…` → id `c4ab`）送出的五則與各自的回覆。
-    const LOG: &str = include_str!("../../../daemon/src/lifecycle/fixtures/claude_2.1.278_pasted_content.jsonl");
+    const LOG: &str = include_str!("../../../crates/am-lifecycle/src/lifecycle/fixtures/claude_2.1.278_pasted_content.jsonl");
 
     fn users() -> Vec<String> {
         LOG.lines().filter_map(crate::lifecycle::transcript_user_text).collect()

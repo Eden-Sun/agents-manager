@@ -348,7 +348,7 @@
             .expect("shim 裡要有 AM_RESERVED_ENV_KEYS")
             .split_whitespace()
             .collect();
-        let setup_src = include_str!("../../../daemon/src/lifecycle/setup.rs");
+        let setup_src = include_str!("../../../crates/am-lifecycle/src/lifecycle/setup.rs");
         let needle = concat!("env", ".insert(\"");
         let injected: std::collections::BTreeSet<&str> = setup_src
             .match_indices(needle)

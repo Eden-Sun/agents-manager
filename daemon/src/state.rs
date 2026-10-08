@@ -9,8 +9,8 @@ use serde_json::{json, Value};
 use sqlx::SqlitePool;
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
-use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
+use std::sync::{Arc, Weak};
 use tokio::sync::{broadcast, Mutex};
 
 pub const WS_RING: usize = 200;
@@ -97,6 +97,7 @@ impl TurnEvent {
 }
 
 pub struct App {
+    self_weak: Weak<App>,
     pub db: SqlitePool,
     /// The local herdr client. Prefer `herdr_for(host)` — SPEC §11.3.6.
     pub herdr: HerdrClient,
@@ -116,7 +117,7 @@ pub struct App {
     /// every interface for direct LAN/Tailscale/etc access, so the peer-address and Origin
     /// checks accept any peer, not just loopback. Only the packaged macOS app — or an explicit
     /// `AM_DEV_LAN=0` — stays localhost-only.
-    pub allow_lan: bool,
+    allow_lan: AtomicBool,
     /// #472：`roles::classify` 連續失敗幾拍了（成功就歸零）。
     ///
     /// 記憶體、重啟重算——跟 incident 的門檻計時同一個原則（SPEC §18.9）。
@@ -274,6 +275,20 @@ impl Drop for App {
 }
 
 impl App {
+    /// Recover the shared application handle for background jobs created by narrow host ports.
+    pub fn shared(&self) -> Arc<Self> {
+        self.self_weak.upgrade().expect("App remains alive while a host port is called")
+    }
+
+    pub(crate) fn allow_lan(&self) -> bool {
+        self.allow_lan.load(Ordering::Relaxed)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn set_allow_lan_for_test(&self, enabled: bool) {
+        self.allow_lan.store(enabled, Ordering::Relaxed);
+    }
+
     pub fn set_startup_ready(&self, ready: bool) {
         self.startup_ready.store(ready, Ordering::Release);
         self.startup_ready_watch.send_replace(ready);
@@ -311,7 +326,8 @@ impl App {
         let (bus, _) = broadcast::channel(1024);
         let (turn_bus, _) = broadcast::channel(1024);
         let (startup_ready_watch, _) = tokio::sync::watch::channel(true);
-        Arc::new(Self {
+        Arc::new_cyclic(|self_weak| Self {
+            self_weak: self_weak.clone(),
             boot_id: crate::db::ulid(),
             instance: std::sync::RwLock::new(crate::startup::instance()),
             db,
@@ -325,7 +341,7 @@ impl App {
             ui_token,
             service_tokens: std::sync::RwLock::new(HashMap::new()),
             herdr_session,
-            allow_lan,
+            allow_lan: AtomicBool::new(allow_lan),
             judge_fuse: Mutex::new(()),
             judge_stuck_seen: Mutex::new(HashMap::new()),
             classify_failures: std::sync::atomic::AtomicU32::new(0),

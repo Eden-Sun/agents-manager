@@ -1,0 +1,904 @@
+//! bot 沒在跑時按送出：**先落地、再啟動**（issue #122）。
+//!
+//! 以前 web 把這一則放在瀏覽器記憶體（`queuedSends`），自己按啟動、等 bot 起來再 `POST /prompt`——在那之前
+//! daemon 完全不知道這則訊息存在，起 bot 的過程中重整、關分頁、換裝置或啟動失敗，訊息就沒了。
+//!
+//! 現在 `POST /prompt` 帶 `start_if_stopped`、而這顆 bot 沒有在跑（沒有 active run、或 run 還在 `starting`）時：
+//! 1. 在 bot 鎖裡把 turn（`queued`、`awaits_start=1`、要送的 `prompt_text`）＋使用者訊息＋附件綁定寫進**同一個交易**，
+//!    commit 之後才回 `delivery: "queued"`。同一個 `client_request_id` 再送一次回同一筆（重整、重送都不會多一則）。
+//! 2. 啟動是之後的副作用（[`kick`]）：睡著的走 `idle_sleep::wake` 接回原本的 session，分享用 bot 以 `resume_native` 接回，
+//!    其他的 `start_bot`。不在請求裡等。
+//! 3. bot 起來、閒下來，由既有的佇列 flush 送出：CAS claim 保證只送一次，resume／額度／維護窗口的閘門照舊。
+//!    瀏覽器不再留一份等著送，所以 WS 幀、重整、重按啟動都不會變成第二次送出。
+//!
+//! 生命週期：
+//! - **啟動失敗、或 run 起來後又結束**：不撤，留在佇列，`start_error` 寫原因——一般「沒有 run 的 queued 一律收掉」
+//!   （`queue::revoke_orphaned_queued_turns`）只管 AGM 的派工，不管這種。UI 顯示「沒能啟動」＋重新啟動
+//!   （`POST /bots/{id}/start`，起來後照樣由 flush 送）／取消。
+//! - **使用者自己按停止**（`stop_bot`）：那是「不要了」，跟起不來不一樣——撤回、寫明理由，不留到下次啟動又送出去。
+//! - **取消**：`POST /turns/{id}/withdraw` 撤回（標 failed＋說明），文字由 web 接回輸入框。已經送出去的撤不回來（409）。
+//! - **daemon 重啟**：開機對帳完成後（`reconcile::autostart_after_reconcile`），還在等、沒有 run 的再替它啟動一次
+//!   （重啟前那次可能根本沒做完、或起不來的原因已經排除）。每次開機最多一次，失敗照樣只記原因。
+
+#[cfg(all(test, feature = "daemon-test-harness"))]
+use crate::state::App;
+use super::*;
+use super::send_now::ports::AttachTxPort;
+use std::collections::HashSet;
+use std::sync::{Mutex, OnceLock};
+
+enum Accepted {
+    /// bot 在跑（或 daemon 本來就不能替它啟動，例如子 agent）：照一般的路走，行為一模一樣。
+    Normal,
+    /// 收下了（或同一個請求之前就收下了）。帶著「正在啟動」的標記＝要替它啟動：標記在 commit **之前**就拿好，
+    /// 撤孤兒的定時掃描（不拿 bot 鎖）才不會在收下與背景啟動之間，把原因寫成「run 已經結束」。
+    Queued(PromptOut, Option<Starting>),
+}
+
+/// `POST /bots/{id}/prompt` 帶 `start_if_stopped`。
+#[cfg(all(test, feature = "daemon-test-harness"))]
+pub async fn prompt_starting(
+    app: &Arc<App>,
+    bot_id: &str,
+    text: &str,
+    client_request_id: &str,
+    attachment_ids: &[String],
+    relay: RelaySrc<'_>,
+) -> LcResult<PromptOut> {
+    prompt_starting_or_queue(app, bot_id, text, client_request_id, attachment_ids, relay, false).await
+}
+
+/// [`prompt_starting`]，另外帶著 `queue_if_busy`：bot 已經在跑（照一般的路）時，旗標不能掉，不然忙碌中的 bot 回 409
+/// 而不是落地排隊（#733）。bot 沒在跑／正在起的那條路不看它。
+pub async fn prompt_starting_or_queue(
+    app: &impl LcHost,
+    bot_id: &str,
+    text: &str,
+    client_request_id: &str,
+    attachment_ids: &[String],
+    relay: RelaySrc<'_>,
+    queue_if_busy: bool,
+) -> LcResult<PromptOut> {
+    prompt_starting_or_queue_authorized(app, bot_id, text, client_request_id, attachment_ids, relay, queue_if_busy, None).await
+}
+
+/// Share-portal variant: the token is rechecked while holding the same bot lock used by rotation and deletion.
+pub async fn prompt_starting_or_queue_with_share_token(
+    app: &impl LcHost,
+    bot_id: &str,
+    text: &str,
+    client_request_id: &str,
+    attachment_ids: &[String],
+    relay: RelaySrc<'_>,
+    queue_if_busy: bool,
+    token: &str,
+) -> LcResult<PromptOut> {
+    prompt_starting_or_queue_authorized(app, bot_id, text, client_request_id, attachment_ids, relay, queue_if_busy, Some(token)).await
+}
+
+async fn prompt_starting_or_queue_authorized(
+    app: &impl LcHost,
+    bot_id: &str,
+    text: &str,
+    client_request_id: &str,
+    attachment_ids: &[String],
+    relay: RelaySrc<'_>,
+    queue_if_busy: bool,
+    share_token: Option<&str>,
+) -> LcResult<PromptOut> {
+    let accepted = {
+        let _g = crate::lifecycle::s6_ports::StartServices::lock_bot_for_start(app, bot_id).await;
+        if let Some(token) = share_token {
+            let valid = app.resolve_share_token(token).await.map_err(|e| LcError::Upstream(e.to_string()))?;
+            if valid.as_deref() != Some(bot_id) {
+                return Err(LcError::NotFound("bot".into()));
+            }
+            app.touch_share(bot_id).await;
+        }
+        accept_locked(app, bot_id, text, client_request_id, attachment_ids, relay).await?
+    };
+    match accepted {
+        Accepted::Normal if queue_if_busy => {
+            match share_token {
+                Some(token) => super::prompt::prompt_from_share_with_token(app, bot_id, text, client_request_id, attachment_ids, relay, true, token).await,
+                None => prompt_from_api_queue_if_busy(app, bot_id, text, client_request_id, attachment_ids, relay, false, None).await,
+            }
+        }
+        Accepted::Normal => match share_token {
+            Some(token) => super::prompt::prompt_from_share_with_token(app, bot_id, text, client_request_id, attachment_ids, relay, false, token).await,
+            None => prompt_from_api(app, bot_id, text, client_request_id, attachment_ids, relay, false, None).await,
+        },
+        Accepted::Queued(out, mark) => {
+            if let Some(mark) = mark {
+                spawn_start(app, bot_id, mark);
+            }
+            Ok(out)
+        }
+    }
+}
+
+async fn accept_locked(
+    app: &impl LcHost,
+    bot_id: &str,
+    text: &str,
+    client_request_id: &str,
+    attachment_ids: &[String],
+    relay: RelaySrc<'_>,
+) -> LcResult<Accepted> {
+    if client_request_id.trim().is_empty() {
+        return Err(LcError::Bad("client_request_id must not be empty".into()));
+    }
+    let bot = db::bot(app.db(), bot_id)
+        .await
+        .map_err(up)?
+        .filter(|b| b.deleted_at.is_none())
+        .ok_or_else(|| LcError::NotFound("bot".into()))?;
+    let conv = db::conversation_id(app.db(), bot_id).await.map_err(up)?;
+    let run = db::active_run(app.db(), bot_id).await.map_err(up)?;
+    // 冪等：同一個請求再來一次回同一筆。還在等、也沒人在替它啟動的話再踢一次——重送同一個請求就是重試。
+    if let Some(t) = sqlx::query_as::<_, db::Turn>("SELECT * FROM turns WHERE conversation_id=? AND client_request_id=?")
+        .bind(&conv)
+        .bind(client_request_id)
+        .fetch_optional(app.db())
+        .await
+        .map_err(up)?
+    {
+        super::prompt::check_same_text(app, &t, text).await?;
+        let waiting = t.status == "queued" && t.awaits_start == 1 && run.is_none();
+        let mark = if waiting { Starting::begin(bot_id) } else { None };
+        return Ok(Accepted::Queued(super::prompt::answer_for_turn(app, &t).await?, mark));
+    }
+    // 只有「沒有 run」或「正在起」才收下：在跑的照一般的路；`stopping` 是有人正在停它，收下的會被停止撤回，照一般的路 409。
+    let starting_up = run.as_ref().is_none_or(|r| r.state == "starting");
+    if !starting_up || (run.is_none() && bot.managed_by == "child") {
+        return Ok(Accepted::Normal);
+    }
+    // 維護窗口開著的時候不收、也不替它啟動（issue #86）：一個字都沒寫，同一個請求之後原樣重送是乾淨的。
+    if let Some(refusal) = super::prompt::maintenance_refusal(app, Admission::Gated).await {
+        return Err(refusal);
+    }
+    let files = app.resolve_attachments(bot_id, attachment_ids).await.map_err(|e| LcError::Bad(e.to_string()))?;
+    // 同 `prompt_inner`：起來後打進 pane 的是清過的字（#205），泡泡留原文。
+    let deliver = super::pane_text::for_pane(&bot.kind, &crate::attach::deliver_text(text, &files));
+    if super::pane_text::nothing_left(text, &deliver) {
+        return Err(LcError::Bad("the prompt is empty once invisible characters and terminal escapes are removed".into()));
+    }
+    let (turn_id, msg_id) = (db::ulid(), db::ulid());
+    // 沒有 run 才要替它起（`starting` 那顆已經有人在起）。已經有人在替它起（重複的請求）就不再疊一次。
+    let mark = if run.is_none() { Starting::begin(bot_id) } else { None };
+    let mut tx = app.db().begin().await.map_err(up)?;
+    let queued = sqlx::query(
+        "INSERT INTO turns (id, conversation_id, run_id, origin, status, delivery, client_request_id, created_at, prompt_text, awaits_start)
+         VALUES (?,?,NULL,'web','queued','pending',?,?,?,1)",
+    )
+    .bind(&turn_id)
+    .bind(&conv)
+    .bind(client_request_id)
+    .bind(db::now())
+    .bind(&deliver)
+    .execute(&mut *tx)
+    .await;
+    if let Err(e) = queued {
+        return Err(super::prompt::queue_insert_error(bot_id, &conv, e));
+    }
+    sqlx::query(
+        "INSERT INTO messages (id, conversation_id, turn_id, role, content, source, relay_from, relay_unverified, created_at) VALUES (?,?,?,'user',?,'web',?,?,?)",
+    )
+    .bind(&msg_id)
+    .bind(&conv)
+    .bind(&turn_id)
+    .bind(text)
+    .bind(relay.from)
+    .bind(relay.unverified)
+    .bind(db::now())
+    .execute(&mut *tx)
+    .await
+    .map_err(up)?;
+    // 附件跟訊息同一個交易：要嘛整則（含附件）都收下，要嘛什麼都沒有，不會有一則指著沒綁上的附件在排隊。
+    tx.bind_attachments_tx(&msg_id, &files).await.map_err(|e| LcError::Bad(e.to_string()))?;
+    tx.commit().await.map_err(up)?;
+    super::prompt::emit_prompt_message(app, bot_id, &msg_id).await;
+    crate::lifecycle::s6_ports::QueueServices::turn_changed(app, &turn_id).await;
+    tracing::info!(bot = %bot_id, turn = %turn_id, run = ?run.as_ref().map(|r| &r.id), "bot 沒在跑：先收下這一則，再替它啟動");
+    let out = PromptOut { turn_id, message_id: msg_id, delivery: "queued".into(), send_now: None };
+    Ok(Accepted::Queued(out, mark))
+}
+
+/// 正在替哪幾顆 bot 啟動（只在記憶體）：這段時間沒有 run 是暫時的，撤孤兒那一支不要把原因寫成「沒能啟動」。
+fn starting() -> &'static Mutex<HashSet<String>> {
+    static M: OnceLock<Mutex<HashSet<String>>> = OnceLock::new();
+    M.get_or_init(Default::default)
+}
+
+struct Starting(String);
+
+impl Starting {
+    /// 已經有人在替它啟動就回 `None`：同一顆不疊兩次啟動。
+    fn begin(bot_id: &str) -> Option<Self> {
+        starting().lock().ok()?.insert(bot_id.to_string()).then(|| Starting(bot_id.to_string()))
+    }
+}
+
+impl Drop for Starting {
+    fn drop(&mut self) {
+        if let Ok(mut m) = starting().lock() {
+            m.remove(&self.0);
+        }
+    }
+}
+
+fn in_progress(bot_id: &str) -> bool {
+    starting().lock().map(|m| m.contains(bot_id)).unwrap_or(false)
+}
+
+/// 背景替它啟動（已經有人在起就不疊）。
+pub fn kick(app: &impl LcHost, bot_id: &str) {
+    if let Some(mark) = Starting::begin(bot_id) {
+        spawn_start(app, bot_id, mark);
+    }
+}
+
+/// 測試裡不做：背景的 RPC 會跟測試自己推的狀態機搶（同 `schedule_flush_queued`），測試直接呼叫 [`start_for_waiting`]。
+fn spawn_start(app: &impl LcHost, bot_id: &str, mark: Starting) {
+    if cfg!(test) {
+        return;
+    }
+    let (app, id) = ((*app).clone(), bot_id.to_string());
+    tokio::spawn(async move { start_with(&app, &id, mark).await });
+}
+
+/// 替還在等的那一則啟動 bot（已經有人在起就不疊）。正式路徑都在背景（[`kick`]），測試直接等它做完。
+#[cfg(all(test, feature = "daemon-test-harness"))]
+pub async fn start_for_waiting(app: &Arc<App>, bot_id: &str) {
+    if let Some(mark) = Starting::begin(bot_id) {
+        start_with(app, bot_id, mark).await;
+    }
+}
+
+/// 成功 → 叫醒 flush（起來、閒下來就送）；失敗 → 留在佇列，`start_error` 寫原因。`mark` 在啟動做完時放掉。
+async fn start_with(app: &impl LcHost, bot_id: &str, mark: Starting) {
+    set_start_error(app, bot_id, None, false).await;
+    let res = match app.idle_sleep_wake(bot_id, "有一則訊息等著它起來送").await {
+        Ok(true) => Started::Yes,
+        Ok(false) => match start_stopped(app, bot_id).await {
+            Ok(_) => Started::Yes,
+            // 別人（使用者按了啟動、AGM）剛好先起了：一樣是「起來了」。
+            Err(LcError::Conflict(v)) if v.get("reason").and_then(|r| r.as_str()) == Some("active run already exists") => Started::Yes,
+            // agent 起來了、只差 `running` 沒記下（#152）：不是沒能啟動。
+            Err(LcError::Uncommitted(v)) => match v.get("run_id").and_then(|r| r.as_str()) {
+                Some(run_id) => Started::NotRecorded(run_id.to_string()),
+                None => Started::Yes,
+            },
+            Err(e) => Started::Failed(failure_text(&e)),
+        },
+        // 叫醒（`--resume`）的錯誤是字串，分不出是哪一種：這顆已經有一個 `starting` 的 run 留著，就是 agent 起來了、
+        // 狀態沒記下（真的起不來時 start 會把 run 收成 `exited`）。
+        Err(e) => match db::active_run(app.db(), bot_id).await {
+            Ok(Some(r)) if r.state == "starting" => Started::NotRecorded(r.id),
+            _ => Started::Failed(format!("{e:#}")),
+        },
+    };
+    drop(mark);
+    match res {
+        Started::Yes => {
+            tracing::info!(bot = %bot_id, "替等著送的訊息把 bot 起來了：起來、閒下來就由佇列送出");
+            schedule_flush_queued(app, bot_id);
+        }
+        Started::NotRecorded(run_id) => flush_once_running(app, bot_id, &run_id),
+        Started::Failed(why) => {
+            tracing::warn!(bot = %bot_id, error = %why, "替等著送的訊息啟動 bot 失敗：訊息留在佇列");
+            set_start_error(app, bot_id, Some(&why), false).await;
+        }
+    }
+}
+
+/// 沒睡著、就是停了的那顆。分享用 bot（SPEC §20）是 daemon 重啟、主機重開、pane 被關之後停的——外部 end user 不知道
+/// 它停過，要接回原本那段對話再送（`resume_native`；接不回照舊開新對話，訊息不能卡住）。讀不到是不是分享用 bot 也接回：
+/// 對一般 bot 只差在「先試著接回」，對分享用 bot 開新對話就是把對方的脈絡丟掉。其他 bot 照舊開新對話。
+async fn start_stopped(app: &impl LcHost, bot_id: &str) -> LcResult<String> {
+    let opts = if matches!(app.is_share_bot(bot_id).await, Ok(false)) {
+        StartOpts::default()
+    } else {
+        StartOpts { resume_native: true, ..Default::default() }
+    };
+    start_bot_with(app, bot_id, opts).await
+}
+
+enum Started {
+    Yes,
+    /// agent 起來了，run 停在 `starting`（`running` 寫不進 DB，對帳重試會收斂）。
+    NotRecorded(String),
+    Failed(String),
+}
+
+/// 替它起的 agent 已經起來、`running` 卻沒寫進 DB（`Uncommitted`，#152）：對帳重試會照 herdr 的證據把 run 收成
+/// `running`，但那條路不會叫 flush——排著的這一則就沒人送。這裡在背景等它收斂：`running` 就叫醒 flush；run 不在了
+/// （收成 `exited`）就停，撤孤兒那條路會記原因。測試裡不開背景 task，只記下排了誰（[`watching_for_running`]），
+/// 由測試自己呼叫 [`flush_if_running`]。重啟（`restart_bot_with`／子 agent 原地重啟）遇到同一種 `Uncommitted` 也走這裡（#165）。
+pub fn flush_once_running(app: &impl LcHost, bot_id: &str, run_id: &str) {
+    tracing::warn!(bot = %bot_id, run = %run_id, "agent 起來了、running 還沒記下：等對帳收斂後再叫 flush");
+    if cfg!(test) {
+        #[cfg(all(test, feature = "daemon-test-harness"))]
+        watch_log().lock().unwrap().push(run_id.to_string());
+        return;
+    }
+    let (app, bot_id, run_id) = ((*app).clone(), bot_id.to_string(), run_id.to_string());
+    tokio::spawn(async move {
+        for secs in [2u64, 5, 15, 30, 60, 120, 300] {
+            tokio::time::sleep(Duration::from_secs(secs)).await;
+            if flush_if_running(&app, &bot_id, &run_id).await {
+                return;
+            }
+        }
+        tracing::warn!(bot = %bot_id, run = %run_id, "run 還沒收成 running；之後的 idle 邊或重啟接回會叫 flush");
+    });
+}
+
+/// 看一次：`true`＝不必再等（收成 `running` 已叫 flush，或 run 已經不在）。
+pub async fn flush_if_running(app: &impl LcHost, bot_id: &str, run_id: &str) -> bool {
+    match db::run(app.db(), run_id).await {
+        Ok(Some(r)) if r.state == "running" => {
+            schedule_flush_queued(app, bot_id);
+            true
+        }
+        Ok(Some(r)) if r.state == "starting" => false,
+        Ok(_) => true,
+        Err(_) => false,
+    }
+}
+
+#[cfg(all(test, feature = "daemon-test-harness"))]
+fn watch_log() -> &'static Mutex<Vec<String>> {
+    static L: OnceLock<Mutex<Vec<String>>> = OnceLock::new();
+    L.get_or_init(Default::default)
+}
+
+/// 測試用：有沒有替這顆 run 排「收成 running 就叫 flush」。
+#[cfg(all(test, feature = "daemon-test-harness"))]
+pub fn watching_for_running(run_id: &str) -> bool {
+    watch_log().lock().unwrap().iter().any(|r| r == run_id)
+}
+
+/// 啟動失敗講人話：409／400 的 body 優先用 `hint`／`message`，再退回 `reason`。
+fn failure_text(e: &LcError) -> String {
+    match e {
+        LcError::NotFound(what) => format!("找不到 {what}"),
+        LcError::Bad(m) | LcError::Upstream(m) => m.clone(),
+        LcError::Conflict(v) | LcError::BadValue(v) | LcError::NotFoundValue(v) | LcError::Unprocessable(v) | LcError::Forbidden(v) | LcError::Unavailable(v) | LcError::Uncommitted(v) => ["hint", "message", "reason"]
+            .iter()
+            .find_map(|k| v.get(*k).and_then(|x| x.as_str()))
+            .unwrap_or("啟動被拒絕")
+            .to_string(),
+    }
+}
+
+/// 這顆 bot 還在等它起來的那幾則（`queued`＋`awaits_start`）。
+async fn waiting_turns(app: &impl crate::capabilities::Db, bot_id: &str) -> Vec<String> {
+    sqlx::query_scalar(
+        "SELECT t.id FROM turns t JOIN conversations c ON c.id = t.conversation_id
+          WHERE c.bot_id = ? AND t.status = 'queued' AND t.awaits_start = 1",
+    )
+    .bind(bot_id)
+    .fetch_all(app.db())
+    .await
+    .unwrap_or_default()
+}
+
+/// `keep_first`：已經有原因就不蓋（撤孤兒的定時掃描每分鐘都會來，不能把「找不到 claude」蓋成「它的 run 已經結束」）。
+async fn set_start_error(app: &impl LcHost, bot_id: &str, why: Option<&str>, keep_first: bool) {
+    for id in waiting_turns(app, bot_id).await {
+        let changed = if keep_first {
+            sqlx::query("UPDATE turns SET start_error=? WHERE id=? AND status='queued' AND start_error IS NULL")
+                .bind(why)
+                .bind(&id)
+                .execute(app.db())
+                .await
+        } else {
+            sqlx::query("UPDATE turns SET start_error=? WHERE id=? AND status='queued' AND start_error IS NOT ?")
+                .bind(why)
+                .bind(&id)
+                .bind(why)
+                .execute(app.db())
+                .await
+        };
+        if matches!(changed, Ok(r) if r.rows_affected() > 0) {
+            crate::lifecycle::s6_ports::QueueServices::turn_changed(app, &id).await;
+        }
+    }
+}
+
+/// 撤孤兒那一支（`queue::revoke_orphaned_queued_turns`）遇到這種：不撤，只記原因。正在替它啟動（run 還沒建出來）
+/// 那一段不算，免得把「起到一半」講成「沒能啟動」。
+pub async fn note_run_gone(app: &impl LcHost, bot_id: &str, why: &str) {
+    if in_progress(bot_id) {
+        return;
+    }
+    set_start_error(app, bot_id, Some(why), true).await;
+}
+
+/// 使用者按停止時撤回的說明。
+const STOP_WHY: &str = "bot 已被停止：這一則是 bot 沒在跑時送的，還在等它起來，沒有送出，一併撤銷，不會再送。";
+
+/// 使用者自己按停止：還在等它起來的那幾則一併撤回，不留到下次啟動又送出去。呼叫端是 `stop` 記 `stopping` 的**同一個交易**
+/// （#199）：要嘛「正在停」與撤回都成立，要嘛都不成立（stop 一步都不做）。以前兩步分開、撤不掉只記在記憶體（#159 的欠帳），
+/// 補上之前 daemon 重啟，開機就照舊替它啟動、把使用者已經不要的那一則送出去。
+/// 重啟（換身分、`?resume=native`）的停不撤——那段沒有 run 是暫時的（`restart_hold`），由呼叫端判斷。
+/// 回傳撤掉的那幾則，commit 之後逐一 [`announce_revoked`]。
+pub async fn withdraw_waiting_tx(
+    tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
+    bot_id: &str,
+) -> anyhow::Result<Vec<(String, super::Revoked)>> {
+    let ids: Vec<String> = sqlx::query_scalar(
+        "SELECT t.id FROM turns t JOIN conversations c ON c.id = t.conversation_id
+          WHERE c.bot_id = ? AND t.status = 'queued' AND t.awaits_start = 1",
+    )
+    .bind(bot_id)
+    .fetch_all(&mut **tx)
+    .await?;
+    let mut withdrawn = Vec::new();
+    for id in ids {
+        if let Some(r) = revoke_queued_turn_tx(tx, &id, STOP_WHY).await? {
+            withdrawn.push((id, r));
+        }
+    }
+    Ok(withdrawn)
+}
+
+/// 使用者取消（`POST /turns/{id}/withdraw`）：還在等 bot 起來的那一則、或還在排的 daemon 自動通知（#562）撤回、寫明理由，不送。
+///
+/// 只撤這三種。已經被佇列領走（`in_flight`，字已經打進去了）或本來就不是這種的一律 409——不能拿「放棄回合」
+/// 頂替：那會把已經送出的回合收成失敗，web 又把文字放回輸入框，使用者再按一次就送了兩次。
+pub struct WithdrawnPrompt {
+    pub text: String,
+    pub attachments: Vec<String>,
+}
+
+pub async fn withdraw_turn(app: &impl LcHost, turn_id: &str) -> LcResult<WithdrawnPrompt> {
+    let bot_id: String = sqlx::query_scalar("SELECT c.bot_id FROM turns t JOIN conversations c ON c.id = t.conversation_id WHERE t.id=?")
+        .bind(turn_id)
+        .fetch_optional(app.db())
+        .await
+        .map_err(up)?
+        .ok_or_else(|| LcError::NotFound("turn".into()))?;
+    let _g = crate::lifecycle::s6_ports::StartServices::lock_bot_for_start(app, &bot_id).await;
+    let (status, awaits_start, awaits_idle, origin, crid): (String, i64, i64, String, Option<String>) = sqlx::query_as(
+        "SELECT status, awaits_start, awaits_idle, origin, client_request_id FROM turns WHERE id=?",
+    )
+    .bind(turn_id)
+    .fetch_one(app.db())
+    .await
+    .map_err(up)?;
+    // 還在排的 daemon 自動通知也可以撤（#562）：它擋在佇列頭時，使用者要能讓自己的訊息先走。
+    let why = if awaits_start == 1 {
+        "使用者取消了這一則：它是 bot 沒在跑時送的，還在等 bot 起來，沒有送出，不會再送。"
+    } else if awaits_idle == 1 && origin == "web" {
+        "使用者取消了這一則：bot 忙碌時先排進佇列，還沒送出，不會再送。"
+    } else if super::daemon_notice::is_daemon_notice(crid.as_deref()) {
+        super::daemon_notice::WITHDRAWN_WHY
+    } else {
+        ""
+    };
+    if status != "queued" || why.is_empty() {
+        return Err(LcError::conflict("turn is not waiting for its bot to start", json!({"turn_id": turn_id, "status": status})));
+    }
+    let restores_user_prompt = awaits_start == 1 || (awaits_idle == 1 && origin == "web");
+    let (text, attachments) = if restores_user_prompt {
+        let message: Option<(String, Option<String>)> = sqlx::query_as(
+            "SELECT content, attachments_json FROM messages WHERE turn_id=? AND role='user' ORDER BY created_at, rowid LIMIT 1",
+        )
+        .bind(turn_id)
+        .fetch_optional(app.db())
+        .await
+        .map_err(up)?;
+        let (text, encoded_attachments) = message.ok_or_else(|| LcError::Upstream("queued user turn has no user message".into()))?;
+        let attachments = encoded_attachments
+            .map(|json| serde_json::from_str::<Vec<crate::attach::Attachment>>(&json).map(|items| items.into_iter().map(|item| item.id).collect()))
+            .transpose()
+            .map_err(up)?
+            .unwrap_or_default();
+        (text, attachments)
+    } else {
+        (String::new(), Vec::new())
+    };
+    if !revoke_queued_turn(app, turn_id, why).await.map_err(up)? {
+        return Err(LcError::conflict("turn is not waiting for its bot to start", json!({"turn_id": turn_id, "status": status})));
+    }
+    Ok(WithdrawnPrompt { text, attachments })
+}
+
+/// 開機（那台主機對帳完成、autostart 那一步）：還在等 bot 起來、沒有 run 的，再替它啟動一次。
+/// 重啟前那次啟動可能根本沒做完。回傳踢了幾顆。
+///
+/// 讀不到就延後，不猜（#198）：以前清單讀不到當成「沒有」、主機讀不到當成本機——本機開機時把還沒對帳的遠端 bot
+/// 也起一顆（同一顆 bot 兩個 agent），真的在本機的那顆反而可能永遠沒人起。現在讀不到的 [`RESUME_RETRY`] 之後再看一次。
+pub async fn resume_after_boot(app: &impl LcHost, host: &str) -> usize {
+    resume_waiting(app, host, None).await
+}
+
+/// 開機替等著的 bot 起來時，讀不到清單或主機，多久之後再看。
+const RESUME_RETRY: std::time::Duration = std::time::Duration::from_secs(30);
+
+/// `only`：重看時只看上一次讀不到主機的那幾顆。
+async fn resume_waiting(app: &impl LcHost, host: &str, only: Option<HashSet<String>>) -> usize {
+    let bots: Vec<String> = match sqlx::query_scalar(
+        "SELECT DISTINCT c.bot_id FROM turns t JOIN conversations c ON c.id = t.conversation_id JOIN bots b ON b.id = c.bot_id
+          WHERE t.status = 'queued' AND t.awaits_start = 1 AND b.deleted_at IS NULL
+            AND NOT EXISTS (SELECT 1 FROM runs r WHERE r.bot_id = c.bot_id AND r.state IN ('starting','running','stopping'))",
+    )
+    .fetch_all(app.db())
+    .await
+    {
+        Ok(bots) => bots,
+        Err(e) => {
+            tracing::warn!(host, error = %e, "開機：讀不到等著起來的 bot，稍後再看");
+            retry_resume(app, host, only);
+            return 0;
+        }
+    };
+    let mut kicked = 0;
+    let mut unknown = HashSet::new();
+    for bot_id in bots.into_iter().filter(|b| only.as_ref().is_none_or(|o| o.contains(b))) {
+        match db::bot_host(app.db(), &bot_id).await {
+            Ok(h) if h == host => {}
+            Ok(_) => continue,
+            Err(e) => {
+                tracing::warn!(host, bot = %bot_id, error = %e, "開機：讀不到這顆 bot 在哪台主機，先不替它起、稍後再看");
+                unknown.insert(bot_id);
+                continue;
+            }
+        }
+        tracing::info!(host, bot = %bot_id, "開機：有一則訊息等著這顆起來，替它啟動");
+        kick(app, &bot_id);
+        kicked += 1;
+    }
+    if !unknown.is_empty() {
+        retry_resume(app, host, Some(unknown));
+    }
+    kicked
+}
+
+fn retry_resume(app: &impl LcHost, host: &str, only: Option<HashSet<String>>) {
+    if cfg!(test) {
+        return;
+    }
+    let (app, host) = ((*app).clone(), host.to_string());
+    tokio::spawn(async move {
+        tokio::time::sleep(RESUME_RETRY).await;
+        resume_waiting(&app, &host, only).await;
+    });
+}
+
+#[cfg(all(test, feature = "daemon-test-harness"))]
+mod tests {
+    use super::*;
+    use crate::testing as tt;
+
+    const TEXT: &str = "起來後幫我跑一次測試";
+
+    async fn turn_of(app: &Arc<App>, crid: &str) -> db::Turn {
+        sqlx::query_as::<_, db::Turn>("SELECT * FROM turns WHERE client_request_id=?").bind(crid).fetch_one(&app.db).await.unwrap()
+    }
+
+    async fn count(app: &Arc<App>, sql: &str, bind: &str) -> i64 {
+        sqlx::query_scalar(sql).bind(bind).fetch_one(&app.db).await.unwrap()
+    }
+
+    fn started(e: &tt::Env) -> usize {
+        e.herdr.methods().iter().filter(|m| *m == "agent.start").count()
+    }
+
+    /// 送出的那一刻就在 DB 裡（turn＋訊息同一個交易），啟動是之後的事——在那之前 daemon 重啟、定時掃描跑過，都還在。
+    /// 同一個請求再送一次（重整後重送、網路重試）回同一筆，不會多一則。
+    #[tokio::test]
+    async fn a_send_to_a_stopped_bot_is_on_disk_before_any_start_and_survives_a_restart() {
+        let e = tt::env().await;
+        let app = e.app.clone();
+        let bot = tt::claude_bot(&app, &e.project_id, "stopped").await;
+        let out = prompt_starting(&app, &bot.id, TEXT, "crid-1", &[], RelaySrc::default()).await.unwrap();
+        assert_eq!(out.delivery, "queued");
+        let t = turn_of(&app, "crid-1").await;
+        assert_eq!((t.status.as_str(), t.run_id.as_deref(), t.awaits_start, t.prompt_text.as_deref()), ("queued", None, 1, Some(TEXT)));
+        assert_eq!(count(&app, "SELECT COUNT(*) FROM messages WHERE turn_id=? AND role='user'", &t.id).await, 1);
+        assert_eq!(started(&e), 0, "請求裡不等啟動（啟動是背景的副作用）");
+
+        let again = prompt_starting(&app, &bot.id, TEXT, "crid-1", &[], RelaySrc::default()).await.unwrap();
+        assert_eq!((again.turn_id.as_str(), again.delivery.as_str()), (t.id.as_str(), "queued"), "同一個請求回同一筆");
+        assert_eq!(count(&app, "SELECT COUNT(*) FROM messages WHERE role='user' AND content=?", TEXT).await, 1, "沒有多一則");
+
+        // daemon 重啟：記憶體全空，定時的撤孤兒掃描照常跑——這一則不是孤兒。
+        let fresh = tt::restart_app(&e).await;
+        crate::lifecycle::revoke_all_orphaned_queued_turns(&fresh).await;
+        let t = turn_of(&fresh, "crid-1").await;
+        assert_eq!((t.status.as_str(), t.awaits_start), ("queued", 1), "還在佇列");
+        assert_eq!(resume_after_boot(&fresh, LOCAL_HOST).await, 1, "開機對帳完替它再啟動一次");
+        assert_eq!(resume_after_boot(&fresh, "elsewhere").await, 0, "別台主機的不歸這一輪");
+    }
+
+    /// #198 同類：開機替等著的 bot 起來時讀不到它在哪台主機，不當成本機——本機開機時把還沒對帳的遠端 bot 也起一顆，
+    /// 就是同一顆 bot 兩個 agent。讀不到的先不起，那台自己的開機（或稍後重看）再起。
+    #[tokio::test]
+    async fn a_waiting_bot_whose_host_cannot_be_read_is_not_started_as_local() {
+        let e = tt::env().await;
+        let app = e.app.clone();
+        let far = db::ulid();
+        sqlx::query("INSERT INTO projects (id, path, label, host, created_at) VALUES (?, '/r/p', 'r', 'far', ?)").bind(&far).bind(db::now()).execute(&app.db).await.unwrap();
+        let bot = tt::claude_bot(&app, &far, "remote-waiting").await;
+        prompt_starting(&app, &bot.id, TEXT, "crid-far", &[], RelaySrc::default()).await.unwrap();
+
+        sqlx::query("ALTER TABLE projects RENAME TO projects_unreadable").execute(&app.db).await.unwrap();
+        assert_eq!(resume_after_boot(&app, LOCAL_HOST).await, 0, "讀不到主機：不當成本機的替它起");
+        sqlx::query("ALTER TABLE projects_unreadable RENAME TO projects").execute(&app.db).await.unwrap();
+        assert_eq!(resume_after_boot(&app, LOCAL_HOST).await, 0, "它不在本機");
+        assert_eq!(resume_after_boot(&app, "far").await, 1, "那台自己的開機替它起");
+    }
+
+    /// 啟動失敗不丟訊息：留在佇列、原因寫在 turn 上（UI 顯示「沒能啟動」＋重新啟動／取消）。每分鐘的撤孤兒掃描
+    /// 不把它撤掉，也不把真正的原因蓋成「run 已經結束」。取消＝撤回、寫明理由；已經撤掉的再取消回 409。
+    #[tokio::test]
+    async fn a_failed_start_keeps_the_send_with_its_reason_until_the_user_cancels_it() {
+        let e = tt::env().await;
+        let app = e.app.clone();
+        let bot = tt::claude_bot(&app, &e.project_id, "no-identity").await;
+        // 這台沒有這個身分：`start_bot` 在碰任何 pane 之前就 409。
+        sqlx::query("UPDATE bots SET identity='ghost' WHERE id=?").bind(&bot.id).execute(&app.db).await.unwrap();
+        prompt_starting(&app, &bot.id, TEXT, "crid-fail", &[], RelaySrc::default()).await.unwrap();
+        {
+            // 正在替它起（run 還沒建出來）：不拿 bot 鎖的定時掃描剛好跑過，不能把原因寫成「run 已經結束」。
+            let _mark = Starting::begin(&bot.id).expect("沒有別人在起");
+            crate::lifecycle::revoke_all_orphaned_queued_turns(&app).await;
+            assert_eq!(turn_of(&app, "crid-fail").await.start_error, None, "起到一半不算沒能啟動");
+        }
+        start_for_waiting(&app, &bot.id).await;
+        let t = turn_of(&app, "crid-fail").await;
+        assert_eq!(t.status, "queued", "起不來也不丟");
+        let why = t.start_error.clone().expect("原因寫在 turn 上");
+        assert!(why.contains("ghost"), "{why}");
+        assert!(!in_progress(&bot.id));
+
+        crate::lifecycle::revoke_all_orphaned_queued_turns(&app).await;
+        let t = turn_of(&app, "crid-fail").await;
+        assert_eq!((t.status.as_str(), t.start_error.as_deref()), ("queued", Some(why.as_str())), "掃描不撤、也不蓋掉原因");
+
+        // 取消：撤回、寫明理由，這個對話的排隊名額空出來。
+        withdraw_turn(&app, &t.id).await.unwrap();
+        let t = turn_of(&app, "crid-fail").await;
+        assert_eq!((t.status.as_str(), t.delivery.as_str()), ("failed", "failed"));
+        assert_eq!(count(&app, "SELECT COUNT(*) FROM messages WHERE turn_id=? AND role='system' AND content LIKE '%使用者取消%'", &t.id).await, 1);
+        assert!(matches!(withdraw_turn(&app, &t.id).await, Err(LcError::Conflict(_))), "撤掉的不能再取消一次");
+        assert_eq!(resume_after_boot(&app, LOCAL_HOST).await, 0, "撤掉的不再替它啟動");
+    }
+
+    /// 取消只撤「還在等 bot 起來」的那一則：已經被佇列領走（字打進去了）、或 AGM 排的派工，一律 409、原樣不動——
+    /// 拿「放棄回合」頂替的話，web 會把已經送出的文字放回輸入框，再按一次就送兩次。
+    #[tokio::test]
+    async fn withdraw_refuses_anything_but_a_send_still_waiting_for_its_bot() {
+        let e = tt::env().await;
+        let app = e.app.clone();
+        let bot = tt::claude_bot(&app, &e.project_id, "withdraw").await;
+        prompt_starting(&app, &bot.id, TEXT, "crid-w", &[], RelaySrc::default()).await.unwrap();
+        let t = turn_of(&app, "crid-w").await;
+        let run = tt::fake_run(&app, &bot.id).await;
+        sqlx::query("UPDATE turns SET status='in_flight', run_id=? WHERE id=?").bind(&run).bind(&t.id).execute(&app.db).await.unwrap();
+        assert!(matches!(withdraw_turn(&app, &t.id).await, Err(LcError::Conflict(_))), "已經送出去的撤不回來");
+        assert_eq!(turn_of(&app, "crid-w").await.status, "in_flight", "原樣不動");
+
+        let other = tt::claude_bot(&app, &e.project_id, "agm-queued").await;
+        let conv = db::conversation_id(&app.db, &other.id).await.unwrap();
+        let agm = db::ulid();
+        sqlx::query("INSERT INTO turns (id, conversation_id, origin, status, delivery, prompt_text, created_at) VALUES (?,?,'web','queued','pending','派工',?)")
+            .bind(&agm)
+            .bind(&conv)
+            .bind(db::now())
+            .execute(&app.db)
+            .await
+            .unwrap();
+        assert!(matches!(withdraw_turn(&app, &agm).await, Err(LcError::Conflict(_))), "AGM 的派工不歸這裡撤");
+        assert!(matches!(withdraw_turn(&app, "no-such-turn").await, Err(LcError::NotFound(_))));
+    }
+
+    /// run 起來之後又結束（pane 不見、agent 退出）不是使用者不要了：一樣留著、記原因。使用者自己按停止才撤。
+    #[tokio::test]
+    async fn only_the_users_own_stop_withdraws_a_starting_send() {
+        let e = tt::env().await;
+        let app = e.app.clone();
+        let bot = tt::claude_bot(&app, &e.project_id, "run-ended").await;
+        let run = tt::fake_run(&app, &bot.id).await;
+        sqlx::query("UPDATE runs SET state='starting' WHERE id=?").bind(&run).execute(&app.db).await.unwrap();
+        let out = prompt_starting(&app, &bot.id, TEXT, "crid-run", &[], RelaySrc::default()).await.unwrap();
+        assert_eq!(out.delivery, "queued", "run 還在 starting：一樣先收下（有人在起它，不必再踢一次）");
+
+        crate::lifecycle::mark_run_exited(&app, &run, "pane 不見了").await;
+        let t = turn_of(&app, "crid-run").await;
+        assert_eq!(t.status, "queued", "run 結束不撤");
+        assert!(t.start_error.as_deref().is_some_and(|w| w.contains("pane 不見了")), "{:?}", t.start_error);
+
+        let run2 = tt::fake_run(&app, &bot.id).await;
+        crate::lifecycle::stop_bot(&app, &bot.id).await.unwrap();
+        let t = turn_of(&app, "crid-run").await;
+        assert_eq!(t.status, "failed", "使用者自己按停止：撤回");
+        assert_eq!(count(&app, "SELECT COUNT(*) FROM messages WHERE turn_id=? AND role='system' AND content LIKE 'bot 已被停止%'", &t.id).await, 1);
+        let _ = run2;
+    }
+
+    /// #159（同一類）→ #199：使用者按停止時，等 bot 起來的那一則撤不掉（DB 一時寫不進去）——以前只記一行 error，之後 bot 重新
+    /// 起來、閒下來，flush 就把使用者已經不要的那一則送進去；#159 改成記在記憶體的欠帳，daemon 重啟就沒了。現在撤回跟記
+    /// `stopping` 同一個交易：撤不掉就連停都沒停（502，agent 照跑，外面一步都沒動）；再按一次、寫得進去，兩個一起成立，
+    /// 之後 bot 重新起來也永遠不送。
+    #[tokio::test]
+    async fn a_stop_whose_withdrawal_could_not_be_written_never_lets_the_send_go_out() {
+        let e = tt::env().await;
+        let app = e.app.clone();
+        let bot = tt::claude_bot(&app, &e.project_id, "stop-lost").await;
+        let run = tt::fake_run(&app, &bot.id).await;
+        sqlx::query("UPDATE runs SET state='starting' WHERE id=?").bind(&run).execute(&app.db).await.unwrap();
+        prompt_starting(&app, &bot.id, TEXT, "crid-stop-lost", &[], RelaySrc::default()).await.unwrap();
+        let t = turn_of(&app, "crid-stop-lost").await;
+        sqlx::query("UPDATE runs SET state='running' WHERE id=?").bind(&run).execute(&app.db).await.unwrap();
+        sqlx::query(&format!(
+            "CREATE TRIGGER lost_withdraw BEFORE UPDATE OF status ON turns WHEN OLD.id = '{}' AND NEW.status = 'failed' BEGIN SELECT RAISE(ABORT, 'disk I/O error'); END",
+            t.id
+        ))
+        .execute(&app.db)
+        .await
+        .unwrap();
+        let n = e.herdr.methods().len();
+        let err = crate::lifecycle::stop_bot(&app, &bot.id).await.expect_err("撤不掉：連停都不算開始");
+        assert!(matches!(err, LcError::Upstream(_)), "{err:?}");
+        assert!(!e.herdr.methods().iter().skip(n).any(|m| m == "agent.send_keys" || m == "pane.close"), "外面一步都沒動");
+        let state: String = sqlx::query_scalar("SELECT state FROM runs WHERE id=?").bind(&run).fetch_one(&app.db).await.unwrap();
+        assert_eq!((state.as_str(), turn_of(&app, "crid-stop-lost").await.status.as_str()), ("running", "queued"), "兩個都沒成立");
+
+        sqlx::query("DROP TRIGGER lost_withdraw").execute(&app.db).await.unwrap();
+        crate::lifecycle::stop_bot(&app, &bot.id).await.unwrap();
+        let t = turn_of(&app, "crid-stop-lost").await;
+        assert_eq!(t.status, "failed", "再按一次：撤回跟停一起成立");
+        assert_eq!(count(&app, "SELECT COUNT(*) FROM messages WHERE turn_id=? AND role='system' AND content LIKE 'bot 已被停止%'", &t.id).await, 1);
+
+        // 使用者又把它起來了、閒著：flush 不會把那一則送出去。
+        let run2 = tt::fake_run(&app, &bot.id).await;
+        let pane = format!("pane-{}", bot.id);
+        e.herdr.live_pane(&pane, tt::LivePane { width: Some(120), ..Default::default() });
+        db::set_pane_typed(&app.db, &run2).await.unwrap();
+        forget_queue_retry_timer(&bot.id);
+        flush_queued_locked(&app, &bot.id).await.unwrap();
+        assert_eq!(e.herdr.pane(&pane).map_or(0, |p| p.transcript.iter().filter(|l| l.contains(TEXT)).count()), 0, "永遠不送");
+    }
+
+    /// 在跑的 bot：旗標沒有作用，走一般的送出（有 run、沒有 `awaits_start`）。附件跟訊息同一個交易綁上；
+    /// 認不得的附件 400，什麼都沒寫。
+    #[tokio::test]
+    async fn a_running_bot_takes_the_normal_path_and_attachments_bind_with_the_send() {
+        let e = tt::env().await;
+        let app = e.app.clone();
+        let running = tt::claude_bot(&app, &e.project_id, "running").await;
+        tt::fake_run(&app, &running.id).await;
+        // 假的 run 沒有 transcript：一般那條路照它自己的規則回 409 `transcript_not_ready`——重點是沒有被「收下再啟動」。
+        let normal = prompt_starting(&app, &running.id, "照常送", "crid-running", &[], RelaySrc::default()).await;
+        assert!(
+            matches!(&normal, Err(LcError::Conflict(v)) if v["reason"] == "transcript_not_ready"),
+            "在跑的 bot 照一般的路：{normal:?}"
+        );
+        assert_eq!(count(&app, "SELECT COUNT(*) FROM turns WHERE awaits_start=1 AND client_request_id=?", "crid-running").await, 0);
+
+        let stopped = tt::claude_bot(&app, &e.project_id, "stopped-attach").await;
+        let att = db::ulid();
+        sqlx::query(
+            "INSERT INTO attachments (id, bot_id, name, mime, size, local_path, agent_path, host, created_at)
+             VALUES (?,?,'shot.png','image/png',1,'/tmp/shot.png','/tmp/shot.png','local',?)",
+        )
+        .bind(&att)
+        .bind(&stopped.id)
+        .bind(db::now())
+        .execute(&app.db)
+        .await
+        .unwrap();
+        let bad = prompt_starting(&app, &stopped.id, TEXT, "crid-bad", &["nope".to_string()], RelaySrc::default()).await;
+        assert!(matches!(bad, Err(LcError::Bad(_))));
+        assert_eq!(count(&app, "SELECT COUNT(*) FROM turns WHERE client_request_id=?", "crid-bad").await, 0, "認不得的附件：什麼都沒寫");
+
+        let out = prompt_starting(&app, &stopped.id, TEXT, "crid-att", std::slice::from_ref(&att), RelaySrc::default()).await.unwrap();
+        let bound: Option<String> = sqlx::query_scalar("SELECT message_id FROM attachments WHERE id=?").bind(&att).fetch_one(&app.db).await.unwrap();
+        assert_eq!(bound.as_deref(), Some(out.message_id.as_str()), "附件綁在這一則上");
+        let t = turn_of(&app, "crid-att").await;
+        assert!(t.prompt_text.as_deref().is_some_and(|p| p.contains("/tmp/shot.png")), "起來後送的字帶著附件路徑");
+    }
+
+    /// issue #152（start_send 那一半）：替等著送的訊息啟動時 agent 真的起來了，`running` 卻寫不進 DB（`Uncommitted`）——
+    /// 那不是「沒能啟動」：不寫 `start_error`。對帳重試把 run 收成 `running` 不會叫 flush，所以這裡要自己等到它收斂再叫；
+    /// 收斂之後那一則送出去，只送一次。會真的 `start_bot`，要有 claude（遠端編譯主機沒有）。
+    #[tokio::test]
+    async fn a_start_that_came_up_but_could_not_record_running_still_sends_once_it_settles() {
+        let e = tt::env().await;
+        let app = e.app.clone();
+        let bot = tt::claude_bot(&app, &e.project_id, "uncommitted").await;
+        prompt_starting(&app, &bot.id, TEXT, "crid-u", &[], RelaySrc::default()).await.unwrap();
+        super::super::run_state::refuse_run_state(&app, "running").await;
+        start_for_waiting(&app, &bot.id).await;
+        let t = turn_of(&app, "crid-u").await;
+        assert_eq!((t.status.as_str(), t.start_error.as_deref()), ("queued", None), "agent 起來了：不是沒能啟動");
+        let run = db::active_run(&app.db, &bot.id).await.unwrap().expect("run 停在 starting，沒被收掉");
+        assert_eq!(run.state, "starting");
+        assert!(watching_for_running(&run.id), "排了「收成 running 就叫 flush」");
+        assert!(!flush_if_running(&app, &bot.id, &run.id).await, "還在 starting：繼續等");
+
+        // DB 恢復，對帳照 herdr 的證據收成 running。
+        super::super::run_state::accept_run_state(&app, "running").await;
+        let stuck = super::super::run_state::Settle::Reconcile { stuck: "starting".into() };
+        assert!(super::super::run_state::settle_once(&app, &run.id, &stuck).await);
+        assert!(flush_if_running(&app, &bot.id, &run.id).await, "收成 running：叫 flush，不再等");
+        let pane = db::run(&app.db, &run.id).await.unwrap().unwrap().pane_id.unwrap();
+        e.herdr.live_pane(&pane, tt::LivePane { width: Some(120), ..Default::default() });
+        db::set_pane_typed(&app.db, &run.id).await.unwrap();
+        for _ in 0..3 {
+            forget_queue_retry_timer(&bot.id);
+            flush_queued_locked(&app, &bot.id).await.unwrap();
+        }
+        let t = turn_of(&app, "crid-u").await;
+        assert_eq!((t.status.as_str(), t.run_id.as_deref(), t.start_error.as_deref()), ("in_flight", Some(run.id.as_str()), None));
+        let sent = e.herdr.pane(&pane).map_or(0, |p| p.transcript.iter().filter(|l| l.contains(TEXT)).count());
+        assert_eq!(sent, 1, "送出，只送一次");
+        forget_queue_retry_timer(&bot.id);
+        stop_bot(&app, &bot.id).await.unwrap();
+    }
+
+    /// 同上，走睡著的 bot（`idle_sleep::wake` 用 `--resume` 叫醒，回的是字串錯誤）：留下一個 `starting` 的 run 就是
+    /// agent 起來了、狀態沒記下，一樣不寫 `start_error`、等收斂再叫 flush。會真的 `start_bot`，要有 claude。
+    #[tokio::test]
+    async fn a_sleeping_bot_woken_for_a_send_that_could_not_record_running_is_not_a_failed_start() {
+        let e = tt::env().await;
+        let app = e.app.clone();
+        let bot = tt::claude_bot(&app, &e.project_id, "asleep-uncommitted").await;
+        sqlx::query("INSERT INTO bot_sleeps (bot_id, idle_minutes, reason, slept_at) VALUES (?, 30, 'idle', ?)")
+            .bind(&bot.id)
+            .bind(db::now())
+            .execute(&app.db)
+            .await
+            .unwrap();
+        prompt_starting(&app, &bot.id, TEXT, "crid-sleep", &[], RelaySrc::default()).await.unwrap();
+        super::super::run_state::refuse_run_state(&app, "running").await;
+        start_for_waiting(&app, &bot.id).await;
+        assert_eq!(turn_of(&app, "crid-sleep").await.start_error, None, "叫醒時 agent 起來了：不是沒能啟動");
+        let run = db::active_run(&app.db, &bot.id).await.unwrap().expect("run 停在 starting");
+        assert!(watching_for_running(&run.id));
+        super::super::run_state::accept_run_state(&app, "running").await;
+        forget_queue_retry_timer(&bot.id);
+        stop_bot(&app, &bot.id).await.unwrap();
+    }
+
+    /// 整條：沒在跑 → 收下 → daemon 重啟（啟動還沒發生）→ 開機替它啟動 → 起來、閒下來 → 佇列送出，只送一次；
+    /// 多叫醒幾次、同一個請求重送、再踢一次啟動，都不會再送。會真的 `start_bot`，要有 claude（遠端編譯主機沒有）。
+    #[tokio::test]
+    async fn a_send_to_a_stopped_bot_goes_out_exactly_once_after_the_daemon_starts_it() {
+        let e = tt::env().await;
+        let app = e.app.clone();
+        let bot = tt::claude_bot(&app, &e.project_id, "boot-start").await;
+        prompt_starting(&app, &bot.id, TEXT, "crid-e2e", &[], RelaySrc::default()).await.unwrap();
+
+        let app = tt::restart_app(&e).await;
+        assert_eq!(resume_after_boot(&app, LOCAL_HOST).await, 1);
+        start_for_waiting(&app, &bot.id).await;
+        let t = turn_of(&app, "crid-e2e").await;
+        assert_eq!((t.status.as_str(), t.start_error.as_deref()), ("queued", None), "起來了，還沒送（等閒下來）");
+        let run = db::active_run(&app.db, &bot.id).await.unwrap().expect("run 起來了");
+        let pane = run.pane_id.clone().unwrap();
+        e.herdr.live_pane(&pane, tt::LivePane { width: Some(120), ..Default::default() });
+        db::set_pane_typed(&app.db, &run.id).await.unwrap();
+        let sent = || e.herdr.pane(&pane).map_or(0, |p| p.transcript.iter().filter(|l| l.contains(TEXT)).count());
+
+        for _ in 0..3 {
+            forget_queue_retry_timer(&bot.id);
+            flush_queued_locked(&app, &bot.id).await.unwrap();
+        }
+        let t = turn_of(&app, "crid-e2e").await;
+        assert_eq!((t.status.as_str(), t.run_id.as_deref()), ("in_flight", Some(run.id.as_str())));
+        assert_eq!(sent(), 1, "送出，只送一次");
+
+        let again = prompt_starting(&app, &bot.id, TEXT, "crid-e2e", &[], RelaySrc::default()).await.unwrap();
+        assert_eq!(again.turn_id, t.id, "同一個請求重送：回同一筆，不再開一則");
+        start_for_waiting(&app, &bot.id).await;
+        flush_queued_locked(&app, &bot.id).await.unwrap();
+        assert_eq!(sent(), 1, "再踢一次啟動、再叫醒 flush：不會再送");
+        forget_queue_retry_timer(&bot.id);
+        stop_bot(&app, &bot.id).await.unwrap();
+    }
+}

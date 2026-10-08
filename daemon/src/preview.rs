@@ -750,7 +750,7 @@ async fn decorated(app: &Arc<App>, bot: &db::Bot, mut body: Value, live: bool) -
         .map(|(c, d)| {
             // 顯示的那一行要跟真的會跑的一致（含 #434 接上去的 loopback 旗標）。
             let kind = d.as_deref().and_then(dev_kind).unwrap_or(if d.is_some() { "unknown" } else { "vite" });
-            json!({"dir": c.to_string_lossy(), "command": run_command(d.as_deref(), kind, app.allow_lan, port)})
+            json!({"dir": c.to_string_lossy(), "command": run_command(d.as_deref(), kind, app.allow_lan(), port)})
         })
         .collect();
     if !live {
@@ -772,7 +772,7 @@ async fn decorated(app: &Arc<App>, bot: &db::Bot, mut body: Value, live: bool) -
     if let Some(o) = body.as_object_mut() {
         // #527：`allow_lan` 關著時我們起的 dev server 釘在 loopback（#434／#452），從手機或別台機器
         // 開的前端連不到它；前端要據此把 iframe 換成說明，不要只給一片空白。
-        o.insert("lan".into(), json!(app.allow_lan));
+        o.insert("lan".into(), json!(app.allow_lan()));
         o.insert("candidates".into(), json!(cands.iter().map(|c| c.to_string_lossy()).collect::<Vec<_>>()));
         if !live {
             o.insert("command".into(), info.first().map(|i| i["command"].clone()).unwrap_or(Value::Null));
@@ -958,7 +958,7 @@ pub async fn start(app: &Arc<App>, bot_id: &str, req: StartReq) -> LcResult<Valu
     // kind 先算：`run_command` 要靠它決定接哪個 loopback 旗標（#434）。沒有 dev script 時我們自己組的
     // 那一行一定是 vite。
     let kind = dev.as_deref().and_then(dev_kind).unwrap_or(if dev.is_some() { "unknown" } else { "vite" });
-    let cmd = run_command(dev.as_deref(), kind, app.allow_lan, port.unwrap_or(PORT_START));
+    let cmd = run_command(dev.as_deref(), kind, app.allow_lan(), port.unwrap_or(PORT_START));
     let pane = run.pane_id.clone().unwrap_or_default();
     let pane_id = env.spawn(&pane, &dir, &cmd).await.map_err(up)?;
     let now = db::now();
@@ -1019,7 +1019,7 @@ pub async fn stop(app: &Arc<App>, bot_id: &str) -> LcResult<Value> {
     // 這條不走 `decorated`，`lan` 自己補（#527）：前端拿回應直接蓋掉手上那一份。
     let mut body = off_body();
     if let Some(o) = body.as_object_mut() {
-        o.insert("lan".into(), json!(app.allow_lan));
+        o.insert("lan".into(), json!(app.allow_lan()));
     }
     Ok(body)
 }
@@ -1200,7 +1200,7 @@ async fn refresh_locked(app: &Arc<App>, bot_id: &str) -> Option<Row> {
     if (becoming_running || still_running)
         && !attached
         && r.source == SOURCE_SPAWNED
-        && !app.allow_lan
+        && !app.allow_lan()
         && (becoming_running || crate::preview_bind::take_recheck_slot(bot_id, &db::now()))
     {
         if listeners.is_none() {

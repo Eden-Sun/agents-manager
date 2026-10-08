@@ -32,6 +32,7 @@ pub trait ReconcileHostEnv:
     + TurnCommands
     + IngressCommands
     + ReconcileCommands
+    + BotOpsRepo
     + crate::shared_host::SharedHostEnv
     + PaneIdentitySync
     + Send
@@ -51,6 +52,7 @@ impl<T> ReconcileHostEnv for T where
         + TurnCommands
         + IngressCommands
         + ReconcileCommands
+        + BotOpsRepo
         + crate::shared_host::SharedHostEnv
         + PaneIdentitySync
         + Send
@@ -546,7 +548,7 @@ pub(crate) async fn reconcile_host_locked(app: &impl ReconcileHostEnv, host: &st
         }
         let computed = db::agent_name_for_bot(app.db(), &bot).await?;
         let preserve_stopping = match &active {
-            Some(run) if run.state == "stopping" => app.db().has_open_restart_for_run(host, &bot.id, &run.id).await?,
+            Some(run) if run.state == "stopping" => app.has_open_restart_for_run(host, &bot.id, &run.id).await?,
             _ => false,
         };
         let mut candidates: Vec<String> = Vec::new();

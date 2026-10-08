@@ -1,9 +1,9 @@
 
     use super::*;
 
-    const IDLE: &str = include_str!("../../../../daemon/src/lifecycle/fixtures/claude-2.1.287-linux-idle.txt");
-    const WORKING: &str = include_str!("../../../../daemon/src/lifecycle/fixtures/claude-2.1.287-linux-working.txt");
-    const FINISHED: &str = include_str!("../../../../daemon/src/lifecycle/fixtures/claude-2.1.287-linux-finished.txt");
+    const IDLE: &str = include_str!("../../../../crates/am-lifecycle/src/lifecycle/fixtures/claude-2.1.287-linux-idle.txt");
+    const WORKING: &str = include_str!("../../../../crates/am-lifecycle/src/lifecycle/fixtures/claude-2.1.287-linux-working.txt");
+    const FINISHED: &str = include_str!("../../../../crates/am-lifecycle/src/lifecycle/fixtures/claude-2.1.287-linux-finished.txt");
 
     #[test]
     fn busy_only_while_the_spinner_row_is_up() {

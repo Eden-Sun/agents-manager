@@ -4,12 +4,15 @@ version = "0.1.0"
 edition = "2021"
 
 [features]
-default = ["embed-ui"]
+default = ["embed-ui", "daemon-test-harness"]
 # Enabled for the release build once `web/dist` exists (M8).
 embed-ui = []
+# Compile App-backed tests for extracted lifecycle modules in the daemon harness.
+daemon-test-harness = []
 
 [dependencies]
 am-base = { path = "../crates/am-base" }
+am-lifecycle = { path = "../crates/am-lifecycle" }
 am-core = { path = "../crates/am-core" }
 am-ports = { path = "../crates/am-ports" }
 am-config = { path = "../crates/am-config" }

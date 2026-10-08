@@ -4,7 +4,7 @@ use std::sync::{Arc, Mutex, OnceLock};
 use std::time::Duration;
 use serde_json::json;
 use crate::autostart_revive::{eligible_lost_bot, take_slot, Lost};
-use crate::events::ports::{HostSidePort, SupervisorRepo, TurnCommands};
+use crate::events::ports::{HostSidePort, TurnCommands};
 use crate::state::{App, AutostartHostStatus};
 
 /// 還沒做完的背景補開，依 `App` 分開記（測試用它等補開收尾；平行的測試各有各的 `App`，不能共用一個計數）。
@@ -116,7 +116,7 @@ async fn revive_one(app: &Arc<App>, host: &str, l: &Lost) -> anyhow::Result<()> 
         "bot_id": bot.id, "name": bot.name, "host": host, "lost_run_id": l.run_id,
         "reason": "agent_not_found_during_reconcile", "outcome": outcome, "error": error,
     });
-    if let Err(e) = app.db.push_inbox(&format!("bot_lost:{}:{}", bot.id, l.run_id), "bot_lost", None, Some(&bot.id), None, &payload).await {
+    if let Err(e) = crate::supervisor::store::push_inbox(&app.db, &format!("bot_lost:{}:{}", bot.id, l.run_id), "bot_lost", None, Some(&bot.id), None, &payload).await {
         tracing::warn!(bot = %bot.name, error = ?e, "autostart revive: could not write the bot_lost inbox event");
     }
     Ok(())

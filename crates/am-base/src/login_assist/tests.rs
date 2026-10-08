@@ -7,10 +7,10 @@ use crate::runners::login_assist::{reserve, status, submit_code};
 use crate::testing as tt;
 use serde_json::Value;
 
-const UNWRAPPED: &str = include_str!("../../../../daemon/src/lifecycle/fixtures/claude-2.1.289-auth-login-unwrapped.txt");
-const WRAPPED: &str = include_str!("../../../../daemon/src/lifecycle/fixtures/claude-2.1.289-auth-login-wrapped.txt");
-const FAILED: &str = include_str!("../../../../daemon/src/lifecycle/fixtures/claude-2.1.289-auth-login-failed.txt");
-const M4P_RAW: &str = include_str!("../../../../daemon/src/lifecycle/fixtures/claude-2.1.289-auth-login-m4p.ansi");
+const UNWRAPPED: &str = include_str!("../../../../crates/am-lifecycle/src/lifecycle/fixtures/claude-2.1.289-auth-login-unwrapped.txt");
+const WRAPPED: &str = include_str!("../../../../crates/am-lifecycle/src/lifecycle/fixtures/claude-2.1.289-auth-login-wrapped.txt");
+const FAILED: &str = include_str!("../../../../crates/am-lifecycle/src/lifecycle/fixtures/claude-2.1.289-auth-login-failed.txt");
+const M4P_RAW: &str = include_str!("../../../../crates/am-lifecycle/src/lifecycle/fixtures/claude-2.1.289-auth-login-m4p.ansi");
 
 const URL: &str = "https://claude.com/cai/oauth/authorize?code=true&client_id=9d1c250a-e61b-44d9-88ed-5944d1962f5e&response_type=code&redirect_uri=https%3A%2F%2Fplatform.claude.com%2Foauth%2Fcode%2Fcallback&scope=org%3Acreate_api_key+user%3Aprofile+user%3Ainference+user%3Asessions%3Aclaude_code+user%3Amcp_servers+user%3Afile_upload+user%3Aplugins&code_challenge=FAKEchallengeFAKEchallengeFAKEchallenge0000&code_challenge_method=S256&state=FAKEstateFAKEstateFAKEstateFAKEstate0000000";
 

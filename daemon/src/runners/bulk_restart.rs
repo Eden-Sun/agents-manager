@@ -842,7 +842,7 @@ mod tests {
 
     /// 畫面底部標著 1 個背景 shell 的 claude 畫面（#714 的固定樣本）。
     fn background_screen() -> String {
-        std::fs::read_to_string(format!("{}/src/lifecycle/fixtures/claude-2.1.281-background-shell.txt", env!("CARGO_MANIFEST_DIR"))).unwrap()
+        std::fs::read_to_string(format!("{}/../crates/am-lifecycle/src/lifecycle/fixtures/claude-2.1.281-background-shell.txt", env!("CARGO_MANIFEST_DIR"))).unwrap()
     }
 
     /// #767：回合結束、agent 閒置，但畫面底部還標著背景工作（#714）——重啟一退 CLI，背景 shell／終端跟著沒了。
@@ -944,7 +944,7 @@ mod tests {
         let env = crate::testing::env().await;
         let app = env.app.clone();
         let (bot, run) = pending_bot(&env, "late-after-recheck", "claude", "Update installed · Restart to update").await;
-        let quiet = std::fs::read_to_string(format!("{}/src/lifecycle/fixtures/claude-2.1.281-no-background-shell.txt", env!("CARGO_MANIFEST_DIR"))).unwrap();
+        let quiet = std::fs::read_to_string(format!("{}/../crates/am-lifecycle/src/lifecycle/fixtures/claude-2.1.281-no-background-shell.txt", env!("CARGO_MANIFEST_DIR"))).unwrap();
         env.herdr.set_screen(&format!("pane-{bot}"), &quiet);
         let set_screen = env.herdr.set_screen_later();
         let pane = format!("pane-{bot}");
@@ -974,7 +974,7 @@ mod tests {
         let env = crate::testing::env().await;
         let app = env.app.clone();
         let (bot, run) = pending_bot(&env, "late-before-stop-commit", "claude", "Update installed · Restart to update").await;
-        let quiet = std::fs::read_to_string(format!("{}/src/lifecycle/fixtures/claude-2.1.281-no-background-shell.txt", env!("CARGO_MANIFEST_DIR"))).unwrap();
+        let quiet = std::fs::read_to_string(format!("{}/../crates/am-lifecycle/src/lifecycle/fixtures/claude-2.1.281-no-background-shell.txt", env!("CARGO_MANIFEST_DIR"))).unwrap();
         env.herdr.set_screen(&format!("pane-{bot}"), &quiet);
         let set_screen = env.herdr.set_screen_later();
         let pane = format!("pane-{bot}");
@@ -1008,7 +1008,7 @@ mod tests {
         let (stale, stale_run) = pending_bot(&env, "stale", "claude", "Update installed · Restart to update").await;
         let (unseen, _) = pending_bot(&env, "unseen", "claude", "Update installed · Restart to update").await;
         let (clean, clean_run) = pending_bot(&env, "clean", "claude", "Update installed · Restart to update").await;
-        let quiet = std::fs::read_to_string(format!("{}/src/lifecycle/fixtures/claude-2.1.281-no-background-shell.txt", env!("CARGO_MANIFEST_DIR"))).unwrap();
+        let quiet = std::fs::read_to_string(format!("{}/../crates/am-lifecycle/src/lifecycle/fixtures/claude-2.1.281-no-background-shell.txt", env!("CARGO_MANIFEST_DIR"))).unwrap();
         // 巡邏上一輪看過「乾淨」，之後才丟出背景工作；另一顆巡邏還沒輪到。
         crate::background_jobs::record(&mut app.background_jobs.lock().unwrap(), &stale_run, 0);
         crate::background_jobs::record(&mut app.background_jobs.lock().unwrap(), &clean_run, 0);
