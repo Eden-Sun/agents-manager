@@ -1,4 +1,5 @@
 import { lazy, Suspense, useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import { createRequestId, settleCreateRequest } from '../lib/createRequestId'
 import type { ShareClient } from './shareApi'
 import { displayName, imagesByMessage, isImageName } from './shareImage'
 import { ShareButton, ShareImageViewer, ShareThumb } from './ShareImages'
@@ -34,10 +35,15 @@ interface Pending {
   active: boolean
 }
 
-function newRequestId(): string {
-  const b = new Uint8Array(12)
-  crypto.getRandomValues(b)
-  return `share-${Array.from(b, (x) => x.toString(16).padStart(2, '0')).join('')}`
+/** 重送同一句話的冪等鍵保留多久（同主 UI 的 `SEND_RETRY_WINDOW_MS` 量級）：回應遺失時使用者照提示再按一次要拿到同一個鍵。 */
+const SEND_RETRY_WINDOW_MS = 10 * 60_000
+
+/** 送出後多久還沒等到 working／回覆，就放開送出鈕（SSE 與輪詢都漏掉時的最後出口，#922）。 */
+const AWAIT_LIMIT_MS = 90_000
+
+/** daemon 的 `client_request_id` 只收 `[A-Za-z0-9-_.:]{1,64}`；`createRequestId` 回 UUID，加前綴後仍在範圍內。 */
+function sendRequestId(key: string): string {
+  return `share-${createRequestId(key, { maxAgeMs: SEND_RETRY_WINDOW_MS })}`.replace(/[^A-Za-z0-9\-_.:]/g, '_').slice(0, 64)
 }
 
 function Bubble({ m, images, client, onOpen }: { m: ShareMessage; images: ShareFile[]; client: ShareClient; onOpen: (f: ShareFile) => void }) {
@@ -152,7 +158,8 @@ export function ShareApp({ client }: { client: ShareClient }) {
   // 世代號：SSE 若在 POST resolve 之前先到，不能再被後到的 resolve 設回 true。
   const [awaiting, setAwaiting] = useState(false)
   const awaitGen = useRef(0)
-  const sendAt = useRef<string | null>(null)
+  /** 這一輪送出的錨點：`at` 是瀏覽器時鐘（只在 POST 還沒回 `message_id` 之前當備用），`id` 是 daemon 回的那則 user 訊息。 */
+  const anchor = useRef<{ at: string; id: string | null } | null>(null)
   const listRef = useRef<HTMLDivElement>(null)
   const fileInput = useRef<HTMLInputElement>(null)
   const uploadBusy = useRef(false)
@@ -172,10 +179,15 @@ export function ShareApp({ client }: { client: ShareClient }) {
     setStatus(page.status)
     setMessages((cur) => mergeMessages(cur, page.messages))
     if (!sawOlder.current) setHasMore(page.has_more)
-    const at = sendAt.current
+    const a = anchor.current
     // 還沒看到這一輪的 working 或新 assistant 之前，idle 的舊頁不能把「思考中」清掉。
-    if (at && (page.status === 'working' || page.messages.some((m) => m.role === 'assistant' && m.created_at >= at))) {
-      setAwaiting(false)
+    // 有 `message_id` 就看「那則 user 訊息之後有沒有 assistant」，不比時鐘（手機時鐘快過 daemon 時 created_at 永遠對不上）。
+    if (a) {
+      const at = a.id ? page.messages.findIndex((m) => m.id === a.id) : -1
+      const answered = a.id
+        ? at >= 0 && page.messages.slice(at + 1).some((m) => m.role === 'assistant')
+        : page.messages.some((m) => m.role === 'assistant' && m.created_at >= a.at)
+      if (page.status === 'working' || answered) setAwaiting(false)
     }
     setNetError(null)
     setState('ready')
@@ -211,7 +223,7 @@ export function ShareApp({ client }: { client: ShareClient }) {
       onStatus: (s) => {
         setStatus(s)
         // 只在這一輪送出之後的 working／idle 清掉。POST resolve 不再把 awaiting 設回 true。
-        if (sendAt.current) setAwaiting(false)
+        if (anchor.current) setAwaiting(false)
       },
       // 漏了事件或對話被倒回：整頁重抓，以重抓結果取代手上的清單（倒回的那幾則要消失，合併不會刪）。
       onResync: () => {
@@ -239,6 +251,16 @@ export function ShareApp({ client }: { client: ShareClient }) {
     }, POLL_MS)
     return () => clearInterval(id)
   }, [poll, state, load])
+
+  // 90 秒上限：送出後一直沒等到 working／回覆（SSE 與輪詢都漏掉、或 bot 根本沒收到），不能讓送出鈕永遠灰著。
+  useEffect(() => {
+    if (!awaiting) return
+    const t = setTimeout(() => {
+      setAwaiting(false)
+      setSendError('沒等到回應，可以再送一次。')
+    }, AWAIT_LIMIT_MS)
+    return () => clearTimeout(t)
+  }, [awaiting])
 
   const busy = status === 'working' || awaiting
   // bot 這一回合做的圖（與回覆裡提到的）直接畫在那則回覆下面。
@@ -317,18 +339,35 @@ export function ShareApp({ client }: { client: ShareClient }) {
   const submit = async () => {
     if (!canSend) return
     const gen = ++awaitGen.current
-    sendAt.current = new Date().toISOString()
+    anchor.current = { at: new Date().toISOString(), id: null }
     setAwaiting(true)
     setSending(true)
     setSendError(null)
+    const body = text.trim()
+    const ids = ready.map((p) => p.id!)
+    // 冪等鍵跟著「這句話＋這些附件」走（#921）：回應遺失（網路斷在 daemon 收下之後）時照提示再按一次，要拿到同一個鍵，
+    // daemon 才認得是重送。只有 daemon 明確回了（`ShareHttpError`）才作廢；改了字或附件就是新的一則、新的鍵。
+    const reqKey = `share-send:${body}\u0000${ids.join(',')}`
     try {
-      await client.send(text.trim(), newRequestId(), ready.map((p) => p.id!))
+      const res = await client.send(body, sendRequestId(reqKey), ids)
+      settleCreateRequest(reqKey)
+      if (res?.delivery === 'failed') {
+        // daemon 收下了、但 bot 沒收到（pane 打不進字、附件綁定失敗…）：不會有任何回覆事件，字與附件都留著讓人再送。
+        anchor.current = null
+        if (awaitGen.current === gen) setAwaiting(false)
+        setSendError('bot 沒收到這一則，請再送一次；你打的字還在。')
+        void load()
+        return
+      }
+      if (res?.messageId && anchor.current && awaitGen.current === gen) anchor.current = { ...anchor.current, id: res.messageId }
       setText('')
       setPending((p) => p.filter((x) => !x.id))
       stick.current = true
+      if (res?.delivery === 'unknown') setSendError('送出了，但還不確定 bot 有沒有收到，稍等一下。')
       // 不在這裡 setAwaiting(true)：SSE 可能已經先把這一世代清掉。
       if (awaitGen.current === gen) void load()
     } catch (e) {
+      if (e instanceof ShareHttpError) settleCreateRequest(reqKey)
       if (awaitGen.current === gen) setAwaiting(false)
       if (e instanceof ShareHttpError && e.status === 404) {
         stopLive.current()
