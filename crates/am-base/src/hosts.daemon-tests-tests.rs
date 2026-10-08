@@ -518,3 +518,53 @@
             task.abort();
         }
     }
+
+    // ---- #887：ssh 控制目錄與遠端腳本不再用 /tmp 底下可預測的路徑 ----
+
+    #[test]
+    fn ensure_private_dir_creates_0700_and_rejects_loose_or_symlinked_dirs() {
+        use std::os::unix::fs::{symlink, PermissionsExt};
+        let base = std::env::temp_dir().join(format!("am-test-{}", crate::db::ulid()));
+        std::fs::create_dir_all(&base).unwrap();
+        let mode = |p: &std::path::Path| std::fs::symlink_metadata(p).unwrap().permissions().mode() & 0o777;
+
+        // 不存在 → 建立，0700。
+        let fresh = base.join("fresh");
+        ensure_private_dir(&fresh).unwrap();
+        assert_eq!(mode(&fresh), 0o700);
+        // 已存在 0700 → 照樣 Ok（重複呼叫）。
+        ensure_private_dir(&fresh).unwrap();
+
+        // 已存在但權限太鬆 → Err，而且不去 chmod 它。
+        let loose = base.join("loose");
+        std::fs::create_dir(&loose).unwrap();
+        std::fs::set_permissions(&loose, std::fs::Permissions::from_mode(0o777)).unwrap();
+        let err = ensure_private_dir(&loose).unwrap_err().to_string();
+        assert!(err.contains("不安全的 ssh 控制目錄"), "{err}");
+        assert_eq!(mode(&loose), 0o777, "別人預先佔的目錄不動它");
+
+        // 符號連結（就算指向一個 0700 目錄）→ Err。
+        let link = base.join("link");
+        symlink(&fresh, &link).unwrap();
+        assert!(ensure_private_dir(&link).is_err());
+
+        // 不是目錄 → Err。
+        let file = base.join("file");
+        std::fs::write(&file, b"x").unwrap();
+        assert!(ensure_private_dir(&file).is_err());
+
+        std::fs::remove_dir_all(&base).unwrap();
+    }
+
+    #[test]
+    fn the_remote_session_script_has_no_predictable_tmp_paths_and_still_parses() {
+        let script = HostConn::remote_session_script(&cfg(), false);
+        for old in ["/tmp/am-systemctl.err", "/tmp/am-launchctl.err", "/tmp/herdr-"] {
+            assert!(!script.contains(old), "腳本不該再用 {old}：{script}");
+        }
+        assert!(script.contains("mktemp"), "錯誤輸出暫存要用 mktemp");
+        assert!(script.contains(".config/agents-manager/herdr-"), "server log 放在使用者自己的目錄");
+        assert!(script.contains("umask 077"));
+        let parsed = std::process::Command::new("/bin/sh").arg("-n").arg("-c").arg(&script).output().unwrap();
+        assert!(parsed.status.success(), "sh -n: {}", String::from_utf8_lossy(&parsed.stderr));
+    }

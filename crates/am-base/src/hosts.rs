@@ -10,7 +10,7 @@ use anyhow::{bail, Context, Result};
 use serde_json::json;
 use std::collections::{HashMap, HashSet};
 use std::future::Future;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
@@ -89,8 +89,8 @@ const SSH_CONNECT_TIMEOUT_SECS: u64 = 15;
 /// production daemon's SSH master control socket or forwarded herdr socket (issue #85) —
 /// otherwise one instance's explicit reconnect or shutdown kills the other's tunnel.
 pub fn short_dir(instance: Option<&str>) -> PathBuf {
-    use std::os::unix::fs::MetadataExt;
-    let uid = dirs::home_dir().and_then(|h| std::fs::metadata(h).ok()).map(|m| m.uid()).unwrap_or(0);
+    // SAFETY: geteuid(2) has no preconditions and cannot fail.
+    let uid = unsafe { libc::geteuid() };
     match instance {
         Some(slug) => PathBuf::from(format!("/tmp/agents-manager-{uid}-{slug}")),
         None => PathBuf::from(format!("/tmp/agents-manager-{uid}")),
@@ -114,6 +114,30 @@ pub async fn sh_local(script: &str, timeout: Duration) -> Result<Option<std::pro
     let err = child.stderr.take();
     let gather = async move {
         use tokio::io::AsyncReadExt;
+/// ssh 控制目錄（`/tmp/agents-manager-<uid>[-slug]`）：路徑可預測，所以只准是自己的、0700、非符號連結的真目錄。
+/// 不存在就以 0700 建立；已存在但不合就回錯（不去 chmod 不是自己的目錄，別人預先佔位只會讓連線失敗，不會讓 socket 落進別人的目錄）。
+pub fn ensure_private_dir(path: &Path) -> Result<()> {
+    use std::os::unix::fs::{DirBuilderExt, MetadataExt};
+    match std::fs::DirBuilder::new().mode(0o700).create(path) {
+        Ok(()) => {}
+        Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {}
+        Err(e) => return Err(e).with_context(|| format!("建立 ssh 控制目錄 {}", path.display())),
+    }
+    let meta = std::fs::symlink_metadata(path).with_context(|| format!("檢查 ssh 控制目錄 {}", path.display()))?;
+    if meta.file_type().is_symlink() || !meta.is_dir() {
+        bail!("不安全的 ssh 控制目錄 {}：不是一般目錄（可能是符號連結）", path.display());
+    }
+    // SAFETY: geteuid(2) has no preconditions and cannot fail.
+    let me = unsafe { libc::geteuid() };
+    if meta.uid() != me {
+        bail!("不安全的 ssh 控制目錄 {}：擁有者是 uid {}，不是目前的 uid {me}", path.display(), meta.uid());
+    }
+    if meta.mode() & 0o077 != 0 {
+        bail!("不安全的 ssh 控制目錄 {}：權限 {:o} 允許其他人存取（需要 0700）", path.display(), meta.mode() & 0o777);
+    }
+    Ok(())
+}
+
         let read_stdout = async move {
             let mut stdout = Vec::new();
             if let Some(mut o) = out {
@@ -470,12 +494,23 @@ fi
 if [ "$MODE" = systemd ]; then
   if running; then
     # 已經在跑（不管是誰起的）就不動：停它會收掉每個 pane 裡的 agent。
+# #887：暫存檔與 log 一律只有自己讀得到；server 本身要用回原本的 umask（見 nohup 分支）。
+AM_UMASK=$(umask); umask 077
     printf 'AM_MODE=systemd-existing\n'
-  elif systemctl --user start "herdr@$S.service" 2>/tmp/am-systemctl.err; then
-    printf 'AM_MODE=systemd\n'
   else
-    printf 'AM_MODE=nohup-fallback systemctl: %s\n' "$(tr '\n' ' ' </tmp/am-systemctl.err)"
-    MODE=nohup
+mkdir -p "$HOME/.config/agents-manager"
+LOG="$HOME/.config/agents-manager/herdr-$S.log"
+# 錯誤輸出暫存：mktemp 的隨機檔名（不用 /tmp 底下可預測的固定檔名）；建不起來就丟掉。
+new_err() {{ ERR=$(mktemp "${{TMPDIR:-/tmp}}/am-err.XXXXXX") || ERR=/dev/null; }}
+drop_err() {{ [ "$ERR" = /dev/null ] || rm -f "$ERR"; }}
+    new_err
+    if systemctl --user start "herdr@$S.service" 2>"$ERR"; then
+      printf 'AM_MODE=systemd\n'
+    else
+      printf 'AM_MODE=nohup-fallback systemctl: %s\n' "$(tr '\n' ' ' <"$ERR")"
+      MODE=nohup
+    fi
+    drop_err
   fi
 fi
 if [ "$MODE" = launchd ]; then
@@ -498,8 +533,8 @@ if [ "$MODE" = launchd ]; then
   <key>RunAtLoad</key><true/>
   <key>KeepAlive</key><true/>
   <key>ProcessType</key><string>Interactive</string>
-  <key>StandardOutPath</key><string>/tmp/herdr-$S.log</string>
-  <key>StandardErrorPath</key><string>/tmp/herdr-$S.log</string>
+  <key>StandardOutPath</key><string>$XML_LOG</string>
+  <key>StandardErrorPath</key><string>$XML_LOG</string>
 </dict></plist>
 AM_PLIST
     if chmod 600 "$PL" 2>/dev/null; then
@@ -508,10 +543,12 @@ AM_PLIST
         herdr --session "$S" server stop >/dev/null 2>&1 || true
         sleep 1
       fi
-      if launchctl bootstrap "gui/$(id -u)" "$PL" 2>/tmp/am-launchctl.err; then
+      new_err
+      if launchctl bootstrap "gui/$(id -u)" "$PL" 2>"$ERR"; then
         printf 'AM_MODE=launchd\n'
       else
-        printf 'AM_MODE=nohup-fallback launchctl: %s\n' "$(tr '\n' ' ' </tmp/am-launchctl.err)"
+    XML_LOG=$(xml_escape "$LOG")
+        printf 'AM_MODE=nohup-fallback launchctl: %s\n' "$(tr '\n' ' ' <"$ERR")"
         MODE=nohup
       fi
     else
@@ -523,7 +560,9 @@ fi
 if [ "$MODE" = nohup ] && ! running; then
   # `nohup` refuses to detach when stderr is not a console on some macOS builds,
   # so ignore SIGHUP in a subshell instead.
-  ( trap '' HUP; herdr --session "$S" server </dev/null >"/tmp/herdr-$S.log" 2>&1 & )
+  # log 先在 umask 077 下建好（0600）；server 自己用回原本的 umask，不然它底下每個 pane 的 agent 都會繼承 077。
+  : >"$LOG"
+  ( trap '' HUP; umask "$AM_UMASK"; herdr --session "$S" server </dev/null >"$LOG" 2>&1 & )
   printf 'AM_MODE=nohup\n'
   sleep 1
 fi
@@ -537,6 +576,7 @@ done
 printf 'AM_SOCK=%s\n' "$SOCK"
 herdr session list 2>&1 | sed 's/^/AM_LIST /'
 "#
+      drop_err
         );
         script
     }
@@ -579,7 +619,7 @@ herdr session list 2>&1 | sed 's/^/AM_LIST /'
     async fn start_master(&self, remote_sock: &str) -> Result<()> {
         let cfg = self.cfg.as_ref().unwrap();
         let dir = short_dir(self.instance.as_deref());
-        std::fs::create_dir_all(&dir).ok();
+        ensure_private_dir(&dir)?;
         let ctl = self.ctl_path();
         let local_sock = short_dir(self.instance.as_deref()).join(format!("{}.sock", self.name));
         if local_sock.to_string_lossy().len() > 100 {

@@ -2988,6 +2988,8 @@ label = "foo@m4p"
    而且當掉會被 launchd 拉起。
 2. **master 連線**：`ssh -N -M -S <ctl> -o BatchMode=yes -o ExitOnForwardFailure=yes -o ServerAliveInterval=15 -o ServerAliveCountMax=3 -o StreamLocalBindUnlink=yes（每條 ssh 另外帶 `-o ConnectTimeout=15`，排在使用者的 `ssh_opts` 之後，使用者明寫的蓋得過） -L <local.sock>:<remote herdr.sock> <target>`。
    `<local.sock>`、`<ctl>` 放短路徑 `/tmp/agents-manager-<uid>/<host>.sock|.ctl`（macOS AF_UNIX 上限 104 bytes）。
+   `<uid>` 是 `geteuid()`。這個目錄名稱可預測，所以建立前後都檢查（`ensure_private_dir`，#887）：以 0700 建立；已存在則必須是自己擁有、0700、非符號連結的真目錄，不合就不連（`conn.error` 帶原因，不去 chmod 別人的目錄）。
+   遠端腳本的暫存不用 `/tmp` 底下固定檔名：`systemctl`／`launchctl` 的錯誤輸出走 `mktemp` 的隨機檔、用完刪；herdr server 的 log 放遠端的 `~/.config/agents-manager/herdr-<session>.log`（`umask 077`，server 本身仍用原本的 umask）。
 3. `HerdrClient::new(<local.sock>)` 取得與本機相同的 client，`ping` 成功 → `connected`。
 4. 每 10 秒 `ping`；失敗或 master 退出 → `disconnected`、指數退避（1s→30s）重建 → 成功後對該 host 對帳並重建事件訂閱。
    autostart（§6.1 第 6 步）只在這台**第一次**對帳成功後跑一次；之後的重連不再跑，使用者停掉的 bot 不會被重開。
