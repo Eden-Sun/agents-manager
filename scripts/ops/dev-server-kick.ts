@@ -225,7 +225,7 @@ if (holders.length > 0) {
 const node = await nodeBin()
 if (!node) {
   log(`== ${ts()} 找不到 node，不用 bun 代跑（會在代理錯誤時 crash），放棄這輪`)
-  await alert('dev_node_missing', '找不到 node，5173 dev server 起不來（不用 bun 代跑）；裝 node 或放到 ~/.local/bin/node')
+  await alert('dev_node_missing', '找不到 node，dev server 起不來（不用 bun 代跑）；裝 node 或放到 ~/.local/bin/node')
   process.exit(0)
 }
 if (!existsSync(VITE)) {
