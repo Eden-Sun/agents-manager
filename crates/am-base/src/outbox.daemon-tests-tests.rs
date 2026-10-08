@@ -1,4 +1,50 @@
 
+    /// 串流下載：黑名單檔頭與超大檔在送出前就擋下（只看檔頭／fstat，不整份讀進記憶體）。
+    #[tokio::test]
+    async fn share_file_stream_rejects_withheld_head_and_oversize_without_buffering() {
+        let env = crate::testing::env().await;
+        let bot = crate::testing::claude_bot(&env.app, &env.project_id, "alfa").await;
+        let outbox = ensure(&env.app.data_dir, &bot.id).unwrap();
+
+        // 名字看起來無害、內容是私鑰：檔頭黑名單擋下，回 NotFound。
+        std::fs::write(outbox.join("notes.txt"), b"-----BEGIN RSA PRIVATE KEY-----\nabc\n-----END RSA PRIVATE KEY-----\n").unwrap();
+        assert!(matches!(share_file_stream(&env.app, &bot.id, "notes.txt").await, Err(ShareFileError::NotFound)));
+        // 真的 .pem 副檔名也一樣不給。
+        std::fs::write(outbox.join("key.pem"), b"-----BEGIN PRIVATE KEY-----\nabc\n").unwrap();
+        assert!(matches!(share_file_stream(&env.app, &bot.id, "key.pem").await, Err(ShareFileError::NotFound)));
+
+        // MAX_BYTES + 1 的稀疏檔：fstat 就擋下，回 TooLarge。
+        let f = std::fs::File::create(outbox.join("huge.bin")).unwrap();
+        f.set_len(MAX_BYTES + 1).unwrap();
+        drop(f);
+        assert!(matches!(share_file_stream(&env.app, &bot.id, "huge.bin").await, Err(ShareFileError::TooLarge)));
+
+        // 一般檔：200、Content-Length 對、body 是完整內容。
+        std::fs::write(outbox.join("ok.txt"), b"hello stream").unwrap();
+        let res = share_file_stream(&env.app, &bot.id, "ok.txt").await.unwrap();
+        assert_eq!(res.status(), StatusCode::OK);
+        assert_eq!(res.headers().get(header::CONTENT_LENGTH).unwrap(), "12");
+        let bytes = axum::body::to_bytes(res.into_body(), 1024).await.unwrap();
+        assert_eq!(&bytes[..], b"hello stream");
+    }
+
+    /// 驗證完的 fd 就是送出的 fd：回應拿到之後把路徑換成別的檔，收到的仍是驗證當下那個檔的內容。
+    #[tokio::test]
+    async fn share_file_stream_serves_the_validated_fd() {
+        let env = crate::testing::env().await;
+        let bot = crate::testing::claude_bot(&env.app, &env.project_id, "alfa").await;
+        let outbox = ensure(&env.app.data_dir, &bot.id).unwrap();
+        std::fs::write(outbox.join("a.txt"), b"original").unwrap();
+
+        let res = share_file_stream(&env.app, &bot.id, "a.txt").await.unwrap();
+        std::fs::remove_file(outbox.join("a.txt")).unwrap();
+        std::fs::write(outbox.join("a.txt"), b"swapped-in-later").unwrap();
+
+        assert_eq!(res.headers().get(header::CONTENT_LENGTH).unwrap(), "8");
+        let bytes = axum::body::to_bytes(res.into_body(), 1024).await.unwrap();
+        assert_eq!(&bytes[..], b"original");
+    }
+
     use crate::app_ports_p10::{file, list};
     use crate::state::App;
     use axum::extract::{Path as UrlPath, Query, State};

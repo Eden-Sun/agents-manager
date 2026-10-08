@@ -16,7 +16,7 @@ am-config = { path = "../am-config" }
 axum = { version = "0.8", features = ["ws", "macros"] }
 base64 = "0.22"
 tokio = { version = "1", features = ["full"] }
-tokio-util = { version = "0.7", features = ["rt"] }
+tokio-util = { version = "0.7", features = ["rt", "io"] }
 tower-http = { version = "0.6", features = ["cors", "trace"] }
 serde = { version = "1", features = ["derive"] }
 serde_ignored = "0.1"
