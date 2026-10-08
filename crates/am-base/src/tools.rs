@@ -28,7 +28,7 @@ impl Default for ToolInfo {
 
 /// 偵測（`detect*`）、身分登入驗證、alias 輪詢需要從 `App` 拿的外部事實（`App` 在 `app_ports_p3` 實作）：
 /// 主機表／連線事件（[`HostHooks`]）、偵測結果快取、config 身分表、登入提示與額度的連動，以及寫完偵測結果後的後續動作。
-pub trait ToolsEnv: crate::host_baseline::BaselineEnv + crate::hosts::HostHooks {
+pub trait ToolsEnv: crate::host_baseline::BaselineEnv + crate::hosts::HostHooks + crate::capabilities::BgTasks + crate::capabilities::Shutdown {
     /// 每台主機的偵測結果（`app.tools`）。
     fn tools_cache(&self) -> &tokio::sync::Mutex<std::collections::HashMap<String, HostTools>>;
     /// config 的 `[[identities]]`（讀當下的設定）。
@@ -1050,8 +1050,13 @@ async fn follow_up_host_tools<H: ToolsEnv>(app: &Arc<H>, host: &str) {
     H::host_tools_installed(app, host).await;
 }
 
+/// 一次性的偵測：掛在 `background_tasks` 下（關機時 `wait()` 等得到它），不重啟——失敗下一次連線／alias 變動會再跑。
 pub fn spawn_detect<H: ToolsEnv>(app: Arc<H>, host: String) {
-    tokio::spawn(async move {
+    if crate::capabilities::Shutdown::shutdown(&*app).is_cancelled() {
+        return;
+    }
+    let tracker = crate::capabilities::BgTasks::background_tasks(&*app).clone();
+    tracker.spawn(async move {
         let Some(fence) = app.hosts().fence(&host).await else { return };
         match detect_with_fence(&app, &host, &fence).await {
             Ok(_) => {
@@ -1087,19 +1092,16 @@ async fn poll_aliases<H: ToolsEnv>(app: &Arc<H>, host: &str) -> Option<Vec<crate
 
 /// Full [`detect`] only when the alias set changed; uncached hosts wait for their on-connect detection.
 pub fn spawn_alias_poller<H: ToolsEnv>(app: Arc<H>) {
-    tokio::spawn(async move {
-        loop {
-            tokio::time::sleep(ALIAS_POLL_EVERY).await;
-            for name in app.hosts().names().await {
-                let Some(cached) = app.tools_cache().lock().await.get(&name).map(|t| t.shell_identities.clone()) else { continue };
-                let Some(now) = poll_aliases(&app, &name).await else { continue };
-                if now == cached {
-                    continue;
-                }
-                tracing::info!(host = %name, before = ?cached.iter().map(|i| &i.name).collect::<Vec<_>>(),
-                    after = ?now.iter().map(|i| &i.name).collect::<Vec<_>>(), "ccN aliases changed; re-detecting");
-                spawn_detect(app.clone(), name);
+    crate::background_loop::spawn_periodic(&app, "alias poller", ALIAS_POLL_EVERY, ALIAS_POLL_EVERY, |app| async move {
+        for name in app.hosts().names().await {
+            let Some(cached) = app.tools_cache().lock().await.get(&name).map(|t| t.shell_identities.clone()) else { continue };
+            let Some(now) = poll_aliases(&app, &name).await else { continue };
+            if now == cached {
+                continue;
             }
+            tracing::info!(host = %name, before = ?cached.iter().map(|i| &i.name).collect::<Vec<_>>(),
+                after = ?now.iter().map(|i| &i.name).collect::<Vec<_>>(), "ccN aliases changed; re-detecting");
+            spawn_detect(app.clone(), name);
         }
     });
 }

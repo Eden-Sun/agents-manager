@@ -33,6 +33,34 @@ where
     });
 }
 
+/// 固定週期的迴圈（#924）：先睡 `first_delay`、做一次 `tick`、之後每 `every` 一次；panic 由 [`spawn_restartable`] 退避重啟
+/// （重啟後從 `first_delay` 再開始），睡覺時看 shutdown，所以關機不必等滿一個週期。
+/// `tick` 在每一輪拿到 `Arc<H>`；要跨輪保留的狀態放在 `H` 或 `tick` 捕捉的 `Arc<…>` 裡。
+pub fn spawn_periodic<H, F, Fut>(app: &Arc<H>, name: &'static str, every: Duration, first_delay: Duration, tick: F)
+where
+    H: crate::capabilities::BgTasks + crate::capabilities::Shutdown + Send + Sync + 'static,
+    F: Fn(Arc<H>) -> Fut + Send + Sync + Clone + 'static,
+    Fut: Future<Output = ()> + Send + 'static,
+{
+    let handle = app.clone();
+    spawn_restartable(&**app, name, move || {
+        let app = handle.clone();
+        let tick = tick.clone();
+        async move {
+            let shutdown = crate::capabilities::Shutdown::shutdown(&*app).clone();
+            let mut delay = first_delay;
+            loop {
+                tokio::select! {
+                    _ = shutdown.cancelled() => return,
+                    _ = tokio::time::sleep(delay) => {}
+                }
+                tick(app.clone()).await;
+                delay = every;
+            }
+        }
+    });
+}
+
 /// Run one long-lived loop and restart it if its task unwinds from a panic.
 pub async fn restart_loop<F, Fut>(shutdown: CancellationToken, name: &'static str, factory: F)
 where

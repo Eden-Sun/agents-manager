@@ -334,12 +334,12 @@ pub async fn sweep_unreferenced(app: &(impl crate::capabilities::Db + crate::hos
 }
 
 /// 開機跑一次、之後每 6 小時一次：常駐好幾天的 daemon 也要收。
-pub fn spawn_sweep(app: Arc<impl crate::capabilities::Db + crate::hosts::HostsAccess + 'static>) {
-    tokio::spawn(async move {
-        loop {
-            sweep_unreferenced(&app, UNREFERENCED_KEEP_SECS).await;
-            tokio::time::sleep(SWEEP_EVERY).await;
-        }
+pub fn spawn_sweep<H>(app: Arc<H>)
+where
+    H: crate::capabilities::Db + crate::hosts::HostsAccess + crate::capabilities::BgTasks + crate::capabilities::Shutdown + 'static,
+{
+    crate::background_loop::spawn_periodic(&app, "attachment sweep", SWEEP_EVERY, std::time::Duration::ZERO, |app| async move {
+        sweep_unreferenced(&app, UNREFERENCED_KEEP_SECS).await;
     });
 }
 

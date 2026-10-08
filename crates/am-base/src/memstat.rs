@@ -300,7 +300,7 @@ pub struct BotRef {
 }
 
 /// memstat／memproc 需要從 `App` 拿的外部事實（`App` 在 `app_ports_p3` 實作）：主機表、bot 歸屬、`mem_updated` 事件。
-pub trait MemEnv: HostsAccess {
+pub trait MemEnv: HostsAccess + crate::capabilities::BgTasks + crate::capabilities::Shutdown {
     fn bot_ref(&self, bot_id: &str) -> impl std::future::Future<Output = Option<BotRef>> + Send;
     fn emit_mem_updated(&self, snapshot: Value) -> impl std::future::Future<Output = ()> + Send;
 }
@@ -416,7 +416,11 @@ fn projects_changed(prev: &[ProjectMem], next: &[ProjectMem]) -> bool {
 
 /// Only pushes changes (≥1 MiB drift): a frame per client every 15s for KiB jitter is noise.
 pub fn spawn_poller<H: MemEnv + 'static>(app: Arc<H>) {
-    tokio::spawn(async move {
+    let handle = app.clone();
+    crate::background_loop::spawn_restartable(&*app, "memory poller", move || {
+        let app = handle.clone();
+        async move {
+        let shutdown = crate::capabilities::Shutdown::shutdown(&*app).clone();
         let mut last: Option<MemSnapshot> = None;
         loop {
             let snap = sample(&app).await;
@@ -436,7 +440,11 @@ pub fn spawn_poller<H: MemEnv + 'static>(app: Arc<H>) {
                 app.emit_mem_updated(json!(snap)).await;
                 last = Some(snap);
             }
-            tokio::time::sleep(SAMPLE_EVERY).await;
+            tokio::select! {
+                _ = shutdown.cancelled() => return,
+                _ = tokio::time::sleep(SAMPLE_EVERY) => {}
+            }
+        }
         }
     });
 }
