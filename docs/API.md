@@ -1428,13 +1428,13 @@ cargo shim 把這兩個明確的拒絕（`not_found`／`token_mismatch`）視為
 - `subtree_bytes` = 自己 + 子孫 RSS，清單依它降冪。只列 `claude`/`codex`/`grok`/`node`/`bash`/`zsh`/`sh`/`fish` 且 ≥ 8 MiB 的，其餘併進父程序。
 
 ### `POST /api/mem/processes/kill`
-`{"host":"local","pid":59407,"signal":"TERM"}`（`signal` 只認 `TERM` / `KILL`，預設 TERM）→ `{"host","pid","signal","exe","freed_bytes"}`，並立刻推一次 `mem_updated`。
+`{"host":"local","pid":59407,"signal":"TERM"}`（`signal` 只認 `TERM` / `KILL`，預設 TERM）→ `{"host","pid","signal","exe","freed_bytes","skipped_pids"}`，並立刻推一次 `mem_updated`。`skipped_pids`＝子樹裡起始時間對不上、因此沒收到訊號的成員（#891）。
 **訊號送給整棵子樹**（目標＋子孫，深的在前，先 `STOP` 再送再 `CONT`），所以 `freed_bytes`（＝`subtree_bytes`）才是真的會放掉的量（#529）；
 子孫裡有 `bot`／`herdr`／`daemon` 就整個拒絕（同目標本身的規則），`daemon` 回 400。
 送訊號前重新取樣判定：不在該主機 herdr 樹裡 400；就是 herdr 400；`owner == "bot"` → `409 {"reason":"bot_process","bot_id","message"}`（走 `POST /bots/{id}/stop`）。
 讀不到目標 pid 的環境變數（判不出是不是 bot 的行程）→ 502，不送訊號；讀不到它的**起始時間**（判不出送訊號時還是不是同一顆行程）也是 502。
 **確認與送訊號在同一趟指令裡**（#526）：篩選當下記下 `ps -o lstart=`，送之前再比一次，對不上就什麼都不送，回
-`409 {"reason":"pid_changed","pid","message"}`——兩趟之間 pid 被回收的話，訊號會打在別人身上，而回報還是被篩選那一顆的 `exe`／`freed_bytes`。
+`409 {"reason":"pid_changed","pid","message"}`——兩趟之間 pid 被回收的話，訊號會打在別人身上，而回報還是被篩選那一顆的 `exe`／`freed_bytes`。**子孫也各自比對**（#891）：每個成員帶著取樣時的起始時間，送訊號那趟逐一比對，對不上的跳過、其他照送；取樣裡讀不到起始時間的子孫根本不進集合。
 
 ### `GET /api/mem/processes/pane?host=local&pane_id=wM:pB&socket=<socket_path>&lines=40`
 回那個 pane 現在畫面的字（`lines` 1–500），形狀同主機 shell 的 terminal，`source` 固定 `visible`，**不要求 pane 是 AG Man 開的**。只讀、只接受 UI token（bot 應讀自己的 `/api/bots/{id}/terminal`，不得猜 pane id 讀其他 pane）。

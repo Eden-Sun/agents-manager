@@ -3675,6 +3675,7 @@ owner 格可點開唯讀的 pane 畫面（`GET /api/mem/processes/pane`，`pane.
 而回報還是被篩選那一顆的 `exe`／`freed_bytes`。所以取樣時多讀一段 `ps -Awwo pid=,lstart=`（獨立一段：
 `lstart` 含空白，混進主表會切壞 argv 欄），送訊號那趟先比一次起始時間，對不上就什麼都不送、回 409 `pid_changed`；
 讀不到起始時間跟讀不到環境一樣回 502。
+**子孫也各自確認**（#891）：集合裡每個成員帶取樣時的起始時間，送訊號那趟逐一比對（目標對不上＝`pid_changed`；子孫對不上＝跳過、其餘照送，回應 `skipped_pids`）；取樣讀不到起始時間的子孫不進集合。
 
 ## 16. 從 shell 認出來的身份 cc0～cc6
 
