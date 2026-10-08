@@ -1070,6 +1070,12 @@
         let gone = s.dir.join("gone.md");
         let (out, _) = s.run(&[("AM_AGENT_NAME", "p-1"), ("AM_INSTRUCTIONS_FILE", gone.to_str().unwrap()), ("CODEX_HOME", ch)], &["agent", "start", "kid", "--kind", "codex", "--pane", "w1:p9"]);
         assert_eq!(&out[out.len() - 3..], ["--", "-c", "project_doc_max_bytes=0"]);
+        // 母 bot 有指示檔讀不到（#769）：daemon 給 `AM_KEEP_CLI_DOCS`，這一輪不關 AGENTS.md，其餘照舊。
+        let (out, _) = s.run(
+            &[("AM_AGENT_NAME", "p-1"), ("AM_INSTRUCTIONS_FILE", gone.to_str().unwrap()), ("AM_KEEP_CLI_DOCS", "1"), ("CODEX_HOME", ch)],
+            &["agent", "start", "kid", "--kind", "codex", "--pane", "w1:p9"],
+        );
+        assert!(!out.iter().any(|a| a.contains("project_doc_max_bytes")), "{out:?}");
         // 內容有三個連續單引號：codex 不帶（TOML 表示不了），也不會因此失敗。
         std::fs::write(&f, "a '''b'''").unwrap();
         let (out, err) = s.run(&env, &["agent", "start", "kid", "--kind", "codex", "--pane", "w1:p9"]);
