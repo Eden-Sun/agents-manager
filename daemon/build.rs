@@ -52,6 +52,10 @@ fn main() {
     }
     println!("cargo:rerun-if-changed=src");
     println!("cargo:rerun-if-changed=Cargo.toml");
+    // 同 `crates/am-supervisor/build.rs`：daemon 測試建置的 `build_info` env 來自這支，別的 crate 動了也要重跑（#884）。
+    for p in ["../crates", "../Cargo.toml", "../Cargo.lock"] {
+        println!("cargo:rerun-if-changed={p}");
+    }
 }
 
 #[cfg(test)]
