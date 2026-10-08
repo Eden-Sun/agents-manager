@@ -582,8 +582,9 @@ impl s6_ports::StopServices for App {
         }
     }
 
-    fn validate_workspace_path(&self, data_dir: &Path, workspace: &str) -> Option<PathBuf> {
-        crate::share::folder::validate_workspace_path(data_dir, workspace)
+    async fn validate_workspace_path(&self, data_dir: &Path, workspace: &str) -> Option<PathBuf> {
+        let cfg = self.cfg.get().await;
+        crate::share::folder::daemon_owned_workspace(data_dir, cfg.share.folders_root.as_deref(), &crate::share::cage::local_home(), workspace)
     }
 
     async fn is_shared_host(&self, host: &str) -> bool {

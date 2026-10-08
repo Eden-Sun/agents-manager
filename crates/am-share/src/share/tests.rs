@@ -2053,5 +2053,41 @@ async fn crashed_delete_converges_leftover_share_workspace_on_startup_purge() {
     assert_eq!(std::fs::read_to_string(&file).unwrap(), "precious data");
 }
 
+/// #900：受限 bot 選的是使用者的既有資料夾（專案目錄之類）時，刪 bot 與開機清掃都不能把它搬進 bots-trash
+/// （回收區 7 天／2 GiB 後會永久刪除）。資料夾、裡面的檔案（含 inbox/）原地不動。
+#[tokio::test]
+async fn deleting_a_bot_on_an_existing_folder_leaves_the_folder_alone() {
+    let e = tt::env().await;
+    set_folders_root(&e.app).await;
+    let trash_entries = |id: &str| -> usize {
+        std::fs::read_dir(crate::bot_trash::root(&e.app.data_dir))
+            .map(|rd| rd.flatten().filter(|d| d.file_name().to_string_lossy().starts_with(&format!("{id}.share_workspace."))).count())
+            .unwrap_or(0)
+    };
+    for via_startup_purge in [false, true] {
+        let name = if via_startup_purge { "existing-purge" } else { "existing-delete" };
+        let folder = tt::scratch_dir(&format!("am-share-existing-{name}")).join("site");
+        std::fs::create_dir_all(folder.join("inbox")).unwrap();
+        std::fs::write(folder.join("index.html"), "<h1>mine</h1>").unwrap();
+        std::fs::write(folder.join("inbox/upload.txt"), "from a visitor").unwrap();
+        let b = tt::claude_bot(&e.app, &e.project_id, name).await;
+        let (ws, made) = admin::reserve_restricted(&e.app, &b.id, &folder::ShareFolderIn::Existing { path: folder.to_string_lossy().into_owned() }, false).await.unwrap();
+        assert!(!made, "既有資料夾不是這次新建的");
+        admin::finish_restricted(&e.app, &b.id, &ws, made, true).await;
+        sqlx::query("UPDATE bots SET managed_by = 'child' WHERE id = ?").bind(&b.id).execute(&e.app.db).await.unwrap();
+
+        if via_startup_purge {
+            sqlx::query("UPDATE bots SET deleted_at = ? WHERE id = ?").bind(db::now()).bind(&b.id).execute(&e.app.db).await.unwrap();
+            crate::lifecycle::purge_deleted_bot_dirs(&e.app).await;
+        } else {
+            crate::api::delete_bot(axum::extract::State(e.app.clone()), axum::extract::Path(b.id.clone())).await.unwrap();
+        }
+        assert!(folder.is_dir(), "{name}: 使用者的資料夾還在原地");
+        assert_eq!(std::fs::read_to_string(folder.join("index.html")).unwrap(), "<h1>mine</h1>");
+        assert_eq!(std::fs::read_to_string(folder.join("inbox/upload.txt")).unwrap(), "from a visitor");
+        assert_eq!(trash_entries(&b.id), 0, "{name}: bots-trash 裡沒有 share_workspace 項目");
+    }
+}
+
 #[path = "trusted_tests.rs"]
 mod trusted;
