@@ -674,13 +674,20 @@ pub async fn put_handoff(State(app): State<Arc<App>>, Json(b): Json<HandoffIn>) 
     // The readable copy in the manager's own directory. The database stays authoritative;
     // this is what the manager reads on a cold start before anything else is available.
     let sup = store::get_or_init(&app.db).await.map_err(up)?;
+    let mut copy_error = None;
     if let Some(cwd) = sup.cwd.as_deref() {
-        let _ = std::fs::write(
-            std::path::Path::new(cwd).join("handoff.md"),
-            format!("# AGM 管理摘要（v{version}）\n\n{}\n", b.summary),
-        );
+        // 原子寫（#919）。寫不進去不能無聲吞掉：DB 已經更新（權威），所以事件照發，再回 Upstream 讓呼叫端重送同一份來補。
+        if let Err(e) = setup::write_file(
+            &std::path::Path::new(cwd).join("handoff.md"),
+            format!("# AGM 管理摘要（v{version}）\n\n{}\n", b.summary).as_bytes(),
+        ) {
+            copy_error = Some(LcError::Upstream(format!("handoff saved (v{version}) but handoff.md could not be written: {e}")));
+        }
     }
     app.emit("supervisor_changed", json!({"summary_version": version})).await;
+    if let Some(e) = copy_error {
+        return Err(e);
+    }
     Ok(Json(json!({"summary": b.summary, "summary_version": version})))
 }
 
@@ -1101,7 +1108,7 @@ async fn apply_persona(app: &(impl crate::capabilities::Cfg + crate::capabilitie
     })
     .await
     .map_err(up)?;
-    std::fs::write(setup::agm_dir(app).join("persona.md"), text).map_err(up)?;
+    setup::write_file(&setup::agm_dir(app).join("persona.md"), text.as_bytes()).map_err(up)?;
     Ok(())
 }
 
@@ -2761,6 +2768,26 @@ mod review_boundary_tests {
         let before: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM supervisor_notes WHERE kind='handoff'").fetch_one(&app.db).await.unwrap();
         assert_eq!(before, 0);
         let _ = put_handoff(State(app.clone()), Json(HandoffIn { summary: "x".repeat(MAX_HANDOFF_BYTES) })).await.expect("剛好在上限內");
+        app.db.close().await;
+        std::fs::remove_dir_all(&app.data_dir).unwrap();
+    }
+
+    /// #919：handoff.md 的副本寫不進去（目錄不在了）不再被吞掉：回 Upstream；DB 照樣存了（權威），重送同一份即可補。
+    #[tokio::test]
+    async fn a_handoff_whose_copy_cannot_be_written_is_reported_not_swallowed() {
+        let app = app().await;
+        store::get_or_init(&app.db).await.unwrap();
+        let missing = app.data_dir.join("no-such-agm-dir");
+        store::set_env(&app.db, "bot", "project", &missing.to_string_lossy()).await.unwrap();
+        let r = put_handoff(State(app.clone()), Json(HandoffIn { summary: "交接".into() })).await;
+        assert!(matches!(r, Err(LcError::Upstream(_))), "{r:?}");
+        let stored: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM supervisor_notes WHERE kind='handoff'").fetch_one(&app.db).await.unwrap();
+        assert_eq!(stored, 1, "權威在 DB：照存");
+        // 目錄回來之後重送就補上，而且寫的是完整檔。
+        std::fs::create_dir_all(&missing).unwrap();
+        put_handoff(State(app.clone()), Json(HandoffIn { summary: "交接".into() })).await.expect("目錄在了就寫得進去");
+        let copy = std::fs::read_to_string(missing.join("handoff.md")).unwrap();
+        assert!(copy.contains("交接"), "{copy}");
         app.db.close().await;
         std::fs::remove_dir_all(&app.data_dir).unwrap();
     }

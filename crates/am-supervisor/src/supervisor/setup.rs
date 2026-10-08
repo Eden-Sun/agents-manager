@@ -145,11 +145,12 @@ fn runtime_json(port: u16, bot_id: &str, responder_id: Option<&str>, data_dir: &
 pub fn deploy_files(app: &(impl crate::capabilities::DataDir + crate::capabilities::ListenPort), bot_id: &str, responder_id: Option<&str>, persona: &str) -> std::io::Result<Deployed> {
     let dir = agm_dir(app);
     std::fs::create_dir_all(dir.join("bin"))?;
-    std::fs::write(dir.join("CLAUDE.md"), claude_md(&dir, bot_id, app.port()))?;
-    std::fs::write(dir.join("persona.md"), persona)?;
+    // 原子寫（#919）：`fs::write` 的 `O_TRUNC` 窗口會讓讀的人（`bin/agm` 每次執行都讀 runtime.json）看到空的或半截。
+    write_file(&dir.join("CLAUDE.md"), claude_md(&dir, bot_id, app.port()).as_bytes())?;
+    write_file(&dir.join("persona.md"), persona.as_bytes())?;
     write_runtime_json(app, bot_id, responder_id)?;
     if !dir.join("handoff.md").exists() {
-        std::fs::write(dir.join("handoff.md"), "# AGM 管理摘要\n\n（尚未寫入。權威紀錄在 AG Man 資料庫。）\n")?;
+        write_file(&dir.join("handoff.md"), "# AGM 管理摘要\n\n（尚未寫入。權威紀錄在 AG Man 資料庫。）\n".as_bytes())?;
     }
     // 原子寫（issue #520）：這支 CLI 一直有人在跑（所有 kick 每 5～30 分鐘 exec 一次），
     // `fs::write` 的 `O_TRUNC` 窗口會讓它們讀到半截的 python。跟 `cli_refresh` 用同一個 helper，
@@ -166,10 +167,15 @@ pub fn write_runtime_json(app: &(impl crate::capabilities::DataDir + crate::capa
     if !dir.is_dir() {
         return Ok(());
     }
-    std::fs::write(
-        dir.join("runtime.json"),
-        serde_json::to_string_pretty(&runtime_json(app.port(), bot_id, responder_id, &app.data_dir().to_string_lossy()))?,
+    write_file(
+        &dir.join("runtime.json"),
+        serde_json::to_string_pretty(&runtime_json(app.port(), bot_id, responder_id, &app.data_dir().to_string_lossy()))?.as_bytes(),
     )
+}
+
+/// AGM 目錄裡的文字檔（CLAUDE.md、persona.md、runtime.json、handoff.md）：0644，原子寫入（[`am_base::atomic_file`]）。
+pub fn write_file(path: &Path, data: &[u8]) -> std::io::Result<()> {
+    am_base::atomic_file::write(path, data, am_base::atomic_file::Mode::Exact(0o644))
 }
 
 /// Create (or find) the AGM project and bot in config.toml, then project it into SQLite.
@@ -415,5 +421,43 @@ mod tests {
     #[test]
     fn the_cli_is_compiled_in_not_read_off_the_build_machine() {
         assert!(AGM_CLI.contains("add_parser(\"assignments\""), "the deployed CLI is the real agm.py");
+    }
+
+    struct TestApp {
+        dir: PathBuf,
+    }
+    impl crate::capabilities::DataDir for TestApp {
+        fn data_dir(&self) -> &Path {
+            &self.dir
+        }
+    }
+    impl crate::capabilities::ListenPort for TestApp {
+        fn port(&self) -> u16 {
+            7788
+        }
+    }
+
+    /// #919：deploy_files 重複跑（重寫每個檔）之後，目錄裡只有該有的檔，沒有暫存檔；權限是 0644，bin/agm 0755。
+    #[test]
+    fn deploy_files_leaves_no_temp_files_behind() {
+        use std::os::unix::fs::PermissionsExt;
+        let nanos = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos();
+        let app = TestApp { dir: std::env::temp_dir().join(format!("am-deploy-{}-{nanos}", std::process::id())) };
+        for _ in 0..3 {
+            deploy_files(&app, "botULID", Some("respULID"), "persona text").unwrap();
+        }
+        let dir = agm_dir(&app);
+        let mut names: Vec<String> = std::fs::read_dir(&dir).unwrap().map(|e| e.unwrap().file_name().to_string_lossy().into_owned()).collect();
+        names.sort();
+        assert_eq!(names, vec!["CLAUDE.md", "bin", "handoff.md", "persona.md", "runtime.json"], "不留暫存檔");
+        let bin: Vec<String> = std::fs::read_dir(dir.join("bin")).unwrap().map(|e| e.unwrap().file_name().to_string_lossy().into_owned()).collect();
+        assert_eq!(bin, vec!["agm"], "bin/ 也不留暫存檔");
+        let mode = |p: PathBuf| std::fs::metadata(p).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode(dir.join("runtime.json")), 0o644);
+        assert_eq!(mode(dir.join("persona.md")), 0o644);
+        assert_eq!(std::fs::read_to_string(dir.join("persona.md")).unwrap(), "persona text");
+        let runtime: Value = serde_json::from_str(&std::fs::read_to_string(dir.join("runtime.json")).unwrap()).unwrap();
+        assert_eq!(runtime["manager_bot_id"], "botULID");
+        std::fs::remove_dir_all(&app.dir).ok();
     }
 }
