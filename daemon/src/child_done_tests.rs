@@ -241,6 +241,13 @@
     #[tokio::test]
     async fn the_sweep_does_not_backfill_old_completed_turns() {
         let f = fixture("hook", "completed").await;
+        // parent 在線時完成的（它的 run 早在 child 完成之前就開著）：即時事件一定觸發過，兩小時前的不補（#871 仍維持一小時）。
+        sqlx::query("UPDATE runs SET started_at=? WHERE id=?")
+            .bind(db::iso_in(-3 * 60 * 60))
+            .bind(&f.parent_run)
+            .execute(&f.env.app.db)
+            .await
+            .unwrap();
         sqlx::query("UPDATE turns SET completed_at=? WHERE id=?")
             .bind(db::iso_in(-2 * 60 * 60))
             .bind(&f.child_turn)
@@ -267,6 +274,81 @@
         .unwrap();
         notify_turn(&f.env.app, &f.child_turn).await.unwrap();
         assert_eq!(notice_count(&f).await, 0);
+    }
+
+    async fn parent_bot_id(f: &Fixture) -> String {
+        sqlx::query_scalar("SELECT bot_id FROM runs WHERE id=?").bind(&f.parent_run).fetch_one(&f.env.app.db).await.unwrap()
+    }
+
+    /// parent 的 run 在 `ended` 小時前結束（開了 `started` 小時），child 回合 `completed` 小時前完成。
+    async fn parent_run_window(f: &Fixture, started: i64, ended: i64, completed: i64) {
+        sqlx::query("UPDATE runs SET state='stopped', started_at=?, ended_at=? WHERE id=?")
+            .bind(db::iso_in(-started * 3600))
+            .bind(db::iso_in(-ended * 3600))
+            .bind(&f.parent_run)
+            .execute(&f.env.app.db)
+            .await
+            .unwrap();
+        sqlx::query("UPDATE turns SET created_at=?, completed_at=? WHERE id=?")
+            .bind(db::iso_in(-completed * 3600 - 60))
+            .bind(db::iso_in(-completed * 3600))
+            .bind(&f.child_turn)
+            .execute(&f.env.app.db)
+            .await
+            .unwrap();
+    }
+
+    /// 起一個新的 parent run，並讓它正在回合中（通知排隊、不真的打字）。
+    async fn parent_returns(f: &Fixture) {
+        let run = crate::testing::fake_run(&f.env.app, &parent_bot_id(f).await).await;
+        sqlx::query(
+            "INSERT INTO turns (id, conversation_id, run_id, origin, status, delivery, created_at)
+             VALUES (?,?,?,'web','in_flight','ok',?)",
+        )
+        .bind(db::ulid())
+        .bind(&f.parent_conversation)
+        .bind(&run)
+        .bind(db::now())
+        .execute(&f.env.app.db)
+        .await
+        .unwrap();
+    }
+
+    /// #871：parent 停機期間（完成當下沒有涵蓋那一刻的 run）完成的回合，超過一小時之後 parent 回來仍補送，只有一則。
+    #[tokio::test]
+    async fn a_turn_completed_while_the_parent_was_offline_is_delivered_when_it_returns() {
+        let f = fixture("hook", "completed").await;
+        // parent 的 run 從 6 小時前開到 3 小時前；child 在 2 小時前完成（parent 離線中）。
+        parent_run_window(&f, 6, 3, 2).await;
+        let older = add_completed_turn(&f, "更早的一件事做完了，細節如下。").await;
+        sqlx::query("UPDATE turns SET created_at=?, completed_at=? WHERE id=?")
+            .bind(db::iso_in(-5 * 1800 - 60))
+            .bind(db::iso_in(-5 * 1800))
+            .bind(&older)
+            .execute(&f.env.app.db)
+            .await
+            .unwrap();
+        assert_eq!(sweep(&f.env.app).await, 0, "parent 沒有在線 run：沒有人收");
+        parent_returns(&f).await;
+        // 兩個回合都在 parent 離線期間完成（2.5 小時前與 2 小時前）：都被撈出來，但最新的先送、較舊的被 `superseded` 擋掉。
+        assert_eq!(sweep(&f.env.app).await, 2);
+        assert_eq!(notice_count(&f).await, 1);
+        assert_eq!(all_child_notice_count(&f).await, 1, "每顆 child 最多補一則：較舊的視為被取代");
+        assert_eq!(sweep(&f.env.app).await, 0, "不重送");
+    }
+
+    /// #871：離線補送的窗口是 7 天，再舊的不補。
+    #[tokio::test]
+    async fn offline_backfill_stops_after_seven_days() {
+        let f = fixture("hook", "completed").await;
+        parent_run_window(&f, 24 * 9, 24 * 8 + 12, 24 * 8).await;
+        parent_returns(&f).await;
+        assert_eq!(sweep(&f.env.app).await, 0);
+        assert_eq!(notice_count(&f).await, 0);
+        // 6 天前完成（同樣離線期間）就補。
+        parent_run_window(&f, 24 * 9, 24 * 7, 24 * 6).await;
+        assert_eq!(sweep(&f.env.app).await, 1);
+        assert_eq!(notice_count(&f).await, 1);
     }
 
     #[tokio::test]

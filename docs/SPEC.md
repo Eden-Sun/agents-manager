@@ -1752,7 +1752,8 @@ child 轉成 `blocked` 並且**穩定 8 秒**（daemon 自己按掉的對話框�
 `relay_from` 是 child id）時略過自動通知。
 
 Stop hook 與終端備援提交回覆後都經 `lifecycle::messages::emit_turn` 觸發通知；每分鐘 sweep 另從最近一小時完成的 turn
-與 assistant message 補送漏掉的事件，避免部署後把較舊的未通知回合整批倒灌。若 child 的 run 已知仍有背景工作，完成回合先保留待 sweep；
+與 assistant message 補送漏掉的事件，避免部署後把較舊的未通知回合整批倒灌；**parent 離線期間完成的**（完成當下沒有任何涵蓋那一刻的 parent run）
+放寬到 7 天，parent 的 run 回來後補送（#871；parent 在線時完成的回合即時事件一定觸發過，仍維持一小時）。每顆 child 最多補一則，較舊的視為被取代。若 child 的 run 已知仍有背景工作，完成回合先保留待 sweep；
 Claude Stop hook 的 `background_tasks`（含 Monitor、subagent、workflow）和既有畫面巡讀數都算訊號。daemon 重啟後帳上未知時會嘗試讀一次現有 pane；
 讀不到訊號就沿用即時通知行為。背景工作歸零後，sweep 優先處理最新完成回合；若它已通知，較舊的延後回合視為被取代，不再逐一補送。
 **終端擷取（`completed_fallback`）收下的回合不保證是結尾**（#878：剛開出來、只回了開場白就通知「已完成一個回合」）：即時通知先等 20 秒；
