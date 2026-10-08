@@ -29,6 +29,7 @@ use axum::response::sse::{Event, KeepAlive, Sse};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
 use axum::{Json, Router};
+use futures::StreamExt as _;
 use am_base::ws_event::WsEvent;
 use serde::Deserialize;
 use serde_json::{json, Value};
@@ -1123,9 +1124,22 @@ async fn file<H: PortalEnv>(State(st): State<Portal<H>>, Path((token, name)): Pa
     if name.is_empty() || name.contains('/') || name.contains('\\') || name.starts_with('.') || name.chars().any(char::is_control) {
         return not_found();
     }
+    // 下載名額（不排隊）：每個分享 [`DOWNLOADS_PER_SHARE`]、全站 [`DOWNLOAD_SLOTS`]；permit 跟著 body 活到送完（慢速 client 也占著）。
+    let Some(share_permit) = st.share_downloads.try_acquire(&bot_id) else {
+        return too_many(5, "download");
+    };
+    let Ok(global_permit) = st.downloads.clone().try_acquire_owned() else {
+        return too_many(5, "download");
+    };
     match crate::outbox::share_file(&st.app, &bot_id, &name).await {
         Ok(res) => {
-            let mut res = if inline_image(&name) == Some("image/svg+xml") { embed_photos(&st.app, &bot_id, res).await } else { res };
+            let res = if inline_image(&name) == Some("image/svg+xml") { embed_photos(&st.app, &bot_id, res).await } else { res };
+            let (parts, body) = res.into_parts();
+            let kept = body.into_data_stream().map(move |chunk| {
+                let _ = (&share_permit, &global_permit);
+                chunk
+            });
+            let mut res = Response::from_parts(parts, axum::body::Body::from_stream(kept));
             if let (Some("1"), Some(mime)) = (q.inline.as_deref(), inline_image(&name)) {
                 let h = res.headers_mut();
                 h.insert(header::CONTENT_TYPE, HeaderValue::from_static(mime));

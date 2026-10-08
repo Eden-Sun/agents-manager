@@ -83,7 +83,7 @@ impl<T: OutboxEnv + ?Sized> OutboxEnv for Arc<T> {
 pub const TTL_SECS: u64 = 3600;
 /// 一次最多列這麼多（新的排前面）。
 pub const MAX_ENTRIES: usize = 300;
-/// 單檔下載上限：整份先讀進記憶體，瀏覽器那端也要收得下。
+/// 單檔上限；分享下載是串流（[`share_file_stream`]），管理端下載與 SVG 檢查仍整份讀進記憶體。
 pub const MAX_BYTES: u64 = 64 * 1024 * 1024;
 
 /// 這顆 bot 的 outbox。bot id 會拼進路徑：只收英數（ULID），其他一律不給。
@@ -476,22 +476,69 @@ pub async fn file_for(app: &impl crate::outbox_remote::OutboxRemoteEnv, id: Stri
 }
 
 /// 分享入口用的下載分類：確實不存在／遭黑名單擋下回 NotFound；可信邊界、DB、讀取或工作失敗保留成 Unavailable。
+/// 串流：驗證（可信開檔、大小、檔頭黑名單）與送出用同一個 fd，不整份讀進記憶體；回應 body 最多送出驗證當下量到的長度。
 pub async fn share_file(app: &impl OutboxEnv, bot_id: &str, requested: &str) -> Result<Response, ShareFileError> {
-    let (name, data) = share_file_bytes(app, bot_id, requested).await?;
+    share_file_stream(app, bot_id, requested).await
+}
+
+/// [`share_file`] 的實作：照 [`share_file_read_with_limit`] 同一條鏈（`bot_place` → fd-bound 開檔 → fstat 大小上限），
+/// 只讀檔頭 64 bytes 做內容黑名單（`read_at`，不動游標），之後把**同一個 fd** 包成串流 body 送出。
+pub async fn share_file_stream(app: &impl OutboxEnv, bot_id: &str, requested: &str) -> Result<Response, ShareFileError> {
+    use std::os::unix::fs::{FileExt as _, MetadataExt as _};
+    use tokio::io::AsyncReadExt as _;
+
+    let place = app.bot_place(bot_id).await.map_err(|e| match e {
+        BotLookup::BotMissing | BotLookup::ProjectMissing => ShareFileError::NotFound,
+        BotLookup::BotUnavailable | BotLookup::ProjectUnavailable => ShareFileError::Unavailable,
+    })?;
+    if place.host != crate::config::LOCAL_HOST {
+        return Err(ShareFileError::NotFound);
+    }
+
+    let data_dir = app.data_dir().to_path_buf();
+    let file_bot = bot_id.to_string();
+    let requested = requested.to_string();
+    let (file, name, len) = tokio::task::spawn_blocking(move || {
+        let owner = std::fs::metadata(&data_dir).map_err(|_| ShareFileError::Unavailable)?.uid();
+        let (file, name) = open_share_outbox_entry(&data_dir, &file_bot, &requested, Some(owner))?;
+        let len = file.metadata().map_err(|_| ShareFileError::Unavailable)?.len();
+        if len > MAX_BYTES {
+            return Err(ShareFileError::TooLarge);
+        }
+        let mut head = [0u8; 64];
+        let mut filled = 0;
+        while filled < head.len() {
+            match file.read_at(&mut head[filled..], filled as u64) {
+                Ok(0) => break,
+                Ok(n) => filled += n,
+                Err(e) if e.kind() == std::io::ErrorKind::Interrupted => {}
+                Err(_) => return Err(ShareFileError::Unavailable),
+            }
+        }
+        if content_is_withheld(&head[..filled]) {
+            return Err(ShareFileError::NotFound);
+        }
+        Ok((file, name, len))
+    })
+    .await
+    .map_err(|_| ShareFileError::Unavailable)??;
+
+    let stream = tokio_util::io::ReaderStream::new(tokio::fs::File::from_std(file).take(len));
     Ok((
         StatusCode::OK,
         [
             (header::CONTENT_TYPE, mime_of(Path::new(&name)).to_string()),
             (header::CONTENT_DISPOSITION, content_disposition(&name)),
+            (header::CONTENT_LENGTH, len.to_string()),
             (header::CACHE_CONTROL, "private, no-store".to_string()),
             (header::X_CONTENT_TYPE_OPTIONS, "nosniff".to_string()),
         ],
-        data,
+        axum::body::Body::from_stream(stream),
     )
         .into_response())
 }
 
-/// [`share_file`] 的讀檔那一段（同一條 fd-bound 鏈、同樣的上限與黑名單），回（檔名, 內容）。分享頁下載與 `.svg` 檢查共用。
+/// 整份讀進記憶體的版本（同一條 fd-bound 鏈、同樣的上限與黑名單），回（檔名, 內容）。`.svg` 檢查用；分享頁下載走 [`share_file_stream`]。
 pub async fn share_file_bytes(app: &impl OutboxEnv, bot_id: &str, requested: &str) -> Result<(String, Vec<u8>), ShareFileError> {
     share_file_bytes_with_limit(app, bot_id, requested, MAX_BYTES).await
 }

@@ -1166,6 +1166,91 @@ async fn downloads_come_only_from_the_bots_outbox_as_attachments() {
     }
 }
 
+/// #848：下載是串流，名額（每分享 2、全站 8）活到 body 送完；慢速 client 占著名額、別的分享不被餓死，放掉之後又能下載。
+#[tokio::test]
+async fn share_downloads_are_capped_per_share_and_globally() {
+    let e = tt::env().await;
+    let base = serve(portal::router(e.app.clone())).await;
+    let c = client();
+    // 稀疏檔（40 MiB 的零）：遠大於 loopback 的 socket 緩衝，client 不讀 body 時 server 的串流會停在送出一半，名額一直占著。
+    let big_share = |name: &'static str| {
+        let e_app = e.app.clone();
+        let project_id = e.project_id.clone();
+        async move {
+            let b = restricted_bot(&e_app, &project_id, name).await;
+            let token = shared(&e_app, &b.id).await;
+            let outbox = crate::outbox::ensure(&e_app.data_dir, &b.id).unwrap();
+            let f = std::fs::File::create(outbox.join("big.bin")).unwrap();
+            f.set_len(40 * 1024 * 1024).unwrap();
+            token
+        }
+    };
+    let url = |token: &str| format!("{base}/s/{token}/api/files/big.bin");
+    let token_a = big_share("dl-a").await;
+    let token_b = big_share("dl-b").await;
+
+    // A：兩個下載拿到標頭、不讀 body → 第三個 429 what=download。
+    let a1 = c.get(url(&token_a)).send().await.unwrap();
+    let a2 = c.get(url(&token_a)).send().await.unwrap();
+    assert_eq!((a1.status().as_u16(), a2.status().as_u16()), (200, 200));
+    let a3 = c.get(url(&token_a)).send().await.unwrap();
+    assert_eq!(a3.status().as_u16(), 429);
+    assert_eq!(a3.json::<Value>().await.unwrap()["what"], "download");
+
+    // B 沒被 A 餓死。
+    let b1 = c.get(url(&token_b)).send().await.unwrap();
+    assert_eq!(b1.status().as_u16(), 200);
+
+    // A 讀完一個（permit 隨 body 結束放掉）→ 再下載成功。
+    assert_eq!(a1.bytes().await.unwrap().len(), 40 * 1024 * 1024);
+    let mut again = None;
+    for _ in 0..50 {
+        let r = c.get(url(&token_a)).send().await.unwrap();
+        if r.status().as_u16() == 200 {
+            again = Some(r);
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    let a4 = again.expect("a finished download should return its per-share slot");
+    // A 這邊 drop 掉一個（斷線）也放名額。
+    drop(a2);
+    let mut after_drop = None;
+    for _ in 0..50 {
+        let r = c.get(url(&token_a)).send().await.unwrap();
+        if r.status().as_u16() == 200 {
+            after_drop = Some(r);
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    assert!(after_drop.is_some(), "a dropped download should return its per-share slot");
+    drop((a4, after_drop, b1));
+
+    // 全站 8 個：另外 4 個分享各占 2 個，第 9 個（第 5 個分享）429 what=download。
+    let mut held = Vec::new();
+    for name in ["dl-c0", "dl-c1", "dl-c2", "dl-c3"] {
+        let t = big_share(name).await;
+        for _ in 0..2 {
+            let mut r = None;
+            for _ in 0..50 {
+                let x = c.get(url(&t)).send().await.unwrap();
+                if x.status().as_u16() == 200 {
+                    r = Some(x);
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(100)).await;
+            }
+            held.push(r.expect("slot should be free (A/B's earlier downloads were dropped)"));
+        }
+    }
+    let t = big_share("dl-over").await;
+    let over = c.get(url(&t)).send().await.unwrap();
+    assert_eq!(over.status().as_u16(), 429, "全站 8 個下載名額用完");
+    assert_eq!(over.json::<Value>().await.unwrap()["what"], "download");
+    drop(held);
+}
+
 /// 分享用 bot 的 outbox 不給 AGM 的 gc 清（使用者 2026-10-04：end user 隔天才回來拿是常態）：建立時就放標記、開機補回、
 /// 刪掉才拿掉；主 UI 的清單與分享頁都不給倒數。一般 bot 照舊 1 小時。
 #[tokio::test]
