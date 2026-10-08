@@ -11,6 +11,8 @@ HERE="$(cd "$(dirname "$0")" && pwd)"
 SCRIPT="$HERE/herdr-update-kick.sh"
 PASS=0
 FAIL=0
+# 派工正文的驗收段依平台而異（#886）；既有案例是 macOS 的，固定成 darwin，linux 另測。
+export AGM_OPS_PLATFORM=darwin
 
 setup() {
   ROOT=$(mktemp -d)
@@ -178,6 +180,22 @@ check "交辦帶 CHANGELOG 原文" "修了一堆繞路" "$AGM_DIR/assign-body.tx
 check "交辦帶升級後本機網路驗收" "herdr-lan-check.sh" "$AGM_DIR/assign-body.txt"
 check "交辦禁止 Apple 工具代驗" "Apple 內建 nc" "$AGM_DIR/assign-body.txt"
 equals "state 寫入" "$(cat "$AGM_DIR/herdr-update.last")" "0.9.0"
+check "darwin 仍帶 codesign 驗收" "codesign" "$AGM_DIR/assign-body.txt"
+check "darwin 仍帶 /opt/homebrew 路徑" "/opt/homebrew" "$AGM_DIR/assign-body.txt"
+check "darwin 仍帶授權本機網路" "需要使用者授權本機網路" "$AGM_DIR/assign-body.txt"
+teardown
+
+# 1b. #886：Linux 上不派 macOS 專用驗收（沒有 codesign、/opt/homebrew、本機網路授權可驗），改平台中立的驗收。
+setup
+AGM_OPS_PLATFORM=linux bash "$SCRIPT"
+check "linux：照樣派工並帶版本差異" "0.8.2 → 0.9.0" "$AGM_DIR/assign-body.txt"
+check "linux：驗收看 herdr --version 是新版" "herdr --version\` 是 0.9.0" "$AGM_DIR/assign-body.txt"
+check "linux：驗收看 herdr pane list" "herdr pane list" "$AGM_DIR/assign-body.txt"
+check "linux：驗收對 idle bot 送 prompt" "idle bot 送一句 prompt" "$AGM_DIR/assign-body.txt"
+check_no "linux：正文不含 codesign" "codesign" "$AGM_DIR/assign-body.txt"
+check_no "linux：正文不含 /opt/homebrew" "/opt/homebrew" "$AGM_DIR/assign-body.txt"
+check_no "linux：正文不含授權本機網路" "授權本機網路" "$AGM_DIR/assign-body.txt"
+equals "linux：state 照寫" "$(cat "$AGM_DIR/herdr-update.last")" "0.9.0"
 teardown
 
 # 2. 同一版再跑一次：should_notify 為 false（Rust 端去重），不重派，不留新 log 行。

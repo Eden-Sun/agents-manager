@@ -7,6 +7,8 @@ HERE="$(cd "$(dirname "$0")" && pwd)"
 SCRIPT="$HERE/herdr-lan-check.sh"
 # 解成實際路徑：macOS 的 /var 是 /private/var 的連結，腳本會 readlink -f，假 codesign 比的是完整路徑。
 ROOT=$(cd "$(mktemp -d)" && pwd -P)
+# 驗收只在 macOS 有意義（#886）；既有案例是 macOS 的，固定成 darwin，linux 另測。
+export AGM_OPS_PLATFORM=darwin
 trap 'rm -rf "$ROOT"' EXIT
 
 fail() { echo "FAIL - $1" >&2; exit 1; }
@@ -136,4 +138,21 @@ printf '%s\n' "$BAD_OUTPUT" | grep -F 'unbound variable' >/dev/null && fail "還
 printf '%s\n' "$BAD_OUTPUT" | grep -F '結果：FAIL' >/dev/null || fail "沒走到結尾的 FAIL 結論：$BAD_OUTPUT"
 ok "codesign 失敗：UTF-8 locale 下印出 FAIL、rc=1，沒 crash"
 
-echo "7 passed, 0 failed"
+# #886：非 macOS 沒有「本機網路」授權可驗：SKIP、exit 0，且不碰 codesign／plutil／node（假的全部換成會炸的）。
+printf '%s\n' '#!/bin/bash' 'echo "不該被叫到：$0" >&2' 'exit 99' > "$ROOT/bin/codesign"
+cp "$ROOT/bin/codesign" "$ROOT/bin/plutil"; cp "$ROOT/bin/codesign" "$ROOT/bin/node"
+chmod +x "$ROOT/bin/codesign" "$ROOT/bin/plutil" "$ROOT/bin/node"
+set +e
+LINUX_OUT=$(AGM_OPS_PLATFORM=linux PATH="$ROOT/bin:/usr/bin:/bin" HERDR_NETWORK_AUTH_PLIST="$ROOT/network.plist" bash "$SCRIPT" "$ROOT/herdr" 192.168.1.1 80 2>&1)
+LINUX_RC=$?
+LINUX_NOARG_OUT=$(AGM_OPS_PLATFORM=linux PATH="$ROOT/bin:/usr/bin:/bin" bash "$SCRIPT" 2>&1)
+LINUX_NOARG_RC=$?
+set -u
+[ "$LINUX_RC" -eq 0 ] || fail "linux 應 exit 0，實際 ${LINUX_RC}：$LINUX_OUT"
+printf '%s\n' "$LINUX_OUT" | grep -F 'SKIP: macOS 本機網路授權只在 macOS 需要（平台 linux）' >/dev/null || fail "linux 沒印 SKIP：$LINUX_OUT"
+printf '%s\n' "$LINUX_OUT" | grep -F '不該被叫到' >/dev/null && fail "linux 不該碰 codesign／plutil／node：$LINUX_OUT"
+[ "$LINUX_NOARG_RC" -eq 0 ] || fail "linux 不帶參數也應 exit 0，實際 ${LINUX_NOARG_RC}：$LINUX_NOARG_OUT"
+printf '%s\n' "$LINUX_NOARG_OUT" | grep -F 'SKIP' >/dev/null || fail "linux 不帶參數沒印 SKIP：$LINUX_NOARG_OUT"
+ok "linux：SKIP、exit 0，沒有碰 macOS 的工具"
+
+echo "8 passed, 0 failed"
