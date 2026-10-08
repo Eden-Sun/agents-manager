@@ -2229,9 +2229,9 @@ grok `curl -fsSL https://x.ai/cli/install.sh | bash`；接著確認 `--version`�
 
 | kind | 注入 |
 |---|---|
-| `claude` | `--append-system-prompt "<persona>"` |
+| `claude` | 完整指示（AG Man 規則 + agent md + persona）寫入 bot 目錄的 `persona.md`，`--append-system-prompt-file <路徑>`（herdr 把整條指令壓在 900 bytes 內，放 argv 會被截斷，#769／#901） |
 | `grok` | 完整規則寫入 bot 目錄的 `grok-rules.md`，`--rules` 帶 JSON 引號的檔案路徑指示；使用者 persona 仍接在 daemon 與 `[agents]` 規則之後 |
-| `codex` | `-c developer_instructions=<TOML basic string>`（daemon 逃逸換行與引號） |
+| `codex` | 完整指示寫入 `<CODEX_HOME>/am-bot-<bot id>.config.toml`（0600，`developer_instructions` 為 TOML basic string），`-p am-bot-<bot id>`；bot 自己的參數已有 `-p`／`--profile` 時改回 `-c developer_instructions=<TOML basic string>`（會被截斷，並留一則 system 訊息）。寫不進去則拒絕啟動 |
 
 位置在 daemon 旗標之後、model 之前。AGM 的人設另走 `/api/supervisor/persona`（總管一節）。
 

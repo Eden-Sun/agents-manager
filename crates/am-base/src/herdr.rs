@@ -322,7 +322,10 @@ pub fn fit_command_line(mut args: Vec<String>) -> Vec<String> {
         if trimmed.len() >= args[i].len() {
             break;
         }
-        tracing::warn!(arg = i, from = args[i].len(), to = trimmed.len(), "trimming an over-long agent argument");
+        // error, not warn (#901): six top-level bots ran for months with a 348-char system prompt and nobody saw the warning.
+        // The flag in front of the value says what was cut (`--append-system-prompt`, `--rules`, `-c`…).
+        let flag = i.checked_sub(1).and_then(|p| args.get(p)).filter(|f| f.len() <= 64).cloned().unwrap_or_default();
+        tracing::error!(arg = i, flag = %flag, from = args[i].len(), to = trimmed.len(), "trimming an over-long agent argument; the agent will see a truncated value");
         args[i] = trimmed;
     }
     args
