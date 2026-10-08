@@ -165,6 +165,23 @@ am_build_auth_header() {
     return 1
 }
 
+# 認證標頭與 lease token 不上 curl 的命令列（issue #926）：`/proc/<pid>/cmdline`、`ps aux` 對本機所有使用者可見，
+# 等名額時每 5 秒一次、續約每分鐘一次，人工 shell 退回的還是共用 UI token。curl 的設定改從 stdin 讀（`-K -`，跟 herdr shim 的
+# `am_curl_bot` 同一個道理）；值裡的 `\` 與 `"` 要跳脫成設定檔語法。bot id、holder、purpose 不是祕密，照舊放命令列。
+am_cfg_q() {
+    printf '%s' "$1" | sed -e 's/\\/\\\\/g' -e 's/"/\\"/g'
+}
+
+# `am_curl_auth <curl 參數…>`：把 `$_auth`（整行 `X-AM-Bot-Token: …`／`X-AM-Token: …`）當標頭送出。
+am_curl_auth() {
+    printf 'header = "%s"\n' "$(am_cfg_q "$_auth")" | curl -K - "$@"
+}
+
+# `am_curl_lease <curl 參數…>`：送 `holder=$_holder`＋`token=$_token`（renew／release 的 lease token 是 bearer 憑證）。
+am_curl_lease() {
+    printf 'data-urlencode = "holder=%s"\ndata-urlencode = "token=%s"\n' "$(am_cfg_q "$_holder")" "$(am_cfg_q "$_token")" | curl -K - "$@"
+}
+
 # 受管的 bot pane：本機 bot（daemon 注入 `AM_BOT_ID`、bot token、`AM_PORT`）。這種 pane 的 cargo 不能因為排程器出問題就悄悄變成
 # 沒有名額的 cargo（issue #128：daemon 重啟／升級／DB 出問題的瞬間，所有 bot 同時開編就繞過了 `max_concurrent`，
 # 而那正是最需要保護本機的時候）。沒有 bot 身分的人工 host shell 才有「排程器出問題就直接跑」的隱式 bypass；bot 要繞過得明講
@@ -268,7 +285,7 @@ am_lease_lost() {
     [ -z "$_lost_pid" ] || am_kill_tree "$_lost_pid"
     # shim 已經被 SIGKILL：沒有人會來 `wait` 這個守衛、放名額、收狀態目錄（前景那邊才做這些）——自己收。
     if ! kill -0 "$_lw_shim" 2>/dev/null; then
-        curl -s -m 5 -X POST "${_url}/release" --data-urlencode "holder=${_holder}" --data-urlencode "token=${_token}" >/dev/null 2>&1
+        am_curl_lease -s -m 5 -X POST "${_url}/release" >/dev/null 2>&1
         rm -rf "$_state" 2>/dev/null
     fi
     return 0
@@ -347,13 +364,13 @@ am_lease_watch() {
         if ! kill -0 "$_lw_shim" 2>/dev/null; then
             _lw_c=$(cat "$_state/pid" 2>/dev/null)
             if [ -z "$_lw_c" ] || ! kill -0 "$_lw_c" 2>/dev/null; then
-                curl -s -m 5 -X POST "${_url}/release" --data-urlencode "holder=${_holder}" --data-urlencode "token=${_token}" >/dev/null 2>&1
+                am_curl_lease -s -m 5 -X POST "${_url}/release" >/dev/null 2>&1
                 rm -rf "$_state" 2>/dev/null
                 return 0
             fi
         fi
         _lw_sent=$(am_epoch)
-        _lw_resp=$(curl -s -m "$_lw_m" -X POST "${_url}/renew" --data-urlencode "holder=${_holder}" --data-urlencode "token=${_token}" 2>/dev/null)
+        _lw_resp=$(am_curl_lease -s -m "$_lw_m" -X POST "${_url}/renew" 2>/dev/null)
         if [ "$(am_json_field renewed "$_lw_resp")" = "true" ]; then
             if [ -n "$_lw_sent" ]; then
                 _deadline=$((_lw_sent + _ttl))
@@ -536,10 +553,10 @@ am_cargo() {
     # waiting 列，沒有這一步它會留到 daemon 的 60 秒 stale 才被收，後面的人有空名額也要空等。要帶跟 acquire 一樣的身分。
     _cancel_wait() {
         if [ -n "${AM_BOT_ID:-}" ]; then
-            curl -s -m 5 -X POST "${_url}/release" -H "$_auth" -H "X-AM-Bot-Id: ${AM_BOT_ID}" \
+            am_curl_auth -s -m 5 -X POST "${_url}/release" -H "X-AM-Bot-Id: ${AM_BOT_ID}" \
                 --data-urlencode "holder=${_holder}" --data-urlencode "token=" --data-urlencode "bot_id=${_bot_id}" >/dev/null 2>&1
         else
-            curl -s -m 5 -X POST "${_url}/release" -H "$_auth" \
+            am_curl_auth -s -m 5 -X POST "${_url}/release" \
                 --data-urlencode "holder=${_holder}" --data-urlencode "token=" >/dev/null 2>&1
         fi
         return 0
@@ -550,14 +567,13 @@ am_cargo() {
     while :; do
         _acq_at=$(am_epoch)
         if [ -n "${AM_BOT_ID:-}" ]; then
-            _resp=$(curl -s -m 5 -X POST "${_url}/acquire" \
-                -H "$_auth" -H "X-AM-Bot-Id: ${AM_BOT_ID}" \
+            _resp=$(am_curl_auth -s -m 5 -X POST "${_url}/acquire" \
+                -H "X-AM-Bot-Id: ${AM_BOT_ID}" \
                 --data-urlencode "holder=${_holder}" \
                 --data-urlencode "bot_id=${_bot_id}" \
                 --data-urlencode "purpose=${_purpose}" 2>/dev/null)
         else
-            _resp=$(curl -s -m 5 -X POST "${_url}/acquire" \
-                -H "$_auth" \
+            _resp=$(am_curl_auth -s -m 5 -X POST "${_url}/acquire" \
                 --data-urlencode "holder=${_holder}" \
                 --data-urlencode "bot_id=${_bot_id}" \
                 --data-urlencode "purpose=${_purpose}" 2>/dev/null)
@@ -647,7 +663,7 @@ am_cargo() {
         [ -z "$_released" ] || return 0
         _released=1
         kill "$_renew_pid" 2>/dev/null
-        curl -s -m 5 -X POST "${_url}/release" --data-urlencode "holder=${_holder}" --data-urlencode "token=${_token}" >/dev/null 2>&1
+        am_curl_lease -s -m 5 -X POST "${_url}/release" >/dev/null 2>&1
         rm -rf "$_state" 2>/dev/null
         return 0
     }
@@ -656,7 +672,7 @@ am_cargo() {
     # 那就別拿名額（放回去、不排程直接跑），不要拿了名額卻不受它管。
     _state=$(mktemp -d "${TMPDIR:-/tmp}/am-cargo-lease.$$.XXXXXX" 2>/dev/null)
     if [ -z "$_state" ] || [ ! -d "$_state" ]; then
-        curl -s -m 5 -X POST "${_url}/release" --data-urlencode "holder=${_holder}" --data-urlencode "token=${_token}" >/dev/null 2>&1
+        am_curl_lease -s -m 5 -X POST "${_url}/release" >/dev/null 2>&1
         am_scheduler_unusable "建不出暫存目錄，沒辦法在名額失效時停掉 cargo"
         exec "$_real" "$@"
     fi
