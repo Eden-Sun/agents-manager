@@ -108,3 +108,47 @@
         apply(&q, SID, &leaf, 0).unwrap();
         assert_eq!(std::fs::read_to_string(&q).unwrap().lines().count(), 2);
     }
+
+    fn open_rw(p: &std::path::Path) -> std::fs::File {
+        std::fs::OpenOptions::new().read(true).append(true).open(p).unwrap()
+    }
+
+    /// issue #851：決定「要補」之後、寫之前，來源 CLI 剛好寫進一個新回合：重驗後作廢，錨點不能補在新回合後面。
+    #[test]
+    fn a_turn_landing_between_scan_and_append_makes_the_anchor_obsolete() {
+        use std::io::Write;
+        let dir = crate::testing::scratch_dir("rewind-anchor-race");
+        let p = dir.join(format!("{SID}.jsonl"));
+        std::fs::write(&p, REAL).unwrap();
+        let leaf: Leaf = Some(BEFORE_BRAVO.into());
+        let f = open_rw(&p);
+        let writer = p.clone();
+        let out = decide_and_append(&f, &p, SID, &leaf, REAL.len() as u64, || {
+            let mut w = std::fs::OpenOptions::new().append(true).open(&writer).unwrap();
+            writeln!(w, r#"{{"type":"user","uuid":"n1","parentUuid":"{BEFORE_BRAVO}","message":{{"role":"user","content":"new turn"}}}}"#).unwrap();
+            writeln!(w, r#"{{"type":"assistant","uuid":"n2","parentUuid":"n1","message":{{"role":"assistant","content":[{{"type":"text","text":"OK"}}]}}}}"#).unwrap();
+        })
+        .unwrap();
+        assert_eq!(out, Need::Obsolete);
+        let after = std::fs::read_to_string(&p).unwrap();
+        let last = after.lines().rev().find(|l| l.contains("\"last-prompt\"")).unwrap();
+        assert!(!last.contains("\"rewound\":true"), "最後一個 last-prompt 不能是錨點：{last}");
+        assert!(!after.contains("\"rewound\":true"), "錨點一行都沒寫");
+    }
+
+    /// issue #851：路徑在判斷之後被換成另一個檔：錨點不寫進換進來的檔。
+    #[test]
+    fn a_replaced_transcript_does_not_receive_the_anchor() {
+        let dir = crate::testing::scratch_dir("rewind-anchor-replaced");
+        let p = dir.join(format!("{SID}.jsonl"));
+        std::fs::write(&p, REAL).unwrap();
+        let other = dir.join("other.jsonl");
+        let replacement = format!("{REAL}{{\"type\":\"cost-state\"}}\n");
+        std::fs::write(&other, &replacement).unwrap();
+        let leaf: Leaf = Some(BEFORE_BRAVO.into());
+        let f = open_rw(&p);
+        let out = decide_and_append(&f, &p, SID, &leaf, REAL.len() as u64, || std::fs::rename(&other, &p).unwrap()).unwrap();
+        assert_eq!(out, Need::Obsolete);
+        assert_eq!(std::fs::read_to_string(&p).unwrap(), replacement, "替換進來的檔內容不變");
+        assert_eq!(std::fs::read_to_string(dir.join("other.jsonl")).ok(), None);
+    }

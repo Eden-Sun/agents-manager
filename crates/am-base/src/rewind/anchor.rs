@@ -216,7 +216,8 @@ pub async fn record(app: &impl crate::capabilities::Db, bot: &db::Bot, run: &db:
 }
 
 /// 照 `session_id` `--resume`／fork 之前呼叫：倒回後沒有新回合就把錨點補在 transcript 檔尾。
-/// 呼叫端保證這段 session 的 CLI 已經結束（fork 例外：來源還開著也無妨，它結束時蓋掉的話下一次 resume 會再補）。
+/// 呼叫端保證這段 session 的 CLI 已經結束（fork 例外：來源還開著也無妨，它結束時蓋掉的話下一次 resume 會再補）；
+/// fork 時來源可能正好寫進新回合，所以 `apply` 在寫入前以同一個 fd 重驗長度與路徑，殘餘窗口只剩 `metadata` 到 `write` 之間。
 pub async fn ensure(app: &impl crate::capabilities::Db, session_id: &str) {
     let row: Option<(String, Option<String>, i64)> =
         match sqlx::query_as("SELECT transcript_path, leaf_uuid, transcript_len FROM rewind_anchors WHERE session_id = ?")
@@ -245,17 +246,47 @@ pub async fn ensure(app: &impl crate::capabilities::Db, session_id: &str) {
 }
 
 /// 檔案那一半。檔案比倒回當時短＝被換過了，當作作廢。
+/// 只開一次檔（讀＋附加、不跟 symlink）：決定與寫入用同一個 fd，寫之前再驗長度與路徑（issue #851）。
 pub fn apply(path: &Path, session_id: &str, leaf: &Leaf, len: u64) -> std::io::Result<Need> {
-    use std::io::Write;
-    let bytes = std::fs::read(path)?;
-    if (bytes.len() as u64) < len {
+    use std::os::unix::fs::OpenOptionsExt;
+    let f = std::fs::OpenOptions::new().read(true).append(true).custom_flags(libc::O_NOFOLLOW).open(path)?;
+    if !f.metadata()?.is_file() {
         return Ok(Need::Obsolete);
     }
-    let need = need(&String::from_utf8_lossy(&bytes[len as usize..]), leaf);
-    if need == Need::Append {
-        let mut f = std::fs::OpenOptions::new().append(true).open(path)?;
-        let sep = if bytes.last().is_some_and(|b| *b != b'\n') { "\n" } else { "" };
-        f.write_all(format!("{sep}{}\n", line(session_id, leaf)).as_bytes())?;
+    decide_and_append(&f, path, session_id, leaf, len, || {})
+}
+
+/// 讀 `[len, end)` 判斷要不要補；要補就在**同一個 fd** 上重驗長度（變長＝有人剛寫了東西，重來）與路徑（`path` 不再指向這個檔＝被換掉，作廢）才寫。
+/// 最多重試 3 次，都在長就回 `WouldBlock`（`ensure` 記 warn、保留 DB 那筆，下次 resume 再試）。
+/// 殘餘窗口只剩最後一次 `metadata` 到 `write` 之間；`before_append` 讓測試在判斷之後、重驗之前插進一段寫入。
+pub fn decide_and_append(f: &std::fs::File, path: &Path, session_id: &str, leaf: &Leaf, len: u64, mut before_append: impl FnMut()) -> std::io::Result<Need> {
+    use std::io::Write;
+    use std::os::unix::fs::{FileExt, MetadataExt};
+    for _ in 0..3 {
+        let end = f.metadata()?.len();
+        if end < len {
+            return Ok(Need::Obsolete);
+        }
+        let mut tail = vec![0u8; (end - len) as usize];
+        f.read_exact_at(&mut tail, len)?;
+        let verdict = need(&String::from_utf8_lossy(&tail), leaf);
+        if verdict != Need::Append {
+            return Ok(verdict);
+        }
+        before_append();
+        let meta = f.metadata()?;
+        if meta.len() != end {
+            continue;
+        }
+        match std::fs::symlink_metadata(path) {
+            Ok(m) if (m.dev(), m.ino()) == (meta.dev(), meta.ino()) => {}
+            _ => return Ok(Need::Obsolete),
+        }
+        let mut last = [0u8; 1];
+        let sep = if end > 0 && f.read_exact_at(&mut last, end - 1).is_ok() && last[0] != b'\n' { "\n" } else { "" };
+        let mut w = f;
+        w.write_all(format!("{sep}{}\n", line(session_id, leaf)).as_bytes())?;
+        return Ok(Need::Append);
     }
-    Ok(need)
+    Err(std::io::Error::from(std::io::ErrorKind::WouldBlock))
 }

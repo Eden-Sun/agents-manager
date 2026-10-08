@@ -2875,7 +2875,7 @@ header 的 herdr 徽章確認後 `POST /api/hosts/{name}/herdr-update`（API §1
     記它的 `parentUuid` 與當時 transcript 的長度進 `rewind_anchors`（以 session id 為鍵，留最新一筆）。被丟掉的那則（步驟 3 的例外）記的是真的按了 Restore 的那一則；沒按就不記。
   - 下一次照這段 session 起 CLI 之前——`native_resume_plan`（只在 CLI 已經結束的那一次，重啟前的檢查不算；換身分時在複製 transcript 之前）、
     子 agent 原地重啟、fork 的來源——長度之後沒有新的 user／assistant 列（非 sidechain）而且最後一個 `last-prompt` 不是錨點，就把錨點補在檔尾；
-    有新回合＝CLI 已經從倒回點長出新分支，紀錄刪掉。fork 時來源還開著也照補：來源結束時蓋掉的話，它自己下一次 resume 會再補。
+    有新回合＝CLI 已經從倒回點長出新分支，紀錄刪掉。fork 時來源還開著也照補：來源結束時蓋掉的話，它自己下一次 resume 會再補。寫入前用同一個 fd 重驗長度（變長就重判，最多 3 次，都在長就留著紀錄下次再試）與路徑（不再指向同一個檔就作廢），殘餘窗口只剩 `metadata` 到 `write` 之間。
   - 只做本機 bot（遠端 transcript 在別台，不補）；run 沒記 session／transcript、找不到那一則、讀寫檔失敗都只記 log，倒回本身照樣成功，重啟行為同修之前。
 - **不做的**：`Summarize from here／up to here`、還原程式碼（`--rewind-files`）、codex／grok。
 
