@@ -7,7 +7,7 @@ import './keepWarmChip.css'
 /**
  * 主力晶片的顏色說明（2026-10-04 使用者：「手機版主力長按說明顏色意義；電腦版你自己想」）。
  * 範例直接套晶片與燈號的真 class，顏色永遠跟晶片列一致，不另外寫一份色票。
- * 從主力 bot 狀態卡（`BotStatusCard`）的「顏色代表什麼？」打開。
+ * 從主力 bot 狀態卡（`BotStatusCard`，手機長按）的「顏色代表什麼？」或電腦版晶片列尾端的「?」打開。
  */
 export function ChipLegend({ onClose }: { onClose: () => void }) {
   useEffect(() => {
