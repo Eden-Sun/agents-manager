@@ -602,6 +602,37 @@ async fn svg_checker_reminds_again_on_regression_after_repair() {
     assert_eq!(reminders[1].1.as_deref(), Some(crate::agent_relay::DAEMON_SENDER));
 }
 
+/// issue #866：結構正確但含非法 UTF-8 的 .svg 不能被 lossy 轉換修成健康；要提醒一次、修好變健康、再壞（不同內容）要重新提醒。
+#[tokio::test]
+async fn svg_with_invalid_utf8_is_reported_and_reminds_again_after_repair() {
+    let e = tt::env().await;
+    let b = restricted_bot(&e.app, &e.project_id, "pub").await;
+    let _token = shared(&e.app, &b.id).await;
+    let outbox = crate::outbox::ensure(&e.app.data_dir, &b.id).unwrap();
+    let count = || async { sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM messages WHERE role = 'user' AND content LIKE '%card.svg%'").fetch_one(&e.app.db).await.unwrap() };
+
+    std::fs::write(outbox.join("card.svg"), b"<svg xmlns=\"http://www.w3.org/2000/svg\"><text>\xFF</text></svg>").unwrap();
+    for _ in 0..2 {
+        let err = super::svg_check::check_file(&e.app, &b.id, "card.svg").await.expect("非法 UTF-8 要回錯");
+        assert!(err.message.contains("不是合法 UTF-8 SVG"), "{err:?}");
+    }
+    assert_eq!(count().await, 1, "第一次建立一筆 repair prompt，同版不重送");
+
+    std::fs::write(outbox.join("card.svg"), "<svg xmlns=\"http://www.w3.org/2000/svg\"><text>ÿ</text></svg>").unwrap();
+    assert_eq!(super::svg_check::check_file(&e.app, &b.id, "card.svg").await, None, "修成合法 UTF-8 就健康");
+    assert_eq!(count().await, 1);
+    sqlx::query("UPDATE turns SET status='failed' WHERE status='queued'").execute(&e.app.db).await.unwrap();
+
+    std::fs::write(outbox.join("card.svg"), b"<svg xmlns=\"http://www.w3.org/2000/svg\"><text>\xFE</text></svg>").unwrap();
+    assert!(super::svg_check::check_file(&e.app, &b.id, "card.svg").await.is_some());
+    assert_eq!(count().await, 2, "另一個非法 UTF-8 版本要重新提醒");
+
+    // 有 encoding="UTF-8" 宣告的 fixture 一樣不會被 lossy 修掉。
+    std::fs::write(outbox.join("card.svg"), b"<?xml version=\"1.0\" encoding=\"UTF-8\"?><svg><text>\xC3\x28</text></svg>").unwrap();
+    let err = super::svg_check::check_file(&e.app, &b.id, "card.svg").await.expect("宣告 UTF-8 卻非法");
+    assert!(err.message.contains("不是合法 UTF-8 SVG"), "{err:?}");
+}
+
 #[tokio::test]
 async fn svg_check_exceeding_max_bytes_is_skipped_without_reading_or_reminder() {
     let e = tt::env().await;
