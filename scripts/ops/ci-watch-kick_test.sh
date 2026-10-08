@@ -598,5 +598,38 @@ equals "ubuntu-ci 紅但 log 讀不到：這輪不開" "$(creates)" "0"
 check "ubuntu-ci 紅但 log 讀不到：留 log" "沒有 ubuntu-ci 的 log" "$AGM_DIR/ci-watch.log"
 teardown
 
+# #885：ubuntu-ci 回 error（磁碟不足、被訊號中斷、腳本中斷）不是測試紅：不開票、不派工、不改狀態；
+# 連續 3 輪最新結果都是 error 才推 ci_infra_error（ops-alert），計數遇到非 error 就清掉。
+setup
+export AGM_CI_SOURCE=ubuntu-ci
+mk_ubuntu ddd4:error ccc3:success bbb2:success
+bash "$SCRIPT"
+equals "ubuntu-ci error：不開票" "$(creates)" "0"
+equals "ubuntu-ci error：不派工" "$(assigns)" "0"
+check_no "ubuntu-ci error：第 1 輪不推 alert" "ci_infra_error" "$AGM_DIR/calls.log"
+bash "$SCRIPT"
+check_no "ubuntu-ci error：第 2 輪不推 alert" "ci_infra_error" "$AGM_DIR/calls.log"
+bash "$SCRIPT"
+check "ubuntu-ci error：連 3 輪推 ci_infra_error" "ci_infra_error" "$AGM_DIR/calls.log"
+check "ubuntu-ci error：alert 說明不是測試紅" "不是測試紅" "$AGM_DIR/calls.log"
+equals "ubuntu-ci error：連 3 輪仍不開票" "$(creates)" "0"
+equals "ubuntu-ci error：連 3 輪仍不派工" "$(assigns)" "0"
+mk_ubuntu ddd4:success ccc3:success
+bash "$SCRIPT"
+[ ! -e "$AGM_DIR/ci-watch.errors" ] && echo "ok   - 非 error 清掉計數" && PASS=$((PASS + 1)) || { echo "FAIL - 非 error 沒清計數"; FAIL=$((FAIL + 1)); }
+teardown
+
+# error 夾在兩次失敗之間：error 不算紅也不算綠，紅的那段照舊開一張票（failure 的既有行為不變）。
+setup
+export AGM_CI_SOURCE=ubuntu-ci
+mkdir -p "$AGM_CI_LOG_DIR"
+mk_ubuntu ddd4:error ccc3:failure aaa1:success
+printf '==> daemon: cargo test\ntest foo::bar ... FAILED\n' > "$AGM_CI_LOG_DIR/ccc3.log"
+bash "$SCRIPT"
+equals "error 之下的真 failure：照開一張" "$(creates)" "1"
+equals "error 之下的真 failure：派一次" "$(assigns)" "1"
+equals "error 之下的真 failure：起點是 failure 的 sha" "$(state first_red_sha)" "ccc3"
+teardown
+
 echo "$PASS passed, $FAIL failed"
 [ "$FAIL" -eq 0 ]
