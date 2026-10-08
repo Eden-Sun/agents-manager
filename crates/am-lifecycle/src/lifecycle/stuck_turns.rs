@@ -186,7 +186,7 @@ pub async fn sweep_at(app: &impl StuckTurnContext, host: Option<&str>, now: Inst
         if stuck < threshold {
             continue;
         }
-        match close_locked(app, &run, &turn, CloseWhy::Idle(stuck)).await {
+        match close_stuck(app, &run, &turn, CloseWhy::Idle(stuck)).await {
             Ok(true) => {
                 closed.push(turn.id.clone());
                 // 卡住的就是排在後面的那一筆：同一把鎖裡馬上送，不等下一次喚醒。
@@ -224,7 +224,7 @@ pub async fn close_after_session_paused(app: &impl StuckTurnContext, run_id: &st
     if turn.id != expected_turn_id {
         return None;
     }
-    match close_locked(app, &run, &turn, CloseWhy::SessionPaused).await {
+    match close_stuck(app, &run, &turn, CloseWhy::SessionPaused).await {
         Ok(true) => {
             if let Err(e) = super::flush_queued_locked(app, &run.bot_id).await {
                 tracing::warn!(bot = %run.bot_id, error = ?e, "queued prompt flush after a session-paused close failed");
@@ -237,6 +237,33 @@ pub async fn close_after_session_paused(app: &impl StuckTurnContext, run_id: &st
             None
         }
     }
+}
+
+/// 卡住的回合怎麼收：`delivery='pending'` ＝ 從來沒送出去（送達結果還沒寫、也沒證據字進過 pane），
+/// 不能收成 `completed_fallback`（那等於說「agent 做完了」），收成 failed 請使用者重送（#903）。
+/// 其餘（`ok`／`unknown`…）才走「證得出回覆就 completed、否則 completed_fallback」那條。
+async fn close_stuck(app: &impl StuckTurnContext, run: &db::Run, turn: &db::Turn, why: CloseWhy) -> anyhow::Result<bool> {
+    if turn.delivery == "pending" {
+        return fail_never_sent(app, run, turn).await;
+    }
+    close_locked(app, run, turn, why).await
+}
+
+/// 從未送出的 in_flight 回合：failed＋`delivery='failed'`＋一則系統訊息，同一個交易。`Ok(false)`：別的路先收掉了。
+async fn fail_never_sent(app: &impl StuckTurnContext, run: &db::Run, turn: &db::Turn) -> anyhow::Result<bool> {
+    let Some(bot) = db::bot(app.db(), &run.bot_id).await? else { return Ok(false) };
+    let mut tx = app.db().begin().await?;
+    let out = super::turn_controller::fail_on(&mut tx, &turn.id, super::turn_controller::DeliveryOnFail::Failed, "送出前就卡住").await?;
+    if out != super::turn_controller::Outcome::Applied {
+        return Ok(false);
+    }
+    let note = "這一則在送出前就卡住（一個字都沒送出），由 reconcile 收成失敗；請重送。";
+    let m = insert_message_tx(&mut tx, &turn.conversation_id, Some(&turn.id), "system", note, "system", false, None).await?;
+    tx.commit().await?;
+    tracing::warn!(turn = %turn.id, bot = %bot.name, "closed a never-sent turn stuck in flight as failed");
+    emit_message_added(app, &bot.id, m).await;
+    app.emit_turn(&turn.id).await;
+    Ok(true)
 }
 
 /// 收一筆。`Ok(false)`：CAS 沒搶到（別的路剛好收掉了）。
@@ -700,6 +727,34 @@ mod tests {
 
         // 已經收掉的不會再收一次。
         assert!(sweep_at(&app, None, t0 + 20 * MIN, 5 * MIN).await.is_empty());
+    }
+
+    /// #903：`delivery='pending'` ＝ 從來沒送出去（送達結果沒寫、也沒有字進過 pane）的 in_flight 回合，閒置 watchdog
+    /// 不能收成 `completed_fallback`（等於說 agent 做完了）：收成 failed＋`delivery='failed'`＋說明，請使用者重送。
+    #[tokio::test]
+    async fn a_never_sent_pending_turn_is_failed_not_completed_by_the_idle_sweep() {
+        let f = stuck("從未送出的那則").await;
+        let app = f.env.app.clone();
+        sqlx::query("UPDATE turns SET delivery='pending' WHERE id=?").bind(&f.turn_id).execute(app.db()).await.unwrap();
+        let a = crate::supervisor::store::insert_assignment(app.db(), None, &f.bot_id, "crid-never-sent", "從未送出的那則", &[], None, true)
+            .await
+            .unwrap()
+            .id;
+        crate::supervisor::store::mark_delivered(app.db(), &a, &f.turn_id, "queued").await.unwrap();
+
+        let t0 = Instant::now();
+        observe_at(&f.run_id, "idle", t0);
+        assert_eq!(sweep_at(&app, None, t0 + 6 * MIN, 5 * MIN).await, vec![f.turn_id.clone()]);
+        let t = turn(&app, &f.turn_id).await;
+        assert_eq!((t.status.as_str(), t.delivery.as_str()), ("failed", "failed"));
+        let msgs = messages(&app, &f.turn_id).await;
+        assert!(!msgs.iter().any(|m| m.0 == "assistant"), "沒有 assistant 訊息：{msgs:?}");
+        assert!(msgs.iter().any(|m| m.0 == "system" && m.2.contains("送出前就卡住")), "{msgs:?}");
+
+        // 交辦照回合的實際終態走：是 failed，不是 completed_fallback（那會讓 AGM 以為工作做完了）。
+        crate::supervisor::controller::reconcile(&app).await;
+        let row = crate::supervisor::store::assignment(app.db(), &a).await.unwrap().unwrap();
+        assert_eq!(row.turn_status.as_deref(), Some("failed"), "{:?}", row.turn_status);
     }
 
     /// 2026-09-16 13:17 實況：AM-2-M 從 13:01 就閒置，13:17:01 收到新 prompt（貼上的圖片轉成 `[Image #33]` 時 Enter 被吃掉，
