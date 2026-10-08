@@ -8,6 +8,7 @@ scripts/ops/ci-watch-kick.sh        bin/ci-watch-kick.sh
 scripts/ops/claude-release-kick.sh  bin/claude-release-kick.sh
 scripts/ops/daemon-update-kick.sh   bin/daemon-update-kick.sh
 scripts/ops/daemon-boot.sh          bin/daemon-boot.sh          linux
+scripts/ops/disk-gc.sh              bin/disk-gc.sh              linux
 scripts/ops/dev-server-kick.ts      bin/dev-server-kick.ts
 scripts/ops/herdr-update-kick.sh    bin/herdr-update-kick.sh
 scripts/ops/herdr-lan-check.sh      bin/herdr-lan-check.sh
@@ -52,6 +53,8 @@ scripts/ops/systemd/com.agm.claude-release.timer    systemd/com.agm.claude-relea
 scripts/ops/systemd/com.agm.daemon-update.service   systemd/com.agm.daemon-update.service   linux
 scripts/ops/systemd/com.agm.daemon-update.timer     systemd/com.agm.daemon-update.timer     linux
 scripts/ops/systemd/com.agm.daemon-boot.service     systemd/com.agm.daemon-boot.service     linux
+scripts/ops/systemd/com.agm.disk-gc.service         systemd/com.agm.disk-gc.service         linux
+scripts/ops/systemd/com.agm.disk-gc.timer           systemd/com.agm.disk-gc.timer           linux
 scripts/ops/systemd/com.agm.dev-server.service      systemd/com.agm.dev-server.service      linux
 scripts/ops/systemd/com.agm.dev-server.timer        systemd/com.agm.dev-server.timer        linux
 scripts/ops/systemd/com.agm.herdr-update.service    systemd/com.agm.herdr-update.service    linux
