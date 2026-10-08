@@ -144,6 +144,13 @@ CREATE INDEX IF NOT EXISTS messages_with_attachments ON messages(id) WHERE attac
 CREATE INDEX IF NOT EXISTS messages_assistant_unread ON messages(conversation_id, created_at, turn_id, id) WHERE role = 'assistant';
 -- 主力「不用保溫」（`primary_keep_warm`）：有列＝這顆 bot 這一輪閒置跳過保溫與熱壓；since 之後有真的活動就刪掉。
 CREATE TABLE IF NOT EXISTS keep_warm_skip (bot_id TEXT PRIMARY KEY, since TEXT NOT NULL);
+-- 主力熱壓的 durable 收據（`primary_keep_warm`，issue #864）：先 claim 再送 `/compact`，同一個錨點只會有一列，
+-- 聊天室的 system note 只是投影（寫失敗會補寫，不會重壓）。
+CREATE TABLE IF NOT EXISTS primary_cache_actions (
+  bot_id TEXT NOT NULL, anchor TEXT NOT NULL, kind TEXT NOT NULL CHECK (kind IN ('warm_compact')),
+  run_id TEXT NOT NULL, status TEXT NOT NULL CHECK (status IN ('claimed','done')),
+  age_min INTEGER NOT NULL, claimed_at TEXT NOT NULL, done_at TEXT, note_written INTEGER NOT NULL DEFAULT 0,
+  PRIMARY KEY (bot_id, anchor, kind));
 CREATE TABLE IF NOT EXISTS attachments (
   id TEXT PRIMARY KEY, bot_id TEXT NOT NULL REFERENCES bots(id),
   name TEXT NOT NULL, mime TEXT NOT NULL, size INTEGER NOT NULL,
@@ -335,6 +342,8 @@ pub const SCHEMA_HISTORY: &[(i64, &str)] = &[
     (45, "e88ca2badecc5381"),
     // issue #879：`runs.transcript_baseline_at`（沒有 hook 的 claude run 第一次讀對話檔的基準，既有歷史不生回合）。
     (46, "0d415c91ca473b5e"),
+    // issue #864：`primary_cache_actions`（主力熱壓的 durable 收據，note 只是投影）。
+    (47, "d9e8f995cf7cd191"),
 ];
 pub const SCHEMA_VERSION: i64 = SCHEMA_HISTORY[SCHEMA_HISTORY.len() - 1].0;
 

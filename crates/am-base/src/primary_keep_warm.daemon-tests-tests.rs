@@ -436,7 +436,7 @@
         assert_eq!(n, 4, "舊資料回填");
     }
 
-    // ---- #872：act 帶計畫的 run id ----
+    // ---- #872／#864：act 帶計畫的 run id、熱壓以 durable 收據去重 ----
 
     use am_core::{BotId, NoticeRequest, PortError, RunId, TurnError, TurnId};
     use std::collections::VecDeque;
@@ -534,6 +534,10 @@
         (bot, run)
     }
 
+    async fn receipt(env: &tt::Env, bot_id: &str) -> Option<(String, i64)> {
+        sqlx::query_as("SELECT status, note_written FROM primary_cache_actions WHERE bot_id = ?").bind(bot_id).fetch_optional(&env.app.db).await.unwrap()
+    }
+
     /// #872：保溫與熱壓都帶計畫當時的 run id，由 bot 鎖內比對。
     #[tokio::test]
     async fn keep_warm_and_warm_compact_carry_the_planned_run_id() {
@@ -573,4 +577,89 @@
         assert_eq!(turns.compacts.lock().unwrap().len(), 1);
         assert!(notes.notes.lock().unwrap().is_empty(), "沒壓縮就不寫熱壓說明");
         assert!(!window_open(&run.id), "被拒絕時視窗不留著");
+    }
+
+    /// #864：壓縮已送出、說明寫失敗，之後再怎麼巡也不會對同一個錨點重壓。
+    #[tokio::test]
+    async fn a_failed_note_after_compact_does_not_compact_again() {
+        let env = tt::env().await;
+        let now = chrono::Utc::now();
+        let (bot, run) = warm_compact_due(&env, "kw-note-fails", now).await;
+        let turns = FakeTurns::default();
+        let notes = FakeNotes::failing(usize::MAX);
+        for _ in 0..3 {
+            sweep(&env, &turns, &notes, now).await;
+        }
+        assert_eq!(turns.compacts.lock().unwrap().len(), 1, "同一錨點只壓一次");
+        assert_eq!(receipt(&env, &bot.id).await, Some(("done".to_string(), 0)), "收據定案、說明還沒寫成");
+        drop_window(&run.id);
+    }
+
+    /// #864：重啟（記憶體視窗歸零）後再巡，收據在 DB，同一錨點仍只壓一次。
+    #[tokio::test]
+    async fn a_fresh_sweep_after_restart_does_not_recompact_the_same_anchor() {
+        let env = tt::env().await;
+        let now = chrono::Utc::now();
+        let (_bot, run) = warm_compact_due(&env, "kw-restart-compact", now).await;
+        let turns = FakeTurns::default();
+        let notes = FakeNotes::failing(usize::MAX);
+        sweep(&env, &turns, &notes, now).await;
+        drop_window(&run.id);
+        sweep(&env, &turns, &notes, now).await;
+        assert_eq!(turns.compacts.lock().unwrap().len(), 1);
+        drop_window(&run.id);
+    }
+
+    /// #864：說明下一輪補寫，不會再壓縮；寫成功才記 `note_written = 1`。
+    #[tokio::test]
+    async fn the_note_is_retried_without_recompacting() {
+        let env = tt::env().await;
+        let now = chrono::Utc::now();
+        let (bot, run) = warm_compact_due(&env, "kw-note-retry", now).await;
+        let turns = FakeTurns::default();
+        let notes = FakeNotes::failing(1);
+        sweep(&env, &turns, &notes, now).await;
+        assert!(notes.notes.lock().unwrap().is_empty());
+        sweep(&env, &turns, &notes, now).await;
+        assert_eq!(notes.notes.lock().unwrap().len(), 1);
+        assert!(notes.notes.lock().unwrap()[0].1.starts_with(WARM_COMPACT_NOTE_PREFIX));
+        assert_eq!(turns.compacts.lock().unwrap().len(), 1);
+        assert_eq!(receipt(&env, &bot.id).await, Some(("done".to_string(), 1)));
+        sweep(&env, &turns, &notes, now).await;
+        assert_eq!(notes.notes.lock().unwrap().len(), 1, "補寫過就不再寫");
+        drop_window(&run.id);
+    }
+
+    /// #864：確定沒打字的拒絕（Busy 等）撤回 claim，下一輪可以再試。
+    #[tokio::test]
+    async fn a_refused_compact_releases_the_claim() {
+        let env = tt::env().await;
+        let now = chrono::Utc::now();
+        let (bot, run) = warm_compact_due(&env, "kw-refused", now).await;
+        let turns = FakeTurns::default();
+        turns.compact_script.lock().unwrap().push_back(Err(TurnError::Busy(bot.id.clone())));
+        let notes = FakeNotes::default();
+        sweep(&env, &turns, &notes, now).await;
+        assert_eq!(receipt(&env, &bot.id).await, None, "被拒絕：收據撤回");
+        sweep(&env, &turns, &notes, now).await;
+        assert_eq!(turns.compacts.lock().unwrap().len(), 2, "第一次被拒、第二次成功");
+        assert_eq!(receipt(&env, &bot.id).await, Some(("done".to_string(), 1)));
+        drop_window(&run.id);
+    }
+
+    /// #864：結果不明（可能已經打出 `/compact`）保留 claim，這個錨點不再重試。
+    #[tokio::test]
+    async fn an_ambiguous_compact_failure_keeps_the_claim() {
+        let env = tt::env().await;
+        let now = chrono::Utc::now();
+        let (bot, run) = warm_compact_due(&env, "kw-ambiguous", now).await;
+        let turns = FakeTurns::default();
+        turns.compact_script.lock().unwrap().push_back(Err(TurnError::Unavailable("herdr dropped the reply".into())));
+        let notes = FakeNotes::default();
+        sweep(&env, &turns, &notes, now).await;
+        assert_eq!(receipt(&env, &bot.id).await, Some(("claimed".to_string(), 0)));
+        sweep(&env, &turns, &notes, now).await;
+        assert_eq!(turns.compacts.lock().unwrap().len(), 1, "不再呼叫 compact_bot");
+        assert!(notes.notes.lock().unwrap().is_empty());
+        drop_window(&run.id);
     }
