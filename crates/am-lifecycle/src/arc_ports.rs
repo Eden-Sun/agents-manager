@@ -1078,7 +1078,7 @@ mod arc_port_68_stopservices {
         fn announce_revoked(&self, turn_id: &str, revoked: crate::lifecycle::Revoked) -> impl Future<Output = ()> + Send { <T as crate::lifecycle::s6_ports::StopServices>::announce_revoked(self.as_ref(), turn_id, revoked) }
         fn revoke_orphaned_queued_turns(&self, bot_id: &str, why: &str) -> impl Future<Output = Vec<String>> + Send { <T as crate::lifecycle::s6_ports::StopServices>::revoke_orphaned_queued_turns(self.as_ref(), bot_id, why) }
         fn stop_preview(&self, bot_id: &str, fence: Option<&crate::hosts::HostFence>) -> impl Future<Output = bool> + Send { <T as crate::lifecycle::s6_ports::StopServices>::stop_preview(self.as_ref(), bot_id, fence) }
-        fn validate_workspace_path(&self, data_dir: &Path, workspace: &str) -> Option<PathBuf> { <T as crate::lifecycle::s6_ports::StopServices>::validate_workspace_path(self.as_ref(), data_dir, workspace) }
+        fn validate_workspace_path(&self, data_dir: &Path, workspace: &str) -> impl Future<Output = Option<PathBuf>> + Send { <T as crate::lifecycle::s6_ports::StopServices>::validate_workspace_path(self.as_ref(), data_dir, workspace) }
         fn is_shared_host(&self, host: &str) -> impl Future<Output = bool> + Send { <T as crate::lifecycle::s6_ports::StopServices>::is_shared_host(self.as_ref(), host) }
     }
 }

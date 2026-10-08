@@ -502,7 +502,7 @@ pub async fn purge_deleted_bot_dirs(app: &(impl crate::capabilities::DataDir + c
             Ok(None) => {}
             _ => continue,
         }
-        if let Some(ws_path) = app.validate_workspace_path(app.data_dir(), &ws) {
+        if let Some(ws_path) = app.validate_workspace_path(app.data_dir(), &ws).await {
             match crate::bot_trash::move_in_kind(app.data_dir(), &id, Some(crate::bot_trash::SHARE_WORKSPACE), &ws_path) {
                 Ok(Some(to)) => {
                     tracing::info!(bot = %id, dir = %ws_path.display(), trash = %to.display(), "moved leftover restricted share workspace to bots-trash");
@@ -555,7 +555,7 @@ pub async fn purge_bot_dir(
     // 受限分享用 bot 的工作目錄（`shared_bots.workspace`，issue #828）。
     // 只有 restricted bot 的工作目錄才收進回收區；信任分享（trusted）的工作區是使用者既有目錄，不能動。
     if let Ok(Some(ws)) = app.restricted_workspace(bot_id).await {
-        if let Some(ws_path) = app.validate_workspace_path(crate::capabilities::DataDir::data_dir(app), &ws) {
+        if let Some(ws_path) = app.validate_workspace_path(crate::capabilities::DataDir::data_dir(app), &ws).await {
             match crate::bot_trash::move_in_kind(crate::capabilities::DataDir::data_dir(app), bot_id, Some(crate::bot_trash::SHARE_WORKSPACE), &ws_path) {
                 Ok(Some(to)) => tracing::info!(bot = %bot_id, dir = %ws_path.display(), trash = %to.display(), "moved restricted share workspace to bots-trash"),
                 Ok(None) => {}

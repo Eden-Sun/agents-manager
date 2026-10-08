@@ -436,7 +436,8 @@ pub trait StopServices: Send + Sync {
     fn announce_revoked(&self, turn_id: &str, revoked: crate::lifecycle::Revoked) -> impl Future<Output = ()> + Send;
     fn revoke_orphaned_queued_turns(&self, bot_id: &str, why: &str) -> impl Future<Output = Vec<String>> + Send;
     fn stop_preview(&self, bot_id: &str, fence: Option<&crate::hosts::HostFence>) -> impl Future<Output = bool> + Send;
-    fn validate_workspace_path(&self, data_dir: &Path, workspace: &str) -> Option<PathBuf>;
+    /// 受限分享 bot 的工作目錄裡，哪些是 daemon 自己建的、可以收進回收區；使用者的既有資料夾回 `None`（#900）。
+    fn validate_workspace_path(&self, data_dir: &Path, workspace: &str) -> impl Future<Output = Option<PathBuf>> + Send;
     fn is_shared_host(&self, host: &str) -> impl Future<Output = bool> + Send;
 }
 

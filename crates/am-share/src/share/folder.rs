@@ -206,6 +206,40 @@ pub fn validate_workspace_path(data_dir: &Path, workspace: &str) -> Option<PathB
     Some(p.to_path_buf())
 }
 
+/// 刪 bot 時哪些工作目錄可以收進 bots-trash（#900）：只有 daemon 自己建的。
+/// 受限 bot 也可以選使用者的既有資料夾（專案目錄之類）——那是使用者的東西，刪 bot 不能搬走它，更不能讓回收區 7 天後永久刪掉。
+///
+/// 先過 [`validate_workspace_path`] 的檢查，再只認兩種形狀：
+/// a. 直接在 `[share] folders_root`（預設 `~/shared-bots`）底下的一層：「新資料夾」建出來的就是這個；
+/// b. `<data_dir>/shared-bots/<bot_id>/workspace` 的舊格式（資料目錄底下是 daemon 自己的地盤，所以不套資料目錄那條擋）。
+/// `folders_root/<name>/sub`、`folders_root` 本身、其他位置的既有資料夾一律 `None`。
+pub fn daemon_owned_workspace(data_dir: &Path, folders_root: Option<&str>, home: &str, workspace: &str) -> Option<PathBuf> {
+    let p = Path::new(workspace.trim());
+    if let Some(path) = legacy_data_dir_workspace(data_dir, p) {
+        return Some(path);
+    }
+    let checked = validate_workspace_path(data_dir, workspace)?;
+    let real = canonical(&checked);
+    let root = canonical(&root(folders_root, home));
+    (real != root && real.parent() == Some(root.as_path())).then_some(checked)
+}
+
+/// `<data_dir>/shared-bots/<bot_id>/workspace`：全是一般路徑段（沒有 `..`）、原地不是符號連結。
+fn legacy_data_dir_workspace(data_dir: &Path, p: &Path) -> Option<PathBuf> {
+    if !p.is_absolute() || p.components().any(|c| !matches!(c, Component::RootDir | Component::Normal(_))) {
+        return None;
+    }
+    let bot_dir = p.parent()?;
+    let holder = bot_dir.parent()?;
+    if p.file_name()? != "workspace" || bot_dir.file_name().is_none() || holder != data_dir.join("shared-bots") {
+        return None;
+    }
+    if std::fs::symlink_metadata(p).is_ok_and(|m| m.file_type().is_symlink()) {
+        return None;
+    }
+    Some(p.to_path_buf())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -283,5 +317,44 @@ mod tests {
         }
         assert!(!text.contains("SECRET-TOKEN"), "符號連結指到外面的不能讀：{text}");
         assert!(text.find("MEMORY.md").unwrap() < text.find("color.md").unwrap(), "索引在前");
+    }
+
+    #[test]
+    fn only_daemon_created_workspaces_are_trashable() {
+        let base = crate::share::test_dirs::scratch_dir("am-share-owned");
+        let home = base.join("home");
+        let data = home.join(".config/agents-manager");
+        let root = base.join("folders");
+        for d in [&data, &root, &base.join("project/site")] {
+            std::fs::create_dir_all(d).unwrap();
+        }
+        let (home_s, root_s) = (home.to_string_lossy().into_owned(), root.to_string_lossy().into_owned());
+        let owned = |ws: &Path| daemon_owned_workspace(&data, Some(&root_s), &home_s, &ws.to_string_lossy());
+
+        // daemon 替它建的新資料夾：直接在 folders_root 底下一層。
+        let made = create_new(&root, "support", &home, &data).unwrap();
+        assert_eq!(owned(&made), Some(made.clone()));
+        // 使用者的既有資料夾、folders_root 下更深一層、folders_root 本身：都不是 daemon 的。
+        assert_eq!(owned(&base.join("project/site")), None);
+        std::fs::create_dir_all(made.join("sub")).unwrap();
+        assert_eq!(owned(&made.join("sub")), None);
+        assert_eq!(owned(&root), None);
+        // 預設根目錄（沒設 folders_root）＝ `<home>/shared-bots`。
+        let default_made = create_new(&home.join("shared-bots"), "kefu", &home, &data).unwrap();
+        assert!(daemon_owned_workspace(&data, None, &home_s, &default_made.to_string_lossy()).is_some());
+        assert_eq!(daemon_owned_workspace(&data, None, &home_s, &made.to_string_lossy()), None, "不在預設根目錄底下");
+        // 舊格式：資料目錄底下的 shared-bots/<id>/workspace。
+        let legacy = data.join("shared-bots/b1/workspace");
+        std::fs::create_dir_all(&legacy).unwrap();
+        assert_eq!(owned(&legacy), Some(legacy.clone()));
+        assert_eq!(owned(&data.join("shared-bots/b1/other")), None);
+        assert_eq!(owned(&data.join("shared-bots/b1/x/workspace")), None);
+        assert_eq!(owned(&data.join("shared-bots/b1/../b1/workspace")), None);
+        // 符號連結：folders_root 底下那層若是指到使用者資料夾的連結，不能當成 daemon 建的。
+        std::os::unix::fs::symlink(base.join("project/site"), root.join("link")).unwrap();
+        assert_eq!(owned(&root.join("link")), None);
+        // 相對路徑與危險位置照舊擋。
+        assert_eq!(daemon_owned_workspace(&data, Some(&root_s), &home_s, "relative/support"), None);
+        assert_eq!(daemon_owned_workspace(&data, Some("/etc"), &home_s, "/etc/foo"), None);
     }
 }
