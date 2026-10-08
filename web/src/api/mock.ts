@@ -434,7 +434,7 @@ function claudeModelsForIdentity(identity: string): Rec[] {
   const cfg = CLAUDE_ACCOUNT_EFFORT[identity] ?? CLAUDE_ACCOUNT_EFFORT['']
   return MODELS.claude.map((m) => ({
     ...m,
-    default_effort: cfg.overrides?.[String(m.id)] ?? cfg.global ?? CLAUDE_BUILTIN_DEFAULT_EFFORT,
+    default_effort: cfg.overrides?.[String(m.id)] ?? cfg.global ?? (String(m.id) === 'haiku' ? 'medium' : CLAUDE_BUILTIN_DEFAULT_EFFORT),
   }))
 }
 

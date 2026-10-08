@@ -64,6 +64,37 @@
         assert!(calls.lock().unwrap().last().unwrap().contains("'/home/remote-model/.claude-cc1'/settings.json"), "recovery uses the remote identity path: {:?}", calls.lock().unwrap());
     }
 
+    /// #880：沒帶 `--effort`、settings 沒有 `effortLevel` 時，內建預設按模型分（haiku medium、sonnet high）；有設定就照設定。
+    #[tokio::test]
+    async fn the_builtin_default_effort_depends_on_the_model_alias() {
+        let e = crate::testing::env().await;
+        let host = format!("model-eff-880-{}", crate::db::ulid().to_ascii_lowercase());
+        let conn = e.app.hosts.insert_remote_for_test(crate::config::HostCfg {
+            shared_session: false,
+            name: host.clone(),
+            ssh: "unused".into(),
+            ssh_port: 22,
+            ssh_opts: vec![],
+            herdr_session: "agents-manager".into(),
+            remote_path: String::new(),
+        }).await;
+        *conn.remote_home.lock().await = Some("/home/remote-model".into());
+        crate::hosts::set_ssh_fake(&host, |_| Ok(String::new()));
+        let of = |alias: &'static str| {
+            let (app, host) = (e.app.clone(), host.clone());
+            async move { claude_default_effort(&app, &host, None, alias).await.unwrap() }
+        };
+        assert_eq!(of("haiku").await, "medium");
+        assert_eq!(of("claude-haiku-5-5").await, "medium", "完整 id 也認得");
+        assert_eq!(of("sonnet").await, "high");
+        assert_eq!(of("claude-sonnet-5-5").await, "high");
+        assert_eq!(of("opus").await, "high");
+
+        crate::hosts::set_ssh_fake(&host, |_| Ok(r#"{"effortLevel":"low"}"#.into()));
+        assert_eq!(of("haiku").await, "low", "settings 的 effortLevel 蓋過內建預設");
+        assert_eq!(of("sonnet").await, "low");
+    }
+
     /// #268：遠端 settings.json 讀不到（ssh 失敗）不是「沒設定」——以前讀成 `""`，預設 effort 變成內建的 `high`，
     /// 對帳把它記進子 bot，之後沒有人會再讀一次。
     #[tokio::test]
@@ -273,6 +304,12 @@
         assert!(m3.is_empty());
         let models3 = claude_static_models(g3.as_deref(), &m3);
         assert_eq!(models3[0]["default_effort"], json!("high"));
+        // #880：haiku 的內建預設是 medium；有 global 或 override 時照設定。
+        let of3 = |id: &str| models3.iter().find(|m| m["id"] == id).unwrap()["default_effort"].clone();
+        assert_eq!(of3("haiku"), json!("medium"));
+        assert_eq!(of3("sonnet"), json!("high"));
+        let models4 = claude_static_models(Some("low"), &BTreeMap::new());
+        assert_eq!(models4.iter().find(|m| m["id"] == "haiku").unwrap()["default_effort"], json!("low"));
     }
 
     #[test]

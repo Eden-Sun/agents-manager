@@ -222,6 +222,7 @@ pub(crate) trait GrokTranscriptServices: Send + Sync {
 
 pub(crate) trait GrokTranscriptContext:
     crate::capabilities::Db
+    + crate::capabilities::BotStatusEmit
     + crate::capabilities::Emit
     + crate::hosts::HostsAccess
     + GrokTranscriptServices
@@ -233,6 +234,7 @@ pub(crate) trait GrokTranscriptContext:
 
 impl<T> GrokTranscriptContext for T where
     T: crate::capabilities::Db
+        + crate::capabilities::BotStatusEmit
         + crate::capabilities::Emit
         + crate::hosts::HostsAccess
         + GrokTranscriptServices
