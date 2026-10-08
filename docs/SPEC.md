@@ -3838,6 +3838,7 @@ AGM 控制面讀取（總管摘要、health、handoff、assignments、inbox、pe
   1. **健康 = 對外可達**：`lsof -nP -iTCP:5173 -sTCP:LISTEN -Fpn`（要用 `-F` 機器格式；Linux 用 `ss -Hltnp 'sport = :5173'` 的本地位址欄，Ubuntu server 不保證有 lsof，#676）綁 `*`／`0.0.0.0`／`[::]` 且 curl 127.0.0.1 有回應 → exit 0、不寫 log。只綁 loopback 的是**錯誤實例**。
   2. 錯誤實例：vite 且 `ppid=1`（孤兒）→ kill、等 port 放開（≤ 5 秒）再拉起；vite 但父程序活著 → 只記錄「需人工處理」；非 vite → 只記錄 pid 與 command。
   3. 找不到 node 或 `vite.js` → 記 log 跳過，**不拿 bun 代跑**。node 先取 `$HOME/.local/bin/node`，沒有才退回 `which node`；兩個都沒有才算找不到。
+     另外 worktree 不存在（`dev_worktree_missing`）、找不到 node（`dev_node_missing`）、找不到 `vite.js`（`dev_vite_missing`）都會 `agm ops-alert --source dev-server --reason <…>` 喊人（daemon 端同 source+reason 每小時一則；`AGM_BIN` 可覆寫 agm 路徑，issue #859）——只寫 log 的話 5173 掛了沒人知道。worktree 本身由主機設定建（見 `scripts/ops/README.md`），看門狗不替你建。
   4. 沒人聽 → `node vite.js --host 0.0.0.0 --port 5173 --strictPort`，用 `Bun.spawn` 的 `detached` ＋ `unref()` 脫離（**不是 `nohup`**；launchd 會在 kick 結束後收掉整個 job 的程序群），stdout／stderr 以附加模式接到 `dev-server.log`；≤ 15 秒複驗；失敗交下一輪，不在腳本內重試。
   5. 健康檢查的 `fetch` 有 3 秒逾時。「健康」還要求這一輪沒有因為 `web/bun.lock` 變動而需要重啟；需要重啟、但占用 port 的不是孤兒 vite 時不搶，留給下一輪。
   log：`supervisor/AGM/dev-server.log`、`dev-server.launchd.log`。

@@ -540,6 +540,15 @@ launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.agm.ci-watch.plist
   找不到 node 或 `vite.js` 寧可這輪不起，也不拿 bun 代跑）。
 - **看門狗用 bun、vite 一律用 node**：bun 的 upgrade socket 沒有 `destroySoon`，daemon 一重啟代理斷線 vite 會 crash。
 
+- **告警（issue #859）**：worktree 不存在、找不到 node、找不到 `vite.js` 時，除了寫 `dev-server.log`，另跑 `agm --compact ops-alert --source dev-server --reason dev_worktree_missing｜dev_node_missing｜dev_vite_missing`（daemon 端同 source+reason 每小時一則；`AGM_BIN` 可覆寫 agm 路徑）。以前這三種都只寫 log，5173 掛了沒人知道。
+- **主機設定（一次）**：5173 吃的 worktree 要先建好，換手時把臨時 unit 收掉（`am-vite-5173` 這種 transient unit 的 ppid 不是 1，看門狗不會收）：
+
+```sh
+git -C ~/project/agents-manager worktree add --detach ~/project/agents-manager-main origin/main \
+  && (cd ~/project/agents-manager-main/web && bun install --frozen-lockfile)
+systemctl --user stop am-vite-5173   # 若有臨時 unit；等下一輪看門狗用 node 拉起綁 0.0.0.0 的 vite
+```
+
 隔離測試：`bash scripts/ops/dev-server-kick_test.sh`（假 `lsof`／`ss`／`ps`／`git`／`bun`／`node`，副本的 `PORT` 換成
 測試 port，假 `lsof`／`ss` 只回報測試自己 spawn 的 pid，整套情境 lsof 與 ss 各跑一次；**不會碰真的 5173 或真的 vite**）。沒有 bun／python3 會自己 skip。
 
