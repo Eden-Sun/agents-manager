@@ -31,10 +31,23 @@ pub struct WindowHeld {
     pub expires_at: String,
 }
 
+/// `WindowHeld.resource`：herdr 一鍵更新正在換 binary／重啟 server（issue #893）。不是租約，只是同一個入場閘門的另一個原因。
+pub const HERDR_UPDATE_RESOURCE: &str = "herdr_update";
+
 impl WindowHeld {
     pub fn detail(&self) -> Value {
         let now = crate::db::now();
         let retry_after_secs = self.retry_after_secs(&now);
+        if self.resource == HERDR_UPDATE_RESOURCE {
+            return serde_json::json!({
+                "reason": "herdr_updating",
+                "resource": self.resource,
+                "retry_after_secs": retry_after_secs,
+                "retryable": true,
+                "sent": false,
+                "message": "herdr 正在更新並重啟 server，這幾秒不送新的 prompt（送進去的回合會被一起砍掉）；原樣重送即可。",
+            });
+        }
         serde_json::json!({
             "reason": "maintenance_window",
             "resource": self.resource,
