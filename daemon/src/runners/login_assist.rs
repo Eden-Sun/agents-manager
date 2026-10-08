@@ -117,6 +117,19 @@ fn not_awaiting(why: &str) -> LcError {
     )
 }
 
+/// 這顆 pane 前景程序裡 argv 是 `claude` 的那幾個 pid（`pid` 沒給＝`None`）；空＝沒有 claude 在跑。問不到就當沒有。
+async fn foreground_claude_pids(app: &Arc<App>, host: &str, pane_id: &str) -> LcResult<Vec<Option<i64>>> {
+    let Some(fence) = app.hosts.fence(host).await else { return Err(LcError::NotFound("host".into())) };
+    Ok(match fence.conn().client.pane_process_info(pane_id).await {
+        Ok(ps) => ps
+            .iter()
+            .filter(|p| p.argv.iter().chain(p.argv0.iter()).any(|a| std::path::Path::new(a).file_name().and_then(|v| v.to_str()) == Some("claude")))
+            .map(|p| p.pid)
+            .collect(),
+        Err(_) => Vec::new(),
+    })
+}
+
 fn code_already_sent() -> LcError {
     LcError::conflict(
         "code_already_sent",
@@ -125,6 +138,8 @@ fn code_already_sent() -> LcError {
 }
 
 /// `POST /api/hosts/:name/shells/:pane_id/login/code`：確認畫面還在等 code 才把它打進去、按 Enter。
+/// 兩段式送出：先打字（不按 Enter）、再複查同一顆 claude 還在才按 Enter；不在就送 ctrl+u 清掉命令列、回 `not_awaiting`。
+/// 殘餘窗口：複查到 Enter 之間 claude 剛好結束，Enter 仍會落進 shell；要根治需要 herdr 的條件式輸入（#787，issue #846）。
 /// 回 `{sent:true, outcome}`：`failed`（帶 `message`＝CLI 的 `Login failed: …`）／`finished`（CLI 結束了或 pane 已收掉，成功與否看身分列重驗）／`pending`。
 pub async fn submit_code(app: &Arc<App>, host: &str, pane_id: &str, code: &str) -> LcResult<Value> {
     let code = code.trim();
@@ -140,18 +155,24 @@ pub async fn submit_code(app: &Arc<App>, host: &str, pane_id: &str, code: &str) 
         return Err(not_awaiting(if screen.url.is_some() { "提示已經不在畫面最後一行" } else { "畫面上還沒有等 code 的提示" }));
     }
     // 前景程序還是 claude：讀畫面到打字之間 CLI 結束的話，字會落進 shell。問不到就不送。
-    let Some(fence) = app.hosts.fence(host).await else { return Err(LcError::NotFound("host".into())) };
-    let alive = match fence.conn().client.pane_process_info(pane_id).await {
-        Ok(ps) => ps.iter().any(|p| {
-            p.argv.iter().chain(p.argv0.iter()).any(|a| std::path::Path::new(a).file_name().and_then(|v| v.to_str()) == Some("claude"))
-        }),
-        Err(_) => false,
-    };
-    if !alive {
+    let claude_pids = foreground_claude_pids(app, host, pane_id).await?;
+    if claude_pids.is_empty() {
         return Err(not_awaiting("claude 已經不在這個終端裡跑了"));
     }
     claim_code_send(app, host, pane_id)?;
-    shell::send_text(app, host, pane_id, code, true).await?;
+    // 先只打字、不按 Enter：herdr 沒有條件式送字，Enter 前再複查一次同一顆 claude 還在（見函式上方註解）。
+    shell::send_text(app, host, pane_id, code, false).await?;
+    #[cfg(test)]
+    crate::race_point::hit("login_code_typed", pane_id).await;
+    let still_there = foreground_claude_pids(app, host, pane_id).await.map(|now| now.iter().any(|p| claude_pids.contains(p))).unwrap_or(false);
+    if !still_there {
+        // 字已經進過 pane，`code_sent` 維持 true（同一組 code 不能再送一次）；清掉 shell 命令列上的字，不按 Enter。
+        if let Err(e) = shell::send_keys(app, host, pane_id, &["ctrl+u".to_string()]).await {
+            tracing::warn!(host, pane_id, error = ?e, "could not clear the login code typed into the shell");
+        }
+        return Err(not_awaiting("送出前 claude 已經結束；code 沒有送出，請重新登入"));
+    }
+    shell::send_keys(app, host, pane_id, &["enter".to_string()]).await?;
     tracing::info!(host, pane_id, identity = %t.identity, "a login code was typed into the login pane");
     // 等 CLI 的反應：`Login failed` 要在 pane 被收掉之前讀走。
     let deadline = Instant::now() + OUTCOME_WAIT;

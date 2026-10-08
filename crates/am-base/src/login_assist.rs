@@ -29,7 +29,7 @@ pub const OUTCOME_WAIT: Duration = Duration::from_secs(8);
 pub const OUTCOME_POLL: Duration = Duration::from_millis(500);
 /// 登入 pane 最多活多久（watcher 的上限是 15 分鐘）；帳上的紀錄只多留一點。
 pub const MAX_AGE: Duration = Duration::from_secs(20 * 60);
-const MAX_CODE_LEN: usize = 1024;
+pub const MAX_CODE_LEN: usize = 1024;
 const MAX_URL_LEN: usize = 4096;
 pub const READ_LINES: u32 = 80;
 

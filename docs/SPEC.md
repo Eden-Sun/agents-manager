@@ -3726,7 +3726,7 @@ pane 的終端快照是 UI 顯示 device code / URL 的唯一通道；這些內�
 「立即登入」＝`loginIdentity`（打開上面的登入協助面板）。「先關掉」只存**這一頁的記憶體**（不存 daemon、不用 localStorage——關掉是「這個畫面先別吵我」，不是跨裝置的事實；兩台裝置各自關各自的），以 `since`（探測來源用固定字 `probe`）比對「同一次登出」：同一次不重複洗版，登入成功後記錄清掉，下一次被登出（或新的一次授權失敗）會再提示。沒有新增 API 路由。
 
 **手機版登入協助**（#838，使用者 2026-10-04：「手機版重新登入已失效的 claude，應該要更容易地跳出登入網站、輸入 token，用 m4p 的 cc1 驗證」；`login_assist.rs`）：同一 `(host, identity)` 同時只開一條 Claude 登入流程；在記憶體先 reservation，pane 開好後轉成 `(host, pane_id) → identity`（連同 shell 的 `created_at`，pane id 被重用時對不上；pane 關閉或 host 改指時清）。重複請求在開 pane 前回 `409 identity_login_in_progress`。
-網頁用 `GET …/shells/{pane_id}/login` 取出從畫面讀到的 OAuth 網址（`recent_unwrapped`；只交 claude 的 https authorize 網址）與「是否正在等 code」，用 `POST …/login/code` 把 code 打進**那顆登入 pane** 並按 Enter。守衛：只服務登記過的登入 pane；送前現讀畫面，**最後一個非空行必須正好是 `Paste code here if prompted >`**
+網頁用 `GET …/shells/{pane_id}/login` 取出從畫面讀到的 OAuth 網址（`recent_unwrapped`；只交 claude 的 https authorize 網址）與「是否正在等 code」，用 `POST …/login/code` 把 code 打進**那顆登入 pane** 並按 Enter（兩段式：先只打字，再複查同一顆 claude 行程還在才按 Enter；不在就送 ctrl+u 清掉命令列、回 `not_awaiting_code`、code 視為已送過。複查到 Enter 之間的殘餘窗口要靠 herdr 條件式輸入，#787）。守衛：只服務登記過的登入 pane；送前現讀畫面，**最後一個非空行必須正好是 `Paste code here if prompted >`**
 （2.1.289 真畫面：CLI 收到錯 code 會在同一行接 `Login failed: Request failed with status code 400` 然後退出，所以提示後面有字＝不在等）、前景程序必須還是 `claude`，對不上 409 `not_awaiting_code`、一個字都不送；code 只收 OAuth code 的字元集。網址與 code 不進 log／事件（同上一段 pane 快照的規則）。
 
 每個 pane 只接受一次送碼；並行或重送回 `409 code_already_sent`，避免重複輸入 OAuth code。RPC 結果不明時先關閉該登入終端再重新登入，不在同 pane 重送。送出後等 CLI 反應最多 8 秒，把 `Login failed` 帶回網頁（pane 會被 watcher 收掉）；成功與否仍由 watcher 的重驗決定（遠端 claude 問不出登入狀態的既有限制不變，UI 會講「請以實際使用為準」）。沒綁身份的 bot 重新登入（網頁自己開 shell 打指令）不經這條路，仍在終端完成。
