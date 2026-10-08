@@ -208,6 +208,8 @@ mod app_ports_r2a9;
 mod api;
 #[cfg(test)]
 mod bot_read_scope_tests;
+#[cfg(test)]
+mod ws_event_docs_tests;
 mod bot_state;
 mod intents;
 mod delete_intents;

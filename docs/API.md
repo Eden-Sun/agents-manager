@@ -462,7 +462,7 @@ daemon 重啟後就是空的（那次不會再推 `herdr_update_done`，前端�
 
 - `queued_turn`：排在下一個要送的 Turn（`status = "queued"`，§5），沒有就 `null`；前端據此把輸入框畫成「已排隊」。生產者包含 AGM 派工（2026-09-16）、bot 沒在跑時帶 `start_if_stopped` 的送出（issue #122，turn 帶 `awaits_start:1`），以及回合中帶 `queue_if_busy:true` 的使用者送出（issue #733，turn 帶 `awaits_idle:1`）。
 - `handed_off_to`（#708）：專案已移交給這台主機的 daemon 管（SPEC §6.5h），`null`＝這顆 daemon 管。有值時這個專案的 bot 列照最後的狀態凍結顯示，start／stop／restart／prompt／keys 一律 409 `handed_off`（帶 `bot_id`、`handed_off_to`、`message`）。
-- `unread` 固定 `0`（未讀由前端算）。
+- `unread`：daemon 依 `bot_reads` 算的未讀回合數（標記之後的 assistant 訊息依回合去重，排除 keep-warm 回合；沒有標記＝全部），`read_mark` 是跨裝置共用的已讀位置（`null`＝沒標過）；前端只在「正在看的那顆 bot」上以本機狀態為準，其餘用這個數字。標記怎麼寫見「`POST /api/bots/{id}/read`」（`bot_read` 事件同形，§8）。
 - 其他欄位（hosts、identities、bot 的 model/effort/fast/persona/identity/managed_by/parent_bot_id、run 的 runtime_* 等）見各節。
 
 ### `run` 物件（`null` = 沒有 active Run）
@@ -918,6 +918,19 @@ UI 標籤：`hook` 不標；`terminal_fallback` 或 `incomplete = 1` 標「終�
 | `cli_update_progress` / `cli_update_done` | 見 §12.7a |
 | `herdr_update_progress` / `herdr_update_done` | 見 §12.7b |
 | `supervisor_health` | 見「總管」一節 |
+| `supervisor_changed` | 總管面板的失效通知，`data` 是一個小物件、形狀依觸發原因而不同（`{"bot_id"}`、`{"assignment_id","status"}`、`{"summary_version"}`、`{"acked"}`、`{"ops_alert"}`、`{"deploy_now":{"sha"}}`、`{"remote":true}`…）；客戶端不要靠欄位判斷，收到就重拉自己開著的總管資料（「總管 AGM」一節） |
+| `mission_updated` | `{"mission_id","project_id","status"}`：任務狀態有變（「群組任務（mission）」一節） |
+| `bot_share_changed` | `{"bot_id","enabled"}`：這顆 bot 的分享連結開／關／重產（§5.6、SPEC §20）；只告訴前端重畫分享鈕，不帶連結 |
+| `bot_read` | `{"bot_id","read_mark":{"at","id","seq"?},"unread"}`：已讀標記前進了（`POST /api/bots/{id}/read`，同樣的標記再送、較舊的不推）；其他分頁／裝置收到就重拉 state |
+| `group_read` | `{"project_id","read_mark":{"at","id","seq"?},"unread"}`：群組已讀標記前進了（`POST /api/projects/{id}/group/read`），規則同 `bot_read` |
+| `deploy_wait` | `{"wait": <wait 物件>, "first": boolean}`：部署等待換版窗口的通知／狀態變了（`first:true`＝第一次通知）；見「部署等太久：通知與調度」、SPEC §18.10 |
+| `upstream_update` | 上游有新版的快照有變或要通知：上游一筆 item ＋ `notify`；見「上游有新版可裝」 |
+| `identities_changed` | `{}`：帳號身分（identities）有變，重拉 state（「身份 identities」一節） |
+| `identity_prefs_changed` | `{"host","kind","identity","disabled"}`：某個身分被停用／恢復（`PUT /api/identities/{name}/disabled`） |
+| `hook_fenced` | `{"bot_id","provider","run_id","prior_run_id","session_id","why"}`：上一代 run 的 hook 被世代圍籬丟棄（不改任何狀態，SPEC §4.1）；純診斷，前端可忽略 |
+| `resync` | 見上面：補不齊或 seq 倒退時送，收到就重拉 state 與訊息 |
+
+表外的 `type`（含未來新增的）前端一律忽略，不要報錯。這張表由測試 `ws_event_docs_tests` 釘住：daemon 程式碼裡 `emit("<type>", …)`／`emit_event("<type>", …)` 的每個 type 都必須出現在上表第一欄，新增事件沒寫進文件 CI 會紅。
 
 終端畫面不走 WS，輪詢 §7。
 
