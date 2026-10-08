@@ -180,6 +180,21 @@ pub(crate) fn check(text: &str) -> Result<(), SvgError> {
     Ok(())
 }
 
+/// 檢查 raw bytes：分享頁回給瀏覽器的是原始 bytes（SVG／UTF-8），所以先要求它是嚴格合法的 UTF-8，
+/// 再交給 [`check`]。不能用 `from_utf8_lossy`——它會把非法位元組抹成 U+FFFD，validator 看到的就不是瀏覽器收到的（issue #866）。
+pub(crate) fn check_bytes(data: &[u8]) -> Result<(), SvgError> {
+    match std::str::from_utf8(data) {
+        Ok(text) => check(text),
+        Err(e) => {
+            let valid = e.valid_up_to();
+            // 合法前綴一定是 UTF-8，位置指在第一個壞位元組。
+            let prefix = std::str::from_utf8(&data[..valid]).unwrap_or("");
+            let (line, col) = line_col(prefix, valid);
+            Err(SvgError { line, col, message: format!("檔案不是合法 UTF-8 SVG（第 {} 個位元組起不是合法的 UTF-8）", valid + 1) })
+        }
+    }
+}
+
 /// 給 bot 的那一則（後台，分享頁看不到）。
 pub(crate) fn reminder(name: &str, e: &SvgError) -> String {
     format!(
@@ -293,8 +308,7 @@ pub(crate) async fn check_file<H: SvgCheckEnv>(app: &Arc<H>, bot_id: &str, name:
     if read.data.len() > MAX_CHECK_BYTES {
         return None;
     }
-    let text = String::from_utf8_lossy(&read.data);
-    let e = match check(&text) {
+    let e = match check_bytes(&read.data) {
         Ok(()) => {
             mark_healthy(bot_id, name);
             return None;
@@ -385,6 +399,21 @@ mod tests {
         assert!(check("<svg><text>AT&T</text></svg>").is_err(), "裸 &（quick-xml 自己報）");
         assert!(bad("<svg a=\"1\" a=\"2\"/>").message.contains("屬性"), "重複屬性");
         assert!(bad("").message.contains("根元素"), "空檔");
+    }
+
+    #[test]
+    fn invalid_utf8_bytes_are_rejected_not_repaired_by_lossy_conversion() {
+        // 結構正確，但文字節點裡有 0xFF（不是合法 UTF-8）。
+        let raw: &[u8] = b"<svg xmlns=\"http://www.w3.org/2000/svg\">\n<text>\xFF</text></svg>";
+        assert_eq!(check(&String::from_utf8_lossy(raw)), Ok(()), "lossy 之後 well-formed——正是原本漏掉的原因");
+        let e = check_bytes(raw).expect_err("非法 UTF-8 要擋下");
+        assert!(e.message.contains("不是合法 UTF-8 SVG"), "{e:?}");
+        assert_eq!((e.line, e.col), (2, 7), "指在第一個壞位元組：{e:?}");
+        // 有 encoding 宣告也一樣擋。
+        let decl: &[u8] = b"<?xml version=\"1.0\" encoding=\"UTF-8\"?><svg><text>\xC3\x28</text></svg>";
+        assert!(check_bytes(decl).expect_err("宣告 UTF-8 卻非法").message.contains("不是合法 UTF-8 SVG"));
+        // 合法的多位元組 UTF-8 照過。
+        assert_eq!(check_bytes("<?xml version=\"1.0\" encoding=\"UTF-8\"?><svg><text>嗨 ÿ</text></svg>".as_bytes()), Ok(()));
     }
 
     #[test]
