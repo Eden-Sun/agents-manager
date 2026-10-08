@@ -532,6 +532,19 @@ am_cargo() {
     case "$_wait" in *[!0-9]* | '') _wait=120 ;; esac
     _down_max=$((_wait / 3))
     [ "$_down_max" -ge 1 ] || _down_max=1
+    # 等名額途中放棄（Ctrl-C、被砍、呼叫端走了）要把排隊的號碼牌退掉（issue #913）：空 token 的 release＝取消這個 holder 的
+    # waiting 列，沒有這一步它會留到 daemon 的 60 秒 stale 才被收，後面的人有空名額也要空等。要帶跟 acquire 一樣的身分。
+    _cancel_wait() {
+        if [ -n "${AM_BOT_ID:-}" ]; then
+            curl -s -m 5 -X POST "${_url}/release" -H "$_auth" -H "X-AM-Bot-Id: ${AM_BOT_ID}" \
+                --data-urlencode "holder=${_holder}" --data-urlencode "token=" --data-urlencode "bot_id=${_bot_id}" >/dev/null 2>&1
+        else
+            curl -s -m 5 -X POST "${_url}/release" -H "$_auth" \
+                --data-urlencode "holder=${_holder}" --data-urlencode "token=" >/dev/null 2>&1
+        fi
+        return 0
+    }
+    trap '_cancel_wait; exit 130' INT TERM
     _attempt=0
     _down=0
     while :; do
@@ -566,6 +579,7 @@ am_cargo() {
                     # 呼叫端（叫我們的 shell／agent）已經不在了：沒有人在等這次建置，不要留一個永遠在等名額的孤兒。
                     if am_caller_gone; then
                         printf 'agents-manager: 呼叫端已經結束，不再等 cargo 名額\n' >&2
+                        _cancel_wait
                         exit 1
                     fi
                     _retry=$(am_json_field retry_after_secs "$_resp")
@@ -602,6 +616,7 @@ am_cargo() {
         fi
         if am_caller_gone; then
             printf 'agents-manager: 呼叫端已經結束，不再等 build scheduler\n' >&2
+            _cancel_wait
             exit 1
         fi
         sleep 3

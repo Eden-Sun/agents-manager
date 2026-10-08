@@ -2,6 +2,7 @@
     use super::*;
     use crate::runners::build_scheduler::{get_status, post_acquire, post_release, post_renew};
     use axum::extract::{Form, State};
+    use axum::http::HeaderMap;
     use axum::response::IntoResponse;
     use crate::state::App;
     use std::sync::Arc;
@@ -59,7 +60,7 @@
         let app = env.app.clone();
         let Acquired::Granted { token, .. } = acquire(&app, "A:1", None, "test", "local").await.unwrap() else { panic!() };
         tt::make_table_unreadable(&app, "build_slots").await;
-        let (code, body) = post_release(State(app.clone()), Form(ReleaseIn { holder: "A:1".into(), token: token.clone() })).await;
+        let (code, body) = post_release(State(app.clone()), HeaderMap::new(), Form(ReleaseIn { holder: "A:1".into(), token: token.clone(), bot_id: None })).await;
         tt::make_table_readable(&app, "build_slots").await;
         assert_eq!(code, axum::http::StatusCode::SERVICE_UNAVAILABLE);
         assert_eq!(body.0["released"], false);
@@ -117,7 +118,7 @@
         let renew_error = post_renew(State(app.clone()), Form(RenewIn { holder: huge.clone(), token: token.clone() })).await.unwrap_err();
         assert!(matches!(renew_error, LcError::Bad(_)), "renew bypassed the holder field cap: {renew_error:?}");
 
-        let (code, body) = post_release(State(app.clone()), Form(ReleaseIn { holder: huge, token: token.clone() })).await;
+        let (code, body) = post_release(State(app.clone()), HeaderMap::new(), Form(ReleaseIn { holder: huge, token: token.clone(), bot_id: None })).await;
         assert_eq!(code, axum::http::StatusCode::BAD_REQUEST, "release bypassed the holder field cap: {body:?}");
         assert_eq!(body.0["released"], false);
         assert!(matches!(renew(&app, "held", &token).await.unwrap(), Ok(_)), "rejected oversized requests must leave the real lease intact");
@@ -267,12 +268,77 @@
         // stored lease itself so an unauthenticated caller cannot free somebody else's capacity.
         let (code, body) = post_release(
             State(app.clone()),
-            Form(ReleaseIn { holder: "victim".into(), token: "guessed-token".into() }),
+            HeaderMap::new(),
+            Form(ReleaseIn { holder: "victim".into(), token: "guessed-token".into(), bot_id: None }),
         )
         .await;
         assert_eq!(code, axum::http::StatusCode::OK);
         assert_eq!(body.0["released"], true);
         assert!(matches!(renew(&app, "victim", &token).await.unwrap(), Ok(_)), "the valid lease must remain held");
+    }
+
+    /// issue #913：等名額途中放棄的 shim 空 token 取消自己的號碼牌，後面的人立刻能拿到名額，不必等 `STALE_WAITING`。
+    #[tokio::test]
+    async fn a_waiter_that_gives_up_releases_its_place_at_once() {
+        let env = tt::env().await;
+        let app = env.app.clone();
+        set_max_concurrent(&app, 1).await;
+        let Acquired::Granted { token, .. } = acquire(&app, "A:1", None, "test", "local").await.unwrap() else { panic!() };
+        let Acquired::Waiting { .. } = acquire(&app, "B:2", None, "test", "local").await.unwrap() else { panic!("滿了應該要等") };
+        // C 排在 B 後面；A 放掉名額後，B 的號碼牌（沒有 poll、也沒被取消）還在最前面，C 要讓它。
+        let Acquired::Waiting { .. } = acquire(&app, "C:3", None, "test", "local").await.unwrap() else { panic!("滿了應該要等") };
+        release(&app, "A:1", &token).await.unwrap();
+        assert!(matches!(acquire(&app, "C:3", None, "test", "local").await.unwrap(), Acquired::Waiting { .. }), "B 的號碼牌還在前面，C 不能插隊");
+        // B 放棄：不改 last_seen（沒有等 60 秒），空 token 直接退號碼牌。
+        release_as(&app, "B:2", "", None).await.unwrap();
+        assert!(matches!(acquire(&app, "C:3", None, "test", "local").await.unwrap(), Acquired::Granted { .. }), "B 退號碼牌後 C 立刻拿到");
+    }
+
+    /// 空 token 只動 `waiting` 列：持有中的名額不會被它放掉。
+    #[tokio::test]
+    async fn release_with_an_empty_token_does_not_touch_a_held_slot() {
+        let env = tt::env().await;
+        let app = env.app.clone();
+        set_max_concurrent(&app, 1).await;
+        let Acquired::Granted { token, .. } = acquire(&app, "A:1", Some("BOTA"), "test", "local").await.unwrap() else { panic!() };
+        release_as(&app, "A:1", "", Some("BOTA")).await.unwrap();
+        release_as(&app, "A:1", "", None).await.unwrap();
+        assert!(matches!(renew(&app, "A:1", &token).await.unwrap(), Ok(_)), "held 列還在、token 還有效");
+    }
+
+    /// 別顆 bot 的號碼牌不能被取消（沿用 acquire 的 holder 歸屬守衛）；自己的可以。
+    #[tokio::test]
+    async fn a_waiting_row_of_another_bot_is_not_cancelled() {
+        let env = tt::env().await;
+        let app = env.app.clone();
+        set_max_concurrent(&app, 1).await;
+        acquire(&app, "H:1", None, "test", "local").await.unwrap();
+        let Acquired::Waiting { .. } = acquire(&app, "W:2", Some("BOTA"), "test", "local").await.unwrap() else { panic!("滿了應該要等") };
+        let waiting = || async { status(&app).await.unwrap()["slots"].as_array().unwrap().iter().any(|v| v["holder"] == "W:2") };
+        release_as(&app, "W:2", "", Some("BOTB")).await.unwrap();
+        assert!(waiting().await, "BOTB 取消不了 BOTA 的號碼牌");
+        release_as(&app, "W:2", "", Some("BOTA")).await.unwrap();
+        assert!(!waiting().await, "自己的可以取消");
+    }
+
+    /// HTTP 層：空 token 沒帶身分 → 403；帶 bot 身分只能取消自己的；一般 token 的放名額照舊不需要標頭。
+    #[tokio::test]
+    async fn cancelling_a_wait_over_http_needs_an_identity() {
+        let env = tt::env().await;
+        let app = env.app.clone();
+        set_max_concurrent(&app, 1).await;
+        let bot = a_bot(&env, "tok-a").await;
+        acquire(&app, "H:1", None, "test", "local").await.unwrap();
+        let Acquired::Waiting { .. } = acquire(&app, "W:2", Some(&bot), "test", "local").await.unwrap() else { panic!("滿了應該要等") };
+        let (code, _) = post_release(State(app.clone()), HeaderMap::new(), Form(ReleaseIn { holder: "W:2".into(), token: String::new(), bot_id: None })).await;
+        assert_eq!(code, axum::http::StatusCode::FORBIDDEN, "沒有身分不能取消");
+        let mut headers = HeaderMap::new();
+        headers.insert("X-AM-Bot-Id", bot.parse().unwrap());
+        headers.insert("X-AM-Bot-Token", "tok-a".parse().unwrap());
+        let (code, _) = post_release(State(app.clone()), headers, Form(ReleaseIn { holder: "W:2".into(), token: String::new(), bot_id: Some(bot.clone()) })).await;
+        assert_eq!(code, axum::http::StatusCode::OK);
+        let s = status(&app).await.unwrap();
+        assert!(!s["slots"].as_array().unwrap().iter().any(|v| v["holder"] == "W:2"), "取消後號碼牌不在了");
     }
 
     /// sweep 收掉過期的 held 與太久沒 poll 的 waiting；還在正常範圍內的 waiting 不動（正在排隊，只是隊伍長）。
