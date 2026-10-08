@@ -96,6 +96,17 @@ pub fn last_deploy() -> serde_json::Value {
 mod tests {
     use super::*;
 
+    /// build.rs 的 rerun 範圍要涵蓋整個 workspace（#884）：只看自己 crate 的 `src` 時，改了別的 crate 不會重算 dirty。
+    /// `include_str!` 相對於這個檔案，在 am-supervisor 本身與 daemon（`#[path]` 引入）兩邊都解得到同一支 build.rs。
+    #[test]
+    fn the_build_script_reruns_when_any_workspace_crate_changes() {
+        let script = include_str!("../build.rs");
+        for p in ["../../daemon/src", "../../crates", "../../Cargo.toml", "../../Cargo.lock"] {
+            assert!(script.contains(p), "build.rs must keep `{p}` in its rerun-if-changed list");
+        }
+        assert!(script.contains("rerun-if-changed"), "the rerun hook itself must stay");
+    }
+
     /// 沒有 git 也要能編、能答：說 `unknown` 比編一個假 sha 好。
     #[test]
     fn the_build_sha_is_present_and_the_start_time_is_stable() {

@@ -52,6 +52,11 @@ fn main() {
     }
     println!("cargo:rerun-if-changed=src");
     println!("cargo:rerun-if-changed=Cargo.toml");
+    // 髒樹判斷看的是整個 workspace 的追蹤檔：binary 由 daemon／其他 crate 的程式碼組成，只看自己的 `src` 時，
+    // 改了別的 crate 重建不會重跑這支，`-dirty`／sha 就停在上一次的答案，防線可被繞過（#884）。
+    for p in ["../../daemon/src", "../../crates", "../../Cargo.toml", "../../Cargo.lock"] {
+        println!("cargo:rerun-if-changed={p}");
+    }
 }
 
 #[cfg(test)]
