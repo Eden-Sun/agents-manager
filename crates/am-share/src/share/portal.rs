@@ -53,6 +53,13 @@ pub const INBOX_MAX_FILES: usize = 300;
 const MAX_ATTACHMENTS: usize = 20;
 /// 全站同時讀取幾個上傳 body（每個最多 [`MAX_UPLOAD`]，佔記憶體）。
 const UPLOAD_SLOTS: usize = 2;
+/// 單一分享同時佔用的上傳名額（進行中＋排隊合計）：避免一個連結佔滿全站 [`UPLOAD_SLOTS`] 與 [`UPLOAD_QUEUE_MAX`]。
+/// 官方頁是一張一張送，4 夠重試與兩個分頁。
+pub(crate) const UPLOAD_INFLIGHT_PER_SHARE: usize = 4;
+/// 全站同時進行的分享檔下載（body 串流到送完才放）。
+const DOWNLOAD_SLOTS: usize = 8;
+/// 單一分享同時進行的下載。
+const DOWNLOADS_PER_SHARE: usize = 2;
 /// 名額滿了的上傳排隊等多久：等的時候 body 還沒讀、不扣這個分享的每分鐘額度；等不到才 429。
 #[cfg(not(test))]
 const UPLOAD_QUEUE_WAIT: Duration = Duration::from_secs(60);
@@ -122,10 +129,16 @@ pub struct Portal<H: PortalEnv> {
     uploads: Arc<Semaphore>,
     /// 排隊等 [`Portal::uploads`] 的名額（[`UPLOAD_QUEUE_MAX`]）。
     upload_queue: Arc<Semaphore>,
+    /// 每個分享的上傳名額（進行中＋排隊，[`UPLOAD_INFLIGHT_PER_SHARE`]）。
+    share_uploads: Arc<PerShareSlots>,
+    /// 全站同時進行的下載（[`DOWNLOAD_SLOTS`]）。
+    downloads: Arc<Semaphore>,
+    /// 每個分享的下載名額（[`DOWNLOADS_PER_SHARE`]）。
+    share_downloads: Arc<PerShareSlots>,
     /// 排隊最多等多久（測試可改）。
     upload_wait: Duration,
     streams: Arc<Semaphore>,
-    share_streams: Arc<ShareStreamLimits>,
+    share_streams: Arc<PerShareSlots>,
     token_lookups: Arc<Semaphore>,
 }
 
@@ -136,6 +149,9 @@ impl<H: PortalEnv> Clone for Portal<H> {
             limits: self.limits.clone(),
             uploads: self.uploads.clone(),
             upload_queue: self.upload_queue.clone(),
+            share_uploads: self.share_uploads.clone(),
+            downloads: self.downloads.clone(),
+            share_downloads: self.share_downloads.clone(),
             upload_wait: self.upload_wait,
             streams: self.streams.clone(),
             share_streams: self.share_streams.clone(),
@@ -144,29 +160,34 @@ impl<H: PortalEnv> Clone for Portal<H> {
     }
 }
 
-#[derive(Default)]
-struct ShareStreamLimits {
+/// 每個分享（每顆 bot）同時佔用的名額計數，上限由建構時給定。permit 放掉時歸零就移除 key。
+pub(crate) struct PerShareSlots {
+    max: usize,
     active: Mutex<HashMap<String, usize>>,
 }
 
-impl ShareStreamLimits {
-    fn try_acquire(self: &Arc<Self>, bot_id: &str) -> Option<ShareStreamPermit> {
+impl PerShareSlots {
+    pub(crate) fn new(max: usize) -> Self {
+        Self { max, active: Mutex::new(HashMap::new()) }
+    }
+
+    pub(crate) fn try_acquire(self: &Arc<Self>, bot_id: &str) -> Option<PerSharePermit> {
         let mut active = self.active.lock().unwrap_or_else(|e| e.into_inner());
         let count = active.entry(bot_id.to_string()).or_default();
-        if *count >= MAX_STREAMS_PER_SHARE {
+        if *count >= self.max {
             return None;
         }
         *count += 1;
-        Some(ShareStreamPermit { owner: self.clone(), bot_id: bot_id.to_string() })
+        Some(PerSharePermit { owner: self.clone(), bot_id: bot_id.to_string() })
     }
 }
 
-struct ShareStreamPermit {
-    owner: Arc<ShareStreamLimits>,
+pub(crate) struct PerSharePermit {
+    owner: Arc<PerShareSlots>,
     bot_id: String,
 }
 
-impl Drop for ShareStreamPermit {
+impl Drop for PerSharePermit {
     fn drop(&mut self) {
         let mut active = self.owner.active.lock().unwrap_or_else(|e| e.into_inner());
         let remove = if let Some(count) = active.get_mut(&self.bot_id) {
@@ -238,9 +259,12 @@ pub fn router<H: PortalEnv>(app: Arc<H>) -> Router {
         limits: Arc::new(Limits::default()),
         uploads: Arc::new(Semaphore::new(UPLOAD_SLOTS)),
         upload_queue: Arc::new(Semaphore::new(UPLOAD_QUEUE_MAX)),
+        share_uploads: Arc::new(PerShareSlots::new(UPLOAD_INFLIGHT_PER_SHARE)),
+        downloads: Arc::new(Semaphore::new(DOWNLOAD_SLOTS)),
+        share_downloads: Arc::new(PerShareSlots::new(DOWNLOADS_PER_SHARE)),
         upload_wait: UPLOAD_QUEUE_WAIT,
         streams: Arc::new(Semaphore::new(MAX_STREAMS)),
-        share_streams: Arc::new(ShareStreamLimits::default()),
+        share_streams: Arc::new(PerShareSlots::new(MAX_STREAMS_PER_SHARE)),
         token_lookups: Arc::new(Semaphore::new(MAX_TOKEN_LOOKUPS)),
     };
     router_with_state(st)
@@ -439,6 +463,10 @@ async fn upload_admission<H: PortalEnv>(State(st): State<Portal<H>>, Path(token)
     };
     #[cfg(test)]
     crate::race_point::hit("share_upload_after_bot_for", &bot_id).await;
+    // 單一分享的進行中＋排隊上限：先於全站名額檢查，一個連結不能把全站的名額與排隊位子佔滿。permit 跟 `_permit` 一樣活到回應結束。
+    let Some(_share_permit) = st.share_uploads.try_acquire(&bot_id) else {
+        return too_many(5, "upload_per_share");
+    };
     // 全域上傳名額滿了就排隊等（分享頁一次選好幾張照片時會同時送來）。等的時候還沒讀 body，不算一次上傳嘗試，
     // 否則別的分享占滿名額時，重試會把這顆 bot 的每分鐘額度扣光。排隊的人太多、或等太久才 429。
     let _permit = match st.uploads.clone().try_acquire_owned() {
@@ -766,7 +794,7 @@ pub struct Stream<H: PortalEnv> {
     rx: broadcast::Receiver<WsEvent>,
     kicks: broadcast::Receiver<String>,
     _slot: tokio::sync::OwnedSemaphorePermit,
-    _share_slot: ShareStreamPermit,
+    _share_slot: PerSharePermit,
     pending: Option<Value>,
     emit_guard: Option<OwnedMutexGuard<()>>,
     revoked: bool,
@@ -888,7 +916,7 @@ pub fn stream_for_test<H: PortalEnv>(app: &Arc<H>, token: &str, bot_id: &str, pe
         rx: app.subscribe_events(),
         kicks: kicks().subscribe(),
         _slot: Arc::new(Semaphore::new(1)).try_acquire_owned().unwrap(),
-        _share_slot: Arc::new(ShareStreamLimits::default()).try_acquire(bot_id).unwrap(),
+        _share_slot: Arc::new(PerShareSlots::new(MAX_STREAMS_PER_SHARE)).try_acquire(bot_id).unwrap(),
         pending,
         emit_guard: None,
         revoked: false,
