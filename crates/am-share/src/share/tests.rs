@@ -2152,5 +2152,39 @@ async fn compose_waits_for_the_global_slot() {
     assert!(r.text().await.unwrap().contains(r#"<image href="data:image/jpeg;base64,"#));
 }
 
+/// #843：同一秒、同樣長度地把壞掉的 SVG 修好，`modified_at`（秒）與 `size` 都一樣，但 `version` 要換，分享頁才知道要重抓、後端才會重查。
+#[tokio::test]
+async fn a_same_second_same_size_rewrite_gets_a_new_version() {
+    let e = tt::env().await;
+    let b = restricted_bot(&e.app, &e.project_id, "pub").await;
+    let token = shared(&e.app, &b.id).await;
+    let outbox = crate::outbox::ensure(&e.app.data_dir, &b.id).unwrap();
+    // 兩份同長度：壞的少一個空格（`"380"font-size`），好的把那個空格補上、少一個空白字元。
+    let broken = "<svg xmlns=\"http://www.w3.org/2000/svg\"><text x=\"540\" y=\"380\"font-size=\"100\">hi</text> </svg>";
+    let valid = "<svg xmlns=\"http://www.w3.org/2000/svg\"><text x=\"540\" y=\"380\" font-size=\"100\">hi</text></svg>";
+    assert_eq!(broken.len(), valid.len());
+    let pin = |nsec: u32| {
+        let f = std::fs::OpenOptions::new().write(true).open(outbox.join("card.svg")).unwrap();
+        f.set_times(std::fs::FileTimes::new().set_modified(std::time::UNIX_EPOCH + Duration::new(1_700_000_000, nsec))).unwrap();
+    };
+    std::fs::write(outbox.join("card.svg"), broken).unwrap();
+    pin(100);
+    let base = serve(portal::router(e.app.clone())).await;
+    let c = client();
+    let get = || async { c.get(format!("{base}/s/{token}/api/files")).send().await.unwrap().json::<Value>().await.unwrap()["files"][0].clone() };
+    let before = get().await;
+    assert!(before["version"].as_str().is_some_and(|v| !v.is_empty()), "{before}");
+    assert!(!super::svg_check::claim(&b.id, "card.svg", before["version"].as_str().unwrap()), "第一次讀清單已經領過這一版");
+
+    std::fs::write(outbox.join("card.svg"), valid).unwrap();
+    pin(200);
+    let after = get().await;
+    assert_eq!(after["size"], before["size"]);
+    assert_eq!(after["modified_at"], before["modified_at"], "秒數相同：{before} / {after}");
+    assert_ne!(after["version"], before["version"], "{before} / {after}");
+    assert!(!super::svg_check::claim(&b.id, "card.svg", after["version"].as_str().unwrap()), "第二次讀清單把新版領走了（背景重查）");
+    assert_eq!(super::svg_check::check_file(&e.app, &b.id, "card.svg").await, None, "修好了");
+}
+
 #[path = "trusted_tests.rs"]
 mod trusted;

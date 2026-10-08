@@ -253,20 +253,20 @@ pub fn request_id(bot_id: &str, name: &str, version: &str, e: &SvgError) -> Stri
     format!("share-svg-check-{hex}")
 }
 
-/// 查過的版本：(bot, 檔名) → (mtime, 大小)。同一版不重查。
-fn checked() -> &'static Mutex<HashMap<(String, String), (String, i64)>> {
-    static M: OnceLock<Mutex<HashMap<(String, String), (String, i64)>>> = OnceLock::new();
+/// 查過的版本：(bot, 檔名) → 檔案版本（`scan_checked` 的 `version`：inode／大小／奈秒 mtime／ctime）。同一版不重查。
+fn checked() -> &'static Mutex<HashMap<(String, String), String>> {
+    static M: OnceLock<Mutex<HashMap<(String, String), String>>> = OnceLock::new();
     M.get_or_init(Default::default)
 }
 
-/// 這一版要不要查（沒查過、或 mtime／大小變了）。要查就先記下，免得同時兩個清單請求各查一次。
-fn claim(bot_id: &str, name: &str, version: &(String, i64)) -> bool {
+/// 這一版要不要查（沒查過、或版本變了）。要查就先記下，免得同時兩個清單請求各查一次。
+pub(super) fn claim(bot_id: &str, name: &str, version: &str) -> bool {
     let mut m = checked().lock().unwrap_or_else(std::sync::PoisonError::into_inner);
     let key = (bot_id.to_string(), name.to_string());
-    if m.get(&key) == Some(version) {
+    if m.get(&key).map(String::as_str) == Some(version) {
         return false;
     }
-    m.insert(key, version.clone());
+    m.insert(key, version.to_string());
     true
 }
 
@@ -331,7 +331,7 @@ pub async fn check_file<H: SvgCheckEnv>(app: &Arc<H>, bot_id: &str, name: &str) 
     Some(e)
 }
 
-/// 分享頁讀清單時叫：清單上每個 `.svg`（`files` 是 portal 回的 `{name, size, modified_at}`），沒查過的這一版在背景查。
+/// 分享頁讀清單時叫：清單上每個 `.svg`（`files` 是 portal 回的 `{name, size, modified_at, version}`），沒查過的這一版在背景查。
 pub fn spawn_check<H: SvgCheckEnv>(app: &Arc<H>, bot_id: &str, files: &[serde_json::Value]) {
     let todo: Vec<String> = files
         .iter()
@@ -341,7 +341,11 @@ pub fn spawn_check<H: SvgCheckEnv>(app: &Arc<H>, bot_id: &str, files: &[serde_js
                 return None;
             }
             let size = f.get("size").and_then(|v| v.as_i64()).unwrap_or(-1);
-            let version = (f.get("modified_at").and_then(|v| v.as_str()).unwrap_or("").to_string(), size);
+            // 沒有 `version`（舊資料）就退回 modified_at-size。
+            let version = match f.get("version").and_then(|v| v.as_str()).filter(|v| !v.is_empty()) {
+                Some(v) => v.to_string(),
+                None => format!("{}-{size}", f.get("modified_at").and_then(|v| v.as_str()).unwrap_or("")),
+            };
             if size > MAX_CHECK_BYTES as i64 {
                 claim(bot_id, name, &version);
                 return None;

@@ -32,9 +32,9 @@ export function mockShareClient(token: string): ShareClient {
     { id: 'm4', role: 'assistant', text: '另外幫你做了一張早安圖卡，就在下面。按「分享」可以直接傳給朋友。', created_at: ago(30), attachments: [] },
   ]
   const files: (ShareFile & { body: string })[] = [
-    { name: 'config.toml', size: 418, modified_at: ago(39), body: 'listen = "127.0.0.1:7789"\n' },
-    { name: '安裝步驟.md', size: 2_310, modified_at: ago(120), body: '# 安裝步驟\n' },
-    { name: '星期日早安圖卡.svg', size: MOCK_CARD.length, modified_at: ago(30), body: MOCK_CARD },
+    { name: 'config.toml', size: 418, modified_at: ago(39), version: 'mock-config-1', body: 'listen = "127.0.0.1:7789"\n' },
+    { name: '安裝步驟.md', size: 2_310, modified_at: ago(120), version: 'mock-install-1', body: '# 安裝步驟\n' },
+    { name: '星期日早安圖卡.svg', size: MOCK_CARD.length, modified_at: ago(30), version: 'mock-card-1', body: MOCK_CARD },
   ]
   const previews = new Map<string, string>()
   let status: ShareStatus = 'idle'

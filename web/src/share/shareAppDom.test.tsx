@@ -439,6 +439,37 @@ test('檔案換版（bot 修好、SSE resync 重抓清單）就重試：「還�
   assert.equal(document.querySelector('.sh-file-list .sh-png-note'), null)
 })
 
+test('同秒同大小重寫（時間、大小都沒變，只有 version 變）也算換版：重抓檔案、「還在修」變回按鈕 (issue #843)', async () => {
+  let ev: ShareEvents | null = null
+  let fixed = false
+  let fetches = 0
+  const client: ShareClient = {
+    ...mockShareClient(TOKEN),
+    files: async () => [{ name: '早安.png', size: 3, modified_at: '2026-10-04T00:00:00Z', version: fixed ? 'v2' : 'v1' }],
+    fileBlob: async () => {
+      fetches++
+      if (!fixed) throw new Error('decode')
+      return new Blob(['png'], { type: 'image/png' })
+    },
+    subscribe(e) {
+      ev = e
+      return () => {}
+    },
+  }
+  await mount(<ShareApp client={client} />)
+  await settle(300)
+  assert.equal(document.querySelector('.sh-file-list .sh-png-note')!.textContent, '這張圖還在修，請稍等')
+  const before = fetches
+  fixed = true
+  await act(async () => {
+    ev!.onResync?.()
+  })
+  await settle(300)
+  assert.ok(fetches > before, 'version 變了就重抓')
+  assert.ok(document.querySelector('.sh-file-list .sh-png-btn'), '修好的那一版有按鈕')
+  assert.equal(document.querySelector('.sh-file-list .sh-png-note'), null)
+})
+
 test('resync（對話被倒回）：整頁重抓並取代手上的清單；前綴不顯示', async () => {
   let ev: ShareEvents | null = null
   let page: ShareMessage[] = [

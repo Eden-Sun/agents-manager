@@ -412,6 +412,7 @@ pub fn scan(dir: &std::fs::File, now: u64) -> Vec<serde_json::Value> {
 /// 分享入口只能回傳完整且逐項驗證過的清單；讀取失敗時呼叫端回 503，而不把部分結果當成空清單。
 pub fn scan_checked(dir: &std::fs::File, now: u64) -> Result<Vec<serde_json::Value>, ()> {
     use std::io::Read;
+    use std::os::unix::fs::MetadataExt as _;
     let entries = trusted_open::read_dir_bound(dir).map_err(|_| ())?;
     let mut files = Vec::new();
     for e in entries {
@@ -428,17 +429,22 @@ pub fn scan_checked(dir: &std::fs::File, now: u64) -> Result<Vec<serde_json::Val
         if content_is_withheld(&head[..n]) {
             continue;
         }
+        // 檔案版本：同秒同大小重寫秒數與大小都一樣（#843），所以另外帶 inode／奈秒 mtime／ctime，不透明字串。
+        let version = file
+            .metadata()
+            .map(|m| format!("{:x}-{:x}-{:x}-{:x}", m.ino(), m.len(), m.mtime() as i128 * 1_000_000_000 + m.mtime_nsec() as i128, m.ctime() as i128 * 1_000_000_000 + m.ctime_nsec() as i128))
+            .map_err(|_| ())?;
         let secs = |t: std::time::SystemTime| t.duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0);
         let modified = secs(e.modified);
-        files.push((name, e.size, modified, modified.max(secs(e.changed))));
+        files.push((name, e.size, modified, modified.max(secs(e.changed)), version));
     }
     files.sort_by(|a, b| b.3.cmp(&a.3).then_with(|| a.0.cmp(&b.0)));
     files.truncate(MAX_ENTRIES);
     Ok(files
         .into_iter()
-        .map(|(name, size, modified, landed)| {
+        .map(|(name, size, modified, landed, version)| {
             let expires_at = landed + TTL_SECS;
-            json!({"name": name, "size": size, "modified": modified, "expires_at": expires_at, "remaining_secs": expires_at.saturating_sub(now)})
+            json!({"name": name, "size": size, "modified": modified, "version": version, "expires_at": expires_at, "remaining_secs": expires_at.saturating_sub(now)})
         })
         .collect())
 }
