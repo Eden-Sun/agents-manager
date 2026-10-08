@@ -1025,7 +1025,8 @@ bot 或 active Run 不存在 404。
 ```
 
 - 只列**第一層的一般檔案**（不遞迴；子目錄、符號連結與硬連結不列），新的排前面，最多 300 筆。
-- 分享用 bot（SPEC §20.5）：outbox 不清，回 `ttl_secs:null`、`kept:true`，每個檔 `expires_at`／`remaining_secs` 為 `null`。
+- 分享用 bot（SPEC §20.5）：outbox 走分享保留政策（14 天、500 MiB／1000 檔，超過從最舊刪），回 `ttl_secs:null`、`kept:true`、`keep_days:14`，每個檔 `expires_at`／`remaining_secs` 為 `null`，另回
+  `share_usage:{bytes, files, truncated, cap:{bytes:524288000, files:1000}, keep_days:14}`（整棵 outbox 的用量，不受上面 300 筆列表上限影響；`truncated:true` 表示樹太大、數字是下限）。
 - `expires_at` = mtime 與 ctime（檔案搬進 outbox 的時間）較晚的那個 + `ttl_secs`（`modified` 仍是 mtime）；`remaining_secs` 是回應當下還剩幾秒，到期是 0（AGM 的 `com.agm.outbox-gc` 每 10 分鐘才清一次，0 的檔案還會出現一下）。前端從回應那一刻往下扣，不拿瀏覽器時鐘比 `expires_at`。
 - **一律不列**：隱藏檔、資料庫與旁檔（檔名含 `.sqlite`，或 `.db` 結尾／`.db-`／`.db.`）、金鑰與憑證（`.pem` `.key` `.p12` `.pfx` `.jks` `.keystore` `.ppk` `.kdbx` `.env` `.token` `.keychain`、`id_rsa*` 等，以及 `auth.json`、`credentials.json`、`application_default_credentials.json`、`hosts.yml`、`ui-token`），以及檔頭是 `SQLite format 3` 或 PEM 私鑰的檔案。規則本來就禁止放這些，這是第二道。
 - 目錄不存在（還沒寫過、被清理收掉）→ `200` 空清單。bot 不存在 404。

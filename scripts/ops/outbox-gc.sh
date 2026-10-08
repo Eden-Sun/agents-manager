@@ -42,20 +42,58 @@ OUTBOX=.
 case "$MAX_AGE_MIN" in ''|*[!0-9]*) MAX_AGE_MIN=60 ;; esac
 NOW=${OUTBOX_GC_NOW:-$(date +%s)}
 CUTOFF=$((NOW - MAX_AGE_MIN * 60))
+# 分享保留政策（#850，派工者決定）：有 `.am-share-keep` 標記的目錄保留 SHARE_KEEP_DAYS 天、總量不超過 SHARE_CAP_BYTES／SHARE_CAP_FILES。
+# 數字與 daemon 的 `outbox::SHARE_KEEP_DAYS`／`SHARE_OUTBOX_MAX_BYTES`／`SHARE_OUTBOX_MAX_FILES` 同一組；環境變數是測試接縫。
+SHARE_KEEP_DAYS=${OUTBOX_SHARE_KEEP_DAYS:-14}
+SHARE_CAP_BYTES=${OUTBOX_SHARE_CAP_BYTES:-524288000}
+SHARE_CAP_FILES=${OUTBOX_SHARE_CAP_FILES:-1000}
+case "$SHARE_KEEP_DAYS" in ''|*[!0-9]*) SHARE_KEEP_DAYS=14 ;; esac
+case "$SHARE_CAP_BYTES" in ''|*[!0-9]*) SHARE_CAP_BYTES=524288000 ;; esac
+case "$SHARE_CAP_FILES" in ''|*[!0-9]*) SHARE_CAP_FILES=1000 ;; esac
+SHARE_CUTOFF=$((NOW - SHARE_KEEP_DAYS * 86400))
 REF=$(mktemp "${TMPDIR:-/tmp}/outbox-gc-ref.XXXXXX") || exit 1
-trap 'rm -f "$REF"' EXIT
+SHARE_REF=$(mktemp "${TMPDIR:-/tmp}/outbox-gc-share-ref.XXXXXX") || { rm -f "$REF"; exit 1; }
+trap 'rm -f "$REF" "$SHARE_REF"' EXIT
 touch -t "$(date -r "$CUTOFF" +%Y%m%d%H%M.%S 2>/dev/null || date -d "@$CUTOFF" +%Y%m%d%H%M.%S)" "$REF" || exit 1
-# 分享用 bot（SPEC §20）的 outbox 整個不清（使用者 2026-10-04）：它的 end user 是外部的人（例如長輩），隔天、隔幾天才回來
-# 拿 bot 給的檔是常態，一小時就清等於檔案給了也拿不到。daemon 在那種 bot 的 outbox 放標記檔 `.am-share-keep`（啟動、建立、
-# 開機時補），這裡看到就跳過整個目錄；檔案由擁有者自己整理，bot 刪掉時跟著收。逐個 bot 目錄走：`-delete` 隱含 `-depth`，
-# 同一條 find 裡 `-prune` 不生效。`*(N/)` 只認真的目錄，不跟符號連結（跟原本的 find 一樣）。
+touch -t "$(date -r "$SHARE_CUTOFF" +%Y%m%d%H%M.%S 2>/dev/null || date -d "@$SHARE_CUTOFF" +%Y%m%d%H%M.%S)" "$SHARE_REF" || exit 1
+# 分享用 bot（SPEC §20）的 outbox 走**分享保留政策**（使用者 2026-10-04 原本裁示整個不清，#850 因為一個外部連結就能把資料碟寫滿而改）：
+# 它的 end user 是外部的人（例如長輩），隔天、隔幾天才回來拿 bot 給的檔是常態，所以不是 1 小時，而是保留 SHARE_KEEP_DAYS 天
+# （同樣 mtime 與 ctime 都超過才刪），再加每顆總量上限（檔數、位元組，從最舊的 mtime 開始刪）。daemon 在那種 bot 的 outbox 放標記檔
+# `.am-share-keep`（啟動、建立、開機時補），這裡看到就走這套；標記檔本身不刪、不算量。bot 刪掉時標記拿掉，回到 1 小時。
+# 逐個 bot 目錄走：`-delete` 隱含 `-depth`，同一條 find 裡 `-prune` 不生效。`*(N/)` 只認真的目錄，不跟符號連結（跟原本的 find 一樣）；
+# 上限那一步只認 `(.)` 一般檔案，符號連結不算、不刪。
 SHARE_MARK=.am-share-keep
+zmodload -F zsh/stat b:zstat 2>/dev/null
+# 印出這個分享目錄刪了幾個檔。
+share_prune() {
+  local d=$1 n=0 f count=0 total=0
+  local -a st files
+  n=$(find "$d" -type f ! -name "$SHARE_MARK" ! -newer "$SHARE_REF" ! -newercm "$SHARE_REF" -print -delete 2>/dev/null | wc -l | tr -d ' ')
+  n=${n:-0}
+  files=("$d"/**/*(.DNom))   # 新的排前面（mtime）
+  for f in $files; do
+    [[ ${f:t} == $SHARE_MARK ]] && continue
+    zstat -L -A st +size -- "$f" 2>/dev/null || continue
+    count=$((count + 1))
+    total=$((total + st[1]))
+    if (( count > SHARE_CAP_FILES || total > SHARE_CAP_BYTES )); then
+      rm -f -- "$f" && n=$((n + 1))
+    fi
+  done
+  print -r -- "$n"
+}
 removed=0
+removed_share=0
 for d in "$OUTBOX"/*(N/); do
-  [ -e "$d/$SHARE_MARK" ] && continue
+  if [ -e "$d/$SHARE_MARK" ]; then
+    n=$(share_prune "$d")
+    removed_share=$((removed_share + ${n:-0}))
+    continue
+  fi
   n=$(find "$d" -type f ! -newer "$REF" ! -newercm "$REF" -print -delete 2>/dev/null | wc -l | tr -d ' ')
   removed=$((removed + n))
 done
 find "$OUTBOX" -mindepth 1 -type d -empty -delete 2>/dev/null
 [ "$removed" != "0" ] && echo "$(date '+%F %T') 清掉 $removed 個超過 ${MAX_AGE_MIN} 分鐘的檔案" >> "$LOG"
+[ "$removed_share" != "0" ] && echo "$(date '+%F %T') 分享保留政策清掉 $removed_share 個檔案（${SHARE_KEEP_DAYS} 天／${SHARE_CAP_FILES} 檔／${SHARE_CAP_BYTES} 位元組）" >> "$LOG"
 exit 0

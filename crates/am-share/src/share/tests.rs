@@ -1284,8 +1284,8 @@ async fn share_downloads_and_listings_do_not_hold_the_bot_lock_during_io() {
     assert!(free.load(std::sync::atomic::Ordering::SeqCst), "列表掃描時 bot 鎖要是自由的");
 }
 
-/// 分享用 bot 的 outbox 不給 AGM 的 gc 清（使用者 2026-10-04：end user 隔天才回來拿是常態）：建立時就放標記、開機補回、
-/// 刪掉才拿掉；主 UI 的清單與分享頁都不給倒數。一般 bot 照舊 1 小時。
+/// 分享用 bot 的 outbox 走分享保留政策、不是 1 小時（使用者 2026-10-04：end user 隔天才回來拿是常態；#850 加 14 天／總量上限）：建立時就放標記、開機補回、
+/// 刪掉才拿掉；主 UI 的清單與分享頁都不給 1 小時倒數。一般 bot 照舊 1 小時。
 #[tokio::test]
 async fn a_share_bots_outbox_is_kept_by_the_gc_and_listed_without_a_countdown() {
     let e = tt::env().await;
@@ -1310,6 +1310,10 @@ async fn a_share_bots_outbox_is_kept_by_the_gc_and_listed_without_a_countdown() 
     assert_eq!(v["files"].as_array().unwrap().len(), 1, "標記檔不列：{v}");
     assert_eq!(v["files"][0]["name"], "report.pdf");
     assert_eq!(v["files"][0]["remaining_secs"], Value::Null, "不給倒數");
+    // #850：擁有者看得到用量與上限（標記檔不算量；report.pdf 8 位元組）。
+    assert_eq!(v["keep_days"], 14, "{v}");
+    assert_eq!((v["share_usage"]["bytes"].as_u64(), v["share_usage"]["files"].as_u64()), (Some(8), Some(1)), "{v}");
+    assert_eq!(v["share_usage"]["cap"], json!({"bytes": 500 * 1024 * 1024, "files": 1000}));
     let p = list(plain.id.clone()).await;
     assert_eq!(p["ttl_secs"], json!(crate::outbox::TTL_SECS), "一般 bot 照舊");
     assert!(p["files"][0]["remaining_secs"].is_u64());
