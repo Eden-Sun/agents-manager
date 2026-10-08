@@ -59,18 +59,33 @@ const TOKEN_METRIC_KEYS: [&str; 9] = [
 
 fn is_credential_key(key: &str) -> bool {
     let key = key.to_ascii_lowercase();
-    // Usage counters are telemetry, not credentials. Other token/secret names are removed,
-    // including prefixes such as `token_value` and snake/camel/hyphenated spellings.
-    !TOKEN_METRIC_KEYS.contains(&key.as_str()) && (key.contains("token") || key.contains("secret"))
+    // 用量計數（`recache_tokens_if_cold`、`context_used_tokens`、`input_tokens`…）是遙測不是憑證：
+    // 精確列在 `TOKEN_METRIC_KEYS`，或以 `_tokens` 結尾、或含 `_tokens_`。名字含 `secret` 的一律當憑證，不吃這條放行。
+    // 其餘含 `token`／`secret` 的名字照刪，含 `token_value` 這類前綴與 snake／camel／連字號寫法。
+    let usage_counter = !key.contains("secret")
+        && (TOKEN_METRIC_KEYS.contains(&key.as_str()) || key.ends_with("_tokens") || key.contains("_tokens_"));
+    !usage_counter && (key.contains("token") || key.contains("secret"))
 }
 
+/// 這幾個鍵底下的 object 是「名字當 key」的 map（主機名、身分名、kind 名由使用者決定，`secret-lab`、`tokenbox/claude` 都可能）：
+/// 那一層不拿 key 判斷，只往 value 裡遞迴。
+const NAME_KEYED_PARENTS: [&str; 4] = ["hosts", "identities", "shell_identities", "kinds"];
+
 fn scrub_credentials(v: &mut Value) {
+    scrub(v, false);
+}
+
+fn scrub(v: &mut Value, name_keyed: bool) {
     match v {
         Value::Object(map) => {
-            map.retain(|k, _| !is_credential_key(k));
-            map.values_mut().for_each(scrub_credentials);
+            if !name_keyed {
+                map.retain(|k, _| !is_credential_key(k));
+            }
+            for (k, child) in map.iter_mut() {
+                scrub(child, NAME_KEYED_PARENTS.contains(&k.as_str()));
+            }
         }
-        Value::Array(items) => items.iter_mut().for_each(scrub_credentials),
+        Value::Array(items) => items.iter_mut().for_each(|item| scrub(item, false)),
         _ => {}
     }
 }
@@ -822,6 +837,65 @@ pub async fn ensure_session(session: &str, log_dir: &PathBuf) -> Result<HerdrCli
         }
     }
     anyhow::bail!("herdr session `{session}` did not come up within 10s (started via {how})")
+}
+
+#[cfg(test)]
+mod scrub_tests {
+    use super::scrub_credentials;
+    use serde_json::json;
+
+    fn scrubbed(mut v: serde_json::Value) -> serde_json::Value {
+        scrub_credentials(&mut v);
+        v
+    }
+
+    /// #895：用量計數不是憑證，不能被 WS emit 的最後一道過濾吃掉（`prompt_cache.recache_tokens_if_cold` 曾整欄消失）。
+    #[test]
+    fn usage_counters_survive_the_scrub() {
+        let v = json!({"run": {"prompt_cache": {"recache_tokens_if_cold": 5, "context_used_tokens": 7}}});
+        assert_eq!(scrubbed(v.clone()), v);
+        let v = json!({"input_tokens": 1, "total_input_tokens": 2});
+        assert_eq!(scrubbed(v.clone()), v);
+        let v = json!({"cache_read_input_tokens": 3, "cached_tokens": 4});
+        assert_eq!(scrubbed(v.clone()), v);
+    }
+
+    #[test]
+    fn credential_names_are_still_removed_at_any_depth() {
+        let v = json!({
+            "token": "a", "refresh_token": "b", "access_token": "x", "hook_token": "h", "lease_token": "l",
+            "clientSecret": "c", "client_secret": "s", "tokenValue": "t", "x-token": "z",
+            "nested": [{"hook_token": "d"}],
+            "keep": 1,
+        });
+        assert_eq!(scrubbed(v), json!({"nested": [{}], "keep": 1}));
+    }
+
+    /// 名字當 key 的 map：主機／身分／kind 的名字含 token／secret 不能整筆消失，但裡面的憑證欄位照刪。
+    #[test]
+    fn names_used_as_map_keys_are_kept_but_their_credential_fields_are_not() {
+        let v = scrubbed(json!({"hosts": {"secret-lab": {"connected": true, "access_token": "z"}}}));
+        assert_eq!(v, json!({"hosts": {"secret-lab": {"connected": true}}}));
+        let v = scrubbed(json!({"kinds": {"tokenbox/claude": {}}}));
+        assert_eq!(v, json!({"kinds": {"tokenbox/claude": {}}}));
+        let v = scrubbed(json!({"identities": {"my-token-id": {"refresh_token": "r", "name": "n"}}, "shell_identities": {"secret": {}}}));
+        assert_eq!(v, json!({"identities": {"my-token-id": {"name": "n"}}, "shell_identities": {"secret": {}}}));
+        // 名字 map 只豁免那一層：不在這四個鍵底下的物件照舊用 key 判斷。
+        assert_eq!(scrubbed(json!({"other": {"secret-lab": 1}})), json!({"other": {}}));
+    }
+
+    /// 端到端：`emit` 之後訂閱者收到的幀仍帶用量欄位。
+    #[tokio::test]
+    async fn emit_keeps_prompt_cache_usage_counters_on_the_wire() {
+        let env = crate::testing::env().await;
+        let app = env.app.clone();
+        let mut rx = app.subscribe();
+        app.emit("bot_status", json!({"run": {"prompt_cache": {"recache_tokens_if_cold": 5}, "hook_token": "no"}})).await;
+        let ev = rx.try_recv().expect("a frame");
+        assert_eq!(ev.kind, "bot_status");
+        assert_eq!(ev.data["run"]["prompt_cache"]["recache_tokens_if_cold"], 5);
+        assert!(ev.data["run"].get("hook_token").is_none());
+    }
 }
 
 #[cfg(test)]
