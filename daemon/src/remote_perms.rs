@@ -22,21 +22,23 @@ fn owed() -> &'static Mutex<HashSet<String>> {
 const RETRY_EVERY: std::time::Duration = std::time::Duration::from_secs(300);
 
 /// 連上（含重連）之後在背景收一次。
-pub fn spawn_tighten<H: HostsAccess + HostInstance + 'static>(app: Arc<H>, host: String) {
-    tokio::spawn(async move {
+/// 一次性：掛在 `background_tasks` 下（#924），關機的 `wait()` 等得到它；失敗由下面的 poller 補。
+pub fn spawn_tighten<H: HostsAccess + HostInstance + crate::capabilities::BgTasks + crate::capabilities::Shutdown + 'static>(app: Arc<H>, host: String) {
+    if crate::capabilities::Shutdown::shutdown(&*app).is_cancelled() {
+        return;
+    }
+    let tracker = crate::capabilities::BgTasks::background_tasks(&*app).clone();
+    tracker.spawn(async move {
         run_once(&app, &host).await;
     });
 }
 
 /// 欠著的主機每 5 分鐘補跑一次，成功就不再欠。連上那次就成功的主機不會進這個迴圈。
-pub fn spawn_poller<H: HostsAccess + HostInstance + 'static>(app: Arc<H>) {
-    tokio::spawn(async move {
-        loop {
-            tokio::time::sleep(RETRY_EVERY).await;
-            let hosts: Vec<String> = owed().lock().unwrap().iter().cloned().collect();
-            for host in hosts {
-                run_once(&app, &host).await;
-            }
+pub fn spawn_poller<H: HostsAccess + HostInstance + crate::capabilities::BgTasks + crate::capabilities::Shutdown + 'static>(app: Arc<H>) {
+    crate::background_loop::spawn_periodic(&app, "remote perms retry", RETRY_EVERY, RETRY_EVERY, |app| async move {
+        let hosts: Vec<String> = owed().lock().unwrap().iter().cloned().collect();
+        for host in hosts {
+            run_once(&app, &host).await;
         }
     });
 }

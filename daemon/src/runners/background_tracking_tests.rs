@@ -149,3 +149,18 @@ async fn build_scheduler_sweeper_survives_a_panic_in_one_tick() {
     app.background_tasks.close();
     tokio::time::timeout(Duration::from_secs(2), app.background_tasks.wait()).await.expect("關機要收乾淨");
 }
+
+#[tokio::test]
+async fn title_poller_is_tracked_and_stops_at_shutdown() {
+    tracked_and_stops(true, crate::runners::events::spawn_title_poller).await;
+}
+
+#[tokio::test]
+async fn remote_perms_poller_is_tracked_and_stops_at_shutdown() {
+    tracked_and_stops(true, crate::remote_perms::spawn_poller).await;
+}
+
+#[tokio::test]
+async fn remote_perms_tighten_is_tracked() {
+    tracked_and_stops(false, |app| crate::remote_perms::spawn_tighten(app, "no-such-host".to_string())).await;
+}
