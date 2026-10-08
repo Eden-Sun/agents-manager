@@ -1757,7 +1757,7 @@ Claude Stop hook 的 `background_tasks`（含 Monitor、subagent、workflow）�
 通知前（即時與 sweep 都一樣）若這顆 child 的 run 還是 `working`／`blocked`、或畫面上還有進行中的動詞列，就先不報，等它停下來由 sweep 補送（更新的回合已通知時，舊的視為被取代）。
 transcript／hook 收的回合（`completed`）不受影響。
 同一 child 在 5 分鐘內回覆文字正規化後編輯距離不超過 20% 時視為近似通知，只送一則。`client_request_id` 使用
-`child-done:<child bot id>:<turn id>`，同一 turn 只建立一筆通知，並以 DB 唯一鍵處理即時事件與 sweep 競速。無回覆、failed turn、非 child、已刪 child、無 parent
+`child-done:<child bot id>:<turn id>`（第 0 次無後綴），並以 DB 唯一鍵處理即時事件與 sweep 競速。通知被佇列收成 failed 且 `delivery='failed'`（字沒打進去）時，冷卻 2 分鐘後以 `:r<n>` 後綴重送，最多 3 次（#874，沿用 `child_alerts::last_sent` 的 attempt 判定，全部從 DB 推導）；使用者撤回不重送；送到、結果不明（`delivery` 為 `ok`/`unknown`）、還在路上都不重送。無回覆、failed turn、非 child、已刪 child、無 parent
 或 child 已自行回報的 turn 都不通知。daemon 通知重試與撤回辨識也涵蓋 `child-done:` 前綴。
 
 ### 6.5b herdr PATH shim（命名規則做成機制）
