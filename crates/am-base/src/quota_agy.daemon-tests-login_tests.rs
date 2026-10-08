@@ -126,6 +126,8 @@
     #[tokio::test]
     async fn the_watcher_does_nothing_without_a_token_file_or_a_known_login_state() {
         let _lock = token_test_lock().await;
+        // 登入冷卻是行程全域的（key 是本機）：別條測試（例如 agy 回合授權失敗）可能已經留下一個，watcher 就不會翻旗標。
+        // `Fresh::new()` 進場先清掉（冷卻、退避、探測錯誤、憑證檔），離場也清。
         let fresh = Fresh::new();
         let e = tt::env().await;
         let app = e.app.clone();
