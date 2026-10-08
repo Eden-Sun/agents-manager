@@ -216,7 +216,12 @@ pub async fn refresh_codex(app: &Arc<App>, host: &str) -> Result<bool> {
 }
 
 pub fn spawn_codex_poller(app: Arc<App>) {
-    tokio::spawn(async move {
+    crate::background_loop::spawn_restartable(&app, "codex quota poller", {
+        let app = app.clone();
+        move || {
+            let app = app.clone();
+            async move {
+        let shutdown = app.shutdown.clone();
         let mut last_server: Option<std::time::Instant> = None;
         loop {
             // app-server 每 CODEX_POLL 問一次；狀態列每 CODEX_PANE_POLL 讀一次。同一輪兩個都做時先問 app-server，
@@ -242,7 +247,12 @@ pub fn spawn_codex_poller(app: Arc<App>) {
                 }
             })
             .await;
-            tokio::time::sleep(CODEX_PANE_POLL).await;
+            tokio::select! {
+                _ = shutdown.cancelled() => return,
+                _ = tokio::time::sleep(CODEX_PANE_POLL) => {}
+            }
+        }
+            }
         }
     });
 }

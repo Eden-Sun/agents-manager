@@ -82,15 +82,11 @@ impl Sources for Live {
 }
 
 pub fn spawn(app: Arc<App>) {
-    tokio::spawn(async move {
-        // 開機先等工具探測跑完，不然第一輪一台主機都沒有。
-        tokio::time::sleep(Duration::from_secs(60)).await;
+    // 開機先等工具探測跑完（第一輪延後 60 秒），不然第一輪一台主機都沒有。
+    crate::background_loop::spawn_periodic(&app, "upstream update watcher", SWEEP, Duration::from_secs(60), |app| async move {
         let src = Live(app.clone());
         let path = last_path(&app);
-        loop {
-            tick(&app, &app.upstream_watch, &src, &path).await;
-            tokio::time::sleep(SWEEP).await;
-        }
+        tick(&app, &app.upstream_watch, &src, &path).await;
     });
 }
 

@@ -19,8 +19,21 @@ const BATCH: i64 = 64;
 /// 唯一的消費者。`receive` / drain 只負責 commit 之後叫醒它，不自己處理——單一消費者才不必為
 /// 「同一列被兩邊同時處理」另外加 claim 欄位。
 pub fn spawn_worker(app: Arc<App>) {
-    tokio::spawn(async move {
+    // panic 之後由 supervisor 退避重啟（#924）；睡覺時看 shutdown。
+    crate::background_loop::spawn_restartable(&app, "hook inbox worker", {
+        let app = app.clone();
+        move || {
+            let app = app.clone();
+            async move {
+        let shutdown = app.shutdown.clone();
         loop {
+            #[cfg(test)]
+            {
+                if PANIC_NEXT_TICK.swap(false, std::sync::atomic::Ordering::SeqCst) {
+                    panic!("test-injected hook inbox tick panic");
+                }
+                TICKS.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            }
             // 先做一輪再等：daemon 重啟後把上一輪沒處理完的補回來，就是這一行。
             match drain_once(&app).await {
                 Ok(n) if n > 0 => tracing::info!(processed = n, "hook inbox drained"),
@@ -31,12 +44,21 @@ pub fn spawn_worker(app: Arc<App>) {
                 tracing::debug!(error = ?e, "hook inbox prune failed");
             }
             tokio::select! {
+                _ = shutdown.cancelled() => return,
                 _ = app.hook_inbox_wake.notified() => {}
                 _ = tokio::time::sleep(POLL_EVERY) => {}
             }
         }
+            }
+        }
     });
 }
+
+/// 測試用：讓下一輪 tick 在最前面 panic 一次（驗證 supervisor 會重啟、後面的輪次照常），以及數 tick 次數。
+#[cfg(test)]
+pub(crate) static PANIC_NEXT_TICK: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+#[cfg(test)]
+pub(crate) static TICKS: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
 
 /// 同時處理幾顆 bot 的列（每顆 bot 一個 task）。
 const MAX_BOT_TASKS: usize = 8;

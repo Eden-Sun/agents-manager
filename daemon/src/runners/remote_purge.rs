@@ -69,21 +69,22 @@ pub async fn sweep(app: &Arc<App>, host: &str) -> (usize, usize) {
 
 /// 主機連上（含重連）那一刻背景掃一次。
 pub fn spawn_sweep(app: Arc<App>, host: String) {
-    tokio::spawn(async move {
+    // 一次性：掛在 `background_tasks` 下（#924），關機的 `wait()` 等得到它。
+    if app.shutdown.is_cancelled() {
+        return;
+    }
+    app.background_tasks.spawn(async move {
         sweep(&app, &host).await;
     });
 }
 
 /// 連著的遠端主機定期再掃。
 pub fn spawn_poller(app: Arc<App>) {
-    tokio::spawn(async move {
-        loop {
-            tokio::time::sleep(POLL_EVERY).await;
-            for name in app.hosts.names().await {
-                let Some(conn) = app.hosts.get(&name).await else { continue };
-                if !conn.is_local() && conn.is_connected() {
-                    sweep(&app, &name).await;
-                }
+    crate::background_loop::spawn_periodic(&app, "remote purge poller", POLL_EVERY, POLL_EVERY, |app| async move {
+        for name in app.hosts.names().await {
+            let Some(conn) = app.hosts.get(&name).await else { continue };
+            if !conn.is_local() && conn.is_connected() {
+                sweep(&app, &name).await;
             }
         }
     });
