@@ -203,7 +203,13 @@ start=$(date +%s)
 equals "超時的段也跑得完" "$(run)" "0"
 elapsed=$(( $(date +%s) - start ))
 equals "沒有被卡住（遠小於 sleep 30）" "$([ "$elapsed" -lt 20 ] && echo fast)" "fast"
-check "超時的段記成紅" "紅：web" "$FIX/gh.log"
+# #885：超時（KILL 後 rc=137）算中斷，先記 error 重跑；同一個 sha 連續 3 次都超時才是真的紅（一直卡住的測試不能永遠 error）。
+check "第 1 次超時記成中斷 error" "中斷：web(rc=137)，會重跑" "$FIX/gh.log"
+check_no "第 1 次超時不送 failure" "state=failure" "$FIX/gh.log"
+equals "第 2 次超時也跑得完" "$(run)" "0"
+check_no "第 2 次超時還不是 failure" "state=failure" "$FIX/gh.log"
+equals "第 3 次超時也跑得完" "$(run)" "0"
+check "連續 3 次超時的段記成紅" "連續中斷 3 次：紅：web" "$FIX/gh.log"
 teardown
 
 # 7. 殘留暫存清理（#763）：只刪 $TMPDIR 底下「超過 6 小時沒動、名字以 26 碼 ULID 結尾的 am-*／agm-*」。
