@@ -214,6 +214,7 @@ pub async fn accept(pool: &SqlitePool, body: &HookBody, source: Source) -> Resul
 #[derive(Debug, sqlx::FromRow)]
 pub struct Pending {
     pub id: String,
+    pub bot_id: String,
     pub body_json: String,
     pub attempts: i64,
 }
@@ -222,12 +223,20 @@ pub struct Pending {
 ///
 /// 第二鍵不是 `id`：`id` 是 ULID，同一毫秒內的亂數段不保證遞增，事件順序會偶爾翻過來
 /// （a4605b2 在 `mission_events` 上就是被這個咬的）。`rowid` 就是寫入順序。
+///
+/// **同一顆 bot 的順序不能被失敗的列跳過**（#911）：同 bot 有更早、還沒處理、而且正在退避的列時，後面的列先不挑
+/// （否則 Stop 先失敗、後來的 UserPromptSubmit 先跑，回合順序就翻了）。其他 bot 的列不受影響。
+/// 更早但**已到期**的列不擋：它跟後面的列一起出現在這一批，由 runner 在同一顆 bot 內照順序處理。
 pub async fn pending(pool: &SqlitePool, now: &str, limit: i64) -> Result<Vec<Pending>> {
     Ok(sqlx::query_as::<_, Pending>(
-        "SELECT id, body_json, attempts FROM hook_events
-         WHERE processed_at IS NULL AND (next_attempt_at IS NULL OR next_attempt_at <= ?)
-         ORDER BY rowid LIMIT ?",
+        "SELECT e.id, e.bot_id, e.body_json, e.attempts FROM hook_events e
+         WHERE e.processed_at IS NULL AND (e.next_attempt_at IS NULL OR e.next_attempt_at <= ?)
+           AND NOT EXISTS (
+             SELECT 1 FROM hook_events o
+              WHERE o.bot_id = e.bot_id AND o.processed_at IS NULL AND o.rowid < e.rowid AND o.next_attempt_at > ?)
+         ORDER BY e.rowid LIMIT ?",
     )
+    .bind(now)
     .bind(now)
     .bind(limit)
     .fetch_all(pool)
@@ -523,6 +532,29 @@ mod tests {
         // 退避到了就再挑得到。
         let later = "2099-01-01T00:00:00.000Z";
         assert_eq!(pending(&p, later, 10).await.unwrap().len(), 1, "退避過了要再試");
+    }
+
+    /// #911：一顆 bot 的列失敗退避中，它後面的列不插隊（順序不翻）；別顆 bot 的列照常出列。退避到了兩列依序一起回來。
+    #[tokio::test]
+    async fn a_failed_row_blocks_later_rows_of_the_same_bot_only() {
+        let p = pool().await;
+        let mut other = body("o1", "2026-09-17T12:00:02.000Z");
+        other.bot_id = "b2".into();
+        accept(&p, &body("a1", "2026-09-17T12:00:00.000Z"), Source::Http).await.unwrap();
+        accept(&p, &body("a2", "2026-09-17T12:00:01.000Z"), Source::Http).await.unwrap();
+        accept(&p, &other, Source::Http).await.unwrap();
+        let first = pending(&p, &db::now(), 10).await.unwrap();
+        assert_eq!(first.len(), 3, "全部都到期");
+        assert_eq!(first.iter().map(|r| r.bot_id.as_str()).collect::<Vec<_>>(), vec!["b1", "b1", "b2"]);
+
+        mark_failed(&p, &first[0].id, 1, "boom").await.unwrap();
+        let now = pending(&p, &db::now(), 10).await.unwrap();
+        assert_eq!(now.iter().map(|r| r.bot_id.as_str()).collect::<Vec<_>>(), vec!["b2"], "b1 的 a1 退避中：a2 不插隊，b2 照常");
+
+        let later = pending(&p, "2099-01-01T00:00:00.000Z", 10).await.unwrap();
+        assert_eq!(later.len(), 3, "退避過了：三列都回來");
+        assert_eq!(later[0].id, first[0].id, "a1 仍在 a2 前面");
+        assert_eq!(later[1].id, first[1].id);
     }
 
     #[tokio::test]

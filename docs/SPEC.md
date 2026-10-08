@@ -739,6 +739,8 @@ Jev 不負責回合收尾、額度記帳或競態判斷；這些依 run、turn�
 
 - **出列順序**：`ORDER BY rowid`（寫入順序）。不用 `id`：ULID 同一毫秒內的亂數段不保證遞增。
 - **消費者只有一個**（`hook_inbox::spawn_worker`）：收下的一方 commit 完只負責叫醒它，不自己處理，因此不必為「同一列被兩邊同時處理」另加 claim 欄位。
+  一批按 `bot_id` 分組：每顆 bot 一個 task（同時最多 8 顆），組內照寫入順序，同一顆 bot 不會有兩個 task（process 內的 claim）。一顆 bot 握著自己的鎖（啟動等就緒、批次重啟）時，別顆 bot 的 hook 不排在它後面（#911）。
+  組內一列失敗就停住那顆 bot 這一輪；`pending` 也不挑「同 bot 有更早、退避中的列」之後的列，所以失敗的列不會被後面的插隊。別顆 bot 不受影響。
 - **重播冪等（at-least-once 的窗口）**：worker 先 `process()`、返回後才另外標 `processed_at`，兩者之間 daemon 重啟就會再處理同一列。收掉回合的交易（外部回合的 INSERT、收 in-flight 回合的完成）同時把 `hook_events.id` 寫進 `turns.source_event_id`（partial unique index `turns_source_event`）；重播先查它，命中就**不再開回合／訊息**，只補發 commit 之後才發的通知（`message_added` 前端靠訊息 id 去重、回合事件的消費者本來就是 at-least-once）。這補上 native turn id 缺席（遠端、舊版、手寫 body）時沒有去重鑰匙的洞；帶 native id 的仍先靠 `(native_session_id, native_turn_id)`。直接呼叫 `process()`（沒有收件匣 id）行為不變。schema v45。
 - **延遲**：本機 hook 的關鍵路徑多一次 INSERT＋COMMIT（本機 SQLite，遠小於 §4.4 的 2 秒 HTTP 預算）；處理仍是背景的，送端不會被配對邏輯卡住。worker 靠 notify 叫醒，正常情況下延遲與以前的「spawn 立刻處理」同級，另有 5 秒輪詢當保險。
 - **保留**：處理完的列留 24 小時供查「這則到底進來過沒有」，之後由 worker 順手刪掉。
