@@ -1708,7 +1708,7 @@ env 前綴跟登入是同一段程式算出來的——少帶 `CLAUDE_CONFIG_DIR
 裝／更新那台主機（本機或遠端）的 agy 到官方最新版（SPEC §12a.11）。agy 沒有套件管理器那條路、官方 `install.sh` 又會跑 `agy install`（改 shell profile），所以 daemon **不執行官方安裝腳本**：先經 ssh（本機直接跑）讀 `uname -s -m` 與 libc 決定平台（`darwin_arm64`／`darwin_amd64`／`linux_amd64`／`linux_amd64_musl`／`linux_arm64`／`linux_arm64_musl`），再讀官方 manifest（`…/manifests/<platform>.json`，`{version,url,sha512}`；url 必須在官方儲存桶、sha512 必須是 128 位十六進位，否則 `manifest_invalid`），把它們當資料交給主機端一段寫死的 sh：下載 tarball → 驗 sha512 → 只解出 `antigravity` → 對暫存檔跑 `--version`（`AGY_CLI_DISABLE_AUTO_UPDATE=true`，版本要吻合 manifest）→ 同目錄複製後 `mv` 蓋過 `~/.local/bin/agy`。任何一步失敗都不碰既有的 agy。裝完重新偵測那台的 CLI，偵測到的版本要等於 manifest 版本。主機端有安裝鎖（`~/.agents-manager-agy-install.lock`，同 CLI 升級那套 process-group 鎖）；沒有 body。
 同步回覆，要等下載與驗證（通常幾十秒，逾時 5 分鐘）：`200 {"host","platform","from":<舊版|null>,"to":<版本>,"path":<那台看到的 agy 路徑>,"already_latest":bool}`——`already_latest:true`＝那台已經是官方最新版，沒有下載、沒有動檔案。
 錯誤：主機不存在 `404 {"what":"host"}`；同一台已經在裝（本行程或主機端的鎖）`409 {"reason":"agy_install_in_progress"}`；其餘 `502`，訊息開頭是原因碼——`host_disconnected`、`probe_failed`、`unsupported_platform`、`manifest_unavailable`、`manifest_invalid`、`install_failed`（含腳本的 `AM_AGY_*` 標記與 stderr 尾巴，例如 `AM_AGY_SHA512_MISMATCH`）、`not_on_path`（寫進去了但那台的登入 shell PATH 看不到，多半是 `~/.local/bin` 不在 PATH）、`verify_failed`、`superseded`（途中那台重連或改指到別台，這次作廢）。User-only。
-登入不在這條路：agy 沒有 `login` 子命令，使用者在額度欄「開 shell 登入」（那台的 host shell 跑 `AGY_CLI_DISABLE_AUTO_UPDATE=true agy`），憑證檔出現後 daemon 的 login watcher 翻成已登入並探測額度。
+登入不在這條路：agy 沒有 `login` 子命令，使用者在額度欄「開 shell 登入」（那台的 host shell 跑 `AGY_CLI_DISABLE_AUTO_UPDATE=true agy`），憑證檔出現後 daemon 的 login watcher 先探測 `/usage`，成功才翻成已登入（明確 auth 失敗維持未登入，其他失敗保持現值並記 `quota_error`）。
 
 ## 10. Bot 欄位、編輯、重啟、刪除
 

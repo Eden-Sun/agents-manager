@@ -54,7 +54,7 @@ pub(crate) fn auth_denied() -> &'static std::sync::Mutex<std::collections::HashM
     M.get_or_init(Default::default)
 }
 
-fn auth_denied_active(key: &str) -> bool {
+pub(crate) fn auth_denied_active(key: &str) -> bool {
     auth_denied().lock().unwrap().get(key).is_some_and(|t| *t > std::time::Instant::now())
 }
 
@@ -118,8 +118,14 @@ async fn refresh_with_fence(app: &Arc<App>, host: &str, fence: &crate::hosts::Ho
     }
     let Some(exe) = crate::tools::cached_path(app, host, "agy").await else { return Ok(false) };
     let parsed = if fence.conn().is_local() {
-        match crate::hosts::sh_local_stdout(&probe_script(Some(&exe)), PROBE_TIMEOUT, "`agy -p /usage`").await {
-            Ok(stdout) => read_usage(host, None, &stdout),
+        match crate::hosts::sh_local_capture(&probe_script(Some(&exe)), PROBE_TIMEOUT).await {
+            Ok(run) => read_local_run(
+                host,
+                run.timed_out,
+                &String::from_utf8_lossy(&run.stdout),
+                &String::from_utf8_lossy(&run.stderr),
+                PROBE_TIMEOUT.as_secs(),
+            ),
             Err(e) => Err(ProbeFail::other("timeout", format!("{e:#}"))),
         }
     } else {
@@ -337,6 +343,13 @@ pub async fn refresh_agy_if_due(app: &Arc<App>, host: &str) -> Result<Option<boo
     if matches!(agy_state(app, host).await, Some((true, Some(false)))) {
         return Ok(None);
     }
+    refresh_agy_gated(app, host).await
+}
+
+/// 同上但**不看**已知未登入的旗標：登入偵測發現憑證檔出現時，就是要靠這一次探測決定旗標該不該翻（issue #870）。
+/// 探測成功 [`record_probe_result`] 會把旗標翻成已登入並推 `host_changed`；明確 auth 失敗維持未登入並記 5 分鐘冷卻；
+/// 其他失敗（網路、逾時、pane）旗標不動、只記探測錯誤，並進 15 分鐘失敗冷卻（不然每 20 秒就起一次 200 MB 的探測）。
+async fn refresh_agy_gated(app: &Arc<App>, host: &str) -> Result<Option<bool>> {
     let key = crate::quota::quota_key(host, "agy");
     let Some(cur) = app.hosts.fence(host).await else { return Ok(None) };
     if backoff_active(&key, &cur) {
@@ -344,7 +357,13 @@ pub async fn refresh_agy_if_due(app: &Arc<App>, host: &str) -> Result<Option<boo
     }
     let (fence, result) = refresh_agy_fenced(app, host).await;
     match result {
-        Ok(v) => Ok(Some(v)),
+        Ok(v) => {
+            // 探測通了：這個世代留著的過期冷卻紀錄一併清掉。
+            if let Some(fence) = fence.as_ref() {
+                clear_backoff(app, host, fence).await;
+            }
+            Ok(Some(v))
+        }
         Err(fail) => {
             if let Some(fence) = fence.as_ref().filter(|_| starts_backoff(&fail)) {
                 note_failure(app, host, fence).await;
@@ -376,24 +395,30 @@ pub fn spawn_agy_poller(app: Arc<App>) {
 /// 登入偵測的間隔：只對「裝了 agy、目前記成未登入」的主機做一次 stat（遠端是一個很小的 ssh），或補一次還沒有讀數的探測。
 pub const LOGIN_WATCH: Duration = Duration::from_secs(20);
 
-/// 使用者在 shell 裡把 agy 登好之後，不重啟、不等 5 分鐘輪詢：憑證檔一出現就把 `tools.agy.logged_in` 翻成已登入、
-/// 清掉探測冷卻並馬上探測一次額度，兩條額度就回到那一格。另外，已登入但還沒有任何讀數（例如手動「重新偵測」才翻成已登入）也補探一次。
+/// 使用者在 shell 裡把 agy 登好之後，不重啟、不等 5 分鐘輪詢：憑證檔一出現就**先探測** `/usage`，探測成功才把
+/// `tools.agy.logged_in` 翻成已登入（兩條額度同時回到那一格）。憑證檔只證明有一份 credential，不證明 agy 還接受它
+/// （過期、被撤銷時檔案還在），所以不能先翻再說（issue #870）：
+/// - 明確 auth 失敗（`Authentication required`，含逾時前已印出的）：維持未登入，5 分鐘內不再因憑證檔還在而探測；
+/// - 其他失敗（網路、逾時、pane）：旗標保持現值、記探測錯誤，15 分鐘後才再試；
+/// - 探測成功：[`record_probe_result`] 翻旗標、清冷卻、推 `host_changed`。
+/// 另外，已登入但還沒有任何讀數（例如手動「重新偵測」才翻成已登入）也補探一次。
 pub async fn login_watch_once(app: &Arc<App>, host: &str) {
     // 沒裝、或這輪偵測沒問出登入與否（`None`）：什麼都不猜。
     let Some((true, Some(logged_in))) = agy_state(app, host).await else { return };
     let Some(fence) = app.hosts.fence(host).await else { return };
     let key = crate::quota::quota_key(host, "agy");
-    if !logged_in {
-        // agy 剛明說沒憑證：Keychain 裡有項目（可能是過期的 token）不算登好了，冷卻期內不翻回去、不再開 pane。
+    let probe = if !logged_in {
+        // agy 剛明說沒憑證：Keychain 裡有項目（可能是過期的 token）不算登好了，冷卻期內不探測、不開 pane。
         if auth_denied_active(&key) || token_present(&fence).await != Some(true) {
             return;
         }
-        set_logged_in(app, host, &fence, true).await;
-        clear_backoff(app, host, &fence).await;
+        refresh_agy_gated(app, host).await
     } else if app.quotas.lock().await.contains_key(&key) {
         return;
-    }
-    if let Err(e) = refresh_agy_if_due(app, host).await {
+    } else {
+        refresh_agy_if_due(app, host).await
+    };
+    if let Err(e) = probe {
         tracing::warn!(host, error = %e, "agy quota probe after login failed");
     }
 }
