@@ -958,3 +958,85 @@ async fn a_same_project_bot_cannot_spend_another_missions_round() {
         .unwrap();
     assert_eq!(used, 0, "a denied request must not advance the mission");
 }
+
+/// #855：把回覆公開到分享頁只有使用者能決定；Bot 帶 `share_reply_visible:true` 在任何副作用前就 403。
+async fn share_prompt_server() -> (crate::testing::Env, u16, String, String) {
+    let env = crate::testing::env().await;
+    env.app.set_startup_ready(true);
+    let bot_a = crate::testing::claude_bot(&env.app, &env.project_id, "share-caller").await;
+    let bot_b = crate::testing::claude_bot(&env.app, &env.project_id, "share-target").await;
+    sqlx::query("UPDATE bots SET hook_token='token-a' WHERE id=?")
+        .bind(&bot_a.id)
+        .execute(&env.app.db)
+        .await
+        .unwrap();
+    crate::share::store::insert_share_bot(&env.app.db, &bot_b.id, crate::share::store::PROFILE_TRUSTED, "/tmp/x")
+        .await
+        .unwrap();
+    let router = router(env.app.clone());
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let port = listener.local_addr().unwrap().port();
+    tokio::spawn(async move {
+        let _ = axum::serve(
+            listener,
+            router.into_make_service_with_connect_info::<std::net::SocketAddr>(),
+        )
+        .await;
+    });
+    (env, port, bot_a.id, bot_b.id)
+}
+
+#[tokio::test]
+async fn a_bot_cannot_publish_a_share_reply_with_its_prompt() {
+    let (env, port, a, b) = share_prompt_server().await;
+    let url = format!("http://127.0.0.1:{port}/api/bots/{b}/prompt");
+    let flagged = reqwest::Client::new()
+        .post(&url)
+        .header("content-type", "application/json")
+        .header("X-AM-Bot-Id", &a)
+        .header("X-AM-Bot-Token", "token-a")
+        .body(r#"{"text":"x","client_request_id":"w-public-1","share_reply_visible":true}"#)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(flagged.status(), StatusCode::FORBIDDEN, "a Bot may not flag a share reply");
+    let body = flagged.text().await.unwrap();
+    assert!(body.contains("\"reason\":\"user_only\""), "{body}");
+    let visible: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM share_reply_visible").fetch_one(&env.app.db).await.unwrap();
+    assert_eq!(visible, 0, "nothing is published");
+    let turns: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM turns WHERE client_request_id='w-public-1'")
+        .fetch_one(&env.app.db)
+        .await
+        .unwrap();
+    assert_eq!(turns, 0, "a refused request leaves no side effect");
+
+    // 不帶旗標：維持 Bot→Bot prompt 的既有政策（B 沒在跑時可能是 404／409），只斷言不是 user_only。
+    let plain = reqwest::Client::new()
+        .post(&url)
+        .header("content-type", "application/json")
+        .header("X-AM-Bot-Id", &a)
+        .header("X-AM-Bot-Token", "token-a")
+        .body(r#"{"text":"x","client_request_id":"w-public-2"}"#)
+        .send()
+        .await
+        .unwrap();
+    let plain_status = plain.status();
+    let plain_body = plain.text().await.unwrap();
+    assert!(!(plain_status == StatusCode::FORBIDDEN && plain_body.contains("\"reason\":\"user_only\"")), "{plain_status} {plain_body}");
+}
+
+#[tokio::test]
+async fn the_user_may_flag_a_share_reply() {
+    let (_env, port, _a, b) = share_prompt_server().await;
+    let response = reqwest::Client::new()
+        .post(format!("http://127.0.0.1:{port}/api/bots/{b}/prompt"))
+        .header("content-type", "application/json")
+        .header("X-AM-Token", "test-token")
+        .body(r#"{"text":"x","client_request_id":"w-public-3","share_reply_visible":true}"#)
+        .send()
+        .await
+        .unwrap();
+    let status = response.status();
+    let body = response.text().await.unwrap();
+    assert!(!(status == StatusCode::FORBIDDEN && body.contains("user_only")), "{status} {body}");
+}

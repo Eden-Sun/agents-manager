@@ -606,7 +606,7 @@ config.toml 裡沒有的 id（child、已刪）忽略。成功推 `project_chang
 { "text": "Reply with exactly PONG", "client_request_id": "<前端產生的唯一字串>", "relay_from": "<自己的 bot id>", "attachments"?: ["<attachment id>"], "send_now"?: true, "start_if_stopped"?: true, "queue_if_busy"?: true, "share_reply_visible"?: true }
 ```
 
-`share_reply_visible`（只對分享用 bot 有意義，其他 bot 忽略）：擁有者送的訊息分享頁本來就看不到，這一回合 bot 的回覆預設也不給看；帶 `true`＝這一則觸發的回覆照樣出現在分享頁（SPEC §20.3）。
+`share_reply_visible`（只對分享用 bot 有意義，其他 bot 忽略）：擁有者送的訊息分享頁本來就看不到，這一回合 bot 的回覆預設也不給看；帶 `true`＝這一則觸發的回覆照樣出現在分享頁（SPEC §20.3）。只有使用者（UI token）能帶；Bot／Service 帶 `true` 回 403 `user_only`，不會送出。
 
 收件 bot 與所屬 project 都必須存在且未刪除，否則回 `404`；project 狀態會在 bot lock 內重驗，避免刪除中的孤兒 bot 收到 prompt。
 

@@ -5672,8 +5672,13 @@ async fn prompt_bot(
     State(app): State<Arc<App>>,
     Path(id): Path<String>,
     headers: HeaderMap,
+    Extension(principal): Extension<RequestPrincipal>,
     Json(b): Json<PromptIn>,
 ) -> Result<Response, LcError> {
+    // 把回覆公開到分享頁只有使用者（UI token）能決定：Bot／Service 帶旗標一律 403，且不送出（issue #855）。
+    if b.share_reply_visible && principal != RequestPrincipal::User {
+        return Err(bot_user_only());
+    }
     let given_crid = b.client_request_id.clone();
     let crid = b.client_request_id.unwrap_or_else(db::ulid);
     // `relay_from` is metadata, never an alternate principal. A proven bot that omits it is
@@ -8236,7 +8241,7 @@ mod prompt_route_tests {
 
     async fn call(e: &crate::testing::Env, bot: &str, text: String, crid: &str) -> (StatusCode, Value) {
         let body = PromptIn { text, client_request_id: Some(crid.into()), attachments: vec![], relay_from: None, ack: false, reply_to: None, send_now: false, start_if_stopped: false, queue_if_busy: false, clear_draft: false, submit_draft: false, expect_draft_token: None, share_reply_visible: false };
-        let resp = match prompt_bot(State(e.app.clone()), Path(bot.to_string()), HeaderMap::new(), Json(body)).await {
+        let resp = match prompt_bot(State(e.app.clone()), Path(bot.to_string()), HeaderMap::new(), Extension(RequestPrincipal::User), Json(body)).await {
             Ok(r) => r,
             Err(err) => err.into_response(),
         };
@@ -8252,7 +8257,7 @@ mod prompt_route_tests {
             "queue_if_busy": true,
             "attachments": attachments,
         })).unwrap();
-        let resp = match prompt_bot(State(e.app.clone()), Path(bot.to_string()), HeaderMap::new(), Json(body)).await {
+        let resp = match prompt_bot(State(e.app.clone()), Path(bot.to_string()), HeaderMap::new(), Extension(RequestPrincipal::User), Json(body)).await {
             Ok(r) => r,
             Err(err) => err.into_response(),
         };
@@ -8406,7 +8411,7 @@ mod prompt_route_tests {
             "start_if_stopped": true,
             "queue_if_busy": true,
         })).unwrap();
-        let resp = match prompt_bot(State(e.app.clone()), Path(bot.clone()), HeaderMap::new(), Json(body)).await {
+        let resp = match prompt_bot(State(e.app.clone()), Path(bot.clone()), HeaderMap::new(), Extension(RequestPrincipal::User), Json(body)).await {
             Ok(r) => r,
             Err(err) => err.into_response(),
         };
@@ -13301,7 +13306,7 @@ mod relay_from_auth_tests {
             expect_draft_token: None,
             share_reply_visible: false,
         };
-        let resp = match prompt_bot(State(app.clone()), Path(to.to_string()), h, Json(body)).await {
+        let resp = match prompt_bot(State(app.clone()), Path(to.to_string()), h, Extension(RequestPrincipal::User), Json(body)).await {
             Ok(r) => r,
             Err(err) => err.into_response(),
         };
@@ -13330,7 +13335,7 @@ mod relay_from_auth_tests {
             expect_draft_token: None,
             share_reply_visible: false,
         };
-        let resp = match prompt_bot(State(app.clone()), Path(to.to_string()), h, Json(body)).await {
+        let resp = match prompt_bot(State(app.clone()), Path(to.to_string()), h, Extension(RequestPrincipal::User), Json(body)).await {
             Ok(r) => r,
             Err(err) => err.into_response(),
         };
@@ -13415,7 +13420,7 @@ mod relay_from_auth_tests {
             expect_draft_token: None,
             share_reply_visible: false,
         };
-        let err = prompt_bot(State(f.e.app.clone()), Path(stopped.id.clone()), HeaderMap::new(), Json(body)).await.expect_err("unsigned relay");
+        let err = prompt_bot(State(f.e.app.clone()), Path(stopped.id.clone()), HeaderMap::new(), Extension(RequestPrincipal::User), Json(body)).await.expect_err("unsigned relay");
         assert!(matches!(err, LcError::Forbidden(_)), "{err:?}");
         assert_eq!(counts(&f.e.app).await, (0, 0));
     }
@@ -13447,7 +13452,7 @@ mod relay_from_auth_tests {
             if body.relay_from.is_some() {
                 headers.insert("X-AM-Bot-Token", "tok-alfa".parse().unwrap());
             }
-            prompt_bot(State(f.e.app.clone()), Path(f.target.clone()), headers, Json(body))
+            prompt_bot(State(f.e.app.clone()), Path(f.target.clone()), headers, Extension(RequestPrincipal::User), Json(body))
         };
         let busy = call(false, false, None, None).await.expect_err("composer_busy");
         let token = match busy {
