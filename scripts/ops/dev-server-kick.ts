@@ -50,6 +50,18 @@ const VITE = join(REPO, 'web/node_modules/vite/bin/vite.js')
 
 const ts = () => new Date().toLocaleString('sv-SE').replace('T', ' ')
 const log = (line: string) => appendFileSync(LOG, `${line}\n`)
+/** agm CLI：預設是這支腳本旁邊的 `bin/agm`（＝已安裝的 AGM 目錄），`AGM_BIN` 可覆寫（測試用）。 */
+const AGM_BIN = process.env.AGM_BIN || join(DIR, 'bin', 'agm')
+
+/** 安靜放棄這輪之前先喊人（issue #859）：一則 durable inbox 事件，同 source+reason 由 daemon 每小時只收一則，這裡不用節流。 */
+async function alert(reason: string, detail: string) {
+  try {
+    const p = Bun.spawn([AGM_BIN, '--compact', 'ops-alert', '--source', 'dev-server', '--reason', reason, '--detail', detail], { stdout: 'ignore', stderr: 'ignore' })
+    if ((await p.exited) !== 0) log(`${ts()} 推 ops-alert（${reason}）失敗，只留在這份 log`)
+  } catch (e) {
+    log(`${ts()} 推 ops-alert（${reason}）失敗：${e}，只留在這份 log`)
+  }
+}
 
 /** 健康檢查走 loopback 就夠：本機看得到就代表有在聽。 */
 async function alive(): Promise<boolean> {
@@ -132,6 +144,7 @@ async function git(...args: string[]): Promise<string> {
 async function syncMain(): Promise<boolean> {
   if (!existsSync(join(REPO, '.git'))) {
     log(`== ${ts()} ${REPO} 不是 git worktree，跳過同步`)
+    await alert('dev_worktree_missing', `${REPO} 不是 git worktree；照 scripts/ops/README.md 建 detached worktree 並 bun install`)
     return false
   }
   try {
@@ -212,10 +225,12 @@ if (holders.length > 0) {
 const node = await nodeBin()
 if (!node) {
   log(`== ${ts()} 找不到 node，不用 bun 代跑（會在代理錯誤時 crash），放棄這輪`)
+  await alert('dev_node_missing', '找不到 node，5173 dev server 起不來（不用 bun 代跑）；裝 node 或放到 ~/.local/bin/node')
   process.exit(0)
 }
 if (!existsSync(VITE)) {
   log(`== ${ts()} 找不到 ${VITE}（web/ 還沒 install？），放棄這輪`)
+  await alert('dev_vite_missing', `找不到 ${VITE}；在 ${REPO}/web 跑 bun install --frozen-lockfile`)
   process.exit(0)
 }
 

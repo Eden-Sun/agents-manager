@@ -142,6 +142,13 @@ case "\$1" in --version) echo "v22.0.0"; exit 0 ;; esac
 echo \$\$ >> "${FIX}/spawned"
 exec "${PY3}" -m http.server "${PORT}" --bind 127.0.0.1 --directory "${ROOT}"
 STUB
+  # 假 agm（issue #859）：只記呼叫，不碰真的 daemon；腳本靠 AGM_BIN 找它。
+  cat > "$BIN/agm" <<STUB
+#!/bin/bash
+echo "agm \$*" >> "${FIX}/agm.log"
+exit 0
+STUB
+  : > "$FIX/agm.log"
   chmod 755 "$BIN"/*
   # 情境迴圈裡只留當輪的那一支：腳本選錯工具就叫不到，測試才看得出來。
   case "${TOOL:-}" in lsof) rm -f "$BIN/ss" ;; ss) rm -f "$BIN/lsof" ;; esac
@@ -178,7 +185,7 @@ wait_ready() {
   echo "      （等不到測試用的 HTTP server 在 ${PORT} 上回應）" >&2
   return 1
 }
-run() { ( cd "$ROOT" && AGM_DEV_LISTEN_TOOL="$TOOL" AGM_DEV_REPO="$REPO" PATH="$BIN:${AM_CANARY_DIR:+$AM_CANARY_DIR:}/usr/bin:/bin" "$BUN" "$SCRIPT" >/dev/null 2>&1; echo $? ); }
+run() { ( cd "$ROOT" && AGM_BIN="$BIN/agm" AGM_DEV_LISTEN_TOOL="$TOOL" AGM_DEV_REPO="$REPO" PATH="$BIN:${AM_CANARY_DIR:+$AM_CANARY_DIR:}/usr/bin:/bin" "$BUN" "$SCRIPT" >/dev/null 2>&1; echo $? ); }
 
 # 0. 安全前提：副本裡不准再有 5173，假 lsof 只回報自己 spawn 的 pid。
 setup
@@ -206,6 +213,7 @@ serve >/dev/null; wait_ready
 equals "健康時 exit 0" "$(run)" "0"
 equals "健康時不寫 log" "$(wc -c < "$LOG" | tr -d ' ')" "0"
 check_no "健康時不會去起 vite" "vite.js --host" "$FIX/calls.log"
+equals "健康時不呼叫 agm（#859）" "$(wc -c < "$FIX/agm.log" | tr -d ' ')" "0"
 teardown
 
 # 2. port 被非 vite 的程序占用 → 只記錄，絕不殺。
@@ -254,6 +262,7 @@ echo "aaaaaaa" > "$FIX/head.after"; echo "lock1" > "$FIX/lock.after"
 equals "找不到 node 時 exit 0" "$(run)" "0"
 check "明講不用 bun 代跑" "找不到 node，不用 bun 代跑" "$LOG"
 check_no "沒有真的去 spawn 任何東西" "vite.js --host" "$FIX/calls.log"
+check "找不到 node 有喊人（#859）" "agm --compact ops-alert --source dev-server --reason dev_node_missing" "$FIX/agm.log"
 teardown
 
 # 6. 缺依賴：node 在、但 web/ 還沒 install（vite.js 不存在）→ 放棄這輪並指出缺的檔。
@@ -263,6 +272,8 @@ rm -f "$REPO/web/node_modules/vite/bin/vite.js"
 equals "找不到 vite.js 時 exit 0" "$(run)" "0"
 check "log 指出缺的是 vite.js" "vite/bin/vite.js" "$LOG"
 check_no "不會硬起" "拉起 vite" "$LOG"
+check "找不到 vite.js 有喊人（#859）" "agm --compact ops-alert --source dev-server --reason dev_vite_missing" "$FIX/agm.log"
+equals "只喊一次" "$(grep -c 'ops-alert' "$FIX/agm.log")" "1"
 teardown
 
 # 7. 沒人聽 → 用 node 拉起，參數要綁 0.0.0.0＋strictPort，起來了要寫進 log。
@@ -282,6 +293,7 @@ rm -rf "$REPO/.git"
 run >/dev/null
 check "不是 git worktree 就跳過同步" "不是 git worktree，跳過同步" "$LOG"
 check_no "跳過時不會叫 git" "git fetch" "$FIX/calls.log"
+check "worktree 不在有喊人（#859）" "agm --compact ops-alert --source dev-server --reason dev_worktree_missing" "$FIX/agm.log"
 teardown
 
 # 9. 同步：HEAD 變了但 bun.lock 沒變 → 只記同步，不 bun install（靠 HMR）。
@@ -322,8 +334,9 @@ teardown
 
 # 12. REPO 由共用樹推導：沒有 AGM_DEV_REPO 時是 `${AGM_REPO}-main`（#676：以前寫死 /Users/m4p/…）。
 setup
-( cd "$ROOT" && AGM_DEV_LISTEN_TOOL="$TOOL" AGM_REPO="$ROOT/shared" PATH="$BIN:${AM_CANARY_DIR:+$AM_CANARY_DIR:}/usr/bin:/bin" "$BUN" "$SCRIPT" >/dev/null 2>&1 )
+( cd "$ROOT" && AGM_BIN="$BIN/agm" AGM_DEV_LISTEN_TOOL="$TOOL" AGM_REPO="$ROOT/shared" PATH="$BIN:${AM_CANARY_DIR:+$AM_CANARY_DIR:}/usr/bin:/bin" "$BUN" "$SCRIPT" >/dev/null 2>&1 )
 check "REPO＝AGM_REPO 旁邊的 -main" "$ROOT/shared-main 不是 git worktree" "$LOG"
+check "AGM_DEV_REPO 指到不存在的目錄也喊 dev_worktree_missing（#859）" "reason dev_worktree_missing" "$FIX/agm.log"
 check_no "沒指定時不會去碰測試 REPO" "git -C $REPO" "$FIX/calls.log"
 teardown
 done
