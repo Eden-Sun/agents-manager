@@ -54,7 +54,7 @@ test('視窗裡的輸入框與按鈕照舊留住鍵盤，不被直通吃掉', ()
 // ── 偵測：拿 daemon 的真畫面 fixture 對，兩邊看的是同一張圖 ──
 
 const fixture = (name: string) =>
-  readFileSync(join(import.meta.dirname, '../../../daemon/src/lifecycle/fixtures', name), 'utf8')
+  readFileSync(join(import.meta.dirname, '../../../crates/am-lifecycle/src/lifecycle/fixtures', name), 'utf8')
 
 test('#423 的真畫面認得出來；一般畫面與引用原文不算', () => {
   assert.equal(isDangerousRmScreen(fixture('claude-2.1.281-dangerous-rm.txt')), true)

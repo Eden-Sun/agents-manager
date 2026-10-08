@@ -11,12 +11,12 @@ while IFS= read -r f; do
         # project skill（例如 verify）是 .md 但會被 Claude 當指令執行：要先於下面的文件規則，歸 ops（scripts/verify_skill_test.sh 驗契約）。
         .claude/skills/*) ops=1 ;;
         # 跨界的讀取（2026-10-02 閘門審查）：下面這些不在自己那一塊的檔案，另一塊的測試會在執行期讀它，改了兩邊都要跑。
-        #   - web 的測試讀 daemon 的 lifecycle fixtures（codexUpdatePrompt／blockedKeys）。
+        #   - web 的測試讀 lifecycle fixtures（codexUpdatePrompt／blockedKeys／tuiChoices；561618ef 起在 crates/am-lifecycle，#863）。
         #   - ops 的 project-transfer 測試從 crates/am-base 的 schema 原始碼（db.rs）與三個 daemon store 抽欄位。
         #   - daemon 的測試讀 scripts/check.sh（cargo_shim）、scripts/ops/lint-shell-vars.sh（herdr_shim）、
         #     scripts/ops/fixtures/*（supervisor::setup）、scripts/ops/{claude,codex}-release-task.md（claude_review）。
         # 要先於下面的 daemon/*、scripts/*、*.md 規則。對應的 daemon 測試子集見 scripts/ci-daemon-filters.sh（兩邊要一起改）。
-        daemon/src/lifecycle/fixtures/*) daemon=1; web=1 ;;
+        daemon/src/lifecycle/fixtures/* | crates/am-lifecycle/src/lifecycle/fixtures/*) daemon=1; web=1 ;;
         crates/am-base/src/db.rs | daemon/src/supervisor/store.rs | daemon/src/supervisor/roles.rs | daemon/src/mission/store.rs) daemon=1; ops=1 ;;
         scripts/check.sh | scripts/ops/lint-shell-vars.sh | scripts/ops/fixtures/* | scripts/ops/claude-release-task.md | scripts/ops/codex-release-task.md) ops=1; daemon=1 ;;
         # scripts/ 底下的 .md 不是「只有文件」：任務檔被 install-manifest／ops 測試／daemon 讀，README 內容也有測試釘住。

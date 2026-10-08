@@ -513,7 +513,7 @@ test('Session paused 說明折成很多行：標題仍然是題目，不被擠�
  * 長 heredoc 指令夾在虛線之間，下面是警語兩列、`⚠` 倒數。以前網頁只剩 Yes／No，指令與原因都沒有。
  */
 const dangerFixture = (name: string) =>
-  readFileSync(new URL(`../../../daemon/src/lifecycle/fixtures/${name}`, import.meta.url), 'utf8')
+  readFileSync(new URL(`../../../crates/am-lifecycle/src/lifecycle/fixtures/${name}`, import.meta.url), 'utf8')
 
 test('2.1.289 防誤刪框：指令、警語、倒數各自帶出來', () => {
   const menu = parseChoiceMenu(dangerFixture('claude-2.1.289-dangerous-rm-countdown-30rows.txt'))

@@ -5,9 +5,9 @@ import { answerCodexUpdate, CODEX_UPDATE_MOVED_ON, isCodexUpdateMenu, parseCodex
 import { parseChoiceMenu } from './tuiChoices.ts'
 
 const ANSI = new RegExp(`${String.fromCharCode(27)}\\[[0-?]*[ -/]*[@-~]`, 'g')
-const RAW_DRAFT_BOX = readFileSync(new URL('../../../daemon/src/lifecycle/fixtures/codex-0.155-draft.ansi', import.meta.url), 'utf8')
+const RAW_DRAFT_BOX = readFileSync(new URL('../../../crates/am-lifecycle/src/lifecycle/fixtures/codex-0.155-draft.ansi', import.meta.url), 'utf8')
 const DRAFT_BOX = RAW_DRAFT_BOX.replace(ANSI, '')
-const RATE_LIMIT_MENU = readFileSync(new URL('../../../daemon/src/lifecycle/fixtures/codex-0.157-rate-limit-switch.txt', import.meta.url), 'utf8')
+const RATE_LIMIT_MENU = readFileSync(new URL('../../../crates/am-lifecycle/src/lifecycle/fixtures/codex-0.157-rate-limit-switch.txt', import.meta.url), 'utf8')
 
 test('讀得出 codex TUI 那句的前後版本', () => {
   const screen = [
