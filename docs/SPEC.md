@@ -5118,8 +5118,8 @@ daemon 要能在 Linux（目標：Ubuntu，外部編譯主機 192.168.1.46，#67
   - SVG 轉點陣圖：抓原檔 → 根 `<svg>` 沒有 width／height 就從 viewBox 補上 → 經 blob: 的 `<img>` 畫到 canvas，2x 解析度（單邊 ≤ 8192、總像素 ≤ 16M），背景照 SVG 原樣。每個檔（同版本）只轉一次、一出現就先轉好（點陣圖也先抓好），因為 `navigator.share` 要在點擊的同一個手勢裡呼叫。
   - 安全：SVG 一律只經 `<img>`（blob: 或同源 `?inline=1`）或 canvas，**絕不**插進 DOM；引用外部資源（`#id`／`data:` 以外的 href、`url()`、`@import`）或 `<foreignObject>` 的 SVG 不轉——判斷的是入口嵌完照片之後拿到的內容（§20.3），所以引用資料夾照片的 SVG 照常能轉，只有嵌完仍留著的外部參照才算（`<img>` 不載外部資源、canvas 可能被汙染），只顯示「這張圖沒辦法分享」。頁面 CSP 本來就有 `img-src 'self' data: blob:`，不必放寬。
   - **載不出來≠不能分享**（使用者 2026-10-04：ai-cc 改圖把 `y="380"font-size` 寫壞，長輩看到「沒辦法分享」以為圖不能分享）：這一版載不出來（不是合法 XML——先用 `DOMParser`
-    判、解碼失敗、抓檔失敗）只說「**這張圖還在修，請稍等**」，不給按鈕、縮圖顯示佔位；檔案換版（mtime／大小變了，SSE resync 或重新整理重抓清單）就重試。「沒辦法分享」只留給引用外部資源。
-  - **壞掉的 SVG 自動提醒 bot**（`share::svg_check`）：分享頁讀檔案清單（`GET /s/{token}/api/files`）時，背景查清單上每個 `.svg` 的新版（同一版 mtime＋大小只查一次）——
+    判、解碼失敗、抓檔失敗）只說「**這張圖還在修，請稍等**」，不給按鈕、縮圖顯示佔位；檔案換版（`version` 變了，SSE resync 或重新整理重抓清單）就重試。「沒辦法分享」只留給引用外部資源。
+  - **壞掉的 SVG 自動提醒 bot**（`share::svg_check`）：分享頁讀檔案清單（`GET /s/{token}/api/files`）時，背景查清單上每個 `.svg` 的新版（同一版只查一次；版本是清單每筆的不透明 `version`：inode＋大小＋奈秒 mtime＋奈秒 ctime，所以同一秒、同樣大小的重寫也算新版，issue #843；沒有 `version` 的舊資料退回 mtime＋大小）——
     不另寫 watcher：daemon 沒有檔案監看的基礎建設，而分享頁正好在載入、SSE resync、每輪 bot 回完時重讀清單，就是 end user 會看到圖的時候。先嚴格驗原始 bytes 是合法 UTF-8（分享頁送給瀏覽器的就是這些 bytes；不做 lossy 替換，issue #866）；quick-xml 管標籤配對與重複屬性，
     它放過的自己補：屬性之間少空格、`&` 不是合法實體（有 DOCTYPE 不查）、屬性值裡有 `<`、標籤到檔尾沒結束、根元素之後還有東西、找不到根。壞了就以 daemon 名義
     （`relay_from = daemon`）送一則後台訊息「圖檔 X 第 N 行第 M 欄格式壞了：<錯誤>，請修好」——分享頁看不到它，也看不到 bot 對它的回覆（沒標 `share_reply_visible`）；

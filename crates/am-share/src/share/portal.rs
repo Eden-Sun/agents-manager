@@ -1087,7 +1087,7 @@ async fn files<H: PortalEnv>(State(st): State<Portal<H>>, Path(token): Path<Stri
         .iter()
         .map(|f| {
             let modified_at = f["modified"].as_i64().and_then(|t| chrono::DateTime::from_timestamp(t, 0)).map(db::iso_at);
-            json!({"name": f["name"], "size": f["size"], "modified_at": modified_at})
+            json!({"name": f["name"], "size": f["size"], "modified_at": modified_at, "version": f["version"]})
         })
         .collect();
     // 清單上的 .svg 有新版就在背景查一次是不是合法 XML，壞了自動提醒 bot（`svg_check`，SPEC §20）。

@@ -25,6 +25,8 @@ export interface ShareFile {
   name: string
   size: number
   modified_at: string | null
+  /** daemon 給的不透明檔案版本（inode／大小／奈秒時間）；同秒同大小重寫也會變。舊 daemon 沒有。 */
+  version?: string | null
 }
 
 /** 單則文字上限（daemon 另有自己的上限，超過回 413）；單檔 25 MiB 同契約 C。 */
@@ -84,10 +86,10 @@ export function toSharePage(v: unknown): SharePage {
 export function toShareFiles(v: unknown): ShareFile[] {
   const list = Array.isArray(rec(v).files) ? (rec(v).files as unknown[]) : []
   return list
-    .map((f) => {
+    .map((f): ShareFile | null => {
       const o = rec(f)
       const name = str(o.name)
-      return name ? { name, size: typeof o.size === 'number' ? o.size : 0, modified_at: str(o.modified_at) || str(o.mtime) || null } : null
+      return name ? { name, size: typeof o.size === 'number' ? o.size : 0, modified_at: str(o.modified_at) || str(o.mtime) || null, version: str(o.version) || null } : null
     })
     .filter((f): f is ShareFile => f !== null)
 }

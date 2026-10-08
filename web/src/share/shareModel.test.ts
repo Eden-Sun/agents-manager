@@ -50,7 +50,13 @@ test('合併：同 id 取新的、照時間排', () => {
 })
 
 test('檔案清單：沒有名字的丟掉', () => {
-  assert.deepEqual(toShareFiles({ files: [{ name: 'a.txt', size: 3 }, { size: 1 }] }), [{ name: 'a.txt', size: 3, modified_at: null }])
+  assert.deepEqual(toShareFiles({ files: [{ name: 'a.txt', size: 3 }, { size: 1 }] }), [{ name: 'a.txt', size: 3, modified_at: null, version: null }])
+})
+
+test('檔案清單：讀得到 daemon 給的 version，沒有時為 null', () => {
+  const [a, b] = toShareFiles({ files: [{ name: 'a.svg', size: 3, modified_at: '2026-10-04T00:00:00Z', version: '1-3-5-7' }, { name: 'b.svg', size: 3 }] })
+  assert.equal(a.version, '1-3-5-7')
+  assert.equal(b.version, null)
 })
 
 test('錯誤給 end user 的話：404＝連結失效、429 帶秒數、不洩漏內部細節', () => {

@@ -3,8 +3,8 @@ import type { ShareClient } from './shareApi'
 import { canShareFile, displayName, isSvgName, pngName, shareOrSave, svgExternalRefs, SvgTaintedError, svgToPng, svgWellFormed } from './shareImage'
 import type { ShareFile } from './shareModel'
 
-/** 檔案換了內容（同名覆寫）預覽要跟著換：時間或大小變了就換網址。 */
-const fileVersion = (f: ShareFile) => `${f.modified_at ?? ''}-${f.size}`
+/** 檔案換了內容（同名覆寫）預覽要跟著換：版本變了就換網址（舊 daemon 沒有 version，退回時間＋大小）。 */
+const fileVersion = (f: ShareFile) => f.version ?? `${f.modified_at ?? ''}-${f.size}`
 
 /**
  * `external`＝圖引用外部資源（為了讀者的隱私不轉、不分享，永遠不會好）；`broken`＝這一版載不出來（bot 把圖寫壞了、網路斷了），
