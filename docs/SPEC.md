@@ -3933,6 +3933,9 @@ AG Man 搬到 Linux 主機（#675）後，`com.agm.*` 例行 job 由 systemd use
   `127.0.0.1:7788/api/session` 已有回應（2xx／401）就直接結束；否則照 `daemon-swap.sh` 的 `start()` 用 `systemd-run --user --collect -p Type=forking -p KillMode=process` 跑 `daemon-start.py`（專用 deploy checkout 那份，沒有退回 repo 的），最多等 60 秒（`DAEMON_BOOT_WAIT_SECS`）。
   binary 不在、`daemon-start.py` 找不到、起不來分別 `ops-alert --source daemon-boot --reason binary_missing｜start_script_missing｜boot_start_failed`。重複啟動無害：daemon 自己有 `daemon.lock` 獨佔鎖。沒有 launchd 對應檔（manifest 標 `linux`）。
 - **browser-gc 排程也有 Linux 版**：`com.agm.browser-gc.service`／`.timer` 每 1800 秒執行 `browser_gc_linux.py`，只回收本使用者的孤兒 headless Chrome（父程序是 pid 1 或自己的 `systemd --user`——Linux user session 的 subreaper，孤兒掛在它底下而不是 pid 1；至少 2 分鐘、CDP 狀態可查且無連線）與安全標記的舊 `/tmp/am-*` profile，再跑 `pane-gc`。`ss` 不存在或查詢錯誤時保留程序。Linux worker 不啟動 browser-gc bot、不派 ego-browser task；圖形瀏覽器／OB worker 依 #718 暫不實作。macOS 的 `browser-gc-kick.sh`、task 與 plist 仍只裝在 `darwin`。
+- **編譯快取回收**（issue #835，Linux 才有）：`com.agm.disk-gc.timer`（開機後 10 分鐘、之後每小時）跑 `bin/disk-gc.sh`：刪 `~/.cache/agents-manager/remote-cargo/*` 超過 7 天且沒人用的頂層目錄（不論 `build.remote` 開關）、
+  主樹與各 worktree 的 `target/*/incremental/*` 超過 2 天的子目錄、各 worktree（不含主樹）`.fingerprint` 超過 7 天沒動的整個 `target/`；之後 `$HOME` 磁碟使用率 ≥ 85% 或剩餘 < 20 GB 就 `ops-alert --source disk-gc --reason disk_low`。
+  只刪明確路徑，路徑含 `..`／symlink／實際位置不符就整步放棄；worktree 有行程 cwd、`target/` 有行程開檔、或讀不到 `/proc` 就不動。沒有 launchd 對應檔。
 - **對照表依平台選組**：`install-manifest.tsv` 可選第三欄 `darwin`／`linux`；`agm ops-sync --check` 只比這台平台的列，另一邊的放進 `skipped`。
   排程列必須標對（`LaunchAgents/…`＝`darwin`、`systemd/…`＝`linux`），否則 `bad_manifest`。Linux 上掃 `~/.config/systemd/user/com.agm.*` 找沒版控的 unit（`extra`），
   unit 比 parse 過的「段.鍵 → 值」，註解與空白不算，只忽略 `Environment=` 的值。

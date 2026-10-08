@@ -1,0 +1,11 @@
+# 來源檔（issue #835）：回收編譯快取（remote-cargo、worktree 的 target/incremental 與久沒用的 target/）。
+# Linux 先做，沒有 launchd 對應檔（manifest 標 linux）。排程見 com.agm.disk-gc.timer。
+[Unit]
+Description=AGM disk-gc：回收編譯快取，磁碟水位高時喊人（issue #835）
+
+[Service]
+Type=oneshot
+Environment=PATH=%h/.local/bin:%h/.bun/bin:%h/.cargo/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin
+ExecStart=/bin/bash %h/.config/agents-manager/supervisor/AGM/bin/disk-gc.sh
+StandardOutput=append:%h/.config/agents-manager/supervisor/AGM/disk-gc.systemd.log
+StandardError=append:%h/.config/agents-manager/supervisor/AGM/disk-gc.systemd.log

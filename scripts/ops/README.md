@@ -544,6 +544,31 @@ launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.agm.ci-watch.plist
 隔離測試：`bash scripts/ops/outbox-gc_test.sh`、`pane-gc_test.sh`、`browser-gc-kick_test.sh`（假 `ps`／`lsof`／`herdr`／`bin/agm`，`kill` 用函式替身，`/tmp/am-*` 換成暫存目錄；不會殺行程、關 pane 或碰真的 outbox／HOME）。
 安裝比照其他 kick：`install -m 755 scripts/ops/{outbox-gc,pane-gc,browser-gc-kick}.sh ~/.config/agents-manager/supervisor/AGM/bin/`、`install -m 644 scripts/ops/browser-gc-task.md ~/.config/agents-manager/supervisor/AGM/`；launchd 由巡檢處理。
 
+## disk-gc.sh（issue #835，Linux）
+
+回收編譯快取，磁碟水位高時喊人。以前沒有任何排程回收磁碟：daemon 的 `select_gc` 只在 `[build.remote] enabled` 時才跑，各 worktree 的 `target/` 越堆越多。
+`com.agm.disk-gc.timer`：`OnActiveSec=600s`、`OnUnitActiveSec=3600s`（每小時）跑 `bin/disk-gc.sh`；只有 systemd 版，**沒有 launchd plist**（macOS 另議）。
+
+| 步驟 | 對象 | 規則（env 可覆寫） |
+| --- | --- | --- |
+| (a) | `~/.cache/agents-manager/remote-cargo/*` 頂層目錄 | mtime 超過 `DISK_GC_REMOTE_CARGO_DAYS`（7）天，且沒有行程的 cwd／開檔在底下才刪；不論 `build.remote` 開關 |
+| (b) | 主樹與 `.claude/worktrees/*` 的 `target/*/incremental/*` | 子目錄 mtime 超過 `DISK_GC_INCREMENTAL_DAYS`（2）天就刪 |
+| (c) | 各 worktree（**不含主樹**）的 `target/` | 最新的 `target/*/.fingerprint`（含它底下第一層）都超過 `DISK_GC_TARGET_DAYS`（7）天 → 整個 `target/` 刪；一個 `.fingerprint` 都沒有就不判斷 |
+| (d) | `$HOME` 所在磁碟 | 使用率 ≥ `DISK_GC_ALERT_PCT`（85）或剩餘 < `DISK_GC_ALERT_FREE_GB`（20）→ `agm ops-alert --source disk-gc --reason disk_low` |
+
+安全：只刪上面這幾個明確路徑；路徑含 `..`、不在 `$HOME` 底下、任何一層是 symlink、實際位置不符就整步放棄；`cd` 進去後只用相對路徑刪。
+worktree 底下有行程的 cwd，或 `target/` 底下有行程開著檔，整棵不動（主樹只看 `target/` 底下有沒有開檔，因為主樹本來就一直有人在）；讀不到 `/proc` 就不刪任何東西。
+每輪在 `supervisor/AGM/disk-gc.log` 寫一行（釋放多少 MB、跳過哪些與原因）。`/tmp` 外洩由 `ubuntu-ci.sh` 的 `sweep_stale_tmp` 處理，這裡不重做。
+
+隔離測試：`bash scripts/ops/disk-gc_test.sh`（HOME 指到暫存目錄，`touch -d` 造舊檔，假 `df`／`agm`；不碰真的快取）。
+安裝（**需要 AGM 核准**）：
+
+```sh
+install -m 755 scripts/ops/disk-gc.sh ~/.config/agents-manager/supervisor/AGM/bin/
+install -m 644 scripts/ops/systemd/com.agm.disk-gc.{service,timer} ~/.config/systemd/user/
+systemctl --user daemon-reload && systemctl --user enable --now com.agm.disk-gc.timer
+```
+
 ## dev-server-kick.ts（issue #418）
 
 5173 dev server 的看門狗。**2026-09-24 之前只存在於 `AGM/bin/`**：`docs/SPEC.md` §18.1 把行為寫得很細，

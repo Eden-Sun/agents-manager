@@ -1,0 +1,11 @@
+# 來源檔（issue #835）：開機（timer 啟動）10 分鐘後第一次，之後每小時；上一輪還在跑就不會疊一個。
+[Unit]
+Description=AGM disk-gc 排程（每 3600 秒）
+
+[Timer]
+OnActiveSec=600s
+OnUnitActiveSec=3600s
+AccuracySec=1s
+
+[Install]
+WantedBy=timers.target
