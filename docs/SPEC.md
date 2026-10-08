@@ -29,8 +29,9 @@ status:   queued ────► in_flight             （前一回合結束後�
             ▲  └─────► failed                （送不出去：重試用完、內容空、無法照原樣送）
             └───────── in_flight             （領走後、打第一個字之前被擋下：放回佇列）
           in_flight ──► completed            （hook 配對成功）
-              │    └──► completed_fallback   （終端備援；之後不被 hook 覆蓋，UI 標「可能不完整」）
+              │    └──► completed_fallback   （終端備援，UI 標「可能不完整」；之後遲到的 hook／transcript 可以升級它，見下一行）
               └───────► failed               （agent_blocked / interrupt / stop / 使用者放棄）
+ completed_fallback ──► completed            （遲到的 hook／transcript 補上原文，取代備援那則；唯一的出邊，§4.3、`turn_guard::LEGAL_EDGES`）
 delivery: pending → ok | unknown | failed    （送出的結果——打字證據或 agent.prompt；獨立於 status。
                                               有沒有證據、能不能重送另記 delivery_verified／auto_resend，§6）
 origin:   web | external                     （external = 非本系統送出、由 hook 或快照得知）
