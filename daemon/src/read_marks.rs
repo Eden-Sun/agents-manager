@@ -122,26 +122,44 @@ pub async fn unread_counts(pool: &SqlitePool) -> Result<HashMap<String, i64>> {
     Ok(rows.into_iter().collect())
 }
 
-/// 從 `conversations` 出發、用 `messages_assistant_unread`（只含 assistant 列的 covering 索引）只讀標記之後的範圍（`CROSS JOIN` 鎖住順序、`INDEXED BY` 鎖住索引；
-/// 查詢裡的 `m.role = 'assistant'` 要原樣留著，partial index 才用得上）：
-/// `/api/state` 每次都會問，以前是從 `messages` 全表掃起（1.7 萬則約 40～70 ms，隨訊息數線性長），已讀過的 bot 其實幾乎沒有
-/// 標記之後的訊息。`created_at >= 標記時間` 是下面那個全序條件的必要條件，只負責讓索引能 seek，結果不變。
-const UNREAD_SQL: &str = "SELECT c.bot_id, COUNT(DISTINCT COALESCE(m.turn_id, 'msg:' || m.id))
+/// 同 [`unread_counts`]，只算一顆 bot（沒有未讀回 0）。
+pub async fn unread_count_for(pool: &SqlitePool, bot_id: &str) -> Result<i64> {
+    let row: Option<(String, i64)> = sqlx::query_as(UNREAD_ONE_SQL).bind(bot_id).fetch_optional(pool).await?;
+    Ok(row.map_or(0, |(_, n)| n))
+}
+
+/// [`UNREAD_SQL`] 與 [`UNREAD_ONE_SQL`] 共用的查詢本體；`$scope` 是塞在 `WHERE` 開頭的額外條件（全表版為空）。
+macro_rules! unread_sql {
+    ($scope:literal) => {
+        concat!("SELECT c.bot_id, COUNT(DISTINCT COALESCE(m.turn_id, 'msg:' || m.id))
            FROM conversations c
            LEFT JOIN bot_reads r ON r.bot_id = c.bot_id
            CROSS JOIN messages m INDEXED BY messages_assistant_unread
            LEFT JOIN messages read_m ON read_m.id = r.message_id AND read_m.created_at = r.read_at
             AND read_m.conversation_id = c.id
-          WHERE m.conversation_id = c.id AND m.created_at >= COALESCE(r.read_at, '') AND m.role = 'assistant'
+          WHERE ", $scope, "m.conversation_id = c.id AND m.created_at >= COALESCE(r.read_at, '') AND m.role = 'assistant'
             AND NOT EXISTS (SELECT 1 FROM turns kt WHERE kt.id = m.turn_id AND (kt.client_request_id LIKE 'keep-warm:%' OR kt.client_request_id LIKE 'keepalive:%'))
             AND (r.bot_id IS NULL OR m.created_at > r.read_at OR (m.created_at = r.read_at AND
                  CASE WHEN read_m.rowid IS NULL THEN m.id > r.message_id ELSE m.rowid > read_m.rowid END))
-          GROUP BY c.bot_id";
+          GROUP BY c.bot_id")
+    };
+}
+
+/// 從 `conversations` 出發、用 `messages_assistant_unread`（只含 assistant 列的 covering 索引）只讀標記之後的範圍（`CROSS JOIN` 鎖住順序、`INDEXED BY` 鎖住索引；
+/// 查詢裡的 `m.role = 'assistant'` 要原樣留著，partial index 才用得上）：
+/// `/api/state` 每次都會問，以前是從 `messages` 全表掃起（1.7 萬則約 40～70 ms，隨訊息數線性長），已讀過的 bot 其實幾乎沒有
+/// 標記之後的訊息。`created_at >= 標記時間` 是下面那個全序條件的必要條件，只負責讓索引能 seek，結果不變。
+const UNREAD_SQL: &str = unread_sql!("");
+
+/// 單顆 bot 的版本（`POST /bots/{id}/read` 只要那一顆，不必算全表）：同一份查詢，`WHERE` 多一個 `c.bot_id = ?`；
+/// 順序與索引（`CROSS JOIN`、`INDEXED BY`、`m.role = 'assistant'`）原樣不動。
+const UNREAD_ONE_SQL: &str = unread_sql!("c.bot_id = ? AND ");
 
 /// 只往前推：另一台裝置送來較舊的標記（離線很久才同步）不能把已讀退回未讀。時間先比，再用現存訊息 rowid 判同毫秒順序；`at` 先經 [`normalize_at`]。
-pub async fn mark(pool: &SqlitePool, bot_id: &str, at: &str, message_id: &str) -> Result<ReadMark> {
+/// 回傳目前的標記，以及這次有沒有真的改到（`false`＝標記沒前進，呼叫端不必廣播，#899）。
+pub async fn mark(pool: &SqlitePool, bot_id: &str, at: &str, message_id: &str) -> Result<(ReadMark, bool)> {
     let at = normalize_at(at, &crate::db::now()).ok_or_else(|| anyhow::anyhow!("at must be an RFC 3339 timestamp"))?;
-    sqlx::query(
+    let advanced = sqlx::query(
         "INSERT INTO bot_reads (bot_id, read_at, message_id) VALUES (?, ?, ?)
          ON CONFLICT(bot_id) DO UPDATE SET read_at = excluded.read_at, message_id = excluded.message_id
           WHERE excluded.read_at > bot_reads.read_at
@@ -160,7 +178,9 @@ pub async fn mark(pool: &SqlitePool, bot_id: &str, at: &str, message_id: &str) -
     .bind(&at)
     .bind(message_id)
     .execute(pool)
-    .await?;
+    .await?
+    .rows_affected()
+        > 0;
     let (at, message_id, seq): (String, String, Option<i64>) = sqlx::query_as(
         "SELECT r.read_at, r.message_id, m.rowid FROM bot_reads r
           LEFT JOIN messages m ON m.id = r.message_id AND m.created_at = r.read_at
@@ -170,7 +190,7 @@ pub async fn mark(pool: &SqlitePool, bot_id: &str, at: &str, message_id: &str) -
         .bind(bot_id)
         .fetch_one(pool)
         .await?;
-    Ok(ReadMark { at, message_id, seq })
+    Ok((ReadMark { at, message_id, seq }, advanced))
 }
 
 pub async fn group_marks(pool: &SqlitePool) -> Result<HashMap<String, ReadMark>> {
@@ -211,10 +231,10 @@ const GROUP_UNREAD_SQL: &str = "SELECT b.project_id, COUNT(DISTINCT m.turn_id)
                  CASE WHEN read_m.rowid IS NULL THEN m.id > r.message_id ELSE m.rowid > read_m.rowid END))
           GROUP BY b.project_id";
 
-/// 同 [`mark`]：只往前推。
-pub async fn mark_group(pool: &SqlitePool, project_id: &str, at: &str, message_id: &str) -> Result<Option<ReadMark>> {
+/// 同 [`mark`]：只往前推；第二個值是這次有沒有真的改到。專案不存在（或已軟刪）回 `None`。
+pub async fn mark_group(pool: &SqlitePool, project_id: &str, at: &str, message_id: &str) -> Result<Option<(ReadMark, bool)>> {
     let at = normalize_at(at, &crate::db::now()).ok_or_else(|| anyhow::anyhow!("at must be an RFC 3339 timestamp"))?;
-    sqlx::query(
+    let advanced = sqlx::query(
         "INSERT INTO project_group_reads (project_id, read_at, message_id)
          SELECT ?, ?, ? WHERE EXISTS (SELECT 1 FROM projects WHERE id = ? AND deleted_at IS NULL)
          ON CONFLICT(project_id) DO UPDATE SET read_at = excluded.read_at, message_id = excluded.message_id
@@ -235,7 +255,9 @@ pub async fn mark_group(pool: &SqlitePool, project_id: &str, at: &str, message_i
     .bind(message_id)
     .bind(project_id)
     .execute(pool)
-    .await?;
+    .await?
+    .rows_affected()
+        > 0;
     let live: bool = sqlx::query_scalar("SELECT EXISTS (SELECT 1 FROM projects WHERE id = ? AND deleted_at IS NULL)")
         .bind(project_id)
         .fetch_one(pool)
@@ -253,7 +275,7 @@ pub async fn mark_group(pool: &SqlitePool, project_id: &str, at: &str, message_i
         .bind(project_id)
         .fetch_one(pool)
         .await?;
-    Ok(Some(ReadMark { at, message_id, seq }))
+    Ok(Some((ReadMark { at, message_id, seq }, advanced)))
 }
 
 /// 讀到的訊息 id：真的 id 是 26 字元的 ULID。這個字串整個存進 DB、又隨 `GET /api/state` 與 WS 廣播給每個分頁，
@@ -319,10 +341,13 @@ pub async fn post(State(app): State<Arc<App>>, Path(id): Path<String>, body: Opt
         return Err(LcError::Bad("message_id must identify a message in this bot's conversation".into()));
     }
     let at = mark_at(b.at, message_at.as_deref(), &crate::db::now())?;
-    let m = mark(&app.db, &id, &at, message_id).await.map_err(|e| LcError::Upstream(e.to_string()))?;
-    let unread = unread_counts(&app.db).await.map_err(|e| LcError::Upstream(e.to_string()))?.get(&id).copied().unwrap_or(0);
+    let (m, advanced) = mark(&app.db, &id, &at, message_id).await.map_err(|e| LcError::Upstream(e.to_string()))?;
+    let unread = unread_count_for(&app.db, &id).await.map_err(|e| LcError::Upstream(e.to_string()))?;
     let out = json!({"bot_id": id, "read_mark": json_value(&m), "unread": unread});
-    app.emit("bot_read", out.clone()).await;
+    // 標記沒前進（重複送、或較舊的標記被擋下）：其他分頁什麼都沒變，不廣播（#899）。
+    if advanced {
+        app.emit("bot_read", out.clone()).await;
+    }
     Ok(Json(out))
 }
 
@@ -357,10 +382,12 @@ pub async fn post_group(State(app): State<Arc<App>>, Path(id): Path<String>, bod
     }
     let at = mark_at(b.at, message_at.as_deref(), &crate::db::now())?;
     let m = mark_group(&app.db, &id, &at, message_id).await.map_err(|e| LcError::Upstream(e.to_string()))?;
-    let Some(m) = m else { return Err(LcError::NotFound("project".into())) };
+    let Some((m, advanced)) = m else { return Err(LcError::NotFound("project".into())) };
     let unread = group_unread_counts(&app.db).await.map_err(|e| LcError::Upstream(e.to_string()))?.get(&id).copied().unwrap_or(0);
     let out = json!({"project_id": id, "read_mark": json_value(&m), "unread": unread});
-    app.emit("group_read", out.clone()).await;
+    if advanced {
+        app.emit("group_read", out.clone()).await;
+    }
     Ok(Json(out))
 }
 
@@ -416,6 +443,7 @@ mod tests {
         // 不必為了讀 `role` 去撈每一列（量測：1.7 萬則訊息的正式 DB 複本上 11 ms → 1 ms，結果逐位元相同）。
         for (name, sql, index) in [
             ("unread", UNREAD_SQL, "COVERING INDEX messages_assistant_unread"),
+            ("unread_one", UNREAD_ONE_SQL, "COVERING INDEX messages_assistant_unread"),
             ("group_unread", GROUP_UNREAD_SQL, "INDEX messages_conv_time"),
         ] {
             let plan: Vec<(i64, i64, i64, String)> = sqlx::query_as(&format!("EXPLAIN QUERY PLAN {sql}")).fetch_all(&pool).await.unwrap();
@@ -439,7 +467,7 @@ mod tests {
         assert_eq!(unread_counts(&pool).await.unwrap().get("b"), Some(&2), "a1-t2 的 id 較大，仍未讀 + t3");
         mark(&pool, "b", "2026-09-15T02:00:00.000Z", "a1-t2").await.unwrap();
         assert_eq!(unread_counts(&pool).await.unwrap().get("b"), Some(&1), "a0-t2 的 id 較小，已讀；只剩 t3");
-        let m = mark(&pool, "b", "2026-09-15T01:00:00.000Z", "a1-t1").await.unwrap();
+        let m = mark(&pool, "b", "2026-09-15T01:00:00.000Z", "a1-t1").await.unwrap().0;
         assert_eq!(m.at, "2026-09-15T02:00:00.000Z", "較舊的標記不倒退");
         mark(&pool, "b", "2026-09-15T03:00:01.000Z", "").await.unwrap();
         assert_eq!(unread_counts(&pool).await.unwrap().get("b"), None);
@@ -468,13 +496,13 @@ mod tests {
     async fn offset_and_precision_variants_of_the_same_instant_compare_equal() {
         let (pool, dir) = pool().await;
         seed(&pool).await;
-        let m = mark(&pool, "b", "2026-09-15T10:00:00+08:00", "a0-t2").await.unwrap();
+        let m = mark(&pool, "b", "2026-09-15T10:00:00+08:00", "a0-t2").await.unwrap().0;
         assert_eq!(m.at, "2026-09-15T02:00:00.000Z");
         assert_eq!(unread(&pool).await, Some(2), "a1-t2 + t3 未讀，t3 不因 +08:00 字串較大被吃掉");
-        let m = mark(&pool, "b", "2026-09-15T03:30:00Z", "").await.unwrap();
+        let m = mark(&pool, "b", "2026-09-15T03:30:00Z", "").await.unwrap().0;
         assert_eq!(m.at, "2026-09-15T03:30:00.000Z", "後送的較新 UTC 標記要能前推");
         assert_eq!(unread(&pool).await, None);
-        let m = mark(&pool, "b", "2026-09-15T11:00:00+08:00", "").await.unwrap();
+        let m = mark(&pool, "b", "2026-09-15T11:00:00+08:00", "").await.unwrap().0;
         assert_eq!(m.at, "2026-09-15T03:30:00.000Z", "較舊（03Z）的離線標記不倒退，即使字串看起來比較大");
 
         sqlx::query("DELETE FROM bot_reads").execute(&pool).await.unwrap();
@@ -492,7 +520,7 @@ mod tests {
         let (pool, dir) = pool().await;
         seed(&pool).await;
         let before = crate::db::now();
-        let m = mark(&pool, "b", "2099-01-01T00:00:00Z", "").await.unwrap();
+        let m = mark(&pool, "b", "2099-01-01T00:00:00Z", "").await.unwrap().0;
         assert!(m.at >= before && m.at <= crate::db::now(), "夾到現在：{}", m.at);
         assert_eq!(unread(&pool).await, None, "已存在的訊息都算讀過");
         let later = (chrono::Utc::now() + chrono::Duration::seconds(5)).to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
@@ -529,12 +557,12 @@ mod tests {
             sqlx::query("UPDATE messages SET group_id = 'g-1' WHERE role = 'user' AND turn_id = ?").bind(tid).execute(&pool).await.unwrap();
         }
         assert_eq!(group_unread_counts(&pool).await.unwrap().get("p"), Some(&2), "t1、t3 是群組回合；同回合兩則 assistant 算一個");
-        let m = mark_group(&pool, "p", "2026-09-15T01:00:00.000Z", "a0-t1").await.unwrap().unwrap();
+        let m = mark_group(&pool, "p", "2026-09-15T01:00:00.000Z", "a0-t1").await.unwrap().unwrap().0;
         assert_eq!(m.at, "2026-09-15T01:00:00.000Z");
         assert_eq!(group_unread_counts(&pool).await.unwrap().get("p"), Some(&2), "a1-t1 的 id 較大仍未讀，t3 也是");
         mark_group(&pool, "p", "2026-09-15T01:00:00.000Z", "a1-t1").await.unwrap();
         assert_eq!(group_unread_counts(&pool).await.unwrap().get("p"), Some(&1));
-        let m = mark_group(&pool, "p", "2026-09-15T00:30:00.000Z", "").await.unwrap().unwrap();
+        let m = mark_group(&pool, "p", "2026-09-15T00:30:00.000Z", "").await.unwrap().unwrap().0;
         assert_eq!(m.at, "2026-09-15T01:00:00.000Z", "較舊的標記不倒退");
         assert_eq!(group_marks(&pool).await.unwrap().get("p").map(|m| m.message_id.as_str()), Some("a1-t1"));
         mark_group(&pool, "p", "2026-09-15T03:00:00.000Z", "a1-t3").await.unwrap();
@@ -851,5 +879,118 @@ mod tests {
 
         let unread = unread_counts(&e.app.db).await.unwrap().get(&bot).copied().unwrap_or(0);
         assert_eq!(unread, 0, "a later inserted message is a later read mark even when its id sorts first");
+    }
+
+    // ---- #899：標記沒前進就不廣播；POST 只算那一顆 bot 的未讀 ----
+
+    fn rfc(ago_min: i64) -> String {
+        (chrono::Utc::now() - chrono::Duration::minutes(ago_min)).to_rfc3339_opts(chrono::SecondsFormat::Millis, true)
+    }
+
+    fn drain(rx: &mut tokio::sync::broadcast::Receiver<crate::state::WsEvent>, kind: &str) -> usize {
+        let mut n = 0;
+        while let Ok(ev) = rx.try_recv() {
+            if ev.kind == kind {
+                n += 1;
+            }
+        }
+        n
+    }
+
+    async fn post_at(app: &Arc<App>, id: &str, at: &str) -> Value {
+        let body = MarkIn { at: Some(at.to_string()), message_id: None };
+        post(State(app.clone()), Path(id.to_string()), Some(Json(body))).await.unwrap().0
+    }
+
+    async fn post_group_at(app: &Arc<App>, id: &str, at: &str) -> Value {
+        let body = MarkIn { at: Some(at.to_string()), message_id: None };
+        post_group(State(app.clone()), Path(id.to_string()), Some(Json(body))).await.unwrap().0
+    }
+
+    #[tokio::test]
+    async fn a_bot_read_post_that_does_not_advance_the_mark_is_not_broadcast() {
+        let env = crate::testing::env().await;
+        let app = env.app.clone();
+        let bot = crate::testing::claude_bot(&app, &env.project_id, "read-emit").await;
+        sqlx::query("DELETE FROM bot_reads").execute(&app.db).await.unwrap();
+        let mut rx = app.subscribe();
+        let (older, newer, newest) = (rfc(120), rfc(60), rfc(30));
+
+        let out = post_at(&app, &bot.id, &newer).await;
+        assert_eq!(out["read_mark"]["at"], newer.as_str());
+        assert_eq!(drain(&mut rx, "bot_read"), 1, "第一次：標記前進，廣播");
+        post_at(&app, &bot.id, &newer).await;
+        assert_eq!(drain(&mut rx, "bot_read"), 0, "同一標記再送：沒前進，不廣播");
+        let out = post_at(&app, &bot.id, &older).await;
+        assert_eq!(drain(&mut rx, "bot_read"), 0, "較舊的標記：被擋下，不廣播");
+        assert_eq!(out["read_mark"]["at"], newer.as_str(), "回應仍是較新的那個標記");
+        assert!(out["unread"].is_number() && out["bot_id"] == bot.id.as_str(), "照樣回 200 的完整內容");
+        post_at(&app, &bot.id, &newest).await;
+        assert_eq!(drain(&mut rx, "bot_read"), 1, "較新的標記：前進，廣播");
+    }
+
+    #[tokio::test]
+    async fn a_group_read_post_that_does_not_advance_the_mark_is_not_broadcast() {
+        let env = crate::testing::env().await;
+        let app = env.app.clone();
+        sqlx::query("DELETE FROM project_group_reads").execute(&app.db).await.unwrap();
+        let mut rx = app.subscribe();
+        let (older, newer, newest) = (rfc(120), rfc(60), rfc(30));
+
+        let out = post_group_at(&app, &env.project_id, &newer).await;
+        assert_eq!(out["read_mark"]["at"], newer.as_str());
+        assert_eq!(drain(&mut rx, "group_read"), 1);
+        post_group_at(&app, &env.project_id, &newer).await;
+        assert_eq!(drain(&mut rx, "group_read"), 0, "同一標記再送不廣播");
+        let out = post_group_at(&app, &env.project_id, &older).await;
+        assert_eq!(drain(&mut rx, "group_read"), 0, "較舊的標記不廣播");
+        assert_eq!(out["read_mark"]["at"], newer.as_str());
+        post_group_at(&app, &env.project_id, &newest).await;
+        assert_eq!(drain(&mut rx, "group_read"), 1);
+    }
+
+    #[tokio::test]
+    async fn mark_reports_whether_it_advanced() {
+        let (pool, dir) = pool().await;
+        seed(&pool).await;
+        sqlx::query("DELETE FROM bot_reads").execute(&pool).await.unwrap();
+        assert!(mark(&pool, "b", "2026-09-15T02:00:00.000Z", "a0-t2").await.unwrap().1, "新列");
+        assert!(!mark(&pool, "b", "2026-09-15T02:00:00.000Z", "a0-t2").await.unwrap().1, "同一標記");
+        assert!(!mark(&pool, "b", "2026-09-15T01:00:00.000Z", "a1-t1").await.unwrap().1, "較舊");
+        assert!(mark(&pool, "b", "2026-09-15T02:00:00.000Z", "a1-t2").await.unwrap().1, "同時間、較大的 id");
+        assert!(!mark(&pool, "b", "2026-09-15T02:00:00.000Z", "a0-t2").await.unwrap().1, "同時間、較小的 id");
+        assert!(mark_group(&pool, "p", "2026-09-15T02:00:00.000Z", "").await.unwrap().unwrap().1);
+        assert!(!mark_group(&pool, "p", "2026-09-15T02:00:00.000Z", "").await.unwrap().unwrap().1);
+        assert!(mark_group(&pool, "no-such", "2026-09-15T02:00:00.000Z", "").await.unwrap().is_none());
+        std::fs::remove_dir_all(dir).ok();
+    }
+
+    /// 單顆版本與全表版本在各種資料下結果相同（沒有標記、標記在中間、標記在最後、別顆 bot 的訊息不混進來、不存在的 bot）。
+    #[tokio::test]
+    async fn the_single_bot_unread_count_matches_the_full_table_count() {
+        let (pool, dir) = pool().await;
+        seed(&pool).await;
+        let now = "2026-09-15T00:00:00.000Z";
+        sqlx::query("INSERT INTO bots (id,project_id,name,kind,hook_token,created_at) VALUES ('b2','p','b2','claude','t',?)").bind(now).execute(&pool).await.unwrap();
+        sqlx::query("INSERT INTO conversations (id,bot_id,created_at) VALUES ('c2','b2',?)").bind(now).execute(&pool).await.unwrap();
+        sqlx::query("INSERT INTO messages (id,conversation_id,turn_id,role,content,source,created_at) VALUES ('a-b2',  'c2',NULL,'assistant','a','hook','2026-09-15T05:00:00.000Z')").execute(&pool).await.unwrap();
+        // 保溫回合的回覆不算未讀（兩個版本都要排除）。
+        sqlx::query("INSERT INTO turns (id,conversation_id,origin,status,client_request_id,created_at,completed_at) VALUES ('kw','c','web','completed','keep-warm:x','2026-09-15T04:00:00.000Z','2026-09-15T04:00:00.000Z')").execute(&pool).await.unwrap();
+        sqlx::query("INSERT INTO messages (id,conversation_id,turn_id,role,content,source,created_at) VALUES ('a-kw','c','kw','assistant','a','hook','2026-09-15T04:00:00.000Z')").execute(&pool).await.unwrap();
+
+        sqlx::query("DELETE FROM bot_reads").execute(&pool).await.unwrap();
+        for step in 0..4 {
+            match step {
+                1 => drop(mark(&pool, "b", "2026-09-15T02:00:00.000Z", "a0-t2").await.unwrap()),
+                2 => drop(mark(&pool, "b", "2026-09-15T02:00:00.000Z", "a1-t2").await.unwrap()),
+                3 => drop(mark(&pool, "b", "2026-09-15T03:00:01.000Z", "").await.unwrap()),
+                _ => {}
+            }
+            let all = unread_counts(&pool).await.unwrap();
+            for bot in ["b", "b2", "nobody"] {
+                assert_eq!(unread_count_for(&pool, bot).await.unwrap(), all.get(bot).copied().unwrap_or(0), "step {step} bot {bot}");
+            }
+        }
+        std::fs::remove_dir_all(dir).ok();
     }
 }
