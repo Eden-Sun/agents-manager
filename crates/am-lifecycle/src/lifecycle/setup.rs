@@ -1913,6 +1913,29 @@ mod model_args_tests {
         );
     }
 
+    /// #901：頂層 bot 的啟動參數經 `fit_command_line`（900 bytes 預算）之後，claude／codex 的指示不能被砍成「…（後略）」——
+    /// persona 再長，argv 裡也只有短路徑／profile 名。
+    #[test]
+    fn staged_persona_launch_args_survive_the_command_line_budget_untouched() {
+        let long = "完整的人設內容".repeat(400);
+        for (kind, staged) in [("claude", "/data/bots/01HZZZZZZZZZZZZZZZZZZZZZZZ/persona.md"), ("codex", "am-bot-01HZZZZZZZZZZZZZZZZZZZZZZZ")] {
+            let mut b = bot(kind, Some("some-model"), None, true);
+            b.persona = Some(long.clone());
+            let mut args = vec!["--dangerously-skip-permissions".to_string()];
+            args.extend(super::persona_args(&b, "proj-abc123", Some("AGENT-MD"), Some(staged)));
+            args.extend(["--model".to_string(), "some-model".to_string()]);
+            let fitted = crate::herdr::fit_command_line(args.clone());
+            assert_eq!(fitted, args, "{kind}: nothing needed trimming");
+            assert!(!fitted.iter().any(|a| a.contains("後略")), "{kind}: {fitted:?}");
+            assert!(fitted.iter().all(|a| !a.contains("AG Man 規則") && !a.contains(&long)), "{kind}: the text itself stays out of argv");
+        }
+        // 對照：沒有 staged 時整份放進 argv，確實會被砍——這正是頂層 bot 以前的樣子。
+        let mut b = bot("claude", None, None, false);
+        b.persona = Some(long.clone());
+        let inline = crate::herdr::fit_command_line(super::persona_args(&b, "proj-abc123", Some("AGENT-MD"), None));
+        assert!(inline.iter().any(|a| a.ends_with("後略）")), "{inline:?}");
+    }
+
     /// 2026-09-13 使用者要求：人設與注入提示一律用命令語氣。客氣的寫法（「請…」「不要…比較好」）
     /// agent 會當成建議，實際上不照做；硬規則要寫成命令才會被執行。
     #[test]
