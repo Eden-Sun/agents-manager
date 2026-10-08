@@ -15,6 +15,8 @@ export function usePendingQuestion(botId: string, paused = false): PendingQuesti
     if (paused || kind !== 'claude') return
     let alive = true
     const tick = async () => {
+      // 分頁在背景就不讀；回前景時 `onVisible` 立刻補一次。
+      if (document.visibilityState === 'hidden') return
       try {
         const raw = await api.fetchPendingQuestion(botId)
         if (alive) setState({ botId, questions: toPendingQuestions(raw) })
@@ -22,10 +24,15 @@ export function usePendingQuestion(botId: string, paused = false): PendingQuesti
         // 讀不到不是紅字：這只是補充，畫面本身照舊。
       }
     }
+    const onVisible = () => {
+      if (document.visibilityState === 'visible') void tick()
+    }
+    document.addEventListener('visibilitychange', onVisible)
     void tick()
     const t = setInterval(() => void tick(), 5000)
     return () => {
       alive = false
+      document.removeEventListener('visibilitychange', onVisible)
       clearInterval(t)
     }
   }, [botId, kind, paused])
