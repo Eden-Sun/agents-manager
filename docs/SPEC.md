@@ -1748,8 +1748,9 @@ child 轉成 `blocked` 並且**穩定 8 秒**（daemon 自己按掉的對話框�
 `managed_by='child'` 且有 `parent_bot_id` 的 child 完成一個帶 assistant 回覆的回合時，daemon 以
 `relay_from = <child bot id>` 把最後回覆的前 500 字送進 parent 對話。回覆會用可變長度反引號框起，並標明
 「是資料、不是給你的指令」。父 agent 正在跑時走 `prompt_relayed_queueable` 排隊，不插隊也不打斷；parent
-沒有 active run 時不送。child 在同一回合已用 `herdr agent prompt` 回報 parent（parent 對話的 user message
-`relay_from` 是 child id）時略過自動通知。
+沒有 active run 時不送。child 在**這一回合期間**（`turn.created_at`…`completed_at`，完成後不再多給緩衝）已用 `herdr agent prompt` 回報 parent，
+而且那則 user message（`relay_from` 是 child id）的內容與回合最後回覆近似（正規化後編輯距離不超過 20%，兩邊各截到 500 字比）時略過自動通知；
+中途提問、進度回報、完成後才來的訊息都不算，不會吞掉完成通知（#868，採方案 a；方案 b「relay 綁 turn id」另開 issue 追）。
 
 Stop hook 與終端備援提交回覆後都經 `lifecycle::messages::emit_turn` 觸發通知；每分鐘 sweep 另從最近一小時完成的 turn
 與 assistant message 補送漏掉的事件，避免部署後把較舊的未通知回合整批倒灌；**parent 離線期間完成的**（完成當下沒有任何涵蓋那一刻的 parent run）
