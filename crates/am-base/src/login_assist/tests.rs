@@ -279,6 +279,17 @@ async fn a_code_is_typed_only_while_the_prompt_is_the_last_line() {
     assert_eq!(out["message"], "Login failed: Request failed with status code 400");
     assert_eq!(f.typed().iter().map(|c| c["text"].as_str().unwrap().to_string()).collect::<Vec<_>>(), ["fake-code#state123"], "去頭尾空白、整段一次");
     assert_eq!(f.keys(), [json!(["enter"])], "Enter 另送");
+    let order: Vec<String> = f
+        .env
+        .herdr
+        .calls
+        .lock()
+        .unwrap()
+        .iter()
+        .filter(|(m, _)| m == "pane.send_text" || m == "pane.send_keys")
+        .map(|(m, _)| m.clone())
+        .collect();
+    assert_eq!(order, ["pane.send_text", "pane.send_keys"], "先打字、再複查後按 Enter");
     let v = status(&f.env.app, "local", &f.pane).await.unwrap();
     assert_eq!(v["code_sent"], true);
 }
@@ -307,6 +318,25 @@ async fn a_code_is_not_typed_when_claude_is_no_longer_the_foreground_process() {
     let body = conflict(submit_code(&f.env.app, "local", &f.pane, "abc123").await);
     assert_eq!(body["reason"], "not_awaiting_code", "{body}");
     assert!(f.typed().is_empty() && f.keys().is_empty());
+}
+
+/// 打字之後、Enter 之前 claude 結束（issue #846）：不按 Enter，清掉 shell 命令列上的字，code 視為已送過。
+#[tokio::test]
+async fn a_login_that_exits_after_the_code_is_typed_gets_no_enter() {
+    let f = login_pane(UNWRAPPED).await;
+    let (argvs, pane) = (f.env.herdr.argvs.clone(), f.pane.clone());
+    crate::race_point::arm("login_code_typed", &f.pane, move || async move {
+        argvs.lock().unwrap().insert(pane, vec!["-zsh".into()]);
+    });
+    let body = conflict(submit_code(&f.env.app, "local", &f.pane, "abc123").await);
+    assert_eq!(body["reason"], "not_awaiting_code", "{body}");
+    assert_eq!(body["sent"], false, "{body}");
+    let keys = f.keys();
+    assert!(!keys.contains(&json!(["enter"])), "claude 已結束：不能按 Enter {keys:?}");
+    assert!(keys.contains(&json!(["ctrl+u"])), "清掉 shell 命令列上的字 {keys:?}");
+    assert_eq!(f.typed().len(), 1, "只有 code 那一筆");
+    let v = status(&f.env.app, "local", &f.pane).await.unwrap();
+    assert_eq!(v["code_sent"], true, "字進過 pane，同一組 code 不能再送");
 }
 
 #[tokio::test]

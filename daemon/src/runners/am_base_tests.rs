@@ -115,6 +115,9 @@ mod local_image;
 #[path = "am_base_tests/local_sh.rs"]
 mod local_sh;
 
+#[path = "am_base_tests/login_assist.rs"]
+mod login_assist;
+
 #[path = "am_base_tests/models.rs"]
 mod models;
 
