@@ -115,6 +115,21 @@ systemctl --user enable --now com.agm.<名字>.timer
 loginctl enable-linger "$USER"   # 沒登入也要跑（一次就好；沒開的話登出後整個 user manager 會停）
 ```
 
+**開機自己起 daemon（issue #858，Linux）**：`com.agm.daemon-boot.service`（oneshot，沒有 timer）＋`bin/daemon-boot.sh`。
+開機時正式 daemon 沒在聽 7788 就用 `systemd-run --user`（`Type=forking`、`KillMode=process`，同 `daemon-swap.sh`）起一顆；已經在跑就什麼都不做。
+`herdr@.service` 現在也有 `[Install]`，只 enable daemon 用的那個 session：
+
+```sh
+install -m 755 scripts/ops/daemon-boot.sh ~/.config/agents-manager/supervisor/AGM/bin/
+install -m 644 scripts/ops/systemd/com.agm.daemon-boot.service scripts/ops/systemd/herdr@.service ~/.config/systemd/user/
+systemctl --user daemon-reload
+systemctl --user enable com.agm.daemon-boot.service herdr@agents-manager.service
+loginctl enable-linger "$USER"   # 必須：沒登入也要在開機時跑 user manager
+```
+
+驗收：`qm shutdown 114 && qm start 114` 後不碰任何東西，`curl 127.0.0.1:7788/api/session` 有回應、bot 被 supervisor 接回。
+隔離測試：`bash scripts/ops/daemon-boot_test.sh`（假 `systemd-run`／`curl`／`agm`，HOME 指到暫存目錄）。
+
 `daemon-update` 的 `Environment=` 有 PATH（`%h/.local/bin:%h/.bun/bin:%h/.cargo/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin`）
 與 `HERDR_SESSION=agents-manager`；新主機的工具不在這些位置就改安裝那份，`ops-sync` 不會報（`Environment=` 只看在不在，不比內容；安裝端少了 `HERDR_SESSION` 也一樣不會報，要自己重裝或補 drop-in）。
 macOS launchd 的 `daemon-update` PATH 也要保留 `~/.local/bin`，因為 `daemon-swap.sh` 會呼叫安裝在那裡的 herdr。
