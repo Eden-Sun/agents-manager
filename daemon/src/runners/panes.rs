@@ -151,6 +151,7 @@ pub(crate) async fn close_tracked(app: &Arc<App>, host: &str, pane_id: &str, con
     match client.pane_get(&pane_id).await.map_err(up)? {
         None => {
             sqlx::query("DELETE FROM panes WHERE host=? AND pane_id=?").bind(&host).bind(&pane_id).execute(&app.db).await.map_err(sql)?;
+            crate::drafts::clear_shell(&app, &host, &pane_id).await;
             announce_if_changed(&app, &host).await;
             return Err(LcError::NotFound("pane".into()));
         }
@@ -195,6 +196,7 @@ pub(crate) async fn close_tracked(app: &Arc<App>, host: &str, pane_id: &str, con
         .execute(&app.db)
         .await
         .map_err(sql)?;
+    crate::drafts::clear_shell(&app, &host, &pane_id).await;
     app.pane_live.lock().await.remove(&(host.clone(), pane_id.clone()));
     announce_if_changed(&app, &host).await;
     tracing::info!(host, pane_id, kind = %info["kind"], "pane closed by request");

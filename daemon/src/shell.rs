@@ -155,7 +155,7 @@ pub async fn open(app: &(impl crate::api::shell::HostShellOpenLocks + crate::api
 }
 
 /// `GET /api/hosts/:name/shells` — sweeps out panes closed by hand in herdr.
-pub async fn list(app: &(impl crate::api::shell::HostShells + crate::capabilities::HerdrRoutes + crate::hosts::HostsAccess), host: &str) -> LcResult<Vec<HostShell>> {
+pub async fn list(app: &(impl crate::api::shell::HostShells + crate::capabilities::Db + crate::capabilities::Emit + crate::capabilities::HerdrRoutes + crate::hosts::HostsAccess), host: &str) -> LcResult<Vec<HostShell>> {
     let (client, _) = client_for(app, host).await?;
     let mine: Vec<HostShell> = app.host_shells().lock().await.iter().filter(|s| s.host == host).cloned().collect();
     let mut alive = Vec::with_capacity(mine.len());
@@ -169,6 +169,10 @@ pub async fn list(app: &(impl crate::api::shell::HostShells + crate::capabilitie
     }
     if !dead.is_empty() {
         app.host_shells().lock().await.retain(|s| s.host != host || !dead.contains(&s.pane_id));
+        // 手動在 herdr 關掉的 shell pane：它的指令草稿跟著清（issue #896）。
+        for pane_id in &dead {
+            crate::drafts::clear_shell(app, host, pane_id).await;
+        }
     }
     Ok(alive)
 }
