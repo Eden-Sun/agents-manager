@@ -587,23 +587,20 @@ const TITLE_POLL: std::time::Duration = std::time::Duration::from_secs(4);
 
 /// 讓 `runs.agent_title` 跟上 agent 自己現在的標題（claude 會寫成它正在做的事）。
 pub fn spawn_title_poller(app: Arc<App>) {
-    tokio::spawn(async move {
-        loop {
-            tokio::time::sleep(TITLE_POLL).await;
-            for conn in app.hosts.list().await {
-                if !conn.is_local() && !conn.is_connected() {
-                    continue;
-                }
-                let Some(session) = app.session_for_host(&conn.name).await else { continue };
-                let Some(client) = app.herdr_for_session(&conn.name, &session).await else { continue };
-                poll_titles(&app, &conn.name, &session, &session, &client).await;
+    crate::background_loop::spawn_periodic(&app, "title poller", TITLE_POLL, TITLE_POLL, |app| async move {
+        for conn in app.hosts.list().await {
+            if !conn.is_local() && !conn.is_connected() {
+                continue;
             }
-            // default session 不在 HostManager 裡，但可能有被採用的 agent，標題也要跟。
-            if app.herdr_session.as_str() != "default" && app.default_connected.load(Ordering::SeqCst) {
-                let fallback = app.herdr_session.clone();
-                let client = app.default_herdr.clone();
-                poll_titles(&app, LOCAL_HOST, "default", &fallback, &client).await;
-            }
+            let Some(session) = app.session_for_host(&conn.name).await else { continue };
+            let Some(client) = app.herdr_for_session(&conn.name, &session).await else { continue };
+            poll_titles(&app, &conn.name, &session, &session, &client).await;
+        }
+        // default session 不在 HostManager 裡，但可能有被採用的 agent，標題也要跟。
+        if app.herdr_session.as_str() != "default" && app.default_connected.load(Ordering::SeqCst) {
+            let fallback = app.herdr_session.clone();
+            let client = app.default_herdr.clone();
+            poll_titles(&app, LOCAL_HOST, "default", &fallback, &client).await;
         }
     });
 }
