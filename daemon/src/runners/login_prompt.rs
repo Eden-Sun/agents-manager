@@ -21,6 +21,10 @@ pub async fn clear_and_push(app: &Arc<App>, host: &str, identity: &str) {
 /// 綁著身分的 claude bot 的回合因為授權失敗收尾：記下、推快照，並立刻重探該身分（不等探測週期）。
 /// 沒綁身分（用主機預設帳號）的 bot 不處理：沒有「哪個身分」可以提示。
 pub async fn on_auth_failure(app: &Arc<App>, bot: &db::Bot) {
+    if bot.kind == "agy" {
+        crate::runners::agy_auth::on_turn_auth_failure(app, bot).await;
+        return;
+    }
     if bot.kind != "claude" {
         return;
     }

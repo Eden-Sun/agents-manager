@@ -47,9 +47,9 @@ async fn pane_probe(app: &Arc<App>, host: &str, fence: &crate::hosts::HostFence,
 
 
 /// agy 明說沒憑證之後，登入偵測（[`login_watch_once`]）暫時不要又因為 Keychain 裡有項目而把旗標翻回已登入、再開一次 pane。
-const AUTH_DENIED_COOLDOWN: Duration = Duration::from_secs(5 * 60);
+pub(crate) const AUTH_DENIED_COOLDOWN: Duration = Duration::from_secs(5 * 60);
 
-fn auth_denied() -> &'static std::sync::Mutex<std::collections::HashMap<String, std::time::Instant>> {
+pub(crate) fn auth_denied() -> &'static std::sync::Mutex<std::collections::HashMap<String, std::time::Instant>> {
     static M: std::sync::OnceLock<std::sync::Mutex<std::collections::HashMap<String, std::time::Instant>>> = std::sync::OnceLock::new();
     M.get_or_init(Default::default)
 }
@@ -198,7 +198,7 @@ async fn set_logged_in(app: &Arc<App>, host: &str, fence: &crate::hosts::HostFen
 }
 
 /// 同上但不推：呼叫端還有別的東西要一起變（[`record_probe_result`] 一輪只推一次）。
-async fn set_logged_in_quiet(app: &Arc<App>, host: &str, fence: &crate::hosts::HostFence, logged_in: bool) -> bool {
+pub(crate) async fn set_logged_in_quiet(app: &Arc<App>, host: &str, fence: &crate::hosts::HostFence, logged_in: bool) -> bool {
     let mut all = app.tools.lock().await;
     if !app.hosts.is_current(fence).await {
         return false;

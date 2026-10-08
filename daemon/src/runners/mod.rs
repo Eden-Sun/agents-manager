@@ -3,6 +3,7 @@
 //! 封裝對 `App` 與 composition 的依賴，作為背景工作與 HTTP 路由入口，
 //! 下層模組只保留核心邏輯。
 
+pub mod agy_auth;
 pub mod ask_answers;
 pub(crate) mod app_ports_p11;
 pub(crate) mod app_ports_p2;
