@@ -195,48 +195,71 @@ async fn agy_state(app: &impl crate::tools::ToolsTable, host: &str) -> Option<(b
 /// 那一格立刻變成沒有讀數。回「檔案原本在不在」（不在不算錯）。不跑 agy、不動別的檔、不停正在跑的 agy bot（它們下次重啟才會停在登入畫面）。
 /// 拿探測的鎖：正在跑的探測不能在清掉之後又把讀數寫回來。
 pub async fn logout(app: &Arc<App>, host: &str) -> Result<bool, LogoutError> {
-    let fence = app.hosts.fence(host).await.ok_or(LogoutError::UnknownHost)?;
+    // 請求當下的權威：排隊等探測鎖期間 H 若換了主機或重連，這份就作廢（#865）。
+    let requested = app.hosts.fence(host).await.ok_or(LogoutError::UnknownHost)?;
     let _guard = crate::quota::probe_lock(&format!("{host}#agy")).await;
-    let removed = if fence.conn().is_local() {
-        let home = crate::home::dir().ok_or_else(|| LogoutError::Failed("no home directory".into()))?;
-        let file = match std::fs::remove_file(home.join(TOKEN_FILE)) {
-            Ok(()) => true,
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => false,
-            Err(e) => return Err(LogoutError::Failed(format!("cannot remove the agy credentials: {e}"))),
-        };
-        let keychain = local_keychain(&["find-generic-password"]).await;
-        if keychain && !local_keychain(&["delete-generic-password"]).await {
-            return Err(LogoutError::Failed("cannot remove the agy credentials from the Keychain".into()));
-        }
-        file || keychain
-    } else {
-        if !fence.conn().is_connected() {
-            return Err(LogoutError::Failed(format!("host `{host}` is not connected")));
-        }
-        let out = fence.conn().ssh_exec_path_timeout(REMOTE_LOGOUT_SCRIPT, PROBE_TIMEOUT).await.map_err(|e| LogoutError::Failed(format!("{e:#}")))?;
-        match out.trim() {
-            "AM_REMOVED" => true,
-            "AM_ABSENT" => false,
-            other => return Err(LogoutError::Failed(format!("remote agy logout did not confirm: {other}"))),
-        }
-    };
-    if !app.hosts.is_current(&fence).await {
-        return Err(LogoutError::Failed(format!("host `{host}` changed during the agy logout")));
+    let fence = app.hosts.fence(host).await.ok_or(LogoutError::UnknownHost)?;
+    if !fence.same_authority(&requested) {
+        return Err(LogoutError::Superseded);
     }
-    let key = crate::quota::quota_key(host, "agy");
-    let had = app.quotas.lock().await.contains_key(&key);
-    crate::quota::forget(app, &key).await;
+    // 刪憑證 → 清額度 → 翻未登入，整段拿 authority_gate 的 read 端，跟 repoint／reconnect 線性化。
+    // closure 裡不能呼叫 `emit_host_changed`／`set_logged_in`（它們內部也走 `run_if_current`，寫者排隊時再取 read 會死結），推播放到外面。
+    let done = app
+        .hosts
+        .run_if_current(&fence, async {
+            let removed = if fence.conn().is_local() {
+                let home = crate::home::dir().ok_or_else(|| LogoutError::Failed("no home directory".into()))?;
+                let file = match std::fs::remove_file(home.join(TOKEN_FILE)) {
+                    Ok(()) => true,
+                    Err(e) if e.kind() == std::io::ErrorKind::NotFound => false,
+                    Err(e) => return Err(LogoutError::Failed(format!("cannot remove the agy credentials: {e}"))),
+                };
+                let keychain = local_keychain(&["find-generic-password"]).await;
+                if keychain && !local_keychain(&["delete-generic-password"]).await {
+                    return Err(LogoutError::Failed("cannot remove the agy credentials from the Keychain".into()));
+                }
+                file || keychain
+            } else {
+                if !fence.conn().is_connected() {
+                    return Err(LogoutError::Failed(format!("host `{host}` is not connected")));
+                }
+                let out = fence.conn().ssh_exec_path_timeout(REMOTE_LOGOUT_SCRIPT, PROBE_TIMEOUT).await.map_err(|e| LogoutError::Failed(format!("{e:#}")))?;
+                match out.trim() {
+                    "AM_REMOVED" => true,
+                    "AM_ABSENT" => false,
+                    other => return Err(LogoutError::Failed(format!("remote agy logout did not confirm: {other}"))),
+                }
+            };
+            let key = crate::quota::quota_key(host, "agy");
+            let had = app.quotas.lock().await.contains_key(&key);
+            crate::quota::forget(app, &key).await;
+            // 額度那格要立刻變成「未登入」並出現登入鈕，不等下一輪偵測。
+            let changed = set_logged_in_quiet(app, host, &fence, false).await;
+            Ok::<_, LogoutError>((removed, had, changed))
+        })
+        .await
+        .ok_or(LogoutError::Superseded)?;
+    let (removed, had, changed) = done?;
     if had {
+        let key = crate::quota::quota_key(host, "agy");
         app.emit("quota_updated", serde_json::json!({"kind": key, "host": host, "quota": null})).await;
     }
-    // 額度那格要立刻變成「未登入」並出現登入鈕，不等下一輪偵測。
-    set_logged_in(app, host, &fence, false).await;
+    if changed {
+        crate::state::emit_host_changed(app, &fence).await;
+    }
     tracing::info!(host, removed, "agy logged out: credentials removed and quota snapshots cleared");
     Ok(removed)
 }
 
 
-fn backoff() -> &'static std::sync::Mutex<std::collections::HashMap<String, std::time::Instant>> {
+/// 探測失敗的冷卻。綁著失敗當下的主機世代（同 `update_watch::DiskVersionEntry`）：
+/// 同名改指到別台或重連之後，舊世代的冷卻不能壓住新主機，舊世代的 watcher 也不能清掉新主機的冷卻（#873）。
+pub(crate) struct BackoffEntry {
+    pub until: std::time::Instant,
+    pub authority: crate::hosts::HostAuthorityKey,
+}
+
+pub(crate) fn backoff() -> &'static std::sync::Mutex<std::collections::HashMap<String, std::time::Instant>> {
     static M: std::sync::OnceLock<std::sync::Mutex<std::collections::HashMap<String, std::time::Instant>>> = std::sync::OnceLock::new();
     M.get_or_init(Default::default)
 }

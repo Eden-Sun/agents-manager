@@ -1701,7 +1701,7 @@ env 前綴跟登入是同一段程式算出來的——少帶 `CLAUDE_CONFIG_DIR
 ### `POST /api/hosts/{name}/agy/logout`
 登出那台主機的 agy 帳號（agy 沒有 `logout` 子命令也沒有身分）：直接刪 `$HOME/.gemini/antigravity-cli/antigravity-oauth-token`（macOS 另刪 Keychain 項目 `gemini`／`antigravity`；本機用 daemon 的家目錄、遠端經 ssh；不跑 agy、不動別的檔），再清掉那台唯一的 Gemini `agy` 額度快照（含重啟快取）並推一則 `quota_updated`（`quota:null`），額度欄那格立刻變沒有讀數。舊版 `agy:claude-gpt` 快照在 daemon 載入 cache 時會刪掉。拿 agy 額度探測的鎖，進行中的探測不會在清掉之後又寫回來。
 **不停正在跑的 agy bot**：它們不受影響，下次重啟才會停在登入畫面。
-`200 {"removed": true|false}`——`false`＝憑證檔原本就不在（不算錯，快照照樣清）；主機不存在 `404 {"what":"host"}`；遠端沒連線、ssh 失敗、刪檔失敗或換了連線 `502` 帶訊息。User-only。SPEC §12a.7。
+`200 {"removed": true|false}`——`false`＝憑證檔原本就不在（不算錯，快照照樣清）；主機不存在 `404 {"what":"host"}`；遠端沒連線、ssh 失敗或刪檔失敗 `502` 帶訊息；排隊等探測鎖期間或刪除途中這台主機換了主機／重連 → `409 {"reason":"host_superseded","host","retryable":true}`，什麼都沒刪（刪憑證、清快照、翻未登入整段跟換代線性化），可重試。User-only。SPEC §12a.7。
 
 ### `POST /api/hosts/{name}/agy/install`
 裝／更新那台主機（本機或遠端）的 agy 到官方最新版（SPEC §12a.11）。agy 沒有套件管理器那條路、官方 `install.sh` 又會跑 `agy install`（改 shell profile），所以 daemon **不執行官方安裝腳本**：先經 ssh（本機直接跑）讀 `uname -s -m` 與 libc 決定平台（`darwin_arm64`／`darwin_amd64`／`linux_amd64`／`linux_amd64_musl`／`linux_arm64`／`linux_arm64_musl`），再讀官方 manifest（`…/manifests/<platform>.json`，`{version,url,sha512}`；url 必須在官方儲存桶、sha512 必須是 128 位十六進位，否則 `manifest_invalid`），把它們當資料交給主機端一段寫死的 sh：下載 tarball → 驗 sha512 → 只解出 `antigravity` → 對暫存檔跑 `--version`（`AGY_CLI_DISABLE_AUTO_UPDATE=true`，版本要吻合 manifest）→ 同目錄複製後 `mv` 蓋過 `~/.local/bin/agy`。任何一步失敗都不碰既有的 agy。裝完重新偵測那台的 CLI，偵測到的版本要等於 manifest 版本。主機端有安裝鎖（`~/.agents-manager-agy-install.lock`，同 CLI 升級那套 process-group 鎖）；沒有 body。
