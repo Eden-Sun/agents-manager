@@ -106,6 +106,27 @@ pub async fn reassign_stale_approvals(app: &(impl crate::capabilities::Db + crat
         if !should_reassign(age_secs(&e.created_at), &owner, Some(reason)) {
             continue;
         }
+        // 那筆核准已經不用裁示了（被裁示、取代、過期）：改派過去只會叫醒巡檢去處理一筆作廢的申請。直接收掉這則（#881）。
+        match approval_needs_no_decision(app.db(), e, &now).await {
+            Ok(true) => {
+                match sqlx::query("UPDATE supervisor_inbox SET state='handled', acked_by='daemon', updated_at=? WHERE id=? AND state!='handled'")
+                    .bind(&now)
+                    .bind(&e.id)
+                    .execute(app.db())
+                    .await
+                {
+                    Ok(_) => tracing::info!(event = %e.id, "approval no longer pending or already expired; closed its inbox event instead of reassigning"),
+                    Err(err) => tracing::warn!(event = %e.id, error = %err, "could not close the inbox event of a settled approval"),
+                }
+                continue;
+            }
+            Ok(false) => {}
+            // 讀不到就不動這一則，下一拍再看。
+            Err(err) => {
+                tracing::warn!(event = %e.id, error = %err, "could not read the approval behind an inbox event");
+                continue;
+            }
+        }
         match reassign_one(app.db(), e, reason, &now).await {
             Ok(true) => {
                 moved += 1;
@@ -119,6 +140,18 @@ pub async fn reassign_stale_approvals(app: &(impl crate::capabilities::Db + crat
         app.emit("supervisor_changed", json!({"approvals_reassigned": moved, "to_role": Role::Patrol.as_str(), "reason": reason})).await;
     }
     moved
+}
+
+/// 這則 `approval_requested` 指向的核准是否已經不需要裁示：不是 `pending` 了，或已過有效期。
+/// payload 是 `Approval::to_json()`（鍵 `id`）；找不到那筆核准（沒有 id、查無列）就當作不知道，照舊改派。
+async fn approval_needs_no_decision(db: &SqlitePool, e: &store::InboxEvent, now: &str) -> anyhow::Result<bool> {
+    let payload: Value = serde_json::from_str(&e.payload_json).unwrap_or_else(|_| json!({}));
+    let Some(id) = payload.get("approval_id").or_else(|| payload.get("id")).and_then(Value::as_str) else { return Ok(false) };
+    let Some(a) = store::approval(db, id).await? else { return Ok(false) };
+    if a.status != "pending" {
+        return Ok(true);
+    }
+    Ok(a.effective_expiry().is_some_and(|t| crate::db::cmp_ts(&t, now).is_le()))
 }
 
 /// 一則的改派。條件寫在 SQL 裡（`{owner}` 還是協調者才改），所以兩拍之間巡檢已經收走時不會重複寫。
@@ -156,13 +189,18 @@ async fn reassign_one(db: &SqlitePool, e: &store::InboxEvent, reason: &str, now:
 /// 不看在誰手上：改派之後巡檢也沒登入時，要喊的是人。`wait_since` 是被取代時接過來的等待起點，
 /// 有就用它——重申請接續的等待不能因為換了一筆 id 就從零開始算。
 pub async fn stalled_approvals(db: &SqlitePool, after_secs: i64) -> anyhow::Result<Vec<(String, i64, String)>> {
-    let rows: Vec<(String, String, Option<String>, String)> =
-        sqlx::query_as("SELECT id, created_at, wait_since, requester FROM supervisor_approvals WHERE supervisor_id=? AND status='pending'")
+    let rows: Vec<(String, String, Option<String>, String, Option<String>)> =
+        sqlx::query_as("SELECT id, created_at, wait_since, requester, expires_at FROM supervisor_approvals WHERE supervisor_id=? AND status='pending'")
             .bind(store::SUPERVISOR_ID)
             .fetch_all(db)
             .await?;
+    let now = crate::db::now();
     let mut out = vec![];
-    for (id, created_at, wait_since, requester) in rows {
+    for (id, created_at, wait_since, requester, expires_at) in rows {
+        // 已過有效期的 pending 沒有人需要裁示（核准不能再用）：不算卡住。秒格式舊值靠 `cmp_ts` 正規化，不用字串比。
+        if expires_at.as_deref().is_some_and(|t| crate::db::cmp_ts(t, &now).is_le()) {
+            continue;
+        }
         let since = wait_since.unwrap_or(created_at);
         let age = age_secs(&since);
         if age >= after_secs {
@@ -444,5 +482,86 @@ mod tests {
         let out = stalled_approvals(&app.db, STALLED_AFTER_SECS).await.unwrap();
         assert_eq!(out.iter().map(|(id, _, _)| id.as_str()).collect::<Vec<_>>(), vec![second.as_str()], "只剩新那筆 pending");
         assert!(out[0].1 >= 7200, "等待是接續的，不是從新 id 重新算：{}", out[0].1);
+    }
+
+    async fn pending(app: &Arc<App>, requester: &str, commit: &str) -> String {
+        store::create_approval(&app.db, requester, "rebuild", "s", Some(commit), None, None).await.unwrap().approval.id
+    }
+
+    async fn age_and_expire(app: &Arc<App>, id: &str, expires_in: i64) {
+        sqlx::query("UPDATE supervisor_approvals SET created_at=?, expires_at=? WHERE id=?")
+            .bind(crate::db::iso_in(-STALLED_AFTER_SECS - 60))
+            .bind(crate::db::iso_in(expires_in))
+            .bind(id)
+            .execute(&app.db)
+            .await
+            .unwrap();
+    }
+
+    /// #881：過期的 pending 沒人需要裁示，不算卡住；還沒過期的照常報（既有正向測試不能壞）。
+    #[tokio::test]
+    async fn an_expired_pending_approval_is_not_stalled() {
+        let app = app().await;
+        let id = pending(&app, "kick", "c1").await;
+        age_and_expire(&app, &id, -10).await;
+        assert!(stalled_approvals(&app.db, STALLED_AFTER_SECS).await.unwrap().is_empty(), "已過期的 pending 不算 stalled");
+        age_and_expire(&app, &id, 3600).await;
+        let out = stalled_approvals(&app.db, STALLED_AFTER_SECS).await.unwrap();
+        assert_eq!(out.iter().map(|(i, _, _)| i.as_str()).collect::<Vec<_>>(), vec![id.as_str()], "還沒過期的照報");
+        // 秒格式的舊值（`…Z` 不帶毫秒）靠 cmp_ts 正規化，不能因為字串比較而誤判。
+        let past_secs = chrono::Utc::now().checked_sub_signed(chrono::Duration::seconds(10)).unwrap().to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
+        sqlx::query("UPDATE supervisor_approvals SET expires_at=? WHERE id=?").bind(past_secs).bind(&id).execute(&app.db).await.unwrap();
+        assert!(stalled_approvals(&app.db, STALLED_AFTER_SECS).await.unwrap().is_empty(), "秒格式的過期值也要認得");
+    }
+
+    /// #881：重申請（不帶 supersedes）時，同申請者同用途的 pending 已過期也要收掉，只剩一筆 pending。
+    #[tokio::test]
+    async fn re_requesting_supersedes_an_expired_pending_approval() {
+        let app = app().await;
+        let first = pending(&app, "kick", "c1").await;
+        age_and_expire(&app, &first, -10).await;
+        store::push_inbox(&app.db, &format!("approval:{first}:requested"), "approval_requested", None, None, None, &json!({"id": first})).await.unwrap();
+        let second = store::create_approval(&app.db, "kick", "rebuild", "s", Some("c2"), None, None).await.unwrap();
+        assert_eq!(second.superseded.as_deref(), Some(first.as_str()));
+        let status = |id: String| {
+            let db = app.db.clone();
+            async move { sqlx::query_scalar::<_, String>("SELECT status FROM supervisor_approvals WHERE id=?").bind(id).fetch_one(&db).await.unwrap() }
+        };
+        assert_eq!(status(first.clone()).await, "superseded");
+        let n: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM supervisor_approvals WHERE status='pending'").fetch_one(&app.db).await.unwrap();
+        assert_eq!(n, 1, "只剩新那筆 pending");
+        let wait: Option<String> = sqlx::query_scalar("SELECT wait_since FROM supervisor_approvals WHERE id=?").bind(&second.approval.id).fetch_one(&app.db).await.unwrap();
+        assert!(wait.is_none(), "過期的舊申請沒有在等，不接續等待起點");
+        let handled: String = sqlx::query_scalar("SELECT state FROM supervisor_inbox WHERE event_key=?").bind(format!("approval:{first}:requested")).fetch_one(&app.db).await.unwrap();
+        assert_eq!(handled, "handled", "舊申請的 approval_requested 一起收掉");
+    }
+
+    /// #881：協調者不可用、一則 approval_requested 指向已過期的 pending → 不改派，直接收掉那則 inbox 事件。
+    #[tokio::test]
+    async fn an_event_for_an_expired_approval_is_closed_not_reassigned() {
+        let app = app().await;
+        let expired = pending(&app, "kick", "c1").await;
+        sqlx::query("UPDATE supervisor_approvals SET expires_at=? WHERE id=?").bind(crate::db::iso_in(-10)).bind(&expired).execute(&app.db).await.unwrap();
+        let live = pending(&app, "other", "c9").await;
+        let mk = |key: &'static str, approval: String| {
+            let app = app.clone();
+            async move {
+                let id = store::push_inbox(&app.db, key, "approval_requested", None, None, None, &json!({"approval_id": approval})).await.unwrap().unwrap();
+                sqlx::query("UPDATE supervisor_inbox SET role='responder', wake=1, created_at=? WHERE id=?")
+                    .bind(crate::db::iso_in(-600))
+                    .bind(&id)
+                    .execute(&app.db)
+                    .await
+                    .unwrap();
+                id
+            }
+        };
+        let dead = mk("approval:expired:requested", expired).await;
+        let alive = mk("approval:live:requested", live).await;
+        assert_eq!(reassign_stale_approvals(&app, Some("needs_login")).await, 1, "只改派還需要裁示的那則");
+        let state: String = sqlx::query_scalar("SELECT state FROM supervisor_inbox WHERE id=?").bind(&dead).fetch_one(&app.db).await.unwrap();
+        assert_eq!(state, "handled");
+        assert_eq!(owner_of(&app.db, &dead).await.unwrap().as_deref(), Some("responder"), "過期的沒有被改派");
+        assert_eq!(owner_of(&app.db, &alive).await.unwrap().as_deref(), Some("patrol"));
     }
 }

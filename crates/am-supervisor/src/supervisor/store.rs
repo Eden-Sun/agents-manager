@@ -2531,10 +2531,12 @@ async fn create_approval_inner(
             Some(o) => Some(o),
             None => bail("approval_not_found")?,
         };
-        let live = old
-            .as_ref()
-            .is_some_and(|o| matches!(o.status.as_str(), "pending" | "approved") && !o.expires_at.as_deref().is_some_and(|t| crate::db::cmp_ts(t, &now).is_le()));
-        if let (true, Some(old)) = (live, old) {
+        let expired = |o: &Approval| o.expires_at.as_deref().is_some_and(|t| crate::db::cmp_ts(t, &now).is_le());
+        let live = old.as_ref().is_some_and(|o| matches!(o.status.as_str(), "pending" | "approved") && !expired(o));
+        // 自動找到的同申請者、同用途 pending 即使已過期也要收掉（#881）：過期的 pending 沒有人會再裁示，
+        // 留著會讓 `approval_stalled` 關不掉、重申請又疊第二筆。明確帶 `supersedes` 的路徑不變。
+        let stale_pending = auto && old.as_ref().is_some_and(|o| o.status == "pending" && expired(o));
+        if let (true, Some(old)) = (live || stale_pending, old) {
             sqlx::query("UPDATE supervisor_approvals SET status='superseded', updated_at=? WHERE id=? AND status=?")
                 .bind(&now)
                 .bind(&old.id)
@@ -2542,7 +2544,14 @@ async fn create_approval_inner(
                 .execute(&mut *tx)
                 .await?;
             // 還沒核准的舊申請沒有等待可接（等的是 AGM，不是安全窗口）；它自己接過來的照樣往下傳。
-            wait_since = if old.status == "approved" { old.waiting_since().map(str::to_string) } else { old.wait_since.clone() };
+            // 過期的舊申請沒有在等：不接續它的等待起點。
+            wait_since = if !live {
+                None
+            } else if old.status == "approved" {
+                old.waiting_since().map(str::to_string)
+            } else {
+                old.wait_since.clone()
+            };
             let body = json!({"approval_id": old.id, "from": old.status, "to": "superseded", "actor": requester,
                               "reason": format!("superseded by {id}")});
             sqlx::query("INSERT INTO supervisor_notes (id, supervisor_id, kind, body, version, created_at) VALUES (?,?,?,?,1,?)")
