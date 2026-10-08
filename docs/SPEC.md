@@ -4434,7 +4434,7 @@ incident 以資源為單位持久化（`supervisor_incidents`，`(kind, resource
   （working／送達中的 bot 名、讀不到狀態、別人的租約）、預計幾點自動放寬。之後只在狀態轉換時推 inbox（同一個 `id`、`rev` 遞增）：使用者按鈕（現在換版／先等）、
   自動放寬生效、拿到窗口、換好（新 daemon 開機確認跑的是那顆）或放棄才更新同一則；擋住名單變動不單獨推 inbox（WS frame 照常推送供網頁即時更新名單），
   且「拿到窗口→§3a 複查 abort 退回交還」的循環同一 sha 最多每 30 分鐘推一則；`wait.auto_escalated` 表示等待門檻已自動放寬。除首次超過 3 分鐘設 `wake:true` 叫醒巡檢外，其餘轉換皆為 `wake:false` 僅做紀錄。
-  狀態存 `<data_dir>/deploy-wait.json`，跨過換版那次重啟。`GET /api/state` 的 `deploy_wait` 供重整對帳。
+  狀態存 `<data_dir>/deploy-wait.json`，跨過換版那次重啟。以暫存檔＋fsync＋rename 寫入（不會留半份）；開機讀到壞檔會改名成 `deploy-wait.json.corrupt-<時間>` 並記 error、讀不了的檔原樣不動，都不會被當成「沒有等待」靜默覆寫（issue #869）。`GET /api/state` 的 `deploy_wait` 供重整對帳。
   使用者調度（只收 UI token）：「現在換版」＝這次部署的自動核准當成已等滿門檻（working 不擋，送達臨界區、別人的租約、讀不到狀態照樣擋），只認同一個 owner、
   `decided_by=service(daemon-swap)` 的核准，AGM 親手核的與下一次部署都不受影響，並順手叫排程器跑一輪；「先等」＝收起通知，到門檻照樣自動放寬。
   放寬持續到**這次部署結束**（換好或放棄），拿到窗口在換（`Swapping`）時仍算數；daemon-swap 拿到窗口後換 binary 前的複查（§3a）帶 restart-window 回應裡的

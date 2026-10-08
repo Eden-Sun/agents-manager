@@ -91,7 +91,8 @@ fn path(app: &impl crate::capabilities::DataDir) -> PathBuf {
 fn save(app: &impl crate::capabilities::DataDir, w: Option<&Wait>) {
     let p = path(app);
     let res = match w {
-        Some(w) => serde_json::to_vec(w).map_err(std::io::Error::other).and_then(|b| std::fs::write(&p, b)),
+        // 暫存檔 + fsync + rename：寫到一半當機，正式檔也不會是半份（issue #869）。
+        Some(w) => serde_json::to_vec(w).map_err(std::io::Error::other).and_then(|b| crate::lifecycle::setup::write_private(&p, &b)).map(|()| sync_dir(&p)),
         None => match std::fs::remove_file(&p) {
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
             other => other,
@@ -99,6 +100,40 @@ fn save(app: &impl crate::capabilities::DataDir, w: Option<&Wait>) {
     };
     if let Err(e) = res {
         tracing::warn!(error = %e, file = %p.display(), "could not persist the deploy wait");
+    }
+}
+
+/// best effort：rename 之後再 fsync 目錄，讓新名字也落盤；失敗只記 debug。
+fn sync_dir(file: &std::path::Path) {
+    let Some(dir) = file.parent() else { return };
+    if let Err(e) = std::fs::File::open(dir).and_then(|d| d.sync_all()) {
+        tracing::debug!(error = %e, dir = %dir.display(), "could not fsync the data dir after saving the deploy wait");
+    }
+}
+
+/// 讀回上一顆 daemon 留下的狀態檔。沒有檔＝真的沒有等待；讀不了或壞檔都不能當成「沒有等待」靜默覆寫（issue #869）：
+/// 讀不了就原樣留著，壞檔改名成 `deploy-wait.json.corrupt-<時間>` 保留證據。
+fn load(app: &impl crate::capabilities::DataDir) -> Option<Wait> {
+    let p = path(app);
+    let bytes = match std::fs::read(&p) {
+        Ok(b) => b,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return None,
+        Err(e) => {
+            tracing::error!(path = %p.display(), error = %e, "deploy wait state unreadable; keeping it for inspection");
+            return None;
+        }
+    };
+    match serde_json::from_slice(&bytes) {
+        Ok(w) => Some(w),
+        Err(e) => {
+            let stamp = crate::db::now().replace(':', "");
+            let aside = p.with_file_name(format!("{FILE}.corrupt-{stamp}"));
+            match std::fs::rename(&p, &aside) {
+                Ok(()) => tracing::error!(path = %p.display(), aside = %aside.display(), error = %e, "deploy wait state is corrupt; moved aside"),
+                Err(re) => tracing::error!(path = %p.display(), error = %e, rename_error = %re, "deploy wait state is corrupt and could not be moved aside"),
+            }
+            None
+        }
     }
 }
 
@@ -335,8 +370,7 @@ pub async fn startup(app: &(impl crate::capabilities::DataDir + crate::capabilit
 }
 
 async fn startup_as(app: &(impl crate::capabilities::DataDir + crate::capabilities::Db + crate::capabilities::Emit + crate::deploy_wait::DeployWaitState), running_sha: &str) {
-    let loaded: Option<Wait> = std::fs::read(path(app)).ok().and_then(|b| serde_json::from_slice(&b).ok());
-    let Some(mut w) = loaded else { return };
+    let Some(mut w) = load(app) else { return };
     let now = crate::db::now();
     let mut out = None;
     if w.phase == Phase::Swapping {
