@@ -12,8 +12,8 @@ use serde_json::Value;
 
 /// 每次探測要起一個約 200 MB 的執行檔。
 pub const AGY_POLL: std::time::Duration = std::time::Duration::from_secs(300);
-/// 測試縮短（探測逾時的測試不必真的等 40 秒）。
-pub const PROBE_TIMEOUT: std::time::Duration = if cfg!(test) { std::time::Duration::from_secs(3) } else { std::time::Duration::from_secs(40) };
+/// 測試縮短（探測逾時的測試不必真的等 40 秒）。daemon 的測試是以 `test-hooks`（dev-dependency）編 am-base，`cfg(test)` 對 am-base 本身不成立，所以兩個都要認；正式建置不開 `test-hooks`。
+pub const PROBE_TIMEOUT: std::time::Duration = if cfg!(any(test, feature = "test-hooks")) { std::time::Duration::from_secs(3) } else { std::time::Duration::from_secs(40) };
 
 /// 探測指令（本機與遠端同一份）：拋棄式 cwd、不讀 stdin、關自動更新、跑完刪目錄。`exe` 是偵測到的絕對路徑，沒有就用 PATH 上的 `agy`。
 pub fn probe_script(exe: Option<&str>) -> String {
@@ -233,6 +233,26 @@ pub fn read_usage(host: &str, rc: Option<i32>, text: &str) -> Result<Vec<(&'stat
     match rc {
         Some(rc) if rc != 0 => Err(ProbeFail::other("exit", format!("`agy -p /usage` on {host} exited with {rc}: {}", tail(text, 200)))),
         _ => Err(ProbeFail::other("unreadable", format!("`agy -p /usage` on {host} printed no readable quota window: {}", tail(text, 200)))),
+    }
+}
+
+/// 本機探測（`sh -c` 跑 [`probe_script`]）的結果。agy 沒憑證時會印 `Authentication required` 然後**卡住等人去開網址**，
+/// 所以逾時也要看逾時前已經讀到的輸出：認得出就是 [`ProbeFail::AuthRequired`]，不是「逾時」（issue #870）。
+/// stderr 也看（agy 的警告與登入提示不一定在 stdout）；正常結束時額度仍只從 stdout 讀。
+pub fn read_local_run(host: &str, timed_out: bool, stdout: &str, stderr: &str, timeout_secs: u64) -> Result<Vec<(&'static str, Quota)>, ProbeFail> {
+    if timed_out {
+        if auth_required(stdout) || auth_required(stderr) {
+            return Err(ProbeFail::AuthRequired);
+        }
+        let seen = if stdout.trim().is_empty() { stderr } else { stdout };
+        return Err(ProbeFail::other(
+            "timeout",
+            format!("`agy -p /usage` on {host} did not finish within {timeout_secs}s; output: {}", tail(seen, 200)),
+        ));
+    }
+    match read_usage(host, None, stdout) {
+        Err(ProbeFail::Other { .. }) if auth_required(stderr) => Err(ProbeFail::AuthRequired),
+        other => other,
     }
 }
 

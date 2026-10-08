@@ -142,46 +142,82 @@ pub fn sh_quote(s: &str) -> String {
     format!("'{}'", s.replace('\'', "'\\''"))
 }
 
-/// `None` = timed out. The whole process group is killed so a hung `git merge` (pinentry,
-/// stuck remote) cannot keep holding `index.lock` after the caller gave up.
-pub async fn sh_local(script: &str, timeout: Duration) -> Result<Option<std::process::Output>> {
+/// 本機跑一段 `/bin/sh -c` 的完整結果。逾時時 `status` 是 `None`、`timed_out` 為真，但**逾時前已讀到的 stdout／stderr 都留著**：
+/// 有些指令會先印出關鍵字再卡住等人（例如 `agy -p /usage` 印 `Authentication required` 後等人去開網址），
+/// 只回「逾時」會讓呼叫端認不出它其實是沒登入（issue #870）。
+pub struct LocalRun {
+    pub status: Option<std::process::ExitStatus>,
+    pub stdout: Vec<u8>,
+    pub stderr: Vec<u8>,
+    pub timed_out: bool,
+}
+
+/// 把管線讀進共用緩衝：被取消時已經讀到的部分還在。
+fn drain_into<R>(pipe: Option<R>, buf: Arc<std::sync::Mutex<Vec<u8>>>) -> tokio::task::JoinHandle<()>
+where
+    R: tokio::io::AsyncRead + Unpin + Send + 'static,
+{
+    tokio::spawn(async move {
+        use tokio::io::AsyncReadExt;
+        let Some(mut pipe) = pipe else { return };
+        let mut chunk = [0u8; 8192];
+        loop {
+            match pipe.read(&mut chunk).await {
+                Ok(0) | Err(_) => break,
+                Ok(n) => buf.lock().unwrap_or_else(|e| e.into_inner()).extend_from_slice(&chunk[..n]),
+            }
+        }
+    })
+}
+
+/// 逾時時整個行程群組都砍掉（卡住的 `git merge`、pinentry 不能繼續佔著 `index.lock`），並回傳逾時前已讀到的輸出。
+pub async fn sh_local_capture(script: &str, timeout: Duration) -> Result<LocalRun> {
     let mut cmd = tokio::process::Command::new("/bin/sh");
     cmd.arg("-c").arg(script).stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::piped());
     cmd.process_group(0);
     cmd.kill_on_drop(true);
     let mut child = cmd.spawn().context("spawn /bin/sh")?;
     let pid = child.id();
-    let out = child.stdout.take();
-    let err = child.stderr.take();
-    let gather = async move {
-        use tokio::io::AsyncReadExt;
-        let read_stdout = async move {
-            let mut stdout = Vec::new();
-            if let Some(mut o) = out {
-                o.read_to_end(&mut stdout).await.ok();
-            }
-            stdout
-        };
-        let read_stderr = async move {
-            let mut stderr = Vec::new();
-            if let Some(mut e) = err {
-                e.read_to_end(&mut stderr).await.ok();
-            }
-            stderr
-        };
-        tokio::join!(read_stdout, read_stderr)
+    let out_buf = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let err_buf = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let mut read_out = drain_into(child.stdout.take(), out_buf.clone());
+    let mut read_err = drain_into(child.stderr.take(), err_buf.clone());
+    let finished = tokio::select! {
+        r = async {
+            let status = child.wait().await.context("wait /bin/sh")?;
+            let _ = (&mut read_out).await;
+            let _ = (&mut read_err).await;
+            Ok::<_, anyhow::Error>(status)
+        } => Some(r?),
+        _ = tokio::time::sleep(timeout) => None,
     };
-    let (status, (stdout, stderr)) = tokio::select! {
-        r = async { tokio::join!(child.wait(), gather) } => (r.0.context("wait /bin/sh")?, r.1),
-        _ = tokio::time::sleep(timeout) => {
+    let status = match finished {
+        Some(status) => Some(status),
+        None => {
             if let Some(pid) = pid {
                 let _ = tokio::process::Command::new("/bin/kill").args(["-9", "--", &format!("-{pid}")]).status().await;
             }
             let _ = child.kill().await;
-            return Ok(None);
+            // 群組被砍之後管線裡可能還有沒讀完的幾個位元組；給一小段時間排空，不等孫行程握著管線不放的情況。
+            let _ = tokio::time::timeout(Duration::from_millis(300), async {
+                let _ = (&mut read_out).await;
+                let _ = (&mut read_err).await;
+            })
+            .await;
+            read_out.abort();
+            read_err.abort();
+            None
         }
     };
-    Ok(Some(std::process::Output { status, stdout, stderr }))
+    let take = |b: &Arc<std::sync::Mutex<Vec<u8>>>| std::mem::take(&mut *b.lock().unwrap_or_else(|e| e.into_inner()));
+    Ok(LocalRun { timed_out: status.is_none(), status, stdout: take(&out_buf), stderr: take(&err_buf) })
+}
+
+/// `None` = timed out. The whole process group is killed so a hung `git merge` (pinentry,
+/// stuck remote) cannot keep holding `index.lock` after the caller gave up.
+pub async fn sh_local(script: &str, timeout: Duration) -> Result<Option<std::process::Output>> {
+    let run = sh_local_capture(script, timeout).await?;
+    Ok(run.status.map(|status| std::process::Output { status, stdout: run.stdout, stderr: run.stderr }))
 }
 
 /// 本機跑一段 `/bin/sh -c`、只要 stdout；超過 `timeout` 回錯（`what timed out`）。

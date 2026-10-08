@@ -337,6 +337,26 @@
         assert_eq!(sh_local_stdout("printf ok", Duration::from_secs(10), "probe").await.unwrap(), "ok");
     }
 
+    /// 逾時前已經印出的輸出要留著：agy 沒憑證時印 `Authentication required` 然後卡住等人（issue #870）。
+    #[tokio::test]
+    async fn a_timed_out_local_run_keeps_what_it_printed_before_the_timeout() {
+        let marker = format!("am-partial-{}", crate::db::ulid());
+        let script = format!("echo 'Authentication required'; echo warn >&2; sleep 30 # {marker}");
+        let t0 = std::time::Instant::now();
+        let run = sh_local_capture(&script, Duration::from_millis(500)).await.unwrap();
+        assert!(run.timed_out && run.status.is_none());
+        assert!(String::from_utf8_lossy(&run.stdout).contains("Authentication required"), "{:?}", String::from_utf8_lossy(&run.stdout));
+        assert!(String::from_utf8_lossy(&run.stderr).contains("warn"));
+        assert!(t0.elapsed() < Duration::from_secs(25));
+        // 沒逾時的照舊：有退出狀態、完整輸出。
+        let ok = sh_local_capture("printf out; printf err >&2; exit 3", Duration::from_secs(10)).await.unwrap();
+        assert!(!ok.timed_out);
+        assert_eq!(ok.status.and_then(|s| s.code()), Some(3));
+        assert_eq!((String::from_utf8_lossy(&ok.stdout).as_ref(), String::from_utf8_lossy(&ok.stderr).as_ref()), ("out", "err"));
+        // `sh_local` 的契約不變：逾時回 `None`。
+        assert!(sh_local("sleep 30", Duration::from_millis(200)).await.unwrap().is_none());
+    }
+
     #[tokio::test]
     async fn sh_local_timeout_kills_the_child() {
         let marker = format!("am-sh-local-{}", crate::db::ulid());

@@ -18,6 +18,37 @@
         .to_string()
     }
 
+    /// 本機探測的結果分類（issue #870）：逾時前已印出的 `Authentication required` 要認得出來，其他逾時／失敗不能被當成沒登入。
+    #[test]
+    fn a_local_probe_that_printed_the_login_wall_and_hung_is_auth_required() {
+        assert_eq!(read_local_run("local", true, "Authentication required\nPlease visit the URL to log in\n", "", 40).unwrap_err(), ProbeFail::AuthRequired);
+        assert_eq!(read_local_run("local", true, "", "Authentication required", 40).unwrap_err(), ProbeFail::AuthRequired, "stderr 也看");
+        // 逾時而且什麼辨識得出的都沒有：只是逾時，不改登入旗標。
+        match read_local_run("local", true, "starting…", "", 40).unwrap_err() {
+            ProbeFail::Other { reason, message } => {
+                assert_eq!(reason, "timeout");
+                assert!(message.contains("did not finish within 40s") && message.contains("starting"), "{message}");
+            }
+            other => panic!("{other:?}"),
+        }
+        match read_local_run("local", true, "", "", 40).unwrap_err() {
+            ProbeFail::Other { reason, .. } => assert_eq!(reason, "timeout"),
+            other => panic!("{other:?}"),
+        }
+    }
+
+    #[test]
+    fn a_finished_local_probe_reads_usage_from_stdout_and_only_stderr_can_add_the_login_wall() {
+        assert!(read_local_run("local", false, &real(), "", 40).is_ok());
+        assert_eq!(read_local_run("local", false, "", "Authentication required", 40).unwrap_err(), ProbeFail::AuthRequired);
+        // 讀得到額度就不看 stderr 的警告。
+        assert!(read_local_run("local", false, &real(), "Authentication required (refreshing)", 40).is_ok());
+        match read_local_run("local", false, "", "dial tcp: connection refused", 40).unwrap_err() {
+            ProbeFail::Other { reason, .. } => assert_eq!(reason, "unreadable"),
+            other => panic!("{other:?}"),
+        }
+    }
+
     #[test]
     fn the_real_output_keeps_both_gemini_windows_and_ignores_claude_gpt() {
         let got = parse_usage(&real()).expect("parsed");
