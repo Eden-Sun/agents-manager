@@ -34,28 +34,52 @@ export function TerminalTab({ botId }: { botId: string }) {
 
   /** 一次只抓一份：上一趟還沒回來時，自動那趟就跳過，不疊請求。 */
   const inFlight = useRef(false)
+  /** 請求世代（#918）：每趟 `refresh` 領一個號碼，回來時號碼不是最新的（換 bot、改行數、更新的一趟已經發出）就整趟丟掉。 */
+  const gen = useRef(0)
   /** `quiet`：自動刷新不切「刷新中…」，按鈕不會每 3 秒閃一次。 */
   const refresh = useCallback(async (quiet = false) => {
     if (quiet && inFlight.current) return
+    const mine = ++gen.current
     inFlight.current = true
     if (!quiet) setLoading(true)
     try {
-      setSnap(await readTerminal(botId, 'recent_unwrapped', lines))
+      const next = await readTerminal(botId, 'recent_unwrapped', lines)
+      if (mine !== gen.current) return
+      setSnap(next)
       setErr(null)
     } catch (e) {
+      if (mine !== gen.current) return
       setErr(e instanceof Error ? e.message : String(e))
     } finally {
-      inFlight.current = false
-      if (!quiet) setLoading(false)
+      // 被取代的那趟不碰旗標與「刷新中」：新的那趟（或 effect 的 cleanup）會管。
+      if (mine === gen.current) {
+        inFlight.current = false
+        if (!quiet) setLoading(false)
+      }
     }
   }, [botId, lines, readTerminal])
+
+  // 換 bot 在 render 當下清畫面（同 `useTerminalSnapshot`，不用 effect）：上一顆的快照與錯誤不能留到下一趟回來。
+  const [lastBot, setLastBot] = useState(botId)
+  if (lastBot !== botId) {
+    setLastBot(botId)
+    setSnap(null)
+    setErr(null)
+    setLoading(false)
+  }
 
   useEffect(() => {
     void refresh()
     const id = window.setInterval(() => {
       if (!document.hidden) void refresh(true)
     }, AUTO_REFRESH_MS)
-    return () => window.clearInterval(id)
+    return () => {
+      window.clearInterval(id)
+      // 換 bot／行數、或卸載：所有在途的回應作廢。
+      gen.current++
+      inFlight.current = false
+      setLoading(false)
+    }
   }, [refresh])
 
   const move = useCallback(async () => {
