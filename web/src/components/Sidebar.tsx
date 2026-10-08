@@ -11,6 +11,7 @@ import { BOT_KINDS, LOCAL_HOST } from '../api/types'
 import { identityBadgeVisible } from '../lib/identityBadgeVisible'
 import { eventIsFromCurrentTarget, eventTargetIsInsideCurrentTarget } from '../lib/domEvents'
 import { herdrIdentity } from '../lib/herdrIdentity'
+import { settingsBlocksLeave } from '../lib/settingsLeaveGuard'
 import {
   adjacentBotId,
   botLamp,
@@ -292,6 +293,7 @@ function BotRowImpl({
         if (!eventIsFromCurrentTarget(e)) return
         if (e.key === 'Enter' || e.key === ' ') {
           e.preventDefault()
+          if (settingsBlocksLeave()) return
           selectBot(botId)
         }
         if (e.key !== 'ArrowUp' && e.key !== 'ArrowDown') return
@@ -303,6 +305,7 @@ function BotRowImpl({
           return
         }
         e.preventDefault()
+        if (settingsBlocksLeave()) return // 桌機設定卡有未儲存變更：先問，不換 bot（#925）
         onStep(botId, dir)
       }}
       onDragStart={(e) => {

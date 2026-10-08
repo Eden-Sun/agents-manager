@@ -5,6 +5,7 @@ import { useDialogFocus } from '../hooks/useDialogFocus'
 import { enabledIdentities, identitiesOfHost, identityStatusOfHost, projectHostName, useStore } from '../store/store'
 import { canLoginInSession } from '../lib/quotaLogin'
 import { startCliLogin } from '../lib/cliLogin'
+import { registerSettingsLeaveGuard } from '../lib/settingsLeaveGuard'
 import { envDisplayText } from './identityEnv'
 import { UnsavedGuard } from './UnsavedGuard'
 import { ConfirmDialog } from './ConfirmDialog'
@@ -107,6 +108,27 @@ function identityTitle(env: Record<string, string>, st: IdentityStatus | undefin
     parts.push(`來自 ${hostLabel} 的 shell alias（ccN），不是 config.toml`)
   }
   return parts.filter(Boolean).join('\n')
+}
+
+/**
+ * 鍵盤導覽（⌥↑／⌥↓、Control+1…9、側欄列的 ↑／↓）換 bot／專案前會先問這裡（#925）：有未儲存變更就打開「放棄未儲存的變更？」
+ * 並回 true 擋下。桌機設定卡非模態，`dialogOpen()` 看不到它；跟滑鼠點外面（`requestClose`）同一道門。
+ */
+function LeaveGuard({ dirty, onBlocked }: { dirty: boolean; onBlocked: () => void }) {
+  const latest = useRef({ dirty, onBlocked })
+  useEffect(() => {
+    latest.current = { dirty, onBlocked }
+  })
+  useEffect(
+    () =>
+      registerSettingsLeaveGuard(() => {
+        if (!latest.current.dirty) return false
+        latest.current.onBlocked()
+        return true
+      }),
+    [],
+  )
+  return null
 }
 
 /**
@@ -416,6 +438,7 @@ export function BotSettingsPanel({ botId }: { botId: string }) {
       aria-label={`${bot.name} 的設定`}
     >
       <UnsavedGuard dirty={dirty} />
+      <LeaveGuard dirty={dirty} onBlocked={() => setCloseConfirmOpen(true)} />
       <div className="bs-head">
         <strong>Bot 設定</strong>
         <KindTag kind={bot.kind} />

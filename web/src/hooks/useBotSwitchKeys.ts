@@ -1,6 +1,7 @@
 import { useEffect } from 'react'
 import { dialogOpen } from '../lib/dialogOpen'
 import { isImeEnter } from '../lib/ime'
+import { settingsBlocksLeave } from '../lib/settingsLeaveGuard'
 import { useStore } from '../store/store'
 
 /**
@@ -18,6 +19,11 @@ export function useBotSwitchKeys() {
       const target = e.target instanceof Element ? e.target : null
       if (target?.closest('.bot-row')) return
       if (dialogOpen()) return
+      // 桌機設定卡有未儲存變更：守門函式已把確認框打開；事件吃掉，別讓瀏覽器拿去用（#925）。
+      if (settingsBlocksLeave()) {
+        e.preventDefault()
+        return
+      }
       e.preventDefault()
       selectAdjacentBot(e.key === 'ArrowUp' ? -1 : 1)
     }
