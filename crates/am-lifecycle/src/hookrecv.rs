@@ -1193,7 +1193,8 @@ pub async fn process_locked_for<H: HookHost>(app: &H, body: &HookBody, event_id:
                 return Ok(());
             }
             // 登入失效：記下這個身分要重新登入、立刻重探它（網頁會跳提示，`login_prompt.rs`）。同一則重送只記一次。
-            if reason == FailureReason::Auth && provider == "claude" && admitted.is_some() {
+            // agy 沒有身分：改把那台主機的 `tools.agy.logged_in` 翻成未登入（`agy_auth.rs`，issue #870）。
+            if reason == FailureReason::Auth && (provider == "claude" || provider == "agy") && admitted.is_some() {
                 app.login_on_auth_failure(&bot).await;
             }
             // 同一筆送兩次（重試、spool 重播）：已經收過的那一回合。
