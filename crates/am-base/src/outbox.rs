@@ -94,9 +94,86 @@ pub fn dir_for(data_dir: &Path, bot_id: &str) -> Option<PathBuf> {
     Some(data_dir.join("outbox").join(bot_id))
 }
 
-/// 分享用 bot（SPEC §20）的 outbox 標記檔：AGM 的 `outbox-gc.sh` 看到它就整個目錄不清（使用者 2026-10-04：end user 是外部的人，
-/// 隔天才回來拿檔是常態）。點開頭，清單本來就不列（[`withheld_name`]）。
+/// 分享用 bot（SPEC §20）的 outbox 標記檔：AGM 的 `outbox-gc.sh` 看到它就改走**分享保留政策**，不再 1 小時就清
+/// （使用者 2026-10-04：end user 是外部的人，隔天才回來拿檔是常態）：保留 [`SHARE_KEEP_DAYS`] 天、每顆總量 [`SHARE_OUTBOX_MAX_BYTES`]／
+/// [`SHARE_OUTBOX_MAX_FILES`]，超過從最舊的刪（#850：原本整個不清，一個外部連結就能把資料碟寫滿）。點開頭，清單本來就不列（[`withheld_name`]）。
 pub const SHARE_KEEP_MARK: &str = ".am-share-keep";
+/// 分享保留政策（#850，派工者決定）：檔案保留天數（與 `outbox-gc.sh` 的 `SHARE_KEEP_DAYS` 同一個數）。
+pub const SHARE_KEEP_DAYS: u64 = 14;
+/// 分享用 bot 的 outbox 總量上限（位元組／檔數；與 `outbox-gc.sh` 的 `SHARE_CAP_BYTES`／`SHARE_CAP_FILES` 同一組數）。
+pub const SHARE_OUTBOX_MAX_BYTES: u64 = 500 * 1024 * 1024;
+pub const SHARE_OUTBOX_MAX_FILES: u64 = 1000;
+
+/// [`tree_usage`] 最多看幾個項目／幾層：工作目錄是外部使用者能寫的東西，量測不能被一棵超大的樹拖住。
+const WALK_MAX_ENTRIES: usize = 200_000;
+const WALK_MAX_DEPTH: usize = 32;
+
+/// 一棵目錄樹的用量（一般檔案的大小與個數；符號連結不跟、不算）。`truncated`＝超過 [`WALK_MAX_ENTRIES`]／[`WALK_MAX_DEPTH`] 停下，數字是下限。
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct TreeUsage {
+    pub bytes: u64,
+    pub files: u64,
+    pub truncated: bool,
+}
+
+/// 量一棵樹：全程只用 `dir` 這個已驗證的目錄 fd 往下 `openat(O_NOFOLLOW)`（[`trusted_open::read_dir_bound_while`]／
+/// [`trusted_open::open_dir_entry_in`]），不用路徑重新解析、不跟符號連結（#853：量測對象是外部使用者能寫的目錄）。
+/// 量到一半被換掉的子目錄略過，不算錯。
+pub fn tree_usage(dir: &std::fs::File) -> std::io::Result<TreeUsage> {
+    let mut usage = TreeUsage::default();
+    let mut seen = 0usize;
+    walk_usage(dir, 0, &mut usage, &mut seen)?;
+    Ok(usage)
+}
+
+fn walk_usage(dir: &std::fs::File, depth: usize, usage: &mut TreeUsage, seen: &mut usize) -> std::io::Result<()> {
+    let mut subdirs: Vec<std::ffi::OsString> = Vec::new();
+    trusted_open::read_dir_bound_while(dir, |entry| {
+        *seen += 1;
+        if *seen > WALK_MAX_ENTRIES {
+            usage.truncated = true;
+            return false;
+        }
+        if entry.is_file {
+            // 標記檔 `.am-share-keep` 是 daemon 放的，不算使用者的量（跟 `outbox-gc.sh` 一致）。
+            if depth == 0 && entry.name == SHARE_KEEP_MARK {
+                return true;
+            }
+            usage.bytes = usage.bytes.saturating_add(entry.size);
+            usage.files += 1;
+        } else if entry.is_dir {
+            subdirs.push(entry.name);
+        }
+        true
+    })?;
+    if subdirs.is_empty() || usage.truncated {
+        return Ok(());
+    }
+    if depth >= WALK_MAX_DEPTH {
+        usage.truncated = true;
+        return Ok(());
+    }
+    for name in subdirs {
+        if usage.truncated {
+            break;
+        }
+        if let Ok(child) = trusted_open::open_dir_entry_in(dir, &name) {
+            walk_usage(&child, depth + 1, usage, seen)?;
+        }
+    }
+    Ok(())
+}
+
+/// 擁有者 outbox 列表的 `share_usage`（#850）：目前用量與上限、保留天數。
+pub fn share_usage_json(usage: TreeUsage) -> serde_json::Value {
+    json!({
+        "bytes": usage.bytes,
+        "files": usage.files,
+        "truncated": usage.truncated,
+        "cap": {"bytes": SHARE_OUTBOX_MAX_BYTES, "files": SHARE_OUTBOX_MAX_FILES},
+        "keep_days": SHARE_KEEP_DAYS,
+    })
+}
 
 /// 替分享用 bot 的 outbox 放 [`SHARE_KEEP_MARK`]（啟動、建立、daemon 開機時都補一次；bot 自己刪掉也會被補回）。
 /// 寫不起來只記 warning：少了標記只是檔案照一般的 1 小時清，不該讓 bot 起不來。
@@ -106,7 +183,7 @@ pub fn mark_share_keep(data_dir: &Path, bot_id: &str) {
     if std::fs::symlink_metadata(&mark).is_ok() {
         return;
     }
-    if let Err(e) = std::fs::write(&mark, b"share bot outbox: kept by outbox-gc.sh (SPEC 20)\n") {
+    if let Err(e) = std::fs::write(&mark, b"share bot outbox: share retention policy in outbox-gc.sh (SPEC 20, #850)\n") {
         tracing::warn!(bot = bot_id, dir = %dir.display(), error = %e, "could not mark the share bot's outbox as kept");
     }
 }
@@ -121,7 +198,7 @@ pub fn unmark_share_keep(data_dir: &Path, bot_id: &str) {
     }
 }
 
-/// 分享用 bot 的檔案不會被清：清單上不給 `expires_at`／`remaining_secs`（前端不畫倒數）。
+/// 分享用 bot 的檔案走分享保留政策（14 天／總量上限，不是 1 小時）：清單上不給 `expires_at`／`remaining_secs`（前端不畫 1 小時倒數）。
 pub(crate) fn without_expiry(files: &mut [serde_json::Value]) {
     for f in files {
         if let Some(o) = f.as_object_mut() {
@@ -419,10 +496,27 @@ pub async fn list_for(app: &impl crate::outbox_remote::OutboxRemoteEnv, id: Stri
             return Ok((StatusCode::OK, axum::Json(json!({"files": [], "ttl_secs": TTL_SECS, "reason": "outbox_untrusted"}))).into_response());
         }
     };
-    // 分享用 bot（SPEC §20）的 outbox 不清：`ttl_secs:null`、每個檔不帶到期。讀不到是不是分享用 bot 就照一般的報（只影響顯示）。
+    // 分享用 bot（SPEC §20）的 outbox 走分享保留政策（14 天、500 MiB／1000 檔）：`ttl_secs:null`、每個檔不帶 1 小時到期，
+    // 另回 `share_usage {bytes, files, cap, keep_days}`。讀不到是不是分享用 bot 就照一般的報（只影響顯示）。
     if matches!(crate::db::is_share_bot(app.db_pool(), &id).await, Ok(true)) {
         without_expiry(&mut files);
-        return Ok((StatusCode::OK, axum::Json(json!({"dir": dir.to_string_lossy(), "ttl_secs": null, "kept": true, "files": files}))).into_response());
+        let (data_dir, usage_dir) = (app.data_dir().to_path_buf(), dir.clone());
+        let usage = tokio::task::spawn_blocking(move || match open_trusted_dir(&data_dir, &usage_dir) {
+            Ok(Some(fd)) => tree_usage(&fd).ok(),
+            _ => None,
+        })
+        .await
+        .ok()
+        .flatten()
+        .unwrap_or_default();
+        return Ok((
+            StatusCode::OK,
+            axum::Json(json!({
+                "dir": dir.to_string_lossy(), "ttl_secs": null, "kept": true, "keep_days": SHARE_KEEP_DAYS,
+                "share_usage": share_usage_json(usage), "files": files,
+            })),
+        )
+            .into_response());
     }
     Ok((StatusCode::OK, axum::Json(json!({"dir": dir.to_string_lossy(), "ttl_secs": TTL_SECS, "files": files}))).into_response())
 }

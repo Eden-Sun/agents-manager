@@ -28,7 +28,7 @@ setup() {
   mkdir -p "$ROOT/agm/bin" "$HOME/.config/agents-manager/outbox" "$HOME/.ssh"
   cp "$HERE/outbox-gc.sh" "$ROOT/agm/bin/outbox-gc.sh"
   OB="$HOME/.config/agents-manager/outbox"; LOG="$ROOT/agm/outbox-gc.log"; : > "$LOG"
-  unset AM_OUTBOX_ROOT OUTBOX_MAX_AGE_MIN
+  unset AM_OUTBOX_ROOT OUTBOX_MAX_AGE_MIN OUTBOX_SHARE_KEEP_DAYS OUTBOX_SHARE_CAP_BYTES OUTBOX_SHARE_CAP_FILES
 }
 teardown() { rm -rf "$ROOT"; }
 old() { touch -t 202601010000 "$@"; }     # 遠超過任何保留期（只能往回改 mtime；ctime 一定是「現在」）
@@ -86,19 +86,61 @@ run_at 61 >/dev/null
 gone   "搬進來超過 60 分鐘才刪" "$OB/b/moved-in.pdf"
 teardown
 
-# 2c. 分享用 bot 的 outbox（daemon 放了 `.am-share-keep`）整個不清：end user 隔天才回來拿是常態（使用者 2026-10-04）。
+# 2c. 分享用 bot 的 outbox（daemon 放了 `.am-share-keep`）走分享保留政策（#850）：保留 14 天，不是 1 小時
+# （end user 隔天才回來拿是常態，使用者 2026-10-04）；標記檔本身不清。
 setup
 mkdir -p "$OB/share/sub" "$OB/plain"
 : > "$OB/share/.am-share-keep"; old "$OB/share/.am-share-keep"
 echo x > "$OB/share/report.pdf"; old "$OB/share/report.pdf"
 echo x > "$OB/share/sub/deep.pdf"; old "$OB/share/sub/deep.pdf"
 echo x > "$OB/plain/old.txt"; old "$OB/plain/old.txt"
-equals "正常跑 exit 0" "$(run_at 100000)" "0"
-exists "分享用 bot 的檔幾天後還在" "$OB/share/report.pdf"
+equals "正常跑 exit 0" "$(run_at $((60 * 24 * 7)))" "0"
+exists "分享用 bot 的檔 7 天後還在" "$OB/share/report.pdf"
 exists "分享用 bot 子目錄的檔也在" "$OB/share/sub/deep.pdf"
 exists "標記檔本身不清" "$OB/share/.am-share-keep"
 gone   "一般 bot 照常清" "$OB/plain/old.txt"
 check  "log 只算一般 bot 那 1 個" "清掉 1 個超過 60 分鐘" "$LOG"
+check_no "7 天內分享保留政策沒刪東西" "分享保留政策" "$LOG"
+equals "正常跑 exit 0" "$(run_at $((60 * 24 * 15)))" "0"
+gone   "超過 14 天的分享檔被刪" "$OB/share/report.pdf"
+gone   "超過 14 天的子目錄檔也刪" "$OB/share/sub/deep.pdf"
+exists "刪光之後標記檔還在（分享目錄不被收掉）" "$OB/share/.am-share-keep"
+check  "log 記分享保留政策刪了 2 個" "分享保留政策清掉 2 個檔案" "$LOG"
+teardown
+
+# 2d. 分享用 bot 的總量上限（#850）：超過檔數或位元組，從最舊的 mtime 開始刪，標記檔不算量也不刪。
+setup
+mkdir -p "$OB/share"
+: > "$OB/share/.am-share-keep"
+for i in 1 2 3 4 5; do echo x > "$OB/share/f$i.txt"; touch -t "20260101000$i" "$OB/share/f$i.txt"; done
+OUTBOX_SHARE_CAP_FILES=3 run_at 120 >/dev/null
+gone   "超過檔數上限：最舊的 f1 被刪" "$OB/share/f1.txt"
+gone   "超過檔數上限：次舊的 f2 被刪" "$OB/share/f2.txt"
+exists "留下最新的 3 個（f3）" "$OB/share/f3.txt"
+exists "留下最新的 3 個（f4）" "$OB/share/f4.txt"
+exists "留下最新的 3 個（f5）" "$OB/share/f5.txt"
+exists "標記檔不算量、不刪" "$OB/share/.am-share-keep"
+check  "log 記刪了 2 個" "分享保留政策清掉 2 個檔案" "$LOG"
+teardown
+setup
+mkdir -p "$OB/share/sub"
+: > "$OB/share/.am-share-keep"
+printf '0123456789' > "$OB/share/a.bin"; touch -t 202601010001 "$OB/share/a.bin"
+printf '0123456789' > "$OB/share/sub/b.bin"; touch -t 202601010002 "$OB/share/sub/b.bin"
+printf '0123456789' > "$OB/share/c.bin"; touch -t 202601010003 "$OB/share/c.bin"
+OUTBOX_SHARE_CAP_BYTES=25 run_at 120 >/dev/null
+gone   "超過位元組上限：最舊的 a.bin 被刪" "$OB/share/a.bin"
+exists "20 位元組在 25 的上限內（含子目錄的 b.bin）" "$OB/share/sub/b.bin"
+exists "最新的 c.bin 留下" "$OB/share/c.bin"
+teardown
+setup
+mkdir -p "$OB/share" "$ROOT/outside"
+: > "$OB/share/.am-share-keep"
+echo secret > "$ROOT/outside/precious.txt"; old "$ROOT/outside/precious.txt"
+ln -s "$ROOT/outside/precious.txt" "$OB/share/link.txt"
+echo x > "$OB/share/f.txt"
+OUTBOX_SHARE_CAP_FILES=1 run_at $((60 * 24 * 15)) >/dev/null
+exists "分享目錄裡的符號連結目標不被刪" "$ROOT/outside/precious.txt"
 teardown
 
 # 3. 不碰不該碰的：outbox 外面的私鑰、DB、scratchpad、別的 bot 資料，即使很舊。

@@ -2107,8 +2107,12 @@ pid 不拿去對 listen port。agy 的登入 TUI 會在 127.0.0.1 自己開兩�
 - **清理者**：AGM 的 launchd `com.agm.outbox-gc`（`supervisor/AGM/bin/outbox-gc.sh`）每 10 分鐘刪掉 `-mindepth 2` 底下
   mtime 與 ctime **都**超過 60 分鐘的檔，並收掉空目錄（`OUTBOX_GC_NOW` 是測試用的時鐘接縫）。**daemon 不清**。清理會拒絕 outbox 根目錄或其路徑父項是 symlink，並在進入目錄後用相對路徑清理；遇到 symlinked 路徑會記錄並失敗，不沿路徑刪到外面。空目錄會被收掉，所以 daemon 啟動時建的目錄不保證還在：
   bot **寫之前一律 `mkdir -p "$AM_OUTBOX"`**。
-- **分享用 bot 例外**（§20.5，使用者 2026-10-04）：它的 outbox 整個不清。daemon 在那顆的 outbox 放標記檔 `.am-share-keep`（建立、每次啟動、daemon 開機時補；
-  bot 或專案刪掉時拿掉，回到 1 小時），`outbox-gc.sh` 看到就跳過整個目錄；清單回 `ttl_secs:null`、`kept:true`、每個檔 `expires_at`／`remaining_secs` 為 null，網頁不畫倒數。
+- **分享用 bot 例外**（§20.5）：它的 outbox 走**分享保留政策**（#850，派工者決定）。使用者 2026-10-04 原本裁示「整個不清」（end user 是外部的人，隔天才回來拿檔是常態），
+  但那讓一個外部連結就能把資料碟寫滿（bot 一直寫新檔名、列表只顯示最新 300 筆、舊的看不到卻還佔碟），所以翻案成「留得久、但有上限」：
+  daemon 在那顆的 outbox 放標記檔 `.am-share-keep`（建立、每次啟動、daemon 開機時補；bot 或專案刪掉時拿掉，回到 1 小時），`outbox-gc.sh` 看到就改走這套，不再整個跳過：
+  檔案保留 **14 天**（mtime 與 ctime 都超過才刪，`outbox::SHARE_KEEP_DAYS`）；每顆 **500 MiB／1000 檔**（`SHARE_OUTBOX_MAX_BYTES`／`SHARE_OUTBOX_MAX_FILES`），超過從最舊的 mtime 開始刪；標記檔不算量也不刪，符號連結不跟、不算。
+  清單回 `ttl_secs:null`、`kept:true`、`keep_days:14`、每個檔 `expires_at`／`remaining_secs` 為 null（網頁不畫 1 小時倒數），另回 `share_usage {bytes, files, truncated, cap:{bytes,files}, keep_days}`
+  （擁有者看用量；fd-bound 遞迴量整棵 outbox，不跟符號連結）。
 - **禁放清單**：私鑰、憑證、DB 一律不得放 scratchpad 或 outbox——`.pem` `.key` `.p12` `.pfx` `.jks` `.keystore` `.ppk` `.kdbx` `.env`、
   `id_rsa*`／`id_ed25519*`、`*.sqlite*`、`*.db`（含 `-wal`／`-shm`／`.bak`）、DB 複本、瀏覽器 profile。要長期保留的東西進 repo 或 `reports/`。
 - **規則三條**（寫進 `lifecycle::child_agent_rules`，claude skill 與三種 kind 的 persona 共用，所以不在本 repo 的 bot 也讀得到；
@@ -5028,7 +5032,7 @@ daemon 要能在 Linux（目標：Ubuntu，外部編譯主機 192.168.1.46，#67
 - **不套籠子**：權限就是一般 bot——`auto_approve`／bypass 照 bot 設定、Bash 等工具全開、照常讀專案的 agent md／`[agents.projects]`、裝 shim 與 herdr skill、bot 身分（`AM_BOT_TOKEN`）照常能打 API。
   `shared_bots.profile = 'trusted'`；判斷「要不要關進籠子」只看 `profile = 'restricted'`（`store::caged_workspace`／`is_caged`），`cage::prepare` 對它回 `None`。
 - **跟受限一樣適用**的（凡是判斷「是不是分享 bot」的地方都用 `store::is_share_bot`，兩種都算）：分享連結與入口、只呈現 end user 與 bot 的對話、`〔分享使用者〕` 前綴、
-  AGM 不能刪／停（`guards_from_bot_principal`）、不收進閒置睡眠（`share_bot`）、child 退役擋下、outbox 不過期（`.am-share-keep`）、停了先試著接回原對話（`resume_native`）、hook 一律注入。
+  AGM 不能刪／停（`guards_from_bot_principal`）、不收進閒置睡眠（`share_bot`）、child 退役擋下、outbox 走分享保留政策（`.am-share-keep`，14 天／500 MiB）、停了先試著接回原對話（`resume_native`）、hook 一律注入。
   上傳一樣放 `<資料夾>/inbox/`（資料夾是專案目錄時就是專案底下的 `inbox/`）。
 - `shared_bots.profile` 原本 CHECK 只收 `'restricted'`：開機時換名、照新定義建表、搬資料、刪舊表（schema v41）。
 
@@ -5124,7 +5128,7 @@ daemon 要能在 Linux（目標：Ubuntu，外部編譯主機 192.168.1.46，#67
 - **隱式退役**（`child_retire`，對帳 agent 不見／run 早就結束、維護窗口收尾）：分享用 bot 不會是 child，入口仍多一道保險，回 `ShareBot`、不軟刪。
 - **AGM 經 API**：AGM 角色本來只碰得到自己 bot 樹（`bot_resource_scope`）；另外 Bot principal 打 `DELETE /api/bots/{id}`、`POST /api/bots/{id}/stop`、
   `DELETE /api/projects/{id}`（專案裡有活著的分享用 bot）一律 403 `share_bot_protected`。重啟照准（會自己起回來）；使用者（UI token）照常能停能刪。
-- **outbox**：不給 `outbox-gc.sh` 清（§6.5f 分享用 bot 例外）。
+- **outbox**：不走 1 小時清理，改走分享保留政策（14 天、500 MiB／1000 檔，#850，§6.5f 分享用 bot 例外）。
 - **停了自動接回**：pane 被關、daemon 重啟、主機重開之後它就是停著（對帳只把 run 收成 exited，不刪 bot）。end user 送來一則時照「先落地、再啟動」
   （`start_send`）：睡著的走 `idle_sleep::wake`，停著的分享用 bot 以 `resume_native` 啟動（接不回才開新對話），起來閒下來由佇列送出。
 - 本來就不影響：批次重啟／herdr 升級（`resume_native` 原地接回）、`autostart_revive`（只碰 autostart 且被 herdr 弄丟的，起回來）、`pane-gc.sh`（只關卡住的登入 pane）、
