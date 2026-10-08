@@ -344,6 +344,8 @@ pub const SCHEMA_HISTORY: &[(i64, &str)] = &[
     (46, "0d415c91ca473b5e"),
     // issue #864：`primary_cache_actions`（主力熱壓的 durable 收據，note 只是投影）。
     (47, "d9e8f995cf7cd191"),
+    // issue #916：`codex_steers`（codex steer 的 client_request_id 落地，重啟後重送不再打第二次字）。
+    (48, "0883f7828daa3cda"),
 ];
 pub const SCHEMA_VERSION: i64 = SCHEMA_HISTORY[SCHEMA_HISTORY.len() - 1].0;
 

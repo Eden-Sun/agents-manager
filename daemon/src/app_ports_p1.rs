@@ -38,6 +38,7 @@ pub(crate) static FEATURE_MIGRATIONS: FeatureMigrations = &[
     feature!("release_triage::ledger", crate::release_triage::ledger::migrate),
     feature!("judge", crate::judge::migrate),
     feature!("cli_update", crate::cli_update::migrate),
+    feature!("codex_steer", crate::lifecycle::codex_steer::migrate),
     feature!("share::store", crate::share::store::migrate),
 ];
 
@@ -57,7 +58,7 @@ mod tests {
         sqlx::query_scalar("SELECT name FROM sqlite_master WHERE type='table' ORDER BY name").fetch_all(pool).await.unwrap()
     }
 
-    /// 清單照原本的順序（`apply_migrations` 尾巴那 13 行）。
+    /// 清單照原本的順序（`apply_migrations` 尾巴那 13 行，之後新增的 `codex_steer` 插在 `cli_update` 與 `share::store` 之間）。
     #[test]
     fn the_feature_migrations_keep_their_original_order() {
         let names: Vec<&str> = FEATURE_MIGRATIONS.iter().map(|(n, _)| *n).collect();
@@ -76,6 +77,7 @@ mod tests {
                 "release_triage::ledger",
                 "judge",
                 "cli_update",
+                "codex_steer",
                 "share::store"
             ]
         );

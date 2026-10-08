@@ -2962,6 +2962,64 @@ mod send_now_tests {
         assert_eq!(n, 1);
     }
 
+    async fn supplement_count(f: &Fixture) -> i64 {
+        sqlx::query_scalar("SELECT COUNT(*) FROM messages WHERE role='user' AND sent_via='supplement'").fetch_one(&f.env.app.db).await.unwrap()
+    }
+
+    /// #916：記憶體帳沒了（daemon 重啟、被淘汰）之後同一個 request id 重送，以 `codex_steers` 為準：不再打字、回同一則訊息、不多補記。
+    #[tokio::test]
+    async fn a_steer_replayed_after_the_memo_is_lost_does_not_type_again() {
+        let f = codex_fixture(Some("0.159.0"), true).await;
+        busy(&f).await;
+        let first = prompt_send_now(&f.env.app, &f.bot_id, "改方向", "cx-lost", &[], None).await.unwrap();
+        crate::lifecycle::codex_steer::forget_memo_for_test(&f.bot_id, "cx-lost");
+        let again = prompt_send_now(&f.env.app, &f.bot_id, "改方向", "cx-lost", &[], None).await.unwrap();
+        assert_eq!((again.turn_id.as_str(), again.message_id.as_str(), again.send_now), (first.turn_id.as_str(), first.message_id.as_str(), Some("steered")));
+        assert_eq!(typed(&f), 1, "只打一次");
+        assert_eq!(supplement_count(&f).await, 1);
+        let row: (String, Option<String>) = sqlx::query_as("SELECT delivery, message_id FROM codex_steers WHERE bot_id=? AND client_request_id='cx-lost'")
+            .bind(&f.bot_id)
+            .fetch_one(&f.env.app.db)
+            .await
+            .unwrap();
+        assert_eq!((row.0.as_str(), row.1.as_deref()), (first.delivery.as_str(), Some(first.message_id.as_str())));
+    }
+
+    #[tokio::test]
+    async fn a_steer_replayed_with_different_text_is_refused() {
+        let f = codex_fixture(Some("0.159.0"), true).await;
+        busy(&f).await;
+        prompt_send_now(&f.env.app, &f.bot_id, "改方向", "cx-diff", &[], None).await.unwrap();
+        crate::lifecycle::codex_steer::forget_memo_for_test(&f.bot_id, "cx-diff");
+        let err = prompt_send_now(&f.env.app, &f.bot_id, "完全不同的一句", "cx-diff", &[], None).await.unwrap_err();
+        let LcError::Conflict(body) = err else { panic!("{err:?}") };
+        assert_eq!(body["reason"], "client_request_id was already used for a different prompt", "{body}");
+        assert_eq!(typed(&f), 1, "沒有再打");
+    }
+
+    /// 字打進去了、訊息沒記成（記憶體帳也沒了）：重送只補記，不重打；帳上的 message_id 補上。
+    #[tokio::test]
+    async fn an_uncommitted_steer_is_only_recorded_on_replay() {
+        let f = codex_fixture(Some("0.159.0"), true).await;
+        busy(&f).await;
+        sqlx::query("CREATE TRIGGER no_user_msg2 BEFORE INSERT ON messages WHEN NEW.sent_via = 'supplement' BEGIN SELECT RAISE(ABORT, 'disk hiccup'); END")
+            .execute(&f.env.app.db).await.unwrap();
+        let err = prompt_send_now(&f.env.app, &f.bot_id, "改方向", "cx-unc", &[], None).await.unwrap_err();
+        assert!(matches!(err, LcError::Uncommitted(_)), "{err:?}");
+        crate::lifecycle::codex_steer::forget_memo_for_test(&f.bot_id, "cx-unc");
+        sqlx::query("DROP TRIGGER no_user_msg2").execute(&f.env.app.db).await.unwrap();
+        let out = prompt_send_now(&f.env.app, &f.bot_id, "改方向", "cx-unc", &[], None).await.unwrap();
+        assert_eq!(out.send_now, Some("steered"));
+        assert_eq!(typed(&f), 1, "重送只補記，不重打");
+        assert_eq!(supplement_count(&f).await, 1);
+        let message_id: Option<String> = sqlx::query_scalar("SELECT message_id FROM codex_steers WHERE bot_id=? AND client_request_id='cx-unc'")
+            .bind(&f.bot_id)
+            .fetch_one(&f.env.app.db)
+            .await
+            .unwrap();
+        assert_eq!(message_id.as_deref(), Some(out.message_id.as_str()));
+    }
+
     /// 字打進去了但訊息寫不進 DB：回 503（sent:true），重送只補記訊息，不重打。
     #[tokio::test]
     async fn a_codex_steer_whose_message_could_not_be_saved_is_not_typed_again_on_retry() {

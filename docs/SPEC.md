@@ -1484,8 +1484,11 @@ tab 已被回收視為完成，`tab.list` 失敗不猜。沒有 `tab_id` 的 Run
      **不按任何特殊鍵、不收舊回合、不建新回合**，字走一般送出的圍籬（框裡有草稿就 `composer_busy`）與證據（rollout 計數，證不出來誠實回 `unknown`），
      成功後記成**被 steer 回合的補充訊息**（`sent_via='supplement'`，第 10 點），回 `send_now: "steered"`、`turn_id` 是被 steer 的那一回合。
      沒有回合在飛＝照一般送出（`idle`）。沒帶 `send_now` 的 prompt、`queue_if_busy` 完全不變。
-     冪等：steer 沒有自己的 turn 列，同一個 `client_request_id` 重送靠記憶體帳（bot＋request id）認出字已在 pane、**不再打**；訊息寫不進 DB
-     回 `503 send_now_state_uncommitted`（`sent:true`），重送只補記。**已知限制**：這份帳不跨 daemon 重啟，且 canary 的真機驗證
+     冪等：steer 沒有自己的 turn 列，同一個 `client_request_id` 重送靠 `codex_steers` 表（`PRIMARY KEY (bot_id, client_request_id)`，記 `turn_id`、
+     文字的 SHA-256、`delivery`、`message_id`；#916）認出字已在 pane、**不再打**，跨 daemon 重啟；同一個 request id 帶不同文字回 409。打字**之前**先寫一列
+     `delivery='pending'`（寫不進去就不打），打完改成送達結果；一個字都沒進 pane 的（`NotAttempted`）撤掉那一列、可原樣重送；`pending` 的列重送時當 `unknown`、不重打。
+     記憶體只是快取（滿了淘汰一筆）。列留 7 天，下一次 steer 時順手清。訊息寫不進 DB
+     回 `503 send_now_state_uncommitted`（`sent:true`），重送只補記。**已知限制**：canary 的真機驗證
      （working 中的 steer 是否被立即讀取、rollout 只出現一次、舊 turn 不被誤收）還沒做，所以旗標預設關。
 10. **補充**（使用者 2026-09-28：「插隊或補充都要寫在右邊的對話窗，因為也是一種發出的訊息」）：`POST /bots/:id/text` 帶 `record: true`
     （網頁鎖條上的「補充」）。不建新回合，字直接打進 pane；打字（含 Enter）成功後**同一把 bot 鎖裡**把它記成這個 run 進行中回合的
