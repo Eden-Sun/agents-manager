@@ -2373,7 +2373,12 @@ pt-hub = ["~/project/pt/CLAUDE.md", "~/project/pt/AGENTS.md"]      # 多份照�
   （每次開 child 都重寫，掃掉不會害到誰；CODEX_HOME 裡別的檔案不碰）。③ CODEX_HOME 寫不進去（是檔案、唯讀）：子 agent 照開、沒帶指示、stderr 講一聲。
   ④ 注入的值（指示檔路徑、`AM_MODEL`、`AM_EFFORT`）含控制字元就不帶那個參數並在 stderr 講（`am_arg_ok`）——herdr 會因為一個壞參數拒絕整個 `agent start`。
   ⑤ 指示檔路徑含空白、全形字、引號時仍是單一 argv 元素；grok 那句話把路徑用反引號框起來。
-- **讀不到不擋啟動**：檔案不存在或是空檔時 bot 照開，warn 並在對話裡寫一則 system 訊息講少了哪個檔。
+- **讀不到不擋啟動，而且不關 CLI 自己的指示檔（#769，採方案 A，派工者決定 2026-10-08）**：檔案不存在或是空檔時 bot 照開，warn 並在對話裡寫一則 system 訊息講少了哪個檔。
+  其中**讀不到**的（遠端主機睡著、ssh／tailscale 斷線、檔案不在；空檔不算）只要有任何一份：這次啟動**不**設 `CLAUDE_CODE_DISABLE_CLAUDE_MDS`、
+  codex 不帶 `-c project_doc_max_bytes=0`，CLI 自己讀 repo 的 CLAUDE.md／AGENTS.md，讀得到的那幾份 agent md 照常注入——避免遠端專案在 m4p 睡著的那一刻開出一顆兩邊都沒有規則的 bot。
+  pane env 另帶 `AM_KEEP_CLI_DOCS=1`（shim 的保留清單），子 agent 的 shim 看到它也不補 codex 的 `project_doc_max_bytes=0`（claude 子 agent 本來就繼承母 bot 的 env，沒有那個變數就會自己讀）。
+  同時推一則 `ops_alert`（`source=daemon`、`reason=agent_md_unreadable`，帶 bot 與讀不到的檔）進 AGM inbox：去重鍵含 bot、問題內容與小時，同一個問題一小時內只推一則。
+  每一份都讀到才照舊關掉。對話裡那則 system 訊息會寫明「這次不關 CLI 自己的指示檔」。修好檔案後重啟 bot 才會帶上。
 
 ### 6.5j 主力晶片的 prompt cache 倒數（使用者 2026-10-04）
 

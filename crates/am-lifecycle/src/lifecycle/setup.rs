@@ -1425,6 +1425,12 @@ fn grok_rules_reference(path: &str) -> String {
 /// claude／grok 是檔案路徑，codex 是 profile 名（`<CODEX_HOME>/<名>.config.toml`）。None＝沒有 staged，退回把整份放進 argv
 /// （只剩單元測試與沒有 bot 目錄的路徑；正式啟動沒 staged 成功會直接拒絕，見 `start::stage_persona`）。
 pub fn persona_args(bot: &db::Bot, agent_name: &str, agent_md: Option<&str>, staged_persona: Option<&str>) -> Vec<String> {
+    persona_args_cli_docs(bot, agent_name, agent_md, staged_persona, agent_md.is_some())
+}
+
+/// 同 [`persona_args`]，但「關掉 CLI 自己的指示檔」（codex 的 `project_doc_max_bytes=0`）獨立給：agent md 有一份讀不到時
+/// 仍要注入讀得到的那幾份，卻不能關掉 AGENTS.md（#769）。
+pub fn persona_args_cli_docs(bot: &db::Bot, agent_name: &str, agent_md: Option<&str>, staged_persona: Option<&str>, disable_cli_docs: bool) -> Vec<String> {
     let p = persona_text(bot, agent_name, agent_md);
     let p = p.as_str();
     match bot.kind.as_str() {
@@ -1444,7 +1450,7 @@ pub fn persona_args(bot: &db::Bot, agent_name: &str, agent_md: Option<&str>, sta
                 Some(profile) => vec!["-p".into(), profile.to_string()],
                 None => vec!["-c".into(), format!("developer_instructions={}", toml_basic_string(p))],
             };
-            if agent_md.is_some() {
+            if disable_cli_docs {
                 v.extend(["-c".into(), "project_doc_max_bytes=0".into()]);
             }
             v
@@ -1934,6 +1940,17 @@ mod model_args_tests {
         b.persona = Some(long.clone());
         let inline = crate::herdr::fit_command_line(super::persona_args(&b, "proj-abc123", Some("AGENT-MD"), None));
         assert!(inline.iter().any(|a| a.ends_with("後略）")), "{inline:?}");
+    }
+
+    #[test]
+    fn codex_keeps_project_docs_when_the_cli_docs_are_not_disabled() {
+        let b = bot("codex", None, None, false);
+        let on = super::persona_args_cli_docs(&b, "proj-abc123", Some("AGENT-MD"), None, true);
+        assert_eq!(&on[2..], ["-c", "project_doc_max_bytes=0"]);
+        let off = super::persona_args_cli_docs(&b, "proj-abc123", Some("AGENT-MD"), None, false);
+        assert_eq!(off.len(), 2, "有指示檔讀不到：讀得到的 agent md 照注入，但不關 AGENTS.md：{off:?}");
+        assert!(off[1].contains("AGENT-MD"));
+        assert_eq!(super::persona_args(&b, "proj-abc123", Some("AGENT-MD"), None), on, "既有簽名：有 agent md 就關");
     }
 
     /// 2026-09-13 使用者要求：人設與注入提示一律用命令語氣。客氣的寫法（「請…」「不要…比較好」）

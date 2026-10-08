@@ -1043,6 +1043,32 @@ impl<'a> StartPaneGuard<'a> {
     }
 }
 
+/// agent md 有指示檔讀不到（#769）：除了對話裡那則 system 訊息，也推一則 `ops_alert` 進 AGM inbox（`source=daemon`）。
+/// 去重鍵含 bot、讀不到的內容與「小時」：同一顆 bot 同一個問題一小時內只推一則，持續讀不到下一個小時會再提醒。推不進去只記 log。
+async fn push_agent_md_unreadable_alert(app: &impl StartContext, bot: &db::Bot, unreadable: &[String]) {
+    let detail = unreadable.join("；");
+    let hour = chrono::Utc::now().format("%Y%m%d%H");
+    let key = format!(
+        "ops_alert:daemon:agent_md_unreadable:{}:{}:{hour}",
+        bot.id,
+        crate::supervisor_inbox::short_hash(detail.as_bytes()),
+    );
+    let payload = serde_json::json!({
+        "source": "daemon",
+        "reason": "agent_md_unreadable",
+        "subject": bot.name,
+        "bot_id": bot.id,
+        "bot_name": bot.name,
+        "detail": format!("bot `{}`（{}）啟動時有 agent md 讀不到：{detail}", bot.name, bot.id),
+        "action": "到設定的指示檔所在主機確認檔案存在、ssh／網路通（遠端專案的檔在專案那台主機上讀）。這次啟動 daemon 沒有關掉 CLI 自己的 CLAUDE.md／AGENTS.md，bot 仍讀得到 repo 的規則，但沒有帶到 [agents] 設定的那份；修好後重啟 bot 才會帶上。",
+    });
+    match crate::supervisor_inbox::push_inbox(app.db(), &key, "ops_alert", None, Some(&bot.id), None, &payload).await {
+        Ok(Some(_)) => app.emit("supervisor_changed", serde_json::json!({ "ops_alert": key })).await,
+        Ok(None) => {}
+        Err(e) => tracing::warn!(bot = %bot.name, error = %e, "could not queue the agent md ops_alert"),
+    }
+}
+
 /// 母 bot 的完整啟動指示放在哪裡。herdr 把整條指令壓在 900 bytes 內，整份放進 argv 會被砍成「…（後略）」，
 /// 所以 claude／grok 走檔案、codex 走 profile（SPEC §6.5i）。
 enum StagedPersona {
@@ -1172,18 +1198,30 @@ async fn start_inner(
     // §6.5i：agent md 讀一次，母 bot 的 persona 與子 agent 的檔用同一份。
     let agent_md = if restricted.is_some() { Default::default() } else { super::agent_md::load(app, project).await };
     if !agent_md.problems.is_empty() {
-        let reason = format!("agent md 有問題，這次啟動沒帶到：{}", agent_md.problems.join("；"));
+        let mut reason = format!("agent md 有問題，這次啟動沒帶到：{}", agent_md.problems.join("；"));
+        if !agent_md.unreadable.is_empty() {
+            reason.push_str("。因為有指示檔讀不到，這次不關 CLI 自己的指示檔（CLAUDE.md／AGENTS.md 照常讀），免得 bot 兩邊都沒有規則");
+        }
         tracing::warn!(bot = %bot.name, "{reason}");
         if let Ok(conv) = db::conversation_id(app.db(), &bot.id).await {
             let _ = insert_message(app, &conv, None, "system", &reason, "system", false, None).await;
         }
     }
+    if !agent_md.unreadable.is_empty() {
+        push_agent_md_unreadable_alert(app, bot, &agent_md.unreadable).await;
+    }
     let mut env = env;
-    if agent_md.configured {
-        // 這個專案有 agent md：claude 一律不讀任何 CLAUDE.md（帳號層與 repo 都是）。不分 kind 都設——codex／grok bot
+    if agent_md.cli_docs_disabled() {
+        // 這個專案有 agent md（而且每一份都讀到）：claude 一律不讀任何 CLAUDE.md（帳號層與 repo 都是）。不分 kind 都設——codex／grok bot
         // 開出來的 claude 子 agent 也繼承（shim 的保留清單帶下去）。沒設定的專案不動，CLI 照舊讀自己的檔。
         if let Some(map) = env.as_object_mut() {
             map.insert("CLAUDE_CODE_DISABLE_CLAUDE_MDS".into(), serde_json::json!("1"));
+        }
+    } else if agent_md.configured {
+        // 有一份指示檔讀不到（#769 方案 A）：不關 CLI 自己的指示檔，讓 bot 至少讀得到 repo 的 CLAUDE.md／AGENTS.md。
+        // claude 靠「不設」上面那個變數；子 agent 的 codex 由 shim 看這個旗標決定要不要補 `project_doc_max_bytes=0`。
+        if let Some(map) = env.as_object_mut() {
+            map.insert("AM_KEEP_CLI_DOCS".into(), serde_json::json!("1"));
         }
     }
     // Grok's `--rules` accepts only a string, while Herdr trims every launch to 900 bytes to stay
@@ -1244,7 +1282,7 @@ async fn start_inner(
         args.extend(app.restricted_launch_args(&env, &prompt));
         args.extend(model_args(&effort_checked(app, bot, &project.host).await));
     } else {
-        args.extend(persona_args(bot, &agent, agent_md.configured.then_some(agent_md.text.as_str()), staged_persona.reference()));
+        args.extend(persona_args_cli_docs(bot, &agent, agent_md.configured.then_some(agent_md.text.as_str()), staged_persona.reference(), agent_md.cli_docs_disabled()));
         args.extend(model_args(&effort_checked(app, bot, &project.host).await));
         args.extend(identity_args_v);
         args.extend(bot.args());
@@ -2308,6 +2346,111 @@ mod resume_args_tests {
         // 沒指定自己的 profile 時，CODEX_HOME 在這個測試行程的假家目錄底下，不是真的 ~/.codex。
         let home = super::codex_home_dir(&e.app, &project, &no_env).await.unwrap();
         assert!(home.ends_with("/.codex") && home.starts_with(crate::home::dir().unwrap().to_str().unwrap()), "{home}");
+    }
+
+    /// `[agents]` 設定 global（讀得到）＋這個專案一份（`project_md`，可以是不存在的檔）。
+    async fn configure_agent_md(e: &Env, global: &std::path::Path, project_md: &std::path::Path) {
+        use crate::capabilities::Cfg;
+        let (g, p) = (global.to_string_lossy().into_owned(), project_md.to_string_lossy().into_owned());
+        let pid = e.project_id.clone();
+        e.app
+            .cfg()
+            .update(move |c| {
+                c.agents.instructions_file = Some(g);
+                c.agents.projects.insert(pid, crate::config::AgentMdFiles::One(p));
+                Ok(())
+            })
+            .await
+            .unwrap();
+    }
+
+    fn first_pane_env(e: &Env) -> Value {
+        let env_of = |method: &str| e.herdr.calls_to(method).into_iter().find_map(|p| p.get("env").cloned());
+        env_of("tab.create").or_else(|| env_of("pane.split")).or_else(|| env_of("workspace.create")).expect("a pane was created with env")
+    }
+
+    async fn system_notes(e: &Env, bot_id: &str) -> Vec<String> {
+        let conv = db::conversation_id(e.app.db(), bot_id).await.unwrap();
+        sqlx::query_scalar("SELECT content FROM messages WHERE conversation_id=? AND role='system'")
+            .bind(&conv)
+            .fetch_all(e.app.db())
+            .await
+            .unwrap()
+    }
+
+    async fn agent_md_alerts(e: &Env, bot_id: &str) -> i64 {
+        sqlx::query_scalar("SELECT COUNT(*) FROM supervisor_inbox WHERE kind='ops_alert' AND bot_id=? AND event_key LIKE 'ops_alert:daemon:agent_md_unreadable:%'")
+            .bind(bot_id)
+            .fetch_one(e.app.db())
+            .await
+            .unwrap()
+    }
+
+    /// #769 方案 A：設定的指示檔有一份讀不到（遠端主機睡著、ssh 逾時…）時，不關 CLI 自己的 CLAUDE.md／AGENTS.md，
+    /// 讀得到的那份照常注入，對話裡有 system 訊息、AGM inbox 有 ops_alert——不能開出一顆兩邊都沒有規則的 bot。
+    #[tokio::test]
+    async fn an_unreadable_agent_md_keeps_the_cli_docs_on_and_raises_an_alert() {
+        let e = env().await;
+        let global = e.dir.join("global-agent-md.md");
+        std::fs::write(&global, "GLOBAL-RULES-MARKER\n").unwrap();
+        configure_agent_md(&e, &global, &e.dir.join("missing-project-agent-md.md")).await;
+        let bot = claude_bot(&e.app, &e.project_id, "md-unreadable").await;
+
+        start_bot(&e.app, &bot.id).await.unwrap();
+
+        let env = first_pane_env(&e);
+        assert!(env.get("CLAUDE_CODE_DISABLE_CLAUDE_MDS").is_none(), "有一份讀不到：CLI 自己的 CLAUDE.md 照讀：{env}");
+        assert_eq!(env["AM_KEEP_CLI_DOCS"], "1", "子 agent 的 shim 也要知道：{env}");
+        let persona = std::fs::read_to_string(e.app.data_dir.join("bots").join(&bot.id).join("persona.md")).unwrap();
+        assert!(persona.contains("GLOBAL-RULES-MARKER"), "讀得到的那份照常注入");
+        let notes = system_notes(&e, &bot.id).await;
+        assert!(notes.iter().any(|n| n.contains("讀不到") && n.contains("不關 CLI 自己的指示檔")), "{notes:?}");
+        assert_eq!(agent_md_alerts(&e, &bot.id).await, 1, "AGM inbox 有一則 agent_md_unreadable");
+        // 同一小時同一個問題再開一次：不重複推。
+        stop_bot(&e.app, &bot.id).await.unwrap();
+        start_bot(&e.app, &bot.id).await.unwrap();
+        assert_eq!(agent_md_alerts(&e, &bot.id).await, 1, "同一小時同一個問題只推一則");
+    }
+
+    /// 每一份都讀到：照舊關掉 CLI 自己的指示檔，不推告警。
+    #[tokio::test]
+    async fn a_readable_agent_md_still_disables_the_cli_docs() {
+        let e = env().await;
+        let global = e.dir.join("global-agent-md-ok.md");
+        let project = e.dir.join("project-agent-md-ok.md");
+        std::fs::write(&global, "GLOBAL-OK\n").unwrap();
+        std::fs::write(&project, "PROJECT-OK\n").unwrap();
+        configure_agent_md(&e, &global, &project).await;
+        let bot = claude_bot(&e.app, &e.project_id, "md-readable").await;
+
+        start_bot(&e.app, &bot.id).await.unwrap();
+
+        let env = first_pane_env(&e);
+        assert_eq!(env["CLAUDE_CODE_DISABLE_CLAUDE_MDS"], "1", "{env}");
+        assert!(env.get("AM_KEEP_CLI_DOCS").is_none(), "{env}");
+        assert_eq!(agent_md_alerts(&e, &bot.id).await, 0);
+        assert!(system_notes(&e, &bot.id).await.iter().all(|n| !n.contains("agent md")));
+    }
+
+    /// codex：讀不到時不帶 `-c project_doc_max_bytes=0`（AGENTS.md 照讀）；讀得到的 agent md 仍進 profile。
+    #[tokio::test]
+    async fn codex_with_an_unreadable_agent_md_does_not_cap_project_docs() {
+        let e = env().await;
+        let global = e.dir.join("global-agent-md-codex.md");
+        std::fs::write(&global, "GLOBAL-CODEX-MARKER\n").unwrap();
+        configure_agent_md(&e, &global, &e.dir.join("missing-project-agent-md-codex.md")).await;
+        let bot = claude_bot(&e.app, &e.project_id, "md-codex").await;
+        let codex_home = e.dir.join("codex-home-md");
+        let env_json = serde_json::json!({ "CODEX_HOME": codex_home.to_string_lossy() }).to_string();
+        sqlx::query("UPDATE bots SET kind='codex', identity=NULL, env_json=? WHERE id=?").bind(&env_json).bind(&bot.id).execute(e.app.db()).await.unwrap();
+
+        start_bot(&e.app, &bot.id).await.unwrap();
+
+        let args = started_args(&e).pop().unwrap();
+        assert!(!args.iter().any(|a| a.contains("project_doc_max_bytes")), "{args:?}");
+        let profile = std::fs::read_to_string(codex_home.join(format!("am-bot-{}.config.toml", bot.id))).unwrap();
+        assert!(profile.contains("GLOBAL-CODEX-MARKER"), "讀得到的那份照常進 profile");
+        assert_eq!(agent_md_alerts(&e, &bot.id).await, 1);
     }
 
     /// 2026-10-05：agy 只留 Gemini 3.8 Flash。已存在的 bot 設了拿掉的模型，啟動照常成功、argv 改用 3.8 medium（不讓它起不來）。

@@ -50,7 +50,7 @@ am_dedupe_path() {
 # `AM_DAEMON_EXE`／`AM_CONFIG_PATH`（issue #138）：cargo shim 把 check／test／clippy 轉到外部編譯主機的前提。
 # 少了它們，子 agent 的 cargo 永遠留在本機——#104 當初只在 daemon 注入端加了，這份清單漏了。
 # 跟其他 key 一樣：母 pane 有才帶、呼叫者自己給了就尊重（它們不是隔離實例那種要防偽造的保留變數）。
-AM_RESERVED_ENV_KEYS="CLAUDE_CONFIG_DIR CODEX_HOME AM_BOT_ID AM_BOT_TOKEN AM_HOOK_TOKEN AM_PORT AM_RUN_ID AM_AGENT_NAME AM_KIND AM_MODEL AM_EFFORT AM_PROJECT_ID AM_WORKSPACE_ID AM_OUTBOX AM_DAEMON_EXE AM_CONFIG_PATH AM_REAL_HERDR PATH CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION CLAUDE_CODE_DISABLE_CLAUDE_MDS AM_INSTRUCTIONS_FILE"
+AM_RESERVED_ENV_KEYS="CLAUDE_CONFIG_DIR CODEX_HOME AM_BOT_ID AM_BOT_TOKEN AM_HOOK_TOKEN AM_PORT AM_RUN_ID AM_AGENT_NAME AM_KIND AM_MODEL AM_EFFORT AM_PROJECT_ID AM_WORKSPACE_ID AM_OUTBOX AM_DAEMON_EXE AM_CONFIG_PATH AM_REAL_HERDR PATH CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION CLAUDE_CODE_DISABLE_CLAUDE_MDS AM_INSTRUCTIONS_FILE AM_KEEP_CLI_DOCS"
 
 # API calls use the independent bot credential. Keep the hook-token fallback for already-running
 # hook-enabled panes until they restart to receive AM_BOT_TOKEN.
@@ -421,7 +421,8 @@ am_agent_start() {
                 fi
             fi
             # 只在 §6.5i 底下（daemon 給了 AM_INSTRUCTIONS_FILE）才關：人工 shell 的 codex 照它自己的習慣。
-            if [ "$_has_docs" = 0 ] && [ -n "${AM_INSTRUCTIONS_FILE:-}" ]; then
+            # `AM_KEEP_CLI_DOCS`：母 bot 啟動時有一份 agent md 讀不到（#769），這一輪不關，子 agent 才讀得到 AGENTS.md。
+            if [ "$_has_docs" = 0 ] && [ -n "${AM_INSTRUCTIONS_FILE:-}" ] && [ -z "${AM_KEEP_CLI_DOCS:-}" ]; then
                 [ "$_stop" = 1 ] || set -- "$@" --
                 _stop=1
                 set -- "$@" -c project_doc_max_bytes=0

@@ -20,11 +20,21 @@ pub const PERSONA_FILE: &str = "persona.md";
 /// 讀出來的 agent md。`problems` 是讀不到或空的檔：bot 照開，但要讓人看得到少了什麼。
 /// `configured`＝`[agents]` 有指定檔：只有這時才關掉 CLI 自己的指示檔——沒設定就維持 CLI 原本的行為，
 /// 免得換版之後、設定還沒寫好之前，bot 兩邊都讀不到。
+/// `unreadable`＝其中**讀不到**的檔（不含空檔）：只要有一份讀不到，CLI 自己的指示檔就不關（#769 方案 A，派工者決定）——
+/// 遠端主機睡著、ssh 逾時的那一刻開 bot，不能變成「兩邊都沒有規則」。
 #[derive(Debug, Default)]
 pub struct AgentMd {
     pub configured: bool,
     pub text: String,
     pub problems: Vec<String>,
+    pub unreadable: Vec<String>,
+}
+
+impl AgentMd {
+    /// 這次啟動要不要關掉 CLI 自己的指示檔（claude 的 CLAUDE.md、codex 的 AGENTS.md）：設了而且每一份都讀到才關。
+    pub fn cli_docs_disabled(&self) -> bool {
+        self.configured && self.unreadable.is_empty()
+    }
 }
 
 /// 依 `[agents]` 讀這個專案的 agent md（全域在前、專案在後）。全域那份在 daemon 這台機器上讀；
@@ -73,7 +83,10 @@ fn collect(reads: Vec<Result<String, String>>) -> AgentMd {
         match r {
             Ok(t) if !t.trim().is_empty() => parts.push(t.trim().to_string()),
             Ok(_) => out.problems.push("有一份 agent md 是空檔".into()),
-            Err(e) => out.problems.push(e),
+            Err(e) => {
+                out.unreadable.push(e.clone());
+                out.problems.push(e);
+            }
         }
     }
     out.text = parts.join("\n\n");
@@ -282,9 +295,17 @@ mod tests {
         let ok = dir.join("g.md");
         std::fs::write(&ok, "GLOBAL\n").unwrap();
         let got = collect(vec![read_local(ok.to_str().unwrap()).await, read_local(dir.join("nope.md").to_str().unwrap()).await]);
-        assert!(got.configured, "設了但讀不到也算設了：CLI 自己的檔照樣關，問題寫進對話");
+        assert!(got.configured, "設了但讀不到也算設了：讀得到的照常注入，問題寫進對話");
         assert_eq!(got.text, "GLOBAL");
         assert_eq!(got.problems.len(), 1, "{:?}", got.problems);
+        assert_eq!(got.unreadable.len(), 1, "{:?}", got.unreadable);
+        assert!(!got.cli_docs_disabled(), "有一份讀不到：CLI 自己的指示檔不關（#769 方案 A），不然 bot 兩邊都沒規則");
+        // 每一份都讀到才關；空檔不是「讀不到」（檔在、只是沒內容），照舊關。
+        let all = collect(vec![read_local(ok.to_str().unwrap()).await]);
+        assert!(all.cli_docs_disabled());
+        let empty = collect(vec![Ok("GLOBAL".into()), Ok("  \n".into())]);
+        assert!(empty.problems.len() == 1 && empty.unreadable.is_empty() && empty.cli_docs_disabled(), "{empty:?}");
+        assert!(!collect(vec![]).cli_docs_disabled(), "沒設定本來就不關");
         std::fs::remove_dir_all(&dir).unwrap();
     }
 
