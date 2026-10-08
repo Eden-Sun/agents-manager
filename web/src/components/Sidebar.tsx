@@ -76,6 +76,7 @@ import { quotaIdentity, runtimeIdentity, runtimeSettingsKnown } from '../lib/run
 import { syncKidsScroll, wheelKidsScroll } from '../lib/kidsScroll'
 import { createHitSearch } from '../lib/hitSearch'
 import { useWheelRef } from '../hooks/useWheelRef'
+import { scrollProjectIntoView } from '../lib/scrollProject'
 import './sidebar.css'
 
 function ConnBadge({ socket, connected }: { socket: SocketStatus; connected: boolean }) {
@@ -875,6 +876,8 @@ function ProjectTitle({
       onClick={(e) => {
         e.stopPropagation()
         selectProject(projectId)
+        // 點選左邊 menu 的專案，側欄跟著捲到那個專案（2026-10-08 使用者）。
+        requestAnimationFrame(() => scrollProjectIntoView(projectId))
       }}
     >
       {inner}
@@ -1239,7 +1242,10 @@ export function Sidebar() {
               <header
                 className={`project-head${projectSelected ? ' selected' : ''}`}
                 // 滑鼠延伸命中區；鍵盤等價是 ProjectTitle 按鈕，故不給 tabIndex。
-                onClick={() => selectProject(p.id)}
+                onClick={() => {
+                  selectProject(p.id)
+                  requestAnimationFrame(() => scrollProjectIntoView(p.id))
+                }}
                 draggable={!query}
                 // 不在此掛 title：會被 ＋/⋯ 繼承（見 ProjectTitle）。
                 onDragStart={(e) => {

@@ -97,17 +97,11 @@ function ChipLamp({ id }: { id: string }) {
   return LAMP_SHOWN.has(lamp) || background > 0 || kids > 0 ? <StatusLamp lamp={lamp} background={background} kids={kids} /> : null
 }
 
-/** 有滑鼠可以 hover 的裝置（手機的 tap 也會觸發 mouseenter，不能拿來開浮卡）。 */
-const canHover = () => typeof window !== 'undefined' && window.matchMedia?.('(hover: hover)').matches === true
-/** 滑鼠停多久才開狀態卡：掃過晶片列不該每顆都閃一下。 */
-const PEEK_DELAY_MS = 400
-
 function chipHints(it: ChipItem): ChipHints {
   return { current: it.current, unread: it.unread, needsReply: it.needsReply, waitsKids: it.waitsKids, kidsRunning: it.kidsRunning, cacheTitle: it.cache?.title ?? (it.noWarm ? NO_WARM_TEXT : null), keepWarmReplied: it.keepWarmReplied }
 }
 
-function Chip({ it, dnd, lamp, onPeek }: { it: ChipItem; dnd?: PinnedDnd; lamp?: boolean; /** 主力晶片：hover 開狀態卡（`null`＝收起）。 */ onPeek?: (id: string | null, at?: DOMRect) => void }) {
-  const peekTimer = useRef<ReturnType<typeof setTimeout> | null>(null)
+function Chip({ it, dnd, lamp }: { it: ChipItem; dnd?: PinnedDnd; lamp?: boolean }) {
   const drag = it.pinned ? dnd : undefined
   const dragging = drag?.dragId != null && drag.dragId !== it.id
   const shifted = dragging && drag.shifted.includes(it.id)
@@ -120,26 +114,8 @@ function Chip({ it, dnd, lamp, onPeek }: { it: ChipItem; dnd?: PinnedDnd; lamp?:
     <button
       type="button"
       className={`${chipClass(it)}${cache ? ` cache-${cache.level}` : ''}${it.keepWarmReplied ? ' keep-warm-replied' : ''}${drag?.dragId === it.id ? ' dragging' : ''}${shifted ? ' shifted' : ''}${mark}`}
-      // 主力晶片在能 hover 的裝置上改用狀態卡，不再疊一個瀏覽器原生 tooltip。
-      title={onPeek && canHover() ? undefined : [it.title, it.cache?.title ?? (it.noWarm ? NO_WARM_TEXT : null), it.keepWarmReplied ? KEEP_WARM_REPLIED_TEXT : null].filter(Boolean).join('\n')}
-      onMouseEnter={
-        onPeek
-          ? (e) => {
-              if (!canHover()) return
-              const el = e.currentTarget
-              peekTimer.current = setTimeout(() => onPeek(it.id, el.getBoundingClientRect()), PEEK_DELAY_MS)
-            }
-          : undefined
-      }
-      onMouseLeave={
-        onPeek
-          ? () => {
-              if (peekTimer.current) clearTimeout(peekTimer.current)
-              peekTimer.current = null
-              onPeek(null)
-            }
-          : undefined
-      }
+      // 電腦只有原生 tooltip，不 hover 開狀態卡（2026-10-08 使用者：桌面版不要 hover 就跳出）；狀態卡只剩手機長按。
+      title={[it.title, it.cache?.title ?? (it.noWarm ? NO_WARM_TEXT : null), it.keepWarmReplied ? KEEP_WARM_REPLIED_TEXT : null].filter(Boolean).join('\n')}
       data-bot-id={it.pinned ? it.id : undefined}
       style={
         drag?.dragId === it.id
@@ -301,17 +277,17 @@ export function UnreadChip() {
   const visiblePinned = useMemo(() => shownPinned.map((it) => it.id), [shownPinned])
   const names = useMemo(() => Object.fromEntries(pinnedItems.map((it) => [it.id, it.name])), [pinnedItems])
   const [legend, setLegend] = useState(false)
-  // 主力 bot 狀態卡（2026-10-04 使用者）：電腦 hover（`at`＝晶片位置），手機長按一到就開（`at` 為 null，底部彈出；接著移動＝拖曳、收卡）。
-  const [peek, setPeek] = useState<{ id: string; at: DOMRect | null } | null>(null)
-  const dnd = usePinnedDrag(fullPinned, visiblePinned, names, movePrimary, (id) => setPeek(id ? { id, at: null } : null))
-  const onPeek = useCallback((id: string | null, at?: DOMRect) => setPeek(id ? { id, at: at ?? null } : null), [])
+  // 主力 bot 狀態卡（2026-10-04 使用者）：手機長按一到就開（底部彈出；接著移動＝拖曳、收卡）。
+  // 電腦不再 hover 開卡（2026-10-08 使用者）；顏色說明改由晶片列尾端的「?」開。
+  const [peek, setPeek] = useState<{ id: string } | null>(null)
+  const dnd = usePinnedDrag(fullPinned, visiblePinned, names, movePrimary, (id) => setPeek(id ? { id } : null))
   const peekItem = peek ? pinnedItems.find((it) => it.id === peek.id) ?? null : null
   const peekCard =
     peek && peekItem ? (
       <BotStatusCard
         botId={peek.id}
         hints={chipHints(peekItem)}
-        anchor={peek.at}
+        anchor={null}
         onClose={() => setPeek(null)}
         onLegend={() => {
           setPeek(null)
@@ -368,7 +344,7 @@ export function UnreadChip() {
               style={!expanded && clipPx[name] > 0 ? { maxHeight: clipPx[name], overflow: 'hidden' } : undefined}
             >
               {group.map((it) => (
-                <Chip key={it.id} it={it} dnd={pinned ? dnd : undefined} onPeek={pinned ? onPeek : undefined} />
+                <Chip key={it.id} it={it} dnd={pinned ? dnd : undefined} />
               ))}
               {pinned ? <span className="sr-only" aria-live="polite">{dnd.announce}</span> : null}
             </div>
@@ -386,7 +362,10 @@ export function UnreadChip() {
           {expanded ? '收合' : `+${hidden}`}
         </button>
       ) : null}
-      {/* 電腦版：晶片列尾端一顆「?」開顏色說明（2026-10-04 使用者：電腦版你自己想）。 */}
+      {/* 電腦版：晶片列尾端一顆「?」開顏色說明（2026-10-04 使用者：電腦版你自己想；2026-10-08 hover 狀態卡拿掉後的唯一入口）。 */}
+      <button type="button" className="unread-bar-help" aria-label="顏色代表什麼？" title="顏色代表什麼？" onClick={() => setLegend(true)}>
+        ?
+      </button>
       {peekCard}
       {legend ? <ChipLegend onClose={() => setLegend(false)} /> : null}
     </div>

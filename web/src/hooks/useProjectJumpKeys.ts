@@ -1,6 +1,7 @@
 import { useEffect } from 'react'
 import { dialogOpen } from '../lib/dialogOpen'
 import { isImeEnter } from '../lib/ime'
+import { scrollProjectIntoView } from '../lib/scrollProject'
 import { orderedProjects, useStore } from '../store/store'
 
 /** 1–9：`Digit1`…`Digit9`（看實體鍵位，不看輸入法或 Shift 打出什麼字）。 */
@@ -40,10 +41,8 @@ export function useProjectJumpKeys() {
       selectProject(id)
       // 選完才畫得出輸入框：等這一輪 render 完再給焦點，拿不到就退回專案標題（至少鍵盤位置對了）。
       requestAnimationFrame(() => {
-        // 側欄捲到這個專案並讓它貼齊頂端（2026-09-16 使用者：「menu 也要 scroll 到指定點」）：
-        // `nearest` 在它只露一半時什麼都不做，看起來像沒捲。
-        const row = document.querySelector<HTMLElement>(`.project[data-project-id="${CSS.escape(id)}"]`)
-        row?.scrollIntoView({ block: 'start', behavior: 'smooth' })
+        // 側欄捲到這個專案並讓它貼齊頂端（2026-09-16 使用者：「menu 也要 scroll 到指定點」）。
+        scrollProjectIntoView(id)
         const box = document.querySelector<HTMLTextAreaElement>('.composer textarea')
         if (box && !box.disabled) {
           // focus 會把元素捲進視野：`preventScroll` 保住上面那一捲，也避免主面板被拉動。

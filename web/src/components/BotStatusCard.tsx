@@ -33,8 +33,9 @@ function headline(h: ChipHints, label: string, blockedReason: string): string {
 }
 
 /**
- * 主力 bot 現在的狀態（2026-10-04 使用者：「hover 至主力的 bot 時，就說明目前 context 狀態」）。
- * 電腦：滑鼠停在主力晶片上；手機：長按（一到就開，手指接著移動＝改成拖曳、收卡）。`anchor` 有值＝貼在那顆晶片下方的浮卡，沒有＝手機底部彈出。
+ * 主力 bot 現在的狀態（2026-10-04 使用者：「hover 至主力的 bot 時，就說明目前 context 狀態」；
+ * 2026-10-08 使用者：桌面版不要 hover 就跳出來，所以晶片列現在只剩手機長按開它）。
+ * 手機：長按（一到就開，手指接著移動＝改成拖曳、收卡），底部彈出。`anchor` 有值＝貼在某個位置下方的浮卡（目前晶片列不再傳），沒有＝底部彈出。
  */
 export function BotStatusCard({
   botId,

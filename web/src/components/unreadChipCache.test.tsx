@@ -39,7 +39,7 @@ function seed() {
 }
 
 const chip = (id: string) => document.querySelector<HTMLElement>(`.unread-chip[data-bot-id="${id}"]`)!
-/** 主力晶片在能 hover 的裝置上沒有原生 tooltip，快取倒數改在 hover 狀態卡裡（2026-10-04）：停一下、讀卡片、移開。 */
+/** 電腦不再 hover 開狀態卡（2026-10-08）：快取倒數只在原生 tooltip（`title`）裡；hover 之後也不該冒出狀態卡。 */
 async function hoverText(id: string): Promise<string> {
   const el = chip(id)
   await act(async () => {
@@ -47,7 +47,8 @@ async function hoverText(id: string): Promise<string> {
     el.dispatchEvent(new MouseEvent('mouseenter', { bubbles: false }))
     await new Promise((r) => setTimeout(r, 450))
   })
-  const text = el.title || (document.querySelector('.bot-status-card')?.textContent ?? '')
+  assert.equal(document.querySelector('.bot-status-card'), null, 'hover 不該開狀態卡')
+  const text = el.title
   await act(async () => {
     el.dispatchEvent(new MouseEvent('mouseout', { bubbles: true }))
     el.dispatchEvent(new MouseEvent('mouseleave', { bubbles: false }))
