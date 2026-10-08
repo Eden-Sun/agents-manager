@@ -477,6 +477,39 @@ async fn sending_validates_before_it_spends_the_rate_limit() {
     assert_eq!(n, 0, "沒有一則進到對話");
 }
 
+/// #853：沙箱（工作目錄＋inbox＋outbox）合計達 1 GiB，送訊息回 507 `share_storage_full`；沒有一則進對話。
+/// 稀疏檔：`set_len` 只改大小，不真的佔碟。
+#[tokio::test]
+async fn a_full_share_sandbox_refuses_new_messages_with_507() {
+    let e = tt::env().await;
+    let b = restricted_bot(&e.app, &e.project_id, "pub-full").await;
+    let token = shared(&e.app, &b.id).await;
+    let ws = std::path::PathBuf::from(store::restricted_workspace(&e.app.db, &b.id).await.unwrap().unwrap());
+    budget::clear_cached_for_test(&b.id);
+    let base = serve(portal::router(e.app.clone())).await;
+    let c = client();
+    let send = |crid: &str| c.post(format!("{base}/s/{token}/api/messages")).json(&json!({"text": "hi", "client_request_id": crid})).send();
+
+    // 工作目錄 700 MiB＋outbox 400 MiB：各自都沒超過，合計超過 1 GiB。
+    let f = std::fs::File::create(ws.join("big.bin")).unwrap();
+    f.set_len(700 * 1024 * 1024).unwrap();
+    let out = crate::outbox::dir_for(&e.app.data_dir, &b.id).unwrap();
+    std::fs::create_dir_all(&out).unwrap();
+    std::fs::File::create(out.join("export.bin")).unwrap().set_len(400 * 1024 * 1024).unwrap();
+    let r = send("full-1").await.unwrap();
+    assert_eq!(r.status(), 507);
+    assert_eq!(r.json::<Value>().await.unwrap()["error"], "share_storage_full");
+    let n: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM messages").fetch_one(&e.app.db).await.unwrap();
+    assert_eq!(n, 0, "沒有一則進到對話");
+    let (m, _) = budget::cached(&b.id).expect("量測值有記下來");
+    assert!(m.full() && m.workspace_bytes == 700 * 1024 * 1024 && m.outbox_bytes == 400 * 1024 * 1024);
+
+    // 擁有者清掉檔案：已滿的量測值只信 60 秒內；這裡直接清快取模擬「過了重量」。
+    std::fs::remove_file(ws.join("big.bin")).unwrap();
+    budget::clear_cached_for_test(&b.id);
+    assert!(!budget::is_full(&e.app, &b.id).await, "清掉之後不再擋（outbox 400 MiB 單獨不到 1 GiB）");
+}
+
 #[tokio::test]
 async fn the_message_rate_limit_is_per_share_per_minute() {
     let l = portal::Limits::default();

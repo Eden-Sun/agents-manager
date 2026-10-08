@@ -709,6 +709,14 @@ async fn send_message<H: PortalEnv>(State(st): State<Portal<H>>, Path(token): Pa
     if text.is_empty() && b.attachments.is_empty() {
         return bad("empty", "沒有內容");
     }
+    // 沙箱總預算（#853）：工作目錄＋inbox＋outbox 合計滿了就不收新訊息（bot 再寫只會更滿）；分享頁顯示「空間滿了」，擁有者另有通知。
+    if crate::share::budget::is_full(&st.app, &bot_id).await {
+        return (
+            StatusCode::INSUFFICIENT_STORAGE,
+            Json(json!({"error": "share_storage_full", "message": "空間滿了，請跟分享給你的人說一聲"})),
+        )
+            .into_response();
+    }
     // 附件檢查會排進 blocking pool，先扣額度讓無效附件不能免費放大檔案系統工作量。
     if let Some(wait) = st.limits.take(&bot_id, "message", MESSAGES_PER_MIN, Duration::from_secs(60)) {
         return too_many(wait, "message");
@@ -1074,7 +1082,7 @@ async fn files<H: PortalEnv>(State(st): State<Portal<H>>, Path(token): Path<Stri
             return unavailable();
         }
     };
-    // 只給名字、大小、時間；目錄路徑不給。分享用 bot 的 outbox 不清（`outbox-gc.sh` 看 `.am-share-keep`），所以不給倒數。
+    // 只給名字、大小、時間；目錄路徑不給。分享用 bot 的 outbox 走分享保留政策（14 天／總量上限，`outbox-gc.sh` 看 `.am-share-keep`），不是 1 小時，所以不給倒數。
     let out: Vec<Value> = listed
         .iter()
         .map(|f| {

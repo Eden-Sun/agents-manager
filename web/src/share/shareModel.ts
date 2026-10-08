@@ -157,6 +157,8 @@ export function shareErrorText(e: unknown, what: 'send' | 'upload' | 'load'): st
     if (e.status === 429) return e.retryAfter ? `傳得太快了，請 ${e.retryAfter} 秒後再試。` : '傳得太快了，請稍等一下再試。'
     if (e.status === 413) return what === 'upload' ? '檔案太大了（單檔上限 25 MB）。' : '訊息太長了，請分成幾段送。'
     if (e.status === 415) return '不支援這種檔案。'
+    // 507 share_storage_full（#853）：沙箱滿了，送訊息被擋；打的字還在。
+    if (e.status === 507) return '空間滿了，請跟分享給你的人說一聲；你打的字還在。'
     // 一段對話同時只排一則（409 not_accepted）：上一則還沒回完。
     if (e.status === 409) return '上一則還沒回完，等 bot 回完再送；你打的字還在。'
   }

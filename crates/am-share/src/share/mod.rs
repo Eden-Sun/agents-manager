@@ -10,6 +10,7 @@
 //! - [`portal`]：獨立 listener（`[share] listen`），router 上只有 `/s/{token}/…` 與分享頁的靜態檔，沒有 fallback 到主 API。
 
 pub mod admin;
+pub mod budget;
 pub mod cage;
 pub mod compose;
 pub mod folder;

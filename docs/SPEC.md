@@ -2112,7 +2112,7 @@ pid 不拿去對 listen port。agy 的登入 TUI 會在 127.0.0.1 自己開兩�
   daemon 在那顆的 outbox 放標記檔 `.am-share-keep`（建立、每次啟動、daemon 開機時補；bot 或專案刪掉時拿掉，回到 1 小時），`outbox-gc.sh` 看到就改走這套，不再整個跳過：
   檔案保留 **14 天**（mtime 與 ctime 都超過才刪，`outbox::SHARE_KEEP_DAYS`）；每顆 **500 MiB／1000 檔**（`SHARE_OUTBOX_MAX_BYTES`／`SHARE_OUTBOX_MAX_FILES`），超過從最舊的 mtime 開始刪；標記檔不算量也不刪，符號連結不跟、不算。
   清單回 `ttl_secs:null`、`kept:true`、`keep_days:14`、每個檔 `expires_at`／`remaining_secs` 為 null（網頁不畫 1 小時倒數），另回 `share_usage {bytes, files, truncated, cap:{bytes,files}, keep_days}`
-  （擁有者看用量；fd-bound 遞迴量整棵 outbox，不跟符號連結）。
+  （擁有者看用量；fd-bound 遞迴量整棵 outbox，不跟符號連結）。受限分享 bot 的**沙箱總預算**另見 §20.5「沙箱總預算」。
 - **禁放清單**：私鑰、憑證、DB 一律不得放 scratchpad 或 outbox——`.pem` `.key` `.p12` `.pfx` `.jks` `.keystore` `.ppk` `.kdbx` `.env`、
   `id_rsa*`／`id_ed25519*`、`*.sqlite*`、`*.db`（含 `-wal`／`-shm`／`.bak`）、DB 複本、瀏覽器 profile。要長期保留的東西進 repo 或 `reports/`。
 - **規則三條**（寫進 `lifecycle::child_agent_rules`，claude skill 與三種 kind 的 persona 共用，所以不在本 repo 的 bot 也讀得到；
@@ -5131,6 +5131,11 @@ daemon 要能在 Linux（目標：Ubuntu，外部編譯主機 192.168.1.46，#67
 - **outbox**：不走 1 小時清理，改走分享保留政策（14 天、500 MiB／1000 檔，#850，§6.5f 分享用 bot 例外）。
 - **停了自動接回**：pane 被關、daemon 重啟、主機重開之後它就是停著（對帳只把 run 收成 exited，不刪 bot）。end user 送來一則時照「先落地、再啟動」
   （`start_send`）：睡著的走 `idle_sleep::wake`，停著的分享用 bot 以 `resume_native` 啟動（接不回才開新對話），起來閒下來由佇列送出。
+- **沙箱總預算**（#853，派工者決定）：受限分享 bot 的 Write／Edit 能寫整個工作目錄與 outbox，上限原本只在上傳的 `inbox/`（200 MiB／300 檔）。現在工作目錄（含 `inbox/`）加 outbox 合計 **1 GiB**
+  （`share::budget::SANDBOX_MAX_BYTES`）：daemon 每 10 分鐘（`runners::share_budget`）重量一次（fd-bound、不跟符號連結、最多 20 萬項／32 層，樹太大回 `truncated` 下限值），量測值只放記憶體；
+  `POST /s/{token}/api/messages` 送出前看最近一次量測值（沒有或太舊——已滿的只信 60 秒——才現場量一次），達 1 GiB 回 **507 `share_storage_full`**，分享頁顯示「空間滿了，請跟分享給你的人說一聲」，一則都不進對話。
+  量測剛變滿時通知擁有者：該 bot 的對話一則系統訊息＋AGM inbox 一則 `ops_alert`（`reason:"share_storage_full"`，同一顆一天最多一則）。**不自動刪工作目錄的檔**（那是擁有者的東西）；擁有者清掉後約 1 分鐘內恢復。
+  只管受限分享 bot（信任分享的工作目錄就是一般專案，不在此列）。已有大型既有資料夾（`share_folder.kind=existing`）一開始就超過 1 GiB 的會直接被擋，需要先整理。
 - 本來就不影響：批次重啟／herdr 升級（`resume_native` 原地接回）、`autostart_revive`（只碰 autostart 且被 herdr 弄丟的，起回來）、`pane-gc.sh`（只關卡住的登入 pane）、
   `bot_trash`／`remote_purge`（只處理已刪的）、config 投影移除（使用者自己從 config 拿掉）、AGM persona 第 19 條的閒置盤點（只清 AGM 自己的 child，文件另寫明分享用 bot 不清）。
 
