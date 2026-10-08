@@ -3927,8 +3927,11 @@ AG Man 搬到 Linux 主機（#675）後，`com.agm.*` 例行 job 由 systemd use
   對應：`StartInterval N` → `OnUnitActiveSec=Ns`，第一次 `OnActiveSec=Ns`（`RunAtLoad` 則 `1s`）；log 落在 `supervisor/AGM/<名字>.systemd.log`；
   `EnvironmentVariables` → `Environment=`（同名變數）。`scripts/agm_test.py` 的 `SystemdParityTest` 逐支比對 plist 與 unit。
 - **cgroup**：systemd 收 unit 時殺整個 cgroup，不是程序群。kick 自己 detached 拉起的長駐行程（`dev-server` 的 vite）要 `KillMode=process` 才活得過 kick 結束。
-- **herdr server 也交給 systemd**：`scripts/ops/systemd/herdr@.service`（不是排程、沒有 .timer、不 enable），daemon 要起 session 時
-  `systemctl --user start herdr@<session>.service`，只有 systemd 一個看管者；細節與退回條件見 §19。
+- **herdr server 也交給 systemd**：`scripts/ops/systemd/herdr@.service`（不是排程、沒有 .timer），daemon 要起 session 時
+  `systemctl --user start herdr@<session>.service`，只有 systemd 一個看管者；細節與退回條件見 §19。只 enable `herdr@agents-manager`（開機起 daemon 用的 session，#858），其他 session 仍由 daemon 決定何時起。
+- **開機自己起 daemon**（issue #858）：`com.agm.daemon-boot.service`（oneshot、`WantedBy=default.target`、需 `loginctl enable-linger`）跑 `bin/daemon-boot.sh`：
+  `127.0.0.1:7788/api/session` 已有回應（2xx／401）就直接結束；否則照 `daemon-swap.sh` 的 `start()` 用 `systemd-run --user --collect -p Type=forking -p KillMode=process` 跑 `daemon-start.py`（專用 deploy checkout 那份，沒有退回 repo 的），最多等 60 秒（`DAEMON_BOOT_WAIT_SECS`）。
+  binary 不在、`daemon-start.py` 找不到、起不來分別 `ops-alert --source daemon-boot --reason binary_missing｜start_script_missing｜boot_start_failed`。重複啟動無害：daemon 自己有 `daemon.lock` 獨佔鎖。沒有 launchd 對應檔（manifest 標 `linux`）。
 - **browser-gc 排程也有 Linux 版**：`com.agm.browser-gc.service`／`.timer` 每 1800 秒執行 `browser_gc_linux.py`，只回收本使用者的孤兒 headless Chrome（父程序是 pid 1 或自己的 `systemd --user`——Linux user session 的 subreaper，孤兒掛在它底下而不是 pid 1；至少 2 分鐘、CDP 狀態可查且無連線）與安全標記的舊 `/tmp/am-*` profile，再跑 `pane-gc`。`ss` 不存在或查詢錯誤時保留程序。Linux worker 不啟動 browser-gc bot、不派 ego-browser task；圖形瀏覽器／OB worker 依 #718 暫不實作。macOS 的 `browser-gc-kick.sh`、task 與 plist 仍只裝在 `darwin`。
 - **對照表依平台選組**：`install-manifest.tsv` 可選第三欄 `darwin`／`linux`；`agm ops-sync --check` 只比這台平台的列，另一邊的放進 `skipped`。
   排程列必須標對（`LaunchAgents/…`＝`darwin`、`systemd/…`＝`linux`），否則 `bad_manifest`。Linux 上掃 `~/.config/systemd/user/com.agm.*` 找沒版控的 unit（`extra`），

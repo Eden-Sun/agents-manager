@@ -3,7 +3,7 @@
 #
 # 對應 macOS 由 daemon 寫的 launchd job `dev.agents-manager.herdr-<session>`（KeepAlive）。daemon 在 Linux 上要起
 # session 時先 `systemctl --user start herdr@<session>.service`，叫不到 user bus 或沒裝這個檔才退回直接 spawn——
-# 看管者只有 systemd 一個，不會跟 daemon 各起一顆搶同一個 socket（SPEC §19）。不 enable：什麼時候起由 daemon 決定。
+# 看管者只有 systemd 一個，不會跟 daemon 各起一顆搶同一個 socket（SPEC §19）。安裝時 enable `herdr@agents-manager`（開機起 daemon 用的 session，#858）；其他 session 仍不 enable，什麼時候起由 daemon 決定。
 #
 # KillMode=process：只收 herdr server 本身，跟 launchd 一樣不去掃 pane 裡的行程。預設的 control-group 會在
 # server 掛掉、Restart 之前把整個 cgroup（每個 pane 的 agent）一起殺掉。
@@ -20,3 +20,6 @@ RestartSec=2
 KillMode=process
 StandardOutput=append:/tmp/herdr-%i.log
 StandardError=append:/tmp/herdr-%i.log
+
+[Install]
+WantedBy=default.target

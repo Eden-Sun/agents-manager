@@ -1,0 +1,18 @@
+# 來源檔（issue #858）：Linux 主機開機後，正式 daemon 沒在跑就起一顆。
+# 沒有對應的 launchd plist：macOS 的 daemon 由 launchd／使用者自己起，這份只給 systemd 主機（install-manifest 標 linux）。
+# oneshot、不常駐；daemon 本身仍是 systemd-run 的 transient unit，跟 daemon-swap 的換版流程不衝突。
+# 安裝：照 scripts/ops/README.md，`systemctl --user enable com.agm.daemon-boot.service`（需要 `loginctl enable-linger`）。
+[Unit]
+Description=AGM daemon-boot：開機後正式 daemon 沒在跑就起一顆（issue #858）
+After=default.target
+
+[Service]
+Type=oneshot
+Environment=PATH=%h/.local/bin:%h/.bun/bin:%h/.cargo/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin
+Environment=HERDR_SESSION=agents-manager
+ExecStart=/bin/bash %h/.config/agents-manager/supervisor/AGM/bin/daemon-boot.sh
+StandardOutput=append:%h/.config/agents-manager/supervisor/AGM/daemon-boot.systemd.log
+StandardError=append:%h/.config/agents-manager/supervisor/AGM/daemon-boot.systemd.log
+
+[Install]
+WantedBy=default.target
