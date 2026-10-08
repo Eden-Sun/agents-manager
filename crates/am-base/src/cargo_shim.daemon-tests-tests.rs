@@ -700,8 +700,9 @@ esac"#
     #[test]
     fn a_manual_shell_keeps_the_documented_default_port_and_a_set_am_port_wins() {
         let s = Sandbox::new();
+        // 標頭走 stdin（`curl -K -`，#926）：把 stdin 攤平接在 argv 後面記，這樣「請求長什麼樣」還是一行。
         s.install_fake_curl(&format!(
-            "echo \"$*\" >> '{d}/curl.log'\nprintf '{{\"granted\":true,\"token\":\"tok-1\",\"cargo_jobs\":2,\"lease_ttl_secs\":30}}'\n",
+            "in=$(cat | tr '\\n' ' ')\necho \"$* $in\" >> '{d}/curl.log'\nprintf '{{\"granted\":true,\"token\":\"tok-1\",\"cargo_jobs\":2,\"lease_ttl_secs\":30}}'\n",
             d = s.dir.display()
         ));
         let home = s.dir.join("fake-home/.config/agents-manager");
@@ -1474,6 +1475,41 @@ esac"#,
         assert_shim_gives_up_once_caller_is_gone(&s, group, &err_path);
         let released = std::fs::read_to_string(s.dir.join("release.log")).unwrap_or_default();
         assert!(released.contains("/build-slots/release") && released.contains("token="), "放棄等待要用空 token 退號碼牌：{released:?}");
+    }
+
+    /// issue #926：認證標頭（bot token／共用 UI token）與 lease token 都不能出現在 curl 的命令列（`/proc/<pid>/cmdline`、`ps aux`
+    /// 對本機所有使用者可見）；改走 stdin 的 `-K -`。先對腳本字串斷言，再用假 curl 實際記下 argv 與 stdin。
+    #[test]
+    fn the_shim_never_passes_a_token_on_curls_command_line() {
+        for banned in ["-H \"$_auth\"", "--data-urlencode \"token=${_token}\"", "-H \"X-AM-Bot-Token", "-H \"X-AM-Token"] {
+            assert!(!super::SHIM_SH.contains(banned), "shim 不該把 {banned} 放在 curl 命令列");
+        }
+        let s = Sandbox::new();
+        let d = s.dir.display();
+        s.install_fake_curl(&format!(
+            "echo \"$*\" >> '{d}/argv.log'\ncat >> '{d}/stdin.log'\nprintf '{{\"granted\":true,\"token\":\"lease-secret-1\",\"cargo_jobs\":2,\"lease_ttl_secs\":30}}'\n"
+        ));
+        let (_, err, rc) = s.run(&[("AM_PORT", "4243"), ("AM_BOT_ID", "b1"), ("AM_BOT_TOKEN", "bot-secret-9")], &["build"]);
+        assert_eq!(rc, 0, "{err}");
+        let argv = std::fs::read_to_string(s.dir.join("argv.log")).unwrap();
+        let stdin = std::fs::read_to_string(s.dir.join("stdin.log")).unwrap();
+        for secret in ["bot-secret-9", "lease-secret-1"] {
+            assert!(!argv.contains(secret), "{secret} 上了 curl 命令列：{argv}");
+        }
+        assert!(argv.contains("X-AM-Bot-Id: b1") && argv.contains("/build-slots/acquire") && argv.contains("/build-slots/release"), "{argv}");
+        assert!(stdin.contains("header = \"X-AM-Bot-Token: bot-secret-9\""), "acquire 的標頭走 stdin：{stdin}");
+        assert!(stdin.contains("data-urlencode = \"token=lease-secret-1\""), "release 的 lease token 走 stdin：{stdin}");
+
+        // 人工 shell 退回的共用 UI token 也一樣。
+        let home = s.dir.join("fake-home/.config/agents-manager");
+        std::fs::create_dir_all(&home).unwrap();
+        std::fs::write(home.join("ui-token"), "ui-secret-7").unwrap();
+        let _ = std::fs::remove_file(s.dir.join("argv.log"));
+        let _ = std::fs::remove_file(s.dir.join("stdin.log"));
+        let (_, err, rc) = s.run(&[("AM_PORT", "4243")], &["build"]);
+        assert_eq!(rc, 0, "{err}");
+        assert!(!std::fs::read_to_string(s.dir.join("argv.log")).unwrap().contains("ui-secret-7"), "UI token 上了 curl 命令列");
+        assert!(std::fs::read_to_string(s.dir.join("stdin.log")).unwrap().contains("header = \"X-AM-Token: ui-secret-7\""));
     }
 
     /// issue #913：等名額的 shim 被 TERM（Ctrl-C 也是同一條路）要先退號碼牌再退出 130，不能讓後面的人空等 daemon 的 60 秒 stale。
