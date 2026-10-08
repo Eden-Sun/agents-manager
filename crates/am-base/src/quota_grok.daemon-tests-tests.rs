@@ -248,3 +248,28 @@
         // The context-usage tab has a percentage but no limit header.
         assert!(parse_grok_usage("  Context: ████░░  62%", Local::now()).is_none());
     }
+
+    /// #892：移除／改指主機要把那台的 grok 探測退避清掉，其他主機與本機不受影響。
+    #[test]
+    fn forgetting_a_host_drops_only_its_grok_backoff() {
+        let host = format!("m4p-{}", crate::db::ulid());
+        let other = format!("other-{}", crate::db::ulid());
+        let mine = format!("{host}/grok");
+        let theirs = format!("{other}/grok");
+        let local = format!("grok-{}", crate::db::ulid());
+        let long = Duration::from_secs(600);
+        park(&mine, long);
+        park(&theirs, long);
+        park(&local, long);
+        forget_host(&host);
+        assert!(!cooling_down(&mine), "那台的退避要清掉");
+        assert!(cooling_down(&theirs), "別台不動");
+        assert!(cooling_down(&local), "本機不動");
+        park(&mine, long);
+        forget_host(&host[..2]);
+        assert!(cooling_down(&mine), "前綴相同但不是同一台不能誤清");
+        forget_host(LOCAL_HOST);
+        assert!(!cooling_down(&local));
+        assert!(cooling_down(&mine), "遠端不受本機 forget 影響");
+        park(&mine, Duration::from_millis(1));
+    }

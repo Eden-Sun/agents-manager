@@ -388,6 +388,17 @@ pub fn park(key: &str, how_long: Duration) {
     backoff_map().lock().unwrap().insert(key.to_string(), std::time::Instant::now() + how_long);
 }
 
+/// 主機被移除或改指到別台時，丟掉那台的探測退避（#892）：遠端 key 是 `<host>/…`，本機的不帶 `/`。
+pub fn forget_host(host: &str) {
+    backoff_map().lock().unwrap().retain(|k, _| {
+        if host == LOCAL_HOST {
+            k.contains('/')
+        } else {
+            !k.strip_prefix(host).is_some_and(|rest| rest.starts_with('/'))
+        }
+    });
+}
+
 /// §16.4 skip rules: logged out, or our own probe failed recently.
 pub fn should_probe_grok(logged_in: Option<bool>, cooling: bool) -> bool {
     logged_in != Some(false) && !cooling

@@ -104,6 +104,9 @@ async fn forget_host_observations(app: &(impl crate::api::shell::HostShells + cr
         // 前端的額度條認 `quota_updated`：不告訴它，那台機器（或換連線前的那條）的數字會掛到下一次輪詢（形狀同 `identity_kind::cleanup_host`）。
         app.emit("quota_updated", json!({"kind": key, "host": name, "quota": null})).await;
     }
+    // claude／grok 的探測退避與 `/usage` 讀到時刻只在記憶體、以主機名為鍵：換了連線不能繼承舊機器的（#892）。
+    crate::quota_claude::forget_host(name);
+    crate::quota_grok::forget_host(name);
     app.models_cache().lock().await.retain(|k, _| !k.starts_with(&prefix));
     app.host_shells().lock().await.retain(|s| s.host != name);
     crate::login_assist::forget_host(app, name);
@@ -464,6 +467,30 @@ mod port_tests {
         assert_eq!(local.host_id, "local");
         assert!(e.app.current_fence(&"nowhere".to_string()).await.unwrap().is_none());
         assert_eq!(e.app.current_fence(&"local".to_string()).await.unwrap(), Some(local), "不重連世代不變");
+    }
+
+    /// #892：同名主機改指之後，claude／grok 的探測退避與 usage_seen 不能留給新連線；別台與本機的不動。
+    #[tokio::test]
+    async fn repointing_a_host_clears_its_claude_and_grok_probe_state() {
+        let e = env().await;
+        let host = format!("port-q-{}", crate::db::ulid());
+        let other = format!("port-o-{}", crate::db::ulid());
+        let claude_key = format!("{host}/claude:cc1");
+        let claude_bare = format!("{host}/claude");
+        let grok_key = format!("{host}/grok");
+        let other_claude = format!("{other}/claude");
+        e.app.hosts.insert_remote_for_test(remote_cfg(&host)).await;
+        crate::quota_claude::park(&claude_key, true);
+        crate::quota_claude::mark_usage_seen(&claude_bare);
+        crate::quota_claude::park(&other_claude, true);
+        crate::quota_grok::park(&grok_key, std::time::Duration::from_secs(600));
+        assert!(crate::quota_claude::cooling_down(&claude_key, false, false) && crate::quota_claude::usage_fresh(&claude_bare) && crate::quota_grok::cooling_down(&grok_key));
+        e.app.hosts.replace_remote_for_test(&e.app, remote_cfg(&host)).await;
+        assert!(!crate::quota_claude::cooling_down(&claude_key, false, false), "claude 退避已清");
+        assert!(!crate::quota_claude::usage_fresh(&claude_bare), "usage_seen 已清");
+        assert!(!crate::quota_grok::cooling_down(&grok_key), "grok 退避已清");
+        assert!(crate::quota_claude::cooling_down(&other_claude, false, false), "別台的不動");
+        crate::quota_claude::unpark(&other_claude);
     }
 
     /// 同名主機設定換掉＝換了一條連線：舊 fence 的操作要 `Conflict`，不能送到新連線上（即使新連線的重連計數剛好一樣）。
