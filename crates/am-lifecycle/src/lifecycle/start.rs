@@ -1043,32 +1043,6 @@ impl<'a> StartPaneGuard<'a> {
     }
 }
 
-/// agent md 有指示檔讀不到（#769）：除了對話裡那則 system 訊息，也推一則 `ops_alert` 進 AGM inbox（`source=daemon`）。
-/// 去重鍵含 bot、讀不到的內容與「小時」：同一顆 bot 同一個問題一小時內只推一則，持續讀不到下一個小時會再提醒。推不進去只記 log。
-async fn push_agent_md_unreadable_alert(app: &impl StartContext, bot: &db::Bot, unreadable: &[String]) {
-    let detail = unreadable.join("；");
-    let hour = chrono::Utc::now().format("%Y%m%d%H");
-    let key = format!(
-        "ops_alert:daemon:agent_md_unreadable:{}:{}:{hour}",
-        bot.id,
-        crate::supervisor_inbox::short_hash(detail.as_bytes()),
-    );
-    let payload = serde_json::json!({
-        "source": "daemon",
-        "reason": "agent_md_unreadable",
-        "subject": bot.name,
-        "bot_id": bot.id,
-        "bot_name": bot.name,
-        "detail": format!("bot `{}`（{}）啟動時有 agent md 讀不到：{detail}", bot.name, bot.id),
-        "action": "到設定的指示檔所在主機確認檔案存在、ssh／網路通（遠端專案的檔在專案那台主機上讀）。這次啟動 daemon 沒有關掉 CLI 自己的 CLAUDE.md／AGENTS.md，bot 仍讀得到 repo 的規則，但沒有帶到 [agents] 設定的那份；修好後重啟 bot 才會帶上。",
-    });
-    match crate::supervisor_inbox::push_inbox(app.db(), &key, "ops_alert", None, Some(&bot.id), None, &payload).await {
-        Ok(Some(_)) => app.emit("supervisor_changed", serde_json::json!({ "ops_alert": key })).await,
-        Ok(None) => {}
-        Err(e) => tracing::warn!(bot = %bot.name, error = %e, "could not queue the agent md ops_alert"),
-    }
-}
-
 /// 母 bot 的完整啟動指示放在哪裡。herdr 把整條指令壓在 900 bytes 內，整份放進 argv 會被砍成「…（後略）」，
 /// 所以 claude／grok 走檔案、codex 走 profile（SPEC §6.5i）。
 enum StagedPersona {
@@ -1208,7 +1182,7 @@ async fn start_inner(
         }
     }
     if !agent_md.unreadable.is_empty() {
-        push_agent_md_unreadable_alert(app, bot, &agent_md.unreadable).await;
+        super::agent_md::push_unreadable_alert(app, bot, &agent_md.unreadable).await;
     }
     let mut env = env;
     if agent_md.cli_docs_disabled() {
