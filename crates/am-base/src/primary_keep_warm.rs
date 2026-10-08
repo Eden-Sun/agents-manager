@@ -17,12 +17,13 @@
 //! * **不用保溫**（`keep_warm_skip` 表，使用者按鈕）：這顆主力「這一輪閒置」跳過保溫與熱壓；錨點（真的活動）晚於按下的時間就自動恢復，
 //!   持久（daemon 重啟不忘）。
 //!
-//! 「這個錨點之後是否做過」不放記憶體：保溫看有沒有 `keep-warm:`（舊資料 `keepalive:`）回合比錨點晚，壓縮看對話裡有沒有比錨點晚的系統訊息
-//! （[`WARM_COMPACT_NOTE_PREFIX`]，同時是聊天室看得到的說明），daemon 重啟後不會重做。
+//! 「這個錨點之後是否做過」不放記憶體：保溫看有沒有 `keep-warm:`（舊資料 `keepalive:`）回合比錨點晚；壓縮以 `primary_cache_actions`
+//! 的收據為準（先 claim 再送，同一錨點只會有一列；舊資料另看比錨點晚的系統訊息 [`WARM_COMPACT_NOTE_PREFIX`]）。系統訊息只是聊天室看得到的
+//! 說明：寫失敗會補寫（[`retry_pending_notes`]），不會因此重壓。daemon 重啟後不會重做。
 
 use crate::cache_clock::{self, KEEP_WARM_CRID_PREFIX, WARM_COMPACT_NOTE_PREFIX};
 use crate::db;
-use am_core::PromptRequest;
+use am_core::{PromptRequest, TurnError};
 use am_ports::{Clock, DbContext, EventSink, SystemMessageWriter, TurnControl};
 use sqlx::SqlitePool;
 use std::collections::HashMap;
@@ -309,6 +310,97 @@ pub async fn skip_route(app: &(impl crate::capabilities::Db + crate::capabilitie
     Ok(skip)
 }
 
+/// 熱壓的聊天室說明（`WARM_COMPACT_NOTE_PREFIX` 開頭）。
+fn warm_compact_note(age_min: i64) -> String {
+    format!("{WARM_COMPACT_NOTE_PREFIX}cache 年齡已 {age_min} 分鐘，自動送出 /compact（熱壓）")
+}
+
+/// 送 `/compact` 之前先 claim 這個錨點。回 `true`＝這一輪可以送；`false`＝已經 claim／做過了，什麼都不要送。
+pub async fn claim_warm_compact(pool: &SqlitePool, bot_id: &str, anchor: &str, run_id: &str, age_min: i64) -> anyhow::Result<bool> {
+    let n = sqlx::query(
+        "INSERT INTO primary_cache_actions (bot_id, anchor, kind, run_id, status, age_min, claimed_at)
+         VALUES (?, ?, 'warm_compact', ?, 'claimed', ?, ?) ON CONFLICT(bot_id, anchor, kind) DO NOTHING",
+    )
+    .bind(bot_id)
+    .bind(anchor)
+    .bind(run_id)
+    .bind(age_min)
+    .bind(db::now())
+    .execute(pool)
+    .await?
+    .rows_affected();
+    Ok(n == 1)
+}
+
+/// `/compact` 已送出：收據定案。
+pub async fn settle_warm_compact(pool: &SqlitePool, bot_id: &str, anchor: &str) -> anyhow::Result<()> {
+    sqlx::query("UPDATE primary_cache_actions SET status = 'done', done_at = ? WHERE bot_id = ? AND anchor = ? AND kind = 'warm_compact'")
+        .bind(db::now())
+        .bind(bot_id)
+        .bind(anchor)
+        .execute(pool)
+        .await?;
+    Ok(())
+}
+
+/// 確定**沒打字**（鎖內前置檢查就擋下）時撤回 claim，下一輪可依新狀態重判。已定案（`done`）的不動。
+pub async fn release_warm_compact(pool: &SqlitePool, bot_id: &str, anchor: &str) -> anyhow::Result<()> {
+    sqlx::query("DELETE FROM primary_cache_actions WHERE bot_id = ? AND anchor = ? AND kind = 'warm_compact' AND status = 'claimed'")
+        .bind(bot_id)
+        .bind(anchor)
+        .execute(pool)
+        .await?;
+    Ok(())
+}
+
+/// 這顆 bot 最近一次熱壓（claim 或定案）的時間；沒有收據是 `None`。
+pub async fn last_warm_compact_at(pool: &SqlitePool, bot_id: &str) -> anyhow::Result<Option<chrono::DateTime<chrono::Utc>>> {
+    let at: Option<String> = sqlx::query_scalar(
+        "SELECT MAX(COALESCE(done_at, claimed_at)) FROM primary_cache_actions WHERE bot_id = ? AND kind = 'warm_compact'",
+    )
+    .bind(bot_id)
+    .fetch_one(pool)
+    .await?;
+    Ok(at.as_deref().and_then(db::parse_ts))
+}
+
+async fn mark_note_written(pool: &SqlitePool, bot_id: &str, anchor: &str) -> anyhow::Result<()> {
+    sqlx::query("UPDATE primary_cache_actions SET note_written = 1 WHERE bot_id = ? AND anchor = ? AND kind = 'warm_compact'")
+        .bind(bot_id)
+        .bind(anchor)
+        .execute(pool)
+        .await?;
+    Ok(())
+}
+
+/// 壓縮已送出、聊天室說明沒寫成的收據（`done` 且 `note_written = 0`）補寫一次說明；成功才設 1。不再 compact。
+async fn retry_pending_notes<M: SystemMessageWriter>(db: &DbContext<SqlitePool>, messages: &M, bot: &db::Bot) {
+    let rows: Vec<(String, i64)> = match sqlx::query_as(
+        "SELECT anchor, age_min FROM primary_cache_actions
+          WHERE bot_id = ? AND kind = 'warm_compact' AND status = 'done' AND note_written = 0 ORDER BY claimed_at",
+    )
+    .bind(&bot.id)
+    .fetch_all(db.pool())
+    .await
+    {
+        Ok(r) => r,
+        Err(e) => {
+            tracing::warn!(bot = %bot.name, error = %format!("{e:#}"), "primary keep-warm: could not read pending compaction notes");
+            return;
+        }
+    };
+    for (anchor, age_min) in rows {
+        match messages.append_system_message(bot.id.clone(), warm_compact_note(age_min)).await {
+            Ok(_) => {
+                if let Err(e) = mark_note_written(db.pool(), &bot.id, &anchor).await {
+                    tracing::warn!(bot = %bot.name, error = %format!("{e:#}"), "primary keep-warm: could not mark the compaction note written");
+                }
+            }
+            Err(e) => tracing::warn!(bot = %bot.name, error = ?e, "primary keep-warm: compaction note still not written; will retry"),
+        }
+    }
+}
+
 /// 判斷這顆主力現在要不要動。`None`＝不對象（不是主力、忙著、沒有任何活動紀錄…）。只讀，不送任何東西。
 async fn plan_with_db(db: &DbContext<SqlitePool>, bot: &db::Bot, run: &db::Run, now: chrono::DateTime<chrono::Utc>) -> anyhow::Result<Option<Plan>> {
     let in_flight = db::in_flight_turn(db.pool(), &run.id).await?.is_some();
@@ -345,7 +437,8 @@ async fn plan_with_db(db: &DbContext<SqlitePool>, bot: &db::Bot, run: &db::Run, 
     )
     .await?
     .is_some_and(|t| t > anchor_t);
-    let last_compact = latest(
+    // 舊資料只有 note、新資料以收據為準：兩者都算，取較晚的。
+    let last_note = latest(
         db,
         &format!(
             "SELECT MAX(m.created_at) FROM messages m JOIN conversations c ON c.id = m.conversation_id
@@ -355,6 +448,7 @@ async fn plan_with_db(db: &DbContext<SqlitePool>, bot: &db::Bot, run: &db::Run, 
         &bot.id,
     )
     .await?;
+    let last_compact = last_note.max(last_warm_compact_at(db.pool(), &bot.id).await?);
     if is_warm_compact_echo(anchor_t, last_compact) {
         return Ok(None);
     }
@@ -376,7 +470,8 @@ pub async fn plan(app: &impl crate::capabilities::Db, bot: &db::Bot, run: &db::R
 }
 
 /// 照計畫做一步。送不出去（忙著、被擋）只記 log；下一輪重試仍須符合 cache 熱度條件。
-async fn act<T: TurnControl, M: SystemMessageWriter>(turns: &T, messages: &M, bot: &db::Bot, run: &db::Run, plan: &Plan) {
+/// 計畫綁的是 `run`：送出時帶 `expected_run_id`，bot 鎖內 active run 已換掉就不送（#872）。
+async fn act<T: TurnControl, M: SystemMessageWriter>(db: &DbContext<SqlitePool>, turns: &T, messages: &M, bot: &db::Bot, run: &db::Run, plan: &Plan) {
     match plan.step {
         Step::Wait => {}
         Step::KeepWarm => {
@@ -396,23 +491,49 @@ async fn act<T: TurnControl, M: SystemMessageWriter>(turns: &T, messages: &M, bo
                 }
             }
         }
-        Step::WarmCompact => match {
-            // 同保溫：壓縮造成的 statusLine 變化與 working 不算活動（另見 `is_warm_compact_echo`）。
-            open_window(&run.id);
-            turns.compact_bot(bot.id.clone(), Some(run.id.clone())).await
-        } {
-            Ok(_) => {
-                tracing::info!(bot = %bot.name, age_min = plan.age_secs / 60, "primary cache age reached the limit: sent /compact");
-                let note = format!("{WARM_COMPACT_NOTE_PREFIX}cache 年齡已 {} 分鐘，自動送出 /compact（熱壓）", plan.age_secs / 60);
-                if let Err(e) = messages.append_system_message(bot.id.clone(), note).await {
-                    tracing::warn!(bot = %bot.name, error = ?e, "could not record the compaction note; it may be sent again");
+        Step::WarmCompact => {
+            let age_min = plan.age_secs / 60;
+            // 先 claim 再送（#864）：收據在 DB，note 寫失敗或 daemon 在兩者之間掛掉都不會對同一錨點重壓。
+            match claim_warm_compact(db.pool(), &bot.id, &plan.anchor, &run.id, age_min).await {
+                Ok(true) => {}
+                Ok(false) => return,
+                Err(e) => {
+                    tracing::warn!(bot = %bot.name, error = %format!("{e:#}"), "primary cache compaction: could not claim the anchor; not sent");
+                    return;
                 }
             }
-            Err(e) => {
-                drop_window(&run.id);
-                tracing::info!(bot = %bot.name, error = ?e, "primary cache compaction not sent this round; will retry");
+            // 同保溫：壓縮造成的 statusLine 變化與 working 不算活動（另見 `is_warm_compact_echo`）。
+            open_window(&run.id);
+            match turns.compact_bot(bot.id.clone(), Some(run.id.clone())).await {
+                Ok(()) => {
+                    tracing::info!(bot = %bot.name, age_min, "primary cache age reached the limit: sent /compact");
+                    if let Err(e) = settle_warm_compact(db.pool(), &bot.id, &plan.anchor).await {
+                        tracing::warn!(bot = %bot.name, error = %format!("{e:#}"), "could not settle the compaction receipt; the claim still blocks a resend");
+                    }
+                    match messages.append_system_message(bot.id.clone(), warm_compact_note(age_min)).await {
+                        Ok(_) => {
+                            if let Err(e) = mark_note_written(db.pool(), &bot.id, &plan.anchor).await {
+                                tracing::warn!(bot = %bot.name, error = %format!("{e:#}"), "could not mark the compaction note written");
+                            }
+                        }
+                        Err(e) => tracing::warn!(bot = %bot.name, error = ?e, "could not record the compaction note; it will be written again later (no recompaction)"),
+                    }
+                }
+                // 鎖內前置檢查擋下、一個鍵都沒打（含 #872 的 `superseded_run`）：撤回 claim，下一輪依新狀態重判。
+                Err(e @ (TurnError::Busy(_) | TurnError::BotNotFound(_) | TurnError::InvalidRequest(_) | TurnError::QuotaBlocked(_))) => {
+                    drop_window(&run.id);
+                    if let Err(re) = release_warm_compact(db.pool(), &bot.id, &plan.anchor).await {
+                        tracing::warn!(bot = %bot.name, error = %format!("{re:#}"), "could not release the compaction claim");
+                    }
+                    tracing::info!(bot = %bot.name, error = ?e, "primary cache compaction not sent this round; will retry");
+                }
+                // 可能已送出 `/compact`（例如 send_slash_line 中途失敗）：保留 claim，不重壓這個錨點。
+                Err(e) => {
+                    drop_window(&run.id);
+                    tracing::warn!(bot = %bot.name, error = ?e, "primary cache compaction: result unknown; not retrying this anchor");
+                }
             }
-        },
+        }
     }
 }
 
@@ -446,8 +567,9 @@ pub async fn sweep_with<T: TurnControl, M: SystemMessageWriter, E: EventSink, C:
             settle_window(&run.id, quiet);
         }
         settle_skip_with(db, events, &bot, &run, now).await;
+        retry_pending_notes(db, messages, &bot).await;
         match plan_with_db(db, &bot, &run, now).await {
-            Ok(Some(p)) if p.step != Step::Wait => act(turns, messages, &bot, &run, &p).await,
+            Ok(Some(p)) if p.step != Step::Wait => act(db, turns, messages, &bot, &run, &p).await,
             Ok(_) => {}
             Err(e) => tracing::warn!(bot = %bot.name, error = %format!("{e:#}"), "primary keep-warm: could not read this bot's state"),
         }
