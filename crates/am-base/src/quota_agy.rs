@@ -295,5 +295,7 @@ pub async fn token_test_lock() -> tokio::sync::MutexGuard<'static, ()> {
 #[derive(Debug)]
 pub enum LogoutError {
     UnknownHost,
+    /// 排隊等探測鎖或刪憑證期間，這台主機換了主機或重連：什麼都沒刪，可重試。
+    Superseded,
     Failed(String),
 }

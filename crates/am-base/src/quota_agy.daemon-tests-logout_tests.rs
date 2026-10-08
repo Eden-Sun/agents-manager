@@ -115,3 +115,80 @@
         assert!(matches!(logout(&app, &host).await, Err(LogoutError::Failed(m)) if m.contains("did not confirm")), "認不得的回覆＝失敗，快照留著");
         assert!(app.quotas.lock().await.contains_key(&format!("{host}/agy")));
     }
+
+    fn remote_cfg(host: &str) -> crate::config::HostCfg {
+        crate::config::HostCfg {
+            shared_session: false,
+            name: host.to_string(),
+            ssh: "unused".into(),
+            ssh_port: 22,
+            ssh_opts: vec![],
+            herdr_session: "agents-manager".into(),
+            remote_path: String::new(),
+        }
+    }
+
+    /// #865：logout 排在探測鎖後面時 H 被改指到別台——舊世代的請求作廢，一段 script 都不送（A、B 同名，零次就同時涵蓋兩台）。
+    #[tokio::test]
+    async fn a_logout_queued_behind_the_probe_lock_is_superseded_by_a_repoint_and_touches_no_host() {
+        let e = tt::env().await;
+        let app = e.app.clone();
+        let host = format!("agy-lo-q-{}", crate::db::ulid().to_ascii_lowercase());
+        let conn = app.hosts.insert_remote_for_test(remote_cfg(&host)).await;
+        conn.connected.store(true, std::sync::atomic::Ordering::SeqCst);
+        let scripts = Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
+        let s2 = scripts.clone();
+        crate::hosts::set_ssh_fake(&host, move |script| {
+            s2.lock().unwrap().push(script.to_string());
+            Ok("AM_REMOVED\n".to_string())
+        });
+        seed(&app, &host).await;
+
+        let guard = crate::quota::probe_lock(&format!("{host}#agy")).await;
+        let queued = tokio::spawn({
+            let (app, host) = (app.clone(), host.clone());
+            async move { logout(&app, &host).await }
+        });
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        // 排隊期間 H 改指到 B。
+        let b = app.hosts.insert_remote_for_test(remote_cfg(&host)).await;
+        b.connected.store(true, std::sync::atomic::Ordering::SeqCst);
+        drop(guard);
+
+        assert!(matches!(queued.await.unwrap(), Err(LogoutError::Superseded)));
+        assert!(scripts.lock().unwrap().is_empty(), "A、B 都沒收到任何 script");
+        assert!(app.quotas.lock().await.contains_key(&format!("{host}/agy")), "額度快照還在");
+
+        // 重試（現在的權威是 B）會成功，剛好送一段 script。
+        assert!(logout(&app, &host).await.unwrap());
+        assert_eq!(scripts.lock().unwrap().len(), 1);
+    }
+
+    /// #865：logout 刪憑證到收尾的整段拿著 authority_gate 的 read 端，repoint 要等它做完才生效。
+    #[tokio::test]
+    async fn a_repoint_waits_for_an_in_flight_logout() {
+        let e = tt::env().await;
+        let app = e.app.clone();
+        let host = format!("agy-lo-w-{}", crate::db::ulid().to_ascii_lowercase());
+        let conn = app.hosts.insert_remote_for_test(remote_cfg(&host)).await;
+        conn.connected.store(true, std::sync::atomic::Ordering::SeqCst);
+        crate::hosts::set_ssh_fake(&host, |_| Ok("AM_REMOVED\n".to_string()));
+        // ssh 那一段非同步地卡住：logout 在 closure 裡等它。
+        crate::hosts::set_ssh_delay(&host, Duration::from_millis(400));
+        seed(&app, &host).await;
+
+        let logging_out = tokio::spawn({
+            let (app, host) = (app.clone(), host.clone());
+            async move { logout(&app, &host).await }
+        });
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        let mut repoint = tokio::spawn({
+            let (app, host) = (app.clone(), host.clone());
+            async move { app.hosts.insert_remote_for_test(remote_cfg(&host)).await }
+        });
+        assert!(tokio::time::timeout(Duration::from_millis(100), &mut repoint).await.is_err(), "logout 還在跑，repoint 不能先生效");
+        assert!(logging_out.await.unwrap().unwrap(), "logout 在原連線上做完");
+        repoint.await.unwrap();
+        assert!(!app.quotas.lock().await.contains_key(&format!("{host}/agy")));
+    }
+

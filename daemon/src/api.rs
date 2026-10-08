@@ -3514,6 +3514,7 @@ async fn logout_agy(
     match crate::runners::quota_agy::logout(&app, &name).await {
         Ok(removed) => Ok(Json(json!({"removed": removed}))),
         Err(crate::quota_agy::LogoutError::UnknownHost) => Err(LcError::NotFound("host".into())),
+        Err(crate::quota_agy::LogoutError::Superseded) => Err(LcError::conflict("host_superseded", json!({"host": name, "retryable": true}))),
         Err(crate::quota_agy::LogoutError::Failed(m)) => Err(LcError::Upstream(m)),
     }
 }
@@ -3624,6 +3625,16 @@ mod agy_logout_route_tests {
         assert_eq!((st, body["removed"].as_bool()), (StatusCode::OK, Some(true)), "{body}");
         let (st, body) = call(&e.app, crate::config::LOCAL_HOST, RequestPrincipal::User).await;
         assert_eq!((st, body["removed"].as_bool()), (StatusCode::OK, Some(false)), "{body}");
+    }
+
+    /// #865：`LogoutError::Superseded` ＝ 409 `host_superseded`（可重試），跟 `lifecycle::start` 同一個 reason。
+    #[tokio::test]
+    async fn a_superseded_logout_is_a_retryable_409() {
+        let resp = LcError::conflict("host_superseded", json!({"host": "h", "retryable": true})).into_response();
+        assert_eq!(resp.status(), StatusCode::CONFLICT);
+        let bytes = axum::body::to_bytes(resp.into_body(), 1 << 20).await.unwrap();
+        let body: Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!((body["reason"].as_str(), body["retryable"].as_bool()), (Some("host_superseded"), Some(true)), "{body}");
     }
 }
 
