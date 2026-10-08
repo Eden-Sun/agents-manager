@@ -47,6 +47,13 @@ fn err(text: &str, offset: usize, message: impl Into<String>) -> SvgError {
     SvgError { line, col, message: message.into() }
 }
 
+fn invalid_utf8_err(data: &[u8], error: std::str::Utf8Error) -> SvgError {
+    let offset = error.valid_up_to();
+    let prefix = std::str::from_utf8(&data[..offset]).expect("valid_up_to is a UTF-8 boundary");
+    let (line, col) = line_col(prefix, offset);
+    SvgError { line, col, message: "檔案不是合法 UTF-8 SVG".into() }
+}
+
 /// `&` 後面要是預先定義的五個實體或數字字元參照。回傳第一個壞掉的 `&` 的位移（相對 `s`）。
 fn bad_entity(s: &[u8]) -> Option<usize> {
     let mut i = 0;
@@ -293,13 +300,15 @@ pub(crate) async fn check_file<H: SvgCheckEnv>(app: &Arc<H>, bot_id: &str, name:
     if read.data.len() > MAX_CHECK_BYTES {
         return None;
     }
-    let text = String::from_utf8_lossy(&read.data);
-    let e = match check(&text) {
-        Ok(()) => {
-            mark_healthy(bot_id, name);
-            return None;
-        }
-        Err(e) => e,
+    let e = match std::str::from_utf8(&read.data) {
+        Ok(text) => match check(text) {
+            Ok(()) => {
+                mark_healthy(bot_id, name);
+                return None;
+            }
+            Err(e) => e,
+        },
+        Err(error) => invalid_utf8_err(&read.data, error),
     };
     let gen = mark_broken(bot_id, name);
     let vfp = version_fingerprint(read.ino, read.mtime_ns, read.ctime_ns, gen, &read.data);
