@@ -9,6 +9,7 @@ import type { FakeRequest } from '../testing/domHarness'
 import { act, click, mockApi, mount, setupDom, teardownDom, unmountAll, until } from '../testing/domHarness'
 import { sharedMock, virtualMockTime } from '../testing/sharedMock'
 import { resetStoreForTest, useStore } from '../store/store'
+import { ChatPanel } from './ChatPanel'
 import { KeepWarmSkipButton } from './KeepWarmSkipButton'
 import { UnreadChip } from './UnreadChip'
 
@@ -111,3 +112,53 @@ test('保溫回覆：TTL 內有框、過 TTL 沒框、送 prompt 立即沒框', 
   assert.equal(chip(id)!.querySelector('.unread-chip-warm'), null, '送 prompt 後 ♨ 消失')
 })
 
+
+/** 手機寬度：`matchMedia` 對 640px 斷點回 true。 */
+function asPhone(): () => void {
+  const original = window.matchMedia
+  window.matchMedia = ((q: string) => ({ matches: q.includes('max-width: 640px'), media: q, addEventListener() {}, removeEventListener() {} })) as unknown as typeof window.matchMedia
+  return () => (window.matchMedia = original)
+}
+
+test('手機版：「Git / 專案資訊」彈窗最上面有「不用保溫」列，可切換；狀態列裡不重複', async () => {
+  const restore = asPhone()
+  try {
+    const { id, requests } = await running('am-claude')
+    await act(() => useStore.setState({ selectedBotId: id }))
+    await mount(<ChatPanel onOpenSidebar={() => {}} />)
+    assert.equal(document.querySelector('.mobile-keep-warm-row'), null, '彈窗沒開就看不到')
+    await click(document.querySelector<HTMLButtonElement>('.mobile-git-info')!)
+    await until(() => document.querySelector('.mobile-keep-warm-row') !== null, '開彈窗後出現「不用保溫」列')
+    assert.equal(document.querySelectorAll('.keep-warm-skip-btn').length, 1, '手機只有彈窗那一顆，狀態列不重複')
+    assert.ok(btn()!.classList.contains('touch'), '觸控版（CSS 給 ≥ 40px）')
+    assert.equal(btn()!.textContent, '不用保溫')
+
+    await click(btn()!)
+    await until(() => btn()?.getAttribute('aria-pressed') === 'true', '開著')
+    assert.equal(btn()!.textContent, '不保溫中・取消')
+    assert.deepEqual(skipBodies(requests), [{ skip: true }])
+    assert.equal(useStore.getState().runs[id]?.keep_warm_skip, true)
+
+    await click(btn()!)
+    await until(() => btn()?.getAttribute('aria-pressed') === 'false', '已取消')
+    assert.deepEqual(skipBodies(requests), [{ skip: true }, { skip: false }])
+  } finally {
+    restore()
+  }
+})
+
+test('手機版：沒釘成主力就沒有「不用保溫」列', async () => {
+  const restore = asPhone()
+  try {
+    const { id } = await running('am-claude')
+    await mock.request('PATCH', `/bots/${id}`, { primary: false })
+    await useStore.getState().refreshState()
+    await act(() => useStore.setState({ selectedBotId: id }))
+    await mount(<ChatPanel onOpenSidebar={() => {}} />)
+    await click(document.querySelector<HTMLButtonElement>('.mobile-git-info')!)
+    assert.equal(document.querySelector('.mobile-keep-warm-row'), null)
+    await mock.request('PATCH', `/bots/${id}`, { primary: true })
+  } finally {
+    restore()
+  }
+})
