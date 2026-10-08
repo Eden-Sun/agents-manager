@@ -14,6 +14,8 @@ import {
   resetBlockedPrefetch,
   type PrefetchDeps,
 } from './blockedPrefetch.ts'
+import { hasPreload } from './draftPreload.ts'
+import { parseChoiceMenu } from './tuiChoices.ts'
 
 /** 真機那份（A 各種，2026-09-25）：一題複選＋送出頁。 */
 const ONE_QUESTION = [
@@ -111,5 +113,59 @@ test('forgetBlockedExcept：刪掉的 bot 的快照與預載被放掉，還在�
   forgetBlockedExcept(new Set(['b-live']))
   assert.ok(peekPrefetched('b-live', PREFETCH_SOURCE, PREFETCH_LINES, 1_000), '還在的不動')
   assert.equal(peekPrefetched('b-gone', PREFETCH_SOURCE, PREFETCH_LINES, 1_000), null, '沒了的被放掉')
+  resetBlockedPrefetch()
+})
+
+/** 手動放行的 read：模擬 `readTerminal` 還在飛。 */
+function slowDeps(text: string, extra: Partial<PrefetchDeps> = {}) {
+  let release!: () => void
+  const gate = new Promise<void>((r) => {
+    release = r
+  })
+  let ioCalls = 0
+  const base = deps(text)
+  const d: PrefetchDeps = {
+    ...base,
+    read: async () => {
+      await gate
+      return snap(text)
+    },
+    io: (id) => {
+      ioCalls += 1
+      return base.io(id)
+    },
+    ...extra,
+  }
+  return { d, release, ioCalls: () => ioCalls, sent: base.sent }
+}
+
+test('#908 讀快照的途中 bot 離開 blocked：不寫快取、不起預載', async () => {
+  resetBlockedPrefetch()
+  const s = slowDeps(TWO_QUESTIONS)
+  const pending = prefetchBlocked('b-flight', s.d)
+  forgetBlocked('b-flight')
+  s.release()
+  assert.equal(await pending, null)
+  assert.equal(peekPrefetched('b-flight', PREFETCH_SOURCE, PREFETCH_LINES, 1_000), null)
+  assert.equal(s.ioCalls(), 0, '沒有拿 io')
+  const menu = parseChoiceMenu(TWO_QUESTIONS)
+  assert.ok(menu)
+  assert.equal(hasPreload(draftKey('b-flight', menu)), false)
+  await new Promise((r) => setTimeout(r, 0))
+  assert.deepEqual(s.sent, [], '一顆鍵都沒送')
+  resetBlockedPrefetch()
+})
+
+test('#908 stillBlocked 回 false：同樣丟掉這次結果', async () => {
+  resetBlockedPrefetch()
+  const s = slowDeps(TWO_QUESTIONS, { stillBlocked: () => false })
+  const pending = prefetchBlocked('b-flight2', s.d)
+  s.release()
+  assert.equal(await pending, null)
+  assert.equal(peekPrefetched('b-flight2', PREFETCH_SOURCE, PREFETCH_LINES, 1_000), null)
+  assert.equal(s.ioCalls(), 0)
+  const menu = parseChoiceMenu(TWO_QUESTIONS)
+  assert.ok(menu)
+  assert.equal(hasPreload(draftKey('b-flight2', menu)), false)
   resetBlockedPrefetch()
 })
