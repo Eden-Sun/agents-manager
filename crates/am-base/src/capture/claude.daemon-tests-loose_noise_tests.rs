@@ -45,6 +45,17 @@
         assert!(quoted_reply.contains(quoted_status), "以 mode on 結尾的引用也不能被剝：{quoted_reply}");
     }
 
+    #[test]
+    fn usage_rows_with_left_format_are_status_chrome() {
+        for row in [
+            "hunta | bot | OP5.5 M ctx 5% | 5h left 96%(rst 1h 53m) | F5 left 95%",
+            "hunta | bot | OP5.5 M ctx 5% | 7d left 46%(rst 3d 5h) | F5 left 95%",
+        ] {
+            assert!(is_status_chrome(row), "{row}");
+            assert!(is_noise(row), "{row}");
+        }
+    }
+
     /// #788：模式列只有 [`is_mode_row`] 一份，child_alerts 也呼叫它。四種模式（bypass／accept edits／plan／default manual）
     /// 連同各種尾巴都認；`child_alerts` 原本認的形式（沒有 `⏵⏵` 的 `bypass permissions on`、只剩 `shift+tab to cycle`
     /// 的折行、大小寫不同）不能退步。暫停中的回覆列、句子中間提到模式名稱的回覆都不是模式列。
