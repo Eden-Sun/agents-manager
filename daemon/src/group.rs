@@ -132,7 +132,23 @@ pub fn parse_mentions(text: &str, members: &[Member]) -> Vec<Member> {
     hit.into_iter().map(|i| members[i].clone()).collect()
 }
 
+/// 刪掉 mention 之後該從哪裡接著讀：吃掉緊接的一個標點，而且當 `out` 為空或已經以空白結尾時，再吃掉後面連續的空格／tab
+/// （只此一處，不跨換行），這樣 `hi @bot, please` 不會變成 `hi  please`，其餘空白與縮排一律原樣保留。
+fn skip_after_mention(chars: &[char], end: usize, out: &str) -> usize {
+    let mut skip_to = end;
+    if skip_to < chars.len() && matches!(chars[skip_to], ',' | ':' | ';' | '，' | '：' | '；' | '、') {
+        skip_to += 1;
+    }
+    if out.is_empty() || out.ends_with([' ', '\t', '\n']) {
+        while skip_to < chars.len() && matches!(chars[skip_to], ' ' | '\t') {
+            skip_to += 1;
+        }
+    }
+    skip_to
+}
+
 /// Falls back to the original text when nothing is left, so a bare `@all` is not an empty prompt.
+/// 只動 mention 本身與緊貼它的空白；訊息其餘的空白、縮排、空行原樣送給 bot（程式碼貼上不能被壓壞，issue #897）。
 pub fn strip_mentions(text: &str, members: &[Member]) -> String {
     let chars: Vec<char> = text.chars().collect();
     let mut out = String::with_capacity(text.len());
@@ -141,11 +157,7 @@ pub fn strip_mentions(text: &str, members: &[Member]) -> String {
         if chars[i] == '@' && (i == 0 || !(chars[i - 1].is_alphanumeric() || chars[i - 1] == '_')) {
             let start = i + 1;
             if let Some((_, end)) = spaced_member_at(&chars, start, members) {
-                let mut skip_to = end;
-                if skip_to < chars.len() && matches!(chars[skip_to], ',' | ':' | ';' | '，' | '：' | '；' | '、') {
-                    skip_to += 1;
-                }
-                i = skip_to;
+                i = skip_after_mention(&chars, end, &out);
                 continue;
             }
             let mut end = start;
@@ -160,11 +172,7 @@ pub fn strip_mentions(text: &str, members: &[Member]) -> String {
                     || token_member(&raw, members).is_some()
                     || token_member(&trimmed, members).is_some();
                 if known {
-                    let mut skip_to = end;
-                    if skip_to < chars.len() && matches!(chars[skip_to], ',' | ':' | ';' | '，' | '：' | '；' | '、') {
-                        skip_to += 1;
-                    }
-                    i = skip_to;
+                    i = skip_after_mention(&chars, end, &out);
                     continue;
                 }
             }
@@ -172,24 +180,11 @@ pub fn strip_mentions(text: &str, members: &[Member]) -> String {
         out.push(chars[i]);
         i += 1;
     }
-    let mut tidy = String::with_capacity(out.len());
-    let mut prev_space = false;
-    for c in out.chars() {
-        if c == ' ' || c == '\t' {
-            if !prev_space {
-                tidy.push(' ');
-            }
-            prev_space = true;
-        } else {
-            tidy.push(c);
-            prev_space = c == '\n';
-        }
-    }
-    let tidy = tidy.trim().to_string();
+    let tidy = out.trim_start_matches('\n').trim_end();
     if tidy.is_empty() {
         text.to_string()
     } else {
-        tidy
+        tidy.to_string()
     }
 }
 
@@ -522,6 +517,19 @@ mod strip_tests {
         assert_eq!(pick("@my 自己"), ["my"], "沒空白的照舊");
         assert_eq!(strip_mentions("@my bot, 看一下", &ms), "看一下");
         assert_eq!(strip_mentions("@my bot 2 跟 @my 說", &ms), "跟 說");
+    }
+
+    /// issue #897：只拿掉 mention 與緊貼它的空白，貼進來的程式碼縮排、連續空白、空行不能被壓掉。
+    #[test]
+    fn stripping_mentions_keeps_the_rest_of_the_message_verbatim() {
+        let ms = [m("g-claude"), m("g-codex"), m("x_y")];
+        assert_eq!(strip_mentions("@g-codex 這段：\ndef f():\n    if x:\n        return 1", &ms), "這段：\ndef f():\n    if x:\n        return 1");
+        assert_eq!(strip_mentions("@g-codex  hello   world", &ms), "hello   world");
+        assert_eq!(strip_mentions("hi @g-codex, please", &ms), "hi please");
+        assert_eq!(strip_mentions("@g-codex\n    code", &ms), "    code");
+        assert_eq!(strip_mentions("@all", &ms), "@all");
+        assert_eq!(strip_mentions("a\t@g-claude\tb", &ms), "a\tb");
+        assert_eq!(strip_mentions("a\n\n    b  c\t d", &ms), "a\n\n    b  c\t d", "沒有 mention 就原樣（只去結尾空白）");
     }
 
     #[test]
