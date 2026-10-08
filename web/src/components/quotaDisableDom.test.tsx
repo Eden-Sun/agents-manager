@@ -51,14 +51,27 @@ after(async () => {
 
 const it = (name: string, fn: () => Promise<void>) => test(name, { timeout: 30_000 }, fn)
 
-it('條上勾停用：存進 localStorage（到期時間＝下一個 reset）、勾選與提示變成已停用；再勾一次解除', async () => {
-  await open()
-  assert.equal(stripBox().checked, false)
-  await click(stripBox())
-  await until(() => STRIP_KEY in disk(), '寫進 localStorage')
-  const until_ = disk()[STRIP_KEY]
-  assert.equal(typeof until_, 'number', '有 reset 時間就自動解除')
-  assert.ok((until_ as number) > Date.now(), '到期時間在未來')
+it('條上勾停用：存進 localStorage（到期時間＝用完的那個窗口的 reset）、勾選與提示變成已停用；再勾一次解除', async () => {
+  // #920：7d 用完、5h 還有——到期要等 7d 的 reset，不是比較早的 5h。
+  const quotas = (mock as unknown as { quota: Record<string, { five_hour: Record<string, unknown>; seven_day: Record<string, unknown> }> }).quota
+  const q = quotas.claude
+  const saved = { five: { ...q.five_hour }, seven: { ...q.seven_day } }
+  q.seven_day = { ...q.seven_day, used_pct: 100, low: true, critical: true }
+  q.five_hour = { ...q.five_hour, used_pct: 40, low: false, critical: false }
+  try {
+    await open()
+    assert.equal(stripBox().checked, false)
+    await click(stripBox())
+    await until(() => STRIP_KEY in disk(), '寫進 localStorage')
+    const until_ = disk()[STRIP_KEY]
+    assert.equal(typeof until_, 'number', '有 reset 時間就自動解除')
+    assert.ok((until_ as number) > Date.now(), '到期時間在未來')
+    assert.equal(until_, Date.parse(q.seven_day.resets_at as string), '到期＝7d 的 reset')
+    assert.ok((until_ as number) > Date.parse(q.five_hour.resets_at as string), '不是比較早的 5h')
+  } finally {
+    q.five_hour = saved.five
+    q.seven_day = saved.seven
+  }
   assert.equal(stripBox().checked, true)
   assert.match(stripBox().getAttribute('aria-label') ?? '', /^解除停用/)
   await click(stripBox())
