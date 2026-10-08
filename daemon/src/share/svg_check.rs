@@ -293,13 +293,21 @@ pub(crate) async fn check_file<H: SvgCheckEnv>(app: &Arc<H>, bot_id: &str, name:
     if read.data.len() > MAX_CHECK_BYTES {
         return None;
     }
-    let text = String::from_utf8_lossy(&read.data);
-    let e = match check(&text) {
-        Ok(()) => {
-            mark_healthy(bot_id, name);
-            return None;
+    let e = match std::str::from_utf8(&read.data) {
+        Ok(text) => match check(text) {
+            Ok(()) => {
+                mark_healthy(bot_id, name);
+                return None;
+            }
+            Err(e) => e,
+        },
+        Err(utf8) => {
+            // `valid_up_to` is a byte offset. The valid prefix lets `err` report the invalid
+            // byte's line and character column without ever repairing the bytes for parsing.
+            let prefix = std::str::from_utf8(&read.data[..utf8.valid_up_to()])
+                .expect("the prefix before Utf8Error::valid_up_to is valid UTF-8");
+            err(prefix, prefix.len(), "檔案不是合法 UTF-8 SVG")
         }
-        Err(e) => e,
     };
     let gen = mark_broken(bot_id, name);
     let vfp = version_fingerprint(read.ino, read.mtime_ns, read.ctime_ns, gen, &read.data);
