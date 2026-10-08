@@ -6471,6 +6471,9 @@ mod agy_tests {
 
     #[tokio::test]
     async fn an_error_stop_closes_the_turn_as_failed_with_the_agy_error_in_the_note() {
+        // "API key not valid" 被歸為授權失敗，會走 `agy_auth::on_turn_auth_failure`：寫行程全域的 agy 登入冷卻（key 是本機）。
+        // 跟 `quota_agy` 的登入／登出測試共用同一把鎖，不然冷卻會在別條測試中途冒出來（login watcher 測試因此偶發紅）。
+        let _agy_globals = crate::quota_agy::token_test_lock().await;
         let env = tt::env().await;
         let app = env.app.clone();
         let (bot_id, _run, turn_id) = agy_turn(&app, &env.project_id).await;
