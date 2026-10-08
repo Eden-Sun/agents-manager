@@ -14,6 +14,7 @@ pub mod agy_remote;
 pub mod agy_screen;
 pub mod agy_support;
 pub mod assets;
+pub mod atomic_file;
 pub mod attach;
 pub mod background_hook;
 pub mod background_loop;

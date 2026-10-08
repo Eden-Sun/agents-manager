@@ -3907,6 +3907,9 @@ AGM 控制面讀取（總管摘要、health、handoff、assignments、inbox、pe
   相同不寫；不同先把舊檔留成 `bin/agm.bak-<舊內容 FNV-1a 前 12 碼>`（同名已在就不重複留），再 tmp＋rename 原子寫入、權限 0755，記 info log（角色、舊→新雜湊、備份檔名）。
   角色沒設定、目錄或 `bin/` 不存在就跳過，不代建。
 - **只動 `bin/agm`**：`CLAUDE.md`、`persona.md`、`runtime.json`、身分／model／effort 一律不碰（那些只在 `agm supervisor-setup`／`responder setup` 寫；開機不走 setup）。
+- **AGM 目錄裡的檔一律原子寫**（#919，`am_base::atomic_file`）：`CLAUDE.md`、`persona.md`、`runtime.json`、`handoff.md`（巡檢目錄；`PUT /api/supervisor/handoff` 與 persona 同步也是）同目錄暫存檔 `create_new` ＋ 一開始 0600 → `fsync` → 套 0644 → `rename` → 目錄 `fsync`，失敗刪暫存；
+  `bin/agm` 每次執行都讀 `runtime.json`，`O_TRUNC` 窗口會讓它讀到半截（`bad_runtime`）。`PUT /api/supervisor/handoff` 的 `handoff.md` 副本寫不進去回 502 `Upstream`（DB 已存、事件已發，重送同一份即補）。
+  trust 檔（`.claude.json`、codex `config.toml` 等）同一個 helper，沿用原檔權限。
 - 寫不進去不擋開機：記 warn，推一則 `agm_cli_stale` inbox（路由給巡檢並喚醒），payload 帶角色、路徑、內嵌版雜湊與錯誤。
 - **`scripts/ops/*.sh`（`daemon-update-kick.sh` 等）與 `*-task.md` 沒有內嵌，不會跟 daemon binary 一起換版**——改了就照 `scripts/ops/README.md` 安裝，並留備份。
   要裝哪些、裝到哪裡只寫在 `scripts/ops/install-manifest.tsv`；`agm ops-sync --check`（issue #418）唯讀比對安裝端與 `origin/main`，

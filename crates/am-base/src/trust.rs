@@ -160,32 +160,11 @@ pub fn grok_merge(existing: &str, paths: &[String], now_secs: i64) -> Result<Opt
 }
 
 /// Temp file + fsync + `rename`: a crash must not corrupt the user's own agent-CLI state files.
+/// 暫存檔一開始就是 0600，結果沿用原檔的權限（`.claude.json` 是 0600，不能被我們的 umask 放寬）；細節見 [`crate::atomic_file`]。
 fn write_atomic(path: &Path, text: &str) -> Result<()> {
-    use std::io::Write;
-
     let dir = path.parent().ok_or_else(|| anyhow!("{} has no parent directory", path.display()))?;
-    let name = path.file_name().and_then(|s| s.to_str()).unwrap_or("trust");
     std::fs::create_dir_all(dir)?;
-    // pid 之外再加一個遞增號：同一個行程裡並行的兩次寫入不能共用暫存檔（互相截斷、改名撞 ENOENT）。
-    static SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
-    let tmp = dir.join(format!(".{name}.am-trust.{}.{}.tmp", std::process::id(), SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed)));
-
-    let res = (|| -> Result<()> {
-        let mut f = std::fs::File::create(&tmp)?;
-        f.write_all(text.as_bytes())?;
-        f.sync_all()?;
-        drop(f);
-        // `.claude.json` is 0600; a rename would otherwise hand it our umask instead.
-        if let Ok(md) = std::fs::metadata(path) {
-            let _ = std::fs::set_permissions(&tmp, md.permissions());
-        }
-        std::fs::rename(&tmp, path)?;
-        Ok(())
-    })();
-    if res.is_err() {
-        let _ = std::fs::remove_file(&tmp);
-    }
-    res.with_context(|| format!("writing {}", path.display()))
+    crate::atomic_file::write(path, text.as_bytes(), crate::atomic_file::Mode::Preserve).with_context(|| format!("writing {}", path.display()))
 }
 
 /// `None` when already trusted (or the kind has no gate).
