@@ -250,18 +250,15 @@ pub const RECHECK_EVERY: std::time::Duration = std::time::Duration::from_secs(6 
 
 /// 每隔 [`RECHECK_EVERY`] 對每台連著的主機重跑一次偵測（含這份檢查）；啟動那一輪由開機偵測負責，所以先睡再做。
 pub fn spawn_poller<H: crate::tools::ToolsEnv>(app: std::sync::Arc<H>) {
-    tokio::spawn(async move {
-        loop {
-            tokio::time::sleep(RECHECK_EVERY).await;
-            for name in app.hosts().names().await {
-                let connected = match app.hosts().get(&name).await {
-                    Some(c) if c.is_local() => app.local_herdr_connected(),
-                    Some(c) => c.is_connected(),
-                    None => false,
-                };
-                if connected {
-                    crate::tools::spawn_detect(app.clone(), name);
-                }
+    crate::background_loop::spawn_periodic(&app, "host baseline recheck", RECHECK_EVERY, RECHECK_EVERY, |app| async move {
+        for name in app.hosts().names().await {
+            let connected = match app.hosts().get(&name).await {
+                Some(c) if c.is_local() => app.local_herdr_connected(),
+                Some(c) => c.is_connected(),
+                None => false,
+            };
+            if connected {
+                crate::tools::spawn_detect(app.clone(), name);
             }
         }
     });
