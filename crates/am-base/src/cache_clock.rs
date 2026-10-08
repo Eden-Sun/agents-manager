@@ -157,15 +157,15 @@ static LAST_TURN_SQL: LazyLock<String> = LazyLock::new(|| {
                            AND COALESCE(k.completed_at, k.created_at) > COALESCE((SELECT MAX(m.created_at) FROM messages m
                                 WHERE m.conversation_id = c.id AND m.role = 'system' AND {note}), '')), ''), '') AS kept_warm_at,
        EXISTS(SELECT 1 FROM keep_warm_skip s WHERE s.bot_id = c.bot_id) AS keep_warm_skip,
-       (SELECT CASE WHEN r.v > COALESCE((SELECT MAX(u.created_at) FROM turns u
-                                          WHERE u.conversation_id = c.id AND (u.client_request_id IS NULL OR NOT {kw_u})), '')
-                    THEN r.v END
-          FROM (SELECT MAX(COALESCE(k.completed_at, k.created_at)) AS v FROM turns k
-                 WHERE k.conversation_id = c.id AND {kw_k} AND k.status IN ('completed','completed_fallback')) r) AS keep_warm_replied_at
+       (SELECT COALESCE(k.completed_at, k.created_at) FROM turns k
+         WHERE k.conversation_id = c.id AND {kw_k} AND k.status IN ('completed','completed_fallback')
+           AND NOT EXISTS (SELECT 1 FROM turns u WHERE u.conversation_id = c.id
+                             AND (u.client_request_id IS NULL OR NOT {kw_u}) AND u.rowid > k.rowid)
+         ORDER BY k.rowid DESC LIMIT 1) AS keep_warm_replied_at
      FROM conversations c
      JOIN turns t ON t.id = (SELECT id FROM turns WHERE conversation_id = c.id AND status != 'queued'
                               AND (client_request_id IS NULL OR NOT {kw_t})
-                              ORDER BY created_at DESC, id DESC LIMIT 1)"
+                              ORDER BY created_at DESC, rowid DESC LIMIT 1)"
     )
 });
 
@@ -293,14 +293,15 @@ mod tests {
              CREATE TABLE keep_warm_skip (bot_id TEXT PRIMARY KEY, since TEXT NOT NULL);
              INSERT INTO conversations VALUES ('c1','b1'),('c2','b2'),('c3','b3'),('c4','b4'),('c5','b5'),('c6','b6');
              INSERT INTO keep_warm_skip VALUES ('b4','2026-10-04T11:30:00.000Z');
+             -- 「之後」以寫入順序（rowid）判：t3 要排在 k1 後面插入。
              INSERT INTO turns VALUES
                ('t1','c1','completed','2026-10-04T10:00:00.000Z','2026-10-04T10:05:00.000Z',NULL),
                ('t2','c1','completed','2026-10-04T11:00:00.000Z','2026-10-04T11:04:00.000Z',NULL),
-               ('t3','c1','queued','2026-10-04T11:30:00.000Z',NULL,NULL),
                ('t4','c2','in_flight','2026-10-04T11:50:00.000Z',NULL,NULL),
                ('t5','c3','queued','2026-10-04T11:50:00.000Z',NULL,NULL),
                ('k1','c1','completed','2026-10-04T11:20:00.000Z','2026-10-04T11:21:00.000Z','keepalive:2026-10-04T11:04:00.000Z'),
                ('k2','c1','failed','2026-10-04T11:40:00.000Z','2026-10-04T11:40:01.000Z','keepalive:x'),
+               ('t3','c1','queued','2026-10-04T11:30:00.000Z',NULL,NULL),
                ('k3','c3','in_flight','2026-10-04T11:50:00.000Z',NULL,'keepalive:y'),
                ('t6','c4','completed','2026-10-04T10:00:00.000Z','2026-10-04T10:05:00.000Z',NULL),
                ('k4','c4','completed','2026-10-04T11:20:00.000Z','2026-10-04T11:21:00.000Z','keep-warm:2026-10-04T10:05:00.000Z'),
@@ -339,5 +340,71 @@ mod tests {
         assert_eq!(all.get("b6").and_then(|t| t.kept_warm_at.as_deref()), Some("2026-10-04T12:59:00.000Z"));
         assert_eq!(last_turn_for_bot(&pool, "b1").await.unwrap(), Some(b1));
         assert_eq!(last_turn_for_bot(&pool, "b3").await.unwrap(), None);
+    }
+
+    async fn bare_pool() -> SqlitePool {
+        let pool = SqlitePool::connect("sqlite::memory:").await.unwrap();
+        sqlx::query(
+            "CREATE TABLE conversations (id TEXT PRIMARY KEY, bot_id TEXT NOT NULL);
+             CREATE TABLE turns (id TEXT PRIMARY KEY, conversation_id TEXT NOT NULL, status TEXT NOT NULL,
+                                 created_at TEXT NOT NULL, completed_at TEXT, client_request_id TEXT);
+             CREATE TABLE messages (id TEXT PRIMARY KEY, conversation_id TEXT NOT NULL, role TEXT NOT NULL,
+                                    content TEXT NOT NULL, created_at TEXT NOT NULL);
+             CREATE TABLE keep_warm_skip (bot_id TEXT PRIMARY KEY, since TEXT NOT NULL);
+             INSERT INTO conversations VALUES ('c','b');",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+        pool
+    }
+
+    /// 同一毫秒建立的兩筆回合：ULID 字典序不保證等於寫入順序，第二鍵要用 `rowid`（同 `native_resume_plan`）。
+    #[tokio::test]
+    async fn same_millisecond_turns_are_ordered_by_insertion_not_ulid() {
+        let pool = bare_pool().await;
+        // 'tz' 先寫、'ta' 後寫；'tz' > 'ta'（字典序故意相反）。
+        sqlx::query(
+            "INSERT INTO turns VALUES
+               ('tz','c','completed','2026-10-04T11:00:00.000Z','2026-10-04T11:01:00.000Z',NULL),
+               ('ta','c','failed','2026-10-04T11:00:00.000Z','2026-10-04T11:02:00.000Z',NULL);",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+        let last = last_turn_for_bot(&pool, "b").await.unwrap().unwrap();
+        assert_eq!((last.status.as_str(), last.completed_at.as_deref()), ("failed", Some("2026-10-04T11:02:00.000Z")));
+    }
+
+    #[tokio::test]
+    async fn keep_warm_reply_then_same_millisecond_user_turn_clears_the_badge() {
+        let pool = bare_pool().await;
+        sqlx::query(
+            "INSERT INTO turns VALUES
+               ('t0','c','completed','2026-10-04T10:00:00.000Z','2026-10-04T10:05:00.000Z',NULL),
+               ('k','c','completed','2026-10-04T11:00:00.000Z','2026-10-04T11:01:00.000Z','keep-warm:a'),
+               ('u','c','completed','2026-10-04T11:00:00.000Z','2026-10-04T11:02:00.000Z',NULL);",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+        let last = last_turn_for_bot(&pool, "b").await.unwrap().unwrap();
+        assert_eq!(last.keep_warm_replied_at, None);
+    }
+
+    #[tokio::test]
+    async fn user_turn_then_same_millisecond_keep_warm_reply_keeps_the_badge() {
+        let pool = bare_pool().await;
+        sqlx::query(
+            "INSERT INTO turns VALUES
+               ('t0','c','completed','2026-10-04T10:00:00.000Z','2026-10-04T10:05:00.000Z',NULL),
+               ('u','c','completed','2026-10-04T11:00:00.000Z','2026-10-04T11:02:00.000Z',NULL),
+               ('k','c','completed','2026-10-04T11:00:00.000Z','2026-10-04T11:01:00.000Z','keep-warm:a');",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+        let last = last_turn_for_bot(&pool, "b").await.unwrap().unwrap();
+        assert_eq!(last.keep_warm_replied_at.as_deref(), Some("2026-10-04T11:01:00.000Z"));
     }
 }
