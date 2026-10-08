@@ -200,6 +200,56 @@ async fn the_new_daemon_reports_whether_the_swap_landed() {
 }
 
 #[tokio::test]
+async fn save_replaces_the_file_atomically() {
+    let e = tt::env().await;
+    let app = &e.app;
+    let id = approval_waiting(app, SHA, 240).await;
+    observe(app, OWNER, &id, SHA, Err(&not_idle(&[("b1", "alpha")]))).await;
+    let mut w = current(app).unwrap();
+    w.rev = 7;
+    save(app, Some(&w));
+    w.rev = 8;
+    save(app, Some(&w));
+    let back: Wait = serde_json::from_slice(&std::fs::read(path(app)).unwrap()).unwrap();
+    assert_eq!(back.rev, 8, "讀回的是第二份");
+    let leftovers: Vec<_> = std::fs::read_dir(&app.data_dir)
+        .unwrap()
+        .filter_map(|e| e.ok())
+        .map(|e| e.file_name().to_string_lossy().to_string())
+        .filter(|n| n.starts_with(".deploy-wait.json.") && n.ends_with(".tmp"))
+        .collect();
+    assert!(leftovers.is_empty(), "不留暫存檔：{leftovers:?}");
+}
+
+#[tokio::test]
+async fn a_corrupt_state_file_is_kept_aside_and_logged_not_silently_dropped() {
+    let e = tt::env().await;
+    let app = &e.app;
+    let half = br#"{"commit":"abc"#;
+    std::fs::write(path(app), half).unwrap();
+    startup_as(app, "abc").await;
+    assert!(!path(app).exists(), "壞檔不留在原名");
+    let aside: Vec<_> = std::fs::read_dir(&app.data_dir)
+        .unwrap()
+        .filter_map(|e| e.ok())
+        .filter(|e| e.file_name().to_string_lossy().starts_with("deploy-wait.json.corrupt-"))
+        .collect();
+    assert_eq!(aside.len(), 1, "改名保留證據");
+    assert_eq!(std::fs::read(aside[0].path()).unwrap(), half, "內容等於原本那份半份");
+    assert!(current(app).is_none());
+}
+
+#[tokio::test]
+async fn an_unreadable_state_file_is_not_overwritten() {
+    let e = tt::env().await;
+    let app = &e.app;
+    std::fs::create_dir(path(app)).unwrap(); // 讀會 EISDIR
+    startup_as(app, "abc").await;
+    assert!(path(app).is_dir(), "讀不了的不動它");
+    assert!(current(app).is_none());
+}
+
+#[tokio::test]
 async fn a_wait_nobody_retries_is_given_up_and_says_so_once() {
     let e = tt::env().await;
     let app = &e.app;
