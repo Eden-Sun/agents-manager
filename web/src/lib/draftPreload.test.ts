@@ -10,6 +10,7 @@ const tick = () => new Promise((r) => setTimeout(r, 1))
 function starter(result: Draft | null = draft) {
   let calls = 0
   let progress: ((d: number, t: number) => void) | null = null
+  const signals: AbortSignal[] = []
   let done!: (d: Draft | null) => void
   const job = new Promise<Draft | null>((r) => {
     done = r
@@ -18,10 +19,12 @@ function starter(result: Draft | null = draft) {
     get calls() {
       return calls
     },
+    signals,
     progress: (d: number, t: number) => progress?.(d, t),
     finish: () => done(result),
-    start: (onProgress: (d: number, t: number) => void) => {
+    start: (onProgress: (d: number, t: number) => void, signal: AbortSignal) => {
       calls += 1
+      signals.push(signal)
       progress = onProgress
       return job
     },
@@ -138,4 +141,45 @@ test('不同 bot 或不同問卷各跑各的', () => {
   acquirePreload('b1:q2', s.start)
   acquirePreload('b2:q1', s.start)
   assert.equal(s.calls, 3)
+})
+
+test('#908 沒人持有了：下一拍中止預載的 signal', async () => {
+  const s = starter()
+  const h = acquirePreload('b1:q', s.start)
+  assert.equal(s.signals[0].aborted, false)
+  h.release()
+  assert.equal(s.signals[0].aborted, false, '同一拍還不中止（StrictMode 要能再接上）')
+  await tick()
+  assert.equal(s.signals[0].aborted, true)
+  assert.equal(hasPreload('b1:q'), false)
+})
+
+test('#908 StrictMode：release 後同一拍再 acquire 不中止', async () => {
+  const s = starter()
+  const a = acquirePreload('b1:q', s.start)
+  a.release()
+  const b = acquirePreload('b1:q', s.start)
+  await tick()
+  assert.equal(s.calls, 1)
+  assert.equal(s.signals[0].aborted, false)
+  b.release()
+  await tick()
+  assert.equal(s.signals[0].aborted, true)
+})
+
+test('#908 restartPreload：被換掉的舊預載立刻中止，新的不受影響', async () => {
+  const old = starter()
+  acquirePreload('b1:q', old.start)
+  const fresh = starter()
+  restartPreload('b1:q', fresh.start)
+  assert.equal(old.signals[0].aborted, true)
+  assert.equal(fresh.signals[0].aborted, false)
+})
+
+test('#908 resetPreloads 全部中止', () => {
+  const s = starter()
+  acquirePreload('b1:q1', s.start)
+  acquirePreload('b1:q2', s.start)
+  resetPreloads()
+  assert.ok(s.signals.length === 2 && s.signals.every((x) => x.aborted))
 })

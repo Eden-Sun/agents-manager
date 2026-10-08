@@ -7,10 +7,12 @@ import type { Draft } from './choiceDraft'
  */
 
 export type Progress = (done: number, total: number) => void
-export type StartPreload = (onProgress: Progress) => Promise<Draft | null>
+export type StartPreload = (onProgress: Progress, signal: AbortSignal) => Promise<Draft | null>
 
 interface Entry {
   job: Promise<Draft | null>
+  /** 沒人持有了（或被換掉）就中止，預載不再對終端送導覽鍵（issue #908）。 */
+  controller: AbortController
   refs: number
   listeners: Set<Progress>
   last: { done: number; total: number } | null
@@ -25,11 +27,12 @@ export interface PreloadHandle {
 const entries = new Map<string, Entry>()
 
 function begin(key: string, start: StartPreload): Entry {
-  const entry: Entry = { job: Promise.resolve(null), refs: 0, listeners: new Set(), last: null, drop: null }
+  const controller = new AbortController()
+  const entry: Entry = { job: Promise.resolve(null), controller, refs: 0, listeners: new Set(), last: null, drop: null }
   entry.job = start((done, total) => {
     entry.last = { done, total }
     for (const l of entry.listeners) l(done, total)
-  })
+  }, controller.signal)
   void entry.job.then((d) => {
     if (d === null && entries.get(key) === entry) entries.delete(key)
   })
@@ -58,7 +61,10 @@ function attach(key: string, entry: Entry, onProgress?: Progress): PreloadHandle
       if (entry.refs > 0) return
       entry.drop = setTimeout(() => {
         entry.drop = null
-        if (entry.refs === 0 && entries.get(key) === entry) entries.delete(key)
+        if (entry.refs === 0 && entries.get(key) === entry) {
+          entries.delete(key)
+          entry.controller.abort()
+        }
       }, 0)
     },
   }
@@ -76,6 +82,7 @@ export function restartPreload(key: string, start: StartPreload, onProgress?: Pr
     clearTimeout(old.drop)
     old.drop = null
   }
+  old?.controller.abort()
   const entry = begin(key, start)
   // Handles keep releasing the entry they attached to; the replacement only counts new handles.
   return attach(key, entry, onProgress)
@@ -83,7 +90,10 @@ export function restartPreload(key: string, start: StartPreload, onProgress?: Pr
 
 /** 測試用。 */
 export function resetPreloads() {
-  for (const e of entries.values()) if (e.drop !== null) clearTimeout(e.drop)
+  for (const e of entries.values()) {
+    if (e.drop !== null) clearTimeout(e.drop)
+    e.controller.abort()
+  }
   entries.clear()
 }
 

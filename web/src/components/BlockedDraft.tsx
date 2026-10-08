@@ -79,7 +79,7 @@ export function BlockedDraft({
     const onProgress = (done: number, total: number) => {
       if (alive) setStep({ done, total })
     }
-    const start = (progress: (done: number, total: number) => void) => preload(ioRef.current, menu, progress)
+    const start = (progress: (done: number, total: number) => void, signal: AbortSignal) => preload(ioRef.current, menu, progress, signal)
     const retry = retryRef.current
     retryRef.current = false
     const handle = retry ? restartPreload(key, start, onProgress) : acquirePreload(key, start, onProgress)

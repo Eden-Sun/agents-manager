@@ -1,6 +1,6 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
-import { commit, pageNeedsCommit, preload, radioPick, samePage, togglesFor, wantOf, type Io } from './choiceDraft.ts'
+import { commit, moveTab, pageNeedsCommit, preload, radioPick, samePage, togglesFor, wantOf, type Io } from './choiceDraft.ts'
 import { parseChoiceMenu, typedAnswerHere } from './tuiChoices.ts'
 
 /**
@@ -205,6 +205,38 @@ test('走不動就整個放棄，不留讀了一半的草稿', async () => {
   // 導覽鍵全部吃掉 → 畫面永遠不變
   const dead: Io = { ...io, send: async () => {} }
   assert.equal(await preload(dead, start), null)
+})
+
+test('#908 預載中止：之後一顆導覽鍵都不再送，preload 回 null', async () => {
+  const tui = new FakeTui()
+  const start = parseChoiceMenu(tui.screen())
+  assert.ok(start)
+  const controller = new AbortController()
+  const io = tui.io()
+  let sends = 0
+  const counted: Io = {
+    ...io,
+    send: async (keys) => {
+      sends += 1
+      await io.send(keys)
+      if (sends === 2) controller.abort() // 第 2 次 moveTab 進行中，bot 離開 blocked
+    },
+  }
+  assert.equal(await preload(counted, start, undefined, controller.signal), null)
+  assert.equal(sends, 2, '中止之後不再送鍵')
+  const after = sends
+  await new Promise((r) => setTimeout(r, 5))
+  assert.equal(sends, after)
+})
+
+test('#908 moveTab：signal 已中止就一顆鍵都不送', async () => {
+  const tui = new FakeTui()
+  const menu = parseChoiceMenu(tui.screen())
+  assert.ok(menu)
+  const controller = new AbortController()
+  controller.abort()
+  assert.equal(await moveTab(tui.io(), 1, menu, controller.signal), null)
+  assert.deepEqual(tui.sent, [])
 })
 
 test('差集：只翻要翻的那幾顆，已經對的不動', () => {

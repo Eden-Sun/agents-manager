@@ -28,6 +28,8 @@ interface Cached {
 
 const snaps = new Map<string, Cached>()
 const held = new Map<string, { key: string; handle: PreloadHandle }>()
+/** `forgetBlocked` 每呼叫一次 +1：還在飛的 `prefetchBlocked` 讀完發現世代變了＝bot 已離開 blocked，不可再寫快取或起預載（issue #908）。 */
+const generation = new Map<string, number>()
 
 export function peekPrefetched(botId: string, source: string, lines: number, now = Date.now()): TerminalSnapshot | null {
   if (source !== PREFETCH_SOURCE || lines !== PREFETCH_LINES) return null
@@ -43,6 +45,8 @@ export function draftKey(botId: string, menu: TuiChoiceMenu): string {
 export interface PrefetchDeps {
   read: (botId: string) => Promise<TerminalSnapshot>
   io: (botId: string) => Io
+  /** 讀完之後這顆 bot 還在 blocked 嗎；回 `false` 就丟掉這次結果。沒給＝只看 `forgetBlocked` 的世代。 */
+  stillBlocked?: (botId: string) => boolean
   /** 這個分頁現在看得見嗎（多分頁問卷才看）。 */
   visible: () => boolean
   now?: () => number
@@ -50,12 +54,14 @@ export interface PrefetchDeps {
 
 /** 讀一次、存快取，必要時起預載。回傳認到的選單（測試用）。 */
 export async function prefetchBlocked(botId: string, deps: PrefetchDeps): Promise<TuiChoiceMenu | null> {
+  const gen = generation.get(botId) ?? 0
   let snap: TerminalSnapshot
   try {
     snap = await deps.read(botId)
   } catch {
     return null
   }
+  if (gen !== (generation.get(botId) ?? 0) || deps.stillBlocked?.(botId) === false) return null
   snaps.set(botId, { snap, at: (deps.now ?? Date.now)() })
   const menu = parseChoiceMenu(snap.text)
   if (!menu || menu.tabs.length < MIN_TABS || !deps.visible()) return menu
@@ -63,12 +69,13 @@ export async function prefetchBlocked(botId: string, deps: PrefetchDeps): Promis
   if (held.get(botId)?.key === key) return menu
   held.get(botId)?.handle.release()
   const io = deps.io(botId)
-  held.set(botId, { key, handle: acquirePreload(key, (progress) => preload(io, menu, progress)) })
+  held.set(botId, { key, handle: acquirePreload(key, (progress, signal) => preload(io, menu, progress, signal)) })
   return menu
 }
 
 /** bot 不再 blocked：放掉快取與握著的預載。 */
 export function forgetBlocked(botId: string): void {
+  generation.set(botId, (generation.get(botId) ?? 0) + 1)
   snaps.delete(botId)
   held.get(botId)?.handle.release()
   held.delete(botId)

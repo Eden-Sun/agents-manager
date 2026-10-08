@@ -25,6 +25,7 @@ function deps(): PrefetchDeps {
         await s().sendText(botId, text, false)
       },
     }),
+    stillBlocked: (id) => useStore.getState().runs[id]?.agent_status === 'blocked',
     visible: () => typeof document === 'undefined' || document.visibilityState === 'visible',
   }
 }

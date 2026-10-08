@@ -68,11 +68,16 @@ function submitPage(tab: number, label: string): DraftPage {
   return { tab, label, question: null, choices: [], multi: false, hasSubmitRow: false, review: [], isSubmit: true }
 }
 
-/** 走一格分頁並確認畫面換了。先 ←／→（別處無副作用），沒反應才 `tab`／`shift+tab`；走不動回 `null`。 */
-export async function moveTab(io: Io, dir: 1 | -1, from: TuiChoiceMenu): Promise<TuiChoiceMenu | null> {
+/**
+ * 走一格分頁並確認畫面換了。先 ←／→（別處無副作用），沒反應才 `tab`／`shift+tab`；走不動回 `null`。
+ * `signal` 中止後不再送任何鍵（issue #908：bot 已經離開 blocked，導覽鍵會打進正在工作的 TUI）。
+ */
+export async function moveTab(io: Io, dir: 1 | -1, from: TuiChoiceMenu, signal?: AbortSignal): Promise<TuiChoiceMenu | null> {
   for (const key of dir > 0 ? ['right', 'tab'] : ['left', 'shift+tab']) {
+    if (signal?.aborted) return null
     await io.send([key])
     for (let i = 0; i < SETTLE_TRIES; i++) {
+      if (signal?.aborted) return null
       await io.wait(SETTLE_STEP)
       const now = await io.read()
       if (now && (now.question !== from.question || now.review.length !== from.review.length)) return now
@@ -89,11 +94,14 @@ export async function moveTab(io: Io, dir: 1 | -1, from: TuiChoiceMenu): Promise
  * 畫面變成「Submit answers / Cancel」，好幾個瀏覽器同時開著時，另一個的預載會把那裡當起點、最後「走回」那裡，
  * 終端就被晾在送出頁。送出頁改成合成的一頁；只有一題的問卷因此完全不用換頁。起點本身就是送出頁（`tabAt` 是推的、
  * 不是真的游標所在）時不預載，退回即時模式。
+ *
+ * `signal` 中止（持有者都放手了、或 bot 已不在 blocked）就立刻停、回 `null`，之後不再送鍵（issue #908）。
  */
 export async function preload(
   io: Io,
   start: TuiChoiceMenu,
   onProgress?: (done: number, total: number) => void,
+  signal?: AbortSignal,
 ): Promise<Draft | null> {
   const tabs = start.tabs
   const n = tabs.length
@@ -124,7 +132,7 @@ export async function preload(
     // 第二圈經過讀過的頁照樣重讀：便宜，順便確認畫面沒變。
     const stop = dir < 0 ? 0 : last
     while (at !== stop) {
-      const next = await moveTab(io, dir, cur)
+      const next = await moveTab(io, dir, cur, signal)
       if (!next) return null
       at += dir
       cur = next
@@ -135,7 +143,7 @@ export async function preload(
   }
 
   while (at > startTab) {
-    const next = await moveTab(io, -1, cur)
+    const next = await moveTab(io, -1, cur, signal)
     if (!next) return null
     at -= 1
     cur = next
