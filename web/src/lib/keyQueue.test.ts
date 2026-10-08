@@ -1,6 +1,6 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { KeyQueue } from './keyQueue'
+import { KeyQueue, MAX_KEYS_PER_SEND } from './keyQueue'
 
 /** 解得開的 promise，用來把「請求還在路上」這段時間握在測試手裡。 */
 function deferred<T = void>() {
@@ -120,4 +120,83 @@ test('沒給 sendText 時貼上直接丟掉，不會假裝送出去', async () =
   q.push(['a'])
   await settled.promise
   assert.deepEqual(log, ['a'])
+})
+
+const flush = () => new Promise((r) => setTimeout(r, 0))
+const range = (n: number, from = 0) => Array.from({ length: n }, (_, i) => `k${from + i}`)
+
+test('飛的期間累積超過 64 鍵：切成每批最多 64，順序不變（#898）', async () => {
+  const sent: string[][] = []
+  const first = deferred()
+  let call = 0
+  const q = new KeyQueue(async (keys) => {
+    sent.push(keys)
+    if (call++ === 0) await first.promise
+  })
+  q.push(['head'])
+  for (let i = 0; i < 100; i++) q.push([`k${i}`])
+  first.resolve()
+  await flush()
+  assert.deepEqual(sent.map((b) => b.length), [1, 64, 36])
+  assert.deepEqual(sent.flat(), ['head', ...range(100)])
+})
+
+test('單次 push 150 個鍵：64／64／22', async () => {
+  const sent: string[][] = []
+  const q = new KeyQueue(async (keys) => {
+    sent.push(keys)
+  })
+  q.push(range(150))
+  await flush()
+  assert.deepEqual(sent.map((b) => b.length), [64, 64, 22])
+  assert.deepEqual(sent.flat(), range(150))
+})
+
+test('keys 70＋貼上＋keys 3：64、6、text、3', async () => {
+  const order: string[] = []
+  const gate = deferred()
+  // 先卡住一批，讓後面的項目都留在佇列裡一起排。
+  let held = false
+  const q = new KeyQueue(
+    async (keys) => {
+      if (!held) {
+        held = true
+        await gate.promise
+        return
+      }
+      order.push(`keys:${keys.length}`)
+    },
+    undefined,
+    async (text) => {
+      order.push(`text:${text}`)
+    },
+  )
+  q.push(['hold'])
+  q.push(range(70))
+  q.pushText('x')
+  q.push(range(3))
+  gate.resolve()
+  await flush()
+  assert.deepEqual(order, ['keys:64', 'keys:6', 'text:x', 'keys:3'])
+})
+
+test('任何一批 send 收到的長度都不超過 MAX_KEYS_PER_SEND', async () => {
+  const sizes: number[] = []
+  const gate = deferred()
+  let held = false
+  const q = new KeyQueue(async (keys) => {
+    sizes.push(keys.length)
+    if (!held) {
+      held = true
+      await gate.promise
+    }
+  })
+  q.push(['a'])
+  q.push(range(130))
+  q.push(range(40))
+  gate.resolve()
+  await flush()
+  assert.ok(sizes.length > 1)
+  assert.ok(sizes.every((n) => n <= MAX_KEYS_PER_SEND), String(sizes))
+  assert.equal(sizes.reduce((a, b) => a + b, 0), 171)
 })
