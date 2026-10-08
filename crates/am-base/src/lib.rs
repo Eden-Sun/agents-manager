@@ -83,6 +83,7 @@ pub mod release_triage;
 pub mod remote_health;
 pub mod remote_purge;
 pub mod remote_trash;
+pub mod request_id;
 pub mod restart_coalesce;
 pub mod restart_intents;
 pub mod rewind;

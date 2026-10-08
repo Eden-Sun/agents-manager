@@ -66,7 +66,10 @@ pub async fn fork_bot(
     body: Option<Json<ForkReq>>,
 ) -> Result<Response, LcError> {
     let req = body.map(|Json(b)| b).unwrap_or_default();
-    let request_id = req.client_request_id.as_deref().map(str::trim).filter(|n| !n.is_empty()).map(String::from).unwrap_or_else(db::ulid);
+    let request_id = match req.client_request_id.as_deref().map(str::trim).filter(|n| !n.is_empty()) {
+        Some(c) => crate::request_id::validate("client_request_id", c)?,
+        None => db::ulid(),
+    };
     let requested = req.name.as_deref().map(str::trim).unwrap_or("").to_string();
     let _serial = FORK_LOCK.lock().await;
 
@@ -708,5 +711,21 @@ mod tests {
         let again = fork_with(&e, &src, None, Some("req-crash")).await.unwrap();
         assert_eq!((again["bot_id"].as_str().unwrap(), again["run_id"].as_str().unwrap()), (target.as_str(), run.as_str()));
         assert_eq!(fork_starts(&e), 1, "沒有第二次分岔");
+    }
+
+    /// #923：過長或含控制字元的 client_request_id 不能進 fork_ops 的主鍵再回出去。
+    #[tokio::test]
+    async fn a_fork_with_an_oversized_or_unsafe_client_request_id_is_refused() {
+        let e = env().await;
+        let src = source_bot(&e, "claude", "alfa", "user").await;
+        for bad in ["x".repeat(201), "a\nb".to_string(), "a b".to_string(), "a\u{1b}[31m".to_string()] {
+            let err = fork_with(&e, &src, None, Some(&bad)).await.unwrap_err();
+            assert!(matches!(&err, LcError::Bad(m) if m.contains("client_request_id")), "{bad:?}: {err:?}");
+        }
+        let n: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM fork_ops").fetch_one(&e.app.db).await.unwrap();
+        assert_eq!(n, 0, "被拒的請求不留紀錄");
+        // 合格的照常（前後空白 trim 掉）。
+        let out = fork_with(&e, &src, None, Some(" req-ok.1 ")).await.unwrap();
+        assert_eq!(out["name"], "alfa-fork");
     }
 }

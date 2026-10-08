@@ -199,6 +199,10 @@ pub async fn post_mission(
     if !(0..=10).contains(&max_rounds) {
         return Err(LcError::Bad("max_rounds must be 0..=10".into()));
     }
+    let client_request_id = match b.client_request_id.as_deref().map(str::trim).filter(|c| !c.is_empty()) {
+        Some(c) => Some(crate::request_id::validate("client_request_id", c)?),
+        None => None,
+    };
     let project = crate::db::project(&app.db, &project_id)
         .await
         .map_err(up)?
@@ -208,7 +212,7 @@ pub async fn post_mission(
         // 遠端要另外設計交付路徑，先明確拒絕。
         return Err(LcError::BadValue(json!({"error": "remote_not_supported", "host": project.host})));
     }
-    let crid = b.client_request_id.clone().unwrap_or_else(crate::db::ulid);
+    let crid = client_request_id.unwrap_or_else(crate::db::ulid);
     let payload_of = |m: &store::Mission| {
         json!({
             "mission_id": m.id,
@@ -4033,5 +4037,17 @@ mod tests {
             Err(LcError::BadValue(v)) => assert_eq!(v["error"], "remote_not_supported"),
             other => panic!("expected remote_not_supported, got {:?}", other.map(|j| j.0)),
         }
+    }
+
+    /// #923：任務的 client_request_id 進 `missions` 的唯一索引、再隨 mission_created／GET 回出去：過長與控制字元一律 400，不建任務。
+    #[tokio::test]
+    async fn a_mission_with_an_unsafe_client_request_id_is_refused() {
+        let e = crate::testing::env().await;
+        for bad in ["x".repeat(201), "a\nb".to_string(), "a b".to_string(), "a\u{0}b".to_string()] {
+            let err = post_mission(State(e.app.clone()), Path(e.project_id.clone()), Json(new_mission(&bad, "push_main"))).await.unwrap_err();
+            assert!(matches!(&err, LcError::Bad(m) if m.contains("client_request_id")), "{bad:?}: {err:?}");
+        }
+        let n: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM missions").fetch_one(&e.app.db).await.unwrap();
+        assert_eq!(n, 0, "被拒的請求不建任務");
     }
 }
