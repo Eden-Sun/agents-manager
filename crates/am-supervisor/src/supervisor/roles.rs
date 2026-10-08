@@ -834,6 +834,14 @@ mod tests {
     use super::*;
     use sqlx::sqlite::SqlitePoolOptions;
 
+    fn workspace_root() -> std::path::PathBuf {
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .ancestors()
+            .find(|p| p.join("daemon/Cargo.toml").is_file())
+            .expect("crate manifest directory is under the workspace")
+            .to_path_buf()
+    }
+
     /// issue #101：**遷移期間新舊格式會並存**，混存時判斷仍要正確。
     ///
     /// `notify_next_at` 以前由 `defer_notify` 寫到**秒**（`…T07:00:00Z`），而 `due_for` 是拿
@@ -1006,13 +1014,16 @@ mod tests {
                 }
             }
         }
-        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
+        let repo = workspace_root();
+        let roots = [repo.join("daemon/src"), repo.join("crates/am-supervisor/src")];
         let mut files = Vec::new();
-        walk(&root, &mut files);
+        for root in &roots {
+            walk(root, &mut files);
+        }
         let mut kinds = std::collections::BTreeMap::new();
         for f in files {
             let src = std::fs::read_to_string(&f).unwrap();
-            let at = f.strip_prefix(&root).unwrap().display().to_string();
+            let at = f.strip_prefix(&repo).unwrap().display().to_string();
             let mut add = |k: String| {
                 kinds.entry(k).or_insert_with(|| at.clone());
             };
@@ -1061,9 +1072,13 @@ mod tests {
             }
         }
         // 執行期讀，不是 `include_str!`：那會把整棵原始碼變成這個測試的建置輸入。
-        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
+        let repo = workspace_root();
+        let roots = [repo.join("daemon/src"), repo.join("crates/am-supervisor/src")];
+        let owner_file = repo.join("crates/am-supervisor/src/supervisor/roles.rs");
         let mut files = Vec::new();
-        walk(&root, &mut files);
+        for root in &roots {
+            walk(root, &mut files);
+        }
         assert!(files.len() > 10, "掃不到檔案就不算掃過");
         let squash = |s: &str| s.chars().filter(|c| !c.is_whitespace()).collect::<String>();
         // 比對的字串**由 `OWNER` 現算**，不在這裡再打一次：打出來的話這個檔案自己就有兩份字面，
@@ -1072,8 +1087,8 @@ mod tests {
         let mut sql_here = 0usize;
         let mut strays: Vec<String> = Vec::new();
         for f in &files {
-            let at = f.strip_prefix(&root).unwrap().display().to_string();
-            let is_this_file = at == "supervisor/roles.rs";
+            let at = f.strip_prefix(&repo).unwrap().display().to_string();
+            let is_this_file = f == &owner_file;
             for (n, line) in std::fs::read_to_string(f).unwrap().lines().enumerate() {
                 let flat = squash(line);
                 let sql = flat.contains(&needle);

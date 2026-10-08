@@ -44,7 +44,7 @@ check "daemon ops" "scripts/ops/fixtures/patrol-runtime.json"
 # scripts/ 底下的 .md 不是「只有文件」：任務檔被 install-manifest／ops 測試／daemon 讀（browser-gc-task.md 等），README 也由 ops 測試釘住內容。
 check "ops" "scripts/ops/README.md"
 check "ops" "scripts/ops/browser-gc-task.md"
-# 反方向：web 的測試讀 daemon 的 fixtures；ops 的 project-transfer 測試從 daemon 的 schema 原始碼抽欄位。
+# 反方向：web 的測試讀 am-lifecycle 的 fixtures；ops 的 project-transfer 測試從 am-base schema 與 supervisor store 抽欄位。
 check "web daemon" "crates/am-lifecycle/src/lifecycle/fixtures/codex-0.155-draft.ansi"
 check "daemon" "daemon/src/release_triage/fixtures/claude_2.1.276-278.md"
 for f in crates/am-base/src/db.rs crates/am-supervisor/src/supervisor/store.rs crates/am-supervisor/src/supervisor/roles.rs crates/am-supervisor/src/mission/store.rs; do
