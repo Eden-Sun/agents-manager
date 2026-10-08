@@ -1,6 +1,6 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
-import { composerPlaceholder, sendButtonLabel, sendButtonTitle } from './composerLabels.ts'
+import { ATTACHMENT_FAILED_NOTICE, composerPlaceholder, sendButtonLabel, sendButtonTitle } from './composerLabels.ts'
 
 const idle = { disabled: false, reason: '', queued: false }
 const running = { disabled: false, reason: '這回合還在跑，送出會排到結束後', queued: true }
@@ -37,4 +37,16 @@ test('送出中／上傳中優先於其他字；鎖住時輸入框講原因', ()
   assert.equal(sendButtonTitle(stopped, true), '附件上傳中…')
   const locked = { disabled: true, reason: 'Run 狀態為 starting，尚無法送出訊息', queued: false }
   assert.match(composerPlaceholder(locked, { phone: false, starting: false }), /Run 狀態為 starting.*可以先打/)
+})
+
+test('#917 有附件上傳失敗：送出鍵說有附件失敗；送出中／上傳中優先，沒失敗時不變', () => {
+  assert.equal(sendButtonLabel(idle, { phone: false, sending: false, uploading: false, failed: true }), '有附件上傳失敗')
+  assert.equal(sendButtonLabel(running, { phone: true, sending: false, uploading: false, failed: true }), '有附件上傳失敗', '排隊字樣讓位給失敗')
+  assert.equal(sendButtonLabel(idle, { phone: false, sending: true, uploading: false, failed: true }), '送出中…')
+  assert.equal(sendButtonLabel(idle, { phone: false, sending: false, uploading: true, failed: true }), '上傳中…')
+  assert.equal(sendButtonLabel(idle, { phone: false, sending: false, uploading: false, failed: false }), '送出')
+  assert.equal(sendButtonTitle(idle, false, true), ATTACHMENT_FAILED_NOTICE)
+  assert.match(ATTACHMENT_FAILED_NOTICE, /重試.*移除/)
+  assert.equal(sendButtonTitle(idle, true, true), '附件上傳中…')
+  assert.equal(sendButtonTitle(running, false, false), '這回合結束後自動送出')
 })

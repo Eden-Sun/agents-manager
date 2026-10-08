@@ -10,6 +10,8 @@ import { act, click, imeEnter, keydown, mockApi, mount, settle, setupDom, teardo
 import type { FakeRequest } from '../testing/domHarness'
 import { sharedMock, virtualMockTime } from '../testing/sharedMock'
 import { resetStoreForTest, useStore } from '../store/store'
+import { ApiError } from '../api/types'
+import { ATTACHMENT_FAILED_NOTICE } from '../lib/composerLabels'
 import { ChatPanel } from './ChatPanel'
 
 virtualMockTime()
@@ -129,4 +131,65 @@ test('#733 排隊的那一則落在 daemon：全新的 store（另一個分頁�
   await mount(<ChatPanel onOpenSidebar={() => {}} />)
   await until(() => /visible everywhere/.test(queuedBar()?.textContent ?? ''), '另一個分頁也看到排隊中的那一則')
   assert.match(queuedBar()!.textContent ?? '', /visible everywhere/)
+})
+
+/** 讓下一次附件上傳失敗一次（502），之後恢復 mock 原本的上傳；回傳還原函式。 */
+function failNextUpload(): () => void {
+  const original = mock.upload.bind(mock)
+  let armed = true
+  mock.upload = (async (path: string, file: Blob, opts?: Parameters<typeof original>[2]) => {
+    if (armed) {
+      armed = false
+      throw new ApiError(502, { error: 'upstream', message: 'mock: 寫入附件失敗' }, 'POST attachments failed (502)')
+    }
+    return original(path, file, opts)
+  }) as typeof mock.upload
+  return () => {
+    mock.upload = original as typeof mock.upload
+  }
+}
+
+async function dropFile(name: string) {
+  const input = document.querySelector<HTMLInputElement>('input[type=file]')!
+  const file = new File([new Uint8Array([137, 80, 78, 71])], name, { type: 'image/png' })
+  Object.defineProperty(input, 'files', { value: [file], configurable: true })
+  await act(async () => {
+    input.dispatchEvent(new Event('change', { bubbles: true }))
+  })
+}
+
+test('#917 附件上傳失敗後 Enter／送出鈕不送出、出現通知、失敗卡片與重試還在；重試成功後才帶該 id 送出', { timeout: 30_000 }, async () => {
+  const restore = failNextUpload()
+  try {
+    const { requests } = await openChat('am-grok')
+    await dropFile('shot.png')
+    await until(() => document.querySelectorAll('.attach-thumb.failed').length === 1, '上傳失敗的卡片')
+    const retryBtn = () => [...document.querySelectorAll('.attach-thumb button')].find((b) => b.textContent?.includes('重試'))
+    assert.ok(retryBtn(), '失敗卡片有「重試」')
+
+    await typeInto(textarea(), 'with a file')
+    const sendBtn = document.querySelector<HTMLButtonElement>('.send-btn')!
+    assert.equal(sendBtn.disabled, true, '有附件失敗時送出鈕 disabled')
+    assert.match(sendBtn.title, /附件上傳失敗/)
+    assert.match(sendBtn.textContent ?? '', /附件上傳失敗/)
+
+    await keydown(textarea(), 'Enter')
+    await settle(200)
+    assert.equal(prompts(requests).length, 0, 'Enter 沒有送出 prompt')
+    assert.equal(textarea().value, 'with a file', '字還在輸入框')
+    assert.equal(document.querySelectorAll('.attach-thumb.failed').length, 1, '失敗卡片還在')
+    assert.ok(retryBtn(), '「重試」還在')
+    assert.ok(useStore.getState().notices.some((n) => n.kind === 'error' && n.text === ATTACHMENT_FAILED_NOTICE), '出現錯誤通知')
+
+    await click(retryBtn()!)
+    await until(() => document.querySelectorAll('.attach-thumb:not(.uploading):not(.failed)').length === 1, '重試成功')
+    assert.equal(document.querySelector<HTMLButtonElement>('.send-btn')!.disabled, false)
+    await keydown(textarea(), 'Enter')
+    await until(() => prompts(requests).length === 1, '重試成功後送出')
+    const body = prompts(requests)[0].body as { text: string; attachments?: string[] }
+    assert.equal(body.text, 'with a file')
+    assert.equal(body.attachments?.length, 1, 'prompt 帶了該附件 id')
+  } finally {
+    restore()
+  }
 })

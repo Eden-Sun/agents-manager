@@ -1,0 +1,92 @@
+/**
+ * 群組輸入區的附件失敗（issue #917，真的掛 `GroupChatPanel` 進 happy-dom，後端是 `MockTransport`）：
+ * 上傳失敗的卡片不在 `files.ids` 裡，照送會少一個檔案、送成功後還把失敗卡片連重試鈕一起清掉——所以要擋送、提示、保留卡片。
+ */
+import test, { after, afterEach, before } from 'node:test'
+import assert from 'node:assert/strict'
+import { act, click, keydown, mockApi, mount, settle, setupDom, teardownDom, typeInto, unmountAll, until } from '../testing/domHarness'
+import type { FakeRequest } from '../testing/domHarness'
+import { sharedMock, virtualMockTime } from '../testing/sharedMock'
+import { ApiError } from '../api/types'
+import { ATTACHMENT_FAILED_NOTICE } from '../lib/composerLabels'
+import { groupComposerState, resetStoreForTest, useStore } from '../store/store'
+import { GroupChatPanel } from './GroupChatPanel'
+
+virtualMockTime()
+afterEach(unmountAll)
+before(setupDom)
+after(async () => {
+  resetStoreForTest()
+  await teardownDom()
+})
+
+const mock = sharedMock
+const textarea = () => document.querySelector<HTMLTextAreaElement>('.composer textarea')!
+const chats = (requests: FakeRequest[]) => requests.filter((r) => r.method === 'POST' && /\/projects\/[^/]+\/chat/.test(r.path))
+
+function failNextUpload(): () => void {
+  const original = mock.upload.bind(mock)
+  let armed = true
+  mock.upload = (async (path: string, file: Blob, opts?: Parameters<typeof original>[2]) => {
+    if (armed) {
+      armed = false
+      throw new ApiError(502, { error: 'upstream', message: 'mock: 寫入附件失敗' }, 'POST attachments failed (502)')
+    }
+    return original(path, file, opts)
+  }) as typeof mock.upload
+  return () => {
+    mock.upload = original as typeof mock.upload
+  }
+}
+
+test('#917 群組輸入區：附件上傳失敗後 Enter／送出鈕不送出、卡片與重試還在；重試成功後才帶該 id 送出', { timeout: 30_000 }, async () => {
+  const restore = failNextUpload()
+  try {
+    const requests = mockApi(mock)
+    // 自己的專案與 bot：同一個行程裡別的測試檔會讓內建專案的 bot 一直在跑回合（群組輸入區因此鎖住）。
+    const { project_id: projectId } = (await mock.request('POST', '/projects', { path: '/tmp/group-attach-fail', label: 'group-attach-fail' })) as { project_id: string }
+    const created = (await mock.request('POST', `/projects/${projectId}/bots`, { name: 'gaf-claude', kind: 'claude' })) as { id?: string; bot_id?: string }
+    await useStore.getState().refreshState()
+    const bot = useStore.getState().bots.find((b) => b.name === 'gaf-claude')!
+    assert.ok(bot, `建好 bot（${JSON.stringify(created)}）`)
+    await mock.request('POST', `/bots/${bot.id}/start`)
+    await until(async () => {
+      await useStore.getState().refreshState()
+      return useStore.getState().runs[bot.id]?.state === 'running' && !groupComposerState(useStore.getState(), projectId).disabled
+    }, 'gaf-claude running 且群組輸入區可送出')
+    await mount(<GroupChatPanel projectId={projectId} onOpenSidebar={() => {}} />)
+    await settle(200)
+
+    const input = document.querySelector<HTMLInputElement>('input[type=file]')!
+    const file = new File([new Uint8Array([137, 80, 78, 71])], 'shot.png', { type: 'image/png' })
+    Object.defineProperty(input, 'files', { value: [file], configurable: true })
+    await act(async () => {
+      input.dispatchEvent(new Event('change', { bubbles: true }))
+    })
+    await until(() => document.querySelectorAll('.attach-thumb.failed').length === 1, '上傳失敗的卡片')
+    const retryBtn = () => [...document.querySelectorAll('.attach-thumb button')].find((b) => b.textContent?.includes('重試'))
+    assert.ok(retryBtn(), '失敗卡片有「重試」')
+
+    await typeInto(textarea(), '@gaf-claude with a file')
+    const sendBtn = document.querySelector<HTMLButtonElement>('.send-btn')!
+    assert.equal(sendBtn.disabled, true, '有附件失敗時送出鈕 disabled')
+    assert.match(sendBtn.title, /附件上傳失敗/)
+
+    await keydown(textarea(), 'Enter')
+    await settle(200)
+    assert.equal(chats(requests).length, 0, 'Enter 沒有送出群組訊息')
+    assert.equal(textarea().value, '@gaf-claude with a file', '字還在輸入框')
+    assert.equal(document.querySelectorAll('.attach-thumb.failed').length, 1, '失敗卡片還在')
+    assert.ok(retryBtn(), '「重試」還在')
+    assert.ok(useStore.getState().notices.some((n) => n.kind === 'error' && n.text === ATTACHMENT_FAILED_NOTICE), '出現錯誤通知')
+
+    await click(retryBtn()!)
+    await until(() => document.querySelectorAll('.attach-thumb:not(.uploading):not(.failed)').length === 1, '重試成功')
+    await keydown(textarea(), 'Enter')
+    await until(() => chats(requests).length === 1, '重試成功後送出')
+    const body = chats(requests)[0].body as { text: string; attachments?: string[] }
+    assert.equal(body.attachments?.length, 1, '群組訊息帶了該附件 id')
+  } finally {
+    restore()
+  }
+})

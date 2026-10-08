@@ -174,8 +174,10 @@ export function useAttachments(uploadTo: string | null, resetKey: string | null)
 
   const ids = items.map((it) => it.id).filter((id): id is string => Boolean(id))
   const uploading = items.some((it) => !it.id && !it.error)
+  /** 有卡片上傳失敗（還在托盤裡、沒有 id）：送出會少了那個檔案，要擋下來讓使用者重試或移除（issue #917）。 */
+  const failed = items.some((it) => !it.id && Boolean(it.error))
 
-  return { items, add, remove, retry, clear, restoreAttachments, ids, uploading }
+  return { items, add, remove, retry, clear, restoreAttachments, ids, uploading, failed }
 }
 
 /** Drop target for OS files and shelf drags (key only; the shelf never uploads, so bytes go to the bot dropped on). */
