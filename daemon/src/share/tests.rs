@@ -603,6 +603,82 @@ async fn svg_checker_reminds_again_on_regression_after_repair() {
 }
 
 #[tokio::test]
+async fn svg_checker_rejects_invalid_utf8_and_reminds_again_after_repair() {
+    let e = tt::env().await;
+    let b = restricted_bot(&e.app, &e.project_id, "pub").await;
+    let _token = shared(&e.app, &b.id).await;
+    let outbox = crate::outbox::ensure(&e.app.data_dir, &b.id).unwrap();
+
+    let invalid_without_declaration =
+        b"<svg xmlns=\"http://www.w3.org/2000/svg\"><text>\xff</text></svg>".to_vec();
+    std::fs::write(outbox.join("card.svg"), &invalid_without_declaration).unwrap();
+    for _ in 0..2 {
+        let err = super::svg_check::check_file(&e.app, &b.id, "card.svg")
+            .await
+            .expect("非法 UTF-8 檔應判定為壞掉");
+        let bad_byte = invalid_without_declaration
+            .iter()
+            .position(|&byte| byte == 0xff)
+            .unwrap();
+        assert_eq!((err.line, err.col), (1, bad_byte + 1));
+        assert_eq!(err.message, "檔案不是合法 UTF-8 SVG");
+    }
+    let first_reminders: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM messages WHERE role = 'user' AND content LIKE '%card.svg%'",
+    )
+    .fetch_one(&e.app.db)
+    .await
+    .unwrap();
+    assert_eq!(first_reminders, 1, "同一版非法 UTF-8 只建立一筆修復提示");
+
+    std::fs::write(
+        outbox.join("card.svg"),
+        "<svg xmlns=\"http://www.w3.org/2000/svg\"><text>合法</text></svg>".as_bytes(),
+    )
+    .unwrap();
+    assert_eq!(
+        super::svg_check::check_file(&e.app, &b.id, "card.svg").await,
+        None,
+        "修成合法 UTF-8 後應判定為 healthy"
+    );
+
+    // 模擬 bot 結束上一輪修復，讓下一個錯誤可以建立新的 repair prompt。
+    sqlx::query("UPDATE turns SET status='failed' WHERE status='queued'")
+        .execute(&e.app.db)
+        .await
+        .unwrap();
+
+    let invalid_with_declaration = b"<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<svg xmlns=\"http://www.w3.org/2000/svg\"><text>\xff</text></svg>".to_vec();
+    std::fs::write(outbox.join("card.svg"), &invalid_with_declaration).unwrap();
+    let bad_byte = invalid_with_declaration
+        .iter()
+        .position(|&byte| byte == 0xff)
+        .unwrap();
+    let prefix = &invalid_with_declaration[..bad_byte];
+    let expected_line = prefix.iter().filter(|&&byte| byte == b'\n').count() + 1;
+    let expected_col = prefix
+        .iter()
+        .rev()
+        .take_while(|&&byte| byte != b'\n')
+        .count()
+        + 1;
+    for _ in 0..2 {
+        let err = super::svg_check::check_file(&e.app, &b.id, "card.svg")
+            .await
+            .expect("宣告 UTF-8 仍不可 lossy 修補非法 bytes");
+        assert_eq!((err.line, err.col), (expected_line, expected_col));
+        assert_eq!(err.message, "檔案不是合法 UTF-8 SVG");
+    }
+    let reminders: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM messages WHERE role = 'user' AND content LIKE '%card.svg%'",
+    )
+    .fetch_one(&e.app.db)
+    .await
+    .unwrap();
+    assert_eq!(reminders, 2, "修復後再次寫入非法 UTF-8 應重新提醒");
+}
+
+#[tokio::test]
 async fn svg_check_exceeding_max_bytes_is_skipped_without_reading_or_reminder() {
     let e = tt::env().await;
     let b = restricted_bot(&e.app, &e.project_id, "pub").await;
