@@ -265,6 +265,11 @@ fn is_done_row(s: &str) -> bool {
     is_spinner_glyph(c) && (s.contains("· done") || s.contains(" for "))
 }
 
+/// 使用者 statusLine（`名字 | 專案 | 模型 ctx 4% | 5h:96% | 7d:46%`，或新格式 `… | 5h left 96%(rst 1h 53m) | 7d left 46%(…)`）。
+fn is_user_statusline(s: &str) -> bool {
+    s.contains(" | ") && ["5h:", "7d:", "5h left ", "7d left "].iter().any(|k| s.contains(k))
+}
+
 pub fn is_status_chrome(s: &str) -> bool {
     if s.is_empty() {
         return false;
@@ -276,7 +281,7 @@ pub fn is_status_chrome(s: &str) -> bool {
         || s.starts_with("Tip:")
         || s.starts_with("⎿")
         || s.contains("Auto-update failed")
-        || (s.contains(" | ") && (s.contains("5h:") || s.contains("7d:")))
+        || is_user_statusline(s)
         || (s.contains(" · ") && s.contains("% left"))
 }
 
@@ -404,7 +409,7 @@ pub fn is_noise(s: &str) -> bool {
     {
         return true;
     }
-    if (s.contains(" | ") && (s.contains("5h:") || s.contains("7d:")))
+    if is_user_statusline(s)
         || (s.contains(" · ") && s.contains("% left"))
     {
         return true;

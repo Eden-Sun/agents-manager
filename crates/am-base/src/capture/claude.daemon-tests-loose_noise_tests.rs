@@ -14,6 +14,20 @@
         assert!(is_noise("· 5h 82% left · weekly 97% left"));
     }
 
+    /// #876：現行 statusLine `5h left 96%(rst …)` 與舊 `5h:96%` 都是狀態列；回覆裡提到 `5h left` 的句子不是（沒有 ` | `）。
+    #[test]
+    fn both_statusline_formats_are_chrome_but_a_reply_mentioning_5h_left_is_not() {
+        for row in [
+            "hunta | pt | SON5.5 H ctx 4% | 5h left 96%(rst 1h 53m) | 7d left 46%(rst 3d 5h) | F5 left 95%",
+            "hunta | pt | SON5.5 H | 5h:96% | 7d:46%",
+        ] {
+            assert!(is_status_chrome(row) && is_noise(row), "{row}");
+        }
+        assert!(!is_status_chrome("額度還有 5h left 96%，7d left 46%"));
+        let screen = "❯ 額度？\n⏺ 目前：\n  5h left 96%\n\n────────────\n❯\u{a0}\n────────────\n  hunta | pt | SON5.5 H ctx 4% | 5h left 96%(rst 1h) | 7d left 46%(rst 3d)\n";
+        assert_eq!(ClaudeCapture.extract_reply(screen).as_deref(), Some("目前：\n  5h left 96%"));
+    }
+
     /// #783：四種權限模式列（2.1.288 真機 shift+tab 輪一圈）都是輸入框底下的 chrome；回覆裡 `⏸` 開頭的句子不是。
     #[test]
     fn every_permission_mode_row_is_chrome_but_a_paused_reply_row_is_not() {

@@ -36,8 +36,7 @@ fn without_list(screen: &str) -> String {
 #[test]
 fn claude_290_suggestion_list_reads_like_the_same_screen_without_it() {
     for (cmd, raw) in [("/rewind", REWIND), ("/model", MODEL), ("/effort", EFFORT), ("/compact", COMPACT)] {
-        // `5h:` 狀態列：這台機器的 statusline 改成 `5h left 96%` 之後 claude 的輸入框判讀不認得它（另案），
-        // 用舊格式讓 `extract_reply` 走到「切在輸入框上緣」那條路。
+        // 現行 `5h left 96%` 與舊格式 `5h:96%` 兩種狀態列都要認得。
         let old_status = plain(raw).replace("5h left 96%", "5h:96%");
         for (form, screen) in [("ansi", raw.to_string()), ("plain", plain(raw)), ("plain-5h", old_status)] {
             let ctx = format!("{cmd} {form}");
@@ -73,11 +72,8 @@ fn claude_290_suggestion_list_reads_like_the_same_screen_without_it() {
             }
             assert_eq!(echo_row_hits("claude", &screen, ECHO), echo_row_hits("claude", &base, ECHO), "{ctx}: echo_row_hits");
             assert_eq!(echo_row_hits("claude", &screen, cmd), 0, "{ctx}: 選中列不算 `{cmd}` 的回音");
-            // `plain`（`5h left` 狀態列）找不到輸入框上緣，有沒有清單都會把框與狀態列收進來（另案），不在這裡比。
-            if form != "plain" {
-                assert_eq!(extract_reply("claude", &screen), extract_reply("claude", &base), "{ctx}: extract_reply");
-            }
-            if form == "plain-5h" {
+            assert_eq!(extract_reply("claude", &screen), extract_reply("claude", &base), "{ctx}: extract_reply");
+            if form != "ansi" {
                 assert_eq!(extract_reply("claude", &screen).as_deref(), Some("PONG"), "{ctx}: 清單不進回覆");
             }
 
