@@ -101,6 +101,7 @@ async fn recover_open(app: &Arc<App>, host: &str, open: Vec<Intent>) {
 }
 
 async fn retry_loop(app: &Arc<App>, id: &str) {
+    let mut in_progress = 0i64;
     for attempt in 0.. {
         tokio::time::sleep(crate::runners::app_ports_p11::recovery_retry_delay(attempt)).await;
         match drive_once(app, id).await {
@@ -108,9 +109,17 @@ async fn retry_loop(app: &Arc<App>, id: &str) {
                 lifecycle::restart_hold::release_intent(app, id);
                 return;
             }
-            // The owner (or its retry worker) will release the hold when it finishes.
-            Outcome::InProgress => return,
-            Outcome::Retry(_) => {}
+            // 另一條真的在補（`driving()` 裡有它）：等它做完。但不能永遠等——連續太多輪都還在「補」的話，
+            // 放掉開機 hold 並大聲報錯，不讓 hold 與 queued 派工永遠卡著（#904）。
+            Outcome::InProgress => {
+                in_progress += 1;
+                if in_progress > intents::MAX_ATTEMPTS {
+                    tracing::error!(intent = id, rounds = in_progress, "restart intent has been in progress for too long; releasing its boot hold");
+                    lifecycle::restart_hold::release_intent(app, id);
+                    return;
+                }
+            }
+            Outcome::Retry(_) => in_progress = 0,
         }
     }
 }
@@ -121,32 +130,53 @@ pub fn retry_later(app: &Arc<App>, id: &str) {
     tokio::spawn(async move { retry_loop(&app, &id).await });
 }
 
-/// 認領一次並補一輪。同 boot 的另一條 recovery 已認領＝ `InProgress`；已收尾／不存在＝ `Finished`。
-pub async fn drive_once(app: &Arc<App>, id: &str) -> Outcome {
-    match intents::claim(&app.db, id, &app.boot_id).await {
-        Ok(true) => {}
-        Ok(false) => {
-            return match intents::get(&app.db, id).await {
-                Ok(Some(intent))
-                    if intent.status == "running" && intent.owner_boot.as_deref() == Some(app.boot_id.as_str()) =>
-                {
-                    Outcome::InProgress
-                }
-                Ok(Some(intent))
-                    if intent.status == "pending" && intent.owner_boot.as_deref() == Some(app.boot_id.as_str()) =>
-                {
-                    Outcome::Retry("restart recovery on this boot just returned the intent for retry".into())
-                }
-                Ok(_) => Outcome::Finished,
-                Err(e) => Outcome::Retry(format!("cannot inspect an unclaimed intent: {e:#}")),
-            };
-        }
-        Err(e) => return Outcome::Retry(format!("cannot claim the intent: {e:#}")),
+/// 這顆 daemon 行程裡，正在跑 `drive_once` 的 intent id。`claim` 對「同一個 boot 已經是 running」回 false，
+/// 光看資料庫分不出「別條正在補」和「上一輪補到一半、記不下失敗而留下的半套」——靠這張行程內的表分（#904）。
+fn driving() -> &'static std::sync::Mutex<std::collections::HashSet<String>> {
+    static DRIVING: std::sync::OnceLock<std::sync::Mutex<std::collections::HashSet<String>>> = std::sync::OnceLock::new();
+    DRIVING.get_or_init(Default::default)
+}
+
+/// RAII：`drive_once` 進入時登記、離開（含 panic／被取消）時移除。
+struct Driving(String);
+
+impl Driving {
+    /// 已經有別條在補這件 intent 就回 None。
+    fn enter(id: &str) -> Option<Driving> {
+        let mut set = driving().lock().unwrap_or_else(|e| e.into_inner());
+        set.insert(id.to_string()).then(|| Driving(id.to_string()))
     }
-    let intent = match intents::get(&app.db, id).await {
-        Ok(Some(i)) => i,
-        Ok(None) => return Outcome::Finished,
-        Err(e) => return fail_attempt(app, id, format!("cannot read the intent: {e:#}")).await,
+}
+
+impl Drop for Driving {
+    fn drop(&mut self) {
+        driving().lock().unwrap_or_else(|e| e.into_inner()).remove(&self.0);
+    }
+}
+
+/// 認領一次並補一輪。同 boot 的另一條 recovery 正在補＝ `InProgress`；已收尾／不存在＝ `Finished`。
+/// 同一顆 daemon 讀到自己留下的 `running` intent、而且沒有別條在補，視為上一輪留下的半套，不經 `claim` 直接續做。
+pub async fn drive_once(app: &Arc<App>, id: &str) -> Outcome {
+    // 登記放在 claim 之前：認領成功到開始補之間沒有空窗，別條看到 running 時一定查得到這件在補。
+    let Some(_driving) = Driving::enter(id) else { return Outcome::InProgress };
+    let intent = match intents::claim(&app.db, id, &app.boot_id).await {
+        Ok(true) => match intents::get(&app.db, id).await {
+            Ok(Some(i)) => i,
+            Ok(None) => return Outcome::Finished,
+            Err(e) => return fail_attempt(app, id, format!("cannot read the intent: {e:#}")).await,
+        },
+        Ok(false) => match intents::get(&app.db, id).await {
+            Ok(Some(intent)) if intent.status == "running" && intent.owner_boot.as_deref() == Some(app.boot_id.as_str()) => {
+                tracing::warn!(intent = id, "restart intent was left running by an earlier attempt of this boot; resuming it");
+                intent
+            }
+            Ok(Some(intent)) if intent.status == "pending" && intent.owner_boot.as_deref() == Some(app.boot_id.as_str()) => {
+                return Outcome::Retry("restart recovery on this boot just returned the intent for retry".into());
+            }
+            Ok(_) => return Outcome::Finished,
+            Err(e) => return Outcome::Retry(format!("cannot inspect an unclaimed intent: {e:#}")),
+        },
+        Err(e) => return Outcome::Retry(format!("cannot claim the intent: {e:#}")),
     };
     match resume(app, &intent).await {
         Ok(()) => Outcome::Finished,
@@ -154,14 +184,20 @@ pub async fn drive_once(app: &Arc<App>, id: &str) -> Outcome {
     }
 }
 
-async fn fail_attempt(app: &impl crate::capabilities::Db, id: &str, why: String) -> Outcome {
-    match intents::record_failure(app.db(), id, &why).await {
+async fn fail_attempt(app: &Arc<App>, id: &str, why: String) -> Outcome {
+    match intents::record_failure(&app.db, id, &why).await {
         Ok(true) => {
             tracing::error!(intent = id, error = %why, "interrupted restart could not be completed; gave up and told AGM");
             Outcome::Finished
         }
         Ok(false) => Outcome::Retry(why),
-        Err(e) => Outcome::Retry(format!("{why}（且記不下失敗：{e:#}）")),
+        Err(e) => {
+            // 記不下失敗：intent 會停在 `running`。再試一次只把「自己擁有的 running」翻回 pending，下一輪 `claim` 才拿得到。
+            match intents::record_failure_on_owned(&app.db, id, &app.boot_id, &why).await {
+                Ok(_) => Outcome::Retry(format!("{why}（記失敗時出錯：{e:#}，已補記為 pending）")),
+                Err(e2) => Outcome::Retry(format!("{why}（且記不下失敗：{e:#}；補記也失敗：{e2:#}）")),
+            }
+        }
     }
 }
 
@@ -500,6 +536,57 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(events, 1, "AGM inbox 有一則 intent_failed");
+    }
+
+    /// #904：補做失敗、而且連「記下這次失敗」也寫不進去（intent 停在 `running`、owner 是這顆 boot）。
+    /// 以前下一輪 `claim` 因為「同 boot 已經 running」回 false，被當成 `InProgress`，retry_loop 直接 return，
+    /// 沒有任何東西在做、開機 hold 永遠留著。現在沒有別條在補就視為半套直接續做；環境恢復後補完收尾。
+    #[tokio::test]
+    async fn a_failure_that_cannot_be_recorded_is_still_retried_and_eventually_gives_up() {
+        let e = tt::env().await;
+        let (bot, _run1) = running_bot(&e, "unrecordable").await;
+        die_at(&e, &bot.id, "restart_after_stop").await;
+        sqlx::query("UPDATE bots SET identity = 'ghost' WHERE id = ?").bind(&bot.id).execute(&e.app.db).await.unwrap();
+        let app2 = tt::restart_app(&e).await;
+        lifecycle::restart_hold::adopt_open_intents(&app2).await;
+        assert!(lifecycle::restart_hold::in_progress(&bot.id));
+        let intent_id: String = sqlx::query_scalar("SELECT id FROM intents WHERE subject_id = ?").bind(&bot.id).fetch_one(&app2.db).await.unwrap();
+
+        // 記不下失敗：把 running → pending 的寫入全擋掉。
+        sqlx::query(
+            "CREATE TRIGGER refuse_pending BEFORE UPDATE OF status ON intents WHEN OLD.status='running' AND NEW.status='pending'
+             BEGIN SELECT RAISE(ABORT,'injected'); END",
+        )
+        .execute(&app2.db)
+        .await
+        .unwrap();
+
+        let first = drive_once(&app2, &intent_id).await;
+        assert!(matches!(first, Outcome::Retry(_)), "{first:?}");
+        assert_eq!(intent_status(&app2, &bot.id).await, vec!["running"], "失敗記不下來：intent 停在 running（這就是半套）");
+        let second = drive_once(&app2, &intent_id).await;
+        assert!(matches!(second, Outcome::Retry(_)), "沒有別條在補：不能再被當成 InProgress：{second:?}");
+
+        // 環境恢復：拆掉 trigger、身分改回 → 下一輪續做到收尾。
+        sqlx::query("DROP TRIGGER refuse_pending").execute(&app2.db).await.unwrap();
+        sqlx::query("UPDATE bots SET identity = NULL WHERE id = ?").bind(&bot.id).execute(&app2.db).await.unwrap();
+        let third = drive_once(&app2, &intent_id).await;
+        assert_eq!(third, Outcome::Finished);
+        assert_eq!(intent_status(&app2, &bot.id).await, vec!["done"]);
+        assert!(db::active_run(&app2.db, &bot.id).await.unwrap().is_some(), "bot 回來了");
+        lifecycle::restart_hold::release_intent(&app2, &intent_id);
+        assert!(!lifecycle::restart_hold::in_progress(&bot.id), "收尾後 hold 放掉");
+        assert!(lifecycle::revoke_all_orphaned_queued_turns(&app2).await.is_empty());
+    }
+
+    /// 同時有第二條呼叫進來：第一條還在補（持有 driving 登記）時，第二條要回 `InProgress`，不能搶著續做。
+    #[tokio::test]
+    async fn a_second_caller_sees_in_progress_while_the_first_is_driving() {
+        let id = format!("test-driving-{}", db::ulid());
+        let first = Driving::enter(&id).expect("first caller registers");
+        assert!(Driving::enter(&id).is_none(), "the second caller is refused while the first is registered");
+        drop(first);
+        assert!(Driving::enter(&id).is_some(), "the registration is released on drop");
     }
 
     /// 寫不進 intent＝什麼都還沒動、不能開始重啟（fail closed）：bot 照舊在跑。
