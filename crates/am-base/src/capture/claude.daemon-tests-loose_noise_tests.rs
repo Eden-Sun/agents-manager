@@ -26,6 +26,18 @@
         assert_eq!(ClaudeCapture.extract_reply(&screen).as_deref(), Some("PONG"));
     }
 
+    /// #876：`is_noise` 也要認現行 `5h left` 狀態列（舊 `5h:` 照舊）；回覆裡提到 `5h left` 的句子（沒有 ` | `）不是雜訊。
+    #[test]
+    fn is_noise_recognises_the_5h_left_statusline() {
+        for row in [
+            "hunta | pt | SON5.5 H ctx 4% | 5h left 96%(rst 1h 53m) | 7d left 46%(rst 3d 5h) | F5 left 95%",
+            "hunta | pt | SON5.5 H | 5h:96% | 7d:46%",
+        ] {
+            assert!(is_noise(row), "{row}");
+        }
+        assert!(!is_noise("額度還有 5h left 96%，7d left 46%"));
+    }
+
     /// #783：四種權限模式列（2.1.288 真機 shift+tab 輪一圈）都是輸入框底下的 chrome；回覆裡 `⏸` 開頭的句子不是。
     #[test]
     fn every_permission_mode_row_is_chrome_but_a_paused_reply_row_is_not() {

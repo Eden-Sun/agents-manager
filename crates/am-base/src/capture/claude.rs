@@ -265,6 +265,12 @@ fn is_done_row(s: &str) -> bool {
     is_spinner_glyph(c) && (s.contains("· done") || s.contains(" for "))
 }
 
+/// 使用者 statusLine 的額度段：舊格式 `5h:96%`；2.1.290 起 `~/.claude/statusline-command.sh` 印 `5h left 96%`（#876）。
+/// `is_status_chrome` 與 `is_noise` 共用這一份。
+fn is_user_statusline(s: &str) -> bool {
+    s.contains(" | ") && ["5h:", "7d:", "5h left", "7d left"].iter().any(|k| s.contains(k))
+}
+
 pub fn is_status_chrome(s: &str) -> bool {
     if s.is_empty() {
         return false;
@@ -276,8 +282,7 @@ pub fn is_status_chrome(s: &str) -> bool {
         || s.starts_with("Tip:")
         || s.starts_with("⎿")
         || s.contains("Auto-update failed")
-        // 額度段：舊格式 `5h:96%`；2.1.290 起 `~/.claude/statusline-command.sh` 印 `5h left 96%`（#876）。
-        || (s.contains(" | ") && ["5h:", "7d:", "5h left", "7d left"].iter().any(|k| s.contains(k)))
+        || is_user_statusline(s)
         || (s.contains(" · ") && s.contains("% left"))
 }
 
@@ -405,7 +410,7 @@ pub fn is_noise(s: &str) -> bool {
     {
         return true;
     }
-    if (s.contains(" | ") && (s.contains("5h:") || s.contains("7d:")))
+    if is_user_statusline(s)
         || (s.contains(" · ") && s.contains("% left"))
     {
         return true;
