@@ -18,7 +18,6 @@ use am_ports::BotLock;
 use am_ports::BotLockGuard;
 use anyhow::Result;
 use serde_json::Value;
-use sqlx::SqlitePool;
 #[cfg(test)]
 use std::future::Future;
 use std::sync::Arc;
@@ -56,70 +55,75 @@ impl<A: crate::capabilities::BotLocks> BotLock for AppBotLock<'_, A> {
     }
 }
 
-impl HandoffSessionRepo for SqlitePool {
+impl HandoffSessionRepo for App {
     async fn bot_handed_off_to(&self, bot_id: &str) -> Result<Option<String>> {
-        crate::handoff::bot_handed_off_to(self, bot_id).await
+        crate::handoff::bot_handed_off_to(&self.db, bot_id).await
     }
+
     async fn refuse_handed_off(&self, bot_id: &str) -> LcResult<()> {
-        crate::handoff::refuse(self, bot_id).await
+        crate::handoff::refuse(&self.db, bot_id).await
     }
 }
 
-impl ShareSessionRepo for SqlitePool {
+impl ShareSessionRepo for App {
     async fn restricted_workspace(&self, bot_id: &str) -> std::result::Result<Option<String>, sqlx::Error> {
-        crate::share::store::restricted_workspace(self, bot_id).await
+        crate::share::store::restricted_workspace(&self.db, bot_id).await
     }
+
     async fn caged_workspace(&self, bot_id: &str) -> std::result::Result<Option<String>, sqlx::Error> {
-        crate::share::store::caged_workspace(self, bot_id).await
+        crate::share::store::caged_workspace(&self.db, bot_id).await
     }
 }
 
-impl RestartIntentRepo for SqlitePool {
+impl RestartIntentRepo for App {
     async fn prepare_restart_intent(&self, subject_id: &str, host: &str, payload: &Value, ttl_secs: i64, boot: &str) -> Result<String> {
-        crate::intents::prepare_restart(self, subject_id, host, payload, ttl_secs, boot).await
+        crate::intents::prepare_restart(&self.db, subject_id, host, payload, ttl_secs, boot).await
     }
+
     async fn complete_intent(&self, id: &str) -> Result<bool> {
-        crate::intents::complete(self, id).await
+        crate::intents::complete(&self.db, id).await
     }
+
     async fn abandon_intent(&self, id: &str, why: &str) -> Result<bool> {
-        crate::intents::abandon(self, id, why).await
+        crate::intents::abandon(&self.db, id, why).await
     }
+
     async fn fail_intent(&self, id: &str, err: &str) -> Result<bool> {
-        crate::intents::fail(self, id, err).await
+        crate::intents::fail(&self.db, id, err).await
     }
 }
 
-impl PaneWatchPort for Arc<App> {
+impl PaneWatchPort for App {
     async fn unwatch_pane_on_session(&self, host: &str, session: &str, pane_id: &str) {
-        crate::events::unwatch_pane_on_session(self, host, session, pane_id).await
+        crate::events::unwatch_pane_on_session(&self.shared(), host, session, pane_id).await
     }
 }
 
-impl RemoteCleanupPort for Arc<App> {
+impl RemoteCleanupPort for App {
     async fn record_remote_purge(&self, bot_id: &str, host: &str, ok: bool, error: Option<&str>) {
-        crate::remote_purge::record(self, bot_id, host, ok, error).await
+        crate::remote_purge::record(&self.shared(), bot_id, host, ok, error).await
     }
     async fn move_remote_bot_dir_to_trash(&self, conn: &crate::hosts::HostConn, bot_id: &str) -> Result<Option<String>> {
         crate::runners::remote_trash::move_in(conn, bot_id).await
     }
 }
 
-impl PreviewPort for Arc<App> {
+impl PreviewPort for App {
     async fn stop_preview_for_bot(&self, bot_id: &str) -> bool {
-        crate::preview::stop_for_bot(self, bot_id).await
+        crate::preview::stop_for_bot(&self.shared(), bot_id).await
     }
 }
 
-impl SessionProviderPort for Arc<App> {
+impl SessionProviderPort for App {
     fn claude_live_start_fresh(&self, run_id: &str) {
         crate::claude_live::start_fresh(run_id)
     }
     async fn models_list(&self, host: &str, kind: &str, identity: Option<&str>, refresh: bool) -> Result<Value> {
-        crate::runners::models::list(self, host, kind, identity, refresh).await
+        crate::runners::models::list(&self.shared(), host, kind, identity, refresh).await
     }
 }
 
-impl ShimInstallPort for Arc<App> {
+impl ShimInstallPort for App {
     fn install_local_herdr_shim(&self, bot_dir: &std::path::Path) -> std::io::Result<std::path::PathBuf> {
         crate::herdr_shim::install_local(bot_dir)
     }

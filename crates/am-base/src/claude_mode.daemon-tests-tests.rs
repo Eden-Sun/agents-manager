@@ -26,7 +26,7 @@
         ] {
             assert!(!is_mode_row(reply), "{reply}");
         }
-        let fixture = include_str!("../../../daemon/src/lifecycle/fixtures/claude-2.1.288-manual-mode-finished.txt");
+        let fixture = include_str!("../../../crates/am-lifecycle/src/lifecycle/fixtures/claude-2.1.288-manual-mode-finished.txt");
         let row = fixture.lines().rev().find(|l| !l.trim().is_empty()).unwrap();
         assert!(is_mode_row(row), "{row}");
     }

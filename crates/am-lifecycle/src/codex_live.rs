@@ -1,0 +1,1238 @@
+//! Changing a **running** codex's model / effort / fast tier (SPEC §4.4a).
+//!
+//! Unlike claude/grok, codex 0.153.4 (verified 2026-09-09) has no one-line form:
+//! * `/model` takes **no arguments** (`/model x high` becomes a prompt); bare `/model` opens two
+//!   numbered pickers (model, then reasoning level), so even an effort-only change picks a model.
+//! * `/fast` is a plain **toggle** (2026-09-22, 0.154.0, measured in a scratch `CODEX_HOME`):
+//!   bare `/fast` answers `Service tier set to priority` / `… default`, but `/fast on` and
+//!   `/fast off` are NOT slash forms — the TUI submits them as an ordinary prompt and the model
+//!   goes off to read the docs. So the target tier is reached by reading the status line first
+//!   ([`fast_plan`]) and toggling only when it is wrong; when the tier cannot be read, toggle
+//!   once, read back, and toggle back if it landed the wrong way round. Either way the read-back
+//!   still proves the result, and nothing is refused for an unknown starting tier.
+//!
+//! Picker contents/order and `(default)`/`(current)` markers vary by account, so every step reads
+//! the pane back and matches on text. codex saves the choice as the account default in
+//! `~/.codex/config.toml` (CLI behaviour, not ours).
+
+use crate::db;
+use crate::herdr::HerdrClient;
+use std::time::Duration;
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CodexRuntime {
+    pub model: String,
+    pub effort: Option<String>,
+    pub fast: bool,
+}
+
+fn effort_menu_label(effort: &str) -> &'static str {
+    match effort {
+        "low" => "Low",
+        "medium" => "Medium",
+        "high" => "High",
+        "xhigh" => "Extra high",
+        "max" => "Max",
+        "ultra" => "Ultra",
+        _ => "",
+    }
+}
+
+/// `max` and `ultra` live behind the `More reasoning…` entry of the first level menu.
+fn is_nested_effort(effort: &str) -> bool {
+    matches!(effort, "max" | "ultra")
+}
+
+/// 視窗底部才是現在的狀態列。再往上同一形狀的行是啟動 banner，或回覆裡引用的舊列。
+const STATUS_TAIL_LINES: usize = 8;
+
+fn context_percent(line: &str) -> bool {
+    let Some(rest) = line.split("Context").nth(1) else { return false };
+    rest.trim_start().starts_with(|c: char| c.is_ascii_digit())
+}
+
+/// `<model> [<effort>] [fast] · <cwd> · <topic|Context …|quota>` — the only place codex states
+/// all three, so it is the read-back proving a live change landed (SPEC §4.4a).
+pub fn parse_status_line(screen: &str) -> Option<CodexRuntime> {
+    // Last match in the viewport tail wins: the startup banner and a quoted line higher up share
+    // the shape. A narrow pane wraps the line; join a continuation line.
+    let lines: Vec<&str> = screen.lines().collect();
+    let tail = &lines[lines.len().saturating_sub(STATUS_TAIL_LINES)..];
+    let mut out = None;
+    let mut i = 0;
+    while i < tail.len() {
+        let mut line = tail[i].trim().to_string();
+        if line.contains('·') {
+            if let Some(next) = tail.get(i + 1) {
+                let next = next.trim();
+                let is_nav_or_prompt = next.starts_with('?')
+                    || next.starts_with('←')
+                    || next.starts_with('›')
+                    || next.starts_with('•')
+                    || next.contains("for shortcuts")
+                    || next.contains("to interrupt");
+                let is_continuation = !is_nav_or_prompt
+                    && (line.trim_end().ends_with('·')
+                        || next.starts_with('·')
+                        || context_percent(next)
+                        || next.contains("% left"));
+                if is_continuation {
+                    line.push(' ');
+                    line.push_str(next);
+                    i += 1;
+                }
+            }
+        }
+        i += 1;
+        if !line.contains('·') {
+            continue;
+        }
+        // 未開始回合的冷啟動 footer 只有兩段（`<model> <default> · <cwd>`），還沒有 Context／額度／主題，
+        // 尚未有 active session，不當成 runtime（保留 argv 預設值，SPEC §4.3）。
+        if line.matches('·').count() < 2 && !context_percent(&line) && !line.contains("% left") {
+            continue;
+        }
+        let Some((head, _)) = line.split_once('·') else { continue };
+        let mut parts = head.split_whitespace();
+        // 這一行的開頭沒有東西（`· Context …`）只是別的行：略過，不能整個函式回 None（下面才有真的狀態列）。
+        // 0.157 印顯示名（`GPT-6-Luna`）而不是 id（`gpt-6-luna`）：一律轉小寫，runtime 才跟設定比得起來（#712）。
+        let Some(model) = parts.next().map(str::to_ascii_lowercase) else { continue };
+        if !model.contains('-') || !model.chars().all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '.' || c == '_') {
+            continue;
+        }
+        let rest: Vec<&str> = parts.collect();
+        // head 裡在 model 之後只能是 fast、default 或已知的 codex effort（避免把普通文字行誤認成狀態列）。
+        if !rest.iter().all(|w| {
+            let lower = w.to_ascii_lowercase();
+            lower == "fast"
+                || lower == "default"
+                || crate::config::efforts_for_kind("codex").contains(&lower.as_str())
+        }) {
+            continue;
+        }
+        let fast = rest.iter().any(|w| w.eq_ignore_ascii_case("fast"));
+        let effort = rest
+            .iter()
+            .find(|w| crate::config::efforts_for_kind("codex").contains(&w.to_ascii_lowercase().as_str()))
+            .map(|w| w.to_ascii_lowercase());
+        out = Some(CodexRuntime { model, effort, fast });
+    }
+    out
+}
+
+/// 以畫面上的狀態列校正 `runs.runtime_*`（SPEC §4.4a）。回傳 `true` = 有改動。
+/// * 讀不到狀態列（選單開著、畫面被清、CLI 剛啟動）什麼都不動：讀不到不是 fast=false。
+/// * 讀得到就一律以它為準：狀態列有 `fast` 字樣 = 開，**整行讀得到卻沒有 = 關**（tier 關掉時 codex 省略那個字）。
+///   使用者在 TUI 手打 `/fast`、`/model`，或當場套用中途失敗，都會讓啟動時記下的值過期。
+pub async fn correct_runtime_from_screen(app: &(impl crate::capabilities::BotStatusEmit + crate::capabilities::Db + crate::capabilities::Emit), run_id: &str, screen: &str) -> bool {
+    let Some(seen) = parse_status_line(screen) else { return false };
+    let Ok(Some(run)) = db::run(app.db(), run_id).await else { return false };
+    let same = run.runtime_model.as_deref() == Some(seen.model.as_str())
+        && run.runtime_effort == seen.effort
+        && run.runtime_fast == Some(i64::from(seen.fast));
+    if same {
+        return false;
+    }
+    // child 的設定跟著 TUI 的切換（只跟這一輪變了的模型／強度；fast 照舊只看 argv，#393）。先寫設定：寫不進去就連 runtime
+    // 都不寫，下一輪仍不同才會再試。
+    let model_moved = run.runtime_model.as_deref() != Some(seen.model.as_str());
+    let effort_moved = seen.effort.is_some() && run.runtime_effort != seen.effort;
+    if let Err(e) = crate::child_runtime::follow(
+        app,
+        &run.bot_id,
+        Some(seen.model.as_str()).filter(|_| model_moved),
+        seen.effort.as_deref().filter(|_| effort_moved),
+    )
+    .await
+    {
+        tracing::warn!(run = %run_id, error = %e, "could not follow the codex switch in the child's settings, retrying next sweep");
+        return false;
+    }
+    let wrote = sqlx::query("UPDATE runs SET runtime_model = ?, runtime_effort = ?, runtime_fast = ? WHERE id = ?")
+        .bind(&seen.model)
+        .bind(&seen.effort)
+        .bind(i64::from(seen.fast))
+        .bind(run_id)
+        .execute(app.db())
+        .await
+        .is_ok();
+    if wrote {
+        app.emit_bot_status(&run.bot_id).await;
+        tracing::info!(run = %run_id, model = %seen.model, effort = ?seen.effort, fast = seen.fast,
+                       "codex runtime corrected from the status line");
+    }
+    wrote
+}
+
+pub async fn hint_moves_runtime(app: &impl crate::capabilities::Db, run_id: &str, screen: &str) -> bool {
+    let Some(seen) = parse_status_line(screen) else { return false };
+    let Ok(Some(run)) = db::run(app.db(), run_id).await else { return true };
+    run.runtime_model.as_deref() != Some(seen.model.as_str())
+        || run.runtime_effort != seen.effort
+        || run.runtime_fast != Some(i64::from(seen.fast))
+}
+
+pub use am_base::codex_status::{parse_status_quota, CodexStatusQuota};
+
+/// Digit for the one row whose **label** exactly matches `needle`. Descriptions are excluded;
+/// current/default markers are matched separately, and duplicate labels are ambiguous.
+pub fn picker_number(screen: &str, needle: &str) -> Option<u32> {
+    if needle.is_empty() {
+        return None;
+    }
+    let mut found = None;
+    for raw in screen.lines() {
+        let line = raw.trim_start().trim_start_matches('›').trim_start();
+        let Some((num, rest)) = line.split_once('.') else { continue };
+        let Ok(n) = num.trim().parse::<u32>() else { continue };
+        let label = rest.trim_start().split("  ").next().unwrap_or("").trim();
+        let (plain_label, marker) = if let Some(label) = label.strip_suffix(" (current)") {
+            (label, Some("(current)"))
+        } else if let Some(label) = label.strip_suffix(" (default)") {
+            (label, Some("(default)"))
+        } else {
+            (label, None)
+        };
+        let matches = match needle {
+            "(current)" | "(default)" => marker == Some(needle),
+            _ => plain_label == needle,
+        };
+        if matches {
+            if found.is_some() {
+                return None;
+            }
+            found = Some(n);
+        }
+    }
+    found
+}
+
+async fn read(client: &HerdrClient, pane_id: &str) -> Result<String, ()> {
+    client
+        .pane_read(pane_id, "visible", 60)
+        .await
+        .map(|r| r.text)
+        .map_err(|_| ())
+}
+
+async fn key(client: &HerdrClient, pane_id: &str, k: &str) -> bool {
+    client.pane_send_keys(pane_id, &[k]).await.is_ok()
+}
+
+async fn text(client: &HerdrClient, pane_id: &str, t: &str) -> bool {
+    client.pane_send_text(pane_id, t).await.is_ok()
+}
+
+/// Is a Codex selection screen on screen? Footer or heading (a short pane can scroll either away).
+/// Must be checked before typing into codex: a user message sent into a picker was eaten and its
+/// Enter switched the model. Migration and rate-limit prompts are user decisions; never dismiss
+/// them from this helper.
+pub fn picker_open(screen: &str) -> bool {
+    let t = screen.to_lowercase();
+    crate::tui_prompts::is_codex_model_migration_prompt(screen)
+        || rate_limit_switch_prompt_open(screen)
+        // 啟動時的更新選單（預設選 Update now）：`/model`、`/fast` 打進去、Enter 就是替使用者按下「現在更新」。
+        || crate::codex_update::update_menu_open(screen)
+        || t.contains("press enter to confirm or esc to go back")
+        || t.contains("select model and effort")
+        || t.contains("select reasoning level")
+}
+
+/// Codex 0.157.0's quota warning offers a model switch using the bottom selection popup.
+/// Match its structure and footer so a transcript merely mentioning the recommendation is ignored.
+pub fn rate_limit_switch_prompt_open(screen: &str) -> bool {
+    const TAIL_LINES: usize = 20;
+    let raw: Vec<&str> = screen.lines().filter(|l| !l.trim().is_empty()).collect();
+    let tail_raw = &raw[raw.len().saturating_sub(TAIL_LINES)..];
+    let lines: Vec<String> = tail_raw
+        .iter()
+        .map(|line| {
+            let spaced: String = line
+                .chars()
+                .map(|c| if c.is_whitespace() || "│┌┐└┘─├┤┬┴┼╭╮╯╰▎▔".contains(c) { ' ' } else { c.to_ascii_lowercase() })
+                .collect();
+            spaced
+                .split_whitespace()
+                .collect::<Vec<_>>()
+                .join(" ")
+                .trim_start_matches(|c| "❯›»>*●•⏺⎿✻-— ".contains(c))
+                .trim()
+                .to_string()
+        })
+        .collect();
+    lines.iter().any(|l| l.starts_with("approaching rate limits"))
+        && lines.iter().any(|l| l.starts_with("switch to ") && l.contains("for lower credit usage?"))
+        && lines.iter().any(|l| l.starts_with("1. switch to "))
+        && lines.iter().any(|l| l.starts_with("2. keep current model"))
+        && lines.iter().any(|l| l.starts_with("3. keep current model (never show again)"))
+        && rate_limit_footer_open(&lines)
+}
+
+/// 腳註整行是 `enter select · esc back`。窄 pane 會在 `·` 後面折成兩行，最後一行就不再同時含這兩段。
+fn rate_limit_footer_open(lines: &[String]) -> bool {
+    if lines.last().is_some_and(|l| l.starts_with("enter select") && l.contains("esc back")) {
+        return true;
+    }
+    let Some(last) = lines.last() else { return false };
+    let Some(prev) = lines.get(lines.len().saturating_sub(2)) else { return false };
+    prev.starts_with("enter select") && !prev.contains("esc back") && last == "esc back"
+}
+
+/// The exact row we selected is still in a recognized picker on the latest pane read.
+fn picker_choice_matches(screen: &str, needle: &str, n: u32) -> bool {
+    picker_open(screen) && picker_number(screen, needle) == Some(n)
+}
+
+/// Escapes until no picker is left. One Escape is not enough: from the level menu it only goes
+/// back to the model menu, and anything typed next would land in it.
+async fn close_picker_checked(client: &HerdrClient, pane_id: &str) -> Result<bool, ()> {
+    for _ in 0..PICKER_ESCAPES {
+        let screen = read(client, pane_id).await?;
+        if crate::tui_prompts::is_codex_model_migration_prompt(&screen) || rate_limit_switch_prompt_open(&screen) || crate::codex_update::update_menu_open(&screen) {
+            return Ok(false);
+        }
+        if !picker_open(&screen) {
+            return Ok(true);
+        }
+        if !key(client, pane_id, "Escape").await {
+            return Ok(false);
+        }
+        tokio::time::sleep(Duration::from_millis(400)).await;
+    }
+    #[cfg(all(test, feature = "daemon-test-harness"))]
+    crate::race_point::hit("codex_picker_before_final_read", pane_id).await;
+    Ok(!picker_open(&read(client, pane_id).await?))
+}
+
+pub async fn close_picker(client: &HerdrClient, pane_id: &str) -> bool {
+    matches!(close_picker_checked(client, pane_id).await, Ok(true))
+}
+
+/// Two levels + nested `More reasoning…` + one spare.
+const PICKER_ESCAPES: u32 = 4;
+
+/// A failed send leaves the menu open, so back out before reporting failure.
+async fn press_number(client: &HerdrClient, pane_id: &str, n: u32, needle: &str) -> Result<bool, ()> {
+    // A picker can close or change while the caller is deciding which row to choose. Re-read and
+    // verify both the picker and the intended row immediately before typing the one-digit choice.
+    let screen = read(client, pane_id).await?;
+    if !picker_choice_matches(&screen, needle, n) {
+        let _ = close_picker_checked(client, pane_id).await;
+        return Ok(false);
+    }
+    if !text(client, pane_id, &n.to_string()).await {
+        let _ = close_picker_checked(client, pane_id).await;
+        return Ok(false);
+    }
+    tokio::time::sleep(Duration::from_millis(700)).await;
+    Ok(true)
+}
+
+/// `model: None` → `(current)` row; `effort: None` → `(default)` row. Any unexpected menu returns
+/// `false` and the caller falls back to "needs restart" (always safe).
+async fn apply_model_and_effort(
+    client: &HerdrClient,
+    pane_id: &str,
+    model: Option<&str>,
+    effort: Option<&str>,
+) -> Result<bool, ()> {
+    if !text(client, pane_id, "/model").await {
+        let _ = close_picker_checked(client, pane_id).await;
+        return Ok(false);
+    }
+    tokio::time::sleep(Duration::from_millis(600)).await;
+    if !key(client, pane_id, "Enter").await {
+        let _ = close_picker_checked(client, pane_id).await;
+        return Ok(false);
+    }
+    tokio::time::sleep(Duration::from_millis(1200)).await;
+
+    #[cfg(all(test, feature = "daemon-test-harness"))]
+    crate::race_point::hit("codex_apply_before_model_picker_read", pane_id).await;
+    let screen = read(client, pane_id).await?;
+    if !screen.contains("Select Model") {
+        let _ = close_picker_checked(client, pane_id).await;
+        return Ok(false);
+    }
+    let needle = model.map(str::to_string).unwrap_or_else(|| "(current)".to_string());
+    let Some(n) = picker_number(&screen, &needle) else {
+        let _ = close_picker_checked(client, pane_id).await;
+        return Ok(false);
+    };
+    if !press_number(client, pane_id, n, &needle).await? {
+        return Ok(false);
+    }
+
+    #[cfg(all(test, feature = "daemon-test-harness"))]
+    crate::race_point::hit("codex_apply_before_effort_picker_read", pane_id).await;
+    let screen = read(client, pane_id).await?;
+    if !screen.contains("Select Reasoning Level") {
+        let _ = close_picker_checked(client, pane_id).await;
+        return Ok(false);
+    }
+    let want = effort.unwrap_or("");
+    let needle = if want.is_empty() { "(default)".to_string() } else { effort_menu_label(want).to_string() };
+    if needle.is_empty() {
+        let _ = close_picker_checked(client, pane_id).await;
+        return Ok(false);
+    }
+    let screen = if is_nested_effort(want) && picker_number(&screen, &needle).is_none() {
+        let Some(more) = picker_number(&screen, "More reasoning…") else {
+            let _ = close_picker_checked(client, pane_id).await;
+            return Ok(false);
+        };
+        if !press_number(client, pane_id, more, "More reasoning…").await? {
+            return Ok(false);
+        }
+        read(client, pane_id).await?
+    } else {
+        screen
+    };
+    let Some(n) = picker_number(&screen, &needle) else {
+        let _ = close_picker_checked(client, pane_id).await;
+        return Ok(false);
+    };
+    if !press_number(client, pane_id, n, &needle).await? {
+        return Ok(false);
+    }
+    // Should be closed now; if not, the next prompt would be typed into it.
+    close_picker_checked(client, pane_id).await
+}
+
+async fn toggle_fast(client: &HerdrClient, pane_id: &str) -> bool {
+    if !text(client, pane_id, "/fast").await {
+        return false;
+    }
+    tokio::time::sleep(Duration::from_millis(600)).await;
+    if !key(client, pane_id, "Enter").await {
+        return false;
+    }
+    #[cfg(all(test, feature = "daemon-test-harness"))]
+    crate::race_point::hit("codex_after_fast_toggle", pane_id).await;
+    tokio::time::sleep(Duration::from_millis(1000)).await;
+    true
+}
+
+/// What to do to reach `want` given what we know about the current tier (`fast` on the status line,
+/// else `runs.runtime_fast`). `/fast on|off` is not a slash form (see the module docs), so the
+/// only tool is the toggle.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FastPlan {
+    /// Already there: send nothing.
+    Keep,
+    /// Known wrong: one toggle.
+    Toggle,
+    /// Unknown start: one toggle, read back, toggle again only if it landed on the wrong side.
+    ToggleThenCheck,
+}
+
+pub fn fast_plan(now: Option<bool>, want: bool) -> FastPlan {
+    match now {
+        Some(n) if n == want => FastPlan::Keep,
+        Some(_) => FastPlan::Toggle,
+        None => FastPlan::ToggleThenCheck,
+    }
+}
+
+/// After the first toggle of [`FastPlan::ToggleThenCheck`]: is a second one needed?
+pub fn needs_second_toggle(seen: Option<bool>, want: bool) -> bool {
+    matches!(seen, Some(n) if n != want)
+}
+
+/// On `Err` the caller keeps `needs_restart: true`.
+pub async fn apply(
+    client: &HerdrClient,
+    pane_id: &str,
+    bot: &db::Bot,
+    was_fast: Option<bool>,
+    fields: &[&str],
+) -> Result<CodexRuntime, &'static str> {
+    // The startup migration and rate-limit suggestion both require a user choice. Do not type into
+    // either screen or dismiss it with Escape while applying a setting.
+    match close_picker_checked(client, pane_id).await {
+        Ok(true) => {}
+        Ok(false) => return Err("picker_open"),
+        Err(()) => return Err("pane_read_failed"),
+    }
+    // 輸入框裡有使用者的草稿：`/model`、`/fast` 會接在後面，Enter 把整段當 prompt 送出（回合中那條 #712 早有這道檢查）。
+    // herdr 不給帶樣式的讀法時分不出灰色佔位字與草稿，不擋（維持原行為）。
+    if let Ok(r) = crate::composer_parse::read_styled_snapshot(client, pane_id, "visible", 60).await {
+        if r.format == "ansi" && crate::composer_parse::box_state("codex", &r.text) == crate::composer_parse::BoxState::NonEmpty {
+            return Err("composer_not_empty");
+        }
+    }
+    if fields.iter().any(|f| *f == "model" || *f == "effort") {
+        let model = bot.model.as_deref().map(str::trim).filter(|s| !s.is_empty());
+        let effort = bot.effort.as_deref().map(str::trim).filter(|s| !s.is_empty());
+        match apply_model_and_effort(client, pane_id, model, effort).await {
+            Ok(true) => {}
+            Ok(false) => return Err("picker_failed"),
+            Err(()) => return Err("pane_read_failed"),
+        }
+    }
+    if fields.contains(&"fast") {
+        reach_fast(client, pane_id, bot.fast != 0, was_fast).await?;
+    }
+    readback(client, pane_id, bot, fields).await
+}
+
+/// `/fast` until the status line says `want`: read the tier first, toggle only when wrong; an unknown tier is
+/// toggled once, read back, and toggled back if it landed the wrong way round (module docs).
+async fn reach_fast(client: &HerdrClient, pane_id: &str, want: bool, was_fast: Option<bool>) -> Result<(), &'static str> {
+    // The screen is the truth about the tier right now; `runs.runtime_fast` may be stale.
+    let screen = read(client, pane_id).await.map_err(|_| "pane_read_failed")?;
+    let now = parse_status_line(&screen).map(|r| r.fast).or(was_fast);
+    match fast_plan(now, want) {
+        FastPlan::Keep => {}
+        FastPlan::Toggle => {
+            if !toggle_fast(client, pane_id).await {
+                return Err("fast_toggle_failed");
+            }
+        }
+        FastPlan::ToggleThenCheck => {
+            if !toggle_fast(client, pane_id).await {
+                return Err("fast_toggle_failed");
+            }
+            tokio::time::sleep(Duration::from_millis(900)).await;
+            let screen = read(client, pane_id).await.map_err(|_| "pane_read_failed")?;
+            let seen = parse_status_line(&screen).map(|r| r.fast);
+            if needs_second_toggle(seen, want) && !toggle_fast(client, pane_id).await {
+                return Err("fast_toggle_failed");
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Read-back (SPEC §4.4a).
+async fn readback(client: &HerdrClient, pane_id: &str, bot: &db::Bot, fields: &[&str]) -> Result<CodexRuntime, &'static str> {
+    tokio::time::sleep(Duration::from_millis(900)).await;
+    let screen = read(client, pane_id).await.map_err(|_| "pane_read_failed")?;
+    let Some(seen) = parse_status_line(&screen) else { return Err("no_status_line") };
+    verify(&seen, bot, fields)?;
+    Ok(seen)
+}
+
+/// Does the status line show what the bot is configured for? The model is compared without case: 0.157 prints
+/// the display name (`GPT-6-Luna`) for the id `gpt-6-luna`, and a case-only mismatch used to fail every live
+/// apply — a fast-only change included — back to "needs restart" (#712).
+pub fn verify(seen: &CodexRuntime, bot: &db::Bot, fields: &[&str]) -> Result<(), &'static str> {
+    if let Some(m) = bot.model.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
+        if !seen.model.eq_ignore_ascii_case(m) {
+            return Err("readback_model_mismatch");
+        }
+    }
+    if let Some(e) = bot.effort.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
+        if seen.effort.as_deref() != Some(e) {
+            return Err("readback_effort_mismatch");
+        }
+    }
+    if fields.contains(&"fast") && seen.fast != (bot.fast != 0) {
+        return Err("readback_fast_mismatch");
+    }
+    Ok(())
+}
+
+/// 回合中不能碰這個畫面（[`apply_fast_during_turn`]）：選單／選擇畫面開著，或輸入框不是空的（使用者的草稿——打 `/fast`
+/// 會接在它後面，Enter 就把整段送出去）。輸入框要用**帶樣式**的讀法判：純文字分不出 codex 的灰色佔位字與打的字。
+pub fn busy_fast_blocked(plain: &str, styled: &str) -> bool {
+    picker_open(plain) || crate::composer_parse::box_state("codex", styled) != crate::composer_parse::BoxState::Empty
+}
+
+/// 回合中只切 fast（#712）。codex 0.157.1 的 service tier 指令（`/fast`）是 `available_during_task`：回合跑著照樣
+/// 當場生效（`• Service tier set to priority`，狀態列立刻多出 `fast`），回合不中斷、照常跑完（2026-09-28 隔離 herdr
+/// session 實測，兩個方向都試過）。跟閒著時的 [`apply`] 不同：這裡**絕不按 Esc**（回合中 Esc＝中斷回合），
+/// 畫面不能碰就回 `busy_not_ready`，由呼叫端排到回合結束再走 [`apply`]。
+pub async fn apply_fast_during_turn(
+    client: &HerdrClient,
+    pane_id: &str,
+    bot: &db::Bot,
+    was_fast: Option<bool>,
+) -> Result<CodexRuntime, &'static str> {
+    let plain = read(client, pane_id).await.map_err(|_| "pane_read_failed")?;
+    let styled = crate::composer_parse::read_styled(client, pane_id, "visible", 60)
+        .await
+        .map_err(|_| "pane_read_failed")?;
+    if busy_fast_blocked(&plain, &styled) {
+        return Err(BUSY_NOT_READY);
+    }
+    reach_fast(client, pane_id, bot.fast != 0, was_fast).await?;
+    readback(client, pane_id, bot, &["fast"]).await
+}
+
+/// [`apply_fast_during_turn`] 碰不得畫面時的理由：跟「agent 忙」一樣排到回合結束（`deferred_live::is_busy_reason`）。
+pub const BUSY_NOT_READY: &str = "busy_not_ready";
+
+#[cfg(all(test, feature = "daemon-test-harness"))]
+mod tests {
+    use super::{fast_plan, needs_second_toggle, FastPlan};
+
+    /// #393：`/fast on|off` 不是 slash 形式（0.154.0 實測會被當一般 prompt 送給模型），所以只能靠開關＋讀畫面。
+    /// 已知現況就只在不對時按一下；未知現況以前直接拒絕（unknown_fast_tier），現在先按一下、讀回、方向錯才再按。
+    /// 窄 pane 把 `enter select · esc back` 折成兩行時，選單仍開著，不能把 prompt 打進去。
+    #[test]
+    fn a_wrapped_rate_limit_footer_is_still_the_open_prompt() {
+        let screen = "\
+  Approaching rate limits
+  Switch to gpt-6-luna for lower credit usage?
+
+› 1. Switch to gpt-6-luna
+  2. Keep current model
+  3. Keep current model (never show again)
+
+  enter select ·
+  esc back
+";
+        assert!(rate_limit_switch_prompt_open(screen));
+    }
+
+    #[test]
+    fn the_plan_toggles_only_when_the_tier_is_known_to_be_wrong() {
+        assert_eq!(fast_plan(Some(true), true), FastPlan::Keep);
+        assert_eq!(fast_plan(Some(false), false), FastPlan::Keep);
+        assert_eq!(fast_plan(Some(false), true), FastPlan::Toggle);
+        assert_eq!(fast_plan(Some(true), false), FastPlan::Toggle);
+        assert_eq!(fast_plan(None, true), FastPlan::ToggleThenCheck, "不知道現況也不拒絕");
+    }
+
+    #[test]
+    fn an_unknown_start_toggles_back_only_when_the_first_toggle_went_the_wrong_way() {
+        assert!(!needs_second_toggle(Some(true), true), "第一下就到了");
+        assert!(needs_second_toggle(Some(false), true), "本來就是開的，按一下變關了：要按回來");
+        assert!(!needs_second_toggle(None, true), "讀不到就不再亂按，讓讀回驗證報錯");
+    }
+
+    /// 2026-09-14 實況：fork 起來的 codex 狀態列沒有 `Context` 那段，照樣要讀得到剩餘額度。
+    /// #321：畫面上方有一行開頭是 `·`、又含 `Context` 的字（bot 印的、或別的 chrome），以前 `parts.next()?` 直接讓整個函式
+    /// 回 None，下面真正的狀態列讀不到——改模型／強度的讀回驗證就誤判成「沒落地」。
+    #[test]
+    fn a_quoted_status_line_above_the_viewport_tail_is_not_the_runtime() {
+        let mut screen = "  gpt-6-luna max · /tmp · Context 90% used\n".to_string();
+        for _ in 0..STATUS_TAIL_LINES {
+            screen.push_str("  the model mentioned Context once\n");
+        }
+        screen.push_str("  gpt-6.1-sol high · /tmp · Context 3% used\n");
+        let rt = parse_status_line(&screen).expect("底部那行才是現況");
+        assert_eq!((rt.model.as_str(), rt.effort.as_deref()), ("gpt-6.1-sol", Some("high")));
+    }
+
+    #[test]
+    fn a_wrapped_status_line_still_reads_the_model_and_effort() {
+        let screen = "  gpt-6-luna max · /tmp ·\n  Context 3% used · 5h 90% left\n";
+        let rt = parse_status_line(screen).expect("斷行的狀態列仍是同一列");
+        assert_eq!((rt.model.as_str(), rt.effort.as_deref(), rt.fast), ("gpt-6-luna", Some("max"), false));
+    }
+
+    #[test]
+    fn a_stray_leading_dot_row_does_not_hide_the_real_status_line() {
+        let screen = "  · Context notes: see docs\n\n  gpt-5.6-sol high · /tmp · Context 3% used\n";
+        let rt = parse_status_line(screen).expect("下面那行才是狀態列");
+        assert_eq!((rt.model.as_str(), rt.effort.as_deref()), ("gpt-5.6-sol", Some("high")));
+    }
+
+    #[test]
+    fn a_status_line_without_context_still_yields_the_quota() {
+        let q = parse_status_quota("  gpt-5.6-sol medium · ~/project/agents-manager · 5h 82% left · weekly 97% left\n").unwrap();
+        assert_eq!(q.five_hour_left, Some(82.0));
+        assert_eq!(q.weekly_left, Some(97.0));
+    }
+
+    use super::*;
+
+    #[tokio::test]
+    async fn close_picker_leaves_model_migration_rate_limit_and_update_choices_for_the_user() {
+        let env = crate::testing::env().await;
+        for (name, pane, screen) in [
+            (
+                "migration",
+                "pane-codex-migration",
+                include_str!("lifecycle/fixtures/codex-0.157-model-migration.txt"),
+            ),
+            (
+                "rate-limit",
+                "pane-codex-rate-limit",
+                include_str!("lifecycle/fixtures/codex-0.157-rate-limit-switch.txt"),
+            ),
+            (
+                "update-menu",
+                "pane-codex-update-menu",
+                include_str!("lifecycle/fixtures/codex-0.155-update-menu.txt"),
+            ),
+        ] {
+            let bot = crate::testing::claude_bot(&env.app, &env.project_id, name).await;
+            sqlx::query("UPDATE bots SET kind='codex' WHERE id=?").bind(&bot.id).execute(&env.app.db).await.unwrap();
+            let run_id = crate::testing::fake_run(&env.app, &bot.id).await;
+            sqlx::query("UPDATE runs SET pane_id=? WHERE id=?").bind(pane).bind(&run_id).execute(&env.app.db).await.unwrap();
+            env.herdr.set_screen(pane, screen);
+            let run = db::active_run(&env.app.db, &bot.id).await.unwrap().unwrap();
+            let client = env.app.herdr_for_run(&run).await.unwrap();
+            assert!(!close_picker(&client, pane).await, "{name} requires the user's choice");
+        }
+        assert!(env.herdr.calls_to("pane.send_keys").is_empty(), "Escape must not dismiss either choice");
+    }
+
+    #[tokio::test]
+    async fn an_unreadable_migration_or_rate_limit_preflight_does_not_touch_a_user_choice_screen() {
+        let env = crate::testing::env().await;
+        let bot = crate::testing::claude_bot(&env.app, &env.project_id, "unreadable-picker").await;
+        sqlx::query("UPDATE bots SET kind='codex', model='gpt-6-astra', effort='high' WHERE id=?")
+            .bind(&bot.id)
+            .execute(&env.app.db)
+            .await
+            .unwrap();
+        let bot = db::bot(&env.app.db, &bot.id).await.unwrap().unwrap();
+        for (pane, screen) in [
+            ("pane-codex-unreadable-migration", include_str!("lifecycle/fixtures/codex-0.157-model-migration.txt")),
+            ("pane-codex-unreadable-rate-limit", include_str!("lifecycle/fixtures/codex-0.157-rate-limit-switch.txt")),
+        ] {
+            env.herdr.set_screen(pane, screen);
+            env.herdr.fail_next("pane.read", crate::testing::Fault::Refuse);
+
+            assert!(apply(&env.app.herdr, pane, &bot, Some(false), &["model"]).await.is_err(), "{pane}");
+            assert!(env.herdr.calls_to("pane.send_text").is_empty(), "an unreadable preflight cannot authorize /model: {pane}");
+            assert!(env.herdr.calls_to("pane.send_keys").is_empty(), "an unreadable preflight cannot authorize Enter or Escape: {pane}");
+        }
+    }
+
+    #[tokio::test]
+    async fn an_unreadable_ordinary_model_picker_does_not_choose_a_setting() {
+        let env = crate::testing::env().await;
+        let bot = crate::testing::claude_bot(&env.app, &env.project_id, "unreadable-model-menu").await;
+        sqlx::query("UPDATE bots SET kind='codex', model='gpt-6-astra', effort='high' WHERE id=?")
+            .bind(&bot.id)
+            .execute(&env.app.db)
+            .await
+            .unwrap();
+        let bot = db::bot(&env.app.db, &bot.id).await.unwrap().unwrap();
+        let pane = "pane-codex-unreadable-model-menu";
+        env.herdr.set_screen(pane, EMPTY_BOX_ANSI);
+        let screens = env.herdr.screens.clone();
+        let fail = env.herdr.fail_later();
+        crate::race_point::arm("codex_apply_before_model_picker_read", pane, move || async move {
+            screens.lock().unwrap().insert(pane.into(), MODEL_MENU.into());
+            fail("pane.read", crate::testing::Fault::Refuse);
+        });
+
+        assert_eq!(apply(&env.app.herdr, pane, &bot, Some(false), &["model"]).await, Err("pane_read_failed"));
+        assert_eq!(
+            env.herdr.calls_to("pane.send_text").iter().map(|v| v["text"].as_str()).collect::<Vec<_>>(),
+            vec![Some("/model")],
+            "a readable initial composer may open the ordinary picker, but unreadable picker state cannot authorize a setting choice"
+        );
+        assert_eq!(
+            env.herdr.calls_to("pane.send_keys").iter().map(|v| v["keys"].clone()).collect::<Vec<_>>(),
+            vec![serde_json::json!(["Enter"])],
+            "no numeric choice or cleanup key is safe until the picker can be read"
+        );
+    }
+
+    #[tokio::test]
+    async fn an_unreadable_final_picker_check_is_not_treated_as_closed() {
+        let env = crate::testing::env().await;
+        let pane = "pane-codex-final-picker-read";
+        env.herdr.set_screen(pane, MODEL_MENU);
+        let fail = env.herdr.fail_later();
+        crate::race_point::arm("codex_picker_before_final_read", pane, move || async move {
+            fail("pane.read", crate::testing::Fault::Refuse);
+        });
+
+        assert!(close_picker_checked(&env.app.herdr, pane).await.is_err(), "a failed final read is not proof the picker closed");
+        assert_eq!(
+            env.herdr.calls_to("pane.send_keys").len(),
+            4,
+            "the read failure after the Escape budget cannot grant a safe-to-type result"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_readable_empty_composer_allows_a_verified_model_and_effort_apply() {
+        let env = crate::testing::env().await;
+        let bot = crate::testing::claude_bot(&env.app, &env.project_id, "readable-model-menu").await;
+        sqlx::query("UPDATE bots SET kind='codex', model='gpt-6-astra', effort='high' WHERE id=?")
+            .bind(&bot.id)
+            .execute(&env.app.db)
+            .await
+            .unwrap();
+        let bot = db::bot(&env.app.db, &bot.id).await.unwrap().unwrap();
+        let pane = "pane-codex-readable-model-menu";
+        let screens = env.herdr.screens.clone();
+        env.herdr.set_screen(pane, EMPTY_BOX_ANSI);
+        let model_screens = screens.clone();
+        crate::race_point::arm("codex_apply_before_model_picker_read", pane, move || async move {
+            model_screens.lock().unwrap().insert(pane.into(), MODEL_MENU.into());
+        });
+        let effort_screens = screens.clone();
+        crate::race_point::arm("codex_apply_before_effort_picker_read", pane, move || async move {
+            effort_screens.lock().unwrap().insert(pane.into(), EFFORT_MENU.into());
+        });
+        crate::race_point::arm("codex_picker_before_final_read", pane, move || async move {
+            screens.lock().unwrap().insert(pane.into(), COMPOSER.into());
+        });
+
+        let seen = apply(&env.app.herdr, pane, &bot, Some(false), &["model"]).await.unwrap();
+        assert_eq!(seen, CodexRuntime { model: "gpt-6-astra".into(), effort: Some("high".into()), fast: false });
+        assert_eq!(
+            env.herdr.calls_to("pane.send_text").iter().map(|v| v["text"].as_str()).collect::<Vec<_>>(),
+            vec![Some("/model"), Some("1"), Some("3")],
+            "a readable composer opens the picker and the verified requested rows are selected"
+        );
+    }
+
+    async fn run_with_runtime(env: &crate::testing::Env, fast: i64) -> String {
+        let bot = crate::testing::claude_bot(&env.app, &env.project_id, "payload").await;
+        let run = crate::testing::fake_run(&env.app, &bot.id).await;
+        sqlx::query("UPDATE runs SET runtime_model='gpt-5.6-luna', runtime_effort='max', runtime_fast=? WHERE id=?")
+            .bind(fast)
+            .bind(&run)
+            .execute(&env.app.db)
+            .await
+            .unwrap();
+        run
+    }
+
+    async fn fast_of(env: &crate::testing::Env, run: &str) -> Option<i64> {
+        db::run(&env.app.db, run).await.unwrap().unwrap().runtime_fast
+    }
+
+    /// 2026-09-22 使用者：標題列寫 fast，codex 狀態列其實沒有 fast。啟動時記的 1 之後沒人改。
+    #[tokio::test]
+    async fn a_status_line_without_fast_corrects_a_stale_runtime_fast() {
+        let env = crate::testing::env().await;
+        let run = run_with_runtime(&env, 1).await;
+        let screen = "› Ask Codex\n\n  gpt-5.6-luna max · ~/project/hermes-agents · Context 43% used · 5h 12% left\n";
+        assert!(correct_runtime_from_screen(&env.app, &run, screen).await);
+        assert_eq!(fast_of(&env, &run).await, Some(0));
+    }
+
+    #[tokio::test]
+    async fn a_status_line_with_fast_corrects_the_other_way() {
+        let env = crate::testing::env().await;
+        let run = run_with_runtime(&env, 0).await;
+        let screen = "  gpt-5.6-luna max fast · /tmp · Context 43% used · 5h 12% left\n";
+        assert!(correct_runtime_from_screen(&env.app, &run, screen).await);
+        assert_eq!(fast_of(&env, &run).await, Some(1));
+    }
+
+    /// codex 子 agent l8 在 TUI 裡手動打 /fast 開了 fast，狀態列顯示主題段（無 Context）。
+    #[test]
+    fn status_line_with_session_topic_or_truncated_topic_parses_runtime() {
+        // codex 子 agent l8 的真實畫面
+        let screen = "• Compacting context (7s • esc to interrupt)\n  └ Making room to continue.\n\n› Ask Codex to do anything\n\n  GPT-6-Luna max fast · ~/project/agents-manager · 修正主力 cache 冷 context 規則\n  ? for shortcuts                                                                                                                                                                          ⚠ 2 warnings · f2 to view\n";
+        let rt = parse_status_line(screen).expect("讀得到主題段的狀態列");
+        assert_eq!(
+            rt,
+            CodexRuntime {
+                model: "gpt-6-luna".into(),
+                effort: Some("max".into()),
+                fast: true,
+            }
+        );
+
+        // 截斷主題（…）
+        let truncated = "› Ask Codex to do anything\n\n  GPT-6-Luna max fast · ~/project/agents-manager · …\n";
+        let rt_trunc = parse_status_line(truncated).expect("讀得到 … 截斷主題的狀態列");
+        assert_eq!(
+            rt_trunc,
+            CodexRuntime {
+                model: "gpt-6-luna".into(),
+                effort: Some("max".into()),
+                fast: true,
+            }
+        );
+
+        // 手動打 /fast 關閉 fast
+        let fast_off = "› Ask Codex to do anything\n\n  GPT-6-Luna max · ~/project/agents-manager · 修正主力 cache 冷 context 規則\n";
+        let rt_off = parse_status_line(fast_off).expect("讀得到關閉 fast 的狀態列");
+        assert_eq!(
+            rt_off,
+            CodexRuntime {
+                model: "gpt-6-luna".into(),
+                effort: Some("max".into()),
+                fast: false,
+            }
+        );
+
+        // 手動打 /model 切換模型與推理強度
+        let model_switched = "› Ask Codex to do anything\n\n  gpt-5.6-sol medium fast · ~/project/agents-manager · 修正主力 cache 冷 context 規則\n";
+        let rt_switch = parse_status_line(model_switched).expect("讀得到換模型後的狀態列");
+        assert_eq!(
+            rt_switch,
+            CodexRuntime {
+                model: "gpt-5.6-sol".into(),
+                effort: Some("medium".into()),
+                fast: true,
+            }
+        );
+
+        // 窄 pane 折行主題
+        let wrapped_topic = "  GPT-6-Luna max fast · ~/project/agents-manager ·\n  修正主力 cache 冷 context 規則\n";
+        let rt_wrapped = parse_status_line(wrapped_topic).expect("折行的主題段仍能解析");
+        assert_eq!(
+            rt_wrapped,
+            CodexRuntime {
+                model: "gpt-6-luna".into(),
+                effort: Some("max".into()),
+                fast: true,
+            }
+        );
+    }
+
+    /// 收編時 runs.runtime_* 全為 NULL，狀態列帶主題段能正確填入 runtime_model、runtime_effort 與 runtime_fast。
+    #[tokio::test]
+    async fn a_status_line_with_topic_corrects_null_runtime_and_enables_fast() {
+        let env = crate::testing::env().await;
+        let bot = crate::testing::claude_bot(&env.app, &env.project_id, "payload").await;
+        let run = crate::testing::fake_run(&env.app, &bot.id).await;
+        // 初始狀態如 adopted child：runtime 皆為 NULL
+        sqlx::query("UPDATE runs SET runtime_model=NULL, runtime_effort=NULL, runtime_fast=NULL WHERE id=?")
+            .bind(&run)
+            .execute(&env.app.db)
+            .await
+            .unwrap();
+
+        let screen = "› Ask Codex to do anything\n\n  GPT-6-Luna max fast · ~/project/agents-manager · 修正主力 cache 冷 context 規則\n  ? for shortcuts\n";
+        assert!(correct_runtime_from_screen(&env.app, &run, screen).await);
+
+        let row = db::run(&env.app.db, &run).await.unwrap().unwrap();
+        assert_eq!(row.runtime_model.as_deref(), Some("gpt-6-luna"));
+        assert_eq!(row.runtime_effort.as_deref(), Some("max"));
+        assert_eq!(row.runtime_fast, Some(1));
+    }
+
+    /// 讀不到狀態列（選單開著、畫面被清）不能當成 fast=false。
+    #[tokio::test]
+    async fn an_unreadable_screen_leaves_the_runtime_alone() {
+        let env = crate::testing::env().await;
+        let run = run_with_runtime(&env, 1).await;
+        for screen in ["", "› Ask Codex to do anything\n", MODEL_MENU] {
+            assert!(!correct_runtime_from_screen(&env.app, &run, screen).await, "{screen:?}");
+        }
+        assert_eq!(fast_of(&env, &run).await, Some(1));
+    }
+
+    /// Real pane text, codex 0.153.4 (2026-09-09).
+    const STATUS: &str = "\
+╭─────────────────────────────────────────────────────────╮
+│ >_ OpenAI Codex (v0.153.4)                              │
+│                                                         │
+│ model:       gpt-5.6-luna max   fast   /model to change │
+│ directory:   /tmp                                       │
+╰─────────────────────────────────────────────────────────╯
+
+› Ask Codex to do anything
+
+  gpt-5.6-sol high fast · /tmp · Context 0% used · 5h 82% left · weekly 73% left
+";
+
+    const MODEL_MENU: &str = "\
+  Select Model and Effort
+  Access legacy models by running codex -m <model_name> or in your config.toml
+
+  1. gpt-6-astra (default)   Our most capable model for complex, demanding work.
+  2. gpt-5.6-sol             Reliable agentic workhorse for everyday tasks.
+  3. gpt-5.6-terra           Balanced agentic coding model for everyday work.
+› 4. gpt-5.6-luna (current)  Fast and affordable agentic coding model.
+  5. gpt-5.5                 Proven previous-generation model for coding and general work.
+
+  Press enter to confirm or esc to go back
+";
+
+    const EFFORT_MENU: &str = "\
+  Select Reasoning Level for gpt-5.6-sol
+
+› 1. Low (default)    Fast responses with lighter reasoning
+  2. Medium           Balances speed and reasoning depth for everyday tasks
+  3. High             Greater reasoning depth for complex problems
+  4. Extra high       Extra high reasoning depth for complex problems
+  5. More reasoning…  Max and Ultra consume usage limits faster
+
+  Press enter to confirm or esc to go back
+";
+
+    #[test]
+    fn the_status_line_is_what_codex_is_really_on() {
+        let rt = parse_status_line(STATUS).unwrap();
+        // The banner above says `gpt-5.6-luna max fast`; the live line below it wins.
+        assert_eq!(rt, CodexRuntime { model: "gpt-5.6-sol".into(), effort: Some("high".into()), fast: true });
+        let off = parse_status_line("  gpt-5.6-sol high · /tmp · Context 0% used · 5h 82% left\n").unwrap();
+        assert!(!off.fast);
+        // A model on the CLI default effort prints no level at all.
+        let bare = parse_status_line("  gpt-5.5 · /tmp · Context 3% used\n").unwrap();
+        assert_eq!(bare.effort, None);
+        assert!(parse_status_line("› Ask Codex to do anything\n").is_none());
+    }
+
+    #[test]
+    fn picker_rows_are_matched_by_text_not_by_position() {
+        assert_eq!(picker_number(MODEL_MENU, "gpt-5.6-sol"), Some(2));
+        // No model of its own → stay on the row codex marks as current.
+        assert_eq!(picker_number(MODEL_MENU, "(current)"), Some(4));
+        assert_eq!(picker_number(EFFORT_MENU, "Extra high"), Some(4));
+        assert_eq!(picker_number(EFFORT_MENU, "(default)"), Some(1));
+        assert_eq!(picker_number(EFFORT_MENU, "More reasoning…"), Some(5));
+        // `Max` / `Ultra` only appear in row 5's *description*; matching that would press the
+        // submenu row as if it were the level itself.
+        assert_eq!(picker_number(EFFORT_MENU, "Max"), None, "max / ultra are one menu deeper");
+        assert_eq!(picker_number(EFFORT_MENU, "Ultra"), None);
+        assert_eq!(picker_number(MODEL_MENU, "gpt-4"), None);
+    }
+
+    /// issue #636: a model whose name merely *starts with* the wanted one must not win just
+    /// because it is listed first — codex would really switch to the preview / mini model.
+    #[test]
+    fn picker_rows_match_the_whole_name_not_a_prefix() {
+        const PREFIXED: &str = "\
+  Select Model and Effort
+
+› 1. gpt-6-sol-preview (current)  Preview build.
+  2. gpt-6-sol                    Reliable agentic workhorse.
+  3. gpt-5.5-mini                 Cheaper.
+  4. gpt-5.5                      Proven previous-generation model.
+
+  Press enter to confirm or esc to go back
+";
+        assert_eq!(picker_number(PREFIXED, "gpt-6-sol"), Some(2));
+        assert_eq!(picker_number(PREFIXED, "gpt-5.5"), Some(4));
+        assert_eq!(picker_number(PREFIXED, "gpt-6-sol-preview"), Some(1));
+        assert_eq!(picker_number(PREFIXED, "(current)"), Some(1));
+        assert_eq!(picker_number(PREFIXED, "gpt-6"), None, "a bare prefix names no row");
+        assert_eq!(picker_number(PREFIXED, "sol"), None);
+        const AMBIGUOUS: &str = "\
+  Select Model and Effort
+
+  1. gpt-5.5     First duplicate
+  2. gpt-5.5     Second duplicate
+
+  Press enter to confirm or esc to go back
+";
+        assert_eq!(picker_number(AMBIGUOUS, "gpt-5.5"), None, "ambiguous rows must not be selected");
+        // Same rule for effort labels: `High` must not pick `Extra high` or `Higher`.
+        const LEVELS: &str = "\
+  Select Reasoning Level for gpt-6-sol
+
+  1. Higher (default)  Hypothetical level listed first
+  2. High              Greater reasoning depth
+  3. Extra high        Extra high reasoning depth
+
+  Press enter to confirm or esc to go back
+";
+        assert_eq!(picker_number(LEVELS, "High"), Some(2));
+        assert_eq!(picker_number(LEVELS, "Extra high"), Some(3));
+        assert_eq!(picker_number(LEVELS, "(default)"), Some(1));
+        assert_eq!(picker_number(LEVELS, "Extra"), None);
+    }
+
+    #[test]
+    fn codex_0157_rate_limit_switch_prompt_is_a_choice_screen_not_a_quota_hit() {
+        let screen = include_str!("lifecycle/fixtures/codex-0.157-rate-limit-switch.txt");
+        assert!(rate_limit_switch_prompt_open(screen));
+        assert!(picker_open(screen));
+        assert!(parse_status_line(screen).is_none());
+        assert!(parse_status_quota(screen).is_none());
+
+        let quoted = format!("⏺ Codex suggested this option:\n{screen}\n{COMPOSER}");
+        assert!(!rate_limit_switch_prompt_open(&quoted), "quoted text outside the popup is not a live selector");
+    }
+
+    #[test]
+    fn a_numeric_choice_requires_the_target_row_in_a_live_picker() {
+        assert!(picker_choice_matches(MODEL_MENU, "gpt-5.6-sol", 2));
+        assert!(!picker_choice_matches(MODEL_MENU, "gpt-5.6-sol", 3), "a different row is not the target");
+        assert!(!picker_choice_matches(COMPOSER, "gpt-5.6-sol", 2), "a stale selection cannot target the composer");
+    }
+
+    #[tokio::test]
+    async fn missing_or_ambiguous_picker_rows_do_not_authorize_number_entry() {
+        let env = crate::testing::env().await;
+        const SCREEN: &str = "\
+  Select Model and Effort
+
+  1. gpt-5.5     First duplicate
+  2. gpt-5.5     Second duplicate
+
+  Press enter to confirm or esc to go back
+";
+        for (pane, needle) in [
+            ("pane-codex-ambiguous-picker", "gpt-5.5"),
+            ("pane-codex-missing-picker", "gpt-6-astra"),
+        ] {
+            env.herdr.set_screen(pane, SCREEN);
+            assert_eq!(press_number(&env.app.herdr, pane, 1, needle).await, Ok(false), "{needle}");
+        }
+        assert!(env.herdr.calls_to("pane.send_text").is_empty(), "an ambiguous row must not receive a numeric choice");
+        assert!(
+            env.herdr.calls_to("pane.send_keys").iter().all(|call| call["keys"] == serde_json::json!(["Escape"])),
+            "the picker may only be escaped, never assigned an ambiguous row number"
+        );
+    }
+
+    /// 帶樣式的真空輸入框（灰色佔位字）：閒著套用前會先看輸入框有沒有草稿，純文字的 [`COMPOSER`] 分不出佔位字。
+    const EMPTY_BOX_ANSI: &str = include_str!("lifecycle/fixtures/codex-0.155-idle.ansi");
+
+    /// Real composer, codex 0.154.0 (2026-09-10) — nothing in the way.
+    const COMPOSER: &str = "\
+─ Worked for 1m 17s ────────────────────────────────────
+
+• Model changed to gpt-6-astra high
+
+› Ask Codex to do anything
+
+  gpt-6-astra high · ~/project/agents-manager · Context 44% used · 5h 10% left
+";
+
+    /// 2026-09-10 a user message sent into a picker vanished and switched the model.
+    #[test]
+    fn a_pane_showing_a_picker_is_not_ready_for_text() {
+        assert!(picker_open(MODEL_MENU));
+        assert!(picker_open(EFFORT_MENU));
+        // The footer alone is enough: a short pane can scroll the heading away.
+        assert!(picker_open("  Press enter to confirm or esc to go back\n"));
+        assert!(!picker_open(COMPOSER));
+        assert!(!picker_open(STATUS));
+        assert!(!picker_open(""));
+    }
+
+    #[test]
+    fn effort_labels_match_the_menu_codex_draws() {
+        assert_eq!(effort_menu_label("xhigh"), "Extra high");
+        assert_eq!(effort_menu_label("high"), "High");
+        assert!(is_nested_effort("max") && is_nested_effort("ultra"));
+        assert!(!is_nested_effort("xhigh"));
+    }
+
+    /// codex 0.154.0 兩層選單原文（2026-09-13 實地抓）。導航靠這些字；codex 一改字，改 effort
+    /// 就會靜靜退回重啟（2026-09-13 使用者遇過），釘住讓測試先講。
+    const MODEL_MENU_0154: &str = "\
+  Select Model and Effort
+  Access legacy models by running codex -m <model_name> or in your config.toml
+
+› 1. gpt-6-astra (current)  Our most capable model for complex, demanding work.
+  2. gpt-5.6-sol            Reliable agentic workhorse for everyday tasks.
+  3. gpt-5.6-terra          Balanced agentic coding model for everyday work.
+  4. gpt-5.6-luna           Fast and affordable agentic coding model.
+  5. gpt-5.5                Proven previous-generation model for coding and general work.
+
+  Press enter to confirm or esc to go back
+";
+
+    const EFFORT_MENU_0154: &str = "\
+  Select Reasoning Level for gpt-6-astra
+
+  1. Low (default)    Fast responses with lighter reasoning
+  2. Medium           Balances speed and reasoning depth for everyday tasks
+› 3. High (current)   Greater reasoning depth for complex problems
+  4. Extra high       Extra high reasoning depth for complex problems
+  5. More reasoning…  Max and Ultra consume usage limits faster
+
+  Press enter to confirm or esc to go back
+";
+
+    #[test]
+    fn the_0_154_menus_still_read_the_way_the_driver_expects() {
+        assert!(MODEL_MENU_0154.contains("Select Model"), "第一層的判斷字");
+        assert!(EFFORT_MENU_0154.contains("Select Reasoning Level"), "第二層的判斷字");
+        assert_eq!(picker_number(MODEL_MENU_0154, "gpt-6-astra"), Some(1));
+        assert_eq!(picker_number(MODEL_MENU_0154, "(current)"), Some(1));
+        assert_eq!(picker_number(MODEL_MENU_0154, "gpt-5.6-luna"), Some(4));
+        assert_eq!(picker_number(EFFORT_MENU_0154, effort_menu_label("low")), Some(1));
+        assert_eq!(picker_number(EFFORT_MENU_0154, effort_menu_label("medium")), Some(2));
+        assert_eq!(picker_number(EFFORT_MENU_0154, effort_menu_label("high")), Some(3));
+        assert_eq!(picker_number(EFFORT_MENU_0154, effort_menu_label("xhigh")), Some(4));
+        assert_eq!(picker_number(EFFORT_MENU_0154, "More reasoning…"), Some(5));
+        assert!(picker_number(EFFORT_MENU_0154, effort_menu_label("max")).is_none(), "max 藏在下一層");
+        // `(default)` 那一列不能被 `Extra high` 的描述文字搶走（描述在兩格空白之後）。
+        assert_eq!(picker_number(EFFORT_MENU_0154, "(default)"), Some(1));
+    }
+
+    /// 2026-09-13 使用者截圖那一行（行尾被截斷）。
+    #[test]
+    fn the_status_line_carries_the_accounts_remaining_quota() {
+        let q = parse_status_quota(
+            "  gpt-6-astra high · ~/project/agents-manager · Context 28% used · 5h 90% left · weekly 48% …\n",
+        )
+        .unwrap();
+        assert_eq!(q.five_hour_left, Some(90.0));
+        assert_eq!(q.weekly_left, Some(48.0), "`left` 被截掉也要讀得到");
+
+        // 省略號黏在 `%` 後（2026-09-13 實機），曾讓 header 少了 7d。
+        let tight = parse_status_quota(
+            "  gpt-6-astra medium · ~/project/agents-manager · Context 9% used · 5h 36% left · weekly 24%…",
+        )
+        .unwrap();
+        assert_eq!((tight.five_hour_left, tight.weekly_left), (Some(36.0), Some(24.0)));
+        let odd = parse_status_quota("m x · /tmp · Context 1% used · 5h 7.5% left, weekly 12%.").unwrap();
+        assert_eq!((odd.five_hour_left, odd.weekly_left), (Some(7.5), Some(12.0)));
+
+        let full = parse_status_quota("gpt-5.6-sol high fast · /tmp · Context 0% used · 5h 82% left · weekly 73% left")
+            .unwrap();
+        assert_eq!((full.five_hour_left, full.weekly_left), (Some(82.0), Some(73.0)));
+
+        // 只有 5h 的那種（週窗還沒開始算）。
+        let one = parse_status_quota("gpt-6-astra high · /tmp · Context 44% used · 5h 10% left").unwrap();
+        assert_eq!((one.five_hour_left, one.weekly_left), (Some(10.0), None));
+
+        assert!(parse_status_quota("› Ask Codex to do anything\n1 background terminal running\n").is_none());
+        // 空讀數不能蓋掉 app-server 的。
+        assert!(parse_status_quota("gpt-6-astra high · /tmp · Context 44% used").is_none());
+    }
+
+    /// #712：0.157 的狀態列印顯示名（`GPT-6-Luna`）。runtime 記成 id 的寫法，設定才比得起來。
+    #[test]
+    fn a_display_cased_model_is_read_as_the_id() {
+        let rt = parse_status_line("  GPT-6-Luna max fast · /tmp · Context 43% used · 5h 12% left\n").unwrap();
+        assert_eq!(rt, CodexRuntime { model: "gpt-6-luna".into(), effort: Some("max".into()), fast: true });
+    }
+
+    fn bot(model: Option<&str>, effort: Option<&str>, fast: bool) -> crate::db::Bot {
+        crate::db::Bot {
+            id: "b".into(),
+            project_id: "p".into(),
+            name: "b".into(),
+            kind: "codex".into(),
+            model: model.map(Into::into),
+            effort: effort.map(Into::into),
+            fast: i64::from(fast),
+            persona: None,
+            args_json: "[]".into(),
+            autostart: 0,
+            inject_hooks: 1,
+            auto_approve: 1,
+            identity: None,
+            env_json: "{}".into(),
+            managed_by: "user".into(),
+            cwd: None,
+            herdr_session: None,
+            parent_bot_id: None,
+            is_primary: 0,
+            primary_position: 0,
+            hook_token: "t".into(),
+            deleted_at: None,
+            created_at: crate::db::now(),
+        }
+    }
+
+    /// 讀回只在真的不一樣時失敗：模型大小寫不同不算（以前只切 fast 也因此退回重啟）。
+    #[test]
+    fn the_readback_ignores_model_case_but_not_a_different_model() {
+        let seen = |model: &str, fast: bool| CodexRuntime { model: model.into(), effort: Some("max".into()), fast };
+        let want = bot(Some("gpt-6-luna"), Some("max"), true);
+        assert_eq!(verify(&seen("GPT-6-Luna", true), &want, &["fast"]), Ok(()));
+        assert_eq!(verify(&seen("gpt-6-sol", true), &want, &["fast"]), Err("readback_model_mismatch"));
+        assert_eq!(verify(&seen("gpt-6-luna", false), &want, &["fast"]), Err("readback_fast_mismatch"));
+        assert_eq!(verify(&seen("gpt-6-luna", false), &want, &["model"]), Ok(()), "沒改 fast 就不比 fast");
+        let high = CodexRuntime { model: "gpt-6-luna".into(), effort: Some("high".into()), fast: true };
+        assert_eq!(verify(&high, &want, &["fast"]), Err("readback_effort_mismatch"));
+    }
+
+    /// 回合中切 fast 之前的畫面檢查（真畫面 fixtures）：輸入框空的才打，有草稿或選單開著就不碰。
+    #[test]
+    fn a_turn_is_only_typed_into_with_an_empty_composer_and_no_picker() {
+        let working = include_str!("lifecycle/fixtures/codex-0.155-working.ansi");
+        let draft = include_str!("lifecycle/fixtures/codex-0.155-draft.ansi");
+        let migration = include_str!("lifecycle/fixtures/codex-0.157-model-migration.txt");
+        assert!(!busy_fast_blocked(working, working), "回合中、輸入框只有灰色佔位字");
+        assert!(busy_fast_blocked(draft, draft), "使用者的草稿：/fast 會接在後面一起送出");
+        assert!(busy_fast_blocked(migration, working), "選擇畫面開著");
+        assert!(busy_fast_blocked(working, "gpt-6-luna max · /tmp · Context 1% used\n"), "讀不出輸入框：不打");
+    }
+}

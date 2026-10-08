@@ -13,38 +13,18 @@
 //!   哪一顆 daemon、最後一個 run 怎麼結束與 herdr 對 pane 的回答（#554）。換版腳本靠它分辨「父 bot 收掉的」與
 //!   「換版弄丟的」，判斷見 [`cause`]。
 
-use crate::events::ports::{BotOpsRepo, HandoffConnRepo, HandoffRepo, IntentConnRepo, SupervisorRepo};
+use crate::events::ports::{BotOpsRepo, HandoffConnRepo, HandoffRepo, SupervisorRepo};
 use crate::db;
 use serde_json::json;
 use std::future::Future;
 use std::panic::Location;
 
 
-/// 誰要退役這顆 child。
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum Mode {
-    /// 對帳／維護收尾自己判斷的：AGM 的 child 要擋。
-    Implicit,
-    /// 使用者或 AGM 明講的（promote）：照做，只記呼叫端。
-    Explicit,
-}
+pub(crate) use crate::events::ports::{RetireMode as Mode, RetireOutcome as Outcome};
 
-#[derive(Debug, PartialEq, Eq)]
-pub(crate) enum Outcome {
-    /// 寫進去了。
-    Retired,
-    /// 早就不在（或已經退役）：什麼都沒寫。
-    AlreadyGone,
-    /// AGM 角色 bot、它們的 child、或 AGM 專案底下的 bot：不軟刪，已推 `child_retire_refused` 給巡檢。
-    Refused,
-    /// 讀不到誰是 AGM 的：這一輪不退役，晚一點再看。
-    Unreadable,
-    /// 專案已移交給另一台主機的 daemon（#708）：不退役，什麼都沒寫。
-    HandedOff,
-    /// 分享用（受限）bot（SPEC §20）：外部 end user 隨時會來，自動清理一律不動它，什麼都沒寫。
-    ShareBot,
-    /// A restore/restart guard appeared after this pass made its initial eligibility decision.
-    Protected,
+/// 寫入 child 退役 intent 的 composition 邊界；實作留在 daemon，因為 `intents` 屬於上層。
+pub(crate) trait IntentConnRepo {
+    async fn record_done_intent(&mut self, kind: &str, subject_id: &str, host: &str, payload: &serde_json::Value) -> anyhow::Result<String>;
 }
 
 /// 退役 `bot_id` 這顆 child。DB 寫不進去回 `Err`（呼叫端各自決定重試或回滾）；守衛擋下、讀不到擁有關係不是錯誤。
@@ -60,9 +40,30 @@ where
         + crate::capabilities::Emit
         + crate::capabilities::BootId
         + crate::capabilities::HerdrRoutes
+        + BotOpsRepo
+        + SupervisorRepo
         + 'a,
 {
-    let at = Location::caller();
+    retire_at(app, bot_id, why, mode, Location::caller())
+}
+
+/// `retire` 的異步工作核心。組裝層若先建 future，須在同步呼叫時捕捉並傳入原始位置，避免 async block 把 caller 改成 adapter。
+pub(crate) fn retire_at<'a, C>(
+    app: &'a C,
+    bot_id: &'a str,
+    why: &'static str,
+    mode: Mode,
+    at: &'static Location<'static>,
+) -> impl Future<Output = anyhow::Result<Outcome>> + 'a
+where
+    C: crate::capabilities::Db
+        + crate::capabilities::Emit
+        + crate::capabilities::BootId
+        + crate::capabilities::HerdrRoutes
+        + BotOpsRepo
+        + SupervisorRepo
+        + 'a,
+{
     async move {
         let Some(bot) = db::bot(app.db(), bot_id).await? else { return Ok(Outcome::AlreadyGone) };
         if bot.deleted_at.is_some() {
@@ -77,7 +78,7 @@ where
         }
         // 2026-10-04 使用者：「let AGM 不清除這類 bot」。分享用 bot 不會是 child（建 bot 時才選、managed_by=user），
         // 這裡是唯一入口上的保險：哪天有一條路誤把它當 child，也不會被隱式軟刪。讀不到＝不退役。
-        if mode == Mode::Implicit && !matches!(app.db().is_share_bot(&bot.id).await, Ok(false)) {
+        if mode == Mode::Implicit && !matches!(app.is_share_bot(&bot.id).await, Ok(false)) {
             tracing::info!(bot = %bot.name, bot_id = %bot.id, why, "bot not retired: it is a share bot (or that could not be read)");
             return Ok(Outcome::ShareBot);
         }
@@ -239,8 +240,8 @@ async fn pane_state(app: &impl crate::capabilities::HerdrRoutes, run: &db::Run) 
 }
 
 /// 隱式退役前的 AGM 判斷。`Retired`＝放行（不是 AGM 的）。
-async fn agm_guard(app: &impl crate::capabilities::Db, bot: &db::Bot, why: &str) -> Outcome {
-    let owned = match app.db().load_owned().await {
+async fn agm_guard(app: &(impl crate::capabilities::Db + SupervisorRepo), bot: &db::Bot, why: &str) -> Outcome {
+    let owned = match app.load_owned().await {
         Ok(o) => o,
         Err(e) => {
             tracing::warn!(bot = %bot.name, why, error = ?e, "cannot read which bots are AGM's; child kept this pass");
@@ -270,7 +271,7 @@ async fn agm_guard(app: &impl crate::capabilities::Db, bot: &db::Bot, why: &str)
     });
     // 同一顆、一小時最多一則（跟 `supervisor_owned::alert` 同一個慣例）：擋下來本身已經做完了。
     let key = notice_key(app, &bot.id, chrono::Utc::now()).await;
-    match app.db().push_inbox(&key, "child_retire_refused", None, Some(&bot.id), None, &payload).await {
+    match app.push_inbox(&key, "child_retire_refused", None, Some(&bot.id), None, &payload).await {
         Ok(_) => tracing::warn!(bot = %bot.name, role, why, "refused to retire an AGM child; patrol notified"),
         Err(e) => tracing::error!(bot = %bot.name, role, why, error = %e, "refused to retire an AGM child; the inbox row could not be written"),
     }
@@ -303,7 +304,7 @@ async fn notice_key(app: &impl crate::capabilities::Db, bot_id: &str, now: chron
           WHERE supervisor_id=? AND kind='child_retire_refused' AND bot_id=? AND created_at >= ?
           ORDER BY created_at DESC, rowid DESC LIMIT 1",
     )
-    .bind(<sqlx::SqlitePool as SupervisorRepo>::SUPERVISOR_ID)
+    .bind(<crate::state::App as SupervisorRepo>::SUPERVISOR_ID)
     .bind(bot_id)
     .bind(&since)
     .fetch_optional(app.db())

@@ -31,7 +31,7 @@ const MENU_2286_MIDDLE: &str = include_str!("claude_2.1.286_rewind_menu_middle.t
 /// 在上面那一則按 Enter 的確認頁：標題改成 `Confirm you want to restore to the point before…`（少了 `the conversation`）。
 const CONFIRM_2286: &str = include_str!("claude_2.1.286_rewind_confirm.txt");
 /// 7178806b 的實機畫面（帶樣式）：輸入列只有 dim 的「建議下一句」`Initialize git`。
-const SUGGESTION: &str = include_str!("../../../../daemon/src/lifecycle/fixtures/claude-2.1.280-prompt-suggestion.ansi");
+const SUGGESTION: &str = include_str!("../../../../crates/am-lifecycle/src/lifecycle/fixtures/claude-2.1.280-prompt-suggestion.ansi");
 
 const SECOND: &str = "Second prompt, line one.\nLine two mentions BANANA.\nReply with just OK.";
 const THIRD: &str = "Third prompt is deliberately long so that the rewind menu has to truncate it: it talks about cherries, dates, elderberries, figs, grapes, honeydew melons, kiwis, lemons, mangoes, nectarines, oranges, papayas and quinces, and then finally asks you to reply with just OK.";

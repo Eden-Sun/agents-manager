@@ -3,6 +3,90 @@
 
 pub mod runners;
 pub use am_base::config;
+#[cfg(test)]
+#[path = "../../crates/am-lifecycle/src/arc_ports.rs"]
+mod am_lifecycle_arc_ports;
+#[cfg(test)]
+#[path = "../../crates/am-lifecycle/src/ports_impl.rs"]
+mod am_lifecycle_ports_impl;
+#[cfg(not(test))]
+pub use am_lifecycle::{
+    ask_answers,
+    background_jobs,
+    blocked_reason,
+    child_alerts,
+    child_done,
+    codex_history,
+    codex_live,
+    codex_model_migration,
+    daemon_notice,
+    default_session,
+    dangerous_rm,
+    events,
+    handoff,
+    hookrecv,
+    judge,
+    lifecycle,
+    tui_prompts,
+    turn_error,
+};
+// App-backed unit tests still belong to the daemon crate. Under `cargo test`, compile the same
+// source modules at the crate root so their `crate::` paths and the App adapters share one set of
+// types. Production builds use the extracted crate re-exports above.
+#[cfg(test)]
+#[path = "../../crates/am-lifecycle/src/ask_answers.rs"]
+pub mod ask_answers;
+#[cfg(test)]
+#[path = "../../crates/am-lifecycle/src/background_jobs.rs"]
+pub mod background_jobs;
+#[cfg(test)]
+#[path = "../../crates/am-lifecycle/src/blocked_reason.rs"]
+pub mod blocked_reason;
+#[cfg(test)]
+#[path = "../../crates/am-lifecycle/src/child_alerts.rs"]
+pub mod child_alerts;
+#[cfg(test)]
+#[path = "../../crates/am-lifecycle/src/child_done.rs"]
+pub mod child_done;
+#[cfg(test)]
+#[path = "../../crates/am-lifecycle/src/codex_history.rs"]
+pub mod codex_history;
+#[cfg(test)]
+#[path = "../../crates/am-lifecycle/src/codex_live.rs"]
+pub mod codex_live;
+#[cfg(test)]
+#[path = "../../crates/am-lifecycle/src/codex_model_migration.rs"]
+pub mod codex_model_migration;
+#[cfg(test)]
+#[path = "../../crates/am-lifecycle/src/daemon_notice.rs"]
+pub mod daemon_notice;
+#[cfg(test)]
+#[path = "../../crates/am-lifecycle/src/default_session.rs"]
+pub mod default_session;
+#[cfg(test)]
+#[path = "../../crates/am-lifecycle/src/dangerous_rm.rs"]
+pub mod dangerous_rm;
+#[cfg(test)]
+#[path = "../../crates/am-lifecycle/src/events.rs"]
+pub mod events;
+#[cfg(test)]
+#[path = "../../crates/am-lifecycle/src/handoff.rs"]
+pub mod handoff;
+#[cfg(test)]
+#[path = "../../crates/am-lifecycle/src/hookrecv.rs"]
+pub mod hookrecv;
+#[cfg(test)]
+#[path = "../../crates/am-lifecycle/src/judge.rs"]
+pub mod judge;
+#[cfg(test)]
+#[path = "../../crates/am-lifecycle/src/lifecycle/mod.rs"]
+pub mod lifecycle;
+#[cfg(test)]
+#[path = "../../crates/am-lifecycle/src/tui_prompts.rs"]
+pub mod tui_prompts;
+#[cfg(test)]
+#[path = "../../crates/am-lifecycle/src/turn_error.rs"]
+pub mod turn_error;
 pub use am_base::{
     agent_relay,
     agy_remote,
@@ -99,24 +183,11 @@ pub use am_base::{
 
 #[cfg(test)]
 pub use am_base::race_point;
-mod ask_answers;
-mod identity_kind;
-mod blocked_reason;
-mod child_alerts;
-mod child_done;
-mod child_retire;
-pub mod daemon_notice;
-mod dangerous_rm;
-mod default_session;
-mod due_actions;
-mod events;
-mod handoff;
-mod tui_prompts;
-mod background_jobs;
-mod codex_live;
-mod codex_model_migration;
-mod panes;
 mod projection;
+mod identity_kind;
+mod child_retire;
+pub mod due_actions;
+mod panes;
 mod supervisor_owned;
 mod relay_auth;
 mod deleted_bots;
@@ -135,11 +206,11 @@ mod promote_intents;
 mod autostart_revive;
 mod claude_review;
 mod cli_update;
-mod codex_history;
 mod app_ports_p0;
 mod app_ports_p1;
 mod app_ports_p10;
 pub(crate) mod app_ports_p4;
+pub(crate) mod app_ports_p4obs;
 pub(crate) mod app_ports_p4send;
 pub(crate) mod app_ports_p4state;
 pub(crate) mod app_ports_p9;
@@ -158,9 +229,6 @@ mod git_quick;
 mod group;
 mod share;
 mod herdr_upgrade;
-mod judge;
-mod hookrecv;
-mod lifecycle;
 mod swap_window;
 mod mission;
 mod preview;
@@ -176,6 +244,8 @@ mod supervisor_evidence;
 mod startup;
 mod service_auth;
 #[cfg(test)]
+mod ingress_ports;
+#[cfg(test)]
 mod testing;
 #[cfg(test)]
 mod test_home;
@@ -183,7 +253,6 @@ mod test_home;
 mod timestamp_compat_tests;
 #[cfg(test)]
 mod same_ms_order_tests;
-mod turn_error;
 pub mod serve;
 pub mod cli;
 pub use cli::{Cli, Cmd};

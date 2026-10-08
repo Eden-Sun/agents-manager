@@ -39,9 +39,10 @@ pub fn hash(text: &str) -> String {
 /// question from whether it is urgent enough to restart anything.
 ///
 /// Kept in sync with the real `include_str!` sites by the test below.
-pub const BUILD_INPUTS: [&str; 8] = [
+pub const BUILD_INPUTS: [&str; 9] = [
     "daemon",
     "crates/am-base",
+    "crates/am-lifecycle",
     "web",
     "Cargo.toml",
     "Cargo.lock",

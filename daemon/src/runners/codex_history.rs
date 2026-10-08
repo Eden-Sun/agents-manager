@@ -10,7 +10,7 @@ use crate::config::LOCAL_HOST;
 use crate::db;
 use crate::state::App;
 
-impl CodexHistoryHost for Arc<App> {
+impl CodexHistoryHost for App {
     fn enabled(&self) -> impl Future<Output = bool> + Send + '_ {
         async move { self.cfg().get().await.codex_history.enabled }
     }
@@ -24,10 +24,10 @@ impl CodexHistoryHost for Arc<App> {
     }
 
     fn codex_home<'a>(&'a self, bot: &'a db::Bot) -> impl Future<Output = Option<PathBuf>> + Send + 'a {
-        async move { crate::app_ports_p13::codex_home(self, bot).await }
+        async move { crate::app_ports_p13::codex_home(&self.shared(), bot).await }
     }
 
     fn codex_program(&self) -> impl Future<Output = String> + Send + '_ {
-        async move { crate::tools::cached_path(self, LOCAL_HOST, "codex").await.unwrap_or_else(|| "codex".to_string()) }
+        async move { crate::tools::cached_path(&self.shared(), LOCAL_HOST, "codex").await.unwrap_or_else(|| "codex".to_string()) }
     }
 }

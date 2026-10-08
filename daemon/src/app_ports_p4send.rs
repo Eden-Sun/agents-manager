@@ -8,19 +8,15 @@
 use crate::attach::Attachment;
 use crate::codex_history::{HistoryConn, Mark};
 use crate::db;
-use crate::lifecycle::LcResult;
 use crate::lifecycle::send_now::ports::{
-    AttachConnPort, AttachSendPort, AttachTxPort, CodexSendPort, HandoffSendRepo, IdleSleepPort, MaintenancePort, PaneWatchPort,
-    SendEnvPort, ShareSendRepo, SupervisorSendRepo,
+    AssignmentState, AttachSendPort, CodexSendPort, HandoffSendRepo, IdleSleepPort, MaintenancePort, PaneWatchPort, SendEnvPort,
+    ShareSendRepo, SupervisorSendRepo, WindowHeld as SendWindowHeld, WindowUnreadable as SendWindowUnreadable,
 };
 use crate::state::App;
-use crate::supervisor::maintenance::{WindowHeld, WindowUnreadable};
 use am_core::{BotId, PortError};
 use am_ports::{BotLock, BotLockGuard};
 use anyhow::Result;
-use sqlx::{Sqlite, SqliteConnection, SqlitePool, Transaction};
 use std::future::Future;
-use std::sync::Arc;
 
 /// `am_ports::BotLock` 的 App 實作：就是 `App::bot_lock` 那把 per-bot 互斥鎖（同一格 `Arc<Mutex<()>>`）。
 /// 守衛持有 `OwnedMutexGuard`，所以 `App::retain_bot_locks` 看到的 `Arc` 計數跟原本握著 `lock` 的寫法一樣（有人握著或等著就不清）。
@@ -47,82 +43,82 @@ impl<A: crate::capabilities::BotLocks> BotLock for AppBotLock<'_, A> {
     }
 }
 
-impl MaintenancePort for Arc<App> {
+impl MaintenancePort for App {
     const UNREADABLE_RETRY_SECS: i64 = crate::supervisor::maintenance::UNREADABLE_RETRY_SECS;
-    async fn window_held(&self) -> std::result::Result<Option<WindowHeld>, WindowUnreadable> {
-        crate::supervisor::maintenance::window_held(self).await
+    async fn window_held(&self) -> std::result::Result<Option<SendWindowHeld>, SendWindowUnreadable> {
+        crate::supervisor::maintenance::window_held(self)
+            .await
+            .map(|window| window.map(|w| SendWindowHeld { resource: w.resource, owner: w.owner, fence: w.fence, expires_at: w.expires_at }))
+            .map_err(|e| SendWindowUnreadable { resource: e.resource, error: e.error })
     }
 }
 
-impl IdleSleepPort for Arc<App> {
+impl IdleSleepPort for App {
     async fn idle_sleep_wake(&self, bot_id: &str, why: &str) -> Result<bool> {
-        crate::supervisor::idle_sleep::wake(self, bot_id, why).await
+        crate::supervisor::idle_sleep::wake(&self.shared(), bot_id, why).await
     }
     async fn idle_sleep_wake_locked(&self, bot_id: &str, why: &str) -> Result<bool> {
-        crate::supervisor::idle_sleep::wake_locked(self, bot_id, why).await
+        crate::supervisor::idle_sleep::wake_locked(&self.shared(), bot_id, why).await
     }
 }
 
-impl SupervisorSendRepo for SqlitePool {
-    async fn assignment_by_turn(&self, turn_id: &str) -> Result<Option<crate::supervisor::store::Assignment>> {
-        crate::supervisor::store::assignment_by_turn(self, turn_id).await
+impl SupervisorSendRepo for App {
+    async fn assignment_by_turn(&self, turn_id: &str) -> Result<Option<AssignmentState>> {
+        Ok(crate::supervisor::store::assignment_by_turn(&self.db, turn_id).await?.map(|a| AssignmentState {
+            id: a.id,
+            status: a.status,
+            review_reason: a.review_reason,
+            error: a.error,
+        }))
     }
+
     async fn load_owned(&self) -> Result<crate::projection::Owned> {
-        crate::supervisor_owned::load(self).await
+        crate::supervisor_owned::load(&self.db).await
     }
 }
 
-impl HandoffSendRepo for SqlitePool {
+impl HandoffSendRepo for App {
     async fn bot_handed_off_to(&self, bot_id: &str) -> Result<Option<String>> {
-        crate::handoff::bot_handed_off_to(self, bot_id).await
+        crate::handoff::bot_handed_off_to(&self.db, bot_id).await
     }
-    async fn refuse_handed_off(&self, bot_id: &str) -> LcResult<()> {
-        crate::handoff::refuse(self, bot_id).await
+
+    async fn refuse_handed_off(&self, bot_id: &str) -> crate::lifecycle::LcResult<()> {
+        crate::handoff::refuse(&self.db, bot_id).await
     }
 }
 
-impl ShareSendRepo for SqlitePool {
+impl ShareSendRepo for App {
     async fn resolve_share_token(&self, token: &str) -> std::result::Result<Option<String>, sqlx::Error> {
-        crate::share::store::resolve(self, token).await
+        crate::share::store::resolve(&self.db, token).await
     }
+
     async fn touch_share(&self, bot_id: &str) {
-        crate::share::store::touch(self, bot_id).await
+        crate::share::store::touch(&self.db, bot_id).await
     }
+
     async fn is_share_bot(&self, bot_id: &str) -> std::result::Result<bool, sqlx::Error> {
-        crate::share::store::is_share_bot(self, bot_id).await
+        crate::share::store::is_share_bot(&self.db, bot_id).await
     }
 }
 
-impl AttachSendPort for Arc<App> {
+impl AttachSendPort for App {
     async fn resolve_attachments(&self, bot_id: &str, ids: &[String]) -> Result<Vec<Attachment>> {
-        crate::attach::resolve(self, bot_id, ids).await
+        crate::attach::resolve(&self.shared(), bot_id, ids).await
     }
     async fn bind_attachments(&self, message_id: &str, items: &[Attachment]) -> Result<()> {
-        crate::attach::bind(self, message_id, items).await
+        crate::attach::bind(&self.shared(), message_id, items).await
     }
 }
 
-impl AttachTxPort for Transaction<'_, Sqlite> {
-    async fn bind_attachments_tx(&mut self, message_id: &str, items: &[Attachment]) -> Result<()> {
-        crate::attach::bind_tx(self, message_id, items).await
-    }
-}
-
-impl AttachConnPort for SqliteConnection {
-    async fn unbind_attachment_message(&mut self, msg_id: &str, turn_id: &str) -> Result<()> {
-        crate::attach::unbind_message(self, msg_id, turn_id).await
-    }
-}
-
-impl PaneWatchPort for Arc<App> {
+impl PaneWatchPort for App {
     async fn unwatch_pane_on_session(&self, host: &str, session: &str, pane_id: &str) {
-        crate::events::unwatch_pane_on_session(self, host, session, pane_id).await
+        crate::events::unwatch_pane_on_session(&self.shared(), host, session, pane_id).await
     }
 }
 
-impl CodexSendPort for Arc<App> {
+impl CodexSendPort for App {
     async fn observe_codex_screen(&self, run: &db::Run, screen: &str) {
-        crate::runners::codex_model_migration::observe_screen(self, run, screen).await
+        crate::runners::codex_model_migration::observe_screen(&self.shared(), run, screen).await
     }
     async fn close_codex_picker(&self, client: &crate::herdr::HerdrClient, pane_id: &str) -> bool {
         crate::codex_live::close_picker(client, pane_id).await
@@ -131,19 +127,19 @@ impl CodexSendPort for Arc<App> {
         crate::codex_update::running_version_of(run_id)
     }
     async fn codex_history_mark(&self, bot: &db::Bot, run: &db::Run) -> Option<Mark> {
-        crate::codex_history::mark(self, bot, run).await
+        crate::codex_history::mark(&self.shared(), bot, run).await
     }
     async fn codex_prompt_landed(&self, mark: &Mark, conn: &mut Option<Box<dyn HistoryConn>>, text: &str) -> bool {
-        crate::codex_history::prompt_landed(self, mark, conn, text).await
+        crate::codex_history::prompt_landed(&self.shared(), mark, conn, text).await
     }
 }
 
-impl SendEnvPort for Arc<App> {
+impl SendEnvPort for App {
     async fn dangerous_rm_notify_once(&self, run: &db::Run, rm: &crate::tui_prompts::DangerousRm) -> bool {
-        crate::dangerous_rm::notify_once(self, run, rm).await
+        crate::dangerous_rm::notify_once(&self.shared(), run, rm).await
     }
     async fn note_keep_warm_prompt(&self, bot_id: &str, client_request_id: &str) {
-        crate::primary_keep_warm::note_prompt(self, bot_id, client_request_id).await
+        crate::primary_keep_warm::note_prompt(&self.shared(), bot_id, client_request_id).await
     }
 }
 

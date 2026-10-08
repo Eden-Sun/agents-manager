@@ -483,8 +483,8 @@ async fn get_advances_starting_to_running_and_emits() {
 /// 前端連不到它。三個端點都要帶這一格，前端才知道要把 iframe 換成說明，而不是給一片空白。
 #[tokio::test]
 async fn every_preview_body_says_whether_the_dev_server_is_reachable_from_elsewhere() {
-    let mut r = rig().await;
-    assert!(!r.e.app.allow_lan, "測試的 App 預設 allow_lan 關著");
+    let r = rig().await;
+    assert!(!r.e.app.allow_lan(), "測試的 App 預設 allow_lan 關著");
     let bot = running_bot(&r, "alfa").await;
     // 面板進來的第一次 GET 就是 off，那一份也要有。
     assert_eq!(get(&r.e.app, &bot).await.unwrap()["lan"], json!(false));
@@ -496,7 +496,7 @@ async fn every_preview_body_says_whether_the_dev_server_is_reachable_from_elsewh
     // DELETE 不走 `decorated`，自己補的那一份也要有。
     assert_eq!(stop(&r.e.app, &bot).await.unwrap()["lan"], json!(false));
 
-    Arc::get_mut(&mut r.e.app).expect("no other handle").allow_lan = true;
+    r.e.app.set_allow_lan_for_test(true);
     assert_eq!(get(&r.e.app, &bot).await.unwrap()["lan"], json!(true), "開著就是 true，不是寫死的");
 }
 
@@ -742,9 +742,9 @@ async fn a_refused_split_leaves_no_row_behind() {
 
 #[tokio::test]
 async fn the_lan_flag_widens_the_bind() {
-    let mut r = rig().await;
+    let r = rig().await;
     let bot = running_bot(&r, "alfa").await;
-    Arc::get_mut(&mut r.e.app).expect("no other handle").allow_lan = true;
+    r.e.app.set_allow_lan_for_test(true);
     start(&r.e.app, &bot, StartReq::default()).await.unwrap();
     assert!(r.fake.spawns()[0].2.contains("--host 0.0.0.0"));
 }
@@ -1510,10 +1510,10 @@ async fn a_loopback_dev_server_is_not_affected_by_the_bind_check() {
 /// `allow_lan` 開著＝使用者明講要對外（手機／Tailscale 連得到）：綁 `*` 照常 running。
 #[tokio::test]
 async fn the_lan_flag_allows_a_public_dev_server() {
-    let mut r = rig().await;
+    let r = rig().await;
     std::fs::remove_file(r.e.repo.join("web/vite.config.ts")).unwrap();
     write_pkg(&r.e.repo, Some("vite"));
-    Arc::get_mut(&mut r.e.app).expect("no other handle").allow_lan = true;
+    r.e.app.set_allow_lan_for_test(true);
     let bot = running_bot(&r, "alfa").await;
     let pane = start(&r.e.app, &bot, StartReq::default()).await.unwrap()["pane_id"].as_str().unwrap().to_string();
 

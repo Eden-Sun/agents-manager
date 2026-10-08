@@ -122,7 +122,7 @@
     /// 它跟 `⏵⏵` 那種一樣是固定行：不能帶給 parent，尾巴換了（`? for shortcuts`、多了背景 shell）也不能算成新問題。
     #[test]
     fn the_default_mode_row_stays_out_of_the_question() {
-        const MANUAL: &str = include_str!("lifecycle/fixtures/claude-2.1.288-manual-mode-finished.txt");
+        const MANUAL: &str = include_str!("../../crates/am-lifecycle/src/lifecycle/fixtures/claude-2.1.288-manual-mode-finished.txt");
         let q = question_from_screen(MANUAL).expect("畫面上有字");
         assert!(q.contains("DONE") && !q.contains("manual mode"), "{q}");
         let shortcuts = MANUAL.replace("· ← for agents", "· ? for shortcuts");

@@ -12,29 +12,29 @@ use axum::Json;
 use serde_json::{json, Value};
 use std::sync::Arc;
 
-impl HookHost for Arc<App> {
+impl HookHost for App {
     fn wake_hook_inbox(&self) {
         self.hook_inbox_wake.notify_one();
     }
 
     fn hook_bot_dir(&self, bot_id: &str) -> Result<std::path::PathBuf> {
-        App::bot_dir(self, bot_id)
+        App::bot_dir(&self.shared(), bot_id)
     }
 
     async fn after_turn_end(&self, body: &HookBody) {
-        crate::runners::ask_answers::after_turn_end(self, body).await
+        crate::runners::ask_answers::after_turn_end(&self.shared(), body).await
     }
 
     async fn background_stop(&self, run: &db::Run, payload: &Value) {
-        crate::runners::background_hook::on_stop(self, run, payload).await
+        crate::runners::background_hook::on_stop(&self.shared(), run, payload).await
     }
 
     async fn transcript_allowed(&self, bot: &db::Bot, path: &str) -> bool {
-        crate::app_ports_p5::transcript_allowed(self, bot, path).await
+        crate::app_ports_p5::transcript_allowed(&self.shared(), bot, path).await
     }
 
     async fn local_transcript_allowed(&self, bot: &db::Bot, path: &str) -> bool {
-        crate::app_ports_p5::local_transcript_allowed(self, bot, path).await
+        crate::app_ports_p5::local_transcript_allowed(&self.shared(), bot, path).await
     }
 }
 

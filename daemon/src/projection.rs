@@ -8,54 +8,15 @@ use crate::db;
 use anyhow::{bail, Result};
 use rand::Rng;
 use sqlx::SqlitePool;
-use std::collections::{HashMap, HashSet};
+use std::collections::HashSet;
 use std::panic::Location;
 
-#[derive(Debug, Default, Clone)]
-pub struct Owned {
-    bot_ids: HashSet<String>,
-    project_ids: HashSet<String>,
-    roles: HashMap<String, &'static str>,
-}
+pub use am_lifecycle::projection::Owned;
 
-impl Owned {
-    pub fn owns(&self, b: &db::Bot) -> bool {
-        self.bot_ids.contains(&b.id)
-            || b.parent_bot_id.as_ref().is_some_and(|p| self.bot_ids.contains(p))
-            || self.project_ids.contains(&b.project_id)
-    }
-
-    pub fn role(&self, b: &db::Bot) -> &'static str {
-        if let Some(r) = self.roles.get(&b.id) {
-            r
-        } else if b.parent_bot_id.as_ref().is_some_and(|p| self.bot_ids.contains(p)) {
-            "AGM 開出去的子 agent"
-        } else {
-            "AGM 專案裡的常駐工人"
-        }
-    }
-
-    pub(crate) fn add_bot(&mut self, id: String, role: &'static str) {
-        self.roles.entry(id.clone()).or_insert(role);
-        self.bot_ids.insert(id);
-    }
-
-    pub(crate) fn add_project(&mut self, id: String) {
-        self.project_ids.insert(id);
-    }
-
-    pub(crate) fn owns_project_id(&self, id: &str) -> bool {
-        self.project_ids.contains(id)
-    }
-}
-
-/// 投影對 AGM 自己的 bot／專案（`supervisor_owned`）的窄介面：讀「哪些列是 AGM 的」與推一則 `ops_alert`。
-/// 實作在 `SqlitePool` 上（repo context），委派在 `app_ports_p2.rs`，projection 不直接呼叫 supervisor。
+/// Daemon composition's access to supervisor ownership projection and alerts.
 #[allow(async_fn_in_trait)]
 pub trait SupervisorOwnedSource {
-    /// `supervisor_owned::load`。
-    async fn load_owned(&self) -> Result<Owned>;
-    /// `supervisor_owned::alert`：推 `ops_alert` 給巡檢（同一批同一小時收斂成一則）。
+    async fn load_owned(&self) -> anyhow::Result<Owned>;
     async fn ops_alert(&self, reason: &str, subject: &str, detail: &str);
 }
 

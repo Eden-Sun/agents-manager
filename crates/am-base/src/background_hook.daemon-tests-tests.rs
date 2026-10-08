@@ -5,7 +5,14 @@
     use crate::testing as tt;
 
     fn fixture() -> Value {
-        let path = format!("{}/src/lifecycle/fixtures/claude-2.1.287-stop-background-tasks.json", env!("CARGO_MANIFEST_DIR"));
+        let manifest = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+        let name = "claude-2.1.287-stop-background-tasks.json";
+        let candidates = [
+            manifest.join("src/lifecycle/fixtures"),
+            manifest.join("../crates/am-lifecycle/src/lifecycle/fixtures"),
+            manifest.join("../am-lifecycle/src/lifecycle/fixtures"),
+        ];
+        let path = candidates.iter().map(|dir| dir.join(name)).find(|path| path.is_file()).expect("fixture exists");
         serde_json::from_str(&std::fs::read_to_string(path).unwrap()).unwrap()
     }
 

@@ -189,7 +189,7 @@ mod tests {
         ("group.rs", include_str!("../group.rs")),
         ("agent_relay.rs", include_str!("../../../crates/am-base/src/agent_relay.rs")),
         ("relay_auth.rs", include_str!("../relay_auth.rs")),
-        ("handoff.rs", include_str!("../handoff.rs")),
+        ("handoff.rs", include_str!("../../../crates/am-lifecycle/src/handoff.rs")),
     ];
 
     /// 每一行是否落在 `#[cfg(test)]` 項目裡（從屬性那行到項目的大括號收尾）。

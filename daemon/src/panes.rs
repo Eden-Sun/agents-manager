@@ -232,15 +232,7 @@ pub fn project_for_cwd<'a>(cwd: &str, projects: &'a [(String, String)]) -> Optio
         .map(|(id, _)| id.as_str())
 }
 
-/// 一輪掃描的結果。`complete=false`＝有 pane 的事實這一輪讀不到（行程 dump 或 herdr 失敗）：那幾列的分類與
-/// 歸屬沿用上一輪，呼叫端這一輪不跑 GC 與通知（§6.5e：讀不到不等於是空的）。
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct ScanOutcome {
-    pub panes: usize,
-    pub complete: bool,
-    /// 這一輪選出來的 scratch 名字還不是 `scratch_name`：呼叫端去 herdr 改名（純顯示）。
-    pub rename_scratch: Option<String>,
-}
+pub use crate::events::ports::ScanOutcome;
 
 fn is_agent_pane(p: &Value) -> bool {
     p.get("agent").and_then(Value::as_str).is_some_and(|a| !a.is_empty())

@@ -4,6 +4,16 @@
     use crate::state::App;
     use std::sync::Arc;
 
+    fn fixture(name: &str) -> String {
+        let manifest = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+        let candidates = [
+            manifest.join("src/lifecycle/fixtures"),
+            manifest.join("../crates/am-lifecycle/src/lifecycle/fixtures"),
+            manifest.join("../am-lifecycle/src/lifecycle/fixtures"),
+        ];
+        let path = candidates.iter().map(|dir| dir.join(name)).find(|path| path.is_file()).expect("fixture exists");
+        std::fs::read_to_string(path).unwrap()
+    }
 
     /// 2026-09-12 使用者實測：跑著 2.1.267、磁碟上 2.1.269。
     #[test]
@@ -136,11 +146,7 @@
         let e = crate::testing::env().await;
         let bot = crate::testing::claude_bot(&e.app, &e.project_id, "bg").await;
         let run = crate::testing::fake_run(&e.app, &bot.id).await;
-        let screen = std::fs::read_to_string(format!(
-            "{}/src/lifecycle/fixtures/claude-2.1.281-background-shell.txt",
-            env!("CARGO_MANIFEST_DIR")
-        ))
-        .unwrap();
+        let screen = fixture("claude-2.1.281-background-shell.txt");
         e.herdr.set_screen(&format!("pane-{}", bot.id), &screen);
         let mut rx = e.app.subscribe();
 
@@ -208,11 +214,7 @@
         assert_eq!(crate::background_jobs::known(&e.app, &run), None);
         assert!(state_run(&e.app).is_null(), "沒觀察過：null");
 
-        let screen = std::fs::read_to_string(format!(
-            "{}/src/lifecycle/fixtures/claude-2.1.281-no-background-shell.txt",
-            env!("CARGO_MANIFEST_DIR")
-        ))
-        .unwrap();
+        let screen = fixture("claude-2.1.281-no-background-shell.txt");
         e.herdr.set_screen(&format!("pane-{}", bot.id), &screen);
         let mut rx = e.app.subscribe();
         sweep(&e.app).await;
@@ -231,11 +233,7 @@
     async fn the_first_observation_of_many_runs_pushes_once_each_and_then_stays_quiet() {
         let _serial = serial().lock().await;
         let e = crate::testing::env().await;
-        let screen = std::fs::read_to_string(format!(
-            "{}/src/lifecycle/fixtures/claude-2.1.281-no-background-shell.txt",
-            env!("CARGO_MANIFEST_DIR")
-        ))
-        .unwrap();
+        let screen = fixture("claude-2.1.281-no-background-shell.txt");
         let mut bots = Vec::new();
         for i in 0..5 {
             let bot = crate::testing::claude_bot(&e.app, &e.project_id, &format!("storm{i}")).await;

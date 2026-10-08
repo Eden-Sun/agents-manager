@@ -105,7 +105,7 @@
             assert!(!is_mode_row(reply), "{reply}");
         }
         // 2.1.288 default 模式真畫面：最底那一行就是模式列。
-        let fixture = include_str!("../../../../daemon/src/lifecycle/fixtures/claude-2.1.288-manual-mode-finished.txt");
+        let fixture = include_str!("../../../../crates/am-lifecycle/src/lifecycle/fixtures/claude-2.1.288-manual-mode-finished.txt");
         let last = fixture.lines().rev().find(|l| !l.trim().is_empty()).unwrap();
         assert!(is_mode_row(last), "{last:?}");
     }
