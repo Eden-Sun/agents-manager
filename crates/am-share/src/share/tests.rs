@@ -1251,6 +1251,39 @@ async fn share_downloads_are_capped_per_share_and_globally() {
     drop(held);
 }
 
+/// #906：下載與列表驗完 token 就放掉 per-bot 互斥鎖——慢的 I/O（掃描、SVG 合成）進行中，hook／送訊息用的同一把鎖是自由的。
+#[tokio::test]
+async fn share_downloads_and_listings_do_not_hold_the_bot_lock_during_io() {
+    use portal::PortalEnv as _;
+    let e = tt::env().await;
+    let b = restricted_bot(&e.app, &e.project_id, "lock-free-io").await;
+    let token = shared(&e.app, &b.id).await;
+    let outbox = crate::outbox::ensure(&e.app.data_dir, &b.id).unwrap();
+    std::fs::write(outbox.join("a.txt"), "hello").unwrap();
+    let base = serve(portal::router(e.app.clone())).await;
+    // 兩種請求都會經過這一點（驗完 token、放鎖之後、開始 I/O 之前）：在這裡試著拿同一把 bot 鎖。掛點是一次性的，每個請求各掛一次。
+    let probe = || {
+        let free = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let (app, free_hook, bot) = (e.app.clone(), free.clone(), b.id.clone());
+        crate::lifecycle::race_point::arm("share_io_after_authority_released", &b.id, move || async move {
+            let lock = app.bot_mutex(&bot).await;
+            let got = lock.try_lock().is_ok();
+            free_hook.store(got, std::sync::atomic::Ordering::SeqCst);
+        });
+        free
+    };
+    let c = client();
+    let free = probe();
+    let r = c.get(format!("{base}/s/{token}/api/files/a.txt")).send().await.unwrap();
+    assert_eq!(r.status(), 200);
+    assert_eq!(r.text().await.unwrap(), "hello");
+    assert!(free.load(std::sync::atomic::Ordering::SeqCst), "下載進行 I/O 時 bot 鎖要是自由的");
+    let free = probe();
+    let r = c.get(format!("{base}/s/{token}/api/files")).send().await.unwrap();
+    assert_eq!(r.status(), 200);
+    assert!(free.load(std::sync::atomic::Ordering::SeqCst), "列表掃描時 bot 鎖要是自由的");
+}
+
 /// 分享用 bot 的 outbox 不給 AGM 的 gc 清（使用者 2026-10-04：end user 隔天才回來拿是常態）：建立時就放標記、開機補回、
 /// 刪掉才拿掉；主 UI 的清單與分享頁都不給倒數。一般 bot 照舊 1 小時。
 #[tokio::test]
