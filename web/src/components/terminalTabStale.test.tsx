@@ -3,7 +3,7 @@
  */
 import test, { after, afterEach, before } from 'node:test'
 import assert from 'node:assert/strict'
-import { useState } from 'react'
+import { useEffect, useState } from 'react'
 import { act, mount, setupDom, teardownDom, unmountAll, until } from '../testing/domHarness'
 import { resetStoreForTest, useStore } from '../store/store'
 import type { TerminalSnapshot } from '../api/types'
@@ -35,12 +35,15 @@ function fakeReadTerminal() {
   return { calls, read }
 }
 
-let switchBot: (id: string) => void = () => {}
+const control = { switchBot: (_id: string) => {} }
 function Harness() {
   const [id, setId] = useState('A')
-  switchBot = setId
+  useEffect(() => {
+    control.switchBot = setId
+  }, [setId])
   return <TerminalTab botId={id} />
 }
+const switchBot = (id: string) => control.switchBot(id)
 
 const shown = () => document.querySelector('pre.term')?.textContent ?? ''
 const chip = () => document.querySelector('.term-pane-chip')?.textContent ?? ''
