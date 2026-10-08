@@ -603,6 +603,68 @@ async fn svg_checker_reminds_again_on_regression_after_repair() {
 }
 
 #[tokio::test]
+async fn invalid_utf8_svg_gets_reminder_and_recovers_when_repaired() {
+    let e = tt::env().await;
+    let b = restricted_bot(&e.app, &e.project_id, "pub").await;
+    let _token = shared(&e.app, &b.id).await;
+    let outbox = crate::outbox::ensure(&e.app.data_dir, &b.id).unwrap();
+
+    // 1. 建一個結構正確但文字節點含 0xFF 且帶 encoding="UTF-8" declaration 的 .svg
+    let broken_v1 = b"<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<svg xmlns=\"http://www.w3.org/2000/svg\">\n<text x=\"10\" y=\"20\">\xFF</text>\n</svg>";
+    std::fs::write(outbox.join("card.svg"), broken_v1).unwrap();
+
+    // 2. check_file 必須回 Some(SvgError)
+    for _ in 0..2 {
+        let err = super::svg_check::check_file(&e.app, &b.id, "card.svg").await.expect("非 UTF-8 壞檔");
+        assert_eq!((err.line, err.col), (3, 21));
+        assert!(err.message.contains("檔案不是合法 UTF-8 SVG"));
+    }
+
+    // 3. 第一次應建立一筆 repair prompt
+    let reminders: Vec<(String, Option<String>)> = sqlx::query_as(
+        "SELECT content, relay_from FROM messages WHERE role = 'user' AND content LIKE '%card.svg%'"
+    )
+    .fetch_all(&e.app.db)
+    .await
+    .unwrap();
+    assert_eq!(reminders.len(), 1, "V1 只建立一筆 reminder");
+    assert!(reminders[0].0.contains("檔案不是合法 UTF-8 SVG"));
+    assert!(reminders[0].0.contains("第 3 行第 21 欄格式壞了"));
+    assert_eq!(reminders[0].1.as_deref(), Some(crate::agent_relay::DAEMON_SENDER));
+
+    // 4. 修成合法 UTF-8 後應變 healthy
+    let valid_v2 = "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<svg xmlns=\"http://www.w3.org/2000/svg\">\n<text x=\"10\" y=\"20\">ÿ</text>\n</svg>";
+    std::fs::write(outbox.join("card.svg"), valid_v2).unwrap();
+    assert_eq!(super::svg_check::check_file(&e.app, &b.id, "card.svg").await, None, "修成合法 UTF-8 變 healthy");
+    let count_v2: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM messages WHERE role = 'user' AND content LIKE '%card.svg%'")
+        .fetch_one(&e.app.db)
+        .await
+        .unwrap();
+    assert_eq!(count_v2, 1, "修好後無新增 reminder");
+
+    // 模擬 bot 結束了修復回合（turn 結束，隊列清空）
+    sqlx::query("UPDATE turns SET status='failed' WHERE status='queued'").execute(&e.app.db).await.unwrap();
+
+    // 5. 再寫入另一個非法 UTF-8 版本時應重新提醒
+    let broken_v3 = b"<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<svg xmlns=\"http://www.w3.org/2000/svg\">\n<text x=\"10\" y=\"20\">\xFE</text>\n</svg>";
+    std::fs::write(outbox.join("card.svg"), broken_v3).unwrap();
+    for _ in 0..2 {
+        let err = super::svg_check::check_file(&e.app, &b.id, "card.svg").await.expect("再次改壞的非 UTF-8 檔");
+        assert_eq!((err.line, err.col), (3, 21));
+        assert!(err.message.contains("檔案不是合法 UTF-8 SVG"));
+    }
+
+    let reminders_v3: Vec<(String, Option<String>)> = sqlx::query_as(
+        "SELECT content, relay_from FROM messages WHERE role = 'user' AND content LIKE '%card.svg%' ORDER BY id ASC"
+    )
+    .fetch_all(&e.app.db)
+    .await
+    .unwrap();
+    assert_eq!(reminders_v3.len(), 2, "重新提醒：總共 2 筆 reminder");
+    assert!(reminders_v3[1].0.contains("檔案不是合法 UTF-8 SVG"));
+}
+
+#[tokio::test]
 async fn svg_check_exceeding_max_bytes_is_skipped_without_reading_or_reminder() {
     let e = tt::env().await;
     let b = restricted_bot(&e.app, &e.project_id, "pub").await;

@@ -6,7 +6,8 @@
 //! - **什麼時候查**：分享頁讀檔案清單（`GET /s/{token}/api/files`）時，背景順便查清單上的 `.svg`。不另寫 watcher：daemon 沒有
 //!   檔案監看的基礎建設，而分享頁正好在「載入、SSE resync、每一輪 bot 回完」時重讀清單——就是 end user 會看到那張圖的時候。
 //!   同一個檔的同一版（mtime＋大小）只查一次。
-//! - **查什麼**：quick-xml 管標籤配對與重複屬性；它放過的幾種這裡自己補——屬性之間少空格、`&` 不是合法的實體（有 DOCTYPE 的不查）、
+//! - **查什麼**：先驗證 raw bytes 為合法 UTF-8（非法 UTF-8 不用 lossy 抹平，直接報錯）；quick-xml 管標籤配對與重複屬性；
+//!   它放過的幾種這裡自己補——屬性之間少空格、`&` 不是合法的實體（有 DOCTYPE 的不查）、
 //!   標籤到檔尾沒結束、根元素之後還有東西。
 //! - **怎麼講**：壞了就以 daemon 名義（`relay_from = daemon`，擁有者那一類）送一則**後台**訊息給那顆 bot：分享頁不顯示它，也不顯示
 //!   bot 對它的回覆（`share_reply_visible` 沒標）。同一個檔同一版（含錯誤與壞掉世代）只送一次——`client_request_id` 由 bot＋檔名＋版本指紋＋錯誤決定，
@@ -180,6 +181,20 @@ pub(crate) fn check(text: &str) -> Result<(), SvgError> {
     Ok(())
 }
 
+/// 是不是合法 UTF-8 且 well-formed XML 的 SVG。先嚴格檢查 UTF-8，再交給 quick-xml。
+pub(crate) fn check_bytes(bytes: &[u8]) -> Result<(), SvgError> {
+    let text = std::str::from_utf8(bytes).map_err(|e| {
+        let valid = std::str::from_utf8(&bytes[..e.valid_up_to()]).unwrap_or("");
+        let (line, col) = line_col(valid, e.valid_up_to());
+        SvgError {
+            line,
+            col,
+            message: "檔案不是合法 UTF-8 SVG".into(),
+        }
+    })?;
+    check(text)
+}
+
 /// 給 bot 的那一則（後台，分享頁看不到）。
 pub(crate) fn reminder(name: &str, e: &SvgError) -> String {
     format!(
@@ -293,8 +308,7 @@ pub(crate) async fn check_file<H: SvgCheckEnv>(app: &Arc<H>, bot_id: &str, name:
     if read.data.len() > MAX_CHECK_BYTES {
         return None;
     }
-    let text = String::from_utf8_lossy(&read.data);
-    let e = match check(&text) {
+    let e = match check_bytes(&read.data) {
         Ok(()) => {
             mark_healthy(bot_id, name);
             return None;
@@ -404,5 +418,24 @@ mod tests {
         assert_ne!(base, version_fingerprint(1, 2, 4, 4, b"broken"), "ctime 改變表示檔案曾被改寫");
         assert_ne!(base, version_fingerprint(1, 2, 3, 5, b"broken"), "修好後的新壞掉 episode 要有新指紋");
         assert_ne!(base, version_fingerprint(1, 2, 3, 4, b"other"), "內容改變要有新指紋");
+    }
+
+    #[test]
+    fn invalid_utf8_svg_bytes_are_caught_before_xml_parsing() {
+        // 沒有 XML 宣告，含有 0xFF 的文字
+        let broken = b"<svg xmlns=\"http://www.w3.org/2000/svg\"><text>\xFF</text></svg>";
+        let err = check_bytes(broken).expect_err("0xFF 不是合法 UTF-8");
+        assert_eq!((err.line, err.col), (1, 47));
+        assert_eq!(err.message, "檔案不是合法 UTF-8 SVG");
+
+        // 有 encoding="UTF-8" declaration，含有 0xFF
+        let broken_decl = b"<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<svg xmlns=\"http://www.w3.org/2000/svg\"><text>\xFF</text></svg>";
+        let err2 = check_bytes(broken_decl).expect_err("含宣告仍應擋下非 UTF-8 bytes");
+        assert_eq!((err2.line, err2.col), (2, 47));
+        assert_eq!(err2.message, "檔案不是合法 UTF-8 SVG");
+
+        // 合法 UTF-8（含 UTF-8 多位元組字元 ÿ = \xC3\xBF 與中文）
+        let valid_decl = "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<svg xmlns=\"http://www.w3.org/2000/svg\"><text>ÿ 嗨</text></svg>";
+        assert_eq!(check_bytes(valid_decl.as_bytes()), Ok(()));
     }
 }

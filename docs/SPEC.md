@@ -5073,7 +5073,7 @@ daemon 要能在 Linux（目標：Ubuntu，外部編譯主機 192.168.1.46，#67
   - **載不出來≠不能分享**（使用者 2026-10-04：ai-cc 改圖把 `y="380"font-size` 寫壞，長輩看到「沒辦法分享」以為圖不能分享）：這一版載不出來（不是合法 XML——先用 `DOMParser`
     判、解碼失敗、抓檔失敗）只說「**這張圖還在修，請稍等**」，不給按鈕、縮圖顯示佔位；檔案換版（mtime／大小變了，SSE resync 或重新整理重抓清單）就重試。「沒辦法分享」只留給引用外部資源。
   - **壞掉的 SVG 自動提醒 bot**（`share::svg_check`）：分享頁讀檔案清單（`GET /s/{token}/api/files`）時，背景查清單上每個 `.svg` 的新版（同一版 mtime＋大小只查一次）——
-    不另寫 watcher：daemon 沒有檔案監看的基礎建設，而分享頁正好在載入、SSE resync、每輪 bot 回完時重讀清單，就是 end user 會看到圖的時候。quick-xml 管標籤配對與重複屬性，
+    不另寫 watcher：daemon 沒有檔案監看的基礎建設，而分享頁正好在載入、SSE resync、每輪 bot 回完時重讀清單，就是 end user 會看到圖的時候。先驗證 raw bytes 為合法 UTF-8（非法 UTF-8 不用 lossy 抹平，直接報錯，issue #866）；quick-xml 管標籤配對與重複屬性，
     它放過的自己補：屬性之間少空格、`&` 不是合法實體（有 DOCTYPE 不查）、屬性值裡有 `<`、標籤到檔尾沒結束、根元素之後還有東西、找不到根。壞了就以 daemon 名義
     （`relay_from = daemon`）送一則後台訊息「圖檔 X 第 N 行第 M 欄格式壞了：<錯誤>，請修好」——分享頁看不到它，也看不到 bot 對它的回覆（沒標 `share_reply_visible`）；
     bot 沒在跑就先起來再送。同一個檔同一版本同一錯誤只送一次：`client_request_id` 由 bot＋檔名＋版本指紋（含 inode／奈秒 mtime 與 ctime／內容／壞掉世代）＋錯誤決定，已經有那一筆 turn 就不重複送；修好後若再度改壞（新版本／新 episode）會重新提醒（issue #845）；沒送成（例如分享使用者的訊息正排著）下次讀清單再試。
