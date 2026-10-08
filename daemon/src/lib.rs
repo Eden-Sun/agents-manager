@@ -167,6 +167,7 @@ pub use am_base::{
     remote_health,
     remote_purge,
     remote_trash,
+    request_id,
     restart_coalesce,
     restart_intents,
     rewind,
