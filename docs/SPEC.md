@@ -2405,7 +2405,8 @@ pt-hub = ["~/project/pt/CLAUDE.md", "~/project/pt/AGENTS.md"]      # 多份照�
   `last_api_at` 與 `cache_kept_warm_at` 判斷 cache 是否仍熱；若 60 分內沒保溫到，cache 涼掉了就不補送。
 - **110 分（`WARM_COMPACT_AFTER_SECS`）**：年齡 ≥ 110 分、這個錨點之後還沒熱壓過、距離 §6.5j 的 `max(last_api_at, cache_kept_warm_at)` 未滿 58 分鐘
   （cache TTL 到期前留 2 分鐘餘裕），**而且 context 用量超過門檻**（依 kind：claude `WARM_COMPACT_MIN_CONTEXT_PCT_CLAUDE` ＝ 30%、codex `WARM_COMPACT_MIN_CONTEXT_PCT_CODEX` ＝ 50%，`warm_compact_min_context_pct`；使用者 2026-10-05：用量小的 context 重建 cache 很便宜，不值得壓。
-  codex 視窗 258K、涼掉重讀沒有寫入加價，損益點約 35%，所以門檻比 claude 高），才呼叫 `lifecycle::compact`（`/compact`，與 context 旁的壓縮鈕同一支）；成功後在對話裡記一則系統訊息
+  codex 視窗 258K、涼掉重讀沒有寫入加價，損益點約 35%，所以門檻比 claude 高），才呼叫 `lifecycle::compact`（`/compact`，與 context 旁的壓縮鈕同一支）。
+  **保溫與熱壓都綁計畫當時的 run**（#872）：送出時帶 `expected_run_id`，在 bot 鎖內比對 active run id 與 `idle` 狀態（保溫另看有無排隊回合），不同就不送（409 `superseded_run`，一個鍵都不打），下一輪依新 run 重判。成功後在對話裡記一則系統訊息
   （「主力熱壓：…」，同時是持久的「這個錨點熱壓過了」記號；改名前的「主力 cache 到點壓縮：…」舊訊息一樣認得）。cache 已涼就不熱壓；等真的活動更新 `last_api_at` 後重新計時。
   **context 用量**（`primary_keep_warm::context_used_pct`）：claude 讀 statusLine 的 `context_window.used_percentage`（`runs.status_json`），codex 讀 rollout 最近一筆 `token_count`（input ÷ 視窗，`prompt_cache::codex_context_pct`）；
   **讀不到（剛開的 session 是 null、codex 還沒讀到 rollout、視窗大小不明）保守不熱壓**。用量不超過門檻（claude ≤ 30%、codex ≤ 50%，剛好等於也不壓）到 110 分時不熱壓，**也不再保溫**（110 分已超過 TTL，保溫只在 58 分到 TTL 之間送），就讓它涼掉，直到真的活動重新計時。

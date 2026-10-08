@@ -415,7 +415,7 @@ pub async fn prompt_from_api(
     // 「清掉再送我這則」：先清掉框裡使用者確認過的那段（`composer_draft::clear`），框空了才打字。
     clear_draft: Option<&str>,
 ) -> LcResult<PromptOut> {
-    prompt_inner(app, bot_id, text, client_request_id, None, None, attachment_ids, relay, false, false, Admission::Gated, send_now, clear_draft, None).await
+    prompt_inner(app, bot_id, text, client_request_id, None, None, attachment_ids, relay, false, false, Admission::Gated, send_now, clear_draft, None, None).await
 }
 
 /// `POST /prompt` with `queue_if_busy:true`: queue a user prompt only while the active run is busy.
@@ -444,6 +444,7 @@ pub async fn prompt_from_api_queue_if_busy(
         Admission::Gated,
         send_now,
         clear_draft,
+        None,
         None,
     )
     .await
@@ -475,6 +476,7 @@ pub async fn prompt_from_share_with_token(
         false,
         None,
         Some(token),
+        None,
     )
     .await
 }
@@ -491,7 +493,7 @@ pub async fn prompt_relayed_queueable(
     client_request_id: &str,
     relay_from: Option<&str>,
 ) -> LcResult<PromptOut> {
-    prompt_inner(app, bot_id, text, client_request_id, None, None, &[], RelaySrc::trusted(relay_from), true, false, Admission::Gated, false, None, None).await
+    prompt_inner(app, bot_id, text, client_request_id, None, None, &[], RelaySrc::trusted(relay_from), true, false, Admission::Gated, false, None, None, None).await
 }
 
 /// 排一筆 `queued` turn 等下一回合（只有 AGM 派工走這裡）。
@@ -823,7 +825,19 @@ pub async fn prompt_grouped(
     attachment_ids: &[String],
     relay_from: Option<&str>,
 ) -> LcResult<PromptOut> {
-    prompt_inner(app, bot_id, text, client_request_id, group_id, deliver, attachment_ids, RelaySrc::trusted(relay_from), false, false, Admission::Gated, false, None, None).await
+    prompt_inner(app, bot_id, text, client_request_id, group_id, deliver, attachment_ids, RelaySrc::trusted(relay_from), false, false, Admission::Gated, false, None, None, None).await
+}
+
+/// 主力保溫專用（#872）：跟 [`prompt`] 同一條路，但在 bot 鎖內確認 active run 仍是計畫時的那顆、仍 idle、沒有排隊回合，
+/// 否則回 409 `superseded_run`（一個鍵都不打、不建 turn），由呼叫端下一輪依新 run 重判。
+pub async fn prompt_expect_run(
+    app: &impl LcHost,
+    bot_id: &str,
+    text: &str,
+    client_request_id: &str,
+    expected_run_id: &str,
+) -> LcResult<PromptOut> {
+    prompt_inner(app, bot_id, text, client_request_id, None, None, &[], RelaySrc::trusted(None), false, false, Admission::Gated, false, None, None, Some(expected_run_id)).await
 }
 
 /// 插隊送出（issue #103）：照舊寫 turn／訊息進資料庫，但**不等 idle**——對 pane 送 claude 2.1.275 的
@@ -853,7 +867,7 @@ pub async fn prompt_control_plane(
     client_request_id: &str,
     relay_from: Option<&str>,
 ) -> LcResult<PromptOut> {
-    prompt_inner(app, bot_id, text, client_request_id, None, None, &[], RelaySrc::trusted(relay_from), false, false, Admission::ControlPlane, false, None, None).await
+    prompt_inner(app, bot_id, text, client_request_id, None, None, &[], RelaySrc::trusted(relay_from), false, false, Admission::ControlPlane, false, None, None, None).await
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -879,6 +893,8 @@ async fn prompt_inner(
     clear_draft: Option<&str>,
     // 分享 capability 必須在 bot 鎖裡重驗，避免撤銷前通過的請求之後才送達。
     share_token: Option<&str>,
+    // 主力保溫（#872）：計畫當時的 active run。鎖內 active run 已換掉、不再 idle 或有排隊回合就不送（`superseded_run`）。
+    expected_run: Option<&str>,
 ) -> LcResult<PromptOut> {
     let deliver = deliver.unwrap_or(text);
     #[cfg(all(test, feature = "daemon-test-harness"))]
@@ -966,6 +982,17 @@ async fn prompt_inner(
     })?;
     if run.state != "running" {
         return Err(LcError::conflict("run is not running", json!({"run_id": run.id, "state": run.state})));
+    }
+    if let Some(want) = expected_run {
+        if run.id != want
+            || run.agent_status != "idle"
+            || db::queued_turn_for_bot(app.db(), bot_id).await.map_err(up)?.is_some()
+        {
+            return Err(LcError::conflict(
+                "superseded_run",
+                json!({"expected_run_id": want, "run_id": run.id, "agent_status": run.agent_status}),
+            ));
+        }
     }
     if queue_awaits_idle {
         let in_flight = db::in_flight_turn(app.db(), &run.id).await.map_err(up)?;
@@ -1374,6 +1401,65 @@ mod prompt_tests {
         // These exercise the agent.prompt path, which needs an agent herdr has a session bound to.
         env.herdr.set_agent("prompt-test", "pane-prompt-test", true);
         Fixture { env, bot_id, conv, run_id }
+    }
+
+    /// 把 fixture 的 run A 收掉、起一顆新的 active run B，回 B 的 id（#872：計畫綁 A，送出時 active 已是 B）。
+    async fn supersede_run(f: &Fixture) -> String {
+        let app = &f.env.app;
+        sqlx::query("UPDATE runs SET state = 'exited', ended_at = ? WHERE id = ?").bind(db::now()).bind(&f.run_id).execute(&app.db).await.unwrap();
+        tt::fake_run(app, &f.bot_id).await
+    }
+
+    /// #872：計畫綁 run A、鎖內 active 已是 B → 409 `superseded_run`，沒有 turn、沒有使用者訊息、herdr 沒收到任何字或鍵。
+    #[tokio::test]
+    async fn prompt_expect_run_refuses_a_different_active_run() {
+        let f = fixture("claude", "test").await;
+        let app = f.env.app.clone();
+        let run_b = supersede_run(&f).await;
+
+        let err = prompt_expect_run(&app, &f.bot_id, "any updates", "keep-warm:anchor-a", &f.run_id)
+            .await
+            .expect_err("active run 已換成 B，不能送進去");
+        match err {
+            LcError::Conflict(v) => {
+                assert_eq!(v["reason"], "superseded_run", "{v}");
+                assert_eq!((v["expected_run_id"].as_str(), v["run_id"].as_str()), (Some(f.run_id.as_str()), Some(run_b.as_str())));
+            }
+            other => panic!("{other:?}"),
+        }
+        let turns: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM turns WHERE conversation_id=?").bind(&f.conv).fetch_one(&app.db).await.unwrap();
+        let messages: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM messages WHERE conversation_id=? AND role='user'").bind(&f.conv).fetch_one(&app.db).await.unwrap();
+        assert_eq!((turns, messages), (0, 0), "沒有新 turn、沒有新 user message");
+        assert!(f.env.herdr.calls_to("pane.send_text").is_empty() && f.env.herdr.calls_to("pane.send_keys").is_empty(), "一個字、一個鍵都沒打");
+    }
+
+    /// #872：run 沒換、仍 idle 就照常往下走（建 turn）；不是被 `superseded_run` 擋掉。
+    #[tokio::test]
+    async fn prompt_expect_run_sends_on_the_same_idle_run() {
+        let f = fixture("claude", "test").await;
+        let app = f.env.app.clone();
+        sqlx::query("UPDATE runs SET pane_id = 'pane-prompt-test', pane_typed = 1 WHERE id = ?").bind(&f.run_id).execute(&app.db).await.unwrap();
+        f.env.herdr.live_pane("pane-prompt-test", tt::LivePane { width: Some(120), ..Default::default() });
+
+        let out = prompt_expect_run(&app, &f.bot_id, "any updates", "keep-warm:anchor-a", &f.run_id).await;
+        if let Err(LcError::Conflict(v)) = &out {
+            assert_ne!(v["reason"], "superseded_run", "{v}");
+        }
+        let turns: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM turns WHERE conversation_id=? AND client_request_id='keep-warm:anchor-a'").bind(&f.conv).fetch_one(&app.db).await.unwrap();
+        assert_eq!(turns, 1, "同一顆 idle run：照常建 turn 往下送");
+    }
+
+    /// #872：active run 不再 idle（working）也不送。
+    #[tokio::test]
+    async fn prompt_expect_run_refuses_a_run_that_is_no_longer_idle() {
+        let f = fixture("claude", "test").await;
+        let app = f.env.app.clone();
+        sqlx::query("UPDATE runs SET agent_status = 'working' WHERE id = ?").bind(&f.run_id).execute(&app.db).await.unwrap();
+        match prompt_expect_run(&app, &f.bot_id, "any updates", "keep-warm:anchor-a", &f.run_id).await.unwrap_err() {
+            LcError::Conflict(v) => assert_eq!(v["reason"], "superseded_run", "{v}"),
+            other => panic!("{other:?}"),
+        }
+        assert!(f.env.herdr.calls_to("pane.send_text").is_empty());
     }
 
     /// 帶附件的回合一個字都還沒打就撤回：要先解開 attachments.message_id，不能踩外鍵（#646）。

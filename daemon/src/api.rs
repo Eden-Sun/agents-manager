@@ -5614,7 +5614,7 @@ async fn keep_warm_skip_bot(State(app): State<Arc<App>>, Path(id): Path<String>,
 
 /// `POST /api/bots/{id}/compact`：對閒著的 bot 送 `/compact`（網頁 context 旁的「壓縮」鈕，2026-10-04 使用者）。
 async fn compact_bot(State(app): State<Arc<App>>, Path(id): Path<String>) -> Result<Response, LcError> {
-    let out = lifecycle::compact(&app, &id).await?;
+    let out = lifecycle::compact(&app, &id, None).await?;
     Ok((StatusCode::OK, Json(out)).into_response())
 }
 

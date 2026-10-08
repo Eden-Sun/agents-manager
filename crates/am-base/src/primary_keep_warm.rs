@@ -386,6 +386,7 @@ async fn act<T: TurnControl, M: SystemMessageWriter>(turns: &T, messages: &M, bo
                 bot_id: bot.id.clone(),
                 text: KEEP_WARM_TEXT.to_string(),
                 client_request_id: Some(keep_warm_crid(&plan.anchor)),
+                expected_run_id: Some(run.id.clone()),
             }).await {
                 Ok(turn_id) => tracing::info!(bot = %bot.name, turn = %turn_id, age_min = plan.age_secs / 60,
                                           "primary keep-warm: sent {KEEP_WARM_TEXT:?}"),
@@ -398,7 +399,7 @@ async fn act<T: TurnControl, M: SystemMessageWriter>(turns: &T, messages: &M, bo
         Step::WarmCompact => match {
             // 同保溫：壓縮造成的 statusLine 變化與 working 不算活動（另見 `is_warm_compact_echo`）。
             open_window(&run.id);
-            turns.compact_bot(bot.id.clone()).await
+            turns.compact_bot(bot.id.clone(), Some(run.id.clone())).await
         } {
             Ok(_) => {
                 tracing::info!(bot = %bot.name, age_min = plan.age_secs / 60, "primary cache age reached the limit: sent /compact");
