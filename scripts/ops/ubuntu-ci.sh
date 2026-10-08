@@ -263,6 +263,9 @@ git clean -q -fdx -e target -e web/node_modules
 # 四段各自跑完再彙總：一段紅了（例如只在 Linux 紅的 ops 腳本）也照樣拿得到其他段的結果。
 rc=0
 failed=""
+# 被訊號收掉的段落（timeout 124、KILL 137、TERM 143）：登出殺掉使用者行程、timeout 到了都會這樣，不是測試紅（#885）。
+interrupted=""
+signal_only=1
 : > "${log}"
 for part in ob ops web daemon; do
     prc=0
@@ -272,10 +275,39 @@ for part in ob ops web daemon; do
     if [ "${prc}" != 0 ]; then
         rc="${prc}"
         failed="${failed}${failed:+,}${part}"
+        case "${prc}" in
+            124|137|143) interrupted="${interrupted}${interrupted:+,}${part}(rc=${prc})" ;;
+            *) signal_only=0 ;;
+        esac
     fi
 done
 
 finished="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+# 中斷（#885）：有段落被訊號收掉、其餘紅的段也都是訊號收的，而且整份 log 沒有任何測試紅的證據（`test … FAILED`、`FAIL - `）
+# → 不是這個 commit 的錯。記 error、不前進 last-sha，下一輪（每分鐘）同一個 sha 重跑；同一個 sha 連續中斷 3 次才當 failure，
+# 免得一直被殺的環境永遠不出結果。計數檔 interrupted-<sha> 在正常結束（success／真的 failure）時刪掉，別的 sha 的殘檔順手清。
+irc_file="${CI_ROOT}/interrupted-${sha}"
+fail_prefix=""
+for old_irc in "${CI_ROOT}"/interrupted-*; do
+    [ -e "${old_irc}" ] && [ "${old_irc}" != "${irc_file}" ] && rm -f -- "${old_irc}"
+done
+if [ "${rc}" != 0 ] && [ -n "${interrupted}" ] && [ "${signal_only}" = 1 ] \
+    && ! grep -Eq '^test .* \.\.\. FAILED$|^FAIL - ' "${log}"; then
+    irc_count="$(cat "${irc_file}" 2>/dev/null || echo 0)"
+    case "${irc_count}" in *[!0-9]*|'') irc_count=0 ;; esac
+    irc_count=$((irc_count + 1))
+    if [ "${irc_count}" -lt 3 ]; then
+        echo "${irc_count}" > "${irc_file}"
+        desc="$(printf '中斷：%s，會重跑' "${interrupted}" | cut -c1-120)"
+        final_status error "${desc}"
+        printf '{"sha":"%s","state":"error","reason":"interrupted","rc":%s,"interrupted_count":%s,"started":"%s","finished":"%s","log":"%s","description":"%s"}\n' \
+            "${sha}" "${rc}" "${irc_count}" "${started}" "${finished}" "$(json_str "${log}")" "$(json_str "${desc}")" > "${CI_ROOT}/status.json"
+        finalized=1
+        exit 0
+    fi
+    fail_prefix="連續中斷 3 次："
+fi
+rm -f -- "${irc_file}"
 if [ "${rc}" = 0 ]; then
     state=success
     desc="ob+ops+web+daemon 全綠"
@@ -290,6 +322,7 @@ else
     else
         desc="$(printf '紅：%s（%s）' "${failed}" "${first}" | cut -c1-120)"
     fi
+    desc="${fail_prefix}${desc}"
 fi
 final_status "${state}" "${desc}"
 printf '{"sha":"%s","state":"%s","rc":%s,"started":"%s","finished":"%s","log":"%s","description":"%s"}\n' \

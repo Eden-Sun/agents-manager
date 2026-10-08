@@ -367,5 +367,66 @@ check_no "最後的 commit status 沒被舊 failure 倒灌" "statuses/$SHA.*stat
 [ ! -e "$CI/unposted" ] && echo "ok   - 同 SHA 的舊結果已清除" && PASS=$((PASS + 1)) || { echo "FAIL - 同 SHA 的舊結果還在"; FAIL=$((FAIL + 1)); }
 teardown
 
+# 9. #885：段落被訊號收掉（TERM＝143）、log 沒有任何測試紅的證據 → 不是這個 commit 的錯。記 error、不前進 last-sha、不算 failure，
+#    同一個 sha 下一輪重跑；連續 3 次才當 failure。
+setup
+echo 143 > "$FIX/rc.daemon"
+SHA=$(git -C "$ROOT/work" rev-parse HEAD)
+equals "第 1 次中斷 exit 0" "$(run)" "0"
+check "中斷送 error" "state=error" "$FIX/gh.log"
+check "description 點名中斷的段與 rc" "中斷：daemon(rc=143)，會重跑" "$FIX/gh.log"
+check_no "中斷不送 failure" "state=failure" "$FIX/gh.log"
+check "status.json 是 error／interrupted" '"reason":"interrupted"' "$CI/status.json"
+check "status.json state 是 error" '"state":"error"' "$CI/status.json"
+[ ! -e "$CI/last-sha" ] && echo "ok   - 中斷不寫 last-sha" && PASS=$((PASS + 1)) || { echo "FAIL - 中斷不該寫 last-sha"; FAIL=$((FAIL + 1)); }
+equals "中斷計數是 1" "$(cat "$CI/interrupted-$SHA")" "1"
+equals "第 2 次中斷 exit 0（同一個 sha 重跑）" "$(run)" "0"
+equals "中斷計數是 2" "$(cat "$CI/interrupted-$SHA")" "2"
+check_no "兩次中斷都還不算 failure" "state=failure" "$FIX/gh.log"
+equals "第 3 次中斷 exit 0" "$(run)" "0"
+check "第 3 次當 failure" "state=failure" "$FIX/gh.log"
+check "description 有連續中斷前綴" "連續中斷 3 次：紅：daemon" "$FIX/gh.log"
+equals "failure 寫 last-sha" "$(cat "$CI/last-sha")" "$SHA"
+[ ! -e "$CI/interrupted-$SHA" ] && echo "ok   - 計數檔已刪" && PASS=$((PASS + 1)) || { echo "FAIL - 計數檔還在"; FAIL=$((FAIL + 1)); }
+teardown
+
+# 9b. 中斷之後正常跑完：計數檔要刪掉（下次同一個 sha 再中斷不能接著舊計數）。
+setup
+echo 143 > "$FIX/rc.daemon"
+SHA=$(git -C "$ROOT/work" rev-parse HEAD)
+run >/dev/null
+echo 0 > "$FIX/rc.daemon"
+equals "恢復後 exit 0" "$(run)" "0"
+check "恢復後 success" "state=success" "$FIX/gh.log"
+[ ! -e "$CI/interrupted-$SHA" ] && echo "ok   - success 刪掉計數檔" && PASS=$((PASS + 1)) || { echo "FAIL - success 後計數檔還在"; FAIL=$((FAIL + 1)); }
+equals "success 寫 last-sha" "$(cat "$CI/last-sha")" "$SHA"
+teardown
+
+# 9c. 有真的測試紅（`test … FAILED`／`FAIL - `）時，即使有段落 exit 143 也是 failure，不當中斷重跑。
+setup
+printf 'test a::b ... FAILED\n' > "$FIX/title.daemon"
+echo 143 > "$FIX/rc.daemon"
+SHA=$(git -C "$ROOT/work" rev-parse HEAD)
+equals "測試紅又 143 exit 0" "$(run)" "0"
+check "直接 failure" "state=failure" "$FIX/gh.log"
+check_no "不送 error" "state=error" "$FIX/gh.log"
+equals "failure 寫 last-sha" "$(cat "$CI/last-sha")" "$SHA"
+[ ! -e "$CI/interrupted-$SHA" ] && echo "ok   - 沒有計數檔" && PASS=$((PASS + 1)) || { echo "FAIL - 不該有計數檔"; FAIL=$((FAIL + 1)); }
+teardown
+setup
+printf 'FAIL - some shell case\n' > "$FIX/title.ops"
+echo 143 > "$FIX/rc.ops"
+run >/dev/null
+check "ops 的 FAIL - 行也算證據" "state=failure" "$FIX/gh.log"
+teardown
+
+# 9d. 另一段是普通失敗（rc=1）又有一段被中斷：真的紅，不重跑。
+setup
+echo 143 > "$FIX/rc.daemon"
+echo 1 > "$FIX/rc.web"
+run >/dev/null
+check "普通失敗混中斷仍是 failure" "state=failure" "$FIX/gh.log"
+teardown
+
 echo "ubuntu-ci_test: $PASS passed, $FAIL failed"
 [ "$FAIL" = 0 ]

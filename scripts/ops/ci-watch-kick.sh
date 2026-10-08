@@ -24,6 +24,8 @@ OWNER="${AM_AGENT_NAME:-ci-watch-kick}"
 LABEL="ci-red"
 
 FAILS="$DIR/ci-watch.fails"      # 連續幾輪沒能完成檢查（完成一次就清掉）
+ERRS="$DIR/ci-watch.errors"      # ubuntu-ci 最新結果連續幾輪是 error（不是 error 就清掉）
+ERROR_ALERT_AFTER=${AGM_ERROR_ALERT_AFTER:-3}
 FAIL_ALERT_AFTER=${AGM_FAIL_ALERT_AFTER:-6}   # 每 10 分鐘一輪＝連續約 1 小時
 
 log() { echo "$(date '+%F %T') $*" >> "$LOG"; }
@@ -113,19 +115,35 @@ import json, subprocess, sys
 def gh(path):
     return json.loads(subprocess.run(["gh", "api", path], check=True, capture_output=True, text=True).stdout)
 runs = []
+latest_state = ""   # 最新一個有 ubuntu-ci status 的 commit 的 state（error＝基礎設施問題，不是測試紅）
 for c in gh("repos/{owner}/{repo}/commits?sha=main&per_page=20"):
     sha = c["sha"]
     st = [x for x in gh("repos/{owner}/{repo}/commits/%s/status" % sha).get("statuses", []) if x.get("context") == "ubuntu-ci"]
     if not st:
         continue
     state = st[0].get("state")
+    if not runs:
+        latest_state = state or ""
     runs.append({"databaseId": sha[:8], "headSha": sha, "createdAt": st[0].get("created_at") or "",
                  "url": st[0].get("target_url") or c.get("html_url") or "",
-                 "status": "completed" if state in ("success", "failure", "error") else "in_progress",
-                 "conclusion": {"success": "success", "failure": "failure", "error": "failure"}.get(state, "")})
+                 # error（磁碟不足、被訊號中斷、腳本中斷）不是測試紅：當未完成，不開票也不改狀態（#885）。
+                 "status": "completed" if state in ("success", "failure") else "in_progress",
+                 "conclusion": {"success": "success", "failure": "failure"}.get(state, "")})
 json.dump(runs, open(sys.argv[1], "w"))
-' "$RUNS" 2> "$WORK/err"; then
+open(sys.argv[2], "w").write(latest_state)
+' "$RUNS" "$WORK/latest-state" 2> "$WORK/err"; then
     fail_run "讀 ubuntu-ci commit status 失敗，這輪不動：$(tail -c 200 "$WORK/err" | tr '\n' ' ')"
+  fi
+  # 最新的 ubuntu-ci 結果連續 ERROR_ALERT_AFTER 輪都是 error：基礎設施壞了（磁碟、一直被中斷），不是測試紅——
+  # 推 ops_alert 就好，不開 issue、不派工（#885）。不是 error 就清計數。
+  if [ "$(cat "$WORK/latest-state" 2>/dev/null)" = error ]; then
+    _e=$(cat "$ERRS" 2>/dev/null)
+    case "$_e" in ''|*[!0-9]*) _e=0 ;; esac
+    _e=$((_e + 1))
+    echo "$_e" > "$ERRS"
+    [ "$_e" -ge "$ERROR_ALERT_AFTER" ] && alert ci_infra_error "ubuntu-ci 最新 sha 連續回 error（磁碟不足／中斷），不是測試紅；看 ~/.cache/agents-manager/ci/status.json"
+  else
+    rm -f "$ERRS" 2>/dev/null
   fi
 elif ! gh run list --branch main --workflow CI -L 20 --json databaseId,conclusion,status,headSha,createdAt,url > "$RUNS" 2> "$WORK/err"; then
   fail_run "gh run list 失敗，這輪不動：$(head -c 200 "$WORK/err" | tr '\n' ' ')"
