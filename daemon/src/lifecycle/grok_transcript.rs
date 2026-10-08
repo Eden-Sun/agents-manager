@@ -279,6 +279,7 @@ pub(crate) async fn sync_locked(app: &impl GrokTranscriptContext, run_id: &str) 
     } else if bot.kind == "claude" {
         // claude（SPEC §12.5b）：session 從 herdr 的 agent_session 來，對話在 `projects/*/<session>.jsonl`；本機與遠端同一條路。
         let Some((sid, text)) = super::claude_child_log::load(app, &bot, &run, &host).await? else { return Ok(Synced::Unavailable) };
+        super::claude_child_log::record_runtime(app, &bot, &run, &text).await;
         (sid, super::claude_child_log::parse_exchanges(&text))
     } else {
         let grok_home = grok_home_for(app, &bot, &host).await?;

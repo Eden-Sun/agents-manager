@@ -3801,7 +3801,7 @@ claude 的預設強度來自**帳號的 `settings.json`**：
 
 - `effortLevel` 全域；`modelSettings.<真實 model id>.effortLevel` per-model 覆寫。真實 id 不是啟動用的 alias（`--model opus` 跑的是 `claude-opus-5`），
   所以用**子字串**比對 key 是否含 `opus`/`sonnet`/`haiku`/`fable`；不吻合就沒有提示，不猜。
-- 兩者都沒有、讀不到、非法 JSON → claude 內建預設 **`high`**（官方文件：除 Opus 4.7 外所有模型預設 high；乾淨帳號真機確認 sonnet 與 haiku 皆 high）。
+- 兩者都沒有、讀不到、非法 JSON → claude 內建預設按模型分（`models::claude_builtin_default_effort`）：**haiku `medium`**，其餘 **`high`**（2026-10-08 Claude Code 2.1.293 實測：沒帶 `--effort`、settings 沒有 `effortLevel`，haiku 的對話紀錄每則 assistant 都是 `"effort":"medium"`，sonnet 是 high；#880）。沒有 hook 的 claude 子 agent 另以對話紀錄最新一則 assistant 的 `effort`／`message.model` 寫進 `runs.runtime_effort`／`runtime_model`（`claude_child_log::record_runtime`，§12.5b），網頁顯示優先用 runtime、`bots.effort` 只是設定值，不回寫。
 - `GET /api/models?kind=claude&host=&identity=` 的 `identity` 決定讀哪個 `CLAUDE_CONFIG_DIR/settings.json`（`identities_for_host`）；不指定或不存在 → 預設帳號 `~/.claude/settings.json`。
   本機讀檔、遠端 ssh `cat`。快取 key `{host}/{kind}/{identity}`，10 分鐘 TTL。
 - UI tooltip 講來源：「不帶 --effort（帳號目前設定 高）」，不寫「模型預設」。

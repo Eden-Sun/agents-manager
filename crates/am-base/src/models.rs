@@ -316,6 +316,16 @@ pub async fn read_claude_effort_settings(
 /// `high` (2026-09-07); the documented exception (Opus 4.7) is none of our aliases.
 const CLAUDE_BUILTIN_DEFAULT_EFFORT: &str = "high";
 
+/// haiku 的內建預設是 `medium`（2026-10-08 實測 Claude Code 2.1.293：沒帶 `--effort`、settings 沒有 `effortLevel`，
+/// 對話紀錄每則 assistant 都是 `"effort":"medium"`；sonnet 是 high，#880）。`alias` 可以是 `haiku` 或完整 id。
+pub fn claude_builtin_default_effort(alias: &str) -> &'static str {
+    if alias.to_ascii_lowercase().contains("haiku") {
+        "medium"
+    } else {
+        CLAUDE_BUILTIN_DEFAULT_EFFORT
+    }
+}
+
 /// What "不帶 `--effort`" resolves to; fills a spawned child's effort, since its argv never says.
 /// 讀不到設定檔回 `Err`（不是內建預設）：呼叫端會把這個值記進 bot，記錯了沒有人會再來讀一次。
 pub async fn claude_default_effort(app: &Arc<impl crate::hosts::HostsAccess + crate::tools::ToolsEnv + 'static>, host: &str, identity: Option<&str>, alias: &str) -> Result<String> {
@@ -327,7 +337,7 @@ pub async fn claude_default_effort(app: &Arc<impl crate::hosts::HostsAccess + cr
         .find(|(k, _)| k.to_ascii_lowercase().contains(&alias))
         .map(|(_, v)| v.clone())
         .or(global)
-        .unwrap_or_else(|| CLAUDE_BUILTIN_DEFAULT_EFFORT.to_string()))
+        .unwrap_or_else(|| claude_builtin_default_effort(&alias).to_string()))
 }
 
 pub fn claude_static_models(global: Option<&str>, per_model: &BTreeMap<String, String>) -> Vec<Value> {
@@ -338,7 +348,7 @@ pub fn claude_static_models(global: Option<&str>, per_model: &BTreeMap<String, S
         .enumerate()
         .map(|(i, id)| {
             let overridden = per_model.iter().find(|(k, _)| k.to_ascii_lowercase().contains(id)).map(|(_, v)| v.clone());
-            let default_effort = overridden.or_else(|| global.map(str::to_string)).unwrap_or_else(|| CLAUDE_BUILTIN_DEFAULT_EFFORT.to_string());
+            let default_effort = overridden.or_else(|| global.map(str::to_string)).unwrap_or_else(|| claude_builtin_default_effort(id).to_string());
             json!({
                 "id": id, "display_name": id, "description": "", "is_default": i == 0,
                 "default_effort": default_effort, "efforts": efforts, "service_tiers": [],

@@ -463,3 +463,49 @@ async fn an_empty_transcript_baseline_lets_every_later_exchange_through() {
     write_log(&cfg, "sess-1", &log(&[user_at("u1", "第一問", "2026-10-07T09:00:00.000Z"), assistant("第一答。", Some("end_turn"), false)]));
     assert_eq!(sync_locked(&app, &c.run_id).await.unwrap(), Synced::Read { imported: 1, pending: None });
 }
+
+fn assistant_with(effort: &str, model: &str) -> String {
+    json!({"type": "assistant", "isSidechain": false, "effort": effort,
+           "message": {"role": "assistant", "model": model, "content": [{"type": "text", "text": "好。"}], "stop_reason": "end_turn"}})
+    .to_string()
+}
+
+/// #880：每則 assistant 行帶 `effort` 與 `message.model`，最新一則是實際在跑的值；`<synthetic>`、sidechain、半行不算。
+#[test]
+fn the_runtime_is_the_latest_assistant_effort_and_model() {
+    let seen = parse_runtime(&log(&[
+        assistant_with("high", "claude-sonnet-5-5"),
+        assistant_with("medium", "claude-haiku-5-5"),
+        json!({"type": "assistant", "isSidechain": true, "effort": "low", "message": {"model": "claude-opus-5-5"}}).to_string(),
+        assistant_with("low", "<synthetic>"),
+        "{\"type\":\"assistant\",\"eff".to_string(),
+    ]));
+    assert_eq!(seen, RuntimeSeen { model: Some("claude-haiku-5-5".into()), effort: Some("low".into()) });
+    assert_eq!(parse_runtime(&two_exchanges()), RuntimeSeen::default(), "舊格式沒有這兩欄＝不猜");
+}
+
+/// #880：沒帶 `--effort` 的 haiku 子 agent，對話紀錄寫 medium → `runtime_effort=medium`、`runtime_model` 也補上；bots.effort 不回寫。
+#[tokio::test]
+async fn the_transcript_effort_and_model_become_the_runtime() {
+    let cfg = tt::track(std::env::temp_dir().join(format!("am-claude-cfg-{}", db::ulid())));
+    let c = claude_child(Some(&cfg), None).await;
+    let app = c.env.app.clone();
+    sqlx::query("UPDATE bots SET effort = 'high', model = 'haiku' WHERE id = ?").bind(&c.bot.id).execute(&app.db).await.unwrap();
+    baselined(&app, &c.run_id).await;
+    c.env.herdr.set_agent("hub-midplat", &c.pane, true);
+    let body = log(&[user("u1", "開工"), assistant_with("medium", "claude-haiku-5-5")]);
+    write_log(&cfg, "sess-1", &body);
+
+    sync_locked(&app, &c.run_id).await.unwrap();
+    let run = db::run(&app.db, &c.run_id).await.unwrap().unwrap();
+    assert_eq!(run.runtime_effort.as_deref(), Some("medium"));
+    assert_eq!(run.runtime_model.as_deref(), Some("haiku"), "設定是同家族別名就沿用，不憑空多一條模型 drift");
+    let bot = db::bot(&app.db, &c.bot.id).await.unwrap().unwrap();
+    assert_eq!(bot.effort.as_deref(), Some("high"), "設定值不回寫");
+
+    // 之後 /effort 切到 high、/model 換成 sonnet：照最新一則走。
+    write_log(&cfg, "sess-1", &(body + &log(&[assistant_with("high", "claude-sonnet-5-5")])));
+    sync_locked(&app, &c.run_id).await.unwrap();
+    let run = db::run(&app.db, &c.run_id).await.unwrap().unwrap();
+    assert_eq!((run.runtime_model.as_deref(), run.runtime_effort.as_deref()), (Some("claude-sonnet-5-5"), Some("high")));
+}
