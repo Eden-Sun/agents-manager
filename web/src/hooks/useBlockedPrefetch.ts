@@ -47,13 +47,19 @@ export function useBlockedPrefetch(): void {
     const d = deps()
     let alive = true
     const tick = () => {
-      if (!alive) return
+      // 分頁在背景整個略過（不只擋預載）：手機切走時每顆 blocked bot 不必每 4 秒讀一次終端；回前景時 `onVisible` 立刻補一次。
+      if (!alive || document.visibilityState === 'hidden') return
       for (const id of list) void prefetchBlocked(id, d)
     }
+    const onVisible = () => {
+      if (document.visibilityState === 'visible') tick()
+    }
+    document.addEventListener('visibilitychange', onVisible)
     tick()
     const t = setInterval(tick, REFRESH_MS)
     return () => {
       alive = false
+      document.removeEventListener('visibilitychange', onVisible)
       clearInterval(t)
       const still = new Set(blockedIds(useStore.getState()).split(' '))
       for (const id of list) if (!still.has(id)) forgetBlocked(id)

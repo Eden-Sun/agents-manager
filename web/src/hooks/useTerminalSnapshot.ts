@@ -40,8 +40,18 @@ export function useTerminalSnapshot(
   useEffect(() => {
     if (paused) return
     let alive = true
+    let busy = false
     let timer: ReturnType<typeof setTimeout> | null = null
+    const next = () => {
+      if (alive) timer = setTimeout(() => void tick(), intervalMs)
+    }
     const tick = async () => {
+      // 分頁在背景（手機切走）就不打 API：`TerminalTab` 與 WS 看門狗也是這樣；回前景時 `onVisible` 立刻補一次。
+      if (document.visibilityState === 'hidden') {
+        next()
+        return
+      }
+      busy = true
       try {
         const s = await readTerminal(botId, source, lines)
         if (alive) {
@@ -51,11 +61,21 @@ export function useTerminalSnapshot(
       } catch (e) {
         if (alive) setErr(e instanceof Error ? e.message : String(e))
       }
-      if (alive) timer = setTimeout(() => void tick(), intervalMs)
+      busy = false
+      next()
     }
+    const onVisible = () => {
+      // 已經有一次在飛：它結束會自己排下一輪，不要另起第二條輪詢鏈。
+      if (document.visibilityState !== 'visible' || busy) return
+      if (timer) clearTimeout(timer)
+      timer = null
+      void tick()
+    }
+    document.addEventListener('visibilitychange', onVisible)
     void tick()
     return () => {
       alive = false
+      document.removeEventListener('visibilitychange', onVisible)
       if (timer) clearTimeout(timer)
     }
   }, [botId, source, lines, intervalMs, paused, readTerminal, nonce])
