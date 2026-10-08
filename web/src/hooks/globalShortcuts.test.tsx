@@ -6,6 +6,7 @@ import test, { after, afterEach, before } from 'node:test'
 import assert from 'node:assert/strict'
 import { act, mount, setupDom, teardownDom, unmountAll } from '../testing/domHarness'
 import { useStore } from '../store/store'
+import { registerSettingsLeaveGuard } from '../lib/settingsLeaveGuard'
 
 before(setupDom)
 after(teardownDom)
@@ -93,3 +94,32 @@ test('手機側邊欄抽屜本身（aside.sidebar 的 aria-modal）不算「有�
   await press(alt('ArrowDown'))
   assert.deepEqual(calls, ['bot:1'])
 })
+
+test('桌機設定卡有未儲存變更（守門回 true）：⌥↓ 與 Ctrl+1 都不換 bot／專案，事件仍 preventDefault；解除後恢復（#925）', async () => {
+  const calls = setup()
+  await mount(<Keys />)
+  let asked = 0
+  const off = registerSettingsLeaveGuard(() => {
+    asked++
+    return true
+  })
+  const down = await press(alt('ArrowDown'))
+  const jump = await press(ctrl1())
+  assert.deepEqual(calls, [], '守門擋下：沒換 bot、沒換專案')
+  assert.equal(down.defaultPrevented, true)
+  assert.equal(jump.defaultPrevented, true)
+  assert.equal(asked, 2, '兩個快捷鍵都問過守門')
+  off()
+  await press(alt('ArrowDown'))
+  assert.deepEqual(calls, ['bot:1'], '解除後恢復')
+})
+
+test('守門回 false（沒有未儲存變更）：快捷鍵照常能用', async () => {
+  const calls = setup()
+  await mount(<Keys />)
+  const off = registerSettingsLeaveGuard(() => false)
+  await press(alt('ArrowDown'))
+  assert.deepEqual(calls, ['bot:1'])
+  off()
+})
+

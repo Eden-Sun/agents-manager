@@ -2,6 +2,7 @@ import { useEffect } from 'react'
 import { dialogOpen } from '../lib/dialogOpen'
 import { isImeEnter } from '../lib/ime'
 import { scrollProjectIntoView } from '../lib/scrollProject'
+import { settingsBlocksLeave } from '../lib/settingsLeaveGuard'
 import { orderedProjects, useStore } from '../store/store'
 
 /** 1–9：`Digit1`…`Digit9`（看實體鍵位，不看輸入法或 Shift 打出什麼字）。 */
@@ -33,6 +34,11 @@ export function useProjectJumpKeys() {
       const slot = slotOf(e.code)
       if (slot === null) return
       if (dialogOpen()) return
+      // 桌機設定卡有未儲存變更：先問（確認框已由守門函式打開），不換專案（#925）。
+      if (settingsBlocksLeave()) {
+        e.preventDefault()
+        return
+      }
       const nav = document.querySelector('.sidebar-scroll')
       const shown = nav ? [...nav.querySelectorAll<HTMLElement>('.project[data-project-id]')].map((el) => el.dataset.projectId ?? '') : null
       const id = jumpTargetId(slot, shown, orderedProjects(useStore.getState()))
