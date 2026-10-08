@@ -143,9 +143,9 @@ printf '%s\n' '#!/bin/bash' 'echo "不該被叫到：$0" >&2' 'exit 99' > "$ROOT
 cp "$ROOT/bin/codesign" "$ROOT/bin/plutil"; cp "$ROOT/bin/codesign" "$ROOT/bin/node"
 chmod +x "$ROOT/bin/codesign" "$ROOT/bin/plutil" "$ROOT/bin/node"
 set +e
-LINUX_OUT=$(AGM_OPS_PLATFORM=linux PATH="$ROOT/bin:/usr/bin:/bin" HERDR_NETWORK_AUTH_PLIST="$ROOT/network.plist" bash "$SCRIPT" "$ROOT/herdr" 192.168.1.1 80 2>&1)
+LINUX_OUT=$(AGM_OPS_PLATFORM=linux PATH="$ROOT/bin:${AM_CANARY_DIR:+$AM_CANARY_DIR:}/usr/bin:/bin" HERDR_NETWORK_AUTH_PLIST="$ROOT/network.plist" bash "$SCRIPT" "$ROOT/herdr" 192.168.1.1 80 2>&1)
 LINUX_RC=$?
-LINUX_NOARG_OUT=$(AGM_OPS_PLATFORM=linux PATH="$ROOT/bin:/usr/bin:/bin" bash "$SCRIPT" 2>&1)
+LINUX_NOARG_OUT=$(AGM_OPS_PLATFORM=linux PATH="$ROOT/bin:${AM_CANARY_DIR:+$AM_CANARY_DIR:}/usr/bin:/bin" bash "$SCRIPT" 2>&1)
 LINUX_NOARG_RC=$?
 set -u
 [ "$LINUX_RC" -eq 0 ] || fail "linux 應 exit 0，實際 ${LINUX_RC}：$LINUX_OUT"
