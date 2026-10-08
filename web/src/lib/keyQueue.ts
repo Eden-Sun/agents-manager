@@ -8,6 +8,9 @@
 /** 排在佇列裡的一項：一串鍵，或一段貼上的文字（貼上不能拆成鍵——換行會變成 Enter 直接執行）。 */
 type Item = { kind: 'keys'; keys: string[] } | { kind: 'text'; text: string }
 
+/** 單次 send 最多幾個鍵：必須等於 daemon `shell::MAX_KEYS`，超過會整批被 400。 */
+export const MAX_KEYS_PER_SEND = 64
+
 export class KeyQueue {
   private pending: Item[] = []
   private sending = false
@@ -62,9 +65,16 @@ export class KeyQueue {
         if (first.kind === 'text') {
           job = this.sendText!(first.text)
         } else {
-          const keys = [...first.keys]
-          while (this.pending[0]?.kind === 'keys') {
-            keys.push(...(this.pending.shift() as { kind: 'keys'; keys: string[] }).keys)
+          // 一批最多 MAX_KEYS_PER_SEND 個：超出的部分切開留在 pending 開頭，順序不變。
+          const keys = first.keys.slice(0, MAX_KEYS_PER_SEND)
+          if (first.keys.length > MAX_KEYS_PER_SEND) {
+            this.pending.unshift({ kind: 'keys', keys: first.keys.slice(MAX_KEYS_PER_SEND) })
+          }
+          while (keys.length < MAX_KEYS_PER_SEND && this.pending[0]?.kind === 'keys') {
+            const next = this.pending.shift() as { kind: 'keys'; keys: string[] }
+            const room = MAX_KEYS_PER_SEND - keys.length
+            keys.push(...next.keys.slice(0, room))
+            if (next.keys.length > room) this.pending.unshift({ kind: 'keys', keys: next.keys.slice(room) })
           }
           job = this.send(keys)
         }
