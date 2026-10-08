@@ -1,6 +1,6 @@
 //! `reconcile` runner：全域與單機對帳、autostart 與開機恢復入口。
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
 use anyhow::Result;
@@ -60,7 +60,31 @@ pub fn schedule_deferred_pass(app: &Arc<App>, host: &str) {
     });
 }
 
-async fn autostart_pass(app: &Arc<App>, host: &str, owed: &mut Option<HashSet<String>>, since: &str) -> bool {
+/// 這顆 bot 的 autostart 這次沒辦法下結論、要再試。帶著 `since` 之後這顆 bot 現有的 run 數（`.0`）：
+/// 失敗的 `start_bot` 會先寫一列 run 再收成 exited，重試時「有人動過它」的判斷要扣掉這些自己留下的，不然會把自己的失敗
+/// 當成別人動過、永遠不再試。
+#[derive(Debug)]
+struct OwedAfter(i64, String);
+
+impl std::fmt::Display for OwedAfter {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.1)
+    }
+}
+
+impl std::error::Error for OwedAfter {}
+
+async fn runs_since(app: &Arc<App>, bot_id: &str, since: &str) -> sqlx::Result<i64> {
+    sqlx::query_scalar("SELECT COUNT(*) FROM runs WHERE bot_id = ? AND started_at >= ?").bind(bot_id).bind(since).fetch_one(&app.db).await
+}
+
+/// 失敗要再試的路徑都帶回「現在有幾列 run」：其中包含這次失敗的起動自己寫的那一列。
+async fn owed_after(app: &Arc<App>, bot_id: &str, since: &str, fallback: i64, why: String) -> anyhow::Error {
+    anyhow::Error::new(OwedAfter(runs_since(app, bot_id, since).await.unwrap_or(fallback), why))
+}
+
+/// `owed`：`None`＝第一輪（全部都要看）；`Some`＝還欠著的 bot id → 我們自己失敗的 run 數（見 [`OwedAfter`]）。
+async fn autostart_pass(app: &Arc<App>, host: &str, owed: &mut Option<HashMap<String, i64>>, since: &str) -> bool {
     let bots = match db::live_bots(&app.db).await {
         Ok(b) => b,
         Err(e) => {
@@ -68,14 +92,16 @@ async fn autostart_pass(app: &Arc<App>, host: &str, owed: &mut Option<HashSet<St
             return false;
         }
     };
-    let mut still = HashSet::new();
+    let mut still = HashMap::new();
     for bot in bots {
-        if bot.autostart != 1 || owed.as_ref().is_some_and(|o| !o.contains(&bot.id)) {
+        if bot.autostart != 1 || owed.as_ref().is_some_and(|o| !o.contains_key(&bot.id)) {
             continue;
         }
-        if let Err(e) = autostart_one(app, host, &bot, since).await {
+        let own_runs = owed.as_ref().and_then(|o| o.get(&bot.id)).copied().unwrap_or(0);
+        if let Err(e) = autostart_one(app, host, &bot, since, own_runs).await {
             tracing::warn!(host, bot = %bot.name, error = ?e, "autostart: cannot tell whether this bot should start; will look again");
-            still.insert(bot.id.clone());
+            let own_runs = e.downcast_ref::<OwedAfter>().map_or(own_runs, |o| o.0);
+            still.insert(bot.id.clone(), own_runs);
         }
     }
     let done = still.is_empty();
@@ -83,11 +109,15 @@ async fn autostart_pass(app: &Arc<App>, host: &str, owed: &mut Option<HashSet<St
     done
 }
 
-async fn autostart_one(app: &Arc<App>, host: &str, bot: &db::Bot, since: &str) -> Result<()> {
+async fn autostart_one(app: &Arc<App>, host: &str, bot: &db::Bot, since: &str, own_runs: i64) -> Result<()> {
     let bot_host = db::bot_host(&app.db, &bot.id).await?;
     if bot_host != host {
         return Ok(());
     }
+    // 這一輪看到的連線世代：start 失敗時用它分辨「主機中途斷了／被換掉」與「bot 本身起不來」。
+    let Some(fence) = app.hosts.fence(host).await else {
+        return Err(anyhow::anyhow!("host gone"));
+    };
     if !app.host_connected(host).await {
         tracing::info!(bot = %bot.name, host, "autostart skipped: host not connected");
         return Err(anyhow::anyhow!("host is not connected"));
@@ -95,12 +125,7 @@ async fn autostart_one(app: &Arc<App>, host: &str, bot: &db::Bot, since: &str) -
     if db::active_run(&app.db, &bot.id).await?.is_some() {
         return Ok(());
     }
-    let touched: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM runs WHERE bot_id = ? AND started_at >= ?")
-        .bind(&bot.id)
-        .bind(since)
-        .fetch_one(&app.db)
-        .await?;
-    if touched > 0 {
+    if runs_since(app, &bot.id, since).await? > own_runs {
         return Ok(());
     }
     tracing::info!(bot = %bot.name, host, "autostart");
@@ -110,11 +135,17 @@ async fn autostart_one(app: &Arc<App>, host: &str, bot: &db::Bot, since: &str) -
         Ok(Ok(_)) => {}
         Ok(Err(e)) => {
             tracing::error!(bot = %bot.name, error = ?e, "autostart failed");
-            if !app.host_connected(host).await {
-                return Err(anyhow::anyhow!("host disconnected while starting bot"));
+            if !app.hosts.is_current(&fence).await || !app.host_connected(host).await {
+                return Err(owed_after(app, &bot.id, since, own_runs, "host disconnected while starting bot".into()).await);
+            }
+            // herdr／ssh 暫時不通、或暫時讀不到狀態：不是「這顆 bot 不該起」，記在 still 讓背景重試。
+            // Uncommitted（副作用已做、run 會自己收斂）與 Bad／NotFound／Conflict／Forbidden／Unprocessable
+            // （不該起、已在起）維持 Ok：再試也不會不一樣。
+            if matches!(e, crate::lifecycle::LcError::Upstream(_) | crate::lifecycle::LcError::Unavailable(_)) {
+                return Err(owed_after(app, &bot.id, since, own_runs, format!("autostart could not start the bot yet: {e:?}")).await);
             }
         }
-        Err(e) => return Err(e.into()),
+        Err(e) => return Err(owed_after(app, &bot.id, since, own_runs, e.to_string()).await),
     }
     Ok(())
 }
@@ -216,4 +247,44 @@ pub async fn rearm_progress(app: &Arc<App>) {
             }
         }
     });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::testing as tt;
+
+    /// #888：start 失敗是 herdr 暫時不通（Upstream）、主機仍連線中 → 這一輪記進 owed、claim 不完成、背景會再試；
+    /// 再試時自己失敗留下的那列 run 不算「有人動過它」。
+    #[tokio::test]
+    async fn an_upstream_start_failure_on_a_connected_host_is_owed_and_retried() {
+        let env = tt::env().await;
+        let mut ids = Vec::new();
+        for name in ["autostart-owed-a", "autostart-owed-b"] {
+            let b = tt::claude_bot(&env.app, &env.project_id, name).await;
+            sqlx::query("UPDATE bots SET autostart = 1 WHERE id = ?").bind(&b.id).execute(&env.app.db).await.unwrap();
+            ids.push(b.id);
+        }
+        env.herdr.fail_next("agent.start", tt::Fault::Refuse);
+        let claim = AutostartClaim::begin(&env.app, LOCAL_HOST).expect("fresh autostart claim");
+        let mut owed = None;
+
+        assert!(!autostart_pass(&env.app, LOCAL_HOST, &mut owed, &claim.since).await, "有一顆起不來：這一輪不算完成");
+        let first = owed.clone().unwrap();
+        assert_eq!(first.len(), 1, "只有失敗的那顆欠著：{first:?}");
+        let failed = first.keys().next().unwrap().clone();
+        let other = ids.iter().find(|i| **i != failed).unwrap();
+        assert!(db::active_run(&env.app.db, &failed).await.unwrap().is_none());
+        assert!(db::active_run(&env.app.db, other).await.unwrap().is_some(), "另一顆照常起來");
+        assert_eq!(
+            env.app.autostart_hosts.lock().unwrap().get(LOCAL_HOST),
+            Some(&AutostartHostStatus::InProgress),
+            "claim 沒完成"
+        );
+
+        // 背景重試：只看欠著的那顆，自己失敗的 run 不算別人動過它；herdr 好了就起來。
+        assert!(autostart_pass(&env.app, LOCAL_HOST, &mut owed, &claim.since).await);
+        assert!(db::active_run(&env.app.db, &failed).await.unwrap().is_some(), "重試之後起來了");
+        claim.complete();
+    }
 }

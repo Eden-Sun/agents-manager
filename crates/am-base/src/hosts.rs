@@ -76,6 +76,23 @@ pub trait HostHooks: HostsAccess + HostInstance + 'static {
 
 /// SPEC §11.3.4.
 const PING_INTERVAL: Duration = Duration::from_secs(10);
+/// 測試用的 ping 間隔（毫秒，0＝用 [`PING_INTERVAL`]）；只在 test／`test-hooks` 編譯，正式版固定 10 秒。
+#[cfg(any(test, feature = "test-hooks"))]
+static PING_INTERVAL_OVERRIDE_MS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+#[cfg(any(test, feature = "test-hooks"))]
+pub fn set_ping_interval_for_test(d: Option<Duration>) {
+    PING_INTERVAL_OVERRIDE_MS.store(d.map_or(0, |d| d.as_millis().max(1) as u64), Ordering::SeqCst);
+}
+fn ping_interval() -> Duration {
+    #[cfg(any(test, feature = "test-hooks"))]
+    {
+        let ms = PING_INTERVAL_OVERRIDE_MS.load(std::sync::atomic::Ordering::SeqCst);
+        if ms > 0 {
+            return Duration::from_millis(ms);
+        }
+    }
+    PING_INTERVAL
+}
 const BACKOFF_MIN: Duration = Duration::from_secs(1);
 const BACKOFF_MAX: Duration = Duration::from_secs(30);
 const MASTER_UP_TIMEOUT: Duration = Duration::from_secs(20);
@@ -97,23 +114,6 @@ pub fn short_dir(instance: Option<&str>) -> PathBuf {
     }
 }
 
-pub fn sh_quote(s: &str) -> String {
-    format!("'{}'", s.replace('\'', "'\\''"))
-}
-
-/// `None` = timed out. The whole process group is killed so a hung `git merge` (pinentry,
-/// stuck remote) cannot keep holding `index.lock` after the caller gave up.
-pub async fn sh_local(script: &str, timeout: Duration) -> Result<Option<std::process::Output>> {
-    let mut cmd = tokio::process::Command::new("/bin/sh");
-    cmd.arg("-c").arg(script).stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::piped());
-    cmd.process_group(0);
-    cmd.kill_on_drop(true);
-    let mut child = cmd.spawn().context("spawn /bin/sh")?;
-    let pid = child.id();
-    let out = child.stdout.take();
-    let err = child.stderr.take();
-    let gather = async move {
-        use tokio::io::AsyncReadExt;
 /// ssh 控制目錄（`/tmp/agents-manager-<uid>[-slug]`）：路徑可預測，所以只准是自己的、0700、非符號連結的真目錄。
 /// 不存在就以 0700 建立；已存在但不合就回錯（不去 chmod 不是自己的目錄，別人預先佔位只會讓連線失敗，不會讓 socket 落進別人的目錄）。
 pub fn ensure_private_dir(path: &Path) -> Result<()> {
@@ -138,6 +138,23 @@ pub fn ensure_private_dir(path: &Path) -> Result<()> {
     Ok(())
 }
 
+pub fn sh_quote(s: &str) -> String {
+    format!("'{}'", s.replace('\'', "'\\''"))
+}
+
+/// `None` = timed out. The whole process group is killed so a hung `git merge` (pinentry,
+/// stuck remote) cannot keep holding `index.lock` after the caller gave up.
+pub async fn sh_local(script: &str, timeout: Duration) -> Result<Option<std::process::Output>> {
+    let mut cmd = tokio::process::Command::new("/bin/sh");
+    cmd.arg("-c").arg(script).stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::piped());
+    cmd.process_group(0);
+    cmd.kill_on_drop(true);
+    let mut child = cmd.spawn().context("spawn /bin/sh")?;
+    let pid = child.id();
+    let out = child.stdout.take();
+    let err = child.stderr.take();
+    let gather = async move {
+        use tokio::io::AsyncReadExt;
         let read_stdout = async move {
             let mut stdout = Vec::new();
             if let Some(mut o) = out {
@@ -311,6 +328,12 @@ impl HostConn {
         self.cfg.is_none()
     }
 
+    /// Test seam: 放一個假的 ssh master 行程（`run_connected` 看它活著就當 master 還在）。
+    #[cfg(any(test, feature = "test-hooks"))]
+    pub async fn set_master_for_test(&self, child: tokio::process::Child) {
+        *self.master.lock().await = Some(child);
+    }
+
     /// Test seam: what an explicit reconnect does to superseded observations.
     #[cfg(any(test, feature = "test-hooks"))]
     pub fn bump_generation_for_test(&self) {
@@ -471,10 +494,17 @@ impl HostConn {
         let q = sh_quote(sess);
         let script = format!(
             r#"printf 'AM_HOME=%s\n' "$HOME"
+# #887：暫存檔與 log 一律只有自己讀得到；server 本身要用回原本的 umask（見 nohup 分支）。
+AM_UMASK=$(umask); umask 077
 S={q}
 SHARED={shared}
 SOCK="$HOME/.config/herdr/sessions/$S/herdr.sock"
 LABEL="dev.agents-manager.herdr-$S"
+mkdir -p "$HOME/.config/agents-manager"
+LOG="$HOME/.config/agents-manager/herdr-$S.log"
+# 錯誤輸出暫存：mktemp 的隨機檔名（不用 /tmp 底下可預測的固定檔名）；建不起來就丟掉。
+new_err() {{ ERR=$(mktemp "${{TMPDIR:-/tmp}}/am-err.XXXXXX") || ERR=/dev/null; }}
+drop_err() {{ [ "$ERR" = /dev/null ] || rm -f "$ERR"; }}
 xml_escape() {{ printf '%s' "$1" | sed 's/&/\&amp;/g; s/</\&lt;/g; s/>/\&gt;/g'; }}
 running() {{ herdr session list 2>/dev/null | grep -q "^$S[[:space:]].*running"; }}
 HERDR_BIN=$(command -v herdr 2>/dev/null)
@@ -494,15 +524,8 @@ fi
 if [ "$MODE" = systemd ]; then
   if running; then
     # 已經在跑（不管是誰起的）就不動：停它會收掉每個 pane 裡的 agent。
-# #887：暫存檔與 log 一律只有自己讀得到；server 本身要用回原本的 umask（見 nohup 分支）。
-AM_UMASK=$(umask); umask 077
     printf 'AM_MODE=systemd-existing\n'
   else
-mkdir -p "$HOME/.config/agents-manager"
-LOG="$HOME/.config/agents-manager/herdr-$S.log"
-# 錯誤輸出暫存：mktemp 的隨機檔名（不用 /tmp 底下可預測的固定檔名）；建不起來就丟掉。
-new_err() {{ ERR=$(mktemp "${{TMPDIR:-/tmp}}/am-err.XXXXXX") || ERR=/dev/null; }}
-drop_err() {{ [ "$ERR" = /dev/null ] || rm -f "$ERR"; }}
     new_err
     if systemctl --user start "herdr@$S.service" 2>"$ERR"; then
       printf 'AM_MODE=systemd\n'
@@ -523,6 +546,7 @@ if [ "$MODE" = launchd ]; then
     XML_LABEL=$(xml_escape "$LABEL")
     XML_HERDR_BIN=$(xml_escape "$HERDR_BIN")
     XML_PATH=$(xml_escape "$PATH")
+    XML_LOG=$(xml_escape "$LOG")
     cat > "$PL" <<AM_PLIST
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
@@ -547,10 +571,10 @@ AM_PLIST
       if launchctl bootstrap "gui/$(id -u)" "$PL" 2>"$ERR"; then
         printf 'AM_MODE=launchd\n'
       else
-    XML_LOG=$(xml_escape "$LOG")
         printf 'AM_MODE=nohup-fallback launchctl: %s\n' "$(tr '\n' ' ' <"$ERR")"
         MODE=nohup
       fi
+      drop_err
     else
       printf 'AM_MODE=nohup-fallback launchd plist permissions\n'
       MODE=nohup
@@ -576,7 +600,6 @@ done
 printf 'AM_SOCK=%s\n' "$SOCK"
 herdr session list 2>&1 | sed 's/^/AM_LIST /'
 "#
-      drop_err
         );
         script
     }
@@ -746,6 +769,55 @@ pub async fn run_with_stdin(
     }
 }
 
+/// 連上之後到斷線為止（SPEC §11.3.4）：標成連線中、推 `host_changed`，**另起一個 task** 跑 [`HostHooks::host_connected`]
+/// （對帳、事件訂閱、autostart… 可能很久，甚至卡在遠端不回話），自己立刻開始 ping／檢查 ssh master——
+/// 以前是同步等 post-connect 跑完才開始 ping，那段時間連線死了也發現不了（#888）。
+/// 斷線、ping 失敗、世代變了、supervisor 被 abort 都會 abort 那個 task。回 `true`＝世代變了（被 reconnect／換設定取代，呼叫端直接結束 supervisor），
+/// `false`＝斷線了，呼叫端照退避重連。
+pub async fn run_connected<H: HostHooks>(app: &Arc<H>, conn: &Arc<HostConn>, fence: &HostFence, generation: u64) -> bool {
+    conn.mark_up();
+    conn.connected.store(true, Ordering::SeqCst);
+    *conn.error.lock().await = None;
+    H::host_changed(app, fence).await;
+    // supervisor 被 abort（reconnect／換設定／移除）時這個 future 直接被丟掉：guard 一起收掉 post-connect task，不留孤兒。
+    let post = AbortOnDrop(tokio::spawn(H::host_connected(app.clone(), conn.name.clone())));
+
+    loop {
+        tokio::time::sleep(ping_interval()).await;
+        if conn.generation.load(Ordering::SeqCst) != generation {
+            return true;
+        }
+        let master_dead = match conn.master.lock().await.as_mut() {
+            Some(m) => matches!(m.try_wait(), Ok(Some(_))),
+            None => true,
+        };
+        if master_dead {
+            tracing::warn!(host = %conn.name, "ssh master exited");
+            *conn.error.lock().await = Some("ssh master exited".into());
+            break;
+        }
+        if let Err(e) = conn.client.ping().await {
+            tracing::warn!(host = %conn.name, error = %e, "host ping failed");
+            *conn.error.lock().await = Some(format!("ping failed: {e}"));
+            break;
+        }
+    }
+    drop(post);
+    conn.mark_down();
+    conn.connected.store(false, Ordering::SeqCst);
+    conn.kill_master().await;
+    H::host_changed(app, fence).await;
+    false
+}
+
+struct AbortOnDrop(tokio::task::JoinHandle<()>);
+
+impl Drop for AbortOnDrop {
+    fn drop(&mut self) {
+        self.0.abort();
+    }
+}
+
 /// SPEC §11.3.4.
 fn spawn_supervisor<H: HostHooks>(app: Arc<H>, conn: Arc<HostConn>, generation: u64) -> tokio::task::JoinHandle<()> {
     tokio::spawn(async move {
@@ -765,36 +837,9 @@ fn spawn_supervisor<H: HostHooks>(app: Arc<H>, conn: Arc<HostConn>, generation: 
             match attempt {
                 Ok(()) => {
                     backoff = BACKOFF_MIN;
-                    conn.mark_up();
-                    conn.connected.store(true, Ordering::SeqCst);
-                    *conn.error.lock().await = None;
-                    H::host_changed(&app, &fence).await;
-                    H::host_connected(app.clone(), conn.name.clone()).await;
-
-                    loop {
-                        tokio::time::sleep(PING_INTERVAL).await;
-                        if conn.generation.load(Ordering::SeqCst) != generation {
-                            return;
-                        }
-                        let master_dead = match conn.master.lock().await.as_mut() {
-                            Some(m) => matches!(m.try_wait(), Ok(Some(_))),
-                            None => true,
-                        };
-                        if master_dead {
-                            tracing::warn!(host = %conn.name, "ssh master exited");
-                            *conn.error.lock().await = Some("ssh master exited".into());
-                            break;
-                        }
-                        if let Err(e) = conn.client.ping().await {
-                            tracing::warn!(host = %conn.name, error = %e, "host ping failed");
-                            *conn.error.lock().await = Some(format!("ping failed: {e}"));
-                            break;
-                        }
+                    if run_connected(&app, &conn, &fence, generation).await {
+                        return;
                     }
-                    conn.mark_down();
-                    conn.connected.store(false, Ordering::SeqCst);
-                    conn.kill_master().await;
-                    H::host_changed(&app, &fence).await;
                 }
                 Err(e) => {
                     let msg = format!("{e:#}");

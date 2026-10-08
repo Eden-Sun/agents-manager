@@ -568,3 +568,99 @@
         let parsed = std::process::Command::new("/bin/sh").arg("-n").arg("-c").arg(&script).output().unwrap();
         assert!(parsed.status.success(), "sh -n: {}", String::from_utf8_lossy(&parsed.stderr));
     }
+
+    // ---- #888：post-connect 卡住不能讓 supervisor 發現不了斷線 ----
+
+    struct TestHooks {
+        hosts: HostManager,
+        entered: Arc<AtomicBool>,
+        dropped: Arc<AtomicBool>,
+    }
+
+    impl HostsAccess for TestHooks {
+        fn hosts(&self) -> &HostManager {
+            &self.hosts
+        }
+    }
+
+    impl HostInstance for TestHooks {
+        fn instance(&self) -> Option<String> {
+            None
+        }
+    }
+
+    impl HostHooks for TestHooks {
+        async fn is_shared_host(_app: &Arc<Self>, _host: &str) -> bool {
+            false
+        }
+        async fn host_changed(_app: &Arc<Self>, _fence: &HostFence) {}
+        fn set_local_herdr_connected(&self, _ok: bool) {}
+        /// 永遠不回的 post-connect（像卡在遠端不回話的對帳）；被 abort 時 future 被丟掉，flag 會翻。
+        async fn host_connected(app: Arc<Self>, _host: String) {
+            struct OnDrop(Arc<AtomicBool>);
+            impl Drop for OnDrop {
+                fn drop(&mut self) {
+                    self.0.store(true, Ordering::SeqCst);
+                }
+            }
+            let _flag = OnDrop(app.dropped.clone());
+            app.entered.store(true, Ordering::SeqCst);
+            futures::future::pending::<()>().await;
+        }
+        async fn forget_host_observations(_app: &Arc<Self>, _host: &str) {}
+        async fn host_removed(_app: &Arc<Self>, _host: &str) {}
+    }
+
+    #[tokio::test]
+    async fn a_hung_post_connect_does_not_stop_the_supervisor_from_noticing_a_dead_host() {
+        let dir = std::env::temp_dir().join(format!("am-test-{}", crate::db::ulid()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let herdr = crate::testing::MockHerdr::start(dir.join("remote.sock"));
+        let hooks = Arc::new(TestHooks {
+            hosts: HostManager::new(HerdrClient::new(dir.join("local.sock"))),
+            entered: Arc::new(AtomicBool::new(false)),
+            dropped: Arc::new(AtomicBool::new(false)),
+        });
+        let mut host_cfg = cfg();
+        host_cfg.name = "post-connect-hang-test".into();
+        let conn = hooks.hosts.insert_remote_with_client_for_test(host_cfg, HerdrClient::new(dir.join("remote.sock"))).await;
+        // 一個活著的假 ssh master：`run_connected` 只看它還在不在。
+        let master = tokio::process::Command::new("sleep").arg("60").kill_on_drop(true).spawn().unwrap();
+        conn.set_master_for_test(master).await;
+        set_ping_interval_for_test(Some(Duration::from_millis(100)));
+        let fence = hooks.hosts.fence(&conn.name).await.unwrap();
+        let generation = hooks.hosts.current_generation(&conn.name).await.unwrap();
+
+        let run = tokio::spawn({
+            let (hooks, conn) = (hooks.clone(), conn.clone());
+            async move { run_connected(&hooks, &conn, &fence, generation).await }
+        });
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while !(hooks.entered.load(Ordering::SeqCst) && conn.is_connected()) {
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+        })
+        .await
+        .expect("連上之後要標成連線中，而且 post-connect 已經開始（卡住）");
+
+        // herdr 不回 ping：post-connect 還卡著，也要在幾個 ping 間隔內發現、標成斷線。
+        for _ in 0..4 {
+            herdr.fail_next("ping", crate::testing::Fault::Refuse);
+        }
+        let superseded = tokio::time::timeout(Duration::from_secs(5), run)
+            .await
+            .expect("post-connect 卡住時 supervisor 仍要發現斷線")
+            .unwrap();
+        assert!(!superseded, "斷線不是世代變了");
+        assert!(!conn.is_connected());
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while !hooks.dropped.load(Ordering::SeqCst) {
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+        })
+        .await
+        .expect("斷線時 post-connect task 要一起收掉");
+
+        set_ping_interval_for_test(None);
+        std::fs::remove_dir_all(&dir).ok();
+    }

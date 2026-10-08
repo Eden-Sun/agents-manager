@@ -2992,6 +2992,8 @@ label = "foo@m4p"
    遠端腳本的暫存不用 `/tmp` 底下固定檔名：`systemctl`／`launchctl` 的錯誤輸出走 `mktemp` 的隨機檔、用完刪；herdr server 的 log 放遠端的 `~/.config/agents-manager/herdr-<session>.log`（`umask 077`，server 本身仍用原本的 umask）。
 3. `HerdrClient::new(<local.sock>)` 取得與本機相同的 client，`ping` 成功 → `connected`。
 4. 每 10 秒 `ping`；失敗或 master 退出 → `disconnected`、指數退避（1s→30s）重建 → 成功後對該 host 對帳並重建事件訂閱。
+   連上之後的整串 post-connect（對帳、訂閱、autostart…）在**另一個 task** 跑，supervisor 立刻開始 ping／檢查 master：post-connect 卡住（遠端不回話）也能在一個 ping 間隔內發現斷線；斷線、世代變了、supervisor 被取消時一併收掉那個 task（#888）。
+   autostart 起 bot 失敗是 `Upstream`／`Unavailable`（herdr／ssh 暫時不通）或主機中途斷了，這顆記在欠著的名單裡，背景重試；自己失敗那次留下的 run 不算「已經有人動過它」。其他失敗（Conflict、Bad、NotFound、Uncommitted…）不重試。
    autostart（§6.1 第 6 步）只在這台**第一次**對帳成功後跑一次；之後的重連不再跑，使用者停掉的 bot 不會被重開。
 5. daemon 退出時 `ssh -O exit`；遠端 herdr 與 agent 保持存活。
 6. `App.hosts: HashMap<String, HostConn>`，`"local"` 為本機；一律 `app.herdr_for(project.host)`；pane watcher、fallback timer 以 `(host, pane_id)` 為鍵；對帳與全域訂閱逐 host。
