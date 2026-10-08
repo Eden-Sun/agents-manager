@@ -96,3 +96,26 @@ it('點「開 shell 登入」→ 確認框寫明授權網址與 /quit → 確認
   assert.ok(btn(agyRow(), '登出 agy'), '已登入又有登出鈕')
   assert.equal(btn(agyRow(), '開 shell 登入'), undefined)
 })
+
+it('已經有一顆活著的 host shell：登入仍然新開一顆，指令不打進舊的那顆（#915）', async () => {
+  const requests = await openAgyPopover()
+  const api = await import('../api')
+  const existing = await api.openHostShell('local')
+  const isOpen = (r: { method: string; path: string }) => r.method === 'POST' && /\/hosts\/local\/shells$/.test(r.path)
+  const before = requests.filter(isOpen).length
+  const oldPath = `/shells/${encodeURIComponent(existing.pane_id)}/`
+  assert.ok((await api.fetchHostShells('local')).some((s) => s.pane_id === existing.pane_id), '舊的那顆還活著')
+
+  await click(btn(agyRow(), '開 shell 登入')!)
+  await until(() => btn(document.body, '開 shell 並送出') !== undefined, '確認框出現')
+  await click(btn(document.body, '開 shell 並送出')!)
+  await until(() => requests.filter(isOpen).length === before + 1, '又新開了一顆 shell')
+  const isText = (r: { method: string; path: string }) => r.method === 'POST' && /\/hosts\/local\/shells\/[^/]+\/text$/.test(r.path)
+  await until(() => requests.some((r) => isText(r) && !r.path.includes(oldPath)), '字打進新的那顆')
+  assert.ok(!requests.some((r) => isText(r) && r.path.includes(oldPath)), '舊 shell 沒收到任何字')
+  const view = useStore.getState().shellView
+  assert.ok(view && view.paneId !== existing.pane_id, 'shellView 是新的那顆')
+  // 共用的 mock 是行程單例、shell 上限 8 顆：收掉這個測試開的，別讓後面的測試撞 `too_many_shells`。
+  for (const sh of await api.fetchHostShells('local')) await api.closeHostShell('local', sh.pane_id, true)
+})
+

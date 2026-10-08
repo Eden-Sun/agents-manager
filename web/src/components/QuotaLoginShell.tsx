@@ -1,7 +1,7 @@
 import { useState, type ReactNode } from 'react'
 import type { BotKind } from '../api/types'
-import * as api from '../api'
 import { useStore } from '../store/store'
+import { openFreshShellAndType } from '../lib/cliLogin'
 import { ConfirmDialog } from './ConfirmDialog'
 import { AgyInstallDialog } from './AgyInstall'
 import { useAgyMissing } from './agyInstallState'
@@ -27,7 +27,6 @@ export function QuotaLoginShell({
 }) {
   const [open, setOpen] = useState(false)
   const [sent, setSent] = useState(false)
-  const openHostShell = useStore((s) => s.openHostShell)
   const refreshTools = useStore((s) => s.refreshTools)
   const notify = useStore((s) => s.notify)
   const shellBusy = useStore((s) => s.busy[`shell:${host}`] === true)
@@ -38,18 +37,11 @@ export function QuotaLoginShell({
   const agyMissing = useAgyMissing(host) && kind === 'agy'
 
   async function run() {
-    if (!(await openHostShell(host))) return
-    const view = useStore.getState().shellView
-    if (!view) return
-    try {
-      await api.sendHostShellText(host, view.paneId, command, true)
-      setSent(true)
-      notify('info', `已在 ${hostLabel} 的 shell 送出 ${command}，請在那個終端完成登入`)
-    } catch {
-      // 打字失敗不代表 shell 沒開起來：使用者眼前就是那個終端，告訴他自己敲哪一行最省事。
-      setSent(true)
-      notify('info', `shell 已開好，請在裡面輸入 ${command}`)
-    }
+    // 一律新開（不接回舊 shell，#915）：指令不會被打進別人前景的 vim／sudo／手動開的 claude。
+    const { opened, typed } = await openFreshShellAndType(host, command)
+    if (!opened) return
+    setSent(true)
+    if (typed) notify('info', `已在 ${hostLabel} 的 shell 送出 ${command}，請在那個終端完成登入`)
   }
 
   return (
