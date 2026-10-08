@@ -5,6 +5,7 @@ import { parseMentions, stripMentionsOf } from '../api/mentions'
 import type { Bot, GroupMessage } from '../api/types'
 import { useScrollTail } from '../hooks/useScrollTail'
 import { attachCommandOf, composerState, groupComposerState, projectHostName, useStore } from '../store/store'
+import { ATTACHMENT_FAILED_NOTICE } from '../lib/composerLabels'
 import { useBotLamp } from '../hooks/useBotLamp'
 import { useEnterToSend } from '../hooks/useEnterToSend'
 import { PHONE_QUERY, useMediaQuery } from '../hooks/useMediaQuery'
@@ -368,6 +369,11 @@ function GroupComposer({
       return
     }
     if (sending || files.uploading) return
+    // 失敗的附件不在 `files.ids` 裡：照送會少一個檔案，送成功後 `clear()` 還把失敗卡片與重試鈕丟掉（issue #917）。
+    if (files.failed) {
+      notify('error', ATTACHMENT_FAILED_NOTICE)
+      return
+    }
     setSending(true)
     void sendGroupChat(projectId, body, files.ids).then((res) => {
       setSending(false)
@@ -528,20 +534,22 @@ function GroupComposer({
           type="button"
           className={`send-btn${toAgm ? ' agm' : ''}`}
           disabled={
-            sending || files.uploading || !text.trim() || (toAgm ? false : state.disabled || targets.length === 0)
+            sending || files.uploading || (!toAgm && files.failed) || !text.trim() || (toAgm ? false : state.disabled || targets.length === 0)
           }
           title={
             toAgm
               ? (agmAttachmentBlock(toAgm, files.items.length) ?? '建一個任務交給 AGM')
               : files.uploading
                 ? '附件上傳中…'
-                : targets.length === 0
+                : files.failed
+                  ? ATTACHMENT_FAILED_NOTICE
+                  : targets.length === 0
                   ? '請選擇收件者（上方 chip 或 @mention）'
                   : `送給 ${targets.map((t) => `@${t.name}`).join(', ')}`
           }
           onClick={submit}
         >
-          {sending ? '送出中…' : files.uploading ? '上傳中…' : toAgm ? '交給 AGM' : '送出'}
+          {sending ? '送出中…' : files.uploading ? '上傳中…' : !toAgm && files.failed ? '有附件上傳失敗' : toAgm ? '交給 AGM' : '送出'}
         </button>
       </div>
       {toAgm ? (

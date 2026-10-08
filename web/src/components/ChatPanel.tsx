@@ -16,7 +16,7 @@ import { typeAlongside } from '../store/alongside'
 import { sendNowButton } from '../store/sendNowCopy'
 import { SentViaTag } from './SentViaTag'
 import { startingSend, startingSendLabel } from '../store/startingSend'
-import { composerPlaceholder, sendButtonLabel, sendButtonTitle } from '../lib/composerLabels'
+import { ATTACHMENT_FAILED_NOTICE, composerPlaceholder, sendButtonLabel, sendButtonTitle } from '../lib/composerLabels'
 import { queuedSendFor } from '../store/queuedSend'
 import { isImeEnter } from '../lib/ime'
 import { herdrIdentity } from '../lib/herdrIdentity'
@@ -747,6 +747,11 @@ function Composer({
       return
     }
     if (sending || files.uploading) return
+    // 失敗的附件不在 `files.ids` 裡：照送會少一個檔案，送成功後 `clear()` 還把失敗卡片與重試鈕一起丟掉（issue #917）。
+    if (files.failed) {
+      notify('error', ATTACHMENT_FAILED_NOTICE)
+      return
+    }
     setSending(true)
     // Enter always opts into daemon queueing; idle bots still follow the ordinary immediate-send path.
     void sendPrompt(botId, body, files.ids, false, Boolean(state.autoStart), undefined, true).then((ok) => {
@@ -767,6 +772,10 @@ function Composer({
     const body = pending.trim()
     const ids = files.ids
     if (!body && ids.length === 0) return
+    if (files.failed) {
+      notify('error', ATTACHMENT_FAILED_NOTICE)
+      return
+    }
     setSending(true)
     const ok = await sendPrompt(botId, body, ids, true)
     setSending(false)
@@ -952,13 +961,13 @@ function Composer({
         <button
           type="button"
           className="send-btn"
-          disabled={state.disabled || sending || files.uploading || nothingToSend}
-          title={sendButtonTitle(state, files.uploading)}
+          disabled={state.disabled || sending || files.uploading || files.failed || nothingToSend}
+          title={sendButtonTitle(state, files.uploading, files.failed)}
           /* 手機失焦收鍵盤→版面位移→click 不成立；擋 mousedown 保住焦點（2026-09-10）。 */
           onMouseDown={(e) => e.preventDefault()}
           onClick={submit}
         >
-          {sendButtonLabel(state, { phone, sending, uploading: files.uploading })}
+          {sendButtonLabel(state, { phone, sending, uploading: files.uploading, failed: files.failed })}
         </button>
       </div>
     </div>
