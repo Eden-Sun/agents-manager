@@ -325,6 +325,62 @@ check_eq "有失敗計數" "1" "$(cat "$AGM_DIR/daemon-update.fails")"
 check_no "sha 不符不記進 rejected" "$C3" "$AGM_DIR/daemon-update.rejected"
 teardown
 
+# 16c. rc=10（binary 內嵌的 sha 對不上）要清掉 .built-for：下一輪重新 checkout＋建置，不認那顆壞 binary（issue #883）。
+setup
+ci "$C3" success
+export STUB_SWAP_RC=10
+run >/dev/null
+check_eq "rc=10 後 .built-for 不在" "no" "$([ -f "$AGM_DEPLOY_CHECKOUT/target/release/.built-for" ] && echo yes || echo no)"
+run >/dev/null
+check_eq "rc=10 的下一輪重新建置" "2" "$(count 'cargo build' "$AGM_DIR/build.log")"
+teardown
+
+# 16d. 立即部署連續失敗（rc=3，不會自己好）：滿 3 次推 now_failed 並收掉請求；之前請求檔留著、計數累加（issue #883）。
+setup
+printf '{"sha":"%s"}' "$C1" > "$AGM_DIR/daemon-update.now.json"
+export STUB_SWAP_RC=3
+run >/dev/null
+check_eq "第 1 次失敗請求檔還在" "yes" "$([ -f "$AGM_DIR/daemon-update.now.json" ] && echo yes || echo no)"
+check_eq "失敗計數是 1" "$C1 1" "$(cat "$AGM_DIR/daemon-update.now.fails")"
+run >/dev/null
+check_eq "第 2 次失敗請求檔還在" "yes" "$([ -f "$AGM_DIR/daemon-update.now.json" ] && echo yes || echo no)"
+check_no "還沒到上限不推 now_failed" "now_failed" "$AGM_DIR/alerts.log"
+run >/dev/null
+check_eq "第 3 次失敗收掉請求檔" "no" "$([ -f "$AGM_DIR/daemon-update.now.json" ] && echo yes || echo no)"
+check "推 now_failed" "now_failed" "$AGM_DIR/alerts.log"
+check_eq "收掉後計數檔也清掉" "no" "$([ -f "$AGM_DIR/daemon-update.now.fails" ] && echo yes || echo no)"
+teardown
+
+# 16e. 立即部署一直等窗口（rc=4）：不算失敗，請求檔留著、不累計。
+setup
+printf '{"sha":"%s"}' "$C1" > "$AGM_DIR/daemon-update.now.json"
+export STUB_SWAP_RC=4
+run >/dev/null; run >/dev/null; run >/dev/null
+check_eq "rc=4 三輪請求檔仍在" "yes" "$([ -f "$AGM_DIR/daemon-update.now.json" ] && echo yes || echo no)"
+check_eq "rc=4 不累計失敗" "no" "$([ -f "$AGM_DIR/daemon-update.now.fails" ] && echo yes || echo no)"
+check_no "rc=4 不推 now_failed" "now_failed" "$AGM_DIR/alerts.log"
+teardown
+
+# 16f. 立即部署遇到 daemon 太舊（rc=9）：做不了，立刻收掉。
+setup
+printf '{"sha":"%s"}' "$C1" > "$AGM_DIR/daemon-update.now.json"
+export STUB_SWAP_RC=9
+run >/dev/null
+check_eq "rc=9 立刻收掉請求檔" "no" "$([ -f "$AGM_DIR/daemon-update.now.json" ] && echo yes || echo no)"
+check "仍推 swap_daemon_too_old" "swap_daemon_too_old" "$AGM_DIR/alerts.log"
+teardown
+
+# 16g. 立即部署的建置一直失敗：也算失敗，滿 3 次收掉。
+setup
+printf '{"sha":"%s"}' "$C1" > "$AGM_DIR/daemon-update.now.json"
+export STUB_CARGO_FAIL=1
+run >/dev/null; run >/dev/null
+check_eq "建置失敗 2 次請求檔還在" "yes" "$([ -f "$AGM_DIR/daemon-update.now.json" ] && echo yes || echo no)"
+run >/dev/null
+check_eq "建置失敗 3 次收掉請求檔" "no" "$([ -f "$AGM_DIR/daemon-update.now.json" ] && echo yes || echo no)"
+check "建置失敗推 now_failed" "now_failed" "$AGM_DIR/alerts.log"
+teardown
+
 # 17. 殘留鎖（執行者已不在）超過門檻就回收；還活著的執行者則跳過。
 setup
 ci "$C3" success

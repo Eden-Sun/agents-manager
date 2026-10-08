@@ -209,7 +209,24 @@ log "== check"
 
 # 立即部署請求（SPEC §18.2）：daemon 的 `POST /api/deploy/now` 寫下要部署的 sha 再叫起這個 job。
 NOW=0; NOW_SHA=""
-drop_now() { rm -f "$NOW_FILE"; log "收掉立即部署請求（$1）"; }
+NOW_FAILS="$DIR/daemon-update.now.fails"            # 立即部署對同一顆 sha 連續失敗的次數：「<sha> <次數>」
+NOW_FAIL_MAX=${AGM_NOW_FAIL_MAX:-3}
+drop_now() { rm -f "$NOW_FILE" "$NOW_FAILS"; log "收掉立即部署請求（$1）"; }
+# 立即部署的一次「不會自己好」的失敗（換版 rc=3／5／10／11／其他、建置失敗）：同一顆 sha 累計到上限就喊人並收掉請求，
+# 不然這種請求會每 5 分鐘重建、重失敗，永遠不收（issue #883）。等窗口（rc=4）不算，成功或收掉時清零。
+now_fail() { # now_fail <失敗描述>
+  [ "$NOW" = 1 ] || return 0
+  _nsha=""; _nn=0
+  read -r _nsha _nn < "$NOW_FAILS" 2>/dev/null || true
+  case "$_nn" in ''|*[!0-9]*) _nn=0 ;; esac
+  if [ "$_nsha" = "$NOW_SHA" ]; then _nn=$((_nn + 1)); else _nn=1; fi
+  echo "$NOW_SHA $_nn" > "$NOW_FAILS.tmp" && mv -f "$NOW_FAILS.tmp" "$NOW_FAILS"
+  if [ "$_nn" -ge "$NOW_FAIL_MAX" ]; then
+    alert now_failed "立即部署 ${NOW_SHA} 連續 ${_nn} 次失敗（${1}），已收掉請求；細節見 ${DIR}/daemon-swap.log"
+    drop_now "連續 ${_nn} 次失敗"
+  fi
+  return 0
+}
 if [ -f "$NOW_FILE" ]; then
   NOW_SHA=$(python3 -c '
 import json,sys
@@ -317,10 +334,10 @@ else
   "$GIT" -C "$DEPLOY" checkout -q --force --detach "$TARGET" >> "$LOG" 2>&1 || { note_fail "checkout ${SHORT} 失敗"; exit 0; }
   "$GIT" -C "$DEPLOY" clean -fdq >> "$LOG" 2>&1 || true   # 沒有 -x：target／node_modules（被 ignore）留著，增量建置才快
   log "建置 ${SHORT}：web"
-  ( cd "$DEPLOY/web" && "$BUN" install --frozen-lockfile && "$BUN" run build ) >> "$LOG" 2>&1 || { note_fail "web 建置失敗（${SHORT}）"; exit 0; }
+  ( cd "$DEPLOY/web" && "$BUN" install --frozen-lockfile && "$BUN" run build ) >> "$LOG" 2>&1 || { note_fail "web 建置失敗（${SHORT}）"; now_fail "web 建置失敗"; exit 0; }
   log "建置 ${SHORT}：daemon（cargo build --release）"
   ( cd "$DEPLOY" && AM_REAL_CARGO="$CARGO" PATH="$(dirname "$CARGO"):$PATH" "$NICE" -n 10 "$CARGO" build --release -p agents-managerd ) >> "$LOG" 2>&1 \
-    || { note_fail "cargo build 失敗（${SHORT}）"; exit 0; }
+    || { note_fail "cargo build 失敗（${SHORT}）"; now_fail "cargo build 失敗"; exit 0; }
   [ -x "$DEPLOY/target/release/agents-managerd" ] || { note_fail "cargo build 沒產出 binary（${SHORT}）"; exit 0; }
   echo "$TARGET" > "$BUILD_MARK"
   log "建好 ${SHORT}"
@@ -343,6 +360,7 @@ case "$SWAP_RC" in
   4)
     # 有人在忙／窗口拿不到：正常的等。立即部署的請求留著，下一輪再試。
     log "還有人在忙（或複查不安全），這輪沒換版（daemon-swap rc=4）；下一輪再試"
+    rm -f "$NOW_FAILS"
     ;;
   6)
     # 新版起來了、只是升過 schema 所以往前修；daemon-swap 沒寫 .built，這裡補上，否則下一輪會對同一顆重做一遍。
@@ -363,13 +381,18 @@ case "$SWAP_RC" in
     # 換版之前就擋下、什麼都沒動：這次建出來的 binary 不是 ${SHORT} 這顆 commit 的（沒重建？髒樹？），不是 commit 本身有問題，所以不記進 rejected。
     alert swap_binary_sha_mismatch "要換上 ${SHORT} 的 binary 內嵌的 sha 不是它（或髒樹建的、或舊 binary 沒內嵌 sha），換版中止、窗口沒拿、線上沒動。請看 ${DIR}/daemon-swap.log"
     ROUND_FAIL="${ROUND_FAIL:-新 binary 的內嵌 sha 對不上 ${SHORT}}"
+    # 下一輪要整個重來（checkout --force＋clean＋建置），不能還認這顆「已經建好」的 binary。
+    rm -f "$BUILD_MARK"
+    now_fail "rc=10"
     ;;
   9)
     alert swap_daemon_too_old "線上 daemon 太舊，沒有 restart-window 路由，自動換版做不了。要先手動換過一次含這條路由的 binary（scripts/ops/README.md）"
     ROUND_FAIL="${ROUND_FAIL:-線上 daemon 太舊，沒有 restart-window 路由}"
+    [ "$NOW" = 1 ] && drop_now "daemon 太舊，立即部署做不了"
     ;;
   *)
     note_fail "daemon-swap 失敗 rc=${SWAP_RC}（${SHORT}），細節見 ${DIR}/daemon-swap.log"
+    now_fail "rc=${SWAP_RC}"
     ;;
 esac
 exit 0
