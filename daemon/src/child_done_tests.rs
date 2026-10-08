@@ -366,3 +366,176 @@
         let reply = "completed with `inline code`";
         assert_eq!(quoted_reply(&message_for("child", reply)), Some(reply));
     }
+
+    // ---- #874：字沒打進去的通知補送 ----
+
+    fn base_crid(f: &Fixture) -> String {
+        format!("{CRID_PREFIX}{}:{}", f.child_id, f.child_turn)
+    }
+
+    async fn crid_count(f: &Fixture, crid: &str) -> i64 {
+        sqlx::query_scalar("SELECT COUNT(*) FROM turns WHERE conversation_id=? AND client_request_id=?")
+            .bind(&f.parent_conversation)
+            .bind(crid)
+            .fetch_one(&f.env.app.db)
+            .await
+            .unwrap()
+    }
+
+    /// 把 `crid` 那一筆通知改成「字沒打進去就被佇列收掉」，完成時間是 `ago_secs` 秒前。
+    async fn fail_undelivered(f: &Fixture, crid: &str, ago_secs: i64) {
+        sqlx::query("UPDATE turns SET status='failed', delivery='failed', completed_at=? WHERE conversation_id=? AND client_request_id=?")
+            .bind(db::iso_in(-ago_secs))
+            .bind(&f.parent_conversation)
+            .bind(crid)
+            .execute(&f.env.app.db)
+            .await
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn an_undelivered_failed_notice_is_retried_with_an_attempt_suffix() {
+        let f = fixture("hook", "completed").await;
+        make_parent_busy(&f, "parent-working-retry").await;
+        notify_turn(&f.env.app, &f.child_turn).await.unwrap();
+        assert_eq!(notice_count(&f).await, 1);
+        fail_undelivered(&f, &base_crid(&f), 180).await;
+
+        sweep(&f.env.app).await;
+        assert_eq!(crid_count(&f, &format!("{}:r1", base_crid(&f))).await, 1);
+        assert_eq!(all_child_notice_count(&f).await, 2);
+
+        sweep(&f.env.app).await;
+        assert_eq!(all_child_notice_count(&f).await, 2, "r1 還在 queued：不再多送");
+    }
+
+    #[tokio::test]
+    async fn the_retry_is_not_suppressed_as_a_near_duplicate_of_its_own_failed_attempt() {
+        let f = fixture("hook", "completed").await;
+        make_parent_busy(&f, "parent-working-retry-dup").await;
+        notify_turn(&f.env.app, &f.child_turn).await.unwrap();
+        // 冷卻剛過（2 分鐘多一點），第 0 次的內文還在 5 分鐘的近似重複窗口裡。
+        fail_undelivered(&f, &base_crid(&f), 130).await;
+        notify_turn(&f.env.app, &f.child_turn).await.unwrap();
+        assert_eq!(crid_count(&f, &format!("{}:r1", base_crid(&f))).await, 1);
+    }
+
+    #[tokio::test]
+    async fn a_retry_waits_for_the_cooldown() {
+        let f = fixture("hook", "completed").await;
+        make_parent_busy(&f, "parent-working-retry-cooldown").await;
+        notify_turn(&f.env.app, &f.child_turn).await.unwrap();
+        fail_undelivered(&f, &base_crid(&f), 30).await;
+        sweep(&f.env.app).await;
+        assert_eq!(all_child_notice_count(&f).await, 1, "冷卻還沒過：不補送");
+    }
+
+    /// 全部從 DB 推導，沒有記憶體狀態：直接再呼叫 `notify_turn`（不經 `on_completed_turn`）就等價於重啟後的補送。
+    #[tokio::test]
+    async fn the_retry_survives_a_restart() {
+        let f = fixture("hook", "completed").await;
+        make_parent_busy(&f, "parent-working-retry-restart").await;
+        notify_turn(&f.env.app, &f.child_turn).await.unwrap();
+        fail_undelivered(&f, &base_crid(&f), 180).await;
+        notify_turn(&f.env.app, &f.child_turn).await.unwrap();
+        assert_eq!(crid_count(&f, &format!("{}:r1", base_crid(&f))).await, 1);
+        assert_eq!(all_child_notice_count(&f).await, 2);
+    }
+
+    #[tokio::test]
+    async fn a_pending_notice_is_not_fanned_out() {
+        let f = fixture("hook", "completed").await;
+        make_parent_busy(&f, "parent-working-pending").await;
+        for _ in 0..3 {
+            sweep(&f.env.app).await;
+            notify_turn(&f.env.app, &f.child_turn).await.unwrap();
+        }
+        assert_eq!(all_child_notice_count(&f).await, 1);
+    }
+
+    #[tokio::test]
+    async fn a_delivered_or_unknown_notice_is_never_repeated() {
+        for (status, delivery) in [("completed", "ok"), ("failed", "unknown")] {
+            let f = fixture("hook", "completed").await;
+            make_parent_busy(&f, "parent-working-delivered").await;
+            notify_turn(&f.env.app, &f.child_turn).await.unwrap();
+            // queued → completed 不是合法邊（turn_guard）：先認領成 in_flight。
+            if status == "completed" {
+                sqlx::query("UPDATE turns SET status='in_flight' WHERE conversation_id=? AND client_request_id=?")
+                    .bind(&f.parent_conversation)
+                    .bind(base_crid(&f))
+                    .execute(&f.env.app.db)
+                    .await
+                    .unwrap();
+            }
+            sqlx::query("UPDATE turns SET status=?, delivery=?, completed_at=? WHERE conversation_id=? AND client_request_id=?")
+                .bind(status)
+                .bind(delivery)
+                .bind(db::iso_in(-600))
+                .bind(&f.parent_conversation)
+                .bind(base_crid(&f))
+                .execute(&f.env.app.db)
+                .await
+                .unwrap();
+            sweep(&f.env.app).await;
+            notify_turn(&f.env.app, &f.child_turn).await.unwrap();
+            assert_eq!(all_child_notice_count(&f).await, 1, "status={status} delivery={delivery}");
+        }
+    }
+
+    #[tokio::test]
+    async fn a_withdrawn_notice_is_not_retried() {
+        let f = fixture("hook", "completed").await;
+        make_parent_busy(&f, "parent-working-withdrawn").await;
+        notify_turn(&f.env.app, &f.child_turn).await.unwrap();
+        fail_undelivered(&f, &base_crid(&f), 600).await;
+        let notice: String = sqlx::query_scalar("SELECT id FROM turns WHERE conversation_id=? AND client_request_id=?")
+            .bind(&f.parent_conversation)
+            .bind(base_crid(&f))
+            .fetch_one(&f.env.app.db)
+            .await
+            .unwrap();
+        sqlx::query(
+            "INSERT INTO messages (id, conversation_id, turn_id, role, content, source, created_at)
+             VALUES (?,?,?,'system',?,'system',?)",
+        )
+        .bind(db::ulid())
+        .bind(&f.parent_conversation)
+        .bind(&notice)
+        .bind(crate::daemon_notice::WITHDRAWN_WHY)
+        .bind(db::now())
+        .execute(&f.env.app.db)
+        .await
+        .unwrap();
+        sweep(&f.env.app).await;
+        notify_turn(&f.env.app, &f.child_turn).await.unwrap();
+        assert_eq!(all_child_notice_count(&f).await, 1, "撤回＝使用者說不要，不重送");
+    }
+
+    #[tokio::test]
+    async fn retries_stop_after_the_limit() {
+        let f = fixture("hook", "completed").await;
+        make_parent_busy(&f, "parent-working-limit").await;
+        let base = base_crid(&f);
+        // r0..r3 全部字沒打進去，時間都超過冷卻。
+        for (n, ago) in [(0, 900), (1, 800), (2, 700), (3, 600)] {
+            let crid = if n == 0 { base.clone() } else { format!("{base}:r{n}") };
+            sqlx::query(
+                "INSERT INTO turns (id, conversation_id, run_id, origin, status, delivery, client_request_id, created_at, completed_at)
+                 VALUES (?,?,?,'web','failed','failed',?,?,?)",
+            )
+            .bind(db::ulid())
+            .bind(&f.parent_conversation)
+            .bind(&f.parent_run)
+            .bind(&crid)
+            .bind(db::iso_in(-ago - 5))
+            .bind(db::iso_in(-ago))
+            .execute(&f.env.app.db)
+            .await
+            .unwrap();
+        }
+        sweep(&f.env.app).await;
+        notify_turn(&f.env.app, &f.child_turn).await.unwrap();
+        assert_eq!(crid_count(&f, &format!("{base}:r4")).await, 0);
+        assert_eq!(all_child_notice_count(&f).await, 4);
+    }

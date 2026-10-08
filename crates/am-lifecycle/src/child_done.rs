@@ -10,11 +10,12 @@ const NEAR_DUPLICATE_MINUTES: i64 = 5;
 const NEAR_DUPLICATE_MAX_DISTANCE_PERCENT: usize = 20;
 pub const CRID_PREFIX: &str = "child-done:";
 
+/// `current_base_crid` 是來源回合的 `child-done:<child>:<turn>`（不含 `:r<n>`）：同一個來源回合的整串重試都不算「近似重複」。
 pub async fn has_recent_near_duplicate(
     db: &sqlx::SqlitePool,
     parent_conversation: &str,
     child_prefix: &str,
-    current_client_request_id: &str,
+    current_base_crid: &str,
     current_reply: &str,
 ) -> anyhow::Result<bool> {
     let recent: Vec<String> = sqlx::query_scalar(
@@ -25,13 +26,17 @@ pub async fn has_recent_near_duplicate(
             AND sent.client_request_id IS NOT NULL
             AND substr(sent.client_request_id, 1, length(?)) = ?
             AND sent.client_request_id <> ?
+            AND substr(sent.client_request_id, 1, length(?) + 2) <> ? || ':r'
+            AND NOT (sent.status = 'failed' AND sent.delivery = 'failed')
             AND julianday(m.created_at) >= julianday('now', ?)
           ORDER BY m.created_at DESC LIMIT 8",
     )
     .bind(parent_conversation)
     .bind(child_prefix)
     .bind(child_prefix)
-    .bind(current_client_request_id)
+    .bind(current_base_crid)
+    .bind(current_base_crid)
+    .bind(current_base_crid)
     .bind(format!("-{NEAR_DUPLICATE_MINUTES} minutes"))
     .fetch_all(db)
     .await?;

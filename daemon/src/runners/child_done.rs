@@ -38,6 +38,12 @@ impl Drop for Working {
 /// 終端擷取（`completed_fallback`）收下的回合，先等這麼久再通知，讓「剛開出來、只回了開場白」的子 agent 有時間繼續動起來（#878）。
 const FALLBACK_SETTLE: std::time::Duration = std::time::Duration::from_secs(20);
 
+/// 通知被佇列收成 failed（字沒打進去）之後，隔多久才補送下一次（#874）。
+const CHILD_DONE_RETRY_COOLDOWN: std::time::Duration = std::time::Duration::from_secs(120);
+
+/// 同一個來源回合最多補送幾次（第 0 次之外）。
+const CHILD_DONE_RETRY_LIMIT: u32 = 3;
+
 /// Start a best-effort immediate notification after a completed turn has been committed.
 pub fn on_completed_turn(app: &Arc<App>, turn_id: &str) {
     if cfg!(test) {
@@ -87,13 +93,35 @@ pub async fn sweep(app: &Arc<App>) -> usize {
                 SELECT 1 FROM turns sent
                   JOIN conversations pc ON pc.id = sent.conversation_id
                  WHERE pc.bot_id = b.parent_bot_id
-                   AND sent.client_request_id = 'child-done:' || b.id || ':' || t.id
+                   AND (sent.client_request_id = 'child-done:' || b.id || ':' || t.id
+                        OR substr(sent.client_request_id, 1, length('child-done:' || b.id || ':' || t.id || ':r'))
+                           = 'child-done:' || b.id || ':' || t.id || ':r')
+                   AND NOT (sent.status = 'failed' AND sent.delivery = 'failed')
+            )
+            -- 這顆 child 較新的回合已經有（不是 undelivered 的）通知：舊的由 notify_turn 的 `superseded` 擋掉，不必每輪撈出來。
+            AND NOT EXISTS (
+                SELECT 1 FROM turns sent
+                  JOIN conversations pc ON pc.id = sent.conversation_id
+                  JOIN turns source ON source.id = CASE
+                         WHEN instr(substr(sent.client_request_id, length('child-done:' || b.id || ':') + 1), ':') > 0
+                         THEN substr(substr(sent.client_request_id, length('child-done:' || b.id || ':') + 1), 1,
+                                     instr(substr(sent.client_request_id, length('child-done:' || b.id || ':') + 1), ':') - 1)
+                         ELSE substr(sent.client_request_id, length('child-done:' || b.id || ':') + 1)
+                       END
+                 WHERE pc.bot_id = b.parent_bot_id
+                   AND substr(sent.client_request_id, 1, length('child-done:' || b.id || ':')) = 'child-done:' || b.id || ':'
+                   AND NOT (sent.status = 'failed' AND sent.delivery = 'failed')
+                   AND (source.completed_at > t.completed_at
+                        OR (source.completed_at = t.completed_at AND source.rowid > t.rowid))
             )
             AND NOT EXISTS (
                 SELECT 1 FROM messages reported
                   JOIN conversations pc ON pc.id = reported.conversation_id
                  WHERE pc.bot_id = b.parent_bot_id
                    AND reported.role = 'user' AND reported.relay_from = b.id
+                   -- daemon 自己送的 child-done 通知也帶 relay_from：不算 child 自己回報（否則補送會被前一次的通知擋掉，#874）
+                   AND NOT EXISTS (SELECT 1 FROM turns nt WHERE nt.id = reported.turn_id
+                                    AND substr(nt.client_request_id, 1, length('child-done:' || b.id || ':')) = 'child-done:' || b.id || ':')
                    AND julianday(reported.created_at) >= julianday(t.created_at)
                    AND julianday(reported.created_at) <= julianday(t.completed_at) + (5.0 / 1440.0)
             )
@@ -169,32 +197,49 @@ pub(crate) async fn notify_turn(app: &Arc<App>, turn_id: &str) -> anyhow::Result
         return Ok(());
     }
 
-    let client_request_id = format!("{CRID_PREFIX}{}:{}", turn.child_id, turn.id);
+    let base_crid = format!("{CRID_PREFIX}{}:{}", turn.child_id, turn.id);
     let parent_conversation = crate::db::conversation_id(&app.db, &turn.parent_id).await?;
-    let already_notified: bool = sqlx::query_scalar(
-        "SELECT EXISTS (SELECT 1 FROM turns WHERE conversation_id = ? AND client_request_id = ?)",
-    )
-    .bind(&parent_conversation)
-    .bind(&client_request_id)
-    .fetch_one(&app.db)
-    .await?;
-    if already_notified {
-        return Ok(());
-    }
+    // 這個來源回合在 parent 那邊最後一則通知怎麼了（#874）：字沒打進去就收成 failed 的，冷卻過後以 `:r<n>` 補送；
+    // 送到、結果不明、還在路上、使用者撤回都不重送。全部從 DB 推導，重啟後照舊。
+    let client_request_id = match crate::child_alerts::last_sent(app, &turn.parent_id, &base_crid).await? {
+        crate::child_alerts::Sent::Never => base_crid.clone(),
+        crate::child_alerts::Sent::Undelivered { attempt, at } => {
+            let cooled = chrono::Utc::now()
+                .signed_duration_since(at)
+                .to_std()
+                .is_ok_and(|d| d >= CHILD_DONE_RETRY_COOLDOWN);
+            if !cooled || attempt >= CHILD_DONE_RETRY_LIMIT {
+                return Ok(());
+            }
+            format!("{base_crid}:r{}", attempt + 1)
+        }
+        crate::child_alerts::Sent::Outstanding
+        | crate::child_alerts::Sent::Delivered
+        | crate::child_alerts::Sent::Withdrawn => return Ok(()),
+    };
 
     let prefix = format!("{CRID_PREFIX}{}:", turn.child_id);
     let superseded: bool = sqlx::query_scalar(
         "SELECT EXISTS (
             SELECT 1 FROM turns sent
-             JOIN turns source ON source.id = substr(sent.client_request_id, length(?) + 1)
+             JOIN turns source ON source.id = CASE
+                    WHEN instr(substr(sent.client_request_id, length(?) + 1), ':') > 0
+                    THEN substr(substr(sent.client_request_id, length(?) + 1), 1,
+                                instr(substr(sent.client_request_id, length(?) + 1), ':') - 1)
+                    ELSE substr(sent.client_request_id, length(?) + 1)
+                  END
             WHERE sent.conversation_id = ?
               AND substr(sent.client_request_id, 1, length(?)) = ?
+              AND NOT (sent.status = 'failed' AND sent.delivery = 'failed')
               AND (source.completed_at > ? OR (
                     source.completed_at = ?
                     AND source.rowid > (SELECT rowid FROM turns WHERE id = ?)
               ))
         )",
     )
+    .bind(&prefix)
+    .bind(&prefix)
+    .bind(&prefix)
     .bind(&prefix)
     .bind(&parent_conversation)
     .bind(&prefix)
@@ -212,12 +257,16 @@ pub(crate) async fn notify_turn(app: &Arc<App>, turn_id: &str) -> anyhow::Result
         "SELECT EXISTS (
             SELECT 1 FROM messages m
              WHERE m.conversation_id = ? AND m.role = 'user' AND m.relay_from = ?
+               AND NOT EXISTS (SELECT 1 FROM turns nt WHERE nt.id = m.turn_id
+                                AND substr(nt.client_request_id, 1, length(?)) = ?)
                AND julianday(m.created_at) >= julianday(?)
                AND julianday(m.created_at) <= julianday(?) + (5.0 / 1440.0)
         )",
     )
     .bind(&parent_conversation)
     .bind(&turn.child_id)
+    .bind(&prefix)
+    .bind(&prefix)
     .bind(&turn.started_at)
     .bind(&turn.completed_at)
     .fetch_one(&app.db)
@@ -243,7 +292,7 @@ pub(crate) async fn notify_turn(app: &Arc<App>, turn_id: &str) -> anyhow::Result
         &app.db,
         &parent_conversation,
         &prefix,
-        &client_request_id,
+        &base_crid,
         &quoted_reply,
     )
     .await?

@@ -423,7 +423,7 @@ const REARM_LIMIT: u32 = 3;
 
 /// 這一次 blocked、這一個問題，parent 那邊最後一則通知怎麼了（#567）。
 #[derive(Debug, Clone, PartialEq)]
-enum Sent {
+pub enum Sent {
     /// 還沒送過。
     Never,
     /// 還在排、或正在送：同一次 blocked 最多一則在路上。
@@ -452,7 +452,7 @@ fn next_attempt(last: Sent, now: chrono::DateTime<chrono::Utc>) -> Option<u32> {
 }
 
 /// 從 parent 的對話讀 `base` 這一串（第 0 次＋`:r<n>`）最新的一則。
-async fn last_sent(app: &impl crate::capabilities::Db, parent_id: &str, base: &str) -> anyhow::Result<Sent> {
+pub async fn last_sent(app: &impl crate::capabilities::Db, parent_id: &str, base: &str) -> anyhow::Result<Sent> {
     let conv = db::conversation_id(app.db(), parent_id).await?;
     let retry_prefix = format!("{base}:r");
     let row: Option<(String, String, String, String, bool)> = sqlx::query_as(
