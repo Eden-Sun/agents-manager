@@ -10,6 +10,7 @@ import { PHONE_QUERY, useMediaQuery } from '../hooks/useMediaQuery'
 import './mobileQuota.css'
 import { isQuotaDisabled, quotaDisableKey, setQuotaDisabled, useDisabledQuota } from '../store/quotaHide'
 import { quotaBaseKey, weeklyOnlyKind } from '../store/quotaLookup'
+import { disableUntil } from '../lib/quotaDisableUntil'
 import { KindIcon } from './KindTag'
 import { KIND_LABEL } from './kindMeta'
 import { QuotaLoginShell } from './QuotaLoginShell'
@@ -588,18 +589,6 @@ function Gauge({
   )
 }
 
-/** 暫時停用的自動解除時刻＝最近一次未到的 reset；null 表示只能手動解除。 */
-function nextResetOf(q: KindQuota | null, now: number): number | null {
-  let next: number | null = null
-  for (const w of [q?.five_hour, q?.seven_day, q?.fable]) {
-    if (!w?.resets_at) continue
-    const t = Date.parse(w.resets_at)
-    if (Number.isNaN(t) || t <= now) continue
-    if (next === null || t < next) next = t
-  }
-  return next
-}
-
 /** popover 裡的暫時停用勾選格（見 docs/UI-DECISIONS.md）；卡片點擊由 `PopRow` 轉呼叫。 */
 function DisableToggle({ on, label: name, onToggle }: { on: boolean; label: string; onToggle: () => void }) {
   return (
@@ -638,7 +627,7 @@ function StripDisableToggle({ entry, host }: { entry: QuotaEntry; host: string }
             : `停用 ${name}（底下的 Bot 先從側欄收起來，額度 reset 後自動回來）`
         }
         checked={off}
-        onChange={() => setQuotaDisabled(key, !off, off ? null : nextResetOf(q, Date.now()))}
+        onChange={() => setQuotaDisabled(key, !off, off ? null : disableUntil(q, Date.now()))}
       />
     </label>
   )
@@ -761,7 +750,7 @@ function PopRow({ entry, host, onAgyLogout }: { entry: QuotaEntry; host: string;
   const disabledMap = useDisabledQuota()
   const key = quotaDisableKey(host, entry.kind, entry.identity)
   const off = isQuotaDisabled(disabledMap, key)
-  const toggle = () => setQuotaDisabled(key, !off, off ? null : nextResetOf(q, Date.now()))
+  const toggle = () => setQuotaDisabled(key, !off, off ? null : disableUntil(q, Date.now()))
 
   return (
     <div
