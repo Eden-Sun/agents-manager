@@ -2029,19 +2029,32 @@ pub fn scan_script(root: &str) -> String {
 /// 位元組層合併，不經 UTF-8：崩在半個多位元組字元上的 `.replaying` 以前 `read_to_string` 失敗、
 /// `unwrap_or_default` 成空字串，接著整份被新的 spool 覆蓋——舊事件就此消失（#302）。
 fn fold_spool(src: &std::path::Path, dst: &std::path::Path) -> std::io::Result<()> {
+    use std::io::Write as _;
     if !src.exists() {
         return Ok(());
     }
     if !dst.exists() {
         return std::fs::rename(src, dst);
     }
-    let mut prev = std::fs::read(dst)?;
+    // 追加寫入，不重寫 `dst`（#912）：以前 read(dst)→write(整份) 是先截斷再寫，崩在寫入途中就清空了這份唯一的副本。
+    // 先讀 `src`：讀不到（壞檔、是目錄）就在碰 `dst` 之前回錯。
+    let data = std::fs::read(src)?;
+    let mut f = std::fs::OpenOptions::new().read(true).append(true).create(true).open(dst)?;
     // 崩在一行寫到一半時尾巴沒有換行：直接接上去，會跟下一份的第一行黏成一行、兩則一起解不開。
-    if prev.last().is_some_and(|b| *b != b'\n') {
-        prev.push(b'\n');
+    let len = f.metadata()?.len();
+    let mut buf = Vec::with_capacity(data.len() + 1);
+    if len > 0 {
+        use std::os::unix::fs::FileExt as _;
+        let mut last = [0u8; 1];
+        f.read_exact_at(&mut last, len - 1)?;
+        if last[0] != b'\n' {
+            buf.push(b'\n');
+        }
     }
-    prev.extend(std::fs::read(src)?);
-    std::fs::write(dst, prev)?;
+    buf.extend(data);
+    // 寫完、sync 完才刪 `src`；中途崩掉的話兩份都在，重複與半行交給 `dedupe_key` 與 unparseable spool line 的既有保護。
+    f.write_all(&buf)?;
+    f.sync_all()?;
     std::fs::remove_file(src)
 }
 
@@ -5919,6 +5932,48 @@ mod spool_claim_window_tests {
         assert_eq!(replay_spool(&env.app, &bot.id).await.unwrap(), 1, "只剩 .claim 也要收");
         assert!(!claim.exists(), "收完就不該留著");
         assert_eq!(inbox_rows(&env).await, 1);
+    }
+
+    fn fold_dir() -> std::path::PathBuf {
+        let dir = crate::testing::track(std::env::temp_dir().join(format!("am-fold-{}", db::ulid())));
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    /// #912：併進既有的 `.replaying` 是追加，不截斷；尾巴沒換行的半行補上換行再接；`src` 併完才刪。
+    #[test]
+    fn fold_spool_appends_without_truncating() {
+        let dir = fold_dir();
+        let (src, dst) = (dir.join("hook-spool.jsonl.claim"), dir.join("hook-spool.jsonl.replaying"));
+        std::fs::write(&dst, "OLD1\nOLD2-half").unwrap();
+        std::fs::write(&src, "NEW1\nNEW2\n").unwrap();
+        super::fold_spool(&src, &dst).unwrap();
+        assert_eq!(std::fs::read_to_string(&dst).unwrap(), "OLD1\nOLD2-half\nNEW1\nNEW2\n");
+        assert!(!src.exists(), "併完才刪 src");
+
+        // dst 已經以換行結尾：不多補空行。
+        std::fs::write(&src, "NEW3\n").unwrap();
+        super::fold_spool(&src, &dst).unwrap();
+        assert!(std::fs::read_to_string(&dst).unwrap().ends_with("NEW2\nNEW3\n"));
+
+        // dst 不存在：直接搬過去。
+        let fresh = dir.join("fresh.replaying");
+        std::fs::write(&src, "ONLY\n").unwrap();
+        super::fold_spool(&src, &fresh).unwrap();
+        assert_eq!(std::fs::read_to_string(&fresh).unwrap(), "ONLY\n");
+        assert!(!src.exists());
+    }
+
+    /// #912：`src` 讀不到（這裡是目錄）就回錯，`dst` 一個位元組都不動。
+    #[test]
+    fn fold_spool_keeps_dst_when_src_is_unreadable() {
+        let dir = fold_dir();
+        let (src, dst) = (dir.join("hook-spool.jsonl.claim"), dir.join("hook-spool.jsonl.replaying"));
+        std::fs::create_dir(&src).unwrap();
+        std::fs::write(&dst, "KEEP-ME\n").unwrap();
+        assert!(super::fold_spool(&src, &dst).is_err());
+        assert_eq!(std::fs::read_to_string(&dst).unwrap(), "KEEP-ME\n");
+        assert!(src.exists());
     }
 
     // ---- 遠端那一半：真的把產出的腳本跑起來（不連任何主機，`$HOME` 指到暫存目錄）
