@@ -153,10 +153,14 @@ mod tests {
     #[test]
     fn every_embedded_file_is_declared_as_a_build_input() {
         let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+        let repo = root
+            .ancestors()
+            .find(|p| p.join("daemon/Cargo.toml").is_file())
+            .expect("crate manifest directory is under the workspace");
         let mut found = Vec::new();
-        let mut stack = vec![root.join("src")];
+        let mut stack = vec![repo.join("daemon/src"), repo.join("crates/am-supervisor/src")];
         while let Some(dir) = stack.pop() {
-            for entry in std::fs::read_dir(&dir).expect("daemon/src is readable").flatten() {
+            for entry in std::fs::read_dir(&dir).expect("daemon and am-supervisor sources are readable").flatten() {
                 let p = entry.path();
                 if p.is_dir() {
                     stack.push(p);
@@ -172,8 +176,6 @@ mod tests {
                     // Resolve against the file's own directory, then back to the repo root.
                     let abs = p.parent().expect("file has a parent").join(rel);
                     let Ok(abs) = abs.canonicalize() else { continue };
-                    let repo = root.join("../..");
-                    let repo = repo.canonicalize().expect("crate manifest directory is under the repo");
                     let Ok(rel_to_repo) = abs.strip_prefix(repo) else { continue };
                     found.push(rel_to_repo.to_string_lossy().replace('\\', "/"));
                 }

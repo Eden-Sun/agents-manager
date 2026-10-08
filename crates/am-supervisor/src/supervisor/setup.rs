@@ -354,7 +354,11 @@ mod tests {
     /// 形狀一變這裡就紅；照訊息把 fixture 換成新的輸出，bash 測試才會跟著吃到。
     #[test]
     fn the_ops_script_fixture_is_what_setup_actually_writes() {
-        let path = concat!(env!("CARGO_MANIFEST_DIR"), "/../../scripts/ops/fixtures/patrol-runtime.json");
+        let repo = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .ancestors()
+            .find(|p| p.join("daemon/Cargo.toml").is_file())
+            .expect("crate manifest directory is under the workspace");
+        let path = repo.join("scripts/ops/fixtures/patrol-runtime.json");
         let want = runtime_json(7788, "bot-agm", Some("bot-resp"), "/data");
         let have: Value = serde_json::from_str(&std::fs::read_to_string(path).expect("fixture exists")).expect("fixture is JSON");
         assert_eq!(have, want, "scripts/ops/fixtures/patrol-runtime.json 要換成：\n{}", serde_json::to_string_pretty(&want).unwrap());
