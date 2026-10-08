@@ -276,7 +276,11 @@ pub fn is_status_chrome(s: &str) -> bool {
         || s.starts_with("Tip:")
         || s.starts_with("⎿")
         || s.contains("Auto-update failed")
-        || (s.contains(" | ") && (s.contains("5h:") || s.contains("7d:")))
+        || (s.contains(" | ")
+            && (s.contains("5h:")
+                || s.contains("7d:")
+                || s.contains("5h left")
+                || s.contains("7d left")))
         || (s.contains(" · ") && s.contains("% left"))
 }
 
