@@ -34,7 +34,10 @@ export function TerminalTab({ botId }: { botId: string }) {
 
   /** 一次只抓一份：上一趟還沒回來時，自動那趟就跳過，不疊請求。 */
   const inFlight = useRef(false)
-  /** 請求世代（#918）：每趟 `refresh` 領一個號碼，回來時號碼不是最新的（換 bot、改行數、更新的一趟已經發出）就整趟丟掉。 */
+  /**
+   * 請求世代（#918）：每趟 `refresh` 領一個號碼，回來時號碼不是最新的就整趟丟掉。換 bot／改行數會重跑 effect，
+   * 它第一件事就是一趟非 quiet 的 `refresh()`，所以舊的在途回應自然作廢（不需要 cleanup 裡動 ref）。
+   */
   const gen = useRef(0)
   /** `quiet`：自動刷新不切「刷新中…」，按鈕不會每 3 秒閃一次。 */
   const refresh = useCallback(async (quiet = false) => {
@@ -73,13 +76,7 @@ export function TerminalTab({ botId }: { botId: string }) {
     const id = window.setInterval(() => {
       if (!document.hidden) void refresh(true)
     }, AUTO_REFRESH_MS)
-    return () => {
-      window.clearInterval(id)
-      // 換 bot／行數、或卸載：所有在途的回應作廢。
-      gen.current++
-      inFlight.current = false
-      setLoading(false)
-    }
+    return () => window.clearInterval(id)
   }, [refresh])
 
   const move = useCallback(async () => {
