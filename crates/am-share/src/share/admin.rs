@@ -10,12 +10,12 @@ use serde_json::{json, Value};
 use crate::lifecycle::LcError;
 use crate::share::store;
 
-pub(crate) fn db_err(e: sqlx::Error) -> LcError {
+pub fn db_err(e: sqlx::Error) -> LcError {
     LcError::Upstream(format!("share store: {e}"))
 }
 
 /// 活著、而且是分享用 bot（受限或信任分享）。不存在 404；不是分享用 bot 409 `not_shareable`。
-pub(crate) async fn shareable_bot(app: &impl crate::capabilities::Db, id: &str) -> Result<bool, LcError> {
+pub async fn shareable_bot(app: &impl crate::capabilities::Db, id: &str) -> Result<bool, LcError> {
     let bot = crate::db::bot(app.db(), id).await.map_err(|e| LcError::Upstream(e.to_string()))?.filter(|b| b.deleted_at.is_none()).ok_or_else(|| LcError::NotFound("bot".into()))?;
     let project = crate::db::project(app.db(), &bot.project_id).await.map_err(|e| LcError::Upstream(e.to_string()))?;
     if project.is_none_or(|p| p.deleted_at.is_some()) {
@@ -24,14 +24,14 @@ pub(crate) async fn shareable_bot(app: &impl crate::capabilities::Db, id: &str) 
     store::is_share_bot(app.db(), id).await.map_err(db_err)
 }
 
-pub(crate) fn not_shareable(id: &str) -> LcError {
+pub fn not_shareable(id: &str) -> LcError {
     LcError::conflict(
         "not_shareable",
         json!({"bot_id": id, "message": "只有建立時選「分享用（受限）」或「信任分享」的 bot 能分享；既有 bot 不能切換，要分享請新建一顆"}),
     )
 }
 
-pub(crate) async fn base_url(app: &impl crate::capabilities::Cfg) -> Result<String, LcError> {
+pub async fn base_url(app: &impl crate::capabilities::Cfg) -> Result<String, LcError> {
     app.cfg().get().await.share.base().ok_or_else(|| {
         LcError::conflict(
             "share_not_configured",
@@ -41,7 +41,7 @@ pub(crate) async fn base_url(app: &impl crate::capabilities::Cfg) -> Result<Stri
 }
 
 /// 目前的分享狀態。開著就從 DB 存的 token 組完整網址；`base_url` 沒設時 `url:null`（開不了新的，但舊列照樣報狀態）。
-pub(crate) async fn state(app: &(impl crate::capabilities::Cfg + crate::capabilities::Db), id: &str) -> Result<Value, LcError> {
+pub async fn state(app: &(impl crate::capabilities::Cfg + crate::capabilities::Db), id: &str) -> Result<Value, LcError> {
     let row = store::share(app.db(), id).await.map_err(db_err)?;
     let base = app.cfg().get().await.share.base();
     let url = row.as_ref().and_then(|r| r.token.as_deref()).zip(base).map(|(t, b)| format!("{b}/s/{t}"));
@@ -59,7 +59,7 @@ pub(crate) async fn state(app: &(impl crate::capabilities::Cfg + crate::capabili
 
 /// 建分享用 bot（受限或信任分享）的前半：決定資料夾（新資料夾就建出來）、`shared_bots` 記下來（在寫 config 之前）。
 /// 回 `(資料夾, 是不是這次建的)`；`replay`＝config 裡已經有同一個 `client_request_id` 的 bot：新資料夾已經在了就照用，不回 409。
-pub(crate) async fn reserve_share_bot(
+pub async fn reserve_share_bot(
     app: &(impl crate::capabilities::Cfg + crate::capabilities::DataDir + crate::capabilities::Db),
     bot_id: &str,
     profile: &str,
@@ -97,13 +97,13 @@ pub(crate) async fn reserve_share_bot(
 }
 
 #[cfg(test)]
-pub(crate) async fn reserve_restricted(app: &(impl crate::capabilities::Cfg + crate::capabilities::DataDir + crate::capabilities::Db), bot_id: &str, folder: &crate::share::folder::ShareFolderIn, replay: bool) -> Result<(String, bool), LcError> {
+pub async fn reserve_restricted(app: &(impl crate::capabilities::Cfg + crate::capabilities::DataDir + crate::capabilities::Db), bot_id: &str, folder: &crate::share::folder::ShareFolderIn, replay: bool) -> Result<(String, bool), LcError> {
     reserve_share_bot(app, bot_id, store::PROFILE_RESTRICTED, folder, replay).await
 }
 
 /// 建受限 bot 的後半：建成了就把 `bots.cwd` 指到資料夾；沒建成（失敗、重送拿回舊的那顆）就把前半收回。
 /// 資料夾只有「這次新建的」才刪：既有資料夾、重送時已經在的，一律不動。
-pub(crate) async fn finish_restricted(app: &(impl crate::capabilities::DataDir + crate::capabilities::Db), bot_id: &str, workspace: &str, created_folder: bool, created: bool) {
+pub async fn finish_restricted(app: &(impl crate::capabilities::DataDir + crate::capabilities::Db), bot_id: &str, workspace: &str, created_folder: bool, created: bool) {
     if created {
         if let Err(e) = sqlx::query("UPDATE bots SET cwd = ? WHERE id = ?").bind(workspace).bind(bot_id).execute(app.db()).await {
             // 啟動時以 `shared_bots.workspace` 為準（`cage::prepare`），這裡寫不進去只影響側欄顯示的目錄。

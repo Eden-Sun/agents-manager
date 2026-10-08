@@ -13,6 +13,7 @@ daemon-test-harness = []
 [dependencies]
 am-base = { path = "../crates/am-base" }
 am-lifecycle = { path = "../crates/am-lifecycle" }
+am-share = { path = "../crates/am-share" }
 am-core = { path = "../crates/am-core" }
 am-ports = { path = "../crates/am-ports" }
 am-config = { path = "../crates/am-config" }

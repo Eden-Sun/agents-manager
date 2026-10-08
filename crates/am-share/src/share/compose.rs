@@ -20,9 +20,9 @@ use base64::Engine as _;
 use image::{DynamicImage, ImageDecoder as _, ImageFormat, ImageReader};
 
 /// 縮圖後的長邊上限（px）。
-pub(crate) const LONG_SIDE: u32 = 1600;
+pub const LONG_SIDE: u32 = 1600;
 /// 縮圖 JPEG 品質。
-pub(crate) const JPEG_QUALITY: u8 = 85;
+pub const JPEG_QUALITY: u8 = 85;
 /// 一張引用檔最多讀這麼多（手機原圖通常 2–8MB）。
 const SOURCE_MAX: u64 = 40 * 1024 * 1024;
 /// 解碼的長寬上限：擋解壓縮炸彈。
@@ -95,13 +95,13 @@ fn decodes_for_test() -> usize {
 }
 
 /// SVG 文字裡值得處理的跡象：沒有 `<image` 就原樣送，不必解析。
-pub(crate) fn wants_embed(svg: &[u8]) -> bool {
+pub fn wants_embed(svg: &[u8]) -> bool {
     svg.windows(6).any(|w| w == b"<image")
 }
 
 /// 把 `svg` 裡 `<image>` 的相對 href 嵌成 data URI，回新的內容；沒有要改的就回 `None`（照原檔送）。
 /// 不是 UTF-8 的也回 `None`。會讀檔與解碼，呼叫端放在 `spawn_blocking` 裡。
-pub(crate) fn embed(svg: &[u8], folder: &Path) -> Option<Vec<u8>> {
+pub fn embed(svg: &[u8], folder: &Path) -> Option<Vec<u8>> {
     if !wants_embed(svg) {
         return None;
     }
@@ -306,7 +306,7 @@ fn percent_decode(s: &str) -> Option<String> {
 
 /// 相對路徑拆成段：scheme（第一段有 `:`）、`/` 開頭、`\`、控制字元、空段、`.`／`..`、`.` 開頭的段一律 `None`。
 /// 開頭的 `./` 可以。
-pub(crate) fn safe_rel(href: &str) -> Option<Vec<&str>> {
+pub fn safe_rel(href: &str) -> Option<Vec<&str>> {
     let href = href.strip_prefix("./").unwrap_or(href);
     if href.is_empty() || href.starts_with('/') || href.contains('\\') || href.contains(['?', '#']) || href.chars().any(char::is_control) {
         return None;
@@ -427,7 +427,7 @@ mod tests {
     use super::*;
 
     fn scratch(tag: &str) -> PathBuf {
-        let base = crate::testing::track(std::env::temp_dir().join(format!("am-compose-{tag}-{}", crate::db::ulid())));
+        let base = crate::share::test_dirs::track(std::env::temp_dir().join(format!("am-compose-{tag}-{}", crate::db::ulid())));
         std::fs::create_dir_all(base.join("inbox")).unwrap();
         std::fs::canonicalize(base).unwrap()
     }

@@ -27,7 +27,7 @@ pub enum ShareFolderIn {
 }
 
 /// 新資料夾的根目錄：`[share] folders_root`（可用 `~/`），沒設＝`~/shared-bots`。
-pub(crate) fn root(cfg_root: Option<&str>, home: &str) -> PathBuf {
+pub fn root(cfg_root: Option<&str>, home: &str) -> PathBuf {
     match cfg_root.map(str::trim).filter(|s| !s.is_empty()) {
         Some(r) => PathBuf::from(crate::config::expand_home(r, home)),
         None => Path::new(home).join("shared-bots"),
@@ -39,7 +39,7 @@ fn bad(message: impl Into<String>) -> LcError {
 }
 
 /// 新資料夾的名字：英數開頭，`[A-Za-z0-9._-]`，最多 64 字；不能是 `.`／`..` 或藏起來的名字。
-pub(crate) fn check_new_name(name: &str) -> Result<(), LcError> {
+pub fn check_new_name(name: &str) -> Result<(), LcError> {
     let ok = !name.is_empty()
         && name.len() <= 64
         && name.chars().next().is_some_and(|c| c.is_ascii_alphanumeric())
@@ -52,7 +52,7 @@ pub(crate) fn check_new_name(name: &str) -> Result<(), LcError> {
 }
 
 /// 一選下去就把機器上的秘密整包交出去的位置。`folder`、`home`、`data_dir` 都要是 canonicalize 過的。
-pub(crate) fn unsafe_reason(folder: &Path, home: &Path, data_dir: &Path) -> Option<&'static str> {
+pub fn unsafe_reason(folder: &Path, home: &Path, data_dir: &Path) -> Option<&'static str> {
     if folder.parent().is_none() {
         return Some("不能分享整個根目錄");
     }
@@ -84,7 +84,7 @@ fn canonical(p: &Path) -> PathBuf {
 }
 
 /// 既有資料夾：絕對路徑、存在、是目錄、不在 [`unsafe_reason`] 的範圍。回 canonicalize 過的路徑（符號連結解開，存的是真正的位置）。
-pub(crate) fn check_existing(path: &str, home: &Path, data_dir: &Path) -> Result<PathBuf, LcError> {
+pub fn check_existing(path: &str, home: &Path, data_dir: &Path) -> Result<PathBuf, LcError> {
     let p = Path::new(path.trim());
     if !p.is_absolute() {
         return Err(bad("既有資料夾要給絕對路徑"));
@@ -100,7 +100,7 @@ pub(crate) fn check_existing(path: &str, home: &Path, data_dir: &Path) -> Result
 }
 
 /// 建新資料夾（0700）。已經有同名的就 409 `folder_exists`：不能讓「新資料夾」悄悄變成分享一個既有的。
-pub(crate) fn create_new(root: &Path, name: &str, home: &Path, data_dir: &Path) -> Result<PathBuf, LcError> {
+pub fn create_new(root: &Path, name: &str, home: &Path, data_dir: &Path) -> Result<PathBuf, LcError> {
     check_new_name(name)?;
     std::fs::create_dir_all(root).map_err(|e| LcError::Upstream(format!("share folders root {}: {e}", root.display())))?;
     let root = canonical(root);
@@ -121,7 +121,7 @@ pub(crate) fn create_new(root: &Path, name: &str, home: &Path, data_dir: &Path) 
 }
 
 /// `<資料夾>/inbox/`（不存在就建，0700，不跟符號連結）。資料夾本身不見了就失敗：不替使用者重建一個空的。
-pub(crate) fn ensure_inbox(folder: &Path) -> std::io::Result<std::fs::File> {
+pub fn ensure_inbox(folder: &Path) -> std::io::Result<std::fs::File> {
     if !folder.is_dir() {
         return Err(std::io::Error::new(std::io::ErrorKind::NotFound, "share folder is missing"));
     }
@@ -141,7 +141,7 @@ fn read_bound(folder: &Path, parts: &[&str]) -> Option<String> {
 
 /// 資料夾的指示與記憶，給系統提示用。全部 `O_NOFOLLOW` 逐層打開：既有資料夾裡的 `CLAUDE.md` 若是指到外面
 /// （例如 ui-token）的符號連結，一律不讀——不然 daemon 會替 bot 把資料夾外的東西讀進它的提示。
-pub(crate) fn instructions(folder: &Path) -> String {
+pub fn instructions(folder: &Path) -> String {
     let mut out = String::new();
     let push = |label: &str, text: &str, out: &mut String| {
         if out.len() + text.len() > TOTAL_MAX {
@@ -184,7 +184,7 @@ pub(crate) fn instructions(folder: &Path) -> String {
 
 /// 驗證受限 bot 的 workspace 路徑是否合法（issue #828）。
 /// 必須是絕對路徑、不是根目錄的一級子目錄、通過 `unsafe_reason`、且原地若是 symlink 則拒絕。
-pub(crate) fn validate_workspace_path(data_dir: &Path, workspace: &str) -> Option<PathBuf> {
+pub fn validate_workspace_path(data_dir: &Path, workspace: &str) -> Option<PathBuf> {
     let p = Path::new(workspace.trim());
     if !p.is_absolute() {
         return None;
@@ -244,7 +244,7 @@ mod tests {
 
     #[test]
     fn a_new_folder_never_reuses_an_existing_one_and_existing_ones_resolve_symlinks() {
-        let base = crate::testing::scratch_dir("am-share-folder");
+        let base = crate::share::test_dirs::scratch_dir("am-share-folder");
         let home = base.join("home");
         let data = home.join(".config/agents-manager");
         std::fs::create_dir_all(&data).unwrap();
@@ -263,7 +263,7 @@ mod tests {
 
     #[test]
     fn instructions_load_md_and_memory_but_never_follow_symlinks_out() {
-        let f = crate::testing::scratch_dir("am-share-md");
+        let f = crate::share::test_dirs::scratch_dir("am-share-md");
         std::fs::write(f.join("CLAUDE.md"), "codeword PELICAN").unwrap();
         std::fs::write(f.join("AGENTS.md"), "codeword WALRUS").unwrap();
         std::fs::create_dir_all(f.join(".claude/memory")).unwrap();
@@ -272,7 +272,7 @@ mod tests {
         std::fs::create_dir_all(f.join("memory")).unwrap();
         std::fs::write(f.join("memory/MEMORY.md"), "- [bird](bird.md)").unwrap();
         std::fs::write(f.join("memory/bird.md"), "remember PUFFIN").unwrap();
-        let outside = crate::testing::scratch_dir("am-share-secret");
+        let outside = crate::share::test_dirs::scratch_dir("am-share-secret");
         std::fs::write(outside.join("ui-token"), "SECRET-TOKEN").unwrap();
         std::fs::create_dir_all(f.join(".claude")).unwrap();
         std::os::unix::fs::symlink(outside.join("ui-token"), f.join(".claude/CLAUDE.md")).unwrap();

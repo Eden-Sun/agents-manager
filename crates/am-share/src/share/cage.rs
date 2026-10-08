@@ -29,18 +29,18 @@ use crate::outbox::ShareStorage;
 
 /// 受限 bot 啟動／建立要從 `App` 拿的外部事實（`App` 在 `app_ports_p10` 實作）：本機身分的 env、bot 目錄、claude 模型清單。
 ///
-/// 實作者是 `Arc<App>`（不是 `App`）：身分表與模型清單的既有函式要的是 `&Arc<App>`。
+/// 身分表與模型清單的既有函式要的是 `&Arc<App>`，所以這兩個是以 `&Arc<Self>` 為參數的關聯函式（`App` 實作；`Arc<App>` 不能在 daemon 實作外來 trait）。
 pub trait CageEnv: ShareStorage {
     /// 本機名叫 `identity` 的身分的 env（沒有＝空）。
-    fn local_identity_env(&self, identity: &str) -> impl std::future::Future<Output = BTreeMap<String, String>> + Send;
+    fn local_identity_env(app: &std::sync::Arc<Self>, identity: &str) -> impl std::future::Future<Output = BTreeMap<String, String>> + Send;
     /// 這顆 bot 在 daemon 資料目錄底下的目錄（id 不合法＝錯誤）。
     fn bot_dir(&self, bot_id: &str) -> anyhow::Result<PathBuf>;
     /// `/api/models?kind=claude` 當下的清單（`{"models":[{"id":…}]}`）；列不出來回錯誤字串。
-    fn claude_models(&self, identity: Option<&str>) -> impl std::future::Future<Output = Result<Value, String>> + Send;
+    fn claude_models(app: &std::sync::Arc<Self>, identity: Option<&str>) -> impl std::future::Future<Output = Result<Value, String>> + Send;
 }
 
 /// 受限 bot 目前只做 claude、只在本機（工作目錄在這台的 data dir 底下）。
-pub(crate) fn check_profile(kind: &str, host: &str) -> Result<(), LcError> {
+pub fn check_profile(kind: &str, host: &str) -> Result<(), LcError> {
     if kind != "claude" {
         return Err(LcError::conflict(
             "unsupported_kind",
@@ -58,7 +58,7 @@ pub(crate) fn check_profile(kind: &str, host: &str) -> Result<(), LcError> {
 
 /// 啟動前：這顆是不是受限 bot。是的話回它的工作目錄（順手補建），而且 kind／host 不合就不准起來。
 /// 讀不到 `shared_bots` 一律不啟動——寧可起不來，也不要把受限 bot 當一般 bot 起（fail closed）。
-pub(crate) async fn prepare(app: &impl ShareStorage, bot: &db::Bot, host: &str) -> Result<Option<String>, LcError> {
+pub async fn prepare(app: &impl ShareStorage, bot: &db::Bot, host: &str) -> Result<Option<String>, LcError> {
     let ws = crate::share::store::caged_workspace(app.db_pool(), &bot.id)
         .await
         .map_err(|e| LcError::Upstream(format!("cannot tell whether bot {} is a restricted share bot: {e}", bot.id)))?;
@@ -103,7 +103,7 @@ const BLANK: &[&str] = &[
 
 /// 把 `pane_env` 的結果收成受限 bot 的：只留 [`KEEP_AM`]、[`KEEP_CLAUDE`] 與身分（帳號）的 env，bot 自訂 env 一律丟掉，
 /// shim 的 `PATH` 也丟掉（不能開子 agent）；再把可能繼承來的憑證類變數蓋成空的。CLAUDE.md 一律不讀。
-pub(crate) fn cage_env(env: &mut Value, identity_env: &BTreeMap<String, String>, home: &str) {
+pub fn cage_env(env: &mut Value, identity_env: &BTreeMap<String, String>, home: &str) {
     let Some(map) = env.as_object_mut() else { return };
     map.retain(|k, _| KEEP_AM.contains(&k.as_str()) || KEEP_CLAUDE.contains(&k.as_str()));
     // 身分的值重算一次：bot env 可能蓋過同名的鍵，那是使用者自訂，不算數。
@@ -120,15 +120,15 @@ pub(crate) fn cage_env(env: &mut Value, identity_env: &BTreeMap<String, String>,
 }
 
 /// 啟動時重算 [`cage_env`] 要的身分 env（本機）。
-pub(crate) async fn identity_env(app: &impl CageEnv, bot: &db::Bot) -> BTreeMap<String, String> {
+pub async fn identity_env(app: &std::sync::Arc<impl CageEnv>, bot: &db::Bot) -> BTreeMap<String, String> {
     match bot.identity.as_deref().filter(|s| !s.trim().is_empty()) {
-        Some(idn) => app.local_identity_env(idn).await,
+        Some(idn) => CageEnv::local_identity_env(app, idn).await,
         None => BTreeMap::new(),
     }
 }
 
 /// 受限 bot 拿得到的工具（`--tools`）。2026-10-03 實測：`--restricted` 加這份白名單之後工具就只剩這六個。
-pub(crate) const TOOLS: &str = "Read,Edit,Write,Glob,Grep,WebSearch";
+pub const TOOLS: &str = "Read,Edit,Write,Glob,Grep,WebSearch";
 
 /// 第二層：白名單之外、點名 deny 的（白名單哪天失效也擋得住最危險的那幾個）。
 const DENY_TOOLS: &[&str] = &[
@@ -165,7 +165,7 @@ const INSTRUCTION_FILES: &[&str] = &["CLAUDE.md", "AGENTS.md", ".claude/CLAUDE.m
 /// `shared-bots`／`outbox` 這兩個**目錄**就連底下全擋，deny 又優先於 allow，結果 inbox 讀不到、outbox 寫不進（線上實測）。
 /// 現在的 deny 只有工具、資料夾內的秘密檔、指示檔的 Edit，都在資料夾**裡面**，不可能蓋到 inbox 或 outbox。
 /// Read 規則也管 Glob／Grep，Edit 規則也管 Write（claude 的權限規則就是這樣分兩類，2.1.288 實測）。
-pub(crate) fn cage_settings(settings: &mut Value, workspace: &str, env: &Value) {
+pub fn cage_settings(settings: &mut Value, workspace: &str, env: &Value) {
     if !settings.is_object() {
         *settings = json!({});
     }
@@ -201,7 +201,7 @@ pub(crate) fn cage_settings(settings: &mut Value, workspace: &str, env: &Value) 
 /// 那兩個是一般 bot 用來加旗標的地方（`--dangerously-skip-permissions`、`--remote-control`…），受限 bot 一律不吃。
 /// 系統提示走檔案（`--append-system-prompt-file`，2.1.288 實測可用）：herdr 把整行啟動指令壓在 900 bytes 內、
 /// 超過就從最長的參數砍尾巴，主人寫的 persona 在最後面，會是被砍掉的那段。
-pub(crate) fn launch_args(env: &Value, prompt_file: &Path) -> Vec<String> {
+pub fn launch_args(env: &Value, prompt_file: &Path) -> Vec<String> {
     let mut out: Vec<String> = ["--restricted", "--tools", TOOLS, "--strict-mcp-config", "--permission-mode", "dontAsk"].map(String::from).to_vec();
     if let Some(o) = env.get("AM_OUTBOX").and_then(Value::as_str).filter(|s| !s.is_empty()) {
         out.extend(["--add-dir".to_string(), o.to_string()]);
@@ -211,7 +211,7 @@ pub(crate) fn launch_args(env: &Value, prompt_file: &Path) -> Vec<String> {
 }
 
 /// 把受限 bot 的系統提示寫進它自己的 bot 目錄（0600；它的檔案工具碰不到 `bots/`，CLI 啟動時自己讀）。
-pub(crate) fn install_prompt(app: &impl CageEnv, bot: &db::Bot, workspace: &str, env: &Value) -> anyhow::Result<PathBuf> {
+pub fn install_prompt(app: &std::sync::Arc<impl CageEnv>, bot: &db::Bot, workspace: &str, env: &Value) -> anyhow::Result<PathBuf> {
     let outbox = env.get("AM_OUTBOX").and_then(Value::as_str).filter(|s| !s.is_empty());
     let dir = app.bot_dir(&bot.id)?;
     crate::private_files::create_private_dir(&dir)?;
@@ -223,7 +223,7 @@ pub(crate) fn install_prompt(app: &impl CageEnv, bot: &db::Bot, workspace: &str,
 
 /// `folder_md`＝[`crate::share::folder::instructions`]：資料夾的 CLAUDE.md／AGENTS.md 與 `.claude/memory/`，放在最後
 /// （主人寫的 persona 之後），啟動時讀一次。
-pub(crate) fn system_prompt(workspace: &str, outbox: Option<&str>, persona: Option<&str>, folder_md: &str) -> String {
+pub fn system_prompt(workspace: &str, outbox: Option<&str>, persona: Option<&str>, folder_md: &str) -> String {
     let mut p = format!(
         "你是透過分享連結開放給外部使用者的助理。對方的訊息開頭會有「〔分享使用者〕」；對方只看得到你的文字回覆，看不到你的工具過程。\n\
          - 你的工作目錄是 `{workspace}`，這個資料夾就是你能讀寫的全部範圍。對方上傳的檔案放在 `inbox/`，訊息裡會寫出檔名。\n\
@@ -254,12 +254,12 @@ pub(crate) fn system_prompt(workspace: &str, outbox: Option<&str>, persona: Opti
 }
 
 /// 本機的家目錄字串（拿來展開身分 env）。
-pub(crate) fn local_home() -> String {
+pub fn local_home() -> String {
     crate::home::dir().map(|p| p.to_string_lossy().into_owned()).unwrap_or_default()
 }
 
 /// 建受限 bot 時要擋掉的請求內容：自訂 args／env 在籠子裡都不會生效，收下來只會讓人以為有用。
-pub(crate) fn check_create(kind: &str, host: &str, args: &[String], env: Option<&BTreeMap<String, String>>) -> Result<(), LcError> {
+pub fn check_create(kind: &str, host: &str, args: &[String], env: Option<&BTreeMap<String, String>>) -> Result<(), LcError> {
     check_profile(kind, host)?;
     if !args.is_empty() || env.is_some_and(|e| !e.is_empty()) {
         return Err(LcError::BadValue(json!({
@@ -275,8 +275,8 @@ pub(crate) fn check_create(kind: &str, host: &str, args: &[String], env: Option<
 /// 受限 bot 沒指定模型時用的：`/api/models?kind=claude` 當下列出的最新 Opus。清單有完整 id（`claude-opus-X-Y`）就挑版本最大的，
 /// 只有別名就用 `opus`（claude 自己把它解析成當版最新的 Opus，2.1.288 實測是 claude-opus-5-5）。清單抓不到也退回 `opus`：
 /// 不寫死版本號，也不落回帳號預設（線上那顆就是這樣跑成舊版的）。
-pub(crate) async fn latest_opus(app: &impl CageEnv, identity: Option<&str>) -> String {
-    match app.claude_models(identity).await {
+pub async fn latest_opus(app: &std::sync::Arc<impl CageEnv>, identity: Option<&str>) -> String {
+    match CageEnv::claude_models(app, identity).await {
         Ok(v) => latest_opus_in(&v).unwrap_or_else(|| "opus".into()),
         Err(e) => {
             tracing::warn!(error = %e, "cannot list claude models for the restricted bot; using the `opus` alias");
@@ -285,7 +285,7 @@ pub(crate) async fn latest_opus(app: &impl CageEnv, identity: Option<&str>) -> S
     }
 }
 
-pub(crate) fn latest_opus_in(models: &Value) -> Option<String> {
+pub fn latest_opus_in(models: &Value) -> Option<String> {
     let ids = models.get("models")?.as_array()?.iter().filter_map(|m| m.get("id").and_then(Value::as_str));
     let mut best: Option<(Vec<u32>, String)> = None;
     let mut alias = None;

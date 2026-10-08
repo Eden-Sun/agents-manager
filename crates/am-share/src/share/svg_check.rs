@@ -20,10 +20,10 @@ use sha2::Digest as _;
 
 
 /// 單檔超過這麼大就不查（bot 畫的圖不會這麼大；查不完不如不查）。
-pub(crate) const MAX_CHECK_BYTES: usize = 4 * 1024 * 1024;
+pub const MAX_CHECK_BYTES: usize = 4 * 1024 * 1024;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct SvgError {
+pub struct SvgError {
     pub line: usize,
     pub col: usize,
     pub message: String,
@@ -101,7 +101,7 @@ fn bad_attrs(raw: &[u8], check_entities: bool) -> Option<(usize, String)> {
 }
 
 /// 是不是 well-formed XML。只回第一個錯誤。
-pub(crate) fn check(text: &str) -> Result<(), SvgError> {
+pub fn check(text: &str) -> Result<(), SvgError> {
     let mut r = quick_xml::Reader::from_str(text);
     let mut stack: Vec<(String, usize)> = Vec::new();
     let mut roots = 0usize;
@@ -182,7 +182,7 @@ pub(crate) fn check(text: &str) -> Result<(), SvgError> {
 
 /// 先驗原始 bytes 是不是合法 UTF-8，再當 XML 查（issue #866）。分享頁送給瀏覽器的是原始 bytes，
 /// 不能先 `from_utf8_lossy` 把壞位元組換成 `�` 再查——那樣查的是另一份檔。
-pub(crate) fn check_bytes(data: &[u8]) -> Result<(), SvgError> {
+pub fn check_bytes(data: &[u8]) -> Result<(), SvgError> {
     let text = match std::str::from_utf8(data) {
         Ok(t) => t,
         Err(e) => {
@@ -195,7 +195,7 @@ pub(crate) fn check_bytes(data: &[u8]) -> Result<(), SvgError> {
 }
 
 /// 給 bot 的那一則（後台，分享頁看不到）。
-pub(crate) fn reminder(name: &str, e: &SvgError) -> String {
+pub fn reminder(name: &str, e: &SvgError) -> String {
     format!(
         "〔系統〕圖檔 {name} 第 {} 行第 {} 欄格式壞了：{}。手機瀏覽器會整張畫不出來，請修好這個檔（存回 outbox 同一個檔名），修好就好，不必跟分享使用者解釋。",
         e.line, e.col, e.message
@@ -235,7 +235,7 @@ fn mark_healthy(bot_id: &str, name: &str) {
     tracker.health = Some(FileHealth::Healthy);
 }
 
-pub(crate) fn version_fingerprint(ino: u64, mtime_ns: i128, ctime_ns: i128, gen: u64, data: &[u8]) -> String {
+pub fn version_fingerprint(ino: u64, mtime_ns: i128, ctime_ns: i128, gen: u64, data: &[u8]) -> String {
     let mut h = sha2::Sha256::new();
     h.update(ino.to_le_bytes());
     h.update(mtime_ns.to_le_bytes());
@@ -247,7 +247,7 @@ pub(crate) fn version_fingerprint(ino: u64, mtime_ns: i128, ctime_ns: i128, gen:
 }
 
 /// 同一個 bot、同一個檔、同一版本（含壞掉世代）、同一個錯誤 → 同一個 `client_request_id`：同版本送過就不再送。
-pub(crate) fn request_id(bot_id: &str, name: &str, version: &str, e: &SvgError) -> String {
+pub fn request_id(bot_id: &str, name: &str, version: &str, e: &SvgError) -> String {
     let h = sha2::Sha256::digest(format!("{bot_id}\n{name}\n{version}\n{}:{}:{}", e.line, e.col, e.message).as_bytes());
     let hex: String = h.iter().take(12).map(|b| format!("{b:02x}")).collect();
     format!("share-svg-check-{hex}")
@@ -291,7 +291,7 @@ async fn already_sent(app: &impl crate::outbox::ShareStorage, crid: &str) -> boo
 }
 
 /// 查一個檔；壞了就提醒 bot（同一版本同一個錯誤只一次）。回傳查到的錯誤（測試用）。
-pub(crate) async fn check_file<H: SvgCheckEnv>(app: &Arc<H>, bot_id: &str, name: &str) -> Option<SvgError> {
+pub async fn check_file<H: SvgCheckEnv>(app: &Arc<H>, bot_id: &str, name: &str) -> Option<SvgError> {
     let read = match crate::outbox::share_file_read_with_limit(app, bot_id, name, MAX_CHECK_BYTES as u64).await {
         Ok(r) => r,
         Err(crate::outbox::ShareFileError::TooLarge) => {
@@ -332,7 +332,7 @@ pub(crate) async fn check_file<H: SvgCheckEnv>(app: &Arc<H>, bot_id: &str, name:
 }
 
 /// 分享頁讀清單時叫：清單上每個 `.svg`（`files` 是 portal 回的 `{name, size, modified_at}`），沒查過的這一版在背景查。
-pub(crate) fn spawn_check<H: SvgCheckEnv>(app: &Arc<H>, bot_id: &str, files: &[serde_json::Value]) {
+pub fn spawn_check<H: SvgCheckEnv>(app: &Arc<H>, bot_id: &str, files: &[serde_json::Value]) {
     let todo: Vec<String> = files
         .iter()
         .filter_map(|f| {
