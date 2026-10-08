@@ -5088,7 +5088,8 @@ daemon 要能在 Linux（目標：Ubuntu，外部編譯主機 192.168.1.46，#67
     從 `shared_bots.workspace` 逐段 `O_NOFOLLOW` 打開（`trusted_open::open_bound_file`：符號連結、硬連結 >1 都擋）。
   - 只收 JPEG／PNG／WebP／GIF（看檔頭不看副檔名，GIF 取第一格）。HEIC／HEIF 不解：要 libheif（C 函式庫）daemon 不帶；分享頁上傳時已在瀏覽器把 HEIC 轉成 JPEG（§20.4），會遇到的只剩從別處放進資料夾的。
   - 不收的（找不到、跳出資料夾、不是圖、HEIC、太大、超過張數）：整個 href 拿掉，換成 `data-am-embed="<理由>"`（`not_relative`／`not_found`／`not_an_image`／`heic_unsupported`／`source_too_large`／`image_too_large`／`too_many_images`／`svg_too_large`／`decode_failed`），並記 info log。`#id` 與 `data:` 原樣不動；`<image>` 以外的元素、註解與 CDATA 不碰。
-  - 縮圖（`image` crate）：先依 EXIF 修正方向，長邊縮到 1600（小的不放大），JPEG 品質 85（有半透明像素才用 PNG）；重編碼也把 EXIF（含 GPS）拿掉。上限：原檔 40 MiB、解碼長寬 16384、嵌進去的一張 base64 後 4 MiB（超過先縮到 1200 再試）、一份 16 張、嵌完整份 24 MiB。
+  - 縮圖（`image` crate）：先依 EXIF 修正方向，長邊縮到 1600（小的不放大），JPEG 品質 85（有半透明像素才用 PNG）；重編碼也把 EXIF（含 GPS）拿掉。上限：原檔 40 MiB、解碼長寬 16384、單張總像素 ≈50.3 MP（8192×6144，解碼前看檔頭尺寸就拒絕，理由 `image_too_large`；解碼配置上限 256 MiB）、嵌進去的一張 base64 後 4 MiB（超過先縮到 1200 再試）、一份成功嵌 16 張、嵌完整份 24 MiB。
+  **預算（issue #842）**：一份 SVG 最多「嘗試」32 個引用（成功與失敗都算，第 33 個起直接 `too_many_images`、不讀檔不解碼）；全站同時只有 1 個 compose 在解（跨分享連結共用的 semaphore，等 10 秒拿不到就回 503 `unavailable`＋`Retry-After: 5`，不在沒有預算時解碼）。同一個分享連結本來就被 bot 鎖序列化，第二個請求吃快取（失敗也快取）。
   - 快取：每張的結果（含跳過理由）依「資料夾＋相對路徑＋inode＋大小＋mtime」記在記憶體（總量 64 MiB，先進先出）；照片換了就重算。SVG 本身每次照讀，改寫只是字串處理。
   - 測試釘住：`share::compose::tests`（路徑跳脫／scheme／符號連結／硬連結被擋、非圖片與 HEIC 被擋、嵌完是 quick-xml 解得開的 XML、縮圖與 EXIF 方向、快取）與 `svg_photo_refs_are_embedded_on_the_way_out`（入口兩條路、原檔不改）。
   - 受限 bot 的系統提示（`cage::system_prompt`）寫明這個用法：`<image href="inbox/檔名" …>`、先用 Read 看照片內容與長寬比、圓角／圓形框用 `<clipPath>`。

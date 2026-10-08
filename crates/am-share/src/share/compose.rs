@@ -25,7 +25,7 @@ pub const LONG_SIDE: u32 = 1600;
 pub const JPEG_QUALITY: u8 = 85;
 /// 一張引用檔最多讀這麼多（手機原圖通常 2–8MB）。
 const SOURCE_MAX: u64 = 40 * 1024 * 1024;
-/// 解碼的長寬上限：擋解壓縮炸彈。
+/// 解碼的長寬上限：擋解壓縮炸彈（總像素另有 [`PIXEL_MAX`]）。
 const DECODE_SIDE_MAX: u32 = 16_384;
 /// 嵌進去的一張（base64 之後）最多這麼大。
 const EMBED_MAX: usize = 4 * 1024 * 1024;
@@ -33,6 +33,17 @@ const EMBED_MAX: usize = 4 * 1024 * 1024;
 const OUT_MAX: usize = 24 * 1024 * 1024;
 /// 一份 SVG 最多嵌幾張。
 const MAX_IMAGES: usize = 16;
+/// 一份 SVG 最多嘗試解幾個引用（成功與失敗都算），免得一堆壞檔把解碼預算耗光。
+const MAX_ATTEMPTS: usize = 2 * MAX_IMAGES;
+/// 單張的像素上限（≈50.3 MP，涵蓋 48 MP 手機原圖）；超過在解碼前就拒絕。
+const PIXEL_MAX: u64 = 8192 * 6144;
+/// 全站同時進行的 compose 數（解碼很吃記憶體與 CPU）。
+const COMPOSE_SLOTS: usize = 1;
+/// 等全站 compose 名額最久這麼久，等不到回 503。
+#[cfg(not(test))]
+pub(crate) const COMPOSE_WAIT: std::time::Duration = std::time::Duration::from_secs(10);
+#[cfg(test)]
+pub(crate) const COMPOSE_WAIT: std::time::Duration = std::time::Duration::from_secs(1);
 /// 快取總量（data URI 的位元組數）。
 const CACHE_MAX: usize = 64 * 1024 * 1024;
 
@@ -54,6 +65,22 @@ struct Cache {
     map: HashMap<Key, Embedded>,
     order: VecDeque<Key>,
     bytes: usize,
+}
+
+/// 全站 compose 名額：跨分享連結共用，避免多個連結同時各解一批大圖。
+#[cfg(not(test))]
+pub(crate) fn slots() -> Arc<tokio::sync::Semaphore> {
+    static S: OnceLock<Arc<tokio::sync::Semaphore>> = OnceLock::new();
+    S.get_or_init(|| Arc::new(tokio::sync::Semaphore::new(COMPOSE_SLOTS))).clone()
+}
+
+/// 測試版：每個測試（各自一條執行緒、current_thread runtime）用自己的名額，彼此不搶；名額的行為本身不變。
+#[cfg(test)]
+pub(crate) fn slots() -> Arc<tokio::sync::Semaphore> {
+    thread_local! {
+        static S: Arc<tokio::sync::Semaphore> = Arc::new(tokio::sync::Semaphore::new(COMPOSE_SLOTS));
+    }
+    S.with(Arc::clone)
 }
 
 fn cache() -> &'static Mutex<Cache> {
@@ -109,6 +136,7 @@ pub fn embed(svg: &[u8], folder: &Path) -> Option<Vec<u8>> {
     let mut out = String::with_capacity(text.len());
     let mut changed = false;
     let mut embedded = 0usize;
+    let mut attempts = 0usize;
     let mut i = 0;
     while i < text.len() {
         let rest = &text[i..];
@@ -133,7 +161,7 @@ pub fn embed(svg: &[u8], folder: &Path) -> Option<Vec<u8>> {
         };
         let tag = &at[..tag_len];
         if is_image {
-            let rewritten = rewrite_image_tag(tag, folder, &mut embedded, text.len() + out.len());
+            let rewritten = rewrite_image_tag(tag, folder, &mut embedded, &mut attempts, text.len() + out.len());
             changed |= rewritten.is_some();
             out.push_str(rewritten.as_deref().unwrap_or(tag));
         } else {
@@ -160,8 +188,8 @@ fn tag_end(at: &str) -> Option<usize> {
 }
 
 /// 一個 `<image …>` 標籤：`href`／`xlink:href` 是相對路徑的就換成 data URI 或拿掉；沒動到回 `None`。
-/// `size_so_far` 是目前輸出的估計大小，用來守 [`OUT_MAX`]。
-fn rewrite_image_tag(tag: &str, folder: &Path, embedded: &mut usize, size_so_far: usize) -> Option<String> {
+/// `size_so_far` 是目前輸出的估計大小，用來守 [`OUT_MAX`]；`attempts` 是整份 SVG 已嘗試解的引用數，用來守 [`MAX_ATTEMPTS`]。
+fn rewrite_image_tag(tag: &str, folder: &Path, embedded: &mut usize, attempts: &mut usize, size_so_far: usize) -> Option<String> {
     let mut out = String::with_capacity(tag.len());
     let mut changed = false;
     let bytes = tag.as_bytes();
@@ -217,7 +245,8 @@ fn rewrite_image_tag(tag: &str, folder: &Path, embedded: &mut usize, size_so_far
             out.push_str(&tag[ws_start..end]);
         } else {
             changed = true;
-            let outcome = if *embedded >= MAX_IMAGES { Err("too_many_images") } else { resolve(folder, &v) };
+            *attempts += 1;
+            let outcome = if *embedded >= MAX_IMAGES || *attempts > MAX_ATTEMPTS { Err("too_many_images") } else { resolve(folder, &v) };
             match outcome {
                 Ok(uri) if size_so_far + out.len() + uri.len() <= OUT_MAX => {
                     *embedded += 1;
@@ -384,9 +413,13 @@ fn to_data_uri(bytes: &[u8]) -> Embedded {
     let mut limits = image::Limits::default();
     limits.max_image_width = Some(DECODE_SIDE_MAX);
     limits.max_image_height = Some(DECODE_SIDE_MAX);
-    limits.max_alloc = Some(512 * 1024 * 1024);
+    limits.max_alloc = Some(256 * 1024 * 1024);
     reader.limits(limits);
     let mut decoder = reader.into_decoder().map_err(|_| "decode_failed")?;
+    let (w, h) = decoder.dimensions();
+    if w as u64 * h as u64 > PIXEL_MAX {
+        return Err("image_too_large");
+    }
     let orientation = decoder.orientation().unwrap_or(image::metadata::Orientation::NoTransforms);
     let mut img = DynamicImage::from_decoder(decoder).map_err(|_| "decode_failed")?;
     img.apply_orientation(orientation);
@@ -608,6 +641,54 @@ mod tests {
         let c = embed(src.as_bytes(), &dir).unwrap();
         assert_ne!(a, c);
         assert!(decodes_for_test() - before >= 2);
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn an_image_over_the_pixel_budget_is_refused_before_decode() {
+        let dir = scratch("pixels");
+        let img = image::GrayImage::from_pixel(8200, 6200, image::Luma([7u8]));
+        let mut png = Vec::new();
+        DynamicImage::ImageLuma8(img).write_to(&mut std::io::Cursor::new(&mut png), ImageFormat::Png).unwrap();
+        std::fs::write(dir.join("inbox/huge.png"), png).unwrap();
+        let out = embed(svg(r#"<image href="inbox/huge.png"/>"#).as_bytes(), &dir).unwrap();
+        let found = images(&out);
+        assert_eq!(found.len(), 1);
+        assert_eq!(found[0].1.as_deref(), Some("image_too_large"));
+        assert!(!String::from_utf8(out).unwrap().contains("data:image"));
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn failed_refs_count_against_the_attempt_cap() {
+        let dir = scratch("attempts");
+        let mut body = String::new();
+        for i in 0..40 {
+            let mut junk = b"\x89PNG\r\n\x1a\n".to_vec();
+            junk.extend_from_slice(format!("garbage-{i}").as_bytes());
+            std::fs::write(dir.join(format!("inbox/bad{i}.png")), junk).unwrap();
+            body.push_str(&format!(r#"<image href="inbox/bad{i}.png"/>"#));
+        }
+        let before = decodes_for_test();
+        let out = embed(svg(&body).as_bytes(), &dir).unwrap();
+        assert!(decodes_for_test() - before <= MAX_ATTEMPTS, "解碼次數不得超過嘗試上限");
+        let found = images(&out);
+        assert_eq!(found.len(), 40);
+        assert_eq!(found[MAX_ATTEMPTS - 1].1.as_deref(), Some("decode_failed"));
+        for (_, mark) in &found[MAX_ATTEMPTS..] {
+            assert_eq!(mark.as_deref(), Some("too_many_images"));
+        }
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn a_normal_phone_photo_still_embeds() {
+        let dir = scratch("phone");
+        std::fs::write(dir.join("inbox/p.jpg"), jpeg(3200, 2400)).unwrap();
+        let out = embed(svg(r#"<image href="inbox/p.jpg"/>"#).as_bytes(), &dir).unwrap();
+        let found = images(&out);
+        assert!(found[0].0.as_deref().is_some_and(|h| h.starts_with("data:image/jpeg;base64,")));
+        assert_eq!(found[0].1, None);
         std::fs::remove_dir_all(&dir).unwrap();
     }
 

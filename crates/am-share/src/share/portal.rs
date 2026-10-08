@@ -1187,8 +1187,18 @@ async fn embed_photos<H: PortalEnv>(app: &Arc<H>, bot_id: &str, res: Response) -
         return Response::from_parts(parts, axum::body::Body::from(bytes));
     }
     let Some(folder) = folder_of(app, bot_id).await else { return Response::from_parts(parts, axum::body::Body::from(bytes)) };
+    // 全站 compose 名額（跨分享連結）：等不到就 503，不在沒有預算時解碼（#842）。
+    let Ok(Ok(permit)) = tokio::time::timeout(crate::share::compose::COMPOSE_WAIT, crate::share::compose::slots().acquire_owned()).await else {
+        return unavailable();
+    };
     let src = bytes.clone();
-    let out = tokio::task::spawn_blocking(move || crate::share::compose::embed(&src, &folder)).await.ok().flatten();
+    let out = tokio::task::spawn_blocking(move || {
+        let _permit = permit;
+        crate::share::compose::embed(&src, &folder)
+    })
+    .await
+    .ok()
+    .flatten();
     match out {
         Some(svg) => {
             parts.headers.remove(header::CONTENT_LENGTH);
