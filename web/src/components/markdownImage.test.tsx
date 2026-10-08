@@ -40,10 +40,12 @@ test('經 Markdown 渲染（含輸出中的氣泡走的 markdownComponents）也
   assert.doesNotMatch(html, /<img[^>]+example\.invalid/i)
 })
 
-test('輸出中的氣泡（LiveBubble）也用同一個圖片元件，不是 react-markdown 預設的 <img>', () => {
+test('輸出中的氣泡（LiveBubble）走 SafeMarkdown 並帶 botId，而 SafeMarkdown 的內容用 markdownComponents（同一個圖片元件）', () => {
   const src = readFileSync(new URL('./ChatPanel.tsx', import.meta.url), 'utf8')
   const live = src.slice(src.indexOf('export function LiveBubble'), src.indexOf('export function LiveReplyBubble'))
-  assert.match(live, /<Markdown[^>]*components=\{markdownComponents\(/)
+  assert.match(live, /<SafeMarkdown[^>]*botId=\{botId\}/)
+  const content = readFileSync(new URL('./SafeMarkdownContent.tsx', import.meta.url), 'utf8')
+  assert.match(content, /<Markdown[^>]*components=\{markdownComponents\(/)
 })
 
 test('index.html 有 CSP img-src：只放 self、data:、blob:（之後新增的渲染路徑也繞不過）', () => {

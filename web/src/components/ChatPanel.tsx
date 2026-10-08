@@ -297,7 +297,7 @@ export function LiveBubble({
       <div className={`bubble${showText ? ' md' : ''}`}>
         {showText ? (
           <>
-            <SafeMarkdown text={text ?? ""} cache={false} />
+            <SafeMarkdown text={text ?? ""} botId={botId} cache={false} />
             <span className="caret" aria-hidden="true" />
           </>
         ) : (
