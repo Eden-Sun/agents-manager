@@ -213,7 +213,12 @@ pub async fn force_probe(app: &Arc<App>, host: &str, account: Option<&str>) -> R
 }
 
 pub fn spawn_claude_poller(app: Arc<App>) {
-    tokio::spawn(async move {
+    crate::background_loop::spawn_restartable(&app, "claude quota poller", {
+        let app = app.clone();
+        move || {
+            let app = app.clone();
+            async move {
+        let shutdown = app.shutdown.clone();
         sweep_stale(app.as_ref()).await;
         loop {
             crate::quota::for_each_host(crate::quota::pollable_hosts(&app).await, |host| {
@@ -227,7 +232,12 @@ pub fn spawn_claude_poller(app: Arc<App>) {
                 }
             })
             .await;
-            tokio::time::sleep(CLAUDE_POLL).await;
+            tokio::select! {
+                _ = shutdown.cancelled() => return,
+                _ = tokio::time::sleep(CLAUDE_POLL) => {}
+            }
+        }
+            }
         }
     });
 }

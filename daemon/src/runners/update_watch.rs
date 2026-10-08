@@ -198,10 +198,7 @@ pub async fn sweep_runs(app: &Arc<App>, runs: anyhow::Result<Vec<db::Run>>) {
 }
 
 pub fn spawn_update_watcher(app: Arc<App>) {
-    tokio::spawn(async move {
-        loop {
-            tokio::time::sleep(SWEEP).await;
-            sweep(&app).await;
-        }
+    crate::background_loop::spawn_periodic(&app, "update watcher", SWEEP, SWEEP, |app| async move {
+        sweep(&app).await;
     });
 }

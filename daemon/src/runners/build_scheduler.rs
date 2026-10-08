@@ -11,17 +11,30 @@ use crate::build_scheduler::{
 use crate::lc_error::LcError;
 use crate::state::App;
 
+/// 測試裡縮短週期，才看得到「第一輪 panic 之後下一輪照常」。
+const TICK_EVERY: std::time::Duration = if cfg!(test) { std::time::Duration::from_millis(50) } else { SWEEP_EVERY };
+
 pub fn spawn_sweeper(app: Arc<App>) {
-    tokio::spawn(async move {
-        loop {
-            tokio::time::sleep(SWEEP_EVERY).await;
-            let (held, waiting) = sweep(app.as_ref()).await;
-            if held > 0 || waiting > 0 {
-                tracing::info!(held, waiting, "build scheduler: 收回沒人續約／沒人再 poll 的名額");
+    crate::background_loop::spawn_periodic(&app, "build scheduler sweeper", TICK_EVERY, TICK_EVERY, |app| async move {
+        #[cfg(test)]
+        {
+            if PANIC_NEXT_TICK.swap(false, std::sync::atomic::Ordering::SeqCst) {
+                panic!("test-injected build scheduler sweep panic");
             }
+            TICKS.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        }
+        let (held, waiting) = sweep(app.as_ref()).await;
+        if held > 0 || waiting > 0 {
+            tracing::info!(held, waiting, "build scheduler: 收回沒人續約／沒人再 poll 的名額");
         }
     });
 }
+
+/// 測試用：讓下一輪 sweep 一開始就 panic 一次，以及數 tick 次數。
+#[cfg(test)]
+pub(crate) static PANIC_NEXT_TICK: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+#[cfg(test)]
+pub(crate) static TICKS: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
 
 pub async fn get_status(State(app): State<Arc<App>>) -> Result<Json<Value>, LcError> {
     Ok(Json(status(app.as_ref()).await.map_err(up)?))

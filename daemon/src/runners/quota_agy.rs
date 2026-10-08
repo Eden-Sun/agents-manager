@@ -374,21 +374,18 @@ async fn refresh_agy_gated(app: &Arc<App>, host: &str) -> Result<Option<bool>> {
 }
 
 pub fn spawn_agy_poller(app: Arc<App>) {
-    tokio::spawn(async move {
-        loop {
-            crate::quota::for_each_host(crate::quota::pollable_hosts(&app).await, |host| {
-                let app = app.clone();
-                async move {
-                    match refresh_agy_if_due(&app, &host).await {
-                        Ok(Some(true) | None) => {}
-                        Ok(Some(false)) => tracing::debug!(host = %host, "agy not installed; agy quota stays null"),
-                        Err(e) => tracing::warn!(host = %host, error = %e, retry_in_s = RETRY_AFTER_FAILURE.as_secs(), "agy quota refresh failed; keeping the last reading"),
-                    }
+    crate::background_loop::spawn_periodic(&app, "agy quota poller", AGY_POLL, std::time::Duration::ZERO, |app| async move {
+        crate::quota::for_each_host(crate::quota::pollable_hosts(&app).await, |host| {
+            let app = app.clone();
+            async move {
+                match refresh_agy_if_due(&app, &host).await {
+                    Ok(Some(true) | None) => {}
+                    Ok(Some(false)) => tracing::debug!(host = %host, "agy not installed; agy quota stays null"),
+                    Err(e) => tracing::warn!(host = %host, error = %e, retry_in_s = RETRY_AFTER_FAILURE.as_secs(), "agy quota refresh failed; keeping the last reading"),
                 }
-            })
-            .await;
-            tokio::time::sleep(AGY_POLL).await;
-        }
+            }
+        })
+        .await;
     });
 }
 
@@ -424,12 +421,9 @@ pub async fn login_watch_once(app: &Arc<App>, host: &str) {
 }
 
 pub fn spawn_agy_login_watcher(app: Arc<App>) {
-    tokio::spawn(async move {
-        loop {
-            tokio::time::sleep(LOGIN_WATCH).await;
-            for host in crate::quota::pollable_hosts(&app).await {
-                login_watch_once(&app, &host).await;
-            }
+    crate::background_loop::spawn_periodic(&app, "agy login watcher", LOGIN_WATCH, LOGIN_WATCH, |app| async move {
+        for host in crate::quota::pollable_hosts(&app).await {
+            login_watch_once(&app, &host).await;
         }
     });
 }

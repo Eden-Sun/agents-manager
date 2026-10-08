@@ -87,7 +87,12 @@ pub async fn refresh_grok_if_due(app: &Arc<App>, host: &str) -> Result<Option<bo
 }
 
 pub fn spawn_grok_poller(app: Arc<App>) {
-    tokio::spawn(async move {
+    crate::background_loop::spawn_restartable(&app, "grok quota poller", {
+        let app = app.clone();
+        move || {
+            let app = app.clone();
+            async move {
+        let shutdown = app.shutdown.clone();
         sweep_stale(&app).await;
         loop {
             crate::quota::for_each_host(crate::quota::pollable_hosts(&app).await, |host| {
@@ -102,7 +107,12 @@ pub fn spawn_grok_poller(app: Arc<App>) {
                 }
             })
             .await;
-            tokio::time::sleep(GROK_POLL).await;
+            tokio::select! {
+                _ = shutdown.cancelled() => return,
+                _ = tokio::time::sleep(GROK_POLL) => {}
+            }
+        }
+            }
         }
     });
 }

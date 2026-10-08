@@ -10,6 +10,8 @@ pub(crate) mod app_ports_p2;
 pub mod autostart_revive;
 pub mod background_hook;
 pub mod background_jobs;
+#[cfg(test)]
+mod background_tracking_tests;
 pub mod build_scheduler;
 pub mod bulk_restart;
 pub mod child_alerts;

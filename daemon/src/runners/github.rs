@@ -8,7 +8,11 @@ pub fn spawn_detect_host(app: Arc<App>, host: String) {
     let Some(mut claim) = crate::github::host_detection_registry().claim(&app.data_dir, &host) else {
         return;
     };
-    tokio::spawn(async move {
+    // 一次性（合併重複要求）：掛在 `background_tasks` 下，關機的 `wait()` 等得到它；不重啟（下一次連線／對帳會再要求）。
+    if app.shutdown.is_cancelled() {
+        return;
+    }
+    app.background_tasks.spawn(async move {
         loop {
             crate::github::detect_host_once(&app, &host).await;
             if !claim.finish() {
