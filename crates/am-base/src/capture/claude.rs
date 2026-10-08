@@ -276,8 +276,13 @@ pub fn is_status_chrome(s: &str) -> bool {
         || s.starts_with("Tip:")
         || s.starts_with("⎿")
         || s.contains("Auto-update failed")
-        || (s.contains(" | ") && (s.contains("5h:") || s.contains("7d:")))
+        || is_usage_status_row(s)
         || (s.contains(" · ") && s.contains("% left"))
+}
+
+fn is_usage_status_row(s: &str) -> bool {
+    s.contains(" | ")
+        && ["5h:", "7d:", "5h left", "7d left"].iter().any(|marker| s.contains(marker))
 }
 
 /// 輸入框底下的權限模式列。判斷只有 [`crate::claude_mode::is_mode_row`] 一份（#788）。
@@ -404,9 +409,7 @@ pub fn is_noise(s: &str) -> bool {
     {
         return true;
     }
-    if (s.contains(" | ") && (s.contains("5h:") || s.contains("7d:")))
-        || (s.contains(" · ") && s.contains("% left"))
-    {
+    if is_usage_status_row(s) || (s.contains(" · ") && s.contains("% left")) {
         return true;
     }
     s.starts_with("Claude Code v")
