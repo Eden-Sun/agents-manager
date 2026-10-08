@@ -57,6 +57,36 @@ fn is_interrupt_marker(text: &str) -> bool {
     text.trim_start().starts_with("[Request interrupted by user")
 }
 
+fn flag(v: &Value, key: &str) -> bool {
+    v.get(key).and_then(Value::as_bool) == Some(true)
+}
+
+/// CLI 自己寫進 transcript 的 user 行：auto-compact／`/compact` 的摘要（`isCompactSummary`，內容是一大段 `This session is being continued…`）
+/// 與只給 transcript 檢視看的行。形狀是 `type:"user"`、字串 content，沒有 `isMeta`，所以光看文字分不出來（#910）。
+fn is_cli_written_row(v: &Value) -> bool {
+    flag(v, "isCompactSummary") || flag(v, "isVisibleInTranscriptOnly")
+}
+
+/// 一行 `user` 若是人打的（含被打斷的標記）就回它**原樣**的文字（可能被 CLI 包成 `<pasted_content>`）；
+/// `isMeta`／compact 摘要／sidechain、非純文字（tool_result、圖片）、slash 指令的回音一律 `None`。
+/// 送達驗證（`delivery::transcript_user_text`）比對的是這個原樣文字。
+pub(crate) fn user_prompt_raw(v: &Value) -> Option<String> {
+    if v.get("type").and_then(Value::as_str) != Some("user") || flag(v, "isMeta") || flag(v, "isSidechain") || is_cli_written_row(v) {
+        return None;
+    }
+    let raw = v.get("message")?.get("content").and_then(parts_text)?;
+    (!is_cli_echo(&raw)).then_some(raw)
+}
+
+/// 一行 `user` 是不是人打的一問；是就回使用者當初送出的字（`<pasted_content>` 拆開後）。中斷標記、空白、CLI 回音、compact 摘要都不是。
+pub(crate) fn is_human_prompt_row(v: &Value) -> Option<String> {
+    let raw = user_prompt_raw(v)?;
+    if raw.trim().is_empty() || is_interrupt_marker(&raw) {
+        return None;
+    }
+    Some(crate::pasted_content::original(&raw).into_owned())
+}
+
 pub fn parse_exchanges(text: &str) -> Vec<Exchange> {
     let mut out: Vec<Exchange> = Vec::new();
     // `tail -c` 會從一行中間切開。切剩的半行解析失敗後，後面的 assistant 仍是那一問的，
@@ -75,10 +105,23 @@ pub fn parse_exchanges(text: &str) -> Vec<Exchange> {
         }
         match v.get("type").and_then(Value::as_str) {
             Some("user") => {
-                if v.get("isMeta").and_then(Value::as_bool) == Some(true) {
+                if flag(&v, "isMeta") {
                     continue;
                 }
-                let Some(raw) = v.get("message").and_then(|m| m.get("content")).and_then(parts_text) else { continue };
+                let content = v.get("message").and_then(|m| m.get("content"));
+                // 工具結果是同一回合中途的 user 行：不動。
+                if content.and_then(Value::as_array).is_some_and(|ps| ps.iter().any(|p| p.get("type").and_then(Value::as_str) == Some("tool_result"))) {
+                    continue;
+                }
+                // compact 摘要、帶圖片等非純文字的行不是一問，但它們把上一問截斷了：後面的 assistant 不能再接到上一問的回覆上（#910）。
+                if is_cli_written_row(&v) || content.is_some_and(|c| parts_text(c).is_none()) {
+                    if let Some(prev) = out.last_mut() {
+                        prev.closed = true;
+                    }
+                    gap = true;
+                    continue;
+                }
+                let Some(raw) = content.and_then(parts_text) else { continue };
                 if is_interrupt_marker(&raw) {
                     gap = false;
                     if let Some(prev) = out.last_mut() {
@@ -86,14 +129,12 @@ pub fn parse_exchanges(text: &str) -> Vec<Exchange> {
                     }
                     continue;
                 }
-                if raw.trim().is_empty() || is_cli_echo(&raw) {
-                    continue;
-                }
+                let Some(original) = is_human_prompt_row(&v) else { continue };
                 gap = false;
                 if let Some(prev) = out.last_mut() {
                     prev.closed = true;
                 }
-                let prompt = crate::pasted_content::original(&raw).trim().to_string();
+                let prompt = original.trim().to_string();
                 let uuid = v.get("uuid").and_then(Value::as_str).filter(|u| !u.is_empty());
                 out.push(Exchange { prompt, prompt_index: uuid.map(index_of), reply: None, closed: false, at: v.get("timestamp").and_then(Value::as_str).map(str::to_string) });
             }

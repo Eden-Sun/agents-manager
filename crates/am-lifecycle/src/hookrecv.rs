@@ -3130,6 +3130,51 @@ mod external_claim_tests {
         quickly_finished.unwrap().unwrap().unwrap();
     }
 
+    /// #910：transcript 尾巴最後一列是 auto-compact 的摘要（`type:"user"`、`isCompactSummary`，內容是一大段
+    /// `This session is being continued…`）時，Stop 讀到的「最後一則使用者訊息」不能是它：`unknown` 的 in-flight 回合照樣被認領，
+    /// 不開外部回合，對話裡也不會多一則以摘要開頭的 user 訊息。
+    #[tokio::test]
+    async fn a_compact_summary_at_the_transcript_tail_does_not_hide_the_prompt_from_the_stop() {
+        let env = tt::env().await;
+        let app = env.app.clone();
+        let (bot_id, conv, turn_id) = unknown_turn(&app, &env.project_id, "claude", "做完那份長任務").await;
+        let scratch = tt::track(std::env::temp_dir().join(format!("am-hook-compact-{}", db::ulid())));
+        let path = own_projects_file(&app, &bot_id, &scratch, "compact.jsonl").await;
+        let rows = [
+            json!({"type": "user", "uuid": "u1", "message": {"role": "user", "content": "做完那份長任務"}}),
+            json!({"type": "assistant", "message": {"role": "assistant", "content": [{"type": "text", "text": "做完了"}], "stop_reason": "end_turn"}}),
+            json!({"type": "user", "uuid": "s1", "isCompactSummary": true, "isVisibleInTranscriptOnly": true,
+                "message": {"role": "user", "content": "This session is being continued from a previous conversation that ran out of context. Summary: ..."}}),
+        ];
+        std::fs::write(&path, rows.iter().map(|r| format!("{r}\n")).collect::<String>()).unwrap();
+        assert_eq!(last_transcript_user_text(&path).as_deref(), Some("做完那份長任務"), "摘要列不是使用者訊息");
+
+        process(
+            &app,
+            &HookBody {
+                bot_id,
+                provider: "claude".into(),
+                payload: json!({"hook_event_name":"Stop", "session_id":"compact-session", "prompt_id":"compact-turn",
+                    "transcript_path": path.to_string_lossy(), "last_assistant_message":"做完了"}),
+                received_at: None,
+                truncated: false,
+                run_id: None,
+            },
+        )
+        .await
+        .unwrap();
+
+        let turn = sqlx::query_as::<_, db::Turn>("SELECT * FROM turns WHERE id=?").bind(&turn_id).fetch_one(&app.db).await.unwrap();
+        assert_eq!(turn.status, "completed", "原本的回合被認領");
+        let external: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM turns WHERE conversation_id=? AND origin='external'").bind(&conv).fetch_one(&app.db).await.unwrap();
+        assert_eq!(external, 0, "沒有外部回合");
+        let summaries: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM messages WHERE role='user' AND content LIKE 'This session is being continued%'")
+            .fetch_one(&app.db)
+            .await
+            .unwrap();
+        assert_eq!(summaries, 0, "對話裡沒有摘要當 user 訊息");
+    }
+
     /// 備援剛把回合關掉、沒存回覆（這個 run 已經沒有 in-flight 回合）。
     async fn fallback_closed_turn(app: &Arc<App>, project_id: &str, prompt: &str) -> (String, String, String) {
         let (bot_id, conv, turn_id) = unknown_turn(app, project_id, "codex", prompt).await;
