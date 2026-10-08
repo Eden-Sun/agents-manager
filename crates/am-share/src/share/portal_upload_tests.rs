@@ -16,7 +16,6 @@ async fn fixture() -> (tt::Env, String, Portal<crate::state::App>, SocketAddr, r
 /// `upload_wait`：名額滿了排隊等多久。
 async fn fixture_with(upload_wait: Duration) -> (tt::Env, String, Portal<crate::state::App>, SocketAddr, reqwest::Client) {
     let e = tt::env().await;
-    let b = tt::claude_bot(&e.app, &e.project_id, "share-upload-tests").await;
     let root = tt::scratch_dir("am-share-upload-root");
     let root = root.to_string_lossy().into_owned();
     e.app
@@ -27,29 +26,32 @@ async fn fixture_with(upload_wait: Duration) -> (tt::Env, String, Portal<crate::
         })
         .await
         .unwrap();
-    let folder = crate::share::folder::ShareFolderIn::New {
-        name: "share-upload-tests".into(),
-    };
-    let (ws, made) = crate::share::admin::reserve_restricted(&e.app, &b.id, &folder, false)
-        .await
-        .unwrap();
-    crate::share::admin::finish_restricted(&e.app, &b.id, &ws, made, true).await;
-    let token = crate::share::store::enable(&e.app.db, &b.id)
-        .await
-        .unwrap()
-        .unwrap();
+    let (_, token) = make_share(&e, "share-upload-tests").await;
     let state = Portal {
         app: e.app.clone(),
         limits: Arc::new(Limits::default()),
         uploads: Arc::new(Semaphore::new(UPLOAD_SLOTS)),
         upload_queue: Arc::new(Semaphore::new(UPLOAD_QUEUE_MAX)),
+        share_uploads: Arc::new(PerShareSlots::new(UPLOAD_INFLIGHT_PER_SHARE)),
+        downloads: Arc::new(Semaphore::new(DOWNLOAD_SLOTS)),
+        share_downloads: Arc::new(PerShareSlots::new(DOWNLOADS_PER_SHARE)),
         upload_wait,
         streams: Arc::new(Semaphore::new(MAX_STREAMS)),
-        share_streams: Arc::new(ShareStreamLimits::default()),
+        share_streams: Arc::new(PerShareSlots::new(MAX_STREAMS_PER_SHARE)),
         token_lookups: Arc::new(Semaphore::new(MAX_TOKEN_LOOKUPS)),
     };
     let addr = serve(router_with_state(state.clone())).await;
     (e, token, state, addr, client())
+}
+
+/// 再開一顆分享用 bot（`cfg.share.folders_root` 要先設好）：回（bot id, token）。
+async fn make_share(e: &tt::Env, name: &str) -> (String, String) {
+    let b = tt::claude_bot(&e.app, &e.project_id, name).await;
+    let folder = crate::share::folder::ShareFolderIn::New { name: name.into() };
+    let (ws, made) = crate::share::admin::reserve_restricted(&e.app, &b.id, &folder, false).await.unwrap();
+    crate::share::admin::finish_restricted(&e.app, &b.id, &ws, made, true).await;
+    let token = crate::share::store::enable(&e.app.db, &b.id).await.unwrap().unwrap();
+    (b.id, token)
 }
 
 fn client() -> reqwest::Client {
@@ -460,9 +462,10 @@ fn issue_826_office_uploads_require_bounded_ooxml_zip_structure_and_return_offic
 }
 
 /// 客訴 2026-10-04：分享頁一次選好幾張照片、同時送出，第三張起就 429「傳得太快了」。名額（2 個）都被慢的 body 占著時，
-/// 同時再來 5 個上傳要排隊等、不 429；名額一空出來就輪到，7 個全部存進 `inbox/`。
+/// 同時再來的上傳要排隊等、不 429；名額一空出來就輪到，全部存進 `inbox/`。
+/// 單一分享進行中＋排隊合計上限 [`UPLOAD_INFLIGHT_PER_SHARE`]（4）：2 個慢的＋2 個排隊剛好用滿（官方頁本來就一張一張送）。
 #[tokio::test]
-async fn five_uploads_at_once_queue_for_the_two_slots_instead_of_failing() {
+async fn queued_uploads_wait_for_the_two_slots_instead_of_failing() {
     let (_e, token, state, addr, client) = fixture_with(Duration::from_secs(30)).await;
     let slow = format!("/s/{token}/api/upload?name=slow.txt");
     let mut first = partial_upload(addr, &slow).await;
@@ -475,7 +478,7 @@ async fn five_uploads_at_once_queue_for_the_two_slots_instead_of_failing() {
     .await
     .expect("two slow bodies should hold both upload permits");
 
-    let queued: Vec<_> = (0..5)
+    let queued: Vec<_> = (0..UPLOAD_INFLIGHT_PER_SHARE - 2)
         .map(|i| {
             let (client, uri) = (client.clone(), format!("/s/{token}/api/upload?name=photo-{i}.txt"));
             tokio::spawn(async move { call(&client, addr, &uri, "application/octet-stream", format!("photo {i}").into_bytes()).await })
@@ -495,7 +498,7 @@ async fn five_uploads_at_once_queue_for_the_two_slots_instead_of_failing() {
     }
     let bot_id: String = sqlx::query_scalar("SELECT id FROM bots WHERE name = 'share-upload-tests'").fetch_one(&state.app.db).await.unwrap();
     let inbox = folder_of(&state.app, &bot_id).await.unwrap().join("inbox");
-    assert_eq!(std::fs::read_dir(inbox).unwrap().count(), 7);
+    assert_eq!(std::fs::read_dir(inbox).unwrap().count(), UPLOAD_INFLIGHT_PER_SHARE);
 }
 
 /// 一則訊息帶一整批照片（上限 [`MAX_ATTACHMENTS`]）、每分鐘上傳額度（[`UPLOADS_PER_MIN`]）都要容得下「一次選 10 張」再加重傳。
@@ -504,4 +507,104 @@ fn a_batch_of_ten_phone_photos_fits_the_limits() {
     assert!(MAX_ATTACHMENTS >= 10);
     assert!(UPLOADS_PER_MIN >= 2 * 10, "10 張再重傳一輪也不撞每分鐘額度");
     assert!(INBOX_MAX_FILES >= 10 && INBOX_MAX_BYTES >= 10 * 8 * 1024 * 1024, "10 張原尺寸 8 MB 的照片放得下");
+}
+
+/// #844：一個分享連結不能把全站的上傳排隊位子佔滿；別的分享仍進得了排隊。
+#[tokio::test]
+async fn one_share_cannot_take_every_upload_queue_slot() {
+    let (e, token_a, state, addr, client) = fixture_with(Duration::from_secs(30)).await;
+    let (_, token_b) = make_share(&e, "share-upload-tests-b").await;
+    let slow = format!("/s/{token_a}/api/upload?name=slow.txt");
+    let mut first = partial_upload(addr, &slow).await;
+    let mut second = partial_upload(addr, &slow).await;
+    tokio::time::timeout(Duration::from_secs(2), async {
+        while state.uploads.available_permits() != 0 {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("two slow bodies should hold both upload permits");
+
+    // A 再排滿它自己的名額（進行中 2 ＋ 排隊 UPLOAD_INFLIGHT_PER_SHARE - 2）。
+    let queued: Vec<_> = (0..UPLOAD_INFLIGHT_PER_SHARE - 2)
+        .map(|i| {
+            let (client, uri) = (client.clone(), format!("/s/{token_a}/api/upload?name=a-{i}.txt"));
+            tokio::spawn(async move { call(&client, addr, &uri, "application/octet-stream", format!("a {i}").into_bytes()).await })
+        })
+        .collect();
+    tokio::time::timeout(Duration::from_secs(2), async {
+        while state.upload_queue.available_permits() != UPLOAD_QUEUE_MAX - (UPLOAD_INFLIGHT_PER_SHARE - 2) {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("A's extra uploads should be waiting in the queue");
+
+    // 第 5 個起 A 立刻 429 upload_per_share，而且沒有再佔排隊位子。
+    let r = client
+        .post(format!("http://{addr}/s/{token_a}/api/upload?name=over.txt"))
+        .header("content-type", "application/octet-stream")
+        .body(b"over".to_vec())
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(r.status(), StatusCode::TOO_MANY_REQUESTS);
+    let body: serde_json::Value = r.json().await.unwrap();
+    assert_eq!(body["what"], "upload_per_share");
+    assert!(state.upload_queue.available_permits() >= UPLOAD_QUEUE_MAX - (UPLOAD_INFLIGHT_PER_SHARE - 2));
+
+    // B 不受 A 影響：能進排隊，A 放開名額後 B 成功。
+    let b_upload = {
+        let (client, uri) = (client.clone(), format!("/s/{token_b}/api/upload?name=b.txt"));
+        tokio::spawn(async move { call(&client, addr, &uri, "application/octet-stream", b"b".to_vec()).await })
+    };
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    assert!(!b_upload.is_finished(), "B 應該在排隊等名額，不是被 A 擋掉");
+    for s in [&mut first, &mut second] {
+        s.write_all(&vec![b'a'; 1_048_576]).await.unwrap();
+    }
+    assert_eq!(response_status(&mut first).await, 200);
+    assert_eq!(response_status(&mut second).await, 200);
+    assert_eq!(b_upload.await.unwrap(), StatusCode::OK);
+    for h in queued {
+        assert_eq!(h.await.unwrap(), StatusCode::OK);
+    }
+}
+
+/// #844：排隊逾時回 429 之後，這個分享的計數要歸零（RAII 放掉）。
+#[tokio::test]
+async fn per_share_upload_permits_are_released_on_timeout() {
+    let (_e, token, state, addr, client) = fixture_with(Duration::from_millis(50)).await;
+    let slow = format!("/s/{token}/api/upload?name=slow.txt");
+    let first = partial_upload(addr, &slow).await;
+    let second = partial_upload(addr, &slow).await;
+    tokio::time::timeout(Duration::from_secs(2), async {
+        while state.uploads.available_permits() != 0 {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("two slow bodies should hold both upload permits");
+
+    // 排隊逾時（50ms）→ 429。
+    assert_eq!(
+        call(&client, addr, &format!("/s/{token}/api/upload?name=late.txt"), "application/octet-stream", b"late".to_vec()).await,
+        StatusCode::TOO_MANY_REQUESTS
+    );
+    // 慢的兩個斷線之後，計數要回到 0：連續 UPLOAD_INFLIGHT_PER_SHARE 個上傳都不會吃到 upload_per_share。
+    drop((first, second));
+    tokio::time::timeout(Duration::from_secs(2), async {
+        while state.uploads.available_permits() != 2 {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("closing the slow bodies should return both upload permits");
+    for i in 0..UPLOAD_INFLIGHT_PER_SHARE {
+        assert_eq!(
+            call(&client, addr, &format!("/s/{token}/api/upload?name=ok-{i}.txt"), "application/octet-stream", b"ok".to_vec()).await,
+            StatusCode::OK,
+            "逾時與斷線的 permit 都要放掉（第 {i} 個）"
+        );
+    }
 }
