@@ -2620,6 +2620,8 @@ claude 下載新版後只能靠重啟套用（`runs.update_notice`，§3.1）。
 - UI 入口在額度列 claude 量表右邊的 `⬆ N` chip（`UpdateQuotaChip.tsx`），確認框列出要重啟與跳過的；側欄 `UpdateAllBanner` 只顯示進度與失敗／跳過名單。
 
 ### 6.9b herdr 一鍵更新（完整重啟版）
+
+**擋新派送**（#893）：開維護窗口後、複查閒置**之前**先把 phase 設成 `stopping`——`stopping`／`restarting`／`rolling_back` 三個階段，`MaintenancePort::window_held`（`lifecycle::prompt`、排隊 flush 的入場閘門，AGM 派工遇到 409 就留在佇列）回 409 `herdr_updating`（`sent:false`、`retryable:true`），不送任何字也不建 turn；複查發現又忙起來就退回 `waiting_idle`、閘門重開。`resuming` 起恢復。
 header 的 herdr 徽章確認後 `POST /api/hosts/{name}/herdr-update`（API §12.7b，`daemon/src/herdr_upgrade.rs`）。不用 live handoff：
 換 binary → 在維護窗口（§6.5.2）裡重啟這顆 daemon 的 herdr server → 頂層 bot `resume_native` 接回。**只做 local**；遠端（尤其 `shared_session`，
 別顆 daemon 也在用那台的 herdr）一律 409。同一顆 daemon 同時只跑一個，進行中的狀態只在記憶體（`GET /api/state` 的 `herdr_updates`）。**跟 CLI 安裝（cli-update，API §12.7a）互斥**：同一台有 `running` 的 cli-update 列就 409 `cli_update_in_progress`；herdr 更新在跑時 `POST /hosts/local/cli-update` 回 409 `herdr_update_in_progress`（兩邊都是先佔自己的位、再看對方，同時開的最壞結果是互相退讓）。更新後不需要另外重寫 shim：shim 內容來自 daemon binary（開機與遠端連線時 `shim_refresh`），binary 路徑不變，接回的 bot 啟動時也會重裝自己的 shim。

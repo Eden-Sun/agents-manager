@@ -99,6 +99,21 @@ pub fn is_running(app: &impl crate::capabilities::DataDir) -> bool {
     running().lock().unwrap_or_else(|e| e.into_inner()).contains_key(app.data_dir())
 }
 
+/// 這幾個階段 herdr server 即將被（或正在）砍：新的 prompt／relay／交辦打進去，回合會直接被殺，
+/// 接回之後也沒有人重送（issue #893）。`stopping` 在「開維護窗口之後、複查閒置之前」就設好，閘門先關、複查才算數。
+const GATED_PHASES: [&str; 3] = ["stopping", "restarting", "rolling_back"];
+
+/// 送出入口的閘門：這台 daemon 的 herdr 更新走到「擋新派送」的階段就回那一筆進度。
+/// `MaintenancePort::window_held` 的 App 實作讀它，於是 `lifecycle::prompt`、排隊 flush 與交辦派送共用同一份判斷。
+pub fn gate(app: &impl crate::capabilities::DataDir) -> Option<Progress> {
+    running()
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .get(app.data_dir())
+        .filter(|p| GATED_PHASES.contains(&p.phase.as_str()))
+        .cloned()
+}
+
 /// 測試用：佔住這顆 App 的更新位置，掉了就放。
 #[cfg(test)]
 pub(crate) fn hold_slot_for_test(app: &App) -> impl Drop + '_ {
@@ -431,13 +446,18 @@ async fn steps(app: &Arc<App>, ops: &dyn Ops, timing: Timing, ctx: &Ctx) -> Outc
         match affected(app, &ctx.host).await {
             Ok(a) if a.busy.is_empty() => {
                 match crate::runners::herdr_maintenance::open_as(app, crate::herdr_maintenance::MAX_MINUTES, "herdr_update", &format!("herdr 一鍵更新 → {}", ctx.target)).await {
-                    Ok(Some(w)) => match affected(app, &ctx.host).await {
-                        Ok(a) if a.busy.is_empty() => break (w, a),
-                        recheck => {
-                            log_line(app, ctx, "waiting_idle", &format!("開窗口時又忙起來了：{:?}", recheck.map(|a| a.busy)));
-                            let _ = crate::runners::herdr_maintenance::close_as(app, &w, "herdr_update", Some("又忙起來了，晚點再試")).await;
+                    Ok(Some(w)) => {
+                        // 先關閘門再複查（issue #893）：複查之後到重啟之間不會再有新派送打進來；複查前剛送進去的，複查看得到。
+                        set_phase(app, &ctx.update_id, "stopping");
+                        match affected(app, &ctx.host).await {
+                            Ok(a) if a.busy.is_empty() => break (w, a),
+                            recheck => {
+                                set_phase(app, &ctx.update_id, "waiting_idle");
+                                log_line(app, ctx, "waiting_idle", &format!("開窗口時又忙起來了：{:?}", recheck.map(|a| a.busy)));
+                                let _ = crate::runners::herdr_maintenance::close_as(app, &w, "herdr_update", Some("又忙起來了，晚點再試")).await;
+                            }
                         }
-                    },
+                    }
                     Ok(None) => return out.fail("maintenance_busy", "已經有別人開著 herdr 維護窗口；什麼都沒動"),
                     Err(e) => return out.fail("maintenance_busy", format!("開不了 herdr 維護窗口：{e:#}；什麼都沒動")),
                 }
@@ -890,6 +910,8 @@ mod tests {
         restarts: Mutex<Vec<String>>,
         resumed: Mutex<Vec<String>>,
         notified: Mutex<Vec<(String, String)>>,
+        /// 重啟 server 的前一刻跑一次（模擬那一刻剛好進來的 prompt）。
+        before_restart: Mutex<Option<BoxFuture<'static, ()>>>,
     }
 
     impl Fake {
@@ -910,6 +932,7 @@ mod tests {
                 restarts: Mutex::new(vec![]),
                 resumed: Mutex::new(vec![]),
                 notified: Mutex::new(vec![]),
+                before_restart: Mutex::new(None),
             })
         }
         fn installed(&self) -> String {
@@ -944,6 +967,10 @@ mod tests {
         }
         fn restart_server<'a>(&'a self, session: &'a str) -> BoxFuture<'a, Result<(), String>> {
             Box::pin(async move {
+                let hook = self.before_restart.lock().unwrap().take();
+                if let Some(hook) = hook {
+                    hook.await;
+                }
                 self.restarts.lock().unwrap().push(session.to_string());
                 let v = if self.bad_restarts.load(Ordering::SeqCst) > 0 {
                     self.bad_restarts.fetch_sub(1, Ordering::SeqCst);
@@ -1068,6 +1095,55 @@ mod tests {
         let log = std::fs::read_to_string(env.app.data_dir.join(LOG_FILE)).unwrap();
         for p in ["downloading", "waiting_idle", "stopping", "restarting", "resuming", "done"] {
             assert!(log.contains(&format!(" 0.9.3 {p} ")), "log 少了 {p}：\n{log}");
+        }
+    }
+
+    /// issue #893：複查閒置之後、重啟 server 之前進來的 prompt 不能打進即將被砍的 pane——回 409 `herdr_updating`、
+    /// 一個字都沒送（沒有 turn），更新結束之後閘門就開了。
+    #[tokio::test]
+    async fn a_prompt_arriving_right_before_the_restart_is_refused_not_lost() {
+        let env = tt::env().await;
+        let fake = Fake::new(&env, "0.9.1", "0.9.3");
+        let bot = top(&env, "boss", "idle").await;
+        let seen: Arc<Mutex<Option<Result<(), LcError>>>> = Arc::new(Mutex::new(None));
+        let gate_phase: Arc<Mutex<Option<String>>> = Arc::new(Mutex::new(None));
+        {
+            let (app, bot, seen, gate_phase) = (env.app.clone(), bot.clone(), seen.clone(), gate_phase.clone());
+            *fake.before_restart.lock().unwrap() = Some(Box::pin(async move {
+                *gate_phase.lock().unwrap() = gate(&app).map(|p| p.phase);
+                let r = crate::lifecycle::prompt(&app, &bot, "late prompt", "crid-893").await;
+                *seen.lock().unwrap() = Some(r.map(|_| ()));
+            }));
+        }
+        let (_accepted, done) = go(&env, &fake, "0.9.3").await;
+        assert_eq!(done["ok"], true, "{done}");
+
+        assert_eq!(gate_phase.lock().unwrap().as_deref(), Some("restarting"), "重啟那一刻閘門是關的");
+        let got = seen.lock().unwrap().take().expect("hook 跑了");
+        match got {
+            Err(LcError::Conflict(v)) => {
+                assert_eq!(v["reason"], "herdr_updating", "{v}");
+                assert_eq!(v["sent"], false);
+                assert_eq!(v["retryable"], true);
+            }
+            other => panic!("要回 409 herdr_updating，拿到 {other:?}"),
+        }
+        let turns: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM turns WHERE client_request_id = 'crid-893'").fetch_one(&env.app.db).await.unwrap();
+        assert_eq!(turns, 0, "被擋下來的 prompt 沒有留下 turn");
+
+        assert!(gate(&env.app).is_none(), "更新結束，閘門開了");
+        let after = crate::lifecycle::prompt(&env.app, &bot, "after", "crid-893b").await;
+        assert!(!matches!(&after, Err(LcError::Conflict(v)) if v["reason"] == "herdr_updating"), "結束後不再被這道閘門擋：{after:?}");
+    }
+
+    /// 閘門只在要砍 server 的階段關：下載、等閒置、接回都不擋。
+    #[tokio::test]
+    async fn only_the_destructive_phases_close_the_gate() {
+        let env = tt::env().await;
+        let _held = hold_slot_for_test(&env.app);
+        for (phase, closed) in [("downloading", false), ("waiting_idle", false), ("stopping", true), ("restarting", true), ("rolling_back", true), ("resuming", false)] {
+            set_phase(&env.app, "held", phase);
+            assert_eq!(gate(&env.app).is_some(), closed, "{phase}");
         }
     }
 
