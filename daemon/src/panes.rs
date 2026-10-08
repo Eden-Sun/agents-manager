@@ -315,7 +315,11 @@ async fn scan_host(app: &(impl crate::capabilities::Cfg + crate::capabilities::D
         };
         observed.insert(pane_id.to_string(), seen);
     }
-    let scan = record_scan(app, host, snapshot_panes, &observed, &scanned_at).await?;
+    let (scan, gone) = record_scan_gone(app, host, snapshot_panes, &observed, &scanned_at).await?;
+    // 關掉的 pane 的指令草稿跟著清（issue #896）：手動在 herdr 關掉、或 herdr 重啟後不見的 pane 不會經過任何關閉 API。
+    for pane_id in &gone {
+        crate::drafts::clear_shell(app, host, pane_id).await;
+    }
     announce_if_changed(app, host).await;
     if let (Some(pane_id), Some(client)) = (&scan.rename_scratch, &client) {
         let name = app.cfg().get().await.panes.scratch_name.clone();
@@ -364,6 +368,7 @@ pub fn spawn_scanner(app: Arc<impl crate::capabilities::Cfg + crate::capabilitie
 /// 兩句「不見了就清掉」的 DELETE 都要帶上 `last_seen < scanned_at`：`note_purpose` 沒有 `SCAN` 鎖保護，
 /// 一顆剛開的 pane 可能在 snapshot 拍下之後、這裡收尾之前才被回報進來，它的 `last_seen` 會晚於
 /// `scanned_at`，不是這份 snapshot 判定「不在了」的對象。
+#[cfg(test)]
 pub(crate) async fn record_scan(
     app: &(impl crate::capabilities::Cfg + crate::capabilities::Db),
     host: &str,
@@ -371,11 +376,23 @@ pub(crate) async fn record_scan(
     observed: &HashMap<String, Option<Observed>>,
     scanned_at: &str,
 ) -> Result<ScanOutcome> {
+    record_scan_gone(app, host, snapshot_panes, observed, scanned_at).await.map(|(scan, _)| scan)
+}
+
+/// [`record_scan`] 加上這一輪被判「不見了」而從表裡刪掉的 pane id（`scan_host` 拿去清它們的指令草稿，issue #896）。
+/// 用 `DELETE … RETURNING` 取，所以回報的跟實際刪掉的一模一樣，不會有 SELECT 與 DELETE 之間被 `note_purpose` 更新的列。
+pub(crate) async fn record_scan_gone(
+    app: &(impl crate::capabilities::Cfg + crate::capabilities::Db),
+    host: &str,
+    snapshot_panes: &[Value],
+    observed: &HashMap<String, Option<Observed>>,
+    scanned_at: &str,
+) -> Result<(ScanOutcome, Vec<String>)> {
     let non_agent: Vec<&Value> = snapshot_panes.iter().filter(|p| !is_agent_pane(p)).collect();
     if non_agent.is_empty() {
         // 這台沒有非 agent pane：把舊的收乾淨（pane 已經關了），但別清掉比這份 snapshot 還新的列。
-        sqlx::query("DELETE FROM panes WHERE host=? AND last_seen < ?").bind(host).bind(scanned_at).execute(app.db()).await?;
-        return Ok(ScanOutcome { panes: 0, complete: true, rename_scratch: None });
+        let gone: Vec<String> = sqlx::query_scalar("DELETE FROM panes WHERE host=? AND last_seen < ? RETURNING pane_id").bind(host).bind(scanned_at).fetch_all(app.db()).await?;
+        return Ok((ScanOutcome { panes: 0, complete: true, rename_scratch: None }, gone));
     }
     let now = crate::db::now();
     // canonical path 比對用（§6.5e 的 cwd 回退）。
@@ -587,10 +604,10 @@ pub(crate) async fn record_scan(
     // 不見了的 pane：herdr 說它不在了，就從表裡拿掉（下次再出現會重新記 first_seen）；
     // 但比這份 snapshot 還新的列（見函式頂端的說明）不算「不見了」，留給下一輪重新判斷。
     let keep = seen.iter().map(|s| format!("'{}'", s.replace('\'', "''"))).collect::<Vec<_>>().join(",");
-    sqlx::query(&format!("DELETE FROM panes WHERE host=? AND pane_id NOT IN ({keep}) AND last_seen < ?"))
+    let gone: Vec<String> = sqlx::query_scalar(&format!("DELETE FROM panes WHERE host=? AND pane_id NOT IN ({keep}) AND last_seen < ? RETURNING pane_id"))
         .bind(host)
         .bind(scanned_at)
-        .execute(app.db())
+        .fetch_all(app.db())
         .await?;
     // scratch 只在完整的一輪重選：不完整時 kind／歸屬是上一輪的，拿來選會讓它來回跳。
     let mut rename_scratch = None;
@@ -611,7 +628,7 @@ pub(crate) async fn record_scan(
             .await?;
         rename_scratch = pick.filter(|c| !name.is_empty() && c.label.as_deref() != Some(name.as_str())).map(|c| c.pane_id.clone());
     }
-    Ok(ScanOutcome { panes: seen.len(), complete, rename_scratch })
+    Ok((ScanOutcome { panes: seen.len(), complete, rename_scratch }, gone))
 }
 
 #[derive(Debug, Clone, sqlx::FromRow)]
@@ -796,7 +813,7 @@ pub(crate) fn seconds_since(at: &str) -> i64 {
 
 /// 關之前再確認一次（§6.5e 的三條守門）。回 `false` = 這一輪不關。
 async fn close_if_still_idle(
-    app: &(impl crate::capabilities::Db + crate::capabilities::HerdrRoutes + crate::hosts::HostsAccess + PaneRuntime),
+    app: &(impl crate::capabilities::Db + crate::capabilities::Emit + crate::capabilities::HerdrRoutes + crate::hosts::HostsAccess + PaneRuntime),
     host: &str,
     pane_id: &str,
     workspace_id: Option<&str>,
@@ -826,6 +843,7 @@ async fn close_if_still_idle(
     tracing::info!(host, pane_id, workspace_id, tab_id, screen_tail = %tail, "pane GC：閒置太久，關掉這顆 shell pane");
     app.close_pane_and_tab(&client, workspace_id, tab_id, pane_id).await;
     sqlx::query("DELETE FROM panes WHERE host=? AND pane_id=?").bind(host).bind(pane_id).execute(app.db()).await?;
+    crate::drafts::clear_shell(app, host, pane_id).await;
     Ok(true)
 }
 
@@ -1522,6 +1540,62 @@ mod tests {
         let still_there: Option<(Option<String>,)> =
             sqlx::query_as("SELECT purpose FROM panes WHERE pane_id='w1:pFresh'").fetch_optional(&app.db).await.unwrap();
         assert_eq!(still_there.map(|(p,)| p), Some(Some("剛開的 build pane".to_string())), "剛回報用途的 pane 不該被同一輪、比它舊的 snapshot 收尾清掉");
+        std::fs::remove_dir_all(&app.data_dir).ok();
+    }
+
+    async fn shell_row(app: &Arc<App>, pane_id: &str) {
+        let stamp = crate::db::iso_in(-60);
+        sqlx::query("INSERT INTO panes (pane_id, host, workspace_id, tab_id, kind, last_output_at, first_seen, last_seen) VALUES (?, 'local', 'w1', 't1', 'shell', ?, ?, ?)")
+            .bind(pane_id)
+            .bind(&stamp)
+            .bind(&stamp)
+            .bind(&stamp)
+            .execute(&app.db)
+            .await
+            .unwrap();
+    }
+
+    /// issue #896：pane 不是經過關閉 API 消失的（手動在 herdr 關掉、herdr 重啟），掃描把它從表裡拿掉時，
+    /// 它的 host shell 指令草稿也要清，其他瀏覽器收到 `draft_updated`。還在 snapshot 裡的不動。
+    #[tokio::test]
+    async fn a_pane_that_vanished_from_the_scan_loses_its_shell_draft() {
+        let app = app().await;
+        shell_row(&app, "w1:p9").await;
+        shell_row(&app, "w1:p8").await;
+        crate::drafts::put(&app.db, &crate::drafts::shell_key("local", "w1:p9"), "rm -rf build").await.unwrap();
+        crate::drafts::put(&app.db, &crate::drafts::shell_key("local", "w1:p8"), "ls").await.unwrap();
+        let mut rx = app.subscribe();
+
+        // snapshot 還有 p8、沒有 p9：只有 p9 的草稿被清。
+        scan_host(&app, "local", &[pane("w1:p8", None, 1)]).await.unwrap();
+        let keys: Vec<String> = crate::drafts::list(&app.db).await.unwrap().into_iter().map(|d| d.key).collect();
+        assert_eq!(keys, ["shell:local/w1:p8"], "不見的那顆草稿清掉，還在的留著");
+        let mut cleared = Vec::new();
+        while let Ok(ev) = rx.try_recv() {
+            if ev.kind == "draft_updated" {
+                cleared.push((ev.data["key"].as_str().unwrap_or_default().to_string(), ev.data["text"].as_str().unwrap_or_default().to_string()));
+            }
+        }
+        assert_eq!(cleared, [("shell:local/w1:p9".to_string(), String::new())]);
+
+        // 這台一顆非 agent pane 都沒有的收尾分支也一樣。
+        sqlx::query("UPDATE panes SET last_seen=? WHERE pane_id='w1:p8'").bind(crate::db::iso_in(-60)).execute(&app.db).await.unwrap();
+        scan_host(&app, "local", &[]).await.unwrap();
+        assert!(crate::drafts::list(&app.db).await.unwrap().is_empty());
+        std::fs::remove_dir_all(&app.data_dir).ok();
+    }
+
+    /// `record_scan_gone` 回報的就是實際被刪掉的 pane；snapshot 仍含該 pane 時是空的。
+    #[tokio::test]
+    async fn record_scan_reports_exactly_the_panes_it_removed() {
+        let app = app().await;
+        shell_row(&app, "w1:p9").await;
+        let facts = HashMap::new();
+        let (_, gone) = record_scan_gone(&app, "local", &[pane("w1:p9", None, 1)], &facts, &crate::db::now()).await.unwrap();
+        assert!(gone.is_empty());
+        sqlx::query("UPDATE panes SET last_seen=? WHERE pane_id='w1:p9'").bind(crate::db::iso_in(-60)).execute(&app.db).await.unwrap();
+        let (_, gone) = record_scan_gone(&app, "local", &[pane("w1:pOther", None, 1)], &facts, &crate::db::now()).await.unwrap();
+        assert_eq!(gone, ["w1:p9"]);
         std::fs::remove_dir_all(&app.data_dir).ok();
     }
 
