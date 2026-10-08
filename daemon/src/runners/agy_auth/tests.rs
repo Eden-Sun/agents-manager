@@ -57,9 +57,32 @@ fn clear_denied() {
     auth_denied().lock().unwrap().remove(&crate::quota::quota_key(HOST, "agy"));
 }
 
+/// 這個檔的測試都碰同一份行程全域狀態：`auth_denied()` 的 `agy` 冷卻（key 是本機）、`probe_errors()` 的 `local`，
+/// 以及 `tools.agy.logged_in` 與假 HOME 裡的憑證檔（`quota_agy` 的登入／登出測試同樣用這些）。平行跑時任何一條
+/// 清掉或寫入冷卻，別條的斷言就看到別人的狀態（冷卻測試被另一條的 `clear_denied()` 清掉後，watcher 把旗標翻回已登入）。
+/// 所以每個測試開頭先拿 `token_test_lock`（與 `quota_agy`／`api` 那幾條共用同一把），進場與離場（含 panic）都把冷卻清乾淨。
+struct AgyGlobals {
+    _lock: tokio::sync::MutexGuard<'static, ()>,
+}
+
+impl Drop for AgyGlobals {
+    fn drop(&mut self) {
+        clear_denied();
+        crate::quota_agy::set_probe_error(HOST, None);
+        let _ = std::fs::remove_file(tt::fake_home().join(crate::quota_agy::TOKEN_FILE));
+    }
+}
+
+async fn agy_globals() -> AgyGlobals {
+    let lock = crate::quota_agy::token_test_lock().await;
+    clear_denied();
+    crate::quota_agy::set_probe_error(HOST, None);
+    AgyGlobals { _lock: lock }
+}
+
 #[tokio::test]
 async fn an_agy_auth_stop_failure_marks_agy_logged_out_and_pushes_host_changed() {
-    clear_denied();
+    let _globals = agy_globals().await;
     let env = tt::env().await;
     seed_agy(&env.app).await;
     env.app.quotas.lock().await.insert("agy".into(), quota());
@@ -77,12 +100,11 @@ async fn an_agy_auth_stop_failure_marks_agy_logged_out_and_pushes_host_changed()
     let q: Vec<_> = frames.iter().filter(|f| f.kind == "quota_updated").collect();
     assert!(q.iter().any(|f| f.data["quota"].is_null()), "舊讀數要清掉並廣播");
     assert!(!env.app.quotas.lock().await.contains_key("agy"));
-    clear_denied();
 }
 
 #[tokio::test]
 async fn an_agy_rate_limit_or_api_error_does_not_mark_logged_out() {
-    clear_denied();
+    let _globals = agy_globals().await;
     let env = tt::env().await;
     seed_agy(&env.app).await;
     let bot = agy_bot(&env, "agy-auth-b").await;
@@ -90,12 +112,11 @@ async fn an_agy_rate_limit_or_api_error_does_not_mark_logged_out() {
         process(&env.app, &stop(&bot, err)).await.unwrap();
         assert_eq!(logged_in(&env.app).await, Some(true), "{err}");
     }
-    clear_denied();
 }
 
 #[tokio::test]
 async fn a_repeated_agy_auth_failure_pushes_once() {
-    clear_denied();
+    let _globals = agy_globals().await;
     let env = tt::env().await;
     seed_agy(&env.app).await;
     let bot = agy_bot(&env, "agy-auth-c").await;
@@ -104,14 +125,12 @@ async fn a_repeated_agy_auth_failure_pushes_once() {
     assert_eq!(drain(&mut rx).iter().filter(|f| f.kind == "host_changed").count(), 1);
     process(&env.app, &stop(&bot, "401 UNAUTHENTICATED")).await.unwrap();
     assert!(drain(&mut rx).iter().all(|f| f.kind != "host_changed"), "已是未登入：不重複推");
-    clear_denied();
 }
 
 /// 憑證檔還在（只是被撤銷）：冷卻期內登入偵測不把旗標翻回去。
 #[tokio::test]
 async fn the_watcher_does_not_flip_back_during_the_auth_denied_cooldown() {
-    let _lock = crate::quota_agy::token_test_lock().await;
-    clear_denied();
+    let _globals = agy_globals().await;
     let env = tt::env().await;
     seed_agy(&env.app).await;
     let bot = agy_bot(&env, "agy-auth-d").await;
@@ -124,12 +143,11 @@ async fn the_watcher_does_not_flip_back_during_the_auth_denied_cooldown() {
     crate::runners::quota_agy::login_watch_once(&env.app, HOST).await;
     let _ = std::fs::remove_file(&token);
     assert_eq!(logged_in(&env.app).await, Some(false), "冷卻期內不翻回已登入");
-    clear_denied();
 }
 
 #[tokio::test]
 async fn an_unadmitted_agy_hook_does_not_change_login_state() {
-    clear_denied();
+    let _globals = agy_globals().await;
     let env = tt::env().await;
     seed_agy(&env.app).await;
     // 有 bot 但沒有 run：沒有放行證明。
@@ -138,5 +156,4 @@ async fn an_unadmitted_agy_hook_does_not_change_login_state() {
     let bot = db::bot(&env.app.db, &bot.id).await.unwrap().unwrap();
     let _ = process(&env.app, &stop(&bot, "401 UNAUTHENTICATED")).await;
     assert_eq!(logged_in(&env.app).await, Some(true));
-    clear_denied();
 }
