@@ -80,7 +80,15 @@ pub async fn sweep(app: &Arc<App>) -> usize {
            JOIN bots b ON b.id = c.bot_id
           WHERE t.status IN ('completed','completed_fallback')
             AND t.completed_at IS NOT NULL
-            AND julianday(t.completed_at) >= julianday('now', '-1 hour')
+            -- 近一小時完成的一律補；parent 離線期間完成的（完成當下沒有任何涵蓋那一刻的 parent run）放寬到 7 天（#871）。
+            -- parent 在線時完成的回合，即時事件一定觸發過，仍維持一小時，避免部署後把較舊的整批倒灌。
+            AND (julianday(t.completed_at) >= julianday('now', '-1 hour')
+                 OR (julianday(t.completed_at) >= julianday('now', '-7 days')
+                     AND NOT EXISTS (
+                         SELECT 1 FROM runs cov
+                          WHERE cov.bot_id = b.parent_bot_id
+                            AND julianday(cov.started_at) <= julianday(t.completed_at)
+                            AND (cov.ended_at IS NULL OR julianday(cov.ended_at) >= julianday(t.completed_at)))))
             AND b.managed_by = 'child' AND b.deleted_at IS NULL
             AND TRIM(COALESCE(b.parent_bot_id, '')) <> ''
             AND EXISTS (
