@@ -1,6 +1,6 @@
 use std::collections::HashSet;
 use std::sync::{Arc, Mutex, OnceLock};
-use crate::child_done::{has_recent_near_duplicate, message_for, truncate, CRID_PREFIX, MAX_REPLY_CHARS};
+use crate::child_done::{child_already_reported, has_recent_near_duplicate, message_for, truncate, CRID_PREFIX, MAX_REPLY_CHARS};
 use crate::events::ports::TurnCommands;
 use crate::state::App;
 
@@ -122,17 +122,7 @@ pub async fn sweep(app: &Arc<App>) -> usize {
                    AND (source.completed_at > t.completed_at
                         OR (source.completed_at = t.completed_at AND source.rowid > t.rowid))
             )
-            AND NOT EXISTS (
-                SELECT 1 FROM messages reported
-                  JOIN conversations pc ON pc.id = reported.conversation_id
-                 WHERE pc.bot_id = b.parent_bot_id
-                   AND reported.role = 'user' AND reported.relay_from = b.id
-                   -- daemon 自己送的 child-done 通知也帶 relay_from：不算 child 自己回報（否則補送會被前一次的通知擋掉，#874）
-                   AND NOT EXISTS (SELECT 1 FROM turns nt WHERE nt.id = reported.turn_id
-                                    AND substr(nt.client_request_id, 1, length('child-done:' || b.id || ':')) = 'child-done:' || b.id || ':')
-                   AND julianday(reported.created_at) >= julianday(t.created_at)
-                   AND julianday(reported.created_at) <= julianday(t.completed_at) + (5.0 / 1440.0)
-            )
+            -- child 自己回報過的判斷（內容近似）在 Rust 做（`notify_turn`，#868），SQL 比不了編輯距離。
           ORDER BY t.completed_at DESC, t.rowid DESC",
     )
     .fetch_all(&app.db)
@@ -261,25 +251,17 @@ pub(crate) async fn notify_turn(app: &Arc<App>, turn_id: &str) -> anyhow::Result
         return Ok(());
     }
 
-    let child_already_reported: bool = sqlx::query_scalar(
-        "SELECT EXISTS (
-            SELECT 1 FROM messages m
-             WHERE m.conversation_id = ? AND m.role = 'user' AND m.relay_from = ?
-               AND NOT EXISTS (SELECT 1 FROM turns nt WHERE nt.id = m.turn_id
-                                AND substr(nt.client_request_id, 1, length(?)) = ?)
-               AND julianday(m.created_at) >= julianday(?)
-               AND julianday(m.created_at) <= julianday(?) + (5.0 / 1440.0)
-        )",
+    let reported = child_already_reported(
+        &app.db,
+        &parent_conversation,
+        &turn.child_id,
+        &prefix,
+        &turn.started_at,
+        &turn.completed_at,
+        &turn.reply,
     )
-    .bind(&parent_conversation)
-    .bind(&turn.child_id)
-    .bind(&prefix)
-    .bind(&prefix)
-    .bind(&turn.started_at)
-    .bind(&turn.completed_at)
-    .fetch_one(&app.db)
     .await?;
-    if child_already_reported {
+    if reported {
         return Ok(());
     }
 
