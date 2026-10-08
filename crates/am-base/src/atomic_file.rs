@@ -143,13 +143,17 @@ mod tests {
                 loose
             })
         };
+        // 結果要 0600 的寫入：暫存檔從建立到 rename 都不能比 0600 寬（`Exact(0o644)` 的暫存檔在寫完內容、rename 之前
+        // 本來就會變 0644，那是它最後要的權限，不在這裡觀察）。
         let big = vec![b'x'; 4_000_000];
         for _ in 0..20 {
-            write(&path, &big, Mode::Exact(0o644)).unwrap();
+            write(&path, &big, Mode::Exact(0o600)).unwrap();
         }
         stop.store(true, Ordering::Relaxed);
         let loose = watcher.join().unwrap();
         assert!(loose.is_empty(), "暫存檔曾經以較寬的權限出現：{loose:?}");
+        assert_eq!(mode_of(&path), 0o600);
+        write(&path, b"first", Mode::Exact(0o644)).unwrap();
         assert_eq!(mode_of(&path), 0o644);
 
         // Preserve：沿用原檔（0640），不被放寬成 0644／收窄成 0600。
