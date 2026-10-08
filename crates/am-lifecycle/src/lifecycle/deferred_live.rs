@@ -26,6 +26,14 @@ fn pending() -> &'static Mutex<HashMap<String, PendingLive>> {
     P.get_or_init(Default::default)
 }
 
+/// `pending()` 是行程內共用的表，`retain_bots` 會清掉名單外的每一顆：碰這張表的測試要排隊，
+/// 不然平行跑時另一條測試的 `retain_bots(&[])` 會在兩次 `defer_live` 中間把前一筆清掉（issue #928）。
+#[cfg(test)]
+fn pending_test_lock() -> std::sync::MutexGuard<'static, ()> {
+    static L: Mutex<()> = Mutex::new(());
+    L.lock().unwrap_or_else(|e| e.into_inner())
+}
+
 /// 這個 live 套用失敗的理由，是不是「bot 現在忙」——那種才值得等下一次 idle。
 /// `codex: busy_not_ready`：回合中切 fast 時輸入框有字或選單開著（#712），一樣等回合結束。
 pub fn is_busy_reason(reason: &str) -> bool {
@@ -132,6 +140,7 @@ mod retain_tests {
 
     #[test]
     fn a_deleted_bots_deferred_live_apply_is_dropped() {
+        let _serial = pending_test_lock();
         for bot in ["defer-gone", "defer-kept"] {
             assert!(defer_live(bot, &["model"], "r0", "r1", false));
         }
@@ -157,6 +166,7 @@ mod tests {
 
     #[test]
     fn deferring_collects_known_fields_once_and_take_empties_it() {
+        let _serial = pending_test_lock();
         let id = "test-deferred-live-bot";
         assert!(!is_deferred(id));
         assert!(defer_live(id, &["fast", "bogus", "fast"], "baseline-a", "target-a", false));
@@ -178,6 +188,7 @@ mod tests {
     /// claude／grok 的 slash 指令一次一個值：已經排著 model，再排 effort 不合併（合併了 idle 那次整批失敗）。
     #[test]
     fn a_single_field_kind_does_not_merge_a_second_field() {
+        let _serial = pending_test_lock();
         let id = "test-deferred-live-single";
         assert!(defer_live(id, &["model"], "base", "t1", true));
         assert!(defer_live(id, &["model"], "base", "t2", true), "同一個欄位再改：更新目標版本");
