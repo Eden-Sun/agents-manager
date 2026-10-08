@@ -3863,6 +3863,7 @@ AGM 控制面讀取（總管摘要、health、handoff、assignments、inbox、pe
   2. 沒有 bot 在 `working`：拿窗口最多重試 3 分鐘，拿不到就 defer；**換 binary 前一刻再查一次**，再確認正式 binary 的 hash 沒在等待期間被另一趟換掉。
   3. 備份舊 binary 為 `target/release/agents-managerd.bak-<old>`（hash 對得上才算數）與 DB（`integrity_check` 通過）。
      DB 備份 `<db>.bak-<YYYYMMDD-HHMMSS>`：**權限 600**（DB 裡有 bot 的 hook token，不看呼叫端 umask）、**已經有同名檔就拒絕（結束碼 5）**不覆蓋（`.backup` 對既有檔是整個覆蓋，會把上一趟換版前唯一的好備份蓋成已 migrate 過的）；備份失敗與已存在都先交還 restart 窗口再結束。成功後只留最新一份。
+     **沒升 schema 的回滾只換 binary、DB 與 `-wal`／`-shm` 原樣保留**（舊 binary 開得了現在的 DB，還原備份只會抹掉新 daemon 這段時間寫的資料；log `db left as is`，備份保留）；只有升過 schema、往前修也失敗才還原 DB（#902）。
      **回滾還原 DB 是原子的**：先 `cp` 到同目錄暫存檔 `<db>.restore.<pid>`（600）、fsync，成功了才刪 `-wal`／`-shm` 再 `mv` 覆蓋；`cp` 或 fsync 失敗時原 DB 與它的 `-wal`／`-shm` 一個位元組都不動、暫存檔清掉、log 記 `DB 還原失敗`，備份還在可手動還原。
      **停 daemon 之前先擋**（結束碼 3）：讀不到 DB 的 `user_version`、或 DB 的 schema 版本比要換上的 binary 認得的還新（換上去一定被版本閘擋下，停機後才發現就晚了）。
   4. 重啟後 30 秒內驗 `/api/session` 與 `agm health`。daemon 起來即自動釋放 `restart` 租約，被 hold 的交辦馬上派送——**重啟後無等待期**（§18.10）。

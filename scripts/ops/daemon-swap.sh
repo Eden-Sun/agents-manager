@@ -664,8 +664,10 @@ rollback() {
     log "ROLLBACK requested: $*"
     # Capture children adopted by the new daemon before restoring the backup. Their panes can outlive
     # the DB restore, so at minimum report the exact rows that will become untracked.
+    # 只有真的會還原 DB（升過 schema、往前修又失敗）才需要盤點；沒升 schema 的回滾不碰 DB（issue #902）。
     ROLLBACK_CHILDREN_KNOWN=yes
-    if ! ROLLBACK_NEW_CHILDREN=$(rollback_new_children); then
+    ROLLBACK_NEW_CHILDREN=""
+    if [ "$BUMPED" = yes ] && ! ROLLBACK_NEW_CHILDREN=$(rollback_new_children); then
         ROLLBACK_CHILDREN_KNOWN=no
         ROLLBACK_NEW_CHILDREN=""
     fi
@@ -684,6 +686,20 @@ rollback() {
             exit 6
         fi
         log "forward-fix 失敗：新 binary 起不來，改還原 binary 與 DB"
+    else
+        # 沒升 schema：舊 binary 直接開得了現在的 DB，只換 binary 回去。DB 在新 daemon 跑的這段時間
+        # 已經寫進新資料（回合、訊息、child 收編…），還原備份會把這些全部抹掉（issue #902）。
+        if ! stop_daemon_for_rollback; then
+            log "ERROR: cannot roll back while daemon is still alive; binary and DB left untouched"
+            exit 11
+        fi
+        cp -p "$BAK" target/release/agents-managerd
+        rm -f "$AM_DATA/service-tokens/daemon-swap.token" "$AM_DATA/service-tokens/herdr-upgrade.token"
+        rmdir "$AM_DATA/service-tokens" 2>/dev/null || true
+        log "db left as is（schema 未升，舊 binary 可直接開；備份 ${DBB} 保留）"
+        start; sleep 5
+        log "rolled back pid $(dpid)"
+        exit 7
     fi
     if ! stop_daemon_for_rollback; then
         log "ERROR: cannot roll back while daemon is still alive; binary and DB left untouched"
@@ -796,8 +812,14 @@ if ! stop_daemon "$OLDPID"; then
     release_window "線上 daemon 無法停止" || true
     exit 11
 fi
-PREV="target/release/agents-managerd.prev-$OLD-$(date +%Y%m%d-%H%M%S)"
-[ -e "$PREV" ] && { log "ABORT: $PREV 已存在"; exit 5; }
+PREV="target/release/agents-managerd.prev-$OLD-$(date +%Y%m%d-%H%M%S)-${SWAP_PREV_NONCE:-$$}"
+if [ -e "$PREV" ]; then
+    # 舊 daemon 已經停了、舊 binary 還在原位：先把它起回來，再交還窗口，不能留一個停著的 daemon（issue #902）。
+    log "ABORT: $PREV 已存在；把舊 daemon 起回來"
+    start; sleep 3
+    release_window "備份檔名撞名，沒換版" || true
+    exit 5
+fi
 mv target/release/agents-managerd "$PREV"
 cp "$NEWBIN" target/release/agents-managerd
 start
