@@ -602,8 +602,9 @@ struct Target {
     pid: i32,
     exe: String,
     freed: u64,
-    /// 目標自己與它的子孫，**深的在前**：`kill -TERM` 只送給那一個 pid，子孫不會跟著死（#529）。
-    set: Vec<i32>,
+    /// 目標自己與它的子孫（pid、取樣時的起始時間），**深的在前**：`kill -TERM` 只送給那一個 pid，子孫不會跟著死（#529）。
+    /// 送訊號前每個成員各自比對起始時間，pid 被回收成別的行程的就不送（#891）；讀不到起始時間的子孫不在這裡。
+    set: Vec<(i32, String)>,
     started: String,
 }
 
@@ -650,9 +651,12 @@ fn screen_kill(out: &str, pid: i32) -> anyhow::Result<Result<Target, KillDenied>
         anyhow::bail!("讀不到 pid {pid} 的環境變數，判不出它是不是 bot 的行程，不送訊號");
     }
     // #526：沒有起始時間就沒辦法確認送訊號那一刻還是同一顆行程，寧可不送。
-    let Some(started) = parse_start(start_section(out)).get(&pid).cloned() else {
+    let starts = parse_start(start_section(out));
+    let Some(started) = starts.get(&pid).cloned() else {
         anyhow::bail!("讀不到 pid {pid} 的起始時間，確認不了送訊號時還是同一顆行程，不送");
     };
+    // #891：子孫也要各自確認；讀不到起始時間的子孫沒辦法確認，直接不送給它。
+    let mut set: Vec<(i32, String)> = set.into_iter().filter_map(|m| starts.get(&m).map(|st| (m, st.clone()))).collect();
     // 深的先收：父行程先死的話，子孫會被 init 收養，之後只能靠環境認回來。
     set.reverse();
     Ok(Ok(Target {
@@ -665,22 +669,27 @@ fn screen_kill(out: &str, pid: i32) -> anyhow::Result<Result<Target, KillDenied>
 }
 
 /// 確認與送訊號放進**同一趟**指令（#526）：兩趟之間 pid 被回收的話，訊號會打在別人身上，
-/// 而回報還是被篩選那一顆的 exe 與大小。對不上就什麼都不送。
+/// 而回報還是被篩選那一顆的 exe 與大小。目標對不上就什麼都不送；子孫（#891）逐一比對起始時間，
+/// 對不上的那一顆跳過、其他照送，`AM_KILLED` 後面列出真的送到的 pid。
 fn kill_script(target: &Target, sig: &str) -> String {
     let pid = target.pid;
-    let set = target
+    let checks: String = target
         .set
         .iter()
-        .map(|p| p.to_string())
-        .collect::<Vec<_>>()
-        .join(" ");
+        .map(|(p, st)| format!("chk {p} {}\n", crate::hosts::sh_quote(st)))
+        .collect();
     format!(
         "s=$(ps -o lstart= -p {pid} 2>/dev/null | tr -s ' ' | sed -e 's/^ *//' -e 's/ *$//')\n\
          [ \"$s\" = {started} ] || {{ printf 'AM_PID_CHANGED\\n'; exit 0; }}\n\
-         kill -STOP {set} 2>/dev/null\n\
-         kill -{sig} {set} 2>/dev/null\n\
-         kill -CONT {set} 2>/dev/null\n\
-         printf 'AM_KILLED\\n'\n\
+         ok=\n\
+         chk() {{ s=$(ps -o lstart= -p \"$1\" 2>/dev/null | tr -s ' ' | sed -e 's/^ *//' -e 's/ *$//'); [ \"$s\" = \"$2\" ] && ok=\"$ok $1\"; }}\n\
+         {checks}\
+         if [ -n \"$ok\" ]; then\n\
+         kill -STOP $ok 2>/dev/null\n\
+         kill -{sig} $ok 2>/dev/null\n\
+         kill -CONT $ok 2>/dev/null\n\
+         fi\n\
+         printf 'AM_KILLED%s\\n' \"$ok\"\n\
          exit 0\n",
         started = crate::hosts::sh_quote(&target.started),
     )
@@ -727,15 +736,21 @@ pub async fn kill(
     if stdout.lines().any(|l| l.trim() == "AM_PID_CHANGED") {
         return Ok(Err(KillDenied::PidChanged));
     }
-    if !stdout.lines().any(|l| l.trim() == "AM_KILLED") {
+    let Some(killed_line) = stdout.lines().map(str::trim).find(|l| l.starts_with("AM_KILLED")) else {
         anyhow::bail!("kill 沒有回報結果，不確定送出去沒有：{}", stdout.trim());
+    };
+    let killed: Vec<i32> = killed_line["AM_KILLED".len()..].split_whitespace().filter_map(|p| p.parse().ok()).collect();
+    // 目標自己在逐一比對時也沒對上（兩段之間被回收）：什麼都沒送到它。
+    if !killed.contains(&pid) {
+        return Ok(Err(KillDenied::PidChanged));
     }
+    let skipped: Vec<i32> = target.set.iter().map(|(p, _)| *p).filter(|p| !killed.contains(p)).collect();
 
     // Update the badge now rather than up to 15s later.
     let snap = crate::memstat::sample(app).await;
     app.emit_mem_updated(json!(snap)).await;
     Ok(Ok(
-        json!({"host": host, "pid": pid, "signal": sig, "exe": exe, "freed_bytes": freed}),
+        json!({"host": host, "pid": pid, "signal": sig, "exe": exe, "freed_bytes": freed, "skipped_pids": skipped}),
     ))
 }
 
@@ -1066,23 +1081,76 @@ mod tests {
             Err(d) => panic!("404 是 pane 的 shell，應該放行：{d:?}"),
         };
         assert_eq!(
-            t.set,
+            t.set.iter().map(|(p, _)| *p).collect::<Vec<_>>(),
             vec![405, 404],
             "深的先收：父先死的話子孫會被 init 收養"
         );
+        assert_eq!(t.set[0].1, "Wed Sep 24 10:00:05 2026", "每個成員帶自己的起始時間");
         let script = kill_script(&t, "TERM");
         let check = script.find("AM_PID_CHANGED").expect("要有比對那一段");
         let first_kill = script.find("kill -").expect("要有送訊號那一段");
         assert!(check < first_kill, "比對必須在送訊號之前：{script}");
+        let (c405, c404) = (script.find("chk 405 ").expect("子孫各自比對"), script.find("chk 404 ").expect("目標也比對"));
+        assert!(c405 < c404, "深的在前：{script}");
+        let stop = script.find("kill -STOP $ok").expect("先凍住整批，不然它還會 fork");
+        assert!(c404 < stop, "逐一比對完才送：{script}");
+        assert!(script.contains("kill -TERM $ok"), "{script}");
         assert!(
-            script.contains("kill -STOP 405 404"),
-            "先凍住整棵，不然它還會 fork：{script}"
-        );
-        assert!(script.contains("kill -TERM 405 404"), "{script}");
-        assert!(
-            script.contains("kill -CONT 405 404"),
+            script.contains("kill -CONT $ok"),
             "凍住之後要放開才收得了尾：{script}"
         );
+    }
+
+    /// #891：子孫也各自比對起始時間。A 對得上、B（pid 被回收成別的行程）對不上：只有 A 收到訊號，B 還活著。
+    /// 兩顆都是本測試自己起的 `sleep`，不碰別人的行程。
+    #[test]
+    fn a_descendant_whose_start_time_changed_is_not_signalled() {
+        let alive = |pid: u32| {
+            std::process::Command::new("/bin/sh")
+                .args(["-c", &format!("kill -0 {pid} 2>/dev/null")])
+                .status()
+                .map(|s| s.success())
+                .unwrap_or(false)
+        };
+        let mut a = std::process::Command::new("sleep").arg("30").spawn().unwrap();
+        let mut b = std::process::Command::new("sleep").arg("30").spawn().unwrap();
+        let (pa, pb) = (a.id(), b.id());
+        let real = super::run_sh(&format!(
+            "ps -o lstart= -p {pa} 2>/dev/null | tr -s ' ' | sed -e 's/^ *//' -e 's/ *$//'"
+        ))
+        .trim()
+        .to_string();
+        assert!(!real.is_empty(), "這台機器的 ps 讀不到 lstart，測不了");
+        let target = Target {
+            pid: pa as i32,
+            exe: "sleep".into(),
+            freed: 1,
+            set: vec![
+                (pa as i32, real.clone()),
+                (pb as i32, "Wed Sep 24 10:00:05 1999".into()),
+            ],
+            started: real,
+        };
+        let out = super::run_sh(&kill_script(&target, "TERM"));
+        a.wait().unwrap(); // 收屍：zombie 的 `kill -0` 仍成功
+        let b_alive = alive(pb);
+        let _ = b.kill();
+        let _ = b.wait();
+        assert!(out.contains("AM_KILLED"), "{out:?}");
+        assert!(out.contains(&pa.to_string()), "A 收到訊號：{out:?}");
+        assert!(!out.contains(&pb.to_string()), "B 起始時間對不上，不送：{out:?}");
+        assert!(b_alive, "B 還活著");
+    }
+
+    /// #891：取樣裡讀不到起始時間的子孫，不進要送訊號的集合（目標自己讀不到仍是拒絕）。
+    #[test]
+    fn a_descendant_without_a_start_time_is_left_out_of_the_set() {
+        let no_start = DUMP.replace("  405 Wed Sep 24 10:00:05 2026\n", "");
+        let t = match screen_kill(&no_start, 404).unwrap() {
+            Ok(t) => t,
+            Err(d) => panic!("404 應該放行：{d:?}"),
+        };
+        assert_eq!(t.set.iter().map(|(p, _)| *p).collect::<Vec<_>>(), vec![404]);
     }
 
     /// 沒有起始時間（那台的 `ps` 不吃 `lstart`、或輸出被截斷）＝確認不了同一顆行程，寧可不送。
