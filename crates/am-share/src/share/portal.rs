@@ -1042,10 +1042,14 @@ async fn upload<H: PortalEnv>(
 }
 
 async fn files<H: PortalEnv>(State(st): State<Portal<H>>, Path(token): Path<String>) -> Response {
-    let (bot_id, _authority) = match authorized_bot(&st, &token).await {
+    let (bot_id, authority) = match authorized_bot(&st, &token).await {
         Ok(v) => v,
         Err(r) => return r,
     };
+    // token 驗完就放掉 per-bot 互斥鎖（#906）：後面的 outbox 掃描是慢 I/O，不能讓 hook／送訊息（同一把鎖）排在它後面。
+    drop(authority);
+    #[cfg(test)]
+    crate::lifecycle::race_point::hit("share_io_after_authority_released", &bot_id).await;
     let Some(dir) = crate::outbox::dir_for(&st.app.data_dir(), &bot_id) else { return not_found() };
     let data_dir = st.app.data_dir().to_path_buf();
     #[cfg(test)]
@@ -1116,10 +1120,14 @@ pub fn inline_image(name: &str) -> Option<&'static str> {
 }
 
 async fn file<H: PortalEnv>(State(st): State<Portal<H>>, Path((token, name)): Path<(String, String)>, Query(q): Query<FileQuery>) -> Response {
-    let (bot_id, _authority) = match authorized_bot(&st, &token).await {
+    let (bot_id, authority) = match authorized_bot(&st, &token).await {
         Ok(v) => v,
         Err(r) => return r,
     };
+    // token 驗完就放掉 per-bot 互斥鎖（#906）：讀檔與 SVG 嵌圖（spawn_blocking 合成）很慢，不能讓同一把鎖上的 hook／送訊息排在後面。
+    drop(authority);
+    #[cfg(test)]
+    crate::lifecycle::race_point::hit("share_io_after_authority_released", &bot_id).await;
     // 只認 outbox 第一層的檔名；子目錄、`..`、隱藏檔一律不給。
     if name.is_empty() || name.contains('/') || name.contains('\\') || name.starts_with('.') || name.chars().any(char::is_control) {
         return not_found();

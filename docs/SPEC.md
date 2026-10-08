@@ -5024,7 +5024,7 @@ daemon 要能在 Linux（目標：Ubuntu，外部編譯主機 192.168.1.46，#67
 
 - `bot_shares`：一顆 bot 至多一條。token 32 bytes 亂數（base64url，43 字），DB 存 SHA-256（入口查表用）、末 4 碼提示與原文 `token`（跟 `bots.hook_token` 同一個 0600 DB、同一等級），
   管理端分享中隨時拿得回完整連結（2026-10-04 使用者：連結只顯示一次＝找不到可以分享的連結）。加 `token` 欄（schema v39）之前開的分享只有 hash：開機後照舊可用，管理端回 `url:null`＋`needs_rotate:true`，重產一次就有。
--  查詢用 hash 找列、再常數時間比一次；bot 或專案刪了、`shared_bots` 那列不見了都不認。每個 portal 請求在副作用前於 bot 鎖內重驗 token；同一把鎖也序列化輪替、停用與刪除，因此已拿鎖的操作先完成，撤銷先拿鎖時舊 token 不再生效。管理端啟用與輪替也在鎖內重查 bot 存活狀態。
+-  查詢用 hash 找列、再常數時間比一次；bot 或專案刪了、`shared_bots` 那列不見了都不認。每個 portal 請求在副作用前於 bot 鎖內重驗 token；同一把鎖也序列化輪替、停用與刪除，因此已拿鎖的操作先完成，撤銷先拿鎖時舊 token 不再生效。管理端啟用與輪替也在鎖內重查 bot 存活狀態。唯讀的檔案列表與下載（`GET …/api/files`、`…/api/files/{name}`）驗完 token 就放鎖，掃描 outbox、讀檔與 SVG 嵌圖都在鎖外做（#906），不讓同一把鎖上的 hook 與送訊息排在慢 I/O 後面；代價是撤銷與這類請求的 I/O 之間沒有序列化（撤銷後最多再多送出已開始的那一次讀取）。
 -  重產＝換 hash 與原文，舊連結當下失效；關閉或刪除 bot／專案會刪除公開 token 列並叫醒 SSE。刪除保留 `shared_bots` 的受限 profile；還原 bot 不會恢復刪除前的 token，必須明確重新啟用。開著的 SSE 在初始狀態、每個 bus 事件、resync 與週期重查時都驗證權限，失效就斷。
 - 網址＝`[share] base_url` ＋ `/s/<token>`；沒設 `base_url` 不能開（409 `share_not_configured`）。管理端點見 API.md §5.6，只收 UI token。
 
