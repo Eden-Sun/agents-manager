@@ -201,13 +201,28 @@ async fn write<C: OwedDeliveryContext>(app: &C, bot_id: &str, o: &Owed) -> anyho
             }
             applied
         }
-        Write::PutBack { conv, reason, wait_key } => {
-            app.queue_put_back(bot_id, conv, &o.turn_id, reason, wait_key).await?;
-            true
-        }
+        Write::PutBack { conv, reason, wait_key } => match app.queue_put_back(bot_id, conv, &o.turn_id, reason, wait_key).await {
+            Ok(()) => true,
+            // 補寫的時候，這段對話的唯一佇列名額（`turns_one_queued`）已經被後來的那則佔走：這一則放不回去，
+            // 再補也永遠一樣（#903）。它一個字都沒送出，收成 failed＋說明，別讓帳永遠欠著、佇列被一直卡住。
+            Err(e) if is_unique_violation(&e) => {
+                tracing::warn!(bot = bot_id, turn = %o.turn_id, error = %e, "放回佇列時名額已被後來的那則佔走：改收成 failed");
+                let closed = Owed { turn_id: o.turn_id.clone(), write: Write::Closed { delivery: "failed", note: SLOT_TAKEN_NOTE.to_string() } };
+                return Box::pin(write(app, bot_id, &closed)).await;
+            }
+            Err(e) => return Err(e),
+        },
     };
     app.turn_changed(&o.turn_id).await;
     Ok(applied)
+}
+
+/// 放回佇列時名額已被佔走、收成 failed 的說明（#903）。
+const SLOT_TAKEN_NOTE: &str = "放回佇列時名額已被後來的那則佔走，這一則一個字都沒送出，不再自動重送；請重送。";
+
+/// `anyhow` 鏈裡有沒有 SQLite 的唯一鍵衝突（可能被 `context` 包過，所以走整條鏈）。
+fn is_unique_violation(e: &anyhow::Error) -> bool {
+    e.chain().filter_map(|c| c.downcast_ref::<sqlx::Error>()).any(|e| e.as_database_error().is_some_and(|d| d.is_unique_violation()))
 }
 
 /// 欠著的帳沒有 hook、也沒有下一則 prompt 時也要補上。
@@ -743,4 +758,49 @@ mod tests {
         assert!(matches!(other, Err(LcError::Uncommitted(_))), "別種的 503 不動");
         assert!(matches!(owed_as_unknown(Err(LcError::Bad("x".into()))), Err(LcError::Bad(_))));
     }
+
+    /// #903：認領後放回佇列那一句寫不進去而記成欠著，等補寫的時候，同一段對話的唯一佇列名額（`turns_one_queued`）
+    /// 已經被後來的那則佔走——以前每次補寫都撞唯一鍵、帳永遠欠著，T1 永遠 in_flight＋pending 擋住後面所有的回合。
+    /// 現在收成 failed＋說明（一個字都沒送出），帳清掉，後來那則照常被認領。
+    #[tokio::test]
+    async fn a_put_back_whose_queue_slot_was_taken_closes_the_turn_as_failed_instead_of_retrying_forever() {
+        let env = tt::env().await;
+        let app = env.app.clone();
+        let (bot, t1, _a) = queued(&env, "claude", "P1").await;
+        // 放回佇列（in_flight → queued）那一句寫不進去：認領照常，放回去失敗。
+        sqlx::query(
+            "CREATE TRIGGER refuse_requeue BEFORE UPDATE OF status ON turns WHEN OLD.status='in_flight' AND NEW.status='queued' \
+             BEGIN SELECT RAISE(ABORT,'injected'); END",
+        )
+        .execute(app.db())
+        .await
+        .unwrap();
+        // 畫面沒準備好（停在登入選單）：flush 認領後放棄、要放回佇列。
+        env.herdr.set_screen("pane-api", "Select login method:\n❯ 1. Claude account with subscription\n  2. Anthropic Console account\n");
+
+        assert!(flush_queued_locked(&app, &bot).await.is_err(), "放不回去：flush 不回普通的成功");
+        let t = turn(&app, &t1).await;
+        assert_eq!((t.status.as_str(), t.delivery.as_str()), ("in_flight", "pending"));
+        assert_eq!(owed(&bot).len(), 1, "記成欠著");
+
+        // T1 還欠著的時候，後來的 P2 排進佇列，佔走名額。
+        let p2 = prompt_relayed_queueable(&app, &bot, "P2", "crid-p2", Some(crate::agent_relay::DAEMON_SENDER)).await.expect("P2 排進佇列");
+        assert_eq!(turn(&app, &p2.turn_id).await.status, "queued");
+
+        sqlx::query("DROP TRIGGER refuse_requeue").execute(app.db()).await.unwrap();
+        settle_locked(&app, &bot).await.expect("名額被佔走：收成 failed，不是一直補不進去");
+
+        let t = turn(&app, &t1).await;
+        assert_eq!((t.status.as_str(), t.delivery.as_str()), ("failed", "failed"));
+        let notes: Vec<String> = sqlx::query_scalar("SELECT content FROM messages WHERE turn_id=? AND role='system'").bind(&t1).fetch_all(app.db()).await.unwrap();
+        assert!(notes.iter().any(|n| n.contains("名額已被後來的那則佔走")), "{notes:?}");
+        assert!(owed(&bot).is_empty(), "帳清掉");
+        assert_eq!(typed(&env), 0, "從頭到尾沒送過字");
+
+        // 擋住佇列的東西沒了：P2 被認領（要嘛已經離開 queued，要嘛至少算了一次放回的重試）。
+        flush_queued_locked(&app, &bot).await.ok();
+        let p = turn(&app, &p2.turn_id).await;
+        assert!(p.status != "queued" || p.flush_retries > 0, "P2 被認領了：{:?}", (p.status, p.flush_retries));
+    }
 }
+
