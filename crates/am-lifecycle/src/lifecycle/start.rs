@@ -1043,6 +1043,86 @@ impl<'a> StartPaneGuard<'a> {
     }
 }
 
+/// 母 bot 的完整啟動指示放在哪裡。herdr 把整條指令壓在 900 bytes 內，整份放進 argv 會被砍成「…（後略）」，
+/// 所以 claude／grok 走檔案、codex 走 profile（SPEC §6.5i）。
+enum StagedPersona {
+    /// 受限 bot（cage 自己有檔）或沒有 persona argv 的 kind（agy）。
+    NotNeeded,
+    /// claude／grok＝檔案路徑，codex＝profile 名。
+    Staged(String),
+    /// codex bot 自己的參數已有 `-p`／`--profile`：不覆蓋它，指示照舊放 argv（會被截斷），訊息說明原因。
+    KeptInline(String),
+    /// 寫不進去：呼叫端 fail closed。
+    Failed,
+}
+
+impl StagedPersona {
+    fn reference(&self) -> Option<&str> {
+        match self {
+            StagedPersona::Staged(s) => Some(s),
+            _ => None,
+        }
+    }
+}
+
+/// args 裡有沒有 codex 的 `-p <name>`／`--profile <name>`／`--profile=<name>`。
+fn has_profile_arg<'a>(args: impl IntoIterator<Item = &'a String>) -> bool {
+    args.into_iter().any(|a| a == "-p" || a == "--profile" || a.starts_with("--profile="))
+}
+
+/// codex 母 bot 那台主機的 CODEX_HOME：pane env 已經合併過身分與 bot 自己的 env（`~` 展開成那台主機的 HOME），有就用；
+/// 都沒有才退回 `<那台的 HOME>/.codex`。遠端 HOME 讀不到就回 None（不借用 daemon 這台的 HOME）。
+async fn codex_home_dir(app: &impl HostsAccess, project: &db::Project, env: &Value) -> Option<String> {
+    if let Some(v) = env.get("CODEX_HOME").and_then(Value::as_str).map(str::trim).filter(|s| !s.is_empty()) {
+        return Some(v.to_string());
+    }
+    let home = if project.host == crate::config::LOCAL_HOST {
+        crate::home::dir()?.to_string_lossy().into_owned()
+    } else {
+        app.hosts().get(&project.host).await?.home().await.ok()?
+    };
+    Some(format!("{}/.codex", home.trim_end_matches('/')))
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn stage_persona(
+    app: &impl HostsAccess,
+    bot: &db::Bot,
+    project: &db::Project,
+    shim_dir: Option<&str>,
+    env: &Value,
+    agent: &str,
+    agent_md: Option<&str>,
+    identity_args: &[String],
+) -> StagedPersona {
+    let staged = |name: Option<String>| name.map(StagedPersona::Staged).unwrap_or(StagedPersona::Failed);
+    match bot.kind.as_str() {
+        "claude" | "grok" => {
+            let full = super::setup::persona_text(bot, agent, agent_md);
+            let path = if bot.kind == "grok" {
+                super::agent_md::install_grok_rules(app, bot, project, shim_dir, &full).await
+            } else {
+                super::agent_md::install_persona(app, bot, project, shim_dir, &full).await
+            };
+            staged(path)
+        }
+        "codex" => {
+            let own = bot.args();
+            if has_profile_arg(identity_args.iter().chain(own.iter())) {
+                return StagedPersona::KeptInline(
+                    "這顆 codex bot 的參數已指定 -p／--profile，完整啟動指示無法走 profile；改以 -c developer_instructions= 帶入，\
+                     會被 herdr 的 900 bytes 指令上限截斷（只剩 AG Man 規則的前段）。要完整指示請拿掉 -p／--profile"
+                        .to_string(),
+                );
+            }
+            let Some(home) = codex_home_dir(app, project, env).await else { return StagedPersona::Failed };
+            let full = super::setup::persona_text(bot, agent, agent_md);
+            staged(super::agent_md::install_codex_profile(app, bot, project, &home, &full).await)
+        }
+        _ => StagedPersona::NotNeeded,
+    }
+}
+
 async fn start_inner(
     app: &impl StartContext,
     bot: &db::Bot,
@@ -1124,19 +1204,31 @@ async fn start_inner(
             map.insert("AM_INSTRUCTIONS_FILE".into(), serde_json::json!(path));
         }
     }
-    let grok_rules_file = if bot.kind == "grok" {
-        let full_persona = super::setup::persona_text(bot, &agent, agent_md.configured.then_some(agent_md.text.as_str()));
-        super::agent_md::install_grok_rules(app, bot, project, shim_dir.as_deref(), &full_persona).await
+    // Identity args are read once: `stage_persona` needs them to see a codex `-p`, and the argv below appends them.
+    let identity_args_v = if restricted.is_some() { Vec::new() } else { identity_args(app, bot, &project.host).await };
+    let staged_persona = if restricted.is_some() {
+        StagedPersona::NotNeeded
     } else {
-        None
+        stage_persona(app, bot, project, shim_dir.as_deref(), &env, &agent, agent_md.configured.then_some(agent_md.text.as_str()), &identity_args_v)
+            .await
     };
-    if bot.kind == "grok" && (!child_instructions_ready || grok_rules_file.is_none()) {
-        let reason = "無法把 Grok 的完整啟動指示寫進 bot 目錄；拒絕以遭截斷的 --rules 啟動";
+    let refuse = match (&staged_persona, bot.kind.as_str()) {
+        (StagedPersona::Failed, kind) => Some(format!("無法把 {kind} 的完整啟動指示寫進 bot 目錄；拒絕以遭截斷的系統提示啟動")),
+        (_, "grok") if !child_instructions_ready => Some("無法把 Grok 的完整啟動指示寫進 bot 目錄；拒絕以遭截斷的 --rules 啟動".to_string()),
+        _ => None,
+    };
+    if let Some(reason) = refuse {
         tracing::error!(bot = %bot.name, "{reason}");
         if let Ok(conv) = db::conversation_id(app.db(), &bot.id).await {
-            let _ = insert_message(app, &conv, None, "system", reason, "system", false, None).await;
+            let _ = insert_message(app, &conv, None, "system", &reason, "system", false, None).await;
         }
-        return Err(LcError::Upstream(reason.into()));
+        return Err(LcError::Upstream(reason));
+    }
+    if let StagedPersona::KeptInline(note) = &staged_persona {
+        tracing::warn!(bot = %bot.name, "{note}");
+        if let Ok(conv) = db::conversation_id(app.db(), &bot.id).await {
+            let _ = insert_message(app, &conv, None, "system", note, "system", false, None).await;
+        }
     }
     // SPEC §6.5c: claude learns herdr from a skill (the CLI's own doc), not the persona.
     if restricted.is_none() {
@@ -1152,9 +1244,9 @@ async fn start_inner(
         args.extend(app.restricted_launch_args(&env, &prompt));
         args.extend(model_args(&effort_checked(app, bot, &project.host).await));
     } else {
-        args.extend(persona_args(bot, &agent, agent_md.configured.then_some(agent_md.text.as_str()), grok_rules_file.as_deref()));
+        args.extend(persona_args(bot, &agent, agent_md.configured.then_some(agent_md.text.as_str()), staged_persona.reference()));
         args.extend(model_args(&effort_checked(app, bot, &project.host).await));
-        args.extend(identity_args(app, bot, &project.host).await);
+        args.extend(identity_args_v);
         args.extend(bot.args());
     }
 
@@ -2085,6 +2177,137 @@ mod resume_args_tests {
         let full_rules = std::fs::read_to_string(&rules_file).expect("the full instructions are staged beside the bot");
         assert!(full_rules.contains("需要開子任務或平行工作時"), "base rules survive outside the shell argv");
         assert!(full_rules.contains(persona), "configured persona survives outside the shell argv");
+    }
+
+    /// #769：claude 母 bot 的完整指示以前整份塞進 `--append-system-prompt`，被 herdr 的 900 bytes 預算砍成「…（後略）」，
+    /// 只剩 AG Man 規則的前段，agent md 與 persona 一個字都沒帶到。現在走檔案。
+    #[tokio::test]
+    async fn claude_start_passes_the_full_persona_by_file_without_truncation() {
+        let e = env().await;
+        let bot = claude_bot(&e.app, &e.project_id, "claude-persona").await;
+        let persona = format!("CLAUDE-PERSONA-START {} CLAUDE-PERSONA-END", "完整的人設內容".repeat(120));
+        assert!(persona.len() > 1500);
+        sqlx::query("UPDATE bots SET persona=? WHERE id=?").bind(&persona).bind(&bot.id).execute(e.app.db()).await.unwrap();
+
+        start_bot(&e.app, &bot.id).await.unwrap();
+
+        let args = started_args(&e).pop().unwrap();
+        let at = args.iter().position(|a| a == "--append-system-prompt-file").expect("claude reads its persona from a file");
+        assert!(args[at + 1].ends_with("persona.md"), "{args:?}");
+        assert!(!args.iter().any(|a| a == "--append-system-prompt"), "the inline form must be gone: {args:?}");
+        assert!(!args.iter().any(|a| a.ends_with("（後略）") || a.contains("後略")), "nothing in argv was truncated: {args:?}");
+        assert!(args.iter().map(|a| a.len()).sum::<usize>() <= 900, "argv fits Herdr's command-line budget: {args:?}");
+
+        let file = e.app.data_dir.join("bots").join(&bot.id).join("persona.md");
+        let full = std::fs::read_to_string(&file).expect("the full persona is staged beside the bot");
+        assert!(full.contains("需要開子任務或平行工作時"), "the AG Man rules survive");
+        assert!(full.contains(&persona), "the configured persona survives in full");
+    }
+
+    /// #769：codex 母 bot 同理，`-c developer_instructions=<整份>` 改寫成 `<CODEX_HOME>/am-bot-<id>.config.toml`，argv 只帶 `-p`。
+    #[tokio::test]
+    async fn codex_start_passes_the_full_persona_by_profile_without_truncation() {
+        let e = env().await;
+        let bot = claude_bot(&e.app, &e.project_id, "codex-persona").await;
+        let codex_home = e.dir.join("codex-home-persona");
+        let persona = format!("CODEX-PERSONA-START {} CODEX-PERSONA-END", "完整的人設內容".repeat(120));
+        let env_json = serde_json::json!({ "CODEX_HOME": codex_home.to_string_lossy() }).to_string();
+        sqlx::query("UPDATE bots SET kind='codex', identity=NULL, persona=?, env_json=? WHERE id=?")
+            .bind(&persona)
+            .bind(&env_json)
+            .bind(&bot.id)
+            .execute(e.app.db())
+            .await
+            .unwrap();
+
+        start_bot(&e.app, &bot.id).await.unwrap();
+
+        let args = started_args(&e).pop().unwrap();
+        let profile = format!("am-bot-{}", bot.id);
+        assert!(args.windows(2).any(|w| w[0] == "-p" && w[1] == profile), "{args:?}");
+        assert!(!args.iter().any(|a| a.contains("developer_instructions=")), "the inline form must be gone: {args:?}");
+        assert!(!args.iter().any(|a| a.contains("後略")), "nothing in argv was truncated: {args:?}");
+
+        let file = codex_home.join(format!("{profile}.config.toml"));
+        let toml_text = std::fs::read_to_string(&file).expect("the profile is written under the bot's CODEX_HOME");
+        assert!(toml_text.starts_with("developer_instructions = \""), "{toml_text}");
+        let parsed: toml::Value = toml::from_str(&toml_text).expect("the profile is valid TOML");
+        let instructions = parsed["developer_instructions"].as_str().unwrap();
+        assert!(instructions.contains("需要開子任務或平行工作時"), "the AG Man rules survive");
+        assert!(instructions.contains(&persona), "the configured persona survives in full");
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt as _;
+            assert_eq!(std::fs::metadata(&file).unwrap().permissions().mode() & 0o777, 0o600, "the rules are private to the user");
+        }
+    }
+
+    /// 自己指定了 codex profile 的 bot：不覆蓋它的 profile，指示照舊放 argv（會被截斷），並留一則 system 訊息。
+    #[tokio::test]
+    async fn codex_bot_with_its_own_profile_keeps_the_inline_instructions() {
+        let e = env().await;
+        let bot = claude_bot(&e.app, &e.project_id, "codex-own-profile").await;
+        let codex_home = e.dir.join("codex-home-own-profile");
+        let env_json = serde_json::json!({ "CODEX_HOME": codex_home.to_string_lossy() }).to_string();
+        sqlx::query("UPDATE bots SET kind='codex', identity=NULL, args_json=?, env_json=? WHERE id=?")
+            .bind(r#"["-p","x"]"#)
+            .bind(&env_json)
+            .bind(&bot.id)
+            .execute(e.app.db())
+            .await
+            .unwrap();
+
+        start_bot(&e.app, &bot.id).await.unwrap();
+
+        let args = started_args(&e).pop().unwrap();
+        assert!(args.iter().any(|a| a.starts_with("developer_instructions=")), "the old inline form stays: {args:?}");
+        assert!(!args.iter().any(|a| a.starts_with("am-bot-")), "our profile is not injected: {args:?}");
+        assert!(!codex_home.join(format!("am-bot-{}.config.toml", bot.id)).exists(), "nothing written to CODEX_HOME");
+        let conv = db::conversation_id(e.app.db(), &bot.id).await.unwrap();
+        let notes: Vec<String> = sqlx::query_scalar("SELECT content FROM messages WHERE conversation_id=? AND role='system'")
+            .bind(&conv)
+            .fetch_all(e.app.db())
+            .await
+            .unwrap();
+        assert!(notes.iter().any(|n| n.contains("-p／--profile")), "the truncation is explained: {notes:?}");
+    }
+
+    #[test]
+    fn a_profile_flag_is_recognised_in_every_spelling() {
+        let v = |a: &[&str]| a.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+        assert!(super::has_profile_arg(&v(&["--yolo", "-p", "x"])));
+        assert!(super::has_profile_arg(&v(&["--profile", "x"])));
+        assert!(super::has_profile_arg(&v(&["--profile=x"])));
+        assert!(!super::has_profile_arg(&v(&["--yolo", "-c", "tui.show_tooltips=false", "--model", "gpt-6.1-sol"])));
+    }
+
+    /// 寫不進 bot 目錄（沒有 shim_dir）時，claude／codex／grok 都回 `Failed`，呼叫端據此 fail closed，
+    /// 不會拿遭截斷的 argv 啟動。
+    #[tokio::test]
+    async fn a_claude_persona_that_cannot_be_staged_fails_closed() {
+        let e = env().await;
+        let bot = claude_bot(&e.app, &e.project_id, "unstageable").await;
+        let project = db::project(e.app.db(), &e.project_id).await.unwrap().unwrap();
+        let no_env = serde_json::json!({});
+        let stage = |b: db::Bot| {
+            let (app, project, no_env) = (e.app.clone(), project.clone(), no_env.clone());
+            async move { super::stage_persona(&app, &b, &project, None, &no_env, "x", None, &[]).await }
+        };
+        assert!(matches!(stage(bot.clone()).await, super::StagedPersona::Failed), "claude without a bot dir");
+        let mut grok = bot.clone();
+        grok.kind = "grok".into();
+        assert!(matches!(stage(grok).await, super::StagedPersona::Failed), "grok without a bot dir");
+        let mut agy = bot.clone();
+        agy.kind = "agy".into();
+        assert!(matches!(stage(agy).await, super::StagedPersona::NotNeeded), "agy has no persona argv");
+        let mut codex = bot;
+        codex.kind = "codex".into();
+        let mut own = codex.clone();
+        own.args_json = r#"["--profile","mine"]"#.into();
+        assert!(matches!(stage(own).await, super::StagedPersona::KeptInline(_)));
+        // 沒指定自己的 profile 時，CODEX_HOME 在這個測試行程的假家目錄底下，不是真的 ~/.codex。
+        let home = super::codex_home_dir(&e.app, &project, &no_env).await.unwrap();
+        assert!(home.ends_with("/.codex") && home.starts_with(crate::home::dir().unwrap().to_str().unwrap()), "{home}");
     }
 
     /// 2026-10-05：agy 只留 Gemini 3.8 Flash。已存在的 bot 設了拿掉的模型，啟動照常成功、argv 改用 3.8 medium（不讓它起不來）。

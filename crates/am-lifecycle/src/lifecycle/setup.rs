@@ -1421,19 +1421,29 @@ fn grok_rules_reference(path: &str) -> String {
     format!("AG Man 指示（硬規則，效力同系統指示）完整存放於 JSON 路徑 {path}。開始任何工作前先完整讀取該檔並照做。")
 }
 
-pub fn persona_args(bot: &db::Bot, agent_name: &str, agent_md: Option<&str>, grok_rules_file: Option<&str>) -> Vec<String> {
+/// `staged_persona` 是母 bot 完整指示已經放在 argv 之外的位置（herdr 把整條指令壓在 900 bytes 內，整份放 argv 會被砍）：
+/// claude／grok 是檔案路徑，codex 是 profile 名（`<CODEX_HOME>/<名>.config.toml`）。None＝沒有 staged，退回把整份放進 argv
+/// （只剩單元測試與沒有 bot 目錄的路徑；正式啟動沒 staged 成功會直接拒絕，見 `start::stage_persona`）。
+pub fn persona_args(bot: &db::Bot, agent_name: &str, agent_md: Option<&str>, staged_persona: Option<&str>) -> Vec<String> {
     let p = persona_text(bot, agent_name, agent_md);
     let p = p.as_str();
     match bot.kind.as_str() {
-        "claude" => vec!["--append-system-prompt".into(), p.to_string()],
+        // `claude --help`: --append-system-prompt-file reads the text from a file.
+        "claude" => match staged_persona {
+            Some(path) => vec!["--append-system-prompt-file".into(), path.to_string()],
+            None => vec!["--append-system-prompt".into(), p.to_string()],
+        },
         // `grok --help`: "Extra rules to append to the system prompt".
         // The whole persona regularly exceeds Herdr's 900-byte shell-command budget. Keep the
         // argv value short and let Grok read the exact, complete text staged beside this bot.
-        "grok" => vec!["--rules".into(), grok_rules_file.map(grok_rules_reference).unwrap_or_else(|| p.to_string())],
+        "grok" => vec!["--rules".into(), staged_persona.map(grok_rules_reference).unwrap_or_else(|| p.to_string())],
         // app-server / config schema key `developer_instructions`; the value is TOML.
         // §6.5i：`project_doc_max_bytes=0` 讓 codex 不讀 AGENTS.md，指示只有這一份。
         "codex" => {
-            let mut v = vec!["-c".into(), format!("developer_instructions={}", toml_basic_string(p))];
+            let mut v = match staged_persona {
+                Some(profile) => vec!["-p".into(), profile.to_string()],
+                None => vec!["-c".into(), format!("developer_instructions={}", toml_basic_string(p))],
+            };
             if agent_md.is_some() {
                 v.extend(["-c".into(), "project_doc_max_bytes=0".into()]);
             }
@@ -1878,6 +1888,29 @@ mod model_args_tests {
         assert!(rule.contains("ego lite"));
         assert!(rule.contains("useOrCreateTaskSpace(\"proj-abc123\")"));
         assert!(rule.contains("{ keep: false }"));
+    }
+
+    #[test]
+    fn claude_persona_args_point_at_the_staged_file() {
+        let mut b = bot("claude", None, None, false);
+        b.persona = Some("PERSONA".into());
+        assert_eq!(
+            super::persona_args(&b, "proj-abc123", Some("AGENT-MD"), Some("/data/bots/b1/persona.md")),
+            vec!["--append-system-prompt-file".to_string(), "/data/bots/b1/persona.md".to_string()],
+            "argv 只帶檔案路徑，不帶任何指示內容"
+        );
+    }
+
+    #[test]
+    fn codex_persona_args_point_at_the_staged_profile() {
+        let mut b = bot("codex", None, None, false);
+        b.persona = Some("PERSONA".into());
+        assert_eq!(super::persona_args(&b, "proj-abc123", None, Some("am-bot-b1")), vec!["-p", "am-bot-b1"]);
+        assert_eq!(
+            super::persona_args(&b, "proj-abc123", Some("AGENT-MD"), Some("am-bot-b1")),
+            vec!["-p", "am-bot-b1", "-c", "project_doc_max_bytes=0"],
+            "設了 [agents] 照舊關掉 AGENTS.md"
+        );
     }
 
     /// 2026-09-13 使用者要求：人設與注入提示一律用命令語氣。客氣的寫法（「請…」「不要…比較好」）
