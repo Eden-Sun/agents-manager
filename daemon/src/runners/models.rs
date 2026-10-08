@@ -15,44 +15,61 @@ use crate::state::App;
 const LOCAL_RPC_TIMEOUT: Duration = Duration::from_secs(20);
 const REMOTE_RPC_HOLD_SECS: u32 = 6;
 
+/// 本機找 `exe` 的絕對路徑：含 `/` 直接用，否則走 login shell 探測。探測走 [`crate::hosts::sh_local_stdout`]，
+/// 逾時整個行程群組收掉（卡住的 `-lic` 互動 shell 不會留下來，issue #889）。
+async fn resolve_local_exe(exe: &str, probe_timeout: Duration) -> Result<String> {
+    resolve_local_exe_with(exe, probe_timeout, "").await
+}
+
+/// 同 [`resolve_local_exe`]；`script_prefix` 接在探測腳本前面（測試用來只替子行程設 `SHELL` 等環境，不碰全域環境）。
+async fn resolve_local_exe_with(exe: &str, probe_timeout: Duration, script_prefix: &str) -> Result<String> {
+    if exe.contains('/') {
+        return Ok(exe.to_string());
+    }
+    let probe = format!("{script_prefix}{}; printf '%s\\n' \"$p\"", crate::tools::login_abs_sh(exe));
+    let out = crate::hosts::sh_local_stdout(&probe, probe_timeout, "codex path probe").await?;
+    let p = out.trim().to_string();
+    if p.is_empty() {
+        bail!("`{exe}` is not installed on this machine");
+    }
+    Ok(p)
+}
+
 async fn codex_rpc_local(exe: &str, lines: &[String], id: u64) -> Result<Value> {
-    let exe = if exe.contains('/') {
-        exe.to_string()
-    } else {
-        let probe = format!("{}; printf '%s\\n' \"$p\"", crate::tools::login_abs_sh(exe));
-        let o = tokio::process::Command::new("/bin/sh").arg("-c").arg(&probe).output().await?;
-        let p = String::from_utf8_lossy(&o.stdout).trim().to_string();
-        if p.is_empty() {
-            bail!("`{exe}` is not installed on this machine");
-        }
-        p
-    };
+    let exe = resolve_local_exe(exe, Duration::from_secs(10)).await?;
     let mut child = tokio::process::Command::new(&exe)
         .arg("app-server")
         .stdin(std::process::Stdio::piped())
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::null())
+        .process_group(0)
         .kill_on_drop(true)
         .spawn()
         .with_context(|| format!("spawn {exe} app-server"))?;
-    let mut stdin = child.stdin.take().ok_or_else(|| anyhow!("no stdin"))?;
-    let stdout = child.stdout.take().ok_or_else(|| anyhow!("no stdout"))?;
-    for l in lines {
-        stdin.write_all(l.as_bytes()).await?;
-        stdin.write_all(b"\n").await?;
-    }
-    stdin.flush().await?;
-    let mut reader = tokio::io::BufReader::new(stdout).lines();
-    let result = loop {
-        match reader.next_line().await? {
-            None => break Err(anyhow!("codex app-server exited before answering")),
-            Some(line) => {
-                if let Some(r) = find_response(&line, id) {
-                    break r;
+    let stdin = child.stdin.take();
+    let stdout = child.stdout.take();
+    // 任何一步失敗（含寫 stdin、讀 stdout）都要走到下面的 kill，不留 app-server。
+    let result: Result<Value> = async {
+        let mut stdin = stdin.ok_or_else(|| anyhow!("no stdin"))?;
+        let stdout = stdout.ok_or_else(|| anyhow!("no stdout"))?;
+        for l in lines {
+            stdin.write_all(l.as_bytes()).await?;
+            stdin.write_all(b"\n").await?;
+        }
+        stdin.flush().await?;
+        let mut reader = tokio::io::BufReader::new(stdout).lines();
+        loop {
+            match reader.next_line().await? {
+                None => break Err(anyhow!("codex app-server exited before answering")),
+                Some(line) => {
+                    if let Some(r) = find_response(&line, id) {
+                        break r;
+                    }
                 }
             }
         }
-    };
+    }
+    .await;
     let _ = child.kill().await;
     result
 }
@@ -143,4 +160,53 @@ pub async fn list(app: &Arc<App>, host: &str, kind: &str, identity: Option<&str>
     }
     cache.insert(key, (Instant::now(), v.clone()));
     Ok(v)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::os::unix::fs::PermissionsExt as _;
+
+    /// 行程還活著嗎（殭屍不算）。
+    fn alive(pid: &str) -> bool {
+        let out = std::process::Command::new("ps").args(["-o", "stat=", "-p", pid]).output().unwrap();
+        let st = String::from_utf8_lossy(&out.stdout);
+        let st = st.trim();
+        !st.is_empty() && !st.starts_with('Z')
+    }
+
+    /// issue #889：login shell 探測卡住時，逾時要回錯，而且卡住的 shell 行程要被收掉。
+    #[tokio::test]
+    async fn a_hung_login_shell_probe_times_out_and_is_reaped() {
+        let dir = crate::testing::scratch_dir("am-models-probe");
+        let fake = dir.join("fake-sh");
+        std::fs::write(&fake, "#!/bin/sh\necho $$ > \"$PIDFILE\"\nsleep 30\n").unwrap();
+        std::fs::set_permissions(&fake, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let pidfile = dir.join("pid");
+        let prefix = format!(
+            "SHELL={} PIDFILE={}; export SHELL PIDFILE\n",
+            sh_quote(&fake.to_string_lossy()),
+            sh_quote(&pidfile.to_string_lossy())
+        );
+        let started = Instant::now();
+        let err = resolve_local_exe_with("codex", Duration::from_millis(200), &prefix).await.unwrap_err();
+        assert!(err.to_string().contains("timed out"), "{err}");
+        assert!(started.elapsed() < Duration::from_secs(10), "逾時要照時限回來");
+        let pid = std::fs::read_to_string(&pidfile).expect("假 shell 有跑到").trim().to_string();
+        let mut dead = false;
+        for _ in 0..40 {
+            if !alive(&pid) {
+                dead = true;
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+        let _ = std::fs::remove_dir_all(&dir);
+        assert!(dead, "逾時後卡住的 login shell（pid {pid}）要被收掉");
+    }
+
+    #[tokio::test]
+    async fn an_exe_with_a_slash_skips_the_probe() {
+        assert_eq!(resolve_local_exe("/opt/x/codex", Duration::from_millis(1)).await.unwrap(), "/opt/x/codex");
+    }
 }
