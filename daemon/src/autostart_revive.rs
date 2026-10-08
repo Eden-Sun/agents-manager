@@ -1,8 +1,8 @@
 //! herdr 斷線重連或 server 重啟之後，把「因為 agent 不見而被對帳收成 exited」的 autostart bot 再起一次。
 //!
-//! 對帳發現 run 的 agent 不在（`agent not found during reconcile`）只有兩種情況：herdr 的 pane／server 在 daemon 沒看到事件時
+//! 對帳發現 run 的 agent 不在（`agent not found during reconcile`），或定時掃描搶在對帳前把它收成 `pane gone`（#914），只有兩種情況：herdr 的 pane／server 在 daemon 沒看到事件時
 //! 掉了（herdr 更新、當機、daemon 斷線那段 pane 被關）。使用者手動停（`stopped`）、在 herdr 裡關 pane（`pane exited` 事件）
-//! 都不走這條，所以這裡只看這個原因。以前這種 bot 要等 `bot_stopped` 探針（300 秒）才報、而且 autostart 每台主機一生只跑一次，
+//! 都不走這條，所以這裡只看這兩個原因（`pane gone` 由 runner 定時掃出來補開）。以前這種 bot 要等 `bot_stopped` 探針（300 秒）才報、而且 autostart 每台主機一生只跑一次，
 //! 不會自己回來（2026-10-02 herdr 0.9.3 更新後實際發生）。
 //!
 //! * 只在開機那一輪 autostart 跑完之後才動（`autostart_hosts` 是 `Done`）：開機那一輪由 autostart 負責，不搶著起第二次。
@@ -27,6 +27,18 @@ pub(crate) struct Lost {
 
 /// 對帳收掉 run 時記的退出原因（`reconcile.rs`）；只有這個原因才是「herdr 掉了 agent」。
 pub(crate) const LOST_REASON: &str = "agent not found during reconcile";
+
+/// 定時掃描（`dead_panes`、`relay_watch`）在對帳之前問到剛重啟、空的 herdr，把 run 收成這個原因（#914）。
+/// 跟 [`LOST_REASON`] 同一件事（herdr 把 pane 弄丟了）：使用者在 herdr 裡關 pane 走的是 `pane exited` 事件，不在這裡。
+pub(crate) const PANE_GONE_REASON: &str = "pane gone";
+
+/// 值得補開的「run 被收掉的原因」。
+pub(crate) const LOST_REASONS: [&str; 2] = [LOST_REASON, PANE_GONE_REASON];
+
+/// 原因 → inbox payload 的 `reason`（`agent not found during reconcile` → `agent_not_found_during_reconcile`）。
+pub(crate) fn reason_slug(exit_reason: &str) -> String {
+    exit_reason.chars().map(|c| if c.is_ascii_alphanumeric() { c } else { '_' }).collect()
+}
 
 pub(crate) const MAX_RESTARTS: usize = 3;
 pub(crate) const WINDOW: Duration = Duration::from_secs(30 * 60);
@@ -62,8 +74,11 @@ pub(crate) async fn eligible_lost_bot(app: &(impl crate::capabilities::Db + crat
             .bind(&bot.id)
             .fetch_optional(app.db())
             .await?;
-    // 使用者關 pane 或其他路徑收掉的 run，都不是這次對帳發現的遺失。
-    if last.as_ref().map(|(id, state, why)| (id.as_str(), state.as_str(), why.as_deref())) != Some((l.run_id.as_str(), "exited", Some(LOST_REASON))) {
+    // 使用者關 pane 或其他路徑收掉的 run，都不是 herdr 掉的遺失。
+    let lost = last
+        .as_ref()
+        .is_some_and(|(id, state, why)| id == &l.run_id && state == "exited" && why.as_deref().is_some_and(|w| LOST_REASONS.contains(&w)));
+    if !lost {
         return Ok(None);
     }
     Ok(Some(bot))
@@ -378,5 +393,96 @@ mod tests {
         assert_eq!(events.len(), super::MAX_RESTARTS + 1, "第 4 次遺失只留告警：{events:?}");
         assert_eq!(events.iter().filter(|e| e["outcome"] == "restarted").count(), super::MAX_RESTARTS);
         assert_eq!(events.iter().filter(|e| e["outcome"] == "backoff").count(), 1);
+    }
+
+    /// #914：herdr 非計畫重啟之後，定時掃描搶在對帳前把 run 收成 `pane gone`——對帳那頭已經看不到遺失。
+    /// 定時掃出來的 `pane gone` autostart bot 也要補開，並推 `bot_lost`（reason 照退出原因）。
+    #[tokio::test]
+    async fn a_bot_whose_pane_the_sweep_saw_vanish_is_revived_too() {
+        let env = tt::env().await;
+        let bot = autostart_bot(&env, "gone").await;
+        crate::lifecycle::start_bot(&env.app, &bot.id).await.unwrap();
+        autostart_done(&env.app);
+        let run = db::active_run(&env.app.db, &bot.id).await.unwrap().unwrap().id;
+        crate::lifecycle::mark_run_exited(&env.app, &run, "pane gone").await;
+
+        runner::sweep_lost_by_pane_gone(&env.app).await;
+        runner::quiesce(&env.app).await;
+
+        let before = runs(&env.app, &bot.id).await;
+        assert_eq!(before.len(), 2, "舊的收掉、新的起來：{before:?}");
+        assert_eq!(before[0], ("exited".into(), Some("pane gone".into())));
+        assert_eq!(before[1].0, "running");
+        let events = bot_lost_events(&env.app, &bot.id).await;
+        assert_eq!(events.len(), 1, "{events:?}");
+        assert_eq!(events[0]["outcome"], "restarted");
+        assert_eq!(events[0]["reason"], "pane_gone");
+        // 已經接回來了：再掃一次不會再開。
+        runner::sweep_lost_by_pane_gone(&env.app).await;
+        runner::quiesce(&env.app).await;
+        assert_eq!(runs(&env.app, &bot.id).await.len(), 2);
+    }
+
+    /// 使用者在 herdr 裡關掉 pane（`pane exited`）、手動停（`stopped`）、不是 autostart、child：掃描不撈。
+    #[tokio::test]
+    async fn a_pane_the_user_closed_is_still_not_revived() {
+        let env = tt::env().await;
+        let closed = autostart_bot(&env, "closed-by-user").await;
+        let stopped = autostart_bot(&env, "stopped-by-user").await;
+        let plain = tt::claude_bot(&env.app, &env.project_id, "plain-gone").await;
+        let child = autostart_bot(&env, "child-gone").await;
+        for b in [&closed, &stopped, &plain, &child] {
+            crate::lifecycle::start_bot(&env.app, &b.id).await.unwrap();
+        }
+        // child 不能從這裡啟動：先起來，再改成 child。
+        sqlx::query("UPDATE bots SET managed_by = 'child' WHERE id = ?").bind(&child.id).execute(&env.app.db).await.unwrap();
+        autostart_done(&env.app);
+        for (b, why) in [(&closed, "pane exited"), (&plain, "pane gone"), (&child, "pane gone")] {
+            let run = db::active_run(&env.app.db, &b.id).await.unwrap().unwrap().id;
+            crate::lifecycle::mark_run_exited(&env.app, &run, why).await;
+        }
+        crate::lifecycle::stop_bot(&env.app, &stopped.id).await.unwrap();
+
+        runner::sweep_lost_by_pane_gone(&env.app).await;
+        runner::quiesce(&env.app).await;
+
+        for b in [&closed, &stopped, &plain, &child] {
+            assert_eq!(runs(&env.app, &b.id).await.len(), 1, "{}：不補開", b.name);
+            assert!(db::active_run(&env.app.db, &b.id).await.unwrap().is_none(), "{}", b.name);
+            assert!(bot_lost_events(&env.app, &b.id).await.is_empty(), "{}", b.name);
+        }
+    }
+
+    /// `pane gone` 的補開跟對帳那條共用 30 分鐘 3 次的退避：額度用完只通知、不再開。
+    #[tokio::test]
+    async fn pane_gone_revival_respects_the_backoff_window() {
+        let env = tt::env().await;
+        let bot = autostart_bot(&env, "gone-flappy").await;
+        crate::lifecycle::start_bot(&env.app, &bot.id).await.unwrap();
+        autostart_done(&env.app);
+        for attempt in 0..super::MAX_RESTARTS {
+            crate::supervisor::store::push_inbox(
+                &env.app.db,
+                &format!("bot_lost:{}:prior-{attempt}", bot.id),
+                "bot_lost",
+                None,
+                Some(&bot.id),
+                None,
+                &serde_json::json!({"outcome": "restarted"}),
+            )
+            .await
+            .unwrap();
+        }
+        let run = db::active_run(&env.app.db, &bot.id).await.unwrap().unwrap().id;
+        crate::lifecycle::mark_run_exited(&env.app, &run, "pane gone").await;
+
+        runner::sweep_lost_by_pane_gone(&env.app).await;
+        runner::quiesce(&env.app).await;
+
+        assert!(db::active_run(&env.app.db, &bot.id).await.unwrap().is_none(), "退避額度用完：不再開");
+        assert_eq!(runs(&env.app, &bot.id).await.len(), 1);
+        let events = bot_lost_events(&env.app, &bot.id).await;
+        assert_eq!(events.iter().filter(|e| e["outcome"] == "backoff").count(), 1, "{events:?}");
+        assert_eq!(events.iter().filter(|e| e["outcome"] == "restarted").count(), super::MAX_RESTARTS);
     }
 }

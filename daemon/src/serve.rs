@@ -247,6 +247,8 @@ pub async fn serve(config_path: Option<PathBuf>, dev_watch_all_panes: bool) -> R
     host_baseline::spawn_poller(app.clone());
     crate::runners::herdr_version::spawn_poller(app.clone());
     crate::runners::remote_purge::spawn_poller(app.clone());
+    // herdr 非計畫重啟後被定時掃描收成 `pane gone` 的 autostart bot 也要補開（#914）。
+    crate::runners::autostart_revive::spawn_pane_gone_sweeper(app.clone());
     // 連上那趟收權限失敗的主機（#501）：欠著的每 5 分鐘補跑一次，不然一台不重連的主機就一直是 0755（#501 複看）。
     remote_perms::spawn_poller(app.clone());
     // #406：回收區不能只在開機收，常駐好幾天會一路長。
