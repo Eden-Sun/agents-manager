@@ -10,6 +10,28 @@
   ⏵⏵ bypass permissions on (shift+tab to cycle) · ← for agents
 ";
 
+    /// 現行 5h left / 7d left 狀態列（issue #876）。
+    const COMPOSER_MODERN: &str = "\
+────────────────────────────────
+❯
+────────────────────────────────
+  hunta | i875-throwaway | SON5.5 H ctx 4% | 5h left 96%(rst 1h 53m) | 7d left 46%(rst 3d 5h) | F5 left 95%
+  ⏵⏵ bypass permissions on (shift+tab to cycle) · ← for agents
+";
+
+    /// issue #876：現行 `5h left`／`7d left` 狀態列被認成 chrome，extract_reply 不收輸入框與狀態列。
+    #[test]
+    fn modern_5h_left_statusline_is_cut_from_reply() {
+        let screen = format!(
+            "❯ 請回覆測試\n⏺ 這是一則真正的回覆。\n\n回答完畢。\n{COMPOSER_MODERN}"
+        );
+        let reply = ClaudeCapture.extract_reply(&screen).unwrap();
+        assert_eq!(reply, "這是一則真正的回覆。\n\n回答完畢。");
+        assert!(!reply.contains("5h left"), "{reply}");
+        assert!(!reply.contains("7d left"), "{reply}");
+        assert!(!reply.contains("bypass permissions"), "{reply}");
+    }
+
     /// #661：markdown 表格的 `│` 列與回覆裡的 `---` 不是輸入框上緣。
     #[test]
     fn a_markdown_table_and_a_horizontal_rule_stay_in_the_reply() {

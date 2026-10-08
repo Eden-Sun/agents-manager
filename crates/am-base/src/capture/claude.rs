@@ -265,6 +265,15 @@ fn is_done_row(s: &str) -> bool {
     is_spinner_glyph(c) && (s.contains("· done") || s.contains(" for "))
 }
 
+fn is_quota_statusline(s: &str) -> bool {
+    (s.contains(" | ")
+        && (s.contains("5h:")
+            || s.contains("7d:")
+            || s.contains("5h left")
+            || s.contains("7d left")))
+        || (s.contains(" · ") && s.contains("% left"))
+}
+
 pub fn is_status_chrome(s: &str) -> bool {
     if s.is_empty() {
         return false;
@@ -276,8 +285,7 @@ pub fn is_status_chrome(s: &str) -> bool {
         || s.starts_with("Tip:")
         || s.starts_with("⎿")
         || s.contains("Auto-update failed")
-        || (s.contains(" | ") && (s.contains("5h:") || s.contains("7d:")))
-        || (s.contains(" · ") && s.contains("% left"))
+        || is_quota_statusline(s)
 }
 
 /// 輸入框底下的權限模式列。判斷只有 [`crate::claude_mode::is_mode_row`] 一份（#788）。
@@ -404,9 +412,7 @@ pub fn is_noise(s: &str) -> bool {
     {
         return true;
     }
-    if (s.contains(" | ") && (s.contains("5h:") || s.contains("7d:")))
-        || (s.contains(" · ") && s.contains("% left"))
-    {
+    if is_quota_statusline(s) {
         return true;
     }
     s.starts_with("Claude Code v")

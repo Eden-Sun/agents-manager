@@ -12,6 +12,18 @@
         // 真的狀態列照舊是雜訊。
         assert!(is_noise("gpt-5.6-sol high · ~/p · Context 3% used · 5h 82% left · weekly 97% left"));
         assert!(is_noise("· 5h 82% left · weekly 97% left"));
+        // claude 的 5h left / 7d left 與 5h: / 7d: 狀態列（issue #876）
+        for row in [
+            "  hunta | i875-throwaway | SON5.5 H ctx 4% | 5h left 96%(rst 1h 53m) | 7d left 46%(rst 3d 5h) | F5 left 95%",
+            "hunta | pt | OP5.5 M ctx 5% | 5h left 96% | 7d left 46%",
+            "hunta | pt | 5h left 96%",
+            "hunta | pt | 7d left 46%",
+            "hunta | survey-cwd | HAI4.5 | 5h:80% | 7d:70%",
+        ] {
+            assert!(is_status_chrome(row) && is_noise(row), "{row}");
+        }
+        assert!(!is_status_chrome("5h left before deadline"));
+        assert!(!is_status_chrome("7d left"));
     }
 
     /// #783：四種權限模式列（2.1.288 真機 shift+tab 輪一圈）都是輸入框底下的 chrome；回覆裡 `⏸` 開頭的句子不是。
