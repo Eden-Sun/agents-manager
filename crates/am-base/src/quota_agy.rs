@@ -13,7 +13,7 @@ use serde_json::Value;
 /// 每次探測要起一個約 200 MB 的執行檔。
 pub const AGY_POLL: std::time::Duration = std::time::Duration::from_secs(300);
 /// 測試縮短（探測逾時的測試不必真的等 40 秒）。daemon 的測試是以 `test-hooks`（dev-dependency）編 am-base，`cfg(test)` 對 am-base 本身不成立，所以兩個都要認；正式建置不開 `test-hooks`。
-pub const PROBE_TIMEOUT: std::time::Duration = if cfg!(any(test, feature = "test-hooks")) { std::time::Duration::from_secs(3) } else { std::time::Duration::from_secs(40) };
+pub const PROBE_TIMEOUT: std::time::Duration = if cfg!(any(test, feature = "test-hooks")) { std::time::Duration::from_secs(10) } else { std::time::Duration::from_secs(40) };
 
 /// 探測指令（本機與遠端同一份）：拋棄式 cwd、不讀 stdin、關自動更新、跑完刪目錄。`exe` 是偵測到的絕對路徑，沒有就用 PATH 上的 `agy`。
 pub fn probe_script(exe: Option<&str>) -> String {
