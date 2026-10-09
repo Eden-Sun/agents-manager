@@ -34,8 +34,20 @@ pub fn root(cfg_root: Option<&str>, home: &str) -> PathBuf {
     }
 }
 
-fn bad(message: impl Into<String>) -> LcError {
+/// 400 `bad_share_folder`：資料夾選不得（建 bot 的各種拒絕都走這個）。
+pub(crate) fn bad(message: impl Into<String>) -> LcError {
     LcError::BadValue(json!({"error": "bad_request", "reason": "bad_share_folder", "message": message.into()}))
+}
+
+/// 遠端的新資料夾根目錄（R-S2 §1 #7）：`folders_root` 是 `~/…` 才照遠端家目錄展開；絕對路徑的設定是這台的位置，不套到遠端，
+/// 改用遠端 `~/shared-bots`。
+pub fn remote_root(cfg_root: Option<&str>, remote_home: &str) -> String {
+    let home = remote_home.trim_end_matches('/');
+    match cfg_root.map(str::trim).filter(|s| !s.is_empty()) {
+        Some("~") => home.to_string(),
+        Some(r) if r.starts_with("~/") => format!("{home}/{}", &r[2..]),
+        _ => format!("{home}/shared-bots"),
+    }
 }
 
 /// 新資料夾的名字：英數開頭，`[A-Za-z0-9._-]`，最多 64 字；不能是 `.`／`..` 或藏起來的名字。
@@ -264,6 +276,16 @@ mod tests {
         ] {
             assert_eq!(unsafe_reason(Path::new(p), home, data).is_some(), bad, "{p}");
         }
+    }
+
+    #[test]
+    fn remote_root_follows_the_remote_home_only_for_tilde_paths() {
+        assert_eq!(remote_root(None, "/home/m4p"), "/home/m4p/shared-bots");
+        assert_eq!(remote_root(Some("~/kefu"), "/home/m4p"), "/home/m4p/kefu");
+        assert_eq!(remote_root(Some("  ~/kefu/  "), "/home/m4p/"), "/home/m4p/kefu/");
+        // 這台的絕對路徑不能拿去遠端用：改回遠端的 ~/shared-bots。
+        assert_eq!(remote_root(Some("/Users/edan/shared-bots"), "/home/m4p"), "/home/m4p/shared-bots");
+        assert_eq!(remote_root(Some(""), "/"), "/shared-bots");
     }
 
     #[test]

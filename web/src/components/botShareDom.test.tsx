@@ -6,7 +6,7 @@
 import test, { after, afterEach, before } from 'node:test'
 import assert from 'node:assert/strict'
 import { renderToStaticMarkup } from 'react-dom/server'
-import { act, click, mockApi, mount, settle, setupDom, teardownDom, unmountAll } from '../testing/domHarness'
+import { act, click, fakeApi, mockApi, mount, settle, setupDom, teardownDom, unmountAll, until } from '../testing/domHarness'
 import { MockTransport } from '../api/mock'
 import { ApiError } from '../api/types'
 import { resetStoreForTest, useStore } from '../store/store'
@@ -194,9 +194,8 @@ test('分享使用者的訊息標「🔗 分享使用者」，自己發的不標
 })
 
 test('建 bot 的「分享用（受限）」只給本機的 claude；mock 建 codex 受限 409', async () => {
-  assert.equal(shareProfileBlocked('claude', 'local'), null)
-  assert.match(shareProfileBlocked('codex', 'local')!, /只支援 claude/)
-  assert.match(shareProfileBlocked('claude', 'm4p')!, /本機/)
+  assert.equal(shareProfileBlocked('claude'), null)
+  assert.match(shareProfileBlocked('codex')!, /只支援 claude/)
   const mock = new MockTransport()
   const st = (await mock.request('GET', '/state')) as { projects: { id: string }[] }
   const pid = st.projects[0].id
@@ -206,6 +205,25 @@ test('建 bot 的「分享用（受限）」只給本機的 claude；mock 建 co
   const b = st2.projects.flatMap((p) => p.bots).find((x) => x.id === ok.bot_id)!
   assert.equal(b.share_profile, 'restricted')
   assert.equal(b.auto_approve, false, '受限 bot 不帶 bypass permissions')
+})
+
+test('遠端專案也能建分享用 bot：表單不灰掉，新資料夾標在那台的 ~/shared-bots，瀏覽的是那台（DirPicker 帶 host）', async () => {
+  assert.equal(shareProfileBlocked('claude'), null)
+  const { ShareProfileField } = await import('./ShareProfileField')
+  let folder = { mode: 'new' as 'new' | 'existing', name: '', path: '' }
+  await mount(<ShareProfileField kind="claude" host="m4p" value="restricted" onChange={() => {}} botName="support" folder={folder} onFolder={(f) => (folder = f)} />)
+  const radios = [...document.querySelectorAll<HTMLInputElement>('input[name="share-profile"]')]
+  assert.equal(radios[1].disabled, false, '遠端不灰掉受限')
+  assert.equal(radios[2].disabled, false, '遠端不灰掉信任分享')
+  assert.equal(document.querySelector('.share-folder-prefix')!.textContent, 'm4p：~/shared-bots/')
+  await unmountAll()
+
+  const requests = fakeApi(() => ({ path: '/home/m4p/site', parent: '/home/m4p', home: '/home/m4p', entries: [] }))
+  folder = { mode: 'existing', name: '', path: '/home/m4p/site' }
+  await mount(<ShareProfileField kind="claude" host="m4p" value="restricted" onChange={() => {}} botName="support" folder={folder} onFolder={(f) => (folder = f)} />)
+  const browse = [...document.querySelectorAll<HTMLButtonElement>('.share-folder button')].find((b) => b.textContent === '瀏覽…')!
+  await click(browse)
+  await until(() => requests.some((r) => r.path.includes('/fs/dirs') && r.path.includes('host=m4p')), '瀏覽遠端資料夾要帶 host=m4p')
 })
 
 test('建 bot 表單的資料夾：新資料夾預設 bot 名、既有資料夾要絕對路徑並警告 .env 讀得到', async () => {

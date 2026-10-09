@@ -5,10 +5,17 @@
 //! - `POST /api/bots/{id}/share` `{"enabled":true|false}` → 開（已經開著就沿用同一條）／關（清掉 token）
 //! - `POST /api/bots/{id}/share/rotate` → 換新 token，舊連結當下失效，回新的 `url`
 
+use std::path::Path;
+use std::sync::Arc;
+
+use am_base::hosts::HostConn;
 use serde_json::{json, Value};
 
 use crate::lifecycle::LcError;
-use crate::share::store;
+use crate::share::folder::{self, ShareFolderIn};
+use crate::share::remote_fs::RfsError;
+use crate::share::site::RemoteSite;
+use crate::share::{cage, site, store};
 
 pub fn db_err(e: sqlx::Error) -> LcError {
     LcError::Upstream(format!("share store: {e}"))
@@ -99,6 +106,130 @@ pub async fn reserve_share_bot(
 #[cfg(test)]
 pub async fn reserve_restricted(app: &(impl crate::capabilities::Cfg + crate::capabilities::DataDir + crate::capabilities::Db), bot_id: &str, folder: &crate::share::folder::ShareFolderIn, replay: bool) -> Result<(String, bool), LcError> {
     reserve_share_bot(app, bot_id, store::PROFILE_RESTRICTED, folder, replay).await
+}
+
+/// 建分享用 bot 的資料夾與記錄，依專案主機分流：本機走 [`reserve_share_bot`]，遠端走 [`reserve_remote_share_bot`]。
+pub async fn reserve_share_bot_on(
+    app: &(impl crate::capabilities::Cfg + crate::capabilities::DataDir + crate::capabilities::Db + crate::hosts::HostsAccess),
+    host: &str,
+    bot_id: &str,
+    profile: &str,
+    folder: &ShareFolderIn,
+    replay: bool,
+) -> Result<(String, bool), LcError> {
+    if host == am_base::config::LOCAL_HOST {
+        return reserve_share_bot(app, bot_id, profile, folder, replay).await;
+    }
+    reserve_remote_share_bot(app, host, bot_id, profile, folder, replay).await
+}
+
+/// 遠端專案的分享 bot（R-S2 §4.1）：先 preflight（受限才查 claude 版本與 managed settings），再解析或建資料夾，
+/// 最後 `ensure_inbox` 與 `shared_bots` 記錄。任何一步失敗，這次建的資料夾只 `rmdir`（遠端從不 `rm -rf`）。
+pub async fn reserve_remote_share_bot(
+    app: &(impl crate::capabilities::Cfg + crate::capabilities::Db + crate::hosts::HostsAccess),
+    host: &str,
+    bot_id: &str,
+    profile: &str,
+    folder: &ShareFolderIn,
+    replay: bool,
+) -> Result<(String, bool), LcError> {
+    let conn: Arc<HostConn> = app.hosts().get(host).await.ok_or_else(|| cage::preflight_conflict(crate::share::remote_fs::PreflightError::Unreachable))?;
+    if profile == store::PROFILE_RESTRICTED {
+        cage::preflight_restricted(&conn).await?;
+    } else {
+        crate::share::remote_fs::preflight_connected(&conn).map_err(cage::preflight_conflict)?;
+    }
+    let home = conn.home().await.map_err(|_| cage::preflight_conflict(crate::share::remote_fs::PreflightError::Unreachable))?;
+    let instance = conn.instance().map(str::to_string);
+    let root_cfg = app.cfg().get().await.share.folders_root.clone();
+    let (ws, created) = match folder {
+        ShareFolderIn::Existing { path } => (remote_existing(&conn, path).await?, false),
+        ShareFolderIn::New { name } => {
+            folder::check_new_name(name)?;
+            let root = folder::remote_root(root_cfg.as_deref(), &home);
+            match RemoteSite::create_folder(&conn, &root, name).await {
+                Ok(p) => {
+                    if let Err(e) = remote_check_path(&conn, &p, &home).await {
+                        rmdir_made(&conn, host, &home, instance.as_deref(), bot_id, &p).await;
+                        return Err(e);
+                    }
+                    (p, true)
+                }
+                Err(RfsError::Exists) if replay => (remote_existing(&conn, &format!("{root}/{name}")).await?, false),
+                Err(RfsError::Exists) => {
+                    return Err(LcError::conflict(
+                        "folder_exists",
+                        json!({"path": format!("{root}/{name}"), "host": host, "message": "遠端這個名字的資料夾已經有了；要用它請選「既有資料夾」，不然換個名字"}),
+                    ))
+                }
+                Err(e) => return Err(remote_folder_error(e)),
+            }
+        }
+    };
+    let site = site::remote_site_at(conn.clone(), host, home.clone(), instance.as_deref(), bot_id, ws.clone())
+        .ok_or_else(|| cage::preflight_conflict(crate::share::remote_fs::PreflightError::Unreachable))?;
+    if let Err(e) = site.ensure_inbox().await {
+        if created {
+            let _ = site.remove_created_folder().await;
+        }
+        return Err(match e {
+            RfsError::Unavailable => cage::preflight_conflict(crate::share::remote_fs::PreflightError::Unreachable),
+            other => LcError::Upstream(format!("share folder inbox on {host}: {other}")),
+        });
+    }
+    if let Err(e) = store::insert_share_bot(app.db(), bot_id, profile, &ws).await {
+        if created {
+            let _ = site.remove_created_folder().await;
+        }
+        return Err(db_err(e));
+    }
+    Ok((ws, created))
+}
+
+/// 既有的遠端資料夾：解析實體路徑，然後照本機同一套規則檢查（[`check_remote_path`]）。
+async fn remote_existing(conn: &HostConn, path: &str) -> Result<String, LcError> {
+    if !path.trim().starts_with('/') {
+        return Err(folder::bad("既有資料夾要給絕對路徑"));
+    }
+    let resolved = RemoteSite::resolve_folder(conn, path.trim()).await.map_err(|e| match e {
+        RfsError::NotFound => folder::bad("找不到這個資料夾"),
+        RfsError::Untrusted => folder::bad("這個路徑含符號連結、或不是資料夾（遠端只收實體路徑）"),
+        RfsError::Unavailable => cage::preflight_conflict(crate::share::remote_fs::PreflightError::Unreachable),
+        other => LcError::Upstream(format!("resolve remote folder: {other}")),
+    })?;
+    if !resolved.owned_by_me {
+        return Err(folder::bad("這個資料夾不是 SSH 登入的使用者擁有的"));
+    }
+    if let Some(why) = folder::unsafe_reason(Path::new(&resolved.physical), Path::new(&resolved.home_physical), Path::new(&resolved.root_physical)) {
+        return Err(folder::bad(why));
+    }
+    Ok(resolved.physical)
+}
+
+/// 新建的遠端資料夾（或重送時拿回的）實體路徑要過 `unsafe_reason`：家目錄的上層、帳號目錄、資料目錄、系統目錄都不行。
+async fn remote_check_path(conn: &HostConn, p: &str, home: &str) -> Result<(), LcError> {
+    let r = RemoteSite::resolve_folder(conn, home).await.map_err(remote_folder_error)?;
+    if let Some(why) = folder::unsafe_reason(Path::new(p), Path::new(&r.home_physical), Path::new(&r.root_physical)) {
+        return Err(folder::bad(why));
+    }
+    Ok(())
+}
+
+/// 建失敗或重送拿不回來時，把這次建的遠端資料夾收掉（只 `rmdir`，非空就留著）。
+async fn rmdir_made(conn: &Arc<HostConn>, host: &str, home: &str, instance: Option<&str>, bot_id: &str, p: &str) {
+    if let Some(site) = site::remote_site_at(conn.clone(), host, home.to_string(), instance, bot_id, p.to_string()) {
+        let _ = site.remove_created_folder().await;
+    }
+}
+
+fn remote_folder_error(e: RfsError) -> LcError {
+    match e {
+        RfsError::Unavailable => cage::preflight_conflict(crate::share::remote_fs::PreflightError::Unreachable),
+        RfsError::Unsafe(why) => folder::bad(why),
+        RfsError::Untrusted => folder::bad("遠端的資料夾路徑含符號連結，或不是資料夾"),
+        RfsError::NotFound => folder::bad("找不到這個資料夾"),
+        other => LcError::Upstream(format!("remote folder: {other}")),
+    }
 }
 
 /// 建受限 bot 的後半：建成了就把 `bots.cwd` 指到資料夾；沒建成（失敗、重送拿回舊的那顆）就把前半收回。

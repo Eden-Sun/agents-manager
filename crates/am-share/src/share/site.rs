@@ -146,21 +146,34 @@ async fn resolve_inner(app: &impl SiteEnv, bot_id: &str, include_deleted: bool) 
             SiteError::Unavailable
         })?;
         let instance = app.instance();
-        let rel_root = am_base::hosts::remote_root_for(instance.as_deref());
-        let root = if home == "/" {
-            format!("/{rel_root}")
-        } else {
-            format!("{}/{rel_root}", home.trim_end_matches('/'))
-        };
-        let outbox = am_base::outbox_remote::remote_dir(&home, instance.as_deref(), bot_id)
-            .ok_or(SiteError::Unavailable)?;
-        Ok(ShareSite::Remote(RemoteSite {
-            conn,
-            host,
-            home,
-            root,
-            workspace,
-            outbox,
-        }))
+        remote_site_at(conn, &host, home, instance.as_deref(), bot_id, workspace)
+            .map(ShareSite::Remote)
+            .ok_or(SiteError::Unavailable)
     }
+}
+
+/// 遠端分享 bot 的位置（root、outbox 的算法只在這裡）。建 bot 時資料還沒進 DB，所以 `resolve` 用不了，就用這個直接組。
+pub fn remote_site_at(
+    conn: Arc<HostConn>,
+    host: &str,
+    home: String,
+    instance: Option<&str>,
+    bot_id: &str,
+    workspace: String,
+) -> Option<RemoteSite> {
+    let rel_root = am_base::hosts::remote_root_for(instance);
+    let root = if home == "/" {
+        format!("/{rel_root}")
+    } else {
+        format!("{}/{rel_root}", home.trim_end_matches('/'))
+    };
+    let outbox = am_base::outbox_remote::remote_dir(&home, instance, bot_id)?;
+    Some(RemoteSite {
+        conn,
+        host: host.to_string(),
+        home,
+        root,
+        workspace,
+        outbox,
+    })
 }

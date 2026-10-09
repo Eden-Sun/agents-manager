@@ -58,6 +58,14 @@ impl<T> StuckTurnContext for T where
 
 pub trait SetupShareServices: Send + Sync {
     fn cage_settings(&self, settings: &mut Value, workspace: &str, env: &Value);
+    /// 寫一個私有檔進遠端 bot 目錄（0600），寫完比對 sha256；不符是錯誤（不啟動）。
+    fn write_remote_private_file<'a>(
+        &'a self,
+        conn: &'a am_base::hosts::HostConn,
+        dir: &'a str,
+        name: &'a str,
+        data: &'a [u8],
+    ) -> impl Future<Output = anyhow::Result<()>> + Send + 'a;
 }
 
 pub trait StartServices: SetupShareServices + Send + Sync {
@@ -72,13 +80,16 @@ pub trait StartServices: SetupShareServices + Send + Sync {
         &'a self,
         env: &'a mut Value,
         bot: &'a db::Bot,
+        host: &'a str,
     ) -> impl Future<Output = ()> + Send + 'a;
-    fn install_restricted_prompt(
-        &self,
-        bot: &db::Bot,
-        workspace: &str,
-        env: &Value,
-    ) -> anyhow::Result<PathBuf>;
+    /// 系統提示寫好後的路徑（遠端就是那台的路徑）。
+    fn install_restricted_prompt<'a>(
+        &'a self,
+        bot: &'a db::Bot,
+        host: &'a str,
+        workspace: &'a str,
+        env: &'a Value,
+    ) -> impl Future<Output = anyhow::Result<String>> + Send + 'a;
     fn restricted_launch_args(&self, env: &Value, prompt: &Path) -> Vec<String>;
     fn pane_env(
         &self,

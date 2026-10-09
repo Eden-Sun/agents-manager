@@ -2173,10 +2173,12 @@ async fn create_bot(
         .map(|p| p.host)
         .unwrap_or_else(|| crate::config::LOCAL_HOST.to_string());
     let identity = check_identity(&app, &host, &b.identity, &b.kind).await?;
+    // 分享用 bot：專案在本機，或設定裡有這台主機（不認得＝409 `unsupported_host`）。
+    let host_known = host == crate::config::LOCAL_HOST || app.hosts.get(&host).await.is_some();
     let share_profile = match b.share_profile.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
         None => None,
         Some(crate::share::store::PROFILE_RESTRICTED) => {
-            crate::share::cage::check_create(&b.kind, &host, &b.args, b.env.as_ref())?;
+            crate::share::cage::check_create(&b.kind, &host, host_known, &b.args, b.env.as_ref())?;
             Some(crate::share::store::PROFILE_RESTRICTED)
         }
         Some(crate::share::store::PROFILE_TRUSTED) => {
@@ -2187,7 +2189,7 @@ async fn create_bot(
                     "message": "信任分享：拿到連結的人可以透過它操作這台機器上的任何東西，建立時要帶 confirm_trusted:true",
                 })));
             }
-            crate::share::cage::check_profile(&b.kind, &host)?;
+            crate::share::cage::check_profile(&b.kind, &host, host_known)?;
             if matches!(b.share_folder, Some(crate::share::folder::ShareFolderIn::New { .. })) {
                 return Err(LcError::Bad("trusted share bots use an existing folder (share_folder.kind must be `existing`)".into()));
             }
@@ -2274,7 +2276,10 @@ async fn create_bot(
                 Some(c) => app.cfg.get().await.projects.iter().flat_map(|p| p.bots.iter()).any(|x| x.create_request_id.as_deref() == Some(c.as_str())),
                 None => false,
             };
-            Some(crate::share::admin::reserve_share_bot(&app, &id, share_profile.unwrap_or(crate::share::store::PROFILE_RESTRICTED), folder, replay).await?)
+            Some(
+                crate::share::admin::reserve_share_bot_on(&app, &host, &id, share_profile.unwrap_or(crate::share::store::PROFILE_RESTRICTED), folder, replay)
+                    .await?,
+            )
         }
         None => None,
     };
@@ -2330,6 +2335,10 @@ async fn create_bot(
     if let Some((ws, created_folder)) = &workspace {
         let created = res.is_ok() && replayed.lock().unwrap().is_none();
         crate::share::admin::finish_restricted(&app, &id, ws, *created_folder, created).await;
+        // 遠端的保留標記（本機的 `finish_restricted` 已經放了）。
+        if created && host != crate::config::LOCAL_HOST {
+            crate::share::keep_new_remote_share(&app, &id).await;
+        }
     }
     match res {
         Ok(()) => {}
