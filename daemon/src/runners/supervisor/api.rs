@@ -843,6 +843,9 @@ pub async fn post_remote_observation(
     if !super::remote::STATES.contains(&b.status.as_str()) {
         return Err(LcError::Bad(format!("status must be one of {:?}", super::remote::STATES)));
     }
+    // #970：evidence 原樣存進 `supervisors.remote_evidence`，每次 GET 都讀；actor 同理。
+    bounded("evidence", b.evidence.as_deref().unwrap_or_default(), MAX_NOTE_CHARS)?;
+    bounded("actor", b.actor.as_deref().unwrap_or_default(), MAX_LABEL_CHARS)?;
     let source = super::remote::Source::parse(&b.source)
         .ok_or_else(|| LcError::Bad("source must be `manual` or `provider`".into()))?;
     super::remote::validate_external_source(source).map_err(|e| LcError::Bad(e.into()))?;
@@ -1188,6 +1191,15 @@ async fn requester_claim(app: &impl crate::capabilities::Db, headers: &HeaderMap
 
 /// Ask for a rebuild / restart window. Creates a `pending` record; AGM decides it.
 pub async fn post_approval(State(app): State<Arc<App>>, headers: HeaderMap, Json(b): Json<ApprovalIn>) -> Result<Json<Value>, LcError> {
+    // #970：自由文字原樣進申請列、`approval_requested` inbox 與 `GET /approvals`，跟交辦一樣設上限（request_id 另由 #923 驗）。
+    for (label, value, max) in [
+        ("requester", Some(b.requester.as_str()), MAX_LABEL_CHARS),
+        ("scope", Some(b.scope.as_str()), MAX_NOTE_CHARS),
+        ("reason", b.reason.as_deref(), MAX_NOTE_CHARS),
+        ("supersedes", b.supersedes.as_deref(), MAX_LABEL_CHARS),
+    ] {
+        bounded(label, value.unwrap_or_default(), max)?;
+    }
     if !super::maintenance::RESOURCES.contains(&b.purpose.as_str()) {
         return Err(LcError::Bad(format!("purpose must be one of {:?}", super::maintenance::RESOURCES)));
     }
@@ -1264,6 +1276,9 @@ pub async fn post_approval_decision(
     headers: HeaderMap,
     Json(b): Json<DecisionIn>,
 ) -> Result<Json<Value>, LcError> {
+    // #970：被拒的裁示不拿鎖、不寫列（reason 進 supervisor_approvals 與稽核列，actor 進稽核列）。
+    bounded("reason", b.reason.as_deref().unwrap_or_default(), MAX_NOTE_CHARS)?;
+    bounded("actor", b.actor.as_deref().unwrap_or_default(), MAX_LABEL_CHARS)?;
     // 核准只給驗過的 AGM 角色（issue #447，2026-09-25 使用者裁示）：核准是換 binary／重啟窗口的授權來源，
     // 而 UI token 本機任何行程都拿得到——不要求角色的話，一顆 bot 不帶身分就能核准自己要的窗口。
     // deny／revoke 照舊不要求：那只會叫停，人在一般 shell 裡還得叫得停。
@@ -2475,6 +2490,66 @@ mod approval_decision_tests {
         let events: i64 =
             sqlx::query_scalar("SELECT COUNT(*) FROM supervisor_inbox WHERE kind='approval_requested'").fetch_one(&app.db).await.unwrap();
         assert_eq!(events, 0, "也不叫醒 AGM");
+        app.db.close().await;
+        std::fs::remove_dir_all(&app.data_dir).unwrap();
+    }
+
+    /// #970：申請的自由文字原樣進申請列與 `approval_requested` inbox；超過上限一律 400、什麼都不寫，剛好到上限的照常收。
+    #[tokio::test]
+    async fn approval_free_text_fields_are_bounded() {
+        let app = app().await;
+        let ask = |requester: String, scope: String, reason: Option<String>| ApprovalIn {
+            reason,
+            requester,
+            purpose: "restart".into(),
+            scope,
+            target_commit: Some("ca7b22d".into()),
+            expires_in_secs: None,
+            request_id: None,
+            supersedes: None,
+        };
+        for (label, input) in [
+            ("requester", ask("x".repeat(201), "daemon".into(), None)),
+            ("scope", ask("k8bw2f".into(), "y".repeat(8001), None)),
+            ("reason", ask("k8bw2f".into(), "daemon".into(), Some("z".repeat(8001)))),
+        ] {
+            let err = post_approval(State(app.clone()), HeaderMap::new(), Json(input)).await.expect_err(label);
+            assert!(matches!(&err, LcError::Bad(m) if m.contains(label)), "{label}: {err:?}");
+        }
+        assert!(store::approvals(&app.db, 10).await.unwrap().is_empty(), "被拒的申請不留列");
+        let events: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM supervisor_inbox WHERE kind='approval_requested'").fetch_one(&app.db).await.unwrap();
+        assert_eq!(events, 0, "也不叫醒 AGM");
+        let Json(ok) = post_approval(State(app.clone()), HeaderMap::new(), Json(ask("x".repeat(200), "daemon".into(), Some("z".repeat(8000)))))
+            .await
+            .unwrap();
+        assert_eq!(ok["created"], true, "剛好到上限照常收");
+        app.db.close().await;
+        std::fs::remove_dir_all(&app.data_dir).unwrap();
+    }
+
+    /// #970：裁示的理由超過上限就整個拒絕：核准仍是 pending，沒有 `approval_decision` 稽核列。
+    #[tokio::test]
+    async fn an_oversized_decision_reason_writes_nothing() {
+        let app = app().await;
+        let id = pending(&app).await;
+        let input = DecisionIn { decision: "deny".into(), actor: None, reason: Some("z".repeat(8001)), expires_in_secs: None };
+        let err = post_approval_decision(State(app.clone()), Path(id.clone()), HeaderMap::new(), Json(input)).await.unwrap_err();
+        assert!(matches!(err, LcError::Bad(_)), "{err:?}");
+        assert_eq!(store::approval(&app.db, &id).await.unwrap().unwrap().status, "pending", "被拒的裁示不能動核准");
+        let notes: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM supervisor_notes WHERE kind='approval_decision'").fetch_one(&app.db).await.unwrap();
+        assert_eq!(notes, 0, "也不留稽核列");
+        app.db.close().await;
+        std::fs::remove_dir_all(&app.data_dir).unwrap();
+    }
+
+    /// #970：`remote` 的 evidence 每次 GET 都讀，超過上限就 400、不寫。
+    #[tokio::test]
+    async fn remote_observation_evidence_is_bounded() {
+        let app = app().await;
+        let body = json!({"status": "unknown", "source": "manual", "evidence": "e".repeat(8001)});
+        let err = post_remote_observation(State(app.clone()), HeaderMap::new(), Json(serde_json::from_value(body).unwrap())).await.unwrap_err();
+        assert!(matches!(&err, LcError::Bad(m) if m.contains("evidence")), "{err:?}");
         app.db.close().await;
         std::fs::remove_dir_all(&app.data_dir).unwrap();
     }
