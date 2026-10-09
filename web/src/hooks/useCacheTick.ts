@@ -6,8 +6,14 @@ export function useCacheTick(active: boolean): number {
   const [now, setNow] = useState(() => Date.now())
   useEffect(() => {
     if (!active) return
-    const id = window.setInterval(() => setNow(Date.now()), CACHE_TICK_MS)
-    return () => window.clearInterval(id)
+    const tick = () => setNow(Date.now())
+    // 剛變成 active 時先補一次：掛載時拿的時間可能是很久以前（同 useHostOffline 的 useNow）。
+    const first = window.setTimeout(tick, 0)
+    const id = window.setInterval(tick, CACHE_TICK_MS)
+    return () => {
+      window.clearTimeout(first)
+      window.clearInterval(id)
+    }
   }, [active])
   return now
 }
