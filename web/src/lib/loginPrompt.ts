@@ -64,6 +64,22 @@ export function pruneDismissed(dismissed: Record<string, string>, pending: Pendi
   return Object.fromEntries(keys.filter((k) => live.has(k)).map((k) => [k, dismissed[k]]))
 }
 
+/** 給 prune 用的 pending：來源斷線的那幾台，已關掉的 key 原樣保留（斷線≠登入成功）。 */
+export function pendingForPrune(
+  s: Pick<LoginPromptInput, 'hosts' | 'localConnected'>,
+  pending: PendingLogin[],
+  dismissed: Record<string, string>,
+): PendingLogin[] {
+  const live = new Set([...(s.localConnected ? ['local'] : []), ...s.hosts.filter((h) => h.connected).map((h) => h.name)])
+  const keep: PendingLogin[] = []
+  for (const [k, episode] of Object.entries(dismissed)) {
+    const at = k.indexOf('/')
+    const host = k.slice(0, at)
+    if (at > 0 && !live.has(host)) keep.push({ host, identity: k.slice(at + 1), episode, via: 'probe', bots: [] })
+  }
+  return keep.length ? [...pending, ...keep] : pending
+}
+
 export function loginPromptText(p: PendingLogin): { title: string; detail: string } {
   const where = p.host === 'local' ? '本機' : p.host
   const n = p.bots.length

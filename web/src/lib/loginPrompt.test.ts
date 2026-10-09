@@ -2,7 +2,7 @@ import test from 'node:test'
 import assert from 'node:assert/strict'
 import type { IdentityStatus } from '../api/types.ts'
 import { toIdentityStatusMap } from '../api/normalize.ts'
-import { dismissKey, loginPromptText, pendingLogins, pruneDismissed, visibleLogins, type LoginPromptInput } from './loginPrompt.ts'
+import { dismissKey, loginPromptText, pendingForPrune, pendingLogins, pruneDismissed, visibleLogins, type LoginPromptInput } from './loginPrompt.ts'
 
 const st = (over: Partial<IdentityStatus> = {}): IdentityStatus => ({
   name: 'cc1',
@@ -88,6 +88,27 @@ test('關掉只對同一次登出有效；換一次或登入成功後再被登�
   assert.equal(visibleLogins(pendingLogins(down({ logged_in: false })), cleaned).length, 1)
   // 沒有要清的就回同一個物件（store 不必重畫）。
   assert.equal(pruneDismissed(dismissed, first), dismissed)
+})
+
+test('主機暫時斷線不算登入成功：關掉的紀錄保留，重連後同一次登出不再提示', () => {
+  const dismissed = { [dismissKey('m4p', 'cc1')]: 'T1' }
+  const offline = base({ hosts: [{ name: 'm4p', connected: false, identity_status: {} }] })
+  const kept = pruneDismissed(dismissed, pendingForPrune(offline, pendingLogins(offline), dismissed))
+  assert.deepEqual(kept, dismissed, '斷線期間不清掉')
+  const back = down({ logged_in: null, login_needed: { since: 'T1', via: 'turn_auth_failure' } })
+  assert.deepEqual(visibleLogins(pendingLogins(back), kept), [], '重連後同一次登出：不再洗版')
+})
+
+test('本機 WebSocket 斷線同理：本機的關掉紀錄保留', () => {
+  const dismissed = { [dismissKey('local', 'cc1')]: 'T1' }
+  const offline = base({ localConnected: false, bots: [{ id: 'b', name: 'l', project_id: 'p-local', identity: 'cc1', kind: 'claude' }], hosts: [] })
+  assert.deepEqual(pruneDismissed(dismissed, pendingForPrune(offline, pendingLogins(offline), dismissed)), dismissed)
+})
+
+test('來源連著、但已不需要登入：關掉的紀錄照樣清掉（登入成功）', () => {
+  const dismissed = { [dismissKey('m4p', 'cc1')]: 'T1' }
+  const ok = down({ logged_in: true, login_needed: null })
+  assert.deepEqual(pruneDismissed(dismissed, pendingForPrune(ok, pendingLogins(ok), dismissed)), {})
 })
 
 test('提示文字：說清楚哪個身分、哪台主機、幾顆 bot、怎麼發現的', () => {
