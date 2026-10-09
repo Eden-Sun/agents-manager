@@ -326,16 +326,40 @@ pub fn claude_builtin_default_effort(alias: &str) -> &'static str {
     }
 }
 
+/// `modelSettings` 裡該模型的 `effortLevel` 覆寫（issue #937）。
+///
+/// 以前用 `key.contains(alias)` 掃字典序的 `BTreeMap`，一律先撞到**舊版**那一列（`claude-sonnet-5` 排在 `claude-sonnet-5-5` 前面，
+/// 完整 id `claude-sonnet-5` 還會 `contains` 到 `claude-sonnet-5-5`），預設強度因此記錯又標錯。現在：
+/// 1. key 與 `model` 不分大小寫完全相等 → 用它；
+/// 2. `model` 是裸家族別名（opus／sonnet／haiku／fable）→ 只看 `claude-<別名>-` 開頭的 key，取版本最高的（別名指到該家族最新版）；
+///    版本＝`-` 分段的數字段逐段比數值，`[1m]` 這類非數字尾巴剝掉；
+/// 3. 其他（完整 id 但沒有完全相等的 key）→ `None`，不做子字串比對。
+pub fn claude_effort_override(per_model: &BTreeMap<String, String>, model: &str) -> Option<String> {
+    let model = model.trim().to_ascii_lowercase();
+    if let Some((_, v)) = per_model.iter().find(|(k, _)| k.to_ascii_lowercase() == model) {
+        return Some(v.clone());
+    }
+    if !["opus", "sonnet", "haiku", "fable"].contains(&model.as_str()) {
+        return None;
+    }
+    let prefix = format!("claude-{model}-");
+    let version = |rest: &str| -> Vec<u64> {
+        rest.split('-').map_while(|seg| seg.chars().take_while(char::is_ascii_digit).collect::<String>().parse::<u64>().ok()).collect()
+    };
+    per_model
+        .iter()
+        .filter_map(|(k, v)| k.to_ascii_lowercase().strip_prefix(&prefix).map(|rest| (version(rest), k.clone(), v.clone())))
+        .max_by(|a, b| a.0.cmp(&b.0).then_with(|| a.1.cmp(&b.1)))
+        .map(|(_, _, v)| v)
+}
+
 /// What "不帶 `--effort`" resolves to; fills a spawned child's effort, since its argv never says.
 /// 讀不到設定檔回 `Err`（不是內建預設）：呼叫端會把這個值記進 bot，記錯了沒有人會再來讀一次。
 pub async fn claude_default_effort(app: &Arc<impl crate::hosts::HostsAccess + crate::tools::ToolsEnv + 'static>, host: &str, identity: Option<&str>, alias: &str) -> Result<String> {
     let dir = claude_config_dir(app, host, identity).await?;
     let (global, per_model) = read_claude_effort_settings(app, host, dir.as_deref()).await?;
     let alias = alias.to_ascii_lowercase();
-    Ok(per_model
-        .iter()
-        .find(|(k, _)| k.to_ascii_lowercase().contains(&alias))
-        .map(|(_, v)| v.clone())
+    Ok(claude_effort_override(&per_model, &alias)
         .or(global)
         .unwrap_or_else(|| claude_builtin_default_effort(&alias).to_string()))
 }
@@ -347,7 +371,7 @@ pub fn claude_static_models(global: Option<&str>, per_model: &BTreeMap<String, S
         .iter()
         .enumerate()
         .map(|(i, id)| {
-            let overridden = per_model.iter().find(|(k, _)| k.to_ascii_lowercase().contains(id)).map(|(_, v)| v.clone());
+            let overridden = claude_effort_override(per_model, id);
             let default_effort = overridden.or_else(|| global.map(str::to_string)).unwrap_or_else(|| claude_builtin_default_effort(id).to_string());
             json!({
                 "id": id, "display_name": id, "description": "", "is_default": i == 0,
