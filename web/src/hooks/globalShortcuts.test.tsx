@@ -7,6 +7,7 @@ import assert from 'node:assert/strict'
 import { act, mount, setupDom, teardownDom, unmountAll } from '../testing/domHarness'
 import { useStore } from '../store/store'
 import { registerSettingsLeaveGuard } from '../lib/settingsLeaveGuard'
+import { dialogOpen } from '../lib/dialogOpen'
 
 before(setupDom)
 after(teardownDom)
@@ -93,6 +94,58 @@ test('手機側邊欄抽屜本身（aside.sidebar 的 aria-modal）不算「有�
   document.body.appendChild(aside)
   await press(alt('ArrowDown'))
   assert.deepEqual(calls, ['bot:1'])
+})
+
+test('側邊欄裡開的對話框（新增 Project／Bot、環境設定的 .modal-backdrop）算「有對話框」：⌥↓／Ctrl+1 不穿透；關掉後恢復（#935）', async () => {
+  const calls = setup()
+  await mount(<Keys />)
+  const aside = document.createElement('aside')
+  aside.className = 'sidebar open'
+  aside.setAttribute('aria-modal', 'true')
+  aside.innerHTML = '<div class="modal-backdrop"><div class="modal" role="dialog" aria-modal="true"></div></div>'
+  document.body.appendChild(aside)
+  await press(alt('ArrowDown'))
+  await press(ctrl1())
+  assert.deepEqual(calls, [], '抽屜裡的對話框開著，背後的 bot／專案不能被換掉')
+  aside.querySelector('.modal-backdrop')!.remove()
+  await press(alt('ArrowDown'))
+  assert.deepEqual(calls, ['bot:1'], '對話框關掉、只剩抽屜本身：恢復')
+  aside.remove()
+})
+
+test('抽屜開＋側欄內 modal 開時 Esc 只關 modal、抽屜留著；modal 關了之後 Esc 才關抽屜（#935；抽屜 Esc 條件照 App.tsx）', async () => {
+  let drawerClosed = 0
+  let modalClosed = 0
+  // 跟 App.tsx 的抽屜 Esc 同一個判斷，而且先註冊（抽屜先開、Modal 後掛）。
+  const drawerEsc = (e: KeyboardEvent) => {
+    if (e.key !== 'Escape' || e.defaultPrevented) return
+    if (dialogOpen()) return
+    e.preventDefault()
+    drawerClosed++
+  }
+  window.addEventListener('keydown', drawerEsc)
+  try {
+    const { Modal } = await import('../components/Modal')
+    const tree = (open: boolean) => (
+      <aside className="sidebar open" aria-modal="true">
+        <Modal open={open} title="新增 Bot" onClose={() => modalClosed++}>
+          <input />
+        </Modal>
+      </aside>
+    )
+    await mount(tree(true))
+    const dialog = document.querySelector('.modal')!
+    assert.equal(dialogOpen(), true)
+    await press({ key: 'Escape' }, dialog)
+    assert.deepEqual([modalClosed, drawerClosed], [1, 0], 'Esc 只關最上層的 modal，抽屜留著')
+    await unmountAll()
+    await mount(tree(false))
+    assert.equal(dialogOpen(), false)
+    await press({ key: 'Escape' }, document.querySelector('aside.sidebar')!)
+    assert.deepEqual([modalClosed, drawerClosed], [1, 1], 'modal 關了之後 Esc 輪到抽屜')
+  } finally {
+    window.removeEventListener('keydown', drawerEsc)
+  }
 })
 
 test('桌機設定卡有未儲存變更（守門回 true）：⌥↓ 與 Ctrl+1 都不換 bot／專案，事件仍 preventDefault；解除後恢復（#925）', async () => {

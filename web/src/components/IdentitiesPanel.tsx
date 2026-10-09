@@ -1,4 +1,4 @@
-import { useState } from 'react'
+import { useRef, useState } from 'react'
 import type { BotKind, IdentityStatus, IdentityStatusMap } from '../api/types'
 import { identityDisabled, useStore } from '../store/store'
 import { findIdentity, hostLabel, identityHost, identityRowKey, identityUseCount, shadowedByConfig } from '../store/identityRows'
@@ -142,9 +142,12 @@ function IdentityLogoutButton({ host, identity }: { host: string; identity: stri
   const used = useStore((s) => identityUseCount(s.bots, s.projects, host, identity))
   const [busy, setBusy] = useState(false)
   const [confirm, setConfirm] = useState(false)
+  // 確認框的 onConfirm 沒有按鈕事件可用：先把按鈕元素存起來，登出成功後收掉包著這個面板的「環境設定」彈窗（跟登入同一條）。
+  const btnRef = useRef<HTMLButtonElement>(null)
   return (
     <>
       <button
+        ref={btnRef}
         type="button"
         className="mini-btn identity-login-btn"
         disabled={busy}
@@ -173,7 +176,11 @@ function IdentityLogoutButton({ host, identity }: { host: string; identity: stri
         onConfirm={() => {
           setConfirm(false)
           setBusy(true)
+          const btn = btnRef.current
           void logoutIdentity(host, identity)
+            .then((ok) => {
+              if (ok && btn) closeEnclosingPopup(btn)
+            })
             .catch((err) => notify('error', err instanceof Error ? err.message : String(err)))
             .finally(() => setBusy(false))
         }}
