@@ -1,7 +1,7 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
 import { ApiError } from '../api/types.ts'
-import { keySyncActive, paneReadOnly, shellForbidden, shellStateUnknown } from './shellAccess.ts'
+import { initialKeySync, keySyncActive, paneReadOnly, shellForbidden, shellStateUnknown } from './shellAccess.ts'
 
 test('唯讀看 daemon 的 read_only；舊 daemon 沒這欄時退回看 port，不看 kind', () => {
   // 跑著 vim 的 shell 被掃描分成 service，但沒有 port：要打得進去，不然人出不來。
@@ -32,4 +32,15 @@ test('讀不到 pane 狀態的 409：顯示 daemon 的說明、不當成唯讀',
   assert.equal(shellForbidden(unknown), null, '不能拿去鎖面板')
   assert.equal(shellStateUnknown(new ApiError(409, { error: 'conflict', reason: 'pane_state_unknown' } as never, 'conflict'))?.includes('稍後再試'), true)
   assert.equal(shellStateUnknown(new ApiError(409, { error: 'conflict', reason: 'service_pane' } as never, 'conflict')), null)
+})
+
+test('鍵盤直通的初值：記著關→關、記著開→開，都沒記桌機開、手機關（#931）', () => {
+  const none = new Set<string>()
+  const t = 'local/%1'
+  assert.equal(initialKeySync(t, { phone: false, off: none, on: none }), true, '桌機沒記錄＝開')
+  assert.equal(initialKeySync(t, { phone: true, off: none, on: none }), false, '手機沒記錄＝關（才有輸入框）')
+  assert.equal(initialKeySync(t, { phone: false, off: new Set([t]), on: none }), false, '桌機明確關過')
+  assert.equal(initialKeySync(t, { phone: true, off: none, on: new Set([t]) }), true, '手機明確打開過')
+  assert.equal(initialKeySync(t, { phone: true, off: new Set([t]), on: new Set([t]) }), false, '兩邊都有記錄時關優先（關是比較安全的那一邊）')
+  assert.equal(initialKeySync(t, { phone: true, off: new Set(['local/%2']), on: new Set(['local/%3']) }), false, '別顆 pane 的記錄不算')
 })

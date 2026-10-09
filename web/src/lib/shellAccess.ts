@@ -39,3 +39,13 @@ export function shellStateUnknown(e: unknown): string | null {
 export function keySyncActive(remembered: boolean, readOnly: boolean): boolean {
   return remembered && !readOnly
 }
+
+/**
+ * 鍵盤直通的初值（#931）：這顆 pane 記著「關」→ 關；記著「開」→ 開；都沒記就看裝置——
+ * 桌機預設開，手機預設關（手機點 `<pre>` 叫不出軟鍵盤，直通開著又不畫輸入列，等於一個字都打不進去）。
+ */
+export function initialKeySync(target: string, opts: { phone: boolean; off: ReadonlySet<string>; on: ReadonlySet<string> }): boolean {
+  if (opts.off.has(target)) return false
+  if (opts.on.has(target)) return true
+  return !opts.phone
+}
