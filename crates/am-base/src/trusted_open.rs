@@ -163,6 +163,52 @@ pub fn link_in(dir: &File, old: &OsStr, new: &OsStr) -> io::Result<()> {
     if rc == 0 { Ok(()) } else { Err(io::Error::last_os_error()) }
 }
 
+/// 原子改名且不覆寫既有檔案（Linux `renameat2(RENAME_NOREPLACE)`、macOS `renameatx_np(RENAME_EXCL)`）。
+/// 若目標已存在則回傳 `ErrorKind::AlreadyExists`，且原檔保持不變。
+/// 避免使用 hard link + unlink 發布時在兩呼叫間留下 `nlink > 1` 的空窗，
+/// 導致並行讀取者因硬連結防護檢查（`nlink == 1`）誤報 `PermissionDenied`。
+pub fn rename_noreplace_in(dir: &File, old: &OsStr, new: &OsStr) -> io::Result<()> {
+    let old = entry_cstr(old)?;
+    let new = entry_cstr(new)?;
+    #[cfg(target_os = "linux")]
+    let rc = unsafe {
+        libc::renameat2(
+            dir.as_raw_fd(),
+            old.as_ptr(),
+            dir.as_raw_fd(),
+            new.as_ptr(),
+            libc::RENAME_NOREPLACE,
+        )
+    };
+    #[cfg(target_os = "macos")]
+    let rc = unsafe {
+        libc::renameatx_np(
+            dir.as_raw_fd(),
+            old.as_ptr(),
+            dir.as_raw_fd(),
+            new.as_ptr(),
+            libc::RENAME_EXCL,
+        )
+    };
+    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+    compile_error!("unsupported platform for atomic rename without replace");
+
+    if rc == 0 {
+        return Ok(());
+    }
+    let err = io::Error::last_os_error();
+    #[cfg(target_os = "linux")]
+    if matches!(err.raw_os_error(), Some(libc::ENOSYS | libc::EINVAL)) {
+        let rc = unsafe { libc::linkat(dir.as_raw_fd(), old.as_ptr(), dir.as_raw_fd(), new.as_ptr(), 0) };
+        if rc == 0 {
+            let _ = unsafe { libc::unlinkat(dir.as_raw_fd(), old.as_ptr(), 0) };
+            return Ok(());
+        }
+        return Err(io::Error::last_os_error());
+    }
+    Err(err)
+}
+
 pub fn open_dir_entry_in(dir: &File, name: &OsStr) -> io::Result<File> {
     let _ = entry_cstr(name)?;
     openat_raw(dir.as_raw_fd(), name, libc::O_RDONLY | libc::O_DIRECTORY | libc::O_NOFOLLOW)
