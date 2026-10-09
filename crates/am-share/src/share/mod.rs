@@ -16,8 +16,13 @@ pub mod compose;
 pub mod folder;
 pub mod multipart;
 pub mod portal;
+pub mod remote_fs;
+pub mod site;
 pub mod store;
 pub mod svg_check;
+
+#[cfg(test)]
+mod remote_fs_tests;
 
 #[cfg(test)]
 mod test_dirs;

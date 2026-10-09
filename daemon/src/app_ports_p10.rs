@@ -56,6 +56,25 @@ impl crate::outbox_remote::OutboxRemoteEnv for App {
     }
 }
 
+impl crate::share::site::SiteEnv for App {
+    fn db_pool(&self) -> &sqlx::SqlitePool {
+        &self.db
+    }
+
+    fn host_conn(&self, host: &str) -> impl Future<Output = Option<Arc<crate::hosts::HostConn>>> + Send {
+        let host = host.to_string();
+        async move { self.hosts.get(&host).await }
+    }
+
+    fn instance(&self) -> Option<String> {
+        App::instance(self)
+    }
+
+    fn data_dir(&self) -> &Path {
+        &self.data_dir
+    }
+}
+
 impl crate::share::cage::CageEnv for App {
     fn local_identity_env(app: &Arc<Self>, identity: &str) -> impl Future<Output = std::collections::BTreeMap<String, String>> + Send {
         let app = app.clone();
