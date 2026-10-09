@@ -368,6 +368,25 @@ printf 'AM_RFS1\nOK 0\n\nAM_RFS_DONE\n'
     )
 }
 
+/// 遠端 stdout 的上限（位元組）：instructions（8 MiB）、outbox 清單（4 MiB）。outbox_read 用 `max + 4096`。
+const INSTRUCTIONS_STDOUT_MAX: u64 = 8 * 1024 * 1024;
+const OUTBOX_LIST_STDOUT_MAX: u64 = 4 * 1024 * 1024;
+
+/// 收原始 stdout 位元組。`ssh_exec_timeout` 回 `String`，有損 UTF-8 轉換會把截斷在多位元組字中間的框弄得長度對不上（#983）；
+/// 這裡照 `photo_fetch` 的做法走 `ssh_stream`，超過 `cap` 就當不可信。
+async fn exec_bytes(conn: &HostConn, host: &str, script: &str, timeout: Duration, cap: u64, what: &str) -> Result<Vec<u8>, RfsError> {
+    use tokio::io::AsyncReadExt as _;
+    let mut stream = conn.ssh_stream(script, &[]).await.map_err(|e| {
+        tracing::warn!(host = %host, error = %e, "{what} ssh failed");
+        RfsError::Unavailable
+    })?;
+    let mut out = Vec::new();
+    match tokio::time::timeout(timeout, stream.take(cap.saturating_add(1)).read_to_end(&mut out)).await {
+        Ok(Ok(_)) if out.len() as u64 <= cap => Ok(out),
+        _ => Err(RfsError::Unavailable),
+    }
+}
+
 pub fn instructions_script(workspace: &str) -> String {
     let header = script_common_header();
     format!(
@@ -436,7 +455,8 @@ pub fn parse_instructions(out: &[u8]) -> Result<String, RfsError> {
         if f.tag != "FILE" {
             continue;
         }
-        let line = String::from_utf8(f.data).map_err(|_| RfsError::Unavailable)?;
+        // 截斷的半個字變成 U+FFFD，不讓整份指示失敗（#983）。
+        let line = String::from_utf8_lossy(&f.data).into_owned();
         let mut parts = line.splitn(2, '\t');
         let label = parts.next().unwrap_or("").trim();
         let content = parts.next().unwrap_or("").trim_end();
@@ -772,7 +792,8 @@ pub fn parse_outbox_list(out: &[u8], _now: u64) -> Result<Vec<Value>, RfsError> 
         if f.tag != "ENTRY" {
             continue;
         }
-        let line = String::from_utf8(f.data).map_err(|_| RfsError::Unavailable)?;
+        // 檔名不是 UTF-8 只跳過那一筆，不讓整張清單 503（#983）。
+        let Ok(line) = String::from_utf8(f.data) else { continue };
         let mut parts = line.splitn(3, '\t');
         let (Some(meta), Some(hex), Some(name)) = (parts.next(), parts.next(), parts.next()) else { continue };
         let mut meta_parts = meta.split_whitespace();
@@ -1487,11 +1508,8 @@ impl RemoteSite {
         }
         let _permit = acquire_slot(&self.host, TIMEOUT_QUICK).await?;
         let script = instructions_script(&self.workspace);
-        let out = self.conn.ssh_exec_timeout(&script, TIMEOUT_QUICK).await.map_err(|e| {
-            tracing::warn!(host = %self.host, error = %e, "instructions ssh failed");
-            RfsError::Unavailable
-        })?;
-        parse_instructions(out.as_bytes())
+        let out = exec_bytes(&self.conn, &self.host, &script, TIMEOUT_QUICK, INSTRUCTIONS_STDOUT_MAX, "instructions").await?;
+        parse_instructions(&out)
     }
 
     pub async fn write_private_files(
@@ -1569,11 +1587,8 @@ impl RemoteSite {
         }
         let _permit = acquire_slot(&self.host, TIMEOUT_QUICK).await?;
         let script = outbox_list_script(&self.outbox);
-        let out = self.conn.ssh_exec_timeout(&script, TIMEOUT_QUICK).await.map_err(|e| {
-            tracing::warn!(host = %self.host, error = %e, "outbox_list ssh failed");
-            RfsError::Unavailable
-        })?;
-        parse_outbox_list(out.as_bytes(), now)
+        let out = exec_bytes(&self.conn, &self.host, &script, TIMEOUT_QUICK, OUTBOX_LIST_STDOUT_MAX, "outbox_list").await?;
+        parse_outbox_list(&out, now)
     }
 
     pub async fn outbox_stream(&self, name: &str, max: u64) -> Result<RemoteFile, ShareFileError> {
@@ -1674,11 +1689,10 @@ impl RemoteSite {
             return Err(ShareFileError::NotFound);
         }
         let script = outbox_read_script(&self.outbox, name, max);
-        let out = self.conn.ssh_exec_timeout(&script, TIMEOUT_QUICK).await.map_err(|e| {
-            tracing::warn!(host = %self.host, error = %e, "outbox_read ssh failed");
-            ShareFileError::Unavailable
-        })?;
-        parse_outbox_read(out.as_bytes(), name)
+        let out = exec_bytes(&self.conn, &self.host, &script, TIMEOUT_QUICK, max.saturating_add(4096), "outbox_read")
+            .await
+            .map_err(|_| ShareFileError::Unavailable)?;
+        parse_outbox_read(&out, name)
     }
 
     pub async fn photo_stats(&self, rels: &[Vec<String>]) -> Result<Vec<Option<PhotoStat>>, RfsError> {
