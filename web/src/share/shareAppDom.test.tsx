@@ -4,7 +4,7 @@
  */
 import test, { after, afterEach, before } from 'node:test'
 import assert from 'node:assert/strict'
-import { act, click, mount, settle, setupDom, teardownDom, unmountAll } from '../testing/domHarness'
+import { act, click, mount, settle, setupDom, teardownDom, unmountAll, until } from '../testing/domHarness'
 import { ShareApp } from './ShareApp'
 import { httpShareClient, type ShareClient, type ShareEvents } from './shareApi'
 import { mockShareClient } from './shareMock'
@@ -557,4 +557,85 @@ test('真的沒傳上去：寫「這張沒傳上去」，按「再試一次」�
   await settle(50)
   assert.equal(document.querySelectorAll('.sh-pending li.ok').length, 1)
   assert.equal(document.querySelector('.sh-retry'), null)
+})
+
+/** 送出的 POST 先等 gate 才交給 mock：送出期間輸入框與📎都沒有停用，可以接著打字、選檔。 */
+function gatedSendClient(): { client: ShareClient; release: () => void; sent: Array<{ text: string; attachments: string[] }>; uploaded: string[] } {
+  let release!: () => void
+  const gate = new Promise<void>((r) => (release = r))
+  const sent: Array<{ text: string; attachments: string[] }> = []
+  const uploaded: string[] = []
+  const base = mockShareClient(TOKEN)
+  const client: ShareClient = {
+    ...base,
+    async send(text, clientRequestId, attachments) {
+      sent.push({ text, attachments })
+      await gate
+      return base.send(text, clientRequestId, attachments)
+    },
+    async upload(file) {
+      const r = await base.upload(file)
+      uploaded.push(r.id)
+      return r
+    },
+  }
+  return { client, release, sent, uploaded }
+}
+
+test('送出中打的下一則不會被清掉', async () => {
+  const { client, release, sent } = gatedSendClient()
+  try {
+    await mount(<ShareApp client={client} />)
+    await settle(300)
+    const ta = document.querySelector('textarea')!
+    const setTa = (v: string) =>
+      act(async () => {
+        const set = Object.getOwnPropertyDescriptor(Object.getPrototypeOf(ta), 'value')!.set!
+        set.call(ta, v)
+        ta.dispatchEvent(new Event('input', { bubbles: true }))
+      })
+    await setTa('第一則')
+    await click(document.querySelector('.sh-send')!)
+    await settle(50)
+    await setTa('第二則')
+    release()
+    await settle(300)
+    assert.equal(ta.value, '第二則')
+    assert.equal(sent[0].text, '第一則')
+  } finally {
+    release()
+  }
+})
+
+test('送出中才傳好的附件留著', async () => {
+  const { client, release, sent, uploaded } = gatedSendClient()
+  try {
+    await mount(<ShareApp client={client} />)
+    await settle(300)
+    const ta = document.querySelector('textarea')!
+    await act(async () => {
+      const set = Object.getOwnPropertyDescriptor(Object.getPrototypeOf(ta), 'value')!.set!
+      set.call(ta, '第一則')
+      ta.dispatchEvent(new Event('input', { bubbles: true }))
+    })
+    await click(document.querySelector('.sh-send')!)
+    await settle(50)
+    // 送出期間才選的檔：傳好（拿到 id）但沒有跟這一則送出。
+    const fi = document.querySelector<HTMLInputElement>('input[type="file"]')!
+    Object.defineProperty(fi, 'files', { configurable: true, value: [new File(['hi'], 'late.png', { type: 'image/png' })] })
+    await act(async () => fi.dispatchEvent(new Event('change', { bubbles: true })))
+    await until(() => document.querySelector('.sh-pending li.ok') !== null, '附件傳好')
+    release()
+    await settle(300)
+    assert.equal(sent[0].attachments.length, 0, '第一則送出時沒帶附件')
+    assert.equal(document.querySelectorAll('.sh-pending li').length, 1, '送出期間才傳好的附件還在清單上')
+    assert.equal(document.querySelector('.sh-pending li')!.className, 'ok')
+    // 等 bot 回完、送出鈕恢復，再按送出：這次附件要跟上。
+    await until(() => !document.querySelector<HTMLButtonElement>('.sh-send')!.disabled, '可以再送')
+    await click(document.querySelector('.sh-send')!)
+    await settle(300)
+    assert.deepEqual(sent[1].attachments, uploaded)
+  } finally {
+    release()
+  }
 })

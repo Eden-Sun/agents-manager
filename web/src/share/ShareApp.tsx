@@ -360,8 +360,10 @@ export function ShareApp({ client }: { client: ShareClient }) {
         return
       }
       if (res?.messageId && anchor.current && awaitGen.current === gen) anchor.current = { ...anchor.current, id: res.messageId }
-      setText('')
-      setPending((p) => p.filter((x) => !x.id))
+      // 送出期間又打了字：留著（輸入框送出中沒有停用）。
+      setText((cur) => (cur.trim() === body ? '' : cur))
+      // 只拿掉這一則真的帶走的附件；送出期間才傳好的留著給下一則。
+      setPending((p) => p.filter((x) => !(x.id && ids.includes(x.id))))
       stick.current = true
       if (res?.delivery === 'unknown') setSendError('送出了，但還不確定 bot 有沒有收到，稍等一下。')
       // 不在這裡 setAwaiting(true)：SSE 可能已經先把這一世代清掉。
