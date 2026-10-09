@@ -307,7 +307,8 @@ export function ModelQuickPicker({
   const model = bot?.model ?? null
   const shownModels = sortModels(kind, visibleModels(models, model))
   const effort = bot?.effort ?? null
-  const current = (model && models.find((m) => m.id === model)) || models.find((m) => m.is_default) || models[0]
+  // 完整 id（`claude-sonnet-5-5`）要對到別名（`sonnet`）：同 `ApiModelFields`，先完全相等再 `modelMatches`（#939）。
+  const current = (model && (models.find((m) => m.id === model) ?? models.find((m) => modelMatches(m.id, model)))) || models.find((m) => m.is_default) || models[0]
   const efforts = current?.efforts ?? []
 
   const apply = async (input: PatchBotInput) => {
@@ -319,7 +320,7 @@ export function ModelQuickPicker({
   }
 
   const pickModel = (id: string) => {
-    if (!bot || patching || id === bot.model) {
+    if (!bot || patching || id === bot.model || modelMatches(id, bot.model)) {
       setOpen(false)
       return
     }
@@ -374,9 +375,9 @@ export function ModelQuickPicker({
               key={m.id}
               type="button"
               role="menuitemradio"
-              aria-checked={model === m.id}
+              aria-checked={model === m.id || modelMatches(m.id, model)}
               tabIndex={-1}
-              className={`opt${model === m.id ? ' on' : ''}`}
+              className={`opt${model === m.id || modelMatches(m.id, model) ? ' on' : ''}`}
               title={[m.id, m.description, m.is_default ? '模型預設' : ''].filter(Boolean).join(' — ')}
               disabled={patching}
               onClick={() => pickModel(m.id)}
