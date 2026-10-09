@@ -606,7 +606,9 @@ esac
 exec /bin/cp "$@"
 STUB
 chmod +x "$ROOT/fakecp/cp"
-rc=$(PATH="$ROOT/fakecp:$PATH" run)
+# 失敗的那趟與下面的重跑各給不同的 SWAP_BACKUP_STAMP：DB 備份檔名到秒、已存在就拒絕（rc=5，刻意的），
+# 兩趟落在同一秒（機器忙時跑得快）就會撞名，測的會變成備份撞名而不是 cp 恢復。
+rc=$(SWAP_BACKUP_STAMP=first PATH="$ROOT/fakecp:$PATH" run)
 check_eq "換版 cp 失敗 rc=5" "5" "$rc"
 check_eq "正式 binary 還是舊的" "old-binary" "$(cat "$AGM_REPO/target/release/agents-managerd")"
 check_eq "舊 daemon 被起回來" "old-binary" "$(tail -1 "$AGM_DIR/started-binary.log")"
@@ -614,7 +616,7 @@ check_no "不能說已回滾" "rolled back" "$SWAP_LOG"
 check "log 講清楚複製失敗" "新 binary 複製到 target/release 失敗" "$SWAP_LOG"
 check_file "不留截斷的暫存檔" no "$AGM_REPO/target/release/agents-managerd.new.*"
 check_file "沒有寫 .rejected" no "$AGM_DIR/daemon-update.rejected"
-rc=$(run)
+rc=$(SWAP_BACKUP_STAMP=second run)
 check_eq "cp 恢復後再跑就成功（不是卡在 rc=3）" "0" "$rc"
 check_eq "第二次換上新 binary" "new-binary" "$(tail -1 "$AGM_DIR/started-binary.log")"
 teardown
@@ -631,12 +633,12 @@ esac
 exec /bin/cp "$@"
 STUB
 chmod +x "$ROOT/fakecp/cp"
-rc=$(PATH="$ROOT/fakecp:$PATH" run)
+rc=$(SWAP_BACKUP_STAMP=first PATH="$ROOT/fakecp:$PATH" run)
 check_eq "備份 cp 失敗 rc=3（什麼都沒動）" "3" "$rc"
 check_file "沒有留下半截的 .bak-<old>" no "$AGM_REPO/target/release/agents-managerd.bak-$OLD"
 check_eq "正式 binary 沒動" "old-binary" "$(cat "$AGM_REPO/target/release/agents-managerd")"
 check_file "沒有啟動任何東西" no "$AGM_DIR/started-binary.log"
-rc=$(run)
+rc=$(SWAP_BACKUP_STAMP=second run)
 check_eq "備份恢復正常後再跑就成功" "0" "$rc"
 teardown
 
