@@ -815,6 +815,11 @@ const BOT_ROUTE_POLICIES: &[(&str, &str, BotRoutePolicy)] = &[
     ("POST", "/api/bots/{id}/restore", BotRoutePolicy::UserOrAgm),
     ("POST", "/api/bots/{id}/preview", BotRoutePolicy::UserOrAgm),
     ("DELETE", "/api/bots/{id}/preview", BotRoutePolicy::UserOrAgm),
+    // #989：網頁專用的寫入——群組聊天（以使用者名義）、建任務、撤回／放棄回合。一般 Bot 在自己的專案裡也不能打。
+    ("POST", "/api/projects/{id}/chat", BotRoutePolicy::UserOnly),
+    ("POST", "/api/projects/{id}/missions", BotRoutePolicy::UserOrAgm),
+    ("POST", "/api/turns/{id}/withdraw", BotRoutePolicy::UserOnly),
+    ("POST", "/api/turns/{id}/abandon", BotRoutePolicy::UserOrAgm),
     ("POST", "/api/projects", BotRoutePolicy::UserOrAgm),
     ("PATCH", "/api/projects/{id}", BotRoutePolicy::UserOrAgm),
     ("DELETE", "/api/projects/{id}", BotRoutePolicy::UserOrAgm),
