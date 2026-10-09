@@ -312,4 +312,39 @@ mod tests {
         assert_eq!(system_messages(&app, &bot.id).await, [WAITING_HINT, CLOSED_NOTE], "closure note is written once");
         assert_eq!(crate::app_ports_p13::take_scheduled_flush_count(&bot.id), 0, "resolved episode wakes the queue once");
     }
+
+    /// #978：同一個 run 先跳模型遷移、再換成更新選單（中間沒有「沒有框」的空檔）。原因與提示要跟著換，同一張框不重講。
+    #[tokio::test]
+    async fn a_dialog_that_turns_into_another_dialog_updates_the_reason_and_hint() {
+        let env = tt::env().await;
+        let bot = tt::claude_bot(&env.app, &env.project_id, "codex-dialog-swap").await;
+        sqlx::query("UPDATE bots SET kind='codex' WHERE id=?")
+            .bind(&bot.id)
+            .execute(&env.app.db)
+            .await
+            .unwrap();
+        let run_id = tt::fake_run(&env.app, &bot.id).await;
+        sqlx::query("UPDATE runs SET agent_status='blocked' WHERE id=?")
+            .bind(&run_id)
+            .execute(&env.app.db)
+            .await
+            .unwrap();
+        let app = env.app.clone();
+        let migration = include_str!("lifecycle/fixtures/codex-0.157-model-migration.txt");
+        let update_menu = include_str!("lifecycle/fixtures/codex-0.155-update-menu.txt");
+
+        observe_screen(&app, &run_of(&app, &run_id).await, migration).await;
+        assert_eq!(open_dialog(&run_id), Some(Dialog::Migration));
+
+        observe_screen(&app, &run_of(&app, &run_id).await, update_menu).await;
+        assert_eq!(open_dialog(&run_id), Some(Dialog::UpdateMenu), "blocked_reason reads the episode's dialog");
+        let messages = system_messages(&app, &bot.id).await;
+        assert_eq!(messages.iter().filter(|m| m.as_str() == WAITING_HINT).count(), 1);
+        assert_eq!(messages.iter().filter(|m| m.as_str() == UPDATE_WAITING_HINT).count(), 1);
+
+        observe_screen(&app, &run_of(&app, &run_id).await, update_menu).await;
+        assert_eq!(system_messages(&app, &bot.id).await.len(), messages.len(), "the same dialog is not announced again");
+
+        open().lock().unwrap().remove(&run_id);
+    }
 }

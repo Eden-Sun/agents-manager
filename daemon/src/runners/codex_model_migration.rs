@@ -33,8 +33,12 @@ pub async fn observe(app: &Arc<App>, run: &db::Run) {
 
 pub async fn observe_screen(app: &Arc<App>, run: &db::Run, screen: &str) {
     if let Some(dialog) = Dialog::of(screen) {
-        notify_once(app, run, dialog).await;
+        let changed = notify_once(app, run, dialog).await;
         if run.agent_status == "blocked" {
+            // 框換成另一種時 blocked_reason 跟著變，網頁要重讀一次。
+            if changed {
+                app.emit_bot_status(&run.bot_id).await;
+            }
             return;
         }
 
@@ -124,13 +128,18 @@ pub async fn observe_screen(app: &Arc<App>, run: &db::Run, screen: &str) {
     crate::app_ports_p13::schedule_flush_queued(app, &run.bot_id);
 }
 
-async fn notify_once(app: &(impl crate::capabilities::Db + crate::capabilities::Emit), run: &db::Run, dialog: Dialog) {
+/// 回傳是否新開或換了一種框（要講提示、原因要重推）；同一種框再看到就不動。
+async fn notify_once(app: &(impl crate::capabilities::Db + crate::capabilities::Emit), run: &db::Run, dialog: Dialog) -> bool {
     {
         let mut episodes = open().lock().unwrap();
-        if episodes.contains_key(&run.id) {
-            return;
+        match episodes.get_mut(&run.id) {
+            Some(e) if e.closing || e.dialog == dialog => return false,
+            // 換了一種框：原因跟著換、提示再講一次。
+            Some(e) => e.dialog = dialog,
+            None => {
+                episodes.insert(run.id.clone(), Episode { forced_from: None, closing: false, dialog });
+            }
         }
-        episodes.insert(run.id.clone(), Episode { forced_from: None, closing: false, dialog });
     }
     tracing::warn!(run = %run.id, bot = %run.bot_id, ?dialog, "Codex dialog is waiting for a user choice");
     match db::conversation_id(app.db(), &run.bot_id).await {
@@ -151,4 +160,5 @@ async fn notify_once(app: &(impl crate::capabilities::Db + crate::capabilities::
             tracing::warn!(run = %run.id, error = ?error, "could not post the Codex model migration notice")
         }
     }
+    true
 }
