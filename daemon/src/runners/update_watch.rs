@@ -182,18 +182,32 @@ pub async fn sweep_runs(app: &Arc<App>, runs: anyhow::Result<Vec<db::Run>>) {
         if seen.is_some() {
             tracing::info!(run = %run.id, bot = %run.bot_id, kind = %kind, "有新版等著處理");
         }
+        // 以這輪開頭讀到的舊值做 CAS：掃描期間若 cli_update 等已經改過，0 列就保留較新的值，不用舊快照蓋回去（#976）。
         let update = async {
-            sqlx::query("UPDATE runs SET update_notice = ? WHERE id = ?")
+            sqlx::query("UPDATE runs SET update_notice = ? WHERE id = ? AND update_notice IS ?")
                 .bind(seen.as_deref())
                 .bind(&run.id)
+                .bind(run.update_notice.as_deref())
                 .execute(&app.db)
                 .await
         };
-        if let Some(fence) = observation_fence.as_ref() {
-            let Some(result) = app.hosts.run_if_current(fence, update).await else { continue };
-            let _ = result;
-        } else {
-            let _ = update.await;
+        let result = match observation_fence.as_ref() {
+            Some(fence) => match app.hosts.run_if_current(fence, update).await {
+                Some(result) => result,
+                None => continue,
+            },
+            None => update.await,
+        };
+        match result {
+            Ok(r) if r.rows_affected() == 1 => {}
+            Ok(_) => {
+                tracing::debug!(run = %run.id, "update_notice changed during the sweep; keeping the newer value");
+                continue;
+            }
+            Err(e) => {
+                tracing::warn!(run = %run.id, error = %e, "could not write update_notice");
+                continue;
+            }
         }
         app.emit_bot_status(&run.bot_id).await;
     }
