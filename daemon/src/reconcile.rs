@@ -223,9 +223,14 @@ async fn adopt_orphan_delivery(app: &(impl crate::capabilities::Db + crate::even
 /// 剛送出不久才值得補上 stall watchdog：它會在 12 秒後判「畫面上完全沒有這則」並重送一次，
 /// 對一筆幾小時前的 turn 那是把舊訊息又送一次，比不補更糟。
 fn fresh_enough(created_at: &str) -> bool {
+    fresh_enough_at(created_at, chrono::Utc::now())
+}
+
+/// [`fresh_enough`] 對指定的「現在」：測試傳固定的時刻，不靠牆鐘（#950：高負載下兩次取時間差幾秒，邊界值會翻）。
+fn fresh_enough_at(created_at: &str, now: chrono::DateTime<chrono::Utc>) -> bool {
     const MAX_AGE_SECS: i64 = 120;
     chrono::DateTime::parse_from_rfc3339(created_at)
-        .map(|t| (chrono::Utc::now() - t.with_timezone(&chrono::Utc)).num_seconds() <= MAX_AGE_SECS)
+        .map(|t| (now - t.with_timezone(&chrono::Utc)).num_seconds() <= MAX_AGE_SECS)
         .unwrap_or(false)
 }
 
@@ -1643,11 +1648,15 @@ mod compat_tests {
     fn only_a_freshly_sent_turn_gets_its_watchdog_back() {
         let now = chrono::Utc::now();
         let iso = |d: chrono::Duration| (now - d).to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
-        assert!(super::fresh_enough(&iso(chrono::Duration::seconds(5))));
-        assert!(super::fresh_enough(&iso(chrono::Duration::seconds(119))));
-        assert!(!super::fresh_enough(&iso(chrono::Duration::seconds(121))));
-        assert!(!super::fresh_enough(&iso(chrono::Duration::hours(3))));
-        assert!(!super::fresh_enough("not-a-time"), "讀不懂時間就不要補");
+        // 固定的「現在」：iso 與判斷用同一個時刻，邊界不受 runner 快慢影響。
+        let fresh = |d: chrono::Duration| super::fresh_enough_at(&iso(d), now);
+        assert!(fresh(chrono::Duration::seconds(5)));
+        assert!(fresh(chrono::Duration::seconds(119)));
+        assert!(fresh(chrono::Duration::seconds(120)), "剛好 120 秒還算新");
+        assert!(!fresh(chrono::Duration::seconds(121)));
+        assert!(!fresh(chrono::Duration::hours(3)));
+        assert!(!super::fresh_enough_at("not-a-time", now), "讀不懂時間就不要補");
+        assert!(super::fresh_enough(&iso(chrono::Duration::seconds(5))), "帶牆鐘的版本只驗大方向");
     }
 
     // ---- #75 重開：開機恢復讀不到不算做完 ----

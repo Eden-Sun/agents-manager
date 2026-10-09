@@ -316,9 +316,10 @@ mod tests {
     fn a_user_command_cannot_escape_the_deadline_after_closing_stdout() {
         let deadline = Instant::now() + Duration::from_millis(100);
         let started = Instant::now();
-        let _ = relay_user_command("exec 1>&-; sleep 2", "{}", deadline);
+        // 子行程睡 30 秒、門檻 10 秒：沒綁住 deadline 時會等滿 30 秒而紅；綁住時 100ms 就回，高負載下拖到幾秒也不會誤判（#950）。
+        let _ = relay_user_command("exec 1>&-; sleep 30", "{}", deadline);
         assert!(
-            started.elapsed() < Duration::from_millis(500),
+            started.elapsed() < Duration::from_secs(10),
             "statusline waited for a child after stdout closed"
         );
     }
