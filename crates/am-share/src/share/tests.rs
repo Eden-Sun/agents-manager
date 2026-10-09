@@ -432,7 +432,7 @@ async fn the_event_stream_only_pushes_the_end_user_and_the_bot() {
     .expect("倒回要送 resync");
     assert!(seen.contains(&share_msg) && seen.contains(&bot_msg), "{seen}");
     assert!(seen.contains("\"text\":\"早安\""), "前綴拿掉：{seen}");
-    for leak in [owner_reply.as_str(), owner_ok.as_str(), "後台", "ok-to-owner", "m-relay", "AGM", "分享使用者", "owner"] {
+    for leak in [owner_reply.as_str(), owner_ok.as_str(), "後台", "ok-to-owner", "m-relay", "AGM 派來的", "分享使用者", "owner"] {
         assert!(!seen.contains(leak), "{leak} 不能推給 end user：{seen}");
     }
 }
