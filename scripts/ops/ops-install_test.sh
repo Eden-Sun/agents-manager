@@ -240,6 +240,30 @@ equals "備份期間手改的檔保留" "echo hand-edited-during-backup" "$(sed 
 check "備份期間手改有回報 drifted" "drifted bin/a-kick.sh" "$OUT"
 teardown
 
+# 9d. #942：bun 依副檔名挑 loader——自檢的檔名不是 `.ts` 結尾（例如 `bin/t-tool.ts.new.<pid>`）就會把它當 asset、必定失敗。
+# 自檢要對一份副檔名跟安裝位置一樣的暫存檔做；假 bun 在最後一個引數的 basename 不是 `*.ts` 時 exit 1。
+setup
+printf 'scripts/ops/t-tool.ts  bin/t-tool.ts\n' >> "$REPO/scripts/ops/install-manifest.tsv"
+printf 'console.log("t-v1")\n' > "$REPO/scripts/ops/t-tool.ts"
+"$GITBIN" -C "$REPO" add -A; "$GITBIN" -C "$REPO" commit -q -m ts
+install -m 755 "$REPO/scripts/ops/t-tool.ts" "$DIR/bin/t-tool.ts"
+bump t-tool.ts $'console.log("t-v2")\n'
+FAKEBIN="$ROOT/fakebin"; mkdir -p "$FAKEBIN"
+cat > "$FAKEBIN/bun" <<'BUN'
+#!/bin/sh
+for last; do :; done
+case "$(basename "$last")" in
+  *.ts) exit 0 ;;
+  *) echo "error: unexpected file name $(basename "$last") (bun picks its loader by extension)" >&2; exit 1 ;;
+esac
+BUN
+chmod +x "$FAKEBIN/bun"
+equals "ts 自檢的檔名以 .ts 結尾：exit 0" "$(PATH="$FAKEBIN:$PATH" run)" "0"
+check "ts 裝上了" "installed bin/t-tool.ts" "$OUT"
+equals "新內容換進去" "$(cat "$DIR/bin/t-tool.ts")" 'console.log("t-v2")'
+gone "自檢暫存檔沒有留在安裝目錄" "$DIR/bin/t-tool.ts.new.$$"
+teardown
+
 # 11. 安裝位置是 symlink（使用者把它連到別處）：不換、不把連結吃掉，報 skipped。
 setup
 bump a-kick.sh $'#!/bin/bash\necho a-v2\n'

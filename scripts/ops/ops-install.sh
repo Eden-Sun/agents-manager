@@ -216,8 +216,15 @@ printf '%s\n' "$MANIFEST" | while IFS= read -r line || [ -n "$line" ]; do
     rm -f "$stage"; echo "failed ${tgt}（寫不進去，沒動它）"; echo F >> "$TMP/results"; continue
   fi
   # 先在暫存檔上自檢：沒過就丟掉，安裝位置上的舊檔沒被碰過。
+  # 自檢對一份副檔名跟安裝位置一樣的暫存檔做，不對 `$stage`（`<dest>.new.<pid>`）：bun 依副檔名挑 loader，
+  # `.ts.new.<pid>` 會被當成 asset 而多輸出一檔、必定失敗（#942）。`$stage` 只拿來原子替換。
+  _sc_file="$TMP/selfcheck.${tgt##*.}"
+  if ! cp "$stage" "$_sc_file"; then
+    rm -f "$stage"; echo "failed ${tgt}（暫存不了自檢用的檔，沒動它）"; echo F >> "$TMP/results"; continue
+  fi
   _sc_rc=0
-  err=$(selfcheck "$tgt" "$stage") || _sc_rc=$?
+  err=$(selfcheck "$tgt" "$_sc_file") || _sc_rc=$?
+  rm -f "$_sc_file"
   if [ "$_sc_rc" -eq 2 ] && [ "$err" = "SKIPPED_NO_ZSH" ]; then
     rm -f "$stage"
     sed -e '$d' "$TMP/results" > "$TMP/results.tmp" 2>/dev/null && mv "$TMP/results.tmp" "$TMP/results"
