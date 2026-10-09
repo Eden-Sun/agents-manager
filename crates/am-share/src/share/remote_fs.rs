@@ -23,6 +23,9 @@ pub const RFS_DONE_TAG: &str = "AM_RFS_DONE";
 /// 每個主機的分享 SSH 同時連線上限（避免耗盡 ControlMaster 的 MaxSessions）。
 pub const HOST_SHARE_SLOTS: usize = 4;
 
+/// 下載串流不准用掉的最後幾格，留給上傳／清單／受限 bot 啟動（#988）：慢速下載不能把整台主機的分享動作全部擋住。
+pub const HOST_STREAM_RESERVE: usize = 1;
+
 /// 遠端操作的各種超時規定（§3.1）。
 pub const TIMEOUT_QUICK: Duration = Duration::from_secs(30);
 pub const TIMEOUT_UPLOAD: Duration = Duration::from_secs(120);
@@ -1613,8 +1616,11 @@ impl RemoteSite {
         if !self.conn.is_connected() {
             return Err(ShareFileError::Unavailable);
         }
-        // 下載名額不排隊：拿不到直接 429 (ShareFileError::Unavailable)
+        // 下載名額不排隊：拿不到直接 429 (ShareFileError::Unavailable)；最後 HOST_STREAM_RESERVE 格不給下載。
         let sem = host_slot(&self.host);
+        if sem.available_permits() <= HOST_STREAM_RESERVE {
+            return Err(ShareFileError::Unavailable);
+        }
         let permit = sem.try_acquire_owned().map_err(|_| ShareFileError::Unavailable)?;
 
         if name.is_empty() || name.contains('/') || name.chars().any(char::is_control) || withheld_name(&name.to_ascii_lowercase()) {
