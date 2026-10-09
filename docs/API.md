@@ -832,7 +832,7 @@ Bot principal 只能讀自己的 bot 與 descendant bots 的對話；讀到 ance
 }
 ```
 
-`turns` 為最近 `limit+1` 筆（時間倒序），用來判斷回合是否還在跑與 delivery 警示。
+`turns` 為本頁訊息所屬的回合，加上這段對話仍在 `queued`／`in_flight` 的回合（`created_at` 倒序，同毫秒以 `rowid` 倒序），用來判斷回合是否還在跑與 delivery 警示；翻到更早的頁（`before=`）或帶 `turn_id=` 時，`turns` 跟著那一頁的訊息走，不再固定是最新的幾筆（#954）。
 UI 標籤：`hook` 不標；`terminal_fallback` 或 `incomplete = 1` 標「終端備援 · 可能不完整」；`system` 灰字系統列。
 `ask:` 開頭的訊息 id（2026-10-02，SPEC §6.7a）：claude 的 `AskUserQuestion` 與使用者的回答，`role=system`、`source=system`，`content` 是 JSON 字串
 `{"type":"ask_answers","tool_use_id":"toolu_…","answered":true,"items":[{"header":"拋單倉庫","question":"…","answer":"拿掉拋單","notes":"…"}]}`：
