@@ -760,9 +760,9 @@ for f in ./*; do
   exec 3< "$F" || continue
   if ! am_same || ! am_singlelink; then exec 3<&-; continue; fi
   if [ -n "$G" ]; then
-    m=$(stat -L -c '%s %Y %Z' /dev/fd/3 2>/dev/null) || {{ exec 3<&-; continue; }}
+    m=$(stat -L -c '%s %Y %Z %i %.9Y %.9Z' /dev/fd/3 2>/dev/null) || {{ exec 3<&-; continue; }}
   else
-    m=$(stat -L -f '%z %m %c' /dev/fd/3 2>/dev/null) || {{ exec 3<&-; continue; }}
+    m=$(stat -L -f '%z %m %c %i %Fm %Fc' /dev/fd/3 2>/dev/null) || {{ exec 3<&-; continue; }}
   fi
   h=$(head -c 64 <&3 | od -An -tx1 | tr -d ' \n')
   exec 3<&-
@@ -796,9 +796,19 @@ pub fn parse_outbox_list(out: &[u8], _now: u64) -> Result<Vec<Value>, RfsError> 
         let Ok(line) = String::from_utf8(f.data) else { continue };
         let mut parts = line.splitn(3, '\t');
         let (Some(meta), Some(hex), Some(name)) = (parts.next(), parts.next(), parts.next()) else { continue };
-        let mut meta_parts = meta.split_whitespace();
-        let (Some(Ok(size)), Some(Ok(modified))) = (meta_parts.next().map(str::parse::<u64>), meta_parts.next().map(str::parse::<u64>)) else { continue };
-        let changed = meta_parts.next().and_then(|c| c.parse::<u64>().ok()).unwrap_or(0);
+        // 欄位：大小 mtime ctime [inode 其餘…]；舊腳本只有前三欄，之後的缺了就當沒有版本（空字串）。
+        let tokens: Vec<&str> = meta.split_whitespace().collect();
+        let (Some(Ok(size)), Some(Ok(modified))) = (tokens.first().map(|t| t.parse::<u64>()), tokens.get(1).map(|t| t.parse::<u64>())) else { continue };
+        let changed = tokens.get(2).and_then(|c| c.parse::<u64>().ok()).unwrap_or(0);
+        // 不透明版本：inode＋大小＋奈秒 mtime／ctime（BSD 的 %Fm 可能含空白，所以其餘欄位整個併起來）。
+        let version = tokens.get(3).map_or_else(String::new, |ino| {
+            let mut v = format!("{ino}-{size}");
+            for t in &tokens[4..] {
+                v.push('-');
+                v.push_str(t);
+            }
+            v
+        });
         if name.is_empty() || name.contains('/') || name.chars().any(char::is_control) {
             continue;
         }
@@ -809,7 +819,7 @@ pub fn parse_outbox_list(out: &[u8], _now: u64) -> Result<Vec<Value>, RfsError> 
         if content_is_withheld(&head) {
             continue;
         }
-        files.push((name.to_string(), size, modified, changed));
+        files.push((name.to_string(), size, modified, changed, version));
     }
 
     files.sort_by(|a, b| b.2.max(b.3).cmp(&a.2.max(a.3)).then_with(|| a.0.cmp(&b.0)));
@@ -817,12 +827,13 @@ pub fn parse_outbox_list(out: &[u8], _now: u64) -> Result<Vec<Value>, RfsError> 
 
     let entries: Vec<Value> = files
         .into_iter()
-        .map(|(name, size, modified, changed)| {
+        .map(|(name, size, modified, changed, version)| {
             json!({
                 "name": name,
                 "size": size,
                 "modified": modified,
                 "changed": changed,
+                "version": version,
                 "kept": true,
                 "keep_days": 14,
                 "ttl_secs": Value::Null,

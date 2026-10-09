@@ -607,3 +607,42 @@ async fn remote_photo_fetch_stops_at_the_total_before_sending() {
         .unwrap();
     assert!(out.stdout.len() < 7000 + 256, "stdout {} bytes，第三張不該被送出", out.stdout.len());
 }
+
+/// 組一筆 `ENTRY` 框（與 `outbox_list_script` 的輸出同格式）。
+fn outbox_entry_frame(payload: &str) -> String {
+    format!("ENTRY {}\n{payload}\n", payload.len())
+}
+
+#[test]
+fn remote_outbox_list_carries_an_opaque_version() {
+    let frames = format!(
+        "AM_RFS1\n{}{}AM_RFS_DONE\n",
+        outbox_entry_frame("10 100 100 42 100.000000001 100.000000002\t00\ta.svg"),
+        outbox_entry_frame("10 100 100\t00\tb.svg"),
+    );
+    let entries = parse_outbox_list(frames.as_bytes(), 0).unwrap();
+    let a = entries.iter().find(|e| e["name"] == "a.svg").expect("a.svg 要列出");
+    assert_eq!(a["version"], "42-10-100.000000001-100.000000002");
+    // 舊腳本只有前三欄：仍列出，版本是空字串（字串型別）。
+    let b = entries.iter().find(|e| e["name"] == "b.svg").expect("b.svg 要列出");
+    assert_eq!(b["version"], "");
+}
+
+#[tokio::test]
+async fn remote_outbox_list_version_changes_on_same_second_rewrite() {
+    let scratch = test_dirs::scratch_dir("rfs-outbox-version");
+    let site = make_test_remote_site(&scratch, "host-version-1");
+    let ob = Path::new(&site.outbox);
+
+    fs::write(ob.join("a.svg"), b"<svg>one</svg>").unwrap();
+    let before = site.outbox_list(100).await.unwrap();
+    let v1 = before[0]["version"].as_str().unwrap().to_string();
+    assert!(!v1.is_empty(), "{before:?}");
+
+    // 同長度、同一秒內改寫（新 inode、新奈秒時間）：版本要跟著變。
+    fs::remove_file(ob.join("a.svg")).unwrap();
+    fs::write(ob.join("a.svg"), b"<svg>two</svg>").unwrap();
+    let after = site.outbox_list(100).await.unwrap();
+    let v2 = after[0]["version"].as_str().unwrap();
+    assert_ne!(v1, v2, "{before:?} / {after:?}");
+}
