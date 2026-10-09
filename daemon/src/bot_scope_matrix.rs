@@ -1040,3 +1040,40 @@ async fn the_user_may_flag_a_share_reply() {
     let body = response.text().await.unwrap();
     assert!(!(status == StatusCode::FORBIDDEN && body.contains("user_only")), "{status} {body}");
 }
+
+/// #990：一般 Bot 經跨 bot 的 `prompt` 不能用 `start_if_stopped` 替別人開機、用 `send_now` 打斷別人的回合。
+/// 那等同 `start`／`interrupt`（已是 UserOrAgm），只能是使用者或登記的 AGM 角色。
+#[tokio::test]
+async fn a_plain_bot_cannot_start_or_interrupt_another_bot_through_prompt() {
+    let (env, port, a, b) = share_prompt_server().await;
+    let client = reqwest::Client::new();
+    let url = format!("http://127.0.0.1:{port}/api/bots/{b}/prompt");
+    for (crid, flag) in [("y2-start", "start_if_stopped"), ("y2-now", "send_now")] {
+        let response = client
+            .post(&url)
+            .header("content-type", "application/json")
+            .header("X-AM-Bot-Id", &a)
+            .header("X-AM-Bot-Token", "token-a")
+            .body(format!(r#"{{"text":"x","client_request_id":"{crid}","{flag}":true}}"#))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::FORBIDDEN, "{flag}");
+        let body = response.text().await.unwrap();
+        assert!(body.contains("\"reason\":\"user_only\""), "{flag}: {body}");
+    }
+    let turns: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM turns WHERE client_request_id IN ('y2-start','y2-now')").fetch_one(&env.app.db).await.unwrap();
+    assert_eq!(turns, 0, "a refused prompt must not open a turn on the target");
+    assert!(crate::db::active_run(&env.app.db, &b).await.unwrap().is_none(), "a refused start must not start the target");
+
+    // 使用者（UI token）照舊能用这两个旗标：不是 403。
+    let user = client
+        .post(&url)
+        .header("content-type", "application/json")
+        .header("X-AM-Token", "test-token")
+        .body(r#"{"text":"x","client_request_id":"y2-user","start_if_stopped":true}"#)
+        .send()
+        .await
+        .unwrap();
+    assert_ne!(user.status(), StatusCode::FORBIDDEN, "the user keeps start_if_stopped: {:?}", user.text().await);
+}
