@@ -22,10 +22,17 @@ use std::path::{Path, PathBuf};
 
 use serde_json::{json, Value};
 
+use am_base::hosts::HostConn;
+
 use crate::config::LOCAL_HOST;
 use crate::db;
 use crate::lifecycle::LcError;
 use crate::outbox::ShareStorage;
+use crate::share::remote_fs::{self, PreflightError};
+use crate::share::site::{self, RemoteSite, ShareSite, SiteEnv};
+
+/// 受限 bot 的 claude 最低版本：籠子的旗標與行為是照這版驗的（R-S2 §4.1）。
+pub const MIN_CLAUDE: &str = "2.1.288";
 
 /// 受限 bot 啟動／建立要從 `App` 拿的外部事實（`App` 在 `app_ports_p10` 實作）：本機身分的 env、bot 目錄、claude 模型清單。
 ///
@@ -39,42 +46,99 @@ pub trait CageEnv: ShareStorage {
     fn claude_models(app: &std::sync::Arc<Self>, identity: Option<&str>) -> impl std::future::Future<Output = Result<Value, String>> + Send;
 }
 
-/// 受限 bot 目前只做 claude、只在本機（工作目錄在這台的 data dir 底下）。
-pub fn check_profile(kind: &str, host: &str) -> Result<(), LcError> {
+/// 分享用 bot 目前只做 claude。`host_known`：本機，或設定裡有的主機（專案的 host 在那台上）。
+/// 不認得的主機 409 `unsupported_host`（找不到，不是「不支援遠端」）。
+pub fn check_profile(kind: &str, host: &str, host_known: bool) -> Result<(), LcError> {
     if kind != "claude" {
         return Err(LcError::conflict(
             "unsupported_kind",
             json!({"kind": kind, "message": "分享用的受限 bot 目前只支援 claude（codex／grok 還沒有對應的籠子）"}),
         ));
     }
-    if host != LOCAL_HOST {
+    if host != LOCAL_HOST && !host_known {
         return Err(LcError::conflict(
             "unsupported_host",
-            json!({"host": host, "message": "分享用的受限 bot 只能建在本機專案（工作目錄在這台 daemon 的資料目錄底下）"}),
+            json!({"host": host, "message": "找不到這台主機（請先在設定裡加上它）"}),
         ));
     }
     Ok(())
 }
 
+/// 遠端 preflight 的失敗對應到 409（R-S2 §4.1、§7）：三種都是建立或啟動時就擋下，不留半套的 bot。
+pub fn preflight_conflict(e: PreflightError) -> LcError {
+    match e {
+        PreflightError::Unreachable => LcError::conflict(
+            "share_host_unreachable",
+            json!({"message": "專案所在的主機連不上（或還沒連線），先確認它連得到再試"}),
+        ),
+        PreflightError::ClaudeTooOld { found } => LcError::conflict(
+            "share_claude_too_old",
+            json!({"found": found, "min": MIN_CLAUDE, "message": format!("遠端的 claude 版本要 {MIN_CLAUDE} 以上（讀到：{}）", if found.is_empty() { "讀不到" } else { found.as_str() })}),
+        ),
+        PreflightError::ManagedSettings => LcError::conflict(
+            "share_managed_settings",
+            json!({"message": "遠端機器上有 claude 的 managed settings（它會蓋過籠子的設定），拿掉之後再試"}),
+        ),
+    }
+}
+
+/// 受限遠端 bot 的完整檢查（建立與每次啟動都做）。
+pub async fn preflight_restricted(conn: &HostConn) -> Result<(), LcError> {
+    remote_fs::preflight_restricted(conn, MIN_CLAUDE).await.map_err(preflight_conflict)
+}
+
+/// 遠端分享 bot 的位置；連不上（或這顆不是遠端的）就是 `share_host_unreachable`，fail closed。
+pub async fn remote_site(app: &impl SiteEnv, bot_id: &str) -> Result<RemoteSite, LcError> {
+    match site::resolve(app, bot_id).await {
+        Ok(ShareSite::Remote(r)) => Ok(r),
+        Ok(ShareSite::Local { .. }) => Err(LcError::Upstream(format!("share bot {bot_id} is not on a remote host"))),
+        Err(_) => Err(preflight_conflict(PreflightError::Unreachable)),
+    }
+}
+
 /// 啟動前：這顆是不是受限 bot。是的話回它的工作目錄（順手補建），而且 kind／host 不合就不准起來。
 /// 讀不到 `shared_bots` 一律不啟動——寧可起不來，也不要把受限 bot 當一般 bot 起（fail closed）。
-pub async fn prepare(app: &impl ShareStorage, bot: &db::Bot, host: &str) -> Result<Option<String>, LcError> {
-    let ws = crate::share::store::caged_workspace(app.db_pool(), &bot.id)
+pub async fn prepare(app: &(impl ShareStorage + SiteEnv), bot: &db::Bot, host: &str) -> Result<Option<String>, LcError> {
+    let ws = crate::share::store::caged_workspace(ShareStorage::db_pool(app), &bot.id)
         .await
         .map_err(|e| LcError::Upstream(format!("cannot tell whether bot {} is a restricted share bot: {e}", bot.id)))?;
     let Some(ws) = ws else {
         // 信任分享（trusted）不進籠子，照一般 bot 起；但 outbox 一樣不給 gc 清、上傳的 inbox 一樣要在。
-        if let Ok(Some(dir)) = crate::share::store::workspace(app.db_pool(), &bot.id).await {
-            let _ = crate::share::folder::ensure_inbox(Path::new(&dir));
-            crate::outbox::mark_share_keep(app.data_dir(), &bot.id);
+        if let Ok(Some(dir)) = crate::share::store::workspace(ShareStorage::db_pool(app), &bot.id).await {
+            if host == LOCAL_HOST {
+                let _ = crate::share::folder::ensure_inbox(Path::new(&dir));
+                crate::outbox::mark_share_keep(ShareStorage::data_dir(app), &bot.id);
+            } else if let Ok(site) = remote_site(app, &bot.id).await {
+                // 遠端的 inbox 與保留標記盡力而為（本機也是這樣）：失敗只記 warning，不擋啟動。
+                if let Err(e) = site.ensure_inbox().await {
+                    tracing::warn!(bot = %bot.id, host, error = %e, "remote trusted share folder inbox not ensured");
+                }
+                if let Err(e) = site.mark_share_keep(true).await {
+                    tracing::warn!(bot = %bot.id, host, error = %e, "remote trusted share outbox keep mark not written");
+                }
+            }
         }
         return Ok(None);
     };
-    check_profile(&bot.kind, host)?;
-    // 資料夾不見了就不起來（不替使用者重建一個空的）；inbox 不存在就建。
-    crate::share::folder::ensure_inbox(Path::new(&ws)).map_err(|e| LcError::Upstream(format!("restricted bot folder {ws}: {e}")))?;
-    // outbox 不給 AGM 的 gc 清（使用者 2026-10-04）：每次啟動補一次標記，bot 自己刪掉也回得來。
-    crate::outbox::mark_share_keep(app.data_dir(), &bot.id);
+    check_profile(&bot.kind, host, true)?;
+    if host == LOCAL_HOST {
+        // 資料夾不見了就不起來（不替使用者重建一個空的）；inbox 不存在就建。
+        crate::share::folder::ensure_inbox(Path::new(&ws)).map_err(|e| LcError::Upstream(format!("restricted bot folder {ws}: {e}")))?;
+        // outbox 不給 AGM 的 gc 清（使用者 2026-10-04）：每次啟動補一次標記，bot 自己刪掉也回得來。
+        crate::outbox::mark_share_keep(ShareStorage::data_dir(app), &bot.id);
+        return Ok(Some(ws));
+    }
+    // 遠端：每次啟動都重跑 preflight（claude 可能被換版、managed settings 可能被加），不過就不起來。
+    let site = remote_site(app, &bot.id).await?;
+    preflight_restricted(&site.conn).await?;
+    site.ensure_inbox().await.map_err(|e| match e {
+        remote_fs::RfsError::NotFound => LcError::Upstream(format!("restricted bot folder {ws} on {host} is gone")),
+        remote_fs::RfsError::Unavailable => preflight_conflict(PreflightError::Unreachable),
+        other => LcError::Upstream(format!("restricted bot folder {ws} on {host}: {other}")),
+    })?;
+    if let Err(e) = site.mark_share_keep(true).await {
+        tracing::warn!(bot = %bot.id, host, error = %e, "remote restricted share outbox keep mark not written");
+    }
     Ok(Some(ws))
 }
 
@@ -117,6 +181,14 @@ pub fn cage_env(env: &mut Value, identity_env: &BTreeMap<String, String>, home: 
         map.insert((*k).to_string(), json!(""));
     }
     map.insert("CLAUDE_CODE_DISABLE_CLAUDE_MDS".into(), json!("1"));
+}
+
+/// 遠端受限 bot 的 PATH：那台 `remote_path` 照字面展開（`$HOME`／`~` 換成那台的家目錄）＋標準目錄，**不含** shim 目錄
+/// （不能開子 agent）。ssh 起的 herdr PATH 只有 `/usr/bin:/bin…`，丟掉 PATH 遠端就找不到 `claude`（R-S2 §1 #9）。
+pub fn remote_cage_path(remote_path: &str, home: &str) -> String {
+    let mut dirs = am_base::hosts::remote_path_dirs(remote_path, home);
+    dirs.extend(["/usr/local/bin", "/usr/bin", "/bin", "/usr/sbin", "/sbin"].map(String::from));
+    dirs.join(":")
 }
 
 /// 啟動時重算 [`cage_env`] 要的身分 env（本機）。
@@ -210,15 +282,37 @@ pub fn launch_args(env: &Value, prompt_file: &Path) -> Vec<String> {
     out
 }
 
+/// 系統提示檔的名字（bot 目錄底下）。
+pub const PROMPT_FILE: &str = "share-system-prompt.md";
+
 /// 把受限 bot 的系統提示寫進它自己的 bot 目錄（0600；它的檔案工具碰不到 `bots/`，CLI 啟動時自己讀）。
-pub fn install_prompt(app: &std::sync::Arc<impl CageEnv>, bot: &db::Bot, workspace: &str, env: &Value) -> anyhow::Result<PathBuf> {
+/// 回寫好的路徑字串（遠端就是遠端的路徑）。遠端寫完比對 sha256，不符就是錯誤（不啟動）。
+pub async fn install_prompt<T: CageEnv + SiteEnv>(app: &std::sync::Arc<T>, bot: &db::Bot, host: &str, workspace: &str, env: &Value) -> anyhow::Result<String> {
     let outbox = env.get("AM_OUTBOX").and_then(Value::as_str).filter(|s| !s.is_empty());
+    if host != LOCAL_HOST {
+        let site = remote_site(app.as_ref(), &bot.id).await.map_err(|e| anyhow::anyhow!("遠端分享 bot 的位置：{}", lc_message(&e)))?;
+        let folder_md = site.instructions().await.map_err(|e| anyhow::anyhow!("讀不到遠端資料夾的指示：{e}"))?;
+        // 寫進遠端時結尾換行會被 shell 吃掉、sha 對不上，所以先去掉。
+        let text = system_prompt(workspace, outbox, bot.persona.as_deref(), &folder_md);
+        let dir = format!("{}/bots/{}", site.root, bot.id);
+        RemoteSite::write_private_files(&site.conn, &dir, &[(PROMPT_FILE, text.trim_end_matches('\n').as_bytes())])
+            .await
+            .map_err(|e| anyhow::anyhow!("寫不進遠端的系統提示：{e}"))?;
+        return Ok(format!("{dir}/{PROMPT_FILE}"));
+    }
     let dir = app.bot_dir(&bot.id)?;
     crate::private_files::create_private_dir(&dir)?;
-    let path = dir.join("share-system-prompt.md");
+    let path = dir.join(PROMPT_FILE);
     let folder_md = crate::share::folder::instructions(Path::new(workspace));
     crate::lifecycle::setup::write_private(&path, system_prompt(workspace, outbox, bot.persona.as_deref(), &folder_md).as_bytes())?;
-    Ok(path)
+    Ok(path.to_string_lossy().into_owned())
+}
+
+fn lc_message(e: &LcError) -> String {
+    match e {
+        LcError::Conflict(v) => v.get("message").and_then(Value::as_str).map(str::to_string).unwrap_or_else(|| format!("{e:?}")),
+        other => format!("{other:?}"),
+    }
 }
 
 /// `folder_md`＝[`crate::share::folder::instructions`]：資料夾的 CLAUDE.md／AGENTS.md 與 `.claude/memory/`，放在最後
@@ -259,8 +353,8 @@ pub fn local_home() -> String {
 }
 
 /// 建受限 bot 時要擋掉的請求內容：自訂 args／env 在籠子裡都不會生效，收下來只會讓人以為有用。
-pub fn check_create(kind: &str, host: &str, args: &[String], env: Option<&BTreeMap<String, String>>) -> Result<(), LcError> {
-    check_profile(kind, host)?;
+pub fn check_create(kind: &str, host: &str, host_known: bool, args: &[String], env: Option<&BTreeMap<String, String>>) -> Result<(), LcError> {
+    check_profile(kind, host, host_known)?;
     if !args.is_empty() || env.is_some_and(|e| !e.is_empty()) {
         return Err(LcError::BadValue(json!({
             "error": "bad_request",

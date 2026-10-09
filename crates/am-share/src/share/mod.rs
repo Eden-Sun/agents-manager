@@ -28,6 +28,9 @@ mod remote_fs_tests;
 #[cfg(all(test, feature = "daemon-test-harness"))]
 mod portal_remote_tests;
 
+#[cfg(all(test, feature = "daemon-test-harness"))]
+mod remote_cage_tests;
+
 #[cfg(test)]
 mod test_dirs;
 
@@ -78,6 +81,11 @@ async fn set_remote_keep<S: site::SiteEnv>(app: &S, bot_id: &str, keep: bool, in
             tracing::warn!(bot = %bot_id, keep, "remote share outbox keep mark skipped: the host is unreachable or unknown");
         }
     }
+}
+
+/// 遠端分享 bot 剛建好：放上遠端的保留標記（本機的在 `admin::finish_restricted` 已經放了）。失敗只記 warning（同 `keep_share_outboxes`）。
+pub async fn keep_new_remote_share<S: crate::outbox::ShareStorage + site::SiteEnv>(app: &S, bot_id: &str) {
+    set_remote_keep(app, bot_id, true, false).await;
 }
 
 /// Revoke a bot's public share link after its lifecycle has been decided.

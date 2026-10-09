@@ -35,7 +35,9 @@ export function ShareProfileField({
   /** 信任分享的預設資料夾。 */
   projectPath?: string
 }) {
-  const blocked = shareProfileBlocked(kind, host)
+  const blocked = shareProfileBlocked(kind)
+  // 遠端專案：資料夾、outbox、籠子都在那台（R-S2）；表單照常，只把位置標出來。
+  const remote = host && host !== 'local' ? host : null
   const [browsing, setBrowsing] = useState(false)
   const [asking, setAsking] = useState(false)
   const [ack, setAck] = useState(false)
@@ -104,7 +106,7 @@ export function ShareProfileField({
           )}
           {folder.mode === 'new' && !trusted ? (
             <div className="share-folder-row">
-              <span className="share-folder-prefix">~/shared-bots/</span>
+              <span className="share-folder-prefix">{remote ? `${remote}：~/shared-bots/` : '~/shared-bots/'}</span>
               <input
                 type="text"
                 value={folder.name}
@@ -145,6 +147,7 @@ export function ShareProfileField({
           {browsing ? (
             <DirPicker
               initial={folder.path || undefined}
+              host={host}
               onPick={(p) => {
                 onFolder({ ...folder, mode: 'existing', path: p })
                 setBrowsing(false)

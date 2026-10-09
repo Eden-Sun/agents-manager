@@ -543,6 +543,11 @@ impl HostConn {
         Ok(SshStream::from_child(child, stdout))
     }
 
+    /// SPEC §11.2 `remote_path` 的原始設定（組遠端受限 bot 的 PATH 用，見 `share::cage::remote_cage_path`）。
+    pub fn remote_path(&self) -> String {
+        self.cfg.as_ref().map(|c| c.remote_path.clone()).unwrap_or_default()
+    }
+
     /// SPEC §11.2 `remote_path`.
     fn path_prefix(&self) -> String {
         remote_path_prefix(self.cfg.as_ref().map(|c| c.remote_path.as_str()).unwrap_or_default())

@@ -870,17 +870,20 @@ fn the_default_model_is_the_newest_opus_the_model_list_offers() {
 }
 
 #[tokio::test]
-async fn only_local_claude_bots_can_be_restricted() {
+async fn only_claude_bots_can_be_restricted() {
     let e = tt::env().await;
     let b = restricted_bot(&e.app, &e.project_id, "pub").await;
     sqlx::query("UPDATE bots SET kind = 'codex' WHERE id = ?").bind(&b.id).execute(&e.app.db).await.unwrap();
     let err = crate::lifecycle::start_bot(&e.app, &b.id).await.unwrap_err();
     assert!(matches!(&err, crate::lifecycle::LcError::Conflict(v) if v["reason"] == "unsupported_kind"), "{err:?}");
     assert!(e.herdr.calls_to("agent.start").is_empty(), "一個字都沒起");
-    assert!(cage::check_profile("claude", "m4p").is_err());
-    assert!(cage::check_create("claude", "local", &["--x".into()], None).is_err());
-    assert!(cage::check_create("claude", "local", &[], Some(&[("A".to_string(), "1".to_string())].into())).is_err());
-    assert!(cage::check_create("claude", "local", &[], None).is_ok());
+    // 遠端：設定裡有的主機 claude 過（R-S2）；不認得的主機 409。codex 永遠 409。
+    assert!(cage::check_profile("claude", "m4p", true).is_ok());
+    assert!(cage::check_profile("claude", "m4p", false).is_err());
+    assert!(cage::check_profile("codex", "m4p", true).is_err());
+    assert!(cage::check_create("claude", "local", true, &["--x".into()], None).is_err());
+    assert!(cage::check_create("claude", "local", true, &[], Some(&[("A".to_string(), "1".to_string())].into())).is_err());
+    assert!(cage::check_create("claude", "local", true, &[], None).is_ok());
 }
 
 #[tokio::test]

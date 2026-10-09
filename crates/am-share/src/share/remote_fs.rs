@@ -1326,6 +1326,88 @@ pub fn parse_prune_outbox(out: &[u8]) -> Result<u64, RfsError> {
 
 // ───────────────────── RemoteSite 實作 ─────────────────────
 
+/// 建受限分享 bot 前、以及每次啟動前的遠端檢查（R-S2 §4.1）。順序就是檢查的順序。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PreflightError {
+    /// 主機沒連線、或 ssh 失敗：不確定就當連不上（fail closed）。
+    Unreachable,
+    /// `claude --version` 讀不到或低於最低版本；`found` 是讀到的版本（讀不到是空字串）。
+    ClaudeTooOld { found: String },
+    /// 遠端有 claude 的 managed settings：它優先於 `--settings`，籠子保證不了。
+    ManagedSettings,
+}
+
+/// `claude --version` 的輸出（例如 `2.1.288 (Claude Code)`）裡第一個 `x.y[.z…]`。
+pub fn parse_claude_version(out: &str) -> Option<String> {
+    out.split_whitespace()
+        .map(|w| w.trim_matches(|c: char| !c.is_ascii_digit() && c != '.'))
+        .find(|w| {
+            let parts: Vec<&str> = w.split('.').collect();
+            parts.len() >= 2 && parts.iter().all(|p| !p.is_empty() && p.chars().all(|c| c.is_ascii_digit()))
+        })
+        .map(str::to_string)
+}
+
+/// 版本逐段比較（`2.1.288` ≥ `2.1.287`，`2.10` ≥ `2.9`）。解析不了就是 `false`。
+pub fn version_at_least(found: &str, min: &str) -> bool {
+    let parse = |s: &str| -> Option<Vec<u64>> { s.split('.').map(|p| p.parse().ok()).collect() };
+    let (Some(f), Some(m)) = (parse(found), parse(min)) else { return false };
+    let n = f.len().max(m.len());
+    (0..n)
+        .map(|i| (f.get(i).copied().unwrap_or(0), m.get(i).copied().unwrap_or(0)))
+        .find(|(a, b)| a != b)
+        .is_none_or(|(a, b)| a > b)
+}
+
+/// managed settings 的位置（Linux 與 macOS 各兩處：單檔與 `.d` 目錄）。有檔、或目錄裡有東西就回 `FOUND`。
+pub fn managed_settings_script() -> String {
+    r#"umask 077
+for f in /etc/claude-code/managed-settings.json "/Library/Application Support/ClaudeCode/managed-settings.json"; do
+  if [ -f "$f" ]; then echo FOUND; exit 0; fi
+done
+for d in /etc/claude-code/managed-settings.d "/Library/Application Support/ClaudeCode/managed-settings.d"; do
+  if [ -d "$d" ] && [ -n "$(ls -A "$d" 2>/dev/null)" ]; then echo FOUND; exit 0; fi
+done
+echo NONE
+"#
+    .to_string()
+}
+
+/// 遠端只要主機連得上（信任分享用）。
+pub fn preflight_connected(conn: &HostConn) -> Result<(), PreflightError> {
+    if conn.is_connected() {
+        Ok(())
+    } else {
+        Err(PreflightError::Unreachable)
+    }
+}
+
+/// 受限分享用的完整檢查：連線、claude 版本（≥ `min_claude`）、沒有 managed settings。
+/// 版本那一趟吞掉「找不到 claude」（只回 `NOCLAUDE`）：ssh 本身失敗才是 `Unreachable`。
+pub async fn preflight_restricted(conn: &HostConn, min_claude: &str) -> Result<(), PreflightError> {
+    preflight_connected(conn)?;
+    let _permit = acquire_slot(&conn.name, TIMEOUT_QUICK).await.map_err(|_| PreflightError::Unreachable)?;
+    let ver = conn
+        .ssh_exec_path_timeout("claude --version 2>/dev/null || printf NOCLAUDE", TIMEOUT_QUICK)
+        .await
+        .map_err(|e| {
+            tracing::warn!(host = %conn.name, error = %e, "preflight: claude --version ssh failed");
+            PreflightError::Unreachable
+        })?;
+    let found = parse_claude_version(&ver).unwrap_or_default();
+    if found.is_empty() || !version_at_least(&found, min_claude) {
+        return Err(PreflightError::ClaudeTooOld { found });
+    }
+    let managed = conn.ssh_exec_timeout(&managed_settings_script(), TIMEOUT_QUICK).await.map_err(|e| {
+        tracing::warn!(host = %conn.name, error = %e, "preflight: managed settings check ssh failed");
+        PreflightError::Unreachable
+    })?;
+    if managed.contains("FOUND") {
+        return Err(PreflightError::ManagedSettings);
+    }
+    Ok(())
+}
+
 impl RemoteSite {
     // 建立／啟動（R-S2 用）
     pub async fn resolve_folder(conn: &HostConn, path: &str) -> Result<ResolvedFolder, RfsError> {
