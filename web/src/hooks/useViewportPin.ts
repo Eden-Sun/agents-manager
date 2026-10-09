@@ -9,6 +9,16 @@ import { DRAWER_QUERY, useMediaQuery } from './useMediaQuery'
  * viewport，而 641–1024px 的抽屜版面（iPad 直式 768／820、iPad mini 744）原本沒有 `--vvh`，
  * 鍵盤一彈出來就把底部輸入列蓋住。
  */
+/** 全螢幕 sheet（新增／設定對話框、bot 設定、確認框）：鍵盤彈出後焦點欄位要留在可視範圍內（issue #933）。 */
+export const SHEET_SELECTOR = '.modal, .bot-settings, .confirm-dialog'
+
+/** 焦點在 sheet 裡才補捲；頁面其他地方的焦點不動（輸入列有自己的處理）。 */
+export function revealInSheet(active: Pick<Element, 'closest' | 'scrollIntoView'> | null | undefined): boolean {
+  if (!active || typeof active.closest !== 'function' || !active.closest(SHEET_SELECTOR)) return false
+  active.scrollIntoView({ block: 'nearest' })
+  return true
+}
+
 export function useViewportPin() {
   const narrow = useMediaQuery(DRAWER_QUERY)
   useEffect(() => {
@@ -25,7 +35,10 @@ export function useViewportPin() {
       // iOS 在 focus 之後才動 viewport，多補幾次直到它安定。
       setTimeout(apply, 50)
       setTimeout(apply, 250)
-      setTimeout(apply, 600)
+      setTimeout(() => {
+        apply()
+        revealInSheet(document.activeElement)
+      }, 600)
     }
     vv?.addEventListener('resize', apply)
     vv?.addEventListener('scroll', apply)

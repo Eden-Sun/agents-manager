@@ -253,10 +253,18 @@
 @media (width <= 640px) {
   /* `.anchored` 保險：手機不量齒輪位置，免得殘留 inline left/top 推歪 sheet。 */
 
+  /* 高度跟 `--vvh`（`useViewportPin`）走，iOS 鍵盤彈出時底部按鈕不被蓋住（issue #933）；`inset: 0 0 auto 0` 讓 `height` 生效。 */
+
+  .bs-scrim {
+    bottom: auto;
+    height: var(--vvh, 100dvh);
+  }
+
   .bot-settings,
   .bot-settings.anchored {
     position: fixed;
-    inset: 0;
+    inset: 0 0 auto 0;
+    height: var(--vvh, 100dvh);
     width: auto;
     max-width: none;
     max-height: none;
