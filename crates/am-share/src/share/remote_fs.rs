@@ -202,6 +202,7 @@ pub fn script_common_header() -> String {
     let file_helpers = am_base::outbox_remote::file_identity_helpers("/usr/bin/lsof");
     format!(
         r#"umask 077
+LC_ALL=C; export LC_ALL
 if stat -c %Y . >/dev/null 2>&1; then G=1; else G=; fi
 {dir_helpers}
 {file_helpers}
