@@ -114,6 +114,9 @@ pub struct LivePane {
     /// 畫面列數（`pane.get` 的 `scroll.viewport_rows`）。有值時 claude 的框照真 claude 2.1.280 的樣子
     /// 最多畫 `rows/2 - 5` 列、只留最後幾列（#403）；`None` 時整段都畫、`pane.get` 不回 `scroll`。
     pub rows: Option<u32>,
+    /// 不畫那條永遠在轉的 `✻ Crunching…` 假 spinner。stall watchdog 看到畫面上有進行中的 spinner 就當 agent 在忙、不判失敗不重送
+    /// （issue #956），所以要驗「真的 stall 了」的測試得用一個沒有 spinner 的畫面。
+    pub no_spinner: bool,
 }
 
 /// 框裡的字送出去：進 transcript，有 transcript 檔就照 claude 的格式補一筆 user entry。
@@ -172,7 +175,9 @@ impl LivePane {
             out.push_str(line);
             out.push('\n');
         }
-        out.push_str(&format!("✻ Crunching… ({}s · esc to interrupt)\n", self.reads));
+        if !self.no_spinner {
+            out.push_str(&format!("✻ Crunching… ({}s · esc to interrupt)\n", self.reads));
+        }
         if self.boxed {
             out.push_str("  ╭──────────────────────────────────────────╮\n");
             match self.composer.split_first() {

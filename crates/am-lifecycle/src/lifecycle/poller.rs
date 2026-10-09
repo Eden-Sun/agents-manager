@@ -1095,6 +1095,13 @@ async fn stall_round(
     // failing the turn with a system message the user has to act on.
     let mut resent_now = false;
     if !st.nudged && !st.resent && !unsure {
+        // 沒在框裡、畫面上也看不到：不一定是「沒送到」。Claude 長思考時畫面是 `✽ Orchestrating… (13s · ↓ 537 tokens)` 加一個空的 `❯`，
+        // herdr 偵測又把它當 idle（沒有 `working` 事件），這時重送等於把同一則 prompt 再打一次（issue #956）。
+        // 這一輪 hook 已經有動靜、或畫面上有進行中的 spinner／計時＝agent 收到了，不重送、也不判失敗。
+        if agent_is_active(app, run_id, bot_id, turn_id).await {
+            tracing::info!(turn = %turn_id, bot = %bot_id, "stall watchdog: the agent is already working on the prompt (hook activity or a live spinner); not resending");
+            return StallRound::Done;
+        }
         // 期限那一次 nudge 讀到了才走到這裡：`sent` 已經有了。
         let sent = st.sent.clone().unwrap_or_default();
         let Some((last, blocked)) =
@@ -1171,12 +1178,22 @@ async fn fail_stalled_turn(
     if turn.id != turn_id || turn.delivery != "ok" {
         return Ok(());
     }
+    // issue #956: 判 STALL 前先看 agent 有沒有在動——hook 有動靜（PostToolUse…）或畫面上有進行中的 spinner／計時，
+    // 就是收到了在處理（長思考、編排），不是「沒反應」。herdr 對 Claude 2.1.x 的 Orchestrating 畫面報 idle，所以光看 `agent_status` 會誤判。
+    if has_hook_activity(app.db(), bot_id, &turn.created_at, turn_id).await {
+        tracing::info!(turn = %turn_id, bot = %bot_id, "prompt stall watchdog saw hook activity for this turn; not failing it");
+        return Ok(());
+    }
     // Quote the screen, never assert a cause (the host may well be logged in).
     let mut snapshot: Option<String> = None;
     let mut hints: Vec<String> = Vec::new();
     if let Ok(client) = client_for_run(app, &run).await {
         if let Some(pane) = run.pane_id.as_deref() {
             if let Ok(read) = client.pane_read(pane, "visible", 60).await {
+                if is_screen_busy(&read.text) {
+                    tracing::info!(turn = %turn_id, bot = %bot_id, "prompt stall watchdog saw a live spinner on screen; not failing the turn");
+                    return Ok(());
+                }
                 hints = stall_hint_lines(&read.text);
                 snapshot = Some(read.text);
             }
@@ -1543,6 +1560,51 @@ pub fn is_tool_progress(reply: &str) -> bool {
     crate::capture::claude::is_tool_progress(reply)
 }
 
+/// issue #956: 畫面上有進行中的 spinner／計時嗎。
+/// - [`pane_still_busy`]：Claude／grok 的 spinner 列與 codex 的 `• Working (4s • esc to interrupt)`；
+/// - [`is_activity_shape`]：任何 glyph、任何動詞的 `<Verb>… (13s · ↓ 537 tokens · thinking with high effort)`（Claude 2.1.x 的
+///   `Orchestrating…` 之類，動詞會隨版本換，只有括號裡的經過時間／token 計數是穩定的）。
+/// 已完成的行（`✻ Crunched for 9s`）沒有 `…`，不算。
+pub fn is_screen_busy(screen: &str) -> bool {
+    pane_still_busy(screen) || screen.lines().any(|l| is_activity_shape(l.trim()))
+}
+
+/// issue #956: 這個回合開始之後，這顆 bot 的 hook 有動靜嗎（收件匣有新事件，或這個回合已經有 hook 寫的訊息）。
+/// 有＝agent 收到並在處理。`SessionStart` 不算：自動啟動的 bot 在回合建立之後、prompt 送達之前就會送它，證明不了 prompt 被收下。
+pub async fn has_hook_activity(db: &sqlx::SqlitePool, bot_id: &str, since: &str, turn_id: &str) -> bool {
+    let events: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM hook_events WHERE bot_id = ? AND received_at >= ? AND lower(body_json) NOT LIKE '%sessionstart%'",
+    )
+    .bind(bot_id)
+    .bind(since)
+    .fetch_one(db)
+    .await
+    .unwrap_or(0);
+    if events > 0 {
+        return true;
+    }
+    sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM messages WHERE turn_id = ? AND source = 'hook'")
+        .bind(turn_id)
+        .fetch_one(db)
+        .await
+        .unwrap_or(0)
+        > 0
+}
+
+/// stall watchdog 判斷「agent 其實在忙這則 prompt」：hook 有動靜，或畫面上有進行中的 spinner／計時。讀不到就當作不是。
+async fn agent_is_active(app: &impl LcHost, run_id: &str, bot_id: &str, turn_id: &str) -> bool {
+    let Ok(Some(run)) = db::run(app.db(), run_id).await else { return false };
+    let Ok(Some(turn)) = db::in_flight_turn(app.db(), run_id).await else { return false };
+    if turn.id != turn_id {
+        return false;
+    }
+    if has_hook_activity(app.db(), bot_id, &turn.created_at, turn_id).await {
+        return true;
+    }
+    let Ok(client) = client_for_run(app, &run).await else { return false };
+    let Some(pane) = run.pane_id.as_deref() else { return false };
+    client.pane_read(pane, "visible", 60).await.is_ok_and(|read| is_screen_busy(&read.text))
+}
 
 /// Adopted run without hooks: no `user_prompt` / `stop` payload will ever come, so the terminal
 /// snapshot is the only source (e.g. `managed_by='child'` bots whose parent started the pane).
@@ -2901,7 +2963,7 @@ mod issue_17_tests {
     #[tokio::test]
     async fn an_unproven_resend_that_cannot_be_recorded_is_owed_not_failed() {
         let f = fixture("claude", "").await;
-        live(&f, crate::testing::LivePane { transcript: vec!["⏺ 先前的回覆".into()], swallow_enter: true, ..wide() });
+        live(&f, crate::testing::LivePane { transcript: vec!["⏺ 先前的回覆".into()], swallow_enter: true, no_spinner: true, ..wide() });
         let app = f.env.app.clone();
         db::set_pane_typed(&app.db, &f.run_id).await.unwrap();
         app.stall_timers.lock().await.insert(f.run_id.clone(), 12);
@@ -2985,7 +3047,7 @@ mod issue_17_tests {
     async fn a_resend_blocked_twice_says_what_blocked_it() {
         use std::os::unix::fs::PermissionsExt;
         let f = fixture("claude", "").await;
-        let t = with_transcript(&f, wide()).await;
+        let t = with_transcript(&f, crate::testing::LivePane { no_spinner: true, ..wide() }).await;
         let app = f.env.app.clone();
         db::set_pane_typed(&app.db, &f.run_id).await.unwrap();
         app.stall_timers.lock().await.insert(f.run_id.clone(), 7);
@@ -3050,6 +3112,87 @@ mod issue_17_tests {
             .await
             .unwrap();
         assert!(notes.iter().any(|n| n.contains("hit your usage limit")), "{notes:?}");
+    }
+
+    const ORCHESTRATING: &str = "✽ Orchestrating… (13s · ↓ 537 tokens · thinking with high effort)\n  ⎿ Tip: Run /install-github-app to tag @claude right from your Github issues and PRs\n─────────────────────────────────────────────────────────────────────────────\n❯\n─────────────────────────────────────────────────────────────────────────────\n";
+    const IDLE_BOX: &str = "─────────────────────────────────────────────────────────────────────────────\n❯\n─────────────────────────────────────────────────────────────────────────────\n";
+
+    async fn turn_status(f: &Fixture) -> String {
+        sqlx::query_scalar("SELECT status FROM turns WHERE id = ?").bind(&f.turn_id).fetch_one(&f.env.app.db).await.unwrap()
+    }
+
+    async fn hook_event(f: &Fixture, id: &str, body: &str, at: &str) {
+        let _ = am_base::hook_inbox::migrate(&f.env.app.db).await;
+        sqlx::query("INSERT INTO hook_events (id, bot_id, provider, source, body_json, received_at) VALUES (?, ?, 'claude', 'http', ?, ?)")
+            .bind(id)
+            .bind(&f.bot_id)
+            .bind(body)
+            .bind(at)
+            .execute(&f.env.app.db)
+            .await
+            .unwrap();
+    }
+
+    /// issue #956（pane w9FW:p36）：Claude 2.1.x 長思考時畫面是 `✽ Orchestrating… (13s · ↓ 537 tokens · …)` 加一個空的 `❯`，
+    /// herdr 偵測報 idle。期限到了不能判 STALL，也不能把同一則 prompt 重送一次。
+    #[tokio::test]
+    async fn a_stall_round_does_not_fail_or_resend_while_the_screen_shows_a_live_spinner() {
+        let f = fixture("claude", ORCHESTRATING).await;
+        let app = f.env.app.clone();
+        app.stall_timers().lock().await.insert(f.run_id.clone(), 956);
+        let mut st = Stall::default();
+        let res = stall_round(&app, &f.run_id, &f.bot_id, &f.turn_id, 956, &mut st, Duration::from_millis(1)).await;
+        assert_eq!(res, StallRound::Done);
+        assert_eq!(turn_status(&f).await, "in_flight", "進行中的 spinner 不可判定為 failed");
+        assert!(f.env.herdr.calls_to("pane.send_text").is_empty() && f.env.herdr.calls_to("pane.send_keys").is_empty(), "不重送、不按鍵");
+    }
+
+    /// 最後一關（`fail_stalled_turn`）也看：畫面忙就不判失敗；同樣的回合畫面是空框就照舊判失敗（沒有被放過頭）。
+    #[tokio::test]
+    async fn the_final_stall_check_spares_a_busy_screen_but_still_fails_an_idle_one() {
+        let busy = fixture("claude", ORCHESTRATING).await;
+        fail_stalled_turn(&busy.env.app, &busy.run_id, &busy.bot_id, &busy.turn_id, false, false, None).await.unwrap();
+        assert_eq!(turn_status(&busy).await, "in_flight");
+
+        let idle = fixture("claude", IDLE_BOX).await;
+        fail_stalled_turn(&idle.env.app, &idle.run_id, &idle.bot_id, &idle.turn_id, false, false, None).await.unwrap();
+        assert_eq!(turn_status(&idle).await, "failed", "沒有任何活動跡象：照舊判 STALL");
+    }
+
+    /// 同一個 issue 的另一半：畫面是空框、herdr 沒報 working，但 hook 已經有動靜（`PostToolUse`）＝agent 在處理，不判失敗也不重送。
+    #[tokio::test]
+    async fn a_stall_round_does_not_fail_or_resend_when_the_turn_has_hook_activity() {
+        let f = fixture("claude", IDLE_BOX).await;
+        let app = f.env.app.clone();
+        hook_event(&f, "h956", r#"{"hook_event_name":"PostToolUse"}"#, &db::now()).await;
+        app.stall_timers().lock().await.insert(f.run_id.clone(), 957);
+        let mut st = Stall::default();
+        let res = stall_round(&app, &f.run_id, &f.bot_id, &f.turn_id, 957, &mut st, Duration::from_millis(1)).await;
+        assert_eq!(res, StallRound::Done);
+        assert_eq!(turn_status(&f).await, "in_flight", "有 hook 活動時不可判定為 failed");
+        assert!(f.env.herdr.calls_to("pane.send_text").is_empty() && f.env.herdr.calls_to("pane.send_keys").is_empty(), "不重送、不按鍵");
+        fail_stalled_turn(&app, &f.run_id, &f.bot_id, &f.turn_id, false, false, None).await.unwrap();
+        assert_eq!(turn_status(&f).await, "in_flight", "最後一關也認 hook 活動");
+    }
+
+    /// 什麼不算「有動靜」：回合建立之前的事件、`SessionStart`（自動啟動的 bot 在 prompt 送達前就會送它）、別顆 bot 的事件。
+    #[tokio::test]
+    async fn only_hook_events_after_the_turn_began_from_this_bot_count_as_activity() {
+        let f = fixture("claude", IDLE_BOX).await;
+        let since = db::now();
+        let before = "2000-01-01T00:00:00.000Z";
+        hook_event(&f, "h-old", r#"{"hook_event_name":"PostToolUse"}"#, before).await;
+        hook_event(&f, "h-start", r#"{"hook_event_name":"SessionStart"}"#, &db::now()).await;
+        let other = tt::claude_bot(&f.env.app, &f.env.project_id, "someone-else").await;
+        sqlx::query("INSERT INTO hook_events (id, bot_id, provider, source, body_json, received_at) VALUES ('h-other', ?, 'claude', 'http', '{\"hook_event_name\":\"PostToolUse\"}', ?)")
+            .bind(&other.id)
+            .bind(db::now())
+            .execute(&f.env.app.db)
+            .await
+            .unwrap();
+        assert!(!has_hook_activity(&f.env.app.db, &f.bot_id, &since, &f.turn_id).await, "舊事件、SessionStart、別顆 bot 都不算");
+        hook_event(&f, "h-tool", r#"{"hook_event_name":"PostToolUse"}"#, &db::now()).await;
+        assert!(has_hook_activity(&f.env.app.db, &f.bot_id, &since, &f.turn_id).await);
     }
 }
 
@@ -4178,6 +4321,21 @@ mod codex_limit_quote_tests {
         let lines = codex_usage_notice_lines(&screen);
         assert_eq!(lines.len(), 1, "{lines:?}");
         assert!(lines[0].contains("hit your usage limit") && lines[0].contains("2099 6:43 PM"), "{lines:?}");
+    }
+
+    /// issue #956: 終端畫面在 Orchestrating / thinking with high effort / 計時中時視為運算中；已完成的行與空框不是。
+    #[test]
+    fn is_screen_busy_recognizes_a_live_spinner_but_not_a_finished_one() {
+        let p36_screen = "✽ Orchestrating… (13s · ↓ 537 tokens · thinking with high effort)\n  ⎿ Tip: Run /install-github-app to tag @claude right from your Github issues and PRs\n─────────────────────────────────────────────────────────────────────────────\n❯\n─────────────────────────────────────────────────────────────────────────────\n  eddie | uniform-tracker | OP5.5 H 35% | ...\n";
+        assert!(is_screen_busy(p36_screen), "Claude p36 orchestrating 應判定為 busy");
+        assert!(is_screen_busy("⠦ Thinking… 52s\n"));
+        assert!(is_screen_busy("• Reviewing (1h 02m 03s • ctrl + c to interrupt)\n"));
+        assert!(is_screen_busy("✢ Baking… (3m 18s · ↓ 11.0k tokens)\n❯\n"), "換一個動詞與 glyph 也認得");
+
+        // 過去已完成的回覆或空框不是 busy。
+        assert!(!is_screen_busy("✻ Crunched for 9s · done 11:35 PM\n❯ \n"));
+        assert!(!is_screen_busy("────────────────────\n❯ \n────────────────────\n"));
+        assert!(!is_screen_busy("使用者貼了一句 Thinking (about X)\n"));
     }
 }
 
