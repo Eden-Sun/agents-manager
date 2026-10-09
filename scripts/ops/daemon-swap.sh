@@ -188,6 +188,24 @@ save_token() { # $1=token
     }
 }
 
+# 成功換版後清舊 binary 備份（issue #943）：每趟都留 `agents-managerd.bak-<舊 sha>` 與 `.prev-<舊 sha>-<時間>-<pid>`，
+# 只清 DB 備份的話它們會一路長（實測 155＋157 份、16.7 GB）。只留這趟的 ${BAK}（下一趟回滾要用的是新的備份，
+# 但這趟的還是「剛換掉的那一版」）與 ${PREV}；其餘固定前綴 glob 下的一般檔全刪，符號連結與目錄不碰，刪不掉只 WARN。
+# 只在成功路徑呼叫：回滾／中止時舊備份全留著（可能就是要靠它們手動還原）。
+prune_old_binary_backups() {
+    local f
+    for f in target/release/agents-managerd.bak-* target/release/agents-managerd.prev-*; do
+        [ -f "$f" ] && [ ! -L "$f" ] || continue
+        [ "$f" = "$BAK" ] && continue
+        [ "$f" = "$PREV" ] && continue
+        if rm -f "$f"; then
+            log "removed old binary backup $f"
+        else
+            log "WARN: could not remove old binary backup $f"
+        fi
+    done
+}
+
 # 交還窗口。**rc 不吞**（issue #477）：以前這三處都是 `>/dev/null 2>&1` 然後無條件 log「窗口已交還」，
 # release 真的失敗時（daemon 不在、fence 過期、token 對不上）窗口會一直握到 TTL 到期，而紀錄說已經還了，
 # 下一個人照著 log 判斷就會判錯。回傳 release 自己的 rc，由呼叫端決定要不要因此換結束碼。
@@ -991,6 +1009,7 @@ log "daemon.log since restart: ERROR/drift lines=$ERRS"
 
 echo "$SHORT" > "$AGM_DIR/daemon-update.built"
 prune_old_db_backups
+prune_old_binary_backups
 log "DONE .built=$SHORT pid=$(dpid) db_backup=$DBB"
 # 換版成功、但窗口沒交還：下一個人拿不到窗口，要看得出來（issue #477）。
 [ "$RELEASE_FAILED" = 0 ] || { log "EXIT 8: 換版成功，但 restart 窗口沒有交還成功（見上面的 rc）"; exit 8; }

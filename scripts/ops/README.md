@@ -156,6 +156,7 @@ macOS launchd 的 `daemon-update` PATH 也要保留 `~/.local/bin`，因為 `dae
 
 狀態檔（都在 `AGM_DIR`）：`daemon-update.built`（上次換上去的 short sha，`daemon-swap.sh` 寫）、`daemon-update.rejected`（換上去被回滾的完整 sha，之後不再挑）、
 `daemon-update.fails`（連續失敗輪數）、`daemon-update.lock`（owner 與診斷資訊）、`daemon-update.lock.guard`（核心自動釋放的防重疊 advisory lock）、`daemon-update.now.json`（立即部署請求）、`daemon-update.log`。
+`daemon-swap.sh` 每趟會在 `target/release/` 留 `agents-managerd.bak-<舊 sha>`（回滾用）與 `.prev-<舊 sha>-<時間>-<pid>`（換下來的舊 binary）；**成功**換版最後只保留這趟的那兩個、其餘舊的全刪（DB 備份也是只留最新一份），回滾／中止不清。
 `.built` 不在或指向不在 repo 的 sha 時，腳本推 `ops_alert built_unknown` 並停住——它需要知道線上是哪一版才敢往上換。
 
 同一顆 sha 建好後（`<checkout>/target/release/.built-for`）等安全窗口的那幾輪不會重建；`daemon-swap.sh` 結束碼 4（有人在忙）不算失敗，下一輪再試。
