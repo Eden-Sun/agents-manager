@@ -73,7 +73,9 @@ pub(crate) const SEEN_COOLDOWN: Duration = Duration::from_secs(120);
 
 /// 控制迴圈每拍呼叫。**丟背景跑**（issue #480）。
 pub fn sweep(app: &Arc<App>) {
-    if app.shutdown.is_cancelled() {
+    // 測試裡 controller 每拍都會經過這裡；`SWEEPING` 是行程全域旗標，會跟直接拿 `SweepGuard` 的測試互撞（issue #947）。
+    // 同 `idle_sleep::sweep`／`primary_keep_warm`：測試不跑背景 sweep，要驗的測試自己呼叫 `sweep_once`。
+    if cfg!(test) || app.shutdown.is_cancelled() {
         return;
     }
     let Some(guard) = SweepGuard::take() else {

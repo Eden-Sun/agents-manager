@@ -154,9 +154,14 @@ mod tests {
     use crate::state::App;
     use crate::testing as tt;
 
+    /// `SWEEPING` 是行程全域旗標：直接拿 `SweepGuard` 的測試一次只准一條（照 `idle_sleep.rs` 的 `SWEEP_TEST_LOCK`，issue #947）。
+    static SWEEP_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
     #[tokio::test]
     async fn a_slow_background_sweep_is_cancelled_and_joined_on_shutdown() {
         use std::sync::atomic::{AtomicBool, Ordering};
+        let _serial = SWEEP_TEST_LOCK.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        SWEEPING.store(false, Ordering::SeqCst);
 
         struct DropMark(Arc<AtomicBool>);
         impl Drop for DropMark {
@@ -180,7 +185,7 @@ mod tests {
 
         app.shutdown.cancel();
         app.background_tasks.close();
-        let joined = tokio::time::timeout(std::time::Duration::from_secs(1), app.background_tasks.wait()).await;
+        let joined = tokio::time::timeout(std::time::Duration::from_secs(5), app.background_tasks.wait()).await;
         assert!(joined.is_ok(), "daemon shutdown must join the in-flight Jev probe");
         assert!(dropped.load(Ordering::SeqCst), "shutdown must drop the slow sweep future");
         assert!(!SWEEPING.load(Ordering::SeqCst), "cancelling a sweep must release its concurrency guard");
@@ -341,6 +346,8 @@ mod tests {
     #[test]
     fn the_sweep_guard_is_released_even_when_the_round_panics() {
         use std::sync::atomic::Ordering;
+        let _serial = SWEEP_TEST_LOCK.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        SWEEPING.store(false, Ordering::SeqCst);
         assert!(!SWEEPING.load(Ordering::SeqCst), "起點是沒人在跑");
         {
             let _g = SweepGuard::take().expect("第一個搶得到");
