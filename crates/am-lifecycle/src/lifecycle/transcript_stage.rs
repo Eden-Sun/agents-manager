@@ -147,10 +147,10 @@ fn stage_file_after_missing_check(
         backup_name = Some(backup.clone());
         if preserve_old { outcome = Staged::Diverged { set_aside: dest_dir.join(&backup) }; }
     }
-    if let Err(e) = crate::trusted_open::link_in(&dir, &tmp_name, fname) {
+    if let Err(e) = crate::trusted_open::rename_noreplace_in(&dir, &tmp_name, fname) {
         if e.kind() == std::io::ErrorKind::AlreadyExists {
             let _ = crate::trusted_open::unlink_in(&dir, &tmp_name);
-            // `linkat` publishes the completed, fsynced file atomically. A competing stager won
+            // `rename_noreplace` publishes the completed, fsynced file atomically. A competing stager won
             // the same name between our lookup and publication; verify its contents before
             // accepting it, and retain any divergent destination according to the normal rules.
             let retry = stage_file(src, dest_dir, fname);
@@ -162,12 +162,11 @@ fn stage_file_after_missing_check(
             return retry;
         }
         if let Some(backup) = backup_name.as_deref() {
-            if crate::trusted_open::link_in(&dir, backup, fname).is_ok() { let _ = crate::trusted_open::unlink_in(&dir, backup); }
+            if crate::trusted_open::rename_noreplace_in(&dir, backup, fname).is_ok() { let _ = crate::trusted_open::unlink_in(&dir, backup); }
         }
         let _ = crate::trusted_open::unlink_in(&dir, &tmp_name);
         return Err(e);
     }
-    crate::trusted_open::unlink_in(&dir, &tmp_name)?;
     if let Some(backup) = backup_name.as_deref().filter(|_| !preserve_old) { crate::trusted_open::unlink_in(&dir, backup)?; }
     Ok(outcome)
 }
@@ -207,8 +206,7 @@ fn copy_bound_dir(src: &std::fs::File, dest: &std::fs::File) -> std::io::Result<
                 std::io::copy(&mut from, &mut out)?;
                 out.flush()?;
                 out.sync_all()?;
-                crate::trusted_open::link_in(dest, &tmp_name, &entry.name)?;
-                crate::trusted_open::unlink_in(dest, &tmp_name)
+                crate::trusted_open::rename_noreplace_in(dest, &tmp_name, &entry.name)
             })();
             if let Err(e) = result { let _ = crate::trusted_open::unlink_in(dest, &tmp_name); return Err(e); }
         }

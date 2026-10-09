@@ -326,3 +326,26 @@
         assert!(safe_relative_components(Path::new("")).is_none());
         assert!(safe_relative_components(Path::new(".")).is_none());
     }
+
+    #[test]
+    fn rename_noreplace_atomically_moves_and_rejects_existing() {
+        use std::os::unix::fs::MetadataExt as _;
+        let base = scratch("rename-noreplace");
+        let dir = File::open(&base).unwrap();
+
+        std::fs::write(base.join("src.txt"), b"source").unwrap();
+        rename_noreplace_in(&dir, OsStr::new("src.txt"), OsStr::new("dst.txt")).unwrap();
+        assert!(!base.join("src.txt").exists());
+        assert_eq!(std::fs::read_to_string(base.join("dst.txt")).unwrap(), "source");
+        assert_eq!(std::fs::metadata(base.join("dst.txt")).unwrap().nlink(), 1);
+
+        std::fs::write(base.join("src2.txt"), b"source2").unwrap();
+        let err = rename_noreplace_in(&dir, OsStr::new("src2.txt"), OsStr::new("dst.txt")).unwrap_err();
+        assert_eq!(err.kind(), io::ErrorKind::AlreadyExists);
+        assert_eq!(std::fs::read_to_string(base.join("src2.txt")).unwrap(), "source2");
+        assert_eq!(std::fs::read_to_string(base.join("dst.txt")).unwrap(), "source");
+        assert_eq!(std::fs::metadata(base.join("dst.txt")).unwrap().nlink(), 1);
+        assert_eq!(std::fs::metadata(base.join("src2.txt")).unwrap().nlink(), 1);
+
+        std::fs::remove_dir_all(&base).unwrap();
+    }
