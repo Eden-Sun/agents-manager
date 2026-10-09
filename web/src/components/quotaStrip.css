@@ -682,17 +682,20 @@
   }
 
   /* 貼額度列正下方而非底部 sheet：底部要滑很遠且擋輸入框（2026-09-09 使用者）。 */
+  /* 寬度等於視窗（2026-10-09 使用者：手機按額度的 pop up 要全螢幕寬）：左右貼齊、只讓出 safe-area（瀏海、圓角螢幕），
+     不再留 8px 邊；`position: fixed` 直接對視窗定位，寬度由左右兩個 inset 決定，超過的內容在 max-height 內捲動。 */
 
   .quota-pop {
     position: fixed;
     top: 100px;
-    right: 8px;
-    left: 8px;
+    left: env(safe-area-inset-left, 0px);
+    right: env(safe-area-inset-right, 0px);
     bottom: auto;
     width: auto;
     max-width: none;
+    box-sizing: border-box;
     max-height: min(60dvh, 480px);
-    border-radius: 12px;
+    border-radius: 0;
     padding: 10px 12px;
     z-index: 80;
   }
