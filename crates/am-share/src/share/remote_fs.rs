@@ -781,7 +781,7 @@ pub fn parse_outbox_list(out: &[u8], _now: u64) -> Result<Vec<Value>, RfsError> 
         if name.is_empty() || name.contains('/') || name.chars().any(char::is_control) {
             continue;
         }
-        if withheld_name(name) {
+        if withheld_name(&name.to_ascii_lowercase()) {
             continue;
         }
         let head = hex_bytes(hex);
@@ -1585,7 +1585,7 @@ impl RemoteSite {
         let sem = host_slot(&self.host);
         let permit = sem.try_acquire_owned().map_err(|_| ShareFileError::Unavailable)?;
 
-        if name.is_empty() || name.contains('/') || name.chars().any(char::is_control) || withheld_name(name) {
+        if name.is_empty() || name.contains('/') || name.chars().any(char::is_control) || withheld_name(&name.to_ascii_lowercase()) {
             return Err(ShareFileError::NotFound);
         }
 
@@ -1670,7 +1670,7 @@ impl RemoteSite {
             return Err(ShareFileError::Unavailable);
         }
         let _permit = acquire_slot(&self.host, TIMEOUT_QUICK).await.map_err(|_| ShareFileError::Unavailable)?;
-        if name.is_empty() || name.contains('/') || name.chars().any(char::is_control) || withheld_name(name) {
+        if name.is_empty() || name.contains('/') || name.chars().any(char::is_control) || withheld_name(&name.to_ascii_lowercase()) {
             return Err(ShareFileError::NotFound);
         }
         let script = outbox_read_script(&self.outbox, name, max);
