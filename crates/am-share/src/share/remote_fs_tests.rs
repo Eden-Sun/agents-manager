@@ -664,3 +664,28 @@ async fn remote_downloads_leave_a_slot_for_other_share_ops() {
     assert!(list.is_ok());
     drop(held);
 }
+
+#[test]
+fn resolve_folder_length_is_bytes_under_a_utf8_bash() {
+    let tmp = test_dirs::scratch_dir("rfs-utf8-bash");
+    let target = tmp.join("中文資料夾");
+    fs::create_dir_all(&target).unwrap();
+    let path = target.to_str().unwrap();
+
+    let script = resolve_folder_script(path, None);
+    let output = match std::process::Command::new("bash")
+        .arg("--posix")
+        .arg("-c")
+        .arg(&script)
+        .env("LC_ALL", "C.UTF-8")
+        .env("HOME", &tmp)
+        .output()
+    {
+        Ok(out) => out,
+        Err(_) => return,
+    };
+
+    let r = parse_resolve_folder(&output.stdout).expect("parse resolve folder under utf-8 bash");
+    assert!(r.physical.ends_with("中文資料夾"));
+}
+
