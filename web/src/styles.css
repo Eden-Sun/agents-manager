@@ -3381,7 +3381,8 @@ button.model-tag:hover:not(:disabled) {
   }
 }
 
-/* 手機通知改從上面出現：390px 右下是送出鍵，且 `.shelf`（30）高於 `.notices`（20）會切掉它（2026-09-08 實測）。z-index 80：高於 shelf、低於 modal 900。 */
+/* 手機通知改從上面出現：390px 右下是送出鍵，且 `.shelf`（30）高於 `.notices`（20）會切掉它（2026-09-08 實測）。
+   z-index 1100：全螢幕 sheet 在 900（`.modal-backdrop`）／1000（`.confirm-backdrop`），通知要在上面，否則 sheet 裡操作失敗的錯誤訊息被蓋住看不到（issue #932）。 */
 
 @media (width <= 640px) {
   .notices {
@@ -3389,7 +3390,7 @@ button.model-tag:hover:not(:disabled) {
     right: 8px;
     bottom: auto;
     left: 8px;
-    z-index: 80;
+    z-index: 1100;
     max-width: none;
   }
 }
