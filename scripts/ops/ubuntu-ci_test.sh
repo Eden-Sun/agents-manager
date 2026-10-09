@@ -434,5 +434,72 @@ run >/dev/null
 check "普通失敗混中斷仍是 failure" "state=failure" "$FIX/gh.log"
 teardown
 
+# 10. #945：跑到一半 ENOSPC（同機 worktree 把碟寫滿）不是這個 commit 的錯：記 error、不前進 last-sha、不算 failure，
+#     同一個 sha 下一輪重跑；跟中斷共用 interrupted-<sha> 計數，連續 3 次才當 failure。
+setup
+SHA=$(git -C "$ROOT/work" rev-parse HEAD)
+printf '==> daemon: cargo test\nerror: No space left on device (os error 28)\ntest a::b ... FAILED\n' > "$FIX/title.daemon"
+echo 1 > "$FIX/rc.daemon"
+equals "磁碟滿第 1 次 exit 0" "$(run)" "0"
+check "送 error" "state=error" "$FIX/gh.log"
+check "說明磁碟滿、會重跑" "磁碟滿：.*會重跑" "$FIX/gh.log"
+check_no "不送 failure" "state=failure" "$FIX/gh.log"
+check "status.json 是 error／disk_full" '"reason":"disk_full"' "$CI/status.json"
+[ ! -e "$CI/last-sha" ] && echo "ok   - 磁碟滿不寫 last-sha" && PASS=$((PASS + 1)) || { echo "FAIL - 磁碟滿不該寫 last-sha"; FAIL=$((FAIL + 1)); }
+equals "計數是 1" "$(cat "$CI/interrupted-$SHA")" "1"
+equals "磁碟滿第 2 次 exit 0（同一個 sha 重跑）" "$(run)" "0"
+equals "計數是 2" "$(cat "$CI/interrupted-$SHA")" "2"
+check_no "兩次都還不是 failure" "state=failure" "$FIX/gh.log"
+equals "磁碟滿第 3 次 exit 0" "$(run)" "0"
+check "連續 3 次才當 failure" "連續磁碟滿 3 次：紅：daemon" "$FIX/gh.log"
+equals "failure 寫 last-sha" "$(cat "$CI/last-sha")" "$SHA"
+[ ! -e "$CI/interrupted-$SHA" ] && echo "ok   - 計數檔已刪" && PASS=$((PASS + 1)) || { echo "FAIL - 計數檔還在"; FAIL=$((FAIL + 1)); }
+teardown
+
+# 10b. check.sh 自己的磁碟證據（`!! 失敗時磁碟只剩`）也算；中斷與磁碟滿共用同一個計數。
+setup
+SHA=$(git -C "$ROOT/work" rev-parse HEAD)
+printf '!! 失敗時磁碟只剩 1G\n' > "$FIX/title.ops"
+echo 1 > "$FIX/rc.ops"
+run >/dev/null
+check "check.sh 的磁碟證據：error／disk_full" '"reason":"disk_full"' "$CI/status.json"
+check_no "不送 failure" "state=failure" "$FIX/gh.log"
+teardown
+
+# 10c. 跑完再量一次剩餘空間低於門檻（沒有任何 ENOSPC 字樣）也算磁碟滿。
+setup
+echo 1 > "$FIX/rc.web"
+export AGM_CI_MIN_FREE_GB=0
+cat > "$ROOT/bin/df" <<'DF'
+#!/bin/sh
+# 預檢那一次（log 還不存在）回很多、跑完之後回 1 KB。
+if [ -e "$AGM_CI_ROOT/logs/$(git -C "$AGM_CI_ROOT/repo" rev-parse HEAD 2>/dev/null).log" ] && [ -s "$AGM_CI_ROOT/logs/$(git -C "$AGM_CI_ROOT/repo" rev-parse HEAD).log" ]; then
+  printf 'Filesystem 1024-blocks Used Available Capacity Mounted\nx 100 99 1 99%% /\n'
+else
+  printf 'Filesystem 1024-blocks Used Available Capacity Mounted\nx 999999999 1 999999998 1%% /\n'
+fi
+DF
+chmod +x "$ROOT/bin/df"
+export AGM_CI_MIN_FREE_GB=5
+run >/dev/null
+check "跑完磁碟已低於門檻：error／disk_full" '"reason":"disk_full"' "$CI/status.json"
+check_no "不送 failure" "state=failure" "$FIX/gh.log"
+export AGM_CI_MIN_FREE_GB=0
+teardown
+
+# 10d. 磁碟全滿時預檢那條路：先寫 disk-low-sha，status.json 寫不進去（這裡把它換成目錄）也不能中止、不能每分鐘重送 error。
+setup
+(cd "$ROOT/work" && echo 1 > f && git add f && git commit -q -m c2 && git push -q origin main)
+SHA=$(git -C "$ROOT/work" rev-parse HEAD)
+mkdir -p "$CI"; mkdir "$CI/status.json"
+export AGM_CI_MIN_FREE_GB=99999999
+equals "status.json 寫不進去也 exit 0" "$(run)" "0"
+equals "disk-low-sha 照樣記下" "$(cat "$CI/disk-low-sha")" "$SHA"
+: > "$FIX/gh.log"
+equals "下一輪 exit 0" "$(run)" "0"
+equals "同一個 sha 不重複送 error" "$(wc -l < "$FIX/gh.log" | tr -d ' ')" "0"
+export AGM_CI_MIN_FREE_GB=0
+teardown
+
 echo "ubuntu-ci_test: $PASS passed, $FAIL failed"
 [ "$FAIL" = 0 ]
