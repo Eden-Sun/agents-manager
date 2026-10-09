@@ -3322,13 +3322,15 @@ button.model-tag:hover:not(:disabled) {
 }
 
 /* 表單欄位手機一律 ≥16px（2026-09-08）：iOS Safari < 16px 聚焦會放大整頁，而 viewport 不該有 `maximum-scale`。
-   只管可輸入欄位，`docs/UI-DECISIONS.md` 的「其餘文字下限 12px」照舊。 */
+   只管可輸入欄位，`docs/UI-DECISIONS.md` 的「其餘文字下限 12px」照舊。
+   `!important`：元件樣式（`.field input`、`.mini-input`、各 popover 的輸入框…）特異性比這條高，且常在它之後載入，
+   少了 `!important` 只要有一個元件把欄位寫成 13px，iOS 聚焦就又放大整頁（issue #934）。 */
 
 @media (width <= 640px) {
   input:not([type='checkbox'], [type='radio'], [type='file'], [type='range']),
   textarea,
   select {
-    font-size: 16px;
+    font-size: 16px !important;
   }
 }
 
