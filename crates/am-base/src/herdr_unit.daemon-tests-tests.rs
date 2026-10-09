@@ -83,7 +83,8 @@
 
     /// 等背景 spawn 的假 herdr 寫完（它由 reap thread 收，不在這條執行緒上）。
     fn read_eventually(p: &Path) -> String {
-        for _ in 0..100 {
+        // 30 秒上限（issue #952）：原本 2 秒在高負載下會先到期。
+        for _ in 0..1500 {
             if let Ok(s) = std::fs::read_to_string(p) {
                 if !s.is_empty() {
                     return s;

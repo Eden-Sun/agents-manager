@@ -3566,7 +3566,8 @@ mod tests {
 
     /// `echo $! > file` creates the file before writing the PID, so wait for parseable content, not just existence.
     async fn wait_for_pid_file(path: &std::path::Path) -> Option<u32> {
-        for _ in 0..200 {
+        // 30 秒上限（issue #952）：原本 2 秒在整樹平行跑、負載高時會先到期。
+        for _ in 0..3000 {
             if let Some(pid) = std::fs::read_to_string(path).ok().and_then(|text| text.trim().parse().ok()) {
                 return Some(pid);
             }
@@ -3623,19 +3624,9 @@ mod tests {
         assert!(!second_ran.exists(), "the contender must not enter its install section");
 
         std::fs::write(&release_file, "release").unwrap();
-        for _ in 0..300 {
-            if unsafe { libc::kill(installer_pid as i32, 0) } != 0 {
-                break;
-            }
-            tokio::time::sleep(Duration::from_millis(10)).await;
-        }
+        crate::testing::eventually!(unsafe { libc::kill(installer_pid as i32, 0) } != 0);
         assert_ne!(unsafe { libc::kill(installer_pid as i32, 0) }, 0, "fake installer should finish");
-        for _ in 0..200 {
-            if !parse_probe(&local_sh(&probe_script(&lock), Duration::from_secs(5)).await.unwrap()).unwrap() {
-                break;
-            }
-            tokio::time::sleep(Duration::from_millis(10)).await;
-        }
+        crate::testing::eventually!(!parse_probe(&local_sh(&probe_script(&lock), Duration::from_secs(5)).await.unwrap()).unwrap());
         assert!(!parse_probe(&local_sh(&probe_script(&lock), Duration::from_secs(5)).await.unwrap()).unwrap(), "lock becomes recoverable after the installer exits");
         local_sh(&locked_script(&lock, &format!("touch '{}'", second_ran.display())), Duration::from_secs(5)).await.expect("a completed installer must release the lock");
         assert!(second_ran.exists());
@@ -3693,12 +3684,7 @@ mod tests {
         let second_did_not_run = !second_ran.exists();
 
         std::fs::write(&release_file, "release").unwrap();
-        for _ in 0..500 {
-            if unsafe { libc::kill(installer_pid as i32, 0) } != 0 {
-                break;
-            }
-            tokio::time::sleep(Duration::from_millis(10)).await;
-        }
+        crate::testing::eventually!(unsafe { libc::kill(installer_pid as i32, 0) } != 0);
         let installer_finished = unsafe { libc::kill(installer_pid as i32, 0) } != 0;
         let released = !parse_probe(&local_sh(&probe_script(&lock), Duration::from_secs(5)).await.unwrap()).unwrap();
         let reacquired = local_sh(&locked_script(&lock, &format!("touch '{}'", second_ran.display())), Duration::from_secs(5)).await.is_ok();
