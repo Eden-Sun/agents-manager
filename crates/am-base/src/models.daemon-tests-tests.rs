@@ -283,7 +283,7 @@
         assert_eq!(global.as_deref(), Some("high"));
         assert_eq!(per_model.get("claude-opus-5").map(String::as_str), Some("low"));
 
-        let models = claude_static_models(global.as_deref(), &per_model);
+        let models = claude_static_models(global.as_deref(), &per_model, None);
         let of = |id: &str| models.iter().find(|m| m["id"] == id).unwrap()["default_effort"].as_str().map(String::from);
         assert_eq!(of("opus"), Some("low".into()), "per-model override wins");
         assert_eq!(of("sonnet"), Some("high".into()), "falls back to the account default");
@@ -292,7 +292,7 @@
         let (global2, per_model2) =
             parse_claude_effort_settings(r#"{"modelSettings":{"claude-fable-5-1":{"effortLevel":"low"}}}"#);
         assert_eq!(global2, None);
-        let models2 = claude_static_models(global2.as_deref(), &per_model2);
+        let models2 = claude_static_models(global2.as_deref(), &per_model2, None);
         let of2 = |id: &str| models2.iter().find(|m| m["id"] == id).unwrap()["default_effort"].clone();
         assert_eq!(of2("fable"), json!("low"));
         // No override and no global: the CLI's own default (verified on a fresh cc2 identity).
@@ -302,13 +302,13 @@
         let (g3, m3) = parse_claude_effort_settings("");
         assert_eq!(g3, None);
         assert!(m3.is_empty());
-        let models3 = claude_static_models(g3.as_deref(), &m3);
+        let models3 = claude_static_models(g3.as_deref(), &m3, None);
         assert_eq!(models3[0]["default_effort"], json!("high"));
         // #880：haiku 的內建預設是 medium；有 global 或 override 時照設定。
         let of3 = |id: &str| models3.iter().find(|m| m["id"] == id).unwrap()["default_effort"].clone();
         assert_eq!(of3("haiku"), json!("medium"));
         assert_eq!(of3("sonnet"), json!("high"));
-        let models4 = claude_static_models(Some("low"), &BTreeMap::new());
+        let models4 = claude_static_models(Some("low"), &BTreeMap::new(), None);
         assert_eq!(models4.iter().find(|m| m["id"] == "haiku").unwrap()["default_effort"], json!("low"));
     }
 
@@ -337,7 +337,7 @@
         assert_eq!(of("SONNET").as_deref(), Some("high"));
         assert_eq!(of("gpt-5"), None);
 
-        let models = claude_static_models(global.as_deref(), &per_model);
+        let models = claude_static_models(global.as_deref(), &per_model, None);
         let eff = |id: &str| models.iter().find(|m| m["id"] == id).unwrap()["default_effort"].clone();
         assert_eq!(eff("sonnet"), json!("high"));
         assert_eq!(eff("opus"), json!("medium"));
@@ -351,6 +351,83 @@
             .map(|(k, v)| (k.to_string(), v.to_string()))
             .collect();
         assert_eq!(claude_effort_override(&m, "opus").as_deref(), Some("high"));
+    }
+
+    /// #941：claude 的預設標記跟著帳號 settings.json 的頂層 `model`，不是寫死 opus。
+    #[test]
+    fn claude_default_mark_follows_settings_model() {
+        let marks = |default: Option<&str>| -> Vec<String> {
+            claude_static_models(None, &BTreeMap::new(), default)
+                .iter()
+                .filter(|m| m["is_default"] == json!(true))
+                .map(|m| m["id"].as_str().unwrap().to_string())
+                .collect()
+        };
+        assert_eq!(marks(Some("sonnet")), ["sonnet"]);
+        assert_eq!(marks(Some("claude-sonnet-5-5")), ["sonnet"]);
+        assert_eq!(marks(Some("opus[1m]")), ["opus"]);
+        assert_eq!(marks(Some("claude-opus-5-5")), ["opus"]);
+        assert_eq!(marks(Some("claude-fable-5-1")), ["fable"]);
+        // 沒設、或對不到任何系列：一顆都不標，不猜 opus。
+        assert!(marks(None).is_empty());
+        assert!(marks(Some("gpt-6-luna")).is_empty());
+    }
+
+    #[test]
+    fn claude_alias_of_takes_whole_names_and_family_prefixes_only() {
+        assert_eq!(claude_alias_of("sonnet"), Some("sonnet"));
+        assert_eq!(claude_alias_of("Opus[1m]"), Some("opus"));
+        assert_eq!(claude_alias_of("claude-haiku-5-5"), Some("haiku"));
+        assert_eq!(claude_alias_of("claude-sonnet-5"), Some("sonnet"));
+        assert_eq!(claude_alias_of("claude-opus"), Some("opus"));
+        // 子字串不算：名字裡有家族名但不是那個家族的，對不到。
+        assert_eq!(claude_alias_of("my-sonnet-experiment"), None);
+        assert_eq!(claude_alias_of(""), None);
+    }
+
+    #[test]
+    fn claude_settings_model_is_read_from_the_same_file() {
+        assert_eq!(parse_claude_default_model(r#"{"model":"sonnet","effortLevel":"low"}"#).as_deref(), Some("sonnet"));
+        assert_eq!(parse_claude_default_model(r#"{"model":"  "}"#), None);
+        assert_eq!(parse_claude_default_model(r#"{"effortLevel":"high"}"#), None);
+        assert_eq!(parse_claude_default_model(""), None);
+    }
+
+    /// #941：codex 身分 `config.toml` 頂層的 model／effort 才是它實際會跑的；只有 app-server 的 isDefault 不夠。
+    #[test]
+    fn codex_identity_config_sets_default_model_and_effort() {
+        let models = || {
+            vec![
+                json!({"id": "gpt-6-sol", "is_default": true, "default_effort": "low"}),
+                json!({"id": "gpt-6-luna", "is_default": false, "default_effort": "low"}),
+            ]
+        };
+        // 模型與強度都有設：luna 成為預設，強度覆寫在 luna 上，sol 不動。
+        let m = codex_apply_identity_config(models(), "model = \"gpt-6-luna\"\nmodel_reasoning_effort = \"high\"\n");
+        assert_eq!(m[0]["is_default"], json!(false));
+        assert_eq!(m[1]["is_default"], json!(true));
+        assert_eq!(m[1]["default_effort"], json!("high"));
+        assert_eq!(m[0]["default_effort"], json!("low"));
+        // 只有強度：覆寫 app-server 回的預設模型。
+        let m = codex_apply_identity_config(models(), "model_reasoning_effort = 'medium'\n");
+        assert_eq!(m[0]["default_effort"], json!("medium"));
+        assert_eq!(m[1]["default_effort"], json!("low"));
+        // 設的模型不在清單裡：一顆都不標，不猜。
+        let m = codex_apply_identity_config(models(), "model = \"gpt-9\"\n");
+        assert!(m.iter().all(|v| v["is_default"] == json!(false)));
+        // 沒設、讀不懂、或只在 [profiles] 裡：照 app-server 原樣。
+        assert_eq!(codex_apply_identity_config(models(), ""), models());
+        assert_eq!(codex_apply_identity_config(models(), "not toml = = ="), models());
+        assert_eq!(codex_apply_identity_config(models(), "[profiles.x]\nmodel = \"gpt-6-luna\"\n"), models());
+    }
+
+    /// #941：身分的家目錄要真的帶進 `codex app-server`／`grok models` 的環境，讀檔也讀同一個目錄。
+    #[test]
+    fn identity_home_reaches_the_cli_env_and_its_files() {
+        assert_eq!(home_env_prefix("CODEX_HOME", "/home/u/.codex-cx2"), "CODEX_HOME='/home/u/.codex-cx2'; export CODEX_HOME; ");
+        assert_eq!(home_file_expr(Some("/home/u/.grok-g2"), ".grok", "config.toml"), "'/home/u/.grok-g2'/config.toml");
+        // 沒有身分：照 CLI 預設讀 `$HOME/<預設目錄>`。
+        assert_eq!(home_file_expr(None, ".grok", "models_cache.json"), "\"$HOME/.grok/models_cache.json\"");
     }
 
     #[test]
