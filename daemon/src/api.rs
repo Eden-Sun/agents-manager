@@ -529,9 +529,17 @@ async fn relay_announce(
             );
         }
     };
-    crate::agent_relay::announce(&host, &body.bot_id, &body.to_agent, &body.text);
+    // 寄件 bot 送這句當下正在跑的回合（#927，child_done 用它認「這一回合已經自己回報過」）。找不到不擋送出，只是少一個綁定。
+    let from_turn = match crate::lifecycle::relay_watch::sender_turn_at(&app, &body.bot_id, &db::now()).await {
+        Ok(turn) => turn,
+        Err(e) => {
+            tracing::warn!(bot = %body.bot_id, error = ?e, "relay announce could not find the sender's running turn");
+            None
+        }
+    };
+    crate::agent_relay::announce(&host, &body.bot_id, &body.to_agent, &body.text, from_turn.as_deref());
     // #380：收件方 UI 看得出在跑，字卡在輸入列時補 Enter；先登記受關機屏障管理的 watcher，再回 2xx。
-    crate::lifecycle::relay_watch::on_resolved_announce(&app, &body.bot_id, &body.text, relay_run).await;
+    crate::lifecycle::relay_watch::on_resolved_announce(&app, &body.bot_id, from_turn.as_deref(), &body.text, relay_run).await;
     (StatusCode::OK, Json(json!({})))
 }
 

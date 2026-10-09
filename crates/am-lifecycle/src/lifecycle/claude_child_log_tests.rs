@@ -484,7 +484,7 @@ async fn the_baseline_still_settles_the_turn_that_was_dispatched() {
     c.env.herdr.set_agent("hub-midplat", &c.pane, true);
     let parent = tt::claude_bot(&app, &c.env.project_id, "parent").await;
     let run = db::run(&app.db, &c.run_id).await.unwrap().unwrap();
-    let tid = crate::lifecycle::relay_watch::open_turn(&app, &run, &parent.id, "請讀 brief 並開工").await.unwrap();
+    let tid = crate::lifecycle::relay_watch::open_turn(&app, &run, &parent.id, None, "請讀 brief 並開工").await.unwrap();
 
     assert_eq!(sync_locked(&app, &c.run_id).await.unwrap(), Synced::Read { imported: 1, pending: None });
     assert_eq!(turn_count(&app, &c.conv).await, 1, "只有派工開的那一筆");

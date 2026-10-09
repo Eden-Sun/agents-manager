@@ -261,11 +261,11 @@ async fn a_relayed_prompt_is_the_user_message_and_its_reply_lands_on_the_same_tu
     let parent = tt::claude_bot(&app, &c.env.project_id, "parent").await;
     let run = db::run(&app.db, &c.run_id).await.unwrap().unwrap();
 
-    assert!(super::super::relay_watch::open_turn(&app, &run, &parent.id, "/effort high").await.is_none(), "slash 指令不開回合");
+    assert!(super::super::relay_watch::open_turn(&app, &run, &parent.id, None, "/effort high").await.is_none(), "slash 指令不開回合");
     assert!(messages(&app, &c.conv).await.is_empty(), "slash 指令的回音不是對話");
-    let tid = super::super::relay_watch::open_turn(&app, &run, &parent.id, &want[0].prompt).await.expect("交辦開回合");
+    let tid = super::super::relay_watch::open_turn(&app, &run, &parent.id, None, &want[0].prompt).await.expect("交辦開回合");
     // 收件方忙的時候送來的下一句：先記下來，等它自己的回合。
-    assert!(super::super::relay_watch::open_turn(&app, &run, &parent.id, &want[1].prompt).await.is_none());
+    assert!(super::super::relay_watch::open_turn(&app, &run, &parent.id, None, &want[1].prompt).await.is_none());
 
     assert!(super::super::poller::try_fallback(&app, &c.run_id, Some(&tid)).await.unwrap(), "對話檔收掉這一回合");
     let msgs = messages(&app, &c.conv).await;
@@ -362,7 +362,7 @@ async fn a_prompt_still_running_in_the_transcript_stays_in_flight() {
     let want = parse_chat_history(COMPACTED);
     let parent = tt::claude_bot(&app, &c.env.project_id, "parent").await;
     let run = db::run(&app.db, &c.run_id).await.unwrap().unwrap();
-    let tid = super::super::relay_watch::open_turn(&app, &run, &parent.id, &want[1].prompt).await.unwrap();
+    let tid = super::super::relay_watch::open_turn(&app, &run, &parent.id, None, &want[1].prompt).await.unwrap();
 
     assert!(!super::super::poller::try_fallback(&app, &c.run_id, Some(&tid)).await.unwrap(), "還沒答完：不收");
     let status: String = sqlx::query_scalar("SELECT status FROM turns WHERE id = ?").bind(&tid).fetch_one(&app.db).await.unwrap();
