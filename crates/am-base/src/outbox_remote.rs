@@ -213,7 +213,7 @@ fn list_script_inner(dir: &str, before_open: &str, after_open: &str, lsof_path: 
         String::new()
     } else {
         format!(
-            "if ! find . -maxdepth 1 -type f -mmin +{ttl_min} -cmin +{ttl_min} -exec rm -f {{}} + 2>/dev/null; then\n  printf 'AM_OUTBOX_UNTRUSTED\\n'\n  exit 0\nfi",
+            "if ! find . -mindepth 1 -type f -mmin +{ttl_min} -cmin +{ttl_min} -exec rm -f {{}} + 2>/dev/null; then\n  printf 'AM_OUTBOX_UNTRUSTED\\n'\n  exit 0\nfi\nfind . -mindepth 1 -type d -empty -delete 2>/dev/null",
             ttl_min = TTL_SECS / 60
         )
     };
@@ -235,6 +235,14 @@ am_list_entry() {{
   exec 3< "$F" || return 0
   {after_open}
   if ! am_dir_same || [ -L "$F" ] || [ ! -f "$F" ]; then exec 3<&-; return 0; fi
+  cur=.
+  rest=${{F#./}}
+  while case "$rest" in */*) true;; *) false;; esac; do
+    comp=${{rest%%/*}}
+    rest=${{rest#*/}}
+    cur="$cur/$comp"
+    if [ -L "$cur" ] || [ ! -d "$cur" ]; then exec 3<&-; return 0; fi
+  done
   {helpers}
   if ! am_same; then exec 3<&-; return 0; fi
   if [ -n "$G" ]; then
@@ -247,9 +255,9 @@ am_list_entry() {{
   printf '%s\t%s\t%s\n' "$m" "$h" "$N"
   exec 3<&-
 }}
-for f in ./*; do
+find . -mindepth 1 -maxdepth 33 \( -name '.*' -prune \) -o \( -type f ! -name '.*' -print \) 2>/dev/null | while IFS= read -r f; do
   [ -f "$f" ] && [ ! -L "$f" ] || continue
-  N=${{f##*/}}
+  N=${{f#./}}
   case "$N" in *[[:cntrl:]]*) continue;; esac
   F="$f"
   {before_open}
@@ -291,10 +299,15 @@ fn parse_list_with(out: &str, now: u64, keep: bool) -> Option<Vec<serde_json::Va
         // 第三欄 ctime＝搬進來的時間；舊格式沒有這一欄就只看 mtime。
         let changed = meta.next().and_then(|c| c.parse::<u64>().ok()).unwrap_or(0);
         if name.is_empty()
-            || name.contains('/')
             || name.chars().any(char::is_control)
-            || withheld_name(&name.to_ascii_lowercase())
             || content_is_withheld(&hex_bytes(hex))
+        {
+            continue;
+        }
+        let parts: Vec<&str> = name.split('/').collect();
+        if parts.is_empty()
+            || parts.len() > crate::outbox::WALK_MAX_DEPTH + 1
+            || parts.iter().any(|p| p.is_empty() || p.starts_with('.') || *p == ".." || withheld_name(&p.to_ascii_lowercase()))
         {
             continue;
         }
@@ -346,11 +359,18 @@ pub async fn list(t: Target, now: u64) -> Result<Response, LcError> {
     Ok((StatusCode::OK, axum::Json(body)).into_response())
 }
 
-/// 下載只收 outbox 最上層的一個檔名：沒有 `/`、不是隱藏檔、不在擋掉的名單裡。絕對路徑只收落在 outbox 裡那一層的。
+/// 下載只收 outbox 裡的檔案：相對路徑不含 `..`、隱藏目錄／檔名，不在擋掉的名單裡，深度不超過上限。絕對路徑只收落在 outbox 裡的。
 pub fn safe_name<'a>(dir: &str, requested: &'a str) -> Option<&'a str> {
     let r = requested.trim();
     let name = r.strip_prefix(dir).and_then(|rest| rest.strip_prefix('/')).unwrap_or(r);
-    if name.is_empty() || name.contains('/') || name.starts_with('.') || name.contains(['\0', '\n', '\r']) || withheld_name(&name.to_ascii_lowercase()) {
+    if name.is_empty() || name.chars().any(char::is_control) || name.contains(['\0', '\n', '\r', '\\']) {
+        return None;
+    }
+    let parts: Vec<&str> = name.split('/').collect();
+    if parts.is_empty()
+        || parts.len() > crate::outbox::WALK_MAX_DEPTH + 1
+        || parts.iter().any(|p| p.is_empty() || p.starts_with('.') || *p == ".." || withheld_name(&p.to_ascii_lowercase()))
+    {
         return None;
     }
     Some(name)
@@ -382,6 +402,14 @@ pub fn file_script_race_with_lsof(dir: &str, name: &str, gap: &str, after_path_c
 {dir_helpers}
 if ! am_enter_dir; then printf 'AM_OUTBOX_MISSING\n'; exit 0; fi
 F=./{n}
+cur=.
+rest=${{F#./}}
+while case "$rest" in */*) true;; *) false;; esac; do
+  comp=${{rest%%/*}}
+  rest=${{rest#*/}}
+  cur="$cur/$comp"
+  if [ -L "$cur" ] || [ ! -d "$cur" ]; then printf 'AM_OUTBOX_MISSING\n'; exit 0; fi
+done
 if stat -c %Y . >/dev/null 2>&1; then G=1; else G=; fi
 {helpers}
 {{
@@ -448,11 +476,12 @@ pub async fn file(t: Target, requested: &str) -> Result<Response, LcError> {
     if content_is_withheld(&data) {
         return Err(not_found());
     }
+    let download_name = std::path::Path::new(name).file_name().and_then(std::ffi::OsStr::to_str).unwrap_or(name);
     Ok((
         StatusCode::OK,
         [
-            (header::CONTENT_TYPE, mime_of(std::path::Path::new(name)).to_string()),
-            (header::CONTENT_DISPOSITION, content_disposition(name)),
+            (header::CONTENT_TYPE, mime_of(std::path::Path::new(download_name)).to_string()),
+            (header::CONTENT_DISPOSITION, content_disposition(download_name)),
             (header::CACHE_CONTROL, "private, no-store".to_string()),
             (header::X_CONTENT_TYPE_OPTIONS, "nosniff".to_string()),
         ],

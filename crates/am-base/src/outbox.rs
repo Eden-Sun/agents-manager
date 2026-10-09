@@ -106,7 +106,7 @@ pub const SHARE_OUTBOX_MAX_FILES: u64 = 1000;
 
 /// [`tree_usage`] 最多看幾個項目／幾層：工作目錄是外部使用者能寫的東西，量測不能被一棵超大的樹拖住。
 const WALK_MAX_ENTRIES: usize = 200_000;
-const WALK_MAX_DEPTH: usize = 32;
+pub const WALK_MAX_DEPTH: usize = 32;
 
 /// 一棵目錄樹的用量（一般檔案的大小與個數；符號連結不跟、不算）。`truncated`＝超過 [`WALK_MAX_ENTRIES`]／[`WALK_MAX_DEPTH`] 停下，數字是下限。
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
@@ -282,13 +282,16 @@ fn safe_outbox_path<'a>(root: &Path, requested: &'a str) -> Option<(String, Vec<
     let p = Path::new(requested);
     let rel = if p.is_absolute() { p.strip_prefix(root).ok()? } else { p };
     let components = trusted_open::safe_relative_components(rel)?;
-    if components.iter().any(|c| c.to_string_lossy().starts_with('.')) {
-        return None; // 隱藏目錄／檔名——withheld_name 只查最後一段，中間的目錄這裡先擋。
-    }
-    let name = components.last()?.to_string_lossy().into_owned();
-    if withheld_name(&name.to_ascii_lowercase()) {
+    if components.len() > WALK_MAX_DEPTH + 1 {
         return None;
     }
+    if components.iter().any(|c| {
+        let s = c.to_string_lossy();
+        s.starts_with('.') || withheld_name(&s.to_ascii_lowercase())
+    }) {
+        return None;
+    }
+    let name = components.last()?.to_string_lossy().into_owned();
     Some((name, components))
 }
 
@@ -322,6 +325,10 @@ fn open_share_outbox_entry(base: &Path, bot_id: &str, requested: &str, owner_uid
         p
     });
     let (name, rel) = safe_outbox_path(&root, requested).ok_or(ShareFileError::NotFound)?;
+    // 分享入口只給 outbox 最上層（見 [`scan_checked`]）：子資料夾裡的檔就算路徑合法也不放行。
+    if rel.len() != 1 {
+        return Err(ShareFileError::NotFound);
+    }
     let mut components: Vec<&OsStr> = prefix.to_vec();
     components.extend(rel);
     let file = trusted_open::open_bound_file(base, &components, owner_uid).map_err(|e| {
@@ -363,46 +370,139 @@ pub fn content_disposition(name: &str) -> String {
     format!("attachment; filename=\"{safe}\"; filename*=UTF-8''{encoded}")
 }
 
-/// 目錄裡可以列出來的檔案：第一層的一般檔案（符號連結、子目錄不列），名字與內容都不是黑名單
-/// （[`withheld_name`]／[`content_is_withheld`]），新的排前面。每個帶 `expires_at`（mtime 與 ctime 較晚的那個 + [`TTL_SECS`]，
-/// 即「搬進來」的時間：`mv`／`cp -p` 保留舊 mtime，ctime 才是搬入那一刻；AGM 清理要兩個都過期才刪）與 `remaining_secs`（到期了是 0，清理每 10 分鐘才跑一次，所以 0 的檔案還會在
-/// 清單上待一下）。`dir` 是呼叫端已經驗證過（[`open_trusted_dir`]）拿到的目錄 fd：列舉
-/// （[`trusted_open::read_dir_bound`]）與逐一開檔看內容（[`trusted_open::open_entry_in`]）全程都掛在
-/// 這個 fd 底下，不再用任何路徑名字重新解析——檢查通過之後這個目錄被整個換成符號連結也不影響列出來的內容
-/// （issue #96）。
-pub fn scan(dir: &std::fs::File, now: u64) -> Vec<serde_json::Value> {
-    let mut files = Vec::new();
-    if let Ok(entries) = trusted_open::read_dir_bound(dir) {
-        for e in entries {
-            if !e.is_file {
-                continue;
-            }
-            let name = e.name.to_string_lossy().into_owned();
-            if withheld_name(&name.to_ascii_lowercase()) {
-                continue;
-            }
-            let is_withheld = trusted_open::open_entry_in(dir, &e.name)
-                .ok()
-                .map(|mut f| {
-                    use std::io::Read;
+/// [`scan`]／[`scan_checked`] 共用的遞迴列舉：`dir` 是呼叫端已經驗證過（[`open_trusted_dir`]）拿到的目錄 fd，
+/// 列舉（[`trusted_open::read_dir_bound_while`]）、開子目錄（[`trusted_open::open_dir_entry_in`]）與逐一開檔看內容
+/// （[`trusted_open::open_entry_in`]）全程都掛在 fd 底下（`openat(O_NOFOLLOW)`），不再用路徑名字重新解析——
+/// 檢查通過之後這個目錄被整個換成符號連結也不影響列出來的內容（issue #96）；符號連結（含指向目錄的）不跟不列。
+/// 深度上限 [`WALK_MAX_DEPTH`]、總項目數上限 [`WALK_MAX_ENTRIES`]；隱藏項目與 [`withheld_name`]（目錄名也算）整個略過，
+/// 內容擋（[`content_is_withheld`]）逐檔照套。`strict` ＝ 任何一步讀不了就整個失敗（分享入口），否則當作要擋、略過那一項。
+/// 檔案以相對路徑（`子資料夾/檔名`，[`WALK_MAX_DEPTH`] 層以內）收進 `files`：（name、size、mtime、搬入時間）。
+fn walk_scan(
+    dir: &std::fs::File,
+    rel_prefix: &str,
+    depth: usize,
+    max_depth: usize,
+    files: &mut Vec<(String, u64, u64, u64, String)>,
+    seen: &mut usize,
+    strict: bool,
+) -> Result<(), ()> {
+    use std::io::Read;
+    use std::os::unix::fs::MetadataExt as _;
+    let mut subdirs: Vec<(std::ffi::OsString, String)> = Vec::new();
+    let mut strict_error = false;
+    let res = trusted_open::read_dir_bound_while(dir, |e| {
+        *seen += 1;
+        if *seen > WALK_MAX_ENTRIES {
+            return false;
+        }
+        let name_str = e.name.to_string_lossy();
+        if name_str.starts_with('.') || withheld_name(&name_str.to_ascii_lowercase()) {
+            return true;
+        }
+        if e.is_file {
+            // 檔案版本（分享入口用）：同秒同大小重寫秒數與大小都一樣（#843），所以另外帶 inode／奈秒 mtime／ctime，不透明字串。
+            let mut version = String::new();
+            let is_withheld = match trusted_open::open_entry_in(dir, &e.name) {
+                Ok(mut file) => {
                     let mut head = [0u8; 64];
-                    let n = f.read(&mut head).unwrap_or(0);
-                    content_is_withheld(&head[..n])
-                })
-                .unwrap_or(true); // 開不起來（例如列舉之後又被換掉）就當作要擋，不列。
-            if is_withheld {
-                continue;
+                    match file.read(&mut head) {
+                        Ok(n) => {
+                            match file.metadata() {
+                                Ok(m) => {
+                                    version = format!(
+                                        "{:x}-{:x}-{:x}-{:x}",
+                                        m.ino(),
+                                        m.len(),
+                                        m.mtime() as i128 * 1_000_000_000 + m.mtime_nsec() as i128,
+                                        m.ctime() as i128 * 1_000_000_000 + m.ctime_nsec() as i128
+                                    );
+                                }
+                                Err(_) if strict => {
+                                    strict_error = true;
+                                    return false;
+                                }
+                                Err(_) => {}
+                            }
+                            content_is_withheld(&head[..n])
+                        }
+                        Err(_) => {
+                            if strict {
+                                strict_error = true;
+                                return false;
+                            }
+                            true
+                        }
+                    }
+                }
+                Err(_) => {
+                    if strict {
+                        strict_error = true;
+                        return false;
+                    }
+                    true
+                }
+            };
+            if !is_withheld {
+                let secs = |t: std::time::SystemTime| t.duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0);
+                let modified = secs(e.modified);
+                let landed = modified.max(secs(e.changed));
+                let name = if rel_prefix.is_empty() {
+                    name_str.into_owned()
+                } else {
+                    format!("{rel_prefix}{name_str}")
+                };
+                files.push((name, e.size, modified, landed, version));
             }
-            let secs = |t: std::time::SystemTime| t.duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0);
-            let modified = secs(e.modified);
-            files.push((name, e.size, modified, modified.max(secs(e.changed))));
+        } else if e.is_dir && depth < max_depth {
+            let next_prefix = if rel_prefix.is_empty() {
+                format!("{name_str}/")
+            } else {
+                format!("{rel_prefix}{name_str}/")
+            };
+            subdirs.push((e.name, next_prefix));
+        }
+        true
+    });
+
+    if strict && (strict_error || res.is_err()) {
+        return Err(());
+    }
+
+    if subdirs.is_empty() || *seen > WALK_MAX_ENTRIES || depth >= max_depth {
+        return Ok(());
+    }
+
+    for (name, next_prefix) in subdirs {
+        if *seen > WALK_MAX_ENTRIES {
+            break;
+        }
+        match trusted_open::open_dir_entry_in(dir, &name) {
+            Ok(child) => {
+                walk_scan(&child, &next_prefix, depth + 1, max_depth, files, seen, strict)?;
+            }
+            Err(e) => {
+                if strict && e.kind() != std::io::ErrorKind::NotFound {
+                    return Err(());
+                }
+            }
         }
     }
+    Ok(())
+}
+
+/// 目錄裡可以列出來的檔案：一般檔案與子資料夾裡的一般檔案（符號連結不跟不列），名字與內容都不是黑名單
+/// （[`withheld_name`]／[`content_is_withheld`]），深度上限同 [`WALK_MAX_DEPTH`]，新的排前面。
+/// 每個帶 `expires_at`（mtime 與 ctime 較晚的那個 + [`TTL_SECS`]）與 `remaining_secs`。
+/// 回傳 `name` 為相對路徑（`子資料夾/檔名`）。
+pub fn scan(dir: &std::fs::File, now: u64) -> Vec<serde_json::Value> {
+    let mut files = Vec::new();
+    let mut seen = 0usize;
+    let _ = walk_scan(dir, "", 0, WALK_MAX_DEPTH, &mut files, &mut seen, false);
     files.sort_by(|a, b| b.3.cmp(&a.3).then_with(|| a.0.cmp(&b.0)));
     files.truncate(MAX_ENTRIES);
     files
         .into_iter()
-        .map(|(name, size, modified, landed)| {
+        .map(|(name, size, modified, landed, _version)| {
             let expires_at = landed + TTL_SECS;
             json!({"name": name, "size": size, "modified": modified, "expires_at": expires_at, "remaining_secs": expires_at.saturating_sub(now)})
         })
@@ -410,34 +510,12 @@ pub fn scan(dir: &std::fs::File, now: u64) -> Vec<serde_json::Value> {
 }
 
 /// 分享入口只能回傳完整且逐項驗證過的清單；讀取失敗時呼叫端回 503，而不把部分結果當成空清單。
+/// 分享入口維持**單層**（只列 outbox 最上層的一般檔；portal 的 `/api/files/{name}` 也只認單一檔名）：
+/// 外部使用者拿到的清單與下載面不隨子資料夾擴大（SPEC §20）。
 pub fn scan_checked(dir: &std::fs::File, now: u64) -> Result<Vec<serde_json::Value>, ()> {
-    use std::io::Read;
-    use std::os::unix::fs::MetadataExt as _;
-    let entries = trusted_open::read_dir_bound(dir).map_err(|_| ())?;
     let mut files = Vec::new();
-    for e in entries {
-        if !e.is_file {
-            continue;
-        }
-        let name = e.name.to_string_lossy().into_owned();
-        if withheld_name(&name.to_ascii_lowercase()) {
-            continue;
-        }
-        let mut file = trusted_open::open_entry_in(dir, &e.name).map_err(|_| ())?;
-        let mut head = [0u8; 64];
-        let n = file.read(&mut head).map_err(|_| ())?;
-        if content_is_withheld(&head[..n]) {
-            continue;
-        }
-        // 檔案版本：同秒同大小重寫秒數與大小都一樣（#843），所以另外帶 inode／奈秒 mtime／ctime，不透明字串。
-        let version = file
-            .metadata()
-            .map(|m| format!("{:x}-{:x}-{:x}-{:x}", m.ino(), m.len(), m.mtime() as i128 * 1_000_000_000 + m.mtime_nsec() as i128, m.ctime() as i128 * 1_000_000_000 + m.ctime_nsec() as i128))
-            .map_err(|_| ())?;
-        let secs = |t: std::time::SystemTime| t.duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0);
-        let modified = secs(e.modified);
-        files.push((name, e.size, modified, modified.max(secs(e.changed)), version));
-    }
+    let mut seen = 0usize;
+    walk_scan(dir, "", 0, 0, &mut files, &mut seen, true)?;
     files.sort_by(|a, b| b.3.cmp(&a.3).then_with(|| a.0.cmp(&b.0)));
     files.truncate(MAX_ENTRIES);
     Ok(files

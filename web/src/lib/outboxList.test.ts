@@ -1,6 +1,6 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { downloadFailure, emptyReason, fileSize, isPreviewableImage, lastSettledTurnKey, orderFiles, previewPlacement, readOutbox, remainingLabel, remainingNow } from './outboxList'
+import { downloadFailure, emptyReason, fileSize, isPreviewableImage, lastSettledTurnKey, orderFiles, previewPlacement, readOutbox, remainingLabel, remainingNow, splitOutboxName } from './outboxList'
 import { ApiError } from '../api/types'
 
 const file = (name: string, modified: number, remainingSecs: number | null = 3600) => ({ name, size: 1, modified, remainingSecs })
@@ -130,3 +130,11 @@ test('下載失敗講人話：404 是「被清掉了」並要求呼叫端移除�
   assert.match(downloadFailure('a.txt', new ApiError(500, { error: 'upstream', message: '壞了' }, 'x')).text, /HTTP 500/)
   assert.match(downloadFailure('a.txt', new Error('連線中斷')).text, /連線中斷/)
 })
+
+test('子資料夾裡的檔：相對路徑拆成資料夾前綴與檔名（存檔名只取最後一段）', () => {
+  assert.deepEqual(splitOutboxName('report.pdf'), { dir: '', base: 'report.pdf' })
+  assert.deepEqual(splitOutboxName('報價_晶輝企業_Q-2026-1009-01/報價單.pdf'), { dir: '報價_晶輝企業_Q-2026-1009-01/', base: '報價單.pdf' })
+  assert.deepEqual(splitOutboxName('a/b/c.csv'), { dir: 'a/b/', base: 'c.csv' })
+  assert.equal(isPreviewableImage('相簿/IMG_1.PNG'), true, '子資料夾裡的圖照樣能預覽')
+})
+

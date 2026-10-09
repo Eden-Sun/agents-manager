@@ -62,6 +62,24 @@ exists "outbox 根目錄本身還在" "$OB"
 check  "有刪就記 log（3 個）" "清掉 3 個超過 60 分鐘" "$LOG"
 teardown
 
+# 1b. bot 把產出放在子資料夾裡（`$AM_OUTBOX/報價_Q-1/*.pdf`，UI 現在也列得到）：每個檔各自照自己的時間清，
+#     同一個子資料夾裡新的留、舊的刪、資料夾只在清空後才收；更深一層也一樣。
+setup
+mkdir -p "$OB/botE/報價_Q-1/附件" "$OB/botE/空的/更空"
+echo x > "$OB/botE/報價_Q-1/old.pdf"; old "$OB/botE/報價_Q-1/old.pdf"
+echo x > "$OB/botE/報價_Q-1/new.pdf"; fresh "$OB/botE/報價_Q-1/new.pdf"
+echo x > "$OB/botE/報價_Q-1/附件/old.csv"; old "$OB/botE/報價_Q-1/附件/old.csv"
+echo x > "$OB/botE/報價_Q-1/附件/new.csv"; fresh "$OB/botE/報價_Q-1/附件/new.csv"
+equals "子資料夾的清理 exit 0" "$(run)" "0"
+gone   "子資料夾裡過期的檔被刪" "$OB/botE/報價_Q-1/old.pdf"
+exists "子資料夾裡新的檔留著" "$OB/botE/報價_Q-1/new.pdf"
+gone   "更深一層過期的檔被刪" "$OB/botE/報價_Q-1/附件/old.csv"
+exists "更深一層新的檔留著" "$OB/botE/報價_Q-1/附件/new.csv"
+exists "還有檔的子資料夾留著" "$OB/botE/報價_Q-1"
+gone   "本來就空的巢狀子資料夾（含更深一層）被收掉" "$OB/botE/空的"
+check  "log 記刪了 2 個" "清掉 2 個超過 60 分鐘" "$LOG"
+teardown
+
 # 2. 保留期邊界與覆寫：30 分鐘的檔在 60 分鐘期限內留著；OUTBOX_MAX_AGE_MIN=5 就刪。
 setup
 mkdir -p "$OB/b"; echo x > "$OB/b/f.txt"; touch -t "$(date -v-30M +%Y%m%d%H%M 2>/dev/null || date -d '30 minutes ago' +%Y%m%d%H%M)" "$OB/b/f.txt"

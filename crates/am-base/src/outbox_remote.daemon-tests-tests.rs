@@ -183,11 +183,19 @@
         std::fs::remove_dir_all(&base).unwrap();
     }
 
+    /// 遠端清單的記錄名字是 outbox 裡的相對路徑（可含子資料夾）：合法的巢狀路徑收下，
+    /// 但跳出 outbox（`..`、絕對路徑）、隱藏／被擋的段、空段與超過深度上限的一律丟掉。
     #[test]
     fn remote_list_parser_rejects_forged_path_records() {
-        let forged = "AM_OUTBOX_OK\n10 1000 1000\t00\tprivate/report.md\nAM_OUTBOX_DONE\n";
-        let files = parse_list(forged, 1_000).unwrap();
-        assert!(files.is_empty(), "remote records can only name one outbox entry: {files:?}");
+        let rec = |name: &str| format!("AM_OUTBOX_OK\n10 1000 1000\t00\t{name}\nAM_OUTBOX_DONE\n");
+        let files = parse_list(&rec("private/report.md"), 1_000).unwrap();
+        assert_eq!(files.len(), 1, "a nested relative path is a legitimate outbox entry: {files:?}");
+        assert_eq!(files[0]["name"], "private/report.md");
+        let too_deep = vec!["d"; crate::outbox::WALK_MAX_DEPTH + 1].join("/") + "/f.txt";
+        for bad in ["../report.md", "a/../report.md", "/etc/passwd", "a//b.md", "a/.hidden/b.md", ".env", "a/id_rsa", "a/key.pem", "a/", too_deep.as_str()] {
+            let files = parse_list(&rec(bad), 1_000).unwrap();
+            assert!(files.is_empty(), "{bad:?} must not be accepted as an outbox entry: {files:?}");
+        }
     }
 
     #[test]
@@ -219,7 +227,9 @@
         let d = "/Users/m/.config/agents-manager/outbox/01ABC";
         assert_eq!(safe_name(d, "report.md"), Some("report.md"));
         assert_eq!(safe_name(d, &format!("{d}/report.md")), Some("report.md"));
-        for bad in ["../x", "sub/x", ".env", "", "/etc/passwd", "key.pem", "a\nb", "prod.sqlite3"] {
+        assert_eq!(safe_name(d, "sub/x.txt"), Some("sub/x.txt"));
+        assert_eq!(safe_name(d, &format!("{d}/sub/x.txt")), Some("sub/x.txt"));
+        for bad in ["../x", "sub/../x", "sub/.hidden", ".env", "", "/etc/passwd", "key.pem", "a\nb", "prod.sqlite3", "sub/id_rsa"] {
             assert_eq!(safe_name(d, bad), None, "{bad:?}");
         }
     }
@@ -899,4 +909,42 @@ exit 1
         let v = listed(plain.id.clone()).await;
         assert_eq!(v["kept"], json!(true), "{v}");
         assert!(!scripts.lock().unwrap().last().unwrap().contains("rm -f"), "is_share_bot 讀不到：不刪");
+    }
+
+    #[test]
+    fn remote_outbox_nested_subdirectories_list_and_download() {
+        let base = sandbox("nested-remote");
+        let d = base.join("outbox");
+        let outside = base.join("outside");
+        std::fs::create_dir_all(&outside).unwrap();
+        std::fs::write(outside.join("secret.txt"), b"secret").unwrap();
+
+        std::fs::create_dir_all(d.join("sub/nested")).unwrap();
+        std::fs::write(d.join("top.txt"), b"top").unwrap();
+        std::fs::write(d.join("sub/report.pdf"), b"%PDF-1.4").unwrap();
+        std::fs::write(d.join("sub/nested/data.csv"), b"1,2,3").unwrap();
+        std::os::unix::fs::symlink(&outside, d.join("sym_dir")).unwrap();
+        std::fs::write(d.join("sub/id_rsa"), b"key").unwrap();
+
+        let raw_list = run_list(&d);
+        let listed = parse_list(&raw_list, 1_000).unwrap();
+        let names: Vec<String> = listed.iter().map(|f| f["name"].as_str().unwrap().to_string()).collect();
+
+        assert!(names.contains(&"top.txt".to_string()), "top.txt listed: {names:?}");
+        assert!(names.contains(&"sub/report.pdf".to_string()), "sub/report.pdf listed: {names:?}");
+        assert!(names.contains(&"sub/nested/data.csv".to_string()), "sub/nested/data.csv listed: {names:?}");
+        assert!(!names.iter().any(|n| n.starts_with("sym_dir")), "symlink dir not listed: {names:?}");
+        assert!(!names.contains(&"sub/id_rsa".to_string()), "withheld sub/id_rsa not listed: {names:?}");
+
+        // Download
+        let out = run_download(&d, "sub/report.pdf", "");
+        assert_eq!(served(&out), Some(b"%PDF-1.4".to_vec()));
+        let out_csv = run_download(&d, "sub/nested/data.csv", "");
+        assert_eq!(served(&out_csv), Some(b"1,2,3".to_vec()));
+
+        // Symlink dir download fails
+        let out_sym = run_download(&d, "sym_dir/secret.txt", "");
+        assert_eq!(out_sym.trim(), "AM_OUTBOX_MISSING");
+
+        std::fs::remove_dir_all(&base).unwrap();
     }
