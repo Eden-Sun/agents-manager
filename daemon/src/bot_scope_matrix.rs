@@ -71,10 +71,6 @@ fn deny_rule(method: &'static str, path: &'static str, expect: Expect, rationale
     Rule { method, path, expect, open_leak: None, rationale: Some(rationale), decision: Some(Decision::Denied) }
 }
 
-fn pending_rule(method: &'static str, path: &'static str, ticket: &'static str, rationale: &'static str) -> Rule {
-    Rule { method, path, expect: Expect::Forbidden, open_leak: Some(ticket), rationale: Some(rationale), decision: Some(Decision::Pending) }
-}
-
 fn rules() -> Vec<Rule> {
     vec![
         deny_rule("GET", "/api/session", Expect::Forbidden, "This loopback bootstrap returns the shared UI token to browsers; Bot and Service principals must not receive it."),
@@ -243,7 +239,7 @@ fn rules() -> Vec<Rule> {
         rule("PATCH", "/api/bots/{id}/restart", Expect::Forbidden, None),
         rule("DELETE", "/api/bots/{id}/restart", Expect::Forbidden, None),
         allow_rule("GET", "/api/state", "Bot state is projected to the caller and descendants, excluding other projects and global/private configuration (#807)."),
-        pending_rule("POST", "/api/release-triage/verdicts", "#801", "Release-triage verdict submission remains open pending the user's decision on binding it to an assigned Bot and generation."),
+        scoped_allow_rule("POST", "/api/release-triage/verdicts", "A Bot may submit only the verdict for a version dispatched to it (or to a child under it) at the current dispatch generation (#801); this unassigned Bot-A probe must be refused."),
         rule("PUT", "/api/drafts/{key}", Expect::Forbidden, None),
         scoped_allow_rule("POST", "/api/supervisor/leases/{resource}/renew", "A Bot may renew its own lease, including an upgrade-era tokenless lease; it cannot renew Bot B's lease."),
         rule("POST", "/api/hosts/{name}/gh/cancel", Expect::Forbidden, None),
@@ -415,7 +411,7 @@ fn rules() -> Vec<Rule> {
         rule("POST", "/api/turns/{id}/withdraw", Expect::UserOnly, None),
         scoped_allow_rule("POST", "/api/missions/{id}/complete", "An assigned Bot may complete its own mission when workflow and delivery gates pass; this Bot-A-to-B probe must be rejected."),
         rule("POST", "/api/supervisor/herdr-maintenance/end", Expect::Forbidden, None),
-        pending_rule("GET", "/api/release-triage", "#801", "Release-triage ledger visibility remains open pending the user's decision on whether it is global or assignment-scoped."),
+        allow_rule("GET", "/api/release-triage", "A Bot sees only the dispatched rows assigned to it (or to a child under it), with their dispatch_gen; the global ledger is for User and AGM roles (#801)."),
         principal_allow_rule("POST", "/api/services/herdr-upgrade/notify", "This notification path is allowed only to the herdr-upgrade Service principal; a Bot credential must be rejected."),
         allow_rule("GET", "/api/quota", "Reads the cached quota snapshot; refresh requests are centrally limited to User or registered AGM roles (#808)."),
         rule("GET", "/api/projects/{id}/group/read", Expect::Forbidden, None),
@@ -747,8 +743,8 @@ async fn bot_a_against_bot_b_matches_the_allow_table() {
         .await
         .unwrap();
 
-    // #801 stays deliberately open pending the user's decision, but exercise a real verdict
-    // against a seeded ledger row so the matrix proves the write endpoint is reachable.
+    // A real verdict against a seeded ledger row, so the matrix proves the write endpoint is reachable.
+    // Bot A is not assigned this version, so the binding (#801) must refuse it.
     let sections = crate::release_triage::source_sections("claude", include_str!("../../crates/am-base/src/release_triage/fixtures/claude_2.1.276-278.md"));
     let section = sections.iter().find(|section| section.version == "2.1.277").unwrap();
     let entries = crate::release_triage::build_entries("claude", section).unwrap();

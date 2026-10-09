@@ -189,8 +189,8 @@ async fn rerun_before_dispatch_still_reports_the_same_pending_versions() {
     );
     // 派出去之後才不再是 pending；重跑 --since 也不會重複派。
     let both = ["2.1.277".to_string(), "2.1.278".to_string()];
-    assert_eq!(ledger::mark_dispatched(&p, "claude", &both).await.unwrap(), 2);
-    assert_eq!(ledger::mark_dispatched(&p, "claude", &both).await.unwrap(), 0, "CAS：已 dispatched 的不再動");
+    assert_eq!(ledger::mark_dispatched(&p, "claude", &both, "bot-worker").await.unwrap(), 2);
+    assert_eq!(ledger::mark_dispatched(&p, "claude", &both, "bot-worker").await.unwrap(), 0, "CAS：已 dispatched 的不再動");
     let third = check(&p, "claude", &all, None, Some("2.1.275")).await.unwrap();
     assert!(third.pending.is_empty(), "已經 dispatched，不再是 pending");
 }
@@ -212,7 +212,7 @@ async fn stale_dispatch_goes_back_to_pending_and_fails_after_three_attempts() {
     let es = entries("claude", &claude_sections(), "2.1.277");
     ledger::insert_version(&p, "claude", "2.1.277", &es).await.unwrap();
     for round in 1..=3 {
-        ledger::mark_dispatched(&p, "claude", &["2.1.277".into()]).await.unwrap();
+        ledger::mark_dispatched(&p, "claude", &["2.1.277".into()], "bot-worker").await.unwrap();
         // 剛派出去：還沒過期，不動。
         assert!(ledger::requeue_stale(&p, "claude").await.unwrap().is_empty());
         let old = (chrono::Utc::now() - chrono::Duration::hours(7)).format("%Y-%m-%dT%H:%M:%S%.3fZ").to_string();

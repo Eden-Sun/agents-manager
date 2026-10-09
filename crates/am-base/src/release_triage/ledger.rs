@@ -35,6 +35,9 @@ pub async fn migrate(pool: &SqlitePool) -> Result<()> {
            -- [{marker,entry_ids,number,url,created_at,comment}]：開出去（或只留言）的 issue，名字沿用 issue #204。
            issue_numbers_json TEXT NOT NULL DEFAULT '[]',
            dispatched_at TEXT,
+           -- #801：派出時收件的 bot（`dispatched` 那一刻記下）與派工代數（每派一次＋1）。verdict 只收這個 bot（或它底下的 child）、這一代的。
+           assigned_bot_id TEXT,
+           dispatch_gen INTEGER NOT NULL DEFAULT 0,
            attempts INTEGER NOT NULL DEFAULT 0,
            publish_error TEXT,
            created_at TEXT NOT NULL,
@@ -44,6 +47,14 @@ pub async fn migrate(pool: &SqlitePool) -> Result<()> {
     )
     .execute(pool)
     .await?;
+    // 比 #801 早建的帳本沒有上面兩欄：補上（`CREATE TABLE IF NOT EXISTS` 不會動既有的表）。
+    let cols: Vec<String> = sqlx::query_scalar("SELECT name FROM pragma_table_info('release_triage')").fetch_all(pool).await?;
+    if !cols.iter().any(|c| c == "assigned_bot_id") {
+        sqlx::query("ALTER TABLE release_triage ADD COLUMN assigned_bot_id TEXT").execute(pool).await?;
+    }
+    if !cols.iter().any(|c| c == "dispatch_gen") {
+        sqlx::query("ALTER TABLE release_triage ADD COLUMN dispatch_gen INTEGER NOT NULL DEFAULT 0").execute(pool).await?;
+    }
     sqlx::query(
         "CREATE TABLE IF NOT EXISTS release_triage_publish_intents (
            kind TEXT NOT NULL,
@@ -252,6 +263,10 @@ pub struct Row {
     pub verdicts: Option<serde_json::Value>,
     pub issues: Vec<IssueRef>,
     pub dispatched_at: Option<String>,
+    /// #801：派出時收件的 bot；沒派過就是 `None`。
+    pub assigned_bot_id: Option<String>,
+    /// #801：派工代數（`dispatched` 每成功一次＋1）。
+    pub dispatch_gen: i64,
     pub attempts: i64,
     pub publish_error: Option<String>,
     pub created_at: String,
@@ -267,6 +282,8 @@ struct RawRow {
     verdicts_json: Option<String>,
     issue_numbers_json: String,
     dispatched_at: Option<String>,
+    assigned_bot_id: Option<String>,
+    dispatch_gen: i64,
     attempts: i64,
     publish_error: Option<String>,
     created_at: String,
@@ -283,6 +300,8 @@ impl RawRow {
             kind: self.kind,
             version: self.version,
             dispatched_at: self.dispatched_at,
+            assigned_bot_id: self.assigned_bot_id,
+            dispatch_gen: self.dispatch_gen,
             attempts: self.attempts,
             publish_error: self.publish_error,
             created_at: self.created_at,
@@ -291,7 +310,7 @@ impl RawRow {
     }
 }
 
-const COLS: &str = "kind, version, status, entries_json, verdicts_json, issue_numbers_json, dispatched_at, attempts, publish_error, created_at, updated_at";
+const COLS: &str = "kind, version, status, entries_json, verdicts_json, issue_numbers_json, dispatched_at, assigned_bot_id, dispatch_gen, attempts, publish_error, created_at, updated_at";
 
 pub async fn get(pool: &SqlitePool, kind: &str, version: &str) -> Result<Option<Row>> {
     let raw: Option<RawRow> = sqlx::query_as(&format!("SELECT {COLS} FROM release_triage WHERE kind = ? AND version = ?"))
@@ -360,16 +379,19 @@ pub async fn insert_version(pool: &SqlitePool, kind: &str, version: &str, entrie
     Ok(r.rows_affected() == 1)
 }
 
-/// kick 派出交辦後呼叫：`pending` → `dispatched`（CAS，只動真的還是 `pending` 的）。回傳實際轉換的筆數。
-pub async fn mark_dispatched(pool: &SqlitePool, kind: &str, versions: &[String]) -> Result<u64> {
+/// kick 派出交辦後呼叫：`pending` → `dispatched`（CAS，只動真的還是 `pending` 的），記下收件的 `bot_id` 並把派工代數＋1（#801）。
+/// 回傳實際轉換的筆數。
+pub async fn mark_dispatched(pool: &SqlitePool, kind: &str, versions: &[String], bot_id: &str) -> Result<u64> {
     let now = now_ts();
     let mut n = 0;
     for v in versions {
         n += sqlx::query(
-            "UPDATE release_triage SET status = 'dispatched', dispatched_at = ?, updated_at = ? WHERE kind = ? AND version = ? AND status = 'pending'",
+            "UPDATE release_triage SET status = 'dispatched', dispatched_at = ?, updated_at = ?, assigned_bot_id = ?, dispatch_gen = dispatch_gen + 1
+              WHERE kind = ? AND version = ? AND status = 'pending'",
         )
         .bind(&now)
         .bind(&now)
+        .bind(bot_id)
         .bind(kind)
         .bind(v)
         .execute(pool)
@@ -414,19 +436,56 @@ pub async fn requeue_stale(pool: &SqlitePool, kind: &str) -> Result<Vec<(String,
 
 /// verdict 進來：`pending`／`dispatched`／`failed` → `next`（`judged` 或沒有任何提案時的 `empty`），CAS。
 /// `failed` 也收：bot 撞限退了三次之後人工補交一份，不必為此重設 attempts。回傳是不是真的寫進去了。
-pub async fn save_verdicts(pool: &SqlitePool, kind: &str, version: &str, verdicts: &serde_json::Value, next: Status) -> Result<bool> {
+/// `binding` 是 bot principal 的交件（#801）：只有 `dispatched`、收件 bot 是 `(bot, gen)` 這一代的列才寫；
+/// 人工（User／AGM）補交不綁，傳 `None`。
+pub async fn save_verdicts(
+    pool: &SqlitePool,
+    kind: &str,
+    version: &str,
+    verdicts: &serde_json::Value,
+    next: Status,
+    binding: Option<(&str, i64)>,
+) -> Result<bool> {
+    let (bot, gen) = match binding {
+        Some((bot, gen)) => (Some(bot), Some(gen)),
+        None => (None, None),
+    };
     let r = sqlx::query(
         "UPDATE release_triage SET status = ?, verdicts_json = ?, dispatched_at = NULL, publish_error = NULL, updated_at = ?
-         WHERE kind = ? AND version = ? AND status IN ('pending','dispatched','failed')",
+         WHERE kind = ? AND version = ? AND status IN ('pending','dispatched','failed')
+           AND (?6 IS NULL OR (status = 'dispatched' AND assigned_bot_id = ?6 AND dispatch_gen = ?7))",
     )
     .bind(next.as_str())
     .bind(serde_json::to_string(verdicts)?)
     .bind(now_ts())
     .bind(kind)
     .bind(version)
+    .bind(bot)
+    .bind(gen)
     .execute(pool)
     .await?;
     Ok(r.rows_affected() == 1)
+}
+
+/// `caller` 就是 `root`，或是 `root` 底下（`parent_bot_id` 鏈上）的 child（#801）：交辦給 bot 之後，它自己開的 child 照樣可以交回 verdict。
+pub async fn bot_within(pool: &SqlitePool, caller: &str, root: &str) -> Result<bool> {
+    if caller == root {
+        return Ok(true);
+    }
+    let found: Option<i64> = sqlx::query_scalar(
+        "WITH RECURSIVE up(id, parent, depth) AS (
+           SELECT id, parent_bot_id, 0 FROM bots WHERE id = ?1
+           UNION ALL
+           SELECT b.id, b.parent_bot_id, up.depth + 1 FROM bots b JOIN up ON b.id = up.parent
+            WHERE up.depth < 32
+         )
+         SELECT 1 FROM up WHERE parent = ?2 LIMIT 1",
+    )
+    .bind(caller)
+    .bind(root)
+    .fetch_optional(pool)
+    .await?;
+    Ok(found.is_some())
 }
 
 /// publish 之後寫回：目前的 issue 清單、狀態（`judged` 或 `published`）與錯誤／備註。只動 `judged` 的列

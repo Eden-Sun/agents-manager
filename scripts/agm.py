@@ -1727,9 +1727,9 @@ def cmd_release_triage(client: Client, cfg: dict, args) -> object:
             raise AgmError("bad_args", f"{args.file} 要是一個 JSON 物件（{{kind,version,verdicts,issues}}）", 2)
         return client.post("/api/release-triage/verdicts", body)
     if args.op == "dispatched":
-        if not args.kind or not args.version:
-            raise AgmError("bad_args", "dispatched 要 --kind 與至少一個 --version", 2)
-        return client.post("/api/release-triage/dispatched", {"kind": args.kind, "versions": args.version})
+        if not args.kind or not args.version or not args.bot:
+            raise AgmError("bad_args", "dispatched 要 --kind、至少一個 --version，還有 --bot（收件 bot id）", 2)
+        return client.post("/api/release-triage/dispatched", {"kind": args.kind, "versions": args.version, "bot_id": args.bot})
     body = {}
     if args.kind:
         body["kind"] = args.kind
@@ -2596,6 +2596,7 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("--file", help="submit：verdicts.json（{kind,version,verdicts,issues}）")
     s.add_argument("--kind", choices=["claude", "codex"])
     s.add_argument("--version", action="append", help="show／publish：某一版；dispatched：可重複給多版")
+    s.add_argument("--bot", help="dispatched：這批交辦收件的 bot id（#801）。之後只有它或它底下的 child 能交這些版的 verdict")
     s.add_argument("--dry-run", action="store_true", help="publish：乾跑。檢查 gh auth／repo 權限／標籤齊不齊，印出會開哪幾張（含標題與內文），一張都不開、帳本不動")
     s.set_defaults(func=cmd_release_triage)
 

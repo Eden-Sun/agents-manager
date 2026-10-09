@@ -4066,7 +4066,9 @@ codex 的新版還沒裝，兩個版本都從 `update_notice` 讀。
 
 **帳本**（SQLite `release_triage`，`(kind, version)` 為主鍵）：`status` ＝ `pending`（待派）→ `dispatched`（kick 派出）→ `judged`（verdict 已收）→ `published`（issue 開完）；
 `empty`（沒有 kept／unmatched，或全部 verdict 都不開 issue）；`failed`（`dispatched` 超過 6 小時沒回、退回 `pending` 累計 3 次）。
-另存 `entries_json`（逐條原文、桶、類別、規則名）、`verdicts_json`、`issue_numbers_json`、`attempts`、`publish_error`。第一次跑（帳本空）只把磁碟上的版本記成 `empty` 基準；補歷史用 `--since`。
+另存 `entries_json`（逐條原文、桶、類別、規則名）、`verdicts_json`、`issue_numbers_json`、`attempts`、`publish_error`。
+**交辦綁定**（#801）：`dispatched` 時記下收件 bot（`assigned_bot_id`）與派工代數（`dispatch_gen`，每派一次＋1）。一般 Bot 只看得到派給它（或它底下的 child）的 `dispatched` 列，
+也只能交那一版、帶對代數的 verdict（不相干的 403 `not_assigned`，代數過期 409 `stale_assignment`）；User／AGM 的全域讀取與補交不綁。第一次跑（帳本空）只把磁碟上的版本記成 `empty` 基準；補歷史用 `--since`。
 `(from, to]` 每一版各自一列；`pending` 舊版在前（kick 截斷時 request-id 取該批最後一版）。
 
 **issue**：一項一張，沒有「一版一張報告」；「這一版看過了、逐條結論是什麼」放帳本（`GET /api/release-triage`）。模型不直接跑 `gh`，用 `bin/agm release-triage submit` 交回結構化結果，
