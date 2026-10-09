@@ -2,6 +2,7 @@ import { useEffect, useRef } from 'react'
 import { createPortal } from 'react-dom'
 import { effortLabel } from '../api/types'
 import { useBotLamp } from '../hooks/useBotLamp'
+import { useDialogFocus } from '../hooks/useDialogFocus'
 import { backgroundTaskLines } from '../lib/backgroundJobs'
 import { contextLabel } from '../lib/contextLabel'
 import { shortModel } from '../lib/shortModel'
@@ -56,6 +57,9 @@ export function BotStatusCard({
   const { lamp, background, label, blockedReason, kids } = useBotLamp(botId)
   // 手機的卡是長按當下就開的：手指放開那一下的 click 會落在剛蓋上來的暗底。只有在暗底上按下去的才算「點外面關掉」。
   const downOnBackdrop = useRef(false)
+  // 浮卡（anchor 有值）不是模態，不搶焦點、不困住 Tab；底部彈出的手機卡才是對話框。
+  const cardRef = useRef<HTMLDivElement>(null)
+  useDialogFocus(!anchor, cardRef)
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
       if (e.key === 'Escape') onClose()
@@ -75,7 +79,7 @@ export function BotStatusCard({
   const ctx = contextLabel(status)
 
   const card = (
-    <div className="bot-status-card chip-legend" role="dialog" aria-label={`${bot.name} 的狀態`} onClick={(e) => e.stopPropagation()}>
+    <div ref={cardRef} className="bot-status-card chip-legend" role="dialog" aria-modal={anchor ? undefined : 'true'} aria-label={`${bot.name} 的狀態`} onClick={(e) => e.stopPropagation()}>
       <div className="chip-legend-head">
         <span className="bot-status-name">
           <StatusLamp lamp={lamp} background={background} kids={kids} />
