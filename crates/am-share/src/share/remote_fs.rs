@@ -560,7 +560,11 @@ D={outbox_quoted}
 if [ "{keep_flag}" = "1" ]; then
   mkdir -m 700 -p "$D" 2>/dev/null
   am_enter_dir || {{ printf 'AM_RFS1\nERR 9\nUNTRUSTED\nAM_RFS_DONE\n'; exit 0; }}
-  touch .am-share-keep && chmod 600 .am-share-keep
+  # outbox 是 bot 能寫的地方：標記檔若被換成符號連結，`touch`／`chmod` 會改到別的檔。先拆掉連結，再用 noclobber 建（O_EXCL，不寫穿）。
+  [ -L .am-share-keep ] && rm -f .am-share-keep
+  if [ ! -e .am-share-keep ]; then
+    ( set -C; printf 'share bot outbox: share retention policy (SPEC 20, #850)\n' > .am-share-keep ) 2>/dev/null
+  fi
 else
   if am_enter_dir; then
     rm -f .am-share-keep
@@ -1165,40 +1169,48 @@ pub fn measure_script(workspace: &str, outbox: &str) -> String {
     let header = script_common_header();
     format!(
         r#"{header}
+fail() {{ printf 'AM_RFS1\nERR 9\nUNTRUSTED\nAM_RFS_DONE\n'; exit 0; }}
+# 一棵樹：`du -skx`（不跟符號連結、不跨檔案系統；KiB）＋`find -xdev -type f` 數檔案（上限 200001 個就停）。任何一步量不出數字就整個失敗，不當成 0。
+ws_kib=0
+ws_files=0
 D={ws_quoted}
-am_enter_dir || {{ printf 'AM_RFS1\nERR 9\nUNTRUSTED\nAM_RFS_DONE\n'; exit 0; }}
-ws_kib=$(du -skx . 2>/dev/null | awk '{{print $1}}')
-ws_bytes=$(( ${{ws_kib:-0}} * 1024 ))
-ws_files=$(find . -xdev -type f 2>/dev/null | head -n 200001 | wc -l | tr -d ' ')
-
-ob_bytes=0
+am_enter_dir
+case "$?" in
+  0)
+    ws_kib=$(du -skx . 2>/dev/null | awk '{{print $1}}')
+    ws_files=$(find . -xdev -type f 2>/dev/null | head -n 200001 | wc -l | tr -d ' ')
+    ;;
+  2) ;; # 工作目錄不見了：算 0（跟本機一樣）
+  *) fail ;;
+esac
+ob_kib=0
 ob_files=0
 D={ob_quoted}
-if am_enter_dir; then
-  ob_kib=$(du -skx . 2>/dev/null | awk '{{print $1}}')
-  ob_bytes=$(( ${{ob_kib:-0}} * 1024 ))
-  ob_files=$(find . -xdev -type f 2>/dev/null | head -n 200001 | wc -l | tr -d ' ')
-  if [ -f .am-share-keep ]; then
-    if [ -n "$G" ]; then
-      sk_sz=$(stat -L -c %s .am-share-keep 2>/dev/null || echo 0)
-    else
-      sk_sz=$(stat -L -f %z .am-share-keep 2>/dev/null || echo 0)
+am_enter_dir
+case "$?" in
+  0)
+    ob_kib=$(du -skx . 2>/dev/null | awk '{{print $1}}')
+    ob_files=$(find . -xdev -type f 2>/dev/null | head -n 200001 | wc -l | tr -d ' ')
+    # 標記檔是 daemon 放的，不算使用者的量（連同它佔的區塊一起扣）。
+    if [ -f .am-share-keep ] && [ ! -L .am-share-keep ]; then
+      kk=$(du -sk .am-share-keep 2>/dev/null | awk '{{print $1}}')
+      case "$kk" in ''|*[!0-9]*) fail ;; esac
+      ob_kib=$(( ob_kib - kk ))
+      [ "$ob_files" -gt 0 ] && ob_files=$(( ob_files - 1 ))
     fi
-    ob_bytes=$(( ob_bytes - sk_sz ))
-    [ "$ob_files" -gt 0 ] && ob_files=$(( ob_files - 1 ))
-  fi
-fi
-
-tot_files=$(( ws_files + ob_files ))
+    ;;
+  2) ;;
+  *) fail ;;
+esac
+for v in "$ws_kib" "$ws_files" "$ob_kib" "$ob_files"; do
+  case "$v" in ''|*[!0-9]*) fail ;; esac
+done
 trunc=0
-if [ "$ws_files" -gt 200000 ] || [ "$ob_files" -gt 200000 ]; then
-  trunc=1
-fi
-
-payload=$(printf '%s %s %s %s' "$ws_bytes" "$ob_bytes" "$tot_files" "$trunc")
-len=$(printf '%s' "$payload" | wc -c | tr -d ' ')
+if [ "$ws_files" -gt 200000 ] || [ "$ob_files" -gt 200000 ]; then trunc=1; fi
+tot_files=$(( ws_files + ob_files ))
+payload="$(( ws_kib * 1024 )) $(( ob_kib * 1024 )) $tot_files $trunc"
 printf 'AM_RFS1\n'
-printf 'MEASURE %d\n%s\n' "$len" "$payload"
+printf 'MEASURE %d\n%s\n' "${{#payload}}" "$payload"
 printf 'AM_RFS_DONE\n'
 "#,
         ws_quoted = sh_quote(workspace),
@@ -1237,8 +1249,14 @@ pub fn parse_measure(out: &[u8]) -> Result<budget::Measured, RfsError> {
 }
 
 pub fn prune_outbox_script(outbox: &str, keep_days: u64, cap_bytes: u64, cap_files: usize) -> String {
+    prune_outbox_script_at(outbox, keep_days, cap_bytes, cap_files, None)
+}
+
+/// 同 [`prune_outbox_script`]；`now` 是測試用的時鐘接縫（epoch 秒，同 `outbox-gc.sh` 的 `OUTBOX_GC_NOW`）：
+/// ctime 沒辦法往回改，只能把「現在」往後撥來驗「超過 14 天」。正式一律 `None`＝遠端的 `date +%s`。
+pub fn prune_outbox_script_at(outbox: &str, keep_days: u64, cap_bytes: u64, cap_files: usize, now: Option<u64>) -> String {
     let header = script_common_header();
-    let ttl_min = keep_days * 24 * 60;
+    let now_expr = now.map_or_else(|| "$(date +%s)".to_string(), |n| n.to_string());
     format!(
         r#"{header}
 D={ob_quoted}
@@ -1248,87 +1266,43 @@ case "$?" in
   2) printf 'AM_RFS1\nPRUNED 1\n0\nAM_RFS_DONE\n'; exit 0 ;;
   *) printf 'AM_RFS1\nERR 9\nUNTRUSTED\nAM_RFS_DONE\n'; exit 0 ;;
 esac
-
+# 分享保留政策（#850，跟 `outbox-gc.sh` 的 `share_prune` 同語意）：遠端從不遞迴刪目錄，只刪一般檔；符號連結不跟、不算。
+# 輸出的刪除數靠 `echo x` 計（檔名含換行也數得對）。
 removed=0
-
-# 1. 檔名含換行/控制字元直接刪
-for f in ./*; do
-  [ -f "$f" ] || continue
-  bn=${{f##*/}}
-  [ "$bn" = ".am-share-keep" ] && continue
-  case "$bn" in
-    *[[:cntrl:]]*)
-      rm -f "$f" 2>/dev/null && removed=$((removed + 1))
-      ;;
-  esac
-done
-
-# 2. mtime 與 ctime 都超過 keep_days 的刪除
-for f in ./*; do
-  [ -f "$f" ] || continue
-  bn=${{f##*/}}
-  [ "$bn" = ".am-share-keep" ] && continue
-  if [ -n "$G" ]; then
-    mt=$(stat -L -c %Y "$f" 2>/dev/null) || continue
-    ct=$(stat -L -c %Z "$f" 2>/dev/null) || continue
-  else
-    mt=$(stat -L -f %m "$f" 2>/dev/null) || continue
-    ct=$(stat -L -f %c "$f" 2>/dev/null) || continue
-  fi
-  now=$(date +%s)
-  age_m=$(( (now - mt) / 60 ))
-  age_c=$(( (now - ct) / 60 ))
-  if [ "$age_m" -ge {ttl_min} ] && [ "$age_c" -ge {ttl_min} ]; then
-    rm -f "$f" 2>/dev/null && removed=$((removed + 1))
-  fi
-done
-
-# 3. 超量從最舊刪到低於上限
-# 搜集剩餘一般檔 (排除 .am-share-keep)，排序: 最舊在上
-# 輸出: mtime size name
-items=""
-for f in ./*; do
-  [ -f "$f" ] && [ ! -L "$f" ] || continue
-  bn=${{f##*/}}
-  [ "$bn" = ".am-share-keep" ] && continue
-  if [ -n "$G" ]; then
-    mt=$(stat -L -c %Y "$f" 2>/dev/null) || continue
-    sz=$(stat -L -c %s "$f" 2>/dev/null) || continue
-  else
-    mt=$(stat -L -f %m "$f" 2>/dev/null) || continue
-    sz=$(stat -L -f %z "$f" 2>/dev/null) || continue
-  fi
-  items=$(printf '%s\n%s %s %s' "$items" "$mt" "$sz" "$bn")
-done
-
-# 計算當前總量
-cur_bytes=0
-cur_count=0
-echo "$items" | while read -r mt sz fn; do
-  [ -n "$fn" ] || continue
-  cur_bytes=$((cur_bytes + sz))
-  cur_count=$((cur_count + 1))
-done
-
-# 按時間排序 (舊在前) 逐一刪除直到符合上限
-sorted=$(echo "$items" | grep -v '^$' | sort -n -k1,1)
-echo "$sorted" | while read -r mt sz fn; do
-  [ -n "$fn" ] || continue
-  if [ "$cur_bytes" -gt {cap_bytes} ] || [ "$cur_count" -gt {cap_files} ]; then
-    rm -f "./$fn" 2>/dev/null
-    cur_bytes=$((cur_bytes - sz))
-    cur_count=$((cur_count - 1))
-    removed=$((removed + 1))
-  fi
-done
-
-# 再次確認真正刪除數，或直接回報
+NL=$(printf '\n.'); NL=${{NL%.}}
+rm_each='for f; do rm -f -- "$f" && echo x; done'
+fail() {{ printf 'AM_RFS1\nERR 9\nUNTRUSTED\nAM_RFS_DONE\n'; exit 0; }}
+# 1. 檔名含換行的直接刪（清單與下載都不收這種名字）。
+n=$(find . -type f -name "*${{NL}}*" -exec sh -c "$rm_each" sh {{}} + 2>/dev/null | wc -l | tr -d ' ')
+removed=$(( removed + ${{n:-0}} ))
+# 2. mtime 與 ctime 都超過保留天數的刪（標記檔不動）：用參考檔比，GNU／BSD 的 find 都有 -newer 與 -newercm。
+now={now_expr}
+cutoff=$(( now - {keep_days} * 86400 ))
+tmp=$(mktemp "${{TMPDIR:-/tmp}}/am-rfs-prune.XXXXXX") || fail
+over="$tmp.over"
+trap 'rm -f "$tmp" "$over"' EXIT
+# GNU `date -d @N` 先試：BSD 的 `date -r N` 在 GNU 上是「讀檔案 N 的 mtime」，而 cwd 就是 bot 能寫的 outbox（檔名可以叫 `1760000000`）。
+touch -t "$(date -d "@$cutoff" +%Y%m%d%H%M.%S 2>/dev/null || date -r "$cutoff" +%Y%m%d%H%M.%S)" "$tmp" || fail
+n=$(find . -type f ! -name .am-share-keep ! -newer "$tmp" ! -newercm "$tmp" -exec sh -c "$rm_each" sh {{}} + 2>/dev/null | wc -l | tr -d ' ')
+removed=$(( removed + ${{n:-0}} ))
+# 3. 超量：新的排前面累計，數量或位元組一超過上限，那一個和更舊的都刪。
+if [ -n "$G" ]; then
+  find . -type f ! -name .am-share-keep -exec stat -c '%Y %s %n' {{}} + 2>/dev/null > "$tmp"
+else
+  find . -type f ! -name .am-share-keep -exec stat -f '%m %z %N' {{}} + 2>/dev/null > "$tmp"
+fi
+sort -rn -k1,1 "$tmp" | awk -v cb={cap_bytes} -v cf={cap_files} '{{ n++; t += $2; if (n > cf || t > cb) {{ sub(/^[0-9]+ [0-9]+ /, ""); print }} }}' > "$over"
+while IFS= read -r f; do
+  [ -n "$f" ] || continue
+  rm -f -- "$f" && removed=$(( removed + 1 ))
+done < "$over"
 printf 'AM_RFS1\n'
 printf 'PRUNED %d\n%s\n' "${{#removed}}" "$removed"
 printf 'AM_RFS_DONE\n'
 "#,
         ob_quoted = sh_quote(outbox),
-        ttl_min = ttl_min,
+        keep_days = keep_days,
+        now_expr = now_expr,
         cap_bytes = cap_bytes,
         cap_files = cap_files,
     )
