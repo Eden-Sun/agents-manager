@@ -401,3 +401,36 @@ fn the_remote_cage_path_expands_home_and_has_no_shim_dir() {
     );
     assert_eq!(cage::remote_cage_path("", "/home/m4p"), "/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin");
 }
+
+/// 遠端分享 bot 建立失敗回滾時，只清理遠端資料夾，絕不遞迴刪除本機同路徑的資料夾（#982）。
+#[tokio::test]
+async fn remote_share_rollback_never_deletes_a_local_dir_with_the_same_path() {
+    let e = tt::env().await;
+    let f = fake_host(&e, "rb", cage::MIN_CLAUDE, false).await;
+    let b = tt::claude_bot(&e.app, &e.project_id, "rs2-rb").await;
+
+    // 先 reserve_share_bot_on(..New{name:"keepme"}..) 拿到遠端 ws
+    let folder = folder::ShareFolderIn::New { name: "keepme".into() };
+    let (ws, made) = admin::reserve_share_bot_on(&e.app, &f.host, &b.id, store::PROFILE_RESTRICTED, &folder, false).await.unwrap();
+    assert!(made);
+    let ws_path = PathBuf::from(&ws);
+    assert!(ws_path.is_dir(), "假遠端的 ws 目錄已建立");
+
+    // 在 tempdir 建本機目錄 P/keep.txt
+    let p_dir = tt::scratch_dir("local-same-path");
+    let keep_file = p_dir.join("keep.txt");
+    std::fs::write(&keep_file, "must not be deleted").unwrap();
+    let p_str = p_dir.to_str().unwrap();
+
+    // 呼叫 finish_share_bot_on(&e.app, &f.host, &b.id, &ws, true, false)，
+    // 另外把 P 當 workspace 再呼叫一次 finish_share_bot_on(&e.app, &f.host, &b.id, P, true, false)。
+    admin::finish_share_bot_on(&e.app, &f.host, &b.id, &ws, true, false).await;
+    admin::finish_share_bot_on(&e.app, &f.host, &b.id, p_str, true, false).await;
+
+    // 斷言：本機 P/keep.txt 仍在；假遠端的 ws 目錄已不存在（被 rmdir）；shared_bots 沒有這顆。
+    assert!(keep_file.exists(), "本機 P/keep.txt 仍在");
+    assert!(!ws_path.exists(), "假遠端的 ws 目錄已不存在（被 rmdir）");
+    assert!(!store::is_share_bot(&e.app.db, &b.id).await.unwrap(), "shared_bots 沒有這顆");
+    let n: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM shared_bots WHERE bot_id = ?").bind(&b.id).fetch_one(&e.app.db).await.unwrap();
+    assert_eq!(n, 0, "shared_bots 沒有這顆");
+}

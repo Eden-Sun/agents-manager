@@ -250,3 +250,42 @@ pub async fn finish_restricted(app: &(impl crate::capabilities::DataDir + crate:
         let _ = std::fs::remove_dir_all(workspace);
     }
 }
+
+/// 依專案主機收尾或回滾分享 bot 的建立：
+/// 本機走 [`finish_restricted`]；遠端若未建成只在遠端 `rmdir`，絕不刪除本機同路徑資料夾。
+pub async fn finish_share_bot_on(
+    app: &(impl crate::capabilities::DataDir + crate::capabilities::Db + crate::hosts::HostsAccess),
+    host: &str,
+    bot_id: &str,
+    workspace: &str,
+    created_folder: bool,
+    created: bool,
+) {
+    if host == am_base::config::LOCAL_HOST {
+        finish_restricted(app, bot_id, workspace, created_folder, created).await;
+        return;
+    }
+    if created {
+        if let Err(e) = sqlx::query("UPDATE bots SET cwd = ? WHERE id = ?").bind(workspace).bind(bot_id).execute(app.db()).await {
+            tracing::warn!(bot = bot_id, error = %e, "could not point the restricted bot's cwd at its folder");
+        }
+        return;
+    }
+    if let Err(e) = store::delete_restricted(app.db(), bot_id).await {
+        tracing::warn!(bot = bot_id, error = %e, "could not roll back a restricted bot reservation");
+    }
+    if created_folder {
+        if let Some(conn) = app.hosts().get(host).await {
+            match conn.home().await {
+                Ok(home) => {
+                    rmdir_made(&conn, host, &home, conn.instance(), bot_id, workspace).await;
+                }
+                Err(e) => {
+                    tracing::warn!(bot = bot_id, host = host, error = %e, "could not resolve remote home to clean up folder {workspace}");
+                }
+            }
+        } else {
+            tracing::warn!(bot = bot_id, host = host, "could not get host connection to clean up folder {workspace}");
+        }
+    }
+}

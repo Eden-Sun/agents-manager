@@ -2345,7 +2345,7 @@ async fn create_bot(
     .await;
     if let Some((ws, created_folder)) = &workspace {
         let created = res.is_ok() && replayed.lock().unwrap().is_none();
-        crate::share::admin::finish_restricted(&app, &id, ws, *created_folder, created).await;
+        crate::share::admin::finish_share_bot_on(&app, &host, &id, ws, *created_folder, created).await;
         // 遠端的保留標記（本機的 `finish_restricted` 已經放了）。
         if created && host != crate::config::LOCAL_HOST {
             crate::share::keep_new_remote_share(&app, &id).await;
