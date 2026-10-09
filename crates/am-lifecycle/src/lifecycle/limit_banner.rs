@@ -46,6 +46,18 @@ fn last_counts() -> &'static Mutex<HashMap<String, HashMap<String, usize>>> {
     M.get_or_init(|| Mutex::new(HashMap::new()))
 }
 
+/// 不在 `active` 裡的 run（結束了）不留記錄；巡邏每輪叫（`stuck_turns::forget_ended_runs`）。
+/// 取代原本「超過 512 筆整張清空」：清空會讓還在跑的 run 下一次讀畫面都變回 `FirstRead`，
+/// 正在跑回合時舊的（fork 重播）橫幅就會被當成這一回合真的撞限。
+pub fn retain_runs(active: &[String]) {
+    prune(&mut last_counts().lock().unwrap_or_else(|e| e.into_inner()), active);
+}
+
+/// 只留 `active` 裡的 run。獨立成函式讓單元測試用自己的表驗證，不碰全域表（平行測試互相清表會讓斷言不穩）。
+fn prune<V>(map: &mut HashMap<String, V>, active: &[String]) {
+    map.retain(|id, _| active.contains(id));
+}
+
 /// 這張橫幅在這個 run 裡是第幾種情況。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Sighting {
@@ -66,9 +78,6 @@ pub fn sighting(run_id: &str, screen: &str, notice: &str, all_banners: &[String]
     let now = banner_count(screen, &key);
     let mut m = last_counts().lock().unwrap();
     if !m.contains_key(run_id) {
-        if m.len() > 512 {
-            m.clear();
-        }
         let first: HashMap<String, usize> =
             all_banners.iter().map(|b| (banner_key(b), banner_count(screen, &banner_key(b)))).collect();
         m.insert(run_id.to_string(), first);
@@ -195,6 +204,29 @@ mod tests {
     }
 
     /// 第一次讀畫面就碰上在飛的回合（daemon 中途重啟）：那張字是這個回合的答案，不能當歷史。
+    /// 巡邏清掉結束的 run，只留還在跑的（用本地表驗，不碰全域表）。
+    #[test]
+    fn prune_keeps_only_active_runs() {
+        let mut m: HashMap<String, usize> = HashMap::new();
+        m.insert("a".into(), 1);
+        m.insert("b".into(), 1);
+        prune(&mut m, &["a".to_string()]);
+        assert_eq!(m.keys().collect::<Vec<_>>(), vec![&"a".to_string()]);
+    }
+
+    /// 很多 run 來來去去（每次重啟／child 都是新 run id）時，在跑的 run 不能因此把舊橫幅當成新撞到。
+    #[test]
+    fn many_runs_do_not_make_a_known_banner_look_new() {
+        let banner = "You've hit your usage limit. Upgrade to Pro, or try again at Sep 19th, 2026 6:43 PM.";
+        let banners = vec![banner.to_string()];
+        let screen = format!("■ {banner}\n");
+        assert_eq!(sighting("lb-keep-old", &screen, banner, &banners), Sighting::FirstRead);
+        for i in 0..600 {
+            sighting(&format!("lb-filler-{i}"), "", banner, &banners);
+        }
+        assert_eq!(sighting("lb-keep-old", &screen, banner, &banners), Sighting::Old, "表變大也不能把已知的橫幅變成 FirstRead");
+    }
+
     #[test]
     fn a_first_read_during_an_in_flight_turn_is_not_history() {
         assert!(is_history(Sighting::FirstRead, false), "run 剛起來那一下沒有回合＝重播");
