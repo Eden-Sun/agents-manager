@@ -1287,6 +1287,8 @@ mod tests {
             kind: "claude".into(),
             version: "2.1.277".into(),
             status: Status::Published,
+            assigned_bot_id: None,
+            dispatch_gen: 0,
             entries: vec![entry],
             verdicts: Some(json!({"issues": [{
                 "entry_ids": ["e1"],

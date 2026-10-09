@@ -61,6 +61,9 @@ pub struct Submission {
     pub verdicts: Vec<EntryVerdict>,
     #[serde(default)]
     pub issues: Vec<Proposal>,
+    /// #801：bot principal 交回時必填，抄自 `GET /api/release-triage` 那一列的 `dispatch_gen`（派工代數）。人工補交不用。
+    #[serde(default)]
+    pub dispatch_gen: Option<i64>,
 }
 
 /// 通過驗證、帶著推得出的 issue 類別，存進 `verdicts_json` 的形狀。

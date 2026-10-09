@@ -348,6 +348,8 @@ pub const SCHEMA_HISTORY: &[(i64, &str)] = &[
     (48, "0883f7828daa3cda"),
     // issue #927：`messages.relay_turn_id`（別的 bot 的報備是寄件 bot 哪一回合送的，child_done 只認同一回合的回報）。
     (49, "62625b15ce32c1d2"),
+    // issue #801：`release_triage.assigned_bot_id`／`dispatch_gen`（交辦綁定收件 bot 與派工代數，verdict 只收它的）。
+    (50, "22bdbf27a684cd91"),
 ];
 pub const SCHEMA_VERSION: i64 = SCHEMA_HISTORY[SCHEMA_HISTORY.len() - 1].0;
 

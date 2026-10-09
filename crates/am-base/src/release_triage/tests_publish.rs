@@ -42,7 +42,7 @@ fn proposal(ids: &[&str]) -> Proposal {
 }
 
 fn sub(es: &[Entry], v: Verdict, issues: Vec<Proposal>) -> Submission {
-    Submission { kind: "claude".into(), version: "2.1.277".into(), verdicts: verdicts_all(es, v), issues }
+    Submission { kind: "claude".into(), version: "2.1.277".into(), verdicts: verdicts_all(es, v), issues, dispatch_gen: None }
 }
 
 #[test]
@@ -293,7 +293,7 @@ async fn seed_version(p: &SqlitePool, version: &str, props: &[(&str, &[usize], O
         })
         .collect();
     let v = serde_json::json!({"verdicts": [], "issues": stored});
-    assert!(ledger::save_verdicts(p, "claude", version, &v, Status::Judged).await.unwrap());
+    assert!(ledger::save_verdicts(p, "claude", version, &v, Status::Judged, None).await.unwrap());
     es
 }
 
@@ -982,7 +982,7 @@ async fn a_dry_run_and_the_real_publish_agree_even_when_two_proposals_share_an_e
         },
     ];
     let v = serde_json::json!({"verdicts": [], "issues": stored});
-    assert!(ledger::save_verdicts(&p, "claude", "2.1.277", &v, Status::Judged).await.unwrap());
+    assert!(ledger::save_verdicts(&p, "claude", "2.1.277", &v, Status::Judged, None).await.unwrap());
 
     let cfg = gh.cfg(true);
     let dry = issue::preflight(&p, &cfg, None, None).await.unwrap();

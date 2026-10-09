@@ -423,19 +423,19 @@ teardown
 setup
 mk_pending claude 2.1.278 2.1.277 2.1.278; mk_empty codex
 bash "$SCRIPT"
-check "dispatched 帶 kind 與兩版" "release-triage dispatched --kind claude --version 2.1.277 --version 2.1.278$" "$AGM_DIR/calls.log"
+check "dispatched 帶 kind 與兩版" "release-triage dispatched --kind claude --version 2.1.277 --version 2.1.278 --bot [^ ][^ ]*$" "$AGM_DIR/calls.log"
 equals "dispatched 只呼叫一次" "$(grep -c 'release-triage dispatched' "$AGM_DIR/calls.log" | tr -d ' ')" "1"
 teardown
 setup
 mk_pending claude 2.1.290 2.1.281 2.1.282 2.1.283 2.1.284 2.1.285 2.1.290; mk_empty codex
 bash "$SCRIPT"
-check "截斷：dispatched 只帶前 5 版" "dispatched --kind claude --version 2.1.281 --version 2.1.282 --version 2.1.283 --version 2.1.284 --version 2.1.285$" "$AGM_DIR/calls.log"
+check "截斷：dispatched 只帶前 5 版" "dispatched --kind claude --version 2.1.281 --version 2.1.282 --version 2.1.283 --version 2.1.284 --version 2.1.285 --bot [^ ][^ ]*$" "$AGM_DIR/calls.log"
 check_no "截斷：第 6 版不標" "version 2.1.290" "$AGM_DIR/calls.log"
 teardown
 setup
 mk_pending claude 2.1.278 2.1.278; mk_pending codex 0.155.0 0.155.0
 bash "$SCRIPT"
-check "兩個 kind 各標自己的" "dispatched --kind codex --version 0.155.0$" "$AGM_DIR/calls.log"
+check "兩個 kind 各標自己的" "dispatched --kind codex --version 0.155.0 --bot [^ ][^ ]*$" "$AGM_DIR/calls.log"
 teardown
 setup
 mk_pending claude 2.1.278 2.1.278; mk_empty codex

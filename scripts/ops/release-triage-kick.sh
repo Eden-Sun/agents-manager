@@ -482,7 +482,8 @@ for p in json.load(sys.stdin)["pending"]:
     done <<< "$VERS"
     DISPATCHED_OK=1
     if [ "$VARGS_COUNT" -gt 0 ]; then
-      if "$AGM" --compact release-triage dispatched --kind "$KIND" "${VARGS[@]}" >> "$LOG" 2>&1; then
+      # #801：收件 bot 一起記下，daemon 只收它（或它底下的 child）交這一批的 verdict。
+      if "$AGM" --compact release-triage dispatched --kind "$KIND" "${VARGS[@]}" --bot "$BOT" >> "$LOG" 2>&1; then
         :
       else
         DISPATCHED_OK=0

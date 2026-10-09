@@ -2,12 +2,13 @@
 
 use std::sync::Arc;
 
-use axum::extract::{Query, State};
+use axum::extract::{Extension, Query, State};
 use axum::routing::{get, post};
 use axum::{Json, Router};
 use serde::Deserialize;
 use serde_json::{json, Value};
 
+use crate::api::RequestPrincipal;
 use crate::lc_error::LcError;
 use crate::release_triage::issue::{self, Outcome};
 use crate::release_triage::ledger::{self, Row, Status};
@@ -35,6 +36,8 @@ fn row_json(r: &Row) -> Value {
         "verdicts": r.verdicts,
         "issues": r.issues,
         "dispatched_at": r.dispatched_at,
+        "assigned_bot_id": r.assigned_bot_id,
+        "dispatch_gen": r.dispatch_gen,
         "attempts": r.attempts,
         "publish_error": r.publish_error,
         "created_at": r.created_at,
@@ -49,9 +52,24 @@ struct LedgerQuery {
 }
 
 /// 逐條結論查得到：`GET /api/release-triage?kind=&version=`（都省略＝全部，新版在前）。
-async fn get_ledger(State(app): State<Arc<App>>, Query(q): Query<LedgerQuery>) -> Result<Json<Value>, LcError> {
+/// Bot principal（#801）只看到派給它（或它底下的 child）、還在 `dispatched` 的列，要拿來交 verdict 用的 `dispatch_gen` 也在裡面；
+/// 全域帳本只給 User 與 AGM 角色。
+async fn get_ledger(State(app): State<Arc<App>>, Extension(principal): Extension<RequestPrincipal>, Query(q): Query<LedgerQuery>) -> Result<Json<Value>, LcError> {
     let version = q.version.as_deref().and_then(crate::changelog::version_string).or(q.version.clone());
-    let rows = ledger::list(&app.db, q.kind.as_deref().filter(|k| !k.is_empty()), version.as_deref().filter(|v| !v.is_empty())).await.map_err(up)?;
+    let mut rows = ledger::list(&app.db, q.kind.as_deref().filter(|k| !k.is_empty()), version.as_deref().filter(|v| !v.is_empty())).await.map_err(up)?;
+    if let RequestPrincipal::Bot(caller) = &principal {
+        let mut mine = Vec::new();
+        for r in rows {
+            let ours = match (r.status == Status::Dispatched, r.assigned_bot_id.as_deref()) {
+                (true, Some(root)) => ledger::bot_within(&app.db, caller, root).await.map_err(up)?,
+                _ => false,
+            };
+            if ours {
+                mine.push(r);
+            }
+        }
+        rows = mine;
+    }
     let cfg = app.cfg.get().await.release_triage;
     Ok(Json(json!({
         "publish_enabled": cfg.publish,
@@ -60,16 +78,42 @@ async fn get_ledger(State(app): State<Arc<App>>, Query(q): Query<LedgerQuery>) -
     })))
 }
 
+/// Bot principal 交回 verdict 的綁定（#801）：只收派給它（或它底下的 child）、還在 `dispatched`、而且是這一代的列。
+/// 順序是先看「派給誰」（不是它的人一律 403，不論列的狀態），再看代數與狀態；過了才回 `Some((派給的 bot, 代數))` 給 CAS 用。
+async fn bot_verdict_binding(app: &App, caller: &str, row: &Row, gen: Option<i64>) -> Result<(String, i64), LcError> {
+    let root = match row.assigned_bot_id.as_deref() {
+        Some(root) if ledger::bot_within(&app.db, caller, root).await.map_err(up)? => root.to_string(),
+        _ => return Err(LcError::Forbidden(json!({"error": "forbidden", "reason": "not_assigned"}))),
+    };
+    let Some(gen) = gen else {
+        return Err(LcError::Forbidden(json!({"error": "forbidden", "reason": "dispatch_gen_required", "message": "交回時要帶 `dispatch_gen`（`agm release-triage show` 那一列的值）"})));
+    };
+    if row.status != Status::Dispatched {
+        return Err(LcError::conflict("not_awaiting_verdict", json!({"status": row.status.as_str()})));
+    }
+    if gen != row.dispatch_gen {
+        return Err(LcError::conflict("stale_assignment", json!({"message": "這份交辦已被換掉（代數不符），請用最新的 show 再交"})));
+    }
+    Ok((root, row.dispatch_gen))
+}
+
 /// 模型（經 `bin/agm release-triage submit`）交回逐條 verdict 與 issue 提案。整份驗過才收，不合格整份退回。
-async fn post_verdicts(State(app): State<Arc<App>>, Json(sub): Json<Submission>) -> Result<Json<Value>, LcError> {
+/// Bot principal 只能交派給它的那一版（#801，見 [`bot_verdict_binding`]）；User 與 AGM 補交不綁。
+async fn post_verdicts(State(app): State<Arc<App>>, Extension(principal): Extension<RequestPrincipal>, Json(sub): Json<Submission>) -> Result<Json<Value>, LcError> {
     if !crate::release_triage::rules::supported(&sub.kind) {
         return Err(LcError::Bad(format!("kind `{}` 沒有分診規則（claude｜codex）", sub.kind)));
     }
     let version = crate::changelog::version_string(&sub.version).ok_or_else(|| LcError::Bad(format!("version `{}` 看不出版本", sub.version)))?;
     let row = ledger::get(&app.db, &sub.kind, &version).await.map_err(up)?.ok_or_else(|| LcError::NotFound(format!("帳本沒有 {} {version}", sub.kind)))?;
-    if !matches!(row.status, Status::Pending | Status::Dispatched | Status::Failed) {
-        return Err(LcError::conflict("not_awaiting_verdict", json!({"status": row.status.as_str()})));
-    }
+    let binding = match &principal {
+        RequestPrincipal::Bot(caller) => Some(bot_verdict_binding(&app, caller, &row, sub.dispatch_gen).await?),
+        _ => {
+            if !matches!(row.status, Status::Pending | Status::Dispatched | Status::Failed) {
+                return Err(LcError::conflict("not_awaiting_verdict", json!({"status": row.status.as_str()})));
+            }
+            None
+        }
+    };
     let (verdicts, proposals) = verdict::validate(&sub, &row.entries)
         .map_err(|problems| LcError::BadValue(json!({"error": "invalid_verdicts", "problems": problems})))?;
     // `duplicate_of` 會被 publish 直接拿去 `gh issue comment <n>`：只收帳本裡真的有的 release-triage issue，
@@ -88,7 +132,8 @@ async fn post_verdicts(State(app): State<Arc<App>>, Json(sub): Json<Submission>)
     }
     let next = if proposals.is_empty() { Status::Empty } else { Status::Judged };
     let stored = json!({"submitted_at": ledger::now_ts(), "verdicts": verdicts, "issues": proposals});
-    if !ledger::save_verdicts(&app.db, &sub.kind, &version, &stored, next).await.map_err(up)? {
+    let cas = binding.as_ref().map(|(root, gen)| (root.as_str(), *gen));
+    if !ledger::save_verdicts(&app.db, &sub.kind, &version, &stored, next, cas).await.map_err(up)? {
         // 說明放 `message`：extra 的 `reason` 會蓋掉機器 key（#228，同 #219）。
         return Err(LcError::conflict("not_awaiting_verdict", json!({"message": "狀態在驗證期間變了"})));
     }
@@ -117,16 +162,22 @@ async fn post_verdicts(State(app): State<Arc<App>>, Json(sub): Json<Submission>)
 struct DispatchedIn {
     kind: String,
     versions: Vec<String>,
+    /// #801：這批交辦收件的 bot（kick 用的 `assign --bot`）。之後只有它（或它底下的 child）能交這些版的 verdict。
+    bot_id: String,
 }
 
-/// kick 派出交辦後標記：`pending` → `dispatched`（CAS）。同一版不會被下一輪再派。
+/// kick 派出交辦後標記：`pending` → `dispatched`（CAS）。同一版不會被下一輪再派。記下收件 bot 並把派工代數＋1（#801）。
 async fn post_dispatched(State(app): State<Arc<App>>, Json(b): Json<DispatchedIn>) -> Result<Json<Value>, LcError> {
     if !crate::release_triage::rules::supported(&b.kind) {
         return Err(LcError::Bad(format!("kind `{}` 沒有分診規則", b.kind)));
     }
+    match crate::db::bot(&app.db, &b.bot_id).await.map_err(up)? {
+        Some(bot) if bot.deleted_at.is_none() => {}
+        _ => return Err(LcError::Bad(format!("bot_id `{}` 不是現存的 bot", b.bot_id))),
+    }
     let versions: Vec<String> = b.versions.iter().filter_map(|v| crate::changelog::version_string(v)).collect();
-    let n = ledger::mark_dispatched(&app.db, &b.kind, &versions).await.map_err(up)?;
-    Ok(Json(json!({"kind": b.kind, "dispatched": n})))
+    let n = ledger::mark_dispatched(&app.db, &b.kind, &versions, &b.bot_id).await.map_err(up)?;
+    Ok(Json(json!({"kind": b.kind, "dispatched": n, "bot_id": b.bot_id})))
 }
 
 #[derive(Deserialize, Default)]
@@ -187,8 +238,9 @@ mod tests {
         let sections = source_sections("claude", include_str!("../../../crates/am-base/src/release_triage/fixtures/claude_2.1.276-278.md"));
         let entries = build_entries("claude", sections.iter().find(|s| s.version == "2.1.277").unwrap()).unwrap();
         ledger::insert_version(&app.db, "claude", "2.1.277", &entries).await.unwrap();
+        let worker = crate::testing::claude_bot(&app, &env.project_id, "rt-worker").await;
 
-        let d = post_dispatched(State(app.clone()), Json(DispatchedIn { kind: "claude".into(), versions: vec!["2.1.277".into()] })).await.unwrap();
+        let d = post_dispatched(State(app.clone()), Json(DispatchedIn { kind: "claude".into(), versions: vec!["2.1.277".into()], bot_id: worker.id.clone() })).await.unwrap();
         assert_eq!(d.0["dispatched"], 1);
 
         let judged: Vec<&crate::release_triage::Entry> = entries.iter().filter(|e| e.bucket != Bucket::Dropped).collect();
@@ -196,7 +248,7 @@ mod tests {
         // 缺一條 → 400，狀態不動。
         let mut partial = mk(Verdict::None);
         partial.pop();
-        let bad = post_verdicts(State(app.clone()), Json(Submission { kind: "claude".into(), version: "2.1.277".into(), verdicts: partial, issues: vec![] })).await;
+        let bad = post_verdicts(State(app.clone()), Extension(RequestPrincipal::User), Json(Submission { dispatch_gen: None, kind: "claude".into(), version: "2.1.277".into(), verdicts: partial, issues: vec![] })).await;
         assert!(matches!(bad, Err(LcError::BadValue(_))));
         assert_eq!(ledger::get(&app.db, "claude", "2.1.277").await.unwrap().unwrap().status, Status::Dispatched);
 
@@ -211,15 +263,15 @@ mod tests {
             acceptance: "a".into(),
             duplicate_of: None,
         }];
-        let ok = post_verdicts(State(app.clone()), Json(Submission { kind: "claude".into(), version: "v2.1.277".into(), verdicts: vs.clone(), issues: issues.clone() })).await.unwrap();
+        let ok = post_verdicts(State(app.clone()), Extension(RequestPrincipal::User), Json(Submission { dispatch_gen: None, kind: "claude".into(), version: "v2.1.277".into(), verdicts: vs.clone(), issues: issues.clone() })).await.unwrap();
         assert_eq!(ok.0["status"], "judged");
         assert_eq!(ok.0["publish_enabled"], false, "預設只寫帳本");
         assert!(ok.0["publish"].is_null());
         // 已 judged：同一版不接第二份。
-        let again = post_verdicts(State(app.clone()), Json(Submission { kind: "claude".into(), version: "2.1.277".into(), verdicts: vs, issues })).await;
+        let again = post_verdicts(State(app.clone()), Extension(RequestPrincipal::User), Json(Submission { dispatch_gen: None, kind: "claude".into(), version: "2.1.277".into(), verdicts: vs, issues })).await;
         assert!(matches!(again, Err(LcError::Conflict(_))));
 
-        let got = get_ledger(State(app.clone()), Query(LedgerQuery { kind: Some("claude".into()), version: Some("2.1.277".into()) })).await.unwrap();
+        let got = get_ledger(State(app.clone()), Extension(RequestPrincipal::User), Query(LedgerQuery { kind: Some("claude".into()), version: Some("2.1.277".into()) })).await.unwrap();
         assert_eq!(got.0["rows"][0]["status"], "judged");
         assert_eq!(got.0["rows"][0]["verdicts"]["issues"][0]["triage"], "guard");
         assert_eq!(got.0["rows"][0]["entries"].as_array().unwrap().len(), entries.len());
@@ -252,7 +304,7 @@ mod tests {
             acceptance: "a".into(),
             duplicate_of: None,
         }];
-        let _ = post_verdicts(State(app.clone()), Json(Submission { kind: "claude".into(), version: "2.1.277".into(), verdicts: vs, issues })).await.unwrap();
+        let _ = post_verdicts(State(app.clone()), Extension(RequestPrincipal::User), Json(Submission { dispatch_gen: None, kind: "claude".into(), version: "2.1.277".into(), verdicts: vs, issues })).await.unwrap();
         assert_eq!(ledger::get(&app.db, "claude", "2.1.277").await.unwrap().unwrap().status, Status::Judged);
 
         let pub_in = |kind: Option<&str>, version: Option<&str>, dry_run: bool| {
@@ -294,7 +346,7 @@ mod tests {
             acceptance: "a".into(),
             duplicate_of: dup,
         };
-        let submit = |dup| post_verdicts(State(app.clone()), Json(Submission { kind: "claude".into(), version: "2.1.277".into(), verdicts: vs.clone(), issues: vec![proposal(dup)] }));
+        let submit = |dup| post_verdicts(State(app.clone()), Extension(RequestPrincipal::User), Json(Submission { dispatch_gen: None, kind: "claude".into(), version: "2.1.277".into(), verdicts: vs.clone(), issues: vec![proposal(dup)] }));
         // 帳本裡沒有 #9999：退回，狀態不動。
         let err = submit(Some(9999)).await.expect_err("不認得的 issue 編號不能當 duplicate_of");
         let LcError::BadValue(body) = err else { panic!("要是 400：{err:?}") };
@@ -325,9 +377,9 @@ mod tests {
     async fn herdr_reads_an_empty_ledger_and_cannot_be_written() {
         let env = crate::testing::env().await;
         let app = env.app.clone();
-        let got = get_ledger(State(app.clone()), Query(LedgerQuery { kind: Some("herdr".into()), version: None })).await.unwrap();
+        let got = get_ledger(State(app.clone()), Extension(RequestPrincipal::User), Query(LedgerQuery { kind: Some("herdr".into()), version: None })).await.unwrap();
         assert_eq!(got.0["rows"], json!([]));
-        let d = post_dispatched(State(app.clone()), Json(DispatchedIn { kind: "herdr".into(), versions: vec!["0.9.3".into()] })).await;
+        let d = post_dispatched(State(app.clone()), Json(DispatchedIn { kind: "herdr".into(), versions: vec!["0.9.3".into()], bot_id: String::new() })).await;
         assert!(matches!(d, Err(LcError::Bad(_))));
     }
 
@@ -351,10 +403,140 @@ mod tests {
             .execute(&app.db)
             .await
             .unwrap();
-        let err = post_verdicts(State(app.clone()), Json(Submission { kind: "claude".into(), version: "2.1.277".into(), verdicts: vs, issues: vec![] }))
+        let err = post_verdicts(State(app.clone()), Extension(RequestPrincipal::User), Json(Submission { dispatch_gen: None, kind: "claude".into(), version: "2.1.277".into(), verdicts: vs, issues: vec![] }))
             .await
             .expect_err("沒寫進去就不能回成功");
         let LcError::Conflict(body) = err else { panic!("要是 409：{err:?}") };
         assert_eq!((body["error"].as_str(), body["reason"].as_str()), (Some("conflict"), Some("not_awaiting_verdict")), "{body}");
+    }
+
+    fn verdicts_for(entries: &[crate::release_triage::Entry]) -> Vec<EntryVerdict> {
+        entries
+            .iter()
+            .filter(|e| e.bucket != Bucket::Dropped)
+            .map(|e| EntryVerdict { entry_id: e.id.clone(), verdict: Verdict::None, reason: "r".into(), module: "m".into() })
+            .collect()
+    }
+
+    fn submission(gen: Option<i64>, version: &str, entries: &[crate::release_triage::Entry]) -> Submission {
+        Submission { kind: "claude".into(), version: version.into(), verdicts: verdicts_for(entries), issues: vec![], dispatch_gen: gen }
+    }
+
+    /// #801：交辦給一顆 bot 之後，verdict 只收它（或它底下的 child）、只收這一代的。不相干的 bot 一律 403、列不動。
+    #[tokio::test]
+    async fn only_the_assigned_bot_or_its_child_can_submit_the_current_generation() {
+        let env = crate::testing::env().await;
+        let app = env.app.clone();
+        let sections = source_sections("claude", include_str!("../../../crates/am-base/src/release_triage/fixtures/claude_2.1.276-278.md"));
+        let entries = build_entries("claude", sections.iter().find(|s| s.version == "2.1.277").unwrap()).unwrap();
+        ledger::insert_version(&app.db, "claude", "2.1.277", &entries).await.unwrap();
+        let worker = crate::testing::claude_bot(&app, &env.project_id, "rt-assignee").await;
+        let child = crate::testing::claude_bot(&app, &env.project_id, "rt-assignee-child").await;
+        let stranger = crate::testing::claude_bot(&app, &env.project_id, "rt-stranger").await;
+        sqlx::query("UPDATE bots SET parent_bot_id = ? WHERE id = ?").bind(&worker.id).bind(&child.id).execute(&app.db).await.unwrap();
+        let _ = post_dispatched(State(app.clone()), Json(DispatchedIn { kind: "claude".into(), versions: vec!["2.1.277".into()], bot_id: worker.id.clone() })).await.unwrap();
+        let row = ledger::get(&app.db, "claude", "2.1.277").await.unwrap().unwrap();
+        assert_eq!((row.assigned_bot_id.as_deref(), row.dispatch_gen), (Some(worker.id.as_str()), 1));
+
+        // 不相干的 bot：帶不帶代數都 403（順序是先看派給誰），列不動。
+        for gen in [None, Some(1)] {
+            let err = post_verdicts(State(app.clone()), Extension(RequestPrincipal::Bot(stranger.id.clone())), Json(submission(gen, "2.1.277", &entries)))
+                .await
+                .expect_err("不相干的 bot 不能交 verdict");
+            assert!(matches!(err, LcError::Forbidden(_)), "{err:?}");
+        }
+        assert_eq!(ledger::get(&app.db, "claude", "2.1.277").await.unwrap().unwrap().status, Status::Dispatched);
+
+        // 派給的 bot 自己不帶代數：403 要它帶。
+        let err = post_verdicts(State(app.clone()), Extension(RequestPrincipal::Bot(worker.id.clone())), Json(submission(None, "2.1.277", &entries)))
+            .await
+            .expect_err("綁定的交辦要帶代數");
+        assert!(matches!(err, LcError::Forbidden(_)), "{err:?}");
+
+        // 代數對不上：409 stale_assignment，不是 403（派給的人沒錯，只是這份交辦過期了）。
+        let err = post_verdicts(State(app.clone()), Extension(RequestPrincipal::Bot(child.id.clone())), Json(submission(Some(0), "2.1.277", &entries)))
+            .await
+            .expect_err("過期的代數不能交");
+        let LcError::Conflict(body) = err else { panic!("要是 409：{err:?}") };
+        assert_eq!(body["reason"].as_str(), Some("stale_assignment"), "{body}");
+
+        // 派給的 bot 的 child 用現在這一代交：收。
+        let ok = post_verdicts(State(app.clone()), Extension(RequestPrincipal::Bot(child.id.clone())), Json(submission(Some(1), "2.1.277", &entries))).await.unwrap();
+        assert_eq!(ok.0["status"], "empty");
+        assert_eq!(ledger::get(&app.db, "claude", "2.1.277").await.unwrap().unwrap().status, Status::Empty);
+    }
+
+    /// #801：重新派工（代數＋1）之後，舊的交辦不能覆蓋新派工；GET 給 bot 的只有它現在這一代的列。
+    #[tokio::test]
+    async fn a_superseded_assignment_cannot_overwrite_a_newer_dispatch() {
+        let env = crate::testing::env().await;
+        let app = env.app.clone();
+        let sections = source_sections("claude", include_str!("../../../crates/am-base/src/release_triage/fixtures/claude_2.1.276-278.md"));
+        let entries = build_entries("claude", sections.iter().find(|s| s.version == "2.1.277").unwrap()).unwrap();
+        ledger::insert_version(&app.db, "claude", "2.1.277", &entries).await.unwrap();
+        let worker = crate::testing::claude_bot(&app, &env.project_id, "rt-first").await;
+        let next = crate::testing::claude_bot(&app, &env.project_id, "rt-second").await;
+        let dispatch = |bot: &str| DispatchedIn { kind: "claude".into(), versions: vec!["2.1.277".into()], bot_id: bot.to_string() };
+        let _ = post_dispatched(State(app.clone()), Json(dispatch(&worker.id))).await.unwrap();
+        // 超時退回 pending（真的 requeue 要等六小時，這裡直接改狀態）再派給另一顆。
+        sqlx::query("UPDATE release_triage SET status = 'pending' WHERE kind = 'claude' AND version = '2.1.277'").execute(&app.db).await.unwrap();
+        let _ = post_dispatched(State(app.clone()), Json(dispatch(&next.id))).await.unwrap();
+        let row = ledger::get(&app.db, "claude", "2.1.277").await.unwrap().unwrap();
+        assert_eq!((row.assigned_bot_id.as_deref(), row.dispatch_gen), (Some(next.id.as_str()), 2));
+
+        // 第一顆的 bot 已經不是收件方：403（不是 409，它從來沒有這一代的權利）。
+        let err = post_verdicts(State(app.clone()), Extension(RequestPrincipal::Bot(worker.id.clone())), Json(submission(Some(1), "2.1.277", &entries)))
+            .await
+            .expect_err("舊的收件方不能交");
+        assert!(matches!(err, LcError::Forbidden(_)), "{err:?}");
+        assert_eq!(ledger::get(&app.db, "claude", "2.1.277").await.unwrap().unwrap().status, Status::Dispatched);
+
+        // 同一顆 bot 再被派一次（代數 3）：第一次的代數 2 過期，要 409；用現在的代數就收。
+        sqlx::query("UPDATE release_triage SET status = 'pending' WHERE kind = 'claude' AND version = '2.1.277'").execute(&app.db).await.unwrap();
+        let _ = post_dispatched(State(app.clone()), Json(dispatch(&next.id))).await.unwrap();
+        let err = post_verdicts(State(app.clone()), Extension(RequestPrincipal::Bot(next.id.clone())), Json(submission(Some(2), "2.1.277", &entries)))
+            .await
+            .expect_err("過期的代數不能交");
+        let LcError::Conflict(body) = err else { panic!("要是 409：{err:?}") };
+        assert_eq!(body["reason"].as_str(), Some("stale_assignment"), "{body}");
+        let ok = post_verdicts(State(app.clone()), Extension(RequestPrincipal::Bot(next.id.clone())), Json(submission(Some(3), "2.1.277", &entries))).await.unwrap();
+        assert_eq!(ok.0["status"], "empty");
+    }
+
+    /// #801：bot 只看得到派給它（或它底下的 child）、還在 `dispatched` 的列；User 看全部。
+    #[tokio::test]
+    async fn a_bot_reads_only_its_own_dispatched_rows_and_the_user_reads_all() {
+        let env = crate::testing::env().await;
+        let app = env.app.clone();
+        let sections = source_sections("claude", include_str!("../../../crates/am-base/src/release_triage/fixtures/claude_2.1.276-278.md"));
+        for v in ["2.1.277", "2.1.278"] {
+            let entries = build_entries("claude", sections.iter().find(|s| s.version == v).unwrap()).unwrap();
+            ledger::insert_version(&app.db, "claude", v, &entries).await.unwrap();
+        }
+        let mine = crate::testing::claude_bot(&app, &env.project_id, "rt-reader").await;
+        let theirs = crate::testing::claude_bot(&app, &env.project_id, "rt-other-reader").await;
+        let _ = post_dispatched(State(app.clone()), Json(DispatchedIn { kind: "claude".into(), versions: vec!["2.1.277".into()], bot_id: mine.id.clone() })).await.unwrap();
+        let _ = post_dispatched(State(app.clone()), Json(DispatchedIn { kind: "claude".into(), versions: vec!["2.1.278".into()], bot_id: theirs.id.clone() })).await.unwrap();
+
+        let as_bot = get_ledger(State(app.clone()), Extension(RequestPrincipal::Bot(mine.id.clone())), Query(LedgerQuery { kind: Some("claude".into()), version: None })).await.unwrap();
+        let rows = as_bot.0["rows"].as_array().unwrap();
+        assert_eq!(rows.len(), 1, "{rows:?}");
+        assert_eq!((rows[0]["version"].as_str(), rows[0]["dispatch_gen"].as_i64()), (Some("2.1.277"), Some(1)));
+
+        let as_user = get_ledger(State(app.clone()), Extension(RequestPrincipal::User), Query(LedgerQuery { kind: Some("claude".into()), version: None })).await.unwrap();
+        assert_eq!(as_user.0["rows"].as_array().unwrap().len(), 2);
+    }
+
+    /// #801：派工要指向現存的 bot；打錯或已刪的 id 直接 400，不記成沒人接的交辦。
+    #[tokio::test]
+    async fn dispatch_must_name_an_existing_bot() {
+        let env = crate::testing::env().await;
+        let app = env.app.clone();
+        let sections = source_sections("claude", include_str!("../../../crates/am-base/src/release_triage/fixtures/claude_2.1.276-278.md"));
+        let entries = build_entries("claude", sections.iter().find(|s| s.version == "2.1.277").unwrap()).unwrap();
+        ledger::insert_version(&app.db, "claude", "2.1.277", &entries).await.unwrap();
+        let bad = post_dispatched(State(app.clone()), Json(DispatchedIn { kind: "claude".into(), versions: vec!["2.1.277".into()], bot_id: "no-such-bot".into() })).await;
+        assert!(matches!(bad, Err(LcError::Bad(_))));
+        assert_eq!(ledger::get(&app.db, "claude", "2.1.277").await.unwrap().unwrap().status, Status::Pending);
     }
 }

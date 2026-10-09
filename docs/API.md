@@ -152,7 +152,7 @@ A 組與 `git/push` 標「待裁示」的原因：這幾支唯一的呼叫端是
 | GET | `/api/projects/{id}/panes` | User-only；Bot 與 AGM role 均 → 403 `user_only`；Service 依明列 path scope（本路徑未授權） |
 | GET | `/api/projects/{id}/submodules` | User 或 Bot principal；Service 僅可走其明列 method/path scope |
 | GET | `/api/quota` | User 或 Bot principal；讀取快照；一般 Bot 的 `refresh=1|true|yes` → 403 `user_only`；已登記 AGM 角色沿用原有權限 |
-| GET | `/api/release-triage` | User 或 Bot principal；release-triage 任務可用 `agm release-triage show` 查帳本；全域或任務範圍待 #801 使用者決定 |
+| GET | `/api/release-triage` | User／AGM 角色看全域帳本；一般 Bot 只看派給它（或它底下的 child）、還在 `dispatched` 的列（#801） |
 | GET | `/api/search/messages` | User 或已登記 AGM 角色 Bot；一般 Bot → 403 `role_required`；Service 僅可走其明列 method/path scope |
 | GET | `/api/session` | UI bootstrap 不需 principal；TCP loopback、Host 與 Origin 守衛；帶 Bot／Service header 一律 403 `user_only`，不回傳 UI token |
 | GET | `/api/state` | User 取得全域狀態；Bot 只取得自己與 descendants 的投影並移除 global/private fields；Service 僅可走其明列 method/path scope |
@@ -221,7 +221,7 @@ A 組與 `git/push` 標「待裁示」的原因：這幾支唯一的呼叫端是
 | HEAD | `/api/projects/{id}/panes` | User-only；Bot 與 AGM role 均 → 403 `user_only`；Service 依明列 path scope（本路徑未授權） |
 | HEAD | `/api/projects/{id}/submodules` | User 或 Bot principal；Service 僅可走其明列 method/path scope |
 | HEAD | `/api/quota` | User 或 Bot principal；一般 Bot 的 `refresh=1` → 403 `user_only`；快取讀取維持原權限；已登記 AGM 角色沿用原有權限 |
-| HEAD | `/api/release-triage` | User 或 Bot principal；release-triage 任務可用 `agm release-triage show` 查帳本；視野範圍待 #801 決定 |
+| HEAD | `/api/release-triage` | 同 GET（#801）：User／AGM 全域，一般 Bot 只看派給它的列 |
 | HEAD | `/api/search/messages` | User 或已登記 AGM 角色 Bot；一般 Bot → 403 `role_required`；Service 僅可走其明列 method/path scope |
 | HEAD | `/api/session` | 無 principal；TCP loopback、Host 與 Origin 守衛 |
 | HEAD | `/api/state` | User 或 Bot principal；Service 僅可走其明列 method/path scope |
@@ -324,7 +324,7 @@ A 組與 `git/push` 標「待裁示」的原因：這幾支唯一的呼叫端是
 | POST | `/api/quota/probe` | User-only；一般 Bot → 403 `user_only`；已登記 AGM 角色略過共用 fence，仍受既有路由／資源權限限制 |
 | POST | `/api/release-triage/dispatched` | User-only；一般 Bot → 403 `user_only`；已登記 AGM 角色略過共用 fence，仍受既有路由／資源權限限制 |
 | POST | `/api/release-triage/publish` | User-only；一般 Bot → 403 `user_only`；已登記 AGM 角色略過共用 fence，仍受既有路由／資源權限限制 |
-| POST | `/api/release-triage/verdicts` | User 或 Bot principal；release-triage worker 目前需提交 verdict；尚未綁定交辦身分，待 #801 使用者決定 |
+| POST | `/api/release-triage/verdicts` | User／AGM 補交不綁；一般 Bot 只能交派給它（或它底下的 child）、這一代的 verdict：要帶 `dispatch_gen`（缺＝403 `dispatch_gen_required`），不是收件方＝403 `not_assigned`，代數過期＝409 `stale_assignment`（#801） |
 | POST | `/api/services/daemon-swap/probe/{id}` | Service `daemon-swap` only |
 | POST | `/api/services/daemon-swap/restart-window` | Service `daemon-swap` only |
 | POST | `/api/services/herdr-upgrade/notify` | Service `herdr-upgrade` only |
@@ -2450,8 +2450,8 @@ WS `upstream_update`：快照有變或要通知時推，`data` ＝上面一筆 i
 CLI：`agents-managerd release-triage-check --kind <claude|codex> [--since <ver>] --json`（抓 feed、切條、分桶、寫帳本；抓不到 exit 1）輸出
 `{"kind","from","to","pending":[{"version","kept":[{"id","text","categories":[]}],"unmatched":[{"id","text"}],"dropped_count"}]}`，`pending` 舊版在前。
 
-- `GET /api/release-triage?kind=&version=` → `{publish_enabled, repo, rows:[{kind,version,status,entries:[{id,text,bucket,categories,rules}],verdicts,issues:[{marker,entry_ids,number,url,created_at,comment}],dispatched_at,attempts,publish_error,created_at,updated_at}]}`，新版在前；`status`：`pending|dispatched|judged|published|empty|failed`。`verdicts` 是交回來的整份（`{verdicts:[…], issues:[提案，含 title／triage／entry_ids／duplicate_of?], submitted_at}`），還沒交回是 `null`；網頁更新框讀這支顯示分診結論（issue #561）。
-- `POST /api/release-triage/dispatched {kind, versions[]}` → `{kind, dispatched}`。`pending` → `dispatched`（CAS，同一版不被下一輪再派）。
+- `GET /api/release-triage?kind=&version=` → `{publish_enabled, repo, rows:[{kind,version,status,assigned_bot_id,dispatch_gen,entries:[{id,text,bucket,categories,rules}],verdicts,issues:[{marker,entry_ids,number,url,created_at,comment}],dispatched_at,attempts,publish_error,created_at,updated_at}]}`，新版在前；`status`：`pending|dispatched|judged|published|empty|failed`。`verdicts` 是交回來的整份（`{verdicts:[…], issues:[提案，含 title／triage／entry_ids／duplicate_of?], submitted_at}`），還沒交回是 `null`；網頁更新框讀這支顯示分診結論（issue #561）。
+- `POST /api/release-triage/dispatched {kind, versions[], bot_id}` → `{kind, dispatched, bot_id}`。`pending` → `dispatched`（CAS，同一版不被下一輪再派）；記下收件 `bot_id`、`dispatch_gen`＋1（#801）。`bot_id` 不是現存的 bot 就 400。
 - `POST /api/release-triage/verdicts {kind, version, verdicts:[{entry_id, verdict:guard|adopt|upgrade-arg|none, reason, module}], issues:[{entry_ids[], title, goal, suggestion, acceptance, verdict?, duplicate_of?}]}`。
   只收 `pending|dispatched|failed` 的版本（其他 409 `not_awaiting_verdict`）；**整份驗過才收**，不合格 400 `{error:"invalid_verdicts", problems:[…]}` 一次列完。 `duplicate_of` 只能是帳本裡（任何版本）已記錄的 release-triage issue 編號（publish 會直接對它 `gh issue comment`）；填了別的編號整份退回。
   沒有任何 issue 提案 → 版本 `empty`；否則 `judged`，`[release_triage] publish = true` 時當場 publish。回 `{kind,version,status,verdicts,issues_proposed,publish_enabled,publish}`。
@@ -2461,7 +2461,7 @@ CLI：`agents-managerd release-triage-check --kind <claude|codex> [--since <ver>
   但只用唯讀的 `gh auth status`／`repo view`／`label list`／`issue list`——**不開 issue、不留言、不寫帳本**。`action`：`create`｜`comment`｜`existing`（遠端已有同標記，含已關）｜`already_logged`（帳本已有，連 gh 都不問）｜
   `skipped_version_limit`｜`deferred_daily_limit`｜`remote_unknown`（gh 檢查沒過，去重問不到；title／body 照樣渲染）。去重、`already`、上限與排序（guard 優先）跟真的 publish **共用同一份實作**；跨版本每日上限也會計入近 24 小時內由遠端標記確認、但 `issue_numbers_json` 尚未回寫的 create intent（乾跑只讀、不寫帳本）。`would_create`／`would_comment`／`existing` 等於真跑的 `created`／`commented`／`existing`（有等價測試釘住，含兩個提案 `entry_ids` 交集的情形）。
 - 設定：`[release_triage] publish = false`（預設）／`gh_bin`／`repo`。
-- CLI：`bin/agm release-triage submit --file verdicts.json`；另有 `show`／`dispatched --kind K --version V…`／`publish`（加 `--dry-run` 就是上面的乾跑）。
+- CLI：`bin/agm release-triage submit --file verdicts.json`；另有 `show`／`dispatched --kind K --version V… --bot <收件 bot id>`／`publish`（加 `--dry-run` 就是上面的乾跑）。verdict 的 JSON 要帶 `dispatch_gen`（抄 `show` 那一列）。
 
 ## 總管 AGM（SPEC §18）
 
