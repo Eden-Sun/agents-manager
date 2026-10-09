@@ -16,8 +16,8 @@ export function chipStateText({ needsReply, unread, waitsKids, working, kids = 0
   return `${own}${kidsPart}${keepWarmReplied ? `（${KEEP_WARM_REPLIED_TEXT}）` : ''}`
 }
 
-/** 保溫回覆提示的白話：晶片框變色之外的文字版（sr-only、tooltip、狀態卡共用）。 */
-export const KEEP_WARM_REPLIED_TEXT = '保溫回覆已到，送出新 prompt 前維持這個框色'
+/** 保溫回覆提示的白話：晶片 ♨ 符號之外的文字版（sr-only、tooltip、狀態卡共用）。 */
+export const KEEP_WARM_REPLIED_TEXT = '保溫回覆已到，送出新 prompt 前維持 ♨ 提示'
 
 /** tooltip／aria 用：「N 個子 agent 在跑」。 */
 export function kidsText(n: number): string {

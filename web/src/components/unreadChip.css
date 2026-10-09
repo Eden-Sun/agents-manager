@@ -22,7 +22,7 @@
 /* 桌機：★ 主力一組、其餘一組，各自換行各自裁切（2026-09-15 使用者；`lib/chipOverflow.ts`）。收合時主力最多三行（2026-09-23），
    其餘那組在主力也在時一行、只有它時兩行——整列一起裁的話，主力占滿就把沒釘的「要你回答」擠進 `+N`（review3 c4 L2）。
    裁切高度由 `UnreadChip.tsx` 量出來寫在 style 上（寫死 px 在晶片加了星號與徽章變高之後會切一半，541afe7）。
-   四周留 1px：`current` 的綠外框是 box-shadow，貼齊裁切邊會被切掉。 */
+   四周留 1px：`current` 的藍外框是 box-shadow，貼齊裁切邊會被切掉。 */
 .unread-group {
   display: flex;
   flex-basis: 100%;
@@ -202,37 +202,37 @@
   color: var(--text);
   /* 方角是主訊號（不靠顏色）；999px 圓角會把 inset 左條削成月牙（2026-09-12 實拍），收成 6px。 */
   border-radius: 6px;
-  box-shadow: inset 3px 0 0 var(--lamp-green);
+  box-shadow: inset 3px 0 0 var(--accent);
   /* 650 + 多出來的左內距讓這顆看起來比別人大一號（2026-09-20 使用者）：收回 600／10px。 */
   font-weight: 600;
   padding-left: 10px;
 }
 
 /* 同時有未讀：底維持實心藍，左條反白才看得見。 */
-/* 使用中那顆加**綠色外框**（2026-09-13 使用者：「目前使用窗不夠明顯，要有綠色外框標注」）：綠在這列沒別的意思（藍未讀、紅要回答、黃等子 agent）。 */
+/* 使用中那顆加**藍色外框**（2026-10-09 使用者：「主要的 focus border 用藍色」）：深淺色模式均沿用 --accent。 */
 .unread-chip.current {
-  border-color: var(--lamp-green);
-  /* 左條原本是石墨色，在 20px 藥丸上看起來像缺一角的黑底（2026-09-20 使用者）：跟外框同綠。 */
+  border-color: var(--accent);
+  /* 左條原本是石墨色，在 20px 藥丸上看起來像缺一角的黑底（2026-09-20 使用者）：跟外框同藍。 */
   /* 外框往內畫：`0 0 0 1px` 是盒子外的一圈，看起來又大一號。 */
-  box-shadow: inset 3px 0 0 var(--lamp-green), inset 0 0 0 1px var(--lamp-green);
+  box-shadow: inset 3px 0 0 var(--accent), inset 0 0 0 1px var(--accent);
 }
 
 .unread-chip.current.unread {
   background: var(--accent);
-  border-color: var(--lamp-green);
+  border-color: var(--accent);
   color: var(--accent-text);
-  box-shadow: inset 3px 0 0 var(--accent-text), inset 0 0 0 1px var(--lamp-green);
+  box-shadow: inset 3px 0 0 var(--accent-text), inset 0 0 0 1px var(--accent);
 }
 
 /* 方角照舊套在紅、黃、進行中：它是「你在這裡」，跟顏色無關。 */
 .unread-chip.current.needs-reply {
-  border-color: var(--lamp-green);
-  box-shadow: inset 3px 0 0 var(--danger), inset 0 0 0 1px var(--lamp-green);
+  border-color: var(--accent);
+  box-shadow: inset 3px 0 0 var(--danger), inset 0 0 0 1px var(--accent);
 }
 
 .unread-chip.current.waits-kids {
-  border-color: var(--lamp-green);
-  box-shadow: inset 3px 0 0 var(--lamp-green), inset 0 0 0 1px var(--lamp-green);
+  border-color: var(--accent);
+  box-shadow: inset 3px 0 0 var(--accent), inset 0 0 0 1px var(--accent);
 }
 
 /* 紅／黃講「該做什麼」比「你在哪」重要：填色維持語意，左條疊上去。 */
@@ -242,10 +242,10 @@
   color: var(--danger);
 }
 
-/* 正在看＋等子 agent：綠框留著（你在這裡），顏色交給那顆黃點。 */
+/* 正在看＋等子 agent：藍框留著（你在這裡），顏色交給那顆黃點。 */
 .unread-chip.current.waits-kids {
   background: var(--bg-hover);
-  border-color: var(--lamp-green);
+  border-color: var(--accent);
   color: var(--text);
 }
 
