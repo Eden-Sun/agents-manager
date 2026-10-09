@@ -5097,6 +5097,19 @@ daemon 要能在 Linux（目標：Ubuntu，外部編譯主機 192.168.1.46，#67
   - 快取：每張的結果（含跳過理由）依「資料夾＋相對路徑＋inode＋大小＋mtime」記在記憶體（總量 64 MiB，先進先出）；照片換了就重算。SVG 本身每次照讀，改寫只是字串處理。
   - 測試釘住：`share::compose::tests`（路徑跳脫／scheme／符號連結／硬連結被擋、非圖片與 HEIC 被擋、嵌完是 quick-xml 解得開的 XML、縮圖與 EXIF 方向、快取）與 `svg_photo_refs_are_embedded_on_the_way_out`（入口兩條路、原檔不改）。
   - 受限 bot 的系統提示（`cage::system_prompt`）寫明這個用法：`<image href="inbox/檔名" …>`、先用 Read 看照片內容與長寬比、圓角／圓形框用 `<clipPath>`。
+- **專案在遠端主機**（#955）：入口每個檔案動作先 `site::resolve`（`shared_bots.workspace`＋`projects.host`），本機走上面所有現有程式碼（行為不變），
+  遠端走 `share::remote_fs`（POSIX sh 腳本、逐段 `cd -P` 不跟符號連結、硬連結 >1 擋、輸出用有長度的框，少 `AM_RFS_DONE`／長度不符／未知 TAG 整個作廢），經 `share::remote_io` 接進 `portal`／`svg_check`。
+  解析不出來（DB 讀不到、主機不認得或斷線）、腳本框不完整、遠端路徑不可信（符號連結、非自己擁有）一律**一般 503**（不洩漏主機名；下載名額不足才是 429）——遠端任何不確定都 fail closed。
+  - 上傳：順序與名額不變（每分享 4、全站 2＋排隊 ≤ 60 秒、每分鐘 40 次、≤ 25 MiB）；在 bot 鎖內 `inbox_write`——同一趟 ssh 數 inbox 第一層的一般檔（`>= 300` 或加上這個檔超過 200 MiB 就 507 `inbox_full`，與本機同一條線）、
+    `set -C` 建 `<ulid>-<名字>`（不寫穿懸空符號連結）、`head -c` 寫入、驗長度與身分，任何一步失敗就刪掉剛建的檔。
+  - 附件檢查：一趟 ssh 查完所有附件（≤ 20）；連不上＝503，不送出。
+  - 列表：只列第一層一般檔（黑名單同本機），**不刪任何檔**（分享用 bot 走保留政策 §20.5，不是 1 小時）；outbox 還沒建＝空清單。
+  - 下載：名額照舊（每分享 2、全站 8、不排隊）加上主機名額（每台主機分享 ssh 同時 4，用完 429 `what=download`）；`outbox_stream` 讀首行宣告的長度與前 64 bytes 做內容黑名單，通過才回 200（`Content-Length`＝宣告長度），
+    body 邊收邊送、每塊重算 60 秒閒置逾時；實際位元組數對不上（檔被截短）或逾時就中斷連線，不補零。client 斷線時名額與 ssh 行程 RAII 回收。標頭與 `?inline=1` 規則共用本機那份。
+  - SVG 嵌照片：`compose::PhotoSource`（`embed_with`；本機來源＝原本的 `open_bound_file`）。遠端先用純函式 `referenced_rels` 找出引用的路徑（≤ 16 張的候選），一趟 `photo_stats`，快取命中的不抓
+    （鍵含主機名：`主機＋遠端資料夾＋相對路徑＋inode＋大小＋mtime`，兩台同路徑不串），沒命中的一趟 `photo_fetch`（每張 ≤ 40 MiB，這一次合計 ≤ 64 MiB，超過的 `source_too_large`；照片是二進位，走 `ssh_stream` 讀原始 stdout），
+    再用預先抓好的 `PrefetchedSource` 在 `spawn_blocking` 跑 `embed_with`。抓不到的照片該張 `data-am-embed="not_found"`（同本機）；跳過理由、縮圖、EXIF、上限全部沿用。
+  - 壞 SVG 提醒（`svg_check`）：遠端用 `outbox_read`（≤ 4 MiB，帶回 ino／奈秒 mtime／ctime 算版本指紋）；讀不到就 `forget`，下次再查，同一版本只提醒一次。
 - SSE：`status`（連上時先送一次）、`message`、`resync`（漏了，請重抓）；全部分享加起來同時 32 條，每顆 bot 同時最多 4 條；滿額時該分享回 429，其他分享仍可連線。每個送出的事件都在 bot 鎖內重驗 token；每 30 秒或被叫醒時也重新確認，關閉連線即歸還兩層名額。
 
 ### 20.4 前端

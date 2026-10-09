@@ -1537,18 +1537,26 @@ impl RemoteSite {
         let mut stream = self.conn.ssh_stream(&script, &[]).await.map_err(|_| ShareFileError::Unavailable)?;
 
         // 讀取標頭首行（超時 30 秒）
-        let read_header_fut = async {
+        async fn read_line(stream: &mut SshStream) -> Vec<u8> {
             let mut line_buf = Vec::new();
             let mut b = [0u8; 1];
             while stream.read_exact(&mut b).await.is_ok() {
                 line_buf.push(b[0]);
                 if b[0] == b'\n' {
-                    if line_buf.starts_with(RFS_VERSION_TAG.as_bytes()) {
-                        line_buf.clear();
-                        continue;
-                    }
                     break;
                 }
+            }
+            line_buf
+        }
+        let read_header_fut = async {
+            let mut line_buf = read_line(&mut stream).await;
+            if line_buf.starts_with(RFS_VERSION_TAG.as_bytes()) {
+                line_buf = read_line(&mut stream).await;
+            }
+            // 錯誤框是 `ERR <長度>\n<原因>\n`：原因在下一行（NOTFOUND／TOOLARGE／UNTRUSTED），要讀進來才分得出 404／413／503。
+            if line_buf.starts_with(b"ERR") {
+                let reason = read_line(&mut stream).await;
+                line_buf.extend_from_slice(&reason);
             }
             line_buf
         };
@@ -1641,11 +1649,18 @@ impl RemoteSite {
         }
         let _permit = acquire_slot(&self.host, TIMEOUT_MAINTAIN).await?;
         let script = photo_fetch_script(&self.workspace, rels, each_max, total_max);
-        let out = self.conn.ssh_exec_timeout(&script, TIMEOUT_MAINTAIN).await.map_err(|e| {
+        // 照片是二進位：`ssh_exec_timeout` 回 `String`（有損 UTF-8 轉換會弄壞位元組、長度對不上），所以走 `ssh_stream` 讀原始 stdout。
+        use tokio::io::AsyncReadExt as _;
+        let mut stream = self.conn.ssh_stream(&script, &[]).await.map_err(|e| {
             tracing::warn!(host = %self.host, error = %e, "photo_fetch ssh failed");
             RfsError::Unavailable
         })?;
-        parse_photo_fetch(out.as_bytes(), rels, each_max, total_max)
+        let mut out = Vec::new();
+        match tokio::time::timeout(TIMEOUT_MAINTAIN, stream.read_to_end(&mut out)).await {
+            Ok(Ok(_)) => {}
+            _ => return Err(RfsError::Unavailable),
+        }
+        parse_photo_fetch(&out, rels, each_max, total_max)
     }
 
     // 預算與保留（R-S4 用）
@@ -1683,6 +1698,7 @@ impl RemoteSite {
 
 // ───────────────────── 測試替身支援 ─────────────────────
 
+#[cfg(test)]
 pub mod test_support {
     use super::*;
     use std::process::Stdio;
