@@ -13,7 +13,7 @@
 use std::collections::{HashMap, VecDeque};
 use std::ffi::OsStr;
 use std::os::unix::fs::MetadataExt as _;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::sync::{Arc, Mutex, OnceLock};
 
 use base64::Engine as _;
@@ -36,10 +36,10 @@ const MAX_IMAGES: usize = 16;
 /// 快取總量（data URI 的位元組數）。
 const CACHE_MAX: usize = 64 * 1024 * 1024;
 
-/// 引用檔的身分：同一個資料夾、同一條相對路徑、同一個 inode／大小／mtime 才算同一張。
+/// 引用檔的身分：同一個來源（本機資料夾，或「主機＋遠端資料夾」，兩台同路徑不串）、同一條相對路徑、同一個 inode／大小／mtime 才算同一張。
 #[derive(Clone, PartialEq, Eq, Hash)]
 struct Key {
-    folder: PathBuf,
+    scope: String,
     rel: String,
     ino: u64,
     len: u64,
@@ -48,6 +48,139 @@ struct Key {
 
 /// 一張的結果：data URI，或跳過的理由（理由也快取，壞檔不用每次重解）。
 type Embedded = Result<Arc<str>, &'static str>;
+
+/// 引用檔的身分資料（快取鍵用）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PhotoMeta {
+    pub ino: u64,
+    pub len: u64,
+    pub mtime_ns: i128,
+}
+
+/// 照片從哪裡來（#955 R-S3）：本機資料夾，或預先從遠端抓好的一批。`embed_with` 只透過它看照片，其餘（href 解析、縮圖、上限、快取）共用。
+/// 理由字串沿用既有的：`not_found`／`source_too_large`／`read_failed`。
+pub trait PhotoSource {
+    /// 快取鍵的來源部分：本機是資料夾路徑；遠端要帶主機名。
+    fn scope(&self) -> String;
+    fn stat(&self, parts: &[&str]) -> Result<PhotoMeta, &'static str>;
+    fn read(&self, parts: &[&str], max: u64) -> Result<Vec<u8>, &'static str>;
+}
+
+/// 本機資料夾：逐段 `O_NOFOLLOW` 打開（[`crate::trusted_open::open_bound_file`]：不跟符號連結、硬連結也擋）。
+struct LocalSource<'a> {
+    folder: &'a Path,
+}
+
+impl PhotoSource for LocalSource<'_> {
+    fn scope(&self) -> String {
+        self.folder.to_string_lossy().into_owned()
+    }
+
+    fn stat(&self, parts: &[&str]) -> Result<PhotoMeta, &'static str> {
+        let comps: Vec<&OsStr> = parts.iter().map(OsStr::new).collect();
+        let file = crate::trusted_open::open_bound_file(self.folder, &comps, None).map_err(|_| "not_found")?;
+        let meta = file.metadata().map_err(|_| "not_found")?;
+        Ok(PhotoMeta { ino: meta.ino(), len: meta.len(), mtime_ns: meta.mtime() as i128 * 1_000_000_000 + meta.mtime_nsec() as i128 })
+    }
+
+    fn read(&self, parts: &[&str], max: u64) -> Result<Vec<u8>, &'static str> {
+        let comps: Vec<&OsStr> = parts.iter().map(OsStr::new).collect();
+        let file = crate::trusted_open::open_bound_file(self.folder, &comps, None).map_err(|_| "not_found")?;
+        match crate::trusted_open::read_limited(file, max) {
+            Ok(bytes) => Ok(bytes),
+            Err(crate::trusted_open::BoundedReadError::TooLarge { .. }) => Err("source_too_large"),
+            Err(crate::trusted_open::BoundedReadError::Io) => Err("read_failed"),
+        }
+    }
+}
+
+/// 遠端照片：先在 async 端用 [`referenced_rels`] 找出引用的路徑，經 `photo_stats`／`photo_fetch` 抓好，再交給同步的 [`embed_with`] 用
+/// （`embed_with` 在 `spawn_blocking` 裡跑，不能 await）。沒抓到的一律 `not_found`（遠端任何不確定都不嵌）。
+pub struct PrefetchedSource {
+    scope: String,
+    items: HashMap<String, (PhotoMeta, Option<Result<Vec<u8>, &'static str>>)>,
+}
+
+impl PrefetchedSource {
+    /// `scope`＝主機名＋遠端資料夾；`rels`、`metas`、`data` 同長度、同順序（`data[i]` 只對沒命中快取而且要抓的才有值）。
+    pub fn new(host: &str, workspace: &str, rels: &[Vec<String>], metas: &[Option<PhotoMeta>], data: Vec<Option<Result<Vec<u8>, &'static str>>>) -> Self {
+        let mut items = HashMap::new();
+        for ((rel, meta), data) in rels.iter().zip(metas).zip(data) {
+            if let Some(meta) = meta {
+                items.insert(rel.join("/"), (*meta, data));
+            }
+        }
+        Self { scope: Self::scope_of(host, workspace), items }
+    }
+
+    /// 快取鍵的來源部分：主機名＋遠端資料夾（兩台主機同一條路徑不會串）。
+    pub fn scope_of(host: &str, workspace: &str) -> String {
+        format!("{host}\0{workspace}")
+    }
+}
+
+impl PhotoSource for PrefetchedSource {
+    fn scope(&self) -> String {
+        self.scope.clone()
+    }
+
+    fn stat(&self, parts: &[&str]) -> Result<PhotoMeta, &'static str> {
+        self.items.get(&parts.join("/")).map(|(m, _)| *m).ok_or("not_found")
+    }
+
+    fn read(&self, parts: &[&str], max: u64) -> Result<Vec<u8>, &'static str> {
+        match self.items.get(&parts.join("/")) {
+            Some((_, Some(Ok(bytes)))) if bytes.len() as u64 <= max => Ok(bytes.clone()),
+            Some((_, Some(Ok(_)))) => Err("source_too_large"),
+            Some((_, Some(Err(why)))) => Err(why),
+            _ => Err("not_found"),
+        }
+    }
+}
+
+/// 記錄 `embed_with` 要看哪些照片（一律回 `not_found`，不讀不解）：用同一套 href 解析找出引用路徑，不另寫一份解析器。
+struct RecordingSource {
+    wanted: std::cell::RefCell<Vec<Vec<String>>>,
+}
+
+impl PhotoSource for RecordingSource {
+    fn scope(&self) -> String {
+        String::new()
+    }
+
+    fn stat(&self, parts: &[&str]) -> Result<PhotoMeta, &'static str> {
+        let rel: Vec<String> = parts.iter().map(|p| (*p).to_string()).collect();
+        let mut wanted = self.wanted.borrow_mut();
+        // 候選（原樣與 `%XX` 解碼後）合計最多 2×MAX_IMAGES 條，免得一份塞滿 `<image>` 的 SVG 讓遠端查太多。
+        if wanted.len() < MAX_IMAGES * 2 && !wanted.contains(&rel) {
+            wanted.push(rel);
+        }
+        Err("not_found")
+    }
+
+    fn read(&self, _parts: &[&str], _max: u64) -> Result<Vec<u8>, &'static str> {
+        Err("not_found")
+    }
+}
+
+/// SVG 引用的照片路徑（至多 [`MAX_IMAGES`] 張的候選，順序固定）。遠端先抓這些，再 `embed_with`。純函式。
+pub fn referenced_rels(svg: &[u8]) -> Vec<Vec<String>> {
+    let rec = RecordingSource { wanted: Default::default() };
+    let _ = embed_with(svg, &rec);
+    rec.wanted.into_inner()
+}
+
+/// 這張照片（依來源＋路徑＋身分）的縮圖結果已在快取裡嗎？命中的不必再從遠端抓。
+pub fn is_cached(scope: &str, rel: &[String], meta: &PhotoMeta) -> bool {
+    cache_get(&key_of(scope, &rel.join("/"), meta)).is_some()
+}
+
+/// 照片的原始大小上限（超過回 `source_too_large`），遠端 `photo_fetch` 的每張上限也用它。
+pub const PHOTO_SOURCE_MAX: u64 = SOURCE_MAX;
+
+fn key_of(scope: &str, rel: &str, meta: &PhotoMeta) -> Key {
+    Key { scope: scope.to_string(), rel: rel.to_string(), ino: meta.ino, len: meta.len, mtime_ns: meta.mtime_ns }
+}
 
 #[derive(Default)]
 struct Cache {
@@ -102,6 +235,11 @@ pub fn wants_embed(svg: &[u8]) -> bool {
 /// 把 `svg` 裡 `<image>` 的相對 href 嵌成 data URI，回新的內容；沒有要改的就回 `None`（照原檔送）。
 /// 不是 UTF-8 的也回 `None`。會讀檔與解碼，呼叫端放在 `spawn_blocking` 裡。
 pub fn embed(svg: &[u8], folder: &Path) -> Option<Vec<u8>> {
+    embed_with(svg, &LocalSource { folder })
+}
+
+/// 同 [`embed`]，照片從 `src` 來（本機資料夾或遠端預先抓好的一批）。
+pub fn embed_with(svg: &[u8], src: &dyn PhotoSource) -> Option<Vec<u8>> {
     if !wants_embed(svg) {
         return None;
     }
@@ -133,7 +271,7 @@ pub fn embed(svg: &[u8], folder: &Path) -> Option<Vec<u8>> {
         };
         let tag = &at[..tag_len];
         if is_image {
-            let rewritten = rewrite_image_tag(tag, folder, &mut embedded, text.len() + out.len());
+            let rewritten = rewrite_image_tag(tag, src, &mut embedded, text.len() + out.len());
             changed |= rewritten.is_some();
             out.push_str(rewritten.as_deref().unwrap_or(tag));
         } else {
@@ -161,7 +299,7 @@ fn tag_end(at: &str) -> Option<usize> {
 
 /// 一個 `<image …>` 標籤：`href`／`xlink:href` 是相對路徑的就換成 data URI 或拿掉；沒動到回 `None`。
 /// `size_so_far` 是目前輸出的估計大小，用來守 [`OUT_MAX`]。
-fn rewrite_image_tag(tag: &str, folder: &Path, embedded: &mut usize, size_so_far: usize) -> Option<String> {
+fn rewrite_image_tag(tag: &str, src: &dyn PhotoSource, embedded: &mut usize, size_so_far: usize) -> Option<String> {
     let mut out = String::with_capacity(tag.len());
     let mut changed = false;
     let bytes = tag.as_bytes();
@@ -217,7 +355,7 @@ fn rewrite_image_tag(tag: &str, folder: &Path, embedded: &mut usize, size_so_far
             out.push_str(&tag[ws_start..end]);
         } else {
             changed = true;
-            let outcome = if *embedded >= MAX_IMAGES { Err("too_many_images") } else { resolve(folder, &v) };
+            let outcome = if *embedded >= MAX_IMAGES { Err("too_many_images") } else { resolve(src, &v) };
             match outcome {
                 Ok(uri) if size_so_far + out.len() + uri.len() <= OUT_MAX => {
                     *embedded += 1;
@@ -319,7 +457,7 @@ pub fn safe_rel(href: &str) -> Option<Vec<&str>> {
 }
 
 /// 解一個 href：找得到（原樣或 `%XX` 解碼後）就回 data URI，不然回理由。
-fn resolve(folder: &Path, href: &str) -> Embedded {
+fn resolve(src: &dyn PhotoSource, href: &str) -> Embedded {
     let mut candidates = vec![href.to_string()];
     if href.contains('%') {
         candidates.extend(percent_decode(href));
@@ -327,7 +465,7 @@ fn resolve(folder: &Path, href: &str) -> Embedded {
     let mut why = "not_relative";
     for c in &candidates {
         let Some(parts) = safe_rel(c) else { continue };
-        match load(folder, c, &parts) {
+        match load(src, &parts) {
             Err("not_found") => why = "not_found",
             other => return other,
         }
@@ -335,30 +473,14 @@ fn resolve(folder: &Path, href: &str) -> Embedded {
     Err(why)
 }
 
-/// 開檔（不跟連結）、查快取、不在快取就讀檔縮圖。
-fn load(folder: &Path, rel: &str, parts: &[&str]) -> Embedded {
-    let comps: Vec<&OsStr> = parts.iter().map(OsStr::new).collect();
-    let Ok(file) = crate::trusted_open::open_bound_file(folder, &comps, None) else { return Err("not_found") };
-    let Ok(meta) = file.metadata() else { return Err("not_found") };
-    let key = Key {
-        folder: folder.to_path_buf(),
-        rel: rel.to_string(),
-        ino: meta.ino(),
-        len: meta.len(),
-        mtime_ns: meta.mtime() as i128 * 1_000_000_000 + meta.mtime_nsec() as i128,
-    };
+/// 查身分（不跟連結）、查快取、不在快取就讀檔縮圖。
+fn load(src: &dyn PhotoSource, parts: &[&str]) -> Embedded {
+    let meta = src.stat(parts)?;
+    let key = key_of(&src.scope(), &parts.join("/"), &meta);
     if let Some(hit) = cache_get(&key) {
         return hit;
     }
-    let result = if meta.len() > SOURCE_MAX {
-        Err("source_too_large")
-    } else {
-        match crate::trusted_open::read_limited(file, SOURCE_MAX) {
-            Ok(bytes) => to_data_uri(&bytes),
-            Err(crate::trusted_open::BoundedReadError::TooLarge { .. }) => Err("source_too_large"),
-            Err(crate::trusted_open::BoundedReadError::Io) => Err("read_failed"),
-        }
-    };
+    let result = if meta.len > SOURCE_MAX { Err("source_too_large") } else { src.read(parts, SOURCE_MAX).and_then(|bytes| to_data_uri(&bytes)) };
     cache_put(key, result.clone());
     result
 }
@@ -425,6 +547,7 @@ fn encode(img: &DynamicImage) -> Result<(&'static str, Vec<u8>), &'static str> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::path::PathBuf;
 
     fn scratch(tag: &str) -> PathBuf {
         let base = crate::share::test_dirs::track(std::env::temp_dir().join(format!("am-compose-{tag}-{}", crate::db::ulid())));
