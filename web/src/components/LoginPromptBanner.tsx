@@ -1,6 +1,6 @@
 import { useEffect, useMemo } from 'react'
 import { useShallow } from 'zustand/react/shallow'
-import { loginPromptText, pendingLogins, visibleLogins } from '../lib/loginPrompt'
+import { loginPromptText, pendingForPrune, pendingLogins, visibleLogins } from '../lib/loginPrompt'
 import { useStore } from '../store/store'
 import './loginPromptBanner.css'
 
@@ -26,7 +26,7 @@ export function LoginPromptBanner() {
   const loginIdentity = useStore((s) => s.loginIdentity)
   const busy = useStore((s) => s.busy)
   const pending = useMemo(() => pendingLogins(input), [input])
-  useEffect(() => prune(pending), [pending, prune])
+  useEffect(() => prune(pendingForPrune(input, pending, dismissed)), [input, pending, dismissed, prune])
   const shown = visibleLogins(pending, dismissed)
   if (shown.length === 0) return null
   return (
