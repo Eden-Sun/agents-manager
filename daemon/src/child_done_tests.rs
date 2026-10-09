@@ -259,48 +259,51 @@
     }
 
     /// child 在 parent 對話裡留一則 `relay_from = child` 的訊息（模擬它自己 `herdr agent prompt` 回報）。
-    async fn child_relays_to_parent(f: &Fixture, content: &str, created_at: &str) {
+    /// `sent_in`＝寄件當下 child 正在跑的回合（`relay_turn_id`，#927）。
+    async fn child_relays_to_parent(f: &Fixture, content: &str, sent_in: &str) {
         sqlx::query(
-            "INSERT INTO messages (id, conversation_id, turn_id, role, content, source, relay_from, created_at)
-             VALUES (?,?,NULL,'user',?,'hook',?,?)",
+            "INSERT INTO messages (id, conversation_id, turn_id, role, content, source, relay_from, relay_turn_id, created_at)
+             VALUES (?,?,NULL,'user',?,'hook',?,?,?)",
         )
         .bind(db::ulid())
         .bind(&f.parent_conversation)
         .bind(content)
         .bind(&f.child_id)
-        .bind(created_at)
+        .bind(sent_in)
+        .bind(db::now())
         .execute(&f.env.app.db)
         .await
         .unwrap();
     }
 
-    /// #868（方案 a）：回合期間、內容與最後回覆近似的 relay 才算「child 已自己回報」，略過自動通知。
+    /// #927：同一回合送出、內容與最後回覆近似的 relay 才算「child 已自己回報」，略過自動通知。
     #[tokio::test]
     async fn a_child_that_already_prompted_its_parent_does_not_get_a_second_notice() {
         let f = fixture("hook", "completed").await;
-        child_relays_to_parent(&f, "工作完成，結果如下。", &db::iso_in(-30)).await;
+        child_relays_to_parent(&f, "工作完成，結果如下。", &f.child_turn).await;
         notify_turn(&f.env.app, &f.child_turn).await.unwrap();
         assert_eq!(notice_count(&f).await, 0);
         assert_eq!(sweep(&f.env.app).await, 1, "sweep 仍會撈出它，但 notify_turn 同樣認得出已回報");
         assert_eq!(notice_count(&f).await, 0);
     }
 
-    /// #868：回合中途的提問、進度回報（內容跟最後回覆不像）不能吞掉完成通知。
+    /// #868：回合中途的提問、進度回報（同一回合、內容跟最後回覆不像）不能吞掉完成通知。
     #[tokio::test]
     async fn a_midturn_question_to_the_parent_does_not_swallow_the_completion_notice() {
         let f = fixture("hook", "completed").await;
         make_parent_busy(&f, "parent-working-midturn").await;
-        child_relays_to_parent(&f, "請問資料庫連線字串要用 staging 還是 production？我先暫停等你回覆。", &db::iso_in(-30)).await;
+        child_relays_to_parent(&f, "請問資料庫連線字串要用 staging 還是 production？我先暫停等你回覆。", &f.child_turn).await;
         notify_turn(&f.env.app, &f.child_turn).await.unwrap();
         assert_eq!(notice_count(&f).await, 1);
     }
 
-    /// #868：完成之後才來的訊息（不再多給 5 分鐘），即使內容一模一樣也不算這一回合的回報。
+    /// #927：綁著別的回合送出的報備，即使內容一模一樣也不算這一回合的回報（不再靠時間窗）。
     #[tokio::test]
-    async fn a_message_after_the_turn_completed_does_not_count_as_its_report() {
+    async fn a_report_sent_in_another_turn_does_not_count_for_this_one() {
         let f = fixture("hook", "completed").await;
         make_parent_busy(&f, "parent-working-after").await;
-        child_relays_to_parent(&f, "工作完成，結果如下。", &db::iso_in(3 * 60)).await;
+        let other = add_completed_turn(&f, "另一個回合的回覆").await;
+        child_relays_to_parent(&f, "工作完成，結果如下。", &other).await;
         notify_turn(&f.env.app, &f.child_turn).await.unwrap();
         assert_eq!(notice_count(&f).await, 1);
     }

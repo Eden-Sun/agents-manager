@@ -43,7 +43,7 @@ pub const RELAY_ANNOUNCE_EVENT: &str = "AmRelayAnnounce";
 
 /// 報備比收件方的回音晚到時補標：寄件者那台主機上、`agent_name` 是 `to_agent` 的在跑 run，它的對話裡
 /// 五分鐘內、還沒標來源、內容對得上的最新一則使用者訊息。補上就用掉那筆報備（同一句不標兩次）。
-async fn relay_backfill(app: &(impl crate::capabilities::Db + crate::events::ports::TurnCommands), from_bot: &str, to_agent: &str, text: &str) -> Result<()> {
+async fn relay_backfill(app: &(impl crate::capabilities::Db + crate::events::ports::TurnCommands), from_bot: &str, from_turn: Option<&str>, to_agent: &str, text: &str) -> Result<()> {
     let host = db::bot_host(app.db(), from_bot).await?;
     let since = (chrono::Utc::now() - chrono::Duration::minutes(5)).to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
     let rows: Vec<(String, String, String)> = sqlx::query_as(
@@ -65,8 +65,9 @@ async fn relay_backfill(app: &(impl crate::capabilities::Db + crate::events::por
     let Some((msg_id, content, to_bot)) = rows.into_iter().find(|(_, c, _)| crate::agent_relay::same_prompt(text, c)) else {
         return Ok(());
     };
-    sqlx::query("UPDATE messages SET relay_from = ?, relay_unverified = 0, updated_at = ? WHERE id = ? AND relay_from IS NULL")
+    sqlx::query("UPDATE messages SET relay_from = ?, relay_unverified = 0, relay_turn_id = ?, updated_at = ? WHERE id = ? AND relay_from IS NULL")
         .bind(from_bot)
+        .bind(from_turn)
         .bind(db::now())
         .bind(&msg_id)
         .execute(app.db())
@@ -78,12 +79,12 @@ async fn relay_backfill(app: &(impl crate::capabilities::Db + crate::events::por
     Ok(())
 }
 
-async fn relay_source(app: &impl crate::capabilities::Db, run: Option<&db::Run>, echo: &str) -> Option<String> {
+async fn relay_source(app: &impl crate::capabilities::Db, run: Option<&db::Run>, echo: &str) -> Option<crate::agent_relay::Relayed> {
     let run = run?;
     let agent = run.agent_name.as_deref()?;
     // 讀不到主機＝認不出來就不標（寧可少標，不要錯標）。
     let host = db::bot_host(app.db(), &run.bot_id).await.ok()?;
-    crate::agent_relay::claim(&host, agent, echo)
+    crate::agent_relay::claim_relayed(&host, agent, echo)
 }
 
 pub enum HookKind {
@@ -687,7 +688,9 @@ async fn store_resent_prompt_tx(
     }
     tracing::info!(turn = %turn.id, "external turn: the Stop proves a person typed this prompt again; storing it");
     let from = relay_source(app, run, text).await;
-    Ok(Some(tx.insert_message_relayed_tx(conv, Some(&turn.id), "user", text, "hook", false, None, from.as_deref()).await?))
+    let msg = tx.insert_message_relayed_tx(conv, Some(&turn.id), "user", text, "hook", false, None, from.as_ref().map(|r| r.from_bot.as_str())).await?;
+    crate::lifecycle::messages::mark_relay_turn(tx, &msg.id, from.as_ref().and_then(|r| r.from_turn.as_deref())).await?;
+    Ok(Some(msg))
 }
 
 /// [`store_resent_prompt_tx`] 給「回合已被備援收掉、遲到的 Stop 才到」的路徑：自己開交易、補完就發事件。
@@ -1409,8 +1412,11 @@ pub async fn process_locked_for<H: HookHost>(app: &H, body: &HookBody, event_id:
         HookKind::RelayAnnounce { to_agent, text } => {
             // 讀不到寄件者的主機就不記（記了也沒人認得出是哪台）；補標那邊同樣要讀主機，會一起報錯。
             let host = db::bot_host(app.db(), &bot.id).await?;
-            crate::agent_relay::announce(&host, &bot.id, &to_agent, &text);
-            relay_backfill(app, &bot.id, &to_agent, &text).await
+            // 寄件 bot 送這句當下正在跑的回合：用 shim 寫進報備的 `received_at`（送出時間；spool 可能晚好幾秒才收到）。
+            let sent_at = body.received_at.clone().unwrap_or_else(db::now);
+            let from_turn = crate::lifecycle::relay_watch::sender_turn_at(app, &bot.id, &sent_at).await?;
+            crate::agent_relay::announce(&host, &bot.id, &to_agent, &text, from_turn.as_deref());
+            relay_backfill(app, &bot.id, from_turn.as_deref(), &to_agent, &text).await
         }
         HookKind::Identity { session_id, transcript_path } => {
             if let Some(r) = &run {
@@ -1582,10 +1588,11 @@ pub async fn process_locked_for<H: HookHost>(app: &H, body: &HookBody, event_id:
                                 .await?;
                         if hook_user_is_new(&have, u) && !repeats_answered_prompt(&mut tx, &conv, &t.id, u).await? {
                             let from = relay_source(app, run.as_ref(), u).await;
-                            added.push(
-                                tx.insert_message_relayed_tx(&conv, Some(&t.id), "user", u, "hook", false, None, from.as_deref())
-                                    .await?,
-                            );
+                            let msg = tx
+                                .insert_message_relayed_tx(&conv, Some(&t.id), "user", u, "hook", false, None, from.as_ref().map(|r| r.from_bot.as_str()))
+                                .await?;
+                            crate::lifecycle::messages::mark_relay_turn(&mut tx, &msg.id, from.as_ref().and_then(|r| r.from_turn.as_deref())).await?;
+                            added.push(msg);
                         } else {
                             // 刮下來的回音可能被折行截斷；hook 的原文較可信，補完下半截。
                             upgrade_clipped_user_message(&mut tx, &t.id, u).await?;
@@ -1651,9 +1658,9 @@ pub async fn process_locked_for<H: HookHost>(app: &H, body: &HookBody, event_id:
             let mut added = Vec::new();
             if let Some(u) = user.filter(|s| !s.is_empty()) {
                 let from = relay_source(app, run.as_ref(), &u).await;
-                added.push(
-                    tx.insert_message_relayed_tx(&conv, Some(&tid), "user", &u, "hook", false, None, from.as_deref()).await?,
-                );
+                let msg = tx.insert_message_relayed_tx(&conv, Some(&tid), "user", &u, "hook", false, None, from.as_ref().map(|r| r.from_bot.as_str())).await?;
+                crate::lifecycle::messages::mark_relay_turn(&mut tx, &msg.id, from.as_ref().and_then(|r| r.from_turn.as_deref())).await?;
+                added.push(msg);
             }
             if !body_text.is_empty() {
                 added.push(tx.insert_message_tx(&conv, Some(&tid), "assistant", &body_text, "hook", false, None).await?);
@@ -4481,7 +4488,41 @@ mod external_claim_tests {
         let remote_run = db::run(&env.app.db, &remote_run).await.unwrap().unwrap();
         assert_eq!(relay_source(&env.app, Some(&remote_run), text).await, None, "另一台主機的同名 agent 不能認領");
         let local_run = db::run(&env.app.db, &local_run).await.unwrap().unwrap();
-        assert_eq!(relay_source(&env.app, Some(&local_run), text).await.as_deref(), Some(from.id.as_str()), "真正的收件方照常認領");
+        assert_eq!(relay_source(&env.app, Some(&local_run), text).await.map(|r| r.from_bot).as_deref(), Some(from.id.as_str()), "真正的收件方照常認領");
+    }
+
+    /// #927：報備記下寄件 bot 送它當下正在跑的回合，收件方的回音認領時一起帶出來（child_done 靠它認「這一回合已經自己回報」）。
+    #[tokio::test]
+    async fn a_relay_announce_carries_the_sender_turn_into_the_echo_it_attributes() {
+        let env = tt::env().await;
+        let from = tt::claude_bot(&env.app, &env.project_id, "relay-turn-from").await;
+        let local = tt::claude_bot(&env.app, &env.project_id, "relay-turn-local").await;
+        let local_run = tt::fake_run(&env.app, &local.id).await;
+        sqlx::query("UPDATE runs SET agent_name = 'proj-relay-turn' WHERE id = ?").bind(&local_run).execute(&env.app.db).await.unwrap();
+        let sender_conv = db::conversation_id(&env.app.db, &from.id).await.unwrap();
+        let sender_turn = db::ulid();
+        sqlx::query("INSERT INTO turns (id, conversation_id, origin, status, delivery, created_at) VALUES (?,?,'web','in_flight','ok',?)")
+            .bind(&sender_turn)
+            .bind(&sender_conv)
+            .bind(db::now())
+            .execute(&env.app.db)
+            .await
+            .unwrap();
+        let text = "請核准這一則，寄件的時候我還在跑這一回合";
+        let announce = HookBody {
+            bot_id: from.id.clone(),
+            provider: "claude".into(),
+            payload: json!({"hook_event_name": RELAY_ANNOUNCE_EVENT, "to_agent": "proj-relay-turn", "text": text}),
+            received_at: None,
+            truncated: false,
+            run_id: None,
+        };
+        process(&env.app, &announce).await.unwrap();
+
+        let local_run = db::run(&env.app.db, &local_run).await.unwrap().unwrap();
+        let relayed = relay_source(&env.app, Some(&local_run), text).await.expect("收件方的回音認得出來");
+        assert_eq!(relayed.from_bot, from.id);
+        assert_eq!(relayed.from_turn.as_deref(), Some(sender_turn.as_str()));
     }
 
     #[tokio::test]

@@ -85,8 +85,8 @@ pub async fn resolve(app: &(impl crate::capabilities::Db + crate::capabilities::
 }
 
 /// 開進行中的回合。已經有回合在飛（收件方正忙，字會排在它後面）就不開，UI 本來就看得到。寫不進去只記 log，不擋補 Enter。
-pub(super) async fn open_turn(app: &impl RelayWatchContext, run: &db::Run, from_bot: &str, text: &str) -> Option<String> {
-    match try_open_turn(app, run, from_bot, text).await {
+pub(super) async fn open_turn(app: &impl RelayWatchContext, run: &db::Run, from_bot: &str, from_turn: Option<&str>, text: &str) -> Option<String> {
+    match try_open_turn(app, run, from_bot, from_turn, text).await {
         Ok(tid) => tid,
         Err(e) => {
             tracing::warn!(error = ?e, run = %run.id, "agent-to-agent prompt: could not open a turn");
@@ -95,7 +95,7 @@ pub(super) async fn open_turn(app: &impl RelayWatchContext, run: &db::Run, from_
     }
 }
 
-async fn try_open_turn(app: &impl RelayWatchContext, run: &db::Run, from_bot: &str, text: &str) -> anyhow::Result<Option<String>> {
+async fn try_open_turn(app: &impl RelayWatchContext, run: &db::Run, from_bot: &str, from_turn: Option<&str>, text: &str) -> anyhow::Result<Option<String>> {
     let lock = app.bot_lock(&run.bot_id).await;
     let _g = lock.lock().await;
     let Some(run) = db::run(app.db(), &run.id).await? else { return Ok(None) };
@@ -112,6 +112,7 @@ async fn try_open_turn(app: &impl RelayWatchContext, run: &db::Run, from_bot: &s
         if transcript {
             let mut tx = app.db().begin().await?;
             let msg = insert_message_relayed_tx(&mut tx, &conv, None, "user", text, "hook", false, None, Some(from_bot)).await?;
+            super::messages::mark_relay_turn(&mut tx, &msg.id, from_turn).await?;
             tx.commit().await?;
             super::messages::emit_message_added(app, &run.bot_id, msg).await;
         }
@@ -127,6 +128,7 @@ async fn try_open_turn(app: &impl RelayWatchContext, run: &db::Run, from_bot: &s
         .execute(&mut *tx)
         .await?;
     let msg = insert_message_relayed_tx(&mut tx, &conv, Some(&tid), "user", text, "hook", false, None, Some(from_bot)).await?;
+    super::messages::mark_relay_turn(&mut tx, &msg.id, from_turn).await?;
     tx.commit().await?;
     super::messages::emit_message_added(app, &run.bot_id, msg).await;
     app.turn_changed(&tid).await;
@@ -242,7 +244,7 @@ async fn give_up(app: &impl RelayWatchContext, w: &Watch) -> Step {
 /// Start the watch only after the caller has completed [`resolve`] successfully. The announce API
 /// does this synchronously before acknowledging the shim, so a DB failure cannot be mistaken for
 /// an unmanaged target and followed by an unobserved direct prompt.
-pub async fn on_resolved_announce(app: &impl RelayWatchContext, from_bot: &str, text: &str, run: Option<db::Run>) {
+pub async fn on_resolved_announce(app: &impl RelayWatchContext, from_bot: &str, from_turn: Option<&str>, text: &str, run: Option<db::Run>) {
     if text.trim().is_empty() {
         return;
     }
@@ -255,11 +257,29 @@ pub async fn on_resolved_announce(app: &impl RelayWatchContext, from_bot: &str, 
         app.sweep_dead_panes().await;
         return;
     }
-    let turn_id = open_turn(app, &run, from_bot, text).await;
+    let turn_id = open_turn(app, &run, from_bot, from_turn, text).await;
     spawn_watch(
         app,
         Watch { run_id: run.id.clone(), bot_id: run.bot_id.clone(), text: text.to_string(), turn_id, started: Instant::now(), held_since: None, nudges: 0, rev_at_nudge: None },
     );
+}
+
+/// 寄件 bot 送一句報備當下正在跑的回合（#927）：`at`（RFC 3339 或 `db::now()` 的格式）落在 `[created_at, completed_at]` 之間、最新的那一回合。
+/// 本機 API 傳的是現在；遠端 spool 傳的是 shim 寫進報備的 `received_at`（送出當下，不是 daemon 收到的時間）。找不到就是 `None`。
+pub async fn sender_turn_at(app: &impl crate::capabilities::Db, bot_id: &str, at: &str) -> anyhow::Result<Option<String>> {
+    let turn = sqlx::query_scalar(
+        "SELECT t.id FROM turns t
+           JOIN conversations c ON c.id = t.conversation_id
+          WHERE c.bot_id = ?1
+            AND julianday(t.created_at) <= julianday(?2)
+            AND (t.completed_at IS NULL OR julianday(t.completed_at) >= julianday(?2))
+          ORDER BY t.created_at DESC, t.rowid DESC LIMIT 1",
+    )
+    .bind(bot_id)
+    .bind(at)
+    .fetch_optional(app.db())
+    .await?;
+    Ok(turn)
 }
 
 /// Restore composer delivery watchers from the durable relay turns after startup or host reconnect.
@@ -344,6 +364,32 @@ mod tests {
     }
 
     /// 名字對得到在跑的 bot：開進行中的回合，使用者訊息標 `relay_from`；已經有回合在飛就不重開。
+    /// #927：寄件 bot 送報備當下正在跑的回合：時間落在 `[created_at, completed_at]` 之間、最新的那一回合。
+    #[tokio::test]
+    async fn the_sender_turn_is_the_one_running_when_it_sent() {
+        let f = fixture("sender-turn").await;
+        let app = f.env.app.clone();
+        let sender = tt::claude_bot(&app, &f.env.project_id, "sender-turn-child").await;
+        let conv = db::conversation_id(app.db(), &sender.id).await.unwrap();
+        for (id, status, created, completed) in [
+            ("turn-old", "completed", "2026-10-09T10:00:00.000Z", Some("2026-10-09T10:05:00.000Z")),
+            ("turn-open", "in_flight", "2026-10-09T10:10:00.000Z", None),
+        ] {
+            sqlx::query("INSERT INTO turns (id, conversation_id, origin, status, delivery, created_at, completed_at) VALUES (?,?,'web',?,'ok',?,?)")
+                .bind(id)
+                .bind(&conv)
+                .bind(status)
+                .bind(created)
+                .bind(completed)
+                .execute(app.db())
+                .await
+                .unwrap();
+        }
+        assert_eq!(sender_turn_at(&app, &sender.id, "2026-10-09T10:02:00.000Z").await.unwrap().as_deref(), Some("turn-old"));
+        assert_eq!(sender_turn_at(&app, &sender.id, "2026-10-09T10:20:00.000Z").await.unwrap().as_deref(), Some("turn-open"));
+        assert_eq!(sender_turn_at(&app, &sender.id, "2026-10-09T10:07:00.000Z").await.unwrap(), None, "兩回合之間沒有在跑的回合");
+    }
+
     #[tokio::test]
     async fn an_announce_opens_an_in_flight_turn_marked_with_its_sender() {
         let f = fixture("insurer-mt").await;
@@ -351,12 +397,12 @@ mod tests {
         let sender = tt::claude_bot(&app, &f.env.project_id, "console-fetures").await;
         let run = db::run(app.db(), &f.run_id).await.unwrap().unwrap();
 
-        let tid = open_turn(&app, &run, &sender.id, TEXT).await.expect("開了回合");
+        let tid = open_turn(&app, &run, &sender.id, None, TEXT).await.expect("開了回合");
         assert_eq!(status_of(&f, &tid).await, "in_flight");
         let (content, from): (String, Option<String>) =
             sqlx::query_as("SELECT content, relay_from FROM messages WHERE turn_id=? AND role='user'").bind(&tid).fetch_one(app.db()).await.unwrap();
         assert_eq!((content.as_str(), from.as_deref()), (TEXT, Some(sender.id.as_str())));
-        assert!(open_turn(&app, &run, &sender.id, "第二句").await.is_none(), "已經有回合在飛：不重開");
+        assert!(open_turn(&app, &run, &sender.id, None, "第二句").await.is_none(), "已經有回合在飛：不重開");
 
         assert_eq!(resolve(&app, &sender.id, "agent").await.unwrap().map(|r| r.id), Some(f.run_id.clone()), "agent 名對得到");
         assert_eq!(resolve(&app, &sender.id, &f.pane).await.unwrap().map(|r| r.id), Some(f.run_id.clone()), "pane id 對得到");
@@ -370,7 +416,7 @@ mod tests {
         let sender = tt::claude_bot(&app, &f.env.project_id, "tracked-relay-sender").await;
         let run = db::run(app.db(), &f.run_id).await.unwrap().unwrap();
 
-        on_resolved_announce(&app, &sender.id, TEXT, Some(run)).await;
+        on_resolved_announce(&app, &sender.id, None, TEXT, Some(run)).await;
         assert_eq!(app.background_tasks.len(), 1, "the delivery watcher must belong to the daemon shutdown barrier");
 
         app.shutdown.cancel();
@@ -387,7 +433,7 @@ mod tests {
         let app = f.env.app.clone();
         let sender = tt::claude_bot(&app, &f.env.project_id, "rearmed-relay-sender").await;
         let run = db::run(app.db(), &f.run_id).await.unwrap().unwrap();
-        let turn_id = open_turn(&app, &run, &sender.id, TEXT).await.expect("persist the external turn before shutdown");
+        let turn_id = open_turn(&app, &run, &sender.id, None, TEXT).await.expect("persist the external turn before shutdown");
         f.env.herdr.live_pane(&f.pane, tt::LivePane { composer: vec![TEXT.into()], width: Some(120), ..Default::default() });
 
         let mut restored = restore_open_watches(&app, "local").await.unwrap();
@@ -517,7 +563,7 @@ mod tests {
         let sender = tt::claude_bot(&app, &f.env.project_id, "sender").await;
         let run = db::run(app.db(), &f.run_id).await.unwrap().unwrap();
         f.env.herdr.live_pane(&f.pane, tt::LivePane { width: Some(120), ..Default::default() });
-        let tid = open_turn(&app, &run, &sender.id, TEXT).await.unwrap();
+        let tid = open_turn(&app, &run, &sender.id, None, TEXT).await.unwrap();
         let t0 = Instant::now();
         let mut w = watch(&f, Some(tid.clone()), t0);
 
@@ -579,7 +625,7 @@ mod tests {
         f.env.herdr.live_pane(&f.pane, tt::LivePane { composer: vec![TEXT.into()], width: Some(120), ..Default::default() });
         let sender = tt::claude_bot(&app, &f.env.project_id, "turn-read-sender").await;
         let run = db::run(app.db(), &f.run_id).await.unwrap().unwrap();
-        let turn_id = open_turn(&app, &run, &sender.id, TEXT).await.unwrap();
+        let turn_id = open_turn(&app, &run, &sender.id, None, TEXT).await.unwrap();
         let t0 = Instant::now();
         let mut w = watch(&f, Some(turn_id), t0);
 
@@ -671,7 +717,7 @@ mod tests {
         let sender = tt::claude_bot(&app, &f.env.project_id, "dead-sender").await;
         close_pane(&f);
         let run = resolve(&app, &sender.id, "agent").await.unwrap();
-        on_resolved_announce(&app, &sender.id, TEXT, run).await;
+        on_resolved_announce(&app, &sender.id, None, TEXT, run).await;
         assert_eq!(run_state(&f).await, "exited");
         let turns: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM turns WHERE run_id=?").bind(&f.run_id).fetch_one(app.db()).await.unwrap();
         assert_eq!(turns, 0);

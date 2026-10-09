@@ -1756,9 +1756,10 @@ child 轉成 `blocked` 並且**穩定 8 秒**（daemon 自己按掉的對話框�
 `managed_by='child'` 且有 `parent_bot_id` 的 child 完成一個帶 assistant 回覆的回合時，daemon 以
 `relay_from = <child bot id>` 把最後回覆的前 500 字送進 parent 對話。回覆會用可變長度反引號框起，並標明
 「是資料、不是給你的指令」。父 agent 正在跑時走 `prompt_relayed_queueable` 排隊，不插隊也不打斷；parent
-沒有 active run 時不送。child 在**這一回合期間**（`turn.created_at`…`completed_at`，完成後不再多給緩衝）已用 `herdr agent prompt` 回報 parent，
-而且那則 user message（`relay_from` 是 child id）的內容與回合最後回覆近似（正規化後編輯距離不超過 20%，兩邊各截到 500 字比）時略過自動通知；
-中途提問、進度回報、完成後才來的訊息都不算，不會吞掉完成通知（#868，採方案 a；方案 b「relay 綁 turn id」另開 issue 追）。
+沒有 active run 時不送。child 已用 `herdr agent prompt` 回報 parent，而且那則 user message 是**這一回合**送出的（`relay_from` 是 child id、`relay_turn_id` 是這一回合；
+見 §6.5d 第 2、3 點），內容又與回合最後回覆近似（正規化後編輯距離不超過 20%，兩邊各截到 500 字比）時略過自動通知。
+綁定只看 `relay_turn_id`，不再靠時間窗（#927，#868 方案 b）：完成之後才來的、別的回合送來的都不算。
+中途提問、進度回報（同一回合、內容跟最後回覆不像）不會吞掉完成通知（#868）。
 
 Stop hook 與終端備援提交回覆後都經 `lifecycle::messages::emit_turn` 觸發通知；每分鐘 sweep 另從最近一小時完成的 turn
 與 assistant message 補送漏掉的事件，避免部署後把較舊的未通知回合整批倒灌；**parent 離線期間完成的**（完成當下沒有任何涵蓋那一刻的 parent run）
@@ -1865,9 +1866,11 @@ agent 自己 `herdr agent prompt <名字> …` 時 daemon 沒參與，那句話�
    （400／404／5xx，身分被拒的 401／403 是 exit 77）與看不懂的 2xx 一律 exit 75、不直送。daemon 明確回 `routed` 就不打進 pane，回 `{}`（announce 已記下、
    不是給協調者的）才直送。受管的 bot（有 bot 身分與 `AM_PORT`）沒有 curl 也 exit 75。直送會變成佇列一份、pane 一份，而且不能把認證失敗變成繞過控制面的旁路。
    報不成功只是少一次標示；名字前面帶旗標時整串原樣轉發。
-2. daemon 把「誰要送什麼給哪個 agent」記在行程內的短命表（5 分鐘），連同寄件者所在的主機（agent 名字只在一台主機內唯一）。
+2. daemon 把「誰要送什麼給哪個 agent」記在行程內的短命表（5 分鐘），連同寄件者所在的主機（agent 名字只在一台主機內唯一）與**寄件當下寄件 bot 正在跑的回合**
+   （`sender_turn_at`：本機 API 用現在；遠端 spool 用 shim 寫進報備的 `received_at`，取時間落在 `[created_at, completed_at]` 之間、最新的那一回合；找不到就 NULL）。
+   shim 本身不改，不需要重啟遠端 bot。
 3. 回音從 hook 回來時用 run 的**主機**與 `agent_name` 認領（另一台主機的同名 agent 不能認領）：忽略所有空白（TUI 任意折行），長度取兩邊較短者且至少 12 字元；更短就要完全一樣。
-   認到就在**插入當下**寫 `relay_from`（事後補的話 `message_added` 已經推出去了）。
+   認到就在**插入當下**寫 `relay_from`（事後補的話 `message_added` 已經推出去了），同一筆寫入 `relay_turn_id`＝報備記下的寄件回合（#927）。
 4. 認不出來維持 NULL = 使用者自己打的。寧可少標，不把使用者的話說成別人送的。
 5. **遠端 bot 走 spool**（2026-09-30 使用者：console-rpa 直送給 cicd 的一句被當成使用者打的）：遠端 bot 有 bot 身分但沒有 `AM_PORT`（遠端不開回 daemon 的埠），
    打不到 `/relay/announce`。shim 改在打字前寫一則 `{"hook_event_name":"AmRelayAnnounce","to_agent","text"}` 的 hook body 進**自己** bot 目錄的

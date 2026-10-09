@@ -346,6 +346,8 @@ pub const SCHEMA_HISTORY: &[(i64, &str)] = &[
     (47, "d9e8f995cf7cd191"),
     // issue #916：`codex_steers`（codex steer 的 client_request_id 落地，重啟後重送不再打第二次字）。
     (48, "0883f7828daa3cda"),
+    // issue #927：`messages.relay_turn_id`（別的 bot 的報備是寄件 bot 哪一回合送的，child_done 只認同一回合的回報）。
+    (49, "62625b15ce32c1d2"),
 ];
 pub const SCHEMA_VERSION: i64 = SCHEMA_HISTORY[SCHEMA_HISTORY.len() - 1].0;
 
@@ -552,6 +554,8 @@ async fn apply_migrations_inner(pool: &SqlitePool, fail_after_spawn_hints_drop: 
         ("runs", "launch_rev", "ALTER TABLE runs ADD COLUMN launch_rev TEXT"),
         // issue #339：`relay_from` 是呼叫端自稱、沒帶自己的 bot token 證明（相容期）＝1。舊列 0＝不是這條路寫的。
         ("messages", "relay_unverified", "ALTER TABLE messages ADD COLUMN relay_unverified INTEGER NOT NULL DEFAULT 0"),
+        // issue #927：`relay_turn_id`＝寄件 bot 送這句話當下正在跑的回合（child_done 用它認「這一回合已經自己回報過」）。舊列 NULL＝不知道。
+        ("messages", "relay_turn_id", "ALTER TABLE messages ADD COLUMN relay_turn_id TEXT"),
         // issue #554：run 為什麼被收成 exited；舊列 NULL＝不知道，退役紀錄當成「沒親眼看到 pane 被關」。
         ("runs", "exit_reason", "ALTER TABLE runs ADD COLUMN exit_reason TEXT"),
         // 回合中送出的方式（使用者 2026-09-28）：`send_now`＝插隊、`supplement`＝補充（打進 pane、併在進行中的回合）。

@@ -46,11 +46,11 @@ pub async fn has_recent_near_duplicate(
         .any(|reply| nearly_same_reply(current_reply, reply)))
 }
 
-/// child 自己已經把這一回合的結果回報給 parent 了嗎（#868，採方案 a）。
+/// child 自己已經把這一回合的結果回報給 parent 了嗎（#868，#927 改綁回合）。
 ///
-/// 只認**這一回合期間**（`[turn.created_at, turn.completed_at]`，不再多給完成後 5 分鐘）parent 對話裡
-/// `relay_from = child` 的 user message，而且內容要跟這回合的最後回覆近似（[`nearly_same_reply`]）才算「已回報」。
-/// 中途提問、進度回報、完成後才來的下一件事都不算，不會吞掉完成通知；代價是 child 用不同的話回報過時 parent 會多收一則。
+/// 只認 parent 對話裡 `relay_from = child`、而且 `relay_turn_id = 這一回合` 的 user message：那是寄件時記下、
+/// child 送這句話當下正在跑的回合（見 `messages.relay_turn_id`）。別的回合送來的、完成之後才來的，都不會是它，不再靠時間窗。
+/// 同一回合裡還要內容跟最後回覆近似（[`nearly_same_reply`]），中途的提問、進度回報不能吞掉完成通知（#868）。
 /// daemon 自己送的 `child-done:` 通知也帶 `relay_from`，不算 child 自己回報（否則補送會被前一次的通知擋掉，#874）。
 /// 兩邊都截到 [`MAX_REPLY_CHARS`] 再比：編輯距離是 O(n·m)，長回覆不能拖慢每分鐘的 sweep。
 pub async fn child_already_reported(
@@ -58,25 +58,21 @@ pub async fn child_already_reported(
     parent_conversation: &str,
     child_id: &str,
     child_prefix: &str,
-    turn_created_at: &str,
-    turn_completed_at: &str,
+    turn_id: &str,
     reply: &str,
 ) -> anyhow::Result<bool> {
     let relayed: Vec<String> = sqlx::query_scalar(
         "SELECT m.content FROM messages m
-          WHERE m.conversation_id = ? AND m.role = 'user' AND m.relay_from = ?
+          WHERE m.conversation_id = ? AND m.role = 'user' AND m.relay_from = ? AND m.relay_turn_id = ?
             AND NOT EXISTS (SELECT 1 FROM turns nt WHERE nt.id = m.turn_id
                              AND substr(nt.client_request_id, 1, length(?)) = ?)
-            AND julianday(m.created_at) >= julianday(?)
-            AND julianday(m.created_at) <= julianday(?)
           ORDER BY m.created_at DESC LIMIT 16",
     )
     .bind(parent_conversation)
     .bind(child_id)
+    .bind(turn_id)
     .bind(child_prefix)
     .bind(child_prefix)
-    .bind(turn_created_at)
-    .bind(turn_completed_at)
     .fetch_all(db)
     .await?;
     let reply = truncate(reply.trim(), MAX_REPLY_CHARS);

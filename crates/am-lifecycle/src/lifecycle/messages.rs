@@ -93,6 +93,13 @@ pub async fn insert_message_grouped(
     insert_message_full(app, conversation_id, turn_id, role, content, source, incomplete, snapshot, group_id, None).await
 }
 
+/// 別的 bot 送來的訊息記下寄件 bot 送它當下正在跑的回合（`relay_turn_id`，#927）。跟插入同一個交易，寫在 [`insert_message_relayed_tx`] 之後。
+pub async fn mark_relay_turn(conn: &mut sqlx::SqliteConnection, message_id: &str, turn: Option<&str>) -> anyhow::Result<()> {
+    let Some(turn) = turn else { return Ok(()) };
+    sqlx::query("UPDATE messages SET relay_turn_id = ? WHERE id = ?").bind(turn).bind(message_id).execute(conn).await?;
+    Ok(())
+}
+
 /// 同上，外加 `relay_from`（別的 bot 送進來的，SPEC §6.5d）。INSERT 時就寫：`message_added`
 /// 當下就推出去，事後 UPDATE 的話泡泡要重新載入才會變「AGM →」。
 #[allow(clippy::too_many_arguments)]

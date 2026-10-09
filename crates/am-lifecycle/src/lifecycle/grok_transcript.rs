@@ -460,7 +460,10 @@ async fn import(app: &impl GrokTranscriptContext, bot: &db::Bot, run: &db::Run, 
                 }
             }
             if users.is_empty() && t.prompt_text.is_none() {
-                added.push(insert_message_relayed_tx(&mut tx, &conv, Some(&t.id), "user", &ex.prompt, "transcript", false, None, relay_from(host, run, &ex.prompt).as_deref()).await?);
+                let from = relay_from(host, run, &ex.prompt);
+                let msg = insert_message_relayed_tx(&mut tx, &conv, Some(&t.id), "user", &ex.prompt, "transcript", false, None, from.as_ref().map(|r| r.from_bot.as_str())).await?;
+                super::messages::mark_relay_turn(&mut tx, &msg.id, from.as_ref().and_then(|r| r.from_turn.as_deref())).await?;
+                added.push(msg);
             }
             if let Some(reply) = &ex.reply {
                 let replies: Vec<(String, String)> =
@@ -521,7 +524,9 @@ async fn import(app: &impl GrokTranscriptContext, bot: &db::Bot, run: &db::Run, 
                 }
                 None => {
                     let from = relay_from(host, run, &ex.prompt);
-                    added.push(insert_message_relayed_tx(&mut tx, &conv, Some(&tid), "user", &ex.prompt, "transcript", false, None, from.as_deref()).await?);
+                    let msg = insert_message_relayed_tx(&mut tx, &conv, Some(&tid), "user", &ex.prompt, "transcript", false, None, from.as_ref().map(|r| r.from_bot.as_str())).await?;
+                    super::messages::mark_relay_turn(&mut tx, &msg.id, from.as_ref().and_then(|r| r.from_turn.as_deref())).await?;
+                    added.push(msg);
                 }
             }
             if let Some(reply) = &ex.reply {
@@ -546,8 +551,8 @@ async fn import(app: &impl GrokTranscriptContext, bot: &db::Bot, run: &db::Run, 
 }
 
 /// §6.5d：別的 agent 用 `herdr agent prompt` 交辦的這句。
-fn relay_from(host: &str, run: &db::Run, prompt: &str) -> Option<String> {
-    crate::agent_relay::claim(host, run.agent_name.as_deref()?, prompt)
+fn relay_from(host: &str, run: &db::Run, prompt: &str) -> Option<crate::agent_relay::Relayed> {
+    crate::agent_relay::claim_relayed(host, run.agent_name.as_deref()?, prompt)
 }
 
 /// `try_fallback` 先問這裡。`Some(true)`：回合已經由對話檔收掉；`Some(false)`：對話檔說這一問還沒結束，留在飛；

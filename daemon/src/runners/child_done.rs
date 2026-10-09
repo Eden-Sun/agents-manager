@@ -156,7 +156,6 @@ struct CompletedTurn {
     child_id: String,
     child_name: String,
     parent_id: String,
-    started_at: String,
     completed_at: String,
     run_id: Option<String>,
     kind: String,
@@ -167,7 +166,7 @@ pub(crate) async fn notify_turn(app: &Arc<App>, turn_id: &str) -> anyhow::Result
     let _notification_guard = notification_lock().lock().await;
     let row: Option<CompletedTurn> = sqlx::query_as(
         "SELECT t.id, t.status, b.id AS child_id, b.name AS child_name, b.parent_bot_id AS parent_id,
-                t.created_at AS started_at, t.completed_at, t.run_id, b.kind,
+                t.completed_at, t.run_id, b.kind,
                 (SELECT a.content FROM messages a
                   WHERE a.turn_id = t.id AND a.role = 'assistant'
                   ORDER BY a.created_at DESC, a.rowid DESC LIMIT 1) AS reply
@@ -256,8 +255,7 @@ pub(crate) async fn notify_turn(app: &Arc<App>, turn_id: &str) -> anyhow::Result
         &parent_conversation,
         &turn.child_id,
         &prefix,
-        &turn.started_at,
-        &turn.completed_at,
+        &turn.id,
         &turn.reply,
     )
     .await?;
