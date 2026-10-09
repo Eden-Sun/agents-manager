@@ -21,7 +21,8 @@ import { clipAfterRows, layoutBoxes, lineBudget, moreTitle } from '../lib/chipOv
 import { chipTracked } from '../lib/supervisorProject'
 import { loadPinGridRows, pinGridLayout, pinGridRowsNeeded, rowsFromDrag, savePinGridRows, sortPinned } from '../lib/pinnedOrder'
 import { useChipFlip } from './useChipFlip'
-import { orderedBotIds, useStore } from '../store/store'
+import { useShallow } from 'zustand/react/shallow'
+import { botLamp, orderedBotIds, useStore } from '../store/store'
 import { useBotLamp } from '../hooks/useBotLamp'
 import { StatusLamp } from './StatusLamp'
 import type { Lamp } from '../api/types'
@@ -197,6 +198,8 @@ export function UnreadChip() {
   const bots = useStore((s) => s.bots)
   const botUnread = useStore((s) => s.botUnread)
   const runs = useStore((s) => s.runs)
+  // 燈號走 `botLamp`（同側欄與 `useBotLamp`）：run 已 exited、主機斷線時不算在跑／要你回答。只看 agent_status 會讓死掉的 pane 永遠黃燈。
+  const lamps = useStore(useShallow((s) => Object.fromEntries(s.bots.map((b) => [b.id, botLamp(s, b.id)])) as Record<string, Lamp>))
   const selectedBotId = useStore((s) => s.selectedBotId)
   // 側欄收起來的 bot 不畫晶片：點下去會選到一顆側欄裡找不到的 bot。
   const hiddenBotIds = useStore((s) => s.hiddenBotIds)
@@ -212,7 +215,7 @@ export function UnreadChip() {
   const items = useMemo(() => {
     const tracked = (b: Bot) => chipTracked(b, supervisorProjectId)
     const kidsRunning = (id: string) =>
-      bots.filter((b) => b.parent_bot_id === id && (runs[b.id]?.agent_status === 'working' || runs[b.id]?.agent_status === 'blocked')).length
+      bots.filter((b) => b.parent_bot_id === id && (lamps[b.id] === 'working' || lamps[b.id] === 'blocked')).length
     const hidden = new Set(hiddenBotIds)
     const out: ChipItem[] = []
     for (const b of bots) {
@@ -220,12 +223,13 @@ export function UnreadChip() {
       // 釘選是使用者自己指定的，不受排除規則影響。
       const pinned = b.primary
       const n = botUnread[b.id] ?? 0
-      const status = runs[b.id]?.agent_status
-      const needsReply = status === 'blocked'
+      const lamp = lamps[b.id]
+      const needsReply = lamp === 'blocked'
+      const working = lamp === 'working'
       const nKids = kidsRunning(b.id)
       const kids = !needsReply && nKids > 0
       const current = b.id === selectedBotId
-      const show = pinned || (tracked(b) && (n > 0 || b.id === keptId || status === 'working' || needsReply))
+      const show = pinned || (tracked(b) && (n > 0 || b.id === keptId || working || needsReply))
       if (!show) continue
       out.push({
         id: b.id,
@@ -239,15 +243,15 @@ export function UnreadChip() {
         needsReply,
         waitsKids: kids,
         kidsRunning: nKids,
-        working: status === 'working',
+        working,
         title: botTitle(b.name, pinned, n, needsReply, kids, current) + (nKids > 0 ? `（${kidsText(nKids)}）` : ''),
         keepWarmReplied: pinned && keepWarmReplied(runs[b.id], now),
-        cache: pinned ? chipCache(runs[b.id], now, status === 'working') : null,
+        cache: pinned ? chipCache(runs[b.id], now, working) : null,
         noWarm: pinned && runs[b.id]?.keep_warm_skip === true,
       })
     }
     return out
-  }, [supervisorProjectId, botUnread, bots, hiddenBotIds, keptId, runs, selectBot, selectedBotId, now])
+  }, [supervisorProjectId, botUnread, bots, hiddenBotIds, keptId, lamps, runs, selectBot, selectedBotId, now])
 
   // 固定順序（#344）：主力組照 `primary_position`，其餘組照側欄順序；未讀／忙碌／卡住只用顏色與角標表示、不再讓晶片跳位。
   const pinnedItems = useMemo(() => sortPinned(items.filter((it) => it.pinned)), [items])
