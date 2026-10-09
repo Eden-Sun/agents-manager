@@ -70,6 +70,20 @@ impl s6_ports::SetupShareServices for App {
     fn cage_settings(&self, settings: &mut Value, workspace: &str, env: &Value) {
         crate::share::cage::cage_settings(settings, workspace, env);
     }
+
+    fn write_remote_private_file<'a>(
+        &'a self,
+        conn: &'a crate::hosts::HostConn,
+        dir: &'a str,
+        name: &'a str,
+        data: &'a [u8],
+    ) -> impl std::future::Future<Output = anyhow::Result<()>> + Send + 'a {
+        async move {
+            crate::share::site::RemoteSite::write_private_files(conn, dir, &[(name, data)])
+                .await
+                .map_err(|e| anyhow::anyhow!("寫不進遠端 {dir}/{name}：{e}"))
+        }
+    }
 }
 
 impl s6_ports::IdentityAccess for App {
@@ -103,18 +117,36 @@ impl s6_ports::StartServices for App {
         crate::share::cage::prepare(&self.shared(), bot, host).await
     }
 
-    async fn cage_environment(&self, env: &mut Value, bot: &crate::db::Bot) {
-        let identity_env = crate::share::cage::identity_env(&self.shared(), bot).await;
-        crate::share::cage::cage_env(env, &identity_env, &crate::share::cage::local_home());
+    async fn cage_environment(&self, env: &mut Value, bot: &crate::db::Bot, host: &str) {
+        let shared = self.shared();
+        if host == crate::config::LOCAL_HOST {
+            let identity_env = crate::share::cage::identity_env(&shared, bot).await;
+            crate::share::cage::cage_env(env, &identity_env, &crate::share::cage::local_home());
+            return;
+        }
+        // 遠端：身分與家目錄都是那台的，PATH 換成那台的（不含 shim 目錄）。位置解析不到就留空，那顆 bot 啟動前已經被 prepare 擋下。
+        let (home, remote_path) = match crate::share::cage::remote_site(&shared, &bot.id).await {
+            Ok(site) => (site.home.clone(), site.conn.remote_path()),
+            Err(_) => (String::new(), String::new()),
+        };
+        let identity_env = match bot.identity.as_deref().filter(|s| !s.trim().is_empty()) {
+            Some(idn) => crate::tools::identity_for_host(&shared, host, idn).await.map(|i| i.env).unwrap_or_default(),
+            None => Default::default(),
+        };
+        crate::share::cage::cage_env(env, &identity_env, &home);
+        if let Some(map) = env.as_object_mut() {
+            map.insert("PATH".into(), serde_json::json!(crate::share::cage::remote_cage_path(&remote_path, &home)));
+        }
     }
 
-    fn install_restricted_prompt(
-        &self,
-        bot: &crate::db::Bot,
-        workspace: &str,
-        env: &Value,
-    ) -> anyhow::Result<PathBuf> {
-        crate::share::cage::install_prompt(&self.shared(), bot, workspace, env)
+    fn install_restricted_prompt<'a>(
+        &'a self,
+        bot: &'a crate::db::Bot,
+        host: &'a str,
+        workspace: &'a str,
+        env: &'a Value,
+    ) -> impl std::future::Future<Output = anyhow::Result<String>> + Send + 'a {
+        async move { crate::share::cage::install_prompt(&self.shared(), bot, host, workspace, env).await }
     }
 
     fn restricted_launch_args(&self, env: &Value, prompt: &Path) -> Vec<String> {

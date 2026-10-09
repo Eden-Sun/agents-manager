@@ -5000,12 +5000,12 @@ daemon 要能在 Linux（目標：Ubuntu，外部編譯主機 192.168.1.46，#67
 ### 20.1 受限 bot（`share_profile = "restricted"`）
 
 - 只能在**建 bot 時**選（`POST /api/projects/{id}/bots` 帶 `share_profile:"restricted"`）；既有 bot 不能切換，要分享就新建一顆。
-  只有 claude、只有本機專案（409 `unsupported_kind`／`unsupported_host`）；不收自訂 `args`／`env`（400 `restricted_no_custom`）；
+  只有 claude（409 `unsupported_kind`）；專案在遠端主機也能建（§20.1b），設定裡沒有的主機 409 `unsupported_host`；不收自訂 `args`／`env`（400 `restricted_no_custom`）；
   `auto_approve` 一律寫成 false。記在 `shared_bots`（不在 `config.toml`）：**寫 config 之前**就先記，投影出來的那一列從第一次啟動起就在籠子裡；
   建失敗或冪等重送拿回舊的那顆時收回。`/api/state` 的 bot 帶 `share_profile`（一般 bot `null`）。
 - **以資料夾為單位**（使用者 2026-10-03 裁示，`share::folder`）：建 bot 時選一個資料夾，那就是它能碰的全部範圍（cwd＝它，`shared_bots.workspace` 記 canonicalize 過的路徑、`bots.cwd` 指過去）。
   `share_folder` 兩種：`{"kind":"new","name"}`＝在 `[share] folders_root`（預設 `~/shared-bots`，必須在 daemon 資料目錄之外）底下建 `<name>`（0700；名字 `[A-Za-z0-9._-]`、英數開頭、≤ 64；已經有同名 409 `folder_exists`，冪等重送例外）；
-  `{"kind":"existing","path"}`＝本機任意既有資料夾（絕對路徑、符號連結解開後判斷），但根目錄、家目錄本身與它的上層、daemon 資料目錄（含上下層）、`~/.ssh`／`~/.config`／`~/.claude*`／`~/.codex`／`~/.grok`／`~/.aws`／`~/.gnupg`／`~/.local`…、系統目錄一律 400 `bad_share_folder`。
+  `{"kind":"existing","path"}`＝任意既有資料夾（本機，或遠端專案那台的實體路徑；絕對路徑、符號連結解開後判斷），但根目錄、家目錄本身與它的上層、daemon 資料目錄（含上下層）、`~/.ssh`／`~/.config`／`~/.claude*`／`~/.codex`／`~/.grok`／`~/.aws`／`~/.gnupg`／`~/.local`…、系統目錄一律 400 `bad_share_folder`。
   沒帶＝新資料夾、名字用 bot 名。上傳一律放 `<資料夾>/inbox/`（不存在就建，0700）。建失敗或重送時只刪「這次新建的」資料夾，既有資料夾絕不動。
   資料夾在啟動時不見了就不啟動（不替使用者重建空的）。2026-10-03 之前建的受限 bot（資料夾在 `<data_dir>/shared-bots/<id>/workspace/`）照舊能用，不搬。
 - 模型：沒指定＝`/api/models?kind=claude` 當下列出的最新 Opus（有完整 id 挑版本最大的；只有別名就用 `opus`，claude 2.1.288 解析成 claude-opus-5-5，實測），不落回帳號預設（線上那顆就這樣跑成舊版），也不寫死版本號。
@@ -5039,11 +5039,29 @@ daemon 要能在 Linux（目標：Ubuntu，外部編譯主機 192.168.1.46，#67
   `/build-slots/acquire` 一律 403 `restricted_bot`（`shared_bots` 讀不到也擋）。
 - end user 上傳的檔放資料夾的 `inbox/`；給 end user 的檔照舊寫 `$AM_OUTBOX`（`--add-dir` 讓它寫得進去）。
 
+### 20.1b 遠端專案的分享 bot（#955 R-S2）
+
+專案在遠端主機（`projects.host`）時，受限與信任分享的 bot 照樣能建、能啟動。**工作目錄、`inbox/`、outbox、籠子設定與系統提示都放在那台**；
+分享頁、DB、token、名額、預算量測仍在這台 daemon。遠端的檔案動作全部經 `share::remote_fs`（POSIX sh、逐段 `cd -P`、有長度的框、對不上就 fail closed）。
+
+- **建立**（`admin::reserve_remote_share_bot`，先於寫 config）：設定裡沒有的主機 409 `unsupported_host`（找不到，不是「不支援遠端」）；連不上 409 `share_host_unreachable`，`shared_bots` 不留列、不建資料夾。
+  受限才做 preflight：claude 版本 ≥ `cage::MIN_CLAUDE`（2.1.288，籠子的旗標是照這版驗的）否則 409 `share_claude_too_old`（帶 `found`、`min`）；那台有 claude 的 managed settings（Linux `/etc/claude-code/managed-settings.json` 與 `.d/`，macOS `/Library/Application Support/ClaudeCode/…`）→ 409 `share_managed_settings`（它優先於 `--settings`，籠子保證不了）。信任分享只查連線。
+- **資料夾**：`existing`＝那台的絕對路徑，解開符號連結後跑**同一支** `folder::unsafe_reason`（家目錄與上層、那台的 `~/.config/agents-manager[/instances/<slug>]`、`~/.ssh`、`~/.claude*`…、系統目錄），
+  不屬於 ssh 使用者、路徑含符號連結 → 400 `bad_share_folder`。`new`（只有受限）＝`[share] folders_root` 是 `~/…` 才照那台的家目錄展開，否則那台的 `~/shared-bots`；同名已存在 409 `folder_exists`（重送例外）。
+- **建失敗**（inbox、`shared_bots` 寫入、路徑檢查任一步）只 `rmdir` 這次新建的資料夾（非空就留著）。遠端從不 `rm -rf`。
+- **啟動**（`cage::prepare`）：受限每次啟動都重跑 preflight（claude 可能被換版、managed settings 可能被加），不過就不起來；信任分享只盡力補 inbox 與保留標記（失敗只記 warning，本機也是這樣）。
+- **設定與系統提示**寫進那台的 `~/.config/agents-manager/bots/<id>/`（目錄 0700、檔 0600），寫完比對 sha256，不符就不啟動；提示內容不帶結尾換行（shell 會吃掉，驗不過）。`--settings` 與 `--append-system-prompt-file` 都指向那台的路徑。
+  settings 就是 `cage_settings` 的版本（工作目錄與 outbox 都是那台的路徑）。不裝 shim、herdr skill、agent md（同本機受限）。
+- **pane env**：身分來自那台（`identity_for_host`），`HOME` 是那台的家目錄，`PATH`＝那台的 `remote_path`（`$HOME`／`~` 展開）加標準目錄，**不含 shim 目錄**；`AM_BOT_TOKEN` 照蓋成空。
+- **刪 bot**：遠端分享 bot 的資料夾**一律不動**（不搬進 bots-trash、不刪，含 `kind:new` 建的）；刪除時 log 寫出路徑讓擁有者自己清。`purge_bot_dir` 與殘留清理只處理本機的工作目錄。
+  遠端 bot 目錄照既有的 `remote_purge`。
+- 保留政策與量測見 §20.5（遠端 `.am-share-keep` 建立時、每次啟動、開機時補；撤銷分享時拿掉）。
+
 ### 20.1a 信任分享（`share_profile = "trusted"`，使用者 2026-10-04）
 
 - 分享對象是**絕對信任的人**時用：一顆**可以操作整個 project** 的 bot，他下的指令會真的動東西（shell、build、測試、git、dev server）。
 - 只能在**建 bot 時**選（`share_profile:"trusted"`），而且一定要帶 `confirm_trusted:true`（沒帶 400 `confirm_trusted_required`；帶給別的 profile 400）。既有 bot 不能切過去。
-  只有 claude、只有本機專案（同受限的 409）。資料夾只收**既有資料夾**（`{"kind":"existing","path"}`，同一套危險位置檢查；`kind:"new"` 400），沒帶＝專案目錄；那就是它的 cwd。
+  只有 claude（同受限的 409），遠端專案也能（§20.1b）。資料夾只收**既有資料夾**（`{"kind":"existing","path"}`，同一套危險位置檢查；`kind:"new"` 400），沒帶＝專案目錄；那就是它的 cwd。
 - **不套籠子**：權限就是一般 bot——`auto_approve`／bypass 照 bot 設定、Bash 等工具全開、照常讀專案的 agent md／`[agents.projects]`、裝 shim 與 herdr skill、bot 身分（`AM_BOT_TOKEN`）照常能打 API。
   `shared_bots.profile = 'trusted'`；判斷「要不要關進籠子」只看 `profile = 'restricted'`（`store::caged_workspace`／`is_caged`），`cage::prepare` 對它回 `None`。
 - **跟受限一樣適用**的（凡是判斷「是不是分享 bot」的地方都用 `store::is_share_bot`，兩種都算）：分享連結與入口、只呈現 end user 與 bot 的對話、`〔分享使用者〕` 前綴、
@@ -5115,7 +5133,7 @@ daemon 要能在 Linux（目標：Ubuntu，外部編譯主機 192.168.1.46，#67
 ### 20.4 前端
 
 **前端（主 UI）**
-- 建 bot 表單的「用途」三選一：不分享／分享用（受限）／🔓 信任分享；分享的兩種只給本機專案的 claude（其他 kind／遠端專案是灰的並寫原因）。選信任分享先跳確認框、要勾「只分享給絕對信任的人」才算數，資料夾預設專案目錄、只收既有資料夾，送 `share_profile:"trusted"`、`confirm_trusted:true`，`auto_approve` 照表單。受限的如下：勾了要選它的資料夾：「開一個新資料夾」（`~/shared-bots/<名稱>`，名稱空著＝bot 名）或「用一個既有的資料夾」（路徑＋「瀏覽…」用目錄選擇器挑，下面有警示：資料夾裡的所有檔案含 .env 之類 end user 都可能透過 bot 讀到）。
+- 建 bot 表單的「用途」三選一：不分享／分享用（受限）／🔓 信任分享；分享的兩種只給 claude（其他 kind 灰的並寫原因；遠端專案不灰，資料夾的瀏覽與新資料夾標示都指向那台主機）。選信任分享先跳確認框、要勾「只分享給絕對信任的人」才算數，資料夾預設專案目錄、只收既有資料夾，送 `share_profile:"trusted"`、`confirm_trusted:true`，`auto_approve` 照表單。受限的如下：勾了要選它的資料夾：「開一個新資料夾」（`~/shared-bots/<名稱>`，名稱空著＝bot 名）或「用一個既有的資料夾」（路徑＋「瀏覽…」用目錄選擇器挑，下面有警示：資料夾裡的所有檔案含 .env 之類 end user 都可能透過 bot 讀到）。
   送 `share_profile: "restricted"`、`share_folder`、`auto_approve: false`；模型照表單選，沒選＝daemon 補最新 Opus。建好不能切回一般 bot。
 - 分享用 bot 的設定面板多一塊「🔗 分享給外部使用者」（信任分享是「🔓 信任分享給外部使用者」＋一行警告）：開關、分享中隨時顯示完整連結＋複製（舊資料只有雜湊時提示重產一次）、建立與最後使用時間、「重產連結」與「關閉分享」（都要確認）。一般 bot 不畫這塊。
 - 受限 bot 的聊天區頂端（⚙ 右邊）有一顆「🔗 分享」：未分享時按下＝開啟並複製連結；分享中顯示「🔗 複製連結」（亮起），按下＝複製，旁邊 ▾ 選單可「重產連結」／「關閉分享」（都要確認，重產後自動複製新連結）。一般 bot 沒有這顆。

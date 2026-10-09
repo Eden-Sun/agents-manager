@@ -1,9 +1,8 @@
 import type { BotKind, ShareFolderIn, ShareProfile } from '../api/types'
 
-/** 能不能建成分享用的 bot（受限或信任分享）：daemon 只做了 claude、而且資料夾在本機（SPEC §20）。null＝可以。 */
-export function shareProfileBlocked(kind: BotKind, host: string): string | null {
+/** 能不能建成分享用的 bot（受限或信任分享）：目前只做 claude（SPEC §20）。null＝可以。遠端專案也能（資料夾與籠子都在那台）。 */
+export function shareProfileBlocked(kind: BotKind): string | null {
   if (kind !== 'claude') return '分享用的 bot 目前只支援 claude'
-  if (host && host !== 'local') return '分享用的 bot 只能建在本機的專案'
   return null
 }
 

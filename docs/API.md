@@ -767,10 +767,11 @@ codex 的 rollout 還沒寫出來時先放回等 3 次（只算這個原因，�
 - 建分享用 bot：`POST /api/projects/{id}/bots` 多一個 `share_profile:"restricted"|"trusted"`（其他值 400）。
   **信任分享**（`"trusted"`，SPEC §20.1a）：一定要帶 `confirm_trusted:true`（沒帶 400 `confirm_trusted_required`；帶給受限或一般 bot 400），只有 claude／本機（同下面的 409），
   `share_folder` 只收 `{"kind":"existing","path"}`（`new` 400），沒帶＝專案目錄；權限照 bot 設定（`auto_approve` 不改寫），不吃下面受限 bot 的限制。
-  **受限**（`"restricted"`）：claude 以外 409 `unsupported_kind`、遠端專案 409 `unsupported_host`、
+  **受限**（`"restricted"`）：claude 以外 409 `unsupported_kind`、設定裡沒有的主機 409 `unsupported_host`（遠端專案照常，見 SPEC §20.1b）、
   帶了 `args`／`env` 400 `restricted_no_custom`。`share_profile` 進冪等指紋。
   `share_folder`（只給受限 bot，一般 bot 帶了 400）：`{"kind":"new","name":"support"}`＝在 `[share] folders_root`（預設 `~/shared-bots`）建新資料夾，同名已存在 409 `folder_exists`（同一個 `client_request_id` 的重送除外）；
   `{"kind":"existing","path":"/abs/dir"}`＝本機既有資料夾；位置不行（根目錄、家目錄與上層、daemon 資料目錄、`~/.ssh`／`~/.config`／`~/.claude*`…、系統目錄、不是絕對路徑、不存在）400 `bad_share_folder`＋`message`。
+  遠端專案：同一組規則，路徑是那台的實體路徑；另外 409 `share_host_unreachable`（連不上；不留列、不建資料夾）、`share_claude_too_old`（帶 `found`、`min`；受限才查）、`share_managed_settings`（那台有 claude 的 managed settings；受限才查）。
   沒帶＝新資料夾、名字用 bot 名。`share_folder` 進冪等指紋。`model` 沒給＝最新 Opus（`/api/models` 當下列出的；只有別名時是 `opus`），寫進 bot 的 `model`。
   config 另有 `[share] folders_root`（可用 `~/`，必須在 daemon 資料目錄之外）。`GET /api/state` 的 bot 帶 `share_profile`（`"restricted"`／`"trusted"`／`null`）與 `share_enabled`（分享連結開著＝true）。
 - 分享使用者送來的訊息：`relay_from:"share"`、`source:"share"`（只在輸出；見 SPEC §20.3）。WS 多一種事件 `bot_share_changed {bot_id, enabled}`。

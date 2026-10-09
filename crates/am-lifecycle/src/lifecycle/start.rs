@@ -1164,7 +1164,7 @@ async fn start_inner(
     let env = match &restricted {
         Some(_) => {
             let mut caged = env;
-            app.cage_environment(&mut caged, bot).await;
+            app.cage_environment(&mut caged, bot, &host).await;
             caged
         }
         None => env,
@@ -1252,8 +1252,8 @@ async fn start_inner(
     let mut args = injected;
     if let Some(ws) = &restricted {
         // 受限 bot 不吃 bot／身分自訂的 args（那是加 `--dangerously-skip-permissions` 之類旗標的地方）。
-        let prompt = app.install_restricted_prompt(bot, ws, &env).map_err(up)?;
-        args.extend(app.restricted_launch_args(&env, &prompt));
+        let prompt = app.install_restricted_prompt(bot, &host, ws, &env).await.map_err(up)?;
+        args.extend(app.restricted_launch_args(&env, std::path::Path::new(&prompt)));
         args.extend(model_args(&effort_checked(app, bot, &project.host).await));
     } else {
         args.extend(persona_args_cli_docs(bot, &agent, agent_md.configured.then_some(agent_md.text.as_str()), staged_persona.reference(), agent_md.cli_docs_disabled()));
