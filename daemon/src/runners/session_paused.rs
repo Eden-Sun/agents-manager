@@ -185,15 +185,8 @@ mod tests {
         let status = || async {
             sqlx::query_scalar::<_, String>("SELECT status FROM turns WHERE id=?").bind(&turn_id).fetch_one(&app.db).await.unwrap()
         };
-        let mut closed = false;
-        for _ in 0..40 {
-            tokio::time::sleep(Duration::from_millis(50)).await;
-            if status().await != "in_flight" {
-                closed = true;
-                break;
-            }
-        }
-        assert!(closed, "選單關掉、run 仍 idle：那筆沒有回覆的 in-flight 要馬上收");
+        // 被等的 closer 自己先睡 `AFTER_CLOSE`（1 秒）：固定 2 秒的輪詢在高負載下會先到期（issue #952），改 30 秒上限。
+        assert!(crate::testing::eventually!(status().await != "in_flight"), "選單關掉、run 仍 idle：那筆沒有回覆的 in-flight 要馬上收");
         for m in ["pane.send_keys", "pane.send_text", "agent.prompt"] {
             assert!(e.herdr.calls_to(m).is_empty(), "不能替使用者按：{m}");
         }
