@@ -89,7 +89,7 @@
 ## 標題列下面那一列（★ 主力與 bot 晶片）
 
 - 主力（★ 釘選）常駐在這一列，不寫「主力」兩字；釘了就一直在，正在看的那顆也在（使用者指定：固定並標成 focus，不要消失）。
-- 編碼通道分開：**顏色＝該去看**（未讀實心 accent、要你回答紅填色＋`!`、等子 agent 黃填色＋點），**形狀＝你在這裡**（6px 方角＋石墨左條＋粗體＋ 1px 綠外框）。
+- 編碼通道分開：**顏色＝該去看**（未讀實心 accent、要你回答紅填色＋`!`、等子 agent 黃填色＋點），**形狀與外框＝你在這裡**（6px 方角＋粗體＋ 1px 藍外框，2026-10-09 使用者：「主要的 focus border 用藍色」；深淺色模式均沿用 `--accent`）。
 - 桌機：依緊急度排序（要回答 → 未讀 → 等子 agent → 正在看 → 其餘），★ 主力一組、其餘一組各自換行、各有行數上限；收合時**主力最多三行**，其餘那組在主力也在時一行、只有它時兩行，多的收進 `+N`
   （整列一起裁的話，主力占滿就把沒釘的「要你回答」擠進 `+N`——跟 09-12 錯過 blocked bot 同形；所以主力再多也只吃自己的三行）。`+N` 的提示照實際藏起來的等級寫，不寫死「都是比較不急的」。
   ![桌機兩組各一行](screenshots/fix3-web3/mock-desktop-pinned-vs-needs-reply.png)
@@ -983,21 +983,18 @@ tooltip 寫最後一次失敗的原因。主機一直離線時沒有任何事件
 
 使用者：「可以對某個 bot 下 compact，按鈕做在 context 旁邊」。對話頁狀態列的 context 用量旁一顆小「壓縮」鈕，送 `/compact`（`POST /api/bots/{id}/compact`，claude／codex；grok 沒有這個指令所以不畫）。只有 bot 在跑而且閒著才能按；被擋時用人話說原因（回合中、忙著、沒在跑）。不等壓縮完成，新的用量由 statusLine 回報。
 
-## 「不用保溫」鈕與保溫回覆的晶片框色（2026-10-05 使用者）
+## 「不用保溫」鈕與保溫回覆提示（2026-10-05 使用者）
 
 - **「不用保溫」鈕**（`KeepWarmSkipButton`）：緊貼在「壓縮」鈕右邊，只主力（`primary`）的 claude／codex 畫，非主力、grok、沒有 run 都不畫。
   按下＝這顆 bot「這一輪閒置」跳過保溫與熱壓（`POST /api/bots/{id}/keep-warm/skip`，`run.keep_warm_skip`）；有真的活動（使用者或 bot 新回合，不含保溫／熱壓）daemon 自動清掉，鈕跟著回復。再按一次取消。
   **狀態用文字＋樣式講，不只靠顏色**：沒開是外框鈕「不用保溫」；開著是實心 accent 底「不保溫中・取消」（`aria-pressed`）。按完先在本機套一份，不等廣播。
 - **手機版也能設定不用保溫（2026-10-08 使用者：「手機版 也要能 設定不保溫」）**：手機（≤640px）的狀態列收在標題列 git 鈕開的「Git / 專案資訊」彈窗裡，context 旁 16px 高的小鈕點不到，所以手機**不在狀態列畫**這顆鈕，
   改在彈窗最上面一整列「快取保溫 ｜ 不用保溫」（`MobileKeepWarmRow`，觸控目標 ≥ 40px）；同一個 `KeepWarmSkipButton`、同一支 `setKeepWarmSkip`，資格（主力 claude／codex、有 run）與狀態文字都沿用。
-- **保溫回覆到了，主力晶片框換洋紅（`keep-warm-replied`，`keepWarmChip.css`），維持一個快取 TTL 或直到使用者送出新 prompt 才恢復（2026-10-06 使用者）**：
-  原本一直掛到使用者送出新 prompt（實例 ops-web 掛了 18 小時）。改成保溫的效果只有一個 cache TTL（照 `cacheClock` 既有的 TTL 與 `cache_kept_warm_at`／`last_api_at` 判斷）：快取一涼掉（`level === 'cold'`）洋紅框與 ♨ 記號隨之消失；使用者若在 TTL 內送出新 prompt，仍照舊由 daemon 在使用者 prompt 時將 `run.keep_warm_replied_at` 清成 null 立即清除恢復。
-  只動框（邊框＋2px inset 環），不動底色與字，所以快取倒數的底色、未讀實心藍、要回答的紅底全部照舊疊在上面。
+- **保溫回覆提示改為不靠外框（2026-10-09 使用者：「主要的 focus border 用藍色，而保溫機制不要有紫色外框，易混淆」）**：
+  原本主力保溫回覆到了畫洋紅（紫色）外框，容易與主要 focus 的藍色外框混淆。
+  改為**不要紫色外框**，完全不靠外框提示，改以晶片內的小 `♨` 記號（`.unread-chip-warm`）與 tooltip 文字（`KEEP_WARM_REPLIED_TEXT`）作為提示，正在看（`.current`）時保持藍色 focus 外框不被蓋掉；
+  維持一個快取 TTL 或直到使用者送出新 prompt 才恢復（快取一涼掉或送新 prompt 時 ♨ 消失）。`ChipLegend` 同步更新為 ♨ 標記與藍框說明。
 - **按了「不用保溫」就不畫快取倒數（2026-10-06 使用者）**：主力 `run.keep_warm_skip === true` 時晶片不加 `cache-*` class、不填底色（回一般樣式），hover 狀態卡／tooltip 的快取那行改寫「不保溫中（不顯示快取倒數）」；取消（daemon 廣播 `keep_warm_skip=false`）或有新活動讓 daemon 自動清掉後立即恢復倒數。判斷在 `cacheClock.chipCache`（其餘照既有 `cacheState`），網頁不另有規則；不影響輸入框旁的快取欄位。
-- **為什麼是洋紅**：這列已經用掉綠（快取新鮮／正在看）、黃（快取剩不多／等子 agent）、紅（快取快沒了／要回答）、藍（未讀），洋紅（`--keep-warm`，淺 `#a21caf`／深 `#e879f9`）離它們色相都夠遠，淺色深色模式對白底、深底都在 4.5:1 以上。
-  藍（未讀）與洋紅在實心藍底上相鄰時，靠 ♨ 記號與框形分得出來。
-- **手機也看得出**：2px 框在手機主力格（無星號、只有燈）一樣畫；另有一顆非顏色的 `♨` 記號放在名字後面，sr-only 另寫「保溫回覆已到，送出新 prompt 前維持這個框色」，狀態卡（hover／長按）多一行「保溫」，顏色說明（`ChipLegend`）多一列。
-  「正在看」那顆保留左側 3px 條（你在這裡），只有框換洋紅。
 - **保溫回覆不算未讀**：保溫那一回合的訊息（使用者那則與 bot 的回覆）帶 `keep_warm: true`，`completesTurn` 不計；`turn_updated` 與 working→idle 邊緣補記也認得保溫回合
   （`client_request_id` 前綴 `keep-warm:`，DB 舊資料的 `keepalive:` 照認，`lib/keepWarm.ts`），但仍標記 hook 已報過完成，免得接著的 idle 邊緣補記一筆。
 

@@ -46,7 +46,7 @@ export function ChipLegend({ onClose }: { onClose: () => void }) {
               <span className="unread-chip-name">bot</span>
               <span className="unread-chip-warm">♨︎</span>
             </span>
-            <span>洋紅框＋♨：保溫回覆到了（cache 還熱），送出新 prompt 才恢復；不算未讀</span>
+            <span>♨ 標記：保溫回覆到了（cache 還熱），送出新 prompt 才恢復；不算未讀</span>
           </li>
           <li>
             <span className="unread-chip waits-kids" aria-hidden="true">
@@ -66,7 +66,7 @@ export function ChipLegend({ onClose }: { onClose: () => void }) {
             <span className="unread-chip current" aria-hidden="true">
               <span className="unread-chip-name">bot</span>
             </span>
-            <span>左側深色條＋粗體：你正在看的這顆</span>
+            <span>藍框＋粗體：你正在看的這顆</span>
           </li>
           <li>
             <span className="unread-chip pin-more needs-reply" aria-hidden="true">
