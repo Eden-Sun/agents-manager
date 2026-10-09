@@ -474,9 +474,22 @@ impl HostConn {
         Ok(())
     }
 
+    pub fn instance(&self) -> Option<&str> {
+        self.instance.as_deref()
+    }
+
     /// For payloads like a gh token: script in argv, bytes on stdin (same quoting as `ssh_put`).
     /// Failures report stderr only — stdout may be sensitive.
     pub async fn ssh_exec_stdin(&self, script: &str, data: &[u8], timeout: Duration) -> Result<String> {
+        #[cfg(any(test, feature = "test-hooks"))]
+        if let Some(d) = ssh_delay_for(&self.name) {
+            tokio::time::sleep(d).await;
+        }
+        #[cfg(any(test, feature = "test-hooks"))]
+        if let Some(f) = ssh_fake_io_for(&self.name) {
+            let out = f(script, data)?;
+            return Ok(String::from_utf8_lossy(&out).to_string());
+        }
         let Some(cfg) = &self.cfg else { bail!("ssh_exec_stdin called on the local host") };
         let remote = format!("/bin/sh -c {}", sh_quote(script));
         let mut cmd = tokio::process::Command::new("ssh");
@@ -491,6 +504,43 @@ impl HostConn {
         }
         wrote.with_context(|| format!("write stdin to {}", cfg.ssh))?;
         Ok(String::from_utf8_lossy(&out.stdout).to_string())
+    }
+
+    pub async fn ssh_stream(&self, script: &str, stdin: &[u8]) -> Result<SshStream> {
+        #[cfg(any(test, feature = "test-hooks"))]
+        if let Some(d) = ssh_delay_for(&self.name) {
+            tokio::time::sleep(d).await;
+        }
+        #[cfg(any(test, feature = "test-hooks"))]
+        if let Some(f) = ssh_fake_io_for(&self.name) {
+            let data = f(script, stdin)?;
+            if let Some((chunk_size, delay)) = ssh_stream_chunk_delay_for(&self.name) {
+                return Ok(SshStream::from_reader(ChunkDelayedReader {
+                    data,
+                    pos: 0,
+                    chunk_size,
+                    delay,
+                    sleep: None,
+                }));
+            }
+            return Ok(SshStream::from_reader(std::io::Cursor::new(data)));
+        }
+        let Some(cfg) = &self.cfg else { bail!("ssh_stream called on the local host") };
+        let remote = format!("/bin/sh -c {}", sh_quote(script));
+        let mut cmd = tokio::process::Command::new("ssh");
+        cmd.args(self.ssh_args()).arg(&cfg.ssh).arg(&remote);
+        cmd.stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::piped());
+        cmd.kill_on_drop(true);
+        let mut child = cmd.spawn().with_context(|| format!("spawn ssh {}", cfg.ssh))?;
+        if let Some(mut sin) = child.stdin.take() {
+            use tokio::io::AsyncWriteExt as _;
+            if !stdin.is_empty() {
+                sin.write_all(stdin).await.context("write stdin to ssh")?;
+            }
+            sin.shutdown().await.ok();
+        }
+        let stdout = child.stdout.take().ok_or_else(|| anyhow::anyhow!("no stdout from ssh"))?;
+        Ok(SshStream::from_child(child, stdout))
     }
 
     /// SPEC §11.2 `remote_path`.
@@ -899,6 +949,38 @@ fn spawn_supervisor<H: HostHooks>(app: Arc<H>, conn: Arc<HostConn>, generation: 
     })
 }
 
+/// SSH 串流 stdout 的 AsyncRead 包裝；drop 時 kill 行程（kill_on_drop）。
+pub struct SshStream {
+    inner: std::pin::Pin<Box<dyn tokio::io::AsyncRead + Send>>,
+    _child: Option<tokio::process::Child>,
+}
+
+impl SshStream {
+    pub fn from_child(child: tokio::process::Child, stdout: tokio::process::ChildStdout) -> Self {
+        Self {
+            inner: Box::pin(stdout),
+            _child: Some(child),
+        }
+    }
+
+    pub fn from_reader(reader: impl tokio::io::AsyncRead + Send + 'static) -> Self {
+        Self {
+            inner: Box::pin(reader),
+            _child: None,
+        }
+    }
+}
+
+impl tokio::io::AsyncRead for SshStream {
+    fn poll_read(
+        mut self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+        buf: &mut tokio::io::ReadBuf<'_>,
+    ) -> std::task::Poll<std::io::Result<()>> {
+        std::pin::Pin::new(&mut self.inner).poll_read(cx, buf)
+    }
+}
+
 /// Test seam: a fake "ssh" per host name, so remote-side effects (`rm -rf` of a bot dir …) can be observed without a network.
 #[cfg(any(test, feature = "test-hooks"))]
 type SshFake = Arc<dyn Fn(&str) -> Result<String> + Send + Sync>;
@@ -913,6 +995,78 @@ pub fn set_ssh_fake(host: &str, f: impl Fn(&str) -> Result<String> + Send + Sync
 #[cfg(any(test, feature = "test-hooks"))]
 fn ssh_fake_for(host: &str) -> Option<SshFake> {
     SSH_FAKES.lock().unwrap().iter().find(|(h, _)| h == host).map(|(_, f)| f.clone())
+}
+
+#[cfg(any(test, feature = "test-hooks"))]
+type SshFakeIo = Arc<dyn Fn(&str, &[u8]) -> Result<Vec<u8>> + Send + Sync>;
+#[cfg(any(test, feature = "test-hooks"))]
+static SSH_FAKE_IOS: std::sync::Mutex<Vec<(String, SshFakeIo)>> = std::sync::Mutex::new(Vec::new());
+#[cfg(any(test, feature = "test-hooks"))]
+pub fn set_ssh_fake_io(host: &str, f: impl Fn(&str, &[u8]) -> Result<Vec<u8>> + Send + Sync + 'static) {
+    let mut v = SSH_FAKE_IOS.lock().unwrap();
+    v.retain(|(h, _)| h != host);
+    v.push((host.to_string(), Arc::new(f)));
+}
+#[cfg(any(test, feature = "test-hooks"))]
+pub fn clear_ssh_fake_io(host: &str) {
+    let mut v = SSH_FAKE_IOS.lock().unwrap();
+    v.retain(|(h, _)| h != host);
+}
+#[cfg(any(test, feature = "test-hooks"))]
+fn ssh_fake_io_for(host: &str) -> Option<SshFakeIo> {
+    SSH_FAKE_IOS.lock().unwrap().iter().find(|(h, _)| h == host).map(|(_, f)| f.clone())
+}
+
+#[cfg(any(test, feature = "test-hooks"))]
+static SSH_STREAM_CHUNK_DELAYS: std::sync::Mutex<Vec<(String, (usize, Duration))>> = std::sync::Mutex::new(Vec::new());
+#[cfg(any(test, feature = "test-hooks"))]
+pub fn set_ssh_stream_chunk_delay(host: &str, chunk_size: usize, delay: Duration) {
+    let mut v = SSH_STREAM_CHUNK_DELAYS.lock().unwrap();
+    v.retain(|(h, _)| h != host);
+    v.push((host.to_string(), (chunk_size, delay)));
+}
+#[cfg(any(test, feature = "test-hooks"))]
+fn ssh_stream_chunk_delay_for(host: &str) -> Option<(usize, Duration)> {
+    SSH_STREAM_CHUNK_DELAYS.lock().unwrap().iter().find(|(h, _)| h == host).map(|(_, d)| *d)
+}
+
+#[cfg(any(test, feature = "test-hooks"))]
+struct ChunkDelayedReader {
+    data: Vec<u8>,
+    pos: usize,
+    chunk_size: usize,
+    delay: Duration,
+    sleep: Option<std::pin::Pin<Box<tokio::time::Sleep>>>,
+}
+
+#[cfg(any(test, feature = "test-hooks"))]
+impl tokio::io::AsyncRead for ChunkDelayedReader {
+    fn poll_read(
+        mut self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+        buf: &mut tokio::io::ReadBuf<'_>,
+    ) -> std::task::Poll<std::io::Result<()>> {
+        if self.pos >= self.data.len() {
+            return std::task::Poll::Ready(Ok(()));
+        }
+        if self.delay > Duration::ZERO {
+            if self.sleep.is_none() {
+                self.sleep = Some(Box::pin(tokio::time::sleep(self.delay)));
+            }
+            if let Some(sleep) = self.sleep.as_mut() {
+                if sleep.as_mut().poll(cx).is_pending() {
+                    return std::task::Poll::Pending;
+                }
+            }
+            self.sleep = None;
+        }
+        let end = (self.pos + self.chunk_size.max(1)).min(self.data.len());
+        let chunk = &self.data[self.pos..end];
+        let to_write = chunk.len().min(buf.remaining());
+        buf.put_slice(&chunk[..to_write]);
+        self.pos += to_write;
+        std::task::Poll::Ready(Ok(()))
+    }
 }
 
 /// Test seam: make every ssh leg to this host take that long *asynchronously* — a host that accepts the
