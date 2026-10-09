@@ -610,6 +610,8 @@ config.toml 裡沒有的 id（child、已刪）忽略。成功推 `project_chang
 
 收件 bot 與所屬 project 都必須存在且未刪除，否則回 `404`；project 狀態會在 bot lock 內重驗，避免刪除中的孤兒 bot 收到 prompt。
 
+`client_request_id` 去頭尾空白後須為 1..=200 個 `[A-Za-z0-9._:-]`（#923，同 fork／mission／交辦的規則），否則 `400`、不建回合；沒帶或空白＝daemon 自己生一個。
+
   - Bot principal 一定要帶成對 `X-AM-Bot-Id`、`X-AM-Bot-Token`，且不能混帶 `X-AM-Token`。`AM_BOT_TOKEN` 是每個 bot 都注入的 API 憑證；目前重用 `bots.hook_token`，可由 User 用 credential rotation 立即失效並重啟該 bot。若任一活著的後代 pane 還繼承母 bot 的 token，輪替先以 `409 live_children_use_credential` 拒絕，不撤舊值。`AM_HOOK_TOKEN` 只在 hook-enabled pane 注入。網頁沒有 Bot headers，仍以共用 UI token 作 User principal。
   - `relay_from` 是來源標記，不能覆蓋 principal。省略時：User 請求記為使用者；Bot 請求由 daemon 補成已驗證的 `X-AM-Bot-Id`。Bot 若提供 `relay_from`，只能是自己的 id，否則 403 `relay_from_mismatch`。#339 的未驗證相容期已在 #410 結束：User 沒帶 Bot proof 就自稱活 bot 來源一律 403 `relay_from_token_required`（歷史訊息的 `relay_unverified = 1` 保留）。
 
