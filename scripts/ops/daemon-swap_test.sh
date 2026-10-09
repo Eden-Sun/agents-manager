@@ -398,8 +398,17 @@ run_capture() {
 setup 10 10
 printf 'old-backup-1\n' > "$DAEMON_DB.bak-20000101-0000"
 printf 'old-backup-2\n' > "$DAEMON_DB.bak-20010101-0000"
+# 舊 binary 備份（issue #943）：上幾趟留下的 .bak-／.prev- 成功後要清掉；符號連結不碰。
+printf 'stale-bak\n' > "$AGM_REPO/target/release/agents-managerd.bak-0000dead"
+printf 'stale-prev\n' > "$AGM_REPO/target/release/agents-managerd.prev-0000dead-20000101-000000-1"
+ln -s "$SCRIPT" "$AGM_REPO/target/release/agents-managerd.bak-0000link"
 rc=$(run)
 check_eq "順利時 rc=0" "0" "$rc"
+check_file "成功後清掉舊的 .bak- binary 備份" no "$AGM_REPO/target/release/agents-managerd.bak-0000dead"
+check_file "成功後清掉舊的 .prev- binary 備份" no "$AGM_REPO/target/release/agents-managerd.prev-0000dead-20000101-000000-1"
+check_file "binary 備份只清一般檔，符號連結不碰" yes "$AGM_REPO/target/release/agents-managerd.bak-0000link"
+check_file "成功後保留這趟的 .bak- 備份" yes "$AGM_REPO/target/release/agents-managerd.bak-$OLD"
+check_eq "成功後只剩這趟的 .prev- 備份" "1" "$(ls "$AGM_REPO"/target/release/agents-managerd.prev-* 2>/dev/null | wc -l | tr -d ' ')"
 check "預期版本從 checkout 讀出來" "checkout SCHEMA_VERSION=10, db user_version=10, bumped=no" "$SWAP_LOG"
 check "有換上新 binary" "new-binary" "$AGM_DIR/started-binary.log"
 check_eq ".built 寫的是這次的 sha" "$(echo "$SHA" | cut -c1-8)" "$(cat "$AGM_DIR/daemon-update.built")"
@@ -515,9 +524,13 @@ teardown
 #    新 daemon 跑的這段時間 DB 已經寫進新資料，還原備份會把它們抹掉，而舊 binary 開得了現在的 DB。
 setup 10 10
 printf 'older-backup\n' > "$DAEMON_DB.bak-20000101-0000"
+printf 'stale-bak\n' > "$AGM_REPO/target/release/agents-managerd.bak-0000dead"
+printf 'stale-prev\n' > "$AGM_REPO/target/release/agents-managerd.prev-0000dead-20000101-000000-1"
 export STUB_SUPERVISOR=stopped
 rc=$(run)
 check_eq "沒升 schema 的失敗走回滾（rc=7）" "7" "$rc"
+check_file "回滾不清舊的 .bak- binary 備份" yes "$AGM_REPO/target/release/agents-managerd.bak-0000dead"
+check_file "回滾不清舊的 .prev- binary 備份" yes "$AGM_REPO/target/release/agents-managerd.prev-0000dead-20000101-000000-1"
 check_no "不會講往前修" "forward-fix" "$SWAP_LOG"
 check_no "沒升 schema 不還原 DB" "db restored" "$SWAP_LOG"
 check "說明 DB 原樣保留" "db left as is" "$SWAP_LOG"
