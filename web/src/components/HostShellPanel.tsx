@@ -3,7 +3,8 @@ import type { ClipboardEvent as ReactClipboardEvent, KeyboardEvent as ReactKeybo
 import * as api from '../api'
 import { ClaudeLoginAssist } from './ClaudeLoginAssist'
 import { herdrKeyFromEvent, useShellKeys } from '../hooks/usePaneKeys'
-import { keySyncActive, shellForbidden, shellStateUnknown } from '../lib/shellAccess'
+import { initialKeySync, keySyncActive, shellForbidden, shellStateUnknown } from '../lib/shellAccess'
+import { PHONE_QUERY, useMediaQuery } from '../hooks/useMediaQuery'
 import { isImeEnter } from '../lib/ime'
 import { ApiError } from '../api/types'
 import type { TerminalSnapshot, TerminalSource } from '../api/types'
@@ -28,13 +29,24 @@ import './hostShellPanel.css'
  * 就像坐在那台終端前面。**預設開著**（2026-09-17 使用者），只記「被關掉的」；關著時是「打一行、Enter 送出」。
  */
 const SYNC_OFF_KEY = 'am.shellKeySyncOff'
+const SYNC_ON_KEY = 'am.shellKeySyncOn'
 /** 同步時輪詢要快一點，不然自己打的字要等一秒才看得到。 */
 const SYNC_POLL_MS = 250
 const IDLE_POLL_MS = 1_000
 
+/** 明確關掉鍵盤直通的 pane（桌機預設開，所以只記被關掉的）。 */
 function readSyncOffSet(): Set<string> {
+  return readTargetSet(SYNC_OFF_KEY)
+}
+
+/** 明確打開鍵盤直通的 pane（手機預設關，所以要記被打開的；#931）。 */
+function readSyncOnSet(): Set<string> {
+  return readTargetSet(SYNC_ON_KEY)
+}
+
+function readTargetSet(key: string): Set<string> {
   try {
-    const raw = localStorage.getItem(SYNC_OFF_KEY)
+    const raw = localStorage.getItem(key)
     const parsed: unknown = raw ? JSON.parse(raw) : null
     return new Set(Array.isArray(parsed) ? parsed.filter((x): x is string => typeof x === 'string') : [])
   } catch {
@@ -42,12 +54,20 @@ function readSyncOffSet(): Set<string> {
   }
 }
 
+/** 兩份一起維護：開＝加進 on、移出 off；關＝加進 off、移出 on。哪個裝置的預設都不會蓋掉明確的選擇。 */
 function writeSync(target: string, on: boolean) {
   try {
-    const set = readSyncOffSet()
-    if (on) set.delete(target)
-    else set.add(target)
-    localStorage.setItem(SYNC_OFF_KEY, JSON.stringify([...set]))
+    const off = readSyncOffSet()
+    const onSet = readSyncOnSet()
+    if (on) {
+      off.delete(target)
+      onSet.add(target)
+    } else {
+      off.add(target)
+      onSet.delete(target)
+    }
+    localStorage.setItem(SYNC_OFF_KEY, JSON.stringify([...off]))
+    localStorage.setItem(SYNC_ON_KEY, JSON.stringify([...onSet]))
   } catch {
     /* storage unavailable: 這一頁還記得 */
   }
@@ -130,7 +150,10 @@ export function HostShellPanel({
   const setDraft = useStore((s) => s.setDraft)
   const setText = useCallback((v: string) => setDraft(draftKey, v), [setDraft, draftKey])
   const [sending, setSending] = useState(false)
-  const [sync, setSyncState] = useState(() => !readSyncOffSet().has(target))
+  // 手機沒有實體鍵盤：直通預設關（出現輸入框），明確打開過的 pane 才記成開（#931）。
+  const phone = useMediaQuery(PHONE_QUERY)
+  const initialSync = () => initialKeySync(target, { phone, off: readSyncOffSet(), on: readSyncOnSet() })
+  const [sync, setSyncState] = useState(initialSync)
   // 唯讀時記著「開」也不算：不然按鍵照樣一下一下送出去、一下一下吃 403，按鈕還 disabled 關不掉。
   const syncOn = keySyncActive(sync, readOnly)
   /** 有沒有真的握著鍵盤：同步開著但焦點在別處時，打字不會進到 pane，要講清楚。 */
@@ -151,7 +174,7 @@ export function HostShellPanel({
     setSnap(null)
     setErr(null)
     setHistAt(-1)
-    setSyncState(!readSyncOffSet().has(target))
+    setSyncState(initialSync())
     setTyping(false)
   }
 
@@ -463,7 +486,9 @@ export function HostShellPanel({
           <div className={`shell-sync-note${typing ? ' is-live' : ''}`} role="status">
             {typing
               ? '鍵盤直通中：按鍵直接送進這個 pane。⌘C／⌘R／⌘V 仍是瀏覽器的；Delete／Home／End／PgUp herdr 不收。'
-              : '鍵盤直通開著，但焦點不在終端上——點一下上面的畫面才會收你的鍵盤。'}
+              : phone
+                ? '手機沒有實體鍵盤：關掉鍵盤直通改用下方輸入框。'
+                : '鍵盤直通開著，但焦點不在終端上——點一下上面的畫面才會收你的鍵盤。'}
           </div>
         ) : null}
 
