@@ -17,12 +17,16 @@ pub mod folder;
 pub mod multipart;
 pub mod portal;
 pub mod remote_fs;
+pub mod remote_io;
 pub mod site;
 pub mod store;
 pub mod svg_check;
 
 #[cfg(test)]
 mod remote_fs_tests;
+
+#[cfg(all(test, feature = "daemon-test-harness"))]
+mod portal_remote_tests;
 
 #[cfg(test)]
 mod test_dirs;
