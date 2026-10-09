@@ -984,16 +984,42 @@ mod tests {
     async fn schedule_returns_while_jev_is_still_hanging_and_the_assignment_stays_queued() {
         let rig = stand(Mode::Hang, true, true).await;
         let app = rig.env.app.clone();
-        app.cfg.update(|c| { c.judge.timeout_ms = 5000; Ok(()) }).await.unwrap();
+        app.cfg.update(|c| { c.judge.timeout_ms = 60_000; Ok(()) }).await.unwrap();
         let bot = tt::claude_bot(&app, &rig.env.project_id, "a").await;
         let other = tt::claude_bot(&app, &rig.env.project_id, "b").await;
         crate::supervisor::store::insert_assignment(&app.db, None, &other.id, "old", "做 A", &[], None, true).await.unwrap();
         let a = crate::supervisor::store::insert_assignment(&app.db, None, &bot.id, "new", "做 A 的另一面", &[], None, true).await.unwrap();
-        let started = Instant::now();
-        schedule_assignment(&app, &a.id).await;
-        assert!(started.elapsed() < std::time::Duration::from_millis(1000), "schedule 不能等 Jev 回來");
+        // 逾時 60 秒、Jev 卡住：10 秒內回來就代表 schedule 沒有等 Jev（不拿牆鐘毫秒數當斷言，issue #948）。
+        tokio::time::timeout(std::time::Duration::from_secs(10), schedule_assignment(&app, &a.id)).await.expect("schedule 不能等 Jev 回來");
         assert_eq!(status_of(&app, &a.id).await, "queued");
         assert!(shadow_rows(&app).await.is_empty() || shadow_rows(&app).await[0].2.as_deref() == Some("pending") || shadow_rows(&app).await[0].1.is_none());
+    }
+
+    /// 真的走 `supervisor::assign`，Jev 卡住、逾時 60 秒：派工要在 10 秒內回來（不拿牆鐘毫秒數當斷言，issue #948）。
+    #[tokio::test]
+    async fn assign_returns_while_jev_hangs() {
+        let rig = stand(Mode::Hang, true, true).await;
+        let app = rig.env.app.clone();
+        app.cfg.update(|c| { c.judge.timeout_ms = 60_000; Ok(()) }).await.unwrap();
+        let bot = tt::claude_bot(&app, &rig.env.project_id, "a").await;
+        let other = tt::claude_bot(&app, &rig.env.project_id, "b").await;
+        crate::supervisor::store::insert_assignment(&app.db, None, &other.id, "old", "修 quota 橫幅", &[], None, true).await.unwrap();
+        let manager = tt::claude_bot(&app, &rig.env.project_id, "agm").await;
+        crate::supervisor::store::get_or_init(&app.db).await.unwrap();
+        sqlx::query("UPDATE supervisors SET bot_id=? WHERE id=?")
+            .bind(&manager.id)
+            .bind(crate::supervisor::store::SUPERVISOR_ID)
+            .execute(&app.db)
+            .await
+            .unwrap();
+        let out = tokio::time::timeout(
+            std::time::Duration::from_secs(10),
+            crate::supervisor::assign(&app, &bot.id, "修 quota 橫幅的誤判", "crid-948", None, &[], None, true, None, None, None, Default::default()),
+        )
+        .await
+        .expect("派工不能等 Jev")
+        .unwrap();
+        assert!(out["ownership_conflicts"].as_array().is_some_and(|v| v.is_empty()), "撞題不併進 ownership_conflicts");
     }
 
     /// 真的走 `supervisor::assign`：派工照常回來、交辦照常建，撞題的問答在背景才落帳。
@@ -1013,13 +1039,11 @@ mod tests {
             .execute(&app.db)
             .await
             .unwrap();
-        let started = Instant::now();
         let out = crate::supervisor::assign(&app, &bot.id, "修 quota 橫幅的誤判", "crid-557", None, &[], None, true, None, None, None, Default::default())
             .await
             .unwrap();
-        assert!(started.elapsed() < std::time::Duration::from_millis(1000), "派工不能等 Jev");
         assert!(out["ownership_conflicts"].as_array().is_some_and(|v| v.is_empty()), "撞題不併進 ownership_conflicts");
-        let deadline = Instant::now() + std::time::Duration::from_secs(10);
+        let deadline = Instant::now() + std::time::Duration::from_secs(30);
         let row = loop {
             let rows = shadow_rows(&app).await;
             if rows.first().is_some_and(|r| r.2.as_deref() != Some("pending")) {

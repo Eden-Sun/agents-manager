@@ -545,7 +545,8 @@ pub mod tests {
         let key = env.dir.join("jev-key");
         std::fs::write(&key, "k-test\n").unwrap();
         enable(&app, &env.project_id, &url, &key).await;
-        app.cfg.update(|c| { c.judge.timeout_ms = 2_000; Ok(()) }).await.unwrap();
+        // 逾時放大：「不等 Jev」改驗「在上限內回來」，不拿牆鐘毫秒數當斷言（高負載會誤報，issue #948）。
+        app.cfg.update(|c| { c.judge.timeout_ms = 60_000; Ok(()) }).await.unwrap();
         let child = tt::claude_bot(&app, &env.project_id, "child").await;
         // 完成回合才問。失敗回合、從終端機刮下來的 fallback 回覆，連 task 都不起。
         shadow_settled(&app, "A-fail", &child.id, None, "failed", Some("做完了")).await;
@@ -553,9 +554,10 @@ pub mod tests {
         tokio::time::sleep(Duration::from_millis(50)).await;
         assert!(seen.lock().unwrap().is_empty(), "失敗回合與 completed_fallback 都不問");
 
-        let started = Instant::now();
-        shadow_settled(&app, "A-hang", &child.id, None, "completed", Some("還沒跑測試")).await;
-        assert!(started.elapsed() < Duration::from_millis(400), "不能在 tick 裡等 Jev：{:?}", started.elapsed());
+        // Jev 還卡著（`go` 沒放行）、逾時 60 秒：能在 10 秒內回來就代表沒有在 tick 裡等 Jev。
+        tokio::time::timeout(Duration::from_secs(10), shadow_settled(&app, "A-hang", &child.id, None, "completed", Some("還沒跑測試")))
+            .await
+            .expect("不能在 tick 裡等 Jev");
         // 放行之後帳本才會有。先確認此刻還沒有旗標（問都還沒回來）。
         let n: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM supervisor_inbox WHERE kind = 'judge_report_evidence'")
             .fetch_one(&app.db)
