@@ -173,7 +173,7 @@ function BotRowImpl({
   const run = useStore((s) => s.runs[botId] ?? null)
   const { lamp, background: bgJobs, label: stateLabel, blockedReason, kids: kidsRunning } = useBotLamp(botId)
   const hostDown = useBotOfflineHost(botId)
-  // 額度 critical 時整列反灰＋警語（API.md §12.4）。botQuotaWarning 每次回新物件，不 useShallow 會無限重繪。
+  // 額度 critical 時整列反灰並加警示晶片（API.md §12.4）。botQuotaWarning 每次回新物件，不 useShallow 會無限重繪。
   const quotaWarning = useStore(
     useShallow((s) => {
       const b = s.bots.find((x) => x.id === botId)
@@ -440,28 +440,23 @@ function BotRowImpl({
               unknown={identityUnknown}
             />
           )}
+          <ModelTag botId={botId} short={compact} />
           {quotaWarning ? (
-            // critical 警語取代模型標籤（側欄窄）；截斷時看 title。
             <span
-              className="bot-quota-warn"
+              className="bot-quota-chip crit"
               title={`${KIND_LABEL[bot.kind]}${bot.identity ? ` · ${bot.identity}` : ''} ${quotaWarning.window} 額度剩 ${quotaWarning.pct}%，快用完了`}
             >
-              ⚠ 額度剩 {quotaWarning.pct}%
+              ⚠ {quotaWarning.pct}%
             </span>
-          ) : (
-            <>
-              <ModelTag botId={botId} short={compact} />
-              {/* 黃燈：與頂端 QuotaStrip 一致；critical 走上面的警語。 */}
-              {quotaLevel ? (
-                <span
-                  className={`bot-quota-chip ${quotaLevel.level}`}
-                  title={`${KIND_LABEL[bot.kind]}${bot.identity ? ` · ${bot.identity}` : ''} ${quotaLevel.window} 額度剩 ${quotaLevel.pct}%`}
-                >
-                  {quotaLevel.window} {quotaLevel.pct}%
-                </span>
-              ) : null}
-            </>
-          )}
+          ) : quotaLevel ? (
+            /* 黃燈：與頂端 QuotaStrip 一致；critical 優先用上面的短紅晶片。 */
+            <span
+              className={`bot-quota-chip ${quotaLevel.level}`}
+              title={`${KIND_LABEL[bot.kind]}${bot.identity ? ` · ${bot.identity}` : ''} ${quotaLevel.window} 額度剩 ${quotaLevel.pct}%`}
+            >
+              {quotaLevel.window} {quotaLevel.pct}%
+            </span>
+          ) : null}
         </span>
         {/* agent 標題獨佔一行：第二行擠進去會把模型截成 `op…`。 */}
         {showTitle ? (
