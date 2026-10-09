@@ -12153,8 +12153,21 @@ mod per_principal_auth_tests {
         };
         let denied = |r: &str| r.starts_with("HTTP/1.1 403") && r.contains("role_required");
         // 放行：notice → 巡檢。
+        // 寄件者要是這顆一般 bot 本人（不是巡檢），而且是證明過身分的：#991 以前被記成巡檢寄的。
+        async fn latest_bot_request(db: &sqlx::SqlitePool) -> Value {
+            let s: String = sqlx::query_scalar("SELECT payload_json FROM supervisor_inbox WHERE kind='bot_request' ORDER BY rowid DESC LIMIT 1")
+                .fetch_one(db)
+                .await
+                .unwrap();
+            serde_json::from_str(&s).unwrap()
+        }
         let ok = post(json!({"target_bot_id": patrol.id, "text": "claude 2.1.999 分診完了", "client_request_id": "notice-ok", "kind": "notice"}), Some(&plain)).await;
         assert!(!denied(&ok), "一般 bot 對角色 bot 的 notice 不能被擋：{ok}");
+        assert!(ok.starts_with("HTTP/1.1 200"), "notice 要成功交回巡檢（以前一律 400）：{ok}");
+        let p = latest_bot_request(&e.app.db).await;
+        assert_eq!(p["from_bot_id"], json!(plain.id), "寄件者是那顆一般 bot 自己：{p}");
+        assert_eq!(p["sender_verified"], json!(true), "{p}");
+        assert_eq!(p["to_role"], json!("patrol"), "{p}");
         // 仍然擋：要驗收的交辦、派給別的一般 bot、掛任務。
         for (what, body) in [
             ("要驗收的交辦", json!({"target_bot_id": patrol.id, "text": "做 X", "client_request_id": "n1"})),
@@ -12170,6 +12183,15 @@ mod per_principal_auth_tests {
         assert!(!denied(&r), "{r}");
         let r = post(json!({"target_bot_id": victim.id, "text": "做 X", "client_request_id": "u2"}), Some(&patrol)).await;
         assert!(!denied(&r), "{r}");
+
+        // 協調者建立過：一般 bot 的 notice 攔下來排進協調者的佇列，寄件者仍是那顆一般 bot（不是巡檢）。
+        let responder = distinct_bot(&e, "notice-responder").await;
+        crate::supervisor::roles::set_env(&e.app.db, crate::supervisor::roles::Role::Responder, &responder.id, &e.project_id, "/tmp").await.unwrap();
+        let r = post(json!({"target_bot_id": patrol.id, "text": "交給協調者", "client_request_id": "notice-to-responder", "kind": "notice"}), Some(&plain)).await;
+        assert!(r.starts_with("HTTP/1.1 200"), "{r}");
+        let p = latest_bot_request(&e.app.db).await;
+        assert_eq!(p["from_bot_id"], json!(plain.id), "協調者看到的寄件者是那顆一般 bot：{p}");
+        assert_eq!(p["to_role"], json!("responder"), "{p}");
     }
 
     /// setup 的「接著用上一次寫進去的那顆」只認它自己留了記號的 bot：別人先建一顆同名的（`AGM`／`AGM-responder`）再叫 setup，
