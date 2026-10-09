@@ -184,6 +184,9 @@ esac"#
         /// 只有背景的守衛在睡覺，時鐘只有一個寫入者；但讀的人很多（假 cargo、假 `date`、測試本身），而且 shim 收尾時會
         /// SIGKILL 守衛正在跑的 `sleep`。所以時鐘（與 `date-count`）一律先寫暫存檔再 `mv` 換上去：`echo … > clock` 會先把檔案
         /// 截成 0 bytes 再寫，讀在那一瞬間就讀到空字串，寫入者剛好在那時被殺，時鐘就永遠是空的（issue #857）。
+        /// 暫存檔名裡的 `$$` 一定要放在**雙引號**裡：寫成 `'…/clock.$$'`（單引號）shell 不展開，每一次撥時鐘用的都是同一個字面檔名
+        /// `clock.$$`——被殺的上一輪留下的（或還沒跑完的）`mv` 會把另一輪剛 `>` 截空、還沒寫字的那個檔換成時鐘，時鐘就變空的，
+        /// 被截空的那一輪接著被殺就永遠是空的。整套平行跑、磁碟忙的時候重疊機率才高到會紅。
         fn install_virtual_clock(&self) {
             let d = self.dir.display();
             std::fs::write(self.dir.join("clock"), "1000000").unwrap();
@@ -192,10 +195,10 @@ esac"#
                     "sleep",
                     // 等假 cargo 發出 ready 才撥時鐘：不然守衛在 cargo 還沒起來時就先判完了，殺樹的測試會空過。
                     format!(
-                        "#!/bin/sh\ni=0\nwhile [ ! -e '{d}/cargo.ready' ] && [ $i -lt 500 ]; do /bin/sleep 0.02; i=$((i + 1)); done\nn=$(cat '{d}/clock')\necho $((n + ${{1%%.*}})) > '{d}/clock.$$' && mv -f '{d}/clock.$$' '{d}/clock'\nexec /bin/sleep 0.05\n"
+                        "#!/bin/sh\ni=0\nwhile [ ! -e '{d}/cargo.ready' ] && [ $i -lt 500 ]; do /bin/sleep 0.02; i=$((i + 1)); done\nn=$(cat '{d}/clock')\necho $((n + ${{1%%.*}})) > \"{d}/clock.$$\" && mv -f \"{d}/clock.$$\" '{d}/clock'\nexec /bin/sleep 0.05\n"
                     ),
                 ),
-                ("date", format!("#!/bin/sh\ncase \"$*\" in '+%s') n=$(cat '{d}/date-count' 2>/dev/null || echo 0); n=$((n + 1)); echo \"$n\" > '{d}/date-count.$$' && mv -f '{d}/date-count.$$' '{d}/date-count'; if [ -f '{d}/date-fail-at' ] && [ \"$n\" -eq \"$(cat '{d}/date-fail-at')\" ]; then exit 1; fi; cat '{d}/clock' ;; *) exec /bin/date \"$@\" ;; esac\n")),
+                ("date", format!("#!/bin/sh\ncase \"$*\" in '+%s') n=$(cat '{d}/date-count' 2>/dev/null || echo 0); n=$((n + 1)); echo \"$n\" > \"{d}/date-count.$$\" && mv -f \"{d}/date-count.$$\" '{d}/date-count'; if [ -f '{d}/date-fail-at' ] && [ \"$n\" -eq \"$(cat '{d}/date-fail-at')\" ]; then exit 1; fi; cat '{d}/clock' ;; *) exec /bin/date \"$@\" ;; esac\n")),
             ];
             for (name, body) in files {
                 let path = self.dir.join("real").join(name);
