@@ -501,5 +501,59 @@ equals "同一個 sha 不重複送 error" "$(wc -l < "$FIX/gh.log" | tr -d ' ')"
 export AGM_CI_MIN_FREE_GB=0
 teardown
 
+# 11. #946：網路半開時 git fetch 卡住——要有時限，不能握著鎖不放（之後每分鐘「上一輪還在跑」、CI 靜默停擺）。
+#     假 git（AGM_CI_GIT_BIN）的 fetch 睡 30 秒；AGM_CI_FETCH_TIMEOUT=1 要讓整輪在幾秒內以非零結束、鎖馬上可以再拿到。
+setup
+REAL_GIT=$(command -v git)
+cat > "$ROOT/fakegit" <<GIT
+#!/bin/bash
+[ "\$1" = fetch ] && { sleep 30; exit 0; }
+exec "$REAL_GIT" "\$@"
+GIT
+chmod +x "$ROOT/fakegit"
+export AGM_CI_GIT_BIN="$ROOT/fakegit" AGM_CI_FETCH_TIMEOUT=1
+start=$(date +%s)
+rc=$(run)
+elapsed=$(( $(date +%s) - start ))
+equals "fetch 逾時：整輪以非零結束" "$([ "$rc" != 0 ] && echo nonzero)" "nonzero"
+equals "5 秒內結束（不是等 30 秒）" "$([ "$elapsed" -lt 5 ] && echo fast)" "fast"
+equals "鎖已放掉、可以再拿到" "$( ( exec 9>"$CI/lock"; flock -n 9 && echo got ) )" "got"
+check_no "沒有送出任何 status（還沒開始驗）" "state=" "$FIX/gh.log"
+[ -s "$CI/running-since" ] && echo "ok   - 拿到鎖後有寫 running-since" && PASS=$((PASS + 1)) || { echo "FAIL - 沒有 running-since"; FAIL=$((FAIL + 1)); }
+unset AGM_CI_GIT_BIN AGM_CI_FETCH_TIMEOUT
+teardown
+
+# 11b. 鎖被占著而且占很久（running-since 超過門檻）→ 對 CI clone 的 agm.py 喊 `ops-alert … ci_hung`；沒超過門檻就不喊。
+setup
+git clone -q "$ROOT/origin.git" "$CI/repo" 2>/dev/null
+mkdir -p "$CI"
+( exec 9>"$CI/lock"; flock -n 9; sleep 6 ) &
+HOLDER=$!
+sleep 0.5
+date +%s > "$CI/running-since"
+equals "占鎖還沒超過門檻 exit 0" "$(run)" "0"
+[ ! -e "$FIX/agm.log" ] && echo "ok   - 還沒超過門檻：不喊人" && PASS=$((PASS + 1)) || { echo "FAIL - 不該喊人"; FAIL=$((FAIL + 1)); }
+echo 1 > "$CI/running-since"
+equals "占鎖超過門檻 exit 0" "$(run)" "0"
+check "喊 ops-alert ci_hung" "ops-alert --source ubuntu-ci --reason ci_hung" "$FIX/agm.log"
+equals "沒有 gh 呼叫（沒碰 status）" "$(wc -l < "$FIX/gh.log" | tr -d ' ')" "0"
+kill "$HOLDER" 2>/dev/null; wait "$HOLDER" 2>/dev/null
+teardown
+
+# 11c. 喊人失敗（agm.py 壞掉）也不影響退出碼；CI clone 還沒有就根本不喊。
+setup
+mkdir -p "$CI"
+( exec 9>"$CI/lock"; flock -n 9; sleep 4 ) &
+HOLDER=$!
+sleep 0.5
+echo 1 > "$CI/running-since"
+equals "clone 還沒有：不喊也 exit 0" "$(run)" "0"
+git clone -q "$ROOT/origin.git" "$CI/repo" 2>/dev/null
+echo 9 > "$FIX/agm.rc"
+equals "喊人失敗（agm.py exit 9）仍 exit 0" "$(run)" "0"
+check "有嘗試喊" "ci_hung" "$FIX/agm.log"
+kill "$HOLDER" 2>/dev/null; wait "$HOLDER" 2>/dev/null
+teardown
+
 echo "ubuntu-ci_test: $PASS passed, $FAIL failed"
 [ "$FAIL" = 0 ]
