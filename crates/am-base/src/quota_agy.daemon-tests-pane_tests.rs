@@ -73,13 +73,16 @@
     }
 
     async fn open_workspaces(h: &MockHerdr) -> usize {
-        for _ in 0..40 {
-            if h.workspaces.lock().unwrap().is_empty() {
-                break;
-            }
-            tokio::time::sleep(Duration::from_millis(50)).await;
-        }
+        // 等到收乾淨為止（放棄上限 30 秒），不是固定 2 秒的短輪詢（#951）。
+        let _ = crate::testing::eventually!(h.workspaces.lock().unwrap().is_empty());
         h.workspaces.lock().unwrap().len()
+    }
+
+    /// #951：測試版探測逾時不能小於 10 秒——整樹並行時一條探測光是起 mock herdr、排程就可能吃掉好幾秒，3 秒會讓「還在探測」被判成逾時。
+    /// 要驗逾時行為的測試用這個常數的倍數當門檻，不寫死秒數。
+    #[test]
+    fn the_test_probe_timeout_leaves_room_for_a_loaded_runner() {
+        assert!(PROBE_TIMEOUT >= Duration::from_secs(10), "{PROBE_TIMEOUT:?}");
     }
 
     fn quota_error_of(app_tools: &crate::tools::HostTools, host: &str) -> serde_json::Value {
@@ -117,7 +120,7 @@
         r.herdr.set_screen("*", &format!("{PANE_BEGIN}\nAuthentication required. Please visit the URL to log in\nhttps://accounts.example/x\n"));
         let started = std::time::Instant::now();
         let err = refresh_agy(&app, &r.host).await.unwrap_err();
-        assert!(started.elapsed() < Duration::from_secs(2), "不必等逾時：{:?}", started.elapsed());
+        assert!(started.elapsed() < PROBE_TIMEOUT / 2, "不必等逾時：{:?}", started.elapsed());
         assert!(err.to_string().contains("not logged in"), "{err:#}");
         assert_eq!(agy_flag(&app, &r.host).await, Some(false));
         assert!(quota_error_of(&app.tools.lock().await[&r.host], &r.host).is_null(), "未登入由旗標表達，不另記額度錯誤");
