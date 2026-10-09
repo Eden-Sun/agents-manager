@@ -967,7 +967,10 @@ async fn auth(State(app): State<Arc<App>>, mut req: axum::extract::Request, next
             return e.into_response();
         }
         // 分享用 bot（SPEC §20）不給 AGM 刪、停（含刪它所在的專案）：只有使用者自己能。
-        if let Some(target) = crate::share::guards_from_bot_principal(&app.db, method, path).await {
+        // 守衛要看解碼後的路徑（#992）：範圍檢查與 handler 拿到的都是解碼後的 id，`%30…` 這種編碼不能讓守衛查不到。
+        let Some(decoded) = decoded_bot_path_segments(path) else { return bot_scope_denied(bot_id).into_response() };
+        let decoded_path = format!("/{}", decoded.join("/"));
+        if let Some(target) = crate::share::guards_from_bot_principal(&app.db, method, &decoded_path).await {
             return (StatusCode::FORBIDDEN, Json(json!({"error": "forbidden", "reason": "share_bot_protected", "bot_id": target}))).into_response();
         }
     }
@@ -1038,6 +1041,11 @@ async fn bot_may_access_bot(app: &Arc<App>, caller: &str, target: &str) -> Resul
     bot_descends_from_or_is(app, caller, target).await
 }
 
+/// 路徑每一段都做 `%XX` 解碼（空段略過）；解不開回 `None`。範圍檢查與分享守衛共用，兩邊看到的 id 必須一樣（#992）。
+fn decoded_bot_path_segments(path: &str) -> Option<Vec<String>> {
+    path.split('/').filter(|part| !part.is_empty()).map(decode_api_path_segment).collect()
+}
+
 fn decode_api_path_segment(segment: &str) -> Option<String> {
     fn hex(byte: u8) -> Option<u8> {
         (byte as char).to_digit(16).map(|digit| digit as u8)
@@ -1064,12 +1072,7 @@ fn decode_api_path_segment(segment: &str) -> Option<String> {
 /// attachment, mission, or assignment. User and service principals retain their existing route
 /// behavior; AGM role bots keep their explicitly delegated cross-resource scope.
 async fn authorize_bot_path(app: &Arc<App>, caller: &str, method: &str, path: &str) -> Result<(), LcError> {
-    let decoded: Vec<String> = path
-        .split('/')
-        .filter(|part| !part.is_empty())
-        .map(decode_api_path_segment)
-        .collect::<Option<_>>()
-        .ok_or_else(|| bot_scope_denied(caller))?;
+    let decoded = decoded_bot_path_segments(path).ok_or_else(|| bot_scope_denied(caller))?;
     let parts: Vec<&str> = decoded.iter().map(String::as_str).collect();
     if parts.first() != Some(&"api") {
         return Ok(());

@@ -1390,6 +1390,12 @@ async fn agm_can_neither_stop_nor_delete_a_share_bot_but_the_user_can() {
     let r = as_agm(c.delete(format!("{base}/api/projects/{}", e.project_id))).send().await.unwrap();
     assert_eq!(r.status(), 403);
     assert_eq!(r.json::<Value>().await.unwrap()["reason"], "share_bot_protected");
+    // #992：專案 id 第一個字元用 %XX 編碼，範圍檢查（解碼後）照過、handler 刪的也是同一個專案，守衛不能因此漏接。
+    let enc = format!("%{:02X}{}", e.project_id.as_bytes()[0], &e.project_id[1..]);
+    let r = as_agm(c.delete(format!("{base}/api/projects/{enc}"))).send().await.unwrap();
+    assert_eq!(r.status(), 403, "編碼過的專案 id 也要擋");
+    assert_eq!(r.json::<Value>().await.unwrap()["reason"], "share_bot_protected");
+    assert!(db::project(&e.app.db, &e.project_id).await.unwrap().unwrap().deleted_at.is_none(), "專案還在");
     // 守衛本身也認 bot 層級的停與刪（萬一哪天分享用 bot 落進 AGM 的範圍）。
     for (m, p) in [("POST", format!("/api/bots/{}/stop", b.id)), ("DELETE", format!("/api/bots/{}", b.id))] {
         assert_eq!(crate::share::guards_from_bot_principal(&e.app.db, m, &p).await, Some(b.id.clone()), "{m} {p}");
