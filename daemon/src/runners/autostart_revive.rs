@@ -35,6 +35,9 @@ pub(crate) fn spawn_revive(app: &Arc<App>, host: &str, lost: Vec<Lost>) {
                 map.remove(&key);
             }
         }
+        drop(map);
+        #[cfg(test)]
+        revive_done().notify_waiters();
     });
 }
 
@@ -44,16 +47,32 @@ pub(crate) fn pending_count(app: &Arc<App>) -> usize {
     pending().lock().unwrap_or_else(|e| e.into_inner()).get(&pending_key(app)).copied().unwrap_or(0)
 }
 
-/// 測試：等這個 `App` 的背景補開做完（上限 60 秒）。
+/// 測試：任何一輪背景補開做完就叫醒等的人（`quiesce` 靠它，不靠輪詢計時）。
+#[cfg(test)]
+fn revive_done() -> &'static tokio::sync::Notify {
+    static N: OnceLock<tokio::sync::Notify> = OnceLock::new();
+    N.get_or_init(Default::default)
+}
+
+/// 測試：等這個 `App` 的背景補開都做完。事件驅動：補開收尾時 `notify_waiters`，這裡醒來重看計數（別的 `App` 的補開收尾也會叫醒，
+/// 重看就好）；沒有「等幾秒」的判斷。上限只是補開真的卡死時別讓整個測試行程掛著（正常路徑不會碰到）。
 #[cfg(test)]
 pub(crate) async fn quiesce(app: &Arc<App>) {
-    for _ in 0..6000 {
-        if pending_count(app) == 0 {
-            return;
+    let wait = async {
+        loop {
+            let notified = revive_done().notified();
+            tokio::pin!(notified);
+            // 先登記再看計數：看完計數到開始等之間補開收尾，也不會漏掉叫醒。
+            notified.as_mut().enable();
+            if pending_count(app) == 0 {
+                return;
+            }
+            notified.await;
         }
-        tokio::time::sleep(Duration::from_millis(10)).await;
+    };
+    if tokio::time::timeout(Duration::from_secs(600), wait).await.is_err() {
+        panic!("背景補開 600 秒還沒做完（卡死）");
     }
-    panic!("背景補開 60 秒還沒做完");
 }
 
 /// 定時掃描最久往回看多久（run 收成 `pane gone` 之後這段時間內還沒被接回來才補開）。
