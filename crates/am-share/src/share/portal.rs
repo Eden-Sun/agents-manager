@@ -1216,7 +1216,7 @@ async fn file<H: PortalEnv>(State(st): State<Portal<H>>, Path((token, name)): Pa
         Err(()) => Err(crate::outbox::ShareFileError::Unavailable),
         Ok(Some(site)) => {
             // 主機的分享 ssh 名額（每台 4）也是下載名額的一部分：用完直接 429，不排隊（同 #848）。
-            if crate::share::remote_fs::host_slot(&site.host).available_permits() == 0 {
+            if crate::share::remote_fs::host_slot(&site.host).available_permits() <= crate::share::remote_fs::HOST_STREAM_RESERVE {
                 return too_many(5, "download");
             }
             match site.outbox_stream(&name, crate::outbox::MAX_BYTES).await {
