@@ -1361,8 +1361,9 @@ export function ChatPanel({ onOpenSidebar }: { onOpenSidebar: () => void }) {
           <>
             <button
               type="button"
-              className="icon-btn mobile-git-info"
-              aria-label="Git / 專案資訊 / 檔案"
+              className={`icon-btn mobile-git-info${statusInfo?.account_warning ? ' warn' : ''}`}
+              // 帳號警告（未登入、用的是預設帳號）在手機收進這個彈窗裡：鈕上加一個點，不然沒人會點開來看（#930）。
+              aria-label={statusInfo?.account_warning ? 'Git / 專案資訊 / 檔案（帳號警告）' : 'Git / 專案資訊 / 檔案'}
               aria-haspopup="dialog"
               aria-expanded={gitInfoBotId === botId}
               onClick={() => setGitInfoBotId(botId)}

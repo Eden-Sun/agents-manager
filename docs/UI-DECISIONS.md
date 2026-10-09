@@ -419,6 +419,10 @@ shell 面板本來只有「打一行、Enter 送出」：TUI（`top`、`vim`、�
 - **一律附件下載**：`Content-Disposition: attachment` + `nosniff`，白名單外的型別一律 `application/octet-stream`。
 - **最高佔暫存欄的 60%**：檔案一多整欄會被它吃掉，上半段的暫存就看不到。超過就在清單裡捲。641–1024px 的底部暫存條只有 `max-height: 46vh`（不是確定高度，百分比失效），改用 `46vh × 60%`；≤640px 本來就不顯示暫存區——**手機的去處（#929）**：整個托盤在手機是 `display: none`，outbox 沒有別的入口就等於拿不到（bot 說「放好了」，1 小時後檔案被清掉）。所以手機的標題列 Git 鈕（彈窗標題與 `aria-label` 改叫「Git / 專案資訊 / 檔案」）打開的彈窗裡，在狀態列後面畫同一個 `OutboxFiles`；彈窗內 `.modal .outbox-files` 不設高度上限，由彈窗自己捲。
 
+### 手機的帳號警告（#930）
+
+手機把狀態列的帳號欄（email）收掉，因為最長也最不急；但**帳號警告**（`⚠ 未登入，用的是預設帳號`，花的是別人的額度）不能跟著藏：CSS 只收 `.sl-account:not(.sl-warn)`。警告畫在「Git / 專案資訊 / 檔案」彈窗的狀態列裡；彈窗要點開才看得到，所以有警告時標題列的 Git 鈕帶 `warn` class（右上一個 6px 警告色點）並在 `aria-label` 加「（帳號警告）」。
+
 ## 選單裡的 shell pane 點得進去（2026-09-16，使用者裁示）
 
 使用者：「這 shell pane 要在 menu 可點選進入」。專案頁已經有「其他 pane」區塊（看細節、聚焦、關閉），但它的「聚焦」是 herdr `pane.focus`——只動得了跑 daemon 那台機器的 TUI，手機上按了什麼都看不到。

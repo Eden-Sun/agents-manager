@@ -655,7 +655,8 @@
     line-clamp: 2;
   }
 
-  .sl-item.sl-account {
+  /* 只收 email：帳號警告（`sl-warn`，用的是預設帳號）不能跟著藏，手機使用者不然不會知道（#930）。 */
+  .sl-item.sl-account:not(.sl-warn) {
     display: none;
   }
 }
@@ -835,7 +836,7 @@
 
   /* 帳號欄 `display: none` 仍是 `.sl-item + .sl-item` 的兄弟，context 開頭會多一條分隔線。 */
 
-  .context-bar .sl-item.sl-account + .sl-item {
+  .context-bar .sl-item.sl-account:not(.sl-warn) + .sl-item {
     padding-left: 0;
     border-left: 0;
     margin-left: 0;
@@ -1056,4 +1057,20 @@
     min-width: 40px;
     min-height: 40px;
   }
+}
+
+/* 手機標題列的 Git 鈕：帳號有警告時右上一個小點（警告本身在彈窗的狀態列裡，#930）。 */
+.mobile-git-info.warn {
+  position: relative;
+}
+
+.mobile-git-info.warn::after {
+  content: '';
+  position: absolute;
+  top: 2px;
+  right: 2px;
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--warn);
 }
