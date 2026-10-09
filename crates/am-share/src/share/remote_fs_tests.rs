@@ -579,3 +579,31 @@ async fn remote_outbox_list_skips_only_the_non_utf8_name() {
     assert!(names.contains(&"ok.txt"), "{names:?}");
     assert!(!names.iter().any(|n| n.contains("bad")), "{names:?}");
 }
+
+#[tokio::test]
+async fn remote_photo_fetch_stops_at_the_total_before_sending() {
+    // 合計上限 7000：前兩張（各 3000）送得出去，第三張會超過，遠端就不能把它送出來（#987）。
+    let scratch = test_dirs::scratch_dir("rfs-photo-total");
+    let site = make_test_remote_site(&scratch, "host-photo-total-1");
+    let inbox = Path::new(&site.workspace).join("inbox");
+    fs::create_dir_all(&inbox).unwrap();
+    for name in ["a.jpg", "b.jpg", "c.jpg"] {
+        fs::write(inbox.join(name), vec![b'x'; 3000]).unwrap();
+    }
+    let rels: Vec<Vec<String>> = ["a.jpg", "b.jpg", "c.jpg"].iter().map(|n| vec!["inbox".to_string(), n.to_string()]).collect();
+
+    let got = site.photo_fetch(&rels, 5000, 7000).await.unwrap();
+    let sizes: Vec<Result<usize, &str>> = got.iter().map(|r| r.as_ref().map(|v| v.len()).map_err(|e| *e)).collect();
+    assert_eq!(sizes, vec![Ok(3000), Ok(3000), Err("source_too_large")]);
+
+    // 腳本本身：第三張根本沒有送出來，stdout 只剩前兩張＋框頭。
+    let script = photo_fetch_script(&site.workspace, &rels, 5000, 7000);
+    let out = std::process::Command::new("/bin/sh")
+        .arg("-c")
+        .arg(&script)
+        .env("HOME", &scratch)
+        .env("TMPDIR", &scratch)
+        .output()
+        .unwrap();
+    assert!(out.stdout.len() < 7000 + 256, "stdout {} bytes，第三張不該被送出", out.stdout.len());
+}
