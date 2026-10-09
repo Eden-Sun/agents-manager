@@ -1,4 +1,5 @@
 import { useState } from 'react'
+import { useShallow } from 'zustand/react/shallow'
 import * as api from '../api'
 import { inFlightTurn, projectHostName, useStore } from '../store/store'
 import { readyLabel, updateBatchCounts } from '../lib/updateBatch'
@@ -62,23 +63,23 @@ export function RestartChip({ control }: { control?: DialogControl } = {}) {
   const restartIdleBots = useStore((s) => s.restartIdleBots)
   const clear = useStore((s) => s.clearRestartBatch)
   const sending = useStore((s) => Boolean(s.busy['restart-idle']))
-  // 各 selector 回純值：`updateBatchCounts` 每次回新陣列，包成物件連 `useShallow` 都擋不住（getSnapshot should be cached）。
+  // 各 selector 回純值或字串陣列：`updateBatchCounts` 每次回新陣列，包成物件連 `useShallow` 都擋不住（getSnapshot should be cached）；
+  // 字串陣列用 `useShallow` 逐項比就穩。名單不用「、」「\n」串成一個字串再拆（名字可以含「、」，#998）。
   const readyCount = useStore((s) => updateBatchCounts(s.bots, s.runs, (id) => inFlightTurn(s, id) !== null).ready.length)
-  const readyNames = useStore((s) =>
-    updateBatchCounts(s.bots, s.runs, (id) => inFlightTurn(s, id) !== null)
-      .ready.map(readyLabel)
-      .join('、'),
+  const readyNames = useStore(
+    useShallow((s) => updateBatchCounts(s.bots, s.runs, (id) => inFlightTurn(s, id) !== null).ready.map(readyLabel)),
   )
   // 巡邏還沒看過它們的背景工作（#767）：沒有證據所以照樣會重啟，確認框要講清楚。
   const unknownCount = useStore((s) => updateBatchCounts(s.bots, s.runs, (id) => inFlightTurn(s, id) !== null).ready.filter((b) => b.backgroundUnknown).length)
   // 還沒裝新版的 codex 由旁邊的 `CodexInstallChip` 負責（安裝＋重啟），不再算進這顆的「在忙」。
-  const busyLines = useStore((s) =>
-    updateBatchCounts(s.bots, s.runs, (id) => inFlightTurn(s, id) !== null)
-      .busy.filter((b) => !b.install)
-      .map((b) => `${b.name}（${b.why}）`)
-      .join('\n'),
+  const busyLines = useStore(
+    useShallow((s) =>
+      updateBatchCounts(s.bots, s.runs, (id) => inFlightTurn(s, id) !== null)
+        .busy.filter((b) => !b.install)
+        .map((b) => `${b.name}（${b.why}）`),
+    ),
   )
-  const busyCount = busyLines ? busyLines.split('\n').length : 0
+  const busyCount = busyLines.length
   const [localOpen, setLocalOpen] = useState(false)
   const confirming = control ? control.open : localOpen
   const setConfirming = (v: boolean) => (control ? !v && control.close() : setLocalOpen(v))
@@ -131,7 +132,7 @@ export function RestartChip({ control }: { control?: DialogControl } = {}) {
 
   if (readyCount === 0 && busyCount === 0 && !control) return null
 
-  const busyNote = busyCount > 0 ? `\n${busyCount} 顆在忙，會先跳過：\n${busyLines}` : ''
+  const busyNote = busyCount > 0 ? `\n${busyCount} 顆在忙，會先跳過：\n${busyLines.join('\n')}` : ''
   const label =
     readyCount === 0
       ? '有 CLI 更新，但這些 Bot 現在都在忙——閒下來再按'
@@ -143,7 +144,7 @@ export function RestartChip({ control }: { control?: DialogControl } = {}) {
         type="button"
         className={`quota-update${readyCount === 0 ? ' waiting' : ''}`}
         disabled={sending || readyCount === 0}
-        title={`${label}${readyCount > 0 ? `：\n${readyNames}` : ''}${busyNote}`}
+        title={`${label}${readyCount > 0 ? `：\n${readyNames.join('、')}` : ''}${busyNote}`}
         aria-label={label}
         onClick={() => setConfirming(true)}
       >
@@ -171,8 +172,8 @@ export function RestartChip({ control }: { control?: DialogControl } = {}) {
               接回來——上下文不會掉，但重啟要花幾秒，這段時間它們不會回話。
             </p>
             <ul className="confirm-list">
-              {readyNames.split('、').map((n) => (
-                <li key={n}>{n}</li>
+              {readyNames.map((n, i) => (
+                <li key={`${i}:${n}`}>{n}</li>
               ))}
             </ul>
             {unknownCount > 0 ? (
@@ -184,8 +185,8 @@ export function RestartChip({ control }: { control?: DialogControl } = {}) {
               <>
                 <p className="confirm-note">另外 {busyCount} 顆在忙，這次會跳過：</p>
                 <ul className="confirm-list dim">
-                  {busyLines.split('\n').map((n) => (
-                    <li key={n}>{n}</li>
+                  {busyLines.map((n, i) => (
+                    <li key={`${i}:${n}`}>{n}</li>
                   ))}
                 </ul>
               </>
