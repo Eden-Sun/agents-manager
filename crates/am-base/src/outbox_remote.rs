@@ -51,12 +51,21 @@ pub fn remote_dir(home: &str, instance: Option<&str>, bot_id: &str) -> Option<St
 pub struct Target {
     conn: Arc<HostConn>,
     dir: String,
+    /// 這顆是分享用 bot（或讀不出來是不是）：它的 outbox 走分享保留政策（14 天，由 daemon 的預算巡邏執行），
+    /// 列表**絕不能**照一般 bot 的規矩刪掉超過 1 小時的檔（#850、remote-share-design §6）。
+    keep: bool,
 }
 
 #[cfg(feature = "test-hooks")]
 #[doc(hidden)]
 pub fn target_for_test(conn: Arc<HostConn>, dir: impl Into<String>) -> Target {
-    Target { conn, dir: dir.into() }
+    Target { conn, dir: dir.into(), keep: false }
+}
+
+#[cfg(feature = "test-hooks")]
+#[doc(hidden)]
+pub fn target_for_test_keep(conn: Arc<HostConn>, dir: impl Into<String>) -> Target {
+    Target { conn, dir: dir.into(), keep: true }
 }
 
 fn unreachable_body(host: &str) -> serde_json::Value {
@@ -96,7 +105,9 @@ pub(crate) async fn target(app: &impl OutboxRemoteEnv, bot_id: &str) -> Result<O
     }
     let home = conn.home().await.map_err(|_| unreachable(&project.host))?;
     let dir = remote_dir(&home, app.instance().as_deref(), bot_id).ok_or_else(|| LcError::NotFound("bot".into()))?;
-    Ok(Some(Target { conn, dir }))
+    // 讀不到是不是分享用 bot 就當是（寧可少刪：多留一個檔只是佔點空間，錯刪是拿不回來的）。
+    let keep = !matches!(crate::db::is_share_bot(app.db_pool(), bot_id).await, Ok(false));
+    Ok(Some(Target { conn, dir, keep }))
 }
 
 /// 兩條遠端路徑共用的 identity 與 link-count 檢查。除 inode 外也確認 fd 解析出的實際檔名仍是 outbox 內指定項目，
@@ -183,11 +194,29 @@ pub fn list_script(dir: &str) -> String {
     list_script_race(dir, "", "")
 }
 
+/// 分享用 bot 的版本：一樣的列舉與擋法，但**不刪任何檔**（保留政策由 daemon 的巡邏執行）。
+pub fn list_script_keep(dir: &str) -> String {
+    list_script_inner(dir, "", "", "/usr/sbin/lsof", true)
+}
+
 fn list_script_race(dir: &str, before_open: &str, after_open: &str) -> String {
     list_script_race_with_lsof(dir, before_open, after_open, "/usr/sbin/lsof")
 }
 
 pub fn list_script_race_with_lsof(dir: &str, before_open: &str, after_open: &str, lsof_path: &str) -> String {
+    list_script_inner(dir, before_open, after_open, lsof_path, false)
+}
+
+fn list_script_inner(dir: &str, before_open: &str, after_open: &str, lsof_path: &str, keep: bool) -> String {
+    // 一般 bot：順手刪掉超過 1 小時的檔（遠端沒有 AGM 的 outbox-gc）；分享用 bot：不刪。
+    let gc = if keep {
+        String::new()
+    } else {
+        format!(
+            "if ! find . -maxdepth 1 -type f -mmin +{ttl_min} -cmin +{ttl_min} -exec rm -f {{}} + 2>/dev/null; then\n  printf 'AM_OUTBOX_UNTRUSTED\\n'\n  exit 0\nfi",
+            ttl_min = TTL_SECS / 60
+        )
+    };
     format!(
         r#"D={d}
 {dir_helpers}
@@ -198,10 +227,7 @@ case "$enter_status" in
   2) printf 'AM_OUTBOX_OK\nAM_OUTBOX_DONE\n'; exit 0 ;;
   *) printf 'AM_OUTBOX_UNTRUSTED\n'; exit 0 ;;
 esac
-if ! find . -maxdepth 1 -type f -mmin +{ttl_min} -cmin +{ttl_min} -exec rm -f {{}} + 2>/dev/null; then
-  printf 'AM_OUTBOX_UNTRUSTED\n'
-  exit 0
-fi
+{gc}
 if stat -c %Y . >/dev/null 2>&1; then G=1; else G=; fi
 printf 'AM_OUTBOX_OK\n'
 am_list_entry() {{
@@ -232,7 +258,7 @@ done
 printf 'AM_OUTBOX_DONE\n'
 "#,
         d = sh_quote(dir),
-        ttl_min = TTL_SECS / 60,
+        gc = gc,
         before_open = before_open,
         after_open = after_open,
         helpers = file_identity_helpers(lsof_path),
@@ -246,6 +272,15 @@ fn hex_bytes(hex: &str) -> Vec<u8> {
 
 /// `list_script` 的輸出 → 跟本機 `outbox::scan` 同形狀的清單。`None`＝不可信或未完整列舉。
 pub fn parse_list(out: &str, now: u64) -> Option<Vec<serde_json::Value>> {
+    parse_list_with(out, now, false)
+}
+
+/// 分享用 bot 的清單：沒有 1 小時到期（`expires_at`／`remaining_secs` 是 `null`，跟本機分享 bot 的列表同形狀）。
+pub fn parse_list_keep(out: &str, now: u64) -> Option<Vec<serde_json::Value>> {
+    parse_list_with(out, now, true)
+}
+
+fn parse_list_with(out: &str, now: u64, keep: bool) -> Option<Vec<serde_json::Value>> {
     let payload = out.strip_prefix("AM_OUTBOX_OK\n")?.strip_suffix("AM_OUTBOX_DONE\n")?;
     let mut files: Vec<(String, u64, u64, u64)> = Vec::new();
     for line in payload.lines() {
@@ -271,6 +306,9 @@ pub fn parse_list(out: &str, now: u64) -> Option<Vec<serde_json::Value>> {
         files
             .into_iter()
             .map(|(name, size, modified, landed)| {
+                if keep {
+                    return json!({"name": name, "size": size, "modified": modified, "expires_at": null, "remaining_secs": null});
+                }
                 let expires_at = landed + TTL_SECS;
                 json!({"name": name, "size": size, "modified": modified, "expires_at": expires_at, "remaining_secs": expires_at.saturating_sub(now)})
             })
@@ -279,24 +317,30 @@ pub fn parse_list(out: &str, now: u64) -> Option<Vec<serde_json::Value>> {
 }
 
 pub async fn list(t: Target, now: u64) -> Result<Response, LcError> {
+    // 分享用 bot 沒有 1 小時的承諾：`ttl_secs:null`、`kept:true`、`keep_days`（同本機分享 bot 的列表）。
+    let ttl = if t.keep { json!(null) } else { json!(TTL_SECS) };
     // `target()` and I/O are separate awaits. The supervisor can mark this connection down
     // between them, so don't start a new SSH process after that state is already known.
     if !t.conn.is_connected() {
         return Ok((StatusCode::OK, axum::Json({
             let mut body = unreachable_body(&t.conn.name);
             body["files"] = json!([]);
-            body["ttl_secs"] = json!(TTL_SECS);
+            body["ttl_secs"] = ttl;
             body
         })).into_response());
     }
-    let body = match t.conn.ssh_exec_timeout(&list_script(&t.dir), LIST_TIMEOUT).await {
-        Ok(out) => match parse_list(&out, now) {
+    let script = if t.keep { list_script_keep(&t.dir) } else { list_script(&t.dir) };
+    let body = match t.conn.ssh_exec_timeout(&script, LIST_TIMEOUT).await {
+        Ok(out) => match parse_list_with(&out, now, t.keep) {
+            Some(files) if t.keep => {
+                json!({"dir": t.dir, "host": t.conn.name, "ttl_secs": null, "kept": true, "keep_days": crate::outbox::SHARE_KEEP_DAYS, "files": files})
+            }
             Some(files) => json!({"dir": t.dir, "host": t.conn.name, "ttl_secs": TTL_SECS, "files": files}),
-            None => json!({"files": [], "ttl_secs": TTL_SECS, "reason": "outbox_untrusted"}),
+            None => json!({"files": [], "ttl_secs": ttl, "reason": "outbox_untrusted"}),
         },
         Err(e) => {
             tracing::warn!(host = %t.conn.name, error = %e, "could not list a remote outbox");
-            json!({"files": [], "ttl_secs": TTL_SECS, "reason": "outbox_remote_unreachable", "host": t.conn.name})
+            json!({"files": [], "ttl_secs": ttl, "reason": "outbox_remote_unreachable", "host": t.conn.name})
         }
     };
     Ok((StatusCode::OK, axum::Json(body)).into_response())
