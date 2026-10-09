@@ -1,5 +1,6 @@
 import { useEffect, useId, useMemo, useRef, useState, type KeyboardEvent as ReactKeyboardEvent } from 'react'
 import { createDir, listDirs } from '../api'
+import { useMediaQuery } from '../hooks/useMediaQuery'
 import { createLatestOnly } from '../lib/latestOnly'
 import { isImeEnter } from '../lib/ime'
 import { keyBelongsToControl } from '../lib/domEvents'
@@ -48,6 +49,8 @@ export function DirPicker({
   const manualRef = useRef<HTMLInputElement>(null)
   const newNameRef = useRef<HTMLInputElement>(null)
   const listRef = useRef<HTMLDivElement>(null)
+  // 觸控裝置點一下會叫出軟鍵盤：焦點不自動搬進過濾框（鍵盤操作不受影響，桌機照舊留在過濾框）。
+  const coarse = useMediaQuery('(pointer: coarse)')
   const listId = useId()
   const optId = (i: number) => `${listId}-opt-${i}`
 
@@ -67,7 +70,7 @@ export function DirPicker({
         // Coming back up a level, land on the child we just left — that is where the eye is.
         const back = opts?.keep ? l.entries.findIndex((e) => e.path === opts.keep) : -1
         setSel(back)
-        filterRef.current?.focus()
+        if (!coarse) filterRef.current?.focus()
       })
       .catch((e: unknown) => {
         if (latest.isCurrent(ticket)) setError(e instanceof Error ? e.message : String(e))
@@ -93,7 +96,7 @@ export function DirPicker({
     setCreating(false)
     setNewName('')
     setCreateError(null)
-    filterRef.current?.focus()
+    if (!coarse) filterRef.current?.focus()
   }
   const submitCreate = () => {
     if (!listing || createBusy) return
@@ -400,6 +403,8 @@ export function DirPicker({
             aria-disabled={busy || undefined}
             className={`dirpicker-row${i === sel ? ' sel' : ''}`}
             onMouseDown={(ev) => {
+              // 觸控：不攔 mousedown，讓點一列把焦點從過濾框移走（鍵盤收起來）。
+              if (coarse) return
               ev.preventDefault()
               filterRef.current?.focus()
             }}
