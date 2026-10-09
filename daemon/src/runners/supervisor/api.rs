@@ -1005,7 +1005,8 @@ pub(super) async fn note_persona_change(db: &SqlitePool, actor: &str, old: Optio
         "AGM persona rewritten"
     );
     // 一個版本一則：同一版重送（修 projection）不該再叫醒巡檢一次。
-    let key = format!("persona:{version}:changed");
+    // 巡檢與協調者的版號各自從 0 數，同一個鍵會被 `INSERT OR IGNORE` 靜靜吃掉另一邊的通知（#968）：協調者那條加前綴，巡檢沿用舊鍵。
+    let key = if how == "responder_api" { format!("persona:responder:{version}:changed") } else { format!("persona:{version}:changed") };
     if let Err(e) = store::push_inbox(db, &key, "persona_changed", None, None, None, &summary).await {
         tracing::warn!(error = ?e, "persona 換了，但通知寫不進 inbox");
     }
