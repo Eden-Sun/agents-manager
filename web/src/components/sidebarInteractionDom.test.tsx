@@ -94,3 +94,28 @@ test('project 標題列的 ⋯ 與它的選單項、確認框：不選取專案'
   await click(dialog!.querySelector('.confirm-title')!)
   assert.equal(useStore.getState().selectedProjectId, null, '點確認框不能冒泡成選取專案')
 })
+
+test('額度 critical 保留模型標籤，一般列與精簡子列都顯示短紅晶片', async () => {
+  const critical = { used_pct: 98, low: true, critical: true, resets_at: null }
+  const parent = { ...bot('b1', 'p1'), model: 'claude-opus-5' }
+  const child = { ...bot('child', 'p1'), model: 'claude-opus-5', parent_bot_id: 'b1' }
+  useStore.setState({
+    bots: [parent, child],
+    quota: { claude: { five_hour: critical, seven_day: null, fable: null } },
+  } as never)
+
+  await mount(<Sidebar />)
+  await settle()
+
+  for (const id of ['b1', 'child']) {
+    const botRow = row(id)
+    const model = botRow.querySelector<HTMLElement>('.model-tag')!
+    const warning = botRow.querySelector<HTMLElement>('.bot-quota-chip.crit')!
+    assert.equal(model.textContent, 'opus', `${id} 的模型仍完整顯示`)
+    assert.match(model.title, /claude-opus-5/, `${id} 保留模型 tooltip`)
+    assert.equal(warning.textContent?.trim(), '⚠ 2%', `${id} 用精簡警告`)
+    assert.match(warning.title, /5h 額度剩 2%，快用完了/, `${id} 的 tooltip 保留完整說明`)
+  }
+  assert.equal(row('child').classList.contains('compact'), true, '子列仍走精簡版型')
+  assert.ok(row('b1').querySelector('.lamp'), '狀態燈照常保留')
+})

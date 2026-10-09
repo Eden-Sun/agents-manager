@@ -758,7 +758,7 @@ button:disabled {
 }
 
 /* 額度 critical（docs/API.md §12.4）：整列反灰但仍可點。只降子元素 opacity，不動 .bot-row 底色／左線，選取狀態才不被蓋；
-   `.bot-quota-warn` 刻意不降以拉視線。名字不用 opacity（15:1 → 4.4:1 讀不出是誰），改 --text-dim。 */
+   模型標籤與額度晶片維持清楚。名字不用 opacity（15:1 → 4.4:1 讀不出是誰），改 --text-dim。 */
 
 .bot-row.quota-critical .lamp,
 .bot-row.quota-critical .bot-kind,

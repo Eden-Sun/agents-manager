@@ -406,6 +406,13 @@
   font-size: 10.5px;
 }
 
+.bot-row.compact .bot-sub .bot-quota-chip {
+  height: 18px;
+  max-height: 18px;
+  padding: 0 4px;
+  font-size: 10px;
+}
+
 .bot-row.compact .bot-hit-text {
   display: none;
 }
@@ -470,24 +477,6 @@
 .bot-ident .bot-name-input.row {
   flex: 1;
   min-width: 0;
-}
-
-/* bot 額度 critical（剩 < 5%，docs/API.md §12.4）：取代 model-tag 的警語，窄就 ellipsis，全文在 title。 */
-
-.bot-quota-warn {
-  height: 20px;
-  max-height: 20px;
-  display: inline-flex;
-  align-items: center;
-  box-sizing: border-box;
-  flex: 1 1 auto;
-  min-width: 0;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-  color: var(--danger);
-  font-weight: 600;
-  cursor: default;
 }
 
 /* 跟頂端 QuotaStrip 同一組 low/critical 門檻。 */
