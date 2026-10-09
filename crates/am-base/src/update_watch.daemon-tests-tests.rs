@@ -387,6 +387,45 @@
     }
 
     #[tokio::test]
+    async fn a_notice_written_during_the_sweep_is_not_overwritten_by_the_stale_snapshot() {
+        let _serial = serial().lock().await;
+        let e = crate::testing::env().await;
+        let bot = crate::testing::claude_bot(&e.app, &e.project_id, "claude-stale-snapshot").await;
+        let run = crate::testing::fake_run(&e.app, &bot.id).await;
+        let pane = format!("pane-{}", bot.id);
+        e.herdr.set_screen(&pane, "› conversation\n");
+        sqlx::query("UPDATE runs SET status_json=? WHERE id=?")
+            .bind(r#"{"version":"2.1.281 (Claude Code)"}"#)
+            .bind(&run)
+            .execute(&e.app.db)
+            .await
+            .unwrap();
+        seed_disk(&e.app, "local", "claude", "2.1.281 (Claude Code)").await;
+        crate::upstream_update::set_snapshot_for_test(&e.app.upstream_watch, crate::upstream_update::build_status(
+            "claude",
+            &Ok("2.1.284".into()),
+            &[("local".into(), Ok("2.1.281 (Claude Code)".into()))],
+            None,
+        ))
+        .await;
+
+        // 掃描開頭讀到的舊列：notice 還是 NULL，所以這輪會算出「需安裝」。
+        let stale = db::run(&e.app.db, &run).await.unwrap().unwrap();
+        assert_eq!(stale.update_notice, None);
+        // 掃描期間 cli_update 已裝好並把 notice 改成「已安裝，重啟套用」。
+        let installed = crate::upstream_update::claude_installed_text("2.1.284", "2.1.281");
+        sqlx::query("UPDATE runs SET update_notice=? WHERE id=?")
+            .bind(&installed)
+            .bind(&run)
+            .execute(&e.app.db)
+            .await
+            .unwrap();
+
+        sweep_runs(&e.app, Ok(vec![stale])).await;
+        assert_eq!(notice_of(&e.app, &run).await.as_deref(), Some(installed.as_str()), "舊快照不能把剛裝好的蓋回需安裝");
+    }
+
+    #[tokio::test]
     async fn an_installed_claude_notice_survives_a_sweep_without_a_running_version() {
         let _serial = serial().lock().await;
         let e = crate::testing::env().await;
