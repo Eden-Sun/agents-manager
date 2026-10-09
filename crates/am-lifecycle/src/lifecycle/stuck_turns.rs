@@ -77,6 +77,7 @@ async fn forget_ended_runs(app: &(impl crate::capabilities::Db + StuckTurnServic
     match ids {
         Ok(ids) => {
             retain_runs(&ids);
+            super::limit_banner::retain_runs(&ids);
             app.retain_supervisor_runs(&ids);
         }
         Err(e) => tracing::warn!(error = ?e, "could not list active runs; per-run idle state not pruned this round"),
