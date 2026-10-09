@@ -209,34 +209,36 @@ mod tests {
     }
 
     /// 補開是一顆一顆 `start_bot`，動輒十幾秒；對帳是 supervisor 連上之後的第一步（後面還有事件訂閱、spool 補放、工具偵測）。
-    /// 補開卡住（這裡用一把被測試握著的 bot 鎖讓 `start_bot` 一直等）時，對帳呼叫端照樣要回來——不靠時間：
-    /// 對帳回來的當下補開還沒做完（還在等鎖、沒有新 run），放開鎖之後它才做完。
+    /// 補開卡住時，對帳呼叫端照樣要回來。不靠時間，用明確的同步點：補開走到 `autostart_revive_before_start`（資格檢查之後、
+    /// 拿 bot 鎖之前）就停在測試握著的閘門上；這時對帳必須自己做完（回來的當下補開還沒做完、沒有新 run），放開閘門之後補開才做完。
+    ///
+    /// 以前用「測試握住 bot 鎖」卡住補開，那把鎖同時擋住所有要這顆 bot 鎖的對帳 pass：高負載下延後補跑的那一輪
+    /// （`schedule_deferred_pass`，測試裡 50ms 後）搶在測試自己的對帳之前收掉 run，測試自己的 pass 就在 `reconcile_host_locked`
+    /// 的逐 bot 取鎖處等到測試永遠不放的鎖，20 秒牆鐘逾時才失敗。閘門在補開自己的路徑上，不影響任何對帳 pass。
     #[tokio::test]
     async fn a_stuck_revive_does_not_hold_up_the_reconcile_caller() {
         let env = tt::env().await;
         let bot = autostart_bot(&env, "slow").await;
         crate::lifecycle::start_bot(&env.app, &bot.id).await.unwrap();
         autostart_done(&env.app);
-        let run = db::active_run(&env.app.db, &bot.id).await.unwrap().unwrap().id;
         herdr_forgets_everything(&env).await;
+        let reached = Arc::new(tokio::sync::Notify::new());
         let release = Arc::new(tokio::sync::Notify::new());
-        let (app, bot_id, gate) = (env.app.clone(), bot.id.clone(), release.clone());
-        // 對帳讀完 run 的那一瞬排一個等這顆 bot 鎖的 task：它排在對帳 pass 後面，pass 一放開就拿到、握到測試放手，補開的 start_bot 因此卡住。
-        crate::lifecycle::race_point::arm("mark_run_exited_after_read", &run, move || async move {
-            tokio::spawn(async move {
-                let lock = app.bot_lock(&bot_id).await;
-                let _g = lock.lock().await;
-                gate.notified().await;
-            });
-            tokio::task::yield_now().await;
+        let (hook_reached, hook_release) = (reached.clone(), release.clone());
+        crate::lifecycle::race_point::arm("autostart_revive_before_start", &bot.id, move || async move {
+            hook_reached.notify_one();
+            hook_release.notified().await;
         });
 
-        tokio::time::timeout(std::time::Duration::from_secs(20), crate::reconcile::reconcile_host(&env.app, config::LOCAL_HOST))
-            .await
-            .expect("對帳不能等補開")
-            .unwrap();
+        let app = env.app.clone();
+        let reconcile = tokio::spawn(async move { crate::reconcile::reconcile_host(&app, config::LOCAL_HOST).await });
+        // 補開停在閘門上（不管它是這一輪對帳還是延後補跑的那一輪起的）。
+        reached.notified().await;
+        // 閘門不會自己放開：對帳要是在等補開，就永遠回不來。這個上限只是「回歸時別卡死整個測試行程」的保險，
+        // 正常路徑上對帳此刻只剩收尾，不靠它判斷快慢。
+        tokio::time::timeout(std::time::Duration::from_secs(120), reconcile).await.expect("對帳不能等補開").unwrap().unwrap();
         assert_eq!(runner::pending_count(&env.app), 1, "對帳回來的時候補開還沒做完");
-        assert!(db::active_run(&env.app.db, &bot.id).await.unwrap().is_none(), "還在等鎖：沒有新 run");
+        assert!(db::active_run(&env.app.db, &bot.id).await.unwrap().is_none(), "補開卡在閘門：沒有新 run");
 
         release.notify_one();
         runner::quiesce(&env.app).await;
