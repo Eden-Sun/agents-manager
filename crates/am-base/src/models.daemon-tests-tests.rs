@@ -312,6 +312,47 @@
         assert_eq!(models4.iter().find(|m| m["id"] == "haiku").unwrap()["default_effort"], json!("low"));
     }
 
+    /// issue #937：m4p 的 `modelSettings`。別名要對到該家族最新版，完整 id 只認完全相等，不做子字串比對。
+    #[test]
+    fn claude_effort_override_resolves_aliases_to_the_latest_family_version() {
+        let (global, per_model) = parse_claude_effort_settings(
+            r#"{"modelSettings":{
+                "claude-fable-5-1":{"effortLevel":"medium"},
+                "claude-haiku-4-5":{"effortLevel":"medium"},
+                "claude-opus-5":{"effortLevel":"high"},
+                "claude-opus-5-5":{"effortLevel":"medium"},
+                "claude-sonnet-5":{"effortLevel":"low"},
+                "claude-sonnet-5-5":{"effortLevel":"high"}}}"#,
+        );
+        assert_eq!(global, None);
+        let of = |m: &str| claude_effort_override(&per_model, m);
+        assert_eq!(of("sonnet").as_deref(), Some("high"), "sonnet → claude-sonnet-5-5，不是字典序較前的舊版");
+        assert_eq!(of("opus").as_deref(), Some("medium"));
+        assert_eq!(of("claude-sonnet-5").as_deref(), Some("low"), "完整 id 只認完全相等，不會 contains 到 -5-5");
+        assert_eq!(of("claude-sonnet-5-5").as_deref(), Some("high"));
+        assert_eq!(of("haiku").as_deref(), Some("medium"));
+        assert_eq!(of("claude-haiku-5-5"), None, "沒有這個 key：不做子字串比對");
+        assert_eq!(of("fable").as_deref(), Some("medium"));
+        assert_eq!(of("Claude-Sonnet-5-5").as_deref(), Some("high"), "大小寫不同仍算相等");
+        assert_eq!(of("SONNET").as_deref(), Some("high"));
+        assert_eq!(of("gpt-5"), None);
+
+        let models = claude_static_models(global.as_deref(), &per_model);
+        let eff = |id: &str| models.iter().find(|m| m["id"] == id).unwrap()["default_effort"].clone();
+        assert_eq!(eff("sonnet"), json!("high"));
+        assert_eq!(eff("opus"), json!("medium"));
+    }
+
+    /// 版本逐段比數值（10 > 9），`[1m]` 之類非數字尾巴不影響比較。
+    #[test]
+    fn claude_effort_override_compares_versions_numerically() {
+        let m: BTreeMap<String, String> = [("claude-opus-5-9", "low"), ("claude-opus-5-10", "high"), ("claude-opus-5[1m]", "medium")]
+            .iter()
+            .map(|(k, v)| (k.to_string(), v.to_string()))
+            .collect();
+        assert_eq!(claude_effort_override(&m, "opus").as_deref(), Some("high"));
+    }
+
     #[test]
     fn grok_text_parses() {
         let t = "You are logged in with grok.com.\n\nDefault model: grok-4.5\n\nAvailable models:\n  - grok-4.6\n  * grok-4.5 (default)\n";
