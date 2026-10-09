@@ -305,6 +305,37 @@ test('codexInstallPlan：沒有 codex 在跑也照上游快照出安裝鈕（本
   assert.equal(codexInstallPlan(bots, runs, none, () => 'local'), null, "claude 的「需安裝」不算 codex 的")
 })
 
+test('codexInstallPlan 上游快照那條也跳過 default session 的 codex（#994，跟有需安裝通知時同一條線）', () => {
+  const upstream = {
+    kind: 'codex',
+    latest: '0.159.0',
+    target: '0.159.0',
+    hasUpdate: true,
+    hosts: [{ host: 'local', installedVersion: '0.158.0', error: null, behind: true }],
+    notify: null,
+    text: null,
+  }
+  const bots = [
+    bot('mine', { kind: 'codex', herdr_session: 'default' }),
+    bot('dflt', { kind: 'codex' }),
+    bot('ok', { kind: 'codex' }),
+    bot('kid', { kind: 'codex', managed_by: 'child' }),
+  ]
+  const runs = {
+    mine: run('mine', { update_notice: null }),
+    dflt: run('dflt', { update_notice: null, herdr_session: 'default' }),
+    ok: run('ok', { update_notice: null }),
+    kid: run('kid', { update_notice: null }),
+  }
+  const p = codexInstallPlan(bots, runs, none, () => 'local', upstream)
+  assert.ok(p)
+  assert.deepEqual(p.ready.map((b) => b.name), ['ok'])
+  const why = Object.fromEntries(p.busy.map((b) => [b.name, b.why]))
+  assert.equal(why.mine, '在你自己的 herdr default session 裡，daemon 不動它')
+  assert.equal(why.dflt, '在你自己的 herdr default session 裡，daemon 不動它')
+  assert.equal(why.kid, '子 agent，由父 Bot 重開', '子 agent 不回歸')
+})
+
 test('grok 徽章也算一種更新 chip：手機單獨出現照舊一顆，跟別種並存就合成一顆（#761 補手機合併選單）', () => {
   assert.equal(mergeUpdateChips(true, false, false, false, false, true), false, '只有 grok 一顆不合併（跟 herdr 一樣）')
   assert.equal(mergeUpdateChips(true, true, false, false, false, true), true, 'grok 跟重啟並存要合成一顆')

@@ -169,8 +169,8 @@ function codexUpstreamPlan(
   for (const bot of bots) {
     const run = runs[bot.id]
     if (bot.kind !== 'codex' || !run || run.state !== 'running' || hostOf(bot) !== disk.host) continue
-    const child = bot.managed_by === 'child' || Boolean(bot.parent_bot_id)
-    const why = child ? '子 agent，由父 Bot 重開' : runBusyReason(run, hasInFlightTurn(bot.id))
+    // 跟 `codexInstallPlan` 同一條線：子 agent 與 default session 都不動（daemon `Skip::Child`／`DefaultSession`）。
+    const why = neverRestartedReason(bot, run) ?? runBusyReason(run, hasInFlightTurn(bot.id))
     if (why) plan.busy.push({ botId: bot.id, name: bot.name, why })
     else plan.ready.push({ botId: bot.id, name: bot.name })
   }
