@@ -277,7 +277,7 @@ fn forget(bot_id: &str, name: &str) {
 }
 
 /// SVG 檢查要從 `App` 拿的：能讀分享檔（[`crate::outbox::OutboxEnv`]），以及「提醒 bot 修檔案」這一步（走一般的 prompt／排隊路徑）。
-pub trait SvgCheckEnv: crate::outbox::OutboxEnv {
+pub trait SvgCheckEnv: crate::outbox::OutboxEnv + crate::share::remote_io::ShareSiteResolver {
     /// 以 daemon 的名義把 `text` 送給 bot（bot 起不來就排隊）；`crid` 是冪等鍵。失敗回錯誤說明（記 log 用）。
     fn remind_bot(app: &Arc<Self>, bot_id: &str, text: &str, crid: &str) -> impl std::future::Future<Output = Result<(), String>> + Send;
 }
@@ -290,9 +290,25 @@ async fn already_sent(app: &impl crate::outbox::ShareStorage, crid: &str) -> boo
     )
 }
 
+/// 讀 outbox 裡的一個檔（含 ino／奈秒 mtime／ctime，`version_fingerprint` 要）。專案在遠端主機就經 ssh 讀（`remote_fs::outbox_read`，
+/// 一樣有大小上限與黑名單）；本機走原本的 fd-bound 讀法。解析不出檔案在哪台（DB 讀不到、主機斷線）＝`Unavailable`，呼叫端 `forget` 下次再查。
+async fn read_outbox_file<H: SvgCheckEnv>(app: &Arc<H>, bot_id: &str, name: &str, max_bytes: u64) -> Result<crate::outbox::ShareFileRead, crate::outbox::ShareFileError> {
+    match crate::share::remote_io::remote_site(&**app, bot_id).await {
+        Ok(Some(site)) => site.outbox_read(name, max_bytes).await.map(|r| crate::outbox::ShareFileRead {
+            name: r.name,
+            data: r.data,
+            ino: r.ino,
+            mtime_ns: r.mtime_ns,
+            ctime_ns: r.ctime_ns,
+        }),
+        Ok(None) => crate::outbox::share_file_read_with_limit(app, bot_id, name, max_bytes).await,
+        Err(()) => Err(crate::outbox::ShareFileError::Unavailable),
+    }
+}
+
 /// 查一個檔；壞了就提醒 bot（同一版本同一個錯誤只一次）。回傳查到的錯誤（測試用）。
 pub async fn check_file<H: SvgCheckEnv>(app: &Arc<H>, bot_id: &str, name: &str) -> Option<SvgError> {
-    let read = match crate::outbox::share_file_read_with_limit(app, bot_id, name, MAX_CHECK_BYTES as u64).await {
+    let read = match read_outbox_file(app, bot_id, name, MAX_CHECK_BYTES as u64).await {
         Ok(r) => r,
         Err(crate::outbox::ShareFileError::TooLarge) => {
             // 超過 4 MiB 直接略過不查；不叫 forget，同一版本不重複排查。

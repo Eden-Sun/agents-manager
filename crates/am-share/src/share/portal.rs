@@ -721,9 +721,28 @@ async fn send_message<H: PortalEnv>(State(st): State<Portal<H>>, Path(token): Pa
     if let Some(wait) = st.limits.take(&bot_id, "message", MESSAGES_PER_MIN, Duration::from_secs(60)) {
         return too_many(wait, "message");
     }
-    for a in &b.attachments {
-        if !stored_name_ok(a) || !inbox_has(&st.app, &bot_id, a).await {
+    // 遠端專案（#955）：一趟 ssh 查完所有附件；連不上＝503（不送出，也不扣第二次額度）。
+    let remote = match crate::share::remote_io::remote_site(&*st.app, &bot_id).await {
+        Ok(r) => r,
+        Err(()) => return unavailable(),
+    };
+    if let (Some(site), false) = (&remote, b.attachments.is_empty()) {
+        if b.attachments.iter().any(|a| !stored_name_ok(a)) {
             return bad("unknown_attachment", "附件不存在（請重新上傳）");
+        }
+        match site.inbox_has(&b.attachments).await {
+            Ok(found) if found.len() == b.attachments.len() && found.iter().all(|f| *f) => {}
+            Ok(_) => return bad("unknown_attachment", "附件不存在（請重新上傳）"),
+            Err(e) => {
+                tracing::warn!(bot = %bot_id, error = %e, "share attachment check on the remote host failed");
+                return unavailable();
+            }
+        }
+    } else {
+        for a in &b.attachments {
+            if !stored_name_ok(a) || !inbox_has(&st.app, &bot_id, a).await {
+                return bad("unknown_attachment", "附件不存在（請重新上傳）");
+            }
         }
     }
     let mut composed = format!("{SHARE_PREFIX}{text}");
@@ -1024,8 +1043,23 @@ async fn upload<H: PortalEnv>(
     #[cfg(test)]
     crate::race_point::hit("share_upload_after_authority_lock", &bot_id).await;
     let stored = format!("{}-{name}", db::ulid());
+    let len = data.len();
+    // 遠端專案（#955）：在 bot 鎖內經 ssh 寫進遠端 inbox（同一趟檢查配額、`set -C` 建檔、驗長度與身分）。解析不出來＝503。
+    match crate::share::remote_io::remote_site(&*st.app, &bot_id).await {
+        Err(()) => return unavailable(),
+        Ok(Some(site)) => {
+            return match site.inbox_write(&stored, &data, INBOX_MAX_BYTES, INBOX_MAX_FILES).await {
+                Ok(()) => Json(json!({"id": stored, "name": name, "size": len, "mime": mime})).into_response(),
+                Err(crate::share::remote_fs::InboxError::Full) => {
+                    (StatusCode::INSUFFICIENT_STORAGE, Json(json!({"error": "inbox_full", "message": "上傳空間滿了"}))).into_response()
+                }
+                Err(crate::share::remote_fs::InboxError::Unavailable) => unavailable(),
+            };
+        }
+        Ok(None) => {}
+    }
     let Some(folder) = folder_of(&st.app, &bot_id).await else { return unavailable() };
-    let (file_name, len) = (stored.clone(), data.len());
+    let file_name = stored.clone();
     let saved = tokio::task::spawn_blocking(move || -> Result<(), &'static str> {
         use std::io::Write as _;
         let dir = crate::share::folder::ensure_inbox(&folder).map_err(|_| "inbox_unavailable")?;
@@ -1058,11 +1092,26 @@ async fn files<H: PortalEnv>(State(st): State<Portal<H>>, Path(token): Path<Stri
     drop(authority);
     #[cfg(test)]
     crate::race_point::hit("share_io_after_authority_released", &bot_id).await;
+    let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0);
+    // 遠端專案（#955）：經 ssh 列遠端 outbox——**不刪任何檔**（分享用 bot 走保留政策，不是 1 小時）；outbox 還沒建＝空清單，
+    // 不可信／連不上／框不完整＝503（不把不完整的結果當空清單）。
+    match crate::share::remote_io::remote_site(&*st.app, &bot_id).await {
+        Err(()) => return unavailable(),
+        Ok(Some(site)) => {
+            return match site.outbox_list(now).await {
+                Ok(listed) => files_response(&st.app, &bot_id, &listed),
+                Err(e) => {
+                    tracing::warn!(bot = %bot_id, error = %e, "remote share outbox listing unavailable");
+                    unavailable()
+                }
+            };
+        }
+        Ok(None) => {}
+    }
     let Some(dir) = crate::outbox::dir_for(&st.app.data_dir(), &bot_id) else { return not_found() };
     let data_dir = st.app.data_dir().to_path_buf();
     #[cfg(test)]
     let fail_scan = take_fail_files_scan_task_for_test(&bot_id);
-    let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0);
     let listed = tokio::task::spawn_blocking(move || {
         #[cfg(test)]
         if fail_scan {
@@ -1082,7 +1131,12 @@ async fn files<H: PortalEnv>(State(st): State<Portal<H>>, Path(token): Path<Stri
             return unavailable();
         }
     };
-    // 只給名字、大小、時間；目錄路徑不給。分享用 bot 的 outbox 走分享保留政策（14 天／總量上限，`outbox-gc.sh` 看 `.am-share-keep`），不是 1 小時，所以不給倒數。
+    files_response(&st.app, &bot_id, &listed)
+}
+
+/// 清單回應（本機與遠端共用）：只給名字、大小、時間；目錄路徑不給。分享用 bot 的 outbox 走分享保留政策（14 天／總量上限，
+/// `outbox-gc.sh` 看 `.am-share-keep`），不是 1 小時，所以不給倒數。
+fn files_response<H: PortalEnv>(app: &Arc<H>, bot_id: &str, listed: &[Value]) -> Response {
     let out: Vec<Value> = listed
         .iter()
         .map(|f| {
@@ -1091,7 +1145,7 @@ async fn files<H: PortalEnv>(State(st): State<Portal<H>>, Path(token): Path<Stri
         })
         .collect();
     // 清單上的 .svg 有新版就在背景查一次是不是合法 XML，壞了自動提醒 bot（`svg_check`，SPEC §20）。
-    crate::share::svg_check::spawn_check(&st.app, &bot_id, &out);
+    crate::share::svg_check::spawn_check(app, bot_id, &out);
     Json(json!({"files": out})).into_response()
 }
 
@@ -1147,9 +1201,28 @@ async fn file<H: PortalEnv>(State(st): State<Portal<H>>, Path((token, name)): Pa
     let Ok(global_permit) = st.downloads.clone().try_acquire_owned() else {
         return too_many(5, "download");
     };
-    match crate::outbox::share_file(&st.app, &bot_id, &name).await {
+    let svg = inline_image(&name) == Some("image/svg+xml");
+    // 遠端專案（#955）：經 ssh 串流（名額＝下載名額＋主機名額，拿不到主機名額也是 429）；本機走原本的 fd-bound 串流。
+    let fetched = match crate::share::remote_io::remote_site(&*st.app, &bot_id).await {
+        Err(()) => Err(crate::outbox::ShareFileError::Unavailable),
+        Ok(Some(site)) => {
+            // 主機的分享 ssh 名額（每台 4）也是下載名額的一部分：用完直接 429，不排隊（同 #848）。
+            if crate::share::remote_fs::host_slot(&site.host).available_permits() == 0 {
+                return too_many(5, "download");
+            }
+            match site.outbox_stream(&name, crate::outbox::MAX_BYTES).await {
+                Ok(file) if svg => crate::share::remote_io::svg_response(&site, &name, file).await,
+                Ok(file) => Ok(crate::share::remote_io::stream_response(&name, file)),
+                Err(e) => Err(e),
+            }
+        }
+        Ok(None) => match crate::outbox::share_file(&st.app, &bot_id, &name).await {
+            Ok(res) if svg => Ok(embed_photos(&st.app, &bot_id, res).await),
+            other => other,
+        },
+    };
+    match fetched {
         Ok(res) => {
-            let res = if inline_image(&name) == Some("image/svg+xml") { embed_photos(&st.app, &bot_id, res).await } else { res };
             let (parts, body) = res.into_parts();
             let kept = body.into_data_stream().map(move |chunk| {
                 let _ = (&share_permit, &global_permit);
