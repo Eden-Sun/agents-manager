@@ -412,7 +412,7 @@ fn rules() -> Vec<Rule> {
         rule("PUT", "/api/supervisor/responder/stop", Expect::Forbidden, None),
         rule("PATCH", "/api/supervisor/responder/stop", Expect::Forbidden, None),
         rule("DELETE", "/api/supervisor/responder/stop", Expect::Forbidden, None),
-        rule("POST", "/api/turns/{id}/withdraw", Expect::NotFound, None),
+        rule("POST", "/api/turns/{id}/withdraw", Expect::UserOnly, None),
         scoped_allow_rule("POST", "/api/missions/{id}/complete", "An assigned Bot may complete its own mission when workflow and delivery gates pass; this Bot-A-to-B probe must be rejected."),
         rule("POST", "/api/supervisor/herdr-maintenance/end", Expect::Forbidden, None),
         pending_rule("GET", "/api/release-triage", "#801", "Release-triage ledger visibility remains open pending the user's decision on whether it is global or assignment-scoped."),
@@ -448,7 +448,7 @@ fn rules() -> Vec<Rule> {
         rule("DELETE", "/api/bots/{id}/start", Expect::Forbidden, None),
         rule("POST", "/api/hosts", Expect::UserOnly, None),
         rule("POST", "/api/hosts/{name}/cli-update", Expect::Forbidden, None),
-        rule("POST", "/api/turns/{id}/abandon", Expect::NotFound, None),
+        rule("POST", "/api/turns/{id}/abandon", Expect::UserOnly, None),
         rule("GET", "/api/supervisor/assignments", Expect::RoleRequired, None),
         scoped_allow_rule("POST", "/api/supervisor/assignments", "An ordinary Bot may send a notice to a registered AGM role; it may not dispatch work to Bot B, ask for review, or attach a mission."),
         scoped_allow_rule("POST", "/api/missions/{id}/revise", "An assigned Bot may open a revision for its own completed mission; this Bot-A-to-B probe must be rejected."),
@@ -1039,4 +1039,113 @@ async fn the_user_may_flag_a_share_reply() {
     let status = response.status();
     let body = response.text().await.unwrap();
     assert!(!(status == StatusCode::FORBIDDEN && body.contains("user_only")), "{status} {body}");
+}
+
+/// #989：一般 Bot 在**自己的**專案與回合上也不能打網頁專用的寫入（群組聊天、建任務、撤回、放棄）。
+/// 這類不是「別人的資源」，所以不在 Bot-A-to-B 的探測表裡，要在這裡直接測。
+async fn plain_bot_in_its_own_project() -> (crate::testing::Env, u16, String) {
+    let env = crate::testing::env().await;
+    env.app.set_startup_ready(true);
+    let bot_a = crate::testing::claude_bot(&env.app, &env.project_id, "own-project-bot").await;
+    sqlx::query("UPDATE bots SET hook_token='token-a' WHERE id=?")
+        .bind(&bot_a.id)
+        .execute(&env.app.db)
+        .await
+        .unwrap();
+    let router = router(env.app.clone());
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let port = listener.local_addr().unwrap().port();
+    tokio::spawn(async move {
+        let _ = axum::serve(listener, router.into_make_service_with_connect_info::<std::net::SocketAddr>()).await;
+    });
+    (env, port, bot_a.id)
+}
+
+#[tokio::test]
+async fn a_plain_bot_cannot_post_group_chat_or_create_a_mission_in_its_own_project() {
+    let (env, port, a) = plain_bot_in_its_own_project().await;
+    let client = reqwest::Client::new();
+    let chat = client
+        .post(format!("http://127.0.0.1:{port}/api/projects/{}/chat", env.project_id))
+        .header("content-type", "application/json")
+        .header("X-AM-Bot-Id", &a)
+        .header("X-AM-Bot-Token", "token-a")
+        .body(r#"{"text":"@all hi","client_request_id":"y1-chat"}"#)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(chat.status(), StatusCode::FORBIDDEN);
+    let body = chat.text().await.unwrap();
+    assert!(body.contains("\"reason\":\"user_only\""), "{body}");
+    let said: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM messages WHERE content LIKE '%@all hi%'").fetch_one(&env.app.db).await.unwrap();
+    assert_eq!(said, 0, "a refused group chat must not reach any bot as the user");
+
+    let mission = json!({"text":"y1","client_request_id":"y1-m","delivery_mode":"pr","executor_kind":"claude","on_5h_limit":"wait"}).to_string();
+    let made = client
+        .post(format!("http://127.0.0.1:{port}/api/projects/{}/missions", env.project_id))
+        .header("content-type", "application/json")
+        .header("X-AM-Bot-Id", &a)
+        .header("X-AM-Bot-Token", "token-a")
+        .body(mission.clone())
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(made.status(), StatusCode::FORBIDDEN);
+    let body = made.text().await.unwrap();
+    assert!(body.contains("\"reason\":\"user_only\""), "{body}");
+    let missions: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM missions").fetch_one(&env.app.db).await.unwrap();
+    assert_eq!(missions, 0);
+
+    // 同一顆 bot 登記成巡檢（AGM 角色）之後，建任務照舊能過這道閘（不是 403）。
+    let supervisor = crate::supervisor::store::get_or_init(&env.app.db).await.unwrap();
+    sqlx::query("UPDATE supervisors SET bot_id=? WHERE id=?")
+        .bind(&a)
+        .bind(&supervisor.id)
+        .execute(&env.app.db)
+        .await
+        .unwrap();
+    let as_role = client
+        .post(format!("http://127.0.0.1:{port}/api/projects/{}/missions", env.project_id))
+        .header("content-type", "application/json")
+        .header("X-AM-Bot-Id", &a)
+        .header("X-AM-Bot-Token", "token-a")
+        .body(mission)
+        .send()
+        .await
+        .unwrap();
+    assert_ne!(as_role.status(), StatusCode::FORBIDDEN, "the registered AGM role keeps mission creation: {:?}", as_role.text().await);
+}
+
+#[tokio::test]
+async fn a_plain_bot_cannot_withdraw_or_abandon_its_own_turn() {
+    let (env, port, a) = plain_bot_in_its_own_project().await;
+    let conversation = crate::db::conversation_id(&env.app.db, &a).await.unwrap();
+    let turn = crate::db::ulid();
+    sqlx::query(
+        "INSERT INTO turns (id, conversation_id, origin, status, delivery, prompt_text, created_at, awaits_idle)
+         VALUES (?,?,'web','queued','pending','y1 撤回測試',?,1)",
+    )
+    .bind(&turn)
+    .bind(&conversation)
+    .bind(crate::db::now())
+    .execute(&env.app.db)
+    .await
+    .unwrap();
+    let client = reqwest::Client::new();
+    for path in ["withdraw", "abandon"] {
+        let response = client
+            .post(format!("http://127.0.0.1:{port}/api/turns/{turn}/{path}"))
+            .header("content-type", "application/json")
+            .header("X-AM-Bot-Id", &a)
+            .header("X-AM-Bot-Token", "token-a")
+            .body("{}")
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::FORBIDDEN, "{path}");
+        let body = response.text().await.unwrap();
+        assert!(body.contains("\"reason\":\"user_only\""), "{path}: {body}");
+    }
+    let status: String = sqlx::query_scalar("SELECT status FROM turns WHERE id=?").bind(&turn).fetch_one(&env.app.db).await.unwrap();
+    assert_eq!(status, "queued", "a refused withdraw or abandon must not touch the turn");
 }
