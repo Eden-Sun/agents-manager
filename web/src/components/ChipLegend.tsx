@@ -1,5 +1,6 @@
-import { useEffect } from 'react'
+import { useEffect, useRef } from 'react'
 import { createPortal } from 'react-dom'
+import { useDialogFocus } from '../hooks/useDialogFocus'
 import { StatusLamp } from './StatusLamp'
 import './chipLegend.css'
 import './keepWarmChip.css'
@@ -10,6 +11,8 @@ import './keepWarmChip.css'
  * 從主力 bot 狀態卡（`BotStatusCard`，手機長按）的「顏色代表什麼？」或電腦版晶片列尾端的「?」打開。
  */
 export function ChipLegend({ onClose }: { onClose: () => void }) {
+  const dialogRef = useRef<HTMLDivElement>(null)
+  useDialogFocus(true, dialogRef)
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
       if (e.key === 'Escape') onClose()
@@ -19,7 +22,7 @@ export function ChipLegend({ onClose }: { onClose: () => void }) {
   }, [onClose])
   return createPortal(
     <div className="chip-legend-backdrop" onClick={onClose}>
-      <div className="chip-legend" role="dialog" aria-label="主力晶片的顏色說明" onClick={(e) => e.stopPropagation()}>
+      <div ref={dialogRef} className="chip-legend" role="dialog" aria-modal="true" aria-label="主力晶片的顏色說明" onClick={(e) => e.stopPropagation()}>
         <div className="chip-legend-head">
           <strong>顏色代表什麼</strong>
           <button type="button" className="chip-legend-close" aria-label="關閉" onClick={onClose}>
