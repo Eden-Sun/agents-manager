@@ -721,7 +721,8 @@ check "rename 失敗有講清楚 DB 還原失敗" "DB 還原失敗" "$SWAP_LOG"
 teardown
 unset STUB_MUTATE_DB
 
-# 5e. 舊 binary 的備份檔名撞名（PREV 已存在）：舊 daemon 此時已停，要先起回來、交還窗口再 rc=5，不能留一個停著的 daemon（issue #902）。
+# 5e. 同一秒、同一程序連換兩趟：舊版 PREV 檔名是「時間-$$」，兩趟撞名就 rc=5（issue #902 的那條路）。
+#     SWAP_PREV_NONCE=fixed 就是模擬「$$ 相同」（舊版吃這個變數）；現在 PREV 用 mktemp 隨機六碼，第二趟照樣換版。
 setup 10 10
 mkdir -p "$ROOT/fakedate"
 cat > "$ROOT/fakedate/date" <<'STUB'
@@ -733,13 +734,19 @@ esac
 STUB
 chmod +x "$ROOT/fakedate/date"
 export SWAP_PREV_NONCE=fixed
-printf 'squatter\n' > "$AGM_REPO/target/release/agents-managerd.prev-$OLD-20000101-000000-fixed"
-rc=$(PATH="$ROOT/fakedate:$PATH" run)
+# DB 備份檔名也是到秒、已存在就拒絕（rc=5，刻意的）：兩趟各給不同的 SWAP_BACKUP_STAMP，才只測 PREV 這一條。
+rc=$(SWAP_BACKUP_STAMP=first PATH="$ROOT/fakedate:$PATH" run)
+check_eq "同一秒第一趟換版 rc=0" "0" "$rc"
+check_eq "第一趟換上新 binary" "new-binary" "$(tail -1 "$AGM_DIR/started-binary.log")"
+STARTS1=$(wc -l < "$AGM_DIR/started-binary.log")
+# 第一趟留下的 .bak- 就是舊 binary；把正式路徑還原成舊版，模擬第二趟開工時線上仍是舊版。
+cp "$AGM_REPO/target/release/agents-managerd.bak-$OLD" "$AGM_REPO/target/release/agents-managerd"
+rc=$(SWAP_BACKUP_STAMP=second PATH="$ROOT/fakedate:$PATH" run)
 unset SWAP_PREV_NONCE
-check_eq "PREV 撞名 rc=5" "5" "$rc"
-check_eq "舊 daemon 被起回來（binary 仍是舊的）" "old-binary" "$(tail -1 "$AGM_DIR/started-binary.log")"
-check "撞名後有交還窗口" "restart 窗口已交還" "$SWAP_LOG"
-check_eq "正式 binary 沒被換" "old-binary" "$(cat "$AGM_REPO/target/release/agents-managerd")"
+check_eq "同一秒第二趟照樣換版 rc=0（不撞名）" "0" "$rc"
+check_eq "第二趟真的又啟動了 daemon" "yes" "$([ "$(wc -l < "$AGM_DIR/started-binary.log")" -gt "$STARTS1" ] && echo yes || echo no)"
+check_eq "第二趟換上新 binary" "new-binary" "$(tail -1 "$AGM_DIR/started-binary.log")"
+check "正式 binary 是新的" "new-binary" "$AGM_REPO/target/release/agents-managerd"
 teardown
 
 # 6. 讀不到 checkout 的 SCHEMA_VERSION：停手，不要拿上一輪的數字猜。

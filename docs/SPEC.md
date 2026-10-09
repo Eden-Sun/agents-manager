@@ -3902,7 +3902,7 @@ AGM 控制面讀取（總管摘要、health、handoff、assignments、inbox、pe
   2. 沒有 bot 在 `working`：拿窗口最多重試 3 分鐘，拿不到就 defer；**換 binary 前一刻再查一次**，再確認正式 binary 的 hash 沒在等待期間被另一趟換掉。
   3. 備份舊 binary 為 `target/release/agents-managerd.bak-<old>`（hash 對得上才算數）與 DB（`integrity_check` 通過）。
      DB 備份 `<db>.bak-<YYYYMMDD-HHMMSS>`：**權限 600**（DB 裡有 bot 的 hook token，不看呼叫端 umask）、**已經有同名檔就拒絕（結束碼 5）**不覆蓋（`.backup` 對既有檔是整個覆蓋，會把上一趟換版前唯一的好備份蓋成已 migrate 過的）；備份失敗與已存在都先交還 restart 窗口再結束。成功後只留最新一份。
-     **binary 備份**（#943）：每趟另留 `target/release/agents-managerd.bak-<舊 sha>` 與 `.prev-<舊 sha>-<時間>-<pid>`；**成功**路徑最後（`prune_old_binary_backups`）只留這趟的 `.bak-`／`.prev-`，其餘固定前綴 glob 下的一般檔全刪（符號連結與目錄不碰，刪不掉只 WARN）；回滾與中止不清，舊備份全留。
+     **binary 備份**（#943）：每趟另留 `target/release/agents-managerd.bak-<舊 sha>` 與 `.prev-<舊 sha>-<時間>-<六碼隨機>`（mktemp，同秒連換兩趟也不撞名）；**成功**路徑最後（`prune_old_binary_backups`）只留這趟的 `.bak-`／`.prev-`，其餘固定前綴 glob 下的一般檔全刪（符號連結與目錄不碰，刪不掉只 WARN）；回滾與中止不清，舊備份全留。
      **cp 不看結果會截斷 binary**（#944）：備份先寫 `<bak>.tmp.<pid>`、驗 `--old-hash` 才 `mv`（失敗 rc=3，不留半截 `.bak-`）；停 daemon 前 `df` 可用空間要 ≥ 新 binary 的兩倍（不足交還窗口 rc=5）；換版 cp 到 `agents-managerd.new.<pid>`、驗等於新 binary 才 `mv`，失敗就把 `.prev-` 搬回、起回舊 daemon、交還窗口 rc=5；回滾優先 `mv -f` 這趟的 `.prev-`，沒有才 cp `.bak-`，都驗 `--old-hash`，驗不過**不起 daemon、rc=11**（不再 log `rolled back` rc=7）；往前修的新 binary 複製同樣先暫存再驗。
      **沒升 schema 的回滾只換 binary、DB 與 `-wal`／`-shm` 原樣保留**（舊 binary 開得了現在的 DB，還原備份只會抹掉新 daemon 這段時間寫的資料；log `db left as is`，備份保留）；只有升過 schema、往前修也失敗才還原 DB（#902）。
      **回滾還原 DB 是原子的**：先 `cp` 到同目錄暫存檔 `<db>.restore.<pid>`（600）、fsync，成功了才刪 `-wal`／`-shm` 再 `mv` 覆蓋；`cp` 或 fsync 失敗時原 DB 與它的 `-wal`／`-shm` 一個位元組都不動、暫存檔清掉、log 記 `DB 還原失敗`，備份還在可手動還原。
