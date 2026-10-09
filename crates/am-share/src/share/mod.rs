@@ -89,20 +89,26 @@ pub async fn keep_new_remote_share<S: crate::outbox::ShareStorage + site::SiteEn
 }
 
 /// Revoke a bot's public share link after its lifecycle has been decided.
+///
+/// token 先作廢（DB 很快）、才拿掉遠端保留標記：後者要 ssh，遠端慢時不能讓舊連結在那段時間照樣過授權（#985）。
 pub async fn revoke_bot_share<S: crate::outbox::ShareStorage + site::SiteEnv>(app: &S, bot_id: &str) -> Result<(), sqlx::Error> {
     portal::kick(bot_id);
+    store::revoke_bot(crate::outbox::ShareStorage::db_pool(app), bot_id).await?;
     crate::outbox::unmark_share_keep(crate::outbox::ShareStorage::data_dir(app), bot_id);
     set_remote_keep(app, bot_id, false, true).await;
-    store::revoke_bot(crate::outbox::ShareStorage::db_pool(app), bot_id).await
+    Ok(())
 }
 
 /// Revoke all share links in a deleted project and close their active event streams.
+///
+/// 同 [`revoke_bot_share`]：整個專案的 token 先一次作廢，再逐顆拿掉遠端標記（#985：原本 N 顆依序 ssh，慢的主機要 N×60 秒）。
 pub async fn revoke_project_shares<S: crate::outbox::ShareStorage + site::SiteEnv>(app: &S, project_id: &str) -> Result<(), sqlx::Error> {
     let pool = crate::outbox::ShareStorage::db_pool(app);
     let ids = store::project_share_ids(pool, project_id).await?;
     for bot_id in ids {
         portal::kick(&bot_id);
     }
+    store::revoke_project(pool, project_id).await?;
     // 分享關著的分享用 bot 也有標記：專案底下每一顆都拿掉（遠端專案的拿掉遠端那份）。
     let restricted: Vec<String> =
         sqlx::query_scalar("SELECT r.bot_id FROM shared_bots r JOIN bots b ON b.id = r.bot_id WHERE b.project_id = ?").bind(project_id).fetch_all(pool).await?;
@@ -110,7 +116,7 @@ pub async fn revoke_project_shares<S: crate::outbox::ShareStorage + site::SiteEn
         crate::outbox::unmark_share_keep(crate::outbox::ShareStorage::data_dir(app), &bot_id);
         set_remote_keep(app, &bot_id, false, true).await;
     }
-    store::revoke_project(pool, project_id).await
+    Ok(())
 }
 
 /// 拿 bot 身分打 API 的（實際上只有 AGM 角色過得了 `UserOrAgm` 那道）不能刪、不能停分享用 bot，也不能刪裝著它的專案
