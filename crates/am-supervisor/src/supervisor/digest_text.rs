@@ -45,14 +45,19 @@ pub fn detail(e: &InboxEvent, p: &Value) -> String {
             };
             format!(" from={from}（{from_id}）{verified}{reply}\n  內容：{}\n", snippet(s("text").unwrap_or(""), 1500))
         }
-        "approval_requested" => format!(
-            " approval={} requester={} purpose={} commit={}\n  範圍：{}\n",
-            s("id").unwrap_or(""),
-            s("requester").unwrap_or(""),
-            s("purpose").unwrap_or(""),
-            s("target_commit").unwrap_or(""),
-            snippet(s("scope").unwrap_or(""), 600),
-        ),
+        "approval_requested" => {
+            // 申請理由（沒附時印「（空）」）與未驗證身分一起印：裁示的人才看得到理由，也看得出是不是冒名。
+            let unverified = if p.get("requester_unverified").and_then(Value::as_bool) == Some(true) { "（申請者未以 bot token 驗證）" } else { "" };
+            format!(
+                " approval={} requester={}{unverified} purpose={} commit={}\n  範圍：{}\n  理由：{}\n",
+                s("id").unwrap_or(""),
+                s("requester").unwrap_or(""),
+                s("purpose").unwrap_or(""),
+                s("target_commit").unwrap_or(""),
+                snippet(s("scope").unwrap_or(""), 600),
+                snippet(s("request_reason").unwrap_or(""), 600),
+            )
+        }
         "incident_opened" | "incident_resolved" => {
             let i = p.get("incident").cloned().unwrap_or(Value::Null);
             let f = |k: &str| i.get(k).and_then(Value::as_str).unwrap_or("").to_string();
@@ -96,4 +101,55 @@ pub fn snippet(s: &str, max: usize) -> String {
     }
     let cut: String = t.chars().take(max).collect();
     if cut.chars().count() < t.chars().count() { format!("{cut}…") } else { cut }
+}
+
+#[cfg(test)]
+mod tests {
+    use serde_json::json;
+
+    use super::*;
+
+    fn approval(payload: Value) -> InboxEvent {
+        InboxEvent {
+            id: "e-ap1".into(),
+            event_key: "k-ap1".into(),
+            assignment_id: None,
+            bot_id: None,
+            turn_id: None,
+            kind: "approval_requested".into(),
+            payload_json: payload.to_string(),
+            state: "pending".into(),
+            notify_turn_id: None,
+            notify_delivery: None,
+            notify_attempts: 0,
+            notify_next_at: None,
+            notify_error: None,
+            delivered_at: None,
+            created_at: "now".into(),
+            updated_at: "now".into(),
+            role: None,
+            wake: None,
+            claimed_by: None,
+            acked_by: None,
+            merged_into: None,
+        }
+    }
+
+    #[test]
+    fn approval_digest_shows_the_request_reason() {
+        let p = json!({"id": "ap1", "requester": "bot-a", "purpose": "restart", "scope": "daemon", "request_reason": "修 #900 要重啟", "requester_unverified": false});
+        let e = approval(p.clone());
+        let out = detail(&e, &p);
+        assert!(out.contains("理由：修 #900 要重啟"), "{out}");
+        assert!(!out.contains("未以 bot token 驗證"), "{out}");
+    }
+
+    #[test]
+    fn approval_digest_marks_missing_reason_and_unverified_requester() {
+        let p = json!({"id": "ap2", "requester": "bot-b", "purpose": "restart", "scope": "daemon", "requester_unverified": true});
+        let e = approval(p.clone());
+        let out = detail(&e, &p);
+        assert!(out.contains("理由：（空）"), "{out}");
+        assert!(out.contains("（申請者未以 bot token 驗證）"), "{out}");
+    }
 }
