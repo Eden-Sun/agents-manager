@@ -6047,12 +6047,24 @@ async fn get_messages(
     let has_more = rows.len() as i64 > limit;
     let mut msgs: Vec<db::Message> = rows.into_iter().take(limit as usize).collect();
     msgs.reverse();
-    let turns = sqlx::query_as::<_, db::Turn>("SELECT * FROM turns WHERE conversation_id=? ORDER BY created_at DESC LIMIT ?")
-        .bind(&conv)
-        .bind(limit + 1)
-        .fetch_all(&app.db)
-        .await
-        .map_err(any_err)?;
+    // `turns`：這一頁訊息所屬的回合（送達警示與撤回鈕要查得到，翻到更早的頁也一樣）∪ 這段對話還沒結束的回合
+    // （判斷還在不在跑）。以前是「最新 limit+1 筆」，翻頁或帶 `turn_id=` 時跟頁上的訊息對不上（#954）。
+    // 一頁最多 500 則訊息，`?` 佔位符低於 SQLite 的 999 個參數上限。第二排序鍵 `rowid`：同毫秒的回合順序要穩定。
+    let mut page_turns: Vec<&str> = msgs.iter().filter_map(|m| m.turn_id.as_deref()).collect();
+    page_turns.sort_unstable();
+    page_turns.dedup();
+    let mut turns_sql = String::from("SELECT * FROM turns WHERE conversation_id=? AND (status IN ('queued','in_flight')");
+    if !page_turns.is_empty() {
+        turns_sql.push_str(" OR id IN (");
+        turns_sql.push_str(&vec!["?"; page_turns.len()].join(","));
+        turns_sql.push(')');
+    }
+    turns_sql.push_str(") ORDER BY created_at DESC, rowid DESC");
+    let mut turns_query = sqlx::query_as::<_, db::Turn>(&turns_sql).bind(&conv);
+    for t in &page_turns {
+        turns_query = turns_query.bind(*t);
+    }
+    let turns = turns_query.fetch_all(&app.db).await.map_err(any_err)?;
     Ok(Json(json!({"bot_id": id, "conversation_id": conv, "messages": msgs, "turns": turns, "has_more": has_more})))
 }
 
@@ -6980,6 +6992,92 @@ mod message_tests {
         assert_eq!(second["has_more"], false);
         assert_eq!(second["messages"][0]["id"], "u-group");
         assert_eq!(second["messages"][0]["group_id"], "grp-1");
+    }
+
+    fn turn_ids(body: &Value) -> Vec<String> {
+        body["turns"].as_array().unwrap().iter().map(|t| t["id"].as_str().unwrap().to_string()).collect()
+    }
+
+    /// #954：`turns` 是這一頁訊息所屬的回合（∪ 還沒結束的），翻到更早的頁也查得到那一則 prompt 的 delivery。
+    #[tokio::test]
+    async fn every_page_carries_the_turns_of_its_own_messages() {
+        let e = crate::testing::env().await;
+        let app = e.app.clone();
+        let (bot_id, conv) = a_bot_with_conv(&e, "turns-page-bot").await;
+        for t in ["t-1", "t-2", "t-3"] {
+            a_turn(&app.db, &conv, t).await;
+        }
+        sqlx::query("UPDATE turns SET delivery='failed' WHERE id='t-1'").execute(&app.db).await.unwrap();
+        for (m, t) in [("m-1", "t-1"), ("m-2", "t-2"), ("m-3", "t-3")] {
+            a_message(&app.db, &conv, m, t, "user", None).await;
+        }
+
+        let page = |before: Option<&str>| {
+            let mut q = HashMap::from([("limit".to_string(), "1".to_string())]);
+            if let Some(b) = before {
+                q.insert("before".to_string(), b.to_string());
+            }
+            q
+        };
+        let Json(first) = get_messages(State(app.clone()), Path(bot_id.clone()), Query(page(None))).await.unwrap();
+        assert_eq!(first["messages"][0]["id"], "m-3");
+        assert_eq!(turn_ids(&first), ["t-3"], "第一頁只帶自己的回合");
+        let Json(second) = get_messages(State(app.clone()), Path(bot_id.clone()), Query(page(Some("m-3")))).await.unwrap();
+        assert_eq!(second["messages"][0]["id"], "m-2");
+        assert_eq!(turn_ids(&second), ["t-2"]);
+        let Json(third) = get_messages(State(app.clone()), Path(bot_id.clone()), Query(page(Some("m-2")))).await.unwrap();
+        assert_eq!(third["messages"][0]["id"], "m-1");
+        assert_eq!(turn_ids(&third), ["t-1"], "最舊那頁也查得到回合");
+        assert_eq!(third["turns"][0]["delivery"], "failed", "失敗 prompt 的送達警示不會因為翻頁消失");
+
+        // 帶 turn_id= 只回那一個回合（加上還沒結束的，這裡沒有）。
+        let q = HashMap::from([("turn_id".to_string(), "t-1".to_string())]);
+        let Json(filtered) = get_messages(State(app.clone()), Path(bot_id.clone()), Query(q)).await.unwrap();
+        assert_eq!(turn_ids(&filtered), ["t-1"]);
+        // 沒有訊息的頁（查不到的 turn）：不帶任何已結束的回合，也不出錯。
+        let q = HashMap::from([("turn_id".to_string(), "t-nope".to_string())]);
+        let Json(none) = get_messages(State(app.clone()), Path(bot_id.clone()), Query(q)).await.unwrap();
+        assert!(turn_ids(&none).is_empty());
+
+        // 還在 queued／in_flight 的回合不管在哪一頁都要帶（判斷還在不在跑）。
+        sqlx::query("INSERT INTO turns (id, conversation_id, origin, status, delivery, created_at) VALUES ('t-live',?,'web','in_flight','ok',?)")
+            .bind(&conv)
+            .bind(db::now())
+            .execute(&app.db)
+            .await
+            .unwrap();
+        let Json(old_page) = get_messages(State(app), Path(bot_id), Query(page(Some("m-2")))).await.unwrap();
+        let ids = turn_ids(&old_page);
+        assert!(ids.contains(&"t-1".to_string()) && ids.contains(&"t-live".to_string()), "{ids:?}");
+        assert!(!ids.contains(&"t-3".to_string()), "別頁已結束的回合不帶：{ids:?}");
+    }
+
+    /// #954：同毫秒的回合要用 `rowid` 倒序，`turns` 的順序在重複查詢與翻頁邊界上穩定。
+    #[tokio::test]
+    async fn turns_created_in_the_same_millisecond_are_ordered_by_rowid_desc() {
+        let e = crate::testing::env().await;
+        let app = e.app.clone();
+        let (bot_id, conv) = a_bot_with_conv(&e, "turns-same-ms-bot").await;
+        let at = db::now();
+        for t in ["t-a", "t-b", "t-c"] {
+            sqlx::query("INSERT INTO turns (id, conversation_id, origin, status, delivery, created_at) VALUES (?,?,'web','in_flight','ok',?)")
+                .bind(t)
+                .bind(&conv)
+                .bind(&at)
+                .execute(&app.db)
+                .await
+                .unwrap();
+        }
+        a_message(&app.db, &conv, "m-a", "t-a", "user", None).await;
+        let expected = ["t-c", "t-b", "t-a"];
+        for _ in 0..3 {
+            let Json(body) = get_messages(State(app.clone()), Path(bot_id.clone()), Query(HashMap::new())).await.unwrap();
+            assert_eq!(turn_ids(&body), expected, "同一毫秒：rowid 倒序，每次一樣");
+        }
+        let q = HashMap::from([("limit".to_string(), "1".to_string()), ("before".to_string(), "m-a".to_string())]);
+        let Json(edge) = get_messages(State(app), Path(bot_id), Query(q)).await.unwrap();
+        assert!(edge["messages"].as_array().unwrap().is_empty(), "m-a 是最舊的一則：往前是空頁");
+        assert_eq!(turn_ids(&edge), expected, "空頁也帶還沒結束的回合，順序不變");
     }
 
     /// review 2026-09-12 #9; deleted bots still answer (API.md §10.4).
