@@ -79,7 +79,7 @@ Service token 由 daemon 在資料目錄建立於 `service-tokens/`（目錄 `07
 |---|---|---|---|
 | `/api/bots/{id}` 與 `/api/bots/{id}/…` | 該路由註冊的 GET／POST／PATCH／DELETE | 否；`POST /prompt` 是例外 | 本 bot、其後代 child。角色 bot 不會因此取得通用 bot API 跨讀寫權；`/prompt` 仍須通過 `relay_auth` 的 sender proof；`/keys`、`/text` 仍 User-only；上傳附件只可寫本 bot 或 child。 |
 | `/api/projects/{id}` 與 `/api/projects/{id}/…` | 該路由註冊的 GET／POST／PATCH／DELETE | 否；任務清單例外 | 專案內含本 bot 或其後代 child 即屬授權範圍。AGM 角色可跨專案使用 `GET／POST /projects/{id}/missions` 任務管理入口；Git、Issue、建立 bot 等一般專案操作不隨角色擴權。 |
-| `/api/turns/{id}/abandon`、`/withdraw`；`/api/attachments/{id}` | POST；GET | 否 | 由 turn 的 conversation 或 attachment row 反查擁有 bot，再套用本 bot／後代 child 範圍；AGM 角色不會因此取得跨 bot 的回合或附件。沒有獨立的 `/api/runs/{id}` 路由。 |
+| `/api/turns/{id}/abandon`、`/withdraw`；`/api/attachments/{id}` | POST；GET | 否 | 由 turn 的 conversation 或 attachment row 反查擁有 bot，再套用本 bot／後代 child 範圍；AGM 角色不會因此取得跨 bot 的回合或附件。`/withdraw` 只給 User（一般 Bot 與 AGM 角色均 403 `user_only`，#989），`/abandon` 給 User 與已登記 AGM 角色。沒有獨立的 `/api/runs/{id}` 路由。 |
 | `/api/missions/{id}` 與 `/api/missions/{id}/…` | GET／POST | 只限任務管理或授權任務 | 本 bot／後代 child 所屬專案、派給本 bot／後代 child 的任務，或明確登記的 AGM 角色 bot；其他一般 bot 回 403。 |
 | `/api/search/messages`、敏感的 `/api/supervisor…` GET | GET | User／AGM 角色 | 這些跨 bot 或內含管理狀態的讀取只限 User 與已登記 AGM 角色；一般 Bot 回 403 `role_required`，Service 仍受明列 path scope 限制。 |
 | `/api/supervisor/assignments/{id}`、`/review` | GET；POST | 只限授權交辦 | 一般 Bot 的 GET 由 AGM gate 拒絕；User 與已登記 AGM 角色可讀。`/review` 仍需既有 AGM 角色閘。 |
@@ -314,13 +314,13 @@ A 組與 `git/push` 標「待裁示」的原因：這幾支唯一的呼叫端是
 | POST | `/api/panes/{id}/focus` | User-only；Bot 與 AGM role 均 → 403 `user_only`；Service 依明列 path scope（本路徑未授權） |
 | POST | `/api/projects` | User-only；一般 Bot → 403 `user_only`；已登記 AGM 角色略過共用 fence，仍受既有路由／資源權限限制 |
 | POST | `/api/projects/{id}/bots` | User-only；一般 Bot → 403 `user_only`；已登記 AGM 角色略過共用 fence，仍受既有路由／資源權限限制 |
-| POST | `/api/projects/{id}/chat` | User 或 Bot principal；Service 僅可走其明列 method/path scope |
+| POST | `/api/projects/{id}/chat` | User-only；Bot 與 AGM role 均 → 403 `user_only`（#989：網頁群組聊天，一般 Bot 不能以使用者名義 @all） |
 | POST | `/api/projects/{id}/git/commit` | User-only；一般 Bot → 403 `user_only`；已登記 AGM 角色略過共用 fence，仍受既有路由／資源權限限制 |
 | POST | `/api/projects/{id}/git/pull` | User-only；一般 Bot → 403 `user_only`；已登記 AGM 角色略過共用 fence，仍受既有路由／資源權限限制 |
 | POST | `/api/projects/{id}/git/push` | User-only；一般 Bot → 403 `user_only`；已登記 AGM 角色略過共用 fence，仍受既有路由／資源權限限制 |
 | POST | `/api/projects/{id}/github/refresh` | User-only；一般 Bot → 403 `user_only`；已登記 AGM 角色略過共用 fence，仍受既有路由／資源權限限制 |
 | POST | `/api/projects/{id}/group/read` | User-only；Bot 與 AGM role 均 → 403 `user_only`；Service 依明列 path scope（本路徑未授權） |
-| POST | `/api/projects/{id}/missions` | User 或 Bot principal；Service 僅可走其明列 method/path scope |
+| POST | `/api/projects/{id}/missions` | User 或已登記 AGM 角色 Bot；一般 Bot → 403 `user_only`（#989） |
 | POST | `/api/quota/probe` | User-only；一般 Bot → 403 `user_only`；已登記 AGM 角色略過共用 fence，仍受既有路由／資源權限限制 |
 | POST | `/api/release-triage/dispatched` | User-only；一般 Bot → 403 `user_only`；已登記 AGM 角色略過共用 fence，仍受既有路由／資源權限限制 |
 | POST | `/api/release-triage/publish` | User-only；一般 Bot → 403 `user_only`；已登記 AGM 角色略過共用 fence，仍受既有路由／資源權限限制 |
@@ -350,8 +350,8 @@ A 組與 `git/push` 標「待裁示」的原因：這幾支唯一的呼叫端是
 | POST | `/api/supervisor/setup` | User 或 AGM 角色 Bot；一般 Bot 403 `role_required` |
 | POST | `/api/supervisor/start` | User 或 AGM 角色 Bot；一般 Bot 403 `role_required` |
 | POST | `/api/supervisor/stop` | User 或 AGM 角色 Bot；一般 Bot 403 `role_required` |
-| POST | `/api/turns/{id}/abandon` | User 或 Bot principal；Service 僅可走其明列 method/path scope |
-| POST | `/api/turns/{id}/withdraw` | User 或 Bot principal；Service 僅可走其明列 method/path scope |
+| POST | `/api/turns/{id}/abandon` | User 或已登記 AGM 角色 Bot；一般 Bot → 403 `user_only`（#989） |
+| POST | `/api/turns/{id}/withdraw` | User-only；Bot 與 AGM role 均 → 403 `user_only`（#989：撤回別人排給它的 queued 回合，一般 Bot 不能） |
 | POST | `/build-slots/acquire` | User 或 Bot token；Bot holder 必須是自己 |
 | POST | `/build-slots/release` | User 或 Bot token；Bot holder 必須是自己 |
 | POST | `/build-slots/renew` | User 或 Bot token；Bot holder 必須是自己 |
