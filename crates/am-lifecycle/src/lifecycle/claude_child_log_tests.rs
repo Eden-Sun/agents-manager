@@ -533,7 +533,8 @@ fn the_runtime_is_the_latest_assistant_effort_and_model() {
     assert_eq!(parse_runtime(&two_exchanges()), RuntimeSeen::default(), "舊格式沒有這兩欄＝不猜");
 }
 
-/// #880：沒帶 `--effort` 的 haiku 子 agent，對話紀錄寫 medium → `runtime_effort=medium`、`runtime_model` 也補上；bots.effort 不回寫。
+/// #880：沒帶 `--effort` 的 haiku 子 agent，對話紀錄寫 medium → `runtime_effort=medium`、`runtime_model` 也補上。
+/// #938：child 的 `bots.effort`／`model` 跟著 runtime 走（模型是同家族別名時沿用別名，不動 `bots.model`）。
 #[tokio::test]
 async fn the_transcript_effort_and_model_become_the_runtime() {
     let cfg = tt::track(std::env::temp_dir().join(format!("am-claude-cfg-{}", db::ulid())));
@@ -550,11 +551,79 @@ async fn the_transcript_effort_and_model_become_the_runtime() {
     assert_eq!(run.runtime_effort.as_deref(), Some("medium"));
     assert_eq!(run.runtime_model.as_deref(), Some("haiku"), "設定是同家族別名就沿用，不憑空多一條模型 drift");
     let bot = db::bot(&app.db, &c.bot.id).await.unwrap().unwrap();
-    assert_eq!(bot.effort.as_deref(), Some("high"), "設定值不回寫");
+    assert_eq!(bot.effort.as_deref(), Some("medium"), "child 的設定跟上 runtime（#938）");
+    assert_eq!(bot.model.as_deref(), Some("haiku"), "同家族別名沒有變，設定的模型不動");
 
     // 之後 /effort 切到 high、/model 換成 sonnet：照最新一則走。
     write_log(&cfg, "sess-1", &(body + &log(&[assistant_with("high", "claude-sonnet-5-5")])));
     sync_locked(&app, &c.run_id).await.unwrap();
     let run = db::run(&app.db, &c.run_id).await.unwrap().unwrap();
     assert_eq!((run.runtime_model.as_deref(), run.runtime_effort.as_deref()), (Some("claude-sonnet-5-5"), Some("high")));
+    let bot = db::bot(&app.db, &c.bot.id).await.unwrap().unwrap();
+    assert_eq!((bot.model.as_deref(), bot.effort.as_deref()), (Some("claude-sonnet-5-5"), Some("high")), "切換後設定也跟上");
+}
+
+async fn runtime_of(app: &Arc<App>, run_id: &str) -> (Option<String>, Option<String>) {
+    sqlx::query_as("SELECT runtime_model, runtime_effort FROM runs WHERE id = ?").bind(run_id).fetch_one(&app.db).await.unwrap()
+}
+
+/// #938 ①：child 的設定是 low、runtime 還沒記，對話檔寫 high → runs 與 bots 都是 high，並推 `bot_changed`（網頁才會重抓設定、不再畫 ⟳）。
+#[tokio::test]
+async fn a_childs_settings_follow_the_transcript_effort() {
+    let c = claude_child(None, None).await;
+    let app = c.env.app.clone();
+    sqlx::query("UPDATE bots SET effort = 'low' WHERE id = ?").bind(&c.bot.id).execute(&app.db).await.unwrap();
+    let run = db::run(&app.db, &c.run_id).await.unwrap().unwrap();
+    assert_eq!(run.runtime_effort, None);
+    let mut rx = app.subscribe();
+
+    record_runtime(&app, &c.bot, &run, &log(&[assistant_with("high", "claude-sonnet-5-5")])).await;
+
+    assert_eq!(runtime_of(&app, &c.run_id).await.1.as_deref(), Some("high"));
+    let bot = db::bot(&app.db, &c.bot.id).await.unwrap().unwrap();
+    assert_eq!(bot.effort.as_deref(), Some("high"), "child 設定跟上");
+    let mut changed = false;
+    while let Ok(ev) = rx.try_recv() {
+        changed |= ev.kind == "bot_changed" && ev.data["bot_id"] == c.bot.id.as_str();
+    }
+    assert!(changed, "要推 bot_changed");
+}
+
+/// #938 ②：一般 bot 的設定是使用者的，只記 runtime，不回寫。
+#[tokio::test]
+async fn an_ordinary_bots_settings_are_not_touched() {
+    let c = claude_child(None, None).await;
+    let app = c.env.app.clone();
+    sqlx::query("UPDATE bots SET effort = 'low', managed_by = 'user' WHERE id = ?").bind(&c.bot.id).execute(&app.db).await.unwrap();
+    let bot = db::bot(&app.db, &c.bot.id).await.unwrap().unwrap();
+    let run = db::run(&app.db, &c.run_id).await.unwrap().unwrap();
+
+    record_runtime(&app, &bot, &run, &log(&[assistant_with("high", "claude-sonnet-5-5")])).await;
+
+    assert_eq!(runtime_of(&app, &c.run_id).await.1.as_deref(), Some("high"));
+    let after = db::bot(&app.db, &c.bot.id).await.unwrap().unwrap();
+    assert_eq!(after.effort.as_deref(), Some("low"), "一般 bot 只改 runs");
+}
+
+/// #938 ③：設定寫不進去（bots 的 UPDATE 被擋）→ runtime 也不寫，下一輪仍不同才會再試（#743 的順序）。
+#[tokio::test]
+async fn a_childs_runtime_is_not_written_when_its_settings_cannot_follow() {
+    let c = claude_child(None, None).await;
+    let app = c.env.app.clone();
+    sqlx::query("UPDATE bots SET effort = 'low' WHERE id = ?").bind(&c.bot.id).execute(&app.db).await.unwrap();
+    let run = db::run(&app.db, &c.run_id).await.unwrap().unwrap();
+    sqlx::query("CREATE TRIGGER no_bot_update BEFORE UPDATE ON bots BEGIN SELECT RAISE(ABORT, 'bots are read-only'); END")
+        .execute(&app.db)
+        .await
+        .unwrap();
+    let text = log(&[assistant_with("high", "claude-sonnet-5-5")]);
+
+    record_runtime(&app, &c.bot, &run, &text).await;
+    assert_eq!(runtime_of(&app, &c.run_id).await, (None, None), "設定沒跟上就不寫 runtime");
+
+    sqlx::query("DROP TRIGGER no_bot_update").execute(&app.db).await.unwrap();
+    record_runtime(&app, &c.bot, &run, &text).await;
+    assert_eq!(runtime_of(&app, &c.run_id).await.1.as_deref(), Some("high"), "下一輪再試就成功");
+    let bot = db::bot(&app.db, &c.bot.id).await.unwrap().unwrap();
+    assert_eq!(bot.effort.as_deref(), Some("high"));
 }

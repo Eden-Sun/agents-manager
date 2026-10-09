@@ -223,7 +223,15 @@ fn same_family_alias(alias: &str, id: &str) -> bool {
 /// 把對話檔回報的實際 model／effort 記進 `runs.runtime_*`；變了才寫、才推 `bot_status`。
 /// runtime 還沒記 model 時也要補（網頁認定 runtime 已知、model 卻是空的會畫成「CLI 預設」）：設定是同家族別名就沿用別名，
 /// 才不會憑空多出一條「模型」drift；已記了別名或同一個 id 的不改寫。
-pub(crate) async fn record_runtime(app: &(impl crate::capabilities::Db + crate::capabilities::BotStatusEmit), bot: &db::Bot, run: &db::Run, text: &str) {
+/// child（`managed_by = 'child'`）的 `bots.model`／`effort` 跟著這次真的變了的欄位走（跟 claude 畫面巡邏、grok、codex 一樣）：
+/// 不然 CLI 裡切過之後 runtime 與設定永遠分歧、常駐 ⟳，按下去還用舊設定重開（issue #938）。
+/// 只跟「這一輪 runtime 變了的」欄位，不拿 bots 逐次比對——網頁改了 child 設定、還沒套用時會被蓋回去。
+pub(crate) async fn record_runtime(
+    app: &(impl crate::capabilities::Db + crate::capabilities::BotStatusEmit + crate::capabilities::Emit),
+    bot: &db::Bot,
+    run: &db::Run,
+    text: &str,
+) {
     let seen = parse_runtime(text);
     let model = seen.model.as_deref().and_then(|id| match run.runtime_model.as_deref() {
         Some(cur) if cur.eq_ignore_ascii_case(id) || same_family_alias(&cur.to_ascii_lowercase(), id) => None,
@@ -233,6 +241,13 @@ pub(crate) async fn record_runtime(app: &(impl crate::capabilities::Db + crate::
     let effort = seen.effort.filter(|e| run.runtime_effort.as_deref() != Some(e.as_str()));
     if model.is_none() && effort.is_none() {
         return;
+    }
+    // 先寫設定：寫不進去就連 runtime 都不寫，下一輪仍不同才會再試（不然 runtime 收斂了、設定永遠落後，#743）。
+    if bot.managed_by == "child" {
+        if let Err(e) = crate::child_runtime::follow(app, &bot.id, model.as_deref(), effort.as_deref()).await {
+            tracing::warn!(run = %run.id, bot = %bot.name, error = %e, "could not follow the claude transcript switch in the child's settings, retrying next read");
+            return;
+        }
     }
     let wrote = sqlx::query(
         "UPDATE runs SET runtime_model = COALESCE(?, runtime_model), runtime_effort = COALESCE(?, runtime_effort) WHERE id = ? AND state IN ('starting','running')",
