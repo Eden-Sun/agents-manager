@@ -5,14 +5,18 @@
 //! 分享頁送訊息前（[`is_full`]）看最近一次量測值：滿了回 507 `share_storage_full`、分享頁顯示「空間滿了」，並通知擁有者
 //! （`runners::share_budget`）。**不自動刪工作目錄的檔**——那是擁有者的東西；outbox 另有 `outbox-gc.sh` 的分享保留政策（#850）。
 //!
-//! 量測值只放記憶體（重啟後第一次送訊息或第一輪巡邏重新量）。量不到（目錄讀不出來）當作沒有資料，不擋人。
+//! 量測值只放記憶體（重啟後第一次送訊息或第一輪巡邏重新量）。本機量不到（目錄讀不出來）當作沒有資料，不擋人。
+//!
+//! **遠端專案的分享 bot（remote-share-design §6）**：檔案在專案那台主機上，量測走 [`crate::share::remote_fs`]（一趟 ssh：`du -skx`＋`find -xdev -type f`）。
+//! 遠端 **fail closed**：[`is_full`] 沒有新鮮值又量不到就回 [`Unavailable`]（分享頁送訊息 503），不當作沒滿；
+//! 巡邏（[`sweep`]）含遠端主機，斷線的主機跳過（不通知、不清快取），同一輪先對遠端分享 bot（受限＋信任）執行 outbox 保留政策再量。
 
 use std::collections::HashMap;
 use std::path::Path;
 use std::sync::{Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
-use crate::outbox::ShareStorage;
+use crate::share::site::{self, ShareSite, SiteEnv};
 
 /// 一顆受限分享 bot 的沙箱總預算：工作目錄（含 `inbox/`）加 outbox。
 pub const SANDBOX_MAX_BYTES: u64 = 1024 * 1024 * 1024;
@@ -91,36 +95,71 @@ pub fn measure_blocking(data_dir: &Path, workspace: &Path, bot_id: &str) -> Resu
     Ok(m)
 }
 
-/// 重量一顆受限 bot 並記下。回 `(這次, 上次)`；不是受限分享 bot（沒有籠子工作目錄）或量不到回 `None`（不擋、不通知）。
-pub async fn refresh<S: ShareStorage>(app: &S, bot_id: &str) -> Option<(Measured, Option<Measured>)> {
-    let workspace = crate::share::store::restricted_workspace(app.db_pool(), bot_id).await.ok().flatten()?;
-    let (data_dir, id) = (app.data_dir().to_path_buf(), bot_id.to_string());
-    let measured = tokio::task::spawn_blocking(move || measure_blocking(&data_dir, Path::new(&workspace), &id)).await;
-    match measured {
-        Ok(Ok(m)) => Some((m, record(bot_id, m))),
-        _ => {
-            tracing::warn!(bot = %bot_id, "share sandbox usage could not be measured");
-            None
+/// 遠端的預算量不到（主機斷線、ssh 失敗、腳本不可信或框不完整）：呼叫端要 fail closed（分享頁 503）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
+#[error("share sandbox usage is unavailable")]
+pub struct Unavailable;
+
+/// 這顆 bot 所在的主機（沒有這顆分享 bot、或讀 DB 失敗＝`None`）。
+async fn host_of<S: SiteEnv>(app: &S, bot_id: &str) -> Option<String> {
+    sqlx::query_scalar(
+        "SELECT p.host FROM shared_bots r JOIN bots b ON b.id = r.bot_id AND b.deleted_at IS NULL
+           JOIN projects p ON p.id = b.project_id AND p.deleted_at IS NULL WHERE r.bot_id = ?",
+    )
+    .bind(bot_id)
+    .fetch_optional(app.db_pool())
+    .await
+    .ok()
+    .flatten()
+}
+
+/// 重量一顆受限 bot 並記下。回 `(這次, 上次)`。
+///
+/// - `Ok(None)`：不是受限分享 bot（沒有籠子工作目錄），或**本機**量不到——不擋、不通知。
+/// - `Err(Unavailable)`：**遠端**專案的受限 bot 量不到（fail closed，見模組說明）。
+pub async fn refresh<S: SiteEnv>(app: &S, bot_id: &str) -> Result<Option<(Measured, Option<Measured>)>, Unavailable> {
+    let Some(workspace) = crate::share::store::restricted_workspace(app.db_pool(), bot_id).await.ok().flatten() else { return Ok(None) };
+    // 本機行為一個字不改：量不到當作沒有資料。DB 讀不到主機＝當本機處理（跟改動前一樣只看本機路徑）。
+    let host = host_of(app, bot_id).await;
+    if host.as_deref().is_none_or(|h| h == crate::config::LOCAL_HOST) {
+        let (data_dir, id) = (app.data_dir().to_path_buf(), bot_id.to_string());
+        let measured = tokio::task::spawn_blocking(move || measure_blocking(&data_dir, Path::new(&workspace), &id)).await;
+        return match measured {
+            Ok(Ok(m)) => Ok(Some((m, record(bot_id, m)))),
+            _ => {
+                tracing::warn!(bot = %bot_id, "share sandbox usage could not be measured");
+                Ok(None)
+            }
+        };
+    }
+    let ShareSite::Remote(remote) = site::resolve(app, bot_id).await.map_err(|_| Unavailable)? else { return Err(Unavailable) };
+    match remote.measure().await {
+        Ok(m) => Ok(Some((m, record(bot_id, m)))),
+        Err(e) => {
+            tracing::warn!(bot = %bot_id, host = %remote.host, error = %e, "remote share sandbox usage could not be measured");
+            Err(Unavailable)
         }
     }
 }
 
-/// 分享頁送訊息前問：這顆的沙箱滿了嗎。用最近一次量測值（沒有或太舊才現場量一次）；量不到當作沒滿。
-pub async fn is_full<S: ShareStorage>(app: &S, bot_id: &str) -> bool {
+/// 分享頁送訊息前問：這顆的沙箱滿了嗎。用最近一次量測值（沒有或太舊才現場量一次）。
+/// 本機量不到當作沒滿（`Ok(false)`）；遠端沒有新鮮值又量不到 → `Err(Unavailable)`，不當作沒滿。
+pub async fn is_full<S: SiteEnv>(app: &S, bot_id: &str) -> Result<bool, Unavailable> {
     let fresh = cached(bot_id).filter(|(m, age)| *age < if m.full() { FULL_RECHECK } else { REFRESH_EVERY });
-    let m = match fresh {
-        Some((m, _)) => Some(m),
-        None => refresh(app, bot_id).await.map(|(m, _)| m),
-    };
-    m.is_some_and(|m| m.full())
+    if let Some((m, _)) = fresh {
+        return Ok(m.full());
+    }
+    Ok(refresh(app, bot_id).await?.is_some_and(|(m, _)| m.full()))
 }
 
-/// 巡邏用：重量所有本機的受限分享 bot，回「這一輪剛變滿」的（上一輪不是滿的，或這是第一次量）。
-pub async fn sweep<S: ShareStorage>(app: &S) -> Vec<(String, Measured)> {
-    let ids: Vec<String> = sqlx::query_scalar(
-        "SELECT r.bot_id FROM shared_bots r JOIN bots b ON b.id = r.bot_id AND b.deleted_at IS NULL
-           JOIN projects p ON p.id = b.project_id AND p.deleted_at IS NULL AND p.host = 'local'
-          WHERE r.profile = 'restricted'",
+/// 巡邏用：重量所有受限分享 bot（本機與遠端），回「這一輪剛變滿」的（上一輪不是滿的，或這是第一次量）。
+///
+/// 遠端：主機斷線的整台跳過（不通知、不清快取）；其餘每顆先執行 outbox 保留政策（`prune_outbox`，受限與信任分享都做）再量。
+/// 信任分享照本機規矩不算預算，只做保留政策。
+pub async fn sweep<S: SiteEnv>(app: &S) -> Vec<(String, Measured)> {
+    let rows: Vec<(String, String, String)> = sqlx::query_as(
+        "SELECT r.bot_id, r.profile, p.host FROM shared_bots r JOIN bots b ON b.id = r.bot_id AND b.deleted_at IS NULL
+           JOIN projects p ON p.id = b.project_id AND p.deleted_at IS NULL",
     )
     .fetch_all(app.db_pool())
     .await
@@ -129,8 +168,34 @@ pub async fn sweep<S: ShareStorage>(app: &S) -> Vec<(String, Measured)> {
         Vec::new()
     });
     let mut newly_full = Vec::new();
-    for id in ids {
-        if let Some((now, before)) = refresh(app, &id).await {
+    for (id, profile, host) in rows {
+        let local = host == crate::config::LOCAL_HOST;
+        let restricted = profile == "restricted";
+        if local && !restricted {
+            continue; // 本機的信任分享：保留政策由 outbox-gc.sh 做，這裡不量
+        }
+        if !local {
+            // 斷線的主機整台跳過：不通知、不清快取（量測值照留，`is_full` 自己會因為太舊而 fail closed）。
+            let connected = match app.host_conn(&host).await {
+                Some(c) => c.is_connected(),
+                None => false,
+            };
+            if !connected {
+                continue;
+            }
+            if let Ok(ShareSite::Remote(remote)) = site::resolve(app, &id).await {
+                if let Err(e) = remote
+                    .prune_outbox(crate::outbox::SHARE_KEEP_DAYS, crate::outbox::SHARE_OUTBOX_MAX_BYTES, crate::outbox::SHARE_OUTBOX_MAX_FILES as usize)
+                    .await
+                {
+                    tracing::warn!(bot = %id, host = %host, error = %e, "remote share outbox retention pass failed");
+                }
+            }
+            if !restricted {
+                continue;
+            }
+        }
+        if let Ok(Some((now, before))) = refresh(app, &id).await {
             if now.full() && !before.is_some_and(|b| b.full()) {
                 newly_full.push((id, now));
             }
