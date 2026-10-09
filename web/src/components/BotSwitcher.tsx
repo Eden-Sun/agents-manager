@@ -75,11 +75,12 @@ export function BotSwitcher({ botId, name }: { botId?: string; name: string }) {
           ▾
         </span>
       </button>
-      {open && pos
+      {/* 只看 open 就畫：pos 還沒算出來時先隱藏，useMenuKeys 才找得到選單來放焦點（同 ModelPicker，#959）。 */}
+      {open
         ? createPortal(
             <BotSwitcherMenu
               popRef={popRef}
-              style={{ top: pos.top, left: pos.left, maxWidth: pos.maxWidth }}
+              style={pos ? { top: pos.top, left: pos.left, maxWidth: pos.maxWidth } : { top: 0, left: 0, visibility: 'hidden' }}
               groups={groups}
               botId={botId}
               onKeyDown={menuKeys}
