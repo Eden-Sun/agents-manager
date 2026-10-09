@@ -254,8 +254,11 @@ export function HostShellPanel({
       try {
         await api.sendHostShellText(host, paneId, cmd, true)
         remember(cmd)
-        setText('')
-        setHistAt(-1)
+        // 送出期間又打了下一行：留著，不要清掉（輸入框送出中沒有停用）。
+        if ((useStore.getState().drafts[draftKey] ?? '') === cmd) {
+          setText('')
+          setHistAt(-1)
+        }
         setErr(null)
         refresh()
       } catch (e) {
@@ -264,7 +267,7 @@ export function HostShellPanel({
         setSending(false)
       }
     },
-    [failed, host, paneId, refresh, remember, setText],
+    [draftKey, failed, host, paneId, refresh, remember, setText],
   )
 
   const { press: pressSync, paste: pasteSync } = useShellKeys(

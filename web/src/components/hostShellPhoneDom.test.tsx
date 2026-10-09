@@ -91,3 +91,47 @@ test('手機明確打開直通：記進 am.shellKeySyncOn（並移出 off），�
     restore()
   }
 })
+
+test('手機：送出中接著打的下一行不會被清掉（沒改字的送出照舊清空）', async () => {
+  const restore = asPhone()
+  const fetchBefore = globalThis.fetch
+  let release!: () => void
+  const gate = new Promise<void>((r) => (release = r))
+  try {
+    const shell = await openShell()
+    // 送出的 POST 先等 gate 再真的送出：這段時間輸入框沒有停用，可以接著打字。
+    const textPath = `/shells/${encodeURIComponent(shell.pane_id)}/text`
+    const fetchNow = globalThis.fetch
+    globalThis.fetch = (async (url: string, init?: { method?: string; body?: string }) => {
+      if (init?.method === 'POST' && String(url).endsWith(textPath)) await gate
+      return fetchNow(url, init as RequestInit)
+    }) as unknown as typeof fetch
+    const cmdInput = () => document.querySelector<HTMLInputElement>('.shell-cmd')!
+    const type = async (v: string) => {
+      const el = cmdInput()
+      await act(async () => {
+        const set = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value')!.set!
+        set.call(el, v)
+        el.dispatchEvent(new Event('input', { bubbles: true }))
+      })
+    }
+    const enter = () => cmdInput().dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true, cancelable: true }))
+
+    await type('ls')
+    await act(async () => enter())
+    await type('pwd')
+    release()
+    await settle(300)
+    assert.equal(cmdInput().value, 'pwd', '送出期間打的下一行留著')
+
+    // 對照：沒有改字的送出，送完框是空的。
+    await type('uptime')
+    await act(async () => enter())
+    await settle(300)
+    assert.equal(cmdInput().value, '')
+  } finally {
+    release()
+    globalThis.fetch = fetchBefore
+    restore()
+  }
+})
