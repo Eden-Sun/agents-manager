@@ -155,22 +155,15 @@ pub fn runtime_json(port: u16, self_id: &str, manager_id: Option<&str>, data_dir
 fn deploy_files(app: &(impl crate::capabilities::DataDir + crate::capabilities::ListenPort), bot_id: &str, manager_id: Option<&str>, persona: &str) -> std::io::Result<super::setup::Deployed> {
     let dir = dir(app);
     std::fs::create_dir_all(dir.join("bin"))?;
-    std::fs::write(dir.join("CLAUDE.md"), claude_md(&dir, bot_id, app.port()))?;
-    std::fs::write(dir.join("persona.md"), persona)?;
-    std::fs::write(
-        dir.join("runtime.json"),
-        serde_json::to_string_pretty(&runtime_json(app.port(), bot_id, manager_id, &app.data_dir().to_string_lossy()))?,
-    )?;
+    // 一律原子寫（temp + rename）：bin/agm 與 runtime.json 隨時會被 exec／讀，原地截斷會讓讀者看到半截（#919／#520 同一條）。
+    super::setup::write_file(&dir.join("CLAUDE.md"), claude_md(&dir, bot_id, app.port()).as_bytes())?;
+    super::setup::write_file(&dir.join("persona.md"), persona.as_bytes())?;
+    let runtime = serde_json::to_string_pretty(&runtime_json(app.port(), bot_id, manager_id, &app.data_dir().to_string_lossy()))?;
+    super::setup::write_file(&dir.join("runtime.json"), runtime.as_bytes())?;
     if !dir.join("handoff.md").exists() {
-        std::fs::write(dir.join("handoff.md"), "# AGM 協調者管理摘要\n\n（尚未寫入。權威紀錄在 AG Man 資料庫。）\n")?;
+        super::setup::write_file(&dir.join("handoff.md"), "# AGM 協調者管理摘要\n\n（尚未寫入。權威紀錄在 AG Man 資料庫。）\n".as_bytes())?;
     }
-    let bin = dir.join("bin").join("agm");
-    std::fs::write(&bin, super::setup::AGM_CLI)?;
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o755))?;
-    }
+    super::cli_refresh::install_executable(&dir.join("bin").join("agm"), super::setup::AGM_CLI.as_bytes())?;
     Ok(super::setup::Deployed { cwd: dir.to_string_lossy().to_string(), agm_cli: "deployed".into() })
 }
 
@@ -405,7 +398,7 @@ pub async fn apply_persona(app: &(impl crate::capabilities::Cfg + crate::capabil
     })
     .await
     .map_err(up)?;
-    std::fs::write(dir(app).join("persona.md"), text).map_err(up)?;
+    super::setup::write_file(&dir(app).join("persona.md"), text.as_bytes()).map_err(up)?;
     Ok(())
 }
 
@@ -1926,5 +1919,42 @@ mod gave_up_report_tests {
             .await
             .unwrap();
         assert_eq!(keys, vec![format!("responder_watchdog:gave_up:{at}")]);
+    }
+
+    /// 協調者目錄的檔案要換新 inode（原子寫），不能原地截斷：用 hard link 分辨兩者。
+    /// 原地截斷會把 hard link 另一端（這裡當成「正在被別人讀的舊檔」）一起改掉。
+    #[tokio::test]
+    async fn responder_files_are_replaced_not_truncated_in_place() {
+        let env = crate::testing::env().await;
+        let app = env.app.clone();
+        let d = dir(&app);
+        std::fs::create_dir_all(d.join("bin")).unwrap();
+        let outside = d.parent().unwrap().join("responder-keep");
+        std::fs::create_dir_all(&outside).unwrap();
+        let (keep_persona, keep_agm) = (outside.join("persona.md"), outside.join("agm"));
+        std::fs::write(&keep_persona, "KEEP").unwrap();
+        std::fs::write(&keep_agm, "KEEP").unwrap();
+        for (keep, link) in [(&keep_persona, d.join("persona.md")), (&keep_agm, d.join("bin").join("agm"))] {
+            let _ = std::fs::remove_file(&link);
+            std::fs::hard_link(keep, &link).unwrap();
+        }
+
+        deploy_files(&app, "bot-x", None, "新人設").unwrap();
+
+        assert_eq!(std::fs::read_to_string(&keep_persona).unwrap(), "KEEP", "persona 不能被原地改寫");
+        assert_eq!(std::fs::read_to_string(&keep_agm).unwrap(), "KEEP", "bin/agm 不能被原地改寫");
+        assert_eq!(std::fs::read_to_string(d.join("persona.md")).unwrap(), "新人設");
+        assert_eq!(std::fs::read_to_string(d.join("bin").join("agm")).unwrap(), super::super::setup::AGM_CLI);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mode = std::fs::metadata(d.join("bin").join("agm")).unwrap().permissions().mode();
+            assert_eq!(mode & 0o777, 0o755);
+        }
+        let leftovers: Vec<_> = std::fs::read_dir(&d).unwrap().chain(std::fs::read_dir(d.join("bin")).unwrap())
+            .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+            .filter(|n| n.contains(".tmp"))
+            .collect();
+        assert!(leftovers.is_empty(), "殘留暫存檔：{leftovers:?}");
     }
 }
