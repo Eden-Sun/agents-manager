@@ -507,7 +507,7 @@ async fn a_full_share_sandbox_refuses_new_messages_with_507() {
     // 擁有者清掉檔案：已滿的量測值只信 60 秒內；這裡直接清快取模擬「過了重量」。
     std::fs::remove_file(ws.join("big.bin")).unwrap();
     budget::clear_cached_for_test(&b.id);
-    assert!(!budget::is_full(&e.app, &b.id).await, "清掉之後不再擋（outbox 400 MiB 單獨不到 1 GiB）");
+    assert_eq!(budget::is_full(&e.app, &b.id).await, Ok(false), "清掉之後不再擋（outbox 400 MiB 單獨不到 1 GiB）");
 }
 
 #[tokio::test]

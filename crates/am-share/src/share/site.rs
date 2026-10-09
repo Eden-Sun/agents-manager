@@ -93,13 +93,29 @@ impl<T: SiteEnv + ?Sized> SiteEnv for Arc<T> {
 /// `shared_bots.workspace` ＋ `projects.host` → 這顆分享 bot 的檔案在哪。
 /// DB 讀不到、主機不認得或斷線 → `Unavailable`。
 pub async fn resolve(app: &impl SiteEnv, bot_id: &str) -> Result<ShareSite, SiteError> {
-    let row: Option<(String, String)> = sqlx::query_as(
+    resolve_inner(app, bot_id, false).await
+}
+
+/// 同 [`resolve`]，但軟刪除的 bot／專案也解析（收尾用：拿掉遠端 `.am-share-keep` 標記時 bot 或專案往往已經標成刪除了）。
+pub async fn resolve_including_deleted(app: &impl SiteEnv, bot_id: &str) -> Result<ShareSite, SiteError> {
+    resolve_inner(app, bot_id, true).await
+}
+
+async fn resolve_inner(app: &impl SiteEnv, bot_id: &str, include_deleted: bool) -> Result<ShareSite, SiteError> {
+    let sql = if include_deleted {
+        "SELECT r.workspace, p.host
+         FROM shared_bots r
+         JOIN bots b ON b.id = r.bot_id
+         JOIN projects p ON p.id = b.project_id
+         WHERE r.bot_id = ?"
+    } else {
         "SELECT r.workspace, p.host
          FROM shared_bots r
          JOIN bots b ON b.id = r.bot_id AND b.deleted_at IS NULL
          JOIN projects p ON p.id = b.project_id AND p.deleted_at IS NULL
-         WHERE r.bot_id = ?",
-    )
+         WHERE r.bot_id = ?"
+    };
+    let row: Option<(String, String)> = sqlx::query_as(sql)
     .bind(bot_id)
     .fetch_optional(app.db_pool())
     .await

@@ -105,6 +105,10 @@ pub trait PortalEnv: crate::share::svg_check::SvgCheckEnv {
     fn share_status(&self, bot_id: &str) -> impl std::future::Future<Output = &'static str> + Send;
     /// 訂閱 daemon 的事件匯流排。
     fn subscribe_events(&self) -> broadcast::Receiver<WsEvent>;
+    /// 沙箱總預算滿了嗎（#853）。本機量不到＝沒滿；遠端專案量不到又沒有新鮮值＝`Err`（fail closed，由呼叫端回 503）。
+    /// 用 `budget::is_full` 實作；放在這裡而不是讓 `PortalEnv` 繼承 `SiteEnv`，是因為兩個 trait 都有 `data_dir`／`db_pool`，
+    /// 繼承會讓這個檔裡泛型 `H` 的每一個 `app.db_pool()` 都變成歧義。
+    fn share_storage_full(&self, bot_id: &str) -> impl std::future::Future<Output = Result<bool, crate::share::budget::Unavailable>> + Send;
     /// 把分享使用者的訊息送給 bot（走一般的 prompt／排隊路徑，並在 bot 鎖底下再驗一次 token）。
     fn send_share_message(
         app: &Arc<Self>,
@@ -710,12 +714,17 @@ async fn send_message<H: PortalEnv>(State(st): State<Portal<H>>, Path(token): Pa
         return bad("empty", "沒有內容");
     }
     // 沙箱總預算（#853）：工作目錄＋inbox＋outbox 合計滿了就不收新訊息（bot 再寫只會更滿）；分享頁顯示「空間滿了」，擁有者另有通知。
-    if crate::share::budget::is_full(&st.app, &bot_id).await {
-        return (
-            StatusCode::INSUFFICIENT_STORAGE,
-            Json(json!({"error": "share_storage_full", "message": "空間滿了，請跟分享給你的人說一聲"})),
-        )
-            .into_response();
+    match st.app.share_storage_full(&bot_id).await {
+        Ok(false) => {}
+        Ok(true) => {
+            return (
+                StatusCode::INSUFFICIENT_STORAGE,
+                Json(json!({"error": "share_storage_full", "message": "空間滿了，請跟分享給你的人說一聲"})),
+            )
+                .into_response();
+        }
+        // 遠端專案量不到又沒有新鮮值：不當作沒滿（fail closed，remote-share-design §6），一般 503（不洩漏主機名）。
+        Err(crate::share::budget::Unavailable) => return unavailable(),
     }
     // 附件檢查會排進 blocking pool，先扣額度讓無效附件不能免費放大檔案系統工作量。
     if let Some(wait) = st.limits.take(&bot_id, "message", MESSAGES_PER_MIN, Duration::from_secs(60)) {

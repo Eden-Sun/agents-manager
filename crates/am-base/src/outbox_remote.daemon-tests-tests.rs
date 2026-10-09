@@ -827,3 +827,76 @@ exit 1
         assert_eq!(String::from_utf8_lossy(&out.stdout).trim(), "unverified");
         std::fs::remove_dir_all(&base).unwrap();
     }
+
+    /// 分享用 bot（#955、#850）的遠端 outbox 走保留政策：列表腳本**不刪任何檔**，其餘的列舉與擋法跟一般的一模一樣。
+    #[test]
+    fn the_share_bots_listing_script_never_deletes_while_the_normal_one_still_does() {
+        let normal = list_script("/U/m/outbox/01A");
+        let keep = list_script_keep("/U/m/outbox/01A");
+        assert!(normal.contains("-exec rm -f") && normal.contains("-mmin +60"), "一般遠端 bot 照舊刪：{normal}");
+        assert!(!keep.contains("rm -f") && !keep.contains("-mmin") && !keep.contains("-cmin"), "分享 bot 的列表不刪檔：{keep}");
+        for must in ["am_enter_dir", "am_singlelink", "am_same", "head -c 64", "[[:cntrl:]]", "AM_OUTBOX_DONE"] {
+            assert!(keep.contains(must), "{must} 兩條路徑共用：{keep}");
+        }
+    }
+
+    #[test]
+    fn a_kept_listing_has_no_expiry_but_otherwise_the_same_entries() {
+        let out = "AM_OUTBOX_OK\n10 1000 1500\t68656c6c6f\treport.md\n20 2000 2000\t00\tshot.png\nAM_OUTBOX_DONE\n";
+        let normal = parse_list(out, 2500).unwrap();
+        let kept = parse_list_keep(out, 2500).unwrap();
+        assert_eq!(normal.len(), kept.len());
+        for (n, k) in normal.iter().zip(&kept) {
+            assert_eq!((&n["name"], &n["size"], &n["modified"]), (&k["name"], &k["size"], &k["modified"]));
+            assert!(n["expires_at"].is_u64() && n["remaining_secs"].is_u64());
+            assert!(k["expires_at"].is_null() && k["remaining_secs"].is_null(), "沒有 1 小時倒數：{k}");
+        }
+        assert!(parse_list_keep("AM_OUTBOX_UNTRUSTED\n", 0).is_none(), "不可信照樣作廢");
+    }
+
+    /// 從 HTTP handler 一路走到 ssh：遠端分享 bot 的列表不跑清理、回 `kept:true`；讀不到是不是分享 bot 也不刪；一般 bot 照舊。
+    #[tokio::test]
+    async fn a_remote_share_bots_outbox_listing_is_kept_and_never_garbage_collected() {
+        use axum::extract::{Path as UrlPath, State};
+        let host = "outbox-share-keep";
+        let env = crate::testing::env().await;
+        let cfg = crate::config::HostCfg { name: host.into(), ssh: host.into(), ssh_port: 22, ssh_opts: vec![], herdr_session: "agents-manager".into(), remote_path: String::new(), shared_session: false };
+        let conn = env.app.hosts.insert_remote_for_test(cfg).await;
+        *conn.remote_home.lock().await = Some("/Users/x".into());
+        conn.connected.store(true, std::sync::atomic::Ordering::SeqCst);
+        sqlx::query("UPDATE projects SET host = ? WHERE id = ?").bind(host).bind(&env.project_id).execute(&env.app.db).await.unwrap();
+        let shared = crate::testing::claude_bot(&env.app, &env.project_id, "shared").await;
+        let plain = crate::testing::claude_bot(&env.app, &env.project_id, "plain").await;
+        crate::share::store::insert_share_bot(&env.app.db, &shared.id, "restricted", "/Users/x/shared-bots/shared").await.unwrap();
+        let scripts = Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
+        let seen = scripts.clone();
+        crate::hosts::set_ssh_fake(host, move |script| {
+            seen.lock().unwrap().push(script.to_string());
+            Ok("AM_OUTBOX_OK\n7 2000 2100\t00\tshot.png\nAM_OUTBOX_DONE\n".into())
+        });
+        let listed = |id: String| {
+            let app = env.app.clone();
+            async move {
+                let resp = crate::app_ports_p10::list(State(app), UrlPath(id)).await.unwrap();
+                let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX).await.unwrap();
+                serde_json::from_slice::<serde_json::Value>(&bytes).unwrap()
+            }
+        };
+
+        let v = listed(shared.id.clone()).await;
+        assert_eq!((&v["kept"], &v["keep_days"], &v["ttl_secs"]), (&json!(true), &json!(crate::outbox::SHARE_KEEP_DAYS), &json!(null)), "{v}");
+        assert!(v["files"][0]["expires_at"].is_null() && v["files"][0]["remaining_secs"].is_null(), "{v}");
+        assert_eq!(v["files"][0]["name"], json!("shot.png"));
+        assert!(!scripts.lock().unwrap().last().unwrap().contains("rm -f"), "分享 bot 的列表腳本不刪檔");
+
+        let v = listed(plain.id.clone()).await;
+        assert_eq!(v["ttl_secs"], json!(TTL_SECS), "{v}");
+        assert!(v.get("kept").is_none() && v["files"][0]["expires_at"].is_u64(), "一般遠端 bot 照舊：{v}");
+        assert!(scripts.lock().unwrap().last().unwrap().contains("-exec rm -f"), "一般遠端 bot 照舊刪超過 1 小時的");
+
+        // 讀不到是不是分享 bot（表讀不出來）：寧可少刪，當成分享 bot。
+        sqlx::query("ALTER TABLE shared_bots RENAME TO shared_bots_unreadable").execute(&env.app.db).await.unwrap();
+        let v = listed(plain.id.clone()).await;
+        assert_eq!(v["kept"], json!(true), "{v}");
+        assert!(!scripts.lock().unwrap().last().unwrap().contains("rm -f"), "is_share_bot 讀不到：不刪");
+    }

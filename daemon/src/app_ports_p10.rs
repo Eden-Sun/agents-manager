@@ -139,6 +139,11 @@ impl PortalEnv for App {
         self.subscribe()
     }
 
+    fn share_storage_full(&self, bot_id: &str) -> impl Future<Output = Result<bool, crate::share::budget::Unavailable>> + Send {
+        let bot_id = bot_id.to_string();
+        async move { crate::share::budget::is_full(self, &bot_id).await }
+    }
+
     fn send_share_message(app: &Arc<Self>, bot_id: &str, composed: &str, crid: &str, token: &str) -> impl Future<Output = SendOutcome> + Send {
         let app = app.clone();
         let (bot_id, composed, crid, token) = (bot_id.to_string(), composed.to_string(), crid.to_string(), token.to_string());
