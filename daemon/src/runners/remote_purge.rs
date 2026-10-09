@@ -73,7 +73,8 @@ pub fn spawn_sweep(app: Arc<App>, host: String) {
     if app.shutdown.is_cancelled() {
         return;
     }
-    app.background_tasks.spawn(async move {
+    let tracker = app.background_tasks.clone();
+    tracker.spawn(async move {
         sweep(&app, &host).await;
     });
 }

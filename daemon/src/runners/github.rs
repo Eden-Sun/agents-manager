@@ -12,7 +12,8 @@ pub fn spawn_detect_host(app: Arc<App>, host: String) {
     if app.shutdown.is_cancelled() {
         return;
     }
-    app.background_tasks.spawn(async move {
+    let tracker = app.background_tasks.clone();
+    tracker.spawn(async move {
         loop {
             crate::github::detect_host_once(&app, &host).await;
             if !claim.finish() {
