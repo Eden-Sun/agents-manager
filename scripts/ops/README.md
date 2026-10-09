@@ -675,7 +675,11 @@ main 的每個 push 不再等 GitHub Actions：agm-host 上的 systemd user time
 `~/.cache/agents-manager/ci/status.json` 與 `logs/<sha>.log`。pending 送出後腳本自己中斷（checkout 失敗之類）會補 `error`
 status、status.json 寫 `error`，不讓 pending 掛著（last-sha 不動，下一輪重試）；每段 `timeout -k`（`AGM_CI_KILL_AFTER`，預設 60s），
 step 不理 TERM 也收得掉、不會卡住鎖。跑到一半 ENOSPC（log 有 `No space left on device` 或 check.sh 的「失敗時磁碟只剩」、或跑完再量剩餘空間已低於 `AGM_CI_MIN_FREE_GB`）
-不是這個 commit 的錯：記 `error`（status.json `reason=disk_full`）、不動 last-sha，跟被訊號收掉的中斷共用 `interrupted-<sha>` 計數，連續 3 次才當 failure（#945）。隔離測試：`bash scripts/ops/ubuntu-ci_test.sh`（本地 bare repo＋假 gh）。安裝（agm-host，需 `loginctl enable-linger ubuntu`）：
+不是這個 commit 的錯：記 `error`（status.json `reason=disk_full`）、不動 last-sha，跟被訊號收掉的中斷共用 `interrupted-<sha>` 計數，連續 3 次才當 failure（#945）。`git clone`／`git fetch` 有時限（`AGM_CI_CLONE_TIMEOUT` 預設 600 秒、`AGM_CI_FETCH_TIMEOUT` 預設 300 秒；網路半開時不會握著鎖不放），
+service 設 `TimeoutStartSec=3h15m`（4 段 × 45m ＋ 15m）。拿到鎖就寫 `~/.cache/agents-manager/ci/running-since`；拿不到鎖而且它超過 `AGM_CI_HUNG_AFTER` 秒（預設 11700）
+就對 CI clone 的 `agm.py` 喊 `ops-alert --source ubuntu-ci --reason ci_hung`（同 source+reason 每小時一則；喊人失敗吞掉）（#946）。
+**改了 `ubuntu-ci.service` 要人手重裝**：`cp` 到 `~/.config/systemd/user/` 再 `systemctl --user daemon-reload`（腳本本身 merge 後下一輪自動生效，unit 不會）。
+隔離測試：`bash scripts/ops/ubuntu-ci_test.sh`（本地 bare repo＋假 gh、`AGM_CI_GIT_BIN` 假 git）。安裝（agm-host，需 `loginctl enable-linger ubuntu`）：
 
 agent 本機收尾用 `scripts/check.sh changed`：Rust-only 改動在沒有 `web/dist/index.html` 的 clean checkout 會暫時建立 rust-embed stub，跑完即清除，不會因此安裝依賴或 build web。Web 檢查與背景完整 CI 仍 build 真正的 production bundle。
 

@@ -7,3 +7,5 @@ Type=oneshot
 Environment=PATH=%h/.local/bin:%h/.bun/bin:%h/.cargo/bin:/usr/local/bin:/usr/bin:/bin
 ExecStart=/bin/bash %h/.cache/agents-manager/ci/repo/scripts/ops/ubuntu-ci.sh
 Nice=5
+# oneshot 預設沒有時限：網路半開卡住的一輪會永遠握著鎖。4 段 × 45m（AGM_CI_TIMEOUT）＋ 15m 的 clone／fetch／彙總餘裕（#946）。
+TimeoutStartSec=3h15m

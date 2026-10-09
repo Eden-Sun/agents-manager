@@ -2,7 +2,7 @@
 # ubuntu 背景完整 CI（issue #716）：取代「每個 push 都等 GitHub Actions」。
 #
 # 由 systemd user timer 每分鐘叫一次（scripts/ops/ci/ubuntu-ci.{service,timer}）。每次：
-#   1. 拿不到鎖＝上一輪還在跑，直接退出（同時最多 1 個 running）。
+#   1. 拿不到鎖＝上一輪還在跑，直接退出（同時最多 1 個 running）；握超過 AGM_CI_HUNG_AFTER 秒就 ops-alert ci_hung。
 #   2. fetch origin/main；跟上次驗過的 sha 一樣就退出。
 #   3. 只驗「現在最新的」main HEAD（latest-HEAD coalescing：中間被跳過的 sha 不補跑）。
 #   4. 在常駐 clone 裡 checkout 該 sha、保留 target／node_modules 當暖快取，跑 scripts/check.sh（ob、ops、web、daemon）。
@@ -27,17 +27,43 @@ MIN_FREE_GB="${AGM_CI_MIN_FREE_GB:-20}"
 # 已安裝的 ops 腳本（AGM bin）與 origin/main 的漂移檢查間隔（秒；0＝不檢查）。見 ops_sync_check。
 OPS_SYNC_INTERVAL="${AGM_CI_OPS_SYNC_INTERVAL:-21600}"
 
+# 網路半開時 clone／fetch 會卡到天荒地老、整個握著鎖，之後每分鐘都「上一輪還在跑」而 CI／自動部署靜默停擺（#946）：
+# 兩者都要有時限（timeout 是 GNU 版，會把訊號送給整個行程群組，git 的子行程一起收掉）。
+# AGM_CI_GIT_BIN 是測試接縫（假 git 的 fetch 睡很久）。
+GIT_BIN="${AGM_CI_GIT_BIN:-git}"
+FETCH_TIMEOUT="${AGM_CI_FETCH_TIMEOUT:-300}"
+CLONE_TIMEOUT="${AGM_CI_CLONE_TIMEOUT:-600}"
+# 鎖被占著超過這麼久（秒）就當它卡住了：預設 = unit 的 TimeoutStartSec（4 段 × 45m + 15m）。
+HUNG_AFTER="${AGM_CI_HUNG_AFTER:-11700}"
+
+# 拿不到鎖時：上一輪是不是卡住了？卡住（running-since 超過門檻）就喊人。ops-alert 同 source+reason 每小時最多一則，
+# 每分鐘照喊也不會灌滿 inbox。喊人失敗、clone 還沒有、running-since 讀不懂一律吞掉，不影響退出碼。
+alert_if_hung() {
+    local since now
+    since="$(cat "${CI_ROOT}/running-since" 2>/dev/null || true)"
+    case "${since}" in *[!0-9]*|'') return 0 ;; esac
+    now="$(date +%s)"
+    [ $((now - since)) -ge "${HUNG_AFTER}" ] || return 0
+    [ -f "${CI_ROOT}/repo/scripts/agm.py" ] || return 0
+    timeout -k 5 60 python3 -B "${CI_ROOT}/repo/scripts/agm.py" ops-alert --source ubuntu-ci --reason ci_hung \
+        --detail "ubuntu-ci 上一輪從 $(date -u -d "@${since}" +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || echo "${since}") 起還握著鎖（超過 ${HUNG_AFTER} 秒）；CI 與自動部署停擺中。查 systemctl --user status ubuntu-ci.service，必要時 systemctl --user stop ubuntu-ci.service" \
+        >/dev/null 2>&1 || true
+}
+
 mkdir -p "${CI_ROOT}/logs"
 exec 9>"${CI_ROOT}/lock"
 if ! flock -n 9; then
+    alert_if_hung || true
     exit 0
 fi
+# 這一輪從什麼時候開始握著鎖（上面 alert_if_hung 讀它）。
+date +%s > "${CI_ROOT}/running-since" 2>/dev/null || true
 
 if [ ! -d "${CI_ROOT}/repo/.git" ]; then
-    git clone -q "${REPO_URL}" "${CI_ROOT}/repo"
+    timeout -k 10 "${CLONE_TIMEOUT}" "${GIT_BIN}" clone -q "${REPO_URL}" "${CI_ROOT}/repo"
 fi
 cd "${CI_ROOT}/repo"
-git fetch -q origin main
+timeout -k 10 "${FETCH_TIMEOUT}" "${GIT_BIN}" fetch -q origin main
 
 # 送一則 commit status（sha 由參數給，補送舊 sha 也用它）。暫時連不上就重試幾次（間隔 AGM_CI_STATUS_RETRY_SLEEP 秒）；
 # 還是不行回非零，由呼叫端決定要不要記下來補送。
