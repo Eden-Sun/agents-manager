@@ -168,3 +168,42 @@ test('新資料夾：Esc 先收起表單、不是離開整個對話框；再按�
   await keydown(d.dialog, 'Escape')
   assert.equal(d.cancelled(), 1)
 })
+
+// ───────── 讀目錄中按 Esc（issue #960） ─────────
+
+test('讀目錄中按 Esc：退出選擇器（onCancel），事件被 preventDefault，不會讓外層 Modal 關掉', async () => {
+  // listDirs 永不回應 → busy 一直為 true
+  mockApi({
+    async request(method, path) {
+      if (method === 'GET' && path.includes('/fs/dirs')) return new Promise(() => {})
+      return {}
+    },
+    async upload() {
+      return {}
+    },
+  })
+  let cancelled = 0
+  await mount(<DirPicker initial="/home/u" onPick={() => {}} onCancel={() => cancelled++} />)
+  await settle()
+  const filter = document.querySelector<HTMLInputElement>('[role=dialog] input.dirpicker-filter')!
+  const e = await keydown(filter, 'Escape')
+  assert.equal(cancelled, 1, 'busy 時 Esc 仍要離開選擇器')
+  assert.equal(e.defaultPrevented, true, 'Esc 要 preventDefault，外層 Modal 才不會一起關')
+})
+
+test('讀目錄中按 ArrowDown：busy 仍擋其他鍵，不 preventDefault', async () => {
+  mockApi({
+    async request(method, path) {
+      if (method === 'GET' && path.includes('/fs/dirs')) return new Promise(() => {})
+      return {}
+    },
+    async upload() {
+      return {}
+    },
+  })
+  await mount(<DirPicker initial="/home/u" onPick={() => {}} onCancel={() => {}} />)
+  await settle()
+  const filter = document.querySelector<HTMLInputElement>('[role=dialog] input.dirpicker-filter')!
+  const e = await keydown(filter, 'ArrowDown')
+  assert.equal(e.defaultPrevented, false)
+})

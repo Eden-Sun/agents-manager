@@ -157,7 +157,8 @@ export function DirPicker({
   const up = () => listing?.parent && load(listing.parent, { keep: listing.path })
 
   const onKeyDown = (e: ReactKeyboardEvent) => {
-    if (busy) return
+    // busy 時只擋其他鍵；Esc 照常離開並 preventDefault，不然外層 Modal 會把整個新增視窗關掉。
+    if (busy && e.key !== 'Escape') return
     if (creating) {
       // 名稱輸入框自己管鍵盤；只有 Esc 退回清單。
       if (e.key === 'Escape') {
