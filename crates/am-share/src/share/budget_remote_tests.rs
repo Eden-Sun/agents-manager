@@ -372,4 +372,24 @@ mod with_app {
         crate::share::revoke_bot_share(&e.app, &id).await.unwrap();
         assert!(!mark.exists(), "revoke 拿掉遠端標記");
     }
+
+    /// #985：撤銷分享要先讓 token 失效，不能排在遠端慢的 ssh（拿掉保留標記）後面——那段時間舊連結照樣過授權。
+    #[tokio::test]
+    async fn revoke_drops_the_token_before_the_slow_remote_unmark() {
+        let e = tt::env().await;
+        let scratch = test_dirs::scratch_dir("x5-app-revoke-order");
+        remote_host(&e, "x5-revoke-app", &scratch).await;
+        let (id, _, _) = share_bot(&e, &scratch, "far-revoke", "restricted").await;
+        assert!(crate::share::store::enable(&e.app.db, &id).await.unwrap().is_some(), "先開分享：bot_shares 有一列");
+
+        am_base::hosts::set_ssh_delay("x5-revoke-app", std::time::Duration::from_secs(5));
+        let app = e.app.clone();
+        let target = id.clone();
+        let task = tokio::spawn(async move { crate::share::revoke_bot_share(&app, &target).await });
+        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+        let left: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM bot_shares WHERE bot_id = ?").bind(&id).fetch_one(&e.app.db).await.unwrap();
+        assert_eq!(left, 0, "token 先作廢，不等遠端慢的 ssh 拿掉標記");
+        task.await.unwrap().unwrap();
+        am_base::hosts::set_ssh_delay("x5-revoke-app", std::time::Duration::ZERO);
+    }
 }
