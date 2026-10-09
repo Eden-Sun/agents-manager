@@ -99,7 +99,8 @@ async fn partial_upload(addr: SocketAddr, uri: &str) -> tokio::net::TcpStream {
 
 async fn response_status(stream: &mut tokio::net::TcpStream) -> u16 {
     let mut line = Vec::new();
-    tokio::time::timeout(Duration::from_secs(1), async {
+    // 第三個上傳要先排隊 300ms，高負載下更久：上限只是放棄的期限，不是成功的條件（#950）。
+    tokio::time::timeout(Duration::from_secs(10), async {
         loop {
             let mut byte = [0_u8; 1];
             stream.read_exact(&mut byte).await.unwrap();

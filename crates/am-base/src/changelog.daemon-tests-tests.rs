@@ -16,11 +16,11 @@
             seen.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
             Ok("2.1.5 (Claude Code)\n".into())
         });
-        crate::hosts::set_ssh_delay(host, Duration::from_secs(3));
+        crate::hosts::set_ssh_delay(host, Duration::from_secs(60));
         let started = std::time::Instant::now();
         let err = installed_version(&env.app, host, "claude").await.unwrap_err();
         assert!(err.to_string().contains("未連線"), "{err:#}");
-        assert!(started.elapsed() < Duration::from_secs(1), "連不上的主機不能讓巡邏等：{:?}", started.elapsed());
+        assert!(started.elapsed() < Duration::from_secs(20), "連不上的主機不能讓巡邏等：{:?}", started.elapsed());
         assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 0, "不該打任何 ssh");
     }
 

@@ -58,7 +58,7 @@
             seen.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
             Ok("AM_OUTBOX_OK\n".into())
         });
-        crate::hosts::set_ssh_delay(host, Duration::from_secs(3));
+        crate::hosts::set_ssh_delay(host, Duration::from_secs(60));
 
         let started = std::time::Instant::now();
         let resp = crate::app_ports_p10::list(State(env.app.clone()), UrlPath(bot.id.clone())).await.unwrap();
@@ -71,7 +71,7 @@
             Err(LcError::Conflict(d)) => assert_eq!(d["reason"], json!("outbox_remote_unreachable")),
             other => panic!("下載要回 409 outbox_remote_unreachable：{:?}", other.map(|r| r.status())),
         }
-        assert!(started.elapsed() < Duration::from_secs(1), "連不上的主機不能讓請求等：{:?}", started.elapsed());
+        assert!(started.elapsed() < Duration::from_secs(20), "連不上的主機不能讓請求等：{:?}", started.elapsed());
         assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 0, "不該打任何 ssh");
     }
 
