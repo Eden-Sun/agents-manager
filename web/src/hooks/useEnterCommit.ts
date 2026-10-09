@@ -10,6 +10,7 @@ export function useEnterCommit(ref: RefObject<HTMLInputElement | null>, commit: 
     latest.current = commit
   })
 
+  // 無依賴：input 可能在掛載之後才出現（點名字進入編輯時才畫），每次 render 都重新對 ref.current 掛／卸。
   useEffect(() => {
     const el = ref.current
     if (!el) return
@@ -24,7 +25,7 @@ export function useEnterCommit(ref: RefObject<HTMLInputElement | null>, commit: 
     }
     el.addEventListener('beforeinput', onBeforeInput)
     return () => el.removeEventListener('beforeinput', onBeforeInput)
-  }, [ref])
+  })
 
   return { enterKeyHint: 'done' as const }
 }
