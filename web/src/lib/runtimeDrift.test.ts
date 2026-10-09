@@ -34,12 +34,27 @@ test('codex 改了強度沒重啟：標出實際在跑的那個值', () => {
 })
 
 test('模型與 fast 也一起比，清成 CLI 預設同樣算不一致', () => {
-  const d = runtimeDrift(bot({ model: null, fast: false }), run())
+  // 有值→清成 null 時 daemon 會把 `needs_restart` 標起來（launch_rev 變了），這時才是真的落差。
+  const d = runtimeDrift(bot({ model: null, fast: false, needs_restart: true }), run())
   assert.deepEqual(
     d.map((x) => x.field),
     ['model', 'fast'],
   )
   assert.equal(d[0].configured, '（CLI 預設）')
+})
+
+test('#940：設定是 CLI 預設（null）又沒有待重啟：runtime 記的實際值不算落差', () => {
+  // claude：設定 null，statusLine 讀回 CLI 實際挑的 fable。
+  assert.deepEqual(runtimeDrift(bot({ kind: 'claude', model: null, effort: null, fast: false, needs_restart: false }), run({ runtime_model: 'claude-fable-5-1', runtime_effort: null, runtime_fast: false })), [])
+  // codex：強度設定 null、狀態列印 high；fast 的落差照列。
+  const d = runtimeDrift(bot({ effort: null, fast: false, needs_restart: false }), run({ runtime_effort: 'high', runtime_fast: true }))
+  assert.deepEqual(d.map((x) => x.field), ['fast'])
+  // 設定有值又真的不同：照列（跟 needs_restart 無關）。
+  assert.deepEqual(
+    runtimeDrift(bot({ model: 'gpt-6-luna', needs_restart: false }), run({ runtime_model: 'gpt-6.1-sol' })).map((x) => x.field),
+    ['model'],
+  )
+  assert.deepEqual(runtimeDrift(bot({ effort: 'low', needs_restart: false }), run({ runtime_effort: 'high' })).map((x) => x.field), ['effort'])
 })
 
 test('fast 只有 codex 會變成啟動旗標，其他 kind 不比', () => {

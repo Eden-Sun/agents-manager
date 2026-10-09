@@ -73,7 +73,10 @@ function sameModel(running: string | null | undefined, configured: string | null
 export function runtimeDrift(bot: Bot | null, run: Run | null): RuntimeDriftField[] {
   if (!bot || !run || !runtimeKnown(run)) return []
   const out: RuntimeDriftField[] = []
-  if (runtimeSettingsKnown(run) && !sameModel(run.runtime_model, bot.model)) {
+  // 設定是 null（CLI 預設）又沒有待重啟：runtime 記的是 CLI 實際挑的值（statusLine／狀態列讀回，ModelTag 要用），
+  // 重啟也還是 CLI 預設，不是落差（#940）。有值→清成 null 會讓 `needs_restart` 為真，那一筆照列。
+  const defaultsStay = (configured: string | null | undefined) => (configured ?? null) === null && !bot.needs_restart
+  if (runtimeSettingsKnown(run) && !defaultsStay(bot.model) && !sameModel(run.runtime_model, bot.model)) {
     out.push({
       field: 'model',
       label: '模型',
@@ -81,7 +84,7 @@ export function runtimeDrift(bot: Bot | null, run: Run | null): RuntimeDriftFiel
       configured: bot.model ?? NONE,
     })
   }
-  if (runtimeSettingsKnown(run) && (run.runtime_effort ?? null) !== (bot.effort ?? null)) {
+  if (runtimeSettingsKnown(run) && !defaultsStay(bot.effort) && (run.runtime_effort ?? null) !== (bot.effort ?? null)) {
     out.push({
       field: 'effort',
       label: '強度',
