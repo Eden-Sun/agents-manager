@@ -2826,6 +2826,28 @@ pub async fn approval_decisions(pool: &SqlitePool) -> Result<std::collections::H
     .bind(SUPERVISOR_ID)
     .fetch_all(pool)
     .await?;
+    Ok(group_decisions(rows))
+}
+
+/// 只取這幾筆核准的決定歷程（`GET /approvals` 用）。全表讀出再丟掉的成本隨換版歷史線性成長，所以這裡只讀要的（#972）。
+/// `json_valid` 先擋掉不是 JSON 的列，不讓 `json_extract` 把整句查詢報錯；那種列照舊略過，跟 [`approval_decisions`] 一樣。
+pub async fn approval_decisions_for(pool: &SqlitePool, ids: &[String]) -> Result<std::collections::HashMap<String, Vec<Value>>> {
+    if ids.is_empty() {
+        return Ok(Default::default());
+    }
+    let rows: Vec<(String, String)> = sqlx::query_as(
+        "SELECT body, created_at FROM supervisor_notes WHERE supervisor_id=? AND kind='approval_decision'
+           AND CASE WHEN json_valid(body) THEN json_extract(body, '$.approval_id') END IN (SELECT value FROM json_each(?))
+         ORDER BY created_at ASC, rowid ASC",
+    )
+    .bind(SUPERVISOR_ID)
+    .bind(serde_json::to_string(ids)?)
+    .fetch_all(pool)
+    .await?;
+    Ok(group_decisions(rows))
+}
+
+fn group_decisions(rows: Vec<(String, String)>) -> std::collections::HashMap<String, Vec<Value>> {
     let mut out: std::collections::HashMap<String, Vec<Value>> = Default::default();
     for (body, at) in rows {
         let Ok(mut v) = serde_json::from_str::<Value>(&body) else { continue };
@@ -2833,7 +2855,7 @@ pub async fn approval_decisions(pool: &SqlitePool) -> Result<std::collections::H
         v["at"] = json!(at);
         out.entry(id).or_default().push(v);
     }
-    Ok(out)
+    out
 }
 
 /// Mirrors the row.
@@ -4846,6 +4868,38 @@ mod tests {
         let history = approval_decisions(&p).await.unwrap();
         let order: Vec<&str> = history["ap"].iter().map(|d| d["to"].as_str().unwrap()).collect();
         assert_eq!(order, vec!["approved", "revoked"]);
+    }
+
+    /// #972：`approval_decisions_for` 只取要的那幾筆歷程，跟全表版本的結果一致；不是 JSON 的列略過，不讓整句查詢報錯。
+    #[tokio::test]
+    async fn approval_decisions_for_returns_only_the_requested_approvals() {
+        let p = pool().await;
+        get_or_init(&p).await.unwrap();
+        let rows = [
+            ("01AAAAAAAAAAAAAAAAAAAAAAA1", json!({"approval_id": "a", "to": "approved"}).to_string(), "2026-09-16T12:00:00.000Z"),
+            ("01AAAAAAAAAAAAAAAAAAAAAAA2", json!({"approval_id": "a", "to": "revoked"}).to_string(), "2026-09-16T12:00:01.000Z"),
+            ("01AAAAAAAAAAAAAAAAAAAAAAA3", json!({"approval_id": "b", "to": "approved"}).to_string(), "2026-09-16T12:00:02.000Z"),
+            ("01AAAAAAAAAAAAAAAAAAAAAAA4", "not json {".to_string(), "2026-09-16T12:00:03.000Z"),
+        ];
+        for (id, body, at) in rows {
+            sqlx::query("INSERT INTO supervisor_notes (id, supervisor_id, kind, body, version, created_at) VALUES (?,?,?,?,1,?)")
+                .bind(id)
+                .bind(SUPERVISOR_ID)
+                .bind("approval_decision")
+                .bind(body)
+                .bind(at)
+                .execute(&p)
+                .await
+                .unwrap();
+        }
+        let only_a = approval_decisions_for(&p, &["a".to_string()]).await.unwrap();
+        assert_eq!(only_a.len(), 1, "只有要的那一筆");
+        let order: Vec<&str> = only_a["a"].iter().map(|d| d["to"].as_str().unwrap()).collect();
+        assert_eq!(order, vec!["approved", "revoked"], "最舊在前");
+        assert!(only_a["a"].iter().all(|d| d["at"].is_string()), "每筆帶 at");
+        assert_eq!(only_a["a"], approval_decisions(&p).await.unwrap()["a"], "跟全表版本的結果一致");
+        assert!(approval_decisions_for(&p, &[]).await.unwrap().is_empty());
+        assert!(approval_decisions_for(&p, &["zzz".to_string()]).await.unwrap().is_empty());
     }
 
     /// AGM 背靠背派出的兩件交辦（同一毫秒）照寫入順序排，不看 ULID 的亂數段。

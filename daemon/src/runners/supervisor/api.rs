@@ -1394,8 +1394,9 @@ pub async fn get_approvals(State(app): State<Arc<App>>, Query(q): Query<Approval
         Some(id) => store::approval(&app.db, id).await.map_err(up)?.into_iter().collect(),
         None => store::approvals(&app.db, 100).await.map_err(up)?,
     };
-    // 決定歷程跟著回：核准列只有最後一個狀態，「誰核准的、後來被誰撤銷」要查得到。
-    let mut history = store::approval_decisions(&app.db).await.map_err(up)?;
+    // 決定歷程跟著回：核准列只有最後一個狀態，「誰核准的、後來被誰撤銷」要查得到。只查這幾筆的（#972）。
+    let ids: Vec<String> = rows.iter().map(|a| a.id.clone()).collect();
+    let mut history = store::approval_decisions_for(&app.db, &ids).await.map_err(up)?;
     let out: Vec<Value> = rows
         .iter()
         .map(|a| {
