@@ -92,6 +92,51 @@ mod tests {
         assert_eq!(roles::get(&app.db, Role::Responder).await.unwrap().desired_running, 0);
     }
 
+    /// #968：協調者人設的留痕在 projection 之前寫；projection 失敗（persona.md 寫不進去）時，權威那一份已經生效，留痕也要在。
+    #[tokio::test]
+    async fn a_responder_persona_change_is_noted_even_when_projection_fails() {
+        let app = super::super::bot_requests::flow_tests::app().await;
+        super::super::bot_requests::flow_tests::configure_responder(&app).await;
+        // 測試 app 的 config.toml 沒有這顆 responder bot，`apply_persona` 必然失敗（persona.md 也故意做成目錄，寫不進去）。
+        std::fs::create_dir_all(responder::dir(&app).join("persona.md")).unwrap();
+        let err = put_persona(State(app.clone()), HeaderMap::new(), Json(PersonaIn { text: "新的".into(), expected_version: None }))
+            .await
+            .unwrap_err();
+        let LcError::Conflict(v) = &err else { panic!("expected 409, got {err:?}") };
+        assert_eq!(v["reason"], "persona_sync_incomplete", "{v}");
+        let rows: Vec<(String,)> = sqlx::query_as("SELECT payload_json FROM supervisor_inbox WHERE kind='persona_changed'")
+            .fetch_all(&app.db)
+            .await
+            .unwrap();
+        assert_eq!(rows.len(), 1, "失敗的那一次也要留痕");
+        let payload: Value = serde_json::from_str(&rows[0].0).unwrap();
+        assert_eq!(payload["how"], "responder_api");
+    }
+
+    /// #968：巡檢與協調者的人設版號各自從 0 數；同一個版號的兩則留痕不能互相被 `INSERT OR IGNORE` 吃掉。
+    #[tokio::test]
+    async fn patrol_and_responder_persona_changes_with_the_same_version_both_notify() {
+        let app = super::super::bot_requests::flow_tests::app().await;
+        super::super::bot_requests::flow_tests::configure_responder(&app).await;
+        sqlx::query("UPDATE supervisors SET persona_version=5").execute(&app.db).await.unwrap();
+        sqlx::query("UPDATE supervisor_roles SET persona_version=5 WHERE role='responder'").execute(&app.db).await.unwrap();
+        // 兩邊的 `persona_sync_incomplete` 都算成功：這裡只要留痕寫完。
+        let tolerate = |r: Result<Json<Value>, LcError>| match r {
+            Ok(_) => (),
+            Err(LcError::Conflict(v)) if v["reason"] == "persona_sync_incomplete" => (),
+            Err(e) => panic!("{e:?}"),
+        };
+        tolerate(super::super::api::put_persona(State(app.clone()), HeaderMap::new(), Json(super::super::api::PersonaIn { text: "巡檢的".into(), expected_version: None })).await);
+        tolerate(put_persona(State(app.clone()), HeaderMap::new(), Json(PersonaIn { text: "協調者的".into(), expected_version: None })).await);
+        let rows: Vec<(String,)> = sqlx::query_as("SELECT payload_json FROM supervisor_inbox WHERE kind='persona_changed' ORDER BY rowid")
+            .fetch_all(&app.db)
+            .await
+            .unwrap();
+        let mut hows: Vec<String> = rows.iter().map(|r| serde_json::from_str::<Value>(&r.0).unwrap()["how"].as_str().unwrap().to_string()).collect();
+        hows.sort();
+        assert_eq!(hows, ["api", "responder_api"], "兩則都要進 inbox");
+    }
+
     /// stop：意圖寫不進去就**不要停**，也不要回成功——停了也會被看門狗拉回來（issue #84）。
     #[tokio::test]
     async fn a_stop_whose_intent_write_fails_neither_stops_nor_reports_success() {
@@ -169,6 +214,11 @@ async fn put_persona(State(app): State<Arc<App>>, headers: HeaderMap, Json(b): J
     let _g = super::lock().await;
     let previous = roles::get(&app.db, Role::Responder).await.map_err(up)?.persona_text;
     let version = responder::set_persona(&app.db, text, b.expected_version).await?;
+    // 留痕擺在 projection 之前（同巡檢的 `put_persona`）：DB 那一份才是權威，`apply_persona` 寫不出去時文字已經生效，
+    // 留痕若放在後面，部分失敗就沒人知道、重送時 `previous == text` 也補不回（#968）。
+    if previous.as_deref() != Some(text) {
+        super::api::note_persona_change(&app.db, &actor, previous.as_deref(), text, version, "responder_api").await;
+    }
     responder::apply_persona(app.as_ref(), text).await.map_err(|e| {
         LcError::conflict(
             "persona stored but projection sync is incomplete; retry the same text to repair",
@@ -176,9 +226,6 @@ async fn put_persona(State(app): State<Arc<App>>, headers: HeaderMap, Json(b): J
         )
     })?;
     drop(_g);
-    if previous.as_deref() != Some(text) {
-        super::api::note_persona_change(&app.db, &actor, previous.as_deref(), text, version, "responder_api").await;
-    }
     app.emit("supervisor_changed", json!({"responder_persona_version": version})).await;
     Ok(Json(get_persona(State(app.clone())).await?.0))
 }
