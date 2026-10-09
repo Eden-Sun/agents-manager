@@ -112,7 +112,7 @@ async fn configured_dirs(app: &(impl crate::capabilities::DataDir + crate::capab
 }
 
 pub async fn refresh_on_startup(app: &(impl crate::capabilities::DataDir + crate::capabilities::Db)) {
-    refresh_with(app, super::setup::AGM_CLI).await
+    let _ = refresh_with(app, super::setup::AGM_CLI).await;
 }
 
 /// 已安裝的 `bin/agm` 跟這顆 binary 內嵌的那份對不對得上（issue #532）。
@@ -146,20 +146,28 @@ pub async fn status(app: &(impl crate::capabilities::DataDir + crate::capabiliti
     json!({"embedded_hash": embedded_hash, "roles": roles})
 }
 
-pub async fn refresh_with(app: &(impl crate::capabilities::DataDir + crate::capabilities::Db), embedded: &str) {
+/// 每個已設定的角色刷新一次，回傳各角色的結果：`{role, outcome, error?}`（`outcome` 是 `refreshed`／
+/// `unchanged`／`skipped`／`failed`，`error` 只在 failed 有）。失敗的原因給 `POST /api/supervisor/cli` 回給呼叫的人看。
+pub async fn refresh_with(app: &(impl crate::capabilities::DataDir + crate::capabilities::Db), embedded: &str) -> Vec<Value> {
+    let mut outcomes = Vec::new();
     for (role, dir) in configured_dirs(app).await {
         match refresh_cli(&dir, embedded) {
-            Ok(Outcome::Refreshed { old_hash, new_hash, backup }) => tracing::info!(
-                role = role.as_str(),
-                old = old_hash.as_deref().unwrap_or("-"),
-                new = %new_hash,
-                backup = backup.as_deref().unwrap_or("-"),
-                "daemon started: refreshed the installed bin/agm"
-            ),
-            Ok(_) => {}
+            Ok(Outcome::Refreshed { old_hash, new_hash, backup }) => {
+                tracing::info!(
+                    role = role.as_str(),
+                    old = old_hash.as_deref().unwrap_or("-"),
+                    new = %new_hash,
+                    backup = backup.as_deref().unwrap_or("-"),
+                    "refreshed the installed bin/agm"
+                );
+                outcomes.push(json!({"role": role.as_str(), "outcome": "refreshed"}));
+            }
+            Ok(Outcome::Unchanged) => outcomes.push(json!({"role": role.as_str(), "outcome": "unchanged"})),
+            Ok(Outcome::Skipped) => outcomes.push(json!({"role": role.as_str(), "outcome": "skipped"})),
             Err(e) => {
                 let new_hash = short_hash(embedded.as_bytes());
-                tracing::warn!(role = role.as_str(), dir = %dir.display(), error = %e, "daemon started: could not refresh bin/agm; the installed CLI is stale");
+                tracing::warn!(role = role.as_str(), dir = %dir.display(), error = %e, "could not refresh bin/agm; the installed CLI is stale");
+                outcomes.push(json!({"role": role.as_str(), "outcome": "failed", "error": e.to_string()}));
                 let _ = store::push_inbox(
                     app.db(),
                     &format!("agm_cli_stale:{}:{new_hash}", role.as_str()),
@@ -179,6 +187,7 @@ pub async fn refresh_with(app: &(impl crate::capabilities::DataDir + crate::capa
             }
         }
     }
+    outcomes
 }
 
 #[cfg(all(test, feature = "daemon-test-harness"))]
@@ -415,5 +424,35 @@ mod tests {
         assert!(kinds[0].1.contains("\"role\":\"responder\""), "{}", kinds[0].1);
         let after = roles::get(&app.db, Role::Responder).await.unwrap();
         assert_eq!((after.identity, after.model, after.effort), (before.identity, before.model, before.effort));
+    }
+
+    /// #971：POST 的回應要講清楚每個角色這次怎麼了；失敗的原因不能只留在 log。
+    #[tokio::test]
+    async fn refresh_reports_each_roles_outcome_and_the_failure_reason() {
+        let e = crate::testing::env().await;
+        let app = &e.app;
+        let patrol = with_bin("OLD");
+        // 協調者的 bin/agm 是目錄：讀檔會失敗（不靠 chmod，root 也擋得住）。
+        let responder = with_bin("OLD");
+        std::fs::remove_file(responder.join("bin/agm")).unwrap();
+        std::fs::create_dir_all(responder.join("bin/agm")).unwrap();
+        store::get_or_init(&app.db).await.unwrap();
+        store::set_env(&app.db, "patrol-bot", &e.project_id, &patrol.to_string_lossy()).await.unwrap();
+        roles::set_env(&app.db, Role::Responder, "responder-bot", &e.project_id, &responder.to_string_lossy()).await.unwrap();
+
+        let r = refresh_with(app, "NEW").await;
+        let by = |role: &str| r.iter().find(|x| x["role"] == role).unwrap().clone();
+        let p = by("patrol");
+        assert_eq!(p["outcome"], "refreshed", "{r:?}");
+        assert!(p.get("error").is_none(), "{r:?}");
+        let c = by("responder");
+        assert_eq!(c["outcome"], "failed", "{r:?}");
+        assert!(c["error"].as_str().is_some_and(|s| !s.is_empty()), "{r:?}");
+
+        // 再跑一次：巡檢已經是新版 → unchanged；協調者還是壞的 → 仍 failed。
+        let r = refresh_with(app, "NEW").await;
+        let by = |role: &str| r.iter().find(|x| x["role"] == role).unwrap().clone();
+        assert_eq!(by("patrol")["outcome"], "unchanged", "{r:?}");
+        assert_eq!(by("responder")["outcome"], "failed", "{r:?}");
     }
 }
