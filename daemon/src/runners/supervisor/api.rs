@@ -183,7 +183,6 @@ impl AssignIn {
 
 /// 交辦／裁示各欄位的上限：這些值原樣存進 DB、審計列、digest 與 inbox，不設限就是任何呼叫端都能把它們撐大
 /// （ownership 還會對每一件開著的交辦逐字串比對）。本文另有 `MAX_PROVABLE_CHARS`。
-const MAX_REQUEST_ID_CHARS: usize = 200;
 const MAX_OWNERSHIP_ENTRIES: usize = 64;
 const MAX_OWNERSHIP_CHARS: usize = 1000;
 const MAX_NOTE_CHARS: usize = 8000;
@@ -209,7 +208,8 @@ pub async fn post_assignment(
     headers: HeaderMap,
     Json(b): Json<AssignIn>,
 ) -> Result<Json<Value>, LcError> {
-    bounded("client_request_id", &b.client_request_id, MAX_REQUEST_ID_CHARS)?;
+    // #923：長度與字元一起驗（`bounded` 只看長度，放得進空白與控制字元）。
+    let client_request_id = crate::request_id::validate("client_request_id", &b.client_request_id)?;
     bounded_ownership(&b.ownership)?;
     // 只有 `task`（預設）與 `notice`：`Notice`／`urgent` 這種打錯的值以前被當成要驗收的交辦，呼叫端以為自己送了通知。
     if !matches!(b.kind.as_deref(), None | Some("task") | Some("notice")) {
@@ -247,7 +247,7 @@ pub async fn post_assignment(
         &app,
         &b.target_bot_id,
         &b.text,
-        &b.client_request_id,
+        &client_request_id,
         b.source_turn_id.as_deref(),
         &b.ownership,
         None,
@@ -337,10 +337,13 @@ pub async fn post_review(
         ("evidence", b.evidence.as_deref(), MAX_NOTE_CHARS),
         ("actor", b.actor.as_deref(), MAX_LABEL_CHARS),
         ("source", b.source.as_deref(), MAX_LABEL_CHARS),
-        ("followup_request_id", b.followup_request_id.as_deref(), MAX_REQUEST_ID_CHARS),
         ("followup_bot_id", b.followup_bot_id.as_deref(), MAX_LABEL_CHARS),
     ] {
         bounded(label, value.unwrap_or_default(), max)?;
+    }
+    // #923：續作的冪等鍵進 assignments 的唯一索引；空白＝沒給，交給下面 followup 分支的「needs a stable followup_request_id」去擋。
+    if let Some(c) = b.followup_request_id.as_deref().map(str::trim).filter(|c| !c.is_empty()) {
+        crate::request_id::validate("followup_request_id", c)?;
     }
     bounded_ownership(&b.ownership)?;
     // 續作文字跟交辦本文同一個上限（#335）：超過的一定送不出去，不收下一件註定失敗的續作。
@@ -1190,6 +1193,11 @@ pub async fn post_approval(State(app): State<Arc<App>>, headers: HeaderMap, Json
     if b.target_commit.as_deref().is_some_and(|c| !super::maintenance::valid_commit(c)) {
         return Err(LcError::Bad("target_commit must be 7-64 hex characters (a git sha)".into()));
     }
+    // #923：穩定的 request id 進唯一索引、再隨回應回出去，先驗長度與字元。
+    let request_id = match b.request_id.as_deref().map(str::trim).filter(|r| !r.is_empty()) {
+        Some(r) => Some(crate::request_id::validate("request_id", r)?),
+        None => None,
+    };
     let expires = approval_expires(b.expires_in_secs)?;
     let unverified = requester_claim(&app, &headers, &b.requester).await?;
     let out = store::create_approval_notifying(
@@ -1199,7 +1207,7 @@ pub async fn post_approval(State(app): State<Arc<App>>, headers: HeaderMap, Json
         &b.scope,
         b.target_commit.as_deref(),
         expires.as_deref(),
-        b.request_id.as_deref(),
+        request_id.as_deref(),
         b.supersedes.as_deref(),
         b.reason.as_deref(),
         unverified,
@@ -1455,6 +1463,11 @@ pub async fn post_lease_acquire(
 ) -> Result<Json<Value>, LcError> {
     // Body 的 owner 與 approval requester 相等仍不夠：被證明身分的一般 bot 只能替自己開窗口，
     // 否則任何 bot 都能借另一顆 bot 已獲核准的 approval 拿走 lease token。
+    // #923：冪等鍵進租約表的唯一索引，先驗長度與字元。
+    let request_id = match b.request_id.as_deref().map(str::trim).filter(|r| !r.is_empty()) {
+        Some(r) => Some(crate::request_id::validate("request_id", r)?),
+        None => None,
+    };
     requester_claim(&app, &headers, &b.owner).await?;
     Ok(Json(
         super::maintenance::acquire_with_request(
@@ -1466,7 +1479,7 @@ pub async fn post_lease_acquire(
             b.ttl_secs.unwrap_or(super::maintenance::DEFAULT_TTL_SECS),
             b.require_idle,
             &b.exclude_bot_ids,
-            b.request_id.as_deref(),
+            request_id.as_deref(),
         )
         .await?,
     ))
@@ -2439,6 +2452,32 @@ mod approval_decision_tests {
         assert_eq!(events, 1);
     }
 
+    /// #923：申請的 request id 進唯一索引、再隨回應回出去：過長或含控制字元一律 400，不留申請列、不叫醒 AGM。
+    #[tokio::test]
+    async fn an_approval_with_an_unsafe_request_id_is_refused_before_writing() {
+        let app = app().await;
+        for bad in ["x".repeat(201), "a\nb".to_string(), "a b".to_string()] {
+            let input = ApprovalIn {
+                reason: None,
+                requester: "k8bw2f".into(),
+                purpose: "restart".into(),
+                scope: "daemon".into(),
+                target_commit: Some("ca7b22d".into()),
+                expires_in_secs: None,
+                request_id: Some(bad.clone()),
+                supersedes: None,
+            };
+            let err = post_approval(State(app.clone()), HeaderMap::new(), Json(input)).await.expect_err(&bad);
+            assert!(matches!(&err, LcError::Bad(m) if m.contains("request_id")), "{bad:?}: {err:?}");
+        }
+        assert!(store::approvals(&app.db, 10).await.unwrap().is_empty(), "被拒的申請不留列");
+        let events: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM supervisor_inbox WHERE kind='approval_requested'").fetch_one(&app.db).await.unwrap();
+        assert_eq!(events, 0, "也不叫醒 AGM");
+        app.db.close().await;
+        std::fs::remove_dir_all(&app.data_dir).unwrap();
+    }
+
     #[tokio::test]
     async fn resending_one_approval_request_id_returns_the_same_row() {
         let app = app().await;
@@ -2864,6 +2903,8 @@ mod review_boundary_tests {
         }
         for (label, patch) in [
             ("request id too long", json!({"client_request_id": big(201)})),
+            ("request id with a space", json!({"client_request_id": "a b"})),
+            ("request id with a newline", json!({"client_request_id": "a\nb"})),
             ("too many ownership entries", json!({"ownership": (0..65).map(|i| format!("f{i}")).collect::<Vec<_>>()})),
             ("ownership entry too long", json!({"ownership": [big(1001)]})),
             ("unknown kind", json!({"kind": "Notice"})),
@@ -2888,6 +2929,7 @@ mod review_boundary_tests {
         assert_eq!(d["error"], "text_too_long");
         for (label, patch) in [
             ("followup request id", json!({"followup_request_id": big(201)})),
+            ("followup request id with a control char", json!({"followup_request_id": "f\u{1b}[31m"})),
             ("reason", json!({"reason": big(8001)})),
             ("evidence", json!({"evidence": big(8001)})),
             ("actor", json!({"actor": big(201)})),

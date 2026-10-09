@@ -5679,8 +5679,12 @@ async fn prompt_bot(
     if b.share_reply_visible && principal != RequestPrincipal::User {
         return Err(bot_user_only());
     }
-    let given_crid = b.client_request_id.clone();
-    let crid = b.client_request_id.unwrap_or_else(db::ulid);
+    // #923：冪等鍵進 turns 的唯一索引、再隨回應與日誌回出去，先驗長度與字元（同 fork／mission 的做法）。
+    let given_crid = match b.client_request_id.as_deref().map(str::trim).filter(|c| !c.is_empty()) {
+        Some(c) => Some(crate::request_id::validate("client_request_id", c)?),
+        None => None,
+    };
+    let crid = given_crid.clone().unwrap_or_else(db::ulid);
     // `relay_from` is metadata, never an alternate principal. A proven bot that omits it is
     // attributed to the id already authenticated by middleware. A User request claiming a bot
     // without that bot's token is refused (#410 ended #339's unsigned compatibility branch).
@@ -5864,7 +5868,10 @@ async fn accept_suggestion(
     Json(b): Json<SuggestionAcceptIn>,
 ) -> Result<Response, LcError> {
     require_user(&principal)?;
-    let crid = b.client_request_id.unwrap_or_else(db::ulid);
+    let crid = match b.client_request_id.as_deref().map(str::trim).filter(|c| !c.is_empty()) {
+        Some(c) => crate::request_id::validate("client_request_id", c)?,
+        None => db::ulid(),
+    };
     let out = lifecycle::accept_prompt_suggestion(&app, &id, &b.suggestion, b.expect_run_id.as_deref(), &crid).await?;
     Ok((StatusCode::OK, Json(out)).into_response())
 }
@@ -6091,7 +6098,13 @@ async fn project_chat(
     Path(id): Path<String>,
     Json(b): Json<PromptIn>,
 ) -> Response {
-    let crid = b.client_request_id.unwrap_or_else(db::ulid);
+    let crid = match b.client_request_id.as_deref().map(str::trim).filter(|c| !c.is_empty()) {
+        Some(c) => match crate::request_id::validate("client_request_id", c) {
+            Ok(v) => v,
+            Err(e) => return e.into_response(),
+        },
+        None => db::ulid(),
+    };
     match crate::group::chat(&app, &id, &b.text, &crid, &b.attachments).await {
         Ok(v) => (StatusCode::OK, Json(v)).into_response(),
         Err(crate::group::Response400::Lc(e)) => e.into_response(),
@@ -8627,6 +8640,20 @@ mod prompt_route_tests {
         let (s3, b3) = call(&e, &bot, "second".into(), "crid-x").await;
         assert_eq!(s3, StatusCode::CONFLICT, "{b3}");
         assert_eq!(b3["reason"], "text_mismatch");
+    }
+
+    /// #923：`/prompt` 的 client_request_id 進 turns 的唯一索引、再隨回應回出去：過長、含空白或控制字元一律 400，不建回合。
+    #[tokio::test]
+    async fn a_prompt_with_an_unsafe_client_request_id_is_refused_without_a_turn() {
+        let e = crate::testing::env().await;
+        let bot = typed_bot(&e, "grok").await;
+        e.herdr.live_pane("pane-route", crate::testing::LivePane { width: Some(120), boxed: true, ..Default::default() });
+        for bad in ["a b".to_string(), "a\nb".to_string(), "x".repeat(201)] {
+            let (status, body) = call(&e, &bot, "hello".into(), &bad).await;
+            assert_eq!(status, StatusCode::BAD_REQUEST, "{bad:?}: {body}");
+        }
+        let turns: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM turns").fetch_one(&e.app.db).await.unwrap();
+        assert_eq!(turns, 0, "被拒的請求不建回合");
     }
 
     /// 已刪除的 bot 不能收 prompt（送進使用者已經刪掉的 pane 還回 200）。
