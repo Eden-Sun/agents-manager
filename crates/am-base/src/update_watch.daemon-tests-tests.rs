@@ -340,6 +340,53 @@
     }
 
     #[tokio::test]
+    async fn an_unreadable_disk_version_does_not_mark_a_claude_run_already_on_the_target_as_needing_install() {
+        let _serial = serial().lock().await;
+        let e = crate::testing::env().await;
+        let bot = crate::testing::claude_bot(&e.app, &e.project_id, "claude-unreadable-disk").await;
+        let run = crate::testing::fake_run(&e.app, &bot.id).await;
+        let pane = format!("pane-{}", bot.id);
+        e.herdr.set_screen(&pane, "› conversation\n");
+        sqlx::query("UPDATE runs SET status_json=? WHERE id=?")
+            .bind(r#"{"version":"2.1.284 (Claude Code)"}"#)
+            .bind(&run)
+            .execute(&e.app.db)
+            .await
+            .unwrap();
+        // 磁碟版本讀不到（`claude --version` 逾時）：快取裡是 None，不是 2.1.281。
+        let fence = e.app.hosts.fence("local").await.expect("test host exists");
+        e.app.disk_versions.lock().await.insert(
+            "claude@local".to_string(),
+            DiskVersionEntry { at: Instant::now(), authority: fence.authority_key(), version: None },
+        );
+        // 別台主機落後，快照的 target 因此是 2.1.284；這台 local 自己其實已經在目標版。
+        crate::upstream_update::set_snapshot_for_test(&e.app.upstream_watch, crate::upstream_update::build_status(
+            "claude",
+            &Ok("2.1.284".into()),
+            &[
+                ("local".into(), Ok("2.1.284 (Claude Code)".into())),
+                ("other".into(), Ok("2.1.281 (Claude Code)".into())),
+            ],
+            None,
+        ))
+        .await;
+
+        sweep(&e.app).await;
+        assert_eq!(notice_of(&e.app, &run).await, None, "跑著的已是目標版，不該出現需安裝");
+
+        // 反例：跑著的版本真的落後時，仍要提示需安裝。
+        sqlx::query("UPDATE runs SET status_json=? WHERE id=?")
+            .bind(r#"{"version":"2.1.281 (Claude Code)"}"#)
+            .bind(&run)
+            .execute(&e.app.db)
+            .await
+            .unwrap();
+        sweep(&e.app).await;
+        let pending = notice_of(&e.app, &run).await.expect("跑著的落後時要提示");
+        assert!(pending.contains("需安裝"), "{pending}");
+    }
+
+    #[tokio::test]
     async fn an_installed_claude_notice_survives_a_sweep_without_a_running_version() {
         let _serial = serial().lock().await;
         let e = crate::testing::env().await;

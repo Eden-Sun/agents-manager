@@ -135,11 +135,13 @@ pub async fn sweep_runs(app: &Arc<App>, runs: anyhow::Result<Vec<db::Run>>) {
                     })
                 })
                 .map(str::to_owned);
+            // 「裝著的版本」：磁碟讀得到用磁碟，讀不到才用跑著的；兩個都不知道就不判成落後（未知不等於落後，#974）。
+            let installed = disk_version.or(running.as_deref());
             let below_upstream = upstream.as_deref().filter(|target| {
-                disk_version
+                installed
                     .and_then(crate::changelog::parse_version)
                     .zip(crate::changelog::parse_version(target))
-                    .is_none_or(|(disk, target)| disk < target)
+                    .is_some_and(|(have, target)| have < target)
             });
             if let Some(target) = below_upstream {
                 Some(crate::upstream_update::claude_pending_text(
