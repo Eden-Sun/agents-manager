@@ -182,6 +182,26 @@ pub struct NewMissionIn {
     max_rounds: Option<i64>,
 }
 
+/// 任務本文的上限（#967）：同交辦的 `MAX_PROVABLE_CHARS`，超過的本文最後一定派不出去，不收下來。
+/// 422 `text_too_long` 同 `runners/supervisor/api.rs` 的續作文字。
+fn bounded_mission_text(text: &str) -> Result<(), LcError> {
+    let chars = text.chars().count();
+    if chars > crate::lifecycle::MAX_PROVABLE_CHARS {
+        return Err(LcError::Unprocessable(json!({
+            "error": "text_too_long", "max_chars": crate::lifecycle::MAX_PROVABLE_CHARS, "chars": chars, "sent": false,
+        })));
+    }
+    Ok(())
+}
+
+/// 寫進時間軸的文字上限（#967）：同 `post_event`，一則事件會永遠留在時間軸、還會被推給 AGM 讀。
+fn bounded_event_text(field: &str, v: &str) -> Result<(), LcError> {
+    if v.len() > MAX_EVENT_TEXT_BYTES {
+        return Err(LcError::Bad(format!("{field} is too long (max {MAX_EVENT_TEXT_BYTES} bytes)")));
+    }
+    Ok(())
+}
+
 /// 群組的「交給 AGM」。建任務、在群組時間軸記下使用者的指示，並放進 AGM 的 inbox 叫它起來調度。
 pub async fn post_mission(
     State(app): State<Arc<App>>,
@@ -192,6 +212,7 @@ pub async fn post_mission(
     if text.is_empty() {
         return Err(LcError::Bad("text is empty".into()));
     }
+    bounded_mission_text(text)?;
     one_of("delivery_mode", &b.delivery_mode, &["push_main", "pr"])?;
     one_of("executor_kind", &b.executor_kind, &["claude", "codex", "grok"])?;
     one_of("on_5h_limit", &b.on_5h_limit, &["wait", "switch"])?;
@@ -371,6 +392,7 @@ pub async fn post_question(
     if text.is_empty() {
         return Err(LcError::Bad("text is empty".into()));
     }
+    bounded_event_text("text", text)?;
     let crid = crate::request_id::validate("client_request_id", &b.client_request_id)?;
     let m = load(&app, &id).await?;
     let from = check_relay_from(&app, &headers, b.relay_from.as_deref()).await?;
@@ -437,6 +459,7 @@ pub async fn post_answer(
     if text.is_empty() {
         return Err(LcError::Bad("text is empty".into()));
     }
+    bounded_event_text("text", text)?;
     let crid = crate::request_id::validate("client_request_id", &b.client_request_id)?;
     let m = load(&app, &id).await?;
     let from = check_relay_from(&app, &headers, b.relay_from.as_deref()).await?;
@@ -753,6 +776,10 @@ pub async fn post_pause(
     if reason.is_empty() {
         return Err(LcError::Bad("reason is empty".into()));
     }
+    bounded_event_text("reason", reason)?;
+    if let Some(d) = b.detail.as_deref() {
+        bounded_event_text("detail", d)?;
+    }
     let m = load(&app, &id).await?;
     ensure_open(&m)?;
     require_header_bot_mission_participant(&app, &id, &headers).await?;
@@ -856,6 +883,7 @@ pub async fn post_revise(
     if text.is_empty() {
         return Err(LcError::Bad("text is empty".into()));
     }
+    bounded_mission_text(text)?;
     let crid = crate::request_id::validate("client_request_id", &b.client_request_id)?;
     let from = check_relay_from(&app, &headers, b.relay_from.as_deref()).await?;
     let parent = load(&app, &id).await?;
@@ -1232,6 +1260,7 @@ pub async fn post_complete(
     if b.result_summary.trim().is_empty() {
         return Err(LcError::Bad("result_summary is empty".into()));
     }
+    bounded_event_text("result_summary", &b.result_summary)?;
     let waiver = match b.no_delivery.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
         Some(w) => Some(flow::Waiver::parse(w).ok_or_else(|| LcError::Bad(format!("no_delivery must be one of {}", flow::Waiver::ALL.join(" | "))))?),
         None => None,
@@ -1933,6 +1962,57 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(inbox, 0, "被拒的請求不叫醒 AGM");
+    }
+
+    /// 任務寫入端點的文字有上限（#967）：本文同交辦的 `MAX_PROVABLE_CHARS`（422 `text_too_long`），時間軸文字
+    /// （question／answer／pause 的 reason 與 detail／complete 的 result_summary）同 `post_event` 的 16 KiB。
+    /// 超過的一律拒絕、什麼都不寫；剛好到上限的 question 照收。
+    #[tokio::test]
+    async fn mission_text_fields_are_bounded() {
+        let env = crate::testing::env().await;
+        let app = env.app.clone();
+        let pid = env.project_id.clone();
+        let max_bytes = MAX_EVENT_TEXT_BYTES;
+        let over_bytes = "x".repeat(max_bytes + 1);
+
+        let mut too_long = new_mission("too-long", "pr");
+        too_long.text = "x".repeat(crate::lifecycle::MAX_PROVABLE_CHARS + 1);
+        let err = post_mission(State(app.clone()), Path(pid.clone()), Json(too_long)).await.unwrap_err();
+        let LcError::Unprocessable(v) = err else { panic!("要是 422：{err:?}") };
+        assert_eq!(v["error"], "text_too_long");
+        assert_eq!(v["sent"], false);
+        let missions: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM missions").fetch_one(&app.db).await.unwrap();
+        assert_eq!(missions, 0, "超長的本文不建任務");
+
+        let Json(m) = post_mission(State(app.clone()), Path(pid.clone()), Json(new_mission("bounded-ok", "pr"))).await.unwrap();
+        let id = m["id"].as_str().unwrap().to_string();
+        async fn event_count(app: &Arc<App>) -> i64 {
+            sqlx::query_scalar("SELECT COUNT(*) FROM mission_events").fetch_one(&app.db).await.unwrap()
+        }
+        let before = event_count(&app).await;
+
+        let big_revise = rev(&"x".repeat(crate::lifecycle::MAX_PROVABLE_CHARS + 1), "rv-big");
+        let err = post_revise(State(app.clone()), Path(id.clone()), HeaderMap::new(), Json(big_revise)).await.unwrap_err();
+        assert!(matches!(err, LcError::Unprocessable(ref v) if v["error"] == "text_too_long"), "revise 本文超限：{err:?}");
+
+        let err = post_question(State(app.clone()), Path(id.clone()), HeaderMap::new(), Json(q(&over_bytes, "q-big"))).await.unwrap_err();
+        assert!(matches!(err, LcError::Bad(ref t) if t.contains("text is too long")), "question：{err:?}");
+        let err = post_answer(State(app.clone()), Path(id.clone()), HeaderMap::new(), Json(ans(&over_bytes, "a-big"))).await.unwrap_err();
+        assert!(matches!(err, LcError::Bad(ref t) if t.contains("text is too long")), "answer：{err:?}");
+        let pause = PauseIn { reason: "r".into(), detail: Some(over_bytes.clone()) };
+        let err = post_pause(State(app.clone()), Path(id.clone()), HeaderMap::new(), Json(pause)).await.unwrap_err();
+        assert!(matches!(err, LcError::Bad(ref t) if t.contains("detail is too long")), "pause detail：{err:?}");
+        let pause = PauseIn { reason: over_bytes.clone(), detail: None };
+        let err = post_pause(State(app.clone()), Path(id.clone()), HeaderMap::new(), Json(pause)).await.unwrap_err();
+        assert!(matches!(err, LcError::Bad(ref t) if t.contains("reason is too long")), "pause reason：{err:?}");
+        let done_big = CompleteIn { result_summary: over_bytes.clone(), relay_from: None, no_delivery: None, worktree: None };
+        let err = post_complete(State(app.clone()), Path(id.clone()), HeaderMap::new(), Json(done_big)).await.unwrap_err();
+        assert!(matches!(err, LcError::Bad(ref t) if t.contains("result_summary is too long")), "complete：{err:?}");
+        assert_eq!(event_count(&app).await, before, "被拒的請求不寫時間軸");
+
+        // 剛好到上限的 question 照收（邊界）。
+        let Json(ok) = post_question(State(app.clone()), Path(id.clone()), HeaderMap::new(), Json(q(&"x".repeat(max_bytes), "q-edge"))).await.unwrap();
+        assert_eq!(ok["event"]["kind"], "question");
     }
 
     /// 結案請求跑關卡的途中任務被別人關掉了（使用者按了取消、或另一個結案先落地）：這一次結案必須不成立。
