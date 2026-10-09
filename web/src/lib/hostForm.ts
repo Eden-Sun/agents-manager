@@ -6,7 +6,7 @@
 /** ssh 目標（可用 ssh_config 別名）：開頭 `-` 會被 ssh 當成選項（`-oProxyCommand=…` 在本機執行命令），空白／控制字元永遠不是合法的目標。 */
 export function sshTargetProblem(ssh: string): string | null {
   const hostPart = ssh.includes('@') ? ssh.slice(ssh.lastIndexOf('@') + 1) : ssh
-  if (!ssh || ssh.startsWith('-') || hostPart.startsWith('-') || /[\s\u0000-\u001f\u007f]/.test(ssh)) {
+  if (!ssh || ssh.startsWith('-') || hostPart.startsWith('-') || /[\s\u0000-\u001f\u007f-\u009f]/.test(ssh)) {
     return 'ssh 目標要是主機（或 user@host、ssh_config 別名）：不能空、不能以 - 開頭、不能有空白'
   }
   return null

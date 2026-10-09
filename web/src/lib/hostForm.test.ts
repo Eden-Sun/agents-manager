@@ -7,6 +7,12 @@ test('ssh 目標：跟 daemon 同一條規則（開頭 -、@ 後面以 - 開頭�
   for (const bad of ['', '-oProxyCommand=true', 'me@-oProxyCommand=x', 'a b', 'a\tb', 'a\nb']) assert.ok(sshTargetProblem(bad), JSON.stringify(bad))
 })
 
+test('ssh 目標含 C1 控制字元（U+0080–U+009F，例如 U+0085 NEL）：跟 daemon 一樣拒絕', () => {
+  assert.notEqual(sshTargetProblem('m4p\u0085'), null)
+  assert.notEqual(sshTargetProblem('m4p\u009f'), null)
+  assert.equal(sshTargetProblem('user@m4p.local'), null)
+})
+
 test('herdr_session：1–64 字、英數開頭、只有英數 . _ -', () => {
   for (const ok of ['agents-manager', 'a', 'S1.x_y']) assert.equal(sessionProblem(ok), null, ok)
   for (const bad of ['', '-x', '_x', 'a b', 'a/b', 'x'.repeat(65)]) assert.ok(sessionProblem(bad), JSON.stringify(bad))
