@@ -508,3 +508,38 @@ async fn site_resolve_tests() {
     let err_missing = super::site::resolve(&env, "bghost1").await.unwrap_err();
     assert_eq!(err_missing, super::site::SiteError::NotShareBot);
 }
+
+/// 組一段 `parse_outbox_list` 吃的 RFS 框（每筆 `ENTRY <len>` 後面接那一行）。
+fn outbox_frames(lines: &[&str]) -> Vec<u8> {
+    let mut out = format!("{RFS_VERSION_TAG}\n").into_bytes();
+    for line in lines {
+        out.extend(format!("ENTRY {}\n{}\n", line.len(), line).as_bytes());
+    }
+    out.extend(format!("{RFS_DONE_TAG}\n").as_bytes());
+    out
+}
+
+#[test]
+fn remote_outbox_withholds_uppercase_secret_names() {
+    // 大小寫混寫的憑證檔名不能靠大小寫敏感的黑名單漏過去（#981）。
+    let out = outbox_frames(&[
+        "10 1 1\t00\tID_RSA",
+        "10 1 1\t00\tKey.PEM",
+        "10 1 1\t00\tAUTH.JSON",
+        "10 1 1\t00\tok.txt",
+    ]);
+    let listed = parse_outbox_list(&out, 0).unwrap();
+    let names: Vec<&str> = listed.iter().map(|f| f["name"].as_str().unwrap()).collect();
+    assert_eq!(names, vec!["ok.txt"]);
+}
+
+#[tokio::test]
+async fn remote_outbox_download_refuses_uppercase_secret_names() {
+    let scratch = test_dirs::scratch_dir("rfs-upper-secret");
+    let site = make_test_remote_site(&scratch, "host-upper-secret-1");
+    fs::write(Path::new(&site.outbox).join("SECRET.PEM"), b"hi").unwrap();
+
+    // `RemoteFile`／`ReadWithStat` 沒有 Debug，不能用 unwrap_err，改成比對錯誤種類。
+    assert!(matches!(site.outbox_stream("SECRET.PEM", 100).await, Err(ShareFileError::NotFound)));
+    assert!(matches!(site.outbox_read("SECRET.PEM", 100).await, Err(ShareFileError::NotFound)));
+}
