@@ -207,3 +207,63 @@ test('讀目錄中按 ArrowDown：busy 仍擋其他鍵，不 preventDefault', as
   const e = await keydown(filter, 'ArrowDown')
   assert.equal(e.defaultPrevented, false)
 })
+
+// ───────── 觸控裝置的焦點（issue #999） ─────────
+
+/** 觸控裝置：`matchMedia` 對 `(pointer: coarse)` 回 true。 */
+function asTouch(): () => void {
+  const original = window.matchMedia
+  window.matchMedia = ((q: string) => ({ matches: q.includes('pointer: coarse'), media: q, addEventListener() {}, removeEventListener() {} })) as unknown as typeof window.matchMedia
+  return () => (window.matchMedia = original)
+}
+
+test('觸控：讀完一層不會把焦點搬進過濾框（不叫出軟鍵盤）', async () => {
+  const restore = asTouch()
+  try {
+    fakeApi((req) => (req.path.includes('/fs/dirs') ? listing(new URL(`http://x${req.path}`).searchParams.get('path') || '/home/u') : undefined))
+    await mount(<DirPicker initial="/home/u" onPick={() => {}} onCancel={() => {}} />)
+    await settle()
+    const dialog = document.querySelector<HTMLElement>('[role=dialog]')!
+    const filter = dialog.querySelector<HTMLInputElement>('input.dirpicker-filter')!
+    const cancel = [...dialog.querySelectorAll('button')].find((b) => b.textContent?.startsWith('取消'))!
+    cancel.focus()
+    // 進入 beta 再讀一次目錄：讀完不能把焦點拉回過濾框。
+    await act(async () => dialog.querySelector('[role=option][data-idx="1"]')!.dispatchEvent(new MouseEvent('dblclick', { bubbles: true })))
+    await settle()
+    assert.notEqual(document.activeElement, filter, '觸控讀完一層不能 focus 過濾框')
+    assert.equal(document.activeElement, cancel)
+  } finally {
+    restore()
+  }
+})
+
+test('觸控：點一列不攔 mousedown（不 preventDefault、焦點交還瀏覽器），選取照常', async () => {
+  const restore = asTouch()
+  try {
+    fakeApi((req) => (req.path.includes('/fs/dirs') ? listing('/home/u') : undefined))
+    await mount(<DirPicker initial="/home/u" onPick={() => {}} onCancel={() => {}} />)
+    await settle()
+    const row = document.querySelector<HTMLElement>('[role=dialog] [role=option]')!
+    const ev = new MouseEvent('mousedown', { bubbles: true, cancelable: true })
+    await act(async () => row.dispatchEvent(ev))
+    assert.equal(ev.defaultPrevented, false, '觸控不能攔 mousedown，否則焦點留在過濾框、鍵盤不收')
+    await click(row)
+    assert.equal(row.getAttribute('aria-selected'), 'true')
+  } finally {
+    restore()
+  }
+})
+
+test('桌機對照：點一列仍攔 mousedown、焦點留在過濾框（既有行為不回歸）', async () => {
+  fakeApi((req) => (req.path.includes('/fs/dirs') ? listing('/home/u') : undefined))
+  await mount(<DirPicker initial="/home/u" onPick={() => {}} onCancel={() => {}} />)
+  await settle()
+  const dialog = document.querySelector<HTMLElement>('[role=dialog]')!
+  const filter = dialog.querySelector<HTMLInputElement>('input.dirpicker-filter')!
+  ;[...dialog.querySelectorAll('button')].find((b) => b.textContent?.startsWith('取消'))!.focus()
+  const row = dialog.querySelector<HTMLElement>('[role=option]')!
+  const ev = new MouseEvent('mousedown', { bubbles: true, cancelable: true })
+  await act(async () => row.dispatchEvent(ev))
+  assert.equal(ev.defaultPrevented, true)
+  assert.equal(document.activeElement, filter)
+})
