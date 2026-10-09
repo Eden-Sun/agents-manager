@@ -78,6 +78,8 @@ export function usePinnedDrag(
     const chip = e.currentTarget
     const touch = e.pointerType !== 'mouse'
     const start = { x: e.clientX, y: e.clientY }
+    // 只認按下這根手指（pointerId）：另一根手指的 move／up／cancel 不能拿來改落點或 commit 新順序。
+    const pid = e.pointerId
     let dragging = false
     // 長按進入拖曳之後有沒有真的移動：沒移動就放開＝看說明，不是重排。
     let moved = false
@@ -104,6 +106,7 @@ export function usePinnedDrag(
       cleanup.current = null
     }
     const move = (ev: PointerEvent) => {
+      if (ev.pointerId !== pid) return
       const dx = ev.clientX - start.x
       const dy = ev.clientY - start.y
       if (!dragging) {
@@ -125,6 +128,7 @@ export function usePinnedDrag(
       setDrag({ id, before: slot.before, ready: true, dx, dy, shift: slot.shift, after: slot.after, gap })
     }
     const up = (ev: PointerEvent) => {
+      if (ev.pointerId !== pid) return
       const was = dragging
       end()
       if (!was) return
@@ -151,7 +155,8 @@ export function usePinnedDrag(
         suppress.current = false
       }, 0)
     }
-    const cancel = () => {
+    const cancel = (ev: PointerEvent) => {
+      if (ev.pointerId !== pid) return
       const was = dragging
       end()
       if (was) {
