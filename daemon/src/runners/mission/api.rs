@@ -368,13 +368,10 @@ pub async fn post_question(
     Json(b): Json<QuestionIn>,
 ) -> Result<Json<Value>, LcError> {
     let text = b.text.trim();
-    let crid = b.client_request_id.trim();
     if text.is_empty() {
         return Err(LcError::Bad("text is empty".into()));
     }
-    if crid.is_empty() {
-        return Err(LcError::Bad("client_request_id is empty".into()));
-    }
+    let crid = crate::request_id::validate("client_request_id", &b.client_request_id)?;
     let m = load(&app, &id).await?;
     let from = check_relay_from(&app, &headers, b.relay_from.as_deref()).await?;
     require_header_bot_mission_participant(&app, &id, &headers).await?;
@@ -396,7 +393,7 @@ pub async fn post_question(
         text,
         from.as_deref(),
         None,
-        crid,
+        &crid,
         store::Requires::Anything,
         false,
         Some((format!("mission:{id}:question:{crid}"), "mission_question", &payload)),
@@ -437,13 +434,10 @@ pub async fn post_answer(
     Json(b): Json<AnswerIn>,
 ) -> Result<Json<Value>, LcError> {
     let text = b.text.trim();
-    let crid = b.client_request_id.trim();
     if text.is_empty() {
         return Err(LcError::Bad("text is empty".into()));
     }
-    if crid.is_empty() {
-        return Err(LcError::Bad("client_request_id is empty".into()));
-    }
+    let crid = crate::request_id::validate("client_request_id", &b.client_request_id)?;
     let m = load(&app, &id).await?;
     let from = check_relay_from(&app, &headers, b.relay_from.as_deref()).await?;
     require_header_bot_mission_participant(&app, &id, &headers).await?;
@@ -482,7 +476,7 @@ pub async fn post_answer(
         text,
         from.as_deref(),
         reply_to.as_deref(),
-        crid,
+        &crid,
         // 使用者回答只在任務真的停著時才成立；bot 回覆追問在任何狀態都可以。
         if is_bot_reply { store::Requires::Anything } else { store::Requires::Paused },
         !is_bot_reply,
@@ -859,13 +853,10 @@ pub async fn post_revise(
     Json(b): Json<ReviseIn>,
 ) -> Result<Json<Value>, LcError> {
     let text = b.text.trim();
-    let crid = b.client_request_id.trim();
     if text.is_empty() {
         return Err(LcError::Bad("text is empty".into()));
     }
-    if crid.is_empty() {
-        return Err(LcError::Bad("client_request_id is empty".into()));
-    }
+    let crid = crate::request_id::validate("client_request_id", &b.client_request_id)?;
     let from = check_relay_from(&app, &headers, b.relay_from.as_deref()).await?;
     let parent = load(&app, &id).await?;
     require_header_bot_mission_participant(&app, &id, &headers).await?;
@@ -949,7 +940,7 @@ pub async fn post_revise(
         &app.db,
         &store::NewMission {
             project_id: &project_id,
-            client_request_id: crid,
+            client_request_id: &crid,
             text,
             delivery_mode: &delivery_mode,
             executor_kind: &executor_kind,
@@ -1320,12 +1311,15 @@ pub struct RoundIn {
 }
 
 pub async fn post_round(State(app): State<Arc<App>>, Path(id): Path<String>, body: Option<Json<RoundIn>>) -> Result<Json<Value>, LcError> {
+    let crid = match body.as_ref().and_then(|b| b.client_request_id.as_deref()).map(str::trim).filter(|s| !s.is_empty()) {
+        Some(c) => Some(crate::request_id::validate("client_request_id", c)?),
+        None => None,
+    };
     let m = load(&app, &id).await?;
     ensure_open(&m)?;
-    let crid = body.as_ref().and_then(|b| b.client_request_id.as_deref()).map(str::trim).filter(|s| !s.is_empty());
     #[cfg(test)]
     crate::lifecycle::race_point::hit("mission_round_before_write", &id).await;
-    match store::spend_round(&app.db, &id, crid).await.map_err(up)? {
+    match store::spend_round(&app.db, &id, crid.as_deref()).await.map_err(up)? {
         store::Round::Spent => {
             let m = load(&app, &id).await?;
             emit(&app, &m).await;
@@ -1901,6 +1895,44 @@ mod tests {
         // 一字不差的重送照舊是冪等的。
         let Json(again) = post_mission(State(app.clone()), Path(pid.clone()), Json(new_mission("reused", "pr"))).await.unwrap();
         assert_eq!((again["created"].as_bool(), again["id"].as_str()), (Some(false), Some(id.as_str())));
+    }
+
+    /// question／answer／revise／round 收的冪等鍵同 `post_mission` 過 `request_id::validate`（#966）：
+    /// 換行、空白、超長的鍵以前照樣進 `event_key` 與唯一索引。被拒的請求什麼都不寫。
+    #[tokio::test]
+    async fn mission_reply_endpoints_refuse_an_unsafe_client_request_id() {
+        fn refused_for_crid(e: &LcError) -> bool {
+            matches!(e, LcError::Bad(m) if m.contains("client_request_id"))
+        }
+        let env = crate::testing::env().await;
+        let app = env.app.clone();
+        let Json(m) = post_mission(State(app.clone()), Path(env.project_id.clone()), Json(new_mission("ok-1", "pr"))).await.unwrap();
+        let id = m["id"].as_str().unwrap().to_string();
+
+        for bad in ["x".repeat(201), "a\nb".to_string(), "a b".to_string()] {
+            let e = post_question(State(app.clone()), Path(id.clone()), HeaderMap::new(), Json(q("問", &bad))).await.unwrap_err();
+            assert!(refused_for_crid(&e), "question {bad:?}: {e:?}");
+            let e = post_answer(State(app.clone()), Path(id.clone()), HeaderMap::new(), Json(ans("答", &bad))).await.unwrap_err();
+            assert!(refused_for_crid(&e), "answer {bad:?}: {e:?}");
+            let e = post_revise(State(app.clone()), Path(id.clone()), HeaderMap::new(), Json(rev("改", &bad))).await.unwrap_err();
+            assert!(refused_for_crid(&e), "revise {bad:?}: {e:?}");
+            let body = Some(Json(RoundIn { client_request_id: Some(bad.clone()) }));
+            let e = post_round(State(app.clone()), Path(id.clone()), body).await.unwrap_err();
+            assert!(refused_for_crid(&e), "round {bad:?}: {e:?}");
+        }
+
+        let events: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM mission_events WHERE kind IN ('question','answer','round')")
+            .fetch_one(&app.db)
+            .await
+            .unwrap();
+        assert_eq!(events, 0, "被拒的請求不寫時間軸");
+        let missions: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM missions").fetch_one(&app.db).await.unwrap();
+        assert_eq!(missions, 1, "revise 被拒不建子任務");
+        let inbox: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM supervisor_inbox WHERE kind IN ('mission_question','mission_answered')")
+            .fetch_one(&app.db)
+            .await
+            .unwrap();
+        assert_eq!(inbox, 0, "被拒的請求不叫醒 AGM");
     }
 
     /// 結案請求跑關卡的途中任務被別人關掉了（使用者按了取消、或另一個結案先落地）：這一次結案必須不成立。
