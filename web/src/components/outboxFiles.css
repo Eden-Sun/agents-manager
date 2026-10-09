@@ -130,3 +130,8 @@
   font-size: 11px;
   color: var(--text-faint);
 }
+
+/* 手機沒有檔案暫存托盤，outbox 畫在「Git / 專案資訊 / 檔案」彈窗裡（#929）：托盤用的高度上限不適用，由彈窗自己捲。 */
+.modal .outbox-files {
+  max-height: none;
+}

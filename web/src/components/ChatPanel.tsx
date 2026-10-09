@@ -21,6 +21,7 @@ import { queuedSendFor } from '../store/queuedSend'
 import { isImeEnter } from '../lib/ime'
 import { herdrIdentity } from '../lib/herdrIdentity'
 import { PaneCopy } from './PaneCopy'
+import { OutboxFiles } from './OutboxFiles'
 import { anchorOf, composerState, inFlightTurn, liveReplyOf, projectHostName, toolsOfHost, useStore } from '../store/store'
 import { useBotLamp } from '../hooks/useBotLamp'
 import { handedOffTo } from '../lib/handoff'
@@ -1052,12 +1053,14 @@ function modelExtraOf(status: StatusInfo | null): string {
 }
 
 /** Repo chip + status row. `hasStatus` is explicit: `<StatusLineBar>` is truthy even when it renders null. */
-function ContextBar({ issues, status, hasStatus, phoneExtra, mobileOpen, onClose }: {
+function ContextBar({ issues, status, hasStatus, phoneExtra, phoneFiles, mobileOpen, onClose }: {
   issues: ReactNode
   status: ReactNode
   hasStatus: boolean
   /** 只在手機畫在彈窗最上面的列（「不用保溫」）；桌面不畫。 */
   phoneExtra?: ReactNode
+  /** 只在手機畫在彈窗最下面的「bot 給你的檔案」（#929）：手機沒有檔案暫存托盤，outbox 沒有別的入口；桌面在托盤下半段。 */
+  phoneFiles?: ReactNode
   mobileOpen: boolean
   onClose: () => void
 }) {
@@ -1072,8 +1075,9 @@ function ContextBar({ issues, status, hasStatus, phoneExtra, mobileOpen, onClose
     </div>
   )
   return phone ? (
-    <Modal open title="Git / 專案資訊" onClose={onClose}>
+    <Modal open title="Git / 專案資訊 / 檔案" onClose={onClose}>
       {content}
+      {phoneFiles}
     </Modal>
   ) : content
 }
@@ -1358,7 +1362,7 @@ export function ChatPanel({ onOpenSidebar }: { onOpenSidebar: () => void }) {
             <button
               type="button"
               className="icon-btn mobile-git-info"
-              aria-label="Git / 專案資訊"
+              aria-label="Git / 專案資訊 / 檔案"
               aria-haspopup="dialog"
               aria-expanded={gitInfoBotId === botId}
               onClick={() => setGitInfoBotId(botId)}
@@ -1453,6 +1457,7 @@ export function ChatPanel({ onOpenSidebar }: { onOpenSidebar: () => void }) {
         status={<StatusLineBar botId={botId} status={statusInfo} text={run?.status_line ?? null} />}
         hasStatus={Boolean(statusInfo) || Boolean(run?.status_line?.trim())}
         phoneExtra={<MobileKeepWarmRow botId={botId} />}
+        phoneFiles={<OutboxFiles />}
       />
 
 
