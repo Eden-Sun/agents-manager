@@ -25,7 +25,8 @@ export function useTapCopy(text: string, onCopied: (ok: boolean) => void) {
     onPointerMove: move,
     onPointerUp: move,
     onPointerCancel: cancel,
-    onPointerLeave: cancel,
+    // 觸控／筆放開後瀏覽器必送 pointerleave，早於 click；只有滑鼠移出才取消（觸控拖走由 move 處理）。
+    onPointerLeave: (e: PointerEvent<HTMLElement>) => { if (e.pointerType === 'mouse') cancel() },
     onContextMenu: cancel,
     onClick: (e: MouseEvent<HTMLElement>) => {
       const p = press.current
