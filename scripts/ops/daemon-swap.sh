@@ -90,6 +90,33 @@ if [ ! -f "$START_PY" ] || [ ! -r "$START_PY" ]; then
     log "ABORT: 找不到可讀的 daemon-start.py（${START_PY}），不停止目前 daemon"
     exit 3
 fi
+hash16() { shasum -a 256 "$1" 2>/dev/null | cut -c1-16; }
+
+# 把新 binary 放到正式路徑（issue #944）：先 cp 到同目錄暫存檔、驗 hash 等於 $NEWBIN 才 mv 蓋過去。
+# 直接 cp 到正式路徑時，磁碟滿了／被打斷會留下截斷的 binary，而 daemon 已經停了。成功回 0。
+install_new_binary() {
+    local dest=target/release/agents-managerd tmp="target/release/agents-managerd.new.$$"
+    if cp "$NEWBIN" "$tmp" && [ "$(hash16 "$tmp")" = "$(hash16 "$NEWBIN")" ] && mv -f "$tmp" "$dest"; then
+        return 0
+    fi
+    rm -f "$tmp"
+    return 1
+}
+
+# 把舊 binary 放回正式路徑並驗 ${OLDHASH}（issue #944）。優先搬這趟換下來的 ${PREV}（rename，不吃磁碟），沒有或不對才 cp ${BAK}
+# 到暫存檔、驗過再 mv。兩條都驗不過回 1：呼叫端不能起一顆截斷的 binary，也不能假裝回滾成功。
+restore_old_binary() {
+    local dest=target/release/agents-managerd tmp="target/release/agents-managerd.restore.$$"
+    if [ -f "$PREV" ] && [ "$(hash16 "$PREV")" = "$OLDHASH" ] && mv -f "$PREV" "$dest" && [ "$(hash16 "$dest")" = "$OLDHASH" ]; then
+        return 0
+    fi
+    if cp -p "$BAK" "$tmp" && [ "$(hash16 "$tmp")" = "$OLDHASH" ] && mv -f "$tmp" "$dest"; then
+        return 0
+    fi
+    rm -f "$tmp"
+    return 1
+}
+
 prune_old_db_backups() {
     local backup
     for backup in "$DB".bak-*; do
@@ -397,8 +424,16 @@ fi
 
 cd "$AGM_REPO" || { log "ABORT: 進不去 $AGM_REPO"; exit 3; }
 BAK="target/release/agents-managerd.bak-$OLD"
-[ -e "$BAK" ] || cp -p target/release/agents-managerd "$BAK"
-GOT=$(shasum -a 256 "$BAK" | cut -c1-16)
+if [ ! -e "$BAK" ]; then
+    # 先寫暫存檔、驗 hash 才 mv（issue #944）：半截的 $BAK 會讓之後每一輪都在下面的核對 rc=3，永遠不自癒。
+    BAKTMP="$BAK.tmp.$$"
+    if ! cp -p target/release/agents-managerd "$BAKTMP" || [ "$(hash16 "$BAKTMP")" != "$OLDHASH" ] || ! mv "$BAKTMP" "$BAK"; then
+        rm -f "$BAKTMP"
+        log "ABORT: 無法建立回滾用的備份 ${BAK}（cp 失敗或內容不是 ${OLDHASH}）；什麼都沒動"
+        exit 3
+    fi
+fi
+GOT=$(hash16 "$BAK")
 [ "$GOT" = "$OLDHASH" ] || { log "ABORT: 回滾用的 $BAK sha256=${GOT}，不是 $OLDHASH"; exit 3; }
 log "rollback binary $BAK verified ($OLDHASH)"
 
@@ -697,11 +732,15 @@ rollback() {
             log "ERROR: cannot forward-fix while daemon is still alive; binary and DB left untouched"
             exit 11
         fi
-        cp "$NEWBIN" target/release/agents-managerd; start; sleep 3
-        j=0; while [ $j -lt 30 ]; do api /api/session && break; sleep 1; j=$((j + 1)); done
-        if api /api/session; then
-            log "forward-fix ok：新 binary 服務中 pid $(dpid)，DB 留在 $EXP_UV 沒有還原"
-            exit 6
+        if install_new_binary; then
+            start; sleep 3
+            j=0; while [ $j -lt 30 ]; do api /api/session && break; sleep 1; j=$((j + 1)); done
+            if api /api/session; then
+                log "forward-fix ok：新 binary 服務中 pid $(dpid)，DB 留在 $EXP_UV 沒有還原"
+                exit 6
+            fi
+        else
+            log "forward-fix：新 binary 複製失敗，不起 daemon"
         fi
         log "forward-fix 失敗：新 binary 起不來，改還原 binary 與 DB"
     else
@@ -711,7 +750,10 @@ rollback() {
             log "ERROR: cannot roll back while daemon is still alive; binary and DB left untouched"
             exit 11
         fi
-        cp -p "$BAK" target/release/agents-managerd
+        if ! restore_old_binary; then
+            log "ERROR: 舊 binary 還原失敗（${PREV}／${BAK} 都放不回或驗不過 ${OLDHASH}）；不起 daemon，DB 與備份原樣保留，要人工處理"
+            exit 11
+        fi
         rm -f "$AM_DATA/service-tokens/daemon-swap.token" "$AM_DATA/service-tokens/herdr-upgrade.token"
         rmdir "$AM_DATA/service-tokens" 2>/dev/null || true
         log "db left as is（schema 未升，舊 binary 可直接開；備份 ${DBB} 保留）"
@@ -723,7 +765,10 @@ rollback() {
         log "ERROR: cannot roll back while daemon is still alive; binary and DB left untouched"
         exit 11
     fi
-    cp -p "$BAK" target/release/agents-managerd
+    if ! restore_old_binary; then
+        log "ERROR: 舊 binary 還原失敗（${PREV}／${BAK} 都放不回或驗不過 ${OLDHASH}）；不起 daemon，DB 與備份原樣保留，要人工處理"
+        exit 11
+    fi
     # The old daemon cannot load or accept service principals. Remove credentials it generated before
     # the rollback so a stale token file is not mistaken for a working credential.
     rm -f "$AM_DATA/service-tokens/daemon-swap.token" "$AM_DATA/service-tokens/herdr-upgrade.token"
@@ -825,6 +870,18 @@ if [ "$OLDPID_COUNT" -ne 1 ]; then
     exit 11
 fi
 OLDPID=$(printf '%s\n' "$OLDPIDS" | head -1); log "old pid $OLDPID"
+# 停 daemon 前先確定放得下：換版要多一份新 binary（暫存檔＋換下來的舊檔），不夠就在 daemon 還活著時放棄（issue #944）。
+NEWKB=$(( ($(wc -c < "$NEWBIN") + 1023) / 1024 ))
+AVAILKB=$(df -Pk target/release 2>/dev/null | awk 'NR == 2 { print $4 }')
+case "$AVAILKB" in
+    ''|*[!0-9]*) log "WARN: 讀不到 target/release 的可用空間（'${AVAILKB}'），略過空間檢查" ;;
+    *)
+        if [ "$AVAILKB" -lt $((NEWKB * 2)) ]; then
+            log "ABORT: target/release 可用 ${AVAILKB}KB 不到新 binary 的兩倍（$((NEWKB * 2))KB）；不停 daemon、不換"
+            release_window "磁碟空間不足，沒換版" || true
+            exit 5
+        fi ;;
+esac
 if ! stop_daemon "$OLDPID"; then
     log "ABORT: daemon is still alive after SIGKILL; refusing to replace binary"
     release_window "線上 daemon 無法停止" || true
@@ -839,7 +896,18 @@ if [ -e "$PREV" ]; then
     exit 5
 fi
 mv target/release/agents-managerd "$PREV"
-cp "$NEWBIN" target/release/agents-managerd
+if ! install_new_binary; then
+    # 舊 daemon 已經停了：把舊 binary 搬回原位、起回來，再交還窗口（issue #944）。
+    log "ABORT: 新 binary 複製到 target/release 失敗（磁碟滿了？）；把舊 daemon 起回來"
+    if ! mv -f "$PREV" target/release/agents-managerd; then
+        log "ERROR: 舊 binary 搬不回 $PREV → target/release/agents-managerd；daemon 沒起來，要人工處理"
+        release_window "新 binary 複製失敗且舊 binary 搬不回" || true
+        exit 11
+    fi
+    start; sleep 3
+    release_window "新 binary 複製失敗，沒換版" || true
+    exit 5
+fi
 start
 sleep 2
 NEWPID=$(dpid)
