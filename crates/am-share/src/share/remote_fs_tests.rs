@@ -508,3 +508,21 @@ async fn site_resolve_tests() {
     let err_missing = super::site::resolve(&env, "bghost1").await.unwrap_err();
     assert_eq!(err_missing, super::site::SiteError::NotShareBot);
 }
+
+#[tokio::test]
+async fn remote_downloads_leave_a_slot_for_other_share_ops() {
+    let scratch = test_dirs::scratch_dir("rfs-slot-reserve");
+    let site = make_test_remote_site(&scratch, "host-reserve-1");
+    let ob = Path::new(&site.outbox);
+    fs::write(ob.join("big.bin"), vec![7u8; 4096]).unwrap();
+
+    // 下載串流最多拿到 HOST_SHARE_SLOTS - HOST_STREAM_RESERVE 格；之後的下載拿不到，但清單等其他動作仍能用。
+    let mut held = Vec::new();
+    for _ in 0..(HOST_SHARE_SLOTS - HOST_STREAM_RESERVE) {
+        held.push(site.outbox_stream("big.bin", 1 << 20).await.unwrap());
+    }
+    assert!(matches!(site.outbox_stream("big.bin", 1 << 20).await, Err(ShareFileError::Unavailable)));
+    let list = tokio::time::timeout(Duration::from_secs(1), site.outbox_list(100)).await.expect("清單不能被下載占住");
+    assert!(list.is_ok());
+    drop(held);
+}
