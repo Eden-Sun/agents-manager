@@ -248,6 +248,27 @@ pub fn grok_default_effort_from_config(text: &str) -> Option<String> {
     pick(&doc).or_else(|| doc.get("models").and_then(pick))
 }
 
+/// codex 身分 `config.toml` 頂層的 `model`／`model_reasoning_effort`＝這個身分實際會跑的模型與強度（`-c` 或 `/model` 寫進去的也是這兩行）。
+/// 模型有設就以它為 `is_default`（不在清單裡的就一顆都不標，不猜）；強度有設就覆寫那顆預設模型的 `default_effort`。
+/// 兩個都沒設＝照 app-server 回的。讀不懂的 TOML 原樣回傳。只看頂層，`[profiles.*]` 裡的不算。
+pub fn codex_apply_identity_config(mut models: Vec<Value>, cfg_text: &str) -> Vec<Value> {
+    let Ok(doc) = toml::from_str::<toml::Value>(cfg_text) else { return models };
+    let top = |key: &str| doc.get(key).and_then(|v| v.as_str()).map(str::trim).filter(|s| !s.is_empty()).map(String::from);
+    if let Some(model) = top("model") {
+        for v in &mut models {
+            v["is_default"] = json!(v["id"].as_str() == Some(model.as_str()));
+        }
+    }
+    if let Some(effort) = top("model_reasoning_effort") {
+        for v in &mut models {
+            if v["is_default"] == json!(true) {
+                v["default_effort"] = json!(effort);
+            }
+        }
+    }
+    models
+}
+
 /// Unparsable is `(None, {})`, never an error. Overrides are keyed by real model id and matched
 /// to aliases by substring (verified against local + m4p `settings.json`, 2026-09-07).
 pub fn parse_claude_effort_settings(text: &str) -> (Option<String>, BTreeMap<String, String>) {
@@ -264,16 +285,35 @@ pub fn parse_claude_effort_settings(text: &str) -> (Option<String>, BTreeMap<Str
     (global, per_model)
 }
 
-/// `None` = `~/.claude`; an unknown or non-claude identity silently falls back to that too.
-pub async fn claude_config_dir(app: &Arc<impl crate::tools::ToolsEnv + 'static>, host: &str, identity: Option<&str>) -> Result<Option<String>> {
+/// 身分 `env` 裡的家目錄變數（`CLAUDE_CONFIG_DIR`／`CODEX_HOME`／`GROK_HOME`）展開成這台的絕對路徑。
+/// `None` = 沒有身分、身分不是這個 kind、或沒設這個變數：照 CLI 預設家目錄。
+pub async fn identity_home_dir(app: &Arc<impl crate::tools::ToolsEnv + 'static>, host: &str, identity: Option<&str>, kind: &str, var: &str) -> Result<Option<String>> {
     let Some(name) = identity else { return Ok(None) };
     let Some(idn) = crate::tools::identity_for_host(app, host, name).await else { return Ok(None) };
-    if idn.kind != "claude" {
+    if idn.kind != kind {
         return Ok(None);
     }
-    let Some(dir) = idn.env.get("CLAUDE_CONFIG_DIR") else { return Ok(None) };
+    let Some(dir) = idn.env.get(var) else { return Ok(None) };
     let home = crate::tools::host_home(app, host).await?;
     Ok(Some(expand_home(dir, &home)))
+}
+
+/// `None` = `~/.claude`; an unknown or non-claude identity silently falls back to that too.
+pub async fn claude_config_dir(app: &Arc<impl crate::tools::ToolsEnv + 'static>, host: &str, identity: Option<&str>) -> Result<Option<String>> {
+    identity_home_dir(app, host, identity, "claude", "CLAUDE_CONFIG_DIR").await
+}
+
+/// 在 shell 腳本前面把家目錄變數 export 成這台的絕對路徑（`CODEX_HOME='…'; export CODEX_HOME; `）。
+pub fn home_env_prefix(var: &str, dir: &str) -> String {
+    format!("{var}={}; export {var}; ", sh_quote(dir))
+}
+
+/// `<家目錄>/<file>` 的 shell 讀檔運算式。有解出絕對路徑就用它；沒有就讀 CLI 預設的 `$HOME/<default_dir>`。
+pub fn home_file_expr(home_dir: Option<&str>, default_dir: &str, file: &str) -> String {
+    match home_dir {
+        Some(dir) => format!("{}/{file}", sh_quote(dir)),
+        None => format!("\"$HOME/{default_dir}/{file}\""),
+    }
 }
 
 pub fn optional_cat_script(path_expr: &str) -> String {
@@ -300,16 +340,21 @@ pub async fn read_optional_text(app: &impl crate::hosts::HostsAccess, host: &str
     }
 }
 
+/// settings.json 頂層的 `model`：claude 的 `/model` 寫進去的那個預設（`sonnet`、`claude-sonnet-5-5`…）。沒有＝`None`，不猜。
+pub fn parse_claude_default_model(text: &str) -> Option<String> {
+    let v = serde_json::from_str::<Value>(text).ok()?;
+    v.get("model").and_then(|x| x.as_str()).map(str::trim).filter(|s| !s.is_empty()).map(str::to_string)
+}
+
+/// 回傳 `(全域 effortLevel, per-model 覆寫, 頂層 model)`，三個都從同一份 settings.json 讀。
 pub async fn read_claude_effort_settings(
     app: &impl crate::hosts::HostsAccess,
     host: &str,
     config_dir: Option<&str>,
-) -> Result<(Option<String>, BTreeMap<String, String>)> {
-    let path = match config_dir {
-        Some(dir) => format!("{}/settings.json", sh_quote(dir)),
-        None => "\"$HOME/.claude/settings.json\"".to_string(),
-    };
-    Ok(parse_claude_effort_settings(&read_optional_text(app, host, &path).await?))
+) -> Result<(Option<String>, BTreeMap<String, String>, Option<String>)> {
+    let text = read_optional_text(app, host, &home_file_expr(config_dir, ".claude", "settings.json")).await?;
+    let (global, per_model) = parse_claude_effort_settings(&text);
+    Ok((global, per_model, parse_claude_default_model(&text)))
 }
 
 /// claude's built-in default with no `effortLevel` / override: docs and a fresh identity both say
@@ -357,24 +402,34 @@ pub fn claude_effort_override(per_model: &BTreeMap<String, String>, model: &str)
 /// 讀不到設定檔回 `Err`（不是內建預設）：呼叫端會把這個值記進 bot，記錯了沒有人會再來讀一次。
 pub async fn claude_default_effort(app: &Arc<impl crate::hosts::HostsAccess + crate::tools::ToolsEnv + 'static>, host: &str, identity: Option<&str>, alias: &str) -> Result<String> {
     let dir = claude_config_dir(app, host, identity).await?;
-    let (global, per_model) = read_claude_effort_settings(app, host, dir.as_deref()).await?;
+    let (global, per_model, _) = read_claude_effort_settings(app, host, dir.as_deref()).await?;
     let alias = alias.to_ascii_lowercase();
     Ok(claude_effort_override(&per_model, &alias)
         .or(global)
         .unwrap_or_else(|| claude_builtin_default_effort(&alias).to_string()))
 }
 
-pub fn claude_static_models(global: Option<&str>, per_model: &BTreeMap<String, String>) -> Vec<Value> {
+/// settings.json 的 `model` 對到哪個系列別名（`sonnet`、`opus[1m]`、`claude-sonnet-5-5`…）；對不到就 `None`。
+/// 只認整段相等或 `claude-<alias>-…`，不做子字串（否則 `claude-opus-…` 會被當成 sonnet 之類的誤判）。
+pub fn claude_alias_of(model: &str) -> Option<&'static str> {
+    let base = model.split('[').next().unwrap_or("").trim().to_ascii_lowercase();
+    ["opus", "sonnet", "haiku", "fable"]
+        .into_iter()
+        .find(|a| base == *a || base == format!("claude-{a}") || base.starts_with(&format!("claude-{a}-")))
+}
+
+/// `default_model` 是帳號 settings.json 的頂層 `model`：`is_default` 只標它對到的那一顆；沒有就一顆都不標（不猜 opus）。
+pub fn claude_static_models(global: Option<&str>, per_model: &BTreeMap<String, String>, default_model: Option<&str>) -> Vec<Value> {
     // claude 沒有 per-model effort 清單，每個 alias 都用 `--effort` 那五級。
     let efforts: Vec<Value> = crate::config::efforts_for_kind("claude").iter().map(|e| json!(e)).collect();
+    let default_alias = default_model.and_then(claude_alias_of);
     ["opus", "sonnet", "haiku", "fable"]
         .iter()
-        .enumerate()
-        .map(|(i, id)| {
+        .map(|id| {
             let overridden = claude_effort_override(per_model, id);
             let default_effort = overridden.or_else(|| global.map(str::to_string)).unwrap_or_else(|| claude_builtin_default_effort(id).to_string());
             json!({
-                "id": id, "display_name": id, "description": "", "is_default": i == 0,
+                "id": id, "display_name": id, "description": "", "is_default": default_alias == Some(*id),
                 "default_effort": default_effort, "efforts": efforts, "service_tiers": [],
             })
         })

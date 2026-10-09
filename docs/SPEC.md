@@ -3847,6 +3847,8 @@ claude 的預設強度來自**帳號的 `settings.json`**：
 - 兩者都沒有、讀不到、非法 JSON → claude 內建預設按模型分（`models::claude_builtin_default_effort`）：**haiku `medium`**，其餘 **`high`**（2026-10-08 Claude Code 2.1.293 實測：沒帶 `--effort`、settings 沒有 `effortLevel`，haiku 的對話紀錄每則 assistant 都是 `"effort":"medium"`，sonnet 是 high；#880）。沒有 hook 的 claude 子 agent 另以對話紀錄最新一則 assistant 的 `effort`／`message.model` 寫進 `runs.runtime_effort`／`runtime_model`（`claude_child_log::record_runtime`，§12.5b），網頁顯示優先用 runtime、`bots.effort` 只是設定值，不回寫。
 - `GET /api/models?kind=claude&host=&identity=` 的 `identity` 決定讀哪個 `CLAUDE_CONFIG_DIR/settings.json`（`identities_for_host`）；不指定或不存在 → 預設帳號 `~/.claude/settings.json`。
   本機讀檔、遠端 ssh `cat`。快取 key `{host}/{kind}/{identity}`，10 分鐘 TTL。
+- **預設標記（`is_default`）跟著同一份 settings.json 的頂層 `model`**（#941）：對到哪個系列別名就標哪顆（`claude_alias_of`：整段相等，或 `claude-<alias>-…` 開頭；不做子字串）。沒有 `model`、或對不到 → 一顆都不標，不猜 `opus`。
+- **codex／grok 也看身分的家目錄**（#941）：codex 的 `model/list` 帶 `CODEX_HOME`，並讀身分 `config.toml` 頂層 `model`（標預設）與 `model_reasoning_effort`（覆寫那顆的 `default_effort`）；grok 的 `grok models` 帶 `GROK_HOME`，讀它的 `config.toml`（`default_reasoning_effort`）與 `models_cache.json`。沒有身分或身分沒設家目錄 → daemon 預設家目錄（`~/.codex`、`~/.grok`）。
 - UI tooltip 講來源：「不帶 --effort（帳號目前設定 高）」，不寫「模型預設」。
 - `--effort bogus` 只印警告並用預設，不會讓 run 掛掉。
 
