@@ -629,7 +629,7 @@ function NewBotForm({ onDone, initialProjectId }: { onDone: () => void; initialP
   // 驗 trim 過的：打到一半的 `my ` 不該先閃紅字；送出也送 trim 過的。
   const nameOk = isValidBotName(name.trim())
   const cliOk = Boolean(tools[kind]?.installed)
-  const shareOn = shareProfile !== null && !shareProfileBlocked(kind, host)
+  const shareOn = shareProfile !== null && !shareProfileBlocked(kind)
   const folderIn = shareOn ? shareFolderInput(shareFolder, name) : null
   const projectPath = projects.find((p) => p.id === pid)?.path
   const canSubmit = nameOk && cliOk && Boolean(pid) && !busy && !(folderIn && 'error' in folderIn)

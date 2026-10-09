@@ -488,7 +488,8 @@ pub async fn purge_deleted_bot_dirs(app: &(impl crate::capabilities::DataDir + c
     let restricted_deleted: Vec<(String, String)> = sqlx::query_as(
         "SELECT s.bot_id, s.workspace FROM shared_bots s
          JOIN bots b ON b.id = s.bot_id
-         WHERE b.deleted_at IS NOT NULL AND s.profile = 'restricted'",
+         JOIN projects p ON p.id = b.project_id
+         WHERE b.deleted_at IS NOT NULL AND s.profile = 'restricted' AND p.host = 'local'",
     )
     .fetch_all(app.db())
     .await
@@ -554,12 +555,15 @@ pub async fn purge_bot_dir(
     }
     // 受限分享用 bot 的工作目錄（`shared_bots.workspace`，issue #828）。
     // 只有 restricted bot 的工作目錄才收進回收區；信任分享（trusted）的工作區是使用者既有目錄，不能動。
-    if let Ok(Some(ws)) = app.restricted_workspace(bot_id).await {
-        if let Some(ws_path) = app.validate_workspace_path(crate::capabilities::DataDir::data_dir(app), &ws).await {
-            match crate::bot_trash::move_in_kind(crate::capabilities::DataDir::data_dir(app), bot_id, Some(crate::bot_trash::SHARE_WORKSPACE), &ws_path) {
-                Ok(Some(to)) => tracing::info!(bot = %bot_id, dir = %ws_path.display(), trash = %to.display(), "moved restricted share workspace to bots-trash"),
-                Ok(None) => {}
-                Err(e) => tracing::warn!(bot = %bot_id, dir = %ws_path.display(), error = %e, "could not move restricted share workspace to bots-trash"),
+    // 遠端專案的工作目錄是那台機器上的路徑：這台不認得、也不能動（R-S2 §6：遠端資料夾刪 bot 一律不動）。
+    if host == LOCAL_HOST {
+        if let Ok(Some(ws)) = app.restricted_workspace(bot_id).await {
+            if let Some(ws_path) = app.validate_workspace_path(crate::capabilities::DataDir::data_dir(app), &ws).await {
+                match crate::bot_trash::move_in_kind(crate::capabilities::DataDir::data_dir(app), bot_id, Some(crate::bot_trash::SHARE_WORKSPACE), &ws_path) {
+                    Ok(Some(to)) => tracing::info!(bot = %bot_id, dir = %ws_path.display(), trash = %to.display(), "moved restricted share workspace to bots-trash"),
+                    Ok(None) => {}
+                    Err(e) => tracing::warn!(bot = %bot_id, dir = %ws_path.display(), error = %e, "could not move restricted share workspace to bots-trash"),
+                }
             }
         }
     }

@@ -722,6 +722,7 @@ mod arc_port_52_setupshareservices {
     use std::{future::Future, path::{Path, PathBuf}};
     impl<T: crate::lifecycle::s6_ports::SetupShareServices + ?Sized> crate::lifecycle::s6_ports::SetupShareServices for std::sync::Arc<T> {
         fn cage_settings(&self, settings: &mut Value, workspace: &str, env: &Value) { <T as crate::lifecycle::s6_ports::SetupShareServices>::cage_settings(self.as_ref(), settings, workspace, env) }
+        fn write_remote_private_file<'a>(&'a self, conn: &'a am_base::hosts::HostConn, dir: &'a str, name: &'a str, data: &'a [u8]) -> impl Future<Output = anyhow::Result<()>> + Send + 'a { <T as crate::lifecycle::s6_ports::SetupShareServices>::write_remote_private_file(self.as_ref(), conn, dir, name, data) }
     }
 }
 
@@ -742,13 +743,15 @@ mod arc_port_53_startservices {
             &'a self,
             env: &'a mut Value,
             bot: &'a db::Bot,
-        ) -> impl Future<Output = ()> + Send + 'a { <T as crate::lifecycle::s6_ports::StartServices>::cage_environment(self.as_ref(), env, bot) }
-        fn install_restricted_prompt(
-            &self,
-            bot: &db::Bot,
-            workspace: &str,
-            env: &Value,
-        ) -> anyhow::Result<PathBuf> { <T as crate::lifecycle::s6_ports::StartServices>::install_restricted_prompt(self.as_ref(), bot, workspace, env) }
+            host: &'a str,
+        ) -> impl Future<Output = ()> + Send + 'a { <T as crate::lifecycle::s6_ports::StartServices>::cage_environment(self.as_ref(), env, bot, host) }
+        fn install_restricted_prompt<'a>(
+            &'a self,
+            bot: &'a db::Bot,
+            host: &'a str,
+            workspace: &'a str,
+            env: &'a Value,
+        ) -> impl Future<Output = anyhow::Result<String>> + Send + 'a { <T as crate::lifecycle::s6_ports::StartServices>::install_restricted_prompt(self.as_ref(), bot, host, workspace, env) }
         fn restricted_launch_args(&self, env: &Value, prompt: &Path) -> Vec<String> { <T as crate::lifecycle::s6_ports::StartServices>::restricted_launch_args(self.as_ref(), env, prompt) }
         fn pane_env(
             &self,

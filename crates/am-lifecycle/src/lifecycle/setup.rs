@@ -728,8 +728,8 @@ pub async fn remote_bot_dir_for(conn: &HostConn, bot_id: &str, instance: Option<
 }
 
 /// SPEC §11.4 — push `hook.sh` (+ `claude-settings.json`) to the remote before `agent.start`.
-async fn install_remote_hook(conn: &HostConn, bot: &db::Bot, instance: Option<&str>) -> anyhow::Result<RemoteHookPaths> {
-    let p = remote_bot_dir_for(conn, &bot.id, instance).await?;
+/// 遠端 claude bot 的 settings：hook 指令指向遠端的 `hook.sh`。受限 bot 再由 `cage_settings` 蓋一次（見 `injected_args`）。
+fn remote_claude_settings(p: &RemoteHookPaths, bot: &db::Bot) -> Value {
     // Token slot is `-` (review 2026-09-12 #8): `hook.sh` never reads it and the real key opens
     // `/relay/announce` + `/hook/*`. Kept positional for older agents.
     let cmd = shell_join(&[p.hook_sh.clone(), "claude".into(), bot.id.clone(), REMOTE_TOKEN_SLOT.into()]);
@@ -737,7 +737,12 @@ async fn install_remote_hook(conn: &HostConn, bot: &db::Bot, instance: Option<&s
     let statusline = shell_join(&[p.hook_sh.clone(), "statusline".into(), bot.id.clone(), REMOTE_TOKEN_SLOT.into()]);
     // 遠端也用同一支：`remoteControlAtStartup` 要明講，否則那台機器帳號的全域設定會替每顆 bot
     // 決定要不要開手機入口（見 `claude_settings`）。
-    let settings = claude_settings(&cmd, &statusline, bot.args().iter().any(|a| a == "--remote-control"), bot.auto_approve != 0);
+    claude_settings(&cmd, &statusline, bot.args().iter().any(|a| a == "--remote-control"), bot.auto_approve != 0)
+}
+
+async fn install_remote_hook(conn: &HostConn, bot: &db::Bot, instance: Option<&str>) -> anyhow::Result<RemoteHookPaths> {
+    let p = remote_bot_dir_for(conn, &bot.id, instance).await?;
+    let settings = remote_claude_settings(&p, bot);
     let settings_text = serde_json::to_string_pretty(&settings)?;
     let script = format!(
         // issue #494：目錄 0700、腳本 0700、設定 0600。`umask 077` 管新建的，`chmod` 管舊版留下的
@@ -831,8 +836,8 @@ pub async fn injected_args(app: &(impl crate::capabilities::DataDir + crate::cap
     if bot.inject_hooks == 0 && restricted.is_none() {
         return Ok(out);
     }
-    if restricted.is_some() && (bot.kind != "claude" || project.host != LOCAL_HOST) {
-        anyhow::bail!("restricted share bot must be a local claude bot");
+    if restricted.is_some() && bot.kind != "claude" {
+        anyhow::bail!("restricted share bot must be a claude bot");
     }
 
     // remote project: POSIX sh hook via that host's own herdr (§11.4)
@@ -843,6 +848,13 @@ pub async fn injected_args(app: &(impl crate::capabilities::DataDir + crate::cap
             .await
             .ok_or_else(|| anyhow::anyhow!("unknown host `{}`", project.host))?;
         let paths = install_remote_hook(&conn, bot, app.instance().as_deref()).await?;
+        if let Some(ws) = &restricted {
+            // 受限：settings 換成籠子那一版寫回遠端；寫完比對 sha256，不符就不啟動（R-S2 §4.2）。
+            let mut settings = remote_claude_settings(&paths, bot);
+            app.cage_settings(&mut settings, ws, env);
+            let bytes = serde_json::to_vec_pretty(&settings)?;
+            app.write_remote_private_file(&conn, &paths.dir, "claude-settings.json", &bytes).await?;
+        }
         let hook_args: Vec<String> = match bot.kind.as_str() {
             // Trial: `--verbose` expands tool output in the pane so the 終端 preview shows what ran.
             "claude" => vec!["--settings".into(), paths.settings, "--verbose".into()],
