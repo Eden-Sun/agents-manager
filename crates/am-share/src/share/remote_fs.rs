@@ -1745,16 +1745,7 @@ impl RemoteSite {
         let script = photo_fetch_script(&self.workspace, rels, each_max, total_max);
         // 照片是二進位，走原始位元組（見 `exec_bytes`）。讀取上限＝合計上限＋每筆框頭的餘裕；遠端超過就當不可信（#987）。
         let cap = total_max.saturating_add(64 * 1024 * rels.len() as u64).saturating_add(4096);
-        use tokio::io::AsyncReadExt as _;
-        let mut stream = self.conn.ssh_stream(&script, &[]).await.map_err(|e| {
-            tracing::warn!(host = %self.host, error = %e, "photo_fetch ssh failed");
-            RfsError::Unavailable
-        })?;
-        let mut out = Vec::new();
-        match tokio::time::timeout(TIMEOUT_MAINTAIN, stream.take(cap.saturating_add(1)).read_to_end(&mut out)).await {
-            Ok(Ok(_)) if (out.len() as u64) <= cap => {}
-            _ => return Err(RfsError::Unavailable),
-        }
+        let out = exec_bytes(&self.conn, &self.host, &script, TIMEOUT_MAINTAIN, cap, "photo_fetch").await?;
         parse_photo_fetch(&out, rels, each_max, total_max)
     }
 
