@@ -232,6 +232,9 @@ struct MockState {
     seq: Arc<std::sync::atomic::AtomicU64>,
 }
 
+/// 下一顆 MockHerdr 的 id 起點（行程全域）。
+static MOCK_SEQ_BASE: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+
 impl MockState {
     fn next(&self) -> u64 {
         self.seq.fetch_add(1, std::sync::atomic::Ordering::SeqCst)
@@ -299,7 +302,9 @@ impl MockHerdr {
             hide_agent_list: Default::default(),
             allow_subscribe: Default::default(),
             pong: Arc::new(StdMutex::new(("mock".into(), 20))),
-            seq: Arc::new(std::sync::atomic::AtomicU64::new(1)),
+            // 每顆 MockHerdr 各佔一段 id 空間：以前每顆都從 1 起算，每條測試拿到同一組 `ws-N:pM`，
+            // 以 pane id 當 key 的 `race_point` 就在不同測試之間互相吃動作（issue #949）。
+            seq: Arc::new(std::sync::atomic::AtomicU64::new(MOCK_SEQ_BASE.fetch_add(1_000_000, std::sync::atomic::Ordering::SeqCst))),
         };
         let (workspaces, tabs, calls, agents) =
             (state.workspaces.clone(), state.tabs.clone(), state.calls.clone(), state.agents.clone());
@@ -1213,6 +1218,24 @@ pub mod git {
         std::fs::write(dir.join("README.md"), "base\n").unwrap();
         run(dir, &["add", "-A"]);
         run(dir, &["commit", "-q", "-m", "base"]);
+    }
+}
+
+#[cfg(test)]
+mod mock_herdr_id_tests {
+    /// issue #949：每顆 MockHerdr 的 id 從各自的空間起算；以前都從 1 起算，每條測試拿到同一組 `ws-N:pM`，
+    /// 以 pane id 當 key 的 `race_point` 在不同測試之間互相吃動作。
+    #[tokio::test]
+    async fn two_mock_herdrs_never_hand_out_the_same_pane_ids() {
+        let dir = super::scratch_dir("am-mock-ids");
+        let (sock_a, sock_b) = (dir.join("a.sock"), dir.join("b.sock"));
+        let _a = super::MockHerdr::start(sock_a.clone());
+        let _b = super::MockHerdr::start(sock_b.clone());
+        let (client_a, client_b) = (crate::herdr::HerdrClient::new(sock_a), crate::herdr::HerdrClient::new(sock_b));
+        let (_, pane_a) = client_a.workspace_create("/tmp", "a", serde_json::json!({})).await.unwrap();
+        let (_, pane_b) = client_b.workspace_create("/tmp", "b", serde_json::json!({})).await.unwrap();
+        assert_ne!(pane_a.pane_id, pane_b.pane_id, "兩顆 mock 的 root pane id 不同");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }
 

@@ -354,7 +354,8 @@ pub async fn release(
     };
     #[cfg(all(test, feature = "daemon-test-harness"))]
     if released {
-        crate::lifecycle::race_point::hit("lease_release_after_mark", resource).await;
+        // key 用這張租約的 token（沒有 token 的舊列才退回 resource）：測試之間共用 `"rebuild"` 時，別條測試的 release 會吃掉動作（issue #949）。
+        crate::lifecycle::race_point::hit("lease_release_after_mark", held.lease_token.as_deref().unwrap_or(resource)).await;
     }
     if released {
         if let Some(ap) = held.approval_id.as_deref() {
@@ -1069,7 +1070,7 @@ mod tests {
         let token = first.lease_token.clone().unwrap();
         let next_app = app.clone();
         let next_id = next_approval.clone();
-        crate::lifecycle::race_point::arm("lease_release_after_mark", "rebuild", move || async move {
+        crate::lifecycle::race_point::arm("lease_release_after_mark", &token, move || async move {
             let replacement = store::acquire_lease(
                 &next_app.db,
                 "rebuild",
@@ -1092,6 +1093,39 @@ mod tests {
         assert!(current.released_at.is_none(), "the new holder remains active");
         assert_eq!(store::approval(&app.db, &next_approval).await.unwrap().unwrap().status, "approved",
             "releasing fence {} must not consume the replacement's approval", first.fence);
+    }
+
+    /// issue #949：`lease_release_after_mark` 的 key 是租約 token，不是共用的 `"rebuild"`：別條測試（或別張租約）的 release
+    /// 不會吃掉掛在另一張租約上的動作，動作也不會在別人的 release 裡 panic。
+    #[tokio::test]
+    async fn an_armed_release_action_fires_only_for_its_own_lease_token() {
+        use std::sync::atomic::{AtomicBool, Ordering};
+        use std::sync::Arc;
+        let e = crate::testing::env().await;
+        let app = &e.app;
+        let other_fired = Arc::new(AtomicBool::new(false));
+        let flag = other_fired.clone();
+        crate::lifecycle::race_point::arm("lease_release_after_mark", "someone-elses-token", move || async move {
+            flag.store(true, Ordering::SeqCst);
+        });
+
+        let a = approved_window(app, 0).await;
+        let first = acquire(app, "rebuild", "ops", &a, None, 300, true, &[]).await.unwrap();
+        let (fence, token) = (first["lease"]["fence"].as_i64().unwrap(), first["lease_token"].as_str().unwrap().to_string());
+        assert!(release(app, "rebuild", "ops", fence, store::LeaseProof::Token(&token)).await.unwrap());
+        assert!(!other_fired.load(Ordering::SeqCst), "另一張租約的 token 掛的動作，不會被這張的 release 觸發");
+
+        let b = approved_window(app, 0).await;
+        let second = acquire(app, "rebuild", "ops", &b, None, 300, true, &[]).await.unwrap();
+        let (fence2, token2) = (second["lease"]["fence"].as_i64().unwrap(), second["lease_token"].as_str().unwrap().to_string());
+        let own_fired = Arc::new(AtomicBool::new(false));
+        let flag = own_fired.clone();
+        crate::lifecycle::race_point::arm("lease_release_after_mark", &token2, move || async move {
+            flag.store(true, Ordering::SeqCst);
+        });
+        assert!(release(app, "rebuild", "ops", fence2, store::LeaseProof::Token(&token2)).await.unwrap());
+        assert!(own_fired.load(Ordering::SeqCst), "掛在自己 token 上的動作要觸發");
+        assert!(!other_fired.load(Ordering::SeqCst));
     }
 
     /// 核准後一直等不到全靜止時才放寬，而且只放寬「思考中」這一項。
