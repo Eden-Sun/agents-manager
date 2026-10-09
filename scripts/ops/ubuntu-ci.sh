@@ -229,10 +229,11 @@ free_kb="$(df -Pk "${CI_ROOT}" | awk 'NR==2 {print $4}')"
 free_gb=$(( ${free_kb:-0} / 1048576 ))
 if [ "${free_gb}" -lt "${MIN_FREE_GB}" ]; then
     if [ "$(cat "${CI_ROOT}/disk-low-sha" 2>/dev/null || true)" != "${sha}" ]; then
+        # 先記「這個 sha 已經報過」：磁碟全滿時後面的寫入（status.json）會失敗，記號寫不下去的話每分鐘都重送一次 error（#945）。
+        echo "${sha}" > "${CI_ROOT}/disk-low-sha" 2>/dev/null || true
         status error "磁碟不足，未執行（剩 ${free_gb}G，門檻 ${MIN_FREE_GB}G）"
         printf '{"sha":"%s","state":"error","reason":"disk_low","free_gb":%s,"min_free_gb":%s,"at":"%s"}\n' \
-            "${sha}" "${free_gb}" "${MIN_FREE_GB}" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" > "${CI_ROOT}/status.json"
-        echo "${sha}" > "${CI_ROOT}/disk-low-sha"
+            "${sha}" "${free_gb}" "${MIN_FREE_GB}" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" > "${CI_ROOT}/status.json" 2>/dev/null || true
     fi
     echo "ubuntu-ci: 磁碟不足（剩 ${free_gb}G，門檻 ${MIN_FREE_GB}G），不跑 ${sha}" >&2
     exit 0
@@ -291,21 +292,43 @@ fail_prefix=""
 for old_irc in "${CI_ROOT}"/interrupted-*; do
     [ -e "${old_irc}" ] && [ "${old_irc}" != "${irc_file}" ] && rm -f -- "${old_irc}"
 done
-if [ "${rc}" != 0 ] && [ -n "${interrupted}" ] && [ "${signal_only}" = 1 ] \
-    && ! grep -Eq '^test .* \.\.\. FAILED$|^FAIL - ' "${log}"; then
+# 磁碟滿（#945）：跑到一半 ENOSPC（同機的 worktree 把碟寫滿）是環境問題不是這個 commit 的錯。證據：log 有 `No space left on device`
+# 或 check.sh 的「失敗時磁碟只剩」，或跑完再量一次剩餘空間已低於門檻。紅燈會讓 last-sha 前進、同一個 sha 不再重試，ci-watch 還會開票派工，
+# 所以走跟中斷同一條路（記 error、不動 last-sha、共用 interrupted-<sha> 計數，3 次才當 failure）。ENOSPC 常讓測試也跟著紅，所以不看 FAIL 證據。
+end_free_kb="$(df -Pk "${CI_ROOT}" 2>/dev/null | awk 'NR==2 {print $4}' || true)"
+# 量不出來就不拿這條當證據（當成很大），免得 df 壞掉時每個紅燈都被說成磁碟滿。
+case "${end_free_kb}" in *[!0-9]*|'') end_free_gb=999999 ;; *) end_free_gb=$(( end_free_kb / 1048576 )) ;; esac
+disk_full=0
+if [ "${rc}" != 0 ] && { grep -Fq 'No space left on device' "${log}" || grep -Fq '!! 失敗時磁碟只剩' "${log}" \
+    || [ "${end_free_gb}" -lt "${MIN_FREE_GB}" ]; }; then
+    disk_full=1
+fi
+if [ "${rc}" != 0 ] && { [ "${disk_full}" = 1 ] || { [ -n "${interrupted}" ] && [ "${signal_only}" = 1 ] \
+    && ! grep -Eq '^test .* \.\.\. FAILED$|^FAIL - ' "${log}"; }; }; then
     irc_count="$(cat "${irc_file}" 2>/dev/null || echo 0)"
     case "${irc_count}" in *[!0-9]*|'') irc_count=0 ;; esac
     irc_count=$((irc_count + 1))
+    if [ "${disk_full}" = 1 ]; then
+        reason=disk_full
+        fail_kind="連續磁碟滿 3 次："
+    else
+        reason=interrupted
+        fail_kind="連續中斷 3 次："
+    fi
     if [ "${irc_count}" -lt 3 ]; then
         echo "${irc_count}" > "${irc_file}"
-        desc="$(printf '中斷：%s，會重跑' "${interrupted}" | cut -c1-120)"
+        if [ "${disk_full}" = 1 ]; then
+            desc="$(printf '磁碟滿：跑完剩 %sG（門檻 %sG），會重跑' "${end_free_gb}" "${MIN_FREE_GB}" | cut -c1-120)"
+        else
+            desc="$(printf '中斷：%s，會重跑' "${interrupted}" | cut -c1-120)"
+        fi
         final_status error "${desc}"
-        printf '{"sha":"%s","state":"error","reason":"interrupted","rc":%s,"interrupted_count":%s,"started":"%s","finished":"%s","log":"%s","description":"%s"}\n' \
-            "${sha}" "${rc}" "${irc_count}" "${started}" "${finished}" "$(json_str "${log}")" "$(json_str "${desc}")" > "${CI_ROOT}/status.json"
+        printf '{"sha":"%s","state":"error","reason":"%s","rc":%s,"interrupted_count":%s,"started":"%s","finished":"%s","log":"%s","description":"%s"}\n' \
+            "${sha}" "${reason}" "${rc}" "${irc_count}" "${started}" "${finished}" "$(json_str "${log}")" "$(json_str "${desc}")" > "${CI_ROOT}/status.json"
         finalized=1
         exit 0
     fi
-    fail_prefix="連續中斷 3 次："
+    fail_prefix="${fail_kind}"
 fi
 rm -f -- "${irc_file}"
 if [ "${rc}" = 0 ]; then
