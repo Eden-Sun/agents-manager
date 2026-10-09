@@ -1064,7 +1064,7 @@ pub fn photo_fetch_script(
     workspace: &str,
     rels: &[Vec<String>],
     each_max: u64,
-    _total_max: u64,
+    total_max: u64,
 ) -> String {
     let header = script_common_header();
     let mut body = String::new();
@@ -1092,12 +1092,15 @@ pub fn photo_fetch_script(
       else
         sz=$(stat -L -f '%z' /dev/fd/3 2>/dev/null) || bad=1
       fi
-      if [ "$bad" -eq 0 ] && [ "$sz" -le {each_max} ]; then
+      # 合計在送出之前判斷：已送出的大小累計在 $T（子 shell 改不了父 shell 變數）（#987）。
+      used=$(awk '{{s+=$1}} END{{print s+0}}' "$T")
+      if [ "$bad" -eq 0 ] && [ "$sz" -le {each_max} ] && [ $(( used + sz )) -le {total_max} ]; then
         prefix_len=$(printf '%d\tOK\n' "{idx}" | wc -c | tr -d ' ')
         total_len=$(( prefix_len + sz ))
         printf 'PHOTO %d\n%d\tOK\n' "$total_len" "{idx}"
         head -c "$sz" <&3
         printf '\n'
+        echo "$sz" >> "$T"
       else
         exec 3<&-
         prefix=$(printf '%d\tERR\tsource_too_large' "{idx}")
@@ -1123,10 +1126,13 @@ pub fn photo_fetch_script(
             leaf_quoted = sh_quote(leaf),
             idx = idx,
             each_max = each_max,
+            total_max = total_max,
         ));
     }
     format!(
         r#"{header}
+T=$(mktemp "${{TMPDIR:-/tmp}}/am-rfs-photo.XXXXXX") || {{ printf 'AM_RFS1\nERR 9\nUNTRUSTED\nAM_RFS_DONE\n'; exit 0; }}
+trap 'rm -f "$T"' EXIT
 printf 'AM_RFS1\n'
 {body}
 printf 'AM_RFS_DONE\n'
@@ -1719,15 +1725,16 @@ impl RemoteSite {
         }
         let _permit = acquire_slot(&self.host, TIMEOUT_MAINTAIN).await?;
         let script = photo_fetch_script(&self.workspace, rels, each_max, total_max);
-        // 照片是二進位：`ssh_exec_timeout` 回 `String`（有損 UTF-8 轉換會弄壞位元組、長度對不上），所以走 `ssh_stream` 讀原始 stdout。
+        // 照片是二進位，走原始位元組（見 `exec_bytes`）。讀取上限＝合計上限＋每筆框頭的餘裕；遠端超過就當不可信（#987）。
+        let cap = total_max.saturating_add(64 * 1024 * rels.len() as u64).saturating_add(4096);
         use tokio::io::AsyncReadExt as _;
         let mut stream = self.conn.ssh_stream(&script, &[]).await.map_err(|e| {
             tracing::warn!(host = %self.host, error = %e, "photo_fetch ssh failed");
             RfsError::Unavailable
         })?;
         let mut out = Vec::new();
-        match tokio::time::timeout(TIMEOUT_MAINTAIN, stream.read_to_end(&mut out)).await {
-            Ok(Ok(_)) => {}
+        match tokio::time::timeout(TIMEOUT_MAINTAIN, stream.take(cap.saturating_add(1)).read_to_end(&mut out)).await {
+            Ok(Ok(_)) if (out.len() as u64) <= cap => {}
             _ => return Err(RfsError::Unavailable),
         }
         parse_photo_fetch(&out, rels, each_max, total_max)
