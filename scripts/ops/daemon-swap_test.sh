@@ -593,6 +593,114 @@ check_no "失敗時不能說還原成功" "db restored from" "$SWAP_LOG"
 teardown
 unset STUB_MUTATE_DB
 
+# 5e. 換版的 cp 寫一半失敗（磁碟滿了，issue #944）：daemon 已經停了，要把舊 binary 搬回、舊 daemon 起回來、交還窗口，
+#     rc=5，不能走回滾（rc=7）、不能留截斷的正式 binary；之後再跑不受影響。
+setup 10 10
+mkdir -p "$ROOT/fakecp"
+cat > "$ROOT/fakecp/cp" <<'STUB'
+#!/bin/bash
+for a in "$@"; do dest=$a; done
+case "$dest" in
+  *agents-managerd.new.*) printf 'half-written' > "$dest"; exit 1 ;;   # 換版用的暫存檔：寫一半就失敗
+esac
+exec /bin/cp "$@"
+STUB
+chmod +x "$ROOT/fakecp/cp"
+rc=$(PATH="$ROOT/fakecp:$PATH" run)
+check_eq "換版 cp 失敗 rc=5" "5" "$rc"
+check_eq "正式 binary 還是舊的" "old-binary" "$(cat "$AGM_REPO/target/release/agents-managerd")"
+check_eq "舊 daemon 被起回來" "old-binary" "$(tail -1 "$AGM_DIR/started-binary.log")"
+check_no "不能說已回滾" "rolled back" "$SWAP_LOG"
+check "log 講清楚複製失敗" "新 binary 複製到 target/release 失敗" "$SWAP_LOG"
+check_file "不留截斷的暫存檔" no "$AGM_REPO/target/release/agents-managerd.new.*"
+check_file "沒有寫 .rejected" no "$AGM_DIR/daemon-update.rejected"
+rc=$(run)
+check_eq "cp 恢復後再跑就成功（不是卡在 rc=3）" "0" "$rc"
+check_eq "第二次換上新 binary" "new-binary" "$(tail -1 "$AGM_DIR/started-binary.log")"
+teardown
+
+# 5f. 回滾用備份的 cp 寫一半失敗（磁碟滿了）：不能留下半截的 .bak-<old> 讓之後每一輪都 rc=3（issue #944）。
+setup 10 10
+mkdir -p "$ROOT/fakecp"
+cat > "$ROOT/fakecp/cp" <<'STUB'
+#!/bin/bash
+for a in "$@"; do dest=$a; done
+case "$dest" in
+  *agents-managerd.bak-*) printf 'half-written' > "$dest"; exit 1 ;;
+esac
+exec /bin/cp "$@"
+STUB
+chmod +x "$ROOT/fakecp/cp"
+rc=$(PATH="$ROOT/fakecp:$PATH" run)
+check_eq "備份 cp 失敗 rc=3（什麼都沒動）" "3" "$rc"
+check_file "沒有留下半截的 .bak-<old>" no "$AGM_REPO/target/release/agents-managerd.bak-$OLD"
+check_eq "正式 binary 沒動" "old-binary" "$(cat "$AGM_REPO/target/release/agents-managerd")"
+check_file "沒有啟動任何東西" no "$AGM_DIR/started-binary.log"
+rc=$(run)
+check_eq "備份恢復正常後再跑就成功" "0" "$rc"
+teardown
+
+# 5g. 停 daemon 前空間不夠放兩份新 binary：daemon 還活著就放棄、交還窗口，rc=5（issue #944）。
+setup 10 10
+mkdir -p "$ROOT/fakedf"
+cat > "$ROOT/fakedf/df" <<'STUB'
+#!/bin/sh
+printf 'Filesystem 1024-blocks Used Available Capacity Mounted on\n/dev/x 100 99 0 100%% /\n'
+STUB
+chmod +x "$ROOT/fakedf/df"
+rc=$(PATH="$ROOT/fakedf:$PATH" run)
+check_eq "空間不足 rc=5" "5" "$rc"
+check "log 講明空間不足" "不到新 binary 的兩倍" "$SWAP_LOG"
+check_file "沒有啟動任何東西（daemon 沒被停）" no "$AGM_DIR/started-binary.log"
+check_eq "正式 binary 沒動" "old-binary" "$(cat "$AGM_REPO/target/release/agents-managerd")"
+teardown
+
+# 5h. 回滾時 cp $BAK 會寫一半（磁碟滿了）：優先搬這趟換下來的 .prev-（rename 不吃磁碟），舊 binary 完整回來，rc=7（issue #944）。
+setup 10 10
+export STUB_SUPERVISOR=stopped
+mkdir -p "$ROOT/fakecp"
+cat > "$ROOT/fakecp/cp" <<'STUB'
+#!/bin/bash
+for a in "$@"; do dest=$a; done
+case "$dest" in
+  *agents-managerd.restore.*|*/agents-managerd) printf 'half-written' > "$dest"; exit 1 ;;
+esac
+exec /bin/cp "$@"
+STUB
+chmod +x "$ROOT/fakecp/cp"
+rc=$(PATH="$ROOT/fakecp:$PATH" run)
+check_eq "cp 寫一半也能靠 .prev- 回滾（rc=7）" "7" "$rc"
+check_eq "舊 binary 完整" "old-binary" "$(cat "$AGM_REPO/target/release/agents-managerd")"
+check "有說回滾完成" "rolled back" "$SWAP_LOG"
+teardown
+
+# 5i. 回滾時 .prev- 搬不回、cp $BAK 又失敗：舊 binary 驗不過就不起 daemon，rc=11，不能 log 說 rolled back（issue #944）。
+setup 10 10
+export STUB_SUPERVISOR=stopped
+mkdir -p "$ROOT/fakecp" "$ROOT/fakemv"
+cat > "$ROOT/fakecp/cp" <<'STUB'
+#!/bin/bash
+for a in "$@"; do dest=$a; done
+case "$dest" in
+  *agents-managerd.restore.*) printf 'half-written' > "$dest"; exit 1 ;;
+esac
+exec /bin/cp "$@"
+STUB
+cat > "$ROOT/fakemv/mv" <<'STUB'
+#!/bin/bash
+if [ "$1" = "-f" ] && [[ "$2" == *agents-managerd.prev-* ]]; then exit 1; fi
+exec /bin/mv "$@"
+STUB
+chmod +x "$ROOT/fakecp/cp" "$ROOT/fakemv/mv"
+rc=$(PATH="$ROOT/fakecp:$ROOT/fakemv:$PATH" run)
+check_eq "舊 binary 還原不了 rc=11（不是 7）" "11" "$rc"
+check_no "不能說已回滾" "rolled back" "$SWAP_LOG"
+check "log 講明還原失敗" "舊 binary 還原失敗" "$SWAP_LOG"
+check_eq "沒再啟動任何 daemon（最後一次還是換版那次）" "new-binary" "$(tail -1 "$AGM_DIR/started-binary.log")"
+check_file "留著備份可手動還原" yes "$AGM_REPO/target/release/agents-managerd.bak-$OLD"
+teardown
+unset STUB_SUPERVISOR
+
 # 5d. 暫存檔已備好，但替換主 DB 的 rename 失敗：原 DB 與 sidecar 都必須保留。
 setup 11 10
 export STUB_SUPERVISOR=stopped STUB_SESSION_OK_AFTER_FORWARD="" STUB_MUTATE_DB=1
