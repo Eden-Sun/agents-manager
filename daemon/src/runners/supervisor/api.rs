@@ -228,6 +228,27 @@ pub async fn post_assignment(
                 "一般 bot 只能對 AGM 角色 bot 送 notice（kind=notice）；派工、要驗收的交辦與任務交辦只給 AGM 角色或使用者",
             ));
         }
+        // 通過上面的檢查：就是這顆一般 bot 自己寫給 AGM 的 notice。寄件者必須是它自己；不能走 `super::assign`，
+        // 那邊 actor=None 被當成使用者，寄件者換成巡檢：交回巡檢一律 400、協調者看到的是巡檢寄的（#991）。
+        if b.text.trim().is_empty() {
+            return Err(LcError::Bad("text must not be empty".into()));
+        }
+        let chars = b.text.chars().count();
+        if chars > crate::lifecycle::MAX_PROVABLE_CHARS {
+            return Err(LcError::Unprocessable(json!({"error": "text_too_long", "max_chars": crate::lifecycle::MAX_PROVABLE_CHARS, "chars": chars, "sent": false})));
+        }
+        let mark = super::bot_requests::ReplyMark { ack: b.ack, reply_to: b.reply_to.as_deref() };
+        // 跟 prompt／shim 的攔截同一條：協調者建立過就排進它的佇列，寄件者是這顆 bot；沒有協調者才排進目標角色。
+        let mut out = match super::bot_requests::intercept(&app, &b.target_bot_id, &bot, &b.text, Some(client_request_id.as_str()), &[], true, "assignment", mark).await? {
+            Some(v) => v,
+            None => {
+                let role = super::roles::role_of_bot(&app.db, &b.target_bot_id).await.map_err(up)?.ok_or_else(|| LcError::NotFound("bot".into()))?;
+                super::bot_requests::queue(&app, role, &bot, &b.target_bot_id, &b.text, Some(client_request_id.as_str()), &[], true, "assignment", mark).await?
+            }
+        };
+        out["kind"] = json!("handover");
+        out["expects_review"] = json!(false);
+        return Ok(Json(out));
     }
     let review_role = match b.review_role.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
         Some(r) => Some(super::roles::Role::parse(r).ok_or_else(|| LcError::Bad("review_role must be patrol | responder".into()))?),
