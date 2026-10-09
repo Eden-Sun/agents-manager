@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState } from 'react'
 import * as api from '../api'
 import type { OutboxFile } from '../api'
-import { downloadFailure, emptyReason, fileSize, isPreviewableImage, lastSettledTurnKey, LOAD_FAILED, readOutbox, remainingLabel, remainingNow } from '../lib/outboxList'
+import { downloadFailure, emptyReason, fileSize, isPreviewableImage, lastSettledTurnKey, LOAD_FAILED, readOutbox, remainingLabel, remainingNow, splitOutboxName } from '../lib/outboxList'
 import { clearOutboxPreviews } from '../lib/outboxPreviewCache'
 import { OutboxImagePreview } from './OutboxImagePreview'
 import { useStore } from '../store/store'
@@ -108,7 +108,7 @@ export function OutboxFiles() {
       const url = await api.outboxFileUrl(botId, name)
       const a = document.createElement('a')
       a.href = url
-      a.download = name
+      a.download = splitOutboxName(name).base // 子資料夾裡的檔：存檔名只取最後一段
       document.body.appendChild(a)
       a.click()
       a.remove()
@@ -158,6 +158,7 @@ export function OutboxFiles() {
         <ul className="outbox-list" role="list">
           {files.map((f) => {
             const left = remainingNow(f, fetchedAt, now)
+            const { dir: folder, base } = splitOutboxName(f.name)
             return (
               <li key={f.name}>
                 <button
@@ -171,7 +172,10 @@ export function OutboxFiles() {
                   onFocus={(e) => showPeek(f, e.currentTarget)}
                   onBlur={hidePeek}
                 >
-                  <span className="outbox-name">{f.name}</span>
+                  <span className="outbox-name">
+                    {folder ? <span className="outbox-dir">{folder}</span> : null}
+                    {base}
+                  </span>
                   <span className={`outbox-meta${left !== null && left <= 600 ? ' soon' : ''}`}>
                     {fileSize(f.size)}
                     {left === null ? '' : ` · ${remainingLabel(left)}`}

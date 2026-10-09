@@ -2109,14 +2109,14 @@ pid 不拿去對 listen port。agy 的登入 TUI 會在 127.0.0.1 自己開兩�
   在 identity.env／bot.env 合併**之後**才由 daemon 蓋回去（被改掉的話 bot 寫到別處，使用者看不到）。
   herdr shim 的轉發清單帶 `AM_OUTBOX`（§6.5b），子 pane 繼承母 bot 的 outbox。
 - **遠端主機的 bot**（使用者 2026-10-01）：`AM_OUTBOX` 指到**那台上**的 `~/<remote root>/outbox/<bot_id>/`（跟 bot 目錄同一個實例根，
-  bot.env 的自訂值一樣蓋掉；目錄由 bot 寫檔前自己 `mkdir -p`）。網頁列表與下載由 daemon 走 ssh（`outbox_remote`）：只列最上層的一般檔
-  （符號連結不算；遠端 outbox 路徑任一元件是符號連結就整個不列），擋檔名與內容的規則同本機；下載只收單一層檔名，內容以 base64 傳回、大小上限同本機。清理前逐段拒絕符號連結，進入已驗證目錄後用相對路徑清理，避免沿父層符號連結刪到外面。列檔與下載都先把檔案開在 fd 3，再確認路徑與 fd 3 指向同一個檔、拒絕硬連結（`stat -c %h`／`stat -f %l` 必須為 1）。GNU Linux 用 `/proc/self/fd/3` 確認已開啟 fd 的實際路徑仍是 outbox 項目，再以 `-ef` 比 device＋inode；macOS 的 `/dev/fd/N` 經 devfs 顯示時 device 不同，改由 `lsof` 確認 fd 3、重新開啟的 fd 4 路徑與實際 device＋inode 都吻合；無法確認 identity 時一律 fail closed。下載只從 fd 3 讀，並用 `head -c <上限+1> <&3` 封頂（超過由 daemon 判 `file_too_large`）；開檔時 `$F` 若是連結、之後被換回一般檔案，仍會因 identity 不符而拒絕。
-  遠端沒有 AGM 的 gc，**每次列表時順手刪掉 mtime 與 ctime 都超過 60 分鐘的檔**。**分享用 bot（§20.5）例外**：列表不刪任何檔，回 `ttl_secs:null`、`kept:true`、`keep_days:14`、每個檔 `expires_at:null`（保留政策由 daemon 的預算巡邏執行）；讀不到是不是分享用 bot 也當是（寧可少刪）。連不上那台時清單回 `reason:"outbox_remote_unreachable"`；daemon 已知那台斷線（睡著、tailscale 斷線）時**不再打 ssh**，立刻回這個答案（不等 30／180 秒逾時）。遠端目錄無法列舉或清單缺少完整開始／完成標記時回 `reason:"outbox_untrusted"`，不可把讀取失敗或截斷輸出當成空清單。
+  bot.env 的自訂值一樣蓋掉；目錄由 bot 寫檔前自己 `mkdir -p`）。網頁列表與下載由 daemon 走 ssh（`outbox_remote`）：列一般檔，含子資料夾裡的（相對路徑、深度上限同本機、不進符號連結目錄；
+  符號連結不算；遠端 outbox 路徑任一元件是符號連結就整個不列），擋檔名（資料夾名也算）與內容的規則同本機；下載收相對路徑（逐段驗證、逐層確認不是符號連結），內容以 base64 傳回、大小上限同本機。清理前逐段拒絕符號連結，進入已驗證目錄後用相對路徑清理，避免沿父層符號連結刪到外面。列檔與下載都先把檔案開在 fd 3，再確認路徑與 fd 3 指向同一個檔、拒絕硬連結（`stat -c %h`／`stat -f %l` 必須為 1）。GNU Linux 用 `/proc/self/fd/3` 確認已開啟 fd 的實際路徑仍是 outbox 項目，再以 `-ef` 比 device＋inode；macOS 的 `/dev/fd/N` 經 devfs 顯示時 device 不同，改由 `lsof` 確認 fd 3、重新開啟的 fd 4 路徑與實際 device＋inode 都吻合；無法確認 identity 時一律 fail closed。下載只從 fd 3 讀，並用 `head -c <上限+1> <&3` 封頂（超過由 daemon 判 `file_too_large`）；開檔時 `$F` 若是連結、之後被換回一般檔案，仍會因 identity 不符而拒絕。
+  遠端沒有 AGM 的 gc，**每次列表時順手刪掉 mtime 與 ctime 都超過 60 分鐘的檔**（含子資料夾，清完再刪空資料夾）。**分享用 bot（§20.5）例外**：列表不刪任何檔，回 `ttl_secs:null`、`kept:true`、`keep_days:14`、每個檔 `expires_at:null`（保留政策由 daemon 的預算巡邏執行）；讀不到是不是分享用 bot 也當是（寧可少刪）。連不上那台時清單回 `reason:"outbox_remote_unreachable"`；daemon 已知那台斷線（睡著、tailscale 斷線）時**不再打 ssh**，立刻回這個答案（不等 30／180 秒逾時）。遠端目錄無法列舉或清單缺少完整開始／完成標記時回 `reason:"outbox_untrusted"`，不可把讀取失敗或截斷輸出當成空清單。
 - **時效**：檔案保留 1 小時（`outbox::TTL_SECS = 3600`），從**搬進 outbox 的時間**起算＝mtime 與 ctime 較晚的那個。
   只看 mtime 會出事：`mv`／`cp -p` 進來的舊檔保留舊 mtime，下一輪清理就把 bot 剛交出去的檔刪掉；ctime 是搬入那一刻（寫入、改名、chmod 也會動它，只會延長不會縮短）。
   清單的 `expires_at` 與清理用同一個規則，`modified` 仍是檔案內容的 mtime。
 - **清理者**：AGM 的 launchd `com.agm.outbox-gc`（`supervisor/AGM/bin/outbox-gc.sh`）每 10 分鐘刪掉 `-mindepth 2` 底下
-  mtime 與 ctime **都**超過 60 分鐘的檔，並收掉空目錄（`OUTBOX_GC_NOW` 是測試用的時鐘接縫）。**daemon 不清**。清理會拒絕 outbox 根目錄或其路徑父項是 symlink，並在進入目錄後用相對路徑清理；遇到 symlinked 路徑會記錄並失敗，不沿路徑刪到外面。空目錄會被收掉，所以 daemon 啟動時建的目錄不保證還在：
+  mtime 與 ctime **都**超過 60 分鐘的檔（含子資料夾裡的，每個檔各算各的），並收掉空目錄（含巢狀的；`OUTBOX_GC_NOW` 是測試用的時鐘接縫）。**daemon 不清**。清理會拒絕 outbox 根目錄或其路徑父項是 symlink，並在進入目錄後用相對路徑清理；遇到 symlinked 路徑會記錄並失敗，不沿路徑刪到外面。空目錄會被收掉，所以 daemon 啟動時建的目錄不保證還在：
   bot **寫之前一律 `mkdir -p "$AM_OUTBOX"`**。
 - **分享用 bot 例外**（§20.5）：它的 outbox 走**分享保留政策**（#850，派工者決定）。使用者 2026-10-04 原本裁示「整個不清」（end user 是外部的人，隔天才回來拿檔是常態），
   但那讓一個外部連結就能把資料碟寫滿（bot 一直寫新檔名、列表只顯示最新 300 筆、舊的看不到卻還佔碟），所以翻案成「留得久、但有上限」：
@@ -2135,10 +2135,11 @@ pid 不拿去對 listen port。agy 的登入 TUI 會在 127.0.0.1 自己開兩�
 #### API 與 UI
 - `GET /api/bots/{id}/outbox`、`GET /api/bots/{id}/outbox/file?path=`（API.md）：**只讀 outbox，完全不讀 scratchpad**。
   檔案 API（含 `local-image`、outbox、附件上傳／下載）只接受 User principal；bot principal 回 `403 user_only`。附件上傳在讀 body 與取得上傳名額前拒絕 bot principal。
-  列第一層一般檔案（符號連結、子目錄不列），每個帶 `expires_at`／`remaining_secs`；下載路徑解開後必須在該 bot 的 outbox 內，
-  指到 scratchpad 的絕對路徑或符號連結一律 404。禁放清單在 daemon 端再擋一次（檔名＋檔頭：`SQLite format 3`、PEM 私鑰），不列、下載 404。
+  列一般檔案，**含子資料夾裡的**（bot 常把一份產出放在 `$AM_OUTBOX/<資料夾>/` 底下；`name` 為相對路徑，fd-bound 往下走、不跟符號連結、深度上限 32 層，被擋的名字與內容逐檔照套），每個帶 `expires_at`／`remaining_secs`；下載收同一個相對路徑（逐段驗證、逐層 `openat(O_NOFOLLOW)`），
+  指到 scratchpad 的絕對路徑、`..` 或符號連結一律 404。**分享入口（§20）維持單層**：portal 的 `/api/files` 只列 outbox 最上層、`/api/files/{name}` 只認單一檔名，外部使用者的清單與下載面不隨子資料夾擴大。禁放清單在 daemon 端再擋一次（檔名＋檔頭：`SQLite format 3`、PEM 私鑰），不列、下載 404。
 - 舊的 `/api/bots/{id}/scratchpad*` 明確 404。
 - 網頁「檔案暫存」下半段「bot 給你的檔案」：每列標剩餘時間（剩不到 10 分鐘用警告色），附件下載（UI-DECISIONS）。
+  子資料夾裡的檔顯示成 `資料夾/檔名`（資料夾前綴淡色），存檔名只取最後一段。
   圖檔（PNG/JPEG/GIF/WebP）滑鼠停 150ms 或鍵盤聚焦就在那一列左邊浮出預覽（使用者 2026-09-18），走同一支下載 API 抓成 blob，快取最多 12 張、換 bot 全部釋放；手機沒有 hover，照舊點一下下載。
 - **驗證跟真正讀檔是同一個 fd（issue #89，2026-09-17）**：下載（`outbox::file`）與 `GET /api/bots/{id}/local-image`
   以前都是「驗證路徑（canonicalize＋containment＋metadata）」與「用路徑名字重新 open 讀內容」分開兩步，寫得到那個目錄的

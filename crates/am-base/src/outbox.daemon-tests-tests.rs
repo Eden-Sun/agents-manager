@@ -344,6 +344,20 @@
         assert_eq!(get_file(&env.app, "nope", "x.txt").await.0, StatusCode::NOT_FOUND);
     }
 
+    /// 分享入口維持單層：就算相對路徑合法，子資料夾裡的檔也不給（SPEC §20）。
+    #[tokio::test]
+    async fn share_file_stays_single_layer() {
+        let env = crate::testing::env().await;
+        let bot = crate::testing::claude_bot(&env.app, &env.project_id, "alfa").await;
+        let outbox = ensure(&env.app.data_dir, &bot.id).unwrap();
+        std::fs::create_dir_all(outbox.join("sub")).unwrap();
+        std::fs::write(outbox.join("sub/report.pdf"), b"%PDF-1.4").unwrap();
+        std::fs::write(outbox.join("top.txt"), b"top").unwrap();
+        assert!(share_file_bytes_with_limit(&env.app, &bot.id, "top.txt", 1024).await.is_ok());
+        let nested = share_file_bytes_with_limit(&env.app, &bot.id, "sub/report.pdf", 1024).await;
+        assert!(matches!(nested, Err(ShareFileError::NotFound)), "{nested:?}");
+    }
+
     #[tokio::test]
     async fn share_file_bytes_with_limit_rejects_oversized_file_without_reading() {
         let env = crate::testing::env().await;
@@ -376,3 +390,89 @@
         let res_escape = share_file_bytes_with_limit(&env.app, &bot.id, "link_to_secret.bin", 4 * 1024 * 1024).await;
         assert!(matches!(res_escape, Err(ShareFileError::Unavailable)));
     }
+
+    /// 巢狀資料夾支援：
+    /// 1. 巢狀檔會列出，name 帶相對路徑
+    /// 2. symlink 子目錄不跟
+    /// 3. .. 下載被拒
+    /// 4. 深度上限超過不列不給
+    /// 5. withheld 檔在子目錄仍被擋（名字與檔頭）
+    #[test]
+    fn nested_outbox_files_and_boundary_guards() {
+        let base = scratch("nested-guards");
+        let root = base.join("outbox");
+        let outside = base.join("outside");
+        std::fs::create_dir_all(&outside).unwrap();
+        std::fs::write(outside.join("secret.txt"), b"outside secret").unwrap();
+
+        // 正常巢狀檔案
+        std::fs::create_dir_all(root.join("sub/nested")).unwrap();
+        std::fs::write(root.join("top.txt"), b"top").unwrap();
+        std::fs::write(root.join("sub/report.pdf"), b"%PDF-1.4").unwrap();
+        std::fs::write(root.join("sub/nested/data.csv"), b"a,b,c").unwrap();
+
+        // symlink 子目錄：指向外部目錄
+        std::os::unix::fs::symlink(&outside, root.join("sym_dir")).unwrap();
+
+        // 子目錄裡的 withheld 檔（名字與內容）
+        std::fs::write(root.join("sub/id_rsa"), b"key").unwrap();
+        std::fs::write(root.join("sub/auth.json"), b"{}").unwrap();
+        std::fs::write(root.join("sub/data.sqlite3"), b"SQLite format 3\0...").unwrap();
+        std::fs::write(root.join("sub/disguised.bin"), b"SQLite format 3\0...").unwrap();
+        std::fs::write(root.join("sub/.hidden"), b"hidden").unwrap();
+
+        // withheld 名稱的子目錄
+        std::fs::create_dir_all(root.join(".hidden_dir")).unwrap();
+        std::fs::write(root.join(".hidden_dir/file.txt"), b"hidden").unwrap();
+        std::fs::create_dir_all(root.join("id_rsa")).unwrap();
+        std::fs::write(root.join("id_rsa/file.txt"), b"withheld dir").unwrap();
+
+        // 深度超過 WALK_MAX_DEPTH (32) 的深層目錄
+        let mut deep_path = root.clone();
+        for i in 0..=WALK_MAX_DEPTH {
+            deep_path = deep_path.join(format!("d{i}"));
+        }
+        std::fs::create_dir_all(&deep_path).unwrap();
+        std::fs::write(deep_path.join("too_deep.txt"), b"too deep").unwrap();
+
+        let fd = trusted_open::open_bound_dir(&root, &[], None).unwrap();
+        let listed = scan(&fd, 0);
+        let names: Vec<String> = listed.iter().map(|f| f["name"].as_str().unwrap().to_string()).collect();
+
+        // 1. 巢狀檔會列出，且帶相對路徑
+        assert!(names.contains(&"top.txt".to_string()), "最上層檔案有列出: {names:?}");
+        assert!(names.contains(&"sub/report.pdf".to_string()), "第一層子目錄檔案有列出: {names:?}");
+        assert!(names.contains(&"sub/nested/data.csv".to_string()), "第二層子目錄檔案有列出: {names:?}");
+
+        // 2. symlink 子目錄不跟
+        assert!(!names.iter().any(|n| n.starts_with("sym_dir")), "symlink 子目錄不該列出: {names:?}");
+        assert!(servable(&root, "sym_dir/secret.txt").is_none(), "symlink 子目錄裡的檔案不可下載");
+
+        // 3. .. 下載被拒
+        assert!(servable(&root, "../outside/secret.txt").is_none());
+        assert!(servable(&root, "sub/../../outside/secret.txt").is_none());
+        assert!(servable(&root, "sub/..").is_none());
+
+        // 4. 深度上限：超過 WALK_MAX_DEPTH 的深層檔案不列出、不可下載
+        assert!(!names.iter().any(|n| n.ends_with("too_deep.txt")), "超過深度上限不該列出: {names:?}");
+        let deep_rel = deep_path.strip_prefix(&root).unwrap().join("too_deep.txt");
+        assert!(servable(&root, deep_rel.to_str().unwrap()).is_none(), "超過深度上限不可下載");
+
+        // 5. withheld 檔在子目錄仍被擋
+        for withheld in ["sub/id_rsa", "sub/auth.json", "sub/data.sqlite3", "sub/disguised.bin", "sub/.hidden", ".hidden_dir/file.txt", "id_rsa/file.txt"] {
+            assert!(!names.contains(&withheld.to_string()), "{withheld} 不該列出: {names:?}");
+            assert!(servable(&root, withheld).is_none(), "{withheld} 不可下載");
+        }
+
+        // 下載正常巢狀檔案成功
+        assert_eq!(servable(&root, "sub/report.pdf"), Some(b"%PDF-1.4".to_vec()));
+        assert_eq!(servable(&root, "sub/nested/data.csv"), Some(b"a,b,c".to_vec()));
+
+        // 分享入口維持單層：只列最上層的檔，子資料夾整個不列
+        let shared: Vec<String> = scan_checked(&fd, 0).unwrap().iter().map(|f| f["name"].as_str().unwrap().to_string()).collect();
+        assert!(shared.contains(&"top.txt".to_string()), "分享清單有最上層檔: {shared:?}");
+        assert!(!shared.iter().any(|n| n.contains('/')), "分享清單不含子資料夾裡的檔: {shared:?}");
+
+        std::fs::remove_dir_all(&base).unwrap();
+    }
+

@@ -94,6 +94,11 @@
   white-space: nowrap;
 }
 
+/* 子資料夾裡的檔（`報價/Q-1.pdf`）：資料夾前綴淡色，檔名維持主色。 */
+.outbox-dir {
+  opacity: 0.6;
+}
+
 .outbox-meta {
   font-size: 10px;
   color: var(--text-faint);

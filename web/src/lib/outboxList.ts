@@ -90,6 +90,15 @@ export function emptyReason(reason: string | null, botSelected: boolean, kept = 
   return '還沒有檔案。bot 把要給你的檔案放進 $AM_OUTBOX 之後按重整就看得到；放進去 1 小時後會自動清掉。'
 }
 
+/**
+ * 清單上的 `name` 是相對路徑（`報價/Q-1.pdf`，bot 把檔案放在 `$AM_OUTBOX` 的子資料夾裡）：拆成資料夾前綴（含結尾 `/`，沒有就空字串）
+ * 與檔名。下載存檔用 `base`（瀏覽器不該拿到帶斜線的檔名），畫面把 `dir` 淡色顯示在前面。
+ */
+export function splitOutboxName(name: string): { dir: string; base: string } {
+  const i = name.lastIndexOf('/')
+  return i < 0 ? { dir: '', base: name } : { dir: name.slice(0, i + 1), base: name.slice(i + 1) }
+}
+
 /** 新的排前面；同一秒的依名字排，避免每次重整順序在跳。 */
 export function orderFiles(files: OutboxFile[]): OutboxFile[] {
   return [...files].sort((a, b) => b.modified - a.modified || a.name.localeCompare(b.name))
