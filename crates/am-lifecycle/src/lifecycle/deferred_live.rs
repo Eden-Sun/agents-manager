@@ -70,6 +70,25 @@ pub fn defer_live(bot_id: &str, fields: &[&str], baseline_rev: &str, target_rev:
     true
 }
 
+/// 套用失敗（忙）時把 `take` 走的那筆放回。套用期間若又排進了較新的一筆：目標版本以新的為準，
+/// baseline 保留較早的那一份，欄位取聯集。不經 `defer_live`：它會把 `target_rev` 覆寫回舊的（#977）。
+fn requeue(bot_id: &str, queued: PendingLive) {
+    let mut m = pending().lock().unwrap_or_else(|e| e.into_inner());
+    match m.get_mut(bot_id) {
+        None => {
+            m.insert(bot_id.to_string(), queued);
+        }
+        Some(newer) => {
+            newer.baseline_rev = queued.baseline_rev;
+            for f in queued.fields {
+                if !newer.fields.contains(&f) {
+                    newer.fields.push(f);
+                }
+            }
+        }
+    }
+}
+
 /// 不在 `live` 裡的 bot 不留排著的即時套用：要等 idle 邊才套，bot 被刪掉就永遠等不到。
 pub fn retain_bots(live: &[String]) {
     pending().lock().unwrap_or_else(|e| e.into_inner()).retain(|id, _| live.contains(id));
@@ -114,14 +133,8 @@ pub async fn apply_deferred_once(
         super::LiveApplyOutcome::Applied { .. } => {}
         super::LiveApplyOutcome::Failed(why) if is_busy_reason(why) => {
             // 剛閒下來又被新回合搶走：再排一次。
-            // 同一組欄位放回去（`take` 已清空），不會被 single_field 擋。
-            defer_live(
-                bot_id,
-                &fields,
-                &queued.baseline_rev,
-                &queued.target_rev,
-                false,
-            );
+            // 同一組欄位放回去（`take` 已清空）；套用期間若又排進新的，`requeue` 保留新的目標版本與較早的 baseline。
+            requeue(bot_id, queued);
         }
         super::LiveApplyOutcome::BookkeepingPending { reason, .. } => {
             tracing::warn!(bot = %bot_id, ?fields, reason, "deferred live apply is waiting for DB-only bookkeeping");
@@ -199,5 +212,31 @@ mod tests {
         );
         assert!(defer_live(id, &["effort"], "base", "t4", true), "清空後新的一筆照排");
         take(id);
+    }
+
+    /// 套用中（忙）又被新 PATCH：放回時目標版本以新的為準、baseline 保留較早的，欄位取聯集（#977）。
+    #[test]
+    fn a_busy_requeue_keeps_the_newer_target_and_the_older_baseline() {
+        let _serial = pending_test_lock();
+        let id = "test-deferred-requeue";
+        assert!(defer_live(id, &["fast"], "b1", "t1", false));
+        let queued = take(id).unwrap(); // 套用開始
+        assert!(defer_live(id, &["effort"], "b2", "t2", false)); // 套用期間又 PATCH
+        requeue(id, queued); // 忙 → 放回
+        let got = take(id).unwrap();
+        assert_eq!(got.target_rev, "t2");
+        assert_eq!(got.baseline_rev, "b1");
+        assert!(got.fields.contains(&"fast") && got.fields.contains(&"effort") && got.fields.len() == 2);
+    }
+
+    /// 套用期間沒有新的 PATCH：放回去就是原封不動的那一筆。
+    #[test]
+    fn a_busy_requeue_without_a_newer_patch_restores_it_as_is() {
+        let _serial = pending_test_lock();
+        let id = "test-deferred-requeue-same";
+        assert!(defer_live(id, &["model", "fast"], "b1", "t1", false));
+        let queued = take(id).unwrap();
+        requeue(id, queued.clone());
+        assert_eq!(take(id), Some(queued));
     }
 }
