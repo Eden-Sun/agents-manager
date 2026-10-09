@@ -543,3 +543,39 @@ async fn remote_outbox_download_refuses_uppercase_secret_names() {
     assert!(matches!(site.outbox_stream("SECRET.PEM", 100).await, Err(ShareFileError::NotFound)));
     assert!(matches!(site.outbox_read("SECRET.PEM", 100).await, Err(ShareFileError::NotFound)));
 }
+
+#[tokio::test]
+async fn remote_instructions_survive_a_cut_multibyte_char() {
+    // 36000 位元組的中文檔：`head -c 32768` 會切在多位元組字中間（#983）。
+    let scratch = test_dirs::scratch_dir("rfs-instr-utf8");
+    let site = make_test_remote_site(&scratch, "host-instr-utf8-1");
+    fs::write(Path::new(&site.workspace).join("CLAUDE.md"), "中".repeat(12000)).unwrap();
+
+    let s = site.instructions().await.unwrap();
+    assert!(s.contains("中中中"));
+}
+
+#[tokio::test]
+async fn remote_outbox_read_returns_non_utf8_bytes_verbatim() {
+    let scratch = test_dirs::scratch_dir("rfs-read-nonutf8");
+    let site = make_test_remote_site(&scratch, "host-read-nonutf8-1");
+    fs::write(Path::new(&site.outbox).join("bad.svg"), b"<svg>\xff</svg>").unwrap();
+
+    let r = site.outbox_read("bad.svg", 1 << 20).await.unwrap();
+    assert_eq!(r.data, b"<svg>\xff</svg>");
+}
+
+#[tokio::test]
+async fn remote_outbox_list_skips_only_the_non_utf8_name() {
+    use std::os::unix::ffi::OsStrExt as _;
+    let scratch = test_dirs::scratch_dir("rfs-list-nonutf8");
+    let site = make_test_remote_site(&scratch, "host-list-nonutf8-1");
+    let ob = Path::new(&site.outbox);
+    fs::write(ob.join("ok.txt"), b"ok").unwrap();
+    fs::write(ob.join(std::ffi::OsStr::from_bytes(b"bad\xff.txt")), b"x").unwrap();
+
+    let list = site.outbox_list(1_000).await.unwrap();
+    let names: Vec<&str> = list.iter().map(|f| f["name"].as_str().unwrap()).collect();
+    assert!(names.contains(&"ok.txt"), "{names:?}");
+    assert!(!names.iter().any(|n| n.contains("bad")), "{names:?}");
+}
