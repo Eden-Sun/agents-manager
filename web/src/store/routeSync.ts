@@ -4,7 +4,10 @@
  */
 import { useEffect, useRef } from 'react'
 import * as api from '../api'
+import { dialogOpen } from '../lib/dialogOpen'
+import { popDecision } from '../lib/popGuard'
 import { buildRoute, parseRoute, screenKey, type Route } from '../lib/routes'
+import { settingsBlocksLeave } from '../lib/settingsLeaveGuard'
 import { useStore, type StoreState } from './store'
 
 /** 預覽分頁只給頂層 bot（issue #253）；`ChatPanel` 與網址還原共用這條。 */
@@ -139,15 +142,39 @@ function run(r: Route) {
   })
 }
 
+/** 最上層的對話框元素（DOM 順序最後一個）：`Modal`／`ConfirmDialog` 以 `e.target` 判斷 Esc 的所有權，所以要派給它本身。 */
+function topDialog(): Element | null {
+  const all = [...document.querySelectorAll('.modal-backdrop .modal, .confirm-backdrop .confirm, .lightbox, [aria-modal="true"]')].filter(
+    (el) => !el.matches('aside.sidebar'),
+  )
+  return all[all.length - 1] ?? null
+}
+
 function onPop() {
-  // 抽屜開著時的上一頁只關抽屜（那格 URL 沒變）。
-  if (drawerOpen) {
-    closeDrawer?.()
-    return
-  }
   const r = parseRoute(location.pathname)
-  lastRoute = r
-  run(r)
+  const leavingSettings =
+    lastRoute.kind === 'bot' && lastRoute.settings && !(r.kind === 'bot' && r.settings && r.botId === lastRoute.botId)
+  // 先依畫面上疊了什麼決定（`lib/popGuard.ts`）：對話框 > 抽屜 > 設定未儲存守門 > 導覽。
+  switch (popDecision({ drawerOpen, dialogOpen: dialogOpen(), leavingSettings, guardBlocks: settingsBlocksLeave })) {
+    case 'close-dialog': {
+      // 這一格歷史是借來的：放回去（抽屜開著就還是抽屜那一格），上一頁只關最上層的對話框，其餘都不動（#935）。
+      if (drawerOpen) history.pushState({ am: 'drawer' } satisfies HistoryMark, '', here())
+      else history.pushState({ am: 'route' } satisfies HistoryMark, '', buildRoute(lastRoute))
+      topDialog()?.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }))
+      return
+    }
+    case 'close-drawer':
+      // 抽屜開著時的上一頁只關抽屜（那格 URL 沒變）。
+      closeDrawer?.()
+      return
+    case 'stay':
+      // 設定有未儲存變更（確認框已由守門打開）：把設定那一格放回去，不套用新路由（#936）。
+      history.pushState({ am: 'route' } satisfies HistoryMark, '', buildRoute(lastRoute))
+      return
+    case 'navigate':
+      lastRoute = r
+      run(r)
+  }
 }
 
 /**
