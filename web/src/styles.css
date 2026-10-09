@@ -2100,6 +2100,7 @@ button.pane-toggle:hover:not(:disabled) {
   .modal.blocked-modal {
     width: 100%;
     height: 100dvh;
+    height: var(--vvh, 100dvh);
     min-height: 0;
     max-height: none;
   }
@@ -3488,6 +3489,14 @@ button.model-tag:hover:not(:disabled) {
     padding: 0;
   }
 
+  /* iOS 鍵盤不縮 layout viewport：sheet 跟 `--vvh`（`useViewportPin` 寫的可視高度）走，底部按鈕才不會被鍵盤蓋住（issue #933）。
+     `bottom: auto` 讓 `height` 生效（`inset: 0` 會把 bottom 釘死）。 */
+
+  .modal-backdrop {
+    bottom: auto;
+    height: var(--vvh, 100dvh);
+  }
+
   /* 特異性要蓋過 `:has(.dirpicker)`。寬度 `100%` 不能 `auto`：backdrop 是置中 flex，`auto` 會縮成 262px。 */
 
   .modal,
@@ -3495,6 +3504,7 @@ button.model-tag:hover:not(:disabled) {
     width: 100%;
     max-width: none;
     height: 100dvh;
+    height: var(--vvh, 100dvh);
     max-height: none;
     border: 0;
     border-radius: 0;
