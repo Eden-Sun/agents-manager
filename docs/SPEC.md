@@ -2108,7 +2108,7 @@ pid 不拿去對 listen port。agy 的登入 TUI 會在 127.0.0.1 自己開兩�
 - **遠端主機的 bot**（使用者 2026-10-01）：`AM_OUTBOX` 指到**那台上**的 `~/<remote root>/outbox/<bot_id>/`（跟 bot 目錄同一個實例根，
   bot.env 的自訂值一樣蓋掉；目錄由 bot 寫檔前自己 `mkdir -p`）。網頁列表與下載由 daemon 走 ssh（`outbox_remote`）：只列最上層的一般檔
   （符號連結不算；遠端 outbox 路徑任一元件是符號連結就整個不列），擋檔名與內容的規則同本機；下載只收單一層檔名，內容以 base64 傳回、大小上限同本機。清理前逐段拒絕符號連結，進入已驗證目錄後用相對路徑清理，避免沿父層符號連結刪到外面。列檔與下載都先把檔案開在 fd 3，再確認路徑與 fd 3 指向同一個檔、拒絕硬連結（`stat -c %h`／`stat -f %l` 必須為 1）。GNU Linux 用 `/proc/self/fd/3` 確認已開啟 fd 的實際路徑仍是 outbox 項目，再以 `-ef` 比 device＋inode；macOS 的 `/dev/fd/N` 經 devfs 顯示時 device 不同，改由 `lsof` 確認 fd 3、重新開啟的 fd 4 路徑與實際 device＋inode 都吻合；無法確認 identity 時一律 fail closed。下載只從 fd 3 讀，並用 `head -c <上限+1> <&3` 封頂（超過由 daemon 判 `file_too_large`）；開檔時 `$F` 若是連結、之後被換回一般檔案，仍會因 identity 不符而拒絕。
-  遠端沒有 AGM 的 gc，**每次列表時順手刪掉 mtime 與 ctime 都超過 60 分鐘的檔**。連不上那台時清單回 `reason:"outbox_remote_unreachable"`；daemon 已知那台斷線（睡著、tailscale 斷線）時**不再打 ssh**，立刻回這個答案（不等 30／180 秒逾時）。遠端目錄無法列舉或清單缺少完整開始／完成標記時回 `reason:"outbox_untrusted"`，不可把讀取失敗或截斷輸出當成空清單。
+  遠端沒有 AGM 的 gc，**每次列表時順手刪掉 mtime 與 ctime 都超過 60 分鐘的檔**。**分享用 bot（§20.5）例外**：列表不刪任何檔，回 `ttl_secs:null`、`kept:true`、`keep_days:14`、每個檔 `expires_at:null`（保留政策由 daemon 的預算巡邏執行）；讀不到是不是分享用 bot 也當是（寧可少刪）。連不上那台時清單回 `reason:"outbox_remote_unreachable"`；daemon 已知那台斷線（睡著、tailscale 斷線）時**不再打 ssh**，立刻回這個答案（不等 30／180 秒逾時）。遠端目錄無法列舉或清單缺少完整開始／完成標記時回 `reason:"outbox_untrusted"`，不可把讀取失敗或截斷輸出當成空清單。
 - **時效**：檔案保留 1 小時（`outbox::TTL_SECS = 3600`），從**搬進 outbox 的時間**起算＝mtime 與 ctime 較晚的那個。
   只看 mtime 會出事：`mv`／`cp -p` 進來的舊檔保留舊 mtime，下一輪清理就把 bot 剛交出去的檔刪掉；ctime 是搬入那一刻（寫入、改名、chmod 也會動它，只會延長不會縮短）。
   清單的 `expires_at` 與清理用同一個規則，`modified` 仍是檔案內容的 mtime。
@@ -5165,6 +5165,16 @@ daemon 要能在 Linux（目標：Ubuntu，外部編譯主機 192.168.1.46，#67
   `POST /s/{token}/api/messages` 送出前看最近一次量測值（沒有或太舊——已滿的只信 60 秒——才現場量一次），達 1 GiB 回 **507 `share_storage_full`**，分享頁顯示「空間滿了，請跟分享給你的人說一聲」，一則都不進對話。
   量測剛變滿時通知擁有者：該 bot 的對話一則系統訊息＋AGM inbox 一則 `ops_alert`（`reason:"share_storage_full"`，同一顆一天最多一則）。**不自動刪工作目錄的檔**（那是擁有者的東西）；擁有者清掉後約 1 分鐘內恢復。
   只管受限分享 bot（信任分享的工作目錄就是一般專案，不在此列）。已有大型既有資料夾（`share_folder.kind=existing`）一開始就超過 1 GiB 的會直接被擋，需要先整理。
+- **遠端專案的分享 bot**（#955，R-S4）：檔案在專案那台主機，預算與保留政策由 daemon 經 ssh 執行（`share::remote_fs`：`measure`／`prune_outbox`），**遠端一律 fail closed**：
+  - **量測**：`du -skx`（不跟符號連結、不跨檔案系統，KiB×1024）＋`find -xdev -type f`（最多 200001 項，超過 `truncated`），工作目錄與 outbox 各量一次，outbox 的 `.am-share-keep` 不算；
+    工作目錄不見了算 0，路徑任一段是符號連結或腳本框不完整＝量測失敗。60 秒逾時。
+  - **擋人**：送訊息前有新鮮量測值照用（已滿的只信 60 秒）；沒有或太舊就現場量，**量不到（主機斷線、ssh 失敗、不可信）回 503，不當作沒滿**（`budget::is_full` 回 `Err(Unavailable)`）。本機量不到仍不擋。
+  - **巡邏**：`budget::sweep` 含遠端主機；斷線的主機整台跳過（不通知、不清快取）；同一輪對遠端分享 bot（受限＋信任分享）先執行 outbox 保留政策再量；信任分享只做保留政策、不算預算。剛變滿的通知（系統訊息＋`ops_alert`）沿用。
+  - **outbox 保留政策**：`prune_outbox(14 天, 500 MiB, 1000 檔)`＝`outbox-gc.sh` `share_prune` 同語意——mtime 與 ctime 都超過 14 天的刪、檔名含換行的直接刪、超量從最舊刪到低於上限（新的排前面累計，一超過那個和更舊的都刪）、`.am-share-keep` 不刪不算；
+    只刪一般檔，**遠端從不 `rm -rf`**、符號連結不跟。
+  - **1 小時清理不碰分享 bot**：`outbox_remote::target` 查 `is_share_bot`（讀不到當是分享 bot——寧可少刪），是的話列表腳本不跑 `-mmin +60 … rm`，回應帶 `kept:true`、`keep_days:14`、`ttl_secs:null`、每個檔 `expires_at:null`（同本機分享 bot 的列表）；一般遠端 bot 照舊刪。
+  - **keep 標記**：遠端 outbox 也放 `.am-share-keep`（啟動、`finish_restricted`、開機時 `keep_share_outboxes`；`revoke_bot_share`／`revoke_project_shares` 拿掉，bot／專案已標成刪除也找得到主機）。
+    主機斷線或 ssh 失敗只記 warning；daemon 的巡邏不靠它，遠端那台若自己也跑 `outbox-gc.sh` 才會用到。標記檔若被換成符號連結先拆掉再用 noclobber 建，不寫穿。
 - 本來就不影響：批次重啟／herdr 升級（`resume_native` 原地接回）、`autostart_revive`（只碰 autostart 且被 herdr 弄丟的，起回來）、`pane-gc.sh`（只關卡住的登入 pane）、
   `bot_trash`／`remote_purge`（只處理已刪的）、config 投影移除（使用者自己從 config 拿掉）、AGM persona 第 19 條的閒置盤點（只清 AGM 自己的 child，文件另寫明分享用 bot 不清）。
 
