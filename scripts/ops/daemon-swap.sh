@@ -215,7 +215,7 @@ save_token() { # $1=token
     }
 }
 
-# 成功換版後清舊 binary 備份（issue #943）：每趟都留 `agents-managerd.bak-<舊 sha>` 與 `.prev-<舊 sha>-<時間>-<pid>`，
+# 成功換版後清舊 binary 備份（issue #943）：每趟都留 `agents-managerd.bak-<舊 sha>` 與 `.prev-<舊 sha>-<時間>-<六碼隨機>`，
 # 只清 DB 備份的話它們會一路長（實測 155＋157 份、16.7 GB）。只留這趟的 ${BAK}（下一趟回滾要用的是新的備份，
 # 但這趟的還是「剛換掉的那一版」）與 ${PREV}；其餘固定前綴 glob 下的一般檔全刪，符號連結與目錄不碰，刪不掉只 WARN。
 # 只在成功路徑呼叫：回滾／中止時舊備份全留著（可能就是要靠它們手動還原）。
@@ -887,15 +887,16 @@ if ! stop_daemon "$OLDPID"; then
     release_window "線上 daemon 無法停止" || true
     exit 11
 fi
-PREV="target/release/agents-managerd.prev-$OLD-$(date +%Y%m%d-%H%M%S)-${SWAP_PREV_NONCE:-$$}"
-if [ -e "$PREV" ]; then
+# PREV 用 mktemp 原子建出唯一檔名：以前是「時間-$$」再 `-e` 檢查，同一秒、同一程序連換兩趟就撞名（rc=5）。
+# mktemp 的六碼隨機字元保證不撞；建出來的空佔位檔由下面的 mv -f 覆蓋。
+if ! PREV=$(mktemp "target/release/agents-managerd.prev-$OLD-$(date +%Y%m%d-%H%M%S)-XXXXXX"); then
     # 舊 daemon 已經停了、舊 binary 還在原位：先把它起回來，再交還窗口，不能留一個停著的 daemon（issue #902）。
-    log "ABORT: $PREV 已存在；把舊 daemon 起回來"
+    log "ABORT: 建不出換下來的舊 binary 備份檔；把舊 daemon 起回來"
     start; sleep 3
-    release_window "備份檔名撞名，沒換版" || true
+    release_window "備份檔建立失敗，沒換版" || true
     exit 5
 fi
-mv target/release/agents-managerd "$PREV"
+mv -f target/release/agents-managerd "$PREV"
 if ! install_new_binary; then
     # 舊 daemon 已經停了：把舊 binary 搬回原位、起回來，再交還窗口（issue #944）。
     log "ABORT: 新 binary 複製到 target/release 失敗（磁碟滿了？）；把舊 daemon 起回來"
