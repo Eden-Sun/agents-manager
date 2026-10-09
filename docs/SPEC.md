@@ -373,7 +373,7 @@ React 前端 (Vite) ◄── REST + WebSocket ──► Rust daemon (axum) ◄�
 - **上游有新版**（issue #707／#725，2026-09-28）：`daemon/src/upstream_update.rs` 每 10 分鐘比一次「上游最新正式版」對
   「每台有裝的主機磁碟上的 `--version`」：claude 問 npm registry 的 `latest`，codex 沿用 changelog 那份 GitHub releases 快取；上游結果快取
   1 小時、失敗不快取。Codex 新版仍跳一次「需先安裝」通知。Claude 除單次通知外，還把包含每台版本、讀取錯誤與共同 `target_version` 的快照保存在 header，持續列出目前版 → 目標版，
-  直到各台都到同一目標才收起；不依賴 toast 是否仍在畫面或是否有 active run。這時**不寫 `runs.update_notice`、不進批次重啟**——安裝與「已安裝，重啟套用」是兩步。
+  直到各台都到同一目標才收起；不依賴 toast 是否仍在畫面或是否有 active run。落後主機上 running 的 claude run 另寫 `runs.update_notice`＝`claude 有新版 <a> → <b>，需安裝後重啟`（`update_watch` 以快照的 `target_version` 比磁碟上裝著的版本，讀不到磁碟才用跑著的版本）；批次重啟把「需安裝」列為候選但跳過（`needs_manual_install`，§6.9）——安裝與「已安裝，重啟套用」是兩步。
   同一個上游版本只通知一次（`<data_dir>/upstream-update.last.json`，
   仿 herdr 的 `herdr-update.last`；只在比上次通知的更新時才推）。網頁另記每個瀏覽器看過的版本，開機讀 `GET /api/upstream-updates` 補上錯過的那則。
   **grok**（issue #761）：xAI 自己的 installer（`~/.grok/bin/grok` 指到 `~/.grok/downloads/grok-<版本>-<平台>`，config `installer = "internal"`），沒有 npm／GitHub releases；上游是 `https://storage.googleapis.com/grok-build-public-artifacts/cli/stable`（純文字、內容只有版本號，`grok update --check` 查的同一個指標；HTML 錯誤頁、預發布、build metadata 一律當看不懂＝抓不到），磁碟版本是各主機的 `grok --version`（`grok 1.0.46 (2765805b9442)`，commit 後綴不是版本）。**只提示、不一鍵安裝**：官方升級指令是在那台主機跑 `grok update`，換版後跑著的 bot 要重啟，沒有我們能代跑的固定流程；`text` 寫出落後的主機與這條指令，header 有一顆只提示的 `grok` 徽章（桌機；手機靠 toast）。
