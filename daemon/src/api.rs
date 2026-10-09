@@ -5688,6 +5688,17 @@ async fn prompt_bot(
     if b.share_reply_visible && principal != RequestPrincipal::User {
         return Err(bot_user_only());
     }
+    // #990：`start_if_stopped` 會替對方開機、`send_now` 會打斷對方的回合，等同 start／interrupt（#804 的政策）：
+    // 只給 User 與登記的 AGM 角色。一般 Bot 帶這兩個旗標在任何副作用前就 403（跨 bot 的 prompt 不能繞過 start／interrupt）。
+    if (b.start_if_stopped || b.send_now) && principal != RequestPrincipal::User {
+        let is_role = match &principal {
+            RequestPrincipal::Bot(caller) => crate::supervisor::roles::role_of_bot(&app.db, caller).await.map_err(any_err)?.is_some(),
+            _ => false,
+        };
+        if !is_role {
+            return Err(bot_user_only());
+        }
+    }
     // #923：冪等鍵進 turns 的唯一索引、再隨回應與日誌回出去，先驗長度與字元（同 fork／mission 的做法）。
     let given_crid = match b.client_request_id.as_deref().map(str::trim).filter(|c| !c.is_empty()) {
         Some(c) => Some(crate::request_id::validate("client_request_id", c)?),
