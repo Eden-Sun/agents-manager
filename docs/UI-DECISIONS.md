@@ -149,6 +149,9 @@
   （`docs/screenshots/quota-popup/after-fits-one-view.png`）。內容再多還是會捲，這是上限不是保證。
 - 手機：純文字 chip（不改成桌機 bar，使用者指定）；一格一個數字，預設 7d（grok「週」），別的窗口被標 low／critical 且更急時才取代；
   每一格都畫兩條邊框量表、**兩條都在底部**（5h 上、7d 貼底）（使用者指定）；格子上下貼齊。
+- **手機的額度彈出層全寬**（2026-10-09 使用者：「按下額度的 pop up 要全螢幕寬度」）：≤640px 的 `.quota-pop` 是 `position: fixed`，
+  左右貼齊視窗、只讓出 `env(safe-area-inset-*)`，圓角拿掉（貼螢幕邊的圓角會露出底色）；超過 `min(60dvh, 480px)` 在彈層內捲。
+  舊版留 8px 邊，使用者看起來不是全寬。桌機 336px 不變。`web/src/components/quotaPopPhoneWidth.test.ts` 鎖住這條規則。
 
 ## 對話
 
