@@ -4,6 +4,7 @@ use crate::lifecycle::LcError;
 use sqlx::SqlitePool;
 use serde_json::{json, Value};
 
+#[cfg(test)]
 struct ProbeSlot {
     at: Option<std::time::Instant>,
     value: Value,
@@ -11,6 +12,7 @@ struct ProbeSlot {
 }
 
 /// 快取 `ttl` 內直接回；有人正在探測就回上一份（沒有就是 Null），不排隊；探測最多等 `limit`。
+#[cfg(test)]
 async fn cached_probe<F, Fut>(slot: &std::sync::Mutex<ProbeSlot>, ttl: std::time::Duration, limit: std::time::Duration, probe: F) -> Value
 where
     F: FnOnce() -> Fut,
@@ -41,21 +43,119 @@ where
     s.value.clone()
 }
 
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+pub struct ReleaseTriageFingerprint {
+    pub publish: bool,
+    pub gh_bin: Option<String>,
+    pub repo: Option<String>,
+}
+
+impl From<&crate::config::ReleaseTriageCfg> for ReleaseTriageFingerprint {
+    fn from(cfg: &crate::config::ReleaseTriageCfg) -> Self {
+        Self {
+            publish: cfg.publish,
+            gh_bin: cfg.gh_bin.clone(),
+            repo: cfg.repo.clone(),
+        }
+    }
+}
+
+struct AppProbeSlot {
+    fingerprint: ReleaseTriageFingerprint,
+    epoch: u64,
+    at: Option<std::time::Instant>,
+    value: Value,
+    refreshing: bool,
+}
+
+static RELEASE_TRIAGE_SLOTS: std::sync::LazyLock<
+    std::sync::Mutex<std::collections::HashMap<std::path::PathBuf, AppProbeSlot>>,
+> = std::sync::LazyLock::new(|| std::sync::Mutex::new(std::collections::HashMap::new()));
+
 /// `gh auth status` 要打網路，health 又常被輪詢：60 秒內沿用上一次的結果，探測最多等 15 秒（issue #1118）。
-async fn release_triage_health(app: &(impl crate::capabilities::Cfg + crate::supervisor::ports::HostProbes)) -> Value {
-    static SLOT: std::sync::Mutex<ProbeSlot> = std::sync::Mutex::new(ProbeSlot {
-        at: None,
-        value: Value::Null,
-        refreshing: false,
-    });
+/// 快取以 App 資料目錄與 release_triage 設定指紋隔離，設定變更時強制失效，
+/// 且進行中的探測綁定開始時的設定代數（issue #1159）。
+pub async fn release_triage_health(
+    app: &(impl crate::capabilities::DataDir + crate::capabilities::Cfg + crate::supervisor::ports::HostProbes),
+) -> Value {
+    let data_dir = app.data_dir().to_path_buf();
     let cfg = app.cfg().get().await.release_triage;
-    cached_probe(
-        &SLOT,
-        std::time::Duration::from_secs(60),
-        std::time::Duration::from_secs(15),
-        || async { app.release_triage_health_probe(&cfg).await.unwrap_or(Value::Null) },
-    )
+    let current_fp = ReleaseTriageFingerprint::from(&cfg);
+    let ttl = std::time::Duration::from_secs(60);
+    let limit = std::time::Duration::from_secs(15);
+
+    let my_epoch = {
+        let mut map = RELEASE_TRIAGE_SLOTS.lock().unwrap_or_else(|e| e.into_inner());
+        match map.get_mut(&data_dir) {
+            Some(slot) => {
+                if slot.fingerprint != current_fp {
+                    // 設定變更：強制 invalidation，代數推進
+                    slot.fingerprint = current_fp.clone();
+                    slot.epoch = slot.epoch.wrapping_add(1);
+                    slot.at = None;
+                    slot.value = Value::Null;
+                    slot.refreshing = true;
+                    slot.epoch
+                } else if slot.at.is_some_and(|at| at.elapsed() < ttl) || slot.refreshing {
+                    // 快取命中或已有探測進行中（非阻塞回傳上一份）
+                    return slot.value.clone();
+                } else {
+                    // 快取過期且無人探測中
+                    slot.refreshing = true;
+                    slot.epoch
+                }
+            }
+            None => {
+                let slot = AppProbeSlot {
+                    fingerprint: current_fp.clone(),
+                    epoch: 1,
+                    at: None,
+                    value: Value::Null,
+                    refreshing: true,
+                };
+                map.insert(data_dir.clone(), slot);
+                1
+            }
+        }
+    };
+
+    struct ResetGuard {
+        data_dir: std::path::PathBuf,
+        epoch: u64,
+    }
+    impl Drop for ResetGuard {
+        fn drop(&mut self) {
+            let mut map = RELEASE_TRIAGE_SLOTS.lock().unwrap_or_else(|e| e.into_inner());
+            if let Some(slot) = map.get_mut(&self.data_dir) {
+                if slot.epoch == self.epoch {
+                    slot.refreshing = false;
+                }
+            }
+        }
+    }
+    let _reset = ResetGuard {
+        data_dir: data_dir.clone(),
+        epoch: my_epoch,
+    };
+
+    let fresh = tokio::time::timeout(limit, async {
+        app.release_triage_health_probe(&cfg).await.unwrap_or(Value::Null)
+    })
     .await
+    .ok();
+
+    let mut map = RELEASE_TRIAGE_SLOTS.lock().unwrap_or_else(|e| e.into_inner());
+    if let Some(slot) = map.get_mut(&data_dir) {
+        if slot.epoch == my_epoch && slot.fingerprint == current_fp {
+            if let Some(v) = fresh {
+                slot.value = v;
+            }
+            slot.at = Some(std::time::Instant::now());
+            slot.refreshing = false;
+            return slot.value.clone();
+        }
+    }
+    fresh.unwrap_or(Value::Null)
 }
 
 /// 一顆角色 bot（巡檢／協調者）現在能不能用，給「核准該不該改派」這類決定當依據（issue #421）。
@@ -839,5 +939,196 @@ mod probe_cache_tests {
         .await;
         assert_eq!(count.load(Ordering::SeqCst), 1, "被取消後 slot 應被釋放並執行新 probe");
         assert_eq!(v2, json!({"recovered": true}));
+    }
+
+    use crate::capabilities::{Cfg, DataDir};
+    use crate::config::{ConfigFile, ConfigStore, ReleaseTriageCfg};
+    use std::path::{Path, PathBuf};
+
+    struct NoHooks;
+    impl crate::config::ConfigChangeHooks for NoHooks {
+        fn validate_projection(&self, _next: &ConfigFile) -> anyhow::Result<()> {
+            Ok(())
+        }
+        fn audit_external_change(&self, _at: &'static std::panic::Location<'static>, _path: &Path, _old: &ConfigFile, _new: &ConfigFile) {}
+        fn audit_reload_unchanged(&self, _at: &'static std::panic::Location<'static>, _path: &Path) {}
+        fn audit_write(&self, _at: &'static std::panic::Location<'static>, _path: &Path, _old: &ConfigFile, _new: &ConfigFile) {}
+    }
+
+    struct MockApp {
+        dir: PathBuf,
+        store: ConfigStore,
+        probe_fn: Arc<dyn Fn(&ReleaseTriageCfg) -> Option<Value> + Send + Sync>,
+    }
+
+    impl DataDir for MockApp {
+        fn data_dir(&self) -> &Path {
+            &self.dir
+        }
+    }
+
+    impl Cfg for MockApp {
+        fn cfg(&self) -> &ConfigStore {
+            &self.store
+        }
+    }
+
+    impl crate::supervisor::ports::HostProbes for MockApp {
+        async fn pane_shows_login_problem(&self, _run: &crate::db::Run) -> Option<bool> {
+            None
+        }
+        fn process_dump<'a>(&'a self, _host: &'a str) -> impl std::future::Future<Output = anyhow::Result<String>> + Send + 'a {
+            async { Ok(String::new()) }
+        }
+        async fn identity_for_host(&self, _host: &str, _name: &str) -> Option<crate::config::IdentityCfg> {
+            None
+        }
+        async fn deploy_behind(&self) -> Result<Value, String> {
+            Ok(Value::Null)
+        }
+        async fn release_triage_health_probe(&self, cfg: &ReleaseTriageCfg) -> Option<Value> {
+            (self.probe_fn)(cfg)
+        }
+        async fn due_actions_snapshot(&self) -> Value {
+            Value::Null
+        }
+        fn primary_keep_warm_tick(&self) {}
+        async fn restart_loop<F, Fut>(&self, _name: &'static str, _factory: F)
+        where
+            F: Fn() -> Fut + Send + Sync + 'static,
+            Fut: std::future::Future<Output = ()> + Send + 'static,
+        {
+        }
+        fn spawn_restartable<F, Fut>(&self, _name: &'static str, _factory: F)
+        where
+            F: Fn() -> Fut + Send + Sync + 'static,
+            Fut: std::future::Future<Output = ()> + Send + 'static,
+        {
+        }
+        fn is_share_bot<'a>(&'a self, _bot_id: &'a str) -> impl std::future::Future<Output = anyhow::Result<bool>> + Send + 'a {
+            async { Ok(false) }
+        }
+    }
+
+    async fn create_mock_app(
+        name: &str,
+        repo: &str,
+        probe: impl Fn(&ReleaseTriageCfg) -> Option<Value> + Send + Sync + 'static,
+    ) -> (PathBuf, MockApp) {
+        let nanos = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos();
+        let base = std::env::temp_dir().join(format!("am-test-{}-{}-{}", name, std::process::id(), nanos));
+        std::fs::create_dir_all(&base).unwrap();
+        let cfg_path = base.join("config.toml");
+        let mut file = ConfigFile::default();
+        file.release_triage.publish = true;
+        file.release_triage.repo = Some(repo.to_string());
+        std::fs::write(&cfg_path, toml::to_string(&file).unwrap()).unwrap();
+        let store = ConfigStore::load_with_hooks(cfg_path, Arc::new(NoHooks)).await.unwrap();
+        let app = MockApp {
+            dir: base.join("data"),
+            store,
+            probe_fn: Arc::new(probe),
+        };
+        (base, app)
+    }
+
+    #[tokio::test]
+    async fn cross_app_health_isolation() {
+        let (_d1, app_a) = create_mock_app("app_a", "owner/repo-a", |_| Some(json!({"app": "A"}))).await;
+        let (_d2, app_b) = create_mock_app("app_b", "owner/repo-b", |_| Some(json!({"app": "B"}))).await;
+
+        let va1 = release_triage_health(&app_a).await;
+        assert_eq!(va1, json!({"app": "A"}));
+
+        // B 不得讀 A 的快取結論
+        let vb1 = release_triage_health(&app_b).await;
+        assert_eq!(vb1, json!({"app": "B"}), "App B 不得讀取 App A 的快取結果");
+
+        // 交錯呼叫，各自仍應命中快取
+        let va2 = release_triage_health(&app_a).await;
+        assert_eq!(va2, json!({"app": "A"}));
+        let vb2 = release_triage_health(&app_b).await;
+        assert_eq!(vb2, json!({"app": "B"}));
+    }
+
+    #[tokio::test]
+    async fn config_change_forces_immediate_invalidation() {
+        let (_d, app) = create_mock_app("app_inval", "owner/repo-v1", |cfg| {
+            Some(json!({"repo": cfg.repo.clone()}))
+        }).await;
+
+        let v1 = release_triage_health(&app).await;
+        assert_eq!(v1, json!({"repo": "owner/repo-v1"}));
+
+        // 更新設定
+        app.store.update(|c| {
+            c.release_triage.repo = Some("owner/repo-v2".to_string());
+            Ok(())
+        }).await.unwrap();
+
+        // 應強制 invalidation，不得沿用舊快取
+        let v2 = release_triage_health(&app).await;
+        assert_eq!(v2, json!({"repo": "owner/repo-v2"}), "設定變更後應立即失效並重新探測");
+    }
+
+    #[tokio::test]
+    async fn inflight_probe_does_not_overwrite_after_config_reload() {
+        let state = Arc::new(std::sync::Mutex::new("v1"));
+        let state_clone = Arc::clone(&state);
+
+        let (_d, app) = create_mock_app("app_inflight", "owner/repo-v1", move |_cfg| {
+            let s = *state_clone.lock().unwrap();
+            if s == "v1" {
+                // 慢探測
+                std::thread::sleep(Duration::from_millis(200));
+                Some(json!({"version": "v1"}))
+            } else {
+                Some(json!({"version": "v2"}))
+            }
+        }).await;
+
+        let app_ref = Arc::new(app);
+        let a1 = Arc::clone(&app_ref);
+        let h1 = tokio::spawn(async move {
+            release_triage_health(&*a1).await
+        });
+
+        tokio::time::sleep(Duration::from_millis(30)).await;
+
+        // 此時 hot reload 設定
+        *state.lock().unwrap() = "v2";
+        app_ref.store.update(|c| {
+            c.release_triage.repo = Some("owner/repo-v2".to_string());
+            Ok(())
+        }).await.unwrap();
+
+        // 呼叫新設定的 health
+        let v2 = release_triage_health(&*app_ref).await;
+        assert_eq!(v2, json!({"version": "v2"}));
+
+        // 等待舊的慢探測完成
+        let _ = h1.await;
+
+        // 檢查快取：完成的 v1 probe 不得覆寫 v2
+        let cached = release_triage_health(&*app_ref).await;
+        assert_eq!(cached, json!({"version": "v2"}), "舊的 inflight probe 不得覆寫新設定的快取");
+    }
+
+    #[tokio::test]
+    async fn same_key_hits_cache_within_ttl() {
+        let probe_count = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let count_clone = Arc::clone(&probe_count);
+        let (_d, app) = create_mock_app("app_hit", "owner/repo-hit", move |_| {
+            count_clone.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            Some(json!({"hit": true}))
+        }).await;
+
+        let v1 = release_triage_health(&app).await;
+        assert_eq!(v1, json!({"hit": true}));
+        assert_eq!(probe_count.load(std::sync::atomic::Ordering::SeqCst), 1);
+
+        let v2 = release_triage_health(&app).await;
+        assert_eq!(v2, json!({"hit": true}));
+        assert_eq!(probe_count.load(std::sync::atomic::Ordering::SeqCst), 1, "TTL 內重複呼叫不應重複探測");
     }
 }
