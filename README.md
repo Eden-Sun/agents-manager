@@ -153,7 +153,7 @@ cargo build --release -p agents-managerd
 ./target/release/agents-managerd serve    # http://127.0.0.1:7788
 ```
 
-- 跳過第 1 步也編得過，但那顆 daemon 沒有 UI：開 7788 只會拿到一行「web UI not embedded」的 404。之後補 build 前端，還要讓 daemon **重新編譯**才會嵌進去（cargo 看不到 `web/dist` 變了，見 `daemon/src/assets.rs` 開頭的說明）。
+- 跳過第 1 步也編得過，但那顆 daemon 沒有 UI：開 7788 只會拿到一行「web UI not embedded」的 404。之後補 build 前端，還要讓 daemon **重新編譯**才會嵌進去（`crates/am-base/build.rs` 盯著 `web/dist`，正常的 `cargo build` 就會重嵌；見 `crates/am-base/src/assets.rs` 開頭的說明）。
 - workspace 裡的 `desktop/`（Tauri 殼）需要 `desktop/binaries/agents-managerd-<triple>` 這個 sidecar，只有 `scripts/package-dmg.sh` 會放進去，所以它不在預設建置範圍：不帶 `-p` 的 `cargo build` / `cargo test` 只建 `daemon` 與 `xtask`。要打包成 app 請看 [`docs/PACKAGING.md`](docs/PACKAGING.md)。
 
 前端要邊改邊看時，daemon 照上面跑，另一個終端開 Vite dev server（把 /api、/hook、/ws 代理到 7788）：
@@ -208,4 +208,4 @@ VITE_MOCK=1 bun run dev
 ## 現況
 
 - 單 bot 對話、群組 `@mention`、遠端 host（SSH 轉發 + herdr 事件／spool）、額度條、身份、圖片附件與暫存托盤、主機 shell、遠端 gh 登入、子 agent 血緣認領，是正在用的路徑。
-- 判斷邏輯（專案刪除守門、bot 燈號）抽成純函式，用 `node --test` 跑；daemon 端 `cargo test -p agents-managerd`，shim 腳本另有 `sh` 測試。
+- 判斷邏輯（專案刪除守門、bot 燈號）抽成純函式，用 `bun test` 跑（測試檔是 `node:test` 寫的，bun 直接吃；`scripts/check.sh web`）；daemon 端 `cargo test -p agents-managerd`，shim 腳本另有 `sh` 測試。

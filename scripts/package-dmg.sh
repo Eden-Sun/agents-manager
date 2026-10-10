@@ -35,7 +35,7 @@ VERSION="$(python3 -c 'import json,sys;print(json.load(open("desktop/tauri.conf.
 DMG="$OUT_DIR/$PRODUCT-$VERSION-arm64.dmg"
 
 # ---------------------------------------------------------------- 1. web UI
-# The daemon embeds web/dist with rust-embed (daemon/src/assets.rs), so this must
+# The daemon embeds web/dist with rust-embed (crates/am-base/src/assets.rs), so this must
 # run before the cargo build, not after.
 if [ "${SKIP_WEB:-}" = 1 ] && [ -f web/dist/index.html ]; then
   step "web ui (skipped, reusing web/dist)"

@@ -13,7 +13,7 @@
    spawn `agents-managerd serve` → 等 127.0.0.1:7788 起來 → webview 導向該網址
 ```
 
-UI 依然是 daemon 用 `rust-embed` 內嵌後自己 serve 的（`daemon/src/assets.rs`），
+UI 依然是 daemon 用 `rust-embed` 內嵌後自己 serve 的（`crates/am-base/src/assets.rs`），
 Tauri 只負責開視窗，不參與前端 routing，所以瀏覽器裡看到的和 App 裡看到的是同一份東西。
 
 ---
