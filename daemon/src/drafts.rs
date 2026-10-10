@@ -61,31 +61,37 @@ async fn get(pool: &SqlitePool, key: &str) -> sqlx::Result<Option<Draft>> {
 }
 
 /// 寫一份草稿。回傳（現況, 這次有沒有真的改到）；沒改到時 rev 不動。空字串＝刪除（留墓碑）。
+///
+/// 改到的時候回報的是**這一次寫入產生的那一列**（`RETURNING`），不是寫完之後另外讀的：兩個分頁幾乎同時寫時，
+/// 先寫的那一個不能拿到後寫的版本當自己的回音（#1062）。沒回列＝內容沒變（或刪一份不存在的），才讀現況。
 pub async fn put(pool: &SqlitePool, key: &str, text: &str) -> sqlx::Result<(Option<Draft>, bool)> {
     let now = crate::db::now();
-    let changed = if text.is_empty() {
-        sqlx::query("UPDATE composer_drafts SET text = '', rev = rev + 1, updated_at = ? WHERE key = ? AND text <> ''")
-            .bind(&now)
-            .bind(key)
-            .execute(pool)
-            .await?
-            .rows_affected()
-            > 0
+    let written: Option<Draft> = if text.is_empty() {
+        sqlx::query_as(
+            "UPDATE composer_drafts SET text = '', rev = rev + 1, updated_at = ? WHERE key = ? AND text <> ''
+             RETURNING key, text, rev, updated_at",
+        )
+        .bind(&now)
+        .bind(key)
+        .fetch_optional(pool)
+        .await?
     } else {
-        sqlx::query(
+        sqlx::query_as(
             "INSERT INTO composer_drafts (key, text, rev, updated_at) VALUES (?, ?, 1, ?)
              ON CONFLICT(key) DO UPDATE SET text = excluded.text, rev = composer_drafts.rev + 1, updated_at = excluded.updated_at
-             WHERE composer_drafts.text <> excluded.text",
+             WHERE composer_drafts.text <> excluded.text
+             RETURNING key, text, rev, updated_at",
         )
         .bind(key)
         .bind(text)
         .bind(&now)
-        .execute(pool)
+        .fetch_optional(pool)
         .await?
-        .rows_affected()
-            > 0
     };
-    Ok((get(pool, key).await?, changed))
+    match written {
+        Some(d) => Ok((Some(d), true)),
+        None => Ok((get(pool, key).await?, false)),
+    }
 }
 
 fn event(d: &Draft, client_id: &str) -> Value {
@@ -243,6 +249,24 @@ mod tests {
         let r = put_http(State(app.clone()), Path("bot:nope".into()), put_in("", "c1")).await.unwrap().0;
         assert_eq!(r["rev"], 0);
         assert!(get(&app.db, "bot:nope").await.unwrap().is_none());
+    }
+
+    /// #1062：回報與事件要是**這一次寫入**產生的那一版，不是寫完之後另外讀到的。另一個寫入者剛好落地時，
+    /// 我們的回音仍然是我們的 text／rev；另一個寫入者的版本留在資料庫裡（AFTER trigger 模擬）。
+    #[tokio::test]
+    async fn put_reports_the_version_this_write_produced_not_a_later_writers() {
+        let app = app().await;
+        sqlx::query("CREATE TRIGGER am_test_other_writer AFTER INSERT ON composer_drafts WHEN NEW.text = 'mine' BEGIN UPDATE composer_drafts SET text = 'theirs', rev = rev + 1 WHERE key = NEW.key; END")
+            .execute(&app.db)
+            .await
+            .unwrap();
+        let mut rx = app.subscribe();
+        let r = put_http(State(app.clone()), Path("bot:b1".into()), put_in("mine", "tab-1")).await.unwrap().0;
+        assert_eq!(r["rev"], 1, "回應是這次寫入的版本");
+        let ev = rx.try_recv().unwrap();
+        assert_eq!((ev.data["text"].as_str(), ev.data["rev"].as_i64(), ev.data["client_id"].as_str()), (Some("mine"), Some(1), Some("tab-1")));
+        let now = get(&app.db, "bot:b1").await.unwrap().unwrap();
+        assert_eq!((now.text.as_str(), now.rev), ("theirs", 2), "另一個寫入者的版本還在，沒有被這次的回報蓋掉");
     }
 
     #[tokio::test]
