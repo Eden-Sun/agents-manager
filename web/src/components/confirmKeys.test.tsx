@@ -59,3 +59,15 @@ test('第二個選項（secondary）同樣只觸發一次，而且跟確認共�
   await click(confirmBtn())
   assert.equal(secondary + calls.confirm, 1)
 })
+
+test('要打字確認的框：組字中的 Esc 不取消', async () => {
+  const { calls, el } = dialog({ requireText: '我的專案' })
+  await mount(el)
+  const input = document.querySelector<HTMLInputElement>('.confirm-require input')!
+  await typeInto(input, '我的')
+  await keydown(input, 'Escape', { isComposing: true })
+  assert.equal(calls.cancel, 0)
+  assert.equal(input.value, '我的')
+  await keydown(input, 'Escape')
+  assert.equal(calls.cancel, 1)
+})

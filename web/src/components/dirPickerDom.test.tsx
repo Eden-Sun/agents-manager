@@ -267,3 +267,29 @@ test('桌機對照：點一列仍攔 mousedown、焦點留在過濾框（既有�
   assert.equal(ev.defaultPrevented, true)
   assert.equal(document.activeElement, filter)
 })
+
+test('新資料夾：組字中的 Esc 不收表單、名字留著', async () => {
+  const d = await open()
+  await click(d.button('＋ 新資料夾'))
+  const newNameInput = document.querySelector<HTMLInputElement>('form.dirpicker-new input')!
+  await typeInto(newNameInput, '新資料')
+  const ev = await keydown(newNameInput, 'Escape', { isComposing: true })
+  assert.ok(document.querySelector('.dirpicker-new'), '新資料夾表單不能被收掉')
+  assert.equal(newNameInput.value, '新資料')
+  assert.equal(ev.defaultPrevented, true)
+  assert.equal(d.cancelled(), 0)
+  await keydown(newNameInput, 'Escape')
+  assert.equal(document.querySelector('.dirpicker-new'), null, '一般的 Esc 收起表單')
+})
+
+test('過濾框：組字中的 Esc 不清過濾也不離開', async () => {
+  const d = await open()
+  const filter = document.querySelector<HTMLInputElement>('[role=dialog] input.dirpicker-filter')!
+  await typeInto(filter, 'ab')
+  await keydown(filter, 'Escape', { isComposing: true })
+  assert.equal(filter.value, 'ab')
+  assert.equal(d.cancelled(), 0)
+  await typeInto(filter, '')
+  await keydown(filter, 'Escape', { isComposing: true })
+  assert.equal(d.cancelled(), 0)
+})

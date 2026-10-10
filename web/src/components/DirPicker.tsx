@@ -160,6 +160,11 @@ export function DirPicker({
   const up = () => listing?.parent && load(listing.parent, { keep: listing.path })
 
   const onKeyDown = (e: ReactKeyboardEvent) => {
+    // 輸入法選字中的 Esc 是取消選字：不收表單、不清過濾、不離開。preventDefault 是給外層 Modal 看的（它見 defaultPrevented 就不關）。
+    if (e.key === 'Escape' && isImeEnter(e.nativeEvent)) {
+      e.preventDefault()
+      return
+    }
     // busy 時只擋其他鍵；Esc 照常離開並 preventDefault，不然外層 Modal 會把整個新增視窗關掉。
     if (busy && e.key !== 'Escape') return
     if (creating) {

@@ -82,6 +82,8 @@ export function ConfirmDialog({
     if (!open) return
     const onKey = (e: KeyboardEvent) => {
       if (e.key === 'Escape') {
+        // 輸入法選字中的 Esc 是取消選字，不是取消確認框。
+        if (isImeEnter(e)) return
         // Window-level capture runs the outer dialog first; let the target decide which dialog owns Escape.
         const dialog = dialogRef.current
         if (dialog && e.target instanceof Node && !dialog.contains(e.target)) return
