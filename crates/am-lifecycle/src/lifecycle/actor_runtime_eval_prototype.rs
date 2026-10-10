@@ -60,7 +60,9 @@ mod tests {
     /// 看不到它，新開的 actor 也不知道曾經有這件事，除非另外有東西在「收下」的當下就先寫了 DB。
     /// **這正是 actor 為什麼不能取代現有『先寫 DB 再算數』的路徑，只能疊加在它前面**
     /// （見 docs/ACTOR-RUNTIME-EVAL.md 的「daemon restart」一節）。
-    #[tokio::test]
+    /// 時鐘是假的（`start_paused`）：runtime 沒事做時才把時間推到下一個計時器，所以 15ms 時 actor 一定已經收下、
+    /// 60ms 的「處理中」一定還沒到，跟機器忙不忙無關（#1150）。
+    #[tokio::test(start_paused = true)]
     async fn a_message_accepted_but_not_yet_persisted_is_lost_when_the_actor_restarts() {
         let persisted = Arc::new(Mutex::new(Vec::new()));
         let accepted = Arc::new(Mutex::new(Vec::new()));
@@ -76,6 +78,14 @@ mod tests {
 
         tokio::time::sleep(Duration::from_millis(150)).await;
         assert!(persisted.lock().unwrap().is_empty(), "訊息真的沒了——新開的 actor 只能從 DB 重建狀態，DB 裡沒有這一筆");
+
+        // 對照：沒被砍掉的 actor 過了那 60ms 就會落地——上面看不到，是因為被砍，不是因為等得不夠久。
+        let persisted2 = Arc::new(Mutex::new(Vec::new()));
+        let alive = ToyBotActor::spawn(persisted2.clone(), Arc::new(Mutex::new(Vec::new())));
+        alive.send("type this prompt").await;
+        tokio::time::sleep(Duration::from_millis(61)).await;
+        assert_eq!(persisted2.lock().unwrap().as_slice(), ["type this prompt"]);
+        alive.kill();
     }
 
     /// 對照組：`turn_controller::set_status` 是現有模型的代表——一次 `UPDATE ... WHERE status=?`
