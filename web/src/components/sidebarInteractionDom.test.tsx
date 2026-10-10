@@ -119,3 +119,43 @@ test('額度 critical 保留模型標籤，一般列與精簡子列都顯示短�
   assert.equal(row('child').classList.contains('compact'), true, '子列仍走精簡版型')
   assert.ok(row('b1').querySelector('.lamp'), '狀態燈照常保留')
 })
+
+/** 側欄底部「新增 Bot」開哪個專案的表單（#1085）：選著 bot 就用那顆 bot 所在的專案，不是清單第一個。 */
+const addBotButton = () => [...document.querySelectorAll<HTMLButtonElement>('.sidebar-foot-actions button')].find((b) => b.textContent?.trim() === '新增 Bot')!
+const sheetProject = () => document.querySelector('.modal .modal-sub')?.textContent
+
+test('底部「新增 Bot」：選著 p2 的 bot 就開 p2 的表單', async () => {
+  await act(async () => useStore.setState({ selectedBotId: 'b3', selectedProjectId: null } as never))
+  await mount(<Sidebar />)
+  await settle()
+  await click(addBotButton())
+  await settle()
+  assert.equal(sheetProject(), 'proj-p2')
+})
+
+test('選著 p1 的 bot 開 p1', async () => {
+  await act(async () => useStore.setState({ selectedBotId: 'b2', selectedProjectId: null } as never))
+  await mount(<Sidebar />)
+  await settle()
+  await click(addBotButton())
+  await settle()
+  assert.equal(sheetProject(), 'proj-p1')
+})
+
+test('選著群組頁以群組為準', async () => {
+  await act(async () => useStore.setState({ selectedBotId: 'b2', selectedProjectId: 'p2' } as never))
+  await mount(<Sidebar />)
+  await settle()
+  await click(addBotButton())
+  await settle()
+  assert.equal(sheetProject(), 'proj-p2')
+})
+
+test('什麼都沒選退回第一個專案', async () => {
+  await act(async () => useStore.setState({ selectedBotId: null, selectedProjectId: null } as never))
+  await mount(<Sidebar />)
+  await settle()
+  await click(addBotButton())
+  await settle()
+  assert.equal(sheetProject(), 'proj-p1')
+})
