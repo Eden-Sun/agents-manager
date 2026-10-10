@@ -1,8 +1,8 @@
 //! 分享連結的管理端點，在主 API（7788）上，只收 UI token（SPEC「分享 bot」、API.md）：
 //!
-//! - `GET  /api/bots/{id}/share` → `{shareable, enabled, url, needs_rotate, token_hint, created_at, last_used_at}`：開著就回完整 `url`
+//! - `GET  /api/bots/{id}/share` → `{shareable, enabled, url, needs_rotate, token_hint, created_at, last_used_at, allow_embed}`：開著就回完整 `url`
 //!   （舊資料只有 hash：`url:null`、`needs_rotate:true`，重產一次就有）
-//! - `POST /api/bots/{id}/share` `{"enabled":true|false}` → 開（已經開著就沿用同一條）／關（清掉 token）
+//! - `POST /api/bots/{id}/share` `{"enabled":true|false, "allow_embed"?:bool}` → 開（已經開著就沿用同一條）／關（清掉 token）；`allow_embed` 只給信任分享
 //! - `POST /api/bots/{id}/share/rotate` → 換新 token，舊連結當下失效，回新的 `url`
 
 use std::path::Path;
@@ -61,6 +61,7 @@ pub async fn state(app: &(impl crate::capabilities::Cfg + crate::capabilities::D
         "token_hint": row.as_ref().map(|r| r.token_hint.clone()),
         "created_at": row.as_ref().map(|r| r.created_at.clone()),
         "last_used_at": row.as_ref().and_then(|r| r.last_used_at.clone()),
+        "allow_embed": row.as_ref().is_some_and(|r| r.allow_embed),
     }))
 }
 

@@ -292,3 +292,37 @@ test('信任分享：選了要在確認框勾「只分享給絕對信任的人�
   assert.equal(b.share_profile, 'trusted')
   assert.equal(b.auto_approve, true, '信任分享照 bot 設定')
 })
+
+test('信任分享：「允許 iframe 嵌入」只在信任分享的分享中畫，勾選送出 allow_embed；受限沒有這個選項', async () => {
+  const { mock, shared } = await setup()
+  await mount(<BotShareSection botId={shared.id} />)
+  await settle(100)
+  assert.equal(document.querySelector('.bs-share-embed'), null, '受限不畫')
+  await unmountAll()
+
+  const st = (await mock.request('GET', '/state')) as { projects: { id: string }[] }
+  const made = (await mock.request('POST', `/projects/${st.projects[0].id}/bots`, {
+    name: 'embed-ops',
+    kind: 'claude',
+    share_profile: 'trusted',
+    confirm_trusted: true,
+    share_folder: { kind: 'existing', path: '/home/me/site' },
+  })) as { bot_id: string }
+  await mock.request('POST', `/bots/${made.bot_id}/share`, { enabled: true })
+  const bots = ((await mock.request('GET', '/state')) as { projects: { bots: { id: string; name: string; share_profile: string | null; share_enabled: boolean }[] }[] }).projects.flatMap((p) => p.bots)
+  await act(async () => useStore.setState({ bots: bots.map((b) => ({ ...b, project_id: 'p' })) } as never))
+  const trusted = bots.find((b) => b.id === made.bot_id)!
+  await mount(<BotShareSection botId={trusted.id} />)
+  await settle(150)
+  const box = () => document.querySelector<HTMLInputElement>('.bs-share-embed input')!
+  assert.ok(box(), '信任分享畫這個選項')
+  assert.match(document.querySelector('.bs-share-embed')!.textContent!, /任何網站都能把這個分享頁嵌進去/)
+  assert.equal(box().checked, false, '預設關')
+  await click(box())
+  await settle(150)
+  assert.equal(((await mock.request('GET', `/bots/${trusted.id}/share`)) as { allow_embed: boolean }).allow_embed, true, '勾了送出 allow_embed')
+  assert.equal(box().checked, true)
+  await click(box())
+  await settle(150)
+  assert.equal(((await mock.request('GET', `/bots/${trusted.id}/share`)) as { allow_embed: boolean }).allow_embed, false)
+})

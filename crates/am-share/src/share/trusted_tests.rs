@@ -192,3 +192,77 @@ async fn the_old_shared_bots_table_is_rebuilt_to_accept_trusted() {
     let left: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM sqlite_master WHERE name = 'shared_bots_v1'").fetch_one(db).await.unwrap();
     assert_eq!(left, 0, "暫存的舊表收掉了");
 }
+
+/// 「允許 iframe 嵌入」（SPEC §20.1a）：信任分享勾了，token 底下的回應才去掉 `X-Frame-Options`、`frame-ancestors` 改成 `*`，其餘 CSP 一字不改。
+#[tokio::test]
+async fn a_trusted_share_with_embed_allowed_drops_xfo_and_opens_frame_ancestors() {
+    let e = tt::env().await;
+    let (b, _) = trusted_bot(&e.app, &e.project_id, "embed").await;
+    let token = shared(&e.app, &b.id).await;
+    let base = serve(portal::router(e.app.clone())).await;
+    let c = client();
+    let info = format!("{base}/s/{token}/api/info");
+
+    let deny = c.get(&info).send().await.unwrap();
+    assert_eq!(deny.status(), reqwest::StatusCode::OK);
+    assert_eq!(deny.headers()["x-frame-options"], "DENY", "預設不准嵌");
+    let deny_csp = deny.headers()["content-security-policy"].to_str().unwrap().to_string();
+    assert!(deny_csp.contains("frame-ancestors 'none'"), "{deny_csp}");
+
+    store::set_allow_embed(&e.app.db, &b.id, true).await.unwrap();
+    let open = c.get(&info).send().await.unwrap();
+    assert_eq!(open.status(), reqwest::StatusCode::OK);
+    assert!(open.headers().get("x-frame-options").is_none(), "{:?}", open.headers());
+    let open_csp = open.headers()["content-security-policy"].to_str().unwrap();
+    assert_eq!(open_csp, deny_csp.replace("frame-ancestors 'none'", "frame-ancestors *"), "其餘指令一字不改");
+}
+
+/// 預設關；受限分享帶 `allow_embed` 一律 400 `share_embed_trusted_only`，而且分享不會因此被開起來。信任分享走管理 API 開得起來。
+#[tokio::test]
+async fn embed_is_off_by_default_and_restricted_shares_cannot_enable_it() {
+    let e = tt::env().await;
+    let (t, _) = trusted_bot(&e.app, &e.project_id, "embed-api").await;
+    let r = restricted_bot(&e.app, &e.project_id, "embed-r").await;
+    set_base(&e.app).await;
+    let base = serve(crate::api::router(e.app.clone())).await;
+    let c = client();
+
+    let v: Value = c.post(format!("{base}/api/bots/{}/share", t.id)).header("X-AM-Token", "test-token").json(&json!({"enabled": true})).send().await.unwrap().json().await.unwrap();
+    assert_eq!(v["allow_embed"], false, "{v}");
+    let res = c.post(format!("{base}/api/bots/{}/share", r.id)).header("X-AM-Token", "test-token").json(&json!({"enabled": true, "allow_embed": true})).send().await.unwrap();
+    assert_eq!(res.status(), 400);
+    assert_eq!(res.json::<Value>().await.unwrap()["reason"], "share_embed_trusted_only");
+    assert!(store::share(&e.app.db, &r.id).await.unwrap().is_none(), "被拒絕的那次不開分享");
+
+    let on: Value = c.post(format!("{base}/api/bots/{}/share", t.id)).header("X-AM-Token", "test-token").json(&json!({"enabled": true, "allow_embed": true})).send().await.unwrap().json().await.unwrap();
+    assert_eq!(on["allow_embed"], true, "{on}");
+    let g: Value = c.get(format!("{base}/api/bots/{}/share", t.id)).header("X-AM-Token", "test-token").send().await.unwrap().json().await.unwrap();
+    assert_eq!(g["allow_embed"], true, "{g}");
+    let off: Value = c.post(format!("{base}/api/bots/{}/share", t.id)).header("X-AM-Token", "test-token").json(&json!({"enabled": true, "allow_embed": false})).send().await.unwrap().json().await.unwrap();
+    assert_eq!(off["allow_embed"], false, "{off}");
+}
+
+/// 認不得的 token、分享已關的 token，就算別的分享開了 `allow_embed`，回應也一律 DENY＋'none'。
+#[tokio::test]
+async fn an_invalid_token_stays_deny_even_when_another_share_allows_embed() {
+    let e = tt::env().await;
+    let (t, _) = trusted_bot(&e.app, &e.project_id, "embed-other").await;
+    let (closed, _) = trusted_bot(&e.app, &e.project_id, "embed-closed").await;
+    let token = shared(&e.app, &t.id).await;
+    let old = shared(&e.app, &closed.id).await;
+    store::set_allow_embed(&e.app.db, &t.id, true).await.unwrap();
+    store::set_allow_embed(&e.app.db, &closed.id, true).await.unwrap();
+    store::disable(&e.app.db, &closed.id).await.unwrap();
+    let base = serve(portal::router(e.app.clone())).await;
+    let c = client();
+
+    let unknown = "A".repeat(store::TOKEN_LEN);
+    for tok in [unknown.as_str(), old.as_str()] {
+        let res = c.get(format!("{base}/s/{tok}/api/info")).send().await.unwrap();
+        assert_eq!(res.status(), reqwest::StatusCode::NOT_FOUND);
+        assert_eq!(res.headers()["x-frame-options"], "DENY");
+        assert!(res.headers()["content-security-policy"].to_str().unwrap().contains("frame-ancestors 'none'"));
+    }
+    let ok = c.get(format!("{base}/s/{token}/api/info")).send().await.unwrap();
+    assert!(ok.headers().get("x-frame-options").is_none(), "只有開了的那條放寬");
+}

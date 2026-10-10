@@ -159,6 +159,14 @@
   cursor: pointer;
 }
 
+.bs-share-embed {
+  margin: 8px 0;
+}
+
+.bs-share-embed .hint {
+  margin: 2px 0 0;
+}
+
 .bs-share-trusted {
   margin: 6px 0 0;
   padding: 6px 8px;

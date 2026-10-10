@@ -626,6 +626,7 @@ export class MockTransport implements Transport {
       return b ? b.share_profile != null : null
     },
     (id, enabled) => this.emit('bot_share_changed', { bot_id: id, enabled }),
+    (id) => this.bots.find((x) => x.id === id)?.share_profile === 'trusted',
   )
   readonly serverDrafts = new MockServerDrafts()
   readonly remoteCargo = new MockRemoteCargo()

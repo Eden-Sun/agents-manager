@@ -91,6 +91,9 @@ const INLINE_IMAGE_CSP: &str = "sandbox; default-src 'none'; img-src data:; styl
 
 const CSP: &str = "default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data: blob:; connect-src 'self'; \
                    font-src 'self'; object-src 'none'; base-uri 'none'; frame-ancestors 'none'; form-action 'none'";
+/// 頁面 [`CSP`] 裡的 `frame-ancestors`：預設不准嵌；信任分享開了 `allow_embed` 才換成 [`CSP_FRAME_EMBED`]（其餘指令一字不改）。
+const CSP_FRAME_DENY: &str = "frame-ancestors 'none'";
+const CSP_FRAME_EMBED: &str = "frame-ancestors *";
 
 /// 分享入口從 `App` 拿的外部事實（`App` 在 `app_ports_p10` 實作）：資料目錄與 DB（[`ShareStorage`]）、讀分享檔、SVG 提醒（[`SvgCheckEnv`]），
 /// 加上 `[share]` 設定、bot 互斥鎖、狀態燈、事件匯流排與「把分享使用者的訊息送給 bot」。授權檢查（token 解析、權威鎖、撞號後重驗）全在這個檔，不經過 trait。
@@ -351,6 +354,8 @@ async fn security_headers<H: PortalEnv>(State(st): State<Portal<H>>, uri: Uri, r
         next.run(req).await
     };
     let asset_ok = uri.path().starts_with("/assets/") && res.status() == StatusCode::OK;
+    // 信任分享勾了「允許 iframe 嵌入」（SPEC §20.1a）：只有 token 底下的 200 回應放寬；其餘（404、403、資產）照舊 DENY。
+    let embed = res.status() == StatusCode::OK && embed_for_path(&st, uri.path()).await;
     let h = res.headers_mut();
     // 這個入口沒有任何 CORS：就算哪條路由不小心加了，也在這裡拿掉。
     h.remove(header::ACCESS_CONTROL_ALLOW_ORIGIN);
@@ -359,14 +364,35 @@ async fn security_headers<H: PortalEnv>(State(st): State<Portal<H>>, uri: Uri, r
     h.insert(header::CACHE_CONTROL, HeaderValue::from_static(cache));
     h.insert(header::REFERRER_POLICY, HeaderValue::from_static("no-referrer"));
     h.insert(header::X_CONTENT_TYPE_OPTIONS, HeaderValue::from_static("nosniff"));
-    h.insert(header::X_FRAME_OPTIONS, HeaderValue::from_static("DENY"));
+    if embed {
+        h.remove(header::X_FRAME_OPTIONS);
+    } else {
+        h.insert(header::X_FRAME_OPTIONS, HeaderValue::from_static("DENY"));
+    }
     // 唯一的例外是 inline 圖片自己設的 sandbox CSP（比頁面的更嚴），其餘一律覆蓋成頁面的。
     if h.get(header::CONTENT_SECURITY_POLICY).is_none_or(|v| v != INLINE_IMAGE_CSP) {
-        h.insert(header::CONTENT_SECURITY_POLICY, HeaderValue::from_static(CSP));
+        let csp = if embed { HeaderValue::from_str(&CSP.replace(CSP_FRAME_DENY, CSP_FRAME_EMBED)).ok() } else { Some(HeaderValue::from_static(CSP)) };
+        if let Some(v) = csp {
+            h.insert(header::CONTENT_SECURITY_POLICY, v);
+        }
     }
     h.insert("Cross-Origin-Opener-Policy", HeaderValue::from_static("same-origin"));
     h.insert("Cross-Origin-Resource-Policy", HeaderValue::from_static("same-origin"));
     res
+}
+
+/// `/s/{token}…` 的 token 允許被嵌進 iframe？查 DB（[`store::embed_allowed`]）；查失敗當成不允許（fail closed）。
+async fn embed_for_path<H: PortalEnv>(st: &Portal<H>, path: &str) -> bool {
+    let Some(token) = path.strip_prefix("/s/").and_then(|rest| rest.split('/').next()).filter(|t| !t.is_empty()) else {
+        return false;
+    };
+    match store::embed_allowed(st.app.db_pool(), token).await {
+        Ok(allowed) => allowed,
+        Err(e) => {
+            tracing::warn!(error = %e, "share embed check failed; keeping X-Frame-Options DENY");
+            false
+        }
+    }
 }
 
 /// 找不到、token 錯、分享關了：全部長一樣。

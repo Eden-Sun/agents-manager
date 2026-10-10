@@ -5080,6 +5080,10 @@ daemon 要能在 Linux（目標：Ubuntu，外部編譯主機 192.168.1.46，#67
   AGM 不能刪／停（`guards_from_bot_principal`）、不收進閒置睡眠（`share_bot`）、child 退役擋下、outbox 走分享保留政策（`.am-share-keep`，14 天／500 MiB）、停了先試著接回原對話（`resume_native`）、hook 一律注入。
   上傳一樣放 `<資料夾>/inbox/`（資料夾是專案目錄時就是專案底下的 `inbox/`）。
 - `shared_bots.profile` 原本 CHECK 只收 `'restricted'`：開機時換名、照新定義建表、搬資料、刪舊表（schema v41）。
+- **允許 iframe 嵌入**（`bot_shares.allow_embed`，預設 0；使用者 2026-10-10）：只有信任分享的分享設定裡有這個勾選，受限分享帶了 400 `share_embed_trusted_only`。
+  勾了之後，這條 token 底下 200 的回應不送 `X-Frame-Options`、CSP 的 `frame-ancestors` 改成 `*`（其餘指令一字不改），別的網站可以用 `<iframe>` 嵌進去；
+  判斷只看 `store::embed_allowed`（token 有效、分享還開著、是信任分享、`allow_embed=1`），查詢失敗當成不允許。token 錯、分享關了、`/assets/*` 一律照舊 DENY。
+  信任分享沒有 cookie（授權全靠網址裡的 token），嵌進第三方頁面不會有 SameSite 問題。
 
 ### 20.2 分享連結
 
@@ -5096,7 +5100,7 @@ daemon 要能在 Linux（目標：Ubuntu，外部編譯主機 192.168.1.46，#67
 - router 上**只有** `/s/{token}`（分享頁）、`/s/{token}/api/*` 與 `/assets/*`（分享頁的 js／css），沒有 fallback 到主 API、主 UI、`/ws`、`/hook`。
   分享頁是嵌入的 `web/dist/share.html`（獨立的 Vite entry），沒打包時回一頁佔位。
 - token 錯、分享關了：一律同一個 404。每個回應 `Cache-Control: no-store`（`/assets` 例外：檔名有雜湊）、`Referrer-Policy: no-referrer`、`nosniff`、
-  `X-Frame-Options: DENY`、只允許 `'self'` 的 CSP（沒有 inline script／style）；不設任何 CORS 標頭。
+  `X-Frame-Options: DENY`、只允許 `'self'` 的 CSP（沒有 inline script／style）；不設任何 CORS 標頭。唯一的例外是信任分享勾了「允許 iframe 嵌入」（§20.1a）：該 token 底下 200 的回應改為不送 `X-Frame-Options`、`frame-ancestors *`。
 - 未成形的 token 不查 DB；有效形狀的 token 查詢全入口共用 8 個併發名額，滿額回一般 503。成功驗證後的 `last_used_at` 是遙測：每顆 bot 每分鐘最多檢查一次，先用唯讀查詢看是否已新鮮，寫入失敗不影響請求。
 - 對話：**只有 end user 與 bot 的對話**（使用者 2026-10-04：「這個 share 就該是 for user-only」）——end user 送的 user 訊息（`relay_from = share`）與 assistant；倒回的（`rewound_at` 非空）、擁有者從 AG Man 送的、別顆 bot 轉來的一律不給，列表與 SSE 同一條規則（`portal::VISIBLE_SQL`）。只給 id、role、誰送的（`share`／`bot`）、文字、時間、附件名；系統訊息、工具細節、終端快照、轉寄來源的 bot id 都不給。end user 的訊息顯示時拿掉 `〔分享使用者〕 ` 前綴（她看到的是自己打的原文）；bot 回覆若照抄了前綴或附件標記行也拿掉（只過濾顯示，不改 bot 與 DB）。擁有者倒回對話時 SSE 送 `resync`，分享頁整頁重抓並取代手上的清單。
   **擁有者回合的回覆預設也不給**（使用者 2026-10-04：後台交代 bot 的「ok」不該出現在 end user 的對話裡）：bot 的回覆看觸發那一回合的 user 訊息（同一個 turn 的第一則 user；沒有 turn 的看它前面最近一則 user），
