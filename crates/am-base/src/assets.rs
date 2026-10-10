@@ -2,20 +2,10 @@
 //! fresh clone compiling before `web/dist` exists (`cargo dev` builds the daemon before
 //! any `bun run build`); such a binary answers `/` with a "build the UI first" 404.
 //!
-//! **重建 UI 時要注意**：`rust_embed::Embed` 是巨集，在編譯這個檔案的當下把 `web/dist` 讀進
-//! 二進位裡，但它沒有 build script 去 emit `cargo:rerun-if-changed`——cargo 只看得到 `.rs`
-//! 檔的內容有沒有變。所以 `npm run build` 之後單純 `cargo build --release` **不會**重嵌前端
-//! （`touch` 這個檔也沒用，cargo 比的是內容不是 mtime），跑起來的 daemon 還是送舊的
-//! `assets/index-*.js`。要換前端請用：
-//!
-//! ```sh
-//! cd web && npm run build && cd ..
-//! cargo clean -p am-base --release   # 或改動這個檔的內容
-//! cargo build --release -p agents-managerd
-//! ```
-//!
-//! 驗證方式：`curl -s http://127.0.0.1:7788/ | grep -o 'assets/[^"]*'` 應該和
-//! `web/dist/index.html` 裡的檔名一致。
+//! **重建 UI**：`rust_embed::Embed` 在編譯這個 crate 時把 `web/dist` 讀進二進位；`build.rs` 對 `web/dist`
+//! emit `cargo:rerun-if-changed`，所以 `bun run build` 之後照常 `cargo build` 就會重嵌（#1071，舊的 `cargo clean -p am-base`
+//! 不用了）。打包時 `scripts/package-dmg.sh` 還會用 `scripts/verify-embedded-ui.sh` 比對一次，不一致就不出包。
+//! 驗證方式：`curl -s http://127.0.0.1:7788/ | grep -o 'assets/[^"]*'` 應該和 `web/dist/index.html` 裡的檔名一致。
 
 use axum::http::{header, StatusCode, Uri};
 use axum::response::{IntoResponse, Response};
@@ -91,18 +81,30 @@ mod tests {
         }
     }
 
+    /// `#[folder = "…"]` 的字面值（相對這個 crate 的 Cargo.toml）。
+    fn embed_folder() -> &'static str {
+        include_str!("assets.rs")
+            .lines()
+            .find_map(|l| l.trim().strip_prefix("#[folder = \"")?.strip_suffix("\"]"))
+            .expect("assets.rs 要有 #[folder = \"…\"]")
+    }
+
     /// `#[folder]` 是相對這個 crate 的 Cargo.toml；檔案從 daemon/ 搬到 crates/am-base/ 時少了一層，
     /// `allow_missing` 讓它安靜地編成一顆沒有前端的 binary（7788 整個 404）。
     #[test]
     fn the_embed_folder_points_at_the_repo_web_directory() {
-        let src = include_str!("assets.rs");
-        let folder = src
-            .lines()
-            .find_map(|l| l.trim().strip_prefix("#[folder = \"")?.strip_suffix("\"]"))
-            .expect("assets.rs 要有 #[folder = \"…\"]");
+        let folder = embed_folder();
         let dist = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join(folder);
         assert!(dist.ends_with("web/dist"), "{folder}");
         let web = dist.parent().unwrap();
         assert!(web.join("package.json").is_file(), "{} 不是 repo 的 web/：前端不會被嵌進 binary", web.display());
+    }
+
+    /// 前端單獨重建時 am-base 要重編（#1071）：cargo 只看 .rs 與依賴，build.rs 得對同一個目錄 emit rerun-if-changed。
+    #[test]
+    fn the_build_script_watches_the_embedded_folder() {
+        let build = include_str!("../build.rs");
+        let want = format!("cargo:rerun-if-changed={}", embed_folder());
+        assert!(build.contains(&want), "build.rs 要有 `{want}`，不然前端重建後 binary 還是舊的");
     }
 }
