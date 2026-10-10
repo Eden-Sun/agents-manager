@@ -1075,3 +1075,28 @@ async fn rewinding_the_first_prompt_pins_an_empty_conversation_and_a_missing_pro
     let n: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM rewind_anchors WHERE bot_id = ?").bind(&r.bot).fetch_one(&r.e.app.db).await.unwrap();
     assert_eq!(n, 0, "沒有 transcript：不記");
 }
+
+/// 排隊中被撤掉的那一則從來沒進過 pane：選單上沒有它，不能算進要跳過的同開頭訊息（#1122）。
+#[tokio::test]
+async fn a_prompt_revoked_from_the_queue_is_not_counted_when_skipping_same_first_lines() {
+    let r = rig().await;
+    let ids = insert_msgs(&r.e.app, &r.bot, &[("user", "again"), ("assistant", "OK"), ("user", "again")]).await;
+    let revoked = turn_for(&r, &ids[2], "failed").await;
+    sqlx::query("UPDATE turns SET delivery='failed' WHERE id=?").bind(&revoked).execute(&r.e.app.db).await.unwrap();
+    let tui = FakeTui::new(&[A, SECOND, C, "again"], Faults::default());
+    let out = call(&r, &ids[0], &tui).await.unwrap();
+    assert_eq!(tui.restored(), Some(3), "選單上唯一的那一則 again");
+    assert_eq!(out["hidden"], 3);
+}
+
+/// 更舊還有一則同句：不能因為多算一則而倒到更早那一則之前（#1122）。
+#[tokio::test]
+async fn a_revoked_prompt_does_not_push_the_rewind_to_an_older_identical_one() {
+    let r = rig().await;
+    let ids = insert_msgs(&r.e.app, &r.bot, &[("user", "again"), ("assistant", "OK"), ("user", "again"), ("assistant", "OK"), ("user", "again")]).await;
+    let revoked = turn_for(&r, &ids[4], "failed").await;
+    sqlx::query("UPDATE turns SET delivery='failed' WHERE id=?").bind(&revoked).execute(&r.e.app.db).await.unwrap();
+    let tui = FakeTui::new(&[A, SECOND, C, "again", "again"], Faults::default());
+    call(&r, &ids[2], &tui).await.unwrap();
+    assert_eq!(tui.restored(), Some(4), "倒的是第二則 again，不是更早那一則");
+}

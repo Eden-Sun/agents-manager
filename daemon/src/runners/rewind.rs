@@ -101,17 +101,28 @@ pub async fn rewind_with(app: &Arc<App>, bot_id: &str, message_id: &str, pane: O
         None => None,
     };
     let target = prompt_text.filter(|t| !t.trim().is_empty()).unwrap_or_else(|| msg.content.clone());
-    // 同一行開頭的較新訊息（沒被倒掉的）要在選單上跳過幾則。
-    let later: Vec<String> = sqlx::query_scalar(
-        "SELECT content FROM messages WHERE conversation_id = ? AND role = 'user' AND rewound_at IS NULL
-           AND rowid > (SELECT rowid FROM messages WHERE id = ?)",
+    // 同一行開頭的較新訊息（沒被倒掉的）要在選單上跳過幾則。排隊中被撤掉、從沒打進 pane 的不算（#1122）：選單上沒有它。
+    let later: Vec<(String, Option<String>)> = sqlx::query_as(
+        "SELECT content, turn_id FROM messages WHERE conversation_id = ? AND role = 'user' AND rewound_at IS NULL
+           AND rowid > (SELECT rowid FROM messages WHERE id = ?) ORDER BY rowid",
     )
     .bind(&conv)
     .bind(&msg.id)
     .fetch_all(&app.db)
     .await
     .map_err(up)?;
-    let skip = later.iter().filter(|c| same_first_line(c, &target)).count();
+    let mut skip = 0;
+    for (c, t) in &later {
+        if !same_first_line(c, &target) {
+            continue;
+        }
+        if let Some(t) = t {
+            if never_delivered(app, t).await.map_err(up)? {
+                continue;
+            }
+        }
+        skip += 1;
+    }
 
     let run = db::active_run(&app.db, bot_id).await.map_err(up)?.ok_or_else(|| conflict("not_running", "bot 沒在跑。"))?;
     if let Some(why) = busy_reason(app, bot_id, &run).await? {
@@ -174,6 +185,13 @@ pub async fn rewind_with(app: &Arc<App>, bot_id: &str, message_id: &str, pane: O
 }
 
 /// 回合失敗、而且一則 assistant 回覆都沒有：claude 沒留下它（見 [`rewind_dropped`]）。
+/// 排隊中被撤掉、一個字都沒打進 pane 的那一則（`retract_queued`：`status='failed'`、`delivery='failed'`）：
+/// CLI 從來沒看過它，`/rewind` 選單上不會有，不能算進要跳過的則數（#1122）。
+async fn never_delivered(app: &impl crate::capabilities::Db, turn_id: &str) -> anyhow::Result<bool> {
+    let row: Option<(String, String)> = sqlx::query_as("SELECT status, delivery FROM turns WHERE id = ?").bind(turn_id).fetch_optional(app.db()).await?;
+    Ok(matches!(row, Some((s, d)) if s == "failed" && d == "failed"))
+}
+
 async fn turn_dropped(app: &impl crate::capabilities::Db, turn_id: &str) -> anyhow::Result<bool> {
     let status: Option<String> = sqlx::query_scalar("SELECT status FROM turns WHERE id = ?").bind(turn_id).fetch_optional(app.db()).await?;
     if status.as_deref() != Some("failed") {
@@ -202,7 +220,19 @@ async fn next_in_context(app: &impl crate::capabilities::Db, conv: &str, message
                 continue;
             }
         }
-        let skip = later[i + 1..].iter().filter(|(c, _)| same_first_line(c, content)).count();
+        // 跳過的只算「真的打進過 pane」的同開頭訊息（#1122）。
+        let mut skip = 0;
+        for (c, t) in &later[i + 1..] {
+            if !same_first_line(c, content) {
+                continue;
+            }
+            if let Some(t) = t {
+                if never_delivered(app, t).await? {
+                    continue;
+                }
+            }
+            skip += 1;
+        }
         return Ok(Some((content.clone(), skip)));
     }
     Ok(None)
