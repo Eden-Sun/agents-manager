@@ -330,6 +330,10 @@ pub fn classify(provider: &str, p: &Value) -> HookKind {
     }
     match provider {
         "claude" => {
+            // 解不開的 payload（hook 子行程包成 `{"raw": …}`：超過 1 MiB 被截斷、stdin 逾時）沒有事件名：不猜成 SessionStart（#1007）。
+            if p.get("hook_event_name").is_none() && p.get("prompt_id").is_none() && p.get("raw").is_some() {
+                return HookKind::Ignore("unparseable payload (raw)".into());
+            }
             let ev = p
                 .get("hook_event_name")
                 .and_then(|v| v.as_str())
@@ -514,6 +518,15 @@ mod classify_tests {
       "reason":"end_turn","stopHookActive":false,"lastAssistantMessage":"GROK-OK",
       "backgroundTasks":[],"sessionCrons":[],"hook_event_name":"stop",
       "session_id":"01a072c2-9098-7d50-b3d1-f1750320ae28"}"#;
+
+    /// #1007：解不開的 claude payload（`{"raw": …}`）沒有事件名，不能猜成 SessionStart；舊形狀（只有 session_id、prompt_id）照舊猜。
+    #[test]
+    fn an_unparseable_claude_payload_is_ignored_not_guessed_as_session_start() {
+        assert!(matches!(classify("claude", &json!({"raw": "{\"hook_event_name\":\"Stop\",\"last_assistant_mess"})), HookKind::Ignore(_)));
+        assert!(matches!(classify("claude", &json!({"raw": ""})), HookKind::Ignore(_)));
+        assert!(matches!(classify("claude", &json!({"session_id": "s1"})), HookKind::Identity { .. }), "沒有事件名、沒有 raw 的舊形狀照舊猜");
+        assert!(matches!(classify("claude", &json!({"prompt_id": "p1"})), HookKind::TurnComplete { .. }));
+    }
 
     #[test]
     fn grok_stop_is_a_turn() {
@@ -1102,6 +1115,13 @@ pub async fn process_locked_for<H: HookHost>(app: &H, body: &HookBody, event_id:
     let conv = db::conversation_id(app.db(), &bot.id).await?;
     let run = db::active_run(app.db(), &bot.id).await?;
     let kind = classify(&provider, &body.payload);
+    // 被截斷或解不開的事件等於掉了一則：log 要說得出來，不然只看到一筆 `Identity`／`Ignore`（#1007）。只記旗標，不記 payload 內容。
+    if body.truncated || matches!(&kind, HookKind::Ignore(why) if why.starts_with("unparseable payload")) {
+        tracing::warn!(
+            bot = %bot.name, provider = %body.provider, truncated = body.truncated,
+            "hook payload was truncated or unparseable; the event itself is lost and the turn will close via the terminal fallback",
+        );
+    }
     if matches!(kind, HookKind::StatusLine) {
         tracing::debug!(bot = %bot.name, "statusline received");
     } else {
