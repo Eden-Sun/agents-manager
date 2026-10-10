@@ -21,6 +21,19 @@ check "supervisor::" "crates/am-supervisor/src/supervisor/mod.rs"
 check "supervisor::controller::" "crates/am-supervisor/src/supervisor/controller.rs"
 # 測試檔就在自己的模組底下（foo/tests.rs → foo::tests::，包含在 foo:: 裡）。
 check "host_baseline::tests::" "daemon/src/host_baseline/tests.rs"
+# 用 #[path] 掛成別的模組名的測試檔：照檔名推會選到零個（同 #1033 的 child_done）。#1169。
+check "child_alerts::tests::" "daemon/src/child_alerts_tests.rs"
+check "judge::tests::" "daemon/src/judge_tests.rs"
+check "lifecycle::grok_transcript::tests::" "crates/am-lifecycle/src/lifecycle/grok_transcript_tests.rs"
+check "lifecycle::claude_child_log::tests::" "crates/am-lifecycle/src/lifecycle/claude_child_log_tests.rs"
+check "lifecycle::suggestion::tests::" "crates/am-lifecycle/src/lifecycle/suggestion_tests.rs"
+check "lifecycle::composer_draft::tests::" "crates/am-lifecycle/src/lifecycle/composer_draft_tests.rs"
+check "lifecycle::stop::force_abort_tests::" "crates/am-lifecycle/src/lifecycle/force_abort_tests.rs"
+check "share::tests::trusted::" "crates/am-share/src/share/trusted_tests.rs"
+check "share::portal::upload_tests::" "crates/am-share/src/share/portal_upload_tests.rs"
+# 直接 `mod x_tests;` 宣告的不受影響。
+check "lifecycle::agy_tests::" "crates/am-lifecycle/src/lifecycle/agy_tests.rs"
+check "share::remote_fs_tests::" "crates/am-share/src/share/remote_fs_tests.rs"
 # Build inputs, crate wiring, shared test helpers, and include data can affect tests across modules.
 check "__all__" "daemon/build.rs"
 check "__all__" "Cargo.toml"
