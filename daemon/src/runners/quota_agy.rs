@@ -49,39 +49,73 @@ async fn pane_probe(app: &Arc<App>, host: &str, fence: &crate::hosts::HostFence,
 /// agy 明說沒憑證之後，登入偵測（[`login_watch_once`]）暫時不要又因為 Keychain 裡有項目而把旗標翻回已登入、再開一次 pane。
 pub(crate) const AUTH_DENIED_COOLDOWN: Duration = Duration::from_secs(5 * 60);
 
-pub(crate) fn auth_denied() -> &'static std::sync::Mutex<std::collections::HashMap<String, std::time::Instant>> {
-    static M: std::sync::OnceLock<std::sync::Mutex<std::collections::HashMap<String, std::time::Instant>>> = std::sync::OnceLock::new();
+/// 授權冷卻綁著記下它的主機世代（#1023）：同名改指到別台或重連之後，舊世代的冷卻不能壓住新主機。
+pub(crate) struct AuthDeniedEntry {
+    pub until: std::time::Instant,
+    pub authority: crate::hosts::HostAuthorityKey,
+}
+
+pub(crate) fn auth_denied() -> &'static std::sync::Mutex<std::collections::HashMap<String, AuthDeniedEntry>> {
+    static M: std::sync::OnceLock<std::sync::Mutex<std::collections::HashMap<String, AuthDeniedEntry>>> = std::sync::OnceLock::new();
     M.get_or_init(Default::default)
 }
 
-pub(crate) fn auth_denied_active(key: &str) -> bool {
-    auth_denied().lock().unwrap().get(key).is_some_and(|t| *t > std::time::Instant::now())
+/// 這個世代還在冷卻嗎？世代對不上的紀錄屬於舊主機，順手丟掉。
+pub(crate) fn auth_denied_active(key: &str, fence: &crate::hosts::HostFence) -> bool {
+    let mut map = auth_denied().lock().unwrap();
+    match map.get(key) {
+        Some(entry) if entry.authority.matches(fence) => entry.until > std::time::Instant::now(),
+        Some(_) => {
+            map.remove(key);
+            false
+        }
+        None => false,
+    }
+}
+
+/// 記下授權冷卻。**呼叫端必須已在 `run_if_current(fence)` 裡**（#1023）：換代之後的結果不能寫進來。
+pub(crate) fn note_auth_denied(key: String, fence: &crate::hosts::HostFence) {
+    auth_denied().lock().unwrap().insert(key, AuthDeniedEntry { until: std::time::Instant::now() + AUTH_DENIED_COOLDOWN, authority: fence.authority_key() });
 }
 
 
 /// 把這一輪的結果記下來：成功清掉失敗、未登入翻旗標、其他失敗留下原因；有變就推 `host_changed`。
-async fn record_probe_result(app: &Arc<App>, host: &str, fence: &crate::hosts::HostFence, result: &Result<(), ProbeFail>) {
+/// 整段寫入在 `run_if_current(fence)` 裡（#1023）：探測途中換了主機或重連，這份結果就不寫任何一格
+/// （冷卻、探測錯誤、登入旗標都一樣），推播放到圍籬外面（`emit_host_changed` 自己也走圍籬）。
+pub(crate) async fn record_probe_result(app: &Arc<App>, host: &str, fence: &crate::hosts::HostFence, result: &Result<(), ProbeFail>) {
     let key = crate::quota::quota_key(host, "agy");
-    let mut changed = false;
-    match result {
-        Ok(()) => {
-            auth_denied().lock().unwrap().remove(&key);
-            changed |= set_probe_error(host, None);
-            // 探測讀得到額度＝這台已登入（登入後第一次探測成功就把「未登入」翻回來）。
-            changed |= set_logged_in_quiet(app, host, fence, true).await;
-        }
-        Err(ProbeFail::AuthRequired) => {
-            auth_denied().lock().unwrap().insert(key, std::time::Instant::now() + AUTH_DENIED_COOLDOWN);
-            changed |= set_probe_error(host, None);
-            changed |= set_logged_in_quiet(app, host, fence, false).await;
-        }
-        Err(ProbeFail::Other { reason, message }) => {
-            changed |= set_probe_error(host, Some(ProbeError { reason, message: message.clone(), at: crate::db::now() }));
-        }
-    }
+    let changed = app
+        .hosts
+        .run_if_current(fence, async {
+            let mut changed = false;
+            match result {
+                Ok(()) => {
+                    clear_auth_denied(&key);
+                    changed |= set_probe_error(host, None);
+                    // 探測讀得到額度＝這台已登入（登入後第一次探測成功就把「未登入」翻回來）。
+                    changed |= set_logged_in_quiet(app, host, fence, true).await;
+                }
+                Err(ProbeFail::AuthRequired) => {
+                    note_auth_denied(key.clone(), fence);
+                    changed |= set_probe_error(host, None);
+                    changed |= set_logged_in_quiet(app, host, fence, false).await;
+                }
+                Err(ProbeFail::Other { reason, message }) => {
+                    changed |= set_probe_error(host, Some(ProbeError { reason, message: message.clone(), at: crate::db::now() }));
+                }
+            }
+            changed
+        })
+        .await
+        .unwrap_or(false);
     if changed {
         crate::state::emit_host_changed(app, fence).await;
     }
+}
+
+/// 成功探測／其他 auth 結果清掉冷卻。呼叫端必須已在 `run_if_current(fence)` 裡。
+pub(crate) fn clear_auth_denied(key: &str) {
+    auth_denied().lock().unwrap().remove(key);
 }
 
 /// 一輪探測失敗的原因。`superseded`＝主機在途中換了主機或重連（這個失敗不屬於現在這台，不該記冷卻）。
@@ -406,7 +440,7 @@ pub async fn login_watch_once(app: &Arc<App>, host: &str) {
     let key = crate::quota::quota_key(host, "agy");
     let probe = if !logged_in {
         // agy 剛明說沒憑證：Keychain 裡有項目（可能是過期的 token）不算登好了，冷卻期內不探測、不開 pane。
-        if auth_denied_active(&key) || token_present(&fence).await != Some(true) {
+        if auth_denied_active(&key, &fence) || token_present(&fence).await != Some(true) {
             return;
         }
         refresh_agy_gated(app, host).await

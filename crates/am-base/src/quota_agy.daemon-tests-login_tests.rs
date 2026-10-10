@@ -178,7 +178,7 @@
         login_watch_once(&app, LOCAL_HOST).await;
         assert_eq!(agy_logged_in(&app).await, Some(false), "auth 失敗：維持未登入");
         assert!(!drain_host_changed(&mut rx).contains(&Some(true)), "從沒翻成已登入過");
-        assert!(auth_denied_active(&crate::quota::quota_key(LOCAL_HOST, "agy")), "記下 auth_denied 冷卻");
+        assert!(auth_denied_active(&crate::quota::quota_key(LOCAL_HOST, "agy"), &app.hosts.fence(LOCAL_HOST).await.unwrap()), "記下 auth_denied 冷卻");
         login_watch_once(&app, LOCAL_HOST).await;
         assert_eq!(call_count(&calls), 1, "冷卻期內不再探測");
     }
@@ -197,7 +197,7 @@
         login_watch_once(&app, LOCAL_HOST).await;
         assert!(t0.elapsed() < std::time::Duration::from_secs(25), "逾時後行程群組被收掉");
         assert_eq!(agy_logged_in(&app).await, Some(false));
-        assert!(auth_denied_active(&crate::quota::quota_key(LOCAL_HOST, "agy")), "認得出是 auth 失敗，不是逾時：記 auth_denied 冷卻");
+        assert!(auth_denied_active(&crate::quota::quota_key(LOCAL_HOST, "agy"), &app.hosts.fence(LOCAL_HOST).await.unwrap()), "認得出是 auth 失敗，不是逾時：記 auth_denied 冷卻");
         assert!(quota_error(&app).await.is_null(), "不是探測錯誤");
     }
 
@@ -214,7 +214,7 @@
         login_watch_once(&app, LOCAL_HOST).await;
         assert_eq!(agy_logged_in(&app).await, Some(false), "網路類失敗：保持現值，不翻");
         assert_eq!(quota_error(&app).await["reason"], "unreadable", "記下探測錯誤");
-        assert!(!auth_denied_active(&crate::quota::quota_key(LOCAL_HOST, "agy")), "不是 auth 失敗：不記 auth_denied");
+        assert!(!auth_denied_active(&crate::quota::quota_key(LOCAL_HOST, "agy"), &app.hosts.fence(LOCAL_HOST).await.unwrap()), "不是 auth 失敗：不記 auth_denied");
         login_watch_once(&app, LOCAL_HOST).await;
         assert_eq!(call_count(&calls), 1, "失敗冷卻內不再探測（不然每 20 秒起一次 200 MB 的執行檔）");
 

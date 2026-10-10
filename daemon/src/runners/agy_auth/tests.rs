@@ -54,7 +54,7 @@ fn drain(rx: &mut tokio::sync::broadcast::Receiver<crate::state::WsEvent>) -> Ve
 }
 
 fn clear_denied() {
-    auth_denied().lock().unwrap().remove(&crate::quota::quota_key(HOST, "agy"));
+    crate::runners::quota_agy::auth_denied().lock().unwrap().remove(&crate::quota::quota_key(HOST, "agy"));
 }
 
 /// 這個檔的測試都碰同一份行程全域狀態：`auth_denied()` 的 `agy` 冷卻（key 是本機）、`probe_errors()` 的 `local`，
@@ -156,4 +156,50 @@ async fn an_unadmitted_agy_hook_does_not_change_login_state() {
     let bot = db::bot(&env.app.db, &bot.id).await.unwrap().unwrap();
     let _ = process(&env.app, &stop(&bot, "401 UNAUTHENTICATED")).await;
     assert_eq!(logged_in(&env.app).await, Some(true));
+}
+
+/// #1023：探測途中換了世代（重連、改指）：舊世代的 AuthRequired 不能寫冷卻、不能翻新世代的旗標、不能留探測錯誤。
+#[tokio::test]
+async fn a_probe_result_from_a_replaced_generation_writes_nothing() {
+    use crate::quota_agy::ProbeFail;
+    use crate::runners::quota_agy::auth_denied_active;
+    let _globals = agy_globals().await;
+    let env = tt::env().await;
+    seed_agy(&env.app).await;
+    env.app.quotas.lock().await.insert("agy".into(), quota());
+    let key = crate::quota::quota_key(HOST, "agy");
+    let old = env.app.hosts.fence(HOST).await.unwrap();
+    env.app.hosts.get(HOST).await.unwrap().bump_generation_for_test();
+    let new = env.app.hosts.fence(HOST).await.unwrap();
+    let mut rx = env.app.subscribe();
+
+    crate::runners::quota_agy::record_probe_result(&env.app, HOST, &old, &Err(ProbeFail::AuthRequired)).await;
+    assert_eq!(logged_in(&env.app).await, Some(true), "舊世代的未登入不翻新世代的旗標");
+    assert!(!auth_denied_active(&key, &new), "舊世代不寫冷卻");
+    crate::runners::quota_agy::record_probe_result(&env.app, HOST, &old, &Err(ProbeFail::other("timeout", "old".to_string()))).await;
+    assert!(!crate::quota_agy::set_probe_error(HOST, None), "舊世代的失敗不留在新主機上（沒有東西可清）");
+    assert!(drain(&mut rx).iter().all(|f| f.kind != "host_changed"), "什麼都沒寫就不推");
+}
+
+/// #1023：新世代自己的冷卻不能被舊世代的成功清掉。
+#[tokio::test]
+async fn a_replaced_generations_success_does_not_clear_the_new_cooldown() {
+    use crate::quota_agy::ProbeFail;
+    use crate::runners::quota_agy::auth_denied_active;
+    let _globals = agy_globals().await;
+    let env = tt::env().await;
+    seed_agy(&env.app).await;
+    let key = crate::quota::quota_key(HOST, "agy");
+    let old = env.app.hosts.fence(HOST).await.unwrap();
+    env.app.hosts.get(HOST).await.unwrap().bump_generation_for_test();
+    let new = env.app.hosts.fence(HOST).await.unwrap();
+
+    crate::runners::quota_agy::note_auth_denied(key.clone(), &new);
+    crate::runners::quota_agy::record_probe_result(&env.app, HOST, &old, &Ok(())).await;
+    assert!(auth_denied_active(&key, &new), "舊世代的成功不清新世代的冷卻");
+
+    // 新世代自己的結果照常生效：AuthRequired 翻未登入、記冷卻。
+    crate::runners::quota_agy::record_probe_result(&env.app, HOST, &new, &Err(ProbeFail::AuthRequired)).await;
+    assert_eq!(logged_in(&env.app).await, Some(false));
+    assert!(auth_denied_active(&key, &new));
 }
