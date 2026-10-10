@@ -132,7 +132,7 @@ React 前端 (Vite) ◄── REST + WebSocket ──► Rust daemon (axum) ◄�
     (3) `host` 已經不在 config 的主機清單裡、而且過了 `expires_at`：沒有人會再來補，不必等 (2) 的七天。主機清單是空的（還沒 `apply_config`）就整條不算，寧可晚一輪也不在設定重載的空窗裡判死。
     「過了 `expires_at` 還開著」因此是正常狀態；還欠著哪一件從 `agm health` 的 `due_actions`（`kind = "intent"`）看得到，久久不消失的要當真。
     **已接線：`delete_bot`／`delete_project`**（#296／#284）：定案（config＋DB 軟刪）**之前**先 commit intent（payload＝當時的 bot 快照，之後才出現的 child 不在授權範圍；寫不進去就不刪），
-    handler 自己認領；定案之後死掉，開機（`delete_intents::recover_host`）檢查：母 bot／專案還活著＝`abandoned`；已定案＝逐顆（快照裡的）停、軟刪、清目錄補完（每步先驗世界，重跑安全）。
+    handler 自己認領；`begin` 之後的步驟在 `detach` 裡 `tokio::spawn` 跑完（#1065），client 斷線把 handler future drop 掉也會照常 complete／record_failure，不靠開機或定期掃描；定案之後死掉（行程真的死了），開機（`delete_intents::recover_host`）檢查：母 bot／專案還活著＝`abandoned`；已定案＝逐顆（快照裡的）停、軟刪、清目錄補完（每步先驗世界，重跑安全）。
     軟刪寫不進去的 child 由 intent 的背景重試補完（取代各路徑自己的記憶體重試 task），5 次用完 `failed`＋AGM inbox；目錄清不掉不算補不成（`kept_dirs`／開機清掃／`remote_purge` 各有帳）。
     **已接線：`promote`**（#248）：停 child（回不去的一步）之前先 commit intent（payload＝新 bot id、名字、模型、session、複製了哪些檔）；承諾點＝目標 user bot 進 config。
     開機（`promote_intents::recover_host`）檢查：child 還在跑＝停 child 從沒發生→收回複製、`abandoned`（可原樣重送）；child 已停／已收掉→**往前補完、不回滾**
