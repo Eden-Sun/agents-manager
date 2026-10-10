@@ -36,12 +36,18 @@ fn mib(bytes: u64) -> u64 {
 }
 
 async fn notify_owner(app: &Arc<App>, bot_id: &str, m: budget::Measured) {
+    // 量到一半停下（樹太深或檔案太多）時，數字只是下限：不能說「已達上限」，要講清楚是量不完、擋下來是保守的做法（#1028）。
+    let why = if m.truncated {
+        "工作目錄或 outbox 的目錄太深或檔案太多，量不完（數字只是下限，所以先擋下）。".to_string()
+    } else {
+        format!("已達 {} MiB 上限。", mib(budget::SANDBOX_MAX_BYTES))
+    };
     let text = format!(
-        "分享空間滿了：工作目錄 {} MiB＋輸出 {} MiB，已達 {} MiB 上限。新的分享訊息會被擋下（507 share_storage_full），分享頁顯示「空間滿了」。\
+        "分享空間滿了：工作目錄 {} MiB＋輸出 {} MiB，{}新的分享訊息會被擋下（507 share_storage_full），分享頁顯示「空間滿了」。\
          請整理工作目錄或 outbox（daemon 不會自動刪工作目錄的檔）；清掉後約 1 分鐘內恢復。",
         mib(m.workspace_bytes),
         mib(m.outbox_bytes),
-        mib(budget::SANDBOX_MAX_BYTES),
+        why,
     );
     match crate::db::conversation_id(&app.db, bot_id).await {
         Ok(conv) => {

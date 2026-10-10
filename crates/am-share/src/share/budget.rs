@@ -46,9 +46,9 @@ impl Measured {
         self.workspace_bytes.saturating_add(self.outbox_bytes)
     }
 
-    /// 達到預算就算滿（量不完的樹只看已量到的位元組，不因為「太大」本身就擋人）。
+    /// 達到預算就算滿。量到一半停下的（`truncated`）數字只是下限、不知道實際多少，也算滿（#1028：寧可擋人，不放行沒量完的樹）。
     pub fn full(&self) -> bool {
-        self.total() >= SANDBOX_MAX_BYTES
+        self.truncated || self.total() >= SANDBOX_MAX_BYTES
     }
 }
 
@@ -317,6 +317,32 @@ mod tests {
     }
 
     /// #1028：走不完的樹（超過深度）數字只是下限，不能當成「未滿」放行；33 層深的 1.2 GiB 檔案看不到，也不能判未滿。
+    #[test]
+    fn a_tree_deeper_than_the_walk_is_truncated_and_counts_as_full() {
+        let data = dir("data4");
+        let ws = dir("ws4");
+        let mut deep = ws.clone();
+        for i in 1..=33 {
+            deep = deep.join(format!("a{i:02}"));
+        }
+        std::fs::create_dir_all(&deep).unwrap();
+        let big = std::fs::File::create(deep.join("big.bin")).unwrap();
+        big.set_len(1200 * 1024 * 1024).unwrap(); // 稀疏檔，不真的佔磁碟
+        let m = measure_blocking(&data, &ws, "BOT4").unwrap();
+        assert!(m.truncated, "{m:?}");
+        assert!(m.total() < SANDBOX_MAX_BYTES, "看不到第 33 層的大檔：下限 {m:?}");
+        assert!(m.full(), "量不完就當滿");
+        for d in [data, ws] {
+            std::fs::remove_dir_all(d).ok();
+        }
+    }
+
+    #[test]
+    fn a_truncated_count_is_full_even_when_the_bytes_are_small() {
+        assert!(Measured { truncated: true, ..Default::default() }.full(), "走訪的項目數超過上限也一樣");
+        assert!(!Measured { workspace_bytes: SANDBOX_MAX_BYTES - 1, ..Default::default() }.full());
+    }
+
     #[test]
     fn a_symlinked_outbox_is_refused_not_measured() {
         let data = dir("data3");
