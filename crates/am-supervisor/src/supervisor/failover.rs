@@ -72,23 +72,22 @@ pub fn should_reassign(age_secs: i64, owner: &str, unavailable: Option<&str>) ->
     unavailable.is_some() && owner == Role::Responder.as_str() && age_secs >= REASSIGN_AFTER_SECS
 }
 
-/// 把協調者手上等太久的核准改派給巡檢。回傳改派了幾則。
+/// 把協調者手上等太久的核准改派給巡檢，並在協調者可用或不可用時都收掉已經不用裁示的核准（issue #881、#1120）。
+/// 回傳改派了幾則。
 ///
 /// `unavailable` = `health::responder_state` 回 `Unavailable(reason)` 時的那個原因字串；
-/// 可用、不知道、沒建立協調者都傳 `None`（那時這個函式什麼都不做）。
+/// 可用、不知道、沒建立協調者都傳 `None`（此時不改派，但照舊收掉過期或已有結果的核准）。
 pub async fn reassign_stale_approvals(app: &(impl crate::capabilities::Db + crate::capabilities::Emit), unavailable: Option<&'static str>) -> usize {
-    let Some(reason) = unavailable else { return 0 };
+    let reason = unavailable;
     let now = crate::db::now();
-    // 查詢只縮小範圍，不判門檻（見 `should_reassign`）：開著的、還在協調者手上的核准，一次本來就一兩則。
-    let open = match sqlx::query_as::<_, store::InboxEvent>(&format!(
+    // 查詢只縮小範圍，不判門檻（見 `should_reassign`）：開著的核准一次本來就一兩則。
+    let open = match sqlx::query_as::<_, store::InboxEvent>(
         "SELECT * FROM supervisor_inbox
-          WHERE supervisor_id=? AND kind=? AND state!='handled' AND {owner}=?
+          WHERE supervisor_id=? AND kind=? AND state!='handled'
           ORDER BY created_at ASC, rowid ASC",
-        owner = roles::OWNER
-    ))
+    )
     .bind(store::SUPERVISOR_ID)
     .bind(REASSIGNABLE)
-    .bind(Role::Responder.as_str())
     .fetch_all(app.db())
     .await
     {
@@ -101,12 +100,7 @@ pub async fn reassign_stale_approvals(app: &(impl crate::capabilities::Db + crat
     };
     let mut moved = 0usize;
     for e in &open {
-        // 門檻在這裡判，不在 SQL。`owner` 走 `roles::owner_or_default`，跟查詢的 `roles::OWNER` 同一個定義。
-        let owner = roles::owner_or_default(e.claimed_by.as_deref(), e.role.as_deref());
-        if !should_reassign(age_secs(&e.created_at), &owner, Some(reason)) {
-            continue;
-        }
-        // 那筆核准已經不用裁示了（被裁示、取代、過期）：改派過去只會叫醒巡檢去處理一筆作廢的申請。直接收掉這則（#881）。
+        // 那筆核准已經不用裁示了（被裁示、取代、過期）：改派過去只會叫醒巡檢去處理一筆作廢的申請。直接收掉這則（#881、#1120）。
         match approval_needs_no_decision(app.db(), e, &now).await {
             Ok(true) => {
                 match sqlx::query("UPDATE supervisor_inbox SET state='handled', acked_by='daemon', updated_at=? WHERE id=? AND state!='handled'")
@@ -127,6 +121,12 @@ pub async fn reassign_stale_approvals(app: &(impl crate::capabilities::Db + crat
                 continue;
             }
         }
+        let Some(reason) = reason else { continue };
+        // 門檻在這裡判，不在 SQL。`owner` 走 `roles::owner_or_default`，跟查詢的 `roles::OWNER` 同一個定義。
+        let owner = roles::owner_or_default(e.claimed_by.as_deref(), e.role.as_deref());
+        if !should_reassign(age_secs(&e.created_at), &owner, Some(reason)) {
+            continue;
+        }
         match reassign_one(app.db(), e, reason, &now).await {
             Ok(true) => {
                 moved += 1;
@@ -137,7 +137,9 @@ pub async fn reassign_stale_approvals(app: &(impl crate::capabilities::Db + crat
         }
     }
     if moved > 0 {
-        app.emit("supervisor_changed", json!({"approvals_reassigned": moved, "to_role": Role::Patrol.as_str(), "reason": reason})).await;
+        if let Some(reason) = reason {
+            app.emit("supervisor_changed", json!({"approvals_reassigned": moved, "to_role": Role::Patrol.as_str(), "reason": reason})).await;
+        }
     }
     moved
 }
@@ -563,5 +565,90 @@ mod tests {
         assert_eq!(state, "handled");
         assert_eq!(owner_of(&app.db, &dead).await.unwrap().as_deref(), Some("responder"), "過期的沒有被改派");
         assert_eq!(owner_of(&app.db, &alive).await.unwrap().as_deref(), Some("patrol"));
+    }
+
+    #[tokio::test]
+    async fn an_expired_approvals_event_is_closed_even_when_the_responder_is_fine() {
+        let app = app().await;
+        let expired = pending(&app, "req1", "c1").await;
+        sqlx::query("UPDATE supervisor_approvals SET expires_at=? WHERE id=?")
+            .bind(crate::db::iso_in(-10))
+            .bind(&expired)
+            .execute(&app.db)
+            .await
+            .unwrap();
+        let dead = store::push_inbox(&app.db, "approval:exp:requested", "approval_requested", None, None, None, &json!({"approval_id": expired}))
+            .await
+            .unwrap()
+            .unwrap();
+        sqlx::query("UPDATE supervisor_inbox SET role='responder', state='delivered', created_at=? WHERE id=?")
+            .bind(crate::db::iso_in(-600))
+            .bind(&dead)
+            .execute(&app.db)
+            .await
+            .unwrap();
+
+        let live = pending(&app, "req2", "c2").await;
+        let alive = store::push_inbox(&app.db, "approval:live:requested", "approval_requested", None, None, None, &json!({"approval_id": live}))
+            .await
+            .unwrap()
+            .unwrap();
+        sqlx::query("UPDATE supervisor_inbox SET role='responder', state='delivered', created_at=? WHERE id=?")
+            .bind(crate::db::iso_in(-600))
+            .bind(&alive)
+            .execute(&app.db)
+            .await
+            .unwrap();
+
+        assert_eq!(reassign_stale_approvals(&app, None).await, 0);
+
+        let (dead_state, dead_acked): (String, Option<String>) = sqlx::query_as("SELECT state, acked_by FROM supervisor_inbox WHERE id=?")
+            .bind(&dead)
+            .fetch_one(&app.db)
+            .await
+            .unwrap();
+        assert_eq!(dead_state, "handled");
+        assert_eq!(dead_acked.as_deref(), Some("daemon"));
+
+        let (alive_state, _): (String, Option<String>) = sqlx::query_as("SELECT state, role FROM supervisor_inbox WHERE id=?")
+            .bind(&alive)
+            .fetch_one(&app.db)
+            .await
+            .unwrap();
+        assert_eq!(alive_state, "delivered");
+        assert_eq!(owner_of(&app.db, &alive).await.unwrap().as_deref(), Some("responder"));
+    }
+
+    #[tokio::test]
+    async fn a_reassigned_event_is_closed_once_its_approval_is_decided() {
+        let app = app().await;
+        let apprv = pending(&app, "req3", "c3").await;
+        let event_id = store::push_inbox(&app.db, "approval:reassigned:requested", "approval_requested", None, None, None, &json!({"approval_id": apprv}))
+            .await
+            .unwrap()
+            .unwrap();
+        sqlx::query("UPDATE supervisor_inbox SET role='patrol', state='delivered', created_at=? WHERE id=?")
+            .bind(crate::db::iso_in(-600))
+            .bind(&event_id)
+            .execute(&app.db)
+            .await
+            .unwrap();
+
+        // 外部（例如自動取代或其他路徑）直接把核准狀態標為 superseded
+        sqlx::query("UPDATE supervisor_approvals SET status='superseded' WHERE id=?")
+            .bind(&apprv)
+            .execute(&app.db)
+            .await
+            .unwrap();
+
+        assert_eq!(reassign_stale_approvals(&app, None).await, 0);
+
+        let (state, acked_by): (String, Option<String>) = sqlx::query_as("SELECT state, acked_by FROM supervisor_inbox WHERE id=?")
+            .bind(&event_id)
+            .fetch_one(&app.db)
+            .await
+            .unwrap();
+        assert_eq!(state, "handled");
+        assert_eq!(acked_by.as_deref(), Some("daemon"));
     }
 }
