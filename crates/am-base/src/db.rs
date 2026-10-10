@@ -5,7 +5,6 @@ use sqlx::sqlite::{SqliteConnectOptions, SqlitePoolOptions};
 use sqlx::{FromRow, SqlitePool};
 use std::collections::BTreeSet;
 use std::path::Path;
-use std::str::FromStr;
 
 pub mod schema_guard;
 pub(crate) mod predicates;
@@ -406,8 +405,9 @@ pub async fn sync_trigger(conn: &mut sqlx::SqliteConnection, name: &str, ddl: &s
 
 /// 開啟資料庫；feature 的 migration 清單由呼叫端給（順序即執行順序）。
 pub async fn open_with(path: &Path, features: FeatureMigrations) -> Result<SqlitePool> {
-    let url = format!("sqlite://{}", path.display());
-    let opts = SqliteConnectOptions::from_str(&url)?
+    // 不經 `sqlite://` URL：路徑裡的 `?` 會被當成連線參數、`%XX` 會被 percent-decode 到別的檔（issue #1144）。
+    let opts = SqliteConnectOptions::new()
+        .filename(path)
         .create_if_missing(true)
         .foreign_keys(true)
         .journal_mode(sqlx::sqlite::SqliteJournalMode::Wal)
