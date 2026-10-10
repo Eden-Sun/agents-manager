@@ -57,14 +57,15 @@ function useUnread() {
   }, [markCurrentRead])
 }
 
-function Notices() {
+// live region 要先在 DOM 裡、之後內容變動才會被唸；所以容器一律 render，空的時候不佔位也不擋點擊（.notices 是 fixed，沒有 padding）（#1135）。
+// 錯誤用 alert（會打斷），一般的仍是 polite。
+export function Notices() {
   const notices = useStore((s) => s.notices)
   const dismiss = useStore((s) => s.dismiss)
-  if (notices.length === 0) return null
   return (
     <div className="notices" role="status" aria-live="polite">
       {notices.map((n) => (
-        <div key={n.id} className={`notice ${n.kind}`}>
+        <div key={n.id} className={`notice ${n.kind}`} role={n.kind === 'error' ? 'alert' : undefined}>
           <span style={{ flex: 1 }}>{n.text}</span>
           {n.action ? (
             <button
