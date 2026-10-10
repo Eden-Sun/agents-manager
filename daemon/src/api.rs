@@ -3236,7 +3236,7 @@ pub(crate) async fn restore_bot(State(app): State<Arc<App>>, Path(id): Path<Stri
         let pid = bot.project_id.clone();
         crate::projection::update_and_project(&app.cfg, &app.db, move |cfg| {
             let Some(p) = cfg.projects.iter_mut().find(|p| p.id.as_deref() == Some(pid.as_str())) else {
-                anyhow::bail!("the project this bot belonged to is gone")
+                anyhow::bail!("project-gone")
             };
             if !p.bots.iter().any(|b| b.id.as_deref() == Some(entry.id.as_deref().unwrap_or_default())) {
                 p.bots.push(entry.clone());
@@ -3244,7 +3244,14 @@ pub(crate) async fn restore_bot(State(app): State<Arc<App>>, Path(id): Path<Stri
             Ok(())
         })
         .await
-        .map_err(projection_err)?;
+        .map_err(|e| {
+            // 專案已刪＝呼叫端的前提不成立（還原不回去、重試也一樣）：409，不是 502 upstream。
+            if e.to_string() == "project-gone" {
+                LcError::conflict("the project of this bot is deleted", json!({"bot_id": id, "project_id": bot.project_id}))
+            } else {
+                projection_err(e)
+            }
+        })?;
     }
     // 刪除時搬進回收區的目錄搬回來（issue #406）。本機才有；搬不回來不擋還原（下次啟動會重建需要的檔）。
     if let Ok(dir) = app.bot_dir(&id) {
@@ -10402,6 +10409,18 @@ mod bot_config_tests {
         assert!(restore_bot(State(e.app.clone()), Path(id.clone())).await.is_err(), "讀不懂的 env 不能還原成空的");
         assert!(db::bot(&e.app.db, &id).await.unwrap().unwrap().deleted_at.is_some());
         assert!(e.app.cfg.get().await.projects[0].bots.iter().all(|b| b.id.as_deref() != Some(id.as_str())));
+    }
+
+    /// 專案已刪的 user bot 還原：是 409（前提不成立，重試也一樣），不是 502 upstream，也不能把 bot 復活。
+    #[tokio::test]
+    async fn restoring_a_bot_whose_project_is_deleted_is_a_conflict_not_a_502() {
+        let e = env().await;
+        seed_project(&e).await;
+        let id = add(&e, json!({"name": "orphan", "kind": "claude"})).await.unwrap();
+        delete_project(State(e.app.clone()), Path(e.project_id.clone())).await.unwrap();
+        let err = restore_bot(State(e.app.clone()), Path(id.clone())).await.unwrap_err();
+        assert!(matches!(&err, LcError::Conflict(v) if v["reason"] == "the project of this bot is deleted" && v["project_id"] == json!(e.project_id)), "{err:?}");
+        assert!(db::bot(&e.app.db, &id).await.unwrap().unwrap().deleted_at.is_some());
     }
 
     /// 舊的 config.toml 還留著 `instruction_files = …`：照樣讀得進來、投影得動，bot 不受影響。
