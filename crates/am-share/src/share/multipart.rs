@@ -50,7 +50,7 @@ fn boundary(content_type: &str) -> Option<String> {
 fn disposition(headers: &str) -> Option<(String, Option<String>)> {
     let line = headers.split("\r\n").find(|l| l.to_ascii_lowercase().starts_with("content-disposition:"))?;
     let value = &line["content-disposition:".len()..];
-    let mut parts = value.split(';');
+    let mut parts = split_params(value).into_iter();
     if !parts.next()?.trim().eq_ignore_ascii_case("form-data") {
         return None;
     }
@@ -66,6 +66,23 @@ fn disposition(headers: &str) -> Option<(String, Option<String>)> {
         }
     }
     Some((name?, filename))
+}
+
+/// 以 `;` 切參數；雙引號裡的 `;` 不算（瀏覽器不跳脫檔名裡的 `;`，只把 `"` 寫成 `%22`）。
+fn split_params(s: &str) -> Vec<&str> {
+    let (mut out, mut start, mut quoted) = (Vec::new(), 0, false);
+    for (i, c) in s.char_indices() {
+        match c {
+            '"' => quoted = !quoted,
+            ';' if !quoted => {
+                out.push(&s[start..i]);
+                start = i + 1;
+            }
+            _ => {}
+        }
+    }
+    out.push(&s[start..]);
+    out
 }
 
 fn find(hay: &[u8], needle: &[u8], from: usize) -> Option<usize> {
@@ -118,5 +135,17 @@ mod tests {
         assert_eq!(file_part("multipart/form-data; boundary=B", &two), Err("bad_multipart"), "一次一個檔");
         let nameless = form("B", &[("file", None, b"x")]);
         assert_eq!(file_part("multipart/form-data; boundary=B", &nameless), Err("bad_multipart"));
+    }
+
+    /// issue #1164：瀏覽器不跳脫檔名裡的 `;`、`=`（只把 `"` 寫成 `%22`），引號裡的 `;` 不能當參數分隔。
+    #[test]
+    fn a_filename_with_a_semicolon_or_an_equals_sign_survives() {
+        let body = form("B", &[("file", Some("報價;v2=final.pdf"), b"%PDF-1.7")]);
+        let (name, got) = file_part("multipart/form-data; boundary=B", &body).unwrap();
+        assert_eq!(name, "報價;v2=final.pdf");
+        assert_eq!(got, b"%PDF-1.7");
+        let body = form("B", &[("note", None, b"hi"), ("file", Some("a;b.png"), b"png")]);
+        let (name, _) = file_part("multipart/form-data; boundary=B", &body).unwrap();
+        assert_eq!(name, "a;b.png");
     }
 }
