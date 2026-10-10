@@ -210,7 +210,8 @@ async fn finish(app: &Arc<App>, mut op: ForkOp) -> Result<Response, LcError> {
     }
 
     if op.state == "created" {
-        let opts = StartOpts { fork_session: Some(op.session_id.clone()), ..Default::default() };
+        // 來源身分是 ForkOp 持久化的 `source_bot_id`：重送時搬的還是同一顆來源 bot 的對話（#1168）。
+        let opts = StartOpts { fork_session: Some(op.session_id.clone()), fork_source_bot: Some(op.source_bot_id.clone()), ..Default::default() };
         let (run_id, start_error) = start_fork_target_locked(app, &new_id, opts).await?;
         if let Some(error) = start_error.as_deref() {
             tracing::warn!(source = %source.name, fork = %op.name, error, "forked bot was created but did not start");
@@ -358,7 +359,9 @@ mod tests {
             .await
             .unwrap();
         }
-        let transcript = e.dir.join(format!("{id}.jsonl"));
+        // 對話檔放在真的位置 `<CLAUDE_CONFIG_DIR>/projects/<cwd>/<id>.jsonl`：fork 搬檔失敗就不啟動（#1168），不能用不合形狀的路徑。
+        let transcript = e.dir.join(format!("claude-config/projects/-t/{id}.jsonl"));
+        std::fs::create_dir_all(transcript.parent().unwrap()).unwrap();
         std::fs::write(&transcript, "{}\n").unwrap();
         sqlx::query(
             "INSERT INTO runs (id, bot_id, state, agent_status, native_session_id, transcript_path, started_at, ended_at)

@@ -60,6 +60,8 @@ pub struct StartOpts {
     /// 由呼叫端決定要不要改成開新對話（`?resume=native`，herdr 升級 2026-09-17）。沒設的話照舊退回開新對話。
     pub resume_required: bool,
     pub fork_session: Option<String>,
+    /// 跟 `fork_session` 一起用：這段對話屬於哪一顆來源 bot（fork 的來源）。搬對話檔只看這顆的 run（#1168）。
+    pub fork_source_bot: Option<String>,
     pub require_idle: bool,
     /// Bulk update restart must re-read the live pane under the bot lock before stopping it.
     pub refuse_background_jobs: bool,
@@ -1327,18 +1329,21 @@ async fn start_inner(
         if bot.kind == "claude" {
             crate::rewind::anchor::ensure(app, from).await;
             // 來源那段對話的檔可能還在別的身分底下（來源 bot 改了身分還沒重啟就被 fork）：照接回的做法先複製到這顆 bot 的
-            // 身分。搬不成照舊啟動（等於修之前的行為），只記 warn，不因此讓原本 fork 得成的情況變成失敗（#1124）。
+            // 身分（#1124）。只看來源 bot 自己的 run（#1168）：`native_session_id` 是 provider 的 id，別顆 bot 的同 sid 不算。
+            // 搬不成就不啟動：以前只記 warn 照樣啟動，claude 接不到對話會直接退出，等於假裝 fork 成功。
+            let source = opts.fork_source_bot.as_deref().ok_or_else(|| LcError::Bad("cannot fork: 沒有來源 bot".into()))?;
             let transcript: Option<String> = sqlx::query_scalar(
-                "SELECT transcript_path FROM runs WHERE native_session_id = ? AND transcript_path IS NOT NULL AND transcript_path != ''
+                "SELECT transcript_path FROM runs WHERE bot_id = ? AND native_session_id = ? AND transcript_path IS NOT NULL AND transcript_path != ''
                   ORDER BY started_at DESC, rowid DESC LIMIT 1",
             )
+            .bind(source)
             .bind(from)
             .fetch_optional(app.db())
             .await
             .map_err(up)?;
             if let Some(t) = transcript {
                 if let Err(why) = stage_cross_identity_transcript(app, bot, &host, &t).await {
-                    tracing::warn!(bot = %bot.name, session = from, why, "fork: could not stage the source transcript into this bot's identity");
+                    return Err(LcError::conflict("fork_transcript_unavailable", json!({"session_id": from, "reason": why})));
                 }
             }
         }
@@ -2784,10 +2789,81 @@ mod resume_args_tests {
         .await
         .unwrap();
 
-        start_bot_with(&e.app, &fork.id, StartOpts { fork_session: Some("sid-src".into()), ..Default::default() }).await.unwrap();
+        start_bot_with(&e.app, &fork.id, StartOpts { fork_session: Some("sid-src".into()), fork_source_bot: Some(src.id.clone()), ..Default::default() }).await.unwrap();
         let staged = e.dir.join("own-cfg/projects/-own/sid-src.jsonl");
         assert_eq!(std::fs::read_to_string(&staged).unwrap(), "{}\n", "來源對話要搬到 fork 出來的身分底下");
         assert!(started_args(&e).pop().unwrap().windows(3).any(|w| w == ["--resume", "sid-src", "--fork-session"]), "{:?}", started_args(&e));
+    }
+
+    /// #1168：fork 只接來源 bot 自己的對話檔。兩顆 bot 的 run 用同一個 sid（不同檔）、時間先後任意：
+    /// 以前全 DB 挑最新的一筆，挑到別的 bot 的檔就複製過來、用錯的對話繼續。
+    async fn fork_stages_source_transcript(src_is_newer: bool) -> String {
+        let e = env().await;
+        let src = claude_bot(&e.app, &e.project_id, "src-shared").await;
+        let other = claude_bot(&e.app, &e.project_id, "other-shared").await;
+        let fork = claude_bot(&e.app, &e.project_id, "fork-shared").await;
+        let _ = own_transcript(&e, &fork, "unused").await;
+        let mine = e.dir.join("old-cfg/projects/-own/sid-shared.jsonl");
+        let theirs = e.dir.join("other-cfg/projects/-other/sid-shared.jsonl");
+        for (p, body) in [(&mine, "A"), (&theirs, "B")] {
+            std::fs::create_dir_all(p.parent().unwrap()).unwrap();
+            std::fs::write(p, body).unwrap();
+        }
+        let (mine_at, theirs_at) = if src_is_newer {
+            ("2026-09-02T00:00:00Z", "2026-09-01T00:00:00Z")
+        } else {
+            ("2026-09-01T00:00:00Z", "2026-09-02T00:00:00Z")
+        };
+        for (bot, path, at) in [(&src.id, &mine, mine_at), (&other.id, &theirs, theirs_at)] {
+            sqlx::query(
+                "INSERT INTO runs (id, bot_id, state, agent_status, native_session_id, transcript_path, started_at, ended_at)
+                 VALUES (?,?,'stopped','idle','sid-shared',?,?,?)",
+            )
+            .bind(db::ulid())
+            .bind(bot.clone())
+            .bind(path.to_str().unwrap())
+            .bind(at)
+            .bind(at)
+            .execute(e.app.db())
+            .await
+            .unwrap();
+        }
+        let fork_opts = StartOpts { fork_session: Some("sid-shared".into()), fork_source_bot: Some(src.id.clone()), ..Default::default() };
+        start_bot_with(&e.app, &fork.id, fork_opts).await.unwrap();
+        std::fs::read_to_string(e.dir.join("own-cfg/projects/-own/sid-shared.jsonl")).unwrap()
+    }
+
+    #[tokio::test]
+    async fn a_fork_stages_its_own_source_transcript_even_when_another_bot_has_the_same_session_later() {
+        assert_eq!(fork_stages_source_transcript(false).await, "A", "另一顆 bot 的同 sid 對話比較新，也不能被接過來");
+    }
+
+    #[tokio::test]
+    async fn a_fork_stages_its_own_source_transcript_even_when_another_bot_has_the_same_session_earlier() {
+        assert_eq!(fork_stages_source_transcript(true).await, "A", "結果不能因為時間順序而變");
+    }
+
+    /// #1168：來源對話搬不過來就不啟動。以前只記 warn 照樣啟動，claude 接不到對話就直接退出，等於假裝 fork 成功。
+    #[tokio::test]
+    async fn a_fork_whose_source_transcript_cannot_be_staged_does_not_start() {
+        let e = env().await;
+        let src = claude_bot(&e.app, &e.project_id, "src-gone").await;
+        let fork = claude_bot(&e.app, &e.project_id, "fork-gone").await;
+        let _ = own_transcript(&e, &fork, "unused").await;
+        let gone = e.dir.join("old-cfg/projects/-own/sid-gone.jsonl");
+        sqlx::query(
+            "INSERT INTO runs (id, bot_id, state, agent_status, native_session_id, transcript_path, started_at, ended_at)
+             VALUES (?,?,'stopped','idle','sid-gone',?,'2026-09-01T00:00:00Z','2026-09-01T00:01:00Z')",
+        )
+        .bind(db::ulid())
+        .bind(src.id.clone())
+        .bind(gone.to_str().unwrap())
+        .execute(e.app.db())
+        .await
+        .unwrap();
+        let fork_opts = StartOpts { fork_session: Some("sid-gone".into()), fork_source_bot: Some(src.id.clone()), ..Default::default() };
+        assert!(start_bot_with(&e.app, &fork.id, fork_opts).await.is_err(), "搬不過來就不啟動");
+        assert!(!started_args(&e).iter().any(|a| a.iter().any(|x| x == "--fork-session")), "{:?}", started_args(&e));
     }
 
     /// No transcript → not resumed: `claude --resume` would exit with "No conversation found".
