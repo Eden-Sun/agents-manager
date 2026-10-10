@@ -1911,6 +1911,7 @@ child 還原後不立即建立 run；daemon 給它十分鐘讓父 bot 在原 pan
 |---|---|
 | 找不到 | `404 {"what":"bot"}` |
 | 還沒刪 | `409 {"reason":"bot is not deleted","bot_id"}` |
+| 所屬專案已刪（user bot）／專案或母 bot 已刪（child） | `409 {"reason":"the project of this bot is deleted","bot_id","project_id"}` ／ `409 {"reason":"the project or parent bot of this child is deleted","bot_id"}` |
 | 同專案已有同名活著的 bot | `409 {"reason":"bot name already in use in this project","bot_id","name","taken_by"}` |
 | 投影閘門擋下 | 同 §1 `projection_refused` |
 
