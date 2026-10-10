@@ -142,14 +142,12 @@ pub fn revocation(
     (age < 0 || age >= OBSERVATION_TTL_SECS).then_some(Revoked::Expired)
 }
 
-/// The remote entry point as it should be reported right now, applying expiry and session
-/// binding to whatever is stored.
-pub async fn status(db: &SqlitePool) -> Value {
-    let Ok(sup) = store::get_or_init(db).await else {
-        return json!({"status": "unknown", "capability": capability()});
-    };
+/// 同 [`status`]，但讀不到（supervisor 列或 active run）回 `Err`，不折成 `unknown`——
+/// 給「讀不到不等於沒事」的呼叫端（incident 探針）用。
+pub async fn try_status(db: &SqlitePool) -> anyhow::Result<Value> {
+    let sup = store::get_or_init(db).await?;
     let run = match sup.bot_id.as_deref() {
-        Some(id) => crate::db::active_run(db, id).await.ok().flatten(),
+        Some(id) => crate::db::active_run(db, id).await?,
         None => None,
     };
     // The run id is the session identity we can actually see. `native_session_id` is carried
@@ -163,7 +161,7 @@ pub async fn status(db: &SqlitePool) -> Value {
         chrono::Utc::now(),
     );
     let effective = if revoked.is_some() { "unknown" } else { sup.remote_status.as_str() };
-    json!({
+    Ok(json!({
         "status": effective,
         "stored_status": sup.remote_status,
         "revoked": revoked.map(Revoked::as_str),
@@ -178,7 +176,11 @@ pub async fn status(db: &SqlitePool) -> Value {
         "url_is_evidence": false,
         "capability": capability(),
         "ttl_secs": OBSERVATION_TTL_SECS,
-    })
+    }))
+}
+
+pub async fn status(db: &SqlitePool) -> Value {
+    try_status(db).await.unwrap_or_else(|_| json!({"status": "unknown", "capability": capability()}))
 }
 
 /// Incident severity for the remote entry point.

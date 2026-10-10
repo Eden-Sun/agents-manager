@@ -485,15 +485,23 @@ pub async fn observe(app: &(impl crate::capabilities::DataDir + crate::capabilit
     // The phone entry point, but only when there is evidence it is *broken*. `unknown` with an
     // unsupported capability is a documented limit, not a fault: opening an incident for it
     // would mean a permanent red light nobody can clear.
-    let remote = super::remote::status(app.db()).await;
-    let remote_status = remote.get("status").and_then(Value::as_str).unwrap_or("unknown");
-    if super::remote::severity(remote_status) == "degraded" {
-        out.push(Observation {
-            kind: "remote_entry".into(),
-            resource: super::setup::REMOTE_NAME.to_string(),
-            severity: "degraded".into(),
-            detail: remote.to_string(),
-        });
+    match super::remote::try_status(app.db()).await {
+        Ok(remote) => {
+            let remote_status = remote.get("status").and_then(Value::as_str).unwrap_or("unknown");
+            if super::remote::severity(remote_status) == "degraded" {
+                out.push(Observation {
+                    kind: "remote_entry".into(),
+                    resource: super::setup::REMOTE_NAME.to_string(),
+                    severity: "degraded".into(),
+                    detail: remote.to_string(),
+                });
+            }
+        }
+        // 讀不到＝這條探針這一拍沒跑：開著的 remote_entry 原封不動，不當成恢復。
+        Err(e) => {
+            tracing::warn!(error = ?e, "remote_entry probe failed");
+            probed.failed.push("remote_entry");
+        }
     }
 
     // issue #421：核准開著超過 30 分鐘還沒有**任何人**裁示。改派（`failover`）只換得動角色；
@@ -1300,5 +1308,52 @@ mod tests {
             "最後一個 run（寫入順序）其實是使用者主動停的，不該被誤判成 outage：{:?}",
             probed.seen
         );
+    }
+
+    #[tokio::test]
+    async fn an_unreadable_remote_probe_is_blind_not_a_recovery() {
+        let env = crate::testing::env().await;
+        let app = env.app.clone();
+        let bot = crate::testing::claude_bot(&app, &env.project_id, "agm-remote").await.id;
+        let run_id = crate::testing::fake_run(&app, &bot).await;
+        store::get_or_init(&app.db).await.unwrap();
+        sqlx::query("UPDATE supervisors SET bot_id=? WHERE id=?")
+            .bind(&bot)
+            .bind(store::SUPERVISOR_ID)
+            .execute(&app.db)
+            .await
+            .unwrap();
+        store::set_remote_observed(
+            &app.db,
+            "unavailable",
+            None,
+            "manual",
+            Some(&run_id),
+            Some("user"),
+            Some("phone cannot connect"),
+        )
+        .await
+        .unwrap();
+
+        let thresholds = Thresholds::from_cfg(&app.cfg.get().await.supervisor);
+        let before = observe(&app, &thresholds).await;
+        assert!(before.seen.iter().any(|o| o.kind == "remote_entry"), "前提：探針看得到 unavailable");
+
+        crate::testing::make_table_unreadable(&app, "runs").await;
+        let blind = observe(&app, &thresholds).await;
+        crate::testing::make_table_readable(&app, "runs").await;
+        assert!(!blind.seen.iter().any(|o| o.kind == "remote_entry"));
+        assert!(blind.failed.contains(&"remote_entry"), "讀不到要記成探針沒跑：{:?}", blind.failed);
+
+        // Detector 因此不會把開著的那筆關掉
+        let mut d = Detector::default();
+        let plan = d.plan(
+            &blind.seen,
+            &[("remote_entry".into(), crate::supervisor::setup::REMOTE_NAME.to_string())],
+            &blind.failed,
+            &thresholds,
+            chrono::Utc::now().timestamp(),
+        );
+        assert!(plan.resolve.is_empty(), "{:?}", plan.resolve);
     }
 }
