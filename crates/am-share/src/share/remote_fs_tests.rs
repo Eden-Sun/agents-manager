@@ -779,3 +779,71 @@ fn resolve_folder_length_is_bytes_under_a_utf8_bash() {
     assert!(r.physical.ends_with("中文資料夾"));
 }
 
+#[tokio::test]
+async fn remote_photo_fd_bound_traversal_prevents_symlink_swap_and_hardlink() {
+    let scratch = test_dirs::scratch_dir("rfs-photo-fd-bound");
+    let site = make_test_remote_site(&scratch, "host-photo-fd-1");
+    let ws = Path::new(&site.workspace);
+
+    // 1. 外部目錄與 canary 照片
+    let outside = scratch.join("outside");
+    fs::create_dir_all(&outside).unwrap();
+    let canary = outside.join("canary.png");
+    fs::write(&canary, b"CANARY_SECRET_BYTES").unwrap();
+
+    // 2. 正常兩層巢狀目錄與圖片
+    let nested = ws.join("photos/2026");
+    fs::create_dir_all(&nested).unwrap();
+    let nested_img = nested.join("pic.png");
+    fs::write(&nested_img, b"nested-ok-bytes").unwrap();
+
+    // 3. 一層與兩層 ancestor symlink
+    let sym_ancestor = ws.join("sym_dir");
+    unix_fs::symlink(&outside, &sym_ancestor).unwrap();
+
+    let nested_outside = ws.join("nested_sym");
+    fs::create_dir_all(&nested_outside).unwrap();
+    unix_fs::symlink(&outside, nested_outside.join("sub")).unwrap();
+
+    // 4. Leaf symlink
+    let sym_leaf = ws.join("sym_leaf.png");
+    unix_fs::symlink(&canary, &sym_leaf).unwrap();
+
+    // 5. Hardlink (st_nlink > 1)
+    let hl1 = ws.join("hardlink1.png");
+    let hl2 = ws.join("hardlink2.png");
+    fs::write(&hl1, b"hardlink-bytes").unwrap();
+    fs::hard_link(&hl1, &hl2).unwrap();
+
+    // 執行 photo_stats 與 photo_fetch
+    let rel_ok = vec!["photos".to_string(), "2026".to_string(), "pic.png".to_string()];
+    let rel_sym_anc = vec!["sym_dir".to_string(), "canary.png".to_string()];
+    let rel_sym_anc2 = vec!["nested_sym".to_string(), "sub".to_string(), "canary.png".to_string()];
+    let rel_sym_leaf = vec!["sym_leaf.png".to_string()];
+    let rel_hardlink = vec!["hardlink1.png".to_string()];
+
+    let all_rels = vec![
+        rel_ok.clone(),
+        rel_sym_anc.clone(),
+        rel_sym_anc2.clone(),
+        rel_sym_leaf.clone(),
+        rel_hardlink.clone(),
+    ];
+
+    let stats = site.photo_stats(&all_rels).await.unwrap();
+    assert!(stats[0].is_some(), "正常巢狀圖片必須 stat 成功");
+    assert_eq!(stats[0].as_ref().unwrap().size, 15);
+    assert!(stats[1].is_none(), "ancestor symlink 必須被拒絕");
+    assert!(stats[2].is_none(), "兩層 ancestor symlink 必須被拒絕");
+    assert!(stats[3].is_none(), "leaf symlink 必須被拒絕");
+    assert!(stats[4].is_none(), "hardlink 必須被拒絕");
+
+    let fetched = site.photo_fetch(&all_rels, 100, 200).await.unwrap();
+    assert_eq!(fetched[0].as_ref().unwrap(), b"nested-ok-bytes");
+    assert_eq!(fetched[1], Err("not_found"), "絕不讀取外部 canary");
+    assert_eq!(fetched[2], Err("not_found"), "絕不讀取外部 canary (兩層)");
+    assert_eq!(fetched[3], Err("not_found"), "絕不讀取 leaf symlink");
+    assert_eq!(fetched[4], Err("not_found"), "絕不讀取 hardlink");
+}
+
+
