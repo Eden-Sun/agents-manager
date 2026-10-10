@@ -228,15 +228,26 @@ pub struct Pending {
 /// （否則 Stop 先失敗、後來的 UserPromptSubmit 先跑，回合順序就翻了）。其他 bot 的列不受影響。
 /// 更早但**已到期**的列不擋：它跟後面的列一起出現在這一批，由 runner 在同一顆 bot 內照順序處理。
 pub async fn pending(pool: &SqlitePool, now: &str, limit: i64) -> Result<Vec<Pending>> {
+    pending_excluding(pool, now, limit, &[]).await
+}
+
+/// 同 [`pending`]，但略過 `exclude` 裡的 bot（呼叫端已經有 task 在處理它們）。
+///
+/// #1066：只取前 `limit` 列時，一顆卡住的 bot 的積壓會佔滿整批，其他 bot 的列永遠撈不到。
+/// 忙碌的 bot 在 SQL 就排除，後面的列才會進到這一批。
+pub async fn pending_excluding(pool: &SqlitePool, now: &str, limit: i64, exclude: &[String]) -> Result<Vec<Pending>> {
+    let exclude = serde_json::to_string(exclude)?;
     Ok(sqlx::query_as::<_, Pending>(
         "SELECT e.id, e.bot_id, e.body_json, e.attempts FROM hook_events e
          WHERE e.processed_at IS NULL AND (e.next_attempt_at IS NULL OR e.next_attempt_at <= ?)
+           AND e.bot_id NOT IN (SELECT value FROM json_each(?))
            AND NOT EXISTS (
              SELECT 1 FROM hook_events o
               WHERE o.bot_id = e.bot_id AND o.processed_at IS NULL AND o.rowid < e.rowid AND o.next_attempt_at > ?)
          ORDER BY e.rowid LIMIT ?",
     )
     .bind(now)
+    .bind(exclude)
     .bind(now)
     .bind(limit)
     .fetch_all(pool)
@@ -572,6 +583,22 @@ mod tests {
         mark_dead(&p, &id, unparseable_body_reason()).await.unwrap();
         let last_error: String = sqlx::query_scalar("SELECT last_error FROM hook_events WHERE id = ?").bind(&id).fetch_one(&p).await.unwrap();
         assert!(!last_error.contains(secret), "stored last_error exposed invalid body contents: {last_error}");
+    }
+
+    /// #1066：排除忙碌的 bot 後，它的積壓不佔這一批；被排除的列沒有被標記，之後照常出列。
+    #[tokio::test]
+    async fn excluded_bots_do_not_fill_the_batch_and_keep_their_rows() {
+        let p = pool().await;
+        for i in 0..3 {
+            accept(&p, &body(&format!("a{i}"), "2026-09-17T12:00:00.000Z"), Source::Http).await.unwrap();
+        }
+        let mut other = body("o1", "2026-09-17T12:00:03.000Z");
+        other.bot_id = "b2".into();
+        accept(&p, &other, Source::Http).await.unwrap();
+
+        let rows = pending_excluding(&p, &db::now(), 2, &["b1".to_string()]).await.unwrap();
+        assert_eq!(rows.iter().map(|r| r.bot_id.as_str()).collect::<Vec<_>>(), vec!["b2"], "b1 的三列不佔這一批，b2 撈得到");
+        assert_eq!(pending(&p, &db::now(), 10).await.unwrap().len(), 4, "被排除的列沒有被標記，之後照常出列");
     }
 
     #[test]
