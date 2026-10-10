@@ -3823,7 +3823,17 @@ export function orderedBotIds(state: {
   // 側欄收起來的不走：⌥↑／⌥↓ 走進一顆畫面上找不到的 bot，使用者只能靠搜尋才回得來。
   const hidden = new Set(state.hiddenBotIds ?? [])
   const out: string[] = []
-  for (const p of orderedProjects(state)) for (const b of botsOfProject(state, p.id)) if (!hidden.has(b.id)) out.push(b.id)
+  for (const p of orderedProjects(state)) {
+    // 側欄畫的是「父列 → 它的子 agent → 下一個父列」（#1057）：子 agent 緊跟在父列後面，兩層都維持 botsOfProject 的相對順序。
+    // 父列不在這個清單裡（被收起、被刪）的子 agent 不跟父列，就照 botsOfProject 的順序原地放進來，鍵盤仍走得到。
+    const list = botsOfProject(state, p.id).filter((b) => !hidden.has(b.id))
+    const ids = new Set(list.map((b) => b.id))
+    for (const b of list) {
+      if (b.parent_bot_id && ids.has(b.parent_bot_id)) continue // 跟在父列後面放
+      out.push(b.id)
+      for (const c of list) if (c.parent_bot_id === b.id) out.push(c.id)
+    }
+  }
   // A bot whose project vanished from the list would otherwise be unreachable by keyboard.
   for (const b of state.bots) if (!hidden.has(b.id) && !out.includes(b.id)) out.push(b.id)
   return out
