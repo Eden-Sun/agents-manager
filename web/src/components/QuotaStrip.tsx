@@ -140,12 +140,12 @@ function label(entry: QuotaEntry, q: KindQuota | null, loggedOut = false, now = 
   const parts = [entryLabel(entry)]
   const five = remaining(q?.five_hour)
   const seven = remaining(q?.seven_day)
-  if (five === null && seven === null) parts.push(loggedOut ? '這台主機偵測不到登入，額度尚未取得' : '額度尚未取得')
+  const fable = remaining(q?.fable)
+  if (five === null && seven === null && fable === null) parts.push(loggedOut ? '這台主機偵測不到登入，額度尚未取得' : '額度尚未取得')
   if (five !== null) parts.push(`5 小時剩餘 ${five}%`)
   if (seven !== null) {
     parts.push(weeklyOnlyKind(entry.kind) ? `每週剩餘 ${seven}%` : `7 天剩餘 ${seven}%`)
   }
-  const fable = remaining(q?.fable)
   if (fable !== null) parts.push(`Fable 每週剩餘 ${fable}%`)
   if (q?.five_hour?.resets_at) parts.push(`5 小時 ${fmtTime(q.five_hour.resets_at)} 重置`)
   if (q?.seven_day?.resets_at) {
@@ -734,6 +734,7 @@ function PopRow({ entry, host, onAgyLogout }: { entry: QuotaEntry; host: string;
   const agyQuotaError = useStore((s) => (entry.kind === 'agy' && !entry.identity ? toolsOfHost(s, host).agy?.quota_error ?? null : null))
   const five = remaining(q?.five_hour)
   const seven = remaining(q?.seven_day)
+  const fable = remaining(q?.fable)
   const disabledMap = useDisabledQuota()
   const key = quotaDisableKey(host, entry.kind, entry.identity)
   const off = isQuotaDisabled(disabledMap, key)
@@ -766,7 +767,7 @@ function PopRow({ entry, host, onAgyLogout }: { entry: QuotaEntry; host: string;
           <p className="quota-pop-note warn">{hostLabel(host)} 尚未安裝 agy，要自動安裝嗎？</p>
           <QuotaLoginSlash kind="agy" host={host} hostLabel={hostLabel(host)} identity={null} />
         </>
-      ) : !known || (five === null && seven === null) ? (
+      ) : !known || (five === null && seven === null && fable === null) ? (
         <>
           <p className={`quota-pop-note${loggedOut || agyQuotaError ? ' warn' : ''}`}>
             {loggedOut

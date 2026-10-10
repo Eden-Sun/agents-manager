@@ -4,7 +4,7 @@
  */
 import test, { after, afterEach, before } from 'node:test'
 import assert from 'node:assert/strict'
-import { mockApi, mount, setupDom, teardownDom, unmountAll, until } from '../testing/domHarness'
+import { click, mockApi, mount, setupDom, teardownDom, unmountAll, until } from '../testing/domHarness'
 import { sharedMock, virtualMockTime } from '../testing/sharedMock'
 import { resetStoreForTest, useStore } from '../store/store'
 import { QuotaStrip } from './QuotaStrip'
@@ -54,6 +54,52 @@ after(async () => {
 })
 
 const it = (name: string, fn: () => Promise<void>) => test(name, { timeout: 30_000 }, fn)
+
+async function openOnlyFable(fable: boolean) {
+  mockApi(sharedMock)
+  resetStoreForTest()
+  const now = new Date().toISOString()
+  useStore.setState({
+    quota: {
+      claude: {
+        five_hour: null,
+        seven_day: null,
+        fable: fable ? { used_pct: 20, low: false, critical: false, resets_at: null, observed_at: null } : null,
+        reset_credits: null,
+        limit_hit: null,
+        plan: null,
+        updated_at: now,
+        stale: false,
+        host: 'local',
+      },
+    },
+    identities: [],
+  } as never)
+  await mount(<QuotaStrip />)
+  await until(() => document.querySelector('.quota-hp.claude') !== null, 'Claude 額度格畫出來')
+  return document.querySelector<HTMLElement>('.quota-hp.claude')!
+}
+
+it('只有 Fable：tooltip 與讀屏名稱不寫「尚未取得」', async () => {
+  const cell = await openOnlyFable(true)
+  assert.ok(cell.getAttribute('title')?.includes('Fable 每週剩餘 80%'))
+  assert.ok(!cell.getAttribute('title')?.includes('尚未取得'))
+  assert.ok(!cell.querySelector('.quota-bars-open')?.getAttribute('aria-label')?.includes('尚未取得'))
+})
+
+it('只有 Fable：popover 畫出唯一的 Fable 列；全部沒有讀數時仍顯示尚未取得', async () => {
+  const cell = await openOnlyFable(true)
+  await click(cell.querySelector('.quota-bars-open')!)
+  const pop = document.querySelector('.quota-pop')!
+  assert.ok(pop.textContent?.includes('Fable'))
+  assert.ok(!pop.textContent?.includes('尚未取得'))
+  assert.equal(pop.querySelectorAll('.quota-pop-line').length, 1)
+
+  await unmountAll()
+  const emptyCell = await openOnlyFable(false)
+  await click(emptyCell.querySelector('.quota-bars-open')!)
+  assert.ok(document.querySelector('.quota-pop')?.textContent?.includes('尚未取得'))
+})
 
 it('桌機：只有 Fable 有值時畫出 F 的那一條，不畫「5h —」', async () => {
   resetStoreForTest()
