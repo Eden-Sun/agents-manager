@@ -2562,10 +2562,10 @@ async fn create_approval_inner(
                 .bind(&now)
                 .execute(&mut *tx)
                 .await?;
-            // 還沒送給協調者的那則 `approval_requested` 一起收掉：不要叫它醒來裁示一筆已經作廢的申請。
+            // 那則 `approval_requested`（不論送出去了沒）一起收掉：不要叫它醒來、也不要補送一筆已經作廢的申請。
             sqlx::query(
                 "UPDATE supervisor_inbox SET state='handled', acked_by='daemon', updated_at=?
-                  WHERE supervisor_id=? AND event_key=? AND state='pending'",
+                  WHERE supervisor_id=? AND event_key=? AND state!='handled'",
             )
             .bind(&now)
             .bind(SUPERVISOR_ID)
@@ -3407,6 +3407,28 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(open, vec![format!("approval:{}:requested", second.approval.id)]);
+    }
+
+    /// issue #1115：已經送出去（`delivered`）或補送放棄（`gave_up`）的那則 `approval_requested`，被取代時也要收掉。
+    /// 不收的話 `recover_unacked` 會每次叫醒 AGM 去裁示一筆已經作廢的申請，最後再推一則 `inbox_gave_up`。
+    #[tokio::test]
+    async fn superseding_closes_a_request_event_that_was_already_delivered() {
+        for state in ["delivered", "gave_up"] {
+            let p = pool().await;
+            let first = request(&p, "c1").await;
+            let first_key = format!("approval:{}:requested", first.approval.id);
+            sqlx::query("UPDATE supervisor_inbox SET state=? WHERE event_key=?").bind(state).bind(&first_key).execute(&p).await.unwrap();
+            let second = request(&p, "c2").await;
+            assert_eq!(second.superseded.as_deref(), Some(first.approval.id.as_str()), "{state}");
+            let (st, by): (String, Option<String>) = sqlx::query_as("SELECT state, acked_by FROM supervisor_inbox WHERE event_key=?")
+                .bind(&first_key)
+                .fetch_one(&p)
+                .await
+                .unwrap();
+            assert_eq!((st.as_str(), by.as_deref()), ("handled", Some("daemon")), "{state}：舊的那則要收掉");
+            let open: Vec<String> = sqlx::query_scalar("SELECT event_key FROM supervisor_inbox WHERE state!='handled'").fetch_all(&p).await.unwrap();
+            assert_eq!(open, vec![format!("approval:{}:requested", second.approval.id)], "{state}：只剩新的那則");
+        }
     }
 
     /// 申請還 pending 就被裁示（申請者自己 revoke、有人 deny、另一個角色 approve）：叫 AGM 裁示的那則
