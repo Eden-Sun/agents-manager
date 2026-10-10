@@ -33,7 +33,7 @@ const SKEW_MS = 2000
  * 1. 那個回合在 outbox 新增／更新的圖：以檔案時間找它之後的第一則訊息；那則是 bot 的就掛在那則，
  *    否則看檔案之前緊鄰的那則：是 bot 的＝回完話才寫的圖，掛在那則；是 end user 的＝這一回合 bot 還沒回，先不掛。
  *    同一張圖（照時間）只掛一次。
- * 2. bot 回覆文字裡提到的檔名（要真的在 outbox 裡）。
+ * 2. bot 回覆文字裡提到的檔名（要真的在 outbox 裡；被另一個更長檔名包住的那一處不算，見 [`mentions`]）。
  * 每則最多 6 張。
  */
 export function imagesByMessage(
@@ -60,11 +60,31 @@ export function imagesByMessage(
     const prev = messages[(next < 0 ? messages.length : next) - 1]
     if (prev?.role === 'assistant') add(prev.id, f)
   }
+  const names = imgs.map((f) => f.name)
   for (const m of messages) {
     if (m.role !== 'assistant') continue
-    for (const f of imgs) if (m.text.includes(f.name)) add(m.id, f)
+    for (const f of imgs) if (mentions(m.text, f.name, names)) add(m.id, f)
   }
   return out
+}
+
+/**
+ * 回覆文字有沒有提到這個檔名。檔名是清單裡另一個更長檔名的一部分（`早安.png` 之於 `星期日早安.png`）時，
+ * 文字裡那一處若其實是在講較長的那個檔，就不算——每一處都這樣才判成沒提到。中文沒有空白可當邊界，所以不看前後字元，
+ * 只跟清單裡真的存在的檔名比。
+ */
+function mentions(text: string, name: string, others: readonly string[]): boolean {
+  const longer = others.filter((o) => o.length > name.length && o.includes(name))
+  for (let i = text.indexOf(name); i >= 0; i = text.indexOf(name, i + 1)) {
+    const covered = longer.some((o) => {
+      for (let k = o.indexOf(name); k >= 0; k = o.indexOf(name, k + 1)) {
+        if (i - k >= 0 && text.startsWith(o, i - k)) return true
+      }
+      return false
+    })
+    if (!covered) return true
+  }
+  return false
 }
 
 /**

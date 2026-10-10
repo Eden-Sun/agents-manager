@@ -68,3 +68,19 @@ test('PNG 是 2x，但不超過 canvas 上限', () => {
   const big = pngCanvasSize(6000, 4000)
   assert.ok(big.w <= 8192 && big.h <= 8192 && big.w * big.h <= 16_000_000, JSON.stringify(big))
 })
+
+test('回覆提到較長的檔名時，不把名字被它包住的另一張圖也掛上去', () => {
+  const files = [
+    { name: '早安.png', size: 1, modified_at: null },
+    { name: '星期日早安.png', size: 1, modified_at: null },
+    { name: '1.png', size: 1, modified_at: null },
+    { name: '11.png', size: 1, modified_at: null },
+  ]
+  const msg = (id: string, text: string) => ({ id, role: 'assistant', text, created_at: '2026-10-04T00:00:00.000Z' })
+  const names = (ms: ReturnType<typeof msg>[], id: string) => imagesByMessage(ms, files).get(id)?.map((x) => x.name)
+  assert.deepEqual(names([msg('a', '做好了：星期日早安.png')], 'a'), ['星期日早安.png'], '修之前多一張 早安.png')
+  assert.deepEqual(names([msg('b', '請看 11.png')], 'b'), ['11.png'])
+  assert.deepEqual(names([msg('c', '早安.png 與 星期日早安.png 都好了')], 'c'), ['早安.png', '星期日早安.png'], '短的那個有一處是單獨出現')
+  assert.deepEqual(names([msg('d', '1.png')], 'd'), ['1.png'])
+  assert.equal(names([msg('e', '沒有提到圖')], 'e'), undefined)
+})
