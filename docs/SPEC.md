@@ -5120,6 +5120,7 @@ daemon 要能在 Linux（目標：Ubuntu，外部編譯主機 192.168.1.46，#67
   檔名只取最後一段、清掉控制字元與符號、不收隱藏檔與金鑰／DB 類檔名（同 outbox 的黑名單）；種類以副檔名白名單決定（文字、圖片、PDF、Office），
   內容要對得上（檔頭；文字檔要是 UTF-8、沒有 NUL；Office 要有 `[Content_Types].xml`、`_rels/.rels` 與對應的 Word／Excel／PowerPoint 主文件項目）。ZIP central directory 限 4096 項與 1 MiB，不解壓檔案，拒絕重疊、異常路徑與超過 512 MiB 的展開總量；回傳 Office 專屬 MIME。呼叫端的 Content-Type 不採信。存成 `<ulid>-<檔名>`（0600），`inbox/` 逐層 `O_NOFOLLOW` 打開，被換成符號連結就不寫。
   送訊息時帶的附件 id 必須真的在 `inbox/`，路徑以固定的標記行附在給 bot 的文字後面（對話列表再拆回檔名）。
+- 清單排隊（#1163／#1183）：同一顆 bot 的 `GET …/api/files` 一次只讀一趟（遠端是一條 ssh），進行中＋排隊合計最多 4 趟，超過立刻 429（`Retry-After: 5`）；排隊等超過 60 秒也 429；排完隊才驗 token，排隊期間被撤銷的回 404。
 - 下載：只有這顆 bot 的 outbox 第一層，沿用 outbox 的擋法（金鑰／DB／隱藏檔不列不給、fd-bound 開檔）與下載標頭（attachment、白名單外 octet-stream、nosniff）；不給目錄路徑。列表只有 outbox 尚未建立時回空清單；可信目錄、列舉、檔案讀取或背景工作失敗回一般 503，不把不完整結果當空清單。真正不存在或遭黑名單擋下的單檔下載仍回 404。**下載是串流**（issue #848）：驗證（fd-bound 開檔、fstat 大小 ≤ 64 MiB、檔頭 64 bytes 黑名單）與送出用同一個 fd，不整份讀進記憶體（`Content-Length` 為驗證當下的大小）；名額每個分享同時 2 個、全站 8 個，不排隊，滿了 429 `what=download`，名額活到 body 送完（慢速 client、斷線都 RAII 放掉）。SVG 嵌圖例外：要先整份讀完才能組出結果，仍占名額。
   `?inline=1` 只對圖片類（svg／png／jpg／jpeg／gif／webp）回 inline＋正確 MIME＋`nosniff`＋`sandbox` CSP（不帶 `allow-scripts`），給分享頁 `<img>` 預覽；其他種類一律照舊 attachment（測試 `inline_only_serves_images_inline_and_sandboxed` 釘住）。入口的頁面 CSP 只對這份 sandbox CSP 讓路，其餘回應一律覆蓋成頁面的。
 - **SVG 裡的照片**（使用者 2026-10-04：長輩上傳的照片要能合成進 bot 做的海報）：受限 bot 沒有 shell，只能寫 SVG，所以用相對路徑引用資料夾裡的照片（`<image href="inbox/<檔名>" …>`，也收 `xlink:href` 與資料夾內其他子路徑），

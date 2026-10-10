@@ -264,11 +264,67 @@ pub fn kick(bot_id: &str) {
     let _ = kicks().send(bot_id.to_string());
 }
 
+/// 同一個分享的檔案清單同時最多幾趟（進行中＋排隊）；超過的立刻 429（#1183）。
+pub(crate) const LIST_REQUESTS_PER_SHARE: usize = 4;
+/// 排隊等前一趟最久多久，等不到也 429（#1183）。
+#[cfg(not(test))]
+const LIST_QUEUE_WAIT: Duration = Duration::from_secs(60);
+#[cfg(test)]
+const LIST_QUEUE_WAIT: Duration = Duration::from_secs(5);
+
+type ListLock = Arc<tokio::sync::Mutex<()>>;
+
+/// 每個分享（bot）的單趟鎖；沒人握著、也沒人排隊就拿掉（[`ListTurn`]），不會為每顆 bot 永久留一筆。
+fn list_locks() -> &'static Mutex<HashMap<String, ListLock>> {
+    static G: OnceLock<Mutex<HashMap<String, ListLock>>> = OnceLock::new();
+    G.get_or_init(Default::default)
+}
+
+/// 「進行中＋排隊」的名額（[`LIST_REQUESTS_PER_SHARE`]）。
+fn list_admission() -> &'static Arc<PerShareSlots> {
+    static A: OnceLock<Arc<PerShareSlots>> = OnceLock::new();
+    A.get_or_init(|| Arc::new(PerShareSlots::new(LIST_REQUESTS_PER_SHARE)))
+}
+
+/// 一趟清單（#1163／#1183）：`_admitted` 佔「進行中＋排隊」的名額，`guard` 是同一個分享的單趟鎖。
+/// 拿到鎖、排隊逾時、排隊的連線被斷掉，離開時都會把沒人再用的 key 拿掉。
+struct ListTurn {
+    bot_id: String,
+    lock: ListLock,
+    guard: Option<tokio::sync::OwnedMutexGuard<()>>,
+    _admitted: PerSharePermit,
+}
+
+impl Drop for ListTurn {
+    fn drop(&mut self) {
+        drop(self.guard.take());
+        let mut m = list_locks().lock().unwrap_or_else(|e| e.into_inner());
+        // map 裡一份、本回合一份；多出來的就是還有人在排隊，留給他們。
+        if Arc::strong_count(&self.lock) <= 2 && m.get(&self.bot_id).is_some_and(|l| Arc::ptr_eq(l, &self.lock)) {
+            m.remove(&self.bot_id);
+        }
+    }
+}
+
 /// 同一個分享（每顆 bot）的檔案清單一次只讀一趟，其餘排隊：遠端專案每趟清單是一條 ssh，
 /// 不排隊的話一條連結並發重整就能把那台主機的分享 ssh 名額（`HOST_SHARE_SLOTS`）佔滿（#1163）。
-fn list_gate(bot_id: &str) -> Arc<tokio::sync::Mutex<()>> {
-    static G: OnceLock<Mutex<HashMap<String, Arc<tokio::sync::Mutex<()>>>>> = OnceLock::new();
-    G.get_or_init(Default::default).lock().unwrap_or_else(|e| e.into_inner()).entry(bot_id.to_string()).or_default().clone()
+/// 排隊的人數有上限、等太久也 429（#1183）：一條連結不能堆出無上限的 waiter。
+async fn list_turn(bot_id: &str) -> Result<ListTurn, Response> {
+    let admitted = list_admission().try_acquire(bot_id).ok_or_else(|| too_many(5, "list_per_share"))?;
+    let lock = list_locks().lock().unwrap_or_else(|e| e.into_inner()).entry(bot_id.to_string()).or_default().clone();
+    let mut turn = ListTurn { bot_id: bot_id.to_string(), lock: lock.clone(), guard: None, _admitted: admitted };
+    match tokio::time::timeout(LIST_QUEUE_WAIT, lock.lock_owned()).await {
+        Ok(guard) => {
+            turn.guard = Some(guard);
+            Ok(turn)
+        }
+        Err(_) => Err(too_many(5, "list_per_share")),
+    }
+}
+
+#[cfg(test)]
+pub(crate) fn list_turn_key_is_held_for_test(bot_id: &str) -> bool {
+    list_locks().lock().unwrap_or_else(|e| e.into_inner()).contains_key(bot_id)
 }
 
 pub fn router<H: PortalEnv>(app: Arc<H>) -> Router {
@@ -1158,7 +1214,10 @@ async fn files<H: PortalEnv>(State(st): State<Portal<H>>, Path(token): Path<Stri
         Err(r) => return r,
     };
     // 排完隊才驗 token（#1163）：排隊期間連結被撤銷的，輪到時照樣 404，不能照樣列出檔名。`_listing` 活到函式結束。
-    let _listing = list_gate(&bot_id).lock_owned().await;
+    let _listing = match list_turn(&bot_id).await {
+        Ok(turn) => turn,
+        Err(r) => return r,
+    };
     let authority = match authority_lock(&st, &token, &bot_id).await {
         Ok(g) => g,
         Err(r) => return r,
