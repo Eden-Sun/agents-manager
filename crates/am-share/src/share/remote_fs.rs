@@ -1000,68 +1000,83 @@ pub fn parse_outbox_read(out: &[u8], name: &str) -> Result<ReadWithStat, ShareFi
 
 pub fn photo_stats_script(workspace: &str, rels: &[Vec<String>]) -> String {
     let header = script_common_header();
-    let mut body = String::new();
-    for (idx, rel) in rels.iter().enumerate() {
-        let mut enter_chain = String::new();
-        let leaf = rel.last().map(|s| s.as_str()).unwrap_or("");
-        for part in &rel[..rel.len().saturating_sub(1)] {
-            enter_chain.push_str(&format!(
-                r#"[ -L {p} ] && bad=1; cd -P {p} 2>/dev/null || bad=1; "#,
-                p = sh_quote(part)
-            ));
-        }
-        body.push_str(&format!(
-            r#"(
-  bad=0
-  D={ws_quoted}
-  am_enter_dir || bad=1
-  {enter_chain}
-  F={leaf_quoted}
-  if [ "$bad" -eq 0 ] && [ -f "$F" ] && [ ! -L "$F" ]; then
-    exec 3< "$F" || bad=1
-    if [ "$bad" -eq 0 ] && am_same && am_singlelink; then
-      if [ -n "$G" ]; then
-        st=$(stat -L -c '%i %s %Y000000000' /dev/fd/3 2>/dev/null) || bad=1
-      else
-        st=$(stat -L -f '%i %z %m000000000' /dev/fd/3 2>/dev/null) || bad=1
-      fi
-      exec 3<&-
-      if [ "$bad" -eq 0 ]; then
-        payload=$(printf '%d\t%s' "{idx}" "$st")
-        len=$(printf '%s' "$payload" | wc -c | tr -d ' ')
-        printf 'STAT %d\n%s\n' "$len" "$payload"
-      else
-        payload=$(printf '%d\tNONE' "{idx}")
-        len=$(printf '%s' "$payload" | wc -c | tr -d ' ')
-        printf 'STAT %d\n%s\n' "$len" "$payload"
-      fi
-    else
-      exec 3<&-
-      payload=$(printf '%d\tNONE' "{idx}")
-      len=$(printf '%s' "$payload" | wc -c | tr -d ' ')
-      printf 'STAT %d\n%s\n' "$len" "$payload"
-    fi
-  else
-    payload=$(printf '%d\tNONE' "{idx}")
-    len=$(printf '%s' "$payload" | wc -c | tr -d ' ')
-    printf 'STAT %d\n%s\n' "$len" "$payload"
-  fi
-)
-"#,
-            ws_quoted = sh_quote(workspace),
-            enter_chain = enter_chain,
-            leaf_quoted = sh_quote(leaf),
-            idx = idx,
+    let rels_json = serde_json::to_string(rels).unwrap_or_else(|_| "[]".to_string());
+    let mut fallback_body = String::new();
+    for idx in 0..rels.len() {
+        fallback_body.push_str(&format!(
+            "payload=$(printf '%d\\tNONE' \"{idx}\")\n\
+             len=$(printf '%s' \"$payload\" | wc -c | tr -d ' ')\n\
+             printf 'STAT %d\\n%s\\n' \"$len\" \"$payload\"\n"
         ));
     }
     format!(
         r#"{header}
+if command -v python3 >/dev/null 2>&1; then
+python3 - {ws_quoted} {rels_quoted} << 'AMPY'
+import os, sys, json, stat
+
+workspace = sys.argv[1]
+rels = json.loads(sys.argv[2])
+
+sys.stdout.write("AM_RFS1\n")
+try:
+    root_fd = os.open(workspace, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_CLOEXEC", 0))
+except Exception:
+    root_fd = None
+
+for idx, rel in enumerate(rels):
+    st = None
+    if root_fd is not None and rel:
+        cur_fd = None
+        try:
+            cur_fd = os.dup(root_fd)
+            for part in rel[:-1]:
+                if not part or part in (".", "..") or "/" in part or "\0" in part:
+                    raise ValueError("invalid component")
+                next_fd = os.open(part, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_CLOEXEC", 0), dir_fd=cur_fd)
+                os.close(cur_fd)
+                cur_fd = next_fd
+            leaf = rel[-1]
+            if not leaf or leaf in (".", "..") or "/" in leaf or "\0" in leaf:
+                raise ValueError("invalid leaf")
+            file_fd = os.open(leaf, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0) | getattr(os, "O_CLOEXEC", 0), dir_fd=cur_fd)
+            os.close(cur_fd)
+            cur_fd = None
+            try:
+                s = os.fstat(file_fd)
+                if stat.S_ISREG(s.st_mode) and s.st_nlink == 1:
+                    st = s
+            finally:
+                os.close(file_fd)
+        except Exception:
+            if cur_fd is not None:
+                try:
+                    os.close(cur_fd)
+                except Exception:
+                    pass
+    if st is not None:
+        payload = "%d\t%d %d %d" % (idx, st.st_ino, st.st_size, st.st_mtime_ns)
+    else:
+        payload = "%d\tNONE" % idx
+    b_payload = payload.encode("utf-8")
+    sys.stdout.write("STAT %d\n%s\n" % (len(b_payload), payload))
+
+if root_fd is not None:
+    try:
+        os.close(root_fd)
+    except Exception:
+        pass
+sys.stdout.write("AM_RFS_DONE\n")
+AMPY
+else
 printf 'AM_RFS1\n'
-{body}
-printf 'AM_RFS_DONE\n'
+{fallback_body}printf 'AM_RFS_DONE\n'
+fi
 "#,
         header = header,
-        body = body,
+        ws_quoted = sh_quote(workspace),
+        rels_quoted = sh_quote(&rels_json),
+        fallback_body = fallback_body,
     )
 }
 
@@ -1102,78 +1117,117 @@ pub fn photo_fetch_script(
     total_max: u64,
 ) -> String {
     let header = script_common_header();
-    let mut body = String::new();
-    for (idx, rel) in rels.iter().enumerate() {
-        let mut enter_chain = String::new();
-        let leaf = rel.last().map(|s| s.as_str()).unwrap_or("");
-        for part in &rel[..rel.len().saturating_sub(1)] {
-            enter_chain.push_str(&format!(
-                r#"[ -L {p} ] && bad=1; cd -P {p} 2>/dev/null || bad=1; "#,
-                p = sh_quote(part)
-            ));
-        }
-        body.push_str(&format!(
-            r#"(
-  bad=0
-  D={ws_quoted}
-  am_enter_dir || bad=1
-  {enter_chain}
-  F={leaf_quoted}
-  if [ "$bad" -eq 0 ] && [ -f "$F" ] && [ ! -L "$F" ]; then
-    exec 3< "$F" || bad=1
-    if [ "$bad" -eq 0 ] && am_same && am_singlelink; then
-      if [ -n "$G" ]; then
-        sz=$(stat -L -c '%s' /dev/fd/3 2>/dev/null) || bad=1
-      else
-        sz=$(stat -L -f '%z' /dev/fd/3 2>/dev/null) || bad=1
-      fi
-      # 合計在送出之前判斷：已送出的大小累計在 $T（子 shell 改不了父 shell 變數）（#987）。
-      used=$(awk '{{s+=$1}} END{{print s+0}}' "$T")
-      if [ "$bad" -eq 0 ] && [ "$sz" -le {each_max} ] && [ $(( used + sz )) -le {total_max} ]; then
-        prefix_len=$(printf '%d\tOK\n' "{idx}" | wc -c | tr -d ' ')
-        total_len=$(( prefix_len + sz ))
-        printf 'PHOTO %d\n%d\tOK\n' "$total_len" "{idx}"
-        head -c "$sz" <&3
-        printf '\n'
-        echo "$sz" >> "$T"
-      else
-        exec 3<&-
-        prefix=$(printf '%d\tERR\tsource_too_large' "{idx}")
-        plen=$(printf '%s' "$prefix" | wc -c | tr -d ' ')
-        printf 'PHOTO %d\n%s\n' "$plen" "$prefix"
-      fi
-      exec 3<&-
-    else
-      exec 3<&-
-      prefix=$(printf '%d\tERR\tnot_found' "{idx}")
-      plen=$(printf '%s' "$prefix" | wc -c | tr -d ' ')
-      printf 'PHOTO %d\n%s\n' "$plen" "$prefix"
-    fi
-  else
-    prefix=$(printf '%d\tERR\tnot_found' "{idx}")
-    plen=$(printf '%s' "$prefix" | wc -c | tr -d ' ')
-    printf 'PHOTO %d\n%s\n' "$plen" "$prefix"
-  fi
-)
-"#,
-            ws_quoted = sh_quote(workspace),
-            enter_chain = enter_chain,
-            leaf_quoted = sh_quote(leaf),
-            idx = idx,
-            each_max = each_max,
-            total_max = total_max,
+    let rels_json = serde_json::to_string(rels).unwrap_or_else(|_| "[]".to_string());
+    let mut fallback_body = String::new();
+    for idx in 0..rels.len() {
+        fallback_body.push_str(&format!(
+            "payload=$(printf '%d\\tERR\\tnot_found' \"{idx}\")\n\
+             len=$(printf '%s' \"$payload\" | wc -c | tr -d ' ')\n\
+             printf 'PHOTO %d\\n%s\\n' \"$len\" \"$payload\"\n"
         ));
     }
     format!(
         r#"{header}
-T=$(mktemp "${{TMPDIR:-/tmp}}/am-rfs-photo.XXXXXX") || {{ printf 'AM_RFS1\nERR 9\nUNTRUSTED\nAM_RFS_DONE\n'; exit 0; }}
-trap 'rm -f "$T"' EXIT
+if command -v python3 >/dev/null 2>&1; then
+python3 - {ws_quoted} {rels_quoted} {each_max} {total_max} << 'AMPY'
+import os, sys, json, stat
+
+workspace = sys.argv[1]
+rels = json.loads(sys.argv[2])
+each_max = int(sys.argv[3])
+total_max = int(sys.argv[4])
+
+sys.stdout.buffer.write(b"AM_RFS1\n")
+try:
+    root_fd = os.open(workspace, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_CLOEXEC", 0))
+except Exception:
+    root_fd = None
+
+used = 0
+for idx, rel in enumerate(rels):
+    file_fd = None
+    if root_fd is not None and rel:
+        cur_fd = None
+        try:
+            cur_fd = os.dup(root_fd)
+            for part in rel[:-1]:
+                if not part or part in (".", "..") or "/" in part or "\0" in part:
+                    raise ValueError("invalid component")
+                next_fd = os.open(part, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_CLOEXEC", 0), dir_fd=cur_fd)
+                os.close(cur_fd)
+                cur_fd = next_fd
+            leaf = rel[-1]
+            if not leaf or leaf in (".", "..") or "/" in leaf or "\0" in leaf:
+                raise ValueError("invalid leaf")
+            f_fd = os.open(leaf, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0) | getattr(os, "O_CLOEXEC", 0), dir_fd=cur_fd)
+            os.close(cur_fd)
+            cur_fd = None
+            s = os.fstat(f_fd)
+            if stat.S_ISREG(s.st_mode) and s.st_nlink == 1:
+                file_fd = f_fd
+            else:
+                os.close(f_fd)
+        except Exception:
+            if cur_fd is not None:
+                try:
+                    os.close(cur_fd)
+                except Exception:
+                    pass
+
+    if file_fd is not None:
+        try:
+            s = os.fstat(file_fd)
+            sz = s.st_size
+            if sz > each_max or (used + sz) > total_max:
+                prefix = "%d\tERR\tsource_too_large" % idx
+                b_prefix = prefix.encode("utf-8")
+                sys.stdout.buffer.write(("PHOTO %d\n%s\n" % (len(b_prefix), prefix)).encode("utf-8"))
+            else:
+                content = bytearray()
+                to_read = sz
+                while to_read > 0:
+                    chunk = os.read(file_fd, min(to_read, 65536))
+                    if not chunk:
+                        break
+                    content.extend(chunk)
+                    to_read -= len(chunk)
+                if len(content) == sz:
+                    used += sz
+                    header_line = ("%d\tOK\n" % idx).encode("utf-8")
+                    total_len = len(header_line) + len(content)
+                    sys.stdout.buffer.write(("PHOTO %d\n" % total_len).encode("utf-8"))
+                    sys.stdout.buffer.write(header_line)
+                    sys.stdout.buffer.write(content)
+                    sys.stdout.buffer.write(b"\n")
+                else:
+                    prefix = "%d\tERR\tnot_found" % idx
+                    b_prefix = prefix.encode("utf-8")
+                    sys.stdout.buffer.write(("PHOTO %d\n%s\n" % (len(b_prefix), prefix)).encode("utf-8"))
+        finally:
+            os.close(file_fd)
+    else:
+        prefix = "%d\tERR\tnot_found" % idx
+        b_prefix = prefix.encode("utf-8")
+        sys.stdout.buffer.write(("PHOTO %d\n%s\n" % (len(b_prefix), prefix)).encode("utf-8"))
+
+if root_fd is not None:
+    try:
+        os.close(root_fd)
+    except Exception:
+        pass
+sys.stdout.buffer.write(b"AM_RFS_DONE\n")
+AMPY
+else
 printf 'AM_RFS1\n'
-{body}
-printf 'AM_RFS_DONE\n'
+{fallback_body}printf 'AM_RFS_DONE\n'
+fi
 "#,
         header = header,
-        body = body,
+        ws_quoted = sh_quote(workspace),
+        rels_quoted = sh_quote(&rels_json),
+        each_max = each_max,
+        total_max = total_max,
+        fallback_body = fallback_body,
     )
 }
 
