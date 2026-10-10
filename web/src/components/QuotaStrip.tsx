@@ -27,7 +27,7 @@ import './quotaStrip.css'
 
 /**
  * Remaining quota per kind (`GET /api/quota` + WS `quota_updated`). Every kind stays visible;
- * only its windows collapse. Fill length carries the level so it survives greyscale.
+ * when the strip is too narrow each cell stacks all its windows vertically (2026-10-10 使用者，#1158). Fill length carries the level so it survives greyscale.
  * 桌機每個帳號都畫完整量表，不收進 `+N`（2026-09-11 使用者：「額度顯示是很重要的訊息，不要去省他的空間」）。
  * grok 只有週窗；agy 只顯示 Gemini 組的 5h／7d，量表沿用 claude 的完整、手機與收合規則。
  * 額度按主機分開（SPEC §14），一次只顯示一台；遠端 key 帶 `<host>/` 前綴，先投影成裸 key。
@@ -105,19 +105,6 @@ function worst(q: KindQuota | null): Level {
   if (windows.some((w) => w.critical)) return 'crit'
   if (windows.some((w) => w.low)) return 'warn'
   return 'ok'
-}
-
-/** The window closest to running out — what the collapsed pill shows. */
-function worstWindow(q: KindQuota | null): { name: WindowName; pct: number | null } {
-  const cands: { name: WindowName; pct: number }[] = []
-  const five = remaining(q?.five_hour)
-  const seven = remaining(q?.seven_day)
-  const fable = remaining(q?.fable)
-  if (five !== null) cands.push({ name: '5h', pct: five })
-  if (seven !== null) cands.push({ name: '7d', pct: seven })
-  if (fable !== null) cands.push({ name: 'F', pct: fable })
-  if (cands.length === 0) return { name: '5h', pct: null }
-  return cands.reduce((a, b) => (b.pct < a.pct ? b : a))
 }
 
 function fmtTime(iso: string | null | undefined): string {
@@ -409,7 +396,6 @@ function weekLabel(kind: BotKind): '7d' | '週' {
 function Gauge({
   entry,
   host,
-  collapsed,
   compact,
   focused,
   open,
@@ -417,7 +403,6 @@ function Gauge({
 }: {
   entry: QuotaEntry
   host: string
-  collapsed: boolean
   /** 手機：條子縮成 chip，剩餘量用數字寫。 */
   compact: boolean
   focused: boolean
@@ -450,10 +435,6 @@ function Gauge({
       rivals.push(windowBar('F', fable, q?.fable, q?.updated_at))
     }
     windows = [rivals.reduce((best, w) => (moreUrgent(w, best) ? w : best), shown)]
-  } else if (collapsed) {
-    const w = worstWindow(q)
-    const src = w.name === '5h' ? q?.five_hour : w.name === 'F' ? q?.fable : q?.seven_day
-    windows = [windowBar(w.name === '7d' ? weekLabel(entry.kind) : w.name, w.pct, src, q?.updated_at)]
   } else if (five === null && seven === null) {
     windows = [windowBar(weeklyOnlyKind(entry.kind) ? '週' : '5h', null, null, q?.updated_at)]
   } else {
@@ -1003,7 +984,6 @@ export function QuotaStrip({
               <Gauge
                 entry={entry}
                 host={host}
-                collapsed={collapsed || compact}
                 compact={compact}
                 focused={focused}
                 open={open}
