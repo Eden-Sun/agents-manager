@@ -1316,6 +1316,21 @@ async fn start_inner(
         let fork = fork_args_by_kind(&bot.kind, from).map_err(|why| LcError::Bad(format!("cannot fork: {why}")))?;
         if bot.kind == "claude" {
             crate::rewind::anchor::ensure(app, from).await;
+            // 來源那段對話的檔可能還在別的身分底下（來源 bot 改了身分還沒重啟就被 fork）：照接回的做法先複製到這顆 bot 的
+            // 身分。搬不成照舊啟動（等於修之前的行為），只記 warn，不因此讓原本 fork 得成的情況變成失敗（#1124）。
+            let transcript: Option<String> = sqlx::query_scalar(
+                "SELECT transcript_path FROM runs WHERE native_session_id = ? AND transcript_path IS NOT NULL AND transcript_path != ''
+                  ORDER BY started_at DESC, rowid DESC LIMIT 1",
+            )
+            .bind(from)
+            .fetch_optional(app.db())
+            .await
+            .map_err(up)?;
+            if let Some(t) = transcript {
+                if let Err(why) = stage_cross_identity_transcript(app, bot, &host, &t).await {
+                    tracing::warn!(bot = %bot.name, session = from, why, "fork: could not stage the source transcript into this bot's identity");
+                }
+            }
         }
         if bot.kind == "codex" {
             let mut forked = fork;
@@ -2735,6 +2750,34 @@ mod resume_args_tests {
             .await
             .unwrap();
         assert!(!notes.iter().any(|n| n.contains(CONTEXT_LOST_PREFIX)), "不該說接不回又開了新對話：{notes:?}");
+    }
+
+    /// #1124：來源 bot 改了身分還沒重啟就 fork：來源那段對話的檔在舊身分的 `projects/` 底下，fork 出來的 bot 要先把它
+    /// 複製到自己的身分，`--resume <sid> --fork-session` 才找得到（以前直接啟動，claude 報 No conversation found 退出）。
+    #[tokio::test]
+    async fn a_fork_stages_the_source_transcript_into_the_forks_identity() {
+        let e = env().await;
+        let src = claude_bot(&e.app, &e.project_id, "src").await;
+        let fork = claude_bot(&e.app, &e.project_id, "fork").await;
+        let _ = own_transcript(&e, &fork, "unused").await;
+        let old = e.dir.join("old-cfg/projects/-own/sid-src.jsonl");
+        std::fs::create_dir_all(old.parent().unwrap()).unwrap();
+        std::fs::write(&old, "{}\n").unwrap();
+        sqlx::query(
+            "INSERT INTO runs (id, bot_id, state, agent_status, native_session_id, transcript_path, started_at, ended_at)
+             VALUES (?,?,'stopped','idle','sid-src',?,'2026-09-01T00:00:00Z','2026-09-01T00:01:00Z')",
+        )
+        .bind(db::ulid())
+        .bind(&src.id)
+        .bind(old.to_str().unwrap())
+        .execute(e.app.db())
+        .await
+        .unwrap();
+
+        start_bot_with(&e.app, &fork.id, StartOpts { fork_session: Some("sid-src".into()), ..Default::default() }).await.unwrap();
+        let staged = e.dir.join("own-cfg/projects/-own/sid-src.jsonl");
+        assert_eq!(std::fs::read_to_string(&staged).unwrap(), "{}\n", "來源對話要搬到 fork 出來的身分底下");
+        assert!(started_args(&e).pop().unwrap().windows(3).any(|w| w == ["--resume", "sid-src", "--fork-session"]), "{:?}", started_args(&e));
     }
 
     /// No transcript → not resumed: `claude --resume` would exit with "No conversation found".
