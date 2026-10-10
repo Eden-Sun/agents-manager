@@ -27,6 +27,14 @@ fn up<E: std::fmt::Display>(e: E) -> LcError {
     LcError::Upstream(e.to_string())
 }
 
+/// 這次呼叫是一般 Bot 就回它的 id；User、Service，還有**註冊的 AGM 角色**（它也是 `RequestPrincipal::Bot`）回 `None`（#1040）。
+/// 角色 bot 跟 User 一樣看全域帳本、可以人工補交，不套派工綁定。每次都重讀角色，撤掉角色下一次呼叫就照一般 Bot 算。
+async fn ordinary_bot<'a>(app: &App, principal: &'a RequestPrincipal) -> Result<Option<&'a str>, LcError> {
+    let RequestPrincipal::Bot(caller) = principal else { return Ok(None) };
+    let role = crate::supervisor::roles::role_of_bot(&app.db, caller).await.map_err(up)?;
+    Ok(role.is_none().then_some(caller.as_str()))
+}
+
 fn row_json(r: &Row) -> Value {
     json!({
         "kind": r.kind,
@@ -52,12 +60,12 @@ struct LedgerQuery {
 }
 
 /// 逐條結論查得到：`GET /api/release-triage?kind=&version=`（都省略＝全部，新版在前）。
-/// Bot principal（#801）只看到派給它（或它底下的 child）、還在 `dispatched` 的列，要拿來交 verdict 用的 `dispatch_gen` 也在裡面；
-/// 全域帳本只給 User 與 AGM 角色。
+/// 一般 Bot（#801）只看到派給它（或它底下的 child）、還在 `dispatched` 的列，要拿來交 verdict 用的 `dispatch_gen` 也在裡面；
+/// 全域帳本只給 User 與 AGM 角色（#1040：角色 bot 的 principal 也是 Bot，要用 [`ordinary_bot`] 分開）。
 async fn get_ledger(State(app): State<Arc<App>>, Extension(principal): Extension<RequestPrincipal>, Query(q): Query<LedgerQuery>) -> Result<Json<Value>, LcError> {
     let version = q.version.as_deref().and_then(crate::changelog::version_string).or(q.version.clone());
     let mut rows = ledger::list(&app.db, q.kind.as_deref().filter(|k| !k.is_empty()), version.as_deref().filter(|v| !v.is_empty())).await.map_err(up)?;
-    if let RequestPrincipal::Bot(caller) = &principal {
+    if let Some(caller) = ordinary_bot(&app, &principal).await? {
         let mut mine = Vec::new();
         for r in rows {
             let ours = match (r.status == Status::Dispatched, r.assigned_bot_id.as_deref()) {
@@ -105,9 +113,9 @@ async fn post_verdicts(State(app): State<Arc<App>>, Extension(principal): Extens
     }
     let version = crate::changelog::version_string(&sub.version).ok_or_else(|| LcError::Bad(format!("version `{}` 看不出版本", sub.version)))?;
     let row = ledger::get(&app.db, &sub.kind, &version).await.map_err(up)?.ok_or_else(|| LcError::NotFound(format!("帳本沒有 {} {version}", sub.kind)))?;
-    let binding = match &principal {
-        RequestPrincipal::Bot(caller) => Some(bot_verdict_binding(&app, caller, &row, sub.dispatch_gen).await?),
-        _ => {
+    let binding = match ordinary_bot(&app, &principal).await? {
+        Some(caller) => Some(bot_verdict_binding(&app, caller, &row, sub.dispatch_gen).await?),
+        None => {
             if !matches!(row.status, Status::Pending | Status::Dispatched | Status::Failed) {
                 return Err(LcError::conflict("not_awaiting_verdict", json!({"status": row.status.as_str()})));
             }
@@ -525,6 +533,41 @@ mod tests {
 
         let as_user = get_ledger(State(app.clone()), Extension(RequestPrincipal::User), Query(LedgerQuery { kind: Some("claude".into()), version: None })).await.unwrap();
         assert_eq!(as_user.0["rows"].as_array().unwrap().len(), 2);
+    }
+
+    /// #1040：註冊的 AGM 角色 bot 也是 `RequestPrincipal::Bot`，但全域帳本與人工補交跟 User 一樣（不要 `dispatch_gen`、
+    /// 沒派給它的版也收）；撤掉角色之後同一顆 bot 立刻照一般 Bot 算：只看得到派給它的列，交別人的版 403。
+    #[tokio::test]
+    async fn a_registered_agm_role_bot_reads_and_supplements_like_the_user_until_the_role_is_gone() {
+        let env = crate::testing::env().await;
+        let app = env.app.clone();
+        let sections = source_sections("claude", include_str!("../../../crates/am-base/src/release_triage/fixtures/claude_2.1.276-278.md"));
+        let entries_of = |v: &str| build_entries("claude", sections.iter().find(|s| s.version == v).unwrap()).unwrap();
+        for v in ["2.1.277", "2.1.278"] {
+            ledger::insert_version(&app.db, "claude", v, &entries_of(v)).await.unwrap();
+        }
+        let held = crate::testing::claude_bot(&app, &env.project_id, "rt-held").await;
+        let responder = crate::testing::claude_bot(&app, &env.project_id, "rt-responder").await;
+        let _ = post_dispatched(State(app.clone()), Json(DispatchedIn { kind: "claude".into(), versions: vec!["2.1.277".into()], bot_id: held.id.clone() })).await.unwrap();
+        crate::supervisor::roles::set_env(&app.db, crate::supervisor::roles::Role::Responder, &responder.id, &env.project_id, "/tmp").await.unwrap();
+        let as_role = || RequestPrincipal::Bot(responder.id.clone());
+        let ledger_query = || Query(LedgerQuery { kind: Some("claude".into()), version: None });
+
+        let got = get_ledger(State(app.clone()), Extension(as_role()), ledger_query()).await.unwrap();
+        assert_eq!(got.0["rows"].as_array().unwrap().len(), 2, "角色 bot 看全域：{}", got.0);
+        // 沒派給它、還是 pending 的版：人工補交照收（不綁、不用代數）。
+        let ok = post_verdicts(State(app.clone()), Extension(as_role()), Json(submission(None, "2.1.278", &entries_of("2.1.278")))).await.unwrap();
+        assert_eq!(ok.0["status"], "empty");
+
+        // 撤掉角色（角色表的 bot 清掉）：同一顆 bot 現在是一般 Bot。
+        sqlx::query("UPDATE supervisor_roles SET bot_id = NULL WHERE role = ?").bind(crate::supervisor::roles::Role::Responder.as_str()).execute(&app.db).await.unwrap();
+        let got = get_ledger(State(app.clone()), Extension(as_role()), ledger_query()).await.unwrap();
+        assert_eq!(got.0["rows"], json!([]), "撤掉角色後看不到派給別人的列");
+        let err = post_verdicts(State(app.clone()), Extension(as_role()), Json(submission(Some(1), "2.1.277", &entries_of("2.1.277"))))
+            .await
+            .expect_err("撤掉角色後不能交別人的版");
+        assert!(matches!(err, LcError::Forbidden(_)), "{err:?}");
+        assert_eq!(ledger::get(&app.db, "claude", "2.1.277").await.unwrap().unwrap().status, Status::Dispatched);
     }
 
     /// #801：派工要指向現存的 bot；打錯或已刪的 id 直接 400，不記成沒人接的交辦。
