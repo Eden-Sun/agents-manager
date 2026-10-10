@@ -335,6 +335,8 @@ fn tag_end(at: &str) -> Option<usize> {
 fn rewrite_image_tag(tag: &str, src: &dyn PhotoSource, embedded: &mut usize, attempts: &mut usize, size_so_far: usize) -> Option<String> {
     let mut out = String::with_capacity(tag.len());
     let mut changed = false;
+    // 這個標籤已經處理過一個相對 href（嵌好或留了記號）；之後的相對 href 直接拿掉。
+    let mut handled = false;
     let bytes = tag.as_bytes();
     let mut i = "<image".len();
     out.push_str(&tag[..i]);
@@ -386,7 +388,12 @@ fn rewrite_image_tag(tag: &str, src: &dyn PhotoSource, embedded: &mut usize, att
         let v = unescape(value.trim());
         if v.starts_with('#') || v.get(..5).is_some_and(|p| p.eq_ignore_ascii_case("data:")) {
             out.push_str(&tag[ws_start..end]);
+        } else if handled {
+            // 同一個標籤的第二個相對 href（常見：`href` 與 `xlink:href` 並寫）：前一個已經嵌好或留了記號，這個直接拿掉——
+            // 再處理一次會嵌兩份，或寫出第二個 `data-am-embed`（重複屬性＝整份 SVG 不合法）。
+            changed = true;
         } else {
+            handled = true;
             changed = true;
             *attempts += 1;
             let outcome = if *embedded >= MAX_IMAGES || *attempts > MAX_ATTEMPTS { Err("too_many_images") } else { resolve(src, &v) };
@@ -817,6 +824,27 @@ mod tests {
         let found = images(&out);
         assert!(found[0].0.as_deref().is_some_and(|h| h.starts_with("data:image/jpeg;base64,")));
         assert_eq!(found[0].1, None);
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn a_tag_with_both_href_and_xlink_href_stays_well_formed() {
+        let dir = scratch("both-hrefs");
+        std::fs::write(dir.join("inbox/a.jpg"), jpeg(40, 30)).unwrap();
+        let src = svg(
+            r#"<image href="inbox/a.jpg" xlink:href="inbox/a.jpg" width="4" height="3"/>
+       <image xlink:href="inbox/missing.jpg" href="inbox/missing.jpg" width="4" height="3"/>"#,
+        );
+        let out = embed(src.as_bytes(), &dir).expect("有要改的");
+        let imgs = images(&out); // 重複屬性的話這裡就 panic（「屬性要合法」）
+        assert_eq!(imgs.len(), 2);
+        assert!(imgs[0].0.as_deref().unwrap().starts_with("data:image/jpeg;base64,"));
+        assert_eq!(imgs[0].1, None);
+        assert_eq!(imgs[1], (None, Some("not_found".into())));
+        let text = String::from_utf8(out).unwrap();
+        assert_eq!(text.matches("data:image/jpeg;base64,").count(), 1, "同一張照片不嵌兩份");
+        assert_eq!(text.matches("data-am-embed=").count(), 1, "同一個標籤只留一個記號");
+        assert!(text.contains(r#"width="4" height="3""#), "其他屬性原樣");
         std::fs::remove_dir_all(&dir).unwrap();
     }
 
