@@ -300,8 +300,12 @@ impl ProviderPort for App {
     async fn adopt_statusline_model(&self, run: &db::Run, payload: &Value) {
         crate::claude_live::adopt_statusline_model(&self.shared(), run, payload).await
     }
-    async fn login_on_auth_failure(&self, bot: &db::Bot) {
-        crate::runners::login_prompt::on_auth_failure(&self.shared(), bot).await
+    async fn login_on_auth_failure(&self, bot: &db::Bot, admitted: Option<&crate::hosts::HostFence>) {
+        crate::runners::login_prompt::on_auth_failure(&self.shared(), bot, admitted).await
+    }
+    async fn admitted_host_fence(&self, bot: &db::Bot) -> Option<crate::hosts::HostFence> {
+        let host = db::bot_host(&self.db, &bot.id).await.ok()?;
+        self.hosts.fence(&host).await
     }
     async fn login_on_turn_ok(&self, bot: &db::Bot) {
         crate::runners::login_prompt::on_turn_ok(&self.shared(), bot).await

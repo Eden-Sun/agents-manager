@@ -10,9 +10,10 @@ use std::sync::Arc;
 
 /// agy bot 的回合因為授權失敗收尾：該主機 `tools.agy.logged_in=false`、清 agy 額度、推 `host_changed`。
 /// 已經是未登入時什麼都不推（重送同一則不會再推）。
-pub async fn on_turn_auth_failure(app: &Arc<App>, bot: &db::Bot) {
-    let Ok(host) = db::bot_host(&app.db, &bot.id).await else { return };
-    let Some(fence) = app.hosts.fence(&host).await else { return };
+/// `fence`：這一則放行時捕獲的主機世代（#1024）。不在這裡重新取世代：事件屬於哪一代由放行決定，
+/// 換代之後 `run_if_current` 會擋下寫入，舊事件不能把新主機標成未登入。
+pub async fn on_turn_auth_failure(app: &Arc<App>, bot: &db::Bot, fence: &crate::hosts::HostFence) {
+    let host = fence.conn().name.clone();
     let key = crate::quota::quota_key(&host, "agy");
     // 整段在圍籬裡（#1023）：換代了就什麼都不寫，冷卻、旗標、探測錯誤與舊讀數一起不動。
     let Some((changed, had)) = app
