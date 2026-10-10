@@ -29,6 +29,13 @@ if [ -n "${AM_TEST_GIT_FAIL:-}" ] && [ "$*" = "$AM_TEST_GIT_FAIL" ]; then
     echo "fatal: bad revision" >&2
     exit 128
 fi
+# changed 的 git diff 要關掉改名偵測（issue #1173）：沒帶 diff.renames=false 就拒絕，讓測試能抓到。
+if [ -n "${AM_TEST_REQUIRE_NO_RENAMES:-}" ] && [ "${1:-}" = diff ]; then
+    if [ "${GIT_CONFIG_COUNT:-}" != 1 ] || [ "${GIT_CONFIG_KEY_0:-}" != diff.renames ] || [ "${GIT_CONFIG_VALUE_0:-}" != false ]; then
+        echo "git diff 沒有關掉改名偵測" >&2
+        exit 91
+    fi
+fi
 case "$*" in
     "diff --name-only origin/main...HEAD") ;;
     "diff --name-only HEAD") printf '%s\n' "${AM_TEST_DIFF_HEAD:-daemon/src/main.rs}" ;;
@@ -206,6 +213,11 @@ printf 'pub fn plain() {}\n' >"$fixture/crates/am-base/src/plain.rs"
 export AM_TEST_DIFF_HEAD=crates/am-base/src/plain.rs
 output="$(changed)" || fail "改 crates 一般檔的 changed 失敗：$output"
 printf '%s' "$output" | grep -q 'macos-local' && fail "crates 底下沒有 macos_local_ 的檔不該提醒：$output"
+
+# changed 的 git diff 要關掉改名偵測（issue #1173）：改名只列新路徑的話，把會進 binary 的檔搬到 docs/ 會被當成「只有文件」。
+export AM_TEST_REQUIRE_NO_RENAMES=1 AM_TEST_DIFF_HEAD=daemon/src/lifecycle/queue.rs
+output="$(changed)" || fail "check.sh changed 的 git diff 沒帶 diff.renames=false：$output"
+unset AM_TEST_REQUIRE_NO_RENAMES
 
 # web：改任何一個檔（含共用的 store／lib 與設定檔）都是整套——型別檢查、lint、**全部**測試（不是同目錄的）、build。
 # 這支只是釘住現況：以後有人想為了快把 bun test 縮成只跑相關檔，這裡會紅。

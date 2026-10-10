@@ -276,11 +276,13 @@ check_changed() {
     local base="${1:-origin/main}" committed dirty untracked files parts filters="" nfilters=0 f
     # 三個 git 指令各自檢查：`{ a; b; c; } | …` 的結束碼只看最後一個，base 不存在（沒 fetch、淺 clone、沒有共同祖先）時
     # 第一個失敗被吞掉，工作樹乾淨時就印「只有文件類改動，不用跑」然後綠燈——壞 commit 過閘。看不出改了什麼就拒絕放行。
-    if ! committed="$(git diff --name-only "${base}...HEAD")"; then
+    # 改名只列新路徑的話，把會進 binary 的檔搬到 docs/ 會被當成「只有文件」；關掉改名偵測，舊路徑以刪除出現（issue #1173）。
+    # 用環境變數而不加 --no-renames：其他假 git 測試用整串 argv 比對。
+    if ! committed="$(GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=diff.renames GIT_CONFIG_VALUE_0=false git diff --name-only "${base}...HEAD")"; then
         echo "changed: 無法比較 ${base}...HEAD（${base} 不存在、沒 fetch 或沒有共同祖先？）：看不出改了什麼，拒絕放行" >&2
         return 2
     fi
-    if ! dirty="$(git diff --name-only HEAD)"; then
+    if ! dirty="$(GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=diff.renames GIT_CONFIG_VALUE_0=false git diff --name-only HEAD)"; then
         echo "changed: 無法列出工作樹的改動（git diff --name-only HEAD 失敗）：拒絕放行" >&2
         return 2
     fi
