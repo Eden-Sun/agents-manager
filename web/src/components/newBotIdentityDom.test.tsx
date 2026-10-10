@@ -6,6 +6,7 @@ import test, { after, afterEach, before, beforeEach } from 'node:test'
 import assert from 'node:assert/strict'
 import { click, fakeApi, mount, settle, setupDom, teardownDom, unmountAll, type FakeRequest } from '../testing/domHarness'
 import { useStore } from '../store/store'
+import { BOT_KINDS } from '../api/types'
 import { Sidebar } from './Sidebar'
 
 afterEach(unmountAll)
@@ -44,7 +45,7 @@ async function submitNewBot(kind: string, identity: string | null) {
   const pick = (group: string, label: string) =>
     [...document.querySelectorAll<HTMLButtonElement>(`[aria-label="${group}"] .opt`)].find((b) => b.textContent?.trim() === label)!
   await click(pick('kind', kind))
-  if (identity !== null) await click(pick('identity', identity))
+  if (identity !== null) await click(pick('身份', identity))
   await settle()
   const submit = [...document.querySelectorAll<HTMLButtonElement>('button')].find((b) => b.textContent?.trim() === '新增並啟動')!
   await click(submit)
@@ -79,7 +80,7 @@ test('換 kind 會清掉身份：先選 claude 的 cc1 再切 codex 直接送出
   const pick = (group: string, label: string) =>
     [...document.querySelectorAll<HTMLButtonElement>(`[aria-label="${group}"] .opt`)].find((b) => b.textContent?.trim() === label)!
   await click(pick('kind', 'claude'))
-  await click(pick('identity', 'cc1'))
+  await click(pick('身份', 'cc1'))
   await click(pick('kind', 'codex'))
   await settle()
   await click([...document.querySelectorAll<HTMLButtonElement>('button')].find((b) => b.textContent?.trim() === '新增並啟動')!)
@@ -88,3 +89,18 @@ test('換 kind 會清掉身份：先選 claude 的 cc1 再切 codex 直接送出
   assert.equal((post?.body as { identity: string | null } | undefined)?.identity, null)
 })
 
+
+test('kind 選項是 radio，選中的那顆 aria-checked=true', async () => {
+  useStore.setState({ localTools: Object.fromEntries(BOT_KINDS.map((k) => [k, { installed: true, path: null, version: null, logged_in: true }])) } as never)
+  await mount(<Sidebar />)
+  await settle()
+  await click([...document.querySelectorAll<HTMLButtonElement>('.sidebar-foot-actions button')].find((b) => b.textContent?.trim() === '新增 Bot')!)
+  await settle()
+  const radios = () => [...document.querySelectorAll<HTMLButtonElement>('[role="radiogroup"][aria-label="kind"] [role="radio"]')]
+  assert.equal(radios().length, BOT_KINDS.length)
+  const checked = () => radios().filter((b) => b.getAttribute('aria-checked') === 'true').map((b) => b.textContent?.trim())
+  assert.deepEqual(checked(), ['claude'])
+  await click(radios().find((b) => b.textContent?.trim() === 'codex')!)
+  await settle()
+  assert.deepEqual(checked(), ['codex'])
+})

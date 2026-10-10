@@ -760,6 +760,8 @@ function NewBotForm({ onDone, initialProjectId }: { onDone: () => void; initialP
               <span key={k} className="opt-wrap">
                 <button
                   type="button"
+                  role="radio"
+                  aria-checked={kind === k}
                   className={`opt${kind === k ? ' on' : ''}`}
                   disabled={missing}
                   title={reason}
