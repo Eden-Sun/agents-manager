@@ -272,6 +272,8 @@ function BotRowImpl({
     return e.clientY < r.top + r.height / 2 ? 'before' : 'after'
   }
 
+  const quotaWho = quotaIdentity(bot, run)
+
   return (
     <div
       className={`bot-row${compact ? ' compact' : ''}${selected ? ' selected' : ''}${dragging ? ' dragging' : ''}${
@@ -445,7 +447,7 @@ function BotRowImpl({
           {quotaWarning ? (
             <span
               className="bot-quota-chip crit"
-              title={`${KIND_LABEL[bot.kind]}${bot.identity ? ` · ${bot.identity}` : ''} ${quotaWarning.window} 額度剩 ${quotaWarning.pct}%，快用完了`}
+              title={`${KIND_LABEL[bot.kind]}${quotaWho ? ` · ${quotaWho}` : ''} ${quotaWarning.window} 額度剩 ${quotaWarning.pct}%，快用完了`}
             >
               ⚠ {quotaWarning.pct}%
             </span>
@@ -453,7 +455,7 @@ function BotRowImpl({
             /* 黃燈：與頂端 QuotaStrip 一致；critical 優先用上面的短紅晶片。 */
             <span
               className={`bot-quota-chip ${quotaLevel.level}`}
-              title={`${KIND_LABEL[bot.kind]}${bot.identity ? ` · ${bot.identity}` : ''} ${quotaLevel.window} 額度剩 ${quotaLevel.pct}%`}
+              title={`${KIND_LABEL[bot.kind]}${quotaWho ? ` · ${quotaWho}` : ''} ${quotaLevel.window} 額度剩 ${quotaLevel.pct}%`}
             >
               {quotaLevel.window} {quotaLevel.pct}%
             </span>
