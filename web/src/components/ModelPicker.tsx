@@ -310,6 +310,9 @@ export function ModelQuickPicker({
   // 完整 id（`claude-sonnet-5-5`）要對到別名（`sonnet`）：同 `ApiModelFields`，先完全相等再 `modelMatches`（#939）。
   const current = (model && (models.find((m) => m.id === model) ?? models.find((m) => modelMatches(m.id, model)))) || models.find((m) => m.is_default) || models[0]
   const efforts = current?.efforts ?? []
+  // 沒設就標 CLI 預設那顆（同 ApiModelFields；2026-09-09 使用者決定不放「預設」選項）。
+  const selectedModel = model ?? current?.id ?? null
+  const selectedEffort = effort ?? current?.default_effort ?? null
 
   const apply = async (input: PatchBotInput) => {
     const res = await patchBot(botId, input)
@@ -375,9 +378,9 @@ export function ModelQuickPicker({
               key={m.id}
               type="button"
               role="menuitemradio"
-              aria-checked={model === m.id || modelMatches(m.id, model)}
+              aria-checked={selectedModel === m.id || modelMatches(m.id, selectedModel)}
               tabIndex={-1}
-              className={`opt${model === m.id || modelMatches(m.id, model) ? ' on' : ''}`}
+              className={`opt${selectedModel === m.id || modelMatches(m.id, selectedModel) ? ' on' : ''}`}
               title={[m.id, m.description, m.is_default ? '模型預設' : ''].filter(Boolean).join(' — ')}
               disabled={patching}
               onClick={() => pickModel(m.id)}
@@ -395,9 +398,9 @@ export function ModelQuickPicker({
                   key={e}
                   type="button"
                   role="menuitemradio"
-                  aria-checked={effort === e}
+                  aria-checked={selectedEffort === e}
                   tabIndex={-1}
-                  className={`opt${effort === e ? ' on' : ''}`}
+                  className={`opt${selectedEffort === e ? ' on' : ''}`}
                   disabled={patching}
                   title={current?.default_effort === e ? `${defaultEffortNote(kind)}：${effortLabel(e)}` : undefined}
                   onClick={() => pickEffort(e)}
