@@ -326,7 +326,8 @@ export function BotSettingsPanel({ botId }: { botId: string }) {
       if (!card || !(e.target instanceof Node)) return
       if (card.contains(e.target)) return
       const el = e.target instanceof Element ? e.target : e.target.parentElement
-      if (el?.closest('.confirm-backdrop, .modal-backdrop')) return
+      // 通知是疊在上面的浮層，不是「外面的畫面」：按它的 ✕／動作鈕不算離開設定卡。
+      if (el?.closest('.confirm-backdrop, .modal-backdrop, .notices')) return
       escRef.current()
     }
     document.addEventListener('pointerdown', onDown, true)
