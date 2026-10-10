@@ -19,6 +19,23 @@ OUT=$(AM_DEV_SSHD_DIR="$ROOT/notadir/sub" sh "$HERE/dev-sshd.sh" ssh-opts 2>"$RO
 grep -q 'ssh-opts' "$ROOT/err" && ok "產不出金鑰：stderr 說明原因" || bad "stderr 沒有說明"
 rm -rf "$ROOT"
 
+# pid 檔指到一個活著但不是 sshd 的行程：不能當成在跑，stop 更不能殺它。
+ROOT=$(mktemp -d); mkdir -p "$ROOT/d"
+sleep 300 & VICTIM=$!
+echo "$VICTIM" > "$ROOT/d/sshd.pid"
+OUT=$(AM_DEV_SSHD_DIR="$ROOT/d" sh "$HERE/dev-sshd.sh" status 2>&1); RC=$?
+[ "$RC" -eq 1 ] && ok "pid 被別的行程占用：status exit 1" || bad "status 卻 exit ${RC}（${OUT}）"
+[ "$OUT" = "stopped" ] && ok "pid 被別的行程占用：status 說 stopped" || bad "status 輸出不對：${OUT}"
+OUT=$(AM_DEV_SSHD_DIR="$ROOT/d" sh "$HERE/dev-sshd.sh" stop 2>&1)
+[ "$OUT" = "dev sshd is not running" ] && ok "stop 不把別人的行程當 sshd" || bad "stop 輸出不對：${OUT}"
+kill -0 "$VICTIM" 2>/dev/null && ok "那個不相干的行程還活著" || bad "stop 把不相干的行程殺掉了"
+kill "$VICTIM" 2>/dev/null; wait "$VICTIM" 2>/dev/null
+# pid 檔不是數字：同樣當成沒在跑。
+echo "abc" > "$ROOT/d/sshd.pid"
+OUT=$(AM_DEV_SSHD_DIR="$ROOT/d" sh "$HERE/dev-sshd.sh" status 2>&1); RC=$?
+[ "$RC" -eq 1 ] && [ "$OUT" = "stopped" ] && ok "pid 檔不是數字：status exit 1、說 stopped" || bad "pid 檔是 abc：exit ${RC}，輸出 ${OUT}"
+rm -rf "$ROOT"
+
 # 2. 金鑰產得出來（要 ssh-keygen；沒有就明確 skip，不當成通過也不算失敗）。
 if ! command -v ssh-keygen >/dev/null 2>&1; then
   echo "skip - 金鑰產得出來：這台沒有 ssh-keygen"

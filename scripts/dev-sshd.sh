@@ -27,8 +27,10 @@ SSHD=/usr/sbin/sshd
 is_running() {
   [ -f "$PIDFILE" ] || return 1
   pid=$(cat "$PIDFILE" 2>/dev/null || echo "")
-  [ -n "$pid" ] || return 1
-  kill -0 "$pid" 2>/dev/null
+  case "$pid" in ''|*[!0-9]*) return 1 ;; esac
+  kill -0 "$pid" 2>/dev/null || return 1
+  # pid 檔會留過重開機：那個 pid 可能已經是別的行程，要確認真的是 sshd（Linux 的 comm 是 `sshd`，macOS 是完整路徑）。
+  case "$(ps -p "$pid" -o comm= 2>/dev/null)" in *sshd*) return 0 ;; *) return 1 ;; esac
 }
 
 ensure_material() {
