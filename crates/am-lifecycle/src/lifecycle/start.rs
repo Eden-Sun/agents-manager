@@ -220,13 +220,12 @@ async fn start_bot_locked_with_host_fence(
         if bot.kind == "claude" && project.host == crate::config::LOCAL_HOST {
             if let Some(i) = app.identity_for_host(&project.host, idn).await {
                 let home = dirs::home_dir().map(|p| p.to_string_lossy().to_string()).unwrap_or_default();
-                let dir = i
-                    .env
-                    .get("CLAUDE_CONFIG_DIR")
-                    .map(|d| crate::config::expand_home(d, &home))
-                    .unwrap_or_else(|| format!("{home}/.claude"));
-                if crate::tools::ensure_claude_onboarded(std::path::Path::new(&dir)) {
-                    tracing::info!(bot = %bot.name, identity = idn, dir, "marked claude onboarding complete so the TUI skips the login menu");
+                // 拿不到家目錄就不猜路徑（#1125）。
+                if !home.is_empty() {
+                    let dir = claude_account_file_dir(&i.env, &home);
+                    if crate::tools::ensure_claude_onboarded(std::path::Path::new(&dir)) {
+                        tracing::info!(bot = %bot.name, identity = idn, dir, "marked claude onboarding complete so the TUI skips the login menu");
+                    }
                 }
             }
         }
@@ -785,6 +784,17 @@ fn parse_stage_output(out: &str) -> Result<(), &'static str> {
     } else {
         Err("transcript_missing")
     }
+}
+
+/// 這個身分的 `.claude.json` 所在目錄：設了 `CLAUDE_CONFIG_DIR` 就在裡面；沒設是 `~/.claude.json`（**不是**
+/// `~/.claude/.claude.json`，同 `trust::store_path`）。#1125：以前沒設時算成 `~/.claude`，旗標永遠補不上。
+fn claude_account_file_dir(identity_env: &std::collections::BTreeMap<String, String>, home: &str) -> String {
+    identity_env
+        .get("CLAUDE_CONFIG_DIR")
+        .map(|d| d.trim())
+        .filter(|d| !d.is_empty())
+        .map(|d| crate::config::expand_home(d, home))
+        .unwrap_or_else(|| home.to_string())
 }
 
 fn cannot_resume(bot_id: &str, why: &str) -> LcError {
@@ -5037,5 +5047,21 @@ mod agy_resume_tests {
         let (e, kid, args) = restart_agy_child("not a valid id; rm -rf").await;
         assert!(!args.iter().any(|a| a == "-c" || a.starts_with("--conversation")), "{args:?}");
         assert!(system_notes(&e.app, &kid).await.iter().any(|n| n.contains("接不回")), "{:?}", system_notes(&e.app, &kid).await);
+    }
+}
+
+#[cfg(test)]
+mod account_file_tests {
+    use std::collections::BTreeMap;
+
+    /// #1125：身分沒設 `CLAUDE_CONFIG_DIR` 時，`.claude.json` 在家目錄（不是 `~/.claude/`）；設了就在那個目錄裡。
+    #[test]
+    fn the_account_file_of_an_identity_without_a_config_dir_is_in_home() {
+        let none = BTreeMap::new();
+        assert_eq!(super::claude_account_file_dir(&none, "/home/u"), "/home/u");
+        let set: BTreeMap<String, String> = [("CLAUDE_CONFIG_DIR".to_string(), "~/.claude-cc1".to_string())].into();
+        assert_eq!(super::claude_account_file_dir(&set, "/home/u"), "/home/u/.claude-cc1");
+        let blank: BTreeMap<String, String> = [("CLAUDE_CONFIG_DIR".to_string(), "  ".to_string())].into();
+        assert_eq!(super::claude_account_file_dir(&blank, "/home/u"), "/home/u");
     }
 }
