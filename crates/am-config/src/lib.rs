@@ -1117,11 +1117,13 @@ pub fn ssh_opts_problem(opts: &[String]) -> Option<String> {
 
 fn ssh_option_problem(kv: &str) -> Option<String> {
     // 允許 `Key=Value`；ssh 也接受 `Key Value`，一律先當成同一個東西檢查（Key 就是第一個 `=` 或空白前）。
-    if kv.chars().any(|c| c.is_control()) {
-        return Some("an -o value contains a control character or newline".into());
+    // 非半形空白的空白（全形空白、NBSP…）ssh 不認作分隔，放行只會得到 Bad configuration option，這裡直接拒絕。
+    if kv.chars().any(|c| c.is_control() || (c.is_whitespace() && c != ' ')) {
+        return Some("an -o value contains a control character, newline or non-ASCII whitespace".into());
     }
-    let (key, value) = match kv.find(|c: char| c == '=' || c.is_whitespace()) {
-        Some(i) => (&kv[..i], kv[i + 1..].trim()),
+    // 分隔字元可能是多位元組（全形空白 3 bytes）：用 char_indices 取位元組位置，再跳過整個字元。
+    let (key, value) = match kv.char_indices().find(|(_, c)| *c == '=' || c.is_whitespace()) {
+        Some((i, c)) => (&kv[..i], kv[i + c.len_utf8()..].trim()),
         None => (kv, ""),
     };
     if !SSH_OPT_KEYS.contains(&key.to_ascii_lowercase().as_str()) {
@@ -2281,5 +2283,26 @@ impl ConfigStore {
     /// 測試用：不掛 hook 載入（正式入口在 daemon 的 `projection::app_ports_p2::load_config`）。
     pub(crate) async fn load(path: PathBuf) -> Result<Self> {
         Self::load_with_hooks(path, std::sync::Arc::new(test_support::NoHooks)).await
+    }
+}
+
+#[cfg(test)]
+mod ssh_opts_tests {
+    use super::*;
+
+    #[test]
+    fn non_ascii_whitespace_in_an_ssh_option_is_rejected_without_panicking() {
+        for sep in ['\u{3000}', '\u{a0}', '\u{2003}'] {
+            assert!(ssh_option_problem(&format!("User{sep}root")).is_some(), "sep={sep:?}");
+            assert!(ssh_option_problem(&format!("ConnectTimeout{sep}5")).is_some(), "sep={sep:?}");
+            assert!(ssh_opts_problem(&["-o".into(), format!("User{sep}root")]).is_some(), "sep={sep:?}");
+            assert!(ssh_opts_problem(&[format!("-oConnectTimeout{sep}5")]).is_some(), "sep={sep:?}");
+        }
+        // 不回歸：半形分隔與白名單照舊。
+        assert_eq!(ssh_opts_problem(&["-o".into(), "ConnectTimeout=5".into()]), None);
+        assert_eq!(ssh_opts_problem(&["-oUser root".into()]), None);
+        assert_eq!(ssh_opts_problem(&["-o".into(), "User root".into()]), None);
+        assert_eq!(ssh_opts_problem(&["-i".into(), "/k".into()]), None);
+        assert!(ssh_opts_problem(&["-o".into(), "ProxyCommand=x".into()]).is_some());
     }
 }
