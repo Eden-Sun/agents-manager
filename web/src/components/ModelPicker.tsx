@@ -119,11 +119,13 @@ export function ApiModelFields({
           {/* 不標「即時套用」（2026-09-13 使用者：模型與強度不用特別說明）。 */}
         </span>
         {/* 不放「預設」「自訂…」（2026-09-09 使用者決定）；沒設就標 CLI 預設那顆。 */}
-        <div className="opt-group models" role="radiogroup" aria-label="model">
+        <div className="opt-group models" role="radiogroup" aria-label="模型">
           {shownModels.map((m) => (
             <button
               key={m.id}
               type="button"
+              role="radio"
+              aria-checked={modelMatches(m.id, selectedModel)}
               className={`opt${modelMatches(m.id, selectedModel) ? ' on' : ''}`}
               title={[m.id, m.description, m.is_default ? '模型預設' : ''].filter(Boolean).join(' — ')}
               onClick={() => pickModel(m.id)}
@@ -144,11 +146,13 @@ export function ApiModelFields({
             ) : null}
             {/* claude／codex 切強度會存成帳號預設（SPEC §17、§4.4a）。 */}
           </span>
-          <div className="opt-group" role="radiogroup" aria-label="reasoning effort">
+          <div className="opt-group" role="radiogroup" aria-label="強度">
             {efforts.map((e) => (
               <button
                 key={e}
                 type="button"
+                role="radio"
+                aria-checked={selectedEffort === e}
                 className={`opt${selectedEffort === e ? ' on' : ''}`}
                 title={current?.default_effort === e ? `${defaultEffortNote(kind)}：${effortLabel(e)}` : e}
                 onClick={() => onEffort(e)}
