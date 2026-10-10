@@ -1371,14 +1371,18 @@ pub async fn post_round(State(app): State<Arc<App>>, Path(id): Path<String>, bod
         store::Round::Closed => Err(closed_now(&app, &id).await),
         store::Round::AtLimit { used, max } => {
             let detail = format!("review／驗證已退回 {used} 輪，達到上限 {max}");
-            // 停不下來＝這中間任務被關掉了：不要記一則「等使用者決定」、也不要回 max_rounds（issue #130）。
-            if !store::pause_with_event(&app.db, &id, "max_rounds", Some(&detail), &format!("暫停：{detail}，等使用者決定"), &json!({"reason": "max_rounds"}))
-                .await
-                .map_err(up)?
-            {
-                return Err(closed_now(&app, &id).await);
+            // 已經停在 max_rounds：不再寫第二則「等使用者決定」、也不再推一次 mission_updated（同 get_pick 對 no_fable_for_verifier 的寫法）。
+            let already = load(&app, &id).await?.paused_reason.as_deref() == Some("max_rounds");
+            if !already {
+                // 停不下來＝這中間任務被關掉了：不要記一則「等使用者決定」、也不要回 max_rounds（issue #130）。
+                if !store::pause_with_event(&app.db, &id, "max_rounds", Some(&detail), &format!("暫停：{detail}，等使用者決定"), &json!({"reason": "max_rounds"}))
+                    .await
+                    .map_err(up)?
+                {
+                    return Err(closed_now(&app, &id).await);
+                }
+                emit(&app, &load(&app, &id).await?).await;
             }
-            emit(&app, &load(&app, &id).await?).await;
             Err(LcError::conflict(
                 "max_rounds",
                 json!({"mission_id": id, "rounds_used": used, "max_rounds": max,
@@ -3761,6 +3765,39 @@ mod tests {
         let _ = post_pause(State(app.clone()), Path(id.clone()), HeaderMap::new(), Json(PauseIn { reason: "clarify".into(), detail: None })).await.unwrap();
         let _ = post_resume(State(app.clone()), Path(id.clone())).await.unwrap();
         assert_eq!(load(&app, &id).await.unwrap().max_rounds, 4);
+    }
+
+    /// 停在 max_rounds 之後再 round（換了 crid）不再寫第二則 paused、也不再推 mission_updated；
+    /// 仿 `releasing_a_mission_that_used_up_its_rounds_grants_one_more` 的建法。
+    #[tokio::test]
+    async fn a_repeated_round_at_the_limit_does_not_add_another_paused_event() {
+        let env = crate::testing::env().await;
+        let app = env.app.clone();
+        let Json(m) = post_mission(State(app.clone()), Path(env.project_id.clone()), Json(new_mission("rounds-dup", "pr"))).await.unwrap();
+        let id = m["id"].as_str().unwrap().to_string();
+        let round = |crid: &str| {
+            post_round(
+                State(app.clone()),
+                Path(id.clone()),
+                Some(Json(RoundIn { client_request_id: Some(crid.into()) })),
+            )
+        };
+        let _ = round("r1").await.unwrap();
+        let _ = mission_assignment(&app, &id, "dup-exec-1", "executor", "completed").await;
+        let _ = round("r2").await.unwrap();
+        assert_eq!(conflict_reason(round("r3").await.unwrap_err()), "max_rounds");
+        let paused = |app: &Arc<App>| {
+            let app = app.clone();
+            let id = id.clone();
+            async move { store::events(&app.db, &id).await.unwrap().iter().filter(|e| e.kind == "paused").count() }
+        };
+        assert_eq!(paused(&app).await, 1);
+
+        // 換了 crid 再叫一次（AGM 被叫醒後又試）：409 還是 max_rounds，但時間軸不再多一則。
+        assert_eq!(conflict_reason(round("r4").await.unwrap_err()), "max_rounds");
+        assert_eq!(paused(&app).await, 1, "同一個原因停著，不重寫");
+        let m = load(&app, &id).await.unwrap();
+        assert_eq!((m.paused_reason.as_deref(), m.rounds_used), (Some("max_rounds"), 2));
     }
 
     /// 同一個 commit 交付兩次要冪等：回原本那一筆；連 `delivered` 事件都沒寫成的那種（CLI 逾時、502）
