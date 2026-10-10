@@ -129,19 +129,40 @@ export function ShareButton({ file, client }: { file: ShareFile; client: ShareCl
   )
 }
 
+/** `<img>` 載入失敗（下載名額每個分享同時只有 2 個、滿了 429；或網路一閃）先自己重試，用完才算這一版載不出來。 */
+export const IMG_RETRIES = 3
+export const IMG_RETRY_MS = 1500
+
+function useImgRetry(version: string, retryMs = IMG_RETRY_MS) {
+  const [st, setSt] = useState({ version, fails: 0, waiting: false })
+  // 檔案換版就從頭算。
+  const cur = st.version === version ? st : { version, fails: 0, waiting: false }
+  useEffect(() => {
+    if (!cur.waiting) return
+    const t = setTimeout(() => setSt({ version, fails: cur.fails, waiting: false }), retryMs * cur.fails)
+    return () => clearTimeout(t)
+  }, [version, cur.waiting, cur.fails, retryMs])
+  return {
+    /** 換 key 讓 `<img>` 重掛、重新發請求（回應是 no-store）。 */
+    imgKey: `${version}:${cur.fails}`,
+    waiting: cur.waiting,
+    broken: cur.fails > IMG_RETRIES,
+    onError: () => setSt({ version, fails: cur.fails + 1, waiting: cur.fails + 1 <= IMG_RETRIES }),
+  }
+}
+
 /** 縮圖：一律 `<img>`（向量圖當圖片載入不跑 script），點了放大。載不出來顯示佔位，不擋其他東西；檔案換版（bot 修好）就重載。 */
-export function ShareThumb({ file, client, onOpen, big }: { file: ShareFile; client: ShareClient; onOpen: (f: ShareFile) => void; big?: boolean }) {
+export function ShareThumb({ file, client, onOpen, big, retryMs }: { file: ShareFile; client: ShareClient; onOpen: (f: ShareFile) => void; big?: boolean; retryMs?: number }) {
   const version = fileVersion(file)
-  const [brokenAt, setBrokenAt] = useState<string | null>(null)
-  const broken = brokenAt === version
+  const r = useImgRetry(version, retryMs)
   return (
     <button type="button" className={`sh-thumb${big ? ' big' : ''}`} aria-label={`放大 ${displayName(file.name)}`} title={displayName(file.name)} onClick={() => onOpen(file)}>
-      {broken ? (
-        <span className="sh-thumb-broken" title="這張圖還在修，請稍等">
+      {r.broken || r.waiting ? (
+        <span className="sh-thumb-broken" title={r.broken ? '這張圖還在修，請稍等' : undefined}>
           🖼
         </span>
       ) : (
-        <img key={version} src={client.previewUrl(file.name, version)} alt={big ? displayName(file.name) : ''} loading="lazy" decoding="async" onError={() => setBrokenAt(version)} />
+        <img key={r.imgKey} src={client.previewUrl(file.name, version)} alt={big ? displayName(file.name) : ''} loading="lazy" decoding="async" onError={r.onError} />
       )}
     </button>
   )
@@ -156,6 +177,7 @@ export function ShareImageViewer({ file, client, onClose }: { file: ShareFile; c
     window.addEventListener('keydown', onKey)
     return () => window.removeEventListener('keydown', onKey)
   }, [onClose])
+  const r = useImgRetry(fileVersion(file))
 
   return (
     <div
@@ -173,7 +195,13 @@ export function ShareImageViewer({ file, client, onClose }: { file: ShareFile; c
           ✕
         </button>
       </div>
-      <img className="sh-viewer-img" src={client.previewUrl(file.name, fileVersion(file))} alt={displayName(file.name)} />
+      {r.broken ? (
+        <span className="sh-png-note sh-png-fixing">這張圖還在修，請稍等</span>
+      ) : r.waiting ? (
+        <span className="sh-viewer-img" aria-busy="true" />
+      ) : (
+        <img key={r.imgKey} className="sh-viewer-img" src={client.previewUrl(file.name, fileVersion(file))} alt={displayName(file.name)} onError={r.onError} />
+      )}
       <div className="sh-viewer-actions">
         <ShareButton file={file} client={client} />
       </div>
