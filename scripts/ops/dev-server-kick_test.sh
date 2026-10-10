@@ -255,6 +255,26 @@ run >/dev/null
 check "本機有回應的 loopback-only 孤兒也收掉" "收掉孤兒 loopback-only vite pid ${PID}" "$LOG"
 teardown
 
+# 4c. Linux（#1176）：loopback-only 的 vite 被 systemd --user 收養（ppid≠1）也是孤兒 → 收掉換一顆。
+setup
+echo "aaaaaaa" > "$FIX/head.after"; echo "lock1" > "$FIX/lock.after"
+PID=$(fake_listener "127.0.0.1:${PORT}" 4242 "node /x/vite.js")
+echo "/usr/lib/systemd/systemd --user" > "$FIX/ps.4242"
+run >/dev/null
+check "父程序是 systemd --user 的 loopback-only vite 當孤兒收掉" "收掉孤兒 loopback-only vite pid ${PID}" "$LOG"
+check_no "不再寫需人工處理" "需人工處理" "$LOG"
+teardown
+
+# 4d. 父程序是別的活著的程序（例如某個 bot 的 shell）→ 照舊不碰（#1176 只放寬 systemd --user）。
+setup
+echo "aaaaaaa" > "$FIX/head.after"; echo "lock1" > "$FIX/lock.after"
+PID=$(fake_listener "127.0.0.1:${PORT}" 4242 "node /x/vite.js")
+echo "-zsh" > "$FIX/ps.4242"
+run >/dev/null
+check "父程序不是 systemd --user 時照舊只記錄" "需人工處理" "$LOG"
+equals "別人的 vite 沒被殺" "$(kill -0 "$PID" 2>/dev/null && echo alive)" "alive"
+teardown
+
 # 5. 缺依賴：找不到 node → 明確放棄這輪，不拿 bun 代跑。
 setup
 echo "aaaaaaa" > "$FIX/head.after"; echo "lock1" > "$FIX/lock.after"
@@ -314,6 +334,19 @@ serve >/dev/null; wait_ready
 run >/dev/null
 check "lock 變了就 bun install" "bun install --frozen-lockfile" "$FIX/calls.log"
 check "log 說明要重啟 vite" "web/bun.lock 變了" "$LOG"
+teardown
+
+# 10b. Linux（#1176）：bun.lock 變了、對外的 vite 被 systemd --user 收養 → 也要重啟（以前被當成「不是孤兒」而跳過）。
+setup
+echo "bbbbbbb" > "$FIX/head.after"; echo "lock2" > "$FIX/lock.after"
+PID=$(fake_listener "*:${PORT}" 4242 "node /x/vite.js --host 0.0.0.0")
+echo "/usr/lib/systemd/systemd --user" > "$FIX/ps.4242"
+serve >/dev/null; wait_ready
+run >/dev/null
+check "log 說明要重啟 vite" "web/bun.lock 變了" "$LOG"
+sleep 1
+equals "舊的 vite 真的被收掉" "$(kill -0 "$PID" 2>/dev/null && echo alive || echo gone)" "gone"
+check_no "不寫需人工處理" "需人工處理" "$LOG"
 teardown
 
 # 11. bun install 失敗：不砍還在跑的 vite，HEAD 之後沒變也要重試（#645）。

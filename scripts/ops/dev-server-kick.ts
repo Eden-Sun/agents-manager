@@ -18,7 +18,7 @@
 //   所以 vite 一律用 node 拉起，找不到 node 寧可這輪不起，也不拿 bun 代跑。
 //
 // 健康的定義是「LAN 上的手機連得到」：綁 *:5173 才算數。只綁 127.0.0.1／[::1] 的實例，
-// 是孤兒 vite（ppid=1，起它的人已經走了）就收掉換一顆；還有父程序就只記錄，那是別人正在用的。
+// 是孤兒 vite（ppid=1，或 Linux 上被 systemd --user 收養，起它的人已經走了）就收掉換一顆；還有父程序就只記錄，那是別人正在用的。
 //
 // 5188 那類 VITE_MOCK=1 實例是各 bot 自己的測試環境，不歸這支管，絕不碰。
 //
@@ -80,7 +80,7 @@ async function sh(cmd: string[]): Promise<string> {
   return out.trim()
 }
 
-type Listener = { pid: string; addrs: string[]; cmd: string; ppid: string }
+type Listener = { pid: string; addrs: string[]; cmd: string; ppid: string; pcmd: string }
 
 /** `lsof -Fpn`：`p<pid>` 一行、`n<位址>` 一行。 */
 function parseLsof(out: string): Map<string, string[]> {
@@ -119,7 +119,9 @@ async function listeners(): Promise<Listener[]> {
     const ps = await sh(['ps', '-o', 'ppid=,command=', '-p', pid])
     const ppid = ps.trim().split(/\s+/)[0] ?? ''
     const cmd = ps.trim().replace(/^\s*\d+\s*/, '')
-    res.push({ pid, addrs, cmd, ppid })
+    // 父程序的指令：Linux 上孤兒掛在 `systemd --user` 底下（見 orphan），要看得出來。
+    const pcmd = ppid && ppid !== '1' ? await sh(['ps', '-o', 'command=', '-p', ppid]) : ''
+    res.push({ pid, addrs, cmd, ppid, pcmd })
   }
   return res
 }
@@ -127,8 +129,9 @@ async function listeners(): Promise<Listener[]> {
 /** 綁在萬用位址（`*:5173` / `0.0.0.0:5173`，ss 的 IPv6 萬用是 `[::]:5173`）才是 LAN 上的手機連得到的。 */
 const reachable = (l: Listener) => l.addrs.some(a => a.startsWith('*:') || a.startsWith('0.0.0.0:') || a.startsWith('[::]:'))
 const isVite = (l: Listener) => /vite/.test(l.cmd)
-/** ppid=1：起它的程序已經結束，沒有 bot 還在用它——可以收。 */
-const orphan = (l: Listener) => l.ppid === '1'
+/** 孤兒＝起它的程序已經結束，沒有 bot 還在用它——可以收：ppid=1，或（Linux）被這個使用者的 `systemd --user` 收養
+ *  （user session 的 subreaper，detached 的行程掛在它底下而不是 pid 1；#1176，跟 browser_gc_linux.py 的 _is_orphan_parent 同一件事）。 */
+const orphan = (l: Listener) => l.ppid === '1' || /(^|\/)systemd(\s.*)?\s--user(\s|$)/.test(l.pcmd)
 
 const pidOf = () => listeners().then(ls => ls[0]?.pid ?? '')
 
