@@ -24,7 +24,7 @@ export function SidebarPanes({ projectId }: { projectId: string }) {
   const panes = useStore((s) => s.sidePanes[projectId])
   if (!panes || panes.length === 0) return null
   return (
-    <div className="side-panes" role="list" aria-label="這個專案的 shell pane">
+    <div className="side-panes" role="group" aria-label="這個專案的 shell pane">
       {panes.map((p) => (
         <PaneRow key={`${p.host}:${p.pane_id}`} pane={p} tag={null} />
       ))}
@@ -48,7 +48,7 @@ export function SidebarUnownedPanes() {
 
   if (panes.length === 0) return null
   return (
-    <div className="side-panes unowned" role="list" aria-label="沒有歸屬專案的 pane">
+    <div className="side-panes unowned" role="group" aria-label="沒有歸屬專案的 pane">
       {unownedRows(panes).map(({ pane, tag }) => (
         <PaneRow key={`${pane.host}:${pane.pane_id}`} pane={pane} tag={tag} />
       ))}
@@ -70,7 +70,7 @@ function PaneRow({ pane: p, tag }: { pane: ProjectPane; tag: UnownedTag }) {
   return (
     <button
       type="button"
-      role="listitem"
+      aria-current={here ? 'true' : undefined}
       className={`side-pane${here ? ' current' : ''}${service ? ' service' : ''}`}
       title={`${paneHint(p)}${hostNote}${readOnly ? '（開著 port，只能看）' : ''}${tag ? `・${TAG_TEXT[tag].title}` : ''}`}
       onClick={() => viewPane(p)}
