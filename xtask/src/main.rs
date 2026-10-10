@@ -4,7 +4,7 @@
 use std::fs;
 use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
-use std::process::{Command, Stdio};
+use std::process::{Child, Command, Stdio};
 use std::time::Duration;
 
 fn repo_root() -> PathBuf {
@@ -36,13 +36,153 @@ fn main() {
     }
 }
 
+/// `dev.pids` 裡的一顆行程。pid 會被別的程式重用（重開機、行程自己掉了），所以同時記它的角色與
+/// `ps lstart`（起來的時間）：`cargo down` 只殺 pid 現在仍然是當初那一顆的（#1075）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Kind {
+    Daemon,
+    Web,
+}
+
+impl Kind {
+    /// 指令列裡一定會有的字：`target/debug/agents-managerd serve`、`node …/vite/bin/vite.js`。
+    fn needle(self) -> &'static str {
+        match self {
+            Kind::Daemon => "agents-managerd",
+            Kind::Web => "vite",
+        }
+    }
+    fn tag(self) -> &'static str {
+        match self {
+            Kind::Daemon => "daemon",
+            Kind::Web => "web",
+        }
+    }
+    fn from_tag(s: &str) -> Option<Kind> {
+        match s {
+            "daemon" => Some(Kind::Daemon),
+            "web" => Some(Kind::Web),
+            _ => None,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct Tracked {
+    pid: u32,
+    kind: Kind,
+    /// `ps -o lstart=` 的字串；沒有（舊格式）就只比指令列。
+    started: Option<String>,
+}
+
+/// 每行 `<pid> <daemon|web> <lstart>`，沒有 lstart 寫 `-`。舊版是兩行純 pid（第一行 daemon、第二行 web），讀得進來、沒有 lstart。
+fn encode(tracked: &[Tracked]) -> String {
+    tracked
+        .iter()
+        .map(|t| format!("{} {} {}\n", t.pid, t.kind.tag(), t.started.as_deref().unwrap_or("-")))
+        .collect()
+}
+
+fn decode(text: &str) -> Vec<Tracked> {
+    text.lines()
+        .enumerate()
+        .filter_map(|(i, line)| {
+            let mut parts = line.trim().splitn(3, ' ');
+            let pid: u32 = parts.next()?.parse().ok()?;
+            match parts.next() {
+                None => Some(Tracked {
+                    pid,
+                    kind: if i == 0 { Kind::Daemon } else { Kind::Web },
+                    started: None,
+                }),
+                Some(tag) => Some(Tracked {
+                    pid,
+                    kind: Kind::from_tag(tag)?,
+                    started: parts.next().map(str::trim).filter(|s| !s.is_empty() && *s != "-").map(str::to_string),
+                }),
+            }
+        })
+        .collect()
+}
+
+/// `ps` 看到的 pid 現在是什麼：（指令列，起來的時間）。pid 已經不在＝None。
+fn process_info(pid: u32) -> Option<(String, String)> {
+    let ps = |field: &str| -> Option<String> {
+        let out = Command::new("ps").args(["-o", field, "-p", &pid.to_string()]).output().ok()?;
+        if !out.status.success() {
+            return None;
+        }
+        let s = String::from_utf8_lossy(&out.stdout).trim().to_string();
+        (!s.is_empty()).then_some(s)
+    };
+    Some((ps("command=")?, ps("lstart=")?))
+}
+
+/// 這個 pid 現在是不是當初 `cargo dev` 起的那一顆：角色的指令列字樣對得上，而且（有記的話）起來的時間也一樣。
+fn is_ours(t: &Tracked, info: &(String, String)) -> bool {
+    info.0.contains(t.kind.needle()) && t.started.as_deref().is_none_or(|s| s == info.1)
+}
+
+fn track(pid: u32, kind: Kind) -> Tracked {
+    Tracked { pid, kind, started: process_info(pid).map(|i| i.1) }
+}
+
+/// 讀 pid 檔，只留下還是當初那一顆、現在仍在跑的行程。其餘（已不在、pid 已被別人用）都是舊資料。
+fn live(root: &Path) -> Vec<Tracked> {
+    let text = fs::read_to_string(pid_file(root)).unwrap_or_default();
+    decode(&text)
+        .into_iter()
+        .filter(|t| process_info(t.pid).is_some_and(|info| is_ours(t, &info)))
+        .collect()
+}
+
+fn write_pids(root: &Path, tracked: &[Tracked]) -> std::io::Result<()> {
+    fs::write(pid_file(root), encode(tracked))
+}
+
+/// SIGTERM 並等它真的走（最多約 5 秒）。kill 本身失敗回 false。
+fn terminate(pid: u32) -> bool {
+    if !Command::new("kill").arg(pid.to_string()).status().is_ok_and(|s| s.success()) {
+        return false;
+    }
+    // Wait for it to actually exit — a following `cargo dev` binding the same port
+    // (e.g. the daemon's 7788) would otherwise race a socket the kernel hasn't freed yet.
+    for _ in 0..50 {
+        if process_info(pid).is_none() {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(100));
+    }
+    true
+}
+
+/// 起到一半失敗：把已經起來的收掉、清掉 pid 檔，才不會留下沒有紀錄、佔著 port 的孤兒（#1075）。
+fn abort(root: &Path, started: &[Tracked], why: &str) -> ! {
+    eprintln!("{why}");
+    for t in started {
+        if !terminate(t.pid) {
+            eprintln!("kill pid {} 失敗，請手動處理", t.pid);
+        }
+    }
+    fs::remove_file(pid_file(root)).ok();
+    std::process::exit(1);
+}
+
 fn dev(root: &Path) {
-    if pid_file(root).exists() {
-        eprintln!(
-            "{} already exists — is the stack already running? run `cargo down` first.",
-            pid_file(root).display()
-        );
-        std::process::exit(1);
+    let pids = pid_file(root);
+    if pids.exists() {
+        let running = live(root);
+        if !running.is_empty() {
+            eprintln!(
+                "{} 裡還有在跑的 dev 行程（{}）；先跑 `cargo down`。",
+                pids.display(),
+                running.iter().map(|t| format!("{} pid={}", t.kind.tag(), t.pid)).collect::<Vec<_>>().join("、")
+            );
+            std::process::exit(1);
+        }
+        // 舊的 pid 檔（重開機後、行程自己掉了）：行程已經不在，或 pid 已被別的程式用掉。不是使用者要手動清的東西。
+        println!("{} 是舊的（行程已不在，或 pid 已被別的程式用掉），清掉重來。", pids.display());
+        fs::remove_file(&pids).ok();
     }
 
     let logs = log_dir(root);
@@ -71,8 +211,11 @@ fn dev(root: &Path) {
         std::process::exit(1);
     }
 
+    // 兩個 log 檔先開好：這之前什麼行程都還沒起，開檔失敗不會留下東西。
     let daemon_log = fs::File::create(logs.join("daemon.log")).expect("create daemon.log");
-    let daemon = Command::new(root.join("target/debug/agents-managerd"))
+    let web_log = fs::File::create(logs.join("web.log")).expect("create web.log");
+
+    let daemon: Child = Command::new(root.join("target/debug/agents-managerd"))
         .arg("serve")
         .current_dir(root)
         // Bind every interface and accept LAN peers/Origins — see main.rs/api.rs. A dev
@@ -88,9 +231,13 @@ fn dev(root: &Path) {
         .process_group(0)
         .spawn()
         .expect("spawn agents-managerd");
+    let mut tracked = vec![track(daemon.id(), Kind::Daemon)];
+    // daemon 一起來就先寫 pid 檔：之後 vite 起不來，`cargo down` 也找得到它（#1075）。
+    if let Err(e) = write_pids(root, &tracked) {
+        abort(root, &tracked, &format!("write {}: {e}", pid_file(root).display()));
+    }
 
-    let web_log = fs::File::create(logs.join("web.log")).expect("create web.log");
-    let web = Command::new(root.join("web/node_modules/.bin/vite"))
+    let web = match Command::new(root.join("web/node_modules/.bin/vite"))
         .arg("--host")
         .current_dir(root.join("web"))
         .stdin(Stdio::null())
@@ -98,13 +245,18 @@ fn dev(root: &Path) {
         .stderr(Stdio::from(web_log))
         .process_group(0)
         .spawn()
-        .expect("spawn vite dev server");
-
-    fs::write(
-        pid_file(root),
-        format!("{}\n{}\n", daemon.id(), web.id()),
-    )
-    .expect("write pid file");
+    {
+        Ok(c) => c,
+        Err(e) => abort(
+            root,
+            &tracked,
+            &format!("spawn vite dev server: {e}（web/node_modules 還在嗎？`cd web && bun install`）。已把剛起的 daemon 收掉。"),
+        ),
+    };
+    tracked.push(track(web.id(), Kind::Web));
+    if let Err(e) = write_pids(root, &tracked) {
+        abort(root, &tracked, &format!("write {}: {e}", pid_file(root).display()));
+    }
 
     println!("daemon pid={} log={}", daemon.id(), logs.join("daemon.log").display());
     println!("web    pid={} log={}", web.id(), logs.join("web.log").display());
@@ -163,24 +315,88 @@ fn down(root: &Path) {
         }
     };
 
-    for pid in contents.lines().filter_map(|l| l.trim().parse::<i32>().ok()) {
-        // Kill the whole process group is overkill here; `cargo run` and `npm run dev`
-        // both exec into the real child on macOS/Linux, so a plain kill is enough.
-        let status = Command::new("kill").arg(pid.to_string()).status();
-        if !matches!(status, Ok(s) if s.success()) {
-            eprintln!("pid {pid} was already gone");
-            continue;
-        }
-        // Wait for it to actually exit — a following `cargo dev` binding the same port
-        // (e.g. the daemon's 7788) would otherwise race a socket the kernel hasn't freed yet.
-        for _ in 0..50 {
-            if Command::new("kill").args(["-0", &pid.to_string()]).status().is_ok_and(|s| !s.success()) {
-                break;
+    for t in decode(&contents) {
+        match process_info(t.pid) {
+            None => eprintln!("pid {} was already gone", t.pid),
+            // pid 被別的程式用掉了（pid 檔是舊的）：不殺，那不是我們起的。
+            Some(info) if !is_ours(&t, &info) => eprintln!(
+                "pid {} 現在是別的行程（{}），不是 cargo dev 起的 {}；跳過，不殺。pid 檔是舊的。",
+                t.pid,
+                info.0,
+                t.kind.tag()
+            ),
+            Some(_) => {
+                if terminate(t.pid) {
+                    println!("stopped pid {}", t.pid);
+                } else {
+                    eprintln!("kill pid {} 失敗", t.pid);
+                }
             }
-            std::thread::sleep(Duration::from_millis(100));
         }
-        println!("stopped pid {pid}");
     }
 
     fs::remove_file(&path).ok();
+}
+
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn info(cmd: &str, started: &str) -> (String, String) {
+        (cmd.into(), started.into())
+    }
+
+    #[test]
+    fn pid_file_roundtrips_with_role_and_start_time() {
+        let t = vec![
+            Tracked { pid: 42, kind: Kind::Daemon, started: Some("Sat Oct 10 15:00:00 2026".into()) },
+            Tracked { pid: 43, kind: Kind::Web, started: None },
+        ];
+        assert_eq!(decode(&encode(&t)), t);
+    }
+
+    #[test]
+    fn legacy_two_line_pid_file_is_still_readable() {
+        assert_eq!(
+            decode("111\n222\n"),
+            vec![
+                Tracked { pid: 111, kind: Kind::Daemon, started: None },
+                Tracked { pid: 222, kind: Kind::Web, started: None },
+            ]
+        );
+    }
+
+    #[test]
+    fn garbage_lines_are_skipped() {
+        assert!(decode("not-a-pid\n\n").is_empty());
+    }
+
+    #[test]
+    fn our_daemon_and_vite_are_recognized() {
+        let d = Tracked { pid: 1, kind: Kind::Daemon, started: Some("T".into()) };
+        assert!(is_ours(&d, &info("/x/target/debug/agents-managerd serve", "T")));
+        let w = Tracked { pid: 2, kind: Kind::Web, started: Some("T".into()) };
+        assert!(is_ours(&w, &info("node /x/web/node_modules/vite/bin/vite.js --host", "T")));
+    }
+
+    #[test]
+    fn reused_pid_of_another_program_is_not_ours() {
+        let d = Tracked { pid: 1, kind: Kind::Daemon, started: Some("T".into()) };
+        assert!(!is_ours(&d, &info("/Applications/Editor.app/Contents/MacOS/editor", "T")), "別的程式");
+        let w = Tracked { pid: 2, kind: Kind::Web, started: Some("T".into()) };
+        assert!(!is_ours(&w, &info("node /x/target/debug/agents-managerd", "T")), "角色對不上");
+    }
+
+    #[test]
+    fn same_command_but_different_start_time_is_not_ours() {
+        let d = Tracked { pid: 1, kind: Kind::Daemon, started: Some("Mon".into()) };
+        assert!(!is_ours(&d, &info("/x/agents-managerd serve", "Tue")));
+    }
+
+    #[test]
+    fn legacy_entry_without_start_time_matches_by_command_only() {
+        let d = Tracked { pid: 1, kind: Kind::Daemon, started: None };
+        assert!(is_ours(&d, &info("/x/agents-managerd serve", "whatever")));
+    }
 }
