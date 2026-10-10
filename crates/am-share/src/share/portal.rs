@@ -75,7 +75,10 @@ pub const MAX_STREAMS_PER_SHARE: usize = 4;
 /// 進 token DB 查詢之前可同時佔用的全域名額。
 const MAX_TOKEN_LOOKUPS: usize = 8;
 /// SSE 每隔多久重新確認一次 token 還有效（關分享／重產時另外會被 [`kick`] 叫醒）。
+#[cfg(not(test))]
 const STREAM_RECHECK: Duration = Duration::from_secs(30);
+#[cfg(test)]
+const STREAM_RECHECK: Duration = Duration::from_millis(300);
 
 /// 每則分享使用者的訊息一律以這個開頭再打進 TUI。claude 的輸入框把**第一個字**當模式切換：`!` 是 bash 模式
 /// （2026-10-03 實測：`--restricted --tools … --permission-mode dontAsk`、settings 也 deny Bash，`!echo … > 檔` 照樣真的跑了），
@@ -897,8 +900,10 @@ impl<H: PortalEnv> Stream<H> {
         }
         // Keep the previous event fenced until the consumer polls for another item.
         self.emit_guard.take();
+        // 期限放在迴圈外：別顆 bot 的事件每來一則就轉一圈，放在裡面等於每次重新倒數、永遠不到期（#1162）。
+        let recheck = tokio::time::sleep(STREAM_RECHECK);
+        tokio::pin!(recheck);
         loop {
-            let recheck = tokio::time::sleep(STREAM_RECHECK);
             tokio::select! {
                 ev = self.rx.recv() => match ev {
                     Ok(ev) => {
@@ -925,10 +930,11 @@ impl<H: PortalEnv> Stream<H> {
                         return None;
                     }
                 }
-                _ = recheck => {
+                _ = &mut recheck => {
                     if !self.still_valid().await {
                         return None;
                     }
+                    recheck.as_mut().reset(tokio::time::Instant::now() + STREAM_RECHECK);
                 }
             }
         }
