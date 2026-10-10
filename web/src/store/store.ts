@@ -483,6 +483,8 @@ export interface StoreState {
   /** 預覽模式（issue #253）：每顆頂層 bot 的 dev server 預覽；`preview_changed` 與面板的 GET／POST／DELETE 寫入。 */
   previews: Record<string, Preview>
   setPreview: (botId: string, p: Preview) => void
+  /** 每顆 bot 收到幾次 `bot_share_changed`。重產連結時 `share_enabled` 不變，分享鈕與設定面板靠這個數字知道要重抓連結（#1098）。 */
+  shareRev: Record<string, number>
   settingsBotId: string | null
   /** null = 置中。 */
   settingsAnchor: SettingsAnchor | null
@@ -957,6 +959,7 @@ export const useStore = create<StoreState>((set, get) => {
   rightTab: 'chat',
   previews: {},
   setPreview: (botId, p) => set((s) => ({ previews: { ...s.previews, [botId]: p } })),
+  shareRev: {},
   settingsBotId: null,
   settingsAnchor: null,
   botOrder: {},
@@ -3565,8 +3568,14 @@ export function handleFrame(set: SetFn, get: GetFn, frame: { seq?: number; type:
     case 'identities_changed':
     case 'project_changed':
     case 'bot_read':
-    case 'group_read':
+    case 'group_read': {
+      void get().refreshState()
+      return
+    }
     case 'bot_share_changed': {
+      // 重產連結不改 `share_enabled`，只靠 refreshState 元件感覺不到；另記一個數字讓分享鈕與設定面板重抓（#1098）。
+      const botId = isRec(data) ? str(pick(data, 'bot_id')) : ''
+      if (botId) set((s) => ({ shareRev: { ...s.shareRev, [botId]: (s.shareRev[botId] ?? 0) + 1 } }))
       void get().refreshState()
       return
     }

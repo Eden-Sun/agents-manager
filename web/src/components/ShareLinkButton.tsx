@@ -21,8 +21,12 @@ export function ShareLinkButton({ botId }: { botId: string }) {
   const profile = useStore((s) => s.bots.find((b) => b.id === botId)?.share_profile ?? null)
   const restricted = profile !== null
   const enabled = useStore((s) => s.bots.find((b) => b.id === botId)?.share_enabled === true)
+  // 重產連結不改 `share_enabled`：靠 store 的 `shareRev`（每收到一次 `bot_share_changed` 加一）知道連結換了（#1098）。
+  const rev = useStore((s) => s.shareRev[botId] ?? 0)
   const notify = useStore((s) => s.notify)
-  const [share, setShare] = useState<ShareState | null>(null)
+  // 連結連同它是哪一版（`rev`）一起記：別處重產之後（rev 變了），舊的那條就不認，等重抓回來（#1098）。
+  const [fetched, setFetched] = useState<{ rev: number; share: ShareState } | null>(null)
+  const share = fetched && fetched.rev === rev ? fetched.share : null
   const [busy, setBusy] = useState(false)
   const [menu, setMenu] = useState(false)
   // 選單用 fixed 定位貼著 ▾：名字列 overflow 會剪掉 absolute 的選單（#1072）。
@@ -36,13 +40,13 @@ export function ShareLinkButton({ botId }: { botId: string }) {
     if (!restricted || !enabled) return
     let alive = true
     fetchShare(botId).then(
-      (s) => alive && setShare(s),
+      (s) => alive && setFetched({ rev, share: s }),
       () => {},
     )
     return () => {
       alive = false
     }
-  }, [botId, restricted, enabled])
+  }, [botId, restricted, enabled, rev])
 
   useEffect(() => {
     if (!menu) return
@@ -69,7 +73,7 @@ export function ShareLinkButton({ botId }: { botId: string }) {
     setBusy(true)
     try {
       const s = await what()
-      setShare(s)
+      setFetched({ rev, share: s })
       if (s.enabled) copy(s, done)
       else notify('info', done)
     } catch (e) {
