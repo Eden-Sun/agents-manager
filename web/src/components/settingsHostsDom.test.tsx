@@ -12,6 +12,7 @@ import type { FakeRequest } from '../testing/domHarness'
 import { sharedMock, virtualMockTime } from '../testing/sharedMock'
 import { resetStoreForTest, useStore } from '../store/store'
 import { HostsPanel } from './HostsPanel'
+import * as api from '../api'
 
 virtualMockTime()
 afterEach(async () => {
@@ -91,7 +92,7 @@ it('新增主機：合法就出現在清單、表單清空、顯示就緒；刪�
   assert.ok([...document.querySelectorAll('.host-row .host-name')].some((e) => e.textContent?.includes('dom3ok')))
 
   const row = [...document.querySelectorAll('.host-row')].find((r) => r.textContent?.includes('dom3ok'))!
-  await click(row.querySelector('button[aria-label="刪除主機"]')!)
+  await click(row.querySelector('button[aria-label="刪除主機 dom3ok"]')!)
   assert.equal(requests.some((r) => r.method === 'DELETE'), false, '按 ✕ 只是開確認框，還沒刪')
   const dialog = document.querySelector('[role=alertdialog]')!
   assert.ok(dialog)
@@ -120,7 +121,7 @@ it('刪除主機：還有 Project 在用，確認鍵停用、不送 DELETE', asy
   await useStore.getState().refreshState()
   await until(() => [...document.querySelectorAll('.host-row')].some((r) => r.textContent?.includes('dom3used')), '主機列出現')
   const row = [...document.querySelectorAll('.host-row')].find((r) => r.textContent?.includes('dom3used'))!
-  await click(row.querySelector('button[aria-label="刪除主機"]')!)
+  await click(row.querySelector('button[aria-label="刪除主機 dom3used"]')!)
   const dialog = document.querySelector('[role=alertdialog]')!
   assert.match(dialog.textContent ?? '', /仍有 1 個 Project/)
   const confirm = buttonByText(dialog, '刪除主機')
@@ -130,4 +131,48 @@ it('刪除主機：還有 Project 在用，確認鍵停用、不送 DELETE', asy
   // 共用的 mock 會留給後面的測試檔：把這台主機與它的 Project 收乾淨。
   await mock.request('DELETE', `/projects/${proj.project_id}`)
   await mock.request('DELETE', '/hosts/dom3used')
+})
+
+// #1220：每一列的按鈕名稱要帶主機名，讀屏與語音控制才分得出是哪一台。
+async function seedTwoHosts() {
+  await mock.request('POST', '/hosts', { name: 'm4p', ssh: 'me@m4p' })
+  await mock.request('POST', '/hosts', { name: 'box2', ssh: 'me@box2' })
+  await useStore.getState().refreshState()
+  await until(() => hostNames().includes('box2') && hostNames().includes('m4p'), '兩台主機出現')
+}
+async function dropTwoHosts() {
+  await mock.request('DELETE', '/hosts/m4p')
+  await mock.request('DELETE', '/hosts/box2')
+}
+
+it('每一台的刪除鈕名稱帶主機名：不會出現好幾顆同名的「刪除主機」（#1220）', async () => {
+  await open()
+  await seedTwoHosts()
+  await until(() => document.querySelector('button[aria-label="刪除主機 m4p"]') !== null, 'm4p 的刪除鈕')
+  assert.ok(document.querySelector('button[aria-label="刪除主機 box2"]'))
+  assert.equal(document.querySelector('button[aria-label="刪除主機"]'), null, '沒有不帶名字的刪除鈕')
+  await dropTwoHosts()
+})
+
+it('重連鈕名稱帶主機名（畫面文字不變）；本機那列的開 shell 名稱說明是本機（#1220）', async () => {
+  await open()
+  await seedTwoHosts()
+  await until(() => document.querySelector('button[aria-label="重連 m4p"]') !== null, 'm4p 的重連鈕')
+  assert.equal(document.querySelector('button[aria-label="重連 m4p"]')!.textContent?.trim(), '重連')
+  assert.ok(document.querySelector('button[aria-label="重連 box2"]'))
+  assert.ok(document.querySelector('button[aria-label="在本機開 shell"]'), '本機那列的開 shell')
+  await dropTwoHosts()
+})
+
+it('結束 shell 的名稱帶 cwd 與 pane：同一台主機開好幾顆 shell 也分得出來（#1220）', async () => {
+  mockApi(mock)
+  await seedTwoHosts()
+  const sh = (await mock.request('POST', '/hosts/m4p/shells', { cwd: '/home/u/proj' })) as { pane_id: string }
+  await useStore.getState().refreshState()
+  await mount(<HostsPanel />)
+  const label = `結束 shell /home/u/proj（pane ${sh.pane_id}）`
+  await until(() => document.querySelector(`button[aria-label="${label}"]`) !== null, '結束 shell 鈕帶 cwd 與 pane')
+  assert.equal(document.querySelector('button[aria-label="結束這個 shell"]'), null, '沒有不帶名字的結束鈕')
+  await api.closeHostShell('m4p', sh.pane_id, true)
+  await dropTwoHosts()
 })
