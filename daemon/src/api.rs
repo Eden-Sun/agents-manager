@@ -7962,6 +7962,37 @@ mod delete_bot_tests {
         assert_eq!(n, 1, "AGM inbox 有一則 intent_failed");
     }
 
+    /// #1059：補做失敗、而且失敗記不下來：intent 停在這顆 boot 的 running。同一顆 daemon 之後的重試要續做，不能當成「別人收了」就安靜結束。
+    #[tokio::test]
+    async fn a_delete_whose_failure_cannot_be_recorded_is_still_retried_by_the_same_boot() {
+        use crate::runners::restart_intents::Outcome;
+        let e = crate::testing::env().await;
+        let (parent, kid) = parent_and_child(&e).await;
+        die_in_delete(&e, &parent, "delete_bot_after_decided", false).await;
+        sqlx::query(&format!(
+            "CREATE TRIGGER am_test_kid_stuck BEFORE UPDATE OF deleted_at ON bots WHEN NEW.id = '{kid}' BEGIN SELECT RAISE(ABORT, 'boom'); END"
+        ))
+        .execute(&e.app.db)
+        .await
+        .unwrap();
+        sqlx::query("CREATE TRIGGER am_test_refuse_pending BEFORE UPDATE OF status ON intents WHEN OLD.status = 'running' AND NEW.status = 'pending' BEGIN SELECT RAISE(ABORT, 'injected'); END")
+            .execute(&e.app.db)
+            .await
+            .unwrap();
+        let app2 = crate::testing::restart_app(&e).await;
+        let id: String = sqlx::query_scalar("SELECT id FROM intents WHERE subject_id = ?").bind(&parent).fetch_one(&app2.db).await.unwrap();
+
+        assert!(matches!(crate::delete_intents::drive_once(&app2, &id).await, Outcome::Retry(_)));
+        assert_eq!(intent_states(&app2, &parent).await, vec!["running"]);
+        assert!(matches!(crate::delete_intents::drive_once(&app2, &id).await, Outcome::Retry(_)), "同一顆 boot 的下一輪要續做，不是 Finished");
+
+        sqlx::query("DROP TRIGGER am_test_refuse_pending").execute(&app2.db).await.unwrap();
+        sqlx::query("DROP TRIGGER am_test_kid_stuck").execute(&app2.db).await.unwrap();
+        assert_eq!(crate::delete_intents::drive_once(&app2, &id).await, Outcome::Finished);
+        assert!(deleted(&app2, &kid).await, "child 補完軟刪");
+        assert_eq!(intent_states(&app2, &parent).await, vec!["done"]);
+    }
+
     /// intent 寫不進去＝什麼都還沒動：不能定案刪除。
     #[tokio::test]
     async fn a_delete_that_cannot_record_its_intent_decides_nothing() {
