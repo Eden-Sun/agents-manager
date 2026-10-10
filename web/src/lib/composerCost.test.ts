@@ -32,6 +32,13 @@ test('tokensK / contextTokens', () => {
   assert.equal(tokensK(450_000), '450K')
   assert.equal(tokensK(1_250_000), '1.3M')
   assert.equal(tokensK(800), '800')
+  // 邊界：四捨五入後到 1000K 就該進位成 M；10M 以上不寫小數。
+  assert.equal(tokensK(999_499), '999K')
+  assert.equal(tokensK(999_500), '1M')
+  assert.equal(tokensK(999_999), '1M')
+  assert.equal(tokensK(1_000_000), '1M')
+  assert.equal(tokensK(9_949_999), '9.9M')
+  assert.equal(tokensK(9_950_000), '10M')
   assert.equal(contextTokens(status), 450_000)
   assert.equal(contextTokens({ context_used_pct: 50, context_used_tokens: null, context_size: 200_000 }), 100_000)
   assert.equal(contextTokens({ context_used_pct: 50, context_used_tokens: null, context_size: null }), null)

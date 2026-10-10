@@ -45,18 +45,19 @@ export interface CacheView {
   rewriteTokens: number | null
 }
 
-/** 450000 → `450K`、1250000 → `1.3M`；500 以下直接寫數字。 */
+/** 450000 → `450K`、1250000 → `1.3M`；500 以下直接寫數字。單位看四捨五入之後的值：999500 不寫成 1000K。 */
 export function tokensK(n: number): string {
-  if (n >= 1_000_000) {
-    const m = n / 1_000_000
+  if (n >= 999_500) {
+    // 0.1M 精度先取整再判斷：999500～1049999 得 1M，9950000 起寫 10M（不寫 10.0M）。
+    const m = Math.round(n / 100_000) / 10
     return `${m >= 10 || Number.isInteger(m) ? Math.round(m) : m.toFixed(1)}M`
   }
   if (n >= 1000) return `${Math.round(n / 1000)}K`
   return String(Math.round(n))
 }
 
-/** 狀態列用小寫 k（同 `811k/1M`）。 */
-function tokensLower(n: number): string {
+/** 狀態列與狀態卡用小寫 k（同 `811k/1M`）。 */
+export function tokensLower(n: number): string {
   return tokensK(n).replace('K', 'k')
 }
 
