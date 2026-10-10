@@ -1,50 +1,11 @@
 import { useEffect, useMemo, useState } from 'react'
 import type { ShareClient } from './shareApi'
-import { canShareFile, displayName, isSvgName, pngName, shareOrSave, svgExternalRefs, SvgTaintedError, svgToPng, svgWellFormed } from './shareImage'
+import { canShareFile, displayName, isSvgName, pngName, shareOrSave } from './shareImage'
+import { pngOf, rasterOf, type PngResult } from './shareImageCache'
 import type { ShareFile } from './shareModel'
 
 /** 檔案換了內容（同名覆寫）預覽要跟著換：版本變了就換網址（舊 daemon 沒有 version，退回時間＋大小）。 */
 const fileVersion = (f: ShareFile) => f.version ?? `${f.modified_at ?? ''}-${f.size}`
-
-/**
- * `external`＝圖引用外部資源（為了讀者的隱私不轉、不分享，永遠不會好）；`broken`＝這一版載不出來（bot 把圖寫壞了、網路斷了），
- * bot 修好、檔案換版就會重試——兩種講法不同（使用者 2026-10-04：長輩看到「沒辦法分享」以為圖不能分享）。
- */
-type PngResult = { blob: Blob } | 'external' | 'broken'
-
-/**
- * 向量圖 → 點陣圖每個檔（同版本）只轉一次，清單、對話、放大檢視共用。一出現就先轉好：`navigator.share` 要在點擊的
- * 同一個手勢裡呼叫，不能點了才開始轉。抓不到檔（網路）不留快取，下次再試。
- */
-const pngCache = new WeakMap<ShareClient, Map<string, Promise<PngResult>>>()
-
-function pngOf(client: ShareClient, name: string, version: string): Promise<PngResult> {
-  let byKey = pngCache.get(client)
-  if (!byKey) pngCache.set(client, (byKey = new Map()))
-  const key = `${name}\n${version}`
-  let p = byKey.get(key)
-  if (!p) {
-    p = client.fileBlob(name).then(
-      async (b): Promise<PngResult> => {
-        const text = await b.text()
-        // 寫壞的先講「還在修」：bot 修好、換版就會重試（daemon 也會提醒它修，SPEC §20）。
-        if (!svgWellFormed(text)) return 'broken'
-        if (svgExternalRefs(text)) return 'external'
-        try {
-          return { blob: await svgToPng(text) }
-        } catch (e) {
-          return e instanceof SvgTaintedError ? 'external' : 'broken'
-        }
-      },
-      (): PngResult => {
-        byKey?.delete(key)
-        return 'broken'
-      },
-    )
-    byKey.set(key, p)
-  }
-  return p
-}
 
 function usePng(client: ShareClient, file: ShareFile, enabled: boolean): PngResult | 'loading' {
   // file 物件每次重抓清單都換新；名字與版本沒變就是同一張圖。結果帶著 key，換圖時舊結果自然不算數。
@@ -63,27 +24,6 @@ function usePng(client: ShareClient, file: ShareFile, enabled: boolean): PngResu
     }
   }, [client, name, version, enabled])
   return res?.key === key ? res.r : 'loading'
-}
-
-/** 點陣圖的整檔每個檔（同版本）只抓一次，清單、對話、放大檢視共用。抓不到不留快取，下次再試。 */
-const rasterCache = new WeakMap<ShareClient, Map<string, Promise<Blob>>>()
-
-function rasterOf(client: ShareClient, name: string, version: string): Promise<Blob> {
-  let byKey = rasterCache.get(client)
-  if (!byKey) rasterCache.set(client, (byKey = new Map()))
-  const key = `${name}\n${version}`
-  let p = byKey.get(key)
-  if (!p) {
-    // 同名的舊版本不留：整張圖的 Blob 留著就是記憶體。
-    for (const k of [...byKey.keys()]) if (k.startsWith(`${name}\n`)) byKey.delete(k)
-    const map = byKey
-    const made = client.fileBlob(name)
-    made.catch(() => {
-      if (map.get(key) === made) map.delete(key)
-    })
-    byKey.set(key, (p = made))
-  }
-  return p
 }
 
 /** 點陣圖原樣交出去：先抓好，點擊時直接分享（同 [`usePng`] 的手勢理由）。 */
