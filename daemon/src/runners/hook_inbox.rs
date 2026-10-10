@@ -215,18 +215,15 @@ mod tests {
 
         let drain_app = app.clone();
         let drain = tokio::spawn(async move { drain_once(&drain_app).await });
-        tokio::time::timeout(Duration::from_secs(2), async {
-            while !processed(&app, &b.id).await {
-                tokio::time::sleep(Duration::from_millis(20)).await;
-            }
-        })
-        .await
-        .expect("A 握著鎖時 B 的 hook 仍要在 2 秒內處理完");
+        // 上限 30 秒：被等的是一串 sqlx 查詢，整樹平行時 2 秒會假紅（#1154）。放寬不會變假綠：A 的鎖握到下面才放。
+        assert!(tt::eventually!(processed(&app, &b.id).await), "A 握著鎖時 B 的 hook 仍要處理完（不是排在 A 後面）");
         assert!(!processed(&app, &a.id).await, "A 的還卡在它的鎖上");
         assert!(!drain.is_finished());
 
+        // 前提：A 的鎖整段都還握著（不是因為等久了 A 也好了）。
+        assert!(lock.try_lock().is_err(), "前提：A 的鎖整段都還握著");
         drop(held);
-        let n = tokio::time::timeout(Duration::from_secs(5), drain).await.expect("放鎖後 A 的也處理完").unwrap().unwrap();
+        let n = tokio::time::timeout(Duration::from_secs(30), drain).await.expect("放鎖後 A 的也處理完").unwrap().unwrap();
         assert_eq!(n, 2);
         assert!(processed(&app, &a.id).await);
     }
@@ -251,18 +248,14 @@ mod tests {
         // 這時才到的 B：照 receive 的順序寫進收件匣，再叫醒。
         assert!(crate::hook_inbox::accept(&app.db, &stop(&b.id, "pb"), crate::hook_inbox::Source::Http).await.unwrap().is_new());
         app.hook_inbox_wake.notify_one();
-        tokio::time::timeout(Duration::from_secs(2), async {
-            while !processed(&app, &b.id).await {
-                tokio::time::sleep(Duration::from_millis(20)).await;
-            }
-        })
-        .await
-        .expect("A 還握著鎖時，後到的 B 仍要在 2 秒內處理完");
+        assert!(tt::eventually!(processed(&app, &b.id).await), "A 還握著鎖時，後到的 B 仍要處理完");
         assert!(!processed(&app, &a.id).await, "A 還卡在它的鎖上");
         assert!(!drain.is_finished());
 
+        // 前提：A 的鎖整段都還握著（不是因為等久了 A 也好了）。
+        assert!(lock.try_lock().is_err(), "前提：A 的鎖整段都還握著");
         drop(held);
-        let n = tokio::time::timeout(Duration::from_secs(5), drain).await.expect("放鎖後 A 也處理完").unwrap().unwrap();
+        let n = tokio::time::timeout(Duration::from_secs(30), drain).await.expect("放鎖後 A 也處理完").unwrap().unwrap();
         assert_eq!(n, 2);
         assert!(processed(&app, &a.id).await);
     }
