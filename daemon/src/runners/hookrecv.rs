@@ -186,6 +186,7 @@ async fn spool_scanner_loop(app: Arc<App>) {
                 _ = app.shutdown.cancelled() => return,
                 _ = tokio::time::sleep(hookrecv::SCAN_EVERY) => {}
             }
+            replay_local_spools(&app).await;
             for conn in app.hosts.list().await {
                 if app.shutdown.is_cancelled() {
                     return;
@@ -229,6 +230,35 @@ async fn spool_scanner_loop(app: Arc<App>) {
         }
 }
 
+/// 本機 spool 的定時重放：daemon 活著時 POST 失敗（503、逾時）寫進 spool 的那幾則，不必等下一次 daemon 重啟。
+/// 先看檔案在不在才叫 `replay_spool`（它會拿 bot 鎖），沒有 spool 的 bot 不碰鎖。
+async fn replay_local_spools(app: &Arc<App>) -> usize {
+    let bots = match db::live_bots_on_host(&app.db, crate::config::LOCAL_HOST).await {
+        Ok(b) => b,
+        Err(e) => {
+            tracing::debug!(error = ?e, "local spool scan: could not list bots");
+            return 0;
+        }
+    };
+    let mut n = 0;
+    for b in bots {
+        if app.shutdown.is_cancelled() {
+            break;
+        }
+        let Ok(dir) = app.hook_bot_dir(&b.id) else { continue };
+        let pending = ["hook-spool.jsonl", "hook-spool.jsonl.claim", "hook-spool.jsonl.replaying"]
+            .iter()
+            .any(|f| dir.join(f).exists());
+        if !pending {
+            continue;
+        }
+        match hookrecv::replay_spool(app, &b.id).await {
+            Ok(k) => n += k,
+            Err(e) => tracing::warn!(bot = %b.name, error = ?e, "local spool replay failed; next scan retries"),
+        }
+    }
+    n
+}
 
 #[allow(dead_code)]
 pub async fn replay_all(app: &Arc<App>) {
@@ -308,4 +338,40 @@ async fn replay_host_pass(app: &Arc<App>, host: &str) -> bool {
         }
     }
     ok
+}
+
+#[cfg(test)]
+mod local_spool_tests {
+    use super::*;
+    use crate::testing as tt;
+
+    /// daemon 不重啟，本機 spool 也要被定時重放（#1003）：以前只有開機與 host 連上時才收。
+    #[tokio::test]
+    async fn a_spooled_local_hook_is_replayed_without_a_restart() {
+        let env = tt::env().await;
+        let app = env.app.clone();
+        let bot = tt::claude_bot(&app, &env.project_id, "local-spool").await;
+        let dir = app.hook_bot_dir(&bot.id).unwrap();
+        std::fs::create_dir_all(&dir).unwrap();
+        let line = json!({
+            "bot_id": bot.id,
+            "provider": "claude",
+            "payload": {"hook_event_name": "Stop", "session_id": "s1", "prompt_id": "p1", "last_assistant_message": "done"},
+            "received_at": "2026-10-10T00:00:00.000Z",
+            "truncated": false,
+        });
+        std::fs::write(dir.join("hook-spool.jsonl"), format!("{line}\n")).unwrap();
+
+        assert_eq!(replay_local_spools(&app).await, 1);
+        let n: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM hook_events WHERE bot_id = ?")
+            .bind(&bot.id)
+            .fetch_one(&app.db)
+            .await
+            .unwrap();
+        assert_eq!(n, 1);
+        assert!(!dir.join("hook-spool.jsonl").exists());
+        assert!(!dir.join("hook-spool.jsonl.replaying").exists());
+        // 沒有 spool 的 bot 不重放、也不碰鎖。
+        assert_eq!(replay_local_spools(&app).await, 0);
+    }
 }
