@@ -225,6 +225,48 @@ async fn stale_dispatch_goes_back_to_pending_and_fails_after_three_attempts() {
     assert_eq!((row.status, row.attempts), (ledger::Status::Failed, 3));
 }
 
+/// 把一列的 `dispatched_at` 改成七小時前（真的等六小時太慢）。
+async fn age_dispatch(p: &SqlitePool, version: &str) {
+    let old = (chrono::Utc::now() - chrono::Duration::hours(7)).format("%Y-%m-%dT%H:%M:%S%.3fZ").to_string();
+    sqlx::query("UPDATE release_triage SET dispatched_at = ? WHERE kind='claude' AND version = ?").bind(old).bind(version).execute(p).await.unwrap();
+}
+
+/// #1042：掃描拿著七小時前的快照（第 1 代），中途另一個掃描已經退回、kick 又把同一版派給新的 bot（第 2 代）。
+/// 舊快照回來時不能退回第 2 代，也不能動它的次數。
+#[tokio::test]
+async fn a_stale_snapshot_cannot_requeue_a_newer_dispatch() {
+    let p = pool().await;
+    let es = entries("claude", &claude_sections(), "2.1.277");
+    ledger::insert_version(&p, "claude", "2.1.277", &es).await.unwrap();
+    ledger::mark_dispatched(&p, "claude", &["2.1.277".into()], "bot-old").await.unwrap();
+    age_dispatch(&p, "2.1.277").await;
+    let snapshot = ledger::get(&p, "claude", "2.1.277").await.unwrap().unwrap();
+    assert_eq!(ledger::requeue_stale(&p, "claude").await.unwrap(), [("2.1.277".to_string(), ledger::Status::Pending)]);
+    ledger::mark_dispatched(&p, "claude", &["2.1.277".into()], "bot-new").await.unwrap();
+
+    assert_eq!(ledger::requeue_snapshot(&p, &snapshot).await.unwrap(), None, "舊快照不能動新一代");
+    let row = ledger::get(&p, "claude", "2.1.277").await.unwrap().unwrap();
+    assert_eq!(row.status, ledger::Status::Dispatched);
+    assert_eq!((row.assigned_bot_id.as_deref(), row.dispatch_gen, row.attempts), (Some("bot-new"), 2, 1));
+    assert!(row.dispatched_at.is_some(), "新一代的派工時間不能被清掉");
+}
+
+/// #1042：兩個掃描拿著同一代的快照，只有先到的那個能退回、次數只加一次。
+#[tokio::test]
+async fn two_sweeps_of_the_same_generation_requeue_it_once() {
+    let p = pool().await;
+    let es = entries("claude", &claude_sections(), "2.1.277");
+    ledger::insert_version(&p, "claude", "2.1.277", &es).await.unwrap();
+    ledger::mark_dispatched(&p, "claude", &["2.1.277".into()], "bot-worker").await.unwrap();
+    age_dispatch(&p, "2.1.277").await;
+    let snapshot = ledger::get(&p, "claude", "2.1.277").await.unwrap().unwrap();
+
+    assert_eq!(ledger::requeue_snapshot(&p, &snapshot).await.unwrap(), Some(ledger::Status::Pending));
+    assert_eq!(ledger::requeue_snapshot(&p, &snapshot).await.unwrap(), None, "同一代不能退兩次");
+    let row = ledger::get(&p, "claude", "2.1.277").await.unwrap().unwrap();
+    assert_eq!((row.status, row.attempts), (ledger::Status::Pending, 1));
+}
+
 #[tokio::test]
 async fn ledger_max_version_compares_numerically() {
     let p = pool().await;

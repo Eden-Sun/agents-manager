@@ -415,23 +415,31 @@ pub async fn requeue_stale(pool: &SqlitePool, kind: &str) -> Result<Vec<(String,
         if !stale {
             continue;
         }
-        let attempts = row.attempts + 1;
-        let next = if attempts >= MAX_ATTEMPTS { Status::Failed } else { Status::Pending };
-        let r = sqlx::query(
-            "UPDATE release_triage SET status = ?, attempts = ?, dispatched_at = NULL, updated_at = ? WHERE kind = ? AND version = ? AND status = 'dispatched'",
-        )
-        .bind(next.as_str())
-        .bind(attempts)
-        .bind(now_ts())
-        .bind(kind)
-        .bind(&row.version)
-        .execute(pool)
-        .await?;
-        if r.rows_affected() == 1 {
+        if let Some(next) = requeue_snapshot(pool, &row).await? {
             moved.push((row.version, next));
         }
     }
     Ok(moved)
+}
+
+/// 退回快照那一代（#1042）。`dispatch_gen`／`dispatched_at` 只要有一個對不上（別的掃描已經退回、或 kick 已派給新一代），
+/// 就什麼都不寫，回 `None`：舊快照不能把新一代的交辦退回，也不能再加一次次數。次數用 SQL 的 `attempts + 1` 算。
+pub async fn requeue_snapshot(pool: &SqlitePool, snapshot: &Row) -> Result<Option<Status>> {
+    let next = if snapshot.attempts + 1 >= MAX_ATTEMPTS { Status::Failed } else { Status::Pending };
+    let r = sqlx::query(
+        "UPDATE release_triage SET status = CASE WHEN attempts + 1 >= ? THEN 'failed' ELSE 'pending' END,
+                attempts = attempts + 1, dispatched_at = NULL, updated_at = ?
+         WHERE kind = ? AND version = ? AND status = 'dispatched' AND dispatch_gen = ? AND dispatched_at IS ?",
+    )
+    .bind(MAX_ATTEMPTS)
+    .bind(now_ts())
+    .bind(&snapshot.kind)
+    .bind(&snapshot.version)
+    .bind(snapshot.dispatch_gen)
+    .bind(snapshot.dispatched_at.as_deref())
+    .execute(pool)
+    .await?;
+    Ok((r.rows_affected() == 1).then_some(next))
 }
 
 /// verdict 進來：`pending`／`dispatched`／`failed` → `next`（`judged` 或沒有任何提案時的 `empty`），CAS。
