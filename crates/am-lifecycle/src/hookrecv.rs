@@ -2123,6 +2123,19 @@ pub async fn replay_spool<H: HookHost>(app: &H, bot_id: &str) -> Result<usize> {
     }
     let lock = app.bot_lock(bot_id).await;
     let _g = lock.lock().await;
+    replay_spool_locked(app, bot_id).await
+}
+
+/// 同 [`replay_spool`]，但本機 bot 的鎖被別人握著就回 `Ok(None)`，不排隊等（#1067）：定時掃描是全域共用的一輪，
+/// 一顆 bot 握著鎖（啟動等就緒、批次重啟）不能拖住別顆本機 bot 與遠端主機。spool 還在，下一輪再收。只給本機 bot。
+pub async fn replay_spool_if_idle<H: HookHost>(app: &H, bot_id: &str) -> Result<Option<usize>> {
+    let lock = app.bot_lock(bot_id).await;
+    let Ok(_g) = lock.try_lock() else { return Ok(None) };
+    replay_spool_locked(app, bot_id).await.map(Some)
+}
+
+/// 已經握著 bot 鎖之後的本機重放本體；呼叫端負責鎖。
+async fn replay_spool_locked<H: HookHost>(app: &H, bot_id: &str) -> Result<usize> {
     let dir = app.hook_bot_dir(bot_id)?;
     let spool = dir.join("hook-spool.jsonl");
     let claim = dir.join("hook-spool.jsonl.claim");

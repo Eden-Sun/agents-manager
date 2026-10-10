@@ -181,53 +181,69 @@ pub fn spawn_spool_scanner(app: Arc<App>) {
 }
 
 async fn spool_scanner_loop(app: Arc<App>) {
-        loop {
-            tokio::select! {
-                _ = app.shutdown.cancelled() => return,
-                _ = tokio::time::sleep(hookrecv::SCAN_EVERY) => {}
-            }
-            replay_local_spools(&app).await;
-            for conn in app.hosts.list().await {
-                if app.shutdown.is_cancelled() {
-                    return;
-                }
-                if conn.is_local() || !conn.is_connected() {
-                    continue;
-                }
-                let root = crate::startup::remote_root_for(app.instance().as_deref());
-                let script = hookrecv::scan_script(&root);
-                let pending = match tokio::select! {
-                    _ = app.shutdown.cancelled() => return,
-                    result = conn.ssh_exec(&script) => result,
-                } {
-                    Ok(t) => t,
-                    Err(e) => {
-                        tracing::debug!(host = %conn.name, error = ?e, "spool scan failed");
-                        continue;
-                    }
-                };
-                let ids: std::collections::HashSet<&str> =
-                    pending.lines().map(str::trim).filter(|s| !s.is_empty()).collect();
-                if ids.is_empty() {
-                    continue;
-                }
-                for b in db::live_bots_on_host(&app.db, &conn.name).await.unwrap_or_default() {
-                    if app.shutdown.is_cancelled() {
-                        return;
-                    }
-                    if !ids.contains(b.id.as_str()) {
-                        continue;
-                    }
-                    let drained = tokio::select! {
-                        _ = app.shutdown.cancelled() => return,
-                        result = drain_remote_coalesced(&app, &conn.name, &b.id) => result,
-                    };
-                    if let Err(e) = drained {
-                        tracing::debug!(bot = %b.name, host = %conn.name, error = ?e, "scanned drain failed");
-                    }
-                }
-            }
+    loop {
+        tokio::select! {
+            _ = app.shutdown.cancelled() => return,
+            _ = tokio::time::sleep(hookrecv::SCAN_EVERY) => {}
         }
+        scan_once(&app).await;
+    }
+}
+
+/// 一輪掃描：本機 spool 先收，再把每台遠端主機各自掃。主機之間併行（#1067）：一台 ssh 慢、或它的某顆 bot 卡住，
+/// 不拖住別台；下一輪要等這一輪的所有主機都回來。
+async fn scan_once(app: &Arc<App>) {
+    replay_local_spools(app).await;
+    let mut scans = tokio::task::JoinSet::new();
+    for conn in app.hosts.list().await {
+        if conn.is_local() || !conn.is_connected() {
+            continue;
+        }
+        scans.spawn(scan_remote_host(app.clone(), conn));
+    }
+    while let Some(res) = scans.join_next().await {
+        if let Err(e) = res {
+            tracing::warn!(error = ?e, "remote spool scan task failed");
+        }
+    }
+}
+
+/// 掃一台遠端主機：ssh 列出有 spool 的 bot，再逐顆 claim 進來。
+async fn scan_remote_host(app: Arc<App>, conn: Arc<crate::hosts::HostConn>) {
+    if app.shutdown.is_cancelled() {
+        return;
+    }
+    let root = crate::startup::remote_root_for(app.instance().as_deref());
+    let script = hookrecv::scan_script(&root);
+    let pending = match tokio::select! {
+        _ = app.shutdown.cancelled() => return,
+        result = conn.ssh_exec(&script) => result,
+    } {
+        Ok(t) => t,
+        Err(e) => {
+            tracing::debug!(host = %conn.name, error = ?e, "spool scan failed");
+            return;
+        }
+    };
+    let ids: std::collections::HashSet<&str> = pending.lines().map(str::trim).filter(|s| !s.is_empty()).collect();
+    if ids.is_empty() {
+        return;
+    }
+    for b in db::live_bots_on_host(&app.db, &conn.name).await.unwrap_or_default() {
+        if app.shutdown.is_cancelled() {
+            return;
+        }
+        if !ids.contains(b.id.as_str()) {
+            continue;
+        }
+        let drained = tokio::select! {
+            _ = app.shutdown.cancelled() => return,
+            result = drain_remote_coalesced(&app, &conn.name, &b.id) => result,
+        };
+        if let Err(e) = drained {
+            tracing::debug!(bot = %b.name, host = %conn.name, error = ?e, "scanned drain failed");
+        }
+    }
 }
 
 /// 本機 spool 的定時重放：daemon 活著時 POST 失敗（503、逾時）寫進 spool 的那幾則，不必等下一次 daemon 重啟。
@@ -252,8 +268,9 @@ async fn replay_local_spools(app: &Arc<App>) -> usize {
         if !pending {
             continue;
         }
-        match hookrecv::replay_spool(app, &b.id).await {
-            Ok(k) => n += k,
+        match hookrecv::replay_spool_if_idle(app, &b.id).await {
+            Ok(Some(k)) => n += k,
+            Ok(None) => tracing::debug!(bot = %b.name, "local spool: bot busy; next scan retries"),
             Err(e) => tracing::warn!(bot = %b.name, error = ?e, "local spool replay failed; next scan retries"),
         }
     }
@@ -373,5 +390,88 @@ mod local_spool_tests {
         assert!(!dir.join("hook-spool.jsonl.replaying").exists());
         // 沒有 spool 的 bot 不重放、也不碰鎖。
         assert_eq!(replay_local_spools(&app).await, 0);
+    }
+
+    fn spool_line(bot_id: &str, prompt_id: &str) -> String {
+        json!({
+            "bot_id": bot_id,
+            "provider": "claude",
+            "payload": {"hook_event_name": "Stop", "session_id": "s1", "prompt_id": prompt_id, "last_assistant_message": "done"},
+            "received_at": format!("2026-10-10T00:00:00.000Z-{prompt_id}"),
+            "truncated": false,
+        })
+        .to_string()
+    }
+
+    /// 已經收進收件匣（`hook_events`）的列數：spool 收進來就有一列，不必等 worker 處理。
+    async fn ingested(app: &Arc<App>, bot_id: &str) -> i64 {
+        sqlx::query_scalar("SELECT COUNT(*) FROM hook_events WHERE bot_id = ?").bind(bot_id).fetch_one(&app.db).await.unwrap()
+    }
+
+    /// #1067：A 握著自己的鎖（像重啟等就緒）時，同一輪掃描裡 B 的本機 spool 與遠端主機上 C 的 spool 仍要收進來；
+    /// A 的留著，放鎖後下一輪再收。以前本機重放是排隊等 A 的鎖，後面的 B 與整個遠端掃描都停在那裡。
+    #[tokio::test]
+    async fn a_bot_holding_its_lock_does_not_stall_the_local_or_remote_scan() {
+        let env = tt::env().await;
+        let app = env.app.clone();
+        let a = tt::claude_bot(&app, &env.project_id, "spool-stall-a").await;
+        let b = tt::claude_bot(&app, &env.project_id, "spool-stall-b").await;
+        for (bot, p) in [(&a, "pa"), (&b, "pb")] {
+            let dir = app.hook_bot_dir(&bot.id).unwrap();
+            std::fs::create_dir_all(&dir).unwrap();
+            std::fs::write(dir.join("hook-spool.jsonl"), format!("{}\n", spool_line(&bot.id, p))).unwrap();
+        }
+
+        // 遠端：一台 host 上一顆 bot C（掃描腳本回 C 的 id，claim 腳本回 C 的一行）。
+        let host = format!("spool-stall-{}", db::ulid());
+        let conn = app
+            .hosts
+            .insert_remote_for_test(crate::config::HostCfg {
+                shared_session: false,
+                name: host.clone(),
+                ssh: "unused".into(),
+                ssh_port: 22,
+                ssh_opts: vec![],
+                herdr_session: "am-test".into(),
+                remote_path: String::new(),
+            })
+            .await;
+        conn.connected.store(true, std::sync::atomic::Ordering::SeqCst);
+        let project = db::ulid();
+        sqlx::query("INSERT INTO projects (id, path, label, host, created_at) VALUES (?, ?, 'remote', ?, ?)")
+            .bind(&project)
+            .bind(format!("/remote/{project}"))
+            .bind(&host)
+            .bind(db::now())
+            .execute(&app.db)
+            .await
+            .unwrap();
+        let c = tt::claude_bot(&app, &project, "spool-stall-c").await;
+        let (c_id, c_line) = (c.id.clone(), spool_line(&c.id, "pc"));
+        crate::hosts::set_ssh_fake(&host, move |script| {
+            if script.contains("am_pending") {
+                return Ok(format!("{c_id}\n"));
+            }
+            if script.contains("umask 077") {
+                return Ok(format!("{c_line}\n"));
+            }
+            Ok(String::new())
+        });
+
+        let lock = app.bot_lock(&a.id).await;
+        let held = lock.lock().await;
+        let scan_app = app.clone();
+        let scan = tokio::spawn(async move { scan_once(&scan_app).await });
+        assert!(tt::eventually!(ingested(&app, &b.id).await == 1), "A 握著鎖時，B 的本機 spool 仍要收進來");
+        assert!(tt::eventually!(ingested(&app, &c.id).await == 1), "A 握著鎖時，遠端主機上 C 的 spool 仍要收進來");
+        assert_eq!(ingested(&app, &a.id).await, 0, "A 還卡在它的鎖上");
+
+        // 前提：A 的鎖整段都還握著。放鎖後，下一輪把 A 的 spool 收進來。
+        assert!(lock.try_lock().is_err(), "前提：A 的鎖整段都還握著");
+        drop(held);
+        tokio::time::timeout(std::time::Duration::from_secs(30), scan).await.expect("這一輪不能卡在 A 的鎖上").unwrap();
+        scan_once(&app).await;
+        assert_eq!(ingested(&app, &a.id).await, 1, "放鎖後下一輪 A 的 spool 收進來");
+        assert!(!app.hook_bot_dir(&a.id).unwrap().join("hook-spool.jsonl").exists());
     }
 }
