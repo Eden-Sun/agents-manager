@@ -73,14 +73,14 @@ setup() {
 
   export GIT_BIN="$GITBIN" GH_BIN="$ROOT/bin/gh" BUN_BIN="$ROOT/bin/bun" CARGO_BIN="$ROOT/bin/cargo"
   export AGM_SWAP_SCRIPT="$ROOT/bin/swap.sh" AM_AGENT_NAME=daemon-update-kick
-  export STUB_GH_FAIL="" STUB_SWAP_RC=0 STUB_CARGO_FAIL="" STUB_BUN_FAIL="" STUB_BUN_SLEEP=""
+  export STUB_GH_FAIL="" STUB_BUILD_INPUTS_FAIL="" STUB_SWAP_RC=0 STUB_CARGO_FAIL="" STUB_BUN_FAIL="" STUB_BUN_SLEEP=""
   export AGM_FAIL_ALERT_AFTER=3 AGM_CI_LOOKBACK=30
 
   cat > "$AGM_DIR/bin/agm" <<'STUB'
 #!/bin/bash
 echo "$*" >> "$AGM_DIR/agm.log"
 case "$*" in
-  *build-inputs*) printf '{"paths":["daemon","web","Cargo.toml","Cargo.lock"]}' ;;
+  *build-inputs*) [ -z "${STUB_BUILD_INPUTS_FAIL:-}" ] || exit 1; printf '{"paths":["daemon","web","Cargo.toml","Cargo.lock"]}' ;;
   *ops-alert*) reason=""; nxt=0
       for a in "$@"; do [ "$nxt" = 1 ] && { reason="$a"; nxt=0; }; [ "$a" = "--reason" ] && nxt=1; done
       echo "$reason" >> "$AGM_DIR/alerts.log" ;;
@@ -561,6 +561,19 @@ check_eq "手改的檔沒被蓋掉" "echo x-hand-edited" "$(x_line)"
 check "推了 ops_install_drift" "ops_install_drift" "$AGM_DIR/alerts.log"
 check_no "不是 ops_install_failed" "ops_install_failed" "$AGM_DIR/alerts.log"
 check "部署照常完成" "已換上" "$(LOG)"
+teardown
+
+# 15. 問不到 build-inputs 時保底清單也認 crates/。
+setup
+"$GITBIN" -C "$WORK" reset -q --hard "$C0"; "$GITBIN" -C "$WORK" push -q -f origin HEAD:main
+E=$(commit crates/am-share/src/x.rs "crate only")
+ci "$E" success
+export STUB_BUILD_INPUTS_FAIL=1
+rc=$(run)
+check_eq "rc=0" "0" "$rc"
+check_no "不能說沒有會進 binary 的差異" "沒有會進 binary 的差異" "$(LOG)"
+check "有建置" "cargo build --release -p agents-managerd" "$AGM_DIR/build.log"
+check "換上那顆" "--sha ${E}" "$AGM_DIR/swap.log"
 teardown
 
 for gone in AGM_BUILD_BOT AGM_REBUILD_THRESHOLD "approval request" "lease acquire" "agm assign\|assign --bot" "AGM_REBUILD_MAX_WAIT_MIN"; do
