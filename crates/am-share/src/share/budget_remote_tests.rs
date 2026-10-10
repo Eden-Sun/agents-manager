@@ -10,10 +10,10 @@ use std::sync::atomic::Ordering;
 use std::time::{Duration, SystemTime};
 
 use am_base::config::HostCfg;
-use am_base::hosts::HostConn;
+use am_base::hosts::{HostConn, HostFence};
 
 use super::remote_fs::*;
-use super::site::RemoteSite;
+use super::site::{FencedConn, RemoteSite};
 use super::test_dirs;
 
 fn site(scratch: &Path, host: &str) -> RemoteSite {
@@ -35,7 +35,7 @@ fn site(scratch: &Path, host: &str) -> RemoteSite {
     let outbox = scratch.join(".config/agents-manager/outbox/my-bot").to_string_lossy().to_string();
     fs::create_dir_all(&workspace).unwrap();
     fs::create_dir_all(&outbox).unwrap();
-    RemoteSite { conn, host: host.to_string(), home, root, workspace, outbox }
+    RemoteSite { conn: FencedConn::new(HostFence::for_conn_for_test(&conn)), host: host.to_string(), home, root, workspace, outbox }
 }
 
 fn set_mtime(path: &Path, when: SystemTime) {

@@ -58,10 +58,10 @@ impl<T> StuckTurnContext for T where
 
 pub trait SetupShareServices: Send + Sync {
     fn cage_settings(&self, settings: &mut Value, workspace: &str, env: &Value);
-    /// 寫一個私有檔進遠端 bot 目錄（0600），寫完比對 sha256；不符是錯誤（不啟動）。
+    /// 寫一個私有檔進遠端 bot 目錄（0600），寫完比對 sha256；不符是錯誤（不啟動）。寫入綁在呼叫端捕捉的主機權威上（#1026）。
     fn write_remote_private_file<'a>(
         &'a self,
-        conn: &'a am_base::hosts::HostConn,
+        fence: &'a am_base::hosts::HostFence,
         dir: &'a str,
         name: &'a str,
         data: &'a [u8],

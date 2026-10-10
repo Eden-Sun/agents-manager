@@ -6,15 +6,13 @@
 //! - `POST /api/bots/{id}/share/rotate` → 換新 token，舊連結當下失效，回新的 `url`
 
 use std::path::Path;
-use std::sync::Arc;
 
-use am_base::hosts::HostConn;
 use serde_json::{json, Value};
 
 use crate::lifecycle::LcError;
 use crate::share::folder::{self, ShareFolderIn};
 use crate::share::remote_fs::RfsError;
-use crate::share::site::RemoteSite;
+use crate::share::site::{FencedConn, RemoteSite};
 use crate::share::{cage, site, store};
 
 pub fn db_err(e: sqlx::Error) -> LcError {
@@ -134,7 +132,8 @@ pub async fn reserve_remote_share_bot(
     folder: &ShareFolderIn,
     replay: bool,
 ) -> Result<(String, bool), LcError> {
-    let conn: Arc<HostConn> = app.hosts().get(host).await.ok_or_else(|| cage::preflight_conflict(crate::share::remote_fs::PreflightError::Unreachable))?;
+    // 整段建立都綁在同一個權威圍籬上：中途 repoint 之後，後面的步驟會拿不到權威（fail closed），不會寫到換過的主機（#1026）。
+    let conn = FencedConn::new(app.hosts().fence(host).await.ok_or_else(|| cage::preflight_conflict(crate::share::remote_fs::PreflightError::Unreachable))?);
     if profile == store::PROFILE_RESTRICTED {
         cage::preflight_restricted(&conn).await?;
     } else {
@@ -188,7 +187,7 @@ pub async fn reserve_remote_share_bot(
 }
 
 /// 既有的遠端資料夾：解析實體路徑，然後照本機同一套規則檢查（[`check_remote_path`]）。
-async fn remote_existing(conn: &HostConn, path: &str) -> Result<String, LcError> {
+async fn remote_existing(conn: &FencedConn, path: &str) -> Result<String, LcError> {
     if !path.trim().starts_with('/') {
         return Err(folder::bad("既有資料夾要給絕對路徑"));
     }
@@ -208,7 +207,7 @@ async fn remote_existing(conn: &HostConn, path: &str) -> Result<String, LcError>
 }
 
 /// 新建的遠端資料夾（或重送時拿回的）實體路徑要過 `unsafe_reason`：家目錄的上層、帳號目錄、資料目錄、系統目錄都不行。
-async fn remote_check_path(conn: &HostConn, p: &str, home: &str) -> Result<(), LcError> {
+async fn remote_check_path(conn: &FencedConn, p: &str, home: &str) -> Result<(), LcError> {
     let r = RemoteSite::resolve_folder(conn, home).await.map_err(remote_folder_error)?;
     if let Some(why) = folder::unsafe_reason(Path::new(p), Path::new(&r.home_physical), Path::new(&r.root_physical)) {
         return Err(folder::bad(why));
@@ -217,7 +216,7 @@ async fn remote_check_path(conn: &HostConn, p: &str, home: &str) -> Result<(), L
 }
 
 /// 建失敗或重送拿不回來時，把這次建的遠端資料夾收掉（只 `rmdir`，非空就留著）。
-async fn rmdir_made(conn: &Arc<HostConn>, host: &str, home: &str, instance: Option<&str>, bot_id: &str, p: &str) {
+async fn rmdir_made(conn: &FencedConn, host: &str, home: &str, instance: Option<&str>, bot_id: &str, p: &str) {
     if let Some(site) = site::remote_site_at(conn.clone(), host, home.to_string(), instance, bot_id, p.to_string()) {
         let _ = site.remove_created_folder().await;
     }
@@ -276,7 +275,8 @@ pub async fn finish_share_bot_on(
         tracing::warn!(bot = bot_id, error = %e, "could not roll back a restricted bot reservation");
     }
     if created_folder {
-        if let Some(conn) = app.hosts().get(host).await {
+        if let Some(fence) = app.hosts().fence(host).await {
+            let conn = FencedConn::new(fence);
             match conn.home().await {
                 Ok(home) => {
                     rmdir_made(&conn, host, &home, conn.instance(), bot_id, workspace).await;

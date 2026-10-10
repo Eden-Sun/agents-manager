@@ -186,7 +186,7 @@ async fn measure_at<S: SiteEnv>(app: &S, bot_id: &str, place: Place) -> Result<O
         };
     }
     let ShareSite::Remote(remote) = site::resolve(app, bot_id).await.map_err(|_| Unavailable)? else { return Err(Unavailable) };
-    let measured_at = Place::Remote { host: remote.host.clone(), conn: Arc::downgrade(&remote.conn), workspace: remote.workspace.clone() };
+    let measured_at = Place::Remote { host: remote.host.clone(), conn: Arc::downgrade(remote.conn.conn()), workspace: remote.workspace.clone() };
     match remote.measure().await {
         Ok(m) => Ok(Some((m, record(bot_id, measured_at, m)))),
         Err(e) => {

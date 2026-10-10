@@ -241,7 +241,7 @@ async fn preflight_refuses_old_claude_and_managed_settings_for_restricted_only()
         .expect("信任分享不查 claude 版本");
 
     let missing = fake_host(&e, "pf-none", "", false).await;
-    let conn = e.app.hosts.get(&missing.host).await.unwrap();
+    let conn = crate::share::site::FencedConn::new(e.app.hosts.fence(&missing.host).await.unwrap());
     assert!(matches!(remote_fs::preflight_restricted(&conn, cage::MIN_CLAUDE).await, Err(PreflightError::ClaudeTooOld { .. })), "讀不到 claude 也不行");
 
     let managed = fake_host(&e, "pf-managed", "2.1.288", true).await;
