@@ -10,9 +10,13 @@
 //! **遠端專案的分享 bot（remote-share-design §6）**：檔案在專案那台主機上，量測走 [`crate::share::remote_fs`]（一趟 ssh：`du -skx`＋`find -xdev -type f`）。
 //! 遠端 **fail closed**：[`is_full`] 沒有新鮮值又量不到就回 [`Unavailable`]（分享頁送訊息 503），不當作沒滿；
 //! 巡邏（[`sweep`]）含遠端主機，斷線的主機跳過（不通知、不清快取），同一輪先對遠端分享 bot（受限＋信任）執行 outbox 保留政策再量。
+//!
+//! **權威（#1025、#1027）**：每次都先問一次 DB 這顆 bot 的位置（[`Place`]：本機路徑，或主機名＋那台的連線物件＋工作目錄）。
+//! DB 讀不到＝[`Unavailable`]，不是「不受限」也不是「本機」。量測值記著當時的 [`Place`]，只有位置相同才重用，
+//! 所以主機改指、換連線物件、工作目錄換了都不會拿舊主機的數字當新的。量到一半停下（`truncated`）的數字只是下限，當作滿。
 
 use std::collections::HashMap;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::{Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
@@ -46,22 +50,38 @@ impl Measured {
     }
 }
 
-fn cache() -> &'static Mutex<HashMap<String, (Measured, Instant)>> {
-    static CACHE: OnceLock<Mutex<HashMap<String, (Measured, Instant)>>> = OnceLock::new();
+/// 這顆 bot 的檔案在哪：本機是工作目錄路徑；遠端不在這裡分，量測一律經 `site::resolve`（那裡也要求主機連著）。
+#[derive(Clone)]
+enum Place {
+    Local { workspace: String },
+    Remote,
+}
+
+struct Entry {
+    m: Measured,
+    at: Instant,
+}
+
+fn cache() -> &'static Mutex<HashMap<String, Entry>> {
+    static CACHE: OnceLock<Mutex<HashMap<String, Entry>>> = OnceLock::new();
     CACHE.get_or_init(Default::default)
 }
 
 /// 最近一次量測值與它的年紀。
 pub fn cached(bot_id: &str) -> Option<(Measured, Duration)> {
-    cache().lock().unwrap_or_else(|e| e.into_inner()).get(bot_id).map(|(m, at)| (*m, at.elapsed()))
+    cache().lock().unwrap_or_else(|e| e.into_inner()).get(bot_id).map(|e| (e.m, e.at.elapsed()))
 }
 
+/// 記下一筆量測。回傳上一筆（巡邏用：上一輪不是滿的，這一輪滿了才通知）。
 fn record(bot_id: &str, m: Measured) -> Option<Measured> {
-    cache().lock().unwrap_or_else(|e| e.into_inner()).insert(bot_id.to_string(), (m, Instant::now())).map(|(prev, _)| prev)
+    let mut c = cache().lock().unwrap_or_else(|e| e.into_inner());
+    let prev = c.get(bot_id).map(|e| e.m);
+    c.insert(bot_id.to_string(), Entry { m, at: Instant::now() });
+    prev
 }
 
 #[cfg(test)]
-pub fn set_cached_for_test(bot_id: &str, m: Measured) {
+pub async fn set_cached_for_test<S: SiteEnv>(_app: &S, bot_id: &str, m: Measured) {
     record(bot_id, m);
 }
 
@@ -100,30 +120,35 @@ pub fn measure_blocking(data_dir: &Path, workspace: &Path, bot_id: &str) -> Resu
 #[error("share sandbox usage is unavailable")]
 pub struct Unavailable;
 
-/// 這顆 bot 所在的主機（沒有這顆分享 bot、或讀 DB 失敗＝`None`）。
-async fn host_of<S: SiteEnv>(app: &S, bot_id: &str) -> Option<String> {
-    sqlx::query_scalar(
-        "SELECT p.host FROM shared_bots r JOIN bots b ON b.id = r.bot_id AND b.deleted_at IS NULL
-           JOIN projects p ON p.id = b.project_id AND p.deleted_at IS NULL WHERE r.bot_id = ?",
+/// 這顆受限分享 bot 現在在哪。`Ok(None)`＝不是受限分享 bot（信任分享、一般 bot、已不存在）。
+/// 一條 SQL 同時拿工作目錄與主機，不會一個成功一個失敗（#1025）；讀不到 DB＝`Err(Unavailable)`，不是「不受限」也不是「本機」。
+async fn place_of<S: SiteEnv>(app: &S, bot_id: &str) -> Result<Option<Place>, Unavailable> {
+    let row: Option<(String, String)> = sqlx::query_as(
+        "SELECT r.workspace, p.host FROM shared_bots r
+           JOIN bots b ON b.id = r.bot_id
+           JOIN projects p ON p.id = b.project_id
+          WHERE r.bot_id = ? AND r.profile = 'restricted'",
     )
     .bind(bot_id)
     .fetch_optional(app.db_pool())
     .await
-    .ok()
-    .flatten()
+    .map_err(|e| {
+        tracing::warn!(bot = %bot_id, error = %e, "share sandbox: could not read where the bot lives; failing closed");
+        Unavailable
+    })?;
+    let Some((workspace, host)) = row else { return Ok(None) };
+    if host == crate::config::LOCAL_HOST {
+        return Ok(Some(Place::Local { workspace }));
+    }
+    Ok(Some(Place::Remote))
 }
 
-/// 重量一顆受限 bot 並記下。回 `(這次, 上次)`。
-///
-/// - `Ok(None)`：不是受限分享 bot（沒有籠子工作目錄），或**本機**量不到——不擋、不通知。
-/// - `Err(Unavailable)`：**遠端**專案的受限 bot 量不到（fail closed，見模組說明）。
-pub async fn refresh<S: SiteEnv>(app: &S, bot_id: &str) -> Result<Option<(Measured, Option<Measured>)>, Unavailable> {
-    let Some(workspace) = crate::share::store::restricted_workspace(app.db_pool(), bot_id).await.ok().flatten() else { return Ok(None) };
-    // 本機行為一個字不改：量不到當作沒有資料。DB 讀不到主機＝當本機處理（跟改動前一樣只看本機路徑）。
-    let host = host_of(app, bot_id).await;
-    if host.as_deref().is_none_or(|h| h == crate::config::LOCAL_HOST) {
-        let (data_dir, id) = (app.data_dir().to_path_buf(), bot_id.to_string());
-        let measured = tokio::task::spawn_blocking(move || measure_blocking(&data_dir, Path::new(&workspace), &id)).await;
+/// 照 `place` 量一次並記下。本機量不到回 `Ok(None)`（不擋、不通知）；遠端量不到回 `Err(Unavailable)`。
+async fn measure_at<S: SiteEnv>(app: &S, bot_id: &str, place: Place) -> Result<Option<(Measured, Option<Measured>)>, Unavailable> {
+    if let Place::Local { workspace, .. } = &place {
+        let (data_dir, id, ws) = (app.data_dir().to_path_buf(), bot_id.to_string(), PathBuf::from(workspace));
+        let measured = tokio::task::spawn_blocking(move || measure_blocking(&data_dir, &ws, &id)).await;
+        // 量不到不記值：沒有新的數字就留著舊的，不拿 0 去覆蓋。
         return match measured {
             Ok(Ok(m)) => Ok(Some((m, record(bot_id, m)))),
             _ => {
@@ -142,14 +167,24 @@ pub async fn refresh<S: SiteEnv>(app: &S, bot_id: &str) -> Result<Option<(Measur
     }
 }
 
-/// 分享頁送訊息前問：這顆的沙箱滿了嗎。用最近一次量測值（沒有或太舊才現場量一次）。
-/// 本機量不到當作沒滿（`Ok(false)`）；遠端沒有新鮮值又量不到 → `Err(Unavailable)`，不當作沒滿。
+/// 重量一顆受限 bot 並記下。回 `(這次, 同位置的上一次)`。
+///
+/// - `Ok(None)`：不是受限分享 bot（沒有籠子工作目錄），或**本機**量不到——不擋、不通知。
+/// - `Err(Unavailable)`：DB 讀不到位置，或**遠端**專案的受限 bot 量不到（fail closed，見模組說明）。
+pub async fn refresh<S: SiteEnv>(app: &S, bot_id: &str) -> Result<Option<(Measured, Option<Measured>)>, Unavailable> {
+    let Some(place) = place_of(app, bot_id).await? else { return Ok(None) };
+    measure_at(app, bot_id, place).await
+}
+
+/// 分享頁送訊息前問：這顆的沙箱滿了嗎。位置先問一次 DB；同位置的新鮮量測值直接用，否則現場量一次。
+/// 本機量不到當作沒滿（`Ok(false)`）；DB 讀不到、遠端沒有新鮮值又量不到 → `Err(Unavailable)`，不當作沒滿。
 pub async fn is_full<S: SiteEnv>(app: &S, bot_id: &str) -> Result<bool, Unavailable> {
+    let Some(place) = place_of(app, bot_id).await? else { return Ok(false) };
     let fresh = cached(bot_id).filter(|(m, age)| *age < if m.full() { FULL_RECHECK } else { REFRESH_EVERY });
     if let Some((m, _)) = fresh {
         return Ok(m.full());
     }
-    Ok(refresh(app, bot_id).await?.is_some_and(|(m, _)| m.full()))
+    Ok(measure_at(app, bot_id, place).await?.is_some_and(|(m, _)| m.full()))
 }
 
 /// 巡邏用：重量所有受限分享 bot（本機與遠端），回「這一輪剛變滿」的（上一輪不是滿的，或這是第一次量）。
@@ -252,6 +287,7 @@ mod tests {
         std::fs::remove_dir_all(data).ok();
     }
 
+    /// #1028：走不完的樹（超過深度）數字只是下限，不能當成「未滿」放行；33 層深的 1.2 GiB 檔案看不到，也不能判未滿。
     #[test]
     fn a_symlinked_outbox_is_refused_not_measured() {
         let data = dir("data3");
