@@ -7,5 +7,14 @@ pub trait SystemMessageWriter: Send + Sync {
         &self,
         bot: BotId,
         content: String,
+    ) -> impl Future<Output = Result<(), PortError>> + Send + '_ {
+        self.append_system_message_idempotent(bot, content, None)
+    }
+
+    fn append_system_message_idempotent(
+        &self,
+        bot: BotId,
+        content: String,
+        idempotency_key: Option<String>,
     ) -> impl Future<Output = Result<(), PortError>> + Send + '_;
 }
