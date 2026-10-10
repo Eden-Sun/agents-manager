@@ -145,10 +145,13 @@ export function fmtSize(n: number): string {
 export class ShareHttpError extends Error {
   status: number
   retryAfter: number | null
-  constructor(status: number, retryAfter: number | null = null) {
+  /** 入口回的 `reason`（400 才有，例如 `unknown_attachment`）；只拿來挑文案，不顯示給使用者（#1097）。 */
+  reason: string | null
+  constructor(status: number, retryAfter: number | null = null, reason: string | null = null) {
     super(`HTTP ${status}`)
     this.status = status
     this.retryAfter = retryAfter
+    this.reason = reason
   }
 }
 
@@ -163,6 +166,8 @@ export function shareErrorText(e: unknown, what: 'send' | 'upload' | 'load'): st
     if (e.status === 507) return '空間滿了，請跟分享給你的人說一聲；你打的字還在。'
     // 一段對話同時只排一則（409 not_accepted）：上一則還沒回完。
     if (e.status === 409) return '上一則還沒回完，等 bot 回完再送；你打的字還在。'
+    // 附件在資料夾裡找不到了：再送一次也一樣，要移除後重新選（#1097）。
+    if (e.status === 400 && e.reason === 'unknown_attachment') return '有附件已經不在了，請把附件移除、重新選一次再送；你打的字還在。'
   }
   if (what === 'upload') return '上傳失敗，請再試一次。'
   if (what === 'send') return '送出失敗，請再試一次；你打的字還在。'

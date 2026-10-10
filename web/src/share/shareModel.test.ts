@@ -67,6 +67,15 @@ test('錯誤給 end user 的話：404＝連結失效、429 帶秒數、不洩漏
   assert.doesNotMatch(shareErrorText(new Error('ECONNREFUSED 127.0.0.1:7790'), 'send'), /127\.0\.0\.1/)
 })
 
+test('400 unknown_attachment：文案說要移除、重新選，不再講「再試一次」（#1097）', () => {
+  const msg = shareErrorText(new ShareHttpError(400, null, 'unknown_attachment'), 'send')
+  assert.match(msg, /移除/)
+  assert.match(msg, /重新選/)
+  assert.doesNotMatch(msg, /unknown/)
+  assert.equal(shareErrorText(new ShareHttpError(400), 'send'), '送出失敗，請再試一次；你打的字還在。', '其他 400 照舊')
+  assert.equal(new ShareHttpError(404).reason, null)
+})
+
 test('status 是 daemon 的 lamp：working／blocked／starting 都算「還沒回完」', () => {
   for (const s of ['working', 'blocked', 'starting']) assert.equal(toStatus({ status: s }), 'working', s)
   for (const s of ['idle', 'offline', 'unknown', '']) assert.equal(toStatus({ status: s }), 'idle', s)

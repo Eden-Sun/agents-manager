@@ -38,7 +38,17 @@ export interface ShareClient {
 async function check(res: Response): Promise<Response> {
   if (res.ok) return res
   const ra = Number(res.headers.get('Retry-After'))
-  throw new ShareHttpError(res.status, Number.isFinite(ra) && ra > 0 ? ra : null)
+  // 400 的 body 帶 `reason`（例如 `unknown_attachment`）：文案要分得出來，不然「再試一次」永遠是同一個錯（#1097）。
+  let reason: string | null = null
+  if (res.status === 400) {
+    try {
+      const b = (await res.json()) as { reason?: unknown }
+      if (typeof b?.reason === 'string') reason = b.reason
+    } catch {
+      /* 讀不懂就當沒有原因 */
+    }
+  }
+  throw new ShareHttpError(res.status, Number.isFinite(ra) && ra > 0 ? ra : null, reason)
 }
 
 export function httpShareClient(token: string): ShareClient {

@@ -96,6 +96,18 @@ test('SSE 錯誤不會立刻重開一堆連線', () => {
   }
 })
 
+test('400 帶 reason：client 讀出 unknown_attachment；讀不懂 body 就當沒有原因（#1097）', async () => {
+  const orig = globalThis.fetch
+  try {
+    globalThis.fetch = (async () => new Response(JSON.stringify({ error: 'bad_request', reason: 'unknown_attachment', message: 'x' }), { status: 400 })) as unknown as typeof fetch
+    await assert.rejects(httpShareClient('TOKEN_abcdefghijklmnop').send('x', 'c', ['a']), (e: { status: number; reason: string | null }) => e.status === 400 && e.reason === 'unknown_attachment')
+    globalThis.fetch = (async () => new Response('not json', { status: 400 })) as unknown as typeof fetch
+    await assert.rejects(httpShareClient('TOKEN_abcdefghijklmnop').send('x', 'c', []), (e: { status: number; reason: string | null }) => e.status === 400 && e.reason === null)
+  } finally {
+    globalThis.fetch = orig
+  }
+})
+
 test('HTTP 錯誤帶 status 與 Retry-After', async () => {
   const orig = globalThis.fetch
   globalThis.fetch = (async () => new Response('', { status: 429, headers: { 'Retry-After': '12' } })) as unknown as typeof fetch
