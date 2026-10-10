@@ -105,3 +105,26 @@ test('其他錯誤不重試；太大的檔不送', async () => {
   await assert.rejects(uploadPatiently(huge.client, file('big.zip', 'application/zip', 26 * 1024 * 1024)), (e: unknown) => e instanceof ShareHttpError && e.status === 413)
   assert.equal(huge.calls(), 0)
 })
+
+test('503（入口暫時忙，Retry-After）照 Retry-After 等了自己重試', async () => {
+  const slept: number[] = []
+  const { client, calls } = clientWith([new ShareHttpError(503, 5), new ShareHttpError(503, null), null])
+  const r = await uploadPatiently(client, file('a.txt', 'text/plain', 3), { sleep: async (ms) => void slept.push(ms) })
+  assert.equal(r.id, 'id-3')
+  assert.equal(calls(), 3)
+  assert.deepEqual(slept, [5000, 3000], 'Retry-After 沒給時等 3 秒')
+})
+
+test('一直 503 只試 3 次就放棄，錯誤照拋、仍可「再試一次」', async () => {
+  const { client, calls } = clientWith(Array.from({ length: 10 }, () => new ShareHttpError(503, 5)))
+  await assert.rejects(uploadPatiently(client, file('a.txt', 'text/plain', 3), { sleep: async () => {} }), (e: unknown) => e instanceof ShareHttpError && e.status === 503)
+  assert.equal(calls(), 4)
+  assert.equal(uploadRetryable(new ShareHttpError(503)), true)
+})
+
+test('429 與 503 混著來：429 不吃 503 的額度', async () => {
+  const { client, calls } = clientWith([new ShareHttpError(503, 1), new ShareHttpError(429, 1), new ShareHttpError(429, 1), new ShareHttpError(503, 1), null])
+  const r = await uploadPatiently(client, file('a.txt', 'text/plain', 3), { sleep: async () => {} })
+  assert.equal(r.id, 'id-5')
+  assert.equal(calls(), 5)
+})
