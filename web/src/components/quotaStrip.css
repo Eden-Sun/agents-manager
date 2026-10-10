@@ -991,8 +991,12 @@
   margin-left: 0;
 }
 
-.quota-pop {
-  width: 300px;
+/* 只在非手機套用：這條排在手機 media query 之後、權重相同，不包起來會把手機的 `width: auto` 蓋回 300px
+   （2026-10-10 使用者：手機 popover 仍沒有等寬）。 */
+@media (width > 640px) {
+  .quota-pop {
+    width: 300px;
+  }
 }
 
 .quota-pop .quota-reset {
