@@ -55,7 +55,15 @@ async fn retry_loop(app: &Arc<App>, id: &str) {
 pub async fn drive_once(app: &Arc<App>, id: &str) -> Outcome {
     match intents::claim(&app.db, id, &app.boot_id).await {
         Ok(true) => {}
-        Ok(false) => return Outcome::Finished,
+        Ok(false) => match intents::get(&app.db, id).await {
+            // 這顆 boot 自己留下的 running（上一輪記不下失敗）：不經 claim 直接續做（#1060，同 delete_intents #1059）。
+            // 安全性靠 resume：它自己拿 child 的 bot 鎖後重驗 status == running，每一步先驗世界、重跑安全。
+            Ok(Some(i)) if i.status == "running" && i.owner_boot.as_deref() == Some(app.boot_id.as_str()) => {
+                tracing::warn!(intent = id, "promote intent was left running by this boot; resuming it");
+            }
+            Ok(_) => return Outcome::Finished,
+            Err(e) => return Outcome::Retry(format!("cannot inspect an unclaimed intent: {e:#}")),
+        },
         Err(e) => return Outcome::Retry(format!("cannot claim the intent: {e:#}")),
     }
     let intent = match intents::get(&app.db, id).await {
@@ -69,14 +77,20 @@ pub async fn drive_once(app: &Arc<App>, id: &str) -> Outcome {
     }
 }
 
-async fn fail_attempt(app: &impl crate::capabilities::Db, id: &str, why: String) -> Outcome {
-    match intents::record_failure(app.db(), id, &why).await {
+async fn fail_attempt(app: &Arc<App>, id: &str, why: String) -> Outcome {
+    match intents::record_failure(&app.db, id, &why).await {
         Ok(true) => {
             tracing::error!(intent = id, error = %why, "interrupted promote could not be completed; gave up and told AGM");
             Outcome::Finished
         }
         Ok(false) => Outcome::Retry(why),
-        Err(e) => Outcome::Retry(format!("{why}（且記不下失敗：{e:#}）")),
+        Err(e) => {
+            // 記不下失敗：intent 會停在 `running`。只把「自己擁有的 running」翻回 pending，下一輪 `claim` 才拿得到（#1060）。
+            match intents::record_failure_on_owned(&app.db, id, &app.boot_id, &why).await {
+                Ok(_) => Outcome::Retry(format!("{why}（且記不下失敗：{e:#}）")),
+                Err(e2) => Outcome::Retry(format!("{why}（且記不下失敗：{e:#}；改寫回 pending 也失敗：{e2:#}）")),
+            }
+        }
     }
 }
 
