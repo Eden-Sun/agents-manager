@@ -1257,14 +1257,29 @@
         assert!(!log.exists() || std::fs::read_to_string(&log).unwrap().trim().is_empty(), "自己的 pane 一個字都不能收到");
     }
 
-    /// 真的 herdr 在的話，把 shim 產生的 argv 丟給它的 parser：在最後（`--` 之前）放一個假旗標，
-    /// 回報的未知選項是那個假旗標，就代表前面每個參數它都認得。找不到真的 herdr 就略過。
+    /// 只有 `AM_TEST_REAL_HERDR=1` 才拿真的 herdr 來驗；pane 裡本來就有 `AM_REAL_HERDR`／PATH 上的 herdr，
+    /// 不能當成同意（#1149）。
+    fn real_herdr_opt_in(opt_in: Option<&str>) -> bool {
+        opt_in == Some("1")
+    }
+
+    #[test]
+    fn the_real_herdr_check_is_opt_in() {
+        assert!(!real_herdr_opt_in(None), "pane 裡有 AM_REAL_HERDR 也不跑");
+        assert!(!real_herdr_opt_in(Some("")) && !real_herdr_opt_in(Some("0")));
+        assert!(real_herdr_opt_in(Some("1")));
+    }
+
+    /// 明講 `AM_TEST_REAL_HERDR=1` 時，把 shim 產生的 argv 丟給真的 herdr 的 parser：在最後（`--` 之前）放一個假旗標，
+    /// 回報的未知選項是那個假旗標，就代表前面每個參數它都認得。手動驗證：
+    /// `AM_TEST_REAL_HERDR=1 cargo test -p agents-managerd -- the_generated_argv_parses_with_the_real_herdr`。
     #[test]
     fn the_generated_argv_parses_with_the_real_herdr() {
-        let Some(real) = real_herdr() else {
-            eprintln!("skip: no real herdr on PATH");
+        if !real_herdr_opt_in(std::env::var("AM_TEST_REAL_HERDR").ok().as_deref()) {
+            eprintln!("skip: AM_TEST_REAL_HERDR=1 才拿真的 herdr 驗 argv");
             return;
-        };
+        }
+        let Some(real) = real_herdr() else { panic!("AM_TEST_REAL_HERDR=1 但找不到真的 herdr") };
         let s = Sandbox::new();
         let cases: [Vec<&str>; 4] = [
             vec!["agent", "start", "review", "--kind", "claude", "--pane", "w1:p1", "--env", "AM_INSTANCE=forged"],
@@ -1277,7 +1292,16 @@
                 let (mut out, _) = s.run(parent, args);
                 let at = out.iter().position(|a| a == "--").unwrap_or(out.len());
                 out.insert(at, "--am-dry-parse".into());
-                let res = std::process::Command::new(&real).args(&out).output().unwrap();
+                // 不把呼叫者的 AM_*／HERDR_* 帶進正式 herdr：就算哪天 parser 放行假旗標，也只會連到沙盒裡不存在的 socket（#1149）。
+                let mut cmd = std::process::Command::new(&real);
+                cmd.args(&out);
+                for (key, _) in std::env::vars() {
+                    if key.starts_with("AM_") || key.starts_with("HERDR_") {
+                        cmd.env_remove(key);
+                    }
+                }
+                cmd.env("HERDR_SOCKET_PATH", s.dir.join("no-such-herdr.sock")).env("HOME", &s.dir).env("TMPDIR", &s.dir);
+                let res = cmd.output().unwrap();
                 let text = format!("{}{}", String::from_utf8_lossy(&res.stdout), String::from_utf8_lossy(&res.stderr));
                 assert!(
                     text.contains("unknown option: --am-dry-parse") || text.contains("unexpected argument '--am-dry-parse'"),
