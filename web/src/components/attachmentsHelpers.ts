@@ -160,6 +160,18 @@ export function useAttachments(uploadTo: string | null, resetKey: string | null)
     dispatch({ type: 'clear' })
   }, [abortAll, items, revokePreview])
 
+  /** 送出成功後只收掉這一則帶走的附件；送出期間新加的卡片留給下一則。 */
+  const clearSent = useCallback((sentIds: readonly string[]) => {
+    const sent = new Set(sentIds)
+    for (const it of itemsRef.current) {
+      if (!it.id || !sent.has(it.id)) continue
+      revokePreview(it.previewUrl)
+      seen.current.delete(it.fp)
+      sources.current.delete(it.key)
+      dispatch({ type: 'remove', key: it.key })
+    }
+  }, [revokePreview])
+
   /** 撤回 daemon 已收下的 prompt：同一批已上傳附件直接回 composer，不再傳一次。 */
   const restoreAttachments = useCallback((attachments: Attachment[]) => {
     const known = new Set(itemsRef.current.map((item) => item.id).filter((id): id is string => Boolean(id)))
@@ -177,7 +189,7 @@ export function useAttachments(uploadTo: string | null, resetKey: string | null)
   /** 有卡片上傳失敗（還在托盤裡、沒有 id）：送出會少了那個檔案，要擋下來讓使用者重試或移除（issue #917）。 */
   const failed = items.some((it) => !it.id && Boolean(it.error))
 
-  return { items, add, remove, retry, clear, restoreAttachments, ids, uploading, failed }
+  return { items, add, remove, retry, clear, clearSent, restoreAttachments, ids, uploading, failed }
 }
 
 /** Drop target for OS files and shelf drags (key only; the shelf never uploads, so bytes go to the bot dropped on). */

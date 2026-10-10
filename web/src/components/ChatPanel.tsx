@@ -759,12 +759,13 @@ function Composer({
       return
     }
     setSending(true)
+    const sent = files.ids
     // Enter always opts into daemon queueing; idle bots still follow the ordinary immediate-send path.
-    void sendPrompt(botId, body, files.ids, false, Boolean(state.autoStart), undefined, true).then((ok) => {
+    void sendPrompt(botId, body, sent, false, Boolean(state.autoStart), undefined, true).then((ok) => {
       setSending(false)
       if (ok) {
         setText('')
-        files.clear()
+        files.clearSent(sent)
       }
     })
   }
@@ -792,7 +793,7 @@ function Composer({
     setSending(false)
     if (ok) {
       setText('')
-      files.clear()
+      files.clearSent(ids)
     }
   }
 
