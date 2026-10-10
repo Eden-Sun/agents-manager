@@ -4,7 +4,7 @@
 //! 這裡補另一條路：Stop hook 的 `error` 被分類成 `FailureReason::Auth`（憑證被撤銷、過期）。
 
 use crate::db;
-use crate::runners::quota_agy::{auth_denied, set_logged_in_quiet, AUTH_DENIED_COOLDOWN};
+use crate::runners::quota_agy::{note_auth_denied, set_logged_in_quiet};
 use crate::state::App;
 use std::sync::Arc;
 
@@ -14,21 +14,25 @@ pub async fn on_turn_auth_failure(app: &Arc<App>, bot: &db::Bot) {
     let Ok(host) = db::bot_host(&app.db, &bot.id).await else { return };
     let Some(fence) = app.hosts.fence(&host).await else { return };
     let key = crate::quota::quota_key(&host, "agy");
-    // 憑證檔還在（只是被撤銷）：登入偵測不能在冷卻期內又把旗標翻回已登入、再開一次約 200 MB 的探測。
-    auth_denied().lock().unwrap().insert(key.clone(), std::time::Instant::now() + AUTH_DENIED_COOLDOWN);
-    let mut changed = set_logged_in_quiet(app, &host, &fence, false).await;
-    // 不要讓網頁同時顯示「已登入，但額度暫時拿不到」。
-    changed |= crate::quota_agy::set_probe_error(&host, None);
-    // 舊讀數不能繼續看起來很新。
-    let had = app
+    // 整段在圍籬裡（#1023）：換代了就什麼都不寫，冷卻、旗標、探測錯誤與舊讀數一起不動。
+    let Some((changed, had)) = app
         .hosts
         .run_if_current(&fence, async {
+            // 憑證檔還在（只是被撤銷）：登入偵測不能在冷卻期內又把旗標翻回已登入、再開一次約 200 MB 的探測。
+            note_auth_denied(key.clone(), &fence);
+            let mut changed = set_logged_in_quiet(app, &host, &fence, false).await;
+            // 不要讓網頁同時顯示「已登入，但額度暫時拿不到」。
+            changed |= crate::quota_agy::set_probe_error(&host, None);
+            // 舊讀數不能繼續看起來很新。
             let had = app.quotas.lock().await.contains_key(&key);
             crate::quota::forget(app, &key).await;
-            had
+            (changed, had)
         })
         .await
-        .unwrap_or(false);
+    else {
+        tracing::info!(bot = %bot.name, %host, "agy turn failed on authentication after its host changed; ignored");
+        return;
+    };
     if had {
         app.emit("quota_updated", serde_json::json!({"kind": key, "host": host, "quota": null})).await;
     }
