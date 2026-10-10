@@ -13,6 +13,7 @@ import { resetStoreForTest, useStore } from '../store/store'
 import { ApiError } from '../api/types'
 import { ATTACHMENT_FAILED_NOTICE } from '../lib/composerLabels'
 import { ChatPanel } from './ChatPanel'
+import { ComposerDraftBar } from './ComposerDraftBar'
 
 virtualMockTime()
 afterEach(unmountAll)
@@ -193,3 +194,78 @@ test('#917 附件上傳失敗後 Enter／送出鈕不送出、出現通知、失
     restore()
   }
 })
+
+test('插隊：附件還在上傳時不送、卡片還在；傳完才能插隊', { timeout: 30_000 }, async () => {
+  let releaseUpload!: () => void
+  const gate = new Promise<void>((resolve) => {
+    releaseUpload = resolve
+  })
+  const original = mock.upload.bind(mock)
+  mock.upload = (async (path: string, file: Blob, opts?: Parameters<typeof original>[2]) => {
+    await gate
+    return original(path, file, opts)
+  }) as typeof mock.upload
+
+  try {
+    await useStore.getState().refreshState()
+    const pid = useStore.getState().projects[0]?.id
+    assert.ok(pid, '要有 project')
+    await mock.request('POST', `/projects/${pid}/bots`, { name: 'am-claude-3', kind: 'claude' }).catch(() => {})
+    const { requests, bot } = await openChat('am-claude-3')
+    await makeBusy(bot.id)
+    await typeInto(textarea(), 'urgent')
+    await dropFile('big.png')
+    await until(() => document.querySelectorAll('.attach-thumb.uploading').length === 1, '出現上傳中的卡片')
+    const findSendNow = () => [...document.querySelectorAll<HTMLButtonElement>('.mini-btn')].find((b) => b.textContent?.includes('插隊'))
+    assert.ok(findSendNow(), '找到插隊鈕')
+    assert.equal(findSendNow()!.disabled, true, '附件上傳中插隊鈕 disabled')
+    assert.equal(findSendNow()!.title, '附件上傳中…')
+
+    releaseUpload()
+    await until(() => document.querySelectorAll('.attach-thumb:not(.uploading):not(.failed)').length === 1, '上傳完成')
+    assert.equal(findSendNow()!.disabled, false, '上傳完成後插隊鈕可按')
+
+    await click(findSendNow()!)
+    await until(() => prompts(requests).length > 0 && Boolean((prompts(requests).at(-1)!.body as { send_now?: boolean })?.send_now), '送出插隊請求')
+    const lastPrompt = prompts(requests).at(-1)!.body as { text: string; send_now?: boolean; attachments?: string[] }
+    assert.equal(lastPrompt.send_now, true)
+    assert.equal(lastPrompt.attachments?.length, 1)
+  } finally {
+    releaseUpload?.()
+    mock.upload = original as typeof mock.upload
+  }
+})
+
+test('清掉再送我這則：附件上傳中／失敗時 disabled', { timeout: 30_000 }, async () => {
+  useStore.setState({
+    composerDrafts: {
+      b1: { draft: 'stuck', token: 't', truncated: false, actions: ['submit', 'clear'] },
+    },
+  })
+
+  // 1. attachmentsBlocked="uploading"
+  await mount(<ComposerDraftBar botId="b1" text="mine" attachments={[]} attachmentsBlocked="uploading" onSent={() => {}} />)
+  let clearBtn = [...document.querySelectorAll<HTMLButtonElement>('button')].find((b) => b.textContent?.includes('清掉再送'))!
+  let submitBtn = [...document.querySelectorAll<HTMLButtonElement>('button')].find((b) => b.textContent?.includes('送出框裡那段'))!
+  assert.equal(clearBtn.disabled, true)
+  assert.match(clearBtn.title, /上傳/)
+  assert.equal(submitBtn.disabled, false)
+
+  // 2. attachmentsBlocked="failed"
+  await unmountAll()
+  await mount(<ComposerDraftBar botId="b1" text="mine" attachments={[]} attachmentsBlocked="failed" onSent={() => {}} />)
+  clearBtn = [...document.querySelectorAll<HTMLButtonElement>('button')].find((b) => b.textContent?.includes('清掉再送'))!
+  submitBtn = [...document.querySelectorAll<HTMLButtonElement>('button')].find((b) => b.textContent?.includes('送出框裡那段'))!
+  assert.equal(clearBtn.disabled, true)
+  assert.match(clearBtn.title, /失敗/)
+  assert.equal(submitBtn.disabled, false)
+
+  // 3. attachmentsBlocked={null}
+  await unmountAll()
+  await mount(<ComposerDraftBar botId="b1" text="mine" attachments={[]} attachmentsBlocked={null} onSent={() => {}} />)
+  clearBtn = [...document.querySelectorAll<HTMLButtonElement>('button')].find((b) => b.textContent?.includes('清掉再送'))!
+  submitBtn = [...document.querySelectorAll<HTMLButtonElement>('button')].find((b) => b.textContent?.includes('送出框裡那段'))!
+  assert.equal(clearBtn.disabled, false)
+  assert.equal(submitBtn.disabled, false)
+})
+
