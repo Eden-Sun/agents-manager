@@ -421,22 +421,11 @@ mod tests {
         let intent_id = match inserted {
             crate::intents::Inserted::New(i) | crate::intents::Inserted::AlreadyOpen(i) => i.id,
         };
-        let status = tokio::time::timeout(std::time::Duration::from_secs(2), async {
-            loop {
-                let status = sqlx::query_scalar::<_, String>("SELECT status FROM intents WHERE id=?")
-                    .bind(&intent_id)
-                    .fetch_one(&app2.db)
-                    .await
-                    .unwrap();
-                if status == "running" {
-                    break status;
-                }
-                tokio::time::sleep(std::time::Duration::from_millis(5)).await;
-            }
-        })
-        .await
-        .expect("第一條 recovery 已認領並在 bot 鎖上等待");
-        assert_eq!(status, "running");
+        // 上限 30 秒：等的是一整串 sqlx 查詢，整樹平行時 2 秒會假紅（#1154）。
+        let claimed = tt::eventually!(
+            sqlx::query_scalar::<_, String>("SELECT status FROM intents WHERE id=?").bind(&intent_id).fetch_one(&app2.db).await.unwrap() == "running"
+        );
+        assert!(claimed, "第一條 recovery 已認領並在 bot 鎖上等待");
 
         recover_host(&app2, LOCAL_HOST).await;
         let hold_after_second = lifecycle::restart_hold::in_progress(&bot.id);
@@ -519,15 +508,12 @@ mod tests {
 
         let app2 = tt::restart_app(&e).await;
         recover_host(&app2, LOCAL_HOST).await;
-        let mut status = vec![];
-        for _ in 0..200 {
-            status = intent_status(&app2, &bot.id).await;
-            if status == vec!["failed"] {
-                break;
-            }
-            tokio::time::sleep(std::time::Duration::from_millis(25)).await;
-        }
-        assert_eq!(status, vec!["failed"], "用完次數就放棄，不無限重試");
+        // 上限 30 秒（#1154）：重試之間有退避，整樹平行時 5 秒不夠。
+        assert!(
+            tt::eventually!(intent_status(&app2, &bot.id).await == vec!["failed"]),
+            "用完次數就放棄，不無限重試：{:?}",
+            intent_status(&app2, &bot.id).await
+        );
         let attempts: i64 = sqlx::query_scalar("SELECT attempts FROM intents WHERE subject_id = ?").bind(&bot.id).fetch_one(&app2.db).await.unwrap();
         assert_eq!(attempts, crate::intents::MAX_ATTEMPTS);
         let events: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM supervisor_inbox WHERE kind = 'intent_failed' AND bot_id = ?")
