@@ -52,6 +52,7 @@ import { recoverLostCursor } from './pageCursor'
 import { type CapFloors, capFor, clearFloor, raiseFloor } from './messageCap'
 import { markRewound, markRewoundInGroup } from '../lib/rewind'
 import { acceptStateSeq, singleFlight } from './singleFlight'
+import { bumpEventRevs } from './eventRevs'
 import { quotaForIdentity, weeklyOnlyKind } from './quotaLookup'
 import { botStatusConnTarget } from './botStatusConn'
 import { paneReadOnly } from '../lib/shellAccess'
@@ -2986,6 +2987,8 @@ function connectSocket(set: SetFn, get: GetFn) {
         if (openedBefore) void get().loadIdentityPrefs()
         // pane 清單（側欄「其他 pane」）靠 `panes_changed` 事件＋30 秒輪詢：斷線期間漏掉的事件要馬上補，不等下一輪輪詢。
         if (openedBefore) void get().refreshPanes()
+        // 總管狀態與分享連結只靠事件計數通知元件重抓：斷線期間漏掉的事件要讓開著的元件各自重抓（#1213）。
+        if (openedBefore) set((s) => bumpEventRevs(s))
         return
       }
       set({ socket })
@@ -3058,6 +3061,8 @@ const resyncTrigger = (() => {
     resetStateSeq()
     try {
       await get().refreshState()
+      // bots 清單是剛拉回來的那份，所以放在 refreshState 之後（#1213）。
+      set((s) => bumpEventRevs(s))
       await get().loadQuota()
       // 只靠 WS 事件維持的兩份：漏掉的事件沒有別的來源會補（`identity_prefs_changed`、`draft_updated`）。
       void get().loadIdentityPrefs()
