@@ -964,7 +964,10 @@ export function QuotaStrip({
           let focused = false
           if (focusKind && entry.kind === focusKind) {
             if (entry.kind !== 'claude') {
-              focused = true
+              // 同一個 kind 可能有好幾格（codex＋codex:work）：只亮這顆 bot 的額度實際落的那一格。
+              const target = quotaBaseKey(quota, host, entry.kind, focusIdentity?.trim() || null, identities)
+              // 那一格還沒有讀數（沒畫出來）時退回預設帳號那格，免得整列沒有任何一格被標。
+              focused = shown.some((e) => e.kind === entry.kind && e.key === target) ? entry.key === target : !entry.identity
             } else {
               const focusId =
                 focusIdentity && focusIdentity.trim()
