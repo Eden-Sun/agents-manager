@@ -15,7 +15,8 @@
 set -euo pipefail
 
 usage() {
-    sed -n '2,15p' "$0" | sed 's/^# \{0,1\}//' >&2
+    # 檔頭就是說明書：印整段註解，不寫死行號（行號會隨著補充說明失準，印到程式碼）。
+    awk 'NR > 1 && /^#/ { sub(/^# ?/, ""); print; next } NR > 1 { exit }' "$0" >&2
     exit 2
 }
 
