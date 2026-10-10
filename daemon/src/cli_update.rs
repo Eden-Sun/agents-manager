@@ -126,7 +126,9 @@ trap 'exit 130' INT
 trap 'exit 143' TERM
 wait "$worker_pid"
 status=$?
-cat "$OUT"
+# 失敗的輸出走 stderr：遠端 `ssh_exec` 失敗時只帶 stderr 回來，印到 stdout 會變成 `no stderr`（#1044）。
+# 成功的輸出仍在 stdout（`agy_install` 靠 stdout 的 AM_AGY_INSTALLED 標記）。
+if [ "$status" -eq 0 ]; then cat "$OUT"; else cat "$OUT" >&2; fi
 rm -f "$OUT"
 exit "$status"
 "#,
@@ -3823,6 +3825,47 @@ mod tests {
         assert!(failed.contains("boom") && !failed.contains(LOCKED_MARK), "{failed}");
         assert!(matches!(classify_install_error(failed), InstallError::Failed(_)));
         assert!(std::fs::symlink_metadata(&lock).is_err(), "失敗也放掉鎖");
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// #1044：安裝鎖的 wrapper 失敗時把輸出印到 stderr（遠端 `ssh_exec` 只帶 stderr 回來）：鎖忙的 `LOCKED_MARK` 與安裝器的輸出要帶得到；
+    /// 成功的輸出仍在 stdout（`agy_install` 靠它）。分開讀 stdout／stderr，不能像 `local_sh` 那樣合併。
+    #[test]
+    fn a_failed_or_locked_install_reports_on_stderr_so_a_remote_host_sees_it() {
+        let dir = crate::testing::track(std::env::temp_dir().join(format!("am-cli-stderr-{}", db::ulid())));
+        std::fs::create_dir_all(&dir).unwrap();
+        let lock = dir.join("codex-install.lock").display().to_string();
+        let run = |inner: &str| std::process::Command::new("/bin/sh").arg("-c").arg(locked_script(&lock, inner)).output().unwrap();
+
+        let ok = run("echo hello");
+        assert_eq!(ok.status.code(), Some(0));
+        assert!(String::from_utf8_lossy(&ok.stdout).contains("hello"), "成功的輸出仍在 stdout");
+
+        let failed = run("echo boom >&2; echo out; exit 6");
+        assert_eq!(failed.status.code(), Some(6));
+        let (out, err) = (String::from_utf8_lossy(&failed.stdout).into_owned(), String::from_utf8_lossy(&failed.stderr).into_owned());
+        assert!(err.contains("boom") && err.contains("out"), "失敗的輸出要走 stderr：{err}");
+        assert!(out.is_empty(), "失敗時 stdout 不該有東西：{out}");
+
+        let release = dir.join("release-installer");
+        let mut first = std::process::Command::new("/bin/sh")
+            .arg("-c")
+            .arg(locked_script(&lock, &format!("while [ ! -e '{}' ]; do sleep 0.05; done", release.display())))
+            .spawn()
+            .unwrap();
+        for _ in 0..400 {
+            if std::fs::symlink_metadata(&lock).is_ok() {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        let locked = run("echo never");
+        assert_eq!(locked.status.code(), Some(LOCKED_EXIT));
+        let (out, err) = (String::from_utf8_lossy(&locked.stdout).into_owned(), String::from_utf8_lossy(&locked.stderr).into_owned());
+        assert!(err.contains(LOCKED_MARK), "鎖忙的標記要走 stderr：{err}");
+        assert!(!out.contains(LOCKED_MARK), "{out}");
+        std::fs::write(&release, "release").unwrap();
+        first.wait().unwrap();
         std::fs::remove_dir_all(&dir).ok();
     }
 
