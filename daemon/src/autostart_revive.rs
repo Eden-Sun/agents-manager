@@ -11,6 +11,7 @@
 //!   （使用者在中間做了任何事＝有新 run＝不碰；`pane exited` 等別的路收的＝使用者關的，不碰）。
 //! * 對帳那頭只有「這一輪自己記下 exited」才算遺失（`AlreadyEnded`＝別的路先收了，不是 herdr 掉的）；補開丟到背景一顆一顆做，不卡對帳。
 //! * 退避：同一顆 bot 30 分鐘內最多重開 3 次；herdr 一直掛時只通知、不再開（避免無限重開）。
+//! * 同一顆 lost run 只決定一次（#1061）：定時掃描會把它再交進來，已有 `bot_lost` 紀錄就不再碰，失敗或退避的決定不會被滑掉的窗口翻案。
 //! * 每次遺失都推一則 supervisor inbox `bot_lost`（巡檢收、叫醒），帶 `outcome`：`restarted`／`failed`／`backoff`，不等探針。
 use crate::db;
 use std::time::Duration;
@@ -453,6 +454,71 @@ mod tests {
             assert!(db::active_run(&env.app.db, &b.id).await.unwrap().is_none(), "{}", b.name);
             assert!(bot_lost_events(&env.app, &b.id).await.is_empty(), "{}", b.name);
         }
+    }
+
+    /// #1061：補開在建 run 之前就失敗（身份不在這台主機上）：這顆 lost run 只決定一次，之後的掃描不再重試。
+    #[tokio::test]
+    async fn a_lost_run_that_could_not_be_restarted_is_decided_once_not_every_sweep() {
+        let env = tt::env().await;
+        let bot = autostart_bot(&env, "no-identity").await;
+        crate::lifecycle::start_bot(&env.app, &bot.id).await.unwrap();
+        autostart_done(&env.app);
+        let run = db::active_run(&env.app.db, &bot.id).await.unwrap().unwrap().id;
+        crate::lifecycle::mark_run_exited(&env.app, &run, "pane gone").await;
+        sqlx::query("UPDATE bots SET identity = 'no-such-identity' WHERE id = ?").bind(&bot.id).execute(&env.app.db).await.unwrap();
+
+        runner::sweep_lost_by_pane_gone(&env.app).await;
+        runner::quiesce(&env.app).await;
+        let events = bot_lost_events(&env.app, &bot.id).await;
+        assert_eq!(events.len(), 1, "{events:?}");
+        assert_eq!(events[0]["outcome"], "failed");
+        assert_eq!(runs(&env.app, &bot.id).await.len(), 1);
+
+        // 身份修好了，下一輪掃描也不再碰這顆已經決定過的 lost run。
+        sqlx::query("UPDATE bots SET identity = NULL WHERE id = ?").bind(&bot.id).execute(&env.app.db).await.unwrap();
+        runner::sweep_lost_by_pane_gone(&env.app).await;
+        runner::quiesce(&env.app).await;
+        assert_eq!(runs(&env.app, &bot.id).await.len(), 1, "已經決定過的 lost run 不再補開");
+        assert_eq!(bot_lost_events(&env.app, &bot.id).await.len(), 1);
+    }
+
+    /// #1061：已經回報 `backoff` 的 lost run，等舊的補開紀錄滑出 30 分鐘窗口後不能被悄悄補開。
+    #[tokio::test]
+    async fn a_backoff_decision_for_a_lost_run_is_not_reversed_when_the_window_slides() {
+        let env = tt::env().await;
+        let bot = autostart_bot(&env, "backoff-slides").await;
+        crate::lifecycle::start_bot(&env.app, &bot.id).await.unwrap();
+        autostart_done(&env.app);
+        for attempt in 0..super::MAX_RESTARTS {
+            crate::supervisor::store::push_inbox(
+                &env.app.db,
+                &format!("bot_lost:{}:prior-{attempt}", bot.id),
+                "bot_lost",
+                None,
+                Some(&bot.id),
+                None,
+                &serde_json::json!({"outcome": "restarted"}),
+            )
+            .await
+            .unwrap();
+        }
+        let run = db::active_run(&env.app.db, &bot.id).await.unwrap().unwrap().id;
+        crate::lifecycle::mark_run_exited(&env.app, &run, "pane gone").await;
+
+        runner::sweep_lost_by_pane_gone(&env.app).await;
+        runner::quiesce(&env.app).await;
+        assert!(db::active_run(&env.app.db, &bot.id).await.unwrap().is_none(), "第一輪：額度用完，不再開");
+
+        // 舊的補開紀錄滑出窗口。
+        sqlx::query("UPDATE supervisor_inbox SET created_at = '2020-01-01T00:00:00.000Z' WHERE event_key LIKE ?")
+            .bind(format!("bot_lost:{}:prior-%", bot.id))
+            .execute(&env.app.db)
+            .await
+            .unwrap();
+        runner::sweep_lost_by_pane_gone(&env.app).await;
+        runner::quiesce(&env.app).await;
+        assert!(db::active_run(&env.app.db, &bot.id).await.unwrap().is_none(), "backoff 的決定不能因為窗口滑動就翻案");
+        assert_eq!(runs(&env.app, &bot.id).await.len(), 1);
     }
 
     /// `pane gone` 的補開跟對帳那條共用 30 分鐘 3 次的退避：額度用完只通知、不再開。

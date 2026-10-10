@@ -160,6 +160,16 @@ async fn revive_one(app: &Arc<App>, host: &str, l: &Lost) -> anyhow::Result<()> 
     let lock = app.bot_lock(&l.bot_id).await;
     let guard = lock.lock_owned().await;
     let Some(bot) = eligible_lost_bot(app.as_ref(), host, l).await? else { return Ok(()) };
+    // 一次遺失只決定一次（restarted／failed／backoff 都算）：這顆 lost run 已經有 bot_lost 紀錄就不再碰（#1061）。
+    // 定時掃描每 30 秒會把同一顆 run 再交進來一次；inbox 以 (bot, run) 去重，重做的嘗試不會進退避額度。
+    let key = format!("bot_lost:{}:{}", bot.id, l.run_id);
+    let decided: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM supervisor_inbox WHERE kind = 'bot_lost' AND event_key = ?)")
+        .bind(&key)
+        .fetch_one(&app.db)
+        .await?;
+    if decided {
+        return Ok(());
+    }
     let (outcome, error) = if !take_slot(app.as_ref(), &bot.id).await? {
         drop(guard);
         tracing::warn!(host, bot = %bot.name, "autostart revive: lost again within the backoff window; not restarting, only reporting");
@@ -186,7 +196,7 @@ async fn revive_one(app: &Arc<App>, host: &str, l: &Lost) -> anyhow::Result<()> 
         "reason": crate::autostart_revive::reason_slug(exit_reason.as_deref().unwrap_or(crate::autostart_revive::LOST_REASON)),
         "outcome": outcome, "error": error,
     });
-    if let Err(e) = crate::supervisor::store::push_inbox(&app.db, &format!("bot_lost:{}:{}", bot.id, l.run_id), "bot_lost", None, Some(&bot.id), None, &payload).await {
+    if let Err(e) = crate::supervisor::store::push_inbox(&app.db, &key, "bot_lost", None, Some(&bot.id), None, &payload).await {
         tracing::warn!(bot = %bot.name, error = ?e, "autostart revive: could not write the bot_lost inbox event");
     }
     Ok(())
