@@ -1802,7 +1802,8 @@ async fn create_project(State(app): State<Arc<App>>, Json(b): Json<NewProject>) 
             .await
             .map_err(|e| LcError::Bad(format!("{e:#}")))?
     };
-    let label = b.label.filter(|s| !s.trim().is_empty()).unwrap_or_else(|| {
+    // 驗的與存的都是 trim 過的（同 patch_project）：頭尾空白不進 config.toml，長度上限也對實際存的字串生效。
+    let label = b.label.as_deref().map(str::trim).filter(|s| !s.is_empty()).map(str::to_string).unwrap_or_else(|| {
         std::path::Path::new(&path).file_name().map(|s| s.to_string_lossy().to_string()).unwrap_or_else(|| path.clone())
     });
     let id = db::ulid();
@@ -9195,6 +9196,31 @@ mod bot_config_tests {
         assert!(matches!(r, Err(LcError::Bad(_))), "{r:?}");
         std::fs::remove_dir_all(&dir).ok();
         std::fs::remove_file(&file).ok();
+    }
+
+    /// 建立專案存的 label 要跟驗的一樣是 trim 過的：空白不進 config.toml，64 字上限算的是實際存的字串。
+    #[tokio::test]
+    async fn project_create_stores_the_trimmed_label() {
+        let e = env().await;
+        let dir_a = crate::testing::track(std::env::temp_dir().join(format!("am-label-{}", db::ulid())));
+        std::fs::create_dir_all(&dir_a).unwrap();
+        let dir_b = crate::testing::track(std::env::temp_dir().join(format!("am-label-{}", db::ulid())));
+        std::fs::create_dir_all(&dir_b).unwrap();
+        let body = |path: &std::path::Path, label: &str| Json(NewProject { path: path.to_string_lossy().into_owned(), label: Some(label.into()), host: None });
+
+        create_project(State(e.app.clone()), body(&dir_a, "  spaced  ")).await.unwrap();
+        assert_eq!(e.app.cfg.get().await.projects.last().unwrap().label, "spaced");
+
+        // 空白 label 照舊退回目錄名。
+        create_project(State(e.app.clone()), body(&dir_b, "   ")).await.unwrap();
+        let dir_b_name = dir_b.file_name().unwrap().to_string_lossy().into_owned();
+        assert_eq!(e.app.cfg.get().await.projects.last().unwrap().label, dir_b_name);
+
+        // 64 字加前後空白：驗的是 trim 後的 64 字，存的也是 64 字。
+        let dir_c = crate::testing::track(std::env::temp_dir().join(format!("am-label-{}", db::ulid())));
+        std::fs::create_dir_all(&dir_c).unwrap();
+        create_project(State(e.app.clone()), body(&dir_c, &format!(" {} ", "長".repeat(64)))).await.unwrap();
+        assert_eq!(e.app.cfg.get().await.projects.last().unwrap().label.chars().count(), 64);
     }
 
     #[tokio::test]
