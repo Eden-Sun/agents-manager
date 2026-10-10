@@ -268,3 +268,36 @@
         assert_eq!(notes(&app, "herdr_maintenance_end").await, 1);
         assert!(row(&app.db).await.unwrap().is_none());
     }
+
+    /// issue #1171：讀窗口與關窗之間，窗口被換成新的一扇：`end` 不能回 `active:false`（新窗口還開著），要明說被取代、不關新的那扇。
+    #[tokio::test]
+    async fn ending_a_window_that_was_replaced_in_between_does_not_claim_it_is_closed() {
+        let env = tt::env().await;
+        let app = env.app.clone();
+        let w1 = open_as(&app, 10, "AGM", "first").await.unwrap().unwrap();
+        let (app_hook, w1_hook) = (app.clone(), w1.clone());
+        crate::race_point::arm("herdr_end_after_read", &w1.opened_at, move || async move {
+            close_as(&app_hook, &w1_hook, "AGM", None).await.unwrap();
+            open_as(&app_hook, 10, "AGM", "second").await.unwrap().unwrap();
+        });
+        let headers = agm_headers(&app).await;
+        let r = end(State(app.clone()), headers, None).await;
+        let Err(LcError::Conflict(body)) = r else { panic!("被取代的窗口不能回成功：{r:?}") };
+        assert_eq!(body["reason"], "herdr_maintenance_superseded", "{body}");
+        let w2 = row(&app.db).await.unwrap().expect("新窗口還開著，不能被舊的關窗操作關掉");
+        assert_ne!(w2.opened_at, w1.opened_at);
+        assert_eq!(body["window"]["opened_at"], w2.opened_at, "{body}");
+    }
+
+    /// issue #1171：兩個 `end` 同時關同一扇窗，只有一個回 `closed:true`。
+    #[tokio::test]
+    async fn two_concurrent_ends_report_a_close_only_once() {
+        let env = tt::env().await;
+        let app = env.app.clone();
+        open_as(&app, 10, "AGM", "concurrent end").await.unwrap().unwrap();
+        let headers = agm_headers(&app).await;
+        let (a, b) = tokio::join!(end(State(app.clone()), headers.clone(), None), end(State(app.clone()), headers, None));
+        let closed = |r: Result<Json<serde_json::Value>, LcError>| matches!(r, Ok(Json(ref v)) if v["closed"] == true);
+        assert_eq!(closed(a) as u8 + closed(b) as u8, 1, "只能有一個人真的關掉窗口");
+        assert_eq!(notes(&app, "herdr_maintenance_end").await, 1);
+    }
