@@ -61,18 +61,17 @@ pub(crate) async fn post_share(
         return Err(LcError::BadValue(json!({"error": "bad_request", "reason": "share_embed_trusted_only", "message": "「允許 iframe 嵌入」只給信任分享的 bot"})));
     }
     if !body.enabled {
-        store::disable(&app.db, &id).await.map_err(admin::db_err)?;
-        crate::share::portal::kick(&id);
-        app.emit("bot_share_changed", json!({"bot_id": id, "enabled": false})).await;
+        let changed = store::disable(&app.db, &id).await.map_err(admin::db_err)?;
+        if changed {
+            crate::share::portal::kick(&id);
+            app.emit("bot_share_changed", json!({"bot_id": id, "enabled": false, "allow_embed": false})).await;
+        }
         return Ok(Json(admin::state(&app, &id).await?));
     }
     admin::base_url(&app).await?;
-    // 已經開著：不換 token（已經發出去的連結照樣能用），回的是同一條網址。
-    if store::enable(&app.db, &id).await.map_err(admin::db_err)?.is_some() {
-        app.emit("bot_share_changed", json!({"bot_id": id, "enabled": true})).await;
-    }
-    if let Some(allow) = body.allow_embed {
-        store::set_allow_embed(&app.db, &id, allow).await.map_err(admin::db_err)?;
+    let outcome = store::set_share_enabled(&app.db, &id, body.allow_embed).await.map_err(admin::db_err)?;
+    if outcome.changed {
+        app.emit("bot_share_changed", json!({"bot_id": id, "enabled": true, "allow_embed": outcome.allow_embed})).await;
     }
     Ok(Json(admin::state(&app, &id).await?))
 }
@@ -95,6 +94,8 @@ pub(crate) async fn post_rotate(
         return Err(LcError::conflict("share_disabled", json!({"bot_id": id, "message": "分享沒開著，先開分享"})));
     }
     crate::share::portal::kick(&id);
-    app.emit("bot_share_changed", json!({"bot_id": id, "enabled": true})).await;
-    Ok(Json(admin::state(&app, &id).await?))
+    let state = admin::state(&app, &id).await?;
+    let allow_embed = state.get("allow_embed").and_then(Value::as_bool).unwrap_or(false);
+    app.emit("bot_share_changed", json!({"bot_id": id, "enabled": true, "allow_embed": allow_embed})).await;
+    Ok(Json(state))
 }
