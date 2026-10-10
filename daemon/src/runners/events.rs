@@ -381,9 +381,62 @@ pub async fn handle_status(app: &Arc<App>, host: &str, session: &str, ev: &crate
     handle_status_try(app, host, session, ev, 0, None).await
 }
 
+/// 狀態寫不進 DB 的 pane，等修復（#1184）。鍵是 pane；值帶著寫失敗那時的 run：修復時 pane 上的 run 已經換了就丟掉。
+/// 放在 [`App`] 上、只在記憶體裡：daemon 重啟或主機重連時 `reconcile` 會把 DB 狀態重新對回 herdr，那條路徑本來就是修復。
+#[derive(Clone)]
+pub(crate) struct StatusRepair {
+    run_id: String,
+    since: Instant,
+}
+
+/// 修復迴圈的週期。重放用完之後靠它補，不是靠 `child_alerts::sweep`（那個只看子 agent 的提問）。
+const STATUS_REPAIR_EVERY: std::time::Duration = std::time::Duration::from_secs(15);
+
+fn mark_status_repair(app: &App, key: &PaneKey, run_id: &str) {
+    app.status_repairs.lock().unwrap_or_else(|e| e.into_inner()).entry(key.clone()).or_insert_with(|| StatusRepair { run_id: run_id.to_string(), since: Instant::now() });
+}
+
+fn clear_status_repair(app: &App, key: &PaneKey) {
+    app.status_repairs.lock().unwrap_or_else(|e| e.into_inner()).remove(key);
+}
+
+pub fn spawn_status_repair(app: Arc<App>) {
+    crate::background_loop::spawn_periodic(&app, "status repair", STATUS_REPAIR_EVERY, STATUS_REPAIR_EVERY, |app| async move {
+        repair_pending_statuses(&app).await;
+    });
+}
+
+/// 待修復的 pane 各重新對一次 herdr：重讀**當下**的狀態再寫，不重放舊事件，所以不會把舊的 idle 蓋回新的 working。
+/// pane 上的 run 已經不是登記時那一個就丟掉（那一筆跟著舊 run 結束）。回傳這一輪結束時還剩幾個。
+pub async fn repair_pending_statuses(app: &Arc<App>) -> usize {
+    let pending: Vec<(PaneKey, StatusRepair)> = app.status_repairs.lock().unwrap_or_else(|e| e.into_inner()).iter().map(|(k, v)| (k.clone(), v.clone())).collect();
+    for (key, repair) in &pending {
+        let (host, session, pane_id) = key;
+        let fallback = app.session_for_host(host).await.unwrap_or_default();
+        let runs = match crate::db::active_runs_for_pane(&app.db, host, pane_id, session, &fallback).await {
+            Ok(runs) => runs,
+            Err(e) => {
+                tracing::debug!(host, pane_id, error = ?e, "status repair: could not look up the pane's run; trying again");
+                continue;
+            }
+        };
+        if runs.first().map(|r| r.id.as_str()) != Some(repair.run_id.as_str()) {
+            clear_status_repair(app, key);
+            continue;
+        }
+        let Some(client) = app.herdr_for_session(host, session).await else { continue };
+        resync_pane_status(app, &client, host, session, pane_id).await;
+    }
+    let left = app.status_repairs.lock().unwrap_or_else(|e| e.into_inner());
+    if let Some(oldest) = left.values().map(|r| r.since.elapsed()).max() {
+        tracing::info!(pending = left.len(), oldest_secs = oldest.as_secs(), "pane status repair backlog");
+    }
+    left.len()
+}
+
 fn replay_status_later(app: &Arc<App>, host: &str, session: &str, ev: &crate::herdr::Event, key: PaneKey, seq: u64, attempt: usize) {
     let Some(wait) = status_replay_delays().get(attempt).copied() else {
-        tracing::warn!(host, pane = %key.2, "gave up replaying a pane status event; the periodic child-alert sweep is the safety net");
+        tracing::warn!(host, pane = %key.2, "gave up replaying a pane status event; the status repair loop re-reads the pane");
         return;
     };
     let (app, host, session, ev) = (app.clone(), host.to_string(), session.to_string(), ev.clone());
@@ -486,11 +539,14 @@ async fn handle_status_try(app: &Arc<App>, host: &str, session: &str, ev: &crate
             // 寫不進去就跟讀不到 run 一樣重放：DB 停在舊狀態時，邊的副作用（排隊訊息的 flush 閘門讀的是 DB）會卡住。
             // 這一輪不做任何邊的副作用；重放成功那一次 `prev` 仍是 DB 的舊值，副作用在那一次完整做一遍。
             tracing::warn!(run = %run.id, status = %status, error = ?e, "could not persist the agent status; replaying it shortly");
+            mark_status_repair(app, &key, &run.id);
             drop(write_guard);
             replay_status_later(app, host, session, ev, key, seq, attempt);
             return;
         }
     }
+    // 寫進去了（或本來就一致）：這個 pane 不再欠 DB 一個狀態（#1184）。
+    clear_status_repair(app, &key);
     drop(write_guard);
     app.emit_bot_status(&run.bot_id).await;
 
@@ -998,5 +1054,115 @@ mod tests {
         let _ = crate::testing::eventually!(run_state(&app, &run).await == "exited" && !watching(&app, &pane).await);
         assert!(!status_seq().lock().unwrap().contains_key(&key), "pane 收掉之後 status_seq 不該還留著它");
         assert!(!pane_status_locks().lock().unwrap().contains_key(&key), "pane 收掉之後 pane_status_lock 不該還留著它");
+    }
+
+    fn status_event(pane: &str, status: &str) -> crate::herdr::Event {
+        crate::herdr::Event { event: "pane.agent_status_changed".into(), data: json!({"pane_id": pane, "agent": "claude", "agent_status": status}) }
+    }
+
+    /// 這顆 pane 是否還在待修復清單裡（登錄表在這顆 App 上，只看這顆 App 的）。
+    fn pending_repair(app: &Arc<App>, pane: &str) -> bool {
+        app.status_repairs.lock().unwrap().contains_key(&(LOCAL_HOST.to_string(), "test".to_string(), pane.to_string()))
+    }
+
+    async fn status_in_db(app: &Arc<App>, run: &str) -> String {
+        sqlx::query_scalar("SELECT agent_status FROM runs WHERE id=?").bind(run).fetch_one(&app.db).await.unwrap()
+    }
+
+    /// DB 寫不進去（trigger 擋住 `agent_status` 的 UPDATE）。
+    async fn break_status_writes(app: &Arc<App>) {
+        sqlx::query("CREATE TRIGGER status_write_fails BEFORE UPDATE OF agent_status ON runs BEGIN SELECT RAISE(ABORT, 'database is locked'); END")
+            .execute(&app.db)
+            .await
+            .unwrap();
+    }
+
+    /// #1184：DB 寫不進去的時間超過重放的預算（測試裡 20 次、每次 100ms），之後 herdr 沒有任何新事件：
+    /// 修復迴圈重讀 pane 當下的狀態寫回去。頂層 bot 與子 agent 形狀的 bot 都要收得回來。
+    #[tokio::test]
+    async fn a_status_write_that_outlasts_the_replay_is_repaired_without_a_new_event() {
+        let e = tt::env().await;
+        let app = e.app.clone();
+        let mut cases = Vec::new();
+        for name in ["repair-top", "repair-child"] {
+            let bot = tt::claude_bot(&app, &e.project_id, name).await;
+            let run = tt::fake_run(&app, &bot.id).await;
+            let pane = format!("pane-{}", bot.id);
+            e.herdr.live_pane(&pane, tt::LivePane { rows: Some(40), ..Default::default() });
+            e.herdr.set_agent(name, &pane, false); // herdr 現在說 idle
+            sqlx::query("UPDATE runs SET agent_status='working' WHERE id=?").bind(&run).execute(&app.db).await.unwrap();
+            cases.push((run, pane));
+        }
+        break_status_writes(&app).await;
+        for (_, pane) in &cases {
+            handle_status(&app, LOCAL_HOST, "test", &status_event(pane, "idle")).await;
+        }
+        // 重放用完（測試裡約 2 秒）還寫不進去；寬一點等，免得重放還在跑就被 DB 恢復搶先寫好。
+        tokio::time::sleep(Duration::from_secs(5)).await;
+        for (run, _) in &cases {
+            assert_eq!(status_in_db(&app, run).await, "working", "寫不進去時 DB 停在舊狀態");
+        }
+        repair_pending_statuses(&app).await;
+        for (_, pane) in &cases {
+            assert!(pending_repair(&app, pane), "寫不進去的 pane 都還欠著 DB 一個狀態");
+        }
+
+        sqlx::query("DROP TRIGGER status_write_fails").execute(&app.db).await.unwrap();
+        repair_pending_statuses(&app).await;
+        for (_, pane) in &cases {
+            assert!(!pending_repair(&app, pane), "DB 恢復後修復迴圈一輪就補完");
+        }
+        for (run, _) in &cases {
+            assert_eq!(status_in_db(&app, run).await, "idle", "沒有任何新事件，靠的是重讀 herdr");
+        }
+    }
+
+    /// #1184：修復寫回的是 herdr **當下**的狀態（working），不是登記時那一則舊事件（idle）。
+    #[tokio::test]
+    async fn a_repair_writes_what_herdr_says_now_not_the_stale_event() {
+        let e = tt::env().await;
+        let app = e.app.clone();
+        let bot = tt::claude_bot(&app, &e.project_id, "repair-now").await;
+        let run = tt::fake_run(&app, &bot.id).await;
+        let pane = format!("pane-{}", bot.id);
+        e.herdr.live_pane(&pane, tt::LivePane { rows: Some(40), ..Default::default() });
+        e.herdr.set_unnamed_agent(&pane, None); // herdr 現在說 working
+        sqlx::query("UPDATE runs SET agent_status='working' WHERE id=?").bind(&run).execute(&app.db).await.unwrap();
+        break_status_writes(&app).await;
+        handle_status(&app, LOCAL_HOST, "test", &status_event(&pane, "idle")).await;
+        tokio::time::sleep(Duration::from_secs(5)).await;
+        assert!(pending_repair(&app, &pane), "寫不進去的 pane 還欠著 DB 一個狀態");
+
+        // herdr 現在說 working、DB 也是 working：修復重讀到的是 working，跟 DB 一致，不寫、清掉登記；
+        // 登記的那則舊 idle 不會被重放進來。
+        repair_pending_statuses(&app).await;
+        assert!(!pending_repair(&app, &pane), "修復讀到的是 herdr 當下的值，跟 DB 一致就不用寫");
+        sqlx::query("DROP TRIGGER status_write_fails").execute(&app.db).await.unwrap();
+        repair_pending_statuses(&app).await;
+        assert_eq!(status_in_db(&app, &run).await, "working", "舊的 idle 不能被寫回去");
+    }
+
+    /// #1184：登記之後那個 pane 的 run 結束了：修復丟掉這筆，不寫到已經結束的 run。
+    #[tokio::test]
+    async fn a_pending_repair_is_dropped_once_its_run_is_gone() {
+        let e = tt::env().await;
+        let app = e.app.clone();
+        let bot = tt::claude_bot(&app, &e.project_id, "repair-gone").await;
+        let run = tt::fake_run(&app, &bot.id).await;
+        let pane = format!("pane-{}", bot.id);
+        e.herdr.live_pane(&pane, tt::LivePane { rows: Some(40), ..Default::default() });
+        e.herdr.set_agent("repair-gone", &pane, false);
+        sqlx::query("UPDATE runs SET agent_status='working' WHERE id=?").bind(&run).execute(&app.db).await.unwrap();
+        break_status_writes(&app).await;
+        handle_status(&app, LOCAL_HOST, "test", &status_event(&pane, "idle")).await;
+        tokio::time::sleep(Duration::from_secs(5)).await;
+        repair_pending_statuses(&app).await;
+        assert!(pending_repair(&app, &pane), "寫不進去的 pane 還欠著 DB 一個狀態");
+
+        sqlx::query("UPDATE runs SET state='exited' WHERE id=?").bind(&run).execute(&app.db).await.unwrap();
+        sqlx::query("DROP TRIGGER status_write_fails").execute(&app.db).await.unwrap();
+        repair_pending_statuses(&app).await;
+        assert!(!pending_repair(&app, &pane), "run 結束了，這筆不再算數");
+        assert_eq!(status_in_db(&app, &run).await, "working", "已經結束的 run 不被寫");
     }
 }
