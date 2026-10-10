@@ -238,8 +238,14 @@ async fn start_bot_locked_with_host_fence(
     // 身分跟著 run 走（issue #238）：pane 用這一刻的身分起來，之後 PATCH 改身分要重啟才生效，額度要記在這個身分上。
     let run_id = db::ulid();
     let started_identity = bot.identity.as_deref().map(str::trim).unwrap_or("").to_string();
+    // 遠端 run 記下啟動當下所在主機的世代（#1035）：之後 `?confirm=repoint` 換了主機，舊 run 的 hook 就認得出是上一代。本機不記。
+    let host_generation = if project.host == crate::config::LOCAL_HOST {
+        None
+    } else {
+        app.hosts().fence(&project.host).await.map(|f| f.generation() as i64)
+    };
     let ins = sqlx::query(
-        "INSERT INTO runs (id, bot_id, state, agent_status, herdr_session, runtime_identity, launch_rev, started_at) VALUES (?,?,'starting','unknown',?,?,?,?)",
+        "INSERT INTO runs (id, bot_id, state, agent_status, herdr_session, runtime_identity, launch_rev, started_at, host, host_generation) VALUES (?,?,'starting','unknown',?,?,?,?,?,?)",
     )
     .bind(&run_id)
     .bind(bot_id)
@@ -248,6 +254,8 @@ async fn start_bot_locked_with_host_fence(
     // 這個 run 載入的啟動設定版本（#353）：之後 config 改了、版本對不上＝需要重啟，不靠 PATCH 回應裡那個會遺失的布林。
     .bind(crate::launch_rev::of(&bot))
     .bind(db::now())
+    .bind(&project.host)
+    .bind(host_generation)
     .execute(app.db())
     .await;
     if let Err(e) = ins {
