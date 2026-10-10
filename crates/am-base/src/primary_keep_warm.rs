@@ -311,7 +311,7 @@ pub async fn skip_route(app: &(impl crate::capabilities::Db + crate::capabilitie
 }
 
 /// 熱壓的聊天室說明（`WARM_COMPACT_NOTE_PREFIX` 開頭）。
-fn warm_compact_note(age_min: i64) -> String {
+pub fn warm_compact_note(age_min: i64) -> String {
     format!("{WARM_COMPACT_NOTE_PREFIX}cache 年齡已 {age_min} 分鐘，自動送出 /compact（熱壓）")
 }
 
@@ -373,6 +373,64 @@ async fn mark_note_written(pool: &SqlitePool, bot_id: &str, anchor: &str) -> any
     Ok(())
 }
 
+/// 熱壓 system note 的唯一冪等標識（天然鍵 / CRID）。
+pub fn warm_compact_note_id(bot_id: &str, anchor: &str) -> String {
+    format!("warm-compact:{bot_id}:{anchor}")
+}
+
+/// 檢查該收據對應的熱壓說明是否已存在（已寫入或 crash 前已存下）。
+async fn has_warm_compact_note(pool: &SqlitePool, bot_id: &str, anchor: &str, age_min: i64) -> anyhow::Result<bool> {
+    let note = warm_compact_note(age_min);
+    let key = warm_compact_note_id(bot_id, anchor);
+    let exists: bool = sqlx::query_scalar(
+        "SELECT EXISTS(
+            SELECT 1 FROM messages m JOIN conversations c ON c.id = m.conversation_id
+            WHERE c.bot_id = ? AND m.role = 'system'
+              AND (m.id = ? OR (m.content = ? AND m.created_at >= ?))
+        )",
+    )
+    .bind(bot_id)
+    .bind(&key)
+    .bind(&note)
+    .bind(anchor)
+    .fetch_one(pool)
+    .await?;
+    Ok(exists)
+}
+
+/// 寫入熱壓說明（reconcile）：若已存在直接標記 note_written，不二次寫入；否則帶 stable natural key 寫入。
+async fn write_warm_compact_note<M: SystemMessageWriter>(
+    db: &DbContext<SqlitePool>,
+    messages: &M,
+    bot: &db::Bot,
+    anchor: &str,
+    age_min: i64,
+) {
+    match has_warm_compact_note(db.pool(), &bot.id, anchor, age_min).await {
+        Ok(true) => {
+            if let Err(e) = mark_note_written(db.pool(), &bot.id, anchor).await {
+                tracing::warn!(bot = %bot.name, error = %format!("{e:#}"), "primary keep-warm: could not mark existing compaction note written");
+            }
+            return;
+        }
+        Ok(false) => {}
+        Err(e) => {
+            tracing::warn!(bot = %bot.name, error = %format!("{e:#}"), "primary keep-warm: could not check if compaction note exists; proceeding to write");
+        }
+    }
+
+    let note = warm_compact_note(age_min);
+    let key = warm_compact_note_id(&bot.id, anchor);
+    match messages.append_system_message_idempotent(bot.id.clone(), note, Some(key)).await {
+        Ok(_) => {
+            if let Err(e) = mark_note_written(db.pool(), &bot.id, anchor).await {
+                tracing::warn!(bot = %bot.name, error = %format!("{e:#}"), "primary keep-warm: could not mark the compaction note written");
+            }
+        }
+        Err(e) => tracing::warn!(bot = %bot.name, error = ?e, "primary keep-warm: compaction note still not written; will retry"),
+    }
+}
+
 /// 壓縮已送出、聊天室說明沒寫成的收據（`done` 且 `note_written = 0`）補寫一次說明；成功才設 1。不再 compact。
 async fn retry_pending_notes<M: SystemMessageWriter>(db: &DbContext<SqlitePool>, messages: &M, bot: &db::Bot) {
     let rows: Vec<(String, i64)> = match sqlx::query_as(
@@ -390,14 +448,7 @@ async fn retry_pending_notes<M: SystemMessageWriter>(db: &DbContext<SqlitePool>,
         }
     };
     for (anchor, age_min) in rows {
-        match messages.append_system_message(bot.id.clone(), warm_compact_note(age_min)).await {
-            Ok(_) => {
-                if let Err(e) = mark_note_written(db.pool(), &bot.id, &anchor).await {
-                    tracing::warn!(bot = %bot.name, error = %format!("{e:#}"), "primary keep-warm: could not mark the compaction note written");
-                }
-            }
-            Err(e) => tracing::warn!(bot = %bot.name, error = ?e, "primary keep-warm: compaction note still not written; will retry"),
-        }
+        write_warm_compact_note(db, messages, bot, &anchor, age_min).await;
     }
 }
 
@@ -510,14 +561,7 @@ async fn act<T: TurnControl, M: SystemMessageWriter>(db: &DbContext<SqlitePool>,
                     if let Err(e) = settle_warm_compact(db.pool(), &bot.id, &plan.anchor).await {
                         tracing::warn!(bot = %bot.name, error = %format!("{e:#}"), "could not settle the compaction receipt; the claim still blocks a resend");
                     }
-                    match messages.append_system_message(bot.id.clone(), warm_compact_note(age_min)).await {
-                        Ok(_) => {
-                            if let Err(e) = mark_note_written(db.pool(), &bot.id, &plan.anchor).await {
-                                tracing::warn!(bot = %bot.name, error = %format!("{e:#}"), "could not mark the compaction note written");
-                            }
-                        }
-                        Err(e) => tracing::warn!(bot = %bot.name, error = ?e, "could not record the compaction note; it will be written again later (no recompaction)"),
-                    }
+                    write_warm_compact_note(db, messages, bot, &plan.anchor, age_min).await;
                 }
                 // 鎖內前置檢查擋下、一個鍵都沒打（含 #872 的 `superseded_run`）：撤回 claim，下一輪依新狀態重判。
                 Err(e @ (TurnError::Busy(_) | TurnError::BotNotFound(_) | TurnError::InvalidRequest(_) | TurnError::QuotaBlocked(_))) => {

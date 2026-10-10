@@ -479,6 +479,7 @@
     #[derive(Default)]
     struct FakeNotes {
         notes: Mutex<Vec<(String, String)>>,
+        seen_keys: Mutex<std::collections::HashSet<String>>,
         /// 前 N 次 `append_system_message` 回 Err（`usize::MAX`＝永遠）。
         fail_first: Mutex<usize>,
     }
@@ -491,11 +492,26 @@
 
     impl SystemMessageWriter for FakeNotes {
         fn append_system_message(&self, bot: BotId, content: String) -> impl std::future::Future<Output = Result<(), PortError>> + Send + '_ {
+            self.append_system_message_idempotent(bot, content, None)
+        }
+
+        fn append_system_message_idempotent(
+            &self,
+            bot: BotId,
+            content: String,
+            idempotency_key: Option<String>,
+        ) -> impl std::future::Future<Output = Result<(), PortError>> + Send + '_ {
             async move {
                 let mut left = self.fail_first.lock().unwrap();
                 if *left > 0 {
                     *left = left.saturating_sub(1);
                     return Err(PortError::Unavailable("note store down".into()));
+                }
+                if let Some(key) = idempotency_key {
+                    let mut keys = self.seen_keys.lock().unwrap();
+                    if !keys.insert(key) {
+                        return Ok(());
+                    }
                 }
                 self.notes.lock().unwrap().push((bot, content));
                 Ok(())
@@ -661,5 +677,136 @@
         sweep(&env, &turns, &notes, now).await;
         assert_eq!(turns.compacts.lock().unwrap().len(), 1, "不再呼叫 compact_bot");
         assert!(notes.notes.lock().unwrap().is_empty());
+        drop_window(&run.id);
+    }
+
+    /// #1041 (1): 收據為 done, note_written=0 但聊天室已有該次說明的 system message，sweep 不加第二則 note 且 settle 收據。
+    #[tokio::test]
+    async fn seed_receipt_with_already_written_system_message_does_not_duplicate_and_settles_receipt() {
+        let env = tt::env().await;
+        let now = chrono::Utc::now();
+        let (bot, run) = warm_compact_due(&env, "kw-seed-exist", now).await;
+        let anchor = at(115, now);
+        // 種下收據：done, note_written=0
+        sqlx::query(
+            "INSERT INTO primary_cache_actions (bot_id, anchor, kind, run_id, status, age_min, claimed_at, done_at, note_written)
+             VALUES (?, ?, 'warm_compact', ?, 'done', 110, ?, ?, 0)",
+        )
+        .bind(&bot.id)
+        .bind(&anchor)
+        .bind(&run.id)
+        .bind(&anchor)
+        .bind(&anchor)
+        .execute(&env.app.db)
+        .await
+        .unwrap();
+        // 種下已寫入的 system message
+        let conv = db::conversation_id(&env.app.db, &bot.id).await.unwrap();
+        let note_content = warm_compact_note(110);
+        let msg_id = db::ulid();
+        sqlx::query(
+            "INSERT INTO messages (id, conversation_id, role, content, source, incomplete, created_at)
+             VALUES (?, ?, 'system', ?, 'system', 0, ?)",
+        )
+        .bind(&msg_id)
+        .bind(&conv)
+        .bind(&note_content)
+        .bind(&anchor)
+        .execute(&env.app.db)
+        .await
+        .unwrap();
+
+        let turns = FakeTurns::default();
+        let notes = FakeNotes::default();
+        sweep(&env, &turns, &notes, now).await;
+
+        assert!(notes.notes.lock().unwrap().is_empty(), "不加第二則 note");
+        assert_eq!(receipt(&env, &bot.id).await, Some(("done".to_string(), 1)), "settle 收據");
+        drop_window(&run.id);
+    }
+
+    /// #1041 (2): 說明成功 INSERT 後更新收據失敗（模擬 crash/busy，note_written 維持 0），下次 sweep 仍只有一則說明。
+    #[tokio::test]
+    async fn receipt_update_failure_after_note_insert_leaves_exactly_one_note_on_next_sweep() {
+        let env = tt::env().await;
+        let now = chrono::Utc::now();
+        let (bot, run) = warm_compact_due(&env, "kw-update-fail", now).await;
+        let turns = FakeTurns::default();
+        let notes = FakeNotes::default();
+
+        // 第一次 sweep：compact 成功，寫入 note 成功
+        sweep(&env, &turns, &notes, now).await;
+        assert_eq!(turns.compacts.lock().unwrap().len(), 1);
+        assert_eq!(notes.notes.lock().unwrap().len(), 1);
+        assert_eq!(receipt(&env, &bot.id).await, Some(("done".to_string(), 1)));
+
+        // 人為模擬收據 UPDATE 失敗：將 note_written 重設為 0
+        sqlx::query("UPDATE primary_cache_actions SET note_written = 0 WHERE bot_id = ?")
+            .bind(&bot.id)
+            .execute(&env.app.db)
+            .await
+            .unwrap();
+        assert_eq!(receipt(&env, &bot.id).await, Some(("done".to_string(), 0)));
+
+        // 下一次 sweep：recovery 應 reconcile，不重複寫入 note，並將 note_written 設回 1
+        drop_window(&run.id);
+        sweep(&env, &turns, &notes, now).await;
+        assert_eq!(notes.notes.lock().unwrap().len(), 1, "仍只有一則 note");
+        assert_eq!(turns.compacts.lock().unwrap().len(), 1, "不再 compact");
+        assert_eq!(receipt(&env, &bot.id).await, Some(("done".to_string(), 1)), "收據重新標記為 1");
+        drop_window(&run.id);
+    }
+
+    /// #1041 (3): 初次 note INSERT 失敗時，重試恰好建立一則 note。
+    #[tokio::test]
+    async fn initial_note_insert_failure_retries_and_creates_one_note() {
+        let env = tt::env().await;
+        let now = chrono::Utc::now();
+        let (bot, run) = warm_compact_due(&env, "kw-retry-once", now).await;
+        let turns = FakeTurns::default();
+        let notes = FakeNotes::failing(1);
+
+        sweep(&env, &turns, &notes, now).await;
+        assert!(notes.notes.lock().unwrap().is_empty(), "第一次失敗");
+        assert_eq!(receipt(&env, &bot.id).await, Some(("done".to_string(), 0)));
+
+        sweep(&env, &turns, &notes, now).await;
+        assert_eq!(notes.notes.lock().unwrap().len(), 1, "重試成功恰好一則");
+        assert_eq!(receipt(&env, &bot.id).await, Some(("done".to_string(), 1)));
+        drop_window(&run.id);
+    }
+
+    /// #1041 (4): 同一收據的並發 sweep 不會重複寫入（unique key/claim 保障）。
+    #[tokio::test]
+    async fn concurrent_sweeps_of_the_same_receipt_cannot_write_duplicates() {
+        let env = tt::env().await;
+        let now = chrono::Utc::now();
+        let (bot, run) = warm_compact_due(&env, "kw-concurrent-sweep", now).await;
+        let anchor = at(115, now);
+        // 種下收據：done, note_written=0
+        sqlx::query(
+            "INSERT INTO primary_cache_actions (bot_id, anchor, kind, run_id, status, age_min, claimed_at, done_at, note_written)
+             VALUES (?, ?, 'warm_compact', ?, 'done', 110, ?, ?, 0)",
+        )
+        .bind(&bot.id)
+        .bind(&anchor)
+        .bind(&run.id)
+        .bind(&anchor)
+        .bind(&anchor)
+        .execute(&env.app.db)
+        .await
+        .unwrap();
+
+        let turns = FakeTurns::default();
+        let notes = FakeNotes::default();
+        let ((), (), (), ()) = tokio::join!(
+            sweep(&env, &turns, &notes, now),
+            sweep(&env, &turns, &notes, now),
+            sweep(&env, &turns, &notes, now),
+            sweep(&env, &turns, &notes, now),
+        );
+
+        assert_eq!(notes.notes.lock().unwrap().len(), 1, "並發 sweep 只有一則 note");
+        assert_eq!(receipt(&env, &bot.id).await, Some(("done".to_string(), 1)), "收據為 1");
         drop_window(&run.id);
     }

@@ -153,6 +153,53 @@ pub async fn insert_message_full(
     Ok(m)
 }
 
+/// 帶有自訂 id（冪等鍵）的訊息插入。如果該 id 已存在，直接回傳已存在的訊息（不發出重複的 `message_added` 事件）。
+pub async fn insert_message_idempotent(
+    app: &(impl crate::capabilities::Db + crate::capabilities::Emit),
+    conversation_id: &str,
+    role: &str,
+    content: &str,
+    source: &str,
+    id: &str,
+) -> anyhow::Result<db::Message> {
+    let mut tx = db::begin_write(app.db()).await?;
+    let bot_id = sqlx::query_scalar::<_, String>("SELECT bot_id FROM conversations WHERE id = ?")
+        .bind(conversation_id)
+        .fetch_optional(&mut *tx)
+        .await?
+        .ok_or_else(|| anyhow::anyhow!("conversation {conversation_id} has no owner"))?;
+    if let Some(existing) = sqlx::query_as::<_, db::Message>("SELECT *, rowid AS seq FROM messages WHERE id = ?")
+        .bind(id)
+        .fetch_optional(&mut *tx)
+        .await?
+    {
+        return Ok(existing);
+    }
+    let now = db::now();
+    let n = sqlx::query(
+        "INSERT INTO messages (id, conversation_id, turn_id, role, content, source, incomplete, created_at)
+         VALUES (?,?,NULL,?,?,?,0,?) ON CONFLICT(id) DO NOTHING",
+    )
+    .bind(id)
+    .bind(conversation_id)
+    .bind(role)
+    .bind(content)
+    .bind(source)
+    .bind(&now)
+    .execute(&mut *tx)
+    .await?
+    .rows_affected();
+    let m = sqlx::query_as::<_, db::Message>("SELECT *, rowid AS seq FROM messages WHERE id = ?")
+        .bind(id)
+        .fetch_one(&mut *tx)
+        .await?;
+    tx.commit().await?;
+    if n > 0 {
+        app.emit("message_added", json!({ "bot_id": bot_id, "message": m })).await;
+    }
+    Ok(m)
+}
+
 pub async fn emit_turn(app: &impl LcHost, turn_id: &str) {
     let row = sqlx::query_as::<_, TurnEventRow>(
         "SELECT t.*, c.bot_id AS bot_id FROM turns t JOIN conversations c ON c.id = t.conversation_id WHERE t.id = ?",

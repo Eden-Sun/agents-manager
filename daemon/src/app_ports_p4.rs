@@ -793,23 +793,46 @@ impl SystemMessageWriter for AppSystemMessageWriter<'_> {
         bot: BotId,
         content: String,
     ) -> impl Future<Output = Result<(), PortError>> + Send + '_ {
+        self.append_system_message_idempotent(bot, content, None)
+    }
+
+    fn append_system_message_idempotent(
+        &self,
+        bot: BotId,
+        content: String,
+        idempotency_key: Option<String>,
+    ) -> impl Future<Output = Result<(), PortError>> + Send + '_ {
         async move {
             let conversation = crate::db::conversation_id(&self.app.db, &bot)
                 .await
                 .map_err(|error| PortError::Unavailable(error.to_string()))?;
-            crate::lifecycle::insert_message(
-                self.app,
-                &conversation,
-                None,
-                "system",
-                &content,
-                "system",
-                false,
-                None,
-            )
-            .await
-            .map(|_| ())
-            .map_err(|error| PortError::Unavailable(error.to_string()))
+            if let Some(key) = idempotency_key {
+                crate::lifecycle::insert_message_idempotent(
+                    self.app,
+                    &conversation,
+                    "system",
+                    &content,
+                    "system",
+                    &key,
+                )
+                .await
+                .map(|_| ())
+                .map_err(|error| PortError::Unavailable(error.to_string()))
+            } else {
+                crate::lifecycle::insert_message(
+                    self.app,
+                    &conversation,
+                    None,
+                    "system",
+                    &content,
+                    "system",
+                    false,
+                    None,
+                )
+                .await
+                .map(|_| ())
+                .map_err(|error| PortError::Unavailable(error.to_string()))
+            }
         }
     }
 }
