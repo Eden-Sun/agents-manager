@@ -23,6 +23,15 @@
         let _ = std::fs::remove_dir_all(&dir);
     }
 
+    /// #1004：子 agent 的 pane 帶 `AM_CHILD_OF`，它繼承的 bot 身分是母 bot 的——hook 子行程看到就不送。
+    #[test]
+    fn a_child_pane_never_reports_as_its_parent() {
+        assert!(is_child_pane(Some("proj-abc123".into())));
+        assert!(!is_child_pane(None));
+        assert!(!is_child_pane(Some("".into())));
+        assert!(!is_child_pane(Some("  ".into())));
+    }
+
     #[test]
     fn explicit_token_wins_over_env() {
         assert_eq!(hook_token("cli"), "cli");
