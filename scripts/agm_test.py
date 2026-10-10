@@ -1949,6 +1949,19 @@ class QuotaCommandTest(CliCase):
         post = [r for r in FakeDaemon.seen if r["method"] == "POST"][0]
         self.assertEqual(post["path"], "/api/quota/probe?kind=claude")
 
+    def test_explicit_default_timeout_is_not_replaced_by_quota_probe_timeout(self):
+        from unittest import mock
+        seen = []
+
+        def fake_raw(self_, method, path, body, auth=True):
+            seen.append(self_.timeout)
+            return {}
+
+        with mock.patch.object(agm.Client, "_raw", fake_raw):
+            self.ok("quota", "--probe")
+            self.ok("--timeout", "30", "quota", "--probe")
+        self.assertEqual(seen, [agm.QUOTA_PROBE_TIMEOUT, agm.DEFAULT_TIMEOUT])
+
     def test_probe_failure_surfaces_the_daemon_error(self):
         FakeDaemon.routes["POST /api/quota/probe"] = (404, {"error": "not_found", "what": "identity"})
         err = self.bad("quota", "--probe", "--account", "cc9")
@@ -3295,8 +3308,9 @@ class CliHardeningTest(CliCase):
             self.ok("mission", "deliver", "m1", "--worktree", "/tmp/w")
             self.ok("release-triage", "publish")
             self.ok("--timeout", "7", "release-triage", "publish")
+            self.ok("--timeout", "30", "release-triage", "publish")
             self.ok("health")
-        self.assertEqual([t for _p, t in seen], [agm.SLOW_TIMEOUT, agm.SLOW_TIMEOUT, 7.0, agm.DEFAULT_TIMEOUT], seen)
+        self.assertEqual([t for _p, t in seen], [agm.SLOW_TIMEOUT, agm.SLOW_TIMEOUT, 7.0, 30.0, agm.DEFAULT_TIMEOUT], seen)
 
 
 class PythonThreeNineTest(unittest.TestCase):

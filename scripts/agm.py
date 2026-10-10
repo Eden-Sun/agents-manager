@@ -1868,7 +1868,7 @@ def cmd_quota(client: Client, cfg: dict, args) -> object:
         return client.get("/api/quota")
     # 蓋掉 statusLine 鎖住的錯值（#404）：結果 source=claude-usage，直接寫進 cache。
     query = {k: v for k, v in (("kind", args.kind), ("account", args.account), ("host", args.host)) if v}
-    if client.timeout == DEFAULT_TIMEOUT:
+    if getattr(args, "timeout", None) is None:
         client.timeout = QUOTA_PROBE_TIMEOUT
     return client.post(f"/api/quota/probe?{urllib.parse.urlencode(query)}")
 
@@ -2360,7 +2360,7 @@ def build_parser() -> argparse.ArgumentParser:
         ),
     )
     p.add_argument("--runtime-dir", help="覆寫設定目錄（預設讀 AGM_RUNTIME_DIR，再退回腳本上層目錄）")
-    p.add_argument("--timeout", type=_timeout_arg, default=DEFAULT_TIMEOUT, help=f"HTTP 逾時秒數（預設 {DEFAULT_TIMEOUT:g}）")
+    p.add_argument("--timeout", type=_timeout_arg, default=None, help=f"HTTP 逾時秒數（預設 {DEFAULT_TIMEOUT:g}）")
     p.add_argument("--compact", action="store_true", help="輸出成單行 JSON")
     sub = p.add_subparsers(dest="cmd", required=True)
 
@@ -2708,9 +2708,10 @@ def main(argv: list[str] | None = None) -> int:
         client = None
         if getattr(args, "needs_client", True):
             cfg = load_runtime(args.runtime_dir)
-            client = Client(daemon_url(cfg), args.timeout, bot_auth_headers(cfg))
+            timeout = args.timeout if args.timeout is not None else DEFAULT_TIMEOUT
+            client = Client(daemon_url(cfg), timeout, bot_auth_headers(cfg))
             # 沒用 --timeout 明講、而且是 daemon 這一側本來就跑得久的操作：放寬預設（見 SLOW_TIMEOUT）。
-            if args.timeout == DEFAULT_TIMEOUT and _is_slow_command(args):
+            if args.timeout is None and _is_slow_command(args):
                 client.timeout = SLOW_TIMEOUT
         out = args.func(client, cfg, args)
     except AgmError as e:
