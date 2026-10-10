@@ -30,6 +30,15 @@ pub fn worst(a: &str, b: &str) -> String {
     if rank(a) >= rank(b) { a.to_string() } else { b.to_string() }
 }
 
+/// 門檻大到算不出切點時用的切點（#1012）：比任何一列都早，`assignment_stalled`／`assignment_undelivered` 兩條 probe 都查不到東西。
+const NEVER_STALLED_CUTOFF: &str = "0001-01-01T00:00:00.000Z";
+
+/// 「多久沒動算卡住」的切點。秒數大到算不出時刻（設定寫了極大值＝等於不要這條偵測）回 `None`，不 panic。
+fn stalled_cutoff(now: chrono::DateTime<chrono::Utc>, secs: i64) -> Option<String> {
+    let delta = chrono::Duration::try_seconds(secs)?;
+    Some(now.checked_sub_signed(delta)?.to_rfc3339_opts(chrono::SecondsFormat::Millis, true))
+}
+
 /// 協調者的事件送了這麼多次還在 pending 就開 incident（issue #420）。跟巡檢的 `notify_max_attempts`、
 /// 補送上限 `RECOVER_MAX_DELIVERIES` 同一個數字：試了五次都送不進去，第六次也不會。
 pub const RESPONDER_UNDELIVERED_ATTEMPTS: i64 = 5;
@@ -299,8 +308,7 @@ pub async fn observe(app: &(impl crate::capabilities::DataDir + crate::capabilit
     // Work that has not moved in hours. `updated_at` moves on every retry and every delivery,
     // so this only fires on something genuinely stuck — including an `awaiting_review` row
     // nobody has accepted, which is the case the review found in production.
-    let cutoff = (chrono::Utc::now() - chrono::Duration::seconds(thresholds.assignment_stalled_secs))
-        .to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
+    let cutoff = stalled_cutoff(chrono::Utc::now(), thresholds.assignment_stalled_secs).unwrap_or_else(|| NEVER_STALLED_CUTOFF.to_string());
     match store::assignments_idle_since(app.db(), &cutoff).await {
         Err(e) => {
             tracing::warn!(error = ?e, "assignment_stalled probe failed");
@@ -733,6 +741,15 @@ pub async fn system_health(app: &(impl crate::capabilities::DataDir + crate::cap
 #[cfg(all(test, feature = "daemon-test-harness"))]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_huge_stalled_threshold_yields_no_cutoff_instead_of_panicking() {
+        let now = chrono::Utc::now();
+        assert_eq!(stalled_cutoff(now, i64::MAX), None);
+        assert_eq!(stalled_cutoff(now, 10_000_000_000_000), None);
+        assert_eq!(stalled_cutoff(now, 7200), Some((now - chrono::Duration::seconds(7200)).to_rfc3339_opts(chrono::SecondsFormat::Millis, true)));
+        assert!(NEVER_STALLED_CUTOFF < "2020-01-01T00:00:00.000Z", "切點比任何真實的列都早");
+    }
 
     fn obs(kind: &str, resource: &str) -> Observation {
         Observation {
