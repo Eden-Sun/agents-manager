@@ -238,6 +238,23 @@
         assert!(row(&app.db).await.unwrap().is_none());
     }
 
+    /// issue #1140：開窗的 start note 寫不進去時，窗口不能留著（以前窗口先寫、note 後寫，note 失敗就回錯但窗口還在）。
+    #[tokio::test]
+    async fn a_window_whose_start_note_cannot_be_written_is_not_left_open() {
+        let env = tt::env().await;
+        let app = env.app.clone();
+        sqlx::query("CREATE TRIGGER fail_note BEFORE INSERT ON supervisor_notes BEGIN SELECT RAISE(ABORT, 'note boom'); END")
+            .execute(&app.db)
+            .await
+            .unwrap();
+        assert!(open_as(&app, 10, "AGM", "note failure").await.is_err(), "稽核寫不進去：整個回錯");
+        assert!(row(&app.db).await.unwrap().is_none(), "note 寫不進去：窗口不能留著");
+
+        sqlx::query("DROP TRIGGER fail_note").execute(&app.db).await.unwrap();
+        assert!(open_as(&app, 10, "AGM", "note failure").await.unwrap().is_some());
+        assert_eq!(notes(&app, "herdr_maintenance_start").await, 1);
+    }
+
     /// issue #890：同時兩個 `close_as`，窗口只刪一次、note 只寫一筆。
     #[tokio::test]
     async fn two_concurrent_closes_write_a_single_note() {

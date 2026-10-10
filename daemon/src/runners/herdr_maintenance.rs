@@ -180,18 +180,23 @@ pub async fn open(State(app): State<Arc<App>>, headers: HeaderMap, body: Option<
 pub async fn open_as(app: &Arc<App>, minutes: i64, actor: &str, reason: &str) -> Result<Option<Window>> {
     let opened_at = crate::db::now();
     let until = (chrono::Utc::now() + chrono::Duration::minutes(minutes)).to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
+    // 窗口與開窗的稽核寫在同一個交易（同 `close_as`，#890）：note 寫不進去就整個回滾，
+    // 不留下「窗口開著、沒有稽核、也沒排到期」的狀態（issue #1140）。
+    let mut tx = app.db.begin().await?;
     let inserted = sqlx::query("INSERT OR IGNORE INTO herdr_maintenance (id, opened_at, until, opened_by, reason) VALUES (1,?,?,?,?)")
         .bind(&opened_at)
         .bind(&until)
         .bind(actor)
         .bind(reason)
-        .execute(&app.db)
+        .execute(&mut *tx)
         .await?
         .rows_affected();
     if inserted == 0 {
+        tx.rollback().await?;
         return Ok(None);
     }
-    crate::supervisor_inbox::add_note(&app.db, "herdr_maintenance_start", &json!({"opened_at": opened_at, "until": until, "opened_by": actor, "reason": reason})).await?;
+    crate::supervisor_inbox::add_note_tx(&mut tx, "herdr_maintenance_start", &json!({"opened_at": opened_at, "until": until, "opened_by": actor, "reason": reason})).await?;
+    tx.commit().await?;
     arm_expiry(app, &until);
     tracing::info!(actor, until, reason, "herdr maintenance opened");
     row(&app.db).await
