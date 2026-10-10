@@ -236,6 +236,26 @@ test('插隊：附件還在上傳時不送、卡片還在；傳完才能插隊',
   }
 })
 
+test('Office 類貼上文字不變成附件；只有 Files 的貼上仍收附件', { timeout: 30_000 }, async () => {
+  const { requests } = await openChat('am-claude')
+  const image = new File([new Uint8Array([1])], 'image.png', { type: 'image/png' })
+  const paste = async (clipboardData: { files: File[]; types: string[]; getData(type: string): string }) => {
+    const ev = new Event('paste', { bubbles: true, cancelable: true })
+    Object.defineProperty(ev, 'clipboardData', { value: clipboardData })
+    await act(async () => { textarea().dispatchEvent(ev) })
+    return ev
+  }
+
+  const office = await paste({ files: [image], types: ['text/plain', 'text/html', 'text/rtf', 'Files'], getData: (type) => type === 'text/plain' ? 'A\tB' : '' })
+  assert.equal(office.defaultPrevented, false)
+  assert.equal(document.querySelector('.attach-tray'), null)
+  assert.equal(requests.some((r) => r.method === 'POST' && /\/attachments/.test(r.path)), false)
+
+  const filePaste = await paste({ files: [image], types: ['Files'], getData: () => '' })
+  assert.equal(filePaste.defaultPrevented, true)
+  assert.equal(document.querySelectorAll('.attach-tray .attach-thumb').length, 1)
+})
+
 test('清掉再送我這則：附件上傳中／失敗時 disabled', { timeout: 30_000 }, async () => {
   useStore.setState({
     composerDrafts: {
