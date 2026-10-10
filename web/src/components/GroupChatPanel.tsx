@@ -10,6 +10,7 @@ import { useBotLamp } from '../hooks/useBotLamp'
 import { useEnterToSend } from '../hooks/useEnterToSend'
 import { PHONE_QUERY, useMediaQuery } from '../hooks/useMediaQuery'
 import { useComposerFocus } from '../hooks/useComposerFocus'
+import { pastedFiles } from '../lib/pasteFiles'
 import { mentionComboAttrs, mentionOptionId } from '../lib/mentionCombo'
 import { isImeEnter } from '../lib/ime'
 import { useRefocusAfterSend } from '../hooks/useRefocusAfterSend'
@@ -493,8 +494,7 @@ function GroupComposer({
           onClick={syncCaret}
           onBlur={syncCaret}
           onPaste={(e) => {
-            // 貼上帶的檔案一律收（不再只收圖片）；純文字貼上不帶 files，不受影響。
-            const pasted = Array.from(e.clipboardData?.files ?? [])
+            const pasted = pastedFiles(e.clipboardData)
             if (pasted.length === 0) return
             e.preventDefault()
             files.add(pasted)
