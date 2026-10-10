@@ -20,21 +20,44 @@ export function MemPaneModal({ host, p, onClose }: { host: string; p: MemProcess
   const termRef = useRef<HTMLPreElement>(null)
   useDialogFocus(true, rootRef, { initialFocus: () => closeRef.current })
 
+  // 上一趟結束才排下一趟（同一時間最多一條請求在飛：回應不會亂序、請求不會疊起來，#1138）；背景分頁不抓，回到前景立刻補一次。
   useEffect(() => {
     let alive = true
-    const tick = () =>
-      fetchMemPane(host, paneId, p.socket_path, LINES)
-        .then((s) => {
-          if (!alive) return
+    let busy = false
+    let timer: ReturnType<typeof setTimeout> | null = null
+    const next = () => {
+      if (alive) timer = setTimeout(() => void tick(), REFRESH_MS)
+    }
+    const tick = async () => {
+      if (document.visibilityState === 'hidden') {
+        next()
+        return
+      }
+      busy = true
+      try {
+        const s = await fetchMemPane(host, paneId, p.socket_path, LINES)
+        if (alive) {
           setSnap(s)
           setErr(null)
-        })
-        .catch((e: unknown) => alive && setErr(e instanceof Error ? e.message : '讀不到'))
+        }
+      } catch (e: unknown) {
+        if (alive) setErr(e instanceof Error ? e.message : '讀不到')
+      }
+      busy = false
+      next()
+    }
+    const onVisible = () => {
+      if (document.visibilityState !== 'visible' || busy) return
+      if (timer) clearTimeout(timer)
+      timer = null
+      void tick()
+    }
+    document.addEventListener('visibilitychange', onVisible)
     void tick()
-    const t = setInterval(() => void tick(), REFRESH_MS)
     return () => {
       alive = false
-      clearInterval(t)
+      document.removeEventListener('visibilitychange', onVisible)
+      if (timer) clearTimeout(timer)
     }
   }, [host, paneId, p.socket_path])
 
