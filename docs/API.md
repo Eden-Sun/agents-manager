@@ -1822,6 +1822,7 @@ codex 的 `fast` **不再因為不知道現況而拒絕**（拿掉 `unknown_fast
 - `GET` → `{"active":bool,"window":{"opened_at","until","opened_by","reason"}|null,"max_minutes":30}`；過了 `until` 的窗口在讀取當下自動結束。
 - `POST …/open` body `{"minutes"?:1..30（預設 30）,"reason":"必填"}` → `{"active":true,"window"}`。**只有 AGM 角色**（`X-AM-Bot-Id`＋該 bot 的 `X-AM-Bot-Token`）：其他呼叫端 `403 herdr_maintenance_forbidden`；已經開著 `409`；分鐘數越界或沒有理由 400。
 - `POST …/end` body `{"reason"?}` → `{"active":false,"closed":true,"retired_children":["<name>",…]}`；沒開著回 `{"closed":false}`。同樣只有 AGM 角色。
+  讀窗口與關窗之間被另一扇取代（#1171）：**不關新的那扇**，回 409 `conflict`、`reason: "herdr_maintenance_superseded"`，`window` 是現在這扇（要結束新窗口再呼叫一次）；不回 `active:false`。兩個 `end` 同時關同一扇，只有一個回 `closed:true`。
 - 開、關、逾時都寫 `supervisor_notes`（`herdr_maintenance_start`／`_end`／`_expired`）。
 
 ### 10.3b `POST /api/bots/{id}/fork`

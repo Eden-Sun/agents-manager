@@ -29,15 +29,21 @@ pub async fn active(app: &Arc<App>) -> Result<Option<Window>> {
     Ok(None)
 }
 
+/// `close` 的結果（#1171）：`Closed`＝這次真的關掉了；`NotThisWindow`＝關之前這扇已經不是現在的窗口（別人先關、或被換成新的一扇）。
+pub(crate) enum CloseOutcome {
+    Closed(Vec<String>),
+    NotThisWindow(Vec<String>),
+}
+
 /// 順序（issue #890）：先確認窗口還是同一個 → 退役沒接回的子 agent（失敗＝整個回錯、窗口保留，下次重試）→
 /// 同一個交易刪窗口與寫 note。退役是冪等的（已退役的不會再被選到），所以中途失敗、窗口留著重來不會重複。
-async fn close(app: &Arc<App>, w: &Window, kind: &str, actor: &str, reason: Option<&str>) -> Result<Vec<String>> {
+async fn close(app: &Arc<App>, w: &Window, kind: &str, actor: &str, reason: Option<&str>) -> Result<CloseOutcome> {
     let same: Option<i64> = sqlx::query_scalar("SELECT 1 FROM herdr_maintenance WHERE id = 1 AND opened_at = ?")
         .bind(&w.opened_at)
         .fetch_optional(&app.db)
         .await?;
     if same.is_none() {
-        return Ok(vec![]); // 別人先關了
+        return Ok(CloseOutcome::NotThisWindow(vec![])); // 別人先關了，或已換成新的一扇
     }
     let retired = retire_unreturned_children(app, &w.opened_at).await?;
     let mut tx = app.db.begin().await?;
@@ -48,7 +54,7 @@ async fn close(app: &Arc<App>, w: &Window, kind: &str, actor: &str, reason: Opti
         .rows_affected();
     if gone == 0 {
         tx.rollback().await?;
-        return Ok(retired); // 別人先關了；退役的結果照回
+        return Ok(CloseOutcome::NotThisWindow(retired)); // 別人先關了；退役的結果照回
     }
     crate::supervisor_inbox::add_note_tx(
         &mut tx,
@@ -59,7 +65,7 @@ async fn close(app: &Arc<App>, w: &Window, kind: &str, actor: &str, reason: Opti
     .await?;
     tx.commit().await?;
     tracing::info!(kind, actor, retired = retired.len(), "herdr maintenance closed");
-    Ok(retired)
+    Ok(CloseOutcome::Closed(retired))
 }
 
 /// 維護期間被標 exited、到現在還沒有 active run 的子 agent：照原規則退休（跟 reconcile 平常做的一樣）。
@@ -204,7 +210,9 @@ pub async fn open_as(app: &Arc<App>, minutes: i64, actor: &str, reason: &str) ->
 
 /// 關掉 `open_as` 開的那個窗口（`opened_at` 對得上才關，別人的不動）；回退休的子 agent 名。
 pub async fn close_as(app: &Arc<App>, w: &Window, actor: &str, reason: Option<&str>) -> Result<Vec<String>> {
-    close(app, w, "herdr_maintenance_end", actor, reason).await
+    Ok(match close(app, w, "herdr_maintenance_end", actor, reason).await? {
+        CloseOutcome::Closed(retired) | CloseOutcome::NotThisWindow(retired) => retired,
+    })
 }
 
 pub async fn end(State(app): State<Arc<App>>, headers: HeaderMap, body: Option<Json<CloseIn>>) -> Result<Json<Value>, LcError> {
@@ -213,6 +221,24 @@ pub async fn end(State(app): State<Arc<App>>, headers: HeaderMap, body: Option<J
     let Some(w) = active(&app).await.map_err(up)? else {
         return Ok(Json(json!({"active": false, "closed": false})));
     };
-    let retired = close(&app, &w, "herdr_maintenance_end", role, b.reason.as_deref()).await.map_err(up)?;
-    Ok(Json(json!({"active": false, "closed": true, "retired_children": retired})))
+    #[cfg(test)]
+    crate::race_point::hit("herdr_end_after_read", &w.opened_at).await;
+    #[cfg(test)]
+    crate::race_point::hit("herdr_end_after_read", &w.opened_at).await;
+    match close(&app, &w, "herdr_maintenance_end", role, b.reason.as_deref()).await.map_err(up)? {
+        CloseOutcome::Closed(retired) => {
+            // 照實回：關完之後若又有人開了一扇，`active` 說的是現在的狀態。
+            let now = row(&app.db).await.map_err(up)?;
+            Ok(Json(json!({"active": now.is_some(), "closed": true, "retired_children": retired})))
+        }
+        CloseOutcome::NotThisWindow(retired) => match row(&app.db).await.map_err(up)? {
+            // 讀窗口與關窗之間被另一扇取代：不關新的那扇，也不能回 `active:false`（新窗口還開著）。
+            Some(current) => Err(LcError::conflict(
+                "herdr_maintenance_superseded",
+                json!({"window": current, "retired_children": retired,
+                       "message": "這扇窗口已經被另一扇取代，沒有關掉新的那扇；要結束新窗口請再呼叫一次。"}),
+            )),
+            None => Ok(Json(json!({"active": false, "closed": false, "retired_children": retired}))),
+        },
+    }
 }
