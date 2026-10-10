@@ -864,7 +864,7 @@ async fn events<H: PortalEnv>(State(st): State<Portal<H>>, Path(token): Path<Str
         _slot: slot,
         _share_slot: share_slot,
         pending: Some(Value::Null),
-        emit_guard: Some(authority),
+        first_guard: Some(authority),
         revoked: false,
     };
     let stream = futures::stream::unfold(s, |mut s| async move { s.next().await.map(|ev| (Ok::<_, std::convert::Infallible>(ev), s)) });
@@ -882,7 +882,9 @@ pub struct Stream<H: PortalEnv> {
     _slot: tokio::sync::OwnedSemaphorePermit,
     _share_slot: PerSharePermit,
     pending: Option<Value>,
-    emit_guard: Option<OwnedMutexGuard<()>>,
+    /// handler 驗完 token 的那把 bot 鎖，只留到第一則 `status` 組好就放（#1200）：之後每則事件各自在 `map` 裡重驗，
+    /// 不跨 poll 握著——client 不讀時 hyper 不再 poll，這把鎖不能跟著卡住這顆 bot。
+    first_guard: Option<OwnedMutexGuard<()>>,
     revoked: bool,
 }
 
@@ -894,7 +896,8 @@ impl<H: PortalEnv> Stream<H> {
     /// 下一個要送的事件；`None`＝收掉這條連線（token 失效、bus 關了）。
     async fn next(&mut self) -> Option<Event> {
         if self.pending.take().is_some() {
-            let guard = match self.emit_guard.take() {
+            // 鎖只包到組好這一則；交出去之後不握（見 `first_guard`）。
+            let _guard = match self.first_guard.take() {
                 Some(g) => g,
                 None => match authority_lock_app(&self.app, &self.token_lookups, &self.limits, &self.token, &self.bot_id).await {
                     Ok(g) => g,
@@ -902,11 +905,8 @@ impl<H: PortalEnv> Stream<H> {
                 },
             };
             let first = json!({"status": status_of(&self.app, &self.bot_id).await});
-            self.emit_guard = Some(guard);
             return Some(Event::default().event("status").data(first.to_string()));
         }
-        // Keep the previous event fenced until the consumer polls for another item.
-        self.emit_guard.take();
         // 期限放在迴圈外：別顆 bot 的事件每來一則就轉一圈，放在裡面等於每次重新倒數、永遠不到期（#1162）。
         let recheck = tokio::time::sleep(STREAM_RECHECK);
         tokio::pin!(recheck);
@@ -922,11 +922,10 @@ impl<H: PortalEnv> Stream<H> {
                         }
                     }
                     Err(broadcast::error::RecvError::Lagged(_)) => {
-                        let guard = match authority_lock_app(&self.app, &self.token_lookups, &self.limits, &self.token, &self.bot_id).await {
-                            Ok(g) => g,
-                            Err(_) => return None,
-                        };
-                        self.emit_guard = Some(guard);
+                        // 只重驗，不把鎖留到下一次 poll（#1200）。
+                        if authority_lock_app(&self.app, &self.token_lookups, &self.limits, &self.token, &self.bot_id).await.is_err() {
+                            return None;
+                        }
                         return Some(Event::default().event("resync").data("{}"));
                     }
                     Err(broadcast::error::RecvError::Closed) => return None,
@@ -951,7 +950,8 @@ impl<H: PortalEnv> Stream<H> {
         if ev.data.get("bot_id").and_then(Value::as_str) != Some(self.bot_id.as_str()) {
             return None;
         }
-        let guard = match authority_lock_app(&self.app, &self.token_lookups, &self.limits, &self.token, &self.bot_id).await {
+        // 鎖只包重驗＋組事件（回傳前放掉）：事件交給 HTTP 層之後不握 bot 鎖，client 不讀也不會卡住這顆 bot（#1200）。
+        let _guard = match authority_lock_app(&self.app, &self.token_lookups, &self.limits, &self.token, &self.bot_id).await {
             Ok(g) => g,
             Err(_) => {
                 self.revoked = true;
@@ -987,9 +987,6 @@ impl<H: PortalEnv> Stream<H> {
             "bot_status" => Some(Event::default().event("status").data(json!({"status": status_of(&self.app, &self.bot_id).await}).to_string())),
             _ => None,
         };
-        if out.is_some() {
-            self.emit_guard = Some(guard);
-        }
         out
     }
 }
@@ -1007,7 +1004,7 @@ pub fn stream_for_test<H: PortalEnv>(app: &Arc<H>, token: &str, bot_id: &str, pe
         _slot: Arc::new(Semaphore::new(1)).try_acquire_owned().unwrap(),
         _share_slot: Arc::new(PerShareSlots::new(MAX_STREAMS_PER_SHARE)).try_acquire(bot_id).unwrap(),
         pending,
-        emit_guard: None,
+        first_guard: None,
         revoked: false,
     }
 }

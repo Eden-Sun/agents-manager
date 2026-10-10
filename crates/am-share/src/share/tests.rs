@@ -1975,6 +1975,30 @@ async fn a_revoked_token_cannot_emit_a_queued_sse_bus_event() {
     assert!(portal::map_for_test(&mut stream, &ev).await.is_none(), "a queued bus event must be fenced too");
 }
 
+/// client 不讀（hyper 不再來拿下一則）時，SSE 不能握著 bot 鎖：hook、送訊息、擁有者關分享都要先拿這把鎖（issue #1200）。
+#[tokio::test]
+async fn an_sse_stream_nobody_polls_does_not_hold_the_bot_lock() {
+    use portal::PortalEnv as _;
+    let e = tt::env().await;
+    let b = restricted_bot(&e.app, &e.project_id, "sse-unpolled").await;
+    let token = shared(&e.app, &b.id).await;
+    let lock = e.app.bot_mutex(&b.id).await;
+
+    let mut stream = portal::stream_for_test(&e.app, &token, &b.id, Some(json!({"status": "idle"})));
+    assert!(portal::next_for_test(&mut stream).await.is_some(), "第一則 status");
+    // 從這裡起不再 poll：等於 client 不讀。
+    assert!(lock.try_lock().is_ok(), "第一則交出去之後不握 bot 鎖");
+
+    let ev = crate::state::WsEvent { seq: 1, kind: "bot_status".into(), data: json!({"bot_id": b.id}) };
+    assert!(portal::map_for_test(&mut stream, &ev).await.is_some());
+    assert!(lock.try_lock().is_ok(), "bus 事件交出去之後也不握");
+
+    // 撤銷照樣當場生效：下一則事件在鎖內重驗，發現失效就不送。
+    store::disable(&e.app.db, &b.id).await.unwrap();
+    assert!(portal::map_for_test(&mut stream, &ev).await.is_none(), "撤銷後的事件仍被圍籬擋下");
+    drop(stream);
+}
+
 /// #1162：定期重驗不能被別顆 bot 的事件一直重設——匯流排再忙，撤銷的連線也要在 `STREAM_RECHECK` 內收掉（不靠 `kick`）。
 #[tokio::test]
 async fn the_sse_recheck_fires_even_while_other_bots_keep_the_bus_busy() {
