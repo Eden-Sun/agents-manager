@@ -5,7 +5,7 @@
 import { useCallback, useEffect, useState } from 'react'
 import { orderRows, showRepo } from '../lib/previewList'
 import { shownPreviewErr } from '../lib/previewErr'
-import { groupOthers, kindLabel, fetchPreview, type PreviewOther, type PreviewRelation, type StartPreviewOpts, previewApiMissing, PREVIEW_API_MISSING, previewOutOfReach, previewReasonText, previewUrl, startPreview, stopPreview, NO_DEV_REASONS, PREVIEW_OFF, type Preview } from '../api/preview'
+import { groupOthers, kindLabel, fetchPreview, type PreviewOther, type PreviewRelation, type StartPreviewOpts, previewApiMissing, PREVIEW_API_MISSING, previewOutOfReach, previewReasonText, previewUrl, startPreview, stopPreview, NO_DEV_REASONS, PREVIEW_OFF, type Preview, previewMixedContent } from '../api/preview'
 import { isMock } from '../api'
 import { ApiError } from '../api/types'
 import type { ReactNode } from 'react'
@@ -77,6 +77,19 @@ export function OutOfReachNote({ hostname, https }: { hostname: string; https: b
         {https ? ' 這一頁還是 https，http 的 iframe 也會被瀏覽器當混合內容擋掉。' : ''}
       </p>
       <p className="preview-body">預覽還在跑，在那台機器上開一樣的網址就看得到。</p>
+    </div>
+  )
+}
+
+/** https 頁面嵌 http 的 iframe 會被瀏覽器當混合內容擋掉：一片空白沒有說明（#1212）。講清楚，「在新分頁開」照常可按。 */
+export function MixedContentNote({ url }: { url: string }) {
+  return (
+    <div className="preview-empty" role="status">
+      <h2 className="preview-title">這一頁沒辦法內嵌這個預覽</h2>
+      <p className="preview-body">
+        這一頁是 https，而 dev server 是 http（<code>{url}</code>）：瀏覽器會把 http 的 iframe 當混合內容擋掉。
+      </p>
+      <p className="preview-body">預覽還在跑，按上面的「在新分頁開」直接看。</p>
     </div>
   )
 }
@@ -275,6 +288,8 @@ export function PreviewPanel({ botId, headStart, headEnd }: { botId: string; hea
   if (p.status === 'running' && url) {
     // `allow_lan` 關著時 daemon 把 dev server 釘在 loopback（#434／#452），這個頁面不是從那台機器開的就連不到（#527）。
     const outOfReach = previewOutOfReach(p.lan, location.hostname)
+    // https 頁面嵌 http 的 iframe 會被擋（#1212）：換成說明，「在新分頁開」照常可按。
+    const mixed = !outOfReach && previewMixedContent(location.protocol, location.hostname)
     return (
       <div className="preview-pane">
         {/* 跑起來之後這一列就是預覽欄的標題列（2026-09-20 使用者：「兩排 header 可併在同一排」）。 */}
@@ -287,7 +302,7 @@ export function PreviewPanel({ botId, headStart, headEnd }: { botId: string; hea
             {attached ? `已接上既有的 dev server（port ${p.port}）` : p.source === 'spawned' ? '由 AG Man 啟動' : ''}
           </span>
           <span className="spacer" />
-          <button type="button" className="btn preview-btn" onClick={() => setNonce((n) => n + 1)}>
+          <button type="button" className="btn preview-btn" disabled={mixed} onClick={() => setNonce((n) => n + 1)}>
             重新整理
           </button>
           {outOfReach ? (
@@ -313,6 +328,8 @@ export function PreviewPanel({ botId, headStart, headEnd }: { botId: string; hea
         {err ? <ErrNote err={err} /> : null}
         {outOfReach ? (
           <OutOfReachNote hostname={location.hostname} https={location.protocol === 'https:'} />
+        ) : mixed ? (
+          <MixedContentNote url={url} />
         ) : (
           <iframe
             key={nonce}

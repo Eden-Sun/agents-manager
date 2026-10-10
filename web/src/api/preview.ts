@@ -238,6 +238,11 @@ export function previewOutOfReach(lan: boolean | null, hostname: string): boolea
   return lan === false && !isLoopbackHost(hostname)
 }
 
+/** https 頁面嵌 http 的 iframe 會被瀏覽器當混合內容擋掉（loopback 例外）。iframe 網址一律是 http（`previewUrl`）。 */
+export function previewMixedContent(protocol: string, hostname: string): boolean {
+  return protocol === 'https:' && !isLoopbackHost(hostname)
+}
+
 
 const KIND_LABEL: Record<string, string> = {
   vite: 'Vite',

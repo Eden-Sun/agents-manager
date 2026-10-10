@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict'
 import { test } from 'node:test'
-import { PREVIEW_OFF, groupOthers, kindLabel, previewOutOfReach, previewReasonText, toPreview, toPreviewEvent } from './preview'
+import { PREVIEW_OFF, groupOthers, kindLabel, previewMixedContent, previewOutOfReach, previewReasonText, toPreview, toPreviewEvent } from './preview'
 
 test('toPreview: 沒開過／壞資料都是 off', () => {
   assert.deepEqual(toPreview({ status: 'off' }), PREVIEW_OFF)
@@ -117,4 +117,11 @@ test('連不連得到：allow_lan 關著又不是本機開的才擋（issue #527
   // allow_lan 開著＝daemon 讓它綁對外，照舊嵌 iframe；null＝舊 daemon，不知道就不擋。
   assert.equal(previewOutOfReach(true, 'mac.tailnet.ts.net'), false)
   assert.equal(previewOutOfReach(null, 'mac.tailnet.ts.net'), false)
+})
+
+test('https 的非 loopback 頁面算混合內容；http 或 loopback 不算（#1212）', () => {
+  assert.equal(previewMixedContent('https:', 'mac.tailnet.ts.net'), true)
+  assert.equal(previewMixedContent('http:', 'mac.tailnet.ts.net'), false)
+  assert.equal(previewMixedContent('https:', 'localhost'), false)
+  assert.equal(previewMixedContent('https:', '127.0.0.1'), false)
 })
