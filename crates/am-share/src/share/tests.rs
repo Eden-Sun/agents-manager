@@ -1143,6 +1143,22 @@ async fn uploads_are_checked_by_name_size_and_content() {
     assert_eq!(list["messages"][0]["text"], "看附件");
     assert_eq!(list["messages"][0]["attachments"], json!([{"name": "報表 v2.csv"}]));
 
+    // #1034: 60 個 CJK 字元檔名上傳成功且送訊息接受
+    let cjk60_name = format!("{}.txt", "資".repeat(60));
+    let b_cjk = restricted_bot(&e.app, &e.project_id, "cjk-bot").await;
+    let token_cjk = shared(&e.app, &b_cjk.id).await;
+    let r_up_cjk = c.post(format!("{base}/s/{token_cjk}/api/upload")).query(&[("name", &cjk60_name)]).header("Content-Type", "image/png").body(b"test content".to_vec()).send().await.unwrap();
+    let v_cjk: Value = r_up_cjk.json().await.unwrap();
+    let id_cjk = v_cjk["id"].as_str().unwrap();
+    assert!(portal::stored_name_ok(id_cjk));
+    let r_cjk = c.post(format!("{base}/s/{token_cjk}/api/messages")).json(&json!({"text": "cjk attachment", "client_request_id": "cjk60", "attachments": [id_cjk]})).send().await.unwrap();
+    assert_eq!(r_cjk.status(), 200, "{}", r_cjk.text().await.unwrap());
+
+    // 80 個 CJK 字元檔名直接回 400 bad_name，而非 503
+    let cjk80_name = format!("{}.txt", "資".repeat(80));
+    let res80 = up(&cjk80_name, b"test content".to_vec()).await.unwrap();
+    assert_eq!(res80.status(), 400);
+
     // 分享頁實際送的形狀：`FormData` 的 `file` 欄位。
     let multipart = |field: &str, filename: &str, data: &[u8]| {
         let mut b = format!("--XyZ\r\nContent-Disposition: form-data; name=\"{field}\"; filename=\"{filename}\"\r\nContent-Type: application/octet-stream\r\n\r\n").into_bytes();
@@ -1666,7 +1682,24 @@ fn upload_names_are_cleaned_and_attachments_split_back_out() {
         assert_eq!(portal::clean_upload_name(bad), None, "{bad}");
     }
     assert!(!portal::stored_name_ok("notes.txt"), "一定是 <ulid>-<名字>");
-    assert!(!portal::stored_name_ok("01ARZ3NDEKTSV4RRFFQ69G5FAV-../x"));
+    // #1034: 60 個 CJK 字元（184 位元組）合法上傳且 stored_name_ok 接受
+    let cjk60 = format!("{}.txt", "資".repeat(60));
+    let cleaned60 = portal::clean_upload_name(&cjk60).expect("60 CJK chars must be accepted");
+    let stored60 = format!("01ARZ3NDEKTSV4RRFFQ69G5FAV-{cleaned60}");
+    assert_eq!(stored60.len(), 211);
+    assert!(portal::stored_name_ok(&stored60), "stored 211 bytes must pass stored_name_ok");
+
+    // 80 個 CJK 字元（244 位元組 > CLEAN_NAME_MAX_BYTES 228）拒絕
+    let cjk80 = format!("{}.txt", "資".repeat(80));
+    assert_eq!(portal::clean_upload_name(&cjk80), None, "80 CJK chars exceed byte limit");
+
+    // 剛好 255 位元組的 stored_name 接受，256 拒絕
+    let stored_max = format!("01ARZ3NDEKTSV4RRFFQ69G5FAV-{}", "a".repeat(228));
+    assert_eq!(stored_max.len(), 255);
+    assert!(portal::stored_name_ok(&stored_max));
+    let stored_over = format!("01ARZ3NDEKTSV4RRFFQ69G5FAV-{}", "a".repeat(229));
+    assert!(!portal::stored_name_ok(&stored_over));
+
     let (text, names) = portal::split_attachments(&format!("hi\n\n{}\n- inbox/01ARZ3NDEKTSV4RRFFQ69G5FAV-a.txt\n- inbox/01ARZ3NDEKTSV4RRFFQ69G5FAW-b.png", portal::ATTACH_MARK));
     assert_eq!(text, "hi");
     assert_eq!(names, vec!["a.txt", "b.png"]);
