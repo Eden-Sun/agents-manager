@@ -168,6 +168,8 @@ export function HostShellPanel({
   /** 在歷史裡的位置；`-1` = 正在編輯的那一行（還沒往上翻）。 */
   const [histAt, setHistAt] = useState(-1)
   const inputRef = useRef<HTMLInputElement>(null)
+  /** 開始往上翻歷史前正在打的那一行：↓ 回到底時還給它（#1128）。 */
+  const pendingLine = useRef('')
 
   // 換 shell 在 render 當下清畫面，不走 effect：留著另一台機器的畫面會被誤認成這一台。
   const [lastTarget, setLastTarget] = useState(target)
@@ -262,6 +264,7 @@ export function HostShellPanel({
         if ((useStore.getState().drafts[draftKey] ?? '') === cmd) {
           setText('')
           setHistAt(-1)
+          pendingLine.current = ''
         }
         setSendErr(null)
         refresh()
@@ -328,6 +331,7 @@ export function HostShellPanel({
     const list = history[host] ?? []
     if (e.key === 'ArrowUp' && list.length > 0) {
       e.preventDefault()
+      if (histAt === -1) pendingLine.current = text
       const at = Math.min(histAt + 1, list.length - 1)
       setHistAt(at)
       setText(list[at])
@@ -337,7 +341,7 @@ export function HostShellPanel({
       e.preventDefault()
       const at = histAt - 1
       setHistAt(at)
-      setText(at < 0 ? '' : list[at])
+      setText(at < 0 ? pendingLine.current : list[at])
     }
   }
 

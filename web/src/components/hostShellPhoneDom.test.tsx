@@ -135,3 +135,38 @@ test('手機：送出中接著打的下一行不會被清掉（沒改字的送�
     restore()
   }
 })
+
+/** #1128：↑ 翻歷史會換掉輸入框，打到一半的那一行要在 ↓ 回到底時還回來。 */
+test('手機：↑ 翻歷史再 ↓ 回到底，打到一半的那一行還在', async () => {
+  localStorage.setItem('am.shellHistory', JSON.stringify({ local: ['ls'] }))
+  const restore = asPhone()
+  try {
+    await openShell()
+    const cmdInput = () => document.querySelector<HTMLInputElement>('.shell-cmd')!
+    const setValue = async (v: string) => {
+      await act(async () => {
+        const set = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value')!.set!
+        set.call(cmdInput(), v)
+        cmdInput().dispatchEvent(new Event('input', { bubbles: true }))
+      })
+    }
+    const key = async (k: string) => {
+      await act(async () => cmdInput().dispatchEvent(new KeyboardEvent('keydown', { key: k, bubbles: true, cancelable: true })))
+    }
+
+    await setValue('git st')
+    await key('ArrowUp')
+    assert.equal(cmdInput().value, 'ls', '↑ 翻到歷史')
+    await key('ArrowDown')
+    assert.equal(cmdInput().value, 'git st', '↓ 回到底：打到一半的字還在')
+
+    // 對照：空的輸入框 ↑ 再 ↓ 是空的，不會把前一次的 pending 帶回來。
+    await setValue('')
+    await key('ArrowUp')
+    await key('ArrowDown')
+    assert.equal(cmdInput().value, '')
+  } finally {
+    localStorage.removeItem('am.shellHistory')
+    restore()
+  }
+})
