@@ -374,3 +374,26 @@ test('別處重產連結（share_enabled 沒變）：聊天頂端的分享鈕複
   }
 })
 
+test('別處重產連結（share_enabled 沒變）：設定面板換成新連結（#1099）', async () => {
+  const { mock, shared } = await setup()
+  await mount(<BotShareSection botId={shared.id} />)
+  await settle(150)
+  const before = document.querySelector<HTMLInputElement>('input[aria-label="分享連結"]')!.value
+  assert.ok(before, '分享中就看得到完整連結')
+
+  // 從聊天頂端或另一個分頁重產：share_enabled 不變，只來一幀 bot_share_changed。
+  const r = (await mock.request('POST', `/bots/${shared.id}/share/rotate`)) as { url: string }
+  // 同 #1098：harness 的 act 環境會吞掉 effect 裡重抓的非 act 回寫，這一段暫時關掉 act 環境，finally 還原。
+  const g = globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }
+  g.IS_REACT_ACT_ENVIRONMENT = false
+  try {
+    useStore.setState((s) => ({ shareRev: { ...s.shareRev, [shared.id]: (s.shareRev[shared.id] ?? 0) + 1 } }))
+    await new Promise((resolve) => setTimeout(resolve, 150))
+  } finally {
+    g.IS_REACT_ACT_ENVIRONMENT = true
+  }
+  await settle(50)
+  const after = document.querySelector<HTMLInputElement>('input[aria-label="分享連結"]')!.value
+  assert.equal(after, r.url, '輸入框換成新連結')
+  assert.notEqual(after, before)
+})

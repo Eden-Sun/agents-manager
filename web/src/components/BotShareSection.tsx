@@ -10,12 +10,14 @@ const fmt = (iso: string | null) => (iso ? new Date(iso).toLocaleString('zh-TW',
 /**
  * Bot 設定裡的「分享」區塊（SPEC「分享 bot」）：只有分享用的 bot（受限或信任分享）才畫。
  * 開／關、隨時顯示完整連結＋複製、重產（舊的立刻失效）。舊版開的分享只有雜湊，提示重產一次。
- * 聊天區頂端的「🔗 分享」改了狀態會發 `bot_share_changed` → `share_enabled` 變 → 這裡重抓。
+ * 聊天區頂端的「🔗 分享」或別處的重產會發 `bot_share_changed`：開／關會讓 `share_enabled` 變，重產不會（前後都是分享中），
+ * 所以另外看 `shareRev`（每收到一次加一）——兩者任一變了就重抓（#1099）。
  */
 export function BotShareSection({ botId }: { botId: string }) {
   const profile = useStore((s) => s.bots.find((b) => b.id === botId)?.share_profile ?? null)
   const restricted = profile !== null
   const sharing = useStore((s) => s.bots.find((b) => b.id === botId)?.share_enabled === true)
+  const rev = useStore((s) => s.shareRev[botId] ?? 0)
   const notify = useStore((s) => s.notify)
   const [share, setShare] = useState<ShareState | null>(null)
   const [error, setError] = useState<string | null>(null)
@@ -32,7 +34,7 @@ export function BotShareSection({ botId }: { botId: string }) {
     return () => {
       alive = false
     }
-  }, [botId, restricted, sharing])
+  }, [botId, restricted, sharing, rev])
 
   if (!restricted) return null
 
