@@ -88,7 +88,7 @@ impl HostHooks for App {
 /// 以主機名為鍵、描述「那台機器」的快取全部丟掉（#347）：偵測結果（`app.tools`，含身分與 herdr CLI 版本）、
 /// 額度（`<host>/…`，連重啟快取列）、模型清單（`<host>/<kind>/<identity>`）、這個 daemon 在那台開的 shell 清單。
 /// 移除主機與同名改設定都走這裡；新連線上線後由偵測／探測重新填。
-async fn forget_host_observations(app: &(impl crate::api::shell::HostShells + crate::capabilities::Db + crate::capabilities::Emit + crate::github::GithubCache + crate::host_baseline::HostBaselineTable + crate::login_assist::LoginPanes + crate::login_assist::LoginReservations + crate::models::ModelsCache + crate::quota::QuotaStaleKeys + crate::quota::QuotaTables + crate::shim_refresh::RemoteShimStale + crate::tools::ToolsTable), name: &str) {
+async fn forget_host_observations(app: &(impl crate::api::shell::HostShells + crate::capabilities::Db + crate::capabilities::Emit + crate::github::GithubCache + crate::host_baseline::HostBaselineTable + crate::login_assist::LoginPanes + crate::login_assist::LoginReservations + crate::login_prompt::LoginNeeded + crate::models::ModelsCache + crate::quota::QuotaStaleKeys + crate::quota::QuotaTables + crate::shim_refresh::RemoteShimStale + crate::tools::ToolsTable), name: &str) {
     let prefix = format!("{name}/");
     app.tools().lock().await.remove(name);
     app.host_baseline().lock().await.remove(name);
@@ -110,6 +110,8 @@ async fn forget_host_observations(app: &(impl crate::api::shell::HostShells + cr
     app.models_cache().lock().await.retain(|k, _| !k.starts_with(&prefix));
     app.host_shells().lock().await.retain(|s| s.host != name);
     crate::login_assist::forget_host(app, name);
+    // 登入失效的記號是這台機器的觀測：同名改指後舊機器的「需要重新登入」不能掛到新機器上（#1142）。
+    crate::login_prompt::forget_host(app, name);
     // GitHub origin 跟 tools／額度一樣是這台機器的觀測（#830）。改指或刪除時清掉，舊連線的掃描不能再寫回來。
     if let Ok(projects) = crate::db::live_projects(app.db()).await {
         let mut github = app.github().lock().await;
@@ -491,6 +493,21 @@ mod port_tests {
         assert!(!crate::quota_grok::cooling_down(&grok_key), "grok 退避已清");
         assert!(crate::quota_claude::cooling_down(&other_claude, false, false), "別台的不動");
         crate::quota_claude::unpark(&other_claude);
+    }
+
+    /// #1142：同名改指之後，舊機器的「需要重新登入」不能掛到新機器的同名身分上（別台的記號不動）。
+    #[tokio::test]
+    async fn repointing_a_host_forgets_its_login_needed_markers() {
+        let e = env().await;
+        let host = format!("port-login-{}", crate::db::ulid());
+        let other = format!("port-login-o-{}", crate::db::ulid());
+        e.app.hosts.insert_remote_for_test(remote_cfg(&host)).await;
+        crate::login_prompt::mark(&e.app, &host, "cc1", crate::login_prompt::VIA_TURN);
+        crate::login_prompt::mark(&e.app, &other, "cc1", crate::login_prompt::VIA_TURN);
+        e.app.hosts.replace_remote_for_test(&e.app, remote_cfg(&host)).await;
+        assert!(crate::login_prompt::get(&e.app, &host, "cc1").is_none(), "改指後舊機器的記號不能留著");
+        assert!(crate::login_prompt::get(&e.app, &other, "cc1").is_some(), "別台不受影響");
+        crate::login_prompt::clear(&e.app, &other, "cc1");
     }
 
     /// 同名主機設定換掉＝換了一條連線：舊 fence 的操作要 `Conflict`，不能送到新連線上（即使新連線的重連計數剛好一樣）。

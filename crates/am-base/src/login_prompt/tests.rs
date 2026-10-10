@@ -201,3 +201,15 @@ async fn a_good_turn_clears_the_marker_of_the_identity_the_run_started_with() {
     process(&env.app, &stop(&bot, "p2", "ok")).await.unwrap();
     assert_eq!(get(&env.app, HOST, "cc1"), None, "cc1 自己的提示清掉");
 }
+
+/// 同名主機改指／移除：只丟那台主機的記號，別台與本機不動；已經沒有時回 false。
+#[tokio::test]
+async fn forgetting_a_host_drops_only_that_hosts_markers() {
+    let env = tt::env().await;
+    assert!(mark(&env.app, "m4p", "cc1", VIA_TURN));
+    assert!(mark(&env.app, HOST, "cc1", VIA_TURN));
+    assert!(forget_host(&env.app, "m4p"));
+    assert_eq!(get(&env.app, "m4p", "cc1"), None, "改指後不能留著舊機器的記號");
+    assert!(get(&env.app, HOST, "cc1").is_some(), "別台不受影響");
+    assert!(!forget_host(&env.app, "m4p"), "已經沒有：回 false");
+}
