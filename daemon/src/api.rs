@@ -7906,6 +7906,30 @@ mod delete_bot_tests {
         assert_eq!(intent_states(&app2, &e.project_id).await, vec!["done"]);
     }
 
+    /// #1063：定案之後死掉、草稿還沒清：開機補完要連草稿一起清（bot 與專案版）。
+    #[tokio::test]
+    async fn a_delete_killed_after_the_decision_also_clears_the_drafts_on_boot() {
+        let e = crate::testing::env().await;
+        let (parent, kid) = parent_and_child(&e).await;
+        for key in [format!("bot:{parent}"), format!("bot:{kid}"), format!("group:{}", e.project_id)] {
+            crate::drafts::put(&e.app.db, &key, "unsent").await.unwrap();
+        }
+        die_in_delete(&e, &parent, "delete_bot_after_decided", false).await;
+        let app2 = crate::testing::restart_app(&e).await;
+        crate::delete_intents::recover_host(&app2, LOCAL_HOST).await;
+        let keys: Vec<String> = crate::drafts::list(&app2.db).await.unwrap().into_iter().map(|d| d.key).collect();
+        assert_eq!(keys, vec![format!("group:{}", e.project_id)], "母 bot 與 child 的草稿清掉；專案的草稿不屬於這次刪除");
+
+        let e2 = crate::testing::env().await;
+        let (_p2, kid2) = parent_and_child(&e2).await;
+        crate::drafts::put(&e2.app.db, &format!("group:{}", e2.project_id), "unsent").await.unwrap();
+        crate::drafts::put(&e2.app.db, &format!("bot:{kid2}"), "unsent").await.unwrap();
+        die_in_delete(&e2, &e2.project_id, "delete_project_after_commit", true).await;
+        let app3 = crate::testing::restart_app(&e2).await;
+        crate::delete_intents::recover_host(&app3, LOCAL_HOST).await;
+        assert!(crate::drafts::list(&app3.db).await.unwrap().is_empty(), "專案與它的 bot 草稿都清掉");
+    }
+
     #[tokio::test]
     async fn a_delete_project_killed_before_the_decision_is_abandoned() {
         let e = crate::testing::env().await;
