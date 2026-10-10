@@ -1017,14 +1017,49 @@ mod plain_warn_tests {
 
 #[cfg(all(test, feature = "daemon-test-harness"))]
 mod tests {
-    /// 送達掃描用的 source 必須是 herdr 認得的；本機有 herdr socket 與 pane 時，直接丟給真 herdr 的 RPC
-    /// （CLI 的 clap 連字號也收，所以只有 socket 能證明）。
+    /// 送達掃描用的 source 必須是 herdr 認得的（純斷言，任何環境都跑）。真的 herdr 會不會收，另有
+    /// `the_scan_source_is_one_real_herdr_accepts`（只有明講才連）。
+    #[test]
+    fn the_scan_source_is_a_known_herdr_source() {
+        assert!(["visible", "recent", "recent_unwrapped", "detection"].contains(&SCAN_SOURCE));
+    }
+
+    /// 要不要連真的 herdr：只有 `AM_TEST_REAL_HERDR=1` 才連。pane 裡本來就有 `HERDR_*`，不能當成同意（#1147）。
+    fn real_herdr_target(opt_in: Option<&str>, sock: Option<String>, pane: Option<String>) -> Option<(String, String)> {
+        if opt_in != Some("1") {
+            return None;
+        }
+        Some((sock?, pane?))
+    }
+
+    #[test]
+    fn the_real_herdr_probe_is_opt_in() {
+        let s = || Some("/s".to_string());
+        let p = || Some("w1:p1".to_string());
+        assert!(real_herdr_target(None, s(), p()).is_none(), "pane 裡有 HERDR_* 也不連");
+        assert!(real_herdr_target(Some("0"), s(), p()).is_none());
+        assert!(real_herdr_target(Some("1"), None, p()).is_none());
+        assert_eq!(real_herdr_target(Some("1"), s(), p()), Some(("/s".into(), "w1:p1".into())));
+    }
+
+    /// 本機有 herdr socket 與 pane、而且明講 `AM_TEST_REAL_HERDR=1` 時，直接丟給真 herdr 的 RPC
+    /// （CLI 的 clap 連字號也收，所以只有 socket 能證明）。手動驗證：
+    /// `AM_TEST_REAL_HERDR=1 cargo test -p agents-managerd -- the_scan_source_is_one_real_herdr_accepts`。
     #[test]
     fn the_scan_source_is_one_real_herdr_accepts() {
-        assert!(["visible", "recent", "recent_unwrapped", "detection"].contains(&SCAN_SOURCE));
-        let (Ok(sock), Ok(pane)) = (std::env::var("HERDR_SOCKET_PATH"), std::env::var("HERDR_PANE_ID")) else { return };
+        let Some((sock, pane)) = real_herdr_target(
+            std::env::var("AM_TEST_REAL_HERDR").ok().as_deref(),
+            std::env::var("HERDR_SOCKET_PATH").ok(),
+            std::env::var("HERDR_PANE_ID").ok(),
+        ) else {
+            return;
+        };
         use std::io::{BufRead, Write};
-        let Ok(mut stream) = std::os::unix::net::UnixStream::connect(&sock) else { return };
+        let mut stream = std::os::unix::net::UnixStream::connect(&sock).expect("AM_TEST_REAL_HERDR=1 但連不上 HERDR_SOCKET_PATH");
+        // 沒有讀寫逾時的話 herdr 卡住時這條測試永遠不回來（#1147）。
+        let limit = Some(std::time::Duration::from_secs(10));
+        stream.set_read_timeout(limit).unwrap();
+        stream.set_write_timeout(limit).unwrap();
         let req = json!({"id": "scan-source", "method": "pane.read",
             "params": {"pane_id": pane, "source": SCAN_SOURCE, "lines": 1, "format": "ansi"}});
         stream.write_all(format!("{req}\n").as_bytes()).unwrap();
