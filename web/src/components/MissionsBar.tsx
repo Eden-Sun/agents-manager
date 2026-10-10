@@ -374,6 +374,9 @@ function MissionCard({ mission, onNavigate }: { mission: Mission; onNavigate: Na
   const loadError = useStore((s) => s.missionLoadErrors[mission.id])
   const controlMission = useStore((s) => s.controlMission)
   const answerMission = useStore((s) => s.answerMission)
+  // 詳情只給 bot id（`target_bot_id`）：名字從 store 的 bot 清單對。對不到（bot 已刪、舊資料）就照舊顯示原字串（#1131）。
+  const botNames = useStore(useShallow((s) => Object.fromEntries(s.bots.map((b) => [b.id, b.name]))))
+  const botLabel = (idOrName: string) => botNames[idOrName] ?? idOrName
   const [answer, setAnswer] = useState('')
   const [sending, setSending] = useState(false)
   const [confirmCancel, setConfirmCancel] = useState(false)
@@ -429,7 +432,7 @@ function MissionCard({ mission, onNavigate }: { mission: Mission; onNavigate: Na
             <li key={a.role}>
               <span className="mission-role">{ROLE_LABEL[a.role]}</span>
               <span className="mission-who">
-                {a.bot ?? '—'}
+                {a.bot ? botLabel(a.bot) : '—'}
                 {a.identity ? ` · ${a.identity}` : ''}
                 {a.model ? ` · ${a.model}` : ''}
               </span>
@@ -455,7 +458,11 @@ function MissionCard({ mission, onNavigate }: { mission: Mission; onNavigate: Na
               <span className={`mission-asg-state${a.turn_error || a.turn_status === 'quota_exhausted' ? ' warn' : ''}`}>
                 {assignmentLabel(a)}
               </span>
-              {a.target_bot_id ? <span className="mission-who">{a.target_bot_id}</span> : null}
+              {a.target_bot_id ? (
+                <span className="mission-who" title={a.target_bot_id}>
+                  {botLabel(a.target_bot_id)}
+                </span>
+              ) : null}
               {a.follow_up_of ? <span className="mission-tag">接手</span> : null}
               {a.turn_error ? (
                 <span className="mission-asg-err" title={a.turn_error}>
