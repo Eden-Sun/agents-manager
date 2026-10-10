@@ -14,6 +14,7 @@
 //! - 先讀 transcript（claude）／rollout（codex）：證得出「我們送的 prompt 之後已經有完整回覆」→ `completed` 並回填回覆；
 //!   證不出 → `completed_fallback`，在對話裡寫明理由。**不標 failed**：回合多半是做完了，只是結束沒被看見。
 //! - 收尾走 [`emit_turn`]（交辦照一般回合結束流程），並在同一把 bot 鎖裡立刻 flush 這顆 bot 的 queued。
+//! - 等 bot 鎖最多 [`LOCK_WAIT`]；拿不到就這一輪跳過這顆、下一輪再看（整輪是單一條迴圈，不能被一顆握著鎖的 bot 拖住，#1201）。
 //!
 //! idle 計時放記憶體：daemon 重啟後從第一次看到 idle 重新算，寧可晚收，不要誤收。
 
@@ -30,6 +31,9 @@ pub const IDLE_MINS_DEFAULT: u64 = 5;
 pub const IDLE_MINS_ENV: &str = "AM_STUCK_TURN_IDLE_MINS";
 /// 定時掃描的間隔：reconcile 只在連線、agent 出現、子 pane 關掉時才跑，一顆靜靜 idle 的 bot 不會觸發它。
 const SWEEP_EVERY: Duration = Duration::from_secs(60);
+
+/// 巡邏等一顆 bot 的鎖最多等多久：整輪是單一條迴圈，不能被一顆握著鎖的 bot 拖住（它下一輪再看）。
+const LOCK_WAIT: Duration = Duration::from_secs(5);
 /// transcript／rollout 只讀尾端這麼多：那個 prompt 如果不在這裡面，就當證不出來。
 const LOG_TAIL_BYTES: u64 = 8 * 1024 * 1024;
 
@@ -142,6 +146,10 @@ pub async fn sweep(app: &impl StuckTurnContext, host: Option<&str>) -> Vec<Strin
 }
 
 pub async fn sweep_at(app: &impl StuckTurnContext, host: Option<&str>, now: Instant, threshold: Duration) -> Vec<String> {
+    sweep_with(app, host, now, threshold, LOCK_WAIT).await
+}
+
+async fn sweep_with(app: &impl StuckTurnContext, host: Option<&str>, now: Instant, threshold: Duration, lock_wait: Duration) -> Vec<String> {
     let rows: Vec<(String, String, String, String)> = match sqlx::query_as(
         "SELECT t.id, r.id, r.bot_id, r.agent_status
            FROM turns t
@@ -170,7 +178,10 @@ pub async fn sweep_at(app: &impl StuckTurnContext, host: Option<&str>, now: Inst
             continue;
         }
         let bot_lock = app.bot_lock(&bot_id).await;
-        let _g = bot_lock.lock().await;
+        let Ok(_g) = tokio::time::timeout(lock_wait, bot_lock.lock()).await else {
+            tracing::warn!(bot = %bot_id, turn = %turn_id, "stuck turn sweep: bot lock is busy; skipping this bot until the next round");
+            continue;
+        };
         // 等鎖的時候狀態可能變了：鎖內重讀，run 不是 idle、turn 已經不是那一筆就不動。
         let Ok(Some(run)) = db::run(app.db(), &run_id).await else { continue };
         observe_at(&run_id, &run.agent_status, now);
@@ -477,6 +488,37 @@ mod tests {
         prune(&mut timers, &["idle-timer-kept".to_string()]);
         assert!(!timers.contains_key("idle-timer-gone"), "結束的 run 不留計時");
         assert!(timers.contains_key("idle-timer-kept"), "還活著的 run 的計時不動");
+    }
+
+    /// 一顆 bot 的鎖被握著不放：巡邏跳過它，別的 bot 卡住的回合照收，整輪不會停在那裡（issue #1201）。
+    #[tokio::test]
+    async fn a_bot_whose_lock_is_held_does_not_stall_the_sweep_for_other_bots() {
+        let f = stuck("被握著鎖的那顆").await;
+        let app = f.env.app.clone();
+        // 同一個 app 裡的第二顆：一樣卡住（照 `the_sweep_leaves_a_handed_off_projects_turn_alone` 的寫法手動建）。
+        let other = tt::claude_bot(&app, &f.env.project_id, "other-stuck").await;
+        let other_run = tt::fake_run(&app, &other.id).await;
+        sqlx::query("UPDATE runs SET agent_status = 'idle' WHERE id = ?").bind(&other_run).execute(app.db()).await.unwrap();
+        let conv = db::conversation_id(app.db(), &other.id).await.unwrap();
+        let other_turn = db::ulid();
+        sqlx::query("INSERT INTO turns (id, conversation_id, run_id, origin, status, delivery, prompt_text, created_at) VALUES (?,?,?,'web','in_flight','ok','x',?)")
+            .bind(&other_turn)
+            .bind(&conv)
+            .bind(&other_run)
+            .bind(db::iso_in(-3600))
+            .execute(app.db())
+            .await
+            .unwrap();
+        let t0 = Instant::now();
+        observe_at(&f.run_id, "idle", t0);
+        observe_at(&other_run, "idle", t0);
+
+        let lock = app.bot_lock(&f.bot_id).await;
+        let _held = lock.lock().await;
+        let done = tokio::time::timeout(Duration::from_secs(30), sweep_with(&app, None, t0 + 6 * MIN, 5 * MIN, Duration::from_millis(200))).await;
+        assert_eq!(done.ok(), Some(vec![other_turn.clone()]), "握著鎖的那顆跳過，另一顆照收，整輪有回來");
+        assert_eq!(turn(&app, &f.turn_id).await.status, "in_flight", "被跳過的那顆這一輪不動");
+        assert!(lock.try_lock().is_err(), "前提：鎖整段都還握著");
     }
 
     /// #708：移交出去的專案，in-flight 回合是對方 daemon 的：巡邏不收；收回之後照常收。
