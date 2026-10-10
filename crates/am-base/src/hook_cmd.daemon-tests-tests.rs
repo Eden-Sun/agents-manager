@@ -32,6 +32,17 @@
         assert!(!is_child_pane(Some("  ".into())));
     }
 
+    /// #1005：409（provider 不符）與 410（bot 已刪）是 daemon 明確的永久拒絕，重放也一樣丟，不進 spool。
+    #[test]
+    fn permanent_rejections_are_not_spooled() {
+        assert!(!worth_spooling(409));
+        assert!(!worth_spooling(410));
+        assert!(worth_spooling(401));
+        assert!(worth_spooling(503));
+        assert!(worth_spooling(500));
+        assert!(worth_spooling(413));
+    }
+
     #[test]
     fn explicit_token_wins_over_env() {
         assert_eq!(hook_token("cli"), "cli");
