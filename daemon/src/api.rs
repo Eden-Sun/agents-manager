@@ -6151,7 +6151,8 @@ async fn get_messages(
     let conv = db::conversation_id(&app.db, &id).await.map_err(any_err)?;
     let limit: i64 = q.get("limit").and_then(|s| s.parse().ok()).unwrap_or(100).clamp(1, 500);
     // 游標必須是這段對話裡還在的訊息：被刪掉的或別顆 bot 的一律 404＋reason，不拿全域 rowid 默默切出錯的一頁（#766）。
-    let before_rowid = match q.get("before") {
+    // `before=` 空字串等同沒帶（回第一頁），同 `turn_id`／`role` 與群組版；不是「游標指到一個不存在的 id」。
+    let before_rowid = match q.get("before").map(String::as_str).filter(|b| !b.is_empty()) {
         Some(b) => {
             let at: Option<(i64, String)> = sqlx::query_as("SELECT rowid, conversation_id FROM messages WHERE id = ?")
                 .bind(b)
@@ -7012,6 +7013,22 @@ mod message_tests {
             not_found_reason(group(crate::group::messages(&app, &project, Some("m-elsewhere"), 10).await)).await.as_deref(),
             Some("before_message_not_in_conversation")
         );
+    }
+
+    /// `before=` 空字串是第一頁，不是 404 before_message_gone（同 turn_id／role 的空字串也當沒帶）。
+    #[tokio::test]
+    async fn an_empty_before_cursor_is_the_first_page_not_a_404() {
+        let e = crate::testing::env().await;
+        let app = e.app.clone();
+        let (mine, conv) = a_bot_with_conv(&e, "cursor-empty").await;
+        a_turn(&app.db, &conv, "t-e").await;
+        a_message(&app.db, &conv, "m-e-1", "t-e", "user", None).await;
+        a_message(&app.db, &conv, "m-e-2", "t-e", "assistant", None).await;
+        let page = |before: &str| Query(HashMap::from([("before".to_string(), before.to_string())]));
+        let Json(with_empty) = get_messages(State(app.clone()), Path(mine.clone()), page("")).await.unwrap();
+        let Json(without) = get_messages(State(app.clone()), Path(mine.clone()), Query(HashMap::new())).await.unwrap();
+        assert_eq!(with_empty["messages"], without["messages"]);
+        assert_eq!(with_empty["messages"].as_array().unwrap().len(), 2);
     }
 
     async fn deleted_bot_with_hits(e: &crate::testing::Env, name: &str, hits: usize) -> String {

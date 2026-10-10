@@ -799,7 +799,7 @@ codex 的 rollout 還沒寫出來時先放回等 3 次（只算這個原因，�
 ## 6. 讀訊息
 
 `GET /api/bots/{id}/messages?before=<message_id>&limit=100`：以插入順序倒序分頁（`before` 指向已載入訊息中 rowid 最小的一則；客戶端需依 `seq` 選游標，不能假定時間排序第一則就是游標），回傳的 `messages` 已依時間正序。可選 `turn_id` 限定該回合、`role=user|assistant|system` 限定角色，均在該 bot 的 conversation 內過濾後才分頁；不存在或其他 bot 的回合回空訊息清單，非法 role 回 400。不帶篩選參數沿用原行為。
-Bot principal 只能讀自己的 bot 與 descendant bots 的對話；讀到 ancestor、sibling 或其他 bot 回 `403 bot_resource_scope`。User principal 維持完整讀取。`before` 必須是這顆 bot 的 conversation 裡**還在**的訊息：被刪掉（例如撤回排隊的 prompt、撤掉過期的「未送達」note）或根本不存在 → **404** `{"error":"not_found","what":"before message","reason":"before_message_gone","message_id"}`；是別顆 bot 的訊息 → 404 `reason:"before_message_not_in_conversation"`。不會默默拿全域 rowid 切出錯的一頁；呼叫端的正解是重載第一頁（不是重試同一個游標）。
+Bot principal 只能讀自己的 bot 與 descendant bots 的對話；讀到 ancestor、sibling 或其他 bot 回 `403 bot_resource_scope`。User principal 維持完整讀取。`before` 空字串等同沒帶（回第一頁）。`before` 必須是這顆 bot 的 conversation 裡**還在**的訊息：被刪掉（例如撤回排隊的 prompt、撤掉過期的「未送達」note）或根本不存在 → **404** `{"error":"not_found","what":"before message","reason":"before_message_gone","message_id"}`；是別顆 bot 的訊息 → 404 `reason:"before_message_not_in_conversation"`。不會默默拿全域 rowid 切出錯的一頁；呼叫端的正解是重載第一頁（不是重試同一個游標）。
 沒有這個 bot → 404；已刪除的 bot 仍讀得到歷史。
 
 ```json
@@ -1944,7 +1944,7 @@ agy 的 `payload` 是 stdin JSON（camelCase：`conversationId`、`transcriptPat
   `@` 須在開頭或非字元之後（`me@example.com` 不算）。目標依專案內 bot 順序去重。送給 bot 的文字去掉 mention 與其後的 `, : ; ，：；、`。
 
 ### 11.1 `GET /api/projects/{id}/messages?before=<message_id>&limit=100`
-UI token 會取得 Project 底下所有存活 bot 的訊息合併。Bot token 只取得自己與 descendant bots 的訊息，依插入順序（`rowid`）倒序分頁、回傳正序；SQL 先過濾 bot scope 再套 `limit`，游標若指向 scope 外的訊息回 404。`limit` 1–500。每則多 `bot_id`、`bot_name`。Project 不存在 404。
+UI token 會取得 Project 底下所有存活 bot 的訊息合併。Bot token 只取得自己與 descendant bots 的訊息，依插入順序（`rowid`）倒序分頁、回傳正序；SQL 先過濾 bot scope 再套 `limit`，游標若指向 scope 外的訊息回 404。`before` 空字串等同沒帶（回第一頁）。`limit` 1–500。每則多 `bot_id`、`bot_name`。Project 不存在 404。
 
 ```json
 { "project_id": "01M1...",
