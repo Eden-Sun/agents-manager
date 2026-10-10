@@ -650,22 +650,21 @@ pub fn spawn_identity_login_watch<H: ToolsEnv>(
 /// 「Select login method」 despite being logged in (cc2, 2026-09-08). Local host only.
 pub fn ensure_claude_onboarded(config_dir: &std::path::Path) -> bool {
     let path = config_dir.join(".claude.json");
-    let Ok(text) = std::fs::read_to_string(&path) else { return false };
-    let Ok(mut v) = serde_json::from_str::<serde_json::Value>(&text) else { return false };
-    let Some(obj) = v.as_object_mut() else { return false };
-    if obj.get("hasCompletedOnboarding").and_then(|x| x.as_bool()) == Some(true) {
-        return false;
-    }
-    if obj.get("oauthAccount").map(|a| a.is_object()).unwrap_or(false) == false {
-        return false;
-    }
-    obj.insert("hasCompletedOnboarding".into(), serde_json::Value::Bool(true));
-    let Ok(out) = serde_json::to_string_pretty(&v) else { return false };
-    let tmp = path.with_extension("json.am-tmp");
-    if std::fs::write(&tmp, out).is_err() {
-        return false;
-    }
-    std::fs::rename(&tmp, &path).is_ok()
+    // 走信任檔那一套（#1126）：同一把鎖、讀到寫之間被改就重讀、同目錄暫存檔＋fsync＋rename、沿用原檔權限（0600 不被 umask 放寬）。
+    // 沒有檔、讀不懂、不是物件、已經有旗標、沒有登入帳號：不動，也不建檔。
+    crate::trust::update_file(&path, |existing| {
+        let Ok(mut v) = serde_json::from_str::<serde_json::Value>(existing) else { return Ok(None) };
+        let Some(obj) = v.as_object_mut() else { return Ok(None) };
+        if obj.get("hasCompletedOnboarding").and_then(|x| x.as_bool()) == Some(true) {
+            return Ok(None);
+        }
+        if !obj.get("oauthAccount").is_some_and(|a| a.is_object()) {
+            return Ok(None);
+        }
+        obj.insert("hasCompletedOnboarding".into(), serde_json::Value::Bool(true));
+        Ok(Some(serde_json::to_string_pretty(&v)?))
+    })
+    .unwrap_or(false)
 }
 
 #[derive(Debug, Clone)]

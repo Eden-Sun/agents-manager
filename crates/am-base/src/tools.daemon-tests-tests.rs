@@ -94,6 +94,28 @@
         std::fs::remove_dir_all(&dir).unwrap();
     }
 
+    /// 帳號檔是 0600、走信任檔的鎖與原子寫：改完權限不變、目錄裡沒有暫存檔殘留（#1126）。
+    #[test]
+    fn onboarding_keeps_the_account_file_private_and_leaves_no_temp_file() {
+        use std::os::unix::fs::PermissionsExt as _;
+        let dir = crate::testing::track(std::env::temp_dir().join(format!("am-onboard-mode-{}", ulid::Ulid::new())));
+        std::fs::create_dir_all(&dir).unwrap();
+        let f = dir.join(".claude.json");
+        std::fs::write(&f, r#"{"oauthAccount":{"emailAddress":"x@y"}}"#).unwrap();
+        std::fs::set_permissions(&f, std::fs::Permissions::from_mode(0o600)).unwrap();
+        assert!(super::ensure_claude_onboarded(&dir));
+        assert_eq!(std::fs::metadata(&f).unwrap().permissions().mode() & 0o777, 0o600, "帳號檔不能被放寬");
+        let names: Vec<String> = std::fs::read_dir(&dir).unwrap().map(|e| e.unwrap().file_name().to_string_lossy().into_owned()).collect();
+        assert_eq!(names, vec![".claude.json".to_string()], "沒有留下暫存檔");
+        // 沒有檔：不建。
+        let empty = crate::testing::track(std::env::temp_dir().join(format!("am-onboard-none-{}", ulid::Ulid::new())));
+        std::fs::create_dir_all(&empty).unwrap();
+        assert!(!super::ensure_claude_onboarded(&empty));
+        assert!(!empty.join(".claude.json").exists());
+        std::fs::remove_dir_all(&dir).unwrap();
+        std::fs::remove_dir_all(&empty).unwrap();
+    }
+
     use super::*;
 
     /// Real `alias` output from both machines (2026-09-06); m4p keys cc1 to `~/.claude-ccompany`.
