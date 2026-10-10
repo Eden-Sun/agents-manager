@@ -1135,6 +1135,26 @@ pub async fn process_locked_for<H: HookHost>(app: &H, body: &HookBody, event_id:
     // 放行的那一代主機世代（#1024）：agy 的授權失敗只改這一代，換代了就不改。
     let mut admitted_fence = None;
     if let Some(r) = &run {
+        // 主機世代（#1035）：這一run 啟動時所在的遠端主機已經換代（`?confirm=repoint` 換指、改設定）＝這一則是上一代主機的，
+        // 跟上面的 run 世代一樣：只記錄、不改任何欄位。
+        let run_host_generation = db::run_host_generation(app.db(), &r.id).await.ok().flatten();
+        let host_moved = match run_host_generation {
+            Some(was) => app.admitted_host_fence(&bot).await.is_some_and(|f| f.generation() as i64 != was),
+            None => false,
+        };
+        if host_moved {
+            tracing::warn!(
+                bot = %bot.name, provider = %body.provider, ?kind, run = %r.id,
+                "run 啟動時的遠端主機已換代（repoint）：丟棄，不讓上一代主機的事件改到這一代的狀態（issue #1035）",
+            );
+            app.emit(
+                "hook_fenced",
+                json!({"bot_id": bot.id, "provider": body.provider, "run_id": r.id,
+                       "prior_run_id": "", "session_id": hook_session_id(&body.payload), "why": "host_generation"}),
+            )
+            .await;
+            return Ok(());
+        }
         let ev = crate::lifecycle::fence::EventIdentity { run_id: body.run_id.as_deref(), session_id: hook_session_id(&body.payload) };
         let owner = app.db().classify_event_owner(&bot.id, r, ev).await;
         if !owner.may_mutate() {
@@ -3294,6 +3314,98 @@ mod external_claim_tests {
             .await
             .unwrap();
         (bot_id, conv, turn_id)
+    }
+
+    /// issue #1035：run 在主機 A 上起來（記下 A 的世代），`?confirm=repoint` 把同名主機改指到 B（世代換了），
+    /// 舊 run 的 Stop 這時才到。它是上一代主機的事件：一個欄位都不准動，也要留下 `hook_fenced`。
+    #[tokio::test]
+    async fn a_run_started_before_a_repoint_cannot_touch_the_repointed_host() {
+        let env = tt::env().await;
+        let app = env.app.clone();
+        let host = format!("repoint-{}", db::ulid());
+        let host_cfg = |ssh: &str| crate::config::HostCfg {
+            shared_session: false,
+            name: host.clone(),
+            ssh: ssh.into(),
+            ssh_port: 22,
+            ssh_opts: vec![],
+            herdr_session: "test".into(),
+            remote_path: String::new(),
+        };
+        app.hosts
+            .insert_remote_with_client_for_test(host_cfg("target-a"), crate::herdr::HerdrClient::new(env.dir.join("a.sock")))
+            .await;
+        sqlx::query("UPDATE projects SET host=? WHERE id=?").bind(&host).bind(&env.project_id).execute(&app.db).await.unwrap();
+        let bot_id = db::ulid();
+        sqlx::query(
+            "INSERT INTO bots (id, project_id, name, kind, args_json, autostart, inject_hooks, hook_token, created_at)
+             VALUES (?,?,'repointed','claude','[]',0,1,'tok',?)",
+        )
+        .bind(&bot_id)
+        .bind(&env.project_id)
+        .bind(db::now())
+        .execute(&app.db)
+        .await
+        .unwrap();
+        let conv = db::conversation_id(&app.db, &bot_id).await.unwrap();
+
+        // 起在 A 上的 run：啟動當下記下 A 的世代（start 會這樣寫，這裡直接種）。
+        let gen_a = app.hosts.fence(&host).await.unwrap().generation() as i64;
+        let run = db::ulid();
+        sqlx::query(
+            "INSERT INTO runs (id, bot_id, state, agent_status, pane_id, native_session_id, started_at, host, host_generation)
+             VALUES (?,?,'running','working','pane-a','s-a',?,?,?)",
+        )
+        .bind(&run)
+        .bind(&bot_id)
+        .bind(db::now())
+        .bind(&host)
+        .bind(gen_a)
+        .execute(&app.db)
+        .await
+        .unwrap();
+        let turn = db::ulid();
+        sqlx::query(
+            "INSERT INTO turns (id, conversation_id, run_id, origin, status, delivery, prompt_text, created_at)
+             VALUES (?,?,?,'web','in_flight','ok','改指前問的',?)",
+        )
+        .bind(&turn)
+        .bind(&conv)
+        .bind(&run)
+        .bind(db::now())
+        .execute(&app.db)
+        .await
+        .unwrap();
+        assert_eq!(db::run_host_generation(&app.db, &run).await.unwrap(), Some(gen_a));
+
+        // 同名主機改指到 B：世代換了。
+        app.hosts
+            .replace_remote_with_client_for_test(&app, host_cfg("target-b"), crate::herdr::HerdrClient::new(env.dir.join("b.sock")))
+            .await;
+
+        let mut events = app.subscribe();
+        process(
+            &app,
+            &HookBody {
+                bot_id: bot_id.clone(),
+                provider: "claude".into(),
+                payload: json!({"hook_event_name": "Stop", "session_id": "s-a", "prompt_id": "p-a",
+                                "last_assistant_message": "改指前的回覆"}),
+                received_at: None,
+                truncated: false,
+                run_id: None,
+            },
+        )
+        .await
+        .unwrap();
+
+        let t = sqlx::query_as::<_, db::Turn>("SELECT * FROM turns WHERE id=?").bind(&turn).fetch_one(&app.db).await.unwrap();
+        assert_eq!(t.status, "in_flight", "改指之前的 run 的 Stop 不准收回合");
+        let replies: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM messages WHERE role='assistant'").fetch_one(&app.db).await.unwrap();
+        assert_eq!(replies, 0, "上一代主機的回覆不能貼進對話");
+        let ev = tokio::time::timeout(std::time::Duration::from_secs(1), events.recv()).await.unwrap().unwrap();
+        assert_eq!(ev.kind, "hook_fenced");
+        assert_eq!(ev.data["why"], "host_generation");
     }
 
     /// issue #69 的 race，整條走一遍：使用者 interrupt → bot 重啟（舊 run 收掉、新 run 起來並開了新回合）

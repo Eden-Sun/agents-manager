@@ -1121,6 +1121,11 @@ impl HostFence {
         &self.conn
     }
 
+    /// 這一個 fence 綁的主機世代（`replace`／改設定／重連會換代）。issue #1035：run 啟動時記下它，admission 比對。
+    pub fn generation(&self) -> u64 {
+        self.generation
+    }
+
     #[cfg(feature = "test-hooks")]
     #[doc(hidden)]
     pub fn authority_gate_for_test(&self) -> &tokio::sync::RwLock<()> {
