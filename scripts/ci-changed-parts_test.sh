@@ -14,7 +14,9 @@ check() {
     fi
 }
 
-check "" "docs/API.md" "README.md"
+check "" "docs/FRONTEND.md" "README.md"
+# docs/API.md 不是「只有文件」：daemon 的 api_doc_parity 與 ws_event_docs_tests 在測試時讀它（#1170）。
+check "daemon" "docs/API.md"
 check "web" "web/src/store/store.ts"
 check "daemon" "daemon/src/api.rs"
 check "daemon" "Cargo.lock"
@@ -55,7 +57,7 @@ check "daemon" "daemon/src/api.rs"
 # 有測試釘住內容的文件：docs/SPEC.md（scripts/jev-role_test.sh 要求裡面有 Jev 角色政策那幾句）。
 # 只改這份文件不必跑整包 ops，單獨一個 `specs` 部分只跑那支契約測試。
 check "specs" "docs/SPEC.md"
-check "specs" "docs/SPEC.md" "docs/API.md"
+check "daemon specs" "docs/SPEC.md" "docs/API.md"
 check "daemon specs" "docs/SPEC.md" "daemon/src/api.rs"
 check "ops specs" "docs/SPEC.md" "scripts/ops/README.md"
 
