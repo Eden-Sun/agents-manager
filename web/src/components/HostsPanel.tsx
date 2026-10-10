@@ -51,6 +51,7 @@ function OpenShellButton({ host, connected }: { host: string; connected: boolean
       type="button"
       className="mini-btn"
       disabled={busy || !connected}
+      aria-label={host === 'local' ? '在本機開 shell' : `在 ${host} 開 shell`}
       title={connected ? '在這台主機開一個 shell，直接下指令' : '主機未連線，開不了 shell'}
       onClick={(e) => {
         const btn = e.currentTarget
@@ -118,8 +119,8 @@ function HostShellList({ host, connected }: { host: string; connected: boolean }
               type="button"
               className="icon-btn"
               disabled={ending}
-              aria-label="結束這個 shell"
-              title="結束這個 shell"
+              aria-label={`結束 shell ${sh.cwd}（pane ${sh.pane_id}）`}
+              title={`結束 shell ${sh.cwd}（pane ${sh.pane_id}）`}
               onClick={() =>
                 void endHostShell(host, sh.pane_id).then((why) => {
                   if (why) setNeeds({ paneId: sh.pane_id, why })
@@ -224,6 +225,7 @@ function HostRow({ name }: { name: string }) {
           type="button"
           className="mini-btn"
           disabled={busy}
+          aria-label={busy ? `${name} 連線中` : `重連 ${name}`}
           title="重新建立 ssh master 並 ping 遠端 herdr"
           onClick={() => void reconnectHost(name)}
         >
@@ -232,7 +234,7 @@ function HostRow({ name }: { name: string }) {
         <button
           type="button"
           className="icon-btn"
-          aria-label="刪除主機"
+          aria-label={`刪除主機 ${name}`}
           title={projectCount > 0 ? '仍有 Project 使用這個主機' : '刪除主機'}
           onClick={() => setConfirmDelete(true)}
         >
