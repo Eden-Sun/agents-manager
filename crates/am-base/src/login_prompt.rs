@@ -50,6 +50,14 @@ pub fn clear(app: &impl crate::login_prompt::LoginNeeded, host: &str, identity: 
     app.login_needed().lock().unwrap_or_else(|e| e.into_inner()).remove(&key(host, identity)).is_some()
 }
 
+/// 這台主機的記號全部丟掉（同名改指／移除時，#347）：舊機器的登入失效不能掛到新機器的同名身分上。回傳有沒有丟掉東西。
+pub fn forget_host(app: &impl crate::login_prompt::LoginNeeded, host: &str) -> bool {
+    let mut m = app.login_needed().lock().unwrap_or_else(|e| e.into_inner());
+    let before = m.len();
+    m.retain(|(h, _), _| h != host);
+    m.len() != before
+}
+
 #[allow(dead_code)]
 pub fn get(app: &impl crate::login_prompt::LoginNeeded, host: &str, identity: &str) -> Option<Needed> {
     app.login_needed().lock().unwrap_or_else(|e| e.into_inner()).get(&key(host, identity)).cloned()
