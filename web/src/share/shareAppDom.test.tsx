@@ -4,7 +4,7 @@
  */
 import test, { after, afterEach, before } from 'node:test'
 import assert from 'node:assert/strict'
-import { act, click, mount, settle, setupDom, teardownDom, unmountAll, until } from '../testing/domHarness'
+import { act, click, imeEnter, keydown, mount, settle, setupDom, teardownDom, unmountAll, until } from '../testing/domHarness'
 import { ShareApp } from './ShareApp'
 import { httpShareClient, type ShareClient, type ShareEvents } from './shareApi'
 import { mockShareClient } from './shareMock'
@@ -1096,4 +1096,27 @@ test('載入較早訊息後留在原來那一則，不跳到最舊', { timeout: 
   await settle(50)
   assert.equal(document.querySelectorAll('.sh-msg').length, 4)
   assert.equal(list.scrollTop, 200, '多出來的兩則（200px）補回 scrollTop，人留在原來那一則')
+})
+
+test('輸入法選字的 Enter（isComposing 或 keyCode 229）不送出；一般 Enter 才送', async () => {
+  let sent = 0
+  await mount(<ShareApp client={{ ...mockShareClient(TOKEN), send: async () => { sent++ } }} />)
+  await settle(300)
+  const ta = document.querySelector('textarea')!
+  await act(async () => {
+    const set = Object.getOwnPropertyDescriptor(Object.getPrototypeOf(ta), 'value')!.set!
+    set.call(ta, '注音打到一半')
+    ta.dispatchEvent(new Event('input', { bubbles: true }))
+  })
+  await imeEnter(ta, 'composing')
+  await settle(100)
+  assert.equal(sent, 0, 'isComposing 時不送')
+  assert.equal(ta.value, '注音打到一半')
+  await imeEnter(ta, 'keycode229')
+  await settle(100)
+  assert.equal(sent, 0, 'WebKit 選字確認那一下（keyCode 229）不送')
+  assert.equal(ta.value, '注音打到一半')
+  await keydown(ta, 'Enter')
+  await settle(100)
+  assert.equal(sent, 1, '一般 Enter 才送')
 })
