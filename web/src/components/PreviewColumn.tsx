@@ -8,6 +8,7 @@ import type { KeyboardEvent, PointerEvent as ReactPointerEvent } from 'react'
 import { DRAWER_QUERY, useMediaQuery } from '../hooks/useMediaQuery'
 import { IN_MOBILE_PREVIEW } from '../store/mobilePreview'
 import {
+  PREVIEW_COL_MIN,
   PREVIEW_RAIL_W,
   clampPreviewWidth,
   defaultPreviewWidth,
@@ -69,7 +70,15 @@ export function PreviewColumn() {
       return null
     })
   }, [])
+  // 上限與 clampPreviewWidth 同一條式子（視窗的一半，min 優先）：把手的 aria-valuemax 要跟它一致（#1137）。
+  const maxWidth = Math.max(PREVIEW_COL_MIN, Math.floor(viewport * 0.5))
   const onKey = (e: KeyboardEvent<HTMLDivElement>) => {
+    // APG window splitter：Home＝最窄、End＝最寬（值由小到大，跟 Home／End 的方向一致）。
+    if (e.key === 'Home' || e.key === 'End') {
+      e.preventDefault()
+      setPreviewColWidth(e.key === 'Home' ? PREVIEW_COL_MIN : maxWidth)
+      return
+    }
     const d = e.key === 'ArrowLeft' ? KEY_STEP : e.key === 'ArrowRight' ? -KEY_STEP : 0
     if (!d) return
     e.preventDefault()
@@ -127,6 +136,9 @@ export function PreviewColumn() {
         aria-orientation="vertical"
         aria-label="調整預覽寬度"
         aria-valuenow={width}
+        aria-valuemin={PREVIEW_COL_MIN}
+        aria-valuemax={maxWidth}
+        aria-valuetext={`${width} 像素`}
         tabIndex={0}
         onPointerDown={onDown}
         onPointerMove={onMove}
