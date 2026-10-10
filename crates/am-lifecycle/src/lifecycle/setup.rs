@@ -2181,7 +2181,11 @@ mod remote_hook_tests {
             }
             cmd.stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::piped());
             let mut ch = cmd.spawn().unwrap();
-            ch.stdin.take().unwrap().write_all(stdin).unwrap();
+            // 子 agent 的 pane（AM_CHILD_OF）會在讀 stdin 之前就 exit 0：這時寫入端拿到 EPIPE 是預期的，不是測試失敗。
+            match ch.stdin.take().unwrap().write_all(stdin) {
+                Err(e) if e.kind() == std::io::ErrorKind::BrokenPipe => {}
+                r => r.unwrap(),
+            }
             let out = ch.wait_with_output().unwrap();
             (String::from_utf8_lossy(&out.stdout).into_owned(), out.status.success())
         }
