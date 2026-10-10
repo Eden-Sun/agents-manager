@@ -639,3 +639,101 @@ test('送出中才傳好的附件留著', async () => {
     release()
   }
 })
+
+/** #1092 的測試共用：一頁訊息，與只有 messages 會變的自製 client。 */
+const page = (ms: ShareMessage[]) => ({ bot_name: 'b', status: 'idle' as const, has_more: false, messages: ms })
+const msgAt = (id: string, role: 'user' | 'assistant', n: number): ShareMessage => ({
+  id,
+  role,
+  text: id,
+  created_at: new Date(Date.UTC(2026, 9, 4, 0, n)).toISOString(),
+  attachments: [],
+})
+function clientWith(messages: () => Promise<ReturnType<typeof page>>, subscribe: (e: ShareEvents) => () => void): ShareClient {
+  return {
+    messages,
+    async send() {},
+    async upload() {
+      return { id: 'a', name: 'a' }
+    },
+    async files() {
+      return []
+    },
+    fileUrl: () => '/s/t/api/files/a',
+    previewUrl: () => '/s/t/api/files/a?inline=1',
+    fileBlob: async () => new Blob([]),
+    subscribe,
+  }
+}
+
+test('第一次載入失敗而 SSE 連著：自己重試，不會停在「載入中…」', { timeout: 20_000 }, async () => {
+  let calls = 0
+  const client = clientWith(
+    async () => {
+      calls++
+      if (calls === 1) throw new ShareHttpError(503, 5)
+      return page([msgAt('a1', 'assistant', 2)])
+    },
+    (e) => {
+      e.onUp?.()
+      return () => {}
+    },
+  )
+  await mount(<ShareApp client={client} />)
+  await settle(50)
+  assert.match(document.querySelector('.sh-net')!.textContent!, /連不上/)
+  assert.match(document.querySelector('.sh-list')!.textContent!, /載入中…/)
+  await settle(POLL_WAIT)
+  assert.equal(document.querySelectorAll('.sh-msg').length, 1)
+  assert.equal(document.querySelector('.sh-net'), null)
+  assert.doesNotMatch(document.querySelector('.sh-list')!.textContent!, /載入中…/)
+  assert.equal(calls, 2)
+  await settle(POLL_WAIT)
+  assert.equal(calls, 2, '成功後不再打')
+})
+
+test('resync 的重抓失敗：重試成功後仍以重抓結果取代清單', { timeout: 20_000 }, async () => {
+  let calls = 0
+  let ev!: ShareEvents
+  const client = clientWith(
+    async () => {
+      calls++
+      if (calls === 1) return page([msgAt('a', 'user', 1), msgAt('b', 'assistant', 2)])
+      if (calls === 2) throw new ShareHttpError(503, 5)
+      return page([msgAt('a', 'user', 1)])
+    },
+    (e) => {
+      ev = e
+      return () => {}
+    },
+  )
+  await mount(<ShareApp client={client} />)
+  await settle(100)
+  assert.equal(document.querySelectorAll('.sh-msg').length, 2)
+  await act(async () => {
+    ev.onResync?.()
+  })
+  await settle(50)
+  assert.equal(document.querySelectorAll('.sh-msg').length, 2, '重抓失敗前清單不能被丟掉')
+  assert.ok(document.querySelector('.sh-net'))
+  await settle(POLL_WAIT)
+  assert.equal(document.querySelectorAll('.sh-msg').length, 1, '重試成功後以重抓結果取代')
+  assert.equal(document.querySelector('.sh-net'), null)
+})
+
+test('輪詢開著時失敗不另外多排一條重試', { timeout: 20_000 }, async () => {
+  let calls = 0
+  const client = clientWith(
+    async () => {
+      calls++
+      throw new ShareHttpError(503, 5)
+    },
+    (e) => {
+      e.onDown()
+      return () => {}
+    },
+  )
+  await mount(<ShareApp client={client} />)
+  await settle(POLL_WAIT * 2 + 300)
+  assert.ok(calls <= 3, `開頁 1 次＋兩個 interval tick，實際 ${calls}`)
+})

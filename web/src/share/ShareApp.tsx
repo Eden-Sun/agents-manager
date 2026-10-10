@@ -166,18 +166,29 @@ export function ShareApp({ client }: { client: ShareClient }) {
   const stick = useRef(true)
   const stopLive = useRef<() => void>(() => {})
   const sawOlder = useRef(false)
+  /** `load` 連續失敗幾次（非 404）；> 0 而且沒在輪詢時，自己排下一次重試。 */
+  const [loadFails, setLoadFails] = useState(0)
+  /** resync 要求「下一份成功的頁面取代手上的清單」；重抓失敗時留著，重試成功照樣取代。 */
+  const replaceNext = useRef(false)
 
   const fail = useCallback((e: unknown) => {
     if (e instanceof ShareHttpError && e.status === 404) {
       stopLive.current()
       setState('gone')
-    } else setNetError(shareErrorText(e, 'load'))
+    } else {
+      setNetError(shareErrorText(e, 'load'))
+      setLoadFails((n) => n + 1)
+    }
   }, [])
 
   const applyPage = useCallback((page: SharePage) => {
     setBotName(page.bot_name)
     setStatus(page.status)
-    setMessages((cur) => mergeMessages(cur, page.messages))
+    if (replaceNext.current) {
+      replaceNext.current = false
+      sawOlder.current = false
+      setMessages(mergeMessages([], page.messages))
+    } else setMessages((cur) => mergeMessages(cur, page.messages))
     if (!sawOlder.current) setHasMore(page.has_more)
     const a = anchor.current
     // 還沒看到這一輪的 working 或新 assistant 之前，idle 的舊頁不能把「思考中」清掉。
@@ -190,6 +201,7 @@ export function ShareApp({ client }: { client: ShareClient }) {
       if (page.status === 'working' || answered) setAwaiting(false)
     }
     setNetError(null)
+    setLoadFails(0)
     setState('ready')
   }, [])
 
@@ -227,12 +239,8 @@ export function ShareApp({ client }: { client: ShareClient }) {
       },
       // 漏了事件或對話被倒回：整頁重抓，以重抓結果取代手上的清單（倒回的那幾則要消失，合併不會刪）。
       onResync: () => {
-        client.messages().then((page) => {
-          sawOlder.current = false
-          setMessages(mergeMessages([], page.messages))
-          applyPage(page)
-          void loadFiles()
-        }, fail)
+        replaceNext.current = true
+        void load().then(() => loadFiles())
       },
       onDown: () => setPoll(true),
       onUp: () => setPoll(false),
@@ -242,7 +250,7 @@ export function ShareApp({ client }: { client: ShareClient }) {
       stop()
       stopLive.current = () => {}
     }
-  }, [client, applyPage, fail, loadFiles])
+  }, [client, applyPage, fail, loadFiles, load])
 
   useEffect(() => {
     if (!poll || state === 'gone') return
@@ -251,6 +259,13 @@ export function ShareApp({ client }: { client: ShareClient }) {
     }, POLL_MS)
     return () => clearInterval(id)
   }, [poll, state, load])
+
+  // SSE 連著時 messages 抓失敗：輪詢沒開，沒有人會再抓。自己隔 POLL_MS 再試，成功（applyPage）就歸零。
+  useEffect(() => {
+    if (loadFails === 0 || poll || state === 'gone') return
+    const t = setTimeout(() => void load(), POLL_MS)
+    return () => clearTimeout(t)
+  }, [loadFails, poll, state, load])
 
   // 90 秒上限：送出後一直沒等到 working／回覆（SSE 與輪詢都漏掉、或 bot 根本沒收到），不能讓送出鈕永遠灰著。
   useEffect(() => {
