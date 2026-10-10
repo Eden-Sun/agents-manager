@@ -115,7 +115,7 @@ export function OutboxFiles() {
       setTimeout(() => URL.revokeObjectURL(url), 10_000)
     } catch (e) {
       // 過期被清掉的那一列留在畫面上沒有意義：當場拿掉並重讀一次清單（issue #547）。
-      const { text, gone } = downloadFailure(name, e)
+      const { text, gone } = downloadFailure(name, e, kept)
       if (gone) {
         setFiles((fs) => fs.filter((f) => f.name !== name))
         setLoadedFor(null)

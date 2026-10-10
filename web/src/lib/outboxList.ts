@@ -41,12 +41,18 @@ export function remainingLabel(secs: number): string {
  * 404 ＝ 檔案被清掉了：outbox 的檔案放進去一小時後由 AGM 的 gc 掃掉（每 10 分鐘一輪），而清單只在換 bot、
  * 按 ↻ 或回合結束時重讀，所以過期的那幾列會一直留在畫面上。`gone` 讓呼叫端當場把它拿掉並重讀一次。
  * 其餘的把 daemon 的原因講成人話——以前這裡只拿得到 `res.statusText`（「Not Found」「Conflict」）。
+ * 分享用 bot（`kept`）的 outbox 不是一小時，保留 14 天、總量太大時從最舊的清；句子分開寫（同 `emptyReason`）。
  */
-export function downloadFailure(name: string, e: unknown): { text: string; gone: boolean } {
+export function downloadFailure(name: string, e: unknown, kept = false): { text: string; gone: boolean } {
   const plain = (text: string) => ({ text, gone: false })
   if (!(e instanceof ApiError)) return plain(`下載「${name}」失敗：${e instanceof Error ? e.message : String(e)}`)
   if (e.status === 404) {
-    return { text: `「${name}」已經不在了：outbox 的檔案放進去一小時後會自動清掉。`, gone: true }
+    return {
+      text: kept
+        ? `「${name}」已經不在了：分享用 bot 的檔案保留 14 天，總量太大時會從最舊的清掉。`
+        : `「${name}」已經不在了：outbox 的檔案放進去一小時後會自動清掉。`,
+      gone: true,
+    }
   }
   const reason = String(e.body.reason ?? e.body.error ?? '')
   if (reason === 'file_too_large') {
