@@ -331,6 +331,16 @@ function ShelfCard({
   const remove = useShelf((s) => s.remove)
   const handed = useShelf((s) => s.handed.includes(item.key))
   const notify = useStore((s) => s.notify)
+  // 鍵盤移除後焦點不掉到 body（#1136）：移除前先決定去哪（下一張、沒有就前一張；一張不剩回「＋ 加入檔案」），移除後下一個 frame 再給。
+  // 規格寫的 `.shelf` 根元素實際不存在，暫存區的容器是 `.shelf-body`。
+  const removeKeepingFocus = (from: HTMLElement) => {
+    const card = from.closest<HTMLElement>('.shelf-card')
+    const next = (card?.nextElementSibling ?? card?.previousElementSibling)?.querySelector<HTMLElement>('.shelf-card-main') ?? null
+    const fallback = card?.closest('.shelf-body')?.querySelector<HTMLElement>('.shelf-add') ?? null
+    onPeekEnd()
+    remove(item.key)
+    requestAnimationFrame(() => (next?.isConnected ? next : fallback)?.focus())
+  }
   const press = useRef<{ timer: number; x: number; y: number } | null>(null)
   const swallowClick = useRef(false)
 
@@ -411,8 +421,7 @@ function ShelfCard({
         onKeyDown={(e) => {
           if (e.key !== 'Delete' && e.key !== 'Backspace') return
           e.preventDefault()
-          onPeekEnd()
-          remove(item.key)
+          removeKeepingFocus(e.currentTarget)
         }}
       >
         {item.isImage ? (
@@ -425,7 +434,17 @@ function ShelfCard({
         <span className="shelf-card-name">{item.name}</span>
         <span className="shelf-card-size">{handed ? '已放入' : formatSize(item.size)}</span>
       </button>
-      <button type="button" className="shelf-card-x" aria-label={`從暫存區移除 ${item.name}`} title="移除" onClick={() => remove(item.key)}>
+      <button
+        type="button"
+        className="shelf-card-x"
+        aria-label={`從暫存區移除 ${item.name}`}
+        title="移除"
+        onClick={(e) => {
+          // detail === 0：鍵盤（Enter／Space）觸發；滑鼠與觸控不搬焦點（免得預覽因 onFocus 彈出來）。
+          if (e.detail === 0) removeKeepingFocus(e.currentTarget)
+          else remove(item.key)
+        }}
+      >
         ×
       </button>
     </div>

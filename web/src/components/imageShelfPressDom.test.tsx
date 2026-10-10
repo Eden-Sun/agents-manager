@@ -86,3 +86,20 @@ test('一般點一下照舊放進對話', async () => {
   })
   assert.equal(handed.length, 1, '一般點擊放進對話')
 })
+
+test('鍵盤 Delete 移除卡片後，焦點落在下一張（刪到最後一張則回到「＋」）（#1136）', async () => {
+  useShelf.getState().clear()
+  useShelf.getState().add([new File(['a'], 'a.txt', { type: 'text/plain' }), new File(['b'], 'b.txt', { type: 'text/plain' })])
+  await mount(<ImageShelf />)
+  const cards = () => [...document.querySelectorAll<HTMLButtonElement>('.shelf-card-main')]
+  cards()[0].focus()
+  cards()[0].dispatchEvent(new KeyboardEvent('keydown', { key: 'Delete', bubbles: true, cancelable: true }))
+  await settle(50)
+  assert.equal(cards().length, 1)
+  assert.equal(document.activeElement, cards()[0], '焦點落在下一張，不掉到 body')
+  assert.match(cards()[0].getAttribute('aria-label') ?? '', /^b\.txt/)
+  cards()[0].dispatchEvent(new KeyboardEvent('keydown', { key: 'Delete', bubbles: true, cancelable: true }))
+  await settle(50)
+  assert.equal(cards().length, 0)
+  assert.equal(document.activeElement, document.querySelector('.shelf-add'), '刪到一張不剩：回到「＋ 加入檔案」')
+})
