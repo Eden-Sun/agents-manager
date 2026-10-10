@@ -1774,6 +1774,7 @@ transcript／hook 收的回合（`completed`）不受影響。
 同一 child 在 5 分鐘內回覆文字正規化後編輯距離不超過 20% 時視為近似通知，只送一則。`client_request_id` 使用
 `child-done:<child bot id>:<turn id>`（第 0 次無後綴），並以 DB 唯一鍵處理即時事件與 sweep 競速。通知被佇列收成 failed 且 `delivery='failed'`（字沒打進去）時，冷卻 2 分鐘後以 `:r<n>` 後綴重送，最多 3 次（#874，沿用 `child_alerts::last_sent` 的 attempt 判定，全部從 DB 推導）；使用者撤回不重送；送到、結果不明（`delivery` 為 `ok`/`unknown`）、還在路上都不重送。無回覆、failed turn、非 child、已刪 child、無 parent
 或 child 已自行回報的 turn 都不通知。daemon 通知重試與撤回辨識也涵蓋 `child-done:` 前綴。
+**串行範圍只到同一位 parent**（#1033）：DB 判斷與送出（含 `prompt_relayed_queueable`）以 parent 為單位串行，不同 parent 互不等；畫面讀取與背景工作查詢這類外部 I/O 在鎖外做。sweep 依 parent 分組，不同 parent 並行（同時至多 8 位），同一 parent 內照最新優先的順序一個一個處理。
 
 ### 6.5b herdr PATH shim（命名規則做成機制）
 
