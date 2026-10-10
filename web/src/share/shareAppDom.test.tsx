@@ -857,3 +857,94 @@ test('回到前景補抓一次；背景時不補', { timeout: 20_000 }, async ()
     h.restore()
   }
 })
+
+/** #1094：bot 做的圖要畫在那則回覆下面；輪詢模式沒有 SSE 的 message 事件，新回覆到了也要重抓檔案清單。 */
+test('輪詢模式：新回覆到了也重抓檔案清單，圖出現在那則回覆下面', { timeout: 20_000 }, async () => {
+  const T = Date.UTC(2026, 9, 4)
+  const iso = (ms: number) => new Date(T + ms).toISOString()
+  let replied = false
+  let filesCalls = 0
+  const client: ShareClient = {
+    async messages() {
+      return {
+        bot_name: 'b',
+        status: 'idle',
+        has_more: false,
+        messages: [
+          { id: 'u1', role: 'user', text: '做一張', created_at: iso(0), attachments: [] },
+          ...(replied ? [{ id: 'a1', role: 'assistant' as const, text: '好了', created_at: iso(2000), attachments: [] }] : []),
+        ],
+      }
+    },
+    async send() {},
+    async upload() {
+      return { id: 'a', name: 'a' }
+    },
+    async files() {
+      filesCalls++
+      return replied ? [{ name: '卡片.png', size: 3, modified_at: iso(1000), version: 'v1' }] : []
+    },
+    fileUrl: () => '/s/t/api/files/a',
+    previewUrl: () => '/s/t/api/files/a?inline=1',
+    fileBlob: () => new Promise<Blob>(() => {}),
+    subscribe: (e) => {
+      e.onDown()
+      return () => {}
+    },
+  }
+  await mount(<ShareApp client={client} />)
+  await settle(100)
+  assert.equal(document.querySelector('.sh-imgs'), null)
+  assert.equal(filesCalls, 1)
+  replied = true
+  await settle(POLL_WAIT)
+  assert.ok(document.querySelector('.sh-msg.assistant .sh-imgs .sh-thumb'), '圖要在那則回覆下面')
+  assert.match(document.querySelector('.sh-files-btn')!.textContent!, /（1）/)
+  const afterReply = filesCalls
+  await settle(POLL_WAIT)
+  assert.equal(filesCalls, afterReply, '同一則回覆不重複抓')
+})
+
+test('SSE 模式不重複抓：收到回覆事件已經抓過，載入頁面不再多抓', { timeout: 20_000 }, async () => {
+  const T = Date.UTC(2026, 9, 4)
+  const iso = (ms: number) => new Date(T + ms).toISOString()
+  let replied = false
+  let filesCalls = 0
+  let ev!: ShareEvents
+  const client: ShareClient = {
+    async messages() {
+      return {
+        bot_name: 'b',
+        status: 'idle',
+        has_more: false,
+        messages: [
+          { id: 'u1', role: 'user', text: '做一張', created_at: iso(0), attachments: [] },
+          ...(replied ? [{ id: 'a1', role: 'assistant' as const, text: '好了', created_at: iso(2000), attachments: [] }] : []),
+        ],
+      }
+    },
+    async send() {},
+    async upload() {
+      return { id: 'a', name: 'a' }
+    },
+    async files() {
+      filesCalls++
+      return replied ? [{ name: '卡片.png', size: 3, modified_at: iso(1000), version: 'v1' }] : []
+    },
+    fileUrl: () => '/s/t/api/files/a',
+    previewUrl: () => '/s/t/api/files/a?inline=1',
+    fileBlob: () => new Promise<Blob>(() => {}),
+    subscribe: (e) => {
+      ev = e
+      return () => {}
+    },
+  }
+  await mount(<ShareApp client={client} />)
+  await settle(100)
+  replied = true
+  await act(async () => {
+    ev.onMessage({ id: 'a1', role: 'assistant', text: '好了', created_at: iso(2000), attachments: [] })
+  })
+  await settle(100)
+  assert.equal(filesCalls, 2, '開頁一次＋這一則回覆一次，不是三次')
+})

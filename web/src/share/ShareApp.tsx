@@ -172,6 +172,9 @@ export function ShareApp({ client }: { client: ShareClient }) {
   const replaceNext = useRef(false)
   /** SSE 斷過：重新連上時要補抓一次（斷線期間的事件不會重播）。 */
   const wasDown = useRef(false)
+  /** 手上看過的最新一則 bot 回覆；頁面帶來更新的一則＝bot 剛回完，檔案清單要重抓（輪詢模式沒有 SSE 的 message 事件）。 */
+  const lastAssistant = useRef<string | null>(null)
+  const pageSeen = useRef(false)
 
   const fail = useCallback((e: unknown) => {
     if (e instanceof ShareHttpError && e.status === 404) {
@@ -183,6 +186,17 @@ export function ShareApp({ client }: { client: ShareClient }) {
     }
   }, [])
 
+  const loadFiles = useCallback(
+    () =>
+      client.files().then(
+        (f) => setFiles(f),
+        () => {
+          /* 清單抓不到就留著上一份；連結失效由 load() 判斷 */
+        },
+      ),
+    [client],
+  )
+
   const applyPage = useCallback((page: SharePage) => {
     setBotName(page.bot_name)
     setStatus(page.status)
@@ -191,6 +205,14 @@ export function ShareApp({ client }: { client: ShareClient }) {
       sawOlder.current = false
       setMessages(mergeMessages([], page.messages))
     } else setMessages((cur) => mergeMessages(cur, page.messages))
+    const newest = page.messages.findLast((m) => m.role === 'assistant')?.id ?? null
+    const first = !pageSeen.current
+    pageSeen.current = true
+    if (newest !== lastAssistant.current) {
+      lastAssistant.current = newest
+      // 第一頁不抓：開頁本來就抓了一次。
+      if (!first && newest) void loadFiles()
+    }
     if (!sawOlder.current) setHasMore(page.has_more)
     const a = anchor.current
     // 還沒看到這一輪的 working 或新 assistant 之前，idle 的舊頁不能把「思考中」清掉。
@@ -205,20 +227,9 @@ export function ShareApp({ client }: { client: ShareClient }) {
     setNetError(null)
     setLoadFails(0)
     setState('ready')
-  }, [])
+  }, [loadFiles])
 
   const load = useCallback(() => client.messages().then(applyPage, fail), [client, applyPage, fail])
-
-  const loadFiles = useCallback(
-    () =>
-      client.files().then(
-        (f) => setFiles(f),
-        () => {
-          /* 清單抓不到就留著上一份；連結失效由 load() 判斷 */
-        },
-      ),
-    [client],
-  )
 
   useEffect(() => {
     client.messages().then(applyPage, fail)
@@ -230,6 +241,7 @@ export function ShareApp({ client }: { client: ShareClient }) {
       onMessage: (m) => {
         setMessages((cur) => mergeMessages(cur, [m]))
         if (m.role === 'assistant') {
+          lastAssistant.current = m.id
           setAwaiting(false)
           void loadFiles()
         }
