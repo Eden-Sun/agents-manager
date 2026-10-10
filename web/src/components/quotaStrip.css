@@ -1013,9 +1013,9 @@
   text-align: right;
 }
 
-/* 收合（寬度不夠放完整量表，`quotaCollapsed`）之後每格還是要放得下：條縮到 24px、格不再縮到比內容小，
-   放不下的尾巴直接裁掉（明細點開看）；`clip` 不是 `auto`——後者會把往下開的提示（停用方塊）一起裁掉。
-   以前收合只少一條窗口、寬度不變，百分比照樣疊到下一格的身分名（#314）。 */
+/* 收合（寬度不夠放完整量表）時每格**直向疊出全部窗口**（一列一個：窗口名＋24px 條＋數字／倒數，2026-10-10 使用者，#1158；
+   取代 #314 的單窗口收合）：條縮到 24px、字級收小到三列塞得進 60px 的標題列，格不縮到比內容小，放不下的尾巴直接裁掉（明細點開看）；
+   `clip` 不是 `auto`——後者會把往下開的提示（停用方塊）一起裁掉。 */
 @media (width > 640px) {
   /* 完整量表的格子也不縮到比內容小（2026-09-28 使用者截圖：遠端主機時五格互相疊字）：放不下由
      `nextQuotaFit` 量到後先收主機名牌、再收合，不再靠格子擠壓把字疊到下一格。 */
@@ -1039,6 +1039,16 @@
   .main-head .quota-open.collapsed .quota-bar-wrap {
     flex: 0 0 24px;
     min-width: 24px;
+  }
+
+  .main-head .quota-open.collapsed .quota-bars {
+    row-gap: 1px;
+  }
+
+  .main-head .quota-open.collapsed .quota-window-name,
+  .main-head .quota-open.collapsed .quota-bar-pct,
+  .main-head .quota-open.collapsed .quota-reset-at {
+    font-size: 9.5px;
   }
 }
 
