@@ -375,7 +375,9 @@ A 組與 `git/push` 標「待裁示」的原因：這幾支唯一的呼叫端是
 
 | 狀態碼 | body | 意義 |
 |---|---|---|
-| 400 | `{"error":"bad_request","message":"..."}` | 參數錯誤 |
+| 400 | `{"error":"bad_request","message":"..."}` | 參數錯誤（含 query／路徑參數解析失敗、JSON 語法錯誤） |
+| 415 | `{"error":"bad_request","message":"..."}` | JSON 端點沒帶 `Content-Type: application/json` |
+| 422 | `{"error":"bad_request","message":"..."}` | JSON body 語法正確但欄位型別不對／少必填欄位（axum 的 Json extractor）；handler 自己的 422 另見各端點 |
 | 401 | `{"error":"..."}` | token 錯 |
 | 403 | `{"error":"..."}` | Bot／service scope 不符、對端（只有 `/api/session`）／`Origin` 非本機；另有各端點自己的 403（例如 `read_only_pane`） |
 | 404 | `{"error":"not_found","what":"bot"\|"project"\|"run"\|"pane"\|"turn"\|"route"}` | 找不到；`route`＝`/api/*` 沒有這個端點（不帶 token 也一樣，不會掉到 SPA 的 index.html） |

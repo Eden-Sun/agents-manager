@@ -135,6 +135,19 @@ async fn upload_slot(State(slots): State<Arc<tokio::sync::Semaphore>>, req: axum
     }
 }
 
+/// axum extractor（Json／Query／Path）驗不過時回的是 text/plain；API.md §1 的錯誤一律 JSON。
+/// 只包這三種狀態碼的純文字回應，狀態碼不動；handler 自己回的 JSON 錯誤原樣通過。
+async fn json_rejections(req: axum::extract::Request, next: Next) -> Response {
+    let res = next.run(req).await;
+    let status = res.status();
+    let plain = res.headers().get(header::CONTENT_TYPE).and_then(|v| v.to_str().ok()).is_some_and(|c| c.starts_with("text/plain"));
+    if !plain || !matches!(status, StatusCode::BAD_REQUEST | StatusCode::UNSUPPORTED_MEDIA_TYPE | StatusCode::UNPROCESSABLE_ENTITY) {
+        return res;
+    }
+    let bytes = axum::body::to_bytes(res.into_body(), 64 * 1024).await.unwrap_or_default();
+    (status, Json(json!({"error": "bad_request", "message": String::from_utf8_lossy(&bytes)}))).into_response()
+}
+
 /// AGM 的管理面 route layer：被證明身分的一般 bot 403（`supervisor::bot_requests::forbid_plain_bot`）。
 macro_rules! agm_gate {
     ($app:expr) => {
@@ -364,6 +377,7 @@ pub fn router(app: Arc<App>) -> Router {
         .route("/supervisor/herdr-maintenance", get(crate::runners::herdr_maintenance::get).layer(agm_gate!(app)))
         .route("/supervisor/herdr-maintenance/open", post(crate::runners::herdr_maintenance::open))
         .route("/supervisor/herdr-maintenance/end", post(crate::runners::herdr_maintenance::end))
+        .layer(axum::middleware::from_fn(json_rejections))
         .layer(axum::middleware::from_fn_with_state(app.clone(), auth))
         .route("/session", get(get_session))
         // 沒這條路由的 /api/* 要回 JSON 404，不能掉到外層的 SPA fallback（200 的 index.html）。
@@ -10519,6 +10533,65 @@ mod relay_pane_host_tests {
         assert_eq!(code, StatusCode::OK, "DB 好了重送就成功");
         let host: String = sqlx::query_scalar("SELECT host FROM panes WHERE pane_id='w1-9'").fetch_one(&app.db).await.unwrap();
         assert_eq!(host, "local");
+    }
+}
+
+#[cfg(test)]
+mod extractor_rejection_tests {
+    use super::*;
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    /// 起一顆真的 router，送一個帶標頭與 body 的 HTTP/1.1 請求，回整段回應文字（狀態行＋標頭＋body）。
+    async fn send(app: Arc<App>, head: &str, headers: &[(&str, &str)], body: &str) -> String {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let router = super::router(app);
+        let server = tokio::spawn(async move {
+            axum::serve(listener, router.into_make_service_with_connect_info::<std::net::SocketAddr>()).await
+        });
+        let mut req = format!("{head} HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: close\r\nContent-Length: {}\r\n", body.len());
+        for (k, v) in headers {
+            req.push_str(&format!("{k}: {v}\r\n"));
+        }
+        req.push_str("\r\n");
+        req.push_str(body);
+        let mut c = tokio::net::TcpStream::connect(addr).await.unwrap();
+        c.write_all(req.as_bytes()).await.unwrap();
+        let mut out = String::new();
+        c.read_to_string(&mut out).await.unwrap();
+        server.abort();
+        out
+    }
+
+    /// extractor 驗不過（型別錯、語法錯、沒帶 Content-Type、query 解析失敗）也要是 API.md §1 的 JSON 錯誤，不是 axum 的純文字。
+    #[tokio::test]
+    async fn extractor_rejections_are_json_like_every_other_error() {
+        let e = crate::testing::env().await;
+        let token = e.app.ui_token.clone();
+        let auth = ("X-AM-Token", token.as_str());
+        let json_ct = ("Content-Type", "application/json");
+
+        let out = send(e.app.clone(), "POST /api/projects", &[auth, json_ct], r#"{"path": 1}"#).await;
+        assert!(out.starts_with("HTTP/1.1 422"), "{out}");
+        assert!(out.to_ascii_lowercase().contains("content-type: application/json"), "{out}");
+        assert!(out.contains("\"error\":\"bad_request\"") && out.contains("\"message\":\""), "{out}");
+
+        let out = send(e.app.clone(), "POST /api/projects", &[auth, json_ct], "not json").await;
+        assert!(out.starts_with("HTTP/1.1 400"), "{out}");
+        assert!(out.contains("\"error\":\"bad_request\""), "{out}");
+
+        let out = send(e.app.clone(), "POST /api/projects", &[auth], "{}").await;
+        assert!(out.starts_with("HTTP/1.1 415"), "{out}");
+        assert!(out.contains("\"error\":\"bad_request\""), "{out}");
+
+        let out = send(e.app.clone(), "GET /api/search/messages?limit=abc", &[auth], "").await;
+        assert!(out.starts_with("HTTP/1.1 400"), "{out}");
+        assert!(out.contains("\"error\":\"bad_request\""), "{out}");
+
+        // 對照：handler 自己回的 JSON 錯誤原樣通過，不被重包成巢狀字串。
+        let out = send(e.app.clone(), "POST /api/projects", &[auth, json_ct], r#"{"path":"relative/dir"}"#).await;
+        assert!(out.starts_with("HTTP/1.1 400"), "{out}");
+        assert!(out.contains("\"message\":\"project path must be absolute (or start with ~/)\""), "{out}");
     }
 }
 
