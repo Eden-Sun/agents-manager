@@ -90,3 +90,35 @@ test('#917 群組輸入區：附件上傳失敗後 Enter／送出鈕不送出、
     restore()
   }
 })
+
+test('交給 AGM 模式：打 @ 不彈候選，Enter 直接建任務、文字不被改寫（#1134）', { timeout: 30_000 }, async () => {
+  const requests = mockApi(mock)
+  const { project_id: projectId } = (await mock.request('POST', '/projects', { path: '/tmp/group-agm-at', label: 'group-agm-at' })) as { project_id: string }
+  await mock.request('POST', `/projects/${projectId}/bots`, { name: 'gag-claude', kind: 'claude' })
+  await useStore.getState().refreshState()
+  const bot = useStore.getState().bots.find((b) => b.name === 'gag-claude')!
+  await mock.request('POST', `/bots/${bot.id}/start`)
+  await until(async () => {
+    await useStore.getState().refreshState()
+    return useStore.getState().runs[bot.id]?.state === 'running' && !groupComposerState(useStore.getState(), projectId).disabled
+  }, 'gag-claude running 且群組輸入區可送出')
+  await mount(<GroupChatPanel projectId={projectId} onOpenSidebar={() => {}} />)
+  await settle(200)
+
+  await click(document.querySelector<HTMLElement>('.agm-toggle')!)
+  await settle(50)
+  await typeInto(textarea(), '請看 @')
+  assert.equal(document.querySelector('.mention-pop'), null, '交給 AGM 時不彈 @ 候選')
+  assert.notEqual(textarea().getAttribute('aria-expanded'), 'true')
+  await keydown(textarea(), 'Enter')
+  await until(() => requests.some((r) => r.method === 'POST' && /\/projects\/[^/]+\/missions/.test(r.path)), '建了任務')
+  const created = requests.find((r) => r.method === 'POST' && /\/projects\/[^/]+\/missions/.test(r.path))!
+  assert.equal((created.body as { text: string }).text, '請看 @', '任務說明的文字沒被改寫')
+  assert.equal(chats(requests).length, 0, '沒有走一般的群組訊息')
+
+  // 對照組：沒開「交給 AGM」時打 @ 照樣彈候選。
+  await click(document.querySelector<HTMLElement>('.agm-toggle')!)
+  await settle(50)
+  await typeInto(textarea(), '@')
+  assert.ok(document.querySelector('.mention-pop'), '一般模式打 @ 要彈候選')
+})

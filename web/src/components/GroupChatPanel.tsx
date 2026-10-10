@@ -279,7 +279,8 @@ function GroupComposer({
     el.style.height = `${Math.min(200, el.scrollHeight)}px`
   }, [text, ref])
 
-  const mention = mentionAtCaret(text, caret)
+  // 交給 AGM 模式不解析 @mention（收件者 chip 也藏起來了）：候選清單不彈，Enter 直接走 submit（#1134）。
+  const mention = toAgm ? null : mentionAtCaret(text, caret)
   const candidates: Candidate[] = useMemo(() => {
     if (!mention) return []
     const q = mention.query.toLowerCase()
