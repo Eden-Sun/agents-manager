@@ -1559,7 +1559,7 @@ fn fs_dir_denied(path: &std::path::Path, home: &std::path::Path, data_dir: &std:
     if path.starts_with(data_dir) {
         return true;
     }
-    const UNDER_HOME: [&str; 8] = [".ssh", ".gnupg", ".aws", ".kube", ".config/agents-manager", ".claude", ".codex", ".grok"];
+    const UNDER_HOME: [&str; 9] = [".ssh", ".gnupg", ".aws", ".kube", ".config/agents-manager", ".claude", ".codex", ".grok", ".gemini"];
     if UNDER_HOME.iter().any(|d| {
         let root = home.join(d);
         path.starts_with(&root) || std::fs::canonicalize(&root).is_ok_and(|root| path.starts_with(root))
@@ -9227,11 +9227,12 @@ mod bot_config_tests {
         for denied in [
             "/home/u/.ssh", "/home/u/.ssh/keys", "/home/u/.gnupg", "/home/u/.aws", "/home/u/.kube", "/home/u/.config/agents-manager",
             "/home/u/.config/agents-manager/bots/B1", "/home/u/.claude", "/home/u/.claude-cc1/projects", "/home/u/.codex", "/home/u/.grok",
+            "/home/u/.gemini", "/home/u/.gemini/antigravity-cli",
             "/srv/am-data", "/srv/am-data/bots",
         ] {
             assert!(fs_dir_denied(std::path::Path::new(denied), home, data), "{denied} 要擋");
         }
-        for ok in ["/", "/home", "/home/u", "/home/u/project", "/home/u/.config", "/home/u/.sshx", "/home/u/.claudeish", "/srv", "/srv/am-data2"] {
+        for ok in ["/", "/home", "/home/u", "/home/u/project", "/home/u/.config", "/home/u/.sshx", "/home/u/.claudeish", "/home/u/.geminix", "/srv", "/srv/am-data2"] {
             assert!(!fs_dir_denied(std::path::Path::new(ok), home, data), "{ok} 不該擋");
         }
         // 真的走 handler：daemon 自己的資料目錄。

@@ -78,7 +78,7 @@ pub fn unsafe_reason(folder: &Path, home: &Path, data_dir: &Path) -> Option<&'st
         if let Some(Component::Normal(first)) = rest.components().next() {
             let f = first.to_string_lossy();
             if f.starts_with(".claude")
-                || [".ssh", ".gnupg", ".aws", ".config", ".codex", ".grok", ".docker", ".kube", ".local", ".cargo", ".npm"].contains(&f.as_ref())
+                || [".ssh", ".gnupg", ".aws", ".config", ".codex", ".grok", ".docker", ".kube", ".local", ".cargo", ".npm", ".gemini"].contains(&f.as_ref())
             {
                 return Some("不能分享帳號、金鑰或設定目錄（~/.ssh、~/.claude*、~/.config…）");
             }
@@ -269,10 +269,13 @@ mod tests {
             ("/home/u/.ssh", true),
             ("/home/u/.claude-cc1/projects", true),
             ("/etc/nginx", true),
+            ("/home/u/.gemini", true),
+            ("/home/u/.gemini/antigravity-cli", true),
             ("/home/u/project/site", false),
             ("/home/u/shared-bots/support", false),
             ("/srv/docs", false),
             ("/home/u/.configs-not", false),
+            ("/home/u/.gemini-notes", false),
         ] {
             assert_eq!(unsafe_reason(Path::new(p), home, data).is_some(), bad, "{p}");
         }
