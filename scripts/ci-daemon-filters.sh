@@ -30,6 +30,18 @@ while IFS= read -r f; do
         daemon/src/child_done_tests.rs | daemon/src/runners/child_done.rs)
             printf 'child_done::tests::\n'
             ;;
+        # 其他用 #[path] 掛成別的模組名的測試檔（同上；掛載點見各 crate 的 #[path] 行，#1169）。照檔名推會選到零個，要明列。
+        daemon/src/child_alerts_tests.rs) printf 'child_alerts::tests::\n' ;;
+        daemon/src/judge_tests.rs) printf 'judge::tests::\n' ;;
+        crates/am-lifecycle/src/lifecycle/grok_transcript_tests.rs | crates/am-lifecycle/src/lifecycle/claude_child_log_tests.rs \
+            | crates/am-lifecycle/src/lifecycle/suggestion_tests.rs | crates/am-lifecycle/src/lifecycle/composer_draft_tests.rs)
+            mod="${f#crates/am-lifecycle/src/}"
+            mod="${mod%_tests.rs}"
+            printf '%s::tests::\n' "${mod//\//::}"
+            ;;
+        crates/am-lifecycle/src/lifecycle/force_abort_tests.rs) printf 'lifecycle::stop::force_abort_tests::\n' ;;
+        crates/am-share/src/share/trusted_tests.rs) printf 'share::tests::trusted::\n' ;;
+        crates/am-share/src/share/portal_upload_tests.rs) printf 'share::portal::upload_tests::\n' ;;
         daemon/src/*)
             rel="${f#daemon/src/}"
             case "$rel" in
