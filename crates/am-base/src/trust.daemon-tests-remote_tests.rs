@@ -278,3 +278,35 @@
         assert!(errs[0].contains("Connection refused"), "{errs:?}");
         assert!(!home.join(".claude-ra").exists());
     }
+
+    /// 遠端設定檔是 symlink（例如 dotfiles）：寫入必須跟隨連結，保留 symlink。
+    #[tokio::test]
+    async fn remote_pre_trust_resolves_symlinks_and_keeps_the_symlink() {
+        const HOST: &str = "trustbox-symlink";
+        let (env, home) = remote_env(HOST).await;
+        crate::hosts::set_ssh_fake(HOST, run_sh);
+
+        let dotfiles = home.join("dotfiles");
+        std::fs::create_dir_all(&dotfiles).unwrap();
+        let target = dotfiles.join("claude.json");
+        std::fs::write(&target, r#"{"numStartups": 1}"#).unwrap();
+
+        let config_dir = home.join(".claude-ra");
+        std::fs::create_dir_all(&config_dir).unwrap();
+        let store = config_dir.join(".claude.json");
+        #[cfg(unix)]
+        std::os::unix::fs::symlink(&target, &store).unwrap();
+        #[cfg(windows)]
+        std::os::windows::fs::symlink_file(&target, &store).unwrap();
+
+        let bot = bot_on(&env, "ra").await;
+        let errs = pretrust_for_start(&env.app, &bot, HOST, CWD).await;
+        assert!(errs.is_empty(), "{errs:?}");
+
+        // Symlink must still be a symlink!
+        let meta = std::fs::symlink_metadata(&store).unwrap();
+        assert!(meta.file_type().is_symlink(), "remote symlink was overwritten with a regular file");
+
+        // Target file must have been updated!
+        assert_eq!(trusted(&target), json!(true));
+    }
