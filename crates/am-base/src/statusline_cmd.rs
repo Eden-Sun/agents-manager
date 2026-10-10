@@ -326,14 +326,16 @@ mod tests {
 
     #[test]
     fn user_command_output_is_bounded_while_stdout_is_still_drained() {
+        // deadline 不是這條要驗的東西：指令自己會結束（head -c 讀完就收），給得很寬，高負載下起三個行程才不會被它打斷（#1153）。
         let output = run_user_command(
             "head -c 131072 /dev/zero | tr '\\000' x",
             "{}",
-            Instant::now() + Duration::from_secs(2),
+            Instant::now() + Duration::from_secs(60),
         )
-        .unwrap();
+        .expect("指令自己會結束，不該撞到 deadline");
         assert_eq!(output.bytes.len(), MAX_STATUSLINE_OUTPUT);
         assert!(output.truncated);
+        assert!(output.bytes.iter().all(|b| *b == b'x'), "留下來的是指令的輸出，不是別的");
     }
 
     #[test]
