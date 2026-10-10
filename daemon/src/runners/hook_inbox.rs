@@ -111,58 +111,65 @@ async fn drain_bot(app: Arc<App>, rows: Vec<Pending>, _claim: BotClaim) -> Resul
     Ok(done)
 }
 
-/// 處理一批。回傳這一輪真的處理完幾列。
+/// 沒有新事件、也沒有 task 做完時，每隔這段時間再撈一次（退避中的列要等 `next_attempt_at` 到）。
+const RESCAN_EVERY: Duration = Duration::from_secs(1);
+
+/// 處理到沒有可以做的列為止。回傳這一輪真的處理完幾列。
 ///
-/// 一批按 `bot_id` 分組，每顆 bot 一個 task（同時最多 [`MAX_BOT_TASKS`] 顆），組內照寫入順序（#911）：
-/// 一顆 bot 握著自己的鎖（啟動等就緒 60 秒、批次重啟）時，別顆 bot 的 Stop hook 不再排在它後面。
+/// 每顆 bot 一個 task（同時最多 [`MAX_BOT_TASKS`] 顆），組內照寫入順序（#911）。#1002：task 跨輪保留，
+/// 等的是「任一個 task 做完、有新事件、或 [`RESCAN_EVERY`]」，而不是等整批做完才回頭撈——一顆 bot 握著鎖
+/// （啟動等就緒、批次重啟）時，別顆 bot 在那之後才到的 Stop hook 也不會排在它後面。
 pub async fn drain_once(app: &Arc<App>) -> Result<usize> {
     let mut done = 0usize;
+    let mut first_err: Option<anyhow::Error> = None;
+    let mut tasks: JoinSet<Result<usize>> = JoinSet::new();
     loop {
-        let rows = pending(&app.db, &db::now(), BATCH).await?;
-        if rows.is_empty() {
-            return Ok(done);
-        }
-        let batch = rows.len();
-        let mut groups: Vec<(String, Vec<Pending>)> = Vec::new();
-        for row in rows {
-            match groups.iter_mut().find(|(bot, _)| *bot == row.bot_id) {
-                Some((_, g)) => g.push(row),
-                None => groups.push((row.bot_id.clone(), vec![row])),
+        // 出錯之後不再起新的 task：手上的收完就回傳第一個錯誤（同舊行為）。
+        if first_err.is_none() && tasks.len() < MAX_BOT_TASKS {
+            match pending(&app.db, &db::now(), BATCH).await {
+                Ok(rows) => start_tasks(app, rows, &mut tasks),
+                Err(e) => first_err = Some(e),
             }
         }
-        let mut tasks: JoinSet<Result<usize>> = JoinSet::new();
-        let mut first_err = None;
-        let mut started = 0usize;
-        let mut collect = |res: Result<Result<usize>, tokio::task::JoinError>, done: &mut usize| match res {
-            Ok(Ok(n)) => *done += n,
-            Ok(Err(e)) => {
-                first_err.get_or_insert(e);
-            }
-            Err(e) => {
-                first_err.get_or_insert(anyhow::anyhow!("hook inbox task failed: {e}"));
-            }
-        };
-        for (bot_id, rows) in groups {
-            // 別的 drain 正在處理這顆 bot：這一輪讓它做完，不搶。
-            let Some(claim) = BotClaim::try_new(&bot_id) else { continue };
-            while tasks.len() >= MAX_BOT_TASKS {
-                if let Some(res) = tasks.join_next().await {
-                    collect(res, &mut done);
-                }
-            }
-            started += 1;
-            tasks.spawn(drain_bot(app.clone(), rows, claim));
+        if tasks.is_empty() {
+            break;
         }
-        while let Some(res) = tasks.join_next().await {
-            collect(res, &mut done);
+        tokio::select! {
+            Some(res) = tasks.join_next() => settle(res, &mut done, &mut first_err),
+            _ = app.hook_inbox_wake.notified() => {}
+            _ = tokio::time::sleep(RESCAN_EVERY) => {}
         }
-        if let Some(e) = first_err {
-            return Err(e);
+    }
+    first_err.map_or(Ok(done), Err)
+}
+
+/// 替這一批裡沒人在處理的 bot 起 task（最多到 [`MAX_BOT_TASKS`] 顆）。被別人佔著的 bot 跳過，下一輪再看。
+fn start_tasks(app: &Arc<App>, rows: Vec<Pending>, tasks: &mut JoinSet<Result<usize>>) {
+    let mut groups: Vec<(String, Vec<Pending>)> = Vec::new();
+    for row in rows {
+        match groups.iter_mut().find(|(bot, _)| *bot == row.bot_id) {
+            Some((_, g)) => g.push(row),
+            None => groups.push((row.bot_id.clone(), vec![row])),
         }
-        // 這一批沒滿就沒有下一批了；滿了就繼續，避免一次喚醒只吃 BATCH 列。
-        // 所有組都被別人佔著（一個都沒起）時再撈也是同一批，直接收工。
-        if batch < BATCH as usize || started == 0 {
-            return Ok(done);
+    }
+    for (bot_id, rows) in groups {
+        if tasks.len() >= MAX_BOT_TASKS {
+            break;
+        }
+        // 別的 task（或別的 drain）正在處理這顆 bot：不搶，等它做完。
+        let Some(claim) = BotClaim::try_new(&bot_id) else { continue };
+        tasks.spawn(drain_bot(app.clone(), rows, claim));
+    }
+}
+
+fn settle(res: Result<Result<usize>, tokio::task::JoinError>, done: &mut usize, first_err: &mut Option<anyhow::Error>) {
+    match res {
+        Ok(Ok(n)) => *done += n,
+        Ok(Err(e)) => {
+            first_err.get_or_insert(e);
+        }
+        Err(e) => {
+            first_err.get_or_insert(anyhow::anyhow!("hook inbox task failed: {e}"));
         }
     }
 }
@@ -220,6 +227,42 @@ mod tests {
 
         drop(held);
         let n = tokio::time::timeout(Duration::from_secs(5), drain).await.expect("放鎖後 A 的也處理完").unwrap().unwrap();
+        assert_eq!(n, 2);
+        assert!(processed(&app, &a.id).await);
+    }
+    /// #1002：drain 已經在等 A（A 握著鎖）之後，B 才到的 Stop hook 不能排在 A 後面；要靠 wake 或退避重掃撈到它。
+    #[tokio::test]
+    async fn a_hook_arriving_while_another_bot_is_stuck_is_not_delayed() {
+        let env = tt::env().await;
+        let app = env.app.clone();
+        let a = tt::claude_bot(&app, &env.project_id, "inbox-stuck-a").await;
+        let b = tt::claude_bot(&app, &env.project_id, "inbox-stuck-b").await;
+        tt::fake_run(&app, &a.id).await;
+        tt::fake_run(&app, &b.id).await;
+        assert!(crate::hook_inbox::accept(&app.db, &stop(&a.id, "pa"), crate::hook_inbox::Source::Http).await.unwrap().is_new());
+
+        let lock = app.bot_lock(&a.id).await;
+        let held = lock.lock().await;
+        let drain_app = app.clone();
+        let drain = tokio::spawn(async move { drain_once(&drain_app).await });
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        assert!(!drain.is_finished(), "A 握著鎖，drain 還在等它");
+
+        // 這時才到的 B：照 receive 的順序寫進收件匣，再叫醒。
+        assert!(crate::hook_inbox::accept(&app.db, &stop(&b.id, "pb"), crate::hook_inbox::Source::Http).await.unwrap().is_new());
+        app.hook_inbox_wake.notify_one();
+        tokio::time::timeout(Duration::from_secs(2), async {
+            while !processed(&app, &b.id).await {
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+        })
+        .await
+        .expect("A 還握著鎖時，後到的 B 仍要在 2 秒內處理完");
+        assert!(!processed(&app, &a.id).await, "A 還卡在它的鎖上");
+        assert!(!drain.is_finished());
+
+        drop(held);
+        let n = tokio::time::timeout(Duration::from_secs(5), drain).await.expect("放鎖後 A 也處理完").unwrap().unwrap();
         assert_eq!(n, 2);
         assert!(processed(&app, &a.id).await);
     }
