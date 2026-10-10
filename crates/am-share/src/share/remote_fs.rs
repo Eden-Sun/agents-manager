@@ -603,12 +603,14 @@ printf 'AM_RFS1\nOK 0\n\nAM_RFS_DONE\n'
     )
 }
 
+/// `race`：測試用注入點，插在身分驗證之後、寫入之前（正式路徑一律是空字串）。
 pub fn inbox_write_script(
     workspace: &str,
     stored_name: &str,
     data_len: usize,
     max_bytes: u64,
     max_files: usize,
+    race: &str,
 ) -> String {
     let header = script_common_header();
     format!(
@@ -640,26 +642,28 @@ if [ -e "$N" ] || [ -L "$N" ]; then
   printf 'AM_RFS1\nERR 9\nUNTRUSTED\nAM_RFS_DONE\n'; exit 0
 fi
 
+# 從建檔到寫完只用同一個可寫 fd（#1030）：`set -C` 下的 `exec 3>` 是 O_CREAT|O_EXCL（不跟符號連結），
+# 之後不再用路徑重開——以前這裡驗完關掉讀取 fd，再 `head > "$N"` 用名字寫，中間被換成符號連結就會寫穿到 workspace 外。
+# 權限靠標頭的 `umask 077` 在建檔當下就是 0600。
 set -C
-: > "$N" 2>/dev/null || {{ printf 'AM_RFS1\nERR 9\nUNTRUSTED\nAM_RFS_DONE\n'; exit 0; }}
+exec 3>"$N" || {{ printf 'AM_RFS1\nERR 9\nUNTRUSTED\nAM_RFS_DONE\n'; exit 0; }}
 set +C
-chmod 600 "$N"
-
 F="$N"
-exec 3< "$F" || {{ rm -f "$N"; printf 'AM_RFS1\nERR 9\nUNTRUSTED\nAM_RFS_DONE\n'; exit 0; }}
-if ! am_same || ! am_singlelink; then
-  exec 3<&-
-  rm -f "$N"
+# 刪檔只在名稱仍指向我們建立的那個 inode 時才做（攻擊者換進來的檔不碰）。要在關 fd 之前做，`-ef /dev/fd/3` 才比得到。
+am_drop_own() {{
+  if [ ! -L "$N" ] && [ "$N" -ef /dev/fd/3 ]; then rm -f "$N"; fi
+}}
+am_give_up() {{
+  am_drop_own
+  exec 3>&-
   printf 'AM_RFS1\nERR 9\nUNTRUSTED\nAM_RFS_DONE\n'; exit 0
-fi
-exec 3<&-
-
-head -c {data_len} > "$N"
-actual_len=$(wc -c < "$N" | tr -d ' ')
-if [ "$actual_len" -ne {data_len} ]; then
-  rm -f "$N"
-  printf 'AM_RFS1\nERR 9\nUNTRUSTED\nAM_RFS_DONE\n'; exit 0
-fi
+}}
+if ! am_same || ! am_singlelink; then am_give_up; fi
+{race}
+head -c {data_len} >&3
+if [ -n "$G" ]; then sz=$(stat -L -c '%s' /dev/fd/3 2>/dev/null); else sz=$(stat -L -f '%z' /dev/fd/3 2>/dev/null); fi
+if [ "$sz" != {data_len} ] || ! am_same || ! am_singlelink; then am_give_up; fi
+exec 3>&-
 
 printf 'AM_RFS1\nOK 0\n\nAM_RFS_DONE\n'
 "#,
@@ -668,6 +672,7 @@ printf 'AM_RFS1\nOK 0\n\nAM_RFS_DONE\n'
         data_len = data_len,
         max_bytes = max_bytes,
         max_files = max_files,
+        race = race,
     )
 }
 
@@ -1579,11 +1584,21 @@ impl RemoteSite {
         max_bytes: u64,
         max_files: usize,
     ) -> Result<(), InboxError> {
+        self.inbox_write_with(stored_name, data, max_bytes, max_files, "").await
+    }
+
+    /// 測試用：在身分驗證與寫入之間塞一段 shell（模擬同一個 SSH 使用者的並行攻擊者）。
+    #[cfg(test)]
+    pub async fn inbox_write_racing(&self, stored_name: &str, data: &[u8], max_bytes: u64, max_files: usize, race: &str) -> Result<(), InboxError> {
+        self.inbox_write_with(stored_name, data, max_bytes, max_files, race).await
+    }
+
+    async fn inbox_write_with(&self, stored_name: &str, data: &[u8], max_bytes: u64, max_files: usize, race: &str) -> Result<(), InboxError> {
         if !self.conn.is_connected() {
             return Err(InboxError::Unavailable);
         }
         let _permit = acquire_slot(&self.host, TIMEOUT_UPLOAD).await.map_err(|_| InboxError::Unavailable)?;
-        let script = inbox_write_script(&self.workspace, stored_name, data.len(), max_bytes, max_files);
+        let script = inbox_write_script(&self.workspace, stored_name, data.len(), max_bytes, max_files, race);
         let out = self.conn.ssh_exec_stdin(&script, data, TIMEOUT_UPLOAD).await.map_err(|e| {
             tracing::warn!(host = %self.host, error = %e, "inbox_write ssh failed");
             InboxError::Unavailable

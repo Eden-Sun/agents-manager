@@ -236,6 +236,42 @@ async fn inbox_write_dangling_symlink_refused() {
     assert_eq!(err, InboxError::Unavailable);
 }
 
+/// #1030：身分驗證之後、寫入之前，同一個 SSH 使用者把 inbox 裡的檔換成指向 workspace 外的連結（符號連結、硬連結），
+/// 或改名、放一個新檔。寫入只能經過建檔時握著的那個 fd：canary 的位元組不能變，上傳回失敗；攻擊者換進來的檔也不能被清掉。
+#[tokio::test]
+async fn inbox_write_never_follows_a_name_swapped_after_the_identity_check() {
+    let scratch = test_dirs::scratch_dir("rfs-inbox-race");
+    let site = make_test_remote_site(&scratch, "host-inbox-race-1");
+    site.ensure_inbox().await.unwrap();
+    let canary = scratch.join("canary.txt");
+    fs::write(&canary, b"CANARY").unwrap();
+    let q = am_base::hosts::sh_quote(&canary.to_string_lossy());
+    let name = "upload.bin";
+    let written = Path::new(&site.workspace).join("inbox").join(name);
+
+    // 1. 換成指向 canary 的符號連結
+    let race = format!("rm -f \"$N\"; ln -s {q} \"$N\"");
+    let err = site.inbox_write_racing(name, b"PAYLOAD", 1000, 10, &race).await.unwrap_err();
+    assert_eq!(err, InboxError::Unavailable);
+    assert_eq!(fs::read(&canary).unwrap(), b"CANARY", "符號連結不能讓寫入穿到 workspace 外");
+    assert!(fs::symlink_metadata(&written).unwrap().file_type().is_symlink(), "攻擊者換進來的連結不是我們建的檔：清理不碰它");
+    fs::remove_file(&written).unwrap();
+
+    // 2. 換成 canary 的硬連結（同一個 inode）
+    let race = format!("rm -f \"$N\"; ln {q} \"$N\"");
+    let err = site.inbox_write_racing(name, b"PAYLOAD", 1000, 10, &race).await.unwrap_err();
+    assert_eq!(err, InboxError::Unavailable);
+    assert_eq!(fs::read(&canary).unwrap(), b"CANARY", "硬連結也不能讓寫入改到 canary");
+    fs::remove_file(&written).unwrap();
+
+    // 3. 改名，再放一個新檔：上傳回失敗，而且清理不刪攻擊者放的檔
+    let race = "mv \"$N\" \"$N.moved\"; printf attacker > \"$N\"";
+    let err = site.inbox_write_racing(name, b"PAYLOAD", 1000, 10, race).await.unwrap_err();
+    assert_eq!(err, InboxError::Unavailable);
+    assert_eq!(fs::read(&canary).unwrap(), b"CANARY");
+    assert_eq!(fs::read(&written).unwrap(), b"attacker", "名稱已經不指向我們建的檔：清理不碰它");
+}
+
 #[tokio::test]
 async fn inbox_has_multiple_queries() {
     let scratch = test_dirs::scratch_dir("rfs-inbox-has");
