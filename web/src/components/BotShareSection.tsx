@@ -19,22 +19,34 @@ export function BotShareSection({ botId }: { botId: string }) {
   const sharing = useStore((s) => s.bots.find((b) => b.id === botId)?.share_enabled === true)
   const rev = useStore((s) => s.shareRev[botId] ?? 0)
   const notify = useStore((s) => s.notify)
+  const online = useStore((s) => s.socket === 'open')
   const [share, setShare] = useState<ShareState | null>(null)
   const [error, setError] = useState<string | null>(null)
   const [busy, setBusy] = useState(false)
   const [confirm, setConfirm] = useState<'rotate' | 'off' | null>(null)
+  const [attempt, setAttempt] = useState(0)
+
+  /** 一次都沒讀到：開關是鎖著的，連回來要自己再抓。 */
+  const loadFailed = share === null && error !== null
+  useEffect(() => {
+    if (online && loadFailed) setAttempt((n) => n + 1)
+  }, [online, loadFailed])
 
   useEffect(() => {
     if (!restricted) return
     let alive = true
     fetchShare(botId).then(
-      (s) => alive && setShare(s),
+      (s) => {
+        if (!alive) return
+        setShare(s)
+        setError(null)
+      },
       (e) => alive && setError(shareErrorText(e)),
     )
     return () => {
       alive = false
     }
-  }, [botId, restricted, sharing, rev])
+  }, [botId, restricted, sharing, rev, attempt])
 
   if (!restricted) return null
 

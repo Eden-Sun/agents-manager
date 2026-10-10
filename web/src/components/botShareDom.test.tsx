@@ -409,3 +409,64 @@ test('別處重產連結（share_enabled 沒變）：設定面板換成新連結
   assert.equal(after, r.url, '輸入框換成新連結')
   assert.notEqual(after, before)
 })
+
+test('分享區塊：第一次讀取失敗，連回來自己重抓；讀到之後錯誤收掉、開關可用', async () => {
+  const { shared } = await setup()
+  let getCalls = 0
+  const origFetch = globalThis.fetch
+  globalThis.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
+    const url = String(input)
+    const method = init?.method ?? 'GET'
+    if (method === 'GET' && url.includes(`/bots/${shared.id}/share`)) {
+      getCalls += 1
+      if (getCalls === 1) {
+        return new Response(JSON.stringify({ error: 'upstream', message: 'boom' }), { status: 502 })
+      }
+    }
+    return origFetch(input, init)
+  }) as typeof fetch
+
+  try {
+    useStore.setState({ socket: 'closed' } as never)
+    await mount(<BotShareSection botId={shared.id} />)
+    await settle(50)
+    assert.ok(document.querySelector('.bs-share-error'), '第一次失敗要顯示錯誤訊息')
+    const toggle = document.querySelector<HTMLInputElement>('.bs-share-toggle input')!
+    assert.equal(toggle.disabled, true, '讀取失敗開關 disabled')
+    assert.equal(getCalls, 1, '目前只抓了 1 次')
+
+    await act(async () => {
+      useStore.setState({ socket: 'open' } as never)
+    })
+    await until(() => getCalls === 2, 'GET 重抓第二次')
+    await settle(150)
+    assert.equal(document.querySelector('.bs-share-error'), null, '讀取成功收掉錯誤訊息')
+    assert.equal(toggle.disabled, false, '連線回來重抓成功開關可用')
+  } finally {
+    globalThis.fetch = origFetch
+  }
+})
+
+test('讀取一直失敗時不會無限重試', async () => {
+  const { shared } = await setup()
+  let getCalls = 0
+  const origFetch = globalThis.fetch
+  globalThis.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
+    const url = String(input)
+    const method = init?.method ?? 'GET'
+    if (method === 'GET' && url.includes(`/bots/${shared.id}/share`)) {
+      getCalls += 1
+      return new Response(JSON.stringify({ error: 'upstream', message: 'boom' }), { status: 502 })
+    }
+    return origFetch(input, init)
+  }) as typeof fetch
+
+  try {
+    useStore.setState({ socket: 'open' } as never)
+    await mount(<BotShareSection botId={shared.id} />)
+    await settle(300)
+    assert.ok(getCalls <= 2, `GET 次數應 <= 2，實際 ${getCalls}`)
+  } finally {
+    globalThis.fetch = origFetch
+  }
+})
