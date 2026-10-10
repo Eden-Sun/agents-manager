@@ -575,6 +575,39 @@ class CLITests(unittest.TestCase):
             self.assertEqual(row['source_bot_id'], 'caller')
             self.assertFalse(row['operator_configured'])
 
+    def test_status_refuses_a_label_as_project_id(self):
+        # label、worktree 名查不到東西時不能回一份看起來合法的空清單：查單的人會以為原單不見了，換 request ID 重送。
+        with tempfile.TemporaryDirectory() as tmp:
+            for bad in ('agents-manager', '../../oops', A + '-prefix'):
+                out, err = io.StringIO(), io.StringIO()
+                with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+                    self.assertEqual(ob.cli(['--data-dir', tmp, 'status', '--project-id', bad]), 1, bad)
+                self.assertEqual(out.getvalue(), '', bad)
+                self.assertIn('project_id', json.loads(err.getvalue())['error'])
+            out = io.StringIO()
+            with contextlib.redirect_stdout(out):
+                self.assertEqual(ob.cli(['--data-dir', tmp, 'status', '--project-id', A]), 0)
+            status = json.loads(out.getvalue())
+            self.assertEqual(status['requests'], [])
+            self.assertIn('conversation', status)
+            self.assertIn('rotate_next', status)
+            out = io.StringIO()
+            with contextlib.redirect_stdout(out):
+                self.assertEqual(ob.cli(['--data-dir', tmp, 'status']), 0)
+            self.assertIn('requests', json.loads(out.getvalue()))
+
+    def test_ask_wait_rejects_nan(self):
+        # nan 跟任何數比都是 False：舊的範圍檢查放過它，等於 --wait 0 又不報錯。
+        with tempfile.TemporaryDirectory() as tmp, patch.object(ob, 'daemon_project', return_value={"id": A, "label": "AM"}), patch.dict(os.environ, {"AM_BOT_ID": "caller"}):
+            for wait in ('nan', '-1', '3601'):
+                err = io.StringIO()
+                with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(err):
+                    self.assertEqual(ob.cli(['--data-dir', tmp, 'ask', '--request-id', 'w1', '--no-start', '--wait', wait, 'Question']), 1, wait)
+                self.assertIn('--wait', json.loads(err.getvalue())['error'])
+            self.assertEqual(Store(tmp).list(A), [])
+            with contextlib.redirect_stdout(io.StringIO()):
+                self.assertEqual(ob.cli(['--data-dir', tmp, 'ask', '--request-id', 'w0', '--no-start', '--wait', '0', 'Question']), 0)
+
 
 HOLDER = r"""
 import os, sys, json
