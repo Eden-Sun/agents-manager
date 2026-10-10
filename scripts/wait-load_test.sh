@@ -85,5 +85,12 @@ has "check.sh：閘放行後子行程不再看到 CHECK_MAX_LOAD" "${out}" "nest
 out="$(cd "${HERE}/.." && env -u CHECK_MAX_LOAD WAIT_LOAD_FILE="${ROOT}/nope" bash scripts/check.sh no-such-mode 2>&1)"; rc=$?
 equals "check.sh：沒設 CHECK_MAX_LOAD 就不看負載" "${rc}" 2
 
+# --help 與參數錯誤印的說明是整段檔頭，不能印到程式碼（issue #1022）。
+out="$(bash "${WAIT}" --help 2>&1)"; rc=$?
+equals "--help 回 2" "${rc}" 2
+has "--help 印出旗標說明" "${out}" "--timeout"
+has "--help 印到檔頭最後一行" "${out}" "WAIT_LOAD_FILE"
+case "${out}" in *"set -euo pipefail"*) echo "FAIL - --help 印到程式碼"; FAIL=$((FAIL + 1)) ;; *) echo "ok   - --help 沒印到程式碼"; PASS=$((PASS + 1)) ;; esac
+
 echo "${PASS} passed, ${FAIL} failed"
 [ "${FAIL}" -eq 0 ]
