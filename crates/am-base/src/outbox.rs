@@ -316,6 +316,7 @@ pub enum ShareFileError {
     NotFound,
     TooLarge,
     Unavailable,
+    Busy,
 }
 
 fn open_share_outbox_entry(base: &Path, bot_id: &str, requested: &str, owner_uid: Option<u32>) -> Result<(std::fs::File, String), ShareFileError> {

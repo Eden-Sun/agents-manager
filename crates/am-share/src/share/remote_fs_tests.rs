@@ -6,6 +6,7 @@ use std::fs;
 use std::os::unix::fs as unix_fs;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::Ordering;
+use std::sync::Arc;
 use std::time::Duration;
 
 use am_base::config::HostCfg;
@@ -700,9 +701,57 @@ async fn remote_downloads_leave_a_slot_for_other_share_ops() {
     for _ in 0..(HOST_SHARE_SLOTS - HOST_STREAM_RESERVE) {
         held.push(site.outbox_stream("big.bin", 1 << 20).await.unwrap());
     }
-    assert!(matches!(site.outbox_stream("big.bin", 1 << 20).await, Err(ShareFileError::Unavailable)));
+    assert!(matches!(site.outbox_stream("big.bin", 1 << 20).await, Err(ShareFileError::Busy)));
     let list = tokio::time::timeout(Duration::from_secs(1), site.outbox_list(100)).await.expect("清單不能被下載占住");
     assert!(list.is_ok());
+    drop(held);
+}
+
+#[tokio::test]
+async fn concurrent_remote_downloads_bounded_to_stream_reserve() {
+    let scratch = test_dirs::scratch_dir("rfs-concurrent-reserve");
+    let site = make_test_remote_site(&scratch, "host-concurrent-reserve-1");
+    let ob = Path::new(&site.outbox);
+    fs::write(ob.join("concurrent.bin"), vec![9u8; 4096]).unwrap();
+
+    let site = Arc::new(site);
+    let barrier = Arc::new(tokio::sync::Barrier::new(4));
+    let mut handles = Vec::new();
+
+    for _ in 0..4 {
+        let site = site.clone();
+        let barrier = barrier.clone();
+        handles.push(tokio::spawn(async move {
+            barrier.wait().await;
+            site.outbox_stream("concurrent.bin", 1 << 20).await
+        }));
+    }
+
+    let mut successes = 0;
+    let mut busies = 0;
+    let mut held = Vec::new();
+    for h in handles {
+        match h.await.unwrap() {
+            Ok(file) => {
+                successes += 1;
+                held.push(file);
+            }
+            Err(ShareFileError::Busy) => {
+                busies += 1;
+            }
+            Err(other) => panic!("unexpected error: {other:?}"),
+        }
+    }
+
+    assert_eq!(successes, HOST_SHARE_SLOTS - HOST_STREAM_RESERVE, "最多只能有 3 個下載成功");
+    assert_eq!(busies, 1, "第 4 個併發下載必須回傳 Busy");
+
+    // 此時仍有 1 個 slot 留給非下載操作（如 outbox_list）
+    let list = tokio::time::timeout(Duration::from_secs(1), site.outbox_list(100))
+        .await
+        .expect("清單操作不應被併發下載占滿阻塞");
+    assert!(list.is_ok());
+
     drop(held);
 }
 

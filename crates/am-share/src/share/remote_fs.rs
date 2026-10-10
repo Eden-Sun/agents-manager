@@ -26,6 +26,9 @@ pub const HOST_SHARE_SLOTS: usize = 4;
 /// 下載串流不准用掉的最後幾格，留給上傳／清單／受限 bot 啟動（#988）：慢速下載不能把整台主機的分享動作全部擋住。
 pub const HOST_STREAM_RESERVE: usize = 1;
 
+/// 每個主機允許的下載串流連線上限（#988）：HOST_SHARE_SLOTS - HOST_STREAM_RESERVE = 3。
+pub const HOST_DOWNLOAD_SLOTS: usize = HOST_SHARE_SLOTS.saturating_sub(HOST_STREAM_RESERVE);
+
 /// 遠端操作的各種超時規定（§3.1）。
 pub const TIMEOUT_QUICK: Duration = Duration::from_secs(30);
 pub const TIMEOUT_UPLOAD: Duration = Duration::from_secs(120);
@@ -88,17 +91,27 @@ pub struct RemoteFile {
     pub body: SshStream,
     pub fence: HostFence,
     pub permit: OwnedSemaphorePermit,
+    pub download_permit: Option<OwnedSemaphorePermit>,
 }
 
 // ───────────────────── 主機 Semaphore 名額管理 ─────────────────────
 
 static HOST_SLOTS: std::sync::Mutex<Option<HashMap<String, Arc<Semaphore>>>> = std::sync::Mutex::new(None);
+static HOST_DOWNLOAD_SLOTS_MAP: std::sync::Mutex<Option<HashMap<String, Arc<Semaphore>>>> = std::sync::Mutex::new(None);
 
 pub fn host_slot(host: &str) -> Arc<Semaphore> {
     let mut guard = HOST_SLOTS.lock().unwrap();
     let map = guard.get_or_insert_with(HashMap::new);
     map.entry(host.to_string())
         .or_insert_with(|| Arc::new(Semaphore::new(HOST_SHARE_SLOTS)))
+        .clone()
+}
+
+pub fn host_download_slot(host: &str) -> Arc<Semaphore> {
+    let mut guard = HOST_DOWNLOAD_SLOTS_MAP.lock().unwrap();
+    let map = guard.get_or_insert_with(HashMap::new);
+    map.entry(host.to_string())
+        .or_insert_with(|| Arc::new(Semaphore::new(HOST_DOWNLOAD_SLOTS)))
         .clone()
 }
 
@@ -1634,16 +1647,14 @@ impl RemoteSite {
         if !self.conn.is_connected() {
             return Err(ShareFileError::Unavailable);
         }
-        // 下載名額不排隊：拿不到直接 429 (ShareFileError::Unavailable)；最後 HOST_STREAM_RESERVE 格不給下載。
-        let sem = host_slot(&self.host);
-        if sem.available_permits() <= HOST_STREAM_RESERVE {
-            return Err(ShareFileError::Unavailable);
-        }
-        let permit = sem.try_acquire_owned().map_err(|_| ShareFileError::Unavailable)?;
-
         if name.is_empty() || name.contains('/') || name.chars().any(char::is_control) || withheld_name(&name.to_ascii_lowercase()) {
             return Err(ShareFileError::NotFound);
         }
+
+        // 下載名額不排隊：先拿專屬下載名額（最多 HOST_DOWNLOAD_SLOTS = 3），再拿主機共享名額（最多 HOST_SHARE_SLOTS = 4）。
+        // 任何一個拿不到直接回 Busy（HTTP 429）。下載最多佔 3 格，恆保留 HOST_STREAM_RESERVE = 1 格給其他操作（#988）。
+        let download_permit = host_download_slot(&self.host).try_acquire_owned().map_err(|_| ShareFileError::Busy)?;
+        let permit = host_slot(&self.host).try_acquire_owned().map_err(|_| ShareFileError::Busy)?;
 
         let script = outbox_stream_script(&self.outbox, name, max);
         let mut stream = self.conn.ssh_stream(&script, &[]).await.map_err(|_| ShareFileError::Unavailable)?;
@@ -1724,6 +1735,7 @@ impl RemoteSite {
             body: stream,
             fence: self.conn.fence().clone(),
             permit,
+            download_permit: Some(download_permit),
         })
     }
 
