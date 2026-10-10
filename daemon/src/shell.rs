@@ -435,7 +435,13 @@ pub async fn close_confirmed(app: &Arc<App>, host: &str, pane_id: &str, confirme
             other => other.map(|_| ()),
         };
     };
-    crate::lifecycle::close_pane_and_tab(&client, Some(&shell.workspace_id), Some(&shell.tab_id), pane_id).await;
+    crate::runners::app_ports_p11::close_and_confirm(
+        &client,
+        Some(&shell.workspace_id),
+        Some(&shell.tab_id),
+        pane_id,
+    )
+    .await?;
     app.host_shells.lock().await.retain(|s| s.host != host || s.pane_id != pane_id);
     crate::login_assist::forget(app, host, pane_id);
     tracing::info!(host, pane_id, "closed a host shell");
@@ -1028,6 +1034,49 @@ mod tests {
         let opened = open(app, "local", Some("/tmp")).await.unwrap();
         close(app, "local", &opened.pane_id).await.expect("自己開的直接關，不用確認");
         assert!(app.herdr.pane_get(&opened.pane_id).await.unwrap().is_none());
+    }
+
+    #[tokio::test]
+    async fn a_close_refusal_keeps_a_registered_host_shell_and_draft() {
+        let env = crate::testing::env().await;
+        let app = &env.app;
+        let shell = open(app, "local", Some("/tmp")).await.unwrap();
+        let now = crate::db::now();
+        sqlx::query(
+            "INSERT INTO panes (pane_id, host, workspace_id, tab_id, kind, last_output_at, first_seen, last_seen)
+             VALUES (?, 'local', ?, ?, 'shell', ?, ?, ?)",
+        )
+        .bind(&shell.pane_id)
+        .bind(&shell.workspace_id)
+        .bind(&shell.tab_id)
+        .bind(&now)
+        .bind(&now)
+        .bind(&now)
+        .execute(&app.db)
+        .await
+        .unwrap();
+        let key = crate::drafts::shell_key("local", &shell.pane_id);
+        crate::drafts::put(&app.db, &key, "unfinished command").await.unwrap();
+
+        env.herdr.fail_next("pane.close", crate::testing::Fault::Refuse);
+        let err = close_confirmed(app, "local", &shell.pane_id, true).await.unwrap_err();
+        assert!(matches!(err, LcError::Upstream(_)), "herdr refusal must reach the caller: {err:?}");
+        assert!(app.herdr.pane_get(&shell.pane_id).await.unwrap().is_some(), "pane is still open");
+        assert!(app.host_shells.lock().await.iter().any(|s| s.pane_id == shell.pane_id), "memory registry must retain the live shell");
+        assert_eq!(
+            sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM panes WHERE host='local' AND pane_id=?")
+                .bind(&shell.pane_id)
+                .fetch_one(&app.db)
+                .await
+                .unwrap(),
+            1,
+            "pane metadata remains available"
+        );
+        assert_eq!(crate::drafts::list(&app.db).await.unwrap().iter().find(|d| d.key == key).unwrap().text, "unfinished command");
+
+        close_confirmed(app, "local", &shell.pane_id, true).await.expect("retry closes it");
+        assert!(app.herdr.pane_get(&shell.pane_id).await.unwrap().is_none());
+        assert!(app.host_shells.lock().await.iter().all(|s| s.pane_id != shell.pane_id));
     }
 
     /// 選單點得進去的那一批（`panes` 表）：有 listen port 的只可看，其餘可看可打字；表裡不該有的 kind 一律不給。

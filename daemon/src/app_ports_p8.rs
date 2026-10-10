@@ -170,16 +170,6 @@ impl PaneRuntime for App {
         }
     }
 
-    fn close_pane_and_tab<'a>(
-        &'a self,
-        client: &'a crate::herdr::HerdrClient,
-        workspace_id: Option<&'a str>,
-        tab_id: Option<&'a str>,
-        pane_id: &'a str,
-    ) -> impl Future<Output = ()> + Send + 'a {
-        crate::lifecycle::close_pane_and_tab(client, workspace_id, tab_id, pane_id)
-    }
-
     fn push_pane_inbox<'a>(
         &'a self,
         key: &'a str,
