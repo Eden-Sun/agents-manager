@@ -264,6 +264,10 @@ class Store:
                 raise OBError("project_already_linked：不覆寫既有對話")
             if self.db.execute("SELECT 1 FROM requests WHERE project_id=? AND status IN ('running','unknown')", (pid,)).fetchone():
                 raise OBError("project_busy_or_unknown")
+            # projects.url 只擋「現在正在用」的那一串；別的專案已輪替退役的舊對話也屬於它，要在這裡擋（與 _bind_url 一致）。
+            owner = self.db.execute("SELECT project_id FROM conversations WHERE url=?", (url,)).fetchone()
+            if owner and owner[0] != pid:
+                raise OBError("conversation_already_owned：其他 project 已使用此對話")
             try:
                 self.db.execute("INSERT INTO projects VALUES (?,?,?) ON CONFLICT(id) DO UPDATE SET label=excluded.label,url=excluded.url", (pid, label, url))
                 # 手動接回來的那串也要進輪替計時，否則它永遠不會換。
