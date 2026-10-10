@@ -23,6 +23,9 @@ export const TOKEN_REFRESH_MIN_GAP_MS = 10_000
 /** 看門狗多久檢查一次。 */
 export const CHECK_MS = 10_000
 
+/** 握手送出去這麼久還沒開成＝卡住了（SYN 被黑洞、代理不回 101），丟掉重連；正常握手在區網／tailscale 上是幾十毫秒。 */
+export const CONNECT_TIMEOUT_MS = 8_000
+
 export interface LivenessDeps {
   now: () => number
   /** 每 `ms` 呼叫 `fn`，回傳停止函式；測試換成手動觸發。 */
