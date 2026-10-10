@@ -242,12 +242,17 @@ check_ops() {
 }
 
 check_fmt() {
-    step "daemon: cargo fmt --check"
-    cargo fmt -p agents-managerd -- --check
+    # 範圍跟 clippy 一樣是整個 workspace（issue #1077）：只帶 -p agents-managerd 時拆出去的 crate 沒人看。
+    step "workspace: cargo fmt --check"
+    cargo fmt --all -- --check
 }
 
 check_clippy() {
-    step "daemon: cargo clippy"
+    # 整個 workspace 的 lib／bin（不含 desktop：tauri build script 要 sidecar）。crate 的測試 target 在 daemon 的 #[path] 裡
+    # 已由下面那條跑過；直接 `--all-targets` 會讓 am-supervisor 的 lib test 編不過（issue #1077）。範圍擴大後的既有 warning 不在這裡修、不加 -D warnings。
+    step "workspace: cargo clippy（lib／bin）"
+    cargo clippy --workspace --exclude agents-manager-desktop --lib --bins --locked
+    step "daemon: cargo clippy --all-targets"
     cargo clippy -p agents-managerd --all-targets --locked -- -D warnings
 }
 
