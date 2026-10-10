@@ -576,7 +576,8 @@ export function ShareApp({ client }: { client: ShareClient }) {
             onChange={(e) => setText(e.target.value)}
             onKeyDown={(e) => {
               // 手機上 Enter 是換行；桌機 Enter 送出、Shift+Enter 換行。輸入法選字中不送。
-              if (e.key === 'Enter' && !e.shiftKey && !e.nativeEvent.isComposing && !window.matchMedia('(pointer: coarse)').matches) {
+              // WebKit 在 compositionend 之後才送的那一下 keyCode 是 229（同主 UI #632），isComposing 已經是 false。
+              if (e.key === 'Enter' && !e.shiftKey && !e.nativeEvent.isComposing && e.nativeEvent.keyCode !== 229 && !window.matchMedia('(pointer: coarse)').matches) {
                 e.preventDefault()
                 void submit()
               }
