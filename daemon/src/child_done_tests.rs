@@ -39,10 +39,11 @@
         let child_id = db::ulid();
         sqlx::query(
             "INSERT INTO bots (id, project_id, name, kind, args_json, autostart, inject_hooks, hook_token, managed_by, parent_bot_id, created_at)
-             VALUES (?,?,'child','claude','[]',0,1,'child-token','child',?,?)",
+             VALUES (?,?,?,'claude','[]',0,1,'child-token','child',?,?)",
         )
         .bind(&child_id)
         .bind(project_id)
+        .bind(format!("child-{child_id}"))
         .bind(parent_bot_id)
         .bind(db::now())
         .execute(&app.db)
