@@ -723,7 +723,7 @@ mod arc_port_52_setupshareservices {
     use std::{future::Future, path::{Path, PathBuf}};
     impl<T: crate::lifecycle::s6_ports::SetupShareServices + ?Sized> crate::lifecycle::s6_ports::SetupShareServices for std::sync::Arc<T> {
         fn cage_settings(&self, settings: &mut Value, workspace: &str, env: &Value) { <T as crate::lifecycle::s6_ports::SetupShareServices>::cage_settings(self.as_ref(), settings, workspace, env) }
-        fn write_remote_private_file<'a>(&'a self, conn: &'a am_base::hosts::HostConn, dir: &'a str, name: &'a str, data: &'a [u8]) -> impl Future<Output = anyhow::Result<()>> + Send + 'a { <T as crate::lifecycle::s6_ports::SetupShareServices>::write_remote_private_file(self.as_ref(), conn, dir, name, data) }
+        fn write_remote_private_file<'a>(&'a self, fence: &'a am_base::hosts::HostFence, dir: &'a str, name: &'a str, data: &'a [u8]) -> impl Future<Output = anyhow::Result<()>> + Send + 'a { <T as crate::lifecycle::s6_ports::SetupShareServices>::write_remote_private_file(self.as_ref(), fence, dir, name, data) }
     }
 }
 

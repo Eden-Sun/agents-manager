@@ -18,7 +18,7 @@ use tokio::sync::OwnedSemaphorePermit;
 use crate::outbox::{content_disposition, mime_of, ShareFileError, MAX_BYTES};
 use crate::share::compose::{self, PhotoMeta, PrefetchedSource};
 use crate::share::remote_fs::{RemoteFile, TIMEOUT_STREAM_IDLE};
-use am_base::hosts::SshStream;
+use am_base::hosts::{HostFence, SshStream};
 use crate::share::site::{self, RemoteSite, ShareSite, SiteEnv, SiteError};
 
 /// 「這顆分享 bot 的檔案在哪」的窄入口。`SiteEnv` 與 `ShareStorage` 有同名方法（`db_pool`、`data_dir`），兩個都當 supertrait 會讓泛型程式碼
@@ -48,6 +48,8 @@ const CHUNK: usize = 64 * 1024;
 struct StreamState {
     head: Option<Bytes>,
     body: SshStream,
+    // 每一塊讀取都要在這個權威仍是當前時才做（#1026）：repoint 之後舊主機的位元組不再送給 client。
+    fence: HostFence,
     remaining: u64,
     idle: Duration,
     failed: bool,
@@ -58,11 +60,11 @@ struct StreamState {
 /// 把遠端檔案串成 body：先送已讀的檔頭，再送剩下的 stdout；每塊重新計 [`TIMEOUT_STREAM_IDLE`] 閒置逾時。
 /// 提早 EOF（檔被截短）、讀取錯誤、逾時都回 `Err`，讓 hyper 直接中斷連線——絕不補零，client 才知道檔案不完整。
 fn body_stream(file: RemoteFile, idle: Duration) -> impl futures::Stream<Item = Result<Bytes, std::io::Error>> + Send {
-    let RemoteFile { len, head, body, permit } = file;
+    let RemoteFile { len, head, body, fence, permit } = file;
     let head = Bytes::from(head);
     let remaining = len.saturating_sub(head.len() as u64);
     futures::stream::unfold(
-        StreamState { head: Some(head).filter(|h| !h.is_empty()), body, remaining, idle, failed: false, _permit: permit },
+        StreamState { head: Some(head).filter(|h| !h.is_empty()), body, fence, remaining, idle, failed: false, _permit: permit },
         |mut st| async move {
             if st.failed {
                 return None;
@@ -75,17 +77,22 @@ fn body_stream(file: RemoteFile, idle: Duration) -> impl futures::Stream<Item = 
             }
             let want = st.remaining.min(CHUNK as u64) as usize;
             let mut buf = vec![0u8; want];
-            match tokio::time::timeout(st.idle, st.body.read(&mut buf)).await {
-                Ok(Ok(0)) => {
+            let fence = st.fence.clone();
+            match tokio::time::timeout(st.idle, fence.run_current(st.body.read(&mut buf))).await {
+                Ok(None) => {
+                    st.failed = true;
+                    Some((Err(superseded()), st))
+                }
+                Ok(Some(Ok(0))) => {
                     st.failed = true;
                     Some((Err(std::io::Error::new(std::io::ErrorKind::UnexpectedEof, "remote file was truncated")), st))
                 }
-                Ok(Ok(n)) => {
+                Ok(Some(Ok(n))) => {
                     buf.truncate(n);
                     st.remaining -= n as u64;
                     Some((Ok(Bytes::from(buf)), st))
                 }
-                Ok(Err(e)) => {
+                Ok(Some(Err(e))) => {
                     st.failed = true;
                     Some((Err(e), st))
                 }
@@ -96,6 +103,11 @@ fn body_stream(file: RemoteFile, idle: Duration) -> impl futures::Stream<Item = 
             }
         },
     )
+}
+
+/// 圍籬已經換掉（repoint／重連）：串流中途斷線，不把舊主機的剩餘位元組補給 client。
+fn superseded() -> std::io::Error {
+    std::io::Error::other("remote host authority was replaced during the download")
 }
 
 fn headers_for(name: &str, len: u64) -> [(header::HeaderName, String); 5] {
@@ -116,16 +128,20 @@ pub fn stream_response(name: &str, file: RemoteFile) -> Response {
 
 /// 整份讀進記憶體（SVG 嵌照片要先拿到全文）：長度不等於宣告的就當失敗。
 async fn collect(file: RemoteFile, idle: Duration) -> Result<Vec<u8>, ()> {
-    let RemoteFile { len, head: mut out, mut body, permit } = file;
+    let RemoteFile { len, head: mut out, mut body, fence, permit } = file;
     let want = len as usize;
     out.reserve(want.saturating_sub(out.len()));
     let mut chunk = vec![0u8; CHUNK];
     while out.len() < want {
         let take = (want - out.len()).min(CHUNK);
-        match tokio::time::timeout(idle, body.read(&mut chunk[..take])).await {
-            Ok(Ok(n)) if n > 0 => out.extend_from_slice(&chunk[..n]),
+        match tokio::time::timeout(idle, fence.run_current(body.read(&mut chunk[..take]))).await {
+            Ok(Some(Ok(n))) if n > 0 => out.extend_from_slice(&chunk[..n]),
             _ => return Err(()),
         }
+    }
+    // 讀完才發現主機已經換掉：這份全文是舊主機的，不嵌、不回（#1026）。
+    if !fence.is_current_now() {
+        return Err(());
     }
     // 讀完就放掉主機名額：接下來的 stat／抓照片各自再拿（整段仍受每分享 2、全站 8 的下載名額限制），
     // 不然 4 個同時嵌圖的下載各占一格、再等第五格，全部互等。
