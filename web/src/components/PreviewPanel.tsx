@@ -183,6 +183,9 @@ export function PreviewPanel({ botId, headStart, headEnd }: { botId: string; hea
   const p: Preview = loadFailed && p0.status === 'starting' ? PREVIEW_OFF : p0
 
   const seenStatus = stored?.status
+  // 快照（`refreshState`，重連與 resync 都會跑）的 status／port 變了，代表漏掉了 `preview_changed`：重讀一次（#1211）。
+  const snapStatus = bot?.preview?.status ?? null
+  const snapPort = bot?.preview?.port ?? null
   useEffect(() => {
     if (!connected) return
     let alive = true
@@ -201,7 +204,7 @@ export function PreviewPanel({ botId, headStart, headEnd }: { botId: string; hea
     return () => {
       alive = false
     }
-  }, [botId, connected, setPreview, seenStatus])
+  }, [botId, connected, setPreview, seenStatus, snapStatus, snapPort])
 
   const start = useCallback(async (opts?: StartPreviewOpts) => {
     setPending('start')
