@@ -25,8 +25,11 @@ export function ShareLinkButton({ botId }: { botId: string }) {
   const [share, setShare] = useState<ShareState | null>(null)
   const [busy, setBusy] = useState(false)
   const [menu, setMenu] = useState(false)
+  // 選單用 fixed 定位貼著 ▾：名字列 overflow 會剪掉 absolute 的選單（#1072）。
+  const [menuAt, setMenuAt] = useState<{ top: number; right: number } | null>(null)
   const [confirm, setConfirm] = useState<'rotate' | 'off' | null>(null)
   const wrapRef = useRef<HTMLSpanElement>(null)
+  const moreRef = useRef<HTMLButtonElement>(null)
 
   // 分享中就先把連結抓好：按下去同步複製，不用等網路（剪貼簿要在使用者手勢裡）。
   useEffect(() => {
@@ -76,6 +79,14 @@ export function ShareLinkButton({ botId }: { botId: string }) {
     }
   }
 
+  const toggleMenu = () => {
+    if (!menu) {
+      const r = moreRef.current?.getBoundingClientRect()
+      setMenuAt(r ? { top: r.bottom + 4, right: Math.max(0, window.innerWidth - r.right) } : null)
+    }
+    setMenu((m) => !m)
+  }
+
   const onMain = () => {
     // 手上那份要是開著的那條才直接複製；store 說關了（別處關掉的）就走「開啟」。
     if (enabled && share?.enabled && share.url) return copy(share, '已複製分享連結')
@@ -84,31 +95,33 @@ export function ShareLinkButton({ botId }: { botId: string }) {
 
   return (
     <span className="share-link" ref={wrapRef}>
+      {/* 只放圖示、跟 ★ ⚙ 同一組（#1072）；文字「複製連結／分享」在 aria-label 與 title。 */}
       <button
         type="button"
-        className={`btn share-link-main${enabled ? ' on' : ''}${profile === 'trusted' ? ' trusted' : ''}`}
+        className={`icon-btn share-link-main${enabled ? ' on' : ''}${profile === 'trusted' ? ' trusted' : ''}`}
         disabled={busy}
         aria-label={enabled ? '複製分享連結' : '開啟分享並複製連結'}
         title={`${profile === 'trusted' ? '信任分享：拿到連結的人可以透過它操作這台機器。' : ''}${enabled ? `分享中${share?.enabled && share.url ? `：${share.url}` : ''}。點一下複製連結` : '開啟分享，連結會複製到剪貼簿'}`}
         onClick={onMain}
       >
-        {shareIcon(profile)} {enabled ? '複製連結' : '分享'}
+        {shareIcon(profile)}
       </button>
       {enabled ? (
         <button
+          ref={moreRef}
           type="button"
           className={`btn share-link-more${enabled ? ' on' : ''}`}
           aria-label="分享選項"
           aria-haspopup="menu"
           aria-expanded={menu}
           disabled={busy}
-          onClick={() => setMenu((m) => !m)}
+          onClick={toggleMenu}
         >
           ▾
         </button>
       ) : null}
       {menu ? (
-        <span className="share-link-menu" role="menu">
+        <span className="share-link-menu" role="menu" style={menuAt ? { position: 'fixed', top: menuAt.top, right: menuAt.right } : undefined}>
           <button
             type="button"
             role="menuitem"

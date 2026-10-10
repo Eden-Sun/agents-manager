@@ -42,6 +42,7 @@ async function setup() {
 }
 
 const btn = (label: string) => [...document.querySelectorAll('button')].find((b) => b.textContent?.trim() === label)!
+const mainBtn = () => document.querySelector<HTMLButtonElement>('.share-link-main')!
 
 test('mock 契約：一般 bot 開分享 409 not_shareable；分享中 GET 回完整 url', async () => {
   const { mock, shared, plain } = await setup()
@@ -131,9 +132,10 @@ test('聊天區頂端「🔗 分享」：一般 bot 沒有；未分享按下＝�
     await act(async () => useStore.setState({ notify: (_k: string, m: string) => void msgs.push(m) } as never))
     await setOn(false)
     await mount(<ShareLinkButton botId={shared.id} />)
-    assert.equal(btn('🔗 分享').getAttribute('aria-label'), '開啟分享並複製連結')
+    assert.equal(mainBtn().getAttribute('aria-label'), '開啟分享並複製連結')
+    assert.equal(mainBtn().textContent, '🔗', '主按鈕只有圖示，沒有文字（#1072）')
     assert.equal(document.querySelector('.share-link-more'), null, '沒分享時沒有選單')
-    await click(btn('🔗 分享'))
+    await click(mainBtn())
     await settle(50)
     const g = (await mock.request('GET', `/bots/${shared.id}/share`)) as { enabled: boolean; url: string }
     assert.equal(g.enabled, true, '按下就開啟')
@@ -142,11 +144,12 @@ test('聊天區頂端「🔗 分享」：一般 bot 沒有；未分享按下＝�
 
     await setOn(true)
     await settle(50)
-    await click(btn('🔗 複製連結'))
+    await click(mainBtn())
     await settle(20)
     assert.deepEqual(copied, [g.url, g.url], '分享中按下＝複製同一條')
 
     await click(document.querySelector('.share-link-more')!)
+    assert.equal(document.querySelector<HTMLElement>('.share-link-menu')!.style.position, 'fixed', '選單 fixed，不被名字列剪掉（#1072）')
     await click(btn('重產連結'))
     assert.match(document.body.textContent!, /舊連結立刻失效/, '重產要確認')
     await click(btn('重產'))

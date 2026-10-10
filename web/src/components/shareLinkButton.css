@@ -7,35 +7,32 @@
   align-items: stretch;
 }
 
-.share-link .btn {
-  padding: 2px 10px;
-  font-size: 12.5px;
-  font-weight: 600;
-  white-space: nowrap;
-}
-
+/* 整組寬度 ≤ 52px（#1072）：圖示按鈕跟 ★ ⚙ 同高，▾ 緊貼在後面。 */
 .share-link-main {
+  padding: 0 4px;
+  font-size: 16px;
+  line-height: 0;
+  color: var(--text-dim);
+}
+
+.share-link-main.on {
   color: var(--accent-text);
-  border-color: var(--accent);
-}
-
-.share-link-main.on,
-.share-link-more.on {
-  background: var(--accent-soft);
-  color: var(--accent-ink);
-}
-
-.share-link-main:has(+ .share-link-more) {
-  border-top-right-radius: 0;
-  border-bottom-right-radius: 0;
 }
 
 .share-link-more {
-  padding: 2px 6px !important;
-  border-left: none;
+  padding: 2px 4px !important;
+  font-size: 12px;
+  line-height: 1;
   border-color: var(--accent);
   border-top-left-radius: 0;
   border-bottom-left-radius: 0;
+  border-left: none;
+  white-space: nowrap;
+}
+
+.share-link-more.on {
+  background: var(--accent-soft);
+  color: var(--accent-ink);
 }
 
 .share-link-menu {
@@ -84,12 +81,10 @@
 }
 
 /* 信任分享（trusted）：🔓＋警示色，跟受限的 🔗（accent）一眼分得出來。 */
-.share-link-main.trusted {
+.share-link-main.trusted.on {
   color: var(--warn);
-  border-color: var(--warn);
 }
 
-.share-link-main.trusted.on,
 .share-link-main.trusted.on + .share-link-more {
   background: var(--warn-soft);
   color: var(--warn);
