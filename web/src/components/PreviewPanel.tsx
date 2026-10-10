@@ -354,7 +354,8 @@ export function PreviewPanel({ botId, headStart, headEnd }: { botId: string; hea
             ) : null}
             {p.error ? <pre className="preview-log">{p.error}</pre> : null}
             <div className="preview-actions">
-              <button type="button" className="btn primary" disabled={busy} onClick={() => void start()}>
+              {/* 重試就是重試失敗的那個目錄（#1103）；不是候選就不帶，免得 daemon 以 400 拒絕。 */}
+              <button type="button" className="btn primary" disabled={busy} onClick={() => void start(p.dir && p.candidates.some((c) => c.dir === p.dir) ? { dir: p.dir } : undefined)}>
                 {pending === 'start' ? '重試中…' : '重試'}
               </button>
               <button type="button" className="btn" disabled={busy} onClick={() => void stop()}>
