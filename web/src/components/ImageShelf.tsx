@@ -350,6 +350,8 @@ function ShelfCard({
   }
 
   const onPointerDown = (e: ReactPointerEvent<HTMLButtonElement>) => {
+    // 上一次長按沒有等到 click（被 pointercancel 收走）時旗標會留著，吞掉這一次的點擊。
+    swallowClick.current = false
     // 非圖片沒有預覽可開，長按就不該吃掉那一下點擊。
     if (e.pointerType === 'mouse' || !item.isImage) return
     const el = e.currentTarget
