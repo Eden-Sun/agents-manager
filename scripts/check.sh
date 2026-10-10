@@ -251,15 +251,15 @@ check_clippy() {
     cargo clippy -p agents-managerd --all-targets --locked -- -D warnings
 }
 
-# 平台敏感的 daemon 模組（macos-local 的測試組：cli_update::tests、cargo_shim::tests，以及函式名帶 macos_local_ 的）改了：
+# 平台敏感的 daemon 與 crates/ 模組（macos-local 的測試組：cli_update::tests、cargo_shim::tests，以及函式名帶 macos_local_ 的）改了：
 # 非 macOS 上跑不了 macos-local（check.sh macos-local 會明確拒絕），至少要明講，不能安靜綠燈讓人以為都驗過了（AGENTS.md：
 # 改動 shell／行程／signal 或 BSD 與 GNU 工具差異時要在 Mac 本機跑）。只提醒不擋：Mac 上同樣只提醒，因為它要幾分鐘。
 macos_local_hint() {
     local f hit=""
     while IFS= read -r f; do
         case "$f" in
-            daemon/src/cargo_shim.rs | daemon/src/cli_update.rs) hit="${hit} ${f}" ;;
-            daemon/src/*.rs | daemon/src/*/*.rs) if [ -f "$f" ] && grep -q 'fn macos_local_' "$f" 2>/dev/null; then hit="${hit} ${f}"; fi ;;
+            crates/am-base/src/cargo_shim.rs | crates/am-base/src/cargo_shim.*.rs | daemon/src/runners/am_base_tests/cargo_shim.rs | daemon/src/cli_update.rs) hit="${hit} ${f}" ;;
+            daemon/src/*.rs | daemon/src/*/*.rs | crates/*.rs) if [ -f "$f" ] && grep -q 'fn macos_local_' "$f" 2>/dev/null; then hit="${hit} ${f}"; fi ;;
         esac
     done <<EOF
 $1

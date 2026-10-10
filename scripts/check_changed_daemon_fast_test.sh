@@ -180,9 +180,9 @@ changed >/dev/null || fail "只改 API.md 的 changed 失敗"
 # 平台敏感的 daemon 模組（macos-local 的三組測試所在）改了：Linux 上跑不了 macos-local，至少要明講請去 Mac 跑，
 # 不能安靜地綠燈讓人以為都驗過了。
 : >"$AM_TEST_CARGO_LOG"
-export AM_TEST_DIFF_HEAD=daemon/src/cargo_shim.rs
-output="$(changed)" || fail "改 cargo_shim.rs 的 changed 失敗：$output"
-printf '%s' "$output" | grep -q 'scripts/check.sh macos-local' || fail "改 cargo_shim.rs 沒提醒跑 macos-local：$output"
+export AM_TEST_DIFF_HEAD=crates/am-base/src/cargo_shim.rs
+output="$(changed)" || fail "改 crates/am-base 的 cargo_shim.rs 的 changed 失敗：$output"
+printf '%s' "$output" | grep -q 'scripts/check.sh macos-local' || fail "改 crates/am-base 的 cargo_shim.rs 沒提醒跑 macos-local：$output"
 export AM_TEST_DIFF_HEAD=daemon/src/lifecycle/queue.rs
 output="$(changed)" || fail "改 queue.rs 的 changed 失敗"
 printf '%s' "$output" | grep -q 'macos-local' && fail "改 queue.rs 不該提醒 macos-local：$output"
@@ -194,6 +194,18 @@ export AM_TEST_DIFF_HEAD=daemon/src/supervisor/deep/roles.rs
 output="$(changed)" || fail "改巢狀平台敏感模組的 changed 失敗：$output"
 printf '%s' "$output" | grep -q 'scripts/check.sh macos-local' \
     || fail "巢狀模組有 macos_local_ 測試卻沒提醒：$output"
+
+# crate 拆分後 macos_local_ 測試大多在 crates/ 底下（issue #1172），也要提醒；沒有 macos_local_ 的 crates 檔不提醒。
+mkdir -p "$fixture/crates/am-base/src"
+printf 'fn macos_local_probe() {}\n' >"$fixture/crates/am-base/src/outbox_remote.daemon-tests-tests.rs"
+export AM_TEST_DIFF_HEAD=crates/am-base/src/outbox_remote.daemon-tests-tests.rs
+output="$(changed)" || fail "改 crates 底下平台敏感測試檔的 changed 失敗：$output"
+printf '%s' "$output" | grep -q 'scripts/check.sh macos-local' \
+    || fail "crates/ 底下有 macos_local_ 測試卻沒提醒：$output"
+printf 'pub fn plain() {}\n' >"$fixture/crates/am-base/src/plain.rs"
+export AM_TEST_DIFF_HEAD=crates/am-base/src/plain.rs
+output="$(changed)" || fail "改 crates 一般檔的 changed 失敗：$output"
+printf '%s' "$output" | grep -q 'macos-local' && fail "crates 底下沒有 macos_local_ 的檔不該提醒：$output"
 
 # web：改任何一個檔（含共用的 store／lib 與設定檔）都是整套——型別檢查、lint、**全部**測試（不是同目錄的）、build。
 # 這支只是釘住現況：以後有人想為了快把 bun test 縮成只跑相關檔，這裡會紅。
