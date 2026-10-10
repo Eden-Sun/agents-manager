@@ -277,6 +277,11 @@ for raw in open(sys.argv[1], errors="replace"):
     m = re.match(r"^(?:ERROR|FAIL): (.+)$", line)
     if m:
         add(m.group(1))
+# 上限（#1174）：整樹大量紅時，清單會放進 issue 內文（GitHub 上限 65536 字）、交辦正文、狀態檔，還逐條跑 git log -S。
+# 先排序再截：log 裡 FAILED 的順序每輪不同，不排序的話前 100 條每輪都不一樣。說明不含數字，條數一變也不會被當成新失敗。
+MAX_NAMES = 100
+if len(out) > MAX_NAMES:
+    out = sorted(out)[:MAX_NAMES] + ["（失敗超過 %d 條，只列排序後的前 %d 條；完整清單見 CI log）" % (MAX_NAMES, MAX_NAMES)]
 print(json.dumps(out, ensure_ascii=False))
 ' "$WORK/failed.log") || FAILURES="[]"
 NFAIL=$(python3 -c 'import json,sys; print(len(json.loads(sys.argv[1])))' "$FAILURES")
@@ -401,6 +406,8 @@ if [ -n "$PREV_GREEN" ]; then git rev-list "${PREV_GREEN}..${FIRST_SHA}" > "${WO
 else : > "${WORK}/range.txt"; fi
 while IFS= read -r TNAME; do
   [ -n "$TNAME" ] || continue
+  # 截斷的說明（見上面的 MAX_NAMES）不是測試名，不拿去 git log -S。
+  case "$TNAME" in "（"*) continue ;; esac
   case "$TNAME" in
     *::*) NEEDLE=${TNAME##*::}; NEEDLE=${NEEDLE%% *}; NEEDLE=${NEEDLE%%(*} ;;
     # bash 測試是 `檔名: 中文描述`（issue #449）：描述字串就寫在那個測試檔裡，拿它去 -S 找得到。
@@ -429,7 +436,9 @@ FLAKY=""
 if [ "$NFAIL" -gt 0 ] && [ -n "$PREV_GREEN" ] && [ ! -s "${WORK}/inrange.txt" ] && [ -s "${WORK}/names.txt" ]; then
   FLAKY="**疑似間歇紅（flaky）**：這些測試在上一個綠的 run（\`${PREV_GREEN:0:8}\`）裡就已經存在而且通過了，下面那串嫌疑 commit 多半不是兇手。先當成 flaky 查（排序鍵、時間戳精度、平行測試共用狀態），本機重跑不出來**不代表**不是它。"
 fi
-if [ "$NFAIL" -gt 0 ]; then TITLE="CI 紅了：${FIRST_SHA:0:8} 起 ${NFAIL} 條失敗"; else TITLE="CI 紅了：${FIRST_SHA:0:8} 起失敗"; fi
+if [ "$NFAIL" -gt 100 ]; then TITLE="CI 紅了：${FIRST_SHA:0:8} 起超過 100 條失敗"
+elif [ "$NFAIL" -gt 0 ]; then TITLE="CI 紅了：${FIRST_SHA:0:8} 起 ${NFAIL} 條失敗"
+else TITLE="CI 紅了：${FIRST_SHA:0:8} 起失敗"; fi
 {
   printf 'main 的 CI 從這個 run 起是紅的（ci-watch-kick 自動開；恢復綠時會在這裡留言，但不會自動關）。\n\n'
   printf -- '- 第一個紅的 run：%s（run %s，`%s`）\n' "${FIRST_URL:-run ${FIRST_RUN}}" "$FIRST_RUN" "$FIRST_SHA"
