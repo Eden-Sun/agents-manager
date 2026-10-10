@@ -397,6 +397,35 @@ mod with_app {
         assert_eq!(budget::is_full(&e.app, &id).await, Ok(false));
     }
 
+    /// #1027：分享 bot 指到另一台主機、或工作目錄換了，不沿用舊位置的量測值（A 的 8 MiB 不能放行 B 已滿的資料）。
+    #[tokio::test]
+    async fn a_measurement_from_the_old_place_is_never_reused() {
+        let e = tt::env().await;
+        let scratch = test_dirs::scratch_dir("x-budget-repoint");
+        remote_host(&e, "budget-repoint-a", &scratch).await;
+        let (id, _, _) = share_bot(&e, &scratch, "budget-repoint-bot", "restricted").await;
+        am_base::hosts::set_ssh_fake("budget-repoint-a", |_| Ok(frame("MEASURE", "8388608 0 1 0")));
+        budget::clear_cached_for_test(&id);
+        assert_eq!(budget::is_full(&e.app, &id).await, Ok(false), "A 量到 8 MiB，記下來");
+
+        // 指到 B，B 的連線還沒通：不得沿用 A 的新鮮值，要 503。
+        let b = remote_host(&e, "budget-repoint-b", &scratch).await;
+        b.connected.store(false, Ordering::SeqCst);
+        assert_eq!(budget::is_full(&e.app, &id).await, Err(Unavailable), "B 不可用：不沿用 A 的 false");
+
+        // B 連上了：量 B 的數字（已滿）。
+        b.connected.store(true, Ordering::SeqCst);
+        am_base::hosts::set_ssh_fake("budget-repoint-b", |_| Ok(frame("MEASURE", &format!("{} 0 1 0", budget::SANDBOX_MAX_BYTES))));
+        assert_eq!(budget::is_full(&e.app, &id).await, Ok(true), "只有 B 的量測才算數");
+
+        // 工作目錄換了（bot id 不變）：舊目錄的量測值不再用。
+        let moved = scratch.join("shared-bots/budget-repoint-moved");
+        fs::create_dir_all(&moved).unwrap();
+        sqlx::query("UPDATE shared_bots SET workspace = ? WHERE bot_id = ?").bind(moved.to_string_lossy().to_string()).bind(&id).execute(&e.app.db).await.unwrap();
+        am_base::hosts::set_ssh_fake("budget-repoint-b", |_| Ok(frame("MEASURE", "1 0 1 0")));
+        assert_eq!(budget::is_full(&e.app, &id).await, Ok(false), "換了位置就重量");
+    }
+
     /// #985：撤銷分享要先讓 token 失效，不能排在遠端慢的 ssh（拿掉保留標記）後面——那段時間舊連結照樣過授權。
     #[tokio::test]
     async fn revoke_drops_the_token_before_the_slow_remote_unmark() {
