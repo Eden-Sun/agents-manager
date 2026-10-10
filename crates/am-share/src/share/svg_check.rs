@@ -53,7 +53,8 @@ fn bad_entity(s: &[u8]) -> Option<usize> {
     while i < s.len() {
         if s[i] == b'&' {
             let rest = &s[i + 1..];
-            let end = rest.iter().position(|&b| b == b';')?;
+            // 找不到 `;`：這個 `&` 就是壞的（不能當成「沒有壞實體」）。
+            let Some(end) = rest.iter().position(|&b| b == b';') else { return Some(i) };
             let name = &rest[..end];
             let ok = matches!(name, b"lt" | b"gt" | b"amp" | b"quot" | b"apos")
                 || (name.len() > 2 && name[0] == b'#' && (name[1] == b'x' || name[1] == b'X') && name[2..].iter().all(u8::is_ascii_hexdigit))
@@ -150,14 +151,6 @@ pub fn check(text: &str) -> Result<(), SvgError> {
                     if let Some(p) = bad_entity(bytes) {
                         return Err(err(text, before + p, "文字裡的 `&` 不是合法的實體（要寫成 `&amp;`）"));
                     }
-                }
-            }
-            // quick-xml 把文字裡的 `&名稱;` 切成獨立事件（`before` 指在 `&`）。
-            Event::GeneralRef(ref g) => {
-                let name: &[u8] = g.as_ref();
-                let ok = matches!(name, b"lt" | b"gt" | b"amp" | b"quot" | b"apos") || name.first() == Some(&b'#');
-                if !ok && !has_doctype {
-                    return Err(err(text, before, format!("文字裡的 `&{};` 不是 XML 認得的實體（要寫成 `&amp;` 或數字參照）", String::from_utf8_lossy(name))));
                 }
             }
             // quick-xml 把文字裡的 `&名稱;` 切成獨立事件（`before` 指在 `&`）。
@@ -444,6 +437,22 @@ mod tests {
         assert!(check("<svg><text>AT&T</text></svg>").is_err(), "裸 &（quick-xml 自己報）");
         assert!(bad("<svg a=\"1\" a=\"2\"/>").message.contains("屬性"), "重複屬性");
         assert!(bad("").message.contains("根元素"), "空檔");
+    }
+
+    #[test]
+    fn a_bare_ampersand_in_an_attribute_value_is_caught() {
+        // #1160：`&` 之後整段都沒有 `;` 時，這個 `&` 本身就是壞的（以前 `?` 讓整個檢查回「沒有壞實體」）。
+        let s = "<svg><a href=\"https://x.test/?a=1&b=2\"><text>t</text></a></svg>";
+        let e = bad(s);
+        assert!(e.message.contains("屬性值裡的 `&`"), "{e:?}");
+        assert_eq!((e.line, e.col), (1, s.find('&').unwrap() + 1), "指在那個 `&`：{e:?}");
+        assert!(bad("<svg><text font-family=\"A&B\">x</text></svg>").message.contains("屬性值裡的 `&`"));
+        assert!(bad("<svg><text aria-label=\"R&D\">x</text></svg>").message.contains("屬性值裡的 `&`"));
+        // 合法的寫法照舊過。
+        assert_eq!(check("<svg><a href=\"?a=1&amp;b=2\"/></svg>"), Ok(()));
+        assert_eq!(check("<svg a=\"&#x4E2D;&lt;\"/>"), Ok(()));
+        // 有 DOCTYPE 的照舊不查實體。
+        assert_eq!(check("<!DOCTYPE svg [<!ENTITY x \"y\">]><svg a=\"&x;\"/>"), Ok(()));
     }
 
     #[test]
