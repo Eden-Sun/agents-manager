@@ -677,7 +677,7 @@ function NewBotForm({ onDone, initialProjectId }: { onDone: () => void; initialP
           fast: kind === 'codex' ? fast : undefined,
           persona: persona.trim() || null,
           autostart: false,
-          identity: kind === 'claude' && identity ? identity : null,
+          identity: identity || null,
           // 受限 bot 不帶 bypass permissions（daemon 也會擋），所以 auto_approve 一起關；信任分享照一般 bot。
           ...(folderIn && 'value' in folderIn && shareProfile === 'restricted'
             ? { share_profile: 'restricted' as const, share_folder: folderIn.value, auto_approve: false }
