@@ -2302,7 +2302,7 @@ rustup 換位置或遠端主機上反而是錯的——讓 shim 每次在 pane �
 
 #### 設定（`config.toml` 的 `[build]`，`config::BuildCfg`）
 - `max_concurrent`（預設 2，`AM_BUILD_MAX_CONCURRENT` 可覆寫，0／看不懂一律回預設——0 不是「停用排程」，是「誰都拿不到
-  名額」，整台機器的受管建置會卡死，跟 `panes.idle_close_secs` 同一條防呆規矩）、`cargo_jobs`（預設 2）、
+  名額」，整台機器的受管建置會卡死，跟 `panes.idle_close_secs` 同一條防呆規矩）、`cargo_jobs`（預設 2，`0`＝回預設、最多 256）、
   `test_threads`（預設 8，`0`＝不注入、最多 256；issue #813）、`lease_ttl_secs`（預設 180，續約間隔取它的 1/3）。
   這幾個沒有 API 可寫，唯一的設定方式是手改 `config.toml`，所以 scheduler 每次拿名額／續約／看狀態都走 `ConfigStore::build_fresh`：
   設定檔內容變了就重讀（包含 mtime 不變的替換），**只**換 `[build]` 這一段，不用重啟；讀不了、解析失敗（半寫、打錯字、`lease_ttl_secs` 超出範圍）或整份是空白（空白是合法 TOML、會被解成全部預設）都保留原值，同一份錯誤內容只記一次 WARN。

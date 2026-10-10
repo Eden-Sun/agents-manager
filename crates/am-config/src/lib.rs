@@ -503,7 +503,7 @@ pub struct BuildCfg {
     #[serde(default = "default_build_max_concurrent")]
     pub max_concurrent: usize,
     /// 每個佔用的 `CARGO_BUILD_JOBS`：不吃 cargo 預設的「核心數」，避免兩個佔用各自吃滿全機。
-    #[serde(default = "default_build_cargo_jobs")]
+    #[serde(default = "default_build_cargo_jobs", deserialize_with = "de_build_cargo_jobs")]
     pub cargo_jobs: usize,
     /// 每個佔用的 `cargo test` 測試執行緒上限（shim 注入 `RUST_TEST_THREADS`，issue #813）；`0`＝不設（libtest 預設＝核心數）。
     /// 名額本來就罩住整個 test run，但 `CARGO_BUILD_JOBS` 只限 rustc，不限測試執行緒：32 核上每支 test binary 開 32 個、各吃 8 核以上。
@@ -637,6 +637,19 @@ fn default_build_test_threads() -> usize {
 /// `test_threads` 的上限，跟 `[build.remote] test_threads` 一樣。
 pub const MAX_BUILD_TEST_THREADS: usize = 256;
 
+/// `cargo_jobs` 的上限（#1011）：每個名額各開這麼多 rustc job，設太大會全機超訂。
+pub const MAX_BUILD_CARGO_JOBS: usize = 256;
+
+/// `0` 不是「交給 cargo 決定」：cargo 對 `CARGO_BUILD_JOBS=0` 直接報 `jobs may not be 0`，全機受管建置一起失敗。
+fn de_build_cargo_jobs<'de, D: serde::Deserializer<'de>>(d: D) -> std::result::Result<usize, D::Error> {
+    let raw = usize::deserialize(d)?;
+    let used = if raw == 0 { default_build_cargo_jobs() } else { raw.min(MAX_BUILD_CARGO_JOBS) };
+    if used != raw {
+        tracing::warn!(raw, used, "[build] cargo_jobs 超出 1..=256，改用可用的值");
+    }
+    Ok(used)
+}
+
 fn default_build_lease_ttl_secs() -> u64 {
     180
 }
@@ -718,6 +731,22 @@ mod build_cfg_tests {
         }
         std::fs::remove_dir_all(&dir).unwrap();
         assert!(failures.is_empty(), "{}", failures.join("\n"));
+    }
+
+    /// #1011：`cargo_jobs = 0` 以前照單全收，cargo 收到 `CARGO_BUILD_JOBS=0` 直接失敗；解析時就夾好（同 `notify_max_attempts`）。
+    #[test]
+    fn a_zero_or_absurd_cargo_jobs_is_clamped_while_parsing() {
+        let jobs = |text: &str| toml::from_str::<ConfigFile>(text).unwrap().build.cargo_jobs;
+        assert_eq!(jobs(""), 2);
+        assert_eq!(jobs("[build]\ncargo_jobs = 0\n"), 2, "0 不是停用，cargo 會直接報錯");
+        assert_eq!(jobs("[build]\ncargo_jobs = 3\n"), 3);
+        assert_eq!(jobs("[build]\ncargo_jobs = 100000\n"), MAX_BUILD_CARGO_JOBS);
+
+        // 夾過的值序列化出去再讀回來要穩定（不會每次開機都判成「外部改動」）。
+        let once = toml::from_str::<ConfigFile>("[build]\ncargo_jobs = 0\n").unwrap();
+        let twice = toml::from_str::<ConfigFile>(&toml::to_string_pretty(&once).unwrap()).unwrap();
+        assert_eq!(once.build, twice.build);
+        assert_eq!(twice.build.cargo_jobs, 2);
     }
 
     /// 稽核：`[build]` 的三個門檻只有手改 `config.toml` 一條路，而 `get()` 是記憶體快照——改了不生效。
