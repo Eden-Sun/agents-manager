@@ -41,6 +41,9 @@ const SEND_RETRY_WINDOW_MS = 10 * 60_000
 /** 送出後多久還沒等到 working／回覆，就放開送出鈕（SSE 與輪詢都漏掉時的最後出口，#922）。 */
 const AWAIT_LIMIT_MS = 90_000
 
+/** 一則最多幾個附件（同 daemon `portal.rs` 的 `MAX_ATTACHMENTS`，超過回 400）。 */
+const ATTACH_MAX = 20
+
 /** daemon 的 `client_request_id` 只收 `[A-Za-z0-9-_.:]{1,64}`；`createRequestId` 回 UUID，加前綴後仍在範圍內。 */
 function sendRequestId(key: string): string {
   return `share-${createRequestId(key, { maxAgeMs: SEND_RETRY_WINDOW_MS })}`.replace(/[^A-Za-z0-9\-_.:]/g, '_').slice(0, 64)
@@ -362,8 +365,9 @@ export function ShareApp({ client }: { client: ShareClient }) {
   }
   const ready = pending.filter((p) => p.id)
   const tooLong = text.length > SHARE_TEXT_MAX
+  const tooMany = ready.length > ATTACH_MAX
   // bot 還沒回完不給送：daemon 一段對話同時只排一則，再送會 409（API.md §5.6）。
-  const canSend = !busy && !sending && !uploading && !tooLong && (text.trim().length > 0 || ready.length > 0)
+  const canSend = !busy && !sending && !uploading && !tooLong && !tooMany && (text.trim().length > 0 || ready.length > 0)
 
   const loadOlder = async () => {
     const oldest = messages[0]?.id
@@ -534,9 +538,13 @@ export function ShareApp({ client }: { client: ShareClient }) {
             ))}
           </ul>
         ) : null}
-        {sendError || tooLong ? (
+        {sendError || tooLong || tooMany ? (
           <p className="sh-send-err" role="alert">
-            {tooLong ? `太長了（${text.length}／${SHARE_TEXT_MAX} 字），請分成幾段送。` : sendError}
+            {tooMany
+              ? `一次最多送 ${ATTACH_MAX} 個檔案，請先移除 ${ready.length - ATTACH_MAX} 個，剩下的下一則再送。`
+              : tooLong
+                ? `太長了（${text.length}／${SHARE_TEXT_MAX} 字），請分成幾段送。`
+                : sendError}
           </p>
         ) : null}
         <div className="sh-input-row">
