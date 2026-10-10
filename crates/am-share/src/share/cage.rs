@@ -22,14 +22,12 @@ use std::path::{Path, PathBuf};
 
 use serde_json::{json, Value};
 
-use am_base::hosts::HostConn;
-
 use crate::config::LOCAL_HOST;
 use crate::db;
 use crate::lifecycle::LcError;
 use crate::outbox::ShareStorage;
 use crate::share::remote_fs::{self, PreflightError};
-use crate::share::site::{self, RemoteSite, ShareSite, SiteEnv};
+use crate::share::site::{self, FencedConn, RemoteSite, ShareSite, SiteEnv};
 
 /// 受限 bot 的 claude 最低版本：籠子的旗標與行為是照這版驗的（R-S2 §4.1）。
 pub const MIN_CLAUDE: &str = "2.1.288";
@@ -83,7 +81,7 @@ pub fn preflight_conflict(e: PreflightError) -> LcError {
 }
 
 /// 受限遠端 bot 的完整檢查（建立與每次啟動都做）。
-pub async fn preflight_restricted(conn: &HostConn) -> Result<(), LcError> {
+pub async fn preflight_restricted(conn: &FencedConn) -> Result<(), LcError> {
     remote_fs::preflight_restricted(conn, MIN_CLAUDE).await.map_err(preflight_conflict)
 }
 

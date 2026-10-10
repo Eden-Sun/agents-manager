@@ -9,11 +9,11 @@ use std::sync::atomic::Ordering;
 use std::time::Duration;
 
 use am_base::config::HostCfg;
-use am_base::hosts::HostConn;
+use am_base::hosts::{HostConn, HostFence};
 use am_base::outbox::ShareFileError;
 
 use super::remote_fs::*;
-use super::site::RemoteSite;
+use super::site::{FencedConn, RemoteSite};
 use super::test_dirs;
 
 fn make_test_remote_site(scratch: &Path, host_name: &str) -> RemoteSite {
@@ -39,7 +39,7 @@ fn make_test_remote_site(scratch: &Path, host_name: &str) -> RemoteSite {
     fs::create_dir_all(&outbox).unwrap();
 
     RemoteSite {
-        conn,
+        conn: FencedConn::new(HostFence::for_conn_for_test(&conn)),
         host: host_name.to_string(),
         home,
         root,
@@ -398,7 +398,7 @@ async fn macos_local_bsd_helpers_check() {
 
 struct TestSiteEnv {
     pool: sqlx::SqlitePool,
-    hosts: std::collections::HashMap<String, std::sync::Arc<HostConn>>,
+    fences: std::collections::HashMap<String, HostFence>,
     data_dir: std::path::PathBuf,
 }
 
@@ -408,8 +408,13 @@ impl super::site::SiteEnv for TestSiteEnv {
     }
 
     fn host_conn(&self, host: &str) -> impl std::future::Future<Output = Option<std::sync::Arc<HostConn>>> + Send {
-        let conn = self.hosts.get(host).cloned();
+        let conn = self.fences.get(host).map(|f| f.conn().clone());
         async move { conn }
+    }
+
+    fn host_fence(&self, host: &str) -> impl std::future::Future<Output = Option<HostFence>> + Send {
+        let fence = self.fences.get(host).cloned();
+        async move { fence }
     }
 
     fn instance(&self) -> Option<String> {
@@ -454,11 +459,11 @@ async fn site_resolve_tests() {
     sqlx::query("INSERT INTO bots VALUES ('bdown1', 'p-down', '/home/u/p-down', NULL)").execute(&pool).await.unwrap();
     sqlx::query("INSERT INTO shared_bots VALUES ('bdown1', 'restricted', '/home/u/ws-down', 'now')").execute(&pool).await.unwrap();
 
-    let mut hosts = std::collections::HashMap::new();
+    let mut fences = std::collections::HashMap::new();
 
     // 連線中的主機
     let rem_site = make_test_remote_site(&scratch, "rem-1");
-    hosts.insert("rem-1".to_string(), rem_site.conn);
+    fences.insert("rem-1".to_string(), rem_site.conn.fence().clone());
 
     // 斷線的主機
     let cfg_down = HostCfg {
@@ -472,11 +477,11 @@ async fn site_resolve_tests() {
     };
     let conn_down = HostConn::remote(cfg_down, None);
     conn_down.connected.store(false, Ordering::SeqCst);
-    hosts.insert("rem-down".to_string(), conn_down);
+    fences.insert("rem-down".to_string(), HostFence::for_conn_for_test(&conn_down));
 
     let env = TestSiteEnv {
         pool,
-        hosts,
+        fences,
         data_dir: scratch.join("data_dir"),
     };
 

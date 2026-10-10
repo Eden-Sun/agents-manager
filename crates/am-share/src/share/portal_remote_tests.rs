@@ -512,3 +512,78 @@ async fn an_unreadable_remote_svg_is_not_checked_and_not_remembered() {
     r.conn.connected.store(true, Ordering::SeqCst);
     assert!(super::svg_check::check_file(&e.app, &r.bot.id, "card.svg").await.is_some(), "連回來之後照樣查得到");
 }
+
+// ───────────────────────── 主機改指（#1026） ─────────────────────────
+
+fn host_cfg_for(r: &Remote) -> HostCfg {
+    HostCfg {
+        name: r.host.clone(),
+        ssh: "fake-ssh".into(),
+        ssh_port: 22,
+        ssh_opts: vec![],
+        herdr_session: "test-session".into(),
+        shared_session: false,
+        remote_path: String::new(),
+    }
+}
+
+/// 同名主機改指到另一台（B，連上）：舊連線 A 在這一刻起作廢，舊的分享位置拿不到權威。
+async fn repoint(e: &tt::Env, r: &Remote) {
+    let b = e.app.hosts.replace_remote_for_test(&e.app, host_cfg_for(r)).await;
+    b.connected.store(true, Ordering::SeqCst);
+}
+
+/// 解析（綁 A）→ 寫入之前改指到 B → 寫入：舊主機不收、回 503；新請求重新解析到 B 才寫得進去。
+#[tokio::test]
+async fn a_repoint_between_resolve_and_write_refuses_the_stale_upload() {
+    let e = tt::env().await;
+    let r = setup(&e, "repoint-up").await;
+    let (app, cfg) = (e.app.clone(), host_cfg_for(&r));
+    crate::lifecycle::race_point::arm("share_upload_after_site_resolve", &r.bot.id, move || async move {
+        let b = app.hosts.replace_remote_for_test(&app, cfg).await;
+        b.connected.store(true, Ordering::SeqCst);
+    });
+    let resp = r.upload("stale.txt", b"stale".to_vec()).await;
+    assert_eq!(resp.status(), 503, "舊主機的上傳不能回成功");
+    assert_eq!(std::fs::read_dir(r.inbox()).unwrap().count(), 0, "舊主機的 inbox 沒有寫進任何東西");
+
+    let resp = r.upload("fresh.txt", b"fresh".to_vec()).await;
+    assert_eq!(resp.status(), 200, "新請求重新解析到 B，寫得進去");
+    let id = resp.json::<Value>().await.unwrap()["id"].as_str().unwrap().to_string();
+    assert_eq!(std::fs::read(r.inbox().join(id)).unwrap(), b"fresh");
+}
+
+/// 解析之後改指：列表、串流下載、整份讀取都拿不到權威；重新解析之後就能列。
+#[tokio::test]
+async fn a_stale_site_cannot_list_or_stream_after_the_repoint() {
+    let e = tt::env().await;
+    let r = setup(&e, "repoint-read").await;
+    std::fs::write(r.outbox.join("a.txt"), b"hello").unwrap();
+    let stale = r.site(&e.app).await;
+    assert_eq!(stale.outbox_list(0).await.unwrap().len(), 1, "解析完的當下讀得到");
+
+    repoint(&e, &r).await;
+    assert!(stale.outbox_list(0).await.is_err(), "舊解析的列表不能發布");
+    assert!(stale.outbox_stream("a.txt", 1 << 20).await.is_err(), "舊解析不能開串流");
+    assert!(stale.outbox_read("a.txt", 1 << 20).await.is_err(), "舊解析不能讀全文");
+
+    let fresh = r.site(&e.app).await;
+    assert_eq!(fresh.outbox_list(0).await.unwrap().len(), 1);
+}
+
+/// 同一條 HostConn、重連只加世代：重連之前解析的分享位置不能再寫，重連之後重新解析就能寫。
+#[tokio::test]
+async fn a_reconnect_refuses_the_site_resolved_before_it() {
+    let e = tt::env().await;
+    let r = setup(&e, "reconnect-gen").await;
+    let stale = r.site(&e.app).await;
+    e.app.hosts.bump_generation_for_test(&r.host).await;
+
+    let name = format!("{}-stale.txt", db::ulid());
+    assert!(stale.inbox_write(&name, b"stale", 1 << 20, 300).await.is_err(), "重連前的解析不能寫");
+    assert_eq!(std::fs::read_dir(r.inbox()).unwrap().count(), 0);
+
+    let fresh = r.site(&e.app).await;
+    let name = format!("{}-fresh.txt", db::ulid());
+    assert!(fresh.inbox_write(&name, b"fresh", 1 << 20, 300).await.is_ok(), "重連後重新解析才寫得進去");
+}

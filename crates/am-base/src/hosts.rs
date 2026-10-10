@@ -1141,6 +1141,30 @@ impl HostFence {
         HostAuthorityKey { conn: Arc::downgrade(&self.conn), generation: self.generation }
     }
 
+    /// 這一代是否仍是當前權威（不取 gate，只看旗標）。給「讀完才發布」之前的最後一道檢查用；
+    /// 要擋住「檢查之後、副作用之前」的穿插，請用 [`Self::run_current`]。
+    pub fn is_current_now(&self) -> bool {
+        !self.conn.retiring.load(Ordering::SeqCst) && self.conn.generation.load(Ordering::SeqCst) == self.generation
+    }
+
+    /// 這一代仍是當前權威時才執行 `operation`，否則回 `None`（#1026）。取的是連線 gate 的讀端：repoint／重連／移除
+    /// 在寫端先把舊世代作廢（`retiring`＋世代加一）才放掉 gate，所以寫端與這裡線性化——寫端之前開始的操作會被拒絕，
+    /// 寫端之後才開始的操作整段留在原本的連線上，不會送到換過的主機。
+    pub async fn run_current<F: Future>(&self, operation: F) -> Option<F::Output> {
+        let _authority = self.conn.authority_gate.read().await;
+        if !self.is_current_now() {
+            return None;
+        }
+        Some(operation.await)
+    }
+
+    /// 測試用：直接以現在這條連線（目前世代）做一個圍籬，不經過 `HostManager`。
+    #[cfg(any(test, feature = "test-hooks"))]
+    #[doc(hidden)]
+    pub fn for_conn_for_test(conn: &Arc<HostConn>) -> Self {
+        Self { conn: conn.clone(), generation: conn.generation.load(Ordering::SeqCst), ticket: 0 }
+    }
+
     /// Call while holding the lock of the state being published: true once per ticket, and never for a ticket
     /// older than one that already published.
     pub fn claim_publish(&self) -> bool {
@@ -1150,6 +1174,13 @@ impl HostFence {
         self.conn.fence_published.store(self.ticket, Ordering::SeqCst);
         true
     }
+}
+
+/// 同 `apply_config`／`remove`：換掉同名連線時先把舊連線作廢（在 gate 寫端呼叫），舊圍籬之後一律拿不到權威。
+#[cfg(any(test, feature = "test-hooks"))]
+fn retire_locked(old: &HostConn) {
+    old.retiring.store(true, Ordering::SeqCst);
+    old.generation.fetch_add(1, Ordering::SeqCst);
 }
 
 /// Resolve the home directory belonging to this captured host authority. A remote read failure
@@ -1255,12 +1286,21 @@ impl HostManager {
         conn
     }
 
+    /// Test seam：重連（`reconnect`）的世代加一那一步，在 gate 寫端做、同一條連線不換（不起 supervisor、不真的連 ssh）。
+    #[cfg(any(test, feature = "test-hooks"))]
+    pub async fn bump_generation_for_test(&self, name: &str) {
+        let Some(conn) = self.get(name).await else { return };
+        let _authority = conn.authority_gate.write().await;
+        conn.generation.fetch_add(1, Ordering::SeqCst);
+    }
+
     /// Test seam: [`Self::apply_config`] 換掉同名連線的那一步（含快取失效），只是不起 supervisor、不真的連 ssh。
     #[cfg(any(test, feature = "test-hooks"))]
     pub async fn replace_remote_for_test<H: HostHooks>(&self, app: &Arc<H>, cfg: HostCfg) -> Arc<HostConn> {
         let conn = HostConn::remote(cfg, app.instance());
         if let Some(old) = self.get(&conn.name).await {
             let _authority = old.authority_gate.write().await;
+            retire_locked(&old);
             self.install_conn(app, conn.clone()).await;
         } else {
             self.install_conn(app, conn.clone()).await;
@@ -1279,6 +1319,7 @@ impl HostManager {
         let conn = HostConn::remote_with_client_for_test(cfg, app.instance(), client);
         if let Some(old) = self.get(&conn.name).await {
             let _authority = old.authority_gate.write().await;
+            retire_locked(&old);
             self.install_conn(app, conn.clone()).await;
         } else {
             self.install_conn(app, conn.clone()).await;

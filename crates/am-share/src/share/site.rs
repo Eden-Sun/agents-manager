@@ -8,7 +8,9 @@ use std::future::Future;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use am_base::hosts::HostConn;
+use std::time::Duration;
+
+use am_base::hosts::{HostConn, HostFence, SshStream};
 use sqlx::SqlitePool;
 
 #[derive(Clone)]
@@ -33,9 +35,74 @@ impl std::fmt::Debug for ShareSite {
     }
 }
 
+/// 主機連線的圍籬視圖（#1026）：遠端分享的 I/O 只能經過這裡，每一次 ssh 都在 [`HostFence::run_current`] 之內送出，
+/// 所以 repoint／重連之後舊的分享位置不會再把位元組寫進舊主機（拿不到權威就是 `Err`，呼叫端對外一律 503）。
+#[derive(Clone)]
+pub struct FencedConn {
+    fence: HostFence,
+}
+
+impl FencedConn {
+    pub fn new(fence: HostFence) -> Self {
+        Self { fence }
+    }
+
+    pub fn fence(&self) -> &HostFence {
+        &self.fence
+    }
+
+    /// 只給讀取旗標與設定用（例如 `connected`、`remote_path`）；I/O 一律走本型別的方法，不會繞過圍籬。
+    pub fn conn(&self) -> &Arc<HostConn> {
+        self.fence.conn()
+    }
+
+    pub fn name(&self) -> &str {
+        &self.fence.conn().name
+    }
+
+    pub fn instance(&self) -> Option<&str> {
+        self.fence.conn().instance()
+    }
+
+    pub fn remote_path(&self) -> String {
+        self.fence.conn().remote_path()
+    }
+
+    pub fn is_connected(&self) -> bool {
+        self.fence.conn().is_connected()
+    }
+
+    async fn fenced<T>(&self, op: impl std::future::Future<Output = anyhow::Result<T>>) -> anyhow::Result<T> {
+        match self.fence.run_current(op).await {
+            Some(out) => out,
+            None => Err(anyhow::anyhow!("host `{}` authority superseded; the share site must be re-resolved", self.name())),
+        }
+    }
+
+    pub async fn home(&self) -> anyhow::Result<String> {
+        self.fenced(self.fence.conn().home()).await
+    }
+
+    pub async fn ssh_exec_timeout(&self, script: &str, timeout: Duration) -> anyhow::Result<String> {
+        self.fenced(self.fence.conn().ssh_exec_timeout(script, timeout)).await
+    }
+
+    pub async fn ssh_exec_path_timeout(&self, script: &str, timeout: Duration) -> anyhow::Result<String> {
+        self.fenced(self.fence.conn().ssh_exec_path_timeout(script, timeout)).await
+    }
+
+    pub async fn ssh_exec_stdin(&self, script: &str, data: &[u8], timeout: Duration) -> anyhow::Result<String> {
+        self.fenced(self.fence.conn().ssh_exec_stdin(script, data, timeout)).await
+    }
+
+    pub async fn ssh_stream(&self, script: &str, stdin: &[u8]) -> anyhow::Result<SshStream> {
+        self.fenced(self.fence.conn().ssh_stream(script, stdin)).await
+    }
+}
+
 #[derive(Clone)]
 pub struct RemoteSite {
-    pub conn: Arc<HostConn>,
+    pub conn: FencedConn,
     pub host: String,
     pub home: String,
     /// remote root 絕對路徑（例如 `~/.config/agents-manager[/instances/<slug>]` 解開後的完整路徑）
@@ -68,6 +135,8 @@ pub enum SiteError {
 pub trait SiteEnv: Send + Sync {
     fn db_pool(&self) -> &SqlitePool;
     fn host_conn(&self, host: &str) -> impl Future<Output = Option<Arc<HostConn>>> + Send;
+    /// 這台主機目前的權威圍籬（#1026）：解析分享位置時一起抓住，之後的 I/O 都綁在這一代上。
+    fn host_fence(&self, host: &str) -> impl Future<Output = Option<HostFence>> + Send;
     fn instance(&self) -> Option<String>;
     fn data_dir(&self) -> &Path;
 }
@@ -79,6 +148,10 @@ impl<T: SiteEnv + ?Sized> SiteEnv for Arc<T> {
 
     fn host_conn(&self, host: &str) -> impl Future<Output = Option<Arc<HostConn>>> + Send {
         (**self).host_conn(host)
+    }
+
+    fn host_fence(&self, host: &str) -> impl Future<Output = Option<HostFence>> + Send {
+        (**self).host_fence(host)
     }
 
     fn instance(&self) -> Option<String> {
@@ -137,7 +210,7 @@ async fn resolve_inner(app: &impl SiteEnv, bot_id: &str, include_deleted: bool) 
             outbox,
         })
     } else {
-        let conn = app.host_conn(&host).await.ok_or(SiteError::Unavailable)?;
+        let conn = FencedConn::new(app.host_fence(&host).await.ok_or(SiteError::Unavailable)?);
         if !conn.is_connected() {
             return Err(SiteError::Unavailable);
         }
@@ -154,7 +227,7 @@ async fn resolve_inner(app: &impl SiteEnv, bot_id: &str, include_deleted: bool) 
 
 /// 遠端分享 bot 的位置（root、outbox 的算法只在這裡）。建 bot 時資料還沒進 DB，所以 `resolve` 用不了，就用這個直接組。
 pub fn remote_site_at(
-    conn: Arc<HostConn>,
+    conn: FencedConn,
     host: &str,
     home: String,
     instance: Option<&str>,
