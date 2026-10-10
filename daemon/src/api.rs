@@ -28,6 +28,42 @@ fn any_err<E: std::fmt::Display>(e: E) -> LcError {
     LcError::Upstream(e.to_string())
 }
 
+/// 定案之後的工作脫離請求生命週期（#1065）：工作在自己的 task 裡跑完，handler 只等它的結果。
+/// client 斷線（handler future 被 drop）時工作照樣跑完、照常 complete／record_failure，intent 不會停在 running 沒人補。
+async fn detach<T: Send + 'static>(
+    key: &str,
+    work: impl std::future::Future<Output = Result<T, LcError>> + Send + 'static,
+) -> Result<T, LcError> {
+    // 呼叫端是 task-local（config 寫入的稽核 `http=` 欄位讀它）：脫離之後要帶過去，不然工作裡寫的稽核都會變成 `-`。
+    let caller = crate::config_audit::http_caller();
+    let task = tokio::spawn(crate::config_audit::HTTP_CALLER.scope(caller, work));
+    #[cfg(test)]
+    work_registry().lock().unwrap_or_else(|e| e.into_inner()).insert(key.to_string(), task.abort_handle());
+    let out = task.await.map_err(any_err);
+    #[cfg(test)]
+    work_registry().lock().unwrap_or_else(|e| e.into_inner()).remove(key);
+    out?
+}
+
+/// 測試用：脫離出去的刪除工作以 subject id 登記，好讓測試模擬「行程死亡」時連它一起殺掉。
+#[cfg(test)]
+fn work_registry() -> &'static std::sync::Mutex<std::collections::HashMap<String, tokio::task::AbortHandle>> {
+    static V: std::sync::OnceLock<std::sync::Mutex<std::collections::HashMap<String, tokio::task::AbortHandle>>> = std::sync::OnceLock::new();
+    V.get_or_init(Default::default)
+}
+
+/// 殺掉 `key` 的脫離工作（它若還沒登記就回 false）。
+#[cfg(test)]
+pub(crate) fn kill_delete_work_for_test(key: &str) -> bool {
+    match work_registry().lock().unwrap_or_else(|e| e.into_inner()).remove(key) {
+        Some(h) => {
+            h.abort();
+            true
+        }
+        None => false,
+    }
+}
+
 /// 寫設定的路徑專用：`ConfigStore::update` 在落盤前驗不過時回 **400 `config_invalid`**，而不是 502。
 ///
 /// 502 的定義是「herdr／DB 出錯」（SPEC §3.1）；設定不合法是**請求的問題**，混成同一個碼，呼叫端分不出
@@ -1996,6 +2032,12 @@ async fn delete_project(State(app): State<Arc<App>>, Path(id): Path<String>) -> 
     let snapshot: Vec<Value> = in_project.iter().map(|b| json!({"id": b.id, "managed_by": b.managed_by})).collect();
     let requested_by = crate::config_audit::http_caller();
     tracing::warn!(project_id = %id, http = %requested_by, "project delete requested");
+    detach(&id, finish_project_delete(app, id.clone(), host, held, ids, in_project, snapshot, requested_by, guards)).await
+}
+
+/// 定案之後的收尾（#1065）：在 `detach` 裡跑，client 斷線也會跑完；`begin` 之後的步驟都在這裡。
+#[allow(clippy::too_many_arguments)]
+async fn finish_project_delete(app: Arc<App>, id: String, host: String, held: std::collections::HashSet<String>, ids: Vec<String>, in_project: Vec<db::Bot>, snapshot: Vec<Value>, requested_by: String, guards: Vec<tokio::sync::OwnedMutexGuard<()>>) -> Result<Response, LcError> {
     let intent = crate::delete_intents::begin(&app, "delete_project", &id, &host, &json!({"bots": snapshot, "requested_by": requested_by}))
         .await?;
     #[cfg(test)]
@@ -2922,6 +2964,12 @@ pub(crate) async fn delete_bot(State(app): State<Arc<App>>, Path(id): Path<Strin
     // 誰按的刪除：留在 log 與 intent（DB）裡，事後查得到（issue #406：13:28Z 那兩筆就是查不到）。
     let requested_by = crate::config_audit::http_caller();
     tracing::warn!(bot = %bot.name, bot_id = %id, http = %requested_by, "bot delete requested");
+    detach(&id, finish_bot_delete(app, id.clone(), bot, host, children, snapshot, requested_by, _guards)).await
+}
+
+/// 定案之後的收尾（#1065）：在 `detach` 裡跑，client 斷線也會跑完；`begin` 之後的步驟都在這裡。
+#[allow(clippy::too_many_arguments)]
+async fn finish_bot_delete(app: Arc<App>, id: String, bot: db::Bot, host: String, children: Vec<db::Bot>, snapshot: Vec<Value>, requested_by: String, _guards: Vec<tokio::sync::OwnedMutexGuard<()>>) -> Result<Response, LcError> {
     let intent =
         crate::delete_intents::begin(&app, "delete_bot", &id, &host, &json!({"bots": snapshot, "requested_by": requested_by})).await?;
     #[cfg(test)]
@@ -7810,6 +7858,13 @@ mod delete_bot_tests {
             }
         });
         reached.notified().await;
+        // 行程死亡：定案之後的工作已脫離 handler，要連它一起殺掉（否則它握著鎖，卡在 pending 上）。
+        for _ in 0..200 {
+            if kill_delete_work_for_test(key) {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
         h.abort();
         let _ = h.await;
     }
@@ -7957,6 +8012,50 @@ mod delete_bot_tests {
         let second = delete_project(State(e.app.clone()), Path(e.project_id.clone())).await;
         assert!(matches!(second, Err(LcError::NotFound(_))), "已刪的專案再刪＝404");
         assert!(!intent_states(&e.app, &e.project_id).await.iter().any(|s| s == "abandoned"), "背景那件不能被 abandon");
+    }
+
+    /// #1065：定案之後 client 斷線（handler future 被 drop）：工作脫離出去、照常跑完，intent 收成 done，不停在 running。
+    #[tokio::test]
+    async fn a_bot_delete_whose_handler_is_dropped_after_the_decision_still_finishes() {
+        let e = crate::testing::env().await;
+        let (parent, kid) = parent_and_child(&e).await;
+        let reached = Arc::new(tokio::sync::Notify::new());
+        let release = Arc::new(tokio::sync::Notify::new());
+        let (r2, go) = (reached.clone(), release.clone());
+        crate::lifecycle::race_point::arm("delete_bot_after_decided", &parent, move || async move {
+            r2.notify_one();
+            go.notified().await;
+        });
+        let (app, p) = (e.app.clone(), parent.clone());
+        let h = tokio::spawn(async move { delete_bot(State(app), Path(p)).await.map(|_| ()) });
+        reached.notified().await;
+        h.abort(); // 瀏覽器斷線：handler future 被 drop（脫離出去的工作不受影響）
+        let _ = h.await;
+        release.notify_one();
+        assert!(crate::testing::eventually!(intent_states(&e.app, &parent).await == vec!["done"]), "{:?}", intent_states(&e.app, &parent).await);
+        assert!(deleted(&e.app, &kid).await, "child 照樣軟刪");
+    }
+
+    /// #1065：專案版，同上。
+    #[tokio::test]
+    async fn a_project_delete_whose_handler_is_dropped_after_the_decision_still_finishes() {
+        let e = crate::testing::env().await;
+        let (_parent, kid) = parent_and_child(&e).await;
+        let reached = Arc::new(tokio::sync::Notify::new());
+        let release = Arc::new(tokio::sync::Notify::new());
+        let (r2, go) = (reached.clone(), release.clone());
+        crate::lifecycle::race_point::arm("delete_project_after_commit", &e.project_id, move || async move {
+            r2.notify_one();
+            go.notified().await;
+        });
+        let (app, p) = (e.app.clone(), e.project_id.clone());
+        let h = tokio::spawn(async move { delete_project(State(app), Path(p)).await.map(|_| ()) });
+        reached.notified().await;
+        h.abort();
+        let _ = h.await;
+        release.notify_one();
+        assert!(crate::testing::eventually!(intent_states(&e.app, &e.project_id).await == vec!["done"]), "{:?}", intent_states(&e.app, &e.project_id).await);
+        assert!(deleted(&e.app, &kid).await, "child 照樣軟刪");
     }
 
     /// 補不成（child 的軟刪一直寫不進去）：最多試 MAX_ATTEMPTS 次，failed＋AGM inbox。
