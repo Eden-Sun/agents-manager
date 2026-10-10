@@ -777,6 +777,11 @@ function Composer({
     const body = pending.trim()
     const ids = files.ids
     if (!body && ids.length === 0) return
+    if (sending) return
+    if (files.uploading) {
+      notify('error', '附件還在上傳，傳完再送')
+      return
+    }
     if (files.failed) {
       notify('error', ATTACHMENT_FAILED_NOTICE)
       return
@@ -825,6 +830,7 @@ function Composer({
         botId={botId}
         text={text}
         attachments={files.ids}
+        attachmentsBlocked={files.uploading ? 'uploading' : files.failed ? 'failed' : null}
         onSent={() => {
           setText('')
           files.clear()
@@ -892,8 +898,8 @@ function Composer({
               <button
                 type="button"
                 className="mini-btn"
-                disabled={aborting || sending}
-                title={sendNowButton(botKind, pending)!.title}
+                disabled={aborting || sending || files.uploading}
+                title={files.uploading ? '附件上傳中…' : sendNowButton(botKind, pending)!.title}
                 onClick={() => void sendNow()}
               >
                 {sendNowButton(botKind, pending)!.label}

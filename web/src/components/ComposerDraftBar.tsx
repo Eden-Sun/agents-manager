@@ -10,12 +10,14 @@ export function ComposerDraftBar({
   botId,
   text,
   attachments,
+  attachmentsBlocked,
   onSent,
 }: {
   botId: string
   /** 輸入框裡使用者自己要送的字（清掉再送的就是它）。 */
   text: string
   attachments: string[]
+  attachmentsBlocked?: 'uploading' | 'failed' | null
   /** 自己這則送出去了：清輸入框與附件。 */
   onSent: () => void
 }) {
@@ -31,6 +33,7 @@ export function ComposerDraftBar({
     void sendPrompt(botId, '', [], false, false, { action: 'submit', token: block.token })
   }
   const clearAndSend = () => {
+    if (attachmentsBlocked) return
     void sendPrompt(botId, mine, attachments, false, false, { action: 'clear', token: block.token }).then((ok) => {
       if (ok) onSent()
     })
@@ -55,8 +58,16 @@ export function ComposerDraftBar({
           <button
             type="button"
             className="mini-btn"
-            disabled={busy || !hasMine}
-            title={hasMine ? '清掉框裡這段（確認框空了才打字），再送出你輸入的這則' : '輸入框裡還沒有你要送的字'}
+            disabled={busy || !hasMine || Boolean(attachmentsBlocked)}
+            title={
+              attachmentsBlocked === 'uploading'
+                ? '附件還在上傳，傳完再送'
+                : attachmentsBlocked === 'failed'
+                  ? '有附件上傳失敗：先重試或移除'
+                  : hasMine
+                    ? '清掉框裡這段（確認框空了才打字），再送出你輸入的這則'
+                    : '輸入框裡還沒有你要送的字'
+            }
             onClick={clearAndSend}
           >
             {block.busy === 'clear' ? '清除中…' : '清掉再送我這則'}
