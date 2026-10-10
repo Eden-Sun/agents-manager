@@ -57,6 +57,27 @@ pub fn run(args: HookArgs) {
     }
 }
 
+/// POST 失敗的兩種：daemon 回了非 2xx（分得出狀態碼），或根本沒送到（連不上、逾時、建 client 失敗）。
+enum PostError {
+    Rejected(u16),
+    Failed(String),
+}
+
+impl std::fmt::Display for PostError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            PostError::Rejected(code) => write!(f, "http {code}"),
+            PostError::Failed(msg) => f.write_str(msg),
+        }
+    }
+}
+
+/// daemon 明確、永久的拒絕：重放也一樣被丟，不進 spool。410＝bot 已刪（spool 還會把清掉的 bots/<id>/ 建回來）、
+/// 409＝provider 不是這顆 bot 的 kind。401（token 不對／讀不到 bot）與 5xx 照舊 spool：那可能是暫時的。
+pub fn worth_spooling(status: u16) -> bool {
+    !matches!(status, 409 | 410)
+}
+
 /// 子 agent 的 pane（herdr shim 蓋的 `AM_CHILD_OF`）繼承的是母 bot 的 `AM_BOT_ID`／`AM_HOOK_TOKEN`／`AM_RUN_ID`：
 /// 這裡送出去的 hook 會被記在母 bot 身上（同 kind 時收掉母 bot 的回合、改掉它的 session）。子 agent 沒有自己的 hook 身分
 /// （§12.5／§12a.9 改讀對話檔），所以一律不送。
@@ -100,6 +121,10 @@ fn inner(args: HookArgs) {
     let token = hook_token(&args.token);
     match post(&body, &args.provider, &token, port, deadline) {
         Ok(()) => {}
+        // 永久拒絕：重放也一定被丟，spool 只會把已刪 bot 的目錄建回來（#1005）。不寫 hook.log、不 spool。
+        Err(PostError::Rejected(code)) if !worth_spooling(code) => {
+            let _ = writeln!(std::io::stderr(), "agents-managerd hook: http {code}; dropped");
+        }
         Err(e) => {
             log_line_in(&data_dir, &args.bot, &format!("post failed: {e}"));
             let _ = writeln!(std::io::stderr(), "agents-managerd hook: {e}; spooled");
@@ -210,10 +235,10 @@ fn post(
     token: &str,
     port: u16,
     deadline: Instant,
-) -> Result<(), String> {
+) -> Result<(), PostError> {
     let remaining = deadline.saturating_duration_since(Instant::now());
     if remaining.is_zero() {
-        return Err("out of time budget".into());
+        return Err(PostError::Failed("out of time budget".into()));
     }
     let total = HTTP_TIMEOUT.min(remaining);
 
@@ -221,7 +246,7 @@ fn post(
     let rt = tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()
-        .map_err(|e| format!("runtime: {e}"))?;
+        .map_err(|e| PostError::Failed(format!("runtime: {e}")))?;
 
     let url = format!("http://127.0.0.1:{port}/hook/{provider}");
     let body = body.clone();
@@ -233,21 +258,21 @@ fn post(
             .connect_timeout(CONNECT_TIMEOUT)
             .timeout(total)
             .build()
-            .map_err(|e| format!("client: {e}"))?;
+            .map_err(|e| PostError::Failed(format!("client: {e}")))?;
 
         let resp = tokio::time::timeout(
             total,
             client.post(&url).header("X-AM-Bot-Token", token).json(&body).send(),
         )
         .await
-        .map_err(|_| "timeout".to_string())?
-        .map_err(|e| format!("request: {e}"))?;
+        .map_err(|_| PostError::Failed("timeout".to_string()))?
+        .map_err(|e| PostError::Failed(format!("request: {e}")))?;
 
         let status = resp.status();
         if status.is_success() {
             Ok(())
         } else {
-            Err(format!("http {}", status.as_u16()))
+            Err(PostError::Rejected(status.as_u16()))
         }
     })
 }
