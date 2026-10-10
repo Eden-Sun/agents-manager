@@ -761,7 +761,7 @@ pub async fn ack(pool: &SqlitePool, id: &str, actor: Role, responder_configured:
 ///
 /// 1. 還沒送出的 `health_changed` 只留最新一筆——十分鐘內 degraded→healthy→degraded 是一件事，
 ///    讀的人只需要現在的狀態。
-/// 2. 同一個 incident 開了又在送出前就恢復：兩筆一起結案，不叫醒任何人（抖動）。
+/// 2. 同一個 incident 開了又在送出前就恢復：兩筆一起結案，不叫醒任何人（抖動；送達過又被放回佇列的不算：讀的人已經知道它開了，恢復要讓他看到）。
 ///
 /// 被合併的列 `state='handled'`、`acked_by='daemon'`、`merged_into` 指向留下來的那筆，稽核看得到。
 ///
@@ -795,7 +795,8 @@ pub async fn coalesce_patrol(pool: &SqlitePool) -> Result<usize> {
         "SELECT o.id, r.id FROM supervisor_inbox o
            JOIN supervisor_inbox r
              ON r.event_key = substr(o.event_key, 1, length(o.event_key) - length('opened')) || 'resolved'
-          WHERE o.kind='incident_opened' AND o.state='pending' AND r.state='pending'",
+          WHERE o.kind='incident_opened' AND o.state='pending' AND r.state='pending'
+            AND o.notify_turn_id IS NULL AND o.delivered_at IS NULL",
     )
     .fetch_all(pool)
     .await?;
@@ -1435,5 +1436,88 @@ mod tests {
             sqlx::query_as("SELECT state, merged_into FROM supervisor_inbox WHERE event_key='health:old'").fetch_one(&p).await.unwrap();
         assert_eq!(merged_state, "handled");
         assert_eq!(merged_into.as_deref(), Some("01AAAAAAAAAAAAAAAAAAAAAAAA"));
+    }
+
+    #[tokio::test]
+    async fn a_flap_is_not_swallowed_once_the_opening_was_delivered() {
+        let p = pool().await;
+        let at = "2026-09-18T00:00:00.000Z";
+        for (id, key) in [
+            ("01INBOX00000000000000000001", "incident:i1:opened"),
+            ("01INBOX00000000000000000002", "incident:i2:opened"),
+        ] {
+            sqlx::query(
+                "INSERT INTO supervisor_inbox (id, supervisor_id, event_key, kind, state, role, created_at, updated_at)
+                 VALUES (?,?,?,'incident_opened','pending','patrol',?,?)",
+            )
+            .bind(id)
+            .bind(super::super::store::SUPERVISOR_ID)
+            .bind(key)
+            .bind(at)
+            .bind(at)
+            .execute(&p)
+            .await
+            .unwrap();
+        }
+
+        // 把 i1 那則改成送達過又放回
+        sqlx::query(
+            "UPDATE supervisor_inbox SET notify_turn_id='t1', delivered_at='2026-10-01T00:00:00.000Z', state='pending'
+              WHERE event_key='incident:i1:opened'",
+        )
+        .execute(&p)
+        .await
+        .unwrap();
+
+        // 推 incident:i1:resolved 與 incident:i2:resolved
+        for (id, key) in [
+            ("01INBOX00000000000000000003", "incident:i1:resolved"),
+            ("01INBOX00000000000000000004", "incident:i2:resolved"),
+        ] {
+            sqlx::query(
+                "INSERT INTO supervisor_inbox (id, supervisor_id, event_key, kind, state, role, created_at, updated_at)
+                 VALUES (?,?,?,'incident_resolved','pending','patrol',?,?)",
+            )
+            .bind(id)
+            .bind(super::super::store::SUPERVISOR_ID)
+            .bind(key)
+            .bind(at)
+            .bind(at)
+            .execute(&p)
+            .await
+            .unwrap();
+        }
+
+        assert_eq!(coalesce_patrol(&p).await.unwrap(), 2, "只合併 i2 那一對（opened+resolved 共 2 筆）");
+
+        // i1 的 opened／resolved 兩則仍是 pending、merged_into IS NULL
+        let i1_opened: (String, Option<String>) = sqlx::query_as("SELECT state, merged_into FROM supervisor_inbox WHERE event_key='incident:i1:opened'")
+            .fetch_one(&p)
+            .await
+            .unwrap();
+        assert_eq!(i1_opened.0, "pending");
+        assert_eq!(i1_opened.1, None);
+
+        let i1_resolved: (String, Option<String>) = sqlx::query_as("SELECT state, merged_into FROM supervisor_inbox WHERE event_key='incident:i1:resolved'")
+            .fetch_one(&p)
+            .await
+            .unwrap();
+        assert_eq!(i1_resolved.0, "pending");
+        assert_eq!(i1_resolved.1, None);
+
+        // i2 的兩則是 handled、acked_by='daemon'
+        let i2_opened: (String, Option<String>) = sqlx::query_as("SELECT state, acked_by FROM supervisor_inbox WHERE event_key='incident:i2:opened'")
+            .fetch_one(&p)
+            .await
+            .unwrap();
+        assert_eq!(i2_opened.0, "handled");
+        assert_eq!(i2_opened.1.as_deref(), Some("daemon"));
+
+        let i2_resolved: (String, Option<String>) = sqlx::query_as("SELECT state, acked_by FROM supervisor_inbox WHERE event_key='incident:i2:resolved'")
+            .fetch_one(&p)
+            .await
+            .unwrap();
+        assert_eq!(i2_resolved.0, "handled");
+        assert_eq!(i2_resolved.1.as_deref(), Some("daemon"));
     }
 }
