@@ -9,6 +9,12 @@ test('名字中間可以有單一個空白，頭尾／連續／tab 不行（跟 
     assert.equal(isValidBotName(bad), false, JSON.stringify(bad))
 })
 
+test('控制字元與看不見的格式字元不行（跟 daemon valid_bot_name 同規則）', () => {
+  for (const bad of ['a\u200bb', '\u200bname', 'name\u200d', 'a\u202eb', 'a\u2060b', 'a\u2066b', 'a\ufeffb', 'a\u0007b', 'a\u007fb', 'a\u0085b', 'a\u009fb'])
+    assert.equal(isValidBotName(bad), false, JSON.stringify(bad))
+  for (const ok of ['小幫手', 'emoji 🙂', 'é-accent', 'has space']) assert.equal(isValidBotName(ok), true, ok)
+})
+
 test('@ 一個有空白的名字要整個對上，最長的先比', () => {
   const ms = [{ name: 'my bot' }, { name: 'my bot 2' }, { name: 'my' }]
   const pick = (t: string) => parseMentions(t, ms).map((x) => x.name)
