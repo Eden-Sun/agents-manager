@@ -99,8 +99,13 @@ fn truncate(s: &str, n: usize) -> String {
 ///
 /// **絕不派給巡檢**：daemon 擋「總管對自己下交辦」，派過去每一輪都 400（kick 踩過這個坑）。
 async fn pick_target(app: &(impl crate::capabilities::DataDir + crate::capabilities::Db)) -> Option<crate::db::Bot> {
+    pick_target_from(app, std::env::var("AGM_RELEASE_BOT").ok()).await
+}
+
+/// `env_override`＝`AGM_RELEASE_BOT` 的值。分出來是為了讓測試不必改整個行程的環境變數（多執行緒下 `set_var` 是資料競爭，#1151）。
+async fn pick_target_from(app: &(impl crate::capabilities::DataDir + crate::capabilities::Db), env_override: Option<String>) -> Option<crate::db::Bot> {
     let mut ids: Vec<String> = Vec::new();
-    if let Ok(v) = std::env::var("AGM_RELEASE_BOT") {
+    if let Some(v) = env_override {
         ids.push(v);
     }
     if let Ok(txt) = std::fs::read_to_string(agm_dir(app).join("runtime.json")) {
@@ -1173,16 +1178,17 @@ mod tests {
             Some("patrol1"),
             "測試前提：巡檢就是 patrol1"
         );
-        std::env::set_var("AGM_RELEASE_BOT", "patrol1");
-        assert!(pick_target(&app).await.is_none(), "巡檢不能收交辦");
+        assert!(pick_target_from(&app, Some("patrol1".into())).await.is_none(), "巡檢不能收交辦");
 
         // 指到協調者就用它。
-        std::env::set_var("AGM_RELEASE_BOT", "resp1");
-        assert_eq!(pick_target(&app).await.map(|b| b.id), Some("resp1".to_string()));
+        assert_eq!(pick_target_from(&app, Some("resp1".into())).await.map(|b| b.id), Some("resp1".to_string()));
 
         // 指到不存在的 bot：往下找，找不到就 None。
-        std::env::set_var("AGM_RELEASE_BOT", "nope");
-        assert!(pick_target(&app).await.is_none());
-        std::env::remove_var("AGM_RELEASE_BOT");
+        assert!(pick_target_from(&app, Some("nope".into())).await.is_none());
+
+        // 前後空白照舊會被修掉；空字串等於沒設；誰都沒設＝拒絕。
+        assert_eq!(pick_target_from(&app, Some("  resp1 ".into())).await.map(|b| b.id), Some("resp1".to_string()));
+        assert!(pick_target_from(&app, Some(String::new())).await.is_none());
+        assert!(pick_target_from(&app, None).await.is_none(), "誰都沒設＝拒絕");
     }
 }
