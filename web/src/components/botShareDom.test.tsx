@@ -155,7 +155,7 @@ test('聊天區頂端分享鈕：一般 bot 沒有；未分享按下＝開啟並
     assert.deepEqual([...document.querySelectorAll('.share-link-menu [role="menuitem"]')].map((b) => b.textContent), ['複製連結', '重產連結', '關閉分享'], '第一項是複製連結')
     assert.deepEqual(copied, [g.url], '點鈕只開選單，還沒複製')
     await click(btn('複製連結'))
-    await settle(20)
+    await until(() => copied.length === 2, '選單重新讀取後複製連結')
     assert.deepEqual(copied, [g.url, g.url], '選單「複製連結」＝複製同一條')
     assert.equal(document.querySelector('.share-link-menu'), null, '選了就收起選單')
 
@@ -355,7 +355,7 @@ test('別處重產連結（share_enabled 沒變）：聊天頂端的分享鈕複
     await settle(100)
     await click(mainBtn())
     await click(btn('複製連結'))
-    await settle(50)
+    await until(() => copied.length === 1, '初次複製連結')
     const before = copied[0]
     assert.ok(before, '分享中選單的「複製連結」就複製手上那條')
 
@@ -376,7 +376,7 @@ test('別處重產連結（share_enabled 沒變）：聊天頂端的分享鈕複
 
     await click(mainBtn())
     await click(btn('複製連結'))
-    await settle(50)
+    await until(() => copied.length === 2, '重產後複製新連結')
     assert.equal(copied.at(-1), r.url, '複製的是重產後的新連結')
     assert.notEqual(copied.at(-1), before)
     await settle(100) // 把非 act 的排程收乾淨，不留給下一條測試
@@ -409,10 +409,10 @@ test('聊天分享鈕：複製連結重新讀取狀態，不會把別處剛關�
     await act(async () =>
       useStore.setState((s) => ({ shareRev: { ...s.shareRev, [shared.id]: (s.shareRev[shared.id] ?? 0) + 1 } })),
     )
-    await until(() => releaseGets.length === 1)
+    await until(() => releaseGets.length === 1, '分享版本變更後的讀取開始')
     await click(mainBtn())
     await click(btn('複製連結'))
-    await until(() => releaseGets.length >= 2 || calls.some((c) => c.method === 'POST'))
+    await until(() => releaseGets.length >= 2 || calls.some((c) => c.method === 'POST'), '選單複製期間讀取狀態')
     releaseGets.forEach((release) => release())
     await settle(50)
 
@@ -443,13 +443,35 @@ test('聊天分享鈕：舊版只有 hash 時提示重產，不用 POST 換一�
     await settle(50)
     await click(mainBtn())
     await click(btn('複製連結'))
-    await until(() => messages.length > 0)
+    await until(() => messages.length > 0, '顯示舊版連結提示')
 
     assert.equal(calls.filter((c) => c.method === 'POST' && c.path.endsWith('/share')).length, 0)
     assert.match(messages.at(-1)!, /舊版開的.*重產連結/)
   } finally {
     rawTransport.request = orig
   }
+})
+
+test('分享鈕選單：打開後焦點在第一項，方向鍵移動，Esc 關掉並把焦點還給按鈕（#1198）', async () => {
+  const { shared } = await setup()
+  await mount(<ShareLinkButton botId={shared.id} />)
+  await settle(100)
+  await click(mainBtn())
+  await settle(50)
+
+  const items = () => [...document.querySelectorAll<HTMLButtonElement>('.share-link-menu [role="menuitem"]')]
+  assert.equal(document.activeElement, items()[0], '打開後焦點在第一個選單項目')
+  assert.deepEqual(items().map((item) => item.tabIndex), [-1, -1, -1], 'menuitem 不在一般 Tab 順序')
+  await keydown(items()[0], 'ArrowDown')
+  assert.equal(document.activeElement, items()[1])
+  await keydown(items()[1], 'End')
+  assert.equal(document.activeElement, items()[2])
+  await keydown(items()[2], 'ArrowDown')
+  assert.equal(document.activeElement, items()[0], '方向鍵會繞回第一項')
+  await keydown(document.activeElement as HTMLElement, 'Escape')
+  await settle()
+  assert.equal(document.querySelector('.share-link-menu'), null)
+  assert.equal(document.activeElement, mainBtn(), 'Esc 關閉後焦點回到分享鈕')
 })
 
 test('別處重產連結（share_enabled 沒變）：設定面板換成新連結（#1099）', async () => {

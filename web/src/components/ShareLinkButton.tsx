@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from 'react'
 import { fetchShare, rotateShare, setShareEnabled, shareErrorText, type ShareState } from '../api/share'
+import { useMenuKeys } from '../hooks/useMenuKeys'
 import { copyText } from '../lib/copyText'
 import { shareIcon } from '../lib/shareProfile'
 import { useStore } from '../store/store'
@@ -50,6 +51,7 @@ export function ShareLinkButton({ botId }: { botId: string }) {
   const [menuAt, setMenuAt] = useState<{ top: number; right: number } | null>(null)
   const [confirm, setConfirm] = useState<'rotate' | 'off' | null>(null)
   const wrapRef = useRef<HTMLSpanElement>(null)
+  const menuRef = useRef<HTMLSpanElement>(null)
   const mainRef = useRef<HTMLButtonElement>(null)
 
   // 分享中就先把連結抓好：按下去同步複製，不用等網路（剪貼簿要在使用者手勢裡）。
@@ -78,6 +80,8 @@ export function ShareLinkButton({ botId }: { botId: string }) {
       document.removeEventListener('keydown', esc)
     }
   }, [menu])
+
+  const menuKeys = useMenuKeys(menu, menuRef, mainRef, () => setMenu(false))
 
   if (!restricted) return null
 
@@ -153,13 +157,21 @@ export function ShareLinkButton({ botId }: { botId: string }) {
         <LinkIcon />
       </button>
       {menu ? (
-        <span className="share-link-menu" role="menu" style={menuAt ? { position: 'fixed', top: menuAt.top, right: menuAt.right } : undefined}>
-          <button type="button" role="menuitem" onClick={onCopyFromMenu}>
+        <span
+          ref={menuRef}
+          className="share-link-menu"
+          role="menu"
+          aria-label="分享連結"
+          onKeyDown={menuKeys}
+          style={menuAt ? { position: 'fixed', top: menuAt.top, right: menuAt.right } : undefined}
+        >
+          <button type="button" role="menuitem" tabIndex={-1} onClick={onCopyFromMenu}>
             複製連結
           </button>
           <button
             type="button"
             role="menuitem"
+            tabIndex={-1}
             onClick={() => {
               setMenu(false)
               setConfirm('rotate')
@@ -170,6 +182,7 @@ export function ShareLinkButton({ botId }: { botId: string }) {
           <button
             type="button"
             role="menuitem"
+            tabIndex={-1}
             className="danger"
             onClick={() => {
               setMenu(false)
