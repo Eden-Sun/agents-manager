@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from 'react'
+import { useEffect, useMemo, useRef, useState } from 'react'
 import type { ShareClient } from './shareApi'
 import { canShareFile, displayName, isSvgName, pngName, shareOrSave } from './shareImage'
 import { pngOf, rasterOf, type PngResult } from './shareImageCache'
@@ -131,9 +131,30 @@ export function ShareThumb({ file, client, onOpen, big, retryMs }: { file: Share
 
 /** 放大檢視：大圖＋同一顆「分享／存到手機」。 */
 export function ShareImageViewer({ file, client, onClose }: { file: ShareFile; client: ShareClient; onClose: () => void }) {
+  const box = useRef<HTMLDivElement>(null)
+  const closeBtn = useRef<HTMLButtonElement>(null)
+
+  // 進場把焦點交給「✕」，關掉時還給打開它的那顆（縮圖或檔名）。
+  useEffect(() => {
+    const opener = document.activeElement instanceof HTMLElement ? document.activeElement : null
+    closeBtn.current?.focus()
+    return () => {
+      if (opener?.isConnected) opener.focus()
+    }
+  }, [])
+
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
       if (e.key === 'Escape') onClose()
+      if (e.key === 'Tab') {
+        // 對話框裡只有按鈕：Tab 在按鈕之間繞，不讓焦點走到背後被蓋住的頁面。
+        const items = [...(box.current?.querySelectorAll<HTMLElement>('button:not([disabled])') ?? [])]
+        if (items.length === 0) return
+        const i = items.indexOf(document.activeElement as HTMLElement)
+        const next = e.shiftKey ? (i <= 0 ? items.length - 1 : i - 1) : i < 0 || i === items.length - 1 ? 0 : i + 1
+        e.preventDefault()
+        items[next].focus()
+      }
     }
     window.addEventListener('keydown', onKey)
     return () => window.removeEventListener('keydown', onKey)
@@ -142,6 +163,7 @@ export function ShareImageViewer({ file, client, onClose }: { file: ShareFile; c
 
   return (
     <div
+      ref={box}
       className="sh-viewer"
       role="dialog"
       aria-modal="true"
@@ -152,7 +174,7 @@ export function ShareImageViewer({ file, client, onClose }: { file: ShareFile; c
     >
       <div className="sh-viewer-bar">
         <span className="sh-viewer-name">{displayName(file.name)}</span>
-        <button type="button" className="sh-viewer-close" aria-label="關閉" onClick={onClose}>
+        <button ref={closeBtn} type="button" className="sh-viewer-close" aria-label="關閉" onClick={onClose}>
           ✕
         </button>
       </div>
