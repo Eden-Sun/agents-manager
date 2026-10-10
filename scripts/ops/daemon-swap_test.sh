@@ -1035,7 +1035,7 @@ check "舊 daemon bootstrap 自測使用 User session token" 'with opener.open(b
 setup 10 10
 rm -rf "$AM_DATA/service-tokens"
 rc=$(run)
-check_eq "service 能力無法判定時 fail closed（rc=4）" "4" "$rc"
+check_eq "service 能力無法判定時 fail closed，而且是設定錯誤不是「有人在忙」的 4（rc=3）" "3" "$rc"
 check_no "能力不明時不取得維運租約" "lease acquire restart" "$AGM_DIR/calls.log"
 check_no "能力不明時不替換 binary" "submit" "$AGM_DIR/launchctl.log"
 teardown
@@ -1156,7 +1156,7 @@ setup 10 10
 export STUB_CAP=service_old
 rm -rf "$AM_DATA/service-tokens"
 rc=$(run ap-1)
-check_eq "daemon 宣告 service principal 卻缺 token 時不降級（rc=4）" "4" "$rc"
+check_eq "daemon 宣告 service principal 卻缺 token 時不降級，回設定錯誤（rc=3）" "3" "$rc"
 check_no "缺 service token 時不取得 User 租約" "lease acquire restart" "$AGM_DIR/calls.log"
 teardown
 
