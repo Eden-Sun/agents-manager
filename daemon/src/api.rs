@@ -5225,6 +5225,8 @@ async fn started_json(app: &Arc<App>, run_id: &str, opts: &lifecycle::StartOpts)
 }
 
 async fn start_bot(State(app): State<Arc<App>>, Path(id): Path<String>, Query(q): Query<StartQuery>) -> Result<Response, LcError> {
+    // 參數不合法要在任何副作用（包括叫醒睡著的 bot）之前就 400，與 restart_bot 同順序。
+    let opts = resume_opts(&q)?;
     refuse_child_restart(&app, &id).await?;
     // 被 AGM 因為閒置收起來的（§6.11）一律走續接：使用者按「啟動」要的是把剛剛那顆帶著對話的
     // bot 叫回來，不是開一段新的空白對話。
@@ -5239,7 +5241,6 @@ async fn start_bot(State(app): State<Arc<App>>, Path(id): Path<String>, Query(q)
         };
         return Ok((StatusCode::OK, Json(body)).into_response());
     }
-    let opts = resume_opts(&q)?;
     let run_id = lifecycle::start_bot_with(&app, &id, opts.clone()).await?;
     Ok((StatusCode::OK, Json(started_json(&app, &run_id, &opts).await?)).into_response())
 }
@@ -9041,6 +9042,32 @@ mod started_json_tests {
         assert_eq!(body["run_id"], json!(run.id));
         assert_eq!(body["resumed"], json!(false), "開的是新對話：{body}");
         lifecycle::stop_bot(&app, &bot.id).await.unwrap();
+    }
+
+    /// 睡著的 bot 也一樣：參數不合法就在叫醒之前 400，睡眠列與 run 都不能被動到。
+    #[tokio::test]
+    async fn starting_a_sleeping_bot_with_bad_resume_params_is_refused_before_waking() {
+        let e = tt::env().await;
+        let app = e.app.clone();
+        let bot = tt::claude_bot(&app, &e.project_id, "sleeper2").await;
+        sqlx::query("INSERT INTO bot_sleeps (bot_id, native_session_id, idle_minutes, reason, slept_at) VALUES (?,NULL,90,'idle',?)")
+            .bind(&bot.id)
+            .bind(db::now())
+            .execute(&app.db)
+            .await
+            .unwrap();
+        let bad = [
+            StartQuery { resume: Some("bogus".into()), session: None },
+            StartQuery { resume: None, session: Some("abc".into()) },
+            StartQuery { resume: Some("native".into()), session: Some("a b".into()) },
+        ];
+        for q in bad {
+            let err = start_bot(State(app.clone()), Path(bot.id.clone()), Query(q)).await.unwrap_err();
+            assert!(matches!(err, LcError::Bad(_)), "{err:?}");
+        }
+        assert!(db::active_run(&app.db, &bot.id).await.unwrap().is_none(), "不該被叫醒");
+        let sleeps: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM bot_sleeps WHERE bot_id = ?").bind(&bot.id).fetch_one(&app.db).await.unwrap();
+        assert_eq!(sleeps, 1);
     }
 }
 
