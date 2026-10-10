@@ -194,8 +194,18 @@ pub async fn start_manager(app: &(impl crate::capabilities::Db + crate::capabili
     let bot = manager_bot(app.db())
         .await?
         .ok_or_else(|| LcError::conflict("supervisor is not set up", json!({"reason": "not_configured"})))?;
-    if crate::db::active_run(app.db(), &bot.id).await.map_err(up)?.is_none() {
-        app.start_bot(&bot.id).await?;
+    match crate::db::active_run(app.db(), &bot.id).await.map_err(up)? {
+        None => {
+            app.start_bot(&bot.id).await?;
+        }
+        // 上一個 run 還在收尾：這時起不了新的（`runs_one_active`），當成「已經在跑」往下走只會回一個假的成功。
+        Some(run) if run.state == "stopping" => {
+            return Err(LcError::conflict(
+                "run_stopping",
+                json!({"run_id": run.id, "retryable": true, "message": "上一個 run 還在停止中，等它收掉再啟動"}),
+            ));
+        }
+        Some(_) => {}
     }
     // A newly spawned CLI is intentionally idle until it receives a first turn. Send one
     // idempotent handshake so the user can immediately see how to use AGM; the stable request
@@ -709,7 +719,7 @@ pub async fn sanitized_state(app: &(impl crate::capabilities::Db + crate::capabi
 
 #[cfg(all(test, feature = "daemon-test-harness"))]
 mod tests {
-    use super::sanitized_state;
+    use super::{sanitized_state, start_manager, store, LcError};
     use std::sync::Arc;
 
     fn queued_turns(state: &serde_json::Value, bot_id: &str) -> i64 {
@@ -756,5 +766,24 @@ mod tests {
         crate::testing::make_table_readable(&app, "turns").await;
         assert!(result.is_err(), "an unreadable queued-turn count must not publish a false idle snapshot: {result:?}");
         assert_eq!(queued_turns(&sanitized_state(&app).await.unwrap(), bot_id), 1, "after DB recovery the real count is visible");
+    }
+
+    #[tokio::test]
+    async fn starting_while_the_previous_run_is_still_stopping_is_a_conflict_not_a_fake_success() {
+        let env = crate::testing::env().await;
+        let app = env.app.clone();
+        let bot = crate::testing::claude_bot(&app, &env.project_id, "agm-stopping").await.id;
+        crate::testing::fake_run(&app, &bot).await;
+        store::get_or_init(&app.db).await.unwrap();
+        sqlx::query("UPDATE supervisors SET bot_id=?, generation=1, status_detail='before', remote_status='unknown' WHERE id=?")
+            .bind(&bot).bind(store::SUPERVISOR_ID).execute(&app.db).await.unwrap();
+        sqlx::query("UPDATE runs SET state='stopping' WHERE bot_id=?").bind(&bot).execute(&app.db).await.unwrap();
+
+        let err = start_manager(&app, None).await.unwrap_err();
+        let LcError::Conflict(v) = &err else { panic!("要是 409：{err:?}") };
+        assert_eq!(v["reason"], "run_stopping");
+        let s = store::get_or_init(&app.db).await.unwrap();
+        assert_eq!(s.status_detail.as_deref(), Some("before"), "沒啟動就不能改狀態");
+        assert_eq!(s.remote_status, "unknown", "也不能宣稱 remote 已請求");
     }
 }
