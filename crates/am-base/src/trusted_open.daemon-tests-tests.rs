@@ -299,7 +299,10 @@
             .stderr(Stdio::null())
             .spawn()
             .unwrap();
-        let deadline = Instant::now() + Duration::from_secs(2);
+        // 子行程是整顆測試 binary 再起一次：高負載下光是啟動（載入、過濾幾千條測試）就可能好幾秒。
+        // 要分辨的是「永遠卡在 open(FIFO)」，所以給得很寬；正常情況照樣幾十毫秒就回來（#1152）。
+        const CHILD_DEADLINE: Duration = Duration::from_secs(60);
+        let deadline = Instant::now() + CHILD_DEADLINE;
         let status = loop {
             if let Some(status) = child.try_wait().unwrap() {
                 break Some(status);
@@ -313,7 +316,7 @@
         };
 
         std::fs::remove_dir_all(&base).unwrap();
-        assert!(status.is_some(), "opening a FIFO after the type check must return promptly");
+        assert!(status.is_some(), "子行程 {CHILD_DEADLINE:?} 內沒結束：開 FIFO 卡住了（type check 之後的 open 不能阻塞）");
         assert!(status.unwrap().success(), "the replaced FIFO must be rejected as a non-regular file");
     }
 
