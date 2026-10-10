@@ -3562,7 +3562,7 @@ async fn refresh_tools(
 ) -> Result<Response, LcError> {
     require_user(&principal)?;
     let fence = app.hosts.fence(&name).await.ok_or_else(|| LcError::NotFound("host".into()))?;
-    let ht = crate::tools::detect_with_fence(&app, &name, &fence).await.map_err(|e| LcError::Upstream(format!("{e:#}")))?;
+    let ht = crate::tools::detect_with_fence(&app, &name, &fence).await.map_err(|e| detect_error(&name, e))?;
     crate::state::emit_host_changed(&app, &fence).await;
     Ok((
         StatusCode::OK,
@@ -3576,6 +3576,14 @@ async fn refresh_tools(
         })),
     )
         .into_response())
+}
+
+/// 偵測結果被作廢不是上游錯誤：409 `host_superseded`、可重試；其餘錯誤照舊 502。
+fn detect_error(host: &str, e: anyhow::Error) -> LcError {
+    if e.is::<crate::tools::Superseded>() {
+        return LcError::conflict("host_superseded", json!({"host": host, "retryable": true}));
+    }
+    LcError::Upstream(format!("{e:#}"))
 }
 
 #[derive(Deserialize)]
@@ -3748,6 +3756,21 @@ mod agy_logout_route_tests {
         let bytes = axum::body::to_bytes(resp.into_body(), 1 << 20).await.unwrap();
         let body: Value = serde_json::from_slice(&bytes).unwrap();
         assert_eq!((body["reason"].as_str(), body["retryable"].as_bool()), (Some("host_superseded"), Some(true)), "{body}");
+    }
+}
+
+#[cfg(test)]
+mod refresh_tool_error_tests {
+    use super::*;
+
+    #[test]
+    fn a_superseded_tool_detection_is_a_retryable_409_not_a_502() {
+        let e = anyhow::Error::new(crate::tools::Superseded { host: "m4p".into() });
+        let LcError::Conflict(v) = detect_error("m4p", e) else { panic!("要是 409") };
+        assert_eq!(v["reason"], "host_superseded");
+        assert_eq!(v["retryable"], true);
+        assert_eq!(v["host"], "m4p");
+        assert!(matches!(detect_error("m4p", anyhow::anyhow!("ssh: connect timed out")), LcError::Upstream(_)), "其餘照舊 502");
     }
 }
 
