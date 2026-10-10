@@ -9,6 +9,10 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use super::*;
 use crate::testing as tt;
 
+/// 等名額被占滿／放回的上限。只是失敗時的保險（成功時幾毫秒就到）；被等的是真的 TCP＋DB，
+/// 2 秒在整樹平行時會被排擠到逾時（#1155，同 #952）。
+const PERMIT_WAIT: Duration = Duration::from_secs(30);
+
 async fn fixture() -> (tt::Env, String, Portal<crate::state::App>, SocketAddr, reqwest::Client) {
     fixture_with(UPLOAD_QUEUE_WAIT).await
 }
@@ -137,7 +141,7 @@ async fn issue_823_holds_both_upload_permits_until_body_read_and_rejects_a_third
     let (_e, token, state, addr, _client) = fixture().await;
     let first = partial_upload(addr, &format!("/s/{token}/api/upload?name=x.txt")).await;
     let second = partial_upload(addr, &format!("/s/{token}/api/upload?name=x.txt")).await;
-    tokio::time::timeout(Duration::from_secs(2), async {
+    tokio::time::timeout(PERMIT_WAIT, async {
         while state.uploads.available_permits() != 0 {
             tokio::task::yield_now().await;
         }
@@ -159,7 +163,7 @@ async fn a_capacity_rejection_does_not_spend_the_upload_rate_limit() {
     let uri = format!("/s/{token}/api/upload?name=x.txt");
     let first = partial_upload(addr, &uri).await;
     let second = partial_upload(addr, &uri).await;
-    tokio::time::timeout(Duration::from_secs(2), async {
+    tokio::time::timeout(PERMIT_WAIT, async {
         while state.uploads.available_permits() != 0 {
             tokio::task::yield_now().await;
         }
@@ -172,7 +176,7 @@ async fn a_capacity_rejection_does_not_spend_the_upload_rate_limit() {
         assert_eq!(response_status(&mut rejected).await, StatusCode::TOO_MANY_REQUESTS.as_u16());
     }
     drop((first, second));
-    tokio::time::timeout(Duration::from_secs(2), async {
+    tokio::time::timeout(PERMIT_WAIT, async {
         while state.uploads.available_permits() == 0 {
             tokio::task::yield_now().await;
         }
@@ -471,7 +475,7 @@ async fn queued_uploads_wait_for_the_two_slots_instead_of_failing() {
     let slow = format!("/s/{token}/api/upload?name=slow.txt");
     let mut first = partial_upload(addr, &slow).await;
     let mut second = partial_upload(addr, &slow).await;
-    tokio::time::timeout(Duration::from_secs(2), async {
+    tokio::time::timeout(PERMIT_WAIT, async {
         while state.uploads.available_permits() != 0 {
             tokio::task::yield_now().await;
         }
@@ -518,7 +522,7 @@ async fn one_share_cannot_take_every_upload_queue_slot() {
     let slow = format!("/s/{token_a}/api/upload?name=slow.txt");
     let mut first = partial_upload(addr, &slow).await;
     let mut second = partial_upload(addr, &slow).await;
-    tokio::time::timeout(Duration::from_secs(2), async {
+    tokio::time::timeout(PERMIT_WAIT, async {
         while state.uploads.available_permits() != 0 {
             tokio::task::yield_now().await;
         }
@@ -533,7 +537,7 @@ async fn one_share_cannot_take_every_upload_queue_slot() {
             tokio::spawn(async move { call(&client, addr, &uri, "application/octet-stream", format!("a {i}").into_bytes()).await })
         })
         .collect();
-    tokio::time::timeout(Duration::from_secs(2), async {
+    tokio::time::timeout(PERMIT_WAIT, async {
         while state.upload_queue.available_permits() != UPLOAD_QUEUE_MAX - (UPLOAD_INFLIGHT_PER_SHARE - 2) {
             tokio::task::yield_now().await;
         }
@@ -579,7 +583,7 @@ async fn per_share_upload_permits_are_released_on_timeout() {
     let slow = format!("/s/{token}/api/upload?name=slow.txt");
     let first = partial_upload(addr, &slow).await;
     let second = partial_upload(addr, &slow).await;
-    tokio::time::timeout(Duration::from_secs(2), async {
+    tokio::time::timeout(PERMIT_WAIT, async {
         while state.uploads.available_permits() != 0 {
             tokio::task::yield_now().await;
         }
@@ -594,7 +598,7 @@ async fn per_share_upload_permits_are_released_on_timeout() {
     );
     // 慢的兩個斷線之後，計數要回到 0：連續 UPLOAD_INFLIGHT_PER_SHARE 個上傳都不會吃到 upload_per_share。
     drop((first, second));
-    tokio::time::timeout(Duration::from_secs(2), async {
+    tokio::time::timeout(PERMIT_WAIT, async {
         while state.uploads.available_permits() != 2 {
             tokio::task::yield_now().await;
         }
@@ -608,4 +612,9 @@ async fn per_share_upload_permits_are_released_on_timeout() {
             "逾時與斷線的 permit 都要放掉（第 {i} 個）"
         );
     }
+}
+
+#[test]
+fn the_permit_wait_is_a_failure_bound_not_a_timing_assertion() {
+    assert!(PERMIT_WAIT >= Duration::from_secs(30), "被等的是真的 TCP＋DB：上限太緊在高負載下會假紅（#952）");
 }
