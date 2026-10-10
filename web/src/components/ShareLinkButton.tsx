@@ -116,9 +116,24 @@ export function ShareLinkButton({ botId }: { botId: string }) {
 
   const onCopyFromMenu = () => {
     setMenu(false)
-    // 手上那份要是開著的那條才直接複製；沒有（網路還沒回來）就重抓一次再複製。
-    if (share?.enabled && share.url) return copy(share, '已複製分享連結')
-    void run(() => setShareEnabled(botId, true), '已複製分享連結')
+    // 複製是唯讀操作；重新讀取伺服器狀態，不能從過期的本機旗標重開分享。
+    const requestRev = rev
+    void fetchShare(botId).then(
+      (s) => {
+        // GET 期間若別處重產連結，這份回應已過期，不要複製舊 URL。
+        if ((useStore.getState().shareRev[botId] ?? 0) !== requestRev) return
+        setFetched({ rev: requestRev, share: s })
+        if (!s.enabled) {
+          useStore.setState((state) => ({
+            bots: state.bots.map((b) => (b.id === botId ? { ...b, share_enabled: false } : b)),
+          }))
+          notify('info', '分享已關閉')
+          return
+        }
+        copy(s, '已複製分享連結')
+      },
+      (e) => notify('error', shareErrorText(e)),
+    )
   }
 
   return (

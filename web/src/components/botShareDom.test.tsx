@@ -6,7 +6,7 @@
 import test, { after, afterEach, before } from 'node:test'
 import assert from 'node:assert/strict'
 import { renderToStaticMarkup } from 'react-dom/server'
-import { act, click, fakeApi, mockApi, mount, settle, setupDom, teardownDom, unmountAll, until } from '../testing/domHarness'
+import { act, click, fakeApi, keydown, mockApi, mount, settle, setupDom, teardownDom, unmountAll, until } from '../testing/domHarness'
 import { MockTransport } from '../api/mock'
 import { ApiError } from '../api/types'
 import { resetStoreForTest, useStore } from '../store/store'
@@ -383,6 +383,72 @@ test('別處重產連結（share_enabled 沒變）：聊天頂端的分享鈕複
   } finally {
     Object.defineProperty(navigator, 'clipboard', { configurable: true, value: origClip })
     document.execCommand = origExec
+  }
+})
+
+test('聊天分享鈕：複製連結重新讀取狀態，不會把別處剛關掉的分享打開（#1187）', async () => {
+  const { mock, shared } = await setup()
+  await mount(<ShareLinkButton botId={shared.id} />)
+  await settle(100)
+  const { rawTransport } = await import('../api/index')
+  const orig = rawTransport.request.bind(rawTransport)
+  const calls: { method: string; path: string }[] = []
+  const releaseGets: (() => void)[] = []
+  rawTransport.request = (async (method: string, path: string, body?: unknown) => {
+    calls.push({ method, path })
+    const result = await orig(method as never, path, body as never)
+    if (method === 'GET' && path.endsWith('/share')) {
+      return new Promise((resolve) => releaseGets.push(() => resolve(result)))
+    }
+    return result
+  }) as typeof rawTransport.request
+  try {
+    await mock.request('POST', `/bots/${shared.id}/share`, { enabled: false })
+    // 模擬另一個分頁的狀態尚未送到本分頁：UI 仍顯示 enabled=true。
+    assert.equal(mainBtn().getAttribute('aria-label'), '複製分享連結')
+    await act(async () =>
+      useStore.setState((s) => ({ shareRev: { ...s.shareRev, [shared.id]: (s.shareRev[shared.id] ?? 0) + 1 } })),
+    )
+    await until(() => releaseGets.length === 1)
+    await click(mainBtn())
+    await click(btn('複製連結'))
+    await until(() => releaseGets.length >= 2 || calls.some((c) => c.method === 'POST'))
+    releaseGets.forEach((release) => release())
+    await settle(50)
+
+    assert.equal(calls.filter((c) => c.method === 'POST' && c.path.endsWith('/share')).length, 0, '只複製不能送出開啟分享的 POST')
+    assert.equal(((await mock.request('GET', `/bots/${shared.id}/share`)) as { enabled: boolean }).enabled, false, '分享仍保持關閉')
+    assert.equal(mainBtn().getAttribute('aria-label'), '開啟分享並複製連結', '本機按鈕狀態也更新為未分享')
+  } finally {
+    rawTransport.request = orig
+  }
+})
+
+test('聊天分享鈕：舊版只有 hash 時提示重產，不用 POST 換一條（#1187）', async () => {
+  const { shared } = await setup()
+  const messages: string[] = []
+  await act(async () => useStore.setState({ notify: (_kind: string, message: string) => void messages.push(message) } as never))
+  const { rawTransport } = await import('../api/index')
+  const orig = rawTransport.request.bind(rawTransport)
+  const calls: { method: string; path: string }[] = []
+  rawTransport.request = (async (method: string, path: string, body?: unknown) => {
+    calls.push({ method, path })
+    const result = await orig(method as never, path, body as never)
+    return method === 'GET' && path.endsWith('/share')
+      ? { ...(result as object), url: null, needs_rotate: true, token_hint: '…abcd' }
+      : result
+  }) as typeof rawTransport.request
+  try {
+    await mount(<ShareLinkButton botId={shared.id} />)
+    await settle(50)
+    await click(mainBtn())
+    await click(btn('複製連結'))
+    await until(() => messages.length > 0)
+
+    assert.equal(calls.filter((c) => c.method === 'POST' && c.path.endsWith('/share')).length, 0)
+    assert.match(messages.at(-1)!, /舊版開的.*重產連結/)
+  } finally {
+    rawTransport.request = orig
   }
 })
 
