@@ -483,7 +483,12 @@ async fn handle_status_try(app: &Arc<App>, host: &str, session: &str, ev: &crate
             .execute(&app.db)
             .await
         {
-            tracing::warn!(run = %run.id, status = %status, error = ?e, "could not persist the agent status");
+            // 寫不進去就跟讀不到 run 一樣重放：DB 停在舊狀態時，邊的副作用（排隊訊息的 flush 閘門讀的是 DB）會卡住。
+            // 這一輪不做任何邊的副作用；重放成功那一次 `prev` 仍是 DB 的舊值，副作用在那一次完整做一遍。
+            tracing::warn!(run = %run.id, status = %status, error = ?e, "could not persist the agent status; replaying it shortly");
+            drop(write_guard);
+            replay_status_later(app, host, session, ev, key, seq, attempt);
+            return;
         }
     }
     drop(write_guard);
@@ -899,6 +904,31 @@ mod tests {
         handle_status(&app, LOCAL_HOST, "test", &ev).await;
         let status: String = sqlx::query_scalar("SELECT agent_status FROM runs WHERE id=?").bind(&run).fetch_one(&app.db).await.unwrap();
         assert_eq!(status, "unknown", "不認得的狀態不能讓寫入整句失敗、燈號停在舊的 working");
+    }
+
+    /// B8（#1146）：寫不進 `runs.agent_status` 的狀態事件要重放到寫進去為止，不能只記一行 warn 就丟掉。
+    #[tokio::test]
+    async fn a_status_write_that_fails_is_replayed_until_it_lands() {
+        let e = tt::env().await;
+        let app = e.app.clone();
+        let bot = tt::claude_bot(&app, &e.project_id, "status-write-fail").await;
+        let run = tt::fake_run(&app, &bot.id).await;
+        let pane = format!("pane-{}", bot.id);
+        sqlx::query("UPDATE runs SET agent_status='working' WHERE id=?").bind(&run).execute(&app.db).await.unwrap();
+        sqlx::query("CREATE TRIGGER fail_status BEFORE UPDATE OF agent_status ON runs BEGIN SELECT RAISE(ABORT, 'status boom'); END").execute(&app.db).await.unwrap();
+        let ev = crate::herdr::Event {
+            event: "pane_agent_status_changed".into(),
+            data: json!({"agent": "claude", "pane_id": pane, "agent_status": "idle"}),
+        };
+        handle_status(&app, LOCAL_HOST, "test", &ev).await;
+        let status: String = sqlx::query_scalar("SELECT agent_status FROM runs WHERE id=?").bind(&run).fetch_one(&app.db).await.unwrap();
+        assert_eq!(status, "working", "寫入失敗：DB 還是舊值（這一輪）");
+        sqlx::query("DROP TRIGGER fail_status").execute(&app.db).await.unwrap();
+        let landed = crate::testing::eventually!({
+            let s: String = sqlx::query_scalar("SELECT agent_status FROM runs WHERE id=?").bind(&run).fetch_one(&app.db).await.unwrap();
+            s == "idle"
+        });
+        assert!(landed, "寫入失敗的狀態事件要重放到寫進去為止");
     }
 
     /// m4p 每 39 秒被完整對帳一輪（十幾顆 bot × 好幾個 ssh RPC）：原因是 grok 額度探測（每 30 秒）開的 workspace 一偵測到
