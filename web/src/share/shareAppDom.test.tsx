@@ -255,8 +255,12 @@ test('輪詢恢復後 EventSource 又 open，就不要一直打 messages', { tim
     await act(async () => {
       sources[0].emitOpen()
     })
+    await settle(50)
+    // #1093：斷過又連上補抓一次（訊息＋檔案各一發）。
+    const afterUp = n
+    assert.equal(afterUp, mid + 2, 'SSE 重新連上補抓一次訊息與檔案')
     await settle(POLL_WAIT)
-    assert.equal(n, mid, 'SSE 恢復後停止輪詢')
+    assert.equal(n, afterUp, 'SSE 恢復後停止輪詢')
   } finally {
     globalThis.EventSource = orig
     globalThis.fetch = origFetch
@@ -736,4 +740,120 @@ test('輪詢開著時失敗不另外多排一條重試', { timeout: 20_000 }, as
   await mount(<ShareApp client={client} />)
   await settle(POLL_WAIT * 2 + 300)
   assert.ok(calls <= 3, `開頁 1 次＋兩個 interval tick，實際 ${calls}`)
+})
+
+/** #1093：SSE 在背景斷線又連上、回到前景：訊息與檔案各補抓一次（斷線期間的事件不會重播）。 */
+function reconnectHarness() {
+  const sources: { emitOpen: () => void; emitError: () => void }[] = []
+  class FakeSource {
+    readyState = 0
+    onerror: (() => void) | null = null
+    onopen: (() => void) | null = null
+    constructor(_url: string) {
+      sources.push(this)
+    }
+    addEventListener() {}
+    close() {}
+    emitOpen() {
+      this.readyState = 1
+      this.onopen?.()
+    }
+    emitError() {
+      this.readyState = 0
+      this.onerror?.()
+    }
+  }
+  const counts = { messages: 0, files: 0 }
+  const origFetch = globalThis.fetch
+  const origSource = globalThis.EventSource
+  globalThis.EventSource = FakeSource as unknown as typeof EventSource
+  globalThis.fetch = (async (input: RequestInfo | URL) => {
+    if (String(input).includes('/files')) {
+      counts.files++
+      return new Response('[]', { status: 200 })
+    }
+    counts.messages++
+    return new Response(JSON.stringify({ bot_name: 'b', status: 'idle', messages: [], has_more: false }), { status: 200 })
+  }) as typeof fetch
+  let vis: DocumentVisibilityState = 'visible'
+  Object.defineProperty(document, 'visibilityState', { configurable: true, get: () => vis })
+  const restore = () => {
+    globalThis.EventSource = origSource
+    globalThis.fetch = origFetch
+    delete (document as { visibilityState?: string }).visibilityState
+  }
+  return { sources, counts, setVis: (v: DocumentVisibilityState) => (vis = v), restore }
+}
+
+test('SSE 在背景斷線又連上：連上時補抓一次訊息與檔案', { timeout: 20_000 }, async () => {
+  const h = reconnectHarness()
+  try {
+    await mount(<ShareApp client={httpShareClient('tok_0123456789abcdef')} />)
+    await settle(20)
+    await act(async () => {
+      h.sources[0].emitOpen()
+    })
+    await settle(20)
+    h.setVis('hidden')
+    await act(async () => {
+      h.sources[0].emitError()
+    })
+    const m0 = h.counts.messages
+    const f0 = h.counts.files
+    await settle(POLL_WAIT)
+    assert.equal(h.counts.messages, m0, '背景不輪詢')
+    await act(async () => {
+      h.sources.at(-1)!.emitOpen()
+    })
+    await settle(50)
+    assert.equal(h.counts.messages, m0 + 1)
+    assert.equal(h.counts.files, f0 + 1)
+  } finally {
+    h.restore()
+  }
+})
+
+test('第一次連上不多抓', { timeout: 20_000 }, async () => {
+  const h = reconnectHarness()
+  try {
+    await mount(<ShareApp client={httpShareClient('tok_0123456789abcdef')} />)
+    await settle(20)
+    const m0 = h.counts.messages
+    const f0 = h.counts.files
+    await act(async () => {
+      h.sources[0].emitOpen()
+    })
+    await settle(50)
+    assert.equal(h.counts.messages, m0)
+    assert.equal(h.counts.files, f0)
+  } finally {
+    h.restore()
+  }
+})
+
+test('回到前景補抓一次；背景時不補', { timeout: 20_000 }, async () => {
+  const h = reconnectHarness()
+  try {
+    await mount(<ShareApp client={httpShareClient('tok_0123456789abcdef')} />)
+    await settle(20)
+    await act(async () => {
+      h.sources[0].emitOpen()
+    })
+    await settle(20)
+    const m0 = h.counts.messages
+    h.setVis('hidden')
+    await act(async () => {
+      document.dispatchEvent(new Event('visibilitychange'))
+    })
+    await settle(50)
+    assert.equal(h.counts.messages, m0, '背景時回呼不抓')
+    h.setVis('visible')
+    await act(async () => {
+      document.dispatchEvent(new Event('visibilitychange'))
+    })
+    await settle(50)
+    assert.equal(h.counts.messages, m0 + 1)
+  } finally {
+    h.restore()
+  }
 })
