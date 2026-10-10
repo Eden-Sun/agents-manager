@@ -421,7 +421,9 @@ mod tests {
 
         app.shutdown.cancel();
         app.background_tasks.close();
-        tokio::time::timeout(Duration::from_secs(1), app.background_tasks.wait())
+        // 沒看 shutdown 的 watcher 會活到 GIVE_UP_AFTER（90 秒）；30 秒分得出來，又不會在高負載下把正在收尾的 watcher 判成沒收。
+        assert!(GIVE_UP_AFTER > Duration::from_secs(30), "上限要比 watcher 自己放棄的時間短，才分得出『有看 shutdown』");
+        tokio::time::timeout(Duration::from_secs(30), app.background_tasks.wait())
             .await
             .expect("a relay watcher must leave promptly at shutdown");
         assert_eq!(app.background_tasks.len(), 0);
