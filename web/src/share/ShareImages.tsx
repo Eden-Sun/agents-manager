@@ -65,6 +65,27 @@ function usePng(client: ShareClient, file: ShareFile, enabled: boolean): PngResu
   return res?.key === key ? res.r : 'loading'
 }
 
+/** 點陣圖的整檔每個檔（同版本）只抓一次，清單、對話、放大檢視共用。抓不到不留快取，下次再試。 */
+const rasterCache = new WeakMap<ShareClient, Map<string, Promise<Blob>>>()
+
+function rasterOf(client: ShareClient, name: string, version: string): Promise<Blob> {
+  let byKey = rasterCache.get(client)
+  if (!byKey) rasterCache.set(client, (byKey = new Map()))
+  const key = `${name}\n${version}`
+  let p = byKey.get(key)
+  if (!p) {
+    // 同名的舊版本不留：整張圖的 Blob 留著就是記憶體。
+    for (const k of [...byKey.keys()]) if (k.startsWith(`${name}\n`)) byKey.delete(k)
+    const map = byKey
+    const made = client.fileBlob(name)
+    made.catch(() => {
+      if (map.get(key) === made) map.delete(key)
+    })
+    byKey.set(key, (p = made))
+  }
+  return p
+}
+
 /** 點陣圖原樣交出去：先抓好，點擊時直接分享（同 [`usePng`] 的手勢理由）。 */
 function useRaster(client: ShareClient, file: ShareFile, enabled: boolean): PngResult | 'loading' {
   const name = file.name
@@ -73,7 +94,7 @@ function useRaster(client: ShareClient, file: ShareFile, enabled: boolean): PngR
   useEffect(() => {
     if (!enabled) return
     let alive = true
-    client.fileBlob(name).then(
+    rasterOf(client, name, fileVersion(file)).then(
       (blob) => {
         if (alive) setRes({ key, r: { blob } })
       },

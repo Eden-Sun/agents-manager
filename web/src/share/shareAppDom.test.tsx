@@ -474,6 +474,71 @@ test('同秒同大小重寫（時間、大小都沒變，只有 version 變）�
   assert.equal(document.querySelector('.sh-file-list .sh-png-note'), null)
 })
 
+test('同一張點陣圖只抓一次：清單、對話泡泡、放大檢視共用', async () => {
+  const T = Date.UTC(2026, 9, 4)
+  const iso = (ms: number) => new Date(T + ms).toISOString()
+  let count = 0
+  const client: ShareClient = {
+    ...mockShareClient(TOKEN),
+    messages: async () => ({
+      bot_name: 'b',
+      status: 'idle',
+      has_more: false,
+      messages: [
+        { id: 'u1', role: 'user', text: '做一張', created_at: iso(0), attachments: [] },
+        { id: 'a1', role: 'assistant', text: '好了', created_at: iso(2000), attachments: [] },
+      ],
+    }),
+    files: async () => [{ name: '卡片.png', size: 3, modified_at: iso(1000), version: 'v1' }],
+    fileBlob: async () => {
+      count++
+      return new Blob(['png'], { type: 'image/png' })
+    },
+    subscribe: () => () => {},
+  }
+  await mount(<ShareApp client={client} />)
+  await settle(300)
+  assert.equal(document.querySelectorAll('.sh-png-btn').length, 2)
+  assert.equal(count, 1)
+  await click(document.querySelector('.sh-msg.assistant .sh-thumb')!)
+  await settle(50)
+  assert.equal((document.querySelector('.sh-viewer .sh-png-btn') as HTMLButtonElement | null)?.disabled, false)
+  assert.equal(count, 1)
+})
+
+test('抓失敗不留快取：之後再掛上的（放大檢視）會重抓', async () => {
+  const T = Date.UTC(2026, 9, 4)
+  const iso = (ms: number) => new Date(T + ms).toISOString()
+  let count = 0
+  const client: ShareClient = {
+    ...mockShareClient(TOKEN),
+    messages: async () => ({
+      bot_name: 'b',
+      status: 'idle',
+      has_more: false,
+      messages: [
+        { id: 'u1', role: 'user', text: '做一張', created_at: iso(0), attachments: [] },
+        { id: 'a1', role: 'assistant', text: '好了', created_at: iso(2000), attachments: [] },
+      ],
+    }),
+    files: async () => [{ name: '卡片.png', size: 3, modified_at: iso(1000), version: 'v1' }],
+    fileBlob: async () => {
+      count++
+      if (count === 1) throw new Error('network')
+      return new Blob(['png'], { type: 'image/png' })
+    },
+    subscribe: () => () => {},
+  }
+  await mount(<ShareApp client={client} />)
+  await settle(300)
+  assert.equal(document.querySelector('.sh-file-list .sh-png-note')?.textContent, '這張圖還在修，請稍等')
+  assert.equal(count, 1)
+  await click(document.querySelector('.sh-msg.assistant .sh-thumb')!)
+  await settle(100)
+  assert.ok(document.querySelector('.sh-viewer .sh-png-btn'))
+  assert.equal(count, 2)
+})
+
 test('resync（對話被倒回）：整頁重抓並取代手上的清單；前綴不顯示', async () => {
   let ev: ShareEvents | null = null
   let page: ShareMessage[] = [
