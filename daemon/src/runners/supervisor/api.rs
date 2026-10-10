@@ -1353,6 +1353,21 @@ pub async fn post_approval_decision(
         out["idempotent"] = json!(true);
         return Ok(Json(out));
     }
+    // 已過有效期的申請不能原樣核准：沒帶新的 expires_in_secs 的話，寫下去的是一張當場就不能用的核准。
+    if status == "approved"
+        && b.expires_in_secs.is_none()
+        && current.expires_at.as_deref().is_some_and(|t| crate::db::cmp_ts(t, &crate::db::now()).is_le())
+    {
+        return Err(LcError::conflict(
+            "this approval request has already expired; nothing was written",
+            json!({
+                "reason": "approval_expired",
+                "approval_id": current.id,
+                "expires_at": current.expires_at,
+                "hint": "這筆申請的有效期已過：要核准就帶 expires_in_secs 給新的有效期，否則請申請者重新申請（deny／revoke 不受影響）",
+            }),
+        ));
+    }
     // 範圍先驗完再算時間。算在鎖裡、但在任何 UPDATE 之前：不合法直接 400，鎖放掉，列不動（#655）。
     let expires = approval_expires(b.expires_in_secs)?;
     let actor = decision_actor(verified, b.actor.as_deref());
@@ -1771,6 +1786,48 @@ mod approval_decision_tests {
 
     async fn pending(app: &Arc<App>) -> String {
         store::create_approval(&app.db, "fixer", "rebuild", "release", Some("abc123"), None, None).await.unwrap().approval.id
+    }
+
+    /// issue #1117：過了有效期還停在 pending 的申請，沒帶新的 expires_in_secs 就不能核准（寫下去的是一張當場就不能用的核准）。
+    /// deny 不擋；帶了新的有效期的核准照舊。
+    #[tokio::test]
+    async fn approving_an_expired_request_needs_a_new_expiry() {
+        let app = app().await;
+        let id = pending(&app).await;
+        sqlx::query("UPDATE supervisor_approvals SET expires_at=? WHERE id=?")
+            .bind(crate::db::iso_in(-10))
+            .bind(&id)
+            .execute(&app.db)
+            .await
+            .unwrap();
+
+        let Err(LcError::Conflict(v)) = decide(&app, &id, "approve", "agm").await else { panic!("過期的申請不能原樣核准") };
+        assert_eq!(v["reason"], "approval_expired");
+        assert_eq!(store::approval(&app.db, &id).await.unwrap().unwrap().status, "pending", "拒絕時列不動");
+        let decided: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM supervisor_notes WHERE kind='approval_decision' AND body LIKE ?")
+            .bind(format!("%{id}%"))
+            .fetch_one(&app.db)
+            .await
+            .unwrap();
+        assert_eq!(decided, 0, "拒絕時不寫稽核");
+
+        // 同一筆帶新的有效期就核准，而且新的有效期比現在晚。
+        let body: DecisionIn = serde_json::from_value(json!({"decision": "approve", "actor": "agm", "expires_in_secs": 600})).unwrap();
+        let Json(out) = post_approval_decision(State(app.clone()), Path(id.clone()), patrol_headers(&app).await, Json(body)).await.unwrap();
+        assert_eq!(out["status"], "approved");
+        let exp = out["expires_at"].as_str().unwrap();
+        assert!(crate::db::cmp_ts(exp, &crate::db::now()).is_gt(), "新的有效期在現在之後：{exp}");
+
+        // deny 不看有效期：過期的 pending 照樣可以拒絕。
+        let other = store::create_approval(&app.db, "fixer-b", "rebuild", "release", Some("def456"), None, None).await.unwrap().approval.id;
+        sqlx::query("UPDATE supervisor_approvals SET expires_at=? WHERE id=?")
+            .bind(crate::db::iso_in(-10))
+            .bind(&other)
+            .execute(&app.db)
+            .await
+            .unwrap();
+        let Json(denied) = decide(&app, &other, "deny", "agm").await.unwrap();
+        assert_eq!(denied["status"], "denied");
     }
 
     /// issue #462：改寫總管人設以前連 `HeaderMap` 都不收。共用 UI token 的前提下「沒帶身分＝
