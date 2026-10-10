@@ -1822,11 +1822,12 @@ pub(crate) async fn manager_quota(app: &impl crate::supervisor::ports::QuotaOps,
 /// the plan is explicit that an unknown quota must not be treated as a full one.
 pub async fn quota_reset_at(app: &impl crate::supervisor::ports::QuotaOps, identity: &str) -> Option<String> {
     let quota = manager_quota(app, identity).await?;
+    // 比時刻不比字串（同 policy.rs:102-103）：帶時區偏移的 resets_at 字串比大小會挑錯。
     [&quota.five_hour, &quota.seven_day, &quota.fable]
         .into_iter()
         .flatten()
         .filter_map(|w| w.resets_at.clone())
-        .min()
+        .min_by(|a, b| crate::db::cmp_ts(a, b))
 }
 
 /// Loop scheduling and startup adapters live in `runners::supervisor::runtime`.
@@ -2666,6 +2667,18 @@ mod manager_quota_tests {
         app.quotas.lock().await.insert("claude:cc9".into(), reading(20.0, "2999-02-01T00:00:00Z"));
         assert_eq!(manager_quota(&app, "cc9").await.map(|q| q.five_hour.unwrap().used_pct), Some(20.0));
         assert_eq!(quota_reset_at(&app, "cc9").await.as_deref(), Some("2999-02-01T00:00:00Z"));
+    }
+
+    #[tokio::test]
+    async fn the_soonest_reset_is_decided_by_instant_not_by_string() {
+        let env = crate::testing::env().await;
+        let app = env.app.clone();
+        let w = |reset: &str| Some(Window { observed_at: None, used_pct: 20.0, resets_at: Some(reset.into()) });
+        let mut q = reading(20.0, "2999-02-01T00:30:00Z");
+        q.five_hour = w("2999-02-01T08:00:00+08:00"); // ＝ 2999-02-01T00:00:00Z，三個裡最早
+        q.fable = w("2999-02-01T01:00:00Z");
+        app.quotas.lock().await.insert("claude:cc9".into(), q);
+        assert_eq!(quota_reset_at(&app, "cc9").await.as_deref(), Some("2999-02-01T08:00:00+08:00"));
     }
 }
 
