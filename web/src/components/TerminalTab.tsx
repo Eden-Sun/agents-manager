@@ -98,8 +98,7 @@ export function TerminalTab({ botId }: { botId: string }) {
   const moved = movedBot === botId
   const moveErrText = moveErr?.botId === botId ? moveErr.text : null
   const body = useMemo(() => {
-    if (err) return `讀取終端失敗：${err}`
-    if (!snap) return '讀取中…'
+    if (!snap) return err ? `讀取終端失敗：${err}` : '讀取中…'
     return tight ? squeeze(snap.text) : snap.text
   }, [err, snap, tight])
 
@@ -180,6 +179,11 @@ export function TerminalTab({ botId }: { botId: string }) {
               等 agent 印出新內容才會是完整寬度。
             </span>
           </div>
+        </div>
+      ) : null}
+      {err && snap ? (
+        <div className="term-warn" role="status">
+          讀取終端失敗：{err}（下面是上一次成功讀到的畫面，會自動重試）
         </div>
       ) : null}
       {/* 內容全部在一行：`<pre>` 會照實吐出換行與縮排，JSX 的排版不能溜進終端畫面。 */}
