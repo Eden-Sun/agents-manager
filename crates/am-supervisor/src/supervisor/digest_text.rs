@@ -78,9 +78,30 @@ pub fn detail(e: &InboxEvent, p: &Value) -> String {
             // 故障類（`watchdog_gave_up`、`responder_*`、`bot_restart_failed`、`ops_alert`…）的欄位名不一，
             // 挑人看得懂的那幾個照順序印；一個都沒有就整份 payload 節錄，不要印成「空」。
             let mut out = String::new();
-            for (k, label) in [("text", "內容"), ("why", "原因"), ("reason", "原因"), ("message", "說明"), ("detail", "細節"), ("action", "處理"), ("hint", "下一步")] {
+            for (k, label) in [
+                ("text", "內容"),
+                ("question", "問題"),
+                ("answer", "回答"),
+                ("why", "原因"),
+                ("reason", "原因"),
+                ("message", "說明"),
+                ("detail", "細節"),
+                ("action", "處理"),
+                ("hint", "下一步"),
+                ("note", "備註"),
+            ] {
                 if let Some(v) = s(k) {
                     out.push_str(&format!("\n  {label}：{}", snippet(v, 600)));
+                }
+            }
+            // mission 的「下一步」物件（放行後的下一步，`mission_answered`／`mission_resumed`）：沒有字串的 `action` 才補，
+            // `mission_next` 自己已經有 `action`，不重複印。
+            if s("action").is_none() {
+                if let Some(n) = p.get("next").filter(|n| n.is_object()) {
+                    let action = n.get("action").and_then(Value::as_str).unwrap_or("?");
+                    let role = n.get("role").and_then(Value::as_str).map(|r| format!("（{r}）")).unwrap_or_default();
+                    let hint = n.get("hint").and_then(Value::as_str).unwrap_or("");
+                    out.push_str(&format!("\n  下一步：{action}{role}：{}", snippet(hint, 300)));
                 }
             }
             if out.is_empty() {
@@ -89,7 +110,9 @@ pub fn detail(e: &InboxEvent, p: &Value) -> String {
             // 掛在交辦上的事件（送不進去、等額度…）要說得出是哪一件：下一步就是對它下 `review`。
             let assignment = e.assignment_id.as_deref().map(|a| format!(" assignment={a}")).unwrap_or_default();
             let bot = e.bot_id.as_deref().map(|b| format!(" bot={b}")).unwrap_or_default();
-            format!("{assignment}{bot}{out}\n")
+            // mission 事件要說得出是哪一筆任務：AGM 接著每一步（`mission pick／assign --mission <id>`）都要這個 id。
+            let mission = s("mission_id").map(|m| format!(" mission={m}")).unwrap_or_default();
+            format!("{assignment}{bot}{mission}{out}\n")
         }
     }
 }
@@ -110,13 +133,17 @@ mod tests {
     use super::*;
 
     fn approval(payload: Value) -> InboxEvent {
+        event("approval_requested", payload)
+    }
+
+    fn event(kind: &str, payload: Value) -> InboxEvent {
         InboxEvent {
-            id: "e-ap1".into(),
-            event_key: "k-ap1".into(),
+            id: "e-ev1".into(),
+            event_key: "k-ev1".into(),
             assignment_id: None,
             bot_id: None,
             turn_id: None,
-            kind: "approval_requested".into(),
+            kind: kind.into(),
             payload_json: payload.to_string(),
             state: "pending".into(),
             notify_turn_id: None,
@@ -151,5 +178,48 @@ mod tests {
         let out = detail(&e, &p);
         assert!(out.contains("理由：（空）"), "{out}");
         assert!(out.contains("（申請者未以 bot token 驗證）"), "{out}");
+    }
+
+    /// #1116：mission_paused 的摘要要說得出是哪一筆任務，也要帶 `note`（「不要再派新交辦」）。
+    #[test]
+    fn mission_paused_digest_names_the_mission() {
+        let p = json!({"mission_id": "01MISSION", "project_id": "p", "reason": "clarify", "detail": "等使用者確認", "note": "任務被暫停：不要再派新交辦"});
+        let out = detail(&event("mission_paused", p.clone()), &p);
+        assert!(out.contains(" mission=01MISSION"), "{out}");
+        assert!(out.contains("原因：clarify"), "{out}");
+        assert!(out.contains("備註：任務被暫停"), "{out}");
+    }
+
+    /// #1116：任務本文很長時，問題仍要印得出來（以前整份 JSON 節錄會被鍵序切掉）。
+    #[test]
+    fn mission_question_digest_shows_the_question_past_a_long_mission_text() {
+        let p = json!({"mission_id": "m1", "mission_text": "字".repeat(2000), "question": "標題要不要改？", "asked_by": "executor", "expects": "answer", "status": "open"});
+        let out = detail(&event("mission_question", p.clone()), &p);
+        assert!(out.contains("問題：標題要不要改？"), "{out}");
+        assert!(out.contains(" mission=m1"), "{out}");
+    }
+
+    /// #1116：放行後的下一步（`next` 物件）要印出來。
+    #[test]
+    fn mission_answered_digest_keeps_the_next_step() {
+        let p = json!({"mission_id": "m1", "answer": "好", "next": {"action": "assign", "role": "executor", "hint": "派執行者"}});
+        let out = detail(&event("mission_answered", p.clone()), &p);
+        assert!(out.contains("回答：好"), "{out}");
+        assert!(out.contains("下一步：assign（executor）：派執行者"), "{out}");
+    }
+
+    /// #1116：`mission_next` 自己已經有字串的 `action`，`next` 物件不再重複印一次。
+    #[test]
+    fn mission_next_digest_does_not_repeat_the_next_step() {
+        let p = json!({"mission_id": "m1", "action": "next=assign executor", "next": {"action": "assign", "role": "executor", "hint": "派執行者"}});
+        let out = detail(&event("mission_next", p.clone()), &p);
+        assert!(!out.contains("下一步：assign（"), "{out}");
+    }
+
+    /// #1116：沒有 mission 欄位的事件，輸出逐字不變。
+    #[test]
+    fn events_without_mission_fields_are_unchanged() {
+        let p = json!({"text": "x"});
+        assert_eq!(detail(&event("ops_alert", p.clone()), &p), "\n  內容：x\n");
     }
 }
