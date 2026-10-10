@@ -846,4 +846,80 @@ async fn remote_photo_fd_bound_traversal_prevents_symlink_swap_and_hardlink() {
     assert_eq!(fetched[4], Err("not_found"), "絕不讀取 hardlink");
 }
 
+#[test]
+fn parse_photo_stats_subsecond_gnu_and_bsd_formats() {
+    // 1. 純整數奈秒
+    let p_int = b"0\t42 100 1700000000123456789";
+    let raw_int = format!("AM_RFS1\nSTAT {}\n{}\nAM_RFS_DONE\n", p_int.len(), std::str::from_utf8(p_int).unwrap());
+    let stats = parse_photo_stats(raw_int.as_bytes(), 1).unwrap();
+    assert_eq!(stats[0].as_ref().unwrap().mtime_ns, 1700000000123456789);
+
+    // 2. GNU stat %.9Y 小數格式
+    let p_gnu = b"0\t42 100 1700000000.123456789";
+    let raw_gnu = format!("AM_RFS1\nSTAT {}\n{}\nAM_RFS_DONE\n", p_gnu.len(), std::str::from_utf8(p_gnu).unwrap());
+    let stats = parse_photo_stats(raw_gnu.as_bytes(), 1).unwrap();
+    assert_eq!(stats[0].as_ref().unwrap().mtime_ns, 1700000000123456789);
+
+    // 3. BSD stat %Fm 小數格式（較少位數需補齊到 9 位）
+    let p_bsd = b"0\t42 100 1700000000.5";
+    let raw_bsd = format!("AM_RFS1\nSTAT {}\n{}\nAM_RFS_DONE\n", p_bsd.len(), std::str::from_utf8(p_bsd).unwrap());
+    let stats = parse_photo_stats(raw_bsd.as_bytes(), 1).unwrap();
+    assert_eq!(stats[0].as_ref().unwrap().mtime_ns, 1700000000500000000);
+}
+
+#[tokio::test]
+async fn remote_photo_same_second_rewrite_different_subsecond_invalidates_cache() {
+    let scratch = test_dirs::scratch_dir("rfs-photo-subsecond");
+    let site = make_test_remote_site(&scratch, "host-photo-subsecond-1");
+    let inbox = Path::new(&site.workspace).join("inbox");
+    fs::create_dir_all(&inbox).unwrap();
+
+    let img_a = {
+        let img = image::RgbImage::from_fn(10, 10, |_, _| image::Rgb([255, 0, 0]));
+        let mut out = Vec::new();
+        image::DynamicImage::ImageRgb8(img).write_to(&mut std::io::Cursor::new(&mut out), image::ImageFormat::Jpeg).unwrap();
+        out
+    };
+    let img_b = {
+        let img = image::RgbImage::from_fn(10, 10, |_, _| image::Rgb([0, 0, 255]));
+        let mut out = Vec::new();
+        image::DynamicImage::ImageRgb8(img).write_to(&mut std::io::Cursor::new(&mut out), image::ImageFormat::Jpeg).unwrap();
+        out
+    };
+    assert_eq!(img_a.len(), img_b.len(), "兩張圖片大小必須相同");
+    assert_ne!(img_a, img_b, "兩張圖片內容必須不同");
+
+    let pic_path = inbox.join("pic.jpg");
+    fs::write(&pic_path, &img_a).unwrap();
+    let _ = std::process::Command::new("touch")
+        .arg("-m")
+        .arg("-d")
+        .arg("@1700000000.100000000")
+        .arg(&pic_path)
+        .status();
+
+    let svg_content = r#"<svg xmlns="http://www.w3.org/2000/svg"><image href="inbox/pic.jpg"/></svg>"#.as_bytes().to_vec();
+
+    // 第一次 embed
+    let embedded1 = crate::share::remote_io::embed_remote(&site, svg_content.clone()).await;
+    let s1 = String::from_utf8(embedded1).unwrap();
+    assert!(!s1.contains("data-am-embed"), "第一次 embed 必須成功: {s1}");
+
+    // 同一秒改寫為 img_b，設定不同奈秒
+    fs::write(&pic_path, &img_b).unwrap();
+    let _ = std::process::Command::new("touch")
+        .arg("-m")
+        .arg("-d")
+        .arg("@1700000000.200000000")
+        .arg(&pic_path)
+        .status();
+
+    // 第二次 embed：必須快取失效並輸出 img_b
+    let embedded2 = crate::share::remote_io::embed_remote(&site, svg_content).await;
+    let s2 = String::from_utf8(embedded2).unwrap();
+    assert!(!s2.contains("data-am-embed"), "第二次 embed 必須成功: {s2}");
+    assert_ne!(s1, s2, "同秒改寫照片縮圖必須失效並換成新圖");
+}
+
+
 

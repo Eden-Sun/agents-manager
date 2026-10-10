@@ -1080,6 +1080,21 @@ fi
     )
 }
 
+fn parse_mtime_ns(s: &str) -> Option<i128> {
+    if let Ok(v) = s.parse::<i128>() {
+        return Some(v);
+    }
+    // GNU stat %.9Y 或 BSD stat %Fm 是小數秒 "1712345678.123456789"
+    if let Some((sec_str, frac_str)) = s.split_once('.') {
+        let sec: i128 = sec_str.parse().ok()?;
+        let frac_trimmed = if frac_str.len() > 9 { &frac_str[..9] } else { frac_str };
+        let frac_padded = format!("{:0<9}", frac_trimmed);
+        let nsec: i128 = frac_padded.parse().ok()?;
+        return Some(sec.saturating_mul(1_000_000_000).saturating_add(nsec));
+    }
+    None
+}
+
 pub fn parse_photo_stats(out: &[u8], count: usize) -> Result<Vec<Option<PhotoStat>>, RfsError> {
     let frames = parse_rfs_frames(out, &["STAT"])?;
     for f in &frames {
@@ -1098,13 +1113,9 @@ pub fn parse_photo_stats(out: &[u8], count: usize) -> Result<Vec<Option<PhotoSta
         if idx >= count {
             continue;
         }
-        let (Some(Ok(ino)), Some(Ok(size)), Some(Ok(mtime_ns))) = (
-            it.next().map(str::parse::<u64>),
-            it.next().map(str::parse::<u64>),
-            it.next().map(str::parse::<i128>),
-        ) else {
-            continue;
-        };
+        let Some(Ok(ino)) = it.next().map(str::parse::<u64>) else { continue };
+        let Some(Ok(size)) = it.next().map(str::parse::<u64>) else { continue };
+        let Some(mtime_ns) = it.next().and_then(parse_mtime_ns) else { continue };
         stats[idx] = Some(PhotoStat { ino, size, mtime_ns });
     }
     Ok(stats)
