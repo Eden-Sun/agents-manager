@@ -35,21 +35,7 @@
   background: color-mix(in srgb, var(--accent) 85%, var(--text));
 }
 
-/* 手機（2026-10-08 使用者）：彈窗最上面的一整列，觸控目標 ≥ 40px，不跟 16px 高的狀態列小鈕混用。 */
-.mobile-keep-warm-row {
-  display: flex;
-  flex: 1 0 100%;
-  align-items: center;
-  justify-content: space-between;
-  gap: 12px;
-  min-width: 0;
-}
-
-.mobile-keep-warm-label {
-  color: var(--text-dim);
-  font-size: 13px;
-}
-
+/* 手機（2026-10-08 使用者）：觸控目標 ≥ 40px，不跟 16px 高的狀態列小鈕混用；現在在主力的狀態卡裡（#1104）。 */
 .compact-btn.keep-warm-skip-btn.touch {
   min-width: 40px;
   min-height: 40px;

@@ -999,8 +999,8 @@ tooltip 寫最後一次失敗的原因。主機一直離線時沒有任何事件
 - **「不用保溫」鈕**（`KeepWarmSkipButton`）：緊貼在「壓縮」鈕右邊，只主力（`primary`）的 claude／codex 畫，非主力、grok、沒有 run 都不畫。
   按下＝這顆 bot「這一輪閒置」跳過保溫與熱壓（`POST /api/bots/{id}/keep-warm/skip`，`run.keep_warm_skip`）；有真的活動（使用者或 bot 新回合，不含保溫／熱壓）daemon 自動清掉，鈕跟著回復。再按一次取消。
   **狀態用文字＋樣式講，不只靠顏色**：沒開是外框鈕「不用保溫」；開著是實心 accent 底「不保溫中・取消」（`aria-pressed`）。按完先在本機套一份，不等廣播。
-- **手機版也能設定不用保溫（2026-10-08 使用者：「手機版 也要能 設定不保溫」）**：手機（≤640px）的狀態列收在標題列 git 鈕開的「Git / 專案資訊」彈窗裡，context 旁 16px 高的小鈕點不到，所以手機**不在狀態列畫**這顆鈕，
-  改在彈窗最上面一整列「快取保溫 ｜ 不用保溫」（`MobileKeepWarmRow`，觸控目標 ≥ 40px）；同一個 `KeepWarmSkipButton`、同一支 `setKeepWarmSkip`，資格（主力 claude／codex、有 run）與狀態文字都沿用。
+- **手機版也能設定不用保溫（2026-10-08 使用者：「手機版 也要能 設定不保溫」；2026-10-10 使用者：「在 git 窗不合理 改到長按主力裡面」）**：手機（≤640px）的「不用保溫」鈕**不在狀態列也不在 Git 彈窗**，
+  而是放在主力 bot 的狀態卡（長按主力晶片開的 `BotStatusCard`）裡，用 `KeepWarmSkipButton touch`（觸控目標 ≥ 40px）；同一個元件、同一支 `setKeepWarmSkip`，資格（主力 claude／codex、有 run）與狀態文字都沿用。按了不關卡。桌面版仍在「壓縮」旁。
 - **保溫回覆提示改為不靠外框（2026-10-09 使用者：「主要的 focus border 用藍色，而保溫機制不要有紫色外框，易混淆」）**：
   原本主力保溫回覆到了畫洋紅（紫色）外框，容易與主要 focus 的藍色外框混淆。
   改為**不要紫色外框**，完全不靠外框提示，改以晶片內的小 `♨` 記號（`.unread-chip-warm`）與 tooltip 文字（`KEEP_WARM_REPLIED_TEXT`）作為提示，正在看（`.current`）時保持藍色 focus 外框不被蓋掉；

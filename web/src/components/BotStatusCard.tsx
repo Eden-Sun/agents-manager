@@ -9,6 +9,7 @@ import { shortModel } from '../lib/shortModel'
 import { liveReplyOf, useStore } from '../store/store'
 import { cleanLiveActivity } from '../store/liveText'
 import { StatusLamp } from './StatusLamp'
+import { KeepWarmSkipButton } from './KeepWarmSkipButton'
 import { KEEP_WARM_REPLIED_TEXT } from '../lib/chipStateText'
 import './chipLegend.css'
 
@@ -140,6 +141,8 @@ export function BotStatusCard({
           </>
         ) : null}
       </dl>
+      {/* 手機的「不用保溫」入口（#1104）：主力才畫，沒有 run 不畫（元件自己判斷）。按了不關卡。 */}
+      <KeepWarmSkipButton botId={botId} touch />
       <button type="button" className="bot-status-legend" onClick={onLegend}>
         顏色代表什麼？
       </button>
