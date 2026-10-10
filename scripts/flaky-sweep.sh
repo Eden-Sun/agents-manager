@@ -48,6 +48,8 @@ pos_int -t "$THREADS"
 ROOT=$(cd "$(dirname "$0")/.." && pwd)
 OUT=${OUT:-$(mktemp -d "${TMPDIR:-/tmp}/flaky-sweep.XXXXXX")}
 mkdir -p "$OUT" || { echo "建不出輸出目錄 $OUT" >&2; exit 2; }
+# 相對路徑要先以呼叫端的 cwd 轉成絕對路徑：下面會 cd 到 repo 根，之後的 log／rounds.txt 才寫得到同一個地方（issue #1017）。
+OUT=$(cd "$OUT" && pwd) || { echo "進不去輸出目錄 $OUT" >&2; exit 2; }
 export CARGO_TARGET_DIR=${FLAKY_TARGET_DIR:-$ROOT/target/flaky-sweep}
 cd "$ROOT" || exit 2
 
