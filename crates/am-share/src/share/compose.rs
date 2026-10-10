@@ -113,20 +113,25 @@ pub struct PrefetchedSource {
 }
 
 impl PrefetchedSource {
-    /// `scope`＝主機名＋遠端資料夾；`rels`、`metas`、`data` 同長度、同順序（`data[i]` 只對沒命中快取而且要抓的才有值）。
-    pub fn new(host: &str, workspace: &str, rels: &[Vec<String>], metas: &[Option<PhotoMeta>], data: Vec<Option<Result<Vec<u8>, &'static str>>>) -> Self {
+    /// `scope`＝主機權威標識＋遠端資料夾；`rels`、`metas`、`data` 同長度、同順序（`data[i]` 只對沒命中快取而且要抓的才有值）。
+    pub fn new(authority: &str, workspace: &str, rels: &[Vec<String>], metas: &[Option<PhotoMeta>], data: Vec<Option<Result<Vec<u8>, &'static str>>>) -> Self {
         let mut items = HashMap::new();
         for ((rel, meta), data) in rels.iter().zip(metas).zip(data) {
             if let Some(meta) = meta {
                 items.insert(rel.join("/"), (*meta, data));
             }
         }
-        Self { scope: Self::scope_of(host, workspace), items }
+        Self { scope: Self::scope_of(authority, workspace), items }
     }
 
-    /// 快取鍵的來源部分：主機名＋遠端資料夾（兩台主機同一條路徑不會串）。
-    pub fn scope_of(host: &str, workspace: &str) -> String {
-        format!("{host}\0{workspace}")
+    /// 快取鍵的來源部分：主機權威標識＋遠端資料夾（不同主機／不同世代同一條路徑不會串，#1039）。
+    pub fn scope_of(authority: &str, workspace: &str) -> String {
+        format!("{authority}\0{workspace}")
+    }
+
+    /// 從主機權威圍籬產生 scope。
+    pub fn scope_for(fence: &am_base::hosts::HostFence, workspace: &str) -> String {
+        Self::scope_of(&fence.authority_scope(), workspace)
     }
 }
 

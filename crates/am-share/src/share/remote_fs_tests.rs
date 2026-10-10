@@ -921,5 +921,96 @@ async fn remote_photo_same_second_rewrite_different_subsecond_invalidates_cache(
     assert_ne!(s1, s2, "同秒改寫照片縮圖必須失效並換成新圖");
 }
 
+#[tokio::test]
+async fn standalone_compose_is_cached_authority_isolation() {
+    let scratch_a = test_dirs::scratch_dir("rfs-cache-auth-a");
+    let site_a = make_test_remote_site(&scratch_a, "host-auth-test");
+
+    let scratch_b = test_dirs::scratch_dir("rfs-cache-auth-b");
+    let site_b = make_test_remote_site(&scratch_b, "host-auth-test");
+
+    let fence_a = site_a.conn.fence();
+    let fence_b = site_b.conn.fence();
+
+    let scope_a = crate::share::compose::PrefetchedSource::scope_for(fence_a, "/home/u/ws");
+    let scope_b = crate::share::compose::PrefetchedSource::scope_for(fence_b, "/home/u/ws");
+    assert_ne!(scope_a, scope_b, "不同連線實例的 scope 必須隔離");
+
+    let rel = vec!["inbox".to_string(), "a.png".to_string()];
+    let meta = crate::share::compose::PhotoMeta { ino: 1234, len: 5678, mtime_ns: 999999 };
+
+    // 尚未快取
+    assert!(!crate::share::compose::is_cached(&scope_a, &rel, &meta));
+    assert!(!crate::share::compose::is_cached(&scope_b, &rel, &meta));
+
+    // 使用 scope_a 執行一次 embed
+    let img_bytes = {
+        let img = image::RgbImage::from_fn(10, 10, |_, _| image::Rgb([100, 100, 100]));
+        let mut out = Vec::new();
+        image::DynamicImage::ImageRgb8(img).write_to(&mut std::io::Cursor::new(&mut out), image::ImageFormat::Jpeg).unwrap();
+        out
+    };
+    let src_a = crate::share::compose::PrefetchedSource::new(
+        &fence_a.authority_scope(),
+        "/home/u/ws",
+        std::slice::from_ref(&rel),
+        &[Some(meta)],
+        vec![Some(Ok(img_bytes))],
+    );
+    let svg = r#"<svg xmlns="http://www.w3.org/2000/svg"><image href="inbox/a.png"/></svg>"#.as_bytes();
+    let _ = crate::share::compose::embed_with(svg, &src_a);
+
+    // scope_a 命中快取，但 scope_b 絕不命中
+    assert!(crate::share::compose::is_cached(&scope_a, &rel, &meta), "同一個 authority 必須 cache hit");
+    assert!(!crate::share::compose::is_cached(&scope_b, &rel, &meta), "不同 authority 絕不可誤命中舊快取");
+}
+
+#[tokio::test]
+async fn repoint_host_invalidates_remote_svg_photo_cache() {
+    let scratch_a = test_dirs::scratch_dir("rfs-repoint-a");
+    let site_a = make_test_remote_site(&scratch_a, "repoint-host");
+
+    let scratch_b = test_dirs::scratch_dir("rfs-repoint-b");
+    let site_b = make_test_remote_site(&scratch_b, "repoint-host");
+
+    let img_a = {
+        let img = image::RgbImage::from_fn(10, 10, |_, _| image::Rgb([255, 0, 0]));
+        let mut out = Vec::new();
+        image::DynamicImage::ImageRgb8(img).write_to(&mut std::io::Cursor::new(&mut out), image::ImageFormat::Jpeg).unwrap();
+        out
+    };
+    let img_b = {
+        let img = image::RgbImage::from_fn(10, 10, |_, _| image::Rgb([0, 255, 0]));
+        let mut out = Vec::new();
+        image::DynamicImage::ImageRgb8(img).write_to(&mut std::io::Cursor::new(&mut out), image::ImageFormat::Jpeg).unwrap();
+        out
+    };
+
+    let p_a = Path::new(&site_a.workspace).join("inbox/pic.jpg");
+    let p_b = Path::new(&site_b.workspace).join("inbox/pic.jpg");
+    fs::create_dir_all(p_a.parent().unwrap()).unwrap();
+    fs::create_dir_all(p_b.parent().unwrap()).unwrap();
+    fs::write(&p_a, &img_a).unwrap();
+    fs::write(&p_b, &img_b).unwrap();
+
+    // 刻意將兩台主機上的檔案時間設定為完全相同
+    let _ = std::process::Command::new("touch").arg("-m").arg("-d").arg("@1700000000.500000000").arg(&p_a).status();
+    let _ = std::process::Command::new("touch").arg("-m").arg("-d").arg("@1700000000.500000000").arg(&p_b).status();
+
+    let svg = r#"<svg xmlns="http://www.w3.org/2000/svg"><image href="inbox/pic.jpg"/></svg>"#.as_bytes().to_vec();
+
+    // 主機 A render
+    let out_a = crate::share::remote_io::embed_remote(&site_a, svg.clone()).await;
+    let s_a = String::from_utf8(out_a).unwrap();
+    assert!(!s_a.contains("data-am-embed"), "主機 A embed 成功: {s_a}");
+
+    // Repoint 到主機 B render：即便路徑、大小、mtime 完全一樣，但主機不同，必須輸出主機 B 的圖片，絕不可沿用主機 A 的快取
+    let out_b = crate::share::remote_io::embed_remote(&site_b, svg).await;
+    let s_b = String::from_utf8(out_b).unwrap();
+    assert!(!s_b.contains("data-am-embed"), "主機 B embed 成功: {s_b}");
+    assert_ne!(s_a, s_b, "repoint 後的圖片必須來自新主機 B，不得沿用舊主機 A 的快取");
+}
+
+
 
 

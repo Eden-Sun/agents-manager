@@ -1114,6 +1114,23 @@ impl HostAuthorityKey {
     pub fn matches(&self, fence: &HostFence) -> bool {
         self.generation == fence.generation && self.conn.ptr_eq(&Arc::downgrade(&fence.conn))
     }
+
+    pub fn scope_id(&self) -> String {
+        format!("{:p}#{}", self.conn.as_ptr(), self.generation)
+    }
+}
+
+impl PartialEq for HostAuthorityKey {
+    fn eq(&self, other: &Self) -> bool {
+        self.generation == other.generation && self.conn.ptr_eq(&other.conn)
+    }
+}
+impl Eq for HostAuthorityKey {}
+impl std::hash::Hash for HostAuthorityKey {
+    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
+        self.generation.hash(state);
+        self.conn.as_ptr().hash(state);
+    }
 }
 
 impl HostFence {
@@ -1124,6 +1141,10 @@ impl HostFence {
     /// 這一個 fence 綁的主機世代（`replace`／改設定／重連會換代）。issue #1035：run 啟動時記下它，admission 比對。
     pub fn generation(&self) -> u64 {
         self.generation
+    }
+
+    pub fn authority_scope(&self) -> String {
+        format!("{:p}#{}:{}", Arc::as_ptr(&self.conn), self.generation, self.conn.name)
     }
 
     #[cfg(feature = "test-hooks")]
