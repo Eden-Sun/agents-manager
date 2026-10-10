@@ -108,7 +108,7 @@ WANT={version}
 BIN="$HOME/.local/bin"
 mkdir -p "$BIN"
 T=$(mktemp -d "${{TMPDIR:-/tmp}}/am-agy-install.XXXXXX") || exit 70
-trap 'rm -rf "$T"' EXIT
+trap 'rm -rf "$T"; rm -f "$BIN/.agy.new.$$"' EXIT
 curl -fsSL --retry 2 --connect-timeout 20 -o "$T/agy.tgz" "$URL" || {{ echo "AM_AGY_DOWNLOAD_FAILED $URL" >&2; exit 71; }}
 if command -v sha512sum >/dev/null 2>&1; then GOT=$(sha512sum "$T/agy.tgz" | cut -d' ' -f1)
 elif command -v shasum >/dev/null 2>&1; then GOT=$(shasum -a 512 "$T/agy.tgz" | cut -d' ' -f1)

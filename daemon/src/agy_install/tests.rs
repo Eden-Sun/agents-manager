@@ -191,6 +191,25 @@ fn macos_local_a_tarball_without_the_binary_or_an_unreachable_url_fails_cleanly(
     assert!(leftovers(&f.home).is_empty());
 }
 
+/// #1049：`cp` 寫到一半失敗（磁碟滿）：既有的 agy 不動，半顆 `.agy.new.<pid>` 也不能留在 `~/.local/bin`。
+#[test]
+fn macos_local_a_copy_that_fails_halfway_leaves_no_partial_binary_behind() {
+    let f = fixture("1.3.0", "antigravity");
+    seed_old_agy(&f.home);
+    // 假的 cp：寫出半顆檔案後失敗。只影響這支腳本的 PATH。
+    let fakebin = f.home.join("fakebin");
+    std::fs::create_dir_all(&fakebin).unwrap();
+    let cp = fakebin.join("cp");
+    std::fs::write(&cp, "#!/bin/sh\nprintf partial > \"$2\"\nexit 1\n").unwrap();
+    std::fs::set_permissions(&cp, std::fs::Permissions::from_mode(0o755)).unwrap();
+    let script = format!("PATH='{}':\"$PATH\"; export PATH\n{}", fakebin.display(), install_body(&manifest_for(&f, "1.3.0")));
+    let (code, out) = run_sh(&f.home, &script);
+    assert_ne!(code, 0, "{out}");
+    assert!(!out.contains("AM_AGY_INSTALLED"), "{out}");
+    assert_eq!(std::fs::read_to_string(agy_path(&f.home)).unwrap(), "OLD", "既有的 agy 不動");
+    assert!(leftovers(&f.home).is_empty(), "半顆 .agy.new 不能留下：{:?}", leftovers(&f.home));
+}
+
 #[test]
 fn macos_local_the_locked_wrapper_runs_the_body_under_the_agy_lock_and_releases_it() {
     let f = fixture("1.3.0", "antigravity");
