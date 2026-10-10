@@ -936,8 +936,10 @@ mod tests {
         observe_at(&f.run_id, "idle", t0);
         let lock = app.bot_lock(&f.bot_id).await;
         let _held = lock.lock().await;
-        let done = tokio::time::timeout(Duration::from_secs(2), sweep_at(&app, None, t0 + MIN, 5 * MIN)).await;
+        // 上限只是「多久算永遠」：鎖握到測試結束，真的去排就不會回來。給得寬，高負載下查 DB 慢也不會誤判。
+        let done = tokio::time::timeout(Duration::from_secs(30), sweep_at(&app, None, t0 + MIN, 5 * MIN)).await;
         assert_eq!(done.ok(), Some(vec![]), "沒到門檻就直接略過，不等鎖");
+        assert!(lock.try_lock().is_err(), "前提：鎖整段都還握著，sweep 不是因為拿到鎖才回來的");
     }
 
     /// 收尾後，被它擋住的 queued 馬上送出去。
