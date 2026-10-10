@@ -216,6 +216,11 @@ json_str() {
     printf '%s' "${v}" | LC_ALL=C tr -d '\000-\037'
 }
 
+# 取前 N 個字（不是位元組）：GNU `cut -c` 等於 `-b`，會把 UTF-8 的中文字切成半個。python3 壞掉就原樣輸出（不能讓彙總因此中斷）。
+clip_chars() { # clip_chars <N> <字串>
+    python3 -X utf8 -c 'import sys; sys.stdout.write(sys.argv[2][:int(sys.argv[1])])' "$1" "$2" 2>/dev/null || printf '%s' "$2"
+}
+
 # 保險（#763）：舊版測試與被 kill 的測試行程留下的 am-*／agm-* 暫存目錄／檔案（名字結尾是 26 碼 ULID）會慢慢塞滿根磁碟
 # （2026-10-01 實測 44G、ubuntu-ci 因 ENOSPC 紅 19 條）。持有鎖時才清（ubuntu-ci 自己那一輪不會被誤刪），失敗一律吞掉。保守規則：
 #   - 排在磁碟預檢**之前**：磁碟被這些東西塞滿的那一輪正是需要清的那一輪，排在後面就永遠清不到。
@@ -344,9 +349,9 @@ if [ "${rc}" != 0 ] && { [ "${disk_full}" = 1 ] || { [ -n "${interrupted}" ] && 
     if [ "${irc_count}" -lt 3 ]; then
         echo "${irc_count}" > "${irc_file}"
         if [ "${disk_full}" = 1 ]; then
-            desc="$(printf '磁碟滿：跑完剩 %sG（門檻 %sG），會重跑' "${end_free_gb}" "${MIN_FREE_GB}" | cut -c1-120)"
+            desc="$(clip_chars 120 "$(printf '磁碟滿：跑完剩 %sG（門檻 %sG），會重跑' "${end_free_gb}" "${MIN_FREE_GB}")")"
         else
-            desc="$(printf '中斷：%s，會重跑' "${interrupted}" | cut -c1-120)"
+            desc="$(clip_chars 120 "$(printf '中斷：%s，會重跑' "${interrupted}")")"
         fi
         final_status error "${desc}"
         printf '{"sha":"%s","state":"error","reason":"%s","rc":%s,"interrupted_count":%s,"started":"%s","finished":"%s","log":"%s","description":"%s"}\n' \
@@ -367,9 +372,9 @@ else
     # cargo test 紅了就點出是哪幾條（高負載偶發紅時，只寫「cargo test 紅了」看不出是誰）；編譯錯誤沒有這種行，照舊寫 step 標題。
     red_tests="$(grep -E '^test .* \.\.\. FAILED$' "${log}" | awk '{print $2}' || true)"
     if [ -n "${red_tests}" ]; then
-        desc="$(printf '紅：%s，%s 條測試紅（%s）' "${failed}" "$(printf '%s\n' "${red_tests}" | wc -l | tr -d ' ')" "$(printf '%s\n' "${red_tests}" | head -1)" | cut -c1-120)"
+        desc="$(clip_chars 120 "$(printf '紅：%s，%s 條測試紅（%s）' "${failed}" "$(printf '%s\n' "${red_tests}" | wc -l | tr -d ' ')" "$(printf '%s\n' "${red_tests}" | head -1)")")"
     else
-        desc="$(printf '紅：%s（%s）' "${failed}" "${first}" | cut -c1-120)"
+        desc="$(clip_chars 120 "$(printf '紅：%s（%s）' "${failed}" "${first}")")"
     fi
     desc="${fail_prefix}${desc}"
 fi
