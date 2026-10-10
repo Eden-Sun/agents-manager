@@ -2147,7 +2147,7 @@ UI token 會取得 Project 底下所有存活 bot 的訊息合併。Bot token �
   有差異（`issues` 非空）時推一則 `ops_alert`（`source=daemon`，`reason=host_baseline`，`subject`＝主機名，payload 帶 `issues`、`critical` 數）進 AGM inbox；
   event_key 是 `ops_alert:daemon:host_baseline:<host>:<差異 id 集合的雜湊>`——同一份差異（與順序無關）只推一次，差異變了才再推；一致或未知（`issues: null`）不推。
   跟 `tools` 同一趟探測、同時更新（連上、alias 變了、手動重新偵測，另外**每 6 小時**對連著的主機重跑一次）；`host_changed` 在有結果時帶 `baseline`（沒量過就不帶）；`POST /api/hosts/{name}/tools/refresh` 回應也帶。
-- `POST /api/hosts/{name}/tools/refresh` → 立即重新偵測 `200 {"name","tools","tools_checked_at"}`（host 不存在 404、ssh 失敗 502），並推 `host_changed`。
+- `POST /api/hosts/{name}/tools/refresh` → 立即重新偵測 `200 {"name","tools","tools_checked_at"}`（host 不存在 404、ssh 失敗 502；偵測期間主機重連／改指或被更新的偵測取代時回 `409 host_superseded`，可重試），並推 `host_changed`。
 
 ### 12.6b herdr 版本 `hosts[].herdr`
 
