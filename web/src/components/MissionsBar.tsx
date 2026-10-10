@@ -503,11 +503,15 @@ function MissionCard({ mission, onNavigate }: { mission: Mission; onNavigate: Na
           ) : null}
           {view.ask.resets.length > 0 ? (
             <ul className="mission-resets">
-              {view.ask.resets.map((r) => (
-                <li key={r.identity}>
-                  {r.identity} Fable 額度 {shortTime(r.resets_at)} 回來
-                </li>
-              ))}
+              {view.ask.resets.map((r) => {
+                // daemon 讀不到重置時間就是 null（#1133）：不能印成「額度  回來」（中間空白、意思還相反）。
+                const at = shortTime(r.resets_at)
+                return (
+                  <li key={r.identity}>
+                    {at ? `${r.identity} Fable 額度 ${at} 回來` : `${r.identity} Fable 額度用完了，重置時間不明`}
+                  </li>
+                )
+              })}
             </ul>
           ) : null}
           <div className="mission-ask-row">
