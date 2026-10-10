@@ -1132,6 +1132,8 @@ pub async fn process_locked_for<H: HookHost>(app: &H, body: &HookBody, event_id:
     // 散在 hook／reconcile／fallback 各判一次，遲早會漂成三套。舊世代的事件只記錄，一個欄位都不改。
     // 放行的證明（`admitted`）是 hook 改 Turn 的前提：`turn_controller` 那兩支沒有它就不能呼叫（issue #125）。
     let mut admitted = None;
+    // 放行的那一代主機世代（#1024）：agy 的授權失敗只改這一代，換代了就不改。
+    let mut admitted_fence = None;
     if let Some(r) = &run {
         let ev = crate::lifecycle::fence::EventIdentity { run_id: body.run_id.as_deref(), session_id: hook_session_id(&body.payload) };
         let owner = app.db().classify_event_owner(&bot.id, r, ev).await;
@@ -1159,6 +1161,9 @@ pub async fn process_locked_for<H: HookHost>(app: &H, body: &HookBody, event_id:
             tracing::debug!(bot = %bot.name, run = %r.id, why, "這一則證不出世代歸屬：照既有規則處理");
         }
         admitted = owner.admit(&r.id);
+        if admitted.is_some() {
+            admitted_fence = app.admitted_host_fence(&bot).await;
+        }
     }
 
     // claude ≥ 2.1.287 的 Stop 自己報背景工作（`background_tasks`）：以它為準，不用等畫面巡邏（`background_hook.rs`）。
@@ -1174,7 +1179,7 @@ pub async fn process_locked_for<H: HookHost>(app: &H, body: &HookBody, event_id:
     if provider == "claude" && admitted.is_some() {
         if let HookKind::TurnComplete { assistant: Some(a), .. } = &kind {
             if crate::login_prompt::is_not_logged_in_line(a) {
-                app.login_on_auth_failure(&bot).await;
+                app.login_on_auth_failure(&bot, admitted_fence.as_ref()).await;
             } else if !a.trim().is_empty() {
                 app.login_on_turn_ok(&bot).await;
             }
@@ -1221,7 +1226,7 @@ pub async fn process_locked_for<H: HookHost>(app: &H, body: &HookBody, event_id:
             // 登入失效：記下這個身分要重新登入、立刻重探它（網頁會跳提示，`login_prompt.rs`）。同一則重送只記一次。
             // agy 沒有身分：改把那台主機的 `tools.agy.logged_in` 翻成未登入（`agy_auth.rs`，issue #870）。
             if reason == FailureReason::Auth && (provider == "claude" || provider == "agy") && admitted.is_some() {
-                app.login_on_auth_failure(&bot).await;
+                app.login_on_auth_failure(&bot, admitted_fence.as_ref()).await;
             }
             // 同一筆送兩次（重試、spool 重播）：已經收過的那一回合。
             let seen = match (&session_id, &turn_id) {

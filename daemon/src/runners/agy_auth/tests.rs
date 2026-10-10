@@ -203,3 +203,36 @@ async fn a_replaced_generations_success_does_not_clear_the_new_cooldown() {
     assert_eq!(logged_in(&env.app).await, Some(false));
     assert!(auth_denied_active(&key, &new));
 }
+
+/// #1024：這一則是在換代之前放行的（捕獲的是舊世代）：它的授權失敗不能把新世代標成未登入、不能清它的讀數。
+#[tokio::test]
+async fn an_auth_failure_admitted_under_a_replaced_generation_changes_nothing() {
+    let _globals = agy_globals().await;
+    let env = tt::env().await;
+    seed_agy(&env.app).await;
+    env.app.quotas.lock().await.insert("agy".into(), quota());
+    let bot = agy_bot(&env, "agy-auth-old-gen").await;
+    let old = env.app.hosts.fence(HOST).await.unwrap();
+    env.app.hosts.get(HOST).await.unwrap().bump_generation_for_test();
+
+    on_turn_auth_failure(&env.app, &bot, &old).await;
+
+    assert_eq!(logged_in(&env.app).await, Some(true), "舊世代的授權失敗不翻新世代的旗標");
+    assert!(env.app.quotas.lock().await.contains_key("agy"), "新世代的讀數不清");
+    let new = env.app.hosts.fence(HOST).await.unwrap();
+    assert!(!crate::runners::quota_agy::auth_denied_active(&crate::quota::quota_key(HOST, "agy"), &new), "不記新世代的冷卻");
+}
+
+/// #1024：同一代的授權失敗照常翻成未登入（上一個測試的對照組）。
+#[tokio::test]
+async fn an_auth_failure_under_the_current_generation_still_marks_logged_out() {
+    let _globals = agy_globals().await;
+    let env = tt::env().await;
+    seed_agy(&env.app).await;
+    let bot = agy_bot(&env, "agy-auth-cur-gen").await;
+    let fence = env.app.hosts.fence(HOST).await.unwrap();
+
+    on_turn_auth_failure(&env.app, &bot, &fence).await;
+
+    assert_eq!(logged_in(&env.app).await, Some(false));
+}

@@ -233,7 +233,10 @@ pub trait HostSidePort {
 /// provider／登入／預覽的觀察點（原 `claude_live`、`login_prompt`、`codex_model_migration`、`prompt_suggestion`、`tui_prompts`）。
 pub trait ProviderPort {
     async fn adopt_statusline_model(&self, run: &db::Run, payload: &Value);
-    async fn login_on_auth_failure(&self, bot: &db::Bot);
+    /// `admitted`：這一則放行時捕獲的那台主機世代（#1024）；agy 的授權失敗只改這一代，`None` 就不改。
+    async fn login_on_auth_failure(&self, bot: &db::Bot, admitted: Option<&crate::hosts::HostFence>);
+    /// 放行的那一刻捕獲 bot 所在主機的世代（`None`＝主機不存在／已換代）。
+    async fn admitted_host_fence(&self, bot: &db::Bot) -> Option<crate::hosts::HostFence>;
     async fn login_on_turn_ok(&self, bot: &db::Bot);
     fn codex_migration_on_blocked(&self, run: &db::Run);
     fn prompt_suggestion_on_idle(&self, run: &db::Run);
