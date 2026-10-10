@@ -64,7 +64,8 @@ export function GhHostStatus({ host }: { host: string }) {
     void api
       .fetchGhStatus(host)
       .then(setSt)
-      .catch(() => setSt(null))
+      // 讀不到就留著上一份：輪詢裝置碼授權時一次失敗不能把代碼面板收掉、把輪詢停掉。第一次就讀不到時 st 本來就是 null（照舊不畫）。
+      .catch(() => undefined)
   }, [host])
 
   useEffect(() => {
