@@ -1,6 +1,6 @@
 import { memo, useEffect, useLayoutEffect, useRef, useState, useId } from 'react'
 import { CompactButton } from './CompactButton'
-import { KeepWarmSkipButton, MobileKeepWarmRow } from './KeepWarmSkipButton'
+import { KeepWarmSkipButton } from './KeepWarmSkipButton'
 import type { ReactNode, RefObject } from 'react'
 import { useShallow } from 'zustand/react/shallow'
 import type { BotKind, KindQuota, Message, QuotaWindow, StatusInfo } from '../api/types'
@@ -1059,12 +1059,10 @@ function modelExtraOf(status: StatusInfo | null): string {
 }
 
 /** Repo chip + status row. `hasStatus` is explicit: `<StatusLineBar>` is truthy even when it renders null. */
-function ContextBar({ issues, status, hasStatus, phoneExtra, phoneFiles, mobileOpen, onClose }: {
+function ContextBar({ issues, status, hasStatus, phoneFiles, mobileOpen, onClose }: {
   issues: ReactNode
   status: ReactNode
   hasStatus: boolean
-  /** 只在手機畫在彈窗最上面的列（「不用保溫」）；桌面不畫。 */
-  phoneExtra?: ReactNode
   /** 只在手機畫在彈窗最下面的「bot 給你的檔案」（#929）：手機沒有檔案暫存托盤，outbox 沒有別的入口；桌面在托盤下半段。 */
   phoneFiles?: ReactNode
   mobileOpen: boolean
@@ -1075,7 +1073,6 @@ function ContextBar({ issues, status, hasStatus, phoneExtra, phoneFiles, mobileO
   if (phone && !mobileOpen) return null
   const content = (
     <div className="context-bar">
-      {phone ? phoneExtra : null}
       {issues}
       {hasStatus ? status : null}
     </div>
@@ -1125,7 +1122,7 @@ function StatusLineBar({ botId, status, text }: { botId: string; status: StatusI
         <SlItem k="context" title={ctxDetail ? `已用 ${ctxDetail} tokens` : undefined}>
           {pct(status.context_used_pct)}{ctxDetail ? <span className="sl-dim"> · {ctxDetail}</span> : null}
           <CompactButton botId={botId} />
-          {/* 手機改在彈窗最上面的 MobileKeepWarmRow（觸控目標 ≥ 40px），這裡不重複。 */}
+          {/* 手機改在長按主力晶片的狀態卡裡（BotStatusCard，觸控目標 ≥ 40px），這裡不重複。 */}
           {phone ? null : <KeepWarmSkipButton botId={botId} />}
         </SlItem>
       ) : null}
@@ -1463,7 +1460,6 @@ export function ChatPanel({ onOpenSidebar }: { onOpenSidebar: () => void }) {
         }
         status={<StatusLineBar botId={botId} status={statusInfo} text={run?.status_line ?? null} />}
         hasStatus={Boolean(statusInfo) || Boolean(run?.status_line?.trim())}
-        phoneExtra={<MobileKeepWarmRow botId={botId} />}
         phoneFiles={<OutboxFiles />}
       />
 

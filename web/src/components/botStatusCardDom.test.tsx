@@ -38,3 +38,22 @@ test('標題句跟晶片顏色同一個優先序：要你回答最先', async ()
   await mount(<BotStatusCard botId="b1" hints={{ ...hints, needsReply: true, unread: 3 }} anchor={null} onClose={() => {}} onLegend={() => {}} />)
   assert.ok(document.querySelector('.bot-status-headline')!.textContent!.startsWith('停在等你回答'))
 })
+
+test('主力 claude 有 run 才在卡片裡畫「不用保溫」（觸控版）；非主力或沒有 run 不畫（#1104）', async () => {
+  const primary = { ...bot, primary: true } as unknown as Bot
+  useStore.setState({ bots: [primary], runs: { b1: run }, busy: {} })
+  await mount(<BotStatusCard botId="b1" hints={hints} anchor={null} onClose={() => {}} onLegend={() => {}} />)
+  const keep = document.querySelector<HTMLButtonElement>('.bot-status-card .keep-warm-skip-btn.touch')
+  assert.ok(keep, '主力有 run 要畫')
+  assert.equal(keep!.textContent, '不用保溫')
+  await unmountAll()
+
+  useStore.setState({ bots: [{ ...primary, primary: false }] as Bot[], runs: { b1: run } })
+  await mount(<BotStatusCard botId="b1" hints={hints} anchor={null} onClose={() => {}} onLegend={() => {}} />)
+  assert.equal(document.querySelector('.keep-warm-skip-btn'), null, '非主力不畫')
+  await unmountAll()
+
+  useStore.setState({ bots: [primary], runs: {} })
+  await mount(<BotStatusCard botId="b1" hints={hints} anchor={null} onClose={() => {}} onLegend={() => {}} />)
+  assert.equal(document.querySelector('.keep-warm-skip-btn'), null, '沒有 run 不畫')
+})

@@ -53,19 +53,3 @@ export function KeepWarmSkipButton({ botId, touch = false }: { botId: string; to
     </button>
   )
 }
-
-/**
- * 手機版的「不用保溫」入口（2026-10-08 使用者：「手機版 也要能 設定不保溫」）：手機的狀態列收在「Git / 專案資訊」彈窗裡，
- * 而且 context 項旁那顆 16px 高的小鈕點不到，所以彈窗最上面另給一列、觸控目標 ≥ 40px。同一顆元件、同一支 API。
- */
-export function MobileKeepWarmRow({ botId }: { botId: string }) {
-  const eligible = useStore((s) => keepWarmSkippable(s.bots.find((b) => b.id === botId)))
-  const hasRun = useStore((s) => Boolean(s.runs[botId]))
-  if (!eligible || !hasRun) return null
-  return (
-    <div className="mobile-keep-warm-row">
-      <span className="mobile-keep-warm-label">快取保溫</span>
-      <KeepWarmSkipButton botId={botId} touch />
-    </div>
-  )
-}
