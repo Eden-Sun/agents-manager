@@ -177,7 +177,8 @@ def main(argv=None):
     elif args.command == "ask":
         if bool(args.file) == bool(args.text):
             raise OBError("只提供文字或 --file 其中一個")
-        if args.wait < 0 or args.wait > 3600:
+        # nan 跟任何數比都是 False：寫成「在範圍內才放行」，不然 nan 會悄悄等於 --wait 0。
+        if not 0 <= args.wait <= 3600:
             raise OBError("--wait 必須在 0..3600 秒")
         project = daemon_project(args.project_id)
         question = read_question_file(args.file) if args.file else args.text
@@ -194,6 +195,9 @@ def main(argv=None):
                 result = store.get(result["id"])
         result["operator_configured"] = bool(store.setting("operator"))
     elif args.command == "status":
+        # 跟 ask／link／rotate 同一條規則：label、worktree 名查不到東西，不能回一份看起來合法的空清單。
+        if args.project_id:
+            project_id(args.project_id)
         from ob_operator import recover_orphaned
         recovered = recover_orphaned(store)
         result = store.get(args.id) if args.id else {"requests": store.list(args.project_id), "operator": store.setting("operator"),
