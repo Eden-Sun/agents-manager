@@ -190,6 +190,12 @@ pub(crate) async fn close_tracked(app: &Arc<App>, host: &str, pane_id: &str, con
         &pane_id,
     )
     .await;
+    // `close_pane_and_tab` 是 best-effort（錯誤不回）：這裡是人按的關閉，沒關掉就不能說關了、也不能刪紀錄與草稿（issue #1143）。
+    match client.pane_get(&pane_id).await {
+        Ok(None) => {}
+        Ok(Some(_)) => return Err(LcError::Upstream("herdr 沒有把這顆 pane 關掉，紀錄保留，請再試一次".into())),
+        Err(e) => return Err(LcError::Upstream(format!("關閉後確認不了 pane 的狀態，紀錄保留：{e:#}"))),
+    }
     sqlx::query("DELETE FROM panes WHERE host=? AND pane_id=?")
         .bind(&host)
         .bind(&pane_id)
@@ -201,4 +207,48 @@ pub(crate) async fn close_tracked(app: &Arc<App>, host: &str, pane_id: &str, con
     announce_if_changed(&app, &host).await;
     tracing::info!(host, pane_id, kind = %info["kind"], "pane closed by request");
     Ok(json!({"closed": true, "pane": info}))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::testing::Fault;
+
+    /// issue #1143：herdr 拒絕關閉時回錯、保留紀錄（不能回 closed:true 又刪掉）；不掛故障再關一次就真的關掉。
+    #[tokio::test]
+    async fn a_close_that_herdr_refuses_keeps_the_row_and_reports_the_failure() {
+        let env = crate::testing::env().await;
+        let app = env.app.clone();
+        let (client, _) = crate::runners::app_ports_p11::client_for(&app, "local").await.unwrap();
+        let (_ws, pane) = client.workspace_create("/tmp", "close-refused", json!({})).await.unwrap();
+        let pane_id = pane.pane_id.clone();
+        sqlx::query("INSERT INTO panes (pane_id, host, kind, last_output_at, first_seen, last_seen) VALUES (?, 'local', 'shell', ?, ?, ?)")
+            .bind(&pane_id)
+            .bind(crate::db::now())
+            .bind(crate::db::now())
+            .bind(crate::db::now())
+            .execute(&app.db)
+            .await
+            .unwrap();
+        let rows = |app: &Arc<App>| {
+            let app = app.clone();
+            let pane_id = pane_id.clone();
+            async move {
+                sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM panes WHERE host='local' AND pane_id=?")
+                    .bind(pane_id)
+                    .fetch_one(&app.db)
+                    .await
+                    .unwrap()
+            }
+        };
+
+        env.herdr.fail_next("pane.close", Fault::Refuse);
+        let err = close_tracked(&app, "local", &pane_id, true).await.unwrap_err();
+        assert!(matches!(err, LcError::Upstream(_)), "{err:?}");
+        assert_eq!(rows(&app).await, 1, "pane 還開著：紀錄保留");
+
+        let ok = close_tracked(&app, "local", &pane_id, true).await.unwrap();
+        assert_eq!(ok["closed"], true);
+        assert_eq!(rows(&app).await, 0);
+    }
 }
