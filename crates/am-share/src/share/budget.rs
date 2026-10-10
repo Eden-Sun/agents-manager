@@ -17,8 +17,10 @@
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
-use std::sync::{Mutex, OnceLock};
+use std::sync::{Arc, Mutex, OnceLock, Weak};
 use std::time::{Duration, Instant};
+
+use am_base::hosts::HostConn;
 
 use crate::share::site::{self, ShareSite, SiteEnv};
 
@@ -50,16 +52,31 @@ impl Measured {
     }
 }
 
-/// 這顆 bot 的檔案在哪：本機是工作目錄路徑；遠端不在這裡分，量測一律經 `site::resolve`（那裡也要求主機連著）。
+/// 這顆 bot 的檔案在哪（權威）。比較相等才算同一個來源。
 #[derive(Clone)]
-enum Place {
-    Local { workspace: String },
-    Remote,
+pub enum Place {
+    /// 本機：工作目錄路徑，outbox 由 daemon 的資料目錄算。
+    Local { workspace: String, outbox: Option<PathBuf> },
+    /// 遠端：主機名，那台連線物件（弱指標：換連線＝不再相等），工作目錄。outbox 由家目錄與 bot id 決定，同一條連線內不變。
+    Remote { host: String, conn: Weak<HostConn>, workspace: String },
+}
+
+impl PartialEq for Place {
+    fn eq(&self, other: &Self) -> bool {
+        match (self, other) {
+            (Place::Local { workspace: a, outbox: oa }, Place::Local { workspace: b, outbox: ob }) => a == b && oa == ob,
+            (Place::Remote { host: ha, conn: ca, workspace: wa }, Place::Remote { host: hb, conn: cb, workspace: wb }) => {
+                ha == hb && Weak::ptr_eq(ca, cb) && wa == wb
+            }
+            _ => false,
+        }
+    }
 }
 
 struct Entry {
     m: Measured,
     at: Instant,
+    place: Place,
 }
 
 fn cache() -> &'static Mutex<HashMap<String, Entry>> {
@@ -67,22 +84,29 @@ fn cache() -> &'static Mutex<HashMap<String, Entry>> {
     CACHE.get_or_init(Default::default)
 }
 
-/// 最近一次量測值與它的年紀。
+/// 最近一次量測值與它的年紀（不管位置）。
 pub fn cached(bot_id: &str) -> Option<(Measured, Duration)> {
     cache().lock().unwrap_or_else(|e| e.into_inner()).get(bot_id).map(|e| (e.m, e.at.elapsed()))
 }
 
-/// 記下一筆量測。回傳上一筆（巡邏用：上一輪不是滿的，這一輪滿了才通知）。
-fn record(bot_id: &str, m: Measured) -> Option<Measured> {
+/// 最近一次量測值，只有量的時候位置跟 `place` 相同才回傳。
+fn cached_at(bot_id: &str, place: &Place) -> Option<(Measured, Duration)> {
+    cache().lock().unwrap_or_else(|e| e.into_inner()).get(bot_id).filter(|e| e.place == *place).map(|e| (e.m, e.at.elapsed()))
+}
+
+/// 記下一筆量測。回傳同一個位置下的上一筆（位置變了就沒有「上一筆」，巡邏會當作剛變滿）。
+fn record(bot_id: &str, place: Place, m: Measured) -> Option<Measured> {
     let mut c = cache().lock().unwrap_or_else(|e| e.into_inner());
-    let prev = c.get(bot_id).map(|e| e.m);
-    c.insert(bot_id.to_string(), Entry { m, at: Instant::now() });
+    let prev = c.get(bot_id).filter(|e| e.place == place).map(|e| e.m);
+    c.insert(bot_id.to_string(), Entry { m, at: Instant::now(), place });
     prev
 }
 
 #[cfg(test)]
-pub async fn set_cached_for_test<S: SiteEnv>(_app: &S, bot_id: &str, m: Measured) {
-    record(bot_id, m);
+pub async fn set_cached_for_test<S: SiteEnv>(app: &S, bot_id: &str, m: Measured) {
+    if let Ok(Some(place)) = place_of(app, bot_id).await {
+        record(bot_id, place, m);
+    }
 }
 
 #[cfg(test)]
@@ -121,7 +145,8 @@ pub fn measure_blocking(data_dir: &Path, workspace: &Path, bot_id: &str) -> Resu
 pub struct Unavailable;
 
 /// 這顆受限分享 bot 現在在哪。`Ok(None)`＝不是受限分享 bot（信任分享、一般 bot、已不存在）。
-/// 一條 SQL 同時拿工作目錄與主機，不會一個成功一個失敗（#1025）；讀不到 DB＝`Err(Unavailable)`，不是「不受限」也不是「本機」。
+/// 一條 SQL 同時拿工作目錄與主機，不會一個成功一個失敗（#1025）；讀不到 DB＝`Err(Unavailable)`。
+/// 主機不認得（沒有那台的連線物件）也是 `Err`：不知道它在哪，就不當作本機。
 async fn place_of<S: SiteEnv>(app: &S, bot_id: &str) -> Result<Option<Place>, Unavailable> {
     let row: Option<(String, String)> = sqlx::query_as(
         "SELECT r.workspace, p.host FROM shared_bots r
@@ -138,19 +163,22 @@ async fn place_of<S: SiteEnv>(app: &S, bot_id: &str) -> Result<Option<Place>, Un
     })?;
     let Some((workspace, host)) = row else { return Ok(None) };
     if host == crate::config::LOCAL_HOST {
-        return Ok(Some(Place::Local { workspace }));
+        let outbox = am_base::outbox::dir_for(app.data_dir(), bot_id);
+        return Ok(Some(Place::Local { workspace, outbox }));
     }
-    Ok(Some(Place::Remote))
+    let conn = app.host_conn(&host).await.ok_or(Unavailable)?;
+    Ok(Some(Place::Remote { host, conn: Arc::downgrade(&conn), workspace }))
 }
 
 /// 照 `place` 量一次並記下。本機量不到回 `Ok(None)`（不擋、不通知）；遠端量不到回 `Err(Unavailable)`。
+/// 遠端的位置以實際量的那條連線為準（`site::resolve` 再問一次 DB＋連線）。
 async fn measure_at<S: SiteEnv>(app: &S, bot_id: &str, place: Place) -> Result<Option<(Measured, Option<Measured>)>, Unavailable> {
     if let Place::Local { workspace, .. } = &place {
         let (data_dir, id, ws) = (app.data_dir().to_path_buf(), bot_id.to_string(), PathBuf::from(workspace));
         let measured = tokio::task::spawn_blocking(move || measure_blocking(&data_dir, &ws, &id)).await;
-        // 量不到不記值：沒有新的數字就留著舊的，不拿 0 去覆蓋。
+        // 量不到不記值：沒有新的數字就留著舊的（同位置），不拿 0 去覆蓋。
         return match measured {
-            Ok(Ok(m)) => Ok(Some((m, record(bot_id, m)))),
+            Ok(Ok(m)) => Ok(Some((m, record(bot_id, place, m)))),
             _ => {
                 tracing::warn!(bot = %bot_id, "share sandbox usage could not be measured");
                 Ok(None)
@@ -158,8 +186,9 @@ async fn measure_at<S: SiteEnv>(app: &S, bot_id: &str, place: Place) -> Result<O
         };
     }
     let ShareSite::Remote(remote) = site::resolve(app, bot_id).await.map_err(|_| Unavailable)? else { return Err(Unavailable) };
+    let measured_at = Place::Remote { host: remote.host.clone(), conn: Arc::downgrade(&remote.conn), workspace: remote.workspace.clone() };
     match remote.measure().await {
-        Ok(m) => Ok(Some((m, record(bot_id, m)))),
+        Ok(m) => Ok(Some((m, record(bot_id, measured_at, m)))),
         Err(e) => {
             tracing::warn!(bot = %bot_id, host = %remote.host, error = %e, "remote share sandbox usage could not be measured");
             Err(Unavailable)
@@ -180,7 +209,7 @@ pub async fn refresh<S: SiteEnv>(app: &S, bot_id: &str) -> Result<Option<(Measur
 /// 本機量不到當作沒滿（`Ok(false)`）；DB 讀不到、遠端沒有新鮮值又量不到 → `Err(Unavailable)`，不當作沒滿。
 pub async fn is_full<S: SiteEnv>(app: &S, bot_id: &str) -> Result<bool, Unavailable> {
     let Some(place) = place_of(app, bot_id).await? else { return Ok(false) };
-    let fresh = cached(bot_id).filter(|(m, age)| *age < if m.full() { FULL_RECHECK } else { REFRESH_EVERY });
+    let fresh = cached_at(bot_id, &place).filter(|(m, age)| *age < if m.full() { FULL_RECHECK } else { REFRESH_EVERY });
     if let Some((m, _)) = fresh {
         return Ok(m.full());
     }
