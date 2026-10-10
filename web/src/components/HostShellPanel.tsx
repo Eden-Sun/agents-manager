@@ -185,8 +185,19 @@ export function HostShellPanel({
 
   useEffect(() => {
     let alive = true
+    // 上一趟還沒回來：回前景時不另外再打一趟（#1129，同 useTerminalSnapshot）。
+    let busy = false
     let timer: ReturnType<typeof setTimeout> | null = null
+    const next = () => {
+      if (alive) timer = setTimeout(() => void tick(), syncOn ? SYNC_POLL_MS : IDLE_POLL_MS)
+    }
     const tick = async () => {
+      // 分頁在背景（切走、手機鎖屏）不打 API、不動 snap／err；回前景由 onVisible 立刻補讀一次。
+      if (document.visibilityState === 'hidden') {
+        next()
+        return
+      }
+      busy = true
       try {
         const s = await api.readHostShell(host, paneId, source, lines)
         if (alive) {
@@ -196,6 +207,7 @@ export function HostShellPanel({
       } catch (e) {
         if (e instanceof ApiError && e.status === 404) {
           // 點到已經不在的 pane（例如專案頁剛關掉）：講一聲，不是閃一下就沒了（review M3）。
+          busy = false
           if (alive) paneGone(host, paneId)
           return
         }
@@ -203,11 +215,20 @@ export function HostShellPanel({
         if (denied) lockShellView(host, paneId, denied)
         if (alive) setErr(denied ?? (e instanceof Error ? e.message : String(e)))
       }
-      if (alive) timer = setTimeout(() => void tick(), syncOn ? SYNC_POLL_MS : IDLE_POLL_MS)
+      busy = false
+      next()
     }
+    const onVisible = () => {
+      if (document.visibilityState !== 'visible' || busy) return
+      if (timer) clearTimeout(timer)
+      timer = null
+      void tick()
+    }
+    document.addEventListener('visibilitychange', onVisible)
     void tick()
     return () => {
       alive = false
+      document.removeEventListener('visibilitychange', onVisible)
       if (timer) clearTimeout(timer)
     }
   }, [paneGone, lockShellView, host, paneId, source, lines, nonce, syncOn])
