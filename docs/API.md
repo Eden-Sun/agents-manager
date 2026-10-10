@@ -2462,7 +2462,7 @@ CLI：`agents-managerd release-triage-check --kind <claude|codex> [--since <ver>
   但只用唯讀的 `gh auth status`／`repo view`／`label list`／`issue list`——**不開 issue、不留言、不寫帳本**。`action`：`create`｜`comment`｜`existing`（遠端已有同標記，含已關）｜`already_logged`（帳本已有，連 gh 都不問）｜
   `skipped_version_limit`｜`deferred_daily_limit`｜`remote_unknown`（gh 檢查沒過，去重問不到；title／body 照樣渲染）。去重、`already`、上限與排序（guard 優先）跟真的 publish **共用同一份實作**；跨版本每日上限也會計入近 24 小時內由遠端標記確認、但 `issue_numbers_json` 尚未回寫的 create intent（乾跑只讀、不寫帳本）。`would_create`／`would_comment`／`existing` 等於真跑的 `created`／`commented`／`existing`（有等價測試釘住，含兩個提案 `entry_ids` 交集的情形）。
 - 設定：`[release_triage] publish = false`（預設）／`gh_bin`／`repo`。
-- CLI：`bin/agm release-triage submit --file verdicts.json`；另有 `show`／`dispatched --kind K --version V… --bot <收件 bot id>`／`publish`（加 `--dry-run` 就是上面的乾跑）。verdict 的 JSON 要帶 `dispatch_gen`（抄 `show` 那一列）。
+- CLI：`bin/agm release-triage submit --file verdicts.json`；另有 `show`／`dispatched --kind K --version V… --bot <收件 bot id>`／`publish`（加 `--dry-run` 就是上面的乾跑）。verdict 的 JSON 要帶 `kind`、`version`、`dispatch_gen`（抄 `show` 那一列），一份只交一版；派工模板（`release-triage-task.md`）照這個寫。
 
 ## 總管 AGM（SPEC §18）
 
