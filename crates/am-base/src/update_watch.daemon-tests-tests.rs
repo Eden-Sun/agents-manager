@@ -386,6 +386,50 @@
         assert!(pending.contains("需安裝"), "{pending}");
     }
 
+    /// #1204：磁碟版本這一輪讀不到（`claude --version` 逾時、ssh 抖）不等於「還沒裝」：這顆 run 已經掛著「重啟套用」就沿用。
+    /// 不拿跑著的舊版本改判成需安裝，也不因為這一輪比不出來就清掉（#974 同一條規則）。
+    #[tokio::test]
+    async fn an_unreadable_disk_version_keeps_a_claude_restart_notice() {
+        let _serial = serial().lock().await;
+        let e = crate::testing::env().await;
+        let bot = crate::testing::claude_bot(&e.app, &e.project_id, "claude-keep-restart").await;
+        let run = crate::testing::fake_run(&e.app, &bot.id).await;
+        let pane = format!("pane-{}", bot.id);
+        e.herdr.set_screen(&pane, "› conversation\n");
+        let waiting = crate::update_watch::version_notice("2.1.284 (Claude Code)", "2.1.281").unwrap();
+        sqlx::query("UPDATE runs SET status_json=?, update_notice=? WHERE id=?")
+            .bind(r#"{"version":"2.1.281 (Claude Code)"}"#)
+            .bind(&waiting)
+            .bind(&run)
+            .execute(&e.app.db)
+            .await
+            .unwrap();
+        // 磁碟版本讀不到：快取裡是 None，不是 2.1.284。
+        let fence = e.app.hosts.fence("local").await.expect("test host exists");
+        e.app.disk_versions.lock().await.insert(
+            "claude@local".to_string(),
+            DiskVersionEntry { at: Instant::now(), authority: fence.authority_key(), version: None },
+        );
+
+        // 沒有上游快照：原本會把通知清成 NULL。
+        sweep(&e.app).await;
+        assert_eq!(notice_of(&e.app, &run).await.as_deref(), Some(waiting.as_str()), "磁碟讀不到時不清掉重啟套用");
+
+        // 別台落後：原本會把重啟套用改成需安裝。
+        crate::upstream_update::set_snapshot_for_test(&e.app.upstream_watch, crate::upstream_update::build_status(
+            "claude",
+            &Ok("2.1.284".into()),
+            &[
+                ("local".into(), Ok("2.1.284 (Claude Code)".into())),
+                ("other".into(), Ok("2.1.281 (Claude Code)".into())),
+            ],
+            None,
+        ))
+        .await;
+        sweep(&e.app).await;
+        assert_eq!(notice_of(&e.app, &run).await.as_deref(), Some(waiting.as_str()), "也不改成需安裝");
+    }
+
     #[tokio::test]
     async fn a_notice_written_during_the_sweep_is_not_overwritten_by_the_stale_snapshot() {
         let _serial = serial().lock().await;
