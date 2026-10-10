@@ -659,7 +659,14 @@ function RemoteCargoPanel() {
           ))}
         </ul>
       ) : null}
-      {message ? <pre className="host-result">{message}</pre> : null}
+      {/* live region 要先在 DOM 裡，內容之後才填（#1135）；失敗用 alert，其餘 polite。 */}
+      <div role="status" aria-live="polite">
+        {message ? (
+          <pre className="host-result" role={/^(讀取外部 Cargo 設定|儲存|測試|安裝)失敗：/.test(message) ? 'alert' : undefined}>
+            {message}
+          </pre>
+        ) : null}
+      </div>
     </section>
   )
 }
