@@ -484,6 +484,12 @@ input {
   font-size: 13px;
 }
 
+/* 檔名可能是一長串沒有空白的英數：讓它在膠囊裡折行，不要把 ✕ 擠出畫面。 */
+.sh-pending li > span:first-child {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
 .sh-pending li.err {
   border-color: var(--sh-danger);
   color: var(--sh-danger);
@@ -499,6 +505,7 @@ input {
 }
 
 .sh-pending button {
+  flex: none;
   border: 0;
   background: transparent;
   cursor: pointer;
