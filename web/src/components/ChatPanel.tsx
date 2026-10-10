@@ -60,6 +60,7 @@ import { trimClippedTail } from '../lib/statusLineTail'
 import { quotedFrom } from '../lib/agmQuote'
 import { relaySource } from '../lib/relaySource'
 import { relayPreview } from '../lib/relayPreview'
+import { pastedFiles } from '../lib/pasteFiles'
 import { runtimeIdentity, runtimeSettingsKnown } from '../lib/runtimeDrift'
 import { shortModel } from '../lib/shortModel'
 import { QuotaStrip } from './QuotaStrip'
@@ -955,8 +956,7 @@ function Composer({
           onBlur={syncCursor}
           onKeyUp={syncCursor}
           onPaste={(e) => {
-            // 貼上帶的檔案一律收（不再只收圖片）；純文字貼上不帶 files，不受影響。
-            const pasted = Array.from(e.clipboardData?.files ?? [])
+            const pasted = pastedFiles(e.clipboardData)
             if (pasted.length === 0) return
             e.preventDefault()
             files.add(pasted)
