@@ -313,6 +313,12 @@ fn resume_args_by_kind(kind: &str, session_id: &str) -> Result<Vec<String>, &'st
     }
 }
 
+/// 這顆 kind＋session 接得回原對話嗎（閒置回收 §6.11 的前置）。跟 [`resume_args_by_kind`] 是同一份判斷，
+/// 不另外維護名單（issue #1078：閒置回收的名單以前只有 claude／codex，grok／agy 永遠 `no_resume`）。
+pub fn can_resume_native(kind: &str, session_id: &str) -> bool {
+    resume_args_by_kind(kind, session_id).is_ok()
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct NativeResumeFailure {
     pub reason: &'static str,

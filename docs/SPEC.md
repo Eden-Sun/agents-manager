@@ -2707,7 +2707,7 @@ header 的 herdr 徽章確認後 `POST /api/hosts/{name}/herdr-update`（API §1
   | AGM 還有沒結案的 assignment 指著它 | `open_assignment` | 那顆正要被派工 |
   | 它開的子 agent（`managed_by = 'child'`、`parent_bot_id` 指著它）還有 active run | `live_children` | 父 bot 分完工就結束回合等回報，看起來閒著；子 agent 的 pane 不在它的行程樹底下。收掉之後子 agent 用 `herdr agent prompt` 回報找不到人，§6.5a-1 的提問通知也因為父沒有 run 不送（#172） |
   | 網頁正顯示「背景執行中」（`background_jobs::known` > 0：claude Stop hook 的 `background_tasks`，沒有就是畫面判斷，§6.14） | `background_shell` | subagent／monitor／workflow 不是 pane 底下的行程，行程樹（下一條）看不到它們；同一本帳，避免網頁說在跑、AGM 卻把它收了。**只往保守的方向用**：帳上說「沒有」不放寬行程樹的判斷 |
-  | 沒有可續接的 session | `no_resume` | 沒 `native_session_id`、本機 transcript 不在、或 kind 不支援 `--resume`（grok）。收起來等於把對話丟掉，那不是省 RAM，是刪資料 |
+  | 沒有可續接的 session | `no_resume` | 沒 `native_session_id`、本機 transcript 不在、或 kind＋session 組不出續接參數（`lifecycle::can_resume_native`：claude、grok `--resume`、codex `resume`、agy `--conversation`＝id 形狀合法）。收起來等於把對話丟掉，那不是省 RAM，是刪資料 |
   | 還沒閒置到門檻 | `still_warm` | — |
 
 - **讀不到就是不知道，不收**（issue #123）：收機器是破壞性動作，只有 affirmative 的安全證據才放行。活動時間、
