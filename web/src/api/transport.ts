@@ -1,6 +1,6 @@
 import { ApiError } from './types'
 import type { ApiErrorBody } from './types'
-import { CHECK_MS, RESUME_STALE_MS, SILENCE_MS, STABLE_MS, TOKEN_REFRESH_AFTER_FAILS, TOKEN_REFRESH_MIN_GAP_MS, isForeground, realLivenessDeps } from './socketLiveness'
+import { CHECK_MS, CONNECT_TIMEOUT_MS, RESUME_STALE_MS, SILENCE_MS, STABLE_MS, TOKEN_REFRESH_AFTER_FAILS, TOKEN_REFRESH_MIN_GAP_MS, isForeground, realLivenessDeps } from './socketLiveness'
 import type { LivenessDeps } from './socketLiveness'
 
 export type HttpMethod = 'GET' | 'POST' | 'PUT' | 'PATCH' | 'DELETE'
@@ -203,6 +203,7 @@ export class HttpTransport implements Transport {
     let closed = false
     /** 最後一次收到任何幀（含心跳 ping）或連上的時刻；見 `socketLiveness.ts`（issue #760）。 */
     let lastActive = liveness.now()
+    let connectingSince = liveness.now()
     /**
      * 這個 daemon 會送心跳（這個分頁見過 `ping`）。舊 daemon 不送，安靜時整條線一個幀都沒有，靜默不是斷線的證據；
      * 沒有這個旗標的話，舊 daemon 搭新前端（vite dev 連 7788、daemon 回滾）閒置每分鐘就判半開重連，
@@ -220,6 +221,7 @@ export class HttpTransport implements Transport {
 
     const connect = () => {
       if (closed) return
+      connectingSince = liveness.now()
       // 先拆乾淨舊 socket：CLOSING 的會過 `retryNow` 檢查，其 onclose 晚到會再排 connect，變兩條、frame 收兩次。
       if (sock) {
         const old = sock
@@ -300,6 +302,9 @@ export class HttpTransport implements Transport {
       }
     }
 
+    const stuckConnecting = () =>
+      sock !== null && sock.readyState === WebSocket.CONNECTING && liveness.now() - connectingSince > CONNECT_TIMEOUT_MS
+
     // 回到分頁／網路恢復時不等 backoff。
     const retryNow = () => {
       if (closed) return
@@ -314,6 +319,11 @@ export class HttpTransport implements Transport {
     // 切回前景：`readyState` 是 OPEN 也不一定活著（半開），靜默超過心跳間隔就當死線，丟掉重連（`since` 補洞、open handler 重抓 state）。
     const resume = () => {
       if (closed || !isForeground()) return
+      if (stuckConnecting()) {
+        failsBeforeOpen += 1
+        connect()
+        return
+      }
       if (daemonPings && sock && sock.readyState === WebSocket.OPEN && liveness.now() - lastActive > RESUME_STALE_MS) {
         connect()
         return
@@ -326,6 +336,11 @@ export class HttpTransport implements Transport {
     // 前景裡靜默太久：同上。背景分頁不查——timer 被節流、frame 也可能被凍住，靜默不代表斷線，回前景那一刻再判斷。
     const stopWatchdog = liveness.every(() => {
       if (closed || !isForeground()) return
+      if (stuckConnecting()) {
+        failsBeforeOpen += 1
+        connect()
+        return
+      }
       if (daemonPings && sock && sock.readyState === WebSocket.OPEN && liveness.now() - lastActive > SILENCE_MS) connect()
     }, CHECK_MS)
     window.addEventListener('online', resume)

@@ -65,6 +65,7 @@ function rig() {
     frames,
     advance: (ms: number) => { clock += ms },
     watchdog: () => tick?.(),
+    resume: () => listeners['focus']?.forEach((fn) => fn()),
     fire: (type: string) => listeners[type]?.forEach((fn) => fn()),
     fireDoc: (type: string) => listeners[`doc:${type}`]?.forEach((fn) => fn()),
     last: () => FakeWS.instances[FakeWS.instances.length - 1],
@@ -160,5 +161,38 @@ test('見過 ping 之後才信靜默：重連後的新連線（還沒收到第�
   r.advance(61_000)
   r.watchdog()
   assert.equal(FakeWS.instances.length, 3, '這個 daemon 會送 ping（同一個分頁已經見過），新連線也不能靜默 60 秒')
+  r.stop()
+})
+
+test('握手卡在 CONNECTING 超過逾時：看門狗丟掉重連', () => {
+  const r = rig()
+  const first = r.last()
+  r.advance(5_000)
+  r.watchdog()
+  assert.equal(FakeWS.instances.length, 1, '未滿 8 秒不重連')
+  r.advance(4_000)
+  r.watchdog()
+  assert.equal(FakeWS.instances.length, 2, '超過 8 秒丟掉重連')
+  assert.equal(first.closed, true, '舊 socket 關閉')
+  assert.notEqual(r.last(), first)
+  r.stop()
+})
+
+test('握手卡在 CONNECTING 超過逾時：回前景立即丟掉重連', () => {
+  const r = rig()
+  const first = r.last()
+  r.advance(8_100)
+  r.resume()
+  assert.equal(FakeWS.instances.length, 2, '回前景立即重連')
+  assert.equal(first.closed, true)
+  r.stop()
+})
+
+test('剛發起未滿 8 秒的 CONNECTING 不被丟掉', () => {
+  const r = rig()
+  r.advance(7_900)
+  r.watchdog()
+  r.resume()
+  assert.equal(FakeWS.instances.length, 1, '未滿 8 秒放過')
   r.stop()
 })
