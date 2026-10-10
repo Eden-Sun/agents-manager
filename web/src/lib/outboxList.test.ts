@@ -24,9 +24,10 @@ test('剩餘時間從讀清單那一刻往下扣，不看瀏覽器時鐘跟 daem
   assert.equal(remainingNow(f, fetchedAt, fetchedAt - 60_000), 3000, '時鐘往回跳不加時間')
 })
 
-test('分享用 bot 的檔案不會被清：沒有倒數，空清單也不講「1 小時後清掉」', () => {
+test('分享用 bot 的檔案走 14 天保留：沒有倒數，空清單也不講「1 小時後清掉」', () => {
   assert.equal(remainingNow(file('a.pdf', 1, null), 1_789_600_000_000, 1_789_700_000_000), null)
-  assert.match(emptyReason(null, true, true), /不會自動清掉/)
+  assert.match(emptyReason(null, true, true), /保留 14 天/)
+  assert.doesNotMatch(emptyReason(null, true, true), /不會自動清掉/)
   assert.doesNotMatch(emptyReason(null, true, true), /1 小時/)
   assert.match(emptyReason(null, true), /1 小時後會自動清掉/)
 })

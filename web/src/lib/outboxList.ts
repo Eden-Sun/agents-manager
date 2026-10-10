@@ -86,7 +86,7 @@ export function emptyReason(reason: string | null, botSelected: boolean, kept = 
   if (reason === 'outbox_remote_unreachable') return '連不上這顆 bot 所在的遠端主機，暫時列不出它的檔案。按上面的 ↻ 重試。'
   // daemon 902a85c：outbox 或 bot 那一層是符號連結、擁有者不是資料目錄的使用者——為了安全不列也不給下載，不能說成「還沒有檔案」。
   if (reason === 'outbox_untrusted') return '這顆 bot 的 outbox 不是一般資料夾（符號連結或擁有者不對），為了安全不列出、也不給下載。'
-  if (kept) return '還沒有檔案。這是分享用 bot：它放進 $AM_OUTBOX 的檔案不會自動清掉，外部使用者隔天回來也拿得到。'
+  if (kept) return '還沒有檔案。這是分享用 bot：它放進 $AM_OUTBOX 的檔案會保留 14 天（總量太大時從最舊的清掉），外部使用者隔天回來也拿得到。'
   return '還沒有檔案。bot 把要給你的檔案放進 $AM_OUTBOX 之後按重整就看得到；放進去 1 小時後會自動清掉。'
 }
 
