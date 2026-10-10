@@ -170,6 +170,8 @@ export function ShareApp({ client }: { client: ShareClient }) {
   const [loadFails, setLoadFails] = useState(0)
   /** resync 要求「下一份成功的頁面取代手上的清單」；重抓失敗時留著，重試成功照樣取代。 */
   const replaceNext = useRef(false)
+  /** SSE 斷過：重新連上時要補抓一次（斷線期間的事件不會重播）。 */
+  const wasDown = useRef(false)
 
   const fail = useCallback((e: unknown) => {
     if (e instanceof ShareHttpError && e.status === 404) {
@@ -242,8 +244,18 @@ export function ShareApp({ client }: { client: ShareClient }) {
         replaceNext.current = true
         void load().then(() => loadFiles())
       },
-      onDown: () => setPoll(true),
-      onUp: () => setPoll(false),
+      onDown: () => {
+        wasDown.current = true
+        setPoll(true)
+      },
+      onUp: () => {
+        setPoll(false)
+        if (wasDown.current) {
+          wasDown.current = false
+          void load()
+          void loadFiles()
+        }
+      },
     })
     stopLive.current = stop
     return () => {
@@ -266,6 +278,18 @@ export function ShareApp({ client }: { client: ShareClient }) {
     const t = setTimeout(() => void load(), POLL_MS)
     return () => clearTimeout(t)
   }, [loadFails, poll, state, load])
+
+  // 背景時不輪詢、SSE 也可能已經死了還沒報錯：回到前景先補抓一次。
+  useEffect(() => {
+    if (state === 'gone') return
+    const onVisible = () => {
+      if (document.visibilityState !== 'visible') return
+      void load()
+      void loadFiles()
+    }
+    document.addEventListener('visibilitychange', onVisible)
+    return () => document.removeEventListener('visibilitychange', onVisible)
+  }, [state, load, loadFiles])
 
   // 90 秒上限：送出後一直沒等到 working／回覆（SSE 與輪詢都漏掉、或 bot 根本沒收到），不能讓送出鈕永遠灰著。
   useEffect(() => {
