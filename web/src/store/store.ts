@@ -50,7 +50,7 @@ import { dropHostModels, modelsKey, shouldFetchModels, type ModelsCache } from '
 import { byInsert, byTime, capList, keptAfterPage, oldestByInsert, pruneTurns, reuseUnchanged, upsertSorted } from './lists'
 import { recoverLostCursor } from './pageCursor'
 import { type CapFloors, capFor, clearFloor, raiseFloor } from './messageCap'
-import { markRewound } from '../lib/rewind'
+import { markRewound, markRewoundInGroup } from '../lib/rewind'
 import { acceptStateSeq, singleFlight } from './singleFlight'
 import { quotaForIdentity, weeklyOnlyKind } from './quotaLookup'
 import { botStatusConnTarget } from './botStatusConn'
@@ -3285,8 +3285,15 @@ export function handleFrame(set: SetFn, get: GetFn, frame: { seq?: number; type:
       if (!botId || !id) return
       const at = (isRec(data) && str(pick(data, 'rewound_at'))) || new Date().toISOString()
       set((s) => {
+        // 兩份清單都標：bot 對話（單一段）與群組時間軸（混著別顆 bot，要多比 conversation_id）。#1051：原本只標前者。
+        const patch: Partial<StoreState> = {}
         const next = markRewound(s.messages[botId] ?? [], id, at)
-        return next ? { messages: { ...s.messages, [botId]: next } } : {}
+        if (next) patch.messages = { ...s.messages, [botId]: next }
+        const pid = s.bots.find((b) => b.id === botId)?.project_id
+        const group = pid ? s.groupMessages[pid] : undefined
+        const nextGroup = pid && group ? markRewoundInGroup(group, id, at) : null
+        if (pid && nextGroup) patch.groupMessages = { ...s.groupMessages, [pid]: nextGroup }
+        return patch
       })
       return
     }
