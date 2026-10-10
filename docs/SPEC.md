@@ -1951,7 +1951,10 @@ agent 自己 `herdr agent prompt <名字> …` 時 daemon 沒參與，那句話�
    daemon 記在 `panes.purpose`（pane 還沒被掃到就先建一列）。**回報不能改寫 owner**：已經有 owner 的 pane 只更新 purpose，
    歸屬永遠由第 1 條的環境推斷決定——回報比掃描早到很常見，掃描讀到的 `AM_BOT_ID` 會蓋過回報寫的 owner；
    只有人用 adopt 指定過的（`panes.owner_adopted`）才不被蓋。回報也會補空的 `bound_project_id`，讀不到那顆 pane 環境的輪次
-   （macOS 閒著的 `-zsh`）靠它知道是 bot 開的。報不成功只是少一個用途字串。同時 `herdr pane rename` 與
+   （macOS 閒著的 `-zsh`）靠它知道是 bot 開的。但補歸屬（owner／綁定）只在三種情況下算數（#1101，任何持有 token 的 bot 都能打這條）：
+   還沒有列（shim 剛開完、還沒被掃到）；或列是 60 秒內才出現、owner 空著或就是回報者、沒被 adopt、掃描也沒判成使用者的（`owned_by='user'`）。
+   其餘情況（別顆 bot 的 pane、使用者手開的 pane、已 adopt、列早就存在）回報只寫用途，不碰歸屬，也就不會讓 GC 把它當成 bot 的 pane 關掉。
+   報不成功只是少一個用途字串。同時 `herdr pane rename` 與
    `tab rename` 用 `<bot herdr 名>-sh-<用途>`（純顯示，不是真相）。
 
 **workspace 歸位**：bot 開的非 agent pane 應該落在自己 project 的 workspace。**但已經跑起來的 service pane 不搬**——
