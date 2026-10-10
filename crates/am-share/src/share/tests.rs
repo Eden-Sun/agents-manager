@@ -1374,6 +1374,57 @@ async fn share_downloads_and_listings_do_not_hold_the_bot_lock_during_io() {
     assert!(free.load(std::sync::atomic::Ordering::SeqCst), "列表掃描時 bot 鎖要是自由的");
 }
 
+/// #1163：同一個分享的檔案清單一次只讀一趟（遠端專案每趟是一條 ssh），其餘排隊；別的分享不受影響。
+#[tokio::test]
+async fn share_file_listings_run_one_at_a_time_per_share() {
+    let e = tt::env().await;
+    let a = restricted_bot(&e.app, &e.project_id, "list-gate-a").await;
+    let b = restricted_bot(&e.app, &e.project_id, "list-gate-b").await;
+    let (ta, tb) = (shared(&e.app, &a.id).await, shared(&e.app, &b.id).await);
+    let base = serve(portal::router(e.app.clone())).await;
+    let (entered_tx, entered_rx) = tokio::sync::oneshot::channel::<()>();
+    let release = Arc::new(tokio::sync::Notify::new());
+    let r2 = release.clone();
+    crate::lifecycle::race_point::arm("share_io_after_authority_released", &a.id, move || async move {
+        let _ = entered_tx.send(());
+        r2.notified().await;
+    });
+    let c = client();
+    let first = tokio::spawn(c.get(format!("{base}/s/{ta}/api/files")).send());
+    entered_rx.await.unwrap(); // 第一趟已經驗完 token、停在 I/O 前
+    let mut second = tokio::spawn(c.get(format!("{base}/s/{ta}/api/files")).send());
+    assert!(tokio::time::timeout(Duration::from_millis(300), &mut second).await.is_err(), "同一個分享的第二趟清單要排在第一趟後面");
+    assert_eq!(c.get(format!("{base}/s/{tb}/api/files")).send().await.unwrap().status(), 200, "別的分享不受影響");
+    release.notify_one();
+    assert_eq!(first.await.unwrap().unwrap().status(), 200);
+    assert_eq!(second.await.unwrap().unwrap().status(), 200);
+}
+
+/// #1163：排隊的那一趟是等到輪到它才驗 token——等待期間連結被撤銷，放行後照樣 404（不能照樣列出檔名）。
+#[tokio::test]
+async fn a_queued_share_listing_rechecks_the_token_after_its_turn() {
+    let e = tt::env().await;
+    let a = restricted_bot(&e.app, &e.project_id, "list-gate-revoke").await;
+    let ta = shared(&e.app, &a.id).await;
+    let base = serve(portal::router(e.app.clone())).await;
+    let (entered_tx, entered_rx) = tokio::sync::oneshot::channel::<()>();
+    let release = Arc::new(tokio::sync::Notify::new());
+    let r2 = release.clone();
+    crate::lifecycle::race_point::arm("share_io_after_authority_released", &a.id, move || async move {
+        let _ = entered_tx.send(());
+        r2.notified().await;
+    });
+    let c = client();
+    let first = tokio::spawn(c.get(format!("{base}/s/{ta}/api/files")).send());
+    entered_rx.await.unwrap();
+    let second = tokio::spawn(c.get(format!("{base}/s/{ta}/api/files")).send());
+    tokio::time::sleep(Duration::from_millis(100)).await; // 讓第二趟排到後面
+    store::disable(&e.app.db, &a.id).await.unwrap();
+    release.notify_one();
+    assert_eq!(first.await.unwrap().unwrap().status(), 200, "第一趟在撤銷之前驗過 token");
+    assert_eq!(second.await.unwrap().unwrap().status(), 404, "排隊的那趟輪到時 token 已撤銷");
+}
+
 /// 分享用 bot 的 outbox 走分享保留政策、不是 1 小時（使用者 2026-10-04：end user 隔天才回來拿是常態；#850 加 14 天／總量上限）：建立時就放標記、開機補回、
 /// 刪掉才拿掉；主 UI 的清單與分享頁都不給 1 小時倒數。一般 bot 照舊 1 小時。
 #[tokio::test]

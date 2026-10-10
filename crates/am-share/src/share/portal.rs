@@ -264,6 +264,13 @@ pub fn kick(bot_id: &str) {
     let _ = kicks().send(bot_id.to_string());
 }
 
+/// 同一個分享（每顆 bot）的檔案清單一次只讀一趟，其餘排隊：遠端專案每趟清單是一條 ssh，
+/// 不排隊的話一條連結並發重整就能把那台主機的分享 ssh 名額（`HOST_SHARE_SLOTS`）佔滿（#1163）。
+fn list_gate(bot_id: &str) -> Arc<tokio::sync::Mutex<()>> {
+    static G: OnceLock<Mutex<HashMap<String, Arc<tokio::sync::Mutex<()>>>>> = OnceLock::new();
+    G.get_or_init(Default::default).lock().unwrap_or_else(|e| e.into_inner()).entry(bot_id.to_string()).or_default().clone()
+}
+
 pub fn router<H: PortalEnv>(app: Arc<H>) -> Router {
     let st = Portal::<H> {
         app,
@@ -1146,8 +1153,14 @@ async fn upload<H: PortalEnv>(
 }
 
 async fn files<H: PortalEnv>(State(st): State<Portal<H>>, Path(token): Path<String>) -> Response {
-    let (bot_id, authority) = match authorized_bot(&st, &token).await {
-        Ok(v) => v,
+    let bot_id = match bot_for(&st, &token).await {
+        Ok(id) => id,
+        Err(r) => return r,
+    };
+    // 排完隊才驗 token（#1163）：排隊期間連結被撤銷的，輪到時照樣 404，不能照樣列出檔名。`_listing` 活到函式結束。
+    let _listing = list_gate(&bot_id).lock_owned().await;
+    let authority = match authority_lock(&st, &token, &bot_id).await {
+        Ok(g) => g,
         Err(r) => return r,
     };
     // token 驗完就放掉 per-bot 互斥鎖（#906）：後面的 outbox 掃描是慢 I/O，不能讓 hook／送訊息（同一把鎖）排在它後面。
