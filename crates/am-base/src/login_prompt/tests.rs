@@ -189,6 +189,22 @@ async fn an_auth_failure_is_charged_to_the_identity_the_run_started_with() {
     assert!(get(&env.app, HOST, "cc2").is_none(), "設定的新帳號沒有壞");
 }
 
+/// A delayed auth failure from an old host generation must not mark the current generation's same-name identity.
+#[tokio::test]
+async fn a_stale_auth_failure_does_not_mark_the_repointed_host_identity() {
+    let env = tt::env().await;
+    with_identities(&env.app, &[("cc1", Some(true))]).await;
+    let bot = bound_bot(&env, "stale-auth-failure", "cc1").await;
+    let admitted = env.app.hosts.fence(HOST).await.unwrap();
+
+    // A reconfigure/repoint keeps the host name but retires the admitted authority.
+    env.app.hosts.bump_generation_for_test(HOST).await;
+    assert!(!env.app.hosts.is_current(&admitted).await);
+
+    crate::runners::login_prompt::on_auth_failure(&env.app, &bot, Some(&admitted)).await;
+    assert_eq!(get(&env.app, HOST, "cc1"), None, "舊主機回合不得污染新世代同名身分");
+}
+
 /// 同一個情況下正常答完一回合：清掉的是啟動時那個帳號的記號，不是設定的新帳號。
 #[tokio::test]
 async fn a_good_turn_clears_the_marker_of_the_identity_the_run_started_with() {
@@ -200,6 +216,21 @@ async fn a_good_turn_clears_the_marker_of_the_identity_the_run_started_with() {
 
     process(&env.app, &stop(&bot, "p2", "ok")).await.unwrap();
     assert_eq!(get(&env.app, HOST, "cc1"), None, "cc1 自己的提示清掉");
+}
+
+/// A successful completion from an old host generation must not clear the current generation's login marker.
+#[tokio::test]
+async fn a_stale_success_does_not_clear_the_repointed_host_identity_marker() {
+    let env = tt::env().await;
+    with_identities(&env.app, &[("cc1", Some(true))]).await;
+    let bot = bound_bot(&env, "stale-success", "cc1").await;
+    let admitted = env.app.hosts.fence(HOST).await.unwrap();
+    env.app.hosts.bump_generation_for_test(HOST).await;
+    assert!(!env.app.hosts.is_current(&admitted).await);
+    assert!(mark(&env.app, HOST, "cc1", VIA_TURN));
+
+    crate::runners::login_prompt::on_turn_ok(&env.app, &bot, Some(&admitted)).await;
+    assert!(get(&env.app, HOST, "cc1").is_some(), "舊主機的成功回合不得清掉新世代提示");
 }
 
 /// 同名主機改指／移除：只丟那台主機的記號，別台與本機不動；已經沒有時回 false。

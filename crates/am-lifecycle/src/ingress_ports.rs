@@ -237,7 +237,7 @@ pub trait ProviderPort {
     async fn login_on_auth_failure(&self, bot: &db::Bot, admitted: Option<&crate::hosts::HostFence>);
     /// 放行的那一刻捕獲 bot 所在主機的世代（`None`＝主機不存在／已換代）。
     async fn admitted_host_fence(&self, bot: &db::Bot) -> Option<crate::hosts::HostFence>;
-    async fn login_on_turn_ok(&self, bot: &db::Bot);
+    async fn login_on_turn_ok(&self, bot: &db::Bot, admitted: Option<&crate::hosts::HostFence>);
     fn codex_migration_on_blocked(&self, run: &db::Run);
     fn prompt_suggestion_on_idle(&self, run: &db::Run);
     /// `tui_prompts::dismiss_if_survey`：畫面上是意見調查就代按關掉，回有沒有關。
