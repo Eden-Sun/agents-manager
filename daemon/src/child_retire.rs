@@ -137,6 +137,8 @@ where
         }
         tx.commit().await?;
         tracing::info!(bot = %bot.name, bot_id = %bot.id, why, cause = %record["cause"], caller = %at, http = %crate::config_audit::http_caller(), ?mode, "child retired");
+        // 輸入框草稿跟著 bot 走（同 delete_bot，#1064）：清成墓碑並通知其他瀏覽器。盡力而為，失敗只記 log。
+        crate::drafts::clear_keys(app, &[format!("bot:{}", bot.id)]).await;
         app.emit("project_changed", json!({"project_id": bot.project_id})).await;
         Ok(Outcome::Retired)
     }
@@ -347,6 +349,36 @@ mod tests {
         .await
         .unwrap();
         id
+    }
+
+    /// #1064：退役的 child 不留輸入框草稿：草稿清成墓碑、其他瀏覽器收到清除事件；對照的 child 草稿不動。
+    /// 守衛擋下的（分享用 bot）草稿也不動，因為它還活著。
+    #[tokio::test]
+    async fn retiring_a_child_clears_its_composer_draft() {
+        let env = tt::env().await;
+        let app = env.app.clone();
+        let kid = a_child(&env).await;
+        let other = a_child(&env).await;
+        crate::drafts::put(&app.db, &format!("bot:{kid}"), "unsent").await.unwrap();
+        crate::drafts::put(&app.db, &format!("bot:{other}"), "keep me").await.unwrap();
+        let mut rx = app.subscribe();
+        assert_eq!(retire(&app, &kid, "reconcile_agent_gone", Mode::Implicit).await.unwrap(), Outcome::Retired);
+        let left: Vec<String> = crate::drafts::list(&app.db).await.unwrap().into_iter().map(|d| d.key).collect();
+        assert_eq!(left, [format!("bot:{other}")]);
+        let mut cleared = Vec::new();
+        while let Ok(ev) = rx.try_recv() {
+            if ev.kind == "draft_updated" {
+                cleared.push((ev.data["key"].as_str().unwrap().to_string(), ev.data["text"].as_str().unwrap().to_string()));
+            }
+        }
+        assert_eq!(cleared, [(format!("bot:{kid}"), String::new())]);
+
+        let guarded = a_child(&env).await;
+        crate::share::store::insert_restricted(&app.db, &guarded, "/tmp/share-kid").await.unwrap();
+        crate::drafts::put(&app.db, &format!("bot:{guarded}"), "private").await.unwrap();
+        assert_eq!(retire(&app, &guarded, "reconcile_agent_gone", Mode::Implicit).await.unwrap(), Outcome::ShareBot);
+        let left: Vec<String> = crate::drafts::list(&app.db).await.unwrap().into_iter().map(|d| d.key).collect();
+        assert!(left.contains(&format!("bot:{guarded}")), "守衛擋下的草稿不清：{left:?}");
     }
 
     /// 分享用 bot 就算被誤當成 child，對帳／維護收尾的隱式退役也不軟刪它（2026-10-04 使用者：「let AGM 不清除這類 bot」）。
