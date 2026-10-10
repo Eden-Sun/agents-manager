@@ -162,17 +162,17 @@ PY
 if [ -L "$SERVICE_TOKEN_DIR" ] || { [ -e "$SERVICE_TOKEN_DIR" ] && [ ! -d "$SERVICE_TOKEN_DIR" ]; } \
     || [ -L "$SERVICE_TOKEN_FILE" ] || { [ -e "$SERVICE_TOKEN_FILE" ] && [ ! -f "$SERVICE_TOKEN_FILE" ]; }; then
     log "ABORT: daemon-swap service credential 不是一般檔案"
-    exit 4
+    exit 3
 fi
 CAP=$(service_capability)
 case "$CAP" in
     service)
-        [ -f "$SERVICE_TOKEN_FILE" ] || { log "ABORT: daemon supports service principals but daemon-swap token file is missing"; exit 4; }
+        [ -f "$SERVICE_TOKEN_FILE" ] || { log "ABORT: daemon supports service principals but daemon-swap token file is missing"; exit 3; }
         SERVICE_MODE=service
         WINDOW_MODE=service
         log "maintenance API identity: daemon-swap service principal" ;;
     service_old)
-        [ -f "$SERVICE_TOKEN_FILE" ] || { log "ABORT: daemon supports service principals but daemon-swap token file is missing"; exit 4; }
+        [ -f "$SERVICE_TOKEN_FILE" ] || { log "ABORT: daemon supports service principals but daemon-swap token file is missing"; exit 3; }
         [ -n "$APPROVAL" ] || {
             log "ABORT: 線上 daemon 沒有 restart-window 路由；舊式換版需要明確的 --approval（rc=9）"
             exit 9
@@ -190,7 +190,7 @@ case "$CAP" in
         log "maintenance API identity: 核准的舊 daemon bootstrap（User token）" ;;
     *)
         log "ABORT: cannot determine daemon service-auth capability; refusing User fallback"
-        exit 4 ;;
+        exit 3 ;;
 esac
 
 # lease_token 不進 argv（issue #477）：argv 對同一個 uid 的行程是公開的（`ps`），而這顆 token 是
