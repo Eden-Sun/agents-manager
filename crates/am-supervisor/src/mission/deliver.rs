@@ -20,17 +20,42 @@ fn fail(code: &'static str, detail: impl Into<String>) -> Failure {
     Failure { code, detail: detail.into() }
 }
 
+/// 純本機的 git（status／rev-parse／merge-base／cherry）。
+const LOCAL_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(60);
+/// 會碰網路的（fetch／push／ls-remote）與 `gh`。
+const NET_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(180);
+
+/// 跑到結束或逾時。逾時回 `None`，子行程由 `kill_on_drop` 收掉（future 被丟掉時一起殺）；遠端半開、gh 卡住時
+/// handler 不會永遠等，也不會留下一顆沒人收的 `git push`（#1046）。
+async fn output_within(mut cmd: Command, limit: std::time::Duration) -> std::io::Result<Option<std::process::Output>> {
+    cmd.stdin(std::process::Stdio::null()).kill_on_drop(true);
+    match tokio::time::timeout(limit, cmd.output()).await {
+        Ok(r) => r.map(Some),
+        Err(_) => Ok(None),
+    }
+}
+
+fn git_limit(args: &[&str]) -> std::time::Duration {
+    match args.first() {
+        Some(&"fetch" | &"push" | &"ls-remote") => NET_TIMEOUT,
+        _ => LOCAL_TIMEOUT,
+    }
+}
+
 /// stdout 與 stderr **分開**回傳（都 trim 過）。要**解析**輸出（porcelain、sha）的地方用這個：git 印在 stderr 的警告
 /// （`warning: could not open directory …`、`warning: refname 'HEAD' is ambiguous.`）不能混進要解析的字串。
 async fn git_split(dir: &Path, args: &[&str]) -> Result<(bool, String, String), Failure> {
-    let out = Command::new("git")
-        .arg("-C")
-        .arg(dir)
-        .args(args)
-        .env("GIT_TERMINAL_PROMPT", "0")
-        .output()
+    git_split_within(dir, args, git_limit(args)).await
+}
+
+/// 同 [`git_split`]，上限由呼叫端給（測試用短的）。逾時回 `push_failed`，detail 說明超時。
+async fn git_split_within(dir: &Path, args: &[&str], limit: std::time::Duration) -> Result<(bool, String, String), Failure> {
+    let mut cmd = Command::new("git");
+    cmd.arg("-C").arg(dir).args(args).env("GIT_TERMINAL_PROMPT", "0");
+    let out = output_within(cmd, limit)
         .await
-        .map_err(|e| fail("push_failed", format!("git 無法執行：{e}")))?;
+        .map_err(|e| fail("push_failed", format!("git 無法執行：{e}")))?
+        .ok_or_else(|| fail("push_failed", format!("git {} 超過 {} 秒沒結束，已中止", args.first().copied().unwrap_or(""), limit.as_secs())))?;
     Ok((
         out.status.success(),
         String::from_utf8_lossy(&out.stdout).trim().to_string(),
@@ -249,12 +274,10 @@ pub async fn open_pr_at(dir: &Path, remote: &str, base: &str, branch: &str, titl
 /// `gh pr view <branch>` 不看狀態，關掉的、合併過的也照回（gh 2.98 實測），所以一定要把狀態一起拿回來，
 /// 由呼叫端決定算不算「已經交付」（issue #132）。
 async fn pr_for_branch(gh: &Path, dir: &Path, branch: &str) -> Option<(String, String)> {
-    let out = Command::new(gh)
-        .current_dir(dir)
-        .args(["pr", "view", branch, "--json", "url,state"])
-        .output()
-        .await
-        .ok()?;
+    let mut cmd = Command::new(gh);
+    cmd.current_dir(dir).args(["pr", "view", branch, "--json", "url,state"]);
+    // 逾時當成「查不到」：下面會照常去開（gh pr create 自己會擋重複）。
+    let out = output_within(cmd, NET_TIMEOUT).await.ok().flatten()?;
     if !out.status.success() {
         return None;
     }
@@ -306,12 +329,12 @@ async fn open_pr_expecting(
     if in_base {
         return Err(fail("nothing_to_deliver", format!("HEAD（{head}）已經在 {remote}/{base} 裡，也沒有開著的 PR")));
     }
-    let out = Command::new(gh)
-        .current_dir(dir)
-        .args(["pr", "create", "--base", base, "--head", branch, "--title", title, "--body", body])
-        .output()
+    let mut cmd = Command::new(gh);
+    cmd.current_dir(dir).args(["pr", "create", "--base", base, "--head", branch, "--title", title, "--body", body]);
+    let out = output_within(cmd, NET_TIMEOUT)
         .await
-        .map_err(|e| fail("pr_failed", format!("gh 無法執行：{e}")))?;
+        .map_err(|e| fail("pr_failed", format!("gh 無法執行：{e}")))?
+        .ok_or_else(|| fail("pr_failed", format!("gh pr create 超過 {} 秒沒結束，已中止", NET_TIMEOUT.as_secs())))?;
     if !out.status.success() {
         return Err(fail("pr_failed", String::from_utf8_lossy(&out.stderr).trim().to_string()));
     }
@@ -673,6 +696,17 @@ mod tests {
         let head = head_sha(&work).await.unwrap();
         let pushed = push_main_at(&work, "origin", "main", false, Some(&head)).await.expect("警告不是 HEAD 移動");
         assert_eq!(pushed.sha, head);
+    }
+
+    /// #1046：git 卡住（這裡用 alias 睡五秒模擬遠端半開）→ 上限一到就回來、回 `push_failed` 說明超時，不等它跑完。
+    #[tokio::test]
+    async fn a_git_command_that_hangs_is_cut_off_and_reported() {
+        let (_root, _seed, work) = fixture();
+        let started = std::time::Instant::now();
+        let err = git_split_within(&work, &["-c", "alias.hang=!sleep 5", "hang"], std::time::Duration::from_millis(200)).await.unwrap_err();
+        assert_eq!(err.code, "push_failed");
+        assert!(err.detail.contains("沒結束"), "{}", err.detail);
+        assert!(started.elapsed() < std::time::Duration::from_secs(3), "逾時後要立刻回來，不能等 sleep 跑完");
     }
 
     fn fake_gh(root: &Path) -> std::path::PathBuf {
