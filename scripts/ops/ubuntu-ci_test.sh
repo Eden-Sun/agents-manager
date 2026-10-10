@@ -555,5 +555,16 @@ check "有嘗試喊" "ci_hung" "$FIX/agm.log"
 kill "$HOLDER" 2>/dev/null; wait "$HOLDER" 2>/dev/null
 teardown
 
+# description 照「字」截，不能把中文字切成半個（cut -c 是照位元組）。
+setup
+NAME86=$(printf 'a%.0s' $(seq 1 86))
+printf 'test %s ... FAILED\n' "$NAME86" > "$FIX/title.daemon"
+echo 1 > "$FIX/rc.daemon"
+equals "紅燈仍 exit 0" "$(run)" "0"
+equals "status.json 是合法 UTF-8" "$(python3 -c 'import sys; open(sys.argv[1],"rb").read().decode("utf-8"); print("ok")' "$CI/status.json" 2>/dev/null)" "ok"
+equals "送出去的 description 是合法 UTF-8" "$(python3 -c 'import sys; open(sys.argv[1],"rb").read().decode("utf-8"); print("ok")' "$FIX/gh.log" 2>/dev/null)" "ok"
+check "description 完整（103 個字，不到 120，不該被截）" "條測試紅（${NAME86}）" "$CI/status.json"
+teardown
+
 echo "ubuntu-ci_test: $PASS passed, $FAIL failed"
 [ "$FAIL" = 0 ]
