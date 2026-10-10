@@ -425,8 +425,18 @@ pub async fn start(app: &(impl crate::capabilities::Db + crate::capabilities::Em
         .await
         .map_err(up)?
         .ok_or_else(|| LcError::conflict("responder is not set up", json!({"reason": "responder_not_configured"})))?;
-    if crate::db::active_run(app.db(), &bot.id).await.map_err(up)?.is_none() {
-        app.start_bot(&bot.id).await?;
+    match crate::db::active_run(app.db(), &bot.id).await.map_err(up)? {
+        None => {
+            app.start_bot(&bot.id).await?;
+        }
+        // 上一個 run 還在收尾：這時起不了新的（`runs_one_active`），當成「已經在跑」往下走只會回一個假的成功。
+        Some(run) if run.state == "stopping" => {
+            return Err(LcError::conflict(
+                "run_stopping",
+                json!({"run_id": run.id, "retryable": true, "message": "上一個 run 還在停止中，等它收掉再啟動"}),
+            ));
+        }
+        Some(_) => {}
     }
     if let Err(e) =
         // 同 `super::start_manager`：控制面的握手不受維護窗口的閘門管（issue #86）。
@@ -1956,5 +1966,22 @@ mod gave_up_report_tests {
             .filter(|n| n.contains(".tmp"))
             .collect();
         assert!(leftovers.is_empty(), "殘留暫存檔：{leftovers:?}");
+    }
+
+    #[tokio::test]
+    async fn a_responder_start_over_a_stopping_run_is_a_conflict() {
+        let env = crate::testing::env().await;
+        let app = env.app.clone();
+        store::get_or_init(&app.db).await.unwrap();
+        let now = crate::db::now();
+        sqlx::query("INSERT INTO bots (id,project_id,name,kind,identity,hook_token,created_at) VALUES ('resp',?,'AGM-responder','claude','cc0','tok',?)")
+            .bind(&env.project_id).bind(&now).execute(&app.db).await.unwrap();
+        roles::set_env(&app.db, Role::Responder, "resp", &env.project_id, "/tmp").await.unwrap();
+        sqlx::query("INSERT INTO runs (id,bot_id,state,agent_status,herdr_session,pane_id,started_at) VALUES ('run-r','resp','stopping','idle','test','pane-r',?)")
+            .bind(&now).execute(&app.db).await.unwrap();
+
+        let err = start(&app, None).await.unwrap_err();
+        let LcError::Conflict(v) = &err else { panic!("要是 409：{err:?}") };
+        assert_eq!(v["reason"], "run_stopping");
     }
 }
