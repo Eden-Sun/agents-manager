@@ -10665,11 +10665,13 @@ mod per_principal_auth_tests {
             axum::serve(listener, router.into_make_service_with_connect_info::<std::net::SocketAddr>()).await
         });
         let mut c = tokio::net::TcpStream::connect(addr).await.unwrap();
-        c.write_all(request.as_bytes()).await.unwrap();
-        let mut out = String::new();
-        c.read_to_string(&mut out).await.unwrap();
+        // 超過 body 上限的請求：伺服器在讀完之前就回 413 並關線，寫入端可能撞 BrokenPipe／ECONNRESET。
+        // 回應其實已經在收到的位元組裡（實測：寫入失敗與讀取 RST 都照樣收得到 413），所以這裡不把連線錯誤當成測試失敗，照收到的內容回。
+        let _ = c.write_all(request.as_bytes()).await;
+        let mut bytes = Vec::new();
+        let _ = c.read_to_end(&mut bytes).await;
         server.abort();
-        out
+        String::from_utf8_lossy(&bytes).into_owned()
     }
 
     async fn raw_many(app: Arc<App>, requests: Vec<String>) -> Vec<String> {
