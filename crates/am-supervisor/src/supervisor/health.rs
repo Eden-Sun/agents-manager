@@ -4,19 +4,58 @@ use crate::lifecycle::LcError;
 use sqlx::SqlitePool;
 use serde_json::{json, Value};
 
-/// `gh auth status` 要打網路，health 又常被輪詢：60 秒內沿用上一次的結果。
-async fn release_triage_health(app: &(impl crate::capabilities::Cfg + crate::supervisor::ports::HostProbes)) -> Value {
-    static CACHE: tokio::sync::Mutex<Option<(std::time::Instant, Value)>> = tokio::sync::Mutex::const_new(None);
-    let cfg = app.cfg().get().await.release_triage;
-    let mut c = CACHE.lock().await;
-    if let Some((at, v)) = c.as_ref() {
-        if at.elapsed() < std::time::Duration::from_secs(60) {
-            return v.clone();
+struct ProbeSlot {
+    at: Option<std::time::Instant>,
+    value: Value,
+    refreshing: bool,
+}
+
+/// 快取 `ttl` 內直接回；有人正在探測就回上一份（沒有就是 Null），不排隊；探測最多等 `limit`。
+async fn cached_probe<F, Fut>(slot: &std::sync::Mutex<ProbeSlot>, ttl: std::time::Duration, limit: std::time::Duration, probe: F) -> Value
+where
+    F: FnOnce() -> Fut,
+    Fut: std::future::Future<Output = Value>,
+{
+    {
+        let mut s = slot.lock().unwrap_or_else(|e| e.into_inner());
+        if s.at.is_some_and(|at| at.elapsed() < ttl) || s.refreshing {
+            return s.value.clone();
+        }
+        s.refreshing = true;
+    }
+    // 呼叫端被取消（HTTP 連線斷了）也要把 refreshing 放掉，不然之後永遠回舊值。
+    struct Reset<'a>(&'a std::sync::Mutex<ProbeSlot>);
+    impl Drop for Reset<'_> {
+        fn drop(&mut self) {
+            self.0.lock().unwrap_or_else(|e| e.into_inner()).refreshing = false;
         }
     }
-    let v = app.release_triage_health_probe(&cfg).await.unwrap_or(Value::Null);
-    *c = Some((std::time::Instant::now(), v.clone()));
-    v
+    let _reset = Reset(slot);
+    let fresh = tokio::time::timeout(limit, probe()).await.ok();
+    let mut s = slot.lock().unwrap_or_else(|e| e.into_inner());
+    // 逾時：沿用上一份，但一樣蓋時間戳，`ttl` 內不再重探。
+    if let Some(v) = fresh {
+        s.value = v;
+    }
+    s.at = Some(std::time::Instant::now());
+    s.value.clone()
+}
+
+/// `gh auth status` 要打網路，health 又常被輪詢：60 秒內沿用上一次的結果，探測最多等 15 秒（issue #1118）。
+async fn release_triage_health(app: &(impl crate::capabilities::Cfg + crate::supervisor::ports::HostProbes)) -> Value {
+    static SLOT: std::sync::Mutex<ProbeSlot> = std::sync::Mutex::new(ProbeSlot {
+        at: None,
+        value: Value::Null,
+        refreshing: false,
+    });
+    let cfg = app.cfg().get().await.release_triage;
+    cached_probe(
+        &SLOT,
+        std::time::Duration::from_secs(60),
+        std::time::Duration::from_secs(15),
+        || async { app.release_triage_health_probe(&cfg).await.unwrap_or(Value::Null) },
+    )
+    .await
 }
 
 /// 一顆角色 bot（巡檢／協調者）現在能不能用，給「核准該不該改派」這類決定當依據（issue #421）。
@@ -645,5 +684,160 @@ mod tests {
         assert!(!d.observe("degraded", "not_configured"));
         assert!(!d.observe("degraded", "stopped"));
         assert!(d.observe("healthy", "busy"));
+    }
+}
+
+#[cfg(test)]
+mod probe_cache_tests {
+    use super::*;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::Arc;
+    use std::time::Duration;
+
+    #[tokio::test]
+    async fn a_slow_probe_does_not_block_other_readers() {
+        let slot = Arc::new(std::sync::Mutex::new(ProbeSlot {
+            at: None,
+            value: Value::Null,
+            refreshing: false,
+        }));
+        let s1 = Arc::clone(&slot);
+        let h1 = tokio::spawn(async move {
+            cached_probe(
+                &s1,
+                Duration::from_secs(60),
+                Duration::from_secs(5),
+                || async {
+                    tokio::time::sleep(Duration::from_millis(300)).await;
+                    json!({"n": 1})
+                },
+            )
+            .await
+        });
+
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        let s2 = Arc::clone(&slot);
+        let v2 = tokio::time::timeout(Duration::from_millis(100), async move {
+            cached_probe(
+                &s2,
+                Duration::from_secs(60),
+                Duration::from_secs(5),
+                || async {
+                    panic!("不應呼叫 probe");
+                },
+            )
+            .await
+        })
+        .await
+        .expect("應在時限內返回");
+
+        assert_eq!(v2, Value::Null, "探測中其他呼叫應拿到上一份（此處為 Null）");
+
+        let v1 = h1.await.unwrap();
+        assert_eq!(v1, json!({"n": 1}));
+
+        let s3 = Arc::clone(&slot);
+        let v3 = cached_probe(
+            &s3,
+            Duration::from_secs(60),
+            Duration::from_secs(5),
+            || async {
+                panic!("快取中不應呼叫 probe");
+            },
+        )
+        .await;
+        assert_eq!(v3, json!({"n": 1}));
+    }
+
+    #[tokio::test]
+    async fn a_probe_that_times_out_is_not_retried_within_the_ttl() {
+        let slot = Arc::new(std::sync::Mutex::new(ProbeSlot {
+            at: None,
+            value: Value::Null,
+            refreshing: false,
+        }));
+        let count = Arc::new(AtomicUsize::new(0));
+
+        let s1 = Arc::clone(&slot);
+        let c1 = Arc::clone(&count);
+        let v1 = cached_probe(
+            &s1,
+            Duration::from_secs(60),
+            Duration::from_millis(50),
+            || {
+                let c = Arc::clone(&c1);
+                async move {
+                    c.fetch_add(1, Ordering::SeqCst);
+                    tokio::time::sleep(Duration::from_secs(5)).await;
+                    json!({"n": 42})
+                }
+            },
+        )
+        .await;
+        assert_eq!(v1, Value::Null);
+        assert_eq!(count.load(Ordering::SeqCst), 1);
+
+        let s2 = Arc::clone(&slot);
+        let c2 = Arc::clone(&count);
+        let v2 = cached_probe(
+            &s2,
+            Duration::from_secs(60),
+            Duration::from_millis(50),
+            || {
+                let c = Arc::clone(&c2);
+                async move {
+                    c.fetch_add(1, Ordering::SeqCst);
+                    json!({"n": 99})
+                }
+            },
+        )
+        .await;
+        assert_eq!(v2, Value::Null);
+        assert_eq!(count.load(Ordering::SeqCst), 1, "ttl 內不應再次嘗試探測");
+    }
+
+    #[tokio::test]
+    async fn a_cancelled_refresh_releases_the_slot() {
+        let slot = Arc::new(std::sync::Mutex::new(ProbeSlot {
+            at: None,
+            value: Value::Null,
+            refreshing: false,
+        }));
+        let count = Arc::new(AtomicUsize::new(0));
+
+        let s1 = Arc::clone(&slot);
+        let h1 = tokio::spawn(async move {
+            cached_probe(
+                &s1,
+                Duration::from_secs(60),
+                Duration::from_secs(5),
+                || async {
+                    std::future::pending::<Value>().await
+                },
+            )
+            .await
+        });
+
+        tokio::time::sleep(Duration::from_millis(20)).await;
+        h1.abort();
+        let _ = h1.await;
+
+        let s2 = Arc::clone(&slot);
+        let c2 = Arc::clone(&count);
+        let v2 = cached_probe(
+            &s2,
+            Duration::from_secs(60),
+            Duration::from_secs(5),
+            || {
+                let c = Arc::clone(&c2);
+                async move {
+                    c.fetch_add(1, Ordering::SeqCst);
+                    json!({"recovered": true})
+                }
+            },
+        )
+        .await;
+        assert_eq!(count.load(Ordering::SeqCst), 1, "被取消後 slot 應被釋放並執行新 probe");
+        assert_eq!(v2, json!({"recovered": true}));
     }
 }
