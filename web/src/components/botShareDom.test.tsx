@@ -329,3 +329,48 @@ test('信任分享：「允許 iframe 嵌入」只在信任分享的分享中畫
   await settle(150)
   assert.equal(((await mock.request('GET', `/bots/${trusted.id}/share`)) as { allow_embed: boolean }).allow_embed, false)
 })
+
+test('別處重產連結（share_enabled 沒變）：聊天頂端的分享鈕複製的是新連結（#1098）', async () => {
+  const { mock, shared } = await setup()
+  const copied: string[] = []
+  const nav = navigator as unknown as { clipboard?: unknown }
+  const origClip = nav.clipboard
+  Object.defineProperty(navigator, 'clipboard', { configurable: true, value: { writeText: async (t: string) => void copied.push(t) } })
+  const origExec = document.execCommand
+  document.execCommand = () => false
+  try {
+    await mock.request('POST', `/bots/${shared.id}/share`, { enabled: true })
+    await act(async () => useStore.setState((s) => ({ notify: () => {}, bots: s.bots.map((b) => (b.id === shared.id ? { ...b, share_enabled: true } : b)) })) as never)
+    await mount(<ShareLinkButton botId={shared.id} />)
+    await settle(100)
+    await click(mainBtn())
+    await settle(50)
+    const before = copied[0]
+    assert.ok(before, '分享中按下就複製手上那條')
+
+    // 別處（設定面板或另一個分頁）重產：share_enabled 不變，只來一幀 bot_share_changed。
+    const r = (await mock.request('POST', `/bots/${shared.id}/share/rotate`)) as { url: string }
+    // 重抓是 effect 裡的非同步回寫：整段包在同一個 act 裡，effect 才會在 act 裡跑、回寫才會被 flush 進 DOM。
+    // 第二次 store 更新逼 React 在 render 前先 flush 掛著的 effect（notify 是這個元件的 selector）。
+    // harness 的 act 環境會吞掉「不在 act 裡」的 fetch 回寫（effect 裡重抓連結的 setShare），DOM 永遠不換。
+    // 這一段暫時關掉 act 環境讓 React 照常排程，等重抓回來再還原（finally 也還原）。
+    const g = globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }
+    g.IS_REACT_ACT_ENVIRONMENT = false
+    try {
+      useStore.setState((s) => ({ shareRev: { ...s.shareRev, [shared.id]: (s.shareRev[shared.id] ?? 0) + 1 } }))
+      await new Promise((resolve) => setTimeout(resolve, 150))
+    } finally {
+      g.IS_REACT_ACT_ENVIRONMENT = true
+    }
+
+    await click(mainBtn())
+    await settle(50)
+    assert.equal(copied.at(-1), r.url, '複製的是重產後的新連結')
+    assert.notEqual(copied.at(-1), before)
+    await settle(100) // 把非 act 的排程收乾淨，不留給下一條測試
+  } finally {
+    Object.defineProperty(navigator, 'clipboard', { configurable: true, value: origClip })
+    document.execCommand = origExec
+  }
+})
+
