@@ -723,7 +723,7 @@ Jev 不負責回合收尾、額度記帳或競態判斷；這些依 run、turn�
 2. stdin（claude、grok）上限 1 MiB，超過截斷標 `truncated`；codex 取 argv 最後一個。
 3. POST `http://127.0.0.1:<port>/hook/<provider>`（寫死 IPv4 loopback、`NO_PROXY=127.0.0.1`、連線逾時 300 ms、總逾時 2 秒），header `X-AM-Bot-Token`，
    body `{bot_id, provider, payload, received_at, run_id?}`（`run_id`＝行程 env 的 `AM_RUN_ID`，只給 §4.1 的世代圍籬用）。
-4. 失敗（連不上、逾時，或**任何非 2xx**，含 daemon 寫不進收件匣時的 503）→ `O_APPEND` 追加一行到
+4. 失敗（連不上、逾時，或非 2xx，含 daemon 寫不進收件匣時的 503；409 `provider_mismatch` 與 410 `bot deleted` 是永久拒絕，不 spool）→ `O_APPEND` 追加一行到
    `~/.config/agents-manager/bots/<bot_id>/hook-spool.jsonl`；寫失敗只記 `hook.log`，仍 exit 0。這就是 hook 的重試路徑。
 5. `--port` 取自 command 列；env `AM_PORT` 為備援。
 6. daemon 重放 spool：拿 per-bot 鎖 → rename 成 `.claim` → 併進 `.replaying` → 逐行**寫進 `hook_events` 並 commit** → 刪檔 → 放鎖；
