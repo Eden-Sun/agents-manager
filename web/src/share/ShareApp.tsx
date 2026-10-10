@@ -3,6 +3,7 @@ import { createRequestId, settleCreateRequest } from '../lib/createRequestId'
 import type { ShareClient } from './shareApi'
 import { displayName, imagesByMessage, isImageName } from './shareImage'
 import { ShareButton, ShareImageViewer, ShareThumb } from './ShareImages'
+import { pruneShareImages } from './shareImageCache'
 import { uploadErrorText, uploadPatiently, uploadRetryable } from './shareUpload'
 import {
   fmtSize,
@@ -144,6 +145,8 @@ export function ShareApp({ client }: { client: ShareClient }) {
   const [messages, setMessages] = useState<ShareMessage[]>([])
   const [status, setStatus] = useState<ShareStatus>('idle')
   const [files, setFiles] = useState<ShareFile[]>([])
+  // 清單換了（檔案被刪、改名）：不在清單裡的圖片快取整條淘汰，長開的頁面不會越積越多（#1175）。
+  useEffect(() => pruneShareImages(client, files), [client, files])
   const [state, setState] = useState<'loading' | 'ready' | 'gone'>('loading')
   const [netError, setNetError] = useState<string | null>(null)
   const [text, setText] = useState('')
