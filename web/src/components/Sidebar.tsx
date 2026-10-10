@@ -1405,7 +1405,7 @@ export function Sidebar() {
           <button type="button" className="btn" onClick={() => setOpen('project')}>
             新增 Project
           </button>
-          <button type="button" className="btn" onClick={() => openBotSheet(selectedProjectId ?? projects[0]?.id)} disabled={projects.length === 0}>
+          <button type="button" className="btn" onClick={() => openBotSheet(selectedProjectId ?? selectedBotProject ?? projects[0]?.id)} disabled={projects.length === 0}>
             新增 Bot
           </button>
         </div>
