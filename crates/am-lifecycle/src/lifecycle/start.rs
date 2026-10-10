@@ -796,6 +796,22 @@ pub fn fork_args_by_kind(kind: &str, session_id: &str) -> Result<Vec<String>, &'
     }
 }
 
+/// 這顆 bot 之前從來沒有 run、對話裡也沒有任何 user／assistant 訊息（#1001）。`run_id` 是這次啟動剛插進去的那一列，不算。
+async fn is_first_contact(app: &impl Db, bot: &db::Bot, run_id: &str) -> LcResult<bool> {
+    let conv = db::conversation_id(app.db(), &bot.id).await.map_err(up)?;
+    let seen: i64 = sqlx::query_scalar(
+        "SELECT (SELECT COUNT(*) FROM runs WHERE bot_id = ? AND id <> ?)
+              + (SELECT COUNT(*) FROM messages WHERE conversation_id = ? AND role IN ('user','assistant'))",
+    )
+    .bind(&bot.id)
+    .bind(run_id)
+    .bind(&conv)
+    .fetch_one(app.db())
+    .await
+    .map_err(up)?;
+    Ok(seen == 0)
+}
+
 /// The last native session could not be continued, so this start opens a new conversation.
 ///
 /// 這件事一定要在聊天室裡看得見：以前只寫一行 `tracing::info!`，使用者（或 AGM）看到的是
@@ -1269,7 +1285,12 @@ async fn start_inner(
             Ok(plan) => Some(plan),
             // 預設退回開新對話；`resume_required` 的呼叫在前面就擋掉了。
             Err(failure) => {
-                context_lost(app, bot, failure.reason, failure.session_id.as_deref()).await?;
+                // #1001：全新 bot 第一次啟動沒有「原本的對話」可以接，不是接丟了，不寫警告。
+                if failure.reason == "no_session_id" && is_first_contact(app, bot, run_id).await? {
+                    tracing::info!(bot = %bot.name, "first start of a new bot; no earlier conversation to resume");
+                } else {
+                    context_lost(app, bot, failure.reason, failure.session_id.as_deref()).await?;
+                }
                 None
             }
         }
@@ -2542,7 +2563,16 @@ mod resume_args_tests {
     async fn a_silent_fallback_to_a_new_conversation_leaves_a_visible_note() {
         let e = env().await;
         let pm = claude_bot(&e.app, &e.project_id, "pm").await;
-        // 沒有任何上一段原生對話：native_resume_plan 判定 no_session_id，退回開新對話。
+        // 有過一段 run 但沒記到 session：native_resume_plan 判定 no_session_id，退回開新對話要留說明。
+        // （#1001：全新 bot 第一次啟動沒有原本的對話，不留這則說明；那個情況見 a_brand_new_bot_first_start_does_not_warn_context_lost。）
+        sqlx::query("INSERT INTO runs (id, bot_id, state, agent_status, started_at, ended_at) VALUES (?,?,'stopped','idle',?,?)")
+            .bind(db::ulid())
+            .bind(&pm.id)
+            .bind("2026-10-05T00:00:00Z")
+            .bind("2026-10-05T00:01:00Z")
+            .execute(e.app.db())
+            .await
+            .unwrap();
         start_bot_with(&e.app, &pm.id, StartOpts { resume_native: true, ..Default::default() }).await.unwrap();
         assert!(!started_args(&e).pop().unwrap().contains(&"--resume".into()), "沒有上一段對話，不該帶 --resume");
 
@@ -4813,6 +4843,50 @@ mod agy_resume_tests {
         let args = last_args(&e);
         assert!(!args.iter().any(|a| a == "-c" || a == "--continue" || a.starts_with("--conversation")), "沒有 id 就開新對話，不退到 -c：{args:?}");
         assert!(system_notes(&e.app, &bot.id).await.iter().any(|n| n.contains("接不回")));
+    }
+
+    /// #1001：全新 bot 第一次啟動（沒有 run、對話裡沒有 user／assistant 訊息）沒有「原本的對話」可接，不是接丟了，不寫警告。
+    #[tokio::test]
+    async fn a_brand_new_bot_first_start_does_not_warn_context_lost() {
+        let e = env().await;
+        let bot = claude_bot(&e.app, &e.project_id, "rpa-new").await;
+
+        start_bot_with(&e.app, &bot.id, StartOpts { resume_native: true, ..Default::default() }).await.unwrap();
+
+        assert!(!system_notes(&e.app, &bot.id).await.iter().any(|n| n.contains(CONTEXT_LOST_PREFIX)), "全新 bot 第一次啟動不該說接不回");
+        let notices: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM context_lost_notices WHERE bot_id = ?").bind(&bot.id).fetch_one(e.app.db()).await.unwrap();
+        assert_eq!(notices, 0);
+    }
+
+    /// #1001：有過 run 但沒記到 session id，仍然要警告。
+    #[tokio::test]
+    async fn a_bot_with_history_but_no_session_still_warns() {
+        let e = env().await;
+        let bot = claude_bot(&e.app, &e.project_id, "rpa-old").await;
+        ended_run(&e.app, &bot.id, None).await;
+
+        start_bot_with(&e.app, &bot.id, StartOpts { resume_native: true, ..Default::default() }).await.unwrap();
+
+        assert!(system_notes(&e.app, &bot.id).await.iter().any(|n| n.contains(CONTEXT_LOST_PREFIX)), "有過 run 的 bot 接不回就要說");
+    }
+
+    /// #1001：沒有 run 但對話裡已經有使用者的訊息（排在第一次啟動之前），也算有過對話，仍然要警告。
+    #[tokio::test]
+    async fn a_bot_that_already_spoke_but_never_ran_still_warns() {
+        let e = env().await;
+        let bot = claude_bot(&e.app, &e.project_id, "rpa-spoke").await;
+        let conv = db::conversation_id(e.app.db(), &bot.id).await.unwrap();
+        sqlx::query("INSERT INTO messages (id, conversation_id, role, content, source, created_at) VALUES (?,?,'user','hi','web',?)")
+            .bind(db::ulid())
+            .bind(&conv)
+            .bind(db::now())
+            .execute(e.app.db())
+            .await
+            .unwrap();
+
+        start_bot_with(&e.app, &bot.id, StartOpts { resume_native: true, ..Default::default() }).await.unwrap();
+
+        assert!(system_notes(&e.app, &bot.id).await.iter().any(|n| n.contains(CONTEXT_LOST_PREFIX)), "已有使用者訊息的對話接不回就要說");
     }
 
     /// 在原 pane 裡重啟的 agy 子 agent：接得回就帶 `--conversation=<id>`；記到的 id 形狀不對則開新對話、聊天室留說明（不只 tracing）。
