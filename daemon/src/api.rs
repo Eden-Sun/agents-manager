@@ -1983,7 +1983,13 @@ async fn delete_project(State(app): State<Arc<App>>, Path(id): Path<String>) -> 
     }
     // 專案 host 在**定案之前**讀好（#246）：定案之後才重讀、讀不到就退回 local，會去砍本機同 id 的目錄、
     // 遠端那份留著沒人回收。讀不到就 502、什麼都還沒動，可以原樣再按一次。
-    let host = db::project(&app.db, &id).await.map_err(any_err)?.ok_or_else(|| LcError::NotFound("project".into()))?.host;
+    // 已刪的專案再刪一次＝404，不能走到 `begin`：那會沿用並 abandon 背景還在補的 intent（#1058）。
+    let host = db::project(&app.db, &id)
+        .await
+        .map_err(any_err)?
+        .filter(|p| p.deleted_at.is_none())
+        .ok_or_else(|| LcError::NotFound("project".into()))?
+        .host;
     // 授權範圍在臨界區裡從**當下的** TOML 算；TOML 裡多出沒鎖住的 bot 就拒絕。
     let held: std::collections::HashSet<String> = ids.iter().cloned().collect();
     // 持久 intent（#355 P3）：定案**之前**先 commit（payload＝當時的 bot 快照）；定案之後 daemon 死掉，開機由 `delete_intents::recover_host` 補完。
@@ -7909,6 +7915,24 @@ mod delete_bot_tests {
         crate::delete_intents::recover_host(&app2, LOCAL_HOST).await;
         assert_eq!(intent_states(&app2, &e.project_id).await, vec!["abandoned"]);
         assert!(!deleted(&app2, &kid).await);
+    }
+
+    /// #1058：收尾沒做完的專案，呼叫端再刪一次＝404，不能沿用並 abandon 背景還在補的 intent（child 還沒軟刪、分享還有效）。
+    #[tokio::test]
+    async fn a_second_delete_of_an_already_deleted_project_does_not_abandon_the_cleanup_still_owed() {
+        let e = crate::testing::env().await;
+        let (_parent, kid) = parent_and_child(&e).await;
+        sqlx::query(&format!(
+            "CREATE TRIGGER am_test_kid_stuck BEFORE UPDATE OF deleted_at ON bots WHEN NEW.id = '{kid}' BEGIN SELECT RAISE(ABORT, 'boom'); END"
+        ))
+        .execute(&e.app.db)
+        .await
+        .unwrap();
+        let first = delete_project(State(e.app.clone()), Path(e.project_id.clone())).await;
+        assert!(first.is_err(), "收尾沒做完：第一次要 5xx");
+        let second = delete_project(State(e.app.clone()), Path(e.project_id.clone())).await;
+        assert!(matches!(second, Err(LcError::NotFound(_))), "已刪的專案再刪＝404");
+        assert!(!intent_states(&e.app, &e.project_id).await.iter().any(|s| s == "abandoned"), "背景那件不能被 abandon");
     }
 
     /// 補不成（child 的軟刪一直寫不進去）：最多試 MAX_ATTEMPTS 次，failed＋AGM inbox。
