@@ -14,6 +14,7 @@ import './attachments.css'
 
 import { formatSize, sizeLabel, type Pending } from './attachmentsHelpers'
 import { progressLabel, uploadPercent } from './attachmentUpload'
+import { useStore } from '../store/store'
 
 export function DropVeil({ label = '放開以附加檔案' }: { label?: string }) {
   return (
@@ -260,6 +261,14 @@ function StoredThumb({ item, onOpen }: { item: Attachment; onOpen: () => void })
 
 function useStoredUrl(id: string | null): { url: string | null; failure: AttachmentFailure | null } {
   const [state, setState] = useState<{ url: string | null; failure: AttachmentFailure | null }>({ url: null, failure: null })
+  const [attempt, setAttempt] = useState(0)
+  const online = useStore((s) => s.socket === 'open')
+  const retryable = state.failure === 'error'
+  // 斷線／daemon 重啟時抓失敗的：連回來自己再抓一次。`gone`（404／410）重抓也一樣，不重試。
+  // 依賴是兩個布林，所以每次「失敗」或「連回來」各只觸發一次，不會形成重試迴圈。
+  useEffect(() => {
+    if (online && retryable) setAttempt((n) => n + 1)
+  }, [online, retryable])
   useEffect(() => {
     if (!id) return
     let live = true
@@ -273,7 +282,7 @@ function useStoredUrl(id: string | null): { url: string | null; failure: Attachm
     return () => {
       live = false
     }
-  }, [id])
+  }, [id, attempt])
   return state
 }
 
