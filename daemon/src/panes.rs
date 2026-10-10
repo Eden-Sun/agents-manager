@@ -16,13 +16,6 @@ use sqlx::SqlitePool;
 pub trait PaneRuntime: Send + Sync {
     fn pane_host_ownership<'a>(&'a self, host: &'a str) -> impl Future<Output = Result<Option<PaneOwnership>>> + Send + 'a;
     fn pane_shell_client<'a>(&'a self, host: &'a str) -> impl Future<Output = Result<crate::herdr::HerdrClient>> + Send + 'a;
-    fn close_pane_and_tab<'a>(
-        &'a self,
-        client: &'a crate::herdr::HerdrClient,
-        workspace_id: Option<&'a str>,
-        tab_id: Option<&'a str>,
-        pane_id: &'a str,
-    ) -> impl Future<Output = ()> + Send + 'a;
     fn push_pane_inbox<'a>(
         &'a self,
         key: &'a str,
@@ -53,15 +46,6 @@ impl<T: PaneRuntime + ?Sized> PaneRuntime for Arc<T> {
     }
     fn pane_shell_client<'a>(&'a self, host: &'a str) -> impl Future<Output = Result<crate::herdr::HerdrClient>> + Send + 'a {
         <T as PaneRuntime>::pane_shell_client(self.as_ref(), host)
-    }
-    fn close_pane_and_tab<'a>(
-        &'a self,
-        client: &'a crate::herdr::HerdrClient,
-        workspace_id: Option<&'a str>,
-        tab_id: Option<&'a str>,
-        pane_id: &'a str,
-    ) -> impl Future<Output = ()> + Send + 'a {
-        <T as PaneRuntime>::close_pane_and_tab(self.as_ref(), client, workspace_id, tab_id, pane_id)
     }
     fn push_pane_inbox<'a>(
         &'a self,
@@ -822,8 +806,21 @@ async fn close_if_still_idle(
 ) -> Result<bool> {
     // 1. 重新取前景／行程樹：**讀不到就不關**（讀不到不等於是空的）。
     let dump = crate::memproc::dump(app, host).await?;
+    close_if_still_idle_with_dump(app, host, pane_id, workspace_id, tab_id, log_lines, &dump).await
+}
+
+async fn close_if_still_idle_with_dump(
+    app: &(impl crate::capabilities::Db + crate::capabilities::Emit + crate::capabilities::HerdrRoutes + crate::hosts::HostsAccess + PaneRuntime),
+    host: &str,
+    pane_id: &str,
+    workspace_id: Option<&str>,
+    tab_id: Option<&str>,
+    log_lines: u32,
+    dump: &str,
+) -> Result<bool> {
+    // 1. 重新取前景／行程樹：**讀不到就不關**（讀不到不等於是空的）。
     let client = app.pane_shell_client(host).await?;
-    let Some(f) = read_facts(Some(&client), Some(&dump), pane_id).await else {
+    let Some(f) = read_facts(Some(&client), Some(dump), pane_id).await else {
         tracing::info!(host, pane_id, "GC 前讀不到這顆 pane 的行程樹，這一輪不關");
         return Ok(false);
     };
@@ -841,7 +838,9 @@ async fn close_if_still_idle(
         .map(|r| r.text.lines().rev().take(log_lines as usize).collect::<Vec<_>>().into_iter().rev().collect::<Vec<_>>().join("\n"))
         .unwrap_or_else(|e| format!("（讀不到畫面：{e}）"));
     tracing::info!(host, pane_id, workspace_id, tab_id, screen_tail = %tail, "pane GC：閒置太久，關掉這顆 shell pane");
-    app.close_pane_and_tab(&client, workspace_id, tab_id, pane_id).await;
+    crate::runners::app_ports_p11::close_and_confirm(&client, workspace_id, tab_id, pane_id)
+        .await
+        .map_err(|e| anyhow::anyhow!("{e:?}"))?;
     sqlx::query("DELETE FROM panes WHERE host=? AND pane_id=?").bind(host).bind(pane_id).execute(app.db()).await?;
     crate::drafts::clear_shell(app, host, pane_id).await;
     Ok(true)
@@ -934,6 +933,66 @@ mod tests {
     use crate::lc_error::LcError;
     use crate::runners::panes::{adopt, close, list_all, list_for_project, AdoptIn};
     use crate::state::App;
+
+    #[tokio::test]
+    async fn a_close_refusal_keeps_an_idle_gc_pane_and_draft() {
+        let env = crate::testing::env().await;
+        let app = &env.app;
+        let (_, pane) = app.herdr.workspace_create("/tmp", "gc shell", json!({})).await.unwrap();
+        env.herdr.set_shell_pid(&pane.pane_id, 401);
+        let dump = format!(
+            "  400     1  48000 /opt/homebrew/bin/herdr --session agents-manager\n  401   400  30000 -zsh\n---AM-ENV---\n  401 -zsh HERDR_PANE_ID={}\n",
+            pane.pane_id
+        );
+        let old = crate::db::iso_in(-8 * 60 * 60);
+        let output = crate::db::iso_in(-7 * 60 * 60);
+        sqlx::query(
+            "INSERT INTO panes (pane_id, host, workspace_id, tab_id, kind, last_output_at, first_seen, last_seen)
+             VALUES (?, 'local', ?, ?, 'shell', ?, ?, ?)",
+        )
+        .bind(&pane.pane_id)
+        .bind(&pane.workspace_id)
+        .bind(&pane.tab_id)
+        .bind(&output)
+        .bind(&old)
+        .bind(&old)
+        .execute(&app.db)
+        .await
+        .unwrap();
+        let key = crate::drafts::shell_key("local", &pane.pane_id);
+        crate::drafts::put(&app.db, &key, "unfinished command").await.unwrap();
+
+        env.herdr.fail_next("pane.close", crate::testing::Fault::Refuse);
+        let err = close_if_still_idle_with_dump(app, "local", &pane.pane_id, Some(&pane.workspace_id), Some(&pane.tab_id), 20, &dump)
+            .await
+            .unwrap_err();
+        assert!(err.to_string().contains("pane"), "failed confirmation must be reported: {err:#}");
+        assert!(app.herdr.pane_get(&pane.pane_id).await.unwrap().is_some(), "pane is still open");
+        assert_eq!(
+            sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM panes WHERE host='local' AND pane_id=?")
+                .bind(&pane.pane_id)
+                .fetch_one(&app.db)
+                .await
+                .unwrap(),
+            1,
+            "pane metadata remains available to the next GC run"
+        );
+        assert_eq!(crate::drafts::list(&app.db).await.unwrap().iter().find(|d| d.key == key).unwrap().text, "unfinished command");
+
+        assert!(close_if_still_idle_with_dump(app, "local", &pane.pane_id, Some(&pane.workspace_id), Some(&pane.tab_id), 20, &dump)
+            .await
+            .unwrap());
+        assert!(app.herdr.pane_get(&pane.pane_id).await.unwrap().is_none());
+        assert_eq!(
+            sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM panes WHERE host='local' AND pane_id=?")
+                .bind(&pane.pane_id)
+                .fetch_one(&app.db)
+                .await
+                .unwrap(),
+            0
+        );
+        assert!(crate::drafts::list(&app.db).await.unwrap().iter().all(|d| d.key != key));
+    }
 
     /// 2026-09-16 實測：herdr 0.8.2 的 revision 對一直在輸出的 pane 也不動。量不到的 pane 不能被當成閒置關掉。
     #[test]

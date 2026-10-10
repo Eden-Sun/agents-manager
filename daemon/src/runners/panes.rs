@@ -183,19 +183,13 @@ pub(crate) async fn close_tracked(app: &Arc<App>, host: &str, pane_id: &str, con
             json!({"reason": "service_pane", "pane": info, "unverified": live.is_none()}),
         ));
     }
-    crate::runners::app_ports_p11::close_pane_and_tab(
+    crate::runners::app_ports_p11::close_and_confirm(
         &client,
         info["workspace_id"].as_str(),
         info["tab_id"].as_str(),
         &pane_id,
     )
-    .await;
-    // `close_pane_and_tab` 是 best-effort（錯誤不回）：這裡是人按的關閉，沒關掉就不能說關了、也不能刪紀錄與草稿（issue #1143）。
-    match client.pane_get(&pane_id).await {
-        Ok(None) => {}
-        Ok(Some(_)) => return Err(LcError::Upstream("herdr 沒有把這顆 pane 關掉，紀錄保留，請再試一次".into())),
-        Err(e) => return Err(LcError::Upstream(format!("關閉後確認不了 pane 的狀態，紀錄保留：{e:#}"))),
-    }
+    .await?;
     sqlx::query("DELETE FROM panes WHERE host=? AND pane_id=?")
         .bind(&host)
         .bind(&pane_id)

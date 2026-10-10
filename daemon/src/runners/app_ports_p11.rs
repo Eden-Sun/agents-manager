@@ -51,6 +51,21 @@ pub async fn close_pane_and_tab(
     lifecycle::close_pane_and_tab(client, workspace_id, tab_id, pane_id).await;
 }
 
+/// Closes a pane and confirms herdr removed it before callers discard its local records.
+pub async fn close_and_confirm(
+    client: &crate::herdr::HerdrClient,
+    workspace_id: Option<&str>,
+    tab_id: Option<&str>,
+    pane_id: &str,
+) -> Result<(), LcError> {
+    lifecycle::close_pane_and_tab(client, workspace_id, tab_id, pane_id).await;
+    match client.pane_get(pane_id).await {
+        Ok(None) => Ok(()),
+        Ok(Some(_)) => Err(LcError::Upstream("herdr 沒有把這顆 pane 關掉，紀錄保留，請再試一次".into())),
+        Err(e) => Err(LcError::Upstream(format!("關閉後確認不了 pane 的狀態，紀錄保留：{e:#}"))),
+    }
+}
+
 /// Purges bot directory (local or remote).
 pub async fn purge_bot_dir(app: &Arc<App>, bot_id: &str, host: &str) -> bool {
     lifecycle::purge_bot_dir(app, bot_id, host).await
