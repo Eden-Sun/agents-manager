@@ -10,7 +10,7 @@
 //!
 //! ```sh
 //! cd web && npm run build && cd ..
-//! cargo clean -p agents-managerd --release   # 或改動這個檔的內容
+//! cargo clean -p am-base --release   # 或改動這個檔的內容
 //! cargo build --release -p agents-managerd
 //! ```
 //!
@@ -22,7 +22,7 @@ use axum::response::{IntoResponse, Response};
 
 #[cfg(feature = "embed-ui")]
 #[derive(rust_embed::Embed)]
-#[folder = "../web/dist"]
+#[folder = "../../web/dist"]
 #[allow_missing = true]
 struct WebAssets;
 
@@ -89,5 +89,20 @@ mod tests {
         for p in ["", "index.html", "assets/app.js", "apix", "wsx/y", "bots/api"] {
             assert!(!super::is_api_like(p), "{p}");
         }
+    }
+
+    /// `#[folder]` 是相對這個 crate 的 Cargo.toml；檔案從 daemon/ 搬到 crates/am-base/ 時少了一層，
+    /// `allow_missing` 讓它安靜地編成一顆沒有前端的 binary（7788 整個 404）。
+    #[test]
+    fn the_embed_folder_points_at_the_repo_web_directory() {
+        let src = include_str!("assets.rs");
+        let folder = src
+            .lines()
+            .find_map(|l| l.trim().strip_prefix("#[folder = \"")?.strip_suffix("\"]"))
+            .expect("assets.rs 要有 #[folder = \"…\"]");
+        let dist = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join(folder);
+        assert!(dist.ends_with("web/dist"), "{folder}");
+        let web = dist.parent().unwrap();
+        assert!(web.join("package.json").is_file(), "{} 不是 repo 的 web/：前端不會被嵌進 binary", web.display());
     }
 }
