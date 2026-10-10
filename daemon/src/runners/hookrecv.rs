@@ -374,4 +374,31 @@ mod local_spool_tests {
         // 沒有 spool 的 bot 不重放、也不碰鎖。
         assert_eq!(replay_local_spools(&app).await, 0);
     }
+
+    /// #1068：`.replaying` 裡有一行超過上限（9 MiB）：那一行整行丟掉，前後的合法行照常收進來，檔案收尾。
+    #[tokio::test]
+    async fn an_oversized_line_in_a_spool_is_dropped_and_the_rest_still_replays() {
+        let env = tt::env().await;
+        let app = env.app.clone();
+        let bot = tt::claude_bot(&app, &env.project_id, "spool-oversized").await;
+        let dir = app.hook_bot_dir(&bot.id).unwrap();
+        std::fs::create_dir_all(&dir).unwrap();
+        let good = json!({
+            "bot_id": bot.id,
+            "provider": "claude",
+            "payload": {"hook_event_name": "Stop", "session_id": "s1", "prompt_id": "p-after", "last_assistant_message": "done"},
+            "received_at": "2026-10-10T00:00:00.000Z",
+            "truncated": false,
+        });
+        let mut data = b"{\"bot_id\":\"".to_vec();
+        data.extend(vec![b'x'; 9 * 1024 * 1024]);
+        data.extend_from_slice(b"\n");
+        data.extend_from_slice(format!("{good}\n").as_bytes());
+        std::fs::write(dir.join("hook-spool.jsonl.replaying"), &data).unwrap();
+
+        assert_eq!(hookrecv::replay_spool(&app, &bot.id).await.unwrap(), 1);
+        let n: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM hook_events WHERE bot_id = ?").bind(&bot.id).fetch_one(&app.db).await.unwrap();
+        assert_eq!(n, 1, "合法的那行收進來，超長的那行不收");
+        assert!(!dir.join("hook-spool.jsonl.replaying").exists());
+    }
 }

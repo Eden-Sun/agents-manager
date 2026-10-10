@@ -2093,25 +2093,73 @@ fn fold_spool(src: &std::path::Path, dst: &std::path::Path) -> std::io::Result<(
         return std::fs::rename(src, dst);
     }
     // 追加寫入，不重寫 `dst`（#912）：以前 read(dst)→write(整份) 是先截斷再寫，崩在寫入途中就清空了這份唯一的副本。
-    // 先讀 `src`：讀不到（壞檔、是目錄）就在碰 `dst` 之前回錯。
-    let data = std::fs::read(src)?;
+    // 先開 `src`、確認是一般檔：讀不到（壞檔、是目錄）就在碰 `dst` 之前回錯。
+    let mut from = std::fs::File::open(src)?;
+    if !from.metadata()?.is_file() {
+        return Err(std::io::Error::new(std::io::ErrorKind::InvalidInput, "spool source is not a regular file"));
+    }
     let mut f = std::fs::OpenOptions::new().read(true).append(true).create(true).open(dst)?;
     // 崩在一行寫到一半時尾巴沒有換行：直接接上去，會跟下一份的第一行黏成一行、兩則一起解不開。
     let len = f.metadata()?.len();
-    let mut buf = Vec::with_capacity(data.len() + 1);
     if len > 0 {
         use std::os::unix::fs::FileExt as _;
         let mut last = [0u8; 1];
         f.read_exact_at(&mut last, len - 1)?;
         if last[0] != b'\n' {
-            buf.push(b'\n');
+            f.write_all(b"\n")?;
         }
     }
-    buf.extend(data);
+    // #1068：串流複製，不把整份 `src` 讀進記憶體（spool 在 daemon 離線時可能長到 GiB）。
+    std::io::copy(&mut from, &mut f)?;
     // 寫完、sync 完才刪 `src`；中途崩掉的話兩份都在，重複與半行交給 `dedupe_key` 與 unparseable spool line 的既有保護。
-    f.write_all(&buf)?;
     f.sync_all()?;
     std::fs::remove_file(src)
+}
+
+/// 一行 spool 的上限（#1068）。hook_cmd 把 payload 截在 1 MiB，包成 JSON 時跳脫最多放大到 6 倍，這個上限留足空間。
+/// 超過的行不保留在記憶體裡，整行丟掉並記 warn：它不可能是合法的 hook 行，也不能讓單一一行把 daemon 撐爆。
+const MAX_SPOOL_LINE: usize = 8 * 1024 * 1024;
+
+/// [`read_spool_line`] 讀到的一行。`oversized` 為真時 `bytes` 是空的（超過上限的內容已丟掉）。
+struct SpoolLine {
+    bytes: Vec<u8>,
+    oversized: bool,
+}
+
+/// 讀下一行（不含換行），記憶體上界是 [`MAX_SPOOL_LINE`]。EOF 回 `None`；最後一行沒有換行也照樣回。
+async fn read_spool_line<R: tokio::io::AsyncBufRead + Unpin>(r: &mut R) -> std::io::Result<Option<SpoolLine>> {
+    use tokio::io::AsyncBufReadExt as _;
+    let mut out = SpoolLine { bytes: Vec::new(), oversized: false };
+    let mut seen = false;
+    loop {
+        let buf = r.fill_buf().await?;
+        if buf.is_empty() {
+            return Ok(seen.then_some(out));
+        }
+        seen = true;
+        let (take, done) = match buf.iter().position(|&c| c == b'\n') {
+            Some(i) => (i, true),
+            None => (buf.len(), false),
+        };
+        if !out.oversized {
+            if out.bytes.len() + take > MAX_SPOOL_LINE {
+                out.oversized = true;
+                out.bytes = Vec::new();
+            } else {
+                out.bytes.extend_from_slice(&buf[..take]);
+            }
+        }
+        r.consume(if done { take + 1 } else { take });
+        if done {
+            return Ok(Some(out));
+        }
+    }
+}
+
+/// [`fold_spool`] 是同步的檔案 I/O，丟到 blocking 執行緒去跑，不佔 Tokio 的 worker（#1068）。
+async fn fold_spool_blocking(src: std::path::PathBuf, dst: std::path::PathBuf) -> Result<()> {
+    tokio::task::spawn_blocking(move || fold_spool(&src, &dst)).await??;
+    Ok(())
 }
 
 /// SPEC §4.4.6.
@@ -2133,7 +2181,7 @@ pub async fn replay_spool<H: HookHost>(app: &H, bot_id: &str) -> Result<usize> {
         return Ok(0);
     }
     // 上一輪摘下來、還沒併進 `.replaying` 就崩掉的。
-    fold_spool(&claim, &staging)?;
+    fold_spool_blocking(claim.clone(), staging.clone()).await?;
     if spool.exists() {
         // #493：**先 rename 再讀**。以前是 `read(spool)` → 整份寫回 `.replaying` → `remove_file(spool)`，
         // 中間那一大段（寫一份完整的 staging）裡 hook 附加進來的行，會在最後那個 remove 被連檔刪掉。
@@ -2141,15 +2189,21 @@ pub async fn replay_spool<H: HookHost>(app: &H, bot_id: &str) -> Result<usize> {
         std::fs::rename(&spool, &claim)?;
         #[cfg(all(test, feature = "daemon-test-harness"))]
         crate::lifecycle::race_point::hit("spool_claimed", bot_id).await;
-        fold_spool(&claim, &staging)?;
+        fold_spool_blocking(claim.clone(), staging.clone()).await?;
     }
     if !staging.exists() {
         return Ok(0);
     }
-    let text = String::from_utf8_lossy(&std::fs::read(&staging)?).into_owned();
+    // #1068：逐行讀，不把整份 `.replaying` 讀進記憶體；超過上限的行整行丟掉（不可能是合法的 hook）。
+    let mut reader = tokio::io::BufReader::new(tokio::fs::File::open(&staging).await?);
     let mut n = 0usize;
-    for line in text.lines() {
-        let line = line.trim();
+    while let Some(raw) = read_spool_line(&mut reader).await? {
+        if raw.oversized {
+            tracing::warn!(limit = MAX_SPOOL_LINE, "oversized spool line dropped");
+            continue;
+        }
+        let text = String::from_utf8_lossy(&raw.bytes);
+        let line = text.trim();
         if line.is_empty() {
             continue;
         }
@@ -6216,6 +6270,27 @@ mod spool_claim_window_tests {
         assert!(super::fold_spool(&src, &dst).is_err());
         assert_eq!(std::fs::read_to_string(&dst).unwrap(), "KEEP-ME\n");
         assert!(src.exists());
+    }
+
+    /// #1068：超過上限的行整行丟掉、不留在記憶體；之後的行照常讀到；剛好到上限的行保留；最後一行沒換行也讀得到。
+    #[tokio::test]
+    async fn read_spool_line_drops_an_oversized_line_and_keeps_reading() {
+        let mut data = vec![b'x'; super::MAX_SPOOL_LINE + 1];
+        data.extend_from_slice(b"\n");
+        data.extend(vec![b'y'; super::MAX_SPOOL_LINE]);
+        data.extend_from_slice(b"\nok\ntail");
+        let mut r = tokio::io::BufReader::with_capacity(4096, std::io::Cursor::new(data));
+        let big = super::read_spool_line(&mut r).await.unwrap().unwrap();
+        assert!(big.oversized);
+        assert!(big.bytes.is_empty(), "超過上限的內容不保留");
+        let edge = super::read_spool_line(&mut r).await.unwrap().unwrap();
+        assert!(!edge.oversized, "剛好到上限的行不算超過");
+        assert_eq!(edge.bytes.len(), super::MAX_SPOOL_LINE);
+        let ok = super::read_spool_line(&mut r).await.unwrap().unwrap();
+        assert_eq!(ok.bytes, b"ok");
+        let tail = super::read_spool_line(&mut r).await.unwrap().unwrap();
+        assert_eq!(tail.bytes, b"tail", "最後一行沒有換行也要讀到");
+        assert!(super::read_spool_line(&mut r).await.unwrap().is_none());
     }
 
     // ---- 遠端那一半：真的把產出的腳本跑起來（不連任何主機，`$HOME` 指到暫存目錄）
