@@ -5,7 +5,7 @@
  */
 import test, { after, afterEach, beforeEach, before } from 'node:test'
 import assert from 'node:assert/strict'
-import { act, click, fakeApi, keydown, mount, settle, setupDom, teardownDom, unmountAll } from '../testing/domHarness'
+import { act, click, fakeApi, keydown, mount, settle, setupDom, teardownDom, typeInto, unmountAll } from '../testing/domHarness'
 import { useStore } from '../store/store'
 import { Sidebar } from './Sidebar'
 
@@ -158,4 +158,72 @@ test('什麼都沒選退回第一個專案', async () => {
   await click(addBotButton())
   await settle()
   assert.equal(sheetProject(), 'proj-p1')
+})
+
+test('子 agent 收合時 ↓ 跳過它們，走到下一個父列；↑ 走回來', async () => {
+  localStorage.setItem('am.collapsedChildren', JSON.stringify(['b1']))
+  try {
+    useStore.setState({
+      bots: [
+        bot('b1', 'p1'),
+        { ...bot('c1', 'p1'), parent_bot_id: 'b1', managed_by: 'child' },
+        bot('b2', 'p1'),
+      ],
+      selectedBotId: 'b1',
+    } as never)
+    await mount(<Sidebar />)
+    await settle()
+    assert.equal(document.querySelector('[data-bot-id="c1"]'), null, 'c1 應被收合不畫在 DOM')
+    row('b1').focus()
+    await keydown(row('b1'), 'ArrowDown')
+    await settle()
+    assert.equal(selected(), 'b2', '↓ 應跳過收合的子 agent 選取 b2')
+    assert.equal(document.activeElement, row('b2'), '焦點應移到 b2')
+    await keydown(row('b2'), 'ArrowUp')
+    await settle()
+    assert.equal(selected(), 'b1', '↑ 應跳過收合的子 agent 選回 b1')
+    assert.equal(document.activeElement, row('b1'), '焦點應移回 b1')
+  } finally {
+    localStorage.removeItem('am.collapsedChildren')
+  }
+})
+
+test('展開時照舊走進子 agent（防回歸）', async () => {
+  useStore.setState({
+    bots: [
+      bot('b1', 'p1'),
+      { ...bot('c1', 'p1'), parent_bot_id: 'b1', managed_by: 'child' },
+      bot('b2', 'p1'),
+    ],
+    selectedBotId: 'b1',
+  } as never)
+  await mount(<Sidebar />)
+  await settle()
+  assert.ok(row('c1'), '未收合時 c1 在 DOM')
+  row('b1').focus()
+  await keydown(row('b1'), 'ArrowDown')
+  await settle()
+  assert.equal(selected(), 'c1', '展開時應走進子 agent c1')
+})
+
+test('搜尋中 ↓ 只走畫出來的列', async () => {
+  useStore.setState({
+    bots: [
+      bot('b1', 'p1'),
+      bot('b2', 'p1'),
+      bot('b3', 'p2'),
+    ],
+    selectedBotId: 'b1',
+  } as never)
+  await mount(<Sidebar />)
+  await settle()
+  const searchInput = document.querySelector<HTMLInputElement>('.bot-search-input')!
+  assert.ok(searchInput)
+  await typeInto(searchInput, 'bot-b1')
+  await settle()
+  row('b1').focus()
+  await keydown(row('b1'), 'ArrowDown')
+  await settle()
+  assert.notEqual(selected(), 'b2', '搜尋濾掉 b2 時不能跳到 b2')
+  assert.equal(selected(), 'b1', '只有一列可走時維持原選取')
 })

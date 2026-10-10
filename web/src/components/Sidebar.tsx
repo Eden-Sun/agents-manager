@@ -1094,8 +1094,15 @@ export function Sidebar() {
   /** ↑/↓ 換 bot，焦點跟著走。 */
   const step = useStableCallback((botId: string, dir: -1 | 1) => {
     const st = useStore.getState()
-    const next = adjacentBotId(st, botId, dir)
-    if (!next) return
+    // 畫面上沒有那一列的跳過：子 agent 被收合、或被搜尋濾掉。專案收合的不算（選到會自動展開）。
+    const offscreen = (id: string) => {
+      if (query) return !document.querySelector(`[data-bot-id="${id}"]`)
+      const b = st.bots.find((x) => x.id === id)
+      return Boolean(b?.parent_bot_id && collapsed.has(b.parent_bot_id))
+    }
+    let next = adjacentBotId(st, botId, dir)
+    for (let i = 0; next && next !== botId && offscreen(next) && i < st.bots.length; i += 1) next = adjacentBotId(st, next, dir)
+    if (!next || next === botId || offscreen(next)) return
     st.selectBot(next)
     // The row for `next` may be a fresh element (or scrolled out); focus after React paints it.
     requestAnimationFrame(() => {
