@@ -726,3 +726,11 @@
         assert!(ok.is_ok(), "dir_list ~/project should succeed: {:?}", ok.err());
     }
 
+
+    /// B7（#1145）：ssh 上限要比腳本自己等的時間長，「起不來」的診斷才送得回來；腳本的迴圈也用同一個常數。
+    #[test]
+    fn the_remote_session_probe_gets_more_time_than_its_own_script_waits() {
+        assert!(REMOTE_SESSION_TIMEOUT.as_secs() >= 2 * (REMOTE_SESSION_WAIT_ROUNDS + 2));
+        let script = HostConn::remote_session_script(&cfg(), false);
+        assert!(script.contains(&format!("while [ $i -lt {} ]", REMOTE_SESSION_WAIT_ROUNDS)), "腳本要用同一個等待圈數");
+    }
