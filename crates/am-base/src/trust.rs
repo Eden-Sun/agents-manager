@@ -159,12 +159,35 @@ pub fn grok_merge(existing: &str, paths: &[String], now_secs: i64) -> Result<Opt
     Ok(Some(doc.to_string()))
 }
 
+/// 若路徑是 symlink（例如使用者用 dotfiles 管理設定），解開成目標檔的實際路徑，
+/// 避免 `rename` 把 symlink 換成普通檔而破壞 dotfiles 連結。不存在時回原路徑。
+fn resolve_symlink(path: &Path) -> PathBuf {
+    match std::fs::canonicalize(path) {
+        Ok(p) => p,
+        Err(_) => {
+            if let Ok(dest) = std::fs::read_link(path) {
+                if dest.is_absolute() {
+                    dest
+                } else if let Some(parent) = path.parent() {
+                    parent.join(dest)
+                } else {
+                    dest
+                }
+            } else {
+                path.to_path_buf()
+            }
+        }
+    }
+}
+
 /// Temp file + fsync + `rename`: a crash must not corrupt the user's own agent-CLI state files.
 /// 暫存檔一開始就是 0600，結果沿用原檔的權限（`.claude.json` 是 0600，不能被我們的 umask 放寬）；細節見 [`crate::atomic_file`]。
+/// 寫入時跟隨 symlink（[`resolve_symlink`]），暫存檔建在目標目錄、`rename` 作用在目標檔，保留 symlink（issue #1073）。
 fn write_atomic(path: &Path, text: &str) -> Result<()> {
-    let dir = path.parent().ok_or_else(|| anyhow!("{} has no parent directory", path.display()))?;
+    let target = resolve_symlink(path);
+    let dir = target.parent().ok_or_else(|| anyhow!("{} has no parent directory", target.display()))?;
     std::fs::create_dir_all(dir)?;
-    crate::atomic_file::write(path, text.as_bytes(), crate::atomic_file::Mode::Preserve).with_context(|| format!("writing {}", path.display()))
+    crate::atomic_file::write(&target, text.as_bytes(), crate::atomic_file::Mode::Preserve).with_context(|| format!("writing {}", target.display()))
 }
 
 /// `None` when already trusted (or the kind has no gate).
@@ -209,13 +232,14 @@ pub fn mark_trusted(kind: &str, store: &Path, paths: &[String]) -> Result<bool> 
 /// 同時放信任清單與 `statusLine`，兩邊都從這裡寫，才不會互相蓋掉。回「有沒有寫」。
 pub fn update_file(store: &Path, merge: impl Fn(&str) -> Result<Option<String>>) -> Result<bool> {
     let _one_at_a_time = STORE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let target = resolve_symlink(store);
     for _ in 0..LOCAL_RACE_ATTEMPTS {
-        let existing = read_store(store)?;
+        let existing = read_store(&target)?;
         let Some(next) = merge(&existing)? else { return Ok(false) };
-        if read_store(store)? != existing {
+        if read_store(&target)? != existing {
             continue;
         }
-        write_atomic(store, &next)?;
+        write_atomic(&target, &next)?;
         return Ok(true);
     }
     bail!("{} kept changing while updating it", store.display())
@@ -323,6 +347,23 @@ async fn remote_jobs<T: TrustEnv>(app: &Arc<T>, host: &str, bots: &[db::Bot]) ->
     errors
 }
 
+/// 遠端設定檔若為 symlink，解開成目標路徑，避免 `mv -f "$T" "$F"` 覆蓋 symlink 本身（issue #1073）。
+/// 包含舊版 macOS 沒有 `readlink -f` 時的 `cd -P` fallback。
+const REMOTE_RESOLVE_SYMLINK_SH: &str = "\
+while [ -L \"$F\" ]; do\n\
+  _R=$(readlink -f -- \"$F\" 2>/dev/null || realpath -- \"$F\" 2>/dev/null || true)\n\
+  if [ -n \"$_R\" ]; then F=\"$_R\"; break; fi\n\
+  _T=$(readlink -- \"$F\" 2>/dev/null || true)\n\
+  _P=\"\"\n\
+  case \"$_T\" in\n\
+    /*) _P=\"$_T\" ;;\n\
+    ?*) _D=$(cd -P -- \"$(dirname -- \"$F\")\" 2>/dev/null && cd -P -- \"$(dirname -- \"$_T\")\" 2>/dev/null && pwd -P)\n\
+        [ -n \"$_D\" ] && _P=\"$_D/$(basename -- \"$_T\")\" ;;\n\
+  esac\n\
+  [ -n \"$_P\" ] && [ \"$_P\" != \"$F\" ] || break\n\
+  F=\"$_P\"\n\
+done\n";
+
 /// 讀的那一趟同時把每個工作目錄的**遠端**真實路徑（`pwd -P`）帶回來：CLI 寫的鍵是它自己 `cwd` 看到的路徑，
 /// worktree、symlink、`/tmp`→`/private/tmp` 都會讓字面路徑變成一個沒用的鍵，claude 照樣問（#407 review）。
 /// 本機那半用 [`canonical`]；這裡不能用，那是 daemon 這台的檔案系統。目錄還不存在就照字面留著（跟 [`canonical`] 一樣）。
@@ -334,7 +375,7 @@ fn remote_read_script(store_q: &str, paths: &[String]) -> String {
         s.push_str(&format!("P={q}\nC=$(cd -- \"$P\" 2>/dev/null && pwd -P)\n[ -n \"$C\" ] || C=$P\nprintf 'AM_P=%s\\n' \"$C\"\n"));
     }
     s.push_str(&format!(
-        "F={store_q}\nif [ -f \"$F\" ]; then printf 'AM_SUM=%s\\n' \"$(cksum < \"$F\")\"; cat \"$F\"; else printf 'AM_SUM=missing\\n'; fi\n"
+        "F={store_q}\n{REMOTE_RESOLVE_SYMLINK_SH}if [ -f \"$F\" ]; then printf 'AM_SUM=%s\\n' \"$(cksum < \"$F\")\"; cat \"$F\"; else printf 'AM_SUM=missing\\n'; fi\n"
     ));
     s
 }
@@ -378,7 +419,8 @@ async fn mark_trusted_remote(conn: &crate::hosts::HostConn, kind: &str, store: &
             delim.push('_');
         }
         let write = format!(
-            "set -e\nF={f}\nD=$(dirname \"$F\")\nmkdir -p \"$D\"\ncur=missing\nif [ -f \"$F\" ]; then cur=$(cksum < \"$F\"); fi\n\
+            "set -e\nF={f}\n{REMOTE_RESOLVE_SYMLINK_SH}\
+             D=$(dirname \"$F\")\nmkdir -p \"$D\"\ncur=missing\nif [ -f \"$F\" ]; then cur=$(cksum < \"$F\"); fi\n\
              if [ \"$cur\" != {sum} ]; then printf 'AM_TRUST_CHANGED\\n'; exit 0; fi\n\
              T=\"$D/.$(basename \"$F\").am-trust.$$.tmp\"\ntrap 'rm -f \"$T\"' EXIT\numask 077\ncat > \"$T\" <<'{delim}'\n{body}\n{delim}\n\
              if [ -f \"$F\" ]; then chmod \"$(stat -c %a \"$F\" 2>/dev/null || stat -f %Lp \"$F\")\" \"$T\" 2>/dev/null || true; fi\n\
@@ -417,7 +459,8 @@ pub(crate) async fn update_remote_file(
             delim.push('_');
         }
         let write = format!(
-            "set -e\nF={f}\nD=$(dirname \"$F\")\nmkdir -p \"$D\"\ncur=missing\nif [ -f \"$F\" ]; then cur=$(cksum < \"$F\"); fi\n\
+            "set -e\nF={f}\n{REMOTE_RESOLVE_SYMLINK_SH}\
+             D=$(dirname \"$F\")\nmkdir -p \"$D\"\ncur=missing\nif [ -f \"$F\" ]; then cur=$(cksum < \"$F\"); fi\n\
              if [ \"$cur\" != {sum} ]; then printf 'AM_UPDATE_CHANGED\\n'; exit 0; fi\n\
              T=\"$D/.$(basename \"$F\").am-update.$$.tmp\"\ntrap 'rm -f \"$T\"' EXIT\numask 077\ncat > \"$T\" <<'{delim}'\n{body}\n{delim}\n\
              if [ -f \"$F\" ]; then chmod \"$(stat -c %a \"$F\" 2>/dev/null || stat -f %Lp \"$F\")\" \"$T\" 2>/dev/null || true; fi\n\
