@@ -225,6 +225,23 @@ async fn stale_dispatch_goes_back_to_pending_and_fails_after_three_attempts() {
     assert_eq!((row.status, row.attempts), (ledger::Status::Failed, 3));
 }
 
+/// #1043：派工模板教的 submit 形狀必須是 daemon 收得下的（`kind`／`version`／`dispatch_gen` 齊、一份一版）。
+/// 模板不能再寫「一份 JSON 涵蓋本次所有版本」——#801 之後那一定被整份退回。
+#[test]
+fn the_task_template_teaches_a_submission_the_daemon_accepts() {
+    use super::verdict::Submission;
+    let md = include_str!("../../../../scripts/ops/release-triage-task.md");
+    let json = md.split("```json\n").nth(1).and_then(|rest| rest.split("\n```").next()).expect("模板要有一段 ```json 範例");
+    let v: serde_json::Value = serde_json::from_str(json).expect("範例要是合法 JSON");
+    for key in ["kind", "version", "dispatch_gen"] {
+        assert!(!v[key].is_null(), "範例缺 {key}");
+    }
+    let sub: Submission = serde_json::from_value(v).expect("範例要能解成 Submission");
+    assert_eq!((sub.kind.as_str(), sub.version.as_str(), sub.dispatch_gen), ("claude", "2.1.280", Some(1)));
+    assert!(!md.contains("涵蓋本次所有版本"), "模板不能再教一份 JSON 夾多版");
+    assert!(md.contains("release-triage show --kind"), "模板要教怎麼取 dispatch_gen");
+}
+
 /// 把一列的 `dispatched_at` 改成七小時前（真的等六小時太慢）。
 async fn age_dispatch(p: &SqlitePool, version: &str) {
     let old = (chrono::Utc::now() - chrono::Duration::hours(7)).format("%Y-%m-%dT%H:%M:%S%.3fZ").to_string();

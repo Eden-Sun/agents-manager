@@ -2593,7 +2593,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     s = sub.add_parser("release-triage", help="上游新版分診：submit（交回 verdict）/ show / dispatched / publish（issue #204）")
     s.add_argument("op", choices=["submit", "show", "dispatched", "publish"])
-    s.add_argument("--file", help="submit：verdicts.json（{kind,version,verdicts,issues}）")
+    s.add_argument("--file", help="submit：verdicts.json（{kind,version,dispatch_gen,verdicts,issues}，一次一版；dispatch_gen 抄 show 那一列）")
     s.add_argument("--kind", choices=["claude", "codex"])
     s.add_argument("--version", action="append", help="show／publish：某一版；dispatched：可重複給多版")
     s.add_argument("--bot", help="dispatched：這批交辦收件的 bot id（#801）。之後只有它或它底下的 child 能交這些版的 verdict")

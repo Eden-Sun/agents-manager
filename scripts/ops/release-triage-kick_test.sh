@@ -144,6 +144,17 @@ check "交辦帶 unmatched" "2.1.278-u0" "$AGM_DIR/assign-body.txt"
 check "有記 log" "claude → 2.1.278：已派" "$AGM_DIR/release-triage.log"
 teardown
 
+# 2b. 兩版一批（#1043）：正文同時帶兩版的 JSON；dispatched 一次把兩版都標上、收件 bot 一起記，
+# 這樣 worker 之後 `show` 才看得到兩版的 dispatch_gen（模板要它一版一版交）。
+setup
+mk_pending claude 2.1.278 2.1.277 2.1.278; mk_empty codex
+bash "$SCRIPT"
+check "兩版的條目都在同一則正文" "2.1.277-k0" "$AGM_DIR/assign-body.txt"
+check "第二版的條目也在同一則正文" "2.1.278-k0" "$AGM_DIR/assign-body.txt"
+check "dispatched 一次帶兩版" "release-triage dispatched --kind claude --version 2.1.277 --version 2.1.278 --bot bot-resp" "$AGM_DIR/calls.log"
+equals "dispatched 只打一次" "$(grep -c ' dispatched ' "$AGM_DIR/calls.log" | tr -d ' ')" "1"
+teardown
+
 # 3. 兩個 kind 各自獨立：各派一則、request-id 各自帶自己的 to；一個 kind 檢查失敗不影響另一個。
 setup
 mk_pending claude 2.1.278 2.1.278; mk_pending codex 0.155.0 0.155.0

@@ -43,14 +43,27 @@ AGM 定期交辦：上游（claude／codex）出新版了，請對訊息末尾�
 
 ## 交回結果
 
-寫一份 `verdicts.json`，用 CLI 交回（daemon 驗過才開；不要自己跑 `gh issue create`／`gh issue comment`）：
+**一版交一次。** 本次 JSON 的 `pending` 有幾版，就分幾次交：每版各寫一份 `verdicts-<版號>.json`、各交一次（daemon 一次只收一版；一份 JSON 夾好幾版會整份退回）。條目 `id` 只用那一版自己 `pending` 裡的。
+
+每一版交之前先取派工代數（`dispatch_gen`），在輸出那一列抄下來：
 
 ```sh
-bin/agm release-triage submit --file verdicts.json
+bin/agm release-triage show --kind <kind> --version <版號>
+```
+
+`show` 只列派給你（或你底下的 child）、還在 `dispatched` 的列。看不到這一版＝不是派給你的，或已經被退回，**不要交**。
+
+寫好後用 CLI 交回（daemon 驗過才開；不要自己跑 `gh issue create`／`gh issue comment`）：
+
+```sh
+bin/agm release-triage submit --file verdicts-<版號>.json
 ```
 
 ```json
 {
+  "kind": "claude",
+  "version": "2.1.280",
+  "dispatch_gen": 1,
   "verdicts": [
     {"entry_id": "a1b2c3d4e5", "verdict": "guard", "reason": "一句話理由", "module": "lifecycle/screen.rs"}
   ],
@@ -68,7 +81,8 @@ bin/agm release-triage submit --file verdicts.json
 }
 ```
 
-- 一份 JSON 涵蓋本次所有版本：每個 `entry_id` 本來就唯一。欄位細節若跟 `bin/agm release-triage submit --help` 不一致，以 CLI／`docs/API.md` 為準。
+- `kind`、`version`、`dispatch_gen` 三個都必填：`kind`／`version` 指出這份是交哪一版，`dispatch_gen` 是上一步 `show` 抄的代數。代數過期會被 409 `stale_assignment` 退回，那就重新 `show` 再交。`verdicts` 要涵蓋這一版每一條 kept／unmatched 的 `id`，不多不少。
+- 欄位細節若跟 `bin/agm release-triage submit --help` 不一致，以 CLI／`docs/API.md` 為準。
 - binary-only 交辦的 JSON 會有空的 `pending`；此時不呼叫 submit，只依 binary diff 補充指示完成唯讀比較與通知。
 - `duplicate_of` 只有找到同主題 issue 時才填，沒有就整個欄位省略。
 - `title` 只寫那一句話：完整標題是 daemon 組的 `<kind> <version>: <你的一句話>（提防｜採用）`，
