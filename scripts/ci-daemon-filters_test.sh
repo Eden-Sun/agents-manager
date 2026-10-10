@@ -55,6 +55,15 @@ check "supervisor::setup::" "scripts/agm.py"
 check "supervisor::persona:: supervisor::responder:: supervisor::setup::" "docs/goals/agm-supervisor-persona.md" "docs/goals/agm-responder-persona.md"
 # 跟 daemon 無關的檔案不產生過濾字串。
 check "" "web/src/store/store.ts" "docs/SPEC.md" "scripts/ops/README.md"
+# crate 的 lib.rs 是接線檔（#[path] 進 daemon），不能對成 lib:: 這種選不到測試的過濾字串（issue #1018）。
+check "__all__" "crates/am-share/src/lib.rs"
+check "__all__" "crates/am-lifecycle/src/lib.rs"
+check "__all__" "crates/am-supervisor/src/lib.rs"
+# crate 的 build.rs／Cargo.toml 改動要跑 daemon 全套，不能印「沒有可挑的測試子集」就綠燈。
+check "__all__" "crates/am-supervisor/build.rs"
+check "__all__" "crates/am-core/Cargo.toml"
+check "__all__ share::portal::" "crates/am-share/src/lib.rs" "crates/am-share/src/share/portal.rs"
+check "runners::am_base_tests::" "crates/am-base/src/lib.rs"
 
 if [ "$fail" = 0 ]; then echo "ci-daemon-filters: OK"; fi
 exit "$fail"
