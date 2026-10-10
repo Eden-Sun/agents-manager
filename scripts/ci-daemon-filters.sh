@@ -90,6 +90,8 @@ while IFS= read -r f; do
         scripts/ops/lint-shell-vars.sh) echo 'herdr_shim::' ;;
         scripts/ops/claude-release-task.md | scripts/ops/codex-release-task.md) echo 'claude_review::' ;;
         scripts/ops/fixtures/*) echo 'supervisor::setup::' ;;
+        # am-base owns this include_str! template-contract test, so it needs a crate-specific selector in check.sh.
+        scripts/ops/release-triage-task.md) echo '__am_base_release_triage_submission__' ;;
         scripts/agm.py) echo 'supervisor::setup::' ;;
         docs/goals/agm-supervisor-persona.md) echo 'supervisor::persona::'; echo 'supervisor::setup::' ;;
         docs/goals/agm-responder-persona.md) echo 'supervisor::persona::'; echo 'supervisor::responder::' ;;

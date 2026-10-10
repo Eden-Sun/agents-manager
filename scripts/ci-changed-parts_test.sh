@@ -42,6 +42,7 @@ check "ob" "scripts/chatgpt-consult.mjs"
 check "daemon ops" "scripts/check.sh"
 check "daemon ops" "scripts/ops/lint-shell-vars.sh"
 check "daemon ops" "scripts/ops/codex-release-task.md"
+check "daemon ops" "scripts/ops/release-triage-task.md"
 check "daemon ops" "scripts/ops/fixtures/patrol-runtime.json"
 # scripts/ 底下的 .md 不是「只有文件」：任務檔被 install-manifest／ops 測試／daemon 讀（browser-gc-task.md 等），README 也由 ops 測試釘住內容。
 check "ops" "scripts/ops/README.md"
