@@ -132,6 +132,16 @@ test('下載失敗講人話：404 是「被清掉了」並要求呼叫端移除�
   assert.match(downloadFailure('a.txt', new Error('連線中斷')).text, /連線中斷/)
 })
 
+test('分享用 bot 的檔案 404：不說「一小時」，說保留 14 天', () => {
+  const e = new ApiError(404, { error: 'not_found', what: 'file' }, 'GET … failed (404)')
+  const kept = downloadFailure('報價.pdf', e, true)
+  assert.equal(kept.gone, true)
+  assert.match(kept.text, /14 天/)
+  assert.doesNotMatch(kept.text, /一小時/)
+  assert.match(downloadFailure('報價.pdf', e).text, /一小時/, '一般 bot 照舊')
+  assert.match(downloadFailure('報價.pdf', e, false).text, /一小時/)
+})
+
 test('子資料夾裡的檔：相對路徑拆成資料夾前綴與檔名（存檔名只取最後一段）', () => {
   assert.deepEqual(splitOutboxName('report.pdf'), { dir: '', base: 'report.pdf' })
   assert.deepEqual(splitOutboxName('報價_晶輝企業_Q-2026-1009-01/報價單.pdf'), { dir: '報價_晶輝企業_Q-2026-1009-01/', base: '報價單.pdf' })
