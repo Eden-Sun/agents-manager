@@ -4,7 +4,7 @@ use crate::app_ports_r2a9::HookProcessor;
 use crate::db;
 use crate::hook_body::HookBody;
 use crate::hook_inbox::{
-    mark_dead, mark_done, mark_failed, pending, prune, unparseable_body_reason, Pending,
+    mark_dead, mark_done, mark_failed, pending_excluding, prune, unparseable_body_reason, Pending,
 };
 use crate::state::App;
 use anyhow::Result;
@@ -69,6 +69,11 @@ fn busy_bots() -> &'static std::sync::Mutex<HashSet<String>> {
     BUSY.get_or_init(Default::default)
 }
 
+/// 目前有 task 在處理的 bot。撈列時要從 SQL 排除：它的積壓會佔滿整批 [`BATCH`]，別顆 bot 的列就撈不到（#1066）。
+fn busy_bot_ids() -> Vec<String> {
+    busy_bots().lock().unwrap_or_else(|e| e.into_inner()).iter().cloned().collect()
+}
+
 struct BotClaim(String);
 
 impl BotClaim {
@@ -126,7 +131,7 @@ pub async fn drain_once(app: &Arc<App>) -> Result<usize> {
     loop {
         // 出錯之後不再起新的 task：手上的收完就回傳第一個錯誤（同舊行為）。
         if first_err.is_none() && tasks.len() < MAX_BOT_TASKS {
-            match pending(&app.db, &db::now(), BATCH).await {
+            match pending_excluding(&app.db, &db::now(), BATCH, &busy_bot_ids()).await {
                 Ok(rows) => start_tasks(app, rows, &mut tasks),
                 Err(e) => first_err = Some(e),
             }
@@ -258,5 +263,42 @@ mod tests {
         let n = tokio::time::timeout(Duration::from_secs(30), drain).await.expect("放鎖後 A 也處理完").unwrap().unwrap();
         assert_eq!(n, 2);
         assert!(processed(&app, &a.id).await);
+    }
+
+    /// #1066：A 有 130 列（超過一批的 [`BATCH`]，全排在別人前面）、A 握著鎖；其餘 7 顆 bot 各一列在後面。
+    /// 以前每次只撈前 64 列，全是 A 的，A 被佔著時撈不到別人的列，就永遠卡住；現在 A 已被佔用，就從 SQL 排除。
+    #[tokio::test]
+    async fn a_bot_with_a_backlog_past_the_batch_limit_does_not_hide_other_bots_hooks() {
+        let env = tt::env().await;
+        let app = env.app.clone();
+        let a = tt::claude_bot(&app, &env.project_id, "inbox-backlog-a").await;
+        tt::fake_run(&app, &a.id).await;
+        let mut others = Vec::new();
+        for i in 0..7 {
+            let b = tt::claude_bot(&app, &env.project_id, &format!("inbox-backlog-b{i}")).await;
+            tt::fake_run(&app, &b.id).await;
+            others.push(b.id);
+        }
+        for i in 0..(2 * BATCH + 2) {
+            assert!(crate::hook_inbox::accept(&app.db, &stop(&a.id, &format!("pa{i}")), crate::hook_inbox::Source::Http).await.unwrap().is_new());
+        }
+        for (i, b) in others.iter().enumerate() {
+            assert!(crate::hook_inbox::accept(&app.db, &stop(b, &format!("pb{i}")), crate::hook_inbox::Source::Http).await.unwrap().is_new());
+        }
+
+        let lock = app.bot_lock(&a.id).await;
+        let held = lock.lock().await;
+        let drain_app = app.clone();
+        let drain = tokio::spawn(async move { drain_once(&drain_app).await });
+        for b in &others {
+            assert!(tt::eventually!(processed(&app, b).await), "A 握著鎖、A 還有一整批以上的積壓時，其他 bot 的 hook 仍要處理完");
+        }
+        assert!(!processed(&app, &a.id).await, "A 還卡在它的鎖上");
+        assert!(!drain.is_finished());
+
+        drop(held);
+        tokio::time::timeout(Duration::from_secs(30), drain).await.expect("放鎖後 A 也處理完").unwrap().unwrap();
+        let left: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM hook_events WHERE processed_at IS NULL").fetch_one(&app.db).await.unwrap();
+        assert_eq!(left, 0, "A 的 130 列也要全部處理完");
     }
 }
