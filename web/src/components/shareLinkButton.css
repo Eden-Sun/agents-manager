@@ -1,38 +1,40 @@
-/* ShareLinkButton（分享用 bot 聊天區頂端的「🔗 分享」）與側欄的 🔗 記號。 */
+/* ShareLinkButton（分享用 bot 聊天區頂端的分享鈕，#1180 起只剩一顆圖示鈕）與側欄的 🔗 記號。 */
 
 .share-link {
   position: relative;
   display: inline-flex;
   flex: none;
-  align-items: stretch;
+  align-items: center;
 }
 
-/* 整組寬度 ≤ 52px（#1072）：圖示按鈕跟 ★ ⚙ 同高，▾ 緊貼在後面。 */
-.share-link-main {
-  padding: 0 4px;
+/* 跟 ★ ⚙ 同尺寸、同基線（#1180）：圖示大小與 ⚙ 一樣（16px，手機 20px），顏色表狀態，不要外框、不要底色塊。 */
+.icon-btn.share-link-main {
+  width: 28px;
+  height: 28px;
+  min-width: 28px;
+  min-height: 28px;
+  padding: 0;
   font-size: 16px;
   line-height: 0;
   color: var(--text-dim);
 }
 
-.share-link-main.on {
+.icon-btn.share-link-main.on {
   color: var(--accent-text);
 }
 
-.share-link-more {
-  padding: 2px 4px !important;
-  font-size: 12px;
-  line-height: 1;
-  border-color: var(--accent);
-  border-top-left-radius: 0;
-  border-bottom-left-radius: 0;
-  border-left: none;
-  white-space: nowrap;
+/* 信任分享（trusted）：分享中才上警示色，跟受限的 accent 一眼分得出來。 */
+.icon-btn.share-link-main.trusted.on {
+  color: var(--warn);
 }
 
-.share-link-more.on {
-  background: var(--accent-soft);
-  color: var(--accent-ink);
+@media (width <= 640px) {
+  .icon-btn.share-link-main {
+    width: 40px;
+    height: 40px;
+    min-width: 40px;
+    min-height: 40px;
+  }
 }
 
 .share-link-menu {
@@ -78,17 +80,6 @@
 .share-mark.off {
   opacity: 0.35;
   filter: grayscale(1);
-}
-
-/* 信任分享（trusted）：🔓＋警示色，跟受限的 🔗（accent）一眼分得出來。 */
-.share-link-main.trusted.on {
-  color: var(--warn);
-}
-
-.share-link-main.trusted.on + .share-link-more {
-  background: var(--warn-soft);
-  color: var(--warn);
-  border-color: var(--warn);
 }
 
 .share-mark.trusted.on {

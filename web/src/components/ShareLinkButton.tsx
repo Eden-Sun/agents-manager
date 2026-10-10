@@ -13,9 +13,26 @@ function noUrlText(s: ShareState): string {
     : '拿不到分享連結：config.toml 的 [share] base_url 沒設'
 }
 
+/** 鏈結圖示（線條、currentColor，跟 ⚙ 同風格；#1180 不用 emoji）。 */
+function LinkIcon() {
+  return (
+    <svg viewBox="0 0 24 24" width="1em" height="1em" aria-hidden="true">
+      <path
+        d="M10 13a5 5 0 0 0 7.54.54l3-3a5 5 0 0 0-7.07-7.07l-1.72 1.71M14 11a5 5 0 0 0-7.54-.54l-3 3a5 5 0 0 0 7.07 7.07l1.71-1.71"
+        fill="none"
+        stroke="currentColor"
+        strokeWidth="2"
+        strokeLinecap="round"
+        strokeLinejoin="round"
+      />
+    </svg>
+  )
+}
+
 /**
- * 分享用 bot 的聊天區頂端「🔗 分享」（SPEC「分享 bot」）：一般 bot 不畫。信任分享（trusted）是 🔓、另一個顏色，一眼分得出來。
- * 未分享時按下＝開啟並複製連結；分享中按下＝複製連結。旁邊的 ▾ 選單可重產／關閉（都要確認）。
+ * 分享用 bot 的聊天區頂端分享鈕（SPEC「分享 bot」）：一般 bot 不畫。只有一顆圖示鈕（#1180，跟 ★ ⚙ 同尺寸）：
+ * 狀態用顏色表達（未分享灰、分享中 accent、信任分享警示色）。未分享時按下＝開啟並複製連結；
+ * 分享中按下＝開選單，第一項「複製連結」，其後是重產／關閉（都要確認）。
  */
 export function ShareLinkButton({ botId }: { botId: string }) {
   const profile = useStore((s) => s.bots.find((b) => b.id === botId)?.share_profile ?? null)
@@ -29,11 +46,11 @@ export function ShareLinkButton({ botId }: { botId: string }) {
   const share = fetched && fetched.rev === rev ? fetched.share : null
   const [busy, setBusy] = useState(false)
   const [menu, setMenu] = useState(false)
-  // 選單用 fixed 定位貼著 ▾：名字列 overflow 會剪掉 absolute 的選單（#1072）。
+  // 選單用 fixed 定位貼著圖示鈕：名字列 overflow 會剪掉 absolute 的選單（#1072）。
   const [menuAt, setMenuAt] = useState<{ top: number; right: number } | null>(null)
   const [confirm, setConfirm] = useState<'rotate' | 'off' | null>(null)
   const wrapRef = useRef<HTMLSpanElement>(null)
-  const moreRef = useRef<HTMLButtonElement>(null)
+  const mainRef = useRef<HTMLButtonElement>(null)
 
   // 分享中就先把連結抓好：按下去同步複製，不用等網路（剪貼簿要在使用者手勢裡）。
   useEffect(() => {
@@ -85,47 +102,46 @@ export function ShareLinkButton({ botId }: { botId: string }) {
 
   const toggleMenu = () => {
     if (!menu) {
-      const r = moreRef.current?.getBoundingClientRect()
+      const r = mainRef.current?.getBoundingClientRect()
       setMenuAt(r ? { top: r.bottom + 4, right: Math.max(0, window.innerWidth - r.right) } : null)
     }
     setMenu((m) => !m)
   }
 
   const onMain = () => {
-    // 手上那份要是開著的那條才直接複製；store 說關了（別處關掉的）就走「開啟」。
-    if (enabled && share?.enabled && share.url) return copy(share, '已複製分享連結')
-    void run(() => setShareEnabled(botId, true), enabled ? '已複製分享連結' : '已開啟分享並複製連結')
+    // 未分享：開啟並複製；分享中：開選單（第一項才是複製）。
+    if (enabled) return toggleMenu()
+    void run(() => setShareEnabled(botId, true), '已開啟分享並複製連結')
+  }
+
+  const onCopyFromMenu = () => {
+    setMenu(false)
+    // 手上那份要是開著的那條才直接複製；沒有（網路還沒回來）就重抓一次再複製。
+    if (share?.enabled && share.url) return copy(share, '已複製分享連結')
+    void run(() => setShareEnabled(botId, true), '已複製分享連結')
   }
 
   return (
     <span className="share-link" ref={wrapRef}>
-      {/* 只放圖示、跟 ★ ⚙ 同一組（#1072）；文字「複製連結／分享」在 aria-label 與 title。 */}
+      {/* 只有這一顆圖示鈕，跟 ★ ⚙ 同一組（#1072、#1180）；文字在 aria-label 與 title。 */}
       <button
+        ref={mainRef}
         type="button"
         className={`icon-btn share-link-main${enabled ? ' on' : ''}${profile === 'trusted' ? ' trusted' : ''}`}
         disabled={busy}
         aria-label={enabled ? '複製分享連結' : '開啟分享並複製連結'}
-        title={`${profile === 'trusted' ? '信任分享：拿到連結的人可以透過它操作這台機器。' : ''}${enabled ? `分享中${share?.enabled && share.url ? `：${share.url}` : ''}。點一下複製連結` : '開啟分享，連結會複製到剪貼簿'}`}
+        aria-haspopup={enabled ? 'menu' : undefined}
+        aria-expanded={enabled ? menu : undefined}
+        title={`${profile === 'trusted' ? '信任分享：拿到連結的人可以透過它操作這台機器。' : ''}${enabled ? `分享中${share?.enabled && share.url ? `：${share.url}` : ''}。點一下開選單（第一項複製連結）` : '開啟分享，連結會複製到剪貼簿'}`}
         onClick={onMain}
       >
-        {shareIcon(profile)}
+        <LinkIcon />
       </button>
-      {enabled ? (
-        <button
-          ref={moreRef}
-          type="button"
-          className={`btn share-link-more${enabled ? ' on' : ''}`}
-          aria-label="分享選項"
-          aria-haspopup="menu"
-          aria-expanded={menu}
-          disabled={busy}
-          onClick={toggleMenu}
-        >
-          ▾
-        </button>
-      ) : null}
       {menu ? (
         <span className="share-link-menu" role="menu" style={menuAt ? { position: 'fixed', top: menuAt.top, right: menuAt.right } : undefined}>
+          <button type="button" role="menuitem" onClick={onCopyFromMenu}>
+            複製連結
+          </button>
           <button
             type="button"
             role="menuitem"

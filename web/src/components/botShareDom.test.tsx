@@ -1,6 +1,6 @@
 /**
  * 分享 bot（SPEC「分享 bot」）的主 UI：受限 bot 的設定裡才有分享區塊，分享中隨時顯示完整連結；
- * 聊天區頂端的「🔗 分享」只給受限 bot（未分享＝開啟並複製、分享中＝複製、▾ 選單重產／關閉都要確認）；側欄名字旁 🔗。
+ * 聊天區頂端的分享鈕只給受限 bot（一顆圖示鈕：未分享＝開啟並複製、分享中＝開選單，第一項複製連結，重產／關閉都要確認；#1180）；側欄名字旁 🔗。
  * 重產要確認、新連結跟舊的不同；關閉要確認。分享使用者的訊息標「🔗 分享使用者」。mock 的端點規則同契約 B。
  */
 import test, { after, afterEach, before } from 'node:test'
@@ -113,7 +113,7 @@ test('舊資料只有雜湊：設定面板提示重產一次', async () => {
   }
 })
 
-test('聊天區頂端「🔗 分享」：一般 bot 沒有；未分享按下＝開啟並複製，分享中＝複製，▾ 選單重產與關閉都要確認', async () => {
+test('聊天區頂端分享鈕：一般 bot 沒有；未分享按下＝開啟並複製，分享中＝開選單（第一項複製連結），重產與關閉都要確認', async () => {
   const { mock, shared, plain } = await setup()
   await mount(<ShareLinkButton botId={plain.id} />)
   assert.equal(document.querySelector('.share-link'), null, '一般 bot 沒有分享按鈕')
@@ -133,8 +133,9 @@ test('聊天區頂端「🔗 分享」：一般 bot 沒有；未分享按下＝�
     await setOn(false)
     await mount(<ShareLinkButton botId={shared.id} />)
     assert.equal(mainBtn().getAttribute('aria-label'), '開啟分享並複製連結')
-    assert.equal(mainBtn().textContent, '🔗', '主按鈕只有圖示，沒有文字（#1072）')
-    assert.equal(document.querySelector('.share-link-more'), null, '沒分享時沒有選單')
+    assert.equal(mainBtn().textContent, '', '主按鈕只有圖示，沒有文字（#1072）')
+    assert.ok(mainBtn().querySelector('svg'), '圖示是 inline SVG，不用 emoji（#1180）')
+    assert.equal(mainBtn().getAttribute('aria-haspopup'), null, '沒分享時不是選單鈕')
     await click(mainBtn())
     await settle(50)
     const g = (await mock.request('GET', `/bots/${shared.id}/share`)) as { enabled: boolean; url: string }
@@ -144,12 +145,21 @@ test('聊天區頂端「🔗 分享」：一般 bot 沒有；未分享按下＝�
 
     await setOn(true)
     await settle(50)
+    assert.equal(document.querySelectorAll('.share-link button').length, 1, '已開啟時標題列仍只有一顆按鈕（#1180）')
+    assert.equal(mainBtn().getAttribute('aria-haspopup'), 'menu')
+    assert.equal(mainBtn().getAttribute('aria-expanded'), 'false')
     await click(mainBtn())
     await settle(20)
-    assert.deepEqual(copied, [g.url, g.url], '分享中按下＝複製同一條')
-
-    await click(document.querySelector('.share-link-more')!)
+    assert.equal(mainBtn().getAttribute('aria-expanded'), 'true')
     assert.equal(document.querySelector<HTMLElement>('.share-link-menu')!.style.position, 'fixed', '選單 fixed，不被名字列剪掉（#1072）')
+    assert.deepEqual([...document.querySelectorAll('.share-link-menu [role="menuitem"]')].map((b) => b.textContent), ['複製連結', '重產連結', '關閉分享'], '第一項是複製連結')
+    assert.deepEqual(copied, [g.url], '點鈕只開選單，還沒複製')
+    await click(btn('複製連結'))
+    await settle(20)
+    assert.deepEqual(copied, [g.url, g.url], '選單「複製連結」＝複製同一條')
+    assert.equal(document.querySelector('.share-link-menu'), null, '選了就收起選單')
+
+    await click(mainBtn())
     await click(btn('重產連結'))
     assert.match(document.body.textContent!, /舊連結立刻失效/, '重產要確認')
     await click(btn('重產'))
@@ -158,7 +168,7 @@ test('聊天區頂端「🔗 分享」：一般 bot 沒有；未分享按下＝�
     assert.notEqual(g2.url, g.url)
     assert.equal(copied.at(-1), g2.url, '重產後複製新連結')
 
-    await click(document.querySelector('.share-link-more')!)
+    await click(mainBtn())
     await click(btn('關閉分享'))
     assert.match(document.body.textContent!, /連結立刻失效/, '關閉要確認')
     await click([...document.querySelectorAll('button')].filter((b) => b.textContent?.trim() === '關閉分享').at(-1)!)
@@ -344,9 +354,10 @@ test('別處重產連結（share_enabled 沒變）：聊天頂端的分享鈕複
     await mount(<ShareLinkButton botId={shared.id} />)
     await settle(100)
     await click(mainBtn())
+    await click(btn('複製連結'))
     await settle(50)
     const before = copied[0]
-    assert.ok(before, '分享中按下就複製手上那條')
+    assert.ok(before, '分享中選單的「複製連結」就複製手上那條')
 
     // 別處（設定面板或另一個分頁）重產：share_enabled 不變，只來一幀 bot_share_changed。
     const r = (await mock.request('POST', `/bots/${shared.id}/share/rotate`)) as { url: string }
@@ -364,6 +375,7 @@ test('別處重產連結（share_enabled 沒變）：聊天頂端的分享鈕複
     }
 
     await click(mainBtn())
+    await click(btn('複製連結'))
     await settle(50)
     assert.equal(copied.at(-1), r.url, '複製的是重產後的新連結')
     assert.notEqual(copied.at(-1), before)
