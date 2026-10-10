@@ -85,6 +85,8 @@ export function BotNameField({
             e.preventDefault()
             commit()
           } else if (e.key === 'Escape') {
+            // 輸入法選字中的 Esc 是取消選字，不是放棄改名。
+            if (isImeEnter(e.nativeEvent)) return
             e.preventDefault()
             setDraft(name)
             setEditing(false)
