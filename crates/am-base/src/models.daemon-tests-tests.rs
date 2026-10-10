@@ -162,6 +162,50 @@
         assert!(st.success(), "缺檔時腳本要 exit 0，不然遠端缺檔會被 ssh_exec 當成失敗");
     }
 
+    fn scratch_dir(tag: &str) -> std::path::PathBuf {
+        let nanos = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos();
+        let dir = std::env::temp_dir().join(format!("am-models-{tag}-{}-{nanos}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    /// 設定檔是 FIFO（沒有寫入端）：以前本機的 `cat` 永遠等，`GET /api/models` 與生 child 一起卡住（#1074）。
+    /// 非一般檔案現在當成缺檔（空字串）、立刻回來。
+    #[tokio::test]
+    async fn a_fifo_config_does_not_hang_the_local_read() {
+        let e = crate::testing::env().await;
+        let dir = scratch_dir("fifo");
+        let fifo = dir.join("config.toml");
+        assert!(std::process::Command::new("mkfifo").arg(&fifo).status().unwrap().success());
+        let r = tokio::time::timeout(
+            std::time::Duration::from_secs(20),
+            read_optional_text(&e.app, LOCAL_HOST, &fifo.display().to_string()),
+        )
+        .await;
+        match r {
+            Ok(Ok(s)) => assert_eq!(s, "", "FIFO 當成缺檔，立刻回空字串"),
+            _ => {
+                // 還是卡住：寫端開一下把 `cat` 放掉，免得留下行程。
+                let f = fifo.clone();
+                std::thread::spawn(move || drop(std::fs::OpenOptions::new().write(true).open(f)));
+                panic!("讀 FIFO 卡住（超過 20 秒）：{r:?}");
+            }
+        }
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// 一般檔超過 1 MiB 只讀前 1 MiB（設定檔不會這麼大；指到大檔或裝置時不吃光記憶體）。
+    #[tokio::test]
+    async fn a_huge_config_is_read_only_up_to_one_mib() {
+        let e = crate::testing::env().await;
+        let dir = scratch_dir("huge");
+        let path = dir.join("config.toml");
+        std::fs::write(&path, vec![b'x'; 2 * 1024 * 1024]).unwrap();
+        let s = read_optional_text(&e.app, LOCAL_HOST, &path.display().to_string()).await.unwrap();
+        assert_eq!(s.len(), 1024 * 1024);
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
     /// The argv shapes `herdr pane process-info` actually reported on this machine,
     /// 2026-09-07 (a claude child pane and a grok one).
     #[test]
