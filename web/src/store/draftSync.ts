@@ -90,6 +90,8 @@ export class DraftSync {
 
   /** WS `draft_updated`。 */
   remote(ev: DraftEvent): void {
+    // `load()` 在飛時進來的事件比那份快照新：不能再拿快照判它「daemon 沒有＝被刪了」。
+    this.touched?.add(ev.key)
     this.applyServer(ev.key, ev.text, ev.rev, ev.client_id === this.deps.clientId)
   }
 
