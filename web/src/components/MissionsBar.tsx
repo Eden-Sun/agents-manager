@@ -5,7 +5,7 @@
  * 位置刻意放在**輸入框正上方**而不是訊息列上方：任務卡是要動手的東西——停下來問人的時候
  * 要在這裡回答——跟 IssuesBar 那種「這個專案有什麼可以挑」不一樣，捲到哪裡都不該找不到它。
  */
-import { useEffect, useMemo, useRef, useState } from 'react'
+import { useEffect, useId, useMemo, useRef, useState } from 'react'
 import { useShallow } from 'zustand/react/shallow'
 import type { Mission, MissionDetail } from '../api/types'
 import {
@@ -380,6 +380,7 @@ function MissionCard({ mission, onNavigate }: { mission: Mission; onNavigate: Na
   const [answer, setAnswer] = useState('')
   const [sending, setSending] = useState(false)
   const [confirmCancel, setConfirmCancel] = useState(false)
+  const askId = useId()
 
   // 進行中的卡一定要有事件串才畫得出進度與角色，進來就抓一次；之後靠 WS `mission_updated`。
   useEffect(() => {
@@ -495,7 +496,11 @@ function MissionCard({ mission, onNavigate }: { mission: Mission; onNavigate: Na
             <strong>{pausedLabel(view.ask.reason)}</strong>
             {view.ask.detail ? `：${view.ask.detail}` : ''}
           </p>
-          {view.ask.question ? <p className="mission-ask-q">{view.ask.question}</p> : null}
+          {view.ask.question ? (
+            <p className="mission-ask-q" id={askId}>
+              {view.ask.question}
+            </p>
+          ) : null}
           {view.ask.resets.length > 0 ? (
             <ul className="mission-resets">
               {view.ask.resets.map((r) => (
@@ -510,6 +515,8 @@ function MissionCard({ mission, onNavigate }: { mission: Mission; onNavigate: Na
               className="mission-answer"
               rows={2}
               value={answer}
+              aria-label="回答 AGM"
+              aria-describedby={view.ask.question ? askId : undefined}
               placeholder="回答 AGM，送出後任務就會繼續"
               disabled={sending}
               onChange={(e) => setAnswer(e.target.value)}
