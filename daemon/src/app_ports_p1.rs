@@ -83,6 +83,20 @@ mod tests {
         );
     }
 
+    /// issue #1144：資料目錄含 `?`、`%XX` 時開的必須是那個檔（以前 URL 解析會把 `?mode=memory` 當參數、`%41` 解成 `A`）。
+    #[tokio::test]
+    async fn a_database_path_with_url_metacharacters_opens_that_exact_file() {
+        let dir = crate::testing::track(std::env::temp_dir().join(format!("am-db-path-{}", db::ulid())));
+        let sub = dir.join("weird%41?mode=memory");
+        std::fs::create_dir_all(&sub).unwrap();
+        let path = sub.join("am.db");
+        let pool = db::open_with(&path, &[]).await.expect("路徑含 URL 特殊字元也要開得起來");
+        assert!(path.exists(), "開的就是這個檔");
+        assert!(!dir.join("weirdA").exists(), "%41 不能被 percent-decode 到別的路徑");
+        let n: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM bots").fetch_one(&pool).await.unwrap();
+        assert_eq!(n, 0);
+    }
+
     /// db 自己只認共用 schema：不帶 feature 清單就只有共用的表（而且自己對自己的標準答案不會報漂移）；`db::open` 帶 composition 的清單，什麼都有。
     #[tokio::test]
     async fn db_alone_has_only_the_shared_schema_and_open_adds_every_feature_table() {
