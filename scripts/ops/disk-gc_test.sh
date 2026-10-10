@@ -90,6 +90,26 @@ exists "worktree 的原始碼不碰" "$OLDWT/keep.rs"
 exists "最近有編譯的 worktree target/ 留著" "$NEWWT/target"
 teardown
 
+# 3b. unit 目錄很舊、但裡面的檔最近才被改寫（cargo 重編既有 unit）→ 不算久沒用，target/ 留著（issue #1177）。
+setup
+REBUILT="$REPO/.claude/worktrees/rebuilt"; mkdir -p "$REBUILT"; mk_target "$REBUILT"
+mkdir -p "$REBUILT/target/debug/.fingerprint/foo-abc"
+echo x > "$REBUILT/target/debug/.fingerprint/foo-abc/invoked.timestamp"
+old "$REBUILT/target/debug/.fingerprint/foo-abc" "$REBUILT/target/debug/.fingerprint"
+equals "exit 0" "$(run)" "0"
+exists "最近重編過既有 unit 的 worktree：target/ 留著" "$REBUILT/target"
+teardown
+
+# 3c. unit 目錄與裡面的檔都很舊 → 照舊整個刪。
+setup
+STALE="$REPO/.claude/worktrees/stale-unit"; mkdir -p "$STALE"; mk_target "$STALE"
+mkdir -p "$STALE/target/debug/.fingerprint/foo-abc"
+echo x > "$STALE/target/debug/.fingerprint/foo-abc/invoked.timestamp"
+old "$STALE/target/debug/.fingerprint/foo-abc/invoked.timestamp" "$STALE/target/debug/.fingerprint/foo-abc" "$STALE/target/debug/.fingerprint"
+equals "exit 0" "$(run)" "0"
+gone "unit 與檔都很舊的 worktree：target/ 整個刪" "$STALE/target"
+teardown
+
 # 4. 有行程的 cwd 在某 worktree → 那棵完全不動（即使 target 很舊）。
 setup
 BUSY="$REPO/.claude/worktrees/busy"; mkdir -p "$BUSY"; mk_target "$BUSY" yes

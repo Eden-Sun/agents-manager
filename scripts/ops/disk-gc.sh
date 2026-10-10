@@ -6,7 +6,7 @@
 #
 #   (a) ~/.cache/agents-manager/remote-cargo/* 頂層目錄超過 DISK_GC_REMOTE_CARGO_DAYS 天沒動、而且沒有行程在用 → 刪（不論 build.remote 開關）
 #   (b) 主樹與各 worktree 的 target/*/incremental：超過 DISK_GC_INCREMENTAL_DAYS 天的子目錄 → 刪
-#   (c) 各 worktree（不含主樹）的 target/：.fingerprint 超過 DISK_GC_TARGET_DAYS 天沒動 → 整個 target/ 刪
+#   (c) 各 worktree（不含主樹）的 target/：.fingerprint、它的 unit 目錄與 unit 目錄裡的檔都超過 DISK_GC_TARGET_DAYS 天沒動 → 整個 target/ 刪
 #   (d) 事後看 $HOME 所在磁碟：使用率 ≥ DISK_GC_ALERT_PCT 或剩餘 < DISK_GC_ALERT_FREE_GB → ops-alert disk_low
 #
 # 破壞性，所以：只刪上面這幾個明確路徑；路徑含 `..`、不在 $HOME 底下、任何一層是 symlink、實際位置跟預期不符，
@@ -111,12 +111,13 @@ else
     cd "$tree/target" || return 0
     [ "$(pwd -P)" = "$HOME_REAL${tree#"$HOME"}/target" ] || { skip "${tree}（實際位置不符）"; return 0; }
     if [ "$kind" = worktree ]; then
-      # 最新的 .fingerprint（含它底下的第一層）都超過門檻才算久沒用；一個 .fingerprint 都沒有就不判斷。
+      # .fingerprint、它的 unit 目錄與 unit 目錄裡的檔都超過門檻才算久沒用；cargo 重編既有 unit 只改寫裡面的檔，不動目錄 mtime（issue #1177）。
+      # 一個 .fingerprint 都沒有就不判斷。
       local have=0 recent=0 fp
       for fp in ./*/.fingerprint; do
         [ -d "$fp" ] && [ ! -L "$fp" ] || continue
         have=1
-        if [ -n "$(find "$fp" -maxdepth 1 -mmin -$((TARGET_DAYS * 1440)) -print -quit 2>/dev/null)" ]; then recent=1; fi
+        if [ -n "$(find "$fp" -maxdepth 2 -mmin -$((TARGET_DAYS * 1440)) -print -quit 2>/dev/null)" ]; then recent=1; fi
       done
       if [ "$have" = 1 ] && [ "$recent" = 0 ]; then
         cd "$tree" || return 0
