@@ -1744,10 +1744,11 @@ def cmd_release_triage(client: Client, cfg: dict, args) -> object:
 def cmd_handoff(client: Client, cfg: dict, args) -> object:
     if args.summary is None and args.summary_file is None:
         return client.get("/api/supervisor/handoff")
-    if args.summary_file:
-        summary = read_text_file(args.summary_file, "--summary-file")
-    else:
-        summary = args.summary or ""
+    if args.summary is not None and args.summary_file is not None:
+        raise AgmError("bad_args", "--summary 與 --summary-file 只能給一個", 2)
+    if args.summary_file is not None and not args.summary_file:
+        raise AgmError("bad_args", "--summary-file 的路徑不可為空", 2)
+    summary = _text_of(args, "--summary", "summary_file", "summary", "管理摘要")
     return client.put("/api/supervisor/handoff", {"summary": summary})
 
 
