@@ -166,6 +166,9 @@ pub struct App {
     pub background_tasks: tokio_util::task::TaskTracker,
     /// External relay turns whose composer delivery watcher is active, keyed by turn id.
     pub(crate) relay_watchers: std::sync::Mutex<HashSet<String>>,
+    /// 狀態寫不進 DB、重放也用完的 pane，等修復（#1184）。放在 App 上，不放 process-global：平行的測試各有各的 DB，
+    /// 不能互相撿到對方的 pane 再去清掉它。
+    pub(crate) status_repairs: std::sync::Mutex<HashMap<crate::events::PaneKey, crate::runners::events::StatusRepair>>,
     /// Monotonic deadlines paired with the persisted supervisor watchdog UTC timestamps.
     pub watchdog_deadlines: std::sync::Mutex<crate::supervisor::watchdog::DeadlineCache>,
     /// How "which account is this pid running under" gets answered (SPEC §16.6). Empty in a
@@ -369,6 +372,7 @@ impl App {
             shutdown: tokio_util::sync::CancellationToken::new(),
             background_tasks: tokio_util::task::TaskTracker::new(),
             relay_watchers: std::sync::Mutex::new(HashSet::new()),
+            status_repairs: std::sync::Mutex::new(HashMap::new()),
             watchdog_deadlines: std::sync::Mutex::new(Default::default()),
             proc_env: Default::default(),
             kind_probe: Default::default(),
