@@ -36,8 +36,8 @@ const CLAUDE_MODELS = [
   model('haiku', { default_effort: 'medium' }),
 ]
 
-function setup(botModel: string | null) {
-  const bot = { id: 'b1', name: 'b1', project_id: 'p1', kind: 'claude', model: botModel, effort: null, fast: false, identity: null, needs_restart: false } as unknown as Bot
+function setup(botModel: string | null, effort: string | null = null) {
+  const bot = { id: 'b1', name: 'b1', project_id: 'p1', kind: 'claude', model: botModel, effort, fast: false, identity: null, needs_restart: false } as unknown as Bot
   const patches: PatchBotInput[] = []
   useStore.setState({
     bots: [bot],
@@ -93,4 +93,36 @@ test('haiku bot（存完整 id）：「廠推薦」標在 haiku 的預設強度 
   const tagged = [...document.querySelectorAll('.effort-recommended')].map((e) => e.closest('button')?.textContent ?? '')
   assert.equal(tagged.length, 1, tagged.join('|'))
   assert.ok(tagged[0].startsWith('Medium'), tagged[0])
+})
+
+test('沒指定模型的 bot：預設那顆亮著', async () => {
+  setup(null)
+  await openMenu()
+  assert.deepEqual(checkedModels(), ['opus'])
+  assert.deepEqual(modelItems().filter((b) => b.classList.contains('on')).map((b) => b.textContent), ['opus'])
+})
+
+test('沒指定強度：模型的預設強度亮著', async () => {
+  setup(null)
+  await openMenu()
+  const checkedEfforts = [...document.querySelectorAll('[aria-label="強度"] button[aria-checked="true"]')]
+  assert.equal(checkedEfforts.length, 1)
+  assert.ok(checkedEfforts[0].textContent?.startsWith('High'))
+})
+
+test('有指定強度就照指定的', async () => {
+  setup(null, 'low')
+  await openMenu()
+  const checkedEfforts = [...document.querySelectorAll('[aria-label="強度"] button[aria-checked="true"]')]
+  assert.equal(checkedEfforts.length, 1)
+  assert.ok(checkedEfforts[0].textContent?.startsWith('Low'))
+})
+
+test('沒指定時點亮著的預設那顆仍會送出', async () => {
+  const patches = setup(null)
+  await openMenu()
+  const opus = modelItems().find((b) => b.textContent === 'opus')
+  assert.ok(opus)
+  await click(opus)
+  assert.deepEqual(patches, [{ model: 'opus' }])
 })
