@@ -183,6 +183,7 @@ equals "state 寫入" "$(cat "$AGM_DIR/herdr-update.last")" "0.9.0"
 check "darwin 仍帶 codesign 驗收" "codesign" "$AGM_DIR/assign-body.txt"
 check "darwin 仍帶 /opt/homebrew 路徑" "/opt/homebrew" "$AGM_DIR/assign-body.txt"
 check "darwin 仍帶授權本機網路" "需要使用者授權本機網路" "$AGM_DIR/assign-body.txt"
+check "darwin 升級驗收包含真 herdr argv 契約測試" "AM_TEST_REAL_HERDR=1 cargo test -p agents-managerd -- the_generated_argv_parses_with_the_real_herdr" "$AGM_DIR/assign-body.txt"
 teardown
 
 # 1b. #886：Linux 上不派 macOS 專用驗收（沒有 codesign、/opt/homebrew、本機網路授權可驗），改平台中立的驗收。
@@ -195,6 +196,7 @@ check "linux：驗收對 idle bot 送 prompt" "idle bot 送一句 prompt" "$AGM_
 check_no "linux：正文不含 codesign" "codesign" "$AGM_DIR/assign-body.txt"
 check_no "linux：正文不含 /opt/homebrew" "/opt/homebrew" "$AGM_DIR/assign-body.txt"
 check_no "linux：正文不含授權本機網路" "授權本機網路" "$AGM_DIR/assign-body.txt"
+check "linux：升級驗收包含真 herdr argv 契約測試" "AM_TEST_REAL_HERDR=1 cargo test -p agents-managerd -- the_generated_argv_parses_with_the_real_herdr" "$AGM_DIR/assign-body.txt"
 equals "linux：state 照寫" "$(cat "$AGM_DIR/herdr-update.last")" "0.9.0"
 teardown
 
