@@ -175,3 +175,29 @@ async fn a_probe_that_flips_the_identity_to_logged_in_clears_the_marker() {
     assert!(!changed, "本來就是已登入、沒有新資訊");
     assert!(get(&env.app, HOST, "cc1").is_some(), "探測一直說已登入：不代表授權失敗好了（過期憑證），不清");
 }
+
+/// 改了身分還沒重啟：pane 裡跑的是啟動時的帳號（`runs.runtime_identity`），失敗要記在那一個，不是設定的新帳號上（#238）。
+#[tokio::test]
+async fn an_auth_failure_is_charged_to_the_identity_the_run_started_with() {
+    let env = tt::env().await;
+    with_identities(&env.app, &[("cc1", Some(true)), ("cc2", Some(true))]).await;
+    let bot = bound_bot(&env, "swap-a", "cc2").await;
+    sqlx::query("UPDATE runs SET runtime_identity = 'cc1' WHERE bot_id = ?").bind(&bot.id).execute(&env.app.db).await.unwrap();
+
+    process(&env.app, &auth_failure(&bot, "p1")).await.unwrap();
+    assert!(get(&env.app, HOST, "cc1").is_some(), "pane 裡跑的是 cc1，壞掉的是它");
+    assert!(get(&env.app, HOST, "cc2").is_none(), "設定的新帳號沒有壞");
+}
+
+/// 同一個情況下正常答完一回合：清掉的是啟動時那個帳號的記號，不是設定的新帳號。
+#[tokio::test]
+async fn a_good_turn_clears_the_marker_of_the_identity_the_run_started_with() {
+    let env = tt::env().await;
+    with_identities(&env.app, &[("cc1", Some(true)), ("cc2", Some(true))]).await;
+    let bot = bound_bot(&env, "swap-b", "cc2").await;
+    sqlx::query("UPDATE runs SET runtime_identity = 'cc1' WHERE bot_id = ?").bind(&bot.id).execute(&env.app.db).await.unwrap();
+    mark(&env.app, HOST, "cc1", VIA_TURN);
+
+    process(&env.app, &stop(&bot, "p2", "ok")).await.unwrap();
+    assert_eq!(get(&env.app, HOST, "cc1"), None, "cc1 自己的提示清掉");
+}

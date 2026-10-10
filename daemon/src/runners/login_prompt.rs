@@ -18,6 +18,16 @@ pub async fn clear_and_push(app: &Arc<App>, host: &str, identity: &str) {
     }
 }
 
+/// 這個回合實際用的身分（#238）：改了設定還沒重啟時，pane 裡跑的是啟動時那個帳號，不是 `bot.identity`。
+/// 讀不到 run 才退回設定值（跟額度一樣，`quota::billing_identity`）。
+async fn turn_identity(app: &Arc<App>, bot: &db::Bot) -> Option<String> {
+    match crate::quota::billing_identity(app, bot).await {
+        Ok(identity) => identity,
+        Err(_) => bot.identity.clone(),
+    }
+    .filter(|i| !i.trim().is_empty())
+}
+
 /// 綁著身分的 claude bot 的回合因為授權失敗收尾：記下、推快照，並立刻重探該身分（不等探測週期）。
 /// 沒綁身分（用主機預設帳號）的 bot 不處理：沒有「哪個身分」可以提示。
 /// `admitted`：這一則放行時捕獲的主機世代（#1024）。agy 沒有它就什麼都不改（寧可漏記，不改錯主機）。
@@ -32,7 +42,8 @@ pub async fn on_auth_failure(app: &Arc<App>, bot: &db::Bot, admitted: Option<&cr
     if bot.kind != "claude" {
         return;
     }
-    let Some(identity) = bot.identity.as_deref().filter(|i| !i.is_empty()) else { return };
+    let Some(identity) = turn_identity(app, bot).await else { return };
+    let identity = identity.as_str();
     let Ok(host) = db::bot_host(&app.db, &bot.id).await else { return };
     // 身分不在這台主機的表裡（改名、刪除、還沒偵測）：沒有東西可以附註，也就不記。
     let known = app.tools.lock().await.get(&host).is_some_and(|h| h.identities.contains_key(identity));
@@ -55,13 +66,13 @@ pub async fn on_turn_ok(app: &Arc<App>, bot: &db::Bot) {
     if bot.kind != "claude" {
         return;
     }
-    let Some(identity) = bot.identity.as_deref().filter(|i| !i.is_empty()) else { return };
-    // 先看有沒有帳：絕大多數回合都沒有，不必每次都查 DB。
-    if !app.login_needed.lock().unwrap_or_else(|e| e.into_inner()).keys().any(|(_, i)| i == identity) {
+    // 先看有沒有帳：絕大多數回合都沒有，不必每次都查 DB（只有整張空的才早退，有帳就去查這個回合的身分）。
+    if app.login_needed.lock().unwrap_or_else(|e| e.into_inner()).is_empty() {
         return;
     }
+    let Some(identity) = turn_identity(app, bot).await else { return };
     let Ok(host) = db::bot_host(&app.db, &bot.id).await else { return };
-    clear_and_push(app, &host, identity).await;
+    clear_and_push(app, &host, &identity).await;
 }
 
 #[cfg(test)]
