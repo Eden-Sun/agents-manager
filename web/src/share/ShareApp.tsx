@@ -156,6 +156,8 @@ export function ShareApp({ client }: { client: ShareClient }) {
   const [filesOpen, setFilesOpen] = useState(false)
   const [viewing, setViewing] = useState<ShareFile | null>(null)
   const closeViewer = useCallback(() => setViewing(null), [])
+  // 放大檢視跟著清單走：開著時檔案換版（bot 修好、重畫），檢視裡要看到新的那一版。清單裡已經沒有這個檔就留著手上的。
+  const viewingFile = useMemo(() => (viewing ? (files.find((f) => f.name === viewing.name) ?? viewing) : null), [viewing, files])
   const [poll, setPoll] = useState(false)
   const [hasMore, setHasMore] = useState(false)
   const [loadingOlder, setLoadingOlder] = useState(false)
@@ -593,7 +595,7 @@ export function ShareApp({ client }: { client: ShareClient }) {
           </p>
         ) : null}
       </form>
-      {viewing ? <ShareImageViewer file={viewing} client={client} onClose={closeViewer} /> : null}
+      {viewingFile ? <ShareImageViewer file={viewingFile} client={client} onClose={closeViewer} /> : null}
     </div>
   )
 }
