@@ -729,6 +729,7 @@ Jev 不負責回合收尾、額度記帳或競態判斷；這些依 run、turn�
 6. daemon 重放 spool：拿 per-bot 鎖 → rename 成 `.claim` → 併進 `.replaying` → 逐行**寫進 `hook_events` 並 commit** → 刪檔 → 放鎖；
    §6.7 的配對交給 worker。順序不能顛倒：先刪檔再處理，中間掛掉就等於事件沒發生過。
    摘下來一定走 rename，不是「讀完再刪」：讀與刪之間 hook 附加進來的行會被那個刪除連檔帶走（#493，遠端同款）。
+   本機 spool 除了開機與 host 連上，daemon 活著時也由 spool scanner 每 30 秒重放一次（#1003）：沒有 spool 檔的 bot 不碰鎖。
 7. **遠端 bot 不走 HTTP**：改成「寫 spool + `herdr pane report-agent`」，spool 是唯一內容通道，重放由 herdr 狀態事件觸發（§11.4）。
 
 ### 4.4b hook 耐久收件匣 `hook_events`
