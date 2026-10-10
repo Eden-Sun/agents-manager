@@ -9,6 +9,7 @@ import { MOCK_MODE } from '../api'
 import type { Bot, BotKind, Lamp, MessageHit, ShareProfile } from '../api/types'
 import { BOT_KINDS, LOCAL_HOST } from '../api/types'
 import { identityBadgeVisible } from '../lib/identityBadgeVisible'
+import { labelAfterPick } from '../lib/projectLabel'
 import { eventIsFromCurrentTarget, eventTargetIsInsideCurrentTarget } from '../lib/domEvents'
 import { herdrIdentity } from '../lib/herdrIdentity'
 import { settingsBlocksLeave } from '../lib/settingsLeaveGuard'
@@ -486,6 +487,8 @@ function NewProjectForm({ onDone }: { onDone: () => void }) {
   const [host, setHost] = useState('local')
   const [busy, setBusy] = useState(false)
   const [browsing, setBrowsing] = useState(false)
+  // 上一次自動帶入的標籤（目錄名）：使用者沒改過的時候，換目錄要跟著換（#1084）。
+  const autoLabel = useRef('')
 
   // A host removed while the form is open falls back to local.
   const hostOk = host === 'local' || hosts.some((h) => h.name === host)
@@ -499,7 +502,9 @@ function NewProjectForm({ onDone }: { onDone: () => void }) {
         onCancel={() => setBrowsing(false)}
         onPick={(p) => {
           setPath(p)
-          if (!label.trim()) setLabel(p.split('/').filter(Boolean).pop() ?? '')
+          const next = labelAfterPick(label, autoLabel.current, p)
+          if (next !== label) autoLabel.current = next
+          setLabel(next)
           setBrowsing(false)
         }}
       />
@@ -530,6 +535,11 @@ function NewProjectForm({ onDone }: { onDone: () => void }) {
           onChange={(e) => {
             setHost(e.target.value)
             setPath('')
+            // 路徑清掉了，自動帶入的標籤跟著清（使用者自己打的留著）。
+            if (label === autoLabel.current) {
+              setLabel('')
+              autoLabel.current = ''
+            }
           }}
         >
           <option value="local">本機</option>
