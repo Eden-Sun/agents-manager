@@ -180,7 +180,7 @@ pub async fn embed_remote(site: &RemoteSite, svg: Vec<u8>) -> Vec<u8> {
             vec![None; rels.len()]
         }
     };
-    let scope = PrefetchedSource::scope_of(&site.host, &site.workspace);
+    let scope = PrefetchedSource::scope_for(site.conn.fence(), &site.workspace);
     let mut need: Vec<usize> = Vec::new();
     for (i, meta) in metas.iter().enumerate() {
         if let Some(meta) = meta {
@@ -206,7 +206,7 @@ pub async fn embed_remote(site: &RemoteSite, svg: Vec<u8>) -> Vec<u8> {
             }
         }
     }
-    let src = PrefetchedSource::new(&site.host, &site.workspace, &rels, &metas, data);
+    let src = PrefetchedSource::new(&site.conn.fence().authority_scope(), &site.workspace, &rels, &metas, data);
     let source = svg.clone();
     match tokio::task::spawn_blocking(move || compose::embed_with(&source, &src)).await {
         Ok(Some(embedded)) => embedded,
