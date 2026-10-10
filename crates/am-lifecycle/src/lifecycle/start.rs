@@ -1291,8 +1291,13 @@ async fn start_inner(
     let resume = if opts.resume_native {
         match native_resume_plan(app, bot, &host, false, opts.resume_session.as_deref()).await? {
             Ok(plan) => Some(plan),
-            // 預設退回開新對話；`resume_required` 的呼叫在前面就擋掉了。
             Err(failure) => {
+                // 預檢過了、這裡才接不回（遠端搬檔那趟 ssh 失敗、檔案在這幾秒不見…）：`resume_required` 的約定是不啟動，
+                // 不是悄悄開新對話。這裡還沒開 pane，直接回 409（#1123）。
+                if opts.resume_required {
+                    return Err(cannot_resume(&bot.id, failure.reason));
+                }
+                // 預設退回開新對話。
                 // #1001：全新 bot 第一次啟動沒有「原本的對話」可以接，不是接丟了，不寫警告。
                 if failure.reason == "no_session_id" && is_first_contact(app, bot, run_id).await? {
                     tracing::info!(bot = %bot.name, "first start of a new bot; no earlier conversation to resume");
@@ -2086,7 +2091,7 @@ pub async fn restart_child_in_pane_with(app: &impl StartContext, bot_id: &str, r
 /// over a hiccup is the worse mistake.
 #[cfg(all(test, feature = "daemon-test-harness"))]
 mod resume_args_tests {
-    use super::{resume_args_by_kind, restart_bot_with, start_bot, start_bot_with, stop_bot, LcError, StartOpts};
+    use super::{resume_args_by_kind, restart_bot_with, start_bot, start_bot_with, stop_bot, LcError, StartOpts, CONTEXT_LOST_PREFIX};
     use crate::capabilities::Db;
     use crate::db;
     use crate::testing::{claude_bot, env, Env};
@@ -2693,6 +2698,43 @@ mod resume_args_tests {
         assert!(matches!(err, LcError::Conflict(ref v) if v["resume_reason"] == "transcript_missing"), "{err:?}");
         assert_eq!(db::active_run(e.app.db(), &pm.id).await.unwrap().map(|r| r.id), Some(before), "the running agent was not stopped");
         stop_bot(&e.app, &pm.id).await.unwrap();
+    }
+
+    /// #1123：預檢（`native_resume_plan`）過了、真的組參數時才接不回（兩次判斷之間對話檔不見了）：`resume_required`
+    /// 的約定是**不啟動**，回 409，不能悄悄開新對話。測試用 kind 預檢 hook 在兩次之間把檔案刪掉。
+    #[tokio::test]
+    async fn a_required_resume_that_breaks_after_the_precheck_does_not_start_fresh() {
+        let e = env().await;
+        let pm = claude_bot(&e.app, &e.project_id, "pm").await;
+        let transcript = own_transcript(&e, &pm, "pm-1123").await;
+        std::fs::write(&transcript, "{}\n").unwrap();
+        sqlx::query(
+            "INSERT INTO runs (id, bot_id, state, agent_status, native_session_id, transcript_path, started_at, ended_at)
+             VALUES (?,?,'stopped','idle','sid-pm',?,'2026-09-01T00:00:00Z','2026-09-01T00:01:00Z')",
+        )
+        .bind(db::ulid())
+        .bind(&pm.id)
+        .bind(transcript.to_str().unwrap())
+        .execute(e.app.db())
+        .await
+        .unwrap();
+
+        let gone = transcript.clone();
+        e.app.kind_probe.set(std::sync::Arc::new(move |_host, kind, _probe| {
+            let _ = std::fs::remove_file(&gone);
+            Some(format!("/test/bin/{kind}"))
+        }));
+        let err = start_bot_with(&e.app, &pm.id, StartOpts { resume_native: true, resume_required: true, ..Default::default() }).await.unwrap_err();
+        assert!(matches!(err, LcError::Conflict(ref v) if v["reason"] == "cannot_resume" && v["resume_reason"] == "transcript_missing"), "{err:?}");
+        assert!(started_args(&e).is_empty(), "沒有 agent.start：{:?}", started_args(&e));
+        assert!(db::active_run(e.app.db(), &pm.id).await.unwrap().is_none(), "不留 run 列");
+        let conv = db::conversation_id(e.app.db(), &pm.id).await.unwrap();
+        let notes: Vec<String> = sqlx::query_scalar("SELECT content FROM messages WHERE conversation_id=? AND role='system'")
+            .bind(&conv)
+            .fetch_all(e.app.db())
+            .await
+            .unwrap();
+        assert!(!notes.iter().any(|n| n.contains(CONTEXT_LOST_PREFIX)), "不該說接不回又開了新對話：{notes:?}");
     }
 
     /// No transcript → not resumed: `claude --resume` would exit with "No conversation found".
