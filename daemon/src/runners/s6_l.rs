@@ -73,13 +73,14 @@ impl s6_ports::SetupShareServices for App {
 
     fn write_remote_private_file<'a>(
         &'a self,
-        conn: &'a crate::hosts::HostConn,
+        fence: &'a crate::hosts::HostFence,
         dir: &'a str,
         name: &'a str,
         data: &'a [u8],
     ) -> impl std::future::Future<Output = anyhow::Result<()>> + Send + 'a {
         async move {
-            crate::share::site::RemoteSite::write_private_files(conn, dir, &[(name, data)])
+            let conn = crate::share::site::FencedConn::new(fence.clone());
+            crate::share::site::RemoteSite::write_private_files(&conn, dir, &[(name, data)])
                 .await
                 .map_err(|e| anyhow::anyhow!("寫不進遠端 {dir}/{name}：{e}"))
         }

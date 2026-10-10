@@ -1083,6 +1083,9 @@ async fn upload<H: PortalEnv>(
     match crate::share::remote_io::remote_site(&*st.app, &bot_id).await {
         Err(()) => return unavailable(),
         Ok(Some(site)) => {
+            // 測試用：解析完、寫入之前（#1026）。這中間若改指到另一台，寫入要被圍籬擋下，不能寫進舊主機。
+            #[cfg(test)]
+            crate::race_point::hit("share_upload_after_site_resolve", &bot_id).await;
             return match site.inbox_write(&stored, &data, INBOX_MAX_BYTES, INBOX_MAX_FILES).await {
                 Ok(()) => Json(json!({"id": stored, "name": name, "size": len, "mime": mime})).into_response(),
                 Err(crate::share::remote_fs::InboxError::Full) => {

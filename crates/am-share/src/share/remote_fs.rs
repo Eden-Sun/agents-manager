@@ -9,13 +9,13 @@ use std::path::Path;
 use std::sync::Arc;
 use std::time::Duration;
 
-use am_base::hosts::{sh_quote, HostConn, SshStream};
+use am_base::hosts::{sh_quote, HostFence, SshStream};
 use am_base::outbox::{content_is_withheld, withheld_name, ShareFileError};
 use serde_json::{json, Value};
 use tokio::sync::{OwnedSemaphorePermit, Semaphore};
 
 use crate::share::budget;
-use crate::share::site::RemoteSite;
+use crate::share::site::{FencedConn, RemoteSite};
 
 pub const RFS_VERSION_TAG: &str = "AM_RFS1";
 pub const RFS_DONE_TAG: &str = "AM_RFS_DONE";
@@ -81,11 +81,12 @@ pub struct PhotoStat {
     pub mtime_ns: i128,
 }
 
-/// 遠端 outbox 串流下載物件。
+/// 遠端 outbox 串流下載物件。`fence` 是開檔時的權威：之後每一塊讀取都要在它仍是當前時才做（#1026）。
 pub struct RemoteFile {
     pub len: u64,
     pub head: Vec<u8>,
     pub body: SshStream,
+    pub fence: HostFence,
     pub permit: OwnedSemaphorePermit,
 }
 
@@ -378,15 +379,16 @@ const OUTBOX_LIST_STDOUT_MAX: u64 = 4 * 1024 * 1024;
 
 /// 收原始 stdout 位元組。`ssh_exec_timeout` 回 `String`，有損 UTF-8 轉換會把截斷在多位元組字中間的框弄得長度對不上（#983）；
 /// 這裡照 `photo_fetch` 的做法走 `ssh_stream`，超過 `cap` 就當不可信。
-async fn exec_bytes(conn: &HostConn, host: &str, script: &str, timeout: Duration, cap: u64, what: &str) -> Result<Vec<u8>, RfsError> {
+async fn exec_bytes(conn: &FencedConn, host: &str, script: &str, timeout: Duration, cap: u64, what: &str) -> Result<Vec<u8>, RfsError> {
     use tokio::io::AsyncReadExt as _;
-    let mut stream = conn.ssh_stream(script, &[]).await.map_err(|e| {
+    let stream = conn.ssh_stream(script, &[]).await.map_err(|e| {
         tracing::warn!(host = %host, error = %e, "{what} ssh failed");
         RfsError::Unavailable
     })?;
     let mut out = Vec::new();
     match tokio::time::timeout(timeout, stream.take(cap.saturating_add(1)).read_to_end(&mut out)).await {
-        Ok(Ok(_)) if out.len() as u64 <= cap => Ok(out),
+        // 讀完才發現主機已經換掉：這份結果是舊主機的，不發布（#1026）。
+        Ok(Ok(_)) if out.len() as u64 <= cap && conn.fence().is_current_now() => Ok(out),
         _ => Err(RfsError::Unavailable),
     }
 }
@@ -1416,7 +1418,7 @@ echo NONE
 }
 
 /// 遠端只要主機連得上（信任分享用）。
-pub fn preflight_connected(conn: &HostConn) -> Result<(), PreflightError> {
+pub fn preflight_connected(conn: &FencedConn) -> Result<(), PreflightError> {
     if conn.is_connected() {
         Ok(())
     } else {
@@ -1426,14 +1428,14 @@ pub fn preflight_connected(conn: &HostConn) -> Result<(), PreflightError> {
 
 /// 受限分享用的完整檢查：連線、claude 版本（≥ `min_claude`）、沒有 managed settings。
 /// 版本那一趟吞掉「找不到 claude」（只回 `NOCLAUDE`）：ssh 本身失敗才是 `Unreachable`。
-pub async fn preflight_restricted(conn: &HostConn, min_claude: &str) -> Result<(), PreflightError> {
+pub async fn preflight_restricted(conn: &FencedConn, min_claude: &str) -> Result<(), PreflightError> {
     preflight_connected(conn)?;
-    let _permit = acquire_slot(&conn.name, TIMEOUT_QUICK).await.map_err(|_| PreflightError::Unreachable)?;
+    let _permit = acquire_slot(conn.name(), TIMEOUT_QUICK).await.map_err(|_| PreflightError::Unreachable)?;
     let ver = conn
         .ssh_exec_path_timeout("claude --version 2>/dev/null || printf NOCLAUDE", TIMEOUT_QUICK)
         .await
         .map_err(|e| {
-            tracing::warn!(host = %conn.name, error = %e, "preflight: claude --version ssh failed");
+            tracing::warn!(host = %conn.name(), error = %e, "preflight: claude --version ssh failed");
             PreflightError::Unreachable
         })?;
     let found = parse_claude_version(&ver).unwrap_or_default();
@@ -1441,7 +1443,7 @@ pub async fn preflight_restricted(conn: &HostConn, min_claude: &str) -> Result<(
         return Err(PreflightError::ClaudeTooOld { found });
     }
     let managed = conn.ssh_exec_timeout(&managed_settings_script(), TIMEOUT_QUICK).await.map_err(|e| {
-        tracing::warn!(host = %conn.name, error = %e, "preflight: managed settings check ssh failed");
+        tracing::warn!(host = %conn.name(), error = %e, "preflight: managed settings check ssh failed");
         PreflightError::Unreachable
     })?;
     if managed.contains("FOUND") {
@@ -1452,27 +1454,27 @@ pub async fn preflight_restricted(conn: &HostConn, min_claude: &str) -> Result<(
 
 impl RemoteSite {
     // 建立／啟動（R-S2 用）
-    pub async fn resolve_folder(conn: &HostConn, path: &str) -> Result<ResolvedFolder, RfsError> {
+    pub async fn resolve_folder(conn: &FencedConn, path: &str) -> Result<ResolvedFolder, RfsError> {
         if !conn.is_connected() {
             return Err(RfsError::Unavailable);
         }
-        let _permit = acquire_slot(&conn.name, TIMEOUT_QUICK).await?;
+        let _permit = acquire_slot(conn.name(), TIMEOUT_QUICK).await?;
         let script = resolve_folder_script(path, conn.instance());
         let out = conn.ssh_exec_timeout(&script, TIMEOUT_QUICK).await.map_err(|e| {
-            tracing::warn!(host = %conn.name, error = %e, "resolve_folder ssh failed");
+            tracing::warn!(host = %conn.name(), error = %e, "resolve_folder ssh failed");
             RfsError::Unavailable
         })?;
         parse_resolve_folder(out.as_bytes())
     }
 
-    pub async fn create_folder(conn: &HostConn, root: &str, name: &str) -> Result<String, RfsError> {
+    pub async fn create_folder(conn: &FencedConn, root: &str, name: &str) -> Result<String, RfsError> {
         if !conn.is_connected() {
             return Err(RfsError::Unavailable);
         }
-        let _permit = acquire_slot(&conn.name, TIMEOUT_QUICK).await?;
+        let _permit = acquire_slot(conn.name(), TIMEOUT_QUICK).await?;
         let script = create_folder_script(root, name);
         let out = conn.ssh_exec_timeout(&script, TIMEOUT_QUICK).await.map_err(|e| {
-            tracing::warn!(host = %conn.name, error = %e, "create_folder ssh failed");
+            tracing::warn!(host = %conn.name(), error = %e, "create_folder ssh failed");
             RfsError::Unavailable
         })?;
         parse_create_folder(out.as_bytes())
@@ -1534,18 +1536,18 @@ impl RemoteSite {
     }
 
     pub async fn write_private_files(
-        conn: &HostConn,
+        conn: &FencedConn,
         dir: &str,
         files: &[(&str, &[u8])],
     ) -> Result<(), RfsError> {
         if !conn.is_connected() {
             return Err(RfsError::Unavailable);
         }
-        let _permit = acquire_slot(&conn.name, TIMEOUT_QUICK).await?;
+        let _permit = acquire_slot(conn.name(), TIMEOUT_QUICK).await?;
         let script = write_private_files_script(dir);
         let stdin = encode_private_files_stdin(files);
         let out = conn.ssh_exec_stdin(&script, &stdin, TIMEOUT_QUICK).await.map_err(|e| {
-            tracing::warn!(host = %conn.name, error = %e, "write_private_files ssh failed");
+            tracing::warn!(host = %conn.name(), error = %e, "write_private_files ssh failed");
             RfsError::Unavailable
         })?;
         parse_write_private_files(out.as_bytes(), files)
@@ -1696,10 +1698,16 @@ impl RemoteSite {
             return Err(ShareFileError::NotFound);
         }
 
+        // 標頭讀完、交給下載之前再確認一次；之後每一塊讀取在 `remote_io` 裡還會各自檢查（#1026）。
+        if !self.conn.fence().is_current_now() {
+            return Err(ShareFileError::Unavailable);
+        }
+
         Ok(RemoteFile {
             len,
             head,
             body: stream,
+            fence: self.conn.fence().clone(),
             permit,
         })
     }

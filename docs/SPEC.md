@@ -5068,6 +5068,7 @@ daemon 要能在 Linux（目標：Ubuntu，外部編譯主機 192.168.1.46，#67
 - **刪 bot**：遠端分享 bot 的資料夾**一律不動**（不搬進 bots-trash、不刪，含 `kind:new` 建的）；刪除時 log 寫出路徑讓擁有者自己清。`purge_bot_dir` 與殘留清理只處理本機的工作目錄。
   遠端 bot 目錄照既有的 `remote_purge`。
 - 保留政策與量測見 §20.5（遠端 `.am-share-keep` 建立時、每次啟動、開機時補；撤銷分享時拿掉）。
+- **主機權威圍籬（#1026）**：解析分享位置時抓住那一代的 `HostFence`（`SiteEnv::host_fence`），之後所有遠端 I/O 經 `FencedConn` 送出，每一次 ssh 都在 `HostFence::run_current`（連線 gate 的讀端）之內；repoint／重連／移除在 gate 寫端先作廢舊世代，所以舊的分享位置**不會**把位元組寫進舊主機，拿不到權威一律 503（可重試，不回成功）。下載串流每一塊讀取、列表／全文讀取在發布前都再驗一次。新請求重新解析才會綁到新主機。
 
 ### 20.1a 信任分享（`share_profile = "trusted"`，使用者 2026-10-04）
 

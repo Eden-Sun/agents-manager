@@ -66,6 +66,11 @@ impl crate::share::site::SiteEnv for App {
         async move { self.hosts.get(&host).await }
     }
 
+    fn host_fence(&self, host: &str) -> impl Future<Output = Option<crate::hosts::HostFence>> + Send {
+        let host = host.to_string();
+        async move { self.hosts.fence(&host).await }
+    }
+
     fn instance(&self) -> Option<String> {
         App::instance(self)
     }

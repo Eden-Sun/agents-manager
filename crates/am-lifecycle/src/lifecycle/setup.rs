@@ -852,10 +852,12 @@ pub async fn injected_args(app: &(impl crate::capabilities::DataDir + crate::cap
         let paths = install_remote_hook(&conn, bot, app.instance().as_deref()).await?;
         if let Some(ws) = &restricted {
             // 受限：settings 換成籠子那一版寫回遠端；寫完比對 sha256，不符就不啟動（R-S2 §4.2）。
+            // 寫入綁在同一代的主機權威上：中途改指就寫不進去（#1026）。
+            let fence = app.hosts().fence(&project.host).await.ok_or_else(|| anyhow::anyhow!("unknown host `{}`", project.host))?;
             let mut settings = remote_claude_settings(&paths, bot);
             app.cage_settings(&mut settings, ws, env);
             let bytes = serde_json::to_vec_pretty(&settings)?;
-            app.write_remote_private_file(&conn, &paths.dir, "claude-settings.json", &bytes).await?;
+            app.write_remote_private_file(&fence, &paths.dir, "claude-settings.json", &bytes).await?;
         }
         let hook_args: Vec<String> = match bot.kind.as_str() {
             // Trial: `--verbose` expands tool output in the pane so the 終端 preview shows what ran.
