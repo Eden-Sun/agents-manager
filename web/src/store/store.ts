@@ -47,7 +47,7 @@ import { applyDeployWaitSnapshot, onDeployWaitFrame } from './deployWait'
 import { gateFrame } from './frameSeen'
 import { applyUpstreamItem, loadUpstreamUpdates, type UpstreamItem } from './upstreamUpdate'
 import { dropHostModels, modelsKey, shouldFetchModels, type ModelsCache } from './modelsCache'
-import { byInsert, byTime, capList, insertSorted, keptAfterPage, oldestByInsert, pruneTurns, reuseUnchanged, upsertSorted } from './lists'
+import { byInsert, byTime, capList, keptAfterPage, oldestByInsert, pruneTurns, reuseUnchanged, upsertSorted } from './lists'
 import { recoverLostCursor } from './pageCursor'
 import { type CapFloors, capFor, clearFloor, raiseFloor } from './messageCap'
 import { markRewound } from '../lib/rewind'
@@ -3308,7 +3308,10 @@ export function handleFrame(set: SetFn, get: GetFn, frame: { seq?: number; type:
         const more: Record<string, boolean> = {}
         // issue #25：滿了從頭截掉，並打開「還有更早的」。
         // 同 id 再來一次＝daemon 原地改過（遲到 hook 蓋掉備援回覆、晚到的 bot 報備補標來源），換掉。
-        const grown = upsertSorted(s.messages[botId] ?? [], msg, byTime, (a, b) => a.content === b.content && a.source === b.source && a.incomplete === b.incomplete && a.relay_from === b.relay_from && a.created_at === b.created_at)
+        // 兩份時間軸（bot 對話、群組時間軸）共用：同 id 的內容一樣才算沒變（#1050：群組時間軸原本用 insertSorted，同 id 會整個丟掉）。
+        const sameShown = (a: Message, b: Message) =>
+          a.content === b.content && a.source === b.source && a.incomplete === b.incomplete && a.relay_from === b.relay_from && a.created_at === b.created_at
+        const grown = upsertSorted(s.messages[botId] ?? [], msg, byTime, sameShown)
         if (grown) {
           const cut = capList(grown, capFor(s.messageCapFloors, botId))
           patch.messages = { ...s.messages, [botId]: cut.list }
@@ -3323,7 +3326,7 @@ export function handleFrame(set: SetFn, get: GetFn, frame: { seq?: number; type:
         if (bot) {
           const pid = bot.project_id
           const group = s.groupMessages[pid]
-          const grownGroup = group ? insertSorted(group, { ...msg, bot_id: botId, bot_name: bot.name }, byInsert) : null
+          const grownGroup = group ? upsertSorted(group, { ...msg, bot_id: botId, bot_name: bot.name }, byInsert, sameShown) : null
           if (grownGroup) {
             const cut = capList(grownGroup, capFor(s.messageCapFloors, pid))
             patch.groupMessages = { ...s.groupMessages, [pid]: cut.list }
