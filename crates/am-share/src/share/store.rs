@@ -73,6 +73,20 @@ pub async fn migrate(pool: &SqlitePool) -> Result<()> {
     )
     .execute(pool)
     .await?;
+    // #1038：遠端保留標記欠著沒放或沒拿掉的主機（ssh 失敗時記下，之後的巡邏補做）。不靠 bot／專案那一列：收尾時它們可能已經刪了。
+    sqlx::query(
+        "CREATE TABLE IF NOT EXISTS share_keep_pending (
+           host TEXT NOT NULL,
+           bot_id TEXT NOT NULL,
+           seq INTEGER NOT NULL,
+           attempts INTEGER NOT NULL DEFAULT 0,
+           last_error TEXT,
+           updated_at TEXT NOT NULL,
+           PRIMARY KEY (host, bot_id)
+         )",
+    )
+    .execute(pool)
+    .await?;
     let has_token: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM pragma_table_info('bot_shares') WHERE name = 'token')").fetch_one(pool).await?;
     if !has_token {
         sqlx::query("ALTER TABLE bot_shares ADD COLUMN token TEXT").execute(pool).await?;
@@ -130,6 +144,72 @@ pub async fn delete_restricted(pool: &SqlitePool, bot_id: &str) -> Result<(), sq
     sqlx::query("DELETE FROM shared_bots WHERE bot_id = ?").bind(bot_id).execute(pool).await?;
     sqlx::query("DELETE FROM bot_shares WHERE bot_id = ?").bind(bot_id).execute(pool).await?;
     Ok(())
+}
+
+/// 遠端保留標記欠著的一台（#1038）。`seq` 每記下一次加一：補做成功時只刪掉開始補做時的那一版，補做途中又有人記下新的就留著。
+#[derive(Debug, Clone, PartialEq, Eq, sqlx::FromRow)]
+pub struct KeepPending {
+    pub host: String,
+    pub bot_id: String,
+    pub seq: i64,
+    pub attempts: i64,
+}
+
+/// ssh 放／拿掉遠端標記失敗：記下這台欠一次。已經欠著就把 seq 加一、清掉失敗次數。
+pub async fn queue_keep(pool: &SqlitePool, host: &str, bot_id: &str) -> Result<(), sqlx::Error> {
+    sqlx::query(
+        "INSERT INTO share_keep_pending (host, bot_id, seq, attempts, last_error, updated_at) VALUES (?,?,1,0,NULL,?)
+         ON CONFLICT (host, bot_id) DO UPDATE SET seq = seq + 1, attempts = 0, updated_at = excluded.updated_at",
+    )
+    .bind(host)
+    .bind(bot_id)
+    .bind(db::now())
+    .execute(pool)
+    .await
+    .map(|_| ())
+}
+
+pub async fn pending_keeps(pool: &SqlitePool) -> Result<Vec<KeepPending>, sqlx::Error> {
+    sqlx::query_as("SELECT host, bot_id, seq, attempts FROM share_keep_pending ORDER BY updated_at").fetch_all(pool).await
+}
+
+/// 補做成功：刪掉開始補做時那一版（之後又有人記下新的，seq 不同，留著）。
+pub async fn settle_keep(pool: &SqlitePool, host: &str, bot_id: &str, seq: i64) -> Result<(), sqlx::Error> {
+    sqlx::query("DELETE FROM share_keep_pending WHERE host = ? AND bot_id = ? AND seq = ?").bind(host).bind(bot_id).bind(seq).execute(pool).await.map(|_| ())
+}
+
+/// 這一次直接放／拿掉成功了：之前欠的那一版已經被現況蓋過，不必再補。
+pub async fn forget_keep(pool: &SqlitePool, host: &str, bot_id: &str) -> Result<(), sqlx::Error> {
+    sqlx::query("DELETE FROM share_keep_pending WHERE host = ? AND bot_id = ?").bind(host).bind(bot_id).execute(pool).await.map(|_| ())
+}
+
+pub async fn note_keep_failure(pool: &SqlitePool, host: &str, bot_id: &str, seq: i64, error: &str) -> Result<(), sqlx::Error> {
+    sqlx::query("UPDATE share_keep_pending SET attempts = attempts + 1, last_error = ? WHERE host = ? AND bot_id = ? AND seq = ?")
+        .bind(error)
+        .bind(host)
+        .bind(bot_id)
+        .bind(seq)
+        .execute(pool)
+        .await
+        .map(|_| ())
+}
+
+/// 收尾用：bot 或專案可能已經標成刪除（甚至 `shared_bots` 那列已經沒了），仍要知道它在哪台主機。
+pub async fn host_of_bot(pool: &SqlitePool, bot_id: &str) -> Result<Option<String>, sqlx::Error> {
+    sqlx::query_scalar("SELECT p.host FROM bots b JOIN projects p ON p.id = b.project_id WHERE b.id = ?").bind(bot_id).fetch_optional(pool).await
+}
+
+/// 現役的分享 bot（bot 與專案都沒刪、`shared_bots` 有一列）：保留標記應該在。補做時照這個決定放或拿掉。
+pub async fn is_active_share(pool: &SqlitePool, bot_id: &str) -> Result<bool, sqlx::Error> {
+    sqlx::query_scalar(
+        "SELECT EXISTS(SELECT 1 FROM shared_bots r
+           JOIN bots b ON b.id = r.bot_id AND b.deleted_at IS NULL
+           JOIN projects p ON p.id = b.project_id AND p.deleted_at IS NULL
+          WHERE r.bot_id = ?)",
+    )
+    .bind(bot_id)
+    .fetch_one(pool)
+    .await
 }
 
 #[derive(Debug, Clone, sqlx::FromRow)]

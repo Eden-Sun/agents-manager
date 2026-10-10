@@ -66,19 +66,89 @@ pub async fn keep_share_outboxes<S: crate::outbox::ShareStorage + site::SiteEnv>
     }
 }
 
-/// 遠端專案的分享 bot：放（`keep=true`）或拿掉（`false`）遠端 outbox 的 `.am-share-keep`。本機的 bot 不做；失敗只記 warning。
+/// 遠端專案的分享 bot：放（`keep=true`）或拿掉（`false`）遠端 outbox 的 `.am-share-keep`。本機的 bot 不做。
 /// `include_deleted`：收尾時 bot／專案常常已經標成刪除，仍要找得到它在哪台主機。
+///
+/// ssh 失敗或主機連不上不能就此算完（#1038）：記進 `share_keep_pending`，由 [`drain_keep_pending`] 之後的巡邏補做。
+/// 主機不認得或連不上時，主機改從 DB 直接讀（bot 可能已刪、`shared_bots` 也可能已經沒了）；讀不到就只記 warning。
 async fn set_remote_keep<S: site::SiteEnv>(app: &S, bot_id: &str, keep: bool, include_deleted: bool) {
+    let pool = app.db_pool();
     let resolved = if include_deleted { site::resolve_including_deleted(app, bot_id).await } else { site::resolve(app, bot_id).await };
     match resolved {
-        Ok(site::ShareSite::Remote(remote)) => {
-            if let Err(e) = remote.mark_share_keep(keep).await {
-                tracing::warn!(bot = %bot_id, host = %remote.host, keep, error = %e, "could not update the remote share outbox keep mark");
+        Ok(site::ShareSite::Remote(remote)) => match remote.mark_share_keep(keep).await {
+            Ok(()) => {
+                if let Err(e) = store::forget_keep(pool, &remote.host, bot_id).await {
+                    tracing::warn!(bot = %bot_id, error = %e, "could not clear the pending remote keep mark");
+                }
             }
-        }
+            Err(e) => {
+                tracing::warn!(bot = %bot_id, host = %remote.host, keep, error = %e, "could not update the remote share outbox keep mark; queued for the periodic pass");
+                queue_keep_or_warn(pool, &remote.host, bot_id).await;
+            }
+        },
         Ok(site::ShareSite::Local { .. }) | Err(site::SiteError::NotShareBot) => {}
-        Err(site::SiteError::Unavailable) => {
-            tracing::warn!(bot = %bot_id, keep, "remote share outbox keep mark skipped: the host is unreachable or unknown");
+        Err(site::SiteError::Unavailable) => match store::host_of_bot(pool, bot_id).await {
+            Ok(Some(host)) if host != am_base::config::LOCAL_HOST => {
+                tracing::warn!(bot = %bot_id, host = %host, keep, "remote share outbox keep mark skipped: the host is unreachable or unknown; queued for the periodic pass");
+                queue_keep_or_warn(pool, &host, bot_id).await;
+            }
+            Ok(_) => {}
+            Err(e) => tracing::warn!(bot = %bot_id, keep, error = %e, "remote share outbox keep mark not recorded: could not look up the host"),
+        },
+    }
+}
+
+async fn queue_keep_or_warn(pool: &sqlx::SqlitePool, host: &str, bot_id: &str) {
+    if let Err(e) = store::queue_keep(pool, host, bot_id).await {
+        tracing::error!(bot = %bot_id, host, error = %e, "could not record the pending remote keep mark; it will not be retried");
+    }
+}
+
+/// 補做欠著的遠端保留標記（#1038）。每一列照 DB 現況放或拿掉（現役分享 bot 放、其餘拿掉），不照列上記的意圖：
+/// restore 或重新分享之後，舊的「拿掉」不會把現役 bot 的標記拿掉。只動那一列的主機與那顆 bot 自己的 outbox（路徑由 bot id 算），
+/// 不碰同一台主機上其他 bot 的標記。主機斷線的跳過、列留著；ssh 失敗記進 `attempts`／`last_error`，下一輪再試。
+/// 由 `runners::share_budget::tick` 每 [`budget::REFRESH_EVERY`] 呼叫一次。
+pub async fn drain_keep_pending<S: site::SiteEnv>(app: &S) {
+    let pool = app.db_pool();
+    let rows = match store::pending_keeps(pool).await {
+        Ok(rows) => rows,
+        Err(e) => {
+            tracing::warn!(error = %e, "could not list pending remote keep marks");
+            return;
+        }
+    };
+    for row in rows {
+        let Some(fence) = app.host_fence(&row.host).await else { continue };
+        let conn = site::FencedConn::new(fence);
+        if !conn.is_connected() {
+            continue;
+        }
+        let keep = match store::is_active_share(pool, &row.bot_id).await {
+            Ok(keep) => keep,
+            Err(e) => {
+                tracing::warn!(bot = %row.bot_id, error = %e, "could not decide the pending remote keep mark; skipped");
+                continue;
+            }
+        };
+        let outcome = match conn.home().await {
+            Ok(home) => match site::remote_site_at(conn, &row.host, home, app.instance().as_deref(), &row.bot_id, String::new()) {
+                Some(remote) => remote.mark_share_keep(keep).await.map_err(|e| e.to_string()),
+                None => Err("the outbox path cannot be computed".to_string()),
+            },
+            Err(e) => Err(e.to_string()),
+        };
+        match outcome {
+            Ok(()) => {
+                if let Err(e) = store::settle_keep(pool, &row.host, &row.bot_id, row.seq).await {
+                    tracing::warn!(bot = %row.bot_id, host = %row.host, error = %e, "could not clear the settled remote keep mark");
+                }
+            }
+            Err(error) => {
+                tracing::warn!(bot = %row.bot_id, host = %row.host, keep, attempts = row.attempts + 1, error = %error, "remote share outbox keep mark still pending; retrying on the next pass");
+                if let Err(e) = store::note_keep_failure(pool, &row.host, &row.bot_id, row.seq, &error).await {
+                    tracing::warn!(bot = %row.bot_id, error = %e, "could not record the remote keep mark failure");
+                }
+            }
         }
     }
 }
