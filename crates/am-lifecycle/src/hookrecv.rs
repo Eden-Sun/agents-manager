@@ -771,7 +771,9 @@ pub async fn repeats_answered_prompt(conn: &mut sqlx::SqliteConnection, conv: &s
 
 /// 只在既有那則是原文的（去空白）前綴且較短時才覆蓋；不是前綴就是另一句話，不能動。
 /// 交易內：跟回合的收尾寫在同一個交易裡（#115）。
-async fn upgrade_clipped_user_message(conn: &mut sqlx::SqliteConnection, turn_id: &str, full: &str) -> Result<()> {
+/// 把折行截斷的使用者回音補成 hook 的原文。回傳被補完的那一則（呼叫端要再推一次同 id，網頁才會換掉內容，#1006）；
+/// 沒有任何一則被補完回 `None`。
+async fn upgrade_clipped_user_message(conn: &mut sqlx::SqliteConnection, turn_id: &str, full: &str) -> Result<Option<db::Message>> {
     let full_sq = squash_ws(full);
     let rows: Vec<(String, String)> =
         sqlx::query_as("SELECT id, content FROM messages WHERE turn_id = ? AND role = 'user' ORDER BY id")
@@ -790,9 +792,10 @@ async fn upgrade_clipped_user_message(conn: &mut sqlx::SqliteConnection, turn_id
             .execute(&mut *conn)
             .await?;
         tracing::info!(turn = %turn_id, msg = %id, "prompt 回音被截斷，用 hook 的原文補完");
-        return Ok(());
+        let message: db::Message = sqlx::query_as("SELECT *, rowid AS seq FROM messages WHERE id = ?").bind(&id).fetch_one(&mut *conn).await?;
+        return Ok(Some(message));
     }
-    Ok(())
+    Ok(None)
 }
 
 /// 把 hook 帶來的 native id（去重鑰匙）記到回合上：只填空的、只動備援關掉或剛由它升級的回合。
@@ -1595,7 +1598,8 @@ pub async fn process_locked_for<H: HookHost>(app: &H, body: &HookBody, event_id:
                             added.push(msg);
                         } else {
                             // 刮下來的回音可能被折行截斷；hook 的原文較可信，補完下半截。
-                            upgrade_clipped_user_message(&mut tx, &t.id, u).await?;
+                            // 同一個 id 在 commit 後再推一次：前端遇到內容不同的同 id 訊息會換掉（#1006）。
+                            added.extend(upgrade_clipped_user_message(&mut tx, &t.id, u).await?);
                         }
                     } else if let Some(text) = human_started_prompt(&body.payload, transcript_read_path.as_deref()).await {
                         added.extend(store_resent_prompt_tx(app, &mut tx, &conv, &t, run.as_ref(), &text).await?);
@@ -2764,7 +2768,9 @@ mod external_claim_tests {
             .await
             .unwrap();
 
-        upgrade_clipped_user_message(&mut app.db.acquire().await.unwrap(), &turn_id, full).await.unwrap();
+        let upgraded = upgrade_clipped_user_message(&mut app.db.acquire().await.unwrap(), &turn_id, full).await.unwrap();
+        let upgraded = upgraded.expect("補完了一則");
+        assert_eq!((upgraded.content.as_str(), upgraded.source.as_str()), (full, "hook"));
 
         let rows: Vec<(String, String)> =
             sqlx::query_as("SELECT content, source FROM messages WHERE turn_id=? AND role='user'")
@@ -2777,13 +2783,71 @@ mod external_claim_tests {
         assert_eq!(rows[0].1, "hook");
 
         // 不是前綴的就別動：那是另一句話。
-        upgrade_clipped_user_message(&mut app.db.acquire().await.unwrap(), &turn_id, "完全不同的一句").await.unwrap();
+        let none = upgrade_clipped_user_message(&mut app.db.acquire().await.unwrap(), &turn_id, "完全不同的一句").await.unwrap();
+        assert!(none.is_none(), "不是前綴就不補");
         let after: String = sqlx::query_scalar("SELECT content FROM messages WHERE turn_id=? AND role='user'")
             .bind(&turn_id)
             .fetch_one(&app.db)
             .await
             .unwrap();
         assert_eq!(after, full);
+    }
+
+    /// #1006：外部回合的回音被 hook 原文補完後，同一則要再推一次（同 id），網頁才不會停在折行截斷的那一句。
+    #[tokio::test]
+    async fn a_clipped_prompt_upgrade_is_pushed_to_the_web() {
+        let env = tt::env().await;
+        let app = env.app.clone();
+        let bot_id = db::ulid();
+        sqlx::query(
+            "INSERT INTO bots (id, project_id, name, kind, args_json, autostart, inject_hooks, hook_token, created_at)
+             VALUES (?,?,'clipped-push','codex','[]',0,1,'tok',?)",
+        )
+        .bind(&bot_id)
+        .bind(&env.project_id)
+        .bind(db::now())
+        .execute(&app.db)
+        .await
+        .unwrap();
+        let conv = db::conversation_id(&app.db, &bot_id).await.unwrap();
+        let run_id = db::ulid();
+        sqlx::query(
+            "INSERT INTO runs (id, bot_id, state, agent_status, workspace_id, pane_id, agent_name, herdr_session, started_at)
+             VALUES (?,?,'running','working','ws-1','pane-1','agent','test',?)",
+        )
+        .bind(&run_id)
+        .bind(&bot_id)
+        .bind(db::now())
+        .execute(&app.db)
+        .await
+        .unwrap();
+        let turn_id = db::ulid();
+        sqlx::query(
+            "INSERT INTO turns (id, conversation_id, run_id, origin, status, delivery, created_at)
+             VALUES (?,?,?,'external','in_flight','ok',?)",
+        )
+        .bind(&turn_id)
+        .bind(&conv)
+        .bind(&run_id)
+        .bind(db::now())
+        .execute(&app.db)
+        .await
+        .unwrap();
+        let full = "請問我兩題，第二題 header『功能』請設 multiSelect: true，四個選項。問完就停著等我回答。";
+        let clipped = &full[..full.char_indices().nth(12).unwrap().0];
+        let echo = crate::lifecycle::insert_message(&app, &conv, Some(&turn_id), "user", clipped, "terminal_fallback", false, None)
+            .await
+            .unwrap();
+
+        let mut events = app.subscribe();
+        process(&app, &codex_done(&bot_id, full)).await.unwrap();
+
+        let pushed: Vec<_> = std::iter::from_fn(|| events.try_recv().ok())
+            .filter(|e| e.kind == "message_added")
+            .filter(|e| e.data["message"]["id"] == echo.id)
+            .collect();
+        assert_eq!(pushed.len(), 1, "被補完的那一則要再推一次");
+        assert_eq!(pushed[0].data["message"]["content"], full);
     }
 
     async fn unknown_turn(app: &Arc<App>, project_id: &str, kind: &str, prompt: &str) -> (String, String, String) {
