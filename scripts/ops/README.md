@@ -161,7 +161,7 @@ macOS launchd 的 `daemon-update` PATH 也要保留 `~/.local/bin`，因為 `dae
 
 同一顆 sha 建好後（`<checkout>/target/release/.built-for`）等安全窗口的那幾輪不會重建；`daemon-swap.sh` 結束碼 4（有人在忙）不算失敗，下一輪再試；service 身分檢查沒過（token 檔不見、能力探不出來）是 3，算失敗（設定錯誤不會自己好，issue #1178）。
 其他結束碼：10（換版**之前**中止：新 binary 的 `--version` 內嵌的 sha 不是要換的那顆、是髒樹建的、或舊 binary 沒內嵌 sha；什麼都沒動）推 `swap_binary_sha_mismatch`，不記進 `.rejected`；6（升過 schema、往前修）補寫 `.built` 並推 `swap_forward_fixed`；7（已回滾）推 `swap_rolled_back` 並記進 `.rejected`；8（換好但窗口沒交還）推 `swap_lease_not_released`；
-9（線上 daemon 太舊，沒有 restart-window 路由）推 `swap_daemon_too_old`。
+9（線上 daemon 太舊，沒有 restart-window 路由）推 `swap_daemon_too_old`；12（回滾後舊 binary 起不來、`/api/session` 30 秒內不通）不算已回滾，kick 走預設的失敗計數，要人工處理（issue #1102）。
 
 **首次上線／舊 daemon**：自動 kick 不帶核准 id；線上 daemon 還沒有 `POST /api/services/daemon-swap/restart-window` 時，照樣以 9 中止並回報。若執行的是已核准的舊部署工作，可在同一份 checkout 呼叫 `daemon-swap.sh --approval <id>`：只有偵測到舊 daemon（`service_old`／`bootstrap`）才會用 User token 和舊式核准租約 bootstrap；`service_old` 還必須有既存的 service token，缺檔會 fail closed。新版路由存在時接受但忽略這個相容參數，改走 service principal。首換成功後新 daemon 建立 service token，之後自動換版使用新路徑。腳本會先確認同一 checkout 的 `daemon-start.py` 可讀，否則在停 daemon 前以 3 中止。
 

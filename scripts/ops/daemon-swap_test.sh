@@ -129,7 +129,7 @@ setup() { # setup <checkout 的 SCHEMA_VERSION> <DB 目前的 user_version>
   echo ok > "$ROOT/integrity"
   : > "$DAEMON_LOG"
   export STUB_UV_AFTER_START="$1"  # 新 binary 起來之後 DB 會被 migrate 到這個版本
-  export STUB_SESSION_OK=1 STUB_SESSION_OK_AFTER_FORWARD=1 STUB_HEALTH_OK=1
+  export STUB_SESSION_OK=1 STUB_SESSION_OK_AFTER_FORWARD=1 STUB_SESSION_OK_AFTER_ROLLBACK=1 STUB_HEALTH_OK=1
   export STUB_ACQUIRE_HELD=true STUB_SAFE=true STUB_SUPERVISOR=idle
   # restart-window 回應裡 daemon 開窗口用的核准（空＝舊 daemon，回應不帶 approval）。
   export STUB_WINDOW_APPROVAL=ap-auto-1
@@ -294,6 +294,8 @@ STUB
 
   cat > "$ROOT/bin/curl" <<'STUB'
 #!/bin/bash
+# 回滾起回的舊 binary（內容是 old-binary）：成不成功由 STUB_SESSION_OK_AFTER_ROLLBACK 決定（issue #1102：回滾後也要驗它起得來）。
+if [ "$(cat "$AGM_REPO/target/release/agents-managerd" 2>/dev/null)" = old-binary ]; then [ -n "$STUB_SESSION_OK_AFTER_ROLLBACK" ] && exit 0 || exit 7; fi
 # 第二次啟動（launchctl submit 或 systemd-run）之後＝往前修那次重啟；成不成功由 STUB_SESSION_OK_AFTER_FORWARD 決定。
 starts=$(wc -l < "$AGM_DIR/starts.log" 2>/dev/null | tr -d ' '); starts=${starts:-0}
 if [ "$starts" -ge 2 ]; then [ -n "$STUB_SESSION_OK_AFTER_FORWARD" ] && exit 0 || exit 7; fi
@@ -543,6 +545,16 @@ check_file "回滾後保留舊 DB 備份" yes "$DAEMON_DB.bak-20000101-0000"
 check_eq "回滾後保留新舊兩份 DB 備份" "2" "$(db_backup_count)"
 teardown
 
+# 5e. 沒升 schema 的回滾：舊 binary 起回來了但 /api/session 不通 → 不能說「已回滾」，rc=12（issue #1102）。
+setup 10 10
+export STUB_SUPERVISOR=stopped STUB_SESSION_OK_AFTER_ROLLBACK=""
+rc=$(run)
+check_eq "回滾後舊 daemon 沒起來：rc=12（不是已回滾的 7）" "12" "$rc"
+check "log 講明回滾後 daemon 沒有在服務" "回滾後 daemon 沒有在服務" "$SWAP_LOG"
+check_no "沒起來時不說已回滾" "rolled back pid" "$SWAP_LOG"
+check_eq "舊 binary 確實被起過" "old-binary" "$(tail -1 "$AGM_DIR/started-binary.log")"
+teardown
+
 # 5a. 沒升 schema 的回滾：新 daemon 寫進 DB 的資料要留著（不是還原成 db@10）。
 setup 10 10
 export STUB_SUPERVISOR=stopped STUB_MUTATE_DB=1
@@ -582,7 +594,8 @@ exec /bin/cp "$@"
 STUB
 chmod +x "$ROOT/fakecp/cp"
 rc=$(PATH="$ROOT/fakecp:$PATH" run)
-check_eq "還原失敗仍走回滾結束（rc=7）" "7" "$rc"
+check_eq "DB 還原失敗不起任何 daemon，以 rc=11 留給人處理（不是已回滾的 7）" "11" "$rc"
+check_eq "DB 還原失敗時沒起舊 binary：最後一次還是換版那次" "new-binary" "$(tail -1 "$AGM_DIR/started-binary.log")"
 check_eq "原 DB 沒被動（新版寫的內容還在）" "mutated-by-new-binary" "$(cat "$DAEMON_DB")"
 check_eq "原 -wal 沒被刪" "stale-wal" "$(cat "$DAEMON_DB-wal" 2>/dev/null)"
 check_eq "原 -shm 沒被刪" "stale-shm" "$(cat "$DAEMON_DB-shm" 2>/dev/null)"
@@ -715,7 +728,8 @@ exec /bin/mv "$@"
 STUB
 chmod +x "$ROOT/fakemv/mv"
 rc=$(PATH="$ROOT/fakemv:$PATH" run)
-check_eq "rename 還原失敗仍走回滾結束（rc=7）" "7" "$rc"
+check_eq "rename 還原失敗不起任何 daemon，以 rc=11 留給人處理（不是已回滾的 7）" "11" "$rc"
+check_eq "rename 還原失敗時沒起舊 binary：最後一次還是換版那次" "new-binary" "$(tail -1 "$AGM_DIR/started-binary.log")"
 check_eq "rename 失敗保留新版 DB" "mutated-by-new-binary" "$(cat "$DAEMON_DB")"
 check_eq "rename 失敗保留 WAL" "stale-wal" "$(cat "$DAEMON_DB-wal" 2>/dev/null)"
 check_eq "rename 失敗保留 SHM" "stale-shm" "$(cat "$DAEMON_DB-shm" 2>/dev/null)"

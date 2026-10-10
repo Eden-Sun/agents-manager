@@ -713,6 +713,13 @@ for line in sys.stdin:
         print("%s (%s)" % (name, ident))' "$BEFORE_ROWS"
 }
 
+# 回滾起回舊 binary 之後等 /api/session（同換版主線與 forward-fix 的 30 秒）：起不來就不能說「已回滾」（issue #1102）。
+wait_session_after_rollback() {
+    local j=0
+    while [ $j -lt 30 ]; do api /api/session && return 0; sleep 1; j=$((j + 1)); done
+    return 1
+}
+
 rollback() {
     log "ROLLBACK requested: $*"
     # Capture children adopted by the new daemon before restoring the backup. Their panes can outlive
@@ -758,6 +765,10 @@ rollback() {
         rmdir "$AM_DATA/service-tokens" 2>/dev/null || true
         log "db left as is（schema 未升，舊 binary 可直接開；備份 ${DBB} 保留）"
         start; sleep 5
+        if ! wait_session_after_rollback; then
+            log "ERROR: 回滾後 daemon 沒有在服務（舊 binary 已換回，但 /api/session 30 秒內沒起來），不算已回滾，要人工處理"
+            exit 12
+        fi
         log "rolled back pid $(dpid)"
         exit 7
     fi
@@ -832,7 +843,16 @@ finally:
     elif [ -n "$ROLLBACK_NEW_CHILDREN" ]; then
         log "WARN: rollback restored the DB but these newly adopted children may still have live panes: $ROLLBACK_NEW_CHILDREN"
     fi
+    # DB 還原失敗：DB 還是 v(N+1)，舊 binary 開不了；新 binary 剛剛 forward-fix 也起不來。不起任何 daemon，留給人處理（issue #1102）。
+    if [ "$RESTORE_READY" != done ]; then
+        log "不起任何 daemon：舊 binary 開不了已升 schema 的 DB，要先人工還原 DB 再啟動"
+        exit 11
+    fi
     start; sleep 5
+    if ! wait_session_after_rollback; then
+        log "ERROR: 回滾後 daemon 沒有在服務（舊 binary 已換回，但 /api/session 30 秒內沒起來），不算已回滾，要人工處理"
+        exit 12
+    fi
     log "rolled back pid $(dpid)"
     exit 7
 }
