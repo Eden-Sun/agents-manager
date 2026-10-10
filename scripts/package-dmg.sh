@@ -48,6 +48,8 @@ fi
 # ---------------------------------------------------------------- 2. daemon
 step "daemon (agents-managerd, $TARGET)"
 cargo build --release -p agents-managerd --target "$TARGET"
+# 嵌進去的前端必須是剛建好的 web/dist（#1071）：前端單獨重建時 cargo 有沒有重編，不能只靠它的判斷，這裡比對一次，不一致就不出包。
+scripts/verify-embedded-ui.sh "target/$TARGET/release/agents-managerd" web/dist
 
 # Tauri looks for `<externalBin>-<triple>` and drops the suffix inside the bundle.
 mkdir -p desktop/binaries
