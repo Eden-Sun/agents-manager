@@ -307,8 +307,8 @@ impl ProviderPort for App {
         let host = db::bot_host(&self.db, &bot.id).await.ok()?;
         self.hosts.fence(&host).await
     }
-    async fn login_on_turn_ok(&self, bot: &db::Bot) {
-        crate::runners::login_prompt::on_turn_ok(&self.shared(), bot).await
+    async fn login_on_turn_ok(&self, bot: &db::Bot, admitted: Option<&crate::hosts::HostFence>) {
+        crate::runners::login_prompt::on_turn_ok(&self.shared(), bot, admitted).await
     }
     fn codex_migration_on_blocked(&self, run: &db::Run) {
         crate::runners::codex_model_migration::on_blocked(&self.shared(), run)
