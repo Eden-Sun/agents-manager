@@ -711,14 +711,16 @@ pub async fn note_purpose(app: &(impl crate::capabilities::Db + crate::capabilit
         return Ok(());
     }
     let now = crate::db::now();
+    // 用途任何 bot 都能更新（別顆 bot 的 pane 也一樣，沿用既有行為）；歸屬欄位只在 `may_claim_owner` 說可以時才補。
+    let claim = may_claim_owner(app.db(), host, pane_id, &bot.id).await?;
     sqlx::query(
         "INSERT INTO panes (pane_id, host, kind, owner_bot_id, project_id, bound_project_id, purpose, last_output_at, first_seen, last_seen)
          VALUES (?,?,'shell',?,?,?,?,?,?,?)
          ON CONFLICT(host, pane_id) DO UPDATE SET
            purpose=CASE WHEN excluded.purpose IS NULL OR excluded.purpose='' THEN panes.purpose ELSE excluded.purpose END,
-           owner_bot_id=COALESCE(panes.owner_bot_id, excluded.owner_bot_id),
-           project_id=COALESCE(panes.project_id, excluded.project_id),
-           bound_project_id=COALESCE(panes.bound_project_id, excluded.bound_project_id)",
+           owner_bot_id=CASE WHEN ? THEN COALESCE(panes.owner_bot_id, excluded.owner_bot_id) ELSE panes.owner_bot_id END,
+           project_id=CASE WHEN ? THEN COALESCE(panes.project_id, excluded.project_id) ELSE panes.project_id END,
+           bound_project_id=CASE WHEN ? THEN COALESCE(panes.bound_project_id, excluded.bound_project_id) ELSE panes.bound_project_id END",
     )
     .bind(pane_id)
     .bind(host)
@@ -729,11 +731,42 @@ pub async fn note_purpose(app: &(impl crate::capabilities::Db + crate::capabilit
     .bind(&now)
     .bind(&now)
     .bind(&now)
+    .bind(claim)
+    .bind(claim)
+    .bind(claim)
     .execute(app.db())
     .await?;
+    if !claim {
+        tracing::warn!(host, pane_id, bot = %bot.id, "pane purpose reported for a pane this bot does not own; only the purpose was recorded");
+    }
     tracing::info!(host, pane_id, bot = %bot.id, purpose, "pane purpose reported by the shim");
     announce_if_changed(app, host).await;
     Ok(())
+}
+
+/// shim 開完 pane 立刻回報，這段時間內補歸屬才算數（#1101）。
+const CLAIM_WINDOW_SECS: i64 = 60;
+
+/// 這一次回報能不能補 owner／綁定（#1101）。沒有列＝這顆 pane 還沒被掃到，shim 剛開完它來回報，照以前接受。
+/// 有列：要還沒被人 adopt、不是掃描判成使用者的、owner 空著或就是回報者，而且列是最近才出現的。
+/// 不然任何持有自己 token 的 bot 都能替別人的 pane（例如使用者自己的 shell）寫入歸屬，GC 就會把它關掉。
+async fn may_claim_owner(db: &SqlitePool, host: &str, pane_id: &str, reporter: &str) -> Result<bool> {
+    let row: Option<(Option<String>, String, i64, Option<String>)> =
+        sqlx::query_as("SELECT owner_bot_id, owned_by, owner_adopted, first_seen FROM panes WHERE host=? AND pane_id=?")
+            .bind(host)
+            .bind(pane_id)
+            .fetch_optional(db)
+            .await?;
+    let Some((owner, owned_by, adopted, first_seen)) = row else {
+        return Ok(true);
+    };
+    if adopted != 0 || owned_by == "user" || owner.as_deref().is_some_and(|o| o != reporter) {
+        return Ok(false);
+    }
+    let fresh = first_seen
+        .and_then(|t| chrono::DateTime::parse_from_rfc3339(&t).ok())
+        .is_some_and(|t| chrono::Utc::now().signed_duration_since(t) <= chrono::Duration::seconds(CLAIM_WINDOW_SECS));
+    Ok(fresh)
 }
 
 /// 一輪 GC（§6.5e 生命週期）。只碰 `shell`，而且只碰可以碰的：
@@ -1470,6 +1503,57 @@ mod tests {
         let purpose: Option<String> =
             sqlx::query_scalar("SELECT purpose FROM panes WHERE pane_id='w1:pS'").fetch_one(&app.db).await.unwrap();
         assert_eq!(purpose.as_deref(), Some("logs"));
+        std::fs::remove_dir_all(&app.data_dir).ok();
+    }
+
+    /// #1101：掃描已經把這顆 pane 判成使用者的（cwd 在專案底下、環境讀不到）。別的 bot 拿 pane id 來回報，
+    /// 不能把歸屬補成它自己，下一輪掃描也不能因此變成 bot 的 pane——GC 只碰 bot 的，使用者的 shell 不能被它關掉。
+    #[tokio::test]
+    async fn another_bots_report_cannot_turn_a_users_pane_into_a_gc_candidate() {
+        let app = app().await;
+        project_and_bot(&app).await;
+        let now = crate::db::now();
+        sqlx::query("INSERT INTO bots (id,project_id,name,kind,hook_token,created_at) VALUES ('b2','p1','b2','claude','t',?)")
+            .bind(&now)
+            .execute(&app.db)
+            .await
+            .unwrap();
+        let b2 = crate::db::bot(&app.db, "b2").await.unwrap().unwrap();
+        let pane = json!({"pane_id": "w1:pU", "workspace_id": "w1", "tab_id": "t1", "cwd": "/tmp/p1/src", "revision": 1});
+        let idle = HashMap::from([("w1:pU".to_string(), Some(Observed { facts: crate::memproc::PaneFacts { pids: vec![1], shell_only: true, ..Default::default() }, ports: vec![] }))]);
+        record_scan(&app, "local", &[pane.clone()], &idle, &crate::db::now()).await.unwrap();
+        let (owned_by,): (String,) = sqlx::query_as("SELECT owned_by FROM panes WHERE pane_id='w1:pU'").fetch_one(&app.db).await.unwrap();
+        assert_eq!(owned_by, "user", "前提：掃描先把它判成使用者的");
+
+        note_purpose(&app, "local", "w1:pU", &b2, "x").await.unwrap();
+        record_scan(&app, "local", &[pane], &idle, &crate::db::now()).await.unwrap();
+        let (owner, owned_by): (Option<String>, String) =
+            sqlx::query_as("SELECT owner_bot_id, owned_by FROM panes WHERE pane_id='w1:pU'").fetch_one(&app.db).await.unwrap();
+        assert_eq!((owner, owned_by.as_str()), (None, "user"), "別的 bot 的回報不能改歸屬");
+        let old = "2026-09-01T01:00:00.000Z";
+        assert_eq!(gc_skip("shell", false, Some(owned_by.as_str()), 0, old, old, 21600), Some("user_pane"), "使用者的 pane 不是 GC 候選");
+        std::fs::remove_dir_all(&app.data_dir).ok();
+    }
+
+    /// #1101：補歸屬只在 shim 剛開完 pane 的那段時間內算數。列早就存在、又沒有 owner 的，回報只能寫用途。
+    #[tokio::test]
+    async fn a_report_for_an_old_unowned_pane_only_records_the_purpose() {
+        let app = app().await;
+        project_and_bot(&app).await;
+        let bot = crate::db::bot(&app.db, "b1").await.unwrap().unwrap();
+        let old = "2026-09-01T01:00:00.000Z";
+        sqlx::query("INSERT INTO panes (pane_id, host, kind, last_output_at, first_seen, last_seen) VALUES ('w1:pO','local','shell',?,?,?)")
+            .bind(old)
+            .bind(old)
+            .bind(old)
+            .execute(&app.db)
+            .await
+            .unwrap();
+
+        note_purpose(&app, "local", "w1:pO", &bot, "hi").await.unwrap();
+        let (owner, purpose, owned_by): (Option<String>, Option<String>, String) =
+            sqlx::query_as("SELECT owner_bot_id, purpose, owned_by FROM panes WHERE pane_id='w1:pO'").fetch_one(&app.db).await.unwrap();
+        assert_eq!((owner, purpose.as_deref(), owned_by.as_str()), (None, Some("hi"), "none"), "用途寫進去，歸屬不補");
         std::fs::remove_dir_all(&app.data_dir).ok();
     }
 
