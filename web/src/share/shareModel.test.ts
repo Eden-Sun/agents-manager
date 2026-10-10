@@ -1,6 +1,6 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
-import { mergeMessages, ShareHttpError, shareErrorText, shareSafeHref, toShareFiles, toShareMessage, toSharePage, toStatus, tokenFromLocation } from './shareModel.ts'
+import { fmtSize, mergeMessages, ShareHttpError, shareErrorText, shareSafeHref, toShareFiles, toShareMessage, toSharePage, toStatus, tokenFromLocation } from './shareModel.ts'
 
 const T = 'AbCdEfGhIjKlMnOpQrStUvWxYz0123456789_-abcd'
 
@@ -80,4 +80,13 @@ test('status 是 daemon 的 lamp：working／blocked／starting 都算「還沒�
   for (const s of ['working', 'blocked', 'starting']) assert.equal(toStatus({ status: s }), 'working', s)
   for (const s of ['idle', 'offline', 'unknown', '']) assert.equal(toStatus({ status: s }), 'idle', s)
   assert.match(shareErrorText(new ShareHttpError(409), 'send'), /你打的字還在/)
+})
+
+test('fmtSize 邊界：差一點滿 1 MB 寫 1.0 MB，不是 1024 KB', () => {
+  assert.equal(fmtSize(1024 * 1024 - 1), '1.0 MB')
+  assert.equal(fmtSize(10 * 1024 - 1), '10 KB')
+  assert.equal(fmtSize(1023), '1023 B')
+  assert.equal(fmtSize(1536), '1.5 KB')
+  assert.equal(fmtSize(20 * 1024), '20 KB')
+  assert.equal(fmtSize(25 * 1024 * 1024), '25.0 MB')
 })

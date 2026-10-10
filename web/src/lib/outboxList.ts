@@ -7,11 +7,15 @@ import type { Turn } from '../api/types'
  *  那邊是一格寬度的 RAM（`1.4G`），這邊是檔案大小，使用者看的是「下載會多大」。 */
 export function fileSize(bytes: number): string {
   if (!Number.isFinite(bytes) || bytes <= 0) return '0 B'
-  const mb = bytes / 1024 ** 2
-  if (mb >= 1) return `${mb < 10 ? mb.toFixed(1) : Math.round(mb)} MB`
+  // 先看「四捨五入後」落在哪：1023.6 KB 進位是 1024，要寫成 1.0 MB；9.96 進位是 10，不寫 10.0。
+  const num = (v: number) => {
+    const one = Math.round(v * 10) / 10
+    return one < 10 ? one.toFixed(1) : String(Math.round(v))
+  }
   const kb = bytes / 1024
-  if (kb >= 1) return `${kb < 10 ? kb.toFixed(1) : Math.round(kb)} KB`
-  return `${Math.round(bytes)} B`
+  if (kb < 1) return `${Math.round(bytes)} B`
+  if (Math.round(kb) < 1024) return `${num(kb)} KB`
+  return `${num(bytes / 1024 ** 2)} MB`
 }
 
 /**

@@ -138,7 +138,10 @@ export function mergeMessages(a: readonly ShareMessage[], b: readonly ShareMessa
 
 export function fmtSize(n: number): string {
   if (n < 1024) return `${n} B`
-  if (n < 1024 * 1024) return `${(n / 1024).toFixed(n < 10 * 1024 ? 1 : 0)} KB`
+  const kb = n / 1024
+  // 四捨五入後滿 1024 KB 就進 MB；9.96 KB 進位成 10，不寫 10.0。
+  const one = Math.round(kb * 10) / 10
+  if (Math.round(kb) < 1024) return `${one < 10 ? one.toFixed(1) : Math.round(kb)} KB`
   return `${(n / 1024 / 1024).toFixed(1)} MB`
 }
 

@@ -139,3 +139,15 @@ test('子資料夾裡的檔：相對路徑拆成資料夾前綴與檔名（存�
   assert.equal(isPreviewableImage('相簿/IMG_1.PNG'), true, '子資料夾裡的圖照樣能預覽')
 })
 
+
+test('fileSize 邊界：進位後不出現「1024 KB」「10.0 KB」「10.0 MB」', () => {
+  assert.equal(fileSize(1024 * 1024 - 1), '1.0 MB')
+  assert.equal(fileSize(1023.4 * 1024), '1023 KB')
+  assert.equal(fileSize(10 * 1024 - 1), '10 KB')
+  assert.equal(fileSize(10 * 1024 ** 2 - 1), '10 MB')
+  assert.equal(fileSize(1023), '1023 B')
+  assert.equal(fileSize(1024), '1.0 KB')
+  assert.equal(fileSize(18 * 1024), '18 KB')
+  assert.equal(fileSize(1.1 * 1024 ** 2), '1.1 MB')
+  assert.equal(fileSize(0), '0 B')
+})
