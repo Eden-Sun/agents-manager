@@ -24,6 +24,13 @@ const mock = sharedMock
 const textarea = () => document.querySelector<HTMLTextAreaElement>('.composer textarea')!
 const chats = (requests: FakeRequest[]) => requests.filter((r) => r.method === 'POST' && /\/projects\/[^/]+\/chat/.test(r.path))
 
+async function dropFile(name: string) {
+  const input = document.querySelector<HTMLInputElement>('input[type=file]')!
+  const file = new File([new Uint8Array([137, 80, 78, 68])], name, { type: 'image/png' })
+  Object.defineProperty(input, 'files', { value: [file], configurable: true })
+  await act(async () => { input.dispatchEvent(new Event('change', { bubbles: true })) })
+}
+
 function failNextUpload(): () => void {
   const original = mock.upload.bind(mock)
   let armed = true
@@ -152,4 +159,44 @@ test('群組輸入框：Office 類複製的文字不變成附件；只有 Files 
   const filePaste = await paste({ files: [image], types: ['Files'], getData: () => '' })
   assert.equal(filePaste.defaultPrevented, true)
   assert.equal(document.querySelectorAll('.attach-tray .attach-thumb').length, 1)
+})
+
+test('群組：送出期間加進來的附件留在托盤', { timeout: 30_000 }, async () => {
+  const requests = mockApi(mock)
+  const { project_id: projectId } = (await mock.request('POST', '/projects', { path: '/tmp/group-late-attachment', label: 'group-late-attachment' })) as { project_id: string }
+  await mock.request('POST', `/projects/${projectId}/bots`, { name: 'gla-claude', kind: 'claude' })
+  await useStore.getState().refreshState()
+  const bot = useStore.getState().bots.find((b) => b.name === 'gla-claude')!
+  await mock.request('POST', `/bots/${bot.id}/start`)
+  await until(async () => {
+    await useStore.getState().refreshState()
+    return useStore.getState().runs[bot.id]?.state === 'running' && !groupComposerState(useStore.getState(), projectId).disabled
+  }, 'gla-claude running 且群組輸入區可送出')
+  await mount(<GroupChatPanel projectId={projectId} onOpenSidebar={() => {}} />)
+  await settle(200)
+
+  const originalFetch = globalThis.fetch
+  let releaseChat!: () => void
+  const chatGate = new Promise<void>((resolve) => { releaseChat = resolve })
+  globalThis.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
+    if (init?.method === 'POST' && /\/projects\/[^/]+\/chat/.test(String(input))) await chatGate
+    return originalFetch(input, init)
+  }) as typeof fetch
+  try {
+    await typeInto(textarea(), '@all hi')
+    await keydown(textarea(), 'Enter')
+    await until(() => textarea().disabled, '群組訊息送出中')
+    await dropFile('late.png')
+    await until(() => document.querySelector('.attach-thumb:not(.uploading)') !== null, '送出期間加入的附件上傳完成')
+    releaseChat()
+    await until(() => chats(requests).length === 1, '第一則群組訊息完成')
+    await settle()
+    assert.equal(textarea().value, '')
+    assert.equal(document.querySelectorAll('.attach-tray .attach-thumb').length, 1)
+    const first = chats(requests)[0].body as { attachments?: string[] }
+    assert.equal(first.attachments, undefined, '送出期間新加的檔案不會帶進第一則')
+  } finally {
+    releaseChat()
+    globalThis.fetch = originalFetch
+  }
 })
