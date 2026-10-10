@@ -266,3 +266,180 @@ async fn an_invalid_token_stays_deny_even_when_another_share_allows_embed() {
     let ok = c.get(format!("{base}/s/{token}/api/info")).send().await.unwrap();
     assert!(ok.headers().get("x-frame-options").is_none(), "只有開了的那條放寬");
 }
+
+/// issue #1069：
+/// 1. 第一次開啟帶 `allow_embed: true` 時，若第二步寫入失敗，整筆交易必須 roll back，不能留下公開可用的 token。
+#[tokio::test]
+async fn post_share_rolls_back_token_if_second_write_fails() {
+    let e = tt::env().await;
+    let (t, _) = trusted_bot(&e.app, &e.project_id, "embed-fail-second").await;
+    set_base(&e.app).await;
+    let base = serve(crate::api::router(e.app.clone())).await;
+    let c = client();
+
+    // 注入故障：當 UPDATE allow_embed 時觸發 SQLite ABORT
+    sqlx::query(
+        "CREATE TRIGGER fail_allow_embed_update BEFORE UPDATE OF allow_embed ON bot_shares
+         BEGIN
+             SELECT RAISE(ABORT, 'injected failure on second write');
+         END;",
+    )
+    .execute(&e.app.db)
+    .await
+    .unwrap();
+
+    let res = c
+        .post(format!("{base}/api/bots/{}/share", t.id))
+        .header("X-AM-Token", "test-token")
+        .json(&json!({"enabled": true, "allow_embed": true}))
+        .send()
+        .await
+        .unwrap();
+
+    assert!(res.status().is_server_error(), "第二步寫入失敗應回傳 5xx: status={}", res.status());
+    assert!(
+        store::share(&e.app.db, &t.id).await.unwrap().is_none(),
+        "失敗後不能留下公開啟用的 token"
+    );
+}
+
+/// 2. 既有已開啟的分享切換 allow_embed（false→true／true→false）必須發出 bot_share_changed 事件，且新設定被 refetch 讀到；
+///    重新送出相同設定（idempotency）不能換 token 也不應發出重複事件。
+#[tokio::test]
+async fn post_share_existing_share_allow_embed_toggle_emits_event_and_is_idempotent() {
+    let e = tt::env().await;
+    let (t, _) = trusted_bot(&e.app, &e.project_id, "embed-toggle-event").await;
+    set_base(&e.app).await;
+    let base = serve(crate::api::router(e.app.clone())).await;
+    let c = client();
+    let mut rx = e.app.subscribe();
+
+    // 第一次開啟，allow_embed: false
+    let res = c
+        .post(format!("{base}/api/bots/{}/share", t.id))
+        .header("X-AM-Token", "test-token")
+        .json(&json!({"enabled": true, "allow_embed": false}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(res.status(), 200);
+    let initial_share = store::share(&e.app.db, &t.id).await.unwrap().expect("share exists");
+    assert!(!initial_share.allow_embed);
+
+    // 清空 rx 裡的初始事件
+    while rx.try_recv().is_ok() {}
+
+    // 切換 allow_embed: true（既有分享）
+    let res = c
+        .post(format!("{base}/api/bots/{}/share", t.id))
+        .header("X-AM-Token", "test-token")
+        .json(&json!({"enabled": true, "allow_embed": true}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(res.status(), 200);
+
+    // 必須收到 bot_share_changed 事件
+    let mut found = false;
+    let deadline = tokio::time::Instant::now() + Duration::from_millis(1000);
+    while let Ok(Ok(ev)) = tokio::time::timeout_at(deadline, rx.recv()).await {
+        if ev.kind == "bot_share_changed" && ev.data.get("bot_id").and_then(Value::as_str) == Some(&t.id) {
+            assert_eq!(ev.data["enabled"], true);
+            assert_eq!(ev.data["allow_embed"], true);
+            found = true;
+            break;
+        }
+    }
+    assert!(found, "既有分享切換 allow_embed=true 必須發出 bot_share_changed 事件");
+
+    // T2 重新讀取必須看到 allow_embed: true
+    let g: Value = c
+        .get(format!("{base}/api/bots/{}/share", t.id))
+        .header("X-AM-Token", "test-token")
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(g["allow_embed"], true);
+
+    // 重送相同設定（idempotency）：不換 token，不發重複事件
+    while rx.try_recv().is_ok() {}
+    let res = c
+        .post(format!("{base}/api/bots/{}/share", t.id))
+        .header("X-AM-Token", "test-token")
+        .json(&json!({"enabled": true, "allow_embed": true}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(res.status(), 200);
+    let current_share = store::share(&e.app.db, &t.id).await.unwrap().expect("share exists");
+    assert_eq!(current_share.token, initial_share.token, "重送相同設定不能 rotate token");
+
+    // 不應收到 bot_share_changed
+    let deadline = tokio::time::Instant::now() + Duration::from_millis(200);
+    let mut redundant = false;
+    while let Ok(Ok(ev)) = tokio::time::timeout_at(deadline, rx.recv()).await {
+        if ev.kind == "bot_share_changed" && ev.data.get("bot_id").and_then(Value::as_str) == Some(&t.id) {
+            redundant = true;
+            break;
+        }
+    }
+    assert!(!redundant, "相同設定不應發出重複的 bot_share_changed 事件");
+
+    // 再切換回 false
+    while rx.try_recv().is_ok() {}
+    let res = c
+        .post(format!("{base}/api/bots/{}/share", t.id))
+        .header("X-AM-Token", "test-token")
+        .json(&json!({"enabled": true, "allow_embed": false}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(res.status(), 200);
+
+    let mut found_off = false;
+    let deadline = tokio::time::Instant::now() + Duration::from_millis(1000);
+    while let Ok(Ok(ev)) = tokio::time::timeout_at(deadline, rx.recv()).await {
+        if ev.kind == "bot_share_changed" && ev.data.get("bot_id").and_then(Value::as_str) == Some(&t.id) {
+            assert_eq!(ev.data["enabled"], true);
+            assert_eq!(ev.data["allow_embed"], false);
+            found_off = true;
+            break;
+        }
+    }
+    assert!(found_off, "切換回 allow_embed=false 必須發出 bot_share_changed 事件");
+}
+
+/// 3. 第一次開啟帶 allow_embed: true 時，收到的 bot_share_changed 必須觀察到 allow_embed: true
+#[tokio::test]
+async fn post_share_first_enable_with_embed_observes_allow_embed_true_on_event() {
+    let e = tt::env().await;
+    let (t, _) = trusted_bot(&e.app, &e.project_id, "embed-first-enable").await;
+    set_base(&e.app).await;
+    let base = serve(crate::api::router(e.app.clone())).await;
+    let c = client();
+    let mut rx = e.app.subscribe();
+
+    let res = c
+        .post(format!("{base}/api/bots/{}/share", t.id))
+        .header("X-AM-Token", "test-token")
+        .json(&json!({"enabled": true, "allow_embed": true}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(res.status(), 200);
+
+    let mut found = false;
+    let deadline = tokio::time::Instant::now() + Duration::from_millis(1000);
+    while let Ok(Ok(ev)) = tokio::time::timeout_at(deadline, rx.recv()).await {
+        if ev.kind == "bot_share_changed" && ev.data.get("bot_id").and_then(Value::as_str) == Some(&t.id) {
+            assert_eq!(ev.data["enabled"], true);
+            assert_eq!(ev.data["allow_embed"], true);
+            found = true;
+            break;
+        }
+    }
+    assert!(found, "新開分享必須發出帶 allow_embed=true 的 bot_share_changed 事件");
+}

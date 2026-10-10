@@ -276,25 +276,94 @@ fn hint(token: &str) -> String {
     format!("…{}", &token[token.len().saturating_sub(4)..])
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SetShareOutcome {
+    pub token: Option<String>,
+    pub changed: bool,
+    pub allow_embed: bool,
+}
+
+/// 開啟分享或更新 allow_embed 設定（issue #1069）。
+///
+/// 整個過程在單一交易內完成：初次開啟若設定 allow_embed 失敗，交易回滾不留下公開 token。
+/// 既有分享切換 allow_embed 則不變更 token；若設定未變動則 `changed` 為 false，避免重複發送事件。
+pub async fn set_share_enabled(
+    pool: &SqlitePool,
+    bot_id: &str,
+    allow_embed: Option<bool>,
+) -> Result<SetShareOutcome, sqlx::Error> {
+    let mut tx = pool.begin().await?;
+    let existing: Option<(bool,)> = sqlx::query_as(
+        "SELECT allow_embed FROM bot_shares WHERE bot_id = ?",
+    )
+    .bind(bot_id)
+    .fetch_optional(&mut *tx)
+    .await?;
+
+    let (token, changed, final_allow_embed) = match existing {
+        None => {
+            let token = new_token();
+            let done = sqlx::query(
+                "INSERT OR IGNORE INTO bot_shares (bot_id, token_hash, token_hint, created_at, token)
+                 SELECT ?,?,?,?,? WHERE EXISTS (
+                   SELECT 1 FROM shared_bots r JOIN bots b ON b.id = r.bot_id AND b.deleted_at IS NULL
+                     JOIN projects p ON p.id = b.project_id AND p.deleted_at IS NULL WHERE r.bot_id = ?
+                 )",
+            )
+            .bind(bot_id)
+            .bind(token_hash(&token))
+            .bind(hint(&token))
+            .bind(db::now())
+            .bind(&token)
+            .bind(bot_id)
+            .execute(&mut *tx)
+            .await?;
+
+            if done.rows_affected() == 1 {
+                let allow = if let Some(allow) = allow_embed {
+                    sqlx::query("UPDATE bot_shares SET allow_embed = ? WHERE bot_id = ?")
+                        .bind(allow)
+                        .bind(bot_id)
+                        .execute(&mut *tx)
+                        .await?;
+                    allow
+                } else {
+                    false
+                };
+                (Some(token), true, allow)
+            } else {
+                (None, false, false)
+            }
+        }
+        Some((old_allow,)) => {
+            if let Some(new_allow) = allow_embed {
+                if new_allow != old_allow {
+                    sqlx::query("UPDATE bot_shares SET allow_embed = ? WHERE bot_id = ?")
+                        .bind(new_allow)
+                        .bind(bot_id)
+                        .execute(&mut *tx)
+                        .await?;
+                    (None, true, new_allow)
+                } else {
+                    (None, false, old_allow)
+                }
+            } else {
+                (None, false, old_allow)
+            }
+        }
+    };
+
+    tx.commit().await?;
+    Ok(SetShareOutcome {
+        token,
+        changed,
+        allow_embed: final_allow_embed,
+    })
+}
+
 /// 開分享。已經開著就不動（回 `None`，網址照 [`share`] 存的拿）：重按開關不該讓已經發出去的連結失效，要換請走 [`rotate`]。
 pub async fn enable(pool: &SqlitePool, bot_id: &str) -> Result<Option<String>, sqlx::Error> {
-    let token = new_token();
-    let done = sqlx::query(
-        "INSERT OR IGNORE INTO bot_shares (bot_id, token_hash, token_hint, created_at, token)
-         SELECT ?,?,?,?,? WHERE EXISTS (
-           SELECT 1 FROM shared_bots r JOIN bots b ON b.id = r.bot_id AND b.deleted_at IS NULL
-             JOIN projects p ON p.id = b.project_id AND p.deleted_at IS NULL WHERE r.bot_id = ?
-         )",
-    )
-        .bind(bot_id)
-        .bind(token_hash(&token))
-        .bind(hint(&token))
-        .bind(db::now())
-        .bind(&token)
-        .bind(bot_id)
-        .execute(pool)
-        .await?;
-    Ok((done.rows_affected() == 1).then_some(token))
+    Ok(set_share_enabled(pool, bot_id, None).await?.token)
 }
 
 /// 換新 token：舊的 hash 與原文一起被蓋掉，同一刻起舊連結 404。沒開著＝`None`。
@@ -316,8 +385,8 @@ pub async fn rotate(pool: &SqlitePool, bot_id: &str) -> Result<Option<String>, s
     Ok((done.rows_affected() == 1).then_some(token))
 }
 
-pub async fn disable(pool: &SqlitePool, bot_id: &str) -> Result<(), sqlx::Error> {
-    sqlx::query("DELETE FROM bot_shares WHERE bot_id = ?").bind(bot_id).execute(pool).await.map(|_| ())
+pub async fn disable(pool: &SqlitePool, bot_id: &str) -> Result<bool, sqlx::Error> {
+    Ok(sqlx::query("DELETE FROM bot_shares WHERE bot_id = ?").bind(bot_id).execute(pool).await?.rows_affected() > 0)
 }
 
 /// token → bot id。分享關了、bot 刪了、不是受限 bot（不該發生，但不信任單一張表）一律 `None`。
