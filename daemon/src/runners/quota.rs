@@ -11,12 +11,9 @@ use crate::quota::{
     for_each_host, keys_for_bot, limit_hit_blocks_model, limit_hit_expired,
     pane_window_used, parse_utc, pollable_hosts, quota_base_for_host,
     quota_from_codex, quota_from_codex_status, quota_key, running_model,
-    set_fenced, status_line_sighting, LimitHit,
+    set_fenced, status_line_sighting, LimitHit, CODEX_PANE_POLL, CODEX_POLL,
 };
 use crate::state::App;
-
-pub const CODEX_POLL: Duration = Duration::from_secs(300);
-pub const CODEX_PANE_POLL: Duration = Duration::from_secs(3);
 
 /// 擋住這顆 bot 的撞限：沒過期、而且撞的那一桶管得到它在跑的模型（[`limit_hit_blocks_model`]）。
 ///
@@ -536,5 +533,12 @@ mod tests {
         let got = try_limit_hit_for_bot(&app, &bot).await;
         assert!(!matches!(got, Ok(None)), "不知道在跑什麼：照擋，不是沒撞限：{got:?}");
         sqlx::query("ALTER TABLE runs_unreadable RENAME TO runs").execute(&app.db).await.unwrap();
+    }
+
+    #[test]
+    fn the_codex_poller_reads_panes_once_a_minute_not_every_three_seconds() {
+        assert_eq!(CODEX_PANE_POLL, Duration::from_secs(60), "SPEC §14.2：狀態列每 60 秒讀一次");
+        assert_eq!(CODEX_POLL, Duration::from_secs(300));
+        assert_eq!(CODEX_PANE_POLL, crate::quota::CODEX_PANE_POLL, "只有 am-base 那一份");
     }
 }
