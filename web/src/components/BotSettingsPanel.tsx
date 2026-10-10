@@ -13,7 +13,7 @@ import { BotShareSection } from './BotShareSection'
 import { CopyChip } from './CopyChip'
 import { KindTag } from './KindTag'
 import { ApiModelFields } from './ModelPicker'
-import { computeBotPatch, effectiveForm, pruneSaved, type BotFormKey } from './botSettingsForm'
+import { computeBotPatch, effectiveForm, pruneSaved, settledKeys, type BotFormKey, type BotFormValues } from './botSettingsForm'
 import './botSettings.css'
 
 /**
@@ -264,6 +264,8 @@ export function BotSettingsPanel({ botId }: { botId: string }) {
   const [loginSent, setLoginSent] = useState(false)
   const [cliOpening, setCliOpening] = useState(false)
   const nameRef = useRef<HTMLInputElement>(null)
+  const formRef = useRef<BotFormValues>({ name: '', model: null, effort: null, fast: false, persona: '', identity: '' })
+  formRef.current = { name, model, effort, fast, persona, identity }
   // 手機是全螢幕 sheet，不用 anchor 座標（只會推歪）。
   const phone = useMediaQuery(PHONE_QUERY)
   const anchor = useStore((s) => (phone ? null : s.settingsAnchor))
@@ -404,9 +406,10 @@ export function BotSettingsPanel({ botId }: { botId: string }) {
       // 記 daemon **實際採用**的值，不是送出去的：停用別名會被換掉（#539），記送出的那個會讓
       // `pruneSaved` 永遠追不上，欄位就一直顯示一個沒在用的模型、還算不出 dirty。
       setSaved((s) => ({ ...s, ...sent, ...(res.remappedModel ? { model: res.remappedModel.to } : {}) }))
+      const settled = settledKeys(sent, formRef.current)
       setTouched((t) => {
         const n = new Set(t)
-        for (const k of Object.keys(sent)) n.delete(k as BotFormKey)
+        for (const k of settled) n.delete(k)
         return n
       })
       setBanner(res.needsRestart ? 'restart' : res.deferred ? null : 'saved')

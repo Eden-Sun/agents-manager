@@ -1,6 +1,6 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
-import { computeBotPatch, effectiveForm, pruneSaved, type BotFormBase, type BotFormKey, type BotFormValues } from './botSettingsForm.ts'
+import { computeBotPatch, effectiveForm, pruneSaved, settledKeys, type BotFormBase, type BotFormKey, type BotFormValues } from './botSettingsForm.ts'
 
 const base: BotFormBase = { name: 'am', model: 'opus', effort: 'high', fast: false, persona: null, identity: null }
 const same: BotFormValues = { name: 'am', model: 'opus', effort: 'high', fast: false, persona: '', identity: '' }
@@ -70,4 +70,32 @@ test('store 還沒追上：存值照留（避免誤跳放棄未儲存）', () =>
 test('存過 null（清回預設）與 fast：以 store 的值相等為準', () => {
   assert.deepEqual(pruneSaved({ effort: null, fast: true }, { ...base, effort: null, fast: true }), {})
   assert.deepEqual(pruneSaved({ persona: null }, { ...base, persona: 'x' }), { persona: null })
+})
+
+test('settledKeys：送出後沒再改的欄位才放掉', () => {
+  assert.deepEqual(
+    settledKeys({ name: 'n1', persona: 'A' }, { name: 'n1', model: null, effort: null, fast: false, persona: 'A', identity: '' }),
+    ['name', 'persona'],
+  )
+})
+
+test('settledKeys：送出後又改過的那一欄留著', () => {
+  assert.deepEqual(
+    settledKeys({ name: 'n1', persona: 'A' }, { name: 'n1', model: null, effort: null, fast: false, persona: 'AB', identity: '' }),
+    ['name'],
+  )
+})
+
+test('settledKeys：正規化跟送出時一致', () => {
+  const sent = { persona: null, identity: null, fast: true, model: null }
+  const now = { name: 'x', model: null, effort: 'high', fast: true, persona: '   ', identity: '' }
+  assert.deepEqual(settledKeys(sent, now), ['model', 'fast', 'persona', 'identity'])
+  assert.deepEqual(
+    settledKeys({ persona: 'A' }, { name: 'x', model: null, effort: null, fast: false, persona: ' A ', identity: '' }),
+    ['persona'],
+  )
+})
+
+test('settledKeys：沒送出的 key 不會出現', () => {
+  assert.deepEqual(settledKeys({}, same), [])
 })
