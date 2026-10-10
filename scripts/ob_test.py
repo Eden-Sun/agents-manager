@@ -102,6 +102,18 @@ class QueueTests(unittest.TestCase):
         with self.assertRaisesRegex(OBError, "project_already_linked"):
             self.s.link(A, "a", UB)
 
+    def test_link_refuses_a_conversation_another_project_already_retired(self):
+        ua2 = "https://chatgpt.com/c/project-a2"
+        self.s.link(A, "a", UA)
+        # A 輪替到 ua2：UA 退役但仍屬於 A。
+        self.s.db.execute("UPDATE conversations SET retired_at=?, retired_why='rotated' WHERE url=?", (time.time(), UA))
+        self.s.db.execute("INSERT INTO conversations(project_id,url,started_at) VALUES (?,?,?)", (A, ua2, time.time()))
+        self.s.db.execute("UPDATE projects SET url=? WHERE id=?", (ua2, A))
+        with self.assertRaisesRegex(OBError, "conversation_already_owned"):
+            self.s.link(B, "b", UA)
+        self.assertIsNone(self.s.project(B))          # 整筆回滾，B 沒被建出來
+        self.assertEqual(self.s.project(A)["url"], ua2)
+
     def test_external_or_malformed_url_is_refused(self):
         for url in ("https://evil.test/c/id", UA + "?token=x", None, "https://chatgpt.com/"):
             with self.assertRaises(OBError):
