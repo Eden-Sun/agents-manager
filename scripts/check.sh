@@ -314,6 +314,7 @@ check_changed() {
     if echo "$parts" | grep -qx ops; then check_ops; fi
     if echo "$parts" | grep -qx web; then check_web; fi
     if echo "$parts" | grep -qx daemon; then
+        local am_base_release_triage_test=0
         if [ ! -f web/dist/index.html ]; then
             step "daemon: temporary web/dist stub (skip web build on the Rust fast path)"
             mkdir -p web/dist
@@ -336,6 +337,12 @@ check_changed() {
             fi
         else
             filters="$(printf '%s\n' "$files" | bash scripts/ci-daemon-filters.sh)"
+            if printf '%s\n' "$filters" | grep -qx '__am_base_release_triage_submission__'; then
+                am_base_release_triage_test=1
+                step "crate: cargo test -p am-base -- the_task_template_teaches_a_submission_the_daemon_accepts"
+                env -u AM_MODEL -u AM_EFFORT -u AM_DATA_DIR cargo test -p am-base --locked the_task_template_teaches_a_submission_the_daemon_accepts
+                filters="$(printf '%s\n' "$filters" | grep -vx '__am_base_release_triage_submission__' || true)"
+            fi
             if printf '%s\n' "$filters" | grep -qx '__all__'; then
                 step "daemon: cargo test（build／crate-wide test input）"
                 run_daemon_tests
@@ -346,7 +353,7 @@ check_changed() {
                 step "daemon: cargo test（改到的模組：$(echo $filters)）"
                 # shellcheck disable=SC2086  # 過濾字串是 [a-z_:]，不含空白與萬用字元
                 run_daemon_tests -- $filters
-            elif ! printf '%s\n' "$filters" | grep -qx '__all__'; then
+            elif ! printf '%s\n' "$filters" | grep -qx '__all__' && [ "$am_base_release_triage_test" = 0 ]; then
                 echo "daemon: 沒有可挑的測試子集（只動了 main.rs 之類不屬於任何模組的檔案）；要跑測試用 CHECK_TESTS=<過濾字串>"
             fi
         fi
