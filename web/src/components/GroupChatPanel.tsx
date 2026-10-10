@@ -377,11 +377,12 @@ function GroupComposer({
       return
     }
     setSending(true)
-    void sendGroupChat(projectId, body, files.ids).then((res) => {
+    const sent = files.ids
+    void sendGroupChat(projectId, body, sent).then((res) => {
       setSending(false)
       if (res) {
         setText('')
-        files.clear()
+        files.clearSent(sent)
       }
     })
   }
