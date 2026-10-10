@@ -197,6 +197,19 @@ pub async fn refresh_codex_from_panes(app: &Arc<App>, host: &str) -> usize {
 /// `Ok(false)` = codex not installed there (quota stays null).
 pub async fn refresh_codex(app: &Arc<App>, host: &str) -> Result<bool> {
     let fence = app.hosts.fence(host).await.ok_or_else(|| anyhow::anyhow!("unknown host `{host}`"))?;
+    if host != crate::config::LOCAL_HOST {
+        // 同 refresh_grok／refresh_claude_account：偵測快照說沒裝就不連線（遠端的「沒裝」只會以 `codex: not found` 被 2>/dev/null 吃掉）。
+        // 空快照＝還沒偵測，不是沒裝。本機照舊走下面的 `is not installed` 判斷。
+        if !app.tools.lock().await.contains_key(host) {
+            crate::tools::detect(app, host).await?;
+        }
+        if !app.hosts.is_current(&fence).await {
+            anyhow::bail!("host `{host}` changed before its codex quota probe");
+        }
+        if crate::tools::cached_path(app, host, "codex").await.is_none() {
+            return Ok(false);
+        }
+    }
     let r = crate::runners::models::codex_rpc(app, host, "account/rateLimits/read", json!({})).await;
     let r = match r {
         Ok(v) => v,
@@ -533,6 +546,39 @@ mod tests {
         let got = try_limit_hit_for_bot(&app, &bot).await;
         assert!(!matches!(got, Ok(None)), "不知道在跑什麼：照擋，不是沒撞限：{got:?}");
         sqlx::query("ALTER TABLE runs_unreadable RENAME TO runs").execute(&app.db).await.unwrap();
+    }
+
+    /// issue #1139：遠端主機沒裝 codex 時回「沒裝」、不連線（以前每 5 分鐘白跑一條 ssh 再記一行 WARN）。
+    #[tokio::test]
+    async fn a_remote_host_without_codex_reports_not_installed_without_an_ssh() {
+        let env = crate::testing::env().await;
+        let app = env.app.clone();
+        let host = "nocodex";
+        app.hosts
+            .insert_remote_for_test(crate::config::HostCfg {
+                shared_session: false,
+                name: host.into(),
+                ssh: "unused".into(),
+                ssh_port: 22,
+                ssh_opts: vec![],
+                herdr_session: "am-test".into(),
+                remote_path: String::new(),
+            })
+            .await;
+        // 偵測快照有這台、但沒有 `codex` 這一格＝沒裝。
+        app.tools.lock().await.insert(
+            host.into(),
+            crate::tools::HostTools {
+                tools: Default::default(),
+                identities: Default::default(),
+                shell_identities: vec![],
+                utc_offset_secs: None,
+                herdr_cli: None,
+                checked_at: crate::db::now(),
+            },
+        );
+        crate::hosts::set_ssh_fake(host, |_| panic!("沒裝 codex 的主機不該被 ssh"));
+        assert!(!refresh_codex(&app, host).await.unwrap(), "沒裝＝Ok(false)，不是 Err");
     }
 
     #[test]
