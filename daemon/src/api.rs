@@ -4756,18 +4756,25 @@ async fn get_mem_pane(State(app): State<Arc<App>>, Query(q): Query<HashMap<Strin
     Ok(Json(crate::app_ports_p3::pane_preview(&app, &host, pane_id, socket, lines).await?))
 }
 
+/// `pid` 要是正的 32 位元整數：`as i32` 會把 2³²+N 截成 N，守衛驗的與訊號打的就都是另一顆行程。
+fn kill_pid(body: &Value) -> Result<i32, LcError> {
+    body.get("pid")
+        .and_then(Value::as_i64)
+        .and_then(|p| i32::try_from(p).ok())
+        .filter(|p| *p > 0)
+        .ok_or_else(|| LcError::Bad("pid must be a positive integer".into()))
+}
+
 /// SPEC §15.4. Guard rails (in the tree, never herdr／daemon, never a bot) live in `memproc::kill`,
 /// which re-samples first and confirms the pid is still the same process in the same command (#526).
 async fn kill_mem_process(State(app): State<Arc<App>>, Json(body): Json<Value>) -> Result<Json<Value>, LcError> {
     let host = body.get("host").and_then(|v| v.as_str()).unwrap_or(crate::config::LOCAL_HOST).to_string();
-    let Some(pid) = body.get("pid").and_then(|v| v.as_i64()) else {
-        return Err(LcError::Bad("pid required".into()));
-    };
+    let pid = kill_pid(&body)?;
     let signal = body.get("signal").and_then(|v| v.as_str()).unwrap_or("TERM");
     if app.hosts.get(&host).await.is_none() {
         return Err(LcError::NotFound(format!("unknown host `{host}`")));
     }
-    match crate::memproc::kill(&app, &host, pid as i32, signal).await {
+    match crate::memproc::kill(&app, &host, pid, signal).await {
         Err(e) => Err(LcError::Upstream(format!("{e:#}"))),
         Ok(Ok(v)) => Ok(Json(v)),
         Ok(Err(crate::memproc::KillDenied::NotInTree)) => Err(LcError::Bad(format!("pid {pid} 不在 {host} 的 herdr 樹裡"))),
@@ -4780,6 +4787,19 @@ async fn kill_mem_process(State(app): State<Arc<App>>, Json(body): Json<Value>) 
         )),
         Ok(Err(crate::memproc::KillDenied::Bot(id))) => {
             Err(LcError::conflict("bot_process", json!({"bot_id": id, "message": "這是 AG Man 的 bot，請用停止 bot"})))
+        }
+    }
+}
+
+#[cfg(test)]
+mod mem_kill_pid_tests {
+    use super::*;
+
+    #[test]
+    fn kill_pid_refuses_values_that_would_wrap_onto_another_process() {
+        assert_eq!(kill_pid(&json!({"pid": 59407})).unwrap(), 59407);
+        for bad in [json!({"pid": 4294967396i64}), json!({"pid": 2147483648i64}), json!({"pid": 0}), json!({"pid": -1}), json!({"pid": "12"}), json!({"pid": 1.5}), json!({})] {
+            assert!(matches!(kill_pid(&bad), Err(LcError::Bad(_))), "{bad} 要 400");
         }
     }
 }
