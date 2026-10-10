@@ -1,13 +1,22 @@
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex, OnceLock};
+use futures::{stream, StreamExt};
 use crate::child_done::{child_already_reported, has_recent_near_duplicate, message_for, truncate, CRID_PREFIX, MAX_REPLY_CHARS};
 use crate::events::ports::TurnCommands;
 use crate::state::App;
 
-fn notification_lock() -> &'static tokio::sync::Mutex<()> {
-    static V: OnceLock<tokio::sync::Mutex<()>> = OnceLock::new();
-    V.get_or_init(Default::default)
+/// 同一位 parent 的完成通知（DB 判斷＋送出）串行；不同 parent 互不等（#1033）。
+/// 只包住 DB 判斷與送出，畫面讀取、背景工作查詢這類外部 I/O 都在鎖外做。
+pub(crate) fn parent_lock(parent_id: &str) -> Arc<tokio::sync::Mutex<()>> {
+    static V: OnceLock<Mutex<HashMap<String, Arc<tokio::sync::Mutex<()>>>>> = OnceLock::new();
+    let mut map = V.get_or_init(Default::default).lock().unwrap_or_else(|e| e.into_inner());
+    // 沒有人持有、也沒人在等的 parent 順手移掉，表不會隨 bot 數一直長。
+    map.retain(|k, m| k == parent_id || Arc::strong_count(m) > 1);
+    map.entry(parent_id.to_string()).or_default().clone()
 }
+
+/// sweep 同時處理幾位 parent 的完成通知；一位 parent 慢只佔一格，其餘照跑（#1033）。
+const SWEEP_PARENTS_AT_ONCE: usize = 8;
 
 fn working() -> &'static Mutex<HashSet<String>> {
     static V: OnceLock<Mutex<HashSet<String>>> = OnceLock::new();
@@ -73,8 +82,8 @@ pub fn on_completed_turn(app: &Arc<App>, turn_id: &str) {
 
 /// Notify all completed child turns that have no durable parent notice yet.
 pub async fn sweep(app: &Arc<App>) -> usize {
-    let candidates: Vec<String> = match sqlx::query_scalar(
-        "SELECT t.id
+    let candidates: Vec<(String, String)> = match sqlx::query_as(
+        "SELECT t.id, b.parent_bot_id
            FROM turns t
            JOIN conversations c ON c.id = t.conversation_id
            JOIN bots b ON b.id = c.bot_id
@@ -135,18 +144,33 @@ pub async fn sweep(app: &Arc<App>) -> usize {
         }
     };
 
-    let mut started = 0;
-    for turn_id in candidates {
-        let Some(working) = Working::start(&turn_id) else {
-            continue;
-        };
-        started += 1;
-        if let Err(e) = notify_turn(app, &turn_id).await {
-            tracing::warn!(turn = %turn_id, error = ?e, "child done sweep notification failed");
+    // 依 parent 分組（組內保留 SQL 的順序，最新的先）：不同 parent 並行、同一 parent 一個一個來，
+    // 這樣「較新的已通知、較舊的視為被取代」仍成立，而慢的 parent 不會卡住別人的回合（#1033）。
+    let mut by_parent: Vec<(String, Vec<String>)> = Vec::new();
+    for (turn_id, parent_id) in candidates {
+        match by_parent.iter_mut().find(|(p, _)| *p == parent_id) {
+            Some((_, turns)) => turns.push(turn_id),
+            None => by_parent.push((parent_id, vec![turn_id])),
         }
-        drop(working);
     }
-    started
+    stream::iter(by_parent)
+        .map(|(_, turns)| async move {
+            let mut started = 0;
+            for turn_id in turns {
+                let Some(working) = Working::start(&turn_id) else {
+                    continue;
+                };
+                started += 1;
+                if let Err(e) = notify_turn(app, &turn_id).await {
+                    tracing::warn!(turn = %turn_id, error = ?e, "child done sweep notification failed");
+                }
+                drop(working);
+            }
+            started
+        })
+        .buffer_unordered(SWEEP_PARENTS_AT_ONCE)
+        .fold(0, |sum, started| async move { sum + started })
+        .await
 }
 
 #[derive(sqlx::FromRow, Debug)]
@@ -163,7 +187,6 @@ struct CompletedTurn {
 }
 
 pub(crate) async fn notify_turn(app: &Arc<App>, turn_id: &str) -> anyhow::Result<()> {
-    let _notification_guard = notification_lock().lock().await;
     let row: Option<CompletedTurn> = sqlx::query_as(
         "SELECT t.id, t.status, b.id AS child_id, b.name AS child_name, b.parent_bot_id AS parent_id,
                 t.completed_at, t.run_id, b.kind,
@@ -193,7 +216,17 @@ pub(crate) async fn notify_turn(app: &Arc<App>, turn_id: &str) -> anyhow::Result
         tracing::debug!(child = %turn.child_name, turn = %turn.id, "deferring a terminal-fallback completion notice: the child is still working");
         return Ok(());
     }
+    if crate::db::active_run(&app.db, &turn.parent_id).await?.is_none() {
+        return Ok(());
+    }
+    if background_work_running(app, turn.run_id.as_deref(), &turn.kind).await {
+        tracing::debug!(child = %turn.child_name, turn = %turn.id, "deferring child completion notice while background work is active");
+        return Ok(());
+    }
 
+    // 以下是 DB 判斷＋送出，同一位 parent 之間串行，避免兩條路徑各自判斷完都送出一則（#1033）。
+    let parent = parent_lock(&turn.parent_id);
+    let _parent_guard = parent.lock().await;
     let base_crid = format!("{CRID_PREFIX}{}:{}", turn.child_id, turn.id);
     let parent_conversation = crate::db::conversation_id(&app.db, &turn.parent_id).await?;
     // 這個來源回合在 parent 那邊最後一則通知怎麼了（#874）：字沒打進去就收成 failed 的，冷卻過後以 `:r<n>` 補送；
@@ -260,18 +293,6 @@ pub(crate) async fn notify_turn(app: &Arc<App>, turn_id: &str) -> anyhow::Result
     )
     .await?;
     if reported {
-        return Ok(());
-    }
-
-    if crate::db::active_run(&app.db, &turn.parent_id)
-        .await?
-        .is_none()
-    {
-        return Ok(());
-    }
-
-    if background_work_running(app, turn.run_id.as_deref(), &turn.kind).await {
-        tracing::debug!(child = %turn.child_name, turn = %turn.id, "deferring child completion notice while background work is active");
         return Ok(());
     }
 

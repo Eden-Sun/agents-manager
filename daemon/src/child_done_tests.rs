@@ -3,6 +3,8 @@
     use super::*;
     use crate::runners::child_done::sweep;
     use crate::db;
+    use crate::state::App;
+    use std::sync::Arc;
 
     struct Fixture {
         env: crate::testing::Env,
@@ -20,20 +22,33 @@
         let parent = crate::testing::claude_bot(&app, &env.project_id, "parent").await;
         let parent_run = crate::testing::fake_run(&app, &parent.id).await;
         let parent_conversation = db::conversation_id(&app.db, &parent.id).await.unwrap();
+        let (child_id, child_run, child_conversation, child_turn) = child_of(&app, &env.project_id, &parent.id, source, status).await;
+        Fixture {
+            env,
+            parent_run,
+            parent_conversation,
+            child_id,
+            child_run,
+            child_conversation,
+            child_turn,
+        }
+    }
 
+    /// 掛在 `parent_bot_id` 底下的一顆 child，完成一個帶回覆的回合；回傳 (child id, run, conversation, turn)。
+    async fn child_of(app: &Arc<App>, project_id: &str, parent_bot_id: &str, source: &str, status: &str) -> (String, String, String, String) {
         let child_id = db::ulid();
         sqlx::query(
             "INSERT INTO bots (id, project_id, name, kind, args_json, autostart, inject_hooks, hook_token, managed_by, parent_bot_id, created_at)
              VALUES (?,?,'child','claude','[]',0,1,'child-token','child',?,?)",
         )
         .bind(&child_id)
-        .bind(&env.project_id)
-        .bind(&parent.id)
+        .bind(project_id)
+        .bind(parent_bot_id)
         .bind(db::now())
         .execute(&app.db)
         .await
         .unwrap();
-        let child_run = crate::testing::fake_run(&app, &child_id).await;
+        let child_run = crate::testing::fake_run(app, &child_id).await;
         let child_conversation = db::conversation_id(&app.db, &child_id).await.unwrap();
         let child_turn = db::ulid();
         let started_at = db::iso_in(-60);
@@ -63,15 +78,7 @@
         .execute(&app.db)
         .await
         .unwrap();
-        Fixture {
-            env,
-            parent_run,
-            parent_conversation,
-            child_id,
-            child_run,
-            child_conversation,
-            child_turn,
-        }
+        (child_id, child_run, child_conversation, child_turn)
     }
 
     async fn add_completed_turn(f: &Fixture, reply: &str) -> String {
@@ -226,6 +233,53 @@
         notify_turn(&f.env.app, &f.child_turn).await.unwrap();
         assert_eq!(sweep(&f.env.app).await, 0);
         assert_eq!(notice_count(&f).await, 0);
+    }
+
+    /// #1033：P1 的判斷＋送出卡在它自己的串行位置上時，P2 的完成通知照樣由 sweep 送出，sweep 也不必等 P1 才開始。
+    #[tokio::test]
+    async fn a_slow_parent_does_not_hold_up_another_parents_sweep() {
+        let f = fixture("terminal_fallback", "completed_fallback").await;
+        let app = f.env.app.clone();
+        let p1: String = sqlx::query_scalar("SELECT parent_bot_id FROM bots WHERE id = ?")
+            .bind(&f.child_id)
+            .fetch_one(&app.db)
+            .await
+            .unwrap();
+        let p2 = crate::testing::claude_bot(&app, &f.env.project_id, "parent-2").await;
+        crate::testing::fake_run(&app, &p2.id).await;
+        let p2_conversation = db::conversation_id(&app.db, &p2.id).await.unwrap();
+        let (c3, _, _, c3_turn) = child_of(&app, &f.env.project_id, &p2.id, "hook", "completed").await;
+        let c3_crid = format!("{CRID_PREFIX}{c3}:{c3_turn}");
+        let notices_for_c3 = || async {
+            sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM turns WHERE conversation_id=? AND client_request_id=?")
+                .bind(&p2_conversation)
+                .bind(&c3_crid)
+                .fetch_one(&app.db)
+                .await
+                .unwrap()
+        };
+
+        let slow = crate::runners::child_done::parent_lock(&p1);
+        let held = slow.lock().await;
+        let sweeping = {
+            let app = app.clone();
+            tokio::spawn(async move { sweep(&app).await })
+        };
+        let mut delivered = false;
+        for _ in 0..200 {
+            if notices_for_c3().await == 1 {
+                delivered = true;
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+        }
+        assert!(delivered, "P2 的通知要照送，不等 P1 放鎖");
+        assert!(!sweeping.is_finished(), "P1 還卡著，這一輪 sweep 還沒結束");
+        assert_eq!(notice_count(&f).await, 0, "P1 還沒送");
+
+        drop(held);
+        assert_eq!(sweeping.await.unwrap(), 2, "兩顆 parent 的回合都被處理");
+        assert_eq!(notice_count(&f).await, 1, "P1 在放鎖後才送出");
     }
 
     #[tokio::test]
