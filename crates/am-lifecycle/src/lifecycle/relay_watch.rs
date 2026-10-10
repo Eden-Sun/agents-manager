@@ -31,6 +31,9 @@ pub struct Watch {
     pub text: String,
     pub turn_id: Option<String>,
     started: Instant,
+    /// 期限到了可不可以把回合判成「沒送達」。接回時回合已經開超過 [`GIVE_UP_AFTER`] 的不行：
+    /// 重啟前它有沒有被收下，這裡已經看不出來，收尾留給 hook／終端備援／`stuck_turns`（#1202）。
+    may_fail: bool,
     /// 宣告的字第一次被看到留在輸入列（agent idle）的時刻；看不到就清掉。
     held_since: Option<Instant>,
     nudges: u32,
@@ -217,6 +220,10 @@ pub async fn step(app: &impl RelayWatchContext, w: &mut Watch, now: Instant) -> 
 
 async fn give_up(app: &impl RelayWatchContext, w: &Watch) -> Step {
     let Some(turn_id) = w.turn_id.as_deref() else { return Step::Done };
+    // 重啟前就開的回合：不知道字有沒有被收下，只收工（#1202）。
+    if !w.may_fail {
+        return Step::Done;
+    }
     let why = "別的 agent 交辦的這句話沒有被收下：字沒進輸入列，或補了 Enter 也沒有反應（畫面沒有重繪），agent 沒有接手，這一回合不會有回覆。";
     let res: anyhow::Result<Option<db::Message>> = async {
         let mut tx = app.db().begin().await?;
@@ -260,7 +267,17 @@ pub async fn on_resolved_announce(app: &impl RelayWatchContext, from_bot: &str, 
     let turn_id = open_turn(app, &run, from_bot, from_turn, text).await;
     spawn_watch(
         app,
-        Watch { run_id: run.id.clone(), bot_id: run.bot_id.clone(), text: text.to_string(), turn_id, started: Instant::now(), held_since: None, nudges: 0, rev_at_nudge: None },
+        Watch {
+            run_id: run.id.clone(),
+            bot_id: run.bot_id.clone(),
+            text: text.to_string(),
+            turn_id,
+            started: Instant::now(),
+            may_fail: true,
+            held_since: None,
+            nudges: 0,
+            rev_at_nudge: None,
+        },
     );
 }
 
@@ -295,8 +312,8 @@ pub async fn rearm_host(app: &impl RelayWatchContext, host: &str) {
 }
 
 async fn restore_open_watches(app: &impl crate::capabilities::Db, host: &str) -> anyhow::Result<Vec<Watch>> {
-    let rows: Vec<(String, String, String, String)> = sqlx::query_as(
-        "SELECT t.id, r.id, r.bot_id, m.content
+    let rows: Vec<(String, String, String, String, String)> = sqlx::query_as(
+        "SELECT t.id, r.id, r.bot_id, m.content, t.created_at
            FROM turns t
            JOIN runs r ON r.id = t.run_id
            JOIN bots b ON b.id = r.bot_id
@@ -308,17 +325,28 @@ async fn restore_open_watches(app: &impl crate::capabilities::Db, host: &str) ->
     .bind(host)
     .fetch_all(app.db())
     .await?;
+    let (now, now_wall) = (Instant::now(), chrono::Utc::now());
     Ok(rows
         .into_iter()
-        .map(|(turn_id, run_id, bot_id, text)| Watch {
-            run_id,
-            bot_id,
-            text,
-            turn_id: Some(turn_id),
-            started: Instant::now(),
-            held_since: None,
-            nudges: 0,
-            rev_at_nudge: None,
+        .map(|(turn_id, run_id, bot_id, text, created_at)| {
+            // 回合已經開了多久：讀不懂的時間當成很舊（不判失敗）；時鐘往回跳（未來的時間）當成剛開。
+            let age = match chrono::DateTime::parse_from_rfc3339(&created_at) {
+                Ok(t) => (now_wall - t.with_timezone(&chrono::Utc)).to_std().unwrap_or_default(),
+                Err(_) => GIVE_UP_AFTER,
+            };
+            // 期限從開回合那一刻接著算，不從重啟重新算（#1202）。
+            let may_fail = age < GIVE_UP_AFTER;
+            Watch {
+                run_id,
+                bot_id,
+                text,
+                turn_id: Some(turn_id),
+                started: if may_fail { now.checked_sub(age).unwrap_or(now) } else { now },
+                may_fail,
+                held_since: None,
+                nudges: 0,
+                rev_at_nudge: None,
+            }
         })
         .collect())
 }
@@ -352,7 +380,7 @@ mod tests {
     }
 
     fn watch(f: &F, turn_id: Option<String>, at: Instant) -> Watch {
-        Watch { run_id: f.run_id.clone(), bot_id: f.bot_id.clone(), text: TEXT.into(), turn_id, started: at, held_since: None, nudges: 0, rev_at_nudge: None }
+        Watch { run_id: f.run_id.clone(), bot_id: f.bot_id.clone(), text: TEXT.into(), turn_id, started: at, may_fail: true, held_since: None, nudges: 0, rev_at_nudge: None }
     }
 
     fn keys_sent(f: &F) -> usize {
@@ -446,6 +474,44 @@ mod tests {
         assert_eq!(step(&app, &mut watch, t0).await, Step::Waiting, "first observe the restored composer");
         assert_eq!(step(&app, &mut watch, t0 + NUDGE_AFTER).await, Step::Nudged, "a prompt left in the composer must still receive Enter");
         assert_eq!(keys_sent(&f), 1);
+    }
+
+    /// #1202：重啟前早就開的交辦回合（超過 `GIVE_UP_AFTER`）：接回的盯梢期限到了只收工，不把它判成「沒送達」。
+    #[tokio::test]
+    async fn a_restored_watch_for_an_old_turn_never_fails_it_as_undelivered() {
+        let f = fixture("old-relay-turn").await;
+        let app = f.env.app.clone();
+        let sender = tt::claude_bot(&app, &f.env.project_id, "old-relay-sender").await;
+        let run = db::run(app.db(), &f.run_id).await.unwrap().unwrap();
+        let tid = open_turn(&app, &run, &sender.id, None, TEXT).await.expect("開了回合");
+        sqlx::query("UPDATE turns SET created_at = ? WHERE id = ?").bind(db::iso_in(-600)).bind(&tid).execute(app.db()).await.unwrap();
+        // agent 閒著、輸入列是空的：字早就送出去了。
+        f.env.herdr.live_pane(&f.pane, tt::LivePane { width: Some(120), ..Default::default() });
+
+        let mut w = restore_open_watches(&app, "local").await.unwrap().pop().expect("還是接回來（字若還在輸入列要補 Enter）");
+        let t0 = Instant::now();
+        assert_eq!(step(&app, &mut w, t0 + GIVE_UP_AFTER + Duration::from_secs(1)).await, Step::Done, "期限到了只收工");
+        assert_eq!(status_of(&f, &tid).await, "in_flight", "不判沒送達：留給 hook／stuck_turns 收");
+        let notes: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM messages WHERE turn_id=? AND role='system'").bind(&tid).fetch_one(app.db()).await.unwrap();
+        assert_eq!(notes, 0);
+    }
+
+    /// #1202：剛報備完就重啟：期限從開回合那一刻接著算，不重新給 90 秒。
+    #[tokio::test]
+    async fn a_restored_watch_for_a_fresh_turn_keeps_its_original_deadline() {
+        let f = fixture("fresh-relay-turn").await;
+        let app = f.env.app.clone();
+        let sender = tt::claude_bot(&app, &f.env.project_id, "fresh-relay-sender").await;
+        let run = db::run(app.db(), &f.run_id).await.unwrap().unwrap();
+        let tid = open_turn(&app, &run, &sender.id, None, TEXT).await.expect("開了回合");
+        sqlx::query("UPDATE turns SET created_at = ? WHERE id = ?").bind(db::iso_in(-60)).bind(&tid).execute(app.db()).await.unwrap();
+        f.env.herdr.live_pane(&f.pane, tt::LivePane { width: Some(120), ..Default::default() });
+
+        let mut w = restore_open_watches(&app, "local").await.unwrap().pop().unwrap();
+        let t0 = Instant::now();
+        assert_eq!(step(&app, &mut w, t0 + Duration::from_secs(15)).await, Step::Waiting, "60+15 秒：還沒到 90");
+        assert_eq!(step(&app, &mut w, t0 + Duration::from_secs(40)).await, Step::GaveUp, "60+40 秒：照原本的期限判沒送達");
+        assert_eq!(status_of(&f, &tid).await, "failed");
     }
 
     #[tokio::test]
