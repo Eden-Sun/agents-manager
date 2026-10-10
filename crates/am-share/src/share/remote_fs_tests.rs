@@ -371,6 +371,76 @@ async fn measure_calculates_and_ignores_keep_mark() {
 }
 
 #[tokio::test]
+async fn measure_fails_closed_when_workspace_or_outbox_has_unreadable_descendant() {
+    let scratch = test_dirs::scratch_dir("rfs-measure-unreadable");
+    let site = make_test_remote_site(&scratch, "host-measure-unreadable-1");
+    let ws = Path::new(&site.workspace);
+    let ob = Path::new(&site.outbox);
+
+    fs::write(ws.join("ok.txt"), b"readable").unwrap();
+    fs::write(ob.join("out.txt"), b"outbox-ok").unwrap();
+
+    // 0. Fully readable workspace below limit is valid
+    let m = site.measure().await.unwrap();
+    assert!(!m.truncated && !m.full(), "正常可讀且未滿");
+    assert_eq!(m.files, 2);
+
+    // 1. Workspace contains an unreadable subdirectory
+    let priv_ws = ws.join("private_ws");
+    fs::create_dir_all(&priv_ws).unwrap();
+    fs::write(priv_ws.join("large.bin"), vec![0u8; 1024 * 1024]).unwrap();
+    let mut perms_ws = fs::metadata(&priv_ws).unwrap().permissions();
+    std::os::unix::fs::PermissionsExt::set_mode(&mut perms_ws, 0o000);
+    fs::set_permissions(&priv_ws, perms_ws.clone()).unwrap();
+
+    let err_ws = site.measure().await.unwrap_err();
+    assert_eq!(err_ws, RfsError::Untrusted, "unreadable subtree in workspace must fail closed");
+
+    // Restore permissions
+    std::os::unix::fs::PermissionsExt::set_mode(&mut perms_ws, 0o700);
+    fs::set_permissions(&priv_ws, perms_ws).unwrap();
+
+    // 2. Outbox contains an unreadable subdirectory
+    let priv_ob = ob.join("private_ob");
+    fs::create_dir_all(&priv_ob).unwrap();
+    fs::write(priv_ob.join("secret.bin"), b"secret").unwrap();
+    let mut perms_ob = fs::metadata(&priv_ob).unwrap().permissions();
+    std::os::unix::fs::PermissionsExt::set_mode(&mut perms_ob, 0o000);
+    fs::set_permissions(&priv_ob, perms_ob.clone()).unwrap();
+
+    let err_ob = site.measure().await.unwrap_err();
+    assert_eq!(err_ob, RfsError::Untrusted, "unreadable subtree in outbox must fail closed");
+
+    // Restore permissions
+    std::os::unix::fs::PermissionsExt::set_mode(&mut perms_ob, 0o700);
+    fs::set_permissions(&priv_ob, perms_ob).unwrap();
+
+    // 3. Restored again: measure succeeds
+    let m_restored = site.measure().await.unwrap();
+    assert!(!m_restored.truncated && !m_restored.full());
+}
+
+#[tokio::test]
+async fn measure_fails_closed_when_permissions_change_between_du_and_find() {
+    let scratch = test_dirs::scratch_dir("rfs-measure-race");
+    let site = make_test_remote_site(&scratch, "host-measure-race-1");
+    let ws = Path::new(&site.workspace);
+
+    let sub = ws.join("sub");
+    fs::create_dir_all(&sub).unwrap();
+    fs::write(sub.join("f.txt"), b"file-content").unwrap();
+
+    // Race hook changes permission on sub after du and before find
+    let race = "chmod 000 sub 2>/dev/null || true";
+    let err = site.measure_racing(race).await.unwrap_err();
+    assert_eq!(err, RfsError::Untrusted, "find error must fail closed even if du succeeded");
+
+    let mut perms = fs::metadata(&sub).unwrap().permissions();
+    std::os::unix::fs::PermissionsExt::set_mode(&mut perms, 0o700);
+    fs::set_permissions(&sub, perms).unwrap();
+}
+
+#[tokio::test]
 async fn prune_outbox_policy() {
     let scratch = test_dirs::scratch_dir("rfs-prune");
     let site = make_test_remote_site(&scratch, "host-prune-1");

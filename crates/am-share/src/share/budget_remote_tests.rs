@@ -306,6 +306,37 @@ mod with_app {
     }
 
     #[tokio::test]
+    async fn remote_is_full_fails_closed_and_does_not_cache_when_unreadable_child_exists() {
+        let e = tt::env().await;
+        let scratch = test_dirs::scratch_dir("rs4-app-unreadable");
+        let _conn = remote_host(&e, "rs4-unreadable-app", &scratch).await;
+        let (id, ws, _) = share_bot(&e, &scratch, "far-unreadable", "restricted").await;
+
+        // 1. Normal readable file: is_full is Ok(false), and result is cached.
+        fs::write(ws.join("inbox/up.bin"), vec![0u8; 8192]).unwrap();
+        budget::clear_cached_for_test(&id);
+        assert_eq!(budget::is_full(&e.app, &id).await, Ok(false), "正常可讀且未滿");
+        assert!(budget::cached(&id).is_some(), "量測成功有快取");
+
+        // 2. Unreadable subtree: fails closed with Err(Unavailable), no cache published.
+        budget::clear_cached_for_test(&id);
+        let priv_dir = ws.join("secret_dir");
+        fs::create_dir_all(&priv_dir).unwrap();
+        fs::write(priv_dir.join("huge.bin"), vec![0u8; 1024 * 1024]).unwrap();
+        let mut perms = fs::metadata(&priv_dir).unwrap().permissions();
+        std::os::unix::fs::PermissionsExt::set_mode(&mut perms, 0o000);
+        fs::set_permissions(&priv_dir, perms.clone()).unwrap();
+
+        let res = budget::is_full(&e.app, &id).await;
+        assert_eq!(res, Err(Unavailable), "不可讀子目錄必須 fail closed 回傳 Unavailable (503)");
+        assert!(budget::cached(&id).is_none(), "量測失敗絕不發布低用量快取");
+
+        // Restore permissions
+        std::os::unix::fs::PermissionsExt::set_mode(&mut perms, 0o700);
+        fs::set_permissions(&priv_dir, perms).unwrap();
+    }
+
+    #[tokio::test]
     async fn the_sweep_prunes_then_measures_remote_bots_skips_down_hosts_and_announces_a_full_one_once() {
         let e = tt::env().await;
         let scratch = test_dirs::scratch_dir("rs4-app-sweep");
