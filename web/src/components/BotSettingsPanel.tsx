@@ -179,8 +179,8 @@ export function IdentityOptions({
           {busy ? '偵測中…' : '重新偵測'}
         </button>
       </span>
-      <div className="opt-group" role="radiogroup" aria-label="identity">
-        <button type="button" className={`opt${value === '' ? ' on' : ''}`} onClick={() => onChange('')}>
+      <div className="opt-group" role="radiogroup" aria-label="身份">
+        <button type="button" role="radio" aria-checked={value === ''} className={`opt${value === '' ? ' on' : ''}`} onClick={() => onChange('')}>
           不指定身分（{!host || host === 'local' ? '本機預設' : `${host} 的預設帳號`}）
         </button>
         {identities.map((i) => {
@@ -190,6 +190,10 @@ export function IdentityOptions({
             <span key={i.name} className="opt-wrap">
               <button
                 type="button"
+                role="radio"
+                aria-checked={value === i.name}
+                // 警示併進名稱：讀屏走到這顆就知道它沒登入（下面那個標記是給眼睛看的）。
+                aria-label={warn ? `${i.name}（${warn.mark}）` : undefined}
                 className={`opt${value === i.name ? ' on' : ''}`}
                 title={identityTitle(i.env, st, hostLabel)}
                 onClick={() => onChange(i.name)}
@@ -197,7 +201,7 @@ export function IdentityOptions({
                 {i.name}
               </button>
               {warn ? (
-                <span className={`identity-logged-out${warn.mark === '未知' ? ' is-unknown' : ''}`} title={warn.title}>
+                <span aria-hidden="true" className={`identity-logged-out${warn.mark === '未知' ? ' is-unknown' : ''}`} title={warn.title}>
                   {warn.mark}
                 </span>
               ) : null}
