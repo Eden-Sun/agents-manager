@@ -948,3 +948,38 @@ test('SSE 模式不重複抓：收到回覆事件已經抓過，載入頁面不�
   await settle(100)
   assert.equal(filesCalls, 2, '開頁一次＋這一則回覆一次，不是三次')
 })
+
+/** #1095：超過 20 個附件在送出前就擋（daemon 會回 400，畫面原本只寫「送出失敗」）；移到 20 個就能送。 */
+test('超過 20 個附件：送出鈕停用並說明要移除幾個；移到 20 個就能送', { timeout: 20_000 }, async () => {
+  const client = mockShareClient(TOKEN)
+  client.upload = async (f) => ({ id: `att-${f.name}`, name: f.name })
+  const sent: string[][] = []
+  client.send = async (_t, _c, ids) => {
+    sent.push(ids)
+  }
+  await mount(<ShareApp client={client} />)
+  await settle(300)
+  const input = document.querySelector('input[type=file]') as HTMLInputElement
+  const files = Array.from({ length: 21 }, (_, i) => new File(['x'], `p${i}.txt`, { type: 'text/plain' }))
+  await act(async () => {
+    Object.defineProperty(input, 'files', { configurable: true, value: files })
+    input.dispatchEvent(new Event('change', { bubbles: true }))
+  })
+  for (let i = 0; i < 60 && document.querySelectorAll('.sh-pending li.ok').length < 21; i++) await settle(50)
+  assert.equal(document.querySelectorAll('.sh-pending li.ok').length, 21)
+  assert.equal((document.querySelector('.sh-send') as HTMLButtonElement).disabled, true)
+  const err = document.querySelector('.sh-send-err')!.textContent!
+  assert.match(err, /最多送 20 個/)
+  assert.match(err, /移除 1 個/)
+  assert.equal(sent.length, 0)
+
+  await click(document.querySelector('.sh-pending li button[aria-label^="移除"]')!)
+  await settle(50)
+  assert.equal(document.querySelectorAll('.sh-pending li').length, 20)
+  assert.equal((document.querySelector('.sh-send') as HTMLButtonElement).disabled, false)
+  assert.equal(document.querySelector('.sh-send-err'), null)
+  await click(document.querySelector('.sh-send')!)
+  await settle(100)
+  assert.equal(sent.length, 1)
+  assert.equal(sent[0].length, 20)
+})
