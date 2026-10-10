@@ -24,8 +24,9 @@ pub fn spawn_ticker(app: &Arc<App>) {
     });
 }
 
-/// 巡一輪：重量，剛變滿的通知。
+/// 巡一輪：先補做欠著的遠端保留標記（#1038），再重量，剛變滿的通知。
 pub async fn tick(app: &Arc<App>) {
+    crate::share::drain_keep_pending(app).await;
     for (bot_id, measured) in budget::sweep(app).await {
         notify_owner(app, &bot_id, measured).await;
     }

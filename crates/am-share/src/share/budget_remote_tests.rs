@@ -445,4 +445,102 @@ mod with_app {
         task.await.unwrap().unwrap();
         am_base::hosts::set_ssh_delay("x5-revoke-app", std::time::Duration::ZERO);
     }
+
+    /// 撤銷分享時主機斷線：token 照樣即刻作廢，遠端標記拿不掉，但記進 pending，不是只記一行 warning 就算完（#1038）。
+    #[tokio::test]
+    async fn a_revoke_while_the_host_is_down_is_recorded_as_pending_and_the_token_still_dies() {
+        let e = tt::env().await;
+        let scratch = test_dirs::scratch_dir("n38-revoke-down");
+        let conn = remote_host(&e, "n38-down-app", &scratch).await;
+        let (id, _, outbox) = share_bot(&e, &scratch, "far-down", "restricted").await;
+        assert!(crate::share::store::enable(&e.app.db, &id).await.unwrap().is_some());
+        crate::share::keep_share_outboxes(&e.app).await;
+        assert!(outbox.join(".am-share-keep").is_file(), "連線時開機補標記");
+
+        conn.connected.store(false, Ordering::SeqCst);
+        sqlx::query("UPDATE bots SET deleted_at = ? WHERE id = ?").bind(crate::db::now()).bind(&id).execute(&e.app.db).await.unwrap();
+        crate::share::revoke_bot_share(&e.app, &id).await.unwrap();
+
+        let left: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM bot_shares WHERE bot_id = ?").bind(&id).fetch_one(&e.app.db).await.unwrap();
+        assert_eq!(left, 0, "token 即刻作廢");
+        assert!(outbox.join(".am-share-keep").is_file(), "斷線時拿不掉，標記還在");
+        let pending = crate::share::store::pending_keeps(&e.app.db).await.unwrap();
+        assert_eq!(pending.iter().map(|p| (p.host.as_str(), p.bot_id.as_str())).collect::<Vec<_>>(), [("n38-down-app", id.as_str())]);
+    }
+
+    /// 主機回來、而且 bot 的 `shared_bots` 那列也已經清掉：巡邏照樣把標記拿掉，不依賴收尾當時的紀錄（#1038）。
+    #[tokio::test]
+    async fn the_periodic_pass_removes_a_stale_mark_after_reconnect_even_when_the_share_row_is_gone() {
+        let e = tt::env().await;
+        let scratch = test_dirs::scratch_dir("n38-reconcile");
+        let conn = remote_host(&e, "n38-reconcile-app", &scratch).await;
+        let (id, _, outbox) = share_bot(&e, &scratch, "far-reconcile", "restricted").await;
+        crate::share::keep_share_outboxes(&e.app).await;
+        conn.connected.store(false, Ordering::SeqCst);
+        sqlx::query("UPDATE bots SET deleted_at = ? WHERE id = ?").bind(crate::db::now()).bind(&id).execute(&e.app.db).await.unwrap();
+        crate::share::revoke_bot_share(&e.app, &id).await.unwrap();
+        sqlx::query("DELETE FROM shared_bots WHERE bot_id = ?").bind(&id).execute(&e.app.db).await.unwrap();
+        assert_eq!(crate::share::store::pending_keeps(&e.app.db).await.unwrap().len(), 1);
+
+        conn.connected.store(true, Ordering::SeqCst);
+        crate::share::drain_keep_pending(&e.app).await;
+        assert!(!outbox.join(".am-share-keep").exists(), "補做：拿掉已刪 bot 的標記");
+        assert!(crate::share::store::pending_keeps(&e.app.db).await.unwrap().is_empty(), "做完的列清掉");
+    }
+
+    /// 開機時主機正好離線、現役分享 bot 的標記沒放上：主機回來後巡邏補上，不必等 bot 重新啟動（#1038）。
+    #[tokio::test]
+    async fn a_boot_time_mark_missed_while_offline_is_placed_by_the_periodic_pass() {
+        let e = tt::env().await;
+        let scratch = test_dirs::scratch_dir("n38-boot-offline");
+        let conn = remote_host(&e, "n38-boot-app", &scratch).await;
+        let (_, _, outbox) = share_bot(&e, &scratch, "far-boot", "restricted").await;
+        let mark = outbox.join(".am-share-keep");
+
+        conn.connected.store(false, Ordering::SeqCst);
+        crate::share::keep_share_outboxes(&e.app).await;
+        assert!(!mark.exists(), "離線：沒有標記");
+        assert_eq!(crate::share::store::pending_keeps(&e.app.db).await.unwrap().len(), 1, "離線的補標記記成欠著");
+
+        conn.connected.store(true, Ordering::SeqCst);
+        crate::share::drain_keep_pending(&e.app).await;
+        assert!(mark.is_file(), "回來後巡邏補上（現役 bot ＝放）");
+        assert!(crate::share::store::pending_keeps(&e.app.db).await.unwrap().is_empty());
+    }
+
+    /// 舊的「拿掉」列不能把現役 bot 的標記拿掉（例如 restore 之後）：巡邏照現況放。
+    #[tokio::test]
+    async fn a_stale_removal_never_strips_the_mark_of_a_live_share_bot() {
+        let e = tt::env().await;
+        let scratch = test_dirs::scratch_dir("n38-stale-removal");
+        remote_host(&e, "n38-stale-app", &scratch).await;
+        let (id, _, outbox) = share_bot(&e, &scratch, "far-stale", "restricted").await;
+        let mark = outbox.join(".am-share-keep");
+        crate::share::store::queue_keep(&e.app.db, "n38-stale-app", &id).await.unwrap();
+
+        crate::share::drain_keep_pending(&e.app).await;
+        assert!(mark.is_file(), "現役 bot：補做是放，不是拿掉");
+        assert!(crate::share::store::pending_keeps(&e.app.db).await.unwrap().is_empty());
+    }
+
+    /// 整個專案刪除時有一顆的主機斷線：token 全部先作廢，那顆欠著的列留下，其餘照常收尾（#1038）。
+    #[tokio::test]
+    async fn a_project_revoke_with_one_host_down_still_kills_every_token_and_keeps_only_the_failed_mark_pending() {
+        let e = tt::env().await;
+        let scratch = test_dirs::scratch_dir("n38-project-revoke");
+        let conn = remote_host(&e, "n38-project-app", &scratch).await;
+        let (a, _, _) = share_bot(&e, &scratch, "far-proj-a", "restricted").await;
+        let (b, _, _) = share_bot(&e, &scratch, "far-proj-b", "restricted").await;
+        for id in [&a, &b] {
+            assert!(crate::share::store::enable(&e.app.db, id).await.unwrap().is_some());
+        }
+        crate::share::keep_share_outboxes(&e.app).await;
+        conn.connected.store(false, Ordering::SeqCst);
+
+        crate::share::revoke_project_shares(&e.app, &e.project_id).await.unwrap();
+        let left: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM bot_shares WHERE bot_id IN (?, ?)").bind(&a).bind(&b).fetch_one(&e.app.db).await.unwrap();
+        assert_eq!(left, 0, "專案的 token 全部作廢，不等遠端");
+        let pending = crate::share::store::pending_keeps(&e.app.db).await.unwrap();
+        assert_eq!(pending.len(), 2, "斷線的主機：兩顆的拿掉都欠著");
+    }
 }

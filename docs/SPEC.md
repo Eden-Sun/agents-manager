@@ -5211,7 +5211,9 @@ daemon 要能在 Linux（目標：Ubuntu，外部編譯主機 192.168.1.46，#67
     只刪一般檔，**遠端從不 `rm -rf`**、符號連結不跟。
   - **1 小時清理不碰分享 bot**：`outbox_remote::target` 查 `is_share_bot`（讀不到當是分享 bot——寧可少刪），是的話列表腳本不跑 `-mmin +60 … rm`，回應帶 `kept:true`、`keep_days:14`、`ttl_secs:null`、每個檔 `expires_at:null`（同本機分享 bot 的列表）；一般遠端 bot 照舊刪。
   - **keep 標記**：遠端 outbox 也放 `.am-share-keep`（啟動、`finish_restricted`、開機時 `keep_share_outboxes`；`revoke_bot_share`／`revoke_project_shares` 拿掉，bot／專案已標成刪除也找得到主機）。
-    主機斷線或 ssh 失敗只記 warning；daemon 的巡邏不靠它，遠端那台若自己也跑 `outbox-gc.sh` 才會用到。標記檔若被換成符號連結先拆掉再用 noclobber 建，不寫穿。
+    主機斷線或 ssh 失敗不再只記 warning（#1038）：記進 `share_keep_pending`（主機＋bot id，不靠 bot／專案那一列——收尾時它們可能已經刪了），`runners::share_budget::tick`（每 10 分鐘）補做：主機連得上才打 ssh，目標一律照 DB 現況（現役分享 bot 放、其餘拿掉），補成功就刪列；主機斷線的列留著等下一輪。
+    **最長收斂時間**：主機恢復後最多約 10 分鐘內補上；主機一直不見（不在設定裡）的列會留著，`attempts`／`last_error` 記在表裡，要人工清。撤銷分享時 token 仍是先作廢、再拿掉標記（#985）。
+    daemon 的巡邏不靠它，遠端那台若自己也跑 `outbox-gc.sh` 才會用到。標記檔若被換成符號連結先拆掉再用 noclobber 建，不寫穿。
 - 本來就不影響：批次重啟／herdr 升級（`resume_native` 原地接回）、`autostart_revive`（只碰 autostart 且被 herdr 弄丟的，起回來）、`pane-gc.sh`（只關卡住的登入 pane）、
   `bot_trash`／`remote_purge`（只處理已刪的）、config 投影移除（使用者自己從 config 拿掉）、AGM persona 第 19 條的閒置盤點（只清 AGM 自己的 child，文件另寫明分享用 bot 不清）。
 

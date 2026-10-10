@@ -354,6 +354,8 @@ pub const SCHEMA_HISTORY: &[(i64, &str)] = &[
     (51, "d22c0281cffb2f15"),
     // issue #1035：`runs.host`／`runs.host_generation`（run 啟動時所在的遠端主機與它的世代；`?confirm=repoint` 換指之後，舊 run 的 hook 不認新主機）。
     (52, "2facd719ec482737"),
+    // issue #1038：`share_keep_pending`（遠端分享保留標記欠著的主機，ssh 失敗時記下、巡邏補做）。
+    (53, "27e8089933d86980"),
 ];
 pub const SCHEMA_VERSION: i64 = SCHEMA_HISTORY[SCHEMA_HISTORY.len() - 1].0;
 
