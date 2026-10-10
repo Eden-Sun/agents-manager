@@ -9,7 +9,7 @@
 #     crate 的 Cargo.toml／build.rs，與以 #[path] 編進 daemon 的 am-lifecycle／am-share／am-supervisor 的 lib.rs 也是 `__all__`（不能當成一般模組）。
 #   - daemon 以外、但 daemon 的測試會在執行期讀的檔案（跟 ci-changed-parts.sh 同一份清單，兩邊要一起改）：
 #     scripts/check.sh → cargo_shim、lint-shell-vars.sh → herdr_shim、release-task.md → claude_review、
-#     ops/fixtures → supervisor::setup、agm.py 與 persona 文件（被 include_str! 編進 setup/responder）。
+#     ops/fixtures → supervisor::setup、agm.py 與 persona 文件（被 include_str! 編進 setup/responder）、docs/API.md（api_doc_parity、ws_event_docs_tests）。
 # 這是「合理子集」不是全量：跨模組的連帶影響（改了被很多模組用的型別）抓不到，完整的交給 ubuntu-ci（scripts/ops/ubuntu-ci.sh）。
 set -euo pipefail
 
@@ -93,5 +93,7 @@ while IFS= read -r f; do
         scripts/agm.py) echo 'supervisor::setup::' ;;
         docs/goals/agm-supervisor-persona.md) echo 'supervisor::persona::'; echo 'supervisor::setup::' ;;
         docs/goals/agm-responder-persona.md) echo 'supervisor::persona::'; echo 'supervisor::responder::' ;;
+        # docs/API.md：路由對照（daemon/tests/api_doc_parity.rs，整合測試沒有模組前綴）與 WS 事件表（ws_event_docs_tests，#907）。#1170。
+        docs/API.md) echo 'api_route_methods_match_documented_inventory'; echo 'ws_event_docs_tests::' ;;
     esac
 done | sort -u

@@ -15,6 +15,7 @@ while IFS= read -r f; do
         #   - ops 的 project-transfer 測試從 am-base schema 原始碼（db.rs）與 supervisor／mission store 抽欄位。
         #   - daemon 的測試讀 scripts/check.sh（cargo_shim）、scripts/ops/lint-shell-vars.sh（herdr_shim）、
         #     scripts/ops/fixtures/*（supervisor::setup）、scripts/ops/{claude,codex}-release-task.md（claude_review）。
+        #   - daemon 的測試讀 docs/API.md（api_doc_parity、ws_event_docs_tests；#1170）。
         # 要先於下面的 daemon/*、scripts/*、*.md 規則。對應的 daemon 測試子集見 scripts/ci-daemon-filters.sh（兩邊要一起改）。
         crates/am-lifecycle/src/lifecycle/fixtures/*) daemon=1; web=1 ;;
         crates/am-base/src/db.rs | crates/am-supervisor/src/supervisor/store.rs | crates/am-supervisor/src/supervisor/roles.rs | crates/am-supervisor/src/mission/store.rs) daemon=1; ops=1 ;;
@@ -23,7 +24,7 @@ while IFS= read -r f; do
         scripts/*.md) ops=1 ;;
         # daemon 用 include_str! 編進去的文件（`supervisor::persona::BUILD_INPUTS`，那邊的測試擋「又多一個沒列」）與 daemon 底下的
         # .md fixture 不是「只有文件」：改名、刪掉會編不過，也要先於下面的文件規則。
-        docs/goals/agm-supervisor-persona.md | docs/goals/agm-responder-persona.md | daemon/*) daemon=1 ;;
+        docs/goals/agm-supervisor-persona.md | docs/goals/agm-responder-persona.md | docs/API.md | daemon/*) daemon=1 ;;
         # 有測試釘住內容的文件：docs/SPEC.md（scripts/jev-role_test.sh 要求裡面有 Jev 角色政策那幾句）。
         # 只改它不必跑整包 ops，獨立一個 `specs` 部分只跑那支契約測試（check.sh changed 處理）。
         docs/SPEC.md) specs=1 ;;

@@ -66,6 +66,8 @@ check "claude_review::" "scripts/ops/codex-release-task.md"
 check "supervisor::setup::" "scripts/ops/fixtures/patrol-runtime.json"
 check "supervisor::setup::" "scripts/agm.py"
 check "supervisor::persona:: supervisor::responder:: supervisor::setup::" "docs/goals/agm-supervisor-persona.md" "docs/goals/agm-responder-persona.md"
+# docs/API.md：路由對照（api_doc_parity，整合測試沒有模組前綴）與 WS 事件表（ws_event_docs_tests）。#1170。
+check "api_route_methods_match_documented_inventory ws_event_docs_tests::" "docs/API.md"
 # 跟 daemon 無關的檔案不產生過濾字串。
 check "" "web/src/store/store.ts" "docs/SPEC.md" "scripts/ops/README.md"
 # crate 的 lib.rs 是接線檔（#[path] 進 daemon），不能對成 lib:: 這種選不到測試的過濾字串（issue #1018）。
