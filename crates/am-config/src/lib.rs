@@ -1169,7 +1169,10 @@ pub fn valid_host_name(name: &str) -> bool {
 }
 
 pub fn canonical_path(p: &str) -> Result<String> {
-    let expanded = if let Some(rest) = p.strip_prefix("~/") {
+    // bare `~` 也是家目錄（#1105）：不展開的話會被當成 daemon 工作目錄底下的相對路徑
+    let expanded = if p == "~" {
+        dirs::home_dir().ok_or_else(|| anyhow!("no home dir"))?
+    } else if let Some(rest) = p.strip_prefix("~/") {
         dirs::home_dir().ok_or_else(|| anyhow!("no home dir"))?.join(rest)
     } else {
         PathBuf::from(p)
@@ -2333,5 +2336,20 @@ mod ssh_opts_tests {
         assert_eq!(ssh_opts_problem(&["-o".into(), "User root".into()]), None);
         assert_eq!(ssh_opts_problem(&["-i".into(), "/k".into()]), None);
         assert!(ssh_opts_problem(&["-o".into(), "ProxyCommand=x".into()]).is_some());
+    }
+}
+
+#[cfg(test)]
+mod canonical_path_tests {
+    use super::*;
+
+    #[test]
+    fn canonical_path_expands_a_bare_tilde_to_the_home_directory() {
+        // 只讀家目錄，不寫任何東西進真實 HOME。
+        let home = std::fs::canonicalize(dirs::home_dir().unwrap()).unwrap();
+        assert_eq!(canonical_path("~").unwrap(), home.to_string_lossy());
+        assert_eq!(canonical_path("~/").unwrap(), home.to_string_lossy());
+        // `~foo` 不是家目錄底下的東西，照舊當相對路徑（不存在就是 Err）。
+        assert!(canonical_path("~no-such-user-dir-xyz").is_err());
     }
 }
