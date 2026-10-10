@@ -195,6 +195,33 @@ equals "狀態：assigned" "$(state assigned)" "true"
 check "有補建標籤" "label" "$GHDIR/labels.log"
 teardown
 
+# 2b. 大量紅（#1174）：失敗清單有上限，票開得出來（內文不能超過 GitHub 的 65536 字），截斷後的清單要穩定。
+setup
+( cd "$AGM_REPO" && git init -q && git config user.email t@t && git config user.name t &&
+  for n in 1 2 3; do echo $n > f; git add f; git commit -q -m "commit $n"; done )
+G=$(git -C "$AGM_REPO" rev-parse HEAD~2); F=$(git -C "$AGM_REPO" rev-parse HEAD)
+mk_runs 5:failure 4:failure 3:success
+python3 - "$GHDIR/runs.json" "$G" "$F" <<'PY'
+import json, sys
+p, g, f = sys.argv[1:]; d = json.load(open(p))
+for r in d:
+    if r["databaseId"] == 3: r["headSha"] = g
+    if r["databaseId"] == 4: r["headSha"] = f
+json.dump(d, open(p, "w"))
+PY
+mk_log 5 $(seq -f 'mod::t%03g' 150 -1 1)      # 150 條，倒序給
+bash "$SCRIPT"
+equals "大量紅也開得出一張" "$(creates)" "1"
+check "標題寫超過 100 條" "^TITLE CI 紅了：${F:0:8} 起超過 100 條失敗" "$GHDIR/created.log"
+check "列排序後的第 1 條" 'BODY - `mod::t001`' "$GHDIR/created.log"
+check "列到第 100 條" 'BODY - `mod::t100`' "$GHDIR/created.log"
+check_no "不列第 101 條" 'mod::t101' "$GHDIR/created.log"
+check "內文註明被截斷" "失敗超過 100 條" "$GHDIR/created.log"
+equals "狀態檔只記 100 條＋說明" "$(python3 -c 'import json,sys; print(len(json.load(open(sys.argv[1]))["failures"]))' "$AGM_DIR/ci-watch.state.json")" "101"
+bash "$SCRIPT"
+equals "同一份 log 再跑不留言（截斷後的清單要穩定）" "$(comments)" "0"
+teardown
+
 # 3. 同一段紅連跑三輪：只有一張、一派、零留言。
 setup
 mk_runs 5:failure 4:failure 3:success; mk_log 5 mod::a
