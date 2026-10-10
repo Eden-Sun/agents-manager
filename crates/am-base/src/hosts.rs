@@ -1479,7 +1479,7 @@ pub const DIR_LIST_LIMIT: usize = 2000;
 /// 遠端目錄列舉要跑的 sh（純字串，可以拿到本機直接跑來驗）。
 
 /// 輸出靠 `AM_*` 開頭的行解析，所以：目前路徑或目錄名字含控制字元（換行、tab、CR…）的一律不列——否則一個叫
-/// `a\nAM_PATH=/etc` 的目錄就能偽造「目前路徑」；憑證與金鑰目錄（`~/.ssh`、`~/.gnupg`、`~/.aws`、`~/.kube`、daemon 與各 CLI 的設定目錄）
+/// `a\nAM_PATH=/etc` 的目錄就能偽造「目前路徑」；憑證與金鑰目錄（`~/.ssh`、`~/.gnupg`、`~/.aws`、`~/.kube`、`~/.gemini`、daemon 與各 CLI 的設定目錄）
 /// 不給進；子目錄最多 [`DIR_LIST_LIMIT`] 個。
 pub fn dir_list_script(path: Option<&str>, hidden: bool) -> String {
     let target = match path.map(str::trim).filter(|s| !s.is_empty()) {
@@ -1495,7 +1495,7 @@ pub fn dir_list_script(path: Option<&str>, hidden: bool) -> String {
 P=$(pwd -P)
 case "$P" in *[[:cntrl:]]*) printf 'AM_ERR=directory name has control characters\n'; exit 0;; esac
 H=$(cd -- "$HOME" 2>/dev/null && pwd -P || printf '%s' "$HOME")
-for S in "$H"/.ssh "$H"/.gnupg "$H"/.aws "$H"/.kube "$H"/.config/agents-manager "$H"/.claude "$H"/.claude-* "$H"/.codex "$H"/.grok; do
+for S in "$H"/.ssh "$H"/.gnupg "$H"/.aws "$H"/.kube "$H"/.config/agents-manager "$H"/.claude "$H"/.claude-* "$H"/.codex "$H"/.grok "$H"/.gemini; do
   [ -d "$S" ] || continue
   R=$(cd -- "$S" 2>/dev/null && pwd -P) || continue
   case "$P" in "$R"|"$R"/*) printf 'AM_ERR=forbidden directory\n'; exit 0;; esac
@@ -1588,13 +1588,13 @@ pub fn make_dir_script(parent: &str, name: &str) -> String {
 P=$(pwd -P)
 case "$P" in *[[:cntrl:]]*) printf 'AM_ERR=directory name has control characters\n'; exit 0;; esac
 H=$(cd -- "$HOME" 2>/dev/null && pwd -P || printf '%s' "$HOME")
-for S in "$H"/.ssh "$H"/.gnupg "$H"/.aws "$H"/.kube "$H"/.config/agents-manager "$H"/.claude "$H"/.claude-* "$H"/.codex "$H"/.grok; do
+for S in "$H"/.ssh "$H"/.gnupg "$H"/.aws "$H"/.kube "$H"/.config/agents-manager "$H"/.claude "$H"/.claude-* "$H"/.codex "$H"/.grok "$H"/.gemini; do
   [ -d "$S" ] || continue
   R=$(cd -- "$S" 2>/dev/null && pwd -P) || continue
   case "$P" in "$R"|"$R"/*) printf 'AM_ERR=forbidden directory\n'; exit 0;; esac
 done
 if [ "$P" = / ]; then N=/{name}; else N="$P"/{name}; fi
-case "$N" in "$H"/.ssh|"$H"/.gnupg|"$H"/.aws|"$H"/.kube|"$H"/.config/agents-manager|"$H"/.claude|"$H"/.claude-*|"$H"/.codex|"$H"/.grok) printf 'AM_ERR=forbidden directory\n'; exit 0;; esac
+case "$N" in "$H"/.ssh|"$H"/.gnupg|"$H"/.aws|"$H"/.kube|"$H"/.config/agents-manager|"$H"/.claude|"$H"/.claude-*|"$H"/.codex|"$H"/.grok|"$H"/.gemini) printf 'AM_ERR=forbidden directory\n'; exit 0;; esac
 if [ -e {name} ] || [ -L {name} ]; then printf 'AM_EXISTS=1\n'; exit 0; fi
 if ! mkdir -- {name} 2>/dev/null; then
   if [ -e {name} ] || [ -L {name} ]; then printf 'AM_EXISTS=1\n'; else printf 'AM_ERR=cannot create directory (permission denied or read-only)\n'; fi

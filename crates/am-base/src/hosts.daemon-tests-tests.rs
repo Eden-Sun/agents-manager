@@ -684,3 +684,45 @@
         set_ping_interval_for_test(None);
         std::fs::remove_dir_all(&dir).ok();
     }
+
+    #[test]
+    fn the_remote_dir_scripts_refuse_the_agy_credential_directory() {
+        let home = crate::testing::track(std::env::temp_dir().join(format!("am-test-gemini-{}", crate::db::ulid())));
+        std::fs::create_dir_all(home.join(".gemini/antigravity-cli")).unwrap();
+        std::fs::create_dir_all(home.join("project")).unwrap();
+
+        let run = |script: &str| -> String {
+            let out = std::process::Command::new("/bin/sh")
+                .arg("-c")
+                .arg(script)
+                .env("HOME", &home)
+                .output()
+                .expect("run sh script");
+            String::from_utf8_lossy(&out.stdout).into_owned()
+        };
+
+        let err1 = parse_dir_listing(&run(&dir_list_script(Some("~/.gemini"), true)), true)
+            .unwrap_err()
+            .to_string();
+        assert!(err1.contains("forbidden"), "dir_list ~/.gemini err: {err1}");
+
+        let err2 = parse_dir_listing(&run(&dir_list_script(Some("~/.gemini/antigravity-cli"), true)), true)
+            .unwrap_err()
+            .to_string();
+        assert!(err2.contains("forbidden"), "dir_list ~/.gemini/antigravity-cli err: {err2}");
+
+        let err3 = parse_make_dir(&run(&make_dir_script("~/.gemini", "x")))
+            .unwrap_err()
+            .to_string();
+        assert!(err3.contains("forbidden"), "make_dir under ~/.gemini err: {err3}");
+        assert!(!home.join(".gemini/x").exists(), "home/.gemini/x must not exist");
+
+        let err4 = parse_make_dir(&run(&make_dir_script("~", ".gemini")))
+            .unwrap_err()
+            .to_string();
+        assert!(err4.contains("forbidden"), "make_dir ~ .gemini err: {err4}");
+
+        let ok = parse_dir_listing(&run(&dir_list_script(Some("~/project"), true)), true);
+        assert!(ok.is_ok(), "dir_list ~/project should succeed: {:?}", ok.err());
+    }
+

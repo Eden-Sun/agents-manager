@@ -958,7 +958,7 @@ UI 標籤：`hook` 不標；`terminal_fallback` 或 `incomplete = 1` 標「終�
 路徑不存在或不是目錄 → 400（訊息講使用者打的那串，不替人把符號連結解開）。
 安全規則（2026-10-02 審查）：
 - **只有 User principal**：pane 裡 bot 的 token（`X-AM-Bot-*`）與 service token 一律 `403 {"reason":"user_only"}`——bot 不能借 daemon 的身分去列本機、更不能經 daemon 的 ssh 列別台主機。
-- **憑證與設定目錄不給進**：`~/.ssh`、`~/.gnupg`、`~/.aws`、`~/.kube`、`~/.config/agents-manager`、daemon 的資料目錄、`~/.claude`／`~/.claude-*`／`~/.codex`／`~/.grok`（含底下所有層）→ `403 {"reason":"directory_not_browsable"}`（遠端同一份規則，回 502 帶 `forbidden directory`）。
+- **憑證與設定目錄不給進**：`~/.ssh`、`~/.gnupg`、`~/.aws`、`~/.kube`、`~/.config/agents-manager`、daemon 的資料目錄、`~/.claude`／`~/.claude-*`／`~/.codex`／`~/.grok`／`~/.gemini`（含底下所有層）→ `403 {"reason":"directory_not_browsable"}`（遠端同一份規則，回 502 帶 `forbidden directory`）。
 - **名字含控制字元（換行、tab、CR…）的目錄不列**，目前路徑含控制字元回錯誤：遠端的 sh 輸出靠 `AM_*` 行解析，一個叫 `a\nAM_PATH=/etc` 的目錄就能偽造「目前路徑」。
 - **最多列 2000 個子目錄**，超過 `truncated:true`（本機與遠端同一個上限；上限內依名字不分大小寫排序）。
 
@@ -975,7 +975,7 @@ UI 標籤：`hook` 不標；`terminal_fallback` 或 `incomplete = 1` 標「終�
 - **名字是單一一段**（`bot_input::check_new_dir_name`）：去頭尾空白後不能是空的、`.`、`..`，不能含 `/`（不能借名字跳出上層，也不能一次建好幾層）、NUL、控制字元（遠端 sh 輸出靠 `AM_*` 行解析，換行會偽造）、不可見的方向控制字元，最長 255 位元組 → 400。以 `.` 或 `-` 開頭的名字可以（不特別處理）。
 - **已經有同名的東西**（資料夾、檔案、符號連結）→ `409 {"error":"conflict","reason":"already_exists","name","parent","message"}`，什麼都不動、也不會「進去那個」。
 - **只有 User principal**：Bot、AGM role 與 service token 一律 `403 {"reason":"user_only"}`。
-- **跟 `GET` 同一份不給進的規則**：上層或新路徑落在 `~/.ssh`、`~/.gnupg`、`~/.aws`、`~/.kube`、`~/.config/agents-manager`、daemon 資料目錄、`~/.claude`／`~/.claude-*`／`~/.codex`／`~/.grok` 底下（含「在家目錄建 `.ssh`」）→ 本機 `403 directory_not_browsable`，遠端 502 帶 `forbidden directory`。
+- **跟 `GET` 同一份不給進的規則**：上層或新路徑落在 `~/.ssh`、`~/.gnupg`、`~/.aws`、`~/.kube`、`~/.config/agents-manager`、daemon 資料目錄、`~/.claude`／`~/.claude-*`／`~/.codex`／`~/.grok`／`~/.gemini` 底下（含「在家目錄建 `.ssh`」）→ 本機 `403 directory_not_browsable`，遠端 502 帶 `forbidden directory`。
 - 遠端建不出來（沒有權限、唯讀）→ 502 帶原因；本機建不出來 → 400 帶系統錯誤。
 
 ### `GET /api/search/messages?q=<文字>&limit=200`
