@@ -1805,6 +1805,38 @@ class MissionCommandTest(CliCase):
         self.assertEqual(self.ok("mission", "round", "m1", "--request-id", "rnd-1")["status"], "round")
         self.assertEqual(self.posts("/api/missions/m1/round")[0]["body"], {"client_request_id": "rnd-1"})
 
+    def test_a_timed_out_round_is_delivery_unknown_with_its_request_id(self):
+        FakeDaemon.routes["POST /api/missions/m1/round"] = (200, {"round": 2})
+        FakeDaemon.slow = {"/api/missions/m1/round"}
+        code, _out, err = self.run_cli("--timeout", "0.3", "mission", "round", "m1", "--request-id", "r-7")
+        body = json.loads(err)
+        self.assertEqual((code, body["error"], body["client_request_id"], body["mission_id"]), (7, "delivery_unknown", "r-7", "m1"))
+        self.assertEqual(len(self.posts("/api/missions/m1/round")), 1, "逾時不能自己重送")
+
+    def test_question_answer_revise_timeouts_are_delivery_unknown_too(self):
+        for op in ("question", "answer", "revise"):
+            path = f"/api/missions/m1/{op}"
+            FakeDaemon.slow = {path}
+            code, _out, err = self.run_cli("--timeout", "0.3", "mission", op, "m1", "--text", "x", "--request-id", "q-1")
+            body = json.loads(err)
+            self.assertEqual((code, body["error"], body["client_request_id"]), (7, "delivery_unknown", "q-1"), op)
+
+    def test_a_dropped_connection_after_send_is_delivery_unknown(self):
+        FakeDaemon.drop = {"/api/missions/m1/round"}
+        code, _out, err = self.run_cli("--timeout", "0.3", "mission", "round", "m1", "--request-id", "r-drop")
+        self.assertEqual((code, json.loads(err)["error"]), (7, "delivery_unknown"))
+
+    def test_a_token_fetch_timeout_before_a_round_is_not_delivery_unknown(self):
+        FakeDaemon.slow = {"/api/session"}
+        code, _out, err = self.run_cli("--timeout", "0.3", "mission", "round", "m1", "--request-id", "r-token")
+        self.assertNotEqual(json.loads(err)["error"], "delivery_unknown")
+        self.assertEqual(self.posts("/api/missions/m1/round"), [])
+
+    def test_ops_without_a_request_id_keep_the_plain_timeout(self):
+        FakeDaemon.slow = {"/api/missions/m1/pause"}
+        code, _out, err = self.run_cli("--timeout", "0.3", "mission", "pause", "m1", "--reason", "waiting_user")
+        self.assertEqual((code, json.loads(err)["error"]), (5, "timeout"))
+
     def test_round_over_the_cap_surfaces_the_conflict(self):
         FakeDaemon.routes["POST /api/missions/m1/round"] = (409, {"error": "conflict", "reason": "max_rounds", "rounds_used": 2})
         err = self.bad("mission", "round", "m1", "--request-id", "rnd-cap")
