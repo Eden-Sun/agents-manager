@@ -702,9 +702,16 @@ struct SendIn {
     attachments: Vec<String>,
 }
 
+/// Unix 檔案系統檔名上限（位元組）。
+pub const STORED_NAME_MAX_BYTES: usize = 255;
+/// 上傳存檔時加在檔名前的 ULID 前綴（26 位元組 ULID ＋ 1 位元組連字號）。
+pub const ULID_PREFIX_BYTES: usize = 27;
+/// 使用者上傳檔名經清理後的位元組上限（確保加上 ULID 前綴後不超過檔案系統上限）。
+pub const CLEAN_NAME_MAX_BYTES: usize = STORED_NAME_MAX_BYTES - ULID_PREFIX_BYTES;
+
 /// 上傳後存進 `inbox/` 的名字（`<ulid>-<清過的檔名>`）。只認這個形狀，送訊息時帶來的附件 id 也用它驗。
 pub fn stored_name_ok(name: &str) -> bool {
-    name.len() <= 200
+    name.len() <= STORED_NAME_MAX_BYTES
         && !name.starts_with('.')
         && !name.contains('/')
         && !name.contains('\\')
@@ -1026,7 +1033,12 @@ pub fn clean_upload_name(raw: &str) -> Option<String> {
         .map(|c| if c.is_alphanumeric() || "._- ()".contains(c) { c } else { '_' })
         .collect();
     let cleaned = cleaned.trim().to_string();
-    if cleaned.is_empty() || cleaned.starts_with('.') || !cleaned.chars().any(char::is_alphanumeric) || cleaned.chars().count() > 120 {
+    if cleaned.is_empty()
+        || cleaned.starts_with('.')
+        || !cleaned.chars().any(char::is_alphanumeric)
+        || cleaned.chars().count() > 120
+        || cleaned.len() > CLEAN_NAME_MAX_BYTES
+    {
         return None;
     }
     if crate::outbox::withheld_name(&cleaned.to_ascii_lowercase()) {
