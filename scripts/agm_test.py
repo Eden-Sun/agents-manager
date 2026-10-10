@@ -1018,6 +1018,12 @@ class ApprovalLeaseCommandTest(CliCase):
             ("bot-a", "rebuild", "abc123", 600),
         )
 
+    def test_a_given_ttl_is_sent_and_an_omitted_one_is_not(self):
+        self.ok("lease", "acquire", "rebuild", "--approval", "ap-1", "--ttl", "120")
+        self.assertEqual(self._last_body()["ttl_secs"], 120)
+        self.ok("lease", "acquire", "rebuild", "--approval", "ap-1")
+        self.assertNotIn("ttl_secs", self._last_body())
+
     def test_request_can_supersede_its_own_earlier_request(self):
         """換 commit 重新申請：帶上舊的 id，daemon 才接得起等待（SPEC §18.10）；不帶就不送這個欄位。"""
         self.ok("approval", "request", "--requester", "bot-a", "--purpose", "rebuild", "--scope", "daemon/",
@@ -3246,6 +3252,21 @@ class CliHardeningTest(CliCase):
             self.assertEqual(code, 2, argv)
             self.assertEqual(json.loads(err)["error"], "bad_args", argv)
         self.assertEqual(FakeDaemon.seen, [], "參數錯誤不能打到 daemon")
+
+    def test_seconds_and_issue_numbers_must_be_positive_integers(self):
+        for argv in (
+            ("approval", "request", "--requester", "b", "--purpose", "rebuild", "--scope", "x", "--expires-in", "0"),
+            ("approval", "request", "--requester", "b", "--purpose", "rebuild", "--scope", "x", "--expires-in", "-60"),
+            ("approval", "decide", "ap-1", "--decision", "approve", "--expires-in", "0"),
+            ("lease", "acquire", "rebuild", "--approval", "a1", "--ttl", "0"),
+            ("lease", "acquire", "rebuild", "--approval", "a1", "--ttl", "-5"),
+            ("lease", "renew", "rebuild", "--fence", "3", "--ttl", "abc"),
+            ("issue", "claim", "0"),
+        ):
+            code, out, err = self.run_cli(*argv)
+            self.assertEqual((code, out), (2, ""), argv)
+            self.assertEqual(json.loads(err)["error"], "bad_args", argv)
+        self.assertEqual([r for r in FakeDaemon.seen if r["path"] != "/api/session"], [], "參數錯誤不能打到 daemon")
 
     def test_ids_must_be_non_empty_single_line_values(self):
         for bad in ("", "  ", "a\nb", "a\x00b", "x" * 300):

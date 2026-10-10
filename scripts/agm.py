@@ -964,7 +964,7 @@ def cmd_approval(client: Client, cfg: dict, args) -> object:
         body: dict = {"requester": args.requester, "purpose": args.purpose, "scope": args.scope}
         if args.commit:
             body["target_commit"] = args.commit
-        if args.expires_in:
+        if args.expires_in is not None:
             body["expires_in_secs"] = args.expires_in
         # 重送同一個 request id 回原本那一筆（回應的 created=false）；換了 purpose／scope／commit 回 409。
         if args.request_id:
@@ -984,7 +984,7 @@ def cmd_approval(client: Client, cfg: dict, args) -> object:
     body = {"decision": args.decision, "actor": args.actor}
     if args.reason:
         body["reason"] = args.reason
-    if args.expires_in:
+    if args.expires_in is not None:
         body["expires_in_secs"] = args.expires_in
     return client.post(f"/api/supervisor/approvals/{path_segment(args.approval_id)}/decide", body)
 
@@ -1100,7 +1100,7 @@ def cmd_lease(client: Client, cfg: dict, args) -> object:
         body: dict = {"owner": owner, "approval_id": args.approval, "require_idle": not args.allow_busy, "request_id": request_id}
         if args.commit:
             body["commit"] = args.commit
-        if args.ttl:
+        if args.ttl is not None:
             body["ttl_secs"] = args.ttl
         if args.exclude_bot:
             body["exclude_bot_ids"] = list(args.exclude_bot)
@@ -1125,7 +1125,7 @@ def cmd_lease(client: Client, cfg: dict, args) -> object:
     # renew／release 要出示 acquire 當下發的一次性憑證：owner 與 fence 是公開欄位
     # （`lease status` 就看得到），只靠它們等於誰都能把別人正在換 binary 的窗口收掉。
     body = {"owner": owner, "fence": args.fence}
-    if args.ttl:
+    if args.ttl is not None:
         body["ttl_secs"] = args.ttl
     tok = lease_token_of(args)
     if tok:
@@ -2344,6 +2344,17 @@ def _limit_arg(raw: str) -> int:
     return v
 
 
+def _positive_int_arg(raw: str) -> int:
+    """正整數（秒數、issue 編號）：0、負數和非整數在解析階段拒絕。"""
+    try:
+        value = int(raw)
+    except ValueError:
+        raise argparse.ArgumentTypeError(f"要是正整數，收到 {raw!r}")
+    if value < 1:
+        raise argparse.ArgumentTypeError(f"要是正整數（≥ 1），收到 {value}")
+    return value
+
+
 def _id_arg(raw: str) -> str:
     v = raw.strip()
     if not v or len(v) > MAX_ID_CHARS or any(ord(c) < 32 or ord(c) == 127 for c in v):
@@ -2496,7 +2507,7 @@ def build_parser() -> argparse.ArgumentParser:
         dest="request_id",
         help="request：穩定 id，重送同一個回原本那一筆（回應 created=false）；換了內容回 409。不確定送出去沒有時用它重送，不要換新 id",
     )
-    s.add_argument("--expires-in", type=int, dest="expires_in", metavar="SECS", help="多久之後失效")
+    s.add_argument("--expires-in", type=_positive_int_arg, dest="expires_in", metavar="SECS", help="多久之後失效")
     s.add_argument(
         "--supersedes",
         metavar="APPROVAL_ID",
@@ -2520,7 +2531,7 @@ def build_parser() -> argparse.ArgumentParser:
     )
     s.add_argument("--approval", help="acquire：核准 id；safety：用這筆核准的等待時間判斷要不要縮小封鎖面")
     s.add_argument("--commit", help="acquire：要處理的 commit，必須符合核准")
-    s.add_argument("--ttl", type=int, metavar="SECS", help="租約長度（預設 900，上限 3600）")
+    s.add_argument("--ttl", type=_positive_int_arg, metavar="SECS", help="租約長度（預設 900，上限 3600）")
     s.add_argument("--fence", type=int, help="renew/release：acquire 回傳的 fence")
     s.add_argument(
         "--lease-token",
@@ -2680,7 +2691,7 @@ def build_parser() -> argparse.ArgumentParser:
         ),
     )
     s.add_argument("op", choices=["claim", "release"])
-    s.add_argument("number", type=int, help="issue 編號")
+    s.add_argument("number", type=_positive_int_arg, help="issue 編號")
     s.add_argument("--repo", help="owner/name；省略就讓 gh 從 cwd 的 remote 自己推")
     s.add_argument("--bot", help="認領人；省略取 AM_AGENT_NAME、再退 AM_BOT_ID")
     s.add_argument("--child", help="claim：要派出去的 child agent 名")
