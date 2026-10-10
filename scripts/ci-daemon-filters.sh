@@ -25,6 +25,11 @@ while IFS= read -r f; do
             | crates/am-lifecycle/src/lib.rs | crates/am-share/src/lib.rs | crates/am-supervisor/src/lib.rs)
             printf '__all__\n'
             ;;
+        # child_done 的測試由 am-lifecycle 的 child_done.rs 以 #[path] 編進 daemon（lib.rs），模組路徑是 child_done::tests::；
+        # 按檔名選會選到零個（#1033 的驗證就是這樣被拒絕放行）。
+        daemon/src/child_done_tests.rs | daemon/src/runners/child_done.rs)
+            printf 'child_done::tests::\n'
+            ;;
         daemon/src/*)
             rel="${f#daemon/src/}"
             case "$rel" in
