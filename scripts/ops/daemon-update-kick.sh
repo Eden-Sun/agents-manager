@@ -264,7 +264,7 @@ except Exception:
     sys.exit(1)
 print(" ".join(d.get("paths") or []))
 ' 2>/dev/null)
-[ -n "$PATHS" ] || PATHS="daemon web Cargo.toml Cargo.lock docs/goals/agm-supervisor-persona.md docs/goals/agm-responder-persona.md scripts/agm.py"
+[ -n "$PATHS" ] || PATHS="daemon crates web Cargo.toml Cargo.lock docs/goals/agm-supervisor-persona.md docs/goals/agm-responder-persona.md scripts/agm.py"
 # shellcheck disable=SC2086  # PATHS 是刻意要拆成多個參數的
 binary_same() { "$GIT" -C "$DEPLOY" diff --quiet "$1" "$2" -- $PATHS; }   # exit 1＝有差；128＝讀不到（當成有差）
 
