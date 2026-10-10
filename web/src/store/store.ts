@@ -2644,8 +2644,11 @@ export const useStore = create<StoreState>((set, get) => {
     const s = get()
     if (!s.missionsSupported) return
     // 斷線期間交辦可能已經換了好幾個階段：卡片會一直停在舊的那一格，直到使用者重整（review3 c1 M5）。
+    // 正在看的專案也要重抓：第一次載入失敗的話清單從來沒有進 `missions`，這裡不補就整條任務列消失（#1214）。
+    const pids = new Set(Object.keys(s.missions))
+    if (s.selectedProjectId) pids.add(s.selectedProjectId)
     await Promise.all([
-      ...Object.keys(s.missions).map((pid) => s.loadMissions(pid)),
+      ...[...pids].map((pid) => s.loadMissions(pid)),
       ...Object.keys(s.missionDetail).map((id) => s.loadMission(id)),
     ])
   },
@@ -3472,7 +3475,8 @@ export function handleFrame(set: SetFn, get: GetFn, frame: { seq?: number; type:
         for (const detail of Object.values(s.missionDetail)) {
           if (detail.revisions.some((r) => r.id === missionId)) void s.loadMission(detail.id)
         }
-        if (projectId && s.missions[projectId]) void s.loadMissions(projectId)
+        // 正在看的專案就算清單沒載成功也要重載（#1214）；沒在看、又沒載過的不主動去載。
+        if (projectId && (s.missions[projectId] || s.selectedProjectId === projectId)) void s.loadMissions(projectId)
       })
       return null
     }
