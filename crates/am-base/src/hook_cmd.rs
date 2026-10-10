@@ -57,7 +57,18 @@ pub fn run(args: HookArgs) {
     }
 }
 
+/// 子 agent 的 pane（herdr shim 蓋的 `AM_CHILD_OF`）繼承的是母 bot 的 `AM_BOT_ID`／`AM_HOOK_TOKEN`／`AM_RUN_ID`：
+/// 這裡送出去的 hook 會被記在母 bot 身上（同 kind 時收掉母 bot 的回合、改掉它的 session）。子 agent 沒有自己的 hook 身分
+/// （§12.5／§12a.9 改讀對話檔），所以一律不送。
+pub fn is_child_pane(child_of: Option<std::ffi::OsString>) -> bool {
+    child_of.is_some_and(|v| !v.to_string_lossy().trim().is_empty())
+}
+
 fn inner(args: HookArgs) {
+    // 子 agent 的 hook 不送、也不 spool（#1004）：在讀 stdin 之前就回去，stdout 照舊空的。
+    if is_child_pane(std::env::var_os("AM_CHILD_OF")) {
+        return;
+    }
     let deadline = Instant::now() + TOTAL_BUDGET;
     let data_dir = resolve_data_dir(&args.data_dir);
 
