@@ -136,7 +136,9 @@ export function HostShellPanel({
   const ending = useStore((s) => Boolean(s.busy[`shell:${host}:${paneId}`]))
 
   const [snap, setSnap] = useState<TerminalSnapshot | null>(null)
+  // 讀取錯誤與送出錯誤分開：輪詢成功只清前者，送字／送鍵失敗的說明不會被下一拍輪詢清掉（#1127）。
   const [err, setErr] = useState<string | null>(null)
+  const [sendErr, setSendErr] = useState<string | null>(null)
   /** 改它就取消排著的那次、立刻重讀（送完指令要馬上看到反應）。 */
   const [nonce, setNonce] = useState(0)
   /** `visible` = 終端現在長什麼樣（shell 的常態）；`recent_unwrapped` = 連捲上去的一起看。 */
@@ -173,6 +175,7 @@ export function HostShellPanel({
     setLastTarget(target)
     setSnap(null)
     setErr(null)
+    setSendErr(null)
     setHistAt(-1)
     setSyncState(initialSync())
     setTyping(false)
@@ -223,12 +226,13 @@ export function HostShellPanel({
       const denied = shellForbidden(e)
       if (!denied) {
         // 讀不到狀態：這次沒送，但不是唯讀——顯示說明、不鎖面板。
-        setErr(shellStateUnknown(e) ?? (e instanceof Error ? e.message : String(e)))
+        setSendErr(shellStateUnknown(e) ?? (e instanceof Error ? e.message : String(e)))
         return
       }
       lockShellView(host, paneId, denied)
       setSyncState(false)
       writeSync(target, false)
+      setSendErr(null)
       setErr(null)
     },
     [host, lockShellView, paneId, target],
@@ -259,7 +263,7 @@ export function HostShellPanel({
           setText('')
           setHistAt(-1)
         }
-        setErr(null)
+        setSendErr(null)
         refresh()
       } catch (e) {
         failed(e)
@@ -276,7 +280,7 @@ export function HostShellPanel({
     useCallback(
       (e: unknown | null) => {
         if (e) failed(e)
-        else setErr(null)
+        else setSendErr(null)
         refresh()
       },
       [failed, refresh],
@@ -469,6 +473,11 @@ export function HostShellPanel({
           <div className="shell-err" role="status">
             {/* 有快照卻讀失敗：畫面是舊的。 */}
             最後一次讀取失敗（{err}）——上面顯示的是先前的畫面。
+          </div>
+        ) : null}
+        {sendErr ? (
+          <div className="shell-err" role="alert">
+            送出失敗（{sendErr}）——這次的輸入沒有送進 pane。
           </div>
         ) : null}
 
