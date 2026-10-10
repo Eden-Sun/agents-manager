@@ -181,7 +181,7 @@ export function IdentityOptions({
       </span>
       <div className="opt-group" role="radiogroup" aria-label="identity">
         <button type="button" className={`opt${value === '' ? ' on' : ''}`} onClick={() => onChange('')}>
-          不指定身分（本機預設）
+          不指定身分（{!host || host === 'local' ? '本機預設' : `${host} 的預設帳號`}）
         </button>
         {identities.map((i) => {
           const st = status[i.name]
