@@ -3,6 +3,7 @@ import { useEffect, useRef, useState } from 'react'
 import { MOCK_MODE } from './api'
 import { useDialogFocus } from './hooks/useDialogFocus'
 import { useViewportPin } from './hooks/useViewportPin'
+import { useWakeLockHolder } from './hooks/useWakeLock'
 import { DRAWER_QUERY, useMediaQuery } from './hooks/useMediaQuery'
 import { useProjectJumpKeys } from './hooks/useProjectJumpKeys'
 import { useBotSwitchKeys } from './hooks/useBotSwitchKeys'
@@ -140,6 +141,8 @@ export default function App() {
   // Below this width the sidebar is an off-canvas drawer (styles.css `@media (width <= 1024px)`).
   const isMobile = useMediaQuery(DRAWER_QUERY)
   useViewportPin()
+  // 螢幕保持亮著的鎖在 App 根部握（#1199）：關掉環境設定視窗不會放掉。
+  useWakeLockHolder()
   const sidebarRef = useRef<HTMLElement>(null)
   const drawerOpen = isMobile && drawer
 
