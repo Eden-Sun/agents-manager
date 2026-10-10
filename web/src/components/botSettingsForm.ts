@@ -59,6 +59,21 @@ export function computeBotPatch(
   return patch
 }
 
+/**
+ * 存檔回來後哪些欄位可以放掉 `touched`：送出之後使用者又改過的那一欄要留著（不然後打的字會被還原成剛存的值）。
+ * `now` 是面板 state 裡的原文（跟 `BotFormValues` 同一份）；比對規則跟 `computeBotPatch` 送出時的正規化一致。
+ */
+export function settledKeys(sent: PatchBotInput, now: BotFormValues): BotFormKey[] {
+  const out: BotFormKey[] = []
+  if ('name' in sent && now.name === sent.name) out.push('name')
+  if ('model' in sent && now.model === (sent.model ?? null)) out.push('model')
+  if ('effort' in sent && now.effort === (sent.effort ?? null)) out.push('effort')
+  if ('fast' in sent && now.fast === Boolean(sent.fast)) out.push('fast')
+  if ('persona' in sent && (now.persona.trim() || null) === (sent.persona ?? null)) out.push('persona')
+  if ('identity' in sent && (now.identity || null) === (sent.identity ?? null)) out.push('identity')
+  return out
+}
+
 const SAVED_KEYS: readonly BotFormKey[] = ['name', 'model', 'effort', 'fast', 'persona', 'identity']
 
 /**
