@@ -252,7 +252,7 @@ mod arc_port_15_providerport {
         async fn adopt_statusline_model(&self, run: &db::Run, payload: &Value) { <T as crate::events::ports::ProviderPort>::adopt_statusline_model(self.as_ref(), run, payload).await }
         async fn login_on_auth_failure(&self, bot: &db::Bot, admitted: Option<&crate::hosts::HostFence>) { <T as crate::events::ports::ProviderPort>::login_on_auth_failure(self.as_ref(), bot, admitted).await }
         async fn admitted_host_fence(&self, bot: &db::Bot) -> Option<crate::hosts::HostFence> { <T as crate::events::ports::ProviderPort>::admitted_host_fence(self.as_ref(), bot).await }
-        async fn login_on_turn_ok(&self, bot: &db::Bot) { <T as crate::events::ports::ProviderPort>::login_on_turn_ok(self.as_ref(), bot).await }
+        async fn login_on_turn_ok(&self, bot: &db::Bot, admitted: Option<&crate::hosts::HostFence>) { <T as crate::events::ports::ProviderPort>::login_on_turn_ok(self.as_ref(), bot, admitted).await }
         fn codex_migration_on_blocked(&self, run: &db::Run) { <T as crate::events::ports::ProviderPort>::codex_migration_on_blocked(self.as_ref(), run) }
         fn prompt_suggestion_on_idle(&self, run: &db::Run) { <T as crate::events::ports::ProviderPort>::prompt_suggestion_on_idle(self.as_ref(), run) }
         async fn dismiss_survey_if_shown(&self, run: &db::Run) -> bool { <T as crate::events::ports::ProviderPort>::dismiss_survey_if_shown(self.as_ref(), run).await }

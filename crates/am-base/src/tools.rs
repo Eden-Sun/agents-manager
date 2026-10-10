@@ -526,7 +526,7 @@ pub async fn recheck_identity_login<H: ToolsEnv>(app: &Arc<H>, host: &str, name:
 }
 
 /// The same host authority is used for the probe and its cache write (#347).
-async fn recheck_identity_login_fenced<H: ToolsEnv>(app: &Arc<H>, host: &str, name: &str, fence: &crate::hosts::HostFence) -> Option<bool> {
+pub async fn recheck_identity_login_fenced<H: ToolsEnv>(app: &Arc<H>, host: &str, name: &str, fence: &crate::hosts::HostFence) -> Option<bool> {
     if !app.hosts().is_current(fence).await {
         return None;
     }

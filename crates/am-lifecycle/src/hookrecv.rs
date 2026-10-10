@@ -1201,7 +1201,7 @@ pub async fn process_locked_for<H: HookHost>(app: &H, body: &HookBody, event_id:
             if crate::login_prompt::is_not_logged_in_line(a) {
                 app.login_on_auth_failure(&bot, admitted_fence.as_ref()).await;
             } else if !a.trim().is_empty() {
-                app.login_on_turn_ok(&bot).await;
+                app.login_on_turn_ok(&bot, admitted_fence.as_ref()).await;
             }
         }
     }
