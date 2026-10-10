@@ -1120,3 +1120,32 @@ test('輸入法選字的 Enter（isComposing 或 keyCode 229）不送出；一�
   await settle(100)
   assert.equal(sent, 1, '一般 Enter 才送')
 })
+
+test('放大檢視開著時檔案換版：檢視裡的「還在修」也變回按鈕', async () => {
+  let ev: ShareEvents | null = null
+  let fixed = false
+  const client: ShareClient = {
+    ...mockShareClient(TOKEN),
+    files: async () => [{ name: '早安.png', size: fixed ? 4 : 3, modified_at: fixed ? '2026-10-04T00:01:00Z' : '2026-10-04T00:00:00Z' }],
+    fileBlob: async () => {
+      if (!fixed) throw new Error('decode')
+      return new Blob(['png!'], { type: 'image/png' })
+    },
+    subscribe(e) {
+      ev = e
+      return () => {}
+    },
+  }
+  await mount(<ShareApp client={client} />)
+  await settle(300)
+  await click(document.querySelector('.sh-file-list .sh-thumb')!)
+  await settle(300)
+  assert.equal(document.querySelector('.sh-viewer .sh-png-note')!.textContent, '這張圖還在修，請稍等')
+  fixed = true
+  await act(async () => {
+    ev!.onResync?.()
+  })
+  await settle(300)
+  assert.ok(document.querySelector('.sh-viewer .sh-png-btn'), '檢視裡修好的那一版要有按鈕')
+  assert.equal(document.querySelector('.sh-viewer .sh-png-note'), null)
+})
