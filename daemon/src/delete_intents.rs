@@ -187,6 +187,9 @@ async fn resume_bot(app: &Arc<App>, intent: &Intent) -> Result<(), String> {
         }
         _ => {}
     }
+    // 已定案：輸入框草稿跟著 bot 走，定案之後死掉時補上清草稿（#1063；清除冪等，失敗只記 log）。
+    let draft_keys: Vec<String> = std::iter::once(&parent).chain(children.iter().map(|(id, _)| id)).map(|b| format!("bot:{b}")).collect();
+    crate::drafts::clear_keys(app, &draft_keys).await;
     ports::revoke_bot_share(app, &parent).await.map_err(|e| format!("cannot revoke bot share {parent}: {e}"))?;
     let host = intent.host.clone();
     // 快照裡的 child（深的先）：停、軟刪、清目錄。
@@ -229,6 +232,9 @@ async fn resume_project(app: &Arc<App>, intent: &Intent) -> Result<(), String> {
         }
         _ => {}
     }
+    // 已定案：輸入框草稿跟著專案與它的 bot 走（#1063）。
+    let draft_keys: Vec<String> = std::iter::once(format!("group:{project_id}")).chain(bots.iter().map(|(id, _)| format!("bot:{id}"))).collect();
+    crate::drafts::clear_keys(app, &draft_keys).await;
     ports::revoke_project_shares(app, &project_id).await.map_err(|e| format!("cannot revoke project shares: {e}"))?;
     let host = intent.host.clone();
     for (bid, managed_by) in &bots {
