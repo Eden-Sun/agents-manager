@@ -1840,7 +1840,7 @@ pane 打 `cargo` 就 permission denied）時，只 chmod 回 0755，不重寫內
 啟動 claude bot 前，把 `herdr --skill` 的輸出寫到該身份的 `$CLAUDE_CONFIG_DIR/skills/herdr/SKILL.md`（遠端用 ssh）；內容相同就不寫。寫之前改兩處：
 
 1. frontmatter `description` 換成 AG Man 版（herdr 原文說「使用者明確提到才用」，對 AG Man 裡的 bot 剛好相反）。
-2. body 最前面插 **AG Man 規則**（`lifecycle::child_agent_rules`）：先 `herdr agent list` 找自己底下閒置的 child 重用、命名、`herdr pane split --pane "$HERDR_PANE_ID"`、
+2. body 最前面插 **AG Man 規則**（`lifecycle::child_agent_rules`；skill 檔一個身分一份、同身分的 bot 共用，所以名字寫成環境變數 `$AM_AGENT_NAME`，不寫死某一顆，#1121）：先 `herdr agent list` 找自己底下閒置的 child 重用、命名、`herdr pane split --pane "$HERDR_PANE_ID"`、
    不要 `git stash`/`--autostash`、子 agent 會掛在自己底下、帳號與 hook 自動帶進子 pane；瀏覽器一律用 ego lite、一個 bot 最多一個分頁、結束就關；
    輸出檔案規則（§6.5f：scratchpad 只放中間產物、給使用者的放 `$AM_OUTBOX`、私鑰／憑證／DB 禁放）；
    CLI 登入／OAuth 一律不開瀏覽器（使用者 2026-10-03）：`gcloud … --no-browser`、`--use-device-code`、`firebase login --no-localhost`、`GH_BROWSER=echo gh auth login --web`；
