@@ -1293,19 +1293,50 @@ pub fn parse_photo_fetch(
 }
 
 pub fn measure_script(workspace: &str, outbox: &str) -> String {
+    measure_script_at(workspace, outbox, "")
+}
+
+pub fn measure_script_at(workspace: &str, outbox: &str, race: &str) -> String {
     let header = script_common_header();
+    let race_hook = if race.is_empty() {
+        String::new()
+    } else {
+        format!("{race}\n")
+    };
     format!(
         r#"{header}
 fail() {{ printf 'AM_RFS1\nERR 9\nUNTRUSTED\nAM_RFS_DONE\n'; exit 0; }}
-# 一棵樹：`du -skx`（不跟符號連結、不跨檔案系統；KiB）＋`find -xdev -type f` 數檔案（上限 200001 個就停）。任何一步量不出數字就整個失敗，不當成 0。
+tmp_dir=$(mktemp -d "${{TMPDIR:-/tmp}}/am-rfs-meas.XXXXXX") || fail
+trap 'rm -rf "$tmp_dir"' EXIT
+
+am_measure_dir() {{
+  du -skx . > "$tmp_dir/du_out" 2> "$tmp_dir/du_err" || fail
+  if [ -s "$tmp_dir/du_err" ]; then fail; fi
+  m_kib=$(awk '{{print $1}}' "$tmp_dir/du_out")
+  case "$m_kib" in ''|*[!0-9]*) fail ;; esac
+
+  {race_hook}
+  rm -f "$tmp_dir/fifo" "$tmp_dir/find_err" "$tmp_dir/find_rc"
+  mkfifo "$tmp_dir/fifo" || fail
+  ( find . -xdev -type f 2>"$tmp_dir/find_err"; echo $? > "$tmp_dir/find_rc" ) > "$tmp_dir/fifo" &
+  f_pid=$!
+  m_files=$(head -n 200001 "$tmp_dir/fifo" | wc -l | tr -d ' ')
+  wait "$f_pid" 2>/dev/null
+  f_rc=$(cat "$tmp_dir/find_rc" 2>/dev/null || echo 1)
+  if [ -s "$tmp_dir/find_err" ]; then fail; fi
+  if [ "$m_files" -le 200000 ] && [ "$f_rc" -ne 0 ]; then fail; fi
+  case "$m_files" in ''|*[!0-9]*) fail ;; esac
+}}
+
 ws_kib=0
 ws_files=0
 D={ws_quoted}
 am_enter_dir
 case "$?" in
   0)
-    ws_kib=$(du -skx . 2>/dev/null | awk '{{print $1}}')
-    ws_files=$(find . -xdev -type f 2>/dev/null | head -n 200001 | wc -l | tr -d ' ')
+    am_measure_dir
+    ws_kib=$m_kib
+    ws_files=$m_files
     ;;
   2) ;; # 工作目錄不見了：算 0（跟本機一樣）
   *) fail ;;
@@ -1316,13 +1347,16 @@ D={ob_quoted}
 am_enter_dir
 case "$?" in
   0)
-    ob_kib=$(du -skx . 2>/dev/null | awk '{{print $1}}')
-    ob_files=$(find . -xdev -type f 2>/dev/null | head -n 200001 | wc -l | tr -d ' ')
+    am_measure_dir
+    ob_kib=$m_kib
+    ob_files=$m_files
     # 標記檔是 daemon 放的，不算使用者的量（連同它佔的區塊一起扣）。
     if [ -f .am-share-keep ] && [ ! -L .am-share-keep ]; then
-      kk=$(du -sk .am-share-keep 2>/dev/null | awk '{{print $1}}')
+      du -sk .am-share-keep > "$tmp_dir/kk_out" 2> "$tmp_dir/kk_err" || fail
+      if [ -s "$tmp_dir/kk_err" ]; then fail; fi
+      kk=$(awk '{{print $1}}' "$tmp_dir/kk_out")
       case "$kk" in ''|*[!0-9]*) fail ;; esac
-      ob_kib=$(( ob_kib - kk ))
+      if [ "$kk" -gt "$ob_kib" ]; then ob_kib=0; else ob_kib=$(( ob_kib - kk )); fi
       [ "$ob_files" -gt 0 ] && ob_files=$(( ob_files - 1 ))
     fi
     ;;
@@ -1342,6 +1376,7 @@ printf 'AM_RFS_DONE\n'
 "#,
         ws_quoted = sh_quote(workspace),
         ob_quoted = sh_quote(outbox),
+        race_hook = race_hook,
     )
 }
 
@@ -1851,11 +1886,20 @@ impl RemoteSite {
 
     // 預算與保留（R-S4 用）
     pub async fn measure(&self) -> Result<budget::Measured, RfsError> {
+        self.measure_with("").await
+    }
+
+    #[cfg(test)]
+    pub async fn measure_racing(&self, race: &str) -> Result<budget::Measured, RfsError> {
+        self.measure_with(race).await
+    }
+
+    async fn measure_with(&self, race: &str) -> Result<budget::Measured, RfsError> {
         if !self.conn.is_connected() {
             return Err(RfsError::Unavailable);
         }
         let _permit = acquire_slot(&self.host, TIMEOUT_MAINTAIN).await?;
-        let script = measure_script(&self.workspace, &self.outbox);
+        let script = measure_script_at(&self.workspace, &self.outbox, race);
         let out = self.conn.ssh_exec_timeout(&script, TIMEOUT_MAINTAIN).await.map_err(|e| {
             tracing::warn!(host = %self.host, error = %e, "measure ssh failed");
             RfsError::Unavailable
