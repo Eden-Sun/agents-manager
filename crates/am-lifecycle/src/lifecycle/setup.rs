@@ -1295,8 +1295,14 @@ const HERDR_SKILL_DESC: &str = "在 agents-manager（AG Man）裡控制 herdr �
 /// Only the description line inside the front matter is touched; the rest of herdr's document
 /// is the CLI's own authority on its commands and is passed through untouched, so a herdr
 /// upgrade brings its new text along.
-fn herdr_skill_doc(raw: &str, agent_name: &str) -> String {
-    let rules = format!("## AG Man 規則（硬規則，優先於本文件其餘內容）\n\n{}\n", child_agent_rules(agent_name));
+/// skill 檔一個身分一份，同身分的每顆 bot 與子 agent 都讀同一份：不能寫死某一顆的名字（#1121）。
+const SKILL_AGENT_NAME: &str = "$AM_AGENT_NAME";
+
+fn herdr_skill_doc(raw: &str) -> String {
+    let rules = format!(
+        "## AG Man 規則（硬規則，優先於本文件其餘內容）\n\n下文的 `$AM_AGENT_NAME` 是這個 pane 的環境變數（`echo \"$AM_AGENT_NAME\"`），也就是你在 AG Man 裡的 agent 名稱；這份 skill 由同一個帳號目錄下的所有 bot 共用，所以不寫死名字，用到的地方代入實際的值。\n\n{}\n",
+        child_agent_rules(SKILL_AGENT_NAME)
+    );
     let lines: Vec<&str> = raw.lines().collect();
     // Front matter is `---` … `---`; without one, put ours in front and leave the rest alone.
     let end = if lines.first().map(|l| l.trim_end()) == Some("---") {
@@ -1332,9 +1338,19 @@ fn herdr_skill_doc(raw: &str, agent_name: &str) -> String {
     out
 }
 
+/// 遠端寫 skill：`mktemp` 給每次的暫存檔獨一個名字（同身分兩顆 bot 同時啟動不互踩，#1121），trap 收尾；
+/// 內容相同就不換（保留 mtime），不同才 `mv`。
+fn remote_skill_script(dir: &str, doc: &str) -> String {
+    format!(
+        "set -e\nD={dir}\nmkdir -p \"$D\"\nN=$(mktemp \"$D/.SKILL.md.XXXXXX\")\ntrap 'rm -f \"$N\"' EXIT\ncat > \"$N\" <<'AM_SKILL_EOF'\n{doc}\nAM_SKILL_EOF\nif cmp -s \"$N\" \"$D/SKILL.md\" 2>/dev/null; then rm -f \"$N\"; else mv \"$N\" \"$D/SKILL.md\"; fi\nprintf 'AM_SKILL_OK\\n'\n",
+        dir = sh_quote(dir),
+        doc = doc.trim_end(),
+    )
+}
+
 /// Install herdr's skill (with `child_agent_rules` on top) into `$CLAUDE_CONFIG_DIR/skills/`.
 /// Per identity; idempotent because the file is in the user's own claude config (backup noise).
-pub async fn install_herdr_skill(app: &impl crate::hosts::HostsAccess, bot: &db::Bot, project: &db::Project, env: &Value, agent_name: &str) {
+pub async fn install_herdr_skill(app: &impl crate::hosts::HostsAccess, bot: &db::Bot, project: &db::Project, env: &Value, _agent_name: &str) {
     if bot.kind != "claude" {
         return;
     }
@@ -1344,10 +1360,10 @@ pub async fn install_herdr_skill(app: &impl crate::hosts::HostsAccess, bot: &db:
     }
     let cfg_dir = env.get("CLAUDE_CONFIG_DIR").and_then(|v| v.as_str()).map(str::to_string);
     let result = if project.host == LOCAL_HOST {
-        install_herdr_skill_local(cfg_dir, agent_name).await
+        install_herdr_skill_local(cfg_dir).await
     } else {
         match app.hosts().get(&project.host).await {
-            Some(conn) => install_herdr_skill_remote(&conn, cfg_dir, agent_name).await,
+            Some(conn) => install_herdr_skill_remote(&conn, cfg_dir).await,
             None => Err(anyhow::anyhow!("unknown host `{}`", project.host)),
         }
     };
@@ -1373,8 +1389,8 @@ async fn herdr_skill_output(bin: &str, timeout: Duration) -> anyhow::Result<Stri
     Ok(String::from_utf8_lossy(&out.stdout).into_owned())
 }
 
-async fn install_herdr_skill_local(cfg_dir: Option<String>, agent_name: &str) -> anyhow::Result<()> {
-    let doc = herdr_skill_doc(&herdr_skill_output("herdr", HERDR_SKILL_TIMEOUT).await?, agent_name);
+async fn install_herdr_skill_local(cfg_dir: Option<String>) -> anyhow::Result<()> {
+    let doc = herdr_skill_doc(&herdr_skill_output("herdr", HERDR_SKILL_TIMEOUT).await?);
     let base = match cfg_dir {
         Some(d) if !d.trim().is_empty() => std::path::PathBuf::from(d),
         _ => crate::home::dir().ok_or_else(|| anyhow::anyhow!("no home directory"))?.join(".claude"),
@@ -1385,34 +1401,30 @@ async fn install_herdr_skill_local(cfg_dir: Option<String>, agent_name: &str) ->
         return Ok(());
     }
     std::fs::create_dir_all(&dir)?;
-    std::fs::write(&path, doc)?;
+    // 同目錄暫存檔再 rename：同身分的 claude 可能正在讀這份檔，不能就地截斷重寫（#1121）。
+    let tmp = dir.join(format!(".SKILL.md.{}.tmp", db::ulid()));
+    std::fs::write(&tmp, &doc)?;
+    if let Err(e) = std::fs::rename(&tmp, &path) {
+        let _ = std::fs::remove_file(&tmp);
+        return Err(e.into());
+    }
     tracing::info!(path = %path.display(), "herdr skill installed for claude");
     Ok(())
 }
 
-async fn install_herdr_skill_remote(
-    conn: &HostConn,
-    cfg_dir: Option<String>,
-    agent_name: &str,
-) -> anyhow::Result<()> {
+async fn install_herdr_skill_remote(conn: &HostConn, cfg_dir: Option<String>) -> anyhow::Result<()> {
     // herdr 常在 `remote_path` 裡（`~/.local/bin`）：非互動 ssh 的 PATH 沒有它，要走 `ssh_exec_path`。
     let raw = conn.ssh_exec_path("herdr --skill").await?;
     if !raw.contains("name:") {
         anyhow::bail!("`herdr --skill` on `{}` did not look like a skill file", conn.name);
     }
-    let doc = herdr_skill_doc(&raw, agent_name);
+    let doc = herdr_skill_doc(&raw);
     let base = match cfg_dir {
         Some(d) if !d.trim().is_empty() => d,
         _ => format!("{}/.claude", conn.home().await?),
     };
     let dir = format!("{base}/skills/herdr");
-    // Temp file + `cmp` so an unchanged skill keeps its mtime, like the local path.
-    let script = format!(
-        "set -e\nD={dir}\nmkdir -p \"$D\"\ncat > \"$D/.SKILL.md.new\" <<'AM_SKILL_EOF'\n{doc}\nAM_SKILL_EOF\nif cmp -s \"$D/.SKILL.md.new\" \"$D/SKILL.md\" 2>/dev/null; then rm -f \"$D/.SKILL.md.new\"; else mv \"$D/.SKILL.md.new\" \"$D/SKILL.md\"; fi\nprintf 'AM_SKILL_OK\\n'\n",
-        dir = sh_quote(&dir),
-        doc = doc.trim_end(),
-    );
-    let out = conn.ssh_exec(&script).await?;
+    let out = conn.ssh_exec(&remote_skill_script(&dir, &doc)).await?;
     if !out.contains("AM_SKILL_OK") {
         anyhow::bail!("remote herdr skill install did not confirm:\n{}", out.trim());
     }
@@ -1859,12 +1871,12 @@ mod model_args_tests {
     #[test]
     fn the_herdr_skill_is_rewritten_for_ag_man() {
         let raw = "---\nname: herdr\ndescription: \"Control Herdr… Use only when the user explicitly mentions Herdr.\"\n---\n\n# Herdr\n\nherdr organizes terminals.\n";
-        let doc = super::herdr_skill_doc(raw, "proj-abc123");
+        let doc = super::herdr_skill_doc(raw);
         assert!(doc.starts_with("---\nname: herdr\ndescription: \""), "front matter is kept, description replaced:\n{doc}");
         assert!(!doc.contains("Use only when the user explicitly mentions Herdr"), "herdr's own description is gone");
         assert!(doc.contains("需要開子任務"), "ours says to use it for sub-tasks");
         assert!(doc.contains("## AG Man 規則"), "the rules lead the body");
-        assert!(doc.contains("`proj-abc123-`"), "the naming rule quotes this agent's name");
+        assert!(doc.contains("`$AM_AGENT_NAME-`"), "the naming rule quotes the env var, not one bot's name");
         assert!(doc.contains("git stash"), "the no-stash rule is carried");
         assert!(doc.contains("herdr agent list"), "reuse an idle child before opening a new one");
         assert!(doc.contains("$HERDR_PANE_ID"), "how to split its own pane");
@@ -1873,10 +1885,27 @@ mod model_args_tests {
         assert!(doc.find("AG Man 規則").unwrap() < doc.find("herdr organizes").unwrap());
     }
 
+    /// 一個身分一份檔、多顆 bot 共用：規則裡不能寫死任何一顆的名字（#1121）。
+    #[test]
+    fn the_herdr_skill_names_no_particular_bot() {
+        let doc = super::herdr_skill_doc("---\nname: herdr\ndescription: x\n---\n# herdr\n");
+        assert!(doc.contains("useOrCreateTaskSpace(\"$AM_AGENT_NAME\")"), "{doc}");
+        assert!(doc.contains("echo \"$AM_AGENT_NAME\""), "說明這是環境變數");
+        assert!(!doc.contains("proj-abc123"), "{doc}");
+    }
+
+    /// 遠端寫檔用獨一的暫存檔名，不再是固定的 `.SKILL.md.new`（兩顆同身分的 bot 同時啟動會互相截斷）。
+    #[test]
+    fn the_remote_skill_script_uses_a_private_temp_file() {
+        let script = super::remote_skill_script("/home/u/.claude/skills/herdr", "x");
+        assert!(script.contains("mktemp") && !script.contains(".SKILL.md.new"), "{script}");
+        assert!(script.contains("trap 'rm -f"), "{script}");
+    }
+
     /// A document without front matter is not edited — our rules simply go in front of it.
     #[test]
     fn a_skill_without_front_matter_is_not_rewritten() {
-        let doc = super::herdr_skill_doc("# Herdr\n\nbody\n", "p-1");
+        let doc = super::herdr_skill_doc("# Herdr\n\nbody\n");
         assert!(doc.starts_with("## AG Man 規則"));
         assert!(doc.ends_with("# Herdr\n\nbody\n"));
     }
@@ -2028,7 +2057,7 @@ mod model_args_tests {
             let args = super::persona_args(&b, "proj-abc123", None, None).join(" ");
             assert!(args.contains("$AM_OUTBOX"), "{kind}: {args}");
         }
-        let doc = super::herdr_skill_doc("---\nname: herdr\ndescription: x\n---\n# herdr\n", "proj-abc123");
+        let doc = super::herdr_skill_doc("---\nname: herdr\ndescription: x\n---\n# herdr\n");
         assert!(doc.contains("$AM_OUTBOX"), "{doc}");
     }
 
