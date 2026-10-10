@@ -22,6 +22,7 @@ import {
   ROLE_LABEL,
 } from '../lib/missionView'
 import { useStore } from '../store/store'
+import { ConfirmDialog } from './ConfirmDialog'
 import { KindIcon } from './KindTag'
 import './missions.css'
 import { safeHttpUrl } from '../lib/safeUrl'
@@ -375,6 +376,7 @@ function MissionCard({ mission, onNavigate }: { mission: Mission; onNavigate: Na
   const answerMission = useStore((s) => s.answerMission)
   const [answer, setAnswer] = useState('')
   const [sending, setSending] = useState(false)
+  const [confirmCancel, setConfirmCancel] = useState(false)
 
   // 進行中的卡一定要有事件串才畫得出進度與角色，進來就抓一次；之後靠 WS `mission_updated`。
   useEffect(() => {
@@ -547,18 +549,32 @@ function MissionCard({ mission, onNavigate }: { mission: Mission; onNavigate: Na
             暫停
           </button>
         )}
-        <button
-          type="button"
-          className="mini-btn danger"
-          onClick={() => {
-            if (confirm(`取消任務「${mission.text}」？已經做的不會回復。`)) void controlMission(mission.id, 'cancel')
-          }}
-        >
+        {/* 用 ConfirmDialog 而不是原生 confirm()：手機預覽的 iframe 沒有 allow-modals，原生框會直接回 false（#1130）。 */}
+        <button type="button" className="mini-btn danger" onClick={() => setConfirmCancel(true)}>
           取消任務
         </button>
       </div>
+      <ConfirmDialog
+        open={confirmCancel}
+        title="取消任務"
+        body={<>要取消「{clip(mission.text, 80)}」嗎？已經做的不會回復。</>}
+        confirmLabel="取消任務"
+        cancelLabel="先不要"
+        danger
+        onCancel={() => setConfirmCancel(false)}
+        onConfirm={() => {
+          setConfirmCancel(false)
+          void controlMission(mission.id, 'cancel')
+        }}
+      />
     </article>
   )
+}
+
+/** 取前 n 個字（以 code point 計），超過加 `…`；用 `Array.from` 才不會切壞 emoji／CJK 代理對。 */
+function clip(s: string, n: number): string {
+  const chars = Array.from(s)
+  return chars.length > n ? `${chars.slice(0, n).join('')}…` : s
 }
 
 function shortTime(iso: string | null): string {
