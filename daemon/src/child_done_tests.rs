@@ -240,6 +240,7 @@
     #[tokio::test]
     async fn a_slow_parent_does_not_hold_up_another_parents_sweep() {
         let f = fixture("terminal_fallback", "completed_fallback").await;
+        make_parent_busy(&f, "p1-busy-sweep").await;
         let app = f.env.app.clone();
         let p1: String = sqlx::query_scalar("SELECT parent_bot_id FROM bots WHERE id = ?")
             .bind(&f.child_id)
@@ -247,8 +248,17 @@
             .await
             .unwrap();
         let p2 = crate::testing::claude_bot(&app, &f.env.project_id, "parent-2").await;
-        crate::testing::fake_run(&app, &p2.id).await;
+        let p2_run = crate::testing::fake_run(&app, &p2.id).await;
         let p2_conversation = db::conversation_id(&app.db, &p2.id).await.unwrap();
+        // 兩位 parent 都在忙：通知走佇列（同其他測試），不去碰真的 herdr 送出。
+        sqlx::query("INSERT INTO turns (id, conversation_id, run_id, origin, status, delivery, created_at) VALUES (?,?,?,'web','in_flight','ok',?)")
+            .bind("p2-busy-sweep")
+            .bind(&p2_conversation)
+            .bind(&p2_run)
+            .bind(db::now())
+            .execute(&app.db)
+            .await
+            .unwrap();
         let (c3, _, _, c3_turn) = child_of(&app, &f.env.project_id, &p2.id, "hook", "completed").await;
         let c3_crid = format!("{CRID_PREFIX}{c3}:{c3_turn}");
         let notices_for_c3 = || async {
