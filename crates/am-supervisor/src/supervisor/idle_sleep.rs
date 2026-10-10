@@ -11,8 +11,8 @@
 //! 挑的規則跟 §6.9 的批次重啟一樣保守，理由也一樣：**最不能做的事就是把使用者正在等的那一回合
 //! 砍掉**。除此之外還多三條，都是「收起來就回不來」的情況：
 //!
-//! * 沒有可續接的 session（沒 `native_session_id`、transcript 不在、或 kind 根本不支援 resume，
-//!   例如 grok）——收起來等於把對話丟掉，那不是省 RAM，是刪資料；
+//! * 沒有可續接的 session（沒 `native_session_id`、transcript 不在、或 kind 根本沒有續接寫法）——
+//!   收起來等於把對話丟掉，那不是省 RAM，是刪資料；
 //! * 子 agent（`managed_by = 'child'`）——它的 pane 是父 agent 開的，daemon 起不回來（§6.5a），
 //!   收掉就真的沒了。子 agent 的去留歸父 agent 與 AGM 的清理規則管，不歸這裡；
 //! * 總管自己那幾顆（`supervisors.bot_id` 與 `supervisor_roles` 的 patrol／responder）——巡邏的人
@@ -185,20 +185,15 @@ pub fn decide(c: &Cand, threshold: i64) -> Result<(), Skip> {
     Ok(())
 }
 
-/// `--resume` 這條路走得通的 kind。跟 `lifecycle::resume_args_by_kind` 是同一份名單：
-/// grok 沒有支援的續接寫法，所以 grok 永遠不收。
-fn kind_resumable(kind: &str) -> bool {
-    matches!(kind, "claude" | "codex")
-}
-
 /// 收掉之後接得回來嗎。判斷跟 `lifecycle::start_bot_locked_with` 的續接前置一致：有 session id，
+/// kind＋session 組得出續接參數（`lifecycle::can_resume_native`，跟 `resume_args_by_kind` 同一份判斷），
 /// 而且本機上 hook 回報過的 transcript 檔還在（claude 對一個沒有 transcript 的 session `--resume`
 /// 會印 `No conversation found` 立刻退出，§6.9）。
 fn resumable(kind: &str, session: Option<&str>, transcript: Option<&str>, local: bool) -> bool {
-    if !kind_resumable(kind) {
+    let Some(session) = session.map(str::trim).filter(|s| !s.is_empty()) else {
         return false;
-    }
-    if session.map(str::trim).filter(|s| !s.is_empty()).is_none() {
+    };
+    if !crate::lifecycle::can_resume_native(kind, session) {
         return false;
     }
     match transcript.map(str::trim) {
@@ -1120,9 +1115,19 @@ mod tests {
         let mut c = cand();
         c.resumable = false;
         assert_eq!(decide(&c, 90), Err(Skip::NoResume));
-        // grok 沒有支援的續接寫法，所以它的 run 永遠不是 resumable。
-        assert!(!kind_resumable("grok"));
-        assert!(kind_resumable("claude") && kind_resumable("codex"));
+        // 沒有續接寫法的 kind（resume_args_by_kind 回 unsupported_kind）永遠不收。
+        assert!(!resumable("cursor", Some("sess-1"), None, true));
+    }
+
+    #[test]
+    fn grok_and_agy_bots_are_collected_when_their_session_can_come_back() {
+        // 跟 lifecycle::resume_args_by_kind 是同一份判斷：grok 有 --resume、agy 有 --conversation（issue #1078）。
+        assert!(resumable("grok", Some("grok-sess-1"), None, true));
+        assert!(resumable("agy", Some("abc-123"), None, true));
+        assert!(resumable("claude", Some("sess-1"), None, true) && resumable("codex", Some("sess-1"), None, true));
+        // agy 的 id 形狀不對就拼不進 argv，接不回來，不收。
+        assert!(!resumable("agy", Some("bad id!"), None, true));
+        assert!(!resumable("grok", None, None, true));
     }
 
     #[test]
