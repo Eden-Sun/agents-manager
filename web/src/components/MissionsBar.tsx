@@ -224,9 +224,27 @@ function FollowUp({ mission, detail, onNavigate }: { mission: Mission; detail: M
   const [mode, setMode] = useState<'ask' | 'revise' | null>(null)
   const [text, setText] = useState('')
   const [busy, setBusy] = useState(false)
+  const inputRef = useRef<HTMLTextAreaElement>(null)
+  const askBtnRef = useRef<HTMLButtonElement>(null)
+  const reviseBtnRef = useRef<HTMLButtonElement>(null)
+  /** 表單是從哪一顆按鈕打開的：關掉時把焦點還回去。 */
+  const openedFrom = useRef<'ask' | 'revise' | null>(null)
   const qna = missionQna(detail.events)
   // 已經有一輪續作還沒結束時，不要再給第二個入口——daemon 也會擋（revision_in_progress）。
   const openRevision = detail.revisions.find((r) => r.status !== 'done' && r.status !== 'cancelled') ?? null
+
+  useEffect(() => {
+    if (mode) {
+      openedFrom.current = mode
+      inputRef.current?.focus()
+      return
+    }
+    const from = openedFrom.current
+    openedFrom.current = null
+    if (!from) return // 第一次掛上來：不搶焦點
+    // 「追加修改」送出成功後那顆按鈕會換成「查看進行中的續作」，找不到就退回「追問」。
+    ;(from === 'revise' ? (reviseBtnRef.current ?? askBtnRef.current) : askBtnRef.current)?.focus()
+  }, [mode])
 
   const send = async () => {
     const body = text.trim()
@@ -234,6 +252,7 @@ function FollowUp({ mission, detail, onNavigate }: { mission: Mission; detail: M
     setBusy(true)
     const ok = mode === 'revise' ? Boolean(await reviseMission(mission.id, body)) : await askMission(mission.id, body)
     setBusy(false)
+    if (!ok) inputRef.current?.focus()
     // 失敗就把字留著——重打一次很煩，而且失敗多半是暫時的。
     if (ok) {
       setText('')
@@ -277,6 +296,7 @@ function FollowUp({ mission, detail, onNavigate }: { mission: Mission; detail: M
       {mode ? (
         <div className="mission-followup-form">
           <textarea
+            ref={inputRef}
             className="mission-followup-input"
             value={text}
             aria-label={mode === 'ask' ? '追問內容' : '追加修改內容'}
@@ -296,7 +316,7 @@ function FollowUp({ mission, detail, onNavigate }: { mission: Mission; detail: M
         </div>
       ) : (
         <div className="mission-followup-actions">
-          <button type="button" className="btn" onClick={() => setMode('ask')}>
+          <button ref={askBtnRef} type="button" className="btn" onClick={() => setMode('ask')}>
             追問
           </button>
           {mission.status === 'done' ? openRevision ? (
@@ -304,7 +324,7 @@ function FollowUp({ mission, detail, onNavigate }: { mission: Mission; detail: M
               查看進行中的續作
             </button>
           ) : (
-            <button type="button" className="btn" onClick={() => setMode('revise')}>
+            <button ref={reviseBtnRef} type="button" className="btn" onClick={() => setMode('revise')}>
               追加修改
             </button>
           ) : null}
