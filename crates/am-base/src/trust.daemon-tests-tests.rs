@@ -277,3 +277,31 @@ trust_level = "trusted"
             let _ = std::fs::remove_dir_all(&dir);
         }
     }
+
+    #[test]
+    fn mark_trusted_resolves_symlinks_and_keeps_the_symlink() {
+        let dir = crate::testing::track(std::env::temp_dir().join(format!("am-trust-symlink-{}", std::process::id())));
+        let _ = std::fs::remove_dir_all(&dir);
+        let dotfiles = dir.join("dotfiles");
+        std::fs::create_dir_all(&dotfiles).unwrap();
+        let target = dotfiles.join(".claude.json");
+        std::fs::write(&target, r#"{"numStartups": 1}"#).unwrap();
+
+        let store = dir.join(".claude.json");
+        #[cfg(unix)]
+        std::os::unix::fs::symlink(&target, &store).unwrap();
+        #[cfg(windows)]
+        std::os::windows::fs::symlink_file(&target, &store).unwrap();
+
+        assert!(mark_trusted("claude", &store, &["/workspace".into()]).unwrap());
+
+        // The symlink must NOT have been replaced by a regular file!
+        let meta = std::fs::symlink_metadata(&store).unwrap();
+        assert!(meta.file_type().is_symlink(), "symlink was overwritten with a regular file");
+
+        // The target file must contain the trusted entry
+        let v: Value = serde_json::from_str(&std::fs::read_to_string(&target).unwrap()).unwrap();
+        assert_eq!(v["projects"]["/workspace"][CLAUDE_KEY], json!(true));
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
