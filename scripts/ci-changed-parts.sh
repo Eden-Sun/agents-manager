@@ -14,12 +14,14 @@ while IFS= read -r f; do
         #   - web 的測試讀 am-lifecycle crate 的 fixtures（codexUpdatePrompt／blockedKeys／tuiChoices；#863）。
         #   - ops 的 project-transfer 測試從 am-base schema 原始碼（db.rs）與 supervisor／mission store 抽欄位。
         #   - daemon 的測試讀 scripts/check.sh（cargo_shim）、scripts/ops/lint-shell-vars.sh（herdr_shim）、
-        #     scripts/ops/fixtures/*（supervisor::setup）、scripts/ops/{claude,codex}-release-task.md（claude_review）。
+        #     scripts/ops/fixtures/*（supervisor::setup）、scripts/ops/{claude,codex}-release-task.md（claude_review）、
+        #     scripts/ops/release-triage-task.md（am-base 的提交模板契約測試；#1185）。
         #   - daemon 的測試讀 docs/API.md（api_doc_parity、ws_event_docs_tests；#1170）。
         # 要先於下面的 daemon/*、scripts/*、*.md 規則。對應的 daemon 測試子集見 scripts/ci-daemon-filters.sh（兩邊要一起改）。
         crates/am-lifecycle/src/lifecycle/fixtures/*) daemon=1; web=1 ;;
         crates/am-base/src/db.rs | crates/am-supervisor/src/supervisor/store.rs | crates/am-supervisor/src/supervisor/roles.rs | crates/am-supervisor/src/mission/store.rs) daemon=1; ops=1 ;;
         scripts/check.sh | scripts/ops/lint-shell-vars.sh | scripts/ops/fixtures/* | scripts/ops/claude-release-task.md | scripts/ops/codex-release-task.md) ops=1; daemon=1 ;;
+        scripts/ops/release-triage-task.md) ops=1; daemon=1 ;;
         # scripts/ 底下的 .md 不是「只有文件」：任務檔被 install-manifest／ops 測試／daemon 讀，README 內容也有測試釘住。
         scripts/*.md) ops=1 ;;
         # daemon 用 include_str! 編進去的文件（`supervisor::persona::BUILD_INPUTS`，那邊的測試擋「又多一個沒列」）與 daemon 底下的
