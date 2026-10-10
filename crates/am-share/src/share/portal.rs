@@ -726,10 +726,7 @@ async fn send_message<H: PortalEnv>(State(st): State<Portal<H>>, Path(token): Pa
     };
     #[cfg(test)]
     crate::race_point::hit("share_send_after_bot_for", &bot_id).await;
-    let authority = match authority_lock(&st, &token, &bot_id).await {
-        Ok(g) => g,
-        Err(r) => return r,
-    };
+
     let crid = b.client_request_id.trim();
     if crid.is_empty() || crid.len() > 64 || !crid.chars().all(|c| c.is_ascii_alphanumeric() || "-_.:".contains(c)) {
         return bad("bad_client_request_id", "client_request_id 要 1～64 個 [A-Za-z0-9-_.:]");
@@ -746,7 +743,16 @@ async fn send_message<H: PortalEnv>(State(st): State<Portal<H>>, Path(token): Pa
     if text.is_empty() && b.attachments.is_empty() {
         return bad("empty", "沒有內容");
     }
-    // 沙箱總預算（#853）：工作目錄＋inbox＋outbox 合計滿了就不收新訊息（bot 再寫只會更滿）；分享頁顯示「空間滿了」，擁有者另有通知。
+    if b.attachments.iter().any(|a| !stored_name_ok(a)) {
+        return bad("unknown_attachment", "附件不存在（請重新上傳）");
+    }
+
+    // 限流檢查（#1032）：先扣額度再做任何昂貴檢查，429 時不量預算、不跑 SSH、不握 bot 互斥鎖。
+    if let Some(wait) = st.limits.take(&bot_id, "message", MESSAGES_PER_MIN, Duration::from_secs(60)) {
+        return too_many(wait, "message");
+    }
+
+    // 沙箱總預算（#853、#1032）：在 bot 鎖外檢查，避免遠端 SSH du 量測長時間霸佔 bot 互斥鎖。
     match st.app.share_storage_full(&bot_id).await {
         Ok(false) => {}
         Ok(true) => {
@@ -759,19 +765,13 @@ async fn send_message<H: PortalEnv>(State(st): State<Portal<H>>, Path(token): Pa
         // 遠端專案量不到又沒有新鮮值：不當作沒滿（fail closed，remote-share-design §6），一般 503（不洩漏主機名）。
         Err(crate::share::budget::Unavailable) => return unavailable(),
     }
-    // 附件檢查會排進 blocking pool，先扣額度讓無效附件不能免費放大檔案系統工作量。
-    if let Some(wait) = st.limits.take(&bot_id, "message", MESSAGES_PER_MIN, Duration::from_secs(60)) {
-        return too_many(wait, "message");
-    }
-    // 遠端專案（#955）：一趟 ssh 查完所有附件；連不上＝503（不送出，也不扣第二次額度）。
+
+    // 遠端專案（#955、#1032）：一趟 ssh 查完所有附件，在 bot 鎖外執行，不阻塞同 bot 的 Stop hook。
     let remote = match crate::share::remote_io::remote_site(&*st.app, &bot_id).await {
         Ok(r) => r,
         Err(()) => return unavailable(),
     };
     if let (Some(site), false) = (&remote, b.attachments.is_empty()) {
-        if b.attachments.iter().any(|a| !stored_name_ok(a)) {
-            return bad("unknown_attachment", "附件不存在（請重新上傳）");
-        }
         match site.inbox_has(&b.attachments).await {
             Ok(found) if found.len() == b.attachments.len() && found.iter().all(|f| *f) => {}
             Ok(_) => return bad("unknown_attachment", "附件不存在（請重新上傳）"),
@@ -782,11 +782,17 @@ async fn send_message<H: PortalEnv>(State(st): State<Portal<H>>, Path(token): Pa
         }
     } else {
         for a in &b.attachments {
-            if !stored_name_ok(a) || !inbox_has(&st.app, &bot_id, a).await {
+            if !inbox_has(&st.app, &bot_id, a).await {
                 return bad("unknown_attachment", "附件不存在（請重新上傳）");
             }
         }
     }
+
+    // 在真正送出副作用前拿 bot 互斥鎖重驗 token（#816、#1032），序列化輪替／撤銷與送訊。
+    let authority = match authority_lock(&st, &token, &bot_id).await {
+        Ok(g) => g,
+        Err(r) => return r,
+    };
     let mut composed = format!("{SHARE_PREFIX}{text}");
     if !b.attachments.is_empty() {
         composed.push_str(&format!("\n\n{ATTACH_MARK}\n"));

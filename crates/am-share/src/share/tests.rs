@@ -548,6 +548,44 @@ async fn a_portal_message_starts_the_restricted_bot_in_its_cage() {
     assert!(args.contains(&"--restricted".into()), "{args:?}");
 }
 
+/// #1032：send_message 扣限流與預算檢查不握 bot 互斥鎖；配額用盡時立即 429、不等待被其他操作握住的 bot 鎖。
+#[tokio::test]
+async fn send_message_rate_limit_rejection_does_not_wait_for_bot_lock() {
+    let e = tt::env().await;
+    let b = restricted_bot(&e.app, &e.project_id, "ratelimit-lock").await;
+    let token = shared(&e.app, &b.id).await;
+    let base = serve(portal::router(e.app.clone())).await;
+    let c = client();
+
+    // 耗盡 10 則/分鐘配額
+    for i in 0..portal::MESSAGES_PER_MIN {
+        let r = c.post(format!("{base}/s/{token}/api/messages"))
+            .json(&json!({"text": format!("msg {i}"), "client_request_id": format!("c-limit-{i}")}))
+            .send()
+            .await
+            .unwrap();
+        assert!(matches!(r.status().as_u16(), 200 | 409), "第 {i} 則正常放行 (status: {})", r.status());
+    }
+
+    // 模擬同 bot 的 Stop hook 或其他操作握住 bot 互斥鎖
+    use portal::PortalEnv as _;
+    let lock = e.app.bot_mutex(&b.id).await;
+    let held = lock.lock_owned().await;
+
+    // 配額已用盡的第 11 則請求：必須立即回 429，不能被 held 卡住
+    let send_fut = c.post(format!("{base}/s/{token}/api/messages"))
+        .json(&json!({"text": "msg 11", "client_request_id": "c-limit-11"}))
+        .send();
+
+    let res = tokio::time::timeout(Duration::from_millis(500), send_fut)
+        .await
+        .expect("rate limited request must not wait for bot mutex")
+        .unwrap();
+    assert_eq!(res.status(), 429);
+
+    drop(held);
+}
+
 /// bot 把 .svg 寫壞（屬性之間少空格）：分享頁讀清單時查到，以後台訊息提醒 bot 一次（同一個錯誤不重送），分享頁看不到那則；
 /// 修好之後不再提醒。
 #[tokio::test]
