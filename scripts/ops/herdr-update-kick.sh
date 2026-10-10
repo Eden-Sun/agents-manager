@@ -212,9 +212,9 @@ BODY=$(mktemp "${TMPDIR:-/tmp}/agm-herdr-update.XXXXXX"); TMPS+=("$BODY"); TMPS_
     "$INSTALLED_LINE" "$HERDR_REPO" "$LATEST_TAG" "$CHANGELOG_URL"
   PLATFORM=$(platform)
   if [ "$PLATFORM" = darwin ]; then
-    printf '\n--- 升級後強制驗收 ---\n核准並完成 herdr 維護窗口後，依 scripts/ops/herdr-upgrade-runbook.md：從 herdr pane 跑 `bash scripts/ops/herdr-lan-check.sh /opt/homebrew/bin/herdr`（第一個參數一定要寫真 binary 的路徑；不帶參數在 bot pane 裡會抓到沒簽章的 per-bot shim）。必須用新 binary 的 codesign -dv identifier 查本機網路授權表，再用 node 連區網；Apple 內建 nc、python3、curl 不可代驗。任何失敗或 node 缺少都停下，回報「需要使用者授權本機網路」，不要靠重啟硬試。\n'
+    printf '\n--- 升級後強制驗收 ---\n核准並完成 herdr 維護窗口後，依 scripts/ops/herdr-upgrade-runbook.md：從 herdr pane 跑 `bash scripts/ops/herdr-lan-check.sh /opt/homebrew/bin/herdr`（第一個參數一定要寫真 binary 的路徑；不帶參數在 bot pane 裡會抓到沒簽章的 per-bot shim）。必須用新 binary 的 codesign -dv identifier 查本機網路授權表，再用 node 連區網；Apple 內建 nc、python3、curl 不可代驗。任何失敗或 node 缺少都停下，回報「需要使用者授權本機網路」，不要靠重啟硬試。另在有新 herdr binary 的環境跑 `AM_TEST_REAL_HERDR=1 cargo test -p agents-managerd -- the_generated_argv_parses_with_the_real_herdr`，確認 shim argv 通過新 parser（測試使用暫存 HOME／socket，不連正式 pane）。\n'
   else
-    printf '\n--- 升級後驗收 ---\n核准並完成 herdr 維護窗口後，在 herdr pane 確認：`herdr --version` 是 %s、`herdr pane list` 正常、對一顆 idle bot 送一句 prompt 能回。這台是 %s：沒有 macOS 的本機網路授權，不要跑 herdr-lan-check.sh（herdr-upgrade-runbook.md 只適用 macOS 主機）。任何一項失敗就停下回報，不要靠重啟硬試。\n' "$LATEST_VERSION" "$PLATFORM"
+    printf '\n--- 升級後驗收 ---\n核准並完成 herdr 維護窗口後，在 herdr pane 確認：`herdr --version` 是 %s、`herdr pane list` 正常、對一顆 idle bot 送一句 prompt 能回。另在有新 herdr binary 的環境跑 `AM_TEST_REAL_HERDR=1 cargo test -p agents-managerd -- the_generated_argv_parses_with_the_real_herdr`，確認 shim argv 通過新 parser（測試使用暫存 HOME／socket，不連正式 pane）。這台是 %s：沒有 macOS 的本機網路授權，不要跑 herdr-lan-check.sh（herdr-upgrade-runbook.md 只適用 macOS 主機）。任何一項失敗就停下回報，不要靠重啟硬試。\n' "$LATEST_VERSION" "$PLATFORM"
   fi
 } > "$BODY"
 

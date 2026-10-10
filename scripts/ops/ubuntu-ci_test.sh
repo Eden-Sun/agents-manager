@@ -65,6 +65,18 @@ echo "gh $*" >> "$FIX/gh.log"
 exit "$(cat "$FIX/gh.rc" 2>/dev/null || echo 0)"
 GH
   chmod +x "$ROOT/bin/gh"
+  # 真 herdr parser 測試的替身：只記錄隔離命令是否被精確呼叫，不執行 cargo 或 herdr。
+  cat > "$ROOT/bin/cargo" <<'CARGO'
+#!/bin/bash
+echo "AM_TEST_REAL_HERDR=${AM_TEST_REAL_HERDR:-} AM_REAL_HERDR=${AM_REAL_HERDR:-} $*" >> "$FIX/cargo.log"
+CARGO
+  chmod +x "$ROOT/bin/cargo"
+  # PATH shim 不算真 herdr；ubuntu-ci 不應只因 pane 注入的 shim 就啟用測試。
+  cat > "$ROOT/bin/herdr" <<'HERDR'
+#!/bin/bash
+exit 0
+HERDR
+  chmod +x "$ROOT/bin/herdr"
   export PATH="$ROOT/bin:$PATH"
   export AGM_CI_ROOT="$ROOT/ci" AGM_CI_REPO_URL="$ROOT/origin.git" AGM_CI_GH_REPO=o/r AGM_CI_TIMEOUT=30s AGM_CI_KILL_AFTER=1s AGM_CI_MIN_FREE_GB=0
   CI="$AGM_CI_ROOT"; : > "$FIX/gh.log"; : > "$FIX/gh.attempts"; export AGM_CI_STATUS_RETRY_SLEEP=0
@@ -96,6 +108,19 @@ check "送 failure" "state=failure" "$FIX/gh.log"
 check "description 點名 ops" "紅：ops" "$FIX/gh.log"
 check "status.json 記 rc=3" '"rc":3' "$CI/status.json"
 check "其他段照樣跑完" "\[ubuntu-ci\] daemon rc=0" "$CI/logs/$(git -C "$ROOT/work" rev-parse HEAD).log"
+teardown
+
+# 1b. 只有找到真 herdr binary 才單獨啟用 shim argv parser 契約測試；不傳旗標給會連正式 pane 的測試。
+setup
+export AM_REAL_HERDR=""
+equals "只有 PATH shim 時全綠" "$(run)" "0"
+check_no "只有 PATH shim 時略過真 herdr parser 測試" "the_generated_argv_parses_with_the_real_herdr" "$FIX/cargo.log"
+export AM_REAL_HERDR=/bin/true
+echo 1 > "$ROOT/work/next"
+(cd "$ROOT/work" && git add next && git commit -q -m c2 && git push -q origin main)
+equals "找到真 herdr binary 時全綠" "$(run)" "0"
+check "只對 argv parser 測試設 AM_TEST_REAL_HERDR=1" "AM_TEST_REAL_HERDR=1 AM_REAL_HERDR=/bin/true test -p agents-managerd --locked -- the_generated_argv_parses_with_the_real_herdr" "$FIX/cargo.log"
+check_no "不啟用會連正式 pane 的 delivery 測試" "the_scan_source_is_one_real_herdr_accepts" "$FIX/cargo.log"
 teardown
 
 # 3b. 紅的 step 標題含引號與反斜線：status.json 仍要是合法 JSON，description 內容不能被吃掉。
