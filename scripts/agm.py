@@ -1752,6 +1752,23 @@ def cmd_handoff(client: Client, cfg: dict, args) -> object:
     return client.put("/api/supervisor/handoff", {"summary": summary})
 
 
+def _post_with_request_id(client: Client, path: str, body: dict, what: str, mission_id: str) -> object:
+    """帶冪等鍵的 mission 寫入逾時或送出後斷線時，回報送達未知；原樣重送可安全對帳。"""
+    try:
+        return client.post(path, body)
+    except AgmError as e:
+        if e.kind in ("timeout", "connection_lost"):
+            request_id = body.get("client_request_id")
+            raise AgmError(
+                "delivery_unknown",
+                f"{what} 逾時或連線中斷，送達狀態未知。用**同一個** --request-id {request_id} 原樣重送一次（daemon 會回同一筆）；不要換新的 id。",
+                7,
+                client_request_id=request_id,
+                mission_id=mission_id,
+            )
+        raise
+
+
 def cmd_mission(client: Client, cfg: dict, args) -> object:
     """群組任務（docs/API.md「群組任務」）。每個 op 對一個端點，不在 CLI 裡另外拼流程。"""
     op = args.op
@@ -1798,7 +1815,7 @@ def cmd_mission(client: Client, cfg: dict, args) -> object:
         # 逾時重送要沿用同一個鍵，daemon 才不會多扣一輪。
         if not args.request_id:
             raise AgmError("bad_args", "mission round 需要 --request-id（穩定的冪等鍵，重送沿用同一個）", 2)
-        return client.post(f"{base}/round", {"client_request_id": args.request_id})
+        return _post_with_request_id(client, f"{base}/round", {"client_request_id": args.request_id}, "mission round", args.mission_id)
     if op in ("question", "answer", "revise"):
         # 三個都要冪等鍵：重送回同一筆，不會變成第二個問題／第二輪續作。
         if not (args.text or args.text_file):
@@ -1812,7 +1829,7 @@ def cmd_mission(client: Client, cfg: dict, args) -> object:
         # answer must explicitly select --as-user; normal bot replies need --reply-to.
         if not args.as_user:
             _with_relay(body, cfg, args)
-        return client.post(f"{base}/{op}", body)
+        return _post_with_request_id(client, f"{base}/{op}", body, f"mission {op}", args.mission_id)
     if op == "complete":
         if not (args.text or args.text_file):
             raise AgmError("bad_args", "mission complete 需要 --text 或 --text-file（結果摘要）", 2)
@@ -2356,6 +2373,7 @@ def build_parser() -> argparse.ArgumentParser:
             "  agm issue claim 425 --child i425 --worktree … --branch …   派工前先認領（exit 3＝別人在做）\n"
             "\n"
             "注意：assign 逾時代表送達未知，**不要**換新的 --request-id 重送，先用 assignments 對帳。\n"
+            "注意：mission round／question／answer／revise 逾時也是送達未知（exit 7），用同一個 --request-id 原樣重送。\n"
             "注意：回合結束不等於工作完成。交辦會停在 awaiting_review，要 `agm review` 才會結案。"
         ),
     )
