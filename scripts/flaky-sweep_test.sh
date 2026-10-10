@@ -145,5 +145,14 @@ check "講明有輪次沒有跑到測試" "輪沒有跑到任何測試" "$LOGF"
 check_eq "四輪都記下 no-tests" "4" "$(awk '$4 == "no-tests" {n++} END {print n+0}' "$OUT/rounds.txt")"
 teardown
 
+# 8. 相對路徑的 -o：以呼叫端的 cwd 為準，跑得完、檔案落在那裡（issue #1017）。
+setup 0
+rc=$(cd "$ROOT" && bash "$SCRIPT" --i-know -k -o relout -n 1 -c 1 >"$LOGF" 2>&1; echo $?)
+check_eq "相對 -o 全綠 rc=0" "0" "$rc"
+check "輪數跑滿" "共 1 輪，紅了 0 輪" "$LOGF"
+check_eq "log 落在呼叫端 cwd 底下" "yes" "$([ -f "$ROOT/relout/1-1.log" ] && echo yes || echo no)"
+check_eq "rounds.txt 也在那裡" "1" "$(wc -l <"$ROOT/relout/rounds.txt" 2>/dev/null | tr -d ' ')"
+teardown
+
 echo "$PASS passed, $FAIL failed"
 [ "$FAIL" -eq 0 ]
