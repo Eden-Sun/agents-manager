@@ -6,6 +6,7 @@ import { enabledIdentities, identitiesOfHost, identityStatusOfHost, projectHostN
 import { canLoginInSession } from '../lib/quotaLogin'
 import { startCliLogin } from '../lib/cliLogin'
 import { registerSettingsLeaveGuard } from '../lib/settingsLeaveGuard'
+import { isImeEnter } from '../lib/ime'
 import { envDisplayText } from './identityEnv'
 import { UnsavedGuard } from './UnsavedGuard'
 import { ConfirmDialog } from './ConfirmDialog'
@@ -308,7 +309,7 @@ export function BotSettingsPanel({ botId }: { botId: string }) {
   const escRef = useRef<() => void>(() => {})
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
-      if (e.key === 'Escape') escRef.current()
+      if (e.key === 'Escape' && !isImeEnter(e)) escRef.current()
     }
     document.addEventListener('keydown', onKey)
     return () => document.removeEventListener('keydown', onKey)

@@ -4,7 +4,7 @@
  */
 import test, { after, afterEach, before } from 'node:test'
 import assert from 'node:assert/strict'
-import { mount, act, click, setupDom, teardownDom, unmountAll, until } from '../testing/domHarness'
+import { mount, act, click, keydown, setupDom, teardownDom, unmountAll, until } from '../testing/domHarness'
 import { resetStoreForTest, useStore } from '../store/store'
 import type { Bot } from '../api/types'
 import { BotSettingsPanel } from './BotSettingsPanel'
@@ -74,4 +74,23 @@ test('有未儲存變更時 ⌥↓ 先彈「放棄未儲存的變更？」、不
   assert.equal(useStore.getState().settingsBotId, null, '設定卡關了')
   await altDown()
   assert.deepEqual(switched, [1], '放棄之後卡片卸載、守門解除：再按 ⌥↓ 才換 bot')
+})
+
+test('設定卡：組字中的 Esc 不關面板', async () => {
+  globalThis.fetch = (async () => new Response('{}', { status: 200 })) as unknown as typeof fetch
+  useStore.setState({
+    bots: [mk('b1', 'one')],
+    runs: {},
+    busy: {},
+    selectedBotId: 'b1',
+    settingsBotId: 'b1',
+    refreshState: async () => {},
+  })
+  await mount(<Harness />)
+  const nameInput = document.querySelector<HTMLInputElement>('input[type="text"]')!
+  assert.ok(nameInput)
+  await keydown(nameInput, 'Escape', { isComposing: true })
+  assert.equal(useStore.getState().settingsBotId, 'b1')
+  await keydown(nameInput, 'Escape')
+  assert.equal(useStore.getState().settingsBotId, null)
 })

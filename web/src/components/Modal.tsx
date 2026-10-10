@@ -1,6 +1,7 @@
 import { useEffect, useId, useRef } from 'react'
 import type { ReactNode } from 'react'
 import { focusableIn, useDialogFocus } from '../hooks/useDialogFocus'
+import { isImeEnter } from '../lib/ime'
 
 /** Centred popup for the sidebar's big forms. The body keeps `sheet-body` so the existing form styling still applies. */
 export function Modal({
@@ -38,6 +39,8 @@ export function Modal({
     if (!open) return
     const onKey = (e: KeyboardEvent) => {
       if (e.key !== 'Escape') return
+      // 輸入法選字中的 Esc 是取消選字，不是關視窗（表單會整個丟掉）。
+      if (isImeEnter(e)) return
       // A picker or menu inside the body handles Escape first; only close when nothing did.
       if (e.defaultPrevented) return
       // Stacked modals: the outer listener runs first, so decide ownership by the focus-trapped target.
