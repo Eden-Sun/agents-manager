@@ -33,6 +33,23 @@ export function markRewound(list: Message[], messageId: string, at: string): Mes
   return changed ? next : null
 }
 
+/**
+ * 群組時間軸（照插入序、混著別顆 bot）：只標跟那則同一段對話、排在它之後（含）的（#1051；daemon 規則是同一個 `conversation_id` 裡 rowid 不小於那則的）。
+ * 找不到那則回 `null`。
+ */
+export function markRewoundInGroup<T extends Message>(list: T[], messageId: string, at: string): T[] | null {
+  const i = list.findIndex((m) => m.id === messageId)
+  if (i < 0) return null
+  const conv = list[i].conversation_id
+  let changed = false
+  const next = list.map((m, j) => {
+    if (j < i || m.rewound_at || m.conversation_id !== conv) return m
+    changed = true
+    return { ...m, rewound_at: at }
+  })
+  return changed ? next : null
+}
+
 /** 失敗時給使用者看的一句：daemon 的 409 帶寫好的 `message`，直接用；舊 daemon 沒這支 API 講清楚要重建。 */
 export function rewindErrText(e: unknown): string {
   if (e instanceof ApiError) {

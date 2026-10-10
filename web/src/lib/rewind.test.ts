@@ -1,7 +1,7 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
 import { ApiError, type Message } from '../api/types'
-import { canOfferRewind, markRewound, rewindBlocked, rewindErrText } from './rewind'
+import { canOfferRewind, markRewound, markRewoundInGroup, rewindBlocked, rewindErrText } from './rewind'
 
 const msg = (id: string, role: Message['role'] = 'user', over: Partial<Message> = {}): Message => ({
   id, conversation_id: 'c', turn_id: null, bot_id: 'b', role, content: id, source: 'web', incomplete: false,
@@ -46,3 +46,23 @@ test('失敗訊息：daemon 寫好的 message 直接用；舊 daemon（405／路
 
 // ── 桌機「⟲ 倒回」（使用者 2026-09-24） ──
 
+
+test('markRewoundInGroup：只標同一段對話、那則之後的（混著別顆 bot 的群組清單）', () => {
+  const a = (id: string) => msg(id, 'user', { conversation_id: 'A' })
+  const b = (id: string) => msg(id, 'user', { conversation_id: 'B' })
+  const list = [a('a1'), b('b1'), a('a2'), b('b2'), a('a3')]
+  const out = markRewoundInGroup(list, 'a2', 'T')
+  assert.ok(out)
+  assert.deepEqual(out.map((m) => m.rewound_at ?? null), [null, null, 'T', null, 'T'])
+  assert.equal(out[0], list[0], '別段對話的原物件不動')
+  assert.equal(out[1], list[1])
+  assert.equal(out[3], list[3])
+})
+
+test('markRewoundInGroup：找不到那則、或全都標過了都回 null', () => {
+  const list = [msg('a1', 'user', { conversation_id: 'A' }), msg('a2', 'user', { conversation_id: 'A' })]
+  assert.equal(markRewoundInGroup(list, 'nope', 'T'), null)
+  const once = markRewoundInGroup(list, 'a1', 'T')
+  assert.ok(once)
+  assert.equal(markRewoundInGroup(once, 'a1', 'T'), null)
+})
