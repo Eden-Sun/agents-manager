@@ -949,7 +949,7 @@ UI 標籤：`hook` 不標；`terminal_fallback` 或 `incomplete = 1` 標「終�
 
 ## 目錄瀏覽 `GET /api/fs/dirs?host=&path=&hidden=`、新資料夾 `POST /api/fs/dirs`
 
-新增 Project 的目錄選擇器。`path` 空白為家目錄，支援 `~`；只列子目錄（含指向目錄的 symlink）。`.` 開頭預設略過，`hidden=1|true|yes` 才列。`host` 省略 = 本機，遠端見 SPEC §11.5。
+新增 Project 的目錄選擇器。`path` 空白為家目錄，支援 `~`（本機只認 `~` 與 `~/…`；本機的 `~user`、相對路徑回 400）；只列子目錄（含指向目錄的 symlink）。`.` 開頭預設略過，`hidden=1|true|yes` 才列。`host` 省略 = 本機，遠端見 SPEC §11.5。
 
 ```json
 {"path":"/Users/me/project","parent":"/Users/me","home":"/Users/me","entries":[{"name":"foo","path":"/Users/me/project/foo","git":true}],"truncated":false}
@@ -971,7 +971,7 @@ UI 標籤：`hook` 不標；`terminal_fallback` 或 `incomplete = 1` 標「終�
 → 200 {"path":"/Users/me/work/new-proj","name":"new-proj","parent":"/Users/me/work"}
 ```
 
-- `host` 省略＝本機；`parent` 省略＝家目錄，支援 `~`、`~/x`（本機先 canonicalize，沿路不跟 symlink 開；遠端 `cd … && pwd -P`）。上層不存在或不是目錄 → 400。
+- `host` 省略＝本機；`parent` 省略＝家目錄，支援 `~`、`~/x`（本機先 canonicalize，沿路不跟 symlink 開；遠端 `cd … && pwd -P`）；本機的 `~user`、相對路徑也 400。上層不存在或不是目錄 → 400。
 - **名字是單一一段**（`bot_input::check_new_dir_name`）：去頭尾空白後不能是空的、`.`、`..`，不能含 `/`（不能借名字跳出上層，也不能一次建好幾層）、NUL、控制字元（遠端 sh 輸出靠 `AM_*` 行解析，換行會偽造）、不可見的方向控制字元，最長 255 位元組 → 400。以 `.` 或 `-` 開頭的名字可以（不特別處理）。
 - **已經有同名的東西**（資料夾、檔案、符號連結）→ `409 {"error":"conflict","reason":"already_exists","name","parent","message"}`，什麼都不動、也不會「進去那個」。
 - **只有 User principal**：Bot、AGM role 與 service token 一律 `403 {"reason":"user_only"}`。

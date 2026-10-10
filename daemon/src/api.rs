@@ -1589,6 +1589,20 @@ struct MkdirIn {
     name: String,
 }
 
+/// 目錄選擇器的本機路徑：空＝家目錄；只認 `~`、`~/…` 與絕對路徑（同 `bot_input::check_project_path`）。
+/// `~foo` 不是家目錄底下的東西、相對路徑會以 daemon 的工作目錄為基準，兩種都 400。
+fn expand_dir_path(raw: Option<&str>, home: &std::path::Path) -> Result<String, LcError> {
+    let p = raw.map(str::trim).filter(|s| !s.is_empty());
+    match p {
+        None | Some("~") => Ok(home.to_string_lossy().into_owned()),
+        Some(p) => match p.strip_prefix("~/") {
+            Some(rest) => Ok(home.join(rest).to_string_lossy().into_owned()),
+            None if std::path::Path::new(p).is_absolute() => Ok(p.to_string()),
+            None => Err(LcError::Bad("path must be absolute (or `~` / start with `~/`)".into())),
+        },
+    }
+}
+
 /// 目錄瀏覽不該列的地方（憑證、金鑰、daemon 自己的資料與各 CLI 的設定／身分目錄）。純判斷，可測。
 /// 用 component 比（`.sshx` 不是 `.ssh`，`.claudeish` 不是 `.claude`）；身分目錄 `~/.claude-<名>` 整族都擋。
 fn fs_dir_denied(path: &std::path::Path, home: &std::path::Path, data_dir: &std::path::Path) -> bool {
@@ -1679,8 +1693,7 @@ async fn list_dirs(State(app): State<Arc<App>>, Extension(principal): Extension<
         return Ok(Json(v));
     }
     let home = dirs::home_dir().unwrap_or_else(|| std::path::PathBuf::from("/"));
-    let raw = q.path.filter(|s| !s.trim().is_empty()).unwrap_or_else(|| home.to_string_lossy().to_string());
-    let raw = if let Some(rest) = raw.strip_prefix("~") { format!("{}{}", home.display(), rest) } else { raw };
+    let raw = expand_dir_path(q.path.as_deref(), &home)?;
     let path = std::fs::canonicalize(&raw).map_err(|e| LcError::Bad(format!("{raw}: {e}")))?;
     // 錯誤訊息講使用者自己打的那串，不替人把符號連結解開、講出真正指到哪。
     if !path.is_dir() {
@@ -1748,8 +1761,7 @@ async fn make_dir(State(app): State<Arc<App>>, Extension(principal): Extension<R
         };
     }
     let home = dirs::home_dir().unwrap_or_else(|| std::path::PathBuf::from("/"));
-    let raw = b.parent.filter(|s| !s.trim().is_empty()).unwrap_or_else(|| home.to_string_lossy().to_string());
-    let raw = if let Some(rest) = raw.strip_prefix("~") { format!("{}{}", home.display(), rest) } else { raw };
+    let raw = expand_dir_path(b.parent.as_deref(), &home)?;
     let parent = std::fs::canonicalize(&raw).map_err(|e| LcError::Bad(format!("{raw}: {e}")))?;
     if !parent.is_dir() {
         return Err(LcError::Bad(format!("{raw} is not a directory")));
@@ -9394,6 +9406,35 @@ mod bot_config_tests {
         for principal in [RequestPrincipal::Bot("b1".into()), RequestPrincipal::Service("daemon-swap".into())] {
             let err = list_dirs(State(e.app.clone()), Extension(principal), dirs_query(&tmp)).await.unwrap_err();
             assert!(matches!(err, LcError::Forbidden(_)), "{err:?}");
+        }
+    }
+
+    #[test]
+    fn dirs_path_expands_only_tilde_and_tilde_slash() {
+        let home = std::path::Path::new("/h/me");
+        for blank in [None, Some(""), Some("  "), Some("~")] {
+            assert_eq!(expand_dir_path(blank, home).unwrap(), "/h/me", "{blank:?}");
+        }
+        assert_eq!(expand_dir_path(Some("~/a/b"), home).unwrap(), "/h/me/a/b");
+        assert_eq!(expand_dir_path(Some("  ~/a/b "), home).unwrap(), "/h/me/a/b");
+        assert_eq!(expand_dir_path(Some("/abs/x"), home).unwrap(), "/abs/x");
+        // 現況 `~2` 會得到 `/h/me2`、`~backup/x` 會得到 `/h/mebackup/x`：兩者都是家目錄的兄弟，不是使用者指的地方。
+        for bad in ["~2", "~backup/x", "rel/dir", "./x", ".."] {
+            assert!(matches!(expand_dir_path(Some(bad), home), Err(LcError::Bad(_))), "{bad} 要 400");
+        }
+    }
+
+    /// 列目錄與新建資料夾共用同一條展開規則：`~user` 與相對路徑在兩邊都是 400，不會落到別的地方。
+    #[tokio::test]
+    async fn dirs_listing_refuses_tilde_user_and_relative_paths() {
+        let e = env().await;
+        for bad in ["~no-such", "relative"] {
+            let query = Query(DirsQuery { path: Some(bad.into()), host: None, hidden: None });
+            let err = list_dirs(State(e.app.clone()), dirs_user(), query).await.unwrap_err();
+            assert!(matches!(&err, LcError::Bad(m) if m.contains("absolute")), "{bad}: {err:?}");
+            let mkdir = Json(MkdirIn { host: None, parent: Some(bad.into()), name: "n".into() });
+            let err = make_dir(State(e.app.clone()), dirs_user(), mkdir).await.unwrap_err();
+            assert!(matches!(&err, LcError::Bad(m) if m.contains("absolute")), "{bad}: {err:?}");
         }
     }
 
