@@ -1,4 +1,4 @@
-import { lazy, Suspense, useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import { lazy, Suspense, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
 import { createRequestId, settleCreateRequest } from '../lib/createRequestId'
 import type { ShareClient } from './shareApi'
 import { displayName, imagesByMessage, isImageName } from './shareImage'
@@ -167,6 +167,8 @@ export function ShareApp({ client }: { client: ShareClient }) {
   const fileInput = useRef<HTMLInputElement>(null)
   const uploadBusy = useRef(false)
   const stick = useRef(true)
+  /** 載入較早訊息前的捲動位置：畫完之後把多出來的高度補回去，人留在原來那一則。 */
+  const restore = useRef<{ height: number; top: number } | null>(null)
   const stopLive = useRef<() => void>(() => {})
   const sawOlder = useRef(false)
   /** `load` 連續失敗幾次（非 404）；> 0 而且沒在輪詢時，自己排下一次重試。 */
@@ -325,6 +327,14 @@ export function ShareApp({ client }: { client: ShareClient }) {
     if (el && stick.current) el.scrollTop = el.scrollHeight
   }, [messages, busy])
 
+  useLayoutEffect(() => {
+    const r = restore.current
+    const el = listRef.current
+    if (!r || !el) return
+    restore.current = null
+    el.scrollTop = r.top + (el.scrollHeight - r.height)
+  }, [messages])
+
   // 一次選好幾張照片：一張接一張傳（客訴 2026-10-04：同時送出時第三張起就「傳得太快了」）。429 在 `uploadPatiently` 裡自己等著重試。
   const pick = (list: FileList | null) => {
     const picked = Array.from(list ?? []).map((f) => ({ key: `${f.name}-${f.size}-${Math.random()}`, name: f.name, file: f, id: null, error: null, retry: false, active: false }))
@@ -377,6 +387,9 @@ export function ShareApp({ client }: { client: ShareClient }) {
     setOlderError(null)
     try {
       const page = await client.messages(oldest)
+      const el = listRef.current
+      // 較早的訊息插在上面：畫完之後把多出來的高度補回去，人留在原來那一則。
+      restore.current = el ? { height: el.scrollHeight, top: el.scrollTop } : null
       sawOlder.current = true
       setMessages((cur) => mergeMessages(cur, page.messages))
       setHasMore(page.has_more)
