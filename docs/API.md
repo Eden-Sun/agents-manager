@@ -756,9 +756,10 @@ codex 的 rollout 還沒寫出來時先放回等 3 次（只算這個原因，�
 
 管理端點在主 API，只收 UI token（Bot／service principal 403 `user_only`）：
 
-- `GET /api/bots/{id}/share` → `{shareable, enabled, url, needs_rotate, token_hint, created_at, last_used_at}`。分享中 `url`＝完整連結（`<base_url>/s/<token>`，隨時拿得回）；
+- `GET /api/bots/{id}/share` → `{shareable, enabled, url, needs_rotate, token_hint, created_at, last_used_at, allow_embed}`。分享中 `url`＝完整連結（`<base_url>/s/<token>`，隨時拿得回）；
   加 `bot_shares.token` 之前開的分享只有 hash：連結照樣能用，但 `url:null`、`needs_rotate:true`，rotate 一次就有。`base_url` 沒設時 `url:null`、`needs_rotate:false`。一般 bot `shareable:false`、其餘 null／false。
 - `POST /api/bots/{id}/share` `{"enabled":true}` → 開啟，回同一個形狀（含完整 `url`）；已經開著就不換 token、回同一條 `url`。
+  `allow_embed`（選填，只給信任分享；受限帶了 400 `share_embed_trusted_only`）：`true`＝允許 `<iframe>` 嵌入這條連結（SPEC §20.1a），沒帶＝沿用現況；`enabled:true` 時同一個請求一起設。
   `{"enabled":false}` → 關掉並清 token（舊連結當下 404）。
 - `POST /api/bots/{id}/share/rotate` → 換新 token、舊的立刻失效，回新的 `url`；沒開著 409 `share_disabled`。
 - 啟用、停用、輪替與 bot 刪除共用 per-bot 鎖；操作在鎖內重查存活狀態，已刪 bot 回 404。刪除 bot／專案會清除公開 token 列；還原 bot 不會恢復舊連結，必須重新啟用。

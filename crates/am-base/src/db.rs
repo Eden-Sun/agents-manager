@@ -350,6 +350,8 @@ pub const SCHEMA_HISTORY: &[(i64, &str)] = &[
     (49, "62625b15ce32c1d2"),
     // issue #801：`release_triage.assigned_bot_id`／`dispatch_gen`（交辦綁定收件 bot 與派工代數，verdict 只收它的）。
     (50, "22bdbf27a684cd91"),
+    // 信任分享：`bot_shares.allow_embed`（勾了「允許 iframe 嵌入」的信任分享，預設 0）。
+    (51, "d22c0281cffb2f15"),
 ];
 pub const SCHEMA_VERSION: i64 = SCHEMA_HISTORY[SCHEMA_HISTORY.len() - 1].0;
 

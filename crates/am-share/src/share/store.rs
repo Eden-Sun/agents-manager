@@ -77,6 +77,10 @@ pub async fn migrate(pool: &SqlitePool) -> Result<()> {
     if !has_token {
         sqlx::query("ALTER TABLE bot_shares ADD COLUMN token TEXT").execute(pool).await?;
     }
+    let has_allow_embed: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM pragma_table_info('bot_shares') WHERE name = 'allow_embed')").fetch_one(pool).await?;
+    if !has_allow_embed {
+        sqlx::query("ALTER TABLE bot_shares ADD COLUMN allow_embed INTEGER NOT NULL DEFAULT 0").execute(pool).await?;
+    }
     Ok(())
 }
 
@@ -135,10 +139,42 @@ pub struct ShareRow {
     pub last_used_at: Option<String>,
     /// NULL＝舊資料（只有 hash），拿不回完整網址。
     pub token: Option<String>,
+    /// 信任分享才能開：這條連結允許被別的網站用 `<iframe>` 嵌進去（SPEC §20.1a）。
+    pub allow_embed: bool,
 }
 
 pub async fn share(pool: &SqlitePool, bot_id: &str) -> Result<Option<ShareRow>, sqlx::Error> {
-    sqlx::query_as("SELECT token_hint, created_at, last_used_at, token FROM bot_shares WHERE bot_id = ?").bind(bot_id).fetch_optional(pool).await
+    sqlx::query_as("SELECT token_hint, created_at, last_used_at, token, allow_embed FROM bot_shares WHERE bot_id = ?").bind(bot_id).fetch_optional(pool).await
+}
+
+/// 這顆 bot 是不是信任分享（`allow_embed` 只給它）。
+pub async fn is_trusted(pool: &SqlitePool, bot_id: &str) -> Result<bool, sqlx::Error> {
+    sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM shared_bots WHERE bot_id = ? AND profile = 'trusted')").bind(bot_id).fetch_one(pool).await
+}
+
+/// 設定「允許 iframe 嵌入」。分享沒開著＝不動（回 `false`）；是否信任分享由呼叫端先擋。
+pub async fn set_allow_embed(pool: &SqlitePool, bot_id: &str, allow: bool) -> Result<bool, sqlx::Error> {
+    Ok(sqlx::query("UPDATE bot_shares SET allow_embed = ? WHERE bot_id = ?").bind(allow).bind(bot_id).execute(pool).await?.rows_affected() == 1)
+}
+
+/// token 有效、分享還開著、是信任分享、而且勾了「允許 iframe 嵌入」才 `true`。token 不對、分享關了、受限 bot 一律 `false`
+/// （同 [`resolve`] 的查法，再加上 `allow_embed`）。
+pub async fn embed_allowed(pool: &SqlitePool, token: &str) -> Result<bool, sqlx::Error> {
+    if !token_shape_ok(token) {
+        return Ok(false);
+    }
+    let want = token_hash(token);
+    let row: Option<(String, bool)> = sqlx::query_as(
+        "SELECT s.token_hash, s.allow_embed FROM bot_shares s
+           JOIN shared_bots r ON r.bot_id = s.bot_id AND r.profile = 'trusted'
+           JOIN bots b ON b.id = s.bot_id AND b.deleted_at IS NULL
+           JOIN projects p ON p.id = b.project_id AND p.deleted_at IS NULL
+          WHERE s.token_hash = ?",
+    )
+    .bind(&want)
+    .fetch_optional(pool)
+    .await?;
+    Ok(row.is_some_and(|(have, allow)| allow && crate::agent_relay::ct_eq(&have, &want)))
 }
 
 pub fn new_token() -> String {

@@ -83,6 +83,20 @@ export function BotShareSection({ botId }: { botId: string }) {
       ) : null}
       {enabled ? (
         <div className="bs-share-body">
+          {profile === 'trusted' ? (
+            <div className="bs-share-embed">
+              <label>
+                <input
+                  type="checkbox"
+                  checked={share?.allow_embed ?? false}
+                  disabled={busy || share === null}
+                  onChange={(e) => void run(() => setShareEnabled(botId, true, e.target.checked), e.target.checked ? '已允許 iframe 嵌入' : '已關閉 iframe 嵌入')}
+                />{' '}
+                允許 iframe 嵌入
+              </label>
+              <p className="hint">任何網站都能把這個分享頁嵌進去；只在你要嵌到自己的網站時開。</p>
+            </div>
+          ) : null}
           {share?.url ? (
             <>
               <div className="bs-share-url">
