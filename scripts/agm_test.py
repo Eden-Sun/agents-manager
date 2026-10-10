@@ -1423,6 +1423,18 @@ class MiscCommandTest(CliCase):
         self.assertEqual(err["error"], "bad_args")
         self.assertEqual(err["path"], str(binary))
 
+    def test_an_empty_handoff_summary_is_refused_and_nothing_is_written(self):
+        FakeDaemon.routes["PUT /api/supervisor/handoff"] = (200, {"summary_version": 9})
+        empty = Path(self.dir.name) / "empty.md"
+        empty.write_text("\n\n", encoding="utf-8")
+        for argv in (("handoff", "--summary", ""), ("handoff", "--summary", "   \n"),
+                     ("handoff", "--summary-file", str(empty)), ("handoff", "--summary-file", ""),
+                     ("handoff", "--summary", "甲", "--summary-file", str(empty))):
+            code, out, err = self.run_cli(*argv)
+            self.assertEqual((code, out), (2, ""), argv)
+            self.assertEqual(json.loads(err)["error"], "bad_args", argv)
+        self.assertFalse([r for r in FakeDaemon.seen if r["method"] == "PUT"], "空的摘要不能送到 daemon")
+
     def test_ack_and_inbox(self):
         FakeDaemon.routes["GET /api/supervisor/inbox"] = (200, {"events": [{"id": "e1"}]})
         FakeDaemon.routes["POST /api/supervisor/inbox/e1/ack"] = (200, {"ok": True})
