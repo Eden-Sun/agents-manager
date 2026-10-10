@@ -39,11 +39,9 @@ pub fn hash(text: &str) -> String {
 /// question from whether it is urgent enough to restart anything.
 ///
 /// Kept in sync with the real `include_str!` sites by the test below.
-pub const BUILD_INPUTS: [&str; 10] = [
+pub const BUILD_INPUTS: [&str; 8] = [
     "daemon",
-    "crates/am-base",
-    "crates/am-lifecycle",
-    "crates/am-supervisor",
+    "crates",
     "web",
     "Cargo.toml",
     "Cargo.lock",
@@ -190,5 +188,32 @@ mod tests {
             found.iter().any(|f| f == "docs/goals/agm-supervisor-persona.md"),
             "the persona should still be embedded; if that changed, update BUILD_INPUTS and this test. found: {found:?}"
         );
+    }
+
+    #[test]
+    fn every_path_dependency_of_the_daemon_is_a_build_input() {
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+        let repo = root
+            .ancestors()
+            .find(|p| p.join("daemon/Cargo.toml").is_file())
+            .expect("crate manifest directory is under the workspace");
+        let manifest = std::fs::read_to_string(repo.join("daemon/Cargo.toml"))
+            .expect("daemon/Cargo.toml must exist and be readable");
+        let mut crates = Vec::new();
+        for line in manifest.lines() {
+            let Some((_, rest)) = line.split_once("path = \"../crates/") else { continue };
+            let Some((name, _)) = rest.split_once('"') else { continue };
+            crates.push(format!("crates/{name}"));
+        }
+        for f in &crates {
+            let covered = BUILD_INPUTS.iter().any(|p| f == p || f.starts_with(&format!("{p}/")));
+            assert!(covered, "{f} is a path dependency of the daemon but is not in BUILD_INPUTS");
+        }
+        for expected in ["crates/am-share", "crates/am-config", "crates/am-core", "crates/am-ports"] {
+            assert!(
+                crates.iter().any(|c| c == expected),
+                "expected {expected} to be found among path dependencies, found {crates:?}"
+            );
+        }
     }
 }
