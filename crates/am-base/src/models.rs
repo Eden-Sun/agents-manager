@@ -316,9 +316,13 @@ pub fn home_file_expr(home_dir: Option<&str>, default_dir: &str, file: &str) -> 
     }
 }
 
+/// 非一般檔（FIFO、裝置）當成缺檔；一般檔最多讀 1 MiB（issue #1074：FIFO 沒有寫入端時 `cat` 永遠等，指到大檔就吃光記憶體）。
 pub fn optional_cat_script(path_expr: &str) -> String {
-    format!("cat {path_expr} 2>/dev/null || true")
+    format!("[ -f {path_expr} ] && head -c 1048576 {path_expr} 2>/dev/null || true")
 }
+
+/// 本機讀設定檔的上限（同 `hosts::SSH_EXEC_TIMEOUT` 的量級）：逾時整個行程群組砍掉，回 Err（#268：讀不到是錯誤，不是空字串）。
+const LOCAL_READ_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
 
 /// 讀那台主機上的一個選用設定檔。**缺檔是答案（回空字串），讀不到是錯誤**：以前兩者都變成 `""`，
 /// ssh 逾時／連不上就被當成「沒設定」，接下來拿內建預設值當成事實記下去（#268）。
@@ -326,14 +330,8 @@ pub fn optional_cat_script(path_expr: &str) -> String {
 pub async fn read_optional_text(app: &impl crate::hosts::HostsAccess, host: &str, path_expr: &str) -> Result<String> {
     let script = optional_cat_script(path_expr);
     if host == LOCAL_HOST {
-        let o = tokio::process::Command::new("/bin/sh")
-            .arg("-c")
-            .arg(&script)
-            .stdin(std::process::Stdio::null())
-            .output()
-            .await
-            .with_context(|| format!("read {path_expr}"))?;
-        Ok(String::from_utf8_lossy(&o.stdout).to_string())
+        // 本機也要有上限：走 hosts::sh_local_stdout（逾時整個行程群組砍掉），不是 Command::output() 外面包 timeout（子行程會留下）。
+        crate::hosts::sh_local_stdout(&script, LOCAL_READ_TIMEOUT, &format!("read {path_expr}")).await
     } else {
         let conn = app.hosts().get(host).await.ok_or_else(|| anyhow!("unknown host `{host}`"))?;
         conn.ssh_exec(&format!("{script}\n")).await.with_context(|| format!("read {path_expr} on {host}"))
