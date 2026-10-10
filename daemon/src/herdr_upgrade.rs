@@ -380,6 +380,8 @@ async fn phase(app: &(impl crate::capabilities::DataDir + crate::capabilities::D
 
 async fn run(app: &Arc<App>, ops: &dyn Ops, timing: Timing, ctx: &Ctx) -> Value {
     let out = steps(app, ops, timing, ctx).await;
+    // staging 只在 steps 裡用：成功時已經複製進安裝位置，失敗時下次會重新下載、重新驗。不清的話每一版永久留一顆（#1048）。
+    let _ = std::fs::remove_dir_all(app.data_dir.join(STAGING_DIR).join(&ctx.target));
     let ok = out.reason.is_none();
     let msg = match (&out.reason, &out.detail) {
         (None, _) => format!("ok：resumed {}，failed {}，children_lost {}", out.resumed.len(), out.failed.len(), out.children_lost.len()),
@@ -1072,6 +1074,7 @@ mod tests {
         let stored_name: String = sqlx::query_scalar("SELECT name FROM bots WHERE id = ?").bind(&kid).fetch_one(&env.app.db).await.unwrap();
         assert_eq!(stored_name, "hub-dgs9j9-dev", "the API display projection does not rewrite the database row");
         assert!(done.get("reason").is_none());
+        assert!(!env.app.data_dir.join(STAGING_DIR).join("0.9.3").exists(), "升完不留 staging");
 
         assert_eq!(fake.installed(), "herdr 0.9.3");
         assert_eq!(std::fs::read_to_string(fake.install.with_file_name("herdr.bak-0.9.1")).unwrap().trim(), "herdr 0.9.1");
@@ -1178,6 +1181,7 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(notes, 0, "等不到閒置就連窗口都沒開");
+        assert!(!env.app.data_dir.join(STAGING_DIR).join("0.9.3").exists(), "沒升成也不留 staging");
     }
 
     #[tokio::test]
@@ -1224,6 +1228,7 @@ mod tests {
         assert_eq!(env.herdr.pong.lock().unwrap().0, "0.9.1");
         assert_eq!(*fake.resumed.lock().unwrap(), vec![bot], "失敗也要把 bot 接回");
         assert!(!window_open(&env.app).await);
+        assert!(!env.app.data_dir.join(STAGING_DIR).join("0.9.3").exists(), "換回舊版也不留 staging（換回靠的是 .bak）");
     }
 
     /// 下載的 binary 對不上 release 公布的 sha256（被換掉、截斷）：在**執行它之前**就擋掉（驗 `--version` 就是執行它）。
