@@ -51,11 +51,32 @@ async function check(res: Response): Promise<Response> {
   throw new ShareHttpError(res.status, Number.isFinite(ra) && ra > 0 ? ra : null, reason)
 }
 
-export function httpShareClient(token: string): ShareClient {
+/** 下載名額每個分享同時 2 個、不排隊（portal.rs `DOWNLOADS_PER_SHARE`）：整檔下載一次只發一個，留一格給 `<img>` 預覽；429／503 照 `Retry-After` 等了重試（#1089）。 */
+const BLOB_RETRY_MAX = 6
+const BLOB_WAIT_MAX_S = 10
+
+export interface ShareClientOptions {
+  /** 等多久（測試換掉）。 */
+  sleep?: (ms: number) => Promise<void>
+}
+
+export function httpShareClient(token: string, opts: ShareClientOptions = {}): ShareClient {
+  const sleep = opts.sleep ?? ((ms: number) => new Promise<void>((r) => setTimeout(r, ms)))
   const base = `/s/${encodeURIComponent(token)}/api`
   // 不帶 cookie、不帶 referrer：分享頁跟主 UI 沒有任何共用的身分。
   const init: RequestInit = { credentials: 'omit', referrerPolicy: 'no-referrer', cache: 'no-store' }
   const json = async (path: string, extra: RequestInit = {}) => (await check(await fetch(`${base}${path}`, { ...init, ...extra }))).json() as Promise<unknown>
+  const fetchBlob = async (name: string): Promise<Blob> => {
+    for (let attempt = 0; ; attempt++) {
+      try {
+        return await (await check(await fetch(`${base}/files/${encodeURIComponent(name)}`, init))).blob()
+      } catch (e) {
+        if (!(e instanceof ShareHttpError) || (e.status !== 429 && e.status !== 503) || attempt >= BLOB_RETRY_MAX) throw e
+        await sleep(Math.min(e.retryAfter ?? 2, BLOB_WAIT_MAX_S) * 1000)
+      }
+    }
+  }
+  let blobChain: Promise<unknown> = Promise.resolve()
   return {
     async messages(before) {
       const q = new URLSearchParams({ limit: '100' })
@@ -90,8 +111,11 @@ export function httpShareClient(token: string): ShareClient {
       if (version) q.set('v', version)
       return `${base}/files/${encodeURIComponent(name)}?${q}`
     },
-    async fileBlob(name) {
-      return (await check(await fetch(`${base}/files/${encodeURIComponent(name)}`, init))).blob()
+    fileBlob(name) {
+      const run = blobChain.then(() => fetchBlob(name))
+      // 前一個失敗不卡住後面的。
+      blobChain = run.catch(() => {})
+      return run
     },
     subscribe(ev) {
       if (typeof EventSource === 'undefined') {
