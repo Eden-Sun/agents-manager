@@ -97,6 +97,11 @@ const BACKOFF_MIN: Duration = Duration::from_secs(1);
 const BACKOFF_MAX: Duration = Duration::from_secs(30);
 const MASTER_UP_TIMEOUT: Duration = Duration::from_secs(20);
 const SSH_EXEC_TIMEOUT: Duration = Duration::from_secs(30);
+/// `remote_session_script` 等 herdr session 起來的圈數（每圈 sleep 1 秒）。腳本與 ssh 上限共用這個數字。
+pub const REMOTE_SESSION_WAIT_ROUNDS: u64 = 20;
+/// `ensure_remote_session` 那一條 ssh 的上限：腳本自己最多等 `REMOTE_SESSION_WAIT_ROUNDS + 2` 秒，
+/// 再留 ssh 握手與二十幾次 herdr／launchctl 呼叫的餘裕——不然「起不來」的診斷會被 30 秒的通用上限砍掉。
+pub const REMOTE_SESSION_TIMEOUT: Duration = Duration::from_secs(60);
 const SSH_PUT_TIMEOUT: Duration = Duration::from_secs(120);
 /// 連不出去（睡著、tailscale 斷線、封包被丟掉）時 ssh 自己放棄的秒數；沒設就等系統的 TCP 逾時（Linux 約 2 分鐘）。
 const SSH_CONNECT_TIMEOUT_SECS: u64 = 15;
@@ -583,6 +588,7 @@ impl HostConn {
         let sess = &cfg.herdr_session;
         let shared = u8::from(shared);
         let q = sh_quote(sess);
+        let rounds = REMOTE_SESSION_WAIT_ROUNDS;
         let script = format!(
             r#"printf 'AM_HOME=%s\n' "$HOME"
 # #887：暫存檔與 log 一律只有自己讀得到；server 本身要用回原本的 umask（見 nohup 分支）。
@@ -682,7 +688,7 @@ if [ "$MODE" = nohup ] && ! running; then
   sleep 1
 fi
 i=0
-while [ $i -lt 20 ]; do
+while [ $i -lt {rounds} ]; do
   if [ -S "$SOCK" ] && running; then
     printf 'AM_OK=1\n'; break
   fi
@@ -702,7 +708,7 @@ herdr session list 2>&1 | sed 's/^/AM_LIST /'
         let cfg = self.cfg.as_ref().unwrap();
         let sess = &cfg.herdr_session;
         let script = Self::remote_session_script(cfg, shared);
-        let out = self.ssh_exec_path(&script).await?;
+        let out = self.ssh_exec_path_timeout(&script, REMOTE_SESSION_TIMEOUT).await?;
         let mut home = None;
         let mut sock = None;
         let mut ok = false;
