@@ -1,6 +1,6 @@
 # herdr 升級 runbook
 
-**本 runbook 只適用 macOS 主機**（codesign、本機網路授權、`herdr-lan-check.sh` 都是 macOS 專屬）；Linux 主機升級後只需確認 `herdr --version`、`herdr pane list` 與一顆 idle bot 能回 prompt。
+本 runbook 的升級窗口與本機網路驗收適用 macOS（codesign、本機網路授權、`herdr-lan-check.sh` 都是 macOS 專屬）。Linux 主機照派工內容確認 `herdr --version`、`herdr pane list`、一顆 idle bot 能回 prompt，並執行下方的平台通用 parser 驗收。
 
 這份 runbook 是 AGM 已核准維護窗口後的人工操作步驟。`herdr-update-kick.sh` 只偵測／派工，
 不會升級、不會重啟 server；正式操作前仍要取得部署租約、使用者同意與 AGM 排定的維護窗口。
@@ -61,6 +61,18 @@ macOS「本機網路」授權綁 identifier。9/20 升 0.9.1 後，herdr 底下�
    terminal_id 改變是正常的；daemon log 應重新出現 `global herdr event subscription established`。
    launchd KeepAlive 在 handoff 後若短暫以舊快取 job 空轉並回 exit 1，是預期噪音；不要為止噪而 bootout。因為 plist 的
    `ProgramArguments` 走 symlink，symlink 已換好後若 server 崩潰，launchd 接手應會跑新版。
+
+## 平台通用：shim argv parser 驗收
+
+升級後在有新版 herdr binary 的 bot pane／工作環境執行：
+
+```sh
+AM_TEST_REAL_HERDR=1 cargo test -p agents-managerd -- the_generated_argv_parses_with_the_real_herdr
+```
+
+測試會把 shim 產生的 `agent start`、`pane split`、`tab create`、`workspace create` argv 交給目前的 herdr parser。它會清除傳給 herdr 的 `AM_*`／`HERDR_*`，並把 `HERDR_SOCKET_PATH`、`HOME`、`TMPDIR` 指到沙盒，所以不會連正式 socket 或操作正式 pane。新 binary 不在 PATH 時，先以 `AM_REAL_HERDR=/path/to/herdr` 指定 binary，再執行上面的命令。
+
+命令只指定 `the_generated_argv_parses_with_the_real_herdr` 這一條測試；不要省略測試名稱，因為同一個 opt-in 旗標也會啟用需要真實 pane 的 delivery 測試。
 
 ## 升級後強制驗收
 

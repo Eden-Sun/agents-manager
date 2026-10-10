@@ -299,10 +299,27 @@ failed=""
 interrupted=""
 signal_only=1
 : > "${log}"
+# 找到真正的 herdr binary 才啟用 argv parser 契約測試；PATH 上的 per-bot shell shim 不算。
+real_herdr=""
+for candidate in "${AM_REAL_HERDR:-}" "$(type -P herdr 2>/dev/null || true)"; do
+    [ -n "${candidate}" ] || continue
+    [ -f "${candidate}" ] && [ -x "${candidate}" ] || continue
+    [ "$(head -c 2 "${candidate}" 2>/dev/null || true)" != '#!' ] || continue
+    real_herdr="${candidate}"
+    break
+done
 for part in ob ops web daemon; do
     prc=0
     timeout -k "${KILL_AFTER}" "${TIMEOUT}" env -u AM_MODEL -u AM_EFFORT -u AM_DATA_DIR -u AM_DAEMON_EXE -u AM_CONFIG_PATH \
         bash scripts/check.sh "${part}" >> "${log}" 2>&1 || prc=$?
+    if [ "${part}" = daemon ] && [ -n "${real_herdr}" ]; then
+        herdr_prc=0
+        timeout -k "${KILL_AFTER}" "${TIMEOUT}" env -u AM_MODEL -u AM_EFFORT -u AM_DATA_DIR -u AM_DAEMON_EXE -u AM_CONFIG_PATH \
+            AM_TEST_REAL_HERDR=1 AM_REAL_HERDR="${real_herdr}" cargo test -p agents-managerd --locked -- \
+            the_generated_argv_parses_with_the_real_herdr >> "${log}" 2>&1 || herdr_prc=$?
+        printf '\n==> [ubuntu-ci] herdr argv parser rc=%s\n' "${herdr_prc}" >> "${log}"
+        if [ "${herdr_prc}" != 0 ]; then prc="${herdr_prc}"; fi
+    fi
     printf '\n==> [ubuntu-ci] %s rc=%s\n' "${part}" "${prc}" >> "${log}"
     if [ "${prc}" != 0 ]; then
         rc="${prc}"
