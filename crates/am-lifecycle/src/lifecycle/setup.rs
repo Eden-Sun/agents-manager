@@ -49,6 +49,8 @@ pub fn remote_hook_sh(root: &str) -> String {
 }
 
 const REMOTE_HOOK_SH_TEMPLATE: &str = r#"#!/bin/sh
+# 子 agent 的 pane（帶 AM_CHILD_OF）繼承的是母 bot 的身分：不送、也不 spool（#1004 本機、#1031 遠端）。
+[ -z "${AM_CHILD_OF:-}" ] || exit 0
 PROVIDER="$1"; BOT="$2"; TOKEN="$3"; shift 3
 LIMIT=1048576
 DIR="$HOME/__AM_REMOTE_ROOT__/bots/$BOT"
@@ -579,7 +581,7 @@ fn instance_gate(instance: Option<&str>) -> String {
 /// 仍然是身分的來源，上面那個 `-n` 檢查也還在——只是不再把它的值傳下去。
 pub fn remote_grok_dispatch_sh(root: &str, instance: Option<&str>) -> String {
     format!(
-        "#!/bin/sh\n# agents-manager grok dispatcher (SPEC §12). Installed by the daemon; no-op outside daemon panes.\n[ -n \"$AM_BOT_ID\" ] && [ -n \"$AM_HOOK_TOKEN\" ] || exit 0\n{gate}H=\"$HOME/{root}/bots/$AM_BOT_ID/hook.sh\"\n[ -x \"$H\" ] || exit 0\nexec \"$H\" grok \"$AM_BOT_ID\" {slot}\n",
+        "#!/bin/sh\n# agents-manager grok dispatcher (SPEC §12). Installed by the daemon; no-op outside daemon panes.\n# 子 agent 的 pane 繼承母 bot 的身分，這裡就不送（#1031，同 hook.sh）。\n[ -z \"${{AM_CHILD_OF:-}}\" ] || exit 0\n[ -n \"$AM_BOT_ID\" ] && [ -n \"$AM_HOOK_TOKEN\" ] || exit 0\n{gate}H=\"$HOME/{root}/bots/$AM_BOT_ID/hook.sh\"\n[ -x \"$H\" ] || exit 0\nexec \"$H\" grok \"$AM_BOT_ID\" {slot}\n",
         gate = instance_gate(instance),
         slot = REMOTE_TOKEN_SLOT,
     )
@@ -1618,6 +1620,8 @@ mod hook_cmd_parts_tests {
             }
             let payload = serde_json::json!({"hook_event_name":"Stop", "transcript_path":path.to_string_lossy()}).to_string();
             let mut command = std::process::Command::new("/bin/sh");
+            // 不繼承跑測試那個行程的 AM_CHILD_OF（子 agent 的 pane 裡跑會被 hook 閘擋掉）。
+            command.env_remove("AM_CHILD_OF");
             command
                 .arg(&script)
                 .arg("claude")
@@ -2402,6 +2406,47 @@ mod remote_hook_tests {
         }
     }
 
+    /// #1031：子 agent 的 pane 帶 `AM_CHILD_OF`，它繼承的是母 bot 的身分：遠端 hook 不 spool、也不叫 herdr；沒帶就照舊。
+    #[test]
+    fn a_child_pane_never_spools_a_remote_hook_as_its_parent() {
+        let sb = Sandbox::new(true);
+        let (_, ok) = sb.run_with_env(&["claude", &sb.bot, "-"], STOP, &[("AM_CHILD_OF", "parent-bot")]);
+        assert!(ok);
+        assert!(spool_events(&sb.bot_dir()).is_empty(), "子 agent 的事件不准寫進母 bot 的 spool");
+        assert!(sb.calls().is_empty(), "子 agent 的 pane 不叫 herdr：{:?}", sb.calls());
+
+        let (_, ok) = sb.run(&["claude", &sb.bot, "-"], STOP);
+        assert!(ok);
+        assert!(!spool_events(&sb.bot_dir()).is_empty(), "沒帶 AM_CHILD_OF 的 pane 照舊送");
+    }
+
+    /// #1031：遠端 grok 的 dispatcher 也一樣：子 agent 的 pane 不轉給母 bot 的 `hook.sh`。
+    #[test]
+    fn a_child_pane_never_reaches_the_remote_grok_hook() {
+        let home = crate::testing::track(std::env::temp_dir().join(format!("am-grok-child-{}", crate::db::ulid())));
+        let root = crate::hosts::remote_root_for(None);
+        let bot_dir = home.join(&root).join("bots/b1");
+        std::fs::create_dir_all(&bot_dir).unwrap();
+        let marker = bot_dir.join("called");
+        write_exec(&bot_dir.join("hook.sh"), &format!("#!/bin/sh\ntouch '{}'\n", marker.display()));
+        let disp = home.join("dispatch.sh");
+        write_exec(&disp, &super::remote_grok_dispatch_sh(&root, None));
+        let run = |child: Option<&str>| -> bool {
+            let _ = std::fs::remove_file(&marker);
+            let mut cmd = Command::new("/bin/sh");
+            cmd.arg(&disp).env_clear().env("PATH", "/usr/bin:/bin").env("HOME", &home);
+            cmd.env("AM_BOT_ID", "b1").env("AM_HOOK_TOKEN", "t");
+            if let Some(c) = child {
+                cmd.env("AM_CHILD_OF", c);
+            }
+            assert!(cmd.status().unwrap().success());
+            marker.exists()
+        };
+        assert!(!run(Some("parent-bot")), "子 agent 的 pane 不轉給母 bot 的 hook");
+        assert!(run(None), "沒有 AM_CHILD_OF 照舊轉");
+        let _ = std::fs::remove_dir_all(&home);
+    }
+
     /// issue #43／#495：token 不上命令列。dispatcher 仍然用 `AM_HOOK_TOKEN` 判斷「這是不是 daemon 開的
     /// pane」（`inject_hooks = false` 就是靠它擋掉），但不把值傳下去：遠端那支 `hook.sh` 根本不讀第三個
     /// 參數（`: "$TOKEN"`），本機的 `hook_cmd::hook_token()` 旗標空著時會自己去讀 env。
@@ -2524,6 +2569,7 @@ mod remote_hook_tests {
         );
         let payload = r#"{"type":"agent-turn-complete","thread-id":"slow"}"#;
         let mut command = Command::new("/bin/sh");
+        command.env_remove("AM_CHILD_OF");
         command
             .arg(sb.dir.join("hook.sh"))
             .args(["codex", sb.bot.as_str(), "-", payload])
