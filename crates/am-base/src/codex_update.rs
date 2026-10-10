@@ -225,6 +225,13 @@ pub fn decide(
             return Some(t);
         }
     }
+    // 磁碟讀不到＝不知道，不是「還沒裝」：既有通知已經說「已安裝，重啟套用」就沿用，
+    // 不拿跑著的舊版本改判成需安裝（#1203；#974 對 claude 的同一條規則）。
+    if disk.is_none() {
+        if let Some(e) = existing.filter(|e| e.starts_with(NOTICE_PREFIX) && e.contains("已安裝")) {
+            return Some(e.to_string());
+        }
+    }
     let disk_v = disk.and_then(|d| cli_version_string(d).or_else(|| version_string(d)));
     // 裝著的版本：磁碟優先（跑著的不會比磁碟新），讀不到才用跑著的。兩個都不知道就不拿帳本比。
     let have = disk_v.clone().or_else(|| running.and_then(version_string));
@@ -508,5 +515,19 @@ mod tests {
         assert_eq!(remember_running("run-other", "nothing\n", None), None);
         // 提示句的 from 也算。
         assert_eq!(remember_running("run-from", "x\n", Some(&p("0.150.0", "0.151.0"))).as_deref(), Some("0.150.0"));
+    }
+
+    /// #1203：磁碟版本讀不到（`--version` 逾時、ssh 抖）不等於「還沒裝」：既有通知已經說「已安裝，重啟套用」就沿用，
+    /// 不拿跑著的舊版本改判成「需安裝後重啟」（#974 對 claude 的同一條規則）。
+    #[test]
+    fn an_unreadable_disk_does_not_turn_an_installed_notice_back_into_needs_install() {
+        let installed = "codex 有新版 0.157.0（這個 run 跑的是 0.156.0），已安裝，重啟套用";
+        assert_eq!(decide(None, Some("0.156.0"), None, Some("0.157.0"), Some(installed)).as_deref(), Some(installed));
+        // 畫面上還留著啟動時的提示也一樣。
+        assert_eq!(decide(Some(&p("0.156.0", "0.157.0")), Some("0.156.0"), None, Some("0.157.0"), Some(installed)).as_deref(), Some(installed));
+        // 反例：沒有既有通知時，磁碟讀不到就拿跑著的比（照舊）。
+        assert!(decide(None, Some("0.156.0"), None, Some("0.157.0"), None).unwrap().contains("需安裝"));
+        // 反例：磁碟讀得到而且真的是舊的（被降版）→ 照實改回需安裝。
+        assert!(decide(None, Some("0.156.0"), Some("codex-cli 0.156.0"), Some("0.157.0"), Some(installed)).unwrap().contains("需安裝"));
     }
 }
