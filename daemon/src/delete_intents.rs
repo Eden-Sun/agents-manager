@@ -57,7 +57,12 @@ pub fn spawn_retry(app: Arc<App>, id: String, why: String) {
         match intents::record_failure(&app.db, &id, &why).await {
             Ok(true) => return, // 已放棄並通知
             Ok(false) => {}
-            Err(e) => tracing::warn!(intent = %id, error = %e, "could not record the delete failure; retrying anyway"),
+            Err(e) => {
+                tracing::warn!(intent = %id, error = %e, "could not record the delete failure; retrying anyway");
+                if let Err(e2) = intents::record_failure_on_owned(&app.db, &id, &app.boot_id, &why).await {
+                    tracing::warn!(intent = %id, error = %e2, "could not hand the delete intent back to pending either");
+                }
+            }
         }
         retry_loop(&app, &id).await;
     });
@@ -95,7 +100,15 @@ pub async fn recover_host(app: &Arc<App>, host: &str) {
 pub async fn drive_once(app: &Arc<App>, id: &str) -> Outcome {
     match intents::claim(&app.db, id, &app.boot_id).await {
         Ok(true) => {}
-        Ok(false) => return Outcome::Finished,
+        Ok(false) => match intents::get(&app.db, id).await {
+            // 這顆 boot 自己留下的 running（上一輪記不下失敗、或 handler 沒收尾）：不經 claim 直接續做（#1059）。
+            // 安全性靠 resume_*：先拿齊 bot 鎖、再重驗；活著的 handler 做完之後這裡看到的就不是 running。
+            Ok(Some(i)) if i.status == "running" && i.owner_boot.as_deref() == Some(app.boot_id.as_str()) => {
+                tracing::warn!(intent = id, "delete intent was left running by this boot; resuming it");
+            }
+            Ok(_) => return Outcome::Finished,
+            Err(e) => return Outcome::Retry(format!("cannot inspect an unclaimed intent: {e:#}")),
+        },
         Err(e) => return Outcome::Retry(format!("cannot claim the intent: {e:#}")),
     }
     let intent = match intents::get(&app.db, id).await {
@@ -114,14 +127,20 @@ pub async fn drive_once(app: &Arc<App>, id: &str) -> Outcome {
     }
 }
 
-async fn fail_attempt(app: &impl crate::capabilities::Db, id: &str, why: String) -> Outcome {
-    match intents::record_failure(app.db(), id, &why).await {
+async fn fail_attempt(app: &Arc<App>, id: &str, why: String) -> Outcome {
+    match intents::record_failure(&app.db, id, &why).await {
         Ok(true) => {
             tracing::error!(intent = id, error = %why, "interrupted delete could not be completed; gave up and told AGM");
             Outcome::Finished
         }
         Ok(false) => Outcome::Retry(why),
-        Err(e) => Outcome::Retry(format!("{why}（且記不下失敗：{e:#}）")),
+        Err(e) => {
+            // 記不下失敗：intent 會停在 `running`。再試一次只把「自己擁有的 running」翻回 pending，下一輪 `claim` 才拿得到（#1059，同 restart_intents）。
+            match intents::record_failure_on_owned(&app.db, id, &app.boot_id, &why).await {
+                Ok(_) => Outcome::Retry(format!("{why}（且記不下失敗：{e:#}）")),
+                Err(e2) => Outcome::Retry(format!("{why}（且記不下失敗：{e:#}；改寫回 pending 也失敗：{e2:#}）")),
+            }
+        }
     }
 }
 
