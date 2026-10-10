@@ -104,3 +104,42 @@ test('kind 選項是 radio，選中的那顆 aria-checked=true', async () => {
   await settle()
   assert.deepEqual(checked(), ['codex'])
 })
+
+const LOGGED_OUT_HINT = '預設帳號還沒登入'
+/** 本機 codex 已安裝、登入狀態由參數決定；其他 kind 都照常。 */
+const toolsWithCodex = (logged_in: boolean | null) =>
+  Object.fromEntries(BOT_KINDS.map((k) => [k, { installed: true, path: null, version: null, logged_in: k === 'codex' ? logged_in : true }]))
+async function openNewBotWithKind(kind: string) {
+  await mount(<Sidebar />)
+  await settle()
+  await click([...document.querySelectorAll<HTMLButtonElement>('.sidebar-foot-actions button')].find((b) => b.textContent?.trim() === '新增 Bot')!)
+  await settle()
+  await click([...document.querySelectorAll<HTMLButtonElement>('[aria-label="kind"] .opt')].find((b) => b.textContent?.trim() === kind)!)
+  await settle()
+}
+const hasHint = () => (document.body.textContent ?? '').includes(LOGGED_OUT_HINT)
+
+test('預設帳號沒登入、不指定身分：表單寫出警示，送出鈕仍可按', async () => {
+  useStore.setState({ localTools: toolsWithCodex(false) } as never)
+  await openNewBotWithKind('codex')
+  assert.ok(hasHint(), '不指定身分而預設帳號沒登入，要寫出提示')
+  const submit = [...document.querySelectorAll<HTMLButtonElement>('button')].find((b) => b.textContent?.trim() === '新增並啟動')!
+  assert.equal(submit.disabled, false, '只提示、不擋送出')
+})
+
+test('選了身份就不顯示預設帳號那一條（那邊有自己的警示）', async () => {
+  useStore.setState({ localTools: toolsWithCodex(false) } as never)
+  await openNewBotWithKind('codex')
+  await click([...document.querySelectorAll<HTMLButtonElement>('[aria-label="身份"] .opt')].find((b) => b.textContent?.trim() === 'work')!)
+  await settle()
+  assert.equal(hasHint(), false)
+})
+
+test('預設帳號的登入狀態是 null（問不到）或 true：不顯示', async () => {
+  for (const state of [null, true] as const) {
+    await unmountAll()
+    useStore.setState({ localTools: toolsWithCodex(state) } as never)
+    await openNewBotWithKind('codex')
+    assert.equal(hasHint(), false, `logged_in=${String(state)} 不下結論`)
+  }
+})

@@ -636,6 +636,8 @@ function NewBotForm({ onDone, initialProjectId }: { onDone: () => void; initialP
   // 驗 trim 過的：打到一半的 `my ` 不該先閃紅字；送出也送 trim 過的。
   const nameOk = isValidBotName(name.trim())
   const cliOk = Boolean(tools[kind]?.installed)
+  /** 不指定身分＝用那台的預設帳號；它沒登入時 bot 會停在登入畫面（`logged_in === null` 是問不到，不下結論）。 */
+  const defaultLoggedOut = cliOk && identity === '' && tools[kind]?.logged_in === false
   const shareOn = shareProfile !== null && !shareProfileBlocked(kind)
   const folderIn = shareOn ? shareFolderInput(shareFolder, name) : null
   const projectPath = projects.find((p) => p.id === pid)?.path
@@ -793,6 +795,11 @@ function NewBotForm({ onDone, initialProjectId }: { onDone: () => void; initialP
         onFast={setFast}
       />
       <IdentityOptions kind={kind} host={host} value={identity} onChange={setIdentity} />
+      {defaultLoggedOut ? (
+        <span className="hint identity-selection-warning" role="status">
+          {host === 'local' ? '本機' : host} 上的 {kind} 預設帳號還沒登入：bot 起來會停在登入畫面。先登入，或在上面選一個已登入的身份。
+        </span>
+      ) : null}
       <label className="field">
         <span>名稱</span>
         <input
