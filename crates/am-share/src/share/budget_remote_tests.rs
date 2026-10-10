@@ -289,7 +289,7 @@ mod with_app {
         let (id, _, _) = share_bot(&e, &scratch, "far-closed", "restricted").await;
 
         // 有新鮮的量測值：主機斷了也照用。
-        budget::set_cached_for_test(&id, Measured::default());
+        budget::set_cached_for_test(&e.app, &id, Measured::default()).await;
         conn.connected.store(false, Ordering::SeqCst);
         assert_eq!(budget::is_full(&e.app, &id).await, Ok(false), "新鮮值照用");
         // 沒有值又量不到：不當作沒滿。
@@ -371,6 +371,30 @@ mod with_app {
         sqlx::query("UPDATE bots SET deleted_at = ? WHERE id = ?").bind(crate::db::now()).bind(&id).execute(&e.app.db).await.unwrap();
         crate::share::revoke_bot_share(&e.app, &id).await.unwrap();
         assert!(!mark.exists(), "revoke 拿掉遠端標記");
+    }
+
+    /// #1025：讀不到 bot 的位置＝fail closed（分享頁 503），不是「不受限」；失敗時不記值，上一筆量測值留著。
+    #[tokio::test]
+    async fn a_broken_lookup_fails_closed_and_keeps_the_last_measurement() {
+        let e = tt::env().await;
+        let scratch = test_dirs::scratch_dir("x-budget-db");
+        remote_host(&e, "budget-db-host", &scratch).await;
+        let (id, _, _) = share_bot(&e, &scratch, "budget-db-bot", "restricted").await;
+        am_base::hosts::set_ssh_fake("budget-db-host", |_| Ok(frame("MEASURE", &format!("{} 0 1 0", budget::SANDBOX_MAX_BYTES))));
+        budget::clear_cached_for_test(&id);
+        assert_eq!(budget::is_full(&e.app, &id).await, Ok(true));
+        let last = budget::cached(&id).map(|(m, _)| m);
+
+        sqlx::query("ALTER TABLE shared_bots RENAME TO shared_bots_away").execute(&e.app.db).await.unwrap();
+        assert_eq!(budget::is_full(&e.app, &id).await, Err(Unavailable), "讀不到位置：不當作沒滿");
+        assert!(budget::refresh(&e.app, &id).await.is_err());
+        assert_eq!(budget::cached(&id).map(|(m, _)| m), last, "失敗不記值，也不拿 0 覆蓋");
+        sqlx::query("ALTER TABLE shared_bots_away RENAME TO shared_bots").execute(&e.app.db).await.unwrap();
+
+        // DB 恢復後遠端量得到，照常放行或擋下。
+        am_base::hosts::set_ssh_fake("budget-db-host", |_| Ok(frame("MEASURE", "1 0 1 0")));
+        budget::clear_cached_for_test(&id);
+        assert_eq!(budget::is_full(&e.app, &id).await, Ok(false));
     }
 
     /// #985：撤銷分享要先讓 token 失效，不能排在遠端慢的 ssh（拿掉保留標記）後面——那段時間舊連結照樣過授權。
