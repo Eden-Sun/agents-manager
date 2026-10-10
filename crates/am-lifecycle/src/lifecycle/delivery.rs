@@ -1578,10 +1578,26 @@ mod tests {
         let older = day.join("rollout-2026-09-14T08-00-00-sess-same.jsonl");
         let newer = day.join("rollout-2026-09-14T09-00-00-sess-same.jsonl");
         std::fs::write(&newer, "").unwrap();
-        std::thread::sleep(std::time::Duration::from_millis(20));
         std::fs::write(&older, "").unwrap();
+        // mtime 由測試自己設，不靠牆鐘：以秒為單位的檔案系統，兩次寫入會落在同一秒（#1148）。
+        let set_mtime = |p: &std::path::Path, secs: u64| {
+            std::fs::File::options()
+                .write(true)
+                .open(p)
+                .unwrap()
+                .set_modified(std::time::UNIX_EPOCH + std::time::Duration::from_secs(secs))
+                .unwrap()
+        };
+        set_mtime(&newer, 1_800_000_000);
+        set_mtime(&older, 1_800_000_060);
         // 檔名排序在前的 older 反而是最後寫的：以修改時間為準。
         assert_eq!(codex_session_log(&home, "sess-same"), Some(std::fs::canonicalize(&older).unwrap()));
+        // 反過來也成立：看的是 mtime，不是寫入順序或檔名。
+        set_mtime(&newer, 1_800_000_120);
+        assert_eq!(codex_session_log(&home, "sess-same"), Some(std::fs::canonicalize(&newer).unwrap()));
+        // mtime 一樣時的 tiebreak 是路徑較大的那個（現況行為，釘住）。
+        set_mtime(&older, 1_800_000_120);
+        assert_eq!(codex_session_log(&home, "sess-same"), Some(std::fs::canonicalize(&newer).unwrap()));
         std::fs::write(ancient.join("rollout-2026-01-02T00-00-00-sess-ancient.jsonl"), "").unwrap();
         for d in 3..=28 {
             std::fs::create_dir_all(home.join(format!("sessions/2026/02/{d:02}"))).unwrap();
