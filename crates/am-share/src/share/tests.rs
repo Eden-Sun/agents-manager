@@ -1425,6 +1425,41 @@ async fn a_queued_share_listing_rechecks_the_token_after_its_turn() {
     assert_eq!(second.await.unwrap().unwrap().status(), 404, "排隊的那趟輪到時 token 已撤銷");
 }
 
+/// #1183：一趟清單被卡住時，同一個分享的後續清單最多排 [`LIST_REQUESTS_PER_SHARE`] 趟（連同進行中的），超過的立刻 429；
+/// 別的分享不受影響，排隊的人全部放行後結果照樣正確，之後 key 不留在 map 裡。
+#[tokio::test]
+async fn share_file_listing_waiters_are_capped_and_rejected_at_once() {
+    let e = tt::env().await;
+    let a = restricted_bot(&e.app, &e.project_id, "list-cap-a").await;
+    let b = restricted_bot(&e.app, &e.project_id, "list-cap-b").await;
+    let (ta, tb) = (shared(&e.app, &a.id).await, shared(&e.app, &b.id).await);
+    let base = serve(portal::router(e.app.clone())).await;
+    let (entered_tx, entered_rx) = tokio::sync::oneshot::channel::<()>();
+    let release = Arc::new(tokio::sync::Notify::new());
+    let r2 = release.clone();
+    crate::lifecycle::race_point::arm("share_io_after_authority_released", &a.id, move || async move {
+        let _ = entered_tx.send(());
+        r2.notified().await;
+    });
+    let c = client();
+    let first = tokio::spawn(c.get(format!("{base}/s/{ta}/api/files")).send());
+    entered_rx.await.unwrap();
+    let burst: Vec<_> = (0..6).map(|_| tokio::spawn(c.get(format!("{base}/s/{ta}/api/files")).send())).collect();
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    let rejected_now = burst.iter().filter(|h| h.is_finished()).count();
+    assert_eq!(rejected_now, 6 - (portal::LIST_REQUESTS_PER_SHARE - 1), "排隊有上限：超過的要立刻 429，不能全部排在後面");
+    assert_eq!(c.get(format!("{base}/s/{tb}/api/files")).send().await.unwrap().status(), 200, "別的分享不受影響");
+    release.notify_one();
+    assert_eq!(first.await.unwrap().unwrap().status(), 200);
+    let mut codes = Vec::new();
+    for h in burst {
+        codes.push(h.await.unwrap().unwrap().status().as_u16());
+    }
+    codes.sort();
+    assert_eq!(codes, vec![200, 200, 200, 429, 429, 429], "排到的照常回 200，超過的 429");
+    assert!(!portal::list_turn_key_is_held_for_test(&a.id), "全部結束之後不留 key");
+}
+
 /// 分享用 bot 的 outbox 走分享保留政策、不是 1 小時（使用者 2026-10-04：end user 隔天才回來拿是常態；#850 加 14 天／總量上限）：建立時就放標記、開機補回、
 /// 刪掉才拿掉；主 UI 的清單與分享頁都不給 1 小時倒數。一般 bot 照舊 1 小時。
 #[tokio::test]
