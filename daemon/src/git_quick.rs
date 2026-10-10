@@ -102,6 +102,17 @@ fn done(op: &str, out: crate::git_sh::Out) -> Result<Value, LcError> {
     }
 }
 
+/// `git status --porcelain` 的結果能不能往下提交：指令失敗是錯誤（不是「沒有改動」），成功且沒有輸出才是 `nothing_to_commit`（#1047）。
+fn commit_precheck(st: &crate::git_sh::Out) -> Result<(), LcError> {
+    if !st.ok() {
+        return Err(LcError::Upstream(st.message()));
+    }
+    if st.stdout.trim().is_empty() {
+        return Err(LcError::conflict("nothing_to_commit", json!({})));
+    }
+    Ok(())
+}
+
 /// `git add -A && git commit -m <message>`. Nothing to commit → 409 `nothing_to_commit`.
 pub async fn commit(app: &Arc<App>, id: &str, message: &str) -> Result<Value, LcError> {
     let msg = message.trim();
@@ -110,9 +121,7 @@ pub async fn commit(app: &Arc<App>, id: &str, message: &str) -> Result<Value, Lc
     }
     let p = project(app, id).await?;
     let st = git(app, &p.host, &p.path, &["status", "--porcelain"], GIT_TIMEOUT).await.map_err(|e| LcError::Upstream(e.to_string()))?;
-    if st.stdout.trim().is_empty() {
-        return Err(LcError::conflict("nothing_to_commit", json!({})));
-    }
+    commit_precheck(&st)?;
     let add = git(app, &p.host, &p.path, &["add", "-A"], GIT_TIMEOUT).await.map_err(|e| LcError::Upstream(e.to_string()))?;
     if !add.ok() {
         return done("add", add);
@@ -165,6 +174,16 @@ mod tests {
 
     fn out(code: i32, stdout: &str, stderr: &str) -> anyhow::Result<Out> {
         Ok(Out { code, stdout: stdout.into(), stderr: stderr.into() })
+    }
+
+    /// #1047：status 探測失敗（dubious ownership、非 repo…）是錯誤，不能被報成「沒有東西可提交」。
+    #[test]
+    fn a_failed_status_probe_is_an_error_not_nothing_to_commit() {
+        let err = super::commit_precheck(&out(128, "", "fatal: detected dubious ownership in repository").unwrap()).unwrap_err();
+        assert!(matches!(&err, LcError::Upstream(m) if m.contains("dubious ownership")), "{err:?}");
+        let err = super::commit_precheck(&out(0, "", "").unwrap()).unwrap_err();
+        assert!(matches!(&err, LcError::Conflict(v) if v["reason"] == "nothing_to_commit"), "{err:?}");
+        assert!(super::commit_precheck(&out(0, " M a.txt\n", "").unwrap()).is_ok());
     }
 
     #[test]
