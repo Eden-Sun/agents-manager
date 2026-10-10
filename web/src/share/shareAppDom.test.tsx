@@ -983,3 +983,52 @@ test('超過 20 個附件：送出鈕停用並說明要移除幾個；移到 20 
   assert.equal(sent.length, 1)
   assert.equal(sent[0].length, 20)
 })
+
+/** #1096：載入較早訊息後留在原來那一則，不跳到最舊（scrollHeight 變大、scrollTop 要跟著補）。 */
+test('載入較早訊息後留在原來那一則，不跳到最舊', { timeout: 20_000 }, async () => {
+  const older = [0, 1].map((i) => ({
+    id: `old-${i}`,
+    role: 'user' as const,
+    text: `前文 ${i}`,
+    created_at: new Date(Date.UTC(2020, 0, 1, 0, i)).toISOString(),
+    attachments: [] as { name: string }[],
+  }))
+  const recent = [0, 1].map((i) => ({
+    id: `new-${i}`,
+    role: 'assistant' as const,
+    text: `近文 ${i}`,
+    created_at: new Date(Date.UTC(2024, 0, 1, 0, i)).toISOString(),
+    attachments: [] as { name: string }[],
+  }))
+  const client: ShareClient = {
+    async messages(before) {
+      if (!before) return { bot_name: 'b', status: 'idle', messages: recent, has_more: true }
+      return { bot_name: 'b', status: 'idle', messages: older, has_more: false }
+    },
+    async send() {},
+    async upload() {
+      return { id: 'a', name: 'a' }
+    },
+    async files() {
+      return []
+    },
+    fileUrl: () => '/s/t/api/files/a',
+    previewUrl: () => '/s/t/api/files/a?inline=1',
+    fileBlob: async () => new Blob([]),
+    subscribe: () => () => {},
+  }
+  await mount(<ShareApp client={client} />)
+  await settle(50)
+  const list = document.querySelector('.sh-list') as HTMLElement
+  Object.defineProperty(list, 'scrollHeight', { configurable: true, get: () => document.querySelectorAll('.sh-msg').length * 100 })
+  Object.defineProperty(list, 'clientHeight', { configurable: true, value: 100 })
+  list.scrollTop = 0
+  await act(async () => {
+    list.dispatchEvent(new Event('scroll', { bubbles: true }))
+  })
+  const btn = [...document.querySelectorAll('button')].find((b) => /較早/.test(b.textContent ?? ''))!
+  await click(btn)
+  await settle(50)
+  assert.equal(document.querySelectorAll('.sh-msg').length, 4)
+  assert.equal(list.scrollTop, 200, '多出來的兩則（200px）補回 scrollTop，人留在原來那一則')
+})
