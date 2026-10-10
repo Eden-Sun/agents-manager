@@ -324,7 +324,10 @@ pub fn system_prompt(workspace: &str, outbox: Option<&str>, persona: Option<&str
     );
     match outbox {
         Some(o) => {
-            p.push_str(&format!("- 要交給對方的檔案寫進 `{o}`，對方的頁面會列出來讓他下載（一小時後自動清掉）。\n"));
+            p.push_str(&format!(
+                "- 要交給對方的檔案寫進 `{o}`，對方的頁面會列出來讓他下載（保留 {} 天；總量太大時從最舊的清掉）。\n",
+                crate::outbox::SHARE_KEEP_DAYS
+            ));
             // share/compose.rs：入口送出 SVG 時把相對路徑的 <image> 嵌成 data URI。
             p.push_str(
                 "- 要把對方的照片放進你做的圖（SVG）：用相對於工作目錄的路徑引用，例如 `<image href=\"inbox/檔名.jpeg\" x=\"40\" y=\"40\" width=\"400\" height=\"300\" preserveAspectRatio=\"xMidYMid slice\"/>`，\
@@ -397,4 +400,18 @@ pub fn latest_opus_in(models: &Value) -> Option<String> {
         }
     }
     best.map(|(_, id)| id).or(alias)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn the_prompt_states_the_share_retention_not_one_hour() {
+        let p = system_prompt("/srv/w", Some("/data/outbox/B1"), None, "");
+        assert!(p.contains("保留 14 天"), "{p}");
+        assert!(!p.contains("一小時") && !p.contains("1 小時"), "{p}");
+        let none = system_prompt("/srv/w", None, None, "");
+        assert!(none.contains("只能用文字回覆"));
+    }
 }
