@@ -36,6 +36,8 @@ fn mib(bytes: u64) -> u64 {
     bytes / (1024 * 1024)
 }
 
+const FULL_NOTE_PREFIX: &str = "分享空間滿了：";
+
 async fn notify_owner(app: &Arc<App>, bot_id: &str, m: budget::Measured) {
     // 量到一半停下（樹太深或檔案太多）時，數字只是下限：不能說「已達上限」，要講清楚是量不完、擋下來是保守的做法（#1028）。
     let why = if m.truncated {
@@ -44,7 +46,7 @@ async fn notify_owner(app: &Arc<App>, bot_id: &str, m: budget::Measured) {
         format!("已達 {} MiB 上限。", mib(budget::SANDBOX_MAX_BYTES))
     };
     let text = format!(
-        "分享空間滿了：工作目錄 {} MiB＋輸出 {} MiB，{}新的分享訊息會被擋下（507 share_storage_full），分享頁顯示「空間滿了」。\
+        "{FULL_NOTE_PREFIX}工作目錄 {} MiB＋輸出 {} MiB，{}新的分享訊息會被擋下（507 share_storage_full），分享頁顯示「空間滿了」。\
          請整理工作目錄或 outbox（daemon 不會自動刪工作目錄的檔）；清掉後約 1 分鐘內恢復。",
         mib(m.workspace_bytes),
         mib(m.outbox_bytes),
@@ -52,8 +54,19 @@ async fn notify_owner(app: &Arc<App>, bot_id: &str, m: budget::Measured) {
     );
     match crate::db::conversation_id(&app.db, bot_id).await {
         Ok(conv) => {
-            if let Err(e) = crate::lifecycle::insert_message(app.as_ref(), &conv, None, "system", &text, "system", false, None).await {
-                tracing::warn!(bot = %bot_id, error = %e, "could not tell the owner the share sandbox is full");
+            let told: bool = sqlx::query_scalar(
+                "SELECT EXISTS(SELECT 1 FROM messages WHERE conversation_id = ? AND role = 'system' AND content LIKE ? AND created_at >= ?)",
+            )
+            .bind(&conv)
+            .bind(format!("{FULL_NOTE_PREFIX}%"))
+            .bind(crate::db::iso_in(-24 * 3600))
+            .fetch_one(&app.db)
+            .await
+            .unwrap_or(false); // 查不到就照貼：寧可多一則，不要漏講
+            if !told {
+                if let Err(e) = crate::lifecycle::insert_message(app.as_ref(), &conv, None, "system", &text, "system", false, None).await {
+                    tracing::warn!(bot = %bot_id, error = %e, "could not tell the owner the share sandbox is full");
+                }
             }
         }
         Err(e) => tracing::warn!(bot = %bot_id, error = %e, "could not find the share bot's conversation"),
@@ -72,3 +85,50 @@ async fn notify_owner(app: &Arc<App>, bot_id: &str, m: budget::Measured) {
         tracing::warn!(bot = %bot_id, error = %e, "could not queue the share_storage_full ops_alert");
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn a_full_share_bot_is_told_once_across_restarts() {
+        let e = crate::testing::env().await;
+        let bot = crate::testing::claude_bot(&e.app, &e.project_id, "full").await;
+        let m = budget::Measured {
+            workspace_bytes: budget::SANDBOX_MAX_BYTES,
+            ..Default::default()
+        };
+        notify_owner(&e.app, &bot.id, m).await;
+        notify_owner(&e.app, &bot.id, m).await;
+
+        let count: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM messages m JOIN conversations c ON c.id = m.conversation_id WHERE c.bot_id = ? AND m.role = 'system' AND m.content LIKE '分享空間滿了：%'",
+        )
+        .bind(&bot.id)
+        .fetch_one(&e.app.db)
+        .await
+        .unwrap();
+        assert_eq!(count, 1);
+
+        sqlx::query(
+            "UPDATE messages SET created_at = ? WHERE conversation_id = (SELECT id FROM conversations WHERE bot_id = ?) AND role = 'system' AND content LIKE '分享空間滿了：%'",
+        )
+        .bind(crate::db::iso_in(-25 * 3600))
+        .bind(&bot.id)
+        .execute(&e.app.db)
+        .await
+        .unwrap();
+
+        notify_owner(&e.app, &bot.id, m).await;
+
+        let count: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM messages m JOIN conversations c ON c.id = m.conversation_id WHERE c.bot_id = ? AND m.role = 'system' AND m.content LIKE '分享空間滿了：%'",
+        )
+        .bind(&bot.id)
+        .fetch_one(&e.app.db)
+        .await
+        .unwrap();
+        assert_eq!(count, 2);
+    }
+}
+
