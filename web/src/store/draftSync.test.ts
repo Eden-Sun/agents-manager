@@ -19,7 +19,7 @@ function rig(opts: { debounceMs?: number } = {}) {
   const server = new Map<string, { text: string; rev: number }>()
   const puts: { key: string; text: string; clientId: string }[] = []
   const rejected: string[] = []
-  const gate = { hold: null as null | Promise<void>, fail: false, failWith: null as unknown, serverList: null as null | DraftWire[] }
+  const gate = { hold: null as null | Promise<void>, fetchHold: null as null | Promise<void>, fail: false, failWith: null as unknown, serverList: null as null | DraftWire[] }
   const sync = new DraftSync({
     clientId: 'me',
     debounceMs: opts.debounceMs ?? 400,
@@ -43,7 +43,11 @@ function rig(opts: { debounceMs?: number } = {}) {
       server.set(key, { text, rev })
       return { rev }
     },
-    fetchAll: async () => gate.serverList ?? [...server].filter(([, v]) => v.text).map(([key, v]) => ({ key, ...v })),
+    fetchAll: async () => {
+      const list = gate.serverList ?? [...server].filter(([, v]) => v.text).map(([key, v]) => ({ key, ...v }))
+      if (gate.fetchHold) await gate.fetchHold
+      return list
+    },
   })
   const type = (key: string, text: string) => {
     if (text) local[key] = text
@@ -251,3 +255,26 @@ test('斷線（TypeError）照舊 3 秒後重送', async () => {
   assert.equal(r.sync.isDirty('bot:a'), true)
   assert.deepEqual(r.rejected, [])
 })
+
+test('load 在飛時收到別台的新草稿：舊快照回來不能把它清掉', async () => {
+  const r = rig()
+  let release!: () => void
+  r.gate.fetchHold = new Promise<void>((res) => {
+    release = res
+  })
+  const loading = r.sync.load()
+  r.sync.remote({ key: 'bot:b1', text: 'from phone', rev: 1, client_id: 'other' })
+  assert.equal(r.local['bot:b1'], 'from phone')
+  release()
+  await loading
+  assert.equal(r.local['bot:b1'], 'from phone')
+})
+
+test('load 之前就有、daemon 真的沒有的乾淨草稿照舊清掉', async () => {
+  const r = rig()
+  r.local['bot:old'] = 'stale'
+  r.gate.serverList = []
+  await r.sync.load()
+  assert.equal(r.local['bot:old'], undefined)
+})
+
