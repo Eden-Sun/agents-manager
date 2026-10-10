@@ -1262,10 +1262,6 @@ async fn file<H: PortalEnv>(State(st): State<Portal<H>>, Path((token, name)): Pa
     let fetched = match crate::share::remote_io::remote_site(&*st.app, &bot_id).await {
         Err(()) => Err(crate::outbox::ShareFileError::Unavailable),
         Ok(Some(site)) => {
-            // 主機的分享 ssh 名額（每台 4）也是下載名額的一部分：用完直接 429，不排隊（同 #848）。
-            if crate::share::remote_fs::host_slot(&site.host).available_permits() <= crate::share::remote_fs::HOST_STREAM_RESERVE {
-                return too_many(5, "download");
-            }
             match site.outbox_stream(&name, crate::outbox::MAX_BYTES).await {
                 Ok(file) if svg => crate::share::remote_io::svg_response(&site, &name, file).await,
                 Ok(file) => Ok(crate::share::remote_io::stream_response(&name, file)),
@@ -1300,6 +1296,7 @@ async fn file<H: PortalEnv>(State(st): State<Portal<H>>, Path((token, name)): Pa
             (StatusCode::PAYLOAD_TOO_LARGE, Json(json!({"error": "too_large"}))).into_response()
         }
         Err(crate::outbox::ShareFileError::NotFound) => not_found(),
+        Err(crate::outbox::ShareFileError::Busy) => too_many(5, "download"),
         Err(crate::outbox::ShareFileError::Unavailable) => {
             tracing::warn!(bot = %bot_id, "share outbox download unavailable");
             unavailable()

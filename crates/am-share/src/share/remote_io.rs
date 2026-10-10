@@ -55,16 +55,17 @@ struct StreamState {
     failed: bool,
     // 名額跟著串流活到 body 送完或 client 斷線（RAII）；ssh 行程也一樣（`SshStream` drop 時殺掉）。
     _permit: OwnedSemaphorePermit,
+    _download_permit: Option<OwnedSemaphorePermit>,
 }
 
 /// 把遠端檔案串成 body：先送已讀的檔頭，再送剩下的 stdout；每塊重新計 [`TIMEOUT_STREAM_IDLE`] 閒置逾時。
 /// 提早 EOF（檔被截短）、讀取錯誤、逾時都回 `Err`，讓 hyper 直接中斷連線——絕不補零，client 才知道檔案不完整。
 fn body_stream(file: RemoteFile, idle: Duration) -> impl futures::Stream<Item = Result<Bytes, std::io::Error>> + Send {
-    let RemoteFile { len, head, body, fence, permit } = file;
+    let RemoteFile { len, head, body, fence, permit, download_permit } = file;
     let head = Bytes::from(head);
     let remaining = len.saturating_sub(head.len() as u64);
     futures::stream::unfold(
-        StreamState { head: Some(head).filter(|h| !h.is_empty()), body, fence, remaining, idle, failed: false, _permit: permit },
+        StreamState { head: Some(head).filter(|h| !h.is_empty()), body, fence, remaining, idle, failed: false, _permit: permit, _download_permit: download_permit },
         |mut st| async move {
             if st.failed {
                 return None;
@@ -128,7 +129,7 @@ pub fn stream_response(name: &str, file: RemoteFile) -> Response {
 
 /// 整份讀進記憶體（SVG 嵌照片要先拿到全文）：長度不等於宣告的就當失敗。
 async fn collect(file: RemoteFile, idle: Duration) -> Result<Vec<u8>, ()> {
-    let RemoteFile { len, head: mut out, mut body, fence, permit } = file;
+    let RemoteFile { len, head: mut out, mut body, fence, permit, download_permit } = file;
     let want = len as usize;
     out.reserve(want.saturating_sub(out.len()));
     let mut chunk = vec![0u8; CHUNK];
@@ -146,6 +147,7 @@ async fn collect(file: RemoteFile, idle: Duration) -> Result<Vec<u8>, ()> {
     // 讀完就放掉主機名額：接下來的 stat／抓照片各自再拿（整段仍受每分享 2、全站 8 的下載名額限制），
     // 不然 4 個同時嵌圖的下載各占一格、再等第五格，全部互等。
     drop(permit);
+    drop(download_permit);
     Ok(out)
 }
 

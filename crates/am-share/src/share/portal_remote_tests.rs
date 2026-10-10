@@ -385,6 +385,21 @@ async fn an_exhausted_host_slot_pool_is_a_429_for_downloads() {
     assert_eq!(client().get(r.url("files/a.txt")).send().await.unwrap().status(), 200);
 }
 
+/// 下載專屬名額用完：下載立刻 429 `what=download`，不排隊。
+#[tokio::test]
+async fn an_exhausted_download_slot_pool_is_a_429_for_downloads() {
+    let e = tt::env().await;
+    let r = setup(&e, "dl-only-slots").await;
+    std::fs::write(r.outbox.join("a.txt"), b"hello").unwrap();
+    let dl_slot = super::remote_fs::host_download_slot(&r.host);
+    let held: Vec<_> = (0..dl_slot.available_permits()).map(|_| dl_slot.clone().try_acquire_owned().unwrap()).collect();
+    let resp = client().get(r.url("files/a.txt")).send().await.unwrap();
+    assert_eq!(resp.status(), 429);
+    assert!(resp.headers().contains_key("retry-after"));
+    drop(held);
+    assert_eq!(client().get(r.url("files/a.txt")).send().await.unwrap().status(), 200);
+}
+
 // ───────────────────────── SVG 嵌照片 ─────────────────────────
 
 #[tokio::test]
