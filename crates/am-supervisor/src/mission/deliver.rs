@@ -20,7 +20,9 @@ fn fail(code: &'static str, detail: impl Into<String>) -> Failure {
     Failure { code, detail: detail.into() }
 }
 
-async fn git(dir: &Path, args: &[&str]) -> Result<(bool, String), Failure> {
+/// stdout 與 stderr **分開**回傳（都 trim 過）。要**解析**輸出（porcelain、sha）的地方用這個：git 印在 stderr 的警告
+/// （`warning: could not open directory …`、`warning: refname 'HEAD' is ambiguous.`）不能混進要解析的字串。
+async fn git_split(dir: &Path, args: &[&str]) -> Result<(bool, String, String), Failure> {
     let out = Command::new("git")
         .arg("-C")
         .arg(dir)
@@ -29,15 +31,30 @@ async fn git(dir: &Path, args: &[&str]) -> Result<(bool, String), Failure> {
         .output()
         .await
         .map_err(|e| fail("push_failed", format!("git 無法執行：{e}")))?;
-    let mut text = String::from_utf8_lossy(&out.stdout).trim().to_string();
-    let err = String::from_utf8_lossy(&out.stderr).trim().to_string();
-    if !err.is_empty() {
-        if !text.is_empty() {
-            text.push('\n');
-        }
-        text.push_str(&err);
+    Ok((
+        out.status.success(),
+        String::from_utf8_lossy(&out.stdout).trim().to_string(),
+        String::from_utf8_lossy(&out.stderr).trim().to_string(),
+    ))
+}
+
+/// 給人看的版本：stdout 接 stderr（非空的才接）。
+fn joined(out: &str, err: &str) -> String {
+    match (out.is_empty(), err.is_empty()) {
+        (_, true) => out.to_string(),
+        (true, false) => err.to_string(),
+        (false, false) => format!("{out}\n{err}"),
     }
-    Ok((out.status.success(), text))
+}
+
+/// 輸出的第一行（去頭尾空白）。`rev-parse` 這類只要一個值的指令用它。
+fn first_line(out: &str) -> &str {
+    out.lines().next().unwrap_or("").trim()
+}
+
+async fn git(dir: &Path, args: &[&str]) -> Result<(bool, String), Failure> {
+    let (ok, out, err) = git_split(dir, args).await?;
+    Ok((ok, joined(&out, &err)))
 }
 
 /// 這個目錄現在的 HEAD（完整 sha）。不是 git 工作樹就回 `None`。
@@ -137,9 +154,9 @@ pub async fn base_branch(dir: &Path, remote: &str) -> String {
 ///
 /// **不 fetch**：本地的 `<remote>/<base>` 舊了，只會讓 HEAD 更不容易被算進去（往嚴的方向錯），不會放過改動。
 pub async fn nothing_beyond_base(dir: &Path, remote: &str, base: &str) -> Result<String, String> {
-    let (_, porcelain) = git(dir, &["status", "--porcelain"]).await.map_err(|f| f.detail)?;
-    if !porcelain.trim().is_empty() {
-        return Err(format!("工作樹還有未提交的改動：\n{porcelain}"));
+    let (ok, porcelain, err) = git_split(dir, &["status", "--porcelain"]).await.map_err(|f| f.detail)?;
+    if !ok || !porcelain.is_empty() {
+        return Err(format!("工作樹還有未提交的改動：\n{}", joined(&porcelain, &err)));
     }
     let head = head_sha(dir).await.ok_or_else(|| "讀不到工作樹的 HEAD".to_string())?;
     let remote_ref = format!("{remote}/{base}");
@@ -159,26 +176,31 @@ async fn is_ancestor(dir: &Path, a: &str, b: &str) -> bool {
 /// 「有沒有東西要交」不在這裡判：重試時 HEAD 已經在 base 裡是**成功**的證據，不是錯誤，
 /// 由呼叫端配合「先前有沒有試過」決定（review3 c1 M11）。
 async fn preflight(dir: &Path, remote: &str, base: &str, expected: Option<&str>) -> Result<(String, String), Failure> {
-    let (_, porcelain) = git(dir, &["status", "--porcelain"]).await?;
-    if !porcelain.trim().is_empty() {
-        return Err(fail("dirty_worktree", format!("worktree 還有未提交的改動：\n{porcelain}")));
+    // 只看 stdout：git 在 stderr 印的警告（目錄讀不到）不代表工作樹髒。指令本身失敗才當髒（保守）。
+    let (ok, porcelain, err) = git_split(dir, &["status", "--porcelain"]).await?;
+    if !ok || !porcelain.is_empty() {
+        return Err(fail("dirty_worktree", format!("worktree 還有未提交的改動：\n{}", joined(&porcelain, &err))));
     }
     let (ok, out) = git(dir, &["fetch", remote, base]).await?;
     if !ok {
         return Err(fail("fetch_failed", out));
     }
     let remote_ref = format!("{remote}/{base}");
-    let (_, head) = git(dir, &["rev-parse", "HEAD"]).await?;
+    let (ok, head_out, head_err) = git_split(dir, &["rev-parse", "HEAD"]).await?;
+    if !ok {
+        return Err(fail("push_failed", joined(&head_out, &head_err)));
+    }
+    let head = first_line(&head_out).to_string();
     // 呼叫端驗過／檢查過的是 `expected` 那個 commit：工作樹的 HEAD 在這之間被動過（執行者還在同一個樹上做事）就不能交，
     // 不然推上去的是沒驗過的東西。
     if let Some(want) = expected.filter(|w| *w != head) {
         return Err(fail("head_moved", format!("工作樹的 HEAD（{head}）已經不是要交付的那個 commit（{want}）：中間有人又 commit 了，回到驗證那一步重驗")));
     }
-    let (ok, upstream) = git(dir, &["rev-parse", &remote_ref]).await?;
+    let (ok, upstream_out, upstream_err) = git_split(dir, &["rev-parse", &remote_ref]).await?;
     if !ok {
-        return Err(fail("fetch_failed", upstream));
+        return Err(fail("fetch_failed", joined(&upstream_out, &upstream_err)));
     }
-    Ok((head, upstream))
+    Ok((head, first_line(&upstream_out).to_string()))
 }
 
 /// fast-forward 推到 `<remote>/<base>`。
@@ -619,6 +641,38 @@ mod tests {
         commit(&work, "b");
         std::fs::write(work.join("scratch"), "x").unwrap();
         assert_eq!(push_main(&work, "origin", "main", false).await.unwrap_err().code, "dirty_worktree");
+    }
+
+    /// #1045：git 在 stderr 印警告、exit 0、stdout 空＝工作樹是乾淨的（最常見：目錄讀不到）。以前被當成髒工作樹。
+    #[tokio::test]
+    async fn a_git_warning_on_stderr_is_not_a_dirty_worktree() {
+        use std::os::unix::fs::PermissionsExt;
+        let (_root, _seed, work) = fixture();
+        commit(&work, "b");
+        std::fs::create_dir(work.join("locked")).unwrap();
+        std::fs::write(work.join("locked/f"), "x").unwrap();
+        std::fs::set_permissions(work.join("locked"), std::fs::Permissions::from_mode(0o000)).unwrap();
+        let status = StdCommand::new("git").arg("-C").arg(&work).args(["status", "--porcelain"]).output().unwrap();
+        // 前提：這台機器上真的會印警告（以 root 跑的話權限擋不住，測試才沒有意義）。
+        let warned = status.stdout.is_empty() && !status.stderr.is_empty();
+        let pushed = push_main(&work, "origin", "main", false).await;
+        let nothing = nothing_beyond_base(&work, "origin", "main").await;
+        // 測試結束前一定要改回來，不然 Tmp 刪不掉。
+        std::fs::set_permissions(work.join("locked"), std::fs::Permissions::from_mode(0o755)).unwrap();
+        assert!(warned, "前提不成立：git status 應該只在 stderr 印警告");
+        assert!(pushed.is_ok(), "stderr 警告不能擋交付：{:?}", pushed.err());
+        assert!(nothing.is_ok(), "{nothing:?}");
+    }
+
+    /// #1045：`refs/heads/HEAD` 讓 `rev-parse HEAD` 在 stderr 印 ambiguous 警告、stdout 照給 sha。以前 sha 變成「sha\nwarning…」而 head_moved。
+    #[tokio::test]
+    async fn an_ambiguous_refname_warning_is_not_read_as_a_moved_head() {
+        let (_root, _seed, work) = fixture();
+        commit(&work, "b");
+        sh(&work, &["update-ref", "refs/heads/HEAD", "HEAD"]);
+        let head = head_sha(&work).await.unwrap();
+        let pushed = push_main_at(&work, "origin", "main", false, Some(&head)).await.expect("警告不是 HEAD 移動");
+        assert_eq!(pushed.sha, head);
     }
 
     fn fake_gh(root: &Path) -> std::path::PathBuf {
