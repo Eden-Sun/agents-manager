@@ -435,7 +435,13 @@ function Gauge({
       rivals.push(windowBar('F', fable, q?.fable, q?.updated_at))
     }
     windows = [rivals.reduce((best, w) => (moreUrgent(w, best) ? w : best), shown)]
-  } else if (five === null && seven === null) {
+  } else if (compact && seven === null && (five !== null || fable !== null)) {
+    // 7d 沒有值時手機仍只寫一個窗口：從 5h／F 取最急的那個（#1179：只有 Fable 有值時不能畫成「5h —」）。
+    const cands: WindowBar[] = []
+    if (five !== null) cands.push(windowBar('5h', five, q?.five_hour, q?.updated_at))
+    if (fable !== null) cands.push(windowBar('F', fable, q?.fable, q?.updated_at))
+    windows = [cands.reduce((best, w) => (moreUrgent(w, best) ? w : best))]
+  } else if (five === null && seven === null && fable === null) {
     windows = [windowBar(weeklyOnlyKind(entry.kind) ? '週' : '5h', null, null, q?.updated_at)]
   } else {
     windows = []
