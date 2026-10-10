@@ -256,6 +256,41 @@ test('Office 類貼上文字不變成附件；只有 Files 的貼上仍收附件
   assert.equal(document.querySelectorAll('.attach-tray .attach-thumb').length, 1)
 })
 
+test('送出期間加進來的附件留在托盤給下一則', { timeout: 30_000 }, async () => {
+  const { requests } = await openChat('am-claude-2')
+  const originalFetch = globalThis.fetch
+  let releasePrompt!: () => void
+  const promptGate = new Promise<void>((resolve) => { releasePrompt = resolve })
+  globalThis.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
+    if (init?.method === 'POST' && /\/bots\/[^/]+\/prompt/.test(String(input))) await promptGate
+    return originalFetch(input, init)
+  }) as typeof fetch
+  try {
+    await typeInto(textarea(), 'hi')
+    await keydown(textarea(), 'Enter')
+    await until(() => textarea().disabled, '送出中的輸入框鎖住')
+    await dropFile('late.png')
+    await until(() => document.querySelector('.attach-thumb:not(.uploading)') !== null, '送出期間加入的附件上傳完成')
+    releasePrompt()
+    await until(() => prompts(requests).length === 1, '第一則 prompt 完成')
+    await settle()
+    assert.equal(textarea().value, '')
+    assert.equal(document.querySelectorAll('.attach-tray .attach-thumb').length, 1)
+    const first = prompts(requests)[0].body as { attachments?: string[] }
+    assert.equal(first.attachments, undefined, '送出期間才加入的檔案不會帶進第一則')
+
+    await typeInto(textarea(), 'next')
+    await keydown(textarea(), 'Enter')
+    await until(() => prompts(requests).length === 2, '第二則 prompt 完成')
+    const second = prompts(requests)[1].body as { attachments?: string[] }
+    assert.equal(second.attachments?.length, 1)
+    assert.ok(second.attachments?.[0])
+  } finally {
+    releasePrompt()
+    globalThis.fetch = originalFetch
+  }
+})
+
 test('清掉再送我這則：附件上傳中／失敗時 disabled', { timeout: 30_000 }, async () => {
   useStore.setState({
     composerDrafts: {
