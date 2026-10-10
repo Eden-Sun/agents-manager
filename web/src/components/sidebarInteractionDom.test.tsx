@@ -120,6 +120,50 @@ test('額度 critical 保留模型標籤，一般列與精簡子列都顯示短�
   assert.ok(row('b1').querySelector('.lamp'), '狀態燈照常保留')
 })
 
+test('額度晶片的提示點名實際在跑的身分', async () => {
+  const critical = { used_pct: 98, low: true, critical: true, resets_at: null }
+  useStore.setState({
+    bots: [{ ...bot('b1', 'p1'), identity: 'cc1' }],
+    runs: {
+      b1: {
+        id: 'r1',
+        bot_id: 'b1',
+        state: 'running',
+        agent_status: 'idle',
+        runtime_identity: 'cc2',
+        runtime_model: null,
+        runtime_effort: null,
+        runtime_fast: null,
+      },
+    },
+    identities: [
+      { name: 'cc1', kind: 'claude', env: { CLAUDE_CONFIG_DIR: '/a' }, args: [], host: null },
+      { name: 'cc2', kind: 'claude', env: { CLAUDE_CONFIG_DIR: '/b' }, args: [], host: null },
+    ],
+    quota: { 'claude:cc2': { five_hour: critical, seven_day: null, fable: null } },
+  } as never)
+
+  await mount(<Sidebar />)
+  await settle()
+
+  const chip = row('b1').querySelector<HTMLElement>('.bot-quota-chip.crit')!
+  assert.ok(chip, '應顯示 critical 晶片')
+  assert.ok(chip.title.includes('cc2'), `title 應含 cc2: ${chip.title}`)
+  assert.ok(!chip.title.includes('cc1'), `title 不應含 cc1: ${chip.title}`)
+
+  // 對照：把 run 拿掉（runs: {}）、quota 改放 claude:cc1 → title 含 cc1
+  await act(async () => {
+    useStore.setState({
+      runs: {},
+      quota: { 'claude:cc1': { five_hour: critical, seven_day: null, fable: null } },
+    } as never)
+  })
+  await settle()
+  const chipWithoutRun = row('b1').querySelector<HTMLElement>('.bot-quota-chip.crit')!
+  assert.ok(chipWithoutRun, '無 run 時仍應顯示 critical 晶片')
+  assert.ok(chipWithoutRun.title.includes('cc1'), `title 應含 cc1: ${chipWithoutRun.title}`)
+})
+
 /** 側欄底部「新增 Bot」開哪個專案的表單（#1085）：選著 bot 就用那顆 bot 所在的專案，不是清單第一個。 */
 const addBotButton = () => [...document.querySelectorAll<HTMLButtonElement>('.sidebar-foot-actions button')].find((b) => b.textContent?.trim() === '新增 Bot')!
 const sheetProject = () => document.querySelector('.modal .modal-sub')?.textContent
