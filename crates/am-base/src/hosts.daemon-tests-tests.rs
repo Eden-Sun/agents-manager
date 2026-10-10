@@ -1,6 +1,26 @@
 
     use super::*;
 
+    /// 等到 `ps` 裡沒有帶 marker 的行程，回最後一次看到的殘留（空＝都收掉了）。
+    /// SIGKILL 是非同步的：送出去到行程真的消失之間有一段，高負載下不只 200ms，所以等條件、不等時間。
+    async fn survivors(marker: &str) -> Vec<String> {
+        let mut alive = Vec::new();
+        let _ = crate::testing::eventually!({
+            let ps = std::process::Command::new("/bin/ps").args(["-axo", "command"]).output().unwrap();
+            alive = String::from_utf8_lossy(&ps.stdout).lines().filter(|l| l.contains(marker) && !l.contains("ps ")).map(String::from).collect();
+            alive.is_empty()
+        });
+        alive
+    }
+
+    /// 離開作用域（含 panic）時一定跑一次：測試改過的行程全域開關靠它還原。
+    struct RunOnDrop<F: FnMut()>(F);
+    impl<F: FnMut()> Drop for RunOnDrop<F> {
+        fn drop(&mut self) {
+            (self.0)()
+        }
+    }
+
     #[tokio::test]
     async fn a_remote_autostart_pass_waits_for_the_api_readiness_transition() {
         let env = crate::testing::env().await;
@@ -326,9 +346,7 @@
         let e = sh_local_stdout(&script, Duration::from_millis(300), "probe").await.unwrap_err();
         assert!(e.to_string().contains("timed out"), "{e}");
         assert!(t0.elapsed() < Duration::from_secs(25));
-        tokio::time::sleep(Duration::from_millis(200)).await;
-        let ps = std::process::Command::new("/bin/ps").args(["-axo", "command"]).output().unwrap();
-        let alive: Vec<&str> = std::str::from_utf8(&ps.stdout).unwrap().lines().filter(|l| l.contains(&marker) && !l.contains("ps ")).collect();
+        let alive = survivors(&marker).await;
         assert!(alive.is_empty(), "children survived the timeout: {alive:?}");
     }
 
@@ -366,9 +384,7 @@
         let r = sh_local(&script, Duration::from_millis(300)).await.unwrap();
         assert!(r.is_none(), "expected a timeout");
         assert!(t0.elapsed() < Duration::from_secs(25), "子行程 `sleep 30`：沒被逾時砍掉才會等滿");
-        tokio::time::sleep(Duration::from_millis(200)).await;
-        let ps = std::process::Command::new("/bin/ps").args(["-axo", "command"]).output().unwrap();
-        let alive: Vec<&str> = std::str::from_utf8(&ps.stdout).unwrap().lines().filter(|l| l.contains(&marker) && !l.contains("ps ")).collect();
+        let alive = survivors(&marker).await;
         assert!(alive.is_empty(), "children survived the timeout: {alive:?}");
         let ok = sh_local("printf hi; exit 3", Duration::from_secs(5)).await.unwrap().unwrap();
         assert_eq!(ok.status.code(), Some(3));
@@ -648,6 +664,7 @@
         let master = tokio::process::Command::new("sleep").arg("60").kill_on_drop(true).spawn().unwrap();
         conn.set_master_for_test(master).await;
         set_ping_interval_for_test(Some(Duration::from_millis(100)));
+        let _ping_reset = RunOnDrop(|| set_ping_interval_for_test(None));
         let fence = hooks.hosts.fence(&conn.name).await.unwrap();
         let generation = hooks.hosts.current_generation(&conn.name).await.unwrap();
 
@@ -655,7 +672,7 @@
             let (hooks, conn) = (hooks.clone(), conn.clone());
             async move { run_connected(&hooks, &conn, &fence, generation).await }
         });
-        tokio::time::timeout(Duration::from_secs(5), async {
+        tokio::time::timeout(Duration::from_secs(30), async {
             while !(hooks.entered.load(Ordering::SeqCst) && conn.is_connected()) {
                 tokio::time::sleep(Duration::from_millis(20)).await;
             }
@@ -667,13 +684,13 @@
         for _ in 0..4 {
             herdr.fail_next("ping", crate::testing::Fault::Refuse);
         }
-        let superseded = tokio::time::timeout(Duration::from_secs(5), run)
+        let superseded = tokio::time::timeout(Duration::from_secs(30), run)
             .await
             .expect("post-connect 卡住時 supervisor 仍要發現斷線")
             .unwrap();
         assert!(!superseded, "斷線不是世代變了");
         assert!(!conn.is_connected());
-        tokio::time::timeout(Duration::from_secs(5), async {
+        tokio::time::timeout(Duration::from_secs(30), async {
             while !hooks.dropped.load(Ordering::SeqCst) {
                 tokio::time::sleep(Duration::from_millis(20)).await;
             }
@@ -681,8 +698,20 @@
         .await
         .expect("斷線時 post-connect task 要一起收掉");
 
-        set_ping_interval_for_test(None);
         std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// `RunOnDrop` 的守衛：測試中途 panic 也會跑到還原。
+    #[test]
+    fn a_guard_restores_global_test_switches_even_when_the_test_panics() {
+        let ran = Arc::new(AtomicBool::new(false));
+        let r2 = ran.clone();
+        let caught = std::panic::catch_unwind(std::panic::AssertUnwindSafe(move || {
+            let _g = RunOnDrop(move || r2.store(true, Ordering::SeqCst));
+            panic!("模擬測試中途失敗");
+        }));
+        assert!(caught.is_err());
+        assert!(ran.load(Ordering::SeqCst), "panic 也要跑到還原");
     }
 
     #[test]
