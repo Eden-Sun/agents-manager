@@ -945,6 +945,30 @@ mod tests {
         assert_eq!(n, 1, "AGM inbox 有一則 intent_failed");
     }
 
+    /// #1060：補做失敗、而且失敗記不下來：intent 停在這顆 boot 的 running。同一顆 daemon 之後的重試要續做，不能當成「別人收了」就安靜結束。
+    #[tokio::test]
+    async fn a_promote_whose_failure_cannot_be_recorded_is_still_retried_by_the_same_boot() {
+        use crate::runners::restart_intents::Outcome;
+        let r = rig(true).await;
+        die_at(&r, "promote_after_stop").await;
+        let _ = std::fs::remove_file(r.dest());
+        straddle_the_seed(&r);
+        sqlx::query("CREATE TRIGGER am_test_refuse_pending BEFORE UPDATE OF status ON intents WHEN OLD.status = 'running' AND NEW.status = 'pending' BEGIN SELECT RAISE(ABORT, 'injected'); END")
+            .execute(&r.e.app.db)
+            .await
+            .unwrap();
+        let app2 = crate::testing::restart_app(&r.e).await;
+        let id: String = sqlx::query_scalar("SELECT id FROM intents WHERE subject_id = ? AND kind = 'promote'").bind(&r.child).fetch_one(&app2.db).await.unwrap();
+
+        assert!(matches!(crate::promote_intents::drive_once(&app2, &id).await, Outcome::Retry(_)));
+        assert_eq!(intent_status(&app2, &r.child).await, vec!["running"]);
+        assert!(matches!(crate::promote_intents::drive_once(&app2, &id).await, Outcome::Retry(_)), "同一顆 boot 的下一輪要續做，不是 Finished");
+
+        sqlx::query("DROP TRIGGER am_test_refuse_pending").execute(&app2.db).await.unwrap();
+        assert!(matches!(crate::promote_intents::drive_once(&app2, &id).await, Outcome::Retry(_)));
+        assert_eq!(intent_status(&app2, &r.child).await, vec!["pending"], "失敗記下來了，之後照 MAX_ATTEMPTS 收斂");
+    }
+
     /// 種 run 取了時間戳之後停 5ms 再寫：跨過毫秒邊界是確定的，不靠整樹負載碰運氣。
     fn straddle_the_seed(r: &Rig) {
         lifecycle::race_point::arm("promote_seed", &r.child, || async { tokio::time::sleep(std::time::Duration::from_millis(5)).await });
