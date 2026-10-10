@@ -213,13 +213,19 @@ pub fn ensure_same_generation(s: &crate::mission::store::Snapshot, verified_gene
 /// 任務停在「輪到 AGM」多久沒動靜就叫醒它。
 pub const STALL_SECS: i64 = 600;
 
+/// 距離上一輪滿 60 秒就再掃；時鐘往回跳（差是負的）也照掃，不等牆上時鐘追上來。
+fn sweep_due(last_unix: i64, now_unix: i64) -> bool {
+    let since = now_unix - last_unix;
+    since < 0 || since >= 60
+}
+
 static LAST_SWEEP: std::sync::atomic::AtomicI64 = std::sync::atomic::AtomicI64::new(0);
 
 /// controller 每個 tick 呼叫；自己節流成一分鐘一次。
 pub async fn wake_stalled(app: &impl crate::capabilities::Db) {
     let now = chrono::Utc::now();
     let last = LAST_SWEEP.load(std::sync::atomic::Ordering::Relaxed);
-    if now.timestamp() - last < 60 {
+    if !sweep_due(last, now.timestamp()) {
         return;
     }
     LAST_SWEEP.store(now.timestamp(), std::sync::atomic::Ordering::Relaxed);
@@ -592,6 +598,14 @@ mod tests {
         // 暫停中：在等人，不叫 AGM。
         crate::mission::store::pause(&app.db, &id, "clarify", None).await.unwrap();
         assert!(wake_stalled_at(app, much_later + chrono::Duration::seconds(6 * STALL_SECS)).await.is_empty(), "暫停中");
+    }
+
+    #[test]
+    fn the_stall_sweep_throttle_survives_a_clock_that_moved_back() {
+        assert!(sweep_due(0, 1_000), "第一次一定掃");
+        assert!(!sweep_due(1_000, 1_030), "不到一分鐘不掃");
+        assert!(sweep_due(1_000, 1_060), "滿一分鐘就掃");
+        assert!(sweep_due(1_000, 400), "時鐘往回跳 10 分鐘不能讓巡邏停 10 分鐘");
     }
 
     fn roles_of(kind: &str) -> (crate::supervisor::roles::Role, bool) {
