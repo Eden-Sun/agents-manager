@@ -10,7 +10,18 @@ import type { Bot, Project } from '../api/types.ts'
 const { useStore } = await import('./store.ts')
 
 const json = (body: unknown, status = 200) => new Response(JSON.stringify(body), { status })
-const settle = () => new Promise((r) => setTimeout(r, 40))
+/**
+ * 等條件成立：每一輪讓微任務與 setImmediate 跑完，最多 `rounds` 輪；不靠時間（#1428）。
+ * 等不到就帶上 `what` 失敗，不會像固定 40ms 那樣在負載高時假紅。
+ */
+async function settleUntil(cond: () => boolean, what: string, rounds = 200) {
+  for (let i = 0; i < rounds; i++) {
+    if (cond()) return
+    await new Promise<void>((resolve) => setImmediate(resolve))
+  }
+  assert.fail(`等不到：${what}`)
+}
+const messagesRequested = (botId: string) => () => requests.some((r) => r.path.includes(`/bots/${botId}/messages`))
 const project = () => ({ id: 'p1', label: 'p', path: '/p', host: 'local' }) as Project
 const bot = (id: string) => ({ id, name: id, project_id: 'p1', kind: 'claude', identity: null }) as Bot
 const shell = { host: 'local', paneId: 'w1:p1', cwd: '' }
@@ -55,7 +66,7 @@ test('群組畫面上 addBot：選到新 bot 並離開群組', async () => {
   route('b2')
   seed({ selectedProjectId: 'p1', rightTab: 'terminal', settingsBotId: 'b1' })
   await useStore.getState().addBot('p1', { name: 'x', kind: 'claude', identity: null } as never)
-  await settle()
+  await settleUntil(messagesRequested('b2'), '新 bot 的對話請求')
   expectArrivedAt('b2')
 })
 
@@ -63,7 +74,7 @@ test('整頁 shell 開著時 forkBot：shellView 清掉、切到 fork 出的 bot
   route('b2')
   seed({ shellView: shell })
   await useStore.getState().forkBot('b1')
-  await settle()
+  await settleUntil(messagesRequested('b2'), '新 bot 的對話請求')
   expectArrivedAt('b2')
 })
 
@@ -71,7 +82,7 @@ test('終端分頁開著時 cloneBot：新 bot 不會開在終端分頁', async 
   route('b2')
   seed({ rightTab: 'terminal' })
   await useStore.getState().cloneBot('b1')
-  await settle()
+  await settleUntil(messagesRequested('b2'), '新 bot 的對話請求')
   expectArrivedAt('b2')
 })
 
@@ -79,6 +90,6 @@ test('設定卡開著時 promoteBot：settingsBotId 清掉、切到升級後的 
   route('b2')
   seed({ settingsBotId: 'b1', selectedProjectId: 'p1' })
   await useStore.getState().promoteBot('b1')
-  await settle()
+  await settleUntil(messagesRequested('b2'), '新 bot 的對話請求')
   expectArrivedAt('b2')
 })
