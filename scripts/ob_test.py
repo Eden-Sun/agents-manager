@@ -294,6 +294,14 @@ class OperatorTests(unittest.TestCase):
     def config(self):
         return dict(claude_config_dir=str(Path.home() / ".claude"), claude_binary="/fake/claude", ego_binary="/fake/ego")
 
+    def stale_pre_send_retry(self):
+        self.ask()
+        job = self.s.claim()
+        operator.journal_for(self.s, job["id"]).write_text(json.dumps({
+            "phase": "opened", "project_id": job["project_id"], "page": "p1", "url": None,
+        }))
+        return job
+
     def test_environment_does_not_inherit_account_token_bot_model_or_session(self):
         with patch.dict(os.environ, {"AM_BOT_ID": "secret-bot", "AM_HOOK_TOKEN": "secret", "ANTHROPIC_API_KEY": "key",
                                     "CLAUDE_CONFIG_DIR": "/other-account", "CLAUDECODE": "session", "AM_MODEL": "fable"}):
@@ -328,6 +336,37 @@ class OperatorTests(unittest.TestCase):
             operator.operate(self.s, job, self.config())
         self.assertEqual(self.s.get(job["id"])["status"], "waiting_quota")
         self.assertEqual(proc.call_count, 1)
+
+    def test_a_stale_pre_send_journal_does_not_hide_a_quota_error(self):
+        job = self.stale_pre_send_retry()
+        with patch.object(operator, "run_process", return_value=(1, '{"is_error":true,"error":"rate_limit"}', "")):
+            operator.operate(self.s, job, self.config())
+        self.assertEqual(self.s.get(job["id"])["status"], "waiting_quota")
+        self.assertGreater(self.s.setting("retry_after", 0), 0)
+
+    def test_a_stale_pre_send_journal_does_not_hide_a_busy_browser(self):
+        job = self.stale_pre_send_retry()
+        with patch.object(operator, "run_process", return_value=(1, operator.BUSY_MARK, "")):
+            operator.operate(self.s, job, self.config())
+        row = self.s.get(job["id"])
+        self.assertEqual(row["status"], "pending")
+        self.assertIn("放回佇列", row["error"])
+
+    def test_a_stale_pre_send_journal_does_not_hide_a_browser_that_is_not_running(self):
+        job = self.stale_pre_send_retry()
+        with patch.object(operator, "run_process", return_value=(1, operator.BROWSER_NOT_RUNNING_MARK, "")):
+            operator.operate(self.s, job, self.config())
+        row = self.s.get(job["id"])
+        self.assertEqual(row["status"], "failed")
+        self.assertTrue(row["error"].startswith(operator.BROWSER_NOT_RUNNING_MARK))
+
+    def test_a_stale_pre_send_journal_still_reports_an_unclassified_failure(self):
+        job = self.stale_pre_send_retry()
+        with patch.object(operator, "run_process", return_value=(1, "", "")):
+            operator.operate(self.s, job, self.config())
+        row = self.s.get(job["id"])
+        self.assertEqual(row["status"], "failed")
+        self.assertIn("還沒送出就失敗", row["error"])
 
     def test_a_busy_browser_waits_then_requeues_instead_of_failing(self):
         """`collect` 佔著瀏覽器時，worker 的請求不該被判成 failed 並叫人去查登入（review3 c4 L6）。"""
