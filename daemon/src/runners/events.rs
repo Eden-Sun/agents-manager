@@ -450,6 +450,16 @@ pub async fn repair_pending_statuses(app: &Arc<App>) -> usize {
             clear_status_repair_if(app, key, repair.gen);
             continue;
         }
+        // 移交出去的專案：這顆 daemon 不碰它的 pane，連讀都不讀（SPEC §6.5h）；登記一起丟掉（#1409）。讀不到就留到下一輪。
+        let Some(run) = runs.first() else { continue };
+        match app.db.bot_handed_off_to(&run.bot_id).await {
+            Ok(None) => {}
+            Ok(Some(_)) => {
+                clear_status_repair_if(app, key, repair.gen);
+                continue;
+            }
+            Err(_) => continue,
+        }
         let Some(client) = app.herdr_for_session(host, session).await else { continue };
         resync_pane_status(app, &client, host, session, pane_id).await;
     }
@@ -530,6 +540,8 @@ async fn handle_status_try(app: &Arc<App>, host: &str, session: &str, ev: &crate
         }
     };
     let Some(run) = runs.into_iter().next() else {
+        // pane 上沒有 run：沒有東西可修，登記一起丟掉（#1409）。
+        clear_status_repair(app, &key);
         return;
     };
     let status = if reported_status == "unknown"
@@ -543,7 +555,11 @@ async fn handle_status_try(app: &Arc<App>, host: &str, session: &str, ev: &crate
     // #708：移交出去的專案，狀態、外部回合、備援、通知 parent 都歸接手的 daemon。讀不到就照「讀不到 run」重放。
     match app.db.bot_handed_off_to(&run.bot_id).await {
         Ok(None) => {}
-        Ok(Some(_)) => return,
+        Ok(Some(_)) => {
+            // 移交出去的專案不欠這顆 daemon 任何狀態：之前登記的修復一起丟掉（#708、#1409）。
+            clear_status_repair(app, &key);
+            return;
+        }
         Err(e) => {
             tracing::warn!(host, pane_id, status = %status, error = ?e, "could not tell whether a pane's project was handed off; replaying it shortly");
             mark_status_repair(app, &key, Some(&run.id));

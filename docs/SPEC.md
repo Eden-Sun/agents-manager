@@ -2340,7 +2340,7 @@ pane 沒有立即影響。等這套機制在正式環境跑穩，`cargo-slot.sh`
 - **對帳**（§6.5）：逐 bot 迴圈整顆跳過——不建 run、不收編、不結束 run、不退役 child；不清它的 `projects.workspace_id`；
   結束的 run 留下的 pane 不當孤兒關。它的 agent（名字、活著的 run 的 pane／tab、它的 workspace 對得上）**不是任何 bot 的
   新 child**（§6.5a），它自己也不當父候選。`workspace.closed` 事件同樣不清它的映射；pane 狀態事件整則略過（狀態、外部回合、
-  備援、通知 parent 都不做）。
+  備援、通知 parent 都不做）；pane 狀態修復（#1293）欠著的登記也一起丟掉，定時修復迴圈對它不打 herdr RPC（#1409）。
 - **收口的寫入**：`mark_run_exited` 對它回 `AlreadyEnded`（什麼都不寫；pane 關閉事件、dead-pane 巡邏、default session 都經過它），
   `child_retire` 的隱式退役回 `HandedOff`（不軟刪）。
 - **不操作**：start／stop／restart 與 prompt 回 409 `handed_off`（閒置回收、一鍵重啟、codex 升級後的重啟都經過 stop／start，
