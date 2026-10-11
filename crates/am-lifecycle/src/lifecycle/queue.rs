@@ -11,11 +11,16 @@ use super::send_now::ports::{MaintenancePort, SupervisorSendRepo};
 /// the turn queued; after the claim, any give-up must put it back or fail it — `in_flight` +
 /// `delivery='pending'` has no other way out. 那一句寫不進去就記成欠著（`owed_delivery`），回 `Err`（#158）。
 pub async fn flush_queued_locked<C: QueueContext>(app: &C, bot_id: &str) -> anyhow::Result<()> {
+    let failures_before = read_failure_count(bot_id);
     let res = flush_queued_inner(app, bot_id).await;
-    if res.is_err() {
+    if res.is_err() && read_failure_count(bot_id) == failures_before {
         // #1361：任何一步讀寫不到，這一則還在佇列（或已記成欠著），但閒著的 bot 沒有 `working -> idle` 邊會再叫醒 flush——
         // 留一個短 timer。`arm_queue_retry` 自己去重，已經掛了更早的就不會疊。
-        schedule_flush_retry(app, bot_id, WITHDRAWAL_RECHECK);
+        schedule_read_failure_retry(app, bot_id, WITHDRAWAL_RECHECK);
+    }
+    // 這一輪沒有再排讀取重試：讀得到了，連續失敗的次數歸零（#1431）。
+    if read_failure_count(bot_id) == failures_before {
+        forget_read_failures(bot_id);
     }
     res
 }
@@ -30,7 +35,7 @@ async fn flush_queued_inner<C: QueueContext>(app: &C, bot_id: &str) -> anyhow::R
         }
         Err(e) => {
             tracing::warn!(bot = %bot_id, error = %e, "讀不到專案是否已移交：排著的 prompt 留在佇列，稍後重新判斷");
-            schedule_flush_retry(app, bot_id, std::time::Duration::from_secs(<C as MaintenancePort>::UNREADABLE_RETRY_SECS as u64));
+            schedule_read_failure_retry(app, bot_id, std::time::Duration::from_secs(<C as MaintenancePort>::UNREADABLE_RETRY_SECS as u64));
             return Ok(());
         }
     }
@@ -39,7 +44,7 @@ async fn flush_queued_inner<C: QueueContext>(app: &C, bot_id: &str) -> anyhow::R
         Err(error) => {
             tracing::warn!(error = ?error, bot = %bot_id, "could not get conversation for queued prompt flush");
             // #1361：讀不到對話也留一個短 timer：閒著的 bot 沒有邊會再叫醒它，這一則不能躺到保險絲。
-            schedule_flush_retry(app, bot_id, WITHDRAWAL_RECHECK);
+            schedule_read_failure_retry(app, bot_id, WITHDRAWAL_RECHECK);
             return Ok(());
         }
     };
@@ -58,14 +63,14 @@ async fn flush_queued_inner<C: QueueContext>(app: &C, bot_id: &str) -> anyhow::R
         Ok(None) => {}
         Ok(Some(why)) => {
             if let Err(e) = revoke_queued_turn(app, &turn.id, &why).await {
-                schedule_flush_retry(app, bot_id, WITHDRAWAL_RECHECK);
+                schedule_read_failure_retry(app, bot_id, WITHDRAWAL_RECHECK);
                 return Err(e.context("交辦已經不要了，排著的這一則卻撤不掉：留在佇列，稍後再撤"));
             }
             return Ok(());
         }
         Err(e) => {
             tracing::warn!(bot = %bot_id, turn = %turn.id, error = %e, "讀不到交辦是否已撤回：排著的 prompt 留在佇列，稍後重新判斷");
-            schedule_flush_retry(app, bot_id, WITHDRAWAL_RECHECK);
+            schedule_read_failure_retry(app, bot_id, WITHDRAWAL_RECHECK);
             return Err(e.context("讀不到交辦是否已撤回：排著的 prompt 留在佇列"));
         }
     }
@@ -119,7 +124,7 @@ async fn flush_queued_inner<C: QueueContext>(app: &C, bot_id: &str) -> anyhow::R
         }
         Err(_) => {
             tracing::warn!(bot = %bot_id, turn = %turn.id, "維護窗口狀態讀不到：排隊的 prompt 留在佇列，稍後重新判斷");
-            schedule_flush_retry(app, bot_id, std::time::Duration::from_secs(<C as MaintenancePort>::UNREADABLE_RETRY_SECS as u64));
+            schedule_read_failure_retry(app, bot_id, std::time::Duration::from_secs(<C as MaintenancePort>::UNREADABLE_RETRY_SECS as u64));
             return Ok(());
         }
     }
@@ -136,7 +141,7 @@ async fn flush_queued_inner<C: QueueContext>(app: &C, bot_id: &str) -> anyhow::R
         Ok(false) => {}
         Ok(true) => return Ok(()),
         Err(e) => {
-            schedule_flush_retry(app, bot_id, WITHDRAWAL_RECHECK);
+            schedule_read_failure_retry(app, bot_id, WITHDRAWAL_RECHECK);
             return Err(e.context("續行提示該撤卻撤不掉：留在佇列，稍後再撤"));
         }
     }
@@ -187,7 +192,7 @@ async fn flush_queued_inner<C: QueueContext>(app: &C, bot_id: &str) -> anyhow::R
         other => {
             tracing::info!(bot = %bot_id, turn = %turn.id, run = %run.id, ?other, "排隊的 prompt 沒認領到：留在佇列");
             if matches!(other, super::turn_controller::Outcome::Fenced(_)) {
-                schedule_flush_retry(app, bot_id, WITHDRAWAL_RECHECK);
+                schedule_read_failure_retry(app, bot_id, WITHDRAWAL_RECHECK);
             }
             return Ok(());
         }
@@ -410,6 +415,34 @@ async fn defer_queued_turn(
 
 /// 讀不到交辦、或排著的那一則撤不掉時，flush 多久之後再判斷一次（同維護窗口讀不到的那一條，#127）。
 const WITHDRAWAL_RECHECK: std::time::Duration = std::time::Duration::from_secs(10);
+
+/// 連續讀不到的次數（每顆 bot，只在記憶體）：重排的間隔跟著加倍（#1431）。flush 讀得到、沒再排重試就歸零。
+static QUEUE_READ_FAILURES: std::sync::OnceLock<std::sync::Mutex<std::collections::HashMap<String, u32>>> = std::sync::OnceLock::new();
+/// 讀不到時重排的間隔上限（#1431）：5 分鐘。DB 真的壞很久，就每 5 分鐘試一次，不是每 10 秒。
+const QUEUE_READ_RETRY_CAP: std::time::Duration = std::time::Duration::from_secs(300);
+
+fn read_failure_count(bot_id: &str) -> u32 {
+    QUEUE_READ_FAILURES.get_or_init(Default::default).lock().ok().and_then(|m| m.get(bot_id).copied()).unwrap_or(0)
+}
+
+fn forget_read_failures(bot_id: &str) {
+    if let Ok(mut m) = QUEUE_READ_FAILURES.get_or_init(Default::default).lock() {
+        m.remove(bot_id);
+    }
+}
+
+/// 讀不到東西就排一次重試：`base` 起、每次加倍、上限 [`QUEUE_READ_RETRY_CAP`]（#1431）。
+fn schedule_read_failure_retry<C: QueueContext>(app: &C, bot_id: &str, base: std::time::Duration) {
+    let Ok(mut m) = QUEUE_READ_FAILURES.get_or_init(Default::default).lock() else {
+        schedule_flush_retry(app, bot_id, base);
+        return;
+    };
+    let c = m.entry(bot_id.to_string()).or_insert(0);
+    *c = c.saturating_add(1);
+    let shift = (*c - 1).min(16);
+    drop(m);
+    schedule_flush_retry(app, bot_id, base.saturating_mul(1u32 << shift).min(QUEUE_READ_RETRY_CAP));
+}
 
 /// 掛著這些狀態的交辦，它排著的那一則不送（[`assignment_withdrawal`]；`turn_controller::claim_queued` 認領時也看這張表）。
 pub const WITHDRAWN_ASSIGNMENT: [&str; 5] = ["cancelled", "superseded", "failed", "blocked", "quota_blocked"];
