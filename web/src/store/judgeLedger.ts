@@ -14,6 +14,8 @@ const MIN_GAP_MS = 60_000
 let trailing: ReturnType<typeof setTimeout> | null = null
 /** 抓到一半又來了事件：抓完後補抓一次。 */
 let pendingAfterFlight = false
+/** 抓到一半被要求強制重抓（儲存 Jev）：抓完立刻再抓一次，不等 60 秒（#1426）。 */
+let pendingForce = false
 /** 最近一次 refresh 看到的時間；補抓的延遲從它算起（測試注入時就是注入的時間）。 */
 let lastSeen = 0
 
@@ -47,7 +49,9 @@ export const useJudgeLedger = create<JudgeLedgerState>((set, get) => ({
     const now = opts?.now ?? Date.now()
     lastSeen = now
     if (get().inFlight) {
-      pendingAfterFlight = true
+      // 強制重抓不能被「抓取中」吞掉：記下來，抓完立刻做（#1426）。一般事件只排節流後的補抓。
+      if (opts?.force) pendingForce = true
+      else pendingAfterFlight = true
       return
     }
     if (!opts?.force && now - get().lastFetchAt < MIN_GAP_MS) {
@@ -68,7 +72,11 @@ export const useJudgeLedger = create<JudgeLedgerState>((set, get) => ({
       set({ rows: [], visible: false })
     } finally {
       set({ inFlight: false })
-      if (pendingAfterFlight) {
+      if (pendingForce) {
+        pendingForce = false
+        pendingAfterFlight = false
+        void get().refresh({ force: true, now: lastSeen })
+      } else if (pendingAfterFlight) {
         pendingAfterFlight = false
         scheduleAt(get().lastFetchAt + MIN_GAP_MS)
       }
@@ -82,6 +90,7 @@ export function resetJudgeLedgerForTest(): void {
   if (trailing !== null) clearTimeout(trailing)
   trailing = null
   pendingAfterFlight = false
+  pendingForce = false
   lastSeen = 0
   useJudgeLedger.setState({ rows: [], visible: false, lastFetchAt: 0, inFlight: false })
 }

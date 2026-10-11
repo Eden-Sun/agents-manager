@@ -180,3 +180,33 @@ test('沒有被擋下的事件就不排補抓', async () => {
     restore()
   }
 })
+
+test('抓取中的強制重抓（儲存 Jev）抓完後立刻再抓一次，不等 60 秒（#1426）', async () => {
+  const stub = stubShadow()
+  let release!: () => void
+  stub.gate = new Promise<void>((resolve) => {
+    release = resolve
+  })
+  const { clock, restore } = installManualClockTimers()
+  try {
+    resetJudgeLedgerForTest()
+    await clock.advance(START)
+    const first = useJudgeLedger.getState().refresh({ now: clock.now() })
+    await drain()
+    assert.equal(stub.hits, 1, '第一趟卡在 gate 上')
+    // 抓取中儲存 Jev：這一趟是 force，不能被「抓取中」吞掉。
+    await useJudgeLedger.getState().refresh({ now: clock.now(), force: true })
+
+    release()
+    await first
+    await drain()
+    assert.equal(stub.hits, 2, '抓完後立刻補上那一次強制重抓，時鐘沒有推進')
+
+    await clock.advance(60_000)
+    await drain()
+    assert.equal(stub.hits, 2, '只補一次，之後沒有多餘的補抓')
+  } finally {
+    resetJudgeLedgerForTest()
+    restore()
+  }
+})
