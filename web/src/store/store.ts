@@ -1002,9 +1002,7 @@ export const useStore = create<StoreState>((set, get) => {
       return
     }
     connectSocket(set, get)
-    void loadUpstreamUpdates(() => api.rawTransport.request('GET', '/upstream-updates'), get().notify, (item) => {
-      set((s) => ({ upstreamUpdates: { ...s.upstreamUpdates, [item.kind]: item } }))
-    })
+    reloadUpstreamUpdates(set, get)
     void get().loadQuota()
     void get().loadMem()
     void draftSync.load().catch(() => {})
@@ -2973,6 +2971,14 @@ export function dispatchFrameForTest(frame: { seq?: number; type: string; data?:
   handleFrame(boundSet, boundGet, frame)
 }
 
+/// 上游更新（claude/codex/grok/herdr「有新版、磁碟上還沒有」）整份重抓（#1340）：WS `upstream_update` 只在快照有變時推，
+/// 斷線期間漏掉的沒有別的來源會補。`loadUpstreamUpdates` 每個版本每個瀏覽器只跳一次，重抓不會重複吵。
+function reloadUpstreamUpdates(set: SetFn, get: GetFn) {
+  void loadUpstreamUpdates(() => api.rawTransport.request('GET', '/upstream-updates'), get().notify, (item) => {
+    set((s) => ({ upstreamUpdates: { ...s.upstreamUpdates, [item.kind]: item } }))
+  })
+}
+
 function connectSocket(set: SetFn, get: GetFn) {
   disconnect?.()
   disconnect = api.openSocket({
@@ -2996,6 +3002,8 @@ function connectSocket(set: SetFn, get: GetFn) {
         void draftSync.load().catch(() => {})
         // 身分停用只靠事件更新；第一次連上由 `refreshState` 抓，重連要整份重抓（斷線期間的事件不一定補得回來）。
         if (openedBefore) void get().loadIdentityPrefs()
+        // 上游更新也一樣：斷線期間 daemon 推的 `upstream_update` 可能漏掉（#1340）。
+        if (openedBefore) reloadUpstreamUpdates(set, get)
         // pane 清單（側欄「其他 pane」）靠 `panes_changed` 事件＋30 秒輪詢：斷線期間漏掉的事件要馬上補，不等下一輪輪詢。
         if (openedBefore) void get().refreshPanes()
         // 總管狀態與分享連結只靠事件計數通知元件重抓：斷線期間漏掉的事件要讓開著的元件各自重抓（#1213）。
@@ -3080,6 +3088,7 @@ const resyncTrigger = (() => {
       await get().loadQuota()
       // 只靠 WS 事件維持的兩份：漏掉的事件沒有別的來源會補（`identity_prefs_changed`、`draft_updated`）。
       void get().loadIdentityPrefs()
+      reloadUpstreamUpdates(set, get)
       void draftSync.load().catch(() => {})
       void get().refreshPanes()
       for (const botId of botIdsNeedingConversationReload(get)) await get().loadMessages(botId)
