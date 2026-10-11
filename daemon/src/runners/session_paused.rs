@@ -54,13 +54,7 @@ async fn observe_with(app: &Arc<App>, run: &db::Run, open: bool, label: Option<&
             return; // herdr 自己判的（或已經補過）：不動。
         }
         let prev = run.agent_status.clone();
-        let marked = sqlx::query("UPDATE runs SET agent_status='blocked' WHERE id=? AND agent_status=?")
-            .bind(&run.id)
-            .bind(&prev)
-            .execute(&app.db)
-            .await
-            .map(|r| r.rows_affected() == 1)
-            .unwrap_or(false);
+        let marked = db::compare_and_set_running_run_agent_status(&app.db, run, &prev, "blocked").await.unwrap_or(false);
         if marked {
             record_forced(&run.id, prev, label);
             tracing::warn!(run = %run.id, bot = %run.bot_id, dialog = label, "停在等人回答的選單／對話框：補標 blocked，等使用者自己選（不自動按）");
@@ -83,13 +77,9 @@ async fn observe_with(app: &Arc<App>, run: &db::Run, open: bool, label: Option<&
         None
     };
     // 只還我們自己標的那個 blocked：這段期間 herdr 已經報了別的狀態就是它的，不蓋。
-    let restored = sqlx::query("UPDATE runs SET agent_status=? WHERE id=? AND agent_status='blocked'")
-        .bind(&prev)
-        .bind(&run.id)
-        .execute(&app.db)
-        .await;
+    let restored = db::compare_and_set_running_run_agent_status(&app.db, run, "blocked", &prev).await;
     match restored {
-        Ok(r) if r.rows_affected() == 1 => {
+        Ok(true) => {
             retire(&run.id, epoch);
             app.emit_bot_status(&run.bot_id).await;
             app.schedule_flush_queued(&run.bot_id);
@@ -98,7 +88,7 @@ async fn observe_with(app: &Arc<App>, run: &db::Run, open: bool, label: Option<&
             }
         }
         // 已經不是 blocked（herdr／別的路徑改過）或 run 不在了：被取代，補標記沒有要還的東西了。
-        Ok(_) => retire(&run.id, epoch),
+        Ok(false) => retire(&run.id, epoch),
         // 寫不進去：補標記留著，下一輪巡邏（`is_forced`）重試；DB 仍是 blocked，不發狀態、不叫 flush。
         Err(e) => tracing::warn!(run = %run.id, bot = %run.bot_id, error = %e, "Session paused 還原寫入失敗，下一輪巡邏重試"),
     }
@@ -159,6 +149,25 @@ mod tests {
         for m in ["pane.send_keys", "pane.send_text", "agent.prompt"] {
             assert!(e.herdr.calls_to(m).is_empty(), "不能替使用者選：{m}");
         }
+    }
+
+    #[tokio::test]
+    async fn stale_dialog_observation_does_not_mutate_ended_run() {
+        let _serial = serial().await;
+        let e = tt::env().await;
+        let app = e.app.clone();
+        let bot = tt::claude_bot(&app, &e.project_id, "paused-stale-run").await;
+        let old_id = tt::fake_run(&app, &bot.id).await;
+        let old = run_of(&app, &old_id).await;
+        sqlx::query("UPDATE runs SET state='stopped' WHERE id=?").bind(&old_id).execute(&app.db).await.unwrap();
+        let current_id = tt::fake_run(&app, &bot.id).await;
+
+        observe_screen(&app, &old, SESSION_PAUSED).await;
+
+        assert_eq!(run_of(&app, &old_id).await.agent_status, "idle", "ended run must not be synthetically blocked");
+        assert_eq!(run_of(&app, &current_id).await.agent_status, "idle", "new run remains untouched");
+        assert!(!is_forced(&old_id), "stale screen must not create restore work");
+        assert_eq!(crate::lifecycle::take_scheduled_flush_count(&bot.id), 0, "stale screen must not wake queued work");
     }
 
     /// 2026-09-26：選單關掉、還原成 idle，而那一回合沒有回覆——不留「等待中」到 5 分鐘後，馬上收掉。

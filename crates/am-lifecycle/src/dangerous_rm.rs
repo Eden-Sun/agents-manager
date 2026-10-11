@@ -117,20 +117,17 @@ pub async fn forget_ended(app: &impl crate::capabilities::Db, active: &[db::Run]
 pub async fn observe_screen(app: &(impl crate::capabilities::BotStatusEmit + crate::capabilities::Db + crate::capabilities::Emit + crate::events::ports::TurnCommands), run: &db::Run, screen: &str) {
     match crate::tui_prompts::dangerous_rm_prompt(screen) {
         Some(rm) => {
-            notify_once(app, run, &rm).await;
             if run.agent_status == "blocked" {
+                if db::compare_and_set_running_run_agent_status(app.db(), run, "blocked", "blocked").await.unwrap_or(false) {
+                    notify_once(app, run, &rm).await;
+                }
                 return;
             }
             // herdr 沒把它判成 blocked：補標，燈號與「需要回應」才會亮，一般送出也照 blocked 擋。
             let prev = run.agent_status.clone();
-            let marked = sqlx::query("UPDATE runs SET agent_status='blocked' WHERE id=? AND agent_status=?")
-                .bind(&run.id)
-                .bind(&prev)
-                .execute(app.db())
-                .await
-                .map(|r| r.rows_affected() == 1)
-                .unwrap_or(false);
+            let marked = db::compare_and_set_running_run_agent_status(app.db(), run, &prev, "blocked").await.unwrap_or(false);
             if marked {
+                notify_once(app, run, &rm).await;
                 if let Some(ep) = open().lock().unwrap().get_mut(&run.id) {
                     ep.forced_from.get_or_insert(prev);
                 }
@@ -149,22 +146,16 @@ pub async fn observe_screen(app: &(impl crate::capabilities::BotStatusEmit + cra
             };
 
             let (resolved, status_changed) = if let Some(previous) = &forced_from {
-                match sqlx::query("UPDATE runs SET agent_status=? WHERE id=? AND state='running' AND agent_status='blocked'")
-                    .bind(previous)
-                    .bind(&run.id)
-                    .execute(app.db())
-                    .await
-                {
-                    Ok(result) if result.rows_affected() == 1 => (true, true),
-                    Ok(_) => match sqlx::query_as::<_, (String, String)>("SELECT state, agent_status FROM runs WHERE id=?")
-                        .bind(&run.id)
-                        .fetch_optional(app.db())
-                        .await
-                    {
-                        Ok(Some((state, status))) => (state != "running" || status != "blocked", false),
-                        Ok(None) => (true, false),
+                match db::compare_and_set_running_run_agent_status(app.db(), run, "blocked", previous).await {
+                    Ok(true) => (true, true),
+                    Ok(false) => match db::is_current_running_run(app.db(), run).await {
+                        Ok(true) => (true, false),
+                        Ok(false) => {
+                            open().lock().unwrap().remove(&run.id);
+                            return;
+                        }
                         Err(error) => {
-                            tracing::warn!(run = %run.id, error = ?error, "could not verify synthetic Dangerous rm blocked status");
+                            tracing::warn!(run = %run.id, error = ?error, "could not verify current Dangerous rm run");
                             (false, false)
                         }
                     },
@@ -174,6 +165,10 @@ pub async fn observe_screen(app: &(impl crate::capabilities::BotStatusEmit + cra
                     }
                 }
             } else {
+                if !db::is_current_running_run(app.db(), run).await.unwrap_or(false) {
+                    open().lock().unwrap().remove(&run.id);
+                    return;
+                }
                 (true, false)
             };
             if !resolved {
@@ -253,6 +248,26 @@ mod tests {
         for m in ["pane.send_keys", "pane.send_text", "agent.prompt"] {
             assert!(e.herdr.calls_to(m).is_empty(), "不能替使用者按、也不能打字進框：{m}");
         }
+    }
+
+    #[tokio::test]
+    async fn stale_dialog_observation_does_not_mutate_ended_run() {
+        let _serial = serial().await;
+        let e = tt::env().await;
+        let app = e.app.clone();
+        let bot = tt::claude_bot(&app, &e.project_id, "rm-stale-run").await;
+        let old_id = tt::fake_run(&app, &bot.id).await;
+        let old = run_of(&app, &old_id).await;
+        sqlx::query("UPDATE runs SET state='stopped' WHERE id=?").bind(&old_id).execute(&app.db).await.unwrap();
+        let current_id = tt::fake_run(&app, &bot.id).await;
+
+        observe_screen(&app, &old, DANGEROUS_RM).await;
+
+        assert_eq!(run_of(&app, &old_id).await.agent_status, "idle", "ended run must not be synthetically blocked");
+        assert_eq!(run_of(&app, &current_id).await.agent_status, "idle", "new run remains untouched");
+        assert!(!is_open(&old_id), "stale screen must not create an episode");
+        assert!(system_messages(&app, &bot.id).await.is_empty(), "stale screen must not insert an alert");
+        assert_eq!(crate::lifecycle::take_scheduled_flush_count(&bot.id), 0, "stale screen must not wake queued work");
     }
 
     /// herdr 自己判成 blocked 的（常見情形）不補標，框關掉時也不去改——那是 herdr 的狀態，它會自己報下一個。
@@ -336,8 +351,8 @@ mod tests {
         assert_eq!(run.state, "exited");
         assert_eq!(run.agent_status, "blocked", "don't rewrite an ended run");
         assert!(!is_open(&run_id), "the ended run authoritatively resolves the restore debt");
-        assert_eq!(system_messages(&app, &bot.id).await.len(), 2);
-        assert_eq!(crate::lifecycle::take_scheduled_flush_count(&bot.id), 1);
+        assert_eq!(system_messages(&app, &bot.id).await.len(), 1, "an ended run gets no stale close message");
+        assert_eq!(crate::lifecycle::take_scheduled_flush_count(&bot.id), 0, "an ended run cannot wake the queue");
     }
 
     /// A failed restore is still owed: keep the episode for the next patrol, and don't announce

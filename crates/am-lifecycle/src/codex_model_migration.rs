@@ -165,6 +165,26 @@ mod tests {
         assert_eq!(messages, [WAITING_HINT, CLOSED_NOTE]);
     }
 
+    #[tokio::test]
+    async fn stale_dialog_observation_does_not_mutate_ended_run() {
+        let env = tt::env().await;
+        let bot = tt::claude_bot(&env.app, &env.project_id, "codex-migration-stale-run").await;
+        sqlx::query("UPDATE bots SET kind='codex' WHERE id=?").bind(&bot.id).execute(&env.app.db).await.unwrap();
+        let old_id = tt::fake_run(&env.app, &bot.id).await;
+        let old = run_of(&env.app, &old_id).await;
+        sqlx::query("UPDATE runs SET state='stopped' WHERE id=?").bind(&old_id).execute(&env.app.db).await.unwrap();
+        let current_id = tt::fake_run(&env.app, &bot.id).await;
+        let migration = include_str!("lifecycle/fixtures/codex-0.157-model-migration.txt");
+
+        observe_screen(&env.app, &old, migration).await;
+
+        assert_eq!(run_of(&env.app, &old_id).await.agent_status, "idle", "ended run must not be synthetically blocked");
+        assert_eq!(run_of(&env.app, &current_id).await.agent_status, "idle", "new run remains untouched");
+        assert!(!is_open(&old_id), "stale screen must not create an episode");
+        assert!(system_messages(&env.app, &bot.id).await.is_empty(), "stale screen must not insert an alert");
+        assert_eq!(crate::app_ports_p13::take_scheduled_flush_count(&bot.id), 0, "stale screen must not wake queued work");
+    }
+
     /// 啟動時的更新選單與 rate-limit 切換選單一樣擋住輸入列、要使用者本人選：herdr 判成 idle 時要補標 blocked、
     /// 在對話裡講原因（網頁看得到、知道去 pane 處理）、一個鍵都不按；選單關掉自動回到原本的狀態、補一句「已關閉」並放行排隊的訊息。
     #[tokio::test]
@@ -253,8 +273,8 @@ mod tests {
         assert_eq!(run.state, "exited");
         assert_eq!(run.agent_status, "blocked", "don't rewrite an ended run");
         assert!(!is_open(&run_id), "the ended run authoritatively resolves the restore debt");
-        assert_eq!(system_messages(&app, &bot.id).await, [WAITING_HINT, CLOSED_NOTE]);
-        assert_eq!(crate::app_ports_p13::take_scheduled_flush_count(&bot.id), 1);
+        assert_eq!(system_messages(&app, &bot.id).await, [WAITING_HINT], "an ended run gets no stale close message");
+        assert_eq!(crate::app_ports_p13::take_scheduled_flush_count(&bot.id), 0, "an ended run cannot wake the queue");
     }
 
     /// The restore marker is owed until SQLite commits it. A later patrol must retry before it
