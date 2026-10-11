@@ -424,6 +424,8 @@ export interface StoreState {
   turns: Record<string, Record<string, Turn>>
   messages: Record<string, Message[]>
   loadedBots: Record<string, boolean>
+  /** #1240：第一次載入失敗（還沒成功過）的對話，畫面給「重試」；重試成功就清掉。 */
+  messageLoadFailed: Record<string, true>
   /** issue #25：前面還有更早的（`has_more` 或被 `MESSAGE_CAP` 截掉）；key 是 bot id 或 project id。 */
   moreMessages: Record<string, boolean>
   /** issue #457：使用者按「載入更早的」之後這個對話的上限下緣（`store/messageCap.ts`）。 */
@@ -931,6 +933,7 @@ export const useStore = create<StoreState>((set, get) => {
   turns: {},
   messages: {},
   loadedBots: {},
+  messageLoadFailed: {},
   moreMessages: {},
   messageCapFloors: {},
   loadingMore: {},
@@ -1367,6 +1370,8 @@ export const useStore = create<StoreState>((set, get) => {
   clearOpenBotSheet: () => set({ openBotSheetFor: null }),
 
   async loadMessages(botId) {
+    // 重試時畫面回到轉圈（旗標先清）；成功或再次失敗才決定要不要換成重試鈕（#1240）。
+    if (get().messageLoadFailed[botId]) set((s) => ({ messageLoadFailed: withoutKey(s.messageLoadFailed, botId) }))
     try {
       const startedAt = new Date().toISOString()
       const page = await api.fetchMessages(botId)
@@ -1393,12 +1398,15 @@ export const useStore = create<StoreState>((set, get) => {
           messages: { ...s.messages, [botId]: reuseUnchanged(s.messages[botId] ?? [], kept.length > 0 ? sortByTime([...page.messages, ...kept]) : page.messages) },
           turns: { ...s.turns, [botId]: turns },
           loadedBots: { ...s.loadedBots, [botId]: true },
+          messageLoadFailed: withoutKey(s.messageLoadFailed, botId),
           moreMessages: { ...s.moreMessages, [botId]: page.has_more },
           messageCapFloors: clearFloor(s.messageCapFloors, botId),
         }
       })
       get().recountBot(botId)
     } catch (e) {
+      // 已經載入過的對話重載失敗不換畫面，照舊只跳通知（#1240）。
+      if (!get().loadedBots[botId]) set((s) => ({ messageLoadFailed: { ...s.messageLoadFailed, [botId]: true } }))
       get().notify('error', `載入訊息失敗：${errText(e)}`)
     }
   },
@@ -1921,6 +1929,7 @@ export const useStore = create<StoreState>((set, get) => {
       settleCreateRequest(reqKey)
       await get().refreshState()
       if (id) set({ selectedBotId: id })
+      if (id && !get().loadedBots[id]) void get().loadMessages(id)
       // 建的時候送到停用別名也會被換掉（API.md「停用模型的回應」）：一起講，不要讓人以為選的生效了（#539）。
       get().notify('info', remapped ? `已新增 Bot ${name}：「${remapped.from}」已停用，改用「${remapped.to}」` : `已新增 Bot ${name}`)
       return id || null
@@ -1994,6 +2003,7 @@ export const useStore = create<StoreState>((set, get) => {
       const rest = botsOfProject(get(), bot.project_id).map((b) => b.id).filter((x) => x !== id)
       get().moveBot(id, rest[rest.indexOf(botId) + 1] ?? null)
       set({ selectedBotId: id })
+      if (!get().loadedBots[id]) void get().loadMessages(id)
       get().notify('info', `已新增 Bot ${name}`)
       // 啟動不等：CLI 就緒要好幾秒，交給側欄燈號。
       void get().startBot(id)
@@ -2024,6 +2034,7 @@ export const useStore = create<StoreState>((set, get) => {
       await get().refreshState()
       if (!id) return
       set({ selectedBotId: id })
+      if (!get().loadedBots[id]) void get().loadMessages(id)
       if (res.start_error) {
         get().notify('error', `已從 ${bot.name} fork 出 ${res.name}，但沒有啟動：${res.start_error}`)
       } else {
@@ -2045,6 +2056,7 @@ export const useStore = create<StoreState>((set, get) => {
       await get().refreshState()
       if (!id) return
       set({ selectedBotId: id })
+      if (!get().loadedBots[id]) void get().loadMessages(id)
       get().notify('info', `已把子 agent ${bot.name} 升級成頂層 bot ${res.name}，接續同一段對話`)
     })
     return id
@@ -3006,6 +3018,9 @@ function loadedBotIdsOf(get: GetFn): string[] {
 
 function botIdsNeedingConversationReload(get: GetFn): string[] {
   const botIds = new Set(loadedBotIdsOf(get))
+  // 選取中的那顆一定重抓：第一次載入失敗的話它不在 `loadedBots` 裡，重連後也不會有人去補（#1240）。
+  const selected = get().selectedBotId
+  if (selected && !selected.startsWith('pending:')) botIds.add(selected)
   for (const [botId, turns] of Object.entries(get().turns)) {
     if (Object.values(turns).some((turn) => turnStillOpen(turn.status))) botIds.add(botId)
   }

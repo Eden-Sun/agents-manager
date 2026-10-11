@@ -603,6 +603,9 @@ function useMsgVisible(boxRef: RefObject<HTMLDivElement | null>, msgId: string |
 function MessageList({ botId }: { botId: string }) {
   const messages = useStore((s) => s.messages[botId])
   const loaded = useStore((s) => Boolean(s.loadedBots[botId]))
+  // 第一次載入失敗：給重試，不讓它一直轉圈（#1240）。
+  const failed = useStore((s) => Boolean(s.messageLoadFailed[botId]))
+  const retryLoad = useStore((s) => s.loadMessages)
   const working = useStore((s) => s.runs[botId]?.agent_status === 'working')
   const inFlight = useStore((s) => composerState(s, botId).inFlightTurnId !== null)
   const inFlightTurnId = useStore((s) => inFlightTurn(s, botId)?.id ?? null)
@@ -651,7 +654,21 @@ function MessageList({ botId }: { botId: string }) {
     <div className="msg-list-wrap">
     <div className="msg-list" ref={tail.ref} onScroll={tail.onScroll}>
       <LoadEarlier id={botId} onLoad={loadEarlier} />
-      {list.length === 0 ? (
+      {failed && !loaded && list.length > 0 ? (
+        // 失敗之後有新訊息進來：歷史還沒載到，要讓人知道、也能重試。
+        <div className="load-earlier">
+          <button type="button" className="btn" onClick={() => void retryLoad(botId)}>先前的訊息沒載到，重試</button>
+        </div>
+      ) : null}
+      {list.length === 0 && failed && !loaded ? (
+        <EmptyState
+          title="訊息載入失敗"
+          icon="!"
+          action={<button type="button" className="btn" onClick={() => void retryLoad(botId)}>重試</button>}
+        >
+          讀不到這段對話。
+        </EmptyState>
+      ) : list.length === 0 ? (
         <EmptyState
           loading={!loaded}
           title={loaded ? '開始交代第一個任務' : undefined}
