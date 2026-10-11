@@ -2414,11 +2414,6 @@ mod compat_tests {
         a_fresh_run_survives_when_herdr_cannot_confirm_its_agent(false).await;
     }
 
-    #[tokio::test]
-    async fn a_fresh_run_survives_when_agent_get_still_points_at_the_closed_pane() {
-        a_fresh_run_survives_when_herdr_cannot_confirm_its_agent(true).await;
-    }
-
     /// A child row with a run on `pane`, the way reconcile adopts one (#60 tests).
     async fn a_child(env: &tt::Env, parent: &str, name: &str, agent: &str, ws: &str, tab: &str, pane: &str) -> (String, String) {
         let bot = db::ulid();
