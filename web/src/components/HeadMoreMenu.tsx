@@ -18,10 +18,19 @@ export function HeadMoreMenu({ children, label }: { children: ReactNode; label: 
     const el = pop.current
     if (!open || !el) return
     el.style.removeProperty('translate')
+    delete el.dataset.up
     const { left, right } = el.getBoundingClientRect()
     const edge = 8
     const shift = right > window.innerWidth - edge ? window.innerWidth - edge - right : left < edge ? edge - left : 0
     if (shift !== 0) el.style.setProperty('translate', `${Math.round(shift)}px 0`)
+    const clip = el.closest<HTMLElement>('.sidebar-scroll')
+    const clipRect = clip?.getBoundingClientRect()
+    const floor = Math.min(window.innerHeight, clipRect?.bottom ?? Infinity) - 8
+    const ceil = (clipRect?.top ?? 0) + 8
+    const r = el.getBoundingClientRect()
+    const btnTop = wrap.current?.getBoundingClientRect().top ?? r.top
+    // 往下放不下、往上放得下才翻；上下都放不下就維持往下。
+    if (r.bottom > floor && btnTop - 6 - r.height >= ceil) el.dataset.up = ''
   }, [open])
 
   useEffect(() => {
