@@ -646,10 +646,43 @@ am_cargo() {
     # 測試執行緒上限跟著名額走（issue #813）：呼叫端自己設了 `RUST_TEST_THREADS` 就尊重（`--test-threads` 本來就優先於環境變數）；
     # 沒設才注入名額回應的 `test_threads`。舊 daemon 的回應沒有這個欄位＝用預設 8；`0`＝daemon 明講不設，交給 libtest 的預設。
     _test_env=""
-    if am_cargo_runs_tests "$_sub" && [ -z "${RUST_TEST_THREADS:-}" ]; then
+    _tt_cap=""
+    if am_cargo_runs_tests "$_sub"; then
         _tt=$(am_json_field test_threads "$_resp")
         case "$_tt" in *[!0-9]* | '') _tt=8 ;; esac
-        [ "$_tt" -eq 0 ] || _test_env="RUST_TEST_THREADS=$_tt"
+        # 受管的 bot：名額給的上限是上限，不是預設值（issue #1441）；人工 shell 與 `0`（daemon 明講不設）完全不動。
+        if [ "$_tt" -gt 0 ] && am_is_managed; then _tt_cap=$_tt; fi
+        if [ -z "${RUST_TEST_THREADS:-}" ]; then
+            [ "$_tt" -eq 0 ] || _test_env="RUST_TEST_THREADS=$_tt"
+        elif [ -n "$_tt_cap" ] && [ "$RUST_TEST_THREADS" -gt "$_tt_cap" ] 2>/dev/null; then
+            printf 'agents-manager: RUST_TEST_THREADS=%s 超過名額的測試執行緒上限 %s，改用 %s（要超過請 AM_CARGO_BYPASS_SCHEDULER=1 明講）\n' "$RUST_TEST_THREADS" "$_tt_cap" "$_tt_cap" >&2
+            _test_env="RUST_TEST_THREADS=$_tt_cap"
+        fi
+    fi
+    # libtest 的命令列 `--test-threads` 優先於環境變數，所以 `-- --test-threads=N` 也要夾（issue #1441）：只看第一個 `--` 之後的參數，
+    # 其餘參數順序不動。夾到就在 stderr 印一行（原值、夾成多少）。
+    if [ -n "$_tt_cap" ]; then
+        _n=$#; _dd=""; _fix=""; _clamp_from=""
+        while [ "$_n" -gt 0 ]; do
+            _a=$1; shift; _n=$((_n - 1))
+            if [ -n "$_fix" ]; then
+                _fix=""
+                case "$_a" in *[!0-9]* | '') ;; *) if [ "$_a" -gt "$_tt_cap" ]; then _clamp_from=$_a; _a=$_tt_cap; fi ;; esac
+            elif [ -z "$_dd" ]; then
+                [ "$_a" != "--" ] || _dd=1
+            else
+                case "$_a" in
+                    --test-threads) _fix=1 ;;
+                    --test-threads=*)
+                        _v=${_a#--test-threads=}
+                        case "$_v" in *[!0-9]* | '') ;; *) if [ "$_v" -gt "$_tt_cap" ]; then _clamp_from=$_v; _a="--test-threads=$_tt_cap"; fi ;; esac ;;
+                esac
+            fi
+            set -- "$@" "$_a"
+        done
+        if [ -n "$_clamp_from" ]; then
+            printf 'agents-manager: --test-threads=%s 超過名額的測試執行緒上限 %s，改用 %s（要超過請 AM_CARGO_BYPASS_SCHEDULER=1 明講）\n' "$_clamp_from" "$_tt_cap" "$_tt_cap" >&2
+        fi
     fi
     # 續約間隔取 TTL 的三分之一：daemon 端的 sweep 也是等好幾個間隔才收，一次沒續到不會立刻掉名額。
     _renew_every=$((_ttl / 3))
