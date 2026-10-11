@@ -297,5 +297,14 @@ check    "讀不到身分：log 保留" "keep headless pid 1202（讀不到行�
 exists   "讀不到身分：profile 還在" "$TMPD/am-noid"
 teardown
 
+# ── #1306：使用者自己的 GUI Chrome 用的 profile 也算在用，不能被 rm -rf。
+setup
+gui="$TMPD/am-gui"; mkprofile "$gui"; touch -t 202601010000 "$gui" "$gui/Local State"
+echo "608 1 /Applications/Google Chrome.app/Contents/MacOS/Google Chrome --user-data-dir=$gui" >> "$FIX/ps.txt"
+run >/dev/null
+exists "GUI Chrome 在用的舊 profile 不刪" "$gui"
+check  "log 計數 刪 0 個" "profile 目錄：刪掉 0 個" "$LOG"
+teardown
+
 echo "$PASS passed, $FAIL failed"
 [ "$FAIL" -eq 0 ]
