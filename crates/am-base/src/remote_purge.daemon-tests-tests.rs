@@ -203,5 +203,34 @@ async fn a_bot_lock_that_stays_held_does_not_stall_other_hosts() {
         .expect("一輪掃描不能等一顆被握住的鎖");
     assert_eq!(h1.removed(&other.id), 1, "另一台主機的那顆照常清掉");
     assert_eq!(h1.removed(&stuck), 0, "拿不到鎖的那顆這一輪不動");
-    assert!(crate::remote_purge::pending(&app.db, &h1.host).await.unwrap().contains(&stuck), "仍欠著，下一輪再來");
+    assert!(crate::remote_purge::pending(&app.db, &h1.host, false).await.unwrap().contains(&stuck), "仍欠著，下一輪再來");
+}
+
+/// **#1318**：前 100 顆每次都清不掉（連不上、永遠失敗）。失敗的要退到排程後面，沒試過的先來：第 101 顆在第二輪就清掉，
+/// 不能因為前面一直失敗就永遠排不到。
+#[tokio::test]
+async fn a_permanently_failing_head_of_line_does_not_starve_the_rest() {
+    let r = remote("purgehost-starve").await;
+    let mut ids = Vec::new();
+    for i in 0..101 {
+        ids.push(r.deleted_bot(&format!("bot{i:03}")).await);
+    }
+    let app = r.env.app.clone();
+    // 第一輪排得到的那 100 顆（按 id 排序的前 100）＝永遠失敗的；剩下那顆＝第 101 顆。
+    let first_batch: std::collections::HashSet<String> = crate::remote_purge::pending(&app.db, &r.host, true).await.unwrap().into_iter().collect();
+    assert_eq!(first_batch.len(), 100, "前提：一輪最多 100 顆");
+    let lone = ids.iter().find(|id| !first_batch.contains(*id)).unwrap().clone();
+    let failing = first_batch.clone();
+    let calls = r.calls.clone();
+    crate::hosts::set_ssh_fake(&r.host, move |script| {
+        calls.lock().unwrap().push(script.to_string());
+        if script.contains("bots-trash") && failing.iter().any(|id| script.contains(id.as_str())) {
+            anyhow::bail!("Permission denied");
+        }
+        Ok(if script.contains("AM_TRASH_GC") { "AM_TRASH_GC 0\n".into() } else { "AM_TRASHED\n".into() })
+    });
+
+    assert_eq!(crate::runners::remote_purge::sweep_due(&app, &r.host).await, (0, 100), "第一輪：前 100 顆都失敗、欠著");
+    assert_eq!(crate::runners::remote_purge::sweep_due(&app, &r.host).await, (1, 0), "第二輪：失敗的還在退避，第 101 顆要排得到、清掉");
+    assert_eq!(r.removed(&lone), 1, "第 101 顆的目錄被搬進回收區");
 }

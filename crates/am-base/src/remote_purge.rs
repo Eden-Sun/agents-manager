@@ -71,14 +71,22 @@ pub async fn record(app: &impl crate::capabilities::Db, bot_id: &str, host: &str
 }
 
 /// 這台遠端主機欠著清理的 bot（軟刪、專案在這台、沒有已清掉的記號）。讀不到就回錯，呼叫端什麼都不刪。
-pub async fn pending(pool: &SqlitePool, host: &str) -> Result<Vec<String>> {
+/// 沒試過的先來；試過失敗的依 `next_attempt_at` 排到後面（#1318）：永遠失敗的前幾顆不能每一輪都佔住名額，
+/// 後面的就永遠排不到。`due_only` 為真時退避中（還沒到 `next_attempt_at`）的不列（定期掃描用）；
+/// 為假就全部列出（主機剛連上時用，連上就是重試的時機）。
+pub async fn pending(pool: &SqlitePool, host: &str, due_only: bool) -> Result<Vec<String>> {
     Ok(sqlx::query_scalar(
-        "SELECT b.id FROM bots b JOIN projects p ON p.id = b.project_id
+        "SELECT b.id FROM bots b
+           JOIN projects p ON p.id = b.project_id
+           LEFT JOIN remote_bot_dir_purges r ON r.bot_id = b.id
           WHERE p.host = ? AND b.deleted_at IS NOT NULL
-            AND NOT EXISTS (SELECT 1 FROM remote_bot_dir_purges r WHERE r.bot_id = b.id AND r.purged_at IS NOT NULL)
-          ORDER BY b.id LIMIT ?",
+            AND (r.bot_id IS NULL OR (r.purged_at IS NULL AND (? = 0 OR r.next_attempt_at IS NULL OR r.next_attempt_at <= ?)))
+          ORDER BY (r.next_attempt_at IS NOT NULL), r.next_attempt_at, b.id
+          LIMIT ?",
     )
     .bind(host)
+    .bind(due_only as i64)
+    .bind(crate::db::now())
     .bind(PER_SWEEP)
     .fetch_all(pool)
     .await?)
