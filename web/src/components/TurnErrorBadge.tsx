@@ -1,7 +1,9 @@
-import { useEffect, useLayoutEffect, useRef, useState } from 'react'
+import { useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
 import { createPortal } from 'react-dom'
+import { useShallow } from 'zustand/react/shallow'
 import { projectHostName, useStore } from '../store/store'
 import { canonicalModel, quotaKey } from '../api/types'
+import { resendTarget } from '../lib/resendTarget'
 import './turnErrorBadge.css'
 
 /**
@@ -33,13 +35,14 @@ export function TurnErrorBadge({ botId }: { botId: string }) {
   /** 舊資料可能還存著 `opus` 這個已停用別名，新的一律是正式 id：兩個都算「已經是 opus」（#539）。 */
   const isOpus = currentModel === opusId() || currentModel === 'opus'
   const patchBot = useStore((s) => s.patchBot)
-  const lastUserText = useStore((s) => {
-    const list = s.messages[botId] ?? []
-    for (let i = list.length - 1; i >= 0; i -= 1) {
-      if (list[i].role === 'user') return list[i].content
-    }
-    return null
-  })
+  const resendFields = useStore(useShallow((s) => {
+    const target = resendTarget(s.messages[botId] ?? [])
+    return { text: target?.text ?? null, attachmentsJson: target ? JSON.stringify(target.attachments) : null }
+  }))
+  const target = useMemo(() => resendFields.text === null ? null : {
+    text: resendFields.text,
+    attachments: resendFields.attachmentsJson ? JSON.parse(resendFields.attachmentsJson) as string[] : [],
+  }, [resendFields])
   const busy = useStore((s) => {
     const st = s.runs[botId]?.agent_status
     return st === 'working' || st === 'blocked'
@@ -101,9 +104,9 @@ export function TurnErrorBadge({ botId }: { botId: string }) {
   if (!notice) return null
 
   const resend = () => {
-    if (!lastUserText) return
+    if (!target) return
     setSending(true)
-    void sendPrompt(botId, lastUserText).then((ok) => {
+    void sendPrompt(botId, target.text, target.attachments).then((ok) => {
       setSending(false)
       if (ok) {
         setOpen(false)
@@ -160,15 +163,15 @@ export function TurnErrorBadge({ botId }: { botId: string }) {
         <button
           type="button"
           className="btn primary"
-          disabled={!lastUserText || sending || busy || (quotaLimit && !isOpus && !resetPassed(resetsAt))}
+          disabled={!target || sending || busy || (quotaLimit && !isOpus && !resetPassed(resetsAt))}
           title={
-            !lastUserText
+            !target
               ? '這個對話裡沒有可以重送的訊息'
               : quotaLimit && !isOpus && !resetPassed(resetsAt)
                 ? '額度還沒重置，重送只會再被拒絕一次；先換模型'
               : busy
                 ? '它正在忙，等這一輪停下來再重送'
-                : `重送：${lastUserText.slice(0, 60)}`
+                : `重送：${target.text.slice(0, 60) || `（${target.attachments.length} 個附件）`}`
           }
           onClick={resend}
         >
