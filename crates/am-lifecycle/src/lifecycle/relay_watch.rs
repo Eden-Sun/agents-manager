@@ -420,6 +420,33 @@ mod tests {
         assert_eq!(sender_turn_at(&app, &sender.id, "2026-10-09T10:07:00.000Z").await.unwrap(), None, "兩回合之間沒有在跑的回合");
     }
 
+    /// #1365：child 忙著時又被派一則，排成 queued（`created_at` 比正在跑的那一筆新）。它還沒開始跑，不是寄件當下正在跑的回合；
+    /// 遠端報備晚到、排隊的那一則那時已經在跑，才以它開跑的時間為準。
+    #[tokio::test]
+    async fn a_queued_turn_is_never_the_senders_running_turn() {
+        let f = fixture("sender-queued").await;
+        let app = f.env.app.clone();
+        let sender = tt::claude_bot(&app, &f.env.project_id, "sender-queued-child").await;
+        let conv = db::conversation_id(app.db(), &sender.id).await.unwrap();
+        for (id, status, created) in [("turn-running", "in_flight", "2026-10-09T10:00:00.000Z"), ("turn-queued", "queued", "2026-10-09T10:02:00.000Z")] {
+            sqlx::query("INSERT INTO turns (id, conversation_id, origin, status, delivery, created_at) VALUES (?,?,'web',?,'ok',?)")
+                .bind(id)
+                .bind(&conv)
+                .bind(status)
+                .bind(created)
+                .execute(app.db())
+                .await
+                .unwrap();
+        }
+        assert_eq!(sender_turn_at(&app, &sender.id, "2026-10-09T10:04:00.000Z").await.unwrap().as_deref(), Some("turn-running"), "排隊中的回合還沒開始跑");
+
+        // 遠端報備晚到：turn-running 已經收尾；turn-queued 在 10:05:01 才真的送達開跑。
+        sqlx::query("UPDATE turns SET status = 'completed', completed_at = '2026-10-09T10:05:00.000Z' WHERE id = 'turn-running'").execute(app.db()).await.unwrap();
+        sqlx::query("UPDATE turns SET status = 'in_flight', delivered_at = '2026-10-09T10:05:01.000Z' WHERE id = 'turn-queued'").execute(app.db()).await.unwrap();
+        assert_eq!(sender_turn_at(&app, &sender.id, "2026-10-09T10:04:00.000Z").await.unwrap().as_deref(), Some("turn-running"), "報備當下還是 turn-running");
+        assert_eq!(sender_turn_at(&app, &sender.id, "2026-10-09T10:06:00.000Z").await.unwrap().as_deref(), Some("turn-queued"), "之後才開跑的那一則");
+    }
+
     #[tokio::test]
     async fn an_announce_opens_an_in_flight_turn_marked_with_its_sender() {
         let f = fixture("insurer-mt").await;
