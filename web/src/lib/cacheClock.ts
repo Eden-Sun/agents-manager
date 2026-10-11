@@ -32,8 +32,12 @@ export function cacheLevel(remainingSecs: number): CacheLevel {
   return 'fresh'
 }
 
-function hhmm(t: Date): string {
-  return `${String(t.getHours()).padStart(2, '0')}:${String(t.getMinutes()).padStart(2, '0')}`
+function clock(t: Date, nowMs: number): string {
+  const p = (n: number) => String(n).padStart(2, '0')
+  const time = `${p(t.getHours())}:${p(t.getMinutes())}`
+  const now = new Date(nowMs)
+  const sameDay = t.getFullYear() === now.getFullYear() && t.getMonth() === now.getMonth() && t.getDate() === now.getDate()
+  return sameDay ? time : `${t.getMonth() + 1}/${t.getDate()} ${time}`
 }
 
 /**
@@ -50,7 +54,7 @@ export function cacheState(
   if (!ttlSecs || ttlSecs <= 0) return null
   const at = lastApiAt ? Date.parse(lastApiAt) : NaN
   if (working) {
-    const when = Number.isFinite(at) ? `（上次活動 ${hhmm(new Date(at))}）` : ''
+    const when = Number.isFinite(at) ? `（上次活動 ${clock(new Date(at), nowMs)}）` : ''
     return { level: 'fresh', remainingSecs: ttlSecs, frac: 1, title: `回合進行中，快取是熱的${when}` }
   }
   if (!Number.isFinite(at)) return null
@@ -60,7 +64,9 @@ export function cacheState(
   // 時鐘差一點（daemon 比這台快）時不讓剩餘超過 TTL。
   const remainingSecs = Math.max(0, Math.min(ttlSecs, Math.round((hotSince + ttlSecs * 1000 - nowMs) / 1000)))
   const level = cacheLevel(remainingSecs)
-  const last = hotSince > at ? `上次活動 ${hhmm(new Date(at))}，已保溫 ${hhmm(new Date(hotSince))}` : `上次活動 ${hhmm(new Date(at))}`
+  const last = hotSince > at
+    ? `上次活動 ${clock(new Date(at), nowMs)}，已保溫 ${clock(new Date(hotSince), nowMs)}`
+    : `上次活動 ${clock(new Date(at), nowMs)}`
   const title = level === 'cold' ? `快取已涼（${last}）` : `快取約 ${Math.max(1, Math.ceil(remainingSecs / 60))} 分後到期（${last}）`
   return { level, remainingSecs, frac: remainingSecs / ttlSecs, title }
 }

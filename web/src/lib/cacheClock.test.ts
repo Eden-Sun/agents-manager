@@ -19,7 +19,7 @@ test('倒數：剩餘比例＝剩餘／TTL，隨時間往下掉', () => {
   assert.equal(s.remainingSecs, 45 * 60)
   assert.equal(s.frac, 0.75)
   assert.equal(s.level, 'fresh')
-  assert.match(s.title, /^快取約 45 分後到期（上次活動 \d\d:\d\d）$/)
+  assert.match(s.title, /^快取約 45 分後到期（上次活動 (?:\d+\/\d+ )?\d\d:\d\d）$/)
   // 15 秒後重算：少 15 秒。
   assert.equal(cacheState(at(15), 3600, T0 + 15_000)!.remainingSecs, 45 * 60 - 15)
   assert.equal(cacheState(at(50), 3600, T0)!.level, 'warn')
@@ -28,11 +28,20 @@ test('倒數：剩餘比例＝剩餘／TTL，隨時間往下掉', () => {
   assert.match(cacheState(at(59.9), 3600, T0)!.title, /約 1 分後到期/)
 })
 
+test('上次活動不是今天時帶月日；同一天仍只寫時分', () => {
+  const now = new Date(2026, 9, 11, 15, 0).getTime()
+  const last = new Date(2026, 9, 8, 14, 5).toISOString()
+  assert.equal(cacheState(last, 3600, now)!.title, '快取已涼（上次活動 10/8 14:05）')
+
+  const today = new Date(2026, 9, 11, 14, 5).toISOString()
+  assert.equal(cacheState(today, 3600, now)!.title, '快取約 5 分後到期（上次活動 14:05）')
+})
+
 test('到期：已涼、比例 0', () => {
   const s = cacheState(at(61), 3600, T0)!
   assert.equal(s.level, 'cold')
   assert.equal(s.frac, 0)
-  assert.match(s.title, /^快取已涼（上次活動 \d\d:\d\d）$/)
+  assert.match(s.title, /^快取已涼（上次活動 (?:\d+\/\d+ )?\d\d:\d\d）$/)
 })
 
 test('回合進行中＝滿條；TTL 不明（grok）或沒有紀錄不畫', () => {
@@ -55,7 +64,7 @@ test('保溫：顏色從保溫時間起算，tooltip 仍講真實的上次活動
   const s = cacheState(at(70), 3600, T0, false, at(10))!
   assert.equal(s.remainingSecs, 50 * 60)
   assert.equal(s.level, 'fresh')
-  assert.match(s.title, /^快取約 50 分後到期（上次活動 \d\d:\d\d，已保溫 \d\d:\d\d）$/)
+  assert.match(s.title, /^快取約 50 分後到期（上次活動 (?:\d+\/\d+ )?\d\d:\d\d，已保溫 (?:\d+\/\d+ )?\d\d:\d\d）$/)
   // 保溫也過期了：已涼。
   assert.equal(cacheState(at(130), 3600, T0, false, at(61))!.level, 'cold')
   // 保溫時間比上次活動早（舊資料）或壞掉：不影響。
