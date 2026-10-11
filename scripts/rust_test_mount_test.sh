@@ -45,47 +45,96 @@ in_list() {  # <needle> <item>…
     return 1
 }
 
+# normpath <路徑>：去掉 . 與 ..（純字串，不碰檔案系統），輸出 repo 相對路徑。
+normpath() {
+    local -a parts=()
+    local IFS=/ p q out=""
+    for p in $1; do
+        case "$p" in
+            '' | .) ;;
+            ..) if [ "${#parts[@]}" -gt 0 ]; then parts=("${parts[@]:0:${#parts[@]}-1}"); fi ;;
+            *) parts+=("$p") ;;
+        esac
+    done
+    for q in "${parts[@]+"${parts[@]}"}"; do out="${out:+$out/}$q"; done
+    printf '%s' "$out"
+}
+
 # check_tree <root>：印 FAIL 行到 stdout，回傳失敗數。
 check_tree() {
-    local root="$1" fail=0 tracked attrs f base mounted
+    local root="$1" fail=0 tracked f base mounted work edges roots reach
     tracked="$(git -C "$root" ls-files -- '*.rs')"
-    # 所有 #[path = "…"] 的值（去掉開頭的 ./ 與 ../）。
-    attrs="$(git -C "$root" grep -h -E '#\[path[[:space:]]*=' -- '*.rs' 2>/dev/null |
-        sed -n -E 's/.*#\[path[[:space:]]*=[[:space:]]*"([^"]*)".*/\1/p' |
-        sed -E 's#^(\.\./|\./)+##' || true)"
 
-    # 有 #[path] 的值以 /<值> 結尾、或等於 <值>，就算掛上（值通常是相對於宣告檔的路徑，所以用結尾比對）。
-    mounted_by_path() {  # <repo 內的路徑>
-        local v
-        while IFS= read -r v; do
-            [ -n "$v" ] || continue
-            case "$1" in "$v" | */"$v") return 0 ;; esac
-        done <<<"$attrs"
-        return 1
-    }
-    # 同名模組宣告：<dir>/<名字>.rs 的同層 mod.rs／lib.rs／main.rs，或上一層的 <目錄名>.rs，含有 mod <名字>;。
-    declared_by_mod() {  # <repo 內的路徑>
-        local stem dir dname d
-        stem="$(basename "$1" .rs)"
-        dir="$(dirname "$1")"
-        dname="$(basename "$dir")"
-        for d in "$root/$dir/mod.rs" "$root/$dir/lib.rs" "$root/$dir/main.rs" "$root/$(dirname "$dir")/$dname.rs"; do
-            [ -f "$d" ] || continue
-            if grep -qE "^[[:space:]]*(pub(\([^)]*\))?[[:space:]]+)?mod[[:space:]]+${stem}[[:space:]]*;" "$d"; then
-                return 0
+    # 掛載圖（#1423）：從 crate 根（lib.rs／main.rs／bin／tests／build.rs）沿 `mod X;` 與 `#[path]` 走；走得到的檔才算掛上。
+    # `mod X;` 的子檔＝宣告檔所在目錄下的 X.rs 或 X/mod.rs（宣告檔是 mod.rs／lib.rs／main.rs 時目錄就是它的目錄，否則是 <檔名去掉 .rs>/）。
+    # `#[path = "v"]` 依**宣告檔所在目錄**解析成 repo 內路徑，精確比對（不做結尾比對）。
+    work="$(mktemp -d "${TMPDIR:-/tmp}/rust-test-mount.XXXXXX")"
+    edges="$work/edges"
+    roots="$work/roots"
+    reach="$work/reach"
+    printf '%s\n' "$tracked" >"$work/tracked"
+    : >"$edges"
+    : >"$roots"
+    while IFS= read -r f; do
+        case "$f" in
+            */src/lib.rs | */src/main.rs | */src/bin/*.rs | daemon/tests/*.rs | crates/*/tests/*.rs | daemon/build.rs | crates/*/build.rs)
+                printf '%s\n' "$f" >>"$roots" ;;
+        esac
+    done <<<"$tracked"
+    git -C "$root" grep -n -E '^[[:space:]]*(pub(\([^)]*\))?[[:space:]]+)?mod[[:space:]]+[A-Za-z0-9_]+[[:space:]]*;|^[[:space:]]*#\[path[[:space:]]*=' -- '*.rs' 2>/dev/null |
+        while IFS=: read -r f _ content; do
+            if [[ "$content" =~ ^[[:space:]]*#\[path ]]; then
+                local v t
+                v="$(printf '%s\n' "$content" | sed -n -E 's/.*#\[path[[:space:]]*=[[:space:]]*"([^"]*)".*/\1/p')"
+                [ -n "$v" ] || continue
+                t="$(normpath "$(dirname "$f")/$v")"
+                grep -qxF -- "$t" "$work/tracked" && printf '%s\t%s\n' "$f" "$t"
+            else
+                local name mdir c base
+                name="$(printf '%s\n' "$content" | sed -n -E 's/.*mod[[:space:]]+([A-Za-z0-9_]+)[[:space:]]*;.*/\1/p')"
+                base="$(basename "$f")"
+                case "$base" in
+                    mod.rs | lib.rs | main.rs) mdir="$(dirname "$f")" ;;
+                    *) mdir="$(dirname "$f")/${base%.rs}" ;;
+                esac
+                for c in "$mdir/$name.rs" "$mdir/$name/mod.rs"; do
+                    grep -qxF -- "$c" "$work/tracked" && printf '%s\t%s\n' "$f" "$c"
+                done
             fi
+        done >>"$edges"
+    awk -F'\t' '
+        BEGIN { n = 0 }
+        FILENAME == ARGV[1] { root[$0] = 1; next }
+        FILENAME == ARGV[2] { pa[n] = $1; ch[n] = $2; n++; next }
+        END {
+            for (k in root) reach[k] = 1
+            do {
+                changed = 0
+                for (i = 0; i < n; i++) if ((pa[i] in reach) && !(ch[i] in reach)) { reach[ch[i]] = 1; changed = 1 }
+            } while (changed)
+            for (k in reach) print k
+        }' "$roots" "$edges" >"$reach"
+
+    # 從這支檔往上找宣告它的檔，點名最上面那個沒有從 crate 根掛上的。
+    top_unmounted() {  # <repo 內的路徑>
+        local cur="$1" par i
+        for i in $(seq 1 50); do
+            par="$(awk -F'\t' -v c="$cur" '$2 == c { print $1; exit }' "$edges")"
+            [ -n "$par" ] || break
+            grep -qxF -- "$par" "$reach" && break
+            cur="$par"
         done
-        return 1
+        printf '%s' "$cur"
     }
-    is_mounted() {  # <repo 內的路徑>
-        mounted_by_path "$1" || declared_by_mod "$1"
+    reachable() {  # <repo 內的路徑>
+        grep -qxF -- "$1" "$reach"
     }
 
     # 1) 候選沒人掛、又不在 KNOWN → 失敗；KNOWN 裡的候選已經掛上或檔案不在 → 失敗（棘輪）。
     while IFS= read -r f; do
         case "$f" in daemon/src/* | crates/*/src/*) ;; *) continue ;; esac
         is_candidate "$(basename "$f")" || continue
-        if is_mounted "$f"; then
+        if reachable "$f"; then
             mounted=1
         else
             mounted=0
@@ -94,7 +143,7 @@ check_tree() {
             continue
         fi
         if [ "$mounted" = 0 ]; then
-            printf 'FAIL - %s 沒有被任何 mod／#[path] 掛進去（裡面的測試不會跑）\n' "$f"
+            printf 'FAIL - %s 沒有從 crate 根掛進去（最上面沒掛的是 %s；裡面的測試不會跑）\n' "$f" "$(top_unmounted "$f")"
             fail=$((fail + 1))
         fi
     done <<<"$tracked"
@@ -103,7 +152,7 @@ check_tree() {
         if ! in_list "$f" $tracked; then
             printf 'FAIL - %s 檔案不在了，從 KNOWN 刪掉\n' "$f"
             fail=$((fail + 1))
-        elif is_mounted "$f"; then
+        elif reachable "$f"; then
             printf 'FAIL - %s 已經有人掛進去了，從 KNOWN 刪掉\n' "$f"
             fail=$((fail + 1))
         fi
@@ -139,6 +188,7 @@ check_tree() {
         fi
     done
 
+    rm -rf "$work"
     return "$fail"
 }
 
@@ -160,6 +210,8 @@ new_tree() {
     done
     # 真樹的 am_base_tests.rs 是 runners/mod.rs 用 #[path] 掛的；假樹照做，它才不會被當成沒掛。
     printf '#[path = "am_base_tests.rs"]\npub(crate) mod am_base_tests;\n' >"$(dirname "$d/$HARNESS_ROOT")/mod.rs"
+    # crate 根：daemon/src/lib.rs 掛 runners，runners/mod.rs 才從根走得到（#1423）。
+    printf 'pub mod runners;\n' >"$d/daemon/src/lib.rs"
     : >"$d/$HARNESS_ROOT"
     git -C "$d" add -A
 }
