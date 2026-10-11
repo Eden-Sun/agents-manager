@@ -18,6 +18,7 @@ use crate::db;
 use crate::intents::{self, Intent};
 use crate::lifecycle::{self, LcError, StartOpts};
 use crate::state::App;
+use serde_json::Value;
 use std::sync::Arc;
 
 /// Keep the immediately committed credential rotation recoverable for the same window as restarts.
@@ -201,6 +202,32 @@ async fn fail_attempt(app: &Arc<App>, id: &str, why: String) -> Outcome {
     }
 }
 
+/// 目前認得的 intent 內容版本。沒有 `schema` 欄位＝現行格式（所有寫入端一直都是這個形狀）；有就一定要是認得的值。
+const INTENT_SCHEMA: i64 = 1;
+
+/// 從持久的 intent 內容讀出 `(opts, from_run_id, credential_rotation)`（#1297）。
+/// 缺 `opts`、`opts` 型別錯（例如 `"resume_required": "true"`）、`from_run_id` 不是字串也不是 null（缺了也算）、
+/// `credential_rotation` 不是布林值、未知的版本，一律回 `Err`。`opts` 裡「沒寫的欄位」照舊用預設值（`api` 的部分選項寫法依賴這點）。
+fn decode_payload(payload: &Value) -> Result<(StartOpts, Option<String>, bool), String> {
+    match payload.get("schema") {
+        None => {}
+        Some(v) if v.as_i64() == Some(INTENT_SCHEMA) => {}
+        Some(v) => return Err(format!("未知的內容版本 {v}（這顆 daemon 認得的是 {INTENT_SCHEMA}）")),
+    }
+    let raw = payload.get("opts").ok_or_else(|| "缺少 opts".to_string())?;
+    let opts: StartOpts = serde_json::from_value(raw.clone()).map_err(|e| format!("opts 解不開：{e}"))?;
+    let from_run = match payload.get("from_run_id") {
+        Some(Value::String(s)) => Some(s.clone()),
+        Some(Value::Null) => None,
+        _ => return Err("from_run_id 不是字串或 null".to_string()),
+    };
+    let credential_rotation = match payload.get("credential_rotation") {
+        None => false,
+        Some(v) => v.as_bool().ok_or_else(|| "credential_rotation 不是布林值".to_string())?,
+    };
+    Ok((opts, from_run, credential_rotation))
+}
+
 /// 檢查世界、往前補完。`Ok`＝intent 已收尾；`Err(原因)`＝這次沒補成。
 async fn resume(app: &Arc<App>, intent: &Intent) -> Result<(), String> {
     let bot_id = intent.subject_id.as_str();
@@ -213,9 +240,9 @@ async fn resume(app: &Arc<App>, intent: &Intent) -> Result<(), String> {
         _ => return Ok(()),
     };
     let payload = intent.payload();
-    let opts: StartOpts = serde_json::from_value(payload.get("opts").cloned().unwrap_or_default()).unwrap_or_default();
-    let from_run = payload.get("from_run_id").and_then(|v| v.as_str());
-    let credential_rotation = payload.get("credential_rotation").and_then(|v| v.as_bool()).unwrap_or(false);
+    // 解不開就是這次補不成（`Err`，走有次數上限的重試與通知），不能換成預設值去停、去起（#1297）。
+    let (opts, from_run, credential_rotation) = decode_payload(&payload).map_err(|why| format!("intent 內容解不開：{why}"))?;
+    let from_run = from_run.as_deref();
     let s = |e: anyhow::Error| format!("db: {e:#}");
 
     let bot = db::bot(&app.db, bot_id).await.map_err(s)?;
@@ -295,6 +322,42 @@ mod tests {
 
     async fn run_state(app: &Arc<App>, run: &str) -> String {
         sqlx::query_scalar("SELECT state FROM runs WHERE id = ?").bind(run).fetch_one(&app.db).await.unwrap()
+    }
+
+    /// #1297：持久的 intent 解不開（沒有 opts、型別錯、來源格式錯、未知版本）：這次補不成、intent 留著記下原因，
+    /// 不能拿預設值去停、去起。
+    async fn refuses_an_undecodable_intent(name: &str, payload: impl FnOnce(&str) -> serde_json::Value, why: &str) {
+        let e = tt::env().await;
+        let (bot, run1) = running_bot(&e, name).await;
+        let inserted = crate::intents::insert(&e.app.db, "restart", &bot.id, LOCAL_HOST, &payload(&run1), 900).await.unwrap();
+        let id = match inserted {
+            crate::intents::Inserted::New(i) | crate::intents::Inserted::AlreadyOpen(i) => i.id,
+        };
+        let out = drive_once(&e.app, &id).await;
+        assert!(matches!(out, Outcome::Retry(_)), "{why}：這次要補不成，實際 {out:?}");
+        assert_eq!(run_state(&e.app, &run1).await, "running", "{why}：舊 run 不能被停");
+        assert_eq!(runs_of(&e.app, &bot.id).await, 1, "{why}：不能起新的 run");
+        assert_eq!(intent_status(&e.app, &bot.id).await, vec!["pending"], "{why}：intent 留著，等下一輪或人工處理");
+    }
+
+    #[tokio::test]
+    async fn recovery_refuses_an_intent_whose_options_are_missing() {
+        refuses_an_undecodable_intent("opts-missing", |run| json!({"from_run_id": run}), "opts 不見了").await;
+    }
+
+    #[tokio::test]
+    async fn recovery_refuses_an_option_with_the_wrong_type() {
+        refuses_an_undecodable_intent("opts-typed", |run| json!({"opts": {"resume_required": "true"}, "from_run_id": run}), "opts 型別錯").await;
+    }
+
+    #[tokio::test]
+    async fn recovery_refuses_a_malformed_source_run() {
+        refuses_an_undecodable_intent("source-typed", |_| json!({"opts": {}, "from_run_id": 7}), "from_run_id 型別錯").await;
+    }
+
+    #[tokio::test]
+    async fn recovery_refuses_an_unknown_schema_version() {
+        refuses_an_undecodable_intent("schema-future", |run| json!({"schema": 99, "opts": {}, "from_run_id": run}), "未知版本").await;
     }
 
     async fn intent_status(app: &Arc<App>, bot: &str) -> Vec<String> {
