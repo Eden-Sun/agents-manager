@@ -563,7 +563,13 @@ async fn relay_announce(
         None
     } else {
         match crate::lifecycle::relay_watch::resolve(&app, &body.bot_id, &body.to_agent).await {
-            Ok(run) => run,
+            Ok(run) => {
+                // #1460：沒有目標（含移交出去的）就只看一眼是不是移交，留 log；正常路徑不多一次查詢。
+                if run.is_none() {
+                    crate::lifecycle::relay_watch::note_handoff_direct(&app, &body.bot_id, &body.to_agent).await;
+                }
+                run
+            }
             Err(e) => {
                 tracing::warn!(to = %body.to_agent, error = ?e, "relay watch admission failed; refusing direct prompt so the shim can retry");
                 return (
@@ -692,6 +698,35 @@ mod relay_announce_tests {
         let (retry_code, retry_body) = announce(&app, to, text).await;
         assert_eq!((retry_code, retry_body), (StatusCode::OK, json!({})), "資料庫恢復後可正常重試");
         assert!(crate::agent_relay::claim(crate::config::LOCAL_HOST, to, text).is_some(), "成功重試才記下直送 announce");
+    }
+
+    /// #1460：收件方的專案已移交給別台主機：announce 照舊回 200 `{}`（shim 直送），但這顆 daemon 不開 `external` 回合、
+    /// 不碰 herdr（不盯 pane）。SPEC §6.5d：字由 shim 直接送，本機與接手的 daemon 都不記這句。
+    #[tokio::test]
+    async fn an_announce_to_a_handed_off_agent_opens_no_turn_and_touches_no_pane() {
+        let env = crate::testing::env().await;
+        let app = env.app.clone();
+        sqlx::query("INSERT INTO bots (id,project_id,name,kind,identity,hook_token,created_at) VALUES ('w1',?,'fixer','claude','cc0','tok-w1',?)")
+            .bind(&env.project_id)
+            .bind(db::now())
+            .execute(&app.db)
+            .await
+            .unwrap();
+        let recipient = crate::testing::claude_bot(&app, &env.project_id, "handoff-recipient").await;
+        crate::testing::fake_run(&app, &recipient.id).await;
+        let text = "移交後的直送 relay-1460";
+
+        // 移交前收件方認得到（同一組資料，所以下面的 None 只能是移交造成的）。
+        assert!(crate::lifecycle::relay_watch::resolve(&app, "w1", "agent").await.unwrap().is_some(), "移交前：收件方在這顆 daemon 底下");
+        sqlx::query("UPDATE projects SET handed_off_to = 'agm-host' WHERE id = ?").bind(&env.project_id).execute(&app.db).await.unwrap();
+
+        let calls_before = env.herdr.calls.lock().unwrap().len();
+        let (code, v) = announce(&app, "agent", text).await;
+        assert_eq!((code, v), (StatusCode::OK, json!({})), "移交的收件方照舊回 200，shim 才會直送");
+        assert_eq!(env.herdr.calls.lock().unwrap().len(), calls_before, "不替它呼叫 herdr：不盯 pane、不補 Enter");
+        let external: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM turns WHERE origin='external'").fetch_one(&app.db).await.unwrap();
+        assert_eq!(external, 0, "不替已移交的 bot 開 external 回合");
+        assert!(crate::agent_relay::claim(crate::config::LOCAL_HOST, "agent", text).is_some(), "行程內的報備照舊記一筆（認回音用）");
     }
 }
 

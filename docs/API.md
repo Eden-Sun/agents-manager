@@ -1927,7 +1927,7 @@ child 還原後不立即建立 run；daemon 給它十分鐘讓父 bot 在原 pan
 表單編碼 `bot_id`、`to_agent`、`text` → `200 {}`；bot 不存在、已刪或 token 不符 → 401。
 daemon 記在行程內（5 分鐘、認領一次就用掉），該句回音進對話時帶上 `relay_from`（SPEC §6.5d）。
 若 announce 沒被角色 bot 路由攔截，盯梢解析只看寄件 bot 所在 host／herdr session 的 `agent_name` 或 pane id；舊 run 缺 session 時採用 host 設定。
-bot 資料庫名稱不算 herdr 目標，且只有唯一一筆 running run 符合才開始盯梢。收件方的專案已移交給別台主機（`projects.handed_off_to`）時不算這顆 daemon 的目標：仍回 `200 {}`，但不開 `external` 回合、不盯 pane（#1363）。
+bot 資料庫名稱不算 herdr 目標，且只有唯一一筆 running run 符合才開始盯梢。收件方的專案已移交給別台主機（`projects.handed_off_to`）時不算這顆 daemon 的目標：仍回 `200 {}`，但不開 `external` 回合、不盯 pane（#1363）。字由 shim 直接送，本機與接手的 daemon 都不記這句（只留 log `relay_handoff_direct`，#1460）。
 
 ### 10.6 hook 端點 `POST /hook/{claude|codex|grok|agy}`
 body `{bot_id, provider, payload, received_at, truncated?, run_id?}`，header `X-AM-Bot-Token`。`run_id` 是送出這則 hook 的 CLI 行程

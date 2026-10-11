@@ -2358,7 +2358,8 @@ pane 沒有立即影響。等這套機制在正式環境跑穩，`cargo-slot.sh`
   不當 scratch。
 - **hook**：`process_locked` 記一行 `hook for a handed-off project; ignored` 就丟（spool 重播、spawn hint 也一樣）。移交查詢本身讀失敗＝不知道歸誰：不當成「我的」去處理，也不當成「移交了」丟掉；這一則不做任何 hook 副作用，回錯、收件匣退避重試（#1259）。唯一的例外是撞額度的記帳（#108）：撞限是帳號的事實，照記，排著的派工才擋得住。
 - **relay announce**（§6.5d）：收件方在已移交的專案裡時，`relay_watch::resolve` 回 `None`＝不是這顆 daemon 管的目標：announce 照舊回 200、
-  不開 `external` 回合、不盯 pane（字由 shim 直接送，歸接手的 daemon 記；#1363）。
+  不開 `external` 回合、不盯 pane（字由 shim 直接送；#1363）。**本機與接手的 daemon 都不記這句**（沒有 turn、沒有 message，只有行程內那筆 5 分鐘的報備），
+  這顆 daemon 留一行 log `relay_handoff_direct`（#1460；#1363 之前寫的「歸接手的 daemon 記」沒有對應的程式路徑，已更正）。
 - **撞題提示**（§4.3c）：候選的專案已移交，派工、開票與認領三條路都略過：不問 Jev、不占帳本、不推提示；交辦狀態不動（#1421）。
 - default session（§6.5.1）不把 agent 匯入它。
 - 設定當下**不停也不關任何東西**：agent 繼續跑，交給對方接。清掉旗標＝收回，當場排一輪對帳，照 §6.5 接手（run 還在的沿用、
