@@ -264,3 +264,67 @@ test('捲動或改視窗大小時關掉浮層（fixed 的浮層不跟著列走�
   await settle(20)
   assert.equal(root.querySelector('.judge-badge-pop'), null, '改視窗大小要關掉')
 })
+
+test('捲浮層裡的命中行不關浮層（長命中行要捲得完）', async () => {
+  freshBadgeState()
+  seed([row({ id: 'long-1', regex_verdict: 'stuck_queued', at: ago(1), jev_is_live_ui: 0.9, matched_line: 'x\n'.repeat(50) })])
+  const root = await mount(<JudgeBadge botId="bot-a" />)
+  const pop = await openBadge(root)
+  assert.ok(pop)
+  await act(async () => {
+    pop.querySelector('.judge-badge-line')!.dispatchEvent(new Event('scroll'))
+  })
+  await settle(20)
+  assert.ok(root.querySelector('.judge-badge-pop'), '浮層自己的捲動不關')
+})
+
+test('不相干區域的捲動不關浮層（對話區自動貼底不能把浮層關掉）', async () => {
+  freshBadgeState()
+  seed([row({ id: 'other-1', regex_verdict: 'stuck_queued', at: ago(1), jev_is_live_ui: 0.9 })])
+  const root = await mount(
+    <>
+      <div data-testid="other" />
+      <JudgeBadge botId="bot-a" />
+    </>,
+  )
+  assert.ok(await openBadge(root))
+  await act(async () => {
+    root.querySelector('[data-testid="other"]')!.dispatchEvent(new Event('scroll'))
+  })
+  await settle(20)
+  assert.ok(root.querySelector('.judge-badge-pop'), '別的區域捲動不關')
+})
+
+test('徽章所在的捲動容器捲動才關浮層（位置會錯）', async () => {
+  freshBadgeState()
+  seed([row({ id: 'scroller-1', regex_verdict: 'stuck_queued', at: ago(1), jev_is_live_ui: 0.9 })])
+  const root = await mount(
+    <div data-testid="scroller">
+      <JudgeBadge botId="bot-a" />
+    </div>,
+  )
+  assert.ok(await openBadge(root))
+  await act(async () => {
+    root.querySelector('[data-testid="scroller"]')!.dispatchEvent(new Event('scroll'))
+  })
+  await settle(20)
+  assert.equal(root.querySelector('.judge-badge-pop'), null, '徽章所在的容器捲動要關掉')
+})
+
+test('Esc 關浮層時把事件標成已處理（側欄抽屜的 Esc 不會一起關）', async () => {
+  freshBadgeState()
+  seed([row({ id: 'esc-2', regex_verdict: 'stuck_queued', at: ago(1), jev_is_live_ui: 0.9 })])
+  const root = await mount(<JudgeBadge botId="bot-a" />)
+  assert.ok(await openBadge(root))
+  const seen: boolean[] = []
+  const probe = (e: KeyboardEvent) => seen.push(e.defaultPrevented)
+  window.addEventListener('keydown', probe)
+  try {
+    await pressKey('Escape', { cancelable: true })
+  } finally {
+    window.removeEventListener('keydown', probe)
+  }
+  await settle(20)
+  assert.deepEqual(seen, [true], '冒泡到 window 時要已經 preventDefault')
+  assert.equal(root.querySelector('.judge-badge-pop'), null)
+})
