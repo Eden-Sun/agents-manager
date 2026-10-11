@@ -5,8 +5,10 @@
 # 磁碟滿了才有人發現。由 systemd user timer `com.agm.disk-gc.timer` 每小時跑一次（Linux），純機械不花 LLM。
 #
 #   (a) ~/.cache/agents-manager/remote-cargo/* 頂層目錄超過 DISK_GC_REMOTE_CARGO_DAYS 天沒動、而且沒有行程在用 → 刪（不論 build.remote 開關）
-#   (b) 主樹與各 worktree 的 target/*/incremental：超過 DISK_GC_INCREMENTAL_DAYS 天的子目錄 → 刪
-#   (c) 各 worktree（不含主樹）的 target/：.fingerprint、它的 unit 目錄與 unit 目錄裡的檔都超過 DISK_GC_TARGET_DAYS 天沒動 → 整個 target/ 刪
+#   (b) 主樹、各登記 worktree（`git worktree list`，含 ~/project/agm-* 那種不在 .claude 底下的）與 ubuntu-ci 的常駐 clone
+#       （`${AGM_CI_ROOT:-~/.cache/agents-manager/ci}/repo`）的 target/*/incremental：超過 DISK_GC_INCREMENTAL_DAYS 天的子目錄 → 刪
+#   (c) 各 worktree（不含主樹、不含 CI clone）的 target/：.fingerprint、它的 unit 目錄與 unit 目錄裡的檔都超過 DISK_GC_TARGET_DAYS 天沒動 → 整個 target/ 刪
+#       CI clone 的 target/ 是暖快取，整個不刪（#1450）。
 #   (d) 事後看 $HOME 所在磁碟：使用率 ≥ DISK_GC_ALERT_PCT 或剩餘 < DISK_GC_ALERT_FREE_GB → ops-alert disk_low
 #
 # 破壞性，所以：只刪上面這幾個明確路徑；路徑含 `..`、不在 $HOME 底下、任何一層是 symlink、實際位置跟預期不符，
@@ -21,6 +23,8 @@ LOG="${DISK_GC_LOG:-$DIR/disk-gc.log}"
 AGM_REPO="${AGM_REPO:-$HOME/project/agents-manager}"
 AGM="${AGM_BIN:-$DIR/bin/agm}"
 DF="${DF_BIN:-df}"
+GIT="${DISK_GC_GIT:-git}"
+CI_ROOT="${AGM_CI_ROOT:-$HOME/.cache/agents-manager/ci}"
 REMOTE_DAYS="${DISK_GC_REMOTE_CARGO_DAYS:-7}"
 INC_DAYS="${DISK_GC_INCREMENTAL_DAYS:-2}"
 TARGET_DAYS="${DISK_GC_TARGET_DAYS:-7}"
@@ -144,11 +148,30 @@ else
 
   if safe_dir "$AGM_REPO"; then
     gc_tree "${AGM_REPO%/}" main
+    # 登記的 worktree：git 自己的清單（#1450）。agm issue claim --worktree 給的多半是 ~/project/agm-* 這種路徑，
+    # 不在 .claude/worktrees 底下；以前一棵都掃不到。主樹自己不在這裡處理（上面已經做過）。
+    GT_DONE=""
+    if WTS=$("$GIT" -C "$AGM_REPO" worktree list --porcelain 2>/dev/null); then
+      while IFS= read -r line; do
+        case "$line" in "worktree "*) ;; *) continue ;; esac
+        w="${line#worktree }"
+        [ "$w" = "${AGM_REPO%/}" ] && continue
+        GT_DONE="${GT_DONE}${w}
+"
+        gc_tree "$w" worktree
+      done <<EOF_WTS
+$WTS
+EOF_WTS
+    else
+      skip "git worktree list 失敗，只掃 .claude/worktrees"
+    fi
+    # 沒登記的殘留目錄：照舊掃 .claude/worktrees/*（兩邊去重）。
     WT="${AGM_REPO%/}/.claude/worktrees"
     if [ -e "$WT" ] || [ -L "$WT" ]; then
       if safe_dir "$WT"; then
         for w in "$WT"/*; do
           [ -d "$w" ] && [ ! -L "$w" ] || continue
+          printf '%s\n' "$GT_DONE" | grep -qxF "$w" && continue
           gc_tree "$w" worktree
         done
       else
@@ -157,6 +180,11 @@ else
     fi
   else
     skip "${AGM_REPO}（路徑不符預期，整步放棄）"
+  fi
+  # ubuntu-ci 的常駐 clone：只套 incremental 那條規則，整個 target/ 永不刪（它是 CI 的暖快取，跟主樹一樣）（#1450）。
+  CI_REPO="${CI_ROOT}/repo"
+  if [ -e "$CI_REPO" ] || [ -L "$CI_REPO" ]; then
+    gc_tree "$CI_REPO" main
   fi
   cd / || true
 fi

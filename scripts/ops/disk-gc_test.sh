@@ -26,6 +26,9 @@ setup() {
   FIX="$ROOT/fix"; BIN="$ROOT/fakebin"
   REPO="$HOME/project/agents-manager"
   mkdir -p "$AGM_DIR/bin" "$HOME/.cache/agents-manager" "$REPO/target/debug" "$REPO/.claude/worktrees" "$FIX" "$BIN"
+  # 主樹是真的 git repo（#1450：worktree 清單來自 git worktree list）。
+  git -C "$REPO" init -q -b main
+  git -C "$REPO" -c user.name=t -c user.email=t@t commit -q --allow-empty -m init
   cp "$HERE/disk-gc.sh" "$AGM_DIR/bin/disk-gc.sh"
   LOG="$AGM_DIR/disk-gc.log"; : > "$LOG"
   RC="$HOME/.cache/agents-manager/remote-cargo"
@@ -161,6 +164,67 @@ setup
 mkdir -p "$ROOT/home/x"; mk_target "$REPO" yes
 PATH="$BIN:${AM_CANARY_DIR:+$AM_CANARY_DIR:}/usr/bin:/bin" AGM_REPO="$REPO/../project/agents-manager" DF_BIN="$BIN/df" AGM_BIN="$BIN/agm" DISK_GC_LOG="$LOG" bash "$AGM_DIR/bin/disk-gc.sh" >/dev/null 2>&1
 exists "AGM_REPO 帶 .. 時不刪" "$REPO/target/debug/incremental/oldcrate-aaa"
+teardown
+
+# 5d. （#1450）登記在 ~/project/agm-*（不在 .claude/worktrees 底下）的 worktree：舊的 incremental 刪、新的留；
+#     .fingerprint 全舊的整個 target/ 刪。agm issue claim --worktree 給的就是這種路徑，以前一棵都掃不到。
+setup
+REG="$HOME/project/agm-x"; git -C "$REPO" worktree add -q "$REG" -b agm-x
+mk_target "$REG"
+equals "exit 0" "$(run)" "0"
+gone   "登記的 worktree（非 .claude）舊的 incremental 被刪" "$REG/target/debug/incremental/oldcrate-aaa"
+exists "登記的 worktree（非 .claude）新的 incremental 留著" "$REG/target/debug/incremental/newcrate-bbb"
+teardown
+
+setup
+REGOLD="$HOME/project/agm-stale"; git -C "$REPO" worktree add -q "$REGOLD" -b agm-stale
+mk_target "$REGOLD" yes
+equals "exit 0" "$(run)" "0"
+gone   "登記的 worktree（非 .claude）.fingerprint 全舊：整個 target/ 刪" "$REGOLD/target"
+teardown
+
+# 5e. （#1450）登記的 worktree 有行程的 cwd 在底下 → 整棵不動（同 case 4 的規則套到登記路徑）。
+setup
+BUSYREG="$HOME/project/agm-busy"; git -C "$REPO" worktree add -q "$BUSYREG" -b agm-busy
+mk_target "$BUSYREG" yes
+( cd "$BUSYREG" && exec sleep 30 ) >/dev/null 2>&1 & SLEEPERS="$SLEEPERS $!"
+BUSYPID=$!
+# 等子行程真的 cd 進去（讀 /proc 的 cwd；有上限，不靠時間）。
+for _ in $(seq 1 2000); do [ "$(readlink "/proc/$BUSYPID/cwd" 2>/dev/null)" = "$BUSYREG" ] && break; done
+equals "exit 0" "$(run)" "0"
+exists "登記的 worktree 有行程在用：target/ 不動" "$BUSYREG/target"
+check  "log 記下跳過的原因" "有行程的 cwd 在底下" "$LOG"
+teardown
+
+# 5f. （#1450）登記在 $HOME 之外的 worktree：不碰（不在 $HOME 底下就 skip）。
+setup
+OUTREG="$ROOT/outside-home-wt"; git -C "$REPO" worktree add -q "$OUTREG" -b outside
+mk_target "$OUTREG" yes
+equals "exit 0" "$(run)" "0"
+exists "登記在 HOME 之外的 worktree：target/ 不動" "$OUTREG/target/debug/incremental/oldcrate-aaa"
+teardown
+
+# 5g. （#1450）ubuntu-ci 的常駐 clone：舊的 incremental 刪、新的留；.fingerprint 全舊也不刪整個 target/（它是 CI 的暖快取）。
+setup
+CIREPO="$HOME/.cache/agents-manager/ci/repo"; mkdir -p "$CIREPO"
+mk_target "$CIREPO" yes
+equals "exit 0" "$(run)" "0"
+gone   "CI clone 舊的 incremental 被刪" "$CIREPO/target/debug/incremental/oldcrate-aaa"
+exists "CI clone 新的 incremental 留著" "$CIREPO/target/debug/incremental/newcrate-bbb"
+exists "CI clone 的 target/ 整個不刪（即使 .fingerprint 全舊）" "$CIREPO/target"
+teardown
+
+# 5h. （#1450）git worktree list 失敗：只掃 .claude/worktrees，log 記一行 skip，不會整支不跑。
+setup
+cat > "$BIN/git-fail" <<'STUB'
+#!/bin/bash
+exit 1
+STUB
+chmod 755 "$BIN/git-fail"
+WT2="$REPO/.claude/worktrees/wt-glob"; mkdir -p "$WT2"; mk_target "$WT2"
+equals "exit 0" "$(PATH="$BIN:${AM_CANARY_DIR:+$AM_CANARY_DIR:}/usr/bin:/bin" DISK_GC_GIT="$BIN/git-fail" AGM_REPO="$REPO" DF_BIN="$BIN/df" AGM_BIN="$BIN/agm" DISK_GC_LOG="$LOG" bash "$AGM_DIR/bin/disk-gc.sh" >/dev/null 2>&1; echo $?)" "0"
+gone   "git 失敗時 .claude/worktrees 照舊掃" "$WT2/target/debug/incremental/oldcrate-aaa"
+check  "log 記下 worktree list 失敗" "worktree list 失敗" "$LOG"
 teardown
 
 # 6. 磁碟水位：90% → 呼叫 ops-alert 一次；50% → 不呼叫。
