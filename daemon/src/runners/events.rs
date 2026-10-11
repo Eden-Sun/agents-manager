@@ -1289,4 +1289,58 @@ mod tests {
             assert_eq!(status_in_db(&app, run).await, "idle", "沒有任何新事件，靠的是重讀 herdr");
         }
     }
+
+    /// #1409：已移交專案的 pane，狀態事件進來時把它欠著的修復登記丟掉（移交期間這顆 daemon 不寫它的狀態）。
+    #[tokio::test]
+    async fn a_repair_registration_is_dropped_once_the_project_is_handed_off() {
+        let e = tt::env().await;
+        let app = e.app.clone();
+        let bot = tt::claude_bot(&app, &e.project_id, "handoff-event").await;
+        let run = tt::fake_run(&app, &bot.id).await;
+        let pane = format!("pane-{}", bot.id);
+        e.herdr.live_pane(&pane, tt::LivePane { rows: Some(40), ..Default::default() });
+        e.herdr.set_agent("handoff-event", &pane, false);
+        sqlx::query("UPDATE runs SET agent_status='working' WHERE id=?").bind(&run).execute(&app.db).await.unwrap();
+        let key: PaneKey = (LOCAL_HOST.to_string(), "test".to_string(), pane.clone());
+        mark_status_repair(&app, &key, None);
+        sqlx::query("UPDATE projects SET handed_off_to = 'mac' WHERE id = ?").bind(&e.project_id).execute(&app.db).await.unwrap();
+
+        handle_status(&app, LOCAL_HOST, "test", &status_event(&pane, "idle")).await;
+        assert!(!pending_repair(&app, &pane), "移交出去的專案不欠這顆 daemon 狀態：登記要丟掉");
+        assert_eq!(status_in_db(&app, &run).await, "working", "移交後這顆 daemon 不寫它的 DB");
+    }
+
+    /// #1409：修復迴圈不對已移交專案的 pane 打 herdr RPC（SPEC §6.5h：一個 pane RPC 都不打），登記也跟著丟掉。
+    #[tokio::test]
+    async fn the_repair_loop_never_reads_a_handed_off_pane() {
+        let e = tt::env().await;
+        let app = e.app.clone();
+        let bot = tt::claude_bot(&app, &e.project_id, "handoff-loop").await;
+        let run = tt::fake_run(&app, &bot.id).await;
+        let pane = format!("pane-{}", bot.id);
+        e.herdr.live_pane(&pane, tt::LivePane { rows: Some(40), ..Default::default() });
+        e.herdr.set_agent("handoff-loop", &pane, false);
+        sqlx::query("UPDATE runs SET agent_status='working' WHERE id=?").bind(&run).execute(&app.db).await.unwrap();
+        let key: PaneKey = (LOCAL_HOST.to_string(), "test".to_string(), pane.clone());
+        mark_status_repair(&app, &key, None);
+        sqlx::query("UPDATE projects SET handed_off_to = 'mac' WHERE id = ?").bind(&e.project_id).execute(&app.db).await.unwrap();
+
+        let reads_before = e.herdr.calls_to("pane.get").len();
+        assert_eq!(repair_pending_statuses(&app).await, 0, "移交的 pane 不留在待修復清單裡");
+        assert_eq!(e.herdr.calls_to("pane.get").len(), reads_before, "修復迴圈不對移交的 pane 打 RPC");
+        assert_eq!(status_in_db(&app, &run).await, "working");
+    }
+
+    /// #1409：pane 上已經沒有 run：沒有東西可修，登記順手丟掉（修復迴圈下一輪也會當過期清，這裡不必再多活一輪）。
+    #[tokio::test]
+    async fn a_status_event_for_a_pane_with_no_run_drops_its_registration() {
+        let e = tt::env().await;
+        let app = e.app.clone();
+        let pane = "pane-no-run".to_string();
+        let key: PaneKey = (LOCAL_HOST.to_string(), "test".to_string(), pane.clone());
+        mark_status_repair(&app, &key, None);
+
+        handle_status(&app, LOCAL_HOST, "test", &status_event(&pane, "idle")).await;
+        assert!(!pending_repair(&app, &pane), "沒有 run 的 pane 沒有東西可修，登記要丟掉");
+    }
 }
