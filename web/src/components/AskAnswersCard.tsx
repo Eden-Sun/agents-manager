@@ -2,13 +2,9 @@ import type { Message } from '../api/types'
 import { useStore } from '../store/store'
 import { useTapCopy } from '../hooks/useTapCopy'
 import { NOT_ANSWERED, askAnswersText } from '../lib/askAnswers'
+import { msgTimeLabel, msgTimeTitle } from '../lib/msgTime'
 import type { AskAnswers } from '../lib/askAnswers'
 import './askAnswers.css'
-
-function timeOf(iso: string): string {
-  const d = new Date(iso)
-  return Number.isNaN(d.getTime()) ? '' : d.toLocaleTimeString([], { hour12: false, hour: '2-digit', minute: '2-digit' })
-}
 
 /**
  * 「Claude 問／你答」：claude 的 `AskUserQuestion` 與使用者的回答（網頁或終端答的都一樣）。
@@ -27,8 +23,8 @@ export function AskAnswersCard({ msg, ask }: { msg: Message; ask: AskAnswers }) 
             {ask.answered ? '提問與回答' : '提問（沒有回答）'}
           </span>
         </div>
-        <time className="msg-time" dateTime={msg.created_at} title={msg.created_at}>
-          {timeOf(msg.created_at)}
+        <time className="msg-time" dateTime={msg.created_at} title={msgTimeTitle(msg.created_at)}>
+          {msgTimeLabel(msg.created_at)}
         </time>
       </div>
       <div className="ask-card bubble-copyable" {...tapCopy}>
