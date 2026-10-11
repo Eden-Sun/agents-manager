@@ -72,7 +72,15 @@ fn config_dir_of(env: &std::collections::BTreeMap<String, String>) -> Option<Str
 async fn locate_live(app: &Arc<App>, run: &db::Run) -> Result<Located, LcError> {
     let pane = run.pane_id.clone().filter(|p| !p.is_empty()).ok_or_else(|| refuse("session_not_found", json!({"why": "no_pane"})))?;
     let client = app.herdr_for_run(run).await.ok_or_else(|| LcError::Upstream("herdr unavailable".into()))?;
-    let procs = client.pane_process_info(&pane).await.map_err(up)?;
+    let procs = match client.pane_process_info(&pane).await {
+        Ok(procs) => procs,
+        // #1455：pane 已經不在（herdr 回 pane_not_found）＝裡面找不到 claude session，跟「pane 裡沒有 claude 行程」同一類：409，什麼都不動。
+        // 其他 herdr 錯誤仍是 502（不知道 pane 還在不在）。
+        Err(e) if e.downcast_ref::<crate::herdr::HerdrError>().is_some_and(|h| h.code == "pane_not_found") => {
+            return Err(refuse("session_not_found", json!({"why": "pane_gone", "message": "這顆子 agent 的 pane 已經不在，找不到它的 claude session。"})));
+        }
+        Err(e) => return Err(up(e)),
+    };
     let reader = app.proc_env.reader();
     let mut found: Vec<Located> = Vec::new();
     for p in procs {
