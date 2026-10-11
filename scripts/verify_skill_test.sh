@@ -2,7 +2,7 @@
 # `.claude/skills/verify/SKILL.md`（Claude Code 2.1.286+ 會在 commit 前自動叫起的 project skill，issue #747）的契約：
 #   1. 唯一的指令入口是 `scripts/check.sh changed`，skill 裡沒有另一套 web/daemon/ops/ob 判斷（不複製 CI matrix）。
 #   2. 照 skill 寫的那一行去跑，web／daemon／ops／ob 各自走到 check.sh 既有的 target，而且不會多跑別的
-#      （Rust 小改只 cargo check，不跑整套 daemon 測試）。
+#      （Rust 小改只跑改到模組的 cargo test，不另做重複的 daemon cargo check）。
 #   3. check.sh 失敗時那一行也失敗（skill 據此不得宣稱已驗證）。
 # 假 git／bun／cargo／python3／node 與假 canary 都放在暫存的 fixture 裡，不碰正式環境。
 set -euo pipefail
@@ -85,7 +85,7 @@ run_case() { # <name> <changed path> <want regex（行首）...> -- <forbidden r
 }
 
 run_case web web/src/a.ts 'bunx tsc -p tsconfig.app.json' 'bun test' -- 'cargo' 'python3'
-run_case daemon daemon/src/api.rs 'cargo check -p agents-managerd --all-targets' 'cargo test -p agents-managerd --locked -- api::' -- 'bun' 'python3'
+run_case daemon daemon/src/api.rs 'cargo test -p agents-managerd --locked -- api::' -- 'cargo check -p agents-managerd --all-targets' 'bun' 'python3'
 run_case ops scripts/ops/x.sh 'lint-shell-vars' 'ops-test ran' 'python3 -B scripts/agm_test\.' -- 'cargo' 'bunx tsc'
 run_case ob scripts/ob_x.txt 'python3 -B scripts/ob_test\.' 'node --test scripts/ob_browser_test\.' -- 'cargo' 'bun'
 

@@ -11,7 +11,7 @@
 #   scripts/check.sh clippy     # cargo clippy（只報告，現況不乾淨）
 #   scripts/check.sh all        # 以上全部
 #   CHECK_MAX_LOAD=40 scripts/check.sh changed # 先等 1 分鐘負載 ≤ 40（逾時 CHECK_LOAD_TIMEOUT 秒、預設 1800，失敗不照跑；issue #813）
-#   scripts/check.sh changed [base] # 只跑改到的部分（跟 base，預設 origin/main 比），daemon 做 cargo check＋改到模組的測試（CHECK_TESTS=none 關掉）；issue #716
+#   scripts/check.sh changed [base] # 只跑改到的部分（跟 base，預設 origin/main 比），daemon 有測試時由 cargo test 編 targets，否則 cargo check（CHECK_TESTS=none 關掉測試）；issue #716
 #
 # 注意：
 # - web 的型別檢查一定要 `tsc -p tsconfig.app.json`；根目錄的 tsconfig.json 只有
@@ -331,7 +331,17 @@ check_changed() {
     if echo "$parts" | grep -qx ops; then check_ops; fi
     if echo "$parts" | grep -qx web; then check_web; fi
     if echo "$parts" | grep -qx daemon; then
-        local am_base_release_triage_test=0
+        local am_base_release_triage_test=0 daemon_tests_will_run=0
+        filters="$(printf '%s\n' "$files" | bash scripts/ci-daemon-filters.sh)"
+        if printf '%s\n' "$filters" | grep -qx '__am_base_release_triage_submission__'; then
+            am_base_release_triage_test=1
+            filters="$(printf '%s\n' "$filters" | grep -vx '__am_base_release_triage_submission__' || true)"
+        fi
+        if [ -n "${CHECK_TESTS:-}" ]; then
+            [ "${CHECK_TESTS}" = none ] || daemon_tests_will_run=1
+        elif printf '%s\n' "$filters" | grep -qx '__all__' || [ -n "$filters" ]; then
+            daemon_tests_will_run=1
+        fi
         # Rust 測試檔有沒有被掛進去（#1336）是純文字檢查，不編譯：改到 daemon／crates 就先跑，不等 ubuntu-ci 的 ops 才紅。
         # CHECK_TESTS=none＝不跑測試，一併略過；ops 部分已經會跑它時不重跑。
         # 假 repo（其他 *_test.sh 只複製 check.sh 幾支腳本進去）沒有這支就不跑；真的 repo 一定有。
@@ -345,8 +355,12 @@ check_changed() {
             printf '<!doctype html>\n' > web/dist/index.html
             TEMPORARY_WEB_DIST_STUB=1
         fi
-        step "daemon: cargo check --all-targets"
-        env -u AM_MODEL -u AM_EFFORT -u AM_DATA_DIR cargo check -p agents-managerd --all-targets --locked
+        if [ "$daemon_tests_will_run" = 1 ]; then
+            echo "daemon: 略過 cargo check（下面的 cargo test 會編同一批 target）"
+        else
+            step "daemon: cargo check --all-targets"
+            env -u AM_MODEL -u AM_EFFORT -u AM_DATA_DIR cargo check -p agents-managerd --all-targets --locked
+        fi
         # 從 daemon 抽出去的 crate（crates/am-*）自己的測試：改到哪個就跑哪個（不受 CHECK_TESTS 過濾字串影響）。
         # CHECK_TESTS=none 連這段也不跑（#1251）：none 的意思是「不跑測試」，不是只關 daemon 那一段。
         if [ "${CHECK_TESTS:-}" != none ]; then
@@ -357,16 +371,13 @@ check_changed() {
         fi
         # 發行契約（#1185）不歸 CHECK_TESTS 管（#1258）：指定 daemon 過濾字串只換掉 daemon 那一段，契約照跑；
         # CHECK_TESTS=none 才連它一起略過（none 就是不跑測試，略過時明講）。
-        filters="$(printf '%s\n' "$files" | bash scripts/ci-daemon-filters.sh)"
-        if printf '%s\n' "$filters" | grep -qx '__am_base_release_triage_submission__'; then
-            am_base_release_triage_test=1
+        if [ "$am_base_release_triage_test" = 1 ]; then
             if [ "${CHECK_TESTS:-}" = none ]; then
                 echo "crate: CHECK_TESTS=none：略過發行契約測試（the_task_template_teaches_a_submission_the_daemon_accepts）"
             else
                 step "crate: cargo test -p am-base -- the_task_template_teaches_a_submission_the_daemon_accepts"
                 env -u AM_MODEL -u AM_EFFORT -u AM_DATA_DIR cargo test -p am-base --locked the_task_template_teaches_a_submission_the_daemon_accepts
             fi
-            filters="$(printf '%s\n' "$filters" | grep -vx '__am_base_release_triage_submission__' || true)"
         fi
         if [ -n "${CHECK_TESTS:-}" ]; then
             if [ "${CHECK_TESTS}" = none ]; then
