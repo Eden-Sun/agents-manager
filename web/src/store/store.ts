@@ -1928,8 +1928,7 @@ export const useStore = create<StoreState>((set, get) => {
       const { id, name, remapped_model: remapped } = await api.createBot(projectId, { ...input, client_request_id: createRequestId(reqKey) })
       settleCreateRequest(reqKey)
       await get().refreshState()
-      if (id) set({ selectedBotId: id })
-      if (id && !get().loadedBots[id]) void get().loadMessages(id)
+      if (id) get().selectBot(id)
       // 建的時候送到停用別名也會被換掉（API.md「停用模型的回應」）：一起講，不要讓人以為選的生效了（#539）。
       get().notify('info', remapped ? `已新增 Bot ${name}：「${remapped.from}」已停用，改用「${remapped.to}」` : `已新增 Bot ${name}`)
       return id || null
@@ -2002,8 +2001,7 @@ export const useStore = create<StoreState>((set, get) => {
       // daemon 建 bot 一律接在專案最後；分身要排在本尊正下方（使用者 2026-09-15），存成正式順序。
       const rest = botsOfProject(get(), bot.project_id).map((b) => b.id).filter((x) => x !== id)
       get().moveBot(id, rest[rest.indexOf(botId) + 1] ?? null)
-      set({ selectedBotId: id })
-      if (!get().loadedBots[id]) void get().loadMessages(id)
+      get().selectBot(id)
       get().notify('info', `已新增 Bot ${name}`)
       // 啟動不等：CLI 就緒要好幾秒，交給側欄燈號。
       void get().startBot(id)
@@ -2033,8 +2031,7 @@ export const useStore = create<StoreState>((set, get) => {
       id = res.id || null
       await get().refreshState()
       if (!id) return
-      set({ selectedBotId: id })
-      if (!get().loadedBots[id]) void get().loadMessages(id)
+      get().selectBot(id)
       if (res.start_error) {
         get().notify('error', `已從 ${bot.name} fork 出 ${res.name}，但沒有啟動：${res.start_error}`)
       } else {
@@ -2055,8 +2052,7 @@ export const useStore = create<StoreState>((set, get) => {
       id = res.id || null
       await get().refreshState()
       if (!id) return
-      set({ selectedBotId: id })
-      if (!get().loadedBots[id]) void get().loadMessages(id)
+      get().selectBot(id)
       get().notify('info', `已把子 agent ${bot.name} 升級成頂層 bot ${res.name}，接續同一段對話`)
     })
     return id
