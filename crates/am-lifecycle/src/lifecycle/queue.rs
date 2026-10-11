@@ -1044,6 +1044,8 @@ mod flush_queue_tests {
     async fn queued_kind(kind: &str, session: &str) -> Fixture {
         let env = tt::env().await;
         let app = env.app.clone();
+        // 排隊的 run 住在 `pane-1` 上：真 herdr 上 run 的 pane 一定存在，替身要認得它（#1452）。
+        env.herdr.know_pane("pane-1");
         let bot_id = db::ulid();
         sqlx::query(
             "INSERT INTO bots (id, project_id, name, kind, args_json, autostart, inject_hooks, hook_token, created_at)
