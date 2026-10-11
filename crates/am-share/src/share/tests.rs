@@ -510,6 +510,22 @@ async fn a_full_share_sandbox_refuses_new_messages_with_507() {
     assert_eq!(budget::is_full(&e.app, &b.id).await, Ok(false), "清掉之後不再擋（outbox 400 MiB 單獨不到 1 GiB）");
 }
 
+/// #1396：分享頁送訊息時 `is_full` 先量到滿並記進快取，巡邏的「上一輪」就已經是滿的，擁有者永遠收不到「剛變滿」。
+/// 巡邏自己的上一次量測才算「上一輪」；`is_full` 量的不算。稀疏檔，不真的佔碟。
+#[tokio::test]
+async fn a_bot_first_seen_full_by_is_full_is_still_reported_by_the_next_sweep() {
+    let e = tt::env().await;
+    let b = restricted_bot(&e.app, &e.project_id, "full-seen-by-portal").await;
+    let ws = std::path::PathBuf::from(store::restricted_workspace(&e.app.db, &b.id).await.unwrap().unwrap());
+    std::fs::File::create(ws.join("big.bin")).unwrap().set_len(1200 * 1024 * 1024).unwrap();
+    budget::clear_cached_for_test(&b.id);
+
+    assert_eq!(budget::is_full(&e.app, &b.id).await, Ok(true), "送訊息那條路先量到滿");
+    let newly = budget::sweep(&e.app).await;
+    assert!(newly.iter().any(|(id, m)| id == &b.id && m.full()), "巡邏仍要把它算成剛變滿：{newly:?}");
+    assert!(!budget::sweep(&e.app).await.iter().any(|(id, _)| id == &b.id), "同一段滿只報一次");
+}
+
 #[tokio::test]
 async fn the_message_rate_limit_is_per_share_per_minute() {
     let l = portal::Limits::default();
