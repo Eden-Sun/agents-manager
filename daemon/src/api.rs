@@ -69,6 +69,15 @@ pub(crate) fn work_done_for_test(key: &str) -> Arc<tokio::sync::Notify> {
     map.lock().unwrap_or_else(|e| e.into_inner()).entry(key.to_string()).or_default().clone()
 }
 
+/// 測試用：等脫離工作的完成訊號。逾時只在工作根本沒做完（修正前 handler 沒脫離、訊號永遠不會發）時才會到，
+/// 讓測試 FAIL 而不是掛住；成功路徑不靠這個時間，完成訊號先發後等也照樣收得到。
+#[cfg(test)]
+pub(crate) async fn wait_work_done_for_test(key: &str) {
+    tokio::time::timeout(std::time::Duration::from_secs(60), work_done_for_test(key).notified())
+        .await
+        .expect("脫離工作沒做完：完成訊號沒有發（handler 沒有把工作脫離出去？）");
+}
+
 /// 殺掉 `key` 的脫離工作（它若還沒登記就回 false）。
 #[cfg(test)]
 pub(crate) fn kill_delete_work_for_test(key: &str) -> bool {
@@ -8433,7 +8442,7 @@ mod delete_bot_tests {
         h.abort(); // 瀏覽器斷線：handler future 被 drop（脫離出去的工作不受影響）
         let _ = h.await;
         release.notify_one();
-        work_done_for_test(&bot.id).notified().await;
+        wait_work_done_for_test(&bot.id).await;
         let run2 = db::active_run(&e.app.db, &bot.id).await.unwrap().expect("重啟做完：bot 回來了");
         assert_ne!(run2.id, run1, "是一顆新的 run");
         assert_eq!(run2.state, "running");
@@ -8460,7 +8469,7 @@ mod delete_bot_tests {
         h.abort(); // 瀏覽器斷線：handler future 被 drop（脫離出去的工作不受影響）
         let _ = h.await;
         release.notify_one();
-        work_done_for_test(&bot.id).notified().await;
+        wait_work_done_for_test(&bot.id).await;
         let run = db::active_run(&e.app.db, &bot.id).await.unwrap().expect("啟動做完：有 active run");
         assert_eq!(run.state, "running", "agent 已經起來了，run 不能停在 starting");
     }
@@ -8484,7 +8493,7 @@ mod delete_bot_tests {
         h.abort(); // 瀏覽器斷線：handler future 被 drop（脫離出去的工作不受影響）
         let _ = h.await;
         release.notify_one();
-        work_done_for_test(&bot.id).notified().await;
+        wait_work_done_for_test(&bot.id).await;
         let state: String = sqlx::query_scalar("SELECT state FROM runs WHERE id = ?").bind(&run).fetch_one(&e.app.db).await.unwrap();
         assert_eq!(state, "stopped", "使用者要它停：不是 stopping，也不是 exited");
         assert!(db::active_run(&e.app.db, &bot.id).await.unwrap().is_none());
