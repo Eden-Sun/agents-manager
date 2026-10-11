@@ -1,8 +1,10 @@
-import { useState } from 'react'
+import { useMemo, useState } from 'react'
+import { useShallow } from 'zustand/react/shallow'
 import type { Message } from '../api/types'
 import { identityStatusOfHost, projectHostName, useStore } from '../store/store'
 import { authActionTargetId } from '../lib/authFailure'
 import { startCliLogin } from '../lib/cliLogin'
+import { resendTarget } from '../lib/resendTarget'
 import { hostLabel } from '../store/identityRows'
 import './authLoginAction.css'
 
@@ -17,13 +19,14 @@ export function AuthLoginAction({ msg }: { msg: Message }) {
   const kind = useStore((s) => s.bots.find((b) => b.id === botId)?.kind ?? null)
   const identity = useStore((s) => s.bots.find((b) => b.id === botId)?.identity ?? null)
   const host = useStore((s) => projectHostName(s, s.bots.find((b) => b.id === botId)?.project_id ?? null))
-  const lastUserText = useStore((s) => {
-    const list = botId ? (s.messages[botId] ?? []) : []
-    for (let i = list.length - 1; i >= 0; i -= 1) {
-      if (list[i].role === 'user') return list[i].content
-    }
-    return null
-  })
+  const resendFields = useStore(useShallow((s) => {
+    const target = botId ? resendTarget(s.messages[botId] ?? []) : null
+    return { text: target?.text ?? null, attachmentsJson: target ? JSON.stringify(target.attachments) : null }
+  }))
+  const target = useMemo(() => resendFields.text === null ? null : {
+    text: resendFields.text,
+    attachments: resendFields.attachmentsJson ? JSON.parse(resendFields.attachmentsJson) as string[] : [],
+  }, [resendFields])
   const agentBusy = useStore((s) => {
     const st = botId ? s.runs[botId]?.agent_status : undefined
     return st === 'working' || st === 'blocked'
@@ -61,11 +64,11 @@ export function AuthLoginAction({ msg }: { msg: Message }) {
         notify('error', `${who} 在${where}還是沒登入：先在登入終端完成授權`)
         return
       }
-      if (!lastUserText) {
+      if (!target) {
         notify('info', '已重新偵測；這個對話沒有可以重送的訊息')
         return
       }
-      if (await sendPrompt(botId, lastUserText)) {
+      if (await sendPrompt(botId, target.text, target.attachments)) {
         notify('info', '已重送上一則；若還是 Not logged in，重啟這個 Bot 讓它重讀憑證')
       }
     } finally {
@@ -92,8 +95,8 @@ export function AuthLoginAction({ msg }: { msg: Message }) {
           title={
             agentBusy
               ? '它正在忙，等這一輪停下來再重試'
-              : lastUserText
-                ? `重新偵測 ${who}，登入了就重送：${lastUserText.slice(0, 60)}`
+              : target
+                ? `重新偵測 ${who}，登入了就重送：${target.text.slice(0, 60) || `（${target.attachments.length} 個附件）`}`
                 : `重新偵測 ${who} 的登入狀態`
           }
           onClick={() => void retry()}
