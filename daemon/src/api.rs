@@ -4937,6 +4937,49 @@ mod delete_identity_tests {
         assert!(hostless_identity_in_effect(&cc, "m4p", None, "cc1"), "還沒偵測：照最保守的算");
     }
 
+    /// 設定檔要跟 DB 對得上（投影會拒絕「只有 DB 有的專案」）：把測試環境的專案寫回設定（同 `seed_project`）。
+    async fn seed_project(e: &crate::testing::Env) {
+        let (pid, repo) = (e.project_id.clone(), e.repo.to_string_lossy().to_string());
+        e.app
+            .cfg
+            .update(move |cfg| {
+                cfg.projects.push(crate::config::ProjectCfg { handed_off_to: None, id: Some(pid), path: repo, label: "proj".into(), host: crate::config::LOCAL_HOST.into(), bots: vec![] });
+                Ok(())
+            })
+            .await
+            .unwrap();
+    }
+
+    async fn cache_put(app: &Arc<App>, key: &str) {
+        app.models_cache.lock().await.insert(key.to_string(), (std::time::Instant::now(), json!({"models": []})));
+    }
+
+    async fn cache_has(app: &Arc<App>, key: &str) -> bool {
+        app.models_cache.lock().await.contains_key(key)
+    }
+
+    /// #1349：刪掉再重建同名身分（家目錄變了）之後，那個名字的模型清單快取要作廢；別的身分的不動。
+    #[tokio::test]
+    async fn deleting_or_recreating_an_identity_drops_its_cached_model_list() {
+        let env = crate::testing::env().await;
+        let app = &env.app;
+        seed_project(&env).await;
+        cache_put(app, "local/codex/work").await;
+        cache_put(app, "m4p/codex/work").await;
+        cache_put(app, "local/codex/other").await;
+        let new = NewIdentity { name: "work".into(), kind: "codex".into(), env: Default::default(), args: vec![], host: None };
+        create_identity(State(app.clone()), Json(new)).await.unwrap();
+        assert!(!cache_has(app, "local/codex/work").await, "重建同名身分：舊家目錄的清單不能留著");
+        assert!(!cache_has(app, "m4p/codex/work").await, "同名的別台那格一起作廢（不逐台判斷）");
+        assert!(cache_has(app, "local/codex/other").await, "別的身分不動");
+
+        cache_put(app, "local/codex/work").await;
+        delete_identity(State(app.clone()), Path("work".into()), Query(IdentityHostQuery { host: None })).await.unwrap();
+        assert!(!cache_has(app, "local/codex/work").await, "刪掉之後退回預設家目錄，不能再回舊帳號的清單");
+        assert!(cache_has(app, "local/codex/other").await);
+        assert!(crate::models::cached(app.as_ref(), "local", "codex", Some("work")).await.is_none());
+    }
+
     /// 刪掉沒寫 host 的 `work`：m4p 上的 bot 正在用它（那台沒有自己的 `work`）→ 409，不能只看本機的 bot。
     #[tokio::test]
     async fn deleting_a_hostless_identity_is_refused_while_a_remote_bot_relies_on_it() {
@@ -5112,6 +5155,12 @@ fn check_env_names(env: &BTreeMap<String, String>) -> Result<(), LcError> {
     }
 }
 
+/// 身分的家目錄變了（新增／刪除）：那個名字的模型清單快取作廢（#1349）。key＝`<host>/<kind>/<identity>`，host 與 kind 都不含 `/`。
+/// 不分主機一律清：沒寫 host 的身分在遠端也生效；清掉只是下一次重抓。
+async fn forget_identity_models(app: &Arc<App>, name: &str) {
+    app.models_cache.lock().await.retain(|k, _| k.splitn(3, '/').nth(2) != Some(name));
+}
+
 async fn create_identity(State(app): State<Arc<App>>, Json(b): Json<NewIdentity>) -> Result<Response, LcError> {
     crate::bot_input::check_env(&b.env)?;
     crate::bot_input::check_args(&b.args)?;
@@ -5145,6 +5194,7 @@ async fn create_identity(State(app): State<Arc<App>>, Json(b): Json<NewIdentity>
         }
         Err(e) => return Err(projection_err(e)),
     }
+    forget_identity_models(&app, &b.name).await;
     app.emit("identities_changed", json!({})).await;
     for c in app.hosts.list().await {
         crate::tools::spawn_detect(app.clone(), c.name.clone());
@@ -5228,6 +5278,7 @@ async fn delete_identity(
             ht.identities.insert(name.clone(), crate::tools::IdentityInfo::shell(&i.name, &i.kind, dir));
         }
     }
+    forget_identity_models(&app, &name).await;
     app.emit("identities_changed", json!({})).await;
     Ok((StatusCode::OK, Json(json!({}))).into_response())
 }
