@@ -957,12 +957,12 @@ esac
 
     /// 真的 router（跟 daemon 同一份），回傳它的 port 與 server 的 handle。
     fn serve_router(app: std::sync::Arc<crate::state::App>) -> (u16, tokio::task::JoinHandle<()>) {
-        serve_router_on(app, 0)
+        let listener = std::net::TcpListener::bind(("127.0.0.1", 0)).unwrap();
+        serve_router_with(app, listener)
     }
 
-    /// 同上，指定埠（0＝隨便一個）。
-    fn serve_router_on(app: std::sync::Arc<crate::state::App>, port: u16) -> (u16, tokio::task::JoinHandle<()>) {
-        let listener = std::net::TcpListener::bind(("127.0.0.1", port)).unwrap();
+    /// 同上，但用呼叫端給的 listener（從 [`reserve_port`] 來的，見 #1271）。
+    fn serve_router_with(app: std::sync::Arc<crate::state::App>, listener: std::net::TcpListener) -> (u16, tokio::task::JoinHandle<()>) {
         let port = listener.local_addr().unwrap().port();
         listener.set_nonblocking(true).unwrap();
         let router = crate::api::router(app);
@@ -971,6 +971,41 @@ esac
             let _ = axum::serve(l, router.into_make_service_with_connect_info::<std::net::SocketAddr>()).await;
         });
         (port, server)
+    }
+
+    /// 佔住一個 port 但不 listen：連過去一律被拒（curl 7），這段時間別的 socket 也拿不到這個 port（#1271）。
+    /// 放掉再重綁的做法，放掉的那段空窗會被同一個測試行程裡別的 socket（ephemeral 連線、別的測試的 listener）拿走。
+    struct ReservedPort {
+        fd: std::os::fd::OwnedFd,
+        port: u16,
+    }
+
+    fn reserve_port() -> ReservedPort {
+        use std::os::fd::{AsRawFd as _, FromRawFd as _};
+        let raw = unsafe { libc::socket(libc::AF_INET, libc::SOCK_STREAM, 0) };
+        assert!(raw >= 0, "socket: {}", std::io::Error::last_os_error());
+        let fd = unsafe { std::os::fd::OwnedFd::from_raw_fd(raw) };
+        let mut addr: libc::sockaddr_in = unsafe { std::mem::zeroed() };
+        addr.sin_family = libc::AF_INET as _;
+        addr.sin_addr = libc::in_addr { s_addr: u32::from_ne_bytes([127, 0, 0, 1]) };
+        #[cfg(target_vendor = "apple")]
+        {
+            addr.sin_len = std::mem::size_of::<libc::sockaddr_in>() as u8;
+        }
+        let len = std::mem::size_of_val(&addr) as libc::socklen_t;
+        assert_eq!(unsafe { libc::bind(fd.as_raw_fd(), &addr as *const libc::sockaddr_in as *const libc::sockaddr, len) }, 0, "bind: {}", std::io::Error::last_os_error());
+        let mut got = len;
+        assert_eq!(unsafe { libc::getsockname(fd.as_raw_fd(), &mut addr as *mut libc::sockaddr_in as *mut libc::sockaddr, &mut got) }, 0, "getsockname");
+        ReservedPort { fd, port: u16::from_be(addr.sin_port) }
+    }
+
+    impl ReservedPort {
+        /// 排程器回來：同一個 fd 開始 listen，port 從頭到尾沒放掉過。
+        fn listen(self) -> std::net::TcpListener {
+            use std::os::fd::AsRawFd as _;
+            assert_eq!(unsafe { libc::listen(self.fd.as_raw_fd(), 128) }, 0, "listen: {}", std::io::Error::last_os_error());
+            std::net::TcpListener::from(self.fd)
+        }
     }
 
     /// 跑 `n` 顆 shim（同一個沙盒、同一個真的 router）：回傳它們的 process group 與 stderr 檔。
@@ -1182,8 +1217,9 @@ esac
         .execute(&env.app.db)
         .await
         .unwrap();
-        // 先佔一個埠再放掉：這段時間沒有人在聽，連線被拒（curl 7）。
-        let port = std::net::TcpListener::bind("127.0.0.1:0").unwrap().local_addr().unwrap().port();
+        // 佔住一個埠、不 listen：這段時間沒有人在聽，連線被拒（curl 7），別人也拿不走這個埠（#1271）。
+        let reserved = reserve_port();
+        let port = reserved.port;
 
         let s = Sandbox::new();
         s.install_counting_cargo();
@@ -1195,7 +1231,7 @@ esac
         assert!(!s.dir.join("peak.log").exists(), "排程器沒開、沒有名額：不能有 cargo 在跑：{:?}", std::fs::read_to_string(s.dir.join("peak.log")));
 
         // 排程器回來：照常排隊，一次一顆。
-        let (_, server) = serve_router_on(env.app.clone(), port);
+        let (_, server) = serve_router_with(env.app.clone(), reserved.listen());
         let results = finish_shims(&s, shims).await;
         server.abort();
         for (rc, err) in &results {
@@ -1205,6 +1241,20 @@ esac
         let peaks: Vec<u32> = std::fs::read_to_string(s.dir.join("peak.log")).unwrap().lines().filter_map(|l| l.trim().parse().ok()).collect();
         assert_eq!(peaks.len(), 2, "兩顆都要跑完：{peaks:?}");
         assert_eq!(peaks.iter().max(), Some(&1), "同時在跑的最多 1 顆（max_concurrent=1）：{peaks:?}");
+    }
+
+    /// #1271：保留的 port 連過去一律被拒，別的 socket 綁不走，直到 listen 為止；listen 之後才接得上。
+    #[test]
+    fn a_reserved_port_refuses_connections_and_cannot_be_taken_until_it_listens() {
+        let r = reserve_port();
+        let refused = std::net::TcpStream::connect(("127.0.0.1", r.port)).unwrap_err();
+        assert_eq!(refused.kind(), std::io::ErrorKind::ConnectionRefused, "{refused}");
+        let taken = std::net::TcpListener::bind(("127.0.0.1", r.port)).unwrap_err();
+        assert_eq!(taken.kind(), std::io::ErrorKind::AddrInUse, "{taken}");
+        let port = r.port;
+        let l = r.listen();
+        assert_eq!(l.local_addr().unwrap().port(), port);
+        std::net::TcpStream::connect(("127.0.0.1", port)).expect("listen 之後要接得上");
     }
 
     /// 這台機器上有的 shell（沒有的略過）。macOS 的 `/bin/sh`／`/bin/bash` 是 3.2——腳本改動要在那個版本也驗。
