@@ -9,7 +9,7 @@ use serde::Deserialize;
 use serde_json::{json, Value};
 
 use crate::credential_spawn::{
-    permit_ttl, FenceError, FinishClaimError,
+    permit_ttl, FenceError, FinishClaimError, SpawnAuthority,
 };
 use crate::state::App;
 
@@ -41,16 +41,17 @@ struct FinishClaim {
     bot_id: String,
     permit_id: String,
     pane_id: String,
+    authority: Option<SpawnAuthority>,
     completed: bool,
 }
 
 impl FinishClaim {
     fn begin(app: &Arc<App>, bot_id: &str, permit_id: &str, pane_id: &str) -> Result<Self, FinishClaimError> {
-        app.credential_spawn_gate
+        let authority = app.credential_spawn_gate
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
-            .claim_finish(bot_id, permit_id, pane_id)?;
-        Ok(Self { app: app.clone(), bot_id: bot_id.to_string(), permit_id: permit_id.to_string(), pane_id: pane_id.to_string(), completed: false })
+            .claim_finish_with_authority(bot_id, permit_id, pane_id)?;
+        Ok(Self { app: app.clone(), bot_id: bot_id.to_string(), permit_id: permit_id.to_string(), pane_id: pane_id.to_string(), authority, completed: false })
     }
 
     fn complete(mut self) -> bool {
@@ -62,6 +63,12 @@ impl FinishClaim {
             .complete_finish(&self.bot_id, &self.permit_id, &self.pane_id);
         self.completed = released;
         released
+    }
+
+    fn reject(mut self) {
+        self.app.credential_spawn_gate.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
+            .reject_finish(&self.bot_id, &self.permit_id, &self.pane_id);
+        self.completed = true;
     }
 }
 
@@ -106,9 +113,9 @@ impl Drop for RotationFence {
     }
 }
 
-fn reserve(app: &Arc<App>, bot_id: &str, permit_id: &str, ttl: Duration) -> Result<(), ()> {
+fn reserve(app: &Arc<App>, bot_id: &str, permit_id: &str, ttl: Duration, authority: SpawnAuthority) -> Result<(), ()> {
     let mut gate = app.credential_spawn_gate.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
-    gate.reserve(bot_id, permit_id, ttl)
+    gate.reserve_authoritative(bot_id, permit_id, ttl, authority)
 }
 
 fn release(app: &Arc<App>, bot_id: &str, permit_id: &str) -> bool {
@@ -141,11 +148,39 @@ pub struct SpawnAbort {
 /// `POST /relay/spawn/begin`: reserve the parent's credential while a shim invokes herdr.
 pub async fn begin(State(app): State<Arc<App>>, headers: axum::http::HeaderMap, axum::extract::Form(body): axum::extract::Form<SpawnBegin>) -> (StatusCode, Json<Value>) {
     let token = headers.get("X-AM-Bot-Token").and_then(|v| v.to_str().ok()).unwrap_or("");
-    if let Err(response) = authenticated_bot(&app, &body.bot_id, token).await {
-        return response;
-    }
+    let bot = match authenticated_bot(&app, &body.bot_id, token).await {
+        Ok(bot) => bot,
+        Err(response) => return response,
+    };
+    let host = match crate::db::bot_host(&app.db, &bot.id).await {
+        Ok(host) => host,
+        Err(e) => {
+            tracing::warn!(bot = %bot.id, error = %e, "credential spawn could not read bot host");
+            return fail(StatusCode::SERVICE_UNAVAILABLE, "host_unreadable", "bot host could not be checked; spawn refused");
+        }
+    };
+    let fence = match app.hosts.fence(&host).await {
+        Some(fence) => fence,
+        None => return fail(StatusCode::CONFLICT, "spawn_host_unavailable", "bot host is unavailable; spawn refused"),
+    };
+    let run = match crate::db::active_run(&app.db, &bot.id).await {
+        Ok(Some(run)) => run,
+        Ok(None) => return fail(StatusCode::CONFLICT, "spawn_run_missing", "bot has no active run; spawn refused"),
+        Err(e) => {
+            tracing::warn!(bot = %bot.id, error = %e, "credential spawn could not read active run");
+            return fail(StatusCode::SERVICE_UNAVAILABLE, "run_unreadable", "active run could not be checked; spawn refused");
+        }
+    };
+    let session = match run.herdr_session.clone().filter(|s| !s.is_empty()) {
+        Some(session) => Some(session),
+        None => app.session_for_bot_with_host_fence(&bot, &host, &fence).await,
+    };
+    let Some(session) = session else {
+        return fail(StatusCode::CONFLICT, "spawn_session_unavailable", "bot session is unavailable; spawn refused");
+    };
+    let authority = SpawnAuthority { host: host.clone(), host_authority: fence.authority_key(), herdr_session: session, run_id: run.id };
     let permit_id = crate::db::ulid();
-    if reserve(&app, &body.bot_id, &permit_id, permit_ttl(&body.timeout_ms)).is_err() {
+    if reserve(&app, &body.bot_id, &permit_id, permit_ttl(&body.timeout_ms), authority.clone()).is_err() {
         return fail(StatusCode::CONFLICT, "credential_rotation_pending", "credential rotation is checking child panes; spawn refused");
     }
     // Close the read-before-reserve window: a rotation may have committed between the first token
@@ -153,6 +188,13 @@ pub async fn begin(State(app): State<Arc<App>>, headers: axum::http::HeaderMap, 
     if let Err(response) = authenticated_bot(&app, &body.bot_id, token).await {
         release(&app, &body.bot_id, &permit_id);
         return response;
+    }
+    let still_current = fence.is_current_now()
+        && crate::db::bot_host(&app.db, &bot.id).await.ok().as_deref() == Some(authority.host.as_str())
+        && crate::db::active_run(&app.db, &bot.id).await.ok().flatten().is_some_and(|current| current.id == authority.run_id);
+    if !still_current {
+        release(&app, &body.bot_id, &permit_id);
+        return fail(StatusCode::CONFLICT, "spawn_authority_changed", "bot host or run changed while reserving spawn; retry");
     }
     (StatusCode::OK, Json(json!({"permit_id": permit_id})))
 }
@@ -184,25 +226,88 @@ pub async fn finish(
             return fail(StatusCode::CONFLICT, "spawn_finish_in_progress", "spawn permit is already being finished");
         }
     };
-    let host = match crate::db::bot_host(&app.db, &bot.id).await {
+    let Some(authority) = claim.authority.clone() else {
+        claim.reject();
+        return fail(StatusCode::CONFLICT, "spawn_authority_missing", "spawn permit has no captured authority; retry spawn");
+    };
+    let current_host = match crate::db::bot_host(&app.db, &bot.id).await {
         Ok(host) => host,
         Err(e) => {
             tracing::warn!(bot = %bot.id, error = %e, "credential spawn could not read bot host");
             return fail(StatusCode::SERVICE_UNAVAILABLE, "host_unreadable", "bot host could not be checked; spawn remains fenced");
         }
     };
-    let parent_pane = match crate::db::active_run(&app.db, &bot.id).await {
-        Ok(run) => run.and_then(|r| r.pane_id),
+    let fence = match app.hosts.fence(&authority.host).await {
+        Some(fence) if authority.host_authority.matches(&fence) && current_host == authority.host => fence,
+        _ => {
+            claim.reject();
+            return fail(StatusCode::CONFLICT, "spawn_host_superseded", "spawn host changed after the permit was issued");
+        }
+    };
+    let run = match crate::db::active_run(&app.db, &bot.id).await {
+        Ok(Some(run)) if run.id == authority.run_id => run,
+        Ok(_) => {
+            claim.reject();
+            return fail(StatusCode::CONFLICT, "spawn_run_superseded", "bot run changed after the permit was issued");
+        }
         Err(e) => {
             tracing::warn!(bot = %bot.id, error = %e, "credential spawn could not read active pane");
             return fail(StatusCode::SERVICE_UNAVAILABLE, "run_unreadable", "parent pane could not be checked; spawn remains fenced");
         }
     };
-    if parent_pane.as_deref() != Some(pane_id) {
-        if let Err(e) = crate::panes::note_purpose(&app, &host, pane_id, &bot, body.purpose.trim()).await {
-            tracing::warn!(bot = %bot.id, pane = %pane_id, error = %e, "credential-bearing pane could not be registered");
-            return fail(StatusCode::SERVICE_UNAVAILABLE, "pane_registration_failed", "created pane could not be registered; spawn remains fenced");
+    let current_session = app.session_for_bot_with_host_fence(&bot, &authority.host, &fence).await;
+    let current_session = run.herdr_session.clone().filter(|s| !s.is_empty()).or(current_session);
+    if current_session.as_deref() != Some(authority.herdr_session.as_str()) {
+        claim.reject();
+        return fail(StatusCode::CONFLICT, "spawn_session_superseded", "bot session changed after the permit was issued");
+    }
+    let Some(client) = app.herdr_for_host_fence(&fence, &authority.herdr_session).await else {
+        claim.reject();
+        return fail(StatusCode::CONFLICT, "spawn_host_superseded", "spawn host session is no longer available");
+    };
+    let parent_pane = run.pane_id;
+    let operation = fence.run_current(async {
+        let current_host = match crate::db::bot_host(&app.db, &bot.id).await {
+            Ok(host) => host,
+            Err(e) => {
+                tracing::warn!(bot = %bot.id, error = %e, "credential spawn could not recheck bot host");
+                return Err((StatusCode::SERVICE_UNAVAILABLE, "host_unreadable", "bot host could not be rechecked; spawn remains fenced"));
+            }
+        };
+        let current_run = match crate::db::active_run(&app.db, &bot.id).await {
+            Ok(run) => run,
+            Err(e) => {
+                tracing::warn!(bot = %bot.id, error = %e, "credential spawn could not recheck active run");
+                return Err((StatusCode::SERVICE_UNAVAILABLE, "run_unreadable", "active run could not be rechecked; spawn remains fenced"));
+            }
+        };
+        if current_host != authority.host || !current_run.as_ref().is_some_and(|current| current.id == authority.run_id) {
+            return Err((StatusCode::CONFLICT, "spawn_authority_changed", "bot host or run changed before pane registration"));
         }
+        match client.agent_get(pane_id).await {
+            Ok(Some(_)) => {},
+            Ok(None) => return Err((StatusCode::SERVICE_UNAVAILABLE, "spawn_pane_unverified", "created pane was not found in the captured herdr session; retry finish")),
+            Err(e) => {
+                tracing::warn!(bot = %bot.id, pane = %pane_id, error = %e, "credential spawn could not verify pane");
+                return Err((StatusCode::SERVICE_UNAVAILABLE, "spawn_pane_unreadable", "created pane could not be verified; spawn remains fenced"));
+            }
+        }
+        if parent_pane.as_deref() != Some(pane_id) {
+            crate::panes::note_purpose(&app, &authority.host, pane_id, &bot, body.purpose.trim()).await
+                .map_err(|e| {
+                    tracing::warn!(bot = %bot.id, pane = %pane_id, error = %e, "credential-bearing pane could not be registered");
+                    (StatusCode::SERVICE_UNAVAILABLE, "pane_registration_failed", "created pane could not be registered; spawn remains fenced")
+                })?;
+        }
+        Ok(())
+    }).await;
+    let result = match operation {
+        None => Err((StatusCode::CONFLICT, "spawn_host_superseded", "spawn host changed before pane registration")),
+        Some(result) => result,
+    };
+    if let Err((status, reason, message)) = result {
+        if status == StatusCode::CONFLICT { claim.reject(); }
+        return fail(status, reason, message);
     }
     if !claim.complete() {
         return fail(StatusCode::CONFLICT, "spawn_permit_missing", "spawn permit changed while registering the pane");

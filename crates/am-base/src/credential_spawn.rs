@@ -30,6 +30,16 @@ struct Permit {
     ttl: Duration,
     pane_id: Option<String>,
     finishing: bool,
+    authority: Option<SpawnAuthority>,
+}
+
+/// Authority captured before the external `herdr agent start` call.
+#[derive(Clone, PartialEq, Eq)]
+pub struct SpawnAuthority {
+    pub host: String,
+    pub host_authority: crate::hosts::HostAuthorityKey,
+    pub herdr_session: String,
+    pub run_id: String,
 }
 
 impl Permit {
@@ -80,7 +90,19 @@ impl Gate {
         self.sweep(bot_id, Instant::now());
         self.permits.entry(bot_id.to_string()).or_default().insert(
             permit_id.to_string(),
-            Permit { at: Instant::now(), ttl, pane_id: None, finishing: false },
+            Permit { at: Instant::now(), ttl, pane_id: None, finishing: false, authority: None },
+        );
+        Ok(())
+    }
+
+    pub fn reserve_authoritative(&mut self, bot_id: &str, permit_id: &str, ttl: Duration, authority: SpawnAuthority) -> Result<(), ()> {
+        if self.rotating.contains(bot_id) {
+            return Err(());
+        }
+        self.sweep(bot_id, Instant::now());
+        self.permits.entry(bot_id.to_string()).or_default().insert(
+            permit_id.to_string(),
+            Permit { at: Instant::now(), ttl, pane_id: None, finishing: false, authority: Some(authority) },
         );
         Ok(())
     }
@@ -95,6 +117,15 @@ impl Gate {
     /// Bind a permit before any asynchronous registration. A replay with a different pane must
     /// never get as far as the DB write, even when two finish requests arrive together.
     pub fn claim_finish(&mut self, bot_id: &str, permit_id: &str, pane_id: &str) -> Result<(), FinishClaimError> {
+        self.claim_finish_with_authority(bot_id, permit_id, pane_id).map(|_| ())
+    }
+
+    pub fn claim_finish_with_authority(
+        &mut self,
+        bot_id: &str,
+        permit_id: &str,
+        pane_id: &str,
+    ) -> Result<Option<SpawnAuthority>, FinishClaimError> {
         self.sweep(bot_id, Instant::now());
         let permit = self
             .permits
@@ -110,7 +141,13 @@ impl Gate {
         }
         permit.pane_id.get_or_insert_with(|| pane_id.to_string());
         permit.finishing = true;
-        Ok(())
+        Ok(permit.authority.clone())
+    }
+
+    pub fn reject_finish(&mut self, bot_id: &str, permit_id: &str, pane_id: &str) {
+        let valid = self.permits.get(bot_id).and_then(|permits| permits.get(permit_id))
+            .is_some_and(|p| p.finishing && p.pane_id.as_deref() == Some(pane_id));
+        if valid { self.remove(bot_id, permit_id); }
     }
 
     /// An abort can only discard an untouched permit; once finish started, its registration must
