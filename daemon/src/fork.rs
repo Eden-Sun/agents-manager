@@ -629,7 +629,7 @@ mod tests {
         h.abort(); // 瀏覽器斷線：handler future 被 drop（脫離出去的工作不受影響）
         let _ = h.await;
         release.notify_one();
-        crate::api::work_done_for_test(&target).notified().await;
+        crate::api::wait_work_done_for_test(&target).await;
         let saved = fork_ops::get(&e.app.db, "req-drop").await.unwrap().expect("fork 操作還在");
         assert_eq!(saved.state, "started");
         assert!(saved.run_id.is_some(), "有 run");

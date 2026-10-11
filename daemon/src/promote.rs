@@ -964,7 +964,7 @@ mod tests {
         h.abort(); // 瀏覽器斷線：handler future 被 drop（脫離出去的工作不受影響）
         let _ = h.await;
         release.notify_one();
-        crate::api::work_done_for_test(&r.child).notified().await;
+        crate::api::wait_work_done_for_test(&r.child).await;
         assert_eq!(intent_status(&r.e.app, &r.child).await, vec!["done"], "intent 收成 done，不停在 running");
         assert!(child_state(&r).await.0, "child 收掉了");
         let bots = r.e.app.cfg.get().await.projects[0].bots.clone();
