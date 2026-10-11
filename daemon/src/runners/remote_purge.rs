@@ -4,8 +4,17 @@ use crate::state::App;
 use std::sync::Arc;
 use crate::remote_purge::POLL_EVERY;
 
-/// 掃一台遠端主機：回 `(清掉, 留著)`。資料查詢與結果記錄留在下層模組。
+/// 掃一台遠端主機（主機連上的那一刻用）：欠著的全部重試，不看退避。回 `(清掉, 留著)`。
 pub async fn sweep(app: &Arc<App>, host: &str) -> (usize, usize) {
+    sweep_inner(app, host, false).await
+}
+
+/// 定期掃描用：退避中（上次失敗還沒到 `next_attempt_at`）的先不試（#1318）。
+pub async fn sweep_due(app: &Arc<App>, host: &str) -> (usize, usize) {
+    sweep_inner(app, host, true).await
+}
+
+async fn sweep_inner(app: &Arc<App>, host: &str, due_only: bool) -> (usize, usize) {
     if host == crate::config::LOCAL_HOST {
         return (0, 0);
     }
@@ -14,7 +23,7 @@ pub async fn sweep(app: &Arc<App>, host: &str) -> (usize, usize) {
         return (0, 0);
     }
     crate::runners::remote_trash::gc_host(app, host).await;
-    let ids = match crate::remote_purge::pending(&app.db, host).await {
+    let ids = match crate::remote_purge::pending(&app.db, host, due_only).await {
         Ok(v) => v,
         Err(e) => {
             tracing::warn!(host, error = %e, "could not read which deleted bots still owe a remote directory purge; nothing removed");
@@ -100,7 +109,7 @@ pub async fn sweep_connected_hosts(app: &Arc<App>) {
         if !conn.is_local() && conn.is_connected() {
             let app = app.clone();
             set.spawn(async move {
-                sweep(&app, &name).await;
+                sweep_due(&app, &name).await;
             });
         }
     }
