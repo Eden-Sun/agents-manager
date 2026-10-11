@@ -551,6 +551,26 @@ mod tests {
         assert!(resolve(&app, &sender.id, "local-target").await.unwrap().is_none(), "herdr does not resolve a bot's DB name");
     }
 
+    /// #1363：收件方的專案已經移交給別台主機：這顆 daemon 不認領它（字由 shim 直接送進 pane，歸接手的 daemon 記），
+    /// 不替它開回合、不盯 pane；移交清掉之後又認得到。
+    #[tokio::test]
+    async fn resolve_ignores_a_target_whose_project_was_handed_off() {
+        let f = fixture("handoff-target").await;
+        let app = f.env.app.clone();
+        let sender = tt::claude_bot(&app, &f.env.project_id, "handoff-sender").await;
+        assert_eq!(resolve(&app, &sender.id, &f.pane).await.unwrap().map(|r| r.id), Some(f.run_id.clone()), "移交前：收件方在這顆 daemon 底下");
+
+        sqlx::query("UPDATE projects SET handed_off_to = 'agm-host' WHERE id = ?").bind(&f.env.project_id).execute(app.db()).await.unwrap();
+        assert!(resolve(&app, &sender.id, &f.pane).await.unwrap().is_none(), "已移交：不是這顆 daemon 管的目標");
+        let run = resolve(&app, &sender.id, &f.pane).await.unwrap();
+        on_resolved_announce(&app, &sender.id, None, TEXT, run).await;
+        let external: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM turns WHERE origin='external'").fetch_one(app.db()).await.unwrap();
+        assert_eq!(external, 0, "沒有替已移交的 bot 開回合");
+
+        sqlx::query("UPDATE projects SET handed_off_to = NULL WHERE id = ?").bind(&f.env.project_id).execute(app.db()).await.unwrap();
+        assert_eq!(resolve(&app, &sender.id, &f.pane).await.unwrap().map(|r| r.id), Some(f.run_id.clone()), "移交清掉：又認得到");
+    }
+
     #[tokio::test]
     async fn resolve_returns_none_when_multiple_runs_match_in_the_sender_scope() {
         let f = fixture("ambiguous-target").await;
