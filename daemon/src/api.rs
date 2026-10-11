@@ -10690,11 +10690,21 @@ mod per_principal_auth_tests {
         let mut c = tokio::net::TcpStream::connect(addr).await.unwrap();
         // 超過 body 上限的請求：伺服器在讀完之前就回 413 並關線，寫入端可能撞 BrokenPipe／ECONNRESET。
         // 回應其實已經在收到的位元組裡（實測：寫入失敗與讀取 RST 都照樣收得到 413），所以這裡不把連線錯誤當成測試失敗，照收到的內容回。
-        let _ = c.write_all(request.as_bytes()).await;
+        let wrote = c.write_all(request.as_bytes()).await;
         let mut bytes = Vec::new();
-        let _ = c.read_to_end(&mut bytes).await;
+        let read = c.read_to_end(&mut bytes).await;
+        note_raw_io(&wrote, &read, bytes.len());
         server.abort();
         String::from_utf8_lossy(&bytes).into_owned()
+    }
+
+    /// 連線錯誤照樣不算失敗，只留證據：libtest 只在測試紅時才顯示這行（#1270：紅的那次沒留下寫入／讀取的錯誤種類）。
+    /// 放在獨立的 `#[inline(never)]` 函式裡：格式化的暫存不進 `raw` 的 future，不然 debug 建置的 stack 會撐爆（per_principal 整批 SIGABRT）。
+    #[inline(never)]
+    fn note_raw_io(wrote: &std::io::Result<()>, read: &std::io::Result<usize>, n: usize) {
+        if wrote.is_err() || read.is_err() {
+            eprintln!("raw(): write={wrote:?} read={read:?} response_bytes={n}");
+        }
     }
 
     async fn raw_many(app: Arc<App>, requests: Vec<String>) -> Vec<String> {
