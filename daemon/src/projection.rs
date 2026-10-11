@@ -61,7 +61,11 @@ pub fn project_config_at_startup<'a>(
 
 /// `serve` 啟動時讀一次；其他地方不讀。
 pub fn bulk_delete_allowed_by_env() -> bool {
-    std::env::var(ALLOW_BULK_ENV).is_ok_and(|v| v == "1")
+    bulk_delete_allowed(std::env::var(ALLOW_BULK_ENV).ok().as_deref())
+}
+
+fn bulk_delete_allowed(value: Option<&str>) -> bool {
+    value == Some("1")
 }
 
 /// 刪除 API 這一次**實際從 config.toml 拿掉**的 id。只由 `delete_from_config` 在臨界區內從當下的 TOML 算出來，
@@ -747,11 +751,6 @@ async fn guard_removals(
     }
 }
 
-/// `AM_ALLOW_BULK_DELETE` 是整個行程共用的環境變數：設它的測試與「期待被擋下」的測試平行跑時，
-/// 後者會偶爾被放行（實測 3 次紅 2 次）。兩邊（含 api 的測試）都拿這把鎖。
-#[cfg(test)]
-pub(crate) static BULK_ENV: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1009,12 +1008,9 @@ mod tests {
         std::fs::remove_dir_all(&dir).unwrap();
     }
 
-    use super::BULK_ENV;
-
     /// 2026-09-14：第二顆 daemon 用 /tmp 的空 config 開到正式 DB，曾經軟刪 15 顆 bot／6 個專案。
     #[tokio::test]
     async fn bulk_override_never_bypasses_the_bot_count_limit() {
-        let _env = BULK_ENV.lock().await;
         let dir = crate::testing::track(std::env::temp_dir().join(format!("am-projection-bulk-{}", db::ulid())));
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join("config.toml");
@@ -1044,10 +1040,18 @@ mod tests {
         std::fs::remove_dir_all(&dir).unwrap();
     }
 
+    /// 只有精確的 `1` 放行（原本 `bulk_delete_allowed_by_env` 的判斷，拆成吃值的純函式後由這裡驗）。
+    #[test]
+    fn only_the_exact_value_1_allows_a_bulk_delete() {
+        assert!(bulk_delete_allowed(Some("1")));
+        for v in [None, Some(""), Some("0"), Some("true"), Some(" 1"), Some("11")] {
+            assert!(!bulk_delete_allowed(v), "{v:?}");
+        }
+    }
+
     /// `AM_ALLOW_BULK_DELETE=1` 只放行啟動那一次的空 config（單 bot）；runtime 重投照樣要擋。
     #[tokio::test]
     async fn the_bulk_allowance_does_not_outlive_the_startup_projection() {
-        let _env = BULK_ENV.lock().await;
         let dir = crate::testing::track(std::env::temp_dir().join(format!("am-projection-once-{}", db::ulid())));
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join("config.toml");
@@ -1059,9 +1063,8 @@ mod tests {
         // 使用者清空 config，帶 env 重啟：空設定的舊式明確覆寫仍放行一顆 bot。
         std::fs::write(&path, "[server]\nlisten = '127.0.0.1:7788'\n").unwrap();
         let store = crate::runners::app_ports_p2::load_config(path.clone()).await.unwrap();
-        std::env::set_var(ALLOW_BULK_ENV, "1");
-        assert!(bulk_delete_allowed_by_env());
-        let started = project_config_at_startup(&store, &pool, bulk_delete_allowed_by_env()).await;
+        // 放行與否用參數傳進去，不改整個行程的環境變數（測試平行跑時 set_var 是資料競爭）。
+        let started = project_config_at_startup(&store, &pool, true).await;
         started.unwrap();
         assert_eq!(db::live_bots(&pool).await.unwrap().len(), 0);
 
@@ -1071,7 +1074,6 @@ mod tests {
         std::fs::write(&path, "[server]\nlisten = '127.0.0.1:7788'\n").unwrap();
         store.update(|_| Ok(())).await.unwrap();
         let out = project_config(&store, &pool).await;
-        std::env::remove_var(ALLOW_BULK_ENV);
         let err = out.unwrap_err().to_string();
         assert!(err.contains("拒絕投影") && err.contains("重啟 daemon"), "{err}");
         assert_eq!(db::live_projects(&pool).await.unwrap().len(), 1, "一列都不能動");
@@ -1085,7 +1087,6 @@ mod tests {
     /// 再由 API／總管觸發重投——不擋的話事故路徑只是換個入口（sol 複審 2026-09-14）。
     #[tokio::test]
     async fn a_config_swapped_under_a_running_daemon_is_refused() {
-        let _env = BULK_ENV.lock().await;
         let dir = crate::testing::track(std::env::temp_dir().join(format!("am-projection-reload-{}", db::ulid())));
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join("config.toml");
