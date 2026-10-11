@@ -41,18 +41,31 @@ async fn sweep_inner(app: &Arc<App>, host: &str, due_only: bool) -> (usize, usiz
             kept += 1;
             continue;
         };
-        match crate::db::bot(&app.db, &id).await {
+        let bot = match crate::db::bot(&app.db, &id).await {
             Ok(Some(b)) if b.deleted_at.is_none() => {
                 tracing::info!(bot = %id, host, "the bot was restored while this sweep was running; leaving its directory alone");
                 continue;
             }
-            Ok(Some(_)) => {}
+            Ok(Some(b)) => b,
             Ok(None) => {
                 kept += 1;
                 continue;
             }
             Err(e) => {
                 tracing::warn!(bot = %id, host, error = %e, "could not re-read whether a bot is still deleted; leaving its directory");
+                kept += 1;
+                continue;
+            }
+        };
+        match crate::db::project(&app.db, &bot.project_id).await {
+            Ok(Some(p)) if p.handed_off_to.is_none() => {}
+            Ok(_) => {
+                tracing::debug!(bot = %id, host, "project was handed off or removed while the sweep was running; leaving its directory alone");
+                kept += 1;
+                continue;
+            }
+            Err(e) => {
+                tracing::warn!(bot = %id, host, error = %e, "could not re-read project handoff; leaving its remote directory");
                 kept += 1;
                 continue;
             }
