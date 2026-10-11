@@ -226,7 +226,7 @@ React 前端 (Vite) ◄── REST + WebSocket ──► Rust daemon (axum) ◄�
   落盤之後投影失敗（例如撞上 child 才占著的 `(project_id, name)`）要把這次寫進去的 TOML 退回寫入前的內容（#654）。新增 bot 的重名檢查同時看 config 與 DB 裡還活著的名字（含 child）。
   以前只在投影當下驗，而投影跑在 config 已經落盤之後：一筆會被擋的修改先把 TOML 改壞，API 回了錯，現場卻已經變了，
   daemon 下次啟動才爆。`validate` 是純函式（bot／專案 id 格式、bot 名字、kind、identity 綁定與 kind 相符、identity 名字與 kind，
-  以及 `[[hosts]]` 的名字不得是保留的 `local`、要合 slug 規則、`ssh` 不得為空、不得同名重複——issue #506：這四條以前只擋得住
+  `[[projects]]` 的 id 不得重複、`[[projects.bots]]` 的 id 不得重複（bot id 全域，名字同一專案內不得重複——#1351：兩列同 id 會靜默合成一顆）；以及 `[[hosts]]` 的名字不得是保留的 `local`、要合 slug 規則、`ssh` 不得為空、不得同名重複——issue #506：這四條以前只擋得住
   `POST /api/hosts`，手改 TOML 全部放行，而一列 `name = "local"` 會讓開機的 `hosts::apply_config` 把本機那顆連線換成 ssh 遠端），
   不碰 DB；每個 mutation 都走同一支，規則只有一份。`apply_config` 自己也跳過叫 `local` 的列當第二層保險。
   **壞掉的 `[[hosts]]` ＝拒絕開機**：開機那一次投影走的是同一支 `validate`，所以驗不過時 `serve` 直接帶著
