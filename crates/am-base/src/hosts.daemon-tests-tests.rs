@@ -391,6 +391,69 @@
         assert_eq!(ok.stdout, b"hi");
     }
 
+    /// #1411：本機探測（`$SHELL -lic …`）的子行程不能繼承呼叫端的控制終端。只換 process group 不夠：背景 job 裡的 `-i`
+    /// shell 會去搶前景、被 job control 停住（SIGTTIN／SIGTTOU），整個測試行程就卡住、沒有輸出。
+    /// 這條測試把自己放進「偽終端當控制終端」的 session 重跑一次（`AM_I1411_IN_PTY`），在那裡斷言 `sh_local` 的子行程開不了 `/dev/tty`。
+    /// 不靠 sleep、不靠牆鐘：只等子行程結束。
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_local_probe_child_has_no_controlling_terminal() {
+        const IN_PTY: &str = "AM_I1411_IN_PTY";
+        if std::env::var_os(IN_PTY).is_none() {
+            rerun_this_test_under_a_pty(IN_PTY);
+            return;
+        }
+        let r = sh_local_capture(
+            r#"if (exec 3</dev/tty) 2>/dev/null; then echo TTY; else echo NOTTY; fi"#,
+            Duration::from_secs(10),
+        )
+        .await
+        .unwrap();
+        assert!(!r.timed_out);
+        assert_eq!(String::from_utf8_lossy(&r.stdout).trim(), "NOTTY", "本機探測的子行程還有控制終端（#1411）");
+    }
+
+    /// 外層：開一對偽終端，把 slave 當這個子行程的控制終端（`setsid`＋`TIOCSCTTY`），在裡面只重跑這一條測試。
+    /// 子行程的 stdout／stderr 走管線，讀完才判斷；`1 passed` 確認真的跑到了（過濾字串一條都沒中也會回 0）。
+    #[cfg(unix)]
+    fn rerun_this_test_under_a_pty(marker: &str) {
+        use std::os::fd::FromRawFd as _;
+        use std::os::unix::process::CommandExt as _;
+        let (mut master, mut slave) = (-1, -1);
+        let rc = unsafe { libc::openpty(&mut master, &mut slave, std::ptr::null_mut(), std::ptr::null_mut(), std::ptr::null_mut()) };
+        assert_eq!(rc, 0, "openpty: {}", std::io::Error::last_os_error());
+        // master 留到子行程結束才關，不然 slave 會先掛斷。
+        let master = unsafe { std::os::fd::OwnedFd::from_raw_fd(master) };
+        let slave = unsafe { std::os::fd::OwnedFd::from_raw_fd(slave) };
+        let full = module_path!().split_once("::").map_or(module_path!(), |(_, rest)| rest);
+        let name = format!("{full}::a_local_probe_child_has_no_controlling_terminal");
+        let mut cmd = std::process::Command::new(std::env::current_exe().unwrap());
+        cmd.args(["--exact", &name, "--nocapture", "--test-threads=1"])
+            .env(marker, "1")
+            .stdin(std::process::Stdio::from(slave))
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped());
+        unsafe {
+            cmd.pre_exec(|| {
+                if libc::setsid() == -1 {
+                    return Err(std::io::Error::last_os_error());
+                }
+                if libc::ioctl(0, libc::TIOCSCTTY, 0) == -1 {
+                    return Err(std::io::Error::last_os_error());
+                }
+                Ok(())
+            });
+        }
+        let out = cmd.output().expect("spawn the test again under a pty");
+        drop(master);
+        let stdout = String::from_utf8_lossy(&out.stdout);
+        assert!(
+            out.status.success() && stdout.contains("1 passed"),
+            "在偽終端的控制 session 裡重跑失敗：\n{stdout}\n{}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+    }
+
     #[tokio::test]
     async fn macos_local_sh_local_drains_stdout_and_stderr_concurrently() {
         let output = sh_local(

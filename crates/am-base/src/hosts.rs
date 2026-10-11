@@ -179,7 +179,18 @@ where
 pub async fn sh_local_capture(script: &str, timeout: Duration) -> Result<LocalRun> {
     let mut cmd = tokio::process::Command::new("/bin/sh");
     cmd.arg("-c").arg(script).stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::piped());
-    cmd.process_group(0);
+    // 脫離控制終端（#1411）：只換 process group 不夠，子行程還在呼叫端的控制終端裡；背景 job 裡的 `-i` shell
+    // （`$SHELL -lic` 探測）會去搶前景、被 job control 停住。setsid 之後沒有控制終端，子行程與它的孫行程都碰不到 tty；
+    // 同時子行程是新 session 的 leader（pgid＝pid），逾時整個群組砍掉的做法照舊。
+    unsafe {
+        use std::os::unix::process::CommandExt as _;
+        cmd.pre_exec(|| {
+            if libc::setsid() == -1 {
+                return Err(std::io::Error::last_os_error());
+            }
+            Ok(())
+        });
+    }
     cmd.kill_on_drop(true);
     let mut child = cmd.spawn().context("spawn /bin/sh")?;
     let pid = child.id();
