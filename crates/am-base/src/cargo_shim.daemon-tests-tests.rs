@@ -1168,10 +1168,12 @@ esac
         let d = s.dir.display();
         write_exec(s.dir.join("real/cargo"), format!("#!/bin/sh\necho \"$1 RUST_TEST_THREADS=${{RUST_TEST_THREADS-unset}}\" >> '{d}/rtt.log'\n"));
         let managed = [("AM_BOT_ID", "b1"), ("AM_HOOK_TOKEN", "tok"), ("AM_PORT", "1")];
-        let cases: [(&str, &[(&str, &str)], &str, &str); 6] = [
+        let cases: [(&str, &[(&str, &str)], &str, &str); 7] = [
             (r#","test_threads":4"#, &[], "test", "test RUST_TEST_THREADS=4"),
             (r#","test_threads":4"#, &[], "t", "t RUST_TEST_THREADS=4"),
-            (r#","test_threads":4"#, &[("RUST_TEST_THREADS", "16")], "test", "test RUST_TEST_THREADS=16"),
+            // #1441：呼叫端設的值超過名額就夾成名額的上限；沒超過的照呼叫端的。
+            (r#","test_threads":4"#, &[("RUST_TEST_THREADS", "16")], "test", "test RUST_TEST_THREADS=4"),
+            (r#","test_threads":4"#, &[("RUST_TEST_THREADS", "2")], "test", "test RUST_TEST_THREADS=2"),
             (r#","test_threads":4"#, &[], "check", "check RUST_TEST_THREADS=unset"),
             (r#","test_threads":0"#, &[], "test", "test RUST_TEST_THREADS=unset"),
             ("", &[], "test", "test RUST_TEST_THREADS=8"),
@@ -1187,6 +1189,41 @@ esac
             assert_eq!(rc, 0, "{field} {sub}: {err}");
             let got = std::fs::read_to_string(s.dir.join("rtt.log")).unwrap();
             assert_eq!(got.trim(), want, "回應 `{field}`、呼叫端 {extra:?}、子指令 {sub}");
+        }
+    }
+
+    /// #1441：libtest 的命令列 `--test-threads` 優先於環境變數，shim 原本不看 `--` 之後的參數，受管的 bot 可以用
+    /// `cargo test -- --test-threads=128` 握著 1 個名額開 128 條。只看第一個 `--` 之後的參數，超過名額就夾成名額的上限，
+    /// 其餘參數順序不動；`--` 之前出現的字樣不動；名額回應 `0`（daemon 明講不設）與沒有 bot 身分的人工 shell 完全不動。
+    #[test]
+    fn a_managed_bot_cannot_raise_the_test_threads_on_the_command_line_above_its_grant() {
+        let s = Sandbox::new();
+        let d = s.dir.display();
+        write_exec(s.dir.join("real/cargo"), format!("#!/bin/sh\necho \"$*\" >> '{d}/argv.log'\n"));
+        let managed = [("AM_BOT_ID", "b1"), ("AM_HOOK_TOKEN", "tok"), ("AM_PORT", "1")];
+        // (名額回應的 test_threads 欄位, 呼叫端的參數, 額外環境, 是不是受管, 期望記到的參數)
+        let cases: [(&str, &[&str], &[(&str, &str)], bool, &str); 9] = [
+            ("4", &["test", "-p", "agents-managerd", "--", "--test-threads=128"], &[], true, "test -p agents-managerd -- --test-threads=4"),
+            ("4", &["test", "-p", "agents-managerd", "--", "--test-threads", "128"], &[], true, "test -p agents-managerd -- --test-threads 4"),
+            ("4", &["test", "--", "--test-threads=2"], &[], true, "test -- --test-threads=2"),
+            ("4", &["test", "--test-threads=128", "-p", "agents-managerd"], &[], true, "test --test-threads=128 -p agents-managerd"),
+            ("4", &["test", "-p", "agents-managerd", "--", "--nocapture", "--test-threads=99999"], &[], true, "test -p agents-managerd -- --nocapture --test-threads=4"),
+            ("4", &["test", "-p", "agents-managerd", "--", "--test-threads=4"], &[], true, "test -p agents-managerd -- --test-threads=4"),
+            ("0", &["test", "--", "--test-threads=128"], &[], true, "test -- --test-threads=128"),
+            ("4", &["test", "--", "--test-threads=128"], &[("RUST_TEST_THREADS", "16")], true, "test -- --test-threads=4"),
+            ("4", &["test", "--", "--test-threads=128"], &[], false, "test -- --test-threads=128"),
+        ];
+        for (tt, args, extra, bot, want) in cases {
+            let _ = std::fs::remove_file(s.dir.join("argv.log"));
+            s.install_fake_curl(&format!(
+                "case \"$*\" in *acquire*) printf '{{\"granted\":true,\"token\":\"tok-1\",\"cargo_jobs\":2,\"lease_ttl_secs\":30,\"test_threads\":{tt}}}' ;; *) printf '{{}}' ;; esac"
+            ));
+            let mut env: Vec<(&str, &str)> = if bot { managed.to_vec() } else { Vec::new() };
+            env.extend_from_slice(extra);
+            let (_, err, rc) = s.run(&env, args);
+            assert_eq!(rc, 0, "{args:?}: {err}");
+            let got = std::fs::read_to_string(s.dir.join("argv.log")).unwrap();
+            assert_eq!(got.trim(), want, "名額 {tt}、受管 {bot}、額外環境 {extra:?}、參數 {args:?}");
         }
     }
 
