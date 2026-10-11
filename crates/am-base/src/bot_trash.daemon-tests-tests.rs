@@ -1,6 +1,11 @@
 
     use super::*;
 
+    /// 測試的回收區每顆都當成認得的 bot（生產路徑從 DB 來，見 `known_bot_ids`）；#1313 的測試自己給清單。
+    fn gc_with_cap(data: &Path, keep: Duration, max: u64) -> (usize, usize) {
+        super::gc_with_cap(data, keep, max, &super::known_in(data))
+    }
+
     #[test]
     fn a_trashed_dir_comes_back_on_restore_and_expires_after_keep() {
         let data = crate::testing::track(std::env::temp_dir().join(format!("am-trash-{}", crate::db::ulid())));
@@ -276,4 +281,76 @@
         // 過期後 restore 回傳 None
         assert_eq!(restore_kind(&data, "b1", Some(SHARE_WORKSPACE), &ws).unwrap(), None);
         std::fs::remove_dir_all(&base).unwrap();
+    }
+
+    /// #1313：回收區裡不是 AGM 放的目錄（`backups.1`、`X.1`：毫秒數很小、很舊）不管年紀與大小都不能被清；
+    /// 我們自己放的（`b1.<舊>`、`b1.attachments.<舊>`）照常過期，沒有算進別人的大小。
+    #[test]
+    fn an_unrelated_dot_numeric_dir_is_neither_expired_nor_counted() {
+        let data = crate::testing::track(std::env::temp_dir().join(format!("am-trash-{}", crate::db::ulid())));
+        let old = now_ms() - Duration::from_secs(7200).as_millis();
+        let fresh = now_ms();
+        seed(&data, "b1", old, 10);
+        seed(&data, "b1", fresh, 1024);
+        let attach = root(&data).join(format!("b1.attachments.{old}"));
+        std::fs::create_dir_all(&attach).unwrap();
+        std::fs::write(attach.join("blob"), vec![b'x'; 10]).unwrap();
+        let stray = seed(&data, "backups", 1, 2 * 1024 * 1024);
+        let stray2 = seed(&data, "X", 1, 2 * 1024 * 1024);
+
+        let only_b1 = std::collections::HashSet::from(["b1".to_string()]);
+        assert_eq!(super::gc_with_cap(&data, Duration::from_secs(3600), 4096, &only_b1), (2, 0), "b1 的舊的兩份過期；別人的不算");
+        assert!(stray.join("blob").exists() && stray2.join("blob").exists(), "不是我們放的，不能刪");
+        assert!(root(&data).join(format!("b1.{fresh}")).exists(), "新的留著");
+        std::fs::remove_dir_all(data).unwrap();
+    }
+
+    /// #1309：回收區裡有一個子目錄讀不到（權限），那一份的大小就不知道；不能當成 0 算進總量，據此淘汰別人。
+    #[test]
+    fn an_unreadable_subtree_blocks_the_size_eviction() {
+        use std::os::unix::fs::PermissionsExt as _;
+        let data = crate::testing::track(std::env::temp_dir().join(format!("am-trash-{}", crate::db::ulid())));
+        let old = now_ms() - Duration::from_secs(7200).as_millis();
+        seed(&data, "b1", old, 2 * 1024 * 1024);
+        let new = seed(&data, "b1", now_ms(), 10);
+        let locked = new.join("locked");
+        std::fs::create_dir_all(&locked).unwrap();
+        std::fs::write(locked.join("big"), vec![b'x'; 1024]).unwrap();
+        std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o300)).unwrap();
+
+        let got = gc_with_cap(&data, Duration::from_secs(86_400), 4096);
+        std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o700)).unwrap();
+        assert_eq!(got, (0, 0), "量不到的那一份不算數，不因此淘汰");
+        assert!(root(&data).join(format!("b1.{old}")).exists(), "舊的留著");
+        std::fs::remove_dir_all(data).unwrap();
+    }
+
+    /// #1308：定時 GC 不能在 async 執行緒上同步走目錄。GC 還在做的時候，同一條執行緒上的計時器照樣要走。
+    #[tokio::test]
+    async fn gc_does_not_block_the_async_thread() {
+        let data = crate::testing::track(std::env::temp_dir().join(format!("am-trash-{}", crate::db::ulid())));
+        let old = now_ms() - Duration::from_secs(7200).as_millis();
+        for i in 0..200u128 {
+            let p = seed(&data, "b1", old + i, 1);
+            for j in 0..10 {
+                std::fs::write(p.join(format!("f{j}")), "x").unwrap();
+            }
+        }
+        let ticks = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let ticker = {
+            let ticks = ticks.clone();
+            tokio::spawn(async move {
+                loop {
+                    tokio::time::sleep(Duration::from_millis(1)).await;
+                    ticks.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                }
+            })
+        };
+        let before = ticks.load(std::sync::atomic::Ordering::SeqCst);
+        let (expired, _) = gc_once(&data, Duration::from_secs(3600), MAX_BYTES, &known_in(&data)).await;
+        let during = ticks.load(std::sync::atomic::Ordering::SeqCst) - before;
+        ticker.abort();
+        assert_eq!(expired, 200);
+        assert!(during > 0, "GC 跑的時候計時器一次都沒走：GC 同步佔住了 async 執行緒（計時器 {during} 次）");
+        std::fs::remove_dir_all(data).unwrap();
     }

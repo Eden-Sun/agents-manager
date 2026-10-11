@@ -2272,7 +2272,7 @@ async fn restricted_bot_share_workspace_follows_trash_and_restore_lifecycle() {
     // 5. 再次刪除 + zero keep GC → trash 被移除
     crate::api::delete_bot(axum::extract::State(e.app.clone()), axum::extract::Path(b.id.clone())).await.unwrap();
     assert!(!ws.exists());
-    let (expired, _) = crate::bot_trash::gc_with_cap(&e.app.data_dir, std::time::Duration::ZERO, u64::MAX);
+    let (expired, _) = crate::bot_trash::gc_with_cap(&e.app.data_dir, std::time::Duration::ZERO, u64::MAX, &crate::bot_trash::known_in(&e.app.data_dir));
     assert!(expired >= 1, "workspace trash entry expired and removed");
 
     // 6. 過期後 restore → 建立乾淨 workspace，舊檔案不再重現
@@ -2302,7 +2302,7 @@ async fn restricted_bot_workspace_counts_towards_aggregate_size_cap() {
     crate::api::delete_bot(axum::extract::State(e.app.clone()), axum::extract::Path(b2.id.clone())).await.unwrap();
 
     // 上限 12,000 bytes：b1+b2 超過上限，最舊的 b1 應被淘汰，較新的 b2 留著
-    let (expired, evicted) = crate::bot_trash::gc_with_cap(&e.app.data_dir, std::time::Duration::from_secs(3600), 12_000);
+    let (expired, evicted) = crate::bot_trash::gc_with_cap(&e.app.data_dir, std::time::Duration::from_secs(3600), 12_000, &crate::bot_trash::known_in(&e.app.data_dir));
     assert_eq!(expired, 0);
     assert_eq!(evicted, 1, "oldest workspace entry evicted to stay within cap");
 
