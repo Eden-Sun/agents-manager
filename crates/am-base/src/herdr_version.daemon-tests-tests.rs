@@ -91,9 +91,41 @@
         assert_eq!(app.tools.lock().await["build1"].herdr_cli.as_deref(), Some("herdr 0.9.1"), "B 的快取不動");
     }
 
-/// **#1302**：一台主機的版本探測卡住，不能拖住別台的版本更新。卡住的那台（名字排前面，先探）的 ssh 在測試放行前不回來；
+/// **#1302**：一台主機的版本探測卡住，不能拖住別台的版本更新。卡住的那台的 ssh 在測試放行前不回來；
 /// 健康的那台要在這段期間就更新。
-#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+///
+/// **#1439**：假 ssh 是同步的。這裡只開一條 worker：健康那台的假貨先等卡住那台進到假貨裡，再回話，所以它一定排在
+/// 卡住的那台之後跑。假貨要是還佔著 worker（沒放到 blocking 執行緒上），worker 就動不了，健康那台永遠更新不了，
+/// 計時器也跟著停，所以放行卡住假貨的安全網不能靠 runtime 的計時器，改用一條 OS 執行緒看牆鐘（只在失敗時才會到）。
+/// 判定是「健康那台更新的當下，卡住的那台還沒放行」。
+#[derive(Default)]
+struct GateState {
+    /// 卡住的那台的假貨已經進來了。
+    hung_entered: bool,
+    /// 放行卡住的假貨（健康那台更新後測試放行、安全網逾時、或測試離開時放行）。
+    open: bool,
+    /// 測試已經結束（安全網不用再動）。
+    finished: bool,
+}
+
+struct Gate {
+    state: std::sync::Mutex<GateState>,
+    cv: std::sync::Condvar,
+}
+
+/// 測試離開時（含 panic）一定放行卡住的假貨，免得 blocking 執行緒永遠等下去、runtime 收尾時卡住。
+struct Finish(std::sync::Arc<Gate>);
+
+impl Drop for Finish {
+    fn drop(&mut self) {
+        let mut st = self.0.state.lock().unwrap_or_else(|e| e.into_inner());
+        st.open = true;
+        st.finished = true;
+        self.0.cv.notify_all();
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 1)]
 async fn a_hung_host_probe_does_not_delay_a_healthy_host() {
     let app = crate::testing::env().await.app.clone();
     let cfg = |name: &str| crate::config::HostCfg { name: name.into(), ssh: name.into(), ssh_port: 22, ssh_opts: vec![], herdr_session: "agents-manager".into(), remote_path: String::new(), shared_session: false };
@@ -106,36 +138,74 @@ async fn a_hung_host_probe_does_not_delay_a_healthy_host() {
             utc_offset_secs: None, herdr_cli: None, checked_at: crate::db::now(),
         });
     }
-    let gate = std::sync::Arc::new((std::sync::Mutex::new(false), std::sync::Condvar::new()));
-    let g = gate.clone();
-    crate::hosts::set_ssh_fake("aa-herdr-hung", move |_| {
-        let (m, cv) = &*g;
-        let mut open = m.lock().unwrap();
-        while !*open {
-            open = cv.wait(open).unwrap();
-        }
-        Ok("AM_HERDR herdr 0.9.1\n".into())
-    });
-    crate::hosts::set_ssh_fake("zz-herdr-ok", |_| Ok("AM_HERDR herdr 0.9.2\n".into()));
+    let gate = std::sync::Arc::new(Gate { state: Default::default(), cv: std::sync::Condvar::new() });
+    let _finish = Finish(gate.clone());
+    {
+        // 失敗時的安全網：只看牆鐘、不靠 runtime（卡住時 runtime 的計時器也會停）。測試正常結束時它就退出。
+        let gate = gate.clone();
+        std::thread::spawn(move || {
+            let st = gate.state.lock().unwrap_or_else(|e| e.into_inner());
+            let (mut st, _) = gate.cv.wait_timeout_while(st, std::time::Duration::from_secs(60), |s| !s.finished).unwrap_or_else(|e| e.into_inner());
+            if !st.finished {
+                st.open = true;
+                gate.cv.notify_all();
+            }
+        });
+    }
+    {
+        let gate = gate.clone();
+        crate::hosts::set_ssh_fake("aa-herdr-hung", move |_| {
+            let mut st = gate.state.lock().unwrap_or_else(|e| e.into_inner());
+            st.hung_entered = true;
+            gate.cv.notify_all();
+            while !st.open {
+                st = gate.cv.wait(st).unwrap_or_else(|e| e.into_inner());
+            }
+            Ok("AM_HERDR herdr 0.9.1\n".into())
+        });
+    }
+    {
+        let gate = gate.clone();
+        crate::hosts::set_ssh_fake("zz-herdr-ok", move |_| {
+            let mut st = gate.state.lock().unwrap_or_else(|e| e.into_inner());
+            while !st.hung_entered && !st.open {
+                st = gate.cv.wait(st).unwrap_or_else(|e| e.into_inner());
+            }
+            Ok("AM_HERDR herdr 0.9.2\n".into())
+        });
+    }
 
-    let round = {
+    let mut rx = app.subscribe();
+    let mut round = {
         let app = app.clone();
         tokio::spawn(async move { crate::runners::herdr_version::refresh_all(&app).await })
     };
-    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
-    let mut got = false;
-    while std::time::Instant::now() < deadline {
-        if app.tools.lock().await.get("zz-herdr-ok").and_then(|t| t.herdr_cli.clone()).as_deref() == Some("herdr 0.9.2") {
-            got = true;
-            break;
+    let mut round_finished = false;
+    let healthy_while_hung_blocked = tokio::select! {
+        seen = async {
+            loop {
+                match rx.recv().await {
+                    Ok(ev) if ev.kind == "host_changed" && ev.data["name"] == "zz-herdr-ok" && ev.data["herdr"]["cli_version"] == "0.9.2" => break,
+                    Ok(_) => continue,
+                    Err(_) => return false,
+                }
+            }
+            // 健康那台更新的當下，卡住的那台還沒放行。
+            !gate.state.lock().unwrap_or_else(|e| e.into_inner()).open
+        } => seen,
+        res = &mut round => {
+            round_finished = true;
+            res.unwrap();
+            false
         }
-        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
-    }
+    };
     {
-        let (m, cv) = &*gate;
-        *m.lock().unwrap() = true;
-        cv.notify_all();
+        let mut st = gate.state.lock().unwrap_or_else(|e| e.into_inner());
+        st.open = true;
+        gate.cv.notify_all();
     }
-    round.await.unwrap();
-    assert!(got, "健康的那台要在卡住的那台還沒回來時就更新");
+    if !round_finished {
+        round.await.unwrap();
+    }
+    assert!(healthy_while_hung_blocked, "健康的那台要在卡住的那台還沒回來時就更新");
 }

@@ -458,7 +458,9 @@ impl HostConn {
         }
         #[cfg(any(test, feature = "test-hooks"))]
         if let Some(f) = ssh_fake_for(&self.name) {
-            return f(script);
+            // 假貨是同步的：放到 blocking 執行緒上跑，卡住時探測 task 的逾時才收得掉，也不佔住 runtime 的 worker（#1439）。
+            let script = script.to_string();
+            return tokio::task::spawn_blocking(move || f(&script)).await.map_err(|e| anyhow::anyhow!("ssh fake did not finish: {e}"))?;
         }
         let Some(cfg) = &self.cfg else { bail!("ssh_exec called on the local host") };
         let mut cmd = tokio::process::Command::new("ssh");
