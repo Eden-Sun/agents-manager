@@ -289,6 +289,36 @@ it('讀取失敗後按「重新讀取」，讀到 daemon 的值就填回表單�
   }
 })
 
+it('外部 Cargo 讀取失敗後測試連線不會把初值整份 PUT 進 daemon', async () => {
+  const flaky = flakyLoad([{ status: 503 }])
+  try {
+    await mount(<HostsPanel />)
+    await until(() => btn('重新讀取') !== undefined, '讀取失敗後表單可見')
+    await click(panel().querySelector<HTMLInputElement>('input[type=checkbox]')!)
+    await typeInto(field('主機'), 'builder.example')
+    await typeInto(field('SSH 帳號'), 'builder')
+    await click(btn('測試連線')!)
+    assert.equal(flaky.puts.length, 0, '未知的已存設定不可被預設表單覆蓋')
+  } finally {
+    flaky.restore()
+  }
+})
+
+it('外部 Cargo 讀取成功後測試連線仍會先儲存未存的表單', async () => {
+  const flaky = flakyLoad([{ status: 200, body: { enabled: false, host: '', user: '', ssh_port: 22, remote_root: '.cache/agents-manager/remote-cargo', cargo_jobs: 4, password_set: false } }])
+  try {
+    await mount(<HostsPanel />)
+    await until(() => document.querySelector('.remote-cargo-settings') !== null, '讀取成功後表單可見')
+    await click(panel().querySelector<HTMLInputElement>('input[type=checkbox]')!)
+    await typeInto(field('主機'), 'builder.example')
+    await typeInto(field('SSH 帳號'), 'builder')
+    await click(btn('測試連線')!)
+    await until(() => flaky.puts.length === 1, '測試前先儲存一次')
+  } finally {
+    flaky.restore()
+  }
+})
+
 it('新增主機完成時不清掉送出後又輸入的下一筆主機名稱', async () => {
   const requests = await open()
   const originalFetch = globalThis.fetch
