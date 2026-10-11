@@ -907,6 +907,31 @@ mod tests {
         }
     }
 
+    /// #1358：promote 的 handler 在 child 已經停掉、目標 bot 還沒建的那一瞬被 drop（client 斷線）：脫離出去的工作照樣做完。
+    #[tokio::test]
+    async fn a_promote_whose_handler_is_dropped_after_the_child_is_stopped_still_finishes() {
+        let r = rig(true).await;
+        let reached = Arc::new(tokio::sync::Notify::new());
+        let release = Arc::new(tokio::sync::Notify::new());
+        let (r2, go) = (reached.clone(), release.clone());
+        lifecycle::race_point::arm("promote_after_stop", &r.child, move || async move {
+            r2.notify_one();
+            go.notified().await;
+        });
+        let (app, id) = (r.e.app.clone(), r.child.clone());
+        let h = tokio::spawn(async move { promote_bot(State(app), Path(id), Extension(crate::api::RequestPrincipal::User), None).await.map(|_| ()) });
+        reached.notified().await;
+        h.abort(); // 瀏覽器斷線：handler future 被 drop（脫離出去的工作不受影響）
+        let _ = h.await;
+        release.notify_one();
+        crate::api::work_done_for_test(&r.child).notified().await;
+        assert_eq!(intent_status(&r.e.app, &r.child).await, vec!["done"], "intent 收成 done，不停在 running");
+        assert!(child_state(&r).await.0, "child 收掉了");
+        let bots = r.e.app.cfg.get().await.projects[0].bots.clone();
+        let new_id = bots.iter().filter_map(|b| b.id.clone()).find(|i| *i != r.child).expect("config 裡多了目標 user bot");
+        assert!(db::active_run(&r.e.app.db, &new_id).await.unwrap().is_some(), "目標 bot 有 active run");
+    }
+
     /// 承諾之前（intent 寫了、child 還沒停）死掉：收回複製、abandoned，child 照跑，可原樣重送。
     #[tokio::test]
     async fn a_promote_killed_before_the_child_was_stopped_is_abandoned_and_the_copy_removed() {
