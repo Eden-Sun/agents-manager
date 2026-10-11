@@ -511,3 +511,97 @@
         let state: String = sqlx::query_scalar("SELECT state FROM attachments WHERE id = ?").bind(&id).fetch_one(&env.app.db).await.unwrap();
         assert_eq!(state, "staging", "還沒 ready 不該被誤綁");
     }
+
+    /// 一台測試用的遠端主機（名字帶 ULID）；ssh 結果由 `crate::hosts::set_ssh_fake` 決定。
+    async fn remote_host(app: &Arc<App>) -> String {
+        let host = format!("attach-remote-{}", crate::db::ulid().to_ascii_lowercase());
+        app.hosts
+            .insert_remote_for_test(crate::config::HostCfg {
+                shared_session: false,
+                name: host.clone(),
+                ssh: "unused".into(),
+                ssh_port: 22,
+                ssh_opts: vec![],
+                herdr_session: "agents-manager".into(),
+                remote_path: String::new(),
+            })
+            .await;
+        host
+    }
+
+    /// 寫一個本機副本，並插一筆指向它的遠端附件列（`message_id` 空、`created_at` 指定）。回本機副本的路徑。
+    async fn remote_attachment_row(app: &Arc<App>, bot_id: &str, id: &str, host: &str, state: &str, created_at: &str) -> std::path::PathBuf {
+        let local = std::env::temp_dir().join(format!("attach-remote-{}-{}.png", id, crate::db::ulid().to_ascii_lowercase()));
+        std::fs::write(&local, b"remote bytes").unwrap();
+        sqlx::query(
+            "INSERT INTO attachments (id, bot_id, name, mime, size, local_path, agent_path, host, state, created_at)
+             VALUES (?, ?, 'a.png', 'image/png', 12, ?, ?, ?, ?, ?)",
+        )
+        .bind(id)
+        .bind(bot_id)
+        .bind(local.to_string_lossy().into_owned())
+        .bind(format!("/remote/{id}.png"))
+        .bind(host)
+        .bind(state)
+        .bind(created_at)
+        .execute(&app.db)
+        .await
+        .unwrap();
+        local
+    }
+
+    async fn row_state(app: &Arc<App>, id: &str) -> Option<String> {
+        sqlx::query_scalar("SELECT state FROM attachments WHERE id = ?").bind(id).fetch_optional(&app.db).await.unwrap()
+    }
+
+    /// #1368：遠端主機連不上時，清掃不能先刪 row 再 ssh；row 要留到遠端檔真的刪掉為止（否則檔案永遠沒有紀錄指得到）。
+    #[tokio::test]
+    async fn a_swept_remote_attachment_keeps_its_row_until_the_remote_file_is_really_gone() {
+        let env = tt::env().await;
+        let bot = tt::claude_bot(&env.app, &env.project_id, "remote-sweep").await;
+        let host = remote_host(&env.app).await;
+        let local = remote_attachment_row(&env.app, &bot.id, "rsw1", &host, "ready", &db::iso_in(-3 * 86_400)).await;
+
+        crate::hosts::set_ssh_fake(&host, |_| Err(anyhow::anyhow!("ssh: connect timed out")));
+        assert_eq!(sweep_unreferenced(&env.app, 24 * 3600).await, 0, "遠端這次刪不掉：不算清掉");
+        assert_eq!(row_state(&env.app, "rsw1").await.as_deref(), Some("failed"), "row 留著、標成 failed，不能只剩遠端的檔");
+
+        let seen = std::sync::Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
+        let rec = seen.clone();
+        crate::hosts::set_ssh_fake(&host, move |cmd| {
+            rec.lock().unwrap().push(cmd.to_string());
+            Ok(String::new())
+        });
+        assert_eq!(sweep_unreferenced(&env.app, 24 * 3600).await, 1, "遠端這次刪成了，才真的刪 row");
+        assert_eq!(row_state(&env.app, "rsw1").await, None, "row 在遠端檔刪掉之後才消失");
+        let cmds = seen.lock().unwrap().clone();
+        assert!(cmds.iter().any(|c| c.contains("rm -f") && c.contains("/remote/rsw1.png")), "遠端那份要真的 rm：{cmds:?}");
+        assert!(!local.exists(), "本機副本也要刪掉");
+    }
+
+    /// #1368：開機的 `reconcile_orphans` 也一樣：遠端刪不掉的 staging 列留著，下一次開機再試。
+    #[tokio::test]
+    async fn reconcile_keeps_a_staging_row_whose_remote_delete_failed() {
+        let env = tt::env().await;
+        let bot = tt::claude_bot(&env.app, &env.project_id, "remote-reconcile").await;
+        let host = remote_host(&env.app).await;
+        remote_attachment_row(&env.app, &bot.id, "rrc1", &host, "staging", &db::now()).await;
+
+        crate::hosts::set_ssh_fake(&host, |_| Err(anyhow::anyhow!("ssh: connect timed out")));
+        assert_eq!(reconcile_orphans(&env.app).await, 0, "遠端刪不掉：這一次不算清掉");
+        assert_eq!(row_state(&env.app, "rrc1").await.as_deref(), Some("staging"), "row 留著，下次開機再試");
+
+        crate::hosts::set_ssh_fake(&host, |_| Ok(String::new()));
+        assert_eq!(reconcile_orphans(&env.app).await, 1, "遠端這次刪成了，才真的刪 row");
+        assert_eq!(row_state(&env.app, "rrc1").await, None);
+    }
+
+    /// #1368 的對照：主機已經不在設定裡（無從 ssh）的列，照舊一次就刪掉，不會卡住。
+    #[tokio::test]
+    async fn a_row_whose_host_is_no_longer_configured_is_cleaned_at_once() {
+        let env = tt::env().await;
+        let bot = tt::claude_bot(&env.app, &env.project_id, "gone-host").await;
+        remote_attachment_row(&env.app, &bot.id, "rgh1", "zz-no-such-host", "staging", &db::now()).await;
+        assert_eq!(reconcile_orphans(&env.app).await, 1);
+        assert_eq!(row_state(&env.app, "rgh1").await, None);
+    }
