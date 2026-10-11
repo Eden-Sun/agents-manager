@@ -85,6 +85,37 @@ has "check.sh：閘放行後子行程不再看到 CHECK_MAX_LOAD" "${out}" "nest
 out="$(cd "${HERE}/.." && env -u CHECK_MAX_LOAD WAIT_LOAD_FILE="${ROOT}/nope" bash scripts/check.sh no-such-mode 2>&1)"; rc=$?
 equals "check.sh：沒設 CHECK_MAX_LOAD 就不看負載" "${rc}" 2
 
+# changed 先判斷有沒有要跑的檢查：文件與 git 比較失敗都不應被高負載閘擋住。
+changed_repo="${ROOT}/changed-repo"
+mkdir -p "${changed_repo}/scripts" "${changed_repo}/bin"
+cp "${HERE}/check.sh" "${HERE}/wait-load.sh" "${HERE}/ci-changed-parts.sh" "${changed_repo}/scripts/"
+cat >"${changed_repo}/bin/git" <<'SH'
+#!/usr/bin/env bash
+case "$*" in
+  "diff --name-only origin/main...HEAD")
+    if [ "${AM_TEST_BASE_MISSING:-0}" = 1 ]; then echo 'fatal: bad revision' >&2; exit 128; fi
+    ;;
+  "diff --name-only HEAD") printf '%s\n' "${AM_TEST_DIFF_HEAD:-docs/x.md}" ;;
+  "ls-files --others --exclude-standard") ;;
+  *) echo "unexpected git invocation: $*" >&2; exit 90 ;;
+esac
+SH
+chmod +x "${changed_repo}/bin/git"
+echo "152.30 1 1" >"${LOAD}"
+out="$(cd "${changed_repo}" && PATH="${changed_repo}/bin:${PATH}" WAIT_LOAD_FILE="${LOAD}" CHECK_MAX_LOAD=40 CHECK_LOAD_TIMEOUT=0 AM_TEST_DIFF_HEAD=docs/x.md bash scripts/check.sh changed 2>&1)"; rc=$?
+equals "check.sh changed：只有文件時高負載下仍成功" "${rc}" 0
+has "check.sh changed：只有文件時明確略過" "${out}" "只有文件類改動，不用跑"
+case "${out}" in *"負載閘"*) echo "FAIL - check.sh changed：只有文件仍跑負載閘"; FAIL=$((FAIL + 1)) ;; *) echo "ok   - check.sh changed：只有文件不跑負載閘"; PASS=$((PASS + 1)) ;; esac
+
+out="$(cd "${changed_repo}" && PATH="${changed_repo}/bin:${PATH}" WAIT_LOAD_FILE="${LOAD}" CHECK_MAX_LOAD=40 CHECK_LOAD_TIMEOUT=0 AM_TEST_DIFF_HEAD=scripts/foo.sh bash scripts/check.sh changed 2>&1)"; rc=$?
+equals "check.sh changed：ops 改動仍由負載閘擋下" "${rc}" 124
+has "check.sh changed：ops 改動有負載閘訊息" "${out}" "負載閘"
+case "${out}" in *"ops: shell 變數"*) echo "FAIL - check.sh changed：負載逾時後仍跑 ops"; FAIL=$((FAIL + 1)) ;; *) echo "ok   - check.sh changed：負載逾時後沒跑 ops"; PASS=$((PASS + 1)) ;; esac
+
+out="$(cd "${changed_repo}" && PATH="${changed_repo}/bin:${PATH}" WAIT_LOAD_FILE="${LOAD}" CHECK_MAX_LOAD=40 CHECK_LOAD_TIMEOUT=0 AM_TEST_BASE_MISSING=1 bash scripts/check.sh changed 2>&1)"; rc=$?
+equals "check.sh changed：base 不存在回 2" "${rc}" 2
+case "${out}" in *"負載閘"*) echo "FAIL - check.sh changed：base 錯誤仍跑負載閘"; FAIL=$((FAIL + 1)) ;; *) echo "ok   - check.sh changed：base 錯誤不跑負載閘"; PASS=$((PASS + 1)) ;; esac
+
 # --help 與參數錯誤印的說明是整段檔頭，不能印到程式碼（issue #1022）。
 out="$(bash "${WAIT}" --help 2>&1)"; rc=$?
 equals "--help 回 2" "${rc}" 2

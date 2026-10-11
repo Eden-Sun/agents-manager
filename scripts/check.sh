@@ -10,7 +10,7 @@
 #   scripts/check.sh fmt        # cargo fmt --check（只報告，現況不乾淨）
 #   scripts/check.sh clippy     # cargo clippy（只報告，現況不乾淨）
 #   scripts/check.sh all        # 以上全部
-#   CHECK_MAX_LOAD=40 scripts/check.sh changed # 先等 1 分鐘負載 ≤ 40（逾時 CHECK_LOAD_TIMEOUT 秒、預設 1800，失敗不照跑；issue #813）
+#   CHECK_MAX_LOAD=40 scripts/check.sh changed # 有檢查要跑時才先等 1 分鐘負載 ≤ 40（逾時 CHECK_LOAD_TIMEOUT 秒、預設 1800，失敗不照跑；issue #813）
 #   scripts/check.sh changed [base] # 只跑改到的部分（跟 base，預設 origin/main 比），daemon 有測試時由 cargo test 編 targets，否則 cargo check（CHECK_TESTS=none 關掉測試）；issue #716
 #
 # 注意：
@@ -65,14 +65,16 @@ on_exit() {
 }
 trap on_exit EXIT
 
-# 負載閘（issue #813）：`CHECK_MAX_LOAD=<1 分鐘負載門檻>` 有設就先等負載降到門檻以下再跑（scripts/wait-load.sh），
-# 最多等 `CHECK_LOAD_TIMEOUT` 秒（預設 1800）；逾時整輪失敗（exit 124），不照跑。沒設＝不等（ubuntu-ci 與舊用法不變）。
-if [ -n "${CHECK_MAX_LOAD:-}" ]; then
+# 負載閘（issue #813）：`CHECK_MAX_LOAD=<1 分鐘負載門檻>` 有設就等負載降到門檻以下再跑（scripts/wait-load.sh），
+# 最多等 `CHECK_LOAD_TIMEOUT` 秒（預設 1800）；逾時整輪失敗（exit 124），不照跑。`changed` 延後到確認有工作才等。
+load_gate() {
+    [ -n "${CHECK_MAX_LOAD:-}" ] || return 0
     step "負載閘：1 分鐘負載 ≤ ${CHECK_MAX_LOAD} 才跑（最多等 ${CHECK_LOAD_TIMEOUT:-1800} 秒）"
     bash scripts/wait-load.sh --max "${CHECK_MAX_LOAD}" --timeout "${CHECK_LOAD_TIMEOUT:-1800}"
     # 只在最外層等一次：ops 測試會在沙盒裡再叫 check.sh（那裡沒有 wait-load.sh），不能讓這個開關漏進去。
     unset CHECK_MAX_LOAD
-fi
+}
+if [ "${1:-default}" != changed ]; then load_gate; fi
 
 check_web() {
     step "web: bun install --frozen-lockfile"
@@ -297,23 +299,28 @@ check_changed() {
     # 用環境變數而不加 --no-renames：其他假 git 測試用整串 argv 比對。
     if ! committed="$(GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=diff.renames GIT_CONFIG_VALUE_0=false git diff --name-only "${base}...HEAD")"; then
         echo "changed: 無法比較 ${base}...HEAD（${base} 不存在、沒 fetch 或沒有共同祖先？）：看不出改了什麼，拒絕放行" >&2
+        unset CHECK_MAX_LOAD
         return 2
     fi
     if ! dirty="$(GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=diff.renames GIT_CONFIG_VALUE_0=false git diff --name-only HEAD)"; then
         echo "changed: 無法列出工作樹的改動（git diff --name-only HEAD 失敗）：拒絕放行" >&2
+        unset CHECK_MAX_LOAD
         return 2
     fi
     if ! untracked="$(git ls-files --others --exclude-standard)"; then
         echo "changed: 無法列出未追蹤的檔案（git ls-files 失敗）：拒絕放行" >&2
+        unset CHECK_MAX_LOAD
         return 2
     fi
     files="$(printf '%s\n%s\n%s\n' "$committed" "$dirty" "$untracked" | sort -u)"
     parts="$(printf '%s\n' "$files" | bash scripts/ci-changed-parts.sh)"
     if [ -z "$parts" ]; then
         echo "changed: 只有文件類改動，不用跑"
+        unset CHECK_MAX_LOAD
         return 0
     fi
     echo "changed（base ${base}）：$(echo "$parts" | tr '\n' ' ')"
+    load_gate
     macos_local_hint "$files"
     if [ -n "${CHECK_TESTS:-}" ] && [ "${CHECK_TESTS}" != none ] && ! echo "$parts" | grep -qx -e daemon -e full; then
         echo "!! CHECK_TESTS=${CHECK_TESTS} 沒有用到：這次改動沒有 daemon 部分，不會跑任何 daemon 測試" >&2
