@@ -2039,10 +2039,52 @@ while time.time() < end:
     }
 
     /// 在指定的 port 上重開一個 listener（daemon 重啟後回到同一個位址）。
+    /// 停機期間這個 port 是空的，同一個測試行程裡別的 socket（例如別的測試的 client 連線）可能剛好拿去當 ephemeral port，
+    /// 這時綁不上就等它放掉：有上限，逾時才 panic 並印原因（#1257）。
     fn bind_on(port: u16) -> std::net::TcpListener {
-        let l = std::net::TcpListener::bind(("127.0.0.1", port)).unwrap();
-        l.set_nonblocking(true).unwrap();
-        l
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        loop {
+            match std::net::TcpListener::bind(("127.0.0.1", port)) {
+                Ok(l) => {
+                    l.set_nonblocking(true).unwrap();
+                    return l;
+                }
+                Err(e) if std::time::Instant::now() < deadline => {
+                    let _ = e;
+                    std::thread::sleep(std::time::Duration::from_millis(20));
+                }
+                Err(e) => panic!("重綁 127.0.0.1:{port} 等了 10 秒還是綁不上：{e}"),
+            }
+        }
+    }
+
+    /// #1257：停機期間 port 被別的 socket 佔住（不帶 SO_REUSEADDR 的 client 撞上 ephemeral port），重綁要等它放掉，
+    /// 不能一綁不上就 `unwrap()` 炸掉。佔住的那一方先綁上、才通知我們去重綁。
+    #[test]
+    fn bind_on_waits_out_another_socket_holding_the_port() {
+        let port = std::net::TcpListener::bind("127.0.0.1:0").unwrap().local_addr().unwrap().port();
+        let (bound_tx, bound_rx) = std::sync::mpsc::channel();
+        let holder = std::thread::spawn(move || {
+            let fd = unsafe { libc::socket(libc::AF_INET, libc::SOCK_STREAM, 0) };
+            assert!(fd >= 0, "socket");
+            let mut addr: libc::sockaddr_in = unsafe { std::mem::zeroed() };
+            addr.sin_family = libc::AF_INET as _;
+            addr.sin_port = port.to_be();
+            addr.sin_addr = libc::in_addr { s_addr: u32::from_ne_bytes([127, 0, 0, 1]) };
+            #[cfg(target_vendor = "apple")]
+            {
+                addr.sin_len = std::mem::size_of::<libc::sockaddr_in>() as u8;
+            }
+            let rc = unsafe { libc::bind(fd, &addr as *const libc::sockaddr_in as *const libc::sockaddr, std::mem::size_of_val(&addr) as libc::socklen_t) };
+            assert_eq!(rc, 0, "佔位的 bind");
+            bound_tx.send(()).unwrap();
+            std::thread::sleep(std::time::Duration::from_millis(300));
+            unsafe { libc::close(fd) };
+        });
+        bound_rx.recv().unwrap();
+        let l = bind_on(port);
+        assert_eq!(l.local_addr().unwrap().port(), port);
+        holder.join().unwrap();
     }
 
     /// PATH 上還掛著**別顆 bot 的同一支 shim**（祖先 pane 繼承下來的，2026-09-18 實測有 6 個）：
