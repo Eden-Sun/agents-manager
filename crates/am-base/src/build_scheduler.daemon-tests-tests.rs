@@ -450,6 +450,56 @@
         assert!(!holders.contains(&"dead-front".to_string()), "{holders:?}");
     }
 
+    /// #1445：排最前面的人 30 秒沒 poll（還沒到 60 秒的收列門檻）：它不擋後面還在 poll 的人，列也還在，
+    /// 重新 poll 時保有原本的排隊起點，名額一空就輪到它。holder 取字典序在前的，同一毫秒排進來也不會被當成後來的。
+    #[tokio::test]
+    async fn a_waiter_that_stopped_polling_does_not_hold_the_front_of_the_queue_for_a_minute() {
+        let env = tt::env().await;
+        let app = env.app.clone();
+        set_max_concurrent(&app, 1).await;
+
+        let Acquired::Granted { token, .. } = acquire(&app, "first", None, "t", "local").await.unwrap() else { panic!() };
+        let Acquired::Waiting { since: slow_since, .. } = acquire(&app, "aaa-slow-front", None, "t", "local").await.unwrap() else { panic!() };
+        let Acquired::Waiting { .. } = acquire(&app, "zzz-behind", None, "t", "local").await.unwrap() else { panic!() };
+        sqlx::query("UPDATE build_slots SET last_seen = ? WHERE holder = 'aaa-slow-front'").bind(crate::db::iso_in(-30)).execute(&app.db).await.unwrap();
+        release(&app, "first", &token).await.unwrap();
+
+        let Acquired::Granted { token: behind_token, .. } = acquire(&app, "zzz-behind", None, "t", "local").await.unwrap() else {
+            panic!("停止 poll 的號碼牌不該擋住後面還在 poll 的人")
+        };
+        let s = status(&app).await.unwrap();
+        let holders: Vec<String> = s["slots"].as_array().unwrap().iter().map(|v| v["holder"].as_str().unwrap().to_string()).collect();
+        assert!(holders.contains(&"aaa-slow-front".to_string()), "慢的等待者的列還在，沒有被刪：{holders:?}");
+
+        let Acquired::Waiting { since, .. } = acquire(&app, "aaa-slow-front", None, "t", "local").await.unwrap() else {
+            panic!("名額還被 zzz-behind 握著")
+        };
+        assert_eq!(since, slow_since, "重新 poll 不歸零排隊起點");
+        release(&app, "zzz-behind", &behind_token).await.unwrap();
+        let Acquired::Granted { .. } = acquire(&app, "aaa-slow-front", None, "t", "local").await.unwrap() else {
+            panic!("名額一空就輪到它")
+        };
+    }
+
+    /// #1445 對照組：排最前面的人 10 秒前還在 poll，就照舊擋住後面的人（活著的等待者不會被插隊）。
+    #[tokio::test]
+    async fn a_waiter_that_polled_recently_still_holds_the_front_of_the_queue() {
+        let env = tt::env().await;
+        let app = env.app.clone();
+        set_max_concurrent(&app, 1).await;
+
+        let Acquired::Granted { token, .. } = acquire(&app, "first", None, "t", "local").await.unwrap() else { panic!() };
+        let Acquired::Waiting { .. } = acquire(&app, "aaa-live-front", None, "t", "local").await.unwrap() else { panic!() };
+        let Acquired::Waiting { .. } = acquire(&app, "zzz-behind", None, "t", "local").await.unwrap() else { panic!() };
+        sqlx::query("UPDATE build_slots SET last_seen = ? WHERE holder = 'aaa-live-front'").bind(crate::db::iso_in(-10)).execute(&app.db).await.unwrap();
+        release(&app, "first", &token).await.unwrap();
+
+        let Acquired::Waiting { .. } = acquire(&app, "zzz-behind", None, "t", "local").await.unwrap() else {
+            panic!("還在 poll 的等待者不能被插隊")
+        };
+        let Acquired::Granted { .. } = acquire(&app, "aaa-live-front", None, "t", "local").await.unwrap() else { panic!("輪到排最前面的人") };
+    }
+
     /// issue #813：拿到名額的回應與狀態都帶 `test_threads`（shim 拿它注入 `RUST_TEST_THREADS`），預設 8；設定超過上限的夾到 256。
     #[tokio::test]
     async fn the_grant_tells_the_shim_how_many_test_threads_a_slot_gets() {
