@@ -591,5 +591,36 @@ equals "送出去的 description 是合法 UTF-8" "$(python3 -c 'import sys; ope
 check "description 完整（103 個字，不到 120，不該被截）" "條測試紅（${NAME86}）" "$CI/status.json"
 teardown
 
+# 12. #1448：每段花的秒數。每段結尾的 log 行多 `secs=<s>`（rc= 的位置與格式不變）；status.json 的綠／紅／中斷都有 parts（四段非負整數）。
+parts_ok() { python3 -c 'import json,sys
+p = json.load(open(sys.argv[1])).get("parts")
+ok = isinstance(p, dict) and set(p) == {"ob", "ops", "web", "daemon"} and all(type(v) is int and v >= 0 for v in p.values())
+print("ok" if ok else "bad")' "$1" 2>/dev/null; }
+setup
+equals "全綠 exit 0" "$(run)" "0"
+SHA=$(git -C "$ROOT/work" rev-parse HEAD)
+check 'log 的 ob 段有 secs（綠）' '^==> \[ubuntu-ci\] ob rc=0 secs=[0-9][0-9]*$' "$CI/logs/$SHA.log"
+check 'log 的 daemon 段有 secs（綠）' '^==> \[ubuntu-ci\] daemon rc=0 secs=[0-9][0-9]*$' "$CI/logs/$SHA.log"
+equals "綠：status.json 有四段 parts" "$(parts_ok "$CI/status.json")" "ok"
+teardown
+
+setup
+(cd "$ROOT/work" && echo 1 > f && git add f && git commit -q -m c2 && git push -q origin main)
+echo 1 > "$FIX/rc.web"
+equals "紅段仍 exit 0" "$(run)" "0"
+SHA=$(git -C "$ROOT/work" rev-parse HEAD)
+check 'log 的紅段（web）也有 secs' '^==> \[ubuntu-ci\] web rc=1 secs=[0-9][0-9]*$' "$CI/logs/$SHA.log"
+check "紅：description 仍是既有格式（點名紅的段）" "紅：web" "$FIX/gh.log"
+equals "紅：status.json 有四段 parts" "$(parts_ok "$CI/status.json")" "ok"
+teardown
+
+setup
+(cd "$ROOT/work" && echo 1 > f && git add f && git commit -q -m c2 && git push -q origin main)
+echo 124 > "$FIX/rc.ops"
+equals "中斷（rc=124）仍 exit 0" "$(run)" "0"
+check "中斷：error 的 reason 是 interrupted" '"reason":"interrupted"' "$CI/status.json"
+equals "中斷：status.json 也有四段 parts" "$(parts_ok "$CI/status.json")" "ok"
+teardown
+
 echo "ubuntu-ci_test: $PASS passed, $FAIL failed"
 [ "$FAIL" = 0 ]
