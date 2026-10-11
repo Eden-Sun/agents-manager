@@ -297,7 +297,7 @@ async fn child_kind(client: &crate::herdr::HerdrClient, agent: &crate::herdr::Ag
 /// A child can be adopted one pass before Herdr has filled `agent`.  Once the real kind is
 /// visible, correct the persisted row even though it is already a claimed child.  Reset all
 /// kind-dependent observations so the next pane probe uses the new CLI's env and argv rules.
-async fn refresh_child_kind(app: &(impl crate::capabilities::Db + crate::capabilities::Emit), bot: &mut db::Bot, pane_id: &str, kind: &str) -> anyhow::Result<()> {
+async fn refresh_child_kind(app: &(impl crate::capabilities::Db + crate::capabilities::Emit), host: &str, bot: &mut db::Bot, pane_id: &str, kind: &str) -> anyhow::Result<()> {
     if bot.managed_by != "child" || bot.kind == kind {
         return Ok(());
     }
@@ -322,7 +322,7 @@ async fn refresh_child_kind(app: &(impl crate::capabilities::Db + crate::capabil
     .execute(&mut *tx)
     .await?;
     tx.commit().await?;
-    crate::pane_identity::reset_probe(&bot.id, pane_id);
+    crate::pane_identity::reset_probe(host, &bot.id, pane_id);
     bot.kind = kind.to_string();
     bot.identity = None;
     bot.model = None;
@@ -651,7 +651,7 @@ pub(crate) async fn reconcile_host_locked(app: &impl ReconcileHostEnv, host: &st
         if bot.managed_by == "child" {
             if let Some(agent) = found.as_ref() {
                 let kind = child_kind(&client, agent, &bot.kind).await;
-                refresh_child_kind(app, &mut bot, &agent.pane_id, &kind).await?;
+                refresh_child_kind(app, host, &mut bot, &agent.pane_id, &kind).await?;
             }
         }
         // A bot only owns a tab while herdr still lists its agent.
@@ -1195,7 +1195,7 @@ async fn sync_pane_model(app: &impl ReconcileHostEnv, host: &str, client: &crate
         return;
     }
     let want_model = bot.model.is_none() || bot.effort.is_none();
-    let want_identity = crate::pane_identity::probe_due(&bot.id, &agent.pane_id);
+    let want_identity = crate::pane_identity::probe_due(host, &bot.id, &agent.pane_id);
     // #393：子 agent 用 `-c service_tier="priority"` 起的，bots.fast 也要記成 1。model／effort 已有值時上面的
     // `want_model` 是 false，fast 就永遠沒被補到，UI 平白亮「fast 需重啟」。只在剛收編的窗口內補（不然使用者
     // 之後把 fast 關掉、argv 還是 priority，這裡會反過來把它改回去）。

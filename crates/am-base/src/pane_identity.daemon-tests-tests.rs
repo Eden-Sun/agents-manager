@@ -8,7 +8,7 @@
 
     struct FixedProcEnv {
         reads: std::sync::Arc<std::sync::atomic::AtomicUsize>,
-        env: BTreeMap<String, String>,
+        env: std::sync::Mutex<BTreeMap<String, String>>,
     }
 
     impl ProcEnv for FixedProcEnv {
@@ -21,7 +21,7 @@
         ) -> BoxFuture<'a, Option<BTreeMap<String, String>>> {
             Box::pin(async move {
                 self.reads.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-                Some(self.env.clone())
+                Some(self.env.lock().unwrap().clone())
             })
         }
     }
@@ -104,21 +104,21 @@
         let reads = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
         app.proc_env.set(std::sync::Arc::new(FixedProcEnv {
             reads: reads.clone(),
-            env: [("CLAUDE_CONFIG_DIR".into(), "/home/remote-child/.claude-cc2".into())].into(),
+            env: std::sync::Mutex::new([("CLAUDE_CONFIG_DIR".into(), "/home/remote-child/.claude-cc2".into())].into()),
         }));
         crate::hosts::set_ssh_fake(&host, |_| Err(anyhow::anyhow!("injected remote HOME read failure")));
 
         sync_child_identity(&app, &host, &bot, "w1:p1", Some(901)).await;
         let unchanged = crate::db::bot(&app.db, &bot.id).await.unwrap().unwrap();
         assert_eq!(unchanged.identity.as_deref(), Some("cc1"), "unreadable HOME leaves the inherited identity alone");
-        assert!(probe_due(&bot.id, "w1:p1"), "HOME failure is retryable, not marked as probed");
+        assert!(probe_due(&host, &bot.id, "w1:p1"), "HOME failure is retryable, not marked as probed");
         assert_eq!(reads.load(Ordering::SeqCst), 0, "do not read or interpret the pane env without its host HOME");
 
         *conn.remote_home.lock().await = Some("/home/remote-child".into());
         sync_child_identity(&app, &host, &bot, "w1:p1", Some(901)).await;
         let recovered = crate::db::bot(&app.db, &bot.id).await.unwrap().unwrap();
         assert_eq!(recovered.identity.as_deref(), Some("cc2"), "later pass resolves the child's identity under remote HOME");
-        assert!(!probe_due(&bot.id, "w1:p1"));
+        assert!(!probe_due(&host, &bot.id, "w1:p1"));
         assert_eq!(reads.load(Ordering::SeqCst), 1);
     }
 
@@ -160,7 +160,7 @@
         }).await.unwrap();
         app.proc_env.set(Arc::new(FixedProcEnv {
             reads: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
-            env: [("CLAUDE_CONFIG_DIR".into(), "/home/remote-child/.claude-cc2".into())].into(),
+            env: std::sync::Mutex::new([("CLAUDE_CONFIG_DIR".into(), "/home/remote-child/.claude-cc2".into())].into()),
         }));
         let pane_id = format!("w1:{name}");
         sqlx::query("INSERT INTO runs (id, bot_id, state, agent_status, pane_id, started_at) VALUES (?,?,'running','idle',?,?)")
@@ -172,6 +172,73 @@
             .await
             .unwrap();
         (env, bot, host, pane_id)
+    }
+
+    #[tokio::test]
+    async fn replacing_a_host_reprobes_a_child_with_the_same_pane_id() {
+        use std::sync::atomic::Ordering;
+
+        let env = crate::testing::env().await;
+        let app = env.app.clone();
+        let host = format!("identity-repoint-{}", crate::db::ulid().to_ascii_lowercase());
+        let host_cfg = || crate::config::HostCfg {
+            shared_session: false,
+            name: host.clone(),
+            ssh: "unused".into(),
+            ssh_port: 22,
+            ssh_opts: vec![],
+            herdr_session: "agents-manager".into(),
+            remote_path: String::new(),
+        };
+        let conn = app.hosts.insert_remote_for_test(host_cfg()).await;
+        *conn.remote_home.lock().await = Some("/home/remote-child".into());
+        let bot = crate::testing::claude_bot(&app, &env.project_id, "identity-repoint").await;
+        sqlx::query("UPDATE bots SET managed_by='child', identity='cc1' WHERE id=?")
+            .bind(&bot.id)
+            .execute(&app.db)
+            .await
+            .unwrap();
+        let bot = crate::db::bot(&app.db, &bot.id).await.unwrap().unwrap();
+        app.cfg.update(|cfg| {
+            cfg.identities = vec![
+                idn("cc1", "claude", Some("~/.claude-cc1")),
+                idn("cc2", "claude", Some("~/.claude-cc2")),
+            ]
+            .into_iter()
+            .map(|mut identity| {
+                identity.host = Some(host.clone());
+                identity
+            })
+            .collect();
+            Ok(())
+        }).await.unwrap();
+        let reads = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let proc_env = Arc::new(FixedProcEnv {
+            reads: reads.clone(),
+            env: std::sync::Mutex::new([("CLAUDE_CONFIG_DIR".into(), "/home/remote-child/.claude-cc1".into())].into()),
+        });
+        app.proc_env.set(proc_env.clone());
+        let pane_id = "w1:reused-pane";
+        sqlx::query("INSERT INTO runs (id, bot_id, state, agent_status, pane_id, started_at) VALUES (?,?,'running','idle',?,?)")
+            .bind(crate::db::ulid())
+            .bind(&bot.id)
+            .bind(pane_id)
+            .bind(crate::db::now())
+            .execute(&app.db)
+            .await
+            .unwrap();
+
+        sync_child_identity(&app, &host, &bot, pane_id, Some(901)).await;
+        assert_eq!(reads.load(Ordering::SeqCst), 1);
+
+        let conn = app.hosts.replace_remote_for_test(&app, host_cfg()).await;
+        *conn.remote_home.lock().await = Some("/home/remote-child".into());
+        *proc_env.env.lock().unwrap() = [("CLAUDE_CONFIG_DIR".into(), "/home/remote-child/.claude-cc2".into())].into();
+        sync_child_identity(&app, &host, &bot, pane_id, Some(902)).await;
+
+        let updated = crate::db::bot(&app.db, &bot.id).await.unwrap().unwrap();
+        assert_eq!(updated.identity.as_deref(), Some("cc2"), "the replacement host's process identity must be applied");
+        assert_eq!(reads.load(Ordering::SeqCst), 2, "the replacement host must be sampled despite reusing the pane id");
     }
 
     #[tokio::test]
@@ -190,7 +257,7 @@
 
         sync_child_identity(&app, &host, &bot, &pane_id, Some(901)).await;
 
-        assert!(probe_due(&bot.id, &pane_id), "a failed run write must remain retryable");
+        assert!(probe_due(&host, &bot.id, &pane_id), "a failed run write must remain retryable");
         assert_eq!(crate::db::bot(&app.db, &bot.id).await.unwrap().unwrap().identity.as_deref(), Some("cc1"));
         let runtime_identity: Option<String> = sqlx::query_scalar("SELECT runtime_identity FROM runs WHERE bot_id=? AND pane_id=?")
             .bind(&bot.id)
@@ -211,7 +278,7 @@
             .await
             .unwrap();
         assert_eq!(runtime_identity.as_deref(), Some("cc2"));
-        assert!(!probe_due(&bot.id, &pane_id));
+        assert!(!probe_due(&host, &bot.id, &pane_id));
     }
 
     #[tokio::test]
@@ -230,7 +297,7 @@
 
         sync_child_identity(&app, &host, &bot, &pane_id, Some(901)).await;
 
-        assert!(probe_due(&bot.id, &pane_id), "a failed bot write must remain retryable");
+        assert!(probe_due(&host, &bot.id, &pane_id), "a failed bot write must remain retryable");
         assert_eq!(crate::db::bot(&app.db, &bot.id).await.unwrap().unwrap().identity.as_deref(), Some("cc1"));
         let runtime_identity: Option<String> = sqlx::query_scalar("SELECT runtime_identity FROM runs WHERE bot_id=? AND pane_id=?")
             .bind(&bot.id)
@@ -254,7 +321,7 @@
                 .as_deref(),
             Some("cc2")
         );
-        assert!(!probe_due(&bot.id, &pane_id));
+        assert!(!probe_due(&host, &bot.id, &pane_id));
     }
 
     /// Linux procps 的 `ps eww -p`（BSD 的 `e` 混 SysV 的 `-p`）也要吐出環境：child 的身分就靠它認

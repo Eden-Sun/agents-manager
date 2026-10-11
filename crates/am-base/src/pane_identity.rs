@@ -110,54 +110,78 @@ pub fn probed() -> &'static std::sync::Mutex<std::collections::HashSet<String>> 
 
 /// A probe in progress suppresses concurrent reconcile passes without making a failed
 /// database write permanent.
-fn probing() -> &'static std::sync::Mutex<std::collections::HashSet<String>> {
-    static IN_FLIGHT: std::sync::OnceLock<std::sync::Mutex<std::collections::HashSet<String>>> =
+fn probing() -> &'static std::sync::Mutex<std::collections::HashMap<String, u64>> {
+    static IN_FLIGHT: std::sync::OnceLock<std::sync::Mutex<std::collections::HashMap<String, u64>>> =
         std::sync::OnceLock::new();
-    IN_FLIGHT.get_or_init(|| std::sync::Mutex::new(std::collections::HashSet::new()))
+    IN_FLIGHT.get_or_init(|| std::sync::Mutex::new(std::collections::HashMap::new()))
 }
 
-/// 不在 `live` 裡的 bot（刪掉、退役的 child）不留探測記錄：key 是 `bot\u{1}pane`，每顆 child 每個 pane 一格，只記不清的話只增不減。
+/// 不在 `live` 裡的 bot（刪掉、退役的 child）不留探測記錄：key 是 `host\u{1}bot\u{1}pane`。
 pub fn retain_bots(live: &[String]) {
-    probed().lock().unwrap().retain(|k| k.split('\u{1}').next().is_some_and(|bot| live.iter().any(|l| l == bot)));
-    probing().lock().unwrap().retain(|k| k.split('\u{1}').next().is_some_and(|bot| live.iter().any(|l| l == bot)));
+    probed().lock().unwrap().retain(|k| k.split('\u{1}').nth(1).is_some_and(|bot| live.iter().any(|l| l == bot)));
+    probing().lock().unwrap().retain(|k, _| k.split('\u{1}').nth(1).is_some_and(|bot| live.iter().any(|l| l == bot)));
 }
 
 /// Checked before `pane.process_info`, so a settled child costs no herdr round trip.
-pub fn probe_due(bot_id: &str, pane_id: &str) -> bool {
-    let key = probe_key(bot_id, pane_id);
-    !probed().lock().unwrap().contains(&key) && !probing().lock().unwrap().contains(&key)
+pub fn probe_due(host: &str, bot_id: &str, pane_id: &str) -> bool {
+    let key = probe_key(host, bot_id, pane_id);
+    !probed().lock().unwrap().contains(&key) && !probing().lock().unwrap().contains_key(&key)
 }
 
 /// Claims a probe atomically so concurrent reconcile passes do not repeat the process
 /// environment round trip. A failed attempt releases this claim for the next pass.
-pub fn begin_probe(bot_id: &str, pane_id: &str) -> bool {
-    let key = probe_key(bot_id, pane_id);
+pub fn begin_probe(host: &str, bot_id: &str, pane_id: &str) -> Option<u64> {
+    let key = probe_key(host, bot_id, pane_id);
     let done = probed().lock().unwrap();
     if done.contains(&key) {
-        return false;
+        return None;
     }
-    probing().lock().unwrap().insert(key)
+    static NEXT_PROBE: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+    let mut in_flight = probing().lock().unwrap();
+    if in_flight.contains_key(&key) {
+        return None;
+    }
+    let token = NEXT_PROBE.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    in_flight.insert(key, token);
+    Some(token)
 }
 
 /// A child's CLI kind can become known after the first reconcile pass.  An identity probe made
 /// while the row still carried the parent's kind must not suppress the probe for the child's kind.
-pub fn reset_probe(bot_id: &str, pane_id: &str) {
-    let key = probe_key(bot_id, pane_id);
+pub fn reset_probe(host: &str, bot_id: &str, pane_id: &str) {
+    let key = probe_key(host, bot_id, pane_id);
     probed().lock().unwrap().remove(&key);
     probing().lock().unwrap().remove(&key);
 }
 
+/// Host replacement/repoint retires every child observation tied to its old authority.
+pub fn reset_host_probes(host: &str) {
+    let prefix = format!("{host}\u{1}");
+    probed().lock().unwrap().retain(|key| !key.starts_with(&prefix));
+    probing().lock().unwrap().retain(|key, _| !key.starts_with(&prefix));
+}
+
 /// Releases a probe claim after a transient failure or when its future is cancelled.
-pub fn release_probe(bot_id: &str, pane_id: &str) {
-    probing().lock().unwrap().remove(&probe_key(bot_id, pane_id));
+pub fn release_probe(host: &str, bot_id: &str, pane_id: &str, token: u64) {
+    let key = probe_key(host, bot_id, pane_id);
+    let mut in_flight = probing().lock().unwrap();
+    if in_flight.get(&key) == Some(&token) {
+        in_flight.remove(&key);
+    }
 }
 
-pub fn probe_key(bot_id: &str, pane_id: &str) -> String {
-    format!("{bot_id}\u{1}{pane_id}")
+pub fn probe_key(host: &str, bot_id: &str, pane_id: &str) -> String {
+    format!("{host}\u{1}{bot_id}\u{1}{pane_id}")
 }
 
-pub fn mark_probed(bot_id: &str, pane_id: &str) {
-    let key = probe_key(bot_id, pane_id);
-    probed().lock().unwrap().insert(key.clone());
-    probing().lock().unwrap().remove(&key);
+pub fn mark_probed(host: &str, bot_id: &str, pane_id: &str, token: u64) -> bool {
+    let key = probe_key(host, bot_id, pane_id);
+    let mut done = probed().lock().unwrap();
+    let mut in_flight = probing().lock().unwrap();
+    if in_flight.get(&key) != Some(&token) {
+        return false;
+    }
+    in_flight.remove(&key);
+    done.insert(key);
+    true
 }
