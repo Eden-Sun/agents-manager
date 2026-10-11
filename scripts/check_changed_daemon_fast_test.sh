@@ -57,6 +57,17 @@ SH
 cat >"$fixture/bin/cargo" <<'SH'
 #!/usr/bin/env bash
 printf '%s\n' "$*" >>"$AM_TEST_CARGO_LOG"
+if [ "${1:-}" = test ]; then
+    # libtest 一次只收一個位置過濾字串：`-- a b` 會被拒絕（#1263）。這裡照樣拒絕，假的 cargo 才抓得到。
+    after=0 npos=0
+    for a in "$@"; do
+        if [ "$after" = 1 ]; then npos=$((npos + 1)); elif [ "$a" = -- ]; then after=1; fi
+    done
+    if [ "$npos" -gt 1 ]; then
+        echo "error: unexpected argument found" >&2
+        exit 2
+    fi
+fi
 if [ "${1:-}" = test ] && [ -n "${AM_TEST_CARGO_FAIL_ON_TEST:-}" ]; then
     echo "test foo::bar ... FAILED" >&2
     exit 101
@@ -111,12 +122,18 @@ grep -qx 'test -p agents-managerd --locked -- lifecycle::queue::' "$AM_TEST_CARG
     || fail "改 queue.rs 沒有跑 lifecycle::queue:: 的測試：$(cat "$AM_TEST_CARGO_LOG")"
 [ -e "$fixture/web/dist/index.html" ] && fail 'stub 沒清掉'
 
-# 兩個模組：兩個過濾字串都帶上。
+# 兩個模組：每個過濾字串各跑一次（#1263：不能一條 cargo test 帶好幾個位置參數）。
 : >"$AM_TEST_CARGO_LOG"
 export AM_TEST_DIFF_HEAD=$'daemon/src/lifecycle/queue.rs\ndaemon/src/hookrecv.rs'
-changed >/dev/null || fail "兩個模組的 changed 失敗"
-grep -qx 'test -p agents-managerd --locked -- hookrecv:: lifecycle::queue::' "$AM_TEST_CARGO_LOG" \
-    || fail "多模組的過濾字串不對：$(cat "$AM_TEST_CARGO_LOG")"
+changed >/dev/null || fail "兩個模組的 changed 失敗：$(cat "$AM_TEST_CARGO_LOG")"
+grep -qx 'test -p agents-managerd --locked -- hookrecv::' "$AM_TEST_CARGO_LOG" \
+    || fail "兩個模組沒有各自跑 hookrecv:: ：$(cat "$AM_TEST_CARGO_LOG")"
+grep -qx 'test -p agents-managerd --locked -- lifecycle::queue::' "$AM_TEST_CARGO_LOG" \
+    || fail "兩個模組沒有各自跑 lifecycle::queue:: ：$(cat "$AM_TEST_CARGO_LOG")"
+# 兩個都紅：整輪要紅，而且兩個都跑過（第一個紅不能就停）。
+: >"$AM_TEST_CARGO_LOG"
+AM_TEST_CARGO_FAIL_ON_TEST=1 changed >/dev/null 2>&1 && fail "兩個模組的測試都紅，changed 卻過了"
+[ "$(grep -c '^test -p agents-managerd --locked -- ' "$AM_TEST_CARGO_LOG")" = 2 ] || fail "測試紅了沒有把兩個模組都跑完：$(cat "$AM_TEST_CARGO_LOG")"
 
 # 明講不要測試：只 check。明講要哪個：照它。
 : >"$AM_TEST_CARGO_LOG"
