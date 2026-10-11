@@ -19,6 +19,8 @@ const RETRY_MAX = 12
 const RETRY_WAIT_MAX_S = 30
 /** 503 也等了重試，但只試這麼多次：遠端主機真的離線時不要讓人盯著「上傳中」太久。 */
 const RETRY_503_MAX = 3
+/** 兩種錯誤分開計額，但整體最多重試 15 次（初次上傳以外最多 16 次呼叫）。 */
+const RETRY_TOTAL_MAX = RETRY_MAX + RETRY_503_MAX
 
 /** 瀏覽器解不開的 HEIC（多半是電腦上的 Chrome）：bot 也讀不了，請使用者換一張。 */
 export class PhotoUnreadableError extends Error {
@@ -103,21 +105,28 @@ export interface UploadOptions {
 
 const defaultSleep = (ms: number) => new Promise<void>((r) => setTimeout(r, ms))
 
-/** 先整理照片，再上傳；429／503 照 `Retry-After` 等了重試（429 最多 [`RETRY_MAX`] 次，503 最多 [`RETRY_503_MAX`] 次），其他錯誤照拋。 */
+/** 先整理照片，再上傳；429 最多重試 [`RETRY_MAX`] 次、503 最多 [`RETRY_503_MAX`] 次，合計最多 [`RETRY_TOTAL_MAX`] 次，其他錯誤照拋。 */
 export async function uploadPatiently(client: ShareClient, f: File, opts: UploadOptions = {}): Promise<{ id: string; name: string }> {
   const sleep = opts.sleep ?? defaultSleep
   const file = await preparePhoto(f, opts.codec)
   // 照片縮過才量：原尺寸超過 25 MB 的照片縮完多半就放得下。
   if (file.size > SHARE_FILE_MAX) throw new ShareHttpError(413)
+  let rateLimited = 0
   let busy = 0
-  for (let attempt = 0; ; attempt++) {
+  let retries = 0
+  for (;;) {
     try {
       return await client.upload(file)
     } catch (e) {
-      if (!(e instanceof ShareHttpError) || attempt >= RETRY_MAX) throw e
+      if (!(e instanceof ShareHttpError) || retries >= RETRY_TOTAL_MAX) throw e
       if (e.status === 503) {
-        if (busy++ >= RETRY_503_MAX) throw e
-      } else if (e.status !== 429) throw e
+        if (busy >= RETRY_503_MAX) throw e
+        busy++
+      } else if (e.status === 429) {
+        if (rateLimited >= RETRY_MAX) throw e
+        rateLimited++
+      } else throw e
+      retries++
       await sleep(Math.min(e.retryAfter ?? 3, RETRY_WAIT_MAX_S) * 1000)
     }
   }
