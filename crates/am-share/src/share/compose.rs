@@ -905,6 +905,26 @@ mod tests {
         assert!(images(&out)[0].0.as_deref().is_some_and(|h| h.starts_with("data:image/jpeg;base64,")), "下一次放得下就嵌進去");
     }
 
+    /// #1434：永久讀不到（stat 成功、讀檔被拒，遠端回 `not_found`）的照片要負快取：下一次分享頁不用再抓一次。
+    #[test]
+    fn a_permanently_unreadable_photo_is_cached_as_not_found() {
+        let ws = format!("/remote/ws-{}", crate::db::ulid());
+        let rels = vec![vec!["inbox".to_string(), "locked.jpg".to_string()]];
+        let meta = PhotoMeta { ino: 11, len: 100, mtime_ns: 1 };
+        let s = svg(r#"<image href="inbox/locked.jpg" width="10" height="10"/>"#);
+        let scope = PrefetchedSource::scope_of("hostA#1", &ws);
+
+        let denied = PrefetchedSource::new("hostA#1", &ws, &rels, &[Some(meta)], vec![Some(Err("not_found"))]);
+        let out = embed_with(s.as_bytes(), &denied).unwrap();
+        assert_eq!(images(&out), vec![(None, Some("not_found".to_string()))]);
+        assert!(is_cached(&scope, &rels[0], &meta), "永久讀不到要負快取");
+
+        // 下一次：不該再去抓（給一個「沒抓」的來源；若還去讀，會是 read_failed 而不是 not_found）。
+        let unfetched = PrefetchedSource::new("hostA#1", &ws, &rels, &[Some(meta)], vec![None]);
+        let out = embed_with(s.as_bytes(), &unfetched).unwrap();
+        assert_eq!(images(&out), vec![(None, Some("not_found".to_string()))], "第二次直接用負快取");
+    }
+
     /// 防止改過頭：照片內容本身壞掉（不是圖）是這張照片的身分，照樣快取，不用每次重解。
     #[test]
     fn a_bad_image_is_still_cached() {
