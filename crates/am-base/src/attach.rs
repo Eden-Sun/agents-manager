@@ -232,7 +232,9 @@ async fn best_effort_cleanup(host: &Arc<HostConn>, local_path: &str, agent_path:
 /// (issue #88); `'failed'` rows are ones `save()` already gave up on, whose best-effort cleanup may
 /// not have finished. Both are unrecoverable as attachments (bytes may be partial or absent) —
 /// clean up the file(s) and drop the row. Idempotent: nothing to do once already cleaned.
+/// 遠端主機的列開機不 ssh（#1414）：只轉成 `failed`，交給 [`sweep_unreferenced`] 的 stuck 迴圈在背景刪。
 pub async fn reconcile_orphans(app: &(impl crate::capabilities::Db + crate::hosts::HostsAccess)) -> usize {
+    // 遠端主機的 staging／failed 列開機不 ssh（#1414）；本機的列照舊。
     let rows: Vec<(String, String, String, String)> = match sqlx::query_as(
         "SELECT id, local_path, agent_path, host FROM attachments WHERE state IN ('staging','failed')",
     )
@@ -247,8 +249,14 @@ pub async fn reconcile_orphans(app: &(impl crate::capabilities::Db + crate::host
     };
     let mut cleaned = 0;
     for (id, local_path, agent_path, host_name) in rows {
-        // 檔案還刪不掉（遠端連不上）就留著這一列：沒有檔的紀錄，遠端的檔就永遠沒有人指得到了（#1368）。下一次開機再試。
-        if !remove_files(app, &local_path, &agent_path, &host_name).await {
+        // 開機不 ssh（#1414）：API 這時還在 503，遠端每列等一次 ssh 逾時會把開機拖住好幾分鐘。遠端的 staging 轉成 failed，
+        // 交給背景清掃（它的 stuck 迴圈收所有 failed 列）；已經是 failed 的列本來就在那裡。
+        if is_remote(app, &host_name).await {
+            let _ = sqlx::query("UPDATE attachments SET state = 'failed' WHERE id = ? AND state = 'staging'").bind(&id).execute(app.db()).await;
+            continue;
+        }
+        // 檔案還刪不掉（本機刪不掉）就留著這一列：沒有檔的紀錄，檔案就永遠沒有人指得到了（#1368）。下一次開機再試。
+        if !remove_files(app, &local_path, &agent_path, &host_name, &mut Default::default()).await {
             tracing::warn!(id = %id, host = %host_name, "orphaned attachment's files are not gone yet; keeping its row for the next startup");
             continue;
         }
@@ -266,7 +274,19 @@ pub async fn reconcile_orphans(app: &(impl crate::capabilities::Db + crate::host
 /// 刪一個附件的位元組：daemon 能讀的那份（本機 bot 就是專案裡那份、遠端 bot 是資料目錄裡的副本），遠端再 ssh 刪 agent 讀的那份。
 /// 冪等。回 `true` 只在兩邊都確定沒有了（本機是刪掉或本來就不在；遠端是 `rm -f` 成功，或主機已經不在設定裡、無從刪起）。
 /// 回 `false` 的呼叫端**不能**把 row 刪掉：row 是唯一指得到這些檔的紀錄（#1368）。
-async fn remove_files(app: &impl crate::hosts::HostsAccess, local_path: &str, agent_path: &str, host_name: &str) -> bool {
+/// 設定裡有、而且不是本機的主機（需要 ssh 才刪得到遠端的檔）。
+async fn is_remote(app: &impl crate::hosts::HostsAccess, host_name: &str) -> bool {
+    matches!(app.hosts().get(host_name).await, Some(host) if !host.is_local())
+}
+
+/// `unreachable`：這一輪已經 ssh 失敗過的主機（#1414）。同一輪同一台只試一次，之後的列直接當作遠端刪不掉（本機副本照刪）。
+async fn remove_files(
+    app: &impl crate::hosts::HostsAccess,
+    local_path: &str,
+    agent_path: &str,
+    host_name: &str,
+    unreachable: &mut std::collections::HashSet<String>,
+) -> bool {
     let local_gone = match std::fs::remove_file(local_path) {
         Ok(()) => true,
         // 「不在」包含父層不是目錄（ENOTDIR）這種路徑上根本不可能有檔案的情況；其他錯誤（權限等）只有在路徑上確實還有東西時才算刪不掉。
@@ -274,7 +294,17 @@ async fn remove_files(app: &impl crate::hosts::HostsAccess, local_path: &str, ag
         Err(e) => e.kind() == std::io::ErrorKind::NotFound || e.raw_os_error() == Some(20),
     };
     let remote_gone = match app.hosts().get(host_name).await {
-        Some(host) if !host.is_local() => host.ssh_exec(&format!("rm -f {}", sh_quote(agent_path))).await.is_ok(),
+        Some(host) if !host.is_local() => {
+            if unreachable.contains(host_name) {
+                false
+            } else {
+                let ok = host.ssh_exec(&format!("rm -f {}", sh_quote(agent_path))).await.is_ok();
+                if !ok {
+                    unreachable.insert(host_name.to_string());
+                }
+                ok
+            }
+        }
         _ => true,
     };
     local_gone && remote_gone
@@ -308,6 +338,7 @@ const SWEEP_EVERY: std::time::Duration = std::time::Duration::from_secs(6 * 3600
 ///
 /// 先刪 row 才刪檔：那一句 DELETE 自己帶同樣的條件，跟 [`bind`] 搶同一列——bind 先贏，這裡 0 rows、什麼檔都不動；
 /// 這裡先贏，才刪檔。檔案刪不掉只留下一個沒有 row 的檔（沒有人引用它），不會有「row 在、檔沒了」。
+/// 同一輪同一台遠端主機只 ssh 一次（#1414）：連不上的主機這一輪剩下的列直接留著。
 pub async fn sweep_unreferenced(app: &(impl crate::capabilities::Db + crate::hosts::HostsAccess), keep_secs: i64) -> usize {
     let cutoff = db::iso_in(-keep_secs);
     let created = db::ts_sql("a.created_at");
@@ -333,6 +364,8 @@ pub async fn sweep_unreferenced(app: &(impl crate::capabilities::Db + crate::hos
     // 兩階段（#1368）：先把列標成 `failed`（bind 只認 `ready`，所以跟它搶的那一方現在一定輸）、再刪檔，檔刪乾淨才刪列。
     // 刪不掉的（遠端連不上）就留在 `failed`，下一輪最前面補做。`failed` 的列 resolve／讀取都看不到。
     let mut swept = 0;
+    // 同一輪同一台遠端只 ssh 一次（#1414）：stuck 與 rows 兩個迴圈共用。
+    let mut unreachable = std::collections::HashSet::new();
     let stuck: Vec<(String, String, String, String)> = match sqlx::query_as("SELECT id, local_path, agent_path, host FROM attachments WHERE state = 'failed'")
         .fetch_all(app.db())
         .await
@@ -344,7 +377,7 @@ pub async fn sweep_unreferenced(app: &(impl crate::capabilities::Db + crate::hos
         }
     };
     for (id, local_path, agent_path, host_name) in stuck {
-        if remove_files(app, &local_path, &agent_path, &host_name).await && delete_failed_row(app, &id).await {
+        if remove_files(app, &local_path, &agent_path, &host_name, &mut unreachable).await && delete_failed_row(app, &id).await {
             swept += 1;
         }
     }
@@ -358,7 +391,7 @@ pub async fn sweep_unreferenced(app: &(impl crate::capabilities::Db + crate::hos
         .await;
         match marked {
             Ok(r) if r.rows_affected() == 1 => {
-                if remove_files(app, &local_path, &agent_path, &host_name).await {
+                if remove_files(app, &local_path, &agent_path, &host_name, &mut unreachable).await {
                     if delete_failed_row(app, &id).await {
                         swept += 1;
                     }
