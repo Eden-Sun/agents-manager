@@ -69,7 +69,64 @@ pub async fn migrate(pool: &SqlitePool) -> Result<()> {
     )
     .execute(pool)
     .await?;
+
+    sqlx::query(
+        "CREATE TABLE IF NOT EXISTS release_triage_issue_creates (
+           kind TEXT NOT NULL,
+           version TEXT NOT NULL,
+           created_at TEXT NOT NULL
+         )",
+    )
+    .execute(pool)
+    .await?;
+    sqlx::query("CREATE INDEX IF NOT EXISTS release_triage_issue_creates_by_created_at ON release_triage_issue_creates(created_at)")
+        .execute(pool)
+        .await?;
+    sqlx::query("CREATE INDEX IF NOT EXISTS release_triage_issue_creates_by_row ON release_triage_issue_creates(kind, version)")
+        .execute(pool)
+        .await?;
+    sqlx::query("CREATE TABLE IF NOT EXISTS release_triage_migrations (name TEXT PRIMARY KEY)").execute(pool).await?;
+
+    // Parse the old issue refs only once when introducing the compact, indexed quota summary.
+    // Entry and verdict payloads are intentionally untouched, and one malformed historical row
+    // must not prevent an unrelated release from being published.
+    let mut tx = pool.begin().await?;
+    let backfill = sqlx::query("INSERT OR IGNORE INTO release_triage_migrations (name) VALUES ('issue-create-summary-v1')")
+        .execute(&mut *tx)
+        .await?;
+    if backfill.rows_affected() == 1 {
+        let rows: Vec<(String, String, String)> = sqlx::query_as("SELECT kind, version, issue_numbers_json FROM release_triage").fetch_all(&mut *tx).await?;
+        for (kind, version, raw_issues) in rows {
+            let Ok(issues) = serde_json::from_str::<Vec<StoredIssueCreate>>(&raw_issues) else {
+                tracing::warn!(kind = %kind, version = %version, "release-triage historical issue refs are malformed; skipping quota summary backfill for this row");
+                continue;
+            };
+            for issue in issues.into_iter().filter(|issue| !issue.comment) {
+                let Some(created_at) = normalize_issue_created_at(&issue.created_at) else { continue };
+                sqlx::query("INSERT INTO release_triage_issue_creates (kind, version, created_at) VALUES (?, ?, ?)")
+                    .bind(&kind)
+                    .bind(&version)
+                    .bind(created_at)
+                    .execute(&mut *tx)
+                    .await?;
+            }
+        }
+    }
+    tx.commit().await?;
     Ok(())
+}
+
+#[derive(Deserialize)]
+struct StoredIssueCreate {
+    created_at: String,
+    #[serde(default)]
+    comment: bool,
+}
+
+fn normalize_issue_created_at(value: &str) -> Option<String> {
+    chrono::DateTime::parse_from_rfc3339(value)
+        .ok()
+        .map(|at| at.with_timezone(&chrono::Utc).format("%Y-%m-%dT%H:%M:%S%.9fZ").to_string())
 }
 
 /// A durable intention to make one marker-bearing GitHub side effect.
@@ -190,7 +247,7 @@ pub async fn publish_intent(pool: &SqlitePool, kind: &str, version: &str, marker
 /// following `issue_numbers_json` write was lost. Callers still verify the marker against GitHub
 /// before counting or recovering an intent.
 pub async fn recent_create_intents(pool: &SqlitePool) -> Result<Vec<RecentCreateIntent>> {
-    let cutoff = (chrono::Utc::now() - chrono::Duration::hours(24)).format("%Y-%m-%dT%H:%M:%S%.3fZ").to_string();
+    let cutoff = (chrono::Utc::now() - chrono::Duration::hours(24)).format("%Y-%m-%dT%H:%M:%S%.9fZ").to_string();
     Ok(sqlx::query_as::<_, RecentCreateIntent>(
         "SELECT kind, version, marker, created_at FROM release_triage_publish_intents
          WHERE action = 'create' AND created_at >= ? ORDER BY created_at",
@@ -512,6 +569,7 @@ pub async fn bot_within(pool: &SqlitePool, caller: &str, root: &str) -> Result<b
 /// publish 之後寫回：目前的 issue 清單、狀態（`judged` 或 `published`）與錯誤／備註。只動 `judged` 的列
 /// （重複 publish 不會把 `published` 改回去）。
 pub async fn save_publish(pool: &SqlitePool, kind: &str, version: &str, issues: &[IssueRef], status: Status, note: Option<&str>) -> Result<bool> {
+    let mut tx = pool.begin().await?;
     let r = sqlx::query(
         "UPDATE release_triage SET status = ?, issue_numbers_json = ?, publish_error = ?, updated_at = ?
          WHERE kind = ? AND version = ? AND status = 'judged'",
@@ -522,21 +580,33 @@ pub async fn save_publish(pool: &SqlitePool, kind: &str, version: &str, issues: 
     .bind(now_ts())
     .bind(kind)
     .bind(version)
-    .execute(pool)
+    .execute(&mut *tx)
     .await?;
+    if r.rows_affected() == 1 {
+        sqlx::query("DELETE FROM release_triage_issue_creates WHERE kind = ? AND version = ?")
+            .bind(kind)
+            .bind(version)
+            .execute(&mut *tx)
+            .await?;
+        for issue in issues.iter().filter(|issue| !issue.comment) {
+            let Some(created_at) = normalize_issue_created_at(&issue.created_at) else { continue };
+            sqlx::query("INSERT INTO release_triage_issue_creates (kind, version, created_at) VALUES (?, ?, ?)")
+                .bind(kind)
+                .bind(version)
+                .bind(created_at)
+                .execute(&mut *tx)
+                .await?;
+        }
+    }
+    tx.commit().await?;
     Ok(r.rows_affected() == 1)
 }
 
 /// 最近 24 小時內**新開**的 issue 數（不含只留言／找到既有的），全部 kind、全部版本合計。
 pub async fn created_in_last_day(pool: &SqlitePool) -> Result<usize> {
-    let cutoff = chrono::Utc::now() - chrono::Duration::hours(24);
-    Ok(list(pool, None, None)
-        .await?
-        .iter()
-        .flat_map(|r| r.issues.iter())
-        .filter(|i| !i.comment)
-        .filter(|i| chrono::DateTime::parse_from_rfc3339(&i.created_at).is_ok_and(|t| t.with_timezone(&chrono::Utc) >= cutoff))
-        .count())
+    let cutoff = (chrono::Utc::now() - chrono::Duration::hours(24)).format("%Y-%m-%dT%H:%M:%S%.3fZ").to_string();
+    let count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM release_triage_issue_creates WHERE created_at >= ?").bind(cutoff).fetch_one(pool).await?;
+    usize::try_from(count).map_err(|_| anyhow!("release-triage daily issue count is out of range"))
 }
 
 #[cfg(test)]
