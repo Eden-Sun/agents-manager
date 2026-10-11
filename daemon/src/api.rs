@@ -4846,7 +4846,7 @@ async fn get_mem(State(app): State<Arc<App>>) -> Result<Json<Value>, LcError> {
 async fn get_mem_processes(State(app): State<Arc<App>>, Query(q): Query<HashMap<String, String>>) -> Result<Json<Value>, LcError> {
     let host = q.get("host").cloned().unwrap_or_else(|| crate::config::LOCAL_HOST.to_string());
     if app.hosts.get(&host).await.is_none() {
-        return Err(LcError::NotFound(format!("unknown host `{host}`")));
+        return Err(unknown_host(&host));
     }
     crate::memproc::processes(&app, &host).await.map(Json).map_err(|e| LcError::Upstream(format!("{e:#}")))
 }
@@ -4858,10 +4858,15 @@ async fn get_mem_pane(State(app): State<Arc<App>>, Query(q): Query<HashMap<Strin
     };
     let lines: u32 = q.get("lines").and_then(|s| s.parse().ok()).unwrap_or(40).clamp(1, 500);
     if app.hosts.get(&host).await.is_none() {
-        return Err(LcError::NotFound(format!("unknown host `{host}`")));
+        return Err(unknown_host(&host));
     }
     let socket = q.get("socket").map(String::as_str);
     Ok(Json(crate::app_ports_p3::pane_preview(&app, &host, pane_id, socket, lines).await?))
+}
+
+/// 不認得的主機（#1384）：404 的 `what` 一律是資源名 `host`（API.md §1，同其他端點）；那句話放 message，網頁照讀 `reason ?? message`。
+fn unknown_host(host: &str) -> LcError {
+    LcError::NotFoundValue(json!({"error": "not_found", "what": "host", "host": host, "message": format!("unknown host `{host}`")}))
 }
 
 /// `pid` 要是正的 32 位元整數：`as i32` 會把 2³²+N 截成 N，守衛驗的與訊號打的就都是另一顆行程。
@@ -4880,7 +4885,7 @@ async fn kill_mem_process(State(app): State<Arc<App>>, Json(body): Json<Value>) 
     let pid = kill_pid(&body)?;
     let signal = body.get("signal").and_then(|v| v.as_str()).unwrap_or("TERM");
     if app.hosts.get(&host).await.is_none() {
-        return Err(LcError::NotFound(format!("unknown host `{host}`")));
+        return Err(unknown_host(&host));
     }
     match crate::memproc::kill(&app, &host, pid, signal).await {
         Err(e) => Err(LcError::Upstream(format!("{e:#}"))),
@@ -4927,7 +4932,7 @@ async fn get_quota(State(app): State<Arc<App>>, Query(q): Query<HashMap<String, 
         let hosts = match q.get("host").map(String::as_str).filter(|h| !h.is_empty()) {
             Some(h) => {
                 if app.hosts.get(h).await.is_none() {
-                    return Err(LcError::NotFound(format!("unknown host `{h}`")));
+                    return Err(unknown_host(h));
                 }
                 vec![h.to_string()]
             }
