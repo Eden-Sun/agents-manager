@@ -246,14 +246,10 @@ def operate(store, job, config):
         if store.get(ident)["status"] == "done":
             return
         progress = journal_state(store, ident)
-        if progress:
-            if progress.get("phase") == "done":
-                store.finish(ident, progress["answer"], progress["url"], token)
-            elif journal_may_have_sent(progress):
-                store.fail(ident, "unknown", "可能已送出；用 collect 取回，不可重送", token)
-            else:
-                # opened／preparing：一個字都還沒送，可 retry，不能把同 project 佇列卡成 unknown。
-                store.fail(ident, "failed", "還沒送出就失敗（journal 停在送出前）；檢查登入後 retry", token)
+        if progress and progress.get("phase") == "done":
+            store.finish(ident, progress["answer"], progress["url"], token)
+        elif journal_may_have_sent(progress):
+            store.fail(ident, "unknown", "可能已送出；用 collect 取回，不可重送", token)
         elif quota_error(out):
             store.fail(ident, "waiting_quota", "Sonnet 額度不足；30 分鐘後重試，不換帳號或模型", token)
         elif BUSY_MARK in (out or ""):
@@ -262,6 +258,9 @@ def operate(store, job, config):
         elif BROWSER_NOT_RUNNING_MARK in (out or ""):
             # 沒有 journal：連送都沒送出，留在可重試的 failed，不能算 unknown（GH #65）。
             store.fail(ident, "failed", f"{BROWSER_NOT_RUNNING_MARK}：ego lite 沒有在跑，請先開啟 ego lite 再重試", token)
+        elif progress:
+            # opened／preparing：一個字都還沒送，可 retry，不能把同 project 佇列卡成 unknown。
+            store.fail(ident, "failed", "還沒送出就失敗（journal 停在送出前）；檢查登入後 retry", token)
         else:
             store.fail(ident, "failed", "Sonnet 未取得瀏覽器收據；檢查登入、CLI 與 MCP，再 retry", token)
     except Exception as e:
