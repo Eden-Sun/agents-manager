@@ -46,6 +46,11 @@
   text-align: left;
 }
 
+.head-menu-pop[data-up] {
+  top: auto;
+  bottom: calc(100% + 6px);
+}
+
 @media (width <= 640px) {
   /* 已以 40px 排好，放大範圍時不撐破列高。 */
 
