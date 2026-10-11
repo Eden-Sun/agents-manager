@@ -216,7 +216,7 @@ struct CollisionIn {
 
 /// 呼叫端的 bot 列讀不到（#1384）：404 `what` 是資源名 `bot`，那句話放 message。
 fn bot_not_found(caller: &str) -> LcError {
-    LcError::NotFound(format!("bot {caller}"))
+    LcError::NotFoundValue(json!({"error": "not_found", "what": "bot", "message": format!("bot {caller}")}))
 }
 
 /// `POST /api/judge/collision-check`：bot 認領票時問一次撞題（只記帳本、推提示，不擋認領）。回 202，不等 Jev。
