@@ -4,6 +4,7 @@ import { MOCK_MODE } from './api'
 import { useDialogFocus } from './hooks/useDialogFocus'
 import { useViewportPin } from './hooks/useViewportPin'
 import { useWakeLockHolder } from './hooks/useWakeLock'
+import { useFileDropGuard } from './hooks/useFileDropGuard'
 import { DRAWER_QUERY, useMediaQuery } from './hooks/useMediaQuery'
 import { useProjectJumpKeys } from './hooks/useProjectJumpKeys'
 import { useBotSwitchKeys } from './hooks/useBotSwitchKeys'
@@ -143,6 +144,8 @@ export default function App() {
   useViewportPin()
   // 螢幕保持亮著的鎖在 App 根部握（#1199）：關掉環境設定視窗不會放掉。
   useWakeLockHolder()
+  // 沒有 drop 區接的檔案拖放不讓瀏覽器打開（#1244）。
+  useFileDropGuard()
   const sidebarRef = useRef<HTMLElement>(null)
   const drawerOpen = isMobile && drawer
 
