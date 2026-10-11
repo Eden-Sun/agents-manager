@@ -29,13 +29,14 @@ setup() {
   cp "$HERE/outbox-gc.sh" "$ROOT/agm/bin/outbox-gc.sh"
   OB="$HOME/.config/agents-manager/outbox"; LOG="$ROOT/agm/outbox-gc.log"; : > "$LOG"
   unset AM_OUTBOX_ROOT OUTBOX_MAX_AGE_MIN OUTBOX_SHARE_KEEP_DAYS OUTBOX_SHARE_CAP_BYTES OUTBOX_SHARE_CAP_FILES
-  # 分享名單的資料庫（#1291）：daemon 的 db.sqlite3 放在資料目錄底下，結構只取 gc 會查的欄位。
-  sqlite3 "$HOME/.config/agents-manager/db.sqlite3" "CREATE TABLE projects (id TEXT PRIMARY KEY, deleted_at TEXT); CREATE TABLE bots (id TEXT PRIMARY KEY, project_id TEXT NOT NULL, deleted_at TEXT); CREATE TABLE shared_bots (bot_id TEXT PRIMARY KEY);"
+  # 分享名單的資料庫（#1291）：daemon 寫的帳本檔是 agents-manager.sqlite3（startup.rs、release_triage::default_db_path），
+  # 放在資料目錄底下；這裡的檔名寫死，不從腳本拿，腳本寫錯檔名測試才抓得到（#1391）。結構只取 gc 會查的欄位。
+  sqlite3 "$HOME/.config/agents-manager/agents-manager.sqlite3" "CREATE TABLE projects (id TEXT PRIMARY KEY, deleted_at TEXT); CREATE TABLE bots (id TEXT PRIMARY KEY, project_id TEXT NOT NULL, deleted_at TEXT); CREATE TABLE shared_bots (bot_id TEXT PRIMARY KEY);"
 }
 teardown() { rm -rf "$ROOT"; }
 # 把 bot 登記成正在分享（shared_bots 有列、bot 與專案都沒刪）／把 bot 標成刪掉。
-share_bot() { sqlite3 "$HOME/.config/agents-manager/db.sqlite3" "INSERT OR IGNORE INTO projects (id) VALUES ('p-$1'); INSERT OR IGNORE INTO bots (id, project_id) VALUES ('$1', 'p-$1'); INSERT OR IGNORE INTO shared_bots (bot_id) VALUES ('$1');"; }
-del_bot() { sqlite3 "$HOME/.config/agents-manager/db.sqlite3" "UPDATE bots SET deleted_at = 'x' WHERE id = '$1';"; }
+share_bot() { sqlite3 "$HOME/.config/agents-manager/agents-manager.sqlite3" "INSERT OR IGNORE INTO projects (id) VALUES ('p-$1'); INSERT OR IGNORE INTO bots (id, project_id) VALUES ('$1', 'p-$1'); INSERT OR IGNORE INTO shared_bots (bot_id) VALUES ('$1');"; }
+del_bot() { sqlite3 "$HOME/.config/agents-manager/agents-manager.sqlite3" "UPDATE bots SET deleted_at = 'x' WHERE id = '$1';"; }
 old() { touch -t 202601010000 "$@"; }     # 遠超過任何保留期（只能往回改 mtime；ctime 一定是「現在」）
 # 「搬進來的時間」是 ctime（mv／cp -p 會保留舊 mtime，ctime 卻是搬入那一刻），測試沒辦法把 ctime 往回改，
 # 所以改成把腳本的時鐘往後撥：`run_at <分鐘>`＝假裝現在是 <分鐘> 分鐘之後（OUTBOX_GC_NOW 是腳本給測試的時鐘接縫）。
@@ -181,7 +182,7 @@ echo x > "$OB/live/report.pdf"
 : > "$OB/gone/.am-share-keep"; share_bot gone; del_bot gone
 echo x > "$OB/gone/report.pdf"
 share_bot proj
-sqlite3 "$HOME/.config/agents-manager/db.sqlite3" "UPDATE projects SET deleted_at = 'x' WHERE id = 'p-proj';"
+sqlite3 "$HOME/.config/agents-manager/agents-manager.sqlite3" "UPDATE projects SET deleted_at = 'x' WHERE id = 'p-proj';"
 echo x > "$OB/proj/report.pdf"
 equals "正常跑 exit 0" "$(run)" "0"
 gone   "bot 自建的標記不保留：過期檔照一小時清" "$OB/fake/report.pdf"
@@ -194,7 +195,7 @@ teardown
 setup
 mkdir -p "$OB/plain"
 echo x > "$OB/plain/old.txt"; old "$OB/plain/old.txt"
-rm -f "$HOME/.config/agents-manager/db.sqlite3"
+rm -f "$HOME/.config/agents-manager/agents-manager.sqlite3"
 equals "沒有 DB：exit 1" "$(run)" "1"
 exists "沒有 DB：一般檔也不刪" "$OB/plain/old.txt"
 check  "沒有 DB：log 寫明拒絕整輪" "拒絕整輪清理" "$LOG"
@@ -202,7 +203,7 @@ teardown
 setup
 mkdir -p "$OB/plain"
 echo x > "$OB/plain/old.txt"; old "$OB/plain/old.txt"
-printf 'not a database' > "$HOME/.config/agents-manager/db.sqlite3"
+printf 'not a database' > "$HOME/.config/agents-manager/agents-manager.sqlite3"
 equals "DB 壞掉：exit 1" "$(run)" "1"
 exists "DB 壞掉：一般檔也不刪" "$OB/plain/old.txt"
 check  "DB 壞掉：log 寫明拒絕整輪" "拒絕整輪清理" "$LOG"
@@ -306,6 +307,19 @@ setup
 mkdir -p "$HOME/.ssh/keys"; echo x > "$HOME/.ssh/keys/old"; old "$HOME/.ssh/keys/old"
 equals "帶 .. 的路徑 exit 1" "$(AM_OUTBOX_ROOT="$OB/../../../.ssh" run)" "1"
 exists "帶 .. 指到 outbox 之外的過期檔不刪" "$HOME/.ssh/keys/old"
+teardown
+
+# 4. 分享名單的資料庫檔名要跟 daemon 寫的一致（#1391）。#1291 把腳本的檔名寫成 db.sqlite3，daemon 實際寫的是
+#    agents-manager.sqlite3：讀不到名單就整輪拒絕清理，outbox 每 10 分鐘都停。這裡只放真實檔名的 DB（檔名寫死在 setup），
+#    分享中的 bot 的過期檔要留、一般過期檔照刪、整輪不能因為名單讀不到而拒絕。
+setup
+mkdir -p "$OB/shared" "$OB/plain"
+echo x > "$OB/shared/old.txt"; touch -t "$(date -d '3 days ago' +%Y%m%d%H%M 2>/dev/null || date -v-3d +%Y%m%d%H%M)" "$OB/shared/old.txt"; share_bot shared
+echo x > "$OB/plain/old.txt"; old "$OB/plain/old.txt"
+equals "只有 agents-manager.sqlite3 也照跑 exit 0" "$(run)" "0"
+exists "分享中的 bot 的過期檔留下（名單讀得到）" "$OB/shared/old.txt"
+gone   "一般的過期檔照刪" "$OB/plain/old.txt"
+check_no "log 沒有拒絕整輪" "拒絕" "$LOG"
 teardown
 
 echo "$PASS passed, $FAIL failed"
