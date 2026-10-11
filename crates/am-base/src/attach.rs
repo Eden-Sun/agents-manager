@@ -247,7 +247,11 @@ pub async fn reconcile_orphans(app: &(impl crate::capabilities::Db + crate::host
     };
     let mut cleaned = 0;
     for (id, local_path, agent_path, host_name) in rows {
-        remove_files(app, &local_path, &agent_path, &host_name).await;
+        // 檔案還刪不掉（遠端連不上）就留著這一列：沒有檔的紀錄，遠端的檔就永遠沒有人指得到了（#1368）。下一次開機再試。
+        if !remove_files(app, &local_path, &agent_path, &host_name).await {
+            tracing::warn!(id = %id, host = %host_name, "orphaned attachment's files are not gone yet; keeping its row for the next startup");
+            continue;
+        }
         match sqlx::query("DELETE FROM attachments WHERE id = ?").bind(&id).execute(app.db()).await {
             Ok(_) => cleaned += 1,
             Err(e) => tracing::warn!(id = %id, error = %e, "could not remove an orphaned attachment row"),
@@ -259,13 +263,30 @@ pub async fn reconcile_orphans(app: &(impl crate::capabilities::Db + crate::host
     cleaned
 }
 
-/// 刪一個附件的位元組：daemon 能讀的那份（本機 bot 就是專案裡那份、遠端 bot 是資料目錄裡的副本），遠端再 best-effort
-/// ssh 刪 agent 讀的那份。冪等，失敗只是留下一個沒有 row 的檔，不影響呼叫端。
-async fn remove_files(app: &impl crate::hosts::HostsAccess, local_path: &str, agent_path: &str, host_name: &str) {
-    let _ = std::fs::remove_file(local_path);
-    if let Some(host) = app.hosts().get(host_name).await {
-        if !host.is_local() {
-            let _ = host.ssh_exec(&format!("rm -f {}", sh_quote(agent_path))).await;
+/// 刪一個附件的位元組：daemon 能讀的那份（本機 bot 就是專案裡那份、遠端 bot 是資料目錄裡的副本），遠端再 ssh 刪 agent 讀的那份。
+/// 冪等。回 `true` 只在兩邊都確定沒有了（本機是刪掉或本來就不在；遠端是 `rm -f` 成功，或主機已經不在設定裡、無從刪起）。
+/// 回 `false` 的呼叫端**不能**把 row 刪掉：row 是唯一指得到這些檔的紀錄（#1368）。
+async fn remove_files(app: &impl crate::hosts::HostsAccess, local_path: &str, agent_path: &str, host_name: &str) -> bool {
+    let local_gone = match std::fs::remove_file(local_path) {
+        Ok(()) => true,
+        // 「不在」包含父層不是目錄（ENOTDIR）這種路徑上根本不可能有檔案的情況；其他錯誤（權限等）只有在路徑上確實還有東西時才算刪不掉。
+        // 路徑上已經沒有這個檔：NotFound，或父層不是目錄（ENOTDIR，Linux 與 macOS 都是 20）。其他錯誤（權限等）才是刪不掉。
+        Err(e) => e.kind() == std::io::ErrorKind::NotFound || e.raw_os_error() == Some(20),
+    };
+    let remote_gone = match app.hosts().get(host_name).await {
+        Some(host) if !host.is_local() => host.ssh_exec(&format!("rm -f {}", sh_quote(agent_path))).await.is_ok(),
+        _ => true,
+    };
+    local_gone && remote_gone
+}
+
+/// 把一列 `failed` 真的刪掉（只刪 `failed` 的那一列，不會碰到別人重新標記的）。回 `true` 表示這一句真的刪到一列。
+async fn delete_failed_row(app: &impl crate::capabilities::Db, id: &str) -> bool {
+    match sqlx::query("DELETE FROM attachments WHERE id = ? AND state = 'failed'").bind(id).execute(app.db()).await {
+        Ok(r) => r.rows_affected() == 1,
+        Err(e) => {
+            tracing::warn!(id = %id, error = %e, "could not remove a failed attachment row");
+            false
         }
     }
 }
@@ -309,22 +330,44 @@ pub async fn sweep_unreferenced(app: &(impl crate::capabilities::Db + crate::hos
     if let Some((id, _, _, _)) = rows.first() {
         crate::race_point::hit("attachment_sweep_after_candidates", id).await;
     }
+    // 兩階段（#1368）：先把列標成 `failed`（bind 只認 `ready`，所以跟它搶的那一方現在一定輸）、再刪檔，檔刪乾淨才刪列。
+    // 刪不掉的（遠端連不上）就留在 `failed`，下一輪最前面補做。`failed` 的列 resolve／讀取都看不到。
     let mut swept = 0;
+    let stuck: Vec<(String, String, String, String)> = match sqlx::query_as("SELECT id, local_path, agent_path, host FROM attachments WHERE state = 'failed'")
+        .fetch_all(app.db())
+        .await
+    {
+        Ok(r) => r,
+        Err(e) => {
+            tracing::warn!(error = %e, "could not list failed attachments to retry");
+            Vec::new()
+        }
+    };
+    for (id, local_path, agent_path, host_name) in stuck {
+        if remove_files(app, &local_path, &agent_path, &host_name).await && delete_failed_row(app, &id).await {
+            swept += 1;
+        }
+    }
     for (id, local_path, agent_path, host_name) in rows {
-        let won = sqlx::query(&format!(
-            "DELETE FROM attachments AS a WHERE a.id = ? AND a.state = 'ready' AND a.message_id IS NULL AND {created} <= ? AND {named}"
+        let marked = sqlx::query(&format!(
+            "UPDATE attachments AS a SET state = 'failed' WHERE a.id = ? AND a.state = 'ready' AND a.message_id IS NULL AND {created} <= ? AND {named}"
         ))
         .bind(&id)
         .bind(&cutoff)
         .execute(app.db())
         .await;
-        match won {
+        match marked {
             Ok(r) if r.rows_affected() == 1 => {
-                remove_files(app, &local_path, &agent_path, &host_name).await;
-                swept += 1;
+                if remove_files(app, &local_path, &agent_path, &host_name).await {
+                    if delete_failed_row(app, &id).await {
+                        swept += 1;
+                    }
+                } else {
+                    tracing::warn!(id = %id, host = %host_name, "unreferenced attachment's files are not gone yet; keeping its row (failed) for the next sweep");
+                }
             }
             Ok(_) => {} // 剛好被 bind 搶走：它現在有訊息引用了。
-            Err(e) => tracing::warn!(id = %id, error = %e, "could not remove an unreferenced attachment row"),
+            Err(e) => tracing::warn!(id = %id, error = %e, "could not mark an unreferenced attachment row"),
         }
     }
     if swept > 0 {
