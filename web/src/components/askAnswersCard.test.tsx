@@ -52,6 +52,15 @@ test('取消：每題寫「沒有回答」，標頭註明', () => {
   assert.match(html, /ask-a none/)
 })
 
+test('時間 tooltip 是本地時間，dateTime 仍保留 ISO 字串', () => {
+  const m = message([{ question: 'q', answer: 'a' }])
+  const html = render(m)
+  const time = html.match(/<time class="msg-time" dateTime="([^"]+)" title="([^"]+)"/)
+  assert.ok(time)
+  assert.equal(time[1], m.created_at)
+  assert.doesNotMatch(time[2], /[TZ]/)
+})
+
 test('答案裡的 HTML 不會被當標籤執行', () => {
   const html = render(message([{ question: 'q', answer: '<script>alert(1)</script>' }]))
   assert.doesNotMatch(html, /<script>/)

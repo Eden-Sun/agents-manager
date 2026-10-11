@@ -19,6 +19,7 @@ import { startingSend, startingSendLabel } from '../store/startingSend'
 import { ATTACHMENT_FAILED_NOTICE, composerPlaceholder, sendButtonLabel, sendButtonTitle } from '../lib/composerLabels'
 import { queuedSendFor } from '../store/queuedSend'
 import { isImeEnter } from '../lib/ime'
+import { msgTimeLabel, msgTimeTitle } from '../lib/msgTime'
 import { herdrIdentity } from '../lib/herdrIdentity'
 import { PaneCopy } from './PaneCopy'
 import { OutboxFiles } from './OutboxFiles'
@@ -89,12 +90,6 @@ const SOURCE_LABEL: Record<string, string> = {
   transcript: '對話紀錄',
   web: '網頁訊息',
   system: '系統通知',
-}
-
-/** 訊息時間只到分；完整時間在 `title`。 */
-function timeOf(iso: string): string {
-  const d = new Date(iso)
-  return Number.isNaN(d.getTime()) ? '' : d.toLocaleTimeString([], { hour12: false, hour: '2-digit', minute: '2-digit' })
 }
 
 /** Codex 帳號提示是給 TUI 看的（`Run /usage`）；對話裡只說還有幾次重置。 */
@@ -210,9 +205,9 @@ const PlainBubble = memo(function PlainBubble({
           <time
             className="msg-time"
             dateTime={msg.created_at}
-            title={notice === 'hint' ? `${msg.created_at}\n${DELIVERY_HINT_TEXT}` : msg.created_at}
+            title={notice === 'hint' ? `${msgTimeTitle(msg.created_at)}\n${DELIVERY_HINT_TEXT}` : msgTimeTitle(msg.created_at)}
           >
-            {timeOf(msg.created_at)}
+            {msgTimeLabel(msg.created_at)}
           </time>
         )}
       </div>
@@ -453,8 +448,8 @@ function LastAskPeek({ msg, turnId, onJump }: { msg: Message; turnId: string; on
       <div className={`lastq${ui.open ? ' open' : ''}`} role="region" aria-label="這回合的提問">
         <div className="lastq-head">
           <span className="lastq-tag">這回合的提問</span>
-          <time className="lastq-time" dateTime={msg.created_at} title={msg.created_at}>
-            {timeOf(msg.created_at)}
+          <time className="lastq-time" dateTime={msg.created_at} title={msgTimeTitle(msg.created_at)}>
+            {msgTimeLabel(msg.created_at)}
           </time>
           {clamped ? <span className="lastq-hint">{ui.open ? '再點一下 · 捲到這則' : '點一下 · 展開全文'}</span> : null}
           <button
