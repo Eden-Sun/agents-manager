@@ -25,6 +25,18 @@ pub fn create_private_dir(dir: &Path) -> std::io::Result<()> {
     std::fs::create_dir_all(dir)
 }
 
+/// 建檔或截空重寫（暫存檔、計數檔，#1256）；同樣是**建檔當下**就 0600。
+pub fn create_private_truncate(path: &Path) -> std::io::Result<std::fs::File> {
+    let mut o = std::fs::OpenOptions::new();
+    o.write(true).create(true).truncate(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt as _;
+        o.mode(0o600);
+    }
+    o.open(path)
+}
+
 /// `O_APPEND` 開檔；**建檔當下**就是 0600（不是寫完再 chmod：中間那一瞬是 umask 決定的）。
 /// 已經存在的檔案不動權限——它可能正被另一個 hook 行程附加中。
 pub fn append_private(path: &Path) -> std::io::Result<std::fs::File> {

@@ -130,3 +130,82 @@
         let mut p = serde_json::json!([1, 2]);
         enrich_agy_payload(&mut p, "Stop");
     }
+
+    const MIB: u64 = 1024 * 1024;
+
+    /// 一個全新的資料目錄（測試之間互不相干）。
+    fn fresh_data_dir(name: &str) -> PathBuf {
+        let dir = crate::testing::track(std::env::temp_dir().join(format!("am-spool-cap-{name}-{}", std::process::id())));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    /// 稀疏檔：總長 `len`，尾巴是 `tail`。不真的寫滿磁碟，但大小與換行都是真的。
+    fn sparse(path: &std::path::Path, len: u64, tail: &[u8]) {
+        let f = std::fs::File::create(path).unwrap();
+        f.set_len(len - tail.len() as u64).unwrap();
+        drop(f);
+        let mut f = std::fs::OpenOptions::new().append(true).open(path).unwrap();
+        f.write_all(tail).unwrap();
+    }
+
+    /// #1256：一顆 bot 的 spool（`.replaying`、`.claim`、`hook-spool.jsonl`）加起來不能超過 64 MiB。
+    /// 超過時從最舊的檔丟起：先 `.replaying`，再 `.claim`，最新的那個最後才碰。這裡丟掉 `.replaying` 就夠了，`.claim` 留著。
+    #[test]
+    fn the_spool_drops_its_oldest_file_first_when_the_total_would_pass_the_cap() {
+        let data = fresh_data_dir("oldest-first");
+        let bot = data.join("bots/b1");
+        std::fs::create_dir_all(&bot).unwrap();
+        sparse(&bot.join("hook-spool.jsonl.replaying"), 40 * MIB, b"old-a\n");
+        sparse(&bot.join("hook-spool.jsonl.claim"), 30 * MIB, b"mid-b\n");
+        std::fs::write(bot.join("hook-spool.jsonl"), "new-c\n").unwrap();
+
+        spool_to(&data, "b1", &serde_json::json!({"event": "Stop", "tag": "fresh"}));
+
+        assert!(!bot.join("hook-spool.jsonl.replaying").exists(), "最舊的先丟");
+        assert!(bot.join("hook-spool.jsonl.claim").exists(), "丟到夠了就停，中間那個不動");
+        let active = std::fs::read_to_string(bot.join("hook-spool.jsonl")).unwrap();
+        assert!(active.contains("new-c") && active.contains("\"tag\":\"fresh\""), "最新的留著，這一行也寫進去了：{active}");
+        let _ = std::fs::remove_dir_all(&data);
+    }
+
+    /// #1256：只剩最新那個檔還超過上限：從它的最前面丟（行邊界對齊），最新的幾行留著，檔案大小回到上限以下。
+    #[test]
+    fn when_only_the_newest_file_is_over_the_cap_its_oldest_lines_go_and_the_newest_stay() {
+        let data = fresh_data_dir("newest-trim");
+        let bot = data.join("bots/b1");
+        std::fs::create_dir_all(&bot).unwrap();
+        let tail: Vec<u8> = (0..20_000).flat_map(|i| format!("{{\"n\":{i}}}\n").into_bytes()).collect();
+        sparse(&bot.join("hook-spool.jsonl"), 64 * MIB, &tail);
+
+        spool_to(&data, "b1", &serde_json::json!({"event": "Stop", "tag": "fresh"}));
+
+        let len = std::fs::metadata(bot.join("hook-spool.jsonl")).unwrap().len();
+        assert!(len <= 64 * MIB, "寫完之後不能超過上限：{len}");
+        let body = std::fs::read(bot.join("hook-spool.jsonl")).unwrap();
+        let text = String::from_utf8_lossy(&body);
+        assert!(text.ends_with("\"tag\":\"fresh\"}\n"), "新的那行一定在最後");
+        assert!(text.contains("{\"n\":19999}\n"), "最新的舊行要留著");
+        assert!(!text.contains("{\"n\":0}\n"), "最舊的舊行要丟掉");
+        assert!(text.starts_with("{\"n\":"), "從行邊界開始，不留半行");
+        let _ = std::fs::remove_dir_all(&data);
+    }
+
+    /// #1256：每次丟棄記一行 warn 到 bot 的 hook.log，丟掉的行數累加到 `hook-spool.dropped`（重啟也還在）。
+    #[test]
+    fn dropped_records_are_counted_cumulatively_and_logged() {
+        let data = fresh_data_dir("counted");
+        let bot = data.join("bots/b1");
+        std::fs::create_dir_all(&bot).unwrap();
+        sparse(&bot.join("hook-spool.jsonl.replaying"), 40 * MIB, b"a\nb\nc\n");
+        sparse(&bot.join("hook-spool.jsonl.claim"), 30 * MIB, b"d\n");
+
+        spool_to(&data, "b1", &serde_json::json!({"event": "Stop"}));
+
+        let total: u64 = std::fs::read_to_string(bot.join("hook-spool.dropped")).unwrap().trim().parse().unwrap();
+        assert_eq!(total, 3, "丟掉的 `.replaying` 有三行");
+        let log = std::fs::read_to_string(bot.join("hook.log")).unwrap();
+        assert!(log.contains("spool over cap") && log.contains("hook-spool.jsonl.replaying"), "{log}");
+        let _ = std::fs::remove_dir_all(&data);
+    }

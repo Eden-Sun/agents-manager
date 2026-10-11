@@ -297,6 +297,27 @@ pub fn data_dir_from(env: Option<std::ffi::OsString>) -> PathBuf {
     }
 }
 
+/// spool 總量上限（#1256）：一顆 bot 的 spool 目錄（`.replaying`、`.claim`、`hook-spool.jsonl` 加起來）不超過這個數。
+/// 超過時從最舊的檔丟起；只剩最新那個檔還超過，就從它的最前面截掉（保留最新的一半，行邊界對齊）。
+/// 單行上限在 daemon 那一側（`MAX_SPOOL_LINE`），這裡不管。
+pub const SPOOL_CAP_BYTES: u64 = 64 * 1024 * 1024;
+
+const SPOOL_NAME: &str = "hook-spool.jsonl";
+const SPOOL_CLAIM: &str = "hook-spool.jsonl.claim";
+const SPOOL_REPLAYING: &str = "hook-spool.jsonl.replaying";
+/// 累計丟掉的紀錄數（十進位文字，一行）。daemon 重啟不歸零。
+const SPOOL_DROPPED: &str = "hook-spool.dropped";
+
+/// 一顆 bot 的 spool 目錄的排他鎖（`hook-spool.lock`，#1256）。hook 行程的寫入（含超量丟棄）與 daemon 的認領（rename）
+/// 都要拿：不然丟棄、截斷會跟附加、認領撞在一起。放掉就是關掉檔案。
+pub struct SpoolDirLock(std::fs::File);
+
+pub fn lock_spool_dir(dir: &std::path::Path) -> std::io::Result<SpoolDirLock> {
+    let f = crate::private_files::append_private(&dir.join("hook-spool.lock"))?;
+    f.lock()?;
+    Ok(SpoolDirLock(f))
+}
+
 /// SPEC §4.4.4: one JSON line, `O_APPEND`, same body as the failed POST.
 pub fn spool_to(data_dir: &std::path::Path, bot_id: &str, body: &serde_json::Value) {
     let dir = data_dir.join("bots").join(bot_id);
@@ -305,7 +326,7 @@ pub fn spool_to(data_dir: &std::path::Path, bot_id: &str, body: &serde_json::Val
         log_line_in(data_dir, bot_id, &format!("spool mkdir failed: {e}"));
         return;
     }
-    let path = dir.join("hook-spool.jsonl");
+    let path = dir.join(SPOOL_NAME);
     let line = match serde_json::to_string(body) {
         Ok(s) => s,
         Err(e) => {
@@ -313,6 +334,15 @@ pub fn spool_to(data_dir: &std::path::Path, bot_id: &str, body: &serde_json::Val
             return;
         }
     };
+    // #1256：超量檢查、丟棄、附加整段都在鎖裡做。鎖拿不到就照舊附加——寧可超一點，也不丟事件。
+    let _lock = match lock_spool_dir(&dir) {
+        Ok(l) => Some(l),
+        Err(e) => {
+            log_line_in(data_dir, bot_id, &format!("spool lock failed: {e}"));
+            None
+        }
+    };
+    enforce_spool_cap(data_dir, bot_id, &dir, line.len() as u64 + 1);
     match crate::private_files::append_private(&path) {
         Ok(mut f) => {
             if let Err(e) = f.write_all(format!("{line}\n").as_bytes()) {
@@ -321,6 +351,118 @@ pub fn spool_to(data_dir: &std::path::Path, bot_id: &str, body: &serde_json::Val
         }
         Err(e) => log_line_in(data_dir, bot_id, &format!("spool open failed: {e}")),
     }
+}
+
+/// 超量就丟（#1256）。必須在 [`lock_spool_dir`] 之內呼叫。先整個丟最舊的檔，還超過再從最新檔的前面截。
+fn enforce_spool_cap(data_dir: &std::path::Path, bot_id: &str, dir: &std::path::Path, incoming: u64) {
+    let size = |name: &str| std::fs::metadata(dir.join(name)).map(|m| m.len()).unwrap_or(0);
+    let mut total = size(SPOOL_REPLAYING) + size(SPOOL_CLAIM) + size(SPOOL_NAME);
+    for name in [SPOOL_REPLAYING, SPOOL_CLAIM] {
+        if total + incoming <= SPOOL_CAP_BYTES {
+            return;
+        }
+        let bytes = size(name);
+        if bytes == 0 {
+            continue;
+        }
+        let path = dir.join(name);
+        let records = records_in(&path, 0, bytes).unwrap_or(0);
+        match std::fs::remove_file(&path) {
+            Ok(()) => {
+                total -= bytes;
+                record_drop(data_dir, bot_id, dir, name, bytes, records);
+            }
+            Err(e) => log_line_in(data_dir, bot_id, &format!("spool over cap; dropping {name} failed: {e}")),
+        }
+    }
+    if total + incoming <= SPOOL_CAP_BYTES {
+        return;
+    }
+    match trim_front(dir, SPOOL_CAP_BYTES / 2) {
+        Ok((0, _)) => {}
+        Ok((bytes, records)) => record_drop(data_dir, bot_id, dir, SPOOL_NAME, bytes, records),
+        Err(e) => log_line_in(data_dir, bot_id, &format!("spool over cap; trimming {SPOOL_NAME} failed: {e}")),
+    }
+}
+
+/// 只留最新的 `keep` 位元組（從行邊界開始）。回傳丟掉的位元組數與紀錄數。寫到暫存檔再 rename，寫到一半崩掉留下的還是完整的舊檔。
+fn trim_front(dir: &std::path::Path, keep: u64) -> std::io::Result<(u64, u64)> {
+    use std::io::{Seek, SeekFrom};
+    let active = dir.join(SPOOL_NAME);
+    let mut src = std::fs::File::open(&active)?;
+    let len = src.metadata()?.len();
+    if len <= keep {
+        return Ok((0, 0));
+    }
+    // 從 `len - keep` 往後找第一個換行，截點就在它後面：不留半行。尾巴裡一個換行都沒有就全丟。
+    let mut at = len - keep;
+    src.seek(SeekFrom::Start(at))?;
+    let mut buf = vec![0u8; 64 * 1024];
+    let cut = loop {
+        let n = src.read(&mut buf)?;
+        if n == 0 {
+            break len;
+        }
+        if let Some(i) = buf[..n].iter().position(|&b| b == b'\n') {
+            break at + i as u64 + 1;
+        }
+        at += n as u64;
+    };
+    let records = records_in(&active, 0, cut)?;
+    let tmp = dir.join("hook-spool.jsonl.trim");
+    let mut out = crate::private_files::create_private_truncate(&tmp)?;
+    src.seek(SeekFrom::Start(cut))?;
+    std::io::copy(&mut (&mut src).take(len - cut), &mut out)?;
+    out.sync_all()?;
+    std::fs::rename(&tmp, &active)?;
+    Ok((cut, records))
+}
+
+/// `[from, to)` 裡的紀錄數：每個換行算一筆，結尾沒有換行的半行也算一筆。
+fn records_in(path: &std::path::Path, from: u64, to: u64) -> std::io::Result<u64> {
+    use std::io::{Seek, SeekFrom};
+    if to <= from {
+        return Ok(0);
+    }
+    let mut f = std::fs::File::open(path)?;
+    f.seek(SeekFrom::Start(from))?;
+    let mut left = to - from;
+    let mut buf = vec![0u8; 64 * 1024];
+    let (mut n_records, mut last) = (0u64, b'\n');
+    while left > 0 {
+        let want = left.min(buf.len() as u64) as usize;
+        let n = f.read(&mut buf[..want])?;
+        if n == 0 {
+            break;
+        }
+        n_records += buf[..n].iter().filter(|&&b| b == b'\n').count() as u64;
+        last = buf[n - 1];
+        left -= n as u64;
+    }
+    if last != b'\n' {
+        n_records += 1;
+    }
+    Ok(n_records)
+}
+
+/// 每次丟棄記一行 warn 到 bot 的 `hook.log`，並把丟掉的紀錄數累加到 `hook-spool.dropped`（#1256）。
+fn record_drop(data_dir: &std::path::Path, bot_id: &str, dir: &std::path::Path, what: &str, bytes: u64, records: u64) {
+    let total = bump_dropped(dir, records);
+    log_line_in(
+        data_dir,
+        bot_id,
+        &format!("warn spool over cap: dropped {what} ({bytes} bytes, {records} records); dropped records so far: {total}"),
+    );
+}
+
+fn bump_dropped(dir: &std::path::Path, add: u64) -> u64 {
+    let path = dir.join(SPOOL_DROPPED);
+    let before: u64 = std::fs::read_to_string(&path).ok().and_then(|s| s.trim().parse().ok()).unwrap_or(0);
+    let total = before.saturating_add(add);
+    if let Ok(mut f) = crate::private_files::create_private_truncate(&path) {
+        let _ = f.write_all(format!("{total}\n").as_bytes());
+    }
+    total
 }
 
 /// Last resort; if this fails too we stay silent.
