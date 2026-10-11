@@ -55,7 +55,8 @@ setup() {
   ROOT=$(mktemp -d); export ROOT
   ORIGIN="$ROOT/origin.git"; WORK="$ROOT/work"
   export AGM_DIR="$ROOT/agm" AGM_REPO="$ROOT/repo" AGM_DEPLOY_CHECKOUT="$ROOT/deploy"
-  mkdir -p "$AGM_DIR/bin" "$ROOT/bin" "$ROOT/ci"
+  mkdir -p "$AGM_DIR/bin" "$ROOT/bin" "$ROOT/ci" "$ROOT/cistate"
+  export AGM_CI_ROOT="$ROOT/cistate"          # ubuntu-ci 寫 last-sha 的地方（#1449）
   "$GITBIN" init -q --bare -b main "$ORIGIN"
   "$GITBIN" clone -q "$ORIGIN" "$WORK" 2>/dev/null
   "$GITBIN" -C "$WORK" config user.email t@t; "$GITBIN" -C "$WORK" config user.name t
@@ -585,6 +586,103 @@ else
   echo "ok   - 變數後面接非 ASCII 字元都有大括號"; PASS=$((PASS + 1))
 fi
 rm -f "/tmp/daemon-update-unbraced.$$"
+
+# 8. （#1449）origin/main 比線上多 40 顆、綠燈的 sha 落在往回 30 顆之外：ubuntu-ci 寫的 last-sha 把它挑出來；
+#    往回 30 顆都沒有綠燈時，log 要講清楚是「回看上限用完」，不是「還沒綠」。
+bulk() { # bulk <顆數>：在 WORK 的 daemon/ 連續提交 N 顆（會進 binary），最後推一次
+  local i
+  for i in $(seq 1 "$1"); do
+    echo "bulk $i" >> "$WORK/daemon/src/a.rs"
+    "$GITBIN" -C "$WORK" add -A >/dev/null
+    "$GITBIN" -C "$WORK" commit -q -m "bulk $i"
+  done
+  "$GITBIN" -C "$WORK" push -q origin HEAD:main
+}
+setup
+bulk 40
+S35=$("$GITBIN" -C "$WORK" rev-parse HEAD~34)     # 往回第 35 顆
+ci "$S35" success
+echo "$S35" > "$ROOT/cistate/last-sha"
+rc=$(run)
+check_eq "rc=0" "0" "$rc"
+check "挑到 last-sha 那顆（回看範圍之外）" "--sha $S35" "$AGM_DIR/swap.log"
+check "log 說來源是 last-sha" "來自 ubuntu-ci 的 last-sha" "$(LOG)"
+teardown
+
+# 8b. 同樣情境但沒有 last-sha 檔：照舊只看 30 顆，log 講明是回看上限用完。
+setup
+bulk 40
+ci "$("$GITBIN" -C "$WORK" rev-parse HEAD~34)" success
+rc=$(run)
+check_eq "rc=0" "0" "$rc"
+check_eq "沒換版（綠燈在回看範圍之外、也沒有 last-sha）" "0" "$(wc -l < "$AGM_DIR/swap.log" | tr -d ' ')"
+check "log 講明是回看上限用完" "回看上限 30 顆用完" "$(LOG)"
+teardown
+
+# 8c. last-sha 那顆是紅的：不挑它，走迴圈（迴圈裡也沒有綠燈）。
+setup
+bulk 40
+S35=$("$GITBIN" -C "$WORK" rev-parse HEAD~34)
+ci "$S35" failure
+echo "$S35" > "$ROOT/cistate/last-sha"
+rc=$(run)
+check_eq "rc=0" "0" "$rc"
+check_eq "紅燈的 last-sha 不換版" "0" "$(wc -l < "$AGM_DIR/swap.log" | tr -d ' ')"
+check "log 講明是回看上限用完" "回看上限 30 顆用完" "$(LOG)"
+teardown
+
+# 8d. last-sha 內容是垃圾（不是 40 碼 hex，或 40 碼但不存在）：忽略，照舊走迴圈，不報錯。
+setup
+ci "$C3" success
+echo "not-a-sha" > "$ROOT/cistate/last-sha"
+rc=$(run)
+check_eq "垃圾內容 rc=0" "0" "$rc"
+check "垃圾內容時照舊走迴圈挑到 HEAD" "--sha $C3" "$AGM_DIR/swap.log"
+teardown
+
+setup
+ci "$C3" success
+printf '%040d\n' 0 > "$ROOT/cistate/last-sha"
+rc=$(run)
+check_eq "不存在的 40 碼 rc=0" "0" "$rc"
+check "不存在的 40 碼也忽略，照舊挑到 HEAD" "--sha $C3" "$AGM_DIR/swap.log"
+teardown
+
+# 8e. last-sha 不是 origin/main 的祖先（在別的分支上）：忽略，不挑它。
+setup
+"$GITBIN" -C "$WORK" checkout -q -b side "$C0"
+echo "side" >> "$WORK/daemon/src/side.rs"
+"$GITBIN" -C "$WORK" add -A >/dev/null; "$GITBIN" -C "$WORK" commit -q -m "side"
+SIDE=$("$GITBIN" -C "$WORK" rev-parse HEAD)
+"$GITBIN" -C "$WORK" push -q origin HEAD:refs/heads/side
+"$GITBIN" -C "$WORK" checkout -q main
+ci "$SIDE" success
+echo "$SIDE" > "$ROOT/cistate/last-sha"
+rc=$(run)
+check_eq "rc=0" "0" "$rc"
+check_eq "不是 main 祖先的 last-sha 不換版" "0" "$(wc -l < "$AGM_DIR/swap.log" | tr -d ' ')"
+teardown
+
+# 8f. last-sha 在被回滾名單裡：不挑它。
+setup
+bulk 40
+S35=$("$GITBIN" -C "$WORK" rev-parse HEAD~34)
+ci "$S35" success
+echo "$S35" > "$ROOT/cistate/last-sha"
+echo "$S35" > "$AGM_DIR/daemon-update.rejected"
+rc=$(run)
+check_eq "rc=0" "0" "$rc"
+check_eq "被回滾過的 last-sha 不換版" "0" "$(wc -l < "$AGM_DIR/swap.log" | tr -d ' ')"
+teardown
+
+# 8g. last-sha 就是線上那顆：不多問 GitHub（那一顆不問）。
+setup
+ci "$C3" pending
+echo "$C0" > "$ROOT/cistate/last-sha"
+rc=$(run)
+check_eq "rc=0" "0" "$rc"
+check_no "線上那顆不問 GitHub" "commits/$C0/status" "$AGM_DIR/gh.log"
+teardown
 
 echo "$PASS passed, $FAIL failed"
 [ "$FAIL" -eq 0 ]

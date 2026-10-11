@@ -35,6 +35,7 @@ DEPLOY="${AGM_DEPLOY_CHECKOUT:-$HOME/.cache/agents-manager/deploy-checkout}"   #
 GH_REPO="${AGM_GH_REPO:-Eden-Sun/agents-manager}"
 CI_CONTEXT="${AGM_CI_CONTEXT:-ubuntu-ci}"
 CI_LOOKBACK="${AGM_CI_LOOKBACK:-30}"                  # 沿 first-parent 往回最多看幾顆
+CI_ROOT="${AGM_CI_ROOT:-${HOME}/.cache/agents-manager/ci}"   # ubuntu-ci 的狀態目錄；last-sha 在這裡（#1449，同 ubuntu-ci.sh）
 AGM="$DIR/bin/agm"
 LOG="$DIR/daemon-update.log"
 BUILT="$DIR/daemon-update.built"                      # 上次真的換上正式 binary 的 short sha（daemon-swap 寫）
@@ -298,30 +299,62 @@ else
     ops_install_step "$HEAD_SHA" 1
     exit 0
   fi
-  # 沿 first-parent 往回找最新一顆 ubuntu-ci 綠燈；走到線上那顆（或它的祖先）為止——再往回都是舊的。
-  SEEN=0
-  for CAND in $("$GIT" -C "$DEPLOY" rev-list --first-parent -n "$CI_LOOKBACK" origin/main); do
-    SEEN=$((SEEN + 1))
-    [ "$CAND" = "$BUILT_FULL" ] && break
-    "$GIT" -C "$DEPLOY" merge-base --is-ancestor "$CAND" "$BUILT_FULL" 2>/dev/null && break
-    binary_same "$BUILT_FULL" "$CAND" && break            # 這顆以下都沒有新的 binary 內容
-    if [ -f "$REJECTED" ] && grep -qx "$CAND" "$REJECTED"; then
-      log "${CAND} 之前換上去被回滾過，不再挑它"; continue
-    fi
+  # ubuntu-ci 每輪結束把剛測完的 sha 寫進 last-sha（ubuntu-ci.sh）：那是「最新一顆有最終結果的 sha」。
+  # 下面的迴圈只往回看 CI_LOOKBACK 顆；ubuntu-ci 一輪 34～45 分，main 在那段期間前進超過 30 顆時，綠燈的 sha
+  # 會落在範圍外、永遠挑不到（#1449）。所以先問它一顆。不是 40 碼 hex、不存在、不是 origin/main 的祖先、
+  # 是線上那顆（或它的祖先）、跟線上 binary 內容一樣、被回滾過，就不問；紅燈、沒有狀態、gh 失敗也不下結論，照舊走迴圈。
+  LAST_SHA=$(tr -d '[:space:]' < "${CI_ROOT}/last-sha" 2>/dev/null) || LAST_SHA=""
+  LAST_FULL=""
+  if printf '%s' "$LAST_SHA" | grep -Eq '^[0-9a-f]{40}$'; then
+    LAST_FULL=$("$GIT" -C "$DEPLOY" rev-parse --verify --quiet "${LAST_SHA}^{commit}" 2>/dev/null) || LAST_FULL=""
+  fi
+  if [ -n "$LAST_FULL" ] \
+     && "$GIT" -C "$DEPLOY" merge-base --is-ancestor "$LAST_FULL" origin/main 2>/dev/null \
+     && ! "$GIT" -C "$DEPLOY" merge-base --is-ancestor "$LAST_FULL" "$BUILT_FULL" 2>/dev/null \
+     && ! binary_same "$BUILT_FULL" "$LAST_FULL" \
+     && ! { [ -f "$REJECTED" ] && grep -qx "$LAST_FULL" "$REJECTED"; }; then
     GH_RC=0
-    GH_OUT=$("$GH" api "repos/${GH_REPO}/commits/${CAND}/status" -q ".statuses[]|select(.context==\"${CI_CONTEXT}\")|.state" 2>>"$LOG") || GH_RC=$?
-    STATE=$(printf '%s\n' "$GH_OUT" | head -1)
-    if [ "$GH_RC" -ne 0 ]; then
-      note_fail "問不到 ${CAND} 的 ${CI_CONTEXT} 狀態（gh rc=${GH_RC}），這輪不動"; exit 0
+    GH_OUT=$("$GH" api "repos/${GH_REPO}/commits/${LAST_FULL}/status" -q ".statuses[]|select(.context==\"${CI_CONTEXT}\")|.state" 2>>"$LOG") || GH_RC=$?
+    if [ "$GH_RC" -eq 0 ] && [ "$(printf '%s\n' "$GH_OUT" | head -1)" = success ]; then
+      TARGET=$LAST_FULL
+      log "挑到 ${TARGET}（${CI_CONTEXT} success，來自 ${CI_CONTEXT} 的 last-sha；origin/main ${HEAD_SHA}，線上 ${BUILT_SHA}）"
     fi
-    if [ "$STATE" = success ]; then TARGET=$CAND; break; fi
-    log "${CAND} 的 ${CI_CONTEXT} 是「${STATE:-沒有狀態}」，往前一顆找"
-  done
+  fi
+  # 沿 first-parent 往回找最新一顆 ubuntu-ci 綠燈；走到線上那顆（或它的祖先）為止——再往回都是舊的。
+  # REACHED＝有走到那一顆（或沒有比它新、又有 binary 差異的候選了）；沒走到就是回看上限用完。
+  REACHED=0
+  SEEN=0
   if [ -z "$TARGET" ]; then
-    log "往回 ${SEEN} 顆沒有比線上 ${BUILT_SHA} 新、又有會進 binary 的差異、${CI_CONTEXT} 綠燈的 commit，等下一輪"
+    for CAND in $("$GIT" -C "$DEPLOY" rev-list --first-parent -n "$CI_LOOKBACK" origin/main); do
+      SEEN=$((SEEN + 1))
+      [ "$CAND" = "$BUILT_FULL" ] && { REACHED=1; break; }
+      "$GIT" -C "$DEPLOY" merge-base --is-ancestor "$CAND" "$BUILT_FULL" 2>/dev/null && { REACHED=1; break; }
+      binary_same "$BUILT_FULL" "$CAND" && { REACHED=1; break; }            # 這顆以下都沒有新的 binary 內容
+      if [ -f "$REJECTED" ] && grep -qx "$CAND" "$REJECTED"; then
+        log "${CAND} 之前換上去被回滾過，不再挑它"; continue
+      fi
+      GH_RC=0
+      GH_OUT=$("$GH" api "repos/${GH_REPO}/commits/${CAND}/status" -q ".statuses[]|select(.context==\"${CI_CONTEXT}\")|.state" 2>>"$LOG") || GH_RC=$?
+      STATE=$(printf '%s\n' "$GH_OUT" | head -1)
+      if [ "$GH_RC" -ne 0 ]; then
+        note_fail "問不到 ${CAND} 的 ${CI_CONTEXT} 狀態（gh rc=${GH_RC}），這輪不動"; exit 0
+      fi
+      if [ "$STATE" = success ]; then
+        TARGET=$CAND
+        log "挑到 ${TARGET}（${CI_CONTEXT} success；origin/main ${HEAD_SHA}，線上 ${BUILT_SHA}）"
+        break
+      fi
+      log "${CAND} 的 ${CI_CONTEXT} 是「${STATE:-沒有狀態}」，往前一顆找"
+    done
+  fi
+  if [ -z "$TARGET" ]; then
+    if [ "$REACHED" = 0 ] && [ "$SEEN" -ge "$CI_LOOKBACK" ]; then
+      log "回看上限 ${CI_LOOKBACK} 顆用完，還沒走到線上 ${BUILT_SHA}（${CI_CONTEXT} 綠燈的 commit 可能落在更早的地方）；等下一輪"
+    else
+      log "往回 ${SEEN} 顆沒有比線上 ${BUILT_SHA} 新、又有會進 binary 的差異、${CI_CONTEXT} 綠燈的 commit，等下一輪"
+    fi
     exit 0
   fi
-  log "挑到 ${TARGET}（${CI_CONTEXT} success；origin/main ${HEAD_SHA}，線上 ${BUILT_SHA}）"
 fi
 SHORT=$(printf '%s' "$TARGET" | cut -c1-8)
 
