@@ -3855,6 +3855,33 @@ mod tests {
         assert_eq!(load(&app, &id).await.unwrap().status(), "open", "沒動手也不是交付失敗");
     }
 
+    /// issue #1388：第一次交付就回了 `nothing_to_deliver`（沒有新的 commit 要交），重試不能把它變成已交付。
+    /// 「開始交付」note 寫在動手之前，第一次也算「試過」；這個 commit 的不算數，要有作廢紀錄。
+    #[tokio::test]
+    async fn retrying_a_delivery_that_had_nothing_to_deliver_does_not_turn_into_delivered() {
+        let env = crate::testing::env().await;
+        let app = env.app.clone();
+        let (origin, wt) = with_origin(&env);
+        let Json(m) = post_mission(State(app.clone()), Path(env.project_id.clone()), Json(new_mission("nothing", "push_main"))).await.unwrap();
+        let id = m["id"].as_str().unwrap().to_string();
+        let base_before = git(&origin, &["rev-parse", "main"]);
+        let _ = post_event(State(app.clone()), Path(id.clone()), HeaderMap::new(), Json(verified(Some(&wt), None))).await.unwrap();
+
+        let err = post_deliver(State(app.clone()), Path(id.clone()), HeaderMap::new(), Json(deliver_from(&wt))).await.unwrap_err();
+        assert_eq!(conflict_reason(err), "nothing_to_deliver");
+        assert_eq!(load(&app, &id).await.unwrap().paused_reason.as_deref(), Some("push_main_failed"));
+
+        let err = post_deliver(State(app.clone()), Path(id.clone()), HeaderMap::new(), Json(deliver_from(&wt))).await.unwrap_err();
+        assert_eq!(conflict_reason(err), "nothing_to_deliver", "重試還是沒有東西可交，不能報成已交付");
+        let m = load(&app, &id).await.unwrap();
+        assert_eq!(m.paused_reason.as_deref(), Some("push_main_failed"));
+        assert_eq!(git(&origin, &["rev-parse", "main"]), base_before, "什麼都沒推");
+        let events = store::events(&app.db, &id).await.unwrap();
+        assert!(!events.iter().any(|e| e.kind == "delivered"), "沒有任何 delivered");
+        assert_eq!(events.iter().filter(|e| e.payload_json.contains("delivery_attempt\":")).count(), 1, "「開始交付」只記一次");
+        assert_eq!(events.iter().filter(|e| e.payload_json.contains("delivery_attempt_void")).count(), 1, "作廢紀錄只記一次");
+    }
+
     /// 使用者取消任務：AGM 被叫醒，底下還開著的交辦一併取消（等額度那件不會幾小時後自己重送）。
     #[tokio::test]
     async fn cancelling_a_mission_wakes_the_manager_and_withdraws_its_open_assignments() {
