@@ -45,7 +45,18 @@ function errorText(e: unknown): string {
   return e instanceof Error ? e.message : String(e)
 }
 
-export function IssuesBar({ projectId, draftKey, inputRef }: { projectId: string; draftKey: DraftKey; inputRef: RefObject<HTMLTextAreaElement | null> }) {
+export function IssuesBar({
+  projectId,
+  draftKey,
+  inputRef,
+  onInserted,
+}: {
+  projectId: string
+  draftKey: DraftKey
+  inputRef: RefObject<HTMLTextAreaElement | null>
+  /** 插完之後由外層處理（手機：彈窗收掉）。有給就不把焦點搶回輸入框（#1241）。 */
+  onInserted?: () => void
+}) {
   const github = useStore((s) => s.projects.find((p) => p.id === projectId)?.github ?? null)
   // deps 用字串：`github` 物件每次 normalize 都重建，當 deps 會讓任何 state 事件都重抓（快取冷了就是一次 gh）。
   const githubUrl = github?.url ?? null
@@ -175,13 +186,19 @@ export function IssuesBar({ projectId, draftKey, inputRef }: { projectId: string
     setDraft(draftKey, text)
     const pos = before.length + pad.length + snippet.length
     setDraftCursor(draftKey, pos)
+    setOpen(false)
+    if (onInserted) {
+      // 手機：這顆 IssuesBar 在彈窗裡，輸入框在彈窗外面；焦點 focus 過去會被焦點陷阱拉回來，看起來像沒反應（#1241）。
+      // 不自動叫出鍵盤，同 Composer 的 `autoFocus: !phone`。
+      onInserted()
+      return
+    }
     requestAnimationFrame(() => {
       const ta = inputRef.current
       if (!ta) return
       ta.focus()
       ta.setSelectionRange(pos, pos)
     })
-    setOpen(false)
   }
 
   const insertRef = (i: Issue) => insert(formatGithubIssuePrompt(i))

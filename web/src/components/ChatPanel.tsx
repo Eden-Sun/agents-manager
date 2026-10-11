@@ -1473,7 +1473,12 @@ export function ChatPanel({ onOpenSidebar }: { onOpenSidebar: () => void }) {
         issues={
           phone || (tab === 'chat' && !settingsOpen) ? (
             <>
-              <IssuesBar projectId={bot.project_id} draftKey={`bot:${botId}`} inputRef={composerRef} />
+              <IssuesBar
+                projectId={bot.project_id}
+                draftKey={`bot:${botId}`}
+                inputRef={composerRef}
+                onInserted={phone ? () => setGitInfoBotId(null) : undefined}
+              />
               <GitBar projectId={bot.project_id} />
             </>
           ) : null
