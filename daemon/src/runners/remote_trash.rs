@@ -53,8 +53,8 @@ pub async fn restore_for(app: &Arc<App>, bot_id: &str) {
 /// 移交出去的專案不補（§6.5h，#1405）：接手的那顆 daemon 刪掉的 bot 目錄，這顆不能搬回來。
 /// 每顆在 bot 鎖裡重讀 `deleted_at`（#1405）：名單讀完之後才被刪的，不還原。
 /// 先列一次回收區的名字（#1406）：沒有備份的活 bot 不為它 ssh；回收區是空的，這一輪就只有這一趟 ssh。
-/// 回傳 `None`＝連清單都拿不到，這一輪不清；`Some(failed)`＝還原失敗的那幾顆（它們的備份這一輪不清）。
-async fn restore_pending(app: &Arc<App>, host: &str, conn: &crate::hosts::HostConn) -> Option<HashSet<String>> {
+/// 回傳 `None`＝連清單都拿不到，這一輪不清；`Some(unrestored)`＝這一輪沒還原成的（還原失敗，或鎖忙而跳過）：它們的備份這一輪都不清（#1413）。
+async fn restore_pending(app: &Arc<App>, host: &str, conn: &crate::hosts::HostConn) -> Option<Unrestored> {
     let ids: Vec<String> = match sqlx::query_scalar::<_, String>(
         "SELECT b.id FROM bots b JOIN projects p ON p.id = b.project_id WHERE p.host = ? AND p.handed_off_to IS NULL AND b.deleted_at IS NULL",
     )
@@ -77,12 +77,12 @@ async fn restore_pending(app: &Arc<App>, host: &str, conn: &crate::hosts::HostCo
     };
     #[cfg(test)]
     crate::runners::app_ports_p11::race_point::hit("remote_restore_after_list", host).await;
-    let mut failed = HashSet::new();
+    let mut out = Unrestored::default();
     for id in ids.iter().filter(|id| backed.contains(*id)) {
-        // 拿不到鎖就這一輪跳過（別的路握著，不算失敗，下一輪再來）；拿到才在鎖裡重讀 `deleted_at`，
-        // 鎖握到 `restore` 與 `forget` 做完（同 `remote_purge::sweep`，#511／#1301）。
+        // 拿不到鎖就這一輪跳過（別的路握著，不算還原失敗，下一輪再來）；它的備份這一輪也不能清（#1413）。
+        // 拿到才在鎖裡重讀 `deleted_at`，鎖握到 `restore` 與 `forget` 做完（同 `remote_purge::sweep`，#511／#1301）。
         let Ok(_guard) = app.bot_lock(id).await.try_lock_owned() else {
-            tracing::debug!(host, bot = %id, "bot lock is busy; its pending restore waits for the next round");
+            out.busy.insert(id.clone());
             continue;
         };
         match crate::db::bot(&app.db, id).await {
@@ -90,7 +90,7 @@ async fn restore_pending(app: &Arc<App>, host: &str, conn: &crate::hosts::HostCo
             Ok(_) => continue,
             Err(e) => {
                 tracing::warn!(host, bot = %id, error = %e, "could not re-read whether a bot is still live; not restoring it");
-                failed.insert(id.clone());
+                out.failed.insert(id.clone());
                 continue;
             }
         }
@@ -98,7 +98,7 @@ async fn restore_pending(app: &Arc<App>, host: &str, conn: &crate::hosts::HostCo
             Ok(paths) => paths.dir,
             Err(e) => {
                 tracing::warn!(host, bot = %id, error = %format!("{e:#}"), "could not resolve remote bot directory for a pending restore");
-                failed.insert(id.clone());
+                out.failed.insert(id.clone());
                 continue;
             }
         };
@@ -110,12 +110,21 @@ async fn restore_pending(app: &Arc<App>, host: &str, conn: &crate::hosts::HostCo
             Ok(None) => crate::remote_purge::forget(app, id).await,
             Err(e) => {
                 tracing::warn!(host, bot = %id, error = %format!("{e:#}"), "could not restore a pending remote bot config dir; keeping its bots-trash copy");
-                failed.insert(id.clone());
+                out.failed.insert(id.clone());
             }
         }
     }
     forget_marks_without_backup(app, host, &backed).await;
-    Some(failed)
+    Some(out)
+}
+
+/// 補還原這一輪沒還原成的 bot（#1413）。它們的回收區備份這一輪不算「我們放的」：不過期、不計入總量、不被淘汰。
+#[derive(Default)]
+struct Unrestored {
+    /// 還原失敗（要 warn）。
+    failed: HashSet<String>,
+    /// 鎖忙而跳過（常態，每輪只記一筆 debug）。
+    busy: HashSet<String>,
 }
 
 /// 活著、沒有任何回收區備份的 bot，它的「已清掉」記號沒有用了：忘掉（#1406）。一句 SQL 做完，子查詢只挑
@@ -137,20 +146,27 @@ async fn forget_marks_without_backup(app: &Arc<App>, host: &str, backed: &HashSe
 }
 
 /// 主機連上時：先補還原欠著的，再清一次過期的。補還原的清單拿不到就這一輪不清，免得過期清掉還沒還原的備份（#1307）。
-/// 還原失敗的那幾顆，它們的備份這一輪不算「我們放的」：不過期、不計入總量、不被淘汰；其他的照常清（#1406）。
+/// 還原失敗或鎖忙而沒還原成的那幾顆，它們的備份這一輪不算「我們放的」：不過期、不計入總量、不被淘汰；其他的照常清（#1406、#1413）。
 pub async fn gc_host(app: &Arc<App>, host: &str) {
     let Some(conn) = app.hosts.get(host).await else { return };
     if conn.is_local() {
         return;
     }
-    let Some(failed) = restore_pending(app, host, &conn).await else {
+    let Some(unrestored) = restore_pending(app, host, &conn).await else {
         tracing::warn!(host, "pending remote restores could not be listed; bots-trash not cleaned this round");
         return;
     };
-    if !failed.is_empty() {
-        tracing::warn!(host, failed = failed.len(), "some pending remote restores failed; their bots-trash copies are kept this round");
+    if !unrestored.busy.is_empty() {
+        tracing::debug!(host, busy = unrestored.busy.len(), "bot lock busy; pending restores wait for the next round, their bots-trash copies are kept");
     }
-    let known: Vec<String> = crate::bot_trash::known_bot_ids(&app.db).await.into_iter().filter(|id| !failed.contains(id)).collect();
+    if !unrestored.failed.is_empty() {
+        tracing::warn!(host, failed = unrestored.failed.len(), "some pending remote restores failed; their bots-trash copies are kept this round");
+    }
+    let known: Vec<String> = crate::bot_trash::known_bot_ids(&app.db)
+        .await
+        .into_iter()
+        .filter(|id| !unrestored.failed.contains(id) && !unrestored.busy.contains(id))
+        .collect();
     match crate::remote_trash::gc(
         &conn,
         &remote_root(),
