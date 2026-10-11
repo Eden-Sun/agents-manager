@@ -578,7 +578,22 @@ am_cargo() {
         fi
         return 0
     }
-    trap '_cancel_wait; exit 130' INT TERM
+    # 中斷要看狀態（issue #1444）：還在排隊（granted:false）就取消號碼牌（空 token）；已經拿到名額（granted:true）但 trap 還沒換成
+    # `_release`（守衛啟動之後）之前被中斷，就要帶著 token 放掉名額，不然白佔到 TTL。HUP（pane 被關）跟 INT／TERM 一樣處理。
+    # `_resp` 要在裝 trap 之前先設成空字串：trap 讀的是它。
+    _resp=""
+    _abort_wait() {
+        case "$_resp" in
+            *'"granted":true'*)
+                _token=$(am_json_field token "$_resp")
+                [ -z "$_token" ] || am_release_lease
+                ;;
+            *) _cancel_wait ;;
+        esac
+        return 0
+    }
+    trap '_abort_wait; exit 130' INT TERM
+    trap '_abort_wait; exit 129' HUP
     _attempt=0
     _down=0
     while :; do
