@@ -337,7 +337,7 @@ mod tests {
         .unwrap();
 
         crate::release_triage::ledger::migrate(&p).await.unwrap();
-        assert_eq!(crate::release_triage::ledger::created_in_last_day(&p).await.unwrap(), 1_001);
+        assert_eq!(crate::release_triage::ledger::created_in_last_day_at(&p, now).await.unwrap(), 1_001);
     }
 
     #[tokio::test]
