@@ -17,8 +17,15 @@
         let conn = env.app.hosts.insert_remote_for_test(cfg).await;
         *conn.remote_home.lock().await = Some("/home/x".into());
         sqlx::query("UPDATE projects SET host = ? WHERE id = ?").bind(host).bind(&env.project_id).execute(&env.app.db).await.unwrap();
+        conn.connected.store(true, std::sync::atomic::Ordering::SeqCst);
         let calls = Arc::new(Mutex::new(Vec::new()));
         let fail = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        install_ssh(host, &calls, &fail);
+        Remote { env, host: host.into(), calls, fail }
+    }
+
+    /// ssh 換成記錄腳本的假貨（`calls` 記每一支腳本，`fail` 為真就連不上）。
+    fn install_ssh(host: &str, calls: &Arc<Mutex<Vec<String>>>, fail: &Arc<std::sync::atomic::AtomicBool>) {
         let (c, f) = (calls.clone(), fail.clone());
         crate::hosts::set_ssh_fake(host, move |script| {
             if f.load(std::sync::atomic::Ordering::SeqCst) {
@@ -28,7 +35,26 @@
             // `sweep` 現在也會清回收區（#431）：那支腳本要回它自己的確認字，不然每個測試都在跑 gc 的失敗路徑。
             Ok(if script.contains("AM_TRASH_GC") { "AM_TRASH_GC 0\n".into() } else { "AM_TRASHED\n".into() })
         });
-        Remote { env, host: host.into(), calls, fail }
+    }
+
+    /// 第二台遠端主機與它自己的專案（同一份 calls、同一個 fail 開關），回傳專案 id。
+    async fn second_remote_project(r: &Remote, host: &str) -> String {
+        let cfg = crate::config::HostCfg { name: host.into(), ssh: host.into(), ssh_port: 22, ssh_opts: vec![], herdr_session: "agents-manager".into(), remote_path: String::new(), shared_session: false };
+        let conn = r.env.app.hosts.insert_remote_for_test(cfg).await;
+        *conn.remote_home.lock().await = Some("/home/x".into());
+        conn.connected.store(true, std::sync::atomic::Ordering::SeqCst);
+        install_ssh(host, &r.calls, &r.fail);
+        let pid = crate::db::ulid();
+        sqlx::query("INSERT INTO projects (id, path, label, host, created_at) VALUES (?, ?, ?, ?, ?)")
+            .bind(&pid)
+            .bind(format!("/p-{host}"))
+            .bind(host)
+            .bind(host)
+            .bind(crate::db::now())
+            .execute(&r.env.app.db)
+            .await
+            .unwrap();
+        pid
     }
 
     impl Remote {
@@ -158,4 +184,24 @@
         assert_eq!(sweep(&other.app, crate::config::LOCAL_HOST).await, (0, 0), "本機不歸這裡");
         assert!(dir.exists());
         assert!(r.calls.lock().unwrap().is_empty());
-    }
+}
+
+/// **#1301**：一顆待刪 bot 的鎖被別的路一直握著，不能讓同一輪掃到的別台主機跟著停住。
+/// H1（名字排前面，先掃）的那顆拿不到鎖就這一輪跳過、留著欠著；H2 的照常清掉。
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_bot_lock_that_stays_held_does_not_stall_other_hosts() {
+    let h1 = remote("aa-purge-lock-stuck").await;
+    let stuck = h1.deleted_bot("stuck").await;
+    let h2_project = second_remote_project(&h1, "zz-purge-lock-ok").await;
+    let other = tt::claude_bot(&h1.env.app, &h2_project, "other").await;
+    sqlx::query("UPDATE bots SET deleted_at = ? WHERE id = ?").bind(crate::db::now()).bind(&other.id).execute(&h1.env.app.db).await.unwrap();
+    let app = h1.env.app.clone();
+
+    let _held = app.bot_lock(&stuck).await.lock_owned().await;
+    tokio::time::timeout(std::time::Duration::from_secs(10), crate::runners::remote_purge::sweep_connected_hosts(&app))
+        .await
+        .expect("一輪掃描不能等一顆被握住的鎖");
+    assert_eq!(h1.removed(&other.id), 1, "另一台主機的那顆照常清掉");
+    assert_eq!(h1.removed(&stuck), 0, "拿不到鎖的那顆這一輪不動");
+    assert!(crate::remote_purge::pending(&app.db, &h1.host).await.unwrap().contains(&stuck), "仍欠著，下一輪再來");
+}

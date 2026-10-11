@@ -25,7 +25,13 @@ pub async fn sweep(app: &Arc<App>, host: &str) -> (usize, usize) {
     crate::runners::app_ports_p11::race_point::hit("remote_sweep_after_pending", host).await;
     let (mut purged, mut kept) = (0, 0);
     for id in ids {
-        let _guard = app.bot_lock(&id).await.lock_owned().await;
+        // 拿不到鎖就這一輪跳過、欠著，下一輪再來（#1301）：這顆正被別的路握著（還原、刪除、啟動），不能在這裡無限等，
+        // 否則同一輪掃到的別台主機、以及這台後面的 bot 都跟著停住。
+        let Ok(_guard) = app.bot_lock(&id).await.try_lock_owned() else {
+            tracing::debug!(host, bot = %id, "bot lock is busy; leaving its remote directory for the next sweep");
+            kept += 1;
+            continue;
+        };
         match crate::db::bot(&app.db, &id).await {
             Ok(Some(b)) if b.deleted_at.is_none() => {
                 tracing::info!(bot = %id, host, "the bot was restored while this sweep was running; leaving its directory alone");
@@ -82,11 +88,25 @@ pub fn spawn_sweep(app: Arc<App>, host: String) {
 /// 連著的遠端主機定期再掃。
 pub fn spawn_poller(app: Arc<App>) {
     crate::background_loop::spawn_periodic(&app, "remote purge poller", POLL_EVERY, POLL_EVERY, |app| async move {
-        for name in app.hosts.names().await {
-            let Some(conn) = app.hosts.get(&name).await else { continue };
-            if !conn.is_local() && conn.is_connected() {
-                sweep(&app, &name).await;
-            }
-        }
+        sweep_connected_hosts(&app).await;
     });
+}
+
+/// 同一輪掃所有連著的遠端主機（poller 與測試共用）。每台各自一個 task：一台卡住不拖住別台（#1301）。
+pub async fn sweep_connected_hosts(app: &Arc<App>) {
+    let mut set = tokio::task::JoinSet::new();
+    for name in app.hosts.names().await {
+        let Some(conn) = app.hosts.get(&name).await else { continue };
+        if !conn.is_local() && conn.is_connected() {
+            let app = app.clone();
+            set.spawn(async move {
+                sweep(&app, &name).await;
+            });
+        }
+    }
+    while let Some(res) = set.join_next().await {
+        if let Err(e) = res {
+            tracing::warn!(error = %e, "remote directory sweep task failed");
+        }
+    }
 }
