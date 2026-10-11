@@ -78,7 +78,25 @@ pub fn unsafe_reason(folder: &Path, home: &Path, data_dir: &Path) -> Option<&'st
         if let Some(Component::Normal(first)) = rest.components().next() {
             let f = first.to_string_lossy();
             if f.starts_with(".claude")
-                || [".ssh", ".gnupg", ".aws", ".config", ".codex", ".grok", ".docker", ".kube", ".local", ".cargo", ".npm", ".gemini"].contains(&f.as_ref())
+                || [
+                    ".ssh",
+                    ".gnupg",
+                    ".aws",
+                    ".config",
+                    ".codex",
+                    ".grok",
+                    ".docker",
+                    ".kube",
+                    ".local",
+                    ".cargo",
+                    ".npm",
+                    ".gemini",
+                    "Library",
+                    ".azure",
+                    ".password-store",
+                    ".mozilla",
+                ]
+                .contains(&f.as_ref())
             {
                 return Some("不能分享帳號、金鑰或設定目錄（~/.ssh、~/.claude*、~/.config…）");
             }
@@ -295,6 +313,14 @@ mod tests {
             ("/srv/docs", false),
             ("/home/u/.configs-not", false),
             ("/home/u/.gemini-notes", false),
+            ("/home/u/Library", true),
+            ("/home/u/Library/Application Support/Google/Chrome", true),
+            ("/home/u/.azure", true),
+            ("/home/u/.password-store/work", true),
+            ("/home/u/.mozilla/firefox", true),
+            ("/home/u/project/Library", false),
+            ("/home/u/Library-notes", false),
+            ("/srv/Library", false),
         ] {
             assert_eq!(unsafe_reason(Path::new(p), home, data).is_some(), bad, "{p}");
         }
@@ -373,12 +399,12 @@ mod tests {
         std::fs::write(f.join("memory/bin.md"), [0xff, 0xfe, b'X', b'\n']).unwrap();
 
         let text = instructions(&f);
-        assert!(text.contains("PELICAN"), "指示檔前段要載入：{text}");
-        assert!(text.contains("PUFFIN"), "記憶檔前段要載入：{text}");
-        assert!(text.contains("資料夾的指示：CLAUDE.md 超過 32 KiB"), "指示檔要註明截斷：{text}");
-        assert!(text.contains("記憶：memory/big.md 超過 32 KiB"), "記憶檔要註明截斷：{text}");
-        assert!(!text.contains('\u{FFFD}'), "截斷要停在完整 UTF-8 字元：{text}");
-        assert!(!text.contains("bin.md"), "非 UTF-8 檔案不應載入：{text}");
+        assert!(text.contains("PELICAN"), "指示檔前段要載入");
+        assert!(text.contains("PUFFIN"), "記憶檔前段要載入");
+        assert!(text.contains("資料夾的指示：CLAUDE.md 超過 32 KiB"), "指示檔要註明截斷");
+        assert!(text.contains("記憶：memory/big.md 超過 32 KiB"), "記憶檔要註明截斷");
+        assert!(!text.contains('\u{FFFD}'), "截斷要停在完整 UTF-8 字元");
+        assert!(!text.contains("bin.md"), "非 UTF-8 檔案不應載入");
     }
 
     #[test]

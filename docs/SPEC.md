@@ -5034,7 +5034,7 @@ daemon 要能在 Linux（目標：Ubuntu，外部編譯主機 192.168.1.46，#67
   建失敗或冪等重送拿回舊的那顆時收回。`/api/state` 的 bot 帶 `share_profile`（一般 bot `null`）。
 - **以資料夾為單位**（使用者 2026-10-03 裁示，`share::folder`）：建 bot 時選一個資料夾，那就是它能碰的全部範圍（cwd＝它，`shared_bots.workspace` 記 canonicalize 過的路徑、`bots.cwd` 指過去）。
   `share_folder` 兩種：`{"kind":"new","name"}`＝在 `[share] folders_root`（預設 `~/shared-bots`，必須在 daemon 資料目錄之外）底下建 `<name>`（0700；名字 `[A-Za-z0-9._-]`、英數開頭、≤ 64；已經有同名 409 `folder_exists`，冪等重送例外）；
-  `{"kind":"existing","path"}`＝任意既有資料夾（本機，或遠端專案那台的實體路徑；絕對路徑、符號連結解開後判斷），但根目錄、家目錄本身與它的上層、daemon 資料目錄（含上下層）、`~/.ssh`／`~/.config`／`~/.claude*`／`~/.codex`／`~/.grok`／`~/.aws`／`~/.gnupg`／`~/.local`…、系統目錄一律 400 `bad_share_folder`。
+  `{"kind":"existing","path"}`＝任意既有資料夾（本機，或遠端專案那台的實體路徑；絕對路徑、符號連結解開後判斷），但根目錄、家目錄本身與它的上層、daemon 資料目錄（含上下層）、`~/Library`、`~/.ssh`／`~/.config`／`~/.claude*`／`~/.codex`／`~/.grok`／`~/.aws`／`~/.gnupg`／`~/.local`／`~/.azure`／`~/.password-store`／`~/.mozilla`…、系統目錄一律 400 `bad_share_folder`。
   沒帶＝新資料夾、名字用 bot 名。上傳一律放 `<資料夾>/inbox/`（不存在就建，0700）。建失敗或重送時只刪「這次新建的」資料夾，既有資料夾絕不動。
   資料夾在啟動時不見了就不啟動（不替使用者重建空的）。2026-10-03 之前建的受限 bot（資料夾在 `<data_dir>/shared-bots/<id>/workspace/`）照舊能用，不搬。
 - 模型：沒指定＝`/api/models?kind=claude` 當下列出的最新 Opus（有完整 id 挑版本最大的；只有別名就用 `opus`，claude 2.1.288 解析成 claude-opus-5-5，實測），不落回帳號預設（線上那顆就這樣跑成舊版），也不寫死版本號。
