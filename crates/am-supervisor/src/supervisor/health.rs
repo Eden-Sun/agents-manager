@@ -72,6 +72,22 @@ static RELEASE_TRIAGE_SLOTS: std::sync::LazyLock<
     std::sync::Mutex<std::collections::HashMap<std::path::PathBuf, AppProbeSlot>>,
 > = std::sync::LazyLock::new(|| std::sync::Mutex::new(std::collections::HashMap::new()));
 
+/// 格子數上限（#1324）：每個資料目錄一格，但短命的執行個體（測試、臨時部署）用完不能讓表永遠長下去。
+const RELEASE_TRIAGE_SLOT_CAP: usize = 16;
+
+/// 超過上限就丟掉最久沒用、而且沒有探測在跑的格子。正在探測的不丟：它的結果要寫回自己的格子，epoch 才對得上（#1159）。
+fn evict_idle_slots(map: &mut std::collections::HashMap<std::path::PathBuf, AppProbeSlot>) {
+    while map.len() > RELEASE_TRIAGE_SLOT_CAP {
+        let victim = map.iter().filter(|(_, s)| !s.refreshing).min_by_key(|(_, s)| s.at).map(|(k, _)| k.clone());
+        match victim {
+            Some(k) => {
+                map.remove(&k);
+            }
+            None => break,
+        }
+    }
+}
+
 /// `gh auth status` 要打網路，health 又常被輪詢：60 秒內沿用上一次的結果，探測最多等 15 秒（issue #1118）。
 /// 快取以 App 資料目錄與 release_triage 設定指紋隔離，設定變更時強制失效，
 /// 且進行中的探測綁定開始時的設定代數（issue #1159）。
@@ -114,6 +130,7 @@ pub async fn release_triage_health(
                     refreshing: true,
                 };
                 map.insert(data_dir.clone(), slot);
+                evict_idle_slots(&mut map);
                 1
             }
         }
@@ -1114,6 +1131,18 @@ mod probe_cache_tests {
         // 檢查快取：完成的 v1 probe 不得覆寫 v2
         let cached = release_triage_health(&*app_ref).await;
         assert_eq!(cached, json!({"version": "v2"}), "舊的 inflight probe 不得覆寫新設定的快取");
+    }
+
+    /// #1324：每個資料目錄一格快取，但格子不能只進不出：很多個短命的執行個體（測試、臨時部署）用完，
+    /// 這張 process 級的表不能跟著無限長大。
+    #[tokio::test]
+    async fn release_triage_slots_stay_bounded_across_short_lived_apps() {
+        for i in 0..100 {
+            let (_d, app) = create_mock_app(&format!("app_bound_{i}"), "owner/repo-bound", |_| Some(json!({"ok": true}))).await;
+            assert_eq!(release_triage_health(&app).await, json!({"ok": true}));
+        }
+        let len = RELEASE_TRIAGE_SLOTS.lock().unwrap_or_else(|e| e.into_inner()).len();
+        assert!(len <= 16, "快取格子只進不出：100 個執行個體用完後還有 {len} 格");
     }
 
     #[tokio::test]
