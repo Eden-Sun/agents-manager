@@ -90,7 +90,7 @@ reap_headless() {
   local reaped=0 kept=0
   while IFS= read -r line; do
     [ -z "$line" ] && continue
-    local pid ppid secs dir port
+    local pid ppid secs dir port fp after
     pid=$(echo "$line" | awk '{print $1}')
     ppid=$(echo "$line" | awk '{print $2}')
     # macOS 的 ps 沒有 etimes，只有 etime（[[D-]HH:]MM:SS），自己換算成秒。
@@ -122,7 +122,11 @@ reap_headless() {
     esac
     kill -TERM "$pid" 2>/dev/null
     sleep 3
-    if [ "$(proc_fingerprint "$pid")" = "$fp" ]; then
+    # TERM 後指紋是空的＝行程已經結束（正常情況，不用 KILL、不用記）；還在而指紋相同才送 KILL；變了才是 PID 被回收。
+    after=$(proc_fingerprint "$pid")
+    if [ -z "$after" ]; then
+      :
+    elif [ "$after" = "$fp" ]; then
       kill -0 "$pid" 2>/dev/null && kill -KILL "$pid" 2>/dev/null
     else
       echo "  pid ${pid} 已不是原來的行程（TERM 後身分改變，PID 可能被回收），不送 KILL" >> "$LOG"
