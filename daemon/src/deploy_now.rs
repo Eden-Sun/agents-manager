@@ -40,9 +40,13 @@ const COMMIT_LIST_MAX: usize = 30;
 const FETCH_EVERY: Duration = Duration::from_secs(300);
 const GIT_TIMEOUT: Duration = Duration::from_secs(20);
 
+/// 排程器 kick 最多等這麼久（#1298）：超過就結束子行程、回一個可重試的錯誤，不讓 POST 無限期卡住。
+const KICK_TIMEOUT: Duration = Duration::from_secs(20);
+
 /// 使用者按下之後由誰把 kick 叫起來。正式是 [`SchedulerKick::for_this_host`]；測試換成假的，不碰 launchd／systemd。
+/// 非同步：等待排程器的時候不佔住 Tokio worker（#1298）。
 pub trait KickLauncher: Send + Sync {
-    fn kick(&self) -> Result<(), String>;
+    fn kick<'a>(&'a self) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<(), String>> + Send + 'a>>;
 }
 
 /// 叫排程器「現在跑一輪」的那一條指令：macOS `launchctl kickstart`，Linux `systemctl --user start`（issue #677）。
@@ -50,6 +54,7 @@ pub struct SchedulerKick {
     program: String,
     args: Vec<String>,
     env: Vec<(&'static str, String)>,
+    timeout: Duration,
 }
 
 impl SchedulerKick {
@@ -65,7 +70,7 @@ impl SchedulerKick {
 
     /// 不帶 -k：正在跑的那一輪不能被砍掉（它可能正拿著租約派工）；沒在跑就起一輪。
     fn launchd(uid: u32) -> Self {
-        SchedulerKick { program: "launchctl".into(), args: vec!["kickstart".into(), format!("gui/{uid}/{LAUNCHD_LABEL}")], env: Vec::new() }
+        SchedulerKick { program: "launchctl".into(), args: vec!["kickstart".into(), format!("gui/{uid}/{LAUNCHD_LABEL}")], env: Vec::new(), timeout: KICK_TIMEOUT }
     }
 
     /// `--no-block`：oneshot unit 的 start 會一路等到 kick 跑完（可能好幾分鐘），這一下只要排進去就好。
@@ -78,23 +83,28 @@ impl SchedulerKick {
             program: "systemctl".into(),
             args: ["--user", "start", "--no-block", SYSTEMD_UNIT].map(String::from).to_vec(),
             env,
+            timeout: KICK_TIMEOUT,
         }
     }
 }
 
 impl KickLauncher for SchedulerKick {
-    fn kick(&self) -> Result<(), String> {
-        let out = std::process::Command::new(&self.program)
-            .args(&self.args)
-            .envs(self.env.iter().map(|(k, v)| (k, v)))
-            .output()
-            .map_err(|e| format!("{}: {e}", self.program))?;
-        if out.status.success() {
-            Ok(())
-        } else {
-            let err = String::from_utf8_lossy(&out.stderr).trim().to_string();
-            Err(if err.is_empty() { format!("{} {} rc={:?}", self.program, self.args.join(" "), out.status.code()) } else { err })
-        }
+    fn kick<'a>(&'a self) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<(), String>> + Send + 'a>> {
+        Box::pin(async move {
+            // kill_on_drop：逾時把 future 丟掉時子行程一起被結束，不留下沒人等的 systemctl／launchctl。
+            let mut cmd = tokio::process::Command::new(&self.program);
+            cmd.args(&self.args).envs(self.env.iter().map(|(k, v)| (k, v))).kill_on_drop(true);
+            let out = match tokio::time::timeout(self.timeout, cmd.output()).await {
+                Ok(r) => r.map_err(|e| format!("{}: {e}", self.program))?,
+                Err(_) => return Err(format!("{} 等了 {} 毫秒沒有回來（user bus 可能卡住），已結束", self.program, self.timeout.as_millis())),
+            };
+            if out.status.success() {
+                Ok(())
+            } else {
+                let err = String::from_utf8_lossy(&out.stderr).trim().to_string();
+                Err(if err.is_empty() { format!("{} {} rc={:?}", self.program, self.args.join(" "), out.status.code()) } else { err })
+            }
+        })
     }
 }
 
@@ -352,7 +362,7 @@ pub async fn start(app: &(impl crate::capabilities::Db + crate::capabilities::Em
     if let Err(e) = write_request(&ctx.agm_dir, &request) {
         return Err(LcError::Unavailable(json!({"reason": "request_write_failed", "message": e, "retryable": true})));
     }
-    if let Err(e) = launcher.kick() {
+    if let Err(e) = launcher.kick().await {
         undo(&ctx.agm_dir, &format!("叫不起 {LAUNCHD_LABEL}：{e}"));
         return Err(LcError::Unavailable(json!({"reason": "kick_start_failed", "message": format!("叫不起例行更新（{LAUNCHD_LABEL}）：{e}"),
             "retryable": true})));
@@ -398,9 +408,11 @@ mod tests {
     }
 
     impl KickLauncher for FakeKick {
-        fn kick(&self) -> Result<(), String> {
-            self.calls.fetch_add(1, Ordering::SeqCst);
-            self.fail.map_or(Ok(()), |e| Err(e.to_string()))
+        fn kick<'a>(&'a self) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<(), String>> + Send + 'a>> {
+            Box::pin(async move {
+                self.calls.fetch_add(1, Ordering::SeqCst);
+                self.fail.map_or(Ok(()), |e| Err(e.to_string()))
+            })
         }
     }
 
@@ -524,6 +536,59 @@ mod tests {
         assert!(!f.ctx.agm_dir.join(REQUEST_FILE).exists());
     }
 
+    /// #1298：排程器 kick 慢（同步呼叫、卡住一陣子）時，runtime 上的其他工作不能跟著停。
+    struct SlowKick {
+        ticks: Arc<AtomicUsize>,
+        seen_during: Arc<AtomicUsize>,
+    }
+
+    impl KickLauncher for SlowKick {
+        fn kick<'a>(&'a self) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<(), String>> + Send + 'a>> {
+            Box::pin(async move {
+                // 等到 ticker 看見 10 次為止（最多 1000 圈，約 1 秒）。ticker 若被擋住，這段什麼都看不到＝紅。
+                let before = self.ticks.load(Ordering::SeqCst);
+                for _ in 0..1000 {
+                    if self.ticks.load(Ordering::SeqCst) - before >= 10 {
+                        break;
+                    }
+                    tokio::time::sleep(Duration::from_millis(1)).await;
+                }
+                self.seen_during.store(self.ticks.load(Ordering::SeqCst) - before, Ordering::SeqCst);
+                Ok(())
+            })
+        }
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn a_slow_scheduler_kick_does_not_stop_other_work_on_the_runtime() {
+        let f = fixture().await;
+        let ticks = Arc::new(AtomicUsize::new(0));
+        let seen_during = Arc::new(AtomicUsize::new(0));
+        let t = Arc::clone(&ticks);
+        let ticker = tokio::spawn(async move {
+            loop {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+                t.fetch_add(1, Ordering::SeqCst);
+            }
+        });
+        let kick = SlowKick { ticks: Arc::clone(&ticks), seen_during: Arc::clone(&seen_during) };
+        let out = start(&f.env.app, &f.ctx, Some(&f.code), &kick).await.unwrap();
+        ticker.abort();
+        assert_eq!(out["started"], true);
+        let during = seen_during.load(Ordering::SeqCst);
+        assert!(during >= 10, "kick 還在跑的時候，runtime 上的其他工作只跑了 {during} 次（應該照常跑）");
+    }
+
+    /// #1298：排程器指令永遠不回來：POST 要在上限內回一個可重試的錯誤、把請求檔收回，不能無限期卡住。
+    #[tokio::test]
+    async fn a_scheduler_kick_that_never_returns_is_stopped_and_rolled_back() {
+        let f = fixture().await;
+        let hung = SchedulerKick { program: "sleep".into(), args: vec!["30".into()], env: Vec::new(), timeout: Duration::from_millis(200) };
+        let e = start(&f.env.app, &f.ctx, None, &hung).await.unwrap_err();
+        assert!(matches!(&e, LcError::Unavailable(v) if v["reason"] == "kick_start_failed" && v["retryable"] == true), "{e:?}");
+        assert!(!f.ctx.agm_dir.join(REQUEST_FILE).exists(), "逾時也要收回請求檔");
+    }
+
     #[tokio::test]
     async fn a_kick_that_cannot_start_rolls_the_request_back() {
         let f = fixture().await;
@@ -576,11 +641,11 @@ mod tests {
         (k, log)
     }
 
-    #[test]
-    fn linux_kick_starts_the_systemd_user_unit_without_blocking() {
+    #[tokio::test]
+    async fn linux_kick_starts_the_systemd_user_unit_without_blocking() {
         let dir = tmp();
         let (k, log) = fake_systemctl(&dir.0, 0, "");
-        k.kick().unwrap();
+        k.kick().await.unwrap();
         // --no-block：oneshot 的 start 預設會等 kick 整輪跑完，UI 那一下會卡住好幾分鐘。
         // 沒有 XDG_RUNTIME_DIR 時要補 /run/user/<uid>，否則 systemctl --user 連不到 user bus。
         assert_eq!(
@@ -589,17 +654,17 @@ mod tests {
         );
     }
 
-    #[test]
-    fn linux_kick_keeps_an_existing_runtime_dir_and_reports_systemctl_errors() {
+    #[tokio::test]
+    async fn linux_kick_keeps_an_existing_runtime_dir_and_reports_systemctl_errors() {
         let dir = tmp();
         let (mut k, log) = fake_systemctl(&dir.0, 5, "Unit com.agm.daemon-update.service not found.");
         k.env = SchedulerKick::systemd(4242, true).env;
-        assert_eq!(k.kick().unwrap_err(), "Unit com.agm.daemon-update.service not found.");
+        assert_eq!(k.kick().await.unwrap_err(), "Unit com.agm.daemon-update.service not found.");
         // 已經有值就不蓋：假 systemctl 看到的是繼承下來的原值（本機沒設就是空的，遠端編譯主機上有）。
         let inherited = std::env::var("XDG_RUNTIME_DIR").unwrap_or_default();
         assert!(std::fs::read_to_string(&log).unwrap().ends_with(&format!("XDG_RUNTIME_DIR={inherited}\n")));
         let (k, _) = fake_systemctl(&dir.0, 5, "");
-        let err = k.kick().unwrap_err();
+        let err = k.kick().await.unwrap_err();
         assert!(err.ends_with("systemctl --user start --no-block com.agm.daemon-update.service rc=Some(5)"), "{err}");
     }
 

@@ -556,7 +556,7 @@ pub async fn post_escalate(
     user_only(&p)?;
     let v = escalate(&app, &b.id).await?;
     use crate::deploy_now::KickLauncher as _;
-    if let Err(e) = crate::deploy_now::SchedulerKick::for_this_host().kick() {
+    if let Err(e) = crate::deploy_now::SchedulerKick::for_this_host().kick().await {
         tracing::warn!(error = %e, "deploy wait escalated, but kicking the update job failed; the next scheduled round picks it up");
     }
     Ok(axum::Json(v))
