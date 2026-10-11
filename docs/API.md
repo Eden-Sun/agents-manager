@@ -1414,6 +1414,7 @@ cargo shim 把這兩個明確的拒絕（`not_found`／`token_mismatch`）視為
 （`remote-cargo` helper 每次連完寫進 data-dir 的 `remote-cargo-health.json`），不是另外再 ssh 探一次：
 `true`＝連得進去（之後編譯成不成功是另一回事）、`false`＝那一次沒進去（`reason` 是原因）、
 `null`＝`[build.remote]` 沒開或還沒有人試過（**不是**連不上）。`enabled: false` 時 `target`／`checked_at`／`reason` 都是 `null`。
+健康檔記的 `target`（`user@host:port`）若不是現在設定的那一台（改指到別台之後，上一次嘗試連的是舊主機），那份結論不套用到現在這台：`remote_reachable`／`checked_at`／`reason` 都是 `null`，直到對這台的下一次嘗試寫進結論（#1373）。
 
 ## 記憶體
 

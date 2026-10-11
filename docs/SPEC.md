@@ -2258,7 +2258,7 @@ rustup 換位置或遠端主機上反而是錯的——讓 shim 每次在 pane �
   「連的是誰、ssh 怎麼了、這次拿什麼登入（密碼檔／`identity_file`／ssh 預設金鑰）」，**第一行就要自己講完
   「連不上誰、改在本機跑」**（ssh 自己的抱怨已經先印在上面，細節放第二行），原因帶 ssh 的原話
   （守門那條連線的 stderr 一邊原樣轉出、一邊留最後一行），並把結論寫進 data-dir 的
-  `remote-cargo-health.json`，`GET /api/build-slots` 的 `remote.remote_reachable` 就是它（API.md「`GET /api/build-slots`」）：
+  `remote-cargo-health.json`，`GET /api/build-slots` 的 `remote.remote_reachable` 就是它（API.md「`GET /api/build-slots`」；健康檔的 `target` 不是現在設定的那台時不套用，#1373）：
   本機隊伍排得再長，都看得出來是不是因為外部主機連不上。設定錯（`identity_file` 指的檔案不見了）維持 126——那是要去修設定，不是換台機器跑。
   **來源樹在同步途中被改動不算失敗（2026-09-25 am-lead）**：共用主樹的 `web/dist` 會被別的 bot 的 `bun run build` 整批換掉（hash 檔名），
   rsync 列完檔案清單後舊檔消失就回 23（`open (2)`／`No such file or directory`）或 24（vanished）。這兩種才重送（最多共 3 次、中間等 1.5 秒，仍受整體上限與訊號管；
