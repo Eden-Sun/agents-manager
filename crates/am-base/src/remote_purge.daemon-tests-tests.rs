@@ -246,8 +246,8 @@ async fn an_owed_bot_stays_owed_to_its_old_host_after_its_project_moves() {
     sqlx::query("UPDATE projects SET host = ? WHERE id = ?").bind(new_host).bind(&r.env.project_id).execute(&app.db).await.unwrap();
     let row = r.row(&id).await.expect("搬家時舊主機的義務要寫進 DB");
     assert!(row.0.is_none() && row.1 == 0, "欠著、還沒試過");
-    assert!(crate::remote_purge::pending(&app.db, &r.host).await.unwrap().contains(&id), "舊主機還欠著它");
-    assert!(!crate::remote_purge::pending(&app.db, new_host).await.unwrap().contains(&id), "新主機不碰舊主機的債");
+    assert!(crate::remote_purge::pending(&app.db, &r.host, false).await.unwrap().contains(&id), "舊主機還欠著它");
+    assert!(!crate::remote_purge::pending(&app.db, new_host, false).await.unwrap().contains(&id), "新主機不碰舊主機的債");
     assert_eq!(sweep(&app, new_host).await, (0, 0), "新主機的掃描不搬它");
     assert_eq!(r.removed(&id), 0);
     assert_eq!(sweep(&app, &r.host).await, (1, 0), "舊主機連回來就清掉");
