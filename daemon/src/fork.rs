@@ -570,6 +570,39 @@ mod tests {
         assert_eq!(fork_bot_count(&e).await, before + 1);
     }
 
+    /// #1359：fork 的 handler 在新 bot 已經出現、還沒啟動的那一瞬被 drop：脫離出去的工作照樣以 fork 參數啟動，
+    /// 不留下一顆自稱接續脈絡、實際是空白對話的 bot。
+    #[tokio::test]
+    async fn a_fork_whose_handler_is_dropped_after_the_bot_appears_still_starts_it_as_a_fork() {
+        let e = env().await;
+        let src = source_bot(&e, "claude", "alfa", "user").await;
+        let target = db::ulid();
+        let mut op = planned_op(&src, &target);
+        op.client_request_id = "req-drop".into();
+        fork_ops::insert(&e.app.db, &op).await.unwrap();
+        let reached = Arc::new(tokio::sync::Notify::new());
+        let release = Arc::new(tokio::sync::Notify::new());
+        let (r2, go) = (reached.clone(), release.clone());
+        lifecycle::race_point::arm("fork_after_bot_changed", &target, move || async move {
+            r2.notify_one();
+            go.notified().await;
+        });
+        let (app, s) = (e.app.clone(), src.clone());
+        let h = tokio::spawn(async move {
+            fork_bot(State(app), Path(s), Some(Json(ForkReq { name: None, client_request_id: Some("req-drop".into()) }))).await.map(|_| ())
+        });
+        reached.notified().await;
+        h.abort(); // 瀏覽器斷線：handler future 被 drop（脫離出去的工作不受影響）
+        let _ = h.await;
+        release.notify_one();
+        crate::api::work_done_for_test(&target).notified().await;
+        let saved = fork_ops::get(&e.app.db, "req-drop").await.unwrap().expect("fork 操作還在");
+        assert_eq!(saved.state, "started");
+        assert!(saved.run_id.is_some(), "有 run");
+        assert!(db::active_run(&e.app.db, &target).await.unwrap().is_some(), "目標 bot 有 active run");
+        assert_eq!(fork_starts(&e), 1, "以 fork 參數啟動，不是空白對話");
+    }
+
     fn fork_starts(e: &Env) -> usize {
         started_args(e).iter().filter(|a| a.iter().any(|x| x == "--fork-session")).count()
     }
