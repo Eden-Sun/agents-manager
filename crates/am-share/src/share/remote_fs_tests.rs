@@ -1084,3 +1084,29 @@ async fn repoint_host_invalidates_remote_svg_photo_cache() {
 
 
 
+
+/// #1280：假 ssh 的 stdin 寫入不能因為腳本先結束（不讀 stdin）而失敗——跟正式的 `run_with_stdin` 一樣，結果看 stdout。
+/// 1 MiB 大於 pipe 緩衝，腳本不讀就結束，每次都會 EPIPE（不靠時序）。
+#[tokio::test]
+async fn the_local_sh_fake_survives_a_script_that_exits_before_reading_stdin() {
+    let scratch = test_dirs::scratch_dir("rfs-epipe");
+    let host = "host-epipe-1";
+    test_support::local_sh_fake(host, &scratch);
+    let cfg = HostCfg {
+        name: host.to_string(),
+        ssh: "fake-ssh".to_string(),
+        ssh_port: 22,
+        ssh_opts: vec![],
+        herdr_session: "test-session".to_string(),
+        shared_session: false,
+        remote_path: String::new(),
+    };
+    let conn = HostConn::remote(cfg, None);
+    conn.connected.store(true, Ordering::SeqCst);
+
+    let out = conn
+        .ssh_exec_stdin("printf done; exit 0", &vec![0u8; 1 << 20], Duration::from_secs(30))
+        .await
+        .expect("腳本先結束不是錯誤：結果在 stdout");
+    assert_eq!(out, "done");
+}
