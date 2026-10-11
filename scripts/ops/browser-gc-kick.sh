@@ -76,6 +76,16 @@ cdp_state() {
 # 行程身分指紋（#1305）：啟動時間＋命令列。PID 會被回收，光靠 kill -0 分不出是原來那個還是新的行程。
 proc_fingerprint() { ps -o lstart=,command= -p "$1" 2>/dev/null; }
 
+# 路徑是不是有歧義（#1310）：ps 給的命令列是拍平的字串，路徑含空白時 sed 只能拿到前半段。
+# 截出來的前綴同時是另一個 /tmp/am-* 目錄的前綴，就不能據此刪（可能刪到別人的 profile）。
+dir_ambiguous() {
+  local c
+  for c in /tmp/am-*(N); do
+    [ "$c" != "$1" ] && case "$c" in "$1 "*) return 0 ;; esac
+  done
+  return 1
+}
+
 reap_headless() {
   local reaped=0 kept=0
   while IFS= read -r line; do
@@ -119,7 +129,12 @@ reap_headless() {
     fi
     echo "  reap headless pid ${pid}（孤兒、無 CDP 連線、活了 ${secs:-?}s）dir=$dir" >> "$LOG"
     # 帶 .. 的不刪：/tmp/am-x/../../foo 前綴上像 /tmp/am-*，實際指到別處（#373）。
-    case "$dir" in *..*) ;; /tmp/am-*) rm -rf "$dir" && echo "    rm -rf $dir" >> "$LOG";; esac
+    # 路徑含空白而被截斷的不刪（#1310）：下一輪 reap_profiles 會用完整比對處理。
+    case "$dir" in *..*) ;; /tmp/am-*)
+      if dir_ambiguous "$dir"; then echo "    保留 ${dir}（路徑可能含空白、無法確定，交給 profile 清理）" >> "$LOG"
+      else rm -rf "$dir" && echo "    rm -rf $dir" >> "$LOG"
+      fi ;;
+    esac
     reaped=$((reaped+1))
   done <<EOF2
 $(ps -axo pid,ppid,command | grep 'Google Chrome' | grep -- '--headless' | grep -v -- '--type=' | grep -v grep)
@@ -129,21 +144,28 @@ EOF2
 
 # 沒有 Chrome 在用的 /tmp/am-* profile 目錄（上次跑完沒刪的殘留）。1 小時內動過的不碰，
 # 免得殺到正在起的實例。
+# 這個目錄有沒有被任何 Chrome 命令列引用（#1306、#1310）：headless 與使用者自己的 GUI Chrome 都算；
+# 比對是「--user-data-dir=<目錄>」後面接空白或行尾，不用空白切（路徑可能含空白）。寧可多留，不可漏刪。
+profile_in_use() {
+  D="$1" awk 'BEGIN { k = "--user-data-dir=" ENVIRON["D"] }
+    { s = $0; while ((i = index(s, k)) > 0) { r = substr(s, i + length(k)); if (r == "" || substr(r, 1, 1) == " ") found = 1; s = substr(s, i + 1) } }
+    END { exit found ? 0 : 1 }' <<< "$2"
+}
+
 reap_profiles() {
-  local live n=0 sz psout
+  local n=0 sz psout cmds d
   # 列不出行程就什麼都不刪：不知道誰在用，就當成都在用（#1306）。
   if ! psout=$(ps -axo command 2>/dev/null); then
     echo "profile 目錄：略過（無法列出行程）" >> "$LOG"; return
   fi
-  # headless 與使用者自己的 GUI Chrome 都算在用（#1306）。
-  live=$(printf '%s\n' "$psout" | grep 'Google Chrome' | grep -v grep | sed -n 's/.*--user-data-dir=\([^ ]*\).*/\1/p')
+  cmds=$(printf '%s\n' "$psout" | grep 'Google Chrome' | grep -v grep)
   # 任何 /tmp/am-* 只要長得像 Chrome profile（有 Local State / Default / DevToolsActivePort）就算；
   # 截圖、build target 之類的目錄沒有這些標記，不會被碰。
   # (N)＝沒符合就展開成空；只放寬這一個 glob，不對整支 setopt nonomatch（#371）。
   for d in /tmp/am-*(N); do
     [ -d "$d" ] || continue
     { [ -e "$d/Local State" ] || [ -d "$d/Default" ] || [ -e "$d/DevToolsActivePort" ]; } || continue
-    echo "$live" | grep -qx "$d" && continue
+    profile_in_use "$d" "$cmds" && continue
     [ -n "$(find "$d" -maxdepth 0 -mmin -60 2>/dev/null)" ] && continue
     sz=$(du -sk "$d" 2>/dev/null | awk '{print $1}')
     rm -rf "$d" && { echo "  rm -rf ${d}（${sz}KB，沒有 Chrome 在用）" >> "$LOG"; n=$((n+1)); }
