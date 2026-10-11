@@ -385,7 +385,8 @@ pub async fn handle_status(app: &Arc<App>, host: &str, session: &str, ev: &crate
 /// 放在 [`App`] 上、只在記憶體裡：daemon 重啟或主機重連時 `reconcile` 會把 DB 狀態重新對回 herdr，那條路徑本來就是修復。
 #[derive(Clone)]
 pub(crate) struct StatusRepair {
-    run_id: String,
+    /// `None`＝寫失敗時連 run 都查不出來（#1293）：修復時拿 pane 當下的 run，不拿舊的 run 比對。
+    run_id: Option<String>,
     since: Instant,
     /// 每次登記（含覆寫）都換一個號碼：修復清掉的是**它自己拿到的那一筆**，不是 pane 底下當下的任何一筆（#1290）。
     gen: u64,
@@ -400,8 +401,9 @@ fn next_repair_gen() -> u64 {
 const STATUS_REPAIR_EVERY: std::time::Duration = std::time::Duration::from_secs(15);
 
 /// 同一個 pane 又寫失敗：用這一次寫失敗時的 run 取代舊登記（#1290）。舊的 run 已經換掉，留著它只會讓修復把新 run 丟掉。
-fn mark_status_repair(app: &App, key: &PaneKey, run_id: &str) {
-    app.status_repairs.lock().unwrap_or_else(|e| e.into_inner()).insert(key.clone(), StatusRepair { run_id: run_id.to_string(), since: Instant::now(), gen: next_repair_gen() });
+/// 登記（`run_id` 為 `None` 表示 run 還查不出來，#1293）。
+fn mark_status_repair(app: &App, key: &PaneKey, run_id: Option<&str>) {
+    app.status_repairs.lock().unwrap_or_else(|e| e.into_inner()).insert(key.clone(), StatusRepair { run_id: run_id.map(str::to_string), since: Instant::now(), gen: next_repair_gen() });
 }
 
 /// 寫進去了（或本來就一致）：這個 pane 不再欠 DB 一個狀態。
@@ -439,7 +441,12 @@ pub async fn repair_pending_statuses(app: &Arc<App>) -> usize {
         };
         #[cfg(test)]
         crate::race_point::hit("status_repair_after_lookup", pane_id).await;
-        if runs.first().map(|r| r.id.as_str()) != Some(repair.run_id.as_str()) {
+        // 登記的 run 已經不是 pane 上的 run：那筆跟著舊 run 結束就丟掉。登記時就沒有 run、現在也沒有：沒東西可修。
+        let stale = match &repair.run_id {
+            Some(id) => runs.first().map(|r| r.id.as_str()) != Some(id.as_str()),
+            None => runs.is_empty(),
+        };
+        if stale {
             clear_status_repair_if(app, key, repair.gen);
             continue;
         }
@@ -516,6 +523,8 @@ async fn handle_status_try(app: &Arc<App>, host: &str, session: &str, ev: &crate
         Ok(runs) => runs,
         Err(e) => {
             tracing::warn!(host, pane_id, status = %reported_status, error = ?e, "could not look up the run for a pane status event; replaying it shortly");
+            // run 還不知道也要登記：重放用完之後沒有任何新事件，修復迴圈是唯一的補救（#1293）。
+            mark_status_repair(app, &key, None);
             replay_status_later(app, host, session, ev, key, seq, attempt);
             return;
         }
@@ -537,6 +546,7 @@ async fn handle_status_try(app: &Arc<App>, host: &str, session: &str, ev: &crate
         Ok(Some(_)) => return,
         Err(e) => {
             tracing::warn!(host, pane_id, status = %status, error = ?e, "could not tell whether a pane's project was handed off; replaying it shortly");
+            mark_status_repair(app, &key, Some(&run.id));
             replay_status_later(app, host, session, ev, key, seq, attempt);
             return;
         }
@@ -558,7 +568,7 @@ async fn handle_status_try(app: &Arc<App>, host: &str, session: &str, ev: &crate
             // 寫不進去就跟讀不到 run 一樣重放：DB 停在舊狀態時，邊的副作用（排隊訊息的 flush 閘門讀的是 DB）會卡住。
             // 這一輪不做任何邊的副作用；重放成功那一次 `prev` 仍是 DB 的舊值，副作用在那一次完整做一遍。
             tracing::warn!(run = %run.id, status = %status, error = ?e, "could not persist the agent status; replaying it shortly");
-            mark_status_repair(app, &key, &run.id);
+            mark_status_repair(app, &key, Some(&run.id));
             drop(write_guard);
             replay_status_later(app, host, session, ev, key, seq, attempt);
             return;
@@ -1187,7 +1197,7 @@ mod tests {
 
     /// 登記的 run（沒有登記就是 None）。
     fn repaired_run(app: &Arc<App>, key: &PaneKey) -> Option<String> {
-        app.status_repairs.lock().unwrap().get(key).map(|r| r.run_id.clone())
+        app.status_repairs.lock().unwrap().get(key).and_then(|r| r.run_id.clone())
     }
 
     /// #1290：同一顆 pane 換了新 run、新 run 的寫入也失敗：登記要跟著換到新 run，修復才找得到它。
@@ -1242,7 +1252,7 @@ mod tests {
         // 在它讀完 DB、準備清登記的那一刻，R2 的寫入失敗、登記了 R2。
         let (hook_app, hook_key, r2c) = (app.clone(), key.clone(), r2.clone());
         crate::race_point::arm("status_repair_after_lookup", &pane, move || async move {
-            mark_status_repair(&hook_app, &hook_key, &r2c);
+            mark_status_repair(&hook_app, &hook_key, Some(&r2c));
         });
         repair_pending_statuses(&app).await;
         assert_eq!(repaired_run(&app, &key), Some(r2), "修復清的只能是它自己拿到的 R1，R2 的新登記要留著");
