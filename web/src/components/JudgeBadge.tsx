@@ -36,12 +36,19 @@ export function JudgeBadge({ botId }: { botId: string }) {
     }
     const onKey = (e: KeyboardEvent) => {
       if (e.key === 'Escape' && !e.isComposing) {
+        // 這一下 Esc 是浮層的：標成已處理，側欄抽屜等 window 上的 handler 看到 defaultPrevented 就不動（#1401）。
+        e.preventDefault()
         setOpenId(null)
         btnRef.current?.focus()
       }
     }
-    // fixed 的浮層不會跟著列捲動：打開期間捲動或改視窗大小就關掉，不留在錯的位置（#1381）。
-    const onMove = () => setOpenId(null)
+    // fixed 的浮層不會跟著列捲動：打開期間「徽章所在的捲動容器」捲動或改視窗大小就關掉，不留在錯的位置（#1381）。
+    // 浮層自己的命中行捲動、別的區域（對話區自動貼底）捲動不算——以前任何 scroll 都關，長命中行根本捲不完（#1401）。
+    const onMove = (e: Event) => {
+      const t = e.target
+      if (t instanceof Node && btnRef.current && !t.contains(btnRef.current)) return
+      setOpenId(null)
+    }
     document.addEventListener('mousedown', onDoc)
     document.addEventListener('keydown', onKey)
     window.addEventListener('scroll', onMove, true)
