@@ -240,6 +240,22 @@ struct MockState {
     seq: Arc<std::sync::atomic::AtomicU64>,
 }
 
+/// `set_stale_agent` 記號的欄位名（只在替身內部用，回給 client 前拿掉）。
+const STALE_KEY: &str = "__stale_agent";
+
+fn is_stale(a: &Value) -> bool {
+    a.get(STALE_KEY).and_then(Value::as_bool) == Some(true)
+}
+
+/// 回給 client 的 agent：拿掉替身內部的記號。
+fn wire_agent(a: &Value) -> Value {
+    let mut v = a.clone();
+    if let Some(o) = v.as_object_mut() {
+        o.remove(STALE_KEY);
+    }
+    v
+}
+
 /// 下一顆 MockHerdr 的 id 起點（行程全域）。
 static MOCK_SEQ_BASE: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
 
@@ -254,7 +270,7 @@ impl MockState {
             .lock()
             .unwrap()
             .iter()
-            .find(|a| a.get("pane_id").and_then(Value::as_str) == Some(pane_id))
+            .find(|a| !is_stale(a) && a.get("pane_id").and_then(Value::as_str) == Some(pane_id))
             .cloned();
         let mut v = json!({"pane_id": pane_id, "workspace_id": tab.workspace_id, "tab_id": tab.tab_id,
                "cwd": cwd.cloned().unwrap_or(Value::Null)});
@@ -302,7 +318,7 @@ impl MockState {
             || self.argvs.lock().unwrap().contains_key(pane_id)
             || self.pids.lock().unwrap().contains_key(pane_id)
             || self.shell_pids.lock().unwrap().contains_key(pane_id)
-            || self.agents.lock().unwrap().iter().any(|a| a.get("pane_id").and_then(Value::as_str) == Some(pane_id))
+            || self.agents.lock().unwrap().iter().any(|a| !is_stale(a) && a.get("pane_id").and_then(Value::as_str) == Some(pane_id))
     }
 }
 
@@ -497,7 +513,7 @@ impl MockHerdr {
                         "pane.get" => {
                             let pid = wid_of("pane_id");
                             // agent 一定住在某顆 pane 上：`set_agent` 種的 pane 就算不在任何 tab 上，也要查得到（#1451）。
-                            let occupant_tab = st.agents.lock().unwrap().iter().find(|a| a.get("pane_id").and_then(Value::as_str) == Some(pid.as_str())).map(|a| MockTab {
+                            let occupant_tab = st.agents.lock().unwrap().iter().find(|a| !is_stale(a) && a.get("pane_id").and_then(Value::as_str) == Some(pid.as_str())).map(|a| MockTab {
                                 tab_id: a.get("tab_id").and_then(Value::as_str).unwrap_or("tab-1").to_string(),
                                 workspace_id: a.get("workspace_id").and_then(Value::as_str).unwrap_or("ws-1").to_string(),
                                 label: String::new(),
@@ -789,7 +805,7 @@ impl MockHerdr {
                             let agents = if st.hide_agent_list.load(std::sync::atomic::Ordering::SeqCst) {
                                 vec![]
                             } else {
-                                st.agents.lock().unwrap().clone()
+                                st.agents.lock().unwrap().iter().map(wire_agent).collect()
                             };
                             json!({"id": id, "result": {"agents": agents}})
                         }
@@ -803,11 +819,11 @@ impl MockHerdr {
                                 .iter()
                                 .find(|a| {
                                     a.get("name").and_then(Value::as_str) == Some(target.as_str())
-                                        || a.get("pane_id").and_then(Value::as_str) == Some(target.as_str())
+                                        || (!is_stale(a) && a.get("pane_id").and_then(Value::as_str) == Some(target.as_str()))
                                 })
                                 .cloned();
                             match found {
-                                Some(a) => json!({"id": id, "result": {"agent": a}}),
+                                Some(a) => json!({"id": id, "result": {"agent": wire_agent(&a)}}),
                                 None => json!({"id": id, "error": {"code": "agent_not_found", "message": format!("agent target {target} not found")}}),
                             }
                         }
@@ -930,6 +946,15 @@ impl MockHerdr {
             agent.insert("agent_session".into(), json!({"agent": "claude", "kind": "id", "value": sid}));
         }
         self.agents.lock().unwrap().push(Value::Object(agent));
+    }
+
+    /// 重啟的瞬間：herdr 以名字查 agent 仍回舊的、已經關掉的 pane（名字還沒換過來；cb12b83d，2026-09-11 的事故）。
+    /// 這是**暫態**，只給測試用。它只在 `agent.list`／`agent.get <名字>` 看得到；它住的 pane 已經不在，
+    /// `pane.get`、`agent.get <pane>` 都查不到，所以它不算「agent 住在某顆 pane 上」——穩態的契約照舊，見 `set_agent`。
+    pub fn set_stale_agent(&self, name: &str, closed_pane: &str) {
+        let agent = json!({"name": name, "agent": "claude", "agent_status": "idle", "workspace_id": "ws-1",
+            "tab_id": "tab-1", "pane_id": closed_pane, "cwd": "/tmp/p", STALE_KEY: true});
+        self.agents.lock().unwrap().push(agent);
     }
 
     pub fn set_screen(&self, pane_id: &str, text: &str) {
@@ -1490,5 +1515,18 @@ mod mock_herdr_contract_tests {
         let me = listed.iter().find(|p| p.pane_id == root.pane_id).expect("剛開的 root pane 要列得出來");
         assert_eq!(me.agent_status, Some(AgentStatus::Unknown));
         assert!(client.pane_list(Some("nope")).await.unwrap().is_empty(), "不存在的 workspace 底下沒有 pane");
+    }
+
+    /// 重啟暫態：以名字查得到舊的、已關掉的 pane，但那顆 pane 本身查不到，也不能用 pane id 查到 agent。
+    #[tokio::test]
+    async fn a_stale_agent_is_found_by_name_only_and_its_closed_pane_is_gone() {
+        let (mock, client) = start().await;
+        mock.set_stale_agent("restarting", "w9:pOld");
+        let by_name = client.call("agent.get", json!({"target": "restarting"})).await.unwrap();
+        assert_eq!(by_name["agent"]["pane_id"], "w9:pOld");
+        assert!(by_name["agent"].get(STALE_KEY).is_none(), "替身的記號不外露");
+        assert!(client.pane_get("w9:pOld").await.unwrap().is_none(), "住的 pane 已經不在");
+        let e = client.call("agent.get", json!({"target": "w9:pOld"})).await.unwrap_err();
+        assert_eq!(code_of(&e), "agent_not_found", "暫態不是穩態：pane id 查不到它");
     }
 }

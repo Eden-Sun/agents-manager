@@ -2349,7 +2349,11 @@ mod compat_tests {
         let nameless = json!({
             "name": null, "agent": "claude", "agent_status": "idle",
             "workspace_id": ws.workspace_id, "tab_id": new.tab_id, "pane_id": new.pane_id, "cwd": "/tmp/p"});
-        *env.herdr.agents.lock().unwrap() = if herdr_still_lists_the_old_pane { vec![old_entry, nameless] } else { vec![nameless] };
+        *env.herdr.agents.lock().unwrap() = vec![nameless];
+        // herdr 以名字查 agent 仍回舊的、已關掉的 pane（cb12b83d：重啟後名字還沒換過來）。
+        if herdr_still_lists_the_old_pane {
+            env.herdr.set_stale_agent(&agent, &old.pane_id);
+        }
         drop(guard);
         rec.await.unwrap().unwrap();
 
@@ -2412,6 +2416,11 @@ mod compat_tests {
     #[tokio::test]
     async fn a_fresh_run_survives_when_agent_get_says_not_found() {
         a_fresh_run_survives_when_herdr_cannot_confirm_its_agent(false).await;
+    }
+
+    #[tokio::test]
+    async fn a_fresh_run_survives_when_agent_get_still_points_at_the_closed_pane() {
+        a_fresh_run_survives_when_herdr_cannot_confirm_its_agent(true).await;
     }
 
     /// A child row with a run on `pane`, the way reconcile adopts one (#60 tests).
