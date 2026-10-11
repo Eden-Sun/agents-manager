@@ -797,6 +797,48 @@ test('較新的訊息請求尚未完成時，先回來的快照先顯示', async
   assert.deepEqual([...document.querySelectorAll('.sh-msg.assistant .sh-bubble')].map((node) => node.textContent?.trim()), ['x', 'y'])
 })
 
+test('輪詢模式：回覆後才寫好的檔會在手動時鐘的背景補查中顯示', async () => {
+  const timers = installManualClockTimers()
+  const originalNow = Date.now
+  Date.now = () => 0
+  let messagesCalls = 0
+  let filesCalls = 0
+  const client = clientWith(
+    async () => {
+      messagesCalls++
+      return page(messagesCalls === 1 ? [] : [msgAt('late-answer', 'assistant', 1)])
+    },
+    (events) => {
+      events.onDown()
+      return () => {}
+    },
+  )
+  client.files = async () => {
+    filesCalls++
+    return filesCalls >= 3 ? [{ name: 'late.txt', size: 4, modified_at: null, version: null }] : []
+  }
+  try {
+    await mount(<ShareApp client={client} />)
+    await flushSharePromises()
+    assert.equal(messagesCalls, 1)
+    assert.equal(filesCalls, 1, '開頁只抓一次檔案')
+
+    await act(async () => timers.clock.advance(POLL_WAIT))
+    await flushSharePromises()
+    assert.equal(messagesCalls, 2, '手動推進輪詢時鐘後讀到 assistant 回覆')
+    assert.equal(filesCalls, 2, '讀到回覆後立即重抓一次檔案，檔仍未寫好')
+    assert.equal(document.querySelector('.sh-file-name'), null)
+
+    await act(async () => timers.clock.advance(POLL_WAIT + 300))
+    await flushSharePromises()
+    assert.equal(filesCalls, 3, '回覆後補查再次讀取檔案')
+    assert.equal(document.querySelector('.sh-file-name')?.textContent, 'late.txt')
+  } finally {
+    timers.restore()
+    Date.now = originalNow
+  }
+})
+
 async function runResyncRace(order: 'older-first' | 'resync-first', resyncHasMore: boolean) {
   const pending: ((value: ReturnType<typeof page>) => void)[] = []
   let calls = 0
@@ -1114,7 +1156,10 @@ test('回到前景補抓一次；背景時不補', { timeout: 20_000 }, async ()
 })
 
 /** #1094：bot 做的圖要畫在那則回覆下面；輪詢模式沒有 SSE 的 message 事件，新回覆到了也要重抓檔案清單。 */
-test('輪詢模式：新回覆到了也重抓檔案清單，圖出現在那則回覆下面', { timeout: 20_000 }, async () => {
+test('輪詢模式：新回覆到了也重抓檔案清單，圖出現在那則回覆下面', async () => {
+  const timers = installManualClockTimers()
+  const originalNow = Date.now
+  Date.now = () => 0
   const T = Date.UTC(2026, 9, 4)
   const iso = (ms: number) => new Date(T + ms).toISOString()
   let replied = false
@@ -1147,17 +1192,25 @@ test('輪詢模式：新回覆到了也重抓檔案清單，圖出現在那則�
       return () => {}
     },
   }
-  await mount(<ShareApp client={client} />)
-  await settle(100)
-  assert.equal(document.querySelector('.sh-imgs'), null)
-  assert.equal(filesCalls, 1)
-  replied = true
-  await settle(POLL_WAIT)
-  assert.ok(document.querySelector('.sh-msg.assistant .sh-imgs .sh-thumb'), '圖要在那則回覆下面')
-  assert.match(document.querySelector('.sh-files-btn')!.textContent!, /（1）/)
-  const afterReply = filesCalls
-  await settle(POLL_WAIT)
-  assert.equal(filesCalls, afterReply, '同一則回覆不重複抓')
+  try {
+    await mount(<ShareApp client={client} />)
+    await flushSharePromises()
+    assert.equal(document.querySelector('.sh-imgs'), null)
+    assert.equal(filesCalls, 1)
+    replied = true
+    await act(async () => timers.clock.advance(POLL_WAIT))
+    await flushSharePromises()
+    assert.ok(document.querySelector('.sh-msg.assistant .sh-imgs .sh-thumb'), '圖要在那則回覆下面')
+    assert.match(document.querySelector('.sh-files-btn')!.textContent!, /（1）/)
+    assert.equal(filesCalls, 2, '輪詢讀到新回覆時立即重抓一次檔案')
+
+    await act(async () => timers.clock.advance(POLL_WAIT))
+    await flushSharePromises()
+    assert.equal(filesCalls, 3, '後續只由檔案背景輪詢補查，不因同一則回覆重複觸發')
+  } finally {
+    timers.restore()
+    Date.now = originalNow
+  }
 })
 
 test('SSE 模式不重複抓：收到回覆事件已經抓過，載入頁面不再多抓', { timeout: 20_000 }, async () => {

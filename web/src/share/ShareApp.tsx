@@ -234,7 +234,10 @@ export function ShareApp({ client }: { client: ShareClient }) {
     if (newest !== lastAssistant.current) {
       lastAssistant.current = newest
       // 第一頁不抓：開頁本來就抓了一次。
-      if (!first && newest) void loadFiles()
+      if (!first && newest) {
+        setFilePollUntil(Date.now() + FILE_POLL_AFTER_REPLY_MS)
+        void loadFiles()
+      }
     }
     if (!sawOlder.current) setHasMore(page.has_more)
     const a = anchor.current
