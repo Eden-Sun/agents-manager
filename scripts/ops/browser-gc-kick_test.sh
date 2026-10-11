@@ -31,7 +31,7 @@ setup() {
   grep -q '/tmp/am-' "$HERE/browser-gc-kick.sh" || { echo "FAIL - 腳本裡沒有 /tmp/am-，測試的路徑替換要更新"; exit 1; }
   {
     echo '#!/bin/zsh'
-    echo 'kill() { echo "kill $*" >> "$FIX/kills.log"; if [ "$1" = "-0" ]; then [ -e "$FIX/alive.$2" ]; return; fi; if [ "$1" = "-TERM" ] && [ -e "$FIX/reuse.$2" ]; then cp "$FIX/reuse.$2" "$FIX/fp.$2"; fi; return 0; }'
+    echo 'kill() { echo "kill $*" >> "$FIX/kills.log"; if [ "$1" = "-0" ]; then [ -e "$FIX/alive.$2" ]; return; fi; if [ "$1" = "-TERM" ] && [ -e "$FIX/reuse.$2" ]; then cp "$FIX/reuse.$2" "$FIX/fp.$2"; fi; if [ "$1" = "-TERM" ] && [ -e "$FIX/dies.$2" ]; then rm -f "$FIX/fp.$2"; fi; return 0; }'
     echo 'sleep() { :; }'
     tail -n +2 "$HERE/browser-gc-kick.sh" | sed "s#/tmp/am-#$TMPD/am-#g"
   } > "$ROOT/agm/bin/browser-gc-kick.sh"
@@ -103,6 +103,17 @@ chrome 502 1 "3:00:00" 9223 "$TMPD/am-shot2"; mkprofile "$TMPD/am-shot2"
 run >/dev/null
 check    "TERM 就死了就不 KILL：有 TERM" "kill -TERM 502" "$FIX/kills.log"
 check_no "TERM 就死了就不 KILL：沒有 KILL" "kill -KILL" "$FIX/kills.log"
+teardown
+
+# TERM 後正常結束（#1403）：指紋變成空的是「已經結束」，不是「PID 被回收」；不 KILL、log 不說被回收。
+setup
+mkprofile "$TMPD/am-clean"
+chrome 503 1 "10:00" 9224 "$TMPD/am-clean"; touch "$FIX/dies.503"
+run >/dev/null
+check    "TERM 後正常結束：有送 TERM" "kill -TERM 503" "$FIX/kills.log"
+check_no "TERM 後正常結束：不 KILL" "kill -KILL 503" "$FIX/kills.log"
+check_no "TERM 後正常結束：log 不說 PID 被回收" "已不是原來的行程" "$LOG"
+check    "TERM 後正常結束：照常記 reap" "reap headless pid 503" "$LOG"
 teardown
 
 # 2. 不該收的（每一種都要有 keep 的理由）：什麼都不殺、profile 不刪。
