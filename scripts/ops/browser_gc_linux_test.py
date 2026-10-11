@@ -171,6 +171,34 @@ class BrowserGcLinuxTest(unittest.TestCase):
         self.assertTrue(unrelated.exists())
         self.assertTrue(symlink.is_symlink())
 
+    def test_unreadable_same_user_chrome_cmdline_fails_closed_for_profile_sweep(self):
+        """#1292：同一個使用者的 Chrome 讀不到 cmdline（EACCES／EIO 之類）時，它的 profile 不能被當成「沒人在用」刪掉。
+        舊版 `_active_chrome_profiles` 對這種錯誤直接 continue，整個 sweep 照刪。"""
+        live = self.profile("am-live-unreadable")
+        os.utime(live, (1000 - 7200, 1000 - 7200))
+        self.add_process(401, 80, 300, ["/usr/bin/chromium", f"--user-data-dir={live}"])
+        cmdline = self.proc / "401" / "cmdline"
+        cmdline.unlink()
+        cmdline.mkdir()   # 讀取會丟 IsADirectoryError（OSError），模擬暫時讀不到
+
+        result = self.run_gc()
+
+        self.assertEqual(result.removed_profiles, [])
+        self.assertTrue(live.exists(), "讀不到的同使用者 Chrome：profile 不能刪")
+
+    def test_process_that_exited_during_scan_does_not_block_profile_sweep(self):
+        """#1292 的對照：行程在掃描途中結束（cmdline 不見＝ENOENT）不是錯誤，不能因此把正常的舊 profile 留住。"""
+        stale = self.profile("am-stale-after-exit")
+        os.utime(stale, (1000 - 7200, 1000 - 7200))
+        gone = self.proc / "402"
+        gone.mkdir()
+        (gone / "status").write_text(f"Name:\tchromium\nUid:\t{os.getuid()}\t{os.getuid()}\t{os.getuid()}\t{os.getuid()}\n", encoding="ascii")
+
+        result = self.run_gc()
+
+        self.assertEqual(result.removed_profiles, [stale])
+        self.assertFalse(stale.exists())
+
     def test_runs_optional_pane_gc_once(self):
         pane_gc = Mock()
 

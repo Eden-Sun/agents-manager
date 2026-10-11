@@ -46,14 +46,21 @@ def _proc_stat(path: Path) -> tuple[int, int] | None:
         return None
 
 
+def _uid_from_status(status: str) -> int | None:
+    for line in status.splitlines():
+        if line.startswith("Uid:"):
+            try:
+                return int(line.split()[1])
+            except (ValueError, IndexError):
+                return None
+    return None
+
+
 def _proc_uid(path: Path) -> int | None:
     try:
-        for line in (path / "status").read_text(encoding="ascii").splitlines():
-            if line.startswith("Uid:"):
-                return int(line.split()[1])
-    except (OSError, ValueError, IndexError):
-        pass
-    return None
+        return _uid_from_status((path / "status").read_text(encoding="ascii"))
+    except (OSError, ValueError):
+        return None
 
 
 def _profile_arg(argv: tuple[str, ...]) -> str | None:
@@ -150,19 +157,33 @@ def _read_processes(proc_root: Path, uptime_path: Path, uid: int) -> list[Chrome
 
 
 def _active_chrome_profiles(proc_root: Path, tmp_root: Path, uid: int) -> set[Path] | None:
-    """Include non-headless Chrome too, so a marked profile is not removed while any Chrome uses it."""
+    """Include non-headless Chrome too, so a marked profile is not removed while any Chrome uses it.
+
+    回傳 None＝不知道（列不出行程、或某個同使用者的行程讀不到）：呼叫端要因此整個跳過 profile 清理。
+    讀不到的行程不能當成「沒有在用」（#1292）；只有掃描途中就結束了（ENOENT）才是真的不在了。
+    """
     try:
         proc_entries = list(proc_root.iterdir())
     except OSError:
         return None
     profiles: set[Path] = set()
     for path in proc_entries:
-        if not path.name.isdecimal() or _proc_uid(path) != uid:
+        if not path.name.isdecimal():
+            continue
+        try:
+            status = (path / "status").read_text(encoding="ascii")
+        except FileNotFoundError:
+            continue
+        except (OSError, UnicodeDecodeError):
+            return None
+        if _uid_from_status(status) != uid:
             continue
         try:
             argv = tuple(os.fsdecode(arg) for arg in (path / "cmdline").read_bytes().split(b"\0") if arg)
-        except OSError:
+        except FileNotFoundError:
             continue
+        except OSError:
+            return None
         if not argv or not any(name in Path(argv[0]).name.lower() for name in ("chrome", "chromium")):
             continue
         profile = _safe_profile(_profile_arg(argv), tmp_root)
