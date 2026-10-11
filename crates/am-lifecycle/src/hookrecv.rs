@@ -581,9 +581,17 @@ pub async fn process<H: HookHost>(app: &H, body: &HookBody) -> Result<()> {
 pub async fn process_for<H: HookHost>(app: &H, body: &HookBody, event_id: Option<&str>) -> Result<()> {
     let lock = app.bot_lock(&body.bot_id).await;
     let _g = lock.lock().await;
-    process_locked_for(app, body, event_id).await?;
-    // 回合收完（含終端打字開的外部回合）之後才補：這時候「這一回合」才一定存在。
-    app.after_turn_end(body).await;
+    let mut accepted_turn_id = None;
+    process_locked_for_with_outcome(app, body, event_id, &mut accepted_turn_id).await?;
+    // Only a Stop that the core actually applied can contribute its post-Stop records.
+    if let Some(turn_id) = accepted_turn_id {
+        let run_id = sqlx::query_scalar::<_, Option<String>>("SELECT run_id FROM turns WHERE id = ?")
+            .bind(&turn_id)
+            .fetch_optional(app.db())
+            .await?
+            .flatten();
+        app.after_turn_end(body, run_id.as_deref(), &turn_id).await;
+    }
     Ok(())
 }
 
@@ -1088,6 +1096,16 @@ pub async fn process_locked<H: HookHost>(app: &H, body: &HookBody) -> Result<()>
 }
 
 pub async fn process_locked_for<H: HookHost>(app: &H, body: &HookBody, event_id: Option<&str>) -> Result<()> {
+    let mut accepted_turn_id = None;
+    process_locked_for_with_outcome(app, body, event_id, &mut accepted_turn_id).await
+}
+
+async fn process_locked_for_with_outcome<H: HookHost>(
+    app: &H,
+    body: &HookBody,
+    event_id: Option<&str>,
+    accepted_turn_id: &mut Option<String>,
+) -> Result<()> {
     let Some(bot) = db::bot(app.db(), &body.bot_id).await? else { return Ok(()) };
     // A3: also guards the spool-replay path, where nothing checked the token.
     if bot.deleted_at.is_some() {
@@ -1334,6 +1352,7 @@ pub async fn process_locked_for<H: HookHost>(app: &H, body: &HookBody, event_id:
             };
             let message = tx.insert_message_tx(&conv, Some(&t.id), "system", &note, "hook", false, None).await?;
             tx.commit().await?;
+            *accepted_turn_id = Some(t.id.clone());
             // 撞限在上面（進這一支之前）就記好了：畫面那條路（`turn_error::capture`）要等讀 pane 才記得到，常常比 flush 晚。
             app.emit_message_added(&bot.id, message).await;
             app.emit_turn(&t.id).await;
@@ -1532,6 +1551,7 @@ pub async fn process_locked_for<H: HookHost>(app: &H, body: &HookBody, event_id:
                 if let Some(turn) = turn_of_event(app.db(), event).await? {
                     tracing::info!(turn = %turn, event, "inbox replay of an already-applied hook ignored; re-announcing");
                     reannounce_turn(app, &bot.id, &turn).await;
+                    *accepted_turn_id = Some(turn);
                     return Ok(());
                 }
             }
@@ -1588,6 +1608,7 @@ pub async fn process_locked_for<H: HookHost>(app: &H, body: &HookBody, event_id:
                             {
                                 tracing::info!(turn = %t.id, late = %late.id, bot = %bot.id, "遲到 hook 回答的是備援關掉的那一回合，不是現在 in-flight 的：補回那一回合");
                                 fill_or_drop_late_hook(app, &late, &assistant.clone().unwrap_or_default(), &session_id, &turn_id, true).await?;
+                                *accepted_turn_id = Some(late.id.clone());
                                 return Ok(());
                             }
                         }
@@ -1621,6 +1642,7 @@ pub async fn process_locked_for<H: HookHost>(app: &H, body: &HookBody, event_id:
                         // 這筆就是 hook 要收的 in-flight 回合，只是 CAS 輸給備援：同一回合。
                         fill_or_drop_late_hook(app, &t, &body_text, &session_id, &turn_id, true).await?;
                         store_resent_prompt(app, &bot.id, &conv, &t, run.as_ref(), &body.payload, transcript_read_path.as_deref()).await?;
+                        *accepted_turn_id = Some(t.id.clone());
                         return Ok(());
                     }
                     _ => {}
@@ -1654,6 +1676,7 @@ pub async fn process_locked_for<H: HookHost>(app: &H, body: &HookBody, event_id:
                     added.push(tx.insert_message_tx(&conv, Some(&t.id), "assistant", &body_text, "hook", false, None).await?);
                 }
                 tx.commit().await?;
+                *accepted_turn_id = Some(t.id.clone());
                 for m in added {
                     app.emit_message_added(&bot.id, m).await;
                 }
@@ -1681,6 +1704,7 @@ pub async fn process_locked_for<H: HookHost>(app: &H, body: &HookBody, event_id:
                         let same = seen.is_some() || fired_within(app, &t, body.received_at.as_deref()).await?;
                         fill_or_drop_late_hook(app, &t, &body_text, &session_id, &turn_id, same).await?;
                         store_resent_prompt(app, &bot.id, &conv, &t, run.as_ref(), &body.payload, transcript_read_path.as_deref()).await?;
+                        *accepted_turn_id = Some(t.id.clone());
                         return Ok(());
                     }
                 }
@@ -1715,6 +1739,7 @@ pub async fn process_locked_for<H: HookHost>(app: &H, body: &HookBody, event_id:
                 added.push(tx.insert_message_tx(&conv, Some(&tid), "assistant", &body_text, "hook", false, None).await?);
             }
             tx.commit().await?;
+            *accepted_turn_id = Some(tid.clone());
             for m in added {
                 app.emit_message_added(&bot.id, m).await;
             }
@@ -6891,7 +6916,12 @@ pub trait HookHost:
     /// 本機這顆 bot 的資料夾（spool 在裡面）。
     fn hook_bot_dir(&self, bot_id: &str) -> Result<std::path::PathBuf>;
     /// 回合結束 hook 處理完之後補讀 AskUserQuestion 的答案。
-    fn after_turn_end<'a>(&'a self, body: &'a HookBody) -> impl std::future::Future<Output = ()> + Send + 'a;
+    fn after_turn_end<'a>(
+        &'a self,
+        body: &'a HookBody,
+        run_id: Option<&'a str>,
+        turn_id: &'a str,
+    ) -> impl std::future::Future<Output = ()> + Send + 'a;
     /// claude Stop hook 帶來的背景工作數字。
     fn background_stop<'a>(&'a self, run: &'a db::Run, payload: &'a Value) -> impl std::future::Future<Output = ()> + Send + 'a;
     /// transcript 路徑是不是這顆 bot 讀得的（遠端／本機分別把關）。
