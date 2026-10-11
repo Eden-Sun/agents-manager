@@ -39,14 +39,22 @@ export function GitBar({ projectId }: { projectId: string }) {
   useEffect(() => {
     let alive = true
     let timer: ReturnType<typeof setTimeout> | null = null
+    const visible = () => document.visibilityState === 'visible'
     const tick = async () => {
-      await refresh()
+      // 背景不抓；timer 照排，回前景後自然接上。
+      if (visible()) await refresh()
       if (alive) timer = setTimeout(() => void tick(), POLL_MS)
     }
+    // 回前景立刻補一次，不等下一個 tick。
+    const onVisible = () => {
+      if (visible()) void refresh()
+    }
     void tick()
+    document.addEventListener('visibilitychange', onVisible)
     return () => {
       alive = false
       if (timer) clearTimeout(timer)
+      document.removeEventListener('visibilitychange', onVisible)
     }
   }, [refresh])
 
