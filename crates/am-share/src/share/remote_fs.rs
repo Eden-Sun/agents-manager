@@ -1946,7 +1946,12 @@ pub mod test_support {
             let mut child = cmd.spawn().map_err(|e| anyhow::anyhow!("spawn /bin/sh: {e}"))?;
             if let Some(mut sin) = child.stdin.take() {
                 use std::io::Write;
-                sin.write_all(stdin).map_err(|e| anyhow::anyhow!("write stdin: {e}"))?;
+                // 腳本可能在讀 stdin 之前就印好結果結束（配額滿、目標不可信）：寫入端拿到 EPIPE 是預期的，
+                // 結果照樣看 stdout——跟正式的 `run_with_stdin` 一樣（#1280）。
+                match sin.write_all(stdin) {
+                    Err(e) if e.kind() == std::io::ErrorKind::BrokenPipe => {}
+                    r => r.map_err(|e| anyhow::anyhow!("write stdin: {e}"))?,
+                }
             }
             let out = child.wait_with_output().map_err(|e| anyhow::anyhow!("wait /bin/sh: {e}"))?;
             Ok(out.stdout)
