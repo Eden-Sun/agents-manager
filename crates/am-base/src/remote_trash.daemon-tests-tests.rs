@@ -628,3 +628,54 @@
         crate::runners::remote_trash::gc_host(&app, "trashbox-lock-busy").await;
         assert_eq!(std::fs::read_to_string(dir.join("keep.txt")).unwrap(), "mine", "下一輪照常還原");
     }
+
+    /// **#1406**：回收區是空的（大多數時候）：補還原只列一次名字，不為每顆活 bot 各 ssh 一趟。
+    #[tokio::test]
+    async fn a_sweep_with_an_empty_trash_runs_one_listing_and_no_per_bot_restore() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        static LISTINGS: AtomicUsize = AtomicUsize::new(0);
+        static RESTORES: AtomicUsize = AtomicUsize::new(0);
+        fn counting(script: &str) -> Result<String> {
+            if script.contains("AM_IDS_END") && script.contains("for e in") {
+                LISTINGS.fetch_add(1, Ordering::SeqCst);
+            }
+            if script.contains("best=\n") {
+                RESTORES.fetch_add(1, Ordering::SeqCst);
+            }
+            run_sh(script)
+        }
+        let (env, _root) = remote("trashbox-idle").await;
+        let app = env.app.clone();
+        for name in ["alfa", "bravo", "charlie", "delta", "echo"] {
+            tt::claude_bot(&app, &env.project_id, name).await;
+        }
+        crate::hosts::set_ssh_fake("trashbox-idle", counting);
+
+        crate::runners::remote_trash::gc_host(&app, "trashbox-idle").await;
+        assert_eq!(RESTORES.load(Ordering::SeqCst), 0, "回收區是空的：沒有任何一顆要還原，不該每顆 ssh 一趟");
+        assert_eq!(LISTINGS.load(Ordering::SeqCst), 1, "只列一次名字");
+    }
+
+    /// **#1406**：一顆還原失敗（`bots/` 不可寫，`mv` 失敗）不擋整台的清理：那一顆的備份不清，別顆過期的照清。
+    #[tokio::test]
+    async fn a_failing_restore_does_not_stop_expiry_of_other_bots() {
+        use std::os::unix::fs::PermissionsExt as _;
+        let (env, root) = remote("trashbox-fail-one").await;
+        let app = env.app.clone();
+        let stuck = tt::claude_bot(&app, &env.project_id, "alfa").await;
+        let gone = tt::claude_bot(&app, &env.project_id, "bravo").await;
+        sqlx::query("UPDATE bots SET deleted_at = ? WHERE id = ?").bind(crate::db::now()).bind(&gone.id).execute(&app.db).await.unwrap();
+        let trash = root.join("bots-trash");
+        let fresh = trash.join(format!("{}.{}", stuck.id, now_ms()));
+        let old = trash.join(format!("{}.{}", gone.id, now_ms() - Duration::from_secs(8 * 86_400).as_millis()));
+        std::fs::create_dir_all(&fresh).unwrap();
+        std::fs::create_dir_all(&old).unwrap();
+        let bots = root.join("bots");
+        std::fs::create_dir_all(&bots).unwrap();
+        std::fs::set_permissions(&bots, std::fs::Permissions::from_mode(0o500)).unwrap();
+
+        crate::runners::remote_trash::gc_host(&app, "trashbox-fail-one").await;
+        std::fs::set_permissions(&bots, std::fs::Permissions::from_mode(0o700)).unwrap();
+        assert!(fresh.exists(), "還原失敗那一顆的備份留著");
+        assert!(!old.exists(), "別顆過期的照清，不因為那一顆失敗就整輪不清");
+    }
