@@ -54,6 +54,10 @@ pub async fn migrate(pool: &SqlitePool) -> Result<()> {
 /// shim 的 poll 間隔遠短於這個值，正常排隊不會被誤收。
 const STALE_WAITING: Duration = Duration::from_secs(60);
 
+/// FIFO 判斷用的存活門檻（#1445）：shim 每 5 秒 poll 一次（再加 5 秒 curl 逾時），20 秒沒動靜就先讓後面的人過。
+/// 不刪列：真的只是慢的等待者下一次 poll 仍保有原本的 `since`，名額一空就輪到它。
+const FIFO_LIVE_WAITER: Duration = Duration::from_secs(20);
+
 /// 每顆 bot 同時最多佔幾列（held＋waiting）。`holder` 是呼叫端自己取的，不設上限的話一顆 bot 就能用不同 holder 把佇列塞滿
 /// （FIFO 擋在最前面的是幽靈）、把表撐大。正常用法是每個進行中的 cargo 一列，遠低於這個數字。沒有 bot 身分的人工呼叫不受限。
 pub const MAX_ROWS_PER_BOT: usize = 32;
@@ -117,10 +121,15 @@ async fn reap_expired_held(pool: &SqlitePool, now: &str) -> Result<u64> {
         .rows_affected())
 }
 
+/// 現在往回 `age` 的時間，格式同 `last_seen`（`reap_stale_waiting` 與 FIFO 判斷共用，兩邊的字串比較才一致）。
+fn cutoff_before(age: Duration) -> String {
+    (chrono::Utc::now() - chrono::Duration::from_std(age).unwrap()).to_rfc3339_opts(chrono::SecondsFormat::Millis, true)
+}
+
 /// 收掉太久沒刷新 `last_seen` 的 waiting 列（停止 poll：行程被砍、pane 消失）。acquire 自己也要呼叫這個
 /// （不只等背景 sweep）：死掉的號碼牌卡在佇列最前面會擋住後面活著的人，FIFO 判斷不能讓它拖到下一輪 sweep。
 async fn reap_stale_waiting(pool: &SqlitePool) -> Result<u64> {
-    let cutoff = (chrono::Utc::now() - chrono::Duration::from_std(STALE_WAITING).unwrap()).to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
+    let cutoff = cutoff_before(STALE_WAITING);
     Ok(sqlx::query("DELETE FROM build_slots WHERE status = 'waiting' AND last_seen <= ?")
         .bind(&cutoff)
         .execute(pool)
@@ -200,9 +209,12 @@ pub async fn acquire(app: &(impl crate::build_scheduler::BuildSlotLock + crate::
     if (held as usize) < max {
         // 名額空著，但要先看看排在自己前面的人（排除自己那一列）——有更早的號碼牌就不能插隊，
         // 即使這一刻剛好是自己在問、名額也剛好空著。
+        // 只算最近還在 poll 的等待者（#1445）：停止 poll 的隊首不擋後面的人，它的列留到 `STALE_WAITING` 才收。
+        let live_cutoff = cutoff_before(FIFO_LIVE_WAITER);
         let ahead: Option<(String, String)> =
-            sqlx::query_as("SELECT since, holder FROM build_slots WHERE status = 'waiting' AND holder != ? ORDER BY since, holder LIMIT 1")
+            sqlx::query_as("SELECT since, holder FROM build_slots WHERE status = 'waiting' AND holder != ? AND last_seen > ? ORDER BY since, holder LIMIT 1")
                 .bind(holder)
+                .bind(&live_cutoff)
                 .fetch_optional(app.db())
                 .await?;
         let someone_is_ahead = ahead.is_some_and(|(ahead_since, ahead_holder)| (ahead_since.as_str(), ahead_holder.as_str()) < (my_since.as_str(), holder));
