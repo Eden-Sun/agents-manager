@@ -24,6 +24,8 @@ const NO_IMAGES: ShareFile[] = []
 
 /** 推播斷了才輪詢；分頁在背景時放慢。 */
 const POLL_MS = 4000
+/** bot 可能在最後一則回覆後才完成寫檔；只在前景短暫補查 outbox。 */
+const FILE_POLL_AFTER_REPLY_MS = 60_000
 
 /** 選了的檔：一次只傳一個（`active`），其餘排著等；`id` 有了＝傳好了，`error`＝這張沒傳上去（`retry`＝可以再試一次）。 */
 interface Pending {
@@ -159,6 +161,7 @@ export function ShareApp({ client }: { client: ShareClient }) {
   // 放大檢視跟著清單走：開著時檔案換版（bot 修好、重畫），檢視裡要看到新的那一版。清單裡已經沒有這個檔就留著手上的。
   const viewingFile = useMemo(() => (viewing ? (files.find((f) => f.name === viewing.name) ?? viewing) : null), [viewing, files])
   const [poll, setPoll] = useState(false)
+  const [filePollUntil, setFilePollUntil] = useState(0)
   const [hasMore, setHasMore] = useState(false)
   const [loadingOlder, setLoadingOlder] = useState(false)
   const [olderError, setOlderError] = useState<string | null>(null)
@@ -270,6 +273,7 @@ export function ShareApp({ client }: { client: ShareClient }) {
         if (m.role === 'assistant') {
           lastAssistant.current = m.id
           setAwaiting(false)
+          setFilePollUntil(Date.now() + FILE_POLL_AFTER_REPLY_MS)
           void loadFiles()
         }
       },
@@ -310,6 +314,18 @@ export function ShareApp({ client }: { client: ShareClient }) {
     }, POLL_MS)
     return () => clearInterval(id)
   }, [poll, state, load])
+
+  useEffect(() => {
+    if (state !== 'ready' || !filePollUntil) return
+    const id = setInterval(() => {
+      if (Date.now() >= filePollUntil) {
+        clearInterval(id)
+        return
+      }
+      if (document.visibilityState === 'visible') void loadFiles()
+    }, POLL_MS)
+    return () => clearInterval(id)
+  }, [state, filePollUntil, loadFiles])
 
   // SSE 連著時 messages 抓失敗：輪詢沒開，沒有人會再抓。自己隔 POLL_MS 再試，成功（applyPage）就歸零。
   useEffect(() => {

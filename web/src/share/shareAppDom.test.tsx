@@ -782,6 +782,29 @@ test('resync 快照先完成時，較舊的訊息請求不能合回已移除的�
   await runResyncRace('resync-first', true)
 })
 
+test('assistant 回覆後才出現的檔案會在短暫背景輪詢中顯示', { timeout: 15_000 }, async () => {
+  let ev!: ShareEvents
+  let fileCalls = 0
+  const client: ShareClient = {
+    ...clientWith(async () => page([]), (events) => {
+      ev = events
+      return () => {}
+    }),
+    async files() {
+      fileCalls++
+      return fileCalls >= 3 ? [{ name: 'late.txt', size: 4, modified_at: null, version: null }] : []
+    },
+  }
+  await mount(<ShareApp client={client} />)
+  await settle(50)
+  await act(async () => ev.onMessage(msgAt('answer', 'assistant', 1)))
+  await settle(50)
+  assert.equal(fileCalls, 2, '開頁與 assistant 事件各抓一次')
+  await settle(POLL_WAIT + 300)
+  assert.equal(fileCalls, 3, 'assistant 回覆後短暫重抓檔案清單')
+  assert.equal(document.querySelector('.sh-file-name')?.textContent, 'late.txt', '不用新訊息或手動整理也會顯示晚到的檔案')
+})
+
 test('檔案清單重抓重疊時只採用最新開始的回應', async () => {
   const requests: ((files: ShareFile[]) => void)[] = []
   let ev!: ShareEvents
