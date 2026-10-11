@@ -579,7 +579,8 @@
         assert!(!local.exists(), "本機副本也要刪掉");
     }
 
-    /// #1368：開機的 `reconcile_orphans` 也一樣：遠端刪不掉的 staging 列留著，下一次開機再試。
+    /// #1368：開機的 `reconcile_orphans` 也一樣：遠端刪不掉的 staging 列留著，下一輪清掃再試。
+    /// #1414：開機不 ssh，只把遠端的 staging 轉成 failed；ssh 只在清掃那一輪做。
     #[tokio::test]
     async fn reconcile_keeps_a_staging_row_whose_remote_delete_failed() {
         let env = tt::env().await;
@@ -588,12 +589,75 @@
         remote_attachment_row(&env.app, &bot.id, "rrc1", &host, "staging", &db::now()).await;
 
         crate::hosts::set_ssh_fake(&host, |_| Err(anyhow::anyhow!("ssh: connect timed out")));
-        assert_eq!(reconcile_orphans(&env.app).await, 0, "遠端刪不掉：這一次不算清掉");
-        assert_eq!(row_state(&env.app, "rrc1").await.as_deref(), Some("staging"), "row 留著，下次開機再試");
+        assert_eq!(reconcile_orphans(&env.app).await, 0, "開機不清遠端的列：這一次不算清掉");
+        assert_eq!(row_state(&env.app, "rrc1").await.as_deref(), Some("failed"), "row 留著、轉成 failed，交給清掃");
 
         crate::hosts::set_ssh_fake(&host, |_| Ok(String::new()));
-        assert_eq!(reconcile_orphans(&env.app).await, 1, "遠端這次刪成了，才真的刪 row");
+        assert_eq!(sweep_unreferenced(&env.app, 24 * 3600).await, 1, "遠端這次刪成了，才真的刪 row");
         assert_eq!(row_state(&env.app, "rrc1").await, None);
+    }
+
+    /// #1414：開機路徑不碰遠端主機。API 這時還在 503，每列等一次 ssh 逾時（15 秒）會把開機拖住好幾分鐘。
+    /// 遠端的 staging 與 failed 列都只轉成（或保持）failed，交給背景清掃；清掃那一輪 ssh 成功才真的刪。
+    #[tokio::test]
+    async fn reconcile_at_startup_never_sshes_a_remote_host() {
+        let env = tt::env().await;
+        let bot = tt::claude_bot(&env.app, &env.project_id, "remote-startup").await;
+        let host = remote_host(&env.app).await;
+        remote_attachment_row(&env.app, &bot.id, "rs1", &host, "staging", &db::now()).await;
+        remote_attachment_row(&env.app, &bot.id, "rs2", &host, "failed", &db::now()).await;
+
+        let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let counted = calls.clone();
+        crate::hosts::set_ssh_fake(&host, move |_| {
+            counted.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            Err(anyhow::anyhow!("ssh: connect timed out"))
+        });
+        assert_eq!(reconcile_orphans(&env.app).await, 0, "開機不清遠端的列");
+        assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 0, "開機路徑不能 ssh 遠端主機");
+        assert_eq!(row_state(&env.app, "rs1").await.as_deref(), Some("failed"), "staging 轉成 failed 交給清掃");
+        assert_eq!(row_state(&env.app, "rs2").await.as_deref(), Some("failed"));
+
+        let seen = Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
+        let rec = seen.clone();
+        crate::hosts::set_ssh_fake(&host, move |cmd| {
+            rec.lock().unwrap().push(cmd.to_string());
+            Ok(String::new())
+        });
+        assert_eq!(sweep_unreferenced(&env.app, 24 * 3600).await, 2, "清掃那一輪才 ssh，兩列都刪掉");
+        assert_eq!(row_state(&env.app, "rs1").await, None);
+        assert_eq!(row_state(&env.app, "rs2").await, None);
+        let cmds = seen.lock().unwrap().clone();
+        assert!(cmds.iter().any(|c| c.contains("rm -f") && c.contains("/remote/rs1.png")), "{cmds:?}");
+        assert!(cmds.iter().any(|c| c.contains("rm -f") && c.contains("/remote/rs2.png")), "{cmds:?}");
+    }
+
+    /// #1414：同一輪清掃，同一台遠端主機只 ssh 一次：連不上就記下來，這一輪剩下的同機列留著（不再逐列等逾時），別台照常清。
+    #[tokio::test]
+    async fn one_unreachable_host_is_tried_once_per_sweep() {
+        let env = tt::env().await;
+        let bot = tt::claude_bot(&env.app, &env.project_id, "one-try").await;
+        let dead = remote_host(&env.app).await;
+        let alive = remote_host(&env.app).await;
+        for id in ["da1", "da2", "da3"] {
+            remote_attachment_row(&env.app, &bot.id, id, &dead, "failed", &db::now()).await;
+        }
+        remote_attachment_row(&env.app, &bot.id, "ua1", &alive, "failed", &db::now()).await;
+
+        let dead_calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let counted = dead_calls.clone();
+        crate::hosts::set_ssh_fake(&dead, move |_| {
+            counted.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            Err(anyhow::anyhow!("ssh: connect timed out"))
+        });
+        crate::hosts::set_ssh_fake(&alive, |_| Ok(String::new()));
+
+        assert_eq!(sweep_unreferenced(&env.app, 24 * 3600).await, 1, "只有活的那台的那列清掉");
+        assert_eq!(dead_calls.load(std::sync::atomic::Ordering::SeqCst), 1, "連不上的主機同一輪只 ssh 一次");
+        for id in ["da1", "da2", "da3"] {
+            assert_eq!(row_state(&env.app, id).await.as_deref(), Some("failed"), "{id} 留著");
+        }
+        assert_eq!(row_state(&env.app, "ua1").await, None);
     }
 
     /// #1368 的對照：主機已經不在設定裡（無從 ssh）的列，照舊一次就刪掉，不會卡住。
