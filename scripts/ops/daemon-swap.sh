@@ -441,7 +441,7 @@ log "rollback binary $BAK verified ($OLDHASH)"
 EXP_UV=$("$PYTHON" - "$CHECKOUT/crates/am-base/src/db.rs" <<'PY'
 import re, sys
 src = open(sys.argv[1]).read()
-m = re.search(r"SCHEMA_HISTORY[^=]*=\s*&?\s*\[(.*?)\];", src, re.S)
+m = re.search(r"SCHEMA_HISTORY[^=]*=\s*&?\s*\[(.*?)^\];", src, re.S | re.M)  # 結尾只認單獨成行的 `];`（#1459）
 print(max(int(n) for n in re.findall(r"\(\s*(\d+)\s*,", m.group(1))) if m else "")
 PY
 )
