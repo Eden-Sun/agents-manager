@@ -1,15 +1,21 @@
 //! ops 腳本直接對 daemon 的 DB 下的 SQL，要能在真 schema 上編譯（#1458，#1391 同型的守門）。
 //! 抽不到 SQL 就 panic：腳本改寫法時這支要紅，不能靜靜變成 0 句。
+//!
+//! 腳本在測試執行時從 repo 讀，不用 `include_str!`：契約測試只需要在測試裡拿到 SQL，
+//! 不該把腳本編進正式二進位（那會讓 `persona` 的 BUILD_INPUTS 守門要求把 scripts/ops 也列進重建條件）。
 
 use crate::{db, testing as tt};
 use sqlx::Row;
 
-const OUTBOX_GC: &str = include_str!("../../scripts/ops/outbox-gc.sh");
-const HERDR_UPGRADE: &str = include_str!("../../scripts/ops/herdr-upgrade.sh");
+/// repo 內的腳本（相對於 repo 根）；`CARGO_MANIFEST_DIR` 是 `daemon/`，它的上一層就是 repo 根。
+fn read_script(rel: &str) -> String {
+    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("..");
+    std::fs::read_to_string(root.join(rel)).unwrap_or_else(|e| panic!("讀不到 {rel}：{e}"))
+}
 
 /// `outbox-gc.sh` 的分享名單查詢：唯一一行以 `SHARE_SQL="` 開頭，取兩個雙引號之間的字。
-fn share_sql() -> String {
-    let line = OUTBOX_GC
+fn share_sql(script: &str) -> String {
+    let line = script
         .lines()
         .find(|l| l.starts_with("SHARE_SQL=\""))
         .expect("outbox-gc.sh 沒有 SHARE_SQL=\"…\" 這一行（改寫法了？）");
@@ -19,11 +25,11 @@ fn share_sql() -> String {
 }
 
 /// `herdr-upgrade.sh` 裡 `read_running_snapshot` 與升級後比對的兩句：從 `"SELECT b.id, b.name` 到 `ORDER BY b.name"`。
-fn herdr_sqls() -> Vec<String> {
+fn herdr_sqls(script: &str) -> Vec<String> {
     const START: &str = "\"SELECT b.id, b.name";
     const END: &str = "ORDER BY b.name";
     let mut out = Vec::new();
-    let mut rest = HERDR_UPGRADE;
+    let mut rest = script;
     while let Some(start) = rest.find(START) {
         let after = &rest[start + 1..];
         let end = after.find(&format!("{END}\"")).expect("herdr-upgrade.sh 的 SQL 沒有以 ORDER BY b.name\" 結束");
@@ -37,8 +43,10 @@ fn herdr_sqls() -> Vec<String> {
 #[tokio::test]
 async fn every_ops_sql_statement_compiles_against_the_real_schema() {
     let e = tt::env().await;
-    let mut stmts = vec![("outbox-gc.sh", share_sql())];
-    stmts.extend(herdr_sqls().into_iter().map(|s| ("herdr-upgrade.sh", s)));
+    let gc = read_script("scripts/ops/outbox-gc.sh");
+    let upgrade = read_script("scripts/ops/herdr-upgrade.sh");
+    let mut stmts = vec![("outbox-gc.sh", share_sql(&gc))];
+    stmts.extend(herdr_sqls(&upgrade).into_iter().map(|s| ("herdr-upgrade.sh", s)));
     assert_eq!(stmts.len(), 3, "抽出來的句數要是 1（outbox-gc）+ 2（herdr-upgrade）");
     for (script, sql) in stmts {
         if let Err(err) = sqlx::query(&format!("EXPLAIN {sql}")).fetch_all(&e.app.db).await {
@@ -64,7 +72,7 @@ async fn the_share_list_query_returns_only_live_shared_bots() {
         .execute(&app.db)
         .await
         .unwrap();
-    let sql = share_sql();
+    let sql = share_sql(&read_script("scripts/ops/outbox-gc.sh"));
     let ids: Vec<String> = sqlx::query_scalar::<_, String>(&sql).fetch_all(&app.db).await.unwrap();
     assert_eq!(ids, vec![live.id.clone()], "只有沒刪的分享 bot 在名單上");
 }
@@ -83,7 +91,7 @@ async fn the_running_snapshot_marks_a_bot_with_an_in_flight_turn() {
         .execute(&app.db)
         .await
         .unwrap();
-    let sql = herdr_sqls().remove(0);
+    let sql = herdr_sqls(&read_script("scripts/ops/herdr-upgrade.sh")).remove(0);
     let rows = sqlx::query(&sql).fetch_all(&app.db).await.unwrap();
     let row = rows
         .iter()
