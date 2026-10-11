@@ -605,6 +605,27 @@
         assert_eq!(marks, 1, "清理記號沒有被忘掉");
     }
 
+    /// #1462：名單讀完後移交專案，bot 鎖內必須重查；不能替接手方還原遠端目錄。
+    #[tokio::test]
+    async fn a_project_handed_off_after_the_restore_list_is_not_restored() {
+        let (env, root) = remote("trashbox-handoff-late").await;
+        let app = env.app.clone();
+        let bot = tt::claude_bot(&app, &env.project_id, "alfa").await;
+        let trash = root.join("bots-trash");
+        let backup = trash.join(format!("{}.{}", bot.id, now_ms()));
+        std::fs::create_dir_all(&backup).unwrap();
+        std::fs::write(backup.join("keep.txt"), "mine").unwrap();
+        let (app2, project_id) = (app.clone(), env.project_id.clone());
+        crate::runners::app_ports_p11::race_point::arm("remote_restore_after_list", "trashbox-handoff-late", move || async move {
+            sqlx::query("UPDATE projects SET handed_off_to='mac' WHERE id=?").bind(project_id).execute(&app2.db).await.unwrap();
+        });
+
+        crate::runners::remote_trash::gc_host(&app, "trashbox-handoff-late").await;
+
+        assert!(!root.join("bots").join(&bot.id).exists(), "名單後移交：不還原 bots/");
+        assert_eq!(std::fs::read_to_string(backup.join("keep.txt")).unwrap(), "mine", "移交方的回收區備份保留");
+    }
+
     /// **#1405**：這顆鎖正被別的路握著（刪除、啟動）：這一輪跳過，不還原、也不忘掉記號；放開鎖之後的下一輪才還原。
     #[tokio::test]
     async fn a_bot_whose_lock_is_busy_is_skipped_this_round() {
