@@ -8336,6 +8336,29 @@ mod delete_bot_tests {
         assert!(!lifecycle::restart_hold::in_progress(&bot.id), "restart_hold 放掉了");
     }
 
+    /// #1356：start 的 handler 在 agent 起來、`running` 還沒記的那一瞬被 drop：啟動照樣做完，run 收成 running。
+    #[tokio::test]
+    async fn a_start_whose_handler_is_dropped_while_the_agent_comes_up_still_records_running() {
+        let e = crate::testing::env().await;
+        let bot = crate::testing::claude_bot(&e.app, &e.project_id, "start-drop").await;
+        let reached = Arc::new(tokio::sync::Notify::new());
+        let release = Arc::new(tokio::sync::Notify::new());
+        let (r2, go) = (reached.clone(), release.clone());
+        crate::lifecycle::race_point::arm("start_before_running", &bot.id, move || async move {
+            r2.notify_one();
+            go.notified().await;
+        });
+        let (app, id) = (e.app.clone(), bot.id.clone());
+        let h = tokio::spawn(async move { start_bot(State(app), Path(id), Query(Default::default())).await.map(|_| ()) });
+        reached.notified().await;
+        h.abort(); // 瀏覽器斷線：handler future 被 drop（脫離出去的工作不受影響）
+        let _ = h.await;
+        release.notify_one();
+        work_done_for_test(&bot.id).notified().await;
+        let run = db::active_run(&e.app.db, &bot.id).await.unwrap().expect("啟動做完：有 active run");
+        assert_eq!(run.state, "running", "agent 已經起來了，run 不能停在 starting");
+    }
+
     /// 補不成（child 的軟刪一直寫不進去）：最多試 MAX_ATTEMPTS 次，failed＋AGM inbox。
     #[tokio::test]
     async fn a_delete_that_can_never_be_completed_gives_up_and_tells_agm() {
