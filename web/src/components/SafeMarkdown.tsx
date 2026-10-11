@@ -7,10 +7,17 @@ const CachedMarkdown = lazy(() => import('./SafeMarkdownContent'))
  * 轉換丟例外（巢狀太深爆 stack）時退回純文字：整個 app 沒有 error boundary，沒接住的話
  * 一則 `> > > …` 的訊息會讓整個畫面白掉，而且訊息在歷史裡，重新整理還是白。
  */
-export class MarkdownBoundary extends Component<{ plain: ReactNode; children: ReactNode; onError?: () => void }, { failed: boolean }> {
+export class MarkdownBoundary extends Component<
+  { plain: ReactNode; children: ReactNode; onError?: () => void; resetKey?: unknown },
+  { failed: boolean }
+> {
   state = { failed: false }
   static getDerivedStateFromError() {
     return { failed: true }
+  }
+  // 文字換了就重試一次（#1236）：不用 `key` 重掛，串流中的圖片與選取範圍才不會被卸掉。
+  componentDidUpdate(prev: Readonly<{ resetKey?: unknown }>) {
+    if (this.state.failed && prev.resetKey !== this.props.resetKey) this.setState({ failed: false })
   }
   componentDidCatch() {
     this.props.onError?.()
@@ -51,7 +58,7 @@ export function SafeMarkdown({ text, botId, cache = true }: { text: string; botI
   return (
     <Fragment key={botId ?? ''}>
       <MarkdownBoundary
-        key={text}
+        resetKey={text}
         plain={plain(<p className="md-plain-note">這則訊息的格式太複雜，無法轉成 Markdown，以純文字顯示。</p>)}
         onError={shouldCache ? () => {
           // Keep the fallback shell free of react-markdown. In the render-error case this module
