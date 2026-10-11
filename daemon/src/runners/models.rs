@@ -204,19 +204,26 @@ mod tests {
             sh_quote(&fake.to_string_lossy()),
             sh_quote(&pidfile.to_string_lossy())
         );
-        let started = Instant::now();
-        let err = resolve_local_exe_with("codex", Duration::from_millis(200), &prefix).await.unwrap_err();
-        assert!(err.to_string().contains("timed out"), "{err}");
-        assert!(started.elapsed() < Duration::from_secs(10), "逾時要照時限回來");
-        let pid = std::fs::read_to_string(&pidfile).expect("假 shell 有跑到").trim().to_string();
-        let mut dead = false;
-        for _ in 0..40 {
-            if !alive(&pid) {
-                dead = true;
-                break;
+        // 200ms 內要 fork/exec 兩層 shell 再寫一次檔；整樹平行忙的時候不一定來得及。沒寫到就用更長的時限重來，
+        // 寫到了才往下驗（正常機器第一輪就過）。時限照時限回來、卡住的 shell 被收掉，這兩件事每一輪都驗。
+        let mut pid = None;
+        for timeout_ms in [200u64, 1_000, 5_000, 20_000] {
+            let _ = std::fs::remove_file(&pidfile);
+            let started = Instant::now();
+            let err = resolve_local_exe_with("codex", Duration::from_millis(timeout_ms), &prefix).await.unwrap_err();
+            assert!(err.to_string().contains("timed out"), "{err}");
+            assert!(started.elapsed() < Duration::from_millis(timeout_ms) + Duration::from_secs(10), "逾時要照時限回來");
+            if let Ok(p) = std::fs::read_to_string(&pidfile) {
+                // 假 shell 寫檔與逾時砍它可能同時發生：只收完整的一行數字。
+                if p.ends_with('\n') && p.trim().parse::<u32>().is_ok() {
+                    pid = Some(p.trim().to_string());
+                    break;
+                }
             }
-            tokio::time::sleep(Duration::from_millis(50)).await;
         }
+        let pid = pid.expect("四輪（最長 20 秒）假 shell 都沒跑到寫 pid 檔");
+        // 被 SIGKILL 的行程要等排程器輪到才真的消失，2 秒在忙的機器上不夠。
+        let dead = crate::testing::eventually!(!alive(&pid));
         let _ = std::fs::remove_dir_all(&dir);
         assert!(dead, "逾時後卡住的 login shell（pid {pid}）要被收掉");
     }
