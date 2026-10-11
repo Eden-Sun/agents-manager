@@ -1211,7 +1211,7 @@ for idx, rel in enumerate(rels):
                     sys.stdout.buffer.write(content)
                     sys.stdout.buffer.write(b"\n")
                 else:
-                    prefix = "%d\tERR\tnot_found" % idx
+                    prefix = "%d\tERR\tchanged" % idx
                     b_prefix = prefix.encode("utf-8")
                     sys.stdout.buffer.write(("PHOTO %d\n%s\n" % (len(b_prefix), prefix)).encode("utf-8"))
         finally:
@@ -1281,12 +1281,12 @@ pub fn parse_photo_fetch(
                 results[idx] = Ok(body_bytes.to_vec());
             }
         } else {
-            let reason = it.next().unwrap_or("not_found");
-            if reason == "source_too_large" {
-                results[idx] = Err("source_too_large");
-            } else {
-                results[idx] = Err("not_found");
-            }
+            // `changed`：讀的途中檔案被改（長度對不上）。不是永久的 not_found，不能負快取（#1434）。
+            results[idx] = match it.next().unwrap_or("not_found") {
+                "source_too_large" => Err("source_too_large"),
+                "changed" => Err("read_failed"),
+                _ => Err("not_found"),
+            };
         }
     }
     Ok(results)
