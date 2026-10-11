@@ -918,6 +918,17 @@ async fn remote_photo_fd_bound_traversal_prevents_symlink_swap_and_hardlink() {
     assert_eq!(fetched[4], Err("not_found"), "絕不讀取 hardlink");
 }
 
+/// #1434：腳本對「長度對不上」（讀的途中被改）回 `changed`，不是永久的 `not_found`：解析要分開，才能不快取它。
+#[test]
+fn a_photo_that_changed_while_reading_is_not_a_permanent_not_found() {
+    let prefix = "0\tERR\tchanged";
+    let out = format!("PHOTO {}\n{}\n", prefix.len(), prefix);
+    let rels = vec![vec!["inbox".to_string(), "a.jpg".to_string()]];
+    let got = parse_photo_fetch(out.as_bytes(), &rels, 1 << 20, 1 << 20).unwrap();
+    assert_eq!(got, vec![Err("read_failed")], "讀的途中被改：不是永久的 not_found");
+}
+
+#[test]
 #[test]
 fn parse_photo_stats_subsecond_gnu_and_bsd_formats() {
     // 1. 純整數奈秒
