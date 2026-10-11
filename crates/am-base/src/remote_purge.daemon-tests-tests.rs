@@ -233,4 +233,94 @@ async fn a_permanently_failing_head_of_line_does_not_starve_the_rest() {
     assert_eq!(crate::runners::remote_purge::sweep_due(&app, &r.host).await, (0, 100), "第一輪：前 100 顆都失敗、欠著");
     assert_eq!(crate::runners::remote_purge::sweep_due(&app, &r.host).await, (1, 0), "第二輪：失敗的還在退避，第 101 顆要排得到、清掉");
     assert_eq!(r.removed(&lone), 1, "第 101 顆的目錄被搬進回收區");
+
+/// **#1320**：專案搬到別台之後，舊主機上還欠著的已刪 bot 仍然屬於舊主機（義務寫在 DB 裡，不靠 `projects.host`）。
+#[tokio::test]
+async fn an_owed_bot_stays_owed_to_its_old_host_after_its_project_moves() {
+    let r = remote("purgehost-move-a").await;
+    let new_host = "zz-purgehost-move-b";
+    let _ = second_remote_project(&r, new_host).await;
+    let app = r.env.app.clone();
+    let id = r.deleted_bot("alfa").await;
+    // 刪除的時候專案還在舊主機；之後搬到新主機，舊主機離線、從來沒 purge 過。
+    sqlx::query("UPDATE projects SET host = ? WHERE id = ?").bind(new_host).bind(&r.env.project_id).execute(&app.db).await.unwrap();
+    let row = r.row(&id).await.expect("搬家時舊主機的義務要寫進 DB");
+    assert!(row.0.is_none() && row.1 == 0, "欠著、還沒試過");
+    assert!(crate::remote_purge::pending(&app.db, &r.host).await.unwrap().contains(&id), "舊主機還欠著它");
+    assert!(!crate::remote_purge::pending(&app.db, new_host).await.unwrap().contains(&id), "新主機不碰舊主機的債");
+    assert_eq!(sweep(&app, new_host).await, (0, 0), "新主機的掃描不搬它");
+    assert_eq!(r.removed(&id), 0);
+    assert_eq!(sweep(&app, &r.host).await, (1, 0), "舊主機連回來就清掉");
+    assert_eq!(r.removed(&id), 1);
+}
+
+/// #1320：搬來搬去不重複寫、不把已清掉的記號改回欠著；新主機成功清掉不算舊主機的債。
+#[tokio::test]
+async fn moving_a_project_back_and_forth_neither_duplicates_nor_resets_the_debt() {
+    let r = remote("purgehost-move-c").await;
+    let other = "zz-purgehost-move-d";
+    let _ = second_remote_project(&r, other).await;
+    let app = r.env.app.clone();
+    // done：在舊主機清掉（有已清記號）；owed：還欠著。
+    let done = r.deleted_bot("done").await;
+    assert_eq!(sweep(&app, &r.host).await, (1, 0));
+    let owed = r.deleted_bot("owed").await;
+    r.fail.store(true, std::sync::atomic::Ordering::SeqCst);
+    assert_eq!(sweep(&app, &r.host).await, (0, 1), "owed 失敗、欠著");
+    r.fail.store(false, std::sync::atomic::Ordering::SeqCst);
+    for host in [other, r.host.as_str(), other, r.host.as_str(), other] {
+        sqlx::query("UPDATE projects SET host = ? WHERE id = ?").bind(host).bind(&r.env.project_id).execute(&app.db).await.unwrap();
+    }
+    let rows = |id: String| {
+        let app = app.clone();
+        async move {
+            sqlx::query_as::<_, (String, Option<String>)>("SELECT host, purged_at FROM remote_bot_dir_purges WHERE bot_id = ?")
+                .bind(id)
+                .fetch_all(&app.db)
+                .await
+                .unwrap()
+        }
+    };
+    let owed_rows = rows(owed.clone()).await;
+    assert_eq!(owed_rows.len(), 1, "不重複寫");
+    assert_eq!((owed_rows[0].0.as_str(), owed_rows[0].1.is_none()), (r.host.as_str(), true), "義務還在最初的舊主機上");
+    let done_rows = rows(done).await;
+    assert_eq!(done_rows.len(), 1);
+    assert!(done_rows[0].1.is_some() && done_rows[0].0 == r.host, "已清掉的記號不被搬家改回欠著");
+    // 新主機成功清掉它，不能沖掉舊主機的債。
+    crate::remote_purge::record(&app, &owed, other, true, None).await;
+    assert!(r.row(&owed).await.unwrap().0.is_none(), "新主機的成功不算舊主機的債");
+}
+
+/// #1320：專案被刪除時，已刪的 bot 欠債記在它當下的主機。
+#[tokio::test]
+async fn deleting_a_project_owes_its_deleted_bots_to_the_host_they_were_on() {
+    let r = remote("purgehost-del-e").await;
+    let app = r.env.app.clone();
+    let id = r.deleted_bot("alfa").await;
+    assert!(r.row(&id).await.is_none(), "前提：還沒有記號");
+    sqlx::query("UPDATE projects SET deleted_at = ? WHERE id = ?").bind(crate::db::now()).bind(&r.env.project_id).execute(&app.db).await.unwrap();
+    let row: (String, Option<String>) = sqlx::query_as("SELECT host, purged_at FROM remote_bot_dir_purges WHERE bot_id = ?").bind(&id).fetch_one(&app.db).await.unwrap();
+    assert_eq!(row, (r.host.clone(), None));
+}
+
+/// #1320：舊資料庫（trigger 還不存在）migrate 之後 trigger 就在；重跑不會重複或壞掉。
+#[tokio::test]
+async fn an_old_database_gets_the_owed_triggers_on_migrate() {
+    let env = tt::env().await;
+    let app = env.app.clone();
+    let names = || async {
+        let v: Vec<String> = sqlx::query_scalar("SELECT name FROM sqlite_master WHERE type = 'trigger' AND name LIKE 'remote_bot_dir_purge_owed%' ORDER BY name")
+            .fetch_all(&app.db)
+            .await
+            .unwrap();
+        v
+    };
+    for t in ["remote_bot_dir_purge_owed_on_host_move", "remote_bot_dir_purge_owed_on_project_delete"] {
+        sqlx::query(&format!("DROP TRIGGER IF EXISTS {t}")).execute(&app.db).await.unwrap();
+    }
+    assert!(names().await.is_empty(), "前提：舊庫沒有這兩個 trigger");
+    crate::remote_purge::migrate(&app.db).await.unwrap();
+    crate::remote_purge::migrate(&app.db).await.unwrap();
+    assert_eq!(names().await, vec!["remote_bot_dir_purge_owed_on_host_move".to_string(), "remote_bot_dir_purge_owed_on_project_delete".to_string()]);
 }

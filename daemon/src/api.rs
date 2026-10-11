@@ -4029,6 +4029,38 @@ mod identity_auth_error_tests {
         );
     }
 
+    /// #1320：專案搬到別台之後，舊主機上還欠著清理的已刪 bot 仍是那台主機的刪除條件（不能因為 `projects.host` 已經不是它就漏掉）。
+    #[tokio::test]
+    async fn a_deleted_bot_owed_on_the_old_host_still_blocks_that_host_after_its_project_moved() {
+        let e = crate::testing::env().await;
+        let app = e.app.clone();
+        let (old, new) = ("zz92-moved-old", "zz92-moved-new");
+        app.cfg
+            .update(|f| {
+                for name in [old, new] {
+                    f.hosts.push(HostCfg {
+                        shared_session: false,
+                        name: name.into(),
+                        ssh: "unused-test-host".into(),
+                        ssh_port: 22,
+                        ssh_opts: vec![],
+                        herdr_session: "agents-manager".into(),
+                        remote_path: String::new(),
+                    });
+                }
+                Ok(())
+            })
+            .await
+            .unwrap();
+        sqlx::query("UPDATE projects SET host = ? WHERE id = ?").bind(old).bind(&e.project_id).execute(&app.db).await.unwrap();
+        let bot = crate::testing::claude_bot(&app, &e.project_id, "deleted-then-moved").await;
+        sqlx::query("UPDATE bots SET deleted_at = ? WHERE id = ?").bind(crate::db::now()).bind(&bot.id).execute(&app.db).await.unwrap();
+        sqlx::query("UPDATE projects SET host = ? WHERE id = ?").bind(new).bind(&e.project_id).execute(&app.db).await.unwrap();
+
+        assert!(host_bots_requiring_attention(&app, old).await.unwrap().contains(&bot.id), "舊主機還欠著它的目錄，不能拿掉");
+        assert!(!host_bots_requiring_attention(&app, new).await.unwrap().contains(&bot.id), "新主機不因為它被擋");
+    }
+
     #[tokio::test]
     async fn xreview_deleting_a_host_is_refused_for_a_live_orphan_bot_in_a_deleted_project() {
         let e = crate::testing::env().await;
