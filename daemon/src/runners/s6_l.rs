@@ -812,7 +812,7 @@ impl s6_ports::RelayWatchServices for App {
     fn spawn_relay_watch(&self, watch: crate::lifecycle::relay_watch::Watch) {
         let tracker = self.background_tasks.clone();
         let app = self.shared();
-        tracker.spawn(async move {
+        crate::background_loop::spawn_named(&tracker, "relay watch", async move {
             let mut watch = watch;
             loop {
                 tokio::select! {

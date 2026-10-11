@@ -97,7 +97,7 @@ where
     }
     let shutdown = app.shutdown().clone();
     let tasks = app.background_tasks().clone();
-    tasks.spawn(async move {
+    crate::background_loop::spawn_named(&tasks, "judge task", async move {
         let _guard = guard;
         tokio::select! {
             _ = shutdown.cancelled() => {}

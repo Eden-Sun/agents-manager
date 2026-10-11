@@ -13,7 +13,7 @@ pub fn spawn_detect_host(app: Arc<App>, host: String) {
         return;
     }
     let tracker = app.background_tasks.clone();
-    tracker.spawn(async move {
+    crate::background_loop::spawn_named(&tracker, "github host detect", async move {
         loop {
             crate::github::detect_host_once(&app, &host).await;
             if !claim.finish() {

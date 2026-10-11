@@ -29,7 +29,7 @@ pub(crate) fn spawn_revive(app: &Arc<App>, host: &str, lost: Vec<Lost>) {
     let (app, host) = (app.clone(), host.to_string());
     // 掛在 background_tasks 下：優雅關機的 `wait()` 會等它做完，不會在啟動做到一半時行程結束（#1372）。
     let tracker = app.background_tasks.clone();
-    tracker.spawn(async move {
+    crate::background_loop::spawn_named(&tracker, "autostart revive", async move {
         revive(&app, &host, lost).await;
         let mut map = pending().lock().unwrap_or_else(|e| e.into_inner());
         if let Some(n) = map.get_mut(&key) {

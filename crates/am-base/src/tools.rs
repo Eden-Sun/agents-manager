@@ -1058,7 +1058,7 @@ pub fn spawn_detect<H: ToolsEnv>(app: Arc<H>, host: String) {
         return;
     }
     let tracker = crate::capabilities::BgTasks::background_tasks(&*app).clone();
-    tracker.spawn(async move {
+    crate::background_loop::spawn_named(&tracker, "tools detect", async move {
         let Some(fence) = app.hosts().fence(&host).await else { return };
         match detect_with_fence(&app, &host, &fence).await {
             Ok(_) => {

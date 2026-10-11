@@ -89,7 +89,7 @@ pub fn spawn_sweep(app: Arc<App>, host: String) {
         return;
     }
     let tracker = app.background_tasks.clone();
-    tracker.spawn(async move {
+    crate::background_loop::spawn_named(&tracker, "remote purge sweep", async move {
         sweep(&app, &host).await;
     });
 }

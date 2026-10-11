@@ -28,7 +28,7 @@ pub fn spawn_tighten<H: HostsAccess + HostInstance + crate::capabilities::BgTask
         return;
     }
     let tracker = crate::capabilities::BgTasks::background_tasks(&*app).clone();
-    tracker.spawn(async move {
+    crate::background_loop::spawn_named(&tracker, "remote perms tighten", async move {
         run_once(&app, &host).await;
     });
 }

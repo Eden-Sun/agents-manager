@@ -315,7 +315,7 @@ pub async fn serve(config_path: Option<PathBuf>, dev_watch_all_panes: bool) -> R
     {
         // 遠端保留標記一顆一趟 ssh，慢的主機要好幾分鐘：不擋 signal handler 與巡邏。關機時跟著取消（#1286）。
         let app2 = app.clone();
-        app.background_tasks.spawn(async move {
+        crate::background_loop::spawn_named(&app.background_tasks, "share outbox keeper", async move {
             tokio::select! {
                 _ = app2.shutdown.cancelled() => {}
                 _ = share::keep_share_outboxes(&app2) => {}
@@ -328,10 +328,17 @@ pub async fn serve(config_path: Option<PathBuf>, dev_watch_all_panes: bool) -> R
     Ok(())
 }
 
+/// 關機時等被追蹤的背景工作的上限（#1463）。會卡住的（等 bot 鎖、遠端 ssh）逾時就放棄，記下名字、繼續關機，
+/// 不靠 systemd 的 TimeoutStopSec 強殺。被放棄的工作都能安全中斷：下次開機由 reconcile 與 spool 補齊（SPEC §6.1、§4.4）。
+const BACKGROUND_SHUTDOWN_WAIT: std::time::Duration = std::time::Duration::from_secs(30);
+
 async fn finish_serve<E>(app: &Arc<state::App>, serve_result: Result<(), E>) -> Result<(), E> {
     app.shutdown.cancel();
     app.background_tasks.close();
-    app.background_tasks.wait().await;
+    if tokio::time::timeout(BACKGROUND_SHUTDOWN_WAIT, app.background_tasks.wait()).await.is_err() {
+        let left = crate::background_loop::unfinished_names();
+        tracing::warn!(?left, "shutdown: background tasks still running after the wait limit; giving up on them and continuing");
+    }
     app.hosts.shutdown().await;
     serve_result
 }
@@ -429,6 +436,18 @@ mod tests {
 
         finish_serve(&app, Ok::<(), std::io::Error>(())).await.unwrap();
         assert!(done.load(std::sync::atomic::Ordering::SeqCst), "上限內結束的任務要跑完，不能被截斷");
+    }
+
+    /// #1463：關機放棄的工作要記得名字。逾時 log 用的是同一份名單（`unfinished_names`）。
+    #[tokio::test]
+    async fn a_background_task_given_up_at_shutdown_is_named_in_the_list_the_log_uses() {
+        let env = crate::testing::env().await;
+        let app = env.app.clone();
+        tokio::time::pause();
+        crate::background_loop::spawn_named(&app.background_tasks, "finish-serve-test-stuck", std::future::pending::<()>());
+
+        finish_serve(&app, Ok::<(), std::io::Error>(())).await.unwrap();
+        assert!(crate::background_loop::unfinished_names().contains(&"finish-serve-test-stuck"), "放棄的工作要列得出名字");
     }
 
     /// issue #512：新建的 ui-token 一開始就要是 0600（不留 `write` 與 `chmod` 之間那段 0644 的窗口），
