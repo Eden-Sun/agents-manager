@@ -4663,7 +4663,7 @@ AGM 是使用者唯一的手機入口，但 `--remote-control AGM` 只是 argv �
    `review fail`／`cancel` 那件，`next` 會是同一個角色再派（`retry_of`），不算一輪。
 5. **交付**：`mission deliver --worktree <執行者 worktree>`。工作樹必須是這個專案的 repo，**HEAD 必須就是最新一則 `verified` 記的 commit**。
    409 `not_verified`／`verified_without_sha`／`verification_stale`／`head_not_verified` 代表流程漏了第 4 步（或驗完又改過、又退回過），任務**不會**停下來，回第 4 步重驗這個 commit；
-   其餘 409 任務已 `paused`（`push_main_failed`／`pr_failed`，`reason` 是機器碼），在群組貼原因問人。**不 force 推 main**。PR 模式可以派執行者 rebase 後再交付：daemon 只在遠端任務分支的 tip 是這次改寫掉的舊 commit 時，用 `--force-with-lease` 綁那個 sha 更新 `mission/<id>`；`branch_moved`（遠端有對不上的 commit）不覆蓋。
+   其餘 409 任務已 `paused`（`push_main_failed`／`pr_failed`，`reason` 是機器碼），在群組貼原因問人。**不 force 推 main**。第一次交付就 `nothing_to_deliver`（沒有新 commit 要交）的 commit 會被作廢，重試時仍是 `nothing_to_deliver`，不會因為「試過」就報成已交付（#1388）。PR 模式可以派執行者 rebase 後再交付：daemon 只在遠端任務分支的 tip 是這次改寫掉的舊 commit 時，用 `--force-with-lease` 綁那個 sha 更新 `mission/<id>`；`branch_moved`（遠端有對不上的 commit）不覆蓋。
    執行 git 時固定 `LC_ALL=C`，讓用來判斷缺少遠端分支或 lease 過期的錯誤訊息不受 daemon 啟動時的語系影響。
    之後交付成功，daemon 會自動解除這兩種暫停（記一則 `resumed`）。
    交付含 daemon／agm.py／persona 改動時，正式 daemon 照 §18.2 例行更新，不另開重啟。
