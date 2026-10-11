@@ -122,6 +122,141 @@
         assert_eq!(reads.load(Ordering::SeqCst), 1);
     }
 
+    async fn child_identity_db_write_fixture(
+        name: &str,
+    ) -> (crate::testing::Env, crate::db::Bot, String, String) {
+        let env = crate::testing::env().await;
+        let app = env.app.clone();
+        let host = format!("identity-db-{name}-{}", crate::db::ulid().to_ascii_lowercase());
+        let conn = app.hosts.insert_remote_for_test(crate::config::HostCfg {
+            shared_session: false,
+            name: host.clone(),
+            ssh: "unused".into(),
+            ssh_port: 22,
+            ssh_opts: vec![],
+            herdr_session: "agents-manager".into(),
+            remote_path: String::new(),
+        }).await;
+        *conn.remote_home.lock().await = Some("/home/remote-child".into());
+        let bot = crate::testing::claude_bot(&app, &env.project_id, name).await;
+        sqlx::query("UPDATE bots SET managed_by='child', identity='cc1' WHERE id=?")
+            .bind(&bot.id)
+            .execute(&app.db)
+            .await
+            .unwrap();
+        let bot = crate::db::bot(&app.db, &bot.id).await.unwrap().unwrap();
+        app.cfg.update(|cfg| {
+            cfg.identities = vec![
+                idn("cc1", "claude", Some("~/.claude-cc1")),
+                idn("cc2", "claude", Some("~/.claude-cc2")),
+            ]
+            .into_iter()
+            .map(|mut identity| {
+                identity.host = Some(host.clone());
+                identity
+            })
+            .collect();
+            Ok(())
+        }).await.unwrap();
+        app.proc_env.set(Arc::new(FixedProcEnv {
+            reads: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+            env: [("CLAUDE_CONFIG_DIR".into(), "/home/remote-child/.claude-cc2".into())].into(),
+        }));
+        let pane_id = format!("w1:{name}");
+        sqlx::query("INSERT INTO runs (id, bot_id, state, agent_status, pane_id, started_at) VALUES (?,?,'running','idle',?,?)")
+            .bind(crate::db::ulid())
+            .bind(&bot.id)
+            .bind(&pane_id)
+            .bind(crate::db::now())
+            .execute(&app.db)
+            .await
+            .unwrap();
+        (env, bot, host, pane_id)
+    }
+
+    #[tokio::test]
+    async fn a_failed_run_identity_write_is_retried_without_restarting_the_child() {
+        let (env, bot, host, pane_id) = child_identity_db_write_fixture("run-write").await;
+        let app = env.app.clone();
+        let trigger = format!("fail_run_identity_{}", bot.id.to_ascii_lowercase());
+        sqlx::query(&format!(
+            "CREATE TRIGGER {trigger} BEFORE UPDATE OF runtime_identity ON runs
+             WHEN OLD.bot_id = '{}' BEGIN SELECT RAISE(ABORT, 'injected run identity failure'); END",
+            bot.id
+        ))
+        .execute(&app.db)
+        .await
+        .unwrap();
+
+        sync_child_identity(&app, &host, &bot, &pane_id, Some(901)).await;
+
+        assert!(probe_due(&bot.id, &pane_id), "a failed run write must remain retryable");
+        assert_eq!(crate::db::bot(&app.db, &bot.id).await.unwrap().unwrap().identity.as_deref(), Some("cc1"));
+        let runtime_identity: Option<String> = sqlx::query_scalar("SELECT runtime_identity FROM runs WHERE bot_id=? AND pane_id=?")
+            .bind(&bot.id)
+            .bind(&pane_id)
+            .fetch_one(&app.db)
+            .await
+            .unwrap();
+        assert_eq!(runtime_identity, None);
+
+        sqlx::query(&format!("DROP TRIGGER {trigger}")).execute(&app.db).await.unwrap();
+        sync_child_identity(&app, &host, &bot, &pane_id, Some(901)).await;
+
+        assert_eq!(crate::db::bot(&app.db, &bot.id).await.unwrap().unwrap().identity.as_deref(), Some("cc2"));
+        let runtime_identity: Option<String> = sqlx::query_scalar("SELECT runtime_identity FROM runs WHERE bot_id=? AND pane_id=?")
+            .bind(&bot.id)
+            .bind(&pane_id)
+            .fetch_one(&app.db)
+            .await
+            .unwrap();
+        assert_eq!(runtime_identity.as_deref(), Some("cc2"));
+        assert!(!probe_due(&bot.id, &pane_id));
+    }
+
+    #[tokio::test]
+    async fn a_failed_bot_identity_write_is_retried_without_restarting_the_child() {
+        let (env, bot, host, pane_id) = child_identity_db_write_fixture("bot-write").await;
+        let app = env.app.clone();
+        let trigger = format!("fail_bot_identity_{}", bot.id.to_ascii_lowercase());
+        sqlx::query(&format!(
+            "CREATE TRIGGER {trigger} BEFORE UPDATE OF identity ON bots
+             WHEN OLD.id = '{}' BEGIN SELECT RAISE(ABORT, 'injected bot identity failure'); END",
+            bot.id
+        ))
+        .execute(&app.db)
+        .await
+        .unwrap();
+
+        sync_child_identity(&app, &host, &bot, &pane_id, Some(901)).await;
+
+        assert!(probe_due(&bot.id, &pane_id), "a failed bot write must remain retryable");
+        assert_eq!(crate::db::bot(&app.db, &bot.id).await.unwrap().unwrap().identity.as_deref(), Some("cc1"));
+        let runtime_identity: Option<String> = sqlx::query_scalar("SELECT runtime_identity FROM runs WHERE bot_id=? AND pane_id=?")
+            .bind(&bot.id)
+            .bind(&pane_id)
+            .fetch_one(&app.db)
+            .await
+            .unwrap();
+        assert_eq!(runtime_identity.as_deref(), Some("cc2"));
+
+        sqlx::query(&format!("DROP TRIGGER {trigger}")).execute(&app.db).await.unwrap();
+        sync_child_identity(&app, &host, &bot, &pane_id, Some(901)).await;
+
+        assert_eq!(crate::db::bot(&app.db, &bot.id).await.unwrap().unwrap().identity.as_deref(), Some("cc2"));
+        assert_eq!(
+            sqlx::query_scalar::<_, Option<String>>("SELECT runtime_identity FROM runs WHERE bot_id=? AND pane_id=?")
+                .bind(&bot.id)
+                .bind(&pane_id)
+                .fetch_one(&app.db)
+                .await
+                .unwrap()
+                .as_deref(),
+            Some("cc2")
+        );
+        assert!(!probe_due(&bot.id, &pane_id));
+    }
+
     /// Linux procps 的 `ps eww -p`（BSD 的 `e` 混 SysV 的 `-p`）也要吐出環境：child 的身分就靠它認
     /// （SPEC「Linux 主機」）。真的起一個行程，外部編譯主機會跑到。
     #[cfg(target_os = "linux")]
