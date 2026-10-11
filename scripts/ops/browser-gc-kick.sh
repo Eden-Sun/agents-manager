@@ -130,8 +130,13 @@ EOF2
 # 沒有 Chrome 在用的 /tmp/am-* profile 目錄（上次跑完沒刪的殘留）。1 小時內動過的不碰，
 # 免得殺到正在起的實例。
 reap_profiles() {
-  local live n=0 sz
-  live=$(ps -axo command | grep 'Google Chrome' | grep -- '--headless' | sed -n 's/.*--user-data-dir=\([^ ]*\).*/\1/p')
+  local live n=0 sz psout
+  # 列不出行程就什麼都不刪：不知道誰在用，就當成都在用（#1306）。
+  if ! psout=$(ps -axo command 2>/dev/null); then
+    echo "profile 目錄：略過（無法列出行程）" >> "$LOG"; return
+  fi
+  # headless 與使用者自己的 GUI Chrome 都算在用（#1306）。
+  live=$(printf '%s\n' "$psout" | grep 'Google Chrome' | grep -v grep | sed -n 's/.*--user-data-dir=\([^ ]*\).*/\1/p')
   # 任何 /tmp/am-* 只要長得像 Chrome profile（有 Local State / Default / DevToolsActivePort）就算；
   # 截圖、build target 之類的目錄沒有這些標記，不會被碰。
   # (N)＝沒符合就展開成空；只放寬這一個 glob，不對整支 setopt nonomatch（#371）。
