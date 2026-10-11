@@ -45,7 +45,7 @@ mod arc_port_2_hookhost {
             body: &'a HookBody,
             run_id: Option<&'a str>,
             turn_id: &'a str,
-        ) -> impl std::future::Future<Output = ()> + Send + 'a {
+        ) -> impl std::future::Future<Output = Result<()>> + Send + 'a {
             <T as crate::hookrecv::HookHost>::after_turn_end(self.as_ref(), body, run_id, turn_id)
         }
         fn background_stop<'a>(&'a self, run: &'a db::Run, payload: &'a Value) -> impl std::future::Future<Output = ()> + Send + 'a { <T as crate::hookrecv::HookHost>::background_stop(self.as_ref(), run, payload) }

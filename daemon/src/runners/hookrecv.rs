@@ -21,7 +21,7 @@ impl HookHost for App {
         App::bot_dir(&self.shared(), bot_id)
     }
 
-    async fn after_turn_end(&self, body: &HookBody, run_id: Option<&str>, turn_id: &str) {
+    async fn after_turn_end(&self, body: &HookBody, run_id: Option<&str>, turn_id: &str) -> Result<()> {
         crate::runners::ask_answers::after_turn_end(&self.shared(), body, run_id, turn_id).await
     }
 
