@@ -58,8 +58,9 @@ touch -t "$(date -r "$CUTOFF" +%Y%m%d%H%M.%S 2>/dev/null || date -d "@$CUTOFF" +
 touch -t "$(date -r "$SHARE_CUTOFF" +%Y%m%d%H%M.%S 2>/dev/null || date -d "@$SHARE_CUTOFF" +%Y%m%d%H%M.%S)" "$SHARE_REF" || exit 1
 # 分享用 bot（SPEC §20）的 outbox 走**分享保留政策**（使用者 2026-10-04 原本裁示整個不清，#850 因為一個外部連結就能把資料碟寫滿而改）：
 # 它的 end user 是外部的人（例如長輩），隔天、隔幾天才回來拿 bot 給的檔是常態，所以不是 1 小時，而是保留 SHARE_KEEP_DAYS 天
-# （同樣 mtime 與 ctime 都超過才刪），再加每顆總量上限（檔數、位元組，從最舊的 mtime 開始刪）。daemon 在那種 bot 的 outbox 放標記檔
-# `.am-share-keep`（啟動、建立、開機時補），這裡看到就走這套；標記檔本身不刪、不算量。bot 刪掉時標記拿掉，回到 1 小時。
+# （同樣 mtime 與 ctime 都超過才刪），再加每顆總量上限（檔數、位元組，從最舊的 mtime 開始刪）。「是不是分享用 bot」由上面的
+# 分享名單決定（#1291），不看 outbox 裡的 `.am-share-keep`：那個檔 bot 也寫得到，只當成舊版 daemon 的相容痕跡，這裡不再據以保留。
+# 標記檔本身不刪、不算量（daemon 仍會放，給舊版腳本回退用；一個版本後拿掉）。bot 刪掉或分享停了，就不在名單內，回到 1 小時。
 # 逐個 bot 目錄走：`-delete` 隱含 `-depth`，同一條 find 裡 `-prune` 不生效。`*(N/)` 只認真的目錄，不跟符號連結（跟原本的 find 一樣）；
 # 上限那一步只認 `(.)` 一般檔案，符號連結不算、不刪。
 SHARE_MARK=.am-share-keep
@@ -82,10 +83,20 @@ share_prune() {
   done
   print -r -- "$n"
 }
+# 分享名單（#1291）：哪些 bot 現在真的在分享，只看 daemon 的資料庫（`shared_bots`，且 bot 與專案都沒刪；與 daemon 的 is_active_share 同一條查詢），
+# 不看 outbox 裡的標記檔。標記檔放在 bot 自己寫得到的 outbox 裡，bot 建一個就能拿到分享的保留期與上限；DB 只有 daemon 會寫。
+# 名單讀不到（沒有 DB、sqlite3 失敗、被鎖住）就整輪不刪、記錯誤退出：寧可多留，不可把分享中的檔清掉。
+SHARE_DB="$(dirname "$OUTBOX_BASE")/db.sqlite3"
+SHARE_SQL="SELECT r.bot_id FROM shared_bots r JOIN bots b ON b.id = r.bot_id AND b.deleted_at IS NULL JOIN projects p ON p.id = b.project_id AND p.deleted_at IS NULL;"
+[ -f "$SHARE_DB" ] || { echo "$(date '+%F %T') 拒絕整輪清理：讀不到分享名單（$SHARE_DB 不存在），什麼都不刪" >> "$LOG"; exit 1; }
+SHARE_IDS=$(sqlite3 -cmd '.timeout 5000' -batch -readonly "$SHARE_DB" "$SHARE_SQL" 2>> "$LOG") \
+  || { echo "$(date '+%F %T') 拒絕整輪清理：讀分享名單失敗（sqlite3），什麼都不刪" >> "$LOG"; exit 1; }
+SHARE_LIST=("${(@f)SHARE_IDS}")
 removed=0
 removed_share=0
 for d in "$OUTBOX"/*(N/); do
-  if [ -e "$d/$SHARE_MARK" ]; then
+  name=${d:t}
+  if (( ${SHARE_LIST[(Ie)$name]} )); then
     n=$(share_prune "$d")
     removed_share=$((removed_share + ${n:-0}))
     continue
