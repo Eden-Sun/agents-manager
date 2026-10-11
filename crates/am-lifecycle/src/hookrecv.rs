@@ -590,7 +590,7 @@ pub async fn process_for<H: HookHost>(app: &H, body: &HookBody, event_id: Option
             .fetch_optional(app.db())
             .await?
             .flatten();
-        app.after_turn_end(body, run_id.as_deref(), &turn_id).await;
+        app.after_turn_end(body, run_id.as_deref(), &turn_id).await?;
     }
     Ok(())
 }
@@ -6921,7 +6921,7 @@ pub trait HookHost:
         body: &'a HookBody,
         run_id: Option<&'a str>,
         turn_id: &'a str,
-    ) -> impl std::future::Future<Output = ()> + Send + 'a;
+    ) -> impl std::future::Future<Output = Result<()>> + Send + 'a;
     /// claude Stop hook 帶來的背景工作數字。
     fn background_stop<'a>(&'a self, run: &'a db::Run, payload: &'a Value) -> impl std::future::Future<Output = ()> + Send + 'a;
     /// transcript 路徑是不是這顆 bot 讀得的（遠端／本機分別把關）。
