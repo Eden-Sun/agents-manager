@@ -2,7 +2,7 @@ import { useRef } from 'react'
 import type { MouseEvent, PointerEvent } from 'react'
 import { copyText } from '../lib/copyText'
 
-const INTERACTIVE = 'a, button, input, textarea, select, [role="button"], .msg-attachments, .msg-snapshot'
+const INTERACTIVE = 'a, button, input, textarea, select, [role="button"], .msg-attachments, .msg-snapshot, .lightbox'
 const hasSelection = () => Boolean(window.getSelection()?.toString())
 
 /** 短按複製；長按、拖選、捲動與訊息內的連結／按鈕保留瀏覽器原生行為。 */
