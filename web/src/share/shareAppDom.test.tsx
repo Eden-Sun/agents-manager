@@ -8,7 +8,7 @@ import { act, click, imeEnter, keydown, mount, settle, setupDom, teardownDom, un
 import { ShareApp } from './ShareApp'
 import { httpShareClient, type ShareClient, type ShareEvents } from './shareApi'
 import { mockShareClient } from './shareMock'
-import { ShareHttpError, type ShareMessage, type ShareStatus } from './shareModel'
+import { ShareHttpError, type ShareFile, type ShareMessage, type ShareStatus } from './shareModel'
 
 const POLL_WAIT = 4200
 
@@ -734,6 +734,40 @@ function clientWith(messages: () => Promise<ReturnType<typeof page>>, subscribe:
     subscribe,
   }
 }
+
+test('檔案清單重抓重疊時只採用最新開始的回應', async () => {
+  const requests: ((files: ShareFile[]) => void)[] = []
+  let ev!: ShareEvents
+  const client: ShareClient = {
+    ...clientWith(async () => page([]), (events) => {
+      ev = events
+      return () => {}
+    }),
+    files: () => new Promise((resolve) => requests.push(resolve)),
+  }
+  await mount(<ShareApp client={client} />)
+  assert.equal(requests.length, 1, '開頁先抓一份檔案清單')
+
+  await act(async () => {
+    ev.onMessage(msgAt('new-answer', 'assistant', 1))
+  })
+  assert.equal(requests.length, 2, '新回覆觸發更新清單')
+  await act(async () => requests[1]([{ name: 'report.txt', size: 2, modified_at: null, version: 'new' }]))
+  assert.equal(document.querySelector('.sh-file-size')?.textContent, '2 B')
+  await act(async () => requests[0]([{ name: 'report.txt', size: 1, modified_at: null, version: 'old' }]))
+  assert.equal(document.querySelector('.sh-file-size')?.textContent, '2 B', '較晚回來的舊快照不能覆蓋新版本')
+
+  await act(async () => {
+    ev.onMessage(msgAt('next-answer', 'assistant', 2))
+  })
+  await act(async () => {
+    ev.onMessage(msgAt('last-answer', 'assistant', 3))
+  })
+  assert.equal(requests.length, 4)
+  await act(async () => requests[3]([]))
+  await act(async () => requests[2]([{ name: 'deleted.txt', size: 3, modified_at: null, version: 'stale' }]))
+  assert.equal(document.querySelector('.sh-file-size'), null, '過期清單不能讓已刪檔案復活')
+})
 
 test('第一次載入失敗而 SSE 連著：自己重試，不會停在「載入中…」', { timeout: 20_000 }, async () => {
   let calls = 0

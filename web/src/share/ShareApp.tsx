@@ -185,6 +185,7 @@ export function ShareApp({ client }: { client: ShareClient }) {
   /** 手上看過的最新一則 bot 回覆；頁面帶來更新的一則＝bot 剛回完，檔案清單要重抓（輪詢模式沒有 SSE 的 message 事件）。 */
   const lastAssistant = useRef<string | null>(null)
   const pageSeen = useRef(false)
+  const fileLoadGen = useRef(0)
 
   const fail = useCallback((e: unknown) => {
     if (e instanceof ShareHttpError && e.status === 404) {
@@ -197,13 +198,17 @@ export function ShareApp({ client }: { client: ShareClient }) {
   }, [])
 
   const loadFiles = useCallback(
-    () =>
-      client.files().then(
-        (f) => setFiles(f),
+    () => {
+      const gen = ++fileLoadGen.current
+      return client.files().then(
+        (f) => {
+          if (gen === fileLoadGen.current) setFiles(f)
+        },
         () => {
           /* 清單抓不到就留著上一份；連結失效由 load() 判斷 */
         },
-      ),
+      )
+    },
     [client],
   )
 
@@ -243,10 +248,7 @@ export function ShareApp({ client }: { client: ShareClient }) {
 
   useEffect(() => {
     client.messages().then(applyPage, fail)
-    client.files().then(
-      (f) => setFiles(f),
-      () => {},
-    )
+    void loadFiles()
     const stop = client.subscribe({
       onMessage: (m) => {
         setMessages((cur) => mergeMessages(cur, [m]))
