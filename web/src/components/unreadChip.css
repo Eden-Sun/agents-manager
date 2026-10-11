@@ -124,7 +124,7 @@
 }
 
 
-/* 兩個狀態**正交**，分兩條規則不互蓋（2026-09-11 使用者）：`unread`＝accent 底，`current`＝邊框＋ring＋粗體、不動底色。基底是中性的。 */
+/* 兩個狀態**正交**，分兩條規則不互蓋（2026-09-11 使用者）：`unread`＝黃底（`--done-fill`），`current`＝邊框＋ring＋粗體、不動底色。基底是中性的。 */
 .unread-chip {
   display: inline-flex;
   align-items: center;
@@ -143,23 +143,25 @@
 }
 
 /* 三組有未讀同一畫法才挑得出來；排在 `:hover` 前，hover 才蓋得過。 */
-/* 不用 `--accent-soft`：蓋在 `--bg-sunken` 上只有 1.1／1.3:1，20px 藥丸上等於沒差（2026-09-12 w168:pN 量測）。目標 ~1.8:1。 */
+/* 完成待看用黃（`--done-fill`），不用 accent 藍：藍是「你正在看」（`current`）的顏色，兩個都藍就分不出（2026-10-11 使用者截圖）。
+   不用 `--accent-soft`：蓋在 `--bg-sunken` 上只有 1.1／1.3:1，20px 藥丸上等於沒差（2026-09-12 w168:pN 量測）。 */
 .unread-chip.unread {
-  /* 實心 accent：洗底 22%／32% 只有 1.26:1，而 12px 字要 4.5:1 不能再深；實心淺色 5.4:1、深色 3.7:1。`current` 改用形狀表示。 */
-  background: var(--accent);
-  border-color: var(--accent);
-  color: var(--accent-text);
+  /* 實心黃底＋深字：淺色 `--text` 對 `--done-fill` 10:1、深色 6.6:1（`styles.css` 的 token 註解）。`current` 改用形狀表示。 */
+  background: var(--done-fill);
+  border-color: var(--done-fill);
+  color: var(--done-ink);
 }
 
-/* 實心底上數字籤要反白，否則藍底藍籤看不見。 */
+/* 實心底上數字籤反白（深底淺字），黃底上才看得見。 */
 .unread-chip.unread .unread-chip-n {
-  background: var(--accent-text);
-  color: var(--accent);
+  background: var(--text);
+  color: var(--bg-panel);
 }
 
+/* hover 往面板色靠一點：深色模式底變暗，淺字才不掉到 4.5:1 以下。 */
 .unread-chip.unread:hover {
-  background: color-mix(in srgb, var(--accent) 85%, var(--text));
-  color: var(--accent-text);
+  background: color-mix(in srgb, var(--done-fill) 80%, var(--bg-panel));
+  color: var(--done-ink);
 }
 
 .unread-chip:hover {
@@ -208,7 +210,7 @@
   padding-left: 10px;
 }
 
-/* 同時有未讀：底維持實心藍，左條反白才看得見。 */
+/* 同時有未讀：底是黃（`--done-fill`），藍框照留（選取），左條改深字才看得見。 */
 /* 使用中那顆加**藍色外框**（2026-10-09 使用者：「主要的 focus border 用藍色」）：深淺色模式均沿用 --accent。 */
 .unread-chip.current {
   border-color: var(--accent);
@@ -218,10 +220,10 @@
 }
 
 .unread-chip.current.unread {
-  background: var(--accent);
+  background: var(--done-fill);
   border-color: var(--accent);
-  color: var(--accent-text);
-  box-shadow: inset 3px 0 0 var(--accent-text), inset 0 0 0 1px var(--accent);
+  color: var(--done-ink);
+  box-shadow: inset 3px 0 0 var(--text), inset 0 0 0 1px var(--accent);
 }
 
 /* 方角照舊套在紅、黃、進行中：它是「你在這裡」，跟顏色無關。 */
@@ -565,7 +567,7 @@
     display: none;
   }
 
-  /* 有未讀的晶片是 accent 底：藍色的 working 燈會融進去，加一圈白邊才看得到。 */
+  /* 有未讀的晶片是黃底（`--done-fill`）：藍色的 working 燈在黃底上也會融進去，加一圈白邊才看得到。 */
   .unread-pin-grid .unread-chip.unread .lamp {
     box-shadow: 0 0 0 2px #fff;
   }
@@ -589,7 +591,7 @@
   line-height: 1;
 }
 
-/* 有未讀的晶片是 accent 底：圖示改白色，才讀得出來。 */
+/* 有未讀的晶片是黃底：圖示跟字同色，才讀得出來。 */
 .unread-chip.unread .unread-chip-kids {
   color: currentColor;
 }
