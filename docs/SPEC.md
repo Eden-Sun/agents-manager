@@ -5222,7 +5222,7 @@ daemon 要能在 Linux（目標：Ubuntu，外部編譯主機 192.168.1.46，#67
 - **沙箱總預算**（#853，派工者決定）：受限分享 bot 的 Write／Edit 能寫整個工作目錄與 outbox，上限原本只在上傳的 `inbox/`（200 MiB／300 檔）。現在工作目錄（含 `inbox/`）加 outbox 合計 **1 GiB**
   （`share::budget::SANDBOX_MAX_BYTES`）：daemon 每 10 分鐘（`runners::share_budget`）重量一次（fd-bound、不跟符號連結、最多 20 萬項／32 層，樹太大回 `truncated` 下限值），量測值只放記憶體；
   `POST /s/{token}/api/messages` 送出前看最近一次量測值（沒有或太舊——已滿的只信 60 秒——才現場量一次），達 1 GiB 回 **507 `share_storage_full`**，分享頁顯示「空間滿了，請跟分享給你的人說一聲」，一則都不進對話。
-  量測剛變滿時通知擁有者：該 bot 的對話一則系統訊息＋AGM inbox 一則 `ops_alert`（`reason:"share_storage_full"`，同一顆一天最多一則）。**不自動刪工作目錄的檔**（那是擁有者的東西）；擁有者清掉後約 1 分鐘內恢復。
+  量測剛變滿時通知擁有者（「剛變滿」只跟巡邏自己上一輪量到的值比；分享頁送訊息時量到滿的不算，否則滿的第一筆會被吃掉，#1396）：該 bot 的對話一則系統訊息＋AGM inbox 一則 `ops_alert`（`reason:"share_storage_full"`，同一顆一天最多一則）。**不自動刪工作目錄的檔**（那是擁有者的東西）；擁有者清掉後約 1 分鐘內恢復。
   只管受限分享 bot（信任分享的工作目錄就是一般專案，不在此列）。已有大型既有資料夾（`share_folder.kind=existing`）一開始就超過 1 GiB 的會直接被擋，需要先整理。
 - **遠端專案的分享 bot**（#955，R-S4）：檔案在專案那台主機，預算與保留政策由 daemon 經 ssh 執行（`share::remote_fs`：`measure`／`prune_outbox`），**遠端一律 fail closed**：
   - **量測**：`du -skx`（不跟符號連結、不跨檔案系統，KiB×1024）＋`find -xdev -type f`（最多 200001 項，超過 `truncated`），工作目錄與 outbox 各量一次，outbox 的 `.am-share-keep` 不算；

@@ -77,6 +77,8 @@ struct Entry {
     m: Measured,
     at: Instant,
     place: Place,
+    /// 巡邏上一次在這個位置量到的值（#1396）：`None`＝這個位置還沒被巡邏量過。`is_full` 量的不更新它。
+    swept: Option<Measured>,
 }
 
 fn cache() -> &'static Mutex<HashMap<String, Entry>> {
@@ -94,18 +96,20 @@ fn cached_at(bot_id: &str, place: &Place) -> Option<(Measured, Duration)> {
     cache().lock().unwrap_or_else(|e| e.into_inner()).get(bot_id).filter(|e| e.place == *place).map(|e| (e.m, e.at.elapsed()))
 }
 
-/// 記下一筆量測。回傳同一個位置下的上一筆（位置變了就沒有「上一筆」，巡邏會當作剛變滿）。
-fn record(bot_id: &str, place: Place, m: Measured) -> Option<Measured> {
+/// 記下一筆量測。回傳同一個位置下「巡邏上一次」量到的值（位置變了、或巡邏還沒量過就是 `None`，巡邏會當作剛變滿）。
+/// `by_sweep`：這筆是不是巡邏量的。只有巡邏量的才會成為下一輪的「上一次」（#1396）；分享頁送訊息量的只更新 `m`。
+fn record(bot_id: &str, place: Place, m: Measured, by_sweep: bool) -> Option<Measured> {
     let mut c = cache().lock().unwrap_or_else(|e| e.into_inner());
-    let prev = c.get(bot_id).filter(|e| e.place == place).map(|e| e.m);
-    c.insert(bot_id.to_string(), Entry { m, at: Instant::now(), place });
-    prev
+    let prev_swept = c.get(bot_id).filter(|e| e.place == place).and_then(|e| e.swept);
+    let swept = if by_sweep { Some(m) } else { prev_swept };
+    c.insert(bot_id.to_string(), Entry { m, at: Instant::now(), place, swept });
+    prev_swept
 }
 
 #[cfg(test)]
 pub async fn set_cached_for_test<S: SiteEnv>(app: &S, bot_id: &str, m: Measured) {
     if let Ok(Some(place)) = place_of(app, bot_id).await {
-        record(bot_id, place, m);
+        record(bot_id, place, m, true);
     }
 }
 
@@ -172,13 +176,13 @@ async fn place_of<S: SiteEnv>(app: &S, bot_id: &str) -> Result<Option<Place>, Un
 
 /// 照 `place` 量一次並記下。本機量不到回 `Ok(None)`（不擋、不通知）；遠端量不到回 `Err(Unavailable)`。
 /// 遠端的位置以實際量的那條連線為準（`site::resolve` 再問一次 DB＋連線）。
-async fn measure_at<S: SiteEnv>(app: &S, bot_id: &str, place: Place) -> Result<Option<(Measured, Option<Measured>)>, Unavailable> {
+async fn measure_at<S: SiteEnv>(app: &S, bot_id: &str, place: Place, by_sweep: bool) -> Result<Option<(Measured, Option<Measured>)>, Unavailable> {
     if let Place::Local { workspace, .. } = &place {
         let (data_dir, id, ws) = (app.data_dir().to_path_buf(), bot_id.to_string(), PathBuf::from(workspace));
         let measured = tokio::task::spawn_blocking(move || measure_blocking(&data_dir, &ws, &id)).await;
         // 量不到不記值：沒有新的數字就留著舊的（同位置），不拿 0 去覆蓋。
         return match measured {
-            Ok(Ok(m)) => Ok(Some((m, record(bot_id, place, m)))),
+            Ok(Ok(m)) => Ok(Some((m, record(bot_id, place, m, by_sweep)))),
             _ => {
                 tracing::warn!(bot = %bot_id, "share sandbox usage could not be measured");
                 Ok(None)
@@ -188,7 +192,7 @@ async fn measure_at<S: SiteEnv>(app: &S, bot_id: &str, place: Place) -> Result<O
     let ShareSite::Remote(remote) = site::resolve(app, bot_id).await.map_err(|_| Unavailable)? else { return Err(Unavailable) };
     let measured_at = Place::Remote { host: remote.host.clone(), conn: Arc::downgrade(remote.conn.conn()), workspace: remote.workspace.clone() };
     match remote.measure().await {
-        Ok(m) => Ok(Some((m, record(bot_id, measured_at, m)))),
+        Ok(m) => Ok(Some((m, record(bot_id, measured_at, m, by_sweep)))),
         Err(e) => {
             tracing::warn!(bot = %bot_id, host = %remote.host, error = %e, "remote share sandbox usage could not be measured");
             Err(Unavailable)
@@ -202,7 +206,7 @@ async fn measure_at<S: SiteEnv>(app: &S, bot_id: &str, place: Place) -> Result<O
 /// - `Err(Unavailable)`：DB 讀不到位置，或**遠端**專案的受限 bot 量不到（fail closed，見模組說明）。
 pub async fn refresh<S: SiteEnv>(app: &S, bot_id: &str) -> Result<Option<(Measured, Option<Measured>)>, Unavailable> {
     let Some(place) = place_of(app, bot_id).await? else { return Ok(None) };
-    measure_at(app, bot_id, place).await
+    measure_at(app, bot_id, place, true).await
 }
 
 /// 分享頁送訊息前問：這顆的沙箱滿了嗎。位置先問一次 DB；同位置的新鮮量測值直接用，否則現場量一次。
@@ -213,7 +217,7 @@ pub async fn is_full<S: SiteEnv>(app: &S, bot_id: &str) -> Result<bool, Unavaila
     if let Some((m, _)) = fresh {
         return Ok(m.full());
     }
-    Ok(measure_at(app, bot_id, place).await?.is_some_and(|(m, _)| m.full()))
+    Ok(measure_at(app, bot_id, place, false).await?.is_some_and(|(m, _)| m.full()))
 }
 
 /// 巡邏用：重量所有受限分享 bot（本機與遠端），回「這一輪剛變滿」的（上一輪不是滿的，或這是第一次量）。
