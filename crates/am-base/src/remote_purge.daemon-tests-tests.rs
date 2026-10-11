@@ -233,6 +233,7 @@ async fn a_permanently_failing_head_of_line_does_not_starve_the_rest() {
     assert_eq!(crate::runners::remote_purge::sweep_due(&app, &r.host).await, (0, 100), "第一輪：前 100 顆都失敗、欠著");
     assert_eq!(crate::runners::remote_purge::sweep_due(&app, &r.host).await, (1, 0), "第二輪：失敗的還在退避，第 101 顆要排得到、清掉");
     assert_eq!(r.removed(&lone), 1, "第 101 顆的目錄被搬進回收區");
+}
 
 /// **#1320**：專案搬到別台之後，舊主機上還欠著的已刪 bot 仍然屬於舊主機（義務寫在 DB 裡，不靠 `projects.host`）。
 #[tokio::test]
