@@ -458,6 +458,10 @@ function RemoteCargoPanel() {
   const [clearPassword, setClearPassword] = useState(false)
   const [busy, setBusy] = useState(false)
   const [message, setMessage] = useState('')
+  /** 讀取失敗：表單還是元件初值，不是 daemon 的設定（#1343）。這時不准直接儲存，要先「重新讀取」。 */
+  const [loadFailed, setLoadFailed] = useState(false)
+  /** 按「重新讀取」就 +1，讓下面那個 effect 重跑一次。 */
+  const [reload, setReload] = useState(0)
   // `test()` 內部借用 `save`：兩者共用同一個參照計數鎖，裡層 `save` 做完不會提早把 busy 撥回 false。
   const lock = useRef(nestableBusy(setBusy)).current
 
@@ -466,6 +470,8 @@ function RemoteCargoPanel() {
     void api.fetchRemoteCargoSettings().then(
       (cfg) => {
         if (!alive) return
+        setLoadFailed(false)
+        setMessage('')
         setEnabled(cfg.enabled)
         setHost(cfg.host)
         setUser(cfg.user)
@@ -478,6 +484,7 @@ function RemoteCargoPanel() {
       },
       (e) => {
         if (alive) {
+          setLoadFailed(true)
           setMessage(`讀取外部 Cargo 設定失敗：${remoteCargoErr(e)}`)
           setLoaded(true)
         }
@@ -486,7 +493,7 @@ function RemoteCargoPanel() {
     return () => {
       alive = false
     }
-  }, [])
+  }, [reload])
 
   const form = { enabled, host, user, port, root, jobs, password, clearPassword }
   const problems = remoteCargoProblems(form)
@@ -643,7 +650,14 @@ function RemoteCargoPanel() {
             測試連線
           </button>
         ) : null}
-        <button type="button" className="btn primary" disabled={busy || blocked || (enabled && (!host.trim() || !user.trim()))} onClick={() => void save()}>
+        {/* 讀失敗、表單又沒動過：按了只會用初值整份取代 daemon 的設定（#1343）。 */}
+        <button
+          type="button"
+          className="btn primary"
+          disabled={busy || blocked || (enabled && (!host.trim() || !user.trim())) || (!saved && !unsaved)}
+          title={!saved && !unsaved ? '讀不到目前的設定，先重新讀取' : undefined}
+          onClick={() => void save()}
+        >
           {busy ? '處理中…' : '儲存'}
         </button>
         {needsToolchain ? (
@@ -667,6 +681,14 @@ function RemoteCargoPanel() {
           </pre>
         ) : null}
       </div>
+      {loadFailed ? (
+        <>
+          <p className="hint">讀不到 daemon 目前存的設定。這時按儲存會用這份表單整份取代（沒填的欄位用預設值）；先按「重新讀取」。</p>
+          <button type="button" className="btn" disabled={busy} onClick={() => setReload((n) => n + 1)}>
+            重新讀取
+          </button>
+        </>
+      ) : null}
     </section>
   )
 }
