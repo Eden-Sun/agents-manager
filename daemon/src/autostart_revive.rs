@@ -67,6 +67,11 @@ pub(crate) async fn eligible_lost_bot(app: &(impl crate::capabilities::Db + crat
     if bot.deleted_at.is_some() || bot.autostart != 1 || bot.managed_by == "child" {
         return Ok(None);
     }
+    // Recheck after the candidate scan and again under the per-bot lock: handoff means this daemon
+    // must not restart the bot or write a bot_lost decision for the receiving daemon.
+    if crate::handoff::bot_handed_off_to(app.db(), &bot.id).await?.is_some() {
+        return Ok(None);
+    }
     if db::bot_host(app.db(), &bot.id).await? != host || !app.host_connected(host).await || db::active_run(app.db(), &bot.id).await?.is_some() {
         return Ok(None);
     }
@@ -622,5 +627,27 @@ mod tests {
         let events = bot_lost_events(&env.app, &bot.id).await;
         assert_eq!(events.iter().filter(|e| e["outcome"] == "backoff").count(), 1, "{events:?}");
         assert_eq!(events.iter().filter(|e| e["outcome"] == "restarted").count(), super::MAX_RESTARTS);
+    }
+
+    #[tokio::test]
+    async fn a_handed_off_pane_gone_bot_is_not_revived_or_reported() {
+        let env = tt::env().await;
+        let bot = autostart_bot(&env, "handed-off-lost").await;
+        crate::lifecycle::start_bot(&env.app, &bot.id).await.unwrap();
+        autostart_done(&env.app);
+        let run = db::active_run(&env.app.db, &bot.id).await.unwrap().unwrap();
+        sqlx::query("UPDATE projects SET handed_off_to='mac' WHERE id=?").bind(&env.project_id).execute(&env.app.db).await.unwrap();
+        sqlx::query("UPDATE runs SET state='exited', exit_reason='pane gone', ended_at=? WHERE id=?")
+            .bind(db::now())
+            .bind(&run.id)
+            .execute(&env.app.db)
+            .await
+            .unwrap();
+
+        crate::runners::autostart_revive::sweep_lost_by_pane_gone(&env.app).await;
+        super::quiesce(&env.app).await;
+
+        assert_eq!(runs(&env.app, &bot.id).await, vec![("exited".into(), Some("pane gone".into()))]);
+        assert!(bot_lost_events(&env.app, &bot.id).await.is_empty(), "移交專案不寫 bot_lost，也不消耗重開退避額度");
     }
 }
