@@ -56,7 +56,9 @@ case "$1 $2" in
     [ -n "${STUB_LOG_FAIL:-}" ] && exit 1
     cat "$GHDIR/log-$3.txt" 2>/dev/null ;;
   "api repos/{owner}/{repo}/commits?sha=main&per_page=20")
-    cat "$GHDIR/commits.json" ;;
+    # GitHub Actions 來源也要這份 commit 順序（#1287）：沒有另外給的時候，照 runs.json 的 headSha 排（mk_runs 的順序就是 commit 順序）。
+    if [ -e "$GHDIR/commits.json" ]; then cat "$GHDIR/commits.json"
+    else python3 -c 'import json,sys; print(json.dumps([{"sha": r["headSha"]} for r in json.load(open(sys.argv[1]))]))' "$GHDIR/runs.json"; fi ;;
   "api "*)
     case "$2" in
       "repos/{owner}/{repo}/commits/"*"/status") s="${2#repos/\{owner\}/\{repo\}/commits/}"; cat "$GHDIR/status-${s%/status}.json" 2>/dev/null || echo '{"statuses":[]}' ;;
@@ -656,6 +658,61 @@ bash "$SCRIPT"
 equals "error 之下的真 failure：照開一張" "$(creates)" "1"
 equals "error 之下的真 failure：派一次" "$(assigns)" "1"
 equals "error 之下的真 failure：起點是 failure 的 sha" "$(state first_red_sha)" "ccc3"
+teardown
+
+# #1287：判定只看 commit 順序（main 上越新越前面），不看 status／run 的建立時間。
+# 較舊的 commit 可能晚補狀態（delayed／retry／offline flush），按時間排會把舊的紅／綠當成目前的結論。
+# skew <sha|state|created_at>…（用 | 分，時間戳記本身有冒號）：commit 由新到舊排（前面的較新），created_at 照給的值（可以故意倒過來）。
+skew_ubuntu() {
+  python3 - "$GHDIR" "$@" <<'PY'
+import json, sys
+d, *specs = sys.argv[1:]
+commits = []
+for spec in specs:
+    sha, state, at = spec.split("|")
+    commits.append({"sha": sha, "html_url": "https://github.com/o/r/commit/" + sha})
+    json.dump({"statuses": [{"context": "ubuntu-ci", "state": state, "created_at": at}]}, open("%s/status-%s.json" % (d, sha), "w"))
+json.dump(commits, open(d + "/commits.json", "w"))
+PY
+}
+
+# 1. 舊 commit 晚補綠：最新的 new2 是綠的，就不能因為 old1 的 failure 比較晚才寫進來就開紅票。
+setup
+export AGM_CI_SOURCE=ubuntu-ci
+mkdir -p "$AGM_CI_LOG_DIR"
+skew_ubuntu "new2|success|2026-09-28T09:01:00Z" "old1|failure|2026-09-28T09:59:00Z"
+printf '==> daemon: cargo test\ntest foo::bar ... FAILED\n' > "$AGM_CI_LOG_DIR/old1.log"
+bash "$SCRIPT"
+equals "舊 commit 晚補紅：最新是綠，不開票" "$(creates)" "0"
+equals "舊 commit 晚補紅：不派工" "$(assigns)" "0"
+teardown
+
+# 2. 舊 commit 晚補綠、最新的 new2 是紅：紅不能被蓋掉，照開一張（漏報的那一面）。
+setup
+export AGM_CI_SOURCE=ubuntu-ci
+mkdir -p "$AGM_CI_LOG_DIR"
+skew_ubuntu "new2|failure|2026-09-28T09:01:00Z" "old1|success|2026-09-28T09:59:00Z"
+printf '==> daemon: cargo test\ntest foo::bar ... FAILED\n' > "$AGM_CI_LOG_DIR/new2.log"
+bash "$SCRIPT"
+equals "最新 commit 紅、舊的晚補綠：照開一張（不漏報）" "$(creates)" "1"
+equals "最新 commit 紅：第一個紅的 sha 是 new2" "$(state first_red_sha)" "new2"
+teardown
+
+# 3. GitHub Actions 來源：run 的建立時間與 commit 順序相反，判定要照 commit 順序。
+setup
+python3 - "$GHDIR" <<'PY'
+import json, sys
+d = sys.argv[1]
+json.dump([{"databaseId": 2, "conclusion": "success", "status": "completed", "headSha": "sha2",
+            "createdAt": "2026-09-19T00:01:00Z", "url": "https://github.com/o/r/actions/runs/2"},
+           {"databaseId": 1, "conclusion": "failure", "status": "completed", "headSha": "sha1",
+            "createdAt": "2026-09-19T00:59:00Z", "url": "https://github.com/o/r/actions/runs/1"}],
+          open(d + "/runs.json", "w"))
+json.dump([{"sha": "sha2"}, {"sha": "sha1"}], open(d + "/commits.json", "w"))
+PY
+mk_log 1 "tests::old_red"
+bash "$SCRIPT"
+equals "actions：較新的 run 綠、舊的 run 晚寫入紅：不開票" "$(creates)" "0"
 teardown
 
 echo "$PASS passed, $FAIL failed"
