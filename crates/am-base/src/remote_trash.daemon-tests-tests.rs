@@ -784,3 +784,105 @@
         let host: Option<String> = sqlx::query_scalar("SELECT host FROM remote_bot_dir_purges WHERE bot_id = ?").bind(&bot.id).fetch_optional(&app.db).await.unwrap();
         assert_eq!(host.as_deref(), Some("trashbox-mark-other"), "別台的記號不能被這台的清理忘掉");
     }
+
+    /// **#1427**：補還原永久失敗（`bots/` 不可寫）時，第二輪不再對那顆 ssh 還原；備份照留；到了下次可試的時間才再試。
+    /// 「到了時間」不靠牆鐘：直接把退避表的時間推到過去。
+    #[tokio::test]
+    async fn a_restore_that_keeps_failing_backs_off_instead_of_retrying_every_round() {
+        use std::os::unix::fs::PermissionsExt as _;
+        let host = "trashbox-backoff";
+        let (env, root) = remote(host).await;
+        let app = env.app.clone();
+        let stuck = tt::claude_bot(&app, &env.project_id, "backoff-stuck").await;
+        let fresh = root.join("bots-trash").join(format!("{}.{}", stuck.id, now_ms()));
+        std::fs::create_dir_all(&fresh).unwrap();
+        let bots = root.join("bots");
+        std::fs::create_dir_all(&bots).unwrap();
+        std::fs::set_permissions(&bots, std::fs::Permissions::from_mode(0o500)).unwrap();
+        let restores = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let counted = restores.clone();
+        let marker = format!("B='{}'", stuck.id);
+        crate::hosts::set_ssh_fake(host, move |cmd| {
+            if cmd.contains(&marker) {
+                counted.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            }
+            run_sh(cmd)
+        });
+        let calls = || restores.load(std::sync::atomic::Ordering::SeqCst);
+
+        crate::runners::remote_trash::gc_host(&app, host).await;
+        assert_eq!(calls(), 1, "第一輪照常試一次");
+        assert!(fresh.exists(), "還原失敗，備份留著");
+
+        crate::runners::remote_trash::gc_host(&app, host).await;
+        assert_eq!(calls(), 1, "第二輪還在退避：不再 ssh 還原（修之前每一輪都試）");
+        assert!(fresh.exists(), "退避中備份照留");
+
+        sqlx::query("UPDATE remote_restore_backoff SET next_attempt_at = ? WHERE host = ? AND bot_id = ?")
+            .bind("2000-01-01T00:00:00.000Z")
+            .bind(host)
+            .bind(&stuck.id)
+            .execute(&app.db)
+            .await
+            .unwrap();
+        std::fs::set_permissions(&bots, std::fs::Permissions::from_mode(0o700)).unwrap();
+        crate::runners::remote_trash::gc_host(&app, host).await;
+        assert_eq!(calls(), 2, "到了下次可試的時間才再試");
+        assert!(!fresh.exists(), "這次還原成了，備份搬回去");
+        let left: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM remote_restore_backoff WHERE bot_id = ?").bind(&stuck.id).fetch_one(&app.db).await.unwrap();
+        assert_eq!(left, 0, "還原成功就清掉退避記號");
+    }
+
+    /// **#1427**：連續失敗到上限（`RESTORE_GIVE_UP_AFTER`）就放棄自動重試：備份保留、不再 ssh，並發一則 `ops_alert`。
+    #[tokio::test]
+    async fn a_restore_that_gave_up_stops_retrying_keeps_the_backup_and_alerts_once() {
+        use std::os::unix::fs::PermissionsExt as _;
+        let host = "trashbox-gave-up";
+        let (env, root) = remote(host).await;
+        let app = env.app.clone();
+        let stuck = tt::claude_bot(&app, &env.project_id, "gave-up").await;
+        let fresh = root.join("bots-trash").join(format!("{}.{}", stuck.id, now_ms()));
+        std::fs::create_dir_all(&fresh).unwrap();
+        let bots = root.join("bots");
+        std::fs::create_dir_all(&bots).unwrap();
+        std::fs::set_permissions(&bots, std::fs::Permissions::from_mode(0o500)).unwrap();
+        let restores = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let counted = restores.clone();
+        let marker = format!("B='{}'", stuck.id);
+        crate::hosts::set_ssh_fake(host, move |cmd| {
+            if cmd.contains(&marker) {
+                counted.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            }
+            run_sh(cmd)
+        });
+        sqlx::query(
+            "INSERT INTO remote_restore_backoff (host, bot_id, attempts, last_error, next_attempt_at, updated_at) VALUES (?, ?, ?, 'boom', '2000-01-01T00:00:00.000Z', ?)",
+        )
+        .bind(host)
+        .bind(&stuck.id)
+        .bind(crate::remote_purge::RESTORE_GIVE_UP_AFTER - 1)
+        .bind(crate::db::now())
+        .execute(&app.db)
+        .await
+        .unwrap();
+
+        crate::runners::remote_trash::gc_host(&app, host).await;
+        assert_eq!(restores.load(std::sync::atomic::Ordering::SeqCst), 1, "上限那一次照常試");
+        assert!(fresh.exists(), "放棄之後備份照留");
+        let alert_key = format!("%remote_restore_gave_up:{host}:{}", stuck.id);
+        let alerts = || async {
+            sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM supervisor_inbox WHERE kind = 'ops_alert' AND event_key LIKE ?")
+                .bind(alert_key.clone())
+                .fetch_one(&app.db)
+                .await
+                .unwrap()
+        };
+        assert_eq!(alerts().await, 1, "放棄那一刻發一則 ops_alert");
+
+        crate::runners::remote_trash::gc_host(&app, host).await;
+        crate::runners::remote_trash::gc_host(&app, host).await;
+        assert_eq!(restores.load(std::sync::atomic::Ordering::SeqCst), 1, "放棄之後不再 ssh 還原，就算時間到了");
+        assert!(fresh.exists());
+        assert_eq!(alerts().await, 1, "告警只發一次");
+        std::fs::set_permissions(&bots, std::fs::Permissions::from_mode(0o700)).unwrap();
+    }

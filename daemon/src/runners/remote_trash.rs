@@ -79,6 +79,19 @@ async fn restore_pending(app: &Arc<App>, host: &str, conn: &crate::hosts::HostCo
     crate::runners::app_ports_p11::race_point::hit("remote_restore_after_list", host).await;
     let mut out = Unrestored::default();
     for id in ids.iter().filter(|id| backed.contains(*id)) {
+        // 補還原的退避（#1427）：上次失敗還沒到下次可試的時間、或已經放棄自動重試，這一輪不 ssh；備份算「還沒還原」（不過期、不計量）。
+        match crate::remote_purge::restore_backoff(&app.db, host, id).await {
+            Ok(Some((attempts, due))) if !due || attempts >= crate::remote_purge::RESTORE_GIVE_UP_AFTER => {
+                out.failed.insert(id.clone());
+                continue;
+            }
+            Ok(_) => {}
+            Err(e) => {
+                tracing::warn!(host, bot = %id, error = %e, "could not read the restore backoff; not restoring it this round");
+                out.failed.insert(id.clone());
+                continue;
+            }
+        }
         // 拿不到鎖就這一輪跳過（別的路握著，不算還原失敗，下一輪再來）；它的備份這一輪也不能清（#1413）。
         // 拿到才在鎖裡重讀 `deleted_at`，鎖握到 `restore` 與 `forget` 做完（同 `remote_purge::sweep`，#511／#1301）。
         let Ok(_guard) = app.bot_lock(id).await.try_lock_owned() else {
@@ -105,11 +118,26 @@ async fn restore_pending(app: &Arc<App>, host: &str, conn: &crate::hosts::HostCo
         match crate::remote_trash::restore(conn, id, &dir, &remote_root()).await {
             Ok(Some(from)) => {
                 tracing::info!(host, bot = %id, %from, "restored a pending remote bot config dir from bots-trash");
+                clear_backoff(app, host, id).await;
                 crate::remote_purge::forget(app, id, host).await;
             }
-            Ok(None) => crate::remote_purge::forget(app, id, host).await,
+            Ok(None) => {
+                clear_backoff(app, host, id).await;
+                crate::remote_purge::forget(app, id, host).await;
+            }
             Err(e) => {
-                tracing::warn!(host, bot = %id, error = %format!("{e:#}"), "could not restore a pending remote bot config dir; keeping its bots-trash copy");
+                let why = format!("{e:#}");
+                let attempts = match crate::remote_purge::record_restore_failure(&app.db, host, id, &why).await {
+                    Ok(n) => n,
+                    Err(db) => {
+                        tracing::warn!(host, bot = %id, error = %db, "could not record the restore failure; retrying next round");
+                        0
+                    }
+                };
+                tracing::warn!(host, bot = %id, attempts, error = %why, "could not restore a pending remote bot config dir; keeping its bots-trash copy");
+                if attempts == crate::remote_purge::RESTORE_GIVE_UP_AFTER {
+                    give_up_alert(app, host, id, attempts).await;
+                }
                 out.failed.insert(id.clone());
             }
         }
@@ -125,6 +153,28 @@ struct Unrestored {
     failed: HashSet<String>,
     /// 鎖忙而跳過（常態，每輪只記一筆 debug）。
     busy: HashSet<String>,
+}
+
+/// 還原成功（或已經不需要還原）：這顆的退避記號清掉（#1427）。寫不進去只記 log，下一輪照常試。
+async fn clear_backoff(app: &Arc<App>, host: &str, id: &str) {
+    if let Err(e) = crate::remote_purge::clear_restore_failure(&app.db, host, id).await {
+        tracing::warn!(host, bot = %id, error = %e, "could not clear the restore backoff mark");
+    }
+}
+
+/// 補還原連續失敗到上限（#1427）：備份留著、不再自動重試，發一則 `ops_alert` 等人工處理。同一顆同一台只發一次（key 不帶日期）。
+async fn give_up_alert(app: &Arc<App>, host: &str, id: &str, attempts: i64) {
+    let key = format!("ops_alert:daemon:remote_restore_gave_up:{host}:{id}");
+    let payload = serde_json::json!({
+        "source": "daemon",
+        "reason": "remote_restore_gave_up",
+        "subject": id,
+        "detail": format!("{host} 上的 bot {id} 補還原連續失敗 {attempts} 次，已停止自動重試；它的備份留在遠端 bots-trash，沒有過期、也不計入總量。"),
+        "action": "修好遠端的 bots/ 權限或那一段路徑後，手動還原或清掉這份備份。daemon 沒有刪任何檔。",
+    });
+    if let Err(e) = crate::supervisor::store::push_inbox(&app.db, &key, "ops_alert", None, Some(id), None, &payload).await {
+        tracing::warn!(host, bot = %id, error = %e, "could not queue the remote_restore_gave_up ops_alert");
+    }
 }
 
 /// 活著、沒有任何回收區備份的 bot，它的「已清掉」記號沒有用了：忘掉（#1406）。一句 SQL 做完，子查詢只挑

@@ -359,6 +359,8 @@ pub const SCHEMA_HISTORY: &[(i64, &str)] = &[
     (54, "0761ab4fd4f7886e"),
     // issue #1320：`projects.host`／`deleted_at` 的 trigger 把舊主機還欠著的已刪 bot 義務寫進 `remote_bot_dir_purges`。
     (55, "3337f703704eed22"),
+    // issue #1427：`remote_restore_backoff`（補還原失敗的退避：每 (主機, bot) 的連續失敗次數與下次可試的時間）。
+    (56, "08b0bd7b0cd32821"),
 ];
 pub const SCHEMA_VERSION: i64 = SCHEMA_HISTORY[SCHEMA_HISTORY.len() - 1].0;
 
