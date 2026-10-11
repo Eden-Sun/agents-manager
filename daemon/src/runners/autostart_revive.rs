@@ -20,13 +20,16 @@ fn pending_key(app: &Arc<App>) -> usize {
 
 /// 對帳一輪做完（host 的 pass 鎖已放開）之後呼叫：**丟到背景**，不讓對帳呼叫端等。
 pub(crate) fn spawn_revive(app: &Arc<App>, host: &str, lost: Vec<Lost>) {
-    if lost.is_empty() {
+    // 關機已經開始：不再替任何 bot 開 pane（#1372）；交給下一次開機的對帳。
+    if lost.is_empty() || app.shutdown.is_cancelled() {
         return;
     }
     let key = pending_key(app);
     *pending().lock().unwrap_or_else(|e| e.into_inner()).entry(key).or_default() += 1;
     let (app, host) = (app.clone(), host.to_string());
-    tokio::spawn(async move {
+    // 掛在 background_tasks 下：優雅關機的 `wait()` 會等它做完，不會在啟動做到一半時行程結束（#1372）。
+    let tracker = app.background_tasks.clone();
+    tracker.spawn(async move {
         revive(&app, &host, lost).await;
         let mut map = pending().lock().unwrap_or_else(|e| e.into_inner());
         if let Some(n) = map.get_mut(&key) {
@@ -114,13 +117,10 @@ pub(crate) async fn sweep_lost_by_pane_gone(app: &Arc<App>) {
     }
 }
 
-/// 每 30 秒掃一次 [`sweep_lost_by_pane_gone`]。
+/// 每 30 秒掃一次 [`sweep_lost_by_pane_gone`]。走共用的週期迴圈：睡覺時看 shutdown、掛在 tracker 下、panic 會退避重啟（#1372）。
 pub fn spawn_pane_gone_sweeper(app: Arc<App>) {
-    tokio::spawn(async move {
-        loop {
-            tokio::time::sleep(PANE_GONE_SWEEP_EVERY).await;
-            sweep_lost_by_pane_gone(&app).await;
-        }
+    crate::background_loop::spawn_periodic(&app, "pane gone revive sweeper", PANE_GONE_SWEEP_EVERY, PANE_GONE_SWEEP_EVERY, |app| async move {
+        sweep_lost_by_pane_gone(&app).await;
     });
 }
 
@@ -142,6 +142,10 @@ pub(crate) async fn revive(app: &Arc<App>, host: &str, lost: Vec<Lost>) {
         }
     }
     for l in lost {
+        // 關機開始後不再開下一顆（#1372）：正在做的那一顆自己收尾。
+        if app.shutdown.is_cancelled() {
+            return;
+        }
         if let Err(e) = revive_one(app, host, &l).await {
             tracing::warn!(host, bot = %l.bot_id, error = ?e, "autostart revive: could not decide for this bot; leaving it to the bot_stopped probe");
         }
