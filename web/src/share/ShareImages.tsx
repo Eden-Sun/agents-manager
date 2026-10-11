@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
 import type { ShareClient } from './shareApi'
 import { canShareFile, displayName, isSvgName, pngName, shareOrSave } from './shareImage'
-import { pngOf, rasterOf, type PngResult } from './shareImageCache'
+import { pngRequest, rasterRequest, type PngResult } from './shareImageCache'
 import type { ShareFile } from './shareModel'
 
 /** 檔案換了內容（同名覆寫）預覽要跟著換：版本變了就換網址（舊 daemon 沒有 version，退回時間＋大小）。 */
@@ -16,11 +16,13 @@ function usePng(client: ShareClient, file: ShareFile, enabled: boolean): PngResu
   useEffect(() => {
     if (!enabled) return
     let alive = true
-    void pngOf(client, name, version).then((r) => {
+    const request = pngRequest(client, name, version)
+    void request.promise.then((r) => {
       if (alive) setRes({ key: `${name}\n${version}`, r })
     })
     return () => {
       alive = false
+      request.release()
     }
   }, [client, name, version, enabled])
   return res?.key === key ? res.r : 'loading'
@@ -34,7 +36,8 @@ function useRaster(client: ShareClient, file: ShareFile, enabled: boolean): PngR
   useEffect(() => {
     if (!enabled) return
     let alive = true
-    rasterOf(client, name, fileVersion(file)).then(
+    const request = rasterRequest(client, name, fileVersion(file))
+    request.promise.then(
       (blob) => {
         if (alive) setRes({ key, r: { blob } })
       },
@@ -44,6 +47,7 @@ function useRaster(client: ShareClient, file: ShareFile, enabled: boolean): PngR
     )
     return () => {
       alive = false
+      request.release()
     }
   }, [client, name, key, enabled])
   return res?.key === key ? res.r : 'loading'

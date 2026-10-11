@@ -839,6 +839,30 @@ test('檔案清單重抓重疊時只採用最新開始的回應', async () => {
   assert.equal(document.querySelector('.sh-file-size'), null, '過期清單不能讓已刪檔案復活')
 })
 
+test('分享頁元件卸載後會取消還在等候的圖片下載', async () => {
+  const calls: string[] = []
+  let releaseFirst!: (blob: Blob) => void
+  const files = ['one.png', 'two.png', 'three.png'].map((name) => ({ name, size: 1, modified_at: null, version: 'v1' }))
+  const client: ShareClient = {
+    ...clientWith(async () => page([]), () => () => {}),
+    async files() {
+      return files
+    },
+    fileBlob(name) {
+      calls.push(name)
+      if (name === 'one.png') return new Promise((resolve) => (releaseFirst = resolve))
+      return Promise.resolve(new Blob(['unused']))
+    },
+  }
+  await mount(<ShareApp client={client} />)
+  await settle(100)
+  assert.deepEqual(calls, ['one.png'], '第一張卡住時，其他圖片仍在有界佇列中')
+  await unmountAll()
+  releaseFirst(new Blob(['active']))
+  await settle(50)
+  assert.deepEqual(calls, ['one.png'], '卸載後不會啟動已排隊的圖片')
+})
+
 test('第一次載入失敗而 SSE 連著：自己重試，不會停在「載入中…」', { timeout: 20_000 }, async () => {
   let calls = 0
   const client = clientWith(
