@@ -646,7 +646,7 @@ function RemoteCargoPanel() {
       ) : null}
       <div className="form-actions">
         {enabled ? (
-          <button type="button" className="btn" disabled={busy || blocked || !host.trim() || !user.trim()} onClick={() => void test()}>
+          <button type="button" className="btn" disabled={busy || blocked || loadFailed || !host.trim() || !user.trim()} onClick={() => void test()}>
             測試連線
           </button>
         ) : null}
