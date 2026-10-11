@@ -45,7 +45,7 @@ setup() {
   mkdir -p "$ROOT/agm/bin" "$HOME/.config/agents-manager/outbox" "$HOME/.ssh"
   cp "$HERE/outbox-gc.sh" "$ROOT/agm/bin/outbox-gc.sh"
   OB="$HOME/.config/agents-manager/outbox"; LOG="$ROOT/agm/outbox-gc.log"; : > "$LOG"
-  unset AM_OUTBOX_ROOT OUTBOX_MAX_AGE_MIN OUTBOX_SHARE_KEEP_DAYS OUTBOX_SHARE_CAP_BYTES OUTBOX_SHARE_CAP_FILES
+  unset AM_OUTBOX_ROOT AM_DATA_DIR OUTBOX_MAX_AGE_MIN OUTBOX_SHARE_KEEP_DAYS OUTBOX_SHARE_CAP_BYTES OUTBOX_SHARE_CAP_FILES
   # 分享名單的資料庫（#1291）：檔名是 daemon 的（${SHARE_DB_NAME}，見上面從 startup.rs 取得的值），放在資料目錄底下。
   # 不從腳本拿，腳本寫錯檔名測試才抓得到（#1391）。結構只取 gc 會查的欄位。
   sqlite3 "$HOME/.config/agents-manager/${SHARE_DB_NAME}" "CREATE TABLE projects (id TEXT PRIMARY KEY, deleted_at TEXT); CREATE TABLE bots (id TEXT PRIMARY KEY, project_id TEXT NOT NULL, deleted_at TEXT); CREATE TABLE shared_bots (bot_id TEXT PRIMARY KEY);"
@@ -348,6 +348,68 @@ echo x > "$OB/plain/old.txt"; old "$OB/plain/old.txt"
 equals "只有別的檔名的 DB：exit 1" "$(run)" "1"
 exists "只有別的檔名的 DB：一般過期檔也不刪" "$OB/plain/old.txt"
 check  "只有別的檔名的 DB：log 寫明拒絕整輪" "拒絕整輪清理" "$LOG"
+teardown
+
+# 6. 資料目錄跟 daemon 同一個來源（#1430）：AM_DATA_DIR、設定檔的 [server] data_dir、預設值，順序與 daemon 的 data_dir() 一致
+#    （[server] data_dir > AM_DATA_DIR > ~/.config/agents-manager）。資料目錄改過時，分享名單照讀得到、outbox 也在那裡清；
+#    名單讀不到就整輪拒絕，不回頭去讀預設位置的 DB（那一份可能是別的環境的）。
+dd_make() { # 在資料目錄 $1 建 DB（shared 分享中、plain 不分享）與兩個 bot 目錄，各放一個過期檔
+  local dd=$1
+  mkdir -p "$dd/outbox/shared" "$dd/outbox/plain"
+  sqlite3 "$dd/${SHARE_DB_NAME}" "CREATE TABLE IF NOT EXISTS projects (id TEXT PRIMARY KEY, deleted_at TEXT); CREATE TABLE IF NOT EXISTS bots (id TEXT PRIMARY KEY, project_id TEXT NOT NULL, deleted_at TEXT); CREATE TABLE IF NOT EXISTS shared_bots (bot_id TEXT PRIMARY KEY); INSERT OR IGNORE INTO projects (id) VALUES ('p-shared'); INSERT OR IGNORE INTO bots (id, project_id) VALUES ('shared', 'p-shared'); INSERT OR IGNORE INTO shared_bots (bot_id) VALUES ('shared');"
+  echo x > "$dd/outbox/shared/old.txt"; old "$dd/outbox/shared/old.txt"
+  echo x > "$dd/outbox/plain/old.txt"; old "$dd/outbox/plain/old.txt"
+}
+setup
+ROOT_DD="$ROOT/data"
+dd_make "$ROOT_DD"
+mkdir -p "$OB/plain"; echo x > "$OB/plain/old.txt"; old "$OB/plain/old.txt"
+equals "AM_DATA_DIR 指到別處：exit 0" "$(AM_DATA_DIR="$ROOT_DD" run)" "0"
+exists "AM_DATA_DIR 的分享中 bot 的過期檔留下（名單從那個 DB 讀）" "$ROOT_DD/outbox/shared/old.txt"
+gone   "AM_DATA_DIR 的一般過期檔照刪（outbox 也在那個資料目錄）" "$ROOT_DD/outbox/plain/old.txt"
+exists "預設位置的 outbox 不碰（不是這次的資料目錄）" "$OB/plain/old.txt"
+teardown
+
+setup
+ROOT_DD="$ROOT/cfgdata"
+dd_make "$ROOT_DD"
+printf '[server]\ndata_dir = "%s"\n' "$ROOT_DD" > "$HOME/.config/agents-manager/config.toml"
+equals "設定檔 [server] data_dir（絕對路徑）：exit 0" "$(run)" "0"
+exists "設定檔指到的資料目錄：分享中的過期檔留下" "$ROOT_DD/outbox/shared/old.txt"
+gone   "設定檔指到的資料目錄：一般過期檔照刪" "$ROOT_DD/outbox/plain/old.txt"
+teardown
+
+setup
+dd_make "$HOME/.config/agents-manager/rel"
+printf '[server]\ndata_dir = "rel"\n' > "$HOME/.config/agents-manager/config.toml"
+equals "設定檔 data_dir 是相對路徑：依設定檔所在目錄解析" "$(run)" "0"
+exists "相對路徑解析到設定檔旁邊：分享中的過期檔留下" "$HOME/.config/agents-manager/rel/outbox/shared/old.txt"
+gone   "相對路徑解析到設定檔旁邊：一般過期檔照刪" "$HOME/.config/agents-manager/rel/outbox/plain/old.txt"
+teardown
+
+setup
+dd_make "$HOME/tilde-data"
+printf '[server]\ndata_dir = "~/tilde-data"\n' > "$HOME/.config/agents-manager/config.toml"
+equals "設定檔 data_dir 的 ~ 展開成 HOME：exit 0" "$(run)" "0"
+exists "~ 展開後的資料目錄：分享中的過期檔留下" "$HOME/tilde-data/outbox/shared/old.txt"
+gone   "~ 展開後的資料目錄：一般過期檔照刪" "$HOME/tilde-data/outbox/plain/old.txt"
+teardown
+
+setup
+dd_make "$ROOT/cfgdata"
+dd_make "$ROOT/envdata"
+rm -f "$ROOT/envdata/${SHARE_DB_NAME}"
+printf '[server]\ndata_dir = "%s"\n' "$ROOT/cfgdata" > "$HOME/.config/agents-manager/config.toml"
+equals "設定檔與 AM_DATA_DIR 同時有：設定檔優先（exit 0）" "$(AM_DATA_DIR="$ROOT/envdata" run)" "0"
+exists "設定檔優先：分享中的過期檔留下（名單來自設定檔指到的 DB）" "$ROOT/cfgdata/outbox/shared/old.txt"
+teardown
+
+setup
+dd_make "$HOME/.config/agents-manager"
+mkdir -p "$ROOT/empty-data/outbox/plain"; echo x > "$ROOT/empty-data/outbox/plain/old.txt"; old "$ROOT/empty-data/outbox/plain/old.txt"
+equals "資料目錄裡沒有 DB、預設位置有：exit 1，不回頭讀預設位置的 DB" "$(AM_DATA_DIR="$ROOT/empty-data" run)" "1"
+exists "沒讀到名單：資料目錄的一般過期檔也不刪" "$ROOT/empty-data/outbox/plain/old.txt"
+check  "沒讀到名單：log 寫明拒絕整輪" "拒絕整輪清理" "$LOG"
 teardown
 
 echo "$PASS passed, $FAIL failed"
