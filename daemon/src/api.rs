@@ -13466,6 +13466,7 @@ mod per_principal_auth_tests {
         assert_eq!(db::bot(&e.app.db, &parent.id).await.unwrap().unwrap().hook_token, old, "refusal keeps the old proof valid");
 
         e.herdr.set_agent("spawned-child", "w1:p-unadopted-child", false);
+        e.herdr.live_pane("w1:p-unadopted-child", crate::testing::LivePane { rows: Some(40), ..Default::default() });
         let finish = spawn_finish(e.app.clone(), &parent.id, &old, &permit, "w1:p-unadopted-child").await;
         assert!(finish.starts_with("HTTP/1.1 200"), "successful pane creation must be registered before releasing its permit: {finish}");
         let rotate = raw(
@@ -13488,7 +13489,9 @@ mod per_principal_auth_tests {
         assert!(begin.starts_with("HTTP/1.1 200"), "{begin}");
         let permit = response_json(&begin)["permit_id"].as_str().unwrap().to_string();
         e.herdr.set_agent("replay-a", "w1:p-replay-a", false);
+        e.herdr.live_pane("w1:p-replay-a", crate::testing::LivePane { rows: Some(40), ..Default::default() });
         e.herdr.set_agent("replay-b", "w1:p-replay-b", false);
+        e.herdr.live_pane("w1:p-replay-b", crate::testing::LivePane { rows: Some(40), ..Default::default() });
 
         // Both requests pass the permit check before either finishes its async pane registration.
         let (a, b) = tokio::join!(
