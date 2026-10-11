@@ -141,5 +141,8 @@ export function probabilityText(row: JudgeShadowRow): string {
 /** bot 名（store 找得到用名字）；找不到顯示 id 前 6 碼；沒有 bot 是 `—`。 */
 export function botLabel(id: string | null, bots: readonly { id: string; name: string }[]): string {
   if (id === null) return '—'
+  // 開票那條的候選沒有 bot，bot_id 是 issue:<號碼>（release_triage 開票後的撞題檢查）；取前 6 碼會只剩 issue:。
+  const issue = /^issue:(\d+)$/.exec(id)
+  if (issue) return `#${issue[1]}（開票）`
   return bots.find((b) => b.id === id)?.name ?? id.slice(0, 6)
 }
