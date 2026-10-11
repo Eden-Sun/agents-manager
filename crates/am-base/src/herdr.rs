@@ -514,10 +514,6 @@ impl HerdrClient {
         Ok(())
     }
 
-    pub async fn pane_rects(&self, workspace_id: &str) -> Result<Vec<(String, u32, u32)>> {
-        self.rects(json!({"workspace_id": workspace_id})).await
-    }
-
     /// An empty foreground answers with an empty list, so "no argv" and "no answer" are the same.
     pub async fn pane_process_info(&self, pane_id: &str) -> Result<Vec<ProcessInfo>> {
         let v = self.call("pane.process_info", json!({"pane_id": pane_id})).await?;
