@@ -128,17 +128,44 @@ fn spawn_statusline(app: &Arc<App>, b: HookBody) {
 
 /// SPEC §11.4.4.
 pub async fn drain_remote_coalesced(app: &Arc<App>, host: &str, bot_id: &str) -> Result<usize> {
-    {
-        let mut g = hookrecv::drain_gates().lock().unwrap();
-        let now = std::time::Instant::now();
-        hookrecv::prune_gates(&mut g, now);
-        let e = g.entry(bot_id.to_string()).or_default();
-        if !hookrecv::gate_admit(e, now) {
-            tracing::debug!(bot_id, host, "drain merged into the one in the window");
-            return Ok(0);
-        }
+    if !admit_drain(host, bot_id) {
+        return Ok(0);
     }
     let n = hookrecv::drain_remote(app, host, bot_id).await?;
+    finish_drain(app, host, bot_id, n).await
+}
+
+/// 定時掃描用的版本（#1417）：遠端 bot 握著鎖（批次重啟、等就緒）就跳過、不排隊，spool 留給下一輪收。
+/// 順序是先試鎖、再過閘門：跳過的不佔閘門，否則同一個視窗裡的觸發會被併進一次根本沒跑的 drain。
+pub async fn drain_remote_coalesced_if_idle(app: &Arc<App>, host: &str, bot_id: &str) -> Result<usize> {
+    let lock = app.bot_lock(bot_id).await;
+    let Ok(guard) = lock.try_lock() else {
+        tracing::debug!(bot_id, host, "remote spool: bot busy; next scan retries");
+        return Ok(0);
+    };
+    if !admit_drain(host, bot_id) {
+        return Ok(0);
+    }
+    let n = hookrecv::drain_remote_locked(app, host, bot_id).await?;
+    drop(guard);
+    finish_drain(app, host, bot_id, n).await
+}
+
+/// 閘門：視窗內的觸發併進已經在跑的那一次；`false` 就什麼都不做。
+fn admit_drain(host: &str, bot_id: &str) -> bool {
+    let mut g = hookrecv::drain_gates().lock().unwrap();
+    let now = std::time::Instant::now();
+    hookrecv::prune_gates(&mut g, now);
+    let e = g.entry(bot_id.to_string()).or_default();
+    if !hookrecv::gate_admit(e, now) {
+        tracing::debug!(bot_id, host, "drain merged into the one in the window");
+        return false;
+    }
+    true
+}
+
+/// 一次 drain 跑完之後：視窗內被併進來的要補跑一次，空的要稍後再試一次，然後回傳這次收了幾則。
+async fn finish_drain(app: &Arc<App>, host: &str, bot_id: &str, n: usize) -> Result<usize> {
     let again = {
         let mut g = hookrecv::drain_gates().lock().unwrap();
         hookrecv::gate_take_again(g.entry(bot_id.to_string()).or_default())
@@ -191,7 +218,7 @@ async fn spool_scanner_loop(app: Arc<App>) {
 }
 
 /// 一輪掃描：本機 spool 先收，再把每台遠端主機各自掃。主機之間併行（#1067）：一台 ssh 慢、或它的某顆 bot 卡住，
-/// 不拖住別台；下一輪要等這一輪的所有主機都回來。
+/// 不拖住別台；下一輪要等這一輪的所有主機都回來。本機與遠端的 bot 握著鎖都只 try-lock、鎖被佔就跳過，spool 留給下一輪（#1417）。
 async fn scan_once(app: &Arc<App>) {
     replay_local_spools(app).await;
     let mut scans = tokio::task::JoinSet::new();
@@ -238,7 +265,7 @@ async fn scan_remote_host(app: Arc<App>, conn: Arc<crate::hosts::HostConn>) {
         }
         let drained = tokio::select! {
             _ = app.shutdown.cancelled() => return,
-            result = drain_remote_coalesced(&app, &conn.name, &b.id) => result,
+            result = drain_remote_coalesced_if_idle(&app, &conn.name, &b.id) => result,
         };
         if let Err(e) = drained {
             tracing::debug!(bot = %b.name, host = %conn.name, error = ?e, "scanned drain failed");
