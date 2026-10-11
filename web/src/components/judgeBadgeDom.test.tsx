@@ -135,3 +135,103 @@ test('帳本重抓最短 60 秒一次：連續要求只打一次；強制重抓�
   })
   assert.equal(hits['/judge/shadow'], 2, '強制重抓要打')
 })
+
+/** 每則測試開頭還原：帳本 store 與關掉紀錄（localStorage）都不跟別則共用。 */
+function freshBadgeState() {
+  localStorage.removeItem(DISMISSED_KEY)
+}
+
+const pressKey = (key: string, init: KeyboardEventInit = {}) =>
+  act(async () => {
+    document.dispatchEvent(new KeyboardEvent('keydown', { key, bubbles: true, ...init }))
+  })
+
+const pressMouseDown = (target: Element) =>
+  act(async () => {
+    target.dispatchEvent(new MouseEvent('mousedown', { bubbles: true }))
+  })
+
+async function openBadge(root: HTMLElement) {
+  await click(root.querySelector('.judge-badge')!)
+  await settle(20)
+  return root.querySelector<HTMLElement>('.judge-badge-pop')
+}
+
+test('打開後焦點進浮層', async () => {
+  freshBadgeState()
+  seed([row({ id: 'focus-1', regex_verdict: 'stuck_queued', at: ago(1), jev_is_live_ui: 0.9 })])
+  const root = await mount(<JudgeBadge botId="bot-a" />)
+  const pop = await openBadge(root)
+  assert.ok(pop, '點了要開浮層')
+  assert.ok(pop.contains(document.activeElement), '焦點要在浮層裡，讀屏才知道多了一個 dialog')
+})
+
+test('Esc 關掉浮層、焦點回到徽章鈕', async () => {
+  freshBadgeState()
+  seed([row({ id: 'esc-1', regex_verdict: 'stuck_queued', at: ago(1), jev_is_live_ui: 0.9 })])
+  const root = await mount(<JudgeBadge botId="bot-a" />)
+  assert.ok(await openBadge(root))
+  await pressKey('Escape')
+  await settle(20)
+  assert.equal(root.querySelector('.judge-badge-pop'), null, 'Esc 要關掉浮層')
+  assert.equal(document.activeElement, root.querySelector('.judge-badge'), '焦點回到徽章鈕，不掉到 body')
+  assert.equal(useJudgeLedger.getState().dismissed.has('esc-1'), false, 'Esc 只關浮層，不是把這一則永久收掉')
+})
+
+test('點浮層外面關掉、點浮層裡面不關', async () => {
+  freshBadgeState()
+  seed([row({ id: 'out-1', regex_verdict: 'stuck_queued', at: ago(1), jev_is_live_ui: 0.9 })])
+  const root = await mount(<JudgeBadge botId="bot-a" />)
+  const pop = await openBadge(root)
+  assert.ok(pop)
+  await pressMouseDown(pop.querySelector('p')!)
+  await settle(20)
+  assert.ok(root.querySelector('.judge-badge-pop'), '點浮層裡面不關')
+  await pressMouseDown(document.body)
+  await settle(20)
+  assert.equal(root.querySelector('.judge-badge-pop'), null, '點外面要關掉')
+})
+
+test('輸入法組字中的 Esc 不關', async () => {
+  freshBadgeState()
+  seed([row({ id: 'ime-1', regex_verdict: 'stuck_queued', at: ago(1), jev_is_live_ui: 0.9 })])
+  const root = await mount(<JudgeBadge botId="bot-a" />)
+  assert.ok(await openBadge(root))
+  await pressKey('Escape', { isComposing: true })
+  await settle(20)
+  assert.ok(root.querySelector('.judge-badge-pop'), '組字中的 Esc 是給輸入法的，不能關浮層')
+})
+
+test('關掉這則後還有次新的一則：焦點停在徽章鈕上', async () => {
+  freshBadgeState()
+  seed([
+    row({ id: 'next-a', regex_verdict: 'stuck_queued', at: ago(1), jev_is_live_ui: 0.9 }),
+    row({ id: 'next-b', regex_verdict: 'stuck_queued', at: ago(2), jev_is_live_ui: 0.9 }),
+  ])
+  const root = await mount(<JudgeBadge botId="bot-a" />)
+  const pop = await openBadge(root)
+  assert.ok(pop)
+  const dismiss = [...pop.querySelectorAll('button')].find((b) => b.textContent?.includes('關掉這則'))!
+  await click(dismiss)
+  await settle(20)
+  assert.ok(root.querySelector('.judge-badge'), '次新的那一則接上，徽章還在')
+  assert.equal(document.activeElement, root.querySelector('.judge-badge'), '焦點回到徽章鈕（不是 body）')
+})
+
+test('關掉這則後沒有別的一則：焦點交給最近的可聚焦祖先（列），不掉到 body', async () => {
+  freshBadgeState()
+  seed([row({ id: 'last-1', regex_verdict: 'stuck_queued', at: ago(1), jev_is_live_ui: 0.9 })])
+  const host = await mount(
+    <div tabIndex={0} data-testid="row-host">
+      <JudgeBadge botId="bot-a" />
+    </div>,
+  )
+  const pop = await openBadge(host)
+  assert.ok(pop)
+  const dismiss = [...pop.querySelectorAll('button')].find((b) => b.textContent?.includes('關掉這則'))!
+  await click(dismiss)
+  await settle(20)
+  const listRow = host.querySelector<HTMLElement>('[data-testid="row-host"]')!
+  assert.equal(host.querySelector('.judge-badge'), null, '最後一則關掉，徽章整個不見')
+  assert.equal(document.activeElement, listRow, '焦點交給列（tabIndex 祖先），不掉到 body')
+})
