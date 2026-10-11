@@ -21,11 +21,14 @@ const { MemPopover } = await import('./MemPopover')
 function stubMem() {
   const realFetch = globalThis.fetch
   const gates: { resolve: (body: unknown) => void }[] = []
-  globalThis.fetch = (async (input: string) => {
+  globalThis.fetch = (async (input: string, init?: RequestInit) => {
     const path = String(input).replace(/^\/api/, '')
     if (path === '/session') return new Response(JSON.stringify({ token: 'test-token' }), { status: 200 })
     if (!path.startsWith('/mem/processes')) return new Response('{}', { status: 404 })
-    const body = await new Promise<unknown>((resolve) => gates.push({ resolve }))
+    const body = await new Promise<unknown>((resolve, reject) => {
+      gates.push({ resolve })
+      init?.signal?.addEventListener('abort', () => reject(init.signal?.reason ?? new DOMException('Aborted', 'AbortError')), { once: true })
+    })
     return new Response(JSON.stringify(body), { status: 200 })
   }) as unknown as typeof fetch
   return { gates, restore: () => void (globalThis.fetch = realFetch) }
@@ -66,15 +69,14 @@ test('上一趟還沒回來不發第二趟：到點也不疊，前一趟回來�
   try {
     await openPopover()
     assert.equal(f.gates.length, 1, '點開就抓一趟')
-    await act(async () => timers.clock.advance(15_000))
-    await act(async () => timers.clock.advance(45_000))
-    assert.equal(f.gates.length, 1, '第一趟還在路上：到點也不發第二趟')
+    await act(async () => timers.clock.advance(10_000))
+    assert.equal(f.gates.length, 1, '第一趟尚未逾時：不發重疊請求')
     f.gates[0]!.resolve(snap('bot-one'))
     await flush()
     await act(async () => timers.clock.advance(15_000))
     assert.equal(f.gates.length, 2, '第一趟回來後，下一趟照排')
-    await act(async () => timers.clock.advance(45_000))
-    assert.equal(f.gates.length, 2, '第二趟還在路上也不疊')
+    await act(async () => timers.clock.advance(10_000))
+    assert.equal(f.gates.length, 2, '第二趟尚未逾時：不發重疊請求')
   } finally {
     timers.restore()
     f.restore()
@@ -133,5 +135,31 @@ test('晚回來的舊清單不蓋掉新的：兩趟都在路上，先回來的�
   } finally {
     timers.restore()
     f.restore()
+  }
+})
+
+test('單趟請求逾時後回前景可補抓，之後輪詢也會繼續', async () => {
+  const f = stubMem()
+  const timers = installManualTimers()
+  try {
+    await openPopover()
+    assert.equal(f.gates.length, 1, '點開就發出第一趟')
+    await act(async () => timers.clock.advance(15_000))
+    await flush()
+
+    setVisibility('visible')
+    await act(async () => document.dispatchEvent(new Event('visibilitychange')))
+    await flush()
+    assert.equal(f.gates.length, 2, '首趟逾時後 inflight 歸零，回前景立即補抓')
+
+    f.gates[1]!.resolve(snap('bot-after-timeout'))
+    await flush()
+    await act(async () => timers.clock.advance(15_000))
+    await flush()
+    assert.equal(f.gates.length, 3, '補抓完成後週期輪詢繼續')
+  } finally {
+    timers.restore()
+    f.restore()
+    delete (document as unknown as { visibilityState?: string }).visibilityState
   }
 })
