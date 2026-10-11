@@ -181,7 +181,7 @@ async fn finish_drain(app: &Arc<App>, host: &str, bot_id: &str, n: usize) -> Res
     if let Some(d) = delay {
         let (app2, host2, bot2) = (app.clone(), host.to_string(), bot_id.to_string());
         let tasks = app.background_tasks.clone();
-        tasks.spawn(async move {
+        crate::background_loop::spawn_named(&tasks, "remote drain follow-up", async move {
             tokio::select! {
                 _ = app2.shutdown.cancelled() => return,
                 _ = tokio::time::sleep(d) => {}

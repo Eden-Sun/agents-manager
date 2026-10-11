@@ -12,7 +12,7 @@ pub fn spawn_ticker(app: &Arc<App>) {
     }
     let app = app.clone();
     let tasks = app.background_tasks.clone();
-    tasks.spawn(async move {
+    crate::background_loop::spawn_named(&tasks, "share budget ticker", async move {
         let mut every = tokio::time::interval(budget::REFRESH_EVERY);
         loop {
             tokio::select! {

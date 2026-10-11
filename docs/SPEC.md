@@ -197,6 +197,9 @@ React 前端 (Vite) ◄── REST + WebSocket ──► Rust daemon (axum) ◄�
 - **背景迴圈一律走 `background_loop`**（issue #924）：常駐的輪詢／監看迴圈用 `spawn_restartable`（要跨輪保留狀態或有自己的等待條件）或其上的薄 helper `spawn_periodic`（固定週期：`first_delay` 之後每 `every` 一次）。
   共同保證：掛在 `background_tasks` 下、一輪 panic 之後退避重啟（1/2/5/15/30 秒）、睡覺時看 `shutdown`（關機不必等滿週期，現行那一輪有 30 秒寬限才 abort）。
   一次性的背景工作（連上時的工具偵測、GitHub origin 掃描、遠端 purge／權限收緊）也掛進 `background_tasks`（關機的 `wait()` 等得到），但不重啟。
+  掛進 `background_tasks` 的工作都用 `spawn_named(tracker, name, fut)` 登記名字（#1463）。優雅關機的等待有上限 30 秒（`finish_serve`）：逾時就 warn 列出還沒結束的名字、繼續關機，不靠 systemd 的 TimeoutStopSec 強殺。
+  被放棄的工作都能安全中斷，下次開機補齊：補開（`autostart_revive`）沒寫決定的 lost run 由定時掃描或 `bot_stopped` 探針重做；spool 的 ack 沒送出的遠端 spool 留在遠端，下次掃描重收（去重擋重複，§4.4）；分享保留標記與 ticker 本來就看 `shutdown` 會停。
+  `spawn_restartable`／`spawn_periodic` 的迴圈已經登記名字；`am-supervisor` 的 `idle_sleep` 清掃工作目前沒登記（它不能直接引用 `background_loop`，見 ports 的邊界檢查），逾時 log 不會列它。
   `events::spawn_global_for_session`（訂閱迴圈，以 `(host, session)` 為鍵 abort 舊的再起新的）另有自己的退避重連，不在此列。
 - **時間戳只有一種格式**（issue #101）：RFC3339、UTC、固定到毫秒、以 `Z` 結尾（`2026-09-18T07:00:00.000Z`），
   一律由 `db::now()` / `db::iso_in()` / `db::iso_at()` 產生，生產程式碼不自己 `to_rfc3339_opts`（有測試掃原始碼擋著）。

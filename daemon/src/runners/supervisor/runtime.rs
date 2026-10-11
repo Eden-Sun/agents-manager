@@ -57,7 +57,7 @@ pub(crate) fn spawn(app: Arc<App>, generation: i64) {
     }
     let latch = LiveGenerationGuard { generation };
     let loop_app = app.clone();
-    app.background_tasks.spawn(async move {
+    crate::background_loop::spawn_named(&app.background_tasks, "supervisor controller", async move {
         let _latch = latch;
         let supervisor = loop_app.clone();
         supervisor.restart_loop("supervisor controller", move || {

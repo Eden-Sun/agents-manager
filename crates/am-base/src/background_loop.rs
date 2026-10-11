@@ -17,6 +17,42 @@ const PANIC_RETRY: [Duration; 5] = [
 const PANIC_RETRY: [Duration; 5] = [Duration::from_millis(5); 5];
 const SHUTDOWN_GRACE: Duration = Duration::from_secs(30);
 
+/// 掛在 App 的 task tracker 下、還沒結束的工作名字（#1463）。關機等待逾時時用它記 log，讓人知道是哪一個卡住。
+/// 行程裡只有一個 App（測試裡多個 App 共用這張表，名字只拿來記 log 與比對）。
+fn unfinished() -> &'static std::sync::Mutex<std::collections::BTreeMap<u64, &'static str>> {
+    static V: std::sync::OnceLock<std::sync::Mutex<std::collections::BTreeMap<u64, &'static str>>> = std::sync::OnceLock::new();
+    V.get_or_init(Default::default)
+}
+
+/// 登記的守衛：工作結束、被 abort、或 panic 時（future 被丟掉）都會把登記拿掉。
+struct Registered(u64);
+
+impl Drop for Registered {
+    fn drop(&mut self) {
+        unfinished().lock().unwrap_or_else(|e| e.into_inner()).remove(&self.0);
+    }
+}
+
+/// 掛進 `tracker` 下的工作，並登記名字（#1463）。跟直接 `tracker.spawn` 行為一樣，只多了名字可以在關機逾時時列出來。
+pub fn spawn_named<F>(tracker: &tokio_util::task::TaskTracker, name: &'static str, fut: F) -> tokio::task::JoinHandle<F::Output>
+where
+    F: Future + Send + 'static,
+    F::Output: Send + 'static,
+{
+    static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let id = NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    unfinished().lock().unwrap_or_else(|e| e.into_inner()).insert(id, name);
+    tracker.spawn(async move {
+        let _registered = Registered(id);
+        fut.await
+    })
+}
+
+/// 現在還沒結束的工作名字（關機等待逾時時記進 log）。
+pub fn unfinished_names() -> Vec<&'static str> {
+    unfinished().lock().unwrap_or_else(|e| e.into_inner()).values().copied().collect()
+}
+
 /// Start a loop under the App task tracker. Panics restart with bounded backoff; shutdown gives
 /// the current pass time to leave at its next cancellation check before aborting it as a last resort.
 pub fn spawn_restartable<F, Fut>(app: &(impl crate::capabilities::BgTasks + crate::capabilities::Shutdown), name: &'static str, factory: F)
@@ -28,7 +64,7 @@ where
         return;
     }
     let shutdown = app.shutdown().clone();
-    app.background_tasks().spawn(async move {
+    spawn_named(app.background_tasks(), name, async move {
         restart_loop(shutdown, name, factory).await;
     });
 }

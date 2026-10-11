@@ -45,7 +45,7 @@ pub fn tick(app: &Arc<App>) {
     };
     let app = app.clone();
     let tasks = app.background_tasks.clone();
-    tasks.spawn(async move {
+    crate::background_loop::spawn_named(&tasks, "primary keep warm", async move {
         let _guard = guard;
         crate::app_ports_r2a8::primary_keep_warm_sweep(&app).await;
     });
