@@ -416,7 +416,8 @@ mod tests {
         sqlx::query("PRAGMA foreign_keys=ON").execute(&mut *conn).await.unwrap();
         drop(conn);
 
-        let recovered = tokio::time::timeout(std::time::Duration::from_secs(2), async {
+        // 等的是背景重試（DB 讀寫＋emit）：上限只是保險，平行負載下 2 秒會誤紅（#1274）。壞掉時 30 秒後照樣紅。
+        let recovered = tokio::time::timeout(std::time::Duration::from_secs(30), async {
             loop {
                 if let Ok(event) = turn_events.recv().await {
                     if event.turn_id == terminal { break event; }
@@ -470,7 +471,8 @@ mod tests {
             });
         };
         assert_eq!(rearm_queue_retries_with(&restarted, fire).await.unwrap(), 1);
-        let (woken, flushed) = tokio::time::timeout(std::time::Duration::from_secs(2), rx.recv()).await
+        // 等的是 spawn 出去的整趟 flush（拿鎖、DB、herdr RPC）：上限只是保險（#1274）。
+        let (woken, flushed) = tokio::time::timeout(std::time::Duration::from_secs(30), rx.recv()).await
             .expect("a durable queued row is retried after restart")
             .expect("the retry callback reports the bot");
         assert_eq!(woken, bot.id, "the owner is resolved from the recovered DB row");
