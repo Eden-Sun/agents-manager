@@ -219,11 +219,24 @@ fn sweep_due(last_unix: i64, now_unix: i64) -> bool {
     since < 0 || since >= 60
 }
 
-/// 上一輪掃描的時間，每個資料庫一格（#1325）。以前是全行程共用一個 `static`：另一顆實例（同一行程裡的第二份 App、
-/// 測試的 fixture）剛掃過，就會把這一顆壓掉一分鐘，而且反過來也一樣，兩邊會互相餓死。
-fn last_sweeps() -> &'static std::sync::Mutex<std::collections::HashMap<String, i64>> {
-    static LAST: std::sync::OnceLock<std::sync::Mutex<std::collections::HashMap<String, i64>>> = std::sync::OnceLock::new();
-    LAST.get_or_init(Default::default)
+/// 掃描失敗後多久再試（秒）。DB 一時讀不到時短退避，不冷卻整分鐘（#1326）。
+const RETRY_AFTER_FAILURE_SECS: i64 = 3;
+
+/// 每個資料庫各一格的掃描狀態（#1325）。以前是全行程共用一個 `static`：另一顆實例（同一行程裡的第二份 App、
+/// 測試的 fixture）剛掃過，就會把這一顆壓掉一分鐘，反過來也一樣。
+#[derive(Clone, Copy, Default)]
+struct SweepSlot {
+    /// 有人正在掃這一格：別的呼叫者直接走，同一格同時只會有一個在掃（#1326）。
+    running: bool,
+    /// 上一輪「真的掃完」的時間（unix 秒）。只有成功才算數。
+    last_ok: i64,
+    /// 上一輪失敗的時間（unix 秒）：DB 還沒恢復就短退避，不等滿一分鐘。
+    last_failed: i64,
+}
+
+fn sweep_slots() -> &'static std::sync::Mutex<std::collections::HashMap<String, SweepSlot>> {
+    static SLOTS: std::sync::OnceLock<std::sync::Mutex<std::collections::HashMap<String, SweepSlot>>> = std::sync::OnceLock::new();
+    SLOTS.get_or_init(Default::default)
 }
 
 /// 鍵：資料庫檔案的路徑。記憶體資料庫沒有檔名，就用連線池的位址區分。
@@ -237,16 +250,60 @@ fn sweep_key(pool: &sqlx::SqlitePool) -> String {
     }
 }
 
-/// controller 每個 tick 呼叫；自己節流成一分鐘一次（每個資料庫各自一分鐘）。
+/// 這一輪怎麼結束。只有 `Completed`、`Failed` 會寫時間；其餘（呼叫端的 future 被取消）當作沒掃完。
+#[derive(Clone, Copy)]
+enum SweepEnd {
+    Completed,
+    Failed,
+    Cancelled,
+}
+
+/// 這一格的掃描權。不管怎麼離開（正常、失敗、被取消、panic）都在 `Drop` 裡放掉 `running`，這一格不會卡死。
+struct SweepClaim {
+    key: String,
+    now: i64,
+    end: SweepEnd,
+}
+
+impl Drop for SweepClaim {
+    fn drop(&mut self) {
+        let mut slots = sweep_slots().lock().unwrap_or_else(|e| e.into_inner());
+        let slot = slots.entry(self.key.clone()).or_default();
+        slot.running = false;
+        match self.end {
+            SweepEnd::Completed => slot.last_ok = self.now,
+            SweepEnd::Failed => slot.last_failed = self.now,
+            SweepEnd::Cancelled => {}
+        }
+    }
+}
+
+/// 拿這一格的掃描權：沒有別人在掃、距上次成功滿一分鐘、距上次失敗滿退避。拿不到回 `None`，這一輪什麼都不做。
+fn claim_sweep(key: String, now: i64) -> Option<SweepClaim> {
+    let mut slots = sweep_slots().lock().unwrap_or_else(|e| e.into_inner());
+    let slot = slots.entry(key.clone()).or_default();
+    let since_failed = now - slot.last_failed;
+    let backoff_over = since_failed < 0 || since_failed >= RETRY_AFTER_FAILURE_SECS;
+    if slot.running || !sweep_due(slot.last_ok, now) || !backoff_over {
+        return None;
+    }
+    slot.running = true;
+    Some(SweepClaim { key, now, end: SweepEnd::Cancelled })
+}
+
+/// controller 每個 tick 呼叫；自己節流成一分鐘一次（每個資料庫各自一分鐘），同一格同時只掃一輪。
 pub async fn wake_stalled(app: &impl crate::capabilities::Db) {
     let now = chrono::Utc::now();
-    let key = sweep_key(app.db());
-    let last = last_sweeps().lock().unwrap_or_else(|e| e.into_inner()).get(&key).copied().unwrap_or(0);
-    if !sweep_due(last, now.timestamp()) {
-        return;
-    }
-    last_sweeps().lock().unwrap_or_else(|e| e.into_inner()).insert(key, now.timestamp());
-    wake_stalled_at(app, now).await;
+    let Some(mut claim) = claim_sweep(sweep_key(app.db()), now.timestamp()) else { return };
+    #[cfg(test)]
+    sweep_gate::pass(&claim.key).await;
+    claim.end = match sweep_once(app, now).await {
+        Ok(_) => SweepEnd::Completed,
+        Err(e) => {
+            tracing::warn!(error = ?e, "stalled-mission sweep failed; retrying in a few seconds");
+            SweepEnd::Failed
+        }
+    };
 }
 
 /// 任務停在「輪到 AGM 動手」的那幾步（派下一個角色、記驗證結果、交付、結案）超過 [`STALL_SECS`]，
@@ -260,20 +317,27 @@ pub async fn wake_stalled(app: &impl crate::capabilities::Db) {
 /// 還沒被看到——再推一則只是重複）。同一步只叫一次：event_key 是那一步的簽名，全部來自持久狀態，重啟後
 /// 算出來也一樣，所以 AGM 看過不理，不會每分鐘再叫一次。回傳這次叫醒了哪些任務。
 pub async fn wake_stalled_at(app: &impl crate::capabilities::Db, now: chrono::DateTime<chrono::Utc>) -> Vec<String> {
-    // 專案已刪的任務先收掉再掃（#498 的收斂版）：不叫醒 AGM 去推一個專案不在的任務。
-    match crate::mission::store::deleted_projects_with_open_missions(app.db()).await {
-        Ok(projects) => {
-            for project_id in projects {
-                match crate::mission::store::cancel_open_for_project(app.db(), &project_id, "project_deleted").await {
-                    Ok(0) => {}
-                    Ok(n) => tracing::info!(project = %project_id, missions = n, "project is gone; its open missions were cancelled by the sweep"),
-                    Err(e) => tracing::warn!(project = %project_id, error = ?e, "could not cancel the open missions of a deleted project"),
-                }
-            }
+    match sweep_once(app, now).await {
+        Ok(woke) => woke,
+        Err(e) => {
+            tracing::warn!(error = ?e, "stalled-mission sweep failed");
+            Vec::new()
         }
-        Err(e) => tracing::warn!(error = ?e, "could not look for open missions of deleted projects"),
     }
-    let Ok(missions) = crate::mission::store::open_unpaused(app.db()).await else { return Vec::new() };
+}
+
+/// 一輪掃描的本體。開頭兩個查詢失敗就是整輪失敗（回 `Err`，`wake_stalled` 記成沒掃完、短退避後再試）；
+/// 逐個任務的失敗照舊只跳過那一個。
+async fn sweep_once(app: &impl crate::capabilities::Db, now: chrono::DateTime<chrono::Utc>) -> anyhow::Result<Vec<String>> {
+    // 專案已刪的任務先收掉再掃（#498 的收斂版）：不叫醒 AGM 去推一個專案不在的任務。
+    for project_id in crate::mission::store::deleted_projects_with_open_missions(app.db()).await? {
+        match crate::mission::store::cancel_open_for_project(app.db(), &project_id, "project_deleted").await {
+            Ok(0) => {}
+            Ok(n) => tracing::info!(project = %project_id, missions = n, "project is gone; its open missions were cancelled by the sweep"),
+            Err(e) => tracing::warn!(project = %project_id, error = ?e, "could not cancel the open missions of a deleted project"),
+        }
+    }
+    let missions = crate::mission::store::open_unpaused(app.db()).await?;
     let mut woke = Vec::new();
     for m in missions {
         let Ok((assignments, events)) = inputs(app, &m.id).await else { continue };
@@ -307,7 +371,7 @@ pub async fn wake_stalled_at(app: &impl crate::capabilities::Db, now: chrono::Da
             Err(e) => tracing::warn!(mission = %m.id, error = %e, "could not queue mission_next"),
         }
     }
-    woke
+    Ok(woke)
 }
 
 /// 這個任務還有沒處理完（不是 `handled`）的 inbox：任務自己的通知，或它底下交辦的通知。
@@ -326,6 +390,42 @@ async fn outstanding_inbox(app: &impl crate::capabilities::Db, mission_id: &str)
     .map(|n| n > 0)
     // 查不到就當有：寧可少叫一次（下一分鐘再看），不要在資料庫出狀況時亂叫。
     .unwrap_or(true)
+}
+
+/// 測試用的進門點（#1326）：某個資料庫的掃描進門之後停在 `pass`，直到測試放行，讓測試能在兩個呼叫之間插進去。
+/// 只在測試編譯時存在；沒有裝進門點的資料庫完全不受影響。
+#[cfg(test)]
+pub(crate) mod sweep_gate {
+    use std::collections::HashMap;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::{Arc, Mutex, OnceLock};
+
+    pub(crate) struct Gate {
+        /// 進門的次數。
+        pub(crate) entered: AtomicUsize,
+        /// 放行。`notify_one` 會留一個許可，所以放行早於停住也不會丟。
+        pub(crate) release: tokio::sync::Notify,
+    }
+
+    fn gates() -> &'static Mutex<HashMap<String, Arc<Gate>>> {
+        static GATES: OnceLock<Mutex<HashMap<String, Arc<Gate>>>> = OnceLock::new();
+        GATES.get_or_init(Default::default)
+    }
+
+    /// 替 `key`（見 `sweep_key`）的資料庫裝上進門點。
+    pub(crate) fn install(key: String) -> Arc<Gate> {
+        let gate = Arc::new(Gate { entered: AtomicUsize::new(0), release: tokio::sync::Notify::new() });
+        gates().lock().unwrap_or_else(|e| e.into_inner()).insert(key, gate.clone());
+        gate
+    }
+
+    pub(crate) async fn pass(key: &str) {
+        let gate = gates().lock().unwrap_or_else(|e| e.into_inner()).get(key).cloned();
+        if let Some(gate) = gate {
+            gate.entered.fetch_add(1, Ordering::SeqCst);
+            gate.release.notified().await;
+        }
+    }
 }
 
 #[cfg(all(test, feature = "daemon-test-harness"))]
@@ -654,6 +754,75 @@ mod tests {
         stalled(&b, "iso-b2").await;
         wake_stalled(&b.app).await;
         assert_eq!(mission_next_count(&b.app).await, 1, "同一顆實例一分鐘之內不重掃");
+    }
+
+    /// 等條件成立（最多約五秒）。
+    async fn until(mut ready: impl FnMut() -> bool) {
+        for _ in 0..500 {
+            if ready() {
+                return;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+        panic!("等太久了");
+    }
+
+    /// #1326：掃描失敗（DB 一時讀不到）不算掃過。DB 恢復之後，過了短退避就再掃，不用等滿一分鐘。
+    #[tokio::test]
+    async fn a_failed_sweep_is_retried_soon_after_the_database_recovers() {
+        let env = tt::env().await;
+        store::get_or_init(&env.app.db).await.unwrap();
+        stalled(&env, "retry").await;
+        sqlx::query("ALTER TABLE missions RENAME TO missions_down").execute(&env.app.db).await.unwrap();
+        wake_stalled(&env.app).await;
+        sqlx::query("ALTER TABLE missions_down RENAME TO missions").execute(&env.app.db).await.unwrap();
+        assert_eq!(mission_next_count(&env.app).await, 0, "前提：這一輪讀不到，什麼都沒叫");
+
+        tokio::time::sleep(std::time::Duration::from_secs(RETRY_AFTER_FAILURE_SECS as u64 + 1)).await;
+        wake_stalled(&env.app).await;
+        assert_eq!(mission_next_count(&env.app).await, 1, "DB 恢復後不用等滿一分鐘");
+    }
+
+    /// #1326：同一個資料庫的兩個呼叫同時進來，只能有一個去掃。第二個要立刻回來，不能也進去掃。
+    #[tokio::test]
+    async fn overlapping_callers_on_one_database_run_one_scan() {
+        let env = tt::env().await;
+        store::get_or_init(&env.app.db).await.unwrap();
+        stalled(&env, "overlap").await;
+        let gate = sweep_gate::install(sweep_key(&env.app.db));
+        let (a, b) = (env.app.clone(), env.app.clone());
+        let first = tokio::spawn(async move { wake_stalled(&a).await });
+        until(|| gate.entered.load(std::sync::atomic::Ordering::SeqCst) >= 1).await;
+
+        let second = tokio::spawn(async move { wake_stalled(&b).await });
+        let returned = tokio::time::timeout(std::time::Duration::from_secs(2), second).await.is_ok();
+        assert!(returned, "同一格已經有人在掃：第二個呼叫要立刻回來");
+        assert_eq!(gate.entered.load(std::sync::atomic::Ordering::SeqCst), 1, "只有一個呼叫進了掃描");
+
+        gate.release.notify_one();
+        first.await.unwrap();
+        assert_eq!(mission_next_count(&env.app).await, 1, "放行之後那一輪照常叫醒");
+    }
+
+    /// #1326：掃到一半被取消（呼叫端的 future 被丟掉）：不算掃過、格子放掉，下一個呼叫照常掃。
+    #[tokio::test]
+    async fn a_cancelled_sweep_releases_the_slot_and_is_not_counted_as_done() {
+        let env = tt::env().await;
+        store::get_or_init(&env.app.db).await.unwrap();
+        stalled(&env, "cancel").await;
+        let gate = sweep_gate::install(sweep_key(&env.app.db));
+        let a = env.app.clone();
+        let first = tokio::spawn(async move { wake_stalled(&a).await });
+        until(|| gate.entered.load(std::sync::atomic::Ordering::SeqCst) >= 1).await;
+        first.abort();
+        let _ = first.await;
+
+        let b = env.app.clone();
+        let second = tokio::spawn(async move { wake_stalled(&b).await });
+        until(|| gate.entered.load(std::sync::atomic::Ordering::SeqCst) >= 2).await;
+        gate.release.notify_one();
+        second.await.unwrap();
+        assert_eq!(mission_next_count(&env.app).await, 1, "被取消的那一輪不算掃過，下一個呼叫照常叫醒");
     }
 
     fn roles_of(kind: &str) -> (crate::supervisor::roles::Role, bool) {
