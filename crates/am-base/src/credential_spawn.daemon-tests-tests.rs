@@ -64,6 +64,7 @@
         let env = crate::testing::env().await;
         let app = env.app.clone();
         let bot = crate::testing::claude_bot(&app, &env.project_id, "slow-spawner").await;
+        crate::testing::fake_run(&app, &bot.id).await;
         let begin_with = |timeout_ms: &str| {
             let (app, id, t) = (app.clone(), bot.id.clone(), timeout_ms.to_string());
             async move {
@@ -75,6 +76,7 @@
         let permit = begin_with("120000").await;
         app.credential_spawn_gate.lock().unwrap().age_permit(&bot.id, &permit, Duration::from_secs(100));
         assert_eq!(RotationFence::begin(&app, &bot.id).err(), Some(FenceError::SpawnsInFlight(1)), "100 秒時 120 秒 timeout 的 spawn 還在飛，要擋輪替");
+        env.herdr.set_agent("slow-child", "w1:p9", true);
         let (st, Json(v)) = finish(
             State(app.clone()),
             bot_headers(),
@@ -87,6 +89,63 @@
         let quick = begin_with("").await;
         app.credential_spawn_gate.lock().unwrap().age_permit(&bot.id, &quick, PERMIT_TTL + Duration::from_secs(1));
         assert!(RotationFence::begin(&app, &bot.id).is_ok(), "沒帶 timeout 的 permit 過 60 秒就不擋輪替");
+    }
+
+    #[tokio::test]
+    async fn a_spawn_permit_cannot_register_a_pane_after_its_host_is_repointed() {
+        let env = crate::testing::env().await;
+        let app = env.app.clone();
+        let host = format!("spawn-repoint-{}", crate::db::ulid().to_ascii_lowercase());
+        let cfg = |ssh: &str| crate::config::HostCfg {
+            shared_session: false,
+            name: host.clone(),
+            ssh: ssh.into(),
+            ssh_port: 22,
+            ssh_opts: vec![],
+            herdr_session: "agents-manager".into(),
+            remote_path: String::new(),
+        };
+        app.hosts.insert_remote_for_test(cfg("host-a")).await;
+        sqlx::query("UPDATE projects SET host=? WHERE id=?").bind(&host).bind(&env.project_id).execute(&app.db).await.unwrap();
+        let bot = crate::testing::claude_bot(&app, &env.project_id, "spawn-repoint").await;
+        sqlx::query("INSERT INTO runs (id, bot_id, state, agent_status, pane_id, started_at) VALUES (?,?,'running','idle','w1:parent',?)")
+            .bind(crate::db::ulid())
+            .bind(&bot.id)
+            .bind(crate::db::now())
+            .execute(&app.db)
+            .await
+            .unwrap();
+
+        let (status, Json(begin_body)) = begin(
+            State(app.clone()),
+            bot_headers(),
+            axum::extract::Form(SpawnBegin { bot_id: bot.id.clone(), timeout_ms: String::new() }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{begin_body}");
+        let permit_id = begin_body["permit_id"].as_str().unwrap().to_string();
+
+        app.hosts.replace_remote_for_test(&app, cfg("host-b")).await;
+        let (status, Json(finish_body)) = finish(
+            State(app.clone()),
+            bot_headers(),
+            axum::extract::Form(SpawnFinish {
+                bot_id: bot.id.clone(),
+                permit_id,
+                pane_id: "w1:pane-7".into(),
+                purpose: "child".into(),
+            }),
+        )
+        .await;
+
+        assert_eq!(status, StatusCode::CONFLICT, "a permit from the retired host must be rejected: {finish_body}");
+        assert_eq!(finish_body["reason"], "spawn_host_superseded");
+        let registered: i64 = sqlx::query_scalar("SELECT count(*) FROM panes WHERE host=? AND pane_id='w1:pane-7'")
+            .bind(&host)
+            .fetch_one(&app.db)
+            .await
+            .unwrap();
+        assert_eq!(registered, 0, "a retired host's pane must not be claimed on its replacement");
     }
 
     /// 有效期有上限（herdr 自己最多等 300 秒）：亂填的 timeout 不能讓 permit 永遠擋輪替。
