@@ -253,12 +253,16 @@ impl MockState {
             .iter()
             .find(|a| a.get("pane_id").and_then(Value::as_str) == Some(pane_id))
             .cloned();
-        let (agent, status) = match occupant {
-            Some(a) => (a.get("agent").cloned().unwrap_or(Value::Null), a.get("agent_status").cloned().unwrap_or(Value::Null)),
-            None => (Value::Null, Value::Null),
-        };
         let mut v = json!({"pane_id": pane_id, "workspace_id": tab.workspace_id, "tab_id": tab.tab_id,
-               "cwd": cwd.cloned().unwrap_or(Value::Null), "agent": agent, "agent_status": status});
+               "cwd": cwd.cloned().unwrap_or(Value::Null)});
+        // 真 herdr 0.9.3：空的 shell pane 沒有 `agent` 這個 key，`agent_status` 是 "unknown"（不是 null）。
+        match occupant {
+            Some(a) => {
+                v["agent"] = a.get("agent").cloned().unwrap_or(Value::Null);
+                v["agent_status"] = a.get("agent_status").cloned().unwrap_or(Value::Null);
+            }
+            None => v["agent_status"] = json!("unknown"),
+        }
         if let Some(rows) = self.live.lock().unwrap().get(pane_id).and_then(|p| p.rows) {
             v["scroll"] = json!({"offset_from_bottom": 0, "max_offset_from_bottom": 0, "viewport_rows": rows});
         }
@@ -392,7 +396,7 @@ impl MockHerdr {
                             match st.workspaces.lock().unwrap().get(&wid).cloned() {
                                 Some(label) => json!({"id": id, "result": {"workspace":
                                     {"workspace_id": wid, "label": label, "pane_count": 1}}}),
-                                None => json!({"id": id, "error": {"code": "not_found", "message": "no such workspace"}}),
+                                None => json!({"id": id, "error": {"code": "workspace_not_found", "message": format!("workspace {wid} not found")}}),
                             }
                         }
                         "workspace.list" => {
@@ -425,15 +429,19 @@ impl MockHerdr {
                         }
                         "tab.list" => {
                             let wid = wid_of("workspace_id");
-                            let tabs: Vec<Value> = st
-                                .tabs
-                                .lock()
-                                .unwrap()
-                                .iter()
-                                .filter(|t| wid.is_empty() || t.workspace_id == wid)
-                                .map(MockState::tab_json)
-                                .collect();
-                            json!({"id": id, "result": {"type": "tab_list", "tabs": tabs}})
+                            if !wid.is_empty() && !st.workspaces.lock().unwrap().contains_key(&wid) {
+                                json!({"id": id, "error": {"code": "workspace_not_found", "message": format!("workspace {wid} not found")}})
+                            } else {
+                                let tabs: Vec<Value> = st
+                                    .tabs
+                                    .lock()
+                                    .unwrap()
+                                    .iter()
+                                    .filter(|t| wid.is_empty() || t.workspace_id == wid)
+                                    .map(MockState::tab_json)
+                                    .collect();
+                                json!({"id": id, "result": {"type": "tab_list", "tabs": tabs}})
+                            }
                         }
                         "tab.close" => {
                             let tid = wid_of("tab_id");
@@ -454,10 +462,7 @@ impl MockHerdr {
                                 Some(t) => {
                                     let pane = format!("{}:p{}", t.workspace_id, st.next());
                                     t.panes.push(pane.clone());
-                                    json!({"id": id, "result": {"type": "pane_info", "pane":
-                                        json!({"pane_id": pane, "workspace_id": t.workspace_id,
-                                               "tab_id": t.tab_id, "cwd": params.get("cwd"),
-                                               "agent": null, "agent_status": null})}})
+                                    json!({"id": id, "result": {"type": "pane_info", "pane": st.pane_json(&pane, t, params.get("cwd"))}})
                                 }
                             }
                         }
@@ -472,7 +477,14 @@ impl MockHerdr {
                         }
                         "pane.get" => {
                             let pid = wid_of("pane_id");
-                            match st.find_pane(&pid) {
+                            // agent 一定住在某顆 pane 上：`set_agent` 種的 pane 就算不在任何 tab 上，也要查得到（#1451）。
+                            let occupant_tab = st.agents.lock().unwrap().iter().find(|a| a.get("pane_id").and_then(Value::as_str) == Some(pid.as_str())).map(|a| MockTab {
+                                tab_id: a.get("tab_id").and_then(Value::as_str).unwrap_or("tab-1").to_string(),
+                                workspace_id: a.get("workspace_id").and_then(Value::as_str).unwrap_or("ws-1").to_string(),
+                                label: String::new(),
+                                panes: vec![],
+                            });
+                            match st.find_pane(&pid).or(occupant_tab) {
                                 Some(t) => json!({"id": id, "result": {"type": "pane_info",
                                     "pane": st.pane_json(&pid, &t, None)}}),
                                 // 只用 `live_pane` 種、沒掛在 tab 上的 pane：照樣回得出畫面列數（#403）。
@@ -600,6 +612,8 @@ impl MockHerdr {
                             match width {
                                 Some(w) => json!({"id": id, "result": {"layout": {"panes": [
                                     {"pane_id": pid, "rect": {"x": 0, "y": 0, "width": w, "height": 40}}]}}}),
+                                // 沒帶 pane_id：真 herdr 回使用者正在看的那個分頁，這裡不含任何你要的 pane。
+                                None if pid.is_empty() => json!({"id": id, "result": {"layout": {"panes": []}}}),
                                 None => json!({"id": id, "error": {"code": "unsupported", "message": "no layout"}}),
                             }
                         }
@@ -733,7 +747,7 @@ impl MockHerdr {
                                 .cloned()
                             {
                                 Some(agent) => json!({"id": id, "result": {"agent": agent}}),
-                                None => json!({"id": id, "error": {"code": "not_found", "message": target}}),
+                                None => json!({"id": id, "error": {"code": "agent_not_found", "message": format!("agent target {target} not found")}}),
                             }
                         }
                         "agent.list" => {
@@ -759,7 +773,7 @@ impl MockHerdr {
                                 .cloned();
                             match found {
                                 Some(a) => json!({"id": id, "result": {"agent": a}}),
-                                None => json!({"id": id, "error": {"code": "not_found", "message": target}}),
+                                None => json!({"id": id, "error": {"code": "agent_not_found", "message": format!("agent target {target} not found")}}),
                             }
                         }
                         "events.subscribe" if st.allow_subscribe.load(std::sync::atomic::Ordering::SeqCst) => {
@@ -1287,5 +1301,68 @@ mod scratch_leak_guard {
         let mut bad = Vec::new();
         walk(&std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src"), &mut bad);
         assert!(bad.is_empty(), "wrap with crate::testing::track(…) or use testing::scratch_dir:\n{}", bad.join("\n"));
+    }
+}
+
+/// 替身對照真 herdr 0.9.3（protocol 22）的契約：替身不能讓真 herdr 不可能出現的狀態成立（#1451）。
+#[cfg(test)]
+mod mock_herdr_contract_tests {
+    use super::*;
+    use crate::herdr::{AgentStatus, HerdrClient, HerdrError};
+
+    async fn start() -> (MockHerdr, HerdrClient) {
+        let dir = scratch_dir("mock-herdr-contract");
+        let mock = MockHerdr::start(dir.join("h.sock"));
+        let client = HerdrClient::new(dir.join("h.sock"));
+        (mock, client)
+    }
+
+    fn code_of(e: &anyhow::Error) -> String {
+        e.downcast_ref::<HerdrError>().map(|h| h.code.clone()).unwrap_or_else(|| format!("{e:#}"))
+    }
+
+    #[tokio::test]
+    async fn an_agents_pane_is_always_visible_to_pane_get() {
+        let (mock, client) = start().await;
+        mock.set_agent("a", "w9:p1", false);
+        let pane = client.pane_get("w9:p1").await.unwrap().expect("agent 一定住在某顆 pane 上");
+        assert_eq!(pane.agent.as_deref(), Some("claude"));
+    }
+
+    #[tokio::test]
+    async fn an_empty_pane_answers_like_herdr_0_9_3() {
+        let (_mock, client) = start().await;
+        let (_ws, root) = client.workspace_create("/tmp", "w", json!({})).await.unwrap();
+        let pane = client.pane_get(&root.pane_id).await.unwrap().unwrap();
+        assert_eq!(pane.agent, None);
+        assert_eq!(pane.agent_status, Some(AgentStatus::Unknown));
+        let raw = client.call("pane.get", json!({"pane_id": root.pane_id})).await.unwrap();
+        assert!(raw["pane"].get("agent").is_none(), "空 pane 沒有 agent 這個 key：{raw}");
+    }
+
+    #[tokio::test]
+    async fn not_found_codes_match_herdr() {
+        let (_mock, client) = start().await;
+        let (_ws, root) = client.workspace_create("/tmp", "w", json!({})).await.unwrap();
+        let cases = [
+            ("agent.get", json!({"target": root.pane_id}), "agent_not_found"),
+            ("agent.get", json!({"target": "nope"}), "agent_not_found"),
+            ("workspace.get", json!({"workspace_id": "nope"}), "workspace_not_found"),
+            ("tab.list", json!({"workspace_id": "nope"}), "workspace_not_found"),
+            ("pane.get", json!({"pane_id": "nope"}), "pane_not_found"),
+        ];
+        for (method, params, want) in cases {
+            let err = client.call(method, params).await.unwrap_err();
+            assert_eq!(code_of(&err), want, "{method}");
+        }
+    }
+
+    #[tokio::test]
+    async fn a_layout_without_a_pane_id_does_not_contain_the_pane() {
+        let (mock, client) = start().await;
+        mock.live_pane("w9:p2", LivePane { width: Some(24), ..Default::default() });
+        let raw = client.call("pane.layout", json!({"workspace_id": "w"})).await.unwrap();
+        assert!(raw["layout"]["panes"].as_array().unwrap().is_empty(), "沒帶 pane_id 時真 herdr 回別的分頁，不含這顆：{raw}");
+        assert_eq!(client.pane_size("w9:p2").await.unwrap(), Some((24, 40)));
     }
 }
