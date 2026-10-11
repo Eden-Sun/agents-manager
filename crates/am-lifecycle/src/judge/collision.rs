@@ -98,14 +98,18 @@ pub async fn schedule_assignment(app: &Arc<impl crate::capabilities::Cfg + crate
     });
 }
 
-/// 開票成功之後呼叫（release-triage publish）。`created == 0` 或關著就立刻回來。
-pub async fn hint_after_publish(app: &Arc<impl crate::capabilities::Cfg + crate::capabilities::Db + crate::capabilities::Emit + crate::judge::JudgeFuse + 'static>, before: &[IssueRef], kind: &str, version: &str, created: usize) {
-    if created == 0 || !app.cfg().get().await.judge.enabled {
+/// 開票成功之後呼叫（release-triage publish）。關著、或帳本這次沒多新開的票就立刻回來。
+/// 看帳本前後的差，不看呼叫端的 `created`：publish 開到一半停（deferred／failed）時，先開出去的那幾張票也要比對（#1386）。
+pub async fn hint_after_publish(app: &Arc<impl crate::capabilities::Cfg + crate::capabilities::Db + crate::capabilities::Emit + crate::judge::JudgeFuse + 'static>, before: &[IssueRef], kind: &str, version: &str, _created: usize) {
+    if !app.cfg().get().await.judge.enabled {
         return;
     }
     let Ok(Some(after)) = ledger::get(app.db(), kind, version).await else {
         return;
     };
+    if !has_new_issue(before, &after) {
+        return;
+    }
     let app = app.clone();
     let before = before.to_vec();
     tokio::spawn(async move {
@@ -116,9 +120,9 @@ pub async fn hint_after_publish(app: &Arc<impl crate::capabilities::Cfg + crate:
 }
 
 /// 這次 publish 之後帳本多了新開的票（留言不算）。
-fn has_new_issue(_before: &[IssueRef], _after: &Row) -> bool {
-    // 紅測用的暫時實作（#1386）：修正 commit 換成真的比對。
-    false
+fn has_new_issue(before: &[IssueRef], after: &Row) -> bool {
+    let prev: HashSet<i64> = before.iter().map(|i| i.number).collect();
+    after.issues.iter().any(|i| !i.comment && !prev.contains(&i.number))
 }
 
 /// `POST /api/judge/collision-check`（#1330）：bot 認領票（`agm issue claim`）時問一次撞題。
