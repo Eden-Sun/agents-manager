@@ -17,6 +17,9 @@ export type PrunableState = Pick<
   | 'bots'
   | 'projects'
   | 'messages'
+  | 'turns'
+  | 'messageLoadFailed'
+  | 'shareRev'
   | 'loadedBots'
   | 'moreMessages'
   | 'loadingMore'
@@ -78,6 +81,10 @@ export function pruneDeadKeys(s: PrunableState): Partial<PrunableState> | null {
   set('loadingMore', keepKeys(s.loadingMore, liveConversation))
   set('messageCapFloors', keepKeys(s.messageCapFloors, liveConversation))
   set('liveReply', keepKeys(s.liveReply, liveBot))
+  // 回合表：已刪 bot 的 queued 回合若留著，重連會把它整頁重抓（`botIdsNeedingConversationReload` 看 open 回合）。
+  set('turns', keepKeys(s.turns, liveBot))
+  set('messageLoadFailed', keepKeys(s.messageLoadFailed, liveBot))
+  set('shareRev', keepKeys(s.shareRev, liveBot))
   set('composerDrafts', keepKeys(s.composerDrafts, liveBot))
   set('previews', keepKeys(s.previews, liveBot))
   set('groupMessages', keepKeys(s.groupMessages, liveProject))

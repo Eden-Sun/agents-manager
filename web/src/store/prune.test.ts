@@ -3,8 +3,9 @@
  */
 import test from 'node:test'
 import assert from 'node:assert/strict'
-import { reset } from './storeEnv.harness.ts'
-import { noteMessagePageForTest, storeMemoKeysForTest, useStore } from './store.ts'
+import { reset, requests, routeDaemon } from './storeEnv.harness.ts'
+import { noteMessagePageForTest, reloadLoadedConversations, storeMemoKeysForTest, useStore } from './store.ts'
+import { pruneDeadKeys } from './prune.ts'
 import type { Bot, Message, Mission, Project } from '../api/types.ts'
 
 const bot = (id: string, project = 'p1') => ({ id, name: id, project_id: project, kind: 'claude', identity: null, herdr_session: null }) as Bot
@@ -23,6 +24,9 @@ function seed() {
     loadingMore: { 'b-gone': false, 'p-gone': false },
     messageCapFloors: { 'b-live': 900, 'b-gone': 900, 'p-gone': 900 },
     liveReply: { 'b-gone': { turnId: 't', text: 'x', activity: '', alert: '', revision: 1 } },
+    turns: { 'b-live': { t1: { id: 't1', status: 'queued' } }, 'b-gone': { t2: { id: 't2', status: 'queued' } } },
+    messageLoadFailed: { 'b-live': true, 'b-gone': true },
+    shareRev: { 'b-live': 1, 'b-gone': 3 },
     composerDrafts: {},
     previews: {},
     groupMessages: { 'p-live': [], 'p-gone': [] },
@@ -52,6 +56,10 @@ test('pruneDead：刪掉的 bot／專案在各張表的 key 都被帶走，還�
   assert.deepEqual(Object.keys(s.loadingMore), [])
   assert.deepEqual(Object.keys(s.messageCapFloors), ['b-live'])
   assert.deepEqual(Object.keys(s.liveReply), [])
+  // 回合表、載入失敗旗標、分享版本號：已刪 bot 的 key 都帶走（#1342：turns 的 queued 回合留著會被重連反覆重抓）。
+  assert.deepEqual(Object.keys(s.turns), ['b-live'])
+  assert.deepEqual(Object.keys(s.messageLoadFailed), ['b-live'])
+  assert.deepEqual(Object.keys(s.shareRev), ['b-live'])
   assert.deepEqual(Object.keys(s.groupMessages), ['p-live'])
   assert.deepEqual(Object.keys(s.loadedProjects), ['p-live'])
   assert.deepEqual(Object.keys(s.missions), ['p-live'])
@@ -95,4 +103,26 @@ test('pruneDead：模組層的帳（頁代次）也只留還在名單上的 bot�
   noteMessagePageForTest('group', 'p-gone')
   useStore.getState().pruneDead()
   assert.deepEqual(storeMemoKeysForTest().messagePageGenerations.sort(), ['bot:b-live', 'group:p-live'])
+})
+
+test('pruneDeadKeys：三張回合相關的表都只剩活著的 bot 時回 null（同一個參考，不多 set）', () => {
+  seed()
+  useStore.getState().pruneDead()
+  assert.equal(pruneDeadKeys(useStore.getState()), null)
+})
+
+test('已刪 bot 留著的 queued 回合被帶走後，重連不再重抓它', async () => {
+  seed()
+  // 只留這顆已刪 bot 的 queued 回合；沒有已載入的對話、沒有選取，重連補抓只能靠 turns 把它列進去。
+  useStore.setState({ loadedBots: {}, selectedBotId: null, turns: { 'b-gone': { t9: { id: 't9', status: 'queued' } as never } } } as never)
+  useStore.getState().pruneDead()
+  assert.equal(useStore.getState().turns['b-gone'], undefined, '已刪 bot 的回合表要帶走')
+  routeDaemon((r) => (r.path.includes('/messages') ? new Response(JSON.stringify({ messages: [], turns: [], has_more: false }), { status: 200 }) : new Response('{}', { status: 200 })))
+  requests.length = 0
+  await reloadLoadedConversations(useStore.getState)
+  assert.equal(
+    requests.some((r) => r.path.includes('/bots/b-gone/messages')),
+    false,
+    '重連不再整頁重抓已刪的 bot',
+  )
 })
