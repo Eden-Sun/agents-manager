@@ -278,24 +278,38 @@ fn check(cfg: &crate::config::ConfigFile) -> Result<()> {
         crate::bot_input::check_env(&i.env).map_err(|e| anyhow::Error::msg(format!("identity `{}`: {e:?}", i.name)))?;
         crate::bot_input::check_args(&i.args).map_err(|e| anyhow::Error::msg(format!("identity `{}`: {e:?}", i.name)))?;
     }
+    // #1351：id 不能重複。兩列同 id 會在投影時靜默合成一顆（後面那列蓋掉前面那列）；bot id 是全域唯一的（DB 的主鍵）。
+    // 名字只在同一個專案裡不能重複（`bots_name_project_live` 唯一索引）。沒有 id 的列不算重複：投影會各補一個新的。
+    let mut seen_projects: HashSet<&str> = HashSet::new();
+    let mut seen_bots: HashSet<&str> = HashSet::new();
     for p in &cfg.projects {
         if let Some(id) = p.id.as_deref() {
             if !valid_id(id) {
                 bail!("invalid project id `{id}` for project `{}` (must match {})", p.label, ID_RE);
+            }
+            if !seen_projects.insert(id) {
+                bail!("duplicate project id `{id}` (project `{}`); remove the copied `id` line so a new one is generated", p.label);
             }
         }
         // #708：空字串不是「本機管」也不是任何一台主機；要收回就整個拿掉這個 key。
         if p.handed_off_to.as_deref().is_some_and(|h| h.trim().is_empty()) {
             bail!("project `{}` has an empty handed_off_to (remove the key to manage it here)", p.label);
         }
+        let mut seen_names: HashSet<&str> = HashSet::new();
         for b in &p.bots {
             if let Some(id) = b.id.as_deref() {
                 if !valid_id(id) {
                     bail!("invalid bot id `{id}` for bot `{}` in project `{}` (must match {})", b.name, p.label, ID_RE);
                 }
+                if !seen_bots.insert(id) {
+                    bail!("duplicate bot id `{id}` (bot `{}` in project `{}`); remove the copied `id` line so a new one is generated", b.name, p.label);
+                }
             }
             if !valid_bot_name(&b.name) {
                 bail!("invalid bot name `{}` ({})", b.name, crate::config::BOT_NAME_RE);
+            }
+            if !seen_names.insert(b.name.as_str()) {
+                bail!("duplicate bot name `{}` in project `{}`", b.name, p.label);
             }
             if !crate::config::valid_kind(&b.kind) {
                 bail!("invalid bot kind `{}` (must be {})", b.kind, crate::config::kinds_list());
@@ -878,6 +892,70 @@ mod tests {
             ("herdr_session 帶斜線（會進遠端路徑）", with(vec![blank_session("../../x")]), "herdr_session"),
             ("herdr_session 帶引號（會進 plist）", with(vec![blank_session("a\"b")]), "herdr_session"),
             ("ssh_opts 帶 ProxyCommand（會在本機執行）", with(vec![HostCfg { ssh_opts: vec!["-o".into(), "ProxyCommand=true".into()], ..host("m4p", "me@10.0.0.2") }]), "ssh_opts"),
+        ] {
+            let err = validate(&cfg).expect_err(what).to_string();
+            assert!(err.contains(needle), "{what}: {err}");
+            assert!(err.contains("config.toml 未變更"), "{what}: 要是 ConfigInvalid（不是上游壞掉）：{err}");
+        }
+    }
+
+    /// #1351：id 與 bot 名字不能重複。以前兩列同 id 會靜默合成一顆（後面那列蓋掉前面那列），同專案同名的會在投影途中
+    /// 才撞唯一索引（前面幾列已經寫進 DB）。只擋手改的檔；沒有 id 的列不算重複（投影會各補一個新的）。
+    #[test]
+    fn duplicate_ids_and_names_are_refused_before_they_merge_into_one_row() {
+        fn bot(id: Option<&str>, name: &str) -> crate::config::BotCfg {
+            crate::config::BotCfg {
+                id: id.map(str::to_string),
+                name: name.into(),
+                kind: "claude".into(),
+                model: None,
+                effort: None,
+                fast: false,
+                persona: None,
+                args: vec![],
+                autostart: false,
+                inject_hooks: true,
+                auto_approve: true,
+                identity: None,
+                env: Default::default(),
+                herdr_session: None,
+                create_request_id: None,
+                create_fingerprint: None,
+            }
+        }
+        fn proj(id: Option<&str>, label: &str, bots: Vec<crate::config::BotCfg>) -> crate::config::ProjectCfg {
+            crate::config::ProjectCfg {
+                id: id.map(str::to_string),
+                path: "/tmp".into(),
+                label: label.into(),
+                host: "local".into(),
+                bots,
+                handed_off_to: None,
+            }
+        }
+        let with = |projects: Vec<crate::config::ProjectCfg>| crate::config::ConfigFile { projects, ..Default::default() };
+
+        validate(&with(vec![proj(Some("p1"), "a", vec![bot(Some("b1"), "worker")]), proj(Some("p2"), "b", vec![bot(Some("b2"), "worker")])]))
+            .expect("不同專案各有一顆同名的 worker（id 不同）要過");
+        validate(&with(vec![proj(Some("p1"), "a", vec![bot(None, "one"), bot(None, "two")])])).expect("沒有 id 的兩顆不同名要過");
+
+        for (what, cfg, needle) in [
+            ("兩個專案同 id", with(vec![proj(Some("p1"), "a", vec![]), proj(Some("p1"), "b", vec![])]), "duplicate project id"),
+            (
+                "同一專案兩顆 bot 同 id",
+                with(vec![proj(Some("p1"), "a", vec![bot(Some("b1"), "one"), bot(Some("b1"), "two")])]),
+                "duplicate bot id",
+            ),
+            (
+                "不同專案各一顆 bot 同 id",
+                with(vec![proj(Some("p1"), "a", vec![bot(Some("b1"), "one")]), proj(Some("p2"), "b", vec![bot(Some("b1"), "two")])]),
+                "duplicate bot id",
+            ),
+            (
+                "同一專案兩顆 bot 同名（id 不同）",
+                with(vec![proj(Some("p1"), "a", vec![bot(Some("b1"), "worker"), bot(Some("b2"), "worker")])]),
+                "duplicate bot name",
+            ),
         ] {
             let err = validate(&cfg).expect_err(what).to_string();
             assert!(err.contains(needle), "{what}: {err}");
