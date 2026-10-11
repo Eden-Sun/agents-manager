@@ -85,3 +85,44 @@ test('resync 之後總管 rev 與每顆 bot 的分享 rev 都加一：這兩份�
   assert.equal(useStore.getState().supervisorRev, sup + 1)
   assert.equal(useStore.getState().shareRev.b1 ?? 0, share + 1)
 })
+
+test('resync 之後重抓 upstream-updates：斷線期間出的新版補得回來（#1340）', async () => {
+  reset()
+  useStore.setState({ upstreamUpdates: {} })
+  let items: unknown[] = []
+  routeDaemon((r) => {
+    if (r.path.endsWith('/state')) return json(stateBody())
+    if (r.path.endsWith('/upstream-updates')) return json({ items })
+    return json({ disabled: [], messages: [], turns: [], has_more: false })
+  })
+  await useStore.getState().refreshState()
+  await settle()
+  assert.equal(useStore.getState().upstreamUpdates.codex, undefined, '一開始沒有新版')
+
+  // 斷線期間 codex 出了新版，`upstream_update` 幀漏掉了。
+  items = [{ kind: 'codex', latest_version: '9.9.9', target_version: '9.9.9', has_update: true, hosts: [], text: 'codex 9.9.9 可安裝' }]
+  requests.length = 0
+  dispatchFrameForTest({ type: 'resync', seq: 5 })
+  await settle()
+  assert.ok(requests.some((r) => r.path.endsWith('/upstream-updates')), 'resync 要重抓 upstream-updates')
+  assert.equal(useStore.getState().upstreamUpdates.codex?.hasUpdate, true, '晶片要看得到')
+})
+
+test('resync 讀不到 upstream-updates（404）不跳錯誤通知、原本的那份留著（#1340）', async () => {
+  reset()
+  useStore.setState({
+    notices: [],
+    upstreamUpdates: { claude: { kind: 'claude', latest: '1.0.0', target: '1.0.0', hasUpdate: true, hosts: [], notify: null, text: 'claude 1.0.0 可安裝' } },
+  })
+  routeDaemon((r) => {
+    if (r.path.endsWith('/state')) return json(stateBody())
+    if (r.path.endsWith('/upstream-updates')) return json({ error: 'not found' }, 404)
+    return json({ disabled: [], messages: [], turns: [], has_more: false })
+  })
+  requests.length = 0
+  dispatchFrameForTest({ type: 'resync', seq: 6 })
+  await settle()
+  assert.ok(requests.some((r) => r.path.endsWith('/upstream-updates')), 'resync 有去抓')
+  assert.equal(useStore.getState().upstreamUpdates.claude?.hasUpdate, true, '原本那份留著')
+  assert.equal(useStore.getState().notices.filter((n) => n.kind === 'error').length, 0, '不跳錯誤通知')
+})
