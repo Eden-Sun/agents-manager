@@ -107,6 +107,27 @@ pub fn drop_window(run_id: &str) {
     windows().lock().unwrap_or_else(|e| e.into_inner()).remove(run_id);
 }
 
+/// daemon 重啟後把保溫視窗補回來（視窗只在記憶體，#1285）：還在跑的 run 上，保溫回合還在飛、或剛收尾不到
+/// `WINDOW_MIN + WINDOW_GRACE`，就重開視窗；之後照常由巡邏的 `settle_window` 收。回傳補回的 run 數。
+/// 時間字串是 `db::now()` 那種定寬 UTC，字串比較就是時間比較。
+pub async fn rearm_windows(pool: &SqlitePool) -> anyhow::Result<usize> {
+    let cutoff = db::iso_in(-((WINDOW_MIN + WINDOW_GRACE).as_secs() as i64));
+    let runs: Vec<String> = sqlx::query_scalar(&format!(
+        "SELECT DISTINCT t.run_id FROM turns t JOIN runs r ON r.id = t.run_id
+          WHERE r.state IN ('starting','running') AND {}
+            AND (t.status = 'in_flight'
+                 OR (t.status IN ('completed','completed_fallback') AND t.completed_at >= ?))",
+        cache_clock::keep_warm_crid_sql("t.client_request_id")
+    ))
+    .bind(cutoff)
+    .fetch_all(pool)
+    .await?;
+    for run_id in &runs {
+        open_window(run_id);
+    }
+    Ok(runs.len())
+}
+
 /// 巡邏看到保溫回合已經收尾（閒置、沒有回合在飛）：開始倒數寬限。視窗開著不到 [`WINDOW_MIN`] 不關。
 pub fn settle_window(run_id: &str, idle_and_quiet: bool) {
     let mut m = windows().lock().unwrap_or_else(|e| e.into_inner());

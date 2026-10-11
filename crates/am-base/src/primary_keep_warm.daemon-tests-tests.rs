@@ -156,6 +156,35 @@
         drop_window(run);
     }
 
+    /// #1285：視窗只在記憶體。保溫回合在飛時 daemon 重啟，回覆造成的 statusLine 變化不能被當成真的活動（年齡歸零）。
+    #[tokio::test]
+    async fn a_restart_rearms_the_window_of_a_keep_warm_still_in_flight() {
+        let env = tt::env().await;
+        let (bot, run) = primary(&env, "rearm-a", "working").await;
+        turn(&env, &bot, "kw-in-flight", Some("keep-warm:x"), "in_flight", &db::now(), None).await;
+        sqlx::query("UPDATE turns SET run_id = ? WHERE id = 'kw-in-flight'").bind(&run.id).execute(&env.app.db).await.unwrap();
+        drop_window(&run.id); // 重啟後記憶體是空的
+        assert!(!window_open(&run.id));
+        assert_eq!(rearm_windows(&env.app.db).await.unwrap(), 1, "在飛的保溫要重開視窗");
+        assert!(window_open(&run.id));
+        let a = r#"{"cost":{"total_api_duration_ms":100},"context_window":{"total_output_tokens":5}}"#;
+        let b = r#"{"cost":{"total_api_duration_ms":180},"context_window":{"total_output_tokens":9}}"#;
+        assert!(!cache_clock::on_statusline(&run.id, Some(a), Some(b), &db::now()), "保溫回覆造成的指紋變化不算活動");
+        drop_window(&run.id);
+    }
+
+    /// 剛收尾的保溫（寬限內）也要補；收尾很久以前的不補，不然真的活動會被當成保溫吞掉。
+    #[tokio::test]
+    async fn a_restart_does_not_rearm_a_keep_warm_that_settled_long_ago() {
+        let env = tt::env().await;
+        let (bot, run) = primary(&env, "rearm-b", "idle").await;
+        turn(&env, &bot, "kw-old", Some("keep-warm:y"), "completed", &at(180, chrono::Utc::now()), Some(&at(120, chrono::Utc::now()))).await;
+        sqlx::query("UPDATE turns SET run_id = ? WHERE id = 'kw-old'").bind(&run.id).execute(&env.app.db).await.unwrap();
+        drop_window(&run.id);
+        assert_eq!(rearm_windows(&env.app.db).await.unwrap(), 0);
+        assert!(!window_open(&run.id));
+    }
+
     async fn primary(env: &tt::Env, name: &str, agent_status: &str) -> (db::Bot, db::Run) {
         let bot = tt::claude_bot(&env.app, &env.project_id, name).await;
         sqlx::query("UPDATE bots SET is_primary = 1 WHERE id = ?").bind(&bot.id).execute(&env.app.db).await.unwrap();

@@ -184,6 +184,12 @@ pub async fn serve(config_path: Option<PathBuf>, dev_watch_all_panes: bool) -> R
 
     // #378: 被打斷的重啟在 recovery 補完之前，對帳收尾舊 run 不能把它排著的派工當孤兒撤掉。
     lifecycle::restart_hold::adopt_open_intents(&app).await;
+    // 保溫視窗只在記憶體：重啟前送出、還在飛（或剛收尾）的保溫回合，回覆造成的 statusLine 變化不能被當成真的活動（#1285）。
+    match crate::primary_keep_warm::rearm_windows(&app.db).await {
+        Ok(0) => {}
+        Ok(n) => tracing::info!(n, "re-armed keep-warm windows after restart"),
+        Err(e) => tracing::warn!(error = ?e, "could not re-arm keep-warm windows; a keep-warm reply may count as activity once"),
+    }
 
     // §11.3: each remote host's supervisor reconciles on connect.
     app.hosts.apply_config(&app, &host_cfg).await;
