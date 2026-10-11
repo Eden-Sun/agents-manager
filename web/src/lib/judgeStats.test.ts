@@ -121,3 +121,8 @@ test('撞題：matched_line 沒有 stale、是 null、不是 JSON、stale 是空
 test('stale 只看撞題：別的場景 matched_line 恰好含 stale，門檻照舊', () => {
   assert.equal(overThreshold(row({ regex_verdict: 'stuck_queued', at: ago(1), jev_is_live_ui: 0.9, matched_line: '{"stale":"cancelled"}' })), true)
 })
+
+test('開票那條的 bot_id 是 issue:<號碼>：顯示成 #號碼（開票），不切成 issue:', () => {
+  assert.equal(botLabel('issue:1330', []), '#1330（開票）')
+  assert.equal(botLabel('issue:abc', []), 'issue:', '不是數字的照舊取前 6 碼')
+})
