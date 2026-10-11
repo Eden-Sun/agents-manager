@@ -94,6 +94,9 @@ mod herdr_unit;
 #[path = "am_base_tests/herdr_version.rs"]
 mod herdr_version;
 
+#[path = "am_base_tests/host_baseline.rs"]
+mod host_baseline;
+
 #[path = "am_base_tests/hook_cmd.rs"]
 mod hook_cmd;
 
@@ -162,6 +165,9 @@ mod remote_purge;
 
 #[path = "am_base_tests/remote_trash.rs"]
 mod remote_trash;
+
+#[path = "am_base_tests/release_triage.rs"]
+mod release_triage;
 
 #[path = "am_base_tests/rewind_anchor.rs"]
 mod rewind_anchor;

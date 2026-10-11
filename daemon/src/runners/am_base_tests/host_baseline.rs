@@ -1,4 +1,5 @@
 #![allow(unused_imports)]
-#[path = "../../../../crates/am-base/src/host_baseline.rs"]
-mod subject;
-pub use subject::*;
+use crate::host_baseline::*;
+
+#[path = "../../../../crates/am-base/src/host_baseline/tests.rs"]
+mod tests;

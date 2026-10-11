@@ -338,11 +338,11 @@ check_changed() {
     if echo "$parts" | grep -qx ops; then check_ops; fi
     if echo "$parts" | grep -qx web; then check_web; fi
     if echo "$parts" | grep -qx daemon; then
-        local am_base_release_triage_test=0 daemon_tests_will_run=0
+        local release_triage_submission_test=0 daemon_tests_will_run=0
         filters="$(printf '%s\n' "$files" | bash scripts/ci-daemon-filters.sh)"
-        if printf '%s\n' "$filters" | grep -qx '__am_base_release_triage_submission__'; then
-            am_base_release_triage_test=1
-            filters="$(printf '%s\n' "$filters" | grep -vx '__am_base_release_triage_submission__' || true)"
+        if printf '%s\n' "$filters" | grep -Eq '^(__am_base|__daemon)_release_triage_submission__$'; then
+            release_triage_submission_test=1
+            filters="$(printf '%s\n' "$filters" | grep -Ev '^(__am_base|__daemon)_release_triage_submission__$' || true)"
         fi
         if [ -n "${CHECK_TESTS:-}" ]; then
             [ "${CHECK_TESTS}" = none ] || daemon_tests_will_run=1
@@ -378,12 +378,12 @@ check_changed() {
         fi
         # 發行契約（#1185）不歸 CHECK_TESTS 管（#1258）：指定 daemon 過濾字串只換掉 daemon 那一段，契約照跑；
         # CHECK_TESTS=none 才連它一起略過（none 就是不跑測試，略過時明講）。
-        if [ "$am_base_release_triage_test" = 1 ]; then
+        if [ "$release_triage_submission_test" = 1 ]; then
             if [ "${CHECK_TESTS:-}" = none ]; then
-                echo "crate: CHECK_TESTS=none：略過發行契約測試（the_task_template_teaches_a_submission_the_daemon_accepts）"
+                echo "daemon: CHECK_TESTS=none：略過發行契約測試（the_task_template_teaches_a_submission_the_daemon_accepts）"
             else
-                step "crate: cargo test -p am-base -- the_task_template_teaches_a_submission_the_daemon_accepts"
-                env -u AM_MODEL -u AM_EFFORT -u AM_DATA_DIR cargo test -p am-base --locked the_task_template_teaches_a_submission_the_daemon_accepts
+                step "daemon: cargo test -p agents-managerd -- runners::am_base_tests::release_triage::tests::the_task_template_teaches_a_submission_the_daemon_accepts"
+                run_daemon_tests -- runners::am_base_tests::release_triage::tests::the_task_template_teaches_a_submission_the_daemon_accepts
             fi
         fi
         if [ -n "${CHECK_TESTS:-}" ]; then
@@ -405,7 +405,7 @@ check_changed() {
                 # libtest 收多個位置過濾字串（[FILTERS...]），任一個符合就跑；一次跑完，只有全部加起來選到 0 條才拒絕（#1332）。
                 # shellcheck disable=SC2086  # 過濾字串是 [a-z_:]，不含空白與萬用字元
                 run_daemon_tests -- $filters || return $?
-            elif ! printf '%s\n' "$filters" | grep -qx '__all__' && [ "$am_base_release_triage_test" = 0 ]; then
+            elif ! printf '%s\n' "$filters" | grep -qx '__all__' && [ "$release_triage_submission_test" = 0 ]; then
                 echo "daemon: 沒有可挑的測試子集（只動了 main.rs 之類不屬於任何模組的檔案）；要跑測試用 CHECK_TESTS=<過濾字串>"
             fi
         fi

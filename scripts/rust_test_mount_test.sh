@@ -8,24 +8,13 @@ set -euo pipefail
 
 REPO="$(cd "$(dirname "$0")/.." && pwd)"
 
-# 已知還沒掛回去的（各有票在修）：修好一個就從這裡刪一行；清單只能變短。
+# 已知未掛載清單。目前測試檔都已從 crate 根可達；新未掛載測試直接失敗。
 KNOWN=(
-    crates/am-base/src/release_triage/tests.rs
-    crates/am-base/src/release_triage/tests_publish.rs
-    crates/am-base/src/host_baseline/tests.rs
-    crates/am-base/src/rewind/tests.rs
-    crates/am-base/src/agy_remote/tests.rs
-    crates/am-base/src/prompt_suggestion/tests.rs
 )
-# daemon/src/runners/am_base_tests/ 底下還沒在 am_base_tests.rs 宣告的 harness 檔（#1334／#1335 修好一個就刪一行）。
+# 已知尚未在 daemon/src/runners/am_base_tests.rs 宣告的 harness 檔。
 HARNESS_DIR=daemon/src/runners/am_base_tests
 HARNESS_ROOT=daemon/src/runners/am_base_tests.rs
 KNOWN_HARNESS=(
-    daemon/src/runners/am_base_tests/agy_remote.rs
-    daemon/src/runners/am_base_tests/host_baseline.rs
-    daemon/src/runners/am_base_tests/prompt_suggestion.rs
-    daemon/src/runners/am_base_tests/release_triage.rs
-    daemon/src/runners/am_base_tests/rewind.rs
 )
 
 # 候選：daemon/src 與 crates/*/src 底下檔名是 tests.rs、tests_*.rs、*_tests.rs、*.daemon-tests-*.rs 的檔。
@@ -287,19 +276,21 @@ self_test() {
     git -C "$t" add -A
     expect_fail "#[path] 只做結尾比對" "$t" "crates/x/src/b/tests.rs"
 
-    # KNOWN 的檔已經被掛上 → 點名要從 KNOWN 刪掉（只掛 rewind，不能連帶影響 release_triage 的 tests.rs）。
-    t="$SELF_TMP/known-mounted"
-    new_tree "$t"
-    printf '#[path = "rewind/tests.rs"]\nmod rewind_tests;\n' >"$t/crates/am-base/src/lib.rs"
-    git -C "$t" add -A
-    expect_fail "KNOWN 已掛上" "$t" "crates/am-base/src/rewind/tests.rs"
+    # 若仍有 KNOWN 項目，掛上或刪除時都必須要求清單同步縮短。
+    if [ "${#KNOWN[@]}" -gt 0 ]; then
+        t="$SELF_TMP/known-mounted"
+        new_tree "$t"
+        local known_rel="${KNOWN[0]#crates/am-base/src/}"
+        printf '#[path = "%s"]\nmod known_tests;\n' "$known_rel" >"$t/crates/am-base/src/lib.rs"
+        git -C "$t" add -A
+        expect_fail "KNOWN 已掛上" "$t" "${KNOWN[0]}"
 
-    # KNOWN 的檔不在了 → 點名。
-    t="$SELF_TMP/known-gone"
-    new_tree "$t"
-    rm -f "$t/${KNOWN[0]}"
-    git -C "$t" add -A
-    expect_fail "KNOWN 檔案不在了" "$t" "${KNOWN[0]}"
+        t="$SELF_TMP/known-gone"
+        new_tree "$t"
+        rm -f "$t/${KNOWN[0]}"
+        git -C "$t" add -A
+        expect_fail "KNOWN 檔案不在了" "$t" "${KNOWN[0]}"
+    fi
 
     # harness：沒宣告的新檔 → 點名；已宣告的 KNOWN_HARNESS → 點名。
     t="$SELF_TMP/harness-new"
@@ -308,11 +299,13 @@ self_test() {
     git -C "$t" add -A
     expect_fail "harness 沒宣告" "$t" "$HARNESS_DIR/newone.rs"
 
-    t="$SELF_TMP/harness-mounted"
-    new_tree "$t"
-    printf '#[path = "am_base_tests/rewind.rs"]\nmod rewind;\n' >"$t/$HARNESS_ROOT"
-    git -C "$t" add -A
-    expect_fail "KNOWN_HARNESS 已掛上" "$t" "$HARNESS_DIR/rewind.rs"
+    if [ "${#KNOWN_HARNESS[@]}" -gt 0 ]; then
+        t="$SELF_TMP/harness-mounted"
+        new_tree "$t"
+        printf '#[path = "am_base_tests/%s"]\nmod known;\n' "$(basename "${KNOWN_HARNESS[0]}")" >"$t/$HARNESS_ROOT"
+        git -C "$t" add -A
+        expect_fail "KNOWN_HARNESS 已掛上" "$t" "${KNOWN_HARNESS[0]}"
+    fi
 
     if [ "$st_fail" != 0 ]; then
         return 1
