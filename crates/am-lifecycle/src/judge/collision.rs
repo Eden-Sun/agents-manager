@@ -505,7 +505,11 @@ fn text_card(key: String, source: &'static str, jev_kind: &'static str, raw: &st
 }
 
 fn rank(cand: &Card, mut others: Vec<Card>) -> Vec<Card> {
-    let issues = issue_numbers(&format!("{} {}", cand.title, cand.summary));
+    let mut issues = issue_numbers(&format!("{} {}", cand.title, cand.summary));
+    // 票號也可能只在 `issue_ref`（claim 的票號、交辦的第二行）：title／summary 抽不到時照樣算數（#1385）。
+    if let Some(r) = &cand.issue_ref {
+        push_num(&mut issues, r.trim_start_matches('#'));
+    }
     let bases: HashSet<String> = cand.touches.iter().map(|p| basename(p).to_string()).collect();
     others.sort_by(|a, b| {
         let sa = u8::from(overlaps(a, &issues, &bases));
