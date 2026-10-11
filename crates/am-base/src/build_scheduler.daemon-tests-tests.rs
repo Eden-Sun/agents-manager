@@ -188,6 +188,39 @@
         assert_eq!(s["remote"]["reason"], json!("ssh 回 255"), "原因照 helper 記的帶出來");
     }
 
+    /// issue #1373：健康檔記的是**上一次嘗試**連的那台。設定改指到別台之後，那份結論不能掛在新 target 旁邊
+    /// （對新主機還一無所知＝`null`，不是舊主機的「連不上」）。
+    #[tokio::test]
+    async fn a_health_record_for_another_target_is_not_reported_for_the_configured_one() {
+        let env = tt::env().await;
+        let app = env.app.clone();
+        app.cfg
+            .update(|cfg| {
+                cfg.build.remote.enabled = true;
+                cfg.build.remote.user = "me".into();
+                cfg.build.remote.host = "new".into();
+                Ok(())
+            })
+            .await
+            .unwrap();
+        std::fs::create_dir_all(&app.data_dir).unwrap();
+        crate::remote_health::record(
+            &app.data_dir,
+            &crate::remote_health::Health {
+                reachable: false,
+                checked_at: "2026-09-24T10:00:00.000Z".into(),
+                target: "me@old:22".into(),
+                reason: Some("ssh 回 255：Connection refused".into()),
+            },
+        )
+        .unwrap();
+        let s = status(&app).await.unwrap();
+        assert_eq!(s["remote"]["target"], json!("me@new:22"));
+        assert_eq!(s["remote"]["remote_reachable"], json!(null), "舊主機的結論不能講新主機的事");
+        assert_eq!(s["remote"]["checked_at"], json!(null));
+        assert_eq!(s["remote"]["reason"], json!(null));
+    }
+
     /// 放掉一個名額之後，等待中的下一次 acquire 就能拿到——不是永遠卡住。
     #[tokio::test]
     async fn releasing_a_slot_frees_capacity_for_a_waiter() {
