@@ -39,6 +39,30 @@ pub struct Watch {
     nudges: u32,
     /// 補 Enter 前那一刻 pane 的 revision：補完之後畫面沒重繪＝鍵根本沒送到那個行程（#380 實測），不再重試。
     rev_at_nudge: Option<u64>,
+    /// 這筆回合的盯梢登記（#1366）；`Watch` 被 drop＝盯梢結束，登記跟著放掉。
+    _registered: Option<Registered>,
+}
+
+/// 行程內「已經有一條盯梢」的回合 id。主機每次重連都會 `rearm_host` 一遍，不去重就是同一筆回合好幾條各自補 Enter（#1366）。
+fn watching() -> &'static std::sync::Mutex<std::collections::HashSet<String>> {
+    static WATCHING: std::sync::OnceLock<std::sync::Mutex<std::collections::HashSet<String>>> = std::sync::OnceLock::new();
+    WATCHING.get_or_init(Default::default)
+}
+
+struct Registered(String);
+
+impl Registered {
+    /// 拿到登記＝這筆回合還沒有盯梢；已經有一條在盯就回 `None`。
+    fn claim(turn_id: &str) -> Option<Self> {
+        let mut set = watching().lock().unwrap_or_else(|e| e.into_inner());
+        set.insert(turn_id.to_string()).then(|| Registered(turn_id.to_string()))
+    }
+}
+
+impl Drop for Registered {
+    fn drop(&mut self) {
+        watching().lock().unwrap_or_else(|e| e.into_inner()).remove(&self.0);
+    }
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -279,6 +303,7 @@ pub async fn on_resolved_announce(app: &impl RelayWatchContext, from_bot: &str, 
             held_since: None,
             nudges: 0,
             rev_at_nudge: None,
+            _registered: None,
         },
     );
 }
@@ -350,12 +375,18 @@ async fn restore_open_watches(app: &impl crate::capabilities::Db, host: &str) ->
                 held_since: None,
                 nudges: 0,
                 rev_at_nudge: None,
+                _registered: None,
             }
         })
         .collect())
 }
 
-fn spawn_watch(app: &impl RelayWatchContext, watch: Watch) {
+/// 開一條盯梢。回合已經有一條在盯就不開（#1366）；`turn_id` 是 `None`（收件方正忙、沒開回合）照舊每次都開。
+fn spawn_watch(app: &impl RelayWatchContext, mut watch: Watch) {
+    if let Some(turn_id) = watch.turn_id.as_deref() {
+        let Some(claim) = Registered::claim(turn_id) else { return };
+        watch._registered = Some(claim);
+    }
     app.spawn_relay_watch(watch);
 }
 
@@ -384,7 +415,7 @@ mod tests {
     }
 
     fn watch(f: &F, turn_id: Option<String>, at: Instant) -> Watch {
-        Watch { run_id: f.run_id.clone(), bot_id: f.bot_id.clone(), text: TEXT.into(), turn_id, started: at, may_fail: true, held_since: None, nudges: 0, rev_at_nudge: None }
+        Watch { run_id: f.run_id.clone(), bot_id: f.bot_id.clone(), text: TEXT.into(), turn_id, started: at, may_fail: true, held_since: None, nudges: 0, rev_at_nudge: None, _registered: None }
     }
 
     fn keys_sent(f: &F) -> usize {
