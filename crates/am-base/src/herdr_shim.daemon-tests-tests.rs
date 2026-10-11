@@ -1743,3 +1743,113 @@
         assert_eq!(rc, 0, "{out:?} {err}");
         assert!(out.iter().any(|a| a == "--model") && !out.iter().any(|a| a == "--effort"), "{out:?}");
     }
+
+    /// 真的 router（同 daemon）起在 `127.0.0.1:0`，回埠與要 abort 的 task。
+    async fn serve_daemon_router(app: std::sync::Arc<crate::state::App>) -> (u16, tokio::task::JoinHandle<()>) {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let router = crate::api::router(app);
+        let server = tokio::spawn(async move {
+            let _ = axum::serve(listener, router.into_make_service_with_connect_info::<std::net::SocketAddr>()).await;
+        });
+        (port, server)
+    }
+
+    /// #1456（#1412 的回歸）：bot 在自己的 pane 裡開子 pane，shim 經**真的** router 跟 daemon 走完 spawn fence。
+    /// `pane split` 開出來的是沒有 agent 的空 shell pane；daemon 要驗得到它、回 200，shim exit 0。
+    /// #1412 沒修時 finish 會因為要求 agent 而回 503、shim exit 75——這條在那時就紅。
+    #[tokio::test(flavor = "multi_thread", worker_threads = 3)]
+    async fn a_pane_split_through_the_real_daemon_exits_zero_and_registers_the_pane() {
+        let e = crate::testing::env().await;
+        let parent = crate::testing::claude_bot(&e.app, &e.project_id, "parent").await;
+        sqlx::query("UPDATE bots SET hook_token='tok-parent' WHERE id=?").bind(&parent.id).execute(&e.app.db).await.unwrap();
+        crate::testing::fake_run(&e.app, &parent.id).await;
+        let (_, pane) = e.app.herdr.workspace_create("/tmp", "w", serde_json::json!({})).await.unwrap();
+        let created = serde_json::json!({"result": {"pane": {"pane_id": pane.pane_id}}}).to_string();
+        let (port, server) = serve_daemon_router(e.app.clone()).await;
+        let vars: Vec<(&str, String)> = vec![
+            ("AM_BOT_ID", parent.id.clone()),
+            ("AM_HOOK_TOKEN", "tok-parent".into()),
+            ("AM_AGENT_NAME", "parent".into()),
+            ("AM_PORT", port.to_string()),
+            ("AM_TEST_CREATE_JSON", created.clone()),
+        ];
+        let s = Sandbox::new();
+        std::fs::remove_file(s.dir.join("real/curl")).unwrap();
+        let (out, err, rc) = tokio::task::spawn_blocking(move || {
+            let env: Vec<(&str, &str)> = vars.iter().map(|(k, v)| (*k, v.as_str())).collect();
+            s.run_full(&env, &["pane", "split", "--pane", "w1:p1", "--purpose", "login shell"])
+        })
+        .await
+        .unwrap();
+        assert_eq!(rc, 0, "空 shell pane 必須登記成功：{out:?} {err}");
+        assert!(out.iter().any(|l| l.contains(&pane.pane_id)), "herdr 的輸出原樣印出：{out:?}");
+        assert!(!err.contains("尚未登記"), "{err}");
+        let owner: Option<Option<String>> = sqlx::query_scalar("SELECT owner_bot_id FROM panes WHERE pane_id = ?")
+            .bind(&pane.pane_id)
+            .fetch_optional(&e.app.db)
+            .await
+            .unwrap();
+        assert_eq!(owner, Some(Some(parent.id.clone())), "子 pane 歸屬到開它的 bot");
+        server.abort();
+    }
+
+    /// #1314 的本意：daemon 找不到的 pane id（例如主機改指後拿別台的 pane id 來 finish）不能算登記成功。
+    #[tokio::test(flavor = "multi_thread", worker_threads = 3)]
+    async fn a_pane_the_daemon_cannot_find_keeps_the_fence_and_exits_75() {
+        let e = crate::testing::env().await;
+        let parent = crate::testing::claude_bot(&e.app, &e.project_id, "parent").await;
+        sqlx::query("UPDATE bots SET hook_token='tok-parent' WHERE id=?").bind(&parent.id).execute(&e.app.db).await.unwrap();
+        crate::testing::fake_run(&e.app, &parent.id).await;
+        let created = serde_json::json!({"result": {"pane": {"pane_id": "w9:pNope"}}}).to_string();
+        let (port, server) = serve_daemon_router(e.app.clone()).await;
+        let vars: Vec<(&str, String)> = vec![
+            ("AM_BOT_ID", parent.id.clone()),
+            ("AM_HOOK_TOKEN", "tok-parent".into()),
+            ("AM_AGENT_NAME", "parent".into()),
+            ("AM_PORT", port.to_string()),
+            ("AM_TEST_CREATE_JSON", created),
+        ];
+        let s = Sandbox::new();
+        std::fs::remove_file(s.dir.join("real/curl")).unwrap();
+        let (_out, err, rc) = tokio::task::spawn_blocking(move || {
+            let env: Vec<(&str, &str)> = vars.iter().map(|(k, v)| (*k, v.as_str())).collect();
+            s.run_full(&env, &["pane", "split", "--pane", "w1:p1", "--purpose", "login shell"])
+        })
+        .await
+        .unwrap();
+        assert_eq!(rc, 75, "daemon 找不到的 pane 不能算登記：{err}");
+        assert!(err.contains("尚未登記"), "{err}");
+        let rows: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM panes WHERE pane_id = 'w9:pNope'").fetch_one(&e.app.db).await.unwrap();
+        assert_eq!(rows, 0, "沒有登記任何一列");
+        server.abort();
+    }
+
+    /// token 不對：begin 就被擋，herdr 完全不跑（stdout 是空的，假 herdr 會把 argv 印出來）。
+    #[tokio::test(flavor = "multi_thread", worker_threads = 3)]
+    async fn a_wrong_bot_token_never_reaches_herdr() {
+        let e = crate::testing::env().await;
+        let parent = crate::testing::claude_bot(&e.app, &e.project_id, "parent").await;
+        sqlx::query("UPDATE bots SET hook_token='tok-parent' WHERE id=?").bind(&parent.id).execute(&e.app.db).await.unwrap();
+        crate::testing::fake_run(&e.app, &parent.id).await;
+        let created = serde_json::json!({"result": {"pane": {"pane_id": "w1:p-child"}}}).to_string();
+        let (port, server) = serve_daemon_router(e.app.clone()).await;
+        let vars: Vec<(&str, String)> = vec![
+            ("AM_BOT_ID", parent.id.clone()),
+            ("AM_HOOK_TOKEN", "wrong".into()),
+            ("AM_AGENT_NAME", "parent".into()),
+            ("AM_PORT", port.to_string()),
+            ("AM_TEST_CREATE_JSON", created),
+        ];
+        let s = Sandbox::new();
+        std::fs::remove_file(s.dir.join("real/curl")).unwrap();
+        let (out, err, rc) = tokio::task::spawn_blocking(move || {
+            let env: Vec<(&str, &str)> = vars.iter().map(|(k, v)| (*k, v.as_str())).collect();
+            s.run_full(&env, &["pane", "split", "--pane", "w1:p1", "--purpose", "login shell"])
+        })
+        .await
+        .unwrap();
+        assert!(out.is_empty(), "token 不對，herdr 不能跑：{out:?} {err}");
+        assert_ne!(rc, 0, "{err}");
+        server.abort();
+    }
