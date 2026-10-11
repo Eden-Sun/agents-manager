@@ -65,6 +65,7 @@ import { runtimeIdentity, runtimeSettingsKnown } from '../lib/runtimeDrift'
 import { shortModel } from '../lib/shortModel'
 import { QuotaStrip } from './QuotaStrip'
 import { PrimaryStar } from './PrimaryStar'
+import { JudgeBadge } from './JudgeBadge'
 import { ShareLinkButton } from './ShareLinkButton'
 import { UpdateQuotaChip } from './UpdateQuotaChip'
 import { UnreadChip } from './UnreadChip'
@@ -1318,6 +1319,7 @@ export function ChatPanel({ onOpenSidebar }: { onOpenSidebar: () => void }) {
             {phone ? <UpdateQuotaChip /> : null}
             {/* Ahead of the badges: the row clips its tail, and the gear is the only non-duplicated entry. */}
             <PrimaryStar botId={botId} />
+            <JudgeBadge botId={botId} />
             <button
               type="button"
               className="icon-btn gear icon-tip"

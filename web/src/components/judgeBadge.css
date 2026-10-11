@@ -1,0 +1,40 @@
+/* Jev 徽章（issue #1328）：小膠囊，浮層貼在徽章下方。 */
+.judge-badge-wrap {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+}
+.judge-badge {
+  font-size: 10px;
+  line-height: 1;
+  padding: 2px 5px;
+  border-radius: 999px;
+  border: 1px solid var(--warn);
+  color: var(--warn);
+  background: transparent;
+  cursor: pointer;
+}
+.judge-badge-pop {
+  position: absolute;
+  top: calc(100% + 4px);
+  left: 0;
+  z-index: 20;
+  width: min(280px, 80vw);
+  padding: 8px 10px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--bg-raised, var(--bg));
+  box-shadow: 0 4px 16px rgb(0 0 0 / 0.18);
+  font-size: 12px;
+}
+.judge-badge-pop p {
+  margin: 0 0 6px;
+}
+.judge-badge-line {
+  margin: 0 0 6px;
+  max-height: 96px;
+  overflow: auto;
+  white-space: pre-wrap;
+  word-break: break-all;
+  font-size: 11px;
+}
