@@ -772,7 +772,8 @@ async fn remote_downloads_leave_a_slot_for_other_share_ops() {
         held.push(site.outbox_stream("big.bin", 1 << 20).await.unwrap());
     }
     assert!(matches!(site.outbox_stream("big.bin", 1 << 20).await, Err(ShareFileError::Busy)));
-    let list = tokio::time::timeout(Duration::from_secs(1), site.outbox_list(100)).await.expect("清單不能被下載占住");
+    // 壞掉時清單卡在名額上，會等到 acquire_slot 的 TIMEOUT_QUICK 才回 Err；這個上限要小於它（#1281）。
+    let list = tokio::time::timeout(TIMEOUT_QUICK / 2, site.outbox_list(100)).await.expect("清單不能被下載占住");
     assert!(list.is_ok());
     drop(held);
 }
@@ -817,7 +818,8 @@ async fn concurrent_remote_downloads_bounded_to_stream_reserve() {
     assert_eq!(busies, 1, "第 4 個併發下載必須回傳 Busy");
 
     // 此時仍有 1 個 slot 留給非下載操作（如 outbox_list）
-    let list = tokio::time::timeout(Duration::from_secs(1), site.outbox_list(100))
+    // 同上：上限要小於 acquire_slot 的 TIMEOUT_QUICK（#1281）。
+    let list = tokio::time::timeout(TIMEOUT_QUICK / 2, site.outbox_list(100))
         .await
         .expect("清單操作不應被併發下載占滿阻塞");
     assert!(list.is_ok());
