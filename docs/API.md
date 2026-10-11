@@ -297,7 +297,7 @@ A 組與 `git/push` 標「待裁示」的原因：這幾支唯一的呼叫端是
 | POST | `/api/hosts/{name}/tools/install` | User-only；一般 Bot → 403 `user_only`；已登記 AGM 角色略過共用 fence，仍受既有路由／資源權限限制 |
 | POST | `/api/hosts/{name}/tools/refresh` | User-only；一般 Bot → 403 `user_only`；已登記 AGM 角色略過共用 fence，仍受既有路由／資源權限限制 |
 | POST | `/api/identities` | User-only；一般 Bot → 403 `user_only`；已登記 AGM 角色略過共用 fence，仍受既有路由／資源權限限制 |
-| POST | `/api/judge/collision-check` | Bot principal（驗過的 `X-AM-Bot-Id` 與 token）；只看呼叫端自己的專案，回 202，不等 Jev；一般 Bot 可用（#1330） |
+| POST | `/api/judge/collision-check` | Bot principal（驗過的 `X-AM-Bot-Id` 與 token）；只看呼叫端自己的專案，回 202，不等 Jev；一般 Bot 可用（#1330；body、錯誤碼見「撞限第二意見帳本」一節） |
 | POST | `/api/mem/processes/kill` | User-only；一般 Bot → 403 `user_only`；已登記 AGM 角色略過共用 fence，仍受既有路由／資源權限限制 |
 | POST | `/api/missions/{id}/answer` | User／AGM role；一般 Bot 只限自己或後代 child 有該 mission 交辦，否則 403 `mission_participant_required`；`relay_from` 必須是自己 |
 | POST | `/api/missions/{id}/cancel` | User-only；一般 Bot → 403 `user_only`；已登記 AGM 角色略過共用 fence，仍受既有路由／資源權限限制 |
@@ -2454,7 +2454,7 @@ WS `upstream_update`：快照有變或要通知時推，`data` ＝上面一筆 i
 
 - `GET /api/judge/settings` → `{enabled, projects, model, key_present, key_error}`。key 永遠不回。
 - `PUT /api/judge/settings {enabled?, projects?, token?}` → 同上。`token` 非空＝寫進 key 檔（600）、空或省略＝不動；`projects` 是專案 id 或 label，去空白、去重；`enabled:true` 而沒有可用的 key → 409 `{error:"needs_key", reason}`；`token` 含空白／控制字元 → 400。存檔當下生效。token 與 `enabled`／`projects` 一起存是一個整體：token 先寫成暫存檔（600），config 寫成功才原子換掉現行 key；config 失敗（5xx）舊 key 與 config 都不變，換 key 失敗則把 config 退回原值。
-- `POST /api/judge/collision-check {issue?, title, child, branch?}` → `202 {queued:true}`，不等 Jev。bot 認領票時問一次撞題（`agm issue claim` 的呼叫端）：只記帳本、推提示，**不擋認領**。只給驗過的 bot（`X-AM-Bot-Id`＋token）：沒帶或驗不過 → `403 {error:"forbidden", reason:"bot_only", message}`；`title`／`child` 去頭尾空白後不能是空的、`title`／`child`／`branch` 各最多 500 字 → `400`。專案從呼叫端 bot 查，不從 body 拿；Jev 沒開（`judge.enabled` 為 false）就什麼都不寫進帳本。
+- `POST /api/judge/collision-check {issue?, title, child, branch?}` → `202 {queued:true}`，不等 Jev。bot 認領票時問一次撞題（`agm issue claim` 的呼叫端）：只記帳本、推提示，**不擋認領**。只給驗過的 bot（`X-AM-Bot-Id`＋token）：完全沒帶 `X-AM-Bot-Id` → `403 {error:"forbidden", reason:"bot_only", message}`；帶了 `X-AM-Bot-Id` 但 token 空或對不上 → `403 {error:"forbidden", reason:"bot_proof_mismatch", message}`（不會退回使用者權限）；`title`／`child` 去頭尾空白後不能是空的、`title`／`child`／`branch` 各最多 500 字 → `400 {error:"bad_request", message}`；呼叫端 bot 的列讀不到 → `404 {error:"not_found", what:"bot", message}`；讀 DB 失敗 → `502 {error:"upstream", message}`。專案從呼叫端 bot 查，不從 body 拿；Jev 沒開（`judge.enabled` 為 false）時照回 202，但什麼都不寫進帳本。
 
 ## 上游新版分診 `/api/release-triage/*`（SPEC §18.2c，issue #204）
 
