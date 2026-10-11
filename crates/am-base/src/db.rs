@@ -1403,7 +1403,8 @@ pub async fn active_run(pool: &SqlitePool, bot_id: &str) -> Result<Option<Run>> 
     .await?)
 }
 
-/// CAS a synthetic status transition only while this exact run and pane are still live.
+/// CAS a synthetic status transition only while this exact run and pane are still live (`starting` or `running`).
+/// `stopping`／`stopped`／`exited` 不收（#1321）；codex 的啟動框常在 `starting` 期間出現，也要能補標（#1408）。
 pub async fn compare_and_set_running_run_agent_status(
     pool: &SqlitePool,
     run: &Run,
@@ -1411,7 +1412,7 @@ pub async fn compare_and_set_running_run_agent_status(
     next_status: &str,
 ) -> Result<bool> {
     let result = sqlx::query(
-        "UPDATE runs SET agent_status=? WHERE id=? AND bot_id=? AND pane_id IS ? AND state='running' AND agent_status=?",
+        "UPDATE runs SET agent_status=? WHERE id=? AND bot_id=? AND pane_id IS ? AND state IN ('starting','running') AND agent_status=?",
     )
     .bind(next_status)
     .bind(&run.id)
@@ -1423,10 +1424,10 @@ pub async fn compare_and_set_running_run_agent_status(
     Ok(result.rows_affected() == 1)
 }
 
-/// Whether a snapshot still names the current live run/pane generation for its bot.
+/// Whether a snapshot still names the current live (`starting` or `running`) run/pane generation for its bot.
 pub async fn is_current_running_run(pool: &SqlitePool, run: &Run) -> Result<bool> {
     Ok(sqlx::query_scalar::<_, bool>(
-        "SELECT EXISTS(SELECT 1 FROM runs WHERE id=? AND bot_id=? AND pane_id IS ? AND state='running')",
+        "SELECT EXISTS(SELECT 1 FROM runs WHERE id=? AND bot_id=? AND pane_id IS ? AND state IN ('starting','running'))",
     )
     .bind(&run.id)
     .bind(&run.bot_id)
