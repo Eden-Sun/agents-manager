@@ -39,7 +39,8 @@ pub struct Entry {
 }
 
 /// SHA-1（RFC 3174）。只用來產生穩定的 entry id，不涉及安全性；不為它加依賴。
-fn sha1_hex(data: &[u8]) -> String {
+#[doc(hidden)]
+pub fn sha1_hex(data: &[u8]) -> String {
     let mut h: [u32; 5] = [0x6745_2301, 0xEFCD_AB89, 0x98BA_DCFE, 0x1032_5476, 0xC3D2_E1F0];
     let mut msg = data.to_vec();
     msg.push(0x80);

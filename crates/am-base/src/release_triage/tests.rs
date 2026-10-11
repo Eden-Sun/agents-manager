@@ -190,7 +190,7 @@ async fn rerun_before_dispatch_still_reports_the_same_pending_versions() {
     // 派出去之後才不再是 pending；重跑 --since 也不會重複派。
     let both = ["2.1.277".to_string(), "2.1.278".to_string()];
     assert_eq!(ledger::mark_dispatched(&p, "claude", &both, "bot-worker").await.unwrap(), 2);
-    assert_eq!(ledger::mark_dispatched(&p, "claude", &both, "bot-worker").await.unwrap(), 0, "CAS：已 dispatched 的不再動");
+    assert!(ledger::mark_dispatched(&p, "claude", &both, "bot-worker").await.is_err(), "CAS：已 dispatched 的不再接受重複派工");
     let third = check(&p, "claude", &all, None, Some("2.1.275")).await.unwrap();
     assert!(third.pending.is_empty(), "已經 dispatched，不再是 pending");
 }

@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# scripts/check.sh changed 必須把 release triage 範例的契約測試結果傳回來（#1185）。
+# scripts/check.sh changed 必須在 daemon target 執行 release triage 範例契約，且拒絕零測試（#1185/#1334）。
 set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 tmp="$(mktemp -d "${TMPDIR:-/tmp}/check-release-triage.XXXXXX")"
@@ -16,12 +16,12 @@ echo daemon
 SH
 cat > "$repo/scripts/ci-daemon-filters.sh" <<'SH'
 #!/usr/bin/env bash
-echo __am_base_release_triage_submission__
+echo __daemon_release_triage_submission__
 SH
 cat > "$tmp/bin/cargo" <<'SH'
 #!/usr/bin/env bash
 if [ "$1" = check ]; then exit 0; fi
-if [ "$1" = test ] && [ "$2" = -p ] && [ "$3" = am-base ]; then
+if [ "$1" = test ] && [ "$2" = -p ] && [ "$3" = agents-managerd ] && [[ " $* " == *the_task_template_teaches_a_submission_the_daemon_accepts* ]]; then
     python3 - "$PWD/scripts/ops/release-triage-task.md" <<'PY'
 import json
 import re
@@ -32,10 +32,15 @@ assert sample, "missing JSON sample"
 submission = json.loads(sample.group(1))
 assert all(submission.get(key) is not None for key in ("kind", "version", "dispatch_gen")), "invalid Submission sample"
 PY
-    exit $?
+    rc=$?
+    [ "$rc" = 0 ] || exit "$rc"
 fi
 if [ "$1" = test ] && [ "$3" = agents-managerd ]; then
-    echo 'test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s'
+    if [ "${AM_TEST_CARGO_ZERO_TESTS:-0}" = 1 ]; then
+        echo 'test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s'
+    else
+        echo 'test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s'
+    fi
     exit 0
 fi
 echo "unexpected cargo command: $*" >&2
@@ -63,8 +68,8 @@ if (cd "$repo" && PATH="$tmp/bin:$PATH" bash scripts/check.sh changed) >"$output
     echo "FAIL: check.sh changed passed an invalid release triage sample" >&2
     exit 1
 fi
-if ! grep -Fq 'crate: cargo test -p am-base -- the_task_template_teaches_a_submission_the_daemon_accepts' "$output"; then
-    echo "FAIL: check.sh changed did not select the am-base contract test" >&2
+if ! grep -Fq 'daemon: cargo test -p agents-managerd -- runners::am_base_tests::release_triage::tests::the_task_template_teaches_a_submission_the_daemon_accepts' "$output"; then
+    echo "FAIL: check.sh changed did not select the daemon contract test" >&2
     cat "$output" >&2
     exit 1
 fi
@@ -76,8 +81,8 @@ if (cd "$repo" && PATH="$tmp/bin:$PATH" CHECK_TESTS=cargo_shim:: bash scripts/ch
     cat "$output2" >&2
     exit 1
 fi
-if ! grep -Fq 'crate: cargo test -p am-base -- the_task_template_teaches_a_submission_the_daemon_accepts' "$output2"; then
-    echo "FAIL: CHECK_TESTS 指定 daemon 過濾字串時沒有跑發行契約" >&2
+if ! grep -Fq 'daemon: cargo test -p agents-managerd -- runners::am_base_tests::release_triage::tests::the_task_template_teaches_a_submission_the_daemon_accepts' "$output2"; then
+    echo "FAIL: CHECK_TESTS 指定字串時沒有執行發行契約" >&2
     cat "$output2" >&2
     exit 1
 fi
@@ -104,9 +109,26 @@ if ! (cd "$repo" && PATH="$tmp/bin:$PATH" CHECK_TESTS=none bash scripts/check.sh
     cat "$output4" >&2
     exit 1
 fi
-if ! grep -Fq '略過發行契約測試' "$output4"; then
-    echo "FAIL: CHECK_TESTS=none 略過契約時沒有明講" >&2
+if ! grep -Fq 'daemon: CHECK_TESTS=none：不跑測試' "$output4"; then
+    echo "FAIL: CHECK_TESTS=none 略過測試時沒有明講" >&2
     cat "$output4" >&2
+    exit 1
+fi
+
+# The command may exit zero while libtest selected nothing; check.sh must reject it.
+git -C "$repo" show HEAD:scripts/ops/release-triage-task.md >"$repo/scripts/ops/release-triage-task.md"
+printf '\n<!-- zero-test probe -->\n' >>"$repo/scripts/ops/release-triage-task.md"
+git -C "$repo" add scripts/ops/release-triage-task.md
+git -C "$repo" commit -qam valid-template-for-zero-test-check
+output5="$tmp/output5"
+if (cd "$repo" && PATH="$tmp/bin:$PATH" AM_TEST_CARGO_ZERO_TESTS=1 bash scripts/check.sh changed) >"$output5" 2>&1; then
+    echo "FAIL: check.sh changed passed a zero-test release contract" >&2
+    cat "$output5" >&2
+    exit 1
+fi
+if ! grep -Fq '沒有選到任何測試' "$output5"; then
+    echo "FAIL: zero-test failure did not explain the rejected filter" >&2
+    cat "$output5" >&2
     exit 1
 fi
 echo "check-changed-release-triage: OK"
