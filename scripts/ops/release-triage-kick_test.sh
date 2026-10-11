@@ -89,6 +89,16 @@ pend = [{"version": v,
          "unmatched": [{"id": f"{v}-u0", "text": f"unmatched {v}"}],
          "dropped_count": 4} for v in vers]
 json.dump({"kind": kind, "from": "0.0.0", "to": to, "pending": pend}, open(path, "w"))
+show_path = path.rsplit("/", 1)[0] + "/../agm/show-" + kind + ".json"
+try:
+    show = json.load(open(show_path))
+except (OSError, ValueError):
+    show = {"rows": []}
+rows = show.setdefault("rows", [])
+for version in vers:
+    if not any(row.get("kind") == kind and row.get("version") == version for row in rows):
+        rows.append({"kind": kind, "version": version, "status": "pending", "dispatch_gen": 0})
+json.dump(show, open(show_path, "w"))
 PY
 }
 mk_empty() { printf '{"kind":"%s","from":"1.0.0","to":"1.0.0","pending":[]}' "$1" > "$ROOT/triage/$1.json"; }
@@ -117,6 +127,7 @@ equals() {
   else echo "FAIL - $1（是 '$2'，預期 '$3'）"; FAIL=$((FAIL + 1)); fi
 }
 assigns() { grep -c ' assign ' "$AGM_DIR/calls.log" 2>/dev/null | tr -d ' '; }
+assignment_ids() { sed -n '/ assign /s/.*--request-id \([^ ]*\).*/\1/p' "$AGM_DIR/calls.log"; }
 
 # 1. 兩個 kind 的 pending 都是空的：不派、不寫 log。
 setup
@@ -134,7 +145,7 @@ setup
 mk_pending claude 2.1.278 2.1.277 2.1.278; mk_empty codex
 bash "$SCRIPT"
 equals "派一次" "$(assigns)" "1"
-check "旗標是 --request-id 且帶 kind＋to" "\-\-request-id release-triage-claude-2.1.278" "$AGM_DIR/calls.log"
+check "旗標是 --request-id 且帶 kind＋to 與代號指紋" "\-\-request-id release-triage-claude-2.1.278-" "$AGM_DIR/calls.log"
 check "派給協調者" "\-\-bot bot-resp" "$AGM_DIR/calls.log"
 check_no "不派給巡檢自己（daemon 會 400）" "\-\-bot bot-agm" "$AGM_DIR/calls.log"
 check "交辦給巡檢驗收" "\-\-review-by patrol" "$AGM_DIR/calls.log"
@@ -160,8 +171,8 @@ setup
 mk_pending claude 2.1.278 2.1.278; mk_pending codex 0.155.0 0.155.0
 bash "$SCRIPT"
 equals "兩個 kind 各派一則" "$(assigns)" "2"
-check "claude 的 request-id" "\-\-request-id release-triage-claude-2.1.278" "$AGM_DIR/calls.log"
-check "codex 的 request-id" "\-\-request-id release-triage-codex-0.155.0" "$AGM_DIR/calls.log"
+check "claude 的 request-id" "\-\-request-id release-triage-claude-2.1.278-" "$AGM_DIR/calls.log"
+check "codex 的 request-id" "\-\-request-id release-triage-codex-0.155.0-" "$AGM_DIR/calls.log"
 equals "額度一輪只查一次" "$(grep -c ' quota' "$AGM_DIR/calls.log" | tr -d ' ')" "1"
 teardown
 setup
@@ -188,6 +199,9 @@ import json, sys
 def ver(v, n):
     return {"version": v, "kept": [{"id": f"{v}-{i}", "text": "t", "categories": []} for i in range(n)], "unmatched": [], "dropped_count": 0}
 json.dump({"kind": "claude", "from": "1", "to": "2.0.3", "pending": [ver("2.0.1", 50), ver("2.0.2", 40), ver("2.0.3", 5)]}, open(sys.argv[1], "w"))
+show = sys.argv[1].rsplit("/", 1)[0] + "/../agm/show-claude.json"
+json.dump({"rows": [{"kind": "claude", "version": v, "status": "pending", "dispatch_gen": 0}
+                     for v in ("2.0.1", "2.0.2", "2.0.3")]}, open(show, "w"))
 PY
 mk_empty codex
 bash "$SCRIPT"
@@ -386,6 +400,43 @@ bash "$SCRIPT"
 equals "下一輪重派（同一個 request-id）" "$(grep -c 'release-triage-claude-2.1.278' "$AGM_DIR/calls.log" | tr -d ' ')" "2"
 teardown
 
+# 10c. stale dispatched 重排後是新一代交辦：request-id 改變，避免 daemon 去重回傳舊 assignment。
+setup
+mk_pending claude 2.1.278 2.1.278; mk_empty codex
+cat > "$AGM_DIR/show-claude.json" <<'JSON'
+{"rows":[{"kind":"claude","version":"2.1.278","status":"pending","dispatch_gen":0}]}
+JSON
+bash "$SCRIPT"
+FIRST_ID=$(assignment_ids | tail -1)
+# requeue_stale 會把狀態改回 pending、保留 dispatch_gen=1；下一次要派第 2 代。
+cat > "$AGM_DIR/show-claude.json" <<'JSON'
+{"rows":[{"kind":"claude","version":"2.1.278","status":"pending","dispatch_gen":1}]}
+JSON
+bash "$SCRIPT"
+SECOND_ID=$(assignment_ids | tail -1)
+[ -n "$FIRST_ID" ] && [ -n "$SECOND_ID" ] && [ "$FIRST_ID" != "$SECOND_ID" ] \
+  && { echo "ok   - stale requeue 用新 request-id（${FIRST_ID} → ${SECOND_ID}）"; PASS=$((PASS + 1)); } \
+  || { echo "FAIL - stale requeue 沿用舊 request-id（${FIRST_ID} → ${SECOND_ID}）"; FAIL=$((FAIL + 1)); }
+equals "stale requeue 實際重新派一次" "$(assigns)" "2"
+teardown
+
+# 10d. 同一目標版號改派不同 pending 子集時，request-id 也要不同。
+setup
+mk_pending claude 2.1.290 2.1.281; mk_empty codex
+bash "$SCRIPT"
+FIRST_ID=$(assignment_ids | tail -1)
+mk_pending claude 2.1.290 2.1.282
+bash "$SCRIPT"
+SECOND_ID=$(assignment_ids | tail -1)
+if [ -n "$FIRST_ID" ] && [ -n "$SECOND_ID" ] && [ "$FIRST_ID" != "$SECOND_ID" ]; then
+  echo "ok   - pending 子集不同就使用新 request-id"
+  PASS=$((PASS + 1))
+else
+  echo "FAIL - pending 子集不同就使用新 request-id（${FIRST_ID} → ${SECOND_ID}）"
+  FAIL=$((FAIL + 1))
+fi
+teardown
+
 # 10b. 連續派工失敗：一次不喊人，連續 N 輪推 ops_alert check_failing；成功一輪清零。
 setup
 mk_pending claude 2.1.278 2.1.278; mk_empty codex
@@ -496,12 +547,13 @@ bash "$SCRIPT"
 check "publish 成功有記 log" "2.1.1：publish published" "$AGM_DIR/release-triage.log"
 teardown
 
-# 15. 舊 agm 不認得 release-triage（exit 2）：只講一次；派工照舊。
+# 15. 舊 agm 不認得 release-triage（exit 2）：只講一次；無法讀帳本時不派。
 setup
 mk_pending claude 2.1.278 2.1.278; mk_empty codex
 export STUB_OLD_AGM=1
 bash "$SCRIPT"; equals "舊 agm：exit 0" "$?" "0"
-equals "舊 agm：assign 照派" "$(assigns)" "1"
+equals "舊 agm：無法讀帳本時不派" "$(assigns)" "0"
+check "舊 agm：記錄帳本讀取失敗" "讀不到 claude 帳本目前代號" "$AGM_DIR/release-triage.log"
 bash "$SCRIPT"; bash "$SCRIPT"
 equals "舊 agm：說明只寫一次" "$(grep -c '不認得 release-triage' "$AGM_DIR/release-triage.log" | tr -d ' ')" "1"
 teardown
@@ -697,7 +749,7 @@ check "binary-only kick 輸出獨立公告 id" 'NOTICE_ID="agm-claude-release-${
 check "正常 kick 輸出分診公告 id" 'NOTICE_ID="agm-release-triage-${KIND}-${TO}-notice"' "$SCRIPT"
 # 派工本身的 crid 是另一回事，不能被這次改動波及：`claude_review.rs` 用 agm-claude-release-<ver>
 # 讓網頁按鈕與 kick 冪等地指到同一筆（見該檔 :10／:142），所以那個**沒有** -notice 尾巴的 id 要留著。
-check "kick 的 changelog 派工 request-id 仍是 release-triage-<kind>-<to>" 'release-triage-${KIND}-${TO}' "$SCRIPT"
+check "kick 的 changelog 派工 request-id 含 kind、to 與代號指紋" 'prefix = f"release-triage-{kind}-{to}"' "$SCRIPT"
 
 # stale lock reclaim must be serialized: two ticks that both observed the dead owner
 # must not delete each other's newly acquired lock and dispatch the same batch twice.

@@ -460,10 +460,53 @@ print(json.dumps(out, ensure_ascii=False, indent=2))
     printf '\n\n通知 request-id（child 需原樣使用）：%s\n' "$NOTICE_ID"
   } > "$BODY"
 
+  # request-id 固定代表這批版本的目前一代；重排後 dispatch_gen 變了，便會取得新 id。
+  # 這也讓 assign 成功但 dispatched 記帳失敗時，重試同一代仍由 daemon 冪等去重。
+  SHOW_ASSIGN='{"rows":[]}'
+  if [ "$BINARY_ONLY" -eq 0 ]; then
+    SHOW_ASSIGN=$("$AGM" --compact release-triage show --kind "$KIND" 2>>"$LOG") || {
+      note_fail "讀不到 ${KIND} 帳本目前代號，這輪不派工"
+      continue
+    }
+  fi
+  ASSIGN_ID=$(printf '%s' "$SHOW_ASSIGN" | PAYLOAD="$PAYLOAD" KIND="$KIND" TO="$TO" BINARY_ONLY="$BINARY_ONLY" \
+    BINARY_OLD="$CLAUDE_DIFF_OLD" BINARY_NEW="$CLAUDE_DIFF_NEW" python3 -c '
+import hashlib, json, os, sys
+try:
+    payload = json.loads(os.environ["PAYLOAD"])
+    kind, to = os.environ["KIND"], os.environ["TO"]
+    if os.environ["BINARY_ONLY"] == "1":
+        identity = {"kind": kind, "to": to, "binary_old": os.environ.get("BINARY_OLD", ""),
+                    "binary_new": os.environ.get("BINARY_NEW", "")}
+        prefix = f"release-triage-claude-binary-{to}"
+    else:
+        rows = json.load(sys.stdin).get("rows")
+        if not isinstance(rows, list):
+            raise ValueError("show rows missing")
+        generations = []
+        for pending in payload["pending"]:
+            version = pending["version"]
+            matches = [row for row in rows if row.get("kind") == kind and row.get("version") == version]
+            if len(matches) != 1 or matches[0].get("status") != "pending":
+                raise ValueError(f"{version} is not exactly one pending row")
+            generation = matches[0].get("dispatch_gen")
+            if isinstance(generation, bool) or not isinstance(generation, int) or generation < 0:
+                raise ValueError(f"{version} has invalid dispatch_gen")
+            generations.append({"version": version, "dispatch_gen": generation + 1})
+        identity = {"kind": kind, "to": to, "versions": generations}
+        prefix = f"release-triage-{kind}-{to}"
+    digest = hashlib.sha256(json.dumps(identity, sort_keys=True, separators=(",", ":"),
+                              ensure_ascii=False).encode()).hexdigest()[:20]
+    print(f"{prefix}-{digest}")
+except Exception as exc:
+    print(f"cannot build assignment request-id: {exc}", file=sys.stderr)
+    sys.exit(1)
+  ' 2>>"$LOG") || {
+    note_fail "讀不到 ${KIND} 帳本目前代號，這輪不派工"
+    continue
+  }
   # 旗標叫 `--request-id`（不是 --client-request-id）：拼錯的話 argparse 直接 exit 2，
   # 而 stub 吃掉未知旗標的測試看不出來（2026-09-16 的事故，見 claude-release-kick.sh）。
-  ASSIGN_ID="release-triage-${KIND}-${TO}"
-  [ "$BINARY_ONLY" -eq 0 ] || ASSIGN_ID="release-triage-claude-binary-${TO}"
   if "$AGM" --compact assign --bot "$BOT" --review-by patrol --text-file "$BODY" \
        --request-id "$ASSIGN_ID" >> "$LOG" 2>&1; then
     log "${KIND} → ${TO}：已派 ${BOT} 分診"
