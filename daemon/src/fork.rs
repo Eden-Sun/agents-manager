@@ -111,6 +111,8 @@ pub async fn fork_bot(
         ));
     }
     lifecycle::refuse_default_session(&source)?;
+    // #708／#1360：移交出去的專案不在這顆 daemon 上建 bot、也不啟動；建之前就拒絕，不留下一顆啟動不了的 bot。
+    crate::handoff::refuse(&app.db, &source.id).await?;
     let Some((session_id, transcript)) = source_session(&app, &source.id).await? else {
         return Err(LcError::conflict(
             "no_session",
