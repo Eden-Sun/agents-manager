@@ -264,8 +264,9 @@ try:
         if isinstance(o,dict) and isinstance(o.get("kind"),str):
             kind=o["kind"]
             break
+    echo=("<command-name>","<command-message>","<command-args>","<local-command-","<system-reminder>","Caveat: The messages below")
     for v in users:
-        if v.get("isMeta") is True:
+        if v.get("isMeta") is True or v.get("isSidechain") is True or v.get("isCompactSummary") is True or v.get("isVisibleInTranscriptOnly") is True:
             continue
         c=(v.get("message") or {}).get("content")
         if isinstance(c,list):
@@ -273,6 +274,8 @@ try:
                 continue
             c="\n".join(x["text"] for x in c if isinstance(x.get("text"),str))
         if not isinstance(c,str) or not c.strip():
+            continue
+        if c.lstrip().startswith(echo):
             continue
         if len(c)<=65536:
             c.encode("utf-8")  # a lone surrogate would be written back out as an escape serde_json cannot read
@@ -2271,6 +2274,39 @@ mod remote_hook_tests {
         let sb3 = Sandbox::new(false);
         sb3.run(&["claude", &sb3.bot, "-"], &stop(&transcript.to_string_lossy(), "SessionStart"));
         assert!(spooled(&sb3).get("agm_user_text").is_none());
+    }
+
+    /// #1283：auto-compact 的摘要（`isCompactSummary`）、slash 指令的回音、sidechain 都不是人打的一問：跳過，
+    /// 回到真正那句 `跑完整測試`（與本機 `user_prompt_raw` 同一套規則）。
+    #[test]
+    fn a_remote_stop_skips_compact_summaries_and_command_echoes() {
+        let sb = Sandbox::new(false);
+        let project_dir = sb.dir.join(".claude/projects/project");
+        std::fs::create_dir_all(&project_dir).unwrap();
+        let transcript = project_dir.join("t.jsonl");
+        let line = |v: serde_json::Value| format!("{v}\n");
+        std::fs::write(
+            &transcript,
+            [
+                line(serde_json::json!({"type": "user", "origin": {"kind": "human"}, "message": {"role": "user", "content": "跑完整測試"}})),
+                line(serde_json::json!({"type": "assistant", "message": {"role": "assistant", "content": [{"type": "text", "text": "好"}]}})),
+                line(serde_json::json!({"type": "user", "isCompactSummary": true, "isVisibleInTranscriptOnly": true, "message": {"role": "user", "content": "This session is being continued from a previous conversation"}})),
+                line(serde_json::json!({"type": "user", "message": {"role": "user", "content": "<command-name>/usage</command-name>"}})),
+                line(serde_json::json!({"type": "user", "isSidechain": true, "message": {"role": "user", "content": "子代理的提示"}})),
+                line(serde_json::json!({"type": "assistant", "message": {"role": "assistant", "content": [{"type": "text", "text": "完成"}]}})),
+            ]
+            .concat(),
+        )
+        .unwrap();
+        let stop = serde_json::json!({"hook_event_name": "Stop", "session_id": "s-1", "transcript_path": transcript.to_string_lossy(), "stop_hook_active": false, "last_assistant_message": "完成"}).to_string();
+
+        let (_, ok) = sb.run(&["claude", &sb.bot, "-"], &stop);
+        assert!(ok);
+        let events = sb.read("hook-spool.jsonl");
+        let last = events.lines().rev().find(|l| !l.trim().is_empty()).expect("spool 有一行").to_string();
+        let p = serde_json::from_str::<serde_json::Value>(&last).expect("spool 行是合法 JSON")["payload"].clone();
+        assert_eq!(p["agm_user_text"], "跑完整測試", "{p}");
+        assert_eq!(p["agm_origin_kind"], "human", "{p}");
     }
 
     /// 2026-10-02：遠端 transcript 在那台機器上，`hook.sh` 在 Stop／StopFailure 前把已答完（或取消）的 `AskUserQuestion`
