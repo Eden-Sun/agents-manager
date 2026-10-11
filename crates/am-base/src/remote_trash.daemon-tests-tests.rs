@@ -629,6 +629,32 @@
         assert_eq!(std::fs::read_to_string(dir.join("keep.txt")).unwrap(), "mine", "下一輪照常還原");
     }
 
+    /// **#1413**：鎖忙而跳過的那顆，它的備份同一輪不能被清理刪掉（就算已經超過 7 天）：沒還原成，就還在；放開鎖的下一輪還原回來。
+    /// `a_bot_whose_lock_is_busy_is_skipped_this_round` 的備份是剛放的、本來就不會過期，證明不了這件事。
+    #[tokio::test]
+    async fn a_busy_bots_expired_backup_is_not_cleaned_before_it_is_restored() {
+        let (env, root) = remote("trashbox-lock-busy-old").await;
+        let app = env.app.clone();
+        let bot = tt::claude_bot(&app, &env.project_id, "alfa").await;
+        let trash = root.join("bots-trash");
+        let old = now_ms() - Duration::from_secs(8 * 86_400).as_millis();
+        let backup = trash.join(format!("{}.{old}", bot.id));
+        std::fs::create_dir_all(&backup).unwrap();
+        std::fs::write(backup.join("keep.txt"), "mine").unwrap();
+        crate::remote_purge::record(&app, &bot.id, "trashbox-lock-busy-old", true, None).await;
+        let dir = root.join("bots").join(&bot.id);
+
+        let lock = app.bot_lock(&bot.id).await;
+        let held = lock.lock().await;
+        crate::runners::remote_trash::gc_host(&app, "trashbox-lock-busy-old").await;
+        assert!(!dir.exists(), "鎖被握著：這一輪不還原");
+        assert!(backup.exists(), "鎖忙而跳過：過期的備份這一輪也不能清");
+        drop(held);
+
+        crate::runners::remote_trash::gc_host(&app, "trashbox-lock-busy-old").await;
+        assert_eq!(std::fs::read_to_string(dir.join("keep.txt")).unwrap(), "mine", "放開鎖之後的下一輪還原回來");
+    }
+
     /// **#1406**：回收區是空的（大多數時候）：補還原只列一次名字，不為每顆活 bot 各 ssh 一趟。
     #[tokio::test]
     async fn a_sweep_with_an_empty_trash_runs_one_listing_and_no_per_bot_restore() {
