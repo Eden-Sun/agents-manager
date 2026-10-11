@@ -1511,7 +1511,7 @@ tab 已被回收視為完成，`tab.list` 失敗不猜。沒有 `tab_id` 的 Run
 
 ### 6.4 停止／刪除 Bot（per-bot 鎖內）
 - **遠端已刪 bot 的目錄靠 DB 推導的欠帳收**（issue #349，`crates/am-base/src/remote_purge.rs`，巡邏在 `daemon/src/runners/remote_purge.rs`）：刪除 handler 的一次性 ssh purge 只在 handler 活著時有效；daemon 在「刪除已 commit、purge 還沒跑」之間死掉，
-  開機的 `purge_deleted_bot_dirs` 只掃本機 `data_dir/bots`、看不到遠端。所以欠的清理從 DB 推：`deleted_at` 非空的 bot ＋ 它專案列記的 host（專案軟刪後列還在）＋ 沒有「已清掉」記號（`remote_bot_dir_purges.purged_at`）。
+  開機的 `purge_deleted_bot_dirs` 只掃本機 `data_dir/bots`、看不到遠端。所以欠的清理從 DB 推：`deleted_at` 非空的 bot ＋ 它專案列記的 host（專案軟刪後列還在）＋ 沒有「已清掉」記號（`remote_bot_dir_purges.purged_at`）。移交出去的專案（`handed_off_to`）不列（#708：`purge_bot_dir` 不動它們），也就不佔同一輪的名額（#1407）。
   主機連上（含重連）時背景掃一次，連著期間每 5 分鐘再掃；只有「確定軟刪」而且「確定沒有 active run」才搬進遠端回收區（run 讀不到或還活著＝不刪，DB 讀不到＝什麼都不刪），host 只取專案列、**不明就不動，不退回本機**。
   每一顆都在它自己的 per-bot 鎖（`restore_bot` 拿的那把）裡**重讀一次 `deleted_at`**（issue #511）：撈「誰欠著」到真的 `mv` 之間隔著一次 `active_run` 與一整段 ssh，一輪最多 100 顆可以是好幾分鐘，
   中間使用者按「復原」的話，以前照樣會把剛還原的**活** bot 的遠端目錄（連本機 `attachments/<id>/`）搬進回收區，還補回一列 `purged_at`——那列會讓它之後真的被刪時被「誰欠著」的查詢排除，目錄從此沒人回收。

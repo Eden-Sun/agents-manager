@@ -325,3 +325,41 @@ async fn an_old_database_gets_the_owed_triggers_on_migrate() {
     crate::remote_purge::migrate(&app.db).await.unwrap();
     assert_eq!(names().await, vec!["remote_bot_dir_purge_owed_on_host_move".to_string(), "remote_bot_dir_purge_owed_on_project_delete".to_string()]);
 }
+
+/// 直接插一顆已刪 bot（id 由呼叫端給，好讓字典序可以排）。
+async fn insert_deleted_bot(app: &std::sync::Arc<crate::state::App>, project_id: &str, id: &str) {
+    sqlx::query("INSERT INTO bots (id, project_id, name, kind, args_json, autostart, inject_hooks, hook_token, managed_by, created_at, deleted_at) VALUES (?,?,?,'claude','[]',0,1,'tok','user',?,?)")
+        .bind(id)
+        .bind(project_id)
+        .bind(id)
+        .bind(crate::db::now())
+        .bind(crate::db::now())
+        .execute(&app.db)
+        .await
+        .unwrap();
+}
+
+/// #1407：移交出去的專案不清（#708）、也不記欠著，它的已刪 bot 永遠沒有記號。它們不能佔住同一輪的名額，
+/// 否則同主機其他專案的已刪 bot 永遠排不到（#1318 沒修到的那條）；收回移交之後才又列出來。
+#[tokio::test]
+async fn a_handed_off_project_does_not_occupy_the_sweep_slots() {
+    let r = remote("purgehost-handoff").await;
+    let app = r.env.app.clone();
+    let host = r.host.clone();
+    let handed = crate::db::ulid();
+    sqlx::query("INSERT INTO projects (id, path, label, host, created_at, handed_off_to) VALUES (?, '/handed', 'handed', ?, ?, 'mac')")
+        .bind(&handed)
+        .bind(&host)
+        .bind(crate::db::now())
+        .execute(&app.db)
+        .await
+        .unwrap();
+    // 移交專案的 101 顆已刪 bot 排在字典序前面；正常專案只有一顆 z1。
+    for i in 0..101 {
+        insert_deleted_bot(&app, &handed, &format!("a{i:03}")).await;
+    }
+    insert_deleted_bot(&app, &r.env.project_id, "z1").await;
+    assert_eq!(crate::remote_purge::pending(&app.db, &host, true).await.unwrap(), vec!["z1".to_string()], "移交出去的專案的已刪 bot 不能佔名額");
+    sqlx::query("UPDATE projects SET handed_off_to = NULL WHERE id = ?").bind(&handed).execute(&app.db).await.unwrap();
+    assert_eq!(crate::remote_purge::pending(&app.db, &host, true).await.unwrap().len(), 100, "收回移交之後照常列出（一輪最多 100）");
+}
