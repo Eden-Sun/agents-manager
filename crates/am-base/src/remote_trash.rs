@@ -102,6 +102,24 @@ pub async fn restore(conn: &HostConn, bot_id: &str, dir: &str, remote_root: &str
     }
 }
 
+/// 回收區裡有 `<id>.<毫秒>` 整段備份的 bot id。只列名字、不動任何東西（#1406）：回收區不在或不可信＝空的；
+/// 腳本沒有回報完（沒有 `AM_IDS_END`）＝Err。`attachments`、`share_workspace` 那類與不是數字的尾碼不算，跟 [`restore`] 同一條規則。
+pub async fn backed_up_ids(conn: &HostConn, remote_root: &str) -> Result<Vec<String>> {
+    let home = conn.home().await?;
+    let trash = trash_dir_for(&home, remote_root);
+    let guard = trash_root_guard(&home, "printf 'AM_IDS_END\\n'", false);
+    let script = format!(
+        "T={t}\n{guard}if [ -d \"$T\" ]; then\nfor e in \"$T\"/*; do\n[ -d \"$e\" ] || continue\nb=${{e##*/}}\nid=${{b%%.*}}\nms=${{b#*.}}\n[ \"$id\" != \"$b\" ] || continue\ncase \"$ms\" in ''|*[!0-9]*) continue;; esac\ncase \"$id\" in *[[:space:]]*) continue;; esac\nprintf 'AM_ID %s\\n' \"$id\"\ndone\nfi\nprintf 'AM_IDS_END\\n'\n",
+        t = sh_quote(&trash),
+        guard = guard,
+    );
+    let out = conn.ssh_exec(&script).await?;
+    if !out.lines().any(|l| l == "AM_IDS_END") {
+        bail!("remote bots-trash listing did not confirm: {}", out.trim())
+    }
+    Ok(out.lines().filter_map(|l| l.strip_prefix("AM_ID ")).map(|id| id.trim().to_string()).collect())
+}
+
 /// 兩道一起跑，跟本機 [`crate::bot_trash::gc_with_cap`] 同一套政策（#441）：先清放超過 `keep` 的
 /// （看名字裡的時間，不看 mtime——`mv` 不更新目錄 mtime），再看總量，還超過 `max_bytes` 就從**最舊的**
 /// 開始清到降下來；最新那一份永遠留著（剛刪掉的那顆才是最可能要還原的）。回 `(過期清掉幾份, 因為超量再清掉幾份)`。
