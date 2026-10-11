@@ -283,16 +283,18 @@ pub async fn on_resolved_announce(app: &impl RelayWatchContext, from_bot: &str, 
     );
 }
 
-/// 寄件 bot 送一句報備當下正在跑的回合（#927）：`at`（RFC 3339 或 `db::now()` 的格式）落在 `[created_at, completed_at]` 之間、最新的那一回合。
+/// 寄件 bot 送一句報備當下正在跑的回合（#927）：`at`（RFC 3339 或 `db::now()` 的格式）落在 `[開跑時間, completed_at]` 之間、開跑最晚的那一回合。
+/// 開跑時間是 `COALESCE(delivered_at, created_at)`：排過隊的回合要等真的送達才算在跑（#1365）；還沒開始的（`queued`）不是。
 /// 本機 API 傳的是現在；遠端 spool 傳的是 shim 寫進報備的 `received_at`（送出當下，不是 daemon 收到的時間）。找不到就是 `None`。
 pub async fn sender_turn_at(app: &impl crate::capabilities::Db, bot_id: &str, at: &str) -> anyhow::Result<Option<String>> {
     let turn = sqlx::query_scalar(
         "SELECT t.id FROM turns t
            JOIN conversations c ON c.id = t.conversation_id
           WHERE c.bot_id = ?1
-            AND julianday(t.created_at) <= julianday(?2)
+            AND t.status <> 'queued'
+            AND julianday(COALESCE(t.delivered_at, t.created_at)) <= julianday(?2)
             AND (t.completed_at IS NULL OR julianday(t.completed_at) >= julianday(?2))
-          ORDER BY t.created_at DESC, t.rowid DESC LIMIT 1",
+          ORDER BY COALESCE(t.delivered_at, t.created_at) DESC, t.rowid DESC LIMIT 1",
     )
     .bind(bot_id)
     .bind(at)
