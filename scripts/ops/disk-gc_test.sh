@@ -110,6 +110,23 @@ equals "exit 0" "$(run)" "0"
 gone "unit 與檔都很舊的 worktree：target/ 整個刪" "$STALE/target"
 teardown
 
+# 3d. 舊的目錄看得到、但一個 unit 子樹讀不進去（權限／I/O），裡面卻有近期的檔 → 讀不完就不能證明久沒用：target/ 整棵保留，log 說明原因（issue #1261）。
+setup
+UNREAD="$REPO/.claude/worktrees/unreadable"; mkdir -p "$UNREAD"; mk_target "$UNREAD" yes
+mkdir -p "$UNREAD/target/debug/.fingerprint/bar-xyz"
+echo x > "$UNREAD/target/debug/.fingerprint/bar-xyz/invoked.timestamp"
+old "$UNREAD/target/debug/.fingerprint/bar-xyz" "$UNREAD/target/debug/.fingerprint"
+echo x > "$UNREAD/target/keep-me"; old "$UNREAD/target/keep-me"   # 可讀、很舊的哨兵：整棵刪的話它會跟著被刪
+chmod 000 "$UNREAD/target/debug/.fingerprint/bar-xyz"
+if [ -r "$UNREAD/target/debug/.fingerprint/bar-xyz" ]; then
+  echo "FAIL - 無法模擬讀不到（以 root 跑？）：這條測試需要非 root 身分"; FAIL=$((FAIL + 1))
+fi
+equals "exit 0" "$(run)" "0"
+exists "讀不完的 unit 子樹：target/ 整棵保留，哨兵也還在（不因為 find 沒輸出就當成久沒用）" "$UNREAD/target/keep-me"
+check  "log 記下讀不完的原因" "讀不完" "$LOG"
+chmod 755 "$UNREAD/target/debug/.fingerprint/bar-xyz" 2>/dev/null
+teardown
+
 # 4. 有行程的 cwd 在某 worktree → 那棵完全不動（即使 target 很舊）。
 setup
 BUSY="$REPO/.claude/worktrees/busy"; mkdir -p "$BUSY"; mk_target "$BUSY" yes

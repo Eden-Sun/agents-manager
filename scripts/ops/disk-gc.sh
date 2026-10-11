@@ -113,13 +113,19 @@ else
     if [ "$kind" = worktree ]; then
       # .fingerprint、它的 unit 目錄與 unit 目錄裡的檔都超過門檻才算久沒用；cargo 重編既有 unit 只改寫裡面的檔，不動目錄 mtime（issue #1177）。
       # 一個 .fingerprint 都沒有就不判斷。
-      local have=0 recent=0 fp
+      # find 的錯誤不能當成「沒有近期檔」：讀不完（權限、I/O）就無法證明久沒用，整棵 target/ 保留（issue #1261）。
+      local have=0 recent=0 unreadable=0 fp out rc
       for fp in ./*/.fingerprint; do
         [ -d "$fp" ] && [ ! -L "$fp" ] || continue
         have=1
-        if [ -n "$(find "$fp" -maxdepth 2 -mmin -$((TARGET_DAYS * 1440)) -print -quit 2>/dev/null)" ]; then recent=1; fi
+        out=$(find "$fp" -maxdepth 2 -mmin -$((TARGET_DAYS * 1440)) -print -quit 2>/dev/null); rc=$?
+        if [ -n "$out" ]; then recent=1
+        elif [ "$rc" -ne 0 ]; then unreadable=1
+        fi
       done
-      if [ "$have" = 1 ] && [ "$recent" = 0 ]; then
+      if [ "$unreadable" = 1 ]; then
+        skip "${tree}/target（.fingerprint 讀不完，不能證明久沒用，整棵保留）"
+      elif [ "$have" = 1 ] && [ "$recent" = 0 ]; then
         cd "$tree" || return 0
         remove ./target || skip "${tree}/target（刪除失敗）"
         return 0
