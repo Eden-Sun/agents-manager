@@ -30,12 +30,21 @@ fn any_err<E: std::fmt::Display>(e: E) -> LcError {
 
 /// 定案之後的工作脫離請求生命週期（#1065）：工作在自己的 task 裡跑完，handler 只等它的結果。
 /// client 斷線（handler future 被 drop）時工作照樣跑完、照常 complete／record_failure，intent 不會停在 running 沒人補。
-async fn detach<T: Send + 'static>(
+pub(crate) async fn detach<T: Send + 'static>(
     key: &str,
     work: impl std::future::Future<Output = Result<T, LcError>> + Send + 'static,
 ) -> Result<T, LcError> {
     // 呼叫端是 task-local（config 寫入的稽核 `http=` 欄位讀它）：脫離之後要帶過去，不然工作裡寫的稽核都會變成 `-`。
     let caller = crate::config_audit::http_caller();
+    #[cfg(test)]
+    let done_key = key.to_string();
+    // 完成訊號在脫離的 task 裡發（handler 已經被 drop 時也要發）；只在測試編進去。
+    let work = async move {
+        let out = work.await;
+        #[cfg(test)]
+        work_done_for_test(&done_key).notify_one();
+        out
+    };
     let task = tokio::spawn(crate::config_audit::HTTP_CALLER.scope(caller, work));
     #[cfg(test)]
     work_registry().lock().unwrap_or_else(|e| e.into_inner()).insert(key.to_string(), task.abort_handle());
@@ -50,6 +59,14 @@ async fn detach<T: Send + 'static>(
 fn work_registry() -> &'static std::sync::Mutex<std::collections::HashMap<String, tokio::task::AbortHandle>> {
     static V: std::sync::OnceLock<std::sync::Mutex<std::collections::HashMap<String, tokio::task::AbortHandle>>> = std::sync::OnceLock::new();
     V.get_or_init(Default::default)
+}
+
+/// 測試用：脫離工作結束時對 `key` 發的完成訊號。permit 會留著，先發後等也收得到，測試不靠 sleep。
+#[cfg(test)]
+pub(crate) fn work_done_for_test(key: &str) -> Arc<tokio::sync::Notify> {
+    static V: std::sync::OnceLock<std::sync::Mutex<HashMap<String, Arc<tokio::sync::Notify>>>> = std::sync::OnceLock::new();
+    let map = V.get_or_init(Default::default);
+    map.lock().unwrap_or_else(|e| e.into_inner()).entry(key.to_string()).or_default().clone()
 }
 
 /// 殺掉 `key` 的脫離工作（它若還沒登記就回 false）。
@@ -8279,6 +8296,35 @@ mod delete_bot_tests {
         release.notify_one();
         assert!(crate::testing::eventually!(intent_states(&e.app, &e.project_id).await == vec!["done"]), "{:?}", intent_states(&e.app, &e.project_id).await);
         assert!(deleted(&e.app, &kid).await, "child 照樣軟刪");
+    }
+
+    /// #1355：restart 的 handler 在 stop 與 start 之間被 drop（client 斷線）：脫離出去的工作照樣做完，
+    /// 新的 run 起來、restart intent 收成 done、鎖與 restart_hold 都放掉。
+    #[tokio::test]
+    async fn a_restart_whose_handler_is_dropped_between_stop_and_start_still_finishes() {
+        let e = crate::testing::env().await;
+        let bot = crate::testing::claude_bot(&e.app, &e.project_id, "restart-drop").await;
+        let run1 = lifecycle::start_bot(&e.app, &bot.id).await.unwrap();
+        let reached = Arc::new(tokio::sync::Notify::new());
+        let release = Arc::new(tokio::sync::Notify::new());
+        let (r2, go) = (reached.clone(), release.clone());
+        crate::lifecycle::race_point::arm("restart_after_stop", &bot.id, move || async move {
+            r2.notify_one();
+            go.notified().await;
+        });
+        let (app, id) = (e.app.clone(), bot.id.clone());
+        let h = tokio::spawn(async move { restart_bot(State(app), Path(id), Query(Default::default())).await.map(|_| ()) });
+        reached.notified().await;
+        h.abort(); // 瀏覽器斷線：handler future 被 drop（脫離出去的工作不受影響）
+        let _ = h.await;
+        release.notify_one();
+        work_done_for_test(&bot.id).notified().await;
+        let run2 = db::active_run(&e.app.db, &bot.id).await.unwrap().expect("重啟做完：bot 回來了");
+        assert_ne!(run2.id, run1, "是一顆新的 run");
+        assert_eq!(run2.state, "running");
+        let intents: Vec<String> = sqlx::query_scalar("SELECT status FROM intents WHERE kind = 'restart' AND subject_id = ?").bind(&bot.id).fetch_all(&e.app.db).await.unwrap();
+        assert_eq!(intents, vec!["done"]);
+        assert!(!lifecycle::restart_hold::in_progress(&bot.id), "restart_hold 放掉了");
     }
 
     /// 補不成（child 的軟刪一直寫不進去）：最多試 MAX_ATTEMPTS 次，failed＋AGM inbox。
