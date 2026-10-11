@@ -25,6 +25,9 @@ pub(crate) async fn apply_migrations_failing_after_spawn_hints_drop(pool: &Sqlit
     crate::db::apply_migrations_failing_after_spawn_hints_drop_for_test(pool, composition_features()).await
 }
 
+#[path = "am_base_tests/agy_remote.rs"]
+mod agy_remote;
+
 #[path = "am_base_tests/agy_support.rs"]
 mod agy_support;
 
@@ -142,6 +145,9 @@ mod primary_keep_warm;
 #[path = "am_base_tests/private_files.rs"]
 mod private_files;
 
+#[path = "am_base_tests/prompt_suggestion.rs"]
+mod prompt_suggestion;
+
 #[path = "am_base_tests/prompt_cache.rs"]
 mod prompt_cache;
 
@@ -165,6 +171,9 @@ mod remote_purge;
 
 #[path = "am_base_tests/remote_trash.rs"]
 mod remote_trash;
+
+#[path = "am_base_tests/rewind.rs"]
+mod rewind;
 
 #[path = "am_base_tests/release_triage.rs"]
 mod release_triage;
