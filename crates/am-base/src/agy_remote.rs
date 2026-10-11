@@ -18,7 +18,8 @@ use anyhow::{bail, Result};
 /// dispatcher 裡的 python：補事件名；`Stop` 另外讀 transcript 尾端（2 MiB）把最近一回合的問答放進去。
 /// 必須跟 `agy_support::{last_exchange,last_input_tokens}` 同一份語意（`tests` 的對照測試把兩邊餵同一份 fixture）。
 /// 不能含單引號：它被包在 sh 的單引號裡。
-const ENRICH_PY: &str = r#"import json,sys
+#[doc(hidden)]
+pub const ENRICH_PY: &str = r#"import json,sys
 ev=sys.argv[1] if len(sys.argv)>1 else ""
 try:
     p=json.loads(sys.stdin.buffer.read().decode("utf-8","replace"))
