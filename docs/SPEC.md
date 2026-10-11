@@ -727,6 +727,7 @@ Jev 不負責回合收尾、額度記帳或競態判斷；這些依 run、turn�
    body `{bot_id, provider, payload, received_at, run_id?}`（`run_id`＝行程 env 的 `AM_RUN_ID`，只給 §4.1 的世代圍籬用）。
 4. 失敗（連不上、逾時，或非 2xx，含 daemon 寫不進收件匣時的 503；409 `provider_mismatch` 與 410 `bot deleted` 是永久拒絕，不 spool）→ `O_APPEND` 追加一行到
    `~/.config/agents-manager/bots/<bot_id>/hook-spool.jsonl`；寫失敗只記 `hook.log`，仍 exit 0。這就是 hook 的重試路徑。
+   **總量上限 64 MiB**（#1256，一顆 bot 一個目錄，算 `.replaying`、`.claim`、`hook-spool.jsonl` 加起來）：超過時先整個丟最舊的檔（`.replaying`，再 `.claim`），還超過就從最新檔的前面截掉、保留最新的一半（行邊界對齊）。每次丟棄記一行 `hook.log` 的 warn，丟掉的紀錄數累加到 `hook-spool.dropped`。寫入與 daemon 的認領（rename）都在 `hook-spool.lock` 底下做。單行上限另見 §4.4.6（#1068）。
 5. `--port` 取自 command 列；env `AM_PORT` 為備援。
 6. daemon 重放 spool：拿 per-bot 鎖 → rename 成 `.claim` → 併進 `.replaying` → 逐行**寫進 `hook_events` 並 commit** → 刪檔 → 放鎖；
    §6.7 的配對交給 worker。順序不能顛倒：先刪檔再處理，中間掛掉就等於事件沒發生過。

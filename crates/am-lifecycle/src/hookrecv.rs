@@ -2268,7 +2268,13 @@ async fn replay_spool_locked<H: HookHost>(app: &H, bot_id: &str) -> Result<usize
         // #493：**先 rename 再讀**。以前是 `read(spool)` → 整份寫回 `.replaying` → `remove_file(spool)`，
         // 中間那一大段（寫一份完整的 staging）裡 hook 附加進來的行，會在最後那個 remove 被連檔刪掉。
         // rename 是原子的：之後 append 的行落在新的 inode 上，不在這一輪手上，也就刪不到。
-        std::fs::rename(&spool, &claim)?;
+        // #1256：認領也拿 spool 目錄的鎖，跟 hook 行程的超量丟棄互斥（`am_base::hook_cmd::lock_spool_dir`）。
+        let (s, c, d) = (spool.clone(), claim.clone(), dir.clone());
+        tokio::task::spawn_blocking(move || -> std::io::Result<()> {
+            let _lock = am_base::hook_cmd::lock_spool_dir(&d)?;
+            std::fs::rename(&s, &c)
+        })
+        .await??;
         #[cfg(all(test, feature = "daemon-test-harness"))]
         crate::lifecycle::race_point::hit("spool_claimed", bot_id).await;
         fold_spool_blocking(claim.clone(), staging.clone()).await?;
