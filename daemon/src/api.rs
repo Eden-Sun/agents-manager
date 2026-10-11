@@ -5883,7 +5883,12 @@ async fn service_herdr_upgrade_resume(
 }
 
 async fn stop_bot(State(app): State<Arc<App>>, Path(id): Path<String>) -> Result<Response, LcError> {
-    let had = lifecycle::stop_bot(&app, &id).await?;
+    // 脫離請求（#1357）：送完 ctrl+c 之後 client 斷線，停止照樣記成 stopped，不會卡在 stopping 或被收成 exited。
+    let had = detach(&id, {
+        let (app, id) = (app.clone(), id.clone());
+        async move { lifecycle::stop_bot(&app, &id).await }
+    })
+    .await?;
     if had {
         Ok((StatusCode::OK, Json(json!({}))).into_response())
     } else {
