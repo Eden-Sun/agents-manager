@@ -116,23 +116,54 @@ export function MemPopover({ host = LOCAL_HOST, children }: { host?: string; chi
   const [pos, setPos] = useState<{ left: number; top: number } | null>(null)
   const row = useStore((s) => s.mem?.hosts.find((h) => h.host === host) ?? null)
 
+  // 世代：只認最新一趟。舊的那趟晚回來（遠端慢、按了重新整理）不能把新清單蓋回去（#1347）。
+  const gen = useRef(0)
+  /** 在路上的請求數（點開、重新整理、殺完重抓都算）：輪詢看它，不在路上才排下一趟。 */
+  const inflight = useRef(0)
   const load = useCallback(async () => {
+    const mine = ++gen.current
+    inflight.current += 1
     setLoading(true)
     try {
-      setData(await fetchMemProcesses(host))
+      const d = await fetchMemProcesses(host)
+      if (mine !== gen.current) return
+      setData(d)
       setErr(null)
     } catch (e) {
-      setErr(e instanceof Error ? e.message : '讀不到')
+      if (mine === gen.current) setErr(e instanceof Error ? e.message : '讀不到')
     } finally {
-      setLoading(false)
+      inflight.current -= 1
+      if (mine === gen.current) setLoading(false)
     }
   }, [host])
 
   // 關著就不抓：每次是一趟 `ps`（遠端還要 ssh）；第一筆由點開的 `onClick` 抓。
+  // 上一趟回來才排下一趟（不疊）；分頁在背景不抓，回前景立刻補一次（#1347，同 useTerminalSnapshot）。
   useEffect(() => {
     if (!open) return
-    const t = setInterval(() => void load(), REFRESH_MS)
-    return () => clearInterval(t)
+    let alive = true
+    let timer: ReturnType<typeof setTimeout> | null = null
+    const next = () => {
+      if (alive) timer = setTimeout(() => void tick(), REFRESH_MS)
+    }
+    const tick = async () => {
+      if (document.visibilityState === 'hidden' || inflight.current > 0) return next()
+      await load()
+      next()
+    }
+    const onVisible = () => {
+      if (document.visibilityState !== 'visible' || inflight.current > 0) return
+      if (timer) clearTimeout(timer)
+      timer = null
+      void tick()
+    }
+    document.addEventListener('visibilitychange', onVisible)
+    next()
+    return () => {
+      alive = false
+      document.removeEventListener('visibilitychange', onVisible)
+      if (timer) clearTimeout(timer)
+    }
   }, [open, load])
 
   useLayoutEffect(() => {
