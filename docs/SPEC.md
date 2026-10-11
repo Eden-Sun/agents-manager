@@ -2200,6 +2200,8 @@ rustup 換位置或遠端主機上反而是錯的——讓 shim 每次在 pane �
   佇列順序＝`(since, holder)` 字典序，`since` 是這個 holder**第一次**排進 waiting 的時間（重試不會歸零）；
   `since` 相同（毫秒級撞期）時比 `holder` 當穩定的第二排序鍵。跟 `cargo-slot.sh` 的號碼牌是同一個道理，只是這裡
   拿 `build_slots.since` 當號碼牌，不必另開一張表——`acquire` 額滿或前面有人排隊都會先確保自己有一列 `waiting`。
+  「前面有人」只算 `last_seen` 在 20 秒內的等待者（`FIFO_LIVE_WAITER`，#1445）：停止 poll 的隊首（行程被砍、pane 關掉）不擋後面還在 poll 的人，
+  它的列留到 60 秒才收（`STALE_WAITING`）；它若只是慢，下一次 poll 仍保有原本的 `since`，名額一空就輪到它。
 - **`holder` 只能是自己的**（issue #460）：`holder` 是呼叫端自己填的字串，證明不了身分。帶 bot 身分的 `acquire`
   若指到一列 `bot_id` 不是自己的 holder，回 `403 {"reason":"holder_bot_mismatch"}`、什麼都不動——否則任何驗得過的
   bot 只要重複別人的 holder，就能從冪等分支拿回**它現在的 token**（進而 `release` 掉它的名額，讓對方的 shim 判定
