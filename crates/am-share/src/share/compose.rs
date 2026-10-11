@@ -521,7 +521,14 @@ fn load(src: &dyn PhotoSource, parts: &[&str]) -> Embedded {
     if let Some(hit) = cache_get(&key) {
         return hit;
     }
-    let result = if meta.len > SOURCE_MAX { Err("source_too_large") } else { src.read(parts, SOURCE_MAX).and_then(|bytes| to_data_uri(&bytes)) };
+    // 只快取跟照片內容綁定的結果。讀取階段的失敗（遠端這一趟沒抓到、單次合計上限、檔案剛好在改）跟這張照片的身分無關：不快取，下次再試（#1393）。
+    if meta.len > SOURCE_MAX {
+        let result = Err("source_too_large");
+        cache_put(key, result.clone());
+        return result;
+    }
+    let bytes = src.read(parts, SOURCE_MAX)?;
+    let result = to_data_uri(&bytes);
     cache_put(key, result.clone());
     result
 }
@@ -855,5 +862,64 @@ mod tests {
         for bad in ["", "/a.jpg", "../a.jpg", "inbox//a.jpg", "inbox/./a.jpg", "C:/a.jpg", "a:b", "inbox/a.jpg?x=1", "inbox/a.jpg#f", ".hidden/a.jpg"] {
             assert_eq!(safe_rel(bad), None, "{bad:?}");
         }
+    }
+
+    /// #1393：讀取階段的失敗（遠端這一趟沒抓到）跟這張照片的身分無關，不能記死：下一次分享頁重新整理就要能嵌進去。
+    #[test]
+    fn a_read_stage_failure_is_not_cached_and_the_next_attempt_embeds() {
+        let ws = format!("/remote/ws-{}", crate::db::ulid());
+        let rels = vec![vec!["inbox".to_string(), "a.jpg".to_string()]];
+        let photo = jpeg(40, 30);
+        let meta = PhotoMeta { ino: 7, len: photo.len() as u64, mtime_ns: 1 };
+        let s = svg(r#"<image href="inbox/a.jpg" width="10" height="10"/>"#);
+        let scope = PrefetchedSource::scope_of("hostA#1", &ws);
+
+        let failed = PrefetchedSource::new("hostA#1", &ws, &rels, &[Some(meta)], vec![Some(Err("read_failed"))]);
+        let out = embed_with(s.as_bytes(), &failed).unwrap();
+        assert_eq!(images(&out), vec![(None, Some("read_failed".to_string()))]);
+        assert!(!is_cached(&scope, &rels[0], &meta), "讀取失敗不能進快取");
+
+        let ok = PrefetchedSource::new("hostA#1", &ws, &rels, &[Some(meta)], vec![Some(Ok(photo))]);
+        let out = embed_with(s.as_bytes(), &ok).unwrap();
+        assert!(images(&out)[0].0.as_deref().is_some_and(|h| h.starts_with("data:image/jpeg;base64,")));
+        assert!(is_cached(&scope, &rels[0], &meta), "成功的結果照樣快取");
+    }
+
+    /// #1393：合計上限擋下的（`source_too_large`）是這一趟的事，換一份只引用這一張的 SVG 明明放得下：不能記死。
+    #[test]
+    fn a_total_cap_refusal_is_not_cached() {
+        let ws = format!("/remote/ws-{}", crate::db::ulid());
+        let rels = vec![vec!["inbox".to_string(), "b.jpg".to_string()]];
+        let photo = jpeg(40, 30);
+        let meta = PhotoMeta { ino: 8, len: photo.len() as u64, mtime_ns: 1 };
+        let s = svg(r#"<image href="inbox/b.jpg" width="10" height="10"/>"#);
+        let scope = PrefetchedSource::scope_of("hostA#1", &ws);
+
+        let capped = PrefetchedSource::new("hostA#1", &ws, &rels, &[Some(meta)], vec![Some(Err("source_too_large"))]);
+        let out = embed_with(s.as_bytes(), &capped).unwrap();
+        assert_eq!(images(&out), vec![(None, Some("source_too_large".to_string()))]);
+        assert!(!is_cached(&scope, &rels[0], &meta), "合計上限擋下的不能進快取");
+
+        let ok = PrefetchedSource::new("hostA#1", &ws, &rels, &[Some(meta)], vec![Some(Ok(photo))]);
+        let out = embed_with(s.as_bytes(), &ok).unwrap();
+        assert!(images(&out)[0].0.as_deref().is_some_and(|h| h.starts_with("data:image/jpeg;base64,")), "下一次放得下就嵌進去");
+    }
+
+    /// 防止改過頭：照片內容本身壞掉（不是圖）是這張照片的身分，照樣快取，不用每次重解。
+    #[test]
+    fn a_bad_image_is_still_cached() {
+        let ws = format!("/remote/ws-{}", crate::db::ulid());
+        let rels = vec![vec!["inbox".to_string(), "c.jpg".to_string()]];
+        let meta = PhotoMeta { ino: 9, len: 12, mtime_ns: 1 };
+        let s = svg(r#"<image href="inbox/c.jpg" width="10" height="10"/>"#);
+        let scope = PrefetchedSource::scope_of("hostA#1", &ws);
+
+        let bad = PrefetchedSource::new("hostA#1", &ws, &rels, &[Some(meta)], vec![Some(Ok(b"not an image".to_vec()))]);
+        let out = embed_with(s.as_bytes(), &bad).unwrap();
+        assert_eq!(images(&out), vec![(None, Some("not_an_image".to_string()))]);
+        assert!(is_cached(&scope, &rels[0], &meta), "壞檔是照片內容的結果，照樣快取");
+        let before = decodes_for_test();
+        embed_with(s.as_bytes(), &bad).unwrap();
+        assert_eq!(decodes_for_test(), before, "第二次不再解碼");
     }
 }
