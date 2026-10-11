@@ -1,7 +1,7 @@
 import { test, afterEach } from 'node:test'
 import assert from 'node:assert/strict'
 import type { JudgeShadowRow } from '../api/judge'
-import { DISMISSED_KEY, judgeBadgeFor, loadDismissed, rememberDismissed } from './judgeBadge'
+import { DISMISSED_KEY, judgeBadgeFor, loadDismissed, popPosition, rememberDismissed } from './judgeBadge'
 
 const NOW = Date.parse('2026-10-11T12:00:00Z')
 const ago = (h: number) => new Date(NOW - h * 3600_000).toISOString()
@@ -116,4 +116,26 @@ test('過時的撞題紀錄不產生徽章，次新的超過門檻那則接上',
   ]
   assert.equal(judgeBadgeFor(rows, 'bot-a', NOW, NONE)?.id, 'live-stuck')
   assert.equal(judgeBadgeFor(rows.slice(0, 1), 'bot-a', NOW, NONE), null)
+})
+
+// ── 浮層位置（#1381）：浮層是 fixed，位置由徽章鈕的矩形算，不被側欄的捲動區裁掉。
+
+test('popPosition：放得下就貼著按鈕左緣、往下開', () => {
+  assert.deepEqual(popPosition({ left: 87, top: 100, bottom: 116 }, { width: 280, height: 140 }, 1280, 800), { left: 87, top: 120 })
+})
+
+test('popPosition：右邊放不下就往左推到離右緣 8px', () => {
+  assert.equal(popPosition({ left: 300, top: 100, bottom: 116 }, { width: 280, height: 140 }, 390, 800).left, 390 - 8 - 280)
+})
+
+test('popPosition：左邊最少留 8px', () => {
+  assert.equal(popPosition({ left: 2, top: 100, bottom: 116 }, { width: 280, height: 140 }, 1280, 800).left, 8)
+})
+
+test('popPosition：下面放不下、上面放得下就往上翻', () => {
+  assert.equal(popPosition({ left: 87, top: 700, bottom: 716 }, { width: 280, height: 140 }, 1280, 800).top, 700 - 4 - 140)
+})
+
+test('popPosition：上下都放不下就維持往下', () => {
+  assert.equal(popPosition({ left: 87, top: 90, bottom: 106 }, { width: 280, height: 140 }, 1280, 200).top, 110)
 })

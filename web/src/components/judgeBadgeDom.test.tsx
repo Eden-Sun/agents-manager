@@ -235,3 +235,32 @@ test('關掉這則後沒有別的一則：焦點交給最近的可聚焦祖先�
   assert.equal(host.querySelector('.judge-badge'), null, '最後一則關掉，徽章整個不見')
   assert.equal(document.activeElement, listRow, '焦點交給列（tabIndex 祖先），不掉到 body')
 })
+
+test('浮層是 fixed 定位，並帶算出來的 left／top（不被側欄捲動區裁掉）', async () => {
+  freshBadgeState()
+  seed([row({ id: 'fixed-1', regex_verdict: 'stuck_queued', at: ago(1), jev_is_live_ui: 0.9 })])
+  const root = await mount(<JudgeBadge botId="bot-a" />)
+  const pop = await openBadge(root)
+  assert.ok(pop)
+  assert.equal(pop.style.position, 'fixed')
+  assert.notEqual(pop.style.left, '')
+  assert.notEqual(pop.style.top, '')
+})
+
+test('捲動或改視窗大小時關掉浮層（fixed 的浮層不跟著列走，留著會指錯列）', async () => {
+  freshBadgeState()
+  seed([row({ id: 'scroll-1', regex_verdict: 'stuck_queued', at: ago(1), jev_is_live_ui: 0.9 })])
+  const root = await mount(<JudgeBadge botId="bot-a" />)
+  assert.ok(await openBadge(root))
+  await act(async () => {
+    window.dispatchEvent(new Event('scroll'))
+  })
+  await settle(20)
+  assert.equal(root.querySelector('.judge-badge-pop'), null, '捲動要關掉')
+  assert.ok(await openBadge(root))
+  await act(async () => {
+    window.dispatchEvent(new Event('resize'))
+  })
+  await settle(20)
+  assert.equal(root.querySelector('.judge-badge-pop'), null, '改視窗大小要關掉')
+})

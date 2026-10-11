@@ -46,3 +46,21 @@ export function rememberDismissed(id: string, current: ReadonlySet<string>): Set
   }
   return new Set(kept)
 }
+
+/**
+ * 浮層的位置（#1381）：貼著徽章鈕左緣、往下開；右邊放不下往左推，離視窗邊留 8px；
+ * 下面放不下、上面放得下才往上翻；上下都放不下就維持往下。浮層是 fixed，座標是視窗座標。
+ */
+export function popPosition(
+  btn: { left: number; top: number; bottom: number },
+  pop: { width: number; height: number },
+  vw: number,
+  vh: number,
+): { left: number; top: number } {
+  const edge = 8
+  const left = Math.max(edge, Math.min(btn.left, vw - edge - pop.width))
+  const below = btn.bottom + 4
+  const above = btn.top - 4 - pop.height
+  const top = below + pop.height > vh - edge && above >= edge ? above : below
+  return { left, top }
+}
