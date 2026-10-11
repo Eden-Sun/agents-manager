@@ -1382,7 +1382,8 @@ mod flush_queue_tests {
         for _ in 0..8 {
             forget_queue_retry_timer(&f.bot_id); // 上一顆 timer 燒掉了
             assert!(flush_queued_locked(&app, &f.bot_id).await.is_err());
-            secs.push(queue_retry_timer_left(&f.bot_id).expect("讀不到就要掛 timer").as_secs());
+            // 剩餘時間量的是到期點減現在，讀取時已過的真實時間不超過 1 秒：向上取整就是排程的整秒數。
+            secs.push(queue_retry_timer_left(&f.bot_id).expect("讀不到就要掛 timer").as_secs_f64().ceil() as u64);
         }
         assert_eq!(secs, vec![10, 20, 40, 80, 160, 300, 300, 300], "連續失敗：每次加倍，上限 5 分鐘");
         sqlx::query("ALTER TABLE runs_unreadable RENAME TO runs").execute(app.db()).await.unwrap();

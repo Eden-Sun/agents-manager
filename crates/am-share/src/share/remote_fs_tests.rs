@@ -922,7 +922,7 @@ async fn remote_photo_fd_bound_traversal_prevents_symlink_swap_and_hardlink() {
 #[test]
 fn a_photo_that_changed_while_reading_is_not_a_permanent_not_found() {
     let prefix = "0\tERR\tchanged";
-    let out = format!("PHOTO {}\n{}\n", prefix.len(), prefix);
+    let out = format!("AM_RFS1\nPHOTO {}\n{}\nAM_RFS_DONE\n", prefix.len(), prefix);
     let rels = vec![vec!["inbox".to_string(), "a.jpg".to_string()]];
     let got = parse_photo_fetch(out.as_bytes(), &rels, 1 << 20, 1 << 20).unwrap();
     assert_eq!(got, vec![Err("read_failed")], "讀的途中被改：不是永久的 not_found");
