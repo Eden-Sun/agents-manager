@@ -735,6 +735,53 @@ function clientWith(messages: () => Promise<ReturnType<typeof page>>, subscribe:
   }
 }
 
+async function runResyncRace(order: 'older-first' | 'resync-first', resyncHasMore: boolean) {
+  const pending: ((value: ReturnType<typeof page>) => void)[] = []
+  let calls = 0
+  let ev!: ShareEvents
+  const client = clientWith(
+    () => {
+      calls++
+      if (calls === 1) return Promise.resolve({ ...page([msgAt('a', 'user', 1), msgAt('b', 'assistant', 2), msgAt('c', 'user', 3)]), has_more: true })
+      return new Promise((resolve) => pending.push(resolve))
+    },
+    (events) => {
+      ev = events
+      return () => {}
+    },
+  )
+  await mount(<ShareApp client={client} />)
+  await settle(50)
+  await act(async () => {
+    ev.onDown()
+    ev.onUp?.()
+  })
+  await act(async () => ev.onResync?.())
+  assert.equal(calls, 3, '重連與 resync 各有一個進行中的請求')
+
+  const stale = { ...page([msgAt('a', 'user', 1), msgAt('b', 'assistant', 2), msgAt('c', 'user', 3)]), has_more: true }
+  const rewound = { ...page([msgAt('a', 'user', 1)]), has_more: resyncHasMore }
+  const complete = async (index: number, value: ReturnType<typeof page>) => act(async () => pending[index](value))
+  if (order === 'older-first') {
+    await complete(0, stale)
+    await complete(1, rewound)
+  } else {
+    await complete(1, rewound)
+    await complete(0, stale)
+  }
+
+  assert.deepEqual([...document.querySelectorAll('.sh-msg .sh-bubble')].map((node) => node.textContent?.trim()), ['a'], 'resync 的快照移除舊訊息後，舊回應不能把它們加回來')
+  assert.equal(!!document.querySelector('.sh-older'), resyncHasMore, '載入較早按鈕跟著 resync 快照')
+}
+
+test('resync 先發出的舊訊息請求先完成時仍以 resync 快照為準', async () => {
+  await runResyncRace('older-first', false)
+})
+
+test('resync 快照先完成時，較舊的訊息請求不能合回已移除的訊息', async () => {
+  await runResyncRace('resync-first', true)
+})
+
 test('檔案清單重抓重疊時只採用最新開始的回應', async () => {
   const requests: ((files: ShareFile[]) => void)[] = []
   let ev!: ShareEvents

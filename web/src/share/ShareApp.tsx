@@ -178,8 +178,10 @@ export function ShareApp({ client }: { client: ShareClient }) {
   const sawOlder = useRef(false)
   /** `load` 連續失敗幾次（非 404）；> 0 而且沒在輪詢時，自己排下一次重試。 */
   const [loadFails, setLoadFails] = useState(0)
-  /** resync 要求「下一份成功的頁面取代手上的清單」；重抓失敗時留著，重試成功照樣取代。 */
-  const replaceNext = useRef(false)
+  /** 訊息請求世代：較舊回應不更新 UI；待處理的 resync 由下一份成功快照消化。 */
+  const messageLoadGen = useRef(0)
+  const messageResyncGen = useRef(0)
+  const appliedResyncGen = useRef(0)
   /** SSE 斷過：重新連上時要補抓一次（斷線期間的事件不會重播）。 */
   const wasDown = useRef(false)
   /** 手上看過的最新一則 bot 回覆；頁面帶來更新的一則＝bot 剛回完，檔案清單要重抓（輪詢模式沒有 SSE 的 message 事件）。 */
@@ -212,11 +214,10 @@ export function ShareApp({ client }: { client: ShareClient }) {
     [client],
   )
 
-  const applyPage = useCallback((page: SharePage) => {
+  const applyPage = useCallback((page: SharePage, replace: boolean) => {
     setBotName(page.bot_name)
     setStatus(page.status)
-    if (replaceNext.current) {
-      replaceNext.current = false
+    if (replace) {
       sawOlder.current = false
       setMessages(mergeMessages([], page.messages))
     } else setMessages((cur) => mergeMessages(cur, page.messages))
@@ -244,10 +245,24 @@ export function ShareApp({ client }: { client: ShareClient }) {
     setState('ready')
   }, [loadFiles])
 
-  const load = useCallback(() => client.messages().then(applyPage, fail), [client, applyPage, fail])
+  const load = useCallback(() => {
+    const gen = ++messageLoadGen.current
+    const resyncGen = messageResyncGen.current
+    return client.messages().then(
+      (page) => {
+        if (gen !== messageLoadGen.current) return
+        const replace = resyncGen > appliedResyncGen.current
+        if (replace) appliedResyncGen.current = resyncGen
+        applyPage(page, replace)
+      },
+      (e) => {
+        if (gen === messageLoadGen.current) fail(e)
+      },
+    )
+  }, [client, applyPage, fail])
 
   useEffect(() => {
-    client.messages().then(applyPage, fail)
+    void load()
     void loadFiles()
     const stop = client.subscribe({
       onMessage: (m) => {
@@ -265,7 +280,7 @@ export function ShareApp({ client }: { client: ShareClient }) {
       },
       // 漏了事件或對話被倒回：整頁重抓，以重抓結果取代手上的清單（倒回的那幾則要消失，合併不會刪）。
       onResync: () => {
-        replaceNext.current = true
+        messageResyncGen.current++
         void load().then(() => loadFiles())
       },
       onDown: () => {
