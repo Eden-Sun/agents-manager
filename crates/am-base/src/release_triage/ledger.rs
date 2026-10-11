@@ -436,6 +436,20 @@ pub async fn insert_version(pool: &SqlitePool, kind: &str, version: &str, entrie
     Ok(r.rows_affected() == 1)
 }
 
+/// `mark_dispatched` 整批沒動：這一版不是 `pending`（已派、已判、帳本沒有）。
+#[derive(Debug)]
+pub struct NotPending {
+    pub version: String,
+}
+
+impl std::fmt::Display for NotPending {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "release-triage {} 不是 pending，整批沒有標記", self.version)
+    }
+}
+
+impl std::error::Error for NotPending {}
+
 /// kick 派出交辦後呼叫：`pending` → `dispatched`（CAS，只動真的還是 `pending` 的），記下收件的 `bot_id` 並把派工代數＋1（#801）。
 /// 回傳實際轉換的筆數。
 pub async fn mark_dispatched(pool: &SqlitePool, kind: &str, versions: &[String], bot_id: &str) -> Result<u64> {
@@ -463,7 +477,7 @@ pub async fn mark_dispatched(pool: &SqlitePool, kind: &str, versions: &[String],
         };
         if affected != 1 {
             tx.rollback().await?;
-            return Err(anyhow!("release-triage {kind} {v} was not pending for dispatch (updated {affected} rows)"));
+            return Err(anyhow::Error::new(NotPending { version: v.clone() }));
         }
         n += affected;
     }

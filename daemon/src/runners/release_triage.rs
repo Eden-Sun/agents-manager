@@ -1,5 +1,6 @@
 //! `/api/release-triage/*`（issue #204 B）：verdict 進來、帳本查詢、派出標記、publish 重試。docs/API.md。
 
+use std::collections::HashSet;
 use std::sync::Arc;
 
 use axum::extract::{Extension, Query, State};
@@ -183,8 +184,19 @@ async fn post_dispatched(State(app): State<Arc<App>>, Json(b): Json<DispatchedIn
         Some(bot) if bot.deleted_at.is_none() => {}
         _ => return Err(LcError::Bad(format!("bot_id `{}` 不是現存的 bot", b.bot_id))),
     }
-    let versions: Vec<String> = b.versions.iter().filter_map(|v| crate::changelog::version_string(v)).collect();
-    let n = ledger::mark_dispatched(&app.db, &b.kind, &versions, &b.bot_id).await.map_err(up)?;
+    let mut versions: Vec<String> = b.versions.iter().filter_map(|v| crate::changelog::version_string(v)).collect();
+    let mut seen = HashSet::new();
+    versions.retain(|version| seen.insert(version.clone()));
+    let n = ledger::mark_dispatched(&app.db, &b.kind, &versions, &b.bot_id).await.map_err(|e| match e.downcast_ref::<ledger::NotPending>() {
+        Some(not_pending) => LcError::conflict(
+            "not_pending",
+            json!({
+                "version": not_pending.version,
+                "message": "這一版不是 pending（已派出、已判完或帳本沒有），整批沒有標記",
+            }),
+        ),
+        None => up(e),
+    })?;
     Ok(Json(json!({"kind": b.kind, "dispatched": n, "bot_id": b.bot_id})))
 }
 
@@ -338,6 +350,54 @@ mod tests {
 
         crate::release_triage::ledger::migrate(&p).await.unwrap();
         assert_eq!(crate::release_triage::ledger::created_in_last_day_at(&p, now).await.unwrap(), 1_001);
+    }
+
+    #[tokio::test]
+    async fn dispatching_a_non_pending_version_is_409_and_moves_nothing() {
+        let env = crate::testing::env().await;
+        let app = env.app.clone();
+        let sections = source_sections("claude", include_str!("../../../crates/am-base/src/release_triage/fixtures/claude_2.1.276-278.md"));
+        for version in ["2.1.277", "2.1.278"] {
+            let section = sections.iter().find(|section| section.version == version).unwrap();
+            let entries = build_entries("claude", section).unwrap();
+            ledger::insert_version(&app.db, "claude", version, &entries).await.unwrap();
+        }
+        let worker = crate::testing::claude_bot(&app, &env.project_id, "rt-non-pending").await;
+        ledger::mark_dispatched(&app.db, "claude", &["2.1.278".into()], &worker.id).await.unwrap();
+
+        let err = post_dispatched(
+            State(app.clone()),
+            Json(DispatchedIn { kind: "claude".into(), versions: vec!["2.1.277".into(), "2.1.278".into()], bot_id: worker.id }),
+        )
+        .await
+        .expect_err("非 pending 版本應整批拒絕");
+        let LcError::Conflict(body) = err else { panic!("要是 409：{err:?}") };
+        assert_eq!(body["reason"], "not_pending", "{body}");
+        assert_eq!(body["version"], "2.1.278", "{body}");
+        assert_eq!(ledger::get(&app.db, "claude", "2.1.277").await.unwrap().unwrap().status, Status::Pending);
+        assert_eq!(ledger::get(&app.db, "claude", "2.1.277").await.unwrap().unwrap().dispatch_gen, 0);
+    }
+
+    #[tokio::test]
+    async fn duplicate_versions_in_one_request_are_marked_once() {
+        let env = crate::testing::env().await;
+        let app = env.app.clone();
+        let sections = source_sections("claude", include_str!("../../../crates/am-base/src/release_triage/fixtures/claude_2.1.276-278.md"));
+        let section = sections.iter().find(|section| section.version == "2.1.277").unwrap();
+        let entries = build_entries("claude", section).unwrap();
+        ledger::insert_version(&app.db, "claude", "2.1.277", &entries).await.unwrap();
+        let worker = crate::testing::claude_bot(&app, &env.project_id, "rt-duplicate-dispatch").await;
+
+        let dispatched = post_dispatched(
+            State(app.clone()),
+            Json(DispatchedIn { kind: "claude".into(), versions: vec!["2.1.277".into(), "v2.1.277".into()], bot_id: worker.id }),
+        )
+        .await
+        .unwrap();
+        assert_eq!(dispatched.0["dispatched"], 1);
+        let row = ledger::get(&app.db, "claude", "2.1.277").await.unwrap().unwrap();
+        assert_eq!(row.status, Status::Dispatched);
+        assert_eq!(row.dispatch_gen, 1);
     }
 
     #[tokio::test]
