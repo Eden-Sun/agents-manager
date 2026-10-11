@@ -551,6 +551,23 @@ mod tests {
         assert!(!names.iter().any(|n| n.ends_with("-fork")), "{names:?}");
     }
 
+    /// #1360：專案已移交給別的主機：fork 在建 bot 之前就拒絕（409 handed_off），不留下一顆這顆 daemon 啟動不了的 bot。
+    /// 旗標清掉之後同一個來源照常 fork，證明擋的是移交本身。
+    #[tokio::test]
+    async fn a_fork_in_a_handed_off_project_is_refused_before_creating_anything() {
+        let e = env().await;
+        let src = source_bot(&e, "claude", "handed", "user").await;
+        sqlx::query("UPDATE projects SET handed_off_to = 'agm-host' WHERE id = (SELECT project_id FROM bots WHERE id = ?)").bind(&src).execute(&e.app.db).await.unwrap();
+        let before = fork_bot_count(&e).await;
+        assert_eq!(reason(fork_with(&e, &src, None, Some("fork-handoff-1")).await.unwrap_err()), "handed_off");
+        assert!(fork_ops::get(&e.app.db, "fork-handoff-1").await.unwrap().is_none(), "沒有留下 fork 操作");
+        assert_eq!(fork_bot_count(&e).await, before, "專案裡沒有多出一顆 bot");
+
+        sqlx::query("UPDATE projects SET handed_off_to = NULL WHERE id = (SELECT project_id FROM bots WHERE id = ?)").bind(&src).execute(&e.app.db).await.unwrap();
+        fork(&e, &src, None).await.expect("旗標清掉之後照常 fork");
+        assert_eq!(fork_bot_count(&e).await, before + 1);
+    }
+
     fn fork_starts(e: &Env) -> usize {
         started_args(e).iter().filter(|a| a.iter().any(|x| x == "--fork-session")).count()
     }
