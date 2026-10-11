@@ -128,6 +128,8 @@ async fn accept_locked(
     if client_request_id.trim().is_empty() {
         return Err(LcError::Bad("client_request_id must not be empty".into()));
     }
+    // #708：移交出去的專案不收 prompt、不排隊、也不替它啟動（同 `prompt_inner`）。放在冪等檢查之前：讀不到是 502、不寫任何列。
+    super::send_now::ports::HandoffSendRepo::refuse_handed_off(app, bot_id).await?;
     let bot = db::bot(app.db(), bot_id)
         .await
         .map_err(up)?
