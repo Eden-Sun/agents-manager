@@ -67,6 +67,8 @@ logged_db_backup() {
 }
 
 setup() { # setup <checkout 的 SCHEMA_VERSION> <DB 目前的 user_version>
+  # 上一個 case 忘了 teardown 時不留 fixture（每漏一次就在 /tmp 多一個 tmp.*）。
+  if [ -n "${ROOT:-}" ] && [ -d "$ROOT" ]; then rm -rf "$ROOT"; fi
   ROOT=$(mktemp -d); export ROOT
   export AGM_DIR="$ROOT/agm" AGM_REPO="$ROOT/repo" CHECKOUT="$ROOT/checkout"
   export AM_DATA="$ROOT/data" DAEMON_DB="$ROOT/am.sqlite3" DAEMON_LOG="$ROOT/daemon.log" SWAP_LOG="$ROOT/swap.log"
@@ -1015,6 +1017,7 @@ teardown
 setup 10 10
 rc=$(bash "$SCRIPT" --sha "$SHA" --old "$OLD" --old-hash "$OLDHASH" --owner bot-me --checkout "$CHECKOUT" --pane w9:pSTALE >/dev/null 2>&1; echo $?)
 check_eq "帶 --pane 會被拒（rc=2）" "2" "$rc"
+teardown
 setup 10 10
 rc=$(run)
 check "讀的是環境變數那顆，不是舊的寫死值" "pane read w1:pA" "$AGM_DIR/herdr.log"
@@ -1761,6 +1764,11 @@ export STUB_DAEMON_DIRTY=true
 rc=$(run)
 check_eq "新 daemon 說自己是髒樹建的 → 回滾（rc=7）" "7" "$rc"
 teardown
+
+# setup／teardown 要成對：漏一個＝每跑一次在 /tmp 留一包 fixture（agm-host 累積過 385 包）。
+unbalanced=$(awk '/^ *setup( |$|;)/ { if (open) print last; open = 1; last = NR }
+                  /^ *teardown( *$|;| *#)|; *teardown *$/ { open = 0 }' "$0" | tr '\n' ' ')
+check_eq "每個 setup 都有 teardown（沒收的 setup 行號）" "" "$unbalanced"
 
 echo "$PASS passed, $FAIL failed"
 [ "$FAIL" -eq 0 ]
