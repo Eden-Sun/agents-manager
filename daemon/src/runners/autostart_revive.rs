@@ -94,6 +94,7 @@ pub(crate) async fn sweep_lost_by_pane_gone(app: &Arc<App>) {
            JOIN bots b ON b.id = r.bot_id
            JOIN projects p ON p.id = b.project_id
           WHERE r.state = 'exited' AND r.exit_reason = ? AND r.ended_at >= ?
+            AND p.handed_off_to IS NULL
             AND b.autostart = 1 AND b.managed_by != 'child' AND b.deleted_at IS NULL
             AND r.id = (SELECT id FROM runs WHERE bot_id = b.id ORDER BY started_at DESC, rowid DESC LIMIT 1)",
     )
