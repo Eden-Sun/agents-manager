@@ -737,6 +737,30 @@ mod tests {
         assert!(!r.dest().exists());
     }
 
+    /// #1455：child 的 run 還是 running、pane 已經不在（herdr 回 pane_not_found）：回 409 session_not_found、什麼都不動，
+    /// 跟「pane 裡找不到 claude」同一類，不是 502 upstream。
+    #[tokio::test]
+    async fn a_child_whose_pane_is_gone_is_refused_not_an_upstream_error() {
+        let r = rig(true).await;
+        r.e.herdr.fail_next("pane.process_info", crate::testing::Fault::RefuseWith("pane_not_found"));
+        assert_eq!(reason(promote(&r, PromoteReq::default()).await.unwrap_err()), "session_not_found");
+        assert_eq!(child_state(&r).await, (false, Some("running".into())));
+        assert!(cfg_bot_names(&r).await.is_empty());
+        assert!(!r.dest().exists());
+    }
+
+    /// #1455：process_info 的其他 herdr 錯誤照舊是 502（只有 pane_not_found 才改成 409），什麼都不動。
+    #[tokio::test]
+    async fn other_herdr_failures_on_process_info_stay_upstream() {
+        let r = rig(true).await;
+        r.e.herdr.fail_next("pane.process_info", crate::testing::Fault::Refuse);
+        let err = promote(&r, PromoteReq::default()).await.unwrap_err();
+        assert!(matches!(err, LcError::Upstream(_)), "{err:?}");
+        assert_eq!(child_state(&r).await, (false, Some("running".into())));
+        assert!(cfg_bot_names(&r).await.is_empty());
+        assert!(!r.dest().exists());
+    }
+
     /// 目標已經有一份不同內容的同名檔：不覆寫，整個不動。
     #[tokio::test]
     async fn an_existing_different_transcript_is_never_overwritten() {
