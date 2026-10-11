@@ -142,6 +142,47 @@ changed >/dev/null || fail 'daemon changed failed when the optional mount checke
 fail() { printf '%s\n' "$1" >&2; exit 1; }
 cargo_tests() { grep -E '^test ' "$AM_TEST_CARGO_LOG" || true; }
 
+# A daemon module test already compiles the same daemon targets as check --all-targets.
+: >"$AM_TEST_CARGO_LOG"
+export AM_TEST_DIFF_HEAD=daemon/src/lifecycle/queue.rs
+changed >/dev/null || fail "module changed failed: $(cat "$AM_TEST_CARGO_LOG")"
+! grep -qx 'check -p agents-managerd --all-targets --locked' "$AM_TEST_CARGO_LOG" \
+    || fail "module test redundantly ran cargo check: $(cat "$AM_TEST_CARGO_LOG")"
+[ "$(grep -c '^test -p agents-managerd --locked -- lifecycle::queue::$' "$AM_TEST_CARGO_LOG")" = 1 ] \
+    || fail "module change did not run exactly one daemon test: $(cat "$AM_TEST_CARGO_LOG")"
+[ "$(sed -n '1,2p' "$AM_TEST_CARGO_LOG")" = $'test -p agents-managerd --locked -- lifecycle::queue::\nweb-dist-stub-present' ] \
+    || fail "the first cargo test did not see the temporary web/dist stub: $(cat "$AM_TEST_CARGO_LOG")"
+
+# Explicit filters, all-suite sentinels, and cases with no daemon tests choose the matching path.
+: >"$AM_TEST_CARGO_LOG"
+CHECK_TESTS=none changed >/dev/null || fail 'CHECK_TESTS=none changed failed'
+grep -qx 'check -p agents-managerd --all-targets --locked' "$AM_TEST_CARGO_LOG" \
+    || fail "CHECK_TESTS=none skipped check: $(cat "$AM_TEST_CARGO_LOG")"
+[ -z "$(cargo_tests)" ] || fail "CHECK_TESTS=none ran a test: $(cargo_tests)"
+
+: >"$AM_TEST_CARGO_LOG"
+CHECK_TESTS=foo:: changed >/dev/null || fail 'CHECK_TESTS=foo:: changed failed'
+! grep -qx 'check -p agents-managerd --all-targets --locked' "$AM_TEST_CARGO_LOG" \
+    || fail "explicit test filter redundantly ran cargo check: $(cat "$AM_TEST_CARGO_LOG")"
+grep -qx 'test -p agents-managerd --locked foo::' "$AM_TEST_CARGO_LOG" \
+    || fail "explicit test filter was not used: $(cat "$AM_TEST_CARGO_LOG")"
+
+: >"$AM_TEST_CARGO_LOG"
+export AM_TEST_DIFF_HEAD=daemon/src/main.rs
+changed >/dev/null || fail 'main.rs changed failed'
+! grep -qx 'check -p agents-managerd --all-targets --locked' "$AM_TEST_CARGO_LOG" \
+    || fail "main.rs all-suite tests redundantly ran cargo check: $(cat "$AM_TEST_CARGO_LOG")"
+[ "$(grep -c '^test -p agents-managerd --locked$' "$AM_TEST_CARGO_LOG")" = 1 ] \
+    || fail "main.rs all-suite test did not run once: $(cat "$AM_TEST_CARGO_LOG")"
+
+: >"$AM_TEST_CARGO_LOG"
+export AM_TEST_DIFF_HEAD=daemon/build.rs
+changed >/dev/null || fail 'build.rs changed failed'
+! grep -qx 'check -p agents-managerd --all-targets --locked' "$AM_TEST_CARGO_LOG" \
+    || fail "all-suite daemon test redundantly ran cargo check: $(cat "$AM_TEST_CARGO_LOG")"
+[ "$(grep -c '^test -p agents-managerd --locked$' "$AM_TEST_CARGO_LOG")" = 1 ] \
+    || fail "all-suite change did not run exactly one unfiltered daemon test: $(cat "$AM_TEST_CARGO_LOG")"
+
 # 改了某個模組：除了 cargo check，還要跑那個模組自己的測試（以前只有 check，壞掉的行為過閘）。
 : >"$AM_TEST_CARGO_LOG"
 export AM_TEST_DIFF_HEAD=daemon/src/lifecycle/queue.rs
