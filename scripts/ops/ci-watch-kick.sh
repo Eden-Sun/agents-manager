@@ -116,7 +116,9 @@ def gh(path):
     return json.loads(subprocess.run(["gh", "api", path], check=True, capture_output=True, text=True).stdout)
 runs = []
 latest_state = ""   # 最新一個有 ubuntu-ci status 的 commit 的 state（error＝基礎設施問題，不是測試紅）
-for c in gh("repos/{owner}/{repo}/commits?sha=main&per_page=20"):
+commits = gh("repos/{owner}/{repo}/commits?sha=main&per_page=20")
+json.dump(commits, open(sys.argv[3], "w"))   # 判定用的 commit 順序（#1287）
+for c in commits:
     sha = c["sha"]
     st = [x for x in gh("repos/{owner}/{repo}/commits/%s/status" % sha).get("statuses", []) if x.get("context") == "ubuntu-ci"]
     if not st:
@@ -131,7 +133,7 @@ for c in gh("repos/{owner}/{repo}/commits?sha=main&per_page=20"):
                  "conclusion": {"success": "success", "failure": "failure"}.get(state, "")})
 json.dump(runs, open(sys.argv[1], "w"))
 open(sys.argv[2], "w").write(latest_state)
-' "$RUNS" "$WORK/latest-state" 2> "$WORK/err"; then
+' "$RUNS" "$WORK/latest-state" "$WORK/commits.json" 2> "$WORK/err"; then
     fail_run "讀 ubuntu-ci commit status 失敗，這輪不動：$(tail -c 200 "$WORK/err" | tr '\n' ' ')"
   fi
   # 最新的 ubuntu-ci 結果連續 ERROR_ALERT_AFTER 輪都是 error：基礎設施壞了（磁碟、一直被中斷），不是測試紅——
@@ -148,6 +150,10 @@ open(sys.argv[2], "w").write(latest_state)
 elif ! gh run list --branch main --workflow CI -L 20 --json databaseId,conclusion,status,headSha,createdAt,url > "$RUNS" 2> "$WORK/err"; then
   fail_run "gh run list 失敗，這輪不動：$(head -c 200 "$WORK/err" | tr '\n' ' ')"
 fi
+# 判定依 main 的 commit 順序，不依 run／status 的建立時間（#1287）：拿不到順序就這輪不動。
+if [ "$SOURCE" != ubuntu-ci ] && ! gh api "repos/{owner}/{repo}/commits?sha=main&per_page=20" > "$WORK/commits.json" 2> "$WORK/err"; then
+  fail_run "讀不到 main 的 commit 順序，這輪不動：$(head -c 200 "$WORK/err" | tr '\n' ' ')"
+fi
 
 # 2. 分析：只看已完成的；success 算綠、failure／timed_out／startup_failure 算紅，其他（cancelled、skipped…）當沒看到。
 #    輸出 key=value 行：verdict（green／red／none）、run、sha、url，以及（紅時）這一段紅的起點與上一個綠。
@@ -157,10 +163,13 @@ RED = {"failure", "timed_out", "startup_failure"}
 try:
     runs = json.load(open(sys.argv[1]))
     assert isinstance(runs, list)
+    # main 的 commit 順序（新的在前）。判定只看這個順序：run／status 的建立時間只反映「什麼時候寫進來」，
+    # 較舊的 commit 可能晚補狀態（delayed、retry、unposted 補寫），按時間排會把舊的結果當成目前的結論（#1287）。
+    order = {c["sha"]: i for i, c in enumerate(json.load(open(sys.argv[2])))}
 except Exception:
     sys.exit(3)
 done = [r for r in runs if r.get("status") == "completed" and (r.get("conclusion") in RED or r.get("conclusion") == "success")]
-done.sort(key=lambda r: r.get("createdAt") or "", reverse=True)
+done.sort(key=lambda r: order.get(r.get("headSha"), len(order)))   # 不在這份順序裡的排最後（順序不明，不假裝知道）
 if not done:
     print("verdict=none"); sys.exit(0)
 latest = done[0]
@@ -177,7 +186,7 @@ print("verdict=red"); kv("", latest); kv("first_", first)
 prev = done[i + 1] if i + 1 < len(done) else {}
 print("prev_green_sha=%s" % (prev.get("headSha") or ""))
 print("red_runs=%d" % (i + 1))
-' "$RUNS") || fail_run "gh run list 的輸出看不懂，這輪不動"
+' "$RUNS" "$WORK/commits.json") || fail_run "gh run list 的輸出看不懂，這輪不動"
 field() { printf '%s\n' "$ANALYSIS" | sed -n "s/^$1=//p" | head -1; }
 VERDICT=$(field verdict)
 RUN_ID=$(field run); RUN_SHA=$(field sha); RUN_URL=$(field url)
