@@ -1024,12 +1024,21 @@
     min-width: max-content;
   }
 
+  /* 收合時格子照內容寬（框貼著內容，#1268）：標題列剩下的寬度留在格子外面、靠右排，不再平分進每格的框裡。 */
   .main-head .quota-open.collapsed {
     overflow-x: clip;
+    justify-content: flex-end;
   }
 
   .main-head .quota-open.collapsed .quota-hp {
-    flex: 1 0 auto;
+    flex: 0 0 auto;
+  }
+
+  /* 圖示欄收成內容寬：3.2em 是完整量表時的欄寬；收合後 cc0 這種短名只佔一小段，留著就是左邊的空白。
+     右邊留 8px 給窗口名，不然 5h／7d 會貼著 cc0 的欄。 */
+  .main-head .quota-open.collapsed .quota-head {
+    width: auto;
+    padding-right: 8px;
   }
 
   .main-head .quota-open.collapsed .quota-bar-row {
