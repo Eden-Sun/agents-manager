@@ -12,6 +12,7 @@ import type { ShareFile } from './shareModel'
 type Api = {
   pngOf(client: ShareClient, name: string, version: string): Promise<unknown>
   rasterOf(client: ShareClient, name: string, version: string): Promise<Blob>
+  rasterRequest(client: ShareClient, name: string, version: string): { promise: Promise<Blob>; release(): void }
   pruneShareImages(client: ShareClient, files: ShareFile[]): void
   SHARE_IMAGE_CACHE_LIMITS: { png: { maxEntries: number; maxBytes: number }; raster: { maxEntries: number; maxBytes: number } }
 }
@@ -123,4 +124,25 @@ test('點陣圖總量有上限：一直開新的檔，最舊的會被淘汰，�
   assert.equal(count(calls, 'f0.png'), 2, '最舊的超出上限被淘汰，要重抓')
   await api.rasterOf(client, 'f7.png', 'v1')
   assert.equal(count(calls, 'f7.png'), 1, '最新的還在快取裡')
+})
+
+test('等待中的項目不被 LRU 取消：25 個點陣圖都能完成且各抓一次', async () => {
+  let releaseFirst!: (blob: Blob) => void
+  const first = new Promise<Blob>((resolve) => (releaseFirst = resolve))
+  const calls: string[] = []
+  const client = {
+    fileBlob(name: string) {
+      calls.push(name)
+      return name === 'f0.png' ? first : Promise.resolve(new Blob([name]))
+    },
+  } as unknown as ShareClient
+  const names = Array.from({ length: 25 }, (_, i) => `f${i}.png`)
+  const requests = names.map((name) => api.rasterRequest(client, name, 'v1'))
+  const settled = Promise.allSettled(requests.map((request) => request.promise))
+
+  releaseFirst(new Blob(['f0.png']))
+  const results = await settled
+  assert.ok(results.every((result) => result.status === 'fulfilled'), '等待中的下載不能被 LRU 取消')
+  assert.equal(calls.length, names.length)
+  assert.deepEqual([...calls].sort(), [...names].sort(), '每個不同檔名都只下載一次')
 })

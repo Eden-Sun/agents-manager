@@ -2,10 +2,13 @@ import { useEffect, useMemo, useRef, useState } from 'react'
 import type { ShareClient } from './shareApi'
 import { canShareFile, displayName, isSvgName, pngName, shareOrSave } from './shareImage'
 import { pngRequest, rasterRequest, type PngResult } from './shareImageCache'
+import { ImageWorkSkipped } from './shareImageQueue'
 import type { ShareFile } from './shareModel'
 
 /** 檔案換了內容（同名覆寫）預覽要跟著換：版本變了就換網址（舊 daemon 沒有 version，退回時間＋大小）。 */
 const fileVersion = (f: ShareFile) => f.version ?? `${f.modified_at ?? ''}-${f.size}`
+
+export const SHARE_IMAGE_REQUEUE_MS = 1500
 
 function usePng(client: ShareClient, file: ShareFile, enabled: boolean): PngResult | 'loading' {
   // file 物件每次重抓清單都換新；名字與版本沒變就是同一張圖。結果帶著 key，換圖時舊結果自然不算數。
@@ -13,43 +16,59 @@ function usePng(client: ShareClient, file: ShareFile, enabled: boolean): PngResu
   const version = fileVersion(file)
   const key = `${name}\n${version}`
   const [res, setRes] = useState<{ key: string; r: PngResult } | null>(null)
+  const [retry, setRetry] = useState(0)
   useEffect(() => {
     if (!enabled) return
     let alive = true
+    let retryTimer: ReturnType<typeof setTimeout> | undefined
     const request = pngRequest(client, name, version)
-    void request.promise.then((r) => {
-      if (alive) setRes({ key: `${name}\n${version}`, r })
-    })
+    void request.promise.then(
+      (r) => {
+        if (alive) setRes({ key: `${name}\n${version}`, r })
+      },
+      (e: unknown) => {
+        if (!alive) return
+        if (e instanceof ImageWorkSkipped) retryTimer = setTimeout(() => setRetry((n) => n + 1), SHARE_IMAGE_REQUEUE_MS)
+        else setRes({ key: `${name}\n${version}`, r: 'broken' })
+      },
+    )
     return () => {
       alive = false
+      if (retryTimer !== undefined) clearTimeout(retryTimer)
       request.release()
     }
-  }, [client, name, version, enabled])
+  }, [client, name, version, enabled, retry])
   return res?.key === key ? res.r : 'loading'
 }
 
 /** 點陣圖原樣交出去：先抓好，點擊時直接分享（同 [`usePng`] 的手勢理由）。 */
 function useRaster(client: ShareClient, file: ShareFile, enabled: boolean): PngResult | 'loading' {
   const name = file.name
-  const key = `${name}\n${fileVersion(file)}`
+  const version = fileVersion(file)
+  const key = `${name}\n${version}`
   const [res, setRes] = useState<{ key: string; r: PngResult } | null>(null)
+  const [retry, setRetry] = useState(0)
   useEffect(() => {
     if (!enabled) return
     let alive = true
-    const request = rasterRequest(client, name, fileVersion(file))
+    let retryTimer: ReturnType<typeof setTimeout> | undefined
+    const request = rasterRequest(client, name, version)
     request.promise.then(
       (blob) => {
         if (alive) setRes({ key, r: { blob } })
       },
-      () => {
-        if (alive) setRes({ key, r: 'broken' })
+      (e: unknown) => {
+        if (!alive) return
+        if (e instanceof ImageWorkSkipped) retryTimer = setTimeout(() => setRetry((n) => n + 1), SHARE_IMAGE_REQUEUE_MS)
+        else setRes({ key, r: 'broken' })
       },
     )
     return () => {
       alive = false
+      if (retryTimer !== undefined) clearTimeout(retryTimer)
       request.release()
     }
-  }, [client, name, key, enabled])
+  }, [client, name, version, key, enabled, retry])
   return res?.key === key ? res.r : 'loading'
 }
 

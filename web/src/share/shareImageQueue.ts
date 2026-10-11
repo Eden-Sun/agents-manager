@@ -1,6 +1,9 @@
 /** 待開始的圖片下載／轉圖最多保留這麼多項，正在跑的那一項不算在內。 */
 export const SHARE_IMAGE_PENDING_LIMIT = 24
 
+/** 佇列容量暫滿或工作被取消時，呼叫端可以保留載入狀態並在容量釋出後重試。 */
+export class ImageWorkSkipped extends Error {}
+
 export interface ImageWork<V> {
   promise: Promise<V>
   /** LIFO queue 中再次要求時，把尚未開始的工作移到最前面。 */
@@ -56,8 +59,8 @@ export class ShareImageWorkQueue {
     this.tasks.set(key, task)
     this.pending.push(task)
     if (this.pending.length > this.maxPending) {
-      const oldest = this.pending.shift()!
-      this.cancelTask(oldest, new Error('image_work_dropped'))
+      const oldest = this.pending[0]!
+      this.cancelTask(oldest, new ImageWorkSkipped('image_work_dropped'))
     }
     this.pump()
     return this.workFor<V>(task)
@@ -67,7 +70,7 @@ export class ShareImageWorkQueue {
     return {
       promise: task.promise as Promise<V>,
       promote: () => this.promoteTask(task),
-      cancel: () => this.cancelTask(task, new Error('image_work_cancelled')),
+      cancel: () => this.cancelTask(task, new ImageWorkSkipped('image_work_cancelled')),
     }
   }
 

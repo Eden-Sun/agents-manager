@@ -1,6 +1,6 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
-import { ShareImageWorkQueue, SHARE_IMAGE_PENDING_LIMIT } from './shareImageQueue'
+import { ImageWorkSkipped, ShareImageWorkQueue, SHARE_IMAGE_PENDING_LIMIT } from './shareImageQueue'
 
 test('圖片工作佇列同 key 去重、有界，最近要求的工作先跑', async () => {
   const queue = new ShareImageWorkQueue()
@@ -21,6 +21,7 @@ test('圖片工作佇列同 key 去重、有界，最近要求的工作先跑', 
   for (const work of queued) void work.promise.catch(() => {})
   assert.equal(queue.activeCount, 1)
   assert.equal(queue.pendingCount, SHARE_IMAGE_PENDING_LIMIT)
+  await assert.rejects(queued[0].promise, (error: unknown) => error instanceof ImageWorkSkipped && error.message === 'image_work_dropped')
 
   const duplicate = queue.schedule('image-99', async () => {
     started.push('duplicate')
@@ -52,6 +53,7 @@ test('未開始的圖片工作可以取消，取消後不會執行', async () =>
   void stale.promise.catch(() => {})
   assert.equal(stale.cancel(), true)
   assert.equal(stale.cancel(), false)
+  await assert.rejects(stale.promise, (error: unknown) => error instanceof ImageWorkSkipped && error.message === 'image_work_cancelled')
   releaseActive()
   await active.promise
   assert.deepEqual(started, ['active'])
