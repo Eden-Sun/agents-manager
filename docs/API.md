@@ -297,6 +297,7 @@ A 組與 `git/push` 標「待裁示」的原因：這幾支唯一的呼叫端是
 | POST | `/api/hosts/{name}/tools/install` | User-only；一般 Bot → 403 `user_only`；已登記 AGM 角色略過共用 fence，仍受既有路由／資源權限限制 |
 | POST | `/api/hosts/{name}/tools/refresh` | User-only；一般 Bot → 403 `user_only`；已登記 AGM 角色略過共用 fence，仍受既有路由／資源權限限制 |
 | POST | `/api/identities` | User-only；一般 Bot → 403 `user_only`；已登記 AGM 角色略過共用 fence，仍受既有路由／資源權限限制 |
+| POST | `/api/judge/collision-check` | Bot principal（驗過的 `X-AM-Bot-Id` 與 token）；只看呼叫端自己的專案，回 202，不等 Jev；一般 Bot 可用（#1330） |
 | POST | `/api/mem/processes/kill` | User-only；一般 Bot → 403 `user_only`；已登記 AGM 角色略過共用 fence，仍受既有路由／資源權限限制 |
 | POST | `/api/missions/{id}/answer` | User／AGM role；一般 Bot 只限自己或後代 child 有該 mission 交辦，否則 403 `mission_participant_required`；`relay_from` 必須是自己 |
 | POST | `/api/missions/{id}/cancel` | User-only；一般 Bot → 403 `user_only`；已登記 AGM 角色略過共用 fence，仍受既有路由／資源權限限制 |

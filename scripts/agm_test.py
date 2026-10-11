@@ -2949,6 +2949,45 @@ class IssueClaimTest(unittest.TestCase):
         self.assertFalse([c for c in self.calls() if c[:2] in (["issue", "comment"], ["issue", "edit"])],
                          "被別人認領時什麼都不能寫")
 
+    def _hint_daemon(self, extra_routes: dict | None = None):
+        """#1330：撞題提示要 runtime.json 指到一顆假 daemon（這個類別的 setUp 把 AGM_RUNTIME_DIR 指向不存在的路徑）。"""
+        FakeDaemon.routes = {"GET /api/session": (200, {"token": TOKEN}), **(extra_routes or {})}
+        FakeDaemon.seen = []
+        FakeDaemon.drop = set()
+        server = FakeServer(("127.0.0.1", 0), FakeDaemon)
+        threading.Thread(target=server.serve_forever, daemon=True).start()
+        self.addCleanup(server.server_close)
+        self.addCleanup(server.shutdown)
+        rt = Path(self.dir.name) / "hint-runtime"
+        rt.mkdir()
+        (rt / "runtime.json").write_text(json.dumps({"daemon_url": f"http://127.0.0.1:{server.server_address[1]}", "manager_bot_id": "bot-agm"}), encoding="utf-8")
+        os.environ["AGM_RUNTIME_DIR"] = str(rt)
+
+    def test_a_successful_claim_asks_the_collision_check_with_the_claim_facts(self):
+        # #1330：認領成功後附帶問一次撞題；請求本文帶票號、題目、child、分支。
+        self._hint_daemon({"POST /api/judge/collision-check": (202, {"queued": True})})
+        self.issue(1330, title="撞題提示要接上認領")
+        code, out, err = self.run_cli("issue", "claim", "1330", "--bot", "newbie", "--child", "newbie", "--branch", "fix/newbie-g1330")
+        self.assertEqual(code, 0, err)
+        self.assertTrue(json.loads(out)["claimed"])
+        hits = [c for c in FakeDaemon.seen if c["path"] == "/api/judge/collision-check"]
+        self.assertEqual(len(hits), 1, FakeDaemon.seen)
+        self.assertEqual(hits[0]["method"], "POST")
+        self.assertEqual(hits[0]["body"], {"issue": 1330, "title": "撞題提示要接上認領", "child": "newbie", "branch": "fix/newbie-g1330"})
+
+    def test_a_failing_collision_check_never_changes_the_claim_result(self):
+        # #1330：舊 daemon 沒有這條路由（404）、或收了請求不回應：認領照樣成功、exit 0，撞題那一步什麼都不影響。
+        self._hint_daemon()
+        for mode in ("404", "dropped"):
+            FakeDaemon.seen = []
+            FakeDaemon.drop = {"/api/judge/collision-check"} if mode == "dropped" else set()
+            self.issue(1331, title="撞題失敗不影響認領")
+            code, out, err = self.run_cli("issue", "claim", "1331", "--bot", "newbie", "--child", "newbie")
+            self.assertEqual(code, 0, f"{mode}: {err}")
+            self.assertTrue(json.loads(out)["claimed"], mode)
+            self.assertTrue(any(c["path"] == "/api/judge/collision-check" for c in FakeDaemon.seen), mode)
+            FakeDaemon.drop = set()
+
     def test_a_claim_with_no_activity_for_over_24h_can_be_taken_over(self):
         old = _iso(-30 * 3600)
         self.issue(413, labels=["wip"], comments=[self.claim_comment("kd61te", age_secs=30 * 3600)], updated=old)

@@ -87,6 +87,7 @@ fn rules() -> Vec<Rule> {
         rule("GET", "/api/supervisor/persona", Expect::RoleRequired, None),
         deny_rule("PUT", "/api/supervisor/persona", Expect::RoleRequired, "Persona is supervisory configuration; only User or a registered AGM role may change it."),
         rule("GET", "/api/judge/shadow", Expect::UserOnly, None),
+        allow_rule("POST", "/api/judge/collision-check", "A Bot asks whether its own claim overlaps other work in its own project (#1330); the handler takes the project from the verified caller, never from the body, and only records a ledger row or a hint."),
         rule("POST", "/api/services/daemon-swap/probe/{id}", Expect::Forbidden, None),
         rule("GET", "/api/bots/{id}/terminal", Expect::Forbidden, None),
         rule("POST", "/api/bots/{id}/terminal", Expect::Forbidden, None),

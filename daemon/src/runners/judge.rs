@@ -5,7 +5,8 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use axum::extract::{Query, State};
-use axum::routing::get;
+use axum::http::{HeaderMap, StatusCode};
+use axum::routing::{get, post};
 use axum::{Json, Router};
 use serde::Deserialize;
 use serde_json::{json, Value};
@@ -155,6 +156,7 @@ pub fn routes() -> Router<Arc<App>> {
     Router::new()
         .route("/judge/shadow", get(get_shadow))
         .route("/judge/settings", get(get_settings).put(put_settings))
+        .route("/judge/collision-check", post(post_collision_check))
 }
 
 #[derive(Deserialize)]
@@ -195,6 +197,54 @@ async fn get_shadow(State(app): State<Arc<App>>, Query(q): Query<ShadowQuery>) -
         })
         .collect();
     Ok(Json(json!({"enabled": cfg.enabled, "projects": cfg.projects, "model": cfg.model, "rows": rows})))
+}
+
+// ───────────── Claim Collision Check（#1330）─────────────
+
+/// 題目與分支名的上限（字數）。
+const MAX_CLAIM_TEXT_CHARS: usize = 500;
+
+#[derive(Deserialize)]
+struct CollisionIn {
+    #[serde(default)]
+    issue: Option<u64>,
+    title: String,
+    child: String,
+    #[serde(default)]
+    branch: Option<String>,
+}
+
+/// `POST /api/judge/collision-check`：bot 認領票時問一次撞題（只記帳本、推提示，不擋認領）。回 202，不等 Jev。
+/// 只看呼叫端自己的專案：專案從驗過的 bot id 查，不從請求本文拿。
+async fn post_collision_check(State(app): State<Arc<App>>, headers: HeaderMap, Json(b): Json<CollisionIn>) -> Result<(StatusCode, Json<Value>), LcError> {
+    let Some(caller) = crate::supervisor::bot_requests::verified_bot_id(&app, &headers).await? else {
+        return Err(LcError::Forbidden(json!({
+            "error": "forbidden",
+            "reason": "bot_only",
+            "message": "撞題檢查只給 bot 自己用（要帶 X-AM-Bot-Id 與它的 token）",
+        })));
+    };
+    let title = b.title.trim().to_string();
+    let child = b.child.trim().to_string();
+    let branch = b.branch.map(|s| s.trim().to_string()).filter(|s| !s.is_empty());
+    if title.is_empty() || child.is_empty() {
+        return Err(LcError::Bad("title 與 child 不能是空的".into()));
+    }
+    for (label, value) in [("title", title.as_str()), ("child", child.as_str()), ("branch", branch.as_deref().unwrap_or(""))] {
+        if value.chars().count() > MAX_CLAIM_TEXT_CHARS {
+            return Err(LcError::Bad(format!("{label} 最多 {MAX_CLAIM_TEXT_CHARS} 字")));
+        }
+    }
+    let bot = crate::db::bot(&app.db, &caller)
+        .await
+        .map_err(|e| LcError::Upstream(e.to_string()))?
+        .ok_or_else(|| LcError::NotFound(format!("bot {caller}")))?;
+    crate::judge::collision::schedule_claim(
+        &app,
+        crate::judge::collision::ClaimAsk { project_id: bot.project_id, caller, issue: b.issue, title, child, branch },
+    )
+    .await;
+    Ok((StatusCode::ACCEPTED, Json(json!({"queued": true}))))
 }
 
 async fn settings_json(app: &impl crate::capabilities::Cfg) -> Value {
@@ -262,4 +312,60 @@ pub(crate) async fn put_settings(State(app): State<Arc<App>>, Json(body): Json<S
         }
     }
     Ok(Json(settings_json(&app).await))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::testing as tt;
+    use axum::http::HeaderMap;
+
+    fn body(title: &str) -> CollisionIn {
+        CollisionIn { issue: Some(1330), title: title.into(), child: "newbie".into(), branch: Some("fix/newbie-g1330".into()) }
+    }
+
+    fn bot_headers(id: &str, token: &str) -> HeaderMap {
+        let mut h = HeaderMap::new();
+        h.insert("X-AM-Bot-Id", id.parse().unwrap());
+        h.insert("X-AM-Bot-Token", token.parse().unwrap());
+        h
+    }
+
+    /// 只有驗過的 bot 能問：沒帶身分、或帶了對不上的 token，都在看 body 之前就擋下（#1330）。
+    #[tokio::test]
+    async fn the_collision_check_is_only_for_a_proven_bot() {
+        let env = tt::env().await;
+        let bot = tt::claude_bot(&env.app, &env.project_id, "newbie").await;
+        let none = post_collision_check(State(env.app.clone()), HeaderMap::new(), Json(body("修卡住的畫面判斷"))).await;
+        assert!(matches!(none, Err(LcError::Forbidden(_))), "沒帶身分要 403");
+        let forged = post_collision_check(State(env.app.clone()), bot_headers(&bot.id, "not-the-token"), Json(body("修卡住的畫面判斷"))).await;
+        assert!(forged.is_err(), "token 對不上不能靠 bot id 冒用");
+    }
+
+    /// 驗過的 bot 得到 202、不等 Jev；Jev 沒開（預設）就什麼都不寫進帳本。
+    #[tokio::test]
+    async fn a_proven_bot_is_accepted_and_nothing_is_recorded_while_jev_is_off() {
+        let env = tt::env().await;
+        let bot = tt::claude_bot(&env.app, &env.project_id, "newbie").await;
+        let (status, Json(v)) = post_collision_check(State(env.app.clone()), bot_headers(&bot.id, &bot.hook_token), Json(body("修卡住的畫面判斷")))
+            .await
+            .unwrap();
+        assert_eq!(status, StatusCode::ACCEPTED);
+        assert_eq!(v["queued"], true);
+        let rows: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM judge_shadow").fetch_one(&env.app.db).await.unwrap();
+        assert_eq!(rows, 0);
+    }
+
+    /// 空的題目、或超過上限的字數，在排進任何工作之前就回 400。
+    #[tokio::test]
+    async fn bad_bodies_are_refused_before_anything_is_queued() {
+        let env = tt::env().await;
+        let bot = tt::claude_bot(&env.app, &env.project_id, "newbie").await;
+        let h = || bot_headers(&bot.id, &bot.hook_token);
+        let blank = post_collision_check(State(env.app.clone()), h(), Json(body("   "))).await;
+        assert!(matches!(blank, Err(LcError::Bad(_))), "空題目要 400");
+        let long = "字".repeat(MAX_CLAIM_TEXT_CHARS + 1);
+        let too_long = post_collision_check(State(env.app.clone()), h(), Json(body(&long))).await;
+        assert!(matches!(too_long, Err(LcError::Bad(_))), "超過上限要 400");
+    }
 }
