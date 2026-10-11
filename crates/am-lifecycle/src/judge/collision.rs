@@ -249,6 +249,10 @@ async fn check_candidate(app: &(impl crate::capabilities::Cfg + crate::capabilit
     };
     let mine = cand.as_card();
     for pid in projects {
+        // #1421：移交出去的專案歸接手的 daemon 管，這裡不問、不占帳本、不推提示（同 `child_retire` 的移交檢查）。
+        if crate::handoff::project_handed_off_to(app.db(), &pid).await?.is_some() {
+            continue;
+        }
         let label = crate::db::project(app.db(), &pid).await?.map(|p| p.label).unwrap_or_default();
         if matches!(super::gate(&cfg, &pid, &label, 0), Some(super::Skip::Disabled | super::Skip::ProjectNotListed)) {
             continue;
@@ -1529,5 +1533,35 @@ mod tests {
         let bot: String = sqlx::query_scalar("SELECT bot_id FROM judge_shadow WHERE regex_verdict='same_work' LIMIT 1").fetch_one(&app.db).await.unwrap();
         assert_eq!(bot, parent.id, "對不上 bot 時記在呼叫端名下");
         assert_eq!(rig.seen.lock().unwrap().len(), 1);
+    }
+
+    /// #1421：移交出去的專案（`projects.handed_off_to`）不問撞題：不呼叫 Jev、不寫帳本、不推提示。
+    /// 認領路徑與派工路徑共用 `check_candidate`，兩邊都要擋。
+    #[tokio::test]
+    async fn a_handed_off_project_is_not_asked_about_a_claim() {
+        let rig = stand(Mode::Noul(0.9), true, true).await;
+        let app = rig.env.app.clone();
+        let (parent, _newbie) = claim_setup(&app, &rig.env.project_id, &rig.dir, "卡住的畫面判斷 #1330").await;
+        sqlx::query("UPDATE projects SET handed_off_to='remote' WHERE id=?").bind(&rig.env.project_id).execute(&app.db).await.unwrap();
+        check_claim(&app, &claim_ask(&rig.env.project_id, &parent.id, "newbie")).await.unwrap();
+        assert!(rig.seen.lock().unwrap().is_empty(), "移交中的專案不問 Jev");
+        assert!(shadow_rows(&app).await.is_empty(), "不寫帳本");
+        assert!(inbox(&app).await.is_empty(), "不推提示");
+    }
+
+    #[tokio::test]
+    async fn a_handed_off_project_is_not_asked_about_an_assignment() {
+        let rig = stand(Mode::Noul(0.9), true, true).await;
+        let app = rig.env.app.clone();
+        let bot = tt::claude_bot(&app, &rig.env.project_id, "a").await;
+        let other = tt::claude_bot(&app, &rig.env.project_id, "b").await;
+        crate::supervisor::store::insert_assignment(&app.db, None, &other.id, "old", "修 sidebar 的捲動", &[], None, true).await.unwrap();
+        let a = crate::supervisor::store::insert_assignment(&app.db, None, &bot.id, "new", "修 sidebar 的捲動殘影", &[], None, true).await.unwrap();
+        sqlx::query("UPDATE projects SET handed_off_to='remote' WHERE id=?").bind(&rig.env.project_id).execute(&app.db).await.unwrap();
+        check_assignment(&app, &a.id).await.unwrap();
+        assert!(rig.seen.lock().unwrap().is_empty(), "移交中的專案不問 Jev");
+        assert!(shadow_rows(&app).await.is_empty(), "不寫帳本");
+        assert!(inbox(&app).await.is_empty(), "不推提示");
+        assert_eq!(status_of(&app, &a.id).await, "queued", "交辦狀態不動");
     }
 }
