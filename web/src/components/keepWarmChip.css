@@ -23,8 +23,7 @@
   line-height: 1;
 }
 
-/* 實心藍（未讀）、實心紅（要回答 hover）底上洋紅字會糊掉：反白。 */
-.unread-chip.unread .unread-chip-warm,
+/* 實心紅（要回答 hover）底上洋紅字會糊掉：反白。未讀（黃底，#1331 之後）不反白，保溫記號維持 --keep-warm（#1402）。 */
 .unread-chip.needs-reply:hover .unread-chip-warm {
   color: #fff;
 }
