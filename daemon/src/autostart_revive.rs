@@ -426,6 +426,47 @@ mod tests {
         assert_eq!(runs(&env.app, &bot.id).await.len(), 2);
     }
 
+    /// #1372：SIGTERM 之後（關機已經開始）巡邏到點也不開 bot：不開新的 run、不寫 `bot_lost`，補開的計數是 0。
+    #[tokio::test]
+    async fn nothing_is_revived_once_shutdown_has_begun() {
+        let env = tt::env().await;
+        let bot = autostart_bot(&env, "shutting-down").await;
+        crate::lifecycle::start_bot(&env.app, &bot.id).await.unwrap();
+        autostart_done(&env.app);
+        let run = db::active_run(&env.app.db, &bot.id).await.unwrap().unwrap().id;
+        crate::lifecycle::mark_run_exited(&env.app, &run, "pane gone").await;
+
+        env.app.shutdown.cancel();
+        runner::sweep_lost_by_pane_gone(&env.app).await;
+        runner::quiesce(&env.app).await;
+
+        let after = runs(&env.app, &bot.id).await;
+        assert_eq!(after.len(), 1, "關機之後不再開新的 run：{after:?}");
+        assert_eq!(after[0], ("exited".into(), Some("pane gone".into())));
+        assert!(bot_lost_events(&env.app, &bot.id).await.is_empty(), "關機之後不寫 bot_lost");
+        assert_eq!(runner::pending_count(&env.app), 0);
+    }
+
+    /// #1372：優雅關機的 `background_tasks.wait()` 要等到做一半的補開收尾：補開掛在 tracker 下，收尾時 bot 已經有新的 run。
+    #[tokio::test]
+    async fn a_revive_in_flight_is_awaited_by_graceful_shutdown() {
+        let env = tt::env().await;
+        let bot = autostart_bot(&env, "awaited-by-shutdown").await;
+        crate::lifecycle::start_bot(&env.app, &bot.id).await.unwrap();
+        autostart_done(&env.app);
+        let run = db::active_run(&env.app.db, &bot.id).await.unwrap().unwrap().id;
+        crate::lifecycle::mark_run_exited(&env.app, &run, "pane gone").await;
+
+        runner::sweep_lost_by_pane_gone(&env.app).await;
+        env.app.background_tasks.close();
+        env.app.background_tasks.wait().await;
+
+        assert_eq!(runner::pending_count(&env.app), 0, "wait() 回來時補開已經做完");
+        let after = runs(&env.app, &bot.id).await;
+        assert_eq!(after.len(), 2, "做完了：舊的收掉、新的起來：{after:?}");
+        assert_eq!(after[1].0, "running");
+    }
+
     /// 使用者在 herdr 裡關掉 pane（`pane exited`）、手動停（`stopped`）、不是 autostart、child：掃描不撈。
     #[tokio::test]
     async fn a_pane_the_user_closed_is_still_not_revived() {
