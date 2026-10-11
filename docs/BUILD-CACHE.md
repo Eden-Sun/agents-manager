@@ -32,39 +32,12 @@ cargo → rustc-wrapper（scripts/sccache-wrapper.sh）→ 有裝 sccache？ →
 - **不會跨不相容設定汙染**：key 由 sccache 自己算（rustc 版本、target triple、`--cfg`/features、
   原始碼雜湊……都在裡面），這裡沒有另外寫任何手動判斷「這兩次編譯算不算一樣」的邏輯，全部信任
   sccache 自己的 key，也不做旁路的「直接複製 artifact」這種捷徑。
-- **轉呼叫 sccache 前先濾掉 `-C incremental=<path>`**（兩個 token `-C incremental=…` 與單一 token
-  `-Cincremental=…` 兩種寫法都濾）：sccache 官方文件明講不支援 incremental compilation；cargo 給
-  workspace 自己那幾個 crate 的 `-C incremental=<CARGO_TARGET_DIR>/…` 路徑天生跟著 target dir 走，
-  每個 worktree 都不一樣，帶著它送給 sccache 只會讓那幾個 crate 的 key 永遠對不上。這段過濾**只在
-  `sccache` 存在這個分支裡**：沒裝 sccache 時原封不動照舊，同一個 worktree 內的 incremental
-  compilation 不受影響。第三方依賴（`~/.cargo/registry` 底下的 crate）本來就沒有這個旗標，不在
-  這條修正的範圍內——它們命中率低是另一個還沒解開的問題，見下面。
-
-## 現況與量到的數字（2026-09-18，issue #91 第一輪）
-
-**结論先講**：wrapper 骨架本身正確、安全、零成本退化，已經合進 main；但**這個 repo 目前量到的
-sccache 命中率接近 0%，還沒有拿到「兩個 worktree 共用快取」這個目標效果**。原因沒有在這一輪完全
-釐清，寫在這裡留給下一輪，不要假裝已經解決。
-
-量測方法：同一份原始碼（沒有任何改動）、`cargo build -p agents-managerd`（`CARGO_BUILD_JOBS=1`，
-跟 `cargo-slot.sh` 一致），三段分開量：
-
-| 階段 | CARGO_TARGET_DIR | sccache | cargo 自己回報的編譯時間 |
-|---|---|---|---|
-| baseline | 全新、獨立 | 沒接（`.cargo/config.toml` 暫時還原成沒有 `rustc-wrapper`） | **2m29s** |
-| cold（第一次填快取） | 全新、獨立 | 有接，快取目錄全新 | **2m36s** |
-| warm（模擬第二個 worktree，同一份快取） | 另一個全新、獨立 | 有接，沿用 cold 那份快取 | **2m18～2m20s** |
-
-（`time` 量到的 real time 還含排隊等 `cargo-slot.sh` 名額的時間，跟其他子 agent 搶名額嚴重時
-可以到 8 分鐘以上——那是這台機器目前的名額壓力，不是 sccache 的效果，只看 cargo 自己印的
-`Finished ... in` 那行。）
-
-三段時間彼此在誤差範圍內，**warm 沒有比 cold 明顯快**——`sccache --show-stats` 直接證實了這件事：
-同一個 sccache server session 裡，cold 跑完（0/245 命中）之後緊接著跑 warm，一樣是 0/245 命中；
-另外用已經跑過 cold＋warm、快取確定是熱的那份 `SCCACHE_DIR` 再重跑一次（新的 server session），
-也只有 1/247 命中（命中率 0.41%）。
-
-**已經排除的原因**：
+- **workspace crate 不經過 sccache（#1440）**：帶 `-C incremental=…`（兩個 token）或 `-Cincremental=…`
+  （單一 token）的呼叫＝cargo 給 workspace 自己那幾個 crate 的，**直接 `exec` rustc，旗標原樣、連
+  `--show-stats` 探測都不做**。sccache 官方文件明講不支援 incremental compilation，經過它只會把這幾顆
+  crate 變成每次都非增量的整顆重編（2026-10-11 裝上 sccache 之後 ubuntu-ci 的 daemon 段從中位數 1m44 變成
+  8m12）。registry 依賴本來就沒有這個旗標，照常走 sccache，旗標原樣交給它、**不再濾除任何東西**。沒裝
+  sccache 時照舊原樣直編，同一個 worktree 內的 incremental compilation 不受影響。
 - **不是 `--out-dir` 或 `-L dependency=<target-dir>/…` 本身**——這兩個旗標天生跟著 target dir
   走，但用一支不經過 cargo、單獨呼叫 `sccache rustc` 的最小重現（一個沒有依賴的 `lib` crate，
   只有 `--out-dir`／`-L dependency=` 不同，其他完全一樣）驗證過：sccache 照樣算出同一把 key、
@@ -72,7 +45,7 @@ sccache 命中率接近 0%，還沒有拿到「兩個 worktree 共用快取」�
 - **不是 `-C metadata=…` / `-C extra-filename=…` 隨 target dir 變**——直接用 `cargo build -v`
   比對同一顆 crate（`xtask`，故意選零依賴的，排除依賴圖差異）在兩個不同 `CARGO_TARGET_DIR` 下的
   完整 rustc 呼叫，兩邊的 `-C metadata=`／`-C extra-filename=` 完全一樣。
-- **`-C incremental=<path>` 濾掉後確實生效**——用一份加了除錯輸出的 wrapper 複本重跑過一次，
+- **（#91 當時的量測，已改掉）濾掉 `-C incremental=<path>` 之後**——用一份加了除錯輸出的 wrapper 複本重跑過一次，
   確認送進 `sccache` 的參數裡真的已經沒有這個旗標；但即使濾乾淨，實際 build 的整體命中率仍然
   接近 0%，代表這不是（或不是唯一的）主要原因。
 
@@ -162,7 +135,7 @@ preprocessor output with length "`——**這個正規化是接在「preprocesso
   sccache 版本、目前的架構要求下判定為做不到**，不是還沒查出來，建議把這條標成「已知不可行」
   而不是繼續調參數重跑量測。
 - Wrapper 骨架（`.cargo/config.toml` 指到 `scripts/sccache-wrapper.sh`、沒裝 sccache 就原生
-  退化、濾掉 `-C incremental=`）本身正確、安全、零成本退化，這個結論不影響它繼續留著；只是
+  退化、workspace crate 不經過 sccache）本身正確、安全、零成本退化，這個結論不影響它繼續留著；只是
   「跨 worktree 命中」這個目標效果，不建議再花時間追。
 - 沒有評估過、也不在這次範圍內的下一步（如果之後還要追這個目標）：換一個對 Rust 有實作
   basedir/路徑正規化的編譯快取工具、或重新考慮「每個 worktree 各自 target dir」這個前提本身。
@@ -210,5 +183,5 @@ sccache 的 cache key 含 rustc 版本／commit hash，所以：
 `scripts/sccache-wrapper_test.sh`（`bash scripts/sccache-wrapper_test.sh`）：隔離測試，PATH 鎖進
 暫時目錄，兩條路徑（裝了／沒裝 sccache）都覆蓋，不受跑測試的機器現況影響；釘住「沒裝時原樣呼叫
 rustc（含 incremental 旗標不受影響）」「裝了轉呼叫 sccache 而不是繞過它」「兩種寫法的
-`-C incremental=`／`-Cincremental=` 都被濾掉、其他 `-C` 旗標留著」「快取目錄／大小上限的預設與
-不覆寫呼叫端設定」「結束碼原封不動回傳」，15 條全過。
+`-C incremental=`／`-Cincremental=` 直接呼叫 rustc、不經過 sccache（#1440）」「快取目錄／大小上限的預設與
+不覆寫呼叫端設定」「結束碼原封不動回傳」，19 條全過。

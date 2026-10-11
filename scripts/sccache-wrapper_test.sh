@@ -70,14 +70,14 @@ echo "sccache $*" >> "$CALLS"
 exit 0
 EOF
 chmod +x "$FAKEBIN/sccache"
-PATH="$FAKEBIN" "$BASH_BIN" "$WRAPPER" "$FAKEBIN/rustc" --edition 2021 foo.rs
-check "裝了 sccache 就轉呼叫它，帶著原本的 rustc 呼叫" "sccache $FAKEBIN/rustc --edition 2021 foo.rs" "$CALLS"
+PATH="$FAKEBIN" "$BASH_BIN" "$WRAPPER" "$FAKEBIN/rustc" -C opt-level=0 --edition 2021 foo.rs
+check "裝了 sccache 就轉呼叫它，帶著原本的 rustc 與全部旗標（registry 依賴：不濾掉任何 -C）" "sccache $FAKEBIN/rustc -C opt-level=0 --edition 2021 foo.rs" "$CALLS"
 check_no "不會繞過 sccache 直接呼叫 rustc" "^rustc " "$CALLS"
 teardown
 
-# 2b. `-C incremental=<path>` 兩個 token 的形式要被濾掉才交給 sccache，其他 `-C` 旗標留著
-#     （issue #91 量測記錄：不濾掉的話，兩個 worktree 各自的 incremental 路徑不同，本來完全
-#     沒改過的依賴也會被算成不同的快取鍵，實測命中率是 0%）。
+# 2b. 有 `-C incremental=<path>`（兩個 token）：這是 workspace crate，**不經過 sccache**，
+#     旗標原封不動直接 exec rustc（#1440：sccache 不支援 incremental，經過它會把整顆 workspace
+#     crate 變成非增量的整顆重編）。其他 `-C` 旗標也原樣留著，連 `--show-stats` 都不探測。
 setup
 cat > "$FAKEBIN/sccache" <<'EOF'
 #!/bin/bash
@@ -86,15 +86,21 @@ exit 0
 EOF
 chmod +x "$FAKEBIN/sccache"
 PATH="$FAKEBIN" "$BASH_BIN" "$WRAPPER" "$FAKEBIN/rustc" -C opt-level=0 -C incremental=/wt-a/target/debug/incremental -C debuginfo=2 foo.rs
-check "留著跟 target dir 無關的 -C 旗標" "opt-level=0" "$CALLS"
-check "留著 incremental 後面那個也是 -C 的旗標" "debuginfo=2" "$CALLS"
-check_no "濾掉 -C incremental 這一組（兩個 token）" "incremental=" "$CALLS"
+check "workspace crate 直接呼叫 rustc、旗標原樣" "^rustc -C opt-level=0 -C incremental=/wt-a/target/debug/incremental -C debuginfo=2 foo.rs" "$CALLS"
+check_no "workspace crate 不經過 sccache（連 --show-stats 都沒有）" "^sccache" "$CALLS"
+teardown
 
-# 2c. 單一 token 的 `-Cincremental=<path>` 形式也要濾掉（rustc 兩種寫法都接受）。
-: > "$CALLS"
+# 2c. 單一 token 的 `-Cincremental=<path>` 形式也一樣不經過 sccache（rustc 兩種寫法都接受）。
+setup
+cat > "$FAKEBIN/sccache" <<'EOF'
+#!/bin/bash
+echo "sccache $*" >> "$CALLS"
+exit 0
+EOF
+chmod +x "$FAKEBIN/sccache"
 PATH="$FAKEBIN" "$BASH_BIN" "$WRAPPER" "$FAKEBIN/rustc" -Cincremental=/wt-b/target/debug/incremental -C opt-level=0 foo.rs
-check "留著其他旗標" "opt-level=0" "$CALLS"
-check_no "濾掉單一 token 的 -Cincremental=" "incremental=" "$CALLS"
+check "單一 token 的 incremental：直接呼叫 rustc、旗標原樣" "^rustc -Cincremental=/wt-b/target/debug/incremental -C opt-level=0 foo.rs" "$CALLS"
+check_no "單一 token 的 incremental：不經過 sccache" "^sccache" "$CALLS"
 teardown
 
 # 3. 沒人設過快取目錄／大小上限時，wrapper 自己補一個合理預設（issue #91：要有上限與清理策略，

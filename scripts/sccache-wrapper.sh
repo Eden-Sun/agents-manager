@@ -13,36 +13,27 @@ set -euo pipefail
 # 只有「sccache 自己健康」才走它：先問一次 --show-stats（server 沒起會順便拉起來），失敗就當作
 # sccache 壞了、退回直編。探測放在編譯之前，所以真正的編譯錯誤（sccache 原樣轉出 rustc 的結束碼）
 # 不會被誤判成 sccache 壞掉、也不會被吞成成功。探測過了之後 sccache 在編譯途中才掛掉的情況不在
-# 這裡處理（sccache 自己對快取後端錯誤會退回本機編譯）。
+# 這裡處理（sccache 自己對快取後端錯誤會退回本機編譯）。incremental 的 workspace crate 不經過 sccache，
+# 連探測都不做。
 # 探測要吃跟真正編譯同一組 SCCACHE_DIR／大小，所以預設值先給。
 : "${SCCACHE_DIR:="${HOME:-/tmp}/.cache/agents-manager-sccache"}"
 : "${SCCACHE_CACHE_SIZE:=10G}"
 export SCCACHE_DIR SCCACHE_CACHE_SIZE
-if command -v sccache >/dev/null 2>&1 && sccache --show-stats >/dev/null 2>&1; then
-  # sccache 不支援 incremental compilation（官方文件的已知限制：incremental 的產物本質上跟
-  # 這次編譯自己的歷史狀態綁在一起，沒辦法變成能重用的快取鍵）。cargo 給每個 crate 的
-  # `-C incremental=<CARGO_TARGET_DIR>/…` 路徑天生跟著 target dir 走，每個 worktree 都不一樣；
-  # 帶著它送給 sccache，本來完全沒改過的依賴也會因為路徑不同被算成不同的 key，實測命中率是 0%
-  # （issue #91 量測記錄）。過濾掉這個旗標再交給 sccache，key 只跟著「編什麼」走，不跟著
-  # 「編到哪個 target dir」走；沒裝 sccache 的退化路徑完全不受影響——這段過濾只在這個 if 裡面，
-  # 原生 rustc 照樣拿到 cargo 給的完整旗標，同一個 worktree 內的 incremental 照常運作。
-  filtered=()
-  args=("$@")
-  n=${#args[@]}
-  i=0
-  while [ "$i" -lt "$n" ]; do
-    a="${args[$i]}"
-    if [ "$a" = "-C" ] && [ $((i + 1)) -lt "$n" ]; then
-      case "${args[$((i + 1))]}" in
-        incremental=*) i=$((i + 2)); continue ;;
-      esac
-    fi
-    case "$a" in
-      -Cincremental=*) i=$((i + 1)); continue ;;
-    esac
-    filtered+=("$a")
-    i=$((i + 1))
-  done
-  exec sccache "${filtered[@]}"
+# workspace crate（cargo 給的 `-C incremental=<CARGO_TARGET_DIR>/…`）不經過 sccache：sccache 不支援
+# incremental compilation，經過它會把這幾顆 crate 變成每次都非增量的整顆重編（#1440）。這個判斷放在
+# `--show-stats` 探測之前，所以 workspace crate 連探測都省掉。兩種寫法都認：`-C incremental=…`（兩個
+# token）與 `-Cincremental=…`（單一 token）。
+# 沒有這個旗標的（registry 依賴，本來就沒有 incremental）才走 sccache，旗標原樣交給它、不做任何濾除。
+incremental=0
+prev=""
+for a in "$@"; do
+  case "$a" in
+    -Cincremental=*) incremental=1 ;;
+    incremental=*) [ "$prev" = "-C" ] && incremental=1 ;;
+  esac
+  prev="$a"
+done
+if [ "$incremental" = 0 ] && command -v sccache >/dev/null 2>&1 && sccache --show-stats >/dev/null 2>&1; then
+  exec sccache "$@"
 fi
 exec "$@"
