@@ -341,10 +341,13 @@ check_changed() {
         step "daemon: cargo check --all-targets"
         env -u AM_MODEL -u AM_EFFORT -u AM_DATA_DIR cargo check -p agents-managerd --all-targets --locked
         # 從 daemon 抽出去的 crate（crates/am-*）自己的測試：改到哪個就跑哪個（不受 CHECK_TESTS 過濾字串影響）。
-        for f in $(printf '%s\n' "$files" | sed -n 's#^crates/\([^/]*\)/.*#\1#p' | sort -u); do
-            step "crate: cargo test -p ${f}"
-            env -u AM_MODEL -u AM_EFFORT -u AM_DATA_DIR cargo test -p "${f}" --locked
-        done
+        # CHECK_TESTS=none 連這段也不跑（#1251）：none 的意思是「不跑測試」，不是只關 daemon 那一段。
+        if [ "${CHECK_TESTS:-}" != none ]; then
+            for f in $(printf '%s\n' "$files" | sed -n 's#^crates/\([^/]*\)/.*#\1#p' | sort -u); do
+                step "crate: cargo test -p ${f}"
+                env -u AM_MODEL -u AM_EFFORT -u AM_DATA_DIR cargo test -p "${f}" --locked
+            done
+        fi
         if [ -n "${CHECK_TESTS:-}" ]; then
             if [ "${CHECK_TESTS}" = none ]; then
                 echo "daemon: CHECK_TESTS=none：不跑測試"
