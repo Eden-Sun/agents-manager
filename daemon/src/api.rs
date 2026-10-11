@@ -3360,15 +3360,17 @@ async fn live_projects_on_host(app: &Arc<App>, host: &str) -> Result<Vec<db::Pro
 /// their live bot rows and active runs block host removal/repointing.
 async fn host_bots_requiring_attention(app: &Arc<App>, host: &str) -> Result<Vec<String>, LcError> {
     let require_remote_purge = !crate::shared_host::is_shared(app, host).await;
+    // 欠著目錄的 bot 歸屬看記號（#1320）：專案搬走之後，舊主機的債仍擋舊主機的刪除／換指，不能只看 `projects.host`。
     Ok(sqlx::query_scalar(
-        "SELECT b.id FROM bots b JOIN projects p ON p.id = b.project_id
-         WHERE p.host = ? AND (
-           b.deleted_at IS NULL
-           OR EXISTS (SELECT 1 FROM runs r WHERE r.bot_id = b.id AND r.state IN ('starting','running','stopping'))
-           OR (? = 1 AND NOT EXISTS (
-             SELECT 1 FROM remote_bot_dir_purges rp WHERE rp.bot_id = b.id AND rp.purged_at IS NOT NULL
-           ))
-         )
+        "SELECT b.id FROM bots b
+           JOIN projects p ON p.id = b.project_id
+           LEFT JOIN remote_bot_dir_purges rp ON rp.bot_id = b.id
+         WHERE (p.host = ?1 OR (?2 = 1 AND rp.host = ?1 AND rp.purged_at IS NULL))
+           AND (
+             b.deleted_at IS NULL
+             OR EXISTS (SELECT 1 FROM runs r WHERE r.bot_id = b.id AND r.state IN ('starting','running','stopping'))
+             OR (?2 = 1 AND (rp.bot_id IS NULL OR rp.purged_at IS NULL) AND (rp.bot_id IS NULL OR rp.host = ?1))
+           )
          ORDER BY b.id",
     )
     .bind(host)
