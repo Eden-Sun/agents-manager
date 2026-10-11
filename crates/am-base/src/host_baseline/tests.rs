@@ -54,6 +54,26 @@ fn a_missing_tool_is_critical_and_named() {
     assert_eq!(sev(&out, "tool.rtk"), CRITICAL);
 }
 
+fn without_jq_probe(key_line: &str) -> String {
+    format!(
+        "AM_BL begin\nAM_BL os Linux\nAM_BL tool jq \nAM_BL tool herdr /u/herdr\nAM_BL tool rtk /u/rtk\nAM_BL tool zsh /u/zsh\nAM_BL tool bun /u/bun\nAM_BL tool gh /u/gh\nAM_BL claude-dir cc1 /h/.claude-cc1\nAM_BL claude-file cc1 settings.json 1\nAM_BL claude-key cc1 statusLine ?\nAM_BL claude-key cc1 hooks ?\nAM_BL claude-key cc1 permissions ?\nAM_BL claude-key cc1 defaultMode ?\n{key_line}\nAM_BL end\n"
+    )
+}
+
+#[test]
+fn without_jq_the_settings_keys_are_unknown_not_missing() {
+    let out = without_jq_probe("");
+    let found = ids(&out);
+    assert!(found.contains(&"tool.jq".to_string()), "{found:?}");
+    assert!(!found.iter().any(|id| id.starts_with("claude.cc1.settings.json:")), "{found:?}");
+}
+
+#[test]
+fn a_key_jq_looked_for_and_did_not_find_is_still_reported() {
+    let out = without_jq_probe("AM_BL claude-key cc1 hooks 0");
+    assert!(ids(&out).contains(&"claude.cc1.settings.json:hooks".to_string()));
+}
+
 #[test]
 fn every_claude_identity_is_checked_on_its_own() {
     let out = GOOD.replace(
@@ -166,6 +186,29 @@ fn run_probe_env(home: &std::path::Path, path: &str, envs: &[(&str, &std::ffi::O
         .unwrap();
     assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
     String::from_utf8(out.stdout).unwrap()
+}
+
+#[test]
+fn the_real_script_marks_settings_keys_unknown_when_jq_is_unavailable() {
+    let home = FakeHome::new();
+    let h = home.path();
+    fs::create_dir_all(h.join(".claude")).unwrap();
+    fs::write(
+        h.join(".claude/settings.json"),
+        r#"{"statusLine":{},"hooks":{},"permissions":{"defaultMode":"dontAsk"}}"#,
+    )
+    .unwrap();
+    let bin = h.join("bin");
+    fs::create_dir_all(&bin).unwrap();
+    for tool in ["sed", "grep", "tail", "head", "awk", "uname", "cat"] {
+        std::os::unix::fs::symlink(format!("/usr/bin/{tool}"), bin.join(tool)).unwrap();
+    }
+
+    let out = run_probe_env(h, bin.to_str().unwrap(), &[("SHELL", std::ffi::OsStr::new("/bin/sh"))]);
+    assert!(out.contains("AM_BL tool jq \n"), "jq unexpectedly found:\n{out}");
+    let key_lines: Vec<_> = out.lines().filter(|line| line.starts_with("AM_BL claude-key default ")).collect();
+    assert_eq!(key_lines.len(), 4, "{out}");
+    assert!(key_lines.iter().all(|line| line.ends_with(" ?")), "{key_lines:?}");
 }
 
 #[test]

@@ -109,7 +109,7 @@ bl_has() { [ -e "$1" ] && printf 1 || printf 0; }
 bl_plugin() { [ -f "$1" ] && grep -Eq "\"$2@[^\"]*\"[[:space:]]*:[[:space:]]*true" "$1" 2>/dev/null && printf 1 || printf 0; }
 bl_key() {
   [ -f "$1" ] || { printf 0; return; }
-  [ -n "$bl_jq_path" ] && [ -x "$bl_jq_path" ] || { printf 0; return; }
+  [ -n "$bl_jq_path" ] && [ -x "$bl_jq_path" ] || { printf '?'; return; }
   if [ "$2" = defaultMode ]; then
     "$bl_jq_path" -e 'type == "object" and (.permissions | type == "object" and has("defaultMode"))' "$1" >/dev/null 2>&1 && printf 1 || printf 0
   else
@@ -310,7 +310,7 @@ pub fn evaluate(out: &str) -> Option<Vec<BaselineIssue>> {
                 }
             }
             "claude-key" if f.len() >= 5 => {
-                if claude_settings && !present(f.get(4)) {
+                if claude_settings && f.get(4).copied() != Some("?") && !present(f.get(4)) {
                     issues.push(issue(
                         format!("claude.{}.settings.json:{}", f[2], f[3]),
                         severity_of(&CLAUDE_KEYS, f[3]),
