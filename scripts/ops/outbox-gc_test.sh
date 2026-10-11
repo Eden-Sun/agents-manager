@@ -29,8 +29,13 @@ setup() {
   cp "$HERE/outbox-gc.sh" "$ROOT/agm/bin/outbox-gc.sh"
   OB="$HOME/.config/agents-manager/outbox"; LOG="$ROOT/agm/outbox-gc.log"; : > "$LOG"
   unset AM_OUTBOX_ROOT OUTBOX_MAX_AGE_MIN OUTBOX_SHARE_KEEP_DAYS OUTBOX_SHARE_CAP_BYTES OUTBOX_SHARE_CAP_FILES
+  # 分享名單的資料庫（#1291）：daemon 的 db.sqlite3 放在資料目錄底下，結構只取 gc 會查的欄位。
+  sqlite3 "$HOME/.config/agents-manager/db.sqlite3" "CREATE TABLE projects (id TEXT PRIMARY KEY, deleted_at TEXT); CREATE TABLE bots (id TEXT PRIMARY KEY, project_id TEXT NOT NULL, deleted_at TEXT); CREATE TABLE shared_bots (bot_id TEXT PRIMARY KEY);"
 }
 teardown() { rm -rf "$ROOT"; }
+# 把 bot 登記成正在分享（shared_bots 有列、bot 與專案都沒刪）／把 bot 標成刪掉。
+share_bot() { sqlite3 "$HOME/.config/agents-manager/db.sqlite3" "INSERT OR IGNORE INTO projects (id) VALUES ('p-$1'); INSERT OR IGNORE INTO bots (id, project_id) VALUES ('$1', 'p-$1'); INSERT OR IGNORE INTO shared_bots (bot_id) VALUES ('$1');"; }
+del_bot() { sqlite3 "$HOME/.config/agents-manager/db.sqlite3" "UPDATE bots SET deleted_at = 'x' WHERE id = '$1';"; }
 old() { touch -t 202601010000 "$@"; }     # 遠超過任何保留期（只能往回改 mtime；ctime 一定是「現在」）
 # 「搬進來的時間」是 ctime（mv／cp -p 會保留舊 mtime，ctime 卻是搬入那一刻），測試沒辦法把 ctime 往回改，
 # 所以改成把腳本的時鐘往後撥：`run_at <分鐘>`＝假裝現在是 <分鐘> 分鐘之後（OUTBOX_GC_NOW 是腳本給測試的時鐘接縫）。
@@ -108,6 +113,7 @@ teardown
 # （end user 隔天才回來拿是常態，使用者 2026-10-04）；標記檔本身不清。
 setup
 mkdir -p "$OB/share/sub" "$OB/plain"
+share_bot share
 : > "$OB/share/.am-share-keep"; old "$OB/share/.am-share-keep"
 echo x > "$OB/share/report.pdf"; old "$OB/share/report.pdf"
 echo x > "$OB/share/sub/deep.pdf"; old "$OB/share/sub/deep.pdf"
@@ -129,6 +135,7 @@ teardown
 # 2d. 分享用 bot 的總量上限（#850）：超過檔數或位元組，從最舊的 mtime 開始刪，標記檔不算量也不刪。
 setup
 mkdir -p "$OB/share"
+share_bot share
 : > "$OB/share/.am-share-keep"
 for i in 1 2 3 4 5; do echo x > "$OB/share/f$i.txt"; touch -t "20260101000$i" "$OB/share/f$i.txt"; done
 OUTBOX_SHARE_CAP_FILES=3 run_at 120 >/dev/null
@@ -142,6 +149,7 @@ check  "log 記刪了 2 個" "分享保留政策清掉 2 個檔案" "$LOG"
 teardown
 setup
 mkdir -p "$OB/share/sub"
+share_bot share
 : > "$OB/share/.am-share-keep"
 printf '0123456789' > "$OB/share/a.bin"; touch -t 202601010001 "$OB/share/a.bin"
 printf '0123456789' > "$OB/share/sub/b.bin"; touch -t 202601010002 "$OB/share/sub/b.bin"
@@ -153,12 +161,51 @@ exists "最新的 c.bin 留下" "$OB/share/c.bin"
 teardown
 setup
 mkdir -p "$OB/share" "$ROOT/outside"
+share_bot share
 : > "$OB/share/.am-share-keep"
 echo secret > "$ROOT/outside/precious.txt"; old "$ROOT/outside/precious.txt"
 ln -s "$ROOT/outside/precious.txt" "$OB/share/link.txt"
 echo x > "$OB/share/f.txt"
 OUTBOX_SHARE_CAP_FILES=1 run_at $((60 * 24 * 15)) >/dev/null
 exists "分享目錄裡的符號連結目標不被刪" "$ROOT/outside/precious.txt"
+teardown
+
+# 2e. 分享保留以 daemon 的分享名單（DB）為準（#1291）：bot 自己在 outbox 建 `.am-share-keep` 不算數；
+# 真的在分享的 bot 不用標記也保留；分享停了（bot 或專案刪掉）就回到 1 小時。
+setup
+mkdir -p "$OB/fake" "$OB/live" "$OB/gone" "$OB/proj"
+: > "$OB/fake/.am-share-keep"
+echo x > "$OB/fake/report.pdf"
+share_bot live
+echo x > "$OB/live/report.pdf"
+: > "$OB/gone/.am-share-keep"; share_bot gone; del_bot gone
+echo x > "$OB/gone/report.pdf"
+share_bot proj
+sqlite3 "$HOME/.config/agents-manager/db.sqlite3" "UPDATE projects SET deleted_at = 'x' WHERE id = 'p-proj';"
+echo x > "$OB/proj/report.pdf"
+equals "正常跑 exit 0" "$(run)" "0"
+gone   "bot 自建的標記不保留：過期檔照一小時清" "$OB/fake/report.pdf"
+exists "真的在分享中的 bot 不用標記也保留" "$OB/live/report.pdf"
+gone   "分享停了（bot 刪掉）的檔照一小時清" "$OB/gone/report.pdf"
+gone   "分享停了（專案刪掉）的檔照一小時清" "$OB/proj/report.pdf"
+teardown
+
+# 2f. 分享名單讀不到（沒有 DB、DB 壞掉）：整輪什麼都不刪、exit 1、記錄原因（#1291）。寧可多留，不可把分享中的檔清掉。
+setup
+mkdir -p "$OB/plain"
+echo x > "$OB/plain/old.txt"; old "$OB/plain/old.txt"
+rm -f "$HOME/.config/agents-manager/db.sqlite3"
+equals "沒有 DB：exit 1" "$(run)" "1"
+exists "沒有 DB：一般檔也不刪" "$OB/plain/old.txt"
+check  "沒有 DB：log 寫明拒絕整輪" "拒絕整輪清理" "$LOG"
+teardown
+setup
+mkdir -p "$OB/plain"
+echo x > "$OB/plain/old.txt"; old "$OB/plain/old.txt"
+printf 'not a database' > "$HOME/.config/agents-manager/db.sqlite3"
+equals "DB 壞掉：exit 1" "$(run)" "1"
+exists "DB 壞掉：一般檔也不刪" "$OB/plain/old.txt"
+check  "DB 壞掉：log 寫明拒絕整輪" "拒絕整輪清理" "$LOG"
 teardown
 
 # 3. 不碰不該碰的：outbox 外面的私鑰、DB、scratchpad、別的 bot 資料，即使很舊。
