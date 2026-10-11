@@ -901,4 +901,29 @@ mod tests {
         forget_queue_retry_timer(&bot.id);
         stop_bot(&app, &bot.id).await.unwrap();
     }
+
+    /// #708：移交出去的專案不收 prompt、也不排隊（同 `prompt_inner`）。`start_if_stopped` 這條入口也要擋：
+    /// 被拒的那次不留列，收回移交之後同一個請求照常收。
+    #[tokio::test]
+    async fn a_prompt_for_a_stopped_bot_in_a_handed_off_project_is_refused_not_queued() {
+        let e = tt::env().await;
+        let app = e.app.clone();
+        let bot = tt::claude_bot(&app, &e.project_id, "handed").await;
+        sqlx::query("UPDATE projects SET handed_off_to = 'agm-host' WHERE id = ?").bind(&e.project_id).execute(&app.db).await.unwrap();
+
+        let err = prompt_starting(&app, &bot.id, "還在嗎", "crid-handoff-1", &[], RelaySrc::trusted(None)).await.unwrap_err();
+        match err {
+            LcError::Conflict(v) => assert_eq!(v["reason"], "handed_off"),
+            other => panic!("預期 409 handed_off，實際 {other:?}"),
+        }
+        assert_eq!(count(&app, "SELECT COUNT(*) FROM turns t JOIN conversations c ON c.id = t.conversation_id WHERE c.bot_id = ?", &bot.id).await, 0);
+        assert_eq!(count(&app, "SELECT COUNT(*) FROM messages m JOIN conversations c ON c.id = m.conversation_id WHERE c.bot_id = ?", &bot.id).await, 0);
+        assert_eq!(started(&e), 0, "移交中不替它啟動");
+
+        sqlx::query("UPDATE projects SET handed_off_to = NULL WHERE id = ?").bind(&e.project_id).execute(&app.db).await.unwrap();
+        let out = prompt_starting(&app, &bot.id, "還在嗎", "crid-handoff-1", &[], RelaySrc::trusted(None)).await.unwrap();
+        assert_eq!(out.delivery, "queued", "收回之後同一個請求照常收，被拒的那次沒有撞冪等");
+        forget_queue_retry_timer(&bot.id);
+        stop_bot(&app, &bot.id).await.unwrap();
+    }
 }
