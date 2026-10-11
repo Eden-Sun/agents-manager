@@ -240,6 +240,107 @@ mod tests {
     use crate::release_triage::{build_entries, source_sections, Bucket};
 
     #[tokio::test]
+    async fn the_daily_issue_count_ignores_large_invalid_historical_ledger_rows() {
+        let p = sqlx::sqlite::SqlitePoolOptions::new().max_connections(1).connect("sqlite::memory:").await.unwrap();
+        sqlx::query(
+            "CREATE TABLE release_triage (
+               kind TEXT NOT NULL,
+               version TEXT NOT NULL,
+               status TEXT NOT NULL,
+               entries_json TEXT NOT NULL DEFAULT '[]',
+               verdicts_json TEXT,
+               issue_numbers_json TEXT NOT NULL DEFAULT '[]',
+               dispatched_at TEXT,
+               attempts INTEGER NOT NULL DEFAULT 0,
+               publish_error TEXT,
+               created_at TEXT NOT NULL,
+               updated_at TEXT NOT NULL,
+               PRIMARY KEY (kind, version)
+             )",
+        )
+        .execute(&p)
+        .await
+        .unwrap();
+
+        let now = chrono::Utc::now();
+        let recent = (now - chrono::Duration::hours(23)).to_rfc3339();
+        let cutoff = now - chrono::Duration::hours(24);
+        let just_inside = (cutoff + chrono::Duration::seconds(2)).to_rfc3339();
+        let just_outside = (cutoff - chrono::Duration::seconds(2)).to_rfc3339();
+        let old = (now - chrono::Duration::days(365 * 5)).to_rfc3339();
+        let old_refs = vec![crate::release_triage::ledger::IssueRef {
+            marker: "claude@0.1.0#old".into(),
+            entry_ids: vec!["old".into()],
+            number: 1,
+            url: String::new(),
+            created_at: old.clone(),
+            comment: false,
+        }];
+        for i in 0..2_000 {
+            sqlx::query(
+                "INSERT INTO release_triage (kind, version, status, entries_json, verdicts_json, issue_numbers_json, created_at, updated_at)
+                 VALUES ('claude', ?, 'published', 'invalid historical entries', 'invalid historical verdicts', ?, ?, ?)",
+            )
+            .bind(format!("old-{i}"))
+            .bind(serde_json::to_string(&old_refs).unwrap())
+            .bind(&old)
+            .bind(&old)
+            .execute(&p)
+            .await
+            .unwrap();
+        }
+
+        let mut refs: Vec<crate::release_triage::ledger::IssueRef> = (0..1_000)
+            .map(|i| crate::release_triage::ledger::IssueRef {
+                marker: format!("claude@2.1.277#{i}"),
+                entry_ids: vec![format!("e{i}")],
+                number: i + 100,
+                url: String::new(),
+                created_at: recent.clone(),
+                comment: false,
+            })
+            .collect();
+        refs.push(crate::release_triage::ledger::IssueRef {
+            marker: "claude@2.1.277#comment".into(),
+            entry_ids: vec!["comment".into()],
+            number: 2_000,
+            url: String::new(),
+            created_at: recent.clone(),
+            comment: true,
+        });
+        refs.push(crate::release_triage::ledger::IssueRef {
+            marker: "claude@2.1.277#inside".into(),
+            entry_ids: vec!["inside".into()],
+            number: 2_001,
+            url: String::new(),
+            created_at: just_inside,
+            comment: false,
+        });
+        refs.push(crate::release_triage::ledger::IssueRef {
+            marker: "claude@2.1.277#outside".into(),
+            entry_ids: vec!["outside".into()],
+            number: 2_002,
+            url: String::new(),
+            created_at: just_outside,
+            comment: false,
+        });
+        let refs = serde_json::to_string(&refs).unwrap();
+        sqlx::query(
+            "INSERT INTO release_triage (kind, version, status, entries_json, verdicts_json, issue_numbers_json, created_at, updated_at)
+             VALUES ('claude', '2.1.277', 'published', '[]', NULL, ?, ?, ?)",
+        )
+        .bind(refs)
+        .bind(now.to_rfc3339())
+        .bind(now.to_rfc3339())
+        .execute(&p)
+        .await
+        .unwrap();
+
+        crate::release_triage::ledger::migrate(&p).await.unwrap();
+        assert_eq!(crate::release_triage::ledger::created_in_last_day(&p).await.unwrap(), 1_001);
+    }
+
+    #[tokio::test]
     async fn verdicts_flow_through_the_real_db_and_stay_ledger_only_by_default() {
         let env = crate::testing::env().await;
         let app = env.app.clone();

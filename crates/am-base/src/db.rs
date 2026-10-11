@@ -355,6 +355,8 @@ pub const SCHEMA_HISTORY: &[(i64, &str)] = &[
     (52, "2facd719ec482737"),
     // issue #1038：`share_keep_pending`（遠端分享保留標記欠著的主機，ssh 失敗時記下、巡邏補做）。
     (53, "27e8089933d86980"),
+    // issue #1329：`release_triage_issue_creates`（24 小時配額只掃索引摘要，不解碼整份歷史帳本）。
+    (54, "0761ab4fd4f7886e"),
 ];
 pub const SCHEMA_VERSION: i64 = SCHEMA_HISTORY[SCHEMA_HISTORY.len() - 1].0;
 
