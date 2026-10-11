@@ -80,7 +80,7 @@ pub async fn restore(conn: &HostConn, bot_id: &str, dir: &str, remote_root: &str
     let trash_dir = trash_dir_for(&home, remote_root);
     let guard = trash_root_guard(&home, "printf 'AM_NONE\\n'");
     let script = format!(
-        "set -e\nD={d}\nT={t}\ntrash=$T\n{guard}if [ -L \"$D\" ]; then rm \"$D\"; fi\nif [ -e \"$D\" ] || [ -L \"$D\" ]; then printf 'AM_KEPT\\n'; exit 0; fi\nbest=\nbm=0\nfor e in {id}.*; do\n  [ -d \"$e\" ] || continue\n  ms=${{e##*.}}\n  case \"$ms\" in ''|*[!0-9]*) continue;; esac\n  if [ \"$ms\" -gt \"$bm\" ]; then bm=$ms; best=$e; fi\ndone\nif [ -z \"$best\" ]; then printf 'AM_NONE\\n'; exit 0; fi\nmkdir -p \"$(dirname \"$D\")\"\nmv \"$best\" \"$D\"\nprintf 'AM_RESTORED %s/%s\\n' \"$trash\" \"$best\"\n",
+        "set -e\nD={d}\nT={t}\ntrash=$T\n{guard}best=\nbm=0\nfor e in {id}.*; do\n  [ -d \"$e\" ] || continue\n  ms=${{e##*.}}\n  case \"$ms\" in ''|*[!0-9]*) continue;; esac\n  if [ \"$ms\" -gt \"$bm\" ]; then bm=$ms; best=$e; fi\ndone\n# 先確定有備份才動 `$D`（#1311）：沒有就什麼都不碰，連結原樣留著。\nif [ -z \"$best\" ]; then printf 'AM_NONE\\n'; exit 0; fi\nlink_aside=\nif [ -L \"$D\" ]; then\n  link_aside=\"$D.am-link-$$\"\n  mv \"$D\" \"$link_aside\"\nfi\nif [ -e \"$D\" ] || [ -L \"$D\" ]; then\n  [ -z \"$link_aside\" ] || mv \"$link_aside\" \"$D\"\n  printf 'AM_KEPT\\n'; exit 0\nfi\nmkdir -p \"$(dirname \"$D\")\"\nif mv \"$best\" \"$D\"; then\n  [ -z \"$link_aside\" ] || rm \"$link_aside\"\n  printf 'AM_RESTORED %s/%s\\n' \"$trash\" \"$best\"\nelse\n  [ -z \"$link_aside\" ] || mv \"$link_aside\" \"$D\"\n  exit 1\nfi\n",
         d = sh_quote(&dir),
         t = sh_quote(&trash_dir),
         guard = guard,
