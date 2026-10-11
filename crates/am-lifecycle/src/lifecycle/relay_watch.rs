@@ -55,6 +55,8 @@ pub enum Step {
 
 /// Resolve a herdr target only among runs on the sender's host and session. Pane IDs are local to
 /// a herdr server/session, so an ambiguous target is ignored instead of guessed by start time.
+/// A target whose project was handed off to another host is not this daemon's (#1363): it returns
+/// `None`, so announce opens no turn and watches nothing; the shim delivers the text directly.
 pub async fn resolve(app: &(impl crate::capabilities::Db + crate::capabilities::HerdrRoutes), from_bot: &str, to_agent: &str) -> anyhow::Result<Option<db::Run>> {
     let to = to_agent.trim();
     if to.is_empty() {
@@ -70,7 +72,7 @@ pub async fn resolve(app: &(impl crate::capabilities::Db + crate::capabilities::
         .unwrap_or(&fallback_session);
     let ids: Vec<String> = sqlx::query_scalar(
         "SELECT r.id FROM runs r JOIN bots b ON b.id = r.bot_id JOIN projects p ON p.id = b.project_id
-          WHERE r.state = 'running' AND b.deleted_at IS NULL AND p.host = ?1
+          WHERE r.state = 'running' AND b.deleted_at IS NULL AND p.handed_off_to IS NULL AND p.host = ?1
             AND COALESCE(r.herdr_session, ?2) = ?3 AND (r.agent_name = ?4 OR r.pane_id = ?4)
           LIMIT 2",
     )
