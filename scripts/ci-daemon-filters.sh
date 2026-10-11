@@ -13,6 +13,24 @@
 # 這是「合理子集」不是全量：跨模組的連帶影響（改了被很多模組用的型別）抓不到，完整的交給 ubuntu-ci（scripts/ops/ubuntu-ci.sh）。
 set -euo pipefail
 
+# 模組自己（含子目錄）沒有任何測試時，照檔名推的過濾字串一定選到 0 條，check.sh changed 會以「沒有選到任何測試」拒絕放行（#1338）。
+# 這時退到上一層模組（share/store.rs → share::，share 底下有測試）；頂層檔就不出過濾字串（check.sh 會印「沒有可挑的測試子集」）。
+# 檔案不存在（被刪掉、或測試給的假路徑）照舊照檔名推。mod.rs 的子目錄就是它自己，子模組有測試也算有測試。
+emit_mod() { # emit_mod <repo 相對路徑> <用 / 分隔的模組路徑>
+    local f="$1" mod="$2" sub
+    if [ -f "$f" ]; then
+        case "$f" in
+            */mod.rs) sub="${f%/mod.rs}" ;;
+            *) sub="${f%.rs}" ;;
+        esac
+        if ! grep -Eq '#\[(tokio::)?test|mod [a-z_0-9]*tests?[a-z_0-9]*[[:space:]]*;' "$f" \
+            && { [ ! -d "$sub" ] || ! grep -rEq '#\[(tokio::)?test' "$sub"; }; then
+            case "$mod" in */*) mod="${mod%/*}" ;; *) return 0 ;; esac
+        fi
+    fi
+    printf '%s::\n' "${mod//\//::}"
+}
+
 while IFS= read -r f; do
     [ -n "$f" ] || continue
     case "$f" in
@@ -33,6 +51,10 @@ while IFS= read -r f; do
         # 其他用 #[path] 掛成別的模組名的測試檔（同上；掛載點見各 crate 的 #[path] 行，#1169）。照檔名推會選到零個，要明列。
         daemon/src/child_alerts_tests.rs) printf 'child_alerts::tests::\n' ;;
         daemon/src/judge_tests.rs) printf 'judge::tests::\n' ;;
+        # 用 #[path] 掛在別的模組底下的檔（掛載點：daemon/src/api.rs、daemon/src/runners/s6_l.rs）；照檔名推會選到零個（#1338）。
+        daemon/src/shell.rs) printf 'api::shell::\n' ;;
+        daemon/src/bot_scope_matrix.rs) printf 'api::bot_scope_matrix::\n' ;;
+        daemon/src/app_ports_p4sess.rs) printf 'runners::s6_l::app_ports_p4sess::\n' ;;
         crates/am-lifecycle/src/lifecycle/grok_transcript_tests.rs | crates/am-lifecycle/src/lifecycle/claude_child_log_tests.rs \
             | crates/am-lifecycle/src/lifecycle/suggestion_tests.rs | crates/am-lifecycle/src/lifecycle/composer_draft_tests.rs)
             mod="${f#crates/am-lifecycle/src/}"
@@ -56,7 +78,7 @@ while IFS= read -r f; do
             esac
             mod="${rel%.rs}"
             mod="${mod%/mod}"
-            printf '%s::\n' "${mod//\//::}"
+            emit_mod "$f" "$mod"
             ;;
         crates/am-base/src/*)
             rel="${f#crates/am-base/src/}"
@@ -71,7 +93,7 @@ while IFS= read -r f; do
                 *.rs)
                     mod="${rel%.rs}"
                     mod="${mod%/mod}"
-                    printf '%s::\n' "${mod//\//::}"
+                    emit_mod "$f" "$mod"
                     ;;
                 *) printf '__all__\n' ;;
             esac
@@ -84,7 +106,7 @@ while IFS= read -r f; do
             esac
             mod="${rel%.rs}"
             mod="${mod%/mod}"
-            printf '%s::\n' "${mod//\//::}"
+            emit_mod "$f" "$mod"
             ;;
         scripts/check.sh) echo 'cargo_shim::' ;;
         scripts/ops/lint-shell-vars.sh) echo 'herdr_shim::' ;;
