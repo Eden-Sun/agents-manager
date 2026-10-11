@@ -294,8 +294,9 @@ export function LiveBubble({
   // 半成品預設收起（2026-09-08）：逐字跳讀了白讀、還會一直推動清單。
   const [open, setOpen] = useState(false)
   const showText = Boolean(text) && open
+  // 不是 live region（#1237）：字數與活動列每 250ms 變一次，整顆宣告會讓讀屏一直重唸；階段字另外給。
   return (
-    <article className={`msg assistant live${showText ? ' streaming' : ''}`} aria-live="polite">
+    <article className={`msg assistant live${showText ? ' streaming' : ''}`}>
       <div className={`bubble${showText ? ' md' : ''}`}>
         {showText ? (
           <>
@@ -311,6 +312,7 @@ export function LiveBubble({
         <div className="msg-meta-left">
           {kind ? <span className={`kind-mark ${kind}`} aria-hidden="true" /> : null}
           {from ? <span className="msg-from">{from}</span> : null}
+          <span className="sr-only" role="status">{text ? '正在輸出回覆' : '等待回覆'}</span>
           <span>{text ? '輸出中…' : (act ?? '等待回覆…')}</span>
           {text ? (
             <button type="button" className="live-peek" aria-expanded={open} onClick={() => setOpen((v) => !v)}>
