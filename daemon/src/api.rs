@@ -13701,6 +13701,56 @@ mod per_principal_auth_tests {
         let stale_spawn = spawn_begin(e.app.clone(), &parent.id, &old).await;
         assert!(stale_spawn.starts_with("HTTP/1.1 401"), "a delayed shim call cannot spawn with the revoked proof: {stale_spawn}");
     }
+
+    #[tokio::test]
+    async fn a_running_child_can_spawn_after_its_parent_run_stops_and_session_changes_still_fence() {
+        let e = crate::testing::env().await;
+        let parent = spawn_ready_bot(&e, "stopped-parent-live-child").await;
+        let run = db::active_run(&e.app.db, &parent.id).await.unwrap().unwrap();
+        e.herdr.set_agent("surviving-child", "w1:p-surviving-child", false);
+        sqlx::query("UPDATE runs SET state='stopped', ended_at=? WHERE id=?")
+            .bind(db::now())
+            .bind(&run.id)
+            .execute(&e.app.db)
+            .await
+            .unwrap();
+        assert!(db::active_run(&e.app.db, &parent.id).await.unwrap().is_none(), "the parent run is stopped while the child pane remains live");
+
+        // The real-shim pane split above exercises this inherited proof end to end. Here the
+        // route-level calls also verify that a stopped parent run does not lose session fencing.
+        let begin = spawn_begin(e.app.clone(), &parent.id, &parent.hook_token).await;
+        assert!(begin.starts_with("HTTP/1.1 200"), "a surviving child can reserve a pane on the captured host/session: {begin}");
+        let permit = response_json(&begin)["permit_id"].as_str().unwrap().to_string();
+        let shell_pane = "w1:p-after-parent-stop";
+        e.herdr.live_pane(shell_pane, crate::testing::LivePane { rows: Some(40), ..Default::default() });
+        let finish = spawn_finish(e.app.clone(), &parent.id, &parent.hook_token, &permit, shell_pane).await;
+        assert!(finish.starts_with("HTTP/1.1 200"), "the spawned shell pane is registered before releasing the permit: {finish}");
+        let owner: String = sqlx::query_scalar("SELECT owner_bot_id FROM panes WHERE pane_id=?")
+            .bind(shell_pane)
+            .fetch_one(&e.app.db)
+            .await
+            .unwrap();
+        assert_eq!(owner, parent.id);
+
+        let stale_begin = spawn_begin(e.app.clone(), &parent.id, &parent.hook_token).await;
+        assert!(stale_begin.starts_with("HTTP/1.1 200"), "the unchanged host/session remains eligible: {stale_begin}");
+        let stale_permit = response_json(&stale_begin)["permit_id"].as_str().unwrap().to_string();
+        sqlx::query("UPDATE bots SET herdr_session='replacement-session' WHERE id=?")
+            .bind(&parent.id)
+            .execute(&e.app.db)
+            .await
+            .unwrap();
+        let stale_pane = "w1:p-old-session";
+        e.herdr.live_pane(stale_pane, crate::testing::LivePane { rows: Some(40), ..Default::default() });
+        let stale_finish = spawn_finish(e.app.clone(), &parent.id, &parent.hook_token, &stale_permit, stale_pane).await;
+        assert!(stale_finish.starts_with("HTTP/1.1 409") && stale_finish.contains("spawn_session_superseded"), "a permit cannot finish after its session changes: {stale_finish}");
+        let stale_registered: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM panes WHERE pane_id=?")
+            .bind(stale_pane)
+            .fetch_one(&e.app.db)
+            .await
+            .unwrap();
+        assert_eq!(stale_registered, 0, "a pane from the retired session must not be registered");
+    }
 }
 
 #[cfg(test)]
