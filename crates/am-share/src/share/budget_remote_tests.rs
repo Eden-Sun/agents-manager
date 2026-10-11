@@ -466,13 +466,22 @@ mod with_app {
         let (id, _, _) = share_bot(&e, &scratch, "far-revoke", "restricted").await;
         assert!(crate::share::store::enable(&e.app.db, &id).await.unwrap().is_some(), "先開分享：bot_shares 有一列");
 
+        // 假 ssh 延遲 5 秒；下面的等待上限要小於它，`!task.is_finished()` 才成立（#1279）。
         am_base::hosts::set_ssh_delay("x5-revoke-app", std::time::Duration::from_secs(5));
         let app = e.app.clone();
         let target = id.clone();
         let task = tokio::spawn(async move { crate::share::revoke_bot_share(&app, &target).await });
-        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
-        let left: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM bot_shares WHERE bot_id = ?").bind(&id).fetch_one(&e.app.db).await.unwrap();
+        // token 作廢是 spawn 出去的 DB 寫入，高負載下不會在固定時間內完成：等它不見（有上限），不靠固定 sleep。
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(4);
+        let left = loop {
+            let n: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM bot_shares WHERE bot_id = ?").bind(&id).fetch_one(&e.app.db).await.unwrap();
+            if n == 0 || std::time::Instant::now() >= deadline {
+                break n;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        };
         assert_eq!(left, 0, "token 先作廢，不等遠端慢的 ssh 拿掉標記");
+        assert!(!task.is_finished(), "token 不見的這一刻 revoke 還卡在遠端那條慢 ssh 上：證明是先作廢");
         task.await.unwrap().unwrap();
         am_base::hosts::set_ssh_delay("x5-revoke-app", std::time::Duration::ZERO);
     }
