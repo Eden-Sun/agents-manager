@@ -1,10 +1,11 @@
-//! Embedded web UI (M8), behind the default `embed-ui` feature. `allow_missing` keeps a
-//! fresh clone compiling before `web/dist` exists (`cargo dev` builds the daemon before
-//! any `bun run build`); such a binary answers `/` with a "build the UI first" 404.
+//! Embedded web UI (M8), behind the default `embed-ui` feature. Release builds embed the files;
+//! debug and test builds read them at runtime. `allow_missing` keeps a fresh clone compiling before
+//! `web/dist` exists; such a binary answers `/` with a "build the UI first" 404.
 //!
-//! **重建 UI**：`rust_embed::Embed` 在編譯這個 crate 時把 `web/dist` 讀進二進位；`build.rs` 對 `web/dist`
-//! emit `cargo:rerun-if-changed`，所以 `bun run build` 之後照常 `cargo build` 就會重嵌（#1071，舊的 `cargo clean -p am-base`
-//! 不用了）。打包時 `scripts/package-dmg.sh` 還會用 `scripts/verify-embedded-ui.sh` 比對一次，不一致就不出包。
+//! **重建 UI**：release profile 編譯這個 crate 時，`rust_embed::Embed` 會把 `web/dist` 讀進二進位；`build.rs` 只在這些 profile
+//! 對目錄 emit `cargo:rerun-if-changed`，所以 `bun run build` 之後照常 `cargo build --release` 就會重嵌（#1071，舊的
+//! `cargo clean -p am-base` 不用了）。debug／test profile 執行期讀檔，不會因前端目錄更新重編（issue #1333）。打包時
+//! `scripts/package-dmg.sh` 還會用 `scripts/verify-embedded-ui.sh` 比對一次，不一致就不出包。
 //! 驗證方式：`curl -s http://127.0.0.1:7788/ | grep -o 'assets/[^"]*'` 應該和 `web/dist/index.html` 裡的檔名一致。
 
 use axum::http::{header, StatusCode, Uri};
@@ -106,5 +107,14 @@ mod tests {
         let build = include_str!("../build.rs");
         let want = format!("cargo:rerun-if-changed={}", embed_folder());
         assert!(build.contains(&want), "build.rs 要有 `{want}`，不然前端重建後 binary 還是舊的");
+    }
+
+    #[test]
+    fn the_build_script_only_watches_in_profiles_that_embed() {
+        let build = include_str!("../build.rs");
+        assert!(build.contains("cfg!(debug_assertions)"), "前端目錄只有 release 嵌入時才要監看");
+        let profile_guard = build.find("if !cfg!(debug_assertions)").expect("build.rs 要只在非 debug profile 監看");
+        let watch = build.find("rerun-if-changed=../../web/dist").expect("build.rs 要保留嵌入目錄的檔案監看");
+        assert!(profile_guard < watch, "web/dist 的監看指令必須受 profile 條件包住");
     }
 }
