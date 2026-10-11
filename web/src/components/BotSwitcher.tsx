@@ -3,7 +3,8 @@ import { createPortal } from 'react-dom'
 import type { CSSProperties, KeyboardEvent as ReactKeyboardEvent, RefObject } from 'react'
 import { useMenuKeys } from '../hooks/useMenuKeys'
 import type { Bot, Project } from '../api/types'
-import { useStore } from '../store/store'
+import { useShallow } from 'zustand/react/shallow'
+import { botsOfProject, orderedProjects, useStore } from '../store/store'
 import { useBotLamp } from '../hooks/useBotLamp'
 import { KindTag } from './KindTag'
 import { StatusLamp } from './StatusLamp'
@@ -33,6 +34,9 @@ export function BotSwitcher({ botId, name }: { botId?: string; name: string }) {
   const selectBot = useStore((s) => s.selectBot)
   const projects = useStore((s) => s.projects)
   const bots = useStore((s) => s.bots)
+  const projectOrder = useStore((s) => s.projectOrder)
+  const botOrder = useStore((s) => s.botOrder)
+  const hidden = useStore(useShallow((s) => s.hiddenBotIds))
 
   useEffect(() => {
     if (!open) return
@@ -54,9 +58,12 @@ export function BotSwitcher({ botId, name }: { botId?: string; name: string }) {
     }
   }, [open])
 
-  const mothers = bots.filter((b) => !b.parent_bot_id)
-  const groups = projects
-    .map((p) => ({ project: p, bots: mothers.filter((b) => b.project_id === p.id) }))
+  // 照側欄的順序（拖曳排過的專案與 bot）；只列母 bot（既有決定），收起來的不列，正在看的那顆例外（#1243）。
+  const groups = orderedProjects({ projects, projectOrder })
+    .map((p) => ({
+      project: p,
+      bots: botsOfProject({ bots, botOrder }, p.id).filter((b) => !b.parent_bot_id && (b.id === botId || !hidden.includes(b.id))),
+    }))
     .filter((g) => g.bots.length > 0)
 
   return (
