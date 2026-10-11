@@ -285,7 +285,7 @@ React 前端 (Vite) ◄── REST + WebSocket ──► Rust daemon (axum) ◄�
   而 gc 只在開機清掃與每日那一次跑，所以磁碟最久可能多出一份上限沒算到的殘骸到隔天；追磁碟對不上時先看回收區裡有沒有 `*.deleting`。
   名字看不懂的檔案／目錄一律不碰。軟刪本來就是為了能還原，目錄卻是當場 `remove_dir_all`——誤刪時 bot 列與 config 救得回來，
   spool 裡還沒重放的 hook、手動放的檔就沒了。取捨：多佔最多 7 天／2 GB 的磁碟（bot 目錄通常是 KB 級）。
-  **遠端同一套**（issue #411，`daemon/src/remote_trash.rs`）：遠端的 `bots/<id>/` 由 ssh `mv` 到同一個遠端根（§3.1 遠端分實例）底下的 `bots-trash/<id>.<毫秒>/`；還原時 ssh 搬回最新那份（`bots/<id>/` 已是真目錄或檔案就不動；symlink 只 `rm` 連結再搬回，不跟著進目標。ssh 等 10 秒，搬不回來不擋還原、只記 warn），並清掉那顆的 `remote_bot_dir_purges` 記號；清理由 `remote_purge::sweep` 觸發——**主機連上那一次與連著期間每 5 分鐘那一輪共用同一支**（issue #431：以前只掛在「連上」，常駐連線的主機從來不清，7 天的保留期等於沒生效），排在「還欠著誰的目錄」之前，那一段讀不到也照清。GC 與 restore 會逐段拒絕可信 remote home 以下含 symlink 的回收區路徑；GC 驗證後進入回收區，以相對路徑清理。**清理政策與本機同一套**（issue #441，同樣的 7 天與 2 GB）：先清過期的，再看總量，還超過就從最舊的清到降下來、最新那一份永遠留著——只有時間規則擋不住「七天之內連刪十幾顆」，而 #141／#196 兩次塞爆遠端磁碟都是那個形狀。遠端的第二道多一條限制：排序以行為單位，basename 帶空白的（只可能是人手動放的，`move_in` 造的是 `<ULID>.<毫秒>`）不算進總量也不淘汰。`gc` 與 `restore` 不互斥：`restore` 挑中一份剛好跨過期限的、gc 在它 `mv` 之前就清掉時，還原那一步失敗只記 warn、不擋還原。
+  **遠端同一套**（issue #411，`crates/am-base/src/remote_trash.rs`，巡邏在 `daemon/src/runners/remote_trash.rs`）：遠端的 `bots/<id>/` 由 ssh `mv` 到同一個遠端根（§3.1 遠端分實例）底下的 `bots-trash/<id>.<毫秒>/`；還原時 ssh 搬回最新那份（`bots/<id>/` 已是真目錄或檔案就不動；symlink 只 `rm` 連結再搬回，不跟著進目標。ssh 等 10 秒，搬不回來不擋還原、只記 warn），並清掉那顆的 `remote_bot_dir_purges` 記號；清理由 `remote_purge::sweep` 觸發——**主機連上那一次與連著期間每 5 分鐘那一輪共用同一支**（issue #431：以前只掛在「連上」，常駐連線的主機從來不清，7 天的保留期等於沒生效），排在「還欠著誰的目錄」之前，那一段讀不到也照清。GC 與 restore 會逐段拒絕可信 remote home 以下含 symlink 的回收區路徑；GC 驗證後進入回收區，以相對路徑清理。**清理政策與本機同一套**（issue #441，同樣的 7 天與 2 GB）：先清過期的，再看總量，還超過就從最舊的清到降下來、最新那一份永遠留著——只有時間規則擋不住「七天之內連刪十幾顆」，而 #141／#196 兩次塞爆遠端磁碟都是那個形狀。遠端的第二道多一條限制：排序以行為單位，basename 帶空白的（只可能是人手動放的，`move_in` 造的是 `<ULID>.<毫秒>`）不算進總量也不淘汰。`gc` 與 `restore` 不互斥：`restore` 挑中一份剛好跨過期限的、gc 在它 `mv` 之前就清掉時，還原那一步失敗只記 warn、不擋還原。
   bot 列或 active run 讀不到（DB 一時忙、I/O 錯）＝還不知道：目錄留著、記一行 warn，下次開機再判斷——清理可重入，刪掉還在跑的 bot 的 hook／shim／spool 補不回來（#187）。
   `DELETE /api/projects/:id` 依 id 排序拿齊專案內每顆 bot 的 per-bot 鎖，**在鎖內**重驗都已停止再定案；TOML 裡多出沒鎖住的 bot（剛建立、可能正要啟動）就 409 `delete_refused`。
   **鎖順序**：刪除是唯一會同時持多把 per-bot 鎖的路徑，兩支 DELETE 都「依 id 排序、一次拿齊」（`DELETE /api/bots/:id` 拿 parent＋所有 descendants，拿鎖途中若認領了新 child 就全放掉重來，三次後 409 `children_changed`），再用 locked 版停機；持一把再補拿另一把會與另一支互等成死鎖（ULID 不保證 parent 比 child 小）。
@@ -370,7 +370,7 @@ React 前端 (Vite) ◄── REST + WebSocket ──► Rust daemon (axum) ◄�
   對 running 的 claude run `pane.read visible 80`，認到就寫 `runs.update_notice` 並推 `bot_status`，消失就清 NULL（讀不到畫面不清）；不限 idle。
   認法（`tui_prompts::update_notice`）：兩段字都要中，**且只看最下面 6 行非空白**（正文引用這兩句時會誤中）。存在 run 上：重啟（套用更新本身）後的新 run 本來就沒有。
   畫面上讀不到那句時退到版本比對：statusLine 的 `version`（process 在跑的）對 `claude --version`（磁碟上的），磁碟較新才算；磁碟版本每台主機快取 5 分鐘。
-- **上游有新版**（issue #707／#725，2026-09-28）：`daemon/src/upstream_update.rs` 每 10 分鐘比一次「上游最新正式版」對
+- **上游有新版**（issue #707／#725，2026-09-28）：`crates/am-base/src/upstream_update.rs`（巡邏在 `daemon/src/runners/upstream_update.rs`）每 10 分鐘比一次「上游最新正式版」對
   「每台有裝的主機磁碟上的 `--version`」：claude 問 npm registry 的 `latest`，codex 沿用 changelog 那份 GitHub releases 快取；上游結果快取
   1 小時、失敗不快取。Codex 新版仍跳一次「需先安裝」通知。Claude 除單次通知外，還把包含每台版本、讀取錯誤與共同 `target_version` 的快照保存在 header，持續列出目前版 → 目標版，
   直到各台都到同一目標才收起；不依賴 toast 是否仍在畫面或是否有 active run。落後主機上 running 的 claude run 另寫 `runs.update_notice`＝`claude 有新版 <a> → <b>，需安裝後重啟`（`update_watch` 以快照的 `target_version` 比磁碟上裝著的版本，讀不到磁碟才用跑著的版本）；批次重啟把「需安裝」列為候選但跳過（`needs_manual_install`，§6.9）——安裝與「已安裝，重啟套用」是兩步。
@@ -382,7 +382,7 @@ React 前端 (Vite) ◄── REST + WebSocket ──► Rust daemon (axum) ◄�
   herdr 也在這份快照裡（2026-10-01，一鍵更新的徽章）：上游是 `herdrdev/herdr` GitHub releases 最大的正式版，磁碟版本讀工具探測快取的
   `herdr --version`（`herdr_version` 每 60 秒重探），`target_version`＝上游版；同一版一樣只通知一次。
 - **codex 更新通知**（issue #388，2026-09-21 使用者截圖：codex 畫面有 `✨ Update available! 0.154.0 -> 0.155.1` 卻沒有任何徽章）：`update_watch`
-  同一支巡邏也巡 running 的 codex run（`daemon/src/codex_update.rs`）。**跟 claude 相反：claude 是新版已經下載好、重啟就換；codex 是新版還沒安裝**，
+  同一支巡邏也巡 running 的 codex run（`crates/am-base/src/codex_update.rs`）。**跟 claude 相反：claude 是新版已經下載好、重啟就換；codex 是新版還沒安裝**，
   要先跑安裝指令再重啟——所以通知文字寫明「需安裝後重啟」，**安裝本身不自動跑**：只在使用者按 header 的 codex chip 並確認時才跑（§6.9「codex 需安裝」，
   `daemon/src/cli_update.rs`、API §12.7a），bot 呼叫一律 403。
   - 認得兩種畫面寫法，都是同一句 `✨ Update available! <a> -> <b>`（`->`／`→`／`=>`，窄 pane 折行也讀得到），而且**緊接著要有**：
@@ -1505,7 +1505,7 @@ tab 已被回收視為完成，`tab.list` 失敗不猜。沒有 `tab_id` 的 Run
     這一回合全部的 user Message，補充也在裡面。對話倒回倒到一則補充時用它自己的原文，不是回合的 `prompt_text`。
 
 ### 6.4 停止／刪除 Bot（per-bot 鎖內）
-- **遠端已刪 bot 的目錄靠 DB 推導的欠帳收**（issue #349，`daemon/src/remote_purge.rs`）：刪除 handler 的一次性 ssh purge 只在 handler 活著時有效；daemon 在「刪除已 commit、purge 還沒跑」之間死掉，
+- **遠端已刪 bot 的目錄靠 DB 推導的欠帳收**（issue #349，`crates/am-base/src/remote_purge.rs`，巡邏在 `daemon/src/runners/remote_purge.rs`）：刪除 handler 的一次性 ssh purge 只在 handler 活著時有效；daemon 在「刪除已 commit、purge 還沒跑」之間死掉，
   開機的 `purge_deleted_bot_dirs` 只掃本機 `data_dir/bots`、看不到遠端。所以欠的清理從 DB 推：`deleted_at` 非空的 bot ＋ 它專案列記的 host（專案軟刪後列還在）＋ 沒有「已清掉」記號（`remote_bot_dir_purges.purged_at`）。
   主機連上（含重連）時背景掃一次，連著期間每 5 分鐘再掃；只有「確定軟刪」而且「確定沒有 active run」才搬進遠端回收區（run 讀不到或還活著＝不刪，DB 讀不到＝什麼都不刪），host 只取專案列、**不明就不動，不退回本機**。
   每一顆都在它自己的 per-bot 鎖（`restore_bot` 拿的那把）裡**重讀一次 `deleted_at`**（issue #511）：撈「誰欠著」到真的 `mv` 之間隔著一次 `active_run` 與一整段 ssh，一輪最多 100 顆可以是好幾分鐘，
@@ -1670,7 +1670,7 @@ parent 算出來是 0，連字尾都取不到，退而用完整 herdr agent name
 
 **spawn hint 從哪來**：頂層 bot 自己的 `PostToolUse` hook（`matcher: "Bash"`，issue #94）——它自己的 Bash 工具跑
 `herdr pane split`／`agent start` 時，那條指令的 stdout 是 herdr 自己回的一個或多個 JSON-RPC 回應（`{"id":"cli:pane:split",
-"result":{"pane":{"pane_id":...}}}` 或 `{"id":"cli:agent:start","result":{"agent":{"pane_id":...}}}`，`daemon/src/spawn_hints.rs`
+"result":{"pane":{"pane_id":...}}}` 或 `{"id":"cli:agent:start","result":{"agent":{"pane_id":...}}}`，`crates/am-base/src/spawn_hints.rs`
 對照真的 herdr 0.8.2 驗過）；Bash loop 的多個回應都逐一解析並記成 hint。**只信這兩個 `id`**：`pane:get`／`pane:current`／`pane:list` 回的是同一種 `{"pane":{...}}` 形狀，
 只看 `type` 會把「看一眼」也當成「剛創造」。記進 `spawn_hints((host, pane_id) 唯一, bot_id, created_at)`；pane ID 只在各自的 host 內唯一，
 不同 host 的同號 pane 各自保留。10 分鐘沒被用到就當過期（`prune_stale`，每次 `reconcile_host` 開頭跑一次）；被拿去認領成功只刪掉該 host 的 hint，重複跑不會重複建立。這條**只影響「這個 pane
@@ -2149,7 +2149,7 @@ pid 不拿去對 listen port。agy 的登入 TUI 會在 127.0.0.1 自己開兩�
   圖檔（PNG/JPEG/GIF/WebP）滑鼠停 150ms 或鍵盤聚焦就在那一列左邊浮出預覽（使用者 2026-09-18），走同一支下載 API 抓成 blob，快取最多 12 張、換 bot 全部釋放；手機沒有 hover，照舊點一下下載。
 - **驗證跟真正讀檔是同一個 fd（issue #89，2026-09-17）**：下載（`outbox::file`）與 `GET /api/bots/{id}/local-image`
   以前都是「驗證路徑（canonicalize＋containment＋metadata）」與「用路徑名字重新 open 讀內容」分開兩步，寫得到那個目錄的
-  process（bot 自己）能在兩步之間把驗證通過的路徑換成指到界線外的符號連結。現在共用 `trusted_open`（`daemon/src/trusted_open.rs`）：
+  process（bot 自己）能在兩步之間把驗證通過的路徑換成指到界線外的符號連結。現在共用 `trusted_open`（`crates/am-base/src/trusted_open.rs`）：
   從信任邊界（outbox 是 `data_dir`，local-image 是專案目錄）開始逐層 `openat(2)` 帶 `O_NOFOLLOW`，是不是符號連結、打開的是哪個
   inode 由同一個系統呼叫決定；拿到的 `File` 之後所有判斷（是不是一般檔案、outbox 的擁有者邊界、大小、內容開頭）都讀同一個 fd，
   不再用路徑名字重新 open。
@@ -2662,7 +2662,7 @@ header 的 herdr 徽章確認後 `POST /api/hosts/{name}/herdr-update`（API §1
 - 對話檔（claude）：只找來源 bot 自己的 run（`bot_id` ＋同 sid，取最新一筆；別顆 bot 的同 sid 不算，`native_session_id` 是 provider 的 id，不是全域的 run id；#1168）。搬到新 bot 的身分失敗（檔不在、複製失敗）就**不啟動**、`fork_ops` 記 `failed` 與 `start_error`，不再只記 warn 硬開一顆接不到對話的 fork。
 - 之後兩顆各走各的：新 bot 的下一次重啟用它自己的新 session（照 §6.9 的 resume）。分叉前的訊息不複製到新 bot 的對話紀錄（CLI 裡有），改在新 bot 對話放一則系統訊息指回來源。
 - 跟「開同類分身並啟動」的差別只在脈絡：分身是全新對話。
-- **冪等（issue #348）**：body 的 `client_request_id` 是這次 fork 的身分，持久記在 `fork_ops`（`daemon/src/fork_ops.rs`）。驗證通過後**先記**（目標 bot id、來源 session、名字、`planned`）再動 config，
+- **冪等（issue #348）**：body 的 `client_request_id` 是這次 fork 的身分，持久記在 `fork_ops`（`crates/am-base/src/fork_ops.rs`）。驗證通過後**先記**（目標 bot id、來源 session、名字、`planned`）再動 config，
   之後 `planned → created → started｜failed` 每一步都先看做過沒有：config 已有那個 id 就沿用、說明訊息已寫過不再寫。目標 bot 鎖在投影前取得，UI 收到 `bot_changed` 後若立刻啟動也會等 fork 確定完成。重送時若目標已有活著的 run 就沿用；若只留下 pane 已不在的 `starting` run，照 lifecycle 收掉孤兒 run 後接著啟動同一個 fork。已結束且有 session 記錄的 run 視為 fork 曾啟動過、不再對 provider 分岔；結果未能確認且沒有 session 記錄時回 `start_error`，不猜成功也不重複分岔。
   所以回應遺失或 daemon 在任何兩步之間死掉，用同一個 id 重送就從停下的那步接下去、回同一個目標與結果；分岔點沿用第一次記的 session。同一個 id 但來源或名字不同 → 409 `request_mismatch`；
   結果已定案後目標被刪 → 409 `fork_target_deleted`。想再 fork 一次就換一個 id；省略 `client_request_id` ＝每次都是新的一次（不保證冪等）。讀不到紀錄是錯誤，不當成「沒有這筆」。
@@ -2691,7 +2691,7 @@ header 的 herdr 徽章確認後 `POST /api/hosts/{name}/herdr-update`（API §1
 - **「沒動作」怎麼算**：該 bot 的 turn（`created_at` / `completed_at`）、對話裡的訊息
   （`messages.created_at`，終端快照補回來的回覆也算）、以及這個 run 自己的 `started_at`，三者取
   最大值到現在。用 `started_at` 墊底是因為剛起來還沒被講過話的 bot 不該立刻被當成閒置很久。
-- **挑選**（`daemon/src/supervisor/idle_sleep.rs::decide`，純函式、有單元測試）。順序就是理由的
+- **挑選**（`crates/am-supervisor/src/supervisor/idle_sleep.rs::decide`，純函式、有單元測試）。順序就是理由的
   順序，第一個中的就是理由：
 
   | 條件 | `reason` | 為什麼 |
@@ -2817,7 +2817,7 @@ header 的 herdr 徽章確認後 `POST /api/hosts/{name}/herdr-update`（API §1
   - 沒有才退回 `bunx vite --host <bind> --port <port> --strictPort`；`<bind>` 看 daemon 的 `allow_lan`：開著 `0.0.0.0`，否則
     `127.0.0.1`；`<port>` 從 5180 起往上找 100 顆，跳過別的預覽佔著的（`starting`／`running` 的列）與當下有人在 listen 的
     （5173 留給人手開）。`failed`／`off` 的列不佔 port。
-- **綁哪個介面：兩道，缺一不可**（issue #434，`daemon/src/preview_bind.rs`）。`allow_lan` 是 daemon 的對外開關（§7.1，
+- **綁哪個介面：兩道，缺一不可**（issue #434，`crates/am-base/src/preview_bind.rs`）。`allow_lan` 是 daemon 的對外開關（§7.1，
   同一個判斷也決定 daemon 自己 bind 哪裡與放不放行同網段的 peer／`Origin`），**由 daemon 起的 dev server 不能繞過它**。
   以前只有 `bunx vite` 那條受管：`bun run dev` 綁哪裡完全由專案決定，這個 repo 自己的 `web/` 就是
   `dev: "vite"` ＋ `vite.config.ts` 的 `server.host: true`（＝`0.0.0.0`），`allow_lan` 關著也照樣對外。
@@ -2872,7 +2872,7 @@ header 的 herdr 徽章確認後 `POST /api/hosts/{name}/herdr-update`（API §1
 
 - **入口**：每則使用者訊息上常駐的「↶ 倒回這裡」，桌機手機都一樣（使用者 2026-09-28 改回綁在訊息上；09-24 的輸入列「⟲ 倒回」已拿掉）→
   確認框（寫明這則之後幾則會拿掉、檔案不還原）→
-  `POST /api/bots/{id}/rewind`（`daemon/src/rewind.rs`）。成功後那則的原文接回網頁輸入框**最前面**（原本打到一半的字留著），畫面上那則與之後收成淡色＋「已倒回」。
+  `POST /api/bots/{id}/rewind`（`crates/am-base/src/rewind.rs`，HTTP handler 在 `daemon/src/runners/rewind.rs`）。成功後那則的原文接回網頁輸入框**最前面**（原本打到一半的字留著），畫面上那則與之後收成淡色＋「已倒回」。
 - **範圍**：只收 claude；codex／grok 409 `unsupported_kind`。子 agent 也可以（daemon 本來就對子 agent 的 pane 打字）；從使用者自己 default session 匯入的
   不行（§6.5.1：只看不代打）。bot 要在跑而且**閒著**（idle、沒有在飛或排隊的回合）；從檢查到打完字都**持 bot 鎖**，期間 prompt 進不來。群組發言（`group_id`）網頁不給按。
 - **做法：驅動 TUI 自己的 `/rewind`**（使用者 2026-09-23 裁示）。同一個 session、同一個 jsonl 內分支：session id 不變、不多一個檔、**不重啟**，被倒掉的原文 CLI 會自己放回輸入列。
@@ -2898,7 +2898,7 @@ header 的 herdr 徽章確認後 `POST /api/hosts/{name}/herdr-update`（API §1
      輸入列裡的不是那一則就不清，回應 `pane_cleared: false`，網頁通知叫人到終端清。
   - 打字前先記 `runs.pane_typed`（同 §4.4a 的 slash 指令：直接對 pane 打過字的 run 之後的 prompt 走打字路線）；記不下來就不打。
 - **標記**：`messages.rewound_at`——那則與之後的（同一個 conversation、rowid 不小於它）標上時間，**不刪**；對話加一則 system 說明。推 WS `messages_rewound`。
-- **重啟後也要停在倒回點**（2026-10-04 ai-cc：倒回後 8 秒 `restart?resume=native`，被倒掉的問答又回到 context；`daemon/src/rewind/anchor.rs`）。
+- **重啟後也要停在倒回點**（2026-10-04 ai-cc：倒回後 8 秒 `restart?resume=native`，被倒掉的問答又回到 context；`crates/am-base/src/rewind/anchor.rs`）。
   claude 2.1.289 實測：TUI 的 `/rewind` **不寫 transcript**，下一則送出時才從倒回點分岔；倒回後沒送東西就結束，CLI 結束時還補一行指向舊分支尾巴的
   `last-prompt`，`--resume` 就接回舊分支。互動模式的 `--resume-session-at` 照舊被忽略。CLI 自己認得的倒回錨點是
   `{"type":"last-prompt","leafUuid":<uuid>,"explicit":true,"rewound":true}`（`leafUuid:null`＝空對話）：transcript 最後一個 `last-prompt` 是它時，
@@ -3801,7 +3801,7 @@ CLI 結束後重驗一次登入狀態並寫回快取；快取有變時用目前�
 
 ### 16.7 主機工作環境一致性檢查（issue #719，只讀）
 使用者 2026-09-28 搬 ubuntu 時發現兩台 CLI 設定差很多（缺 statusline、全域 CLAUDE.md／RTK.md、rtk hook、codex approval_policy、缺 rtk／zsh、`.gitconfig` 內嵌 token）。
-每次工具偵測（daemon 啟動、重連、手動重新偵測）在**同一趟 ssh** 後面接一段只讀的 `BASELINE_SH`（`daemon/src/host_baseline.rs`），逐項對照基準，結果放 `hosts[].baseline`（API §12.6）。
+每次工具偵測（daemon 啟動、重連、手動重新偵測）在**同一趟 ssh** 後面接一段只讀的 `BASELINE_SH`（`crates/am-base/src/host_baseline.rs`），逐項對照基準，結果放 `hosts[].baseline`（API §12.6）。
 
 - **只報、不修**：不寫任何檔、不裝任何東西（自動安裝／同步要使用者另行同意，沒有做）。測試用假 `$HOME` 驗證跑完後目錄快照不變。
 - **基準**（寫在 `host_baseline.rs` 的常數與腳本裡，路徑一律 `$HOME`）：
@@ -4004,11 +4004,11 @@ herdr 有新版時自動發現、整理出「對我們有沒有用、會不會�
    （Homebrew 的 `herdr`跟這台機器實際在跑的那份不一定同步——bot 目錄有自己的私有拷貝、PATH shadow 掉 Homebrew 連結的那份，
    release 清單是兩邊最後都會對齊的真相來源）；CHANGELOG 全文抓 `https://raw.githubusercontent.com/herdrdev/herdr/master/CHANGELOG.md`。
    三個字串丟給 `agents-managerd herdr-update-check --installed --latest --changelog-file [--last-notified]`
-   （`daemon/src/herdr_update.rs`）：版本比較（數值比較，`457dd14` 的 `0.9.0` 判成比 `0.10.0` 新那個坑不會再踩）、
+   （`crates/am-base/src/herdr_update.rs`）：版本比較（數值比較，`457dd14` 的 `0.9.0` 判成比 `0.10.0` 新那個坑不會再踩）、
    CHANGELOG 段落擷取（`installed` 不含到 `latest` 含）、同版去重全部交給 Rust，腳本只照印出來的 JSON
    （`has_update`／`should_notify`／`brief`）決定要不要派工，不在 bash 裡重比一次版本。
 2. **CHANGELOG 格式**：herdr 用 Keep a Changelog 的 `## [x.y.z] - date` 標題，跟 Claude Code 那種裸
-   `## x.y.z`（`daemon/src/changelog.rs` 原本唯一認得的格式）不一樣。`changelog::parse_version` 已經改成
+   `## x.y.z`（`crates/am-base/src/changelog.rs` 原本唯一認得的格式）不一樣。`changelog::parse_version` 已經改成
    先剝掉中括號、日期本來就在下一個空白 token、split_whitespace 早就丟掉了；`changelog.rs`／`herdr_update.rs`
    兩邊測試都用真的 herdr CHANGELOG 格式釘住（`gh api repos/herdrdev/herdr/contents/CHANGELOG.md` 2026-09-18 驗過）。
 3. **整理**：`render_agm_brief` 產生的交辦內文已經包含版本差異、原始 CHANGELOG 段落，以及「要判斷哪些條目有用／可能弄壞什麼／哪些繞路仍要保留、驗證通過才能申請升級窗口」的要求——
