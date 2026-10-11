@@ -545,6 +545,30 @@ mod tests {
         assert_eq!(status_of(&f, &tid).await, "failed");
     }
 
+    /// #1366：主機每次重連都會 `rearm_host`；同一筆還在飛的回合不能再開第二條盯梢（補 Enter 的上限與停手都是每條各算）。
+    /// 盯梢結束（關機收工）之後登記放掉，同一筆回合還在飛時下一次對帳才接得回來。
+    #[tokio::test]
+    async fn rearming_a_host_twice_does_not_double_watch_a_turn() {
+        let f = fixture("rearm-twice").await;
+        let app = f.env.app.clone();
+        let sender = tt::claude_bot(&app, &f.env.project_id, "rearm-twice-sender").await;
+        let run = db::run(app.db(), &f.run_id).await.unwrap().unwrap();
+        open_turn(&app, &run, &sender.id, None, TEXT).await.expect("開了回合");
+
+        rearm_host(&app, "local").await;
+        rearm_host(&app, "local").await;
+        assert_eq!(app.background_tasks.len(), 1, "同一筆回合只盯一條");
+
+        app.shutdown.cancel();
+        app.background_tasks.close();
+        tokio::time::timeout(Duration::from_secs(30), app.background_tasks.wait()).await.expect("watchers leave promptly at shutdown");
+        rearm_host(&app, "local").await;
+        assert_eq!(app.background_tasks.len(), 1, "盯梢結束後登記放掉，下一次對帳重新接上");
+        app.shutdown.cancel();
+        app.background_tasks.close();
+        tokio::time::timeout(Duration::from_secs(30), app.background_tasks.wait()).await.expect("watchers leave promptly at shutdown");
+    }
+
     #[tokio::test]
     async fn resolve_uses_the_sender_host_and_session_and_rejects_bot_names() {
         let f = fixture("local-target").await;
