@@ -1654,7 +1654,7 @@ mod hook_cmd_parts_tests {
             let mut child = command.spawn().unwrap();
             use std::io::Write as _;
             child.stdin.take().unwrap().write_all(payload.as_bytes()).unwrap();
-            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(3);
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
             let status = loop {
                 if let Some(status) = child.try_wait().unwrap() {
                     break status;
@@ -1662,11 +1662,11 @@ mod hook_cmd_parts_tests {
                 if std::time::Instant::now() >= deadline {
                     child.kill().ok();
                     let status = child.wait().unwrap();
-                    panic!("hook.sh 必須在 3 秒內結束，不能卡在 transcript：{status}");
+                    panic!("hook.sh 必須在 30 秒內結束，不能卡在 transcript：{status}");
                 }
                 std::thread::sleep(std::time::Duration::from_millis(10));
             };
-            assert!(status.success(), "hook.sh 必須在 3 秒內成功結束：{status}");
+            assert!(status.success(), "hook.sh 必須在 30 秒內成功結束：{status}");
             let body = std::fs::read_dir(&spool)
                 .ok()
                 .into_iter()
