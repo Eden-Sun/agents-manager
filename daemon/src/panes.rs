@@ -393,9 +393,9 @@ pub(crate) async fn record_scan_gone(
         seen.push(pane_id.to_string());
         let revision = p.get("revision").and_then(Value::as_u64).map(|v| v as i64);
         let label = label_of(p);
-        type Prev = (Option<i64>, String, String, Option<String>, Option<String>);
+        type Prev = (Option<i64>, String, String, Option<String>, Option<String>, i64);
         let prev: Option<Prev> = sqlx::query_as(
-            "SELECT last_revision, last_output_at, first_seen, bound_project_id, owner_bot_id FROM panes WHERE host=? AND pane_id=?",
+            "SELECT last_revision, last_output_at, first_seen, bound_project_id, owner_bot_id, owner_adopted FROM panes WHERE host=? AND pane_id=?",
         )
         .bind(host)
         .bind(pane_id)
@@ -403,7 +403,7 @@ pub(crate) async fn record_scan_gone(
         .await?;
         // revision 變了才算「有輸出」；第一次看到就以 first_seen 當基準（§6.5e）。
         let (last_output_at, first_seen) = match &prev {
-            Some((old_rev, out_at, first, _, _)) => {
+            Some((old_rev, out_at, first, _, _, _)) => {
                 let moved = revision.is_some() && *old_rev != revision;
                 ((if moved { now.clone() } else { out_at.clone() }), first.clone())
             }
@@ -524,21 +524,64 @@ pub(crate) async fn record_scan_gone(
         };
         let bound = if f.env_seen { env_project.or(bot_project) } else { prev_bound };
         let kind = classify(f.foreground.as_deref(), ports);
+        // 人 adopt 指定過 owner、而且那顆 bot 還活著：孤兒判定跟著它；環境與 cwd 都對不到專案時，專案也跟著它（#1354）。
+        // adopt 過＝這一列一定已經存在，所以讀不到時只更新位置與輸出時間，分類留給下一輪（同上面讀不到事實那支）。
+        let adopted_live: Option<(String, String)> = match prev.as_ref().filter(|p| p.5 == 1).and_then(|p| p.4.clone()) {
+            None => None,
+            Some(b) => match crate::db::bot(app.db(), &b).await {
+                Ok(Some(bot)) if bot.deleted_at.is_none() => Some((b, bot.project_id)),
+                // adopt 的那顆也被刪了：照環境的判定。
+                Ok(_) => None,
+                Err(e) => {
+                    complete = false;
+                    tracing::warn!(host, pane_id, bot_id = %b, error = ?e, "adopted owner lookup failed; deferring classification");
+                    sqlx::query(
+                        "UPDATE panes SET workspace_id=?, tab_id=?, cwd=?, label=?, last_revision=?, last_output_at=?, last_seen=?
+                          WHERE host=? AND pane_id=?",
+                    )
+                    .bind(p.get("workspace_id").and_then(Value::as_str))
+                    .bind(p.get("tab_id").and_then(Value::as_str))
+                    .bind(p.get("cwd").and_then(Value::as_str))
+                    .bind(label)
+                    .bind(revision)
+                    .bind(&last_output_at)
+                    .bind(&now)
+                    .bind(host)
+                    .bind(pane_id)
+                    .execute(app.db())
+                    .await?;
+                    continue;
+                }
+            },
+        };
         // 擁有它的 bot 被刪（或根本不在這顆 DB）也是孤兒。DB 讀不到就不下結論。
-        let owner_bot = if f.env_seen { env_bot.clone() } else { prev_owner };
+        let owner_bot = match &adopted_live {
+            Some((b, _)) => Some(b.clone()),
+            None if f.env_seen => env_bot.clone(),
+            None => prev_owner,
+        };
         let bot_gone = match &owner_bot {
             Some(b) => matches!(crate::db::bot(app.db(), b).await, Ok(None) | Ok(Some(crate::db::Bot { deleted_at: Some(_), .. }))),
             None => false,
         };
         let live = |id: &str| project_paths.iter().any(|(pid, _)| pid == id);
+        // `live()` 只認這台主機的專案（`project_paths` 已照 host 濾過），adopt 給別台的 bot 不會把 pane 掛到別台的專案底下。
+        let adopted_project = adopted_live.as_ref().map(|(_, p)| p.as_str()).filter(|p| live(p));
         let (project, owned_by, orphaned) = match &bound {
             Some(id) if live(id) => (Some(id.clone()), "bot", bot_gone),
             // 綁過的專案被刪了：沒歸屬，但它是孤兒（通知 `pane_orphaned`、照 GC），不是 scratch 的候選。
-            Some(_) => (None, "none", true),
+            // 人 adopt 指定的 bot 還活著時，專案跟著它、不是孤兒。
+            Some(_) => match adopted_project {
+                Some(p) => (Some(p.to_string()), "bot", false),
+                None => (None, "none", true),
+            },
             None => match project_for_cwd(cwd, &project_paths) {
                 Some(id) if owner.is_some() => (Some(id.to_string()), "bot", bot_gone),
                 Some(id) => (Some(id.to_string()), "user", false),
-                None => (None, "none", owner.is_some() && bot_gone),
+                None => match adopted_project {
+                    Some(p) => (Some(p.to_string()), "bot", false),
+                    None => (None, "none", owner.is_some() && bot_gone),
+                },
             },
         };
         sqlx::query(
@@ -1655,6 +1698,82 @@ mod tests {
             .unwrap();
         record_scan(&app, "local", &[pane], &env, &crate::db::now()).await.unwrap();
         assert_eq!(owner(app.clone()).await.0.as_deref(), Some("b2"));
+        std::fs::remove_dir_all(&app.data_dir).ok();
+    }
+
+    /// `(owner_bot_id, owned_by, project_id, orphaned)` of `w1:pU`.
+    async fn adopted_state(app: &Arc<App>) -> (Option<String>, String, Option<String>, i64) {
+        sqlx::query_as("SELECT owner_bot_id, owned_by, project_id, orphaned FROM panes WHERE pane_id='w1:pU'")
+            .fetch_one(&app.db)
+            .await
+            .unwrap()
+    }
+
+    fn adopt_to(app: &Arc<App>, bot: &str) -> impl std::future::Future<Output = ()> {
+        let app = app.clone();
+        let bot = bot.to_string();
+        async move {
+            let _ = adopt(State(app), Path("w1:pU".into()), Query(HashMap::new()), Some(Json(AdoptIn { owner_bot_id: Some(bot), purpose: None, allow_gc: false })))
+                .await
+                .unwrap();
+        }
+    }
+
+    /// #1354：人 adopt 指定的歸屬要撐過下一輪掃描。沒歸屬的 pane 指給 b1 之後，掃描不能又把它改回「沒歸屬」。
+    #[tokio::test]
+    async fn an_adopted_unowned_pane_stays_in_its_owners_project_after_the_next_scan() {
+        let app = app().await;
+        project_and_bot(&app).await;
+        let pane = json!({"pane_id": "w1:pU", "workspace_id": "w1", "tab_id": "t1", "cwd": "/Users/me", "revision": 1});
+        let none = HashMap::from([("w1:pU".to_string(), observed(None, None, None, &[]))]);
+        record_scan(&app, "local", &[pane.clone()], &none, &crate::db::now()).await.unwrap();
+        assert_eq!(adopted_state(&app).await.1, "none", "前置：一開始沒有歸屬");
+
+        adopt_to(&app, "b1").await;
+        assert_eq!(adopted_state(&app).await.2.as_deref(), Some("p1"), "adopt 的回應與寫入：專案跟著 bot");
+        record_scan(&app, "local", &[pane.clone()], &none, &crate::db::now()).await.unwrap();
+        assert_eq!(adopted_state(&app).await, (Some("b1".into()), "bot".into(), Some("p1".into()), 0), "下一輪掃描不能撤銷 adopt");
+
+        // 讀不到環境的那種掃描（macOS 閒著的 -zsh）也一樣。
+        let idle = HashMap::from([("w1:pU".to_string(), Some(Observed { facts: crate::memproc::PaneFacts { pids: vec![1], shell_only: true, ..Default::default() }, ports: vec![] }))]);
+        record_scan(&app, "local", &[pane], &idle, &crate::db::now()).await.unwrap();
+        assert_eq!(adopted_state(&app).await, (Some("b1".into()), "bot".into(), Some("p1".into()), 0));
+        let listed = crate::runners::panes::list_for_project(State(app.clone()), Path("p1".into())).await.unwrap().0;
+        assert!(listed["panes"].as_array().unwrap().iter().any(|p| p["pane_id"] == "w1:pU"), "專案的 pane 清單要含它");
+        std::fs::remove_dir_all(&app.data_dir).ok();
+    }
+
+    /// #1354：孤兒（環境指到已刪的 bot）被 adopt 給活著的 bot 之後，就不再是孤兒（SPEC §6.5e：真的再變孤兒才通知）。
+    #[tokio::test]
+    async fn adopting_an_orphan_to_a_live_bot_clears_the_orphan_flag_for_good() {
+        let app = app().await;
+        project_and_bot(&app).await;
+        let pane = json!({"pane_id": "w1:pU", "workspace_id": "w1", "tab_id": "t1", "cwd": "/Users/me", "revision": 1});
+        let orphan = HashMap::from([("w1:pU".to_string(), observed(None, Some("gone-bot"), Some("p1"), &[]))]);
+        record_scan(&app, "local", &[pane.clone()], &orphan, &crate::db::now()).await.unwrap();
+        assert_eq!(adopted_state(&app).await.3, 1, "前置：環境指到已刪的 bot，是孤兒");
+
+        adopt_to(&app, "b1").await;
+        record_scan(&app, "local", &[pane], &orphan, &crate::db::now()).await.unwrap();
+        assert_eq!(adopted_state(&app).await, (Some("b1".into()), "bot".into(), Some("p1".into()), 0), "adopt 到活著的 bot：不再是孤兒");
+        std::fs::remove_dir_all(&app.data_dir).ok();
+    }
+
+    /// 使用者手開、cwd 在專案底下的 pane：adopt 給 bot 不能把它變成 bot 的（GC 保護不變，#1354）。
+    #[tokio::test]
+    async fn adopting_a_user_pane_does_not_turn_it_into_a_bot_pane() {
+        let app = app().await;
+        project_and_bot(&app).await;
+        let pane = json!({"pane_id": "w1:pU", "workspace_id": "w1", "tab_id": "t1", "cwd": "/tmp/p1", "revision": 1});
+        let none = HashMap::from([("w1:pU".to_string(), observed(None, None, None, &[]))]);
+        record_scan(&app, "local", &[pane.clone()], &none, &crate::db::now()).await.unwrap();
+        assert_eq!(adopted_state(&app).await.1, "user", "前置：cwd 對得到專案＝使用者的 pane");
+
+        adopt_to(&app, "b1").await;
+        record_scan(&app, "local", &[pane], &none, &crate::db::now()).await.unwrap();
+        assert_eq!(adopted_state(&app).await.1, "user", "adopt 不改歸屬類別");
+        let gc_optin: i64 = sqlx::query_scalar("SELECT gc_optin FROM panes WHERE pane_id='w1:pU'").fetch_one(&app.db).await.unwrap();
+        assert_eq!(gc_optin, 0, "沒簽名就不能自動關");
         std::fs::remove_dir_all(&app.data_dir).ok();
     }
 

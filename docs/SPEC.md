@@ -2067,6 +2067,7 @@ herdr 的 `pane.list` 沒有輸出時間戳，**不要讀畫面內容來判斷**
 - 正常用途：pane 有 `AM_BOT_ID` 但對不到 bot（bot 已被刪），或人明確要求指定 owner。
 - 對**使用者手開**（沒有 `AM_BOT_ID`）的 pane 做 adopt：只寫 owner／purpose 供顯示與歸類，**不會讓它變成可 GC**；
   除非請求明確帶 `allow_gc: true`（等於人簽名說「這顆可以自動關」），並記在 `panes.gc_optin` 與 log。
+adopt 指定的 owner 活著時，專案與孤兒判定跟著它，掃描不再照環境改回去（#1354）：沒歸屬的 pane 指給 bot 之後留在那個專案底下，孤兒指給活著的 bot 之後不再是孤兒。
 
 #### `pane_orphaned` 去重（AGM 2026-09-16 補充）
 同一個 pane 只通知一次：發出後寫 `panes.orphan_notified_at`，之後每輪掃描看到同一顆就跳過；擁有它的 bot 重新出現
