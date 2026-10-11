@@ -267,16 +267,18 @@ impl RoleState {
 
 pub async fn snapshot(app: &(impl crate::capabilities::DataDir + crate::capabilities::Db + crate::capabilities::Cfg + crate::hosts::HostsAccess + crate::supervisor::ports::HostProbes + crate::supervisor::ports::QuotaOps + crate::supervisor::ports::LocalAccountView + crate::supervisor::role_faults::RoleFaultTable + crate::supervisor::ports::DaemonConnection)) -> Result<Value, LcError> {
     let bots = crate::db::live_bots(app.db()).await.map_err(|e| LcError::Upstream(e.to_string()))?;
+    // 一次讀完所有 active run，不逐顆 bot 再查一次（#1322）：跟 `active_run` 同一組狀態，同一顆 bot 只會有一筆。
+    let active = crate::db::active_runs_by_bot(app.db()).await.map_err(|e| LcError::Upstream(e.to_string()))?;
     let mut running = 0usize;
     let mut busy = 0usize;
     let mut stopped = 0usize;
     let mut background_stuck = Vec::new();
     for bot in &bots {
-        match crate::db::active_run(app.db(), &bot.id).await.map_err(|e| LcError::Upstream(e.to_string()))? {
+        match active.get(&bot.id) {
             Some(run) => {
                 running += 1;
                 if run.agent_status == "working" || run.agent_status == "blocked" { busy += 1; }
-                if let Some(v) = background_stuck_entry(app, bot, &run) { background_stuck.push(v); }
+                if let Some(v) = background_stuck_entry(app, bot, run) { background_stuck.push(v); }
             }
             None => stopped += 1,
         }
