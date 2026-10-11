@@ -285,6 +285,8 @@ pub async fn promote_bot(
         return Err(LcError::Forbidden(json!({"error": "forbidden", "reason": "user_only"})));
     }
     let req = body.map(|Json(b)| b).unwrap_or_default();
+    // #1425：移交出去的專案在複製對話、停 child 之前就拒絕（以前要等 start_bot_with 被擋才回收）。
+    crate::handoff::refuse(&app.db, &id).await?;
     // 脫離請求（#1358）：複製、停 child、建 user bot、啟動都在脫離出去的 task 裡做完；client 斷線不會停在半路。
     // bot 鎖也在裡面拿，握著直到做完。
     let response = crate::api::detach(&id, {
