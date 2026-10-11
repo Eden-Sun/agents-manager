@@ -1247,4 +1247,36 @@ mod tests {
         repair_pending_statuses(&app).await;
         assert_eq!(repaired_run(&app, &key), Some(r2), "修復清的只能是它自己拿到的 R1，R2 的新登記要留著");
     }
+
+    /// #1293：查不出 pane 的 run（`runs` 讀不到）、重放又用完，之後 herdr 沒有任何新事件：
+    /// 登記在 run 還不知道的時候就建立，DB 恢復後修復一輪補上 pane 當下的狀態。頂層 bot 與子 agent 形狀的 bot 都要收得回來。
+    #[tokio::test]
+    async fn a_status_event_whose_run_lookup_outlasts_the_replay_is_repaired_without_a_new_event() {
+        let e = tt::env().await;
+        let app = e.app.clone();
+        let mut cases = Vec::new();
+        for name in ["lookup-top", "lookup-child"] {
+            let bot = tt::claude_bot(&app, &e.project_id, name).await;
+            let run = tt::fake_run(&app, &bot.id).await;
+            let pane = format!("pane-{}", bot.id);
+            e.herdr.live_pane(&pane, tt::LivePane { rows: Some(40), ..Default::default() });
+            e.herdr.set_agent(name, &pane, false); // herdr 現在說 idle
+            sqlx::query("UPDATE runs SET agent_status='working' WHERE id=?").bind(&run).execute(&app.db).await.unwrap();
+            cases.push((run, pane));
+        }
+        // 查 run 的那一步失敗；直接以用完的重放次數進入（不等背景重放），所以之後不會有任何重放還在跑。
+        tt::make_table_unreadable(&app, "runs").await;
+        for (_, pane) in &cases {
+            handle_status_try(&app, LOCAL_HOST, "test", &status_event(pane, "idle"), status_replay_delays().len(), None).await;
+            assert!(pending_repair(&app, pane), "查不出 run 也要登記，這顆 pane 欠著 DB 一個狀態");
+        }
+        tt::make_table_readable(&app, "runs").await;
+
+        // DB 恢復，沒有新事件：修復一輪重讀 herdr，補上 DB 的狀態。
+        repair_pending_statuses(&app).await;
+        for ((run, pane), _) in cases.iter().zip(0..) {
+            assert!(!pending_repair(&app, pane), "DB 恢復後修復一輪補完");
+            assert_eq!(status_in_db(&app, run).await, "idle", "沒有任何新事件，靠的是重讀 herdr");
+        }
+    }
 }
