@@ -25,6 +25,15 @@ pub async fn bot_handed_off_to(pool: &SqlitePool, bot_id: &str) -> Result<Option
     .flatten())
 }
 
+/// 這個專案歸誰管；`None`＝這顆 daemon 管（專案不存在也是 `None`，由呼叫端自己處理）。
+pub async fn project_handed_off_to(pool: &SqlitePool, project_id: &str) -> Result<Option<String>> {
+    Ok(sqlx::query_scalar::<_, Option<String>>("SELECT handed_off_to FROM projects WHERE id = ?")
+        .bind(project_id)
+        .fetch_optional(pool)
+        .await?
+        .flatten())
+}
+
 /// Transaction-scoped variant for callers that must keep the handoff check atomic with a write.
 pub async fn bot_handed_off_to_on(conn: &mut SqliteConnection, bot_id: &str) -> Result<Option<String>> {
     Ok(sqlx::query_scalar::<_, Option<String>>(
