@@ -10680,6 +10680,12 @@ mod per_principal_auth_tests {
         db::bot(&e.app.db, &bot.id).await.unwrap().unwrap()
     }
 
+    async fn spawn_ready_bot(e: &crate::testing::Env, name: &str) -> db::Bot {
+        let bot = distinct_bot(e, name).await;
+        crate::testing::fake_run(&e.app, &bot.id).await;
+        bot
+    }
+
     async fn raw(app: Arc<App>, request: String) -> String {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
@@ -13140,7 +13146,7 @@ mod per_principal_auth_tests {
     #[tokio::test]
     async fn a_child_spawn_permit_blocks_rotation_and_the_registered_pane_keeps_the_old_proof() {
         let e = crate::testing::env().await;
-        let parent = distinct_bot(&e, "rotate-parent-with-spawn-permit").await;
+        let parent = spawn_ready_bot(&e, "rotate-parent-with-spawn-permit").await;
         let old = parent.hook_token.clone();
         let begin = spawn_begin(e.app.clone(), &parent.id, &old).await;
         assert!(begin.starts_with("HTTP/1.1 200"), "the parent may reserve before opening a child pane: {begin}");
@@ -13157,6 +13163,7 @@ mod per_principal_auth_tests {
         assert!(rotate.starts_with("HTTP/1.1 409") && rotate.contains("child_spawn_in_progress"), "an in-flight external spawn must prevent rotation: {rotate}");
         assert_eq!(db::bot(&e.app.db, &parent.id).await.unwrap().unwrap().hook_token, old, "refusal keeps the old proof valid");
 
+        e.herdr.set_agent("spawned-child", "w1:p-unadopted-child", false);
         let finish = spawn_finish(e.app.clone(), &parent.id, &old, &permit, "w1:p-unadopted-child").await;
         assert!(finish.starts_with("HTTP/1.1 200"), "successful pane creation must be registered before releasing its permit: {finish}");
         let rotate = raw(
@@ -13174,10 +13181,12 @@ mod per_principal_auth_tests {
     #[tokio::test]
     async fn concurrent_replay_of_a_spawn_permit_registers_only_one_pane() {
         let e = crate::testing::env().await;
-        let parent = distinct_bot(&e, "concurrent-spawn-permit-replay").await;
+        let parent = spawn_ready_bot(&e, "concurrent-spawn-permit-replay").await;
         let begin = spawn_begin(e.app.clone(), &parent.id, &parent.hook_token).await;
         assert!(begin.starts_with("HTTP/1.1 200"), "{begin}");
         let permit = response_json(&begin)["permit_id"].as_str().unwrap().to_string();
+        e.herdr.set_agent("replay-a", "w1:p-replay-a", false);
+        e.herdr.set_agent("replay-b", "w1:p-replay-b", false);
 
         // Both requests pass the permit check before either finishes its async pane registration.
         let (a, b) = tokio::join!(
@@ -13199,7 +13208,7 @@ mod per_principal_auth_tests {
     #[tokio::test]
     async fn spawn_credentials_cannot_be_used_for_another_bots_identity() {
         let e = crate::testing::env().await;
-        let bot_a = distinct_bot(&e, "spawn-auth-a").await;
+        let bot_a = spawn_ready_bot(&e, "spawn-auth-a").await;
         let bot_b = distinct_bot(&e, "spawn-auth-b").await;
 
         let forged_begin = spawn_begin(e.app.clone(), &bot_b.id, &bot_a.hook_token).await;
@@ -13245,7 +13254,7 @@ mod per_principal_auth_tests {
     #[tokio::test]
     async fn a_deleted_parent_cannot_finish_or_start_with_its_inherited_proof() {
         let e = crate::testing::env().await;
-        let parent = distinct_bot(&e, "spawn-deleted-parent").await;
+        let parent = spawn_ready_bot(&e, "spawn-deleted-parent").await;
         let permit_response = spawn_begin(e.app.clone(), &parent.id, &parent.hook_token).await;
         assert!(permit_response.starts_with("HTTP/1.1 200"), "{permit_response}");
         let permit = response_json(&permit_response)["permit_id"].as_str().unwrap().to_string();
@@ -13266,7 +13275,7 @@ mod per_principal_auth_tests {
     #[tokio::test]
     async fn aborting_a_spawn_permit_lets_rotation_proceed() {
         let e = crate::testing::env().await;
-        let parent = distinct_bot(&e, "rotate-after-abort").await;
+        let parent = spawn_ready_bot(&e, "rotate-after-abort").await;
         let old = parent.hook_token.clone();
         let begin = spawn_begin(e.app.clone(), &parent.id, &old).await;
         assert!(begin.starts_with("HTTP/1.1 200"), "{begin}");
@@ -13317,7 +13326,7 @@ mod per_principal_auth_tests {
     #[tokio::test]
     async fn the_spawn_gate_refuses_a_child_created_after_the_descendant_snapshot() {
         let e = crate::testing::env().await;
-        let parent = distinct_bot(&e, "rotate-parent-spawn-race").await;
+        let parent = spawn_ready_bot(&e, "rotate-parent-spawn-race").await;
         let old = parent.hook_token.clone();
         let (send, receive) = tokio::sync::oneshot::channel();
         let app = e.app.clone();
