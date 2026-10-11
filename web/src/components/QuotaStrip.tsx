@@ -23,6 +23,7 @@ import { RULE_5H, RULE_WEEKLY, resetBadge } from '../lib/quotaReset'
 import { cliLoginCommand, identityEnv, shouldUseIdentityLogin } from '../lib/quotaLogin'
 import './quotaLimitHit.css'
 import { carriedOverAt } from '../lib/quotaWindowAge'
+import { limitHitWhen } from '../lib/limitHitWhen'
 import './quotaStrip.css'
 
 /**
@@ -630,15 +631,16 @@ function CodexShellLogin({ host, identity }: { host: string; identity: string | 
 }
 
 function blockedLine(hit: QuotaLimitHit): string {
-  const when = hit.until ? new Date(hit.until) : null
-  const back = when && !Number.isNaN(when.getTime())
-    ? `${when.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })} 才會恢復`
+  const when = limitHitWhen(hit.until)
+  const back = when
+    ? `${when} 才會恢復`
     : '恢復時間 CLI 沒寫，要等它下一回合跑得動'
   return `⛔ CLI 說這個帳號現在被擋住：${back}\n${hit.message}`
 }
 
 function PopLimitHit({ hit }: { hit: QuotaLimitHit | null | undefined }) {
   if (!hit) return null
+  const when = limitHitWhen(hit.until)
   return (
     <div className="quota-pop-line limit-hit">
       <span className="quota-win">
@@ -648,7 +650,7 @@ function PopLimitHit({ hit }: { hit: QuotaLimitHit | null | undefined }) {
         被擋
       </span>
       <span className="quota-limit-hit" title={hit.message}>
-        {hit.until ? `${new Date(hit.until).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })} 恢復` : '等下一回合跑得動'}
+        {when ? `${when} 恢復` : '等下一回合跑得動'}
         <span className="quota-limit-hit-why">CLI 回報額度上限，量表是速率視窗，看不到這件事</span>
       </span>
     </div>
