@@ -5039,7 +5039,7 @@ daemon 要能在 Linux（目標：Ubuntu，外部編譯主機 192.168.1.46，#67
   資料夾在啟動時不見了就不啟動（不替使用者重建空的）。2026-10-03 之前建的受限 bot（資料夾在 `<data_dir>/shared-bots/<id>/workspace/`）照舊能用，不搬。
 - 模型：沒指定＝`/api/models?kind=claude` 當下列出的最新 Opus（有完整 id 挑版本最大的；只有別名就用 `opus`，claude 2.1.288 解析成 claude-opus-5-5，實測），不落回帳號預設（線上那顆就這樣跑成舊版），也不寫死版本號。
 - 資料夾的指示與記憶（`share::folder::instructions`，啟動時讀一次、`O_NOFOLLOW` 逐層打開，指到外面的符號連結不讀）：`CLAUDE.md`、`.claude/CLAUDE.md`、`AGENTS.md`，
-  加上 `memory/*.md` 與 `.claude/memory/*.md`（`MEMORY.md` 索引在前），單檔 32 KiB、合計 96 KiB，接在系統提示檔最後。不讓 claude 自己載入：`--restricted` 不讀 project／user settings，
+  加上 `memory/*.md` 與 `.claude/memory/*.md`（`MEMORY.md` 索引在前），單檔最多載入 32 KiB、合計 96 KiB；超過單檔上限時只載入前 32 KiB 並註明（本機與遠端一致），接在系統提示檔最後。不讓 claude 自己載入：`--restricted` 不讀 project／user settings，
   claude 也就不載入資料夾的 CLAUDE.md（AGENTS.md 一般模式也不載）；就算可以，它還會一路往上讀到家目錄與帳號層的 CLAUDE.md（AG Man 的派工規則），所以 `CLAUDE_CODE_DISABLE_CLAUDE_MDS=1` 照舊、由 daemon 只讀這個資料夾的。
   claude 的 auto-memory 在 `--restricted` 下整個關掉（`autoMemoryDirectory` 從 `--settings` 設得進去，但只有不帶 `--restricted` 才生效，實測），而 `.claude/` 底下 claude 不准它寫（明確 allow 也一樣，實測），
   所以它自己的記憶寫在 `<資料夾>/memory/`（系統提示裡講清楚格式），下次啟動載入；`.claude/memory/` 既有的唯讀照樣載入。
