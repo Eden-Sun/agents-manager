@@ -1445,9 +1445,20 @@ async fn share_file_listing_waiters_are_capped_and_rejected_at_once() {
     let first = tokio::spawn(c.get(format!("{base}/s/{ta}/api/files")).send());
     entered_rx.await.unwrap();
     let burst: Vec<_> = (0..6).map(|_| tokio::spawn(c.get(format!("{base}/s/{ta}/api/files")).send())).collect();
-    tokio::time::sleep(Duration::from_millis(500)).await;
-    let rejected_now = burst.iter().filter(|h| h.is_finished()).count();
-    assert_eq!(rejected_now, 6 - (portal::LIST_REQUESTS_PER_SHARE - 1), "排隊有上限：超過的要立刻 429，不能全部排在後面");
+    // 超過的那幾趟要立刻回 429；它們各自要走完建連線、驗 token、回應寫回，高負載下不會在固定時間內全部結束，所以等到條件成立才數（#1277）。
+    let want = 6 - (portal::LIST_REQUESTS_PER_SHARE - 1);
+    let deadline = std::time::Instant::now() + Duration::from_secs(30);
+    let rejected_now = loop {
+        let n = burst.iter().filter(|h| h.is_finished()).count();
+        if n >= want || std::time::Instant::now() >= deadline {
+            break n;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    };
+    assert_eq!(rejected_now, want, "排隊有上限：超過的要立刻 429，不能全部排在後面");
+    // 排到的那幾趟還卡在第一趟後面：多等一下也不會變多。
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    assert_eq!(burst.iter().filter(|h| h.is_finished()).count(), want, "排進去的不能在第一趟放行之前就結束");
     assert_eq!(c.get(format!("{base}/s/{tb}/api/files")).send().await.unwrap().status(), 200, "別的分享不受影響");
     release.notify_one();
     assert_eq!(first.await.unwrap().unwrap().status(), 200);
