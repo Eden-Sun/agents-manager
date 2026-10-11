@@ -11,6 +11,16 @@ use super::send_now::ports::{MaintenancePort, SupervisorSendRepo};
 /// the turn queued; after the claim, any give-up must put it back or fail it — `in_flight` +
 /// `delivery='pending'` has no other way out. 那一句寫不進去就記成欠著（`owed_delivery`），回 `Err`（#158）。
 pub async fn flush_queued_locked<C: QueueContext>(app: &C, bot_id: &str) -> anyhow::Result<()> {
+    let res = flush_queued_inner(app, bot_id).await;
+    if res.is_err() {
+        // #1361：任何一步讀寫不到，這一則還在佇列（或已記成欠著），但閒著的 bot 沒有 `working -> idle` 邊會再叫醒 flush——
+        // 留一個短 timer。`arm_queue_retry` 自己去重，已經掛了更早的就不會疊。
+        schedule_flush_retry(app, bot_id, WITHDRAWAL_RECHECK);
+    }
+    res
+}
+
+async fn flush_queued_inner<C: QueueContext>(app: &C, bot_id: &str) -> anyhow::Result<()> {
     // #708：移交出去的專案，佇列原樣留著（收回後照常送），這裡一則都不送。讀不到也留在佇列（不認領、不花重試），稍後再看。
     match app.bot_handed_off_to(bot_id).await {
         Ok(None) => {}
@@ -28,6 +38,8 @@ pub async fn flush_queued_locked<C: QueueContext>(app: &C, bot_id: &str) -> anyh
         Ok(conv) => conv,
         Err(error) => {
             tracing::warn!(error = ?error, bot = %bot_id, "could not get conversation for queued prompt flush");
+            // #1361：讀不到對話也留一個短 timer：閒著的 bot 沒有邊會再叫醒它，這一則不能躺到保險絲。
+            schedule_flush_retry(app, bot_id, WITHDRAWAL_RECHECK);
             return Ok(());
         }
     };
@@ -1325,6 +1337,36 @@ mod flush_queue_tests {
         queued_assignment(&f).await;
         flush_queued_locked(&app, &f.bot_id).await.unwrap();
         assert_eq!(turn(&app, &f.turn_id).await.status, "in_flight");
+    }
+
+    /// #1361：閒著的 bot 排著一則，flush 撞上暫時的讀取錯誤（`runs` 讀不到）：這一則不能躺到 30 分鐘保險絲才撤，要掛一個短 timer 再來。
+    /// 不認領、不花重試；讀得到之後照常送出。不 sleep、不看時間。
+    #[tokio::test]
+    async fn a_flush_that_cannot_read_the_run_leaves_a_timer_behind() {
+        let f = queued("test").await;
+        let app = f.env.app.clone();
+        f.env.herdr.live_pane("pane-1", crate::testing::LivePane { width: Some(120), ..Default::default() });
+        forget_queue_retry_timer(&f.bot_id);
+        sqlx::query("ALTER TABLE runs RENAME TO runs_unreadable").execute(app.db()).await.unwrap();
+        assert!(flush_queued_locked(&app, &f.bot_id).await.is_err(), "讀不到 run 要回錯誤");
+        assert!(queue_retry_timer_armed(&f.bot_id), "閒著的 bot 沒有邊會叫醒它，要掛 timer");
+        let t = turn(&app, &f.turn_id).await;
+        assert_eq!((t.status.as_str(), t.flush_retries), ("queued", 0), "留在佇列，不認領、不花重試");
+        sqlx::query("ALTER TABLE runs_unreadable RENAME TO runs").execute(app.db()).await.unwrap();
+        flush_queued_locked(&app, &f.bot_id).await.unwrap();
+        assert_eq!(typed(&f, "ping"), 1, "讀得到之後照常送出");
+    }
+
+    /// #1361 的另一條：讀不到對話（`conversations`）原本直接回 `Ok(())`、不掛 timer；現在要留一個短 timer。
+    #[tokio::test]
+    async fn a_flush_that_cannot_read_the_conversation_leaves_a_timer_behind() {
+        let f = queued("test").await;
+        let app = f.env.app.clone();
+        forget_queue_retry_timer(&f.bot_id);
+        sqlx::query("ALTER TABLE conversations RENAME TO conversations_unreadable").execute(app.db()).await.unwrap();
+        flush_queued_locked(&app, &f.bot_id).await.unwrap();
+        assert!(queue_retry_timer_armed(&f.bot_id), "讀不到對話也要留一個短 timer，閒著的 bot 不會再被叫醒");
+        sqlx::query("ALTER TABLE conversations_unreadable RENAME TO conversations").execute(app.db()).await.unwrap();
     }
 
     /// 之後每一句讀 `supervisor_assignments` 的都失敗（`no such table`）——DB 出錯的樣子（同 `maintenance::fault`）。
