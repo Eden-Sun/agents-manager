@@ -475,6 +475,87 @@ mod local_spool_tests {
         assert!(!app.hook_bot_dir(&a.id).unwrap().join("hook-spool.jsonl").exists());
     }
 
+    /// #1417（#1067 的遠端那一半）：遠端 bot C 握著自己的鎖時，同一台主機上的 D 仍要收進來、本機 B 的新 spool 在下一輪仍要收。
+    /// 以前 `scan_remote_host` 對 C 排隊等鎖，`scan_once` 等不到回來，下一輪的本機重放也跑不到；C 的 spool 留著，放鎖後下一輪收。
+    #[tokio::test]
+    async fn a_remote_bot_holding_its_lock_does_not_stall_the_scan_or_the_next_round() {
+        let env = tt::env().await;
+        let app = env.app.clone();
+        let b = tt::claude_bot(&app, &env.project_id, "spool-remote-stall-b").await;
+        let b_dir = app.hook_bot_dir(&b.id).unwrap();
+        std::fs::create_dir_all(&b_dir).unwrap();
+        std::fs::write(b_dir.join("hook-spool.jsonl"), format!("{}\n", spool_line(&b.id, "pb1"))).unwrap();
+
+        // 遠端：同一台主機上 C（會握鎖）與 D（沒有鎖）各一份 spool。掃描腳本回兩顆的 id，claim 腳本回腳本裡出現的那一顆的一行。
+        let host = format!("spool-remote-stall-{}", db::ulid());
+        let conn = app
+            .hosts
+            .insert_remote_for_test(crate::config::HostCfg {
+                shared_session: false,
+                name: host.clone(),
+                ssh: "unused".into(),
+                ssh_port: 22,
+                ssh_opts: vec![],
+                herdr_session: "am-test".into(),
+                remote_path: String::new(),
+            })
+            .await;
+        conn.connected.store(true, std::sync::atomic::Ordering::SeqCst);
+        let project = db::ulid();
+        sqlx::query("INSERT INTO projects (id, path, label, host, created_at) VALUES (?, ?, 'remote', ?, ?)")
+            .bind(&project)
+            .bind(format!("/remote/{project}"))
+            .bind(&host)
+            .bind(db::now())
+            .execute(&app.db)
+            .await
+            .unwrap();
+        let c = tt::claude_bot(&app, &project, "spool-remote-stall-c").await;
+        let d = tt::claude_bot(&app, &project, "spool-remote-stall-d").await;
+        let (c_id, c_line) = (c.id.clone(), spool_line(&c.id, "pc"));
+        let (d_id, d_line) = (d.id.clone(), spool_line(&d.id, "pd"));
+        crate::hosts::set_ssh_fake(&host, move |script| {
+            if script.contains("am_pending") {
+                return Ok(format!("{c_id}\n{d_id}\n"));
+            }
+            if script.contains("umask 077") {
+                if script.contains(&c_id) {
+                    return Ok(format!("{c_line}\n"));
+                }
+                if script.contains(&d_id) {
+                    return Ok(format!("{d_line}\n"));
+                }
+            }
+            Ok(String::new())
+        });
+
+        let lock = app.bot_lock(&c.id).await;
+        let held = lock.lock().await;
+        // 第一輪：C 握著鎖。這一輪要自己回來（不能卡在 C 的鎖上），D 收得進來，C 的 spool 留著。
+        tokio::time::timeout(std::time::Duration::from_secs(30), scan_once(&app)).await.expect("一輪掃描不能卡在遠端 C 的鎖上");
+        assert_eq!(ingested(&app, &b.id).await, 1, "本機 B 的 spool 收進來");
+        assert_eq!(ingested(&app, &d.id).await, 1, "同一台主機上沒有握鎖的 D 照樣收進來");
+        assert_eq!(ingested(&app, &c.id).await, 0, "C 還握著鎖，它的 spool 留給下一輪");
+
+        // 第二輪（C 仍握著鎖）：B 在上一輪之後又有新的 spool，這一輪要收進來。
+        use std::io::Write as _;
+        std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(b_dir.join("hook-spool.jsonl"))
+            .unwrap()
+            .write_all(format!("{}\n", spool_line(&b.id, "pb2")).as_bytes())
+            .unwrap();
+        tokio::time::timeout(std::time::Duration::from_secs(30), scan_once(&app)).await.expect("下一輪掃描也不能卡在 C 的鎖上");
+        assert_eq!(ingested(&app, &b.id).await, 2, "C 握鎖期間，B 的新 spool 在下一輪照樣收進來");
+        assert_eq!(ingested(&app, &c.id).await, 0, "C 還握著鎖");
+
+        // 放鎖後：下一輪把 C 的 spool 收進來。
+        drop(held);
+        tokio::time::timeout(std::time::Duration::from_secs(30), scan_once(&app)).await.expect("放鎖後的一輪掃描要回來");
+        assert_eq!(ingested(&app, &c.id).await, 1, "放鎖後下一輪 C 的 spool 收進來");
+    }
+
     /// #1068：`.replaying` 裡有一行超過上限（8 MiB）：那一行整行丟掉，前後的合法行照常收進來，檔案收尾。
     /// 超長的那行是合法的 hook JSON（只有 `last_assistant_message` 超大），不是壞掉的字串：沒有上限時它會被解析、收進來，
     /// 所以這條修正前會紅；靠「解析失敗」丟掉的話，修正前也會綠。
