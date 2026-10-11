@@ -1735,6 +1735,84 @@ esac"#,
         assert_eq!(status.code(), Some(130), "退出碼 130");
     }
 
+    /// #1444 路徑一：等名額時 HUP（pane 被關，終端機對前景行程群送的）要跟 TERM 一樣退掉號碼牌，不是讓它留到 daemon 的 stale 才收。
+    #[test]
+    fn a_waiting_shim_that_gets_a_hangup_cancels_its_place() {
+        let s = Sandbox::new();
+        s.install_fake_curl(&format!(
+            r#"case "$*" in
+  *acquire*) echo x >> '{}'; printf '{{"granted":false,"active":2,"retry_after_secs":1}}' ;;
+  *release*) echo "$*" >> '{}'; printf '{{}}' ;;
+  *) printf '{{}}' ;;
+esac"#,
+            s.dir.join("acquire.log").display(),
+            s.dir.join("release.log").display()
+        ));
+        let env = lease_env(&s);
+        let mut cmd = s.command(&format!("{}:{}:/usr/bin:/bin", s.dir.join("bin").display(), s.dir.join("real").display()));
+        cmd.args(["build"]);
+        for (k, v) in &env {
+            cmd.env(k, v);
+        }
+        let (mut shim, _, _) = s.start_group(&mut cmd, false);
+        let group = shim.id() as i32;
+        let up = std::time::Instant::now();
+        while !s.dir.join("acquire.log").exists() {
+            assert!(up.elapsed() < std::time::Duration::from_secs(30), "shim 沒開始排隊");
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+        unsafe { libc::kill(shim.id() as i32, libc::SIGHUP) };
+        let status = shim.wait().unwrap();
+        s.assert_group_gone(group);
+        let released = std::fs::read_to_string(s.dir.join("release.log")).unwrap_or_default();
+        assert!(released.contains("/build-slots/release") && released.contains("token="), "HUP 要退號碼牌：{released:?}");
+        assert!(released.contains("bot_id=b1"), "取消等待要帶 bot 身分：{released:?}");
+        assert_eq!(status.code(), Some(129), "HUP 的退出碼 129");
+    }
+
+    /// #1444 路徑二：剛拿到名額（granted:true），trap 還沒換成 `_release` 之前被 TERM，名額要帶著 token 放掉，不是白佔到 TTL。
+    /// 拿到名額之後到守衛啟動之間有一段前景指令（這裡用假 `mktemp` 撐開它）：TERM 要等它跑完才處理，所以測試先等它開始、
+    /// 送 TERM、再放行，斷言 release 帶的是 `tok-1`、假 cargo 沒有被叫到、退出碼 130。
+    #[test]
+    fn a_shim_interrupted_right_after_the_grant_gives_the_slot_back() {
+        let s = Sandbox::new();
+        let d = s.dir.display();
+        s.install_fake_curl(&format!(
+            r#"case "$*" in
+  *acquire*) touch '{d}/granted.marker'; printf '{{"granted":true,"token":"tok-1","cargo_jobs":2,"lease_ttl_secs":30}}' ;;
+  *release*) cat - >> '{d}/release.cfg'; echo "$*" >> '{d}/release.log'; printf '{{}}' ;;
+  *) printf '{{}}' ;;
+esac"#
+        ));
+        write_exec(s.dir.join("real/cargo"), format!("#!/bin/sh\ntouch '{d}/cargo.ran'\n"));
+        // 假 mktemp：拿到名額之後的第一次呼叫（建守衛的暫存目錄）先留記號、等放行檔出現才真的建。
+        write_exec(
+            s.dir.join("real/mktemp"),
+            format!(
+                "#!/bin/sh\nif [ -e '{d}/granted.marker' ] && [ ! -e '{d}/mktemp.gate' ]; then\n  touch '{d}/mktemp.marker'\n  while [ ! -e '{d}/mktemp.gate' ]; do /bin/sleep 0.02; done\nfi\nexec /usr/bin/mktemp \"$@\"\n"
+            ),
+        );
+        let env = lease_env(&s);
+        let mut cmd = s.command(&format!("{}:{}:/usr/bin:/bin", s.dir.join("bin").display(), s.dir.join("real").display()));
+        cmd.args(["build"]);
+        for (k, v) in &env {
+            cmd.env(k, v);
+        }
+        let (mut shim, _, _) = s.start_group(&mut cmd, false);
+        let up = std::time::Instant::now();
+        while !s.dir.join("mktemp.marker").exists() {
+            assert!(up.elapsed() < std::time::Duration::from_secs(30), "shim 沒走到拿到名額之後的窗口");
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+        unsafe { libc::kill(shim.id() as i32, libc::SIGTERM) };
+        std::fs::write(s.dir.join("mktemp.gate"), "").unwrap();
+        let status = shim.wait().unwrap();
+        let cfg = std::fs::read_to_string(s.dir.join("release.cfg")).unwrap_or_default();
+        assert!(cfg.contains("token=tok-1"), "拿到的名額要帶著 token 放掉，不是空的：{cfg:?}");
+        assert!(!s.dir.join("cargo.ran").exists(), "被中斷之後不能再起 cargo");
+        assert_eq!(status.code(), Some(130), "退出碼 130");
+    }
+
     /// 呼叫端不在之後，shim 最多再問 `MAX_ROUNDS_AFTER_GONE` 輪 acquire 就要自己講一句並退出。
     fn assert_shim_gives_up_once_caller_is_gone(s: &Sandbox, group: i32, err_path: &std::path::Path) {
         // 從這一刻起 shim 只要再問一輪 acquire 就該發現呼叫端不在了：
