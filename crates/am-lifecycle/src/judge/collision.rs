@@ -115,6 +115,12 @@ pub async fn hint_after_publish(app: &Arc<impl crate::capabilities::Cfg + crate:
     });
 }
 
+/// 這次 publish 之後帳本多了新開的票（留言不算）。
+fn has_new_issue(_before: &[IssueRef], _after: &Row) -> bool {
+    // 紅測用的暫時實作（#1386）：修正 commit 換成真的比對。
+    false
+}
+
 /// `POST /api/judge/collision-check`（#1330）：bot 認領票（`agm issue claim`）時問一次撞題。
 /// 候選收集、同一題、同一個開關與名單都跟派工那條一樣；只記帳本、推提示，不擋認領、不改認領、不按鍵。
 pub struct ClaimAsk {
@@ -1421,6 +1427,17 @@ mod tests {
         assert_eq!(ranked[0].key, "zzz-shared", "候選的票號在 issue_ref，同一張票的卡要排在最前");
         let bare = card("claim:x:77", None);
         assert!(!rank(&bare, others()).iter().any(|c| c.key == "zzz-shared"), "沒有票號就只照 key 排，這張被截掉");
+    }
+
+    /// #1386：publish 開到一半停（deferred／failed）時，先開出去的那幾張票也要比對：看帳本前後的差，不看呼叫端數的 `created`。
+    #[test]
+    fn a_publish_that_stopped_midway_still_counts_its_new_issues() {
+        let row = sample_row(404);
+        assert!(has_new_issue(&[], &row), "帳本裡多了一張新開的票，就算這次 created 是 0 也要比對");
+        assert!(!has_new_issue(&row.issues, &row), "沒有新開的票就不比對");
+        let mut only_comment = sample_row(404);
+        only_comment.issues[0].comment = true;
+        assert!(!has_new_issue(&[], &only_comment), "只留言不算開票");
     }
 
     /// #1330：認領時的撞題。候選＝呼叫端專案裡、`child` 以外的在跑工作。
