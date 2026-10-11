@@ -387,17 +387,34 @@ pub async fn handle_status(app: &Arc<App>, host: &str, session: &str, ev: &crate
 pub(crate) struct StatusRepair {
     run_id: String,
     since: Instant,
+    /// 每次登記（含覆寫）都換一個號碼：修復清掉的是**它自己拿到的那一筆**，不是 pane 底下當下的任何一筆（#1290）。
+    gen: u64,
+}
+
+fn next_repair_gen() -> u64 {
+    static N: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    N.fetch_add(1, Ordering::Relaxed) + 1
 }
 
 /// 修復迴圈的週期。重放用完之後靠它補，不是靠 `child_alerts::sweep`（那個只看子 agent 的提問）。
 const STATUS_REPAIR_EVERY: std::time::Duration = std::time::Duration::from_secs(15);
 
+/// 同一個 pane 又寫失敗：用這一次寫失敗時的 run 取代舊登記（#1290）。舊的 run 已經換掉，留著它只會讓修復把新 run 丟掉。
 fn mark_status_repair(app: &App, key: &PaneKey, run_id: &str) {
-    app.status_repairs.lock().unwrap_or_else(|e| e.into_inner()).entry(key.clone()).or_insert_with(|| StatusRepair { run_id: run_id.to_string(), since: Instant::now() });
+    app.status_repairs.lock().unwrap_or_else(|e| e.into_inner()).insert(key.clone(), StatusRepair { run_id: run_id.to_string(), since: Instant::now(), gen: next_repair_gen() });
 }
 
+/// 寫進去了（或本來就一致）：這個 pane 不再欠 DB 一個狀態。
 fn clear_status_repair(app: &App, key: &PaneKey) {
     app.status_repairs.lock().unwrap_or_else(|e| e.into_inner()).remove(key);
+}
+
+/// 只清掉 `gen` 這一筆；登記之後已經被新的寫失敗覆寫的，留著（#1290：非同步的修復不能抹掉較新的登記）。
+fn clear_status_repair_if(app: &App, key: &PaneKey, gen: u64) {
+    let mut m = app.status_repairs.lock().unwrap_or_else(|e| e.into_inner());
+    if m.get(key).is_some_and(|r| r.gen == gen) {
+        m.remove(key);
+    }
 }
 
 pub fn spawn_status_repair(app: Arc<App>) {
@@ -420,8 +437,10 @@ pub async fn repair_pending_statuses(app: &Arc<App>) -> usize {
                 continue;
             }
         };
+        #[cfg(test)]
+        crate::race_point::hit("status_repair_after_lookup", pane_id).await;
         if runs.first().map(|r| r.id.as_str()) != Some(repair.run_id.as_str()) {
-            clear_status_repair(app, key);
+            clear_status_repair_if(app, key, repair.gen);
             continue;
         }
         let Some(client) = app.herdr_for_session(host, session).await else { continue };
@@ -1164,5 +1183,68 @@ mod tests {
         repair_pending_statuses(&app).await;
         assert!(!pending_repair(&app, &pane), "run 結束了，這筆不再算數");
         assert_eq!(status_in_db(&app, &run).await, "working", "已經結束的 run 不被寫");
+    }
+
+    /// 登記的 run（沒有登記就是 None）。
+    fn repaired_run(app: &Arc<App>, key: &PaneKey) -> Option<String> {
+        app.status_repairs.lock().unwrap().get(key).map(|r| r.run_id.clone())
+    }
+
+    /// #1290：同一顆 pane 換了新 run、新 run 的寫入也失敗：登記要跟著換到新 run，修復才找得到它。
+    /// 修之前登記還是舊 run（R1），DB 恢復後修復看到的是 R2 ≠ R1，把登記丟掉，R2 永遠停在舊狀態。
+    #[tokio::test]
+    async fn a_status_repair_follows_the_pane_to_its_replacement_run() {
+        let e = tt::env().await;
+        let app = e.app.clone();
+        let bot = tt::claude_bot(&app, &e.project_id, "repl-top").await;
+        let pane = format!("pane-{}", bot.id);
+        let key: PaneKey = (LOCAL_HOST.to_string(), "test".to_string(), pane.clone());
+        e.herdr.live_pane(&pane, tt::LivePane { rows: Some(40), ..Default::default() });
+        let r1 = tt::fake_run(&app, &bot.id).await;
+        sqlx::query("UPDATE runs SET agent_status='working' WHERE id=?").bind(&r1).execute(&app.db).await.unwrap();
+        break_status_writes(&app).await;
+        // R1 的寫入失敗、重放用完：登記 R1（直接以用完的重放次數進入，不等背景重放）。
+        handle_status_try(&app, LOCAL_HOST, "test", &status_event(&pane, "idle"), status_replay_delays().len(), None).await;
+        assert_eq!(repaired_run(&app, &key), Some(r1.clone()));
+
+        // R1 結束、R2 在同一顆 pane 上開始，R2 的寫入也失敗。
+        sqlx::query("UPDATE runs SET state='exited' WHERE id=?").bind(&r1).execute(&app.db).await.unwrap();
+        let r2 = tt::fake_run(&app, &bot.id).await;
+        handle_status_try(&app, LOCAL_HOST, "test", &status_event(&pane, "working"), status_replay_delays().len(), None).await;
+        assert_eq!(repaired_run(&app, &key), Some(r2.clone()), "登記要跟著 pane 換到 R2");
+
+        sqlx::query("DROP TRIGGER status_write_fails").execute(&app.db).await.unwrap();
+        e.herdr.set_unnamed_agent(&pane, None); // herdr 現在說 working（fake 的列表是 append，這裡只放這一筆）
+        repair_pending_statuses(&app).await;
+        assert!(!pending_repair(&app, &pane), "DB 恢復後修復一輪補完");
+        assert_eq!(status_in_db(&app, &r2).await, "working", "R2 的狀態要被修回來，不是被丟掉");
+    }
+
+    /// #1290：修復讀完 DB、清登記之前，同一顆 pane 又登記了新的 run：修復只清它自己拿到的那一筆，新登記留著。
+    #[tokio::test]
+    async fn a_repair_sweep_never_erases_a_newer_registration_for_its_pane() {
+        let e = tt::env().await;
+        let app = e.app.clone();
+        let bot = tt::claude_bot(&app, &e.project_id, "repl-race").await;
+        let pane = format!("pane-{}", bot.id);
+        let key: PaneKey = (LOCAL_HOST.to_string(), "test".to_string(), pane.clone());
+        e.herdr.live_pane(&pane, tt::LivePane { rows: Some(40), ..Default::default() });
+        e.herdr.set_agent("repl-race", &pane, false);
+        let r1 = tt::fake_run(&app, &bot.id).await;
+        sqlx::query("UPDATE runs SET agent_status='working' WHERE id=?").bind(&r1).execute(&app.db).await.unwrap();
+        break_status_writes(&app).await;
+        handle_status_try(&app, LOCAL_HOST, "test", &status_event(&pane, "idle"), status_replay_delays().len(), None).await;
+        assert_eq!(repaired_run(&app, &key), Some(r1.clone()));
+
+        // 修復一開始拿到的是 R1 的登記；DB 這時已經是 R2 在跑（R1 結束）。
+        sqlx::query("UPDATE runs SET state='exited' WHERE id=?").bind(&r1).execute(&app.db).await.unwrap();
+        let r2 = tt::fake_run(&app, &bot.id).await;
+        // 在它讀完 DB、準備清登記的那一刻，R2 的寫入失敗、登記了 R2。
+        let (hook_app, hook_key, r2c) = (app.clone(), key.clone(), r2.clone());
+        crate::race_point::arm("status_repair_after_lookup", &pane, move || async move {
+            mark_status_repair(&hook_app, &hook_key, &r2c);
+        });
+        repair_pending_statuses(&app).await;
+        assert_eq!(repaired_run(&app, &key), Some(r2), "修復清的只能是它自己拿到的 R1，R2 的新登記要留著");
     }
 }
