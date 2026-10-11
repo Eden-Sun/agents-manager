@@ -43,7 +43,12 @@ const TOKEN_RE = /^[A-Za-z0-9_-]{16,128}$/
 /** 正式網址是 `/s/<token>`；dev／mock 用 `share.html?token=<token>`。對不上回 null（畫「連結無效」）。 */
 export function tokenFromLocation(loc: { pathname: string; search: string }): string | null {
   const m = loc.pathname.match(/^\/s\/([^/]+)\/?$/)
-  const raw = m ? decodeURIComponent(m[1]) : new URLSearchParams(loc.search).get('token')
+  let raw: string | null
+  try {
+    raw = m ? decodeURIComponent(m[1]) : new URLSearchParams(loc.search).get('token')
+  } catch {
+    return null
+  }
   return raw && TOKEN_RE.test(raw) ? raw : null
 }
 

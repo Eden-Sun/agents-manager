@@ -27,6 +27,13 @@ test('token：正式網址 /s/<token>，dev 用 ?token=；不是 base64url 的�
   assert.equal(tokenFromLocation({ pathname: '/share.html', search: `?token=${T}` }), T)
   assert.equal(tokenFromLocation({ pathname: '/s/short', search: '' }), null, '太短')
   assert.equal(tokenFromLocation({ pathname: '/s/..%2F..%2Fapi%2Fstate', search: '' }), null, '不能拿路徑字元當 token')
+  assert.equal(tokenFromLocation({ pathname: `/s/%41${T.slice(1)}`, search: '' }), T, '解碼後仍符合格式的 token 可用')
+  assert.equal(tokenFromLocation({ pathname: `/s/${T}%2F`, search: '' }), null, '編碼斜線不是 token 字元')
+  assert.equal(tokenFromLocation({ pathname: `/s/${T}%252F`, search: '' }), null, '不接受解碼後仍含編碼保留字元')
+  for (const pathname of ['/s/%E0%A4%A', '/s/%ZZ', '/s/%', '/s/%C0%AF']) {
+    assert.doesNotThrow(() => tokenFromLocation({ pathname, search: '' }), pathname)
+    assert.equal(tokenFromLocation({ pathname, search: '' }), null, pathname)
+  }
   assert.equal(tokenFromLocation({ pathname: `/s/${T}/api/messages`, search: '' }), null)
   assert.equal(tokenFromLocation({ pathname: '/', search: '' }), null)
 })
