@@ -4221,6 +4221,26 @@ mod identity_auth_error_tests {
         );
     }
 
+    /// issue #1384：不認得的主機一律 404 `what:"host"`（API.md §1，同其他 17 處）；那句話放 message，不塞進 what。
+    #[tokio::test]
+    async fn an_unknown_host_on_the_mem_and_quota_endpoints_is_404_host_like_the_rest() {
+        let e = crate::testing::env().await;
+        let app = e.app.clone();
+        let q = |pairs: &[(&str, &str)]| Query(pairs.iter().map(|(k, v)| (k.to_string(), v.to_string())).collect::<HashMap<String, String>>());
+        let errs = [
+            ("mem processes", get_mem_processes(State(app.clone()), q(&[("host", "no-such-host")])).await.err()),
+            ("mem pane", get_mem_pane(State(app.clone()), q(&[("host", "no-such-host"), ("pane_id", "p1")])).await.err()),
+            ("mem kill", kill_mem_process(State(app.clone()), Json(json!({"host": "no-such-host", "pid": 4242}))).await.err()),
+            ("quota", get_quota(State(app.clone()), q(&[("refresh", "1"), ("host", "no-such-host")])).await.err()),
+        ];
+        for (name, err) in errs {
+            let (status, body) = body_of(err.unwrap_or_else(|| panic!("{name} 應該回 404"))).await;
+            assert_eq!(status, StatusCode::NOT_FOUND, "{name}: {body}");
+            assert_eq!(body["what"], "host", "{name}：what 是資源名：{body}");
+            assert!(body["message"].as_str().unwrap_or_default().contains("no-such-host"), "{name}：原本那句話留在 message：{body}");
+        }
+    }
+
     /// API.md：host 不存在是 404。沒寫 host 的身分在遠端也生效，所以找不到主機時不能先走到
     /// 「CLI 不在 PATH」那條 409——呼叫端會去裝 CLI，其實主機根本沒這台。
     #[tokio::test]
