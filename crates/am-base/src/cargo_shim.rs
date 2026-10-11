@@ -182,6 +182,23 @@ am_curl_lease() {
     printf 'data-urlencode = "holder=%s"\ndata-urlencode = "token=%s"\n' "$(am_cfg_q "$_holder")" "$(am_cfg_q "$_token")" | curl -K - "$@"
 }
 
+# 放名額（issue #1443）：以前只打一通、5 秒逾時、不看結果，那一列就要白佔到 TTL（agm-host 是 180 秒）。現在最多試 3 次（每次 10 秒，
+# 中間等 1 秒），回應含 `"released":true` 就停。連不上（curl 結束碼 7，daemon 沒開）當場放棄：那時多等沒有意義，列本來就只能等 TTL。
+# 這個函式也會在 EXIT／INT／TERM 的 trap 裡跑，最壞情況多等約 30 秒。
+am_release_lease() {
+    _rl_try=0
+    while [ "$_rl_try" -lt 3 ]; do
+        _rl_try=$((_rl_try + 1))
+        _rl_resp=$(am_curl_lease -s -m 10 -X POST "${_url}/release" 2>/dev/null)
+        _rl_rc=$?
+        case "$_rl_resp" in *'"released":true'*) return 0 ;; esac
+        [ "$_rl_rc" -ne 7 ] || return 0
+        [ "$_rl_try" -lt 3 ] || break
+        sleep 1
+    done
+    return 0
+}
+
 # 受管的 bot pane：本機 bot（daemon 注入 `AM_BOT_ID`、bot token、`AM_PORT`）。這種 pane 的 cargo 不能因為排程器出問題就悄悄變成
 # 沒有名額的 cargo（issue #128：daemon 重啟／升級／DB 出問題的瞬間，所有 bot 同時開編就繞過了 `max_concurrent`，
 # 而那正是最需要保護本機的時候）。沒有 bot 身分的人工 host shell 才有「排程器出問題就直接跑」的隱式 bypass；bot 要繞過得明講
@@ -285,7 +302,7 @@ am_lease_lost() {
     [ -z "$_lost_pid" ] || am_kill_tree "$_lost_pid"
     # shim 已經被 SIGKILL：沒有人會來 `wait` 這個守衛、放名額、收狀態目錄（前景那邊才做這些）——自己收。
     if ! kill -0 "$_lw_shim" 2>/dev/null; then
-        am_curl_lease -s -m 5 -X POST "${_url}/release" >/dev/null 2>&1
+        am_release_lease
         rm -rf "$_state" 2>/dev/null
     fi
     return 0
@@ -364,7 +381,7 @@ am_lease_watch() {
         if ! kill -0 "$_lw_shim" 2>/dev/null; then
             _lw_c=$(cat "$_state/pid" 2>/dev/null)
             if [ -z "$_lw_c" ] || ! kill -0 "$_lw_c" 2>/dev/null; then
-                am_curl_lease -s -m 5 -X POST "${_url}/release" >/dev/null 2>&1
+                am_release_lease
                 rm -rf "$_state" 2>/dev/null
                 return 0
             fi
@@ -723,7 +740,7 @@ am_cargo() {
         [ -z "$_released" ] || return 0
         _released=1
         kill "$_renew_pid" 2>/dev/null
-        am_curl_lease -s -m 5 -X POST "${_url}/release" >/dev/null 2>&1
+        am_release_lease
         rm -rf "$_state" 2>/dev/null
         return 0
     }
@@ -732,7 +749,7 @@ am_cargo() {
     # 那就別拿名額（放回去、不排程直接跑），不要拿了名額卻不受它管。
     _state=$(mktemp -d "${TMPDIR:-/tmp}/am-cargo-lease.$$.XXXXXX" 2>/dev/null)
     if [ -z "$_state" ] || [ ! -d "$_state" ]; then
-        am_curl_lease -s -m 5 -X POST "${_url}/release" >/dev/null 2>&1
+        am_release_lease
         am_scheduler_unusable "建不出暫存目錄，沒辦法在名額失效時停掉 cargo"
         exec "$_real" "$@"
     fi

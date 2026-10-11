@@ -2304,6 +2304,7 @@ rustup 換位置或遠端主機上反而是錯的——讓 shim 每次在 pane �
     shim 退 **75**（可重試），stderr 講明原因，名額放掉（冪等）、暫存狀態目錄清掉；
   - cargo 維持**前景**執行（背景會讓非互動 shell 忽略 SIGINT、換掉 stdin），pid 由 `exec` 包裝寫給守衛。建不出暫存目錄（沒地方放 pid 與失效標記）就不拿名額、放回去（受管的 bot 到此為止 exit 75，人工 shell 才不排程直接跑）；
   - 守衛只罩**本機**的 cargo（名額是本機的）；名額在 cargo 起來之前就失效，就不起它。
+- **放名額要放到（issue #1443）**：shim 放名額（正常收尾、守衛收尾、EXIT／INT／TERM 的 trap）最多試 **3 次**，每次 curl 逾時 10 秒、中間等 1 秒，回應含 `"released":true` 才停。以前只打一通、5 秒逾時、不看結果，逾時的那一列要白佔到 TTL。連不上（curl 結束碼 7，daemon 沒開）當場放棄，多等沒有意義。`_release` 是 trap，最壞情況多等約 30 秒。
 - **shim 不留孤兒行程（issue #151）**：行程數是全機共用的資源（曾被塞到 2661／2666，其他 bot 的 `fork` 全失敗）。三件事：
   等名額的迴圈每輪確認呼叫端（`$PPID`）還在，不在了就自己印一行退出，不留永遠在等的孤兒（`$PPID` 是 shell 啟動那一刻的父行程：呼叫端先走了，那就是收養者——pid 1、`launchd`／`init`，或 Linux 的 child subreaper `systemd --user`，後者同一個使用者、`kill -0` 會成功，所以名字是 `systemd`／`launchd`／`init` 的父行程一律當成沒有呼叫端，#676）；續約守衛的 `sleep` 放背景、用 `wait` 等，
   收到 TERM 先殺掉手上的 sleep 再結束（否則每次 cargo 都留一顆 `sleep 60` 的孤兒，最久 TTL/3 秒）——**兩個縫也要補上（issue #189）**：TERM 落在

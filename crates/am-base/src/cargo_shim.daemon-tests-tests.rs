@@ -1263,6 +1263,68 @@ esac
         }
     }
 
+    /// #1443：放名額的 `/release` 依序照 `plan` 回應：`timeout`（curl 28）、`false`（`released:false`）、`gone`（curl 7，daemon 沒開）、
+    /// 其餘（含 plan 用完）＝`released:true`。每通記到 `curl.log`，`/release` 的通數就是 shim 放名額的次數。
+    fn install_release_curl(s: &Sandbox, plan: &[&str]) {
+        let d = s.dir.display();
+        std::fs::write(s.dir.join("release.plan"), plan.join("\n") + "\n").unwrap();
+        s.install_fake_curl(&format!(
+            "echo \"$*\" >> '{d}/curl.log'\n\
+             case \"$*\" in\n\
+             *acquire*) printf '{{\"granted\":true,\"token\":\"tok-1\",\"cargo_jobs\":2,\"lease_ttl_secs\":30}}' ;;\n\
+             *release*) n=$(($(cat '{d}/release.n' 2>/dev/null || echo 0) + 1)); echo $n > '{d}/release.n'; step=$(sed -n \"${{n}}p\" '{d}/release.plan'); case \"$step\" in timeout) exit 28 ;; gone) exit 7 ;; false) printf '{{\"released\":false}}' ;; *) printf '{{\"released\":true}}' ;; esac ;;\n\
+             *) printf '{{}}' ;;\n\
+             esac"
+        ));
+        // 假 cargo 一起來就寫 ready（假 sleep 等它，不真的睡）、結束碼 3：要看的是 shim 的結束碼跟放名額的次數。
+        write_exec(s.dir.join("real/cargo"), format!("#!/bin/sh\ntouch '{d}/cargo.ready'\nexit 3\n"));
+        s.install_virtual_clock();
+    }
+
+    fn release_calls(s: &Sandbox) -> usize {
+        std::fs::read_to_string(s.dir.join("curl.log")).unwrap_or_default().lines().filter(|l| l.contains("/release")).count()
+    }
+
+    #[test]
+    fn a_release_that_times_out_once_is_retried() {
+        let s = Sandbox::new();
+        install_release_curl(&s, &["timeout", "ok"]);
+        let managed = [("AM_BOT_ID", "b1"), ("AM_HOOK_TOKEN", "tok"), ("AM_PORT", "1")];
+        let (_, err, rc) = s.run(&managed, &["build"]);
+        assert_eq!(release_calls(&s), 2, "逾時的那一通要重試：{err}");
+        assert_eq!(rc, 3, "shim 的結束碼是 cargo 的，不是放名額的");
+    }
+
+    #[test]
+    fn a_release_answered_with_released_false_is_retried() {
+        let s = Sandbox::new();
+        install_release_curl(&s, &["false", "ok"]);
+        let managed = [("AM_BOT_ID", "b1"), ("AM_HOOK_TOKEN", "tok"), ("AM_PORT", "1")];
+        let (_, err, rc) = s.run(&managed, &["build"]);
+        assert_eq!(release_calls(&s), 2, "回 released:false 也要重試：{err}");
+        assert_eq!(rc, 3);
+    }
+
+    #[test]
+    fn a_release_against_a_daemon_that_is_gone_gives_up_at_once() {
+        let s = Sandbox::new();
+        install_release_curl(&s, &["gone", "ok"]);
+        let managed = [("AM_BOT_ID", "b1"), ("AM_HOOK_TOKEN", "tok"), ("AM_PORT", "1")];
+        let (_, err, rc) = s.run(&managed, &["build"]);
+        assert_eq!(release_calls(&s), 1, "daemon 沒開（curl 7）就當場放棄，不重試：{err}");
+        assert_eq!(rc, 3);
+    }
+
+    #[test]
+    fn a_release_that_never_succeeds_stops_after_three_tries() {
+        let s = Sandbox::new();
+        install_release_curl(&s, &["timeout", "timeout", "timeout", "timeout", "timeout"]);
+        let managed = [("AM_BOT_ID", "b1"), ("AM_HOOK_TOKEN", "tok"), ("AM_PORT", "1")];
+        let (_, err, rc) = s.run(&managed, &["build"]);
+        assert_eq!(release_calls(&s), 3, "永遠放不掉也只試三次，不卡住：{err}");
+        assert_eq!(rc, 3);
+    }
+
     /// issue #128（重開）的驗收：`max_concurrent=1`，排程器整個沒開（沒有人在聽那個埠），同時起兩顆**受管的** bot 的 cargo——
     /// 撐過整段 outage，任何時刻都不能有 cargo 在跑（沒有名額）；排程器回來之後照常排隊，兩顆各自跑完、同時在跑的最多 1 顆。
     /// **真的** router（同 daemon 一份）＋**真的** curl＋**真的** shim；bot 身分是真的資料列（router 用 hook token 認證）。
