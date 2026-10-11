@@ -51,6 +51,8 @@ pub struct MockHerdr {
     defer: Arc<StdMutex<Vec<(String, usize, Fault)>>>,
     /// `agent.list` 回空陣列，但 `agent.get` 仍看得到 `agents`：模擬「清單暫時是空的、agent 其實還在」。
     pub hide_agent_list: Arc<std::sync::atomic::AtomicBool>,
+    /// `pane.rename` 記下的標籤，per pane id（`pane.list` 與 `pane.get` 會帶出來）。
+    pub labels: Arc<StdMutex<BTreeMap<String, String>>>,
     /// `events.subscribe` 回 ack 並把連線留著（不吐事件）。預設關：沒開時訂閱照舊回 `unsupported`，既有測試依賴它「訂閱不起來」。
     pub allow_subscribe: Arc<std::sync::atomic::AtomicBool>,
     /// `ping` 的回答 `(version, protocol)`；測 live-handoff 後版本變了（#254）。
@@ -232,6 +234,7 @@ struct MockState {
     faults: Arc<StdMutex<Vec<(String, Fault)>>>,
     defer: Arc<StdMutex<Vec<(String, usize, Fault)>>>,
     hide_agent_list: Arc<std::sync::atomic::AtomicBool>,
+    labels: Arc<StdMutex<BTreeMap<String, String>>>,
     allow_subscribe: Arc<std::sync::atomic::AtomicBool>,
     pong: Arc<StdMutex<(String, u32)>>,
     seq: Arc<std::sync::atomic::AtomicU64>,
@@ -265,6 +268,9 @@ impl MockState {
         }
         if let Some(rows) = self.live.lock().unwrap().get(pane_id).and_then(|p| p.rows) {
             v["scroll"] = json!({"offset_from_bottom": 0, "max_offset_from_bottom": 0, "viewport_rows": rows});
+        }
+        if let Some(label) = self.labels.lock().unwrap().get(pane_id) {
+            v["label"] = json!(label);
         }
         v
     }
@@ -320,6 +326,7 @@ impl MockHerdr {
             faults: Default::default(),
             defer: Default::default(),
             hide_agent_list: Default::default(),
+            labels: Default::default(),
             allow_subscribe: Default::default(),
             pong: Arc::new(StdMutex::new(("mock".into(), 20))),
             // 每顆 MockHerdr 各佔一段 id 空間：以前每顆都從 1 起算，每條測試拿到同一組 `ws-N:pM`，
@@ -341,6 +348,7 @@ impl MockHerdr {
         let faults = state.faults.clone();
         let defer = state.defer.clone();
         let hide_agent_list = state.hide_agent_list.clone();
+        let labels = state.labels.clone();
         let allow_subscribe = state.allow_subscribe.clone();
         let pong = state.pong.clone();
         let handle = tokio::spawn(async move {
@@ -813,6 +821,32 @@ impl MockHerdr {
                             std::future::pending::<()>().await;
                             return;
                         }
+                        "pane.focus" if !st.knows(&wid_of("pane_id")) => {
+                            let pid = wid_of("pane_id");
+                            json!({"id": id, "error": {"code": "pane_not_found", "message": format!("pane {pid} not found")}})
+                        }
+                        "pane.focus" => json!({"id": id, "result": {"type": "ok"}}),
+                        "pane.rename" if !st.knows(&wid_of("pane_id")) => {
+                            let pid = wid_of("pane_id");
+                            json!({"id": id, "error": {"code": "pane_not_found", "message": format!("pane {pid} not found")}})
+                        }
+                        "pane.rename" => {
+                            let pid = wid_of("pane_id");
+                            let label = wid_of("label");
+                            st.labels.lock().unwrap().insert(pid, label);
+                            json!({"id": id, "result": {"type": "ok"}})
+                        }
+                        "pane.list" => {
+                            let wid = wid_of("workspace_id");
+                            let tabs = st.tabs.lock().unwrap().clone();
+                            let mut panes = Vec::new();
+                            for t in tabs.iter().filter(|t| wid.is_empty() || t.workspace_id == wid) {
+                                for p in &t.panes {
+                                    panes.push(st.pane_json(p, t, None));
+                                }
+                            }
+                            json!({"id": id, "result": {"type": "pane_list", "panes": panes}})
+                        }
                         other => json!({"id": id, "error": {"code": "unsupported",
                                         "message": format!("mock herdr does not implement {other}")}}),
                     };
@@ -826,7 +860,7 @@ impl MockHerdr {
                 });
             }
         });
-        MockHerdr { workspaces, tabs, calls, agents, screens, screen_revisions, live, reject_ansi, ignore_ansi, argvs, pids, shell_pids, faults, defer, hide_agent_list, allow_subscribe, pong, handle }
+        MockHerdr { workspaces, tabs, calls, agents, screens, screen_revisions, live, reject_ansi, ignore_ansi, argvs, pids, shell_pids, faults, defer, hide_agent_list, labels, allow_subscribe, pong, handle }
     }
 
     /// 接下來第一次呼叫 `method` 時照 `fault` 壞一次（排幾次就壞幾次，依序）。呼叫一樣記在 `calls` 裡。
@@ -1444,5 +1478,17 @@ mod mock_herdr_contract_tests {
         assert_eq!(code_of(&err), "pane_not_found");
         e.herdr.know_pane(&pane);
         e.app.herdr.pane_read(&pane, "visible", 5).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn rename_and_list_round_trip() {
+        let (mock, client) = start().await;
+        let (_ws, root) = client.workspace_create("/tmp", "w", json!({})).await.unwrap();
+        client.pane_rename(&root.pane_id, "scratch").await.unwrap();
+        assert_eq!(mock.calls_to("pane.rename"), vec![json!({"pane_id": root.pane_id, "label": "scratch"})]);
+        let listed = client.pane_list(None).await.unwrap();
+        let me = listed.iter().find(|p| p.pane_id == root.pane_id).expect("剛開的 root pane 要列得出來");
+        assert_eq!(me.agent_status, Some(AgentStatus::Unknown));
+        assert!(client.pane_list(Some("nope")).await.unwrap().is_empty(), "不存在的 workspace 底下沒有 pane");
     }
 }
