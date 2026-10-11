@@ -1830,7 +1830,7 @@ codex 的 `fast` **不再因為不知道現況而拒絕**（拿掉 `unknown_fast
 - 設定照抄來源的 config.toml 條目（kind、model、effort、fast、persona、args、identity、env、auto_approve、inject_hooks），`autostart` 一律 false。建好立刻啟動。
 - `200 {"bot_id","name","forked_from":{"bot_id","session_id"},"run_id"|null,"start_error"|null}`：建好但沒啟動成功仍回 200，`start_error` 帶原因。推 `bot_changed`；新 bot 的對話裡有一則系統訊息說明從哪裡分出來。
 - **冪等**（SPEC §6.10）：`client_request_id` 相同的重送回同一個 `bot_id`／`run_id`／`start_error`，不會再建一顆或再對 provider 分岔；中斷（回應遺失、daemon 死掉）後也一樣從停下的那步接著做。同一個 id 但來源或名字不同 → `409 request_mismatch`；已定案的結果其目標已被刪 → `409 fork_target_deleted`。要再 fork 一次請換 id；不帶＝每次都是新的一次。
-- 錯誤（都不會先建 bot）：來源不存在 404；`409 reason`：`fork_child`（子 agent）、`default_session`（從 herdr default session 匯入的）、`no_session`（還沒記到 native session）、`transcript_missing`（本機對話檔不在）、`unsupported_kind`、`not_in_config`；名字不合法 400。
+- 錯誤（都不會先建 bot）：來源不存在 404；`409 reason`：`fork_child`（子 agent）、`default_session`（從 herdr default session 匯入的）、`no_session`（還沒記到 native session）、`transcript_missing`（本機對話檔不在）、`no_source_transcript`（claude：來源沒記到對話檔位置）、`unsupported_kind`、`not_in_config`；名字不合法 400。
 
 ### 10.3c `POST /api/bots/{id}/promote`
 把子 agent（`managed_by="child"`）升級成頂層 bot（`managed_by="user"`、進 config.toml），**保留同一段 claude 對話**（SPEC §6.10a，issue #248）。body 可省略：`name`（省略＝沿用 child 的名字，它自己還占著就加 `-N`）、`model`、`effort`（省略＝沿用 child 的）。

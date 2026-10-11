@@ -44,6 +44,21 @@ async fn source_session(app: &impl crate::capabilities::Db, bot_id: &str) -> Res
     .map_err(up)
 }
 
+/// 來源 bot 那段 session 記下的對話檔位置（空白當沒有）。只看來源 bot 自己的 run（#1168），跟 `start` 搬檔用的是同一條。
+async fn source_transcript_path(app: &impl crate::capabilities::Db, bot_id: &str, session_id: &str) -> Result<Option<String>, LcError> {
+    let path: Option<Option<String>> = sqlx::query_scalar(
+        "SELECT transcript_path FROM runs
+          WHERE bot_id = ? AND native_session_id = ? AND transcript_path IS NOT NULL AND transcript_path != ''
+          ORDER BY started_at DESC, rowid DESC LIMIT 1",
+    )
+    .bind(bot_id)
+    .bind(session_id)
+    .fetch_optional(app.db())
+    .await
+    .map_err(up)?;
+    Ok(path.flatten().filter(|t| !t.trim().is_empty()))
+}
+
 /// `alfa` → `alfa-fork`；名字上限 32 字，超過就先截來源名。
 fn default_name(source: &str) -> String {
     const SUFFIX: &str = "-fork";
@@ -113,6 +128,15 @@ pub async fn fork_bot(
                 return Err(LcError::conflict("transcript_missing", json!({"session_id": session_id, "transcript_path": t})));
             }
         }
+    }
+
+    // #1265：claude 的 fork 靠來源那段對話的檔才接得回：沒記到檔的位置就沒有證據，建 bot 之前就拒絕，不留下一顆啟動不了的 bot。
+    // 判斷與 start 搬檔用同一條查詢（同一顆來源 bot、同一個 session）。
+    if source.kind == "claude" && source_transcript_path(&app, &source.id, &session_id).await?.is_none() {
+        return Err(LcError::conflict(
+            "no_source_transcript",
+            json!({"session_id": session_id, "message": format!("{} 的對話檔位置沒有記下來，fork 無法確認新身分底下找得到這段對話，所以不建立。", source.name)}),
+        ));
     }
 
     let wanted = if requested.is_empty() { default_name(&source.name) } else { requested.clone() };
@@ -512,6 +536,21 @@ mod tests {
         let names: Vec<String> = e.app.cfg.get().await.projects[0].bots.iter().map(|b| b.name.clone()).collect();
         assert!(!names.iter().any(|n| n.ends_with("-fork")), "{names:?}");
     }
+    /// #1265：來源 run 沒記對話檔的位置（NULL 或空字串）：沒有證據證明對話在新身分底下找得到，不能當成「沒有東西要搬」照樣 fork。
+    /// 在建 bot 之前就拒絕，不留下一顆啟動不了的 bot。
+    #[tokio::test]
+    async fn a_claude_fork_without_a_recorded_transcript_path_is_refused_before_creating_anything() {
+        let e = env().await;
+        for (name, path) in [("nopath", None), ("blankpath", Some(""))] {
+            let src = source_bot(&e, "claude", name, "user").await;
+            sqlx::query("UPDATE runs SET transcript_path = ? WHERE bot_id = ?").bind(path).bind(&src).execute(&e.app.db).await.unwrap();
+            assert_eq!(reason(fork(&e, &src, None).await.unwrap_err()), "no_source_transcript", "{name}");
+        }
+        assert!(started_args(&e).is_empty(), "沒有 agent.start：{:?}", started_args(&e));
+        let names: Vec<String> = e.app.cfg.get().await.projects[0].bots.iter().map(|b| b.name.clone()).collect();
+        assert!(!names.iter().any(|n| n.ends_with("-fork")), "{names:?}");
+    }
+
     fn fork_starts(e: &Env) -> usize {
         started_args(e).iter().filter(|a| a.iter().any(|x| x == "--fork-session")).count()
     }
