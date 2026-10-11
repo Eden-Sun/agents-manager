@@ -171,6 +171,24 @@
         assert!(r.row(&id).await.is_none(), "沒有補回那列 purged_at：之後真的刪它時 pending 還撈得到");
     }
 
+    /// #1462：pending 名單讀完後才移交，bot 鎖內重查專案歸屬，不能 purge 接手方的目錄。
+    #[tokio::test]
+    async fn a_project_handed_off_after_pending_is_not_purged() {
+        let r = remote("purgehost-handoff-late").await;
+        let app = r.env.app.clone();
+        let id = r.deleted_bot("alfa").await;
+        let (app2, project_id) = (app.clone(), r.env.project_id.clone());
+        crate::runners::app_ports_p11::race_point::arm("remote_sweep_after_pending", &r.host, move || async move {
+            sqlx::query("UPDATE projects SET handed_off_to='mac' WHERE id=?").bind(project_id).execute(&app2.db).await.unwrap();
+        });
+
+        assert_eq!(sweep(&app, &r.host).await, (0, 1), "移交後保留欠款，不能當成已清理");
+        assert_eq!(r.removed(&id), 0, "沒有對移交專案執行遠端刪除");
+        assert!(r.row(&id).await.is_none(), "沒有寫入清理成功標記");
+        sqlx::query("UPDATE projects SET handed_off_to=NULL WHERE id=?").bind(&r.env.project_id).execute(&app.db).await.unwrap();
+        assert!(crate::remote_purge::pending(&app.db, &r.host, false).await.unwrap().contains(&id), "收回移交後仍會重新列入清理");
+    }
+
     /// 清理只認專案列記的主機：本機專案的已刪 bot 不會被遠端掃描碰到，也不會退回本機去刪。
     #[tokio::test]
     async fn the_sweep_never_touches_another_hosts_bots_or_falls_back_to_local() {
