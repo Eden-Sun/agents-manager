@@ -31,7 +31,7 @@ setup() {
   grep -q '/tmp/am-' "$HERE/browser-gc-kick.sh" || { echo "FAIL - 腳本裡沒有 /tmp/am-，測試的路徑替換要更新"; exit 1; }
   {
     echo '#!/bin/zsh'
-    echo 'kill() { echo "kill $*" >> "$FIX/kills.log"; if [ "$1" = "-0" ]; then [ -e "$FIX/alive.$2" ]; return; fi; return 0; }'
+    echo 'kill() { echo "kill $*" >> "$FIX/kills.log"; if [ "$1" = "-0" ]; then [ -e "$FIX/alive.$2" ]; return; fi; if [ "$1" = "-TERM" ] && [ -e "$FIX/reuse.$2" ]; then cp "$FIX/reuse.$2" "$FIX/fp.$2"; fi; return 0; }'
     echo 'sleep() { :; }'
     tail -n +2 "$HERE/browser-gc-kick.sh" | sed "s#/tmp/am-#$TMPD/am-#g"
   } > "$ROOT/agm/bin/browser-gc-kick.sh"
@@ -55,6 +55,7 @@ case "$*" in
   "-o etime= -p "*) cat "$FIX/etime.$4" 2>/dev/null ;;
   # 鎖的殘留判斷要比對指令名（issue #490）：$FIX/cmd.<pid> 有就印那一行。
   "-o command= -p "*) cat "$FIX/cmd.$4" 2>/dev/null ;;
+  "-o lstart=,command= -p "*) cat "$FIX/fp.$4" 2>/dev/null ;;
   *) echo "ps stub: unknown $*" >&2; exit 2 ;;
 esac
 STUB
@@ -79,6 +80,7 @@ run() { PATH="$ROOT/fakebin:$PATH" zsh "$ROOT/agm/bin/browser-gc-kick.sh" >/dev/
 chrome() {
   echo "$1 $2 /Applications/Google Chrome.app/Contents/MacOS/Google Chrome --headless=new --remote-debugging-port=$4 --user-data-dir=$5 ${6:-}" >> "$FIX/ps.txt"
   [ -n "$3" ] && echo "$3" > "$FIX/etime.$1"
+  echo "Mon Oct 11 10:00:00 2026 /Applications/Google Chrome.app/Contents/MacOS/Google Chrome --headless=new --remote-debugging-port=$4 --user-data-dir=$5 ${6:-}" > "$FIX/fp.$1"
   return 0
 }
 kills() { grep -c '^kill -\(TERM\|KILL\)' "$FIX/kills.log" | tr -d ' '; }
@@ -274,6 +276,25 @@ run >/dev/null
 check_no "lsof 權限不足（exit 1＋錯誤輸出）：不殺" "kill -TERM 1102" "$FIX/kills.log"
 check    "lsof 權限不足：log 說無法判定" "keep headless pid 1102（port 9602 的 CDP 連線狀態無法判定" "$LOG"
 exists   "lsof 權限不足：profile 還在" "$TMPD/am-lsof-fail"
+teardown
+
+# ── #1305：TERM 之後到 KILL 之前，PID 可能已被別的行程取用；身分（啟動時間＋命令列）變了就不送 KILL。
+setup
+mkprofile "$TMPD/am-reuse"
+chrome 1201 1 "10:00" 9701 "$TMPD/am-reuse"; touch "$FIX/alive.1201"
+echo "Mon Oct 11 10:05:00 2026 /usr/bin/sleep 999" > "$FIX/reuse.1201"   # TERM 時 PID 被換成無關的行程
+run >/dev/null
+check    "有送 TERM" "kill -TERM 1201" "$FIX/kills.log"
+check_no "身分變了（PID 被回收）：不送 KILL 給無關的行程" "kill -KILL 1201" "$FIX/kills.log"
+check    "log 說身分改變、不送 KILL" "pid 1201 已不是原來的行程" "$LOG"
+teardown
+setup
+mkprofile "$TMPD/am-noid"
+chrome 1202 1 "10:00" 9702 "$TMPD/am-noid"; rm "$FIX/fp.1202"; touch "$FIX/alive.1202"   # ps 讀不到身分
+run >/dev/null
+check_no "讀不到行程身分：不送任何訊號（fail closed）" "kill -" "$FIX/kills.log"
+check    "讀不到身分：log 保留" "keep headless pid 1202（讀不到行程身分" "$LOG"
+exists   "讀不到身分：profile 還在" "$TMPD/am-noid"
 teardown
 
 echo "$PASS passed, $FAIL failed"
