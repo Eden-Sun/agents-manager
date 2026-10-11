@@ -3790,6 +3790,7 @@ CLI 結束後重驗一次登入狀態並寫回快取；快取有變時用目前�
 每 60 秒對每台可達主機只跑 alias 那半段 probe（一個登入 shell，不碰 CLI），與快取的 `shell_identities` 比對；**名單或 `CLAUDE_CONFIG_DIR` 變了**才做完整偵測（含登入探測）並推 `host_changed`。
 還沒做過第一次偵測的主機不在此列。
 身分的家目錄變了（`POST`／`DELETE /api/identities`）：那個名字在任何主機上的模型清單快取作廢（#1349）；快取每次重抓時順手丟掉過期的格子，identity 是任意字串，不回收就只增不減。
+刪除身分時，它的額度讀數一併忘掉（#1350）；同名的 shell alias（`ccN`）仍在用的那把 key 不清。
 
 ### 16.6 收編的子 agent 身份怎麼判定
 子 agent 的 pane 是母 bot 開的（`herdr pane split --env CLAUDE_CONFIG_DIR=…` 就能換帳號），收編時抄母 bot 的 identity 會把額度記到錯帳號。herdr 的 `pane.process_info` 不回 env，所以跟作業系統要：

@@ -4980,6 +4980,57 @@ mod delete_identity_tests {
         assert!(crate::models::cached(app.as_ref(), "local", "codex", Some("work")).await.is_none());
     }
 
+    fn reading(host: &str) -> crate::quota::Quota {
+        crate::quota::Quota {
+            five_hour: None,
+            seven_day: None,
+            fable: None,
+            reset_credits: None,
+            limit_hit: None,
+            plan: None,
+            updated_at: crate::db::now(),
+            source: "test".into(),
+            account: None,
+            host: host.into(),
+        }
+    }
+
+    /// #1350：刪掉身分之後，它的額度讀數（記憶體與 quota_cache）一起清掉；別的身分不動。
+    #[tokio::test]
+    async fn deleting_an_identity_forgets_its_quota_reading() {
+        let env = crate::testing::env().await;
+        let app = &env.app;
+        seed_project(&env).await;
+        app.cfg.update(|f| { f.identities.push(ident("work", "claude", None)); f.identities.push(ident("other", "claude", None)); Ok(()) }).await.unwrap();
+        for key in ["claude:work", "claude:other"] {
+            app.quotas.lock().await.insert(key.into(), reading("local"));
+            crate::quota::persist_cache(app, key, &reading("local")).await;
+        }
+        delete_identity(State(app.clone()), Path("work".into()), Query(IdentityHostQuery { host: None })).await.unwrap();
+        assert!(!app.quotas.lock().await.contains_key("claude:work"), "已刪帳號的額度格不能留著");
+        assert!(app.quotas.lock().await.contains_key("claude:other"), "別的身分不動");
+        let rows: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM quota_cache WHERE key = 'claude:work'").fetch_one(&app.db).await.unwrap();
+        assert_eq!(rows, 0, "重啟後也不能再載回來");
+        let snap = crate::quota::snapshot(app.as_ref()).await;
+        assert!(snap["kinds"].get("claude:work").is_none(), "額度列不再畫那一格：{snap}");
+    }
+
+    /// #1350：同名的 shell alias（`cc1`）接手時，那把 key 仍然有效，不清。
+    #[tokio::test]
+    async fn an_identity_whose_name_a_shell_alias_still_carries_keeps_its_quota_reading() {
+        let env = crate::testing::env().await;
+        let app = &env.app;
+        seed_project(&env).await;
+        app.cfg.update(|f| { f.identities.push(ident("cc1", "claude", None)); Ok(()) }).await.unwrap();
+        app.tools.lock().await.insert("local".into(), crate::tools::HostTools {
+            tools: Default::default(), identities: Default::default(), shell_identities: vec![ident("cc1", "claude", None)],
+            utc_offset_secs: None, herdr_cli: None, checked_at: crate::db::now(),
+        });
+        app.quotas.lock().await.insert("claude:cc1".into(), reading("local"));
+        delete_identity(State(app.clone()), Path("cc1".into()), Query(IdentityHostQuery { host: None })).await.unwrap();
+        assert!(app.quotas.lock().await.contains_key("claude:cc1"), "shell 的 cc1 還在用這把 key");
+    }
+
     /// 刪掉沒寫 host 的 `work`：m4p 上的 bot 正在用它（那台沒有自己的 `work`）→ 409，不能只看本機的 bot。
     #[tokio::test]
     async fn deleting_a_hostless_identity_is_refused_while_a_remote_bot_relies_on_it() {
@@ -5250,6 +5301,8 @@ async fn delete_identity(
     }
     #[cfg(test)]
     crate::lifecycle::race_point::hit("delete_identity_after_check", &name).await;
+    // 被刪那一筆的 kind（刪除前的設定裡找；找不到＝本來就沒有這筆，額度 key 不必動）（#1350）。
+    let removed_kind = cfg.identities.iter().find(|i| i.name == name && i.host_or_local() == host).map(|i| i.kind.clone());
     let (n2, h2) = (name.clone(), host.clone());
     crate::projection::update_and_project(&app.cfg, &app.db, move |f| {
         f.identities.retain(|i| !(i.name == n2 && i.host_or_local() == h2));
@@ -5267,15 +5320,39 @@ async fn delete_identity(
     // A same-named `ccN` alias is a different entry (SPEC §16) and is put back from `shell_identities`.
     // 只動受影響的那幾台的快取：被刪的那一台；刪的是沒寫 host 的那筆時，還靠它的每一台（自己沒有明寫同名的）。
     let cfg_after = app.cfg.get().await;
-    for (h, ht) in app.tools.lock().await.iter_mut() {
-        let has_own = cfg_after.identities.iter().any(|i| i.name == name && i.host_or_local() == h.as_str());
-        if !(*h == host || (removing_hostless && !has_own)) {
-            continue;
+    // 要忘掉的額度 key（#1350）：`<kind>:<name>`，只在這個身分真的不再生效的那幾台。鎖放掉之後才清（清它會推事件）。
+    let mut forget: Vec<(String, String)> = Vec::new();
+    let forget_key = |h: &str| removed_kind.as_ref().map(|kind| crate::quota::quota_key(h, &crate::quota::quota_base(kind, Some(&name))));
+    {
+        let mut tools = app.tools.lock().await;
+        if let Some(key) = forget_key(&host).filter(|_| !tools.contains_key(&host)) {
+            forget.push((host.clone(), key));
         }
-        ht.identities.remove(&name);
-        if let Some(i) = ht.shell_identities.iter().find(|i| i.name == name) {
-            let dir = i.env.get("CLAUDE_CONFIG_DIR").cloned();
-            ht.identities.insert(name.clone(), crate::tools::IdentityInfo::shell(&i.name, &i.kind, dir));
+        for (h, ht) in tools.iter_mut() {
+            let has_own = cfg_after.identities.iter().any(|i| i.name == name && i.host_or_local() == h.as_str());
+            if !(*h == host || (removing_hostless && !has_own)) {
+                continue;
+            }
+            // 同名的 shell alias（`ccN`）接手：那把 key 仍然有效，不清。
+            if !ht.shell_identities.iter().any(|i| i.name == name) {
+                if let Some(key) = forget_key(h) {
+                    forget.push((h.clone(), key));
+                }
+            }
+            ht.identities.remove(&name);
+            if let Some(i) = ht.shell_identities.iter().find(|i| i.name == name) {
+                let dir = i.env.get("CLAUDE_CONFIG_DIR").cloned();
+                ht.identities.insert(name.clone(), crate::tools::IdentityInfo::shell(&i.name, &i.kind, dir));
+            }
+        }
+    }
+    forget.sort();
+    forget.dedup();
+    for (h, key) in forget {
+        let existed = app.quotas.lock().await.contains_key(&key);
+        crate::quota::forget(app.as_ref(), &key).await;
+        if existed {
+            app.emit("quota_updated", json!({"kind": key, "host": h, "quota": null})).await;
         }
     }
     forget_identity_models(&app, &name).await;
