@@ -17,6 +17,7 @@ import './memPopover.css'
 
 /** 15 秒 = daemon 的取樣間隔（SPEC §15.1）；比它快只會拿到同一份數字。 */
 const REFRESH_MS = 15_000
+const LOAD_TIMEOUT_MS = 15_000
 
 function ownerLabel(p: MemProcess): string {
   if (p.owner === 'bot') return p.bot_name ?? `bot ${p.bot_id ?? ''}`.trim()
@@ -123,15 +124,18 @@ export function MemPopover({ host = LOCAL_HOST, children }: { host?: string; chi
   const load = useCallback(async () => {
     const mine = ++gen.current
     inflight.current += 1
+    const controller = new AbortController()
+    const timeout = setTimeout(() => controller.abort(new DOMException('記憶體行程清單讀取逾時', 'TimeoutError')), LOAD_TIMEOUT_MS)
     setLoading(true)
     try {
-      const d = await fetchMemProcesses(host)
+      const d = await fetchMemProcesses(host, controller.signal)
       if (mine !== gen.current) return
       setData(d)
       setErr(null)
     } catch (e) {
       if (mine === gen.current) setErr(e instanceof Error ? e.message : '讀不到')
     } finally {
+      clearTimeout(timeout)
       inflight.current -= 1
       if (mine === gen.current) setLoading(false)
     }

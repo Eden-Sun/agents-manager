@@ -788,8 +788,8 @@ export async function fetchMemPane(host: string, paneId: string, socket: string 
 }
 
 /** SPEC §15.2. */
-export async function fetchMemProcesses(host: string): Promise<MemProcesses> {
-  return toMemProcesses(await transport.request('GET', `/mem/processes?host=${encodeURIComponent(host)}`))
+export async function fetchMemProcesses(host: string, signal?: AbortSignal): Promise<MemProcesses> {
+  return toMemProcesses(await transport.request('GET', `/mem/processes?host=${encodeURIComponent(host)}`, undefined, signal))
 }
 
 /** SPEC §15.2. daemon 擋 herdr 本身（400）與 bot（409）；錯誤原樣上丟，照 daemon 訊息顯示。 */
