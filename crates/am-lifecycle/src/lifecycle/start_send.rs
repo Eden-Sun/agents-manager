@@ -774,6 +774,8 @@ mod tests {
         let app = e.app.clone();
         let running = tt::claude_bot(&app, &e.project_id, "running").await;
         tt::fake_run(&app, &running.id).await;
+        // run 的 pane 真 herdr 上一定存在（#1452）：替身要認得它，讀得到 composer。
+        e.herdr.know_pane(&format!("pane-{}", running.id));
         // 假的 run 沒有 transcript：一般那條路照它自己的規則回 409 `transcript_not_ready`——重點是沒有被「收下再啟動」。
         let normal = prompt_starting(&app, &running.id, "照常送", "crid-running", &[], RelaySrc::default()).await;
         assert!(

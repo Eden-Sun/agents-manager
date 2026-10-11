@@ -287,6 +287,17 @@ impl MockState {
     fn find_pane(&self, pane_id: &str) -> Option<MockTab> {
         self.tabs.lock().unwrap().iter().find(|t| t.panes.iter().any(|p| p == pane_id)).cloned()
     }
+    /// 替身認得的 pane：掛在某個 tab 上，或有任何一張表（畫面、live、argv、pid、agent）提到它。
+    /// 真 herdr 對不認得的 pane 一律 `pane_not_found`（#1452）。
+    fn knows(&self, pane_id: &str) -> bool {
+        self.find_pane(pane_id).is_some()
+            || self.live.lock().unwrap().contains_key(pane_id)
+            || self.screens.lock().unwrap().contains_key(pane_id)
+            || self.argvs.lock().unwrap().contains_key(pane_id)
+            || self.pids.lock().unwrap().contains_key(pane_id)
+            || self.shell_pids.lock().unwrap().contains_key(pane_id)
+            || self.agents.lock().unwrap().iter().any(|a| a.get("pane_id").and_then(Value::as_str) == Some(pane_id))
+    }
 }
 
 impl MockHerdr {
@@ -564,6 +575,10 @@ impl MockHerdr {
                         {
                             json!({"id": id, "error": {"code": "invalid_params", "message": "unknown field `format`"}})
                         }
+                        "pane.read" if !st.knows(&wid_of("pane_id")) && !st.screens.lock().unwrap().contains_key("*") => {
+                            let pid = wid_of("pane_id");
+                            json!({"id": id, "error": {"code": "pane_not_found", "message": format!("pane {pid} not found")}})
+                        }
                         "pane.read" => {
                             let pid = wid_of("pane_id");
                             let live_read = {
@@ -592,6 +607,10 @@ impl MockHerdr {
                                     "format": format, "text": text, "revision": revision, "truncated": false}}})
                             }
                         }
+                        "pane.process_info" if !st.knows(&wid_of("pane_id")) => {
+                            let pid = wid_of("pane_id");
+                            json!({"id": id, "error": {"code": "pane_not_found", "message": format!("pane {pid} not found")}})
+                        }
                         "pane.process_info" => {
                             let pid = wid_of("pane_id");
                             let os_pid = st.pids.lock().unwrap().get(&pid).copied().unwrap_or(1);
@@ -616,6 +635,10 @@ impl MockHerdr {
                                 None if pid.is_empty() => json!({"id": id, "result": {"layout": {"panes": []}}}),
                                 None => json!({"id": id, "error": {"code": "unsupported", "message": "no layout"}}),
                             }
+                        }
+                        "pane.send_text" if !st.knows(&wid_of("pane_id")) => {
+                            let pid = wid_of("pane_id");
+                            json!({"id": id, "error": {"code": "pane_not_found", "message": format!("pane {pid} not found")}})
                         }
                         "pane.send_text" => {
                             let pid = wid_of("pane_id");
@@ -642,6 +665,10 @@ impl MockHerdr {
                                 }
                             }
                             json!({"id": id, "result": {"type": "ok"}})
+                        }
+                        "pane.send_keys" if !st.knows(&wid_of("pane_id")) => {
+                            let pid = wid_of("pane_id");
+                            json!({"id": id, "error": {"code": "pane_not_found", "message": format!("pane {pid} not found")}})
                         }
                         "pane.send_keys" => {
                             let pid = wid_of("pane_id");
@@ -873,6 +900,10 @@ impl MockHerdr {
 
     pub fn set_screen(&self, pane_id: &str, text: &str) {
         self.screens.lock().unwrap().insert(pane_id.to_string(), text.to_string());
+    }
+    /// 讓替身認得這顆 pane（一張空畫面）。`fake_run` 種的 `pane-<bot>` 不是真 herdr 會有的 pane，要的測試自己呼叫這個（#1452）。
+    pub fn know_pane(&self, pane_id: &str) {
+        self.screens.lock().unwrap().entry(pane_id.to_string()).or_default();
     }
 
     /// Capture-safe screen replacement for a race point; changing the screen also advances its revision.
@@ -1364,5 +1395,54 @@ mod mock_herdr_contract_tests {
         let raw = client.call("pane.layout", json!({"workspace_id": "w"})).await.unwrap();
         assert!(raw["layout"]["panes"].as_array().unwrap().is_empty(), "沒帶 pane_id 時真 herdr 回別的分頁，不含這顆：{raw}");
         assert_eq!(client.pane_size("w9:p2").await.unwrap(), Some((24, 40)));
+    }
+
+    #[tokio::test]
+    async fn an_unknown_pane_is_not_found_for_every_pane_rpc() {
+        let (_mock, client) = start().await;
+        let p = "w9:pNope";
+        let e = client.pane_read(p, "visible", 5).await.unwrap_err();
+        assert_eq!(code_of(&e), "pane_not_found");
+        assert!(crate::herdr::never_applied(&e), "讀取失敗不改任何東西");
+        let e = client.pane_process_info(p).await.unwrap_err();
+        assert_eq!(code_of(&e), "pane_not_found");
+        let e = client.pane_shell(p).await.unwrap_err();
+        assert_eq!(code_of(&e), "pane_not_found");
+        let e = client.pane_send_text(p, "x").await.unwrap_err();
+        assert_eq!(code_of(&e), "pane_not_found");
+        assert!(crate::herdr::never_applied(&e), "送進不存在的 pane 什麼都沒送到");
+        let e = client.pane_send_keys(p, &["enter"]).await.unwrap_err();
+        assert_eq!(code_of(&e), "pane_not_found");
+        assert!(crate::herdr::never_applied(&e));
+    }
+
+    #[tokio::test]
+    async fn a_known_pane_keeps_answering() {
+        let (mock, client) = start().await;
+        mock.know_pane("w9:pK");
+        client.pane_read("w9:pK", "visible", 5).await.unwrap();
+        client.pane_process_info("w9:pK").await.unwrap();
+        client.pane_shell("w9:pK").await.unwrap();
+        client.pane_send_text("w9:pK", "x").await.unwrap();
+        client.pane_send_keys("w9:pK", &["enter"]).await.unwrap();
+        mock.set_screen("w9:pS", "hi");
+        assert_eq!(client.pane_read("w9:pS", "visible", 5).await.unwrap().text, "hi");
+        mock.set_screen("*", "any");
+        assert_eq!(client.pane_read("w9:pAny", "visible", 5).await.unwrap().text, "any", "萬用畫面照舊讓任何 pane 讀得到");
+        let e = client.pane_process_info("w9:pOther").await.unwrap_err();
+        assert_eq!(code_of(&e), "pane_not_found", "萬用畫面不等於認得這顆 pane");
+    }
+
+    /// `fake_run` 種的 `pane-<bot>` 不是真 herdr 會有的 pane：要用它的測試得自己讓替身認得它（#1452）。
+    #[tokio::test]
+    async fn fake_run_alone_is_a_pane_herdr_does_not_know() {
+        let e = env().await;
+        let bot = claude_bot(&e.app, &e.project_id, "alfa").await;
+        fake_run(&e.app, &bot.id).await;
+        let pane = format!("pane-{}", bot.id);
+        let err = e.app.herdr.pane_read(&pane, "visible", 5).await.unwrap_err();
+        assert_eq!(code_of(&err), "pane_not_found");
+        e.herdr.know_pane(&pane);
+        e.app.herdr.pane_read(&pane, "visible", 5).await.unwrap();
     }
 }
