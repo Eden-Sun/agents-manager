@@ -2008,6 +2008,7 @@ agent 自己 `herdr agent prompt <名字> …` 時 daemon 沒參與，那句話�
   `pane.focus`，只動得了那台機器的 TUI，兩者不互相取代。重整／深連結（`/hosts/<host>/shells/<pane>`）先查面板自己開的 shell，
   查不到再查 `GET /api/panes`。
 - **白名單兩份**（`shell::registered`）：面板自己開的（`app.host_shells`，只在記憶體）加上 `panes` 表。後者活過重啟。
+- **pane id 會被重用**（#1353）：登記的那顆的 workspace／tab 與 herdr 現在這個 id 的 pane 對不上，清單把它當成已死、清掉登記；關閉時不關現在佔用這個 id 的 pane（改走 `panes` 表那條守門），現在那顆若跑著 bot 的 agent 一律 403、登記留著。
 - **打字權限看是否在 listen，不看 `kind`**（`shell::typing_decision`，2026-09-16 統整者裁示、巡檢同意）。`kind` 只剩顯示、GC 與
   「關閉要不要先確認」用，**不是權限**；程式與這段規格同一條規則。判準依序：有 active run 一律擋；即時複查讀不到一律擋；
   本機看即時重對的 listen port；遠端看 `panes` 表已記錄的 `kind`／`listen_ports`。**有 listen port 的 pane 只可看**——送一個
