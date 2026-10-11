@@ -574,4 +574,139 @@ mod with_app {
         let pending = crate::share::store::pending_keeps(&e.app.db).await.unwrap();
         assert_eq!(pending.len(), 2, "斷線的主機：兩顆的拿掉都欠著");
     }
+
+    /// #1266：讓本機 sh 扮演遠端，但第一支含 `gate` 的腳本會卡在 ssh 裡，等測試放行。回 (卡住的通知, 放行用的 sender)。
+    fn gated_host(host: &str, home: &Path, gate: &'static str) -> (tokio::sync::oneshot::Receiver<()>, std::sync::mpsc::Sender<()>) {
+        let (entered_tx, entered_rx) = tokio::sync::oneshot::channel::<()>();
+        let (release_tx, release_rx) = std::sync::mpsc::channel::<()>();
+        let entered = Mutex::new(Some(entered_tx));
+        let release = Mutex::new(Some(release_rx));
+        let home = home.to_path_buf();
+        am_base::hosts::set_ssh_fake(host, move |script: &str| {
+            if script.contains(gate) {
+                let parked = release.lock().unwrap().take();
+                if let Some(rx) = parked {
+                    if let Some(tx) = entered.lock().unwrap().take() {
+                        let _ = tx.send(());
+                    }
+                    let _ = rx.recv();
+                }
+            }
+            let out = std::process::Command::new("/bin/sh")
+                .arg("-c")
+                .arg(script)
+                .env("HOME", &home)
+                .env("TMPDIR", &home)
+                .stdin(std::process::Stdio::null())
+                .output()
+                .map_err(|e| anyhow::anyhow!("exec /bin/sh: {e}"))?;
+            Ok(String::from_utf8_lossy(&out.stdout).into_owned())
+        });
+        (entered_rx, release_tx)
+    }
+
+    /// #1266：拿掉標記的 ssh 卡住時，同一顆 bot 的 restore 放上標記先做完——舊的拿掉晚到，不能把現役 bot 的標記拿掉。
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_removal_stuck_in_ssh_cannot_strip_a_mark_that_a_restore_placed_after_it() {
+        let e = tt::env().await;
+        let scratch = test_dirs::scratch_dir("i1266-stale-removal");
+        remote_host(&e, "i1266-removal-app", &scratch).await;
+        let (id, _, outbox) = share_bot(&e, &scratch, "far-i1266-removal", "restricted").await;
+        let mark = outbox.join(".am-share-keep");
+        crate::share::keep_share_outboxes(&e.app).await;
+        assert!(mark.is_file(), "前置：現役時標記在");
+
+        // 刪除：bot 標成刪除，欠一列「拿掉」。
+        sqlx::query("UPDATE bots SET deleted_at = ? WHERE id = ?").bind(crate::db::now()).bind(&id).execute(&e.app.db).await.unwrap();
+        crate::share::store::queue_keep(&e.app.db, "i1266-removal-app", &id).await.unwrap();
+
+        let (entered, release) = gated_host("i1266-removal-app", &scratch, "\"0\" = \"1\"");
+        let drain = {
+            let app = e.app.clone();
+            tokio::spawn(async move { crate::share::drain_keep_pending(&app).await })
+        };
+        tokio::time::timeout(Duration::from_secs(10), entered).await.expect("拿掉的 ssh 沒有進到卡點").unwrap();
+
+        // restore：bot 回來，放上標記。
+        sqlx::query("UPDATE bots SET deleted_at = NULL WHERE id = ?").bind(&id).execute(&e.app.db).await.unwrap();
+        let restore = {
+            let app = e.app.clone();
+            let id = id.clone();
+            tokio::spawn(async move { crate::share::keep_new_remote_share(&app, &id).await })
+        };
+        // 給 restore 去搶的時間（有鎖的版本會在這裡等，不會搶先）。
+        tokio::time::sleep(Duration::from_millis(200)).await;
+        release.send(()).unwrap();
+        drain.await.unwrap();
+        restore.await.unwrap();
+
+        assert!(mark.is_file(), "restore 放上在後，最後的標記必須在：現役 bot 不能沒有保留標記");
+        assert!(crate::share::store::pending_keeps(&e.app.db).await.unwrap().is_empty(), "兩邊都收尾，欠著的列清掉");
+    }
+
+    /// #1266（反方向）：巡邏的「放上」卡在 ssh 時，同一顆 bot 的刪除（拿掉）先做完——放上晚到，不能讓已刪的 bot 留著標記。
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_placement_stuck_in_ssh_cannot_leave_a_mark_on_a_bot_deleted_after_it() {
+        let e = tt::env().await;
+        let scratch = test_dirs::scratch_dir("i1266-stale-add");
+        remote_host(&e, "i1266-add-app", &scratch).await;
+        let (id, _, outbox) = share_bot(&e, &scratch, "far-i1266-add", "restricted").await;
+        let mark = outbox.join(".am-share-keep");
+        // 現役 bot 欠一列「放上」，標記還沒放上去。
+        crate::share::store::queue_keep(&e.app.db, "i1266-add-app", &id).await.unwrap();
+        assert!(!mark.exists());
+
+        let (entered, release) = gated_host("i1266-add-app", &scratch, "\"1\" = \"1\"");
+        let drain = {
+            let app = e.app.clone();
+            tokio::spawn(async move { crate::share::drain_keep_pending(&app).await })
+        };
+        tokio::time::timeout(Duration::from_secs(10), entered).await.expect("放上的 ssh 沒有進到卡點").unwrap();
+
+        // 刪除：bot 標成刪除、拿掉標記。
+        sqlx::query("UPDATE bots SET deleted_at = ? WHERE id = ?").bind(crate::db::now()).bind(&id).execute(&e.app.db).await.unwrap();
+        let revoke = {
+            let app = e.app.clone();
+            let id = id.clone();
+            tokio::spawn(async move { crate::share::revoke_bot_share(&app, &id).await })
+        };
+        tokio::time::sleep(Duration::from_millis(200)).await;
+        release.send(()).unwrap();
+        drain.await.unwrap();
+        revoke.await.unwrap().unwrap();
+
+        assert!(!mark.exists(), "刪除在後，最後的標記必須拿掉：已刪的 bot 不能留著保留標記");
+        assert!(crate::share::store::pending_keeps(&e.app.db).await.unwrap().is_empty(), "兩邊都收尾，欠著的列清掉");
+    }
+
+    /// #1266：巡邏拿著那把 (host, bot) 的鎖、卡在 ssh 時被取消：鎖要放掉，下一顆寫入不會等一個已經不存在的 task。
+    #[tokio::test]
+    async fn a_cancelled_pass_releases_the_key_for_the_next_writer() {
+        let e = tt::env().await;
+        let scratch = test_dirs::scratch_dir("i1266-cancel");
+        remote_host(&e, "i1266-cancel-app", &scratch).await;
+        let (id, _, outbox) = share_bot(&e, &scratch, "far-i1266-cancel", "restricted").await;
+        let mark = outbox.join(".am-share-keep");
+        crate::share::keep_share_outboxes(&e.app).await;
+        assert!(mark.is_file());
+        sqlx::query("UPDATE bots SET deleted_at = ? WHERE id = ?").bind(crate::db::now()).bind(&id).execute(&e.app.db).await.unwrap();
+        crate::share::store::queue_keep(&e.app.db, "i1266-cancel-app", &id).await.unwrap();
+
+        am_base::hosts::set_ssh_delay("i1266-cancel-app", Duration::from_secs(5));
+        let drain = {
+            let app = e.app.clone();
+            tokio::spawn(async move { crate::share::drain_keep_pending(&app).await })
+        };
+        tokio::time::sleep(Duration::from_millis(200)).await;
+        drain.abort();
+        assert!(drain.await.unwrap_err().is_cancelled());
+        am_base::hosts::set_ssh_delay("i1266-cancel-app", Duration::ZERO);
+
+        tokio::time::timeout(Duration::from_secs(10), crate::share::revoke_bot_share(&e.app, &id))
+            .await
+            .expect("取消的巡邏沒有放掉鎖：下一顆寫入卡死")
+            .unwrap();
+        assert!(!mark.exists(), "下一顆（刪除）照常拿掉標記");
+        assert!(crate::share::store::pending_keeps(&e.app.db).await.unwrap().is_empty());
+    }
 }

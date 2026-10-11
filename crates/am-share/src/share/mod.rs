@@ -75,20 +75,24 @@ async fn set_remote_keep<S: site::SiteEnv>(app: &S, bot_id: &str, keep: bool, in
     let pool = app.db_pool();
     let resolved = if include_deleted { site::resolve_including_deleted(app, bot_id).await } else { site::resolve(app, bot_id).await };
     match resolved {
-        Ok(site::ShareSite::Remote(remote)) => match remote.mark_share_keep(keep).await {
-            Ok(()) => {
-                if let Err(e) = store::forget_keep(pool, &remote.host, bot_id).await {
-                    tracing::warn!(bot = %bot_id, error = %e, "could not clear the pending remote keep mark");
+        Ok(site::ShareSite::Remote(remote)) => {
+            let _key = keep_lock(&remote.host, bot_id).await;
+            match remote.mark_share_keep(keep).await {
+                Ok(()) => {
+                    if let Err(e) = store::forget_keep(pool, &remote.host, bot_id).await {
+                        tracing::warn!(bot = %bot_id, error = %e, "could not clear the pending remote keep mark");
+                    }
+                }
+                Err(e) => {
+                    tracing::warn!(bot = %bot_id, host = %remote.host, keep, error = %e, "could not update the remote share outbox keep mark; queued for the periodic pass");
+                    queue_keep_or_warn(pool, &remote.host, bot_id).await;
                 }
             }
-            Err(e) => {
-                tracing::warn!(bot = %bot_id, host = %remote.host, keep, error = %e, "could not update the remote share outbox keep mark; queued for the periodic pass");
-                queue_keep_or_warn(pool, &remote.host, bot_id).await;
-            }
-        },
+        }
         Ok(site::ShareSite::Local { .. }) | Err(site::SiteError::NotShareBot) => {}
         Err(site::SiteError::Unavailable) => match store::host_of_bot(pool, bot_id).await {
             Ok(Some(host)) if host != am_base::config::LOCAL_HOST => {
+                let _key = keep_lock(&host, bot_id).await;
                 tracing::warn!(bot = %bot_id, host = %host, keep, "remote share outbox keep mark skipped: the host is unreachable or unknown; queued for the periodic pass");
                 queue_keep_or_warn(pool, &host, bot_id).await;
             }
@@ -102,6 +106,21 @@ async fn queue_keep_or_warn(pool: &sqlx::SqlitePool, host: &str, bot_id: &str) {
     if let Err(e) = store::queue_keep(pool, host, bot_id).await {
         tracing::error!(bot = %bot_id, host, error = %e, "could not record the pending remote keep mark; it will not be retried");
     }
+}
+
+/// 同一台主機、同一顆 bot 的保留標記寫入（#1266）：直接寫（收尾、開機、restore）與巡邏補做共用這把鎖。
+/// 「讀現役狀態 → ssh 寫入 → 清掉欠著的列」整段在鎖裡做完，較早讀到的舊決定不能在較新的寫入之後才寫上遠端。
+/// 只鎖 (host, bot)；沒有人握著的項目在下一次取鎖時清掉，表不會越長越大。
+static KEEP_LOCKS: std::sync::OnceLock<std::sync::Mutex<std::collections::HashMap<(String, String), std::sync::Arc<tokio::sync::Mutex<()>>>>> =
+    std::sync::OnceLock::new();
+
+async fn keep_lock(host: &str, bot_id: &str) -> tokio::sync::OwnedMutexGuard<()> {
+    let lock = {
+        let mut map = KEEP_LOCKS.get_or_init(Default::default).lock().unwrap();
+        map.retain(|_, m| std::sync::Arc::strong_count(m) > 1);
+        map.entry((host.to_string(), bot_id.to_string())).or_default().clone()
+    };
+    lock.lock_owned().await
 }
 
 /// 補做欠著的遠端保留標記（#1038）。每一列照 DB 現況放或拿掉（現役分享 bot 放、其餘拿掉），不照列上記的意圖：
@@ -123,6 +142,8 @@ pub async fn drain_keep_pending<S: site::SiteEnv>(app: &S) {
         if !conn.is_connected() {
             continue;
         }
+        // 現役狀態要在鎖裡讀：拿到鎖之前讀的值，可能已經被一顆較新的直接寫入蓋過（#1266）。
+        let _key = keep_lock(&row.host, &row.bot_id).await;
         let keep = match store::is_active_share(pool, &row.bot_id).await {
             Ok(keep) => keep,
             Err(e) => {
