@@ -10,6 +10,7 @@ import { useProjectJumpKeys } from './hooks/useProjectJumpKeys'
 import { useBotSwitchKeys } from './hooks/useBotSwitchKeys'
 import { dialogOpen } from './lib/dialogOpen'
 import { ChatPanel } from './components/ChatPanel'
+import { JudgeLedgerWatch } from './components/JudgeBadge'
 import { HostOfflineBanner } from './components/HostOffline'
 import { LoginPromptBanner } from './components/LoginPromptBanner'
 import { GroupChatPanel } from './components/GroupChatPanel'
@@ -230,6 +231,7 @@ export default function App() {
       {drawerOpen ? (
         <button type="button" className="scrim" aria-label="關閉側邊欄" onClick={() => setDrawer(false)} />
       ) : null}
+      <JudgeLedgerWatch />
       <main className="main">
         <ConnBanner />
         <HostOfflineBanner />

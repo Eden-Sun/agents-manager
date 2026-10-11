@@ -65,6 +65,7 @@ import { DeployNowBadge } from './DeployNowBadge'
 import { DeployWaitChip } from './DeployWaitChip'
 import { TabsBadge } from './TabsBadge'
 import { ModelTag } from './ModelTag'
+import { JudgeBadge } from './JudgeBadge'
 import { BotRowMenu } from './BotRowMenu'
 import { JudgePanel } from './JudgePanel'
 import { KindDisplayToggle, KindTag } from './KindTag'
@@ -396,6 +397,7 @@ function BotRowImpl({
               </span>
             ) : null}
           </span>
+          <JudgeBadge botId={botId} />
           {/* 選取中的列，點名字才改名。 */}
           <BotNameField botId={botId} name={bot.name} variant="row" armed={selected} hint={herdrIdentity(run, bot.agent_name)?.title}>
             {compact ? null : <PersonaMark persona={bot.persona} />}
