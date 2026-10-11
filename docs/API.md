@@ -2141,7 +2141,8 @@ UI token 會取得 Project 底下所有存活 bot 的訊息合併。Bot token �
 - `hosts[].baseline`（issue #719，SPEC §16.7）：工作環境一致性檢查，**只讀、只報告**：`{"issues": null | [{"id","severity":"critical"|"warn","message"}], "checked_at", "os": "Linux"|"Darwin"|null}`。
   過期標記：`checked_at` 是**最後一次成功**偵測的時間；偵測失敗（ssh 逾時、連不上、探測腳本沒跑起來）時舊結果原封不動留著，另帶
   `failed_at`（最後一次失敗的時間，之後成功就清成 `null`）與 `error`（失敗原因第一行，最多 200 字），並推 `host_changed`；`stale: true` ＝
-  最後一次偵測失敗，**或** `checked_at` 比 6 小時 15 分（一個重量週期＋15 分寬限）還舊（讀不懂也算）。`stale` 在讀取時計算（不存），
+  最後一次偵測失敗，**或** `checked_at` 比 6 小時 15 分（一個重量週期＋15 分寬限）還舊（讀不懂也算）。
+  失敗只在這次偵測開始時的連線仍是現行連線時才標：偵測開始後主機已重連或改指，舊連線的逾時不改寫新連線剛量好的結果（#1371）。`stale` 在讀取時計算（不存），
   從沒量過的主機維持 `baseline: null`，失敗不會憑空造一份。
   `issues: []` = 跟基準一致；`null` = 這趟探測沒跑完（逾時、被截斷），未知，不是「全缺」；整個 `baseline` 為 `null` = 還沒量過。
   `id` 穩定可比對（`tool.rtk`、`claude.cc1.settings.json:statusLine`、`claude.<身分>.settings.json:defaultMode`、`codex.config.toml:approval_policy`、`codex.config.toml:features.hooks`、`gitconfig.token`…）。
