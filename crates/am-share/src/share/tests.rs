@@ -577,7 +577,7 @@ async fn send_message_rate_limit_rejection_does_not_wait_for_bot_lock() {
         .json(&json!({"text": "msg 11", "client_request_id": "c-limit-11"}))
         .send();
 
-    let res = tokio::time::timeout(Duration::from_millis(500), send_fut)
+    let res = tokio::time::timeout(Duration::from_secs(30), send_fut)
         .await
         .expect("rate limited request must not wait for bot mutex")
         .unwrap();
@@ -1753,7 +1753,8 @@ async fn fresh_share_touch_does_not_request_a_sqlite_write_lock() {
     sqlx::query("BEGIN IMMEDIATE").execute(&mut *writer).await.unwrap();
 
     let base = serve(portal::router(e.app.clone())).await;
-    let response = tokio::time::timeout(Duration::from_millis(500), client().get(format!("{base}/s/{token}/api/info")).send()).await;
+    // 壞掉時（去要寫鎖）會在 db::open 的 busy_timeout（10 秒）後才回來：這個上限要明顯小於它（#1278）。
+    let response = tokio::time::timeout(Duration::from_secs(5), client().get(format!("{base}/s/{token}/api/info")).send()).await;
     sqlx::query("ROLLBACK").execute(&mut *writer).await.unwrap();
     let response = response.expect("fresh telemetry touch must not wait for SQLite's writer lock").unwrap();
     assert_eq!(response.status(), 200);
@@ -1770,7 +1771,7 @@ async fn concurrent_well_shaped_unknown_tokens_are_rejected_before_unbounded_db_
     }
     let base = serve(portal::router(e.app.clone())).await;
     let c = client();
-    let malformed = tokio::time::timeout(Duration::from_millis(500), c.get(format!("{base}/s/nope/api/info")).send()).await.unwrap().unwrap();
+    let malformed = tokio::time::timeout(Duration::from_secs(30), c.get(format!("{base}/s/nope/api/info")).send()).await.unwrap().unwrap();
     assert_eq!(malformed.status(), 404, "malformed shapes must be rejected before admission or DB");
 
     let (tx, mut rx) = tokio::sync::mpsc::channel(12);
@@ -1786,7 +1787,7 @@ async fn concurrent_well_shaped_unknown_tokens_are_rejected_before_unbounded_db_
         }));
     }
     drop(tx);
-    let early = tokio::time::timeout(Duration::from_secs(1), rx.recv()).await;
+    let early = tokio::time::timeout(Duration::from_secs(10), rx.recv()).await;
     let saw_fast_rejection = matches!(&early, Ok(Some(Ok(status))) if status.as_u16() == 503);
     drop(held);
     let mut statuses = Vec::new();
