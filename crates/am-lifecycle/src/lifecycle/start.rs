@@ -1347,10 +1347,13 @@ async fn start_inner(
             .fetch_optional(app.db())
             .await
             .map_err(up)?;
-            if let Some(t) = transcript {
-                if let Err(why) = stage_cross_identity_transcript(app, bot, &host, &t).await {
-                    return Err(LcError::conflict("fork_transcript_unavailable", json!({"session_id": from, "reason": why})));
-                }
+            // #1265：沒有記到對話檔的位置（NULL／空字串）就沒有證據證明對話在新身分底下找得到，不能當成「沒有東西要搬」照樣啟動。
+            let Some(t) = transcript.filter(|t| !t.trim().is_empty()) else {
+                return Err(LcError::conflict("no_source_transcript", json!({"session_id": from, "message": "來源對話的檔案位置沒有記下來，無法確認新身分底下找得到這段對話，不啟動。"})));
+            };
+            if let Err(why) = stage_cross_identity_transcript(app, bot, &host, &t).await {
+                // `cause` 不能叫 `reason`：conflict() 會用 extra 覆蓋 reason，外層代碼就丟了（#1265）。
+                return Err(LcError::conflict("fork_transcript_unavailable", json!({"session_id": from, "cause": why})));
             }
         }
         if bot.kind == "codex" {
@@ -2870,6 +2873,36 @@ mod resume_args_tests {
         let fork_opts = StartOpts { fork_session: Some("sid-gone".into()), fork_source_bot: Some(src.id.clone()), ..Default::default() };
         assert!(start_bot_with(&e.app, &fork.id, fork_opts).await.is_err(), "搬不過來就不啟動");
         assert!(!started_args(&e).iter().any(|a| a.iter().any(|x| x == "--fork-session")), "{:?}", started_args(&e));
+    }
+
+    /// #1265：來源 run 的對話檔路徑是 NULL、空字串、或指到不存在的檔：都沒有證據，fork 不能照樣啟動 `--fork-session`。
+    /// NULL／空字串是 `no_source_transcript`（沒有記到位置）；指到不存在的檔維持 `fork_transcript_unavailable`（#1168）。
+    #[tokio::test]
+    async fn a_fork_without_source_transcript_evidence_does_not_start() {
+        for (label, path, want) in [
+            ("null", None, "no_source_transcript"),
+            ("empty", Some(""), "no_source_transcript"),
+            ("missing", Some("/nonexistent/sid-x.jsonl"), "fork_transcript_unavailable"),
+        ] {
+            let e = env().await;
+            let src = claude_bot(&e.app, &e.project_id, &format!("src-{label}")).await;
+            let fork = claude_bot(&e.app, &e.project_id, &format!("fork-{label}")).await;
+            let _ = own_transcript(&e, &fork, "unused").await;
+            sqlx::query(
+                "INSERT INTO runs (id, bot_id, state, agent_status, native_session_id, transcript_path, started_at, ended_at)
+                 VALUES (?,?,'stopped','idle','sid-x',?,'2026-09-01T00:00:00Z','2026-09-01T00:01:00Z')",
+            )
+            .bind(db::ulid())
+            .bind(&src.id)
+            .bind(path)
+            .execute(e.app.db())
+            .await
+            .unwrap();
+            let fork_opts = StartOpts { fork_session: Some("sid-x".into()), fork_source_bot: Some(src.id.clone()), ..Default::default() };
+            let err = start_bot_with(&e.app, &fork.id, fork_opts).await.unwrap_err();
+            assert!(matches!(&err, LcError::Conflict(v) if v["reason"] == want), "{label}: {err:?}");
+            assert!(started_args(&e).is_empty(), "{label}: 沒有 agent.start：{:?}", started_args(&e));
+        }
     }
 
     /// No transcript → not resumed: `claude --resume` would exit with "No conversation found".
