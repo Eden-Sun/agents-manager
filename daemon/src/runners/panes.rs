@@ -245,4 +245,27 @@ mod tests {
         assert_eq!(ok["closed"], true);
         assert_eq!(rows(&app).await, 0);
     }
+
+    /// §A3（#1453）：`pane.focus` 只送出去一次、帶的是那顆 pane 的 id；替身認得它，回 `focused: true`。
+    #[tokio::test]
+    async fn focus_asks_herdr_for_exactly_that_pane() {
+        let env = crate::testing::env().await;
+        let app = env.app.clone();
+        let (_ws, pane) = app.herdr.workspace_create("/tmp", "focus", json!({})).await.unwrap();
+        let Json(body) = focus(State(app.clone()), Path(pane.pane_id.clone()), Query(HashMap::new())).await.unwrap();
+        assert_eq!(body, json!({"focused": true, "pane_id": pane.pane_id}));
+        assert_eq!(env.herdr.calls_to("pane.focus"), vec![json!({"pane_id": pane.pane_id})]);
+    }
+
+    /// herdr 不認得的 pane：焦點切不過去，是上游錯誤（釘住現況；要不要改成 404 不在這張的範圍）。
+    #[tokio::test]
+    async fn focusing_a_pane_herdr_does_not_know_is_an_upstream_error() {
+        let env = crate::testing::env().await;
+        let app = env.app.clone();
+        let err = focus(State(app.clone()), Path("w9:pNope".to_string()), Query(HashMap::new())).await.unwrap_err();
+        match err {
+            LcError::Upstream(m) => assert!(m.contains("pane_not_found"), "{m}"),
+            other => panic!("{other:?}"),
+        }
+    }
 }
