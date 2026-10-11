@@ -21,6 +21,15 @@ cp "$ROOT/scripts/ci-daemon-filters.sh" "$fixture/scripts/ci-daemon-filters.sh"
 printf '#!/usr/bin/env bash\necho jev-ran >>"${AM_TEST_JEV_LOG:?}"\n' >"$fixture/scripts/jev-role_test.sh"
 chmod +x "$fixture/scripts/jev-role_test.sh"
 export AM_TEST_JEV_LOG="$tmp/jev.log"
+# Rust test mount check stand-in: record ordering alongside cargo and support a deterministic failure.
+cat >"$fixture/scripts/rust_test_mount_test.sh" <<'SH'
+#!/usr/bin/env bash
+echo mount-ran >>"${AM_TEST_MOUNT_LOG:?}"
+echo mount >>"${AM_TEST_CARGO_LOG:?}"
+[ "${AM_TEST_MOUNT_FAIL:-0}" != 1 ]
+SH
+chmod +x "$fixture/scripts/rust_test_mount_test.sh"
+export AM_TEST_MOUNT_LOG="$tmp/mount.log"
 
 cat >"$fixture/bin/git" <<'SH'
 #!/usr/bin/env bash
@@ -98,7 +107,37 @@ if [ -e "$fixture/web/dist/index.html" ]; then
     exit 1
 fi
 
+fail() { printf '%s\n' "$1" >&2; exit 1; }
 echo 'changed daemon fast path uses and cleans a temporary web/dist stub'
+
+# Daemon/crate changes must run the pure-text Rust test mount check before cargo.
+: >"$AM_TEST_CARGO_LOG"
+: >"$AM_TEST_MOUNT_LOG"
+export AM_TEST_DIFF_HEAD=daemon/src/queue.rs
+changed >/dev/null || fail "daemon changed path with mount check failed: $(cat "$AM_TEST_CARGO_LOG")"
+[ "$(cat "$AM_TEST_MOUNT_LOG")" = mount-ran ] || fail "daemon change did not run the mount check"
+[ "$(head -1 "$AM_TEST_CARGO_LOG")" = mount ] || fail "mount check did not run before cargo: $(cat "$AM_TEST_CARGO_LOG")"
+
+# A mount-check failure blocks compilation and fails the changed run.
+: >"$AM_TEST_CARGO_LOG"
+AM_TEST_MOUNT_FAIL=1 changed >/dev/null 2>&1 && fail 'mount check failure was ignored'
+! grep -Eq '^(check|test)( |$)' "$AM_TEST_CARGO_LOG" || fail "cargo ran after mount check failed: $(cat "$AM_TEST_CARGO_LOG")"
+unset AM_TEST_MOUNT_FAIL
+
+# none, web-only changes, and fixture repos without the checker do not invoke it.
+: >"$AM_TEST_CARGO_LOG"
+: >"$AM_TEST_MOUNT_LOG"
+CHECK_TESTS=none changed >/dev/null || fail 'CHECK_TESTS=none changed failed'
+[ ! -s "$AM_TEST_MOUNT_LOG" ] || fail 'CHECK_TESTS=none ran the mount checker'
+: >"$AM_TEST_MOUNT_LOG"
+export AM_TEST_DIFF_HEAD=web/src/App.tsx
+changed >/dev/null || fail 'web-only changed failed'
+[ ! -s "$AM_TEST_MOUNT_LOG" ] || fail 'web-only changed ran the mount checker'
+: >"$AM_TEST_MOUNT_LOG"
+export AM_TEST_DIFF_HEAD=daemon/src/queue.rs
+rm "$fixture/scripts/rust_test_mount_test.sh"
+changed >/dev/null || fail 'daemon changed failed when the optional mount checker was absent'
+[ ! -s "$AM_TEST_MOUNT_LOG" ] || fail 'absent mount checker was unexpectedly invoked'
 
 fail() { printf '%s\n' "$1" >&2; exit 1; }
 cargo_tests() { grep -E '^test ' "$AM_TEST_CARGO_LOG" || true; }
