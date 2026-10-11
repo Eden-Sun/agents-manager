@@ -60,7 +60,17 @@ function RemoteImage({ src, alt }: { src: string; alt?: string }) {
           </a>
         </>
       ) : (
-        <button type="button" className="mini-btn" disabled={state === 'loading'} onClick={load}>
+        <button
+          type="button"
+          className="mini-btn"
+          disabled={state === 'loading'}
+          onClick={(e) => {
+            // 可能被包在 Markdown 連結裡：按鈕只負責抓這張圖，不能順便把外層連結開出去（#1238）。
+            e.preventDefault()
+            e.stopPropagation()
+            load()
+          }}
+        >
           {state === 'loading' ? '載入中…' : '載入圖片'}
         </button>
       )}
