@@ -582,6 +582,26 @@ mod tests {
         assert_eq!(fork_bot_count(&e).await, before + 1);
     }
 
+    /// #1422：fork 在移交之前已經記下操作（還沒建 bot），移交之後同一個 client_request_id 重送：不能把它做完
+    /// （那會寫 config 建出一顆啟動不了的 bot），要 409 handed_off，操作本身不動。
+    #[tokio::test]
+    async fn a_replay_of_a_fork_recorded_before_the_handoff_is_refused_without_creating_the_bot() {
+        let e = env().await;
+        let src = source_bot(&e, "claude", "alfa", "user").await;
+        let target = db::ulid();
+        let mut op = planned_op(&src, &target);
+        op.client_request_id = "req-replay-handoff".into();
+        fork_ops::insert(&e.app.db, &op).await.unwrap();
+        sqlx::query("UPDATE projects SET handed_off_to = 'agm-host' WHERE id = (SELECT project_id FROM bots WHERE id = ?)").bind(&src).execute(&e.app.db).await.unwrap();
+        let before = fork_bot_count(&e).await;
+
+        assert_eq!(reason(fork_with(&e, &src, None, Some("req-replay-handoff")).await.unwrap_err()), "handed_off");
+        assert_eq!(fork_bot_count(&e).await, before, "config 沒有多出一顆 bot");
+        assert_eq!(fork_starts(&e), 0, "沒有啟動");
+        let saved = fork_ops::get(&e.app.db, "req-replay-handoff").await.unwrap().expect("操作還在");
+        assert_eq!(saved.state, "planned", "操作不動，收回之後還能接著做");
+    }
+
     /// #1359：fork 的 handler 在新 bot 已經出現、還沒啟動的那一瞬被 drop：脫離出去的工作照樣以 fork 參數啟動，
     /// 不留下一顆自稱接續脈絡、實際是空白對話的 bot。
     #[tokio::test]
