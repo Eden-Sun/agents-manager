@@ -515,7 +515,8 @@ pub async fn purge_deleted_bot_dirs(app: &(impl crate::capabilities::DataDir + c
         }
     }
     // 過期的與超出總量上限的一起收（review d77434c0 #2）；常駐的 daemon 另外由 `bot_trash::spawn_gc` 每天再跑一次。
-    let (expired, evicted) = crate::bot_trash::gc_with_cap(app.data_dir(), crate::bot_trash::keep_duration(), crate::bot_trash::MAX_BYTES);
+    let known = crate::bot_trash::known_bot_ids(app.db()).await;
+    let (expired, evicted) = crate::bot_trash::gc_once(app.data_dir(), crate::bot_trash::keep_duration(), crate::bot_trash::MAX_BYTES, &known).await;
     if expired > 0 || evicted > 0 {
         tracing::info!(expired, evicted, days = crate::bot_trash::KEEP_DAYS, "removed expired or over-cap bots-trash entries");
     }

@@ -37,8 +37,9 @@
             sqlx::query("UPDATE bots SET deleted_at = ? WHERE id = ?").bind(crate::db::now()).bind(&bot.id).execute(&self.env.app.db).await.unwrap();
             bot.id
         }
+        /// 搬進回收區的那支腳本（`move_in`）才有 `NAME=`；gc/還原的腳本也會列出 bot id（`KNOWN=`/`B=`），不能拿來算搬移。
         fn removed(&self, id: &str) -> usize {
-            self.calls.lock().unwrap().iter().filter(|s| s.contains("bots-trash") && s.contains(id)).count()
+            self.calls.lock().unwrap().iter().filter(|s| s.contains("NAME=") && s.contains(id)).count()
         }
         async fn row(&self, id: &str) -> Option<(Option<String>, i64, Option<String>)> {
             sqlx::query_as("SELECT purged_at, attempts, last_error FROM remote_bot_dir_purges WHERE bot_id = ?")

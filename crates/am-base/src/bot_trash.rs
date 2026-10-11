@@ -11,6 +11,7 @@
 
 
 use std::ffi::{OsStr, OsString};
+use std::collections::HashSet;
 use std::fs::File;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -184,21 +185,62 @@ pub fn restore_kind(data_dir: &Path, bot_id: &str, kind: Option<&str>, dir: &Pat
 #[cfg(any(test, feature = "test-hooks"))]
 pub fn entries(data_dir: &Path) -> Vec<(u128, PathBuf, u64)> {
     let Ok(root_dir) = open_root(data_dir) else { return Vec::new() };
-    entries_in(&root_dir).into_iter().map(|(ms, name, size)| (ms, root(data_dir).join(name), size)).collect()
+    entries_in(&root_dir, &known_in(data_dir)).into_iter().map(|(ms, name, size)| (ms, root(data_dir).join(name), size.unwrap_or(0))).collect()
 }
 
-fn entries_in(root_dir: &File) -> Vec<(u128, OsString, u64)> {
-    let mut out: Vec<(u128, OsString, u64)> = crate::trusted_open::read_dir_bound(root_dir)
+/// 回收區裡「我們放的」條目的毫秒：`<bot_id>.<毫秒>`，或 `<bot_id>.attachments.<毫秒>`／`<bot_id>.share_workspace.<毫秒>`。
+/// `<bot_id>` 必須是 DB 裡認得的 bot（`known`）：設定檔裡的 id 不一定是 ULID，所以不看形狀；`backups.1`、`X.1`
+/// 這種別人放的，名字的數字再小、再舊也不算（#1313）。
+fn owned_ms(name: &str, known: &HashSet<String>) -> Option<u128> {
+    let (id, rest) = name.split_once('.')?;
+    if !known.contains(id) {
+        return None;
+    }
+    let ms = match rest.rsplit_once('.') {
+        Some((kind, ms)) if kind == ATTACHMENTS || kind == SHARE_WORKSPACE => ms,
+        Some(_) => return None,
+        None => rest,
+    };
+    if ms.is_empty() || !ms.bytes().all(|b| b.is_ascii_digit()) {
+        return None;
+    }
+    ms.parse().ok()
+}
+
+/// DB 裡所有 bot 的 id（含已刪的：回收區裡還留著它們的東西）。含 `.` 或空白的 id 不可能是條目名的前綴，略過。
+/// 讀不到就回空的：空的認得清單＝這一輪什麼都不清（寧可晚清，不要誤刪）。
+pub async fn known_bot_ids(db: &sqlx::SqlitePool) -> HashSet<String> {
+    match sqlx::query_scalar::<_, String>("SELECT id FROM bots").fetch_all(db).await {
+        Ok(ids) => ids.into_iter().filter(|id| !id.is_empty() && !id.contains('.') && !id.chars().any(char::is_whitespace)).collect(),
+        Err(e) => {
+            tracing::warn!(error = %e, "could not list bot ids for the bots-trash gc; skipping this round");
+            HashSet::new()
+        }
+    }
+}
+
+/// 測試用：回收區裡每個 `<x>.<…>` 的 `<x>` 都當成認得的 bot（生產路徑用 [`known_bot_ids`]）。
+pub fn known_in(data_dir: &Path) -> HashSet<String> {
+    let Ok(root_dir) = open_root(data_dir) else { return HashSet::new() };
+    crate::trusted_open::read_dir_bound(&root_dir)
+        .unwrap_or_default()
+        .into_iter()
+        .filter_map(|e| e.name.to_str()?.split_once('.').map(|(id, _)| id.to_string()))
+        .collect()
+}
+
+fn entries_in(root_dir: &File, known: &HashSet<String>) -> Vec<(u128, OsString, Option<u64>)> {
+    let mut out: Vec<(u128, OsString, Option<u64>)> = crate::trusted_open::read_dir_bound(root_dir)
         .unwrap_or_default()
         .into_iter()
         .filter_map(|e| {
             if !e.is_dir && !e.is_symlink { return None; }
             let name = e.name.to_str()?;
-            let ms: u128 = name.rsplit_once('.')?.1.parse().ok()?;
+            let ms = owned_ms(name, known)?;
             let size = if e.is_dir {
-                crate::trusted_open::open_dir_entry_in(root_dir, &e.name).map(|dir| bound_dir_size(&dir)).unwrap_or(0)
+                crate::trusted_open::open_dir_entry_in(root_dir, &e.name).ok().and_then(|dir| bound_dir_size(&dir))
             } else {
-                e.size
+                Some(e.size)
             };
             Some((ms, e.name, size))
         })
@@ -207,14 +249,17 @@ fn entries_in(root_dir: &File) -> Vec<(u128, OsString, u64)> {
     out
 }
 
-fn bound_dir_size(dir: &File) -> u64 {
-    crate::trusted_open::read_dir_bound(dir).unwrap_or_default().into_iter().map(|entry| {
-        if entry.is_dir {
-            crate::trusted_open::open_dir_entry_in(dir, &entry.name).map(|child| bound_dir_size(&child)).unwrap_or(0)
+fn bound_dir_size(dir: &File) -> Option<u64> {
+    let mut total: u64 = 0;
+    for entry in crate::trusted_open::read_dir_bound(dir).ok()? {
+        let size = if entry.is_dir {
+            crate::trusted_open::open_dir_entry_in(dir, &entry.name).ok().and_then(|child| bound_dir_size(&child))?
         } else {
             entry.size
-        }
-    }).sum()
+        };
+        total = total.saturating_add(size);
+    }
+    Some(total)
 }
 
 /// 目錄佔用的位元組（遞迴，只算檔案；讀不到的當 0——清理的判斷寧可低估也不要因為一個壞檔就整批不清）。
@@ -292,25 +337,30 @@ fn sweep_leftovers(root_dir: &File) {
 /// 清掉放超過 `keep` 的（看名字裡的時間，不看 mtime：`rename` 不會更新目錄的 mtime）。
 #[cfg(any(test, feature = "test-hooks"))]
 pub fn gc(data_dir: &Path, keep: Duration) -> usize {
-    gc_with_cap(data_dir, keep, MAX_BYTES).0
+    gc_with_cap(data_dir, keep, MAX_BYTES, &known_in(data_dir)).0
 }
 
 /// 兩道一起跑：先清過期的，再看總量——還超過 `max_bytes` 就從**最舊的**開始清到降下來。
 /// 回傳 `(過期清掉幾份, 因為超量再清掉幾份)`。
-pub fn gc_with_cap(data_dir: &Path, keep: Duration, max_bytes: u64) -> (usize, usize) {
+pub fn gc_with_cap(data_dir: &Path, keep: Duration, max_bytes: u64, known: &HashSet<String>) -> (usize, usize) {
     let Ok(root_dir) = open_root(data_dir) else { return (0, 0) };
     sweep_leftovers(&root_dir);
     let cutoff = now_ms().saturating_sub(keep.as_millis());
-    let mut live: Vec<(u128, OsString, u64)> = Vec::new();
+    let mut live: Vec<(u128, OsString, Option<u64>)> = Vec::new();
     let (mut expired, mut evicted) = (0, 0);
-    for (ms, name, size) in entries_in(&root_dir) {
+    for (ms, name, size) in entries_in(&root_dir, known) {
         if ms <= cutoff && remove(&root_dir, &name) {
             expired += 1;
         } else {
             live.push((ms, name, size));
         }
     }
-    let mut total: u64 = live.iter().map(|(_, _, size)| *size).sum();
+    // 有一份量不到（`du`/讀目錄失敗）就不知道總量：這一輪只做過期，不憑不完整的數字淘汰（#1309）。
+    if live.iter().any(|(_, _, size)| size.is_none()) {
+        tracing::warn!("some bots-trash entries could not be measured; no size-based eviction this round");
+        return (expired, 0);
+    }
+    let mut total: u64 = live.iter().filter_map(|(_, _, size)| *size).sum();
     // 最舊的先走；最新那一份永遠留著（剛刪掉的那顆才是最可能要還原的，留著才有意義）。
     for (_, name, size) in live.iter().take(live.len().saturating_sub(1)) {
         if total <= max_bytes {
@@ -318,7 +368,7 @@ pub fn gc_with_cap(data_dir: &Path, keep: Duration, max_bytes: u64) -> (usize, u
         }
         if remove(&root_dir, name) {
             evicted += 1;
-            total = total.saturating_sub(*size);
+            total = total.saturating_sub(size.unwrap_or(0));
         }
     }
     if evicted > 0 {
@@ -327,13 +377,26 @@ pub fn gc_with_cap(data_dir: &Path, keep: Duration, max_bytes: u64) -> (usize, u
     (expired, evicted)
 }
 
+/// 定時清掉的一輪（`spawn_gc` 與開機清掃走的都是這一條）。
+pub async fn gc_once(data_dir: &Path, keep: Duration, max_bytes: u64, known: &HashSet<String>) -> (usize, usize) {
+    // 走目錄、刪目錄都是同步 IO，上萬檔或慢磁碟時會佔住 async worker、連計時器與 HTTP 都跟著停（#1308）：放到 blocking 執行緒上做。
+    let (data_dir, known) = (data_dir.to_path_buf(), known.clone());
+    tokio::task::spawn_blocking(move || gc_with_cap(&data_dir, keep, max_bytes, &known))
+        .await
+        .unwrap_or_else(|e| {
+            tracing::warn!(error = %e, "bots-trash gc task did not finish");
+            (0, 0)
+        })
+}
+
 /// 每天清一次：開機那一次之外，常駐好幾天的 daemon 也要收（review d77434c0 #2）。
 pub fn spawn_gc<H>(app: Arc<H>)
 where
-    H: crate::capabilities::DataDir + crate::capabilities::BgTasks + crate::capabilities::Shutdown + 'static,
+    H: crate::capabilities::DataDir + crate::capabilities::BgTasks + crate::capabilities::Shutdown + crate::capabilities::Db + 'static,
 {
     crate::background_loop::spawn_periodic(&app, "bots-trash gc", GC_EVERY, GC_EVERY, |app| async move {
-        let (expired, evicted) = gc_with_cap(app.data_dir(), keep_duration(), MAX_BYTES);
+        let known = known_bot_ids(crate::capabilities::Db::db(&*app)).await;
+        let (expired, evicted) = gc_once(app.data_dir(), keep_duration(), MAX_BYTES, &known).await;
         if expired > 0 || evicted > 0 {
             tracing::info!(expired, evicted, days = KEEP_DAYS, "daily bots-trash sweep");
         }
