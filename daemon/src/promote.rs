@@ -607,6 +607,36 @@ mod tests {
         Ok(serde_json::from_slice(&bytes).unwrap())
     }
 
+    /// #1425：專案已移交給別的主機、child 已經停了（只剩上次記下的 session 與 transcript）：promote 在複製對話、
+    /// 寫 config 之前就 409 handed_off。停了的 child 不需要 pane，所以以前會一路走到複製與寫 config，等啟動被擋才回收。
+    #[tokio::test]
+    async fn a_promote_in_a_handed_off_project_is_refused_before_anything_is_copied_or_written() {
+        let r = rig(true).await;
+        sqlx::query("UPDATE runs SET state = 'stopped', native_session_id = ?, transcript_path = ? WHERE bot_id = ?")
+            .bind(SID)
+            .bind(r.src().to_string_lossy().to_string())
+            .bind(&r.child)
+            .execute(&r.e.app.db)
+            .await
+            .unwrap();
+        // 移交狀態要寫進設定檔：projection 每次寫 config 都會照它重寫 projects 表，只改 DB 的話會在 promote 中途被洗掉。
+        let pid = r.e.project_id.clone();
+        r.e.app
+            .cfg
+            .update(move |c| {
+                c.projects.iter_mut().find(|p| p.id.as_deref() == Some(pid.as_str())).expect("rig 的專案在").handed_off_to = Some("agm-host".into());
+                Ok(())
+            })
+            .await
+            .unwrap();
+        sqlx::query("UPDATE projects SET handed_off_to = 'agm-host' WHERE id = ?").bind(&r.e.project_id).execute(&r.e.app.db).await.unwrap();
+
+        assert_eq!(reason(promote(&r, PromoteReq::default()).await.unwrap_err()), "handed_off");
+        assert!(!r.dest().exists(), "沒有複製對話");
+        assert!(cfg_bot_names(&r).await.is_empty(), "config 沒有新 bot");
+        assert_eq!(child_state(&r).await, (false, None), "child 的紀錄沒被動");
+    }
+
     #[tokio::test]
     async fn a_bot_token_cannot_promote_a_child() {
         let r = rig(true).await;
