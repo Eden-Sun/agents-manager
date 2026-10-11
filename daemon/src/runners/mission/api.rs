@@ -229,6 +229,9 @@ pub async fn post_mission(
         .map_err(up)?
         .filter(|p| p.deleted_at.is_none())
         .ok_or_else(|| LcError::NotFound("project".into()))?;
+    if let Some(host) = project.handed_off_to.as_deref() {
+        return Err(LcError::conflict("handed_off", json!({"project_id": project.id.clone(), "handed_off_to": host})));
+    }
     if project.host != crate::config::LOCAL_HOST {
         // 遠端要另外設計交付路徑，先明確拒絕。
         return Err(LcError::BadValue(json!({"error": "remote_not_supported", "host": project.host})));
@@ -950,6 +953,9 @@ pub async fn post_revise(
         .map_err(up)?
         .filter(|p| p.deleted_at.is_none())
         .ok_or_else(|| LcError::NotFound("project".into()))?;
+    if let Some(host) = project.handed_off_to.as_deref() {
+        return Err(LcError::conflict("handed_off", json!({"project_id": project.id.clone(), "handed_off_to": host})));
+    }
     if project.host != crate::config::LOCAL_HOST {
         return Err(LcError::BadValue(json!({"error": "remote_not_supported", "host": project.host})));
     }
@@ -1686,6 +1692,47 @@ mod tests {
             on_5h_limit: "switch".into(),
             max_rounds: Some(2),
         }
+    }
+
+    #[tokio::test]
+    async fn a_handed_off_project_cannot_create_a_mission() {
+        let env = crate::testing::env().await;
+        sqlx::query("UPDATE projects SET handed_off_to='mac' WHERE id=?").bind(&env.project_id).execute(&env.app.db).await.unwrap();
+
+        let err = post_mission(State(env.app.clone()), Path(env.project_id.clone()), Json(new_mission("handoff-create", "pr"))).await.unwrap_err();
+
+        assert!(matches!(err, LcError::Conflict(ref body) if body["reason"] == "handed_off"), "expected handoff refusal, got {err:?}");
+        let count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM missions WHERE project_id=?").bind(&env.project_id).fetch_one(&env.app.db).await.unwrap();
+        assert_eq!(count, 0, "拒絕後不新增 mission");
+    }
+
+    #[tokio::test]
+    async fn a_handed_off_project_cannot_create_a_revised_mission() {
+        let env = crate::testing::env().await;
+        let Json(parent) = post_mission(State(env.app.clone()), Path(env.project_id.clone()), Json(new_mission("handoff-parent", "pr"))).await.unwrap();
+        let parent_id = parent["id"].as_str().unwrap().to_owned();
+        sqlx::query("UPDATE missions SET completed_at=?, result_summary='done' WHERE id=?")
+            .bind(crate::db::now())
+            .bind(&parent_id)
+            .execute(&env.app.db)
+            .await
+            .unwrap();
+        sqlx::query("UPDATE projects SET handed_off_to='mac' WHERE id=?").bind(&env.project_id).execute(&env.app.db).await.unwrap();
+        let body = ReviseIn {
+            text: "續作".into(),
+            client_request_id: "handoff-revise".into(),
+            relay_from: None,
+            delivery_mode: None,
+            executor_kind: None,
+            on_5h_limit: None,
+            max_rounds: None,
+        };
+
+        let err = post_revise(State(env.app.clone()), Path(parent_id), HeaderMap::new(), Json(body)).await.unwrap_err();
+
+        assert!(matches!(err, LcError::Conflict(ref body) if body["reason"] == "handed_off"), "expected handoff refusal, got {err:?}");
+        let count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM missions WHERE project_id=?").bind(&env.project_id).fetch_one(&env.app.db).await.unwrap();
+        assert_eq!(count, 1, "拒絕後不新增續作 mission");
     }
 
     fn quota(fable_used: f64) -> Quota {
