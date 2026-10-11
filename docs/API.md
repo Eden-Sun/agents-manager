@@ -381,7 +381,7 @@ A 組與 `git/push` 標「待裁示」的原因：這幾支唯一的呼叫端是
 | 422 | `{"error":"bad_request","message":"..."}` | JSON body 語法正確但欄位型別不對／少必填欄位（axum 的 Json extractor）；handler 自己的 422 另見各端點 |
 | 401 | `{"error":"..."}` | token 錯 |
 | 403 | `{"error":"..."}` | Bot／service scope 不符、對端（只有 `/api/session`）／`Origin` 非本機；另有各端點自己的 403（例如 `read_only_pane`） |
-| 404 | `{"error":"not_found","what":"bot"\|"project"\|"run"\|"pane"\|"turn"\|"route"}` | 找不到；`route`＝`/api/*` 沒有這個端點（不帶 token 也一樣，不會掉到 SPA 的 index.html） |
+| 404 | `{"error":"not_found","what":"<資源名>"}` | 找不到。`what` 不是封閉列舉：常見的有 `bot`／`project`／`host`／`run`／`pane`／`turn`／`mission`／`identity`／`shell`／`attachment`，各端點另有自己的值（見各節）。用戶端只能拿它顯示，或比對**自己那支端點文件列出的值**，不要當封閉列舉。`route`＝`/api/*` 沒有這個端點（不帶 token 也一樣，不會掉到 SPA 的 index.html） |
 | 409 | `{"error":"conflict","reason":"<人類可讀>", ...extra}` | 狀態機衝突；extra 視情況含 `run_id` / `turn_id` / `bot_id` / `name` / `path` / `state` |
 | 502 | `{"error":"upstream","message":"..."}` | herdr / DB 出錯 |
 | 503 | `{"error":"starting","message":"daemon startup is still in progress"}` | listener 已開、daemon 尚未完成啟動；附 `Retry-After: 1`，稍後重試 |
@@ -779,7 +779,7 @@ codex 的 rollout 還沒寫出來時先放回等 3 次（只算這個原因，�
   遠端專案：同一組規則，路徑是那台的實體路徑；另外 409 `share_host_unreachable`（連不上；不留列、不建資料夾）、`share_claude_too_old`（帶 `found`、`min`；受限才查）、`share_managed_settings`（那台有 claude 的 managed settings；受限才查）。
   沒帶＝新資料夾、名字用 bot 名。`share_folder` 進冪等指紋。`model` 沒給＝最新 Opus（`/api/models` 當下列出的；只有別名時是 `opus`），寫進 bot 的 `model`。
   config 另有 `[share] folders_root`（可用 `~/`，必須在 daemon 資料目錄之外）。`GET /api/state` 的 bot 帶 `share_profile`（`"restricted"`／`"trusted"`／`null`）與 `share_enabled`（分享連結開著＝true）。
-- 分享使用者送來的訊息：`relay_from:"share"`、`source:"share"`（只在輸出；見 SPEC §20.3）。WS 多一種事件 `bot_share_changed {bot_id, enabled}`。
+- 分享使用者送來的訊息：`relay_from:"share"`、`source:"share"`（只在輸出；見 SPEC §20.3）。WS 多一種事件 `bot_share_changed {bot_id, enabled, allow_embed}`。
 
 分享入口（獨立 listener，`[share] listen`；token 錯／分享關了一律 `404 {"error":"not_found"}`）：
 
@@ -929,7 +929,7 @@ UI 標籤：`hook` 不標；`terminal_fallback` 或 `incomplete = 1` 標「終�
 | `supervisor_health` | 見「總管」一節 |
 | `supervisor_changed` | 總管面板的失效通知，`data` 是一個小物件、形狀依觸發原因而不同（`{"bot_id"}`、`{"assignment_id","status"}`、`{"summary_version"}`、`{"acked"}`、`{"ops_alert"}`、`{"deploy_now":{"sha"}}`、`{"remote":true}`…）；客戶端不要靠欄位判斷，收到就重拉自己開著的總管資料（「總管 AGM」一節） |
 | `mission_updated` | `{"mission_id","project_id","status"}`：任務狀態有變（「群組任務（mission）」一節） |
-| `bot_share_changed` | `{"bot_id","enabled"}`：這顆 bot 的分享連結開／關／重產（§5.6、SPEC §20）；只告訴前端重畫分享鈕，不帶連結 |
+| `bot_share_changed` | `{"bot_id","enabled","allow_embed"}`：這顆 bot 的分享連結開／關／重產（§5.6、SPEC §20）；只告訴前端重畫分享鈕，不帶連結。`allow_embed`＝這條連結現在允不允許 `<iframe>` 嵌入（關閉時一律 `false`） |
 | `bot_read` | `{"bot_id","read_mark":{"at","id","seq"?},"unread"}`：已讀標記前進了（`POST /api/bots/{id}/read`，同樣的標記再送、較舊的不推）；其他分頁／裝置收到就重拉 state |
 | `group_read` | `{"project_id","read_mark":{"at","id","seq"?},"unread"}`：群組已讀標記前進了（`POST /api/projects/{id}/group/read`），規則同 `bot_read` |
 | `deploy_wait` | `{"wait": <wait 物件>, "first": boolean}`：部署等待換版窗口的通知／狀態變了（`first:true`＝第一次通知）；見「部署等太久：通知與調度」、SPEC §18.10 |
@@ -2451,6 +2451,7 @@ WS `upstream_update`：快照有變或要通知時推，`data` ＝上面一筆 i
 
 - `GET /api/judge/settings` → `{enabled, projects, model, key_present, key_error}`。key 永遠不回。
 - `PUT /api/judge/settings {enabled?, projects?, token?}` → 同上。`token` 非空＝寫進 key 檔（600）、空或省略＝不動；`projects` 是專案 id 或 label，去空白、去重；`enabled:true` 而沒有可用的 key → 409 `{error:"needs_key", reason}`；`token` 含空白／控制字元 → 400。存檔當下生效。token 與 `enabled`／`projects` 一起存是一個整體：token 先寫成暫存檔（600），config 寫成功才原子換掉現行 key；config 失敗（5xx）舊 key 與 config 都不變，換 key 失敗則把 config 退回原值。
+- `POST /api/judge/collision-check {issue?, title, child, branch?}` → `202 {queued:true}`，不等 Jev。bot 認領票時問一次撞題（`agm issue claim` 的呼叫端）：只記帳本、推提示，**不擋認領**。只給驗過的 bot（`X-AM-Bot-Id`＋token）：沒帶或驗不過 → `403 {error:"forbidden", reason:"bot_only", message}`；`title`／`child` 去頭尾空白後不能是空的、`title`／`child`／`branch` 各最多 500 字 → `400`。專案從呼叫端 bot 查，不從 body 拿；Jev 沒開（`judge.enabled` 為 false）就什麼都不寫進帳本。
 
 ## 上游新版分診 `/api/release-triage/*`（SPEC §18.2c，issue #204）
 
