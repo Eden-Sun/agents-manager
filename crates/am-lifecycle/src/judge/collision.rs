@@ -1445,9 +1445,10 @@ mod tests {
     }
 
     /// #1330：認領時的撞題。候選＝呼叫端專案裡、`child` 以外的在跑工作。
-    async fn claim_setup(app: &Arc<App>, project: &str, sibling_title: &str) -> (db::Bot, db::Bot) {
+    /// sibling 的工作目錄放在呼叫端的 `dir`（`Rig` 的暫存目錄，`Rig::drop` 會刪），不碰系統暫存目錄（#1387）。
+    async fn claim_setup(app: &Arc<App>, project: &str, dir: &std::path::Path, sibling_title: &str) -> (db::Bot, db::Bot) {
         let parent = tt::claude_bot(app, project, "parent").await;
-        let wt = std::env::temp_dir().join(format!("am-claim-sib-{}", db::ulid()));
+        let wt = dir.join("claim-sib");
         std::fs::create_dir_all(&wt).unwrap();
         child(app, project, &parent.id, "sib", wt.to_str().unwrap(), sibling_title).await;
         let newbie = tt::claude_bot(app, project, "newbie").await;
@@ -1470,7 +1471,7 @@ mod tests {
     async fn a_claim_at_or_above_half_hints_once_per_pair_and_never_blocks() {
         let rig = stand(Mode::Noul(0.72), true, true).await;
         let app = rig.env.app.clone();
-        let (parent, _newbie) = claim_setup(&app, &rig.env.project_id, "卡住的畫面判斷 #1330").await;
+        let (parent, _newbie) = claim_setup(&app, &rig.env.project_id, &rig.dir, "卡住的畫面判斷 #1330").await;
         let ask = || claim_ask(&rig.env.project_id, &parent.id, "newbie");
         check_claim(&app, &ask()).await.unwrap();
         let rows = shadow_rows(&app).await;
@@ -1486,7 +1487,7 @@ mod tests {
     async fn a_claim_below_half_only_lands_in_the_ledger() {
         let rig = stand(Mode::Noul(0.3), true, true).await;
         let app = rig.env.app.clone();
-        let (parent, _newbie) = claim_setup(&app, &rig.env.project_id, "卡住的畫面判斷 #1330").await;
+        let (parent, _newbie) = claim_setup(&app, &rig.env.project_id, &rig.dir, "卡住的畫面判斷 #1330").await;
         check_claim(&app, &claim_ask(&rig.env.project_id, &parent.id, "newbie")).await.unwrap();
         assert_eq!(shadow_rows(&app).await.len(), 1, "帳本照寫");
         assert!(inbox(&app).await.is_empty(), "<0.5 不推提示");
@@ -1497,7 +1498,7 @@ mod tests {
         for (enabled, listed) in [(false, true), (true, false)] {
             let rig = stand(Mode::Noul(0.9), enabled, listed).await;
             let app = rig.env.app.clone();
-            let (parent, _newbie) = claim_setup(&app, &rig.env.project_id, "卡住的畫面判斷 #1330").await;
+            let (parent, _newbie) = claim_setup(&app, &rig.env.project_id, &rig.dir, "卡住的畫面判斷 #1330").await;
             check_claim(&app, &claim_ask(&rig.env.project_id, &parent.id, "newbie")).await.unwrap();
             assert!(rig.seen.lock().unwrap().is_empty(), "enabled={enabled} listed={listed}：不問");
             assert!(shadow_rows(&app).await.is_empty(), "enabled={enabled} listed={listed}：不寫帳本");
@@ -1508,7 +1509,7 @@ mod tests {
     async fn a_claim_never_compares_the_child_with_its_own_running_work() {
         let rig = stand(Mode::Noul(0.9), true, true).await;
         let app = rig.env.app.clone();
-        let (parent, newbie) = claim_setup(&app, &rig.env.project_id, "別的工作 #77").await;
+        let (parent, newbie) = claim_setup(&app, &rig.env.project_id, &rig.dir, "別的工作 #77").await;
         let own_run = tt::fake_run(&app, &newbie.id).await;
         sqlx::query("UPDATE runs SET agent_title=? WHERE id=?").bind("修卡住的畫面判斷 自己的 SELF-1330").bind(&own_run).execute(&app.db).await.unwrap();
         crate::supervisor::store::insert_assignment(&app.db, None, &newbie.id, "own-1330", "SELF-ASSIGNMENT 還沒驗收", &[], None, true).await.unwrap();
@@ -1523,7 +1524,7 @@ mod tests {
     async fn a_claim_whose_child_is_not_a_bot_here_is_recorded_under_the_caller() {
         let rig = stand(Mode::Noul(0.9), true, true).await;
         let app = rig.env.app.clone();
-        let (parent, _newbie) = claim_setup(&app, &rig.env.project_id, "卡住的畫面判斷 #1330").await;
+        let (parent, _newbie) = claim_setup(&app, &rig.env.project_id, &rig.dir, "卡住的畫面判斷 #1330").await;
         check_claim(&app, &claim_ask(&rig.env.project_id, &parent.id, "ghost-child")).await.unwrap();
         let bot: String = sqlx::query_scalar("SELECT bot_id FROM judge_shadow WHERE regex_verdict='same_work' LIMIT 1").fetch_one(&app.db).await.unwrap();
         assert_eq!(bot, parent.id, "對不上 bot 時記在呼叫端名下");
