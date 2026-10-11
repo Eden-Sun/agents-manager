@@ -23,9 +23,9 @@ test('收合的格子不吃標題列剩下的寬度：flex 不 grow、也不寫�
   assert.doesNotMatch(body, /\bwidth:/, '收合的格子不寫死寬度')
 })
 
-test('收合的額度列靠右，剩下的寬度留在格子外（不在框裡）', () => {
+test('收合的額度列靠左貼著標題，剩下的寬度留在最右（不在框裡、也不在標題與額度之間，#1269）', () => {
   const body = ruleBody('.main-head .quota-open.collapsed')
-  assert.match(body, /justify-content:\s*flex-end;/)
+  assert.match(body, /justify-content:\s*flex-start;/)
 })
 
 test('收合的圖示欄跟內容等寬：左內距只剩格子自己的 7px（不再有 3.2em 的空欄）', () => {

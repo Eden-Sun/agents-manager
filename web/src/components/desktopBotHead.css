@@ -1,5 +1,6 @@
 /* 桌機 `.bot-head` 名字截太早、量表前卻有空白（2026-09-11 使用者截圖）：`align-items: flex-start` 讓兩行只取內容寬，
-   `.main-title` 搶回的寬度沒人用。改 stretch，名字與 pane id 改 `flex: 1 1 auto`，名字 `max-width: 22em` 防撐成空按鈕。
+   `.main-title` 搶回的寬度沒人用。改 stretch。名字 `max-width: 22em` 防撐成空按鈕；名字與 pane id 只縮不長
+   （`0 1 auto`）：長了會把 ★⚙ 與名字之間撐出一大段空白（#1269）。
    styles.css 的 min-width 下限不動（分頁 > 名字的優先序）。量測與截圖：`docs/screenshots/desktop-head/`。 */
 .bot-head .main-title {
   align-items: stretch;
@@ -8,12 +9,12 @@
 .bot-head .main-title-row > strong,
 .bot-head .main-title-row > .bot-name-btn,
 .bot-head .main-title-row > .bot-name-input {
-  flex: 1 1 auto;
+  flex: 0 1 auto;
   max-width: 22em;
 }
 
 .bot-head .main-title-sub > .main-status.pane-toggle {
-  flex: 1 1 auto;
+  flex: 0 1 auto;
 }
 
 /* 額度格水平內距收一點（2026-09-11 使用者：「全顯示」不翻案，但留白可收），讓給名字／pane id；垂直 3px 不動。 */
@@ -104,10 +105,12 @@
   }
 }
 
-/* 名字那一塊改固定寬（2026-09-16 使用者：名字＋★⚙ 固定，剩下的全給額度均分）。 */
+/* 名字那一塊只佔內容寬（2026-10-11 #1269：原本固定 18em，名字與 ★⚙ 之間、@m4p 與額度之間都是它吃掉的空白，
+   額度列反而被擠成收合）。上限仍是 18em：名字再長也不把額度列擠出去，超出的名字照常截尾。 */
 @media (width > 1024px) {
   .bot-head .main-title {
-    flex: 0 0 18em;
+    flex: 0 0 auto;
     min-width: 0;
+    max-width: 18em;
   }
 }

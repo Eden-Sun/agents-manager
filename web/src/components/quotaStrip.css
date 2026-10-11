@@ -1024,10 +1024,11 @@
     min-width: max-content;
   }
 
-  /* 收合時格子照內容寬（框貼著內容，#1268）：標題列剩下的寬度留在格子外面、靠右排，不再平分進每格的框裡。 */
+  /* 收合時格子照內容寬（框貼著內容，#1268）：標題列剩下的寬度留在格子外面，不平分進每格的框裡；
+     靠左貼著標題排，不然剩下的寬度會變成標題與額度之間的空白（#1269）。 */
   .main-head .quota-open.collapsed {
     overflow-x: clip;
-    justify-content: flex-end;
+    justify-content: flex-start;
   }
 
   .main-head .quota-open.collapsed .quota-hp {
