@@ -164,6 +164,7 @@ static LAST_TURN_SQL: LazyLock<String> = LazyLock::new(|| {
          ORDER BY k.rowid DESC LIMIT 1) AS keep_warm_replied_at
      FROM conversations c
      JOIN turns t ON t.id = (SELECT id FROM turns WHERE conversation_id = c.id AND status != 'queued'
+                              AND NOT (status = 'failed' AND delivery = 'failed')
                               AND (client_request_id IS NULL OR NOT {kw_t})
                               ORDER BY created_at DESC, rowid DESC LIMIT 1)"
     )
@@ -287,14 +288,14 @@ mod tests {
         sqlx::query(
             "CREATE TABLE conversations (id TEXT PRIMARY KEY, bot_id TEXT NOT NULL);
              CREATE TABLE turns (id TEXT PRIMARY KEY, conversation_id TEXT NOT NULL, status TEXT NOT NULL,
-                                 created_at TEXT NOT NULL, completed_at TEXT, client_request_id TEXT);
+                                 created_at TEXT NOT NULL, completed_at TEXT, client_request_id TEXT, delivery TEXT NOT NULL DEFAULT 'pending');
              CREATE TABLE messages (id TEXT PRIMARY KEY, conversation_id TEXT NOT NULL, role TEXT NOT NULL,
                                     content TEXT NOT NULL, created_at TEXT NOT NULL);
              CREATE TABLE keep_warm_skip (bot_id TEXT PRIMARY KEY, since TEXT NOT NULL);
              INSERT INTO conversations VALUES ('c1','b1'),('c2','b2'),('c3','b3'),('c4','b4'),('c5','b5'),('c6','b6');
              INSERT INTO keep_warm_skip VALUES ('b4','2026-10-04T11:30:00.000Z');
              -- 「之後」以寫入順序（rowid）判：t3 要排在 k1 後面插入。
-             INSERT INTO turns VALUES
+             INSERT INTO turns (id, conversation_id, status, created_at, completed_at, client_request_id) VALUES
                ('t1','c1','completed','2026-10-04T10:00:00.000Z','2026-10-04T10:05:00.000Z',NULL),
                ('t2','c1','completed','2026-10-04T11:00:00.000Z','2026-10-04T11:04:00.000Z',NULL),
                ('t4','c2','in_flight','2026-10-04T11:50:00.000Z',NULL,NULL),
@@ -347,7 +348,7 @@ mod tests {
         sqlx::query(
             "CREATE TABLE conversations (id TEXT PRIMARY KEY, bot_id TEXT NOT NULL);
              CREATE TABLE turns (id TEXT PRIMARY KEY, conversation_id TEXT NOT NULL, status TEXT NOT NULL,
-                                 created_at TEXT NOT NULL, completed_at TEXT, client_request_id TEXT);
+                                 created_at TEXT NOT NULL, completed_at TEXT, client_request_id TEXT, delivery TEXT NOT NULL DEFAULT 'pending');
              CREATE TABLE messages (id TEXT PRIMARY KEY, conversation_id TEXT NOT NULL, role TEXT NOT NULL,
                                     content TEXT NOT NULL, created_at TEXT NOT NULL);
              CREATE TABLE keep_warm_skip (bot_id TEXT PRIMARY KEY, since TEXT NOT NULL);
@@ -365,7 +366,7 @@ mod tests {
         let pool = bare_pool().await;
         // 'tz' 先寫、'ta' 後寫；'tz' > 'ta'（字典序故意相反）。
         sqlx::query(
-            "INSERT INTO turns VALUES
+            "INSERT INTO turns (id, conversation_id, status, created_at, completed_at, client_request_id) VALUES
                ('tz','c','completed','2026-10-04T11:00:00.000Z','2026-10-04T11:01:00.000Z',NULL),
                ('ta','c','failed','2026-10-04T11:00:00.000Z','2026-10-04T11:02:00.000Z',NULL);",
         )
@@ -380,7 +381,7 @@ mod tests {
     async fn keep_warm_reply_then_same_millisecond_user_turn_clears_the_badge() {
         let pool = bare_pool().await;
         sqlx::query(
-            "INSERT INTO turns VALUES
+            "INSERT INTO turns (id, conversation_id, status, created_at, completed_at, client_request_id) VALUES
                ('t0','c','completed','2026-10-04T10:00:00.000Z','2026-10-04T10:05:00.000Z',NULL),
                ('k','c','completed','2026-10-04T11:00:00.000Z','2026-10-04T11:01:00.000Z','keep-warm:a'),
                ('u','c','completed','2026-10-04T11:00:00.000Z','2026-10-04T11:02:00.000Z',NULL);",
@@ -392,11 +393,33 @@ mod tests {
         assert_eq!(last.keep_warm_replied_at, None);
     }
 
+    /// #1284：一個字都沒送進 CLI 的回合（撤回排隊、退避用完：status=failed、delivery=failed）不是 API 活動，
+    /// 它的 `completed_at` 是收掉的時間，不是模型回話的時間；被它蓋住的那一輪（x）要照常算。
+    #[tokio::test]
+    async fn a_turn_that_never_reached_the_cli_is_not_the_last_activity() {
+        let pool = bare_pool().await;
+        sqlx::query(
+            "INSERT INTO turns (id, conversation_id, status, created_at, completed_at, client_request_id, delivery) VALUES
+               ('x','c','completed','2026-10-04T10:00:00.000Z','2026-10-04T13:00:00.000Z',NULL,'ok'),
+               ('y','c','failed','2026-10-04T10:05:00.000Z','2026-10-04T10:06:00.000Z',NULL,'failed');",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+        let last = last_turn_for_bot(&pool, "b").await.unwrap().unwrap();
+        assert_eq!((last.status.as_str(), last.completed_at.as_deref()), ("completed", Some("2026-10-04T13:00:00.000Z")));
+
+        // 送出去之後才失敗（delivery 不是 failed，例如 StopFailure）照舊算活動。
+        sqlx::query("UPDATE turns SET delivery = 'ok' WHERE id = 'y'").execute(&pool).await.unwrap();
+        let last = last_turn_for_bot(&pool, "b").await.unwrap().unwrap();
+        assert_eq!((last.status.as_str(), last.completed_at.as_deref()), ("failed", Some("2026-10-04T10:06:00.000Z")));
+    }
+
     #[tokio::test]
     async fn user_turn_then_same_millisecond_keep_warm_reply_keeps_the_badge() {
         let pool = bare_pool().await;
         sqlx::query(
-            "INSERT INTO turns VALUES
+            "INSERT INTO turns (id, conversation_id, status, created_at, completed_at, client_request_id) VALUES
                ('t0','c','completed','2026-10-04T10:00:00.000Z','2026-10-04T10:05:00.000Z',NULL),
                ('u','c','completed','2026-10-04T11:00:00.000Z','2026-10-04T11:02:00.000Z',NULL),
                ('k','c','completed','2026-10-04T11:00:00.000Z','2026-10-04T11:01:00.000Z','keep-warm:a');",
