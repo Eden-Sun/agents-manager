@@ -357,6 +357,8 @@ pub const SCHEMA_HISTORY: &[(i64, &str)] = &[
     (53, "27e8089933d86980"),
     // issue #1329：`release_triage_issue_creates`（24 小時配額只掃索引摘要，不解碼整份歷史帳本）。
     (54, "0761ab4fd4f7886e"),
+    // issue #1320：`projects.host`／`deleted_at` 的 trigger 把舊主機還欠著的已刪 bot 義務寫進 `remote_bot_dir_purges`。
+    (55, "3337f703704eed22"),
 ];
 pub const SCHEMA_VERSION: i64 = SCHEMA_HISTORY[SCHEMA_HISTORY.len() - 1].0;
 

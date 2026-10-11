@@ -15,6 +15,30 @@ pub const POLL_EVERY: Duration = Duration::from_secs(5 * 60);
 /// 一輪最多處理幾顆：舊的軟刪 bot 一次全清會佔住連線很久，剩下的下一輪接著做。
 const PER_SWEEP: i64 = 100;
 
+/// 專案搬到別台（`projects.host` 改掉）的當下，把**舊主機上**還欠著清理的已刪 bot 的義務寫進來（#1320）。
+/// 義務只從 `projects.host` 推，搬了家就找不到舊主機上的目錄。寫入 `projects.host` 的地方很多（投影、移交、repoint…），
+/// 用 trigger 蓋住，漏一處就漏清。已經有記號的（欠著或已清）不動：同一顆 bot 只記一次，搬來搬去不重複寫。
+const OWE_ON_HOST_MOVE: &str = "CREATE TRIGGER remote_bot_dir_purge_owed_on_host_move AFTER UPDATE OF host ON projects
+  WHEN OLD.host IS NOT NEW.host AND OLD.host <> 'local'
+BEGIN
+  INSERT INTO remote_bot_dir_purges (bot_id, host, purged_at, attempts, last_error, next_attempt_at, updated_at)
+  SELECT b.id, OLD.host, NULL, 0, NULL, NULL, strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
+    FROM bots b
+   WHERE b.project_id = NEW.id AND b.deleted_at IS NOT NULL
+     AND NOT EXISTS (SELECT 1 FROM remote_bot_dir_purges r WHERE r.bot_id = b.id);
+END";
+
+/// 專案被軟刪的當下，已刪的 bot 的義務記在它當時的主機上（#1320）。同一顆 bot 只記一次。
+const OWE_ON_PROJECT_DELETE: &str = "CREATE TRIGGER remote_bot_dir_purge_owed_on_project_delete AFTER UPDATE OF deleted_at ON projects
+  WHEN OLD.deleted_at IS NULL AND NEW.deleted_at IS NOT NULL AND NEW.host <> 'local'
+BEGIN
+  INSERT INTO remote_bot_dir_purges (bot_id, host, purged_at, attempts, last_error, next_attempt_at, updated_at)
+  SELECT b.id, NEW.host, NULL, 0, NULL, NULL, strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
+    FROM bots b
+   WHERE b.project_id = NEW.id AND b.deleted_at IS NOT NULL
+     AND NOT EXISTS (SELECT 1 FROM remote_bot_dir_purges r WHERE r.bot_id = b.id);
+END";
+
 pub async fn migrate(pool: &SqlitePool) -> Result<()> {
     sqlx::query(
         "CREATE TABLE IF NOT EXISTS remote_bot_dir_purges (
@@ -29,6 +53,10 @@ pub async fn migrate(pool: &SqlitePool) -> Result<()> {
     )
     .execute(pool)
     .await?;
+    // trigger 要在表建好之後裝；`sync_trigger` 內容不同就換掉，舊庫也會拿到（#1320）。
+    let mut conn = pool.acquire().await?;
+    crate::db::sync_trigger(&mut conn, "remote_bot_dir_purge_owed_on_host_move", OWE_ON_HOST_MOVE).await?;
+    crate::db::sync_trigger(&mut conn, "remote_bot_dir_purge_owed_on_project_delete", OWE_ON_PROJECT_DELETE).await?;
     Ok(())
 }
 
@@ -40,8 +68,9 @@ pub async fn record(app: &impl crate::capabilities::Db, bot_id: &str, host: &str
         sqlx::query(
             "INSERT INTO remote_bot_dir_purges (bot_id, host, purged_at, attempts, last_error, next_attempt_at, updated_at)
              VALUES (?, ?, ?, 0, NULL, NULL, ?)
-             ON CONFLICT(bot_id) DO UPDATE SET host = excluded.host, purged_at = excluded.purged_at, last_error = NULL,
-               next_attempt_at = NULL, updated_at = excluded.updated_at",
+             ON CONFLICT(bot_id) DO UPDATE SET purged_at = excluded.purged_at, last_error = NULL,
+               next_attempt_at = NULL, updated_at = excluded.updated_at
+             WHERE remote_bot_dir_purges.host = excluded.host",
         )
         .bind(bot_id)
         .bind(host)
@@ -53,9 +82,9 @@ pub async fn record(app: &impl crate::capabilities::Db, bot_id: &str, host: &str
         sqlx::query(
             "INSERT INTO remote_bot_dir_purges (bot_id, host, purged_at, attempts, last_error, next_attempt_at, updated_at)
              VALUES (?, ?, NULL, 1, ?, ?, ?)
-             ON CONFLICT(bot_id) DO UPDATE SET host = excluded.host, attempts = attempts + 1, last_error = excluded.last_error,
+             ON CONFLICT(bot_id) DO UPDATE SET attempts = attempts + 1, last_error = excluded.last_error,
                next_attempt_at = excluded.next_attempt_at, updated_at = excluded.updated_at
-             WHERE purged_at IS NULL",
+             WHERE purged_at IS NULL AND remote_bot_dir_purges.host = excluded.host",
         )
         .bind(bot_id)
         .bind(host)
@@ -70,20 +99,22 @@ pub async fn record(app: &impl crate::capabilities::Db, bot_id: &str, host: &str
     }
 }
 
-/// 這台遠端主機欠著清理的 bot（軟刪、專案在這台、沒有已清掉的記號）。讀不到就回錯，呼叫端什麼都不刪。
-/// 沒試過的先來；試過失敗的依 `next_attempt_at` 排到後面（#1318）：永遠失敗的前幾顆不能每一輪都佔住名額，
-/// 後面的就永遠排不到。`due_only` 為真時退避中（還沒到 `next_attempt_at`）的不列（定期掃描用）；
+/// 這台遠端主機欠著清理的 bot（軟刪、沒有已清掉的記號，且歸屬在這台）。讀不到就回錯，呼叫端什麼都不刪。
+/// 歸屬看記號（#1320）：有記號的只歸記在這台的（搬家後舊主機的仍歸舊主機）；還沒有記號的才看專案現在在哪台。
+/// 沒試過的先來；試過失敗的依 `next_attempt_at` 排到後面（#1318）。`due_only` 為真時退避中的不列（定期掃描用）；
 /// 為假就全部列出（主機剛連上時用，連上就是重試的時機）。
 pub async fn pending(pool: &SqlitePool, host: &str, due_only: bool) -> Result<Vec<String>> {
     Ok(sqlx::query_scalar(
         "SELECT b.id FROM bots b
            JOIN projects p ON p.id = b.project_id
            LEFT JOIN remote_bot_dir_purges r ON r.bot_id = b.id
-          WHERE p.host = ? AND b.deleted_at IS NOT NULL
-            AND (r.bot_id IS NULL OR (r.purged_at IS NULL AND (? = 0 OR r.next_attempt_at IS NULL OR r.next_attempt_at <= ?)))
+          WHERE b.deleted_at IS NOT NULL
+            AND ((r.bot_id IS NULL AND p.host = ?)
+                 OR (r.host = ? AND r.purged_at IS NULL AND (? = 0 OR r.next_attempt_at IS NULL OR r.next_attempt_at <= ?)))
           ORDER BY (r.next_attempt_at IS NOT NULL), r.next_attempt_at, b.id
           LIMIT ?",
     )
+    .bind(host)
     .bind(host)
     .bind(due_only as i64)
     .bind(crate::db::now())
