@@ -977,7 +977,10 @@ pub async fn detect_with_fence<H: ToolsEnv>(app: &Arc<H>, host: &str, fence: &cr
         Ok(out) => out,
         Err(e) => {
             // 連不上／逾時：留著的舊 baseline 標上失敗（不能讓它看起來像剛量的），並推給網頁。
-            crate::host_baseline::note_failure(&**app, host, &e).await;
+            // 這次偵測開始後主機已重連／改指：它的失敗不是現在這台的事，不能把新連線量到的結果標成過期（同 #347 的成功路徑，#1371）。
+            if app.hosts().is_current(fence).await {
+                crate::host_baseline::note_failure(&**app, host, &e).await;
+            }
             H::host_changed(app, fence).await;
             return Err(e);
         }
