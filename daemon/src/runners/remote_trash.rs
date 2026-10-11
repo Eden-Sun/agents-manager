@@ -99,7 +99,15 @@ async fn restore_pending(app: &Arc<App>, host: &str, conn: &crate::hosts::HostCo
             continue;
         };
         match crate::db::bot(&app.db, id).await {
-            Ok(Some(b)) if b.deleted_at.is_none() => {}
+            Ok(Some(b)) if b.deleted_at.is_none() => match crate::db::project(&app.db, &b.project_id).await {
+                Ok(Some(p)) if p.handed_off_to.is_none() => {}
+                Ok(_) => continue,
+                Err(e) => {
+                    tracing::warn!(host, bot = %id, error = %e, "could not re-read project handoff before restoring; leaving the remote backup untouched");
+                    out.failed.insert(id.clone());
+                    continue;
+                }
+            },
             Ok(_) => continue,
             Err(e) => {
                 tracing::warn!(host, bot = %id, error = %e, "could not re-read whether a bot is still live; not restoring it");
