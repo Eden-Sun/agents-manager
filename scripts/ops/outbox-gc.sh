@@ -86,7 +86,9 @@ share_prune() {
 # 分享名單（#1291）：哪些 bot 現在真的在分享，只看 daemon 的資料庫（`shared_bots`，且 bot 與專案都沒刪；與 daemon 的 is_active_share 同一條查詢），
 # 不看 outbox 裡的標記檔。標記檔放在 bot 自己寫得到的 outbox 裡，bot 建一個就能拿到分享的保留期與上限；DB 只有 daemon 會寫。
 # 名單讀不到（沒有 DB、sqlite3 失敗、被鎖住）就整輪不刪、記錯誤退出：寧可多留，不可把分享中的檔清掉。
-SHARE_DB="$(dirname "$OUTBOX_BASE")/db.sqlite3"
+# 檔名要跟 daemon 寫的帳本檔一致：`agents-manager.sqlite3`（daemon 的 startup.rs、release_triage::default_db_path）。#1291 誤寫成 db.sqlite3，
+# 讀不到名單就整輪拒絕，outbox 停擺（#1391）；測試的 fixture 用同一個真實檔名，寫錯測試會紅。
+SHARE_DB="$(dirname "$OUTBOX_BASE")/agents-manager.sqlite3"
 SHARE_SQL="SELECT r.bot_id FROM shared_bots r JOIN bots b ON b.id = r.bot_id AND b.deleted_at IS NULL JOIN projects p ON p.id = b.project_id AND p.deleted_at IS NULL;"
 [ -f "$SHARE_DB" ] || { echo "$(date '+%F %T') 拒絕整輪清理：讀不到分享名單（$SHARE_DB 不存在），什麼都不刪" >> "$LOG"; exit 1; }
 SHARE_IDS=$(sqlite3 -cmd '.timeout 5000' -batch -readonly "$SHARE_DB" "$SHARE_SQL" 2>> "$LOG") \
