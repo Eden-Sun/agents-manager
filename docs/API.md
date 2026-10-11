@@ -2816,10 +2816,11 @@ CLI：`agents-managerd release-triage-check --kind <claude|codex> [--since <ver>
   "delivery_mode": "push_main" | "pr", "executor_kind": "claude" | "codex" | "grok", "on_5h_limit": "wait" | "switch",
   "max_rounds": 2, "rounds_used": 0, "paused_reason": null, "paused_detail": null, "result_summary": null,
   "status": "open" | "paused" | "done" | "cancelled",
-  "created_at": "…", "updated_at": "…", "completed_at": null, "cancelled_at": null }
+  "created_at": "…", "updated_at": "…", "completed_at": null, "cancelled_at": null, "parent_mission_id": null }
 ```
 
 `status` 是從欄位算的（`cancelled_at` → `cancelled`、`completed_at` → `done`、`paused_reason` → `paused`、其餘 `open`）。
+`parent_mission_id`＝這筆是哪一筆的續作（`revise` 建的；不是續作是 `null`）；`request_fingerprint` 是建立請求的冪等指紋（內部用，呼叫端忽略；指紋出現以前的舊列是 `null`），物件裡有、範例省略。
 `GET /api/missions/{id}` 與清單多兩個欄位，都從該任務的 assignments 推導（不另存一份狀態）：
 
 - `phase`：`done | cancelled | paused` 同 `status`；其餘看**最新一件還開著的交辦**——`executing`／`reviewing`／`verifying`（依 `role`），
@@ -2854,8 +2855,10 @@ CLI：`agents-managerd release-triage-check --kind <claude|codex> [--since <ver>
 - 不屬於任何任務的交辦，行為與先前完全相同。
 
 事件（`GET /api/missions/{id}` 的 `events[]`，也是群組時間軸上這個任務的那一串）：
-`{id, mission_id, kind, text, relay_from, payload_json, created_at}`，
-`kind ∈ instruction | report | note | verified | round | paused | resumed | cancelled | delivered | completed`。
+`{id, mission_id, kind, text, relay_from, payload_json, reply_to, client_request_id, request_fingerprint, created_at}`，
+`kind ∈ instruction | report | note | verified | round | paused | resumed | cancelled | delivered | completed | question | answer`（`question`／`answer` 是 `POST …/question`、`POST …/answer` 寫的追問與回覆，兩者都在 `events[]` 裡）。
+`reply_to`＝指回它回的那一則 `question` 事件的 id：bot／AGM 的 `answer` 一定帶，使用者的 `answer` 可以帶可以不帶，其他種類是 `null`；網頁的追問配對靠它。
+`client_request_id`／`request_fingerprint` 只有 `question`／`answer` 有值（冪等鍵與請求指紋），其他種類是 `null`。
 `round` 與 `verified` 的 payload 帶 `after_assignment`（寫下時這個任務最後一件交辦的 id，沒有就是 `null`），用來判斷之後的交辦屬於哪一代；
 `verified` 另帶 `generation` 與給了的 `worktree`。`completed` 的 payload 帶 `delivery`（見 `complete`）。
 `relay_from`：`null` = User principal（只有 `instruction`），bot id = 那顆 Bot principal，`"daemon"` = daemon 自己記的。
