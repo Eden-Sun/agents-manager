@@ -336,3 +336,58 @@
             sqlx::query_as("SELECT purged_at, attempts FROM remote_bot_dir_purges WHERE bot_id = ?").bind(&bot.id).fetch_one(&app.db).await.unwrap();
         assert!(purged.is_none() && attempts == 1);
     }
+
+    /// #1311：`bots/<id>` 是有效的 symlink、回收區沒有可還原的備份（空的，或只有不是目錄的東西）：還原什麼都不能動，
+    /// 連結與它指到的目錄原樣留著。（以前腳本先 `rm` 連結、才找備份，找不到就把連結弄丟了。）
+    #[tokio::test]
+    async fn restore_without_a_backup_keeps_a_valid_symlink() {
+        let (env, root) = remote("trashbox-link-nobackup").await;
+        let app = env.app.clone();
+        let bot = tt::claude_bot(&app, &env.project_id, "alfa").await;
+        let dir = root.join("bots").join(&bot.id);
+        let outside = root.join("outside");
+        std::fs::create_dir_all(&outside).unwrap();
+        std::fs::write(outside.join("victim.txt"), "keep-me").unwrap();
+        std::fs::create_dir_all(dir.parent().unwrap()).unwrap();
+        std::os::unix::fs::symlink(&outside, &dir).unwrap();
+        let trash = root.join("bots-trash");
+        std::fs::create_dir_all(&trash).unwrap();
+
+        restore_for(&app, &bot.id).await;
+        assert!(std::fs::symlink_metadata(&dir).unwrap().file_type().is_symlink(), "空的回收區：連結還在");
+        assert_eq!(std::fs::read_to_string(dir.join("victim.txt")).unwrap(), "keep-me");
+
+        // 同名但不是目錄的東西不算備份，也不能讓連結被拆掉。
+        std::fs::write(trash.join(format!("{}.1000", bot.id)), "not a dir").unwrap();
+        restore_for(&app, &bot.id).await;
+        assert!(std::fs::symlink_metadata(&dir).unwrap().file_type().is_symlink(), "不是目錄的條目：連結還在");
+        assert_eq!(std::fs::read_to_string(dir.join("victim.txt")).unwrap(), "keep-me");
+    }
+
+    /// #1311：有備份，但搬回去那一步失敗（回收區不能寫）：原本的連結要搬回原位，不能弄丟。
+    #[tokio::test]
+    async fn a_failed_restore_move_puts_the_symlink_back() {
+        use std::os::unix::fs::PermissionsExt as _;
+        let (env, root) = remote("trashbox-link-mvfail").await;
+        let app = env.app.clone();
+        let bot = tt::claude_bot(&app, &env.project_id, "alfa").await;
+        let dir = root.join("bots").join(&bot.id);
+        let outside = root.join("outside");
+        std::fs::create_dir_all(&outside).unwrap();
+        std::fs::write(outside.join("victim.txt"), "keep-me").unwrap();
+        std::fs::create_dir_all(dir.parent().unwrap()).unwrap();
+        std::os::unix::fs::symlink(&outside, &dir).unwrap();
+        let trash = root.join("bots-trash");
+        let backup = trash.join(format!("{}.1000", bot.id));
+        std::fs::create_dir_all(&backup).unwrap();
+        std::fs::write(backup.join("keep.txt"), "secret").unwrap();
+        // 回收區唯讀：讀得到備份，但 `mv` 出去會 EACCES。
+        std::fs::set_permissions(&trash, std::fs::Permissions::from_mode(0o500)).unwrap();
+
+        let result = crate::remote_trash::restore(&env.app.hosts.get("trashbox-link-mvfail").await.unwrap(), &bot.id, &dir.to_string_lossy(), &test_remote_root()).await;
+        std::fs::set_permissions(&trash, std::fs::Permissions::from_mode(0o700)).unwrap();
+        assert!(result.is_err(), "搬不動要回報失敗，不能當成沒有備份：{result:?}");
+        assert!(std::fs::symlink_metadata(&dir).unwrap().file_type().is_symlink(), "搬失敗：原本的連結要還在");
+        assert_eq!(std::fs::read_to_string(dir.join("victim.txt")).unwrap(), "keep-me");
+        assert!(backup.join("keep.txt").exists(), "備份還在");
+    }
