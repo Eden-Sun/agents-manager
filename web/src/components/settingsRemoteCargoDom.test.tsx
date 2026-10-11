@@ -228,6 +228,67 @@ it('外部 Cargo 初始讀取失敗後仍可編輯；未儲存值要攔 beforeun
   }
 })
 
+/** 讀取依序回 `steps`（最後一個重複）；其他請求照 mock 走。記下 PUT 的次數，確認有沒有把表單整份送進 daemon。 */
+function flakyLoad(steps: { status: number; body?: unknown }[]) {
+  const before = globalThis.fetch
+  mockApi(mock)
+  const mocked = globalThis.fetch
+  const puts: string[] = []
+  let gets = 0
+  globalThis.fetch = (async (input: string, init?: RequestInit) => {
+    const method = init?.method ?? 'GET'
+    if (String(input) === '/api/build/remote' && method === 'GET') {
+      const r = steps[Math.min(gets, steps.length - 1)]!
+      gets += 1
+      return new Response(JSON.stringify(r.body ?? { message: 'read failed' }), { status: r.status })
+    }
+    if (String(input) === '/api/build/remote' && method === 'PUT') puts.push(String(init?.body))
+    return mocked(input, init)
+  }) as unknown as typeof fetch
+  return { puts, restore: () => (globalThis.fetch = before) }
+}
+const saveBtn = () => [...panel().querySelectorAll('button')].find((b) => b.textContent?.trim() === '儲存') as HTMLButtonElement | undefined
+
+it('外部 Cargo 讀取失敗、表單沒動過時，儲存鍵鎖住也不送 PUT；改了欄位就照舊能存', async () => {
+  const flaky = flakyLoad([{ status: 503 }])
+  try {
+    await mount(<HostsPanel />)
+    await until(() => document.querySelector('.remote-cargo-settings') !== null, '讀取失敗後仍顯示表單')
+    assert.ok(btn('重新讀取'), '讀失敗要給「重新讀取」')
+    assert.equal(saveBtn()!.disabled, true, '表單沒動過（＝初值）就不能存，否則會用預設值蓋掉 daemon 的設定')
+    assert.equal(flaky.puts.length, 0)
+    await click(panel().querySelector<HTMLInputElement>('input[type=checkbox]')!)
+    const inputs = [...document.querySelectorAll<HTMLInputElement>('.remote-cargo-grid input')]
+    await typeInto(inputs[0]!, 'builder.example')
+    await typeInto(inputs[1]!, 'builder')
+    assert.equal(saveBtn()!.disabled, false, '使用者真的改了欄位，照舊可以存')
+  } finally {
+    flaky.restore()
+  }
+})
+
+it('讀取失敗後按「重新讀取」，讀到 daemon 的值就填回表單，失敗訊息與按鈕都消失', async () => {
+  const flaky = flakyLoad([
+    { status: 503 },
+    { status: 200, body: { enabled: true, host: 'h', user: 'u', ssh_port: 2222, remote_root: '/r', cargo_jobs: 16, password_set: false } },
+  ])
+  try {
+    await mount(<HostsPanel />)
+    await until(() => btn('重新讀取') !== undefined, '讀取失敗後有「重新讀取」')
+    await click(btn('重新讀取')!)
+    await until(() => btn('重新讀取') === undefined, '重讀成功後按鈕消失')
+    const values = [...document.querySelectorAll<HTMLInputElement>('.remote-cargo-grid input')].map((i) => i.value)
+    assert.ok(values.includes('h') && values.includes('u'), `主機與帳號要填回 daemon 的值：${values}`)
+    assert.equal(message(), '', '失敗訊息要清掉')
+    const port = [...panel().querySelectorAll<HTMLInputElement>('.remote-cargo-grid input')].find((i) => i.parentElement?.textContent?.includes('SSH port'))!
+    assert.equal(port.value, '2222', 'port 也要是 daemon 的值，不是預設的 22')
+    assert.equal(saveBtn()!.disabled, false, '讀到值之後就能存')
+    assert.equal(flaky.puts.length, 0, '重讀本身不送 PUT')
+  } finally {
+    flaky.restore()
+  }
+})
+
 it('新增主機完成時不清掉送出後又輸入的下一筆主機名稱', async () => {
   const requests = await open()
   const originalFetch = globalThis.fetch
