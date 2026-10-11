@@ -23,7 +23,7 @@ use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
 use axum::Json;
 use serde::Deserialize;
-use serde_json::json;
+use serde_json::{json, Value};
 use std::os::unix::fs::MetadataExt as _;
 use std::path::{Path as FsPath, PathBuf};
 use std::sync::Arc;
@@ -285,6 +285,18 @@ pub async fn promote_bot(
         return Err(LcError::Forbidden(json!({"error": "forbidden", "reason": "user_only"})));
     }
     let req = body.map(|Json(b)| b).unwrap_or_default();
+    // 脫離請求（#1358）：複製、停 child、建 user bot、啟動都在脫離出去的 task 裡做完；client 斷線不會停在半路。
+    // bot 鎖也在裡面拿，握著直到做完。
+    let response = crate::api::detach(&id, {
+        let (app, id) = (app.clone(), id.clone());
+        async move { promote_detached(app, id, req).await }
+    })
+    .await?;
+    Ok((StatusCode::OK, Json(response)).into_response())
+}
+
+/// promote 的本體（見 `promote_bot`）：在脫離出去的 task 裡跑，回傳要給 client 的 body。
+async fn promote_detached(app: Arc<App>, id: String, req: PromoteReq) -> Result<Value, LcError> {
     let lock = app.bot_lock(&id).await;
     let _g = lock.lock().await;
 
@@ -476,11 +488,7 @@ pub async fn promote_bot(
     if let Some((from, to)) = remapped_model {
         response["remapped"] = json!({"model": {"from": from, "to": to}});
     }
-    Ok((
-        StatusCode::OK,
-        Json(response),
-    )
-        .into_response())
+    Ok(response)
 }
 
 #[cfg(test)]
