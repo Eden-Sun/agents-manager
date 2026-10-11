@@ -61,7 +61,13 @@ STUB
   # 假 lsof：-iTCP:PORT 有 $FIX/estab.PORT 就印一行 ESTABLISHED。
   cat > "$ROOT/fakebin/lsof" <<'STUB'
 #!/bin/bash
-p=${2#-iTCP:}; [ -e "$FIX/estab.$p" ] && echo "chrome 1 m4p 20u IPv4 TCP 127.0.0.1:$p->127.0.0.1:5555 (ESTABLISHED)"; exit 0
+p=${2#-iTCP:}
+if [ -e "$FIX/estab.$p" ]; then echo "chrome 1 m4p 20u IPv4 TCP 127.0.0.1:$p->127.0.0.1:5555 (ESTABLISHED)"; exit 0; fi
+case "$(cat "$FIX/lsof.mode" 2>/dev/null)" in
+  missing) echo "lsof: command not found" >&2; exit 127 ;;
+  fail) echo "lsof: can't open socket: Operation not permitted" >&2; exit 1 ;;
+esac
+exit 1
 STUB
   chmod +x "$ROOT/agm/bin/"* "$ROOT/fakebin/"*
   LOG="$ROOT/agm/browser-gc.log"; : > "$LOG"; : > "$FIX/kills.log"; : > "$FIX/ps.txt"; : > "$FIX/agm.log"
@@ -251,6 +257,24 @@ teardown
 # 9. `--request-id` 要維持分鐘級：turns_client_req 是 (conversation_id, client_request_id) 上
 #    **沒有時間範圍**的唯一索引（crates/am-base/src/db.rs:105），換成日期級會讓一天只派得出第一輪。
 equals "request-id 仍含 %H%M" "$(grep -c 'request-id "agm-browser-gc-$(date +%Y%m%d-%H%M)"' "$HERE/browser-gc-kick.sh")" "1"
+
+# ── #1304：lsof 缺失／失敗不能當成「沒有 CDP 連線」（exit 狀態與輸出都要看）。
+setup
+mkprofile "$TMPD/am-lsof-missing"
+chrome 1101 1 "10:00" 9601 "$TMPD/am-lsof-missing"; echo missing > "$FIX/lsof.mode"
+run >/dev/null
+check_no "lsof 不存在：不殺" "kill -TERM 1101" "$FIX/kills.log"
+check    "lsof 不存在：log 說無法判定、保留" "keep headless pid 1101（port 9601 的 CDP 連線狀態無法判定" "$LOG"
+exists   "lsof 不存在：profile 還在" "$TMPD/am-lsof-missing"
+teardown
+setup
+mkprofile "$TMPD/am-lsof-fail"
+chrome 1102 1 "10:00" 9602 "$TMPD/am-lsof-fail"; echo fail > "$FIX/lsof.mode"
+run >/dev/null
+check_no "lsof 權限不足（exit 1＋錯誤輸出）：不殺" "kill -TERM 1102" "$FIX/kills.log"
+check    "lsof 權限不足：log 說無法判定" "keep headless pid 1102（port 9602 的 CDP 連線狀態無法判定" "$LOG"
+exists   "lsof 權限不足：profile 還在" "$TMPD/am-lsof-fail"
+teardown
 
 echo "$PASS passed, $FAIL failed"
 [ "$FAIL" -eq 0 ]

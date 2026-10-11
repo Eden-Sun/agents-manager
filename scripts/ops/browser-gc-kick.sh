@@ -62,6 +62,17 @@ fi
 # 使用者自己的 Chrome 沒有 --headless，永遠不會進這個清單。
 # 注意 ppid=1 不等於「沒人在用」：bot 用 nohup/detached 起的實例，bot 還活著時 ppid 也是 1。
 # 所以再要求「debug port 上沒有 ESTABLISHED 連線」——正在截圖的實例一定有一條。
+# CDP 連線狀態三態（#1304）：`connected`＝有 ESTABLISHED、`none`＝lsof 正常結束且沒有輸出、其餘一律 `unknown`。
+# lsof 不存在、權限不足、輸出不完整都是 unknown：不能因為 grep 數到 0 就當成「沒有人在用」。
+cdp_state() {
+  local out rc
+  out=$(lsof -nP -iTCP:"$1" -sTCP:ESTABLISHED 2>&1); rc=$?
+  if printf '%s\n' "$out" | grep -q ESTABLISHED; then echo connected
+  elif [ "$rc" = 1 ] && [ -z "$out" ]; then echo none
+  else echo unknown
+  fi
+}
+
 reap_headless() {
   local reaped=0 kept=0
   while IFS= read -r line; do
@@ -80,8 +91,11 @@ reap_headless() {
     if [ "$ppid" != "1" ]; then
       echo "  keep headless pid ${pid}（父程序 $ppid 還活著）dir=$dir" >> "$LOG"; kept=$((kept+1)); continue
     fi
-    if [ -n "$port" ] && [ "$(lsof -nP -iTCP:"$port" -sTCP:ESTABLISHED 2>/dev/null | grep -c ESTABLISHED)" -gt 0 ]; then
-      echo "  keep headless pid ${pid}（port $port 上有 CDP 連線，正在用）dir=$dir" >> "$LOG"; kept=$((kept+1)); continue
+    if [ -n "$port" ]; then
+      case "$(cdp_state "$port")" in
+        connected) echo "  keep headless pid ${pid}（port $port 上有 CDP 連線，正在用）dir=$dir" >> "$LOG"; kept=$((kept+1)); continue ;;
+        unknown) echo "  keep headless pid ${pid}（port $port 的 CDP 連線狀態無法判定，保守保留）dir=$dir" >> "$LOG"; kept=$((kept+1)); continue ;;
+      esac
     fi
     # 算不出年齡就當成「剛起」保守保留，寧可下一輪再收。
     if [ -z "${secs:-}" ] || [ "$secs" -lt 120 ]; then
