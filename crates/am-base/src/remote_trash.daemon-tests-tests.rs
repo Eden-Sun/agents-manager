@@ -705,3 +705,82 @@
         assert!(fresh.exists(), "還原失敗那一顆的備份留著");
         assert!(!old.exists(), "別顆過期的照清，不因為那一顆失敗就整輪不清");
     }
+
+    /// 再登記一台遠端主機（不動專案的 host）：遠端家目錄在暫存目錄，回傳它的遠端回收區路徑。
+    async fn register_host(env: &tt::Env, host: &'static str) -> PathBuf {
+        let home = env.dir.join(format!("remote-home-{host}"));
+        std::fs::create_dir_all(&home).unwrap();
+        let cfg = crate::config::HostCfg { name: host.into(), ssh: host.into(), ssh_port: 22, ssh_opts: vec![], herdr_session: "agents-manager".into(), remote_path: String::new(), shared_session: false };
+        let conn = env.app.hosts.insert_remote_for_test(cfg).await;
+        *conn.remote_home.lock().await = Some(home.to_string_lossy().into_owned());
+        crate::hosts::set_ssh_fake(host, run_sh);
+        home.join(crate::startup::remote_root_for(crate::startup::instance().as_deref()))
+    }
+
+    /// #1416：專案改指 B 之後，B 上還原沒有備份（`Ok(None)`）不能清掉 A 的待清記號（A 的目錄還在）。
+    #[tokio::test]
+    async fn a_restore_without_a_backup_on_another_host_keeps_the_old_hosts_purge_mark() {
+        let (env, _) = remote("trashbox-mark-a").await;
+        let app = env.app.clone();
+        register_host(&env, "trashbox-mark-b").await;
+        let bot = tt::claude_bot(&app, &env.project_id, "alfa").await;
+        sqlx::query("UPDATE bots SET deleted_at = ? WHERE id = ?").bind(crate::db::now()).bind(&bot.id).execute(&app.db).await.unwrap();
+        sqlx::query("INSERT INTO remote_bot_dir_purges (bot_id, host, purged_at, updated_at) VALUES (?, 'trashbox-mark-a', NULL, ?)")
+            .bind(&bot.id)
+            .bind(crate::db::now())
+            .execute(&app.db)
+            .await
+            .unwrap();
+        sqlx::query("UPDATE projects SET host = 'trashbox-mark-b' WHERE id = ?").bind(&env.project_id).execute(&app.db).await.unwrap();
+
+        restore_for(&app, &bot.id).await;
+
+        let row: Option<(String, Option<String>)> = sqlx::query_as("SELECT host, purged_at FROM remote_bot_dir_purges WHERE bot_id = ?").bind(&bot.id).fetch_optional(&app.db).await.unwrap();
+        assert_eq!(row, Some(("trashbox-mark-a".to_string(), None)), "B 上沒有備份：A 的待清記號不能被清掉");
+        let owed = crate::remote_purge::pending(&app.db, "trashbox-mark-a", false).await.unwrap();
+        assert!(owed.contains(&bot.id), "{owed:?}");
+    }
+
+    /// #1416：還原真的在記號所在的主機成功，才清掉那一顆的記號（同一顆記在 A，還原也在 A 做）。
+    #[tokio::test]
+    async fn a_restore_that_really_happens_on_the_owning_host_clears_its_mark() {
+        let (env, root) = remote("trashbox-mark-ok").await;
+        let app = env.app.clone();
+        let bot = tt::claude_bot(&app, &env.project_id, "alfa").await;
+        let backup = root.join("bots-trash").join(format!("{}.1000", bot.id));
+        std::fs::create_dir_all(&backup).unwrap();
+        std::fs::write(backup.join("keep.txt"), "x").unwrap();
+        sqlx::query("UPDATE bots SET deleted_at = ? WHERE id = ?").bind(crate::db::now()).bind(&bot.id).execute(&app.db).await.unwrap();
+        sqlx::query("INSERT INTO remote_bot_dir_purges (bot_id, host, purged_at, updated_at) VALUES (?, 'trashbox-mark-ok', NULL, ?)")
+            .bind(&bot.id)
+            .bind(crate::db::now())
+            .execute(&app.db)
+            .await
+            .unwrap();
+
+        restore_for(&app, &bot.id).await;
+
+        assert!(root.join("bots").join(&bot.id).join("keep.txt").exists(), "備份搬回來了");
+        let row: Option<String> = sqlx::query_scalar("SELECT bot_id FROM remote_bot_dir_purges WHERE bot_id = ?").bind(&bot.id).fetch_optional(&app.db).await.unwrap();
+        assert!(row.is_none(), "在記號所在的主機還原成功，才忘掉記號");
+    }
+
+    /// #1416：這台主機的清理（`gc_host`，還原沒有備份的活 bot 那一步）不能忘掉記在別台的「已清掉」記號。
+    #[tokio::test]
+    async fn a_sweep_on_one_host_keeps_another_hosts_purge_mark() {
+        let (env, _) = remote("trashbox-mark-sweep").await;
+        let app = env.app.clone();
+        let bot = tt::claude_bot(&app, &env.project_id, "alfa").await;
+        sqlx::query("INSERT INTO remote_bot_dir_purges (bot_id, host, purged_at, updated_at) VALUES (?, 'trashbox-mark-other', ?, ?)")
+            .bind(&bot.id)
+            .bind(crate::db::now())
+            .bind(crate::db::now())
+            .execute(&app.db)
+            .await
+            .unwrap();
+
+        crate::runners::remote_trash::gc_host(&app, "trashbox-mark-sweep").await;
+
+        let host: Option<String> = sqlx::query_scalar("SELECT host FROM remote_bot_dir_purges WHERE bot_id = ?").bind(&bot.id).fetch_optional(&app.db).await.unwrap();
+        assert_eq!(host.as_deref(), Some("trashbox-mark-other"), "別台的記號不能被這台的清理忘掉");
+    }

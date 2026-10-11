@@ -126,8 +126,9 @@ pub async fn pending(pool: &SqlitePool, host: &str, due_only: bool) -> Result<Ve
 }
 
 /// 還原的 bot 忘掉「已清掉」的記號（issue #411）：之後再被刪一次，掃描才會再搬它的目錄。寫不進去只記 log。
-pub async fn forget(app: &impl crate::capabilities::Db, bot_id: &str) {
-    if let Err(e) = sqlx::query("DELETE FROM remote_bot_dir_purges WHERE bot_id = ?").bind(bot_id).execute(app.db()).await {
+/// 只忘掉記在 `host` 這台的（#1416）：專案改指別台後在新主機還原、那邊沒有備份，舊主機的待清記號不能跟著清掉（舊目錄還在）。
+pub async fn forget(app: &impl crate::capabilities::Db, bot_id: &str, host: &str) {
+    if let Err(e) = sqlx::query("DELETE FROM remote_bot_dir_purges WHERE bot_id = ? AND host = ?").bind(bot_id).bind(host).execute(app.db()).await {
         tracing::warn!(bot = %bot_id, error = %e, "could not clear the remote bot dir purge mark of a restored bot");
     }
 }
