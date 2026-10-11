@@ -679,7 +679,7 @@ daemon 自己補，用同一個 `client_request_id` 重送拿到的是這一則�
 
 `send_now_message` 是同一件事的中文說明，前端直接顯示。灰字（sent／queued 到模型收到之前）由 CLI 自己畫，daemon 不模擬。
 
-**bot 沒在跑時送出 `start_if_stopped: true`**（issue #122，SPEC §4.4a「bot 沒在跑時送出」）：沒有 active run（或 run 還在 `starting`）時，
+**bot 沒在跑時送出 `start_if_stopped: true`**（issue #122，SPEC §4.4a「bot 沒在跑時送出」）：專案移交出去（`handed_off_to`，#708）時，不論有沒有 active run，這條都回 `409 {"reason":"handed_off"}`，不排隊、不寫列、不替它啟動（同一般 prompt；#1369）；沒有 active run（或 run 還在 `starting`）時，
 daemon 在 bot 鎖裡把 queued turn（`awaits_start:1`）＋user 訊息＋附件綁定寫進同一個交易，commit 就回 `200 {"delivery":"queued"}`，
 之後才在背景替它啟動（睡著的走 `--resume` 叫醒），起來、閒下來由佇列送出。同一個 `client_request_id` 再送回同一筆（還在等、沒人在起它時順便再起一次）。
 bot 在跑就跟沒帶一樣。維護窗口開著時 409 `maintenance_window`、什麼都不寫；已經有一筆在排 → 409 `a turn is already queued for this bot`；
