@@ -5145,6 +5145,7 @@ daemon 要能在 Linux（目標：Ubuntu，外部編譯主機 192.168.1.46，#67
   - 只解相對路徑：有 scheme（第一段帶 `:`，含 http／https／file／javascript）、`/` 開頭（含 `//host`）、`\`、`?`／`#`、`..`／`.`、`.` 開頭的段一律不解（開頭的 `./` 可以，`%XX` 解碼後同樣檢查）；
     從 `shared_bots.workspace` 逐段 `O_NOFOLLOW` 打開（`trusted_open::open_bound_file`：符號連結、硬連結 >1 都擋）。
   - 只收 JPEG／PNG／WebP／GIF（看檔頭不看副檔名，GIF 取第一格）。HEIC／HEIF 不解：要 libheif（C 函式庫）daemon 不帶；分享頁上傳時已在瀏覽器把 HEIC 轉成 JPEG（§20.4），會遇到的只剩從別處放進資料夾的。
+  - 只快取跟照片內容綁定的結果（成功、太大、不是圖、HEIC、解碼失敗、縮圖失敗）。讀取階段的失敗（遠端這一趟 ssh 抓不到、單次合計 64 MiB 擋下、讀的當下檔案正在被改）不快取，下一次分享頁重新整理會再抓（#1393）。
   - 不收的（找不到、跳出資料夾、不是圖、HEIC、太大、超過張數）：整個 href 拿掉，換成 `data-am-embed="<理由>"`（`not_relative`／`not_found`／`not_an_image`／`heic_unsupported`／`source_too_large`／`image_too_large`／`too_many_images`／`svg_too_large`／`decode_failed`），並記 info log。`#id` 與 `data:` 原樣不動；`<image>` 以外的元素、註解與 CDATA 不碰。
   - 縮圖（`image` crate）：先依 EXIF 修正方向，長邊縮到 1600（小的不放大），JPEG 品質 85（有半透明像素才用 PNG）；重編碼也把 EXIF（含 GPS）拿掉。上限：原檔 40 MiB、解碼長寬 16384、單張總像素 ≈50.3 MP（8192×6144，解碼前看檔頭尺寸就拒絕，理由 `image_too_large`；解碼配置上限 256 MiB）、嵌進去的一張 base64 後 4 MiB（超過先縮到 1200 再試）、一份成功嵌 16 張、嵌完整份 24 MiB。
   **預算（issue #842）**：一份 SVG 最多「嘗試」32 個引用（成功與失敗都算，第 33 個起直接 `too_many_images`、不讀檔不解碼）；全站同時只有 1 個 compose 在解（跨分享連結共用的 semaphore，等 10 秒拿不到就回 503 `unavailable`＋`Retry-After: 5`，不在沒有預算時解碼）。同一個分享連結本來就被 bot 鎖序列化，第二個請求吃快取（失敗也快取）。
