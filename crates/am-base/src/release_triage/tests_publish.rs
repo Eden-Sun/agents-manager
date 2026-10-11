@@ -300,6 +300,8 @@ async fn seed_version(p: &SqlitePool, version: &str, props: &[(&str, &[usize], O
 /// Seed a different version with issues counted by the cross-version daily cap.
 async fn seed_created_refs(p: &SqlitePool, version: &str, count: usize) {
     ledger::insert_version(p, "claude", version, &entries277()).await.unwrap();
+    let verdicts = serde_json::json!({"verdicts": [], "issues": []});
+    assert!(ledger::save_verdicts(p, "claude", version, &verdicts, Status::Judged, None).await.unwrap());
     let refs: Vec<ledger::IssueRef> = (0..count)
         .map(|n| ledger::IssueRef {
             marker: format!("claude@{version}#seed{n}"),
@@ -310,12 +312,8 @@ async fn seed_created_refs(p: &SqlitePool, version: &str, count: usize) {
             comment: false,
         })
         .collect();
-    sqlx::query("UPDATE release_triage SET status='judged', issue_numbers_json=? WHERE kind='claude' AND version=?")
-        .bind(serde_json::to_string(&refs).unwrap())
-        .bind(version)
-        .execute(p)
-        .await
-        .unwrap();
+    // Keep the indexed daily-quota summary in sync just like a real publish write.
+    assert!(ledger::save_publish(p, "claude", version, &refs, Status::Judged, None).await.unwrap());
 }
 
 async fn row(p: &SqlitePool) -> ledger::Row {
@@ -494,11 +492,7 @@ async fn caps_guard_first_four_per_version_and_eight_per_day() {
     let p = pool().await;
     let gh = FakeGh::new("day");
     seed(&p, &[("guard", &[0], None)]).await;
-    let refs: Vec<ledger::IssueRef> = (0..8)
-        .map(|n| ledger::IssueRef { marker: format!("claude@2.1.270#{n}"), entry_ids: vec![format!("e{n}")], number: n, url: String::new(), created_at: ledger::now_ts(), comment: false })
-        .collect();
-    ledger::insert_version(&p, "claude", "2.1.270", &entries277()).await.unwrap();
-    sqlx::query("UPDATE release_triage SET status='judged', issue_numbers_json=? WHERE version='2.1.270'").bind(serde_json::to_string(&refs).unwrap()).execute(&p).await.unwrap();
+    seed_created_refs(&p, "2.1.270", 8).await;
     let o = issue::publish_version(&p, &gh.cfg(true), "claude", "2.1.277").await.unwrap();
     assert!(matches!(o, Outcome::Deferred { .. }), "{o:?}");
     assert_eq!((gh.count("issue create"), row(&p).await.status), (0, Status::Judged));
