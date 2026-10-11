@@ -284,7 +284,7 @@ pub async fn finish(
         if current_host != authority.host || !current_run.as_ref().is_some_and(|current| current.id == authority.run_id) {
             return Err((StatusCode::CONFLICT, "spawn_authority_changed", "bot host or run changed before pane registration"));
         }
-        match client.agent_get(pane_id).await {
+        match client.pane_get(pane_id).await {
             Ok(Some(_)) => {},
             Ok(None) => return Err((StatusCode::SERVICE_UNAVAILABLE, "spawn_pane_unverified", "created pane was not found in the captured herdr session; retry finish")),
             Err(e) => {
@@ -328,4 +328,84 @@ pub async fn abort(
     }
     let released = release(&app, &body.bot_id, &body.permit_id);
     (StatusCode::OK, Json(json!({"released": released})))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use axum::http::HeaderValue;
+    use axum::Form;
+
+    fn bot_headers(token: &str) -> axum::http::HeaderMap {
+        let mut headers = axum::http::HeaderMap::new();
+        headers.insert("X-AM-Bot-Token", HeaderValue::from_str(token).unwrap());
+        headers
+    }
+
+    async fn reserve(app: &Arc<App>, parent: &crate::db::Bot) -> String {
+        let (status, Json(body)) = begin(
+            State(app.clone()),
+            bot_headers(&parent.hook_token),
+            Form(SpawnBegin { bot_id: parent.id.clone(), timeout_ms: String::new() }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "spawn begin should reserve the parent credential: {body}");
+        body["permit_id"].as_str().expect("permit id").to_string()
+    }
+
+    async fn finish_for(app: &Arc<App>, parent: &crate::db::Bot, permit_id: &str, pane_id: &str) -> (StatusCode, Json<Value>) {
+        finish(
+            State(app.clone()),
+            bot_headers(&parent.hook_token),
+            Form(SpawnFinish {
+                bot_id: parent.id.clone(),
+                permit_id: permit_id.to_string(),
+                pane_id: pane_id.to_string(),
+                purpose: "login shell".to_string(),
+            }),
+        )
+        .await
+    }
+
+    #[tokio::test]
+    async fn finishing_a_spawn_for_a_plain_shell_pane_registers_it() {
+        let e = crate::testing::env().await;
+        let parent = crate::testing::claude_bot(&e.app, &e.project_id, "plain-shell-parent").await;
+        crate::testing::fake_run(&e.app, &parent.id).await;
+        let permit_id = reserve(&e.app, &parent).await;
+        let pane_id = "w1:p-shell";
+        e.herdr.live_pane(pane_id, crate::testing::LivePane { rows: Some(40), ..Default::default() });
+
+        let (status, Json(body)) = finish_for(&e.app, &parent, &permit_id, pane_id).await;
+        assert_eq!(status, StatusCode::OK, "a shell pane without an agent should finish successfully: {body}");
+        assert_eq!(body["registered"], true);
+        let owner: String = sqlx::query_scalar("SELECT owner_bot_id FROM panes WHERE pane_id=?")
+            .bind(pane_id)
+            .fetch_one(&e.app.db)
+            .await
+            .unwrap();
+        assert_eq!(owner, parent.id);
+
+        let (status, Json(body)) = finish_for(&e.app, &parent, &permit_id, pane_id).await;
+        assert_eq!(status, StatusCode::CONFLICT);
+        assert_eq!(body["reason"], "spawn_permit_missing");
+    }
+
+    #[tokio::test]
+    async fn finishing_a_spawn_for_a_pane_herdr_does_not_know_stays_fenced() {
+        let e = crate::testing::env().await;
+        let parent = crate::testing::claude_bot(&e.app, &e.project_id, "retry-shell-parent").await;
+        crate::testing::fake_run(&e.app, &parent.id).await;
+        let permit_id = reserve(&e.app, &parent).await;
+        let pane_id = "w1:p-retry-shell";
+
+        let (status, Json(body)) = finish_for(&e.app, &parent, &permit_id, pane_id).await;
+        assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(body["reason"], "spawn_pane_unverified");
+
+        e.herdr.live_pane(pane_id, crate::testing::LivePane { rows: Some(40), ..Default::default() });
+        let (status, Json(body)) = finish_for(&e.app, &parent, &permit_id, pane_id).await;
+        assert_eq!(status, StatusCode::OK, "a transiently unknown pane can be retried: {body}");
+        assert_eq!(body["registered"], true);
+    }
 }

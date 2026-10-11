@@ -77,6 +77,7 @@
         app.credential_spawn_gate.lock().unwrap().age_permit(&bot.id, &permit, Duration::from_secs(100));
         assert_eq!(RotationFence::begin(&app, &bot.id).err(), Some(FenceError::SpawnsInFlight(1)), "100 秒時 120 秒 timeout 的 spawn 還在飛，要擋輪替");
         env.herdr.set_agent("slow-child", "w1:p9", true);
+        env.herdr.live_pane("w1:p9", crate::testing::LivePane { rows: Some(40), ..Default::default() });
         let (st, Json(v)) = finish(
             State(app.clone()),
             bot_headers(),
