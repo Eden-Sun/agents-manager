@@ -1264,7 +1264,7 @@ abort 之後照常 flush 出去（但先照下一段等寬限）。要取消排�
   中斷之後又有 prompt、或回完一回合，就不算。
 - **等多久**：這顆 bot **連續 idle** 滿寬限（預設 60 秒，`AM_INTERRUPT_FLUSH_GRACE_SECS`，看不懂／0／負數回預設），而且不早於中斷本身；
   中間 working 過就重算。idle 計時跟 §4.3b 的卡住回合共用同一份來源，語意分開（那邊收尾 in_flight，這邊讓使用者先拿回輸入框）。
-  **使用者自己從網頁送的那一句不擋**（2026-10-02 使用者：prorosal 按 Esc 後 7 秒送的「用cc1 sonnets」卡滿 60 秒才送）：寬限只替使用者擋 AGM／其他 bot 的派工。User /prompt（`queue_awaits_idle`、沒有 `relay_from`）送出時不進寬限；它若因 bot 真的在忙排成 `awaits_idle=1`，flush 時也不受寬限擋（`queue::queued_from_the_user`）。
+  **使用者自己從網頁送的那一句不擋**（2026-10-02 使用者：prorosal 按 Esc 後 7 秒送的「用cc1 sonnets」卡滿 60 秒才送）：寬限只替使用者擋 AGM／其他 bot 的派工。User /prompt（`queue_awaits_idle`、沒有 `relay_from`）送出時不進寬限；它若因 bot 真的在忙排成 `awaits_idle=1`，或 bot 沒在跑時送、排成 `awaits_start=1`（等它起來才送，#1362），flush 時也不受寬限擋（`queue::queued_from_the_user`）。
   寬限內 flush 不送、掛 timer 到寬限結束自己再來一次（閒著的 bot 沒有別的邊叫醒它）。
   flush 的任一步讀不到 DB（run、對話、bot、交辦、維護窗口…）＝這一則留在佇列、不認領、不花重試，並掛一個短 timer 再來一次（#1361）；閒著的 bot 沒有邊會叫醒它，不能等 30 分鐘保險絲。
 - **使用者有新輸入就不再擋**：中斷之後這個對話開了任何非 queued 的 turn（網頁送 prompt、在 pane 裡打字送出）＝使用者已經拿回輸入框。
