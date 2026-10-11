@@ -443,3 +443,28 @@ async fn post_share_first_enable_with_embed_observes_allow_embed_true_on_event()
     }
     assert!(found, "新開分享必須發出帶 allow_embed=true 的 bot_share_changed 事件");
 }
+
+/// #1397：開分享與切換 allow_embed 是「先讀後寫」的交易。讀完之後、寫之前，別的 writer 一 commit 就不能讓它失敗：
+/// 交易要從一開始就拿寫鎖（`BEGIN IMMEDIATE`），外來的 writer 才會被擋在外面（不靠 busy handler）。
+#[tokio::test]
+async fn enabling_a_share_survives_a_foreign_writer_between_the_read_and_the_write() {
+    let e = tt::env().await;
+    let (t, _) = trusted_bot(&e.app, &e.project_id, "enable-under-writers").await;
+
+    // 第一次開分享（走 INSERT）。
+    let seen = tt::arm_app_foreign_writer(&e.app, "share_enable_after_read", &t.id);
+    let out = store::set_share_enabled(&e.app.db, &t.id, Some(true))
+        .await
+        .expect("別的 writer 插不進來，開分享不該失敗");
+    assert!(out.token.is_some() && out.changed && out.allow_embed);
+    assert_eq!(*seen.lock().unwrap(), Some(false), "交易從 BEGIN 就拿著寫鎖，外來 writer 被擋在外面");
+    assert!(store::share(&e.app.db, &t.id).await.unwrap().is_some_and(|r| r.allow_embed));
+
+    // 既有分享切換 allow_embed（走 UPDATE）。
+    let seen = tt::arm_app_foreign_writer(&e.app, "share_enable_after_read", &t.id);
+    let out = store::set_share_enabled(&e.app.db, &t.id, Some(false))
+        .await
+        .expect("切換 allow_embed 也一樣");
+    assert!(out.token.is_none() && out.changed && !out.allow_embed);
+    assert_eq!(*seen.lock().unwrap(), Some(false));
+}

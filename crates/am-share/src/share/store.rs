@@ -292,13 +292,16 @@ pub async fn set_share_enabled(
     bot_id: &str,
     allow_embed: Option<bool>,
 ) -> Result<SetShareOutcome, sqlx::Error> {
-    let mut tx = pool.begin().await?;
+    // 先讀後寫：用 `BEGIN IMMEDIATE` 從一開始就拿寫鎖（deferred 讀完才升級，撞到別的 writer 的快照過期不跑 busy handler，#1397）。
+    let mut tx = db::begin_write(pool).await?;
     let existing: Option<(bool,)> = sqlx::query_as(
         "SELECT allow_embed FROM bot_shares WHERE bot_id = ?",
     )
     .bind(bot_id)
     .fetch_optional(&mut *tx)
     .await?;
+    #[cfg(test)]
+    crate::race_point::hit("share_enable_after_read", bot_id).await;
 
     let (token, changed, final_allow_embed) = match existing {
         None => {
