@@ -475,7 +475,9 @@ mod local_spool_tests {
         assert!(!app.hook_bot_dir(&a.id).unwrap().join("hook-spool.jsonl").exists());
     }
 
-    /// #1068：`.replaying` 裡有一行超過上限（9 MiB）：那一行整行丟掉，前後的合法行照常收進來，檔案收尾。
+    /// #1068：`.replaying` 裡有一行超過上限（8 MiB）：那一行整行丟掉，前後的合法行照常收進來，檔案收尾。
+    /// 超長的那行是合法的 hook JSON（只有 `last_assistant_message` 超大），不是壞掉的字串：沒有上限時它會被解析、收進來，
+    /// 所以這條修正前會紅；靠「解析失敗」丟掉的話，修正前也會綠。
     #[tokio::test]
     async fn an_oversized_line_in_a_spool_is_dropped_and_the_rest_still_replays() {
         let env = tt::env().await;
@@ -483,20 +485,21 @@ mod local_spool_tests {
         let bot = tt::claude_bot(&app, &env.project_id, "spool-oversized").await;
         let dir = app.hook_bot_dir(&bot.id).unwrap();
         std::fs::create_dir_all(&dir).unwrap();
-        let good = json!({
-            "bot_id": bot.id,
-            "provider": "claude",
-            "payload": {"hook_event_name": "Stop", "session_id": "s1", "prompt_id": "p-after", "last_assistant_message": "done"},
-            "received_at": "2026-10-10T00:00:00.000Z",
-            "truncated": false,
-        });
-        let mut data = b"{\"bot_id\":\"".to_vec();
-        data.extend(vec![b'x'; 9 * 1024 * 1024]);
-        data.extend_from_slice(b"\n");
-        data.extend_from_slice(format!("{good}\n").as_bytes());
-        std::fs::write(dir.join("hook-spool.jsonl.replaying"), &data).unwrap();
+        let line = |prompt_id: &str, msg: String| {
+            json!({
+                "bot_id": bot.id,
+                "provider": "claude",
+                "payload": {"hook_event_name": "Stop", "session_id": "s1", "prompt_id": prompt_id, "last_assistant_message": msg},
+                "received_at": "2026-10-10T00:00:00.000Z",
+                "truncated": false,
+            })
+            .to_string()
+        };
+        let big = line("p-big", "x".repeat(9 * 1024 * 1024));
+        let good = line("p-after", "done".to_string());
+        std::fs::write(dir.join("hook-spool.jsonl.replaying"), format!("{big}\n{good}\n")).unwrap();
 
-        assert_eq!(hookrecv::replay_spool(&app, &bot.id).await.unwrap(), 1);
+        assert_eq!(hookrecv::replay_spool(&app, &bot.id).await.unwrap(), 1, "超長的合法行不收，只收後面那一行");
         let n: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM hook_events WHERE bot_id = ?").bind(&bot.id).fetch_one(&app.db).await.unwrap();
         assert_eq!(n, 1, "合法的那行收進來，超長的那行不收");
         assert!(!dir.join("hook-spool.jsonl.replaying").exists());
