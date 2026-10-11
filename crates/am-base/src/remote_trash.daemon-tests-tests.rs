@@ -549,3 +549,82 @@
         assert_eq!(std::fs::read_to_string(dir.join("spool/ev.json")).unwrap(), "pending", "重連時先還原");
         assert!(entries(&trash).is_empty(), "還原完才清回收區");
     }
+
+    /// **#1405**：已移交的專案（§6.5h）不補還原：接手的那顆 daemon 刪掉的 bot 目錄，回收區那份不能被這顆搬回來。
+    /// 移交收回來（清掉 `handed_off_to`）之後，照常還原。
+    #[tokio::test]
+    async fn a_handed_off_project_is_never_restored_from_the_remote_trash() {
+        let (env, root) = remote("trashbox-handoff").await;
+        let app = env.app.clone();
+        let bot = tt::claude_bot(&app, &env.project_id, "alfa").await;
+        let trash = root.join("bots-trash");
+        let backup = trash.join(format!("{}.{}", bot.id, now_ms()));
+        std::fs::create_dir_all(&backup).unwrap();
+        std::fs::write(backup.join("keep.txt"), "mine").unwrap();
+        let dir = root.join("bots").join(&bot.id);
+        sqlx::query("UPDATE projects SET handed_off_to = 'mac' WHERE id = ?").bind(&env.project_id).execute(&app.db).await.unwrap();
+
+        crate::runners::remote_trash::gc_host(&app, "trashbox-handoff").await;
+        assert!(!dir.exists(), "已移交：不搬回來");
+        assert_eq!(std::fs::read_to_string(backup.join("keep.txt")).unwrap(), "mine", "回收區那份還在");
+
+        sqlx::query("UPDATE projects SET handed_off_to = NULL WHERE id = ?").bind(&env.project_id).execute(&app.db).await.unwrap();
+        crate::runners::remote_trash::gc_host(&app, "trashbox-handoff").await;
+        assert_eq!(std::fs::read_to_string(dir.join("keep.txt")).unwrap(), "mine", "移交收回來之後照常還原");
+        assert!(entries(&trash).is_empty());
+    }
+
+    /// **#1405**：補還原讀完名單之後，使用者把後面那顆刪了：在 bot 鎖裡重讀 `deleted_at`，已刪的不還原，
+    /// 它的回收區備份與清理記號都留著（以前會搬回 `bots/`，還把記號忘掉）。
+    #[tokio::test]
+    async fn a_bot_deleted_after_the_list_was_read_is_not_restored() {
+        let (env, root) = remote("trashbox-deleted-late").await;
+        let app = env.app.clone();
+        let alive = tt::claude_bot(&app, &env.project_id, "alfa").await;
+        let late = tt::claude_bot(&app, &env.project_id, "bravo").await;
+        let trash = root.join("bots-trash");
+        let mut backups = Vec::new();
+        for id in [&alive.id, &late.id] {
+            let d = trash.join(format!("{id}.{}", now_ms()));
+            std::fs::create_dir_all(&d).unwrap();
+            std::fs::write(d.join("keep.txt"), "mine").unwrap();
+            backups.push(d);
+        }
+        crate::remote_purge::record(&app, &late.id, "trashbox-deleted-late", true, None).await;
+
+        let (app2, late_id) = (app.clone(), late.id.clone());
+        crate::runners::app_ports_p11::race_point::arm("remote_restore_after_list", "trashbox-deleted-late", move || async move {
+            sqlx::query("UPDATE bots SET deleted_at = ? WHERE id = ?").bind(crate::db::now()).bind(&late_id).execute(&app2.db).await.unwrap();
+        });
+        crate::runners::remote_trash::gc_host(&app, "trashbox-deleted-late").await;
+
+        assert_eq!(std::fs::read_to_string(root.join("bots").join(&alive.id).join("keep.txt")).unwrap(), "mine", "活著的那顆照常還原");
+        assert!(!root.join("bots").join(&late.id).exists(), "讀完名單後被刪了：不還原");
+        assert!(backups[1].exists(), "被刪那顆的回收區備份留著");
+        let marks: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM remote_bot_dir_purges WHERE bot_id = ?").bind(&late.id).fetch_one(&app.db).await.unwrap();
+        assert_eq!(marks, 1, "清理記號沒有被忘掉");
+    }
+
+    /// **#1405**：這顆鎖正被別的路握著（刪除、啟動）：這一輪跳過，不還原、也不忘掉記號；放開鎖之後的下一輪才還原。
+    #[tokio::test]
+    async fn a_bot_whose_lock_is_busy_is_skipped_this_round() {
+        let (env, root) = remote("trashbox-lock-busy").await;
+        let app = env.app.clone();
+        let bot = tt::claude_bot(&app, &env.project_id, "alfa").await;
+        let trash = root.join("bots-trash");
+        let backup = trash.join(format!("{}.{}", bot.id, now_ms()));
+        std::fs::create_dir_all(&backup).unwrap();
+        std::fs::write(backup.join("keep.txt"), "mine").unwrap();
+        crate::remote_purge::record(&app, &bot.id, "trashbox-lock-busy", true, None).await;
+        let dir = root.join("bots").join(&bot.id);
+
+        let lock = app.bot_lock(&bot.id).await;
+        let held = lock.lock().await;
+        crate::runners::remote_trash::gc_host(&app, "trashbox-lock-busy").await;
+        assert!(!dir.exists(), "鎖被握著：這一輪不還原");
+        assert!(backup.exists(), "備份留著");
+        drop(held);
+
+        crate::runners::remote_trash::gc_host(&app, "trashbox-lock-busy").await;
+        assert_eq!(std::fs::read_to_string(dir.join("keep.txt")).unwrap(), "mine", "下一輪照常還原");
+    }
