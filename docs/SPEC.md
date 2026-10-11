@@ -2353,6 +2353,8 @@ pane 沒有立即影響。等這套機制在正式環境跑穩，`cargo-slot.sh`
   備援、通知 parent 都不做）；pane 狀態修復（#1293）欠著的登記也一起丟掉，定時修復迴圈對它不打 herdr RPC（#1409）。
 - **收口的寫入**：`mark_run_exited` 對它回 `AlreadyEnded`（什麼都不寫；pane 關閉事件、dead-pane 巡邏、default session 都經過它），
   `child_retire` 的隱式退役回 `HandedOff`（不軟刪）。
+- **其他會觸及 bot／pane 的入口**：autostart 補開、遠端回收區補還原與目錄 purge 在候選掃描及 bot 鎖內都排除已移交專案；
+  Bot／專案刪除與 bot 還原、preview stop、建立新 mission／續作 mission 回 409 `handed_off`，不改狀態、不呼叫 pane／SSH。
 - **不操作**：start／stop／restart 與 prompt 回 409 `handed_off`（閒置回收、一鍵重啟、codex 升級後的重啟都經過 stop／start，
   一起擋下）；佇列原樣留著、一則都不送（收回後照常送）；`client_for_run`／`App::herdr_for_run` 不給 client，所以 keys／text／
   interrupt／login 與背景巡邏（survey、update watch、child alerts……）一個 pane RPC 都不打，連讀畫面都不讀；直接拿主機 client 的
