@@ -39,7 +39,7 @@ pub struct SpawnAuthority {
     pub host: String,
     pub host_authority: crate::hosts::HostAuthorityKey,
     pub herdr_session: String,
-    pub run_id: String,
+    pub run_id: Option<String>,
 }
 
 impl Permit {

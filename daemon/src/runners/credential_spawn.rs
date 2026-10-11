@@ -164,21 +164,20 @@ pub async fn begin(State(app): State<Arc<App>>, headers: axum::http::HeaderMap, 
         None => return fail(StatusCode::CONFLICT, "spawn_host_unavailable", "bot host is unavailable; spawn refused"),
     };
     let run = match crate::db::active_run(&app.db, &bot.id).await {
-        Ok(Some(run)) => run,
-        Ok(None) => return fail(StatusCode::CONFLICT, "spawn_run_missing", "bot has no active run; spawn refused"),
+        Ok(run) => run,
         Err(e) => {
             tracing::warn!(bot = %bot.id, error = %e, "credential spawn could not read active run");
             return fail(StatusCode::SERVICE_UNAVAILABLE, "run_unreadable", "active run could not be checked; spawn refused");
         }
     };
-    let session = match run.herdr_session.clone().filter(|s| !s.is_empty()) {
+    let session = match run.as_ref().and_then(|run| run.herdr_session.clone().filter(|s| !s.is_empty())) {
         Some(session) => Some(session),
         None => app.session_for_bot_with_host_fence(&bot, &host, &fence).await,
     };
     let Some(session) = session else {
         return fail(StatusCode::CONFLICT, "spawn_session_unavailable", "bot session is unavailable; spawn refused");
     };
-    let authority = SpawnAuthority { host: host.clone(), host_authority: fence.authority_key(), herdr_session: session, run_id: run.id };
+    let authority = SpawnAuthority { host: host.clone(), host_authority: fence.authority_key(), herdr_session: session, run_id: run.map(|run| run.id) };
     let permit_id = crate::db::ulid();
     if reserve(&app, &body.bot_id, &permit_id, permit_ttl(&body.timeout_ms), authority.clone()).is_err() {
         return fail(StatusCode::CONFLICT, "credential_rotation_pending", "credential rotation is checking child panes; spawn refused");
@@ -189,9 +188,16 @@ pub async fn begin(State(app): State<Arc<App>>, headers: axum::http::HeaderMap, 
         release(&app, &body.bot_id, &permit_id);
         return response;
     }
+    let run_is_current = match crate::db::active_run(&app.db, &bot.id).await {
+        Ok(current) => current.as_ref().map(|run| run.id.as_str()) == authority.run_id.as_deref(),
+        Err(e) => {
+            tracing::warn!(bot = %bot.id, error = %e, "credential spawn could not recheck active run");
+            false
+        }
+    };
     let still_current = fence.is_current_now()
         && crate::db::bot_host(&app.db, &bot.id).await.ok().as_deref() == Some(authority.host.as_str())
-        && crate::db::active_run(&app.db, &bot.id).await.ok().flatten().is_some_and(|current| current.id == authority.run_id);
+        && run_is_current;
     if !still_current {
         release(&app, &body.bot_id, &permit_id);
         return fail(StatusCode::CONFLICT, "spawn_authority_changed", "bot host or run changed while reserving spawn; retry");
@@ -245,7 +251,7 @@ pub async fn finish(
         }
     };
     let run = match crate::db::active_run(&app.db, &bot.id).await {
-        Ok(Some(run)) if run.id == authority.run_id => run,
+        Ok(run) if run.as_ref().map(|current| current.id.as_str()) == authority.run_id.as_deref() => run,
         Ok(_) => {
             claim.reject();
             return fail(StatusCode::CONFLICT, "spawn_run_superseded", "bot run changed after the permit was issued");
@@ -256,7 +262,7 @@ pub async fn finish(
         }
     };
     let current_session = app.session_for_bot_with_host_fence(&bot, &authority.host, &fence).await;
-    let current_session = run.herdr_session.clone().filter(|s| !s.is_empty()).or(current_session);
+    let current_session = run.as_ref().and_then(|run| run.herdr_session.clone().filter(|s| !s.is_empty())).or(current_session);
     if current_session.as_deref() != Some(authority.herdr_session.as_str()) {
         claim.reject();
         return fail(StatusCode::CONFLICT, "spawn_session_superseded", "bot session changed after the permit was issued");
@@ -265,7 +271,7 @@ pub async fn finish(
         claim.reject();
         return fail(StatusCode::CONFLICT, "spawn_host_superseded", "spawn host session is no longer available");
     };
-    let parent_pane = run.pane_id;
+    let parent_pane = run.as_ref().and_then(|run| run.pane_id.clone());
     let operation = fence.run_current(async {
         let current_host = match crate::db::bot_host(&app.db, &bot.id).await {
             Ok(host) => host,
@@ -281,7 +287,7 @@ pub async fn finish(
                 return Err((StatusCode::SERVICE_UNAVAILABLE, "run_unreadable", "active run could not be rechecked; spawn remains fenced"));
             }
         };
-        if current_host != authority.host || !current_run.as_ref().is_some_and(|current| current.id == authority.run_id) {
+        if current_host != authority.host || current_run.as_ref().map(|run| run.id.as_str()) != authority.run_id.as_deref() {
             return Err((StatusCode::CONFLICT, "spawn_authority_changed", "bot host or run changed before pane registration"));
         }
         match client.pane_get(pane_id).await {
