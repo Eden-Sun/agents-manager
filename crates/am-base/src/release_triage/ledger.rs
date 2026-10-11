@@ -383,9 +383,10 @@ pub async fn insert_version(pool: &SqlitePool, kind: &str, version: &str, entrie
 /// 回傳實際轉換的筆數。
 pub async fn mark_dispatched(pool: &SqlitePool, kind: &str, versions: &[String], bot_id: &str) -> Result<u64> {
     let now = now_ts();
+    let mut tx = pool.begin().await?;
     let mut n = 0;
     for v in versions {
-        n += sqlx::query(
+        let result = sqlx::query(
             "UPDATE release_triage SET status = 'dispatched', dispatched_at = ?, updated_at = ?, assigned_bot_id = ?, dispatch_gen = dispatch_gen + 1
               WHERE kind = ? AND version = ? AND status = 'pending'",
         )
@@ -394,10 +395,22 @@ pub async fn mark_dispatched(pool: &SqlitePool, kind: &str, versions: &[String],
         .bind(bot_id)
         .bind(kind)
         .bind(v)
-        .execute(pool)
-        .await?
-        .rows_affected();
+        .execute(&mut *tx)
+        .await;
+        let affected = match result {
+            Ok(result) => result.rows_affected(),
+            Err(error) => {
+                tx.rollback().await?;
+                return Err(error.into());
+            }
+        };
+        if affected != 1 {
+            tx.rollback().await?;
+            return Err(anyhow!("release-triage {kind} {v} was not pending for dispatch (updated {affected} rows)"));
+        }
+        n += affected;
     }
+    tx.commit().await?;
     Ok(n)
 }
 
@@ -524,4 +537,60 @@ pub async fn created_in_last_day(pool: &SqlitePool) -> Result<usize> {
         .filter(|i| !i.comment)
         .filter(|i| chrono::DateTime::parse_from_rfc3339(&i.created_at).is_ok_and(|t| t.with_timezone(&chrono::Utc) >= cutoff))
         .count())
+}
+
+#[cfg(test)]
+mod mark_dispatched_tests {
+    use super::*;
+
+    async fn pool() -> SqlitePool {
+        let pool = sqlx::sqlite::SqlitePoolOptions::new().max_connections(1).connect("sqlite::memory:").await.unwrap();
+        migrate(&pool).await.unwrap();
+        pool
+    }
+
+    #[tokio::test]
+    async fn a_failed_update_rolls_back_the_batch_and_retry_dispatches_each_version_once() {
+        let pool = pool().await;
+        let versions = ["2.1.277", "2.1.278", "2.1.279"];
+        for version in versions {
+            sqlx::query(
+                "INSERT INTO release_triage (kind, version, status, created_at, updated_at)
+                 VALUES ('claude', ?, 'pending', 'now', 'now')",
+            )
+            .bind(version)
+            .execute(&pool)
+            .await
+            .unwrap();
+        }
+        sqlx::query(
+            "CREATE TRIGGER reject_second_dispatch BEFORE UPDATE OF status ON release_triage
+             WHEN OLD.version = '2.1.278'
+             BEGIN SELECT RAISE(ABORT, 'injected dispatch failure'); END",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        let batch = versions.map(str::to_string);
+        assert!(mark_dispatched(&pool, "claude", &batch, "bot-worker").await.is_err());
+        for version in versions {
+            let row = get(&pool, "claude", version).await.unwrap().unwrap();
+            assert_eq!(row.status, Status::Pending, "{version} must roll back with the batch");
+            assert_eq!(row.dispatch_gen, 0, "{version} generation must remain unchanged");
+        }
+
+        sqlx::query("DROP TRIGGER reject_second_dispatch").execute(&pool).await.unwrap();
+        assert_eq!(mark_dispatched(&pool, "claude", &batch, "bot-worker").await.unwrap(), 3);
+        for version in versions {
+            let row = get(&pool, "claude", version).await.unwrap().unwrap();
+            assert_eq!(row.status, Status::Dispatched, "{version} must dispatch on retry");
+            assert_eq!(row.assigned_bot_id.as_deref(), Some("bot-worker"));
+            assert_eq!(row.dispatch_gen, 1, "{version} generation increments exactly once");
+        }
+        assert!(mark_dispatched(&pool, "claude", &batch, "bot-worker").await.is_err(), "zero-row updates reject duplicate retries");
+        for version in versions {
+            assert_eq!(get(&pool, "claude", version).await.unwrap().unwrap().dispatch_gen, 1);
+        }
+    }
 }
