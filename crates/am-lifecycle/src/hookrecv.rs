@@ -1922,6 +1922,14 @@ pub async fn drain_remote<H: HookHost>(app: &H, host: &str, bot_id: &str) -> Res
     }
     let lock = app.bot_lock(bot_id).await;
     let _g = lock.lock().await;
+    drain_remote_locked(app, host, bot_id).await
+}
+
+/// 同 [`drain_remote`]，但**呼叫端已經握著這顆 bot 的鎖**（#1417：定時掃描先 try-lock，鎖被佔就跳過、不排隊）。
+pub async fn drain_remote_locked<H: HookHost>(app: &H, host: &str, bot_id: &str) -> Result<usize> {
+    if !valid_id(bot_id) {
+        anyhow::bail!("invalid bot id `{bot_id}` (must match {ID_RE})");
+    }
     let Some(conn) = app.hosts().get(host).await else { return Ok(0) };
     if !conn.is_connected() {
         return Ok(0);
