@@ -108,20 +108,48 @@ pub fn probed() -> &'static std::sync::Mutex<std::collections::HashSet<String>> 
     SEEN.get_or_init(|| std::sync::Mutex::new(std::collections::HashSet::new()))
 }
 
+/// A probe in progress suppresses concurrent reconcile passes without making a failed
+/// database write permanent.
+fn probing() -> &'static std::sync::Mutex<std::collections::HashSet<String>> {
+    static IN_FLIGHT: std::sync::OnceLock<std::sync::Mutex<std::collections::HashSet<String>>> =
+        std::sync::OnceLock::new();
+    IN_FLIGHT.get_or_init(|| std::sync::Mutex::new(std::collections::HashSet::new()))
+}
+
 /// 不在 `live` 裡的 bot（刪掉、退役的 child）不留探測記錄：key 是 `bot\u{1}pane`，每顆 child 每個 pane 一格，只記不清的話只增不減。
 pub fn retain_bots(live: &[String]) {
     probed().lock().unwrap().retain(|k| k.split('\u{1}').next().is_some_and(|bot| live.iter().any(|l| l == bot)));
+    probing().lock().unwrap().retain(|k| k.split('\u{1}').next().is_some_and(|bot| live.iter().any(|l| l == bot)));
 }
 
 /// Checked before `pane.process_info`, so a settled child costs no herdr round trip.
 pub fn probe_due(bot_id: &str, pane_id: &str) -> bool {
-    !probed().lock().unwrap().contains(&probe_key(bot_id, pane_id))
+    let key = probe_key(bot_id, pane_id);
+    !probed().lock().unwrap().contains(&key) && !probing().lock().unwrap().contains(&key)
+}
+
+/// Claims a probe atomically so concurrent reconcile passes do not repeat the process
+/// environment round trip. A failed attempt releases this claim for the next pass.
+pub fn begin_probe(bot_id: &str, pane_id: &str) -> bool {
+    let key = probe_key(bot_id, pane_id);
+    let done = probed().lock().unwrap();
+    if done.contains(&key) {
+        return false;
+    }
+    probing().lock().unwrap().insert(key)
 }
 
 /// A child's CLI kind can become known after the first reconcile pass.  An identity probe made
 /// while the row still carried the parent's kind must not suppress the probe for the child's kind.
 pub fn reset_probe(bot_id: &str, pane_id: &str) {
-    probed().lock().unwrap().remove(&probe_key(bot_id, pane_id));
+    let key = probe_key(bot_id, pane_id);
+    probed().lock().unwrap().remove(&key);
+    probing().lock().unwrap().remove(&key);
+}
+
+/// Releases a probe claim after a transient failure or when its future is cancelled.
+pub fn release_probe(bot_id: &str, pane_id: &str) {
+    probing().lock().unwrap().remove(&probe_key(bot_id, pane_id));
 }
 
 pub fn probe_key(bot_id: &str, pane_id: &str) -> String {
@@ -129,5 +157,7 @@ pub fn probe_key(bot_id: &str, pane_id: &str) -> String {
 }
 
 pub fn mark_probed(bot_id: &str, pane_id: &str) {
-    probed().lock().unwrap().insert(probe_key(bot_id, pane_id));
+    let key = probe_key(bot_id, pane_id);
+    probed().lock().unwrap().insert(key.clone());
+    probing().lock().unwrap().remove(&key);
 }

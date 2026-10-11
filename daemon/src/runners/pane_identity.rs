@@ -3,7 +3,7 @@ use std::sync::Arc;
 use futures::future::BoxFuture;
 use serde_json::json;
 use crate::pane_identity::{
-    child_identity, config_dir_var, mark_probed, probe_due, ps_cmd,
+    begin_probe, child_identity, config_dir_var, mark_probed, probe_due, ps_cmd, release_probe,
 };
 use crate::state::App;
 
@@ -62,6 +62,31 @@ impl ProcEnvHook {
     }
 }
 
+struct ProbeClaim<'a> {
+    bot_id: &'a str,
+    pane_id: &'a str,
+    completed: bool,
+}
+
+impl<'a> ProbeClaim<'a> {
+    fn begin(bot_id: &'a str, pane_id: &'a str) -> Option<Self> {
+        begin_probe(bot_id, pane_id).then_some(Self { bot_id, pane_id, completed: false })
+    }
+
+    fn complete(&mut self) {
+        mark_probed(self.bot_id, self.pane_id);
+        self.completed = true;
+    }
+}
+
+impl Drop for ProbeClaim<'_> {
+    fn drop(&mut self) {
+        if !self.completed {
+            release_probe(self.bot_id, self.pane_id);
+        }
+    }
+}
+
 /// `pid: None` leaves the row as it is.
 pub async fn sync_child_identity(
     app: &Arc<App>,
@@ -79,6 +104,9 @@ pub async fn sync_child_identity(
     if !probe_due(&bot.id, pane_id) {
         return;
     }
+    let Some(mut probe) = ProbeClaim::begin(&bot.id, pane_id) else {
+        return;
+    };
     let Some(fence) = app.hosts.fence(host).await else {
         tracing::debug!(host, bot = %bot.name, "host disappeared before child identity detection");
         return;
@@ -105,9 +133,9 @@ pub async fn sync_child_identity(
         tracing::debug!(host, bot = %bot.name, "no identities known for this kind yet; re-checking next pass");
         return;
     }
-    mark_probed(&bot.id, pane_id);
     let dir = env.get(var).map(String::as_str);
     let Some(name) = child_identity(&identities, &bot.kind, var, &home, dir) else {
+        probe.complete();
         tracing::debug!(host, bot = %bot.name, ?dir, "no identity owns the child's account; keeping the inherited identity");
         return;
     };
@@ -117,8 +145,11 @@ pub async fn sync_child_identity(
     }
     // The run remembers the account it was actually read off (`runs.runtime_identity`), even when
     // it matches the inherited value: NULL there means "nobody knows", and the UI says so.
-    stamp_run_identity(app.as_ref(), bot, pane_id, &name).await;
+    if !stamp_run_identity(app.as_ref(), bot, pane_id, &name).await {
+        return;
+    }
     if bot.identity.as_deref() == Some(name.as_str()) {
+        probe.complete();
         return;
     }
     // `managed_by` in WHERE too: a race with the TOML projection must never write a user bot.
@@ -131,6 +162,7 @@ pub async fn sync_child_identity(
         tracing::warn!(bot = %bot.name, error = ?e, "cannot record the account a child agent is running on");
         return;
     }
+    probe.complete();
     tracing::info!(host, bot = %bot.name, pane = %pane_id, was = ?bot.identity, now = %name, %dir,
                    "reconcile: the child is on its own account, not the one it was adopted with");
     app.emit("bot_changed", json!({"bot_id": bot.id})).await;
@@ -138,7 +170,7 @@ pub async fn sync_child_identity(
 
 /// Fills only an unrecorded run: a run the daemon started already carries the identity it was
 /// launched with (`lifecycle::start`). A kind change clears it (`reconcile::refresh_child_kind`).
-async fn stamp_run_identity(app: &(impl crate::capabilities::BotStatusEmit + crate::capabilities::Db), bot: &crate::db::Bot, pane_id: &str, name: &str) {
+async fn stamp_run_identity(app: &(impl crate::capabilities::BotStatusEmit + crate::capabilities::Db), bot: &crate::db::Bot, pane_id: &str, name: &str) -> bool {
     let stamped = sqlx::query(
         "UPDATE runs SET runtime_identity = ?
           WHERE bot_id = ? AND pane_id = ? AND state IN ('starting','running','stopping') AND runtime_identity IS NULL",
@@ -149,8 +181,15 @@ async fn stamp_run_identity(app: &(impl crate::capabilities::BotStatusEmit + cra
     .execute(app.db())
     .await;
     match stamped {
-        Ok(r) if r.rows_affected() > 0 => app.emit_bot_status(&bot.id).await,
-        Ok(_) => {}
-        Err(e) => tracing::warn!(bot = %bot.name, error = ?e, "cannot record the account on the child's run"),
+        Ok(r) => {
+            if r.rows_affected() > 0 {
+                app.emit_bot_status(&bot.id).await;
+            }
+            true
+        }
+        Err(e) => {
+            tracing::warn!(bot = %bot.name, error = ?e, "cannot record the account on the child's run");
+            false
+        }
     }
 }
