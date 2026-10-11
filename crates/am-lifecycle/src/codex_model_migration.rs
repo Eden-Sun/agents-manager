@@ -165,6 +165,25 @@ mod tests {
         assert_eq!(messages, [WAITING_HINT, CLOSED_NOTE]);
     }
 
+    /// issue #1408：codex 啟動框常在 `starting` 期間出現（start 等 ready 最多 60 秒）：那段也要標 blocked、講原因；框關掉後還原。
+    #[tokio::test]
+    async fn a_startup_dialog_is_marked_while_the_run_is_still_starting() {
+        let env = tt::env().await;
+        let bot = tt::claude_bot(&env.app, &env.project_id, "codex-migration-starting").await;
+        sqlx::query("UPDATE bots SET kind='codex' WHERE id=?").bind(&bot.id).execute(&env.app.db).await.unwrap();
+        let run_id = tt::fake_run(&env.app, &bot.id).await;
+        sqlx::query("UPDATE runs SET state='starting', agent_status='unknown' WHERE id=?").bind(&run_id).execute(&env.app.db).await.unwrap();
+        let migration = include_str!("lifecycle/fixtures/codex-0.157-model-migration.txt");
+
+        observe_screen(&env.app, &run_of(&env.app, &run_id).await, migration).await;
+        assert_eq!(run_of(&env.app, &run_id).await.agent_status, "blocked", "starting 期間的啟動框也要標");
+        assert_eq!(system_messages(&env.app, &bot.id).await, [WAITING_HINT]);
+
+        observe_screen(&env.app, &run_of(&env.app, &run_id).await, "› Ask Codex to do anything\n").await;
+        assert_eq!(run_of(&env.app, &run_id).await.agent_status, "unknown", "框關掉之後還原成啟動前的狀態");
+        assert_eq!(system_messages(&env.app, &bot.id).await, [WAITING_HINT, CLOSED_NOTE]);
+    }
+
     #[tokio::test]
     async fn stale_dialog_observation_does_not_mutate_ended_run() {
         let env = tt::env().await;
