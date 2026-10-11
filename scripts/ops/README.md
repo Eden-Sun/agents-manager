@@ -106,7 +106,7 @@ Linux 有 `com.agm.browser-gc` systemd timer，但執行 Linux 專用的 `browse
 `browser-gc-kick.sh`／`browser-gc-task.md`／plist 仍只標 `darwin`；ego lite／OB 圖形 worker 依 #718 暫不實作，
 所以 Linux `bin/` 裡出現 macOS 的 `browser-gc-kick.sh` 仍會報成 `extra`。
 
-安裝（**需要 AGM 核准**，同 macOS；`<名字>` 是對照表列出的八支）：
+安裝（**需要 AGM 核准**，同 macOS；`<名字>` 是對照表（`install-manifest.tsv`）裡同時有 `.service` 與 `.timer` 的那幾支，目前九支；`daemon-boot` 沒有 timer，見下面『開機自己起 daemon』，`disk-gc` 的安裝另見它自己那一節）：
 
 ```sh
 install -m 644 scripts/ops/systemd/com.agm.<名字>.{service,timer} ~/.config/systemd/user/
@@ -300,7 +300,7 @@ scripts/ops/daemon-swap.sh --sha <完整 sha> --old <short sha> --old-hash <sha2
 
 herdr 有新版時整理出「對我們有沒有用、會不會壞」，派給 AGM 排程處理（issue #66，SPEC §18.2b）。
 唯讀、只派工，**不升級、不重啟 herdr server**——真的升級一律要 AGM 核准後走 §6.5.2 的維護模式手動做。
-版本比較與 CHANGELOG 段落擷取交給 `agents-managerd herdr-update-check`（`daemon/src/herdr_update.rs`），
+版本比較與 CHANGELOG 段落擷取交給 `agents-managerd herdr-update-check`（`crates/am-base/src/herdr_update.rs`），
 這支腳本只負責問本機版本、問 GitHub 最新穩定版、抓 CHANGELOG 全文，再照 JSON 決定要不要派工。
 
 | 變數 | 預設 | 意義 |
@@ -326,7 +326,7 @@ herdr 有新版時整理出「對我們有沒有用、會不會壞」，派給 A
 檢查完整跑完（含「沒有新版」）或派工成功就清零。
 隔離測試：`bash scripts/ops/herdr-update-kick_test.sh`（假的 `herdr`／`gh`／`agents-managerd`／`bin/agm`，`file://` CHANGELOG；含 `env -i PATH=/usr/bin:/bin:/usr/sbin:/sbin` 模擬 launchd、缺依賴喊人、殘留鎖與活鎖、連續失敗喊人，系統 `/bin/bash` 3.2 也跑）；
 `herdr-update-check` 本身的版本比較與 CHANGELOG 段落擷取正確性由 `cargo test -p agents-managerd` 釘住
-（`daemon/src/changelog.rs`、`daemon/src/herdr_update.rs`），不在這支腳本測試裡重測。
+（`crates/am-base/src/changelog.rs`、`crates/am-base/src/herdr_update.rs`），不在這支腳本測試裡重測。
 
 安裝（**需要 AGM 核准**；不要自己 `launchctl bootstrap`）：
 

@@ -1,6 +1,6 @@
 # hook 子命令與測試腳本
 
-契約在 SPEC §4.4（遠端 §11.4）與 §6.7；這份記實作上的取捨與怎麼驗。檔案：`daemon/src/hook_cmd.rs`、`scripts/hook-timing-test.sh`、`scripts/hook-smoke.sh`。
+契約在 SPEC §4.4（遠端 §11.4）與 §6.7；這份記實作上的取捨與怎麼驗。檔案：`crates/am-base/src/hook_cmd.rs`、`scripts/hook-timing-test.sh`、`scripts/hook-smoke.sh`。
 
 ## `agents-managerd hook claude|codex|grok`
 
