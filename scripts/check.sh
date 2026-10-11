@@ -348,6 +348,19 @@ check_changed() {
                 env -u AM_MODEL -u AM_EFFORT -u AM_DATA_DIR cargo test -p "${f}" --locked
             done
         fi
+        # 發行契約（#1185）不歸 CHECK_TESTS 管（#1258）：指定 daemon 過濾字串只換掉 daemon 那一段，契約照跑；
+        # CHECK_TESTS=none 才連它一起略過（none 就是不跑測試，略過時明講）。
+        filters="$(printf '%s\n' "$files" | bash scripts/ci-daemon-filters.sh)"
+        if printf '%s\n' "$filters" | grep -qx '__am_base_release_triage_submission__'; then
+            am_base_release_triage_test=1
+            if [ "${CHECK_TESTS:-}" = none ]; then
+                echo "crate: CHECK_TESTS=none：略過發行契約測試（the_task_template_teaches_a_submission_the_daemon_accepts）"
+            else
+                step "crate: cargo test -p am-base -- the_task_template_teaches_a_submission_the_daemon_accepts"
+                env -u AM_MODEL -u AM_EFFORT -u AM_DATA_DIR cargo test -p am-base --locked the_task_template_teaches_a_submission_the_daemon_accepts
+            fi
+            filters="$(printf '%s\n' "$filters" | grep -vx '__am_base_release_triage_submission__' || true)"
+        fi
         if [ -n "${CHECK_TESTS:-}" ]; then
             if [ "${CHECK_TESTS}" = none ]; then
                 echo "daemon: CHECK_TESTS=none：不跑測試"
@@ -356,13 +369,6 @@ check_changed() {
                 run_daemon_tests "${CHECK_TESTS}"
             fi
         else
-            filters="$(printf '%s\n' "$files" | bash scripts/ci-daemon-filters.sh)"
-            if printf '%s\n' "$filters" | grep -qx '__am_base_release_triage_submission__'; then
-                am_base_release_triage_test=1
-                step "crate: cargo test -p am-base -- the_task_template_teaches_a_submission_the_daemon_accepts"
-                env -u AM_MODEL -u AM_EFFORT -u AM_DATA_DIR cargo test -p am-base --locked the_task_template_teaches_a_submission_the_daemon_accepts
-                filters="$(printf '%s\n' "$filters" | grep -vx '__am_base_release_triage_submission__' || true)"
-            fi
             if printf '%s\n' "$filters" | grep -qx '__all__'; then
                 step "daemon: cargo test（build／crate-wide test input）"
                 run_daemon_tests
