@@ -273,10 +273,11 @@ async fn flush_queued_inner<C: QueueContext>(app: &C, bot_id: &str) -> anyhow::R
     written.map_err(|e| e.context("排隊的 prompt 送出去了，送達結果卻寫不進去（記成欠著）"))
 }
 
-/// 排著的這一則是使用者自己從網頁送的：User /prompt 排的（`awaits_idle = 1`、`origin = web`），而且它的使用者訊息沒有
-/// 轉寄來源（`relay_from` 空）。AGM 派工排的是 `awaits_idle = 0`。讀不到就當不是（照舊受寬限擋，跟改之前一樣）。
+/// 排著的這一則是使用者自己從網頁送的：User /prompt 排的（`origin = web`，bot 忙碌時排的是 `awaits_idle = 1`，
+/// bot 沒在跑時送的是 `awaits_start = 1`，#1362），而且它的使用者訊息沒有轉寄來源（`relay_from` 空）。
+/// AGM 派工排的是 `awaits_idle = 0`、`awaits_start = 0`。讀不到就當不是（照舊受寬限擋，跟改之前一樣）。
 async fn queued_from_the_user(app: &impl crate::capabilities::Db, turn: &db::Turn) -> bool {
-    if turn.origin != "web" || turn.awaits_idle != 1 {
+    if turn.origin != "web" || (turn.awaits_idle != 1 && turn.awaits_start != 1) {
         return false;
     }
     let relayed: Result<Option<i64>, _> = sqlx::query_scalar(
@@ -1659,6 +1660,60 @@ mod flush_queue_tests {
             .unwrap();
         assert_ne!(out.delivery, "queued", "使用者自己送的不排隊等寬限");
         assert_eq!(typed(&f, "用cc1 sonnets"), 1, "當場打進 pane");
+    }
+
+    /// 使用者自己在 bot 沒在跑時送的那一則（`awaits_start`，等它起來才送）：中斷寬限不擋它，那正是接管後要打的字（#1362）。
+    #[tokio::test]
+    async fn the_users_own_start_if_stopped_prompt_is_not_held_by_an_earlier_interrupt() {
+        let f = queued("test").await;
+        let app = f.env.app.clone();
+        f.env.herdr.live_pane("pane-1", crate::testing::LivePane { width: Some(120), ..Default::default() });
+        sqlx::query("UPDATE turns SET origin = 'web', awaits_start = 1, awaits_idle = 0, prompt_text = '改好了，繼續' WHERE id = ?")
+            .bind(&f.turn_id)
+            .execute(app.db())
+            .await
+            .unwrap();
+        user_message_of(&app, &f, None).await;
+        note_user_interrupt(&f.bot_id);
+        super::super::stuck_turns::observe_at(&f.run_id, "idle", std::time::Instant::now());
+        flush_queued_locked(&app, &f.bot_id).await.unwrap();
+        assert_eq!(typed(&f, "改好了，繼續"), 1, "使用者自己的那一句不等寬限");
+        assert_eq!(turn(&app, &f.turn_id).await.status, "in_flight");
+    }
+
+    /// 對照（#1362）：同樣是等啟動的一則，但帶轉寄來源（AGM／別的 bot 送的）照舊受寬限擋、不撤。
+    #[tokio::test]
+    async fn a_relayed_start_if_stopped_prompt_is_still_held_by_the_interrupt() {
+        let f = queued("test").await;
+        let app = f.env.app.clone();
+        f.env.herdr.live_pane("pane-1", crate::testing::LivePane { width: Some(120), ..Default::default() });
+        sqlx::query("UPDATE turns SET origin = 'web', awaits_start = 1, awaits_idle = 0, prompt_text = '改好了，繼續' WHERE id = ?")
+            .bind(&f.turn_id)
+            .execute(app.db())
+            .await
+            .unwrap();
+        user_message_of(&app, &f, Some("other-bot")).await;
+        note_user_interrupt(&f.bot_id);
+        super::super::stuck_turns::observe_at(&f.run_id, "idle", std::time::Instant::now());
+        flush_queued_locked(&app, &f.bot_id).await.unwrap();
+        assert_eq!(turn(&app, &f.turn_id).await.status, "queued", "別人的派工照舊等寬限");
+        assert_eq!(typed(&f, "改好了，繼續"), 0);
+        assert!(queue_retry_timer_armed(&f.bot_id));
+    }
+
+    /// 這一則的使用者訊息（`role = 'user'`），`relay_from` 空＝使用者自己從網頁送的。
+    async fn user_message_of(app: &Arc<App>, f: &Fixture, relay_from: Option<&str>) {
+        sqlx::query(
+            "INSERT INTO messages (id, conversation_id, turn_id, role, content, source, created_at, relay_from) VALUES (?,?,?,'user','改好了，繼續','web',?,?)",
+        )
+        .bind(db::ulid())
+        .bind(&f.conv)
+        .bind(&f.turn_id)
+        .bind(db::now())
+        .bind(relay_from)
+        .execute(app.db())
+        .await
+        .unwrap();
     }
 
     /// 網頁按 Esc（interrupt_bot）端到端：收掉回合觸發的 flush 不會把排著的派工打進去。
