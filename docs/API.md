@@ -1438,7 +1438,7 @@ cargo shim 把這兩個明確的拒絕（`not_found`／`token_mismatch`）視為
 - 量不到的主機用 `error` 回報，不從清單消失（UI 標星號）。每 15 秒取樣，變化超過 1 MiB 才推 `mem_updated`。
 
 ### `GET /api/mem/processes?host=local`
-`host` 省略 = `local`，不認得 404。只給 UI token（#810：一般 bot 403 `user_only`，不能讀別顆 agent 的 argv／pane／socket）。
+`host` 省略 = `local`，不認得 404 `{"what":"host"}`（那句「unknown host」放在 `message`，#1384）。只給 UI token（#810：一般 bot 403 `user_only`，不能讀別顆 agent 的 argv／pane／socket）。
 
 ```json
 {"host":"local","sampled_at":"2026-09-08T04:11:02Z","processes":[
