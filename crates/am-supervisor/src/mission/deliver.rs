@@ -48,10 +48,19 @@ async fn git_split(dir: &Path, args: &[&str]) -> Result<(bool, String, String), 
     git_split_within(dir, args, git_limit(args)).await
 }
 
+fn git_command(dir: &Path, args: &[&str]) -> Command {
+    let mut cmd = Command::new("git");
+    cmd.arg("-C")
+        .arg(dir)
+        .args(args)
+        .env("GIT_TERMINAL_PROMPT", "0")
+        .env("LC_ALL", "C");
+    cmd
+}
+
 /// 同 [`git_split`]，上限由呼叫端給（測試用短的）。逾時回 `push_failed`，detail 說明超時。
 async fn git_split_within(dir: &Path, args: &[&str], limit: std::time::Duration) -> Result<(bool, String, String), Failure> {
-    let mut cmd = Command::new("git");
-    cmd.arg("-C").arg(dir).args(args).env("GIT_TERMINAL_PROMPT", "0");
+    let cmd = git_command(dir, args);
     let out = output_within(cmd, limit)
         .await
         .map_err(|e| fail("push_failed", format!("git 無法執行：{e}")))?
@@ -411,6 +420,14 @@ async fn remote_tip_is_only_rewritten(dir: &Path, tip: &str, head: &str) -> Resu
 mod tests {
     use super::*;
     use std::process::Command as StdCommand;
+
+    #[test]
+    fn git_runs_with_a_fixed_message_locale() {
+        let cmd = git_command(Path::new("/nonexistent"), &["fetch", "origin", "x"]);
+        let envs: Vec<_> = cmd.as_std().get_envs().collect();
+        assert!(envs.contains(&(std::ffi::OsStr::new("LC_ALL"), Some(std::ffi::OsStr::new("C")))));
+        assert!(envs.contains(&(std::ffi::OsStr::new("GIT_TERMINAL_PROMPT"), Some(std::ffi::OsStr::new("0")))));
+    }
 
     fn sh(dir: &Path, args: &[&str]) {
         let st = StdCommand::new("git")
