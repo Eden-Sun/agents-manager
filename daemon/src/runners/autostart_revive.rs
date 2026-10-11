@@ -162,7 +162,15 @@ async fn revive_one(app: &Arc<App>, host: &str, l: &Lost) -> anyhow::Result<()> 
     crate::race_point::hit("autostart_revive_before_start", &l.bot_id).await;
 
     let lock = app.bot_lock(&l.bot_id).await;
-    let guard = lock.lock_owned().await;
+    // 拿不到就跳過這一顆（#1429）：補開掛在 background_tasks 下，優雅關機的 `wait()` 會等它，不能在別人握著的鎖上無限等。
+    // 沒有寫決定，之後的定時掃描或 bot_stopped 探測再處理。
+    let guard = match lock.clone().try_lock_owned() {
+        Ok(guard) => guard,
+        Err(_) => {
+            tracing::info!(host, bot = %l.bot_id, "autostart revive: the bot is locked by another operation; leaving it to the next sweep or the bot_stopped probe");
+            return Ok(());
+        }
+    };
     let Some(bot) = eligible_lost_bot(app.as_ref(), host, l).await? else { return Ok(()) };
     // 一次遺失只決定一次（restarted／failed／backoff 都算）：這顆 lost run 已經有 bot_lost 紀錄就不再碰（#1061）。
     // 定時掃描每 30 秒會把同一顆 run 再交進來一次；inbox 以 (bot, run) 去重，重做的嘗試不會進退避額度。
