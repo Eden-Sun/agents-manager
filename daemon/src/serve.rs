@@ -400,6 +400,37 @@ mod tests {
         assert_eq!(app.background_tasks.len(), 0, "shutdown must join tracked work");
     }
 
+    /// #1463：關機的等待有上限（預設 30 秒）。一個永遠不結束的背景任務（例如卡在 bot 鎖或遠端 ssh 上）不能讓優雅關機不結束，
+    /// 否則只能靠 systemd 的 TimeoutStopSec 強殺。用虛擬時間：這裡等的是邏輯時間，不靠牆鐘。
+    #[tokio::test]
+    async fn a_background_task_that_never_finishes_does_not_hold_up_graceful_shutdown() {
+        let env = crate::testing::env().await;
+        let app = env.app.clone();
+        tokio::time::pause();
+        app.background_tasks.spawn(std::future::pending::<()>());
+
+        let out = tokio::time::timeout(std::time::Duration::from_secs(120), finish_serve(&app, Ok::<(), std::io::Error>(()))).await;
+        assert!(out.is_ok(), "關機不能等一個永遠不結束的背景任務（#1463）");
+        assert!(out.unwrap().is_ok(), "關機的結果照原樣回傳");
+    }
+
+    /// #1463 對照組：上限內結束的背景任務要照常跑完，不被截斷。
+    #[tokio::test]
+    async fn a_background_task_that_finishes_within_the_limit_is_not_cut_short() {
+        let env = crate::testing::env().await;
+        let app = env.app.clone();
+        tokio::time::pause();
+        let done = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let flag = done.clone();
+        app.background_tasks.spawn(async move {
+            tokio::time::sleep(std::time::Duration::from_secs(20)).await;
+            flag.store(true, std::sync::atomic::Ordering::SeqCst);
+        });
+
+        finish_serve(&app, Ok::<(), std::io::Error>(())).await.unwrap();
+        assert!(done.load(std::sync::atomic::Ordering::SeqCst), "上限內結束的任務要跑完，不能被截斷");
+    }
+
     /// issue #512：新建的 ui-token 一開始就要是 0600（不留 `write` 與 `chmod` 之間那段 0644 的窗口），
     /// 既有的過寬檔案開機時要被修回來，而且內容不能被換掉（token 本身是好的）。
     #[cfg(unix)]
