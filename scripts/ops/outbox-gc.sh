@@ -5,17 +5,44 @@
 set -u
 DIR="$(cd "$(dirname "$0")/.." && pwd)"
 LOG="$DIR/outbox-gc.log"
-OUTBOX="${AM_OUTBOX_ROOT:-$HOME/.config/agents-manager/outbox}"
 MAX_AGE_MIN=${OUTBOX_MAX_AGE_MIN:-60}
+CONFIG_FILE="$HOME/.config/agents-manager/config.toml"
+# 資料目錄與 daemon 的 data_dir()（daemon/src/startup.rs）同一條規則（沒有 --config，就是 daemon 正式的啟動方式）：
+#   [server] data_dir（~ 展開；相對路徑依設定檔所在目錄）> AM_DATA_DIR（非空）> ~/.config/agents-manager
+# 分享名單的 DB 與 outbox（`<資料目錄>/outbox/<bot>`，daemon 的 outbox.rs）都在這個目錄底下（#1430）。
+config_data_dir() {
+  [ -r "$CONFIG_FILE" ] || return 0
+  awk '
+    /^[[:space:]]*\[/ { sec = ($0 ~ /^[[:space:]]*\[server\][[:space:]]*(#.*)?$/) ? 1 : 0; next }
+    sec && /^[[:space:]]*data_dir[[:space:]]*=/ {
+      s = $0; sub(/^[^=]*=[[:space:]]*/, "", s)
+      if (s ~ /^"/) { sub(/^"/, "", s); sub(/".*$/, "", s) }
+      else if (s ~ /^\047/) { sub(/^\047/, "", s); sub(/\047.*$/, "", s) }
+      else { sub(/[[:space:]]*#.*$/, "", s); sub(/[[:space:]]+$/, "", s) }
+      print s; exit
+    }' "$CONFIG_FILE" 2>/dev/null
+}
+DATA_DIR=$(config_data_dir)
+if [ -n "$DATA_DIR" ]; then
+  case "$DATA_DIR" in "~") DATA_DIR=$HOME ;; "~/"*) DATA_DIR="$HOME/${DATA_DIR#\~/}" ;; esac
+  case "$DATA_DIR" in /*) ;; *) DATA_DIR="$HOME/.config/agents-manager/$DATA_DIR" ;; esac
+elif [ -n "${AM_DATA_DIR:-}" ]; then
+  DATA_DIR=$AM_DATA_DIR
+  case "$DATA_DIR" in /*) ;; *) DATA_DIR="$PWD/$DATA_DIR" ;; esac
+else
+  DATA_DIR="$HOME/.config/agents-manager"
+fi
+while [ "$DATA_DIR" != "/" ] && [ "${DATA_DIR%/}" != "$DATA_DIR" ]; do DATA_DIR=${DATA_DIR%/}; done
+OUTBOX="${AM_OUTBOX_ROOT:-$DATA_DIR/outbox}"
 [ -d "$OUTBOX" ] || exit 0
 reject_outbox() { echo "$(date '+%F %T') 拒絕：$1 $OUTBOX" >> "$LOG"; exit 1; }
 case "$OUTBOX" in *..*) reject_outbox "OUTBOX 帶 .." ;; esac
 while [ "$OUTBOX" != "/" ] && [ "${OUTBOX%/}" != "$OUTBOX" ]; do OUTBOX=${OUTBOX%/}; done
-OUTBOX_BASE="$HOME/.config/agents-manager/outbox"
+OUTBOX_BASE="$DATA_DIR/outbox"
 case "$OUTBOX" in "$OUTBOX_BASE"|"$OUTBOX_BASE/"*) ;; *) reject_outbox "OUTBOX 不在預期路徑" ;; esac
 # The lexical guard is not enough: a symlinked parent makes the trusted-looking path resolve
 # somewhere else. Check each component, including optional subdirectories in AM_OUTBOX_ROOT.
-for part in "$HOME/.config" "$HOME/.config/agents-manager" "$OUTBOX_BASE"; do
+for part in "$HOME/.config" "$HOME/.config/agents-manager" "$DATA_DIR" "$OUTBOX_BASE"; do
   [ ! -L "$part" ] || reject_outbox "OUTBOX 路徑含 symlink（${part}）"
 done
 remaining=${OUTBOX#"$OUTBOX_BASE"}
@@ -30,8 +57,8 @@ while [ -n "$remaining" ]; do
 done
 # Anchor subsequent relative find paths to the opened directory. A parent swapped after `cd`
 # cannot redirect cleanup through the original absolute pathname.
-HOME_REAL=$(cd "$HOME" 2>/dev/null && pwd -P) || reject_outbox "無法解析 HOME"
-EXPECTED_REAL="$HOME_REAL/.config/agents-manager/outbox${OUTBOX#"$OUTBOX_BASE"}"
+DATA_REAL=$(cd "$DATA_DIR" 2>/dev/null && pwd -P) || reject_outbox "無法解析資料目錄"
+EXPECTED_REAL="$DATA_REAL/outbox${OUTBOX#"$OUTBOX_BASE"}"
 cd "$OUTBOX" 2>/dev/null || reject_outbox "無法進入 OUTBOX"
 OUTBOX_REAL=$(pwd -P) || reject_outbox "無法解析 OUTBOX"
 [ "$OUTBOX_REAL" = "$EXPECTED_REAL" ] || reject_outbox "OUTBOX 實際位置不符預期"
@@ -88,7 +115,7 @@ share_prune() {
 # 名單讀不到（沒有 DB、sqlite3 失敗、被鎖住）就整輪不刪、記錯誤退出：寧可多留，不可把分享中的檔清掉。
 # 檔名要跟 daemon 寫的帳本檔一致：`agents-manager.sqlite3`（daemon 的 startup.rs、release_triage::default_db_path）。#1291 誤寫成 db.sqlite3，
 # 讀不到名單就整輪拒絕，outbox 停擺（#1391）；測試的 fixture 用同一個真實檔名，寫錯測試會紅。
-SHARE_DB="$(dirname "$OUTBOX_BASE")/agents-manager.sqlite3"
+SHARE_DB="$DATA_DIR/agents-manager.sqlite3"
 SHARE_SQL="SELECT r.bot_id FROM shared_bots r JOIN bots b ON b.id = r.bot_id AND b.deleted_at IS NULL JOIN projects p ON p.id = b.project_id AND p.deleted_at IS NULL;"
 [ -f "$SHARE_DB" ] || { echo "$(date '+%F %T') 拒絕整輪清理：讀不到分享名單（$SHARE_DB 不存在），什麼都不刪" >> "$LOG"; exit 1; }
 SHARE_IDS=$(sqlite3 -cmd '.timeout 5000' -batch -readonly "$SHARE_DB" "$SHARE_SQL" 2>> "$LOG") \
