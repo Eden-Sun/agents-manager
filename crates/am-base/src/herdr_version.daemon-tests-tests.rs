@@ -90,3 +90,52 @@
         crate::runners::herdr_version::refresh_with_fence(&app, "build1", &fence, Some("herdr 0.8.2".into())).await;
         assert_eq!(app.tools.lock().await["build1"].herdr_cli.as_deref(), Some("herdr 0.9.1"), "B 的快取不動");
     }
+
+/// **#1302**：一台主機的版本探測卡住，不能拖住別台的版本更新。卡住的那台（名字排前面，先探）的 ssh 在測試放行前不回來；
+/// 健康的那台要在這段期間就更新。
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_hung_host_probe_does_not_delay_a_healthy_host() {
+    let app = crate::testing::env().await.app.clone();
+    let cfg = |name: &str| crate::config::HostCfg { name: name.into(), ssh: name.into(), ssh_port: 22, ssh_opts: vec![], herdr_session: "agents-manager".into(), remote_path: String::new(), shared_session: false };
+    for name in ["aa-herdr-hung", "zz-herdr-ok"] {
+        let conn = app.hosts.insert_remote_for_test(cfg(name)).await;
+        conn.connected.store(true, std::sync::atomic::Ordering::SeqCst);
+        *conn.remote_home.lock().await = Some("/home/x".into());
+        app.tools.lock().await.insert(name.into(), crate::tools::HostTools {
+            tools: Default::default(), identities: Default::default(), shell_identities: Default::default(),
+            utc_offset_secs: None, herdr_cli: None, checked_at: crate::db::now(),
+        });
+    }
+    let gate = std::sync::Arc::new((std::sync::Mutex::new(false), std::sync::Condvar::new()));
+    let g = gate.clone();
+    crate::hosts::set_ssh_fake("aa-herdr-hung", move |_| {
+        let (m, cv) = &*g;
+        let mut open = m.lock().unwrap();
+        while !*open {
+            open = cv.wait(open).unwrap();
+        }
+        Ok("AM_HERDR herdr 0.9.1\n".into())
+    });
+    crate::hosts::set_ssh_fake("zz-herdr-ok", |_| Ok("AM_HERDR herdr 0.9.2\n".into()));
+
+    let round = {
+        let app = app.clone();
+        tokio::spawn(async move { crate::runners::herdr_version::refresh_all(&app).await })
+    };
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    let mut got = false;
+    while std::time::Instant::now() < deadline {
+        if app.tools.lock().await.get("zz-herdr-ok").and_then(|t| t.herdr_cli.clone()).as_deref() == Some("herdr 0.9.2") {
+            got = true;
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+    }
+    {
+        let (m, cv) = &*gate;
+        *m.lock().unwrap() = true;
+        cv.notify_all();
+    }
+    round.await.unwrap();
+    assert!(got, "健康的那台要在卡住的那台還沒回來時就更新");
+}

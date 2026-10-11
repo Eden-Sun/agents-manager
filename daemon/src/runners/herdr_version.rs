@@ -45,8 +45,13 @@ const REFRESH_EVERY: std::time::Duration = std::time::Duration::from_secs(60);
 /// 定期重探每台主機：只換了 CLI 的 mismatch 要即時亮警告。
 pub fn spawn_poller(app: std::sync::Arc<crate::state::App>) {
     crate::background_loop::spawn_periodic(&app, "herdr version poller", REFRESH_EVERY, REFRESH_EVERY, |app| async move {
-        for name in app.hosts.names().await {
-            refresh(&app, &name).await;
-        }
+        refresh_all(&app).await;
     });
+}
+
+/// 一輪探所有主機（poller 與測試共用）。
+pub async fn refresh_all(app: &std::sync::Arc<crate::state::App>) {
+    for name in app.hosts.names().await {
+        refresh(app, &name).await;
+    }
 }
