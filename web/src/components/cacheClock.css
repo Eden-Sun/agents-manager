@@ -36,7 +36,7 @@
   color: var(--text);
 }
 
-/* 實心底（未讀藍、要回答 hover 的紅）與淡紅底上只疊薄薄一層（合起來約 15%）：字是反白或紅的，色調太濃會把對比吃掉。 */
+/* 實心底（未讀黃、要回答 hover 的紅）與淡紅底上只疊薄薄一層（合起來約 15%）：未讀黃底上是深色字、hover 紅底上是反白字，色調太濃會把對比吃掉。 */
 .unread-chip.pinned.unread:is(.cache-fresh, .cache-warn, .cache-low),
 .unread-chip.pinned.needs-reply:is(.cache-fresh, .cache-warn, .cache-low) {
   --cache-strong-pct: 9%;
