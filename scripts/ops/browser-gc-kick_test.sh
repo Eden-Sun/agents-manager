@@ -306,5 +306,22 @@ exists "GUI Chrome 在用的舊 profile 不刪" "$gui"
 check  "log 計數 刪 0 個" "profile 目錄：刪掉 0 個" "$LOG"
 teardown
 
+# ── #1310：profile 路徑含空白（ps 給的是拍平的字串）：不能被截成前半段，正在用的不能刪。
+setup
+spaced="$TMPD/am-my photos"; mkprofile "$spaced"; touch -t 202601010000 "$spaced" "$spaced/Local State"
+chrome 1301 4321 "10:00" 9801 "$spaced"        # 父程序還活著：保留，但它的 profile 仍在用
+run >/dev/null
+exists "含空白的使用中 profile 不刪" "$spaced"
+check  "log 計數 刪 0 個" "profile 目錄：刪掉 0 個" "$LOG"
+teardown
+setup
+spaced="$TMPD/am-my photos"; mkprofile "$spaced"; touch -t 202601010000 "$spaced" "$spaced/Local State"
+bare="$TMPD/am-my"; mkprofile "$bare"; touch -t 202601010000 "$bare" "$bare/Local State"
+chrome 1302 1 "10:00" 9802 "$spaced"           # 孤兒：會被收，但截成 am-my 不能刪到別的目錄
+run >/dev/null
+check  "孤兒含空白 profile：行程照收" "reap headless pid 1302" "$LOG"
+exists "截斷成 am-my 不能誤刪同前綴的目錄" "$bare"
+teardown
+
 echo "$PASS passed, $FAIL failed"
 [ "$FAIL" -eq 0 ]
