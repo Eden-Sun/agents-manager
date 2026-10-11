@@ -199,8 +199,9 @@ self_test() {
     printf 'pub fn a() {}\n' >"$t/crates/x/src/foo.rs"
     git -C "$t" add -A
     expect_fail "候選沒人掛" "$t" "crates/x/src/foo/tests.rs"
-    # 同名模組宣告（foo.rs 裡 mod tests;）→ 放行。
+    # 同名模組宣告（foo.rs 裡 mod tests;）→ 放行；foo.rs 本身要從 crate 根掛上（#1423：宣告檔沒掛就不算）。
     printf '#[cfg(test)]\nmod tests;\n' >>"$t/crates/x/src/foo.rs"
+    printf 'mod foo;\n' >"$t/crates/x/src/lib.rs"
     git -C "$t" add -A
     expect_pass "候選由同名模組宣告" "$t"
 
@@ -212,6 +213,27 @@ self_test() {
     printf '#[path = "bar/tests_more.rs"]\nmod tests_more;\n' >"$t/crates/x/src/lib.rs"
     git -C "$t" add -A
     expect_pass "候選由 #[path] 掛上" "$t"
+
+    # #1423 (a)：dead.rs 有 mod tests; 但 dead.rs 自己沒有從 crate 根被掛上 → 點名 dead.rs（不能因為「同層有人宣告」就放行）。
+    t="$SELF_TMP/dead-parent"
+    new_tree "$t"
+    mkdir -p "$t/crates/x/src/dead"
+    printf 'pub fn a() {}\n' >"$t/crates/x/src/lib.rs"
+    printf '#[cfg(test)]\nmod tests;\n' >"$t/crates/x/src/dead.rs"
+    : >"$t/crates/x/src/dead/tests.rs"
+    git -C "$t" add -A
+    expect_fail "宣告檔本身沒掛" "$t" "crates/x/src/dead.rs"
+
+    # #1423 (b)：a.rs 的 #[path = "tests.rs"] 解析成 crates/x/src/tests.rs（依宣告檔所在目錄）；b/tests.rs 不能因為結尾同名就算掛上。
+    t="$SELF_TMP/path-suffix"
+    new_tree "$t"
+    mkdir -p "$t/crates/x/src/b"
+    printf 'mod a;\n' >"$t/crates/x/src/lib.rs"
+    printf '#[path = "tests.rs"]\nmod t;\n' >"$t/crates/x/src/a.rs"
+    : >"$t/crates/x/src/tests.rs"
+    : >"$t/crates/x/src/b/tests.rs"
+    git -C "$t" add -A
+    expect_fail "#[path] 只做結尾比對" "$t" "crates/x/src/b/tests.rs"
 
     # KNOWN 的檔已經被掛上 → 點名要從 KNOWN 刪掉（只掛 rewind，不能連帶影響 release_triage 的 tests.rs）。
     t="$SELF_TMP/known-mounted"
