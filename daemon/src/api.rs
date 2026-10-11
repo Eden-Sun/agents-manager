@@ -2076,7 +2076,21 @@ pub(crate) async fn delete_bot_http(State(app): State<Arc<App>>, Path(id): Path<
     delete_bot(State(app), Path(id)).await
 }
 
+async fn refuse_handed_off_project(pool: &sqlx::SqlitePool, id: &str) -> Result<(), LcError> {
+    let project = db::project(pool, id)
+        .await
+        .map_err(any_err)?
+        .filter(|p| p.deleted_at.is_none())
+        .ok_or_else(|| LcError::NotFound("project".into()))?;
+    if let Some(host) = project.handed_off_to {
+        return Err(LcError::conflict("handed_off", json!({"project_id": id, "handed_off_to": host})));
+    }
+    Ok(())
+}
+
 async fn delete_project(State(app): State<Arc<App>>, Path(id): Path<String>) -> Result<Response, LcError> {
+    // Handoff ownership takes precedence over deletion: the receiving daemon owns these bots and panes.
+    refuse_handed_off_project(&app.db, &id).await?;
     // 拿著專案裡每顆 bot 的 per-bot 鎖（start 用同一把）再確認都停了、再定案：鎖外檢查會跟 start 競爭，
     // 刪掉剛被重新啟動的 bot（sol 四輪）。依 id 排序拿鎖；其他路徑一次只拿一把，不會形成環。
     // 跟 `delete_bot` 同一個做法：拿鎖的途中又有 child 被認領進來的話，它沒被鎖住也不在快照裡——放掉重來（不能在持鎖時
@@ -2108,12 +2122,15 @@ async fn delete_project(State(app): State<Arc<App>>, Path(id): Path<String>) -> 
     // 專案 host 在**定案之前**讀好（#246）：定案之後才重讀、讀不到就退回 local，會去砍本機同 id 的目錄、
     // 遠端那份留著沒人回收。讀不到就 502、什麼都還沒動，可以原樣再按一次。
     // 已刪的專案再刪一次＝404，不能走到 `begin`：那會沿用並 abandon 背景還在補的 intent（#1058）。
-    let host = db::project(&app.db, &id)
+    let project = db::project(&app.db, &id)
         .await
         .map_err(any_err)?
         .filter(|p| p.deleted_at.is_none())
-        .ok_or_else(|| LcError::NotFound("project".into()))?
-        .host;
+        .ok_or_else(|| LcError::NotFound("project".into()))?;
+    if let Some(host) = project.handed_off_to {
+        return Err(LcError::conflict("handed_off", json!({"project_id": id, "handed_off_to": host})));
+    }
+    let host = project.host;
     // 授權範圍在臨界區裡從**當下的** TOML 算；TOML 裡多出沒鎖住的 bot 就拒絕。
     let held: std::collections::HashSet<String> = ids.iter().cloned().collect();
     // 持久 intent（#355 P3）：定案**之前**先 commit（payload＝當時的 bot 快照）；定案之後 daemon 死掉，開機由 `delete_intents::recover_host` 補完。
@@ -3036,6 +3053,7 @@ pub(crate) async fn delete_bot(State(app): State<Arc<App>>, Path(id): Path<Strin
     };
     let children: Vec<db::Bot> = children.into_iter().rev().collect();
     let bot = db::bot(&app.db, &id).await.map_err(any_err)?.ok_or_else(|| LcError::NotFound("bot".into()))?;
+    crate::handoff::refuse(&app.db, &id).await?;
     if bot.deleted_at.is_some() {
         return Err(LcError::NotFound("bot".into()));
     }
@@ -15180,3 +15198,40 @@ mod host_target_tests {
 #[cfg(test)]
 #[path = "bot_scope_matrix.rs"]
 mod bot_scope_matrix;
+
+
+#[cfg(test)]
+mod handoff_delete_tests {
+    use super::*;
+    use crate::testing as tt;
+
+    fn handed_off_reason(err: LcError) -> String {
+        match err {
+            LcError::Conflict(body) => body["reason"].as_str().unwrap_or_default().to_owned(),
+            other => panic!("expected handed_off conflict, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn delete_project_and_bot_refuse_handed_off_ownership() {
+        let project_env = tt::env().await;
+        let project_bot = tt::claude_bot(&project_env.app, &project_env.project_id, "delete-project-handed").await;
+        sqlx::query("UPDATE projects SET handed_off_to='mac' WHERE id=?")
+            .bind(&project_env.project_id)
+            .execute(&project_env.app.db)
+            .await
+            .unwrap();
+        let project_result = delete_project(State(project_env.app.clone()), Path(project_env.project_id.clone())).await;
+
+        let bot_env = tt::env().await;
+        let bot = tt::claude_bot(&bot_env.app, &bot_env.project_id, "delete-bot-handed").await;
+        sqlx::query("UPDATE projects SET handed_off_to='mac' WHERE id=?").bind(&bot_env.project_id).execute(&bot_env.app.db).await.unwrap();
+        let bot_result = delete_bot(State(bot_env.app.clone()), Path(bot.id.clone())).await;
+
+        assert_eq!(handed_off_reason(project_result.unwrap_err()), "handed_off");
+        assert_eq!(handed_off_reason(bot_result.unwrap_err()), "handed_off");
+        assert!(db::bot(&project_env.app.db, &project_bot.id).await.unwrap().unwrap().deleted_at.is_none(), "project refusal leaves bots intact");
+        assert!(db::project(&project_env.app.db, &project_env.project_id).await.unwrap().unwrap().deleted_at.is_none(), "handoff refusal leaves project intact");
+        assert!(db::bot(&bot_env.app.db, &bot.id).await.unwrap().unwrap().deleted_at.is_none(), "bot refusal leaves bot intact");
+    }
+}
