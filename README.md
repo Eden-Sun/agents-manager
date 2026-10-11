@@ -17,7 +17,7 @@ flowchart LR
         d4["hook receiver"]
     end
     store[("SQLite + config.toml<br/>~/.config/agents-manager/")]
-    subgraph herdr["herdr headless server (session=agents-mgr)"]
+    subgraph herdr["herdr headless server (session=agents-manager)"]
         direction TB
         panes["panes: claude / codex / grok"]
     end
@@ -115,10 +115,11 @@ bot 對 bot 送訊息的慣例：走 `POST /api/bots/{id}/prompt` 的要用 `X-A
 
 [![CI](https://github.com/Eden-Sun/agents-manager/actions/workflows/ci.yml/badge.svg)](https://github.com/Eden-Sun/agents-manager/actions/workflows/ci.yml)
 
-每次 push 到 `main` 或建立 Pull Request 都會跑 daemon 與 web 檢查。開發收尾前可在 repo 根目錄執行
-`scripts/check.sh`，讓本地檢查與 CI 使用同一組指令；`web`／`daemon` 參數可只跑一側。
+Pull Request、每日排程與手動觸發會跑 GitHub Actions（macOS，daemon 與 web 檢查）；`main` 的每個 push 由 agm-host 的
+`scripts/ops/ubuntu-ci.sh` 在背景跑整樹 `scripts/check.sh`，結果寫成 commit status `ubuntu-ci`。開發收尾前可在 repo 根目錄執行
+`scripts/check.sh changed`（只跑改到的部分）或 `scripts/check.sh`（不帶參數，全跑 ob、ops、web、daemon）；`web`／`daemon` 參數可只跑一側。
 
-需要：Rust（`cargo`）、[Bun](https://bun.sh)、已安裝的 [herdr](https://herdr.dev)（本專案實測 0.8.2，socket protocol 20），以及至少一種 agent CLI（`claude` / `codex` / `grok`）。
+需要：Rust（`cargo`）、[Bun](https://bun.sh)、已安裝的 [herdr](https://herdr.dev)（支援 socket protocol 20 與 22；0.8.2、0.9.1、0.9.3 實測過），以及至少一種 agent CLI（`claude` / `codex` / `grok`）。
 
 ```bash
 git clone git@github.com:Eden-Sun/agents-manager.git
