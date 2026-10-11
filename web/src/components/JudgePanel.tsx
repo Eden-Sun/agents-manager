@@ -7,6 +7,7 @@
 import { useEffect, useState } from 'react'
 import { fetchJudgeSettings, saveJudgeSettings, type JudgeSettings } from '../api/judge'
 import { useStore } from '../store/store'
+import { JudgeLedger } from './JudgeLedger'
 import './judgePanel.css'
 
 /**
@@ -109,51 +110,54 @@ export function JudgePanel() {
   }
 
   return (
-    <form
-      className="form judge-panel"
-      onSubmit={(e) => {
-        e.preventDefault()
-        if (!busy && dirty) save()
-      }}
-    >
-      <p className="hint">
-        畫面比對判定 codex／grok 撞限時，另外問 TypeSafe 的 Jev「這一行是介面畫的，還是 bot 印出來的內容」。只記錄、不改任何行為。
-      </p>
-      <label className="field">
-        <span>
-          TypeSafe API key{' '}
-          <em className={settings.key_present ? 'judge-key ok' : 'judge-key'}>{settings.key_present ? '已設定' : `未設定${settings.key_error ? `（${settings.key_error}）` : ''}`}</em>
-        </span>
-        <input
-          type="password"
-          value={token}
-          autoComplete="off"
-          spellCheck={false}
-          placeholder={settings.key_present ? '留空＝不更換' : '貼上 key'}
-          onChange={(e) => setToken(e.target.value)}
-        />
-        <span className="hint">只寫進這台機器的 key 檔（權限 600），不進設定檔、不會再顯示。</span>
-      </label>
-      <label className="judge-switch">
-        <input type="checkbox" checked={enabled} disabled={!willHaveKey && !enabled} onChange={(e) => setEnabled(e.target.checked)} />
-        <span>啟用（會把下面專案的撞限畫面最後 60 行，遮罩 token／密碼後送到 TypeSafe）</span>
-      </label>
-      <fieldset className="judge-projects" disabled={!enabled}>
-        <legend>適用的專案（沒勾＝不送）</legend>
-        {allProjects.length === 0 ? <span className="hint">還沒有專案。</span> : null}
-        {allProjects.map((p) => (
-          <label key={p.id}>
-            <input type="checkbox" checked={isPicked(p)} onChange={() => toggle(p)} />
-            <span>{p.label}</span>
-          </label>
-        ))}
-      </fieldset>
-      <div className="form-actions">
-        {note ? <span className={note.ok ? 'judge-note ok' : 'judge-note err'} role="status">{note.text}</span> : null}
-        <button type="submit" className="btn primary" disabled={busy || !dirty}>
-          儲存
-        </button>
-      </div>
-    </form>
+    <>
+      <form
+        className="form judge-panel"
+        onSubmit={(e) => {
+          e.preventDefault()
+          if (!busy && dirty) save()
+        }}
+      >
+        <p className="hint">
+          畫面比對判定 codex／grok 撞限時，另外問 TypeSafe 的 Jev「這一行是介面畫的，還是 bot 印出來的內容」。只記錄、不改任何行為。
+        </p>
+        <label className="field">
+          <span>
+            TypeSafe API key{' '}
+            <em className={settings.key_present ? 'judge-key ok' : 'judge-key'}>{settings.key_present ? '已設定' : `未設定${settings.key_error ? `（${settings.key_error}）` : ''}`}</em>
+          </span>
+          <input
+            type="password"
+            value={token}
+            autoComplete="off"
+            spellCheck={false}
+            placeholder={settings.key_present ? '留空＝不更換' : '貼上 key'}
+            onChange={(e) => setToken(e.target.value)}
+          />
+          <span className="hint">只寫進這台機器的 key 檔（權限 600），不進設定檔、不會再顯示。</span>
+        </label>
+        <label className="judge-switch">
+          <input type="checkbox" checked={enabled} disabled={!willHaveKey && !enabled} onChange={(e) => setEnabled(e.target.checked)} />
+          <span>啟用（會把下面專案的撞限畫面最後 60 行，遮罩 token／密碼後送到 TypeSafe）</span>
+        </label>
+        <fieldset className="judge-projects" disabled={!enabled}>
+          <legend>適用的專案（沒勾＝不送）</legend>
+          {allProjects.length === 0 ? <span className="hint">還沒有專案。</span> : null}
+          {allProjects.map((p) => (
+            <label key={p.id}>
+              <input type="checkbox" checked={isPicked(p)} onChange={() => toggle(p)} />
+              <span>{p.label}</span>
+            </label>
+          ))}
+        </fieldset>
+        <div className="form-actions">
+          {note ? <span className={note.ok ? 'judge-note ok' : 'judge-note err'} role="status">{note.text}</span> : null}
+          <button type="submit" className="btn primary" disabled={busy || !dirty}>
+            儲存
+          </button>
+        </div>
+      </form>
+      <JudgeLedger />
+    </>
   )
 }

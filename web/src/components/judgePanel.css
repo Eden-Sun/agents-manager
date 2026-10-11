@@ -45,3 +45,38 @@
   border-color: var(--accent);
   outline: none;
 }
+/* 帳本（issue #1327）：表格橫向可捲，手機寬度不撐破版面。 */
+.judge-ledger {
+  margin-top: 12px;
+  min-width: 0;
+}
+.judge-ledger h4,
+.judge-ledger h5 {
+  margin: 8px 0 4px;
+}
+.judge-ledger-scroll {
+  overflow-x: auto;
+  -webkit-overflow-scrolling: touch;
+  max-width: 100%;
+}
+.judge-ledger-table {
+  width: 100%;
+  min-width: 480px;
+  border-collapse: collapse;
+  font-size: 12px;
+}
+.judge-ledger-table th,
+.judge-ledger-table td {
+  padding: 4px 6px;
+  border-bottom: 1px solid var(--border);
+  text-align: left;
+  vertical-align: top;
+}
+.judge-ledger-table tr.over td {
+  color: var(--warn);
+}
+.judge-ledger-triggers {
+  margin: 4px 0 0;
+  padding-left: 18px;
+  font-size: 12px;
+}
