@@ -136,23 +136,37 @@ impl LoginMode {
 
 /// Wipe `ghp_` / `gho_` / `github_pat_` (etc.) payloads so they cannot leak into logs or 502 bodies.
 pub fn redact_secrets(s: &str) -> String {
+    redact_counting(s, |_| {})
+}
+
+/// 同 [`redact_secrets`]，但每次配置一段原文副本就回報它的位元組數（#1303：測試用計數點，不靠牆鐘）。
+/// 直接掃原字串：每個位置只比對固定前綴（切片不配置記憶體），沒遮的原文成段輸出；整段沒有 token 時只搬一次。
+fn redact_counting(s: &str, mut on_copy: impl FnMut(usize)) -> String {
     const PREFIXES: [&str; 6] = ["github_pat_", "ghp_", "gho_", "ghu_", "ghs_", "ghr_"];
-    let chars: Vec<char> = s.chars().collect();
+    let bytes = s.as_bytes();
     let mut out = String::with_capacity(s.len());
+    let mut copied = 0; // s[copied..i] 還沒輸出
     let mut i = 0;
-    while i < chars.len() {
-        let rest: String = chars[i..].iter().collect();
-        if let Some(p) = PREFIXES.iter().copied().find(|p| rest.starts_with(p)) {
+    while i < s.len() {
+        if let Some(p) = PREFIXES.iter().copied().find(|p| s[i..].starts_with(p)) {
+            if i > copied {
+                on_copy(i - copied);
+                out.push_str(&s[copied..i]);
+            }
             out.push_str(p);
             out.push_str("***");
-            i += p.chars().count();
-            while i < chars.len() && (chars[i].is_ascii_alphanumeric() || chars[i] == '_') {
+            i += p.len();
+            while i < s.len() && (bytes[i].is_ascii_alphanumeric() || bytes[i] == b'_') {
                 i += 1;
             }
+            copied = i;
             continue;
         }
-        out.push(chars[i]);
-        i += 1;
+        i += s[i..].chars().next().map_or(1, char::len_utf8);
+    }
+    if s.len() > copied {
+        on_copy(s.len() - copied);
+        out.push_str(&s[copied..]);
     }
     out
 }
@@ -869,6 +883,33 @@ mod tests {
         assert!(r.contains("ghp_***"), "{r}");
         assert!(r.contains("github_pat_***"), "{r}");
         assert!(r.contains(" extra"), "{r}");
+    }
+
+    /// #1303：複雜度用「搬了多少原文」證明，不用牆鐘：每個輸入位元組只搬一次（以前每個字元都重組剩餘整段，搬的量是 Θ(n²)）。
+    /// 4 KiB 與 8 KiB 都是毫秒級；斷言是確定性的，跟機器負載無關。
+    #[test]
+    fn redact_copies_each_input_byte_once() {
+        for n in [4096usize, 8192] {
+            let input = "stderr line without secrets\n".repeat(n / 28 + 1);
+            let mut copies = Vec::new();
+            let out = redact_counting(&input, |k| copies.push(k));
+            assert_eq!(out, input);
+            assert_eq!(copies.iter().sum::<usize>(), input.len(), "原文要整段搬一次（輸入 {} 位元組）", input.len());
+        }
+    }
+
+    /// #1303：多位元組字元與 token 相鄰時，邊界要照字元切，不能切在 UTF-8 中間。
+    #[test]
+    fn redact_handles_unicode_around_tokens() {
+        let r = redact_secrets("日本語 ghp_abc中文 gho_x 結尾");
+        assert_eq!(r, "日本語 ghp_***中文 gho_*** 結尾");
+    }
+
+    /// #1303：token 前綴出現在字串最尾端（後面沒有任何字元）也要遮。
+    #[test]
+    fn redact_prefix_at_end_of_input() {
+        assert_eq!(redact_secrets("error: ghp_"), "error: ghp_***");
+        assert_eq!(redact_secrets("ghp"), "ghp");
     }
 
     #[test]
