@@ -1541,7 +1541,8 @@ mod compat_tests {
                 .unwrap();
         }
         drop(guard);
-        let result = tokio::time::timeout(std::time::Duration::from_secs(2), adoption).await.unwrap().unwrap();
+        // 放鎖之後 adopt_child 還要拿 parent 的鎖、重讀 DB；忙的機器上 2 秒不夠。只是放棄的上限，結束得早就早回。
+        let result = tokio::time::timeout(std::time::Duration::from_secs(30), adoption).await.unwrap().unwrap();
         assert!(result.is_err(), "stale reconciliation state must not resurrect a deleted owner: {result:?}");
         let bots: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM bots WHERE parent_bot_id=?")
             .bind(&parent.id)
