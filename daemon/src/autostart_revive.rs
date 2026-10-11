@@ -14,6 +14,7 @@
 //! * 同一顆 lost run 只決定一次（#1061）：定時掃描會把它再交進來，已有 `bot_lost` 紀錄就不再碰，失敗或退避的決定不會被滑掉的窗口翻案。
 //! * 每次遺失都推一則 supervisor inbox `bot_lost`（巡檢收、叫醒），帶 `outcome`：`restarted`／`failed`／`backoff`，不等探針。
 use crate::db;
+use crate::events::ports::HandoffRepo;
 use std::time::Duration;
 
 #[cfg(test)]
@@ -69,7 +70,7 @@ pub(crate) async fn eligible_lost_bot(app: &(impl crate::capabilities::Db + crat
     }
     // Recheck after the candidate scan and again under the per-bot lock: handoff means this daemon
     // must not restart the bot or write a bot_lost decision for the receiving daemon.
-    if crate::handoff::bot_handed_off_to(app.db(), &bot.id).await?.is_some() {
+    if app.db().bot_handed_off_to(&bot.id).await?.is_some() {
         return Ok(None);
     }
     if db::bot_host(app.db(), &bot.id).await? != host || !app.host_connected(host).await || db::active_run(app.db(), &bot.id).await?.is_some() {
