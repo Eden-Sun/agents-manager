@@ -128,3 +128,26 @@ test('429 與 503 混著來：429 不吃 503 的額度', async () => {
   assert.equal(r.id, 'id-5')
   assert.equal(calls(), 5)
 })
+
+test('429 與 503 重試額度各自計算，且交錯失敗的總次數有限', async () => {
+  const first = clientWith([...Array.from({ length: 12 }, () => new ShareHttpError(429, 1)), new ShareHttpError(503, 1), null])
+  const result = await uploadPatiently(first.client, file('a.txt', 'text/plain', 3), { sleep: async () => {} })
+  assert.equal(result.id, 'id-14', '12 次 429 後仍可使用尚未消耗的 503 重試額度')
+  assert.equal(first.calls(), 14)
+
+  const alternating = [
+    new ShareHttpError(429, 1),
+    new ShareHttpError(503, 1),
+    new ShareHttpError(429, 1),
+    new ShareHttpError(503, 1),
+    new ShareHttpError(429, 1),
+    new ShareHttpError(503, 1),
+    ...Array.from({ length: 9 }, () => new ShareHttpError(429, 1)),
+    new ShareHttpError(503, 1),
+  ]
+  const second = clientWith(alternating)
+  const sleeps: number[] = []
+  await assert.rejects(uploadPatiently(second.client, file('a.txt', 'text/plain', 3), { sleep: async (ms) => void sleeps.push(ms) }), (e: unknown) => e instanceof ShareHttpError && e.status === 503)
+  assert.equal(second.calls(), 16, '最多初次上傳加 12 次 429 與 3 次 503 重試')
+  assert.equal(sleeps.length, 15)
+})
