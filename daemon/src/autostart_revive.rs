@@ -467,6 +467,35 @@ mod tests {
         assert_eq!(after[1].0, "running");
     }
 
+    /// #1429：補開收尾掛在 background_tasks 下，優雅關機的 `wait()` 會等它。補開拿 bot 鎖時，別的操作（使用者的 start、
+    /// 別的 revive）正握著那把鎖：補開不能在鎖上無限等，要跳過這一顆、不開新的 run、也不寫決定（之後的掃描或探測再處理），
+    /// 這樣 `wait()` 才會回來。修正前這裡會卡住（紅）。
+    #[tokio::test]
+    async fn a_revive_that_finds_its_bot_locked_skips_it_and_does_not_hold_up_the_shutdown_wait() {
+        let env = tt::env().await;
+        let bot = autostart_bot(&env, "revive-bot-locked").await;
+        crate::lifecycle::start_bot(&env.app, &bot.id).await.unwrap();
+        autostart_done(&env.app);
+        let lost_run = db::active_run(&env.app.db, &bot.id).await.unwrap().unwrap().id;
+        crate::lifecycle::mark_run_exited(&env.app, &lost_run, super::LOST_REASON).await;
+        let before = runs(&env.app, &bot.id).await;
+
+        // 別的操作握著這顆 bot 的鎖。
+        let lock = env.app.bot_lock(&bot.id).await;
+        let held = lock.clone().lock_owned().await;
+        runner::spawn_revive(&env.app, config::LOCAL_HOST, vec![super::Lost { bot_id: bot.id.clone(), run_id: lost_run }]);
+        env.app.background_tasks.close();
+        tokio::time::timeout(std::time::Duration::from_secs(10), env.app.background_tasks.wait())
+            .await
+            .expect("補開不能在 bot 鎖上無限等，否則優雅關機的 wait() 會卡住（#1429）");
+        drop(held);
+
+        assert_eq!(runs(&env.app, &bot.id).await, before, "鎖沒拿到就不動：不開新的 run");
+        assert!(db::active_run(&env.app.db, &bot.id).await.unwrap().is_none());
+        assert!(bot_lost_events(&env.app, &bot.id).await.is_empty(), "沒有決定就不寫 bot_lost，之後還能再處理");
+        assert_eq!(runner::pending_count(&env.app), 0, "補開的計數照常歸零");
+    }
+
     /// 使用者在 herdr 裡關掉 pane（`pane exited`）、手動停（`stopped`）、不是 autostart、child：掃描不撈。
     #[tokio::test]
     async fn a_pane_the_user_closed_is_still_not_revived() {
