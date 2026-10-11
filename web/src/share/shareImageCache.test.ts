@@ -92,6 +92,27 @@ test('點陣圖：清單裡已經沒有的檔案（刪掉、改名）整條淘�
   assert.equal(count(calls, 'a.png'), 2, '已不在清單，淘汰後要重抓')
 })
 
+test('檔案從清單消失時，尚未開始的下載會取消', async () => {
+  let releaseFirst!: (blob: Blob) => void
+  const calls: string[] = []
+  const client = {
+    fileBlob(name: string) {
+      calls.push(name)
+      if (name === 'active.png') return new Promise<Blob>((resolve) => (releaseFirst = resolve))
+      return Promise.resolve(new Blob(['stale']))
+    },
+  } as unknown as ShareClient
+  const active = api.rasterOf(client, 'active.png', 'v1')
+  await Promise.resolve()
+  const stale = api.rasterOf(client, 'stale.png', 'v1')
+  const staleResult = Promise.allSettled([stale])
+  api.pruneShareImages(client, [file('active.png')])
+  releaseFirst(new Blob(['active']))
+  await active
+  await staleResult
+  assert.deepEqual(calls, ['active.png'], '已移除檔案仍在 queue 時不會打到 fileBlob')
+})
+
 test('點陣圖總量有上限：一直開新的檔，最舊的會被淘汰，最新的還在', async () => {
   const { maxBytes } = api.SHARE_IMAGE_CACHE_LIMITS.raster
   const chunk = Math.floor(maxBytes / 4)
