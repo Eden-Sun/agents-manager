@@ -5438,21 +5438,28 @@ async fn start_bot(State(app): State<Arc<App>>, Path(id): Path<String>, Query(q)
     // 參數不合法要在任何副作用（包括叫醒睡著的 bot）之前就 400，與 restart_bot 同順序。
     let opts = resume_opts(&q)?;
     refuse_child_restart(&app, &id).await?;
-    // 被 AGM 因為閒置收起來的（§6.11）一律走續接：使用者按「啟動」要的是把剛剛那顆帶著對話的
-    // bot 叫回來，不是開一段新的空白對話。
-    if crate::supervisor::idle_sleep::wake(&app, &id, "使用者按了啟動")
-        .await
-        .map_err(|e| LcError::Upstream(e.to_string()))?
-    {
-        // 叫醒接不回時會退回開新對話（`idle_sleep::wake`）：照實際結果回，不寫死 `true`（issue #107）。
-        let body = match db::active_run(&app.db, &id).await.map_err(any_err)? {
-            Some(run) => started_json(&app, &run.id, &lifecycle::StartOpts { resume_native: true, ..Default::default() }).await?,
-            None => json!({"run_id": null, "resumed": false}),
-        };
-        return Ok((StatusCode::OK, Json(body)).into_response());
-    }
-    let run_id = lifecycle::start_bot_with(&app, &id, opts.clone()).await?;
-    Ok((StatusCode::OK, Json(started_json(&app, &run_id, &opts).await?)).into_response())
+    // 脫離請求（#1356）：agent 起來要等 60 秒以上，client 斷線時啟動照樣做完，不會停在 starting。
+    let body = detach(&id, {
+        let (app, id) = (app.clone(), id.clone());
+        async move {
+            // 被 AGM 因為閒置收起來的（§6.11）一律走續接：使用者按「啟動」要的是把剛剛那顆帶著對話的
+            // bot 叫回來，不是開一段新的空白對話。
+            if crate::supervisor::idle_sleep::wake(&app, &id, "使用者按了啟動")
+                .await
+                .map_err(|e| LcError::Upstream(e.to_string()))?
+            {
+                // 叫醒接不回時會退回開新對話（`idle_sleep::wake`）：照實際結果回，不寫死 `true`（issue #107）。
+                return match db::active_run(&app.db, &id).await.map_err(any_err)? {
+                    Some(run) => started_json(&app, &run.id, &lifecycle::StartOpts { resume_native: true, ..Default::default() }).await,
+                    None => Ok(json!({"run_id": null, "resumed": false})),
+                };
+            }
+            let run_id = lifecycle::start_bot_with(&app, &id, opts.clone()).await?;
+            started_json(&app, &run_id, &opts).await
+        }
+    })
+    .await?;
+    Ok((StatusCode::OK, Json(body)).into_response())
 }
 
 /// 子 agent（`parent_bot_id` 非空）一律由父 bot 用 herdr 重開，daemon 的 start／restart 不收（SPEC §6.5a，
