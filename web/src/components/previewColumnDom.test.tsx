@@ -9,10 +9,15 @@ import { setPreviewColOpen } from '../store/previewLayout'
 import { PreviewColumn } from './PreviewColumn'
 
 const VIEWPORT = 1600
-const originalMatchMedia = window.matchMedia
-const originalInnerWidth = window.innerWidth
+// 這兩個要等 happy-dom 註冊之後才讀（`before` 裡）：模組頂層讀 `window` 會在 DOM 還沒註冊時炸（#1348）。
+let originalMatchMedia: typeof window.matchMedia
+let originalInnerWidth: number
 
-before(setupDom)
+before(() => {
+  setupDom()
+  originalMatchMedia = window.matchMedia
+  originalInnerWidth = window.innerWidth
+})
 afterEach(async () => {
   await unmountAll()
   window.matchMedia = originalMatchMedia
