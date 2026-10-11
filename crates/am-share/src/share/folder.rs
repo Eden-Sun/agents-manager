@@ -144,27 +144,47 @@ pub fn ensure_inbox(folder: &Path) -> std::io::Result<std::fs::File> {
 const MD_MAX: u64 = 32 * 1024;
 const TOTAL_MAX: usize = 96 * 1024;
 
-fn read_bound(folder: &Path, parts: &[&str]) -> Option<String> {
+fn read_md(f: std::fs::File) -> Option<(String, bool)> {
+    let mut buf = Vec::new();
+    f.take(MD_MAX + 1).read_to_end(&mut buf).ok()?;
+    let truncated = buf.len() as u64 > MD_MAX;
+    buf.truncate(MD_MAX as usize);
+    let text = match String::from_utf8(buf) {
+        Ok(s) => s,
+        Err(e) if truncated && e.utf8_error().error_len().is_none() => {
+            let n = e.utf8_error().valid_up_to();
+            let mut bytes = e.into_bytes();
+            bytes.truncate(n);
+            String::from_utf8(bytes).ok()?
+        }
+        Err(_) => return None,
+    };
+    (!text.trim().is_empty()).then_some((text, truncated))
+}
+
+fn read_bound(folder: &Path, parts: &[&str]) -> Option<(String, bool)> {
     let comps: Vec<&OsStr> = parts.iter().map(OsStr::new).collect();
     let f = crate::trusted_open::open_bound_file(folder, &comps, None).ok()?;
-    let bytes = crate::trusted_open::read_limited(f, MD_MAX).ok()?;
-    String::from_utf8(bytes).ok().filter(|s| !s.trim().is_empty())
+    read_md(f)
 }
 
 /// 資料夾的指示與記憶，給系統提示用。全部 `O_NOFOLLOW` 逐層打開：既有資料夾裡的 `CLAUDE.md` 若是指到外面
 /// （例如 ui-token）的符號連結，一律不讀——不然 daemon 會替 bot 把資料夾外的東西讀進它的提示。
 pub fn instructions(folder: &Path) -> String {
     let mut out = String::new();
-    let push = |label: &str, text: &str, out: &mut String| {
+    let push = |label: &str, text: &str, truncated: bool, out: &mut String| {
         if out.len() + text.len() > TOTAL_MAX {
             out.push_str(&format!("\n（{label} 太大，沒有載入）\n"));
             return;
         }
         out.push_str(&format!("\n\n## {label}\n\n{}\n", text.trim_end()));
+        if truncated {
+            out.push_str(&format!("（{label} 超過 32 KiB，只載入前面）\n"));
+        }
     };
     for parts in [&["CLAUDE.md"][..], &[".claude", "CLAUDE.md"], &["AGENTS.md"]] {
-        if let Some(t) = read_bound(folder, parts) {
-            push(&format!("資料夾的指示：{}", parts.join("/")), &t, &mut out);
+        if let Some((t, truncated)) = read_bound(folder, parts) {
+            push(&format!("資料夾的指示：{}", parts.join("/")), &t, truncated, &mut out);
         }
     }
     // `memory/` 是 bot 自己寫的地方；`.claude/memory/`（claude auto-memory 的格式，既有資料夾可能已經有）唯讀照樣載入——
@@ -184,9 +204,8 @@ pub fn instructions(folder: &Path) -> String {
             names.sort_by_key(|n| (n != "MEMORY.md", n.clone()));
             for n in names.into_iter().take(64) {
                 let Ok(f) = crate::trusted_open::open_entry_in(&dir, OsStr::new(&n)) else { continue };
-                let mut s = String::new();
-                if f.take(MD_MAX).read_to_string(&mut s).is_ok() && !s.trim().is_empty() {
-                    push(&format!("記憶：{label}/{n}"), &s, &mut out);
+                if let Some((s, truncated)) = read_md(f) {
+                    push(&format!("記憶：{label}/{n}"), &s, truncated, &mut out);
                 }
             }
         }
@@ -340,8 +359,26 @@ mod tests {
         for want in ["PELICAN", "WALRUS", "TEAL", "PUFFIN", "MEMORY.md"] {
             assert!(text.contains(want), "{want} 不在：{text}");
         }
+        assert!(!text.contains("超過 32 KiB"), "小檔不應有截斷註記：{text}");
         assert!(!text.contains("SECRET-TOKEN"), "符號連結指到外面的不能讀：{text}");
         assert!(text.find("MEMORY.md").unwrap() < text.find("color.md").unwrap(), "索引在前");
+    }
+
+    #[test]
+    fn oversized_instruction_and_memory_files_load_their_first_32k_with_a_note() {
+        let f = crate::share::test_dirs::scratch_dir("am-share-oversized-md");
+        std::fs::write(f.join("CLAUDE.md"), format!("codeword PELICAN\n\n{}", "指".repeat(20_000))).unwrap();
+        std::fs::create_dir_all(f.join("memory")).unwrap();
+        std::fs::write(f.join("memory/big.md"), format!("remember PUFFIN\n{}", "記".repeat(20_000))).unwrap();
+        std::fs::write(f.join("memory/bin.md"), [0xff, 0xfe, b'X', b'\n']).unwrap();
+
+        let text = instructions(&f);
+        assert!(text.contains("PELICAN"), "指示檔前段要載入：{text}");
+        assert!(text.contains("PUFFIN"), "記憶檔前段要載入：{text}");
+        assert!(text.contains("資料夾的指示：CLAUDE.md 超過 32 KiB"), "指示檔要註明截斷：{text}");
+        assert!(text.contains("記憶：memory/big.md 超過 32 KiB"), "記憶檔要註明截斷：{text}");
+        assert!(!text.contains('\u{FFFD}'), "截斷要停在完整 UTF-8 字元：{text}");
+        assert!(!text.contains("bin.md"), "非 UTF-8 檔案不應載入：{text}");
     }
 
     #[test]
