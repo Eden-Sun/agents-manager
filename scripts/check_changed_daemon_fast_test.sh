@@ -123,6 +123,15 @@ grep -qx 'test -p agents-managerd --locked -- hookrecv:: lifecycle::queue::' "$A
 export AM_TEST_DIFF_HEAD=daemon/src/lifecycle/queue.rs
 CHECK_TESTS=none changed >/dev/null || fail "CHECK_TESTS=none 失敗"
 [ -z "$(cargo_tests)" ] || fail "CHECK_TESTS=none 還是跑了測試：$(cargo_tests)"
+# crates/ 的改動也一樣：none 就一條 cargo test 都不跑（crate 自己的測試也不跑；#1251）。
+: >"$AM_TEST_CARGO_LOG"
+export AM_TEST_DIFF_HEAD=crates/am-core/src/lib.rs
+CHECK_TESTS=none changed >/dev/null || fail "crates 改動的 CHECK_TESTS=none 失敗"
+[ -z "$(cargo_tests)" ] || fail "CHECK_TESTS=none 還是跑了 crate 測試：$(cargo_tests)"
+# 沒設 CHECK_TESTS 時 crate 測試照跑（不能把預設行為一起關掉）。
+: >"$AM_TEST_CARGO_LOG"
+changed >/dev/null || fail "crates 改動的 changed 失敗"
+grep -qx 'test -p am-core --locked' "$AM_TEST_CARGO_LOG" || fail "沒設 CHECK_TESTS 時 crate 測試沒跑：$(cat "$AM_TEST_CARGO_LOG")"
 CHECK_TESTS=prompt:: changed >/dev/null || fail "CHECK_TESTS=prompt:: 失敗"
 grep -qx 'test -p agents-managerd --locked prompt::' "$AM_TEST_CARGO_LOG" || fail "CHECK_TESTS 沒照給的跑：$(cat "$AM_TEST_CARGO_LOG")"
 
