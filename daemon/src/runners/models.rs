@@ -174,6 +174,8 @@ pub async fn list(app: &Arc<App>, host: &str, kind: &str, identity: Option<&str>
     if !app.hosts.is_current(&fence).await {
         bail!("host `{host}` was reconnected/reconfigured while listing {kind} models; stale result discarded");
     }
+    // 過期的格子順手丟掉（同 `github::remember_issues`）：identity 是任意字串，不回收就只增不減（#1349）。
+    cache.retain(|_, entry| entry.0.elapsed() < CACHE_TTL);
     cache.insert(key, (Instant::now(), v.clone()));
     Ok(v)
 }
@@ -226,6 +228,19 @@ mod tests {
         let dead = crate::testing::eventually!(!alive(&pid));
         let _ = std::fs::remove_dir_all(&dir);
         assert!(dead, "逾時後卡住的 login shell（pid {pid}）要被收掉");
+    }
+
+    /// #1349：每次 list 順手丟掉過期的格子（identity 是任意字串，過期的每一格不回收就永遠留在 map 裡）。
+    #[tokio::test]
+    async fn listing_evicts_entries_older_than_the_ttl() {
+        let env = crate::testing::env().await;
+        let app = &env.app;
+        let old = std::time::Instant::now().checked_sub(CACHE_TTL + Duration::from_secs(1)).unwrap();
+        app.models_cache.lock().await.insert("local/agy/stale".into(), (old, json!({"models": []})));
+        list(app, "local", "agy", Some("fresh"), false).await.unwrap();
+        let mut keys: Vec<String> = app.models_cache.lock().await.keys().cloned().collect();
+        keys.sort();
+        assert_eq!(keys, vec!["local/agy/fresh".to_string()]);
     }
 
     #[tokio::test]

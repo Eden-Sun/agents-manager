@@ -2011,7 +2011,7 @@ UI token 會取得 Project 底下所有存活 bot 的訊息合併。Bot token �
 
 ### 12.1 `GET /api/models?kind=claude|codex|grok|agy&host=<name>&identity=<name>&refresh=1`
 
-某 host 上某 kind 可用的模型。`host` 省略 = `local`；快取 10 分鐘（key = host+kind+identity），`refresh=1` 強制重抓；遠端經 ssh 跑同一條管線。一般 Bot 只讀新鮮快取；未命中或過期回 503 `model_cache_miss`，不執行本機或遠端 CLI。一般 Bot 帶 `refresh=1|true|yes` 回 403 `user_only`；User 與已登記 AGM 角色維持現有即時探測行為。
+某 host 上某 kind 可用的模型。`host` 省略 = `local`；快取 10 分鐘（key = host+kind+identity），`refresh=1` 強制重抓；遠端經 ssh 跑同一條管線。一般 Bot 只讀新鮮快取；未命中或過期回 503 `model_cache_miss`，不執行本機或遠端 CLI。身分新增或刪除時，該名字（任何主機）的清單快取作廢，下一次讀取重抓（#1349）。一般 Bot 帶 `refresh=1|true|yes` 回 403 `user_only`；User 與已登記 AGM 角色維持現有即時探測行為。
 `identity` 決定這份清單是哪個身分的：claude 讀 `CLAUDE_CONFIG_DIR/settings.json`，算 `default_effort` 與 `is_default`（SPEC §17.1）；codex 以 `CODEX_HOME` 跑 `app-server` 並讀它的 `config.toml`（頂層 `model`／`model_reasoning_effort`）；grok 以 `GROK_HOME` 跑 `grok models` 並讀它的 `config.toml`／`models_cache.json`。省略或該身分沒設這個家目錄 → 預設家目錄（不是錯誤）。
 
 ```json
