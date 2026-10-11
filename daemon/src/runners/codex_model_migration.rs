@@ -33,25 +33,21 @@ pub async fn observe(app: &Arc<App>, run: &db::Run) {
 
 pub async fn observe_screen(app: &Arc<App>, run: &db::Run, screen: &str) {
     if let Some(dialog) = Dialog::of(screen) {
-        let changed = notify_once(app, run, dialog).await;
         if run.agent_status == "blocked" {
-            // 框換成另一種時 blocked_reason 跟著變，網頁要重讀一次。
-            if changed {
-                app.emit_bot_status(&run.bot_id).await;
+            if db::compare_and_set_running_run_agent_status(&app.db, run, "blocked", "blocked").await.unwrap_or(false) {
+                let changed = notify_once(app, run, dialog).await;
+                if changed {
+                    app.emit_bot_status(&run.bot_id).await;
+                }
             }
+            // 框換成另一種時 blocked_reason 跟著變，網頁要重讀一次。
             return;
         }
 
         let previous = run.agent_status.clone();
-        let marked =
-            sqlx::query("UPDATE runs SET agent_status='blocked' WHERE id=? AND agent_status=?")
-                .bind(&run.id)
-                .bind(&previous)
-                .execute(&app.db)
-                .await
-                .map(|result| result.rows_affected() == 1)
-                .unwrap_or(false);
+        let marked = db::compare_and_set_running_run_agent_status(&app.db, run, &previous, "blocked").await.unwrap_or(false);
         if marked {
+            notify_once(app, run, dialog).await;
             if let Some(episode) = open().lock().unwrap().get_mut(&run.id) {
                 episode.forced_from.get_or_insert(previous);
             }
@@ -73,22 +69,16 @@ pub async fn observe_screen(app: &Arc<App>, run: &db::Run, screen: &str) {
         episode.forced_from.clone()
     };
     let (resolved, status_changed) = if let Some(previous) = &forced_from {
-        match sqlx::query("UPDATE runs SET agent_status=? WHERE id=? AND state='running' AND agent_status='blocked'")
-            .bind(previous)
-            .bind(&run.id)
-            .execute(&app.db)
-            .await
-        {
-            Ok(result) if result.rows_affected() == 1 => (true, true),
-            Ok(_) => match sqlx::query_as::<_, (String, String)>("SELECT state, agent_status FROM runs WHERE id=?")
-                .bind(&run.id)
-                .fetch_optional(&app.db)
-                .await
-            {
-                Ok(Some((state, status))) => (state != "running" || status != "blocked", false),
-                Ok(None) => (true, false),
+        match db::compare_and_set_running_run_agent_status(&app.db, run, "blocked", previous).await {
+            Ok(true) => (true, true),
+            Ok(false) => match db::is_current_running_run(&app.db, run).await {
+                Ok(true) => (true, false),
+                Ok(false) => {
+                    open().lock().unwrap().remove(&run.id);
+                    return;
+                }
                 Err(error) => {
-                    tracing::warn!(run = %run.id, error = ?error, "could not verify synthetic Codex migration blocked status");
+                    tracing::warn!(run = %run.id, error = ?error, "could not verify current Codex migration run");
                     (false, false)
                 }
             },
@@ -98,6 +88,10 @@ pub async fn observe_screen(app: &Arc<App>, run: &db::Run, screen: &str) {
             }
         }
     } else {
+        if !db::is_current_running_run(&app.db, run).await.unwrap_or(false) {
+            open().lock().unwrap().remove(&run.id);
+            return;
+        }
         (true, false)
     };
     if !resolved {
