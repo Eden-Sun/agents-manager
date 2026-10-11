@@ -391,3 +391,36 @@
         assert_eq!(std::fs::read_to_string(dir.join("victim.txt")).unwrap(), "keep-me");
         assert!(backup.join("keep.txt").exists(), "備份還在");
     }
+
+    /// #1312：回收區裡同一顆 bot 的 `.attachments.<ms>`、`.share_workspace.<ms>`、`.old-copy.<ms>` 不是 bot 設定目錄，
+    /// 不管毫秒多大都不能被還原成 `bots/<id>/`；真正那一份 `<id>.<ms>` 才是還原的對象。`plain_ms` 大或小兩種順序都要過。
+    async fn restore_ignores_typed_and_odd_suffixes(host: &'static str, plain_ms: u128, odd_ms: u128) {
+        let (env, root) = remote(host).await;
+        let app = env.app.clone();
+        let bot = tt::claude_bot(&app, &env.project_id, "alfa").await;
+        let trash = root.join("bots-trash");
+        let plain = trash.join(format!("{}.{plain_ms}", bot.id));
+        std::fs::create_dir_all(&plain).unwrap();
+        std::fs::write(plain.join("tag"), "plain").unwrap();
+        for kind in ["attachments", "share_workspace", "old-copy"] {
+            let odd = trash.join(format!("{}.{kind}.{odd_ms}", bot.id));
+            std::fs::create_dir_all(&odd).unwrap();
+            std::fs::write(odd.join("tag"), kind).unwrap();
+        }
+
+        restore_for(&app, &bot.id).await;
+        assert_eq!(std::fs::read_to_string(root.join("bots").join(&bot.id).join("tag")).unwrap(), "plain", "還原的是 bot 自己那一份");
+        assert_eq!(entries(&trash).len(), 3, "其他後綴的目錄原樣留在回收區：{:?}", entries(&trash));
+    }
+
+    /// #1312：typed 後綴的毫秒比較大（會被舊寫法挑中）。
+    #[tokio::test]
+    async fn a_typed_suffix_with_a_newer_number_is_not_restored_as_the_bot_dir() {
+        restore_ignores_typed_and_odd_suffixes("trashbox-suffix-newer", 1000, 9000).await;
+    }
+
+    /// #1312：反過來，bot 自己那一份毫秒比較大。
+    #[tokio::test]
+    async fn the_plain_copy_wins_even_when_typed_suffixes_are_older() {
+        restore_ignores_typed_and_odd_suffixes("trashbox-suffix-older", 9000, 1000).await;
+    }
