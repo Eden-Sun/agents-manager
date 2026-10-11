@@ -219,16 +219,33 @@ fn sweep_due(last_unix: i64, now_unix: i64) -> bool {
     since < 0 || since >= 60
 }
 
-static LAST_SWEEP: std::sync::atomic::AtomicI64 = std::sync::atomic::AtomicI64::new(0);
+/// 上一輪掃描的時間，每個資料庫一格（#1325）。以前是全行程共用一個 `static`：另一顆實例（同一行程裡的第二份 App、
+/// 測試的 fixture）剛掃過，就會把這一顆壓掉一分鐘，而且反過來也一樣，兩邊會互相餓死。
+fn last_sweeps() -> &'static std::sync::Mutex<std::collections::HashMap<String, i64>> {
+    static LAST: std::sync::OnceLock<std::sync::Mutex<std::collections::HashMap<String, i64>>> = std::sync::OnceLock::new();
+    LAST.get_or_init(Default::default)
+}
 
-/// controller 每個 tick 呼叫；自己節流成一分鐘一次。
+/// 鍵：資料庫檔案的路徑。記憶體資料庫沒有檔名，就用連線池的位址區分。
+fn sweep_key(pool: &sqlx::SqlitePool) -> String {
+    let opts = pool.connect_options();
+    let file = opts.get_filename();
+    if file.as_os_str().is_empty() || file == std::path::Path::new(":memory:") {
+        format!("memory:{:p}", pool)
+    } else {
+        format!("file:{}", file.display())
+    }
+}
+
+/// controller 每個 tick 呼叫；自己節流成一分鐘一次（每個資料庫各自一分鐘）。
 pub async fn wake_stalled(app: &impl crate::capabilities::Db) {
     let now = chrono::Utc::now();
-    let last = LAST_SWEEP.load(std::sync::atomic::Ordering::Relaxed);
+    let key = sweep_key(app.db());
+    let last = last_sweeps().lock().unwrap_or_else(|e| e.into_inner()).get(&key).copied().unwrap_or(0);
     if !sweep_due(last, now.timestamp()) {
         return;
     }
-    LAST_SWEEP.store(now.timestamp(), std::sync::atomic::Ordering::Relaxed);
+    last_sweeps().lock().unwrap_or_else(|e| e.into_inner()).insert(key, now.timestamp());
     wake_stalled_at(app, now).await;
 }
 
@@ -606,6 +623,37 @@ mod tests {
         assert!(!sweep_due(1_000, 1_030), "不到一分鐘不掃");
         assert!(sweep_due(1_000, 1_060), "滿一分鐘就掃");
         assert!(sweep_due(1_000, 400), "時鐘往回跳 10 分鐘不能讓巡邏停 10 分鐘");
+    }
+
+    /// 建一個停在「輪到 AGM」的任務：交辦都結案，任務與交辦的 `updated_at` 都推到一小時前（真的停住了）。
+    async fn stalled(env: &tt::Env, crid: &str) -> String {
+        let id = mission(env, crid).await;
+        sqlx::query("UPDATE supervisor_inbox SET state='handled'").execute(&env.app.db).await.unwrap();
+        linked(&env.app, &id, &format!("{crid}-s"), "executor", "completed").await;
+        let old = crate::db::iso_in(-3600);
+        sqlx::query("UPDATE missions SET updated_at=? WHERE id=?").bind(&old).bind(&id).execute(&env.app.db).await.unwrap();
+        sqlx::query("UPDATE supervisor_assignments SET updated_at=?").bind(&old).execute(&env.app.db).await.unwrap();
+        id
+    }
+
+    async fn mission_next_count(app: &Arc<App>) -> i64 {
+        sqlx::query_scalar("SELECT COUNT(*) FROM supervisor_inbox WHERE kind='mission_next'").fetch_one(&app.db).await.unwrap()
+    }
+
+    /// #1325：節流是每個資料庫各一格。另一顆實例剛掃過，不能把這一顆壓掉；同一顆實例一分鐘之內仍然不重掃。
+    #[tokio::test]
+    async fn a_sweep_of_one_database_does_not_suppress_the_sweep_of_another() {
+        let a = tt::env().await;
+        let b = tt::env().await;
+        store::get_or_init(&b.app.db).await.unwrap();
+        stalled(&b, "iso-b").await;
+        wake_stalled(&a.app).await;
+        wake_stalled(&b.app).await;
+        assert_eq!(mission_next_count(&b.app).await, 1, "A 剛掃過，B 停住的任務仍然要在這一輪被叫醒");
+
+        stalled(&b, "iso-b2").await;
+        wake_stalled(&b.app).await;
+        assert_eq!(mission_next_count(&b.app).await, 1, "同一顆實例一分鐘之內不重掃");
     }
 
     fn roles_of(kind: &str) -> (crate::supervisor::roles::Role, bool) {
