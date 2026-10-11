@@ -659,31 +659,58 @@ am_cargo() {
             _test_env="RUST_TEST_THREADS=$_tt_cap"
         fi
     fi
-    # libtest 的命令列 `--test-threads` 優先於環境變數，所以 `-- --test-threads=N` 也要夾（issue #1441）：只看第一個 `--` 之後的參數，
-    # 其餘參數順序不動。夾到就在 stderr 印一行（原值、夾成多少）。
-    if [ -n "$_tt_cap" ]; then
-        _n=$#; _dd=""; _fix=""; _clamp_from=""
+    # 命令列的參數優先於環境變數（cargo 的 `-j`／`--jobs`、libtest 的 `--test-threads`），所以受管的 bot 的命令列也要夾
+    # （issue #1441、#1442）。`-j`／`--jobs` 只看第一個 `--` 之前的參數，`--test-threads` 只看 `--` 之後的；其餘參數順序不動。
+    # 超過名額（或非整數：cargo 接受 `default` 與負數）就夾成名額的值，夾到就在 stderr 印一行。
+    _jobs_cap=""
+    if [ "$_jobs" -gt 0 ] 2>/dev/null && am_is_managed; then _jobs_cap=$_jobs; fi
+    if [ -n "$_tt_cap" ] || [ -n "$_jobs_cap" ]; then
+        _n=$#; _dd=""; _fix=""; _clamp_from=""; _clamp_kind=""
         while [ "$_n" -gt 0 ]; do
             _a=$1; shift; _n=$((_n - 1))
             if [ -n "$_fix" ]; then
-                _fix=""
-                case "$_a" in *[!0-9]* | '') ;; *) if [ "$_a" -gt "$_tt_cap" ]; then _clamp_from=$_a; _a=$_tt_cap; fi ;; esac
+                _kind=$_fix; _fix=""
+                if [ "$_kind" = jobs ]; then _cap=$_jobs_cap; else _cap=$_tt_cap; fi
+                case "$_a" in
+                    *[!0-9]* | '') [ -z "$_cap" ] || { _clamp_from=$_a; _clamp_kind=$_kind; _a=$_cap; } ;;
+                    *) if [ -n "$_cap" ] && [ "$_a" -gt "$_cap" ]; then _clamp_from=$_a; _clamp_kind=$_kind; _a=$_cap; fi ;;
+                esac
+            elif [ "$_a" = "--" ] && [ -z "$_dd" ]; then
+                _dd=1
             elif [ -z "$_dd" ]; then
-                [ "$_a" != "--" ] || _dd=1
+                case "$_a" in
+                    -j | --jobs) [ -z "$_jobs_cap" ] || _fix=jobs ;;
+                    -j*) _v=${_a#-j}
+                         if [ -n "$_jobs_cap" ]; then
+                             case "$_v" in *[!0-9]* | '') _clamp_from=$_v; _clamp_kind=jobs; _a="-j$_jobs_cap" ;;
+                                 *) [ "$_v" -le "$_jobs_cap" ] || { _clamp_from=$_v; _clamp_kind=jobs; _a="-j$_jobs_cap"; } ;; esac
+                         fi ;;
+                    --jobs=*) _v=${_a#--jobs=}
+                         if [ -n "$_jobs_cap" ]; then
+                             case "$_v" in *[!0-9]* | '') _clamp_from=$_v; _clamp_kind=jobs; _a="--jobs=$_jobs_cap" ;;
+                                 *) [ "$_v" -le "$_jobs_cap" ] || { _clamp_from=$_v; _clamp_kind=jobs; _a="--jobs=$_jobs_cap"; } ;; esac
+                         fi ;;
+                esac
             else
                 case "$_a" in
-                    --test-threads) _fix=1 ;;
-                    --test-threads=*)
-                        _v=${_a#--test-threads=}
-                        case "$_v" in *[!0-9]* | '') ;; *) if [ "$_v" -gt "$_tt_cap" ]; then _clamp_from=$_v; _a="--test-threads=$_tt_cap"; fi ;; esac ;;
+                    --test-threads) [ -z "$_tt_cap" ] || _fix=tt ;;
+                    --test-threads=*) _v=${_a#--test-threads=}
+                         if [ -n "$_tt_cap" ]; then
+                             case "$_v" in *[!0-9]* | '') ;;
+                                 *) [ "$_v" -le "$_tt_cap" ] || { _clamp_from=$_v; _clamp_kind=tt; _a="--test-threads=$_tt_cap"; } ;; esac
+                         fi ;;
                 esac
             fi
             set -- "$@" "$_a"
         done
         if [ -n "$_clamp_from" ]; then
-            printf 'agents-manager: --test-threads=%s 超過名額的測試執行緒上限 %s，改用 %s（要超過請 AM_CARGO_BYPASS_SCHEDULER=1 明講）\n' "$_clamp_from" "$_tt_cap" "$_tt_cap" >&2
+            case "$_clamp_kind" in
+                jobs) printf 'agents-manager: -j／--jobs %s 超過名額的並行編譯數 %s，改用 %s（要超過請 AM_CARGO_BYPASS_SCHEDULER=1 明講）\n' "$_clamp_from" "$_jobs_cap" "$_jobs_cap" >&2 ;;
+                tt) printf 'agents-manager: --test-threads=%s 超過名額的測試執行緒上限 %s，改用 %s（要超過請 AM_CARGO_BYPASS_SCHEDULER=1 明講）\n' "$_clamp_from" "$_tt_cap" "$_tt_cap" >&2 ;;
+            esac
         fi
     fi
+
     # 續約間隔取 TTL 的三分之一：daemon 端的 sweep 也是等好幾個間隔才收，一次沒續到不會立刻掉名額。
     _renew_every=$((_ttl / 3))
     [ "$_renew_every" -ge 1 ] || _renew_every=1

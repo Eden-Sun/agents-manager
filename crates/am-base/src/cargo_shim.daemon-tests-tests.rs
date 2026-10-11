@@ -1227,6 +1227,42 @@ esac
         }
     }
 
+    /// #1442：`cargo_jobs` 靠 `CARGO_BUILD_JOBS` 交給 cargo，但命令列的 `-j`／`--jobs` 優先於環境變數，受管的 bot 原本可以
+    /// `cargo build -j 32` 握著 1 個名額開 32 支 rustc。只看第一個 `--` 之前的參數：超過名額（或非整數，cargo 接受 `default` 與負數）
+    /// 一律改成名額的值；`--` 之後的參數不動；人工 shell 不動。每一組都確認 `CARGO_BUILD_JOBS` 照舊帶著名額的值。
+    #[test]
+    fn a_managed_bot_cannot_raise_cargo_jobs_above_the_grant() {
+        let s = Sandbox::new();
+        let d = s.dir.display();
+        write_exec(s.dir.join("real/cargo"), format!("#!/bin/sh\necho \"JOBS=${{CARGO_BUILD_JOBS-}} ARGS=$*\" >> '{d}/jobs.log'\n"));
+        let managed = [("AM_BOT_ID", "b1"), ("AM_HOOK_TOKEN", "tok"), ("AM_PORT", "1")];
+        // (是不是受管, 呼叫端的參數, 期望記到的 ARGS；受管時 JOBS 一律是名額的 2)
+        let cases: [(bool, &[&str], &str); 9] = [
+            (true, &["build", "-j", "32"], "build -j 2"),
+            (true, &["build", "-j32"], "build -j2"),
+            (true, &["check", "--jobs", "64"], "check --jobs 2"),
+            (true, &["test", "--jobs=64"], "test --jobs=2"),
+            (true, &["build", "-j", "1"], "build -j 1"),
+            (true, &["build", "-j", "default"], "build -j 2"),
+            (true, &["build", "-j", "-1"], "build -j 2"),
+            (true, &["test", "--", "-j", "9"], "test -- -j 9"),
+            (false, &["build", "-j", "32"], "build -j 32"),
+        ];
+        for (bot, args, want) in cases {
+            let _ = std::fs::remove_file(s.dir.join("jobs.log"));
+            s.install_fake_curl("case \"$*\" in *acquire*) printf '{\"granted\":true,\"token\":\"tok-1\",\"cargo_jobs\":2,\"lease_ttl_secs\":30}' ;; *) printf '{}' ;; esac");
+            let env: Vec<(&str, &str)> = if bot { managed.to_vec() } else { Vec::new() };
+            let (_, err, rc) = s.run(&env, args);
+            assert_eq!(rc, 0, "{args:?}: {err}");
+            let got = std::fs::read_to_string(s.dir.join("jobs.log")).unwrap();
+            let got = got.trim();
+            assert!(got.ends_with(&format!("ARGS={want}")), "受管 {bot}、參數 {args:?}：{got}");
+            if bot {
+                assert!(got.starts_with("JOBS=2 "), "名額的 cargo_jobs 照舊帶著：{got}");
+            }
+        }
+    }
+
     /// issue #128（重開）的驗收：`max_concurrent=1`，排程器整個沒開（沒有人在聽那個埠），同時起兩顆**受管的** bot 的 cargo——
     /// 撐過整段 outage，任何時刻都不能有 cargo 在跑（沒有名額）；排程器回來之後照常排隊，兩顆各自跑完、同時在跑的最多 1 顆。
     /// **真的** router（同 daemon 一份）＋**真的** curl＋**真的** shim；bot 身分是真的資料列（router 用 hook token 認證）。
