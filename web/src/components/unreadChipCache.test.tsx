@@ -61,7 +61,7 @@ test('主力晶片：底色依剩餘時間填色、綠黃紅分級；已涼回�
   await mount(<UnreadChip />)
   assert.ok(chip('fresh').classList.contains('cache-fresh'))
   assert.equal(chip('fresh').style.getPropertyValue('--cache-fill'), '75.0%')
-  assert.match(await hoverText('fresh'), /快取約 45 分後到期（上次活動 \d\d:\d\d）/)
+  assert.match(await hoverText('fresh'), /快取約 45 分後到期（上次活動 (?:\d+\/\d+ )?\d\d:\d\d）/)
   assert.ok(chip('warn').classList.contains('cache-warn'))
   assert.ok(chip('low').classList.contains('cache-low'))
   // 已涼：沒有任何 cache- class、沒有填色，tooltip 講已涼。
