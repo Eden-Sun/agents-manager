@@ -1831,6 +1831,52 @@
         server.abort();
     }
 
+    /// #1418：母 run 停止後仍活著的 child 繼承 proof，需能經正式 shim 建立 pane。
+    #[tokio::test(flavor = "multi_thread", worker_threads = 3)]
+    async fn spawn_run_missing_regression_live_child_can_split_after_parent_run_stops_through_real_daemon() {
+        let e = crate::testing::env().await;
+        let parent = crate::testing::claude_bot(&e.app, &e.project_id, "parent-with-live-child").await;
+        sqlx::query("UPDATE bots SET hook_token='tok-live-child' WHERE id=?").bind(&parent.id).execute(&e.app.db).await.unwrap();
+        let run = crate::testing::fake_run(&e.app, &parent.id).await;
+        let (_, pane) = e.app.herdr.workspace_create("/tmp", "w", serde_json::json!({})).await.unwrap();
+        e.herdr.live_pane(&pane.pane_id, crate::testing::LivePane { rows: Some(40), ..Default::default() });
+        e.herdr.set_agent("surviving-child", &pane.pane_id, false);
+        sqlx::query("UPDATE runs SET state='stopped', ended_at=? WHERE id=?")
+            .bind(crate::db::now())
+            .bind(&run)
+            .execute(&e.app.db)
+            .await
+            .unwrap();
+        assert!(crate::db::active_run(&e.app.db, &parent.id).await.unwrap().is_none(), "the parent run is stopped");
+        assert!(e.herdr.calls_to("agent.get").is_empty(), "pane creation does not require agent.get");
+        let created = serde_json::json!({"result": {"pane": {"pane_id": pane.pane_id}}}).to_string();
+        let (port, server) = serve_daemon_router(e.app.clone()).await;
+        let vars: Vec<(&str, String)> = vec![
+            ("AM_BOT_ID", parent.id.clone()),
+            ("AM_HOOK_TOKEN", "tok-live-child".into()),
+            ("AM_AGENT_NAME", "surviving-child".into()),
+            ("AM_PORT", port.to_string()),
+            ("AM_TEST_CREATE_JSON", created),
+        ];
+        let s = Sandbox::new();
+        std::fs::remove_file(s.dir.join("real/curl")).unwrap();
+        let (out, err, rc) = tokio::task::spawn_blocking(move || {
+            let env: Vec<(&str, &str)> = vars.iter().map(|(k, v)| (*k, v.as_str())).collect();
+            s.run_full(&env, &["pane", "split", "--pane", "w1:p1", "--purpose", "child shell"])
+        })
+        .await
+        .unwrap();
+        assert_eq!(rc, 0, "a child that outlives its parent run may still split: {out:?} {err}");
+        assert!(out.iter().any(|line| line.contains(&pane.pane_id)), "shim preserves herdr output: {out:?}");
+        let owner: Option<Option<String>> = sqlx::query_scalar("SELECT owner_bot_id FROM panes WHERE pane_id = ?")
+            .bind(&pane.pane_id)
+            .fetch_optional(&e.app.db)
+            .await
+            .unwrap();
+        assert_eq!(owner, Some(Some(parent.id)), "the child pane is registered to the bot whose proof it inherited");
+        server.abort();
+    }
+
     /// #1314 的本意：daemon 找不到的 pane id（例如主機改指後拿別台的 pane id 來 finish）不能算登記成功。
     #[tokio::test(flavor = "multi_thread", worker_threads = 3)]
     async fn a_pane_the_daemon_cannot_find_keeps_the_fence_and_exits_75() {
