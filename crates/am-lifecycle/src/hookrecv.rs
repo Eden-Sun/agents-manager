@@ -1095,6 +1095,51 @@ pub async fn process_locked<H: HookHost>(app: &H, body: &HookBody) -> Result<()>
     process_locked_for(app, body, None).await
 }
 
+/// 同一筆送兩次（重試、spool 重播）：已經收過的那一回合。
+async fn seen_turn<H: HookHost>(app: &H, bot: &db::Bot, session_id: Option<&str>, turn_id: Option<&str>) -> Result<Option<String>> {
+    let (Some(sid), Some(tid)) = (session_id, turn_id) else { return Ok(None) };
+    Ok(sqlx::query_scalar::<_, String>(
+        "SELECT t.id FROM turns t JOIN conversations c ON c.id = t.conversation_id
+          WHERE c.bot_id=? AND t.native_session_id=? AND t.native_turn_id=?",
+    )
+    .bind(&bot.id)
+    .bind(sid)
+    .bind(tid)
+    .fetch_optional(app.db())
+    .await?)
+}
+
+/// #1259：移交查詢讀不出來時，這一則唯一會做的寫入：撞額度的記帳（#108）。規則與正常路徑相同：只記這一代 run 送來的、
+/// 主機已換代的不記、同一則已經收過的不再記。讀不到主機或寫不進去就是錯誤，由呼叫端回給收件匣重試。
+async fn record_limit_hit_only<H: HookHost>(app: &H, body: &HookBody, bot: &db::Bot, run: Option<&db::Run>, kind: &HookKind) -> Result<()> {
+    let HookKind::TurnFailed { session_id, turn_id, reason, detail, .. } = kind else { return Ok(()) };
+    if *reason == FailureReason::Interrupted {
+        return Ok(());
+    }
+    let Some(d) = detail.as_deref().filter(|d| crate::turn_error::is_quota_exhaustion(d)) else { return Ok(()) };
+    let Some(r) = run else { return Ok(()) };
+    let host_moved = match db::run_host_generation(app.db(), &r.id).await.ok().flatten() {
+        Some(was) => app.admitted_host_fence(bot).await.is_some_and(|f| f.generation() as i64 != was),
+        None => false,
+    };
+    if host_moved {
+        return Ok(());
+    }
+    let ev = crate::lifecycle::fence::EventIdentity { run_id: body.run_id.as_deref(), session_id: hook_session_id(&body.payload) };
+    if app.db().classify_event_owner(&bot.id, r, ev).await.admit(&r.id).is_none() {
+        return Ok(());
+    }
+    if seen_turn(app, bot, session_id.as_deref(), turn_id.as_deref()).await?.is_some() {
+        return Ok(());
+    }
+    match bot.kind.as_str() {
+        "claude" => app.mark_claude_limit_hit(bot, d).await?,
+        "agy" => app.mark_agy_limit_hit(bot, d).await?,
+        _ => {}
+    }
+    Ok(())
+}
+
 pub async fn process_locked_for<H: HookHost>(app: &H, body: &HookBody, event_id: Option<&str>) -> Result<()> {
     let mut accepted_turn_id = None;
     process_locked_for_with_outcome(app, body, event_id, &mut accepted_turn_id).await
@@ -1113,15 +1158,18 @@ async fn process_locked_for_with_outcome<H: HookHost>(
         return Ok(());
     }
     // #708：移交出去的專案，hook 的事歸接手的 daemon；記一行就丟（spool 重播、spawn hint 也一樣）。
-    // 讀不到＝`projects` 那一列讀不到：往下走，後面讀主機的那幾步照它們自己的規則 fail closed（欠著的撞限、收件匣重試）。
-    match app.db().bot_handed_off_to(&bot.id).await {
-        Ok(None) => {}
+    // #1259：讀不到＝不知道專案歸誰。不當成「我的」去處理，也不當成「移交了」去丟：下面會只做撞額度的記帳，然後回錯讓收件匣重試。
+    let handoff_unknown = match app.db().bot_handed_off_to(&bot.id).await {
+        Ok(None) => None,
         Ok(Some(to)) => {
             tracing::info!(bot = %bot.name, provider = %body.provider, handed_off_to = %to, "hook for a handed-off project; ignored");
             return Ok(());
         }
-        Err(e) => tracing::warn!(bot = %bot.name, error = %e, "could not tell whether the hook's project was handed off; handling it as ours"),
-    }
+        Err(e) => {
+            tracing::warn!(bot = %bot.name, error = %e, "could not tell whether the hook's project was handed off; will retry");
+            Some(e)
+        }
+    };
     // spool 重播的那條路也要擋（`receive` 已經擋過一次，但舊 spool 裡可能還躺著別種 provider 的）。
     if !provider_matches_kind(&body.provider, &bot.kind) {
         tracing::warn!(bot = %bot.name, kind = %bot.kind, provider = %body.provider, "hook from another provider; ignored");
@@ -1144,6 +1192,13 @@ async fn process_locked_for_with_outcome<H: HookHost>(
         tracing::debug!(bot = %bot.name, "statusline received");
     } else {
         tracing::info!(bot = %bot.name, provider = %body.provider, ?kind, "hook received");
+    }
+
+    // #1259：移交查詢讀不出來時，這一則不做任何 hook 副作用（不認領、不收回合、不寫訊息、不送子通知、不清旗標）。
+    // 唯一的例外是撞額度的記帳（#108）：撞限是帳號的事實，記下來排著的派工才擋得住。記完回錯，收件匣退避重試。
+    if let Some(e) = handoff_unknown {
+        record_limit_hit_only(app, body, &bot, run.as_ref(), &kind).await?;
+        return Err(e.context("could not tell whether the hook's project was handed off; retrying"));
     }
 
     // 世代圍籬（issue #69）：這一則屬於哪一代。只在這裡問一次，`fence` 是唯一的規則所在地——
@@ -1267,18 +1322,7 @@ async fn process_locked_for_with_outcome<H: HookHost>(
                 app.login_on_auth_failure(&bot, admitted_fence.as_ref()).await;
             }
             // 同一筆送兩次（重試、spool 重播）：已經收過的那一回合。
-            let seen = match (&session_id, &turn_id) {
-                (Some(sid), Some(tid)) => sqlx::query_scalar::<_, String>(
-                    "SELECT t.id FROM turns t JOIN conversations c ON c.id = t.conversation_id
-                      WHERE c.bot_id=? AND t.native_session_id=? AND t.native_turn_id=?",
-                )
-                .bind(&bot.id)
-                    .bind(sid)
-                    .bind(tid)
-                    .fetch_optional(app.db())
-                    .await?,
-                _ => None,
-            };
+            let seen = seen_turn(app, &bot, session_id.as_deref(), turn_id.as_deref()).await?;
             // 撞的是帳號額度（#108、#150）：先記撞限，**再**推回合結束——那個事件會叫醒 queue flush，排著的派工要看得到
             // 這個身分沒額度。撞額度是帳號的事實，跟這一則還有沒有回合可收無關：Esc 收掉回合之後才到、對上中斷的回聲、
             // 回合已被別的路收掉，都一樣要記，不然下一件派工會被送進沒額度的身分。只記這一代 run 送來的（`admitted`：
@@ -6927,4 +6971,107 @@ pub trait HookHost:
     /// transcript 路徑是不是這顆 bot 讀得的（遠端／本機分別把關）。
     fn transcript_allowed<'a>(&'a self, bot: &'a db::Bot, path: &'a str) -> impl std::future::Future<Output = bool> + Send + 'a;
     fn local_transcript_allowed<'a>(&'a self, bot: &'a db::Bot, path: &'a str) -> impl std::future::Future<Output = bool> + Send + 'a;
+}
+
+/// issue #1259：移交查詢讀不出來＝不知道專案歸誰，不准當成「我的」去處理。
+#[cfg(all(test, feature = "daemon-test-harness"))]
+mod handoff_lookup_tests {
+    use super::*;
+    use crate::testing::{claude_bot, env, fake_run, Env};
+
+    fn stop_body(bot_id: &str, prompt_id: &str) -> HookBody {
+        HookBody {
+            bot_id: bot_id.into(),
+            provider: "claude".into(),
+            payload: json!({
+                "hook_event_name": "Stop",
+                "session_id": "sess-1",
+                "prompt_id": prompt_id,
+                "last_assistant_message": "做完了",
+            }),
+            received_at: Some("2026-10-11T12:00:00.000Z".into()),
+            truncated: false,
+            run_id: None,
+        }
+    }
+
+    async fn hand_off(e: &Env, to: Option<&str>) {
+        sqlx::query("UPDATE projects SET handed_off_to = ? WHERE id = ?").bind(to).bind(&e.project_id).execute(&e.app.db).await.unwrap();
+    }
+
+    /// BLOB 解不成 `Option<String>`，所以 `bot_handed_off_to` 會讀失敗；`bots`、`runs`、`turns` 等其他查詢都不碰這一欄。
+    async fn break_the_handoff_lookup(e: &Env) {
+        sqlx::query("UPDATE projects SET handed_off_to = X'00' WHERE id = ?").bind(&e.project_id).execute(&e.app.db).await.unwrap();
+    }
+
+    /// 回合、訊息、run 的狀態：Stop 真的處理過，這幾樣至少會有一樣變。
+    async fn footprint(e: &Env, run: &str) -> (i64, i64, String, String) {
+        let turns: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM turns").fetch_one(&e.app.db).await.unwrap();
+        let msgs: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM messages").fetch_one(&e.app.db).await.unwrap();
+        let (state, status): (String, String) =
+            sqlx::query_as("SELECT state, agent_status FROM runs WHERE id = ?").bind(run).fetch_one(&e.app.db).await.unwrap();
+        (turns, msgs, state, status)
+    }
+
+    /// 查詢讀失敗：回錯（收件匣會退避重試），而且完全不做 hook 副作用。查詢恢復後，移交的專案照樣不處理。
+    #[tokio::test]
+    async fn an_unreadable_handoff_lookup_fails_the_hook_and_recovery_still_ignores_a_handed_off_project() {
+        let e = env().await;
+        let bot = claude_bot(&e.app, &e.project_id, "hook-lookup-err").await;
+        let run = fake_run(&e.app, &bot.id).await;
+        hand_off(&e, Some("agm-host")).await;
+        break_the_handoff_lookup(&e).await;
+        let before = footprint(&e, &run).await;
+
+        let err = process_for(&e.app, &stop_body(&bot.id, "p1"), None).await.expect_err("讀不到移交狀態就得回錯，不能當成沒移交");
+        assert!(format!("{err:#}").contains("handed off"), "錯誤要說清楚是移交查詢失敗：{err:#}");
+        assert_eq!(footprint(&e, &run).await, before, "查詢失敗時不准有任何 hook 副作用");
+
+        // 查詢恢復：移交的專案照樣丟掉，而且不留下任何東西。
+        hand_off(&e, Some("agm-host")).await;
+        process_for(&e.app, &stop_body(&bot.id, "p1"), None).await.unwrap();
+        assert_eq!(footprint(&e, &run).await, before, "恢復後移交的專案仍然不處理");
+    }
+
+    /// 對照組：沒有移交、查詢正常的專案，hook 照常處理（副作用確實發生）。
+    #[tokio::test]
+    async fn an_owned_project_hook_is_still_processed() {
+        let e = env().await;
+        let bot = claude_bot(&e.app, &e.project_id, "hook-lookup-owned").await;
+        let run = fake_run(&e.app, &bot.id).await;
+        let before = footprint(&e, &run).await;
+
+        process_for(&e.app, &stop_body(&bot.id, "p1"), None).await.unwrap();
+        assert_ne!(footprint(&e, &run).await, before, "自己管的專案，Stop 要真的處理到");
+    }
+
+    /// #1259 × #108：移交查詢讀不出來、這一則是撞額度的 StopFailure：撞限照記（排著的派工才擋得住），
+    /// 其餘副作用一樣都不做（回合不收、不寫訊息），然後回錯讓收件匣重試。
+    #[tokio::test]
+    async fn a_quota_stop_failure_while_the_handoff_lookup_is_unreadable_records_only_the_limit() {
+        let e = env().await;
+        let bot = claude_bot(&e.app, &e.project_id, "hook-lookup-quota").await;
+        let run = fake_run(&e.app, &bot.id).await;
+        break_the_handoff_lookup(&e).await;
+        let before = footprint(&e, &run).await;
+        let fail = HookBody {
+            bot_id: bot.id.clone(),
+            provider: "claude".into(),
+            payload: json!({
+                "hook_event_name": "StopFailure",
+                "session_id": "s-q",
+                "prompt_id": "p-q",
+                "reason": "You've hit your session limit · resets 5pm",
+            }),
+            received_at: Some("2026-10-11T12:00:00.000Z".into()),
+            truncated: false,
+            run_id: None,
+        };
+
+        let err = process_for(&e.app, &fail, None).await.expect_err("讀不到移交狀態就得回錯，由收件匣重試");
+        assert!(format!("{err:#}").contains("handed off"), "錯誤要說清楚是移交查詢失敗：{err:#}");
+        assert_eq!(footprint(&e, &run).await, before, "除了撞限，不准有任何 hook 副作用");
+        let limit_recorded = e.app.quotas.lock().await.values().any(|q| q.limit_hit.is_some());
+        assert!(limit_recorded, "撞額度是帳號的事實，移交查詢讀不出來也要照記");
+    }
 }

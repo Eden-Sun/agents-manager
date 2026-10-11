@@ -2349,7 +2349,7 @@ pane 沒有立即影響。等這套機制在正式環境跑穩，`cargo-slot.sh`
   codex 額度讀狀態列、對帳補 codex runtime 也把它排除。卡住回合的巡邏（§6.6）不收它的 in-flight 回合。
 - **pane**（§6.5e）：它的 workspace、活著的 run 的 tab／pane 裡的 pane 不進 `panes`——不 GC、不推 `pane_unowned`／`pane_orphaned`、
   不當 scratch。
-- **hook**：`process_locked` 記一行 `hook for a handed-off project; ignored` 就丟（spool 重播、spawn hint 也一樣）。
+- **hook**：`process_locked` 記一行 `hook for a handed-off project; ignored` 就丟（spool 重播、spawn hint 也一樣）。移交查詢本身讀失敗＝不知道歸誰：不當成「我的」去處理，也不當成「移交了」丟掉；這一則不做任何 hook 副作用，回錯、收件匣退避重試（#1259）。唯一的例外是撞額度的記帳（#108）：撞限是帳號的事實，照記，排著的派工才擋得住。
 - **relay announce**（§6.5d）：收件方在已移交的專案裡時，`relay_watch::resolve` 回 `None`＝不是這顆 daemon 管的目標：announce 照舊回 200、
   不開 `external` 回合、不盯 pane（字由 shim 直接送，歸接手的 daemon 記；#1363）。
 - default session（§6.5.1）不把 agent 匯入它。
