@@ -1534,8 +1534,11 @@ pub async fn post_deliver(
     }
     // 動手之前先記一筆：push／PR 成功但回應（或 CLI 的 30 秒逾時）斷在路上時，重試才分得出
     // 「上一次其實成功了」與「執行者根本沒 commit」。
-    let attempted_before = events.iter().any(|e| attempt_sha(e).as_deref() == Some(head.as_str()));
-    if !attempted_before {
+    // 第一次就判成 `nothing_to_deliver` 的 commit 有作廢紀錄（#1388）：之後重試不能再把它當成「上一次其實推成功了」。
+    let attempted = events.iter().any(|e| attempt_sha(e).as_deref() == Some(head.as_str()));
+    let voided = events.iter().any(|e| void_attempt_sha(e).as_deref() == Some(head.as_str()));
+    let attempted_before = attempted && !voided;
+    if !attempted {
         // 記不下就不動手（#269）：這則 note 是重試認得「上一次其實成功了」的唯一依據，吞掉失敗照推，
         // 之後 `delivered` 再寫不成，重試會把早就在 base 上的交付報成 `nothing_to_deliver`。
         store::add_event(
@@ -1587,6 +1590,12 @@ pub async fn post_deliver(
         // 檢查與推之間 HEAD 又被動過：跟 `head_not_verified` 一樣是「流程漏了一步」，不是交付失敗——不停任務，回去重驗。
         Err(f) if f.code == "head_moved" => Err(LcError::conflict(f.code, json!({"mission_id": id, "verified_sha": verified_sha, "detail": f.detail}))),
         Err(f) => {
+            // 第一次就沒有東西可交：記一則作廢，重試時 HEAD 已在 base 裡也不會被當成「先前那次推成功了」。已記過就不重寫。
+            if f.code == "nothing_to_deliver" && !attempted_before && !voided {
+                store::add_event(&app.db, &id, "note", "這個 commit 沒有東西可交（先前的交付嘗試不算數）", Some(crate::agent_relay::DAEMON_SENDER), &json!({"delivery_attempt_void": {"sha": head}}))
+                    .await
+                    .map_err(up)?;
+            }
             let reason = if m.delivery_mode == "push_main" { "push_main_failed" } else { "pr_failed" };
             let text = format!("交付失敗（{}），等使用者決定：{}", f.code, f.detail);
             let paused = store::pause_with_event(&app.db, &id, reason, Some(&format!("{}：{}", f.code, f.detail)), &text, &json!({"reason": reason, "code": f.code}))
@@ -1605,6 +1614,11 @@ pub async fn post_deliver(
 /// 一則 `note` 記的「開始交付」是哪個 commit。
 fn attempt_sha(e: &store::MissionEvent) -> Option<String> {
     serde_json::from_str::<Value>(&e.payload_json).ok()?.pointer("/delivery_attempt/sha")?.as_str().map(str::to_string)
+}
+
+/// 一則 `note` 記的「這個 commit 沒有東西可交（先前的交付嘗試不算數）」是哪個 commit（#1388）。
+fn void_attempt_sha(e: &store::MissionEvent) -> Option<String> {
+    serde_json::from_str::<Value>(&e.payload_json).ok()?.pointer("/delivery_attempt_void/sha")?.as_str().map(str::to_string)
 }
 
 #[derive(Deserialize)]
