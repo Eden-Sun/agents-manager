@@ -100,6 +100,7 @@ pub async fn record(app: &impl crate::capabilities::Db, bot_id: &str, host: &str
 }
 
 /// 這台遠端主機欠著清理的 bot（軟刪、沒有已清掉的記號，且歸屬在這台）。讀不到就回錯，呼叫端什麼都不刪。
+/// 移交出去的專案（`handed_off_to`）不列：`purge_bot_dir` 本來就不動它們（#708），列出來只會佔名額（#1407）。收回移交後自然又列出。
 /// 歸屬看記號（#1320）：有記號的只歸記在這台的（搬家後舊主機的仍歸舊主機）；還沒有記號的才看專案現在在哪台。
 /// 沒試過的先來；試過失敗的依 `next_attempt_at` 排到後面（#1318）。`due_only` 為真時退避中的不列（定期掃描用）；
 /// 為假就全部列出（主機剛連上時用，連上就是重試的時機）。
@@ -109,6 +110,7 @@ pub async fn pending(pool: &SqlitePool, host: &str, due_only: bool) -> Result<Ve
            JOIN projects p ON p.id = b.project_id
            LEFT JOIN remote_bot_dir_purges r ON r.bot_id = b.id
           WHERE b.deleted_at IS NOT NULL
+            AND p.handed_off_to IS NULL
             AND ((r.bot_id IS NULL AND p.host = ?)
                  OR (r.host = ? AND r.purged_at IS NULL AND (? = 0 OR r.next_attempt_at IS NULL OR r.next_attempt_at <= ?)))
           ORDER BY (r.next_attempt_at IS NOT NULL), r.next_attempt_at, b.id
