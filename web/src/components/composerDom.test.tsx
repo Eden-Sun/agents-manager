@@ -283,7 +283,13 @@ async function untilCleared(botId: string, sendResult: () => unknown) {
 }
 
 test('送出期間加進來的附件留在托盤給下一則', { timeout: 30_000 }, async () => {
-  const { requests, bot } = await openChat('am-claude-2')
+  // 專屬的 bot：am-claude-2 會被前面的排隊測試（#733）留下排隊中的回合，共用的話這一則會排在它後面（#1374）。
+  mockApi(mock)
+  await useStore.getState().refreshState()
+  const pid = useStore.getState().bots.find((b) => b.name === 'am-claude-2')!.project_id
+  await mock.request('POST', `/projects/${pid}/bots`, { name: 'am-claude-solo', kind: 'claude', model: 'opus', identity: 'cc0' })
+  await useStore.getState().refreshState()
+  const { requests, bot } = await openChat('am-claude-solo')
   // 包一層 `sendPrompt` 記下它的回傳值，給失敗訊息用；finally 還原（#1374）。
   const realSend = useStore.getState().sendPrompt
   let sendResult: unknown = '尚未呼叫'
