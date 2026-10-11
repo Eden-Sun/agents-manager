@@ -5493,11 +5493,20 @@ async fn restart_bot(State(app): State<Arc<App>>, Path(id): Path<String>, Query(
         }
         crate::restart_coalesce::Admission::Lead(lead) => lead,
     };
+    // 脫離請求（#1355）：stop 與 start 之間 client 斷線，重啟照樣做完，不會停在 stopped、intent 停在 pending。
+    // `lead` 也一起搬進去：leader 斷線時 `Joined` 的請求還是拿得到結果。
     // 出錯就直接丟掉 `lead`（等著的請求會自己重試），不是假裝成功。
-    let run_id = lifecycle::restart_bot_with(&app, &id, opts.clone()).await?;
-    lead.finish(&run_id);
-    let body = started_json(&app, &run_id, &opts).await?;
-    app.emit("bot_changed", json!({"bot_id": id})).await;
+    let body = detach(&id, {
+        let (app, id) = (app.clone(), id.clone());
+        async move {
+            let run_id = lifecycle::restart_bot_with(&app, &id, opts.clone()).await?;
+            lead.finish(&run_id);
+            let body = started_json(&app, &run_id, &opts).await?;
+            app.emit("bot_changed", json!({"bot_id": id})).await;
+            Ok(body)
+        }
+    })
+    .await?;
     Ok((StatusCode::OK, Json(body)).into_response())
 }
 
