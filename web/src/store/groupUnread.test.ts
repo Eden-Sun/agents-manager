@@ -1,7 +1,7 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
 import { spawnSync } from 'node:child_process'
-import { mkdtempSync, readFileSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import {
@@ -95,6 +95,35 @@ test('確認：抓失敗會退避重試；全失敗不記成「不是」，之�
   assert.equal(await confirmGroupTurn('B1', 't-g', rec, flaky, [1, 1]), true)
 })
 
+/** 開一個放 storage.json 的暫存目錄，跑完（含斷言失敗丟例外）一定刪掉。 */
+function withStorageDir<T>(fn: (dir: string) => T): T {
+  const dir = mkdtempSync(join(tmpdir(), 'am-group-unread-'))
+  try {
+    return fn(dir)
+  } finally {
+    rmSync(dir, { recursive: true, force: true })
+  }
+}
+
+test('withStorageDir：跑完目錄就不在，callback 丟例外也一樣', () => {
+  let seen = ''
+  withStorageDir((dir) => {
+    seen = dir
+    assert.equal(existsSync(dir), true)
+  })
+  assert.equal(existsSync(seen), false)
+
+  assert.throws(
+    () =>
+      withStorageDir((dir) => {
+        seen = dir
+        throw new Error('boom')
+      }),
+    /boom/,
+  )
+  assert.equal(existsSync(seen), false)
+})
+
 // ── 整合：真的 import store、跑 bootstrap，每次開機一個行程（見 groupUnreadBoot.harness.ts） ──
 
 const HARNESS = join(import.meta.dirname, 'groupUnreadBoot.harness.ts')
@@ -137,123 +166,123 @@ const msg = (id: string, turnId: string, role: string, groupId: string | null = 
 })
 const bot = (id: string, inFlight: unknown = null) => ({ id, name: id, kind: 'claude', in_flight_turn: inFlight })
 
-test('整合：群組 prompt 在重整前送出、回覆在重整後到達，停在別專案的單 bot 頁也算；一般回合不算', { timeout: 30_000 }, () => {
-  const dir = mkdtempSync(join(tmpdir(), 'am-group-unread-'))
-  const storage = join(dir, 'storage.json')
-  // 重整前：人停在 P2 的 O1 單 bot 頁，P1 從沒打開過；前一個分頁已經做完群組遷移。
-  writeFileSync(storage, JSON.stringify({ 'am.selection': JSON.stringify({ botId: 'O1', projectId: null }) }))
-  const state = {
-    daemon_seq: 1,
-    projects: [
-      // 重整前送出、還在跑的回合：B1 回群組訊息；B2 是直接 prompt 但 client_request_id 冒用了群組的結尾；B3 一般 web prompt。
-      {
-        id: 'P1',
-        path: '/p1',
-        bots: [bot('B1', turn('t-g', 'grp-1:B1', 'in_flight')), bot('B2', turn('t-d', 'mine:B2', 'in_flight')), bot('B3', turn('t-w', 'web-3', 'in_flight'))],
-      },
-      { id: 'P2', path: '/p2', bots: [bot('O1')] },
-    ],
-  }
-  const frames = [
-    { seq: 2, type: 'message_added', data: { bot_id: 'B1', message: msg('m1', 't-g', 'assistant') } },
-    { seq: 3, type: 'turn_updated', data: { bot_id: 'B1', turn: turn('t-g', 'grp-1:B1', 'completed') } },
-    { seq: 4, type: 'message_added', data: { bot_id: 'B2', message: msg('m22', 't-d', 'assistant') } },
-    { seq: 5, type: 'turn_updated', data: { bot_id: 'B2', turn: turn('t-d', 'mine:B2', 'completed') } },
-    { seq: 6, type: 'turn_updated', data: { bot_id: 'B3', turn: turn('t-w', 'web-3', 'completed') } },
-    // 開機後才送的群組回合：看過帶 group_id 的 user 訊息，不必再抓。
-    { seq: 7, type: 'turn_updated', data: { bot_id: 'B2', turn: turn('t-g2', 'grp-2:B2', 'in_flight') } },
-    { seq: 8, type: 'message_added', data: { bot_id: 'B2', message: msg('m333', 't-g2', 'user', 'grp-2') } },
-    { seq: 9, type: 'message_added', data: { bot_id: 'B2', message: msg('m4444', 't-g2', 'assistant') } },
-    { seq: 10, type: 'turn_updated', data: { bot_id: 'B2', turn: turn('t-g2', 'grp-2:B2', 'completed') } },
-    // 單 bot 頁載入的訊息裡有群組 prompt：turn 記錄沒有候選結尾也認得。
-    { seq: 11, type: 'turn_updated', data: { bot_id: 'O1', turn: turn('t-o', null, 'completed') } },
-  ]
-  const page = (...m: unknown[]) => ({ messages: m, turns: [], has_more: false })
-  const messages = {
-    O1: page(msg('m5', 't-o', 'user', 'grp-3')),
-    // 群組 prompt 後面跟著 250 則 assistant：問的是該回合的 user 訊息，長回合照樣認得。
-    B1: page(msg('m0', 't-g', 'user', 'grp-1'), ...Array.from({ length: 250 }, (_, i) => msg(`ma${String(i).padStart(3, '0')}`, 't-g', 'assistant'))),
-    B2: page(msg('m00', 't-d', 'user')),
-  }
-  const out = boot(storage, { state, frames, messages })
-  assert.deepEqual(out.groupUnread, { P1: 2, P2: 1 })
-  assert.deepEqual(out.botUnread, { B1: 1, B2: 2, B3: 1, O1: 1 })
-  // 只有開機載入的單 bot 頁與兩個候選回合抓訊息；一般回合（B3）、已認得的（t-g2）不抓。
-  assert.deepEqual([...out.fetches].sort(), ['B1', 'B2', 'O1'])
+test('整合：群組 prompt 在重整前送出、回覆在重整後到達，停在別專案的單 bot 頁也算；一般回合不算', { timeout: 30_000 }, () =>
+  withStorageDir((dir) => {
+    const storage = join(dir, 'storage.json')
+    // 重整前：人停在 P2 的 O1 單 bot 頁，P1 從沒打開過；前一個分頁已經做完群組遷移。
+    writeFileSync(storage, JSON.stringify({ 'am.selection': JSON.stringify({ botId: 'O1', projectId: null }) }))
+    const state = {
+      daemon_seq: 1,
+      projects: [
+        // 重整前送出、還在跑的回合：B1 回群組訊息；B2 是直接 prompt 但 client_request_id 冒用了群組的結尾；B3 一般 web prompt。
+        {
+          id: 'P1',
+          path: '/p1',
+          bots: [bot('B1', turn('t-g', 'grp-1:B1', 'in_flight')), bot('B2', turn('t-d', 'mine:B2', 'in_flight')), bot('B3', turn('t-w', 'web-3', 'in_flight'))],
+        },
+        { id: 'P2', path: '/p2', bots: [bot('O1')] },
+      ],
+    }
+    const frames = [
+      { seq: 2, type: 'message_added', data: { bot_id: 'B1', message: msg('m1', 't-g', 'assistant') } },
+      { seq: 3, type: 'turn_updated', data: { bot_id: 'B1', turn: turn('t-g', 'grp-1:B1', 'completed') } },
+      { seq: 4, type: 'message_added', data: { bot_id: 'B2', message: msg('m22', 't-d', 'assistant') } },
+      { seq: 5, type: 'turn_updated', data: { bot_id: 'B2', turn: turn('t-d', 'mine:B2', 'completed') } },
+      { seq: 6, type: 'turn_updated', data: { bot_id: 'B3', turn: turn('t-w', 'web-3', 'completed') } },
+      // 開機後才送的群組回合：看過帶 group_id 的 user 訊息，不必再抓。
+      { seq: 7, type: 'turn_updated', data: { bot_id: 'B2', turn: turn('t-g2', 'grp-2:B2', 'in_flight') } },
+      { seq: 8, type: 'message_added', data: { bot_id: 'B2', message: msg('m333', 't-g2', 'user', 'grp-2') } },
+      { seq: 9, type: 'message_added', data: { bot_id: 'B2', message: msg('m4444', 't-g2', 'assistant') } },
+      { seq: 10, type: 'turn_updated', data: { bot_id: 'B2', turn: turn('t-g2', 'grp-2:B2', 'completed') } },
+      // 單 bot 頁載入的訊息裡有群組 prompt：turn 記錄沒有候選結尾也認得。
+      { seq: 11, type: 'turn_updated', data: { bot_id: 'O1', turn: turn('t-o', null, 'completed') } },
+    ]
+    const page = (...m: unknown[]) => ({ messages: m, turns: [], has_more: false })
+    const messages = {
+      O1: page(msg('m5', 't-o', 'user', 'grp-3')),
+      // 群組 prompt 後面跟著 250 則 assistant：問的是該回合的 user 訊息，長回合照樣認得。
+      B1: page(msg('m0', 't-g', 'user', 'grp-1'), ...Array.from({ length: 250 }, (_, i) => msg(`ma${String(i).padStart(3, '0')}`, 't-g', 'assistant'))),
+      B2: page(msg('m00', 't-d', 'user')),
+    }
+    const out = boot(storage, { state, frames, messages })
+    assert.deepEqual(out.groupUnread, { P1: 2, P2: 1 })
+    assert.deepEqual(out.botUnread, { B1: 1, B2: 2, B3: 1, O1: 1 })
+    // 只有開機載入的單 bot 頁與兩個候選回合抓訊息；一般回合（B3）、已認得的（t-g2）不抓。
+    assert.deepEqual([...out.fetches].sort(), ['B1', 'B2', 'O1'])
 
-  // 再重整一次：本機什麼都不存，數字從 daemon 的快照回來（daemon 以訊息表算出同樣的 2 與 1）。
-  const again = boot(storage, {
-    state: { ...state, projects: state.projects.map((p) => ({ ...p, group_unread: p.id === 'P1' ? 2 : 1, bots: p.bots.map((b) => ({ ...b, in_flight_turn: null })) })) },
-    frames: [],
-  })
-  assert.deepEqual(again.groupUnread, { P1: 2, P2: 1 })
-})
+    // 再重整一次：本機什麼都不存，數字從 daemon 的快照回來（daemon 以訊息表算出同樣的 2 與 1）。
+    const again = boot(storage, {
+      state: { ...state, projects: state.projects.map((p) => ({ ...p, group_unread: p.id === 'P1' ? 2 : 1, bots: p.bots.map((b) => ({ ...b, in_flight_turn: null })) })) },
+      frames: [],
+    })
+    assert.deepEqual(again.groupUnread, { P1: 2, P2: 1 })
+  }))
 
-test('整合：群組未讀以 daemon 的數字為準（#756）：本機舊的 group: 數字不讀，別台讀過的清掉，沒開著時回來的補上', { timeout: 30_000 }, () => {
-  const dir = mkdtempSync(join(tmpdir(), 'am-group-unread-'))
-  const storage = join(dir, 'storage.json')
-  // 舊版把群組數字存在這裡（還有 99+ 的）：現在完全不認。
-  writeFileSync(
-    storage,
-    JSON.stringify({ 'am.unread': JSON.stringify({ 'group:P1': 150, 'bot:B1': 3 }), 'am.selection': JSON.stringify({ botId: 'O1', projectId: null }) }),
-  )
-  const projects = (g1: number, g2: number) => [
-    { id: 'P1', path: '/p1', group_unread: g1, bots: [bot('B1'), bot('O1')] },
-    { id: 'P2', path: '/p2', group_unread: g2, bots: [bot('B2')] },
-  ]
-  const first = boot(storage, { state: { daemon_seq: 1, projects: projects(0, 4) }, frames: [] })
-  assert.deepEqual(first.groupUnread, { P2: 4 }, 'P1 的 150 不讀；P2 是這個分頁沒開著時回來的，daemon 的數字補上')
-  assert.deepEqual(first.botUnread, { B1: 3 })
-  const saved = JSON.parse(readFileSync(storage, 'utf8')) as Record<string, string>
-  assert.equal(JSON.stringify(saved['am.unread']).includes('group:P2'), false, 'daemon 給的群組數字不寫進本機')
+test('整合：群組未讀以 daemon 的數字為準（#756）：本機舊的 group: 數字不讀，別台讀過的清掉，沒開著時回來的補上', { timeout: 30_000 }, () =>
+  withStorageDir((dir) => {
+    const storage = join(dir, 'storage.json')
+    // 舊版把群組數字存在這裡（還有 99+ 的）：現在完全不認。
+    writeFileSync(
+      storage,
+      JSON.stringify({ 'am.unread': JSON.stringify({ 'group:P1': 150, 'bot:B1': 3 }), 'am.selection': JSON.stringify({ botId: 'O1', projectId: null }) }),
+    )
+    const projects = (g1: number, g2: number) => [
+      { id: 'P1', path: '/p1', group_unread: g1, bots: [bot('B1'), bot('O1')] },
+      { id: 'P2', path: '/p2', group_unread: g2, bots: [bot('B2')] },
+    ]
+    const first = boot(storage, { state: { daemon_seq: 1, projects: projects(0, 4) }, frames: [] })
+    assert.deepEqual(first.groupUnread, { P2: 4 }, 'P1 的 150 不讀；P2 是這個分頁沒開著時回來的，daemon 的數字補上')
+    assert.deepEqual(first.botUnread, { B1: 3 })
+    const saved = JSON.parse(readFileSync(storage, 'utf8')) as Record<string, string>
+    assert.equal(JSON.stringify(saved['am.unread']).includes('group:P2'), false, 'daemon 給的群組數字不寫進本機')
 
-  // 在別台讀掉 P2：下一次開機 daemon 說 0。
-  assert.deepEqual(boot(storage, { state: { daemon_seq: 1, projects: projects(0, 0) }, frames: [] }).groupUnread, {})
-})
+    // 在別台讀掉 P2：下一次開機 daemon 說 0。
+    assert.deepEqual(boot(storage, { state: { daemon_seq: 1, projects: projects(0, 0) }, frames: [] }).groupUnread, {})
+  }))
 
 /** issue #122：排隊中的 turn（起 bot 中、啟動失敗原因更新）推來的 `turn_updated` 不是「回合完成」——
  *  算進去的話未讀先多一，之後真正完成那一次又被同一個 turn id 去重吃掉。 */
-test('整合：queued 的 turn_updated 不算完成，之後真正完成才記一次未讀', { timeout: 30_000 }, () => {
-  const dir = mkdtempSync(join(tmpdir(), 'am-group-unread-'))
-  const storage = join(dir, 'storage.json')
-  writeFileSync(storage, JSON.stringify({ 'am.selection': JSON.stringify({ botId: 'O1', projectId: null }) }))
-  const state = { daemon_seq: 1, projects: [{ id: 'P1', path: '/p1', bots: [bot('B3'), bot('O1')] }] }
-  const queuedOnly = [
-    { seq: 2, type: 'turn_updated', data: { bot_id: 'B3', turn: turn('t-q', 'web-q', 'queued') } },
-    { seq: 3, type: 'turn_updated', data: { bot_id: 'B3', turn: { ...turn('t-q', 'web-q', 'queued'), start_error: '找不到 claude' } } },
-  ]
-  assert.deepEqual(boot(storage, { state, frames: queuedOnly }).botUnread, {}, '還沒開始的不算完成')
-  writeFileSync(storage, JSON.stringify({ 'am.selection': JSON.stringify({ botId: 'O1', projectId: null }) }))
-  const done = [...queuedOnly, { seq: 4, type: 'turn_updated', data: { bot_id: 'B3', turn: turn('t-q', 'web-q', 'completed') } }]
-  assert.deepEqual(boot(storage, { state, frames: done }).botUnread, { B3: 1 }, '真正完成那一次照樣記')
-})
+test('整合：queued 的 turn_updated 不算完成，之後真正完成才記一次未讀', { timeout: 30_000 }, () =>
+  withStorageDir((dir) => {
+    const storage = join(dir, 'storage.json')
+    writeFileSync(storage, JSON.stringify({ 'am.selection': JSON.stringify({ botId: 'O1', projectId: null }) }))
+    const state = { daemon_seq: 1, projects: [{ id: 'P1', path: '/p1', bots: [bot('B3'), bot('O1')] }] }
+    const queuedOnly = [
+      { seq: 2, type: 'turn_updated', data: { bot_id: 'B3', turn: turn('t-q', 'web-q', 'queued') } },
+      { seq: 3, type: 'turn_updated', data: { bot_id: 'B3', turn: { ...turn('t-q', 'web-q', 'queued'), start_error: '找不到 claude' } } },
+    ]
+    assert.deepEqual(boot(storage, { state, frames: queuedOnly }).botUnread, {}, '還沒開始的不算完成')
+    writeFileSync(storage, JSON.stringify({ 'am.selection': JSON.stringify({ botId: 'O1', projectId: null }) }))
+    const done = [...queuedOnly, { seq: 4, type: 'turn_updated', data: { bot_id: 'B3', turn: turn('t-q', 'web-q', 'completed') } }]
+    assert.deepEqual(boot(storage, { state, frames: done }).botUnread, { B3: 1 }, '真正完成那一次照樣記')
+  }))
 
 /** issue #509 的另一半：不只是「不要標成已讀」，shell 蓋著群組時新回合要真的 `+1`。 */
-test('整合：人在前景、選著專案，但畫面是 shell 面板——群組回覆照樣記未讀', { timeout: 30_000 }, () => {
-  const dir = mkdtempSync(join(tmpdir(), 'am-group-unread-'))
-  const storage = join(dir, 'storage.json')
-  const seed = (shell: boolean) =>
-    writeFileSync(
-      storage,
-      JSON.stringify({
-        // 選著 P1 的群組（`viewPane`／「在這裡開 shell」都不會清掉它）。
-        'am.selection': JSON.stringify({ botId: null, projectId: 'P1' }),
-        ...(shell ? { 'am.shellView': JSON.stringify({ host: 'local', paneId: 'w1:p9', cwd: '/p1' }) } : {}),
-      }),
-    )
-  const state = { daemon_seq: 1, projects: [{ id: 'P1', path: '/p1', bots: [bot('B1')] }] }
-  const frames = [
-    { seq: 2, type: 'turn_updated', data: { bot_id: 'B1', turn: turn('t-g', 'grp-9:B1', 'in_flight') } },
-    { seq: 3, type: 'message_added', data: { bot_id: 'B1', message: msg('mu', 't-g', 'user', 'grp-9') } },
-    { seq: 4, type: 'message_added', data: { bot_id: 'B1', message: msg('ma', 't-g', 'assistant') } },
-    { seq: 5, type: 'turn_updated', data: { bot_id: 'B1', turn: turn('t-g', 'grp-9:B1', 'completed') } },
-  ]
+test('整合：人在前景、選著專案，但畫面是 shell 面板——群組回覆照樣記未讀', { timeout: 30_000 }, () =>
+  withStorageDir((dir) => {
+    const storage = join(dir, 'storage.json')
+    const seed = (shell: boolean) =>
+      writeFileSync(
+        storage,
+        JSON.stringify({
+          // 選著 P1 的群組（`viewPane`／「在這裡開 shell」都不會清掉它）。
+          'am.selection': JSON.stringify({ botId: null, projectId: 'P1' }),
+          ...(shell ? { 'am.shellView': JSON.stringify({ host: 'local', paneId: 'w1:p9', cwd: '/p1' }) } : {}),
+        }),
+      )
+    const state = { daemon_seq: 1, projects: [{ id: 'P1', path: '/p1', bots: [bot('B1')] }] }
+    const frames = [
+      { seq: 2, type: 'turn_updated', data: { bot_id: 'B1', turn: turn('t-g', 'grp-9:B1', 'in_flight') } },
+      { seq: 3, type: 'message_added', data: { bot_id: 'B1', message: msg('mu', 't-g', 'user', 'grp-9') } },
+      { seq: 4, type: 'message_added', data: { bot_id: 'B1', message: msg('ma', 't-g', 'assistant') } },
+      { seq: 5, type: 'turn_updated', data: { bot_id: 'B1', turn: turn('t-g', 'grp-9:B1', 'completed') } },
+    ]
 
-  seed(true)
-  const covered = boot(storage, { state, frames, focus: true, shells: [{ pane_id: 'w1:p9' }] })
-  assert.deepEqual(covered.groupUnread, { P1: 1 }, 'shell 蓋著時群組時間軸看不到，回覆要算未讀')
+    seed(true)
+    const covered = boot(storage, { state, frames, focus: true, shells: [{ pane_id: 'w1:p9' }] })
+    assert.deepEqual(covered.groupUnread, { P1: 1 }, 'shell 蓋著時群組時間軸看不到，回覆要算未讀')
 
-  // 對照：同樣在前景、同樣選著 P1，沒有 shell 就是真的在看，標成已讀。
-  seed(false)
-  assert.deepEqual(boot(storage, { state, frames, focus: true }).groupUnread, {})
-})
+    // 對照：同樣在前景、同樣選著 P1，沒有 shell 就是真的在看，標成已讀。
+    seed(false)
+    assert.deepEqual(boot(storage, { state, frames, focus: true }).groupUnread, {})
+  }))
