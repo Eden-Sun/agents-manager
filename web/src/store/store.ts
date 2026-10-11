@@ -812,6 +812,8 @@ function loginErrText(e: unknown): string {
 let appliedStateSeq = 0
 let supervisorProjectAsked = false
 let identityPrefsAsked = false
+/** `disabledIdentities` 被本機（按鈕、WS 事件）改過幾次；`loadIdentityPrefs` 的快照跨過任何一次就不能套（#1341）。 */
+let identityPrefsEpoch = 0
 let lastRefreshError: string | null = null
 /**
  * 送不出去的已讀。2026-09-15 改成「未讀數以 daemon 為準」之後，這個 POST 就不再是 fire-and-forget：
@@ -2474,11 +2476,18 @@ export const useStore = create<StoreState>((set, get) => {
   },
 
   async loadIdentityPrefs() {
-    try {
-      set({ disabledIdentities: await api.fetchDisabledIdentities() })
-    } catch {
-      // 讀不到就當作沒有人被停用：選單多幾個選項，比整個面板掛掉好。下一次快照刷新再問一次。
-      identityPrefsAsked = false
+    // 請求在路上時本機改過（按鈕、WS 事件）：這份可能是改之前讀的，丟掉重抓一次（#1341）。
+    for (;;) {
+      const epoch = identityPrefsEpoch
+      try {
+        const list = await api.fetchDisabledIdentities()
+        if (epoch !== identityPrefsEpoch) continue
+        set({ disabledIdentities: list })
+      } catch {
+        // 讀不到就當作沒有人被停用：選單多幾個選項，比整個面板掛掉好。下一次快照刷新再問一次。
+        identityPrefsAsked = false
+      }
+      return
     }
   },
 
@@ -2486,6 +2495,7 @@ export const useStore = create<StoreState>((set, get) => {
     const key = api.identityPrefKey(host, kind, name)
     await guarded(set, get, `identity-disabled:${key}`, async () => {
       await api.setIdentityDisabled(host, kind, name, disabled)
+      identityPrefsEpoch += 1
       // 事件也會送一份；先自己更新，按下去才不會等一個來回。
       set((s) => ({
         disabledIdentities: disabled
@@ -2957,6 +2967,7 @@ export function resetStoreForTest(): void {
   if (quotaSweep) clearInterval(quotaSweep)
   quotaSweep = null
   openedOnce = false
+  identityPrefsEpoch = 0
   seenSeq = 0
   ephemeralSeq = 0
   appliedStateSeq = 0
@@ -3221,6 +3232,7 @@ export function handleFrame(set: SetFn, get: GetFn, frame: { seq?: number; type:
       if (!isRec(data)) return
       const key = api.identityPrefKey(str(pick(data, 'host')), str(pick(data, 'kind')), str(pick(data, 'identity')))
       const on = bool(pick(data, 'disabled'), false)
+      identityPrefsEpoch += 1
       set((s) => ({
         disabledIdentities: on
           ? s.disabledIdentities.includes(key)
