@@ -103,3 +103,21 @@ test('bot 名：store 找得到用名字，找不到用 id 前 6 碼，沒有 bo
   assert.equal(botLabel('01GONEXXXXXXXXXXXXXXXXXXXX', bots), '01GONE')
   assert.equal(botLabel(null, bots), '—')
 })
+
+test('撞題：daemon 標成過時（matched_line 帶 stale）的列不算超過門檻，但總數照算', () => {
+  const stale = row({ regex_verdict: 'same_work', at: ago(1), jev_same_work: 0.8, matched_line: '{"pair":"a|b","stale":"cancelled"}' })
+  assert.equal(overThreshold(stale), false)
+  const [, , same] = sceneStats([stale], NOW)
+  assert.equal(same!.windows.all.total, 1)
+  assert.equal(same!.windows.all.over, 0)
+})
+
+test('撞題：matched_line 沒有 stale、是 null、不是 JSON、stale 是空字串，照舊算超過門檻', () => {
+  for (const matched_line of [null, '{"pair":"a|b"}', 'not json', '{"stale":""}']) {
+    assert.equal(overThreshold(row({ regex_verdict: 'same_work', at: ago(1), jev_same_work: 0.8, matched_line })), true, String(matched_line))
+  }
+})
+
+test('stale 只看撞題：別的場景 matched_line 恰好含 stale，門檻照舊', () => {
+  assert.equal(overThreshold(row({ regex_verdict: 'stuck_queued', at: ago(1), jev_is_live_ui: 0.9, matched_line: '{"stale":"cancelled"}' })), true)
+})

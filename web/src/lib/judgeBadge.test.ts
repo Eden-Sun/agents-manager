@@ -108,3 +108,12 @@ test('localStorage 裡的內容壞掉（不是 JSON、不是陣列）：當作�
   ;(globalThis as { localStorage?: unknown }).localStorage = fakeStorage({ get: () => '{"a":1}' })
   assert.deepEqual([...loadDismissed()], [])
 })
+
+test('過時的撞題紀錄不產生徽章，次新的超過門檻那則接上', () => {
+  const rows = [
+    row({ id: 'stale-same', regex_verdict: 'same_work', at: ago(1), jev_same_work: 0.9, matched_line: '{"stale":"cancelled"}' }),
+    row({ id: 'live-stuck', regex_verdict: 'stuck_queued', at: ago(2), jev_is_live_ui: 0.8 }),
+  ]
+  assert.equal(judgeBadgeFor(rows, 'bot-a', NOW, NONE)?.id, 'live-stuck')
+  assert.equal(judgeBadgeFor(rows.slice(0, 1), 'bot-a', NOW, NONE), null)
+})
