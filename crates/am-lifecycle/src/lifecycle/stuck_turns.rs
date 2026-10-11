@@ -14,7 +14,7 @@
 //! - 先讀 transcript（claude）／rollout（codex）：證得出「我們送的 prompt 之後已經有完整回覆」→ `completed` 並回填回覆；
 //!   證不出 → `completed_fallback`，在對話裡寫明理由。**不標 failed**：回合多半是做完了，只是結束沒被看見。
 //! - 收尾走 [`emit_turn`]（交辦照一般回合結束流程），並在同一把 bot 鎖裡立刻 flush 這顆 bot 的 queued。
-//! - 等 bot 鎖最多 [`LOCK_WAIT`]；拿不到就這一輪跳過這顆、下一輪再看（整輪是單一條迴圈，不能被一顆握著鎖的 bot 拖住，#1201）。
+//! - bot 鎖忙碌時立刻跳過這顆、下一輪再看，避免一顆握著鎖的 bot 延遲整輪掃描（#1201、#1264）。
 //!
 //! idle 計時放記憶體：daemon 重啟後從第一次看到 idle 重新算，寧可晚收，不要誤收。
 
@@ -32,8 +32,6 @@ pub const IDLE_MINS_ENV: &str = "AM_STUCK_TURN_IDLE_MINS";
 /// 定時掃描的間隔：reconcile 只在連線、agent 出現、子 pane 關掉時才跑，一顆靜靜 idle 的 bot 不會觸發它。
 const SWEEP_EVERY: Duration = Duration::from_secs(60);
 
-/// 巡邏等一顆 bot 的鎖最多等多久：整輪是單一條迴圈，不能被一顆握著鎖的 bot 拖住（它下一輪再看）。
-const LOCK_WAIT: Duration = Duration::from_secs(5);
 /// transcript／rollout 只讀尾端這麼多：那個 prompt 如果不在這裡面，就當證不出來。
 const LOG_TAIL_BYTES: u64 = 8 * 1024 * 1024;
 
@@ -146,10 +144,10 @@ pub async fn sweep(app: &impl StuckTurnContext, host: Option<&str>) -> Vec<Strin
 }
 
 pub async fn sweep_at(app: &impl StuckTurnContext, host: Option<&str>, now: Instant, threshold: Duration) -> Vec<String> {
-    sweep_with(app, host, now, threshold, LOCK_WAIT).await
+    sweep_with(app, host, now, threshold).await
 }
 
-async fn sweep_with(app: &impl StuckTurnContext, host: Option<&str>, now: Instant, threshold: Duration, lock_wait: Duration) -> Vec<String> {
+async fn sweep_with(app: &impl StuckTurnContext, host: Option<&str>, now: Instant, threshold: Duration) -> Vec<String> {
     let rows: Vec<(String, String, String, String)> = match sqlx::query_as(
         "SELECT t.id, r.id, r.bot_id, r.agent_status
            FROM turns t
@@ -157,7 +155,8 @@ async fn sweep_with(app: &impl StuckTurnContext, host: Option<&str>, now: Instan
            JOIN bots b ON b.id = r.bot_id
            JOIN projects p ON p.id = b.project_id
           WHERE t.status = 'in_flight' AND r.state = 'running' AND (? IS NULL OR p.host = ?)
-            AND p.handed_off_to IS NULL",
+            AND p.handed_off_to IS NULL
+          ORDER BY t.rowid",
     )
     .bind(host)
     .bind(host)
@@ -178,7 +177,7 @@ async fn sweep_with(app: &impl StuckTurnContext, host: Option<&str>, now: Instan
             continue;
         }
         let bot_lock = app.bot_lock(&bot_id).await;
-        let Ok(_g) = tokio::time::timeout(lock_wait, bot_lock.lock()).await else {
+        let Ok(_g) = bot_lock.try_lock() else {
             tracing::warn!(bot = %bot_id, turn = %turn_id, "stuck turn sweep: bot lock is busy; skipping this bot until the next round");
             continue;
         };
@@ -515,10 +514,43 @@ mod tests {
 
         let lock = app.bot_lock(&f.bot_id).await;
         let _held = lock.lock().await;
-        let done = tokio::time::timeout(Duration::from_secs(30), sweep_with(&app, None, t0 + 6 * MIN, 5 * MIN, Duration::from_millis(200))).await;
+        let done = tokio::time::timeout(Duration::from_secs(30), sweep_with(&app, None, t0 + 6 * MIN, 5 * MIN)).await;
         assert_eq!(done.ok(), Some(vec![other_turn.clone()]), "握著鎖的那顆跳過，另一顆照收，整輪有回來");
         assert_eq!(turn(&app, &f.turn_id).await.status, "in_flight", "被跳過的那顆這一輪不動");
         assert!(lock.try_lock().is_err(), "前提：鎖整段都還握著");
+    }
+
+    /// A row near the end of a full sweep must not wait behind per-bot lock timeouts (issue #1264).
+    #[tokio::test]
+    async fn a_sweep_skips_many_locked_bots_and_closes_the_unlocked_candidate() {
+        let env = tt::env().await;
+        let app = env.app.clone();
+        let t0 = Instant::now();
+        let mut locked_turns = Vec::new();
+        let mut locked_bots = Vec::new();
+
+        for i in 0..20 {
+            let name = format!("locked-stuck-{i}");
+            let (bot_id, run_id, turn_id) = stale_candidate(&app, &env.project_id, &name).await;
+            observe_at(&run_id, "idle", t0);
+            locked_turns.push(turn_id);
+            locked_bots.push(bot_id);
+        }
+
+        // Insert the eligible unlocked candidate after all of the blocked predecessors.
+        let (target_bot, target_run, target_turn) = stale_candidate(&app, &env.project_id, "unlocked-stuck-late").await;
+        observe_at(&target_run, "idle", t0);
+
+        let locks = futures::future::join_all(locked_bots.iter().map(|id| app.bot_lock(id))).await;
+        let _guards = locks.into_iter().map(|lock| lock.try_lock_owned().unwrap()).collect::<Vec<_>>();
+        let sweep = tokio::time::timeout(Duration::from_secs(2), sweep_at(&app, None, t0 + 6 * MIN, 5 * MIN)).await;
+
+        assert_eq!(sweep.ok(), Some(vec![target_turn.clone()]), "blocked bots must be skipped promptly so the later eligible turn is closed");
+        for turn_id in locked_turns {
+            assert_eq!(turn(&app, &turn_id).await.status, "in_flight", "busy bot turns remain for a later sweep");
+        }
+        assert_eq!(turn(&app, &target_turn).await.status, "completed_fallback");
+        let _ = target_bot;
     }
 
     /// #708：移交出去的專案，in-flight 回合是對方 daemon 的：巡邏不收；收回之後照常收。
@@ -646,6 +678,22 @@ mod tests {
         .unwrap();
         insert_message(&app, &conv, Some(&turn_id), "user", prompt, "web", false, None).await.unwrap();
         Fixture { env, bot_id: bot.id, run_id, turn_id }
+    }
+
+    async fn stale_candidate(app: &std::sync::Arc<crate::state::App>, project_id: &str, name: &str) -> (String, String, String) {
+        let bot = tt::claude_bot(app, project_id, name).await;
+        let run_id = tt::fake_run(app, &bot.id).await;
+        let conversation_id = db::conversation_id(app.db(), &bot.id).await.unwrap();
+        let turn_id = db::ulid();
+        sqlx::query("INSERT INTO turns (id, conversation_id, run_id, origin, status, delivery, prompt_text, created_at) VALUES (?,?,?,'web','in_flight','ok','x',?)")
+            .bind(&turn_id)
+            .bind(&conversation_id)
+            .bind(&run_id)
+            .bind(db::iso_in(-3600))
+            .execute(app.db())
+            .await
+            .unwrap();
+        (bot.id, run_id, turn_id)
     }
 
     async fn own_transcript(f: &Fixture) -> std::path::PathBuf {
