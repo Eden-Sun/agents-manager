@@ -8,7 +8,8 @@ import test, { after, afterEach, before } from 'node:test'
 import assert from 'node:assert/strict'
 import { act, click, imeEnter, keydown, mockApi, mount, settle, setupDom, teardownDom, typeInto, unmountAll, until } from '../testing/domHarness'
 import type { FakeRequest } from '../testing/domHarness'
-import { sharedMock, virtualMockTime } from '../testing/sharedMock'
+import { advanceMockTime, sharedMock, virtualMockTime } from '../testing/sharedMock'
+import { manualMockClock } from '../api/mockClock'
 import { resetStoreForTest, useStore } from '../store/store'
 import { ApiError } from '../api/types'
 import { ATTACHMENT_FAILED_NOTICE } from '../lib/composerLabels'
@@ -16,8 +17,16 @@ import { ChatPanel } from './ChatPanel'
 import { ComposerDraftBar } from './ComposerDraftBar'
 
 virtualMockTime()
-afterEach(unmountAll)
-before(setupDom)
+afterEach(async () => {
+  await unmountAll()
+  // 這一則留下的 mock timer（回合、啟動）在這裡走完，不帶到下一則：下一則的 bot 才真的是閒的（#1374）。
+  await advanceMockTime(10_000)
+})
+before(async () => {
+  setupDom()
+  // 整個行程共用一個手動時鐘：前面檔案留下的 timer 在這個檔案開始前走完（#1374）。
+  await advanceMockTime(10_000)
+})
 after(async () => {
   resetStoreForTest() // 要在拆 DOM 之前：關 socket 會拿掉 window 上的監聽
   await teardownDom()
@@ -256,8 +265,35 @@ test('Office 類貼上文字不變成附件；只有 Files 的貼上仍收附件
   assert.equal(document.querySelectorAll('.attach-tray .attach-thumb').length, 1)
 })
 
+/**
+ * 送出成功才會清空輸入框：那是 `sendPrompt(...).then(...)` 之後才發生、還要等 React 排上去的事，
+ * 不是 `settle()` 一次 macrotask 就保證趕得上的。等得到就過；等不到就帶上診斷，下次紅時看得出是哪一支（#1374）。
+ */
+async function untilCleared(botId: string, sendResult: () => unknown) {
+  try {
+    await until(() => textarea().value === '', '送出後輸入框清空', 2000)
+  } catch (e) {
+    const s = useStore.getState()
+    throw new Error(
+      `${(e as Error).message}；sendPrompt 回傳值=${JSON.stringify(sendResult())}；` +
+        `草稿=${JSON.stringify(s.drafts[`bot:${botId}`] ?? null)}；回合狀態=${JSON.stringify(s.turns[botId] ?? null).slice(0, 400)}；` +
+        `pending timer=${manualMockClock.pending}`,
+    )
+  }
+}
+
 test('送出期間加進來的附件留在托盤給下一則', { timeout: 30_000 }, async () => {
-  const { requests } = await openChat('am-claude-2')
+  const { requests, bot } = await openChat('am-claude-2')
+  // 包一層 `sendPrompt` 記下它的回傳值，給失敗訊息用；finally 還原（#1374）。
+  const realSend = useStore.getState().sendPrompt
+  let sendResult: unknown = '尚未呼叫'
+  useStore.setState({
+    sendPrompt: async (...args: Parameters<typeof realSend>) => {
+      const ok = await realSend(...args)
+      sendResult = ok
+      return ok
+    },
+  } as never)
   const originalFetch = globalThis.fetch
   let releasePrompt!: () => void
   const promptGate = new Promise<void>((resolve) => { releasePrompt = resolve })
@@ -274,6 +310,7 @@ test('送出期間加進來的附件留在托盤給下一則', { timeout: 30_000
     releasePrompt()
     await until(() => prompts(requests).length === 1, '第一則 prompt 完成')
     await settle()
+    await untilCleared(bot.id, () => sendResult)
     assert.equal(textarea().value, '')
     assert.equal(document.querySelectorAll('.attach-tray .attach-thumb').length, 1)
     const first = prompts(requests)[0].body as { attachments?: string[] }
@@ -288,6 +325,7 @@ test('送出期間加進來的附件留在托盤給下一則', { timeout: 30_000
   } finally {
     releasePrompt()
     globalThis.fetch = originalFetch
+    useStore.setState({ sendPrompt: realSend } as never)
   }
 })
 
