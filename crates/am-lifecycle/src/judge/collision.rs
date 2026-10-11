@@ -1392,6 +1392,33 @@ mod tests {
         std::fs::remove_dir_all(&dir).ok();
     }
 
+    /// #1385：候選的票號只在 `issue_ref`（claim 的票號、交辦的第二行），不在 title／summary 裡：名額排序也要看它，
+    /// 不然同一張票的那張卡會被 15 張的上限截掉。
+    #[test]
+    fn rank_puts_the_card_that_shares_the_candidates_issue_ref_first() {
+        let card = |key: &str, issue_ref: Option<&str>| Card {
+            key: key.into(),
+            source: "candidate",
+            jev_kind: "work somebody is about to start",
+            title: "修卡住的畫面判斷".into(),
+            summary: "修卡住的畫面判斷".into(),
+            touches: vec![],
+            issue_ref: issue_ref.map(String::from),
+            bot_id: None,
+        };
+        let others = || {
+            let mut v: Vec<Card> = (0..16).map(|i| card(&format!("asg:{i:02}"), None)).collect();
+            v.push(card("zzz-shared", Some("#77")));
+            v
+        };
+        let cand = card("claim:x:77", Some("#77"));
+        let ranked = rank(&cand, others());
+        assert_eq!(ranked.len(), MAX_PAIRS);
+        assert_eq!(ranked[0].key, "zzz-shared", "候選的票號在 issue_ref，同一張票的卡要排在最前");
+        let bare = card("claim:x:77", None);
+        assert!(!rank(&bare, others()).iter().any(|c| c.key == "zzz-shared"), "沒有票號就只照 key 排，這張被截掉");
+    }
+
     /// #1330：認領時的撞題。候選＝呼叫端專案裡、`child` 以外的在跑工作。
     async fn claim_setup(app: &Arc<App>, project: &str, sibling_title: &str) -> (db::Bot, db::Bot) {
         let parent = tt::claude_bot(app, project, "parent").await;
