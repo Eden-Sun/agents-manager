@@ -298,6 +298,11 @@ failed=""
 # 被訊號收掉的段落（timeout 124、KILL 137、TERM 143）：登出殺掉使用者行程、timeout 到了都會這樣，不是測試紅（#885）。
 interrupted=""
 signal_only=1
+# 每段花的秒數（#1448）：log 每段結尾的 `secs=`，status.json 的 parts。只量，不改任何判斷。
+ob_secs=0
+ops_secs=0
+web_secs=0
+daemon_secs=0
 : > "${log}"
 # 找到真正的 herdr binary 才啟用 argv parser 契約測試；PATH 上的 per-bot shell shim 不算。
 real_herdr=""
@@ -310,6 +315,7 @@ for candidate in "${AM_REAL_HERDR:-}" "$(type -P herdr 2>/dev/null || true)"; do
 done
 for part in ob ops web daemon; do
     prc=0
+    part_start=${SECONDS}
     timeout -k "${KILL_AFTER}" "${TIMEOUT}" env -u AM_MODEL -u AM_EFFORT -u AM_DATA_DIR -u AM_DAEMON_EXE -u AM_CONFIG_PATH \
         bash scripts/check.sh "${part}" >> "${log}" 2>&1 || prc=$?
     if [ "${part}" = daemon ] && [ -n "${real_herdr}" ]; then
@@ -320,7 +326,14 @@ for part in ob ops web daemon; do
         printf '\n==> [ubuntu-ci] herdr argv parser rc=%s\n' "${herdr_prc}" >> "${log}"
         if [ "${herdr_prc}" != 0 ]; then prc="${herdr_prc}"; fi
     fi
-    printf '\n==> [ubuntu-ci] %s rc=%s\n' "${part}" "${prc}" >> "${log}"
+    part_secs=$((SECONDS - part_start))
+    printf '\n==> [ubuntu-ci] %s rc=%s secs=%s\n' "${part}" "${prc}" "${part_secs}" >> "${log}"
+    case "${part}" in
+        ob) ob_secs=${part_secs} ;;
+        ops) ops_secs=${part_secs} ;;
+        web) web_secs=${part_secs} ;;
+        daemon) daemon_secs=${part_secs} ;;
+    esac
     if [ "${prc}" != 0 ]; then
         rc="${prc}"
         failed="${failed}${failed:+,}${part}"
@@ -332,6 +345,7 @@ for part in ob ops web daemon; do
 done
 
 finished="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+parts_json="$(printf '"parts":{"ob":%s,"ops":%s,"web":%s,"daemon":%s}' "${ob_secs}" "${ops_secs}" "${web_secs}" "${daemon_secs}")"
 # 中斷（#885）：有段落被訊號收掉、其餘紅的段也都是訊號收的，而且整份 log 沒有任何測試紅的證據（`test … FAILED`、`FAIL - `）
 # → 不是這個 commit 的錯。記 error、不前進 last-sha，下一輪（每分鐘）同一個 sha 重跑；同一個 sha 連續中斷 3 次才當 failure，
 # 免得一直被殺的環境永遠不出結果。計數檔 interrupted-<sha> 在正常結束（success／真的 failure）時刪掉，別的 sha 的殘檔順手清。
@@ -371,8 +385,8 @@ if [ "${rc}" != 0 ] && { [ "${disk_full}" = 1 ] || { [ -n "${interrupted}" ] && 
             desc="$(clip_chars 120 "$(printf '中斷：%s，會重跑' "${interrupted}")")"
         fi
         final_status error "${desc}"
-        printf '{"sha":"%s","state":"error","reason":"%s","rc":%s,"interrupted_count":%s,"started":"%s","finished":"%s","log":"%s","description":"%s"}\n' \
-            "${sha}" "${reason}" "${rc}" "${irc_count}" "${started}" "${finished}" "$(json_str "${log}")" "$(json_str "${desc}")" > "${CI_ROOT}/status.json"
+        printf '{"sha":"%s","state":"error","reason":"%s","rc":%s,"interrupted_count":%s,"started":"%s","finished":"%s","log":"%s","description":"%s",%s}\n' \
+            "${sha}" "${reason}" "${rc}" "${irc_count}" "${started}" "${finished}" "$(json_str "${log}")" "$(json_str "${desc}")" "${parts_json}" > "${CI_ROOT}/status.json"
         finalized=1
         exit 0
     fi
@@ -396,8 +410,8 @@ else
     desc="${fail_prefix}${desc}"
 fi
 final_status "${state}" "${desc}"
-printf '{"sha":"%s","state":"%s","rc":%s,"started":"%s","finished":"%s","log":"%s","description":"%s"}\n' \
-    "${sha}" "${state}" "${rc}" "${started}" "${finished}" "$(json_str "${log}")" "$(json_str "${desc}")" > "${CI_ROOT}/status.json"
+printf '{"sha":"%s","state":"%s","rc":%s,"started":"%s","finished":"%s","log":"%s","description":"%s",%s}\n' \
+    "${sha}" "${state}" "${rc}" "${started}" "${finished}" "$(json_str "${log}")" "$(json_str "${desc}")" "${parts_json}" > "${CI_ROOT}/status.json"
 echo "${sha}" > "${CI_ROOT}/last-sha"
 finalized=1
 
