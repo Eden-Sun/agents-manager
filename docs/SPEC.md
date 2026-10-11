@@ -214,6 +214,7 @@ React 前端 (Vite) ◄── REST + WebSocket ──► Rust daemon (axum) ◄�
 - **權威劃分**：TOML 是 Project／Bot 期望設定的唯一權威；SQLite 存 Run／Turn／Message／Conversation／hook token／workspace 映射。啟動與每次寫回 TOML 後做 TOML→SQLite 投影（依 id upsert；TOML 移除的 bot 標 `deleted_at`，保留歷史）。
 - **落盤前先驗投影**（issue #73）：`ConfigStore::update` 的順序是「每次先重讀磁碟上的最新版 → 在記憶體套用修改 →
   `projection::validate` 乾跑 → 原子寫入（唯一暫存檔 + `rename`）」。
+  真正不存在的設定檔可以建立預設值；解析不了的 symlink（含目標消失）則拒絕載入或寫入，保留連結以免覆蓋設定。
   **每次寫入與外部改動都記 log**（issue #406）：寫出去記 INFO `config.toml written`；重讀時內容跟 daemon 記得的不同（＝不是 daemon 自己寫的）記 WARN
   `config.toml changed outside this daemon`。兩者都帶呼叫位置（`#[track_caller]`，`projection` 的公開函式把自己的呼叫端傳下來）、觸發它的 HTTP 請求
   （`api::auth` 對非 GET 請求設的 task-local：method／path／對端／User-Agent／Origin／Referer，不含 token；身分分兩格——`bot=` 是驗過的

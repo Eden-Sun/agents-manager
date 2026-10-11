@@ -1387,7 +1387,16 @@ fn is_retired_key(path: &str) -> bool {
     matches!(parts.as_slice(), ["projects", i, "bots", j, "instruction_files"] if i.parse::<usize>().is_ok() && j.parse::<usize>().is_ok())
 }
 
+/// `exists()` follows symlinks, so it reports a dangling or looping link as absent even though
+/// the directory entry still exists. Refuse to replace that link with a default config.
+fn unresolvable_symlink(path: &Path) -> bool {
+    !path.exists() && std::fs::symlink_metadata(path).is_ok()
+}
+
 fn read_file(path: &Path) -> Result<(ConfigFile, Option<SystemTime>, [u8; 32])> {
+    if unresolvable_symlink(path) {
+        anyhow::bail!("{} 是解析不了的 symlink：拒絕用預設設定蓋掉它（先把連結的目標放回來）", path.display());
+    }
     if !path.exists() {
         let cfg = ConfigFile::default();
         write_atomic(path, &cfg)?;
@@ -1423,7 +1432,13 @@ fn config_fingerprint(text: &str) -> [u8; 32] {
 pub fn write_atomic(path: &Path, cfg: &ConfigFile) -> Result<()> {
     use std::io::Write as _;
     // 檔案還不存在（`read_file` 第一次寫預設設定）時 canonicalize 會失敗：那就照原路徑建。
-    let target = std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
+    let target = match std::fs::canonicalize(path) {
+        Ok(target) => target,
+        Err(_) if unresolvable_symlink(path) => {
+            anyhow::bail!("{} 是解析不了的 symlink：拒絕用預設設定蓋掉它（先把連結的目標放回來）", path.display());
+        }
+        Err(_) => path.to_path_buf(),
+    };
     let text = match std::fs::read_to_string(&target) {
         Ok(old) => render_preserving(&old, cfg)?,
         Err(_) => toml::to_string_pretty(cfg)?,
@@ -1989,6 +2004,44 @@ mod issue507_tests {
             "原本 0600 的設定檔不可以被 rename 放寬成 umask 的權限"
         );
         std::fs::remove_dir_all(&root).ok();
+    }
+
+    #[tokio::test]
+    async fn a_dangling_symlinked_config_is_refused_instead_of_replaced_by_defaults() {
+        let root = super::test_support::track(std::env::temp_dir().join(format!("am-config-dangling-{}", super::test_support::ulid())));
+        std::fs::create_dir_all(&root).unwrap();
+        let link = root.join("config.toml");
+        let target = root.join("missing-target.toml");
+        std::os::unix::fs::symlink("missing-target.toml", &link).unwrap();
+
+        let error = match ConfigStore::load(link.clone()).await {
+            Ok(_) => String::new(),
+            Err(error) => format!("{error:#}"),
+        };
+        assert!(error.contains("symlink"), "應拒絕解析不了的連結：{error}");
+        assert!(std::fs::symlink_metadata(&link).unwrap().file_type().is_symlink(), "連結必須保留");
+        assert!(!target.exists(), "不能建立連結指向的目標");
+    }
+
+    #[tokio::test]
+    async fn a_write_through_a_link_whose_target_vanished_fails_and_keeps_the_link() {
+        let root = super::test_support::track(std::env::temp_dir().join(format!("am-config-vanished-{}", super::test_support::ulid())));
+        std::fs::create_dir_all(&root).unwrap();
+        let link = root.join("config.toml");
+        let target = root.join("target.toml");
+        std::fs::write(&target, "[server]\nlisten = '127.0.0.1:7788'\n").unwrap();
+        std::os::unix::fs::symlink("target.toml", &link).unwrap();
+
+        let store = ConfigStore::load(link.clone()).await.unwrap();
+        std::fs::remove_file(&target).unwrap();
+        let result = store.update(|cfg| {
+            cfg.build.cargo_jobs += 1;
+            Ok(())
+        }).await;
+
+        assert!(result.is_err(), "目標消失後不可把 symlink 換成一般檔");
+        assert!(std::fs::symlink_metadata(&link).unwrap().file_type().is_symlink(), "連結必須保留");
+        assert!(!target.exists(), "不可重建消失的目標");
     }
 
     /// 設定檔還不存在時（`read_file` 會寫一份預設）照原路徑建，不因為 canonicalize 失敗就爆掉。
