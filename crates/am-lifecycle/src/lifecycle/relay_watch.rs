@@ -113,6 +113,41 @@ pub async fn resolve(app: &(impl crate::capabilities::Db + crate::capabilities::
     db::run(app.db(), id).await
 }
 
+/// #1460：收件名字對得到一顆 running run，但它的專案已移交給別台主機（`resolve` 因此回 `None`）。只給 log 用：
+/// 同寄件主機、同名的 agent，不比 session（這裡是提示，不是認領）。
+pub async fn handed_off_target(app: &impl crate::capabilities::Db, from_bot: &str, to_agent: &str) -> anyhow::Result<bool> {
+    let to = to_agent.trim();
+    if to.is_empty() {
+        return Ok(false);
+    }
+    let host = db::bot_host(app.db(), from_bot).await?;
+    let n: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM runs r JOIN bots b ON b.id = r.bot_id JOIN projects p ON p.id = b.project_id
+          WHERE r.state = 'running' AND b.deleted_at IS NULL AND p.handed_off_to IS NOT NULL AND p.host = ?1
+            AND (r.agent_name = ?2 OR r.pane_id = ?2)",
+    )
+    .bind(&host)
+    .bind(to)
+    .fetch_one(app.db())
+    .await?;
+    Ok(n > 0)
+}
+
+/// #1460：announce 因移交而不盯梢時留一行 log（`relay_handoff_direct`），營運看得到「這句只靠 shim 直送、兩顆 daemon 都不記」。
+/// 讀不到就不記，不影響送出。
+pub async fn note_handoff_direct(app: &impl crate::capabilities::Db, from_bot: &str, to_agent: &str) {
+    match handed_off_target(app, from_bot, to_agent).await {
+        Ok(true) => tracing::info!(
+            event = "relay_handoff_direct",
+            bot = from_bot,
+            to = to_agent,
+            "relay announce to an agent whose project was handed off: the shim delivers it directly; no turn is recorded on either daemon (SPEC §6.5d)"
+        ),
+        Ok(false) => {}
+        Err(e) => tracing::debug!(bot = from_bot, to = to_agent, error = ?e, "could not check whether a relay target was handed off"),
+    }
+}
+
 /// 開進行中的回合。已經有回合在飛（收件方正忙，字會排在它後面）就不開，UI 本來就看得到。寫不進去只記 log，不擋補 Enter。
 pub(super) async fn open_turn(app: &impl RelayWatchContext, run: &db::Run, from_bot: &str, from_turn: Option<&str>, text: &str) -> Option<String> {
     match try_open_turn(app, run, from_bot, from_turn, text).await {
@@ -655,6 +690,20 @@ mod tests {
 
         sqlx::query("UPDATE projects SET handed_off_to = NULL WHERE id = ?").bind(&f.env.project_id).execute(app.db()).await.unwrap();
         assert_eq!(resolve(&app, &sender.id, &f.pane).await.unwrap().map(|r| r.id), Some(f.run_id.clone()), "移交清掉：又認得到");
+    }
+
+    /// #1460：`resolve` 因為移交而回 `None` 時，log 要認得出「這句是送給移交出去的 agent」（只給 log 用，不影響送出）。
+    /// 沒移交、或名字不是它的 agent，都不算。
+    #[tokio::test]
+    async fn a_handed_off_target_is_recognised_for_the_handoff_log() {
+        let f = fixture("handoff-log").await;
+        let app = f.env.app.clone();
+        let sender = tt::claude_bot(&app, &f.env.project_id, "handoff-log-sender").await;
+        assert!(!handed_off_target(&app, &sender.id, &f.pane).await.unwrap(), "移交前：本機的收件方不算移交");
+
+        sqlx::query("UPDATE projects SET handed_off_to = 'agm-host' WHERE id = ?").bind(&f.env.project_id).execute(app.db()).await.unwrap();
+        assert!(handed_off_target(&app, &sender.id, &f.pane).await.unwrap(), "移交後：認得出是移交出去的 agent");
+        assert!(!handed_off_target(&app, &sender.id, "no-such-agent").await.unwrap(), "不是它的 agent 不算");
     }
 
     #[tokio::test]
