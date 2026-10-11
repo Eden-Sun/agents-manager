@@ -32,7 +32,8 @@ before(() => {
   }
 })
 after(async () => {
-  HTMLElement.prototype.getBoundingClientRect = nativeRect
+  Reflect.deleteProperty(HTMLElement.prototype, 'getBoundingClientRect')
+  assert.equal(Object.hasOwn(HTMLElement.prototype, 'getBoundingClientRect'), false)
   await teardownDom()
 })
 
