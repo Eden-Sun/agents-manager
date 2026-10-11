@@ -776,6 +776,36 @@ check "講清楚不要用上一輪的數字" "不要用上一輪的數字猜" "$
 check_no "沒有動到 binary" "submit" "$AGM_DIR/launchctl.log"
 teardown
 
+# 6b. 真的 db.rs 讀得出正確的版本（#1459）：腳本的 regex 只對合成的假檔驗過，真檔從來沒餵過它。
+# 這裡用獨立的算法（不共用腳本那段 regex）從真的 db.rs 算出最後一筆 `(N, "…")`，再拿真檔跑一趟，兩者要一樣、而且不走 ABORT。
+REAL_DB_RS="$HERE/../../crates/am-base/src/db.rs"
+REAL_UV=$(awk '/^pub const SCHEMA_HISTORY/ {on=1; next} on && /^\];/ {exit} on && match($0, /^[[:space:]]*\([0-9]+,/) {v=$0; sub(/^[[:space:]]*\(/, "", v); sub(/,.*/, "", v); last=v} END {print last}' "$REAL_DB_RS")
+case "$REAL_UV" in
+  ''|*[!0-9]*) echo "FAIL - 從真的 db.rs 算不出版本（拿到 '$REAL_UV'）"; FAIL=$((FAIL + 1)) ;;
+  *) echo "ok   - 從真的 db.rs 算出版本 $REAL_UV" ; PASS=$((PASS + 1)) ;;
+esac
+setup "$REAL_UV" "$REAL_UV"
+cp "$REAL_DB_RS" "$CHECKOUT/crates/am-base/src/db.rs"
+rc=$(run)
+check "真的 db.rs：腳本讀到的版本跟獨立算法一樣" "checkout SCHEMA_VERSION=$REAL_UV, db user_version=$REAL_UV, bumped=no" "$SWAP_LOG"
+check_no "真的 db.rs：沒有走到讀不到的 ABORT" "讀不到 checkout 的 SCHEMA_VERSION" "$SWAP_LOG"
+teardown
+
+# 6c. 清單裡的註解含 `];`（#1459）：讀到的版本不能因此變小。變小就會被當成「DB 比 binary 還新」每輪 exit 3。
+setup 12 12
+cat > "$CHECKOUT/crates/am-base/src/db.rs" <<'RS'
+pub const SCHEMA_HISTORY: &[(i64, &str)] = &[
+    (9, "aaa"),
+    // 舊寫法是 vec![(1, "x")]; 之後改成常數
+    (10, "bbb"),
+    (12, "ccc"),
+];
+RS
+rc=$(run)
+check "註解裡的 ]; 不會讓版本變小" "checkout SCHEMA_VERSION=12, db user_version=12, bumped=no" "$SWAP_LOG"
+check_no "註解裡的 ]; 不會被當成「DB 比 binary 還新」" "比要換上的 binary 認得的" "$SWAP_LOG"
+teardown
+
 # 7. 回滾點的 binary 對不上 sha256：換版前就停手。
 setup 10 10
 printf 'someone-elses-binary\n' > "$AGM_REPO/target/release/agents-managerd.bak-$OLD"
