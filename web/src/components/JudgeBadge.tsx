@@ -2,9 +2,9 @@
  * bot 上的「Jev」徽章（issue #1328）：近 24 小時有超過門檻的第二意見時才出現，點開看場景、機率、時間與遮罩後的命中行。
  * 只是提示：寫明「不會自動動作」。關掉的那一則記在這台瀏覽器，不再顯示。
  */
-import { useEffect, useRef, useState } from 'react'
+import { useEffect, useLayoutEffect, useRef, useState } from 'react'
 import { JUDGE_SCENES, probabilityText } from '../lib/judgeStats'
-import { judgeBadgeFor } from '../lib/judgeBadge'
+import { judgeBadgeFor, popPosition } from '../lib/judgeBadge'
 import { useJudgeLedger } from '../store/judgeLedger'
 import { useStore } from '../store/store'
 import './judgeBadge.css'
@@ -22,6 +22,8 @@ export function JudgeBadge({ botId }: { botId: string }) {
   const popRef = useRef<HTMLDivElement>(null)
   /** 「關掉這則」之後要還焦點：`fallback` 是事先記下的最近可聚焦祖先（列），徽章不在了才用它。 */
   const restoreFocus = useRef<{ fallback: HTMLElement | null } | null>(null)
+  /** 浮層的視窗座標（fixed）：打開時量徽章鈕算出來，不靠側欄的捲動容器（#1381）。 */
+  const [pos, setPos] = useState<{ left: number; top: number } | null>(null)
   // 「近 24 小時」以快照的時間為準（每次重抓都會更新），渲染只依賴 store，不讀牆鐘。
   const row = visible ? judgeBadgeFor(rows, botId, snapshotAt, dismissed) : null
   const open = row !== null && openId === row.id
@@ -38,12 +40,25 @@ export function JudgeBadge({ botId }: { botId: string }) {
         btnRef.current?.focus()
       }
     }
+    // fixed 的浮層不會跟著列捲動：打開期間捲動或改視窗大小就關掉，不留在錯的位置（#1381）。
+    const onMove = () => setOpenId(null)
     document.addEventListener('mousedown', onDoc)
     document.addEventListener('keydown', onKey)
+    window.addEventListener('scroll', onMove, true)
+    window.addEventListener('resize', onMove)
     return () => {
       document.removeEventListener('mousedown', onDoc)
       document.removeEventListener('keydown', onKey)
+      window.removeEventListener('scroll', onMove, true)
+      window.removeEventListener('resize', onMove)
     }
+  }, [open])
+  // 量徽章鈕與浮層，算出視窗座標；在上屏前寫好，不閃到錯的位置（#1381）。
+  useLayoutEffect(() => {
+    if (!open || !btnRef.current || !popRef.current) return
+    const b = btnRef.current.getBoundingClientRect()
+    const p = popRef.current
+    setPos(popPosition({ left: b.left, top: b.top, bottom: b.bottom }, { width: p.offsetWidth, height: p.offsetHeight }, window.innerWidth, window.innerHeight))
   }, [open])
   // 「關掉這則」之後：徽章還在就回到徽章鈕；不在了就交給事先記下的可聚焦祖先（找不到就不處理）。
   useEffect(() => {
@@ -71,7 +86,14 @@ export function JudgeBadge({ botId }: { botId: string }) {
         Jev
       </button>
       {open ? (
-        <div ref={popRef} tabIndex={-1} className="judge-badge-pop" role="dialog" aria-label="Jev 第二意見">
+        <div
+          ref={popRef}
+          tabIndex={-1}
+          className="judge-badge-pop"
+          role="dialog"
+          aria-label="Jev 第二意見"
+          style={pos ? { position: 'fixed', left: pos.left, top: pos.top } : { position: 'fixed', visibility: 'hidden', left: 0, top: 0 }}
+        >
           <p>
             <b>{scene}</b>・機率 {prob}
           </p>

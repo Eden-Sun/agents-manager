@@ -1,4 +1,4 @@
-/* Jev 徽章（issue #1328）：小膠囊，浮層貼在徽章下方。 */
+/* Jev 徽章（issue #1328）：小膠囊；浮層見下方（#1381：fixed，不被側欄捲動區裁掉）。 */
 .judge-badge-wrap {
   position: relative;
   display: inline-flex;
@@ -14,10 +14,9 @@
   background: transparent;
   cursor: pointer;
 }
+/* fixed：側欄的捲動區（overflow hidden）裁不到它；位置由 JudgeBadge 量了徽章鈕之後寫進 inline style（#1381）。 */
 .judge-badge-pop {
-  position: absolute;
-  top: calc(100% + 4px);
-  left: 0;
+  position: fixed;
   z-index: 20;
   width: min(280px, 80vw);
   padding: 8px 10px;
