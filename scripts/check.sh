@@ -332,6 +332,13 @@ check_changed() {
     if echo "$parts" | grep -qx web; then check_web; fi
     if echo "$parts" | grep -qx daemon; then
         local am_base_release_triage_test=0
+        # Rust 測試檔有沒有被掛進去（#1336）是純文字檢查，不編譯：改到 daemon／crates 就先跑，不等 ubuntu-ci 的 ops 才紅。
+        # CHECK_TESTS=none＝不跑測試，一併略過；ops 部分已經會跑它時不重跑。
+        # 假 repo（其他 *_test.sh 只複製 check.sh 幾支腳本進去）沒有這支就不跑；真的 repo 一定有。
+        if [ "${CHECK_TESTS:-}" != none ] && [ -f scripts/rust_test_mount_test.sh ] && ! echo "$parts" | grep -qx ops; then
+            step "daemon: Rust 測試檔掛載（scripts/rust_test_mount_test.sh）"
+            bash scripts/rust_test_mount_test.sh
+        fi
         if [ ! -f web/dist/index.html ]; then
             step "daemon: temporary web/dist stub (skip web build on the Rust fast path)"
             mkdir -p web/dist
