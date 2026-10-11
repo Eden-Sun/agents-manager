@@ -126,3 +126,34 @@ test('resync 讀不到 upstream-updates（404）不跳錯誤通知、原本的�
   assert.equal(useStore.getState().upstreamUpdates.claude?.hasUpdate, true, '原本那份留著')
   assert.equal(useStore.getState().notices.filter((n) => n.kind === 'error').length, 0, '不跳錯誤通知')
 })
+
+test('identity-prefs 在路上時收到的 identity_prefs_changed 不被舊快照蓋掉（#1341）', async () => {
+  reset()
+  useStore.setState({ disabledIdentities: [] })
+  let calls = 0
+  let release!: () => void
+  const gate = new Promise<void>((r) => {
+    release = r
+  })
+  routeDaemon(async (r) => {
+    if (r.path.endsWith('/identity-prefs')) {
+      calls += 1
+      // 第一次是變更之前讀的舊名單，等到 WS 事件已經套進去之後才回來。
+      if (calls === 1) {
+        await gate
+        return json({ disabled: [] })
+      }
+      return json({ disabled: [{ host: 'local', kind: 'claude', identity: 'cc1' }] })
+    }
+    if (r.path.endsWith('/state')) return json(stateBody())
+    return json({ disabled: [], messages: [], turns: [], has_more: false })
+  })
+  const pending = useStore.getState().loadIdentityPrefs()
+  dispatchFrameForTest({ type: 'identity_prefs_changed', seq: 9, data: { host: 'local', kind: 'claude', identity: 'cc1', disabled: true } })
+  await settle()
+  release()
+  await pending
+  await settle()
+  assert.deepEqual(useStore.getState().disabledIdentities, [identityPrefKey('local', 'claude', 'cc1')], '舊快照不能把停用蓋回去')
+  assert.equal(calls, 2, '期間有變更：丟掉舊的那份，重抓一次')
+})
