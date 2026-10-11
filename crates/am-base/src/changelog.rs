@@ -244,7 +244,7 @@ pub async fn lookup(app: &(impl crate::changelog::ChangelogState + crate::hosts:
             return reply;
         }
     };
-    let all = parse_changelog(&md);
+    let all = crate::release_triage::source_sections(kind, &md);
     let picked = pick_sections(&all, reply.from_version.as_deref(), &installed);
     if picked.is_empty() {
         reply.error = Some(format!("CHANGELOG 裡沒有 {installed} 這一版的段落"));

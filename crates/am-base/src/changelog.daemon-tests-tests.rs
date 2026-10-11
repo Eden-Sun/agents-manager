@@ -99,3 +99,22 @@
         assert_eq!(r.source_url, HERDR_CHANGELOG_URL);
         assert!(lookup(&e.app, "local", "grok", None, Some("1.0.0")).await.error.unwrap().contains("沒有 changelog 來源"));
     }
+
+    /// `GET /api/changelog?kind=codex`：codex 的 release body 自己有 `## New Features`／`## Bug Fixes` 二級標題，
+    /// 版本段落不能在 body 第一行就被結束（#1392）；`## Changelog` 之後的 PR 流水帳不帶。
+    #[tokio::test]
+    async fn codex_lookup_keeps_the_release_body_under_its_own_h2_headings() {
+        const CODEX_JSON: &str = r###"[
+ {"tag_name":"rust-v0.155.1","draft":false,"prerelease":false,"body":"## Bug Fixes\n\n- reasoning summaries stay off by default (#46467)\n\n## Changelog\n\nFull Changelog: https://example.invalid/compare\n\n- #46467 Restore none\n"},
+ {"tag_name":"rust-v0.155.0","draft":false,"prerelease":false,"body":"## New Features\n\n- Added Touch ID verification\n\n## Bug Fixes\n\n- fixed x\n"},
+ {"tag_name":"rust-v0.154.0","draft":false,"prerelease":false,"body":"## Chores\n\n- base\n"}
+]"###;
+        let e = crate::testing::env().await;
+        e.app.changelog.seed("codex", &codex_releases_to_md(CODEX_JSON).unwrap()).await;
+        let r = lookup(&e.app, "local", "codex", Some("0.154.0"), Some("0.155.1")).await;
+        assert!(r.found, "{:?}", r.error);
+        assert_eq!(r.sections.iter().map(|s| s.version.as_str()).collect::<Vec<_>>(), ["0.155.1", "0.155.0"]);
+        assert!(r.sections[0].body.contains("## Bug Fixes") && r.sections[0].body.contains("reasoning summaries"), "{:?}", r.sections[0]);
+        assert!(!r.sections[0].body.contains("Full Changelog"), "`## Changelog` 之後的 PR 流水帳不帶");
+        assert!(r.sections[1].body.contains("Touch ID") && r.sections[1].body.contains("fixed x"), "{:?}", r.sections[1]);
+    }

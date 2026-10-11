@@ -2574,7 +2574,7 @@ claude 下載新版後只能靠重啟套用（`runs.update_notice`，§3.1）。
   現在會一起進批次；新版**還沒安裝**（notice 含「需安裝」）重啟換不到東西，改成「是候選但被跳過」而不是
   「整個不算」——一樣會出現在 header 與確認框的跳過名單裡，講清楚要先手動安裝，不會像以前那樣默默消失。
   **codex 需安裝（2026-09-25，使用者：「codex 的 upgrade 也和 claude 用一樣的方式出現在 header」）**：header 在一般那顆旁邊另有一顆警示色的
-  ⌃⌃ N（N＝那台還寫著「需安裝」的 codex 數），點下去是同一種確認框——左 changelog（`UpdateChangelog kind="codex"`）、右 AGM 解析（`kind=codex`，同一版只派一次）、
+  ⌃⌃ N（N＝那台還寫著「需安裝」的 codex 數），點下去是同一種確認框——左 changelog（`UpdateChangelog kind="codex"`；每版內容是 release body 原文，保留它自己的 `## New Features` 等二級標題，`## Changelog` 之後的 PR 流水帳不帶，#1392）、右 AGM 解析（`kind=codex`，同一版只派一次）、
   下面列出裝好後會重啟的那台閒置 codex 與會跳過的（在忙、子 agent）。確認框標題的版本取那台「需安裝」通知裡**最新的目標**；
   沒有任何 run 帶「需安裝」（沒有 codex 在跑）時改看上游快照：第一台落後的主機（本機優先）、目標取快照的 `target_version`，daemon 核對目標時只有成功查完且沒有 pending notice 才退回快照（那台要落後才算，`upstream_update::behind_target_for_host`，2026-09-29 使用者）；active-run、bot 或 bot-host DB 讀取失敗回可重試 503，不用快照代替，也不開始安裝；
   確認後 `POST /api/hosts/{name}/cli-update {kind:"codex",target_version}`（API §12.7a，`cli_update.rs`），daemon 綁定這一版（#569）：
