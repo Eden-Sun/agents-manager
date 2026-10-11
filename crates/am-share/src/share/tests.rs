@@ -2034,6 +2034,32 @@ async fn an_sse_stream_nobody_polls_does_not_hold_the_bot_lock() {
     drop(stream);
 }
 
+/// #1260: constructing an SSE response must not hold the bot mutex until a client polls its first body item.
+#[tokio::test]
+async fn an_unpolled_sse_response_does_not_hold_the_bot_lock_and_rechecks_before_status() {
+    use futures::StreamExt;
+    use portal::PortalEnv as _;
+    use tower::ServiceExt;
+
+    let e = tt::env().await;
+    let b = restricted_bot(&e.app, &e.project_id, "sse-response-unpolled").await;
+    let token = shared(&e.app, &b.id).await;
+    let lock = e.app.bot_mutex(&b.id).await;
+    let request = axum::http::Request::builder()
+        .uri(format!("/s/{token}/api/events"))
+        .body(axum::body::Body::empty())
+        .unwrap();
+
+    let response = portal::router(e.app.clone()).oneshot(request).await.unwrap();
+    assert_eq!(response.status(), axum::http::StatusCode::OK);
+    assert!(lock.try_lock().is_ok(), "an unpolled HTTP response must not retain bot authority");
+
+    store::disable(&e.app.db, &b.id).await.unwrap();
+    let mut body = response.into_body().into_data_stream();
+    let first = tokio::time::timeout(Duration::from_secs(1), body.next()).await.unwrap();
+    assert!(first.is_none(), "the first status poll after revocation must close without emitting status");
+}
+
 /// #1162：定期重驗不能被別顆 bot 的事件一直重設——匯流排再忙，撤銷的連線也要在 `STREAM_RECHECK` 內收掉（不靠 `kick`）。
 #[tokio::test]
 async fn the_sse_recheck_fires_even_while_other_bots_keep_the_bus_busy() {

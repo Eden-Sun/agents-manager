@@ -909,6 +909,9 @@ async fn events<H: PortalEnv>(State(st): State<Portal<H>>, Path(token): Path<Str
     if let Some(wait) = st.limits.take(&bot_id, "stream", 30, Duration::from_secs(60)) {
         return too_many(wait, "stream");
     }
+    // Response body 可能直到 client poll 才執行；不可把 handler 的 authority guard 帶過 handoff。
+    // Stream.next 會在送出第一個 status 前重新驗 token，並只在組事件時持鎖。
+    drop(authority);
     let s = Stream {
         app: st.app.clone(),
         token,
@@ -920,7 +923,6 @@ async fn events<H: PortalEnv>(State(st): State<Portal<H>>, Path(token): Path<Str
         _slot: slot,
         _share_slot: share_slot,
         pending: Some(Value::Null),
-        first_guard: Some(authority),
         revoked: false,
     };
     let stream = futures::stream::unfold(s, |mut s| async move { s.next().await.map(|ev| (Ok::<_, std::convert::Infallible>(ev), s)) });
@@ -938,9 +940,6 @@ pub struct Stream<H: PortalEnv> {
     _slot: tokio::sync::OwnedSemaphorePermit,
     _share_slot: PerSharePermit,
     pending: Option<Value>,
-    /// handler 驗完 token 的那把 bot 鎖，只留到第一則 `status` 組好就放（#1200）：之後每則事件各自在 `map` 裡重驗，
-    /// 不跨 poll 握著——client 不讀時 hyper 不再 poll，這把鎖不能跟著卡住這顆 bot。
-    first_guard: Option<OwnedMutexGuard<()>>,
     revoked: bool,
 }
 
@@ -952,13 +951,10 @@ impl<H: PortalEnv> Stream<H> {
     /// 下一個要送的事件；`None`＝收掉這條連線（token 失效、bus 關了）。
     async fn next(&mut self) -> Option<Event> {
         if self.pending.take().is_some() {
-            // 鎖只包到組好這一則；交出去之後不握（見 `first_guard`）。
-            let _guard = match self.first_guard.take() {
-                Some(g) => g,
-                None => match authority_lock_app(&self.app, &self.token_lookups, &self.limits, &self.token, &self.bot_id).await {
-                    Ok(g) => g,
-                    Err(_) => return None,
-                },
+            // Response handoff 前已放掉 handler 的鎖；在首個 status poll 時重新驗 token。
+            let _guard = match authority_lock_app(&self.app, &self.token_lookups, &self.limits, &self.token, &self.bot_id).await {
+                Ok(g) => g,
+                Err(_) => return None,
             };
             let first = json!({"status": status_of(&self.app, &self.bot_id).await});
             return Some(Event::default().event("status").data(first.to_string()));
@@ -1060,7 +1056,6 @@ pub fn stream_for_test<H: PortalEnv>(app: &Arc<H>, token: &str, bot_id: &str, pe
         _slot: Arc::new(Semaphore::new(1)).try_acquire_owned().unwrap(),
         _share_slot: Arc::new(PerShareSlots::new(MAX_STREAMS_PER_SHARE)).try_acquire(bot_id).unwrap(),
         pending,
-        first_guard: None,
         revoked: false,
     }
 }
