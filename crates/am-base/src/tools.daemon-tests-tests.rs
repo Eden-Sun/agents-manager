@@ -594,6 +594,43 @@ AM_ALIAS cc2='CLAUDE_CONFIG_DIR=$HOME/.claude-cc2 claude --dangerously-skip-perm
         assert!(install_host_tools_fenced(&app, "build1", ht_marked("new"), &fresh).await);
     }
 
+    /// issue #1371：偵測開始後主機已重連（圍籬過期）：它的失敗不是現在這台的事，不能把新連線剛量好的基準標成過期。
+    #[tokio::test]
+    async fn a_superseded_detection_that_fails_does_not_mark_the_new_baseline_stale() {
+        use crate::host_baseline::{BaselineEnv, BaselineReport};
+        let host = "c5-1371";
+        let app = crate::testing::env().await.app.clone();
+        let conn = app.hosts.insert_remote_for_test(crate::config::HostCfg { name: host.into(), ..host_cfg("target-a") }).await;
+        crate::hosts::set_ssh_fake(host, |_| Err(anyhow::anyhow!("timed out")));
+        let old = app.hosts.fence(host).await.unwrap();
+        conn.bump_generation_for_test();
+        app.baseline_cache().lock().await.insert(
+            host.into(),
+            BaselineReport { os: Some("Linux".into()), issues: Some(vec![]), checked_at: crate::db::now(), failed_at: None, error: None, stale: false },
+        );
+        assert!(crate::tools::detect_with_fence(&app, host, &old).await.is_err());
+        let cached = app.baseline_cache().lock().await.get(host).cloned().unwrap();
+        assert_eq!((cached.failed_at, cached.error), (None, None), "新連線的結果不能被舊偵測標成過期");
+    }
+
+    /// 同一台、圍籬仍是現行的：偵測失敗照舊把基準標成過期（既有行為不變）。
+    #[tokio::test]
+    async fn a_current_detection_that_fails_still_marks_the_baseline_stale() {
+        use crate::host_baseline::{BaselineEnv, BaselineReport};
+        let host = "c5-1371";
+        let app = crate::testing::env().await.app.clone();
+        app.hosts.insert_remote_for_test(crate::config::HostCfg { name: host.into(), ..host_cfg("target-a") }).await;
+        crate::hosts::set_ssh_fake(host, |_| Err(anyhow::anyhow!("timed out")));
+        let current = app.hosts.fence(host).await.unwrap();
+        app.baseline_cache().lock().await.insert(
+            host.into(),
+            BaselineReport { os: Some("Linux".into()), issues: Some(vec![]), checked_at: crate::db::now(), failed_at: None, error: None, stale: false },
+        );
+        assert!(crate::tools::detect_with_fence(&app, host, &current).await.is_err());
+        let cached = app.baseline_cache().lock().await.get(host).cloned().unwrap();
+        assert!(cached.failed_at.is_some(), "現行圍籬的失敗要標過期");
+    }
+
     /// 同一個 generation 內重疊的兩次偵測（開機那次與別名輪詢）：後開始的先寫完，先開始的較晚回來不能蓋掉它。
     #[tokio::test]
     async fn an_older_overlapping_detection_cannot_overwrite_a_newer_one() {
