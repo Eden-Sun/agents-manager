@@ -377,15 +377,9 @@ check_changed() {
             fi
             if [ "$nfilters" -gt 0 ]; then
                 step "daemon: cargo test（改到的模組：$(echo $filters)）"
-                # libtest 一次只收一個位置過濾字串：每個各跑一次，紅的累積起來，不在第一個就停（#1263）。
+                # libtest 收多個位置過濾字串（[FILTERS...]），任一個符合就跑；一次跑完，只有全部加起來選到 0 條才拒絕（#1332）。
                 # shellcheck disable=SC2086  # 過濾字串是 [a-z_:]，不含空白與萬用字元
-                local frc=0 ft
-                for ft in $filters; do
-                    run_daemon_tests -- "$ft" || frc=$?
-                done
-                if [ "$frc" != 0 ]; then
-                    return "$frc"
-                fi
+                run_daemon_tests -- $filters || return $?
             elif ! printf '%s\n' "$filters" | grep -qx '__all__' && [ "$am_base_release_triage_test" = 0 ]; then
                 echo "daemon: 沒有可挑的測試子集（只動了 main.rs 之類不屬於任何模組的檔案）；要跑測試用 CHECK_TESTS=<過濾字串>"
             fi
