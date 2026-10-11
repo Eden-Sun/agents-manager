@@ -96,6 +96,8 @@ pub async fn fork_bot(
                 json!({"client_request_id": request_id, "message": "這個 client_request_id 已經用在另一個 fork 請求（來源或名字不同）。要再 fork 一次請換一個 id。"}),
             ));
         }
+        // #1422：移交之後的重送也不能把它做完（那會寫 config 建出一顆啟動不了的 bot）；操作留著，收回之後重送照樣接著做。
+        crate::handoff::refuse(&app.db, &op.source_bot_id).await?;
         return finish_detached(&app, op, _serial).await;
     }
 
