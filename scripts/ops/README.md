@@ -554,8 +554,8 @@ launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.agm.ci-watch.plist
 | 步驟 | 對象 | 規則（env 可覆寫） |
 | --- | --- | --- |
 | (a) | `~/.cache/agents-manager/remote-cargo/*` 頂層目錄 | mtime 超過 `DISK_GC_REMOTE_CARGO_DAYS`（7）天，且沒有行程的 cwd／開檔在底下才刪；不論 `build.remote` 開關 |
-| (b) | 主樹與 `.claude/worktrees/*` 的 `target/*/incremental/*` | 子目錄 mtime 超過 `DISK_GC_INCREMENTAL_DAYS`（2）天就刪 |
-| (c) | 各 worktree（**不含主樹**）的 `target/` | 最新的 `target/*/.fingerprint`（含它底下第一層）都超過 `DISK_GC_TARGET_DAYS`（7）天 → 整個 `target/` 刪；一個 `.fingerprint` 都沒有就不判斷 |
+| (b) | 主樹、`git worktree list` 登記的每棵 worktree（含 `~/project/agm-*` 那種不在 `.claude/worktrees` 底下的；另加沒登記的 `.claude/worktrees/*`），以及 ubuntu-ci 的常駐 clone（`${AGM_CI_ROOT:-~/.cache/agents-manager/ci}/repo`）的 `target/*/incremental/*` | 子目錄 mtime 超過 `DISK_GC_INCREMENTAL_DAYS`（2）天就刪 |
+| (c) | 各 worktree（**不含主樹、不含 ubuntu-ci 的 clone**）的 `target/` | 最新的 `target/*/.fingerprint`（含它底下第一層）都超過 `DISK_GC_TARGET_DAYS`（7）天 → 整個 `target/` 刪；一個 `.fingerprint` 都沒有就不判斷。ubuntu-ci 的 `target/` 是暖快取，整個不刪 |
 | (d) | `$HOME` 所在磁碟 | 使用率 ≥ `DISK_GC_ALERT_PCT`（85）或剩餘 < `DISK_GC_ALERT_FREE_GB`（20）→ `agm ops-alert --source disk-gc --reason disk_low` |
 
 安全：只刪上面這幾個明確路徑；路徑含 `..`、不在 `$HOME` 底下、任何一層是 symlink、實際位置不符就整步放棄；`cd` 進去後只用相對路徑刪。
