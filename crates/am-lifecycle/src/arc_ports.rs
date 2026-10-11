@@ -40,7 +40,14 @@ mod arc_port_2_hookhost {
     impl<T: crate::hookrecv::HookHost + ?Sized> crate::hookrecv::HookHost for std::sync::Arc<T> {
         fn wake_hook_inbox(&self) { <T as crate::hookrecv::HookHost>::wake_hook_inbox(self.as_ref()) }
         fn hook_bot_dir(&self, bot_id: &str) -> Result<std::path::PathBuf> { <T as crate::hookrecv::HookHost>::hook_bot_dir(self.as_ref(), bot_id) }
-        fn after_turn_end<'a>(&'a self, body: &'a HookBody) -> impl std::future::Future<Output = ()> + Send + 'a { <T as crate::hookrecv::HookHost>::after_turn_end(self.as_ref(), body) }
+        fn after_turn_end<'a>(
+            &'a self,
+            body: &'a HookBody,
+            run_id: Option<&'a str>,
+            turn_id: &'a str,
+        ) -> impl std::future::Future<Output = ()> + Send + 'a {
+            <T as crate::hookrecv::HookHost>::after_turn_end(self.as_ref(), body, run_id, turn_id)
+        }
         fn background_stop<'a>(&'a self, run: &'a db::Run, payload: &'a Value) -> impl std::future::Future<Output = ()> + Send + 'a { <T as crate::hookrecv::HookHost>::background_stop(self.as_ref(), run, payload) }
         fn transcript_allowed<'a>(&'a self, bot: &'a db::Bot, path: &'a str) -> impl std::future::Future<Output = bool> + Send + 'a { <T as crate::hookrecv::HookHost>::transcript_allowed(self.as_ref(), bot, path) }
         fn local_transcript_allowed<'a>(&'a self, bot: &'a db::Bot, path: &'a str) -> impl std::future::Future<Output = bool> + Send + 'a { <T as crate::hookrecv::HookHost>::local_transcript_allowed(self.as_ref(), bot, path) }

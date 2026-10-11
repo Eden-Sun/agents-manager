@@ -1,17 +1,18 @@
 //! `ask_answers` runner 與 hook 後置處理。
 
-use crate::ask_answers::{carried, from_local_transcript, record};
+use crate::ask_answers::{carried, from_local_transcript};
 use crate::db;
+use crate::events::ports::{HandoffRepo, ProviderPort};
 use crate::state::App;
 use serde_json::Value;
 use std::sync::Arc;
 
 /// 回合結束（`Stop`／`StopFailure`）的 hook 處理完之後補讀：這一回合內已經答完（或取消）的提問，一筆都不漏。
 ///
-/// 放在 `hookrecv::process` 收尾而不是 hook 處理中間：終端打字開的外部回合要等 Stop 才建立，這時候「最新的回合」才是對的那一個。
+/// 放在 `hookrecv::process` 收尾：外部回合也要等 Stop 建立後，才能依核心接受的 turn id 補記。
 /// 遠端 bot 用 `hook.sh` 帶來的 `agm_asks`；本機 bot 讀自己這台的 transcript（payload 的路徑，沒有就用 run 記的）。
 /// 記不成不能害這則 hook 失敗：回合收尾比對話裡多一則紀錄重要，所以只記 warn（下一則 hook 或重送會再補）。
-pub(crate) async fn after_turn_end(app: &Arc<App>, body: &crate::hook_body::HookBody) {
+pub(crate) async fn after_turn_end(app: &Arc<App>, body: &crate::hook_body::HookBody, run_id: Option<&str>, turn_id: &str) {
     let p = &body.payload;
     if !body.provider.eq_ignore_ascii_case("claude") || !matches!(p.get("hook_event_name").and_then(Value::as_str), Some("Stop" | "StopFailure")) {
         return;
@@ -20,7 +21,35 @@ pub(crate) async fn after_turn_end(app: &Arc<App>, body: &crate::hook_body::Hook
     if bot.deleted_at.is_some() || bot.kind != "claude" {
         return;
     }
-    let (Ok(conv), Ok(run)) = (db::conversation_id(&app.db, &bot.id).await, db::active_run(&app.db, &bot.id).await) else { return };
+    // Recheck the admission boundary after the core hook transaction and bind recording to its turn.
+    if !matches!(app.db.bot_handed_off_to(&bot.id).await, Ok(None)) {
+        return;
+    }
+    let run = if let Some(run_id) = run_id {
+        let Ok(Some(stored_run)) = db::run(&app.db, run_id).await else { return };
+        if stored_run.bot_id != bot.id {
+            return;
+        }
+        let Ok(active) = db::active_run(&app.db, &bot.id).await else { return };
+        if active.as_ref().is_some_and(|r| r.id != run_id) {
+            return;
+        }
+        let host_generation = match db::run_host_generation(&app.db, run_id).await {
+            Ok(generation) => generation,
+            Err(_) => return,
+        };
+        if let Some(was) = host_generation {
+            if app.admitted_host_fence(&bot).await.is_some_and(|f| f.generation() as i64 != was) {
+                return;
+            }
+        }
+        Some(stored_run)
+    } else if !matches!(db::active_run(&app.db, &bot.id).await, Ok(None)) {
+        return;
+    } else {
+        None
+    };
+    let Ok(conv) = db::conversation_id(&app.db, &bot.id).await else { return };
     let mut records = carried(p);
     if records.is_empty() {
         let local = db::bot_host(&app.db, &bot.id).await.is_ok_and(|h| h == crate::config::LOCAL_HOST);
@@ -35,7 +64,7 @@ pub(crate) async fn after_turn_end(app: &Arc<App>, body: &crate::hook_body::Hook
             }
         }
     }
-    if let Err(e) = record(app, &bot.id, &conv, records).await {
+    if let Err(e) = crate::ask_answers::record_for_turn(app, &bot.id, &conv, run_id, turn_id, records).await {
         tracing::warn!(bot = %bot.name, error = %e, "could not record the AskUserQuestion answers");
     }
 }
@@ -94,7 +123,7 @@ mod tests {
             truncated: false,
             run_id: None,
         };
-        after_turn_end(&app, &body).await;
+        after_turn_end(&app, &body, Some(&run_id), &turn).await;
 
         let imported: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM messages WHERE conversation_id=? AND content LIKE '%FOREIGN-ANSWER-3187%'")
             .bind(&conv)
@@ -102,6 +131,48 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(imported, 0, "外部 JSONL 的答案不能混進本機 bot 對話");
+        let still_here: Option<String> = sqlx::query_scalar("SELECT id FROM turns WHERE id=?").bind(&turn).fetch_optional(&app.db).await.unwrap();
+        assert_eq!(still_here.as_deref(), Some(turn.as_str()));
+    }
+
+    #[tokio::test]
+    async fn stale_stop_does_not_attach_carried_answers_to_the_current_run() {
+        let env = crate::testing::env().await;
+        let app = env.app.clone();
+        let bot = crate::testing::claude_bot(&app, &env.project_id, "ask-stale-stop").await;
+        let old_run = crate::testing::fake_run(&app, &bot.id).await;
+        sqlx::query("UPDATE runs SET state='stopped' WHERE id=?").bind(&old_run).execute(&app.db).await.unwrap();
+        let current_run = crate::testing::fake_run(&app, &bot.id).await;
+        let conv = db::conversation_id(&app.db, &bot.id).await.unwrap();
+        let turn = db::ulid();
+        sqlx::query("INSERT INTO turns (id, conversation_id, run_id, origin, status, delivery, created_at) VALUES (?,?,?, 'web', 'completed', 'ok', ?)")
+            .bind(&turn)
+            .bind(&conv)
+            .bind(&current_run)
+            .bind(db::now())
+            .execute(&app.db)
+            .await
+            .unwrap();
+        let body = crate::hookrecv::HookBody {
+            bot_id: bot.id.clone(),
+            provider: "claude".into(),
+            payload: json!({
+                "hook_event_name": "Stop",
+                "agm_asks": [{"id":"old-question", "at":null, "items":[{"question":"old?","answer":"STALE-RUN-ANSWER-1317"}] }]
+            }),
+            received_at: None,
+            truncated: false,
+            run_id: Some(old_run),
+        };
+
+        crate::hookrecv::process_for(&app, &body, None).await.unwrap();
+
+        let imported: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM messages WHERE conversation_id=? AND content LIKE '%STALE-RUN-ANSWER-1317%'")
+            .bind(&conv)
+            .fetch_one(&app.db)
+            .await
+            .unwrap();
+        assert_eq!(imported, 0, "stale Stop answers must not be attached to the current run's turn");
         let still_here: Option<String> = sqlx::query_scalar("SELECT id FROM turns WHERE id=?").bind(&turn).fetch_optional(&app.db).await.unwrap();
         assert_eq!(still_here.as_deref(), Some(turn.as_str()));
     }

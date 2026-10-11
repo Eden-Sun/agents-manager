@@ -249,20 +249,27 @@ async fn record_on_turn(
     Ok(added)
 }
 
-/// 把回合已結束時讀到的提問記進對話裡最新已開始的回合。回傳新增了幾則。
-///
-/// Stop 也可能替終端手打的外部回合剛建立新 turn，因此這條路要在 `hookrecv::process` 收尾時才挑回合。
-pub async fn record(app: &(impl crate::capabilities::Db + crate::events::ports::TurnCommands), bot_id: &str, conversation_id: &str, records: Vec<AskRecord>) -> Result<usize> {
-    let Some((turn_id, turn_started)) = sqlx::query_as::<_, (String, String)>(
-        "SELECT id, created_at FROM turns WHERE conversation_id = ? AND status <> 'queued' ORDER BY created_at DESC, rowid DESC LIMIT 1",
+/// Record answers on the turn accepted by the Stop handler; never infer the target from the latest conversation turn.
+pub async fn record_for_turn(
+    app: &(impl crate::capabilities::Db + crate::events::ports::TurnCommands),
+    bot_id: &str,
+    conversation_id: &str,
+    run_id: Option<&str>,
+    turn_id: &str,
+    records: Vec<AskRecord>,
+) -> Result<usize> {
+    let Some(turn_started) = sqlx::query_scalar::<_, String>(
+        "SELECT created_at FROM turns WHERE id = ? AND conversation_id = ? AND run_id IS ? AND status <> 'queued'",
     )
+    .bind(turn_id)
     .bind(conversation_id)
+    .bind(run_id)
     .fetch_optional(app.db())
     .await?
     else {
         return Ok(0);
     };
-    record_on_turn(app, bot_id, conversation_id, &turn_id, &turn_started, records).await
+    record_on_turn(app, bot_id, conversation_id, turn_id, &turn_started, records).await
 }
 
 /// PostToolUse arrives before Stop creates a terminal-typed external turn. Attach its early copy only
