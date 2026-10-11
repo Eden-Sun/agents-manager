@@ -1,6 +1,6 @@
 import type { ShareClient } from './shareApi'
 import { svgExternalRefs, SvgTaintedError, svgToPng, svgWellFormed } from './shareImage'
-import { ShareImageWorkQueue, type ImageWork } from './shareImageQueue'
+import { ImageWorkSkipped, ShareImageWorkQueue, type ImageWork } from './shareImageQueue'
 import type { ShareFile } from './shareModel'
 
 /**
@@ -111,7 +111,7 @@ class ImageCache<V> {
       if (this.entries.size <= this.limits.maxEntries && total() <= this.limits.maxBytes) return
       if (k !== keep) {
         const entry = this.entries.get(k)
-        if (entry) this.remove(k, entry)
+        if (entry?.settled) this.remove(k, entry)
       }
     }
   }
@@ -148,7 +148,10 @@ const pngCache = new WeakMap<ShareClient, ImageCache<PngResult>>()
 export function pngOf(client: ShareClient, name: string, version: string): Promise<PngResult> {
   return cacheOf(pngCache, client, () => new ImageCache<PngResult>(SHARE_IMAGE_CACHE_LIMITS.png, (r) => (typeof r === 'object' ? r.blob.size : 0), queueOf(client), 'png'))
     .get(name, version, () => loadPng(client, name))
-    .catch((): PngResult => 'broken')
+    .catch((e): PngResult => {
+      if (e instanceof ImageWorkSkipped) throw e
+      return 'broken'
+    })
 }
 
 
@@ -169,7 +172,13 @@ function loadPng(client: ShareClient, name: string): Promise<PngResult> {
 export function pngRequest(client: ShareClient, name: string, version: string): ShareImageRequest<PngResult> {
   const request = cacheOf(pngCache, client, () => new ImageCache<PngResult>(SHARE_IMAGE_CACHE_LIMITS.png, (r) => (typeof r === 'object' ? r.blob.size : 0), queueOf(client), 'png'))
     .watch(name, version, () => loadPng(client, name))
-  return { promise: request.promise.catch((): PngResult => 'broken'), release: request.release }
+  return {
+    promise: request.promise.catch((e): PngResult => {
+      if (e instanceof ImageWorkSkipped) throw e
+      return 'broken'
+    }),
+    release: request.release,
+  }
 }
 
 /** 點陣圖的整檔每個檔（同版本）只抓一次，清單、對話、放大檢視共用。抓不到不留快取，下次再試。整張圖的 Blob 留著就是記憶體，所以有上限。 */
