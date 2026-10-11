@@ -8366,6 +8366,31 @@ mod delete_bot_tests {
         assert_eq!(run.state, "running", "agent 已經起來了，run 不能停在 starting");
     }
 
+    /// #1357：stop 的 handler 在 pane 關了、`stopped` 還沒記的那一瞬被 drop：停止照樣記完，run 是 stopped 不是 stopping／exited。
+    #[tokio::test]
+    async fn a_stop_whose_handler_is_dropped_before_the_stopped_record_still_records_stopped() {
+        let e = crate::testing::env().await;
+        let bot = crate::testing::claude_bot(&e.app, &e.project_id, "stop-drop").await;
+        let run = lifecycle::start_bot(&e.app, &bot.id).await.unwrap();
+        let reached = Arc::new(tokio::sync::Notify::new());
+        let release = Arc::new(tokio::sync::Notify::new());
+        let (r2, go) = (reached.clone(), release.clone());
+        crate::lifecycle::race_point::arm("stop_before_stopped", &bot.id, move || async move {
+            r2.notify_one();
+            go.notified().await;
+        });
+        let (app, id) = (e.app.clone(), bot.id.clone());
+        let h = tokio::spawn(async move { stop_bot(State(app), Path(id)).await.map(|_| ()) });
+        reached.notified().await;
+        h.abort(); // 瀏覽器斷線：handler future 被 drop（脫離出去的工作不受影響）
+        let _ = h.await;
+        release.notify_one();
+        work_done_for_test(&bot.id).notified().await;
+        let state: String = sqlx::query_scalar("SELECT state FROM runs WHERE id = ?").bind(&run).fetch_one(&e.app.db).await.unwrap();
+        assert_eq!(state, "stopped", "使用者要它停：不是 stopping，也不是 exited");
+        assert!(db::active_run(&e.app.db, &bot.id).await.unwrap().is_none());
+    }
+
     /// 補不成（child 的軟刪一直寫不進去）：最多試 MAX_ATTEMPTS 次，failed＋AGM inbox。
     #[tokio::test]
     async fn a_delete_that_can_never_be_completed_gives_up_and_tells_agm() {
