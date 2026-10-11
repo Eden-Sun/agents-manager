@@ -142,3 +142,40 @@ test('未讀晶片的底改用 --done-fill，不再是 accent；選取＋未讀�
   const count = blockOf(chipCss, '\n.unread-chip.unread .unread-chip-n {')
   assert.doesNotMatch(count, /var\(--accent\)/, '黃底上的數字籤不能再是藍的')
 })
+
+// #1402：未讀（黃底）晶片上的保溫記號 ♨。`keepWarmChip.css` 的反白規則是 #1331 之前「未讀＝實心藍底」留下的，要移除。
+const keepWarmCss = readFileSync(join(dir, 'keepWarmChip.css'), 'utf8')
+/** 去掉註解後，依 `選擇器 { 宣告 }` 切出每一條規則（選擇器可以是逗號清單）。 */
+function rulesOf(src: string): { selectors: string[]; body: string }[] {
+  const bare = src.replace(/\/\*[\s\S]*?\*\//g, '')
+  return [...bare.matchAll(/([^{}]+)\{([^{}]*)\}/g)].map((m) => ({ selectors: m[1].split(',').map((s) => s.trim()), body: m[2] }))
+}
+const UNREAD_WARM = '.unread-chip.unread .unread-chip-warm'
+/** `#abc`／`#aabbcc`／`white` 都換成 `#rrggbb`，好跟 `contrast` 用。 */
+function toHex6(c: string): string {
+  const v = c.toLowerCase()
+  if (v === 'white') return '#ffffff'
+  if (v.length === 4) return '#' + [1, 2, 3].map((i) => v[i] + v[i]).join('')
+  return v
+}
+
+for (const theme of THEMES) {
+  test(`${theme.name}：未讀晶片上的保溫記號（實際套用的顏色）對黃底至少 3:1`, () => {
+    const body = blockOf(styles, theme.header)
+    const doneDecl = body.match(/--done-fill:\s*color-mix\(in srgb,\s*var\(--lamp-yellow\)\s*(\d+)%,\s*var\(--bg-panel\)\)/)
+    assert.ok(doneDecl, `${theme.name} 的 --done-fill 要是「黃混面板」的 color-mix`)
+    const fill = mixHex(hexOf(body, 'lamp-yellow'), Number(doneDecl[1]), hexOf(body, 'bg-panel'))
+    // 套用的顏色：這條選擇器有自己的 color 就用它，沒有才是 --keep-warm。
+    const override = rulesOf(keepWarmCss).find((r) => r.selectors.includes(UNREAD_WARM))?.body.match(/color:\s*(#[0-9a-fA-F]{3}(?:[0-9a-fA-F]{3})?\b|white\b)/i)?.[1]
+    const ink = override ? toHex6(override) : hexOf(blockOf(keepWarmCss, theme.header), 'keep-warm')
+    const ratio = contrast(ink, fill)
+    assert.ok(ratio >= 3, `${theme.name}：未讀晶片的保溫記號 ${ink} 對黃底 ${fill} 只有 ${ratio.toFixed(2)}:1`)
+  })
+}
+
+test('keepWarmChip.css 不再把未讀晶片上的保溫記號設成白色（那是未讀＝藍底時代的反白）', () => {
+  for (const r of rulesOf(keepWarmCss)) {
+    if (!r.selectors.includes(UNREAD_WARM)) continue
+    assert.doesNotMatch(r.body, /color:\s*(#fff\b|#ffffff\b|white\b)/i, `${UNREAD_WARM} 不可反白`)
+  }
+})
