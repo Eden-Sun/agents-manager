@@ -49,9 +49,11 @@ pub async fn restore_for(app: &Arc<App>, bot_id: &str) {
 
 /// 主機連上時先補還原（#1307）：離線時的還原只留下回收區那份，沒有別的記號可以接著做。這裡直接看 DB：
 /// 這台主機上還活著的 bot，它的 `bots/<id>` 不在、回收區有它的備份，就搬回來。全部處理完回 `true`；有一顆失敗就回 `false`。
+/// 移交出去的專案不補（§6.5h，#1405）：接手的那顆 daemon 刪掉的 bot 目錄，這顆不能搬回來。
+/// 每顆在 bot 鎖裡重讀 `deleted_at`（#1405）：名單讀完之後才被刪的，不還原。
 async fn restore_pending(app: &Arc<App>, host: &str, conn: &crate::hosts::HostConn) -> bool {
     let ids: Vec<String> = match sqlx::query_scalar::<_, String>(
-        "SELECT b.id FROM bots b JOIN projects p ON p.id = b.project_id WHERE p.host = ? AND b.deleted_at IS NULL",
+        "SELECT b.id FROM bots b JOIN projects p ON p.id = b.project_id WHERE p.host = ? AND p.handed_off_to IS NULL AND b.deleted_at IS NULL",
     )
     .bind(host)
     .fetch_all(&app.db)
@@ -63,8 +65,25 @@ async fn restore_pending(app: &Arc<App>, host: &str, conn: &crate::hosts::HostCo
             return false;
         }
     };
+    #[cfg(test)]
+    crate::runners::app_ports_p11::race_point::hit("remote_restore_after_list", host).await;
     let mut all_ok = true;
     for id in ids {
+        // 拿不到鎖就這一輪跳過（別的路握著，不算失敗，下一輪再來）；拿到才在鎖裡重讀 `deleted_at`，
+        // 鎖握到 `restore` 與 `forget` 做完（同 `remote_purge::sweep`，#511／#1301）。
+        let Ok(_guard) = app.bot_lock(&id).await.try_lock_owned() else {
+            tracing::debug!(host, bot = %id, "bot lock is busy; its pending restore waits for the next round");
+            continue;
+        };
+        match crate::db::bot(&app.db, &id).await {
+            Ok(Some(b)) if b.deleted_at.is_none() => {}
+            Ok(_) => continue,
+            Err(e) => {
+                tracing::warn!(host, bot = %id, error = %e, "could not re-read whether a bot is still live; not restoring it");
+                all_ok = false;
+                continue;
+            }
+        }
         let dir = match crate::runners::s6_l::remote_bot_dir(conn, &id).await {
             Ok(paths) => paths.dir,
             Err(e) => {
