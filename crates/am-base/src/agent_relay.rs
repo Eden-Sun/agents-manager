@@ -46,6 +46,13 @@ const TTL: Duration = Duration::from_secs(300);
 /// 太短的相同開頭（「繼續」）會把使用者自己打的字認錯。
 const MIN_MATCH: usize = 12;
 
+/// 存下來比對用的字數上限（#1352）：回音只會比兩邊較短的那一段開頭（`same_prompt`），留開頭就夠認。
+const MAX_TEXT_CHARS: usize = 4_000;
+/// 同一顆寄件 bot 最多留幾筆未認領的；超過先丟它自己最舊的（#1352）。
+const MAX_PER_SENDER: usize = 64;
+/// 整張表的上限（防很多顆同時失控）；超過丟最舊的（#1352）。
+const MAX_PENDING: usize = 1_024;
+
 fn store() -> &'static Mutex<Vec<Pending>> {
     static S: std::sync::OnceLock<Mutex<Vec<Pending>>> = std::sync::OnceLock::new();
     S.get_or_init(|| Mutex::new(Vec::new()))
@@ -73,11 +80,20 @@ pub fn announce(host: &str, from_bot: &str, agent: &str, text: &str, from_turn: 
     }
     let mut s = store().lock().unwrap();
     s.retain(|p| p.at.elapsed() < TTL);
+    // 上限（#1352）：這顆寄件 bot 滿了就先丟它自己最舊的（`Vec` 是插入順序，第一筆就是最舊的）；整張表滿了丟最舊的。
+    if s.iter().filter(|p| p.from_bot == from_bot).count() >= MAX_PER_SENDER {
+        if let Some(i) = s.iter().position(|p| p.from_bot == from_bot) {
+            s.remove(i);
+        }
+    }
+    if s.len() >= MAX_PENDING {
+        s.remove(0);
+    }
     s.push(Pending {
         host: host.to_string(),
         from_bot: from_bot.to_string(),
         agent: agent.to_string(),
-        text: text.to_string(),
+        text: text.chars().take(MAX_TEXT_CHARS).collect(),
         from_turn: from_turn.map(str::to_string),
         at: Instant::now(),
     });
@@ -146,5 +162,33 @@ mod tests {
     fn another_agents_echo_is_left_alone() {
         announce(H, "bot-agm", "t-agent", "AGM 裁示：這一句是給 abc 的，不是給 xyz 的", None);
         assert_eq!(claim(H, "t-agent-other", "AGM 裁示：這一句是給 abc 的，不是給 xyz 的"), None);
+    }
+
+    // 下面兩條用的上限與 `MAX_PER_SENDER`（64）、`MAX_TEXT_CHARS`（4000）同值；寫成字面數字，修正前才會是行為紅，而不是編不過。
+
+    /// #1352：同一顆寄件 bot 最多留 64 筆未認領的；超過就丟它自己最舊的，別的寄件者不受影響。
+    #[test]
+    fn a_sender_keeps_only_its_newest_pending_announces() {
+        announce(H, "bot-cap-other", "t-cap-other", "別的寄件者的報備，不該被擠掉", None);
+        for n in 0..=64 {
+            announce(H, "bot-cap-sender", &format!("t-cap-{n}"), &format!("這是第 {n} 則而且夠長的報備內容"), None);
+        }
+        assert_eq!(claim(H, "t-cap-0", "這是第 0 則而且夠長的報備內容"), None, "最舊的那筆被擠掉");
+        assert_eq!(claim(H, "t-cap-64", "這是第 64 則而且夠長的報備內容"), Some("bot-cap-sender".into()), "最新的留著");
+        assert_eq!(claim(H, "t-cap-other", "別的寄件者的報備，不該被擠掉"), Some("bot-cap-other".into()), "別的寄件者不受影響");
+    }
+
+    /// #1352：報備只存前 4000 個字（照字元切）。完整的回音照樣認得，截斷的回音也認得。
+    #[test]
+    fn a_very_long_announce_is_stored_truncated_but_still_claimed() {
+        let long: String = "長".repeat(4000 + 500);
+        announce(H, "bot-long", "t-long", &long, None);
+        assert_eq!(claim(H, "t-long", &long), Some("bot-long".into()), "完整的原文要認得");
+
+        announce(H, "bot-long", "t-long-2", &long, None);
+        let stored = store().lock().unwrap().iter().filter(|p| p.agent == "t-long-2").map(|p| p.text.chars().count()).collect::<Vec<_>>();
+        assert_eq!(stored, vec![4000], "存進去的只有前 4000 字");
+        let head: String = long.chars().take(100).collect();
+        assert_eq!(claim(H, "t-long-2", &head), Some("bot-long".into()), "截斷的回音照舊認得");
     }
 }
