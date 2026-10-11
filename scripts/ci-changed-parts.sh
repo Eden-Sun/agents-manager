@@ -30,6 +30,8 @@ while IFS= read -r f; do
         # 有測試釘住內容的文件：docs/SPEC.md（scripts/jev-role_test.sh 要求裡面有 Jev 角色政策那幾句）。
         # 只改它不必跑整包 ops，獨立一個 `specs` 部分只跑那支契約測試（check.sh changed 處理）。
         docs/SPEC.md) specs=1 ;;
+        # AGENTS.md 也有測試釘住內容（scripts/lint_scope_test.sh 要求 clippy 指令涵蓋 workspace，#1077）：歸 ops。
+        AGENTS.md) ops=1 ;;
         docs/* | *.md | LICENSE | .gitignore | .github/ISSUE_TEMPLATE/*) ;;
         web/*) web=1 ;;
         daemon/* | crates/* | Cargo.toml | Cargo.lock | rust-toolchain* | .cargo/*) daemon=1 ;;

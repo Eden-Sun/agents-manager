@@ -61,6 +61,12 @@ check "specs" "docs/SPEC.md"
 check "daemon specs" "docs/SPEC.md" "docs/API.md"
 check "daemon specs" "docs/SPEC.md" "daemon/src/api.rs"
 check "ops specs" "docs/SPEC.md" "scripts/ops/README.md"
+# 有測試釘住內容的根目錄文件：AGENTS.md（scripts/lint_scope_test.sh 要求 clippy 指令涵蓋 workspace，#1077）。
+# 只改它也要跑 ops，不能當成「只有文件」（#1252）。
+check "ops" "AGENTS.md"
+check "ops specs" "AGENTS.md" "docs/SPEC.md"
+# 其他根目錄文件仍是「只有文件」。
+check "" "README.md"
 
 # web 的設定檔改了＝web 整套（build 與全部測試）：vite／tsconfig／package.json／鎖檔／bunfig／測試墊片／靜態資源。
 for f in web/vite.config.ts web/tsconfig.app.json web/tsconfig.json web/tsconfig.node.json web/package.json web/bun.lock web/bunfig.toml web/test/node-test-shim.ts web/index.html web/public/x.svg; do
