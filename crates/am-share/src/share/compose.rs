@@ -149,6 +149,8 @@ impl PhotoSource for PrefetchedSource {
             Some((_, Some(Ok(bytes)))) if bytes.len() as u64 <= max => Ok(bytes.clone()),
             Some((_, Some(Ok(_)))) => Err("source_too_large"),
             Some((_, Some(Err(why)))) => Err(why),
+            // 這一趟沒抓到（批次失敗、或回覆比要的少）：不是照片本身的事，不能當成永久的 not_found（#1434）。
+            Some((_, None)) => Err("read_failed"),
             _ => Err("not_found"),
         }
     }
@@ -527,7 +529,16 @@ fn load(src: &dyn PhotoSource, parts: &[&str]) -> Embedded {
         cache_put(key, result.clone());
         return result;
     }
-    let bytes = src.read(parts, SOURCE_MAX)?;
+    let bytes = match src.read(parts, SOURCE_MAX) {
+        Ok(bytes) => bytes,
+        // 永久讀不到（遠端 stat 成功、讀檔被拒）：身分沒變就不會好，負快取，下一次不用再抓（#1434）。其他讀取階段的失敗照舊不快取。
+        Err("not_found") => {
+            let result = Err("not_found");
+            cache_put(key, result.clone());
+            return result;
+        }
+        Err(why) => return Err(why),
+    };
     let result = to_data_uri(&bytes);
     cache_put(key, result.clone());
     result
