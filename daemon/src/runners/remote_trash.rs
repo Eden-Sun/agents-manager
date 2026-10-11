@@ -41,9 +41,9 @@ pub async fn restore_for(app: &Arc<App>, bot_id: &str) {
     match crate::remote_trash::restore(&conn, bot_id, &dir, &remote_root()).await {
         Ok(Some(from)) => {
             tracing::info!(host, bot = %bot_id, %from, "restored remote bot config dir from bots-trash");
-            crate::remote_purge::forget(app, bot_id).await;
+            crate::remote_purge::forget(app, bot_id, &host).await;
         }
-        Ok(None) => crate::remote_purge::forget(app, bot_id).await,
+        Ok(None) => crate::remote_purge::forget(app, bot_id, &host).await,
         Err(e) => tracing::warn!(host, bot = %bot_id, error = %format!("{e:#}"), "could not restore remote bot config dir from bots-trash"),
     }
 }
@@ -105,9 +105,9 @@ async fn restore_pending(app: &Arc<App>, host: &str, conn: &crate::hosts::HostCo
         match crate::remote_trash::restore(conn, id, &dir, &remote_root()).await {
             Ok(Some(from)) => {
                 tracing::info!(host, bot = %id, %from, "restored a pending remote bot config dir from bots-trash");
-                crate::remote_purge::forget(app, id).await;
+                crate::remote_purge::forget(app, id, host).await;
             }
-            Ok(None) => crate::remote_purge::forget(app, id).await,
+            Ok(None) => crate::remote_purge::forget(app, id, host).await,
             Err(e) => {
                 tracing::warn!(host, bot = %id, error = %format!("{e:#}"), "could not restore a pending remote bot config dir; keeping its bots-trash copy");
                 out.failed.insert(id.clone());
@@ -130,13 +130,14 @@ struct Unrestored {
 /// 活著、沒有任何回收區備份的 bot，它的「已清掉」記號沒有用了：忘掉（#1406）。一句 SQL 做完，子查詢只挑
 /// 這台主機上**還活著、沒移交**（§6.5h）的 bot，所以名單讀完之後才被刪的那顆不會被忘掉記號。寫不進去只記 log。
 async fn forget_marks_without_backup(app: &Arc<App>, host: &str, backed: &HashSet<String>) {
-    let mut sql = "DELETE FROM remote_bot_dir_purges WHERE bot_id IN (SELECT b.id FROM bots b JOIN projects p ON p.id = b.project_id \
+    // 只清記在這台的記號（#1416）：別台的記號（專案搬走前記的）不屬於這台的清理。
+    let mut sql = "DELETE FROM remote_bot_dir_purges WHERE host = ? AND bot_id IN (SELECT b.id FROM bots b JOIN projects p ON p.id = b.project_id \
                    WHERE p.host = ? AND p.handed_off_to IS NULL AND b.deleted_at IS NULL)"
         .to_string();
     if !backed.is_empty() {
         sql.push_str(&format!(" AND bot_id NOT IN ({})", vec!["?"; backed.len()].join(", ")));
     }
-    let mut q = sqlx::query(&sql).bind(host);
+    let mut q = sqlx::query(&sql).bind(host).bind(host);
     for id in backed {
         q = q.bind(id.as_str());
     }
