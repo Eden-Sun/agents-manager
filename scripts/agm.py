@@ -2123,6 +2123,24 @@ def claim_conflict(number: int, claim: dict) -> AgmError:
     )
 
 
+#: 撞題提示（#1330）是附帶的：認領成功後最多等這麼久，逾時或任何失敗都不影響認領的結果。
+COLLISION_TIMEOUT = 2.0
+
+
+def collision_check_hint(args, number: int, title: str, me: str, payload: dict) -> None:
+    """認領成功後 best-effort 問一次撞題（只記帳本、推提示，不擋認領、不改認領）。舊 daemon 的 404、連不上、
+    逾時、runtime.json 不在：一律吞掉，exit code 與認領結果都不變。"""
+    try:
+        rt = load_runtime(getattr(args, "runtime_dir", None))
+        client = Client(daemon_url(rt), COLLISION_TIMEOUT, bot_auth_headers(rt))
+        client.post(
+            "/api/judge/collision-check",
+            {"issue": number, "title": title, "child": payload.get("child") or me, "branch": payload.get("branch")},
+        )
+    except Exception:  # noqa: BLE001 — 附帶提示的任何失敗都不能讓認領看起來失敗
+        return
+
+
 def cmd_issue(_client, _cfg: dict, args) -> object:
     number = args.number
     me = claiming_bot(args)
@@ -2269,6 +2287,7 @@ def cmd_issue(_client, _cfg: dict, args) -> object:
     out.update({k: v for k, v in payload.items() if k in ("child", "worktree", "branch")})
     if took_over:
         out["took_over_stale_claim_from"] = claim.get("bot")
+    collision_check_hint(args, number, issue.get("title") or f"#{number}", me, payload)
     return out
 
 

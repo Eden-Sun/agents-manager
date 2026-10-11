@@ -115,6 +115,68 @@ pub async fn hint_after_publish(app: &Arc<impl crate::capabilities::Cfg + crate:
     });
 }
 
+/// `POST /api/judge/collision-check`（#1330）：bot 認領票（`agm issue claim`）時問一次撞題。
+/// 候選收集、同一題、同一個開關與名單都跟派工那條一樣；只記帳本、推提示，不擋認領、不改認領、不按鍵。
+pub struct ClaimAsk {
+    /// 呼叫端自己的專案。路由只接受這個專案的問題。
+    pub project_id: String,
+    /// 呼叫端（認領的那顆 bot）。`child` 對不上這個專案的一顆 bot 時，候選就記在它名下。
+    pub caller: String,
+    pub issue: Option<u64>,
+    pub title: String,
+    /// 被派去做的那顆（bot 名）。它自己在跑的卡不拿來比：同一顆接著做不是撞題。
+    pub child: String,
+    pub branch: Option<String>,
+}
+
+/// 路由收到就回 202；這裡只等 spawn，不等 Jev。關著連 task 都不起。
+pub async fn schedule_claim(app: &Arc<impl crate::capabilities::Cfg + crate::capabilities::Db + crate::capabilities::Emit + crate::judge::JudgeFuse + 'static>, ask: ClaimAsk) {
+    if !app.cfg().get().await.judge.enabled {
+        return;
+    }
+    let app = app.clone();
+    tokio::spawn(async move {
+        if let Err(e) = check_claim(&app, &ask).await {
+            tracing::debug!(error = %e, "judge same_work claim check skipped");
+        }
+    });
+}
+
+pub async fn check_claim(app: &(impl crate::capabilities::Cfg + crate::capabilities::Db + crate::capabilities::Emit + crate::judge::JudgeFuse), ask: &ClaimAsk) -> Result<()> {
+    if !app.cfg().get().await.judge.enabled {
+        return Ok(());
+    }
+    // child 的 bot 名＝它在這個專案裡的那一顆；對不上就用呼叫端自己（它的卡同樣不比）。
+    let child: Option<(String, String, Option<String>)> =
+        sqlx::query_as("SELECT id, kind, parent_bot_id FROM bots WHERE project_id = ? AND name = ? AND deleted_at IS NULL LIMIT 1")
+            .bind(&ask.project_id)
+            .bind(&ask.child)
+            .fetch_optional(app.db())
+            .await?;
+    let (bot_id, agent_kind, parent_bot_id) = child.unwrap_or_else(|| (ask.caller.clone(), String::new(), None));
+    let mut summary = ask.title.clone();
+    if let Some(branch) = &ask.branch {
+        summary = format!("{summary}\nbranch {branch}");
+    }
+    let key = format!("claim:{}:{}", ask.child, ask.issue.map_or_else(|| "-".to_string(), |n| n.to_string()));
+    check_candidate(
+        app,
+        &Candidate {
+            key,
+            project_id: Some(ask.project_id.clone()),
+            title: ask.title.clone(),
+            summary: summarize(&summary),
+            touches: paths_of(&ask.title),
+            issue_ref: ask.issue.map(|n| format!("#{n}")),
+            bot_id,
+            agent_kind,
+            parent_bot_id,
+            assignment_id: None,
+        },
+    )
+    .await
+}
+
 pub async fn check_assignment(app: &(impl crate::capabilities::Cfg + crate::capabilities::Db + crate::capabilities::Emit + crate::judge::JudgeFuse), assignment_id: &str) -> Result<()> {
     if !app.cfg().get().await.judge.enabled {
         return Ok(());
@@ -1328,5 +1390,91 @@ mod tests {
         std::fs::create_dir_all(&nested).unwrap();
         assert_eq!(branch_of(nested.to_str().unwrap()).as_deref(), Some("only-the-dirname"));
         std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// #1330：認領時的撞題。候選＝呼叫端專案裡、`child` 以外的在跑工作。
+    async fn claim_setup(app: &Arc<App>, project: &str, sibling_title: &str) -> (db::Bot, db::Bot) {
+        let parent = tt::claude_bot(app, project, "parent").await;
+        let wt = std::env::temp_dir().join(format!("am-claim-sib-{}", db::ulid()));
+        std::fs::create_dir_all(&wt).unwrap();
+        child(app, project, &parent.id, "sib", wt.to_str().unwrap(), sibling_title).await;
+        let newbie = tt::claude_bot(app, project, "newbie").await;
+        sqlx::query("UPDATE bots SET parent_bot_id=? WHERE id=?").bind(&parent.id).bind(&newbie.id).execute(&app.db).await.unwrap();
+        (parent, newbie)
+    }
+
+    fn claim_ask(project: &str, caller: &str, child: &str) -> ClaimAsk {
+        ClaimAsk {
+            project_id: project.into(),
+            caller: caller.into(),
+            issue: Some(1330),
+            title: "修卡住的畫面判斷".into(),
+            child: child.into(),
+            branch: Some("fix/newbie-g1330".into()),
+        }
+    }
+
+    #[tokio::test]
+    async fn a_claim_at_or_above_half_hints_once_per_pair_and_never_blocks() {
+        let rig = stand(Mode::Noul(0.72), true, true).await;
+        let app = rig.env.app.clone();
+        let (parent, _newbie) = claim_setup(&app, &rig.env.project_id, "卡住的畫面判斷 #1330").await;
+        let ask = || claim_ask(&rig.env.project_id, &parent.id, "newbie");
+        check_claim(&app, &ask()).await.unwrap();
+        let rows = shadow_rows(&app).await;
+        assert_eq!(rows.len(), 1, "{rows:?}");
+        assert_eq!(rows[0].1, Some(0.72));
+        assert_eq!(inbox(&app).await.len(), 1, "≥0.5 推一則提示");
+        check_claim(&app, &ask()).await.unwrap();
+        assert_eq!(rig.seen.lock().unwrap().len(), 1, "同一對只問一次");
+        assert_eq!(shadow_rows(&app).await.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn a_claim_below_half_only_lands_in_the_ledger() {
+        let rig = stand(Mode::Noul(0.3), true, true).await;
+        let app = rig.env.app.clone();
+        let (parent, _newbie) = claim_setup(&app, &rig.env.project_id, "卡住的畫面判斷 #1330").await;
+        check_claim(&app, &claim_ask(&rig.env.project_id, &parent.id, "newbie")).await.unwrap();
+        assert_eq!(shadow_rows(&app).await.len(), 1, "帳本照寫");
+        assert!(inbox(&app).await.is_empty(), "<0.5 不推提示");
+    }
+
+    #[tokio::test]
+    async fn a_claim_asks_nothing_when_jev_is_off_or_the_project_is_not_listed() {
+        for (enabled, listed) in [(false, true), (true, false)] {
+            let rig = stand(Mode::Noul(0.9), enabled, listed).await;
+            let app = rig.env.app.clone();
+            let (parent, _newbie) = claim_setup(&app, &rig.env.project_id, "卡住的畫面判斷 #1330").await;
+            check_claim(&app, &claim_ask(&rig.env.project_id, &parent.id, "newbie")).await.unwrap();
+            assert!(rig.seen.lock().unwrap().is_empty(), "enabled={enabled} listed={listed}：不問");
+            assert!(shadow_rows(&app).await.is_empty(), "enabled={enabled} listed={listed}：不寫帳本");
+        }
+    }
+
+    #[tokio::test]
+    async fn a_claim_never_compares_the_child_with_its_own_running_work() {
+        let rig = stand(Mode::Noul(0.9), true, true).await;
+        let app = rig.env.app.clone();
+        let (parent, newbie) = claim_setup(&app, &rig.env.project_id, "別的工作 #77").await;
+        let own_run = tt::fake_run(&app, &newbie.id).await;
+        sqlx::query("UPDATE runs SET agent_title=? WHERE id=?").bind("修卡住的畫面判斷 自己的 SELF-1330").bind(&own_run).execute(&app.db).await.unwrap();
+        crate::supervisor::store::insert_assignment(&app.db, None, &newbie.id, "own-1330", "SELF-ASSIGNMENT 還沒驗收", &[], None, true).await.unwrap();
+        check_claim(&app, &claim_ask(&rig.env.project_id, &parent.id, "newbie")).await.unwrap();
+        let asked = rig.seen.lock().unwrap().clone();
+        assert_eq!(asked.len(), 1, "只問 sib，不問 child 自己的卡：{asked:?}");
+        let text = asked[0].to_string();
+        assert!(!text.contains("SELF-1330") && !text.contains("SELF-ASSIGNMENT"), "{text}");
+    }
+
+    #[tokio::test]
+    async fn a_claim_whose_child_is_not_a_bot_here_is_recorded_under_the_caller() {
+        let rig = stand(Mode::Noul(0.9), true, true).await;
+        let app = rig.env.app.clone();
+        let (parent, _newbie) = claim_setup(&app, &rig.env.project_id, "卡住的畫面判斷 #1330").await;
+        check_claim(&app, &claim_ask(&rig.env.project_id, &parent.id, "ghost-child")).await.unwrap();
+        let bot: String = sqlx::query_scalar("SELECT bot_id FROM judge_shadow WHERE regex_verdict='same_work' LIMIT 1").fetch_one(&app.db).await.unwrap();
+        assert_eq!(bot, parent.id, "對不上 bot 時記在呼叫端名下");
+        assert_eq!(rig.seen.lock().unwrap().len(), 1);
     }
 }
