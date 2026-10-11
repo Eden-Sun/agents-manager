@@ -31,6 +31,18 @@ check "lifecycle::composer_draft::tests::" "crates/am-lifecycle/src/lifecycle/co
 check "lifecycle::stop::force_abort_tests::" "crates/am-lifecycle/src/lifecycle/force_abort_tests.rs"
 check "share::tests::trusted::" "crates/am-share/src/share/trusted_tests.rs"
 check "share::portal::upload_tests::" "crates/am-share/src/share/portal_upload_tests.rs"
+# 模組自己（含子目錄）沒有測試：照檔名推的字串會選到零個，退到上一層（#1338）。
+check "share::" "crates/am-share/src/share/store.rs"
+check "lifecycle::" "crates/am-lifecycle/src/lifecycle/dead_panes.rs"
+check "runners::supervisor::" "daemon/src/runners/supervisor/health.rs"
+# 檔案自己沒有測試、但同名子目錄有測試：不退，留在這一層（runners::supervisor:: 底下有測試）。
+check "runners::supervisor::" "daemon/src/runners/supervisor.rs"
+# 頂層檔自己沒有測試：不出過濾字串（check.sh 會印「沒有可挑的測試子集」）。
+check "" "daemon/src/cli.rs"
+# 用 #[path] 掛在別的模組底下的檔：照掛載點給字串（api.rs、runners/s6_l.rs）；照檔名推會選到零個（#1338）。
+check "api::shell::" "daemon/src/shell.rs"
+check "api::bot_scope_matrix::" "daemon/src/bot_scope_matrix.rs"
+check "runners::s6_l::app_ports_p4sess::" "daemon/src/app_ports_p4sess.rs"
 # 直接 `mod x_tests;` 宣告的不受影響。
 check "lifecycle::agy_tests::" "crates/am-lifecycle/src/lifecycle/agy_tests.rs"
 check "share::remote_fs_tests::" "crates/am-share/src/share/remote_fs_tests.rs"
@@ -52,7 +64,7 @@ check "lifecycle::queue::" "crates/am-lifecycle/src/lifecycle/queue.rs"
 check "codex_history::" "crates/am-lifecycle/src/codex_history.rs"
 check "lifecycle::" "crates/am-lifecycle/src/lifecycle/mod.rs"
 check "__all__" "crates/am-lifecycle/src/lifecycle/fixtures/capture.txt"
-check "mission::ports_impl::" "crates/am-supervisor/src/mission/ports_impl.rs"
+check "mission::" "crates/am-supervisor/src/mission/ports_impl.rs"
 check "build_info::" "crates/am-supervisor/src/build_info.rs"
 check "share::portal::" "crates/am-share/src/share/portal.rs"
 check "share::" "crates/am-share/src/share/mod.rs"
