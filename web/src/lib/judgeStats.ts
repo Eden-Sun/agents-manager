@@ -39,13 +39,28 @@ export const JUDGE_WINDOWS = [
 
 export type JudgeWindow = (typeof JUDGE_WINDOWS)[number]['id']
 
+/**
+ * 撞題紀錄被 daemon 標成過時（答案回來時交辦已不會開始，`matched_line` JSON 的 `stale`＝那時的狀態）；不是就回 null。
+ * daemon 刻意不推提示，所以網頁的門檻與徽章也不算它。
+ */
+export function sameWorkStale(row: JudgeShadowRow): string | null {
+  if (row.regex_verdict !== 'same_work' || !row.matched_line) return null
+  try {
+    const v: unknown = JSON.parse(row.matched_line)
+    const s = typeof v === 'object' && v !== null ? (v as Record<string, unknown>).stale : undefined
+    return typeof s === 'string' && s !== '' ? s : null
+  } catch {
+    return null
+  }
+}
+
 /** 這一列是否超過門檻。`null`＝這個場景沒有門檻。沒有證據（欄位是 null）的一律當沒超過。 */
 export function overThreshold(row: JudgeShadowRow): boolean | null {
   switch (row.regex_verdict) {
     case 'stuck_queued':
       return row.jev_is_live_ui !== null && row.jev_is_live_ui >= 0.7
     case 'same_work':
-      return row.jev_same_work !== null && row.jev_same_work >= 0.5
+      return sameWorkStale(row) === null && row.jev_same_work !== null && row.jev_same_work >= 0.5
     case 'report_evidence':
       return (row.claims_verified !== null && row.claims_verified < 0.8) || (row.asks_parent_action !== null && row.asks_parent_action >= 0.8)
     default:
