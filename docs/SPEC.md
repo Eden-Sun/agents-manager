@@ -2125,11 +2125,11 @@ pid 不拿去對 listen port。agy 的登入 TUI 會在 127.0.0.1 自己開兩�
   只看 mtime 會出事：`mv`／`cp -p` 進來的舊檔保留舊 mtime，下一輪清理就把 bot 剛交出去的檔刪掉；ctime 是搬入那一刻（寫入、改名、chmod 也會動它，只會延長不會縮短）。
   清單的 `expires_at` 與清理用同一個規則，`modified` 仍是檔案內容的 mtime。
 - **清理者**：AGM 的 launchd `com.agm.outbox-gc`（`supervisor/AGM/bin/outbox-gc.sh`）每 10 分鐘刪掉 `-mindepth 2` 底下
-  mtime 與 ctime **都**超過 60 分鐘的檔（含子資料夾裡的，每個檔各算各的），並收掉空目錄（含巢狀的；`OUTBOX_GC_NOW` 是測試用的時鐘接縫）。**daemon 不清**。清理會拒絕 outbox 根目錄或其路徑父項是 symlink，並在進入目錄後用相對路徑清理；遇到 symlinked 路徑會記錄並失敗，不沿路徑刪到外面。空目錄會被收掉，所以 daemon 啟動時建的目錄不保證還在：
+  mtime 與 ctime **都**超過 60 分鐘的檔（含子資料夾裡的，每個檔各算各的），並收掉空目錄（含巢狀的；`OUTBOX_GC_NOW` 是測試用的時鐘接縫）。**daemon 不清**。清理前先用 `sqlite3` 唯讀讀分享名單；讀不到（DB 不在、`sqlite3` 失敗或沒裝、被鎖超過 5 秒）就整輪不刪、在 `outbox-gc.log` 記「拒絕整輪清理：…」並 exit 1（寧可多留，不把分享中的檔清掉）。outbox 清理停了先看這個 log。清理會拒絕 outbox 根目錄或其路徑父項是 symlink，並在進入目錄後用相對路徑清理；遇到 symlinked 路徑會記錄並失敗，不沿路徑刪到外面。空目錄會被收掉，所以 daemon 啟動時建的目錄不保證還在：
   bot **寫之前一律 `mkdir -p "$AM_OUTBOX"`**。
 - **分享用 bot 例外**（§20.5）：它的 outbox 走**分享保留政策**（#850，派工者決定）。使用者 2026-10-04 原本裁示「整個不清」（end user 是外部的人，隔天才回來拿檔是常態），
   但那讓一個外部連結就能把資料碟寫滿（bot 一直寫新檔名、列表只顯示最新 300 筆、舊的看不到卻還佔碟），所以翻案成「留得久、但有上限」：
-  daemon 在那顆的 outbox 放標記檔 `.am-share-keep`（建立、每次啟動、daemon 開機時補；bot 或專案刪掉時拿掉，回到 1 小時），`outbox-gc.sh` 看到就改走這套，不再整個跳過：
+  是不是分享用 bot 由 daemon 資料庫的分享名單決定（`shared_bots`，bot 與專案都沒刪；#1291），不看 outbox 裡的 `.am-share-keep`——那個檔 bot 自己寫得到。daemon 仍會在那顆的 outbox 放標記檔（建立、每次啟動、daemon 開機時補；bot 或專案刪掉時拿掉，回到 1 小時），只給舊版腳本回退用；名單裡的 bot 不再整個跳過，改走這套：
   檔案保留 **14 天**（mtime 與 ctime 都超過才刪，`outbox::SHARE_KEEP_DAYS`）；每顆 **500 MiB／1000 檔**（`SHARE_OUTBOX_MAX_BYTES`／`SHARE_OUTBOX_MAX_FILES`），超過從最舊的 mtime 開始刪；標記檔不算量也不刪，符號連結不跟、不算。
   清單回 `ttl_secs:null`、`kept:true`、`keep_days:14`、每個檔 `expires_at`／`remaining_secs` 為 null（網頁不畫 1 小時倒數），另回 `share_usage {bytes, files, truncated, cap:{bytes,files}, keep_days}`
   （擁有者看用量；fd-bound 遞迴量整棵 outbox，不跟符號連結）。受限分享 bot 的**沙箱總預算**另見 §20.5「沙箱總預算」。
@@ -5225,7 +5225,7 @@ daemon 要能在 Linux（目標：Ubuntu，外部編譯主機 192.168.1.46，#67
   - **keep 標記**：遠端 outbox 也放 `.am-share-keep`（啟動、`finish_restricted`、開機時 `keep_share_outboxes`；`revoke_bot_share`／`revoke_project_shares` 拿掉，bot／專案已標成刪除也找得到主機）。
     主機斷線或 ssh 失敗不再只記 warning（#1038）：記進 `share_keep_pending`（主機＋bot id，不靠 bot／專案那一列——收尾時它們可能已經刪了），`runners::share_budget::tick`（每 10 分鐘）補做：主機連得上才打 ssh，目標一律照 DB 現況（現役分享 bot 放、其餘拿掉），補成功就刪列；主機斷線的列留著等下一輪。
     **最長收斂時間**：主機恢復後最多約 10 分鐘內補上；主機一直不見（不在設定裡）的列會留著，`attempts`／`last_error` 記在表裡，要人工清。撤銷分享時 token 仍是先作廢、再拿掉標記（#985）。
-    daemon 的巡邏不靠它，遠端那台若自己也跑 `outbox-gc.sh` 才會用到。標記檔若被換成符號連結先拆掉再用 noclobber 建，不寫穿。
+    標記只是相容痕跡：`outbox-gc.sh` 不再看它（分享名單改讀 daemon 資料庫，#1291），遠端 outbox 也不在 `outbox-gc.sh` 的清理範圍（`~/.agents-manager-remote/…`）；保留政策由 daemon 的預算巡邏（`runners::share_budget::tick`）執行。標記檔若被換成符號連結先拆掉再用 noclobber 建，不寫穿。
 - 本來就不影響：批次重啟／herdr 升級（`resume_native` 原地接回）、`autostart_revive`（只碰 autostart 且被 herdr 弄丟的，起回來）、`pane-gc.sh`（只關卡住的登入 pane）、
   `bot_trash`／`remote_purge`（只處理已刪的）、config 投影移除（使用者自己從 config 拿掉）、AGM persona 第 19 條的閒置盤點（只清 AGM 自己的 child，文件另寫明分享用 bot 不清）。
 
