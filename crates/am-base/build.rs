@@ -1,7 +1,9 @@
-// 前端嵌入（src/assets.rs 的 `rust_embed::Embed`）是在編譯時讀 `web/dist`。cargo 只看 .rs 與依賴，所以前端單獨重建
-// （檔名 hash 變了、舊檔刪掉）時 am-base 不會重編，binary 還嵌著舊 UI（#1071）。盯著整個目錄：cargo 會掃它底下所有檔的
-// mtime；目錄不存在（還沒建過前端）時 cargo 每次都重跑這支，也是對的。
+// Release profile 會在編譯時把前端嵌進 binary；只有這些 profile 要追蹤 web/dist 的變化。debug／test 使用執行期讀取。
 fn main() {
     println!("cargo:rerun-if-changed=build.rs");
-    println!("cargo:rerun-if-changed=../../web/dist");
+    // rust-embed 沒開 debug-embed：debug assertions 開著的 profile（dev／test）不嵌入，不必因前端目錄變動重編。
+    // release 更新前端時仍須重嵌，否則 binary 會帶舊 UI（#1071）。
+    if !cfg!(debug_assertions) {
+        println!("cargo:rerun-if-changed=../../web/dist");
+    }
 }
