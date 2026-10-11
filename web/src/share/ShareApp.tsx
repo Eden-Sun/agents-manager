@@ -183,6 +183,7 @@ export function ShareApp({ client }: { client: ShareClient }) {
   const [loadFails, setLoadFails] = useState(0)
   /** 訊息請求世代：較舊回應不更新 UI；待處理的 resync 由下一份成功快照消化。 */
   const messageLoadGen = useRef(0)
+  const appliedMessageGen = useRef(0)
   const messageResyncGen = useRef(0)
   const appliedResyncGen = useRef(0)
   /** SSE 斷過：重新連上時要補抓一次（斷線期間的事件不會重播）。 */
@@ -191,6 +192,7 @@ export function ShareApp({ client }: { client: ShareClient }) {
   const lastAssistant = useRef<string | null>(null)
   const pageSeen = useRef(false)
   const fileLoadGen = useRef(0)
+  const appliedFileGen = useRef(0)
 
   const fail = useCallback((e: unknown) => {
     if (e instanceof ShareHttpError && e.status === 404) {
@@ -207,7 +209,9 @@ export function ShareApp({ client }: { client: ShareClient }) {
       const gen = ++fileLoadGen.current
       return client.files().then(
         (f) => {
-          if (gen === fileLoadGen.current) setFiles(f)
+          if (gen < appliedFileGen.current) return
+          appliedFileGen.current = gen
+          setFiles(f)
         },
         () => {
           /* 清單抓不到就留著上一份；連結失效由 load() 判斷 */
@@ -253,7 +257,8 @@ export function ShareApp({ client }: { client: ShareClient }) {
     const resyncGen = messageResyncGen.current
     return client.messages().then(
       (page) => {
-        if (gen !== messageLoadGen.current) return
+        if (gen < appliedMessageGen.current) return
+        appliedMessageGen.current = gen
         const replace = resyncGen > appliedResyncGen.current
         if (replace) appliedResyncGen.current = resyncGen
         applyPage(page, replace)

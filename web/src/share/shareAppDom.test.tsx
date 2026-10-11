@@ -9,6 +9,7 @@ import { ShareApp } from './ShareApp'
 import { httpShareClient, type ShareClient, type ShareEvents } from './shareApi'
 import { mockShareClient } from './shareMock'
 import { ShareHttpError, type ShareFile, type ShareMessage, type ShareStatus } from './shareModel'
+import { installManualClockTimers } from '../testing/manualClockTimers'
 
 const POLL_WAIT = 4200
 
@@ -734,6 +735,67 @@ function clientWith(messages: () => Promise<ReturnType<typeof page>>, subscribe:
     subscribe,
   }
 }
+
+async function flushSharePromises(): Promise<void> {
+  await act(async () => {
+    await Promise.resolve()
+    await Promise.resolve()
+  })
+}
+
+test('較新的檔案請求尚未完成時，先回來的快照先顯示，之後舊快照不倒退', async () => {
+  const requests: ((files: ShareFile[]) => void)[] = []
+  let ev!: ShareEvents
+  const client: ShareClient = {
+    ...clientWith(async () => page([]), (events) => {
+      ev = events
+      return () => {}
+    }),
+    files: () => new Promise((resolve) => requests.push(resolve)),
+  }
+  await mount(<ShareApp client={client} />)
+  await flushSharePromises()
+  assert.equal(requests.length, 1, '開頁發出第一個檔案請求')
+
+  await act(async () => ev.onMessage(msgAt('answer-1', 'assistant', 1)))
+  await act(async () => ev.onMessage(msgAt('answer-2', 'assistant', 2)))
+  assert.equal(requests.length, 3, '兩則回覆各發出一個檔案請求')
+
+  await act(async () => requests[1]([{ name: 'a.txt', size: 2, modified_at: null, version: null }]))
+  assert.equal(document.querySelector('.sh-file-name')?.textContent, 'a.txt', '較新的請求未完成時仍採用已回來的快照')
+  await act(async () => requests[2]([{ name: 'b.txt', size: 3, modified_at: null, version: null }]))
+  assert.equal(document.querySelector('.sh-file-name')?.textContent, 'b.txt')
+  await act(async () => requests[0]([{ name: 'stale.txt', size: 1, modified_at: null, version: null }]))
+  assert.equal(document.querySelector('.sh-file-name')?.textContent, 'b.txt', '較舊請求不能覆蓋已套用的新快照')
+})
+
+test('較新的訊息請求尚未完成時，先回來的快照先顯示', async () => {
+  const pending: ((value: ReturnType<typeof page>) => void)[] = []
+  let calls = 0
+  const base = msgAt('base', 'user', 0)
+  const client = clientWith(
+    () => {
+      calls++
+      if (calls === 1) return Promise.resolve(page([base]))
+      return new Promise((resolve) => pending.push(resolve))
+    },
+    () => () => {},
+  )
+  await mount(<ShareApp client={client} />)
+  await flushSharePromises()
+  assert.equal(calls, 1, '開頁先完成初始快照')
+
+  await act(async () => document.dispatchEvent(new Event('visibilitychange')))
+  await act(async () => document.dispatchEvent(new Event('visibilitychange')))
+  assert.equal(calls, 3, '兩次回到前景各發出一個請求')
+
+  const x = msgAt('x', 'assistant', 1)
+  const y = msgAt('y', 'assistant', 2)
+  await act(async () => pending[0](page([base, x])))
+  assert.deepEqual([...document.querySelectorAll('.sh-msg.assistant .sh-bubble')].map((node) => node.textContent?.trim()), ['x'])
+  await act(async () => pending[1](page([base, x, y])))
+  assert.deepEqual([...document.querySelectorAll('.sh-msg.assistant .sh-bubble')].map((node) => node.textContent?.trim()), ['x', 'y'])
+})
 
 async function runResyncRace(order: 'older-first' | 'resync-first', resyncHasMore: boolean) {
   const pending: ((value: ReturnType<typeof page>) => void)[] = []
