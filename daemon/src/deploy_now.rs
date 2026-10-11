@@ -545,13 +545,13 @@ mod tests {
     impl KickLauncher for SlowKick {
         fn kick<'a>(&'a self) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<(), String>> + Send + 'a>> {
             Box::pin(async move {
-                // 等到 ticker 看見 10 次為止（最多 1000 圈，約 1 秒）。ticker 若被擋住，這段什麼都看不到＝紅。
+                // 等到 ticker 看見 10 次為止（最多一萬圈）。只讓出執行緒、不靠計時器：ticker 若被擋住，這段什麼都看不到＝紅。
                 let before = self.ticks.load(Ordering::SeqCst);
-                for _ in 0..1000 {
+                for _ in 0..10_000 {
                     if self.ticks.load(Ordering::SeqCst) - before >= 10 {
                         break;
                     }
-                    tokio::time::sleep(Duration::from_millis(1)).await;
+                    tokio::task::yield_now().await;
                 }
                 self.seen_during.store(self.ticks.load(Ordering::SeqCst) - before, Ordering::SeqCst);
                 Ok(())
@@ -567,8 +567,8 @@ mod tests {
         let t = Arc::clone(&ticks);
         let ticker = tokio::spawn(async move {
             loop {
-                tokio::time::sleep(Duration::from_millis(10)).await;
                 t.fetch_add(1, Ordering::SeqCst);
+                tokio::task::yield_now().await;
             }
         });
         let kick = SlowKick { ticks: Arc::clone(&ticks), seen_during: Arc::clone(&seen_during) };
@@ -580,13 +580,15 @@ mod tests {
     }
 
     /// #1298：排程器指令永遠不回來：POST 要在上限內回一個可重試的錯誤、把請求檔收回，不能無限期卡住。
-    #[tokio::test]
-    async fn a_scheduler_kick_that_never_returns_is_stopped_and_rolled_back() {
-        let f = fixture().await;
-        let hung = SchedulerKick { program: "sleep".into(), args: vec!["30".into()], env: Vec::new(), timeout: Duration::from_millis(200) };
-        let e = start(&f.env.app, &f.ctx, None, &hung).await.unwrap_err();
-        assert!(matches!(&e, LcError::Unavailable(v) if v["reason"] == "kick_start_failed" && v["retryable"] == true), "{e:?}");
-        assert!(!f.ctx.agm_dir.join(REQUEST_FILE).exists(), "逾時也要收回請求檔");
+    /// #1298／#1435：排程器指令永遠不回來：`kick` 要在上限（`timeout`）之後回錯，子行程被收掉。
+    /// 時間用虛擬時間（`pause()`）推進，不靠真實等待。這一條不跑 git，所以暫停時間是安全的
+    /// （`start()` 裡的 git 子行程會讓暫停的時鐘提早觸發 `GIT_TIMEOUT`，不能在 e2e 裡暫停）。
+    /// 逾時之後的請求檔收回，由 `a_kick_that_cannot_start_rolls_the_request_back` 覆蓋（同一條 `kick_start_failed` 路徑）。
+    #[tokio::test(flavor = "current_thread", start_paused = true)]
+    async fn a_scheduler_kick_that_never_returns_is_stopped_with_a_retryable_error() {
+        let hung = SchedulerKick { program: "sleep".into(), args: vec!["30".into()], env: Vec::new(), timeout: Duration::from_secs(20) };
+        let err = KickLauncher::kick(&hung).await.unwrap_err();
+        assert!(err.contains("沒有回來"), "{err}");
     }
 
     #[tokio::test]
