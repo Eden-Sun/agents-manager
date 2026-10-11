@@ -54,3 +54,12 @@ test('展開時內容變寬（倒數字變長）放不下：退回收合並記�
 test('差不到半像素不算放不下（rect 寬是小數）', () => {
   assert.equal(nextQuotaFit(QUOTA_FIT_START, 590, 590.4, false).level, 0)
 })
+
+/** #1269：名字區不再固定 18em，左半縮到內容寬後，釋出的寬度要讓收合的額度列退回完整（名牌先回來）。 */
+test('左半縮到內容寬釋出的寬度，讓收合的額度列展開（#1269）', () => {
+  const collapsed = settle(QUOTA_FIT_START, 560, remote, true)
+  assert.equal(collapsed.level, 2)
+  // 釋出 72px（252 → 180）：先回到階段 1（名牌＋完整量表要 634，還差一點）。
+  assert.equal(settle(collapsed, 632, remote, true).level, 1)
+  assert.equal(settle(collapsed, 640, remote, true).level, 0)
+})
