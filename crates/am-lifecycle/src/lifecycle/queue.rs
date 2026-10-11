@@ -1370,6 +1370,28 @@ mod flush_queue_tests {
         sqlx::query("ALTER TABLE conversations_unreadable RENAME TO conversations").execute(app.db()).await.unwrap();
     }
 
+    /// #1431：DB 持續讀不到時，flush 失敗的重排要退避（10 秒起、每次加倍、上限 5 分鐘），不能每 10 秒永遠重來；
+    /// DB 恢復後那次送出，排程表清空。只讀排程表上剩的時間，不 sleep、不看牆鐘。
+    #[tokio::test]
+    async fn a_flush_that_keeps_failing_backs_off_and_stops_once_it_succeeds() {
+        let f = queued("test").await;
+        let app = f.env.app.clone();
+        f.env.herdr.live_pane("pane-1", crate::testing::LivePane { width: Some(120), ..Default::default() });
+        sqlx::query("ALTER TABLE runs RENAME TO runs_unreadable").execute(app.db()).await.unwrap();
+        let mut secs = Vec::new();
+        for _ in 0..8 {
+            forget_queue_retry_timer(&f.bot_id); // 上一顆 timer 燒掉了
+            assert!(flush_queued_locked(&app, &f.bot_id).await.is_err());
+            secs.push(queue_retry_timer_left(&f.bot_id).expect("讀不到就要掛 timer").as_secs());
+        }
+        assert_eq!(secs, vec![10, 20, 40, 80, 160, 300, 300, 300], "連續失敗：每次加倍，上限 5 分鐘");
+        sqlx::query("ALTER TABLE runs_unreadable RENAME TO runs").execute(app.db()).await.unwrap();
+        forget_queue_retry_timer(&f.bot_id);
+        flush_queued_locked(&app, &f.bot_id).await.unwrap();
+        assert_eq!(typed(&f, "ping"), 1, "讀得到之後照常送出");
+        assert!(!queue_retry_timer_armed(&f.bot_id), "成功之後不再排重試");
+    }
+
     /// 之後每一句讀 `supervisor_assignments` 的都失敗（`no such table`）——DB 出錯的樣子（同 `maintenance::fault`）。
     async fn break_assignment_reads(app: &Arc<App>) {
         sqlx::query("ALTER TABLE supervisor_assignments RENAME TO supervisor_assignments_unreadable").execute(app.db()).await.unwrap();
