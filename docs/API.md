@@ -2415,7 +2415,7 @@ row（`local_path`／`agent_path`／`host` 都已經定案），再真的寫檔�
 - 沒給 `to` 時 daemon 在該主機再跑 `claude --version` 當 `installed_version`（磁碟已是新版，不快取）。`from` 有給就回 `from`（不含）到目標（含）之間每一版，新的在前。
 - **codex 一定要給 `to`**：它的更新是 TUI 當場問（`✨ Update available! 0.153.4 -> 0.154.0`），新版還沒進磁碟；UI 從畫面那句解出 `from` / `to`。
 - **herdr 也要給 `to`**（新版還沒裝；UI 用 `GET /api/upstream-updates` 的 `target_version`），`from` 給該主機目前版本。
-- 來源：claude `https://raw.githubusercontent.com/anthropics/claude-code/main/CHANGELOG.md`；codex `https://api.github.com/repos/openai/codex/releases`（濾掉 draft／prerelease，`rust-vX.Y.Z` + body 併成同格式）；herdr `https://raw.githubusercontent.com/herdrdev/herdr/master/CHANGELOG.md`（Keep a Changelog 的 `## [x.y.z] - date`）。各自快取 10 分鐘，認 `## x.y.z` 與 `## [x.y.z] - date`。
+- 來源：claude `https://raw.githubusercontent.com/anthropics/claude-code/main/CHANGELOG.md`；codex `https://api.github.com/repos/openai/codex/releases`（濾掉 draft／prerelease，`rust-vX.Y.Z` + body 併成同格式；每版的 body 保留 release 自己的 `##` 二級標題，`## Changelog` 之後的 PR 流水帳不帶，#1392）；herdr `https://raw.githubusercontent.com/herdrdev/herdr/master/CHANGELOG.md`（Keep a Changelog 的 `## [x.y.z] - date`）。各自快取 10 分鐘，認 `## x.y.z` 與 `## [x.y.z] - date`。
 - **永遠 200**；抓不到就 `found:false` + `error`，UI 必須寫「找不到 changelog」。
 - **權限**：只供 User／網頁使用；Bot（含 AGM role）回 403 `user_only`。`kind`／`host` 會決定要在本機或遠端執行哪個 CLI 的 `--version`，因此不把這個命令執行入口開給 Bot。
 
