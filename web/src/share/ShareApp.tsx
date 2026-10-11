@@ -4,6 +4,7 @@ import type { ShareClient } from './shareApi'
 import { displayName, imagesByMessage, isImageName } from './shareImage'
 import { ShareButton, ShareImageViewer, ShareThumb } from './ShareImages'
 import { pruneShareImages } from './shareImageCache'
+import { decideMessageResponse } from './messageResponse'
 import { uploadErrorText, uploadPatiently, uploadRetryable } from './shareUpload'
 import {
   fmtSize,
@@ -184,6 +185,8 @@ export function ShareApp({ client }: { client: ShareClient }) {
   /** 訊息請求世代：較舊回應不更新 UI；待處理的 resync 由下一份成功快照消化。 */
   const messageLoadGen = useRef(0)
   const appliedMessageGen = useRef(0)
+  const settledMessageGen = useRef(0)
+  const linkGone = useRef(false)
   const messageResyncGen = useRef(0)
   const appliedResyncGen = useRef(0)
   /** SSE 斷過：重新連上時要補抓一次（斷線期間的事件不會重播）。 */
@@ -196,6 +199,7 @@ export function ShareApp({ client }: { client: ShareClient }) {
 
   const fail = useCallback((e: unknown) => {
     if (e instanceof ShareHttpError && e.status === 404) {
+      linkGone.current = true
       stopLive.current()
       setState('gone')
     } else {
@@ -209,7 +213,15 @@ export function ShareApp({ client }: { client: ShareClient }) {
       const gen = ++fileLoadGen.current
       return client.files().then(
         (f) => {
-          if (gen < appliedFileGen.current) return
+          const decision = decideMessageResponse({
+            requestGen: gen,
+            latestIssuedGen: fileLoadGen.current,
+            kind: 'success',
+            appliedGen: appliedFileGen.current,
+            settledGen: appliedFileGen.current,
+            state: linkGone.current ? 'gone' : 'active',
+          })
+          if (decision !== 'apply') return
           appliedFileGen.current = gen
           setFiles(f)
         },
@@ -260,14 +272,39 @@ export function ShareApp({ client }: { client: ShareClient }) {
     const resyncGen = messageResyncGen.current
     return client.messages().then(
       (page) => {
-        if (gen < appliedMessageGen.current) return
+        const decision = decideMessageResponse({
+          requestGen: gen,
+          latestIssuedGen: messageLoadGen.current,
+          kind: 'success',
+          appliedGen: appliedMessageGen.current,
+          settledGen: settledMessageGen.current,
+          state: linkGone.current ? 'gone' : 'active',
+        })
+        if (decision !== 'apply') return
         appliedMessageGen.current = gen
+        settledMessageGen.current = Math.max(settledMessageGen.current, gen)
         const replace = resyncGen > appliedResyncGen.current
         if (replace) appliedResyncGen.current = resyncGen
         applyPage(page, replace)
       },
       (e) => {
-        if (gen === messageLoadGen.current) fail(e)
+        const kind = e instanceof ShareHttpError && e.status === 404 ? 'not_found' : 'failure'
+        const decision = decideMessageResponse({
+          requestGen: gen,
+          latestIssuedGen: messageLoadGen.current,
+          kind,
+          appliedGen: appliedMessageGen.current,
+          settledGen: settledMessageGen.current,
+          state: linkGone.current ? 'gone' : 'active',
+        })
+        if (decision === 'discard') return
+        if (decision === 'expire') {
+          linkGone.current = true
+          fail(e)
+          return
+        }
+        settledMessageGen.current = Math.max(settledMessageGen.current, gen)
+        fail(e)
       },
     )
   }, [client, applyPage, fail])
@@ -403,6 +440,7 @@ export function ShareApp({ client }: { client: ShareClient }) {
       (e) => {
         uploadBusy.current = false
         if (e instanceof ShareHttpError && e.status === 404) {
+          linkGone.current = true
           stopLive.current()
           setState('gone')
         }
@@ -433,6 +471,7 @@ export function ShareApp({ client }: { client: ShareClient }) {
     setOlderError(null)
     try {
       const page = await client.messages(oldest)
+      if (linkGone.current) return
       const el = listRef.current
       // 較早的訊息插在上面：畫完之後把多出來的高度補回去，人留在原來那一則。
       restore.current = el ? { height: el.scrollHeight, top: el.scrollTop } : null
@@ -442,6 +481,7 @@ export function ShareApp({ client }: { client: ShareClient }) {
       setState('ready')
     } catch (e) {
       if (e instanceof ShareHttpError && e.status === 404) {
+        linkGone.current = true
         stopLive.current()
         setState('gone')
       } else setOlderError(shareErrorText(e, 'load'))
@@ -486,6 +526,7 @@ export function ShareApp({ client }: { client: ShareClient }) {
       if (e instanceof ShareHttpError) settleCreateRequest(reqKey)
       if (awaitGen.current === gen) setAwaiting(false)
       if (e instanceof ShareHttpError && e.status === 404) {
+        linkGone.current = true
         stopLive.current()
         setState('gone')
       }
