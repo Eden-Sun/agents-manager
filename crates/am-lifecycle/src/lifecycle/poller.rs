@@ -523,10 +523,9 @@ fn strip_echoed_prompt_squashed(text: &str, prompt: &str) -> Option<String> {
 /// Pane width for the "too narrow" message; best effort, failure only means less detail.
 async fn pane_columns(app: &(impl crate::capabilities::Db + crate::capabilities::HerdrRoutes + crate::hosts::HostsAccess), run: &db::Run) -> Option<u32> {
     let pane = run.pane_id.clone()?;
-    let ws = run.workspace_id.clone()?;
     let client = client_for_run(app, run).await.ok()?;
-    let rects = client.pane_rects(&ws).await.ok()?;
-    rects.into_iter().find(|(id, _, _)| *id == pane).map(|(_, w, _)| w)
+    // 用 pane_id 問（#1454）：`pane.layout` 不認 workspace_id，回的是使用者正在看的那個分頁。
+    client.pane_size(&pane).await.ok().flatten().map(|(w, _)| w)
 }
 
 /// Output shredded into single characters? herdr unwraps terminal wrapping, not the TUI's own
@@ -2186,6 +2185,32 @@ mod issue_17_tests {
     async fn run_and_bot(f: &Fixture) -> (db::Run, db::Bot) {
         let app = &f.env.app;
         (db::run(&app.db, &f.run_id).await.unwrap().unwrap(), db::bot(&app.db, &f.bot_id).await.unwrap().unwrap())
+    }
+
+    /// #1454：「太窄」訊息的欄數要用 `pane_id` 問（`pane.layout` 不認 `workspace_id`，回的是使用者正在看的那個分頁）。
+    /// 一顆 bot 的 pane 在自己的分頁（workspace `w7`），正式環境要拿到它的寬度；替身只認 `pane_id`，所以未修時這裡回 `None`。
+    #[tokio::test]
+    async fn the_too_narrow_message_reads_the_width_by_pane_id() {
+        let f = fixture("claude", "").await;
+        sqlx::query("UPDATE runs SET pane_id = 'w7:pNarrow', workspace_id = 'w7' WHERE id = ?").bind(&f.run_id).execute(&f.env.app.db).await.unwrap();
+        f.env.herdr.live_pane("w7:pNarrow", crate::testing::LivePane { width: Some(24), ..Default::default() });
+        let app = f.env.app.clone();
+        let (run, _) = run_and_bot(&f).await;
+        assert_eq!(pane_columns(&app, &run).await, Some(24));
+        let layouts = f.env.herdr.calls_to("pane.layout");
+        assert!(!layouts.is_empty(), "要真的問過 pane.layout");
+        assert!(layouts.iter().all(|p| p["pane_id"] == "w7:pNarrow" && p.get("workspace_id").is_none()), "{layouts:?}");
+    }
+
+    /// #1454 的對照：替身對這顆 pane 沒有版面資料：欄數拿不到就是 `None`（best effort，訊息照出、只少「目前 N 欄」）。
+    #[tokio::test]
+    async fn no_width_when_herdr_has_no_layout_for_the_pane() {
+        let f = fixture("claude", "").await;
+        sqlx::query("UPDATE runs SET pane_id = 'w7:pNarrow', workspace_id = 'w7' WHERE id = ?").bind(&f.run_id).execute(&f.env.app.db).await.unwrap();
+        f.env.herdr.live_pane("w7:pNarrow", crate::testing::LivePane::default());
+        let app = f.env.app.clone();
+        let (run, _) = run_and_bot(&f).await;
+        assert_eq!(pane_columns(&app, &run).await, None);
     }
 
     fn live(f: &Fixture, pane: crate::testing::LivePane) {
