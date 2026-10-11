@@ -310,9 +310,18 @@ pub async fn serve(config_path: Option<PathBuf>, dev_watch_all_panes: bool) -> R
     tracing::info!(%addr, "listening");
     // 分享入口（SPEC §20）：`[share] listen` 有設才開，獨立的 port 與 router，跟上面的管理 API 完全分開。
     share::portal::spawn_listener(&app, addr.port()).await;
-    share::keep_share_outboxes(&app).await;
     crate::runners::share_budget::spawn_ticker(&app);
     let _ = enable_shutdown.send(());
+    {
+        // 遠端保留標記一顆一趟 ssh，慢的主機要好幾分鐘：不擋 signal handler 與巡邏。關機時跟著取消（#1286）。
+        let app2 = app.clone();
+        app.background_tasks.spawn(async move {
+            tokio::select! {
+                _ = app2.shutdown.cancelled() => {}
+                _ = share::keep_share_outboxes(&app2) => {}
+            }
+        });
+    }
     // 連線收完後才等受監督的迴圈，再關 SSH masters。
     let serve_result = server.await.context("HTTP server task panicked")?;
     finish_serve(&app, serve_result).await?;
@@ -350,6 +359,17 @@ fn _assert_send(_: &Arc<state::App>) {}
 
 #[cfg(test)]
 mod tests {
+    /// #1286：signal handler 不能排在遠端 ssh 後面：`enable_shutdown.send` 要早於 `keep_share_outboxes`，
+    /// 而且後者不能在 `serve()` 裡被 `.await`（遠端慢的主機要好幾分鐘）。
+    #[test]
+    fn signal_handlers_are_enabled_before_the_remote_share_keep_pass() {
+        let src = include_str!("serve.rs");
+        let body = &src[..src.find("\nmod tests {").expect("tests module")];
+        let enable = body.find("enable_shutdown.send(())").expect("enable_shutdown.send");
+        let keep = body.find("keep_share_outboxes(").expect("keep_share_outboxes");
+        assert!(enable < keep, "enable_shutdown.send 要在 keep_share_outboxes 之前");
+        assert!(!body.contains("keep_share_outboxes(&app).await;"), "不能在 serve() 裡 inline await");
+    }
     use super::*;
     use std::path::Path;
 
