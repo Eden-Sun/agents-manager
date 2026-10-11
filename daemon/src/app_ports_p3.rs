@@ -32,6 +32,7 @@ impl HostHooks for App {
         let app = app.clone();
         let fence = fence.clone();
         async move {
+            crate::pane_identity::reset_host_probes(&fence.conn().name);
             crate::state::emit_host_changed(&app, &fence).await;
         }
     }
@@ -90,6 +91,7 @@ impl HostHooks for App {
 /// 移除主機與同名改設定都走這裡；新連線上線後由偵測／探測重新填。
 async fn forget_host_observations(app: &(impl crate::api::shell::HostShells + crate::capabilities::Db + crate::capabilities::Emit + crate::github::GithubCache + crate::host_baseline::HostBaselineTable + crate::login_assist::LoginPanes + crate::login_assist::LoginReservations + crate::login_prompt::LoginNeeded + crate::models::ModelsCache + crate::quota::QuotaStaleKeys + crate::quota::QuotaTables + crate::shim_refresh::RemoteShimStale + crate::tools::ToolsTable), name: &str) {
     let prefix = format!("{name}/");
+    crate::pane_identity::reset_host_probes(name);
     app.tools().lock().await.remove(name);
     app.host_baseline().lock().await.remove(name);
     app.remote_shim_stale().lock().await.remove(name);

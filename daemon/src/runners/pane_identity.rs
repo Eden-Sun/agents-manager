@@ -63,26 +63,28 @@ impl ProcEnvHook {
 }
 
 struct ProbeClaim<'a> {
+    host: &'a str,
     bot_id: &'a str,
     pane_id: &'a str,
+    token: u64,
     completed: bool,
 }
 
 impl<'a> ProbeClaim<'a> {
-    fn begin(bot_id: &'a str, pane_id: &'a str) -> Option<Self> {
-        begin_probe(bot_id, pane_id).then_some(Self { bot_id, pane_id, completed: false })
+    fn begin(host: &'a str, bot_id: &'a str, pane_id: &'a str) -> Option<Self> {
+        let token = begin_probe(host, bot_id, pane_id)?;
+        Some(Self { host, bot_id, pane_id, token, completed: false })
     }
 
     fn complete(&mut self) {
-        mark_probed(self.bot_id, self.pane_id);
-        self.completed = true;
+        self.completed = mark_probed(self.host, self.bot_id, self.pane_id, self.token);
     }
 }
 
 impl Drop for ProbeClaim<'_> {
     fn drop(&mut self) {
         if !self.completed {
-            release_probe(self.bot_id, self.pane_id);
+            release_probe(self.host, self.bot_id, self.pane_id, self.token);
         }
     }
 }
@@ -101,10 +103,10 @@ pub async fn sync_child_identity(
     }
     let Some(var) = config_dir_var(&bot.kind) else { return };
     let Some(pid) = pid.filter(|p| *p > 0) else { return };
-    if !probe_due(&bot.id, pane_id) {
+    if !probe_due(host, &bot.id, pane_id) {
         return;
     }
-    let Some(mut probe) = ProbeClaim::begin(&bot.id, pane_id) else {
+    let Some(mut probe) = ProbeClaim::begin(host, &bot.id, pane_id) else {
         return;
     };
     let Some(fence) = app.hosts.fence(host).await else {
@@ -140,29 +142,38 @@ pub async fn sync_child_identity(
         return;
     };
     let dir = dir.unwrap_or("");
-    if !app.hosts.is_current(&fence).await {
+    // Keep the authority read gate through both writes: a host repoint between this check and
+    // persistence must not let the retired machine overwrite the replacement's identity.
+    let Some(persisted) = fence.run_current(async {
+        // The run remembers the account it was actually read off (`runs.runtime_identity`), even
+        // when it matches the inherited value: NULL there means "nobody knows", and the UI says so.
+        if !stamp_run_identity(app.as_ref(), bot, pane_id, &name).await {
+            return false;
+        }
+        if bot.identity.as_deref() == Some(name.as_str()) {
+            return true;
+        }
+        // `managed_by` in WHERE too: a race with the TOML projection must never write a user bot.
+        if let Err(e) = sqlx::query("UPDATE bots SET identity = ? WHERE id = ? AND managed_by = 'child'")
+            .bind(&name)
+            .bind(&bot.id)
+            .execute(&app.db)
+            .await
+        {
+            tracing::warn!(bot = %bot.name, error = ?e, "cannot record the account a child agent is running on");
+            return false;
+        }
+        true
+    }).await else {
         return;
-    }
-    // The run remembers the account it was actually read off (`runs.runtime_identity`), even when
-    // it matches the inherited value: NULL there means "nobody knows", and the UI says so.
-    if !stamp_run_identity(app.as_ref(), bot, pane_id, &name).await {
-        return;
-    }
-    if bot.identity.as_deref() == Some(name.as_str()) {
-        probe.complete();
-        return;
-    }
-    // `managed_by` in WHERE too: a race with the TOML projection must never write a user bot.
-    if let Err(e) = sqlx::query("UPDATE bots SET identity = ? WHERE id = ? AND managed_by = 'child'")
-        .bind(&name)
-        .bind(&bot.id)
-        .execute(&app.db)
-        .await
-    {
-        tracing::warn!(bot = %bot.name, error = ?e, "cannot record the account a child agent is running on");
+    };
+    if !persisted {
         return;
     }
     probe.complete();
+    if bot.identity.as_deref() == Some(name.as_str()) {
+        return;
+    }
     tracing::info!(host, bot = %bot.name, pane = %pane_id, was = ?bot.identity, now = %name, %dir,
                    "reconcile: the child is on its own account, not the one it was adopted with");
     app.emit("bot_changed", json!({"bot_id": bot.id})).await;
