@@ -214,6 +214,11 @@ struct CollisionIn {
     branch: Option<String>,
 }
 
+/// 呼叫端的 bot 列讀不到（#1384）：404 `what` 是資源名 `bot`，那句話放 message。
+fn bot_not_found(caller: &str) -> LcError {
+    LcError::NotFound(format!("bot {caller}"))
+}
+
 /// `POST /api/judge/collision-check`：bot 認領票時問一次撞題（只記帳本、推提示，不擋認領）。回 202，不等 Jev。
 /// 只看呼叫端自己的專案：專案從驗過的 bot id 查，不從請求本文拿。
 async fn post_collision_check(State(app): State<Arc<App>>, headers: HeaderMap, Json(b): Json<CollisionIn>) -> Result<(StatusCode, Json<Value>), LcError> {
@@ -238,7 +243,7 @@ async fn post_collision_check(State(app): State<Arc<App>>, headers: HeaderMap, J
     let bot = crate::db::bot(&app.db, &caller)
         .await
         .map_err(|e| LcError::Upstream(e.to_string()))?
-        .ok_or_else(|| LcError::NotFound(format!("bot {caller}")))?;
+        .ok_or_else(|| bot_not_found(&caller))?;
     crate::judge::collision::schedule_claim(
         &app,
         crate::judge::collision::ClaimAsk { project_id: bot.project_id, caller, issue: b.issue, title, child, branch },
@@ -322,6 +327,17 @@ mod tests {
 
     fn body(title: &str) -> CollisionIn {
         CollisionIn { issue: Some(1330), title: title.into(), child: "newbie".into(), branch: Some("fix/newbie-g1330".into()) }
+    }
+
+    /// #1384：bot 列讀不到＝404 `what:"bot"`（資源名，同 API.md §1），那句話放 message。
+    #[tokio::test]
+    async fn a_vanished_bot_is_404_bot_with_the_sentence_in_message() {
+        use axum::response::IntoResponse;
+        let resp = bot_not_found("01MGHOSTBOT").into_response();
+        assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+        let v: Value = serde_json::from_slice(&axum::body::to_bytes(resp.into_body(), 1 << 20).await.unwrap()).unwrap();
+        assert_eq!(v["what"], "bot", "{v}");
+        assert!(v["message"].as_str().unwrap_or_default().contains("01MGHOSTBOT"), "{v}");
     }
 
     fn bot_headers(id: &str, token: &str) -> HeaderMap {
