@@ -34,6 +34,7 @@ cd "$ROOT"
 step() { printf '\n==> %s\n' "$*"; }
 
 TEMPORARY_WEB_DIST_STUB=0
+CANARY_DIR=""
 cleanup_temporary_web_dist_stub() {
     if [ "$TEMPORARY_WEB_DIST_STUB" = 1 ]; then
         /bin/rm -f web/dist/index.html
@@ -47,6 +48,14 @@ DISK_LOW_KB=2097152
 on_exit() {
     local rc=$? avail_kb
     cleanup_temporary_web_dist_stub
+    if [ -n "${CANARY_DIR}" ]; then
+        # 提早結束（測試紅、被訊號收掉）時護欄目錄還在：先把被擋下的破壞性指令印出來，再清掉。
+        if [ -s "${CANARY_DIR}/hits.log" ]; then
+            echo "!! 中斷前有測試真的叫到破壞性指令（已被擋下）：" >&2
+            cat "${CANARY_DIR}/hits.log" >&2
+        fi
+        /bin/rm -rf "${CANARY_DIR}"
+    fi
     if [ "$rc" != 0 ]; then
         avail_kb="$(df -Pk "$ROOT" 2>/dev/null | awk 'NR==2 {print $4}')"
         if [ -n "${avail_kb:-}" ] && [ "$avail_kb" -lt "$DISK_LOW_KB" ] 2>/dev/null; then
@@ -211,6 +220,7 @@ check_ops() {
     # 2026-09-23 就是一支測試的 PATH 沒擋住，真的把 herdr 的 launchd job bootout 掉，全機 pane 消失。
     local canary
     canary="${TMPDIR:-/tmp}/am-canary-$$"
+    CANARY_DIR="${canary}"
     eval "$(scripts/ops/destructive-canary.sh arm "${canary}")"
     # `arm` 萬一失敗，命令替換是空字串、`eval` 什麼都不做，而且 `set -e` 在這個位置抓不到——
     # 整輪就會在**毫無保護**的情況下跑完，還不會有任何徵兆（i407 審核指出）。
@@ -235,9 +245,11 @@ check_ops() {
     if ! scripts/ops/destructive-canary.sh hits "${canary}"; then
         echo "上面這些測試真的叫到了破壞性指令（已被擋下，但那條路要修）：見 scripts/ops/destructive-canary.sh" >&2
         /bin/rm -rf "${canary}"
+        CANARY_DIR=""
         exit 1
     fi
     /bin/rm -rf "${canary}"
+    CANARY_DIR=""
     echo "canary 乾淨：沒有任何測試叫到 $(scripts/ops/destructive-canary.sh cmds)"
 }
 
