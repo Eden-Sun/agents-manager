@@ -96,7 +96,7 @@ pub async fn fork_bot(
                 json!({"client_request_id": request_id, "message": "這個 client_request_id 已經用在另一個 fork 請求（來源或名字不同）。要再 fork 一次請換一個 id。"}),
             ));
         }
-        return finish(&app, op).await;
+        return finish_detached(&app, op, _serial).await;
     }
 
     let source = db::bot(&app.db, &id).await.map_err(up)?.ok_or_else(|| LcError::NotFound("bot".into()))?;
@@ -158,7 +158,19 @@ pub async fn fork_bot(
         start_error: None,
     };
     fork_ops::insert(&app.db, &op).await.map_err(up)?;
-    finish(&app, op).await
+    finish_detached(&app, op, _serial).await
+}
+
+/// 脫離請求（#1359）：`finish` 在脫離出去的 task 裡做完；`FORK_LOCK` 的 guard 一起搬進去，
+/// client 斷線時鎖仍握著直到 fork 做完，後到的重送／新請求不會跟它並行。
+async fn finish_detached(app: &Arc<App>, op: ForkOp, serial: tokio::sync::MutexGuard<'static, ()>) -> Result<Response, LcError> {
+    let key = op.target_bot_id.clone();
+    let app = app.clone();
+    crate::api::detach(&key, async move {
+        let _serial = serial;
+        finish(&app, op).await
+    })
+    .await
 }
 
 /// 把一筆 fork 操作從它停下的那一步做完（新請求與重送共用）：每一步都先看做過沒有。
