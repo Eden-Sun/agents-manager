@@ -7,6 +7,11 @@ use sha2::{Digest, Sha256};
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
+#[cfg(test)]
+thread_local! {
+    static AFTER_DISK_READ: std::cell::RefCell<Option<Box<dyn Fn(&Path)>>> = const { std::cell::RefCell::new(None) };
+}
+
 fn default_listen() -> String {
     "127.0.0.1:7788".to_string()
 }
@@ -1330,11 +1335,18 @@ impl ConfigStore {
             // comparing metadata alone can miss a completed external atomic replacement.
             let on_disk = std::fs::read_to_string(&self.path)
                 .context("config.toml changed on disk and could not be re-read")?;
+            #[cfg(test)]
+            AFTER_DISK_READ.with(|hook| {
+                if let Some(hook) = hook.borrow().as_ref() {
+                    hook(&self.path);
+                }
+            });
             if on_disk.trim().is_empty() {
                 anyhow::bail!("config.toml changed on disk but is blank; keeping the in-memory config");
             }
-            let (cfg, mtime, hot_fingerprint) = read_file(&self.path)
+            let (cfg, hot_fingerprint) = parse_file_text(&self.path, &on_disk)
                 .context("config.toml changed on disk and could not be re-read")?;
+            let mtime = std::fs::metadata(&self.path).ok().and_then(|m| m.modified().ok());
             // daemon 自己寫完會把記憶體那份換成寫出去的內容，所以內容對不上＝別人改的（issue #406）。
             if cfg != g.cfg {
                 self.hooks.audit_external_change(at, &self.path, &g.cfg, &cfg);
@@ -1405,12 +1417,18 @@ fn read_file(path: &Path) -> Result<(ConfigFile, Option<SystemTime>, [u8; 32])> 
         return Ok((cfg, mtime, config_fingerprint(&text)));
     }
     let text = std::fs::read_to_string(path).with_context(|| format!("read {}", path.display()))?;
+    let (cfg, fingerprint) = parse_file_text(path, &text)?;
+    let mtime = std::fs::metadata(path).ok().and_then(|m| m.modified().ok());
+    Ok((cfg, mtime, fingerprint))
+}
+
+/// Parse an already-read config file; callers can validate and parse the same snapshot.
+fn parse_file_text(path: &Path, text: &str) -> Result<(ConfigFile, [u8; 32])> {
     let (cfg, unknown) = parse_config(&text).with_context(|| format!("parse {}", path.display()))?;
     for key in unknown.into_iter().filter(|k| !is_retired_key(k)) {
         tracing::warn!("{}: unknown key `{key}` is ignored (typo? or a newer daemon's field)", path.display());
     }
-    let mtime = std::fs::metadata(path).ok().and_then(|m| m.modified().ok());
-    Ok((cfg, mtime, config_fingerprint(&text)))
+    Ok((cfg, config_fingerprint(text)))
 }
 
 fn config_fingerprint(text: &str) -> [u8; 32] {
@@ -2320,6 +2338,25 @@ model = "gpt-6"
         assert_eq!(store.get().await.agents.instructions_file.as_deref(), Some("~/old.md"));
         assert_eq!(store.get().await.build.cargo_jobs, 3);
         assert_ne!(store.get().await.server.herdr_session, "from-blank");
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn a_file_truncated_right_after_the_read_does_not_become_the_config() {
+        let (store, _) = store_with(HAND_WRITTEN).await;
+        let observed_projects = std::cell::Cell::new(usize::MAX);
+        AFTER_DISK_READ.with(|hook| {
+            *hook.borrow_mut() = Some(Box::new(|path| std::fs::write(path, "").unwrap()));
+        });
+
+        let result = store.update(|cfg| {
+            observed_projects.set(cfg.projects.len());
+            Ok(())
+        }).await;
+        AFTER_DISK_READ.with(|hook| *hook.borrow_mut() = None);
+
+        result.unwrap();
+        assert_eq!(observed_projects.get(), 1, "套用的對象應是剛讀到的那一份");
+        assert_eq!(store.get().await.projects.len(), 1, "空檔不可把記憶體設定換成預設值");
     }
 }
 
