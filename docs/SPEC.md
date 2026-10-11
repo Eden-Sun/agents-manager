@@ -2348,6 +2348,8 @@ pane 沒有立即影響。等這套機制在正式環境跑穩，`cargo-slot.sh`
 - **pane**（§6.5e）：它的 workspace、活著的 run 的 tab／pane 裡的 pane 不進 `panes`——不 GC、不推 `pane_unowned`／`pane_orphaned`、
   不當 scratch。
 - **hook**：`process_locked` 記一行 `hook for a handed-off project; ignored` 就丟（spool 重播、spawn hint 也一樣）。
+- **relay announce**（§6.5d）：收件方在已移交的專案裡時，`relay_watch::resolve` 回 `None`＝不是這顆 daemon 管的目標：announce 照舊回 200、
+  不開 `external` 回合、不盯 pane（字由 shim 直接送，歸接手的 daemon 記；#1363）。
 - default session（§6.5.1）不把 agent 匯入它。
 - 設定當下**不停也不關任何東西**：agent 繼續跑，交給對方接。清掉旗標＝收回，當場排一輪對帳，照 §6.5 接手（run 還在的沿用、
   不在的收編）。刪除專案照舊要求「沒有 active run」，所以移交中的專案刪不掉，要先收回。
