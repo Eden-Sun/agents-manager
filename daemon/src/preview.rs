@@ -789,6 +789,7 @@ async fn decorated(app: &Arc<App>, bot: &db::Bot, mut body: Value, live: bool) -
 /// `GET`：先對一次帳（pane 還在嗎、port 還在 listen 嗎），再回。
 pub async fn get(app: &Arc<App>, bot_id: &str) -> LcResult<Value> {
     let bot = top_level_bot(app, bot_id).await?;
+    crate::handoff::refuse(&app.db, bot_id).await?;
     let _g = gate().lock().await;
     let r = refresh_locked(app, bot_id).await;
     let live = r.as_ref().is_some_and(|r| r.status().is_live());
@@ -820,6 +821,7 @@ enum Mode {
 /// `POST`：冪等啟動。
 pub async fn start(app: &Arc<App>, bot_id: &str, req: StartReq) -> LcResult<Value> {
     let bot = top_level_bot(app, bot_id).await?;
+    crate::handoff::refuse(&app.db, bot_id).await?;
     if bot.parent_bot_id.is_some() || bot.managed_by != "user" {
         return Err(LcError::conflict("not_top_level", json!({"bot_id": bot_id})));
     }
@@ -1013,6 +1015,7 @@ async fn disconnect_locked(app: &Arc<App>, r: Row) -> Option<Row> {
 /// `DELETE`：關 pane、放掉 port。
 pub async fn stop(app: &Arc<App>, bot_id: &str) -> LcResult<Value> {
     top_level_bot(app, bot_id).await?;
+    crate::handoff::refuse(&app.db, bot_id).await?;
     if !stop_for_bot(app, bot_id).await {
         return Err(LcError::conflict("preview_stop_failed", json!({"bot_id": bot_id})));
     }
@@ -1026,6 +1029,9 @@ pub async fn stop(app: &Arc<App>, bot_id: &str) -> LcResult<Value> {
 
 /// bot 被停止／刪除／閒置收掉時一起收預覽。盡力而為：讀不到就記 log，不擋 bot 的停機。
 pub async fn stop_for_bot(app: &Arc<App>, bot_id: &str) -> bool {
+    if bot_is_handed_off(app, bot_id).await {
+        return false;
+    }
     let _g = gate().lock().await;
     let r = match row(&app.db, bot_id).await {
         Ok(Some(r)) if r.status() != Status::Off => r,
@@ -1041,6 +1047,9 @@ pub async fn stop_for_bot(app: &Arc<App>, bot_id: &str) -> bool {
 /// 關這一列的 pane；回 `false`＝**沒關掉也沒確認它不在**（讀不到 run、拿不到那個 session 的 client、關指令失敗），呼叫端不可標 off。
 /// 讀 run 失敗（`Err`）不等於「bot 已停」：`Ok(None)` 才是確定沒有 run，才退回管理 session。
 async fn close_row_pane(app: &Arc<App>, r: &Row) -> bool {
+    if bot_is_handed_off(app, &r.bot_id).await {
+        return false;
+    }
     // 接上的那顆是別人開的 server：只斷開，絕不動它。
     if r.attached() {
         return true;
@@ -1092,6 +1101,20 @@ async fn close_row_pane(app: &Arc<App>, r: &Row) -> bool {
     env.close_pane(pane).await
 }
 
+async fn bot_is_handed_off(app: &Arc<App>, bot_id: &str) -> bool {
+    match crate::handoff::bot_handed_off_to(&app.db, bot_id).await {
+        Ok(Some(host)) => {
+            tracing::info!(bot = bot_id, handed_off_to = %host, "preview: leaving a handed-off bot and pane untouched");
+            true
+        }
+        Ok(None) => false,
+        Err(e) => {
+            tracing::warn!(bot = bot_id, error = %e, "preview: cannot verify project ownership; leaving the preview untouched");
+            true
+        }
+    }
+}
+
 /// 開機對帳：`starting`／`running` 的列拿「pane 還在不在」＋「port 有沒有在 listen」對回去；還在 `starting` 的補上 watcher。
 pub async fn reconcile_all(app: &Arc<App>) {
     let rows = match live_rows(&app.db).await {
@@ -1102,6 +1125,9 @@ pub async fn reconcile_all(app: &Arc<App>) {
         }
     };
     for r in rows {
+        if bot_is_handed_off(app, &r.bot_id).await {
+            continue;
+        }
         let _g = gate().lock().await;
         if let Some(now) = refresh_locked(app, &r.bot_id).await {
             if now.status().is_live() {
@@ -1325,6 +1351,11 @@ fn spawn_watcher(app: Arc<App>, bot_id: String) -> bool {
         loop {
             tokio::time::sleep(wait).await;
             let _g = gate().lock().await;
+            if bot_is_handed_off(&app, &bot_id).await {
+                watched().lock().unwrap().remove(&bot_id);
+                guard.0 = None;
+                return;
+            }
             #[cfg(test)]
             tick(&bot_id);
             // 只讀**一次**決定要不要結束：以前是 refresh 讀不到之後再讀一次確認，兩次之間 DB 恢復了就把暫時性的錯誤誤判成

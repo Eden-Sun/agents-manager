@@ -1203,6 +1203,23 @@ async fn a_spawned_preview_is_still_closed_by_stop() {
 }
 
 #[tokio::test]
+async fn preview_stop_refuses_a_handed_off_bot_without_touching_its_pane() {
+    let r = rig().await;
+    let bot = running_bot(&r, "preview-handed").await;
+    let body = start(&r.e.app, &bot, StartReq::default()).await.unwrap();
+    let pane = body["pane_id"].as_str().unwrap().to_string();
+    let run = db::active_run(&r.e.app.db, &bot).await.unwrap().unwrap();
+    sqlx::query("UPDATE runs SET state='exited', ended_at=? WHERE id=?").bind(db::now()).bind(&run.id).execute(&r.e.app.db).await.unwrap();
+    sqlx::query("UPDATE projects SET handed_off_to='mac' WHERE id=?").bind(&r.e.project_id).execute(&r.e.app.db).await.unwrap();
+
+    let err = stop(&r.e.app, &bot).await.unwrap_err();
+
+    assert!(matches!(err, LcError::Conflict(ref body) if body["reason"] == "handed_off"), "expected handoff refusal, got {err:?}");
+    assert!(r.fake.alive.lock().unwrap().contains(&pane), "移交後不關 preview pane");
+    assert!(r.fake.closed.lock().unwrap().is_empty(), "沒有 pane close RPC");
+}
+
+#[tokio::test]
 async fn opening_a_pre_v2_database_adds_the_source_and_pid_columns() {
     let dir = crate::testing::track(std::env::temp_dir().join(format!("am-test-{}", db::ulid())));
     std::fs::create_dir_all(&dir).unwrap();
