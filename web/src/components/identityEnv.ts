@@ -45,8 +45,9 @@ export function checkEnvText(text: string): { env: Record<string, string>; error
       errors.push(`第 ${n} 行 key「${key}」不是合法的環境變數名稱（只能英數與 _，不能數字開頭）`)
       return
     }
-    if (key in env) errors.push(`第 ${n} 行 key「${key}」重複了（前面已經有一行）`)
-    env[key] = line.slice(i + 1).trim()
+    // `in` 會看到 Object.prototype（constructor、toString…），要用自己的屬性判斷；`__proto__` 要用 defineProperty 才會成為一般的 key。
+    if (Object.hasOwn(env, key)) errors.push(`第 ${n} 行 key「${key}」重複了（前面已經有一行）`)
+    Object.defineProperty(env, key, { value: line.slice(i + 1).trim(), enumerable: true, writable: true, configurable: true })
   })
   return { env, errors }
 }
