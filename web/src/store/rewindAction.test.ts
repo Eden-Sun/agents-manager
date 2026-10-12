@@ -41,3 +41,18 @@ test('終端輸入列沒清掉：照樣回填網頁輸入框，但通知講清�
   assert.equal(useStore.getState().drafts['bot:b1'], '那一句')
   assert.ok(useStore.getState().notices.some((n) => /終端的輸入列裡還留著/.test(n.text)))
 })
+
+test('倒回一則帶附件的訊息：附件不會跟著回輸入框，通知要講清楚要重新加（撤回與取消排隊都會講）', async () => {
+  const att = { id: 'att-1', name: 'shot.png', size: 10, mime: 'image/png', path: '/x/shot.png' }
+  useStore.setState({
+    drafts: {},
+    notices: [],
+    messages: { b1: [{ id: 'm-9', bot_id: 'b1', role: 'user', content: '看這張', attachments: [att], turn_id: 't1' }] } as never,
+  })
+  stubFetch(200, { rewound: true, text: '看這張', hidden: 0, pane_cleared: true })
+  assert.equal(await rewindAndRefill('b1', 'm-9'), true)
+  assert.ok(
+    useStore.getState().notices.some((n) => /1 個附件/.test(n.text)),
+    JSON.stringify(useStore.getState().notices),
+  )
+})
