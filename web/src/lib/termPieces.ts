@@ -116,26 +116,31 @@ export function termPieces(text: string, columns?: number | null): Piece[][] {
 /** 句尾標點不算網址的一部分。 */
 function trimPunct(url: string): string {
   let u = url
-  while (/[.,;:!?]$/.test(u)) u = u.slice(0, -1)
-  // 包住網址的 )／] 不是網址的一部分；網址自己成對的括號要留著（#659）。
-  const extra = (open: string, close: string) => {
-    let o = 0
-    let c = 0
-    for (const ch of u) {
-      if (ch === open) o++
-      else if (ch === close) c++
+  let prev: string
+  // 句點與不成對的括號會互相遮住（`(…page.)` 先剝不到 `)` 的句點）：剝到不再變為止。
+  do {
+    prev = u
+    u = u.replace(/[.,;:!?]+$/, '')
+    // 包住網址的 )／] 不是網址的一部分；網址自己成對的括號要留著（#659）。
+    const extra = (open: string, close: string) => {
+      let o = 0
+      let c = 0
+      for (const ch of u) {
+        if (ch === open) o++
+        else if (ch === close) c++
+      }
+      return c - o
     }
-    return c - o
-  }
-  let drop = extra('(', ')')
-  while (drop > 0 && u.endsWith(')')) {
-    u = u.slice(0, -1)
-    drop--
-  }
-  drop = extra('[', ']')
-  while (drop > 0 && u.endsWith(']')) {
-    u = u.slice(0, -1)
-    drop--
-  }
+    let drop = extra('(', ')')
+    while (drop > 0 && u.endsWith(')')) {
+      u = u.slice(0, -1)
+      drop--
+    }
+    drop = extra('[', ']')
+    while (drop > 0 && u.endsWith(']')) {
+      u = u.slice(0, -1)
+      drop--
+    }
+  } while (u !== prev)
   return u
 }
