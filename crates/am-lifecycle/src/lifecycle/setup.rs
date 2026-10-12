@@ -1228,7 +1228,9 @@ pub fn child_agent_rules(agent_name: &str) -> String {
 **禁止**用 CLI 內建的子代理（Claude 的 `Agent`／`Task` 工具與 `Workflow`、codex 外掛的 `codex-rescue`／`/codex:rescue`、\
 codex 的子代理、grok 的同類功能），也**禁止**在自己的 pane 裡另起 `claude`／`codex`／`grok` 行程（含丟背景、`codex exec`）分擔工作。\
 那些 AG Man 看不到、追不到狀態、收不掉。要交給 codex 就開 `--kind codex` 的 herdr 子 agent。\
-只在拋棄式目錄驗證 CLI 本身的行為（例如試新旗標）不算派工。\n\
+只在拋棄式目錄驗證 CLI 本身的行為（例如試新旗標）不算派工。\
+開子 agent 一律 `herdr agent start <名稱> --kind … --pane <新 pane>`；**禁止** `herdr pane run <pane> \"claude …\"`／`\"codex …\"` \
+這樣在新 pane 直接起 CLI（就算加了 `--name`）：那樣 agent 在 herdr 沒有名稱，AG Man 認領不到。\n\
 - **先找閒置的 child**：開新的子 agent 之前，**必須先跑** `herdr agent list`，看自己底下有沒有 `idle` / `done` 的子 agent。\
 有就用 `herdr agent prompt <名稱> \"…\"` 把下一份工作交下去。**禁止**每件事都開一顆新的；只有使用者明確要求新開時才可以。\
 **先挑 prompt cache 還熱的**：`herdr agent list` 的 stderr 會附上每顆子 agent 的 cache 還剩幾分（claude／codex 約 60 分）。\
@@ -2021,6 +2023,10 @@ mod model_args_tests {
         for want in ["`Agent`／`Task`", "`Workflow`", "`codex-rescue`", "codex 的子代理", "只准用 herdr pane 派工", "`--kind codex`"] {
             assert!(rule.contains(want), "要點名禁止內建子代理：{want}");
         }
+        // issue #1472：`herdr pane run <pane> "claude …"` 開的 agent 在 herdr 沒有名稱，AG Man 認領不到。
+        assert!(rule.contains("`herdr agent start <名稱> --kind … --pane <新 pane>`"), "要說明唯一的開法");
+        assert!(rule.contains("**禁止** `herdr pane run <pane> \"claude …\"`"), "要點名禁止 pane run 直接起 CLI");
+        assert!(rule.contains("沒有名稱，AG Man 認領不到"), "要講原因");
         assert!(rule.contains("$AM_CHILD_OF"), "子 agent 要知道怎麼認出自己");
         assert!(rule.contains("禁止再開子 agent"));
         assert!(rule.contains("由 parent 決定"));
