@@ -1044,7 +1044,8 @@ user 文字先照 CLI 自己的拆法還原（`lifecycle::pasted_content`，只�
   `in_flight/unknown` turn；補證仍不送 prompt，仍以原基準觀察並走同一個 CAS。只有 `not_proven_submitted`（框已空）才有基準可認領；字還在框裡
   （`still_in_box`）、框狀態讀不到（`composer_unreadable`）、`nothing_typed` 等原因沒有基準可看，維持原行為。session 確認的 DB 暫時讀取錯誤、
   transcript 暫時讀取錯誤都回 `Wait`，下一輪重試；run 已消失或 session 確認不相符才停止。持久 watcher 最多保留 10 分鐘；若一次 60 次觀察仍無結論，
-  保留原基準到 TTL，讓下一次 daemon 重啟仍能恢復觀察。
+  保留原基準到 TTL，讓下一次 daemon 重啟仍能恢復觀察。補證 watcher 登記在背景任務內，關機時取消（列保留，下次開機照樣接回）；
+  開機恢復時單筆清理失敗只記 log、不中止同批其餘的恢復；欠帳補寫成 unknown 後若記憶體登錄已無此筆，改從持久列接回同一回合的基準。
 - **late_proof 記憶體登錄有界清理**（issue #1494）：未認領的 Pending 最多保留 60 秒、最多 256 筆；新項目滿額時淘汰最舊項目。
   daemon 每 15 秒依 run／turn 狀態清掉已結束的項目，並刪除到期或不再有效的 durable watcher；在飛的回合（`pending`／`unknown`／`ok`，`ok` 指重送中、寫 unknown 欠帳的那段）的基準保留到寫回；資料庫最多同樣保留 256 筆、10 分鐘。
   `late_proof::pending_count()` 提供目前記憶體筆數供診斷。

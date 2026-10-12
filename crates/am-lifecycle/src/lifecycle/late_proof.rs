@@ -256,7 +256,7 @@ pub async fn recover_at_startup_at(app: &(impl LcHost + Clone + 'static), now: &
             "transcript" => {
                 let Some((format, path, session_id)) = proof_format.zip(proof_path).zip(proof_session_id).map(|((f, p), s)| (f, p, s)) else {
                     tracing::warn!(run = %run_id, turn = %turn_id, "discarding incomplete durable late proof");
-                    delete_durable_for_turn(app.db(), &turn_id).await?;
+                    delete_durable_or_log(app.db(), &run_id, &turn_id).await;
                     continue;
                 };
                 let format = match format.as_str() {
@@ -265,7 +265,7 @@ pub async fn recover_at_startup_at(app: &(impl LcHost + Clone + 'static), now: &
                     "agy" => super::delivery::LogFormat::Agy,
                     _ => {
                         tracing::warn!(run = %run_id, turn = %turn_id, "discarding durable late proof with unknown transcript format");
-                        delete_durable_for_turn(app.db(), &turn_id).await?;
+                        delete_durable_or_log(app.db(), &run_id, &turn_id).await;
                         continue;
                     }
                 };
@@ -273,14 +273,14 @@ pub async fn recover_at_startup_at(app: &(impl LcHost + Clone + 'static), now: &
             }
             _ => {
                 tracing::warn!(run = %run_id, turn = %turn_id, "discarding durable late proof with unknown proof kind");
-                delete_durable_for_turn(app.db(), &turn_id).await?;
+                delete_durable_or_log(app.db(), &run_id, &turn_id).await;
                 continue;
             }
         };
         // session 已換：這份基準不再對得上這個 run，不恢復也不再留著（SPEC：pane 與 session 都相符才恢復）。
         if matches!(same_session(app, &run_id, &proof).await, SessionMatch::Changed) {
             tracing::info!(run = %run_id, turn = %turn_id, "discarding durable late proof: the session changed before restart");
-            delete_durable_for_turn(app.db(), &turn_id).await?;
+            delete_durable_or_log(app.db(), &run_id, &turn_id).await;
             continue;
         }
         let pending = Pending::new(&kind, &pane, &proof, offset.max(0) as u64, baseline.max(0) as usize, &text, since);
@@ -328,6 +328,13 @@ async fn trim_durable(pool: &sqlx::SqlitePool) -> anyhow::Result<()> {
 async fn delete_durable_for_turn(pool: &sqlx::SqlitePool, turn_id: &str) -> anyhow::Result<()> {
     sqlx::query("DELETE FROM late_proof_pending WHERE turn_id = ?").bind(turn_id).execute(pool).await?;
     Ok(())
+}
+
+/// 開機恢復裡清掉一筆不再有效的列：失敗只記 log、繼續下一筆（一筆清不掉不能拖累同一批其餘的恢復）。
+async fn delete_durable_or_log(pool: &sqlx::SqlitePool, run_id: &str, turn_id: &str) {
+    if let Err(e) = delete_durable_for_turn(pool, turn_id).await {
+        tracing::warn!(run = %run_id, turn = %turn_id, error = %e, "could not delete a stale durable late proof; continuing startup restore");
+    }
 }
 
 /// Deterministic registry and durable-row sweep. `wall_now` drives SQLite expiry; `monotonic_now`
@@ -641,11 +648,17 @@ fn arm_pending(app: &impl LcHost, run_id: &str, bot_id: &str, turn_id: &str, p: 
     }
 }
 
-/// 真的開一條背景 watcher（測試也能直接呼叫，驗它跟關機屏障的關係）。
+/// 開一條背景 watcher，登記在 `background_tasks` 內：關機時取消，不會活到 60 次觀察跑完。
+/// 取消時 durable 列還在，下次開機照樣接回（測試也能直接呼叫，驗它跟關機屏障的關係）。
 pub(crate) fn spawn_watch(app: &impl LcHost, run_id: &str, bot_id: &str, turn_id: &str, p: Pending) {
     let app = (*app).clone();
+    let shutdown = app.shutdown().clone();
+    let tasks = app.background_tasks().clone();
     let (run_id, bot_id, turn_id) = (run_id.to_string(), bot_id.to_string(), turn_id.to_string());
-    tokio::spawn(async move {
-        watch(&app, &run_id, &bot_id, &turn_id, &p, CHECKS, CHECK_EVERY).await;
+    crate::background_loop::spawn_named(&tasks, "late proof watch", async move {
+        tokio::select! {
+            _ = shutdown.cancelled() => {}
+            _ = watch(&app, &run_id, &bot_id, &turn_id, &p, CHECKS, CHECK_EVERY) => {}
+        }
     });
 }
