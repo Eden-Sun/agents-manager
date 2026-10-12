@@ -40,7 +40,8 @@ impl TailCache {
     }
 
     /// 新鮮的結果直接回；否則 `fetch` 一次（同時進來的排隊，後面的看到前面的結果）。`clock` 讓測試不必真的等。
-    pub async fn read_through<F, Fut>(&self, key: &str, clock: impl Fn() -> Instant, fetch: F) -> Option<String>
+    /// 第二個值是這次有沒有真的去讀：`false` 表示拿的是快取。
+    pub async fn read_through<F, Fut>(&self, key: &str, clock: impl Fn() -> Instant, fetch: F) -> (Option<String>, bool)
     where
         F: FnOnce() -> Fut,
         Fut: Future<Output = Option<String>>,
@@ -49,12 +50,12 @@ impl TailCache {
         let mut guard = slot.lock().await;
         if let Some((at, value)) = guard.as_ref() {
             if clock().saturating_duration_since(*at) < FRESH_FOR {
-                return value.clone();
+                return (value.clone(), false);
             }
         }
         let value = fetch().await;
         *guard = Some((clock(), value.clone()));
-        value
+        (value, true)
     }
 }
 
@@ -114,7 +115,8 @@ where
 }
 
 /// 遠端 run 的對話檔尾段（最後 [`crate::pending_question::TAIL_BYTES`]）；讀不到、路徑不在允許範圍、逾時＝`None`。
-pub async fn tail(app: &Arc<App>, bot: &db::Bot, run: &db::Run, host: &str) -> Option<String> {
+/// 第二個值是 `true` 表示這次是現讀的（不是快取），呼叫端才能拿它當有效性檢查的證據。
+pub async fn tail(app: &Arc<App>, bot: &db::Bot, run: &db::Run, host: &str) -> (Option<String>, bool) {
     cache()
         .read_through(&run.id, || cache_now(&run.id), || {
             bounded(REMOTE_READ_TIMEOUT, crate::lifecycle::claude_child_log::pending_tail(app, bot, run, host, crate::pending_question::TAIL_BYTES))
@@ -141,6 +143,7 @@ mod tests {
                 Some(value.to_string())
             })
             .await
+            .0
     }
 
     /// 連續請求不會每次都打遠端：新鮮期間內用上一次的結果，過了才再讀；各 run 各一格。
@@ -173,7 +176,8 @@ mod tests {
                     reads.fetch_add(1, Ordering::SeqCst);
                     None
                 })
-                .await;
+                .await
+                .0;
             assert_eq!(v, None);
         }
         assert_eq!(reads.load(Ordering::SeqCst), 1);
@@ -217,8 +221,8 @@ mod tests {
         };
         tokio::task::yield_now().await;
         release.send(()).unwrap();
-        assert_eq!(first.await.unwrap().as_deref(), Some("tail"));
-        assert_eq!(second.await.unwrap().as_deref(), Some("tail"));
+        assert_eq!(first.await.unwrap().0.as_deref(), Some("tail"));
+        assert_eq!(second.await.unwrap().0.as_deref(), Some("tail"));
         assert_eq!(reads.load(Ordering::SeqCst), 1);
     }
 

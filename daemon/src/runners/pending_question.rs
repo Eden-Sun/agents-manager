@@ -26,18 +26,20 @@ pub async fn get_pending_question(State(app): State<Arc<App>>, Path(id): Path<St
         return null();
     }
     let host = db::bot_host(&app.db, &id).await.map_err(up)?;
-    let log = if host == crate::config::LOCAL_HOST {
+    // `fresh`：這次的檔尾是現讀的。現讀的檔尾已經證明提問還在，`hint_for` 的有效性檢查就不再讀一次；快取的檔尾不算證據。
+    let (log, fresh) = if host == crate::config::LOCAL_HOST {
         let Some(path) = run.transcript_path.clone().filter(|p| !p.trim().is_empty()) else { return null() };
         if !crate::app_ports_p5::local_transcript_allowed(&app, &bot, &path).await {
             return null();
         }
-        tokio::task::spawn_blocking(move || read_tail(std::path::Path::new(&path), TAIL_BYTES)).await.ok().flatten()
+        let log = tokio::task::spawn_blocking(move || read_tail(std::path::Path::new(&path), TAIL_BYTES)).await.ok().flatten();
+        (log, true)
     } else {
         crate::runners::pending_question_remote::tail(&app, &bot, &run, &host).await
     };
     let entry = tokio::task::spawn_blocking(move || log.and_then(|log| pending_ask_entry(&log))).await.ok().flatten();
     let Some((tool_use_id, input)) = entry else { return null() };
-    let jev_options = crate::judge::ask_option::hint_for(&app, &bot, &run.id, &tool_use_id, &input).await;
+    let jev_options = crate::judge::ask_option::hint_for(&app, &bot, &run.id, &tool_use_id, &input, fresh).await;
     Ok(Json(json!({"questions": input.get("questions").cloned(), "jev_options": jev_options})))
 }
 
@@ -250,21 +252,21 @@ mod remote_tests {
         assert_eq!(body["questions"], Value::Null);
     }
 
-    /// #1475 的 `jev_options` 對遠端 bot 一併生效：同一支 `hint_for`（開關、專案名單、名額、mask 照舊）。
-    #[tokio::test]
-    async fn a_remote_bot_gets_jev_options_through_the_same_gate() {
-        let transcript = Arc::new(Mutex::new(ask_line("toolu_1")));
-        let reply = transcript.clone();
-        let rig = rig(Some(&recorded()), move || Ok(found(&reply.lock().unwrap()))).await;
-        let _clock = crate::runners::pending_question_remote::fixed_clock(&rig.run_id);
+    /// 打開 Jev：假的 systemone 端點（每次被叫到先跑 `on_request`，好在 Jev 回答前改檔尾）、專案進名單、key 在暫存目錄、
+    /// 這顆 bot 的 run 有一則 turn。回傳的目錄由測試自己刪。
+    async fn enable_jev(rig: &Rig, on_request: impl Fn() + Clone + Send + Sync + 'static) -> std::path::PathBuf {
         let app = rig.env.app.clone();
         // 假 Jev：第一個選項 0.9、其餘 0.05。
-        let route = axum::routing::post(|axum::Json(body): axum::Json<Value>| async move {
-            let mut answers = serde_json::Map::new();
-            for k in body["questions"].as_object().unwrap().keys() {
-                answers.insert(k.clone(), json!({"type": "noul", "noul": if k.ends_with("_a") { 0.9 } else { 0.05 }}));
+        let route = axum::routing::post(move |axum::Json(body): axum::Json<Value>| {
+            let on_request = on_request.clone();
+            async move {
+                on_request();
+                let mut answers = serde_json::Map::new();
+                for k in body["questions"].as_object().unwrap().keys() {
+                    answers.insert(k.clone(), json!({"type": "noul", "noul": if k.ends_with("_a") { 0.9 } else { 0.05 }}));
+                }
+                axum::Json(json!({"model": "jev-1.13.0", "answers": answers, "usage": {"input_tokens": 10}}))
             }
-            axum::Json(json!({"model": "jev-1.13.0", "answers": answers, "usage": {"input_tokens": 10}}))
         });
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let url = format!("http://{}/v1/systemone", listener.local_addr().unwrap());
@@ -299,6 +301,23 @@ mod remote_tests {
             .execute(&app.db)
             .await
             .unwrap();
+        dir
+    }
+
+    async fn stale_rows(app: &Arc<App>) -> i64 {
+        sqlx::query_scalar("SELECT COUNT(*) FROM judge_shadow WHERE error = 'stale'").fetch_one(&app.db).await.unwrap()
+    }
+
+    /// #1475 的 `jev_options` 對遠端 bot 一併生效：同一支 `hint_for`（開關、專案名單、名額、mask 照舊）。
+    /// 一題的遠端讀取：GET 讀一次檔尾，那次是新鮮的，有效性檢查就用它作證、不再讀；背景問 Jev 的兩段（投 Jev 前、投 Jev 後）各讀一次。
+    #[tokio::test]
+    async fn a_remote_bot_gets_jev_options_through_the_same_gate() {
+        let transcript = Arc::new(Mutex::new(ask_line("toolu_1")));
+        let reply = transcript.clone();
+        let rig = rig(Some(&recorded()), move || Ok(found(&reply.lock().unwrap()))).await;
+        let _clock = crate::runners::pending_question_remote::fixed_clock(&rig.run_id);
+        let app = rig.env.app.clone();
+        let dir = enable_jev(&rig, || {}).await;
 
         let mut rx = app.subscribe();
         let first = get(&rig).await;
@@ -313,12 +332,44 @@ mod remote_tests {
         })
         .await
         .expect("答案落帳後要發事件");
+        assert_eq!(rig.reads(), 3, "GET 的一次讀取（新鮮）＋背景問 Jev 投 Jev 前、投 Jev 後各一次；讀建議前的有效性檢查不再另讀");
         let second = get(&rig).await;
         assert_eq!(second["jev_options"]["questions"], json!([{"index": 0, "scores": [0.9, 0.05], "suggested": 0}]));
-        assert_eq!(rig.reads(), 7, "輪詢題目讀一次；Jev 的六個有效性檢查各自讀新鮮 transcript");
+        assert_eq!(rig.reads(), 4, "已有建議的後續輪詢：檔尾走快取，讀建議前的有效性檢查另讀一次新鮮的");
         transcript.lock().unwrap().push_str(&format!("\n{}", json!({"message":{"content":[{"type":"tool_result","tool_use_id":"toolu_1"}]}})));
-        assert_eq!(get(&rig).await["jev_options"], Value::Null, "題目輪詢快取仍在，也不能把已回答的提問建議帶出去");
-        assert_eq!(rig.reads(), 8, "讀建議前再次繞過快取確認提問已回答");
+        assert_eq!(get(&rig).await["jev_options"], Value::Null, "檔尾快取仍在，也不能把已回答的提問建議帶出去");
+        assert_eq!(rig.reads(), 5, "讀建議前再次讀新鮮的，確認提問已回答");
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// 投 Jev 的那段等待中提問被答掉：投 Jev 之後的檢查要現讀（不沿用投 Jev 之前那次），所以不寫出建議、不發事件。
+    #[tokio::test]
+    async fn a_question_answered_while_jev_is_thinking_gets_no_hint() {
+        let transcript = Arc::new(Mutex::new(ask_line("toolu_1")));
+        let reply = transcript.clone();
+        let rig = rig(Some(&recorded()), move || Ok(found(&reply.lock().unwrap()))).await;
+        let _clock = crate::runners::pending_question_remote::fixed_clock(&rig.run_id);
+        let app = rig.env.app.clone();
+        let answered = transcript.clone();
+        let dir = enable_jev(&rig, move || {
+            answered.lock().unwrap().push_str(&format!("\n{}", json!({"message":{"content":[{"type":"tool_result","tool_use_id":"toolu_1"}]}})));
+        })
+        .await;
+
+        let mut rx = app.subscribe();
+        assert_eq!(get(&rig).await["questions"][0]["question"], "連線方式？");
+        // 背景任務在投 Jev 之後的檢查寫下 stale 才算跑完；等它，不靠 sleep。
+        tokio::time::timeout(std::time::Duration::from_secs(10), async {
+            while stale_rows(&app).await == 0 {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("背景任務要寫下 stale");
+        while let Ok(ev) = rx.try_recv() {
+            assert!(ev.kind != "pending_question_hint", "已答的提問不發建議");
+        }
+        assert_eq!(get(&rig).await["jev_options"], Value::Null, "投 Jev 期間被答掉，建議不能出去");
         std::fs::remove_dir_all(&dir).ok();
     }
 }
