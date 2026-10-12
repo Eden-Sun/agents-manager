@@ -822,7 +822,7 @@ async fn clear_restored_prompt(app: &impl crate::capabilities::Db, client: &Herd
 /// `recent_unwrapped` and the composer parser handle TUI framing; only try a tab-removed candidate
 /// when the original prompt actually had a tab (the known Claude TUI tab-loss behavior).
 fn restored_prompt_matches(kind: &str, screen: &str, expected: &str) -> bool {
-    let Some(actual) = super::poller::composer_text(kind, screen) else { return false };
+    let Some(actual) = super::poller::composer_text_whole(kind, screen) else { return false };
     same_restored_prompt(&actual, expected)
 }
 

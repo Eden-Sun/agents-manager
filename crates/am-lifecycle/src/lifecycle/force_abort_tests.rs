@@ -282,6 +282,20 @@ async fn a_force_abort_does_not_clear_after_its_native_session_changes() {
 }
 
 #[test]
+fn restored_prompt_match_keeps_blank_rows_from_the_composer() {
+    let mut lines: Vec<String> = TALL_DRAFT.lines().map(str::to_string).collect();
+    let marker = lines.iter().rposition(|line| delivery::strip_ansi(line).starts_with('❯')).unwrap();
+    lines.insert(marker + 1, String::new());
+    let screen = lines.join("\n");
+    let expected = composer_text_whole("claude", TALL_DRAFT).unwrap().replacen("fix\n", "fix\n\n", 1);
+
+    assert_eq!(composer_text_whole("claude", &screen).as_deref(), Some(expected.as_str()));
+    assert!(restored_prompt_matches("claude", &screen, &expected), "the full restored prompt must match, including its blank row");
+    let edited = screen.replace("另一行補充說明", "使用者修改過的補充說明");
+    assert!(!restored_prompt_matches("claude", &edited, &expected), "an edited paragraph must not inherit the first paragraph's match");
+}
+
+#[test]
 fn restored_prompt_identity_preserves_word_boundaries_and_only_allows_known_tab_loss() {
     assert!(same_restored_prompt("echo a b", "echo a b"));
     assert!(!same_restored_prompt("echo\n  a b", "echo a b"), "hard line breaks remain part of the prompt");
