@@ -5157,7 +5157,7 @@ daemon 要能在 Linux（目標：Ubuntu，外部編譯主機 192.168.1.46，#67
 分享頁、DB、token、名額、預算量測仍在這台 daemon。遠端的檔案動作全部經 `share::remote_fs`（POSIX sh、逐段 `cd -P`、有長度的框、對不上就 fail closed）。
 
 - **建立**（`admin::reserve_remote_share_bot`，先於寫 config）：設定裡沒有的主機 409 `unsupported_host`（找不到，不是「不支援遠端」）；連不上 409 `share_host_unreachable`，`shared_bots` 不留列、不建資料夾。
-  受限才做 preflight：claude 版本 ≥ `cage::MIN_CLAUDE`（2.1.288，籠子的旗標是照這版驗的）否則 409 `share_claude_too_old`（帶 `found`、`min`）；那台有 claude 的 managed settings（Linux `/etc/claude-code/managed-settings.json` 與 `.d/`，macOS `/Library/Application Support/ClaudeCode/…`）→ 409 `share_managed_settings`（它優先於 `--settings`，籠子保證不了）。信任分享只查連線。
+  受限才做 preflight：claude 版本 ≥ `cage::MIN_CLAUDE`（2.1.288，籠子的旗標是照這版驗的）否則 409 `share_claude_too_old`（帶 `found`、`min`）；那台有 claude 的 managed settings（Linux `/etc/claude-code/managed-settings.json` 與 `.d/`，macOS `/Library/Application Support/ClaudeCode/…`）→ 409 `share_managed_settings`（它優先於 `--settings`，籠子保證不了）。managed settings 的檢查只認遠端明確印出的 `AM_MS=FOUND`／`AM_MS=NONE`；空的、被截斷、夾著別的字，或版本輸出不是恰好一行，都不能當成「確定沒有」，改回 409 `share_managed_unknown`／`share_claude_too_old`（fail closed，`message` 寫出原因）。信任分享只查連線。
 - **資料夾**：`existing`＝那台的絕對路徑，解開符號連結後跑**同一支** `folder::unsafe_reason`（家目錄與上層、那台的 `~/.config/agents-manager[/instances/<slug>]`、`~/.ssh`、`~/.claude*`…、系統目錄），
   不屬於 ssh 使用者、路徑含符號連結 → 400 `bad_share_folder`。`new`（只有受限）＝`[share] folders_root` 是 `~/…` 才照那台的家目錄展開，否則那台的 `~/shared-bots`；同名已存在 409 `folder_exists`（重送例外）。
 - **建失敗**（inbox、`shared_bots` 寫入、路徑檢查任一步）只 `rmdir` 這次新建的資料夾（非空就留著）。遠端從不 `rm -rf`。

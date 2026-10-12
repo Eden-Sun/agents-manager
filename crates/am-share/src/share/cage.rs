@@ -69,13 +69,21 @@ pub fn preflight_conflict(e: PreflightError) -> LcError {
             "share_host_unreachable",
             json!({"message": "專案所在的主機連不上（或還沒連線），先確認它連得到再試"}),
         ),
-        PreflightError::ClaudeTooOld { found } => LcError::conflict(
-            "share_claude_too_old",
-            json!({"found": found, "min": MIN_CLAUDE, "message": format!("遠端的 claude 版本要 {MIN_CLAUDE} 以上（讀到：{}）", if found.is_empty() { "讀不到" } else { found.as_str() })}),
-        ),
+        PreflightError::ClaudeTooOld { found, why } => {
+            let message = if found.is_empty() {
+                format!("遠端的 claude 版本要 {MIN_CLAUDE} 以上（讀不到版本：{why}）")
+            } else {
+                format!("遠端的 claude 版本要 {MIN_CLAUDE} 以上（讀到：{found}）")
+            };
+            LcError::conflict("share_claude_too_old", json!({"found": found, "min": MIN_CLAUDE, "message": message}))
+        }
         PreflightError::ManagedSettings => LcError::conflict(
             "share_managed_settings",
             json!({"message": "遠端機器上有 claude 的 managed settings（它會蓋過籠子的設定），拿掉之後再試"}),
+        ),
+        PreflightError::ManagedUnknown => LcError::conflict(
+            "share_managed_unknown",
+            json!({"message": "讀不到遠端 claude 的 managed settings 狀態（檢查指令失敗或輸出不完整），不能確定籠子的設定會生效；先確認主機連得上、指令正常，再試"}),
         ),
     }
 }

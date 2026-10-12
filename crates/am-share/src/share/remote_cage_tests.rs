@@ -51,7 +51,7 @@ async fn fake_host(e: &tt::Env, tag: &str, version: &str, managed: bool) -> Fake
             return Ok(if v.is_empty() { "NOCLAUDE".to_string() } else { format!("{v} (Claude Code)\n") });
         }
         if script.contains("managed-settings") {
-            return Ok(if *m.lock().unwrap() { "FOUND\n".to_string() } else { "NONE\n".to_string() });
+            return Ok(if *m.lock().unwrap() { "AM_MS=FOUND\n".to_string() } else { "AM_MS=NONE\n".to_string() });
         }
         let out = std::process::Command::new("/bin/sh")
             .arg("-c")
@@ -266,7 +266,7 @@ async fn preflight_does_not_read_claude_version_from_a_banner() {
         if script.contains("claude --version") {
             return Ok("Ubuntu 22.04 LTS\n1.0.5 (Claude Code)\n".to_string());
         }
-        Ok("NONE\n".to_string())
+        Ok("AM_MS=NONE\n".to_string())
     });
     let cfg = HostCfg {
         name: host.clone(),
@@ -462,4 +462,56 @@ async fn remote_share_rollback_never_deletes_a_local_dir_with_the_same_path() {
     assert!(!store::is_share_bot(&e.app.db, &b.id).await.unwrap(), "shared_bots 沒有這顆");
     let n: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM shared_bots WHERE bot_id = ?").bind(&b.id).fetch_one(&e.app.db).await.unwrap();
     assert_eq!(n, 0, "shared_bots 沒有這顆");
+}
+
+/// 遠端 managed settings 的檢查：版本 OK、managed 的答案卻不是 `AM_MS=FOUND`／`AM_MS=NONE`（空的、motd、被截斷，或 ssh 失敗），
+/// 不能當成「確定沒有」，要 fail closed。
+async fn odd_host(e: &tt::Env, tag: &str, version: &'static str, managed: Result<&'static str, &'static str>) -> String {
+    let host = format!("rs2-{tag}-{}", &db::ulid().to_lowercase()[..8]);
+    am_base::hosts::set_ssh_fake(&host, move |script: &str| {
+        if script.contains("claude --version") {
+            return Ok(version.to_string());
+        }
+        if script.contains("managed-settings") {
+            return match managed {
+                Ok(out) => Ok(out.to_string()),
+                Err(why) => Err(anyhow::anyhow!("{why}")),
+            };
+        }
+        Ok(String::new())
+    });
+    let cfg = HostCfg {
+        name: host.clone(),
+        ssh: "fake-ssh".into(),
+        ssh_port: 22,
+        ssh_opts: vec![],
+        herdr_session: "test-session".into(),
+        shared_session: false,
+        remote_path: String::new(),
+    };
+    let conn = e.app.hosts.insert_remote_for_test(cfg).await;
+    conn.connected.store(true, Ordering::SeqCst);
+    host
+}
+
+#[tokio::test]
+async fn preflight_refuses_when_the_managed_settings_answer_is_missing() {
+    let e = tt::env().await;
+    for (tag, managed) in [("empty", Ok("")), ("motd", Ok("Welcome to the host\n")), ("cut", Ok("AM_MS=")), ("ssh-failed", Err("ssh: connect timed out"))] {
+        let host = odd_host(&e, tag, "2.1.288 (Claude Code)\n", managed).await;
+        let site = crate::share::site::FencedConn::new(e.app.hosts.fence(&host).await.unwrap());
+        assert!(remote_fs::preflight_restricted(&site, cage::MIN_CLAUDE).await.is_err(), "managed settings 沒有明確答案（{tag}）時不能放行");
+    }
+}
+
+/// 版本行讀不出來的原因要講得出來：輸出有多行（banner）跟「讀不到」不能看起來一樣。
+#[tokio::test]
+async fn a_version_that_cannot_be_read_says_why() {
+    let e = tt::env().await;
+    let host = odd_host(&e, "why", "Ubuntu 22.04 LTS\n1.0.5 (Claude Code)\n", Ok("AM_MS=NONE\n")).await;
+    let site = crate::share::site::FencedConn::new(e.app.hosts.fence(&host).await.unwrap());
+    let err = cage::preflight_restricted(&site).await.unwrap_err();
+    let LcError::Conflict(v) = err else { panic!("{err:?}") };
+    let msg = v["message"].as_str().unwrap_or_default();
+    assert!(msg.contains("多行"), "讀不到版本的原因要寫出來：{msg}");
 }
