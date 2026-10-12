@@ -23,6 +23,7 @@ import { ProjectPanes } from './ProjectPanes'
 import { ProjectNameField } from './ProjectNameField'
 import { Bubble, EmptyState, JumpToBottom, LiveReplyBubble, LoadEarlier } from './ChatPanel'
 import { KIND_TITLE } from './chatPanelKinds'
+import { DraftTooLargeNote } from './DraftTooLargeNote'
 import { HostBadge } from './HostsPanel'
 import { useShelfSink } from './useShelfSink'
 import { IssuesBar } from './IssuesBar'
@@ -425,6 +426,7 @@ function GroupComposer({
         })}
       </div>
       <AttachTray items={files.items} onRemove={files.remove} onRetry={files.retry} disabled={sending} />
+      <DraftTooLargeNote draftKey={draftKey} />
       <div className="composer-box">
         <AttachPicker onFiles={files.add} disabled={state.disabled || sending || toAgm} />
         {showPop ? (

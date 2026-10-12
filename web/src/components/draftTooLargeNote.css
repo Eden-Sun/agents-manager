@@ -1,0 +1,11 @@
+/* components/DraftTooLargeNote.tsx：草稿太大沒同步到其他裝置時，輸入列上方的一行說明。 */
+
+.draft-too-large {
+  font-size: 12px;
+  color: var(--warn);
+  background: var(--warn-soft);
+  border: 1px solid color-mix(in srgb, var(--warn) 40%, transparent);
+  border-radius: 6px;
+  padding: 4px 10px;
+  margin-bottom: 8px;
+}

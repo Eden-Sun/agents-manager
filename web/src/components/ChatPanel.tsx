@@ -46,6 +46,7 @@ import { RewindButton, RewoundTag } from './RewindButton'
 import { TurnErrorBadge } from './TurnErrorBadge'
 import { AuthLoginAction } from './AuthLoginAction'
 import { ComposerDraftBar } from './ComposerDraftBar'
+import { DraftTooLargeNote } from './DraftTooLargeNote'
 import { SuggestionBar } from './SuggestionBar'
 import { isAuthFailure } from '../lib/authFailure'
 import { parseAskAnswers } from '../lib/askAnswers'
@@ -958,6 +959,7 @@ function Composer({
       ) : null}
       <ComposerCostHint botId={botId} />
       <AttachTray items={files.items} onRemove={files.remove} onRetry={files.retry} disabled={sending} />
+      <DraftTooLargeNote draftKey={draftKey} />
       <div className="composer-box">
         <AttachPicker onFiles={files.add} disabled={state.disabled || sending} />
         <textarea
