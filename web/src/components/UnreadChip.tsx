@@ -585,6 +585,10 @@ function useHorizontalScroll(barRef: RefObject<HTMLDivElement | null>, active: b
     const next = { left: bar.scrollLeft > 4, right: max > 4 && bar.scrollLeft < max - 4 }
     setEdges((e) => (e.left === next.left && e.right === next.right ? e : next))
   }, [active, barRef])
+  // 晶片增減只改 scrollWidth，bar 本身不會 resize、也不會 scroll：每次 render 後重算（setEdges 有相等判斷，不會迴圈）。
+  useLayoutEffect(() => {
+    sync()
+  })
   useEffect(() => {
     const bar = barRef.current
     if (!bar) return
