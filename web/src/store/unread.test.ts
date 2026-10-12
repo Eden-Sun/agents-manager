@@ -1,7 +1,7 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
 import type { Message } from '../api/types.ts'
-import { clearHookCompletion, completionKey, countUnreadTurns, idleEdgeCompletionKey, isUnread, loadCounts, loadMarks, markHookCompletion, markOfMessages, projectUnread, pruneIdleEdges, resetIdleEdges, resetTurnCompletions, saveCounts, saveMarks, takeTurnCompletion, titleUnread, unreadShown } from './unread.ts'
+import { clearHookCompletion, completionKey, countUnreadTurns, idleEdgeCompletionKey, isUnread, loadCounts, loadMarks, markHookCompletion, markOfMessages, projectUnread, pruneIdleEdges, recordReadMark, resetIdleEdges, resetTurnCompletions, saveCounts, saveMarks, takeTurnCompletion, titleUnread, unreadShown } from './unread.ts'
 
 /** node 沒有 localStorage；這裡只要 get/set 兩支。 */
 function stubStorage() {
@@ -264,4 +264,16 @@ test('pruneIdleEdges：刪掉的 bot 的 idle 邊緣帳被帶走，還在的不�
   assert.equal(idleEdgeCompletionKey('b-live', 'r1', { id: 't', status: 'completed' }), 'run:r1:2')
   assert.equal(idleEdgeCompletionKey('b-gone', 'r1', { id: 't', status: 'completed' }), 'run:r1:1')
   resetIdleEdges()
+})
+
+test('多分頁：寫一個已讀標記時，不洗掉另一個分頁剛寫的標記（磁碟上的較新者保留）', () => {
+  const map = stubStorage()
+  const mine = { 'bot:a': { at: '2026-09-07T00:00:01Z', id: 'm1', seq: 11 } }
+  const other = { at: '2026-09-07T00:00:05Z', id: 'm5', seq: 55 }
+  map.set('am.readMarks', JSON.stringify({ 'bot:a': mine['bot:a'], 'bot:b': other }))
+  const next = recordReadMark(mine, 'bot:c', { at: '2026-09-07T00:00:09Z', id: 'm9', seq: 99 })
+  const disk = JSON.parse(map.get('am.readMarks') ?? '{}')
+  assert.deepEqual(disk['bot:b'], other, '另一個分頁的標記不能被洗掉')
+  assert.deepEqual(disk['bot:c'], { at: '2026-09-07T00:00:09Z', id: 'm9', seq: 99 })
+  assert.deepEqual(next['bot:b'], other, '回傳的那份也要看得到它')
 })

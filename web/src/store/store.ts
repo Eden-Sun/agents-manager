@@ -95,6 +95,7 @@ import {
   pruneMarks,
   pruneUnread,
   saveCounts,
+  recordReadMark,
   saveMarks,
   takeTurnCompletion,
   windowActive,
@@ -316,8 +317,7 @@ const initialUnread = loadCounts()
 let readMarks = loadMarks()
 
 function setReadMark(key: string, mark: ReadMark) {
-  readMarks = { ...readMarks, [key]: mark }
-  saveMarks(readMarks)
+  readMarks = recordReadMark(readMarks, key, mark)
 }
 
 /** 群組未讀不存本機：daemon 算、跨裝置共用（`serverGroupUnread`），本機只留記憶體裡的即時 +1。 */

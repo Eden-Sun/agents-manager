@@ -5,6 +5,7 @@
 
 import type { Message } from '../api/types'
 import { writeShared } from './mobilePreview'
+import { laterMark } from './sharedUnread'
 
 const MARKS_KEY = 'am.readMarks'
 const COUNTS_KEY = 'am.unread'
@@ -44,6 +45,18 @@ export function loadMarks(): Record<string, ReadMark> {
   } catch {
     return {}
   }
+}
+
+/**
+ * 寫一個已讀標記：先併進磁碟上現在的那份（別的分頁可能剛寫過），逐筆取較新者，再整份存回去。
+ * 回傳合併後的整份，呼叫端照這份更新記憶體。刪除（`pruneMarks`）不走這裡，它要真的把死掉的鍵拿掉。
+ */
+export function recordReadMark(current: Record<string, ReadMark>, key: string, mark: ReadMark): Record<string, ReadMark> {
+  const merged: Record<string, ReadMark> = { ...current }
+  for (const [k, v] of Object.entries(loadMarks())) merged[k] = laterMark(merged[k], v) ?? v
+  merged[key] = laterMark(merged[key], mark) ?? mark
+  saveMarks(merged)
+  return merged
 }
 
 export function saveMarks(marks: Record<string, ReadMark>) {
