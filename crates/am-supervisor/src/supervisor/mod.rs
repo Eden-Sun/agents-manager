@@ -150,7 +150,8 @@ const BOOTSTRAP_PROMPT: &str = r#"這是 AGM 啟動握手，不是新的工作�
 pub async fn start_requested(app: &(impl crate::capabilities::Db + crate::capabilities::Emit + TurnOps + MissionOps + QuotaOps + JudgeOps + CandidateSwitch + ControllerRuntime + MissionCancellation + Clone + Send + Sync + 'static)) -> Result<(), LcError> {
     // Choose the configured fallback before launching the CLI, so a low Fable bucket starts
     // directly on Opus instead of briefly opening the wrong session.
-    if let Err(e) = controller::apply_quota_policy(app).await {
+    // 大 future 包成 Box（#1461，理由見 runners::supervisor::api::post_start）。
+    if let Err(e) = Box::pin(controller::apply_quota_policy(app)).await {
         tracing::warn!(error = ?e, "quota policy during start failed");
     }
     // `manager_bot` 建好那一列（`get_or_init`）之後才寫得進去，而且沒設定好就該回 not_configured，
@@ -159,7 +160,7 @@ pub async fn start_requested(app: &(impl crate::capabilities::Db + crate::capabi
         return Err(LcError::conflict("supervisor is not set up", json!({"reason": "not_configured"})));
     }
     store::set_desired_running(app.db(), true).await.map_err(persist_intent_failed)?;
-    start_manager(app, None).await
+    Box::pin(start_manager(app, None)).await
 }
 
 /// 使用者按下 stop：**先把「不要它跑」寫進去，寫成功才停**。呼叫端持有 [`lock`]。
@@ -196,7 +197,7 @@ pub async fn start_manager(app: &(impl crate::capabilities::Db + crate::capabili
         .ok_or_else(|| LcError::conflict("supervisor is not set up", json!({"reason": "not_configured"})))?;
     match crate::db::active_run(app.db(), &bot.id).await.map_err(up)? {
         None => {
-            app.start_bot(&bot.id).await?;
+            Box::pin(app.start_bot(&bot.id)).await?;
         }
         // 上一個 run 還在收尾：這時起不了新的（`runs_one_active`），當成「已經在跑」往下走只會回一個假的成功。
         Some(run) if run.state == "stopping" => {
@@ -214,8 +215,8 @@ pub async fn start_manager(app: &(impl crate::capabilities::Db + crate::capabili
     // keeps showing which lines a person actually typed.
     // 控制面自己的送入：維護窗口不擋它，否則「把 AGM 重新起來」這件事會被自己開的窗口鎖在門外
     // （issue #86）。
-    if let Err(e) = app
-        .prompt_control_plane(&bot.id, BOOTSTRAP_PROMPT, BOOTSTRAP_REQUEST_ID, Some(crate::agent_relay::DAEMON_SENDER))
+    if let Err(e) = Box::pin(app
+        .prompt_control_plane(&bot.id, BOOTSTRAP_PROMPT, BOOTSTRAP_REQUEST_ID, Some(crate::agent_relay::DAEMON_SENDER)))
         .await
     {
         tracing::warn!(error = ?e, "AGM bootstrap prompt was not delivered");
@@ -234,7 +235,7 @@ pub async fn start_manager(app: &(impl crate::capabilities::Db + crate::capabili
         sup.generation
     };
     app.spawn_supervisor_controller(gen);
-    controller::reconcile(app).await;
+    Box::pin(controller::reconcile(app)).await;
     app.emit("supervisor_changed", json!({"started": true})).await;
     Ok(())
 }
