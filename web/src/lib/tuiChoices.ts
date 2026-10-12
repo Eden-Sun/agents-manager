@@ -166,6 +166,8 @@ function joinWrapped(a: string, b: string): string {
 interface Row {
   line: number
   marker: boolean
+  /** 編號的欄位（縮排加游標記號的寬度）：同一份選單的選項列欄位一樣，縮排更深的 `N.` 是說明。 */
+  col: number
   number: number
   title: string
   checked: boolean | null
@@ -174,11 +176,12 @@ interface Row {
 function matchRow(line: number, s: string): Row | null {
   const m = ITEM.exec(s)
   if (!m) return null
-  const [, , marker, num, , rest] = m
+  const [, indent, marker, num, , rest] = m
   const box = CHECKBOX.exec(rest.trim())
   return {
     line,
     marker: Boolean(marker),
+    col: indent.length + (marker?.length ?? 0),
     number: Number(num),
     title: (box ? box[2] : rest).trim(),
     checked: box ? box[1] !== ' ' : null,
@@ -234,6 +237,21 @@ function dedentBlock(block: string[]): string[] {
   return out.map((l) => l.slice(Math.min(pad, indentOf(l))))
 }
 
+/**
+ * 選項列的編號欄：游標那一列的（沒有游標就以最底下的編號列）。選項說明裡的 `N.` 縮排比選項深，欄位對不上就不是選項。
+ * 找不到任何編號列回 `null`。
+ */
+function optionColumn(lines: string[]): number | null {
+  let bottom: number | null = null
+  for (let i = lines.length - 1; i >= 0; i--) {
+    const row = matchRow(i, lines[i])
+    if (!row) continue
+    if (hasMarker(lines[i])) return row.col
+    bottom ??= row.col
+  }
+  return bottom
+}
+
 /** 認不出來回 `null`，呼叫端畫按鍵面板，不要猜。 */
 export function parseChoiceMenu(text: string | null | undefined): TuiChoiceMenu | null {
   if (!text) return null
@@ -244,12 +262,14 @@ export function parseChoiceMenu(text: string | null | undefined): TuiChoiceMenu 
   const all = (side ? side.lines : raw).map(stripBox)
   const lines = all.slice(Math.max(0, all.length - SCAN_LINES))
 
-  // 1. 由下往上找最後一個選項行。
+  // 1. 由下往上找最後一個選項行（編號欄與選項列一致的，見 `optionColumn`）。
+  const optionCol = optionColumn(lines)
   let end = -1
   let footer = false
   let tail = 0
   for (let i = lines.length - 1; i >= 0; i--) {
-    if (matchRow(i, lines[i])) {
+    const row = matchRow(i, lines[i])
+    if (row && row.col === optionCol) {
       end = i
       break
     }
@@ -269,7 +289,8 @@ export function parseChoiceMenu(text: string | null | undefined): TuiChoiceMenu 
   let gap = 0
   for (let i = end; i >= 0; i--) {
     const row = matchRow(i, lines[i])
-    if (row) {
+    // 編號欄跟選項不同的 `N.`（縮排更深的說明，如選項底下的 `       1. 先備份`）不是選項，當說明。
+    if (row && row.col === optionCol) {
       // 跳號、重號＝不是同一份選單。
       if (rows.length && row.number !== rows[rows.length - 1].number - 1) break
       rows.push(row)
