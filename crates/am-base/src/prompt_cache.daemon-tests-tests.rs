@@ -89,6 +89,15 @@
     }
 
     #[test]
+    fn a_ttl_that_is_not_ascii_or_overflows_is_unknown_not_a_panic() {
+        // 單位若取最後一個位元組會切在字元中間（panic）；秒數乘上單位溢位（debug 直接 panic，release 繞成負數）。
+        for ttl in ["5分", "分", "9000000000000000h"] {
+            let v = from_statusline(&format!(r#"{{"prompt_cache":{{"ttl":"{ttl}"}}}}"#));
+            assert_eq!(v["ttl_secs"], Value::Null, "{ttl}");
+        }
+    }
+
+    #[test]
     fn grok_and_no_run_carry_nothing() {
         let mut run = json!({"id": "r-grok", "status_json": STATUS});
         annotate(&mut run, "grok", 0);

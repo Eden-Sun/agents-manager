@@ -170,15 +170,16 @@ fn ttl_secs_of(v: Option<&Value>) -> Option<i64> {
         Value::Number(n) => n.as_i64().filter(|n| *n > 0),
         Value::String(s) => {
             let s = s.trim();
-            let (num, unit) = s.split_at(s.len().checked_sub(1)?);
-            let n: i64 = num.trim().parse().ok()?;
+            // 單位取最後一個字元：切位元組會切在非 ASCII 字元中間。乘法用 checked，溢位就當作不知道。
+            let unit = s.chars().last()?;
+            let n: i64 = s[..s.len() - unit.len_utf8()].trim().parse().ok()?;
             let mul = match unit {
-                "s" => 1,
-                "m" => 60,
-                "h" => 3600,
+                's' => 1,
+                'm' => 60,
+                'h' => 3600,
                 _ => return None,
             };
-            (n > 0).then_some(n * mul)
+            (n > 0).then(|| n.checked_mul(mul)).flatten()
         }
         _ => None,
     }
