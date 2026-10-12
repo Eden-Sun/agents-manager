@@ -6,6 +6,5 @@
   "role": "patrol",
   "self_bot_id": "bot-agm",
   "data_dir": "/data",
-  "supervisor_id": "AGM",
-  "remote_name": "AGM"
+  "supervisor_id": "AGM"
 }

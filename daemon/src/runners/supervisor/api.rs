@@ -824,108 +824,6 @@ pub async fn post_ops_alert(State(app): State<Arc<App>>, Json(b): Json<OpsAlertI
     Ok(Json(json!({"queued": id.is_some(), "inbox_event_id": id, "event_key": key})))
 }
 
-// ------------------------------------------------------------------------- remote
-
-/// The phone entry point: what is claimed, on what evidence, and when it stops counting.
-pub async fn get_remote(State(app): State<Arc<App>>) -> Result<Json<Value>, LcError> {
-    Ok(Json(super::remote::status(&app.db).await))
-}
-
-#[derive(Deserialize)]
-pub struct RemoteObservationIn {
-    /// `requested` | `verified` | `unavailable` | `unknown`.
-    pub status: String,
-    /// Only `manual` is accepted on this deployment. `provider` is reserved for a future
-    /// authenticated adapter; callers cannot upgrade a manual claim into provider evidence.
-    pub source: String,
-    /// Who is making the claim. Required for anything that asserts the entry point works: an
-    /// unattributed "it is fine" is exactly the fiction this endpoint exists to prevent.
-    #[serde(default)]
-    pub actor: Option<String>,
-    #[serde(default)]
-    pub evidence: Option<String>,
-    #[serde(default)]
-    pub url: Option<String>,
-}
-
-/// Record an observation of the remote entry point.
-///
-/// Refuses to let argv, or an anonymous caller, claim the entry point works. The observation is
-/// bound to the current session and expires (`remote::OBSERVATION_TTL_SECS`), so it can never
-/// harden into a permanent "connected" that nobody rechecked.
-pub async fn post_remote_observation(
-    State(app): State<Arc<App>>,
-    headers: HeaderMap,
-    Json(b): Json<RemoteObservationIn>,
-) -> Result<Json<Value>, LcError> {
-    // 身分照 #414 的形狀：驗過的角色才寫得出 `AGM:<role>`，其餘一律 `user` / `user(<自稱>)`。
-    // 以前 `actor` 整個由 body 決定，而 doc 卻寫「refuses an anonymous caller」——擋的只有空字串
-    // （issue #463）。
-    let verified = super::bot_requests::actor_role(&app, &headers).await?;
-    if !super::remote::STATES.contains(&b.status.as_str()) {
-        return Err(LcError::Bad(format!("status must be one of {:?}", super::remote::STATES)));
-    }
-    // #970：evidence 原樣存進 `supervisors.remote_evidence`，每次 GET 都讀；actor 同理。
-    bounded("evidence", b.evidence.as_deref().unwrap_or_default(), MAX_NOTE_CHARS)?;
-    bounded("actor", b.actor.as_deref().unwrap_or_default(), MAX_LABEL_CHARS)?;
-    let source = super::remote::Source::parse(&b.source)
-        .ok_or_else(|| LcError::Bad("source must be `manual` or `provider`".into()))?;
-    super::remote::validate_external_source(source).map_err(|e| LcError::Bad(e.into()))?;
-    if b.status == "verified" && !source.can_verify() {
-        return Err(LcError::conflict(
-            "this source cannot verify the remote entry point",
-            json!({"reason": "source_cannot_verify", "source": b.source}),
-        ));
-    }
-    // `url` 會被前端放進 `<a href>`：只收 http／https（`javascript:` 一按就在 app 的 origin 執行）。
-    if let Some(u) = b.url.as_deref() {
-        if !is_http_url(u) {
-            return Err(LcError::Bad("url must be an absolute http(s) URL".into()));
-        }
-    }
-    let claim = b.actor.as_deref().map(str::trim).filter(|s| !s.is_empty());
-    // 驗過的角色不必再自稱：它的身分本身就是署名。沒驗過的照舊要填一個名字，
-    // 只是那個名字會被包成 `user(<自稱>)`，讀的人一眼看得出沒驗過。
-    if matches!(b.status.as_str(), "verified" | "unavailable") && claim.is_none() && verified.is_none() {
-        return Err(LcError::Bad("an observation that claims verified or unavailable needs an actor".into()));
-    }
-    let recorded = decision_actor(verified, claim);
-    let actor = Some(recorded.as_str());
-    if matches!(b.status.as_str(), "verified" | "unavailable")
-        && b.evidence.as_deref().is_none_or(|v| v.trim().is_empty()) {
-        return Err(LcError::Bad("verified or unavailable needs observation evidence".into()));
-    }
-    let sup = store::get_or_init(&app.db).await.map_err(up)?;
-    let session = match sup.bot_id.as_deref() {
-        Some(id) => crate::db::active_run(&app.db, id).await.map_err(up)?.map(|r| r.id),
-        None => None,
-    };
-    if matches!(b.status.as_str(), "verified" | "unavailable") && session.is_none() {
-        return Err(LcError::Bad("cannot record a remote observation without an active manager session".into()));
-    }
-    store::set_remote_observed(
-        &app.db,
-        &b.status,
-        b.url.as_deref(),
-        source.as_str(),
-        session.as_deref(),
-        actor,
-        b.evidence.as_deref(),
-    )
-    .await
-    .map_err(up)?;
-    tracing::info!(status = %b.status, source = source.as_str(), actor = actor.unwrap_or(""), "remote entry observation recorded");
-    app.emit("supervisor_changed", json!({"remote": true})).await;
-    Ok(Json(super::remote::status(&app.db).await))
-}
-
-/// 絕對的 http／https 網址：協定要在最前面（不收前導空白、Tab、換行這些瀏覽器會幫忙吃掉的變形）、有主機、沒有空白或控制字元。
-fn is_http_url(u: &str) -> bool {
-    let rest = ["http://", "https://"].iter().find_map(|p| u.get(..p.len()).filter(|h| h.eq_ignore_ascii_case(p)).map(|_| &u[p.len()..]));
-    let Some(rest) = rest else { return false };
-    u.len() <= 2048 && !rest.is_empty() && !rest.starts_with(['/', '?', '#']) && !u.chars().any(|c| c.is_whitespace() || c.is_control())
-}
-
 // ------------------------------------------------------------------------ persona
 
 /// Which copy is which, and what the running session can honestly be said to have.
@@ -1917,75 +1815,6 @@ mod approval_decision_tests {
         std::fs::remove_dir_all(&app.data_dir).unwrap();
     }
 
-    /// issue #463：`post_remote_observation` 的 `actor` 以前整個由 body 決定，而它的 doc 卻寫
-    /// 「refuses an anonymous caller」——擋的只有空字串。照 #414 的形狀：驗過才寫得出 `AGM:<role>`。
-    #[tokio::test]
-    async fn a_remote_observation_records_who_it_really_came_from() {
-        let app = app().await;
-        let obs = |app: &Arc<App>, h: HeaderMap, actor: Option<&str>| {
-            let (app, actor) = (app.clone(), actor.map(str::to_string));
-            async move {
-                let mut body = json!({"status": "requested", "source": "manual"});
-                if let Some(a) = actor {
-                    body["actor"] = json!(a);
-                }
-                post_remote_observation(State(app), h, Json(serde_json::from_value(body).unwrap())).await
-            }
-        };
-        let recorded = |app: &Arc<App>| {
-            let app = app.clone();
-            async move {
-                sqlx::query_scalar::<_, Option<String>>("SELECT remote_actor FROM supervisors WHERE id=?")
-                    .bind(store::SUPERVISOR_ID)
-                    .fetch_one(&app.db)
-                    .await
-                    .unwrap()
-            }
-        };
-
-        // 沒驗過卻自稱是總管：包成 user(...)，變不成 AGM 開頭。
-        let _ = obs(&app, HeaderMap::new(), Some("AGM:responder")).await.unwrap();
-        let who = recorded(&app).await.unwrap_or_default();
-        assert_eq!(who, "user(AGM:responder)");
-        assert!(!who.starts_with(store::SUPERVISOR_ID), "未驗證的呼叫端寫不出 AGM 開頭的身分，卻拿到 {who:?}");
-
-        // 驗過的角色：以 token 為準，body 的自稱不影響。
-        let agm = agm_role_headers(&app).await;
-        let _ = obs(&app, agm, Some("我是別人")).await.unwrap();
-        assert_eq!(recorded(&app).await.unwrap_or_default(), format!("{}:patrol", store::SUPERVISOR_ID));
-
-        app.db.close().await;
-        std::fs::remove_dir_all(&app.data_dir).unwrap();
-    }
-
-    /// 遠端入口的 `url` 會被前端放進 `<a href>`：任何拿得到 token 的呼叫端（含被 prompt injection 的 bot）寫進 `javascript:`，
-    /// 使用者一按就在 app 的 origin 執行（記憶體裡的 daemon token 跟著暴露）。只收 http／https，其餘 400，且什麼都不寫。
-    #[tokio::test]
-    async fn a_remote_observation_url_must_be_http_or_https() {
-        let app = app().await;
-        let post = |url: serde_json::Value| {
-            let app = app.clone();
-            async move {
-                let body = json!({"status": "requested", "source": "manual", "url": url});
-                post_remote_observation(State(app), HeaderMap::new(), Json(serde_json::from_value(body).unwrap())).await
-            }
-        };
-        let stored = || async { sqlx::query_scalar::<_, Option<String>>("SELECT remote_url FROM supervisors WHERE id=?").bind(store::SUPERVISOR_ID).fetch_one(&app.db).await.unwrap() };
-        for bad in ["javascript:alert(1)", "JaVaScRiPt:alert(1)", "  javascript:alert(1)", "data:text/html;base64,PHNjcmlwdD4=", "vbscript:msgbox(1)", "file:///etc/passwd", "//evil.example/x", "/relative", "not a url", ""] {
-            let err = post(json!(bad)).await.unwrap_err();
-            assert!(matches!(err, LcError::Bad(_)), "{bad:?} 要 400，卻是 {err:?}");
-            assert_eq!(stored().await, None, "{bad:?} 不能寫進去");
-        }
-        let _ = post(json!("https://claude.ai/code/session_1")).await.unwrap();
-        assert_eq!(stored().await.as_deref(), Some("https://claude.ai/code/session_1"));
-        // 沒帶 url 照舊（`url` 是選填）。
-        let body = json!({"status": "requested", "source": "manual"});
-        let _ = post_remote_observation(State(app.clone()), HeaderMap::new(), Json(serde_json::from_value(body).unwrap())).await.unwrap();
-
-        app.db.close().await;
-        std::fs::remove_dir_all(&app.data_dir).unwrap();
-    }
-
     /// 第一個裁示定案。後到的 deny 不能把 approved 翻成 denied——那會讓同一筆核准有兩個
     /// 「第一次決定」，而執行端可能已經拿著 approved 去建置了。
     /// HTTP 這一層的契約：重送同一個 request id 回同一筆、`created` 分得出來、
@@ -2619,17 +2448,6 @@ mod approval_decision_tests {
         assert_eq!(store::approval(&app.db, &id).await.unwrap().unwrap().status, "pending", "被拒的裁示不能動核准");
         let notes: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM supervisor_notes WHERE kind='approval_decision'").fetch_one(&app.db).await.unwrap();
         assert_eq!(notes, 0, "也不留稽核列");
-        app.db.close().await;
-        std::fs::remove_dir_all(&app.data_dir).unwrap();
-    }
-
-    /// #970：`remote` 的 evidence 每次 GET 都讀，超過上限就 400、不寫。
-    #[tokio::test]
-    async fn remote_observation_evidence_is_bounded() {
-        let app = app().await;
-        let body = json!({"status": "unknown", "source": "manual", "evidence": "e".repeat(8001)});
-        let err = post_remote_observation(State(app.clone()), HeaderMap::new(), Json(serde_json::from_value(body).unwrap())).await.unwrap_err();
-        assert!(matches!(&err, LcError::Bad(m) if m.contains("evidence")), "{err:?}");
         app.db.close().await;
         std::fs::remove_dir_all(&app.data_dir).unwrap();
     }
@@ -3335,12 +3153,8 @@ mod desired_running_tests {
     async fn a_stop_whose_intent_write_fails_neither_stops_nor_reports_success() {
         let app = flow_tests::app().await;
         store::set_desired_running(&app.db, true).await.unwrap();
-        // 停掉時會被改寫成 `unknown`：拿它當「副作用有沒有跑過」的探針。
-        sqlx::query("UPDATE supervisors SET remote_status='requested' WHERE id=?")
-            .bind(store::SUPERVISOR_ID)
-            .execute(&app.db)
-            .await
-            .unwrap();
+        // 停掉之後會推 `supervisor_changed {stopped:true}`：拿它當「副作用有沒有跑過」的探針。
+        let mut events = app.subscribe();
         break_intent_writes(&app).await;
 
         let err = post_stop(State(app.clone())).await.unwrap_err();
@@ -3348,12 +3162,9 @@ mod desired_running_tests {
         let msg = format!("{err:?}");
         assert!(msg.contains("could not persist desired_running"), "錯誤要講清楚是哪一步壞了：{msg}");
         assert_eq!(wanted(&app).await, 1, "意圖沒動：看門狗讀到的還是使用者上一次的決定");
-        let remote: String = sqlx::query_scalar("SELECT remote_status FROM supervisors WHERE id=?")
-            .bind(store::SUPERVISOR_ID)
-            .fetch_one(&app.db)
-            .await
-            .unwrap();
-        assert_eq!(remote, "requested", "停的那段副作用一步都沒跑，原樣重試是安全的");
+        while let Ok(ev) = events.try_recv() {
+            assert_ne!(ev.kind, "supervisor_changed", "停的那段副作用一步都沒跑，原樣重試是安全的：{ev:?}");
+        }
     }
 
     /// Start：意圖**先寫**。啟動本身失敗（這裡是測試環境沒有 herdr）時 `desired_running` 照樣留著，

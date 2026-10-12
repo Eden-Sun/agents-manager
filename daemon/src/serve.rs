@@ -270,6 +270,13 @@ pub async fn serve(config_path: Option<PathBuf>, dev_watch_all_panes: bool) -> R
     if let Err(e) = supervisor::responder::merge_into_manager_project(&app).await {
         tracing::warn!(error = ?e, "AGM 協調者併回巡檢的專案失敗，這一輪維持原樣");
     }
+    // 手機 Remote Control 已廢（#1477）：既有安裝的巡檢／協調者 args 裡留著的 `--remote-control <name>` 在這裡拿掉。
+    // 冪等；只改 config.toml，執行中的 session 照舊（launch_rev 變了＝標需重啟），不自動重啟 AGM。
+    match supervisor::setup::strip_remote_control_args(&app).await {
+        Ok(0) => {}
+        Ok(n) => tracing::info!(n, "removed --remote-control from supervisor bot args; restart them to apply"),
+        Err(e) => tracing::warn!(error = ?e, "could not remove --remote-control from supervisor bot args"),
+    }
     // 換版後已安裝的 bin/agm 跟著換（只動 bin/agm；寫不進去記 warn＋inbox，不擋開機，SPEC §18.2a）。
     supervisor::cli_refresh::refresh_on_startup(&app).await;
     crate::runners::supervisor::runtime::respawn(&app).await;

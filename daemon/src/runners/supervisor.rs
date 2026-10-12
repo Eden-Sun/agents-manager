@@ -8,7 +8,7 @@ use axum::response::{IntoResponse, Response};
 use std::sync::Arc;
 
 pub(crate) use crate::supervisor::{
-    assignment_state, bot_requests, controller, failover, health as health_core, idle_sleep, maintenance, persona, ports, remote, responder,
+    assignment_state, bot_requests, controller, failover, health as health_core, idle_sleep, maintenance, persona, ports, responder,
     roles, setup, store, timing, watchdog,
 };
 pub(crate) use crate::supervisor::{assign, check_assignable, lock, manager_liveness, sanitized_state, start_manager, start_requested, status_json, stop_requested};

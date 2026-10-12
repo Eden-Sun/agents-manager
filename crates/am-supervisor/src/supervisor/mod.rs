@@ -18,7 +18,6 @@ pub mod maintenance;
 pub mod persona;
 pub mod policy;
 pub mod ports;
-pub mod remote;
 pub mod responder;
 pub mod responder_api;
 pub mod role_faults;
@@ -173,9 +172,6 @@ pub async fn stop_requested(app: &(impl crate::capabilities::Db + crate::capabil
         .ok_or_else(|| LcError::conflict("supervisor is not set up", json!({"reason": "not_configured"})))?;
     store::set_desired_running(app.db(), false).await.map_err(persist_intent_failed)?;
     app.stop_bot(&bot.id).await?;
-    // A stopped CLI takes its Remote Control session with it; claiming otherwise would send
-    // the user to a dead URL on their phone.
-    let _ = store::set_remote(app.db(), "unknown", None).await;
     app.emit("supervisor_changed", json!({"stopped": true})).await;
     Ok(())
 }
@@ -221,12 +217,6 @@ pub async fn start_manager(app: &(impl crate::capabilities::Db + crate::capabili
     {
         tracing::warn!(error = ?e, "AGM bootstrap prompt was not delivered");
     }
-    // The bot's args carry `--remote-control AGM`, which is a *request*. Whether a remote
-    // session actually came up is something only an observation can say, so the status stays
-    // `requested` until something verifies it — and it is bound to *this* run, so a later
-    // restart cannot inherit the claim (see `remote.rs`).
-    let session = crate::db::active_run(app.db(), &bot.id).await.map_err(up)?.map(|r| r.id);
-    let _ = store::set_remote_observed(app.db(), "requested", None, "argv", session.as_deref(), None, None).await;
     let _ = store::set_status(app.db(), "", detail).await;
     let sup = store::get_or_init(app.db()).await.map_err(up)?;
     let gen = if sup.generation == 0 {
@@ -299,14 +289,10 @@ pub async fn status_json(app: &(impl crate::capabilities::Db + crate::supervisor
         "generation": sup.generation,
         "cwd": sup.cwd,
         "quota_reset_at": sup.quota_reset_at,
-        // Computed, not just read back: an observation that has expired or belongs to a session
-        // that is gone reads as `unknown` here rather than as the word it was stored under.
-        "remote": remote::status(app.db()).await,
         "pending_count": store::pending_count(app.db()).await.map_err(up)?,
         "assignments": assignments.iter().map(store::Assignment::to_json).collect::<Vec<_>>(),
         // 雙角色（SPEC §18.15）。上面那些欄位一直是巡檢的，舊的呼叫端照讀不受影響。
         "role": roles::Role::Patrol.as_str(),
-        "remote_provider": roles::Role::Patrol.as_str(),
         "stats": roles::get(app.db(), roles::Role::Patrol).await.map_err(up)?.stats_json(),
         "responder": responder::status_json(app).await?,
         // 上次成功上線：現在跑的這顆 binary 的 commit 與它起來的時間。前端用它排掉上線以前的
@@ -553,9 +539,8 @@ pub async fn check_assignable(db: &SqlitePool, target_bot_id: &str) -> Result<()
 
 /// Where an assignment came from: `(source, source_key, text)`.
 ///
-/// The phone talks to the manager over Remote Control, which is a native session — its user
-/// echo reaches the daemon through the hook / transcript path, and that path is **not**
-/// verified to carry every word. So: a caller-supplied `source_turn_id` must belong to the
+/// A native session's user echo reaches the daemon through the hook / transcript path, and
+/// that path is **not** verified to carry every word. So: a caller-supplied `source_turn_id` must belong to the
 /// manager (a worker must not be able to name someone else's turn as its authority); with no
 /// id we fall back to whatever turn the manager is on right now; and if no user text can be
 /// read back off that turn, the source is labelled `assignment_text_fallback` rather than
@@ -776,7 +761,7 @@ mod tests {
         let bot = crate::testing::claude_bot(&app, &env.project_id, "agm-stopping").await.id;
         crate::testing::fake_run(&app, &bot).await;
         store::get_or_init(&app.db).await.unwrap();
-        sqlx::query("UPDATE supervisors SET bot_id=?, generation=1, status_detail='before', remote_status='unknown' WHERE id=?")
+        sqlx::query("UPDATE supervisors SET bot_id=?, generation=1, status_detail='before' WHERE id=?")
             .bind(&bot).bind(store::SUPERVISOR_ID).execute(&app.db).await.unwrap();
         sqlx::query("UPDATE runs SET state='stopping' WHERE bot_id=?").bind(&bot).execute(&app.db).await.unwrap();
 
@@ -785,6 +770,17 @@ mod tests {
         assert_eq!(v["reason"], "run_stopping");
         let s = store::get_or_init(&app.db).await.unwrap();
         assert_eq!(s.status_detail.as_deref(), Some("before"), "沒啟動就不能改狀態");
-        assert_eq!(s.remote_status, "unknown", "也不能宣稱 remote 已請求");
+    }
+
+    /// #1477：手機 Remote Control 已廢，`GET /api/supervisor` 不再有遠端入口的狀態（頂層與協調者那一格都一樣）。
+    #[tokio::test]
+    async fn the_status_payload_no_longer_carries_a_remote_entry() {
+        let env = crate::testing::env().await;
+        let app = env.app.clone();
+        let v = super::status_json(&app).await.unwrap();
+        for key in ["remote", "remote_provider"] {
+            assert!(v.get(key).is_none(), "{key} 已拿掉：{v}");
+        }
+        assert!(v["responder"].get("remote_control").is_none(), "協調者那格也不再講 remote_control：{v}");
     }
 }

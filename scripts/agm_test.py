@@ -1352,32 +1352,12 @@ class PersonaCommandTest(CliCase):
         self.assertEqual(self.bad("persona", "show")["error"], "unsupported")
 
 
-class RemoteCommandTest(CliCase):
-    def setUp(self):
-        super().setUp()
-        FakeDaemon.routes["GET /api/supervisor/remote"] = (
-            200,
-            {"status": "requested", "source": "argv", "capability": {"status": "unsupported"}},
-        )
-        FakeDaemon.routes["POST /api/supervisor/remote"] = (200, {"status": "verified"})
-
-    def test_show_reports_the_capability_limit_rather_than_a_connection(self):
-        out = self.ok("remote", "show")
-        self.assertEqual(out["capability"]["status"], "unsupported")
-        self.assertEqual(out["status"], "requested")
-        self.assertNotEqual(out["status"], "active")
-
-    def test_claiming_it_works_needs_an_actor(self):
-        """「通了」是一個人的宣稱，就要留下是誰宣稱的。"""
-        self.assertEqual(self.bad("remote", "observe", "--status", "verified")["error"], "bad_args")
-        self.assertEqual([r for r in FakeDaemon.seen if r["method"] == "POST"], [], "缺 actor 時不送出")
-        self.ok("remote", "observe", "--status", "verified", "--actor", "tony", "--evidence", "手機連過")
-        body = [r for r in FakeDaemon.seen if r["method"] == "POST"][-1]["body"]
-        self.assertEqual((body["status"], body["source"], body["actor"]), ("verified", "manual", "tony"))
-
-    def test_argv_is_not_an_accepted_source(self):
-        code, _out, _err = self.run_cli("remote", "observe", "--source", "argv", "--actor", "tony")
-        self.assertEqual(code, 2, "argv 是 daemon 自己的紀錄，不能拿來當觀測來源")
+class RemoteCommandRemovedTest(CliCase):
+    def test_remote_is_no_longer_a_subcommand(self):
+        """手機 Remote Control 已廢（#1477）：`agm remote` 不存在，也不會再打 /api/supervisor/remote。"""
+        code, _out, _err = self.run_cli("remote", "show")
+        self.assertEqual(code, 2, "argparse 不認得的子命令")
+        self.assertEqual(FakeDaemon.seen, [], "什麼請求都不該送出")
 
 
 class BuildInputsCommandTest(CliCase):

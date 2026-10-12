@@ -354,12 +354,6 @@ pub fn router(app: Arc<App>) -> Router {
         .route("/deploy/now", post(crate::deploy_now::post_now))
         .route("/deploy/wait/escalate", post(crate::deploy_wait::post_escalate))
         .route("/deploy/wait/dismiss", post(crate::deploy_wait::post_dismiss))
-        // 遠端入口：argv 只算 requested，宣稱通了要有帶 actor 的觀測（SPEC §18.12）。
-        .route(
-            "/supervisor/remote",
-            get(crate::runners::supervisor::api::get_remote).layer(agm_gate!(app))
-                .merge(post(crate::runners::supervisor::api::post_remote_observation).layer(agm_gate!(app))),
-        )
         // 重建／重啟的核准與執行租約（SPEC §18.10）。
         .route(
             "/supervisor/approvals",
@@ -12843,33 +12837,6 @@ mod per_principal_auth_tests {
             let row = crate::supervisor::store::approval(&e.app.db, id).await.unwrap().unwrap();
             assert_eq!(row.status, expected_status, "被拒絕的 {decision} 不能改審批狀態");
         }
-    }
-
-    /// `/supervisor/remote` 寫的是 AGM 的遠端入口觀測；有效的一般 bot token 不該被 `actor_role(None)` 當成 User。
-    #[tokio::test]
-    async fn a_plain_bot_cannot_write_supervisor_remote_observations() {
-        let e = crate::testing::env().await;
-        let bot = distinct_bot(&e, "remote-observation-bot").await;
-        let body = json!({"status": "requested", "source": "manual", "actor": "self-claimed"}).to_string();
-        let response = raw(
-            e.app.clone(),
-            format!(
-                "POST /api/supervisor/remote HTTP/1.1\r\nHost: 127.0.0.1\r\nX-AM-Bot-Id: {}\r\nX-AM-Bot-Token: {}\r\nContent-Type: application/json\r\nConnection: close\r\nContent-Length: {}\r\n\r\n{body}",
-                bot.id,
-                bot.hook_token,
-                body.len()
-            ),
-        )
-        .await;
-        assert!(response.starts_with("HTTP/1.1 403"), "一般 bot 不能寫入 remote observation：{response}");
-        assert!(response.contains("role_required"), "{response}");
-        let actor: Option<String> = sqlx::query_scalar("SELECT remote_actor FROM supervisors WHERE id=?")
-            .bind(crate::supervisor::store::SUPERVISOR_ID)
-            .fetch_optional(&e.app.db)
-            .await
-            .unwrap()
-            .flatten();
-        assert_eq!(actor, None, "被拒絕的請求不應寫入觀測");
     }
 
     /// acquire 的 owner 不能只靠 body 自稱：否則另一顆 bot 能拿受害者已核准的 approval 開出它的 lease。

@@ -209,7 +209,6 @@ mod tests {
         ("incidents.rs", include_str!("incidents.rs")),
         ("maintenance.rs", include_str!("maintenance.rs")),
         ("mod.rs", include_str!("mod.rs")),
-        ("remote.rs", include_str!("remote.rs")),
         ("responder.rs", include_str!("responder.rs")),
         ("responder_api.rs", include_str!("responder_api.rs")),
         ("role_faults.rs", include_str!("role_faults.rs")),

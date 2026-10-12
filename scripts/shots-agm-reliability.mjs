@@ -1,7 +1,7 @@
-// AGM 總管面板的畫面證據（驗收狀態、系統故障、遠端入口能力限制）。
+// AGM 總管面板的畫面證據（驗收狀態、系統故障）。
 //
 // **走 mock，不碰正式 daemon 也不碰 5173**：`VITE_MOCK=1`，自己起一個 vite（預設 5199）。
-// 這份改動會改交辦狀態與遠端入口的說法，用真 session 驗等於燒使用者的額度。
+// 這份改動會改交辦狀態的說法，用真 session 驗等於燒使用者的額度。
 //
 //   cd web && VITE_MOCK=1 bunx vite --port 5199 &
 //   OUT=docs/screenshots/agm-reliability node scripts/shots-agm-reliability.mjs
@@ -62,11 +62,10 @@ await shot('2-awaiting-review')
 await ev(`document.querySelector('.agm-panel')?.scrollIntoView(false); document.querySelector('.modal-body,.agm-panel')?.scrollTo(0, 9999)`)
 await shot('3-assignments-and-incidents')
 
-// 檢查文案：不能出現「已連線」，等驗收那筆不能被畫成已完成。
+// 檢查文案：等驗收那筆不能被畫成已完成。
 const text = await ev(`document.querySelector('.agm-panel')?.innerText ?? ''`)
 const checks = [
-  ['遠端入口不宣稱已連線', !text.includes('已連線')],
-  ['遠端入口說明能力限制', text.includes('沒有可靠的 Remote Control 觀測來源')],
+  ['面板不畫遠端入口（手機 Remote Control 已廢，#1477）', !/遠端入口|Remote Control/.test(text)],
   ['等驗收的交辦標成「等驗收」', text.includes('等驗收')],
   ['等驗收的交辦沒有被說成已完成', !text.includes('已完成')],
   ['系統故障有自己的區塊', text.includes('系統故障')],

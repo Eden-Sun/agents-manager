@@ -422,11 +422,6 @@ pub async fn switch_candidate(
     if !restarted {
         let _ = store::set_status(&app.db(), "", Some(&format!("switched to {next}: {reason}"))).await;
     }
-    // A live switch keeps the session (and its Remote Control link); a restart does not, so
-    // the remote entry point has to be re-observed rather than assumed.
-    if !applied {
-        let _ = store::set_remote(&app.db(), if restarted { "requested" } else { "unknown" }, None).await;
-    }
     tracing::info!(model = next, reason, applied, restarted, "supervisor candidate switched");
     app.emit("supervisor_changed", json!({"model": next, "generation": gen, "applied_live": applied, "restarted": restarted})).await;
     spawn(app.clone(), gen);

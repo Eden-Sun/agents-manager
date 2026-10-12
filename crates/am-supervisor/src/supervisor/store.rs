@@ -35,7 +35,8 @@ CREATE TABLE IF NOT EXISTS supervisors (
   fallback_tries INTEGER NOT NULL DEFAULT 0,
   cooldown_until TEXT,
   quota_reset_at TEXT,
-  -- Never asserted from argv: only a verified Remote Control session sets 'active'.
+  -- remote_*：Remote Control 的舊狀態欄，2026-10-12（#1477）起不讀不寫；欄位留著，舊 binary 的 SELECT 與
+  -- ops 腳本的 INSERT 才不會壞（拿掉要升 SCHEMA_VERSION，沒有收益）。
   remote_status TEXT NOT NULL DEFAULT 'unknown',
   remote_url TEXT,
   summary TEXT,
@@ -153,7 +154,7 @@ CREATE INDEX IF NOT EXISTS supervisor_inbox_open ON supervisor_inbox(state) WHER
 CREATE TABLE IF NOT EXISTS supervisor_incidents (
   id TEXT PRIMARY KEY,
   supervisor_id TEXT NOT NULL,
-  -- host_disconnected | bot_stopped | assignment_stalled | notify_exhausted | remote_entry | approval_stalled
+  -- host_disconnected | bot_stopped | assignment_stalled | notify_exhausted | approval_stalled（舊的 remote_entry 已隨 #1477 移除，開著的會被下一拍探針收掉）
   kind TEXT NOT NULL,
   -- What is wrong: a host name, a bot id, an assignment id. Never a message.
   resource TEXT NOT NULL,
@@ -310,8 +311,7 @@ pub async fn migrate(pool: &SqlitePool) -> Result<()> {
         // running binary's is how "there is a newer embedded version" is distinguished from
         // "somebody deliberately customised this".
         ("persona_seed_hash", "ALTER TABLE supervisors ADD COLUMN persona_seed_hash TEXT"),
-        // What the remote-entry status is based on. Without these, `remote_status` was a word
-        // with no provenance and no expiry — and `requested` was being read as "connected".
+        // 舊的 remote-entry 觀測欄（#1477 起不讀不寫，欄位保留，見 CREATE TABLE 的註解）。
         ("remote_source", "ALTER TABLE supervisors ADD COLUMN remote_source TEXT"),
         ("remote_observed_at", "ALTER TABLE supervisors ADD COLUMN remote_observed_at TEXT"),
         // The run the observation was made against: a restart invalidates it.
@@ -488,8 +488,6 @@ pub struct Supervisor {
     pub fallback_tries: i64,
     pub cooldown_until: Option<String>,
     pub quota_reset_at: Option<String>,
-    pub remote_status: String,
-    pub remote_url: Option<String>,
     pub summary: Option<String>,
     pub summary_version: i64,
     pub desired_running: i64,
@@ -502,11 +500,6 @@ pub struct Supervisor {
     pub persona_source: Option<String>,
     pub persona_updated_at: Option<String>,
     pub persona_seed_hash: Option<String>,
-    pub remote_source: Option<String>,
-    pub remote_observed_at: Option<String>,
-    pub remote_session_id: Option<String>,
-    pub remote_actor: Option<String>,
-    pub remote_evidence: Option<String>,
     pub watchdog_gave_up_at: Option<String>,
     pub watchdog_last_error: Option<String>,
     pub created_at: String,
@@ -787,45 +780,6 @@ pub async fn seed_persona_from(pool: &SqlitePool, text: &str, source: &str, embe
     .rows_affected()
         > 0;
     Ok(planted)
-}
-
-/// Record what is known about the remote entry point, and **where it came from**.
-///
-/// `source` is `argv` (we asked for a session), `manual` (a person says they reached it) or
-/// `provider` (an observation, when one becomes available). `session_id` binds the claim to the
-/// run it was made against, so a restart cannot inherit it.
-pub async fn set_remote_observed(
-    pool: &SqlitePool,
-    status: &str,
-    url: Option<&str>,
-    source: &str,
-    session_id: Option<&str>,
-    actor: Option<&str>,
-    evidence: Option<&str>,
-) -> Result<()> {
-    sqlx::query(
-        "UPDATE supervisors
-            SET remote_status=?, remote_url=?, remote_source=?, remote_session_id=?, remote_actor=?,
-                remote_evidence=?, remote_observed_at=?, updated_at=? WHERE id=?",
-    )
-    .bind(status)
-    .bind(url)
-    .bind(source)
-    .bind(session_id)
-    .bind(actor)
-    .bind(evidence)
-    .bind(crate::db::now())
-    .bind(crate::db::now())
-    .bind(SUPERVISOR_ID)
-    .execute(pool)
-    .await?;
-    Ok(())
-}
-
-/// The daemon's own bookkeeping: we started (or stopped) the session, so this is what we asked
-/// for. `argv` can never mean more than `requested`.
-pub async fn set_remote(pool: &SqlitePool, status: &str, url: Option<&str>) -> Result<()> {
-    set_remote_observed(pool, status, url, "argv", None, None, None).await
 }
 
 /// Applying a candidate switch: the new model is recorded only once it is actually in effect,
