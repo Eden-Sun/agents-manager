@@ -103,6 +103,7 @@ import {
 } from './unread'
 import { fetchSupervisor } from '../api/supervisor'
 import { writeShared } from './mobilePreview'
+import { browserTabStores, readTabValue, writeTabValue } from '../lib/tabStorage'
 import { BOT_KINDS, LOCAL_HOST, quotaKey } from '../api/types'
 import { supervisorOwnedAsk, type AgmDeleteAsk } from '../lib/agmDelete'
 import { handedOffReason, handedOffTo } from '../lib/handoff'
@@ -187,26 +188,23 @@ interface Selection {
 
 const NO_SELECTION: Selection = { botId: null, projectId: null }
 
-function readSelection(): Selection {
-  try {
-    const raw = localStorage.getItem(SELECTION_KEY)
-    const parsed: unknown = raw ? JSON.parse(raw) : null
-    if (!isRec(parsed)) return NO_SELECTION
-    return {
-      botId: optStr(pick(parsed, 'botId')),
-      projectId: optStr(pick(parsed, 'projectId')),
-    }
-  } catch {
-    return NO_SELECTION
+function parseSelection(raw: string): Selection | null {
+  const parsed: unknown = JSON.parse(raw)
+  if (!isRec(parsed)) return null
+  return {
+    botId: optStr(pick(parsed, 'botId')),
+    projectId: optStr(pick(parsed, 'projectId')),
   }
 }
 
+/** 重整回到這個分頁自己的選取（sessionStorage）；新開的分頁才拿所有分頁共用的最後一次（見 `lib/tabStorage.ts`）。 */
+function readSelection(): Selection {
+  return readTabValue(SELECTION_KEY, parseSelection, browserTabStores()) ?? NO_SELECTION
+}
+
 function writeSelection(sel: Selection) {
-  try {
-    writeShared(() => localStorage.setItem(SELECTION_KEY, JSON.stringify(sel)))
-  } catch {
-    /* storage unavailable: the selection still holds for this page */
-  }
+  // 預覽 iframe 與主畫面共用 sessionStorage／localStorage：只有主畫面寫（`writeShared`）。
+  writeShared(() => writeTabValue(SELECTION_KEY, JSON.stringify(sel), browserTabStores()))
 }
 
 const initialSelection = readSelection()
@@ -225,34 +223,29 @@ export type ShellView = {
   traced?: boolean
 }
 
-/** 重整要回到同一個 shell；pane 可能已關，`bootstrap` 會對 `GET /api/hosts/:host/shells` 驗一次。 */
-function readShellView(): ShellView | null {
-  try {
-    const raw = localStorage.getItem(SHELL_VIEW_KEY)
-    const parsed: unknown = raw ? JSON.parse(raw) : null
-    if (!isRec(parsed)) return null
-    const host = optStr(pick(parsed, 'host'))
-    const paneId = optStr(pick(parsed, 'paneId'))
-    if (!host || !paneId) return null
-    return {
-      host,
-      paneId,
-      cwd: optStr(pick(parsed, 'cwd')) ?? '',
-      // 重整之後唯讀要跟著回來，不然 dev server 的面板一重整就又能打字了。
-      readOnly: parsed.readOnly === true,
-      traced: parsed.traced === true,
-    }
-  } catch {
-    return null
+function parseShellView(raw: string): ShellView | null {
+  const parsed: unknown = JSON.parse(raw)
+  if (!isRec(parsed)) return null
+  const host = optStr(pick(parsed, 'host'))
+  const paneId = optStr(pick(parsed, 'paneId'))
+  if (!host || !paneId) return null
+  return {
+    host,
+    paneId,
+    cwd: optStr(pick(parsed, 'cwd')) ?? '',
+    // 重整之後唯讀要跟著回來，不然 dev server 的面板一重整就又能打字了。
+    readOnly: parsed.readOnly === true,
+    traced: parsed.traced === true,
   }
 }
 
+/** 重整要回到同一個 shell（這個分頁自己的，見 `readSelection`）；pane 可能已關，`bootstrap` 會對 `GET /api/hosts/:host/shells` 驗一次。 */
+function readShellView(): ShellView | null {
+  return readTabValue(SHELL_VIEW_KEY, parseShellView, browserTabStores())
+}
+
 function writeShellView(v: ShellView | null) {
-  try {
-    writeShared(() => (v ? localStorage.setItem(SHELL_VIEW_KEY, JSON.stringify(v)) : localStorage.removeItem(SHELL_VIEW_KEY)))
-  } catch {
-    /* storage unavailable */
-  }
+  writeShared(() => writeTabValue(SHELL_VIEW_KEY, v ? JSON.stringify(v) : null, browserTabStores()))
 }
 
 const initialShellView = readShellView()
