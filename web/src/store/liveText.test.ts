@@ -73,3 +73,8 @@ test('codex 狀態列的模型名不限於清單裡的 effort（minimal／none�
   // 項目符號不是模型名（#1555 在 daemon 的同一條）。
   assert.equal(cleanLiveText('- 設定檔 · ~/.codex/config.toml 已更新'), '- 設定檔 · ~/.codex/config.toml 已更新')
 })
+
+test('舊版 spinner（`⠦ Thinking… 52s`，沒有括號）是雜訊，同 daemon is_legacy_spinner', () => {
+  assert.equal(cleanLiveText('⠦ Thinking… 52s'), null)
+  assert.equal(cleanLiveText('好的，我來處理。\n⠦ Thinking… 52s'), '好的，我來處理。')
+})
