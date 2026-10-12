@@ -1276,6 +1276,23 @@ async fn adopt_child(
     Ok(bot_id)
 }
 
+/// 讀不出狀態列時，連續失敗的兩次讀取之間跳過的拍數上限（一拍約 10 秒，64 拍約 10 分鐘）。
+const PROBE_SKIP_MAX: u32 = 64;
+
+/// 收編的 codex run 讀不出狀態列的退避（#1652）：`misses` 是連續讀不出來的次數，`skip` 是接下來還要跳過的拍數。
+#[derive(Clone, Copy, Default)]
+struct StatusLineMiss {
+    misses: u32,
+    skip: u32,
+}
+
+/// run id → 退避狀態。讀得出來（之後 runtime 會寫進去，run 不再符合條件）就移除；daemon 重啟也會清空。
+/// 用拍數而不是牆鐘，所以測試不必等時間。
+fn status_line_misses() -> &'static std::sync::Mutex<HashMap<String, StatusLineMiss>> {
+    static MISSES: std::sync::OnceLock<std::sync::Mutex<HashMap<String, StatusLineMiss>>> = std::sync::OnceLock::new();
+    MISSES.get_or_init(Default::default)
+}
+
 /// `runs.runtime_*` for adopted codex runs (SPEC §4.4a: no silently unapplied values; `/fast` is
 /// a toggle). Only fills NULLs — a start or live apply already wrote the truth.
 async fn fill_codex_runtime(app: &(impl crate::capabilities::BotStatusEmit + crate::capabilities::Db + crate::capabilities::Emit), host: &str, client: &crate::herdr::HerdrClient) {
@@ -1296,7 +1313,30 @@ async fn fill_codex_runtime(app: &(impl crate::capabilities::BotStatusEmit + cra
         }
     };
     for (run_id, pane_id) in rows {
+        // 退避中：這一拍不讀畫面，只把要跳過的拍數減一（#1652）。
+        let backing_off = {
+            let mut misses = status_line_misses().lock().unwrap_or_else(|e| e.into_inner());
+            match misses.get_mut(&run_id) {
+                Some(miss) if miss.skip > 0 => {
+                    miss.skip -= 1;
+                    true
+                }
+                _ => false,
+            }
+        };
+        if backing_off {
+            continue;
+        }
         let Ok(read) = client.pane_read(&pane_id, "visible", 60).await else { continue };
+        if crate::codex_live::parse_status_line(&read.text).is_none() {
+            // 讀不出來：第 n 次失敗後跳過 2^(n-1) 拍，封頂 PROBE_SKIP_MAX。
+            let mut misses = status_line_misses().lock().unwrap_or_else(|e| e.into_inner());
+            let miss = misses.entry(run_id).or_default();
+            miss.misses = miss.misses.saturating_add(1);
+            miss.skip = (1u32 << (miss.misses - 1).min(6)).min(PROBE_SKIP_MAX);
+            continue;
+        }
+        status_line_misses().lock().unwrap_or_else(|e| e.into_inner()).remove(&run_id);
         // 同巡邏的校正：收編前就在 TUI 換過模型的 child，設定也跟著狀態列（不然 argv 抄來的舊值永遠留著）。
         if crate::codex_live::correct_runtime_from_screen(app, &run_id, &read.text).await {
             tracing::info!(host, run = %run_id, "codex runtime read off an adopted pane's status line");
@@ -4491,5 +4531,92 @@ mod snapshot_workspace_tests {
         let mapped: Option<String> =
             sqlx::query_scalar("SELECT workspace_id FROM projects WHERE id=?").bind(&env.project_id).fetch_one(&app.db).await.unwrap();
         assert_eq!(mapped.as_deref(), Some(ws.workspace_id.as_str()), "pane 還在那個 workspace，映射不能清掉");
+    }
+}
+
+#[cfg(test)]
+mod codex_runtime_probe_tests {
+    use crate::config::LOCAL_HOST;
+    use crate::db;
+    use crate::testing as tt;
+
+    /// 收編的 codex run：`runtime_*` 三欄是 NULL，pane 認得得到。回傳 (run id, pane id)。
+    async fn adopted_codex_run(env: &tt::Env) -> (String, String) {
+        let bot = db::ulid();
+        sqlx::query(
+            "INSERT INTO bots (id, project_id, name, kind, args_json, autostart, inject_hooks, hook_token, created_at)
+             VALUES (?,?,'kid','codex','[]',0,1,'tok',?)",
+        )
+        .bind(&bot)
+        .bind(&env.project_id)
+        .bind(db::now())
+        .execute(&env.app.db)
+        .await
+        .unwrap();
+        let run = db::ulid();
+        let pane = "w9:pCodex".to_string();
+        sqlx::query(
+            "INSERT INTO runs (id, bot_id, state, agent_status, workspace_id, pane_id, agent_name, herdr_session, started_at)
+             VALUES (?,?,'running','idle','w9',?,'kid-agent','test',?)",
+        )
+        .bind(&run)
+        .bind(&bot)
+        .bind(&pane)
+        .bind(db::now())
+        .execute(&env.app.db)
+        .await
+        .unwrap();
+        (run, pane)
+    }
+
+    /// #1652：收編的 codex run 讀不出狀態列時，巡邏不能每拍（10 秒）都重讀畫面。
+    /// 連續讀不出來的間隔倍增（讀完跳過 1、2、4、8…拍，封頂 64 拍）：40 拍內只該讀第 1、3、6、11、20、37 拍。
+    #[tokio::test]
+    async fn an_unparseable_codex_status_line_is_reread_with_growing_gaps_not_every_pass() {
+        let env = tt::env().await;
+        let app = env.app.clone();
+        let client = crate::herdr::HerdrClient::new(env.dir.join("data/herdr.sock"));
+        let (_run, pane) = adopted_codex_run(&env).await;
+        env.herdr.set_screen(&pane, "codex 啟動中，狀態列還沒畫出來");
+
+        let mut read_on = Vec::new();
+        for pass in 1..=40 {
+            let before = env.herdr.calls_to("pane.read").len();
+            super::fill_codex_runtime(app.as_ref(), LOCAL_HOST, &client).await;
+            if env.herdr.calls_to("pane.read").len() > before {
+                read_on.push(pass);
+            }
+        }
+        assert_eq!(read_on, vec![1, 3, 6, 11, 20, 37]);
+    }
+
+    /// 退避不能把之後才出現的狀態列擋住：讀得出來後，最多跳過封頂的拍數就會寫進 `runtime_model`。
+    #[tokio::test]
+    async fn a_status_line_that_appears_later_is_picked_up_within_the_backoff_cap() {
+        let env = tt::env().await;
+        let app = env.app.clone();
+        let client = crate::herdr::HerdrClient::new(env.dir.join("data/herdr.sock"));
+        let (run, pane) = adopted_codex_run(&env).await;
+        env.herdr.set_screen(&pane, "codex 啟動中");
+        for _ in 0..10 {
+            super::fill_codex_runtime(app.as_ref(), LOCAL_HOST, &client).await;
+        }
+        env.herdr.set_screen(&pane, "  gpt-6.1-sol high · /tmp · Context 3% used\n");
+
+        let mut passes = 0;
+        let model = loop {
+            super::fill_codex_runtime(app.as_ref(), LOCAL_HOST, &client).await;
+            passes += 1;
+            let model: Option<String> = sqlx::query_scalar("SELECT runtime_model FROM runs WHERE id = ?")
+                .bind(&run)
+                .fetch_one(&app.db)
+                .await
+                .unwrap();
+            if model.is_some() || passes > 200 {
+                break model;
+            }
+        };
+        assert_eq!(model.as_deref(), Some("gpt-6.1-sol"));
+        assert!(passes <= 65, "讀得出來後要在封頂的拍數內校正，實際第 {passes} 拍");
     }
 }
