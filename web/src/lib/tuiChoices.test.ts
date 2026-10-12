@@ -786,3 +786,14 @@ test('縮排更深的 `2.` 說明行夾在選項之間，不能讓整份選單�
   )
   assert.equal(menu.cursor, 0)
 })
+
+test('選項說明裡縮排的 ❯ 行不是游標：不能因此認不出整份選單', () => {
+  // 第 1 項的說明是一行 shell 指令（以 ❯ 開頭）。游標只在第 1 項，這份選單仍要認得出來。
+  const menu = parseChoiceMenu('  Which approach?\n❯ 1. Fast path\n       ❯ npm test\n  2. Safe path\n\n  Enter to select\n')
+  assert.ok(menu)
+  assert.deepEqual(
+    menu.choices.map((c) => c.title),
+    ['Fast path', 'Safe path'],
+  )
+  assert.equal(menu.cursor, 0)
+})
