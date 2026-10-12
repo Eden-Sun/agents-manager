@@ -3623,6 +3623,63 @@ mod issue_17_tests {
         assert_eq!(remaining, 0);
     }
 
+    /// 重送中的回合 delivery 仍是 `ok`（寫 unknown 的那一步還沒成功），欠帳期間的清掃不能把補證基準刪掉。
+    #[tokio::test]
+    async fn owed_resend_keeps_its_late_proof_through_a_sweep() {
+        use super::super::delivery::{LogFormat, Proof};
+        use std::time::Instant;
+
+        let f = fixture("claude", "").await;
+        let path = with_transcript(&f, quiet()).await;
+        let proof = Proof::Transcript { format: LogFormat::Claude, path, session_id: "sess-1".into() };
+        let now = "2026-10-12T12:00:00.000Z";
+        let pending = late_proof::Pending::new("claude", "pane-17", &proof, 0, 0, "Reply with PONG please", now.into());
+        late_proof::note(&f.run_id, pending.clone());
+        late_proof::persist_pending_at(&f.env.app.db, &f.run_id, &pending, now).await.unwrap();
+
+        late_proof::sweep_at(&f.env.app, "2026-10-12T12:00:05.000Z", Instant::now()).await.unwrap();
+        let durable: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM late_proof_pending WHERE turn_id=?")
+            .bind(&f.turn_id)
+            .fetch_one(&f.env.app.db)
+            .await
+            .unwrap();
+        assert_eq!(durable, 1, "unknown 寫回還欠著、尚未到期：15 秒清掃不能刪掉補證基準");
+
+        sqlx::query("UPDATE turns SET delivery='unknown', delivery_verified=0 WHERE id=?")
+            .bind(&f.turn_id)
+            .execute(&f.env.app.db)
+            .await
+            .unwrap();
+        let app = f.env.app.clone();
+        late_proof::arm_after_owed_write(&app, &f.run_id, &f.bot_id, &f.turn_id);
+        assert!(late_proof::armed_in_tests().lock().unwrap().iter().any(|(t, _)| t == &f.turn_id), "欠帳補寫成 unknown 後要認領同一則基準");
+    }
+
+    /// 開機恢復只接回 session 仍相符的基準（SPEC：pane 與 session 都相符才恢復）；session 已換，就不為它開 watcher。
+    #[tokio::test]
+    async fn startup_does_not_restore_a_baseline_whose_session_changed() {
+        use super::super::delivery::{LogFormat, Proof};
+
+        let f = fixture("claude", "").await;
+        let path = with_transcript(&f, quiet()).await;
+        let proof = Proof::Transcript { format: LogFormat::Claude, path, session_id: "sess-1".into() };
+        let now = "2026-10-12T12:00:00.000Z";
+        let pending = late_proof::Pending::new("claude", "pane-17", &proof, 0, 0, "Reply with PONG please", now.into());
+        late_proof::note(&f.run_id, pending.clone());
+        late_proof::persist_pending_at(&f.env.app.db, &f.run_id, &pending, now).await.unwrap();
+        sqlx::query("UPDATE turns SET delivery='unknown', delivery_verified=0 WHERE id=?")
+            .bind(&f.turn_id)
+            .execute(&f.env.app.db)
+            .await
+            .unwrap();
+        sqlx::query("UPDATE runs SET native_session_id='sess-2' WHERE id=?").bind(&f.run_id).execute(&f.env.app.db).await.unwrap();
+
+        late_proof::forget_pending_for_restart_test(&f.run_id);
+        let restarted = tt::restart_app(&f.env).await;
+        assert_eq!(late_proof::recover_at_startup_at(&restarted, "2026-10-12T12:01:00.000Z").await.unwrap(), 0, "session 已換：不恢復");
+        assert!(!late_proof::armed_in_tests().lock().unwrap().iter().any(|(t, _)| t == &f.turn_id), "不能為換過的 session 開 watcher");
+    }
+
     async fn delivery_row(f: &Fixture) -> (String, String, i64, i64) {
         sqlx::query_as("SELECT status, delivery, delivery_verified, auto_resend FROM turns WHERE id = ?")
             .bind(&f.turn_id)
