@@ -169,7 +169,7 @@ mod remote_tests {
         assert_eq!(body["jev_options"], Value::Null, "Jev 沒開");
         let scripts = rig.scripts.lock().unwrap().clone();
         let read = scripts.iter().find(|s| s.contains(LOG_MARK)).expect("有一次遠端讀取");
-        assert!(read.contains(ROOT) && read.contains(&format!("/projects/*/{SID}.jsonl")) && read.contains(&format!("tail -c {TAIL_BYTES}")), "{read}");
+        assert!(read.contains(ROOT) && read.contains(SID) && read.contains(&format!(" {TAIL_BYTES} ")) && read.contains("os.O_NOFOLLOW"), "{read}");
     }
 
     /// 連續請求不會每次都打遠端（網頁每 5 秒輪詢、兩個視窗各一份）。

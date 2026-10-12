@@ -3510,8 +3510,9 @@ bot 用 `herdr agent start` 開的 claude 子 agent（本機或遠端）沒有 h
 - **找 session**：herdr `agent.get` 回的 `agent_session`（`kind: "id"`，herdr 從 claude 的 SessionStart 綁的）就是當下的 session id，遠端不必掃行程；
   先用 run 的 agent 名字查，名字被 herdr 拿掉時改用 pane id 查（`agent.pane_id` 要對得上這顆 pane）。還沒綁就用 `runs.native_session_id` 記過的，兩者都沒有＝照舊看畫面。
   herdr 的綁定優先於記過的（`/clear`、`--resume` 會換 session）。找到的連同檔案路徑寫進 `runs.native_session_id`／`transcript_path`。
-- **讀檔**：`<root>/projects/*/<session id>.jsonl` 的最後 8 MiB（一般檔、非 symlink；本機與遠端都用 `sh`，遠端走 ssh）。root 依序是 bot 的 `CLAUDE_CONFIG_DIR`、
+- **讀檔**：`<root>/projects/*/<session id>.jsonl` 的最後 8 MiB（一般檔、非 symlink／hardlink；本機與遠端都用 `sh` 呼叫 Python 3，遠端走 ssh）。root 依序是 bot 的 `CLAUDE_CONFIG_DIR`、
   這個身分（`runs.runtime_identity`／`bots.identity`）在該主機的 config 目錄、`~/.claude`；找不到檔＝照舊看畫面。session id 只收英數與 `-`／`_`。
+  root 的每個路徑段、`projects` 與 cwd 都以 fd-relative `O_NOFOLLOW` 開啟，讀取與一般檔檢查使用同一個 fd；中途換成 symlink 不會把讀取導向 root 外。沒有 Python 3 或安全開啟失敗時不讀檔，沿用畫面備援（pending-question 回無資料）。
 - **一問一答**：`type: user` 且是人打的字（不是 `tool_result`、`isMeta`、sidechain、slash 指令回音 `<command-name>`／`<local-command-…>`）算一問，`<pasted_content>` 包裝拆回原文；
   `[Request interrupted by user…]` 結束上一問。回覆是之後 `stop_reason` 不是 `tool_use` 的 assistant 文字（帶 `tool_use` 的旁白不算，沒有 `stop_reason` 的半行不算）；
   下一問出現也算這一問結束（被打斷、沒有回覆）。回合鑰匙是 user 那行 `uuid` 的 FNV-1a（`native_turn_id = p<n>`），同一句重複打各是一問。

@@ -149,11 +149,131 @@ fn a_cut_off_first_line_does_not_overwrite_the_previous_reply() {
 fn the_read_script_only_trusts_plain_files_under_the_listed_roots() {
     let script = read_script(&["/Users/m4p/.claude-cc0".to_string(), "/Users/m4p/.claude".to_string()], SID);
     assert!(script.contains("'/Users/m4p/.claude-cc0' '/Users/m4p/.claude'"), "{script}");
-    assert!(script.contains(&format!("projects/*/{SID}.jsonl")), "{script}");
-    assert!(script.contains("[ ! -L \"$f\" ]"), "symlink 不讀");
+    assert!(script.contains(SID), "{script}");
+    assert!(script.contains("os.O_NOFOLLOW"), "symlink 不讀");
     let out = format!("{LOG_MARK}\n/Users/m4p/.claude/projects/-x/{SID}.jsonl\n{{\"a\":1}}\n");
     assert_eq!(split_output(&out), Some((format!("/Users/m4p/.claude/projects/-x/{SID}.jsonl"), "{\"a\":1}\n".to_string())));
     assert_eq!(split_output(""), None, "沒有這個檔");
+}
+
+#[test]
+fn read_tail_rejects_directory_symlinks_and_keeps_root_order() {
+    use std::os::unix::fs::symlink;
+    let dir = tt::track(std::env::temp_dir().join(format!("am-claude-tail-{}", ulid::Ulid::new())));
+    std::fs::create_dir_all(&dir).unwrap();
+    let dir = dir.canonicalize().unwrap();
+    let own = dir.join("own");
+    let outside = dir.join("outside");
+    let good = dir.join("good");
+    std::fs::create_dir_all(own.join("projects")).unwrap();
+    std::fs::create_dir_all(&outside).unwrap();
+    std::fs::create_dir_all(good.join("projects/-cwd")).unwrap();
+    std::fs::write(outside.join(format!("{SID}.jsonl")), "OUTSIDE").unwrap();
+    std::fs::write(
+        good.join(format!("projects/-cwd/{SID}.jsonl")),
+        "normal-tail",
+    )
+    .unwrap();
+    symlink(&outside, own.join("projects/-alias")).unwrap();
+    let run = |roots: Vec<String>| {
+        let out = std::process::Command::new("sh")
+            .args(["-c", &read_script_tail(&roots, SID, 4)])
+            .output()
+            .unwrap();
+        assert!(
+            out.status.success(),
+            "{}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        split_output(&String::from_utf8(out.stdout).unwrap())
+    };
+    assert_eq!(
+        run(vec![own.display().to_string()]),
+        None,
+        "cwd symlink must not expose outside data"
+    );
+    assert_eq!(
+        run(vec![own.display().to_string(), good.display().to_string()]),
+        Some((
+            good.join(format!("projects/-cwd/{SID}.jsonl"))
+                .display()
+                .to_string(),
+            "tail".into()
+        ))
+    );
+    std::fs::remove_file(own.join("projects/-alias")).unwrap();
+    std::fs::remove_dir(own.join("projects")).unwrap();
+    std::fs::create_dir_all(outside.join("-cwd")).unwrap();
+    std::fs::write(outside.join(format!("-cwd/{SID}.jsonl")), "OUTSIDE").unwrap();
+    symlink(&outside, own.join("projects")).unwrap();
+    assert_eq!(
+        run(vec![own.display().to_string()]),
+        None,
+        "projects symlink must be rejected"
+    );
+    symlink(&good, dir.join("root-alias")).unwrap();
+    assert_eq!(
+        run(vec![dir.join("root-alias").display().to_string()]),
+        None,
+        "root symlink must be rejected"
+    );
+    symlink(&dir, dir.join("ancestor-alias")).unwrap();
+    assert_eq!(run(vec![dir.join("ancestor-alias/good").display().to_string()]), None, "earlier root component symlink must be rejected");
+    let transcript = good.join(format!("projects/-cwd/{SID}.jsonl"));
+    std::fs::remove_file(&transcript).unwrap();
+    symlink(outside.join(format!("{SID}.jsonl")), &transcript).unwrap();
+    assert_eq!(run(vec![good.display().to_string()]), None, "file symlink must still be rejected");
+    std::fs::remove_file(&transcript).unwrap();
+    std::fs::hard_link(outside.join(format!("{SID}.jsonl")), &transcript).unwrap();
+    assert_eq!(run(vec![good.display().to_string()]), None, "hardlink must be rejected");
+}
+
+#[test]
+fn read_tail_directory_swap_keeps_the_opened_directory_fd() {
+    let dir =
+        tt::track(std::env::temp_dir().join(format!("am-claude-tail-race-{}", ulid::Ulid::new())));
+    std::fs::create_dir_all(&dir).unwrap();
+    let dir = dir.canonicalize().unwrap();
+    let root = dir.join("own");
+    let outside = dir.join("outside");
+    std::fs::create_dir_all(root.join("projects/-cwd")).unwrap();
+    std::fs::create_dir_all(&outside).unwrap();
+    std::fs::write(root.join(format!("projects/-cwd/{SID}.jsonl")), "INSIDE").unwrap();
+    std::fs::write(outside.join(format!("{SID}.jsonl")), "OUTSIDE").unwrap();
+    // Swap precisely after cwd was opened and before the file is opened.
+    // The production reader runs unchanged except for this syscall interposer.
+    let hook = r#"
+real_open = os.open
+swapped = False
+def swap_open(path, flags, *args, **kwargs):
+    global swapped
+    if path == sys.argv[1] + '.jsonl' and not swapped:
+        swapped = True
+        root = sys.argv[4]
+        os.rename(root + '/projects/-cwd', root + '/projects/-saved')
+        os.symlink(os.path.dirname(root) + '/outside', root + '/projects/-cwd')
+    return real_open(path, flags, *args, **kwargs)
+os.open = swap_open
+"#;
+    let script = read_script_tail(&[root.display().to_string()], SID, 64);
+    let reader = include_str!("claude_child_tail.py");
+    let script = script.replace(
+        &sh_quote(reader),
+        &sh_quote(&reader.replace("import sys\n", &format!("import sys\n{hook}\n"))),
+    );
+    let out = std::process::Command::new("sh")
+        .args(["-c", &script])
+        .output()
+        .unwrap();
+    assert!(out.status.success());
+    assert_eq!(
+        split_output(&String::from_utf8(out.stdout).unwrap()).map(|(_, body)| body),
+        Some("INSIDE".into())
+    );
+    assert!(
+        root.join("projects/-cwd").is_symlink(),
+        "interposer must execute the swap"
+    );
 }
 
 struct Child {
@@ -258,7 +378,7 @@ fn two_exchanges() -> String {
 /// #878：沒有 hook 的 claude 子 agent，session 從 herdr 的 `agent_session` 來，回覆讀對話檔、不刮畫面。
 #[tokio::test]
 async fn a_hookless_claude_child_records_its_exchanges_from_its_transcript() {
-    let cfg = tt::track(std::env::temp_dir().join(format!("am-claude-cfg-{}", db::ulid())));
+    let cfg = tt::track(std::env::temp_dir().canonicalize().unwrap().join(format!("am-claude-cfg-{}", db::ulid())));
     let c = claude_child(Some(&cfg), None).await;
     let app = c.env.app.clone();
     let path = write_log(&cfg, "sess-1", &two_exchanges());
@@ -293,7 +413,7 @@ async fn a_hookless_claude_child_records_its_exchanges_from_its_transcript() {
 /// herdr 的 `agent start` 逾時把名字拿掉：用名字查不到，改用 pane id 查，session 照樣找得到。
 #[tokio::test]
 async fn the_session_is_found_by_pane_id_when_herdr_dropped_the_agent_name() {
-    let cfg = tt::track(std::env::temp_dir().join(format!("am-claude-cfg-{}", db::ulid())));
+    let cfg = tt::track(std::env::temp_dir().canonicalize().unwrap().join(format!("am-claude-cfg-{}", db::ulid())));
     let c = claude_child(Some(&cfg), None).await;
     let app = c.env.app.clone();
     write_log(&cfg, "sess-9", &two_exchanges());
@@ -308,7 +428,7 @@ async fn the_session_is_found_by_pane_id_when_herdr_dropped_the_agent_name() {
 /// herdr 還沒綁 session、run 也沒記過：不猜，照舊看畫面（Unavailable）。
 #[tokio::test]
 async fn without_a_bound_session_the_pane_is_the_fallback() {
-    let cfg = tt::track(std::env::temp_dir().join(format!("am-claude-cfg-{}", db::ulid())));
+    let cfg = tt::track(std::env::temp_dir().canonicalize().unwrap().join(format!("am-claude-cfg-{}", db::ulid())));
     let c = claude_child(Some(&cfg), None).await;
     let app = c.env.app.clone();
     write_log(&cfg, "sess-1", &two_exchanges());
@@ -319,7 +439,7 @@ async fn without_a_bound_session_the_pane_is_the_fallback() {
 /// 有 session 但對話檔不在 root 底下（別的身分的目錄）：讀不到＝Unavailable，不從別處猜。
 #[tokio::test]
 async fn a_transcript_outside_the_config_roots_is_not_read() {
-    let cfg = tt::track(std::env::temp_dir().join(format!("am-claude-cfg-{}", db::ulid())));
+    let cfg = tt::track(std::env::temp_dir().canonicalize().unwrap().join(format!("am-claude-cfg-{}", db::ulid())));
     let other = tt::track(std::env::temp_dir().join(format!("am-claude-other-{}", db::ulid())));
     let c = claude_child(Some(&cfg), None).await;
     let app = c.env.app.clone();
@@ -331,7 +451,7 @@ async fn a_transcript_outside_the_config_roots_is_not_read() {
 /// 還在跑的一問：回合在飛時不收，`pending` 回報檔尾那一問。
 #[tokio::test]
 async fn the_unfinished_exchange_is_reported_as_pending() {
-    let cfg = tt::track(std::env::temp_dir().join(format!("am-claude-cfg-{}", db::ulid())));
+    let cfg = tt::track(std::env::temp_dir().canonicalize().unwrap().join(format!("am-claude-cfg-{}", db::ulid())));
     let c = claude_child(Some(&cfg), None).await;
     let app = c.env.app.clone();
     write_log(&cfg, "sess-1", &log(&[user("u1", "開工"), assistant("我先讀那份 brief。", Some("tool_use"), true)]));
@@ -389,7 +509,7 @@ async fn a_remote_claude_child_reads_its_transcript_over_ssh() {
     baselined(&app, &c.run_id).await;
     assert_eq!(sync_locked(&app, &c.run_id).await.unwrap(), Synced::Read { imported: 2, pending: None });
     let scripts = seen.lock().unwrap().clone();
-    assert!(scripts.iter().any(|s| s.contains(&format!("projects/*/{SID}.jsonl")) && s.contains("/Users/m4p/.claude")), "{scripts:?}");
+    assert!(scripts.iter().any(|s| s.contains(SID) && s.contains("os.O_NOFOLLOW") && s.contains("/Users/m4p/.claude")), "{scripts:?}");
     let run = db::run(&app.db, &c.run_id).await.unwrap().unwrap();
     assert_eq!(run.native_session_id.as_deref(), Some(SID));
     assert_eq!(run.transcript_path.as_deref(), Some(transcript.as_str()));
@@ -410,7 +530,7 @@ fn history() -> Vec<String> {
 /// #879：daemon 換版後第一次接上對話檔，裡面整段歷史（含已經回報過的）不能被當成新回合、不能再發 child_done。
 #[tokio::test]
 async fn the_first_read_only_takes_a_baseline_and_makes_no_turns() {
-    let cfg = tt::track(std::env::temp_dir().join(format!("am-claude-cfg-{}", db::ulid())));
+    let cfg = tt::track(std::env::temp_dir().canonicalize().unwrap().join(format!("am-claude-cfg-{}", db::ulid())));
     let c = claude_child(Some(&cfg), None).await;
     let app = c.env.app.clone();
     write_log(&cfg, "sess-1", &log(&history()));
@@ -432,7 +552,7 @@ async fn the_first_read_only_takes_a_baseline_and_makes_no_turns() {
 /// 基準之後才開始的問照記：歷史不記，新的一問結束時記成一個回合。
 #[tokio::test]
 async fn exchanges_after_the_baseline_are_recorded() {
-    let cfg = tt::track(std::env::temp_dir().join(format!("am-claude-cfg-{}", db::ulid())));
+    let cfg = tt::track(std::env::temp_dir().canonicalize().unwrap().join(format!("am-claude-cfg-{}", db::ulid())));
     let c = claude_child(Some(&cfg), None).await;
     let app = c.env.app.clone();
     let mut lines = history();
@@ -455,7 +575,7 @@ async fn exchanges_after_the_baseline_are_recorded() {
 /// 第一次讀到時正在跑的一問（基準時還沒結束）：不在基準裡，結束時照記。
 #[tokio::test]
 async fn the_exchange_running_at_the_baseline_is_still_recorded_when_it_ends() {
-    let cfg = tt::track(std::env::temp_dir().join(format!("am-claude-cfg-{}", db::ulid())));
+    let cfg = tt::track(std::env::temp_dir().canonicalize().unwrap().join(format!("am-claude-cfg-{}", db::ulid())));
     let c = claude_child(Some(&cfg), None).await;
     let app = c.env.app.clone();
     let mut lines = history();
@@ -474,7 +594,7 @@ async fn the_exchange_running_at_the_baseline_is_still_recorded_when_it_ends() {
 /// 第一次讀到時，派工開的在飛回合對得上檔裡的那一問：照舊收掉它（回覆補進去），只是歷史不另開回合。
 #[tokio::test]
 async fn the_baseline_still_settles_the_turn_that_was_dispatched() {
-    let cfg = tt::track(std::env::temp_dir().join(format!("am-claude-cfg-{}", db::ulid())));
+    let cfg = tt::track(std::env::temp_dir().canonicalize().unwrap().join(format!("am-claude-cfg-{}", db::ulid())));
     let c = claude_child(Some(&cfg), None).await;
     let app = c.env.app.clone();
     let mut lines = history();
@@ -501,7 +621,7 @@ async fn the_baseline_still_settles_the_turn_that_was_dispatched() {
 /// 檔裡還沒有任何一問就建基準（空字串）：之後的問全部算新的。
 #[tokio::test]
 async fn an_empty_transcript_baseline_lets_every_later_exchange_through() {
-    let cfg = tt::track(std::env::temp_dir().join(format!("am-claude-cfg-{}", db::ulid())));
+    let cfg = tt::track(std::env::temp_dir().canonicalize().unwrap().join(format!("am-claude-cfg-{}", db::ulid())));
     let c = claude_child(Some(&cfg), None).await;
     let app = c.env.app.clone();
     write_log(&cfg, "sess-1", "");
@@ -537,7 +657,7 @@ fn the_runtime_is_the_latest_assistant_effort_and_model() {
 /// #938：child 的 `bots.effort`／`model` 跟著 runtime 走（模型是同家族別名時沿用別名，不動 `bots.model`）。
 #[tokio::test]
 async fn the_transcript_effort_and_model_become_the_runtime() {
-    let cfg = tt::track(std::env::temp_dir().join(format!("am-claude-cfg-{}", db::ulid())));
+    let cfg = tt::track(std::env::temp_dir().canonicalize().unwrap().join(format!("am-claude-cfg-{}", db::ulid())));
     let c = claude_child(Some(&cfg), None).await;
     let app = c.env.app.clone();
     sqlx::query("UPDATE bots SET effort = 'high', model = 'haiku' WHERE id = ?").bind(&c.bot.id).execute(&app.db).await.unwrap();
