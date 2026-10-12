@@ -4,8 +4,8 @@
 //! 認到就標 blocked、**不送 prompt、一個鍵都不按**。登入、條款（預設已勾選「允許 Google 收集並使用我的 Interactions 資料」，
 //! 一個 Enter 就切換同意與否）、色彩頁都只由人處理；信任框我們預寫 `trustedWorkspaces` 讓它不出現，出現了也不代按。
 //!
-//! 引文的防誤判：agy 在回覆裡把這些字抄一遍時，畫面上其實沒有框，輸入列（單獨一個 `>`）還在——用這個結構性事實分辨
-//! （同 `tui_prompts::composer_is_idle` 的做法），不猜引文排得像不像框。
+//! 引文的防誤判：agy 在回覆裡把這些字抄一遍時，畫面上其實沒有框，輸入列（單獨一個 `>`）還在框標題的下面——用這個結構性事實分辨
+//! （同 `tui_prompts::composer_is_idle` 的做法），不猜引文排得像不像框。標題上面的單獨 `>` 是回覆的引文，不算輸入列。
 
 /// 只看畫面最底下這幾行（框一定在輸入區的位置；更上面是對話內容）。
 const TAIL_LINES: usize = 24;
@@ -52,43 +52,45 @@ fn norm(line: &str) -> String {
 }
 
 /// 輸入列：單獨一個 `>`（框線不算）。對話框裡的選項列是 `> 1. …`／`> [x] …`，後面還有字，不會誤中。
-fn composer_is_idle(lines: &[&str]) -> bool {
-    lines.iter().any(|l| {
-        let mut chars = l.chars().filter(|c| !c.is_whitespace() && !"│┃╭╮╰╯─━▔".contains(*c));
-        chars.next() == Some('>') && chars.next().is_none()
-    })
+fn is_composer_row(line: &str) -> bool {
+    let mut chars = line.chars().filter(|c| !c.is_whitespace() && !"│┃╭╮╰╯─━▔".contains(*c));
+    chars.next() == Some('>') && chars.next().is_none()
 }
 
 pub fn blocking_dialog(screen: &str) -> Option<AgyDialog> {
     let lines: Vec<&str> = screen.lines().filter(|l| !l.trim().is_empty()).collect();
     let tail = &lines[lines.len().saturating_sub(TAIL_LINES)..];
-    if composer_is_idle(tail) {
-        return None;
-    }
     let rows: Vec<String> = tail.iter().map(|l| norm(l)).collect();
     let has = |f: &dyn Fn(&str) -> bool| rows.iter().any(|r| f(r));
     // 整行就是標題（對話框的標題自己一行，前面最多一個圖示）；回覆裡的引文前面是項目符號、引號或別的字，不算。
+    // 回傳標題所在的列，用來判斷輸入列是在框上面還是下面。
     let title = |t: &str| {
-        has(&|r| {
+        rows.iter().position(|r| {
             r == t || r.strip_suffix(t).is_some_and(|pre| pre.chars().all(|c| !c.is_alphanumeric() && !"●⏺⎿•>*-\"'`".contains(c)))
         })
     };
-    if title("select login method:") || has(&|r| r.starts_with("welcome to the antigravity cli") && r.contains("not signed in")) {
-        return Some(AgyDialog::Login);
+    let (at, dialog) = if let Some(i) = title("select login method:")
+        .or_else(|| rows.iter().position(|r| r.starts_with("welcome to the antigravity cli") && r.contains("not signed in")))
+    {
+        (i, AgyDialog::Login)
+    } else if let Some(i) = title("terms of service & data use") {
+        (i, AgyDialog::Terms)
+    } else if let Some(i) = title("choose your color scheme:") {
+        (i, AgyDialog::ColorScheme)
+    } else if let Some(i) = title("do you trust the contents of this project?")
+        .filter(|_| has(&|r| r.contains("yes, i trust this folder") || r.contains("no, exit")))
+    {
+        (i, AgyDialog::Trust)
+    } else if let Some(i) = ["run this command?", "allow access to this url?", "allow calling this tool?"].iter().find_map(|t| title(t)) {
+        (i, AgyDialog::Permission)
+    } else {
+        return None;
+    };
+    // 輸入列在標題下面＝框已經關了（回覆抄了框的字，畫面上只剩輸入列）。標題上面的單獨 `>` 是回覆裡的引文，框照樣要認到。
+    if tail[at + 1..].iter().any(|l| is_composer_row(l)) {
+        return None;
     }
-    if title("terms of service & data use") {
-        return Some(AgyDialog::Terms);
-    }
-    if title("choose your color scheme:") {
-        return Some(AgyDialog::ColorScheme);
-    }
-    if title("do you trust the contents of this project?") && has(&|r| r.contains("yes, i trust this folder") || r.contains("no, exit")) {
-        return Some(AgyDialog::Trust);
-    }
-    if ["run this command?", "allow access to this url?", "allow calling this tool?"].iter().any(|t| title(t)) {
-        return Some(AgyDialog::Permission);
-    }
-    None
+    Some(dialog)
 }
 
 #[cfg(test)]
@@ -210,5 +212,13 @@ esc to cancel
     #[test]
     fn a_trust_title_without_its_choices_is_not_the_dialog() {
         assert_eq!(blocking_dialog("\n Do you trust the contents of this project?\n"), None);
+    }
+
+    /// 回覆引文裡有單獨一個 `>`（markdown 引用的空行）排在權限框上面：那一行不是輸入列，框照樣要認到。
+    /// 以前尾段只要有單獨的 `>` 就當閒置，權限框被略過，送來的 prompt 會打進框裡。
+    #[test]
+    fn a_lone_quote_marker_above_a_permission_dialog_is_not_the_composer() {
+        let screen = format!("● 引文：\n>\n> 這是引用\n{PERMISSION}");
+        assert_eq!(blocking_dialog(&screen), Some(AgyDialog::Permission));
     }
 }
