@@ -26,8 +26,8 @@ const flush = () =>
   })
 
 function Probe({ botId }: { botId: string }) {
-  const questions = usePendingQuestion(botId)
-  return <output>{JSON.stringify(questions)}</output>
+  const { questions, status } = usePendingQuestion(botId)
+  return <output data-status={status}>{JSON.stringify(questions)}</output>
 }
 
 test('背景時不打 pending-question，回前景立刻補一次', async () => {
@@ -78,6 +78,7 @@ async function fixture(run: (f: {
   tick: () => Promise<void>
   visible: () => Promise<void>
   answer: (index: number, body: unknown) => Promise<void>
+  status: () => string
   shown: () => { question: string; jev: unknown }[]
 }) => Promise<void>) {
   resetStoreForTest()
@@ -112,6 +113,7 @@ async function fixture(run: (f: {
         await flush()
       },
       answer: async (index, body) => { await act(async () => reads[index].resolve(new Response(JSON.stringify(body)))); await flush() },
+      status: () => host.querySelector('output')!.getAttribute('data-status')!,
       shown: () => JSON.parse(host.querySelector('output')!.textContent!),
     })
   } finally {
@@ -156,5 +158,60 @@ test('bot 切換立即移除上一顆題目，晚到回應不得跨 bot 套用',
     await answer(2, question('B'))
     await answer(1, question('old A'))
     assert.equal(shown()[0].question, 'B')
+  })
+})
+
+for (const error of [new Error('network down'), new DOMException('aborted', 'AbortError')]) {
+  test(`失敗 ${error.name} 同時移除舊題與 Jev 建議，回前景取得新題`, async () => {
+    await fixture(async ({ reads, tick, visible, answer, shown, status }) => {
+      await answer(0, question('A'))
+      assert.deepEqual(shown()[0].jev, { option: 0, label: 'yes', score: 0.9 })
+      await tick()
+      await act(async () => reads[1].reject(error))
+      await flush()
+      assert.deepEqual(shown(), [])
+      assert.equal(status(), 'unavailable')
+      await visible()
+      await answer(2, question('B'))
+      assert.equal(shown()[0].question, 'B')
+      assert.equal(status(), 'ready')
+    })
+  })
+}
+
+test('HTTP 500 不留下題目；較新的失敗也攔住較早成功回應', async () => {
+  await fixture(async ({ reads, tick, answer, shown }) => {
+    await answer(0, question('A'))
+    await tick()
+    await tick()
+    await act(async () => reads[2].resolve(new Response('{}', { status: 500 })))
+    await flush()
+    assert.deepEqual(shown(), [])
+    await answer(1, question('old A'))
+    assert.deepEqual(shown(), [])
+  })
+})
+
+test('晚到的失敗不得清掉較新的成功題目', async () => {
+  await fixture(async ({ reads, tick, answer, shown }) => {
+    await tick()
+    await answer(1, question('B'))
+    await act(async () => reads[0].reject(new Error('old failure')))
+    await flush()
+    assert.equal(shown()[0].question, 'B')
+  })
+})
+
+test('成功回 null 與讀取失敗有不同狀態', async () => {
+  await fixture(async ({ reads, tick, answer, shown, status }) => {
+    assert.equal(status(), 'loading')
+    await answer(0, { questions: null })
+    assert.deepEqual(shown(), [])
+    assert.equal(status(), 'ready')
+    await tick()
+    await act(async () => reads[1].reject(new Error('offline')))
+    await flush()
+    assert.deepEqual(shown(), [])
+    assert.equal(status(), 'unavailable')
   })
 })

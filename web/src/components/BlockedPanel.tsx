@@ -33,7 +33,7 @@ export function BlockedPanel({
   const wrap = useTermWrap()
   const menu = useChoiceMenu(botId, snap?.text)
   // 畫面上看不到題目（pane 太矮、claude 把選單裁掉）時，從 transcript 補題目（2026-09-23 使用者）。
-  const pending = usePendingQuestion(botId, paused)
+  const { questions: pending, status: pendingStatus } = usePendingQuestion(botId, paused)
   const showPending = pending.length > 0 && !questionVisibleOnScreen(pending, menu?.question)
   // 畫面上是原題的第幾題：補題目、補「第幾題／上一題下一題」（issue #559）。
   const pendingAt = pendingAtOnScreen(pending, menu)
@@ -74,6 +74,7 @@ export function BlockedPanel({
         ) : null}
       </div>
       <CodexUpdateHint botId={botId} text={snap?.text} onAnswered={refresh} />
+      {pendingStatus === 'unavailable' ? <div role="status">暫時無法確認待答題目，請參考終端畫面。</div> : null}
       {/* 同 `BlockedModal`：認得出選單時原題收成一行排在選項後面，認不出才攤開在最上面（issue #559）。 */}
       {showPending && !menu ? <PendingQuestionCard questions={pending} defaultOpen answerWhere="below" /> : null}
       {menu ? (
