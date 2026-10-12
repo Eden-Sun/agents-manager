@@ -134,15 +134,20 @@ pub fn parse_claude_reset(line: &str, now: DateTime<Local>) -> Option<String> {
     let (h, m) = hm?;
     let dt = match (month, day) {
         (Some(month), Some(day)) => {
-            let build = |y: i32| -> Option<DateTime<chrono_tz::Tz>> {
-                let d = NaiveDate::from_ymd_opt(y, month, day)?.and_hms_opt(h, m, 0)?;
-                tz.from_local_datetime(&d).earliest()
-            };
+            let naive = |y: i32| NaiveDate::from_ymd_opt(y, month, day).and_then(|d| d.and_hms_opt(h, m, 0));
             // 最近的一次：不早於一天前的最早那個。只看今年會在 1 月初把去年 12 月底剛過的重置推到明年。
-            [now.year() - 1, now.year(), now.year() + 1]
-                .into_iter()
-                .filter_map(|y| build(y))
-                .find(|dt| *dt >= now.clone() - chrono::Duration::days(1))?
+            // 日期本身不存在（2/29 遇到平年）就跳過那一年；本地時間落在 DST 跳過的那一段（`tz` 換不出來）就放棄，
+            // 不換成別年的同一天。
+            let nearest = || -> Option<DateTime<chrono_tz::Tz>> {
+                for d in [now.year() - 1, now.year(), now.year() + 1].into_iter().filter_map(naive) {
+                    let dt = tz.from_local_datetime(&d).earliest()?;
+                    if dt >= now.clone() - chrono::Duration::days(1) {
+                        return Some(dt);
+                    }
+                }
+                None
+            };
+            nearest()?
         }
         _ => {
             // Time-only: today, or tomorrow if that time already passed (both in `tz`, not host local).

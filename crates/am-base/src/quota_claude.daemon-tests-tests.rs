@@ -792,3 +792,11 @@ AM_USAGE_DONE=0
         unpark(&mine);
         unpark(&theirs);
     }
+
+    /// DST 跳過的那一段本地時間（紐約 2026-03-08 02:30 不存在）：不能因為今年這個時刻不存在，就換成明年同一天。
+    /// 回 `None`（不知道）或今年的日期都可以，回 2027 年就是猜錯。
+    #[test]
+    fn a_reset_inside_a_dst_gap_is_not_moved_to_next_year() {
+        let r = parse_claude_reset("Resets Mar 8 at 2:30am (America/New_York)", at("2026-03-07T10:00:00-05:00"));
+        assert!(r.as_deref().map_or(true, |s| s.starts_with("2026-03-08")), "{r:?}");
+    }
