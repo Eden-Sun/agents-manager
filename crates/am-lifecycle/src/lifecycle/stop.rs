@@ -656,7 +656,7 @@ pub async fn interrupt_turn(app: &impl StopContext, bot_id: &str, expect_turn: O
     // 沒指名哪一筆時，「這一次要打斷的」是**按下去那一刻**使用者看得到的那一筆（#1474）：在拿到 bot 鎖之前先記下來。
     // 這一刻到拿到鎖之間，那一筆可能剛好結束、排著的 prompt 被 flush 接著送出——以前拿到鎖之後才讀「在飛的是誰」，
     // Esc 就按在一則使用者根本沒看過是「在跑」的新回合上（送出後 117ms 被收成 `interrupted by user`，claude 把字放回框裡）。
-    let seen = if expect_turn.is_none() { in_flight_at_arrival(app, bot_id).await } else { None };
+    let seen = if expect_turn.is_none() { in_flight_at_arrival(app, bot_id).await? } else { None };
     #[cfg(all(test, feature = "daemon-test-harness"))]
     super::race_point::hit("interrupt_after_arrival", bot_id).await;
     let _g = app.lock_bot_for_stop(bot_id).await;
@@ -748,17 +748,24 @@ pub async fn interrupt_turn(app: &impl StopContext, bot_id: &str, expect_turn: O
     Ok(())
 }
 
-/// 打斷的請求到達那一刻，這顆 bot 在飛的是哪一筆（沒指名 `turn_id` 時用）。`None`＝讀不到（不設防，照舊拿到鎖之後才看）；
-/// `Some(None)`＝那一刻沒有「使用者看得到在跑」的回合；`Some(Some(id))`＝那一筆。
+/// 打斷的請求到達那一刻，這顆 bot 在飛的是哪一筆（沒指名 `turn_id` 時用）。讀取失敗會回 503、不送 Esc。
+/// `Ok(Some(None))`＝那一刻沒有「使用者看得到在跑」的回合；`Ok(Some(Some(id)))`＝那一筆。
 ///
-/// 排隊的 prompt 剛被 flush 認領、還在打字（`delivery = pending`，而且 `claim_queued` 已經把 `auto_resend` 寫成 0——
-/// 直接送出的回合在送達結果寫下之前 `auto_resend` 還是預設的 1）的在飛回合不算：使用者按下去的時候畫面上它還是「排隊中」，
-/// 不是他要停的那一筆。直接送出、還在打字的回合照舊算（那是使用者剛送的那一則）。
-async fn in_flight_at_arrival(app: &impl crate::capabilities::Db, bot_id: &str) -> Option<Option<String>> {
-    let run = db::active_run(app.db(), bot_id).await.ok()?;
-    let Some(run) = run else { return Some(None) };
-    let turn = db::in_flight_turn(app.db(), &run.id).await.ok()?;
-    Some(turn.filter(|t| !(t.delivery == "pending" && t.auto_resend == 0)).map(|t| t.id))
+/// 排隊的 prompt 剛被 flush 認領、還在打字時不算：`claimed_from_queue` 記來源，`delivery='pending'` 記還沒送完。
+/// 直接送出的回合在打字前也寫 `auto_resend=0`，但來源標記為 0，所以仍是使用者剛送、可以打斷的那一筆。
+async fn in_flight_at_arrival(app: &impl crate::capabilities::Db, bot_id: &str) -> LcResult<Option<Option<String>>> {
+    let run = db::active_run(app.db(), bot_id).await.map_err(|e| interrupt_arrival_unavailable(bot_id, "active_run", e))?;
+    let Some(run) = run else { return Ok(Some(None)) };
+    let turn = db::in_flight_turn(app.db(), &run.id).await.map_err(|e| interrupt_arrival_unavailable(bot_id, "in_flight_turn", e))?;
+    Ok(Some(turn.filter(|t| !(t.delivery == "pending" && t.claimed_from_queue != 0)).map(|t| t.id)))
+}
+
+fn interrupt_arrival_unavailable(bot_id: &str, read: &str, e: impl std::fmt::Display) -> LcError {
+    tracing::warn!(bot = %bot_id, read, error = %e, "interrupt arrival snapshot could not be read; not sending Esc");
+    LcError::Unavailable(json!({
+        "error": "interrupt_state_unavailable", "bot_id": bot_id, "read": read, "retryable": true, "sent": false, "retry_after_secs": 5,
+        "message": "按下中斷時讀不到正在執行的回合，沒有送 Esc；稍後重試。", "detail": e.to_string(),
+    }))
 }
 
 /// claude 在吐出第一個字前被 `esc` 打斷，會把 prompt 放回輸入框（2026-09-08 實測），下一則
