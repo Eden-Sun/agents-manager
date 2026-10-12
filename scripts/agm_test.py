@@ -2754,7 +2754,8 @@ class IssueClaimTest(unittest.TestCase):
     """`agm issue claim/release` 不連 daemon，只跟 gh 說話。"""
 
     ENV_KEYS = ("PATH", "GH_STATE", "GH_FAIL", "GH_FAIL_MSG", "GH_NO_LABEL", "GH_INJECT_COMPETITOR",
-                "GH_INJECT_NEW_CLAIM_ON_REMOVE", "GH_INJECT_RELEASE_ON_ADD", "AM_AGENT_NAME", "AM_BOT_ID", "AGM_RUNTIME_DIR")
+                "GH_INJECT_NEW_CLAIM_ON_REMOVE", "GH_INJECT_RELEASE_ON_ADD", "AM_AGENT_NAME", "AM_BOT_ID",
+                "AM_BOT_TOKEN", "AM_HOOK_TOKEN", "AM_KIND", "AM_INSTANCE", "HOME", "AGM_RUNTIME_DIR")
 
     def setUp(self):
         # 先存原值再改：PATH 指向的是等一下會被刪掉的暫存目錄，收尾一定要還原。
@@ -2762,6 +2763,8 @@ class IssueClaimTest(unittest.TestCase):
         self.addCleanup(lambda: [os.environ.pop(k, None) if v is None else os.environ.__setitem__(k, v) for k, v in saved.items()])
         self.dir = tempfile.TemporaryDirectory()
         self.addCleanup(self.dir.cleanup)
+        self.home = Path(self.dir.name) / "home"
+        self.home.mkdir()
         bindir = Path(self.dir.name) / "bin"
         bindir.mkdir()
         (bindir / "gh").write_text(FAKE_GH, encoding="utf-8")
@@ -2776,8 +2779,10 @@ class IssueClaimTest(unittest.TestCase):
         os.environ["PATH"] = ":".join(p for p in (guard, str(bindir), "/usr/bin", "/bin") if p)
         os.environ["GH_STATE"] = str(self.state)
         os.environ["AM_AGENT_NAME"] = "vvyyg1"
-        for k in ("GH_FAIL", "GH_FAIL_MSG", "GH_NO_LABEL", "GH_INJECT_NEW_CLAIM_ON_REMOVE", "GH_INJECT_RELEASE_ON_ADD", "AM_BOT_ID"):
+        for k in ("GH_FAIL", "GH_FAIL_MSG", "GH_NO_LABEL", "GH_INJECT_NEW_CLAIM_ON_REMOVE", "GH_INJECT_RELEASE_ON_ADD",
+                  "AM_BOT_ID", "AM_BOT_TOKEN", "AM_HOOK_TOKEN", "AM_KIND", "AM_INSTANCE"):
             os.environ.pop(k, None)
+        os.environ["HOME"] = str(self.home)
         # runtime.json 故意不存在：issue 這條路不該去讀它。
         os.environ["AGM_RUNTIME_DIR"] = str(Path(self.dir.name) / "no-such-runtime")
 
@@ -2967,6 +2972,30 @@ class IssueClaimTest(unittest.TestCase):
             self.assertTrue(json.loads(out)["claimed"], mode)
             self.assertTrue(any(c["path"] == "/api/judge/collision-check" for c in FakeDaemon.seen), mode)
             FakeDaemon.drop = set()
+
+    def test_a_claim_without_runtime_spools_collision_check_for_remote_daemon(self):
+        os.environ["AM_BOT_ID"] = "remote-bot"
+        os.environ["AM_KIND"] = "codex"
+        self.issue(1332, title="遠端認領要送進撞題檢查")
+
+        code, out, err = self.run_cli("issue", "claim", "1332", "--bot", "newbie", "--child", "newbie", "--branch", "fix/remote-g1332")
+
+        self.assertEqual(code, 0, err)
+        self.assertTrue(json.loads(out)["claimed"])
+        spool_dir = self.home / ".config" / "agents-manager" / "bots" / "remote-bot" / "hook-spool.d"
+        spools = list(spool_dir.glob("*.json"))
+        self.assertEqual(len(spools), 1, "沒有 runtime.json 時要以一則 hook spool 交給 daemon")
+        event = json.loads(spools[0].read_text(encoding="utf-8"))
+        self.assertEqual(event["bot_id"], "remote-bot")
+        self.assertEqual(event["provider"], "codex")
+        self.assertEqual(event["payload"], {
+            "hook_event_name": "AmClaimCollisionCheck",
+            "issue": 1332,
+            "title": "遠端認領要送進撞題檢查",
+            "child": "newbie",
+            "branch": "fix/remote-g1332",
+        })
+        self.assertIsInstance(event["received_at"], str)
 
     def test_a_claim_with_no_activity_for_over_24h_can_be_taken_over(self):
         old = _iso(-30 * 3600)

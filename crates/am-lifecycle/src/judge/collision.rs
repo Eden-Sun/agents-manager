@@ -6,9 +6,9 @@
 //! 上等（#480）。沒開、專案不在名單、key 讀不到，什麼都不寫；逾時與非 2xx 記一筆 error，不重試。
 //!
 //! 比對的是 daemon 看得到的在跑工作，不另打 GitHub：
-//! - 其他 child 的 `runs.agent_title`（父 bot 的孩子，頂層 bot 的標題不算）
+//! - 其他 child 的 `runs.agent_title`，以及同專案、目前有 running run 的頂層 bot 標題
 //! - 未結案交辦裡點名的 `#N`，以及 worktree 分支名尾端的 `-gN`／`issue-N`（已認領的票）
-//! - child 的 worktree 分支（`.git/HEAD`，沒有就用 `.claude/worktrees/<名>`）
+//! - child 與 running 頂層 bot 的 worktree 分支（`.git/HEAD`，沒有就用 `.claude/worktrees/<名>`）
 //!
 //! 被派工那顆自己的卡不比。開票那條的專案看 `[release_triage] repo` 對得上哪個專案。
 //!
@@ -444,18 +444,18 @@ async fn running_cards(app: &impl crate::capabilities::Db, project_id: &str, ski
         cards.push(card);
     }
 
-    let rows: Vec<(String, Option<String>, Option<String>)> = sqlx::query_as(
-        "SELECT b.id, b.cwd, r.agent_title
+    let rows: Vec<(String, Option<String>, Option<String>, Option<String>)> = sqlx::query_as(
+        "SELECT b.id, b.cwd, r.agent_title, b.parent_bot_id
            FROM bots b
            JOIN runs r ON r.bot_id = b.id AND r.state = 'running'
-          WHERE b.project_id = ? AND b.deleted_at IS NULL AND b.parent_bot_id IS NOT NULL",
+          WHERE b.project_id = ? AND b.deleted_at IS NULL",
     )
     .bind(project_id)
     .fetch_all(app.db())
     .await?;
-    let mut by_bot: HashMap<String, (Option<String>, Option<String>)> = HashMap::new();
-    for (id, cwd, title) in rows {
-        let slot = by_bot.entry(id).or_insert((None, None));
+    let mut by_bot: HashMap<String, (Option<String>, Option<String>, bool)> = HashMap::new();
+    for (id, cwd, title, parent_bot_id) in rows {
+        let slot = by_bot.entry(id).or_insert((None, None, parent_bot_id.is_none()));
         if slot.0.is_none() {
             slot.0 = cwd;
         }
@@ -463,15 +463,20 @@ async fn running_cards(app: &impl crate::capabilities::Db, project_id: &str, ski
             slot.1 = title;
         }
     }
-    for (id, (cwd, title)) in by_bot {
+    for (id, (cwd, title, top_level)) in by_bot {
         if id == skip_bot {
             continue;
         }
+        let (title_source, branch_source, jev_kind) = if top_level {
+            ("top_level_title", "top_level_branch", "a same-project top-level bot that is currently running")
+        } else {
+            ("child_title", "worktree_branch", "an assignment another agent is working on right now")
+        };
         if let Some(title) = title {
             let titled = title_of(&title);
             let key = format!("title:{id}");
             if key != skip_key && !titled.is_empty() && !cards.iter().any(|c| c.title == titled) {
-                let mut card = text_card(key, "child_title", "an assignment another agent is working on right now", &title);
+                let mut card = text_card(key, title_source, jev_kind, &title);
                 card.issue_ref = issue_numbers(&title).first().map(|n| format!("#{n}"));
                 card.bot_id = Some(id.clone());
                 cards.push(card);
@@ -481,7 +486,7 @@ async fn running_cards(app: &impl crate::capabilities::Db, project_id: &str, ski
             if let Some(branch) = branch_of(&cwd) {
                 let key = format!("branch:{id}");
                 if key != skip_key && !cards.iter().any(|c| c.title == branch) {
-                    let mut card = text_card(key, "worktree_branch", "an assignment another agent is working on right now", &branch);
+                    let mut card = text_card(key, branch_source, jev_kind, &branch);
                     card.summary = summarize(&format!("worktree branch {branch}"));
                     card.issue_ref = issue_numbers(&branch).first().map(|n| format!("#{n}"));
                     card.bot_id = Some(id.clone());
@@ -775,11 +780,14 @@ mod tests {
         Status(u16),
     }
 
-    async fn fake_jev(mode: Mode) -> (String, Arc<std::sync::Mutex<Vec<Value>>>) {
+    async fn fake_jev(mode: Mode) -> (String, Arc<std::sync::Mutex<Vec<Value>>>, Arc<tokio::sync::Notify>) {
         let seen = Arc::new(std::sync::Mutex::new(Vec::new()));
         let log = seen.clone();
+        let request_received = Arc::new(tokio::sync::Notify::new());
+        let notify = request_received.clone();
         let route = axum::routing::post(move |axum::Json(body): axum::Json<Value>| {
             let log = log.clone();
+            let notify = notify.clone();
             let mode = match mode {
                 Mode::Noul(p) => Mode::Noul(p),
                 Mode::Hang => Mode::Hang,
@@ -787,6 +795,7 @@ mod tests {
             };
             async move {
                 log.lock().unwrap().push(body);
+                notify.notify_one();
                 match mode {
                     Mode::Hang => {
                         tokio::time::sleep(std::time::Duration::from_secs(30)).await;
@@ -803,18 +812,19 @@ mod tests {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let url = format!("http://{}/v1/systemone", listener.local_addr().unwrap());
         tokio::spawn(async move { axum::serve(listener, axum::Router::new().route("/v1/systemone", route)).await.unwrap() });
-        (url, seen)
+        (url, seen, request_received)
     }
 
     struct Rig {
         env: tt::Env,
         dir: std::path::PathBuf,
         seen: Arc<std::sync::Mutex<Vec<Value>>>,
+        request_received: Arc<tokio::sync::Notify>,
     }
 
     async fn stand(mode: Mode, enabled: bool, listed: bool) -> Rig {
         let env = tt::env().await;
-        let (url, seen) = fake_jev(mode).await;
+        let (url, seen, request_received) = fake_jev(mode).await;
         let dir = crate::testing::track(std::env::temp_dir().join(format!("am-judge-collision-{}", db::ulid())));
         std::fs::create_dir_all(&dir).unwrap();
         let key = dir.join("key");
@@ -838,7 +848,7 @@ mod tests {
             })
             .await
             .unwrap();
-        Rig { env, dir, seen }
+        Rig { env, dir, seen, request_received }
     }
 
     impl Drop for Rig {
@@ -903,10 +913,15 @@ mod tests {
         )
         .await
         .unwrap();
-        // 頂層 bot 的標題不是「其他父 bot 的 child」，不該被拿去問。
+        // 閒置頂層 bot 不在目前活躍候選範圍內。
         let top = tt::claude_bot(&app, &rig.env.project_id, "top").await;
         let top_run = tt::fake_run(&app, &top.id).await;
-        sqlx::query("UPDATE runs SET agent_title=? WHERE id=?").bind("不要比對這個 #999").bind(&top_run).execute(&app.db).await.unwrap();
+        sqlx::query("UPDATE runs SET state='stopped', agent_title=? WHERE id=?")
+            .bind("不要比對這個 #999")
+            .bind(&top_run)
+            .execute(&app.db)
+            .await
+            .unwrap();
 
         let newbie = tt::claude_bot(&app, &rig.env.project_id, "newbie").await;
         sqlx::query("UPDATE bots SET parent_bot_id=? WHERE id=?").bind(&parent.id).bind(&newbie.id).execute(&app.db).await.unwrap();
@@ -1001,6 +1016,118 @@ mod tests {
         let rows = shadow_rows(&app).await;
         assert_eq!(rows.len(), 2, "認領入口也問了：{rows:?}");
         assert!(rows.iter().all(|r| r.1 == Some(0.8) && r.2.is_none()));
+    }
+
+    #[tokio::test]
+    async fn running_top_level_bot_titles_and_branches_are_claim_candidates_only_in_the_same_project() {
+        let rig = stand(Mode::Noul(0.8), true, true).await;
+        let app = rig.env.app.clone();
+        let caller = tt::claude_bot(&app, &rig.env.project_id, "caller").await;
+
+        let active = tt::claude_bot(&app, &rig.env.project_id, "active-top-level").await;
+        let wt = rig.dir.join("top-level-wt");
+        std::fs::create_dir_all(&wt).unwrap();
+        write_branch(&wt, "fix/lx1468");
+        sqlx::query("UPDATE bots SET cwd=? WHERE id=?").bind(wt.to_str().unwrap()).bind(&active.id).execute(&app.db).await.unwrap();
+        let active_run = tt::fake_run(&app, &active.id).await;
+        sqlx::query("UPDATE runs SET agent_title=? WHERE id=?")
+            .bind("Top-level active title #1468")
+            .bind(&active_run)
+            .execute(&app.db)
+            .await
+            .unwrap();
+
+        let idle = tt::claude_bot(&app, &rig.env.project_id, "idle-top-level").await;
+        let idle_run = tt::fake_run(&app, &idle.id).await;
+        sqlx::query("UPDATE runs SET state='stopped', agent_title=? WHERE id=?")
+            .bind("Idle top-level title should stay out")
+            .bind(&idle_run)
+            .execute(&app.db)
+            .await
+            .unwrap();
+
+        let other_project = db::ulid();
+        sqlx::query("INSERT INTO projects (id,path,label,host,created_at) VALUES (?,'/tmp/other-project','other-project','local',?)")
+            .bind(&other_project)
+            .bind(db::now())
+            .execute(&app.db)
+            .await
+            .unwrap();
+        let foreign = tt::claude_bot(&app, &other_project, "foreign-top-level").await;
+        let foreign_run = tt::fake_run(&app, &foreign.id).await;
+        sqlx::query("UPDATE runs SET agent_title=? WHERE id=?")
+            .bind("Foreign top-level title should stay out")
+            .bind(&foreign_run)
+            .execute(&app.db)
+            .await
+            .unwrap();
+
+        let ask = ClaimAsk {
+            project_id: rig.env.project_id.clone(),
+            caller: caller.id.clone(),
+            issue: Some(1468),
+            title: "Candidate issue #1468 title".into(),
+            child: caller.name.clone(),
+            branch: None,
+        };
+        check_claim(&app, &ask).await.unwrap();
+
+        let sent = rig.seen.lock().unwrap().clone();
+        let blob = serde_json::to_string(&sent).unwrap();
+        assert!(blob.contains("Top-level active title #1468"), "在跑的同專案頂層標題要作為候選：{blob}");
+        assert!(blob.contains("fix/lx1468"), "在跑的同專案頂層分支要作為候選：{blob}");
+        assert!(!blob.contains("Idle top-level title should stay out"), "閒置頂層 bot 不納入候選");
+        assert!(!blob.contains("Foreign top-level title should stay out"), "其他專案頂層 bot 不納入候選");
+
+        let sources: HashSet<String> = shadow_rows(&app)
+            .await
+            .into_iter()
+            .filter_map(|(_, _, _, _, line)| serde_json::from_str::<Value>(&line).ok())
+            .filter_map(|v| v.get("source").and_then(|s| s.as_str()).map(str::to_string))
+            .collect();
+        assert!(sources.contains("top_level_title"), "{sources:?}");
+        assert!(sources.contains("top_level_branch"), "{sources:?}");
+    }
+
+    #[tokio::test]
+    async fn a_remote_claim_spool_event_reaches_the_collision_check_for_its_project() {
+        let rig = stand(Mode::Noul(0.8), true, true).await;
+        let app = rig.env.app.clone();
+        sqlx::query("UPDATE projects SET host='m4p' WHERE id=?").bind(&rig.env.project_id).execute(&app.db).await.unwrap();
+        let caller = tt::claude_bot(&app, &rig.env.project_id, "remote-claimer").await;
+        let existing = tt::claude_bot(&app, &rig.env.project_id, "remote-top-level").await;
+        let run = tt::fake_run(&app, &existing.id).await;
+        sqlx::query("UPDATE runs SET agent_title=? WHERE id=?")
+            .bind("Remote top-level active #1468")
+            .bind(&run)
+            .execute(&app.db)
+            .await
+            .unwrap();
+
+        let notified = rig.request_received.notified();
+        let body = crate::hookrecv::HookBody {
+            bot_id: caller.id.clone(),
+            provider: "claude".into(),
+            payload: json!({
+                "hook_event_name": "AmClaimCollisionCheck",
+                "issue": 1468,
+                "title": "遠端認領工作 #1468",
+                "child": "remote-claimer",
+                "branch": "fix/lx1468",
+            }),
+            received_at: Some("2026-10-12T00:00:00.000Z".into()),
+            truncated: false,
+            run_id: None,
+        };
+        crate::hookrecv::process(&app, &body).await.unwrap();
+        notified.await;
+
+        let sent = rig.seen.lock().unwrap().clone();
+        let blob = serde_json::to_string(&sent).unwrap();
+        assert!(blob.contains("遠端認領工作 #1468"), "事件的標題送給 Jev：{blob}");
+        assert!(blob.contains("Remote top-level active #1468"), "同專案活躍頂層候選送給 Jev：{blob}");
+        assert!(!blob.contains(&caller.id), "不送 bot id");
+        assert!(!blob.contains(&rig.env.project_id), "不送 project id");
     }
 
     #[tokio::test]
