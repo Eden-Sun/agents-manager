@@ -1493,10 +1493,12 @@ pub fn parse_prune_outbox(out: &[u8]) -> Result<u64, RfsError> {
 pub enum PreflightError {
     /// 主機沒連線、或 ssh 失敗：不確定就當連不上（fail closed）。
     Unreachable,
-    /// `claude --version` 讀不到或低於最低版本；`found` 是讀到的版本（讀不到是空字串）。
-    ClaudeTooOld { found: String },
+    /// `claude --version` 讀不到或低於最低版本；`found` 是讀到的版本（讀不到是空字串），`why` 是讀不到的原因（給使用者看；版本太舊時是空字串）。
+    ClaudeTooOld { found: String, why: &'static str },
     /// 遠端有 claude 的 managed settings：它優先於 `--settings`，籠子保證不了。
     ManagedSettings,
+    /// managed settings 的檢查沒有明確答案（輸出為空、被截斷、夾著別的字）：不能當成「確定沒有」，不確定就當連不上（fail closed）。
+    ManagedUnknown,
 }
 
 /// `claude --version` 的輸出（例如 `2.1.288 (Claude Code)`）裡第一個 `x.y[.z…]`。
@@ -1521,16 +1523,16 @@ pub fn version_at_least(found: &str, min: &str) -> bool {
         .is_none_or(|(a, b)| a > b)
 }
 
-/// managed settings 的位置（Linux 與 macOS 各兩處：單檔與 `.d` 目錄）。有檔、或目錄裡有東西就回 `FOUND`。
+/// managed settings 的位置（Linux 與 macOS 各兩處：單檔與 `.d` 目錄）。有檔、或目錄裡有東西就印 `AM_MS=FOUND`，否則 `AM_MS=NONE`。
 pub fn managed_settings_script() -> String {
     r#"umask 077
 for f in /etc/claude-code/managed-settings.json "/Library/Application Support/ClaudeCode/managed-settings.json"; do
-  if [ -f "$f" ]; then echo FOUND; exit 0; fi
+  if [ -f "$f" ]; then echo AM_MS=FOUND; exit 0; fi
 done
 for d in /etc/claude-code/managed-settings.d "/Library/Application Support/ClaudeCode/managed-settings.d"; do
-  if [ -d "$d" ] && [ -n "$(ls -A "$d" 2>/dev/null)" ]; then echo FOUND; exit 0; fi
+  if [ -d "$d" ] && [ -n "$(ls -A "$d" 2>/dev/null)" ]; then echo AM_MS=FOUND; exit 0; fi
 done
-echo NONE
+echo AM_MS=NONE
 "#
     .to_string()
 }
@@ -1556,22 +1558,32 @@ pub async fn preflight_restricted(conn: &FencedConn, min_claude: &str) -> Result
             tracing::warn!(host = %conn.name(), error = %e, "preflight: claude --version ssh failed");
             PreflightError::Unreachable
         })?;
-    // 只認恰好一行的輸出：banner、motd 夾在前面時，第一個像版本的字串（例如 `22.04`）不一定是 claude 的版本，寧可讀不到。
-    let found = match ver.trim_end_matches('\n').lines().collect::<Vec<_>>().as_slice() {
-        [one] => parse_claude_version(one).unwrap_or_default(),
-        _ => String::new(),
+    // 只認恰好一行的輸出：banner、motd 夾在前面時，第一個像版本的字串（例如 `22.04`）不一定是 claude 的版本，寧可讀不到，並說清楚為什麼。
+    let (found, why) = match ver.trim_end_matches('\n').lines().collect::<Vec<_>>().as_slice() {
+        [] => (String::new(), "輸出是空的"),
+        [one] if one.trim() == "NOCLAUDE" => (String::new(), "遠端找不到 claude"),
+        [one] => match parse_claude_version(one) {
+            Some(v) => (v, ""),
+            None => (String::new(), "輸出不是版本號"),
+        },
+        _ => (String::new(), "輸出有多行（遠端 shell 可能印了 banner 或提示，分不出哪一行是版本）"),
     };
     if found.is_empty() || !version_at_least(&found, min_claude) {
-        return Err(PreflightError::ClaudeTooOld { found });
+        return Err(PreflightError::ClaudeTooOld { found, why });
     }
     let managed = conn.ssh_exec_timeout(&managed_settings_script(), TIMEOUT_QUICK).await.map_err(|e| {
         tracing::warn!(host = %conn.name(), error = %e, "preflight: managed settings check ssh failed");
         PreflightError::Unreachable
     })?;
-    if managed.contains("FOUND") {
-        return Err(PreflightError::ManagedSettings);
+    // 只認 `AM_MS=FOUND`／`AM_MS=NONE` 兩種明確的答案：空的、被截斷、夾著別的字都不能當成「沒有」。
+    match managed.lines().find_map(|l| l.split_once("AM_MS=").map(|(_, v)| v.trim())) {
+        Some("NONE") => Ok(()),
+        Some("FOUND") => Err(PreflightError::ManagedSettings),
+        _ => {
+            tracing::warn!(host = %conn.name(), bytes = managed.len(), "preflight: managed settings answer missing or unreadable; refusing");
+            Err(PreflightError::ManagedUnknown)
+        }
     }
-    Ok(())
 }
 
 impl RemoteSite {

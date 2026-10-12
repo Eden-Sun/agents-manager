@@ -780,7 +780,7 @@ codex 的 rollout 還沒寫出來時先放回等 3 次（只算這個原因，�
   帶了 `args`／`env` 400 `restricted_no_custom`。`share_profile` 進冪等指紋。
   `share_folder`（只給受限 bot，一般 bot 帶了 400）：`{"kind":"new","name":"support"}`＝在 `[share] folders_root`（預設 `~/shared-bots`）建新資料夾，同名已存在 409 `folder_exists`（同一個 `client_request_id` 的重送除外）；
   `{"kind":"existing","path":"/abs/dir"}`＝本機既有資料夾；位置不行（根目錄、家目錄與上層、daemon 資料目錄、`~/Library`、`~/.ssh`／`~/.config`／`~/.claude*`／`~/.azure`／`~/.password-store`／`~/.mozilla`…、系統目錄、不是絕對路徑、不存在）400 `bad_share_folder`＋`message`。
-  遠端專案：同一組規則，路徑是那台的實體路徑；另外 409 `share_host_unreachable`（連不上；不留列、不建資料夾）、`share_claude_too_old`（帶 `found`、`min`；受限才查）、`share_managed_settings`（那台有 claude 的 managed settings；受限才查）。
+  遠端專案：同一組規則，路徑是那台的實體路徑；另外 409 `share_host_unreachable`（連不上；不留列、不建資料夾）、`share_claude_too_old`（帶 `found`、`min`；受限才查）、`share_managed_settings`（那台有 claude 的 managed settings；受限才查）、`share_managed_unknown`（managed settings 的檢查沒有明確答案：指令失敗之外的空輸出、被截斷、夾著別的字；不能確定就不放行，受限才查）。`share_claude_too_old` 讀不到版本時 `message` 帶原因（例如輸出有多行、找不到 claude）。
   沒帶＝新資料夾、名字用 bot 名。`share_folder` 進冪等指紋。`model` 沒給＝最新 Opus（`/api/models` 當下列出的；只有別名時是 `opus`），寫進 bot 的 `model`。
   config 另有 `[share] folders_root`（可用 `~/`，必須在 daemon 資料目錄之外）。`GET /api/state` 的 bot 帶 `share_profile`（`"restricted"`／`"trusted"`／`null`）與 `share_enabled`（分享連結開著＝true）。
 - 分享使用者送來的訊息：`relay_from:"share"`、`source:"share"`（只在輸出；見 SPEC §20.3）。WS 多一種事件 `bot_share_changed {bot_id, enabled, allow_embed}`。
