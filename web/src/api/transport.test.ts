@@ -63,3 +63,46 @@ test('寫入請求不重送：401 也只送一次（重送可能變成送兩次�
   await assert.rejects(() => t.request('POST', '/bots/b1/prompt', { text: 'hi' }))
   assert.equal(calls.length, 1)
 })
+
+/** 假的計時器：`fireAll` 手動觸發，不靠牆鐘。 */
+function fakeTimers() {
+  let next = 1
+  const live = new Map<number, () => void>()
+  return {
+    setTimeout: (fn: () => void) => {
+      const id = next++
+      live.set(id, fn)
+      return id
+    },
+    clearTimeout: (id: unknown) => void live.delete(id as number),
+    pending: () => live.size,
+    fireAll: () => {
+      for (const [id, fn] of [...live]) {
+        live.delete(id)
+        fn()
+      }
+    },
+  }
+}
+
+test('GET 掛住不回：到時候要中止並丟錯，不能永遠等（否則 singleFlight 的 refreshState 會永遠卡在這一趟）', async () => {
+  const timers = fakeTimers()
+  const t = new HttpTransport({ timers })
+  globalThis.fetch = ((_: string, init?: RequestInit) =>
+    new Promise((_resolve, reject) => {
+      init?.signal?.addEventListener('abort', () => reject(new DOMException('aborted', 'AbortError')))
+    })) as unknown as typeof fetch
+  const pending = t.request('GET', '/state')
+  timers.fireAll()
+  await assert.rejects(pending, (e: unknown) => e instanceof Error && /逾時/.test(e.message))
+  assert.equal(timers.pending(), 0)
+})
+
+test('GET 很快就回來：逾時計時器要清掉，不留著', async () => {
+  const timers = fakeTimers()
+  const t = new HttpTransport({ timers })
+  stubFetch(() => ({ status: 200, body: { ok: true } }))
+  assert.deepEqual(await t.request('GET', '/state'), { ok: true })
+  assert.equal(timers.pending(), 0)
+})
+

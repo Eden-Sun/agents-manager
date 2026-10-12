@@ -96,9 +96,33 @@ async function readBody(res: Response): Promise<unknown> {
   return res.status === 204 ? null : parseText(res.status, await res.text())
 }
 
+/** 計時器可注入（測試用假的、不靠牆鐘）。 */
+export interface TransportTimers {
+  setTimeout: (fn: () => void, ms: number) => unknown
+  clearTimeout: (id: unknown) => void
+}
+
+export interface TransportOptions {
+  /** GET 的逾時（毫秒）。預設 30 秒。 */
+  getTimeoutMs?: number
+  timers?: TransportTimers
+}
+
+/** GET 超過這麼久沒回就中止：掛住的 GET 會讓 `singleFlight` 的 `refreshState` 永遠卡在那一趟。 */
+const GET_TIMEOUT_MS = 30_000
+const realTimers: TransportTimers = {
+  setTimeout: (fn, ms) => setTimeout(fn, ms),
+  clearTimeout: (id) => clearTimeout(id as ReturnType<typeof setTimeout>),
+}
+
 export class HttpTransport implements Transport {
   readonly mock = false
   private token = ''
+  // 參數屬性在 `erasableSyntaxOnly` 下不能用，所以明寫欄位。
+  private readonly opts: TransportOptions
+  constructor(opts: TransportOptions = {}) {
+    this.opts = opts
+  }
   /** 同時只跑一次 `GET /api/session`：401 常常一次來一整批（終端每秒輪詢＋WS 重連）。 */
   private refreshing: Promise<string> | null = null
 
@@ -150,26 +174,46 @@ export class HttpTransport implements Transport {
   }
 
   async request(method: HttpMethod, path: string, body?: unknown, signal?: AbortSignal): Promise<unknown> {
-    const send = (tok: string) => {
-      const headers: Record<string, string> = { Accept: 'application/json' }
-      if (tok) headers['X-AM-Token'] = tok
-      if (body !== undefined) headers['Content-Type'] = 'application/json'
-      return fetch(`/api${path}`, {
-        method,
-        headers,
-        body: body === undefined ? undefined : JSON.stringify(body),
-        signal,
-      })
+    // GET 沒有呼叫端給的 signal 時加上逾時（POST 不加：逾時的寫入可能已經送達，那是「送達狀態未知」的事）。
+    const timers = this.opts.timers ?? realTimers
+    let timedOut = false
+    let timeoutId: unknown = null
+    let effective = signal
+    if (!signal && method === 'GET') {
+      const ctl = new AbortController()
+      timeoutId = timers.setTimeout(() => {
+        timedOut = true
+        ctl.abort()
+      }, this.opts.getTimeoutMs ?? GET_TIMEOUT_MS)
+      effective = ctl.signal
     }
-    // 只有 GET 敢重試：POST/PATCH 401 時 daemon 根本沒跑到處理函式，但重送一次仍可能重複送出。
-    const res = method === 'GET' ? await this.withFreshToken(send, async (r) => r) : await send(this.token)
-    const parsed = await readBody(res)
-    if (!res.ok) {
-      const errBody: ApiErrorBody =
-        parsed && typeof parsed === 'object' ? (parsed as ApiErrorBody) : { reason: String(parsed ?? '') }
-      throw new ApiError(res.status, errBody, `${method} ${path} failed (${res.status})`)
+    try {
+      const send = (tok: string) => {
+        const headers: Record<string, string> = { Accept: 'application/json' }
+        if (tok) headers['X-AM-Token'] = tok
+        if (body !== undefined) headers['Content-Type'] = 'application/json'
+        return fetch(`/api${path}`, {
+          method,
+          headers,
+          body: body === undefined ? undefined : JSON.stringify(body),
+          signal: effective,
+        })
+      }
+      // 只有 GET 敢重試：POST/PATCH 401 時 daemon 根本沒跑到處理函式，但重送一次仍可能重複送出。
+      const res = method === 'GET' ? await this.withFreshToken(send, async (r) => r) : await send(this.token)
+      const parsed = await readBody(res)
+      if (!res.ok) {
+        const errBody: ApiErrorBody =
+          parsed && typeof parsed === 'object' ? (parsed as ApiErrorBody) : { reason: String(parsed ?? '') }
+        throw new ApiError(res.status, errBody, `${method} ${path} failed (${res.status})`)
+      }
+      return parsed
+    } catch (e) {
+      if (timedOut) throw new Error(`${method} ${path} 逾時：${(this.opts.getTimeoutMs ?? GET_TIMEOUT_MS) / 1000} 秒沒有回應`)
+      throw e
+    } finally {
+      if (timeoutId !== null) timers.clearTimeout(timeoutId)
     }
-    return parsed
   }
 
   async upload(path: string, file: Blob, opts?: UploadOptions): Promise<unknown> {
