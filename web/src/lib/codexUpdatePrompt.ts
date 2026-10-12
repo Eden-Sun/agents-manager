@@ -13,7 +13,9 @@ export interface CodexUpdatePrompt {
 
 const LINE = /update available!?\s*[:\s]\s*v?(\d+(?:\.\d+)+)\s*(?:->|→|=>)\s*v?(\d+(?:\.\d+)+)/i
 const ONLY_TO = /update available!?\s*[:\s]\s*v?(\d+(?:\.\d+)+)/i
-const ANSI = new RegExp(`${String.fromCharCode(27)}\\[[0-?]*[ -/]*[@-~]`, 'g')
+// CSI（顏色、游標）、OSC（終端標題，BEL 或 ST 結尾）、其餘兩字元以上的 ESC（字元集 `ESC ( B`、`ESC 7`、`ESC =`）。
+const ESC = String.fromCharCode(27)
+const ANSI = new RegExp(`${ESC}\\[[0-?]*[ -/]*[@-~]|${ESC}\\][^\\x07${ESC}]*(?:\\x07|${ESC}\\\\)|${ESC}[ -/]*[0-~]`, 'g')
 const UPDATE_NOW = /^\s*(?:[❯›▶>]\s*)?1[.)]\s+Update now\b/i
 const SKIP = /^\s*(?:[❯›▶>]\s*)?2[.)]\s+Skip\b/i
 
