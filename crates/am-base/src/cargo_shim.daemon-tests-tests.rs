@@ -358,6 +358,22 @@ esac"#
             )
         }
 
+        /// 等一個 shim 結束，最多 30 秒（只是後盾：正常的結束都是事件驅動的）。逾時就整組殺掉、讓測試失敗並說清楚卡在哪，
+        /// 不是無限等下去（#1464：父行程忽略 HUP 時 shim 不退，裸 `wait()` 會讓整個測試行程卡死）。
+        fn wait_bounded(&self, child: &mut std::process::Child, what: &str) -> std::process::ExitStatus {
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+            loop {
+                if let Some(st) = child.try_wait().unwrap() {
+                    return st;
+                }
+                if std::time::Instant::now() > deadline {
+                    self.kill_group_if_ours(child.id() as i32);
+                    panic!("{what}：shim 30 秒內沒有退出（卡住）");
+                }
+                std::thread::sleep(std::time::Duration::from_millis(20));
+            }
+        }
+
         /// 模擬「整個 pane 被關」：對整組 SIGKILL，**補到組裡一個行程都不剩**（issue #379）。
         /// 單一一次 `killpg` 只送給當下的成員：某個成員正好在 fork 的那一瞬，子行程可能在訊號走完那份名單之後才進組
         /// （macOS 上實測約 144 次並行跑會踩到 1 次），父親死了、子行程（`sleep 120`）成了活到天荒地老的孤兒。
@@ -1403,6 +1419,18 @@ esac
     }
 
     /// 租約守衛用的環境：有 bot 身分、暫存目錄指到沙盒裡（才看得出有沒有留下狀態目錄）。
+    /// 子行程（shim）開場的 SIGHUP 處置。測試行程本身可能是 `nohup` 起的（SIG_IGN 會被子行程繼承），所以要明確設：
+    /// 要測「shim 會接 HUP」就 `SIG_DFL`，要測「父行程忽略 HUP」就 `SIG_IGN`（#1464）。pre_exec 裡只呼叫 `signal(2)`（async-signal-safe）。
+    fn set_child_hup(cmd: &mut Command, disposition: libc::sighandler_t) {
+        use std::os::unix::process::CommandExt as _;
+        unsafe {
+            cmd.pre_exec(move || {
+                libc::signal(libc::SIGHUP, disposition);
+                Ok(())
+            });
+        }
+    }
+
     fn lease_env(s: &Sandbox) -> Vec<(&'static str, String)> {
         let tmp = s.dir.join("tmp");
         std::fs::create_dir_all(&tmp).unwrap();
@@ -1754,6 +1782,8 @@ esac"#,
         for (k, v) in &env {
             cmd.env(k, v);
         }
+        // 測試行程若是 nohup 起的，SIGHUP 是忽略；這條要測的是「shim 接 HUP」，所以子行程明確設回預設（#1464）。
+        set_child_hup(&mut cmd, libc::SIG_DFL);
         let (mut shim, _, _) = s.start_group(&mut cmd, false);
         let group = shim.id() as i32;
         let up = std::time::Instant::now();
@@ -1762,12 +1792,59 @@ esac"#,
             std::thread::sleep(std::time::Duration::from_millis(20));
         }
         unsafe { libc::kill(shim.id() as i32, libc::SIGHUP) };
-        let status = shim.wait().unwrap();
+        let status = s.wait_bounded(&mut shim, "等名額時收到 HUP");
         s.assert_group_gone(group);
         let released = std::fs::read_to_string(s.dir.join("release.log")).unwrap_or_default();
         assert!(released.contains("/build-slots/release") && released.contains("token="), "HUP 要退號碼牌：{released:?}");
         assert!(released.contains("bot_id=b1"), "取消等待要帶 bot 身分：{released:?}");
         assert_eq!(status.code(), Some(129), "HUP 的退出碼 129");
+    }
+
+    /// 父行程明確忽略 SIGHUP（`nohup`、`trap '' HUP` 的包裝）時，shim 開場就是忽略：shell 不能再裝 trap（POSIX），
+    /// 所以等名額時的 HUP 不會退號碼牌——照 nohup 的意思繼續排隊，直到拿到名額或被 TERM／INT 取消。
+    /// 這條測試的決定點是「不會卡住」：HUP 之後 shim 還在排隊（重問 acquire 的次數會增加，這是事件、不是等幾秒），
+    /// TERM 之後照常退號碼牌、退出碼 130，整段都有上限。
+    #[test]
+    fn a_waiting_shim_that_ignores_hangup_keeps_queueing_and_term_still_cancels() {
+        let s = Sandbox::new();
+        s.install_fake_curl(&format!(
+            r#"case "$*" in
+  *acquire*) echo x >> '{}'; printf '{{"granted":false,"active":2,"retry_after_secs":1}}' ;;
+  *release*) echo "$*" >> '{}'; printf '{{}}' ;;
+  *) printf '{{}}' ;;
+esac"#,
+            s.dir.join("acquire.log").display(),
+            s.dir.join("release.log").display()
+        ));
+        let env = lease_env(&s);
+        let mut cmd = s.command(&format!("{}:{}:/usr/bin:/bin", s.dir.join("bin").display(), s.dir.join("real").display()));
+        cmd.args(["build"]);
+        for (k, v) in &env {
+            cmd.env(k, v);
+        }
+        set_child_hup(&mut cmd, libc::SIG_IGN);
+        let (mut shim, _, _) = s.start_group(&mut cmd, false);
+        let group = shim.id() as i32;
+        let rounds = || std::fs::read_to_string(s.dir.join("acquire.log")).map(|t| t.lines().count()).unwrap_or(0);
+        let up = std::time::Instant::now();
+        while rounds() == 0 {
+            assert!(up.elapsed() < std::time::Duration::from_secs(30), "shim 沒開始排隊");
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+        let before_hup = rounds();
+        unsafe { libc::kill(shim.id() as i32, libc::SIGHUP) };
+        // 事件驅動：HUP 之後 shim 還活著、又問了一輪 acquire，才代表它沒有因為 HUP 退出。
+        while rounds() == before_hup {
+            assert!(shim.try_wait().unwrap().is_none(), "忽略 HUP 的 shim 不該因為 HUP 退出");
+            assert!(up.elapsed() < std::time::Duration::from_secs(60), "HUP 之後 shim 沒有再問 acquire（卡住）");
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+        unsafe { libc::kill(shim.id() as i32, libc::SIGTERM) };
+        let status = s.wait_bounded(&mut shim, "忽略 HUP 之後收到 TERM");
+        s.assert_group_gone(group);
+        let released = std::fs::read_to_string(s.dir.join("release.log")).unwrap_or_default();
+        assert!(released.contains("bot_id=b1") && released.contains("token="), "TERM 仍要退號碼牌：{released:?}");
+        assert_eq!(status.code(), Some(130), "TERM 的退出碼 130");
     }
 
     /// #1444 路徑二：剛拿到名額（granted:true），trap 還沒換成 `_release` 之前被 TERM，名額要帶著 token 放掉，不是白佔到 TTL。
