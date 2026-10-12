@@ -3,11 +3,12 @@
 //!
 //! 網頁每 5 秒輪詢，「需要回應」的視窗與面板各一份，所以這裡有兩道保護：
 //! * **逾時**：整段（含查遠端 `$HOME`）最多 [`REMOTE_READ_TIMEOUT`]，超過當沒讀到（`None`），請求不會卡在 ssh 上；
-//! * **節流**：同一個 run 在 [`FRESH_FOR`] 內不再打遠端，直接用上一次的結果（讀失敗也算，不會在主機不通時每次都重試）。
+//! * **節流**：同一個 run generation、host connection 與 live session 在 [`FRESH_FOR`] 內不再打遠端，直接用上一次的結果（讀失敗也算，不會在主機不通時每次都重試）。
 //!   同時進來的請求排在同一把鎖後面，只有第一個真的去讀。
 
 use std::collections::HashMap;
 use std::future::Future;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
@@ -64,6 +65,11 @@ fn cache() -> &'static TailCache {
     CACHE.get_or_init(TailCache::default)
 }
 
+/// Cache identity must include the run generation, host fence, pane, and live Claude session.
+pub(crate) fn cache_key_parts(run_id: &str, started_at: &str, pane: Option<&str>, host: &str, host_id: &str, host_generation: u64, session: &str) -> String {
+    format!("{run_id}\0{started_at}\0{}\0{host}\0{host_id}\0{host_generation}\0{session}", pane.unwrap_or(""))
+}
+
 // A per-run clock lets composition tests keep the polling cache fixed while
 // independently changing the remote transcript. Production always uses Instant::now.
 fn cache_now(_run_id: &str) -> Instant {
@@ -81,7 +87,7 @@ fn test_clocks() -> &'static Mutex<HashMap<String, Instant>> {
 }
 
 #[cfg(test)]
-pub(super) struct FixedClock(String);
+pub(crate) struct FixedClock(String);
 
 #[cfg(test)]
 impl Drop for FixedClock {
@@ -91,7 +97,7 @@ impl Drop for FixedClock {
 }
 
 #[cfg(test)]
-pub(super) fn fixed_clock(run_id: &str) -> FixedClock {
+pub(crate) fn fixed_clock(run_id: &str) -> FixedClock {
     test_clocks().lock().unwrap().insert(run_id.to_string(), Instant::now());
     FixedClock(run_id.to_string())
 }
@@ -116,12 +122,72 @@ where
 
 /// 遠端 run 的對話檔尾段（最後 [`crate::pending_question::TAIL_BYTES`]）；讀不到、路徑不在允許範圍、逾時＝`None`。
 /// 第二個值是 `true` 表示這次是現讀的（不是快取），呼叫端才能拿它當有效性檢查的證據。
+/// live session 的任一道檢查失敗（查不到、形狀不對、讀前讀後換了 session）一律回 `(None, false)`。
 pub async fn tail(app: &Arc<App>, bot: &db::Bot, run: &db::Run, host: &str) -> (Option<String>, bool) {
-    cache()
-        .read_through(&run.id, || cache_now(&run.id), || {
-            bounded(REMOTE_READ_TIMEOUT, crate::lifecycle::claude_child_log::pending_tail(app, bot, run, host, crate::pending_question::TAIL_BYTES))
-        })
+    if !run_is_current(app, bot, run, host).await {
+        return (None, false);
+    }
+    let Some(fence) = app.hosts.fence(host).await else { return (None, false) };
+    let Some(session) = crate::runners::claude_child_log::herdr_session(app, run)
         .await
+        .filter(|sid| crate::lifecycle::grok_transcript::valid_session_id(sid))
+    else {
+        return (None, false);
+    };
+    if !app.hosts.is_current(&fence).await || !run_is_current(app, bot, run, host).await {
+        return (None, false);
+    }
+    let key = cache_key_parts(
+        &run.id,
+        &run.started_at,
+        run.pane_id.as_deref(),
+        host,
+        &fence.authority_scope(),
+        fence.generation(),
+        &session,
+    );
+    // 讀完之後發現 session 或 run 已經換了：這次的檔尾不是這個 session 的，不能當證據，也不能讓呼叫端沿用。
+    let moved = AtomicBool::new(false);
+    let (value, fresh) = cache()
+        .read_through(&key, || cache_now(&run.id), || async {
+            let tail = bounded(
+                REMOTE_READ_TIMEOUT,
+                crate::lifecycle::claude_child_log::pending_tail_for_session(app, bot, run, host, &session, crate::pending_question::TAIL_BYTES),
+            )
+            .await;
+            if !app.hosts.is_current(&fence).await || !run_is_current(app, bot, run, host).await {
+                moved.store(true, Ordering::SeqCst);
+                return None;
+            }
+            let live = crate::runners::claude_child_log::herdr_session(app, run)
+                .await
+                .filter(|sid| crate::lifecycle::grok_transcript::valid_session_id(sid));
+            if live.as_deref() != Some(session.as_str()) {
+                moved.store(true, Ordering::SeqCst);
+                return None;
+            }
+            tail
+        })
+        .await;
+    if moved.load(Ordering::SeqCst) {
+        return (None, false);
+    }
+    (value, fresh)
+}
+
+async fn run_is_current(app: &Arc<App>, bot: &db::Bot, run: &db::Run, host: &str) -> bool {
+    if !matches!(run.state.as_str(), "starting" | "running") {
+        return false;
+    }
+    let Ok(Some(current)) = db::run(&app.db, &run.id).await else { return false };
+    if current.bot_id != bot.id
+        || current.state != run.state
+        || current.started_at != run.started_at
+        || current.pane_id != run.pane_id
+    {
+        return false;
+    }
+    matches!(db::bot_host(&app.db, &bot.id).await, Ok(current_host) if current_host == host)
 }
 
 #[cfg(test)]
