@@ -950,15 +950,13 @@ pub async fn confirm_submitted(
             // 證據永遠對不上。不按，交給使用者看。送出前的清理（`pane_text::for_pane`）本來就不該讓這個畫面出現。
             BoxState::NonEmpty if super::pane_text::invisible_review_notice(&now) => {
                 tracing::warn!(run = %run.id, bot = %bot.name, "claude is asking to review a prompt it cleaned of invisible characters; not pressing Enter");
+                super::late_proof::note(&run.id, super::late_proof::Pending::new(&bot.kind, pane, proof, offset, baseline, text, submitted_at));
                 return Ok(Delivered::Unproven("invisible_chars_review"));
             }
-            BoxState::NonEmpty if !composer_still_holds(&bot.kind, &now, text) => {
-                return Ok(Delivered::Unproven("composer_changed_or_unreadable"));
-            }
-            BoxState::Unready => return Ok(Delivered::Unproven("composer_unreadable")),
-            BoxState::NonEmpty if crate::composer_parse::composer_text_whole(&bot.kind, &now).as_deref() != Some(text) => {
-                return Ok(Delivered::Unproven("composer_changed_or_unreadable"));
-            }
+            // 框裡不是本則（空了、換成別人的字、讀不準）：不按 Enter，也不提早 return，後面的證據查詢照跑，
+            // 最後一定記下 Pending 讓背景升級（#1577）。精確比對不能再擋在這裡：折行的同一則要能補按（#1571）。
+            BoxState::NonEmpty if !composer_still_holds(&bot.kind, &now, text) => {}
+            BoxState::Unready => {}
             BoxState::NonEmpty if may_press_retry_submit(&bot.kind, &now, text, false, pressed_again) => {
                 tracing::warn!(run = %run.id, bot = %bot.name, ?submit, "prompt still in the composer after the submit key; pressing it again");
                 client.pane_send_keys(pane, submit.keys()).await?;
@@ -967,27 +965,33 @@ pub async fn confirm_submitted(
             _ => {}
         }
     }
-    let why = match box_state_within(&bot.kind, &read().await?, typed_tail(text)) {
-        BoxState::NonEmpty => "still_in_box",
-        BoxState::Unready => "composer_unreadable",
-        BoxState::Empty => {
-            // 最後再問一次歷史：rollout 還沒 flush 時，這是唯一的 positive evidence（#749）。
-            if let Some(mark) = structured {
-                if app.codex_prompt_landed(mark, &mut history_conn, text).await {
-                    tracing::info!(run = %run.id, bot = %bot.name, "prompt proven submitted by the codex thread history");
-                    crate::codex_history::note("delivery", crate::codex_history::Evidence::Structured);
-                    return Ok(Delivered::Submitted);
-                }
+    let last = read().await?;
+    let state = box_state_within(&bot.kind, &last, typed_tail(text));
+    if state == BoxState::Empty {
+        // 最後再問一次歷史：rollout 還沒 flush 時，這是唯一的 positive evidence（#749）。
+        if let Some(mark) = structured {
+            if app.codex_prompt_landed(mark, &mut history_conn, text).await {
+                tracing::info!(run = %run.id, bot = %bot.name, "prompt proven submitted by the codex thread history");
+                crate::codex_history::note("delivery", crate::codex_history::Evidence::Structured);
+                return Ok(Delivered::Submitted);
             }
-            // 框已空、證據還沒長出來：記憶體 watcher 立即接手，並先持久化相同基準供重啟恢復（#1479、#1493）。
-            let pending = super::late_proof::Pending::new(&bot.kind, pane, proof, offset, baseline, text, submitted_at);
-            super::late_proof::note(&run.id, pending.clone());
-            if let Err(e) = super::late_proof::persist_pending(app.db(), &run.id, &pending).await {
-                tracing::warn!(run = %run.id, bot = %bot.name, error = %e, "could not persist late proof baseline; the in-process watcher remains active");
-            }
-            "not_proven_submitted"
         }
+    }
+    let why = match state {
+        BoxState::NonEmpty if composer_still_holds(&bot.kind, &last, text) => "still_in_box",
+        BoxState::Unready => "composer_unreadable",
+        BoxState::NonEmpty => "composer_changed_or_unreadable",
+        BoxState::Empty => "not_proven_submitted",
     };
+    // 本則沒有原封不動留在框裡（框空了、讀不準、或已換成別人的字）：證據可能還在路上，回 `Unproven` 前記下基準，
+    // 呼叫端寫完 `unknown` 後背景繼續看（#1479、#1577）。
+    if why != "still_in_box" {
+        let pending = super::late_proof::Pending::new(&bot.kind, pane, proof, offset, baseline, text, submitted_at);
+        super::late_proof::note(&run.id, pending.clone());
+        if let Err(e) = super::late_proof::persist_pending(app.db(), &run.id, &pending).await {
+            tracing::warn!(run = %run.id, bot = %bot.name, error = %e, "could not persist late proof baseline; the in-process watcher remains active");
+        }
+    }
     tracing::warn!(run = %run.id, bot = %bot.name, reason = why, "could not prove the prompt was submitted");
     Ok(Delivered::Unproven(why))
 }

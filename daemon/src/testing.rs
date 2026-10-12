@@ -124,11 +124,19 @@ pub struct LivePane {
     pub pad_echo: bool,
     /// 送出去的字不在畫面上留回音列（被 spinner 擠出視窗、被重畫吃掉）：框空了，證據卻看不到。
     pub hide_echo: bool,
+    /// Enter 沒有送出：框被重畫成這些列（TUI 把長句折行的樣子），字還是同一則（#1571／#1577 的守門測試用）。
+    pub enter_redraws: Option<Vec<String>>,
+    /// Enter 照常送出（寫進 transcript），但框裡接著出現這些列——別人開始打的下一則草稿（#1577 的測試用）。
+    pub after_enter_composer: Option<Vec<String>>,
 }
 
 /// 框裡的字送出去：進 transcript，有 transcript 檔就照 claude 的格式補一筆 user entry。
 /// Enter 與 send-now 和弦（issue #103）共用這一段——兩顆鍵對框的效果一樣。
 fn submit_composer(p: &mut LivePane) {
+    if let Some(redraw) = &p.enter_redraws {
+        p.composer = redraw.clone();
+        return;
+    }
     if let Some(strips) = p.strips_on_enter {
         let removed: usize = p.composer.iter().map(|r| r.chars().filter(|c| strips(*c)).count()).sum();
         if removed > 0 {
@@ -148,6 +156,9 @@ fn submit_composer(p: &mut LivePane) {
         if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(path) {
             let _ = writeln!(f, "{entry}");
         }
+    }
+    if let Some(next) = p.after_enter_composer.take() {
+        p.composer = next;
     }
     if p.hide_echo {
         return;
