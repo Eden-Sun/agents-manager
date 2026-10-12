@@ -115,7 +115,11 @@ export function stripShareMarks(s: string): string {
 
 function capShareText(s: string): string {
   if (s.length <= SHARE_TEXT_STORE_MAX) return s
-  return `${s.slice(0, SHARE_TEXT_STORE_MAX)}\n…（內容過長，已截斷）`
+  // 截點不能落在代理對中間（會留下一個孤立的半個 emoji）：往前退一格。
+  let end = SHARE_TEXT_STORE_MAX
+  const c = s.charCodeAt(end - 1)
+  if (c >= 0xd800 && c <= 0xdbff) end -= 1
+  return `${s.slice(0, end)}\n…（內容過長，已截斷）`
 }
 
 /**

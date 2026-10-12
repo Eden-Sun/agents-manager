@@ -1,6 +1,6 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
-import { fmtSize, mergeMessages, ShareHttpError, shareErrorText, shareSafeHref, toShareFiles, toShareMessage, toSharePage, toStatus, tokenFromLocation } from './shareModel.ts'
+import { fmtSize, SHARE_TEXT_STORE_MAX, mergeMessages, ShareHttpError, shareErrorText, shareSafeHref, toShareFiles, toShareMessage, toSharePage, toStatus, tokenFromLocation } from './shareModel.ts'
 
 const T = 'AbCdEfGhIjKlMnOpQrStUvWxYz0123456789_-abcd'
 
@@ -101,4 +101,12 @@ test('fmtSize 邊界：差一點滿 1 MB 寫 1.0 MB，不是 1024 KB', () => {
 test('fmtSize：MB 進位到 10 時寫整數，不寫 10.0 MB', () => {
   assert.equal(fmtSize(Math.round(9.96 * 1024 * 1024)), '10 MB')
   assert.equal(fmtSize(Math.round(9.5 * 1024 * 1024)), '9.5 MB')
+})
+
+test('截斷顯示的長訊息不切斷 emoji：截點落在代理對中間時，留下完整的字', () => {
+  // SHARE_TEXT_STORE_MAX 以 UTF-16 單位切；截點若落在 😀 的前半，會剩一個孤立的高位代理，畫面上是 �。
+  const text = 'a'.repeat(SHARE_TEXT_STORE_MAX - 1) + '😀' + 'b'.repeat(10)
+  const out = toShareMessage({ id: 'm1', role: 'assistant', text, created_at: '', attachments: [] })!.text
+  assert.doesNotMatch(out, /[\uD800-\uDBFF](?![\uDC00-\uDFFF])/, '不能留下孤立的高位代理')
+  assert.doesNotMatch(out, /[\uDC00-\uDFFF]/, '不能留下孤立的低位代理')
 })
