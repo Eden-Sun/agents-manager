@@ -6,6 +6,7 @@
  * 並叫起既有的自動部署（daemon-update-kick），直接部署那顆 commit、不等 ubuntu-ci，沒人 working 才換版等安全條件照舊。部署在跑時 chip 改寫「部署中」、不給再按。
  */
 import { useCallback, useEffect, useState } from 'react'
+import { usePollWhileVisible } from '../hooks/usePollWhileVisible'
 import { fetchDeployStatus, startDeployNow } from '../api/deploy'
 import { useStore } from '../store/store'
 import { deployNowNotice, deployVisible, runningText, type DeployStatus } from '../lib/deployNow'
@@ -29,13 +30,12 @@ export function DeployNowBadge() {
     if (!snap.offline) setStatus(snap.status)
   }, [])
 
+  // `refresh` 不會拋（fetchDeployStatus 已經吞掉），這裡再接一次免得變成 unhandled rejection。
+  const tick = useCallback(() => void refresh().catch(() => {}), [refresh])
   useEffect(() => {
-    // `refresh` 不會拋（fetchDeployStatus 已經吞掉），這裡再接一次免得變成 unhandled rejection。
-    const tick = () => void refresh().catch(() => {})
     tick()
-    const t = setInterval(tick, POLL_MS)
-    return () => clearInterval(t)
-  }, [refresh])
+  }, [tick])
+  usePollWhileVisible(tick, POLL_MS)
 
   if (!deployVisible(status) || !status) return null
   const running = status.running
