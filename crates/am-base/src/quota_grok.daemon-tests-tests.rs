@@ -183,6 +183,14 @@
         assert!(r.starts_with("2026-01-03"), "{r}");
     }
 
+    /// 跨年：2027-01-01 00:30（+08:00）看到的 "December 31, 23:00" 是一個半小時前剛過的重置（去年的），不是明年的。
+    #[test]
+    fn a_reset_that_just_passed_across_new_years_eve_stays_last_year() {
+        let now = chrono::DateTime::parse_from_rfc3339("2027-01-01T00:30:00+08:00").unwrap();
+        let r = parse_reset(" December 31, 23:00", now).unwrap();
+        assert_eq!(r, "2026-12-31T15:00:00.000Z");
+    }
+
     #[test]
     fn an_explicit_year_is_honoured() {
         let r = parse_reset(" September 12, 2027 16:28", at("2026-09-06T12:00:00+08:00")).unwrap();
