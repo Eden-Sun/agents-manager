@@ -204,6 +204,12 @@ pub async fn serve(config_path: Option<PathBuf>, dev_watch_all_panes: bool) -> R
     };
     // Runs are adopted by now, so any Turn that outlived the restart can get its poller back.
     crate::runners::reconcile::rearm_progress(&app).await;
+    // #1493: recover late-delivery proof baselines only after run reconciliation has restored current panes.
+    match lifecycle::late_proof::recover_at_startup(&app).await {
+        Ok(0) => {}
+        Ok(n) => tracing::info!(n, "re-armed late delivery proof watchers after restart"),
+        Err(e) => tracing::warn!(error = ?e, "could not restore late delivery proof watchers"),
+    }
     lifecycle::relay_watch::rearm_host(&app, config::LOCAL_HOST).await;
     // #564：上一顆 daemon 沒收尾的 codex 安裝，等那台的安裝鎖放掉再收尾（不重跑安裝）。
     cli_update::recover_at_startup(&app).await;
