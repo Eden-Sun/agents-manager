@@ -108,6 +108,9 @@ export interface TransportOptions {
   timers?: TransportTimers
 }
 
+/** 純文字 token：沒有空白、沒有 HTML 的尖括號，長度有上限。 */
+const TOKEN_TEXT = /^[^\s<>]{1,256}$/
+
 /** GET 超過這麼久沒回就中止：掛住的 GET 會讓 `singleFlight` 的 `refreshState` 永遠卡在那一趟。 */
 const GET_TIMEOUT_MS = 30_000
 const realTimers: TransportTimers = {
@@ -162,9 +165,15 @@ export class HttpTransport implements Transport {
     if (!res.ok) {
       throw new ApiError(res.status, (body ?? {}) as ApiErrorBody, `GET /api/session failed (${res.status})`)
     }
+    // 代理或前端的退回頁會對任何路徑回 200 的 HTML：那不是 token，不能拿去帶給所有請求。
+    if ((res.headers?.get?.('content-type') ?? '').includes('text/html')) {
+      throw new Error('GET /api/session 回的是網頁，不是 token（代理或前端服務擋住了 /api）')
+    }
     const token =
       typeof body === 'string'
-        ? body
+        ? TOKEN_TEXT.test(body)
+          ? body
+          : ''
         : body && typeof body === 'object' && typeof (body as { token?: unknown }).token === 'string'
           ? (body as { token: string }).token
           : ''
