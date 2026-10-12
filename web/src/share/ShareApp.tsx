@@ -484,6 +484,10 @@ export function ShareApp({ client }: { client: ShareClient }) {
         linkGone.current = true
         stopLive.current()
         setState('gone')
+      } else if (e instanceof ShareHttpError && e.status === 400 && e.reason === 'bad_cursor') {
+        // 游標那一則已經不在對話裡（撤回、刪掉）：照 API.md 重載第一頁，不拿同一個游標反覆重試。
+        messageResyncGen.current++
+        void load()
       } else setOlderError(shareErrorText(e, 'load'))
     } finally {
       setLoadingOlder(false)
