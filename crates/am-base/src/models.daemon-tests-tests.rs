@@ -228,7 +228,7 @@
                 "codex",
                 &argv(&["codex", "-m", "gpt-5.6-sol", "-c", "model_reasoning_effort=\"max\"", "-c", "service_tier=\"priority\""])
             ),
-            (Some("gpt-6-sol".into()), Some("max".into()))
+            (Some("gpt-6.1-sol".into()), Some("max".into()))
         );
         assert_eq!(
             fast_from_argv("codex", &argv(&["codex", "-c", "service_tier=\"priority\""])),
@@ -558,9 +558,49 @@
     }
 
     #[test]
+    fn codex_previous_sol_is_remapped_exactly() {
+        assert_eq!(remap_deprecated_model("codex", "gpt-6-sol"), Some("gpt-6.1-sol"));
+        for model in ["gpt-6.1-sol", "gpt-6-sol-preview", "gpt-6-sol-extra", "gpt-6-astra", "gpt-6-luna"] {
+            assert_eq!(remap_deprecated_model("codex", model), None, "{model}");
+        }
+        assert_eq!(remap_deprecated_model("claude", "gpt-6-sol"), None);
+    }
+
+    #[test]
+    fn codex_previous_sol_catalog_transfers_default_and_identity_override() {
+        let rpc = |old_default, new_default| json!({"data": [
+            {"id":"gpt-6-sol", "isDefault":old_default},
+            {"id":"gpt-6.1-sol", "isDefault":new_default, "defaultReasoningEffort":"medium"},
+            {"id":"gpt-6-luna", "isDefault":false},
+            {"id":"gpt-6-sol-preview", "isDefault":false}
+        ]});
+        for (old, new) in [(true, false), (false, true), (false, false)] {
+            let models = codex_models_from_rpc(&rpc(old, new));
+            assert_eq!(models.iter().map(|m| m["id"].as_str().unwrap()).collect::<Vec<_>>(),
+                ["gpt-6.1-sol", "gpt-6-luna", "gpt-6-sol-preview"]);
+            assert_eq!(models[0]["is_default"], json!(old || new));
+            assert!(models[1..].iter().all(|m| m["is_default"] == false));
+        }
+        let models = codex_apply_identity_config(codex_models_from_rpc(&rpc(false, false)),
+            "model = 'gpt-6-sol'\nmodel_reasoning_effort = 'high'");
+        assert_eq!(models[0]["is_default"], true);
+        assert_eq!(models[0]["default_effort"], "high");
+        let models = codex_apply_identity_config(models, "model = 'gpt-6-luna'");
+        assert_eq!(models[0]["is_default"], false);
+        assert_eq!(models[1]["is_default"], true);
+        assert!(codex_models_from_rpc(&json!({"data":[{"id":"gpt-6-sol", "isDefault":true}]})).is_empty());
+        let missing_target = codex_models_from_rpc(&json!({"data":[
+            {"id":"gpt-6-sol", "isDefault":true}, {"id":"gpt-6-luna", "isDefault":false}
+        ]}));
+        assert_eq!(missing_target.len(), 1);
+        assert_eq!(missing_target[0]["is_default"], false);
+
+    }
+
+    #[test]
     fn deprecated_models_are_remapped_only_on_exact_matches() {
-        assert_eq!(remap_deprecated_model("codex", "gpt-5.6-sol"), Some("gpt-6-sol"));
-        assert_eq!(remap_deprecated_model("codex", "gpt-5.6-terra"), Some("gpt-6-sol"));
+        assert_eq!(remap_deprecated_model("codex", "gpt-5.6-sol"), Some("gpt-6.1-sol"));
+        assert_eq!(remap_deprecated_model("codex", "gpt-5.6-terra"), Some("gpt-6.1-sol"));
         assert_eq!(remap_deprecated_model("codex", "gpt-5.6-luna"), Some("gpt-6-luna"));
         assert_eq!(remap_deprecated_model("codex", "gpt-5.6-sol-preview"), None);
         assert_eq!(remap_deprecated_model("codex", "gpt-5.6-terra-extra"), None);
@@ -573,8 +613,8 @@
     #[test]
     fn adopted_child_argv_model_is_canonicalized_only_for_retired_exact_names() {
         let argv = |model: &str| vec!["codex".into(), "-m".into(), model.into()];
-        assert_eq!(model_effort_from_argv("codex", &argv("gpt-5.6-sol")).0.as_deref(), Some("gpt-6-sol"));
-        assert_eq!(model_effort_from_argv("codex", &argv("gpt-5.6-terra")).0.as_deref(), Some("gpt-6-sol"));
+        assert_eq!(model_effort_from_argv("codex", &argv("gpt-5.6-sol")).0.as_deref(), Some("gpt-6.1-sol"));
+        assert_eq!(model_effort_from_argv("codex", &argv("gpt-5.6-terra")).0.as_deref(), Some("gpt-6.1-sol"));
         assert_eq!(model_effort_from_argv("codex", &argv("gpt-5.6-luna")).0.as_deref(), Some("gpt-6-luna"));
         let argv = vec!["claude".into(), "--model".into(), "opus".into()];
         assert_eq!(model_effort_from_argv("claude", &argv).0.as_deref(), Some("claude-opus-5-5"));
@@ -590,12 +630,12 @@
             {"id": "gpt-5.6-luna", "displayName": "Old Luna"},
             {"id": "gpt-5.6-sol-preview", "displayName": "Preview"},
             {"id": "gpt-5.6-luna-preview", "displayName": "Other"},
-            {"id": "gpt-6-sol", "displayName": "New Sol"},
+            {"id": "gpt-6.1-sol", "displayName": "New Sol"},
             {"id": "gpt-6-luna", "displayName": "New"}
         ]});
         let mapped = codex_models_from_rpc(&r);
         let ids: Vec<_> = mapped.iter().map(|m| m["id"].as_str().unwrap()).collect();
-        assert_eq!(ids, ["gpt-5.6-sol-preview", "gpt-5.6-luna-preview", "gpt-6-sol", "gpt-6-luna"]);
+        assert_eq!(ids, ["gpt-5.6-sol-preview", "gpt-5.6-luna-preview", "gpt-6.1-sol", "gpt-6-luna"]);
     }
 
     #[test]

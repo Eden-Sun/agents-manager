@@ -9713,8 +9713,9 @@ mod bot_config_tests {
         assert_eq!(db::bot(&e.app.db, codex_id).await.unwrap().unwrap().model.as_deref(), Some("gpt-6-luna"));
 
         for (name, old, replacement) in [
-            ("old-codex-sol", "gpt-5.6-sol", "gpt-6-sol"),
-            ("old-codex-terra", "gpt-5.6-terra", "gpt-6-sol"),
+            ("previous-codex-sol", "gpt-6-sol", "gpt-6.1-sol"),
+            ("old-codex-sol", "gpt-5.6-sol", "gpt-6.1-sol"),
+            ("old-codex-terra", "gpt-5.6-terra", "gpt-6.1-sol"),
         ] {
             let response = create_bot(
                 State(e.app.clone()),
@@ -9728,6 +9729,11 @@ mod bot_config_tests {
             assert_eq!(body["remapped"]["model"]["to"], replacement);
             assert_eq!(db::bot(&e.app.db, body["bot_id"].as_str().unwrap()).await.unwrap().unwrap().model.as_deref(), Some(replacement));
         }
+
+        let patched = patch(&e, codex_id, json!({"model":"gpt-6-sol"})).await.unwrap();
+        assert_eq!(patched["remapped"]["model"]["from"], "gpt-6-sol");
+        assert_eq!(patched["remapped"]["model"]["to"], "gpt-6.1-sol");
+        assert_eq!(db::bot(&e.app.db, codex_id).await.unwrap().unwrap().model.as_deref(), Some("gpt-6.1-sol"));
 
         let create_claude = create_bot(
             State(e.app.clone()),

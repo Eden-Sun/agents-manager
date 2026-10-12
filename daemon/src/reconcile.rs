@@ -3358,7 +3358,7 @@ mod compat_tests {
             .unwrap();
         assert_eq!(child.kind, "codex");
         assert_eq!(child.identity.as_deref(), Some("cx1"));
-        assert_eq!(child.model.as_deref(), Some("gpt-6-sol"));
+        assert_eq!(child.model.as_deref(), Some("gpt-6.1-sol"));
         assert_eq!(child.effort.as_deref(), Some("max"));
         assert_eq!(child.fast, 1);
     }
@@ -3437,7 +3437,7 @@ mod compat_tests {
         assert_eq!(child.kind, "codex");
         assert_eq!(child.identity.as_deref(), Some("cx1"));
         assert_eq!(run_of(&app, &child.id).await.unwrap().runtime_identity.as_deref(), Some("cx1"), "the run follows the new kind's account");
-        assert_eq!(child.model.as_deref(), Some("gpt-6-sol"));
+        assert_eq!(child.model.as_deref(), Some("gpt-6.1-sol"));
         assert_eq!(child.effort.as_deref(), Some("max"));
         assert_eq!(child.fast, 1);
     }
