@@ -2061,6 +2061,22 @@ button.pane-toggle:hover:not(:disabled) {
   font-size: 12.5px;
 }
 
+/* 桌機：一列放得下整個 pane 的欄數（`--term-cols`），不折行——並排的版面（選項＋預覽框）折了就全碎。
+   等寬字一格約 0.602em；視窗內寬扣掉左右邊距與內距（32＋26px）。縮到 9.5px 還放不下就橫捲。 */
+.modal.blocked-modal {
+  container-type: inline-size;
+}
+
+.modal.blocked-modal.is-wide {
+  width: min(1760px, calc(100vw - 48px));
+}
+
+.term.blocked-modal-term.is-fit {
+  white-space: pre;
+  overflow-x: auto;
+  font-size: clamp(9.5px, calc((100cqi - 60px) / var(--term-cols) / 0.602), 12.5px);
+}
+
 /* 焦點停在終端（可捲），但不畫成可打字的輸入框。 */
 
 .term.blocked-modal-term:focus-visible {

@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from 'react'
+import { useEffect, useRef, useState, type CSSProperties } from 'react'
 import { createPortal } from 'react-dom'
 import { useChoiceMenu } from '../hooks/useChoiceMenu'
 import { usePendingQuestion } from '../hooks/usePendingQuestion'
@@ -21,6 +21,8 @@ import { CodexUpdateHint } from './CodexUpdateHint'
 
 /** 低於這個欄數，TUI 會把自己的輸出折成碎片，畫面本身就讀不了（同 TerminalTab）。 */
 const READABLE_COLUMNS = 60
+/** 超過這個欄數，1100px 的視窗放不下 12.5px 的字：視窗放寬到接近整個畫面。 */
+const WIDE_COLUMNS = 140
 
 /**
  * agent 進 `blocked` 時彈出整個 herdr 畫面：`BlockedPanel` 的 300px 截角看不到完整問題與選項。
@@ -53,6 +55,9 @@ export function BlockedModal({ botId, onClose }: { botId: string; onClose: () =>
   const phone = useMediaQuery(PHONE_QUERY)
   const [rawLayout, setRawLayout] = useState(false)
   const reflow = phone && !rawLayout
+  // 桌機：照 pane 的欄數把字縮到一列放得下、不折行（2026-10-12 使用者截圖：213 欄折行後並排的選項與預覽框全碎）。
+  // 縮到下限還放不下就橫捲。欄數未知時維持折行。
+  const fit = !phone && snap?.columns != null && !err
   // 題目與選項在畫面最下面：手機第一張快照到了先捲到底，之後不再動使用者的捲動位置。
   const scrolledRef = useRef(false)
   const hasText = Boolean(snap?.text)
@@ -107,7 +112,7 @@ export function BlockedModal({ botId, onClose }: { botId: string; onClose: () =>
     <div className="modal-backdrop" role="presentation" onMouseDown={onClose}>
       <div
         ref={rootRef}
-        className="modal blocked-modal"
+        className={`modal blocked-modal${fit && (snap?.columns ?? 0) > WIDE_COLUMNS ? ' is-wide' : ''}`}
         role="dialog"
         aria-modal="true"
         aria-label={`${bot?.name ?? 'agent'} 需要回應`}
@@ -177,7 +182,12 @@ export function BlockedModal({ botId, onClose }: { botId: string; onClose: () =>
         ) : null}
 
         {showRaw ? (
-          <pre className={`term term-wrap blocked-modal-term${reflow ? ' is-reflow' : ''}`} ref={termRef} tabIndex={0}>
+          <pre
+            className={`term blocked-modal-term${reflow ? ' term-wrap is-reflow' : fit ? ' is-fit' : ' term-wrap'}`}
+            style={fit ? ({ '--term-cols': snap?.columns } as CSSProperties) : undefined}
+            ref={termRef}
+            tabIndex={0}
+          >
             {err ? `讀取終端失敗：${err}` : snap?.text ? (reflow ? reflowForPhone(fitRules(snap.text)) : fitRules(snap.text)) : '讀取中…'}
           </pre>
         ) : null}
