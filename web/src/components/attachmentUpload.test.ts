@@ -194,3 +194,7 @@ test('撤回 daemon 排隊訊息時，附件以已上傳卡片放回 composer，
     },
   )
 })
+
+test('進度字的 MB：進位到 10 時寫 10 MB，不寫 10.0 MB', () => {
+  assert.equal(progressLabel(Math.round(9.5 * MB), Math.round(9.96 * MB)), '9.5 / 10 MB · 95%')
+})

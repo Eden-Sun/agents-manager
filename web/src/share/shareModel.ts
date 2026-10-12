@@ -147,7 +147,9 @@ export function fmtSize(n: number): string {
   // 四捨五入後滿 1024 KB 就進 MB；9.96 KB 進位成 10，不寫 10.0。
   const one = Math.round(kb * 10) / 10
   if (Math.round(kb) < 1024) return `${one < 10 ? one.toFixed(1) : Math.round(kb)} KB`
-  return `${(n / 1024 / 1024).toFixed(1)} MB`
+  // 一位小數進位到 10 時寫 10 MB（9.96 不寫 10.0 MB）。
+  const mb = n / 1024 / 1024
+  return Math.round(mb * 10) / 10 === 10 ? '10 MB' : `${mb.toFixed(1)} MB`
 }
 
 export class ShareHttpError extends Error {

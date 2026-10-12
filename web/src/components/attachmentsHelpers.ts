@@ -18,7 +18,9 @@ export function formatSize(bytes: number): string {
   if (bytes < 1024) return `${bytes} B`
   // 先看四捨五入後落在哪：1023.6 KB 進位是 1024，要寫成 1.0 MB（同 `lib/outboxList.ts` 的 `fileSize`）。
   if (Math.round(bytes / 1024) < 1024) return `${Math.round(bytes / 1024)} KB`
-  return `${(bytes / (1024 * 1024)).toFixed(1)} MB`
+  // 一位小數進位到 10 時寫 10 MB（9.96 不寫 10.0 MB）。
+  const mb = bytes / (1024 * 1024)
+  return Math.round(mb * 10) / 10 === 10 ? '10 MB' : `${mb.toFixed(1)} MB`
 }
 
 /** 卡片上的大小：壓過的連原檔一起寫，看得出省了多少。 */
