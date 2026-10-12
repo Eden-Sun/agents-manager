@@ -64,3 +64,26 @@ export function popPosition(
   const top = below + pop.height > vh - edge && above >= edge ? above : below
   return { left, top }
 }
+
+/**
+ * 浮層裡「命中行」要印的字。`matched_line` 不是每個場景都是給人看的一行：撞題（same_work）是 JSON（兩張卡的標題在裡面），
+ * 選項建議（ask_option）是 JSON，卡在畫面（stuck_queued）與完成回報（report_evidence）存的是指紋雜湊。這些一律不印原文。
+ * 撞限（limit_hit）是遮罩後的命中行，照印；舊資料若是純文字的撞題，也照印。
+ */
+export function badgeLineText(row: JudgeShadowRow): string | null {
+  const raw = row.matched_line
+  if (!raw) return null
+  if (row.regex_verdict === 'limit_hit') return raw
+  if (row.regex_verdict !== 'same_work') return null
+  let v: unknown
+  try {
+    v = JSON.parse(raw)
+  } catch {
+    return raw
+  }
+  if (typeof v !== 'object' || v === null) return null
+  const o = v as Record<string, unknown>
+  const a = typeof o.candidate_title === 'string' ? o.candidate_title : ''
+  const b = typeof o.existing_title === 'string' ? o.existing_title : ''
+  return a && b ? `${a} ↔ ${b}` : null
+}
