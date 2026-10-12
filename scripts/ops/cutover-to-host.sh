@@ -391,7 +391,8 @@ do_ship() {
     x rm -rf "$STATE/host-state" || die "已傳 host-state 的本機清理失敗：$STATE 可重跑 ship"
 }
 
-do_stop_dst() { x stop_dst_daemon || die "停不了目標 daemon"; }
+# 這幾支失敗時只 return 1、不自己 die：step 迴圈會印「修好後用 --from <步驟> --state-dir …」，自己 die 就跳過那行。
+do_stop_dst() { x stop_dst_daemon || { log "停不了目標 daemon" >&2; return 1; }; }
 
 do_import() {
     local id sup_id rs extra pmap=() m state_cmd cmd gone allowed idx
@@ -430,7 +431,7 @@ for w in json.load(open(sys.argv[1])).get("warnings") or []:
     for idx in "${!ids[@]}"; do
         id=${ids[$idx]}; cmd=${cmds[$idx]}
         if [ "$EXECUTE" = 1 ]; then
-            rsh "$cmd" > "$STATE/import-$id.json" || die "import $id 失敗：看 $STATE/import-$id.json"
+            rsh "$cmd" > "$STATE/import-$id.json" || { log "import $id 失敗：看 $STATE/import-$id.json" >&2; return 1; }
             echo "$id" >> "$STATE/imports.txt"
         else
             echo "    [dry-run] ssh $TARGET $cmd"
@@ -438,7 +439,7 @@ for w in json.load(open(sys.argv[1])).get("warnings") or []:
     done
 }
 
-do_start_dst() { x start_dst_daemon "agents-managerd-$(basename "$STATE")" || die "目標 daemon 起不來：看 $DST_DATA/daemon.log"; }
+do_start_dst() { x start_dst_daemon "agents-managerd-$(basename "$STATE")" || { log "目標 daemon 起不來：看 $DST_DATA/daemon.log" >&2; return 1; }; }
 
 do_resume() {
     local run="$STATE/running.json" id
