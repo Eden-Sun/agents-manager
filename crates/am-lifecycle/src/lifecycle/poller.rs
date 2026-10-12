@@ -3473,6 +3473,46 @@ mod issue_17_tests {
         assert_eq!(count(&f, "pane.send_text"), 1, "只送一次");
     }
 
+    /// issue #1571：TUI 把長句折成多列，框裡還是同一則。`confirm_submitted` 的精確比對早退掉補按（不能只靠 `may_press_retry_submit` 的單元測試）。
+    #[tokio::test]
+    async fn issue_1571_a_folded_draft_gets_its_retry_enter_through_confirm() {
+        let f = fixture("claude", "").await;
+        live(&f, crate::testing::LivePane { enter_redraws: Some(vec!["alpha beta".into(), "  gamma delta".into()]), ..wide() });
+        let app = f.env.app.clone();
+        db::set_pane_typed(&app.db, &f.run_id).await.unwrap();
+        let (run, bot) = run_and_bot(&f).await;
+        let client = client_for_run(&app, &run).await.unwrap();
+
+        let out = deliver_prompt(&app, &client, &run, &bot, "alpha beta gamma delta", false, false).await.unwrap();
+        assert_eq!(out, Delivered::Unproven("still_in_box"));
+        assert_eq!(count(&f, "pane.send_keys"), 2, "框裡還是同一則（只是折了行）：補按一次 Enter");
+    }
+
+    /// issue #1577：送出後第一次檢查框裡已是別人的草稿，transcript 其實已經有本則。以前這裡直接 return、不記 Pending，
+    /// 背景永遠看不到證據；現在要不按 Enter、照常記下 Pending，背景看到 transcript 就升級成已送出。
+    #[tokio::test]
+    async fn issue_1577_a_draft_typed_over_the_sent_text_leaves_it_for_the_late_proof() {
+        let f = fixture("claude", "").await;
+        with_transcript(&f, crate::testing::LivePane { after_enter_composer: Some(vec!["別人的草稿".into()]), ..wide() }).await;
+        let app = f.env.app.clone();
+        db::set_pane_typed(&app.db, &f.run_id).await.unwrap();
+        let (run, bot) = run_and_bot(&f).await;
+        let client = client_for_run(&app, &run).await.unwrap();
+        let text = "Reply with PONG please";
+
+        assert_eq!(deliver_prompt(&app, &client, &run, &bot, text, false, false).await.unwrap(), Delivered::Unproven("composer_changed_or_unreadable"));
+        assert_eq!(count(&f, "pane.send_keys"), 1, "框裡是別人的草稿：只按過一次 Enter，絕不補按");
+        sqlx::query("UPDATE turns SET delivery='unknown', delivery_verified=0, auto_resend=1 WHERE id=?")
+            .bind(&f.turn_id)
+            .execute(&app.db)
+            .await
+            .unwrap();
+        super::super::late_proof::arm(&app, &f.run_id, &f.bot_id, &f.turn_id);
+        let armed = super::super::late_proof::armed_in_tests().lock().unwrap().iter().find(|(t, _)| *t == f.turn_id).map(|(_, p)| p.clone());
+        let p = armed.expect("送出後框不是本則：Pending 要留給背景看");
+        assert_eq!(super::super::late_proof::look(&app, &f.bot_id, &f.turn_id, &p).await, super::super::late_proof::Look::Submitted);
+    }
+
     use super::super::late_proof::{self, Look};
 
     /// 打字送出、框空了、回音列看不到（`hide_echo`）：同步窗口判不出，照呼叫端把 turn 寫成 unknown，再認領背景這一筆。
