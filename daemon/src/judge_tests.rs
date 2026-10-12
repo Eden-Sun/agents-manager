@@ -18,6 +18,12 @@
     }
 
     #[test]
+    fn wildcard_projects_include_unlisted_projects_but_still_require_enabled() {
+        assert_eq!(gate(&cfg(true, &["*"]), "P2", "new project", 0), None);
+        assert_eq!(gate(&cfg(false, &["*"]), "P2", "new project", 0), Some(Skip::Disabled));
+    }
+
+    #[test]
     fn secrets_are_masked_and_layout_is_kept() {
         let m = |s: &str| mask(s);
         assert_eq!(m("  export GITHUB_TOKEN=ghp_abcdefghijklmnopqrstuvwxyz0123456789"), format!("  export GITHUB_TOKEN={REDACTED}"));
