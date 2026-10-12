@@ -17,11 +17,14 @@ impl HookHost for App {
         self.hook_inbox_wake.notify_one();
     }
 
-    fn schedule_claim_collision<'a>(
+    fn check_claim_collision<'a>(
         &'a self,
         ask: crate::judge::collision::ClaimAsk,
-    ) -> impl std::future::Future<Output = ()> + Send + 'a {
-        async move { crate::judge::collision::schedule_claim(&self.shared(), ask).await }
+    ) -> impl std::future::Future<Output = anyhow::Result<()>> + Send + 'a {
+        async move {
+            let app = self.shared();
+            crate::judge::collision::check_claim(&app, &ask).await
+        }
     }
 
     fn hook_bot_dir(&self, bot_id: &str) -> Result<std::path::PathBuf> {

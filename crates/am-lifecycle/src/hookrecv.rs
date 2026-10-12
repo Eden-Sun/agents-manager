@@ -130,7 +130,7 @@ pub enum HookKind {
     /// 遠端 bot 的 herdr shim 在 `agent prompt` 之前寫進自己 spool 的報備（SPEC §6.5d）：遠端沒有 `AM_PORT`，
     /// 打不到 `/relay/announce`，只能跟 hook 走同一條 spool。寄件者就是這則 body 的 bot（spool 在它自己的目錄）。
     RelayAnnounce { to_agent: String, text: String },
-    /// 遠端 agm 認領票後交給 daemon 的 best-effort 撞題檢查（issue #1468）。
+    /// 遠端 agm 認領票後交給 daemon 的撞題檢查（issue #1468）；耐久 hook worker 等檢查完成才 ACK。
     ClaimCollisionCheck { issue: Option<u64>, title: String, child: String, branch: Option<String> },
     Ignore(String),
 }
@@ -1600,7 +1600,7 @@ async fn process_locked_for_with_outcome<H: HookHost>(
             relay_backfill(app, &bot.id, from_turn.as_deref(), &to_agent, &text).await
         }
         HookKind::ClaimCollisionCheck { issue, title, child, branch } => {
-            app.schedule_claim_collision(crate::judge::collision::ClaimAsk {
+            app.check_claim_collision(crate::judge::collision::ClaimAsk {
                 project_id: bot.project_id.clone(),
                 caller: bot.id.clone(),
                 issue,
@@ -1608,7 +1608,7 @@ async fn process_locked_for_with_outcome<H: HookHost>(
                 child,
                 branch,
             })
-            .await;
+            .await?;
             Ok(())
         }
         HookKind::Identity { session_id, transcript_path } => {
@@ -7196,11 +7196,11 @@ pub trait HookHost:
 {
     /// 叫醒 durable hook 收件匣的 worker（commit 之後才叫）。
     fn wake_hook_inbox(&self);
-    /// 將遠端 issue claim 的撞題查詢排進背景 task；不等待 Jev。
-    fn schedule_claim_collision<'a>(
+    /// 處理遠端 issue claim 的撞題查詢；hook inbox 只有在 durable reservation／結果已落帳後才 ACK。
+    fn check_claim_collision<'a>(
         &'a self,
         ask: crate::judge::collision::ClaimAsk,
-    ) -> impl std::future::Future<Output = ()> + Send + 'a;
+    ) -> impl std::future::Future<Output = Result<()>> + Send + 'a;
     /// 本機這顆 bot 的資料夾（spool 在裡面）。
     fn hook_bot_dir(&self, bot_id: &str) -> Result<std::path::PathBuf>;
     /// 回合結束 hook 處理完之後補讀 AskUserQuestion 的答案。

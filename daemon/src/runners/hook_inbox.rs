@@ -202,6 +202,142 @@ mod tests {
         at.is_some()
     }
 
+    /// 遠端 claim 的 hook 必須等撞題檢查完成才可以 ACK。
+    /// gate 卡在 Jev 回覆前，模擬 daemon 在工作中途被 swap；重啟先把 reservation 收成
+    /// `interrupted`，再由 hook inbox 重播時保留這筆可追溯記錄。
+    #[tokio::test]
+    async fn claim_collision_hook_stays_pending_until_reserved_work_is_reconciled() {
+        let env = tt::env().await;
+        let app = env.app.clone();
+        let caller = tt::claude_bot(&app, &env.project_id, "claim-inbox-caller").await;
+        let existing = tt::claude_bot(&app, &env.project_id, "claim-inbox-existing").await;
+        let run_id = tt::fake_run(&app, &existing.id).await;
+        sqlx::query("UPDATE runs SET agent_title=? WHERE id=?")
+            .bind("正在修同一個 issue 1500 的撞題提醒")
+            .bind(&run_id)
+            .execute(&app.db)
+            .await
+            .unwrap();
+
+        let dir = tt::track(std::env::temp_dir().join(format!("am-hook-claim-{}", db::ulid())));
+        std::fs::create_dir_all(&dir).unwrap();
+        let key_file = dir.join("key");
+        std::fs::write(&key_file, "test-key\n").unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&key_file, std::fs::Permissions::from_mode(0o600)).unwrap();
+        }
+
+        let request_received = Arc::new(tokio::sync::Notify::new());
+        let request_count = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let response_gate = Arc::new(tokio::sync::Semaphore::new(0));
+        let route = {
+            let request_received = request_received.clone();
+            let request_count = request_count.clone();
+            let response_gate = response_gate.clone();
+            axum::routing::post(move |axum::Json(body): axum::Json<serde_json::Value>| {
+                let request_received = request_received.clone();
+                let request_count = request_count.clone();
+                let response_gate = response_gate.clone();
+                async move {
+                    request_count.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                    request_received.notify_one();
+                    response_gate.acquire().await.unwrap().forget();
+                    let _ = body;
+                    (
+                        axum::http::StatusCode::OK,
+                        axum::Json(json!({
+                            "model": "jev-test",
+                            "answers": {"same_work": {"type": "noul", "noul": 0.8}},
+                            "usage": {"input_tokens": 1}
+                        })),
+                    )
+                }
+            })
+        };
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let endpoint = format!("http://{}/v1/systemone", listener.local_addr().unwrap());
+        tokio::spawn(async move {
+            axum::serve(listener, axum::Router::new().route("/v1/systemone", route)).await.unwrap();
+        });
+        let project_id = env.project_id.clone();
+        let key_path = key_file.to_string_lossy().into_owned();
+        app.cfg
+            .update(move |cfg| {
+                cfg.judge.enabled = true;
+                cfg.judge.projects = vec![project_id];
+                cfg.judge.key_file = key_path;
+                cfg.judge.endpoint = endpoint;
+                cfg.judge.timeout_ms = 60_000;
+                Ok(())
+            })
+            .await
+            .unwrap();
+
+        let body = HookBody {
+            bot_id: caller.id.clone(),
+            provider: "claude".into(),
+            payload: json!({
+                "hook_event_name": "AmClaimCollisionCheck",
+                "issue": 1500,
+                "title": "修正遠端 claim 撞題提醒的 durable handoff",
+                "child": caller.name,
+                "branch": "fix/pm1500",
+            }),
+            received_at: Some("2026-10-12T00:00:00.000Z".into()),
+            truncated: false,
+            run_id: None,
+        };
+        let accepted = crate::hook_inbox::accept(&app.db, &body, crate::hook_inbox::Source::Remote).await.unwrap();
+        assert!(accepted.is_new());
+        let event_id: String = sqlx::query_scalar("SELECT id FROM hook_events WHERE bot_id=?")
+            .bind(&caller.id)
+            .fetch_one(&app.db)
+            .await
+            .unwrap();
+
+        let request_wait = request_received.notified();
+        let mut processing = Box::pin(crate::app_ports_r2a9::HookProcessor::process_hook(&app, &body, Some(&event_id)));
+        tokio::select! {
+            _ = request_wait => {}
+            result = &mut processing => panic!("hook returned before the gated Jev request: {result:?}"),
+        }
+
+        let processed_at: Option<String> = sqlx::query_scalar("SELECT processed_at FROM hook_events WHERE id=?")
+            .bind(&event_id)
+            .fetch_one(&app.db)
+            .await
+            .unwrap();
+        assert!(processed_at.is_none(), "Jev gate 尚未放行，hook 不得 ACK");
+        let reservation: (Option<f64>, Option<String>) = sqlx::query_as(
+            "SELECT jev_same_work, error FROM judge_shadow WHERE regex_verdict='same_work'",
+        )
+        .fetch_one(&app.db)
+        .await
+        .unwrap();
+        assert_eq!(reservation, (None, Some("pending".into())), "先有可恢復的 reservation 才能進入 Jev");
+
+        // 丟棄中的 hook future 等同 swap 取消正在處理的工作；收件匣列尚未 ACK。
+        drop(processing);
+        assert_eq!(crate::judge::settle_interrupted(&app).await.unwrap(), 1);
+        let interrupted: Option<String> = sqlx::query_scalar("SELECT error FROM judge_shadow WHERE regex_verdict='same_work'")
+            .fetch_one(&app.db)
+            .await
+            .unwrap();
+        assert_eq!(interrupted.as_deref(), Some("interrupted"));
+
+        // 讓被取消的假 Jev handler 收尾，再模擬新 daemon 的 inbox worker 重播。
+        response_gate.add_permits(1);
+        assert_eq!(drain_once(&app).await.unwrap(), 1);
+        assert!(processed(&app, &caller.id).await, "重播完成後 ACK hook");
+        assert_eq!(request_count.load(std::sync::atomic::Ordering::SeqCst), 1, "保留 interrupted 記錄，不重複消耗 Jev 名額");
+        assert!(
+            crate::supervisor::store::pending_inbox(&app.db).await.unwrap().iter().all(|e| e.kind != "judge_same_work"),
+            "interrupted 前沒有答案，不推撞題提示"
+        );
+    }
+
     /// #911：A 握著自己的鎖（像啟動等就緒、批次重啟），A 的 Stop 卡在鎖上；B 的 Stop 照常處理完，不排在 A 後面。
     #[tokio::test]
     async fn a_bot_holding_its_lock_does_not_delay_other_bots_hooks() {
