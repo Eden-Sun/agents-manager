@@ -2306,6 +2306,7 @@ rustup 換位置或遠端主機上反而是錯的——讓 shim 每次在 pane �
   - 守衛只罩**本機**的 cargo（名額是本機的）；名額在 cargo 起來之前就失效，就不起它。
 - **放名額要放到（issue #1443）**：shim 放名額（正常收尾、守衛收尾、EXIT／INT／TERM 的 trap）最多試 **3 次**，每次 curl 逾時 10 秒、中間等 1 秒，回應含 `"released":true` 才停。以前只打一通、5 秒逾時、不看結果，逾時的那一列要白佔到 TTL。連不上（curl 結束碼 7，daemon 沒開）當場放棄，多等沒有意義。`_release` 是 trap，最壞情況多等約 30 秒。
 - **等名額時 HUP 與拿到名額時中斷（issue #1444）**：等名額途中收到 HUP（pane 被關，終端機對前景行程群送的）跟 INT／TERM 一樣退號碼牌（空 token 的取消，退出碼 129／130）。拿到名額（`granted:true`）之後、守衛的 trap 裝上之前的那段被中斷，改帶著 token 放掉名額，不再白佔到 TTL。
+- **父行程忽略 HUP 時 shim 不接 HUP（issue #1464）**：`nohup`、`trap '' HUP` 起的 shim 開場就是忽略 HUP，POSIX 規定這種訊號 shell 不能再裝 trap，所以等名額途中的 HUP 不退號碼牌，shim 照 nohup 的意思繼續排隊（拿到名額就照常跑，不被 HUP 帶走）；TERM／INT 仍然退號碼牌（退出碼 130）。要能被 HUP 取消的呼叫端就別用 nohup 包 shim。測試（`cargo_shim` 的 HUP 那條）在子行程明確設回 `SIG_DFL`，不吃測試行程自己的處置，並且所有等 shim 結束的地方都有上限，不會因為 HUP 被吞掉而整個測試行程卡住。
 - **shim 不留孤兒行程（issue #151）**：行程數是全機共用的資源（曾被塞到 2661／2666，其他 bot 的 `fork` 全失敗）。三件事：
   等名額的迴圈每輪確認呼叫端（`$PPID`）還在，不在了就自己印一行退出，不留永遠在等的孤兒（`$PPID` 是 shell 啟動那一刻的父行程：呼叫端先走了，那就是收養者——pid 1、`launchd`／`init`，或 Linux 的 child subreaper `systemd --user`，後者同一個使用者、`kill -0` 會成功，所以名字是 `systemd`／`launchd`／`init` 的父行程一律當成沒有呼叫端，#676）；續約守衛的 `sleep` 放背景、用 `wait` 等，
   收到 TERM 先殺掉手上的 sleep 再結束（否則每次 cargo 都留一顆 `sleep 60` 的孤兒，最久 TTL/3 秒）——**兩個縫也要補上（issue #189）**：TERM 落在
