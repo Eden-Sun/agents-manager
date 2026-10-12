@@ -56,10 +56,13 @@ pub fn codex_models_from_rpc(result: &Value) -> Vec<Value> {
         .get("data")
         .and_then(|d| d.as_array())
         .map(|arr| {
+            let remapped_default = arr.iter()
+                .find(|m| m.get("isDefault").and_then(Value::as_bool) == Some(true))
+                .and_then(|m| remap_deprecated_model("codex", m.get("id")?.as_str()?));
             arr.iter()
                 .filter_map(|m| {
                     let id = m.get("id")?.as_str()?.to_string();
-                    if matches!(id.as_str(), "gpt-5.6-sol" | "gpt-5.6-terra" | "gpt-5.6-luna") {
+                    if remap_deprecated_model("codex", &id).is_some() {
                         return None;
                     }
                     let efforts: Vec<String> = m
@@ -86,7 +89,8 @@ pub fn codex_models_from_rpc(result: &Value) -> Vec<Value> {
                         "id": id,
                         "display_name": m.get("displayName").and_then(|x| x.as_str()).unwrap_or(""),
                         "description": m.get("description").and_then(|x| x.as_str()).unwrap_or(""),
-                        "is_default": m.get("isDefault").and_then(|x| x.as_bool()).unwrap_or(false),
+                        "is_default": remapped_default.map(|target| target == id)
+                            .unwrap_or_else(|| m.get("isDefault").and_then(Value::as_bool).unwrap_or(false)),
                         "default_effort": m.get("defaultReasoningEffort").and_then(|x| x.as_str()),
                         "efforts": efforts,
                         "service_tiers": tiers,
@@ -116,13 +120,13 @@ pub const AGY_RETIRED_MODELS: &[&str] = &[
     "gpt-oss-120b-medium",
 ];
 
-/// Map only explicitly retired aliases. Full versioned model ids are user choices and stay intact.
+/// Map only explicitly retired names and aliases; other full model ids stay intact.
 pub fn remap_deprecated_model(kind: &str, model: &str) -> Option<&'static str> {
     if kind == "agy" && AGY_RETIRED_MODELS.contains(&model) {
         return Some(AGY_DEFAULT_MODEL);
     }
     match (kind, model) {
-        ("codex", "gpt-5.6-sol" | "gpt-5.6-terra") => Some("gpt-6-sol"),
+        ("codex", "gpt-5.6-sol" | "gpt-5.6-terra" | "gpt-6-sol") => Some("gpt-6.1-sol"),
         ("codex", "gpt-5.6-luna") => Some("gpt-6-luna"),
         ("claude", "opus") => Some("claude-opus-5-5"),
         _ => None,
@@ -256,7 +260,7 @@ pub fn codex_apply_identity_config(mut models: Vec<Value>, cfg_text: &str) -> Ve
     let top = |key: &str| doc.get(key).and_then(|v| v.as_str()).map(str::trim).filter(|s| !s.is_empty()).map(String::from);
     if let Some(model) = top("model") {
         for v in &mut models {
-            v["is_default"] = json!(v["id"].as_str() == Some(model.as_str()));
+            v["is_default"] = json!(v["id"].as_str() == Some(canonical_model("codex", &model)));
         }
     }
     if let Some(effort) = top("model_reasoning_effort") {

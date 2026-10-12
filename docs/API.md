@@ -528,7 +528,7 @@ daemon 重啟後就是空的（那次不會再推 `herdr_update_done`，前端�
 
 成功後推 `project_changed` / `bot_changed`。
 
-**停用模型的回應（#400）**：POST create 與 PATCH model 若輸入剛好等於停用值，回應帶 `remapped.model.from/to`。Codex 的 `gpt-5.6-sol`、`gpt-5.6-terra` 會換成 `gpt-6-sol`，`gpt-5.6-luna` 會換成 `gpt-6-luna`；Claude 的 `opus` 會換成 `claude-opus-5-5`。其他回應不含 `remapped`；同一欄位的 PATCH 只會回報實際替換的值。
+**停用模型的回應（#400）**：POST create 與 PATCH model 若輸入剛好等於停用值，回應帶 `remapped.model.from/to`。Codex 的 `gpt-5.6-sol`、`gpt-5.6-terra`、`gpt-6-sol` 會換成 `gpt-6.1-sol`，`gpt-5.6-luna` 會換成 `gpt-6-luna`；Claude 的 `opus` 會換成 `claude-opus-5-5`。其他回應不含 `remapped`；同一欄位的 PATCH 只會回報實際替換的值。
 
 **`GET /api/intents`**（#355、#811）：持久 intent 的最近 100 筆（含已結束的，新的先）`{intents:[{id,kind,subject_id,host,payload_json,step,status,owner_boot,attempts,last_error,created_at,updated_at,expires_at}]}`。只給 UI token（Bot principal 回 `403 user_only`：payload 含其他 bot 的 session／路徑／錯誤）。唯讀；`restart`／`delete_bot`／`delete_project`／`promote` 會寫（見 SPEC §3.1 的持久 intent）；child 退役另寫一列 `kind = retire_child`、`status = done` 的紀錄（payload 見 SPEC §6.5a，#554）。
 
@@ -2062,7 +2062,9 @@ UI token 會取得 Project 底下所有存活 bot 的訊息合併。Bot token �
 | `claude` | `static` | `opus / sonnet / haiku / fable` | 每個 alias 都是 `low…max` 五級 | `[]` |
 | `agy` | `static` | 只留 Gemini 3.8 Flash 三檔（`gemini-3.8-flash-{medium,high,low}`，使用者 2026-10-05：「agy 的 model 只限 3.8」；預設 `gemini-3.8-flash-medium`；第一階段寫死）。`agy models` 還列的 3.7／3.6 Flash、3.1 Pro、claude、gpt-oss 不給；已存在的 bot 設了這些，寫設定時 `remapped_model` 回報換成 3.8 medium，啟動時也照換 | `[]`（強度在 slug 裡） | `[]` |
 
-`GET /api/models` 提供可選 alias 清單；bot 的 `model` 設定則會交給對應 CLI。Claude 可設定 alias（例如 `opus`）或完整 CLI 模型名（例如 `claude-opus-5-5`），完整名稱不必出現在 alias 清單；Codex 的模型名（例如 `gpt-6-luna`）同樣交給 `-m`。精確舊值 `gpt-5.6-sol`／`gpt-5.6-terra`／`gpt-5.6-luna` 不列在 Codex 清單，送入 create 或 PATCH 時會回報並採用上面的遷移目標。CLI 不會先以 `/api/models` 限制 PATCH 的其他模型字串。
+`GET /api/models` 提供可選 alias 清單；bot 的 `model` 設定則會交給對應 CLI。Claude 可設定 alias（例如 `opus`）或完整 CLI 模型名（例如 `claude-opus-5-5`），完整名稱不必出現在 alias 清單；Codex 的模型名（例如 `gpt-6-luna`）同樣交給 `-m`。精確舊值 `gpt-6-sol`／`gpt-5.6-sol`／`gpt-5.6-terra`／`gpt-5.6-luna` 不列在 Codex 清單，送入 create 或 PATCH 時會回報並採用上面的遷移目標。CLI 不會先以 `/api/models` 限制 PATCH 的其他模型字串。
+
+Codex 清單排除上述改派值；app-server 的預設若是被排除的模型，`is_default` 移到改派目標。身分 `config.toml` 設了舊值時，同樣以改派目標標預設與套用 `model_reasoning_effort`；目標不在清單時不標預設。既存 DB 的 `gpt-6-sol` 啟動參數改用 `gpt-6.1-sol`，不回寫 DB。
 
 - `default_effort`：codex/grok 是模型回報的值（可能 `null`）；claude 一律有值——帳號 `settings.json` 的 per-model 覆寫 > `effortLevel` > 內建 `"high"`。
 - `display_name` / `description` 可能為空字串。

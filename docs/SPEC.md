@@ -776,11 +776,11 @@ Jev 不負責回合收尾、額度記帳或競態判斷；這些依 run、turn�
 
 | kind | 停用的輸入 | 強制使用 | 其餘版本名稱 |
 |---|---|---|---|
-| codex | `gpt-5.6-sol`、`gpt-5.6-terra` | `gpt-6-sol` | 原樣保留 |
+| codex | `gpt-5.6-sol`、`gpt-5.6-terra`、`gpt-6-sol` | `gpt-6.1-sol` | 原樣保留 |
 | codex | `gpt-5.6-luna` | `gpt-6-luna` | 原樣保留 |
 | claude | `opus` | `claude-opus-5-5` | 原樣保留，包括 `claude-opus-4-1` 及其他 `claude-opus-*` 完整名 |
 
-create／PATCH／promote 回應以 `remapped.model.from/to` 說明實際替換；`GET /api/models?kind=codex` 不列出這三個精確的 `gpt-5.6-*` 值。啟動舊 DB 設定、採納子 agent argv、config.toml 投影與 responder/supervisor 的啟動設定都套用同一 helper。schema v15 將 `bots.model` 的既有精確舊值改寫，包含軟刪列；資料 migration 可重複執行。額度與 runtime 探測到明確版本 id 時不做前綴推測或降版。
+create／PATCH／promote 回應以 `remapped.model.from/to` 說明實際替換；`GET /api/models?kind=codex` 不列出這三個精確的 `gpt-5.6-*` 值及 `gpt-6-sol`。app-server 的預設若被排除，改標到改派目標；身分 config.toml 的模型覆寫也先改派，再套用預設強度。既存 DB 的 `gpt-6-sol` 下次啟動以 `gpt-6.1-sol` 傳入參數，不回寫 DB。啟動舊 DB 設定、採納子 agent argv、config.toml 投影與 responder/supervisor 的啟動設定都套用同一 helper。schema v15 將 `bots.model` 的既有精確舊值改寫，包含軟刪列；資料 migration 可重複執行。額度與 runtime 探測到明確版本 id 時不做前綴推測或降版。
   **codex 啟動時的「Update available」互動選單**（預設選 `1. Update now`、底下 `Press enter to continue`，`codex_update::update_menu_open`）跟 model migration、rate-limit 切換選單一樣算「使用者的選擇」：送 prompt 前遇到回 409 `dialog_open`（訊息請使用者到終端選 `2. Skip`），**不按任何鍵、不打字**（打進去的 Enter 會選到預設的 Update now，在 pane 裡直接跑安裝）；live apply 的 `/model`、`/fast` 也不碰它（`picker_open`／`close_picker` 都認得，Escape 都不按）。只認畫面尾巴、最後一行（窄 pane 折成 `Press enter to`／`continue` 兩行也算）是 `Press enter to continue` 的那種；非互動方框（底下就是輸入列）與對話裡引用選單原文都不算。
   這類擋住輸入列的 codex 畫面（model migration、更新選單、rate-limit 切換，`codex_model_migration::Dialog`）開著時：herdr 判成 idle 也補標 `blocked`、在對話裡講一次原因（例如「Codex 更新提示等待選擇：…請到終端選 2. Skip」）、一個鍵都不按；選單關掉後自動回到原本的狀態、補一句「提示已關閉」並放行排隊的訊息（畫面掃描與送 prompt 的守門都會觸發）。補標與還原的 CAS 收 `starting` 與 `running` 兩種 run（#1408）：codex 啟動框常在 `starting` 期間出現（start 等 ready 最多 60 秒），那段也要立刻補標，不能等 run 轉成 `running` 才講；`stopping`／`stopped`／`exited` 照舊不收（#1321）。
 

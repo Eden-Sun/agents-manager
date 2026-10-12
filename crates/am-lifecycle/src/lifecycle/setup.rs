@@ -1798,11 +1798,21 @@ mod model_args_tests {
     }
 
     #[test]
+    fn codex_previous_sol_start_args_use_current_sol() {
+        assert_eq!(model_args(&bot("codex", Some("gpt-6-sol"), None, false)),
+            vec!["-m", "gpt-6.1-sol", "-c", "service_tier=\"\""]);
+        for model in ["gpt-6.1-sol", "gpt-6-sol-preview"] {
+            assert_eq!(model_args(&bot("codex", Some(model), None, false)),
+                vec!["-m", model, "-c", "service_tier=\"\""]);
+        }
+    }
+
+    #[test]
     fn codex_effort_and_fast() {
         let a = model_args(&bot("codex", Some("gpt-5.6-sol"), Some("high"), true));
         assert_eq!(
             a,
-            vec!["-m", "gpt-6-sol", "-c", "model_reasoning_effort=\"high\"", "-c", "service_tier=\"priority\""]
+            vec!["-m", "gpt-6.1-sol", "-c", "model_reasoning_effort=\"high\"", "-c", "service_tier=\"priority\""]
         );
         // Fast off ≠ no opinion: without the flag `~/.codex/config.toml` decides.
         let a = model_args(&bot("codex", None, None, false));
@@ -1835,8 +1845,8 @@ mod model_args_tests {
 
     #[test]
     fn retired_models_are_rewritten_before_start_args_but_other_versions_stay_verbatim() {
-        assert_eq!(model_args(&bot("codex", Some("gpt-5.6-sol"), None, false)), vec!["-m", "gpt-6-sol", "-c", "service_tier=\"\""]);
-        assert_eq!(model_args(&bot("codex", Some("gpt-5.6-terra"), None, false)), vec!["-m", "gpt-6-sol", "-c", "service_tier=\"\""]);
+        assert_eq!(model_args(&bot("codex", Some("gpt-5.6-sol"), None, false)), vec!["-m", "gpt-6.1-sol", "-c", "service_tier=\"\""]);
+        assert_eq!(model_args(&bot("codex", Some("gpt-5.6-terra"), None, false)), vec!["-m", "gpt-6.1-sol", "-c", "service_tier=\"\""]);
         assert_eq!(model_args(&bot("codex", Some("gpt-5.6-luna"), None, false)), vec!["-m", "gpt-6-luna", "-c", "service_tier=\"\""]);
         assert_eq!(model_args(&bot("codex", Some("gpt-5.6-sol-preview"), None, false)), vec!["-m", "gpt-5.6-sol-preview", "-c", "service_tier=\"\""]);
         assert_eq!(model_args(&bot("claude", Some("opus"), None, false)), vec!["--model", "claude-opus-5-5"]);
