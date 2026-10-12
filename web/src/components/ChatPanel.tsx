@@ -897,7 +897,8 @@ function Composer({
       {showLock ? (
         <div className={`composer-lock${state.disabled ? '' : ' running'}`} role="status">
           <span title={state.reason}>{phone && !state.disabled && state.inFlightTurnId ? '執行中 · 送出排隊' : state.reason}</span>
-          {state.unknownTurnId ? (
+          {/* bot 正在跑時 unknown 只是「還沒確認」（issue #1479）：不把「放棄該回合」擺成第一個選項，daemon 背景確認後自己解鎖。 */}
+          {state.unknownTurnId && !state.unknownWorking ? (
             <button type="button" className="mini-btn" onClick={() => void abandonTurn(botId, state.unknownTurnId!)}>
               放棄該回合
             </button>

@@ -731,6 +731,10 @@ impl s6_ports::QueueServices for App {
         crate::lifecycle::poller::arm_progress(&self.shared(), run_id, bot_id, turn_id).await;
     }
 
+    fn watch_late_proof(&self, run_id: &str, bot_id: &str, turn_id: &str) {
+        crate::lifecycle::late_proof::arm(&self.shared(), run_id, bot_id, turn_id);
+    }
+
     fn schedule_reconcile_settle(&self, run_id: &str, stuck: &str) {
         crate::lifecycle::run_state::schedule_settle(&self.shared(), run_id, crate::lifecycle::run_state::Settle::Reconcile { stuck: stuck.to_string() });
     }

@@ -119,6 +119,11 @@ pub struct LivePane {
     /// 不畫那條永遠在轉的 `✻ Crunching…` 假 spinner。stall watchdog 看到畫面上有進行中的 spinner 就當 agent 在忙、不判失敗不重送
     /// （issue #956），所以要驗「真的 stall 了」的測試得用一個沒有 spinner 的畫面。
     pub no_spinner: bool,
+    /// claude 2.1.296 把使用者回音畫成灰底、整列寬（真機 2026-10-12 m4p，issue #1479）：herdr 的 styled 讀取會把列尾
+    /// 補成一排空白。有值時 `❯ ` 開頭的回音列補空白到 `width`（沒設寬度就補到 120 欄）。
+    pub pad_echo: bool,
+    /// 送出去的字不在畫面上留回音列（被 spinner 擠出視窗、被重畫吃掉）：框空了，證據卻看不到。
+    pub hide_echo: bool,
 }
 
 /// 框裡的字送出去：進 transcript，有 transcript 檔就照 claude 的格式補一筆 user entry。
@@ -143,6 +148,9 @@ fn submit_composer(p: &mut LivePane) {
         if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(path) {
             let _ = writeln!(f, "{entry}");
         }
+    }
+    if p.hide_echo {
+        return;
     }
     if let Some((first, rest)) = rows.split_first() {
         p.transcript.push(format!("❯ {first}"));
@@ -175,6 +183,10 @@ impl LivePane {
         }
         for line in &self.transcript {
             out.push_str(line);
+            if self.pad_echo && line.starts_with("❯ ") {
+                let cols = self.width.unwrap_or(120) as usize;
+                out.push_str(&" ".repeat(cols.saturating_sub(line.chars().count())));
+            }
             out.push('\n');
         }
         if !self.no_spinner {

@@ -949,8 +949,10 @@ pane 上回過 ok 卻沒送進去（wits-c1-op-xh 14:24、15:33，第二次距 s
 - 前兩種只在本機有：讀不到這顆 bot 在哪台主機就不打（`NotAttempted(host_unreadable, retry)`，#198）——當成遠端會跳過它們改成盲打。
 - **一列回音**：單行、首尾無空白、不含 tab／控制字元／ZWJ／變體選擇符／組合字元，且在 herdr `pane.layout`
   回報的當下欄寬下保證放得進一列（ASCII 一欄、其他兩欄保守估，加 marker 與 6 欄餘裕）。送出後輸入框上方要多出
-  恰好一列 `❯ <原文>`（claude 也接受 `> `；codex 是 `› `），原樣前綴比對、不 trim，且底下沒有續行；Grok 的回音行先移除 TUI 加在行尾的
-  右對齊時鐘與 `█` 捲軸符號再比對。
+  恰好一列 `❯ <原文>`（claude 也接受 `> `；codex 是 `› `），前綴原樣比對、不 trim，且底下沒有續行；Grok 的回音行先移除 TUI 加在行尾的
+  右對齊時鐘與 `█` 捲軸符號再比對。**列尾的空白不算內容**（issue #1479）：claude 2.1.296 把回音畫成整列寬的灰底，herdr 的 styled
+  讀取把列尾補成背景色空白（m4p 實測 `❯ <text>` 後面接 143～189 個空白），逐字相等永遠不成立——遠端 claude 的證據只有這一列，
+  以前每則都 `not_proven_submitted`（2026-09-28 起 log 裡 262 筆 m4p 全是這個原因）。只放過列尾補白：marker 後多一個空白、多一字、少一字照樣不算。
 
 兩種 session log 都是：打字前記下檔案長度當基準，送出後只讀基準之後新增的位元組，要多一筆與送出文字**逐位元組
 相同**的 user 訊息；同時 run 仍須指向同一個 session（claude 另比對路徑），途中換了就是 `Unproven("session_changed")`；
@@ -1022,6 +1024,18 @@ user 文字先照 CLI 自己的拆法還原（`lifecycle::pasted_content`，只�
   DB 存 `delivery='ok'`＋`turns.delivery_verified=0`（`delivery` 的 CHECK 只有原本四種狀態，不改表），API 回
   `"delivery":"unverified"`，AGM 交辦記成 `delivery=unverified`，UI 在使用者泡泡上標「未驗證送達」。它照常掛 stall
   與進度輪詢、Enter 補送，但**絕不自動重送**（可能已經被收下）。
+- **同步窗口判不出、但框已空：背景繼續看證據**（issue #1479，`lifecycle/late_proof.rs`）：`confirm_submitted` 只看
+  `SUBMIT_CHECKS × SUBMIT_SETTLE_MS`（3 × 1.2 秒）。Enter 按了、框空了、證據還沒長出來（`Unproven("not_proven_submitted")`），
+  回給呼叫端的仍是 `unknown`（不假裝證明了）；打字當下的證據基準（回音列數／transcript offset／`Typed` 的 pane）記在記憶體，
+  呼叫端寫完 `delivery='unknown'` 就認領，之後每 3 秒看一次、最多 60 次（約 3 分鐘）：
+  - 證據長出來（回音列／transcript 比基準多了這一則）→ 升成 `ok`＋`delivery_verified=1`、`auto_resend=0`（同 `Submitted`）；
+  - 框仍是空的、而且 agent 明顯在做事（送出鍵之後 hook 有動靜、畫面有進行中的 spinner、或 `agent_status=working`）→ 升成 `ok`＋
+    `delivery_verified=0`、`auto_resend=0`（同 `Unverified`：UI 標「未驗證送達」、絕不自動重送）；
+  - 兩種都沒有（框空了但 bot 沒動、也沒有證據）→ 維持 `unknown`，**不**放寬成「沒證據也當 ok」，之後由 Stop hook／stuck_turns 收。
+  升級只用 CAS（`status='in_flight' AND delivery='unknown'`）：Stop hook、放棄、run 結束先到就什麼都不寫；成功後推 `turn_updated`、
+  掛 stall／progress 看門狗（跟一般 `ok`／`unverified` 同一套）。只有 `not_proven_submitted`（框已空）才認領；字還在框裡
+  （`still_in_box`）、讀不到（`composer_unreadable`）、`nothing_typed` 等原因沒有基準可看，維持原行為。daemon 重啟後記憶體裡的基準就沒了，
+  留給 `rearm_progress`／Stop hook。
 - **長段貼上要拆段送**（issue #382，2026-09-21 實測 herdr 0.9.1＋claude）：一次 `pane.send_text` 超過約 1024 位元組（≥ 1024 B 就中；≤ 1020 B 完整），
   **最前面的 1024 位元組不見了**，只剩尾巴進框（1048 B 只剩最後 4 行、1804 B 只剩最後 46 行；使用者 58 行的數字清單就這樣只送到最後 3 行，
   泡泡卻顯示整段）。`HerdrClient::pane_send_text` 一律拆成每段 ≤ 1000 B（優先在換行後切、不切斷多位元組字元）依序送——

@@ -1131,6 +1131,7 @@ mod arc_port_69_queueservices {
         fn put_back_owed(&self, bot_id: &str, conversation_id: &str, turn_id: &str, reason: &str, wait_key: &str) -> impl Future<Output = anyhow::Result<()>> + Send { <T as crate::lifecycle::s6_ports::QueueServices>::put_back_owed(self.as_ref(), bot_id, conversation_id, turn_id, reason, wait_key) }
         fn delivered_owed(&self, bot_id: &str, turn_id: &str, record: crate::lifecycle::DeliveryRecord) -> impl Future<Output = anyhow::Result<()>> + Send { <T as crate::lifecycle::s6_ports::QueueServices>::delivered_owed(self.as_ref(), bot_id, turn_id, record) }
         fn arm_stall_and_progress(&self, run_id: &str, bot_id: &str, turn_id: &str) -> impl Future<Output = ()> + Send { <T as crate::lifecycle::s6_ports::QueueServices>::arm_stall_and_progress(self.as_ref(), run_id, bot_id, turn_id) }
+        fn watch_late_proof(&self, run_id: &str, bot_id: &str, turn_id: &str) { <T as crate::lifecycle::s6_ports::QueueServices>::watch_late_proof(self.as_ref(), run_id, bot_id, turn_id) }
         fn schedule_reconcile_settle(&self, run_id: &str, stuck: &str) { <T as crate::lifecycle::s6_ports::QueueServices>::schedule_reconcile_settle(self.as_ref(), run_id, stuck) }
     }
 }

@@ -101,6 +101,8 @@ pub mod codex_steer;
 pub mod interruption;
 /// 送達結果寫不回 DB 時欠著的那一筆（#149）。
 pub mod owed_delivery;
+/// 同步窗口判不出、但框已空的送達：背景繼續看證據，看到就升成 ok（#1479）。
+pub mod late_proof;
 /// claude 把貼上的 prompt 包成 `<pasted_content>` 寫進 transcript（#218）。
 pub use crate::pasted_content;
 pub mod paste_check;
