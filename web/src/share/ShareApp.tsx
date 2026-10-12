@@ -152,6 +152,7 @@ export function ShareApp({ client }: { client: ShareClient }) {
   // 清單換了（檔案被刪、改名）：不在清單裡的圖片快取整條淘汰，長開的頁面不會越積越多（#1175）。
   useEffect(() => pruneShareImages(client, files), [client, files])
   const [state, setState] = useState<'loading' | 'ready' | 'gone'>('loading')
+  const [goneBlocked, setGoneBlocked] = useState(false)
   const [netError, setNetError] = useState<string | null>(null)
   const [text, setText] = useState('')
   const [pending, setPending] = useState<Pending[]>([])
@@ -199,7 +200,13 @@ export function ShareApp({ client }: { client: ShareClient }) {
   const appliedFileGen = useRef(0)
 
   const fail = useCallback((e: unknown) => {
-    if (e instanceof ShareHttpError && e.status === 404) {
+    // 401／403（來源被擋，am-share `security_headers`）：重試不會好，同 404 停掉輪詢，只是說明不一樣。
+    if (e instanceof ShareHttpError && (e.status === 401 || e.status === 403)) {
+      linkGone.current = true
+      stopLive.current()
+      setGoneBlocked(true)
+      setState('gone')
+    } else if (e instanceof ShareHttpError && e.status === 404) {
       linkGone.current = true
       stopLive.current()
       setState('gone')
@@ -553,8 +560,17 @@ export function ShareApp({ client }: { client: ShareClient }) {
           <div className="sh-gone-icon" aria-hidden="true">
             🔗
           </div>
-          <h1>這個分享連結已失效</h1>
-          <p>連結可能被關閉或換新了。請向分享給你的人要一條新的連結。</p>
+          {goneBlocked ? (
+            <>
+              <h1>這個頁面打不開</h1>
+              <p>請用分享給你的人提供的網址重新開啟。</p>
+            </>
+          ) : (
+            <>
+              <h1>這個分享連結已失效</h1>
+              <p>連結可能被關閉或換新了。請向分享給你的人要一條新的連結。</p>
+            </>
+          )}
         </div>
       </main>
     )
