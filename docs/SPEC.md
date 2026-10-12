@@ -1069,6 +1069,8 @@ user 文字先照 CLI 自己的拆法還原（`lifecycle::pasted_content`，只�
 
 第一次貼字前會重讀輸入框；若回合結束時 Codex 把未送出的提問答案放回 composer（0.157 起），daemon 保留該答案、回可重試的 `409 composer_busy`，不把新 prompt 接在後面。自動替 TUI 選答案的操作（數字、`y`，以及方向鍵後的 Enter）會在送鍵前重讀畫面並辨認仍開著的目標提示及選項；認不出來就不按。
 
+待答題目每 5 秒輪詢，背景暫停、回前景立即補抓；同一 hook 只接受比已套用回應更新的請求結果，避免倒序回應復活舊題。尚未完成的後續請求不阻擋較早結果，切換 bot 或卸載後的回應不再套用。
+
 AskUserQuestion 畫面帶並排 `preview` 時，選項 parser 按 grapheme cluster 的終端格寬切出右欄；若已找到預覽框頂、但內框邊線落在不同欄位，整份選單不認，不回退掃描包含預覽正文的原始畫面。
 
 codex 0.159.3 的帳號安全提醒 inline banner（`› 1. Set up security`／`Press a number to choose · …`，辨識在 `screen::codex_inline_banner`）開著時輸入框看起來是空的，但打進去的開頭數字會被當成「選第 N 項」吃掉、殘字卡在框裡（#782）。規劃、準備、第一次貼字前三次讀框都先看它：開著就一個鍵都不按（**不**按 Esc 關它，使用者 2026-10-03 裁示），回可重試的 `NotAttempted(codex_security_banner)`（直接送的 409、排隊的放回），bot 對話插一則 system 訊息請人到終端處理，同時推一則 `ops_alert`（`source=daemon`、`reason=codex_security_banner`，payload 帶 `bot_id`、`bot_name`、`run_id`、`action`）進 AGM inbox 給巡檢（#789）；同一個 run 的同一次橫幅兩者都只發一次，橫幅不見後再出現才再發（去重在記憶體，daemon 重啟後還開著的橫幅會再發一次；event_key `ops_alert:daemon:codex_security_banner:<run>:<這一次的 id>`）（`lifecycle/codex_banner.rs`）。只有資訊、沒有選項的 banner 不吃數字，不擋。

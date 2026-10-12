@@ -16,12 +16,19 @@ export function usePendingQuestion(botId: string, paused = false): PendingQuesti
   useEffect(() => {
     if (paused || kind !== 'claude') return
     let alive = true
+    let requested = 0
+    let applied = 0
     const tick = async () => {
       // 分頁在背景就不讀；回前景時 `onVisible` 立刻補一次。
       if (document.visibilityState === 'hidden') return
+      const sequence = ++requested
       try {
         const raw = await api.fetchPendingQuestion(botId)
-        if (alive) setState({ botId, questions: toPendingQuestionsFromResponse(raw) })
+        // 比已套用的回應新就接受；後續請求尚未完成不會餓死慢請求。
+        if (alive && sequence > applied) {
+          applied = sequence
+          setState({ botId, questions: toPendingQuestionsFromResponse(raw) })
+        }
       } catch {
         // 讀不到不是紅字：這只是補充，畫面本身照舊。
       }
