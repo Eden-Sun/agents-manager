@@ -1527,7 +1527,9 @@
             at: "2026-10-12T13:48:00Z".into(), bucket: bucket.map(String::from) };
         let mut q = codex_q("codex-app-server", None);
         q.updated_at = "2026-10-12T13:55:00Z".into();
-        assert!(recalibrate_limit_hit(hit(None), &q).is_none(), "new non-full windows clear an unscoped hit");
+        // 有重置時間的無桶名撞限（codex 5 小時橫幅）：窗不滿就解除。沒寫時間的是 credits 用完，見下一個測試。
+        let timed = LimitHit { until: Some("2026-10-12T15:00:00Z".into()), ..hit(None) };
+        assert!(recalibrate_limit_hit(timed, &q).is_none(), "new non-full windows clear an unscoped hit");
         q.five_hour.as_mut().unwrap().used_pct = 100.0;
         assert!(recalibrate_limit_hit(hit(None), &q).is_some(), "a matching full window retains the hit");
         assert!(recalibrate_limit_hit(hit(Some("seven_day")), &q).is_none(), "only the hit's own bucket matters");
@@ -1540,6 +1542,20 @@
         assert!(recalibrate_limit_hit(hit(None), &q).is_some(), "partial statusline is not authoritative");
         q.source = "claude-usage".into();
         assert!(recalibrate_limit_hit(hit(Some("five_hour")), &q).is_some(), "Claude behavior is unchanged");
+    }
+
+    /// #1576：credits 用完的撞限（codex 橫幅沒寫重置時間＝`until: None`，沒有桶名）不由權威讀數解除。窗不滿、
+    /// 甚至 5h 與 7d 都在撞限之後重開，credits 都不會因此回來，照擋到成功回合清掉為止。方案變了由 `set` 的 plan_changed 分支處理。
+    #[test]
+    fn a_credits_hit_is_not_released_by_an_authoritative_reading() {
+        let credits = LimitHit { message: "You've hit your usage limit.".into(), until: None,
+            at: "2026-10-12T13:48:00Z".into(), bucket: None };
+        let mut q = codex_q("codex-app-server", None);
+        q.updated_at = "2026-10-12T13:55:00Z".into();
+        assert_eq!(recalibrate_limit_hit(credits.clone(), &q), Some(credits.clone()), "窗都不滿：credits 還是空的，不解除");
+        q.five_hour.as_mut().unwrap().resets_at = Some("2026-10-12T19:00:00Z".into());
+        q.seven_day.as_mut().unwrap().resets_at = Some("2026-10-19T14:00:00Z".into());
+        assert_eq!(recalibrate_limit_hit(credits.clone(), &q), Some(credits), "兩個窗都重開也不是 credits 回來的證據");
     }
 
     #[tokio::test]

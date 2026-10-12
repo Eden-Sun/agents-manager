@@ -1039,8 +1039,13 @@ fn codex_reading_after_hit(hit: &LimitHit, fresh: &Quota) -> bool {
 /// 沒有桶名（codex 的 credits 用完、開機回填的格子）原則上不動：那種撞限只有橫幅說得準。例外：新讀數的
 /// **5h 與 7d 兩個窗都是撞限之後才開的**——兩桶同時重開只會是整個帳號重置（提早重置券、或週窗本身到期），
 /// 撞限作廢（2026-09-27 使用者：codex 提早重置後額度全滿，還掛著「被擋、下午 02:14 恢復」）。
-/// Codex app-server 的新完整讀數另可解除已消失或不再見底的桶，只有週窗時也適用。
+/// Codex app-server 的新完整讀數另可解除已消失或不再見底的桶，只有週窗時也適用；沒寫重置時間的（credits 用完）除外。
 pub fn recalibrate_limit_hit(mut hit: LimitHit, fresh: &Quota) -> Option<LimitHit> {
+    // credits 用完（codex 橫幅沒寫重置時間＝`until: None`，沒有桶名）：窗的讀數證明不了 credits 回來了，權威讀數不解除（#1576）。
+    // 方案變了另由 `set` 的 plan_changed 分支處理。
+    if hit.bucket.is_none() && hit.until.is_none() && codex_reading_after_hit(&hit, fresh) {
+        return Some(hit);
+    }
     // 完整的 Codex 帳號讀數可證明撞限的桶已消失或不再見底。
     // 舊探測、statusline 與其他供應商不具有這個權威性。
     if codex_reading_after_hit(&hit, fresh) {
@@ -1200,6 +1205,10 @@ pub async fn restore_limit_hit(app: &(impl crate::capabilities::Db + crate::capa
     }
     let key = quota_key(host, base);
     let mut quotas = app.quotas().lock().await;
+    // credits 撞限不由讀數解除（見 recalibrate_limit_hit）：權威讀數在它之後、格子卻已經沒有撞限，代表它已被方案變更或成功回合清掉，不寫回（#1576）。
+    if quotas.get(&key).is_some_and(|q| q.limit_hit.is_none() && hit.bucket.is_none() && hit.until.is_none() && codex_reading_after_hit(&hit, q)) {
+        return false;
+    }
     let hit = match quotas.get(&key) {
         Some(q) => match recalibrate_limit_hit(hit, q) {
             Some(h) => h,
