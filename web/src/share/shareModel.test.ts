@@ -97,3 +97,8 @@ test('fmtSize 邊界：差一點滿 1 MB 寫 1.0 MB，不是 1024 KB', () => {
   assert.equal(fmtSize(20 * 1024), '20 KB')
   assert.equal(fmtSize(25 * 1024 * 1024), '25.0 MB')
 })
+
+test('fmtSize：MB 進位到 10 時寫整數，不寫 10.0 MB', () => {
+  assert.equal(fmtSize(Math.round(9.96 * 1024 * 1024)), '10 MB')
+  assert.equal(fmtSize(Math.round(9.5 * 1024 * 1024)), '9.5 MB')
+})
