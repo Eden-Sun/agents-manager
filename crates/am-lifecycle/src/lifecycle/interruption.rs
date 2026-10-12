@@ -850,6 +850,106 @@ mod tests {
         assert_eq!(status_of(&app, &next).await, "in_flight");
     }
 
+    /// 到達之後、拿到 bot 鎖之前：那一筆結束，排著的 prompt 被 flush 認領並送出（`delivery=ok`）。
+    async fn hand_over_to_a_queued_turn(b: &Busy, next: &str) {
+        let app = b.env.app.clone();
+        let conv = db::conversation_id(app.db(), &b.bot.id).await.unwrap();
+        let (old, run, next) = (b.turn.clone(), b.run.clone(), next.to_string());
+        crate::lifecycle::race_point::arm("interrupt_after_arrival", &b.bot.id, move || async move {
+            sqlx::query("UPDATE turns SET status='completed' WHERE id=?").bind(&old).execute(app.db()).await.unwrap();
+            sqlx::query(
+                "INSERT INTO turns (id, conversation_id, run_id, origin, status, delivery, created_at, prompt_text)
+                 VALUES (?,?,?,'web','in_flight','ok',?,'排隊的那一則')",
+            )
+            .bind(&next)
+            .bind(&conv)
+            .bind(&run)
+            .bind(db::now())
+            .execute(app.db())
+            .await
+            .unwrap();
+        });
+    }
+
+    /// issue #1474：使用者按下打斷時看到的是那一筆長回合；它剛好結束、排著的 prompt 接著送出——Esc 不能按在
+    /// 使用者從沒看過是「在跑」的新回合上（以前：送出後 117ms 被收成 `interrupted by user`，claude 把字放回輸入框）。
+    #[tokio::test]
+    async fn an_interrupt_aimed_at_a_finished_turn_does_not_hit_the_queued_prompt_that_took_over() {
+        let b = busy("esc-handoff").await;
+        let app = b.env.app.clone();
+        let next = db::ulid();
+        hand_over_to_a_queued_turn(&b, &next).await;
+
+        let err = interrupt_bot(&app, &b.bot.id).await.expect_err("按下去的那一筆已經結束");
+        let LcError::Conflict(body) = err else { panic!("{err:?}") };
+        assert_eq!(body["reason"], "turn_not_in_flight", "{body}");
+        assert_eq!(body["turn_id"], b.turn.as_str(), "{body}");
+        assert_eq!(body["in_flight_turn_id"], next.as_str(), "{body}");
+        assert_eq!(body["esc_sent"], false, "{body}");
+        assert_eq!(escs(&b.env), 0, "沒有對新回合按 Esc");
+        assert_eq!(status_of(&app, &next).await, "in_flight", "排隊送出的那一則照舊在跑");
+        assert!(system_notes(&app, &next).await.is_empty(), "也沒有被寫上 interrupted by user");
+        assert!(pending(&b.bot.id).is_empty(), "不記帳");
+    }
+
+    /// 同一件事的另一個窗口：按下去的時候排著的 prompt 已經被 flush 認領、還在打字（`delivery=pending`、`auto_resend=0`），
+    /// 畫面上它還是「排隊中」；等拿到鎖時它已經送出。那一筆不是使用者要停的。
+    #[tokio::test]
+    async fn an_interrupt_that_arrived_while_a_queued_prompt_was_being_typed_does_not_hit_it() {
+        let b = busy("esc-claimed-typing").await;
+        let app = b.env.app.clone();
+        sqlx::query("UPDATE turns SET delivery='pending', auto_resend=0 WHERE id=?").bind(&b.turn).execute(app.db()).await.unwrap();
+        let (turn, db_app) = (b.turn.clone(), app.clone());
+        crate::lifecycle::race_point::arm("interrupt_after_arrival", &b.bot.id, move || async move {
+            sqlx::query("UPDATE turns SET delivery='ok' WHERE id=?").bind(&turn).execute(db_app.db()).await.unwrap();
+        });
+
+        let err = interrupt_bot(&app, &b.bot.id).await.expect_err("到達時它還在打字，不是使用者看到在跑的那一筆");
+        let LcError::Conflict(body) = err else { panic!("{err:?}") };
+        assert_eq!(body["reason"], "turn_not_in_flight", "{body}");
+        assert!(body["turn_id"].is_null(), "{body}");
+        assert_eq!(body["in_flight_turn_id"], b.turn.as_str(), "{body}");
+        assert_eq!(escs(&b.env), 0);
+        assert_eq!(status_of(&app, &b.turn).await, "in_flight");
+    }
+
+    /// 反面一：直接送出、還在打字的回合（`auto_resend` 還是預設的 1）是使用者剛送的那一則，照舊可以打斷。
+    #[tokio::test]
+    async fn a_directly_sent_turn_still_being_typed_can_be_interrupted() {
+        let b = busy("esc-direct-typing").await;
+        let app = b.env.app.clone();
+        sqlx::query("UPDATE turns SET delivery='pending' WHERE id=?").bind(&b.turn).execute(app.db()).await.unwrap();
+
+        interrupt_bot(&app, &b.bot.id).await.expect("照舊打斷");
+        assert_eq!(escs(&b.env), 1);
+        assert_eq!(status_of(&app, &b.turn).await, "failed");
+    }
+
+    /// 反面二：到達時沒有在飛的回合，之後才冒出來的是 CLI 自己開的外部回合（畫面上本來就在跑）——照舊打斷它。
+    #[tokio::test]
+    async fn an_external_turn_opened_after_arrival_is_still_what_the_user_meant_to_stop() {
+        let b = busy("esc-external-late").await;
+        let app = b.env.app.clone();
+        sqlx::query("UPDATE turns SET status='completed' WHERE id=?").bind(&b.turn).execute(app.db()).await.unwrap();
+        let conv = db::conversation_id(app.db(), &b.bot.id).await.unwrap();
+        let (run, ext, db_app) = (b.run.clone(), db::ulid(), app.clone());
+        let ext_id = ext.clone();
+        crate::lifecycle::race_point::arm("interrupt_after_arrival", &b.bot.id, move || async move {
+            sqlx::query("INSERT INTO turns (id, conversation_id, run_id, origin, status, delivery, created_at) VALUES (?,?,?,'external','in_flight','ok',?)")
+                .bind(&ext_id)
+                .bind(&conv)
+                .bind(&run)
+                .bind(db::now())
+                .execute(db_app.db())
+                .await
+                .unwrap();
+        });
+
+        interrupt_bot(&app, &b.bot.id).await.expect("外部回合照舊打斷");
+        assert_eq!(escs(&b.env), 1);
+        assert_eq!(status_of(&app, &ext).await, "failed");
+    }
+
     /// herdr 明確拒收 Esc：什麼都沒發生——502、回合照舊在飛、不記任何帳，之後的回聲式 hook 也不會把它收掉。
     #[tokio::test]
     async fn an_esc_herdr_refused_changes_nothing() {

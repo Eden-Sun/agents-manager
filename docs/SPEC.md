@@ -1575,6 +1575,13 @@ tab 已被回收視為完成，`tab.list` 失敗不猜。沒有 `tab_id` 的 Run
     run 上已經沒有別的在飛才這樣算：欠著的帳也可能是插隊送出記的，它一補上新的那一則就在飛、claude 正在做它，這次 Esc 打斷它（#166）。請求可帶
     `{"turn_id"}` 綁定要打斷的那一筆：它已經不在飛（被收掉、下一回合已開始）就不按 Esc、回 `409 turn_not_in_flight`，
     不會誤傷下一回合。強制中止（`abort`）的 in-flight 那一筆走同一套：收不掉就不是 `200 aborted`。
+  - **沒帶 `turn_id` 時，打斷的是請求到達那一刻在飛的那一筆**（#1474）：daemon 在排隊等 bot 鎖**之前**先記下它（排隊的 prompt 剛被認領、
+    還在打字的那一筆——`delivery=pending` 且 `auto_resend=0`，使用者畫面上仍是「排隊中」——不算）。拿到鎖時在飛的已經是別的回合（那一筆剛結束、
+    排著的 prompt 接著送出；到達時它還在打字）就不按 Esc、回 `409 turn_not_in_flight`（`esc_sent:false`，`turn_id` 為到達時的那一筆，沒有則 `null`）。
+    以前拿到鎖之後才讀「在飛的是誰」：使用者按下去的那一筆剛好結束，Esc 落在剛送出 117ms 的排隊 prompt 上，被收成 `interrupted by user`、
+    claude 把字放回輸入框。例外：到達時沒有在飛的回合、之後才冒出 CLI 自己開的外部回合（畫面上本來就在跑）照舊打斷它；欠著收尾的重試照上一條。
+    Esc 把 prompt 放回輸入框之後的清框（`clear_restored_prompt`）沒有清的時候留 log：讀不到畫面（warn）、框裡不是那一則的字或框是空的（info，帶框的狀態），
+    之後才分得出「沒有草稿」與「有草稿卻對不上」。
 - `stop`：Run `stopping` → in-flight Turn 標 `failed` → `ctrl+c` ×2（間隔 500 ms）→ 等 `pane.exited` 或 agent 消失最多 10 秒 → 否則 `pane.close` → `stopped` → 關訂閱。
   run 狀態與破壞性的副作用不是兩條平行線（#146）：
   - `stopping` 以 CAS（from `starting`／`running`／`stopping`，上次沒停成的可以再按）寫入，**寫不進去就一步都不做**（不收 in-flight、
