@@ -19,7 +19,7 @@ pub fn file_part<'a>(content_type: &str, body: &'a [u8]) -> Result<(String, &'a 
         let head_end = find(body, b"\r\n\r\n", head_start).ok_or("bad_multipart")?;
         let headers = std::str::from_utf8(&body[head_start..head_end]).map_err(|_| "bad_multipart")?;
         let content_start = head_end + 4;
-        let next = find(body, &[b"\r\n".as_slice(), &delim].concat(), content_start).ok_or("bad_multipart")?;
+        let next = next_delimiter(body, &delim, content_start).ok_or("bad_multipart")?;
         let content = &body[content_start..next];
         if let Some((name, filename)) = disposition(headers) {
             if name == "file" {
@@ -85,6 +85,20 @@ fn split_params(s: &str) -> Vec<&str> {
     out
 }
 
+/// 內容的結尾：`\r\n--boundary` 後面必須接 `\r\n` 或 `--`（結尾分隔線），否則只是內容裡剛好長得像的字串，繼續往後找。
+fn next_delimiter(body: &[u8], delim: &[u8], from: usize) -> Option<usize> {
+    let needle = [b"\r\n".as_slice(), delim].concat();
+    let mut at = from;
+    loop {
+        let hit = find(body, &needle, at)?;
+        let after = &body[hit + needle.len()..];
+        if after.starts_with(b"\r\n") || after.starts_with(b"--") {
+            return Some(hit);
+        }
+        at = hit + 1;
+    }
+}
+
 fn find(hay: &[u8], needle: &[u8], from: usize) -> Option<usize> {
     if needle.is_empty() || from > hay.len() {
         return None;
@@ -135,6 +149,16 @@ mod tests {
         assert_eq!(file_part("multipart/form-data; boundary=B", &two), Err("bad_multipart"), "一次一個檔");
         let nameless = form("B", &[("file", None, b"x")]);
         assert_eq!(file_part("multipart/form-data; boundary=B", &nameless), Err("bad_multipart"));
+    }
+
+    /// 檔案內容裡剛好有「換行＋`--`＋boundary 前綴」但後面不是分隔線的結尾（例如 `--Bzz`）：不能當成分隔線把檔案切斷。
+    #[test]
+    fn a_boundary_prefix_inside_the_content_is_not_a_delimiter() {
+        let data = b"x\r\n--Bzz\r\nmore";
+        let body = form("B", &[("file", Some("a.txt"), data)]);
+        let (name, got) = file_part("multipart/form-data; boundary=B", &body).unwrap();
+        assert_eq!(name, "a.txt");
+        assert_eq!(got, data);
     }
 
     /// issue #1164：瀏覽器不跳脫檔名裡的 `;`、`=`（只把 `"` 寫成 `%22`），引號裡的 `;` 不能當參數分隔。
