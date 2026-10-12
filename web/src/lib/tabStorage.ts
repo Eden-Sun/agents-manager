@@ -9,6 +9,9 @@ export interface KeyValueStore {
   removeItem(key: string): void
 }
 
+/** 分頁自己清掉的記號（寫在分頁自己那一份）：看到它就是「這一頁沒有」，不退回共用的（別的分頁可能還在寫）。 */
+const CLEARED = '\u0000cleared'
+
 export function readTabValue<T>(
   key: string,
   parse: (raw: string) => T | null,
@@ -17,6 +20,7 @@ export function readTabValue<T>(
   for (const s of stores) {
     try {
       const raw = s?.getItem(key)
+      if (raw === CLEARED) return null
       if (!raw) continue
       const v = parse(raw)
       if (v !== null) return v
@@ -27,15 +31,17 @@ export function readTabValue<T>(
   return null
 }
 
+/** `stores[0]` 一律是分頁自己的（見上面）：清空時留下記號，其餘的（共用）直接移除。 */
 export function writeTabValue(key: string, value: string | null, stores: readonly (KeyValueStore | null | undefined)[]): void {
-  for (const s of stores) {
+  stores.forEach((s, i) => {
     try {
-      if (value === null) s?.removeItem(key)
-      else s?.setItem(key, value)
+      if (value !== null) s?.setItem(key, value)
+      else if (i === 0) s?.setItem(key, CLEARED)
+      else s?.removeItem(key)
     } catch {
       /* 寫不進去就算了：這一頁還記得，重整就沒了 */
     }
-  }
+  })
 }
 
 /** 瀏覽器的 [sessionStorage, localStorage]；取不到（沒有這個全域、被擋）的那一個是 null。 */
