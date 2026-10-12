@@ -108,6 +108,17 @@ fn a_missing_settings_file_does_not_also_list_every_key_in_it() {
 }
 
 #[test]
+fn a_settings_file_jq_cannot_read_is_one_critical_issue_not_missing_keys() {
+    // jq 讀不懂整份檔（退出碼 5）不是「沒有那個鍵」，不能逐鍵報缺（#1370 只處理了沒有 jq 的那一半）。
+    let out = GOOD
+        .replace("claude-key default statusLine 1", "claude-key default statusLine x")
+        .replace("claude-key default hooks 1", "claude-key default hooks x")
+        .replace("claude-key default permissions 1", "claude-key default permissions x");
+    assert_eq!(ids(&out), vec!["claude.default.settings.json:json"]);
+    assert_eq!(sev(&out, "claude.default.settings.json:json"), CRITICAL);
+}
+
+#[test]
 fn codex_gaps_and_a_token_in_gitconfig_are_warnings() {
     let out = GOOD
         .replace("codex-key approval_policy 1", "codex-key approval_policy 0")
@@ -209,6 +220,22 @@ fn the_real_script_marks_settings_keys_unknown_when_jq_is_unavailable() {
     let key_lines: Vec<_> = out.lines().filter(|line| line.starts_with("AM_BL claude-key default ")).collect();
     assert_eq!(key_lines.len(), 4, "{out}");
     assert!(key_lines.iter().all(|line| line.ends_with(" ?")), "{key_lines:?}");
+}
+
+#[test]
+fn the_real_script_reports_a_settings_file_that_is_not_json_once() {
+    let home = FakeHome::new();
+    let h = home.path();
+    fs::create_dir_all(h.join(".claude")).unwrap();
+    // 寫到一半（少一個 `}`）：jq 退出碼 5，四個鍵都看不出來。
+    fs::write(h.join(".claude/settings.json"), r#"{ "statusLine": {}, "hooks": {},"#).unwrap();
+
+    let out = run_probe(h, "/usr/bin:/bin");
+    let key_lines: Vec<_> = out.lines().filter(|line| line.starts_with("AM_BL claude-key default ")).collect();
+    assert_eq!(key_lines.len(), 4, "{out}");
+    assert!(key_lines.iter().all(|line| line.ends_with(" x")), "{key_lines:?}");
+    let found: Vec<_> = ids(&out).into_iter().filter(|id| id.starts_with("claude.default.settings.json")).collect();
+    assert_eq!(found, vec!["claude.default.settings.json:json"], "{out}");
 }
 
 #[test]
