@@ -50,8 +50,11 @@ const SHELL_ECHO = /^\s*\$\s+[a-z][\w./-]*(?:[\s;|]|$)/
 const TOOL_ELAPSED = /·\s*\d+(?:\.\d+)?\s*[sm]\b/
 const SHELL_HINT = /[|;]|\s--?[a-z]/
 
-/** `Cogitated for 5m 53s · done 2:53 AM`、`Thought for 12s`。 */
-const SPINNER_DONE = /^\s*[*✻✽✢✳✶·]?\s*[A-Za-z]+(?:ed|ing)?\s+for\s+\d+(?:\.\d+)?\s*[smh]\b/
+/**
+ * `Cogitated for 5m 53s · done 2:53 AM`、`Thought for 12s`。只認過去式或進行式的動詞（`-ed`／`-ing`／`Thought`），
+ * 而且時間之後只能是行尾或括號／`·` 的註記：`Wait for 30s before retrying…` 是散文，不是 spinner。
+ */
+const SPINNER_DONE = /^\s*[*✻✽✢✳✶·]?\s*(?:[A-Za-z]+(?:ed|ing)|Thought)\s+for\s+\d+(?:\.\d+)?\s*[smh](?:\s+\d+\s*[sm])?(?:\s*[·(（].*)?\s*$/
 
 /** `(5s · 2 lines)` */
 const TOOL_TAIL = /\([\d.]+\s*[smh]\s*·\s*\d+\s+lines?\)\s*$/

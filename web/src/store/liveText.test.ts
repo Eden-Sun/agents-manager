@@ -35,3 +35,13 @@ test('codex warning footer stays out of live text in narrow and wide panes', () 
     assert.equal(cleanLiveText(prose), prose)
   }
 })
+
+test('spinner 完成行才刷掉：一般英文句子含「for N s」不能整句被當成 spinner', () => {
+  // 刷掉的只有 `Cogitated for 5m 53s · done …`、`Thought for 12s` 這種；散文照留。
+  for (const prose of ['Wait for 30s before retrying the request.', 'Retry for 5s before giving up', 'Waiting for 30s before retrying']) {
+    assert.equal(cleanLiveText(prose), prose)
+  }
+  for (const spinner of ['Cogitated for 5m 53s · done 2:53 AM', 'Thought for 12s', 'Baked for 3m 4s']) {
+    assert.equal(cleanLiveText(spinner), null, spinner)
+  }
+})
