@@ -547,6 +547,45 @@ async fn the_conversation_keeps_the_session_logs_text_not_the_screen_reading() {
     assert_eq!(f.user_message().await, "尾巴有空白的假草稿   ");
 }
 
+/// 原文校正寫入失敗時不能回一般成功；同 client_request_id 重試要從已記錄的 session log 補正。
+#[tokio::test]
+async fn a_failed_exact_text_correction_is_retryable_and_never_reports_success() {
+    let f = idle("claude", &["screen text"], true).await;
+    let token = current_draft_token(&f, "observe").await;
+    let path = f.env.herdr.pane("pane-d").unwrap().transcript_file.unwrap();
+    let bot_id = f.bot_id.clone();
+    let exact = "transcript original text";
+    super::super::race_point::arm("draft_after_enter", &bot_id, move || async move {
+        let entry = json!({"type":"user","message":{"role":"user","content":exact}});
+        std::fs::write(path, format!("{entry}\n")).unwrap();
+    });
+    sqlx::query(
+        "CREATE TRIGGER am_test_reject_draft_correction BEFORE UPDATE OF content ON messages
+         WHEN NEW.content = 'transcript original text'
+         BEGIN SELECT RAISE(ABORT, 'injected correction failure'); END",
+    )
+    .execute(&f.env.app.db)
+    .await
+    .unwrap();
+
+    let first = submit(&f.env.app, &f.bot_id, &token, "correction-retry").await;
+    assert!(matches!(first, Err(LcError::Upstream(_))), "failed correction must not be a normal success: {first:?}");
+    sqlx::query("DROP TRIGGER am_test_reject_draft_correction").execute(&f.env.app.db).await.unwrap();
+
+    let retried = submit(&f.env.app, &f.bot_id, &token, "correction-retry").await
+        .expect("same request retries the durable exact-text correction");
+    assert_eq!(retried.delivery, "ok");
+    assert_eq!(f.user_message().await, exact);
+    let prompt_text: String = sqlx::query_scalar("SELECT prompt_text FROM turns WHERE id=?")
+        .bind(&retried.turn_id)
+        .fetch_one(&f.env.app.db)
+        .await
+        .unwrap();
+    assert_eq!(prompt_text, exact);
+    assert_eq!(f.turns().await, 1);
+    assert_eq!(f.keys().len(), 1, "retry must not press Enter again");
+}
+
 /// 沒有無損證據（沒有 transcript）：框在 Enter 後清空就是送出去了，記成 unverified。
 #[tokio::test]
 async fn submitting_without_a_session_log_is_unverified() {

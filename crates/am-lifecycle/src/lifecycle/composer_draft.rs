@@ -278,6 +278,7 @@ async fn confirm(
 ) -> anyhow::Result<(Delivered, Option<String>)> {
     let mut pressed_again = false;
     for _ in 0..SUBMIT_CHECKS {
+        #[cfg(not(all(test, feature = "daemon-test-harness")))]
         tokio::time::sleep(std::time::Duration::from_millis(SUBMIT_SETTLE_MS)).await;
         let screen = read_styled(client, pane, SCAN_SOURCE, DELIVER_SCAN_LINES).await?;
         if !same_session(app, &run.id, proof).await {
@@ -315,10 +316,92 @@ async fn confirm(
 /// 對話裡記 session log 的原文（畫面讀來的草稿可能是摺起來的 `[Pasted text …]`、少了空白）。
 async fn record_exact_text(app: &impl crate::capabilities::Db, turn_id: &str, msg_id: &str, text: &str) -> anyhow::Result<()> {
     let mut tx = app.db().begin().await?;
-    sqlx::query("UPDATE messages SET content = ? WHERE id = ?").bind(text).bind(msg_id).execute(&mut *tx).await?;
-    sqlx::query("UPDATE turns SET prompt_text = ? WHERE id = ?").bind(text).bind(turn_id).execute(&mut *tx).await?;
+    let message = sqlx::query("UPDATE messages SET content = ? WHERE id = ?").bind(text).bind(msg_id).execute(&mut *tx).await?;
+    anyhow::ensure!(message.rows_affected() == 1, "composer submission message disappeared before text correction");
+    let turn = sqlx::query("UPDATE turns SET prompt_text = ?, composer_draft_proof = NULL WHERE id = ?")
+        .bind(text)
+        .bind(turn_id)
+        .execute(&mut *tx)
+        .await?;
+    anyhow::ensure!(turn.rows_affected() == 1, "composer submission turn disappeared before text correction");
     tx.commit().await?;
     Ok(())
+}
+
+async fn clear_proof_checkpoint(app: &impl crate::capabilities::Db, turn_id: &str) -> anyhow::Result<()> {
+    let updated = sqlx::query("UPDATE turns SET composer_draft_proof = NULL WHERE id = ?")
+        .bind(turn_id)
+        .execute(app.db())
+        .await?;
+    anyhow::ensure!(updated.rows_affected() == 1, "composer submission turn disappeared before clearing its proof");
+    Ok(())
+}
+
+#[derive(serde::Deserialize)]
+struct DraftProofCheckpoint {
+    format: String,
+    path: String,
+    session_id: String,
+    offset: u64,
+}
+
+fn proof_checkpoint(proof: &Proof, offset: u64) -> Option<String> {
+    let Proof::Transcript { format, path, session_id } = proof else { return None };
+    let format = match format {
+        LogFormat::Claude => "claude",
+        LogFormat::Codex => "codex",
+        LogFormat::Agy => "agy",
+    };
+    Some(json!({
+        "format": format,
+        "path": path.to_string_lossy(),
+        "session_id": session_id,
+        "offset": offset,
+    }).to_string())
+}
+
+/// Recover a failed exact-text write from the same session log, using the proof snapshot committed before Enter.
+async fn retry_exact_text(app: &impl LcHost, turn: &db::Turn) -> anyhow::Result<()> {
+    let raw: Option<String> = sqlx::query_scalar("SELECT composer_draft_proof FROM turns WHERE id=?")
+        .bind(&turn.id)
+        .fetch_one(app.db())
+        .await?;
+    let Some(raw) = raw else { return Ok(()) };
+    let checkpoint: DraftProofCheckpoint = serde_json::from_str(&raw)?;
+    let Some(run_id) = turn.run_id.as_deref() else { anyhow::bail!("composer proof has no run") };
+    let run = db::run(app.db(), run_id).await?.ok_or_else(|| anyhow::anyhow!("composer proof run is gone"))?;
+    anyhow::ensure!(run.native_session_id.as_deref() == Some(checkpoint.session_id.as_str()), "composer proof session changed");
+    let bot = db::bot(app.db(), &run.bot_id).await?.ok_or_else(|| anyhow::anyhow!("composer proof bot is gone"))?;
+    let project = db::project(app.db(), &bot.project_id).await?.ok_or_else(|| anyhow::anyhow!("composer proof project is gone"))?;
+    anyhow::ensure!(project.host == LOCAL_HOST, "composer proof belongs to a remote host");
+    let path = std::path::PathBuf::from(&checkpoint.path);
+    let format = match (bot.kind.as_str(), checkpoint.format.as_str()) {
+        ("claude", "claude") => {
+            anyhow::ensure!(crate::lifecycle::s6_ports::StuckTurnServices::local_transcript_allowed(app, &bot, &checkpoint.path).await, "composer transcript path is no longer trusted");
+            LogFormat::Claude
+        }
+        ("agy", "agy") => {
+            anyhow::ensure!(crate::lifecycle::s6_ports::StuckTurnServices::local_transcript_allowed(app, &bot, &checkpoint.path).await, "composer transcript path is no longer trusted");
+            LogFormat::Agy
+        }
+        ("codex", "codex") => {
+            let home = crate::lifecycle::s6_ports::StuckTurnServices::codex_home(app, &bot).await
+                .ok_or_else(|| anyhow::anyhow!("codex home is unavailable"))?;
+            let current = codex_session_log_async(home, checkpoint.session_id.clone()).await
+                .ok_or_else(|| anyhow::anyhow!("codex session log is unavailable"))?;
+            anyhow::ensure!(current == path, "codex session log changed");
+            LogFormat::Codex
+        }
+        _ => anyhow::bail!("composer proof format does not match its bot kind"),
+    };
+    let entries = new_user_entries(format, &path, checkpoint.offset)?;
+    anyhow::ensure!(entries.len() == 1 && !entries[0].trim().is_empty(), "composer proof does not contain exactly one new user message");
+    let message_id = sqlx::query_scalar::<_, String>("SELECT id FROM messages WHERE turn_id=? AND role='user' ORDER BY created_at, rowid LIMIT 1")
+        .bind(&turn.id)
+        .fetch_optional(app.db())
+        .await?
+        .ok_or_else(|| anyhow::anyhow!("composer submission message is gone"))?;
+    record_exact_text(app, &turn.id, &message_id, &entries[0]).await
 }
 
 #[derive(Debug)]
@@ -420,6 +503,9 @@ pub async fn submit_locked(app: &impl LcHost, bot_id: &str, expect_token: &str, 
         .map_err(up)
         .map_err(SubmitDraftError::NoKeySent)?
     {
+        retry_exact_text(app, &t)
+            .await
+            .map_err(|e| SubmitDraftError::EnterMayHaveBeenSent(LcError::Upstream(format!("composer prompt text correction is still pending; retry with the same client_request_id: {e}"))))?;
         return answer_for_turn(app, &t)
             .await
             .map_err(SubmitDraftError::EnterMayHaveBeenSent);
@@ -453,6 +539,7 @@ pub async fn submit_locked(app: &impl LcHost, bot_id: &str, expect_token: &str, 
             .map_err(|_| SubmitDraftError::NoKeySent(not_attempted_error(&run.id, Delivered::NotAttempted { reason: "transcript_unreadable", retry: true })))?,
         _ => 0,
     };
+    let checkpoint = proof_checkpoint(&proof, offset);
 
     #[cfg(all(test, feature = "daemon-test-harness"))]
     super::race_point::hit("draft_before_turn_tx", bot_id).await;
@@ -463,8 +550,8 @@ pub async fn submit_locked(app: &impl LcHost, bot_id: &str, expect_token: &str, 
     let msg_id = db::ulid();
     let mut tx = app.db().begin().await.map_err(up).map_err(SubmitDraftError::NoKeySent)?;
     sqlx::query(
-        "INSERT INTO turns (id, conversation_id, run_id, origin, status, delivery, client_request_id, created_at, prompt_text, auto_resend)
-         VALUES (?,?,?,'web','in_flight','pending',?,?,?,0)",
+        "INSERT INTO turns (id, conversation_id, run_id, origin, status, delivery, client_request_id, created_at, prompt_text, auto_resend, composer_draft_proof)
+         VALUES (?,?,?,'web','in_flight','pending',?,?,?,0,?)",
     )
     .bind(&turn_id)
     .bind(&conv)
@@ -472,6 +559,7 @@ pub async fn submit_locked(app: &impl LcHost, bot_id: &str, expect_token: &str, 
     .bind(client_request_id)
     .bind(db::now())
     .bind(&draft)
+    .bind(checkpoint)
     .execute(&mut *tx)
     .await
     .map_err(up)
@@ -527,7 +615,11 @@ pub async fn submit_locked(app: &impl LcHost, bot_id: &str, expect_token: &str, 
         return withdraw_unsubmitted(app, bot_id, &run, &turn_id, &msg_id, changed).await;
     }
     let res = match client.pane_send_keys(&pane, Submit::Enter.keys()).await {
-        Ok(()) => confirm(app, &client, &run, &bot, &pane, &proof, offset, &draft).await,
+        Ok(()) => {
+            #[cfg(all(test, feature = "daemon-test-harness"))]
+            super::race_point::hit("draft_after_enter", bot_id).await;
+            confirm(app, &client, &run, &bot, &pane, &proof, offset, &draft).await
+        }
         Err(e) => {
             // herdr 沒收下 Enter：框裡還是那一段＝沒送出去，撤回這一筆。看不出來才記成 unknown。
             let still = read_draft(&client, &pane, &bot.kind).await.ok().and_then(|(_, d, _)| d);
@@ -541,26 +633,30 @@ pub async fn submit_locked(app: &impl LcHost, bot_id: &str, expect_token: &str, 
             Err(e)
         }
     };
-    let (delivery, rec) = match res {
+    let (delivery, rec, correction_error) = match res {
         Ok((d @ (Delivered::Submitted | Delivered::Unverified), exact)) => {
-            if let Some(text) = exact.filter(|t| *t != draft) {
-                if let Err(e) = record_exact_text(app, &turn_id, &msg_id, &text).await {
-                    tracing::warn!(turn = %turn_id, error = %e, "could not replace the screen-read draft with the session log's text");
-                }
-            }
-            (if matches!(d, Delivered::Submitted) { "ok" } else { "unverified" }, d.record().expect("delivered outcome records"))
+            let correction_error = match exact {
+                Some(text) => record_exact_text(app, &turn_id, &msg_id, &text).await.err(),
+                None if matches!(proof, Proof::Transcript { .. }) => Some(anyhow::anyhow!("session log did not contain exactly one new user message")),
+                None => None,
+            };
+            (if matches!(d, Delivered::Submitted) { "ok" } else { "unverified" }, d.record().expect("delivered outcome records"), correction_error)
         }
         Ok((other, _)) => {
             tracing::warn!(bot = %bot_id, outcome = ?other, "submitting the draft could not be proven");
-            ("unknown", DeliveryRecord { stored: "unknown", verified: false, auto_resend: false })
+            let correction_error = clear_proof_checkpoint(app, &turn_id).await.err();
+            ("unknown", DeliveryRecord { stored: "unknown", verified: false, auto_resend: false }, correction_error)
         }
         Err(e) => {
             tracing::warn!(bot = %bot_id, error = %e, "submitting the draft: result unknown");
-            ("unknown", DeliveryRecord { stored: "unknown", verified: false, auto_resend: false })
+            let correction_error = clear_proof_checkpoint(app, &turn_id).await.err();
+            ("unknown", DeliveryRecord { stored: "unknown", verified: false, auto_resend: false }, correction_error)
         }
     };
     // 內容定稿（可能換成了 session log 的原文）才推訊息：`message_added` 以 id 去重，推了就改不回來。
-    emit_prompt_message(app, bot_id, &msg_id).await;
+    if correction_error.is_none() {
+        super::prompt::emit_prompt_message(app, bot_id, &msg_id).await;
+    }
     let written = super::owed_delivery::delivered(app, bot_id, &turn_id, rec).await;
     if delivery == "ok" || delivery == "unverified" {
         arm_stall(app, &run.id, bot_id, &turn_id).await;
@@ -568,6 +664,11 @@ pub async fn submit_locked(app: &impl LcHost, bot_id: &str, expect_token: &str, 
     }
     if let Err(e) = written {
         return Err(SubmitDraftError::EnterMayHaveBeenSent(super::owed_delivery::uncommitted(Some(&run.id), &turn_id, &msg_id, delivery, Some(&e))));
+    }
+    if let Some(e) = correction_error {
+        return Err(SubmitDraftError::EnterMayHaveBeenSent(LcError::Upstream(format!(
+            "composer prompt text correction is still pending; retry with the same client_request_id: {e}"
+        ))));
     }
     Ok(PromptOut { turn_id, message_id: msg_id, delivery: delivery.into(), send_now: None })
 }

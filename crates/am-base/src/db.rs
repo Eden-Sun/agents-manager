@@ -114,7 +114,10 @@ CREATE TABLE IF NOT EXISTS turns (
   created_at TEXT NOT NULL, completed_at TEXT,
   -- The exact text to hand to the CLI when a queued web prompt is activated. NULL for
   -- external turns; the user-facing message keeps the original text.
-  prompt_text TEXT
+  prompt_text TEXT,
+  -- A composer submission whose transcript text still needs to replace the screen reading.
+  -- Stores the proof path/format/session and byte offset so a same-request retry can finish it.
+  composer_draft_proof TEXT
 );
 CREATE UNIQUE INDEX IF NOT EXISTS turns_one_in_flight ON turns(run_id) WHERE status = 'in_flight';
 CREATE UNIQUE INDEX IF NOT EXISTS turns_one_queued ON turns(conversation_id) WHERE status = 'queued';
@@ -363,6 +366,8 @@ pub const SCHEMA_HISTORY: &[(i64, &str)] = &[
     (56, "08b0bd7b0cd32821"),
     // issue #1482：`turns.claimed_from_queue` separates a claimed queued prompt from a direct prompt while both are pending.
     (57, "97ff8e05ebd65f0c"),
+    // issue #1488：原文校正寫入失敗時保留 session-log proof，讓同請求重試能補正。
+    (58, "f1fafc8c7e9ef622"),
 ];
 pub const SCHEMA_VERSION: i64 = SCHEMA_HISTORY[SCHEMA_HISTORY.len() - 1].0;
 
@@ -540,6 +545,8 @@ async fn apply_migrations_inner(pool: &SqlitePool, fail_after_spawn_hints_drop: 
         ("turns", "start_error", "ALTER TABLE turns ADD COLUMN start_error TEXT"),
         // issue #733: a user prompt accepted while the run is busy waits for the next idle edge.
         ("turns", "awaits_idle", "ALTER TABLE turns ADD COLUMN awaits_idle INTEGER NOT NULL DEFAULT 0"),
+        // issue #1488: retain the composer submission's transcript proof until exact message text is committed.
+        ("turns", "composer_draft_proof", "ALTER TABLE turns ADD COLUMN composer_draft_proof TEXT"),
         // 舊庫裡的每一列都是舊流程「先寫檔、DB insert 最後做」留下來的——insert 成功就代表檔案已經寫完，
         // 一律當 'ready'（issue #88）。
         (
