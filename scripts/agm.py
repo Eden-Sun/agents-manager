@@ -1071,7 +1071,7 @@ def cmd_lease(client: Client, cfg: dict, args) -> object:
     """執行租約：等安全窗口用 `safety`（唯讀），真的要動手用 `acquire`。
 
     兩件事分開是刻意的：safety 只說「現在」，acquire 會在同一個鎖裡重驗一次再把窗口拿走，
-    拿著 restart 租約期間 supervisor assignment 派送暫停；其他送信路徑仍需協調。
+    拿著 restart 租約期間 supervisor assignment 派送暫停；其他送訊息路徑仍需協調。
     """
     if args.op == "status":
         return client.get("/api/supervisor/leases")
