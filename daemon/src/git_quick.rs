@@ -81,11 +81,17 @@ pub async fn summary(app: &Arc<App>, id: &str) -> Result<GitSummary, LcError> {
         // Not a repository (or git missing): the chip simply does not show.
         return Ok(GitSummary::default());
     }
+    // 沒有任何已追蹤的改動（`1`／`2`／`u` 列）時 shortstat 一定是空的：遠端就省一趟 ssh（同 `parse_summary` 的計數）。
+    let tracked_changes = st.stdout.lines().any(|l| l.starts_with("1 ") || l.starts_with("2 ") || l.starts_with("u "));
     // `HEAD` fails on an unborn branch; an empty shortstat then just means zero.
-    let stat = git(app, &p.host, &p.path, &["diff", "--shortstat", "HEAD"], GIT_TIMEOUT)
-        .await
-        .map(|o| if o.ok() { o.stdout } else { String::new() })
-        .unwrap_or_default();
+    let stat = if !tracked_changes {
+        String::new()
+    } else {
+        git(app, &p.host, &p.path, &["diff", "--shortstat", "HEAD"], GIT_TIMEOUT)
+            .await
+            .map(|o| if o.ok() { o.stdout } else { String::new() })
+            .unwrap_or_default()
+    };
     Ok(parse_summary(&st.stdout, &stat))
 }
 
@@ -167,6 +173,7 @@ pub async fn pull(app: &Arc<App>, id: &str) -> Result<Value, LcError> {
 #[cfg(test)]
 mod tests {
     use super::{parse_summary, push_with_runner, FIRST_PUSH_ARGS, PUSH_ARGS, UPSTREAM_PROBE_ARGS};
+    use crate::db;
     use crate::git_sh::Out;
     use crate::lifecycle::LcError;
     use std::collections::VecDeque;
@@ -273,5 +280,83 @@ mod tests {
 
         assert!(result.is_ok(), "existing upstream should allow push: {result:?}");
         assert_eq!(calls, vec![UPSTREAM_PROBE_ARGS.to_vec(), PUSH_ARGS.to_vec()]);
+    }
+
+    /// 一顆遠端主機上的專案；`status` 回 `status`，`diff --shortstat` 回 3 行新增。回傳每一次送到遠端的腳本。
+    async fn remote_repo(status: &'static str) -> (crate::testing::Env, String, std::sync::Arc<std::sync::Mutex<Vec<String>>>) {
+        use std::sync::{atomic::Ordering, Mutex};
+        let env = crate::testing::env().await;
+        let app = env.app.clone();
+        let host = format!("git-summary-{}", db::ulid());
+        let conn = app
+            .hosts
+            .insert_remote_for_test(crate::config::HostCfg {
+                shared_session: false,
+                name: host.clone(),
+                ssh: "unused".into(),
+                ssh_port: 22,
+                ssh_opts: vec![],
+                herdr_session: "am-test".into(),
+                remote_path: String::new(),
+            })
+            .await;
+        conn.connected.store(true, Ordering::SeqCst);
+        let project = db::ulid();
+        sqlx::query("INSERT INTO projects (id, path, label, host, created_at) VALUES (?, ?, 'remote', ?, ?)")
+            .bind(&project)
+            .bind(format!("/remote/{project}"))
+            .bind(&host)
+            .bind(db::now())
+            .execute(&app.db)
+            .await
+            .unwrap();
+        let calls = std::sync::Arc::new(Mutex::new(Vec::<String>::new()));
+        let seen = calls.clone();
+        crate::hosts::set_ssh_fake(&host, move |script| {
+            seen.lock().unwrap().push(script.to_string());
+            // `git()` 把每個參數各自單引號包起來（`'status' '--porcelain=v2'`），所以認參數本身。
+            let body = if script.contains("'--porcelain=v2'") {
+                status
+            } else if script.contains("'--shortstat'") {
+                " 1 file changed, 3 insertions(+)\n"
+            } else {
+                ""
+            };
+            // 遠端輸出的格式同 `git_sh::wrap_remote_script`：內容後面跟 `__am_rc=<代碼>`（那個常數是 am-base 的私有值）。
+            Ok(format!("{body}\n__am_rc=0\n"))
+        });
+        (env, project, calls)
+    }
+
+    /// GitBar 每 15 秒一次，遠端專案的每一趟都是一次 ssh。工作樹乾淨時 `diff --shortstat` 一定是空的，
+    /// 不必再跑一趟：一次摘要只送一個 git 指令。
+    #[tokio::test]
+    async fn a_clean_remote_repo_is_summarised_with_one_git_call() {
+        let (env, project, calls) = remote_repo("# branch.oid abc\n# branch.head main\n").await;
+        let s = super::summary(&env.app, &project).await.unwrap();
+        assert_eq!(s.branch.as_deref(), Some("main"));
+        assert_eq!(s.changed, 0);
+        assert_eq!(calls.lock().unwrap().len(), 1, "乾淨的工作樹只跑 status，不再跑 diff --shortstat");
+    }
+
+    /// 有追蹤檔改動時還是要 shortstat：增刪行數照舊。
+    #[tokio::test]
+    async fn a_dirty_remote_repo_still_asks_for_the_shortstat() {
+        let (env, project, calls) = remote_repo("# branch.oid abc\n# branch.head main\n1 .M N... 100644 100644 100644 x y a.ts\n").await;
+        let s = super::summary(&env.app, &project).await.unwrap();
+        assert_eq!(s.changed, 1);
+        assert_eq!(s.insertions, 3);
+        let calls = calls.lock().unwrap();
+        assert_eq!(calls.len(), 2);
+        assert!(calls[1].contains("'--shortstat'"), "{}", calls[1]);
+    }
+
+    /// 只有未追蹤檔（`?`）時，shortstat 本來就不含它們，也省掉那一趟。
+    #[tokio::test]
+    async fn untracked_files_alone_do_not_need_the_shortstat() {
+        let (env, project, calls) = remote_repo("# branch.oid abc\n# branch.head main\n? new.txt\n").await;
+        let s = super::summary(&env.app, &project).await.unwrap();
+        assert_eq!((s.changed, s.untracked), (0, 1));
+        assert_eq!(calls.lock().unwrap().len(), 1);
     }
 }
