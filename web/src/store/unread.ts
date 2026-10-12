@@ -52,11 +52,26 @@ export function loadMarks(): Record<string, ReadMark> {
  * 回傳合併後的整份，呼叫端照這份更新記憶體。刪除（`pruneMarks`）不走這裡，它要真的把死掉的鍵拿掉。
  */
 export function recordReadMark(current: Record<string, ReadMark>, key: string, mark: ReadMark): Record<string, ReadMark> {
-  const merged: Record<string, ReadMark> = { ...current }
-  for (const [k, v] of Object.entries(loadMarks())) merged[k] = laterMark(merged[k], v) ?? v
+  const merged = mergeWithDisk(current)
   merged[key] = laterMark(merged[key], mark) ?? mark
   saveMarks(merged)
   return merged
+}
+
+/** 記憶體的標記併進磁碟上現在的那份（逐筆取較新者）。 */
+function mergeWithDisk(current: Record<string, ReadMark>): Record<string, ReadMark> {
+  const merged: Record<string, ReadMark> = { ...current }
+  for (const [k, v] of Object.entries(loadMarks())) merged[k] = laterMark(merged[k], v) ?? v
+  return merged
+}
+
+/**
+ * 修剪死掉的 bot 的標記後存回去。跟 `recordReadMark` 一樣先併磁碟：別的分頁剛寫的標記不能被這裡整份覆寫掉。
+ */
+export function prunePersistedMarks(current: Record<string, ReadMark>, liveBot: (id: string) => boolean): Record<string, ReadMark> {
+  const pruned = pruneMarks(mergeWithDisk(current), liveBot)
+  saveMarks(pruned)
+  return pruned
 }
 
 export function saveMarks(marks: Record<string, ReadMark>) {
