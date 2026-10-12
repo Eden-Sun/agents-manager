@@ -29,6 +29,11 @@ export interface ShareFile {
   version?: string | null
 }
 
+/** 字數照 Unicode 字元計（daemon 的 `chars().count()`），不用 UTF-16 的 `length`：emoji 一個字是兩個單位。 */
+export function shareTextChars(s: string): number {
+  return [...s].length
+}
+
 /** 單則文字上限（daemon 另有自己的上限，超過回 413）；單檔 25 MiB 同契約 C。 */
 export const SHARE_TEXT_MAX = 8000
 export const SHARE_FILE_MAX = 25 * 1024 * 1024

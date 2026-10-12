@@ -10,6 +10,7 @@ import {
   fmtSize,
   mergeMessages,
   SHARE_TEXT_MAX,
+  shareTextChars,
   ShareHttpError,
   shareErrorText,
   stripShareMarks,
@@ -458,7 +459,8 @@ export function ShareApp({ client }: { client: ShareClient }) {
     return pending.length > 1 ? `上傳中（第 ${pending.indexOf(p) + 1} 張／共 ${pending.length} 張）` : '上傳中…'
   }
   const ready = pending.filter((p) => p.id)
-  const tooLong = text.length > SHARE_TEXT_MAX
+  const textChars = shareTextChars(text)
+  const tooLong = textChars > SHARE_TEXT_MAX
   const tooMany = ready.length > ATTACH_MAX
   // bot 還沒回完不給送：daemon 一段對話同時只排一則，再送會 409（API.md §5.6）。
   const canSend = !busy && !sending && !uploading && !tooLong && !tooMany && (text.trim().length > 0 || ready.length > 0)
@@ -647,7 +649,7 @@ export function ShareApp({ client }: { client: ShareClient }) {
             {tooMany
               ? `一次最多送 ${ATTACH_MAX} 個檔案，請先移除 ${ready.length - ATTACH_MAX} 個，剩下的下一則再送。`
               : tooLong
-                ? `太長了（${text.length}／${SHARE_TEXT_MAX} 字），請分成幾段送。`
+                ? `太長了（${textChars}／${SHARE_TEXT_MAX} 字），請分成幾段送。`
                 : sendError}
           </p>
         ) : null}
