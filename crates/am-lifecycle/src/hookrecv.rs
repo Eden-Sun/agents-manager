@@ -6916,23 +6916,32 @@ mod host_unreadable_replay_tests {
     #[tokio::test]
     async fn a_host_pass_that_cannot_enumerate_bots_retries_until_the_spool_is_drained() {
         let env = tt::env().await;
-        let (_, spool) = spooled(&env, "alfa").await;
+        let (bot, spool) = spooled(&env, "alfa").await;
+        let claim = spool.with_extension("jsonl.claim");
+        let staging = spool.with_extension("jsonl.replaying");
+        // 背景重試把 spool 摘成 `.claim` 之後、併進 `.replaying` 之前停住：這一瞬 spool 與 `.replaying` 都不在，只剩 `.claim`。
+        let (paused_tx, paused_rx) = tokio::sync::oneshot::channel::<()>();
+        let (go_tx, go_rx) = tokio::sync::oneshot::channel::<()>();
+        crate::lifecycle::race_point::arm("spool_claimed", &bot.id, move || async move {
+            let _ = paused_tx.send(());
+            let _ = go_rx.await;
+        });
         tt::make_table_unreadable(&env.app, "projects").await;
         replay_host(&env.app, crate::config::LOCAL_HOST).await;
         assert!(spool.exists(), "讀不到時什麼都不能動");
         tt::make_table_readable(&env.app, "projects").await;
-        // 等的是「收完」，不是「spool 不見了」（#255）：`replay_spool` 先把 spool rename 成
-        // `.replaying`、逐行 commit 進 hook_events，**全部 commit 之後**才刪 `.replaying`。只等
-        // spool 消失，會在 rename 之後、commit 之前就去數列數，慢的 runner 上數到 0。
-        let staging = spool.with_extension("jsonl.replaying");
-        for _ in 0..200 {
-            if !spool.exists() && !staging.exists() {
-                break;
-            }
-            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
-        }
+        paused_rx.await.unwrap();
+        assert!(claim.exists() && !spool.exists() && !staging.exists(), "停在認領與併入之間");
+        go_tx.send(()).unwrap();
+        // 等的是背景重試這個任務結束，不是檔案消失的那一瞬（#255、#1662）：重試任務是 tracked 的，
+        // 關掉 tracker 後 `wait` 只在它收完（或放棄）時才回來；它先認領、後 commit、最後才刪 `.replaying`，
+        // 所以結束時三個檔都不在、列數就是已收的那批。逾時只防卡死，不是等待的條件。
+        env.app.background_tasks.close();
+        tokio::time::timeout(std::time::Duration::from_secs(60), env.app.background_tasks.wait())
+            .await
+            .expect("背景重試任務應該在 DB 恢復後結束");
         assert!(!spool.exists(), "DB 恢復後背景重試要把 spool 收進來");
-        assert!(!staging.exists(), "收完才刪 .replaying：{staging:?}");
+        assert!(!claim.exists() && !staging.exists(), "收完才刪 .claim／.replaying：{staging:?}");
         assert_eq!(inbox_rows(&env).await, 1, "恰好收一次");
     }
 }
