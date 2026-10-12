@@ -83,15 +83,11 @@ pub fn parse_reset<Tz: TimeZone>(rest: &str, now: DateTime<Tz>) -> Option<String
     };
     let dt = match year {
         Some(y) => build(y)?,
-        None => {
-            let this = build(now.year())?;
-            // A reset more than a day behind us is last year's rendering of the same date.
-            if this < now.clone() - chrono::Duration::days(1) {
-                build(now.year() + 1)?
-            } else {
-                this
-            }
-        }
+        // 最近的一次：不早於一天前的最早那個。只看今年會在 1 月初把去年 12 月底剛過的重置推到明年。
+        None => [now.year() - 1, now.year(), now.year() + 1]
+            .into_iter()
+            .filter_map(|y| build(y))
+            .find(|dt| *dt >= now.clone() - chrono::Duration::days(1))?,
     };
     Some(dt.with_timezone(&chrono::Utc).to_rfc3339_opts(chrono::SecondsFormat::Millis, true))
 }

@@ -316,6 +316,14 @@ AM_USAGE_DONE=0
         assert!(r.starts_with("2026-09-06T"), "{r}");
     }
 
+    /// 跨年：2027-01-01 00:30（+08:00）看到的 "Dec 31 at 11pm" 是一個半小時前剛過的重置（去年的），不是明年的。
+    #[test]
+    fn a_reset_that_just_passed_across_new_years_eve_stays_last_year() {
+        let now = chrono::DateTime::parse_from_rfc3339("2027-01-01T00:30:00+08:00").unwrap().with_timezone(&Local);
+        let r = parse_claude_reset("Resets Dec 31 at 11pm (Asia/Taipei)", now).unwrap();
+        assert_eq!(r, "2026-12-31T15:00:00.000Z");
+    }
+
     #[test]
     fn month_day_reset_parses() {
         let r = parse_claude_reset("Resets Sep 11 at 2pm (Asia/Taipei)", at("2026-09-06T10:00:00+08:00")).unwrap();

@@ -138,12 +138,11 @@ pub fn parse_claude_reset(line: &str, now: DateTime<Local>) -> Option<String> {
                 let d = NaiveDate::from_ymd_opt(y, month, day)?.and_hms_opt(h, m, 0)?;
                 tz.from_local_datetime(&d).earliest()
             };
-            let this = build(now.year())?;
-            if this < now - chrono::Duration::days(1) {
-                build(now.year() + 1)?
-            } else {
-                this
-            }
+            // 最近的一次：不早於一天前的最早那個。只看今年會在 1 月初把去年 12 月底剛過的重置推到明年。
+            [now.year() - 1, now.year(), now.year() + 1]
+                .into_iter()
+                .filter_map(|y| build(y))
+                .find(|dt| *dt >= now.clone() - chrono::Duration::days(1))?
         }
         _ => {
             // Time-only: today, or tomorrow if that time already passed (both in `tz`, not host local).
