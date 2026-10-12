@@ -27,7 +27,7 @@
 3. 文件只寫現況：功能做完，把仍有效的決定併進 `docs/SPEC.md`／`docs/API.md`／`docs/UI-DECISIONS.md`，不另留 goal、進度或驗收紀錄檔（git 歷史就是紀錄）。
 
 ## 改動邊界
-- 只改任務需要的檔案與行；共用檔（`store.ts`、`ChatPanel.tsx`、`Sidebar.tsx`、`styles.css`、`api.rs`、`lifecycle.rs`）hunk 要小，新邏輯優先獨立成新檔。
+- 只改任務需要的檔案與行；共用檔（`store.ts`、`ChatPanel.tsx`、`Sidebar.tsx`、`styles.css`、`api.rs`、`lifecycle/mod.rs`）hunk 要小，新邏輯優先獨立成新檔。
 - 不要翻案 `docs/UI-DECISIONS.md` 已定案的決定；新的取捨補寫進去。
 - 改了 API 要同步 `docs/API.md`；改了行為要同步 `docs/SPEC.md`。
 - **新增 API 路由＝在 `daemon/src/bot_scope_matrix.rs` 的允許表登記**（bot principal 是 Allow 還是 Forbidden），推之前跑 `cargo test -p agents-managerd -- bot_scope_matrix`。漏登記 `bot_a_against_bot_b_matches_the_allow_table` 會報 UNLISTED、main CI 變紅（2026-10-04 #839）。
