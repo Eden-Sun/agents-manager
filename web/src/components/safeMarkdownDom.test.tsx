@@ -140,3 +140,10 @@ test('自動連結的全形標點：連結只包網址，句尾的「。」「�
   assert.deepEqual(hrefs, ['https://example.com/login', 'https://example.com/a'], JSON.stringify(hrefs))
   assert.ok(root.textContent?.includes('請開 https://example.com/login。然後'), root.textContent ?? '')
 })
+
+test('寫成 [文字](網址) 的連結不被自動連結規則改寫（文字與目標相同、含全形標點也照原樣）', async () => {
+  const root = await render('[https://example.com/x。](https://example.com/x。)')
+  // react-markdown 把非 ASCII 的 href 編碼成 %E3%80%82；解碼後目標必須仍含「。」（連結沒被改寫）。
+  assert.equal(decodeURI(root.querySelector('a')?.getAttribute('href') ?? ''), 'https://example.com/x。')
+  assert.equal(root.querySelector('a')?.textContent, 'https://example.com/x。')
+})
