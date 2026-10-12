@@ -3564,7 +3564,8 @@ async fn create_host(
                 }),
             ));
         }
-        return Err(any_err(e));
+        // 設定不合法是請求的問題（400 config_invalid），不是上游壞掉（#1568）。
+        return Err(cfg_err(e));
     }
     let hosts = app.cfg.get().await.hosts;
     let changed_hosts = app.hosts.apply_config(&app, &hosts).await;
@@ -15348,6 +15349,25 @@ mod host_target_tests {
         .await
         .expect_err("an option-looking target must be refused");
         assert!(matches!(err, LcError::Bad(_)), "{err:?}");
+        assert_eq!(e.app.cfg.get().await.hosts.len(), before, "什麼都沒寫");
+    }
+
+    /// `ssh_port` 0 不是合法的 TCP 埠（`remote_cargo` 的 `[build.remote]` 也明確拒絕），以前照樣寫進 config，
+    /// 之後每次連線才以 `ssh -p 0` 失敗，錯誤跑到很後面才出現。
+    #[tokio::test]
+    async fn create_host_refuses_ssh_port_zero_before_touching_config() {
+        let e = crate::testing::env().await;
+        let before = e.app.cfg.get().await.hosts.len();
+        let err = create_host(
+            State(e.app.clone()),
+            Query(DeleteQuery::default()),
+            Extension(RequestPrincipal::User),
+            Json(NewHost { name: "port0".into(), ssh: "me@10.0.0.9".into(), ssh_port: Some(0), ssh_opts: None, herdr_session: None, remote_path: None, shared_session: None }),
+        )
+        .await
+        .expect_err("ssh_port 0 must be refused");
+        // 設定不合法是請求的問題：400 `config_invalid`＋`config_written:false`（同 `cfg_err`），不是 502。
+        assert!(matches!(&err, LcError::BadValue(v) if v["error"] == "config_invalid" && v["config_written"] == false), "{err:?}");
         assert_eq!(e.app.cfg.get().await.hosts.len(), before, "什麼都沒寫");
     }
 }
