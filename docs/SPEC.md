@@ -1869,7 +1869,7 @@ pane 打 `cargo` 就 permission denied）時，只 chmod 回 0755，不重寫內
    輸出檔案規則（§6.5f：scratchpad 只放中間產物、給使用者的放 `$AM_OUTBOX`、私鑰／憑證／DB 禁放）；
    CLI 登入／OAuth 一律不開瀏覽器（使用者 2026-10-03）：`gcloud … --no-browser`、`--use-device-code`、`firebase login --no-localhost`、`GH_BROWSER=echo gh auth login --web`；
    互動式指令放進 shell pane（`pane split`／`run`／`wait-output`），網址／碼／`--remote-bootstrap` 指令原樣交給使用者後結束回合，使用者貼回再 `send-text` 送進去、關 pane；禁止用瀏覽器代登、禁止搬 cookie；
-   派工只准走 herdr pane（禁止 CLI 內建子代理：Claude 的 `Agent`／`Task`／`Workflow`、codex／grok 的同類功能，也禁止在自己 pane 另起 agent CLI——AG Man 追不到）；
+   派工只准走 herdr pane（禁止 CLI 內建子代理：Claude 的 `Agent`／`Task`／`Workflow`、codex／grok 的同類功能，也禁止在自己 pane 另起 agent CLI——AG Man 追不到；開子 agent 一律 `herdr agent start <名稱> --kind … --pane <新 pane>`，禁止 `herdr pane run <pane> "claude …"`／`"codex …"` 直接起 CLI，那樣 agent 在 herdr 沒有名稱、認領不到，#1472）；
    派工 prompt 必須寫明「你是 `<parent>` 的子 agent、禁止再開子 agent、要人手由 parent 決定」；有 `$AM_CHILD_OF` 的子 agent 不開子 agent，要人手在回報裡講、由 parent 決定是否另派兄弟（§6.5b）。
 
 herdr 的 CLI 說明原樣保留（升級會帶進新文字）。裝不起來只 warning。`child_agent_rules` 是同一份文字來源：claude skill 與三種 kind 的 persona
