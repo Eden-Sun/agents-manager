@@ -110,6 +110,16 @@
         assert!(is_mode_row(last), "{last:?}");
     }
 
+    /// 登入失敗時 claude 在 `⎿` 下面印的提示行 `· Run in another terminal: …` 沒有 `…`，不是活動列：不能當成正在做的事回報。
+    #[test]
+    fn a_hint_row_under_a_login_error_is_not_the_activity() {
+        let screen = "❯ go\n  ⎿  Not logged in · Please run /login\n   · Run in another terminal: security unlock-keychain\n";
+        assert_eq!(ClaudeCapture.activity(screen), None);
+        // 真的 `·` 活動列（有 `…`）照舊回報。
+        let working = "❯ go\n · Philosophising… (33m 33s · ↓ 94.9k tokens)\n";
+        assert_eq!(ClaudeCapture.activity(working).as_deref(), Some("Philosophising… (33m 33s · ↓ 94.9k tokens)"));
+    }
+
     /// #331：`*` 開頭的回覆行（markdown 項目、程式碼區塊的 ` * 註解`）被當 spinner 剝掉。
     #[test]
     fn a_reply_row_starting_with_star_or_dot_is_not_a_spinner() {

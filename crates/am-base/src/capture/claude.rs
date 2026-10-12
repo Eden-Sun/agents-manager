@@ -87,7 +87,8 @@ impl Capture for ClaudeCapture {
             let Some(first) = s.chars().next() else {
                 continue;
             };
-            let rest = if spinner_led(s) {
+            // `·` 字頭的提示行（`· Run in another terminal: …`）沒有 `…`，不是活動列；`*` 的規則見 spinner_led。
+            let rest = if spinner_led(s) && (first != '·' || s.contains('…')) {
                 s[first.len_utf8()..].trim()
             } else if super::is_activity_shape(s) {
                 if first.is_alphanumeric() {
