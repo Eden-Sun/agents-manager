@@ -37,7 +37,7 @@ export function shareTextChars(s: string): number {
 /** 單則文字上限（daemon 另有自己的上限，超過回 413）；單檔 25 MiB 同契約 C。 */
 export const SHARE_TEXT_MAX = 8000
 export const SHARE_FILE_MAX = 25 * 1024 * 1024
-/** 一頁最多畫這麼多則；多的丟掉，避免一份超大 JSON 把分頁整個掛上。 */
+/** 一頁最多畫這麼多則；多的（最舊的）丟掉，避免一份超大 JSON 把分頁整個掛上。 */
 export const SHARE_PAGE_MAX = 100
 /** 單則進畫面的字數上限。再長就截斷，避免一則幾 MB 的 `<pre>`。 */
 export const SHARE_TEXT_STORE_MAX = 100_000
@@ -85,11 +85,13 @@ export function toStatus(v: unknown): ShareStatus {
 export function toSharePage(v: unknown): SharePage {
   const o = rec(v)
   const msgs = Array.isArray(o.messages) ? o.messages : []
+  // 契約 C 是舊→新：超過上限時丟掉的是最舊的那段（留最新的），丟掉的還算「更早的還有」。
+  const kept = msgs.slice(-SHARE_PAGE_MAX)
   return {
     bot_name: str(o.bot_name) || str(rec(o.bot).name),
     status: toStatus(o.status),
-    messages: msgs.slice(0, SHARE_PAGE_MAX).map(toShareMessage).filter((m): m is ShareMessage => m !== null),
-    has_more: o.has_more === true,
+    messages: kept.map(toShareMessage).filter((m): m is ShareMessage => m !== null),
+    has_more: o.has_more === true || msgs.length > kept.length,
   }
 }
 
