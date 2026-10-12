@@ -372,6 +372,11 @@ where
     let _g = PROJECTION.lock().await;
     // 投影失敗要把這次寫進去的 TOML 退回。child 名字不在 config 裡，唯一約束會在寫檔之後才爆，
     // 不退的話這個檔之後每一次投影都 502（#654）。
+    // 先把磁碟上的手改讀進記憶體（no-op 更新只做重讀），快照才是寫入之前真正的內容：投影失敗退回時不能把手改蓋掉（#1580）。
+    if let Err(e) = store.update_guarded_at(at, |_: &mut crate::config::ConfigFile| Ok(()), |_| Ok(())).await {
+        alert_on_refusal(pool, &e).await;
+        return Err(e);
+    }
     let snapshot = store.get().await;
     let db_bots: Vec<db::Bot> =
         db::live_bots(pool).await?.into_iter().filter(|b| b.managed_by == "user").collect();
@@ -1279,6 +1284,46 @@ mod tests {
         assert!(std::fs::read_to_string(&path).unwrap().contains("renamed"), "合法的改動要真的落盤");
         let projects = db::live_projects(&pool).await.unwrap();
         assert_eq!(projects[0].label, "renamed", "也要真的投影進 DB");
+
+        pool.close().await;
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// 外部手改 config.toml（記憶體還是舊的）之後，下一次投影失敗：退回不能把那次手改蓋掉。
+    /// 以前快照在重讀磁碟之前取，`restore_config` 寫回的是舊記憶體，手改的內容整段消失（交易範圍）。
+    #[tokio::test]
+    async fn a_rollback_keeps_an_external_edit_made_before_the_failed_projection() {
+        let dir = crate::testing::track(std::env::temp_dir().join(format!("am-uap-external-{}", db::ulid())));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("config.toml");
+        let pool = crate::app_ports_p1::open(&dir.join("db.sqlite3")).await.unwrap();
+        project_text(&path, &pool, &config_text(&["alfa"])).await.unwrap();
+        sqlx::query(
+            "INSERT INTO bots (id, project_id, name, kind, args_json, autostart, inject_hooks, hook_token, managed_by, created_at)
+             VALUES ('child-review','p1','review','claude','[]',0,1,'tok','child',?)",
+        )
+        .bind(db::now())
+        .execute(&pool)
+        .await
+        .unwrap();
+        let store = crate::runners::app_ports_p2::load_config(path.clone()).await.unwrap();
+
+        // 使用者手改檔案（記憶體還不知道）：改 `[server] herdr_session`，一個非熱區段。
+        let edited = config_text(&["alfa"]).replacen("[server]\nlisten = '127.0.0.1:7788'\n", "[server]\nlisten = '127.0.0.1:7788'\nherdr_session = 'hand-edited'\n", 1);
+        std::fs::write(&path, &edited).unwrap();
+
+        let err = update_and_project(&store, &pool, |cfg| {
+            let mut bot = cfg.projects[0].bots[0].clone();
+            bot.id = Some("user-review".into());
+            bot.name = "review".into();
+            cfg.projects[0].bots.push(bot);
+            Ok(())
+        })
+        .await
+        .unwrap_err();
+        assert!(err.to_string().contains("UNIQUE"), "{err}");
+        assert!(std::fs::read_to_string(&path).unwrap().contains("hand-edited"), "投影失敗的退回不能把使用者的手改蓋掉");
+        assert_eq!(store.get().await.server.herdr_session, "hand-edited", "記憶體也要是手改後的內容");
 
         pool.close().await;
         std::fs::remove_dir_all(&dir).unwrap();
