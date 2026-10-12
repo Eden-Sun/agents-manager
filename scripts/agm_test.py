@@ -2678,6 +2678,15 @@ elif argv[0] == "api":
     raw = json.load(open(os.path.join(state, "issue-%s.json" % match.group(1))))
     sys.stdout.write(json.dumps(raw.get("comments", [])))
 elif sub in ("issue comment", "issue edit", "label create"):
+    # GH_MISSING_LABEL=1：repo 裡還沒有 wip label（被人刪了）。真的 gh 這時 `issue edit --add-label` 硬失敗，
+    # 要先 `label create` 才行；建立後留一個標記檔，之後就會成功。
+    if sub == "label create" and os.environ.get("GH_MISSING_LABEL"):
+        open(os.path.join(state, "label-created"), "w").close()
+        sys.exit(0)
+    if sub == "issue edit" and "--add-label" in argv and os.environ.get("GH_MISSING_LABEL") \
+            and not os.path.exists(os.path.join(state, "label-created")):
+        sys.stderr.write("could not add label: 'wip' not found\n")
+        sys.exit(1)
     if sub == "label create" and os.environ.get("GH_NO_LABEL"):
         sys.stderr.write("gh: label already exists\n")
         sys.exit(1)
@@ -2754,7 +2763,7 @@ def _iso(delta_secs: float) -> str:
 class IssueClaimTest(unittest.TestCase):
     """`agm issue claim/release` 不連 daemon，只跟 gh 說話。"""
 
-    ENV_KEYS = ("PATH", "GH_STATE", "GH_FAIL", "GH_FAIL_MSG", "GH_NO_LABEL", "GH_INJECT_COMPETITOR",
+    ENV_KEYS = ("PATH", "GH_STATE", "GH_FAIL", "GH_FAIL_MSG", "GH_NO_LABEL", "GH_MISSING_LABEL", "GH_INJECT_COMPETITOR",
                 "GH_INJECT_NEW_CLAIM_ON_REMOVE", "GH_INJECT_RELEASE_ON_ADD", "AM_AGENT_NAME", "AM_BOT_ID",
                 "AM_BOT_TOKEN", "AM_HOOK_TOKEN", "AM_KIND", "AM_INSTANCE", "AM_DATA_DIR", "HOME", "AGM_RUNTIME_DIR")
 
@@ -2780,7 +2789,7 @@ class IssueClaimTest(unittest.TestCase):
         os.environ["PATH"] = ":".join(p for p in (guard, str(bindir), "/usr/bin", "/bin") if p)
         os.environ["GH_STATE"] = str(self.state)
         os.environ["AM_AGENT_NAME"] = "vvyyg1"
-        for k in ("GH_FAIL", "GH_FAIL_MSG", "GH_NO_LABEL", "GH_INJECT_NEW_CLAIM_ON_REMOVE", "GH_INJECT_RELEASE_ON_ADD",
+        for k in ("GH_FAIL", "GH_FAIL_MSG", "GH_NO_LABEL", "GH_MISSING_LABEL", "GH_INJECT_NEW_CLAIM_ON_REMOVE", "GH_INJECT_RELEASE_ON_ADD",
                   "AM_BOT_ID", "AM_BOT_TOKEN", "AM_HOOK_TOKEN", "AM_KIND", "AM_INSTANCE", "AM_DATA_DIR"):
             os.environ.pop(k, None)
         os.environ["HOME"] = str(self.home)
@@ -3164,6 +3173,20 @@ class IssueClaimTest(unittest.TestCase):
         self.issue(425, comments=[self.claim_comment("vvyyg1", age_secs=300)])
         self.assertTrue(json.loads(self.run_cli("issue", "claim", "425")[1])["already"])
         self.assertEqual([c[-2:] for c in self.calls() if c[:2] == ["issue", "edit"]], [["--add-label", "wip"]])
+
+    def test_reclaiming_my_own_issue_creates_a_wip_label_the_repo_does_not_have(self):
+        os.environ["GH_MISSING_LABEL"] = "1"
+        self.issue(425, comments=[self.claim_comment("vvyyg1", age_secs=300)])
+        code, out, err = self.run_cli("issue", "claim", "425")
+        self.assertEqual(code, 0, err)
+        self.assertTrue(json.loads(out)["already"])
+
+    def test_a_competitors_claim_on_an_unlabelled_issue_reports_the_conflict_not_a_gh_error(self):
+        os.environ["GH_MISSING_LABEL"] = "1"
+        self.issue(425, comments=[self.claim_comment("kd61te", age_secs=300)])
+        code, _out, err = self.run_cli("issue", "claim", "425")
+        self.assertEqual(code, 3, err)
+        self.assertEqual(json.loads(err)["error"], "issue_claimed")
 
     def test_a_released_issue_is_free_again(self):
         self.issue(425, comments=[self.claim_comment("kd61te", age_secs=7200),

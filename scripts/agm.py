@@ -2060,6 +2060,11 @@ def issue_claim_state(args, number: int) -> tuple[dict, dict | None]:
     return issue, current_claim(issue)
 
 
+def ensure_claim_label(args) -> None:
+    """repo 裡要有 wip label 才能 `--add-label`（不存在時 gh 硬失敗）。已存在就失敗，無妨。"""
+    gh(["label", "create", CLAIM_LABEL, *repo_args(args), "--color", "FBCA04", "--description", "有 bot 正在做（agm issue claim）"], allow_fail=True)
+
+
 def reconcile_claim_label(args, number: int) -> tuple[dict, dict | None]:
     """Treat the ordered comment history as the claim source of truth and repair its `wip` projection.
 
@@ -2074,6 +2079,8 @@ def reconcile_claim_label(args, number: int) -> tuple[dict, dict | None]:
         if has_label == (claim is not None):
             return issue, claim
         action = "--add-label" if claim is not None else "--remove-label"
+        if action == "--add-label":
+            ensure_claim_label(args)
         gh(["issue", "edit", str(number), *repo_args(args), action, CLAIM_LABEL])
     issue, claim = issue_claim_state(args, number)
     has_label = CLAIM_LABEL in [label.get("name") for label in issue.get("labels") or []]
@@ -2292,6 +2299,7 @@ def cmd_issue(_client, _cfg: dict, args) -> object:
     # claim：同一顆 bot 重跑不再留第二則（重試不該洗版），但 label 掉了會補回去。
     if claim is not None and claim.get("bot") == me and not claim.get("stale"):
         if CLAIM_LABEL not in labels:
+            ensure_claim_label(args)
             gh(["issue", "edit", str(number), *repo_args(args), "--add-label", CLAIM_LABEL])
         issue, claim = reconcile_claim_label(args, number)
         if claim is None:
@@ -2325,7 +2333,7 @@ def cmd_issue(_client, _cfg: dict, args) -> object:
         lead += f"。接手 {claim.get('bot')} 超過 24 小時沒動靜的認領（最後動靜 {claim['last_activity']}）"
     body = f"{lead}。\n\n<!-- {CLAIM_MARK} {json.dumps(payload, ensure_ascii=False, sort_keys=True)} -->"
     # label 不存在時 `--add-label` 會失敗，先建一次（已存在會失敗，無妨；同 ci-watch-kick 的做法）。
-    gh(["label", "create", CLAIM_LABEL, *repo_args(args), "--color", "FBCA04", "--description", "有 bot 正在做（agm issue claim）"], allow_fail=True)
+    ensure_claim_label(args)
     gh(["issue", "comment", str(number), *repo_args(args), "--body", body])
 
     def release_unconfirmed_claim() -> None:
