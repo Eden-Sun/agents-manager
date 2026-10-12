@@ -426,6 +426,17 @@ fn at_marker_column(raw: &str, marker: &str) -> bool {
     body.starts_with(marker)
 }
 
+/// 續行的內容。claude／codex 的非框續行先是終端畫的兩欄縮排，之後才是使用者自己打的縮排（程式碼、清單），只去掉前者。
+/// 框的續行（grok）與其他 kind 照舊整行 trim（`trimmed`）。
+fn continuation_body(kind: &str, raw: &str, trimmed: String) -> String {
+    let t = strip_grok_decor(raw);
+    let t = t.trim_end();
+    if !matches!(kind, "claude" | "codex") || t.trim_start().starts_with('│') {
+        return trimmed;
+    }
+    t.strip_prefix("  ").unwrap_or(t.trim_start()).to_string()
+}
+
 fn composer_text_rows(kind: &str, screen: &str, keep_blank_rows: bool) -> Option<String> {
     let plain = plain_without_hints(kind, screen);
     let screen = plain.as_str();
@@ -443,7 +454,7 @@ fn composer_text_rows(kind: &str, screen: &str, keep_blank_rows: bool) -> Option
     let mut out: Vec<String> = Vec::new();
     for (n, line) in tail[idx..].iter().enumerate() {
         let row = undecorate_row(line);
-        let body = if n == 0 { row[marker.len()..].trim().to_string() } else { row };
+        let body = if n == 0 { row[marker.len()..].trim().to_string() } else { continuation_body(kind, line, row) };
         if n > 0 && ((body.is_empty() && !keep_blank_rows) || is_box_rule(&body) || is_box_bottom(&body)) {
             break;
         }
@@ -521,5 +532,11 @@ mod composer_draft_shape_tests {
     fn a_draft_line_that_looks_like_a_rule_is_draft_text() {
         let screen = "────────\n❯ 第一段\n  ---\n  第三段\n────────\n  host | pt | 5h:96%\n";
         assert_eq!(composer_text_whole("claude", screen).as_deref(), Some("第一段\n---\n第三段"));
+    }
+
+    #[test]
+    fn a_continuation_keeps_the_users_own_indentation() {
+        let screen = "────────\n❯ 第一段\n      縮排的程式\n────────\n  host | pt | 5h:96%\n";
+        assert_eq!(composer_text_whole("claude", screen).as_deref(), Some("第一段\n    縮排的程式"));
     }
 }
