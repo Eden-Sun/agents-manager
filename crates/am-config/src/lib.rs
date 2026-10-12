@@ -1333,11 +1333,14 @@ impl ConfigStore {
         G: FnOnce(&ConfigFile) -> Result<()>,
     {
         let mut g = self.inner.lock().await;
+        // 讀進來的磁碟內容（寫之前拿來比對、也是合併的底稿）；檔案不存在時是 `None`。
+        let mut base: Option<String> = None;
         if self.path.exists() {
             // Always merge from the current file: filesystems can preserve/coarsen mtimes, so
             // comparing metadata alone can miss a completed external atomic replacement.
             let on_disk = std::fs::read_to_string(&self.path)
                 .context("config.toml changed on disk and could not be re-read")?;
+            base = Some(on_disk.clone());
             #[cfg(test)]
             AFTER_DISK_READ.with(|hook| {
                 if let Some(hook) = hook.borrow().as_ref() {
@@ -1375,7 +1378,11 @@ impl ConfigStore {
         guard(&next)?;
         // 沒變就不寫（issue #38）；有變的話 `write_atomic` 就地改、保留註解與未知鍵。
         if next != g.cfg {
-            write_atomic(&self.path, &next)?;
+            // 寫之前確認磁碟還是我們讀到的那一份：closure 與驗證都跑過了，這中間有手改就不寫、回錯誤請呼叫端重試（#1612）。
+            if std::fs::read_to_string(&self.path).ok() != base {
+                anyhow::bail!("config.toml changed on disk while it was being updated; nothing was written, retry the change");
+            }
+            write_atomic_over(&self.path, base.as_deref(), &next)?;
             g.mtime = std::fs::metadata(&self.path).ok().and_then(|m| m.modified().ok());
             g.hot_fingerprint = std::fs::read_to_string(&self.path).ok().map(|text| config_fingerprint(&text));
             g.hot_read_error = None;
@@ -1451,18 +1458,33 @@ fn config_fingerprint(text: &str) -> [u8; 32] {
 /// 重開機看到的是一個空檔，而 daemon 看到空 config 會把它當成全新安裝。權限：暫存檔一開始就是 0600（不是先照 umask 寫出
 /// 0644 的內容、再 chmod），再套上原檔的 mode；原檔不存在（第一次寫預設設定）就維持 0600。
 pub fn write_atomic(path: &Path, cfg: &ConfigFile) -> Result<()> {
-    use std::io::Write as _;
+    let target = resolve_write_target(path)?;
+    let base = std::fs::read_to_string(&target).ok();
+    write_resolved(&target, base.as_deref(), cfg)
+}
+
+/// 同 [`write_atomic`]，但合併的底稿是呼叫端剛讀到的那一份（`None`＝讀的時候檔案還不存在）。
+/// `update_guarded_at` 用它：寫的時候不再重讀，否則讀與寫之間的手改會被合併時換回舊值（#1612）。
+pub(crate) fn write_atomic_over(path: &Path, base: Option<&str>, cfg: &ConfigFile) -> Result<()> {
+    write_resolved(&resolve_write_target(path)?, base, cfg)
+}
+
+fn resolve_write_target(path: &Path) -> Result<PathBuf> {
     // 檔案還不存在（`read_file` 第一次寫預設設定）時 canonicalize 會失敗：那就照原路徑建。
-    let target = match std::fs::canonicalize(path) {
-        Ok(target) => target,
+    match std::fs::canonicalize(path) {
+        Ok(target) => Ok(target),
         Err(_) if unresolvable_symlink(path) => {
             anyhow::bail!("{} 是解析不了的 symlink：拒絕用預設設定蓋掉它（先把連結的目標放回來）", path.display());
         }
-        Err(_) => path.to_path_buf(),
-    };
-    let text = match std::fs::read_to_string(&target) {
-        Ok(old) => render_preserving(&old, cfg)?,
-        Err(_) => toml::to_string_pretty(cfg)?,
+        Err(_) => Ok(path.to_path_buf()),
+    }
+}
+
+fn write_resolved(target: &Path, base: Option<&str>, cfg: &ConfigFile) -> Result<()> {
+    use std::io::Write as _;
+    let text = match base {
+        Some(old) => render_preserving(old, cfg)?,
+        None => toml::to_string_pretty(cfg)?,
     };
     let nonce = SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_nanos();
     let tmp = target.with_extension(format!("toml.{}.{}.tmp", std::process::id(), nonce));
@@ -2362,9 +2384,27 @@ model = "gpt-6"
         assert_ne!(store.get().await.server.herdr_session, "from-blank");
     }
 
+    /// 手改發生在 daemon 讀完檔、寫回之前：寫回不能靜默蓋掉那次手改（寫回時會再讀一次、用它合併，所以以前會把手改換成舊值）。
+    #[tokio::test(flavor = "current_thread")]
+    async fn an_external_edit_that_lands_during_an_update_is_not_overwritten() {
+        let (store, path) = store_with("[server]\nlisten = '127.0.0.1:7788'\nherdr_session = 'before'\n").await;
+        AFTER_DISK_READ.with(|hook| {
+            *hook.borrow_mut() = Some(Box::new(|p| {
+                std::fs::write(p, "[server]\nlisten = '127.0.0.1:7788'\nherdr_session = 'external'\n").unwrap();
+            }));
+        });
+        let result = store.update(|cfg| {
+            cfg.server.listen = "127.0.0.1:8899".into();
+            Ok(())
+        }).await;
+        AFTER_DISK_READ.with(|hook| *hook.borrow_mut() = None);
+        let text = std::fs::read_to_string(&path).unwrap();
+        assert!(text.contains("herdr_session = 'external'") || text.contains("herdr_session = \"external\""), "手改被蓋掉了（update 結果：{result:?}）：\n{text}");
+    }
+
     #[tokio::test(flavor = "current_thread")]
     async fn a_file_truncated_right_after_the_read_does_not_become_the_config() {
-        let (store, _) = store_with(HAND_WRITTEN).await;
+        let (store, path) = store_with(HAND_WRITTEN).await;
         let observed_projects = std::cell::Cell::new(usize::MAX);
         AFTER_DISK_READ.with(|hook| {
             *hook.borrow_mut() = Some(Box::new(|path| std::fs::write(path, "").unwrap()));
@@ -2377,6 +2417,8 @@ model = "gpt-6"
         AFTER_DISK_READ.with(|hook| *hook.borrow_mut() = None);
 
         result.unwrap();
+        // 這次更新沒有改任何東西（不寫檔），磁碟上的空檔也不能被換成舊內容（#1612 的寫入路徑另有測試）。
+        assert!(std::fs::read_to_string(&path).unwrap().trim().is_empty(), "空檔不能被蓋掉");
         assert_eq!(observed_projects.get(), 1, "套用的對象應是剛讀到的那一份");
         assert_eq!(store.get().await.projects.len(), 1, "空檔不可把記憶體設定換成預設值");
     }
