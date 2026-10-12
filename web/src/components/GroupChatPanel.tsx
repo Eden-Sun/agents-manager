@@ -1,7 +1,8 @@
 import { useEffect, useId, useMemo, useRef, useState } from 'react'
 import type { RefObject } from 'react'
 import { useShallow } from 'zustand/react/shallow'
-import { parseMentions, stripMentionsOf } from '../api/mentions'
+import { parseMentions } from '../api/mentions'
+import { applyRecipients, hasAllMention, stripMentions } from '../lib/groupRecipients'
 import type { Bot, GroupMessage } from '../api/types'
 import { useScrollTail } from '../hooks/useScrollTail'
 import { attachCommandOf, composerState, groupComposerState, projectHostName, useStore } from '../store/store'
@@ -38,29 +39,6 @@ import { StatusLamp } from './StatusLamp'
 import './groupChatPanel.css'
 
 /** SPEC §13 project group chat: timeline merges every member bot's conversation; `@<bot>` / `@all` picks recipients. */
-
-const MENTION_RE = /(^|[^\p{L}\p{N}_])@([^\s@,:;?!。，、！？()（）[\]{}<>"']+)/gu
-
-/** Strip @mentions so chip selection can rewrite the recipient prefix. */
-function stripMentions(text: string, names: string[]): string {
-  // 名字有空白的先整段拿掉，不然 `@my bot` 只會拿掉 `@my`，`bot` 留在內文（2026-09-19）。
-  return stripMentionsOf(text, names).replace(MENTION_RE, '$1').replace(/[ \t]{2,}/g, ' ').replace(/^\s+/, '')
-}
-
-function hasAllMention(text: string): boolean {
-  for (const m of text.matchAll(MENTION_RE)) {
-    if (m[2].toLowerCase() === 'all') return true
-  }
-  return false
-}
-
-function applyRecipients(text: string, mode: 'all' | string[], names: string[]): string {
-  const body = stripMentions(text, names)
-  if (mode === 'all') return body ? `@all ${body}` : '@all '
-  if (mode.length === 0) return body
-  const prefix = mode.map((n) => `@${n}`).join(' ')
-  return body ? `${prefix} ${body}` : `${prefix} `
-}
 
 type Row =
   | { key: string; kind: 'user'; msg: GroupMessage; targets: string[] }
