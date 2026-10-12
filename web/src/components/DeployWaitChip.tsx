@@ -19,15 +19,26 @@ export function DeployWaitChip() {
   const [busy, setBusy] = useState(false)
   const [now, setNow] = useState(() => Date.now())
   const wrap = useRef<HTMLSpanElement>(null)
+  const chip = useRef<HTMLButtonElement>(null)
+  const pop = useRef<HTMLDivElement>(null)
 
   useEffect(() => {
     const t = setInterval(() => setNow(Date.now()), 30_000)
     return () => clearInterval(t)
   }, [])
+  // 打開：焦點進浮層（role=dialog 要有人接住焦點）。
+  useEffect(() => {
+    if (open) pop.current?.focus({ preventScroll: true })
+  }, [open])
   useEffect(() => {
     if (!open) return
     const close = (e: MouseEvent) => !wrap.current?.contains(e.target as Node) && setOpen(false)
-    const esc = (e: KeyboardEvent) => e.key === 'Escape' && setOpen(false)
+    // 焦點在浮層裡時 Esc 收起，焦點回徽章鈕，不掉到 body（同 JudgeBadge）。
+    const esc = (e: KeyboardEvent) => {
+      if (e.key !== 'Escape') return
+      if (pop.current?.contains(document.activeElement)) chip.current?.focus()
+      setOpen(false)
+    }
     document.addEventListener('mousedown', close)
     document.addEventListener('keydown', esc)
     return () => {
@@ -56,6 +67,7 @@ export function DeployWaitChip() {
   return (
     <span className="deploy-wait" ref={wrap}>
       <button
+        ref={chip}
         type="button"
         className="deploy-wait-chip"
         aria-haspopup="dialog"
@@ -67,7 +79,7 @@ export function DeployWaitChip() {
         ⏳ 部署等 {mins} 分
       </button>
       {open ? (
-        <div className="deploy-wait-pop" role="dialog" aria-label="部署等換版窗口">
+        <div ref={pop} tabIndex={-1} className="deploy-wait-pop" role="dialog" aria-label="部署等換版窗口">
           <p>
             要上 <code>{wait.commit.slice(0, 8)}</code>，已等 <strong>{mins}</strong> 分鐘。
           </p>
