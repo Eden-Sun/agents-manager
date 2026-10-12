@@ -361,6 +361,8 @@ pub const SCHEMA_HISTORY: &[(i64, &str)] = &[
     (55, "3337f703704eed22"),
     // issue #1427：`remote_restore_backoff`（補還原失敗的退避：每 (主機, bot) 的連續失敗次數與下次可試的時間）。
     (56, "08b0bd7b0cd32821"),
+    // issue #1482：`turns.claimed_from_queue` separates a claimed queued prompt from a direct prompt while both are pending.
+    (57, "97ff8e05ebd65f0c"),
 ];
 pub const SCHEMA_VERSION: i64 = SCHEMA_HISTORY[SCHEMA_HISTORY.len() - 1].0;
 
@@ -519,6 +521,9 @@ async fn apply_migrations_inner(pool: &SqlitePool, fail_after_spawn_hints_drop: 
         // 能不能自動重送，與「有沒有證據」分開（AGM 2026-09-16）。既有列給 1＝維持今天的行為：
         // 舊的 unverified 列早就把 resend_count 頂到上限，照樣不會被重送。
         ("turns", "auto_resend", "ALTER TABLE turns ADD COLUMN auto_resend INTEGER NOT NULL DEFAULT 1"),
+        // The pending direct-prompt INSERT and a claimed queued prompt have the same delivery and resend fields;
+        // retain the queue transition source so interrupt arrival can tell them apart.
+        ("turns", "claimed_from_queue", "ALTER TABLE turns ADD COLUMN claimed_from_queue INTEGER NOT NULL DEFAULT 0"),
         ("turns", "rollout_waits", "ALTER TABLE turns ADD COLUMN rollout_waits INTEGER NOT NULL DEFAULT 0"),
         ("turns", "rollout_wait_key", "ALTER TABLE turns ADD COLUMN rollout_wait_key TEXT"),
         // 第一次記下送達結果的時間（`prompt::mark_delivery`）。排隊的 turn 的 `created_at` 是**排進佇列**的時間，
@@ -1240,6 +1245,10 @@ pub struct Turn {
     /// 真的讀不到這一欄時（理論上不會，migrate 先跑）退成 0＝不重送，寧可少送不要重複送。
     #[sqlx(default)]
     pub auto_resend: i64,
+    /// 1 = this in-flight prompt was claimed from the queue; unlike a direct prompt it may still be hidden while delivery is pending.
+    #[sqlx(default)]
+    #[serde(skip_serializing)]
+    pub claimed_from_queue: i64,
     /// Times a queued prompt was put back because it could not be typed yet.
     #[sqlx(default)]
     #[serde(skip_serializing)]

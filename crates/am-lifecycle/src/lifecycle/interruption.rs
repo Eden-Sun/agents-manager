@@ -898,19 +898,34 @@ mod tests {
     async fn an_interrupt_that_arrived_while_a_queued_prompt_was_being_typed_does_not_hit_it() {
         let b = busy("esc-claimed-typing").await;
         let app = b.env.app.clone();
-        sqlx::query("UPDATE turns SET delivery='pending', auto_resend=0 WHERE id=?").bind(&b.turn).execute(app.db()).await.unwrap();
-        let (turn, db_app) = (b.turn.clone(), app.clone());
+        let conv = db::conversation_id(app.db(), &b.bot.id).await.unwrap();
+        sqlx::query("UPDATE turns SET status='completed' WHERE id=?").bind(&b.turn).execute(app.db()).await.unwrap();
+        let turn = db::ulid();
+        sqlx::query(
+            "INSERT INTO turns (id, conversation_id, origin, status, delivery, created_at, prompt_text)
+             VALUES (?,?,'web','queued','pending',?,'排隊的 prompt')",
+        )
+        .bind(&turn)
+        .bind(&conv)
+        .bind(db::now())
+        .execute(app.db())
+        .await
+        .unwrap();
+        let mut conn = app.db().acquire().await.unwrap();
+        assert_eq!(super::turn_controller::claim_queued(&mut conn, &turn, &b.run).await.unwrap(), super::turn_controller::Outcome::Applied);
+        drop(conn);
+        let (queued_turn, db_app) = (turn.clone(), app.clone());
         crate::lifecycle::race_point::arm("interrupt_after_arrival", &b.bot.id, move || async move {
-            sqlx::query("UPDATE turns SET delivery='ok' WHERE id=?").bind(&turn).execute(db_app.db()).await.unwrap();
+            sqlx::query("UPDATE turns SET delivery='ok' WHERE id=?").bind(&queued_turn).execute(db_app.db()).await.unwrap();
         });
 
         let err = interrupt_bot(&app, &b.bot.id).await.expect_err("到達時它還在打字，不是使用者看到在跑的那一筆");
         let LcError::Conflict(body) = err else { panic!("{err:?}") };
         assert_eq!(body["reason"], "turn_not_in_flight", "{body}");
         assert!(body["turn_id"].is_null(), "{body}");
-        assert_eq!(body["in_flight_turn_id"], b.turn.as_str(), "{body}");
+        assert_eq!(body["in_flight_turn_id"], turn.as_str(), "{body}");
         assert_eq!(escs(&b.env), 0);
-        assert_eq!(status_of(&app, &b.turn).await, "in_flight");
+        assert_eq!(status_of(&app, &turn).await, "in_flight");
     }
 
     /// 反面一：直接送出、還在打字的回合（`auto_resend` 還是預設的 1）是使用者剛送的那一則，照舊可以打斷。
@@ -923,6 +938,86 @@ mod tests {
         interrupt_bot(&app, &b.bot.id).await.expect("照舊打斷");
         assert_eq!(escs(&b.env), 1);
         assert_eq!(status_of(&app, &b.turn).await, "failed");
+    }
+
+    /// issue #1482：走真正的 `prompt` INSERT，並在 `delivery='pending', auto_resend=0` 還沒開始打字時
+    /// 記到 interrupt 的到達快照。送出路徑放行後，interrupt 拿到 bot 鎖仍應打斷同一筆。
+    #[tokio::test]
+    async fn a_direct_prompt_at_its_insert_state_can_be_interrupted() {
+        let env = tt::env().await;
+        let app = env.app.clone();
+        let bot = tt::claude_bot(&app, &env.project_id, "esc-direct-insert-state").await;
+        let run = tt::fake_run(&app, &bot.id).await;
+        env.herdr.set_agent("agent", &format!("pane-{}", bot.id), true);
+
+        let (prompt_at_typing_tx, prompt_at_typing_rx) = tokio::sync::oneshot::channel();
+        let (resume_prompt_tx, resume_prompt_rx) = tokio::sync::oneshot::channel();
+        crate::lifecycle::race_point::arm("prompt_before_typing", &bot.id, move || async move {
+            let _ = prompt_at_typing_tx.send(());
+            let _ = resume_prompt_rx.await;
+        });
+        let prompt_app = app.clone();
+        let prompt_bot = bot.id.clone();
+        let prompt = tokio::spawn(async move {
+            super::prompt::prompt(&prompt_app, &prompt_bot, "直接送出的那一則", "issue-1482-direct").await
+        });
+        prompt_at_typing_rx.await.expect("direct prompt reached the pre-typing point");
+
+        let turn: db::Turn = sqlx::query_as("SELECT * FROM turns WHERE client_request_id='issue-1482-direct'")
+            .fetch_one(app.db())
+            .await
+            .unwrap();
+        assert_eq!((turn.status.as_str(), turn.delivery.as_str(), turn.auto_resend), ("in_flight", "pending", 0), "must be the production direct-prompt INSERT state");
+
+        let (interrupt_at_arrival_tx, interrupt_at_arrival_rx) = tokio::sync::oneshot::channel();
+        let (resume_interrupt_tx, resume_interrupt_rx) = tokio::sync::oneshot::channel();
+        crate::lifecycle::race_point::arm("interrupt_after_arrival", &bot.id, move || async move {
+            let _ = interrupt_at_arrival_tx.send(());
+            let _ = resume_interrupt_rx.await;
+        });
+        let interrupt_app = app.clone();
+        let interrupt_bot_id = bot.id.clone();
+        let interrupt = tokio::spawn(async move { interrupt_bot(&interrupt_app, &interrupt_bot_id).await });
+        interrupt_at_arrival_rx.await.expect("interrupt captured its arrival snapshot");
+
+        let _ = resume_prompt_tx.send(());
+        let sent = prompt.await.unwrap().expect("mock delivery returns a recorded turn");
+        assert_eq!(sent.turn_id, turn.id);
+        assert_eq!(db::active_run(app.db(), &bot.id).await.unwrap().unwrap().id, run);
+
+        let _ = resume_interrupt_tx.send(());
+        interrupt.await.unwrap().expect("the same direct turn is still what the user meant to interrupt");
+        assert_eq!(escs(&env), 1);
+        assert_eq!(status_of(&app, &turn.id).await, "failed");
+    }
+
+    async fn an_unreadable_arrival_snapshot_fails_closed(table: &'static str, name: &str) {
+        let b = busy(name).await;
+        let app = b.env.app.clone();
+        tt::make_table_unreadable(&app, table).await;
+        let restore_app = app.clone();
+        let restore_table = table;
+        let bot_id = b.bot.id.clone();
+        crate::lifecycle::race_point::arm("interrupt_after_arrival", &bot_id, move || async move {
+            tt::make_table_readable(&restore_app, restore_table).await;
+        });
+
+        let result = interrupt_bot(&app, &b.bot.id).await;
+        // A fail-closed implementation returns before this point; consume the hook here to restore
+        // the test DB. The old fail-open implementation consumes it inside interrupt_bot instead.
+        crate::lifecycle::race_point::hit("interrupt_after_arrival", &b.bot.id).await;
+        let err = result.expect_err("unreadable arrival state must produce a retryable error before Esc");
+        let LcError::Unavailable(body) = err else { panic!("the arrival snapshot needs an explicit 503: {err:?}") };
+        assert_eq!(body["error"], "interrupt_state_unavailable", "{body}");
+        assert_eq!((body["retryable"].as_bool(), body["sent"].as_bool()), (Some(true), Some(false)), "{body}");
+        assert_eq!(escs(&b.env), 0, "a failed arrival read must never authorize Esc");
+        assert_eq!(status_of(&app, &b.turn).await, "in_flight");
+    }
+
+    #[tokio::test]
+    async fn unreadable_run_or_turn_arrival_snapshot_never_sends_esc() {
+        an_unreadable_arrival_snapshot_fails_closed("runs", "esc-arrival-run-unreadable").await;
+        an_unreadable_arrival_snapshot_fails_closed("turns", "esc-arrival-turn-unreadable").await;
     }
 
     /// 反面二：到達時沒有在飛的回合，之後才冒出來的是 CLI 自己開的外部回合（畫面上本來就在跑）——照舊打斷它。
