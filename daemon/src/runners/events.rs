@@ -1047,6 +1047,57 @@ mod tests {
         assert!(!detection_wants_reconcile(&app, LOCAL_HOST, "test", &detected("w-probe")).await, "剛結束：退出的偵測事件還會晚幾秒到，也不對帳");
     }
 
+    /// issue #1472：herdr 沒有「agent 改名」事件，唯一的觸發點是 `pane.agent_detected`。無名 agent 被偵測到時（事件資料裡本來就沒有名字）
+    /// 不能被 `detection_wants_reconcile` 擋掉：兩秒後對帳就要走到「補名字＋認領」，不用等下次偵測或重啟。
+    #[tokio::test]
+    async fn an_unnamed_agent_detected_is_renamed_and_adopted_by_the_reconcile_it_triggers() {
+        let e = tt::env().await;
+        let app = e.app.clone();
+        let client = crate::herdr::HerdrClient::new(e.dir.join("data/herdr.sock"));
+        let (ws, root) = client.workspace_create("/tmp/p", "proj", serde_json::json!({})).await.unwrap();
+        let parent = tt::claude_bot(&app, &e.project_id, "alfa").await;
+        let parent_agent = crate::config::agent_name("proj", &parent.id);
+        sqlx::query(
+            "INSERT INTO runs (id, bot_id, state, agent_status, workspace_id, pane_id, tab_id, agent_name, herdr_session, started_at)
+             VALUES (?,?,'running','idle',?,?,?,?,'test',?)",
+        )
+        .bind(crate::db::ulid())
+        .bind(&parent.id)
+        .bind(&ws.workspace_id)
+        .bind(&root.pane_id)
+        .bind(&root.tab_id)
+        .bind(&parent_agent)
+        .bind(crate::db::now())
+        .execute(&app.db)
+        .await
+        .unwrap();
+        let split = client.pane_split(&root.pane_id, "down", "/tmp/p", serde_json::json!({})).await.unwrap();
+        crate::spawn_hints::record(&app, &parent.id, &split.pane_id).await.unwrap();
+        e.herdr.set_argv(&split.pane_id, &["claude", "--name", &format!("{parent_agent}-om-fix")]);
+        let agent = |name: Option<&str>, pane: &crate::herdr::PaneInfo| {
+            serde_json::json!({"name": name, "agent": "claude", "agent_status": "idle", "workspace_id": pane.workspace_id,
+                               "tab_id": pane.tab_id, "pane_id": pane.pane_id, "cwd": "/tmp/p"})
+        };
+        *e.herdr.agents.lock().unwrap() = vec![agent(Some(&parent_agent), &root), agent(None, &split)];
+
+        // herdr 的偵測事件不帶名字：只有 agent 種類、pane、workspace。
+        let data = serde_json::json!({"agent": "claude", "pane_id": split.pane_id, "workspace_id": split.workspace_id});
+        assert!(detection_wants_reconcile(&app, LOCAL_HOST, "test", &data).await, "無名 agent 的偵測事件照樣對帳");
+        handle_global(&app, LOCAL_HOST, "test", &crate::herdr::Event { event: "pane_agent_detected".into(), data }).await;
+
+        let adopted = crate::testing::eventually!({
+            let n: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM runs WHERE agent_name = ? AND state = 'running'")
+                .bind(format!("{parent_agent}-om-fix"))
+                .fetch_one(&app.db)
+                .await
+                .unwrap();
+            n == 1
+        });
+        assert!(adopted, "偵測事件之後的對帳要補上名字並認領");
+        let parent_of: Option<String> = sqlx::query_scalar("SELECT parent_bot_id FROM bots WHERE name = 'om-fix'").fetch_one(&app.db).await.unwrap();
+        assert_eq!(parent_of.as_deref(), Some(parent.id.as_str()));
+    }
+
     fn close_event(pane: &str) -> crate::herdr::Event {
         crate::herdr::Event { event: "pane.closed".into(), data: json!({"pane_id": pane}) }
     }
