@@ -1004,11 +1004,12 @@ pub async fn claim_resend(pool: &SqlitePool, turn_id: &str, max: i64) -> Result<
 /// 退還一次重送額度。只有在**確定一個位元組都沒寫進 pane** 時才准叫（`Delivered::NotAttempted`
 /// 的契約）：把「試過但被當下就消失的原因擋掉」算成「送過一次」，等於讓唯一一次補救機會白白蒸發
 /// （review 2026-09-16）。
-pub async fn refund_resend(pool: &SqlitePool, turn_id: &str) {
-    let _ = sqlx::query("UPDATE turns SET resend_count = resend_count - 1 WHERE id = ? AND resend_count > 0")
+pub async fn refund_resend(pool: &SqlitePool, turn_id: &str) -> Result<()> {
+    sqlx::query("UPDATE turns SET resend_count = resend_count - 1 WHERE id = ? AND resend_count > 0")
         .bind(turn_id)
         .execute(pool)
-        .await;
+        .await?;
+    Ok(())
 }
 
 /// 時間戳的**唯一**格式：RFC3339、UTC、固定到毫秒、以 `Z` 結尾（`2026-09-18T07:00:00.000Z`）。

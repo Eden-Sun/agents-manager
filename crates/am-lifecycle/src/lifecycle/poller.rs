@@ -820,6 +820,8 @@ enum Resend {
     UnprovenOwed(&'static str),
     /// 判斷要不要重送的狀態讀不到（DB，#193）：這一輪不知道，不能當成「不必重送」接著判失敗。
     Unreadable,
+    /// 一個字都沒打，但退款寫不進去；下輪先補退款再認領。
+    RefundOwed,
 }
 
 fn resend_unreadable(turn_id: &str, e: &anyhow::Error) -> Resend {
@@ -893,7 +895,10 @@ async fn resend_lost_prompt(app: &impl LcHost, run_id: &str, turn_id: &str, sent
         Ok(Delivered::NotAttempted { reason, retry }) => {
             // 一個字都沒寫進去（`NotAttempted` 的契約），所以這次不該算進唯一一次重送額度：
             // 擋下它的原因（框裡剛好有字）通常兩秒後就消失了——呼叫端（`arm_stall`）會再試一次。
-            db::refund_resend(app.db(), turn_id).await;
+            if let Err(e) = db::refund_resend(app.db(), turn_id).await {
+                resend_unreadable(turn_id, &e);
+                return Resend::RefundOwed;
+            }
             tracing::warn!(run_id, turn = %turn_id, reason, "re-delivery was not attempted; the resend budget is given back");
             Resend::Blocked { reason, retry }
         }
@@ -988,7 +993,7 @@ async fn resend_with_retry(
                     break;
                 }
             }
-            Resend::Skipped | Resend::Unproven | Resend::UnprovenOwed(_) | Resend::Unreadable => return Some((last, blocked)),
+            Resend::Skipped | Resend::Unproven | Resend::UnprovenOwed(_) | Resend::Unreadable | Resend::RefundOwed => return Some((last, blocked)),
         }
     }
     Some((last, blocked))
@@ -1046,13 +1051,14 @@ struct Stall {
     blocked: Option<&'static str>,
     /// 重送打過字、`delivery='unknown'` 卻寫不進去（[`Resend::UnprovenOwed`]）：每一輪先補，補上之前不判失敗。
     owed_unproven: Option<&'static str>,
+    owed_refund: bool,
 }
 
 #[derive(Debug, PartialEq, Eq)]
 enum StallRound {
     /// 計時器被換掉（新的回合、取消）：停手，什麼都不動。
     Replaced,
-    /// 有一步讀不到、判斷不了（#193）：不判失敗，隔 [`STALL_RECHECK`] 整輪再看。
+    /// 有一步讀寫失敗、判斷不了（#193、#1487）：不判失敗，隔 [`STALL_RECHECK`] 整輪再看。
     Unsure,
     Done,
 }
@@ -1082,6 +1088,13 @@ async fn stall_round(
         let _g = lock.lock().await;
         if app.stall_timers().lock().await.get(run_id) != Some(&generation) {
             return StallRound::Replaced;
+        }
+        if st.owed_refund {
+            if let Err(e) = db::refund_resend(app.db(), turn_id).await {
+                stall_unsure(turn_id, &e);
+                return StallRound::Unsure;
+            }
+            st.owed_refund = false;
         }
         match nudge_if_unsent(app, run_id, turn_id, &mut st.sent).await {
             Ok(n) => st.nudged |= n,
@@ -1113,6 +1126,10 @@ async fn stall_round(
             Resend::Sent => resent_now = true,
             Resend::UnprovenOwed(why) => st.owed_unproven = Some(why),
             Resend::Unreadable => unsure = true,
+            Resend::RefundOwed => {
+                st.owed_refund = true;
+                unsure = true;
+            }
             Resend::Skipped | Resend::Unproven | Resend::Blocked { .. } => {}
         }
         st.resent = resent_now;
@@ -1152,6 +1169,7 @@ async fn stall_round(
     }
     if let Err(e) = fail_stalled_turn(app, run_id, bot_id, turn_id, st.nudged, st.resent, st.blocked).await {
         tracing::warn!(error = ?e, "stall watchdog failed");
+        return StallRound::Unsure;
     }
     StallRound::Done
 }
@@ -3037,6 +3055,53 @@ mod issue_17_tests {
         let t = turn(&app, &f.turn_id).await;
         assert_eq!((t.status.as_str(), t.delivery.as_str()), ("in_flight", "unknown"), "補上了：送達不明，不判失敗");
         assert_eq!(count(&f, "pane.send_text"), 1, "不重打第二次");
+    }
+
+    #[tokio::test]
+    async fn stall_write_failure_keeps_watchdog_until_transaction_commits() {
+        let f = fixture("claude", "not logged in\n").await;
+        let app = f.env.app.clone();
+        app.stall_timers.lock().await.insert(f.run_id.clone(), 1487);
+        sqlx::query("CREATE TRIGGER refuse_stall_message BEFORE INSERT ON messages WHEN NEW.role='system' BEGIN SELECT RAISE(ABORT, 'injected stall write failure'); END")
+            .execute(&app.db).await.unwrap();
+        let mut st = Stall { resent: true, ..Stall::default() };
+        assert_eq!(stall_round(&app, &f.run_id, &f.bot_id, &f.turn_id, 1487, &mut st, Duration::ZERO).await, StallRound::Unsure);
+        assert_eq!(turn(&app, &f.turn_id).await.status, "in_flight");
+        assert_eq!(app.stall_timers.lock().await.get(&f.run_id), Some(&1487));
+        sqlx::query("DROP TRIGGER refuse_stall_message").execute(&app.db).await.unwrap();
+        assert_eq!(stall_round(&app, &f.run_id, &f.bot_id, &f.turn_id, 1487, &mut st, Duration::ZERO).await, StallRound::Done);
+        assert_eq!(turn(&app, &f.turn_id).await.status, "failed");
+        let n: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM messages WHERE turn_id=? AND role='system'")
+            .bind(&f.turn_id).fetch_one(&app.db).await.unwrap();
+        assert_eq!(n, 1);
+    }
+
+    #[tokio::test]
+    async fn stall_refund_failure_keeps_watchdog_and_restores_unused_budget() {
+        let f = fixture("claude", "").await;
+        live(&f, crate::testing::LivePane { transcript: vec!["⏺ 先前的回覆".into()], no_spinner: true, ..wide() });
+        let app = f.env.app.clone();
+        app.stall_timers.lock().await.insert(f.run_id.clone(), 1487);
+        sqlx::query("CREATE TRIGGER refuse_pane_marker BEFORE UPDATE OF pane_typed ON runs BEGIN SELECT RAISE(ABORT, 'injected before typing'); END")
+            .execute(&app.db).await.unwrap();
+        sqlx::query("CREATE TRIGGER refuse_refund BEFORE UPDATE OF resend_count ON turns WHEN NEW.resend_count < OLD.resend_count BEGIN SELECT RAISE(ABORT, 'injected refund failure'); END")
+            .execute(&app.db).await.unwrap();
+        let mut st = Stall::default();
+        for _ in 0..2 {
+            let result = stall_round(&app, &f.run_id, &f.bot_id, &f.turn_id, 1487, &mut st, Duration::ZERO).await;
+            let budget: i64 = sqlx::query_scalar("SELECT resend_count FROM turns WHERE id=?")
+                .bind(&f.turn_id).fetch_one(&app.db).await.unwrap();
+            assert_eq!(budget, 1, "認領成功，但退款仍欠著");
+            assert_eq!(result, StallRound::Unsure);
+            assert_eq!(turn(&app, &f.turn_id).await.status, "in_flight");
+            assert_eq!(count(&f, "pane.send_text"), 0);
+            assert_eq!(count(&f, "agent.prompt"), 0);
+        }
+        sqlx::query("DROP TRIGGER refuse_refund").execute(&app.db).await.unwrap();
+        sqlx::query("DROP TRIGGER refuse_pane_marker").execute(&app.db).await.unwrap();
+        assert_eq!(stall_round(&app, &f.run_id, &f.bot_id, &f.turn_id, 1487, &mut st, Duration::ZERO).await, StallRound::Done);
+        assert_eq!(count(&f, "pane.send_text"), 1);
+        assert!(!db::claim_resend(&app.db, &f.turn_id, MAX_PROMPT_RESENDS).await.unwrap());
     }
 
     /// #193：期限那一輪讀不到送了什麼——以前當成什麼都沒送：框裡的字不補 Enter、沒到的不重送，接著判失敗。
