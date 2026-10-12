@@ -106,6 +106,7 @@ import { writeShared } from './mobilePreview'
 import { BOT_KINDS, LOCAL_HOST, quotaKey } from '../api/types'
 import { supervisorOwnedAsk, type AgmDeleteAsk } from '../lib/agmDelete'
 import { handedOffReason, handedOffTo } from '../lib/handoff'
+import { pruneStoredIds } from '../lib/storedIds'
 
 const sendMissionRequest = missionRequests(api.newClientRequestId)
 const missionLoads = new Map<string, () => Promise<void>>()
@@ -1501,6 +1502,7 @@ export const useStore = create<StoreState>((set, get) => {
   pruneDead: () => {
     const s = get()
     pruneStoreMemo(s)
+    pruneStoredIds({ botIds: s.bots.map((b) => b.id), projectIds: s.projects.map((p) => p.id) })
     const patch = pruneDeadKeys(s)
     if (!patch) return
     // 草稿另外有兩份外部帳：daemon 端的同步（`draftSync`）與 localStorage 的游標。
