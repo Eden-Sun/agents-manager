@@ -54,7 +54,18 @@ test('寫入兩邊都寫：分頁自己的（重整用）與共用的（新分�
   assert.doesNotThrow(() => writeTabValue('sel', 'bot:Z', [broken, ok]))
   assert.equal(ok.map.get('sel'), 'bot:Z')
 
+  // 清空：共用的移除；分頁自己的留下「清空」記號（讀得到就是沒有，不退回共用的）。
   writeTabValue('sel', null, [session, local])
-  assert.equal(session.map.has('sel'), false)
   assert.equal(local.map.has('sel'), false)
+  assert.equal(session.map.has('sel'), true)
+  assert.equal(readTabValue('sel', parseBot, [session, local]), null)
+})
+
+test('分頁自己清掉的值（例如關掉 shell）重整後不能退回別的分頁還在寫的共用值', () => {
+  // 分頁 A 關掉 shell：自己的值清掉、共用的也清掉；之後分頁 B 開了一個 shell，寫進共用的。
+  const session = fakeStore()
+  const local = fakeStore({ sel: 'bot:Y' })
+  writeTabValue('sel', null, [session, local])
+  local.setItem('sel', 'bot:Z')
+  assert.equal(readTabValue('sel', parseBot, [session, local]), null, '重整 A 不能跳到 B 的 Z')
 })
