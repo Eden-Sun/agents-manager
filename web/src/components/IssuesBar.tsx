@@ -13,6 +13,7 @@ import { ISSUE_PAGE_LIMIT, openCountFromPage } from '../lib/issueCount'
 import { onTabListKeyDown } from './tabKeys'
 import './issuesBar.css'
 import { safeHttpUrl } from '../lib/safeUrl'
+import { agoLabel } from '../lib/agoLabel'
 
 /** v4.0 GitHub issues (via `gh` on the daemon): search, open / closed toggle, insert into the composer. */
 
@@ -25,16 +26,6 @@ function readState(): IssueState {
   } catch {
     return 'open'
   }
-}
-
-function ago(iso: string): string {
-  const t = new Date(iso).getTime()
-  if (Number.isNaN(t)) return ''
-  const m = Math.max(0, Math.round((Date.now() - t) / 60000))
-  if (m < 60) return `${m} 分鐘前`
-  const h = Math.round(m / 60)
-  if (h < 48) return `${h} 小時前`
-  return `${Math.round(h / 24)} 天前`
 }
 
 function errorText(e: unknown): string {
@@ -306,7 +297,7 @@ export function IssuesBar({
                       ))}
                       {i.author ? <span className="issue-author">{i.author}</span> : null}
                       <span className="issue-time" title={i.updated_at}>
-                        {ago(i.updated_at)}
+                        {agoLabel(i.updated_at)}
                       </span>
                     </div>
                   </div>
