@@ -124,7 +124,7 @@ pub fn pick_sections(all: &[Section], from: Option<&str>, to: &str) -> Vec<Secti
 /// **磁碟上**的版本；跑著的 process 可能還是舊的，`update_watch` 靠這個差判斷有更新。
 pub async fn installed_version(app: &impl crate::hosts::HostsAccess, host: &str, kind: &str) -> Result<String> {
     let script = format!(
-        "{}; [ -n \"$p\" ] && \"$p\" --version 2>/dev/null </dev/null | head -1 | tr -d '\\r'",
+        "{}; printf 'AM_VER=%s\\n' \"$([ -n \"$p\" ] && \"$p\" --version 2>/dev/null </dev/null | head -1 | tr -d '\\r')\"",
         crate::tools::login_abs_sh(kind).trim_end()
     );
     let out = if host == LOCAL_HOST {
@@ -137,8 +137,9 @@ pub async fn installed_version(app: &impl crate::hosts::HostsAccess, host: &str,
         }
         conn.ssh_exec_path(&script).await?
     };
-    let line = out.lines().next().unwrap_or("").trim();
-    cli_version_string(line).ok_or_else(|| anyhow!("`{kind} --version` 回了「{line}」，看不出版本"))
+    // 只認腳本自己印的 `AM_VER=` 那一行：遠端 shell 的 banner、motd 夾在前面（或只剩 banner）時，第一行不是 CLI 的版本。
+    let line = out.lines().find_map(|l| l.split_once("AM_VER=").map(|(_, v)| v.trim())).unwrap_or("");
+    cli_version_string(line).ok_or_else(|| anyhow!("`{kind} --version` 回了「{}」，看不出版本", out.trim()))
 }
 
 /// 抓 feed 的網址與「是不是 codex releases JSON」。`release_triage` 的 CLI 是獨立行程，沒有 `App` 的快取可用。

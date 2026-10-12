@@ -118,3 +118,27 @@
         assert!(!r.sections[0].body.contains("Full Changelog"), "`## Changelog` 之後的 PR 流水帳不帶");
         assert!(r.sections[1].body.contains("Touch ID") && r.sections[1].body.contains("fixed x"), "{:?}", r.sections[1]);
     }
+
+    /// 遠端 shell 的 banner（`Ubuntu 22.04.3 LTS`）夾在版本前面：要取 CLI 自己那一行，不能把 banner 裡的 `22.04.3` 當成 claude 的版本。
+    #[tokio::test]
+    async fn an_installed_version_is_read_from_the_clis_own_line_not_a_banner() {
+        let host = "changelog-banner";
+        let env = crate::testing::env().await;
+        let cfg = crate::config::HostCfg { name: host.into(), ssh: host.into(), ssh_port: 22, ssh_opts: vec![], herdr_session: "agents-manager".into(), remote_path: String::new(), shared_session: false };
+        let conn = env.app.hosts.insert_remote_for_test(cfg).await;
+        conn.connected.store(true, std::sync::atomic::Ordering::SeqCst);
+        crate::hosts::set_ssh_fake(host, |_| Ok("Ubuntu 22.04.3 LTS\nAM_VER=2.1.288 (Claude Code)\n".into()));
+        assert_eq!(installed_version(&env.app, host, "claude").await.unwrap(), "2.1.288");
+    }
+
+    /// 沒有 CLI 的版本行（只剩 banner、或 `--version` 什麼都沒印）：不能把 banner 當成版本。
+    #[tokio::test]
+    async fn a_banner_without_the_clis_version_line_is_not_a_version() {
+        let host = "changelog-banner-only";
+        let env = crate::testing::env().await;
+        let cfg = crate::config::HostCfg { name: host.into(), ssh: host.into(), ssh_port: 22, ssh_opts: vec![], herdr_session: "agents-manager".into(), remote_path: String::new(), shared_session: false };
+        let conn = env.app.hosts.insert_remote_for_test(cfg).await;
+        conn.connected.store(true, std::sync::atomic::Ordering::SeqCst);
+        crate::hosts::set_ssh_fake(host, |_| Ok("Ubuntu 22.04.3 LTS\n".into()));
+        assert!(installed_version(&env.app, host, "claude").await.is_err());
+    }

@@ -116,7 +116,7 @@
             .await
             .unwrap();
 
-        let installed = Arc::new(std::sync::Mutex::new("2.2.0 (Claude Code)\n".to_string()));
+        let installed = Arc::new(std::sync::Mutex::new("AM_VER=2.2.0 (Claude Code)\n".to_string()));
         let probes = Arc::new(std::sync::atomic::AtomicUsize::new(0));
         let installed_for_ssh = installed.clone();
         let probes_for_ssh = probes.clone();
@@ -130,7 +130,7 @@
         assert!(cached_notice.contains("2.2.0"), "A 版本要進入 notice：{cached_notice}");
         assert_eq!(probes.load(std::sync::atomic::Ordering::SeqCst), 1);
 
-        *installed.lock().unwrap() = "2.0.0 (Claude Code)\n".to_string();
+        *installed.lock().unwrap() = "AM_VER=2.0.0 (Claude Code)\n".to_string();
         e.app.hosts.replace_remote_for_test(&e.app, remote_host_cfg(host, "target-b")).await;
         e.app.hosts.get(host).await.unwrap().connected.store(true, std::sync::atomic::Ordering::SeqCst);
         sweep(&e.app).await;
