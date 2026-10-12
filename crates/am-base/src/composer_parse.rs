@@ -358,6 +358,11 @@ pub fn prompt_suggestion(kind: &str, screen: &str) -> Option<String> {
     (!text.is_empty() && text.chars().count() <= SUGGESTION_MAX_CHARS).then_some(text)
 }
 
+/// 框的橫線：只由 `─`／`━` 組成的整行。ASCII 的 `---`、`===`、`___` 是草稿裡的 markdown 分隔線，不是框。
+fn is_box_rule(s: &str) -> bool {
+    !s.is_empty() && s.chars().all(|c| "─━".contains(c))
+}
+
 pub fn is_rule_row(s: &str) -> bool {
     !s.is_empty() && s.chars().all(|c| "─━-=_╭╮╰╯".contains(c))
 }
@@ -439,7 +444,7 @@ fn composer_text_rows(kind: &str, screen: &str, keep_blank_rows: bool) -> Option
     for (n, line) in tail[idx..].iter().enumerate() {
         let row = undecorate_row(line);
         let body = if n == 0 { row[marker.len()..].trim().to_string() } else { row };
-        if n > 0 && ((body.is_empty() && !keep_blank_rows) || is_rule_row(&body) || is_box_bottom(&body)) {
+        if n > 0 && ((body.is_empty() && !keep_blank_rows) || is_box_rule(&body) || is_box_bottom(&body)) {
             break;
         }
         out.push(body);
@@ -510,5 +515,11 @@ mod composer_draft_shape_tests {
     fn a_continuation_line_that_starts_with_the_glyph_is_draft_text() {
         let screen = "────────\n❯ 請執行\n  ❯ npm test\n  第三段\n────────\n  host | pt | 5h:96%\n";
         assert_eq!(composer_text_whole("claude", screen).as_deref(), Some("請執行\n❯ npm test\n第三段"));
+    }
+
+    #[test]
+    fn a_draft_line_that_looks_like_a_rule_is_draft_text() {
+        let screen = "────────\n❯ 第一段\n  ---\n  第三段\n────────\n  host | pt | 5h:96%\n";
+        assert_eq!(composer_text_whole("claude", screen).as_deref(), Some("第一段\n---\n第三段"));
     }
 }
