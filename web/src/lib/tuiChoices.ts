@@ -328,7 +328,9 @@ export function parseChoiceMenu(text: string | null | undefined): TuiChoiceMenu 
         break
       }
       if (idx + 1 === rows.length && indentOf(s) < 2) break
-      detail = joinWrapped(detail, s.trim())
+      // 並排版面：`(Recommended)` 是標籤折下來的另一行，前面要留空白（不能被 CJK 的 joinWrapped 黏死）。
+      const piece = s.trim()
+      detail = side && piece.startsWith('(') && detail ? `${detail} ${piece}` : joinWrapped(detail, piece)
     }
     // 並排版面的左欄只有標籤、沒有說明：下一行縮進的 `(Recommended)` 是標籤折下來的，接回標題。
     // claude 自己加的 ` (Recommended)` 前面本來就是空白，CJK 結尾時 joinWrapped 會把它黏死。

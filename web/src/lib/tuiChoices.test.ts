@@ -740,3 +740,18 @@ test('並排預覽框的左欄含 ✅／⭐（Emoji_Presentation、終端佔兩�
   assert.ok(side && !('malformed' in side), '框要對得上，不能是 malformed')
   assert.equal(side.preview, 'HTTP 200')
 })
+
+test('並排版面：標籤折行後的 `(Recommended)` 前面要有空白（CJK 結尾不黏住）', () => {
+  const lines = [
+    'Which one?',
+    '  ❯ 1. 改回 200 正常    ┌────────────┐',
+    '     訊息並記錄到日誌   │ HTTP 200   │',
+    '     (Recommended)      │ { ok }     │',
+    '    2. 維持錯誤         └────────────┘',
+    'Enter to select · ↑/↓ to navigate · Esc to cancel',
+  ]
+  const menu = parseChoiceMenu(lines.join('\n'))
+  assert.ok(menu)
+  assert.equal(menu.choices[0].title, '改回 200 正常訊息並記錄到日誌 (Recommended)')
+  assert.equal(menu.choices[1].title, '維持錯誤')
+})
