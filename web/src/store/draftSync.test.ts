@@ -244,6 +244,25 @@ test('413 也一樣不重送', async () => {
   assert.deepEqual(r.rejected, ['bot:a'])
 })
 
+test('PUT 被拒的同時本機又改了：新的那段照樣排隊送出，不能因為舊字被拒就跟著丟掉', async () => {
+  const r = rig({ debounceMs: 10 })
+  let release = () => {}
+  r.gate.hold = new Promise<void>((res) => (release = res))
+  r.type('bot:a', 'x'.repeat(300_000))
+  await tick(30) // 大字的 PUT 在飛、卡住
+  r.type('bot:a', '短了') // 打字期間又改短：debounce 已排好
+  r.gate.failWith = new ApiError(400, { error: 'draft_too_large' }, 'draft_too_large')
+  release() // 大字被 daemon 拒絕
+  await settleMicrotasks()
+  r.gate.hold = null
+  r.gate.failWith = null
+  await tick(30)
+  assert.equal(r.puts.length, 2, '短的那段要送出去，不能被舊字的拒絕蓋掉')
+  assert.equal(r.puts[1].text, '短了')
+  assert.equal(r.server.get('bot:a')?.text, '短了')
+  assert.equal(r.sync.isDirty('bot:a'), false)
+})
+
 test('斷線（TypeError）照舊 3 秒後重送', async () => {
   const r = rig({ debounceMs: 10 })
   r.gate.failWith = new TypeError('Failed to fetch')

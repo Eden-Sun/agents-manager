@@ -9,7 +9,8 @@
  * - `rev` 是 daemon 每個 key 單調遞增的版本：小於等於已知的 rev 一律當舊事件丟掉（WS 重播、GET 與事件交錯都靠它）。
  * - PUT 失敗（斷線）：維持 dirty、稍後重試；重連時 `load()` 重拉全部、再把還 dirty 的送出去。
  * - PUT 被 daemon 拒絕（400／413，例如超過 256 KB）：重試也不會成功，不再排重送、記進 `rejected`（草稿只留在本機），
- *   `load()` 不把它當「daemon 沒有」清掉；本機再改字、或別台寫了新版本才解除。
+ *   `load()` 不把它當「daemon 沒有」清掉；本機再改字、或別台寫了新版本才解除。PUT 在飛時本機又改過的，拒絕的只是舊那版，
+ *   新的字照樣排隊送出（#1514）。
  */
 
 import { ApiError } from '../api/types'
@@ -181,6 +182,11 @@ export class DraftSync {
       else this.schedule(key, this.deps.read(key) === '' ? 0 : this.debounceMs)
     } catch (e) {
       if (e instanceof ApiError && (e.status === 400 || e.status === 413)) {
+        // 拒絕的是送出去那一版；拒絕之前本機又改了（PUT 在飛時打的字）就照新的字排隊送，不標成被拒（#1514）。
+        if (this.deps.read(key) !== text) {
+          this.schedule(key, this.deps.read(key) === '' ? 0 : this.debounceMs)
+          return
+        }
         // 重送一模一樣的字只會一直被拒：停下來，等本機改字再試。
         this.dirty.delete(key)
         this.rejected.add(key)
