@@ -59,3 +59,13 @@ test('還沒有任何讀數、或不是 codex：不適用', () => {
   assert.equal(noFiveHourCap('claude', quota({})), false)
   assert.equal(noFiveHourCap('grok', quota({})), false)
 })
+
+test('側欄：沿用的舊 5h（critical）不再讓 codex 的 bot 整列反灰、也不掛紅色額度徽章', async () => {
+  const { botQuotaWarning, botQuotaLevel } = await import('../store/store')
+  const stale = { codex: quota({ five_hour: { ...win(100, OLD), low: true, critical: true }, limit_hit: hit }) }
+  assert.equal(botQuotaWarning(stale, 'codex', null), null)
+  assert.equal(botQuotaLevel(stale, 'codex', null), null)
+  // plus：5h 真的用完時照舊警告
+  const real = { codex: quota({ five_hour: { ...win(100, NEW), low: true, critical: true }, plan: 'plus' }) }
+  assert.equal(botQuotaWarning(real, 'codex', null)?.window, '5h')
+})

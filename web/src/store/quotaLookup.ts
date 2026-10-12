@@ -10,6 +10,7 @@
  */
 import { quotaKey } from '../api/types'
 import type { BotKind, Identity, KindQuota, QuotaMap } from '../api/types'
+import { projectNoFiveHour } from '../lib/quotaNoFiveHour'
 
 /**
  * `seven_day` 要畫成「週」、不叫 7d 的 kind：只有 grok 只回報週窗；agy 的 Gemini key 同時有 5h 與 7d。
@@ -87,5 +88,6 @@ export function quotaForIdentity(
   identity: string | null,
   identities: readonly Identity[],
 ): KindQuota | null {
-  return quota[quotaKey(host, quotaBaseKey(quota, host, kind, identity, identities))] ?? null
+  // codex 的方案沒有 5 小時窗時，沿用下來的舊 5h（critical）不能讓側欄整列反灰（見 lib/quotaNoFiveHour）。
+  return projectNoFiveHour(kind, quota[quotaKey(host, quotaBaseKey(quota, host, kind, identity, identities))] ?? null)
 }
