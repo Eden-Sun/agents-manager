@@ -5,13 +5,22 @@ use crate::state::App;
 use super::*;
 use super::send_now::ports::AttachConnPort;
 
-pub async fn emit_prompt_message(app: &(impl crate::capabilities::Db + crate::capabilities::Emit + crate::capabilities::BotStatusEmit), bot_id: &str, message_id: &str) {
-    if let Ok(Some(m)) = sqlx::query_as::<_, db::Message>("SELECT *, rowid AS seq FROM messages WHERE id=?")
+pub async fn emit_prompt_message(app: &(impl crate::capabilities::Db + crate::capabilities::Emit), bot_id: &str, message_id: &str) -> anyhow::Result<()> {
+    if let Some(m) = sqlx::query_as::<_, db::Message>("SELECT *, rowid AS seq FROM messages WHERE id=?")
         .bind(message_id)
         .fetch_optional(app.db())
-        .await
+        .await?
     {
         crate::capabilities::Emit::emit(app, "message_added", json!({"bot_id": bot_id, "message": m})).await;
+    }
+    Ok(())
+}
+
+/// Initial publication failure requests a snapshot refresh; an idempotent retry calls the fallible emitter again.
+pub async fn publish_prompt_message(app: &(impl crate::capabilities::Db + crate::capabilities::Emit), bot_id: &str, message_id: &str) {
+    if let Err(e) = emit_prompt_message(app, bot_id, message_id).await {
+        tracing::warn!(message = %message_id, error = %e, "could not read a prompt message for publication");
+        crate::capabilities::Emit::emit(app, "resync", json!({"reason": "prompt_message_unreadable"})).await;
     }
 }
 
@@ -299,7 +308,7 @@ pub(super) async fn retract_unsent_turn(app: &impl LcHost, bot_id: &str, turn_id
 
 /// 這筆 turn 現在的樣子，換成給呼叫端的答覆。冪等重送（同一個 `client_request_id`）與「撤回時發現
 /// turn 已經被別的路徑收掉」都走這裡，同一筆 turn 才不會因為問法不同而拿到兩種答案（review3 L4）。
-pub(super) async fn answer_for_turn(app: &impl crate::capabilities::Db, t: &db::Turn) -> LcResult<PromptOut> {
+pub(super) async fn answer_for_turn(app: &(impl crate::capabilities::Db + crate::capabilities::Emit), t: &db::Turn) -> LcResult<PromptOut> {
     // 第一則才是這一回合的 prompt；之後的可能是回合中補充的（`sent_via = 'supplement'`）。
     let message_id = sqlx::query_scalar::<_, String>("SELECT id FROM messages WHERE turn_id=? AND role='user' ORDER BY created_at, rowid LIMIT 1")
         .bind(&t.id)
@@ -309,6 +318,15 @@ pub(super) async fn answer_for_turn(app: &impl crate::capabilities::Db, t: &db::
         .unwrap_or_default();
     if let Some(e) = super::owed_delivery::uncommitted_answer(t, &message_id) {
         return Err(e);
+    }
+    if !message_id.is_empty() {
+        let bot_id = sqlx::query_scalar::<_, String>("SELECT bot_id FROM conversations WHERE id=?")
+            .bind(&t.conversation_id)
+            .fetch_optional(app.db())
+            .await
+            .map_err(up)?
+            .ok_or_else(|| LcError::Upstream("the prompt conversation is gone".into()))?;
+        emit_prompt_message(app, &bot_id, &message_id).await.map_err(up)?;
     }
     // The same request asked again reports the same outcome, including "unverified".
     // 還在排隊的那筆照第一次的回答說 `queued`：它的 `delivery` 欄位是 `pending`，原樣回的話
@@ -324,7 +342,7 @@ pub(super) async fn answer_for_turn(app: &impl crate::capabilities::Db, t: &db::
 }
 
 /// [`answer_for_turn`]，但 turn 要先從 id 讀回來（撤回撤不掉時，手上只有 id）。
-pub(super) async fn answer_for_turn_id(app: &impl crate::capabilities::Db, turn_id: &str) -> LcResult<PromptOut> {
+pub(super) async fn answer_for_turn_id(app: &(impl crate::capabilities::Db + crate::capabilities::Emit), turn_id: &str) -> LcResult<PromptOut> {
     let t = sqlx::query_as::<_, db::Turn>("SELECT * FROM turns WHERE id = ?")
         .bind(turn_id)
         .fetch_optional(app.db())
@@ -560,7 +578,7 @@ pub async fn queue_for_next_turn(
     .await
     .map_err(up)?;
     tx.commit().await.map_err(up)?;
-    emit_prompt_message(app, bot_id, &msg_id).await;
+    publish_prompt_message(app, bot_id, &msg_id).await;
     crate::lifecycle::s6_ports::QueueServices::turn_changed(app, &turn_id).await;
     tracing::info!(bot = %bot_id, turn = %turn_id, "對方回合中：prompt 排進佇列，等回合結束再送");
     Ok(PromptOut { turn_id, message_id: msg_id, delivery: "queued".into(), send_now: None })
@@ -1178,7 +1196,7 @@ async fn prompt_inner(
     .map_err(up)?;
     tx.commit().await.map_err(up)?;
     if let Err(e) = app.bind_attachments(&msg_id, &files).await {
-        emit_prompt_message(app, bot_id, &msg_id).await;
+        publish_prompt_message(app, bot_id, &msg_id).await;
         // 一個字都沒送：收成 failed＋說明（同一個交易），前端最後看到的不能是 `pending`。收不成就記成欠著、回 503（#158）——
         // DB 還是 in_flight＋pending 時不回普通的 `failed`。
         let note = format!("delivery failed: attachment binding failed: {e}");
@@ -1188,7 +1206,7 @@ async fn prompt_inner(
             Err(err) => Err(super::owed_delivery::uncommitted(Some(&run.id), &turn_id, &msg_id, "failed", Some(&err))),
         };
     }
-    emit_prompt_message(app, bot_id, &msg_id).await;
+    publish_prompt_message(app, bot_id, &msg_id).await;
     crate::lifecycle::s6_ports::QueueServices::turn_changed(app, &turn_id).await;
 
     // 窄窗：閘門讀完之後、這一筆 commit 之前，窗口才被拿走。一個字都還沒打，所以撤回這一筆再回 409。
@@ -1376,6 +1394,57 @@ mod prompt_tests {
         queue_for_next_turn(&app, &f.conv, &f.bot_id, "one", "one", "c-1", None, RelaySrc::default()).await.unwrap();
         let err = queue_for_next_turn(&app, &f.conv, &f.bot_id, "two", "two", "c-2", None, RelaySrc::default()).await.unwrap_err();
         assert!(matches!(err, LcError::Conflict(_)), "真的已經有一筆在排才是 409：{err:?}");
+    }
+
+    /// A transient post-commit message lookup failure must be repaired by the same request's idempotent retry.
+    #[tokio::test]
+    async fn an_idempotent_retry_reemits_message_after_the_first_lookup_failed() {
+        let f = fixture("codex", "test").await;
+        let (turn_id, message_id, request_id) = (db::ulid(), db::ulid(), "retry-message-added");
+        sqlx::query(
+            "INSERT INTO turns (id, conversation_id, run_id, origin, status, delivery, client_request_id, created_at)
+             VALUES (?,?,?,'web','queued','pending',?,?)",
+        )
+        .bind(&turn_id)
+        .bind(&f.conv)
+        .bind(&f.run_id)
+        .bind(request_id)
+        .bind(db::now())
+        .execute(&f.env.app.db)
+        .await
+        .unwrap();
+        sqlx::query(
+            "INSERT INTO messages (id, conversation_id, turn_id, role, content, source, created_at)
+             VALUES (?,?,?,'user','queued prompt','web',?)",
+        )
+        .bind(&message_id)
+        .bind(&f.conv)
+        .bind(&turn_id)
+        .bind(db::now())
+        .execute(&f.env.app.db)
+        .await
+        .unwrap();
+        let turn: db::Turn = sqlx::query_as("SELECT * FROM turns WHERE id=?")
+            .bind(&turn_id)
+            .fetch_one(&f.env.app.db)
+            .await
+            .unwrap();
+        let before = crate::capabilities::Emit::current_seq(&f.env.app);
+
+        sqlx::query("ALTER TABLE messages RENAME TO messages_unreadable")
+            .execute(&f.env.app.db)
+            .await
+            .unwrap();
+        assert!(emit_prompt_message(&f.env.app, &f.bot_id, &message_id).await.is_err(), "the broken lookup must be observable");
+        sqlx::query("ALTER TABLE messages_unreadable RENAME TO messages")
+            .execute(&f.env.app.db)
+            .await
+            .unwrap();
+
+        let retry = answer_for_turn(&f.env.app, &turn).await.unwrap();
+        assert_eq!(retry.turn_id, turn_id);
+        assert_eq!(retry.message_id, message_id);
+        assert_eq!(crate::capabilities::Emit::current_seq(&f.env.app), before + 1, "retry publishes the missed message_added");
     }
 
     async fn fixture(kind: &str, session: &str) -> Fixture {

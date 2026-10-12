@@ -1085,6 +1085,8 @@ codex 0.159.3 的帳號安全提醒 inline banner（`› 1. Set up security`／`
   turn＋user 訊息在按鍵前寫進 DB。框裡的字是畫面讀來的，不能逐字當證據：本機 claude／codex 的 session log 在基準之後**多了一則使用者訊息**＋框清空
   才算 `Submitted`，對話裡的訊息換成 log 那一則的原文；其他情況框在 Enter 後清空＝`Unverified`。框裡還是同一段就再按一次 Enter（換了字不按）；
   herdr 拒收 Enter 而框裡還是那一段＝沒送出，撤回回合。不會自動重送（`auto_resend=0`：那段字不是 daemon 打的）。
+  原文校正與 proof checkpoint 一起寫入；校正失敗時不回一般成功，同 `client_request_id` 重試會從相同 session log 補正，不再按 Enter。
+  `message_added` 讀取失敗時推 `resync`；同一請求重試會重新讀取訊息並補發事件，客戶端依 message id 去重。
 - **清掉再送我這則**＝在規劃送達之前按清框鍵，**重讀畫面確認框是空的**才往下打字；還有字（或 herdr 拒收那顆鍵）回 409 `draft_uncleared`、一個字都不打。
   清框鍵三種 kind 都是一次 `ctrl+c`：2026-09-26 在隔離的 herdr session（`env -i` + `--session`，daemon 看不到）實測 claude 2.1.281、codex 0.155.1、
   grok 1.0.41 的單行、多行與 claude 的十四列長段，一次就清空（fixtures `*-draft.ansi`／`*-cleared.ansi`）。框本來就空不按（空框的 `ctrl+c` 是
