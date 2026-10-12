@@ -747,6 +747,8 @@ turn 已經建好、還沒打第一個字時 run 就結束（`mark_run_exited` �
 `200 {"delivery":"unverified"}`：已打字、框收下並在 Enter 後清空，但無法逐字核對。走 herdr `agent.prompt` 的那條路同樣回
 `unverified`——它回 ok 但不保證字進得去，沒有證據就是沒有證據。turn JSON 帶 `delivery:"ok"` 與 `delivery_verified:0`，UI 標「未驗證送達」。
 turn JSON 同時帶 `delivery_verified` 與 `auto_resend`，前端要靠兩個一起判斷（只有「無證據且不重送」才標「未驗證送達」）。
+`delivery_verified` 會在 hook 事後證據到時變成 1（issue #1471）：turn 被 hook 收尾（或晚到 hook 綁上 `native_turn_id`）之後，補送過一次、
+遠端主機讀不到 transcript 的回合不再是 `0`；備援收尾而且沒有 `native_turn_id` 的維持 `0`。
 **「未驗證」不等於「不重送」**（AGM 2026-09-16）：要不要自動重送看另一欄 `auto_resend`——打過字證不明的是 0（重送會重複派工），
 `agent.prompt` 是 1（沒送進去才會重送）。按過鍵、該有證據卻證明不了，才是 `200 {"delivery":"unknown"}`。
 排隊中的 prompt 遇到 409 類原因放回 `queued`，以 15 秒起、每次加倍、上限 5 分鐘的退避重試（每顆 bot 同時只有一個重試

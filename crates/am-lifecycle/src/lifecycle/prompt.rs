@@ -37,8 +37,12 @@ pub async fn mark_delivery(app: &Arc<impl crate::capabilities::Db + crate::capab
     // 不重送的那條路照樣把重送額度用掉：回滾到不認得 `auto_resend` 的舊 binary 時，
     // 它仍然不會把同一則再打一次。
     // 這筆 UPDATE 對每份 evidence 都執行，包括沒有取得 first-delivery claim 的呼叫者。
+    // hook 已經收掉這個回合（`completed` 且綁了 native turn id）就已經有事後證據（issue #1471）：欠著的送達結果
+    // 晚一步補寫時，`delivery_verified` 不能被寫回 0。
     sqlx::query(
-        "UPDATE turns SET delivery=?, delivery_verified=?, auto_resend=?,
+        "UPDATE turns SET delivery=?,
+                delivery_verified=CASE WHEN status='completed' AND native_turn_id IS NOT NULL THEN 1 ELSE ? END,
+                auto_resend=?,
                 resend_count = CASE WHEN ? = 0 THEN MAX(resend_count, ?) ELSE resend_count END
           WHERE id=?",
     )

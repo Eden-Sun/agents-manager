@@ -675,6 +675,17 @@ async fn apply_migrations_inner(pool: &SqlitePool, fail_after_spawn_hints_drop: 
     .context("remap retired Codex models")?;
     sqlx::query("UPDATE bots SET model='claude-opus-5-5' WHERE kind='claude' AND model='opus'")
         .execute(&mut *tx).await.context("remap retired Claude alias")?;
+    // issue #1471：hook 收掉的回合（`completed`、native turn id 與收件匣 event id 都在）是事後證據；舊 daemon 收尾時
+    // 沒把 `delivery_verified` 寫成 1，補送過一次的遠端回合因此一直掛著「未驗證送達」。資料回填、不動 schema；
+    // 可重入（只動還是 0 的）。備援收尾、沒綁 native turn id 的不碰——它們真的沒有 hook 證據。
+    sqlx::query(
+        "UPDATE turns SET delivery_verified = 1
+          WHERE delivery_verified = 0 AND status = 'completed'
+            AND native_turn_id IS NOT NULL AND source_event_id IS NOT NULL",
+    )
+    .execute(&mut *tx)
+    .await
+    .context("backfill turns.delivery_verified for hook-completed turns")?;
     // Turn 狀態轉移的單一權威（issue #68）：合法邊只定義在 `db::turn_guard::LEGAL_EDGES`（`lifecycle::turn_controller` re-export），
     // trigger 由它生成。二十來處 `UPDATE turns SET status` 各自帶的 CAS guard 照舊，這是它們的下限，
     // 而且未來新寫的路徑繞不過去——終局的回合不可能被改回進行中。

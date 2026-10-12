@@ -2452,6 +2452,22 @@ mod issue_17_tests {
         assert_eq!(count(&f, "pane.send_text"), 1);
     }
 
+    /// issue #1471：hook 已經收掉回合（`completed`＋native turn id）之後才補寫的送達結果（欠著的帳、慢一步的補送）
+    /// 不能把 `delivery_verified` 寫回 0；還沒被 hook 收掉的照寫。
+    #[tokio::test]
+    async fn a_late_delivery_write_does_not_unverify_a_turn_a_hook_already_completed() {
+        let f = fixture("claude", "").await;
+        let app = f.env.app.clone();
+        let verified = || async { sqlx::query_scalar::<_, i64>("SELECT delivery_verified FROM turns WHERE id = ?").bind(&f.turn_id).fetch_one(&app.db).await.unwrap() };
+        mark_delivery(&app, &f.turn_id, Delivered::Unverified.record().unwrap(), &db::now()).await.unwrap();
+        assert_eq!(verified().await, 0, "還在飛、沒有 hook 證據：照寫成未驗證");
+
+        sqlx::query("UPDATE turns SET status='completed', native_turn_id='n1' WHERE id = ?").bind(&f.turn_id).execute(&app.db).await.unwrap();
+        sqlx::query("UPDATE turns SET delivery_verified = 1 WHERE id = ?").bind(&f.turn_id).execute(&app.db).await.unwrap();
+        mark_delivery(&app, &f.turn_id, Delivered::Unverified.record().unwrap(), &db::now()).await.unwrap();
+        assert_eq!(verified().await, 1, "hook 已經收尾：晚到的送達結果不降回 0");
+    }
+
     /// codex 本機：找到它自己的 rollout 就用 rollout 逐字證明多行 prompt。
     #[tokio::test]
     async fn a_codex_multi_line_prompt_is_proven_by_its_rollout() {

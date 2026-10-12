@@ -995,6 +995,13 @@ user 文字先照 CLI 自己的拆法還原（`lifecycle::pasted_content`，只�
 - `turns.delivery_verified` 只講**證據**：有沒有無損證據證明它進了對方的輸入框／session。
 - `turns.auto_resend` 只講**能不能自動重送**：打過字但證不明的那條路重送會重複派工，所以是 0；有證據的已經送進去，也是 0；
   `agent.prompt` 同樣沒有證據，但沒送進去才會走到重送，所以是 1。重送閘門看 `auto_resend`，不看 `delivery_verified`。
+- **hook 事後證據補寫 `delivery_verified=1`**（issue #1471）：送出當下沒有逐字證據（遠端主機讀不到 transcript、補送過一次）的回合，
+  之後 hook 回報並完成，就是事後證據。daemon 在 (1) hook 收尾（`in_flight → completed`，與 native 證據同一句）、
+  (2) 晚到 hook 把 native turn id 綁到備援收尾的回合（`stamp_native_ids`，綁完非空才算）這兩處寫成 1；
+  欠著的送達結果晚一步補寫時（`mark_delivery`），已 `completed` 且綁了 native turn id 的回合不會被寫回 0。
+  備援收尾、沒有 hook 證據（沒有 native turn id）的回合維持原判；重送閘門看 `auto_resend`，不受影響。
+  既有列：開 DB 時補一次（`status='completed'`、`native_turn_id` 與 `source_event_id` 都有、`delivery_verified=0`），資料回填、不動 schema、不升 `SCHEMA_VERSION`，
+  可重入；只靠晚到 hook 綁上 native id（沒有 `source_event_id`）的舊列不回填，讀出時維持原值。
 - 欄位 additive、migrate 可重入；既有列 `auto_resend` 預設 1，行為與拆開前相同（舊的 unverified 列當時已把
   `resend_count` 頂到上限，照樣不會被重送）。
 - **UI 只標沒人補救的那一種**（2026-09-16）：turn JSON 同時帶 `delivery_verified` 與 `auto_resend`；
