@@ -644,6 +644,49 @@ test('並排預覽：預覽框裡的「1. …」編號行不會被當成選項',
   assert.ok(menu.choices[0].preview.includes('1. 先備份\n2. 再升級'))
 })
 
+test('並排預覽：組合字元標籤與預覽編號行仍只解析左欄真實選項', () => {
+  const lines = ASKQ_PREVIEW.split('\n')
+  const first = lines.findIndex((l) => l.startsWith('❯ 1.'))
+  // 顯示寬度不變：把一個 ASCII 字元替換成 e + 組合重音，但 UTF-16 字串多一碼。
+  lines[first] = lines[first].replace('200', 'e\u030100')
+
+  const boxLine = (line: string, content: string) => {
+    const left = line.indexOf('│')
+    const right = line.lastIndexOf('│')
+    return `${line.slice(0, left + 2)}${content.padEnd(right - left - 2)}${line.slice(right)}`
+  }
+  const firstPreviewRow = lines.findIndex((l) => l.includes('"warnings"'))
+  const secondPreviewRow = lines.findIndex((l) => l.includes('"queried_at"'))
+  lines[firstPreviewRow] = boxLine(lines[firstPreviewRow], '3. 預覽步驟甲')
+  lines[secondPreviewRow] = boxLine(lines[secondPreviewRow], '4. 預覽步驟乙')
+
+  const menu = parseChoiceMenu(lines.join('\n'))
+  assert.ok(menu)
+  assert.deepEqual(menu.choices.map((c) => c.title), [
+    '改回 e\u030100 正常訊息 (Recommended)',
+    '維持錯誤，只改訊息',
+  ])
+  assert.ok(menu.choices[0].preview.includes('3. 預覽步驟甲\n4. 預覽步驟乙'))
+})
+
+test('並排預覽：找到框頂但內框欄位錯位時不回退原 parser', () => {
+  const lines = ASKQ_PREVIEW.split('\n')
+  const firstBody = lines.findIndex((l) => l.includes('(Recommended)'))
+  lines[firstBody] = ` ${lines[firstBody]}`
+
+  const boxLine = (line: string, content: string) => {
+    const left = line.indexOf('│')
+    const right = line.lastIndexOf('│')
+    return `${line.slice(0, left + 2)}${content.padEnd(right - left - 2)}${line.slice(right)}`
+  }
+  const firstPreviewRow = lines.findIndex((l) => l.includes('"warnings"'))
+  const secondPreviewRow = lines.findIndex((l) => l.includes('"queried_at"'))
+  lines[firstPreviewRow] = boxLine(lines[firstPreviewRow], '3. 預覽步驟甲')
+  lines[secondPreviewRow] = boxLine(lines[secondPreviewRow], '4. 預覽步驟乙')
+
+  assert.equal(parseChoiceMenu(lines.join('\n')), null)
+})
+
 test('並排預覽：游標在第 2 項時預覽掛在第 2 項，keysToSelect 走 ↑↓＋Enter', () => {
   const lines = ASKQ_PREVIEW.split('\n')
   const a = lines.findIndex((l) => l.startsWith('❯ 1.'))
