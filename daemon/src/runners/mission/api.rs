@@ -1645,7 +1645,8 @@ pub async fn put_identity_disabled(
     if name.trim().is_empty() {
         return Err(LcError::Bad("identity is empty".into()));
     }
-    let host = b.host.clone().unwrap_or_else(|| crate::config::LOCAL_HOST.to_string());
+    // 留白＝沒給（API.md `host?`）：存成空字串的停用列挑身分時永遠查不到（#1528）。
+    let host = b.host.as_deref().map(str::trim).filter(|h| !h.is_empty()).unwrap_or(crate::config::LOCAL_HOST).to_string();
     store::set_identity_disabled(&app.db, &host, &b.kind, name.trim(), b.disabled).await.map_err(up)?;
     app.emit_event("identity_prefs_changed", json!({"host": host, "kind": b.kind, "identity": name, "disabled": b.disabled})).await;
     Ok(Json(json!({"host": host, "kind": b.kind, "identity": name, "disabled": b.disabled})))
@@ -1671,6 +1672,30 @@ mod tests {
         headers.insert("X-AM-Bot-Id", "authenticated-bot".parse().unwrap());
 
         assert_eq!(effective_relay_claim(&headers, Some(" \t ")), Some("authenticated-bot"));
+    }
+
+    /// `host` 留白（空字串或只有空白）＝沒給，照預設 `local` 存。以前存成空字串 host：挑身分讀的是 `local`，
+    /// 那筆停用永遠查不到，回 200 卻沒有任何效果。
+    #[tokio::test]
+    async fn a_blank_identity_disable_host_falls_back_to_local() {
+        let env = crate::testing::env().await;
+        let app = env.app.clone();
+        for (name, host) in [("cc-empty-host", ""), ("cc-space-host", "  ")] {
+            let Json(out) = put_identity_disabled(
+                State(app.clone()),
+                Path(name.into()),
+                Json(DisableIn { kind: "claude".into(), disabled: true, host: Some(host.into()) }),
+            )
+            .await
+            .unwrap();
+            assert_eq!(out["host"], crate::config::LOCAL_HOST, "blank host {host:?} must default to local");
+        }
+        let Json(prefs) = get_identity_prefs(State(app.clone())).await.unwrap();
+        let rows = prefs["disabled"].as_array().unwrap();
+        assert!(rows.iter().all(|r| r["host"] != ""), "no row may keep an empty host: {rows:?}");
+        for name in ["cc-empty-host", "cc-space-host"] {
+            assert!(rows.iter().any(|r| r["host"] == crate::config::LOCAL_HOST && r["identity"] == name), "{name} must be disabled on local: {rows:?}");
+        }
     }
 
 
