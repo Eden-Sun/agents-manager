@@ -457,13 +457,13 @@ pub async fn switch_candidate(
     let next = if next == "opus" { "opus" } else { "fable" };
     let model = super::setup::model_arg(next).to_string();
     // Config first, so a restart comes up on the new candidate even if the live switch fails.
-    // 這步失敗（極罕見：這個 closure 只改既有 bot 的 model／effort，從不刪列，guard 結構上碰不到）
-    // 一律吞掉不中斷這次自動切換，下一輪 watchdog tick 還會再試——跟以前投影那半段是同一個容錯精神，
-    // 現在寫檔與投影併成一支，容錯範圍跟著涵蓋寫檔那半。
+    #[cfg(test)]
+    crate::lifecycle::race_point::hit("supervisor_switch_before_config", &bot_id).await;
     let bid = bot_id.clone();
     let m2 = model.clone();
     let effort = sup.effort.clone();
-    let _ = crate::projection::update_and_project(&app.cfg(), &app.db(), move |cfg| {
+    // 寫不進去就整個不算數（#1646）：不套用、不記 active_model，下一輪 tick 還會重新決定、再試。
+    crate::projection::update_and_project(&app.cfg(), &app.db(), move |cfg| {
         for p in cfg.projects.iter_mut() {
             if let Some(b) = p.bots.iter_mut().find(|b| b.id.as_deref() == Some(bid.as_str())) {
                 b.model = Some(m2.clone());
@@ -474,7 +474,8 @@ pub async fn switch_candidate(
         }
         Ok(())
     })
-    .await;
+    .await
+    .map_err(|e| LcError::Upstream(format!("could not record the model switch in config.toml; not switched, will retry: {e:#}")))?;
 
     // Apply it to the session that is already running, if there is one. `send_slash_line`
     // answers claude's "Switch model?" confirmation and backs out (Err → false) if it will
@@ -507,4 +508,29 @@ pub async fn switch_candidate(
     app.emit("supervisor_changed", json!({"model": next, "generation": gen, "applied_live": applied, "restarted": restarted})).await;
     spawn(app.clone(), gen);
     Ok(true)
+}
+
+#[cfg(test)]
+mod switch_write_tests {
+    use super::*;
+    use crate::testing as tt;
+
+    /// 切換模型時 config.toml 寫不進去（這裡在寫入前把檔案換成寫到一半的內容）：不能照樣記成「已切換」。
+    /// 以前 `let _ =` 吞掉錯誤，`active_model` 還是先記成新模型，之後的 tick 看到它已經是新的就不再重試，
+    /// 而重啟讀的是 config 裡還停在舊模型的那一份。
+    #[tokio::test]
+    async fn a_switch_whose_config_write_fails_is_not_recorded_as_done() {
+        let e = tt::env().await;
+        let bot = tt::claude_bot(&e.app, &e.project_id, "agm-mgr").await;
+        store::get_or_init(&e.app.db).await.unwrap();
+        store::set_env(&e.app.db, &bot.id, &e.project_id, "/tmp").await.unwrap();
+        let path = e.app.cfg.path.clone();
+        crate::lifecycle::race_point::arm("supervisor_switch_before_config", &bot.id, move || async move {
+            std::fs::write(&path, "[[[ 寫到一半的設定").unwrap();
+        });
+
+        let result = switch_candidate(&e.app, "opus", "test", None).await;
+        assert!(result.is_err(), "config 寫不進去，這次切換不能算數：{result:?}");
+        assert_eq!(store::get_or_init(&e.app.db).await.unwrap().active_model, "fable", "沒切成，下一輪 tick 還會再決定、再試");
+    }
 }
