@@ -269,6 +269,100 @@ fn child_name_from_agent(name: &str) -> String {
     }
 }
 
+/// herdr agent 名稱最長 32 字、字元集 `[a-z][a-z0-9_-]*`（見 `config::agent_name`／shim 的 `am_child_name`）。
+const HERDR_NAME_MAX: usize = 32;
+
+/// 行程 argv 的 `--name X`／`--name=X`／`-n X`（argv[0] 是執行檔，不算）。
+fn argv_agent_name(argv: &[String]) -> Option<&str> {
+    let mut it = argv.iter().skip(1);
+    while let Some(a) = it.next() {
+        if a == "--name" || a == "-n" {
+            return it.next().map(String::as_str);
+        }
+        if let Some(v) = a.strip_prefix("--name=") {
+            return Some(v);
+        }
+    }
+    None
+}
+
+/// 無名子 agent 要補上的 `<parent>-<字尾>` 之字尾：argv 的 `--name` 去掉 parent 前綴後的部分（合法才用），
+/// 否則由 pane id 產生（小寫、非英數換成 `-`）。整個名字放不進 32 字就回 None（不改名）。
+fn unnamed_child_suffix_from(pane_id: &str, parent_agent: &str, argv_name: Option<&str>) -> Option<String> {
+    let fits = |suffix: &str| !suffix.is_empty() && parent_agent.len() + 1 + suffix.len() <= HERDR_NAME_MAX;
+    let legal = |suffix: &str| {
+        suffix.chars().all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_' || c == '-')
+            && !suffix.starts_with('-')
+            && fits(suffix)
+    };
+    if let Some(suffix) = argv_name.and_then(|n| n.strip_prefix(parent_agent)).and_then(|r| r.strip_prefix('-')) {
+        if legal(suffix) {
+            return Some(suffix.to_string());
+        }
+    }
+    unnamed_child_suffix(pane_id, parent_agent)
+}
+
+/// [`unnamed_child_suffix_from`] 沒有 argv 名字可用時的字尾：由 pane id 產生。
+fn unnamed_child_suffix(pane_id: &str, parent_agent: &str) -> Option<String> {
+    let mut slug = String::new();
+    for c in pane_id.chars().map(|c| c.to_ascii_lowercase()) {
+        let c = if c.is_ascii_lowercase() || c.is_ascii_digit() { c } else { '-' };
+        if c == '-' && (slug.is_empty() || slug.ends_with('-')) {
+            continue;
+        }
+        slug.push(c);
+    }
+    let slug = slug.trim_end_matches('-');
+    // 放不進 32 字就留右邊（pane 自己的編號在右邊，左邊是 workspace）；一個字都放不下才不改名。
+    let room = HERDR_NAME_MAX.saturating_sub(parent_agent.len() + 1);
+    let skip = slug.len().saturating_sub(room);
+    let slug = slug[skip..].trim_start_matches('-');
+    (!slug.is_empty()).then(|| slug.to_string())
+}
+
+/// issue #1472：用 `herdr pane run <pane> "claude …"` 開的子 agent 在 herdr 沒有名稱，認領迴圈只看名字就整顆跳過。
+/// 有 spawn hint 指向活著的 parent（或 argv 的 `--name` 以某顆活著的 parent 名稱加 `-` 開頭、而且同 tab，等同 hint）
+/// 才補上 `<parent>-<字尾>`，回傳新名字；沒有證據就不碰（同 tab 裡可能是使用者自己開的 claude）。
+/// rename 失敗只記 log、回 None：這一輪不收、下一輪再試，不中斷整台主機的對帳。
+async fn name_unnamed_child(
+    host: &str,
+    client: &crate::herdr::HerdrClient,
+    agent: &crate::herdr::AgentInfo,
+    parents: &[Parent],
+    hints: &HashMap<String, String>,
+) -> Option<String> {
+    let live = |p: &&Parent| p.tab_id.is_some();
+    let hinted = hints.get(&agent.pane_id).and_then(|bid| parents.iter().filter(live).find(|p| &p.bot.id == bid));
+    if hinted.is_none() && !parents.iter().filter(live).any(|p| p.tab_id.as_deref() == Some(agent.tab_id.as_str())) {
+        return None;
+    }
+    let processes = client.pane_process_info(&agent.pane_id).await.unwrap_or_default();
+    let argv_name = processes.iter().find_map(|p| argv_agent_name(&p.argv));
+    let parent = hinted.or_else(|| {
+        let n = argv_name?;
+        parents
+            .iter()
+            .filter(live)
+            .filter(|p| p.tab_id.as_deref() == Some(agent.tab_id.as_str()) && prefix_score(&p.agent_name, n) > 0)
+            .max_by_key(|p| p.agent_name.len())
+    })?;
+    let suffix = unnamed_child_suffix_from(&agent.pane_id, &parent.agent_name, argv_name)?;
+    let name = format!("{}-{suffix}", parent.agent_name);
+    match client.agent_rename(&agent.pane_id, &name).await {
+        Ok(renamed) => {
+            tracing::info!(host, parent = %parent.bot.name, pane = %agent.pane_id, agent = %name,
+                           "reconcile: gave an unnamed spawned agent a herdr name so it can be adopted");
+            Some(renamed.name.filter(|n| !n.is_empty()).unwrap_or(name))
+        }
+        Err(e) => {
+            tracing::warn!(host, parent = %parent.bot.name, pane = %agent.pane_id, agent = %name, error = ?e,
+                           "reconcile: could not name an unnamed spawned agent; leaving it for the next pass");
+            None
+        }
+    }
+}
+
 /// Herdr normally tells us the CLI kind.  During launch it can report an agent before that
 /// field is populated, so use the foreground executable as a deterministic fallback instead of
 /// permanently inheriting the parent's kind.
@@ -869,7 +963,8 @@ pub(crate) async fn reconcile_host_locked(app: &impl ReconcileHostEnv, host: &st
         match spawn_hints {
             Ok(h) => (h, agents.as_slice()),
             Err(e) => {
-                if agents.iter().any(|a| a.name.as_deref().is_some_and(|n| !claimed.contains(n))) {
+                // 無名 agent（#1472）也算：它靠 hint 才收得到，這一輪讀不到就一顆都不認領、不改名。
+                if agents.iter().any(|a| a.name.as_deref().map_or(true, |n| !claimed.contains(n))) {
                     tracing::warn!(host, error = ?e, "reconcile: cannot read spawn hints; adopting no new child this pass, will look again");
                     app.schedule_deferred_pass(host);
                 }
@@ -880,15 +975,38 @@ pub(crate) async fn reconcile_host_locked(app: &impl ReconcileHostEnv, host: &st
     let owned = if crate::shared_host::is_shared(app, host).await { Some(crate::shared_host::owned(app, host).await?) } else { None };
     let mut new_children = 0usize;
     for agent in strangers.iter() {
-        let Some(name) = agent.name.as_deref() else { continue };
-        if claimed.contains(name) {
-            continue;
-        }
         // #708：移交出去的專案的 agent（名字、pane、tab、workspace 對得上）不是誰的新 child。
         if handed_off_footprint.covers_agent(agent) {
             continue;
         }
+        // #709：共用主機只收自己的。
         if owned.as_ref().is_some_and(|o| !o.covers_agent(agent)) {
+            continue;
+        }
+        // issue #1472：沒有名稱的 agent（`herdr pane run "claude …"` 開的）要先有 hint／argv 證據、補上名字才認領。
+        // 住著某顆 bot 的 active run 的 pane 不是新的子 agent（那是「名字被清掉」，由上面的 per-bot 流程放回去）。
+        let renamed = if agent.name.is_none() {
+            let occupied: i64 = sqlx::query_scalar(
+                "SELECT COUNT(*) FROM runs WHERE pane_id = ? AND state IN ('starting','running','stopping')
+                 AND COALESCE(herdr_session, ?) = ?",
+            )
+            .bind(&agent.pane_id)
+            .bind(&session)
+            .bind(&session)
+            .fetch_one(app.db())
+            .await?;
+            if occupied > 0 {
+                continue;
+            }
+            match name_unnamed_child(host, &client, agent, &parents, &hints).await {
+                Some(n) => Some(n),
+                None => continue,
+            }
+        } else {
+            None
+        };
+        let Some(name) = renamed.as_deref().or(agent.name.as_deref()) else { continue };
+        if claimed.contains(name) {
             continue;
         }
         let by_hint = hints.get(&agent.pane_id).and_then(|bid| parents.iter().find(|p| &p.bot.id == bid));
@@ -4056,6 +4174,257 @@ mod compat_tests {
             let k = sqlx::query_as::<_, db::Bot>("SELECT * FROM bots WHERE name = ?").bind(short).fetch_one(&app.db).await.unwrap();
             assert_eq!(k.parent_bot_id.as_deref(), Some(parent.as_str()), "{short}：沒有 hint 也照名字掛到真正的父 bot 底下");
         }
+    }
+
+    /// issue #1472 的場景：父 bot 在 root pane，另有一顆同 tab 的 pane（`herdr pane split` 出來的、`herdr pane run` 跑 claude）。
+    /// 回 (client, 父 bot id, 父的 herdr agent 名, root pane, 分出來的 pane)。
+    async fn parent_with_split_pane(
+        env: &tt::Env,
+    ) -> (crate::herdr::HerdrClient, String, String, crate::herdr::PaneInfo, crate::herdr::PaneInfo) {
+        let client = crate::herdr::HerdrClient::new(env.dir.join("data/herdr.sock"));
+        let (ws, root) = client.workspace_create("/tmp/p", "proj", json!({})).await.unwrap();
+        let parent = a_bot(env, "alfa").await;
+        let parent_agent = crate::config::agent_name("proj", &parent);
+        sqlx::query(
+            "INSERT INTO runs (id, bot_id, state, agent_status, workspace_id, pane_id, tab_id, agent_name, herdr_session, started_at)
+             VALUES (?,?,'running','idle',?,?,?,?,'test',?)",
+        )
+        .bind(db::ulid())
+        .bind(&parent)
+        .bind(&ws.workspace_id)
+        .bind(&root.pane_id)
+        .bind(&root.tab_id)
+        .bind(&parent_agent)
+        .bind(db::now())
+        .execute(&env.app.db)
+        .await
+        .unwrap();
+        let split = client.pane_split(&root.pane_id, "down", "/tmp/p", json!({})).await.unwrap();
+        assert_eq!(split.tab_id, root.tab_id, "分出來的 pane 在父的同一個 tab");
+        (client, parent, parent_agent, root, split)
+    }
+
+    /// herdr 認得是 claude、但沒有名稱的 agent（`pane run "claude …"` 開的）。
+    fn unnamed_agent_json(pane: &crate::herdr::PaneInfo) -> serde_json::Value {
+        json!({"agent": "claude", "agent_status": "idle", "workspace_id": pane.workspace_id, "tab_id": pane.tab_id,
+               "pane_id": pane.pane_id, "cwd": "/tmp/p"})
+    }
+
+    fn named_agent_json(name: &str, pane: &crate::herdr::PaneInfo) -> serde_json::Value {
+        let mut v = unnamed_agent_json(pane);
+        v["name"] = json!(name);
+        v
+    }
+
+    async fn all_children(app: &Arc<App>) -> Vec<db::Bot> {
+        sqlx::query_as::<_, db::Bot>("SELECT * FROM bots WHERE parent_bot_id IS NOT NULL ORDER BY name").fetch_all(&app.db).await.unwrap()
+    }
+
+    /// issue #1472：有 spawn hint 的無名 agent——`agent.rename` 補上 `<parent>-<argv 的 --name 字尾>`，再照一般流程掛到父底下。
+    #[tokio::test]
+    async fn an_unnamed_agent_with_a_spawn_hint_is_renamed_from_its_argv_name_and_adopted() {
+        let env = tt::env().await;
+        let app = env.app.clone();
+        let (_client, parent, parent_agent, root, split) = parent_with_split_pane(&env).await;
+        crate::spawn_hints::record(&app, &parent, &split.pane_id).await.unwrap();
+        env.herdr.set_argv(&split.pane_id, &["claude", "--model", "claude-sonnet-5-5", "--name", &format!("{parent_agent}-om-fix"), "做事"]);
+        *env.herdr.agents.lock().unwrap() = vec![named_agent_json(&parent_agent, &root), unnamed_agent_json(&split)];
+
+        super::reconcile_host(&app, crate::config::LOCAL_HOST).await.unwrap();
+
+        let want = format!("{parent_agent}-om-fix");
+        let renames = env.herdr.calls_to("agent.rename");
+        assert_eq!(renames.len(), 1, "只改這一顆的名字：{renames:?}");
+        assert_eq!(renames[0]["target"], json!(split.pane_id));
+        assert_eq!(renames[0]["name"], json!(want));
+        let kids = all_children(&app).await;
+        assert_eq!(kids.len(), 1, "{kids:?}");
+        assert_eq!(kids[0].name, "om-fix");
+        assert_eq!(kids[0].parent_bot_id.as_deref(), Some(parent.as_str()));
+        let run = run_of(&app, &kids[0].id).await.unwrap();
+        assert_eq!(run.agent_name.as_deref(), Some(want.as_str()), "runs.agent_name 是 herdr 上的新名字");
+        assert_eq!(run.pane_id.as_deref(), Some(split.pane_id.as_str()));
+        assert!(crate::spawn_hints::for_host(&app, crate::config::LOCAL_HOST).await.unwrap().is_empty(), "認領成功就消耗 hint");
+    }
+
+    /// argv 沒有 `--name`（或名字不是這顆 parent 的前綴、字尾不合法）：字尾由 pane id 產生，名字照樣是 `<parent>-<字尾>`。
+    #[tokio::test]
+    async fn an_unnamed_hinted_agent_without_a_usable_argv_name_gets_a_name_from_its_pane_id() {
+        let env = tt::env().await;
+        let app = env.app.clone();
+        let (_client, parent, parent_agent, root, split) = parent_with_split_pane(&env).await;
+        crate::spawn_hints::record(&app, &parent, &split.pane_id).await.unwrap();
+        // 別顆 bot 的名字（前綴對不上）、`--name` 後面沒東西都不能用。
+        env.herdr.set_argv(&split.pane_id, &["claude", "--name", "someone-else-fix"]);
+        *env.herdr.agents.lock().unwrap() = vec![named_agent_json(&parent_agent, &root), unnamed_agent_json(&split)];
+
+        super::reconcile_host(&app, crate::config::LOCAL_HOST).await.unwrap();
+
+        let want = format!("{parent_agent}-{}", super::unnamed_child_suffix(&split.pane_id, &parent_agent).unwrap());
+        let kids = all_children(&app).await;
+        assert_eq!(kids.len(), 1, "{kids:?}");
+        assert_eq!(kids[0].parent_bot_id.as_deref(), Some(parent.as_str()));
+        assert_eq!(run_of(&app, &kids[0].id).await.unwrap().agent_name.as_deref(), Some(want.as_str()));
+        assert_eq!(env.herdr.calls_to("agent.rename")[0]["name"], json!(want));
+    }
+
+    /// 沒有 hint、argv 也不像哪顆 parent 的子 agent：同 tab 裡可能是使用者自己開的 claude，不收、不改名。
+    #[tokio::test]
+    async fn an_unnamed_agent_without_a_hint_or_a_parent_named_argv_is_left_alone() {
+        let env = tt::env().await;
+        let app = env.app.clone();
+        let (_client, _parent, parent_agent, root, split) = parent_with_split_pane(&env).await;
+        env.herdr.set_argv(&split.pane_id, &["claude", "--name", "my-own-session"]);
+        *env.herdr.agents.lock().unwrap() = vec![named_agent_json(&parent_agent, &root), unnamed_agent_json(&split)];
+
+        super::reconcile_host(&app, crate::config::LOCAL_HOST).await.unwrap();
+
+        assert!(all_children(&app).await.is_empty());
+        assert!(env.herdr.calls_to("agent.rename").is_empty(), "不能替使用者的 agent 改名");
+        assert!(env.herdr.agents.lock().unwrap().iter().any(|a| a.get("name").is_none_or(|n| n.is_null())), "它還是無名");
+    }
+
+    /// 沒有 hint，但 argv 的 `--name` 正好以活著的 parent 名稱加 `-` 開頭、而且同 tab：等同 hint。換了 tab 就不算。
+    #[tokio::test]
+    async fn an_unnamed_agent_whose_argv_name_carries_a_live_parents_prefix_in_its_tab_counts_as_hinted() {
+        let env = tt::env().await;
+        let app = env.app.clone();
+        let (client, _parent, parent_agent, root, split) = parent_with_split_pane(&env).await;
+        let elsewhere = client.tab_create(&root.workspace_id, "/tmp/p", "other", json!({})).await.unwrap();
+        let want = format!("{parent_agent}-om-fix");
+        env.herdr.set_argv(&split.pane_id, &["claude", "--name", &want]);
+        env.herdr.set_argv(&elsewhere.pane_id, &["claude", "--name", &format!("{parent_agent}-far")]);
+        *env.herdr.agents.lock().unwrap() =
+            vec![named_agent_json(&parent_agent, &root), unnamed_agent_json(&split), unnamed_agent_json(&elsewhere)];
+
+        super::reconcile_host(&app, crate::config::LOCAL_HOST).await.unwrap();
+
+        let kids = all_children(&app).await;
+        assert_eq!(kids.iter().map(|k| k.name.as_str()).collect::<Vec<_>>(), ["om-fix"], "別的 tab 的不收：{kids:?}");
+        let renames = env.herdr.calls_to("agent.rename");
+        assert_eq!(renames.len(), 1, "{renames:?}");
+        assert_eq!(renames[0]["target"], json!(split.pane_id));
+        assert_eq!(renames[0]["name"], json!(want));
+    }
+
+    /// rename 失敗（舊版 herdr、撞名）：這一輪不收這顆、其他 agent 照常收編、整台主機的 reconcile 不中斷；hint 留著，下一輪再試。
+    #[tokio::test]
+    async fn a_failed_rename_skips_only_that_agent_and_is_retried_next_pass() {
+        let env = tt::env().await;
+        let app = env.app.clone();
+        let (client, parent, parent_agent, root, split) = parent_with_split_pane(&env).await;
+        let good = client.pane_split(&root.pane_id, "right", "/tmp/p", json!({})).await.unwrap();
+        crate::spawn_hints::record(&app, &parent, &split.pane_id).await.unwrap();
+        crate::spawn_hints::record(&app, &parent, &good.pane_id).await.unwrap();
+        env.herdr.set_argv(&split.pane_id, &["claude", "--name", &format!("{parent_agent}-om-fix")]);
+        *env.herdr.agents.lock().unwrap() = vec![
+            named_agent_json(&parent_agent, &root),
+            unnamed_agent_json(&split),
+            named_agent_json(&format!("{parent_agent}-good"), &good),
+        ];
+        env.herdr.fail_next("agent.rename", tt::Fault::RefuseWith("name_taken"));
+
+        super::reconcile_host(&app, crate::config::LOCAL_HOST).await.unwrap();
+
+        let kids = all_children(&app).await;
+        assert_eq!(kids.iter().map(|k| k.name.as_str()).collect::<Vec<_>>(), ["good"], "撞名那顆不收、其他照常：{kids:?}");
+        assert_eq!(env.herdr.calls_to("agent.rename").len(), 1);
+
+        super::reconcile_host(&app, crate::config::LOCAL_HOST).await.unwrap();
+
+        let kids = all_children(&app).await;
+        assert_eq!(kids.iter().map(|k| k.name.as_str()).collect::<Vec<_>>(), ["good", "om-fix"], "下一輪補收：{kids:?}");
+        assert_eq!(env.herdr.calls_to("agent.rename").len(), 2);
+    }
+
+    /// 「hint 讀不到＝這一輪一顆都不認領」也涵蓋無名 agent：不 rename、不收；表恢復後延後的那一輪自己補上。
+    #[tokio::test]
+    async fn an_unreadable_spawn_hint_also_defers_unnamed_agents() {
+        let env = tt::env().await;
+        let app = env.app.clone();
+        let (_client, parent, parent_agent, root, split) = parent_with_split_pane(&env).await;
+        crate::spawn_hints::record(&app, &parent, &split.pane_id).await.unwrap();
+        env.herdr.set_argv(&split.pane_id, &["claude", "--name", &format!("{parent_agent}-om-fix")]);
+        *env.herdr.agents.lock().unwrap() = vec![named_agent_json(&parent_agent, &root), unnamed_agent_json(&split)];
+
+        sqlx::query("ALTER TABLE spawn_hints RENAME TO spawn_hints_unreadable").execute(&app.db).await.unwrap();
+        super::reconcile_host(&app, crate::config::LOCAL_HOST).await.unwrap();
+        assert!(all_children(&app).await.is_empty(), "hint 讀不到的那一輪不收無名 agent");
+        assert!(env.herdr.calls_to("agent.rename").is_empty(), "也不改名");
+
+        sqlx::query("ALTER TABLE spawn_hints_unreadable RENAME TO spawn_hints").execute(&app.db).await.unwrap();
+        let mut kids;
+        let _ = crate::testing::eventually!({
+            kids = all_children(&app).await;
+            kids.len() == 1
+        });
+        assert_eq!(kids.len(), 1, "延後的那一輪自己補上：{kids:?}");
+        assert_eq!(kids[0].parent_bot_id.as_deref(), Some(parent.as_str()));
+    }
+
+    /// 已經有 active run 的 pane（bot 自己的 agent 被 herdr 清掉名字）不是新的子 agent：交給原本的「把名字放回去」流程。
+    #[tokio::test]
+    async fn an_unnamed_agent_in_a_panes_with_an_active_run_is_not_adopted_as_a_child() {
+        let env = tt::env().await;
+        let app = env.app.clone();
+        let (_client, parent, parent_agent, root, split) = parent_with_split_pane(&env).await;
+        let sibling = a_bot(&env, "bravo").await;
+        let sibling_agent = crate::config::agent_name("proj", &sibling);
+        sqlx::query(
+            "INSERT INTO runs (id, bot_id, state, agent_status, workspace_id, pane_id, tab_id, agent_name, herdr_session, started_at)
+             VALUES (?,?,'running','idle',?,?,?,?,'test',?)",
+        )
+        .bind(db::ulid())
+        .bind(&sibling)
+        .bind(&split.workspace_id)
+        .bind(&split.pane_id)
+        .bind(&split.tab_id)
+        .bind(&sibling_agent)
+        .bind(db::now())
+        .execute(&app.db)
+        .await
+        .unwrap();
+        crate::spawn_hints::record(&app, &parent, &split.pane_id).await.unwrap();
+        *env.herdr.agents.lock().unwrap() = vec![named_agent_json(&parent_agent, &root), unnamed_agent_json(&split)];
+
+        super::reconcile_host(&app, crate::config::LOCAL_HOST).await.unwrap();
+
+        assert!(all_children(&app).await.is_empty(), "有人的 run 住在這顆 pane：不能再收成子 agent");
+        // 原本的流程把名字放回去（用的是那顆 bot 自己的名字，不是 `<parent>-…`）。
+        let renames = env.herdr.calls_to("agent.rename");
+        assert_eq!(renames.len(), 1, "{renames:?}");
+        assert_eq!(renames[0]["name"], json!(sibling_agent));
+    }
+
+    #[test]
+    fn argv_name_reads_long_short_and_equals_forms() {
+        let argv = |a: &[&str]| a.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+        assert_eq!(super::argv_agent_name(&argv(&["claude", "--name", "p-x", "go"])), Some("p-x"));
+        assert_eq!(super::argv_agent_name(&argv(&["claude", "-n", "p-x"])), Some("p-x"));
+        assert_eq!(super::argv_agent_name(&argv(&["claude", "--name=p-x"])), Some("p-x"));
+        assert_eq!(super::argv_agent_name(&argv(&["claude", "--model", "m"])), None);
+        assert_eq!(super::argv_agent_name(&argv(&["claude", "--name"])), None);
+        assert_eq!(super::argv_agent_name(&argv(&["--name", "x"])), None, "argv[0] 是執行檔，不是旗標");
+    }
+
+    #[test]
+    fn unnamed_child_suffix_prefers_a_legal_argv_suffix_and_falls_back_to_the_pane_id() {
+        use super::unnamed_child_suffix as s;
+        // pane id 轉成 herdr 名字的字元集：小寫、非英數換成 `-`。
+        assert_eq!(s("w9FY:p6A", "hub-kytpg9").as_deref(), Some("w9fy-p6a"));
+        assert_eq!(super::unnamed_child_suffix_from("w9FY:p6A", "hub-kytpg9", Some("hub-kytpg9-om-fix")).as_deref(), Some("om-fix"));
+        // 前綴對不上、字尾含不合法字元、整個放不進 32 字：改用 pane id。
+        for argv_name in ["other-om-fix", "hub-kytpg9-Om Fix", "hub-kytpg9-", "hub-kytpg9-aaaaaaaaaaaaaaaaaaaaaaaa"] {
+            assert_eq!(
+                super::unnamed_child_suffix_from("w9FY:p6A", "hub-kytpg9", Some(argv_name)).as_deref(),
+                Some("w9fy-p6a"),
+                "{argv_name}"
+            );
+        }
+        // pane id 太長（放不進 32 字）：留右邊、去掉開頭的 `-`。
+        assert_eq!(s("ws-100000001:p100000003", "hub-kytpg9").as_deref(), Some("100000001-p100000003"));
+        // 母名已經把 32 字用完、一個字都放不下的時候：不改名。
+        assert_eq!(s("w9FY:p6A", "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"), None);
     }
 
     /// A run whose agent herdr no longer lists still exits, tab or not.
