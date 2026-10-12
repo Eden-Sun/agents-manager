@@ -1099,13 +1099,13 @@ function ContextBar({ issues, status, hasStatus, phoneFiles, mobileOpen, onClose
   ) : content
 }
 
-function StatusLineBar({ botId, status, text }: { botId: string; status: StatusInfo | null; text: string | null }) {
+export function StatusLineBar({ botId, status, text }: { botId: string; status: StatusInfo | null; text: string | null }) {
   const phone = useMediaQuery(PHONE_QUERY)
   const line = text?.trim() ?? ''
   if (!status) {
     if (!line) return null
     return (
-      <div className="statusline-bar" role="status" title={line}>
+      <div className="statusline-bar" title={line}>
         {/* CLI 自己截掉的尾巴（`· …`）不畫：那三個點不說任何事。完整原文留在 title。 */}
         <span className="statusline-text mono">{trimClippedTail(line)}</span>
       </div>
@@ -1117,7 +1117,7 @@ function StatusLineBar({ botId, status, text }: { botId: string; status: StatusI
       ? `${compactTokens(status.context_used_tokens)}/${compactTokens(status.context_size)}`
       : null
   return (
-    <div className="statusline-bar" role="status" title={line || undefined}>
+    <div className="statusline-bar" title={line || undefined}>
       {status.account_warning ? (
         <SlItem k="帳號" className="sl-account sl-warn" title={status.account_warning}>
           ⚠ 未登入，用的是預設帳號
