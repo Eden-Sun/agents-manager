@@ -124,3 +124,12 @@ test('/api/session 回的是網頁（代理或前端的退回頁、200）：不�
   assert.ok(sentTokens.every((tok) => tok === undefined || !tok.includes('<')), JSON.stringify(sentTokens))
 })
 
+test('代理回的 HTML 錯誤頁：錯誤訊息要是短短一句，不能把整頁 HTML 當成提示顯示', async () => {
+  const t = new HttpTransport()
+  const page = `<!DOCTYPE html><html><head><title>502 Bad Gateway</title></head><body><h1>Bad Gateway</h1>${'<p>nginx</p>'.repeat(40)}</body></html>`
+  stubFetch(() => ({ status: 502, body: page }))
+  await assert.rejects(
+    () => t.request('GET', '/state'),
+    (e: unknown) => e instanceof ApiError && e.status === 502 && !e.message.includes('<') && e.message.length < 80,
+  )
+})
