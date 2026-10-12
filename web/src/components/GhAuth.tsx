@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useState } from 'react'
+import { usePollWhileVisible } from '../hooks/usePollWhileVisible'
 import * as api from '../api'
 import type { GhPending, GhStatus } from '../api/types'
 import { useStore } from '../store/store'
@@ -72,11 +73,7 @@ export function GhHostStatus({ host }: { host: string }) {
     refresh()
   }, [refresh])
 
-  useEffect(() => {
-    if (!st?.pending) return
-    const t = window.setInterval(refresh, 2000)
-    return () => window.clearInterval(t)
-  }, [st?.pending, refresh])
+  usePollWhileVisible(refresh, st?.pending ? 2000 : null)
 
   const login = async () => {
     if (busy) return
@@ -150,11 +147,7 @@ export function GhLoginButton({ host, onLoggedIn }: { host: string; onLoggedIn: 
       .catch(() => undefined)
   }, [host, onLoggedIn])
 
-  useEffect(() => {
-    if (!st?.pending) return
-    const t = window.setInterval(refresh, 2000)
-    return () => window.clearInterval(t)
-  }, [st?.pending, refresh])
+  usePollWhileVisible(refresh, st?.pending ? 2000 : null)
 
   const login = async () => {
     if (busy) return

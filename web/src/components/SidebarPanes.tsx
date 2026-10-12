@@ -1,4 +1,5 @@
 import { useEffect } from 'react'
+import { usePollWhileVisible } from '../hooks/usePollWhileVisible'
 import type { ProjectPane } from '../api'
 import { unownedRows } from '../lib/paneLists'
 import type { UnownedTag } from '../lib/paneLists'
@@ -42,9 +43,8 @@ export function SidebarUnownedPanes() {
 
   useEffect(() => {
     void refresh()
-    const t = setInterval(() => void refresh(), POLL_MS)
-    return () => clearInterval(t)
   }, [refresh])
+  usePollWhileVisible(() => void refresh(), POLL_MS)
 
   if (panes.length === 0) return null
   return (

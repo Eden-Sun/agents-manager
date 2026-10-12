@@ -1,4 +1,5 @@
 import { useEffect, useState } from 'react'
+import { usePollWhileVisible } from '../hooks/usePollWhileVisible'
 import * as api from '../api'
 import type { ProjectPane } from '../api'
 import { useStore } from '../store/store'
@@ -40,9 +41,8 @@ export function ProjectPanes({ projectId, workspaceId }: { projectId: string; wo
 
   useEffect(() => {
     void refresh()
-    const t = setInterval(() => void refresh(), 30_000)
-    return () => clearInterval(t)
   }, [refresh, projectId])
+  usePollWhileVisible(() => void refresh(), 30_000)
 
   if (!panes || panes.length === 0) return null
 
