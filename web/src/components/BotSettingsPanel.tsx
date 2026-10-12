@@ -339,6 +339,15 @@ export function BotSettingsPanel({ botId }: { botId: string }) {
 
   // 桌機非模態：只設開場焦點；手機全螢幕 sheet 才啟用 focus trap。
   useDialogFocus(phone, cardRef, { initialFocus: () => nameRef.current })
+  // 桌機沒有 focus trap，關掉時自己還焦點：開場時的焦點（開它的鈕）；焦點已經在別處（點了別的地方）就不搶。
+  useEffect(() => {
+    if (phone) return
+    const opener = document.activeElement instanceof HTMLElement ? document.activeElement : null
+    return () => {
+      const a = document.activeElement
+      if (opener?.isConnected && (!a || a === document.body)) opener.focus()
+    }
+  }, [phone])
   useEffect(() => {
     if (phone) return
     const raf = requestAnimationFrame(() => nameRef.current?.focus())
