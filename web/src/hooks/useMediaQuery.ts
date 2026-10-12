@@ -1,4 +1,4 @@
-import { useSyncExternalStore } from 'react'
+import { useCallback, useSyncExternalStore } from 'react'
 
 /* 只有這兩個斷點改變行為（`docs/UI-DECISIONS.md`）；styles.css 其他斷點純樣式。 */
 
@@ -9,13 +9,19 @@ export const DRAWER_QUERY = '(max-width: 1024px)'
 export const PHONE_QUERY = '(max-width: 640px)'
 
 export function useMediaQuery(query: string): boolean {
-  return useSyncExternalStore(
-    (onChange) => {
+  // subscribe 要跟著 query 穩定：行內箭頭函式每次 render 身分都變，React 會 unsubscribe 再 subscribe（#1643）。
+  const subscribe = useCallback(
+    (onChange: () => void) => {
       const mq = window.matchMedia(query)
       mq.addEventListener('change', onChange)
       return () => mq.removeEventListener('change', onChange)
     },
-    () => window.matchMedia(query).matches,
+    [query],
+  )
+  const snapshot = useCallback(() => window.matchMedia(query).matches, [query])
+  return useSyncExternalStore(
+    subscribe,
+    snapshot,
     // No DOM: assume desktop so the sidebar stays reachable to assistive tech.
     () => false,
   )
