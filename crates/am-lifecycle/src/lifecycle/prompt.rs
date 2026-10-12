@@ -1526,6 +1526,35 @@ mod prompt_tests {
         assert!(armed, "框已空、證據沒長出來的那一則要交給背景");
     }
 
+    /// #1483：unknown 第一次寫入失敗、Pending 超過 60 秒後由 owed_delivery 補寫，仍須重新認領補證。
+    #[tokio::test]
+    async fn issue_1483_owed_unknown_write_rearms_expired_pending() {
+        let f = fixture("claude", "test").await;
+        let app = f.env.app.clone();
+        sqlx::query("UPDATE bots SET inject_hooks=0 WHERE id=?").bind(&f.bot_id).execute(&app.db).await.unwrap();
+        sqlx::query("UPDATE runs SET pane_id='pane-prompt-test', pane_typed=1 WHERE id=?").bind(&f.run_id).execute(&app.db).await.unwrap();
+        f.env.herdr.live_pane("pane-prompt-test", tt::LivePane { width: Some(120), hide_echo: true, no_spinner: true, ..Default::default() });
+        sqlx::query(
+            "CREATE TRIGGER refuse_late_unknown BEFORE UPDATE OF delivery ON turns WHEN NEW.delivery='unknown'
+             BEGIN SELECT RAISE(ABORT, 'injected: cannot record unknown delivery'); END",
+        )
+        .execute(&app.db)
+        .await
+        .unwrap();
+
+        let err = prompt(&app, &f.bot_id, "Reply with PONG please", "issue-1483-owed").await.expect_err("第一次 unknown 寫入故意失敗");
+        let LcError::Uncommitted(body) = err else { panic!("expected owed delivery response: {err:?}") };
+        let turn_id = body["turn_id"].as_str().expect("turn id").to_string();
+        assert_eq!(body["delivery"], "unknown");
+        super::super::late_proof::expire_pending_for_test(&f.run_id);
+        sqlx::query("DROP TRIGGER refuse_late_unknown").execute(&app.db).await.unwrap();
+
+        super::super::owed_delivery::settle_locked(&app, &f.bot_id).await.expect("DB 恢復後補寫 unknown");
+        let delivery: String = sqlx::query_scalar("SELECT delivery FROM turns WHERE id=?").bind(&turn_id).fetch_one(&app.db).await.unwrap();
+        assert_eq!(delivery, "unknown");
+        assert!(super::super::late_proof::armed_in_tests().lock().unwrap().iter().any(|(t, _)| *t == turn_id), "欠帳補寫不受原 Pending 的 60 秒期限影響");
+    }
+
     /// #872：run 沒換、仍 idle 就照常往下走（建 turn）；不是被 `superseded_run` 擋掉。
     #[tokio::test]
     async fn prompt_expect_run_sends_on_the_same_idle_run() {

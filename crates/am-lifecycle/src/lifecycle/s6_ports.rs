@@ -552,6 +552,7 @@ pub trait QueueContext:
 
 pub trait OwedDeliveryServices: Send + Sync {
     fn mark_delivery(&self, turn_id: &str, record: crate::lifecycle::DeliveryRecord, delivered_at: &str) -> impl Future<Output = anyhow::Result<()>> + Send;
+    fn watch_late_proof_after_owed(&self, run_id: &str, bot_id: &str, turn_id: &str);
     fn queue_put_back(
         &self,
         bot_id: &str,

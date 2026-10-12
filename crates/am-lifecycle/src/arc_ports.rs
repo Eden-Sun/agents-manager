@@ -1149,6 +1149,7 @@ mod arc_port_70_oweddeliveryservices {
     use std::{future::Future, path::{Path, PathBuf}};
     impl<T: crate::lifecycle::s6_ports::OwedDeliveryServices + ?Sized> crate::lifecycle::s6_ports::OwedDeliveryServices for std::sync::Arc<T> {
         fn mark_delivery(&self, turn_id: &str, record: crate::lifecycle::DeliveryRecord, delivered_at: &str) -> impl Future<Output = anyhow::Result<()>> + Send { <T as crate::lifecycle::s6_ports::OwedDeliveryServices>::mark_delivery(self.as_ref(), turn_id, record, delivered_at) }
+        fn watch_late_proof_after_owed(&self, run_id: &str, bot_id: &str, turn_id: &str) { <T as crate::lifecycle::s6_ports::OwedDeliveryServices>::watch_late_proof_after_owed(self.as_ref(), run_id, bot_id, turn_id) }
         fn queue_put_back(
             &self,
             bot_id: &str,

@@ -15,7 +15,7 @@
 //! 基準（回音列數、transcript offset）只有打字的那一刻知道，所以 `confirm_submitted` 在回 `Unproven` 前記在
 //! 這裡（以 run 為鍵、很快過期），呼叫端寫完 `unknown` 再用 [`arm`] 認領。
 
-use super::delivery::{box_state_within, evidence, read_composer, same_session, typed_tail, BoxState, Delivered, Proof};
+use super::delivery::{box_state_within, evidence, read_composer, same_session, typed_tail, BoxState, Delivered, Proof, SessionMatch};
 use super::*;
 use std::collections::HashMap;
 use std::sync::{Mutex, OnceLock};
@@ -77,6 +77,17 @@ fn take(run_id: &str) -> Option<Pending> {
     (p.noted.elapsed() <= CLAIM_WITHIN).then_some(p)
 }
 
+fn take_after_owed_write(run_id: &str) -> Option<Pending> {
+    registry().lock().unwrap_or_else(|e| e.into_inner()).remove(run_id)
+}
+
+#[cfg(all(test, feature = "daemon-test-harness"))]
+pub(crate) fn expire_pending_for_test(run_id: &str) {
+    if let Some(p) = registry().lock().unwrap_or_else(|e| e.into_inner()).get_mut(run_id) {
+        p.noted = Instant::now() - CLAIM_WITHIN - Duration::from_secs(1);
+    }
+}
+
 /// 一次檢查的結論。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Look {
@@ -107,13 +118,20 @@ pub async fn look(app: &impl LcHost, bot_id: &str, turn_id: &str, p: &Pending) -
         Ok(None) => return Look::Stop,
         Err(_) => return Look::Wait,
     };
-    if run.state != "running" || run.pane_id.as_deref() != Some(p.pane.as_str()) || !same_session(app, &run_id, &p.proof).await {
+    if run.state != "running" || run.pane_id.as_deref() != Some(p.pane.as_str()) {
         return Look::Stop;
+    }
+    match same_session(app, &run_id, &p.proof).await {
+        SessionMatch::Same => {}
+        SessionMatch::Changed => return Look::Stop,
+        SessionMatch::Unavailable => return Look::Wait,
     }
     let Ok(client) = client_for_run(app, &run).await else { return Look::Wait };
     let Ok(screen) = read_composer(&client, &p.pane).await else { return Look::Wait };
-    if evidence(&p.kind, &p.proof, p.offset, &screen, &p.text).is_ok_and(|n| n > p.baseline) {
-        return Look::Submitted;
+    match evidence(&p.kind, &p.proof, p.offset, &screen, &p.text) {
+        Ok(n) if n > p.baseline => return Look::Submitted,
+        Ok(_) => {}
+        Err(_) => return Look::Wait,
     }
     // 沒有證據時只看「框空了＋agent 在忙」：框裡還有字（字還沒送出去）或畫面讀不準，都不算。
     if box_state_within(&p.kind, &screen, typed_tail(&p.text)) != BoxState::Empty {
@@ -187,9 +205,19 @@ pub(crate) fn armed_in_tests() -> &'static Mutex<Vec<(String, Pending)>> {
 /// [`watch`]／[`look`] 直接驗。
 pub fn arm(app: &impl LcHost, run_id: &str, bot_id: &str, turn_id: &str) {
     let Some(p) = take(run_id) else { return };
+    arm_pending(app, run_id, bot_id, turn_id, p);
+}
+
+/// 欠帳的 unknown 寫入結清時，Pending 對應的回合已明確，原本的認領期限不再適用。
+pub fn arm_after_owed_write(app: &impl LcHost, run_id: &str, bot_id: &str, turn_id: &str) {
+    let Some(p) = take_after_owed_write(run_id) else { return };
+    arm_pending(app, run_id, bot_id, turn_id, p);
+}
+
+fn arm_pending(app: &impl LcHost, run_id: &str, bot_id: &str, turn_id: &str, p: Pending) {
     #[cfg(test)]
     {
-        let _ = (app, bot_id);
+        let _ = (app, run_id, bot_id);
         armed_in_tests().lock().unwrap_or_else(|e| e.into_inner()).push((turn_id.to_string(), p));
     }
     #[cfg(not(test))]

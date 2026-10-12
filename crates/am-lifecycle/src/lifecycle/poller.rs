@@ -904,20 +904,20 @@ async fn resend_lost_prompt(app: &impl LcHost, run_id: &str, turn_id: &str, sent
         }
         Ok(Delivered::Unproven(why)) => {
             tracing::warn!(run_id, turn = %turn_id, reason = why, "re-delivery could not be proven either");
-            unproven(app, &bot.id, turn_id, why).await
+            unproven(app, run_id, &bot.id, turn_id, why).await
         }
         // `execute_delivery` 在打第一個字之前的失敗都是 `NotAttempted`，走到 `Err` 就是鍵可能已經送出去了。
         Err(e) => {
             tracing::warn!(run_id, turn = %turn_id, error = %e, "re-delivering a lost prompt failed after typing started");
-            unproven(app, &bot.id, turn_id, "resend_error").await
+            unproven(app, run_id, &bot.id, turn_id, "resend_error").await
         }
     }
 }
 
 /// 重送打過字、證明不了：記成 `delivery='unknown'`；寫不進去就欠著（`UnprovenOwed`，#193）。
-async fn unproven(app: &impl LcHost, bot_id: &str, turn_id: &str, why: &'static str) -> Resend {
-    match mark_resend_unproven(app, bot_id, turn_id, why).await {
-        Ok(()) => Resend::Unproven,
+async fn unproven(app: &impl LcHost, run_id: &str, bot_id: &str, turn_id: &str, why: &'static str) -> Resend {
+    match mark_resend_unproven(app, run_id, bot_id, turn_id, why).await {
+        Ok(_) => Resend::Unproven,
         Err(e) => {
             tracing::warn!(turn = %turn_id, error = ?e, "could not record an unproven resend as unknown delivery; owed, the turn is not failed meanwhile");
             Resend::UnprovenOwed(why)
@@ -929,7 +929,7 @@ async fn unproven(app: &impl LcHost, bot_id: &str, turn_id: &str, why: &'static 
 /// 兩種都不是「agent 沒反應」，判 failed 會讓交辦跟著失敗、AGM 重派同一件事（review3 c3 M5）。
 /// 照 §6「Unproven 才會變成 unknown」記成 `delivery='unknown'`，並留一則說明；hook 來了照樣認領，
 /// 真的沒人收由 §4.3b 收尾。寫不進去回錯（#193）：呼叫端記成欠著，補上之前不判失敗。
-async fn mark_resend_unproven(app: &impl LcHost, bot_id: &str, turn_id: &str, why: &str) -> anyhow::Result<()> {
+async fn mark_resend_unproven(app: &impl LcHost, run_id: &str, bot_id: &str, turn_id: &str, why: &str) -> anyhow::Result<bool> {
     let text = format!(
         "（畫面上完全沒有這則訊息，已自動重打一次，但證明不了有送出（{why}）：字可能還留在輸入框裡，也可能已經被收下、排在後面。\
          這一則先記成「送達不明」，不判失敗。請到終端看一下——還在框裡就按 Enter 或清掉；已經在跑就等它回完。）"
@@ -952,11 +952,15 @@ async fn mark_resend_unproven(app: &impl LcHost, bot_id: &str, turn_id: &str, wh
         anyhow::Ok(Some(m))
     }
     .await?;
+    let applied = res.is_some();
     if let Some(m) = res {
         emit_message_added(app, bot_id, m).await;
         emit_turn(app, turn_id).await;
     }
-    Ok(())
+    if applied {
+        super::late_proof::arm(app, run_id, bot_id, turn_id);
+    }
+    Ok(applied)
 }
 
 /// The watchdog's resend, with one retry when the first try was refused before typing anything.
@@ -1159,8 +1163,8 @@ async fn stall_round(
         return StallRound::Replaced;
     }
     if let Some(why) = st.owed_unproven {
-        match mark_resend_unproven(app, bot_id, turn_id, why).await {
-            Ok(()) => st.owed_unproven = None,
+        match mark_resend_unproven(app, run_id, bot_id, turn_id, why).await {
+            Ok(_) => st.owed_unproven = None,
             Err(e) => unsure = stall_unsure(turn_id, &e),
         }
     }
@@ -2277,6 +2281,20 @@ mod issue_17_tests {
         t
     }
 
+    /// #1483：送出後第一次 session DB 讀取短暫失敗，不應回報 session_changed 而丟棄已可驗證的 transcript 證據。
+    #[tokio::test]
+    async fn issue_1483_delivery_retries_after_a_transient_session_read_error() {
+        let f = fixture("claude", "").await;
+        with_transcript(&f, wide()).await;
+        let app = f.env.app.clone();
+        db::set_pane_typed(&app.db, &f.run_id).await.unwrap();
+        let (run, bot) = run_and_bot(&f).await;
+        let client = client_for_run(&app, &run).await.unwrap();
+        super::super::delivery::fail_next_session_read_for_test(&f.run_id);
+
+        assert_eq!(deliver_prompt(&app, &client, &run, &bot, "第一行\n第二行", false, false).await.unwrap(), Delivered::Submitted);
+    }
+
     #[tokio::test]
     async fn a_short_line_is_proven_by_its_echo_row_on_a_pane_of_known_width() {
         let f = fixture("claude", "").await;
@@ -3028,6 +3046,25 @@ mod issue_17_tests {
         assert_eq!(turn(&app, &f.turn_id).await.status, "in_flight", "送達不明的不判失敗");
     }
 
+    /// #1483：重送框已空但回音列延遲時，mark_resend_unproven 寫成 unknown 後必須認領 delivery 記下的 Pending。
+    #[tokio::test]
+    async fn issue_1483_watchdog_resend_arms_its_late_proof() {
+        let f = fixture("claude", "").await;
+        live(&f, crate::testing::LivePane {
+            transcript: vec!["⏺ 先前的回覆".into()],
+            hide_echo: true,
+            no_spinner: true,
+            ..wide()
+        });
+        let app = f.env.app.clone();
+        db::set_pane_typed(&app.db, &f.run_id).await.unwrap();
+        let sent = vec!["Reply with PONG please".to_string()];
+
+        assert_eq!(resend_lost_prompt(&app, &f.run_id, &f.turn_id, &sent).await, Resend::Unproven);
+        assert_eq!(turn(&app, &f.turn_id).await.delivery, "unknown");
+        assert!(late_proof::armed_in_tests().lock().unwrap().iter().any(|(t, _)| *t == f.turn_id), "watchdog 寫成 unknown 後要 arm 同一則 Pending");
+    }
+
     /// #193：重送打過字、證明不了，`delivery='unknown'` 卻寫不進去——以前只記一行 warning，接著照 `delivery='ok'`
     /// 判 failed，打過的字可能已經被收下，AGM 重派同一件事。現在欠著、這一輪不判；寫得進去的下一輪補上，不判失敗、不重打。
     #[tokio::test]
@@ -3457,6 +3494,41 @@ mod issue_17_tests {
         late_proof::arm(&app, &f.run_id, &f.bot_id, &f.turn_id);
         let armed = late_proof::armed_in_tests().lock().unwrap().iter().find(|(t, _)| *t == f.turn_id).map(|(_, p)| p.clone());
         armed.expect("not_proven_submitted 的那一則被認領了")
+    }
+
+    /// #1483：`same_session` 的一次暫時 DB 讀取錯誤應回 Wait；讀取恢復後仍能用 transcript 證據升級。
+    #[tokio::test]
+    async fn issue_1483_late_proof_retries_after_a_transient_session_read_error() {
+        let f = fixture("claude", "").await;
+        let path = with_transcript(&f, quiet()).await;
+        let text = "Reply with PONG please";
+        std::fs::write(&path, format!("{{\"type\":\"user\",\"message\":{{\"role\":\"user\",\"content\":{}}}}}\n", serde_json::to_string(text).unwrap())).unwrap();
+        let app = f.env.app.clone();
+        sqlx::query("UPDATE turns SET delivery='unknown', delivery_verified=0 WHERE id=?").bind(&f.turn_id).execute(&app.db).await.unwrap();
+        let proof = Proof::Transcript { format: LogFormat::Claude, path, session_id: "sess-1".into() };
+        let p = late_proof::Pending::new("claude", "pane-17", &proof, 0, 0, text, db::now());
+        super::super::delivery::fail_next_session_read_for_test(&f.run_id);
+
+        assert_eq!(late_proof::look(&app, &f.bot_id, &f.turn_id, &p).await, Look::Wait, "暫時讀取錯誤不能終止 watcher");
+        assert_eq!(late_proof::look(&app, &f.bot_id, &f.turn_id, &p).await, Look::Submitted, "讀取恢復後補到證據");
+    }
+
+    /// #1483：transcript 暫時讀不到時不可提早降級成 Unverified，下一輪讀得到就採用原證據。
+    #[tokio::test]
+    async fn issue_1483_late_proof_retries_after_a_transient_transcript_read_error() {
+        let f = fixture("claude", "").await;
+        let path = with_transcript(&f, quiet()).await;
+        std::fs::remove_file(&path).unwrap();
+        let app = f.env.app.clone();
+        sqlx::query("UPDATE runs SET agent_status='working' WHERE id=?").bind(&f.run_id).execute(&app.db).await.unwrap();
+        sqlx::query("UPDATE turns SET delivery='unknown', delivery_verified=0 WHERE id=?").bind(&f.turn_id).execute(&app.db).await.unwrap();
+        let text = "Reply with PONG please";
+        let proof = Proof::Transcript { format: LogFormat::Claude, path: path.clone(), session_id: "sess-1".into() };
+        let p = late_proof::Pending::new("claude", "pane-17", &proof, 0, 0, text, db::now());
+
+        assert_eq!(late_proof::look(&app, &f.bot_id, &f.turn_id, &p).await, Look::Wait, "暫時 I/O 錯誤不能用較弱結果結案");
+        std::fs::write(&path, format!("{{\"type\":\"user\",\"message\":{{\"role\":\"user\",\"content\":{}}}}}\n", serde_json::to_string(text).unwrap())).unwrap();
+        assert_eq!(late_proof::look(&app, &f.bot_id, &f.turn_id, &p).await, Look::Submitted, "transcript 可讀後照原證據升級");
     }
 
     async fn delivery_row(f: &Fixture) -> (String, String, i64, i64) {

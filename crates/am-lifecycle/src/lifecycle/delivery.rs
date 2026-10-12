@@ -576,8 +576,19 @@ fn should_repaste(proof: &Proof, box_empty: bool, evidence_grew: bool) -> bool {
 }
 
 /// Is the run still on the session the transcript proof was taken from?
-pub async fn same_session(app: &impl crate::capabilities::Db, run_id: &str, proof: &Proof) -> bool {
-    let Proof::Transcript { format, path, session_id } = proof else { return true };
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SessionMatch {
+    Same,
+    Changed,
+    Unavailable,
+}
+
+pub async fn same_session(app: &impl crate::capabilities::Db, run_id: &str, proof: &Proof) -> SessionMatch {
+    let Proof::Transcript { format, path, session_id } = proof else { return SessionMatch::Same };
+    #[cfg(all(test, feature = "daemon-test-harness"))]
+    if fail_session_read_for_test(run_id) {
+        return SessionMatch::Unavailable;
+    }
     match db::run(app.db(), run_id).await {
         Ok(Some(r)) => {
             let same_id = r.native_session_id.as_deref() == Some(session_id.as_str());
@@ -586,10 +597,27 @@ pub async fn same_session(app: &impl crate::capabilities::Db, run_id: &str, proo
                 LogFormat::Claude | LogFormat::Agy => r.transcript_path.as_deref().map(std::path::Path::new) == Some(path.as_path()),
                 LogFormat::Codex => true,
             };
-            same_id && same_path
+            if same_id && same_path { SessionMatch::Same } else { SessionMatch::Changed }
         }
-        _ => false,
+        Ok(None) => SessionMatch::Changed,
+        Err(_) => SessionMatch::Unavailable,
     }
+}
+
+#[cfg(all(test, feature = "daemon-test-harness"))]
+fn session_read_failures() -> &'static std::sync::Mutex<std::collections::HashSet<String>> {
+    static FAILURES: std::sync::OnceLock<std::sync::Mutex<std::collections::HashSet<String>>> = std::sync::OnceLock::new();
+    FAILURES.get_or_init(Default::default)
+}
+
+#[cfg(all(test, feature = "daemon-test-harness"))]
+pub(crate) fn fail_next_session_read_for_test(run_id: &str) {
+    session_read_failures().lock().unwrap_or_else(|e| e.into_inner()).insert(run_id.to_string());
+}
+
+#[cfg(all(test, feature = "daemon-test-harness"))]
+fn fail_session_read_for_test(run_id: &str) -> bool {
+    session_read_failures().lock().unwrap_or_else(|e| e.into_inner()).remove(run_id)
 }
 
 /// Carry out a plan. Up to the first keystroke every give-up is `NotAttempted`; after it, every
@@ -879,15 +907,19 @@ pub async fn confirm_submitted(
     for _ in 0..SUBMIT_CHECKS {
         tokio::time::sleep(Duration::from_millis(SUBMIT_SETTLE_MS)).await;
         let now = read().await?;
-        if !same_session(app, &run.id, proof).await {
-            tracing::warn!(run = %run.id, bot = %bot.name, "the session changed while delivering; the transcript proof no longer applies");
-            return Ok(Delivered::Unproven("session_changed"));
+        match same_session(app, &run.id, proof).await {
+            SessionMatch::Same => {}
+            SessionMatch::Changed => {
+                tracing::warn!(run = %run.id, bot = %bot.name, "the session changed while delivering; the transcript proof no longer applies");
+                return Ok(Delivered::Unproven("session_changed"));
+            }
+            SessionMatch::Unavailable => continue,
         }
         let state = box_state_within(&bot.kind, &now, typed_tail(text));
-        let proof_grew = evidence(&bot.kind, proof, offset, &now, text)? > baseline;
+        let proof_evidence = if state == BoxState::Empty { evidence(&bot.kind, proof, offset, &now, text).ok() } else { None };
         // #749：rollout／回音還證不出來時，問 codex 自己的 thread 歷史。只有 positive evidence 會升級成 `Submitted`；
         // 歷史讀不到、沒看到都照舊往下走，不當成「沒送到」。composer 非空時也查，避免已送達的 A 讓補按送出新草稿 B。
-        if !proof_grew {
+        if !proof_evidence.is_some_and(|n| n > baseline) {
             if let Some(mark) = structured {
                 if app.codex_prompt_landed(mark, &mut history_conn, text).await {
                     tracing::info!(run = %run.id, bot = %bot.name, "prompt proven submitted by the codex thread history");
@@ -896,7 +928,7 @@ pub async fn confirm_submitted(
                 }
             }
         }
-        if proof_grew {
+        if proof_evidence.is_some_and(|n| n > baseline) {
             tracing::info!(run = %run.id, bot = %bot.name, proof = ?proof, "prompt typed into the pane and proven submitted");
             note_codex_delivery(&bot.kind, if matches!(proof, Proof::Transcript { .. }) { crate::codex_history::Evidence::Rollout } else { crate::codex_history::Evidence::Screen });
             return Ok(Delivered::Submitted);
@@ -909,6 +941,11 @@ pub async fn confirm_submitted(
                 note_codex_delivery(&bot.kind, crate::codex_history::Evidence::Screen);
                 return Ok(Delivered::Unverified);
             }
+            BoxState::Empty if proof_evidence.is_some_and(|n| n > baseline) => {
+                tracing::info!(run = %run.id, bot = %bot.name, proof = ?proof, "prompt typed into the pane and proven submitted");
+                note_codex_delivery(&bot.kind, if matches!(proof, Proof::Transcript { .. }) { crate::codex_history::Evidence::Rollout } else { crate::codex_history::Evidence::Screen });
+                return Ok(Delivered::Submitted);
+            }
             // claude 清掉隱形字元、等人 review（#205）：框裡是**清過的**字，再按一次送出去的就不是記下的那一段，
             // 證據永遠對不上。不按，交給使用者看。送出前的清理（`pane_text::for_pane`）本來就不該讓這個畫面出現。
             BoxState::NonEmpty if super::pane_text::invisible_review_notice(&now) => {
@@ -919,7 +956,10 @@ pub async fn confirm_submitted(
                 return Ok(Delivered::Unproven("composer_changed_or_unreadable"));
             }
             BoxState::Unready => return Ok(Delivered::Unproven("composer_unreadable")),
-            BoxState::NonEmpty if may_press_retry_submit(&bot.kind, &now, text, proof_grew, pressed_again) => {
+            BoxState::NonEmpty if crate::composer_parse::composer_text_whole(&bot.kind, &now).as_deref() != Some(text) => {
+                return Ok(Delivered::Unproven("composer_changed_or_unreadable"));
+            }
+            BoxState::NonEmpty if may_press_retry_submit(&bot.kind, &now, text, false, pressed_again) => {
                 tracing::warn!(run = %run.id, bot = %bot.name, ?submit, "prompt still in the composer after the submit key; pressing it again");
                 client.pane_send_keys(pane, submit.keys()).await?;
                 pressed_again = true;
@@ -971,7 +1011,7 @@ pub async fn submit_landed(app: &impl crate::capabilities::Db, client: &HerdrCli
     for _ in 0..SUBMIT_CHECKS {
         tokio::time::sleep(Duration::from_millis(SUBMIT_SETTLE_MS)).await;
         if matches!(t.proof, Proof::Transcript { .. })
-            && same_session(app, &run.id, &t.proof).await
+            && same_session(app, &run.id, &t.proof).await == SessionMatch::Same
             && evidence(&bot.kind, &t.proof, t.offset, "", text).is_ok_and(|n| n > t.baseline)
         {
             return Landed::Yes(Delivered::Submitted);
