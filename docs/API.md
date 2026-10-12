@@ -1484,7 +1484,7 @@ cargo shim 把這兩個明確的拒絕（`not_found`／`token_mismatch`）視為
 - `subtree_bytes` = 自己 + 子孫 RSS，清單依它降冪。只列 `claude`/`codex`/`grok`/`node`/`bash`/`zsh`/`sh`/`fish` 且 ≥ 8 MiB 的，其餘併進父程序。
 
 ### `POST /api/mem/processes/kill`
-`{"host":"local","pid":59407,"signal":"TERM"}`（`signal` 只認 `TERM` / `KILL`，預設 TERM）→ `{"host","pid","signal","exe","freed_bytes","skipped_pids"}`，並立刻推一次 `mem_updated`。`skipped_pids`＝子樹裡起始時間對不上、因此沒收到訊號的成員（#891）。
+`{"host":"local","pid":59407,"signal":"TERM"}`（`signal` 只認 `TERM` / `KILL`，不分大小寫；沒帶或 `null` 就是 `TERM`）→ `{"host","pid","signal","exe","freed_bytes","skipped_pids"}`，並立刻推一次 `mem_updated`。其他值（含非字串）回 `400 {"error":"bad_signal","signal","allowed":["TERM","KILL"]}`，在查主機與取樣之前就擋下，什麼都不送。`skipped_pids`＝子樹裡起始時間對不上、因此沒收到訊號的成員（#891）。
 **訊號送給整棵子樹**（目標＋子孫，深的在前，先 `STOP` 再送再 `CONT`），所以 `freed_bytes`（＝`subtree_bytes`）才是真的會放掉的量（#529）；
 子孫裡有 `bot`／`herdr`／`daemon` 就整個拒絕（同目標本身的規則），`daemon` 回 400。
 送訊號前重新取樣判定：不在該主機 herdr 樹裡 400；就是 herdr 400；`owner == "bot"` → `409 {"reason":"bot_process","bot_id","message"}`（走 `POST /bots/{id}/stop`）。
