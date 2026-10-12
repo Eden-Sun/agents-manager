@@ -1243,7 +1243,9 @@ export function Sidebar() {
           // 停用身分的 bot 收起；搜尋中不收。
           const shown = query ? all : all.filter((b) => !hiddenQuota.has(b.id))
           const hiddenCount = all.length - shown.length
-          const list = shown.filter((b) => !b.parent_bot_id)
+          // 父列不在這一份清單裡（被刪、被收起）的子 agent 沒有地方掛：照頂層列畫，不然整顆從側欄消失。
+          const shownIds = new Set(shown.map((b) => b.id))
+          const list = shown.filter((b) => !b.parent_bot_id || !shownIds.has(b.parent_bot_id))
           const childrenOf = (id: string) => shown.filter((b) => b.parent_bot_id === id)
           // 孫代也要畫（SPEC §6.5a）：子列 → 它的子列 → 下一個子列，深度優先。
           const descendantsOf = (id: string, seen = new Set<string>()): Bot[] =>
