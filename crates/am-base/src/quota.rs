@@ -880,10 +880,14 @@ async fn set_inner(
             }
         }
     }
-    // 重置券只有 app-server 讀得到，別的來源不該抹掉。
+    // 重置券只有 app-server 讀得到，別的來源不該抹掉；但 app-server 已確認換了方案（兩邊的 planType 都知道且不同）
+    // 時，舊方案的券不再屬於這個帳號，不沿用（#1508）。
     if q.reset_credits.is_none() {
         if let Some(prev) = quotas.get(&key) {
-            q.reset_credits = prev.reset_credits.clone();
+            let plan_changed = q.source == "codex-app-server" && q.plan.is_some() && prev.plan.is_some() && q.plan != prev.plan;
+            if !plan_changed {
+                q.reset_credits = prev.reset_credits.clone();
+            }
         }
     }
     // 撞上限只有 CLI 橫幅看得到（§12.4），不沿用會被 app-server 輪詢洗回滿格（2026-09-12 使用者）。
