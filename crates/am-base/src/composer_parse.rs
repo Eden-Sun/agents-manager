@@ -411,6 +411,16 @@ pub fn composer_text_whole(kind: &str, screen: &str) -> Option<String> {
     composer_text_rows(kind, screen, kind == "claude")
 }
 
+/// 字頭行的字頭在第 0 欄（框的話是框線後第一格）。縮排的字頭是草稿的續行（`  ❯ npm test`），不是輸入列。
+fn at_marker_column(raw: &str, marker: &str) -> bool {
+    let t = raw.trim_end();
+    let body = match t.trim_start().strip_prefix('│') {
+        Some(inner) => inner.strip_prefix(' ').unwrap_or(inner),
+        None => t,
+    };
+    body.starts_with(marker)
+}
+
 fn composer_text_rows(kind: &str, screen: &str, keep_blank_rows: bool) -> Option<String> {
     let plain = plain_without_hints(kind, screen);
     let screen = plain.as_str();
@@ -423,7 +433,7 @@ fn composer_text_rows(kind: &str, screen: &str, keep_blank_rows: bool) -> Option
     let tail = &lines[from..];
     let idx = tail.iter().rposition(|l| {
         let t = undecorate_row(l);
-        t.starts_with(marker) && !t[marker.len()..].trim().is_empty()
+        at_marker_column(l, marker) && t.starts_with(marker) && !t[marker.len()..].trim().is_empty()
     })?;
     let mut out: Vec<String> = Vec::new();
     for (n, line) in tail[idx..].iter().enumerate() {
@@ -489,4 +499,16 @@ pub async fn read_styled_snapshot(
 
 pub async fn read_styled(client: &HerdrClient, pane: &str, source: &str, lines: u32) -> Result<String> {
     Ok(read_styled_snapshot(client, pane, source, lines).await?.text)
+}
+
+#[cfg(test)]
+mod composer_draft_shape_tests {
+    use super::*;
+
+    /// 2.1.281 真畫面形狀（`claude-2.1.281-multiline-draft.ansi`）：`❯` 在第 0 欄、續行縮排兩格、框線是 `─`。
+    #[test]
+    fn a_continuation_line_that_starts_with_the_glyph_is_draft_text() {
+        let screen = "────────\n❯ 請執行\n  ❯ npm test\n  第三段\n────────\n  host | pt | 5h:96%\n";
+        assert_eq!(composer_text_whole("claude", screen).as_deref(), Some("請執行\n❯ npm test\n第三段"));
+    }
 }
