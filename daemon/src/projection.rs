@@ -529,6 +529,11 @@ async fn project_inner(
         return Err(e);
     }
 
+    // 投影的 DB 寫入併成一個交易（#1613）：中途失敗（撞名）時，前面已經寫進去的列跟著退回，才跟 config 的退回對得上。
+    // 要軟刪的清單在交易開始前取（讀取不改狀態；交易裡的 upsert 只會把仍在 config 裡的列弄活，不影響它）。
+    let live_bots_before = db::live_bots(pool).await?;
+    let live_projects_before = db::live_projects(pool).await?;
+    let mut tx = db::begin_write(pool).await?;
     for (p_at, p) in cfg.projects.iter().enumerate() {
         let pid = p.id.clone().unwrap();
         sqlx::query(
@@ -544,7 +549,7 @@ async fn project_inner(
         .bind(p_at as i64)
         .bind(p.handed_off_to.as_deref().map(str::trim))
         .bind(&now)
-        .execute(pool)
+        .execute(&mut *tx)
         .await?;
 
         for (b_at, b) in p.bots.iter().enumerate() {
@@ -578,9 +583,15 @@ async fn project_inner(
             .bind(b_at as i64)
             .bind(&token)
             .bind(&now)
-            .execute(pool)
+            .execute(&mut *tx)
             .await?;
-            db::conversation_id(pool, &bid).await?;
+            // `db::conversation_id` 只收 pool；這裡在同一個交易裡建（同一條 ON CONFLICT 語意）。
+            sqlx::query("INSERT INTO conversations (id, bot_id, created_at) VALUES (?,?,?) ON CONFLICT(bot_id) DO NOTHING")
+                .bind(db::ulid())
+                .bind(&bid)
+                .bind(&now)
+                .execute(&mut *tx)
+                .await?;
         }
     }
 
@@ -588,20 +599,21 @@ async fn project_inner(
     //
     // `child` bots (agents a bot spawned, adopted by the reconcile) never enter config.toml,
     // so the "not in the TOML ⇒ deleted" rule must not touch them.
-    for b in db::live_bots(pool).await? {
+    for b in live_bots_before {
         if b.managed_by != "user" {
             continue;
         }
         if !live_bots.contains(&b.id) {
-            sqlx::query("UPDATE bots SET deleted_at=? WHERE id=?").bind(&now).bind(&b.id).execute(pool).await?;
+            sqlx::query("UPDATE bots SET deleted_at=? WHERE id=?").bind(&now).bind(&b.id).execute(&mut *tx).await?;
             tracing::info!(bot = %b.name, bot_id = %b.id, caller = %at, http = %crate::config_audit::http_caller(), "bot removed from config.toml; soft-deleted");
         }
     }
-    for p in db::live_projects(pool).await? {
+    for p in live_projects_before {
         if !live_projects.contains(&p.id) {
-            sqlx::query("UPDATE projects SET deleted_at=? WHERE id=?").bind(&now).bind(&p.id).execute(pool).await?;
+            sqlx::query("UPDATE projects SET deleted_at=? WHERE id=?").bind(&now).bind(&p.id).execute(&mut *tx).await?;
         }
     }
+    tx.commit().await?;
     Ok(())
 }
 
@@ -1324,6 +1336,47 @@ mod tests {
         assert!(err.to_string().contains("UNIQUE"), "{err}");
         assert!(std::fs::read_to_string(&path).unwrap().contains("hand-edited"), "投影失敗的退回不能把使用者的手改蓋掉");
         assert_eq!(store.get().await.server.herdr_session, "hand-edited", "記憶體也要是手改後的內容");
+
+        pool.close().await;
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// 投影到一半失敗（後面那顆撞名）：config 會退回，DB 也得退回；以前前面那顆已經寫進 DB 的 bot 會留下來，
+    /// config 裡卻沒有它，下一次投影就把它當成「被移出 config」軟刪（交易範圍）。
+    #[tokio::test]
+    async fn a_failed_projection_does_not_leave_earlier_bots_in_the_db() {
+        let dir = crate::testing::track(std::env::temp_dir().join(format!("am-uap-partial-{}", db::ulid())));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("config.toml");
+        let pool = crate::app_ports_p1::open(&dir.join("db.sqlite3")).await.unwrap();
+        project_text(&path, &pool, &config_text(&["alfa"])).await.unwrap();
+        sqlx::query(
+            "INSERT INTO bots (id, project_id, name, kind, args_json, autostart, inject_hooks, hook_token, managed_by, created_at)
+             VALUES ('child-review','p1','review','claude','[]',0,1,'tok','child',?)",
+        )
+        .bind(db::now())
+        .execute(&pool)
+        .await
+        .unwrap();
+        let store = crate::runners::app_ports_p2::load_config(path.clone()).await.unwrap();
+
+        let err = update_and_project(&store, &pool, |cfg| {
+            for (id, name) in [("user-bravo", "bravo"), ("user-review", "review")] {
+                let mut bot = cfg.projects[0].bots[0].clone();
+                bot.id = Some(id.into());
+                bot.name = name.into();
+                cfg.projects[0].bots.push(bot);
+            }
+            Ok(())
+        })
+        .await
+        .unwrap_err();
+        assert!(err.to_string().contains("UNIQUE"), "{err}");
+        let names: Vec<String> = sqlx::query_scalar("SELECT name FROM bots WHERE project_id = 'p1' AND deleted_at IS NULL AND managed_by = 'user' ORDER BY name")
+            .fetch_all(&pool)
+            .await
+            .unwrap();
+        assert_eq!(names, vec!["alfa".to_string()], "失敗的投影不能在 DB 留下 config 已經退回的 bravo");
 
         pool.close().await;
         std::fs::remove_dir_all(&dir).unwrap();
