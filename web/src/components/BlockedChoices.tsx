@@ -15,7 +15,7 @@ import {
   type TuiChoiceMenu,
   type WalkTarget,
 } from '../lib/tuiChoices'
-import type { PendingAt } from '../lib/pendingQuestion'
+import { jevMatchesTitle, type PendingAt } from '../lib/pendingQuestion'
 import { useStore } from '../store/store'
 import { TypeAnswerField } from './TypeAnswerField'
 import './blockedChoices.css'
@@ -52,6 +52,8 @@ export function BlockedChoices({
   /** pane 太矮、題目或分頁列被裁掉時，從原題補：沒畫出來的題目、第幾題與上一題／下一題。 */
   pendingAt?: PendingAt | null
 }) {
+  // Jev 對這一題的建議（issue #1475）：只在對得上畫面上的列時標，不影響任何按鍵。
+  const jev = pendingAt?.jev ?? null
   const readTerminal = useStore((s) => s.readTerminal)
   const sendKeys = useStore((s) => s.sendKeys)
   const sendText = useStore((s) => s.sendText)
@@ -450,6 +452,11 @@ export function BlockedChoices({
               </span>
               <span className="bc-title">{c.title}</span>
               <span className="bc-mark">
+                {jev && jevMatchesTitle(jev.label, c.title) ? (
+                  <span className="bc-jev" title="Jev 的建議，只供參考，不會自動選">
+                    Jev 建議 {jev.score.toFixed(2)}
+                  </span>
+                ) : null}
                 {busy?.kind === 'choice' && busy.key === String(i) ? '送出中…' : c.current ? '游標在此' : ''}
               </span>
               {shown && c.detail ? <span className="bc-detail">{c.detail}</span> : null}

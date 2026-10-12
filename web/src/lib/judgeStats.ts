@@ -1,13 +1,14 @@
 /**
  * Jev 帳本（`GET /api/judge/shadow`，SPEC §4.3c）的統計：純函式，給環境設定面板用。
- * 超過門檻的定義照 SPEC：stuck ≥0.7、same_work ≥0.5、report_evidence 的 claims_verified <0.8 或 asks_parent_action ≥0.8。
+ * 超過門檻的定義照 SPEC：stuck ≥0.7、same_work ≥0.5、report_evidence 的 claims_verified <0.8 或 asks_parent_action ≥0.8、
+ * ask_option（AskUserQuestion 選項建議，issue #1475）有任何一題 daemon 標了 `suggested`（最高分 ≥0.7 且比第二名高 ≥0.15）。
  * limit_hit 在 SPEC 裡沒有門檻（只記錄、不推提示），所以超過門檻那欄是 `null`＝不適用。
  */
 import type { JudgeShadowRow } from '../api/judge'
 
-export type JudgeScene = 'limit_hit' | 'stuck_queued' | 'same_work' | 'report_evidence'
+export type JudgeScene = 'limit_hit' | 'stuck_queued' | 'same_work' | 'report_evidence' | 'ask_option'
 
-/** 四個場景：名稱與「什麼時候問」（照 SPEC §4.3c 的觸發條件，給沒有紀錄時的說明用）。 */
+/** 五個場景：名稱與「什麼時候問」（照 SPEC §4.3c 的觸發條件，給沒有紀錄時的說明用）。 */
 export const JUDGE_SCENES: readonly { id: JudgeScene; name: string; when: string }[] = [
   {
     id: 'limit_hit',
@@ -28,6 +29,11 @@ export const JUDGE_SCENES: readonly { id: JudgeScene; name: string; when: string
     id: 'report_evidence',
     name: '完成回報的證據',
     when: '交辦從在途收成，且回報是 hook 的完成回覆（不含從終端機刮下來的）時，問回報有沒有宣稱已驗證，以及要不要收件者動手。',
+  },
+  {
+    id: 'ask_option',
+    name: '選項建議',
+    when: 'claude 用 AskUserQuestion 問單選題時，問使用者最可能選哪一項；最高分 ≥0.7 且比第二名高 ≥0.15 才在選項旁標「Jev 建議」。只提示，不代答。',
   },
 ]
 
@@ -54,6 +60,32 @@ export function sameWorkStale(row: JudgeShadowRow): string | null {
   }
 }
 
+const isError = (row: JudgeShadowRow) => row.error !== null && row.error !== ''
+
+/** `ask_option` 列的 `matched_line`（daemon 寫的 `{tool_use_id, questions:[{index,scores,suggested}]}`）；答案還沒回來或壞掉是 null。 */
+export function askOptionQuestions(row: JudgeShadowRow): { index: number; scores: number[]; suggested: number | null }[] | null {
+  if (row.regex_verdict !== 'ask_option' || !row.matched_line || isError(row)) return null
+  try {
+    const v: unknown = JSON.parse(row.matched_line)
+    const qs = typeof v === 'object' && v !== null ? (v as Record<string, unknown>).questions : undefined
+    if (!Array.isArray(qs)) return null
+    const out: { index: number; scores: number[]; suggested: number | null }[] = []
+    for (const q of qs) {
+      if (typeof q !== 'object' || q === null) return null
+      const r = q as Record<string, unknown>
+      if (!Array.isArray(r.scores) || !r.scores.every((n) => typeof n === 'number' && Number.isFinite(n))) return null
+      out.push({
+        index: typeof r.index === 'number' ? r.index : out.length,
+        scores: r.scores as number[],
+        suggested: typeof r.suggested === 'number' && Number.isInteger(r.suggested) ? r.suggested : null,
+      })
+    }
+    return out
+  } catch {
+    return null
+  }
+}
+
 /** 這一列是否超過門檻。`null`＝這個場景沒有門檻。沒有證據（欄位是 null）的一律當沒超過。 */
 export function overThreshold(row: JudgeShadowRow): boolean | null {
   switch (row.regex_verdict) {
@@ -63,6 +95,8 @@ export function overThreshold(row: JudgeShadowRow): boolean | null {
       return sameWorkStale(row) === null && row.jev_same_work !== null && row.jev_same_work >= 0.5
     case 'report_evidence':
       return (row.claims_verified !== null && row.claims_verified < 0.8) || (row.asks_parent_action !== null && row.asks_parent_action >= 0.8)
+    case 'ask_option':
+      return askOptionQuestions(row)?.some((q) => q.suggested !== null) === true
     default:
       return null
   }
@@ -81,8 +115,6 @@ export interface SceneStat {
   /** 最後一次（`at` 最新的那列）的時間原字串；沒有紀錄是 `null`。 */
   last: string | null
 }
-
-const isError = (row: JudgeShadowRow) => row.error !== null && row.error !== ''
 
 function inWindow(at: string, ms: number, now: number): boolean {
   const t = Date.parse(at)
@@ -133,6 +165,14 @@ export function probabilityText(row: JudgeShadowRow): string {
       return fmt(row.jev_same_work)
     case 'report_evidence':
       return `驗 ${fmt(row.claims_verified)}／要 ${fmt(row.asks_parent_action)}`
+    case 'ask_option': {
+      const qs = askOptionQuestions(row)
+      if (!qs || qs.length === 0) return '—'
+      const picked = qs.find((q) => q.suggested !== null)
+      if (picked) return `建議 ${fmt(picked.scores[picked.suggested as number] ?? null)}`
+      const all = qs.flatMap((q) => q.scores)
+      return all.length ? `無建議（最高 ${fmt(Math.max(...all))}）` : '—'
+    }
     default:
       return '—'
   }

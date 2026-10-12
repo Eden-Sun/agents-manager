@@ -1,6 +1,13 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { pendingIndexOnScreen, questionVisibleOnScreen, toPendingQuestions } from './pendingQuestion'
+import {
+  jevMatchesTitle,
+  pendingAtOnScreen,
+  pendingIndexOnScreen,
+  questionVisibleOnScreen,
+  toPendingQuestions,
+  toPendingQuestionsFromResponse,
+} from './pendingQuestion'
 
 const RAW = [
   {
@@ -62,4 +69,84 @@ test('畫面上是第幾題：選項只對上一部分、或兩題都對得上�
   assert.equal(pendingIndexOnScreen(same, { question: null, choices: choices('好', '不要') }), -1, '兩題選項一樣就不猜')
   assert.equal(pendingIndexOnScreen(TWO, null), -1)
   assert.equal(pendingIndexOnScreen([], { question: null, choices: choices('先不關') }), -1)
+})
+
+// ── Jev 的選項建議（issue #1475）：只提示；位置照 daemon 的原 questions[]／options[]，不重算門檻 ──
+
+const JEV_RAW = [
+  { question: '連線方式？', multiSelect: false, options: [{ label: '內網' }, { label: '公網' }] },
+  { question: '要哪些？', multiSelect: true, options: [{ label: 'A' }, { label: 'B' }] },
+  { question: '部署到哪？', options: [{ label: 'staging' }, { label: 'prod' }, { label: 'canary' }] },
+]
+const jevOpts = (questions: unknown[]) => ({ ledger_id: 'L1', model: 'jev-1.13.0', threshold: 0.7, margin: 0.15, questions })
+
+test('Jev 建議掛到對應那題的對應選項，分數原樣', () => {
+  const got = toPendingQuestions(JEV_RAW, jevOpts([
+    { index: 0, scores: [0.91, 0.08], suggested: 0 },
+    { index: 2, scores: [0.1, 0.2, 0.85], suggested: 2 },
+  ]))
+  assert.deepEqual(got[0].jev, { option: 0, label: '內網', score: 0.91 })
+  assert.equal(got[1].jev, null, '沒列的題不標')
+  assert.deepEqual(got[2].jev, { option: 2, label: 'canary', score: 0.85 })
+})
+
+test('沒有建議（suggested 是 null）、沒有 jev_options、舊 daemon：什麼都不掛', () => {
+  const none = toPendingQuestions(JEV_RAW, jevOpts([{ index: 0, scores: [0.85, 0.8], suggested: null }]))
+  assert.deepEqual(none.map((q) => q.jev), [null, null, null])
+  assert.deepEqual(toPendingQuestions(JEV_RAW).map((q) => q.jev), [null, null, null])
+  assert.deepEqual(toPendingQuestions(JEV_RAW, null).map((q) => q.jev), [null, null, null])
+  assert.deepEqual(toPendingQuestions(JEV_RAW, 'bad').map((q) => q.jev), [null, null, null])
+})
+
+test('多選題不標，就算 daemon 帶了；分數壞掉、選項數對不上、位置超出範圍也不標', () => {
+  const got = toPendingQuestions(JEV_RAW, jevOpts([
+    { index: 1, scores: [0.9, 0.1], suggested: 0 },
+    { index: 0, scores: [0.9], suggested: 0 },
+  ]))
+  assert.equal(got[1].jev, null, '多選題')
+  assert.equal(got[0].jev, null, '分數數量跟選項對不上')
+  for (const bad of [
+    { index: 0, scores: [1.4, 0.1], suggested: 0 },
+    { index: 0, scores: [0.9, 'x'], suggested: 0 },
+    { index: 0, scores: [0.9, 0.1], suggested: 5 },
+    { index: 0, scores: [0.9, 0.1], suggested: -1 },
+    { index: 0, scores: [0.9, 0.1], suggested: 0.5 },
+  ]) {
+    assert.equal(toPendingQuestions(JEV_RAW, jevOpts([bad]))[0].jev, null, JSON.stringify(bad))
+  }
+})
+
+test('前面的題目被丟掉、選項被濾掉時，建議仍掛在原位置那一項', () => {
+  const raw = [
+    { question: '  ', options: [{ label: 'x' }, { label: 'y' }] },
+    { question: '選哪個？', options: [{ label: '' }, { label: '甲' }, { label: '乙' }] },
+  ]
+  const got = toPendingQuestions(raw, jevOpts([{ index: 1, scores: [0.0, 0.1, 0.9], suggested: 2 }]))
+  assert.equal(got.length, 1)
+  assert.deepEqual(got[0].options.map((o) => o.label), ['甲', '乙'])
+  assert.deepEqual(got[0].jev, { option: 1, label: '乙', score: 0.9 })
+  // 建議的是一個沒有 label 的選項：不掛。
+  assert.equal(toPendingQuestions(raw, jevOpts([{ index: 1, scores: [0.9, 0.0, 0.1], suggested: 0 }]))[0].jev, null)
+})
+
+test('整份回應 {questions, jev_options} 的解法；舊形狀（只有 questions）照舊', () => {
+  assert.deepEqual(
+    toPendingQuestionsFromResponse({ questions: JEV_RAW, jev_options: jevOpts([{ index: 0, scores: [0.2, 0.9], suggested: 1 }]) })[0].jev,
+    { option: 1, label: '公網', score: 0.9 },
+  )
+  assert.equal(toPendingQuestionsFromResponse({ questions: JEV_RAW })[0].jev, null)
+  assert.deepEqual(toPendingQuestionsFromResponse({ questions: null, jev_options: null }), [])
+  assert.deepEqual(toPendingQuestionsFromResponse(null), [])
+})
+
+test('pendingAtOnScreen 把建議帶給畫面上那一題；標題比對去空白、認得被截的 …', () => {
+  const pending = toPendingQuestions(JEV_RAW, jevOpts([{ index: 0, scores: [0.91, 0.08], suggested: 0 }]))
+  const at = pendingAtOnScreen(pending, { question: '連線方式？', choices: [{ title: '內網' }, { title: '公網' }] })
+  assert.deepEqual(at?.jev, { option: 0, label: '內網', score: 0.91 })
+  assert.equal(jevMatchesTitle('內網 http (Recommended)', '內網 http (Recommended)'), true)
+  assert.equal(jevMatchesTitle('內網 http (Recommended)', '內網  http\n(Recommended)'), true, '折行插的空白不算')
+  assert.equal(jevMatchesTitle('公網 https，拿掉 IP 白名單', '公網 https，拿掉…'), true, '被截斷的標題比前綴')
+  assert.equal(jevMatchesTitle('內網 http', '公網 https'), false)
+  assert.equal(jevMatchesTitle('內網', '…'), false)
+  assert.equal(jevMatchesTitle('', ''), false)
 })

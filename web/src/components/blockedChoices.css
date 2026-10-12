@@ -576,3 +576,22 @@
 .bc-again {
   margin-left: 8px;
 }
+
+/* Jev 的選項建議（issue #1475）：只提示，跟 `.bc-mark`（游標在此）分開、不搶選取色。 */
+.bc-mark:has(.bc-jev) {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  gap: 2px 6px;
+}
+
+.bc-jev {
+  padding: 0 6px;
+  border: 1px solid var(--accent);
+  border-radius: 999px;
+  color: var(--accent);
+  font-size: 11px;
+  font-weight: 600;
+  line-height: 18px;
+  white-space: nowrap;
+}

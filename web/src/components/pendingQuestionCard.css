@@ -106,3 +106,27 @@
   overflow-y: auto;
   margin: 0 16px;
 }
+
+/* Jev 的選項建議（issue #1475）：只提示，用強調色小標籤，不是按鈕。 */
+.pending-q-jev {
+  display: inline-block;
+  margin-left: 6px;
+  padding: 0 6px;
+  border: 1px solid var(--accent);
+  border-radius: 999px;
+  color: var(--accent);
+  font-size: 11px;
+  font-weight: 600;
+  line-height: 18px;
+  white-space: nowrap;
+}
+
+.pending-q-jev-line {
+  margin: 0;
+  font-size: 12px;
+  color: var(--text-dim);
+}
+
+.pending-q-jev-line .pending-q-jev {
+  margin: 0 6px 0 0;
+}

@@ -58,7 +58,7 @@ function setBots() {
   useStore.setState({ bots: [{ id: 'bot-alfa-0001', name: 'alfa' } as unknown as Bot] })
 }
 
-test('有資料：四個場景各一列計數、超過門檻照 SPEC 算、最近清單帶 bot 名', async () => {
+test('有資料：五個場景各一列計數、超過門檻照 SPEC 算、最近清單帶 bot 名', async () => {
   setBots()
   stubApi({
     '/judge/settings': { status: 200, body: SETTINGS },
@@ -72,6 +72,8 @@ test('有資料：四個場景各一列計數、超過門檻照 SPEC 算、最�
           row({ regex_verdict: 'stuck_queued', at: ago(1), bot_id: 'bot-alfa-0001', jev_is_live_ui: 0.9, ms: 620 }),
           row({ regex_verdict: 'stuck_queued', at: ago(2), jev_is_live_ui: 0.3 }),
           row({ regex_verdict: 'report_evidence', at: ago(3), claims_verified: 0.6, error: 'boom' }),
+          row({ regex_verdict: 'ask_option', at: ago(1), ms: 410, matched_line: JSON.stringify({ tool_use_id: 't1', questions: [{ index: 0, scores: [0.91, 0.08], suggested: 0 }] }) }),
+          row({ regex_verdict: 'ask_option', at: ago(2), matched_line: JSON.stringify({ tool_use_id: 't2', questions: [{ index: 0, scores: [0.62, 0.3], suggested: null }] }) }),
         ],
       },
     },
@@ -81,7 +83,10 @@ test('有資料：四個場景各一列計數、超過門檻照 SPEC 算、最�
   const ledger = root.querySelector('.judge-ledger')!
   assert.ok(ledger, '帳本區要出現')
   const scenes = ledger.querySelectorAll('.judge-ledger-table')[0]!.querySelectorAll('tbody tr')
-  assert.equal(scenes.length, 4, '四個場景各一列')
+  assert.equal(scenes.length, 5, '五個場景各一列')
+  const ask = [...scenes].find((tr) => tr.textContent?.includes('選項建議'))!
+  assert.match(ask.textContent ?? '', /2 筆/, '選項建議：全部 2 筆')
+  assert.match(ask.textContent ?? '', /超過門檻 1/, '只有 daemon 標了 suggested 的那筆算')
   const stuck = [...scenes].find((tr) => tr.textContent?.includes('卡在不認識的畫面'))!
   assert.match(stuck.textContent ?? '', /2 筆/, '卡住的場景：全部 2 筆')
   assert.match(stuck.textContent ?? '', /超過門檻 1/, '0.9 超過 0.7，0.3 不超過')
@@ -91,9 +96,11 @@ test('有資料：四個場景各一列計數、超過門檻照 SPEC 算、最�
   assert.match(recent, /alfa/, '找得到的 bot 顯示名字')
   assert.match(recent, /0\.90/, '機率欄照場景取欄位')
   assert.match(recent, /boom/, '錯誤欄')
+  assert.match(recent, /建議 0\.91/, '選項建議的機率欄寫出建議的分數')
+  assert.match(recent, /無建議（最高 0\.62）/, '沒有建議的那筆只寫最高分')
 })
 
-test('還沒被觸發過：明講，並列出四個場景的觸發條件', async () => {
+test('還沒被觸發過：明講，並列出五個場景的觸發條件', async () => {
   setBots()
   stubApi({
     '/judge/settings': { status: 200, body: SETTINGS },
@@ -105,7 +112,7 @@ test('還沒被觸發過：明講，並列出四個場景的觸發條件', async
   assert.match(ledger.textContent ?? '', /還沒被觸發過/)
   assert.equal(ledger.querySelector('.judge-ledger-table'), null, '沒有紀錄就不畫空表')
   const triggers = ledger.querySelectorAll('.judge-ledger-triggers li')
-  assert.equal(triggers.length, 4)
+  assert.equal(triggers.length, 5)
   assert.match(ledger.textContent ?? '', /180 秒/, '卡住的觸發條件要寫出門檻時間')
 })
 
