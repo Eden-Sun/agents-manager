@@ -607,7 +607,7 @@ pub async fn role_of_bot(pool: &SqlitePool, bot_id: &str) -> Result<Option<Role>
     Ok((r.bot_id.as_deref() == Some(bot_id)).then_some(Role::Responder))
 }
 
-/// 角色**登記**的 bot id（不管那顆 bot 現在在不在）。路由與 claim 都認這個；要送信才需要
+/// 角色**登記**的 bot id（不管那顆 bot 現在在不在）。路由與 claim 都認這個；要送訊息才需要
 /// [`responder_bot`] 那種「還活著」的版本。
 pub async fn bot_for(pool: &SqlitePool, role: Role) -> Result<Option<String>> {
     Ok(match role {
