@@ -323,6 +323,11 @@
 
 /* 手機單行橫捲（換行吃半個畫面）：捲軸藏起來、`overscroll-behavior-x: contain` 防帶動整頁、`scroll-snap` 防切一半晶片（使用者回報的問題）。 */
 @media (max-width: 720px) {
+  /* 觸控目標 ≥ 24px（WCAG 2.5.8）；正好放進 `.unread-bar` 的左右留白。 */
+  .unread-bar-arrow {
+    width: 24px;
+  }
+
   .unread-bar {
     flex-wrap: nowrap;
     overflow-x: auto;
