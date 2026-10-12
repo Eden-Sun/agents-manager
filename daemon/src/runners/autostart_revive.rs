@@ -163,14 +163,16 @@ async fn revive_one(app: &Arc<App>, host: &str, l: &Lost) -> anyhow::Result<()> 
     crate::race_point::hit("autostart_revive_before_start", &l.bot_id).await;
 
     let lock = app.bot_lock(&l.bot_id).await;
-    // 拿不到就跳過這一顆（#1429）：補開掛在 background_tasks 下，優雅關機的 `wait()` 會等它，不能在別人握著的鎖上無限等。
-    // 沒有寫決定，之後的定時掃描或 bot_stopped 探測再處理。
-    let guard = match lock.clone().try_lock_owned() {
-        Ok(guard) => guard,
-        Err(_) => {
-            tracing::info!(host, bot = %l.bot_id, "autostart revive: the bot is locked by another operation; leaving it to the next sweep or the bot_stopped probe");
+    // 等鎖，但關機一開始就放棄等（#1429、#1470）：補開掛在 background_tasks 下，優雅關機的 `wait()` 會等它，不能在別人握著的鎖上
+    // 卡到關機逾時。平常（沒在關機）一定等到鎖再判斷：「對帳判定遺失」的 run 只會交進來這一次，這裡跳過就沒有任何掃描會再補開
+    // （定時掃描只撈 `pane gone`），bot 會無聲停著、也沒有 `bot_lost` 紀錄。`biased`：關機已經開始就不再拿鎖、不開新的 pane（#1372）。
+    let guard = tokio::select! {
+        biased;
+        _ = app.shutdown.cancelled() => {
+            tracing::info!(host, bot = %l.bot_id, "autostart revive: shutting down while waiting for the bot lock; leaving it to the next boot's reconcile");
             return Ok(());
         }
+        guard = lock.clone().lock_owned() => guard,
     };
     let Some(bot) = eligible_lost_bot(app.as_ref(), host, l).await? else { return Ok(()) };
     // 一次遺失只決定一次（restarted／failed／backoff 都算）：這顆 lost run 已經有 bot_lost 紀錄就不再碰（#1061）。

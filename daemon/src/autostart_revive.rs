@@ -473,32 +473,72 @@ mod tests {
         assert_eq!(after[1].0, "running");
     }
 
-    /// #1429：補開收尾掛在 background_tasks 下，優雅關機的 `wait()` 會等它。補開拿 bot 鎖時，別的操作（使用者的 start、
-    /// 別的 revive）正握著那把鎖：補開不能在鎖上無限等，要跳過這一顆、不開新的 run、也不寫決定（之後的掃描或探測再處理），
-    /// 這樣 `wait()` 才會回來。修正前這裡會卡住（紅）。
+    /// 補開拿鎖前（`autostart_revive_before_start`）停一下讓測試握著鎖：#[tokio::test] 是 current_thread，補開從這個點放行到
+    /// 下一個真的 Pending 之間不會讓出給測試；所以測試醒來時補開要不是已經在鎖上等（新行為），就是已經放棄這顆（舊的 try-lock）。
+    /// 回傳握著的那把鎖。
+    async fn revive_parked_on_a_held_lock(env: &tt::Env, bot: &db::Bot) -> tokio::sync::OwnedMutexGuard<()> {
+        let lost_run = db::active_run(&env.app.db, &bot.id).await.unwrap().unwrap().id;
+        crate::lifecycle::mark_run_exited(&env.app, &lost_run, super::LOST_REASON).await;
+        // 別的操作（hook、queue flush、spool 重放、對帳收尾…）握著這顆 bot 的鎖。
+        let held = env.app.bot_lock(&bot.id).await.lock_owned().await;
+        let reached = Arc::new(tokio::sync::Notify::new());
+        let hook_reached = reached.clone();
+        crate::lifecycle::race_point::arm("autostart_revive_before_start", &bot.id, move || async move {
+            hook_reached.notify_one();
+        });
+        runner::spawn_revive(&env.app, config::LOCAL_HOST, vec![super::Lost { bot_id: bot.id.clone(), run_id: lost_run }]);
+        reached.notified().await;
+        held
+    }
+
+    /// #1470：對帳判定遺失（`agent not found during reconcile`）的 run 只會交給補開這一次，定時掃描只撈 `pane gone`，
+    /// bot_stopped 探測只開 incident。補開撞到別人握著的 bot 鎖時要等鎖放開、之後照常補開並寫 `bot_lost`，
+    /// 不能無聲跳過（#1429 改成 try-lock 帶進來的回歸；修正前這裡 bot 一直停著、沒有 bot_lost，紅）。
     #[tokio::test]
-    async fn a_revive_that_finds_its_bot_locked_skips_it_and_does_not_hold_up_the_shutdown_wait() {
+    async fn a_revive_that_finds_its_bot_locked_waits_for_the_lock_and_then_starts_it() {
         let env = tt::env().await;
         let bot = autostart_bot(&env, "revive-bot-locked").await;
         crate::lifecycle::start_bot(&env.app, &bot.id).await.unwrap();
         autostart_done(&env.app);
-        let lost_run = db::active_run(&env.app.db, &bot.id).await.unwrap().unwrap().id;
-        crate::lifecycle::mark_run_exited(&env.app, &lost_run, super::LOST_REASON).await;
+        let held = revive_parked_on_a_held_lock(&env, &bot).await;
+        assert!(db::active_run(&env.app.db, &bot.id).await.unwrap().is_none(), "鎖還被握著：不能開新的 run");
+
+        drop(held);
+        runner::quiesce(&env.app).await;
+
+        let after = runs(&env.app, &bot.id).await;
+        assert_eq!(after.len(), 2, "鎖放開之後補開：舊的收掉、新的起來：{after:?}");
+        assert_eq!(after[0], ("exited".into(), Some(super::LOST_REASON.into())));
+        assert_eq!(after[1].0, "running");
+        let events = bot_lost_events(&env.app, &bot.id).await;
+        assert_eq!(events.len(), 1, "決定寫進 bot_lost：{events:?}");
+        assert_eq!(events[0]["outcome"], "restarted");
+        assert_eq!(events[0]["reason"], "agent_not_found_during_reconcile");
+        assert_eq!(runner::pending_count(&env.app), 0);
+    }
+
+    /// #1429：補開收尾掛在 background_tasks 下，優雅關機的 `wait()` 會等它。補開在鎖上等的時候（別的操作正握著）關機開始：
+    /// 要放棄等、不開新的 run、不寫決定，`wait()` 才回得來（不能像 #1470 之前那樣平常也放棄、也不能變成無限等）。
+    #[tokio::test]
+    async fn a_revive_waiting_on_a_bot_lock_gives_up_at_shutdown_and_does_not_hold_up_the_wait() {
+        let env = tt::env().await;
+        let bot = autostart_bot(&env, "revive-bot-locked-shutdown").await;
+        crate::lifecycle::start_bot(&env.app, &bot.id).await.unwrap();
+        autostart_done(&env.app);
+        let held = revive_parked_on_a_held_lock(&env, &bot).await;
         let before = runs(&env.app, &bot.id).await;
 
-        // 別的操作握著這顆 bot 的鎖。
-        let lock = env.app.bot_lock(&bot.id).await;
-        let held = lock.clone().lock_owned().await;
-        runner::spawn_revive(&env.app, config::LOCAL_HOST, vec![super::Lost { bot_id: bot.id.clone(), run_id: lost_run }]);
+        env.app.shutdown.cancel();
         env.app.background_tasks.close();
-        tokio::time::timeout(std::time::Duration::from_secs(10), env.app.background_tasks.wait())
+        // 鎖還握在測試手上：補開要是還在鎖上等，wait() 就永遠不回來。上限只是回歸時別卡死整個測試行程。
+        tokio::time::timeout(std::time::Duration::from_secs(120), env.app.background_tasks.wait())
             .await
-            .expect("補開不能在 bot 鎖上無限等，否則優雅關機的 wait() 會卡住（#1429）");
+            .expect("關機開始後補開不能在 bot 鎖上等，否則優雅關機的 wait() 會卡住（#1429）");
         drop(held);
 
-        assert_eq!(runs(&env.app, &bot.id).await, before, "鎖沒拿到就不動：不開新的 run");
+        assert_eq!(runs(&env.app, &bot.id).await, before, "關機中不開新的 run");
         assert!(db::active_run(&env.app.db, &bot.id).await.unwrap().is_none());
-        assert!(bot_lost_events(&env.app, &bot.id).await.is_empty(), "沒有決定就不寫 bot_lost，之後還能再處理");
+        assert!(bot_lost_events(&env.app, &bot.id).await.is_empty(), "關機中不寫決定，交給下一次開機的對帳");
         assert_eq!(runner::pending_count(&env.app), 0, "補開的計數照常歸零");
     }
 
