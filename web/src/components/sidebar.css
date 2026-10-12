@@ -358,6 +358,11 @@
   bottom: 50%;
 }
 
+/* 孫代：再往裡縮一格，線接在它自己的子列上（SPEC §6.5a）。 */
+.bot-child.deep {
+  margin-left: 14px;
+}
+
 .bot-child::after {
   content: '';
   position: absolute;

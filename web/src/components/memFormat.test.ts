@@ -13,3 +13,10 @@ test('humanBytes 單位進位：四捨五入到 1024M 要改寫成 G，不寫 10
 test('humanBytes 9.96G 進位到 10 時不寫成 10.0G（≥10 的寫法是整數）', () => {
   assert.equal(humanBytes(Math.round(9.96 * GiB)), '10G')
 })
+
+test('humanBytes KB→MB 進位：1023.5K 以上四捨五入到 1024K 要改寫成 M，不寫 1024K', () => {
+  // 19c6c5f6 只補了 M→G；K→M 的邊界（1048575 位元組 ＝ 1023.999K）還是印「1024K」。
+  assert.equal(humanBytes(1048575), '1M')
+  assert.equal(humanBytes(1048064), '1M')
+  assert.equal(humanBytes(1047551), '1023K', '還沒到 1023.5K 的仍是 K')
+})

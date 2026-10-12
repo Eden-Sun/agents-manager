@@ -275,6 +275,11 @@
   background: var(--lamp-yellow);
 }
 
+/* 完成待看蓋掉晶片色時，黃點仍是黃的（見 `UnreadChip` 的 kids-wait）。 */
+.unread-chip.unread .unread-chip-dot.kids-wait {
+  background: var(--lamp-yellow);
+}
+
 .unread-chip-name {
   overflow: hidden;
   text-overflow: ellipsis;
