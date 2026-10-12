@@ -76,6 +76,9 @@ pub struct Wait {
     /// 首次 inbox 寫入成功前保留原 event key 與內容，重啟後也能冪等補送。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub pending_first: Option<PendingFirst>,
+    /// 首次以後的通知（使用者操作、拿到窗口、換版完成、放棄）inbox 寫入失敗時照 rev 順序排在這裡，重送成功才清（issue #1507）。
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub pending_events: Vec<PendingEvent>,
     /// 使用者按了「先等」：header 收起來（狀態照樣更新）。
     pub dismissed: bool,
     pub phase: Phase,
@@ -90,6 +93,13 @@ pub struct Wait {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PendingFirst {
     pub rev: u32,
+    pub payload: Value,
+}
+
+/// 送不進 inbox 的後續通知：`key` 就是 `deploy_waiting:<id>:<rev>`，內容在排隊當下凍結，重送時不重算。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PendingEvent {
+    pub key: String,
     pub payload: Value,
 }
 
@@ -223,7 +233,9 @@ pub async fn observe(app: &(impl crate::capabilities::DataDir + crate::capabilit
             w.owner == owner && matches!(w.phase, Phase::Waiting | Phase::Swapping) && secs_between(&w.last_attempt_at, &now) < STALE_SECS
         });
         if !continuing {
+            let mut carried = Vec::new();
             if let Some(mut old) = g.take() {
+                carried = carry_pending(&mut old);
                 if old.phase == Phase::Waiting && old.notified_at.is_some() {
                     old.phase = Phase::Abandoned;
                     old.ended_at = Some(now.clone());
@@ -244,6 +256,7 @@ pub async fn observe(app: &(impl crate::capabilities::DataDir + crate::capabilit
                 auto_escalated: false,
                 notified_at: None,
                 pending_first: None,
+                pending_events: carried,
                 dismissed: false,
                 phase: Phase::Waiting,
                 rev: 0,
@@ -337,12 +350,8 @@ async fn tick_at(
     app: &(impl crate::capabilities::DataDir + crate::capabilities::Db + crate::capabilities::Emit + crate::deploy_wait::DeployWaitState),
     now: &str,
 ) {
-    // 先補送原始首次通知，避免後續狀態轉換改掉它的 rev、內容或 wake。
-    let pending = app.deploy_wait().lock().unwrap_or_else(std::sync::PoisonError::into_inner)
-        .as_ref().filter(|w| w.pending_first.is_some()).cloned();
-    if let Some(w) = pending {
-        deliver_first(app, &w).await;
-    }
+    // 先補送排隊中的通知（首次通知在最前），避免後續狀態轉換改掉它的 rev、內容或 wake。
+    flush(app).await;
     let mut out = None;
     {
         let mut g = app.deploy_wait().lock().unwrap_or_else(std::sync::PoisonError::into_inner);
@@ -366,7 +375,9 @@ async fn tick_at(
                 }
             }
             Phase::Done | Phase::Abandoned => {
-                if w.ended_at.as_deref().is_none_or(|t| secs_between(t, now) >= KEEP_ENDED_SECS) {
+                // 還有沒送進 inbox 的通知就不能清（issue #1507）：清掉＝那一則永遠送不出去。
+                let settled = w.pending_first.is_none() && w.pending_events.is_empty();
+                if settled && w.ended_at.as_deref().is_none_or(|t| secs_between(t, now) >= KEEP_ENDED_SECS) {
                     *g = None;
                     save(app, None);
                 }
@@ -487,41 +498,70 @@ async fn announce(app: &(impl crate::capabilities::DataDir + crate::capabilities
     // 只記錄類的 deploy_waiting 不設 wake（issue #856）；首次通知也只在「自己不會好」時才叫醒（issue #1478）。
     let wake = first && !clears_itself(w);
     tracing::info!(id = %w.id, rev = w.rev, phase = ?w.phase, first, wake, "{}", summary(w, now));
-    app.emit("deploy_wait", json!({"wait": v, "first": first})).await;
-    if first {
-        deliver_first(app, w).await;
-        return;
+    app.emit("deploy_wait", json!({"wait": v.clone(), "first": first})).await;
+    // 首次通知的內容在 `evaluate` 排進 `pending_first`；之後的狀態轉換先排進佇列（落盤）再送，送不進就留著，tick 每拍重送（issue #1507）。
+    if !first {
+        enqueue(app, PendingEvent {
+            key: notice_key(&w.id, w.rev),
+            payload: json!({"deploy_wait": v, "text": summary(w, now), "wake": wake}),
+        });
     }
-    let key = format!("deploy_waiting:{}:{}", w.id, w.rev);
-    if let Err(e) = crate::supervisor::store::push_inbox(
-        app.db(),
-        &key,
-        "deploy_waiting",
-        None,
-        None,
-        None,
-        &json!({"deploy_wait": v, "text": summary(w, now), "wake": wake}),
-    )
-    .await
-    {
-        tracing::warn!(error = %e, "could not tell AGM about the deploy wait");
-    }
+    flush(app).await;
 }
 
-/// 成功（包含 event key 已存在）才清 pending；await 期間不握住狀態鎖。
-async fn deliver_first(
-    app: &(impl crate::capabilities::DataDir + crate::capabilities::Db + crate::deploy_wait::DeployWaitState),
-    w: &Wait,
-) {
-    let Some(pending) = &w.pending_first else { return };
-    let key = format!("deploy_waiting:{}:{}", w.id, pending.rev);
-    if let Err(e) = crate::supervisor::store::push_inbox(app.db(), &key, "deploy_waiting", None, None, None, &pending.payload).await {
-        tracing::warn!(error = %e, event_key = %key, "could not tell AGM about the deploy wait; will retry");
-        return;
-    }
+fn notice_key(id: &str, rev: u32) -> String {
+    format!("deploy_waiting:{id}:{rev}")
+}
+
+/// 送不進 inbox 的後續通知排進狀態（同一個 key 只排一次）並落盤。
+fn enqueue(app: &(impl crate::capabilities::DataDir + crate::deploy_wait::DeployWaitState), ev: PendingEvent) {
     let mut g = app.deploy_wait().lock().unwrap_or_else(std::sync::PoisonError::into_inner);
-    if let Some(current) = g.as_mut().filter(|current| current.id == w.id && current.pending_first.as_ref() == Some(pending)) {
-        current.pending_first = None;
+    let Some(w) = g.as_mut() else {
+        tracing::error!(event_key = %ev.key, "deploy wait state is gone; the notice cannot be queued");
+        return;
+    };
+    if !w.pending_events.iter().any(|p| p.key == ev.key) {
+        w.pending_events.push(ev);
+    }
+    save(app, g.as_ref());
+}
+
+/// 換掉還沒送完的那次部署時，它沒送出去的通知搬到新的一次的佇列，不因為換人就消失（issue #1507）。
+fn carry_pending(old: &mut Wait) -> Vec<PendingEvent> {
+    let mut out = Vec::new();
+    if let Some(p) = old.pending_first.take() {
+        out.push(PendingEvent { key: notice_key(&old.id, p.rev), payload: p.payload });
+    }
+    out.append(&mut old.pending_events);
+    out
+}
+
+/// 依序把排隊的通知送進 inbox：先首次通知，再後續的。前一則送不進就停，後面的不越過它（rev 順序不亂，也不拿較新的狀態代替）。
+/// 每送成功一則就從狀態裡清掉並落盤；event key 冪等，重送不會多插。await 期間不握住狀態鎖。
+async fn flush(app: &(impl crate::capabilities::DataDir + crate::capabilities::Db + crate::deploy_wait::DeployWaitState)) {
+    loop {
+        let (key, payload, first) = {
+            let g = app.deploy_wait().lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+            let Some(w) = g.as_ref() else { return };
+            if let Some(p) = &w.pending_first {
+                (notice_key(&w.id, p.rev), p.payload.clone(), Some(p.clone()))
+            } else if let Some(e) = w.pending_events.first() {
+                (e.key.clone(), e.payload.clone(), None)
+            } else {
+                return;
+            }
+        };
+        if let Err(e) = crate::supervisor::store::push_inbox(app.db(), &key, "deploy_waiting", None, None, None, &payload).await {
+            tracing::warn!(error = %e, event_key = %key, "could not tell AGM about the deploy wait; will retry");
+            return;
+        }
+        let mut g = app.deploy_wait().lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        let Some(w) = g.as_mut() else { return };
+        match first {
+            Some(p) if w.pending_first.as_ref() == Some(&p) => w.pending_first = None,
+            Some(_) => {}
+            None => w.pending_events.retain(|p| p.key != key),
+        }
         save(app, g.as_ref());
     }
 }

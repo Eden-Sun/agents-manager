@@ -56,6 +56,7 @@ fn the_notice_goes_out_at_three_minutes_and_only_changes_update_it() {
         auto_escalated: false,
         notified_at: None,
         pending_first: None,
+        pending_events: Vec::new(),
         dismissed: false,
         phase: Phase::Waiting,
         rev: 0,
@@ -534,6 +535,7 @@ fn retry_wait() -> Wait {
         auto_escalated: false,
         notified_at: None,
         pending_first: None,
+        pending_events: Vec::new(),
         dismissed: false,
         phase: Phase::Waiting,
         rev: 0,
@@ -591,4 +593,145 @@ async fn legacy_state_without_pending_first_loads_without_reannouncing() {
     assert_eq!(current(app).unwrap(), w);
     super::tick_at(app, "2026-10-04T12:03:15.000Z").await;
     assert!(inbox(app).await.is_empty(), "舊檔沒有 pending，不重新叫醒巡檢");
+}
+
+/// 把 deploy_waiting 的 inbox 寫入全部擋下（暫時性 DB 錯誤，issue #1507）。
+async fn fail_deploy_waiting_inserts(app: &Arc<App>) {
+    sqlx::query(
+        "CREATE TRIGGER fail_later_deploy_waiting BEFORE INSERT ON supervisor_inbox
+         WHEN NEW.kind = 'deploy_waiting'
+         BEGIN SELECT RAISE(ABORT, 'injected transient inbox failure'); END",
+    )
+    .execute(&app.db)
+    .await
+    .unwrap();
+}
+
+async fn heal_deploy_waiting_inserts(app: &Arc<App>) {
+    sqlx::query("DROP TRIGGER fail_later_deploy_waiting").execute(&app.db).await.unwrap();
+}
+
+/// 狀態檔裡還排著的待送通知 event key（落盤的，重啟後也在）。
+fn pending_keys(app: &Arc<App>) -> Vec<String> {
+    load(app).map(|w| w.pending_events.iter().map(|p| p.key.clone()).collect()).unwrap_or_default()
+}
+
+/// issue #1507：首次以後的通知（使用者操作、換版完成、放棄）inbox 寫入失敗，也要排隊、照原本的 event key 與內容補送：
+/// 不回滾已成功的操作、不因為等待記錄過期或中間重啟就消失，補上之後恰好一筆、重複 tick 不再多插。
+#[tokio::test]
+async fn a_failed_later_notice_is_queued_and_resent_with_its_own_rev_and_payload() {
+    // 等待記錄已經過期（結束後超過 10 分鐘）：有待送的就不能清掉。
+    let much_later = "2099-01-01T00:00:00.000Z";
+
+    // 使用者按「現在換版」，inbox 寫入失敗。
+    {
+        let e = tt::env().await;
+        let app = &e.app;
+        let id = approval_waiting(app, SHA, 240).await;
+        observe(app, OWNER, &id, SHA, Err(&not_idle(&[("b1", "alpha")]))).await;
+        let wid = current(app).unwrap().id;
+        fail_deploy_waiting_inserts(app).await;
+        escalate(app, &wid).await.unwrap();
+        assert!(current(app).unwrap().user_escalated, "成功的使用者操作照樣生效，不回滾");
+        assert_eq!(inbox(app).await.len(), 1, "寫入失敗：inbox 還沒有");
+        assert_eq!(pending_keys(app), vec![format!("deploy_waiting:{wid}:2")], "待送通知落盤");
+        let outage_now = current(app).unwrap().last_attempt_at;
+        super::tick_at(app, &outage_now).await;
+        assert_eq!(pending_keys(app).len(), 1, "tick 重送還是失敗就保留");
+
+        heal_deploy_waiting_inserts(app).await;
+        *app.deploy_wait.lock().unwrap() = load(app);
+        super::tick_at(app, &outage_now).await;
+        let rows = inbox(app).await;
+        assert_eq!(rows.len(), 2, "{rows:?}");
+        assert_eq!(rows[1].0, format!("deploy_waiting:{wid}:2"), "同一個 event key");
+        assert_eq!(rows[1].1["deploy_wait"]["rev"], 2);
+        assert_eq!(rows[1].1["deploy_wait"]["user_escalated"], true, "內容是當時的狀態");
+        assert_eq!(rows[1].1["wake"], false, "使用者操作不叫醒巡檢");
+        assert!(pending_keys(app).is_empty(), "送達才清");
+        super::tick_at(app, &outage_now).await;
+        assert_eq!(inbox(app).await.len(), 2, "重複 tick 不會多插一筆");
+    }
+
+    // 換版完成（新 daemon 開機時寫的 Done），inbox 寫入失敗，之後還重啟了一次。
+    {
+        let e = tt::env().await;
+        let app = &e.app;
+        let id = approval_waiting(app, SHA, 240).await;
+        observe(app, OWNER, &id, SHA, Err(&not_idle(&[("b1", "alpha")]))).await;
+        let wid = current(app).unwrap().id;
+        observe(app, OWNER, &id, SHA, Ok(false)).await;
+        assert_eq!(inbox(app).await.len(), 2, "拿到窗口那則先正常送出");
+        fail_deploy_waiting_inserts(app).await;
+        *app.deploy_wait.lock().unwrap() = None;
+        startup_as(app, &SHA[..7]).await;
+        assert_eq!(current(app).unwrap().phase, Phase::Done);
+        assert_eq!(pending_keys(app), vec![format!("deploy_waiting:{wid}:3")]);
+        super::tick_at(app, much_later).await;
+        assert!(current(app).is_some(), "還有待送的，等待記錄不能因為過期被清掉");
+        assert_eq!(pending_keys(app).len(), 1);
+
+        heal_deploy_waiting_inserts(app).await;
+        *app.deploy_wait.lock().unwrap() = load(app);
+        super::tick_at(app, much_later).await;
+        let rows = inbox(app).await;
+        assert_eq!(rows.len(), 3, "{rows:?}");
+        assert_eq!(rows[2].0, format!("deploy_waiting:{wid}:3"));
+        assert_eq!(rows[2].1["deploy_wait"]["phase"], "done");
+        assert_eq!(rows[2].1["deploy_wait"]["rev"], 3);
+        assert!(pending_keys(app).is_empty());
+        assert!(current(app).is_none(), "送達後、過期的結束記錄照常清掉");
+    }
+
+    // 沒有人再試而放棄，inbox 寫入失敗。
+    {
+        let e = tt::env().await;
+        let app = &e.app;
+        let id = approval_waiting(app, SHA, 240).await;
+        observe(app, OWNER, &id, SHA, Err(&not_idle(&[("b1", "alpha")]))).await;
+        let wid = current(app).unwrap().id;
+        app.deploy_wait.lock().unwrap().as_mut().unwrap().last_attempt_at = "2026-10-04T12:00:00.000Z".into();
+        fail_deploy_waiting_inserts(app).await;
+        super::tick_at(app, "2026-10-04T13:00:00.000Z").await;
+        assert_eq!(pending_keys(app), vec![format!("deploy_waiting:{wid}:2")], "放棄的那則排隊");
+        assert_eq!(inbox(app).await.len(), 1);
+        super::tick_at(app, much_later).await;
+        assert!(current(app).is_some(), "待送的放棄通知還在，不清");
+
+        heal_deploy_waiting_inserts(app).await;
+        super::tick_at(app, much_later).await;
+        let rows = inbox(app).await;
+        assert_eq!(rows.len(), 2, "{rows:?}");
+        assert_eq!(rows[1].0, format!("deploy_waiting:{wid}:2"));
+        assert_eq!(rows[1].1["deploy_wait"]["phase"], "abandoned");
+        assert!(pending_keys(app).is_empty());
+        assert!(current(app).is_none());
+    }
+}
+
+/// issue #1507：前一則還沒送進 inbox 時，後面的狀態轉換不越過它先送，也不拿較新的狀態代替它。
+#[tokio::test]
+async fn a_later_notice_does_not_overtake_one_that_failed() {
+    let e = tt::env().await;
+    let app = &e.app;
+    let id = approval_waiting(app, SHA, 240).await;
+    observe(app, OWNER, &id, SHA, Err(&not_idle(&[("b1", "alpha")]))).await;
+    let wid = current(app).unwrap().id;
+    fail_deploy_waiting_inserts(app).await;
+    escalate(app, &wid).await.unwrap();
+    observe(app, OWNER, &id, SHA, Ok(false)).await;
+    assert_eq!(pending_keys(app), vec![format!("deploy_waiting:{wid}:2"), format!("deploy_waiting:{wid}:3")]);
+
+    heal_deploy_waiting_inserts(app).await;
+    let now = current(app).unwrap().last_attempt_at;
+    super::tick_at(app, &now).await;
+    let rows = inbox(app).await;
+    assert_eq!(rows.iter().map(|r| r.0.clone()).collect::<Vec<_>>(), vec![
+        format!("deploy_waiting:{wid}:1"),
+        format!("deploy_waiting:{wid}:2"),
+        format!("deploy_waiting:{wid}:3"),
+    ]);
+    assert_eq!(rows[1].1["deploy_wait"]["phase"], "waiting", "rev 2 送的是當時的內容");
+    assert_eq!(rows[1].1["deploy_wait"]["user_escalated"], true);
+    assert_eq!(rows[2].1["deploy_wait"]["phase"], "swapping");
 }
