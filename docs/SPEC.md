@@ -1116,6 +1116,7 @@ codex 0.159.3 的帳號安全提醒 inline banner（`› 1. Set up security`／`
 （`delivery::read_styled`）再經 `plain_without_hints` 把提示抹掉，得到「什麼都沒打」的畫面——`poller::composer_text`（補 Enter 的看門狗、
 `relay_watch` 的補 Enter、`stop` 中斷後清框的 `ctrl+c`、`paste_check`）與 `judge::stuck`（`tui_prompts::composer_is_idle`）。以前它們讀純文字，
 建議句常常就是剛送過的那一句，會被當成「我們的字還留在框裡」去補 Enter、或被當成框擋著去問 Jev。
+讀回框裡的草稿（`composer_text_whole`）：字頭行只認第 0 欄（續行縮排的 `  ❯ …` 是草稿，#1587）；框的收尾只認 `─`／`━` 整行，ASCII 的 `---` 是草稿的 markdown 分隔線（#1588）；claude／codex 的非框續行只去掉兩欄終端裝飾，之後的縮排保留（#1589）。
 實測 claude 2.1.280：只有建議句時按 Enter **不會**送出建議句（daemon 按 Enter 不會誤送它）。
 **建議句不再被全域關掉**（2026-10-03，使用者要在網頁看到並一鍵送出，見下一段）：以前 claude 的 pane env 帶 `CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION=false`
 （2026-09-23 AM-2-M 的 409 之後加的）；現在所有看輸入框的地方都用樣式讀分得出灰字，就拿掉這個覆蓋，建議句跟著 CLI 與帳號自己的設定走（會多一次背景的模型呼叫）。
