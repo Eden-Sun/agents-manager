@@ -74,3 +74,31 @@ test('頂層父列收合時 ↓ 不能停在看不見的孫代（孫代的直屬
     localStorage.removeItem('am.collapsedChildren')
   }
 })
+
+test('展開時 ↓／↑ 深度優先：G → P → C（孫代）→ H（下一個頂層列），來回一致', async () => {
+  useStore.setState({ bots: [bot('G', null), bot('P', 'G'), bot('C', 'P'), bot('H', null)], selectedBotId: 'G' } as never)
+  await mount(<Sidebar />)
+  await settle()
+  const sel = () => useStore.getState().selectedBotId
+  const press = async (id: string, key: string) => {
+    await keydown(document.querySelector<HTMLElement>(`[data-bot-id="${id}"]`)!, key)
+    await settle()
+  }
+  await press('G', 'ArrowDown')
+  assert.equal(sel(), 'P')
+  await press('P', 'ArrowDown')
+  assert.equal(sel(), 'C', '孫代緊跟在它的子代後面')
+  await press('C', 'ArrowDown')
+  assert.equal(sel(), 'H')
+  await press('H', 'ArrowUp')
+  assert.equal(sel(), 'C')
+})
+
+test('孤兒子 agent（父列不見）可以用 ↓ 走到，順序照畫面', async () => {
+  useStore.setState({ bots: [bot('X', null), bot('C', 'GONE')], selectedBotId: 'X' } as never)
+  await mount(<Sidebar />)
+  await settle()
+  await keydown(document.querySelector<HTMLElement>('[data-bot-id="X"]')!, 'ArrowDown')
+  await settle()
+  assert.equal(useStore.getState().selectedBotId, 'C')
+})
