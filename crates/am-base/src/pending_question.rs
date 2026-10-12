@@ -22,6 +22,11 @@ pub fn pending_ask_entry(log: &str) -> Option<(String, Value)> {
     let mut pending: Option<(String, Value)> = None;
     for line in log.lines() {
         let Ok(entry) = serde_json::from_str::<Value>(line) else { continue };
+        // Sidechain tool calls are internal branches and must not replace or
+        // answer the question visible in the main conversation.
+        if entry.get("isSidechain").and_then(Value::as_bool) == Some(true) {
+            continue;
+        }
         let Some(content) = entry.pointer("/message/content").and_then(Value::as_array) else { continue };
         for block in content {
             match block.get("type").and_then(Value::as_str) {
@@ -53,14 +58,20 @@ mod tests {
     use serde_json::json;
 
     fn ask(id: &str, question: &str) -> String {
-        json!({"type": "assistant", "message": {"content": [{"type": "tool_use", "id": id, "name": "AskUserQuestion",
+        json!({"type": "assistant", "message": {"role": "assistant", "content": [{"type": "tool_use", "id": id, "name": "AskUserQuestion",
             "input": {"questions": [{"question": question, "header": "連線方式", "multiSelect": false,
                 "options": [{"label": "內網 http (Recommended)", "description": "流量留在 VPC"}, {"label": "公網 https", "description": "拿掉白名單"}]}]}}]}})
         .to_string()
     }
 
     fn answer(id: &str) -> String {
-        json!({"type": "user", "message": {"content": [{"type": "tool_result", "tool_use_id": id, "content": "User answered"}]}}).to_string()
+        json!({"type": "user", "message": {"role": "user", "content": [{"type": "tool_result", "tool_use_id": id, "content": "User answered"}]}}).to_string()
+    }
+
+    fn sidechain(entry: String) -> String {
+        let mut value: serde_json::Value = serde_json::from_str(&entry).unwrap();
+        value["isSidechain"] = json!(true);
+        value.to_string()
     }
 
     /// 2026-09-23 console-fetures-fork：pane 只有 14 行，畫面上沒有題目；transcript 裡有。
@@ -93,6 +104,18 @@ mod tests {
     fn a_result_for_another_tool_does_not_answer_the_question() {
         let got = pending_ask(&[ask("t1", "還在等"), answer("other-tool")].join("\n"));
         assert!(got.is_some());
+    }
+
+    #[test]
+    fn sidechain_questions_do_not_replace_or_answer_mainline_questions() {
+        let mainline = ask("main", "主線問題");
+        let sidechain_question = sidechain(ask("side", "旁支問題"));
+        let got = pending_ask(&[mainline.clone(), sidechain_question].join("\n")).unwrap();
+        assert_eq!(got["questions"][0]["question"], "主線問題");
+
+        let sidechain_answer = sidechain(answer("main"));
+        let got = pending_ask(&[mainline, sidechain_answer].join("\n")).unwrap();
+        assert_eq!(got["questions"][0]["question"], "主線問題");
     }
 
     /// 沒有任何提問、或 input 壞掉（沒有 questions）：None，網頁照舊用畫面。
