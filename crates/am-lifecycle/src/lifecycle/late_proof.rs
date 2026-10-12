@@ -296,7 +296,7 @@ async fn prune_durable(pool: &sqlx::SqlitePool, now: &str) -> anyhow::Result<u64
              OR NOT EXISTS (
                  SELECT 1 FROM turns t JOIN runs r ON r.id = p.run_id
                   WHERE t.id = p.turn_id AND t.run_id = p.run_id
-                    AND t.status = 'in_flight' AND t.delivery IN ('pending','unknown')
+                    AND t.status = 'in_flight' AND t.delivery IN ('pending','unknown','ok')
                     AND r.state = 'running' AND r.pane_id = p.pane
              )",
     )
@@ -330,7 +330,7 @@ pub async fn sweep_at(app: &impl LcHost, wall_now: &str, monotonic_now: Instant)
     let durable_removed = prune_durable(app.db(), wall_now).await?;
     let active: Vec<String> = sqlx::query_scalar(
         "SELECT DISTINCT r.id FROM runs r JOIN turns t ON t.run_id = r.id
-          WHERE r.state = 'running' AND t.status = 'in_flight' AND t.delivery IN ('pending','unknown')",
+          WHERE r.state = 'running' AND t.status = 'in_flight' AND t.delivery IN ('pending','unknown','ok')",
     )
     .fetch_all(app.db())
     .await?;
