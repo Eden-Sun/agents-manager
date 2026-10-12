@@ -168,12 +168,17 @@ export function quotaHiddenBotIds(state: StoreState, map: DisabledMap): string[]
     const key = quotaDisableKey(projectHostName(state, b.project_id), b.kind, b.identity)
     if (isQuotaDisabled(map, key)) hideable.add(b.id)
   }
-  const kept = new Set<string>()
+  // 父列要留著，只要底下（含孫子以下）還有一顆不收的：子列掛在被收起的父列底下就沒地方掛（#1510）。
+  const childrenOf = new Map<string, string[]>()
   for (const b of state.bots) {
-    if (!hideable.has(b.id) || b.parent_bot_id) continue
-    if (state.bots.some((c) => c.parent_bot_id === b.id && !hideable.has(c.id))) kept.add(b.id)
+    if (b.parent_bot_id) childrenOf.set(b.parent_bot_id, [...(childrenOf.get(b.parent_bot_id) ?? []), b.id])
   }
-  return [...hideable].filter((id) => !kept.has(id)).sort()
+  const keepsDescendant = (id: string, seen: Set<string>): boolean => {
+    if (seen.has(id)) return false
+    seen.add(id)
+    return (childrenOf.get(id) ?? []).some((c) => !hideable.has(c) || keepsDescendant(c, seen))
+  }
+  return [...hideable].filter((id) => !keepsDescendant(id, new Set())).sort()
 }
 
 /**

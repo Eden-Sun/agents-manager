@@ -30,6 +30,14 @@ test('停用的身分整批收起來', () => {
   assert.deepEqual(quotaHiddenBotIds(state(null), {}), [])
 })
 
+test('收起來的父列不能留下沒地方掛的子列：孫子還看得到，中間與最上層的父列都要留著', () => {
+  const s = {
+    ...state(null),
+    bots: [bot('G', 'cc1'), bot('P', 'cc1', { parent_bot_id: 'G' }), bot('C', null, { parent_bot_id: 'P' })],
+  } as unknown as StoreState
+  assert.deepEqual(quotaHiddenBotIds(s, disabledCc1), [])
+})
+
 test('正在看的那一顆不收：主面板還開著它的對話，側欄卻找不到那一列', () => {
   assert.deepEqual(quotaHiddenBotIds(state('b1'), disabledCc1), ['b2'])
 })
