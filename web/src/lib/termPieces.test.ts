@@ -192,3 +192,10 @@ test('不縮排的折行照舊（不被縮一格的規則改壞）', () => {
   const l1 = 'https://a.example/'.padEnd(cols, 'p')
   assert.equal(urlsOf(termPieces([l1, 'q'.repeat(cols), 'z end'].join('\n'), cols)).length, 3)
 })
+
+test('中文全形標點緊接在網址後面：不算進網址（點一下複製的是網址本身）', () => {
+  assert.equal(urlsOf(termPieces('請開 https://example.com/login。', 80))[0][1], 'https://example.com/login')
+  assert.equal(urlsOf(termPieces('網址：https://example.com/login，然後貼上', 80))[0][1], 'https://example.com/login')
+  assert.equal(urlsOf(termPieces('https://example.com/a、https://example.com/b', 80)).map((x) => x[1]).join(' '), 'https://example.com/a https://example.com/b')
+  assert.equal(urlsOf(termPieces('看 https://example.com/a！', 80))[0][1], 'https://example.com/a')
+})

@@ -10,8 +10,9 @@ export type Piece = { text: string; url: string | null }
  * 終端裡的 URL 點一下複製（多半是一次性登入連結，開新分頁反而跳錯瀏覽器／帳號）。
  * 長 URL 被硬折行時保留畫面折行，但每一段都指向接回來的完整 URL。
  */
-const URL_CHARS = /[^\s<>"'`）」』]/
-const URL_RE = /https?:\/\/[^\s<>"'`）」』]+/g
+// 中文句子裡網址後面常接全形標點（`…/login。`、`…/login，然後`、`a、b`）：那些不算網址的一部分。
+const URL_CHARS = /[^\s<>"'`）」』、。，；：！？》〉】〕“”‘’]/
+const URL_RE = /https?:\/\/[^\s<>"'`）」』、。，；：！？》〉】〕“”‘’]+/g
 
 /** 終端不會窄到這個以下；比這短的「最長一行」只是內容短，不是折行寬度。 */
 const MIN_WRAP_WIDTH = 40
