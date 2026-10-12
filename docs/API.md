@@ -2863,7 +2863,7 @@ CLI：`agents-managerd release-triage-check --kind <claude|codex> [--since <ver>
 
 - `phase`：`done | cancelled | paused` 同 `status`；其餘看**最新一件還開著的交辦**——`executing`／`reviewing`／`verifying`（依 `role`），
   那件停在 `quota_blocked` 時是 `waiting_quota`；還沒有任何交辦＝`planning`；交辦都結案了但任務還開著＝`awaiting_agm`（輪到 AGM 決定下一步）。
-- `assignments[]`：`{id, role, status, target_bot_id, turn_status, turn_error, follow_up_of, created_at, completed_at}`，舊的在前。
+- `assignments[]`：`{id, role, status, target_bot_id, turn_status, turn_error, follow_up_of, resume_at, created_at, completed_at}`，舊的在前。`resume_at` 是撞額度（`quota_blocked`）那件預計自動重送的時間（RFC3339）；其餘狀態是 `null`（#1593）。
 - `next`：daemon 從任務列、交辦與事件推出來的**下一步**（issue #74，`mission::flow`；規則見 SPEC §18.14）。
   `{action, role?, assignment_id?, retry_of?, rework?, sha?, worktree?, alternatives?, paused_reason?, then?, hint}`，
   `action ∈ assign | review | wait | record_verification | deliver | complete | paused | closed`。`alternatives` 是同一個判斷點上也合法的分支

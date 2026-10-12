@@ -75,6 +75,8 @@ async fn with_phase(app: &impl crate::capabilities::Db, m: &store::Mission) -> R
             "turn_status": a.turn_status,
             "turn_error": a.turn_error,
             "follow_up_of": a.follow_up_of,
+            // 撞額度的預計重送時間（#1593）：網頁的「預計幾點自動重送」讀它，沒有就是 null。
+            "resume_at": a.resume_at,
             "created_at": a.created_at,
             "completed_at": a.completed_at,
         }))
@@ -3513,6 +3515,23 @@ mod tests {
         crate::supervisor::store::set_mission_link(&app.db, &a.id, mission_id, role).await.unwrap();
         sqlx::query("UPDATE supervisor_assignments SET status=? WHERE id=?").bind(status).bind(&a.id).execute(&app.db).await.unwrap();
         a.id
+    }
+
+    /// #1593：撞額度停在 `quota_blocked` 的交辦，任務詳情的 `assignments[]` 要帶 `resume_at`（網頁「預計幾點自動重送」讀它）。
+    #[tokio::test]
+    async fn the_mission_detail_carries_when_a_quota_wait_is_due_to_resume() {
+        let env = crate::testing::env().await;
+        let app = env.app.clone();
+        let Json(m) = post_mission(State(app.clone()), Path(env.project_id.clone()), Json(new_mission("resume-at", "push_main"))).await.unwrap();
+        let id = m["id"].as_str().unwrap().to_string();
+        let aid = mission_assignment(&app, &id, "resume-a", "executor", "quota_blocked").await;
+        let resume = "2026-10-13T01:00:00.000Z";
+        sqlx::query("UPDATE supervisor_assignments SET resume_at=? WHERE id=?").bind(resume).bind(&aid).execute(&app.db).await.unwrap();
+
+        let Json(cur) = get_mission(State(app.clone()), Path(id.clone())).await.unwrap();
+        assert_eq!(cur["phase"], "waiting_quota");
+        let row = cur["assignments"].as_array().unwrap().iter().find(|a| a["id"] == aid).expect("the assignment is listed");
+        assert_eq!(row["resume_at"], resume, "{row}");
     }
 
     fn accept() -> crate::supervisor::api::ReviewIn {
