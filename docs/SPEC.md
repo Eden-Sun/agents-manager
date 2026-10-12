@@ -1045,7 +1045,7 @@ user 文字先照 CLI 自己的拆法還原（`lifecycle::pasted_content`，只�
   transcript 暫時讀取錯誤都回 `Wait`，下一輪重試；run 已消失或 session 確認不相符才停止。持久 watcher 最多保留 10 分鐘；若一次 60 次觀察仍無結論，
   保留原基準到 TTL，讓下一次 daemon 重啟仍能恢復觀察。
 - **late_proof 記憶體登錄有界清理**（issue #1494）：未認領的 Pending 最多保留 60 秒、最多 256 筆；新項目滿額時淘汰最舊項目。
-  daemon 每 15 秒依 run／turn 狀態清掉已結束的項目，並刪除到期或不再有效的 durable watcher；資料庫最多同樣保留 256 筆、10 分鐘。
+  daemon 每 15 秒依 run／turn 狀態清掉已結束的項目，並刪除到期或不再有效的 durable watcher；在飛的回合（`pending`／`unknown`／`ok`，`ok` 指重送中、寫 unknown 欠帳的那段）的基準保留到寫回；資料庫最多同樣保留 256 筆、10 分鐘。
   `late_proof::pending_count()` 提供目前記憶體筆數供診斷。
   欠帳結清（owed unknown 寫入成功後）只認領**綁到同一回合**的基準：持久化時把基準綁上查到的回合；綁到別回合、或沒綁的，一律不認領、不升級（fail closed）。
   這避免 T1 的欠帳結清時誤把 T2 登記的基準升級 T1（#1483 複查）。
