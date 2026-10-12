@@ -186,7 +186,8 @@ function claudeIdentities(identities: Identity[]): Identity[] {
     .sort((a, b) => {
       if (a.name === 'cc0') return -1
       if (b.name === 'cc0') return 1
-      return a.name.localeCompare(b.name)
+      // numeric：cc2 排在 cc10 前面（字典序會把 cc10 排到 cc2 前）。
+      return a.name.localeCompare(b.name, undefined, { numeric: true })
     })
 }
 
