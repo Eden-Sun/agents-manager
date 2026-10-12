@@ -114,34 +114,50 @@ export function termPieces(text: string, columns?: number | null): Piece[][] {
   return rows
 }
 
+const TRAILING_PUNCT = '.,;:!?'
+
+/**
+ * 句尾標點不算網址的一部分（`trimPunct` 的步數版：`steps` 是檢查與剝除的次數，測試用來釘住線性）。
+ *
+ * 從尾端往前一趟剝：句尾標點；包住網址的 `)`／`]`（它比對應的 `(`／`[` 多出來時才剝，網址自己成對的括號要留著，#659）。
+ * 剝完一輪若又動到了就再來一輪（句點與括號互相遮住，`(…page.)`）。
+ * 前綴計數讓「這個位置之前還多出幾個 `)`」是 O(1)，每個字元最多被剝一次、每輪至少剝一個字才會再來一輪，所以是 O(n)。
+ * 以前每輪重數整串、再 `slice` 一個字，`).` 重複幾千次要 1 秒以上（2026-10-12 複查）。
+ */
+export function trimPunctSteps(url: string): { end: number; steps: number } {
+  const n = url.length
+  // `excess[p]`：`url[0, p)` 裡 `)`（或 `]`）比 `(`（或 `[`）多幾個。
+  const parenExcess = new Int32Array(n + 1)
+  const bracketExcess = new Int32Array(n + 1)
+  for (let i = 0; i < n; i++) {
+    const ch = url[i]
+    parenExcess[i + 1] = parenExcess[i] + (ch === ')' ? 1 : ch === '(' ? -1 : 0)
+    bracketExcess[i + 1] = bracketExcess[i] + (ch === ']' ? 1 : ch === '[' ? -1 : 0)
+  }
+  let end = n
+  let steps = 0
+  let moved = true
+  while (moved) {
+    steps++
+    const before = end
+    while (end > 0 && TRAILING_PUNCT.includes(url[end - 1])) {
+      end--
+      steps++
+    }
+    while (end > 0 && url[end - 1] === ')' && parenExcess[end] > 0) {
+      end--
+      steps++
+    }
+    while (end > 0 && url[end - 1] === ']' && bracketExcess[end] > 0) {
+      end--
+      steps++
+    }
+    moved = end !== before
+  }
+  return { end, steps }
+}
+
 /** 句尾標點不算網址的一部分。 */
-function trimPunct(url: string): string {
-  let u = url
-  let prev: string
-  // 句點與不成對的括號會互相遮住（`(…page.)` 先剝不到 `)` 的句點）：剝到不再變為止。
-  do {
-    prev = u
-    u = u.replace(/[.,;:!?]+$/, '')
-    // 包住網址的 )／] 不是網址的一部分；網址自己成對的括號要留著（#659）。
-    const extra = (open: string, close: string) => {
-      let o = 0
-      let c = 0
-      for (const ch of u) {
-        if (ch === open) o++
-        else if (ch === close) c++
-      }
-      return c - o
-    }
-    let drop = extra('(', ')')
-    while (drop > 0 && u.endsWith(')')) {
-      u = u.slice(0, -1)
-      drop--
-    }
-    drop = extra('[', ']')
-    while (drop > 0 && u.endsWith(']')) {
-      u = u.slice(0, -1)
-      drop--
-    }
-  } while (u !== prev)
-  return u
+export function trimPunct(url: string): string {
+  return url.slice(0, trimPunctSteps(url).end)
 }
