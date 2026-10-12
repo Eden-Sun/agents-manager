@@ -3080,6 +3080,38 @@ class IssueClaimTest(unittest.TestCase):
                      "bots" / "remote-bot" / "hook-spool.d")
         self.assertEqual(len(list(spool_dir.glob("*.json"))), 1, "remote instance root must match daemon spool scan")
 
+    def test_a_remote_claim_follows_the_remote_daemon_server_data_dir(self):
+        # #1497 的殘留缺口：遠端 bot 的 env 沒有 AM_DATA_DIR，遠端 daemon 若在 `[server] data_dir` 指到別處，
+        # spool 要跟著寫到那裡（同 daemon `startup::data_dir`），不是寫死家目錄預設路徑。
+        custom = Path(self.dir.name) / "remote-custom-data"
+        cfg = self.home / ".config" / "agents-manager"
+        cfg.mkdir(parents=True, exist_ok=True)
+        (cfg / "config.toml").write_text(f'[server]\ndata_dir = "{custom}"  # 遠端 daemon 的資料目錄\n', encoding="utf-8")
+        os.environ.pop("AM_DATA_DIR", None)
+        os.environ["AM_BOT_ID"] = "remote-bot"
+        os.environ["AM_KIND"] = "codex"
+        self.issue(1346, title="遠端 daemon 自訂資料目錄")
+
+        code, out, err = self.run_cli("issue", "claim", "1346", "--bot", "newbie", "--child", "newbie")
+
+        self.assertEqual(code, 0, err)
+        self.assertEqual(len(list((custom / "bots" / "remote-bot" / "hook-spool.d").glob("*.json"))), 1, "spool 要寫進遠端 daemon 的資料目錄")
+        self.assertEqual(list((self.home / ".config" / "agents-manager" / "bots").glob("*/hook-spool.d/*.json")), [], "不該寫到家目錄預設路徑")
+
+    def test_a_remote_claim_resolves_a_relative_server_data_dir_beside_the_config(self):
+        cfg = self.home / ".config" / "agents-manager"
+        cfg.mkdir(parents=True, exist_ok=True)
+        (cfg / "config.toml").write_text('[server]\ndata_dir = "rel-data"\n', encoding="utf-8")
+        os.environ.pop("AM_DATA_DIR", None)
+        os.environ["AM_BOT_ID"] = "remote-bot"
+        os.environ["AM_KIND"] = "codex"
+        self.issue(1347, title="相對資料目錄")
+
+        code, out, err = self.run_cli("issue", "claim", "1347", "--bot", "newbie", "--child", "newbie")
+
+        self.assertEqual(code, 0, err)
+        self.assertEqual(len(list((cfg / "rel-data" / "bots" / "remote-bot" / "hook-spool.d").glob("*.json"))), 1, "相對路徑接在設定檔所在目錄後面")
+
     def test_a_claim_with_no_activity_for_over_24h_can_be_taken_over(self):
         old = _iso(-30 * 3600)
         self.issue(413, labels=["wip"], comments=[self.claim_comment("kd61te", age_secs=30 * 3600)], updated=old)

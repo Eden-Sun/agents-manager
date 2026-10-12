@@ -2108,6 +2108,35 @@ def claim_conflict(number: int, claim: dict) -> AgmError:
 COLLISION_TIMEOUT = 2.0
 
 
+_SERVER_SECTION = re.compile(r"\[\s*server\s*\]\s*(#.*)?\Z")
+_DATA_DIR_LINE = re.compile(r"""data_dir\s*=\s*(?:"([^"]*)"|'([^']*)')\s*(#.*)?\Z""")
+
+
+def configured_data_dir(cfg_dir: Path) -> Path | None:
+    """讀 `<cfg_dir>/config.toml` 的 `[server] data_dir`，規則同 daemon `startup::data_dir`：`~` 展開，相對路徑接在設定檔所在目錄後面。
+    讀不到、沒有這一行、或是空的，回 None（呼叫端退回預設目錄）。只認這一行的簡單寫法，解析不出來就不猜。"""
+    try:
+        text = (cfg_dir / "config.toml").read_text(encoding="utf-8")
+    except OSError:
+        return None
+    in_server = False
+    for raw in text.splitlines():
+        line = raw.strip()
+        if line.startswith("["):
+            in_server = bool(_SERVER_SECTION.match(line))
+            continue
+        if not in_server:
+            continue
+        m = _DATA_DIR_LINE.match(line)
+        if m:
+            value = (m.group(1) if m.group(1) is not None else m.group(2)).strip()
+            if not value:
+                return None
+            p = Path(os.path.expanduser(value))
+            return p if p.is_absolute() else cfg_dir / p
+    return None
+
+
 def spool_claim_collision(number: int, title: str, me: str, payload: dict) -> None:
     """遠端 pane 沒有本機 daemon runtime 時，把認領提示交給該 bot 的 hook spool。"""
     bot_id = os.environ.get("AM_BOT_ID", "")
@@ -2127,6 +2156,9 @@ def spool_claim_collision(number: int, title: str, me: str, payload: dict) -> No
         root = Path.home() / ".config" / "agents-manager"
         if instance:
             root = root / "instances" / instance
+        else:
+            # 遠端 bot 的 env 沒有 AM_DATA_DIR：照遠端 daemon 的規則，`[server] data_dir` 指到哪裡就寫哪裡（#1497）。
+            root = configured_data_dir(root) or root
     spool_dir = root / "bots" / bot_id / "hook-spool.d"
     try:
         spool_dir.mkdir(parents=True, exist_ok=True)
