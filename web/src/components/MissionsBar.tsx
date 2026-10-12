@@ -26,6 +26,7 @@ import { ConfirmDialog } from './ConfirmDialog'
 import { KindIcon } from './KindTag'
 import './missions.css'
 import { safeHttpUrl } from '../lib/safeUrl'
+import { dateTimeLabel } from '../lib/msgTime'
 
 /** 一次最多攤開幾張進行中的卡；其餘收在「還有 N 個」後面。 */
 const OPEN_SHOWN = 2
@@ -615,9 +616,7 @@ function clip(s: string, n: number): string {
   return chars.length > n ? `${chars.slice(0, n).join('')}…` : s
 }
 
+/** 任務的完成／取消／重置時間：`M/D HH:mm`，跨年才帶年（[`dateTimeLabel`]）。 */
 function shortTime(iso: string | null): string {
-  if (!iso) return ''
-  const d = new Date(iso)
-  if (Number.isNaN(d.getTime())) return ''
-  return `${d.getMonth() + 1}/${d.getDate()} ${String(d.getHours()).padStart(2, '0')}:${String(d.getMinutes()).padStart(2, '0')}`
+  return iso ? dateTimeLabel(iso) : ''
 }

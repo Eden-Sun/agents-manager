@@ -1,6 +1,6 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
-import { hostBaselineView } from './hostBaseline'
+import { formatCheckedAt, hostBaselineView } from './hostBaseline'
 import { toHostBaseline } from '../api/normalize'
 
 const issue = (id: string, severity: 'critical' | 'warn') => ({ id, severity, message: `${id} 不一致` })
@@ -85,4 +85,10 @@ test('未知（issues: null）又過期：說上次檢查，而不是只說未�
   const v = hostBaselineView(toHostBaseline({ issues: null, checked_at: ago(9), os: null, stale: true }), NOW)
   assert.equal(v.level, 'stale')
   assert.deepEqual(v.items, [])
+})
+
+test('上次檢查的時間：跨年要帶年份（1 月看到去年 12 月底的檢查）', () => {
+  const now = new Date(2027, 0, 1, 1, 0).getTime()
+  assert.equal(formatCheckedAt(new Date(2026, 11, 31, 22, 0).toISOString(), now), '2026-12-31 22:00')
+  assert.equal(formatCheckedAt(new Date(2027, 0, 1, 0, 30).toISOString(), now), '01-01 00:30')
 })

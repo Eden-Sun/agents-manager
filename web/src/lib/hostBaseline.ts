@@ -14,13 +14,14 @@ export interface HostBaselineView {
 /** 跟 daemon 的 `RECHECK_EVERY + STALE_GRACE`（6 小時 + 15 分）同一條線：超過就算太久沒量。 */
 const STALE_AFTER_MS = (6 * 60 + 15) * 60 * 1000
 
-/** 「上次檢查」的時間，本地時區 `MM-DD HH:mm`；讀不懂就原樣顯示。 */
-export function formatCheckedAt(iso: string): string {
+/** 「上次檢查」的時間，本地時區 `MM-DD HH:mm`；跨年（相對 `now`）改成 `YYYY-MM-DD HH:mm`；讀不懂就原樣顯示。 */
+export function formatCheckedAt(iso: string, now: number = Date.now()): string {
   const t = Date.parse(iso)
   if (Number.isNaN(t)) return iso || '不明'
   const d = new Date(t)
   const p = (n: number) => String(n).padStart(2, '0')
-  return `${p(d.getMonth() + 1)}-${p(d.getDate())} ${p(d.getHours())}:${p(d.getMinutes())}`
+  const year = d.getFullYear() === new Date(now).getFullYear() ? '' : `${d.getFullYear()}-`
+  return `${year}${p(d.getMonth() + 1)}-${p(d.getDate())} ${p(d.getHours())}:${p(d.getMinutes())}`
 }
 
 /**
@@ -36,7 +37,7 @@ export function hostBaselineView(b: HostBaseline | null, now: number = Date.now(
   const sorted = b.issues === null ? [] : [...b.issues].sort((a, c) => Number(c.severity === 'critical') - Number(a.severity === 'critical'))
   if (b.stale || old) {
     return {
-      text: `一致性：上次檢查於 ${formatCheckedAt(b.checked_at)}，目前無法連線`,
+      text: `一致性：上次檢查於 ${formatCheckedAt(b.checked_at, now)}，目前無法連線`,
       level: 'stale',
       hint: b.error ? `最後一次偵測失敗：${b.error}。下面是上次量到的結果，不是現況。` : '超過一個重量週期沒有更新（主機離線或偵測沒跑成）。下面是上次量到的結果，不是現況。',
       items: sorted,

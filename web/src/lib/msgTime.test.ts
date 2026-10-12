@@ -1,6 +1,6 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
-import { msgTimeLabel, msgTimeTitle } from './msgTime.ts'
+import { dateTimeLabel, msgTimeLabel, msgTimeTitle } from './msgTime.ts'
 
 test('訊息時間標籤：今天只有時分，較早日期帶月日，其他年份帶年', () => {
   const now = new Date(2026, 9, 11, 15, 0).getTime()
@@ -14,3 +14,11 @@ test('訊息 tooltip 使用本地完整時間；讀不懂時保留原文', () =>
   assert.equal(msgTimeLabel('x'), '')
   assert.equal(msgTimeTitle('x'), 'x')
 })
+
+test('任意時刻的日期時間（任務完成時間等）：同年只寫月日，跨年才帶年', () => {
+  const now = new Date(2027, 0, 1, 0, 30).getTime()
+  assert.equal(dateTimeLabel(new Date(2026, 11, 31, 23, 50).toISOString(), now), '2026/12/31 23:50')
+  assert.equal(dateTimeLabel(new Date(2027, 0, 1, 0, 10).toISOString(), now), '1/1 00:10')
+  assert.equal(dateTimeLabel('x', now), '')
+})
+

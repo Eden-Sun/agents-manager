@@ -37,7 +37,10 @@ function clock(t: Date, nowMs: number): string {
   const time = `${p(t.getHours())}:${p(t.getMinutes())}`
   const now = new Date(nowMs)
   const sameDay = t.getFullYear() === now.getFullYear() && t.getMonth() === now.getMonth() && t.getDate() === now.getDate()
-  return sameDay ? time : `${t.getMonth() + 1}/${t.getDate()} ${time}`
+  if (sameDay) return time
+  // 跨年要帶年份：去年 12 月底的活動在 1 月看不出是哪一年（tooltip 寫的是「上次活動」）。
+  const head = t.getFullYear() === now.getFullYear() ? '' : `${t.getFullYear()}/`
+  return `${head}${t.getMonth() + 1}/${t.getDate()} ${time}`
 }
 
 /**
