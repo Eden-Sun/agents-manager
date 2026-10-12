@@ -955,7 +955,7 @@ pub fn valid_id(id: &str) -> bool {
 /// 看不見或會改變顯示方向的字元：零寬、方向控制、BOM。放進名稱或標籤，畫面上看起來一樣、實際是另一個字串（或把後面的字倒過來）。
 /// 純字元規則，住在 `config`（`bot_input` 的檢查與 bot 名稱規則共用這一份）。
 pub fn is_invisible_format_char(c: char) -> bool {
-    matches!(c, '\u{200b}'..='\u{200f}' | '\u{202a}'..='\u{202e}' | '\u{2060}'..='\u{2064}' | '\u{2066}'..='\u{2069}' | '\u{feff}')
+    matches!(c, '\u{61c}' | '\u{200b}'..='\u{200f}' | '\u{202a}'..='\u{202e}' | '\u{2060}'..='\u{2064}' | '\u{2066}'..='\u{2069}' | '\u{feff}')
 }
 
 pub fn valid_bot_name(name: &str) -> bool {
@@ -1745,6 +1745,15 @@ mod agent_name_tests {
         assert!(!valid_bot_name(" "));
         assert!(!valid_bot_name("a@b"));
         assert!(!valid_bot_name(&"x".repeat(33)));
+    }
+
+    /// 註解寫「方向控制字元」要擋，但 Unicode 的 Bidi_Control 一共七個，以前漏了 U+061C ARABIC LETTER MARK。
+    #[test]
+    fn nicknames_reject_every_bidi_control_character() {
+        for c in ['\u{61c}', '\u{200e}', '\u{200f}', '\u{202a}', '\u{202e}', '\u{2066}', '\u{2069}'] {
+            assert!(super::is_invisible_format_char(c), "{c:?} 是 Bidi_Control，名字裡不可以有");
+        }
+        assert!(!valid_bot_name("rtl\u{61c}gnp"), "U+061C 會把後面的字倒過來顯示");
     }
 }
 
