@@ -383,9 +383,13 @@ export function assignmentLabel(a: MissionAssignment): string {
   }
 }
 
-/** 這件交辦還開著嗎（沒有 `completed_at` 就是還在跑或還在等）。 */
+/**
+ * 這件交辦還開著嗎：跟 daemon 的 `OPEN_STATES`（未結案）同一份。`failed` 是結案，不能還亮著；
+ * 認不得的新狀態不算開著（只有 daemon 明講還沒結案的才亮）。
+ */
+const OPEN_ASSIGNMENT_STATUSES: readonly string[] = ['queued', 'delivered', 'unknown', 'awaiting_review', 'blocked', 'quota_blocked']
 export function assignmentOpen(a: MissionAssignment): boolean {
-  return !a.completed_at && a.status !== 'completed' && a.status !== 'cancelled' && a.status !== 'superseded'
+  return !a.completed_at && OPEN_ASSIGNMENT_STATUSES.includes(a.status)
 }
 
 /**

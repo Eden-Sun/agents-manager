@@ -263,6 +263,8 @@ test('哪幾件交辦還開著：沒結案的才算，view 也把整串帶出去
   assert.equal(assignmentOpen(open), true)
   assert.equal(assignmentOpen(closed), false)
   assert.equal(assignmentOpen(dropped), false)
+  // daemon 的 OPEN_STATES 是 queued／delivered／unknown／awaiting_review／blocked／quota_blocked；failed 是結案，不能還亮著。
+  assert.equal(assignmentOpen(asg({ status: 'failed', completed_at: null })), false, 'failed 是終態')
   const v = missionView(mission(), [], [closed, open])
   assert.deepEqual(v.assignments.map((a) => a.id), [closed.id, open.id])
 })
