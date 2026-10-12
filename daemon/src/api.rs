@@ -12218,6 +12218,7 @@ mod per_principal_auth_tests {
             user_escalated: false,
             auto_escalated: false,
             notified_at: Some(db::now()),
+            pending_first: None,
             dismissed: false,
             phase: crate::deploy_wait::Phase::Waiting,
             rev: 1,

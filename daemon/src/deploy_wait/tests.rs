@@ -55,6 +55,7 @@ fn the_notice_goes_out_at_three_minutes_and_only_changes_update_it() {
         user_escalated: false,
         auto_escalated: false,
         notified_at: None,
+        pending_first: None,
         dismissed: false,
         phase: Phase::Waiting,
         rev: 0,
@@ -117,6 +118,37 @@ async fn a_wait_under_three_minutes_says_nothing_and_one_over_says_it_once() {
     assert_eq!(rows[1].1["wake"], false, "拿到窗口等只記錄不叫醒");
     let w = current(app).unwrap();
     assert!(crate::supervisor::maintenance::waited_secs(&w.since, &crate::db::now()) >= 240, "換核准不歸零：{}", w.since);
+}
+
+#[tokio::test]
+async fn a_failed_first_inbox_insert_is_retried_on_the_next_tick_with_the_same_key_and_wake() {
+    let e = tt::env().await;
+    let app = &e.app;
+    let t3 = "2026-10-04T12:03:00.000Z";
+    *app.deploy_wait.lock().unwrap() = Some(retry_wait());
+    sqlx::query(
+        "CREATE TRIGGER fail_first_deploy_waiting BEFORE INSERT ON supervisor_inbox
+         WHEN NEW.kind = 'deploy_waiting'
+         BEGIN SELECT RAISE(ABORT, 'injected transient inbox failure'); END",
+    )
+    .execute(&app.db)
+    .await
+    .unwrap();
+
+    super::tick_at(app, t3).await;
+    assert!(inbox(app).await.is_empty(), "第一次 insert 由 trigger 擋下");
+    assert_eq!(current(app).unwrap().notified_at.as_deref(), Some(t3), "首次通知狀態已保存");
+    assert!(load(app).unwrap().pending_first.is_some(), "失敗時保留待送通知於狀態檔");
+
+    sqlx::query("DROP TRIGGER fail_first_deploy_waiting").execute(&app.db).await.unwrap();
+    super::tick_at(app, t3).await;
+
+    let rows = inbox(app).await;
+    assert_eq!(rows.len(), 1, "下一拍補上，event key 冪等：{rows:?}");
+    assert_eq!(rows[0].0, "deploy_waiting:retry-first-notice:1");
+    assert_eq!(rows[0].1["wake"], true, "送達臨界區仍需叫醒巡檢");
+    super::tick_at(app, t3).await;
+    assert_eq!(inbox(app).await.len(), 1, "重複 tick 不會多插一筆");
 }
 
 /// restart-window 的拒絕，擋住的是 `delivering`（送達臨界區）而不是 working：放寬也放不行。
@@ -486,4 +518,77 @@ async fn user_dispatch_actions_push_records_without_wake() {
     assert_eq!(rows.len(), 3);
     assert_eq!(rows[2].1["deploy_wait"]["dismissed"], true);
     assert_eq!(rows[2].1["wake"], false, "先等記錄不叫醒巡檢");
+}
+
+fn retry_wait() -> Wait {
+    Wait {
+        id: "retry-first-notice".into(),
+        owner: OWNER.into(),
+        approval_id: "approval".into(),
+        commit: SHA.into(),
+        since: "2026-10-04T12:00:00.000Z".into(),
+        last_attempt_at: "2026-10-04T12:03:00.000Z".into(),
+        blockers: vec![Blocker { bot_id: Some("delivering".into()), name: "alpha".into(), why: "delivering".into() }],
+        escalates_at: None,
+        user_escalated: false,
+        auto_escalated: false,
+        notified_at: None,
+        pending_first: None,
+        dismissed: false,
+        phase: Phase::Waiting,
+        rev: 0,
+        ended_at: None,
+        swap_announced_at: BTreeMap::new(),
+    }
+}
+
+#[tokio::test]
+async fn pending_first_survives_reload_and_keeps_its_payload_even_after_state_changes() {
+    for wake in [false, true] {
+        let e = tt::env().await;
+        let app = &e.app;
+        let mut w = retry_wait();
+        if !wake {
+            w.blockers[0].why = "working".into();
+            w.escalates_at = Some("2026-10-04T12:05:00.000Z".into());
+        }
+        assert_eq!(evaluate(&mut w, None, "2026-10-04T12:03:00.000Z"), Some(Announce::First));
+        let pending = w.pending_first.clone().unwrap();
+        assert_eq!(pending.payload["wake"], wake);
+        save(app, Some(&w));
+        let mut reloaded = load(app).unwrap();
+        assert_eq!(reloaded.pending_first.as_ref(), Some(&pending));
+        reloaded.rev = 2;
+        reloaded.blockers.clear();
+        reloaded.user_escalated = true;
+        *app.deploy_wait.lock().unwrap() = Some(reloaded);
+        super::tick_at(app, "2026-10-04T12:03:15.000Z").await;
+        let rows = inbox(app).await;
+        assert_eq!(rows, vec![("deploy_waiting:retry-first-notice:1".into(), pending.payload.clone())]);
+        assert!(current(app).unwrap().pending_first.is_none());
+        assert!(load(app).unwrap().pending_first.is_none(), "成功才將清除狀態落盤");
+
+        // insert 成功、清 pending 前重啟：同 key 已存在仍算送達，不產生第二筆。
+        save(app, Some(&w));
+        *app.deploy_wait.lock().unwrap() = load(app);
+        super::tick_at(app, "2026-10-04T12:03:15.000Z").await;
+        assert_eq!(inbox(app).await, rows);
+        assert!(load(app).unwrap().pending_first.is_none());
+    }
+}
+
+#[tokio::test]
+async fn legacy_state_without_pending_first_loads_without_reannouncing() {
+    let e = tt::env().await;
+    let app = &e.app;
+    let mut w = retry_wait();
+    w.notified_at = Some("2026-10-04T12:03:00.000Z".into());
+    w.rev = 1;
+    let mut legacy = serde_json::to_value(&w).unwrap();
+    legacy.as_object_mut().unwrap().remove("pending_first");
+    std::fs::write(path(app), serde_json::to_vec(&legacy).unwrap()).unwrap();
+    *app.deploy_wait.lock().unwrap() = load(app);
+    assert_eq!(current(app).unwrap(), w);
+    super::tick_at(app, "2026-10-04T12:03:15.000Z").await;
+    assert!(inbox(app).await.is_empty(), "舊檔沒有 pending，不重新叫醒巡檢");
 }
