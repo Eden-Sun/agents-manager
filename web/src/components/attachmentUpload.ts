@@ -182,7 +182,8 @@ export function uploadPercent(loaded: number, total: number): number {
 export function progressLabel(loaded: number, total: number): string {
   const pct = uploadPercent(loaded, total)
   if (total < 1024) return `${loaded} / ${total} B · ${pct}%`
-  if (total < 1024 * 1024) return `${Math.round(loaded / 1024)} / ${Math.round(total / 1024)} KB · ${pct}%`
+  // 總大小先看四捨五入後落在哪單位：1023.6 KB 進位是 1024，整段改用 MB，不印「1024 KB」。
+  if (Math.round(total / 1024) < 1024) return `${Math.round(loaded / 1024)} / ${Math.round(total / 1024)} KB · ${pct}%`
   const mb = (n: number) => (n / (1024 * 1024)).toFixed(1)
   return `${mb(loaded)} / ${mb(total)} MB · ${pct}%`
 }
