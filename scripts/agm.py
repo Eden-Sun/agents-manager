@@ -1939,11 +1939,26 @@ def all_comments(args, number: int) -> list:
     path = f"repos/{repo}/issues/{number}/comments" if repo else f"repos/{{owner}}/{{repo}}/issues/{number}/comments"
     raw = gh(["api", "--paginate", f"{path}?per_page=100"])
     try:
-        rows = json.loads(raw or "[]")
-    except json.JSONDecodeError:
+        rows = _json_array_pages(raw or "[]")
+    except ValueError:
         raise AgmError("gh_failed", f"gh api {path} 回的不是 JSON：{raw.strip()[:200]}", 1)
-    if not isinstance(rows, list):
-        raise AgmError("gh_failed", f"gh api {path} 回的不是留言清單", 1)
+    return rows
+
+
+def _json_array_pages(raw: str) -> list:
+    """`gh api --paginate` 不加 `--slurp` 時，每一頁各自是一個 JSON 陣列（`[…]\\n[…]`）。逐段解開接成一份清單；
+    不用 `--slurp`：舊版 gh 不一定有那個旗標，在這裡解開最不依賴 gh 版本。任何一段不是陣列就整份當成壞的（`ValueError`）。"""
+    decoder = json.JSONDecoder()
+    rows: list = []
+    text = raw.strip()
+    idx = 0
+    while idx < len(text):
+        page, idx = decoder.raw_decode(text, idx)
+        if not isinstance(page, list):
+            raise ValueError("page is not a JSON array")
+        rows.extend(page)
+        while idx < len(text) and text[idx].isspace():
+            idx += 1
     return rows
 
 
