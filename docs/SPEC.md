@@ -607,6 +607,8 @@ hook body 另外帶 `run_id`＝這個 CLI 行程 pane env 的 `AM_RUN_ID`（本�
   run 或 bot 沒了才退出——以前一次讀錯就退出，Stop hook 又剛好漏掉的話那一回合就沒人收。讀不到 agent 狀態的那一輪不算閒著。
 - **讀不到送了什麼就不收**（#193）：`try_fallback` 剝回音要的「送了什麼」讀不到時回錯、回合留在飛，下一次再來——當成什麼都沒送，
   我們自己的 prompt 就被當成 agent 的回覆存下來。
+- **Codex warning footer**（#1495）：底部 `⚠ N warning(s) · f2 to view` 獨立一行或與 `? for shortcuts` 同列時，均屬狀態列 chrome。
+  終端備援及網頁即時文字不把它併入回答；模型／強度讀值、busy 與空輸入框判斷沿用原有規則，warning 數不另加 UI 欄位。唯讀終端快照保留原畫面。
 - **codex 0.155 的畫面**（#207；程式先照 rust-v0.155.0 原始碼做，真畫面 0.155.1 已驗）：
   - 狀態列 `• {字頭} ({經過時間} • esc to interrupt)`，後面可能再接 ` · {訊息}`。字頭預設 `Working`，壓縮時 `Compacting context`，
     reasoning summary 開著時是 summary 的最新一行（0.155.0 預設開、0.155.1 預設關回去，身分的 config 明寫的照開）。「還在忙」認**結構**

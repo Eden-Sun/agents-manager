@@ -17,6 +17,9 @@ const NOISE: RegExp[] = [
   /^\s*[(（]?\s*(?:esc|escape)\b[^.]*\b(?:to|for)\b/i,
   /^\s*[(（]?\s*\?\s+for\s+shortcuts/i,
   /^\s*(?:⏵⏵|⏸)/,
+  // Codex footer: warning counter may have its own row in a narrow pane.
+  /^\s*⚠ \d+ warnings? · f2 to view\s*$/,
+  /^\s*[a-z][a-z0-9._]*-[a-z0-9._-]+(?:\s+(?:default|fast|low|medium|high|xhigh|max|ultra))*\s*·\s*[~/]/i,
   // Codex idle splash（框線裡的 banner、空輸入提示、額度重置提示）。
   /OpenAI Codex \(v/i,
   /Ask Codex to do anything/i,
