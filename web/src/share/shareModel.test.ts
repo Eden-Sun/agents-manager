@@ -1,16 +1,17 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
-import { fmtSize, SHARE_TEXT_STORE_MAX, mergeMessages, ShareHttpError, shareErrorText, shareSafeHref, toShareFiles, toShareMessage, toSharePage, toStatus, tokenFromLocation } from './shareModel.ts'
+import { fmtSize, mergeMessages, SHARE_PAGE_MAX, SHARE_TEXT_STORE_MAX, ShareHttpError, shareErrorText, shareSafeHref, toShareFiles, toShareMessage, toSharePage, toStatus, tokenFromLocation } from './shareModel.ts'
 
 const T = 'AbCdEfGhIjKlMnOpQrStUvWxYz0123456789_-abcd'
 
 test('一頁超過 100 則或單則超長文字會被截掉，不能整包塞進頁面', () => {
   const huge = 'x'.repeat(200_000)
-  const messages = Array.from({ length: 250 }, (_, i) => ({ id: `m${i}`, role: 'assistant', text: i === 0 ? huge : 'ok', created_at: '2024-01-01T00:00:00Z' }))
+  // 契約 C 是舊→新：超長的那則放在最新（最後），保留在頁面上（上限只丟最舊的）。
+  const messages = Array.from({ length: 250 }, (_, i) => ({ id: `m${i}`, role: 'assistant', text: i === 249 ? huge : 'ok', created_at: '2024-01-01T00:00:00Z' }))
   const page = toSharePage({ bot_name: 'b', status: 'idle', has_more: true, messages })
   assert.ok(page.messages.length <= 100)
-  assert.ok(page.messages[0].text.length < huge.length)
-  assert.match(page.messages[0].text, /內容過長/)
+  assert.ok(page.messages.at(-1)!.text.length < huge.length)
+  assert.match(page.messages.at(-1)!.text, /內容過長/)
 })
 
 test('分享頁連結只留 http／https', () => {
@@ -109,4 +110,12 @@ test('截斷顯示的長訊息不切斷 emoji：截點落在代理對中間時�
   const out = toShareMessage({ id: 'm1', role: 'assistant', text, created_at: '', attachments: [] })!.text
   assert.doesNotMatch(out, /[\uD800-\uDBFF](?![\uDC00-\uDFFF])/, '不能留下孤立的高位代理')
   assert.doesNotMatch(out, /[\uDC00-\uDFFF]/, '不能留下孤立的低位代理')
+})
+
+test('toSharePage：一頁超過上限時丟掉的是最舊的（契約 C 是舊→新），最新的一則要留著，還有更早的就標 has_more', () => {
+  const msgs = Array.from({ length: SHARE_PAGE_MAX + 50 }, (_, i) => ({ id: `m${i}`, role: i % 2 ? 'assistant' : 'user', text: `t${i}`, created_at: '2026-10-12T00:00:00Z' }))
+  const page = toSharePage({ bot_name: 'b', status: 'idle', messages: msgs, has_more: false })
+  assert.equal(page.messages.length, SHARE_PAGE_MAX)
+  assert.equal(page.messages.at(-1)?.id, `m${SHARE_PAGE_MAX + 49}`, '最新的那則不能被丟掉')
+  assert.equal(page.has_more, true, '丟掉的是更早的，還有東西可載')
 })
