@@ -335,8 +335,12 @@ export function parseChoiceMenu(text: string | null | undefined): TuiChoiceMenu 
   // 游標記號剛好一個：零個＝捲出畫面算不出步數，多個＝正文引用之類不是選單。
   const blockTop = rows[0].line
   const blockEnd = Math.max(end, submitLine)
+  // 只算選項列與 Submit 列上的游標；說明裡縮排的 `❯ npm test` 不是游標。
   let markers = 0
-  for (let i = blockTop; i <= blockEnd; i++) if (hasMarker(lines[i])) markers++
+  for (let i = blockTop; i <= blockEnd; i++) {
+    const onOption = matchRow(i, lines[i])?.col === optionCol || i === submitLine
+    if (onOption && hasMarker(lines[i])) markers++
+  }
   if (markers !== 1) return null
 
   // 3. 說明接成一段；最後一項收到空白行／分隔線為止。
