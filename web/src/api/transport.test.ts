@@ -106,3 +106,21 @@ test('GET 很快就回來：逾時計時器要清掉，不留著', async () => {
   assert.equal(timers.pending(), 0)
 })
 
+test('/api/session 回的是網頁（代理或前端的退回頁、200）：不能拿那串 HTML 當 token', async () => {
+  const t = new HttpTransport()
+  const html = '<!doctype html><html><body>index</body></html>'
+  const sentTokens: (string | undefined)[] = []
+  globalThis.fetch = (async (input: string, init?: RequestInit) => {
+    const headers = (init?.headers ?? {}) as Record<string, string>
+    if (String(input) === '/api/session') {
+      return { ok: true, status: 200, headers: new Headers({ 'content-type': 'text/html' }), text: async () => html } as unknown as Response
+    }
+    sentTokens.push(headers['X-AM-Token'])
+    return { ok: true, status: 200, headers: new Headers(), text: async () => '{}' } as unknown as Response
+  }) as unknown as typeof fetch
+  await assert.rejects(() => t.session(), (e: unknown) => e instanceof Error && !(e instanceof ApiError))
+  await t.request('GET', '/state').catch(() => {})
+  // 沒有拿到 token 就不帶 X-AM-Token；HTML 整頁絕不會出現在任何請求的 header 裡。
+  assert.ok(sentTokens.every((tok) => tok === undefined || !tok.includes('<')), JSON.stringify(sentTokens))
+})
+
