@@ -623,6 +623,13 @@ pub async fn process<H: HookHost>(app: &H, body: &HookBody) -> Result<()> {
 /// 穩定的鑰匙，重播就再開一個外部回合與訊息。這把 id 跟回合同一個交易寫進 `turns.source_event_id`（唯一索引），
 /// 重播先查它：命中就只把 commit 後才發的通知補發一次（`message_added` 靠 id 去重、回合事件本來就是 at-least-once）。
 pub async fn process_for<H: HookHost>(app: &H, body: &HookBody, event_id: Option<&str>) -> Result<()> {
+    // #1626：撞題查詢會等 Jev（可能很慢），不進 bot 鎖；同一顆 bot 的 Stop 與其他 hook 不必排在它後面。
+    if is_claim_collision(body) {
+        let kind = classify(&body.provider.to_ascii_lowercase(), &body.payload);
+        if let HookKind::ClaimCollisionCheck { .. } = kind {
+            return process_claim_for(app, body, kind).await;
+        }
+    }
     let lock = app.bot_lock(&body.bot_id).await;
     let _g = lock.lock().await;
     let mut accepted_turn_id = None;
@@ -637,6 +644,37 @@ pub async fn process_for<H: HookHost>(app: &H, body: &HookBody, event_id: Option
         app.after_turn_end(body, run_id.as_deref(), &turn_id).await?;
     }
     Ok(())
+}
+
+/// 收件匣 worker 用來分流：撞題檢查列不占 bot 的 drain 組（#1626）。
+pub fn is_claim_collision(body: &HookBody) -> bool {
+    body.payload.get("hook_event_name").and_then(Value::as_str) == Some(CLAIM_COLLISION_EVENT)
+}
+
+/// #1626：撞題查詢只讀 bot／runs、寫撞題帳本與提示，不改這顆 bot 的回合狀態，所以不進 bot 鎖。
+/// 慢的 Jev 等待若占著鎖，同一顆 bot 的 Stop 就得排在後面。呼叫端仍在它結束後才 ACK（#1500）。
+async fn process_claim_for<H: HookHost>(app: &H, body: &HookBody, kind: HookKind) -> Result<()> {
+    let HookKind::ClaimCollisionCheck { issue, title, child, branch } = kind else { return Ok(()) };
+    let Some(bot) = db::bot(app.db(), &body.bot_id).await? else { return Ok(()) };
+    if bot.deleted_at.is_some() {
+        return Ok(());
+    }
+    // 同 process_locked_for_with_outcome（#708／#1259）：移交出去的專案歸接手的 daemon；讀不到就回錯，交給收件匣重試。
+    if app.db().bot_handed_off_to(&bot.id).await?.is_some() {
+        return Ok(());
+    }
+    if !provider_matches_kind(&body.provider, &bot.kind) {
+        return Ok(());
+    }
+    app.check_claim_collision(crate::judge::collision::ClaimAsk {
+        project_id: bot.project_id.clone(),
+        caller: bot.id.clone(),
+        issue,
+        title,
+        child,
+        branch,
+    })
+    .await
 }
 
 /// A pane-wrapped echo must still compare equal to the hook's single-line copy.
