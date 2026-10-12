@@ -19,7 +19,7 @@ import { UpdateQuotaChip } from './UpdateQuotaChip'
 import { AgyLogoutButton, AgyLogoutDialog } from './AgyLogout'
 import { agyQuotaErrorText } from '../lib/agyQuotaError'
 import { useAgyMissing } from './agyInstallState'
-import { RULE_5H, RULE_WEEKLY, fmtLeft, fmtLeftLong, resetBadge } from '../lib/quotaReset'
+import { RULE_5H, RULE_WEEKLY, fmtLeft, fmtLeftLong, msUntil, resetBadge } from '../lib/quotaReset'
 import { cliLoginCommand, identityEnv, shouldUseIdentityLogin } from '../lib/quotaLogin'
 import './quotaLimitHit.css'
 import { carriedOverAt } from '../lib/quotaWindowAge'
@@ -537,7 +537,7 @@ function Gauge({
         {windows.map((w) => {
           const span = WINDOW_MS[w.name]
           const mark = resetMark(w.resetsAt, span, now)
-          const left = w.resetsAt ? new Date(w.resetsAt).getTime() - now : null
+          const left = msUntil(w.resetsAt, now)
           const back = resetBadge(w.pct, w.resetsAt, now, resetRule(w.name))
           // 那一列已經寫倒數了，窗口名就別再換成剩幾分——同一個時間寫兩次，還會擠在一起。
           const soon = back ? null : soonLabel(w.name, w.resetsAt, now)
@@ -654,7 +654,7 @@ function PopLimitHit({ hit }: { hit: QuotaLimitHit | null | undefined }) {
 /** codex 額度重置券（2026-09-10 使用者）；daemon 只讀不用，要用在 codex `/status` → Reset usage。 */
 function PopResetCredits({ credits, now }: { credits: QuotaResetCredits | null | undefined; now: number }) {
   if (!credits || credits.available <= 0) return null
-  const left = credits.expires_at ? new Date(credits.expires_at).getTime() - now : null
+  const left = msUntil(credits.expires_at, now)
   return (
     <div className="quota-pop-line reset-credits">
       <span className="quota-win">
@@ -687,7 +687,7 @@ function PopWindow({
 }) {
   const pct = remaining(w)
   if (pct === null) return null
-  const left = w?.resets_at ? new Date(w.resets_at).getTime() - now : null
+  const left = msUntil(w?.resets_at, now)
   return (
     <div className="quota-pop-line">
       <span className="quota-win">

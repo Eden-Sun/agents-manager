@@ -34,6 +34,16 @@ function short(ms: number): string {
 }
 
 /**
+ * 距離 `iso` 還有幾毫秒。沒有時間、或字串讀不出來＝`null`：呼叫端照額度列的空狀態顯示「—」、不掛提示，
+ * 不能把 `NaN` 印出來（`new Date("…").getTime()` 讀不出來時是 NaN，直接算下去會寫成「NaN 分」）。
+ */
+export function msUntil(iso: string | null | undefined, now: number): number | null {
+  if (!iso) return null
+  const t = new Date(iso).getTime()
+  return Number.isNaN(t) ? null : t - now
+}
+
+/**
  * 這一格現在要不要寫倒數？`remainingPct` 是**剩餘**百分比（跟量表同一個數字）。
  *
  * 回 `null` 的情況：還有額度、沒有重置時間、時間讀不出來、或重置在三小時之外。已經過了重置時刻
