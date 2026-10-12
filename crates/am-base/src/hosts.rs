@@ -1728,9 +1728,15 @@ pub async fn remote_canonical_dir(conn: &HostConn, path: &str) -> Result<String>
     let out = conn
         .ssh_exec(&format!("cd -- {target} 2>/dev/null && pwd -P || printf 'AM_ERR\\n'"))
         .await?;
-    let line = out.lines().next().unwrap_or("").trim().to_string();
+    // 路徑含換行或控制字元時只取第一行會悄悄存成另一個目錄（建專案）：要求輸出恰好一行、沒有控制字元，否則拒絕。
+    let mut lines = out.lines();
+    let line = match (lines.next(), lines.next()) {
+        (Some(one), None) if !one.chars().any(char::is_control) => one.trim(),
+        (Some(_), _) => bail!("remote directory path has control characters or several lines: {path}"),
+        _ => "",
+    };
     if line.is_empty() || line == "AM_ERR" {
         bail!("remote directory does not exist: {path}");
     }
-    Ok(line)
+    Ok(line.to_string())
 }
