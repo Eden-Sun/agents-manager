@@ -20,6 +20,7 @@ import tempfile
 import threading
 import time
 import unittest
+from unittest.mock import patch
 import urllib.parse
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -2947,6 +2948,13 @@ class IssueClaimTest(unittest.TestCase):
         rt.mkdir()
         (rt / "runtime.json").write_text(json.dumps({"daemon_url": f"http://127.0.0.1:{server.server_address[1]}", "manager_bot_id": "bot-agm"}), encoding="utf-8")
         os.environ["AGM_RUNTIME_DIR"] = str(rt)
+        return server
+
+    def _claim_spools(self, bot_id="remote-bot"):
+        root = self.home / ".config" / "agents-manager"
+        if os.environ.get("AM_INSTANCE"):
+            root /= Path("instances") / os.environ["AM_INSTANCE"]
+        return list((root / "bots" / bot_id / "hook-spool.d").glob("*.json"))
 
     def test_a_successful_claim_asks_the_collision_check_with_the_claim_facts(self):
         # #1330：認領成功後附帶問一次撞題；請求本文帶票號、題目、child、分支。
@@ -2959,10 +2967,13 @@ class IssueClaimTest(unittest.TestCase):
         self.assertEqual(len(hits), 1, FakeDaemon.seen)
         self.assertEqual(hits[0]["method"], "POST")
         self.assertEqual(hits[0]["body"], {"issue": 1330, "title": "撞題提示要接上認領", "child": "newbie", "branch": "fix/newbie-g1330"})
+        self.assertEqual(self._claim_spools(), [], "202 已確認收件，不再寫一份 spool")
 
     def test_a_failing_collision_check_never_changes_the_claim_result(self):
         # #1330：舊 daemon 沒有這條路由（404）、或收了請求不回應：認領照樣成功、exit 0，撞題那一步什麼都不影響。
         self._hint_daemon()
+        os.environ["AM_BOT_ID"] = "remote-bot"
+        os.environ["AM_KIND"] = "codex"
         for mode in ("404", "dropped"):
             FakeDaemon.seen = []
             FakeDaemon.drop = {"/api/judge/collision-check"} if mode == "dropped" else set()
@@ -2971,7 +2982,63 @@ class IssueClaimTest(unittest.TestCase):
             self.assertEqual(code, 0, f"{mode}: {err}")
             self.assertTrue(json.loads(out)["claimed"], mode)
             self.assertTrue(any(c["path"] == "/api/judge/collision-check" for c in FakeDaemon.seen), mode)
+            self.assertEqual(len(self._claim_spools()), 1 if mode == "dropped" else 0, mode)
+            if mode == "404":
+                self.assertIn("404", err, "4xx 要留下診斷，不能靜默略過")
             FakeDaemon.drop = set()
+
+    def test_a_claim_spools_when_runtime_exists_but_connection_is_refused(self):
+        server = self._hint_daemon()
+        server.shutdown()
+        server.server_close()
+        os.environ["AM_BOT_ID"] = "remote-bot"
+        os.environ["AM_KIND"] = "codex"
+        self.issue(1334, title="runtime 存在但 daemon 未啟動")
+
+        code, out, err = self.run_cli("issue", "claim", "1334", "--bot", "newbie", "--child", "newbie")
+
+        self.assertEqual(code, 0, err)
+        self.assertTrue(json.loads(out)["claimed"])
+        self.assertEqual(len(self._claim_spools()), 1, "連線拒絕時將撞題提示排進 hook spool")
+
+    def test_a_claim_spools_when_collision_check_returns_server_error(self):
+        self._hint_daemon({"POST /api/judge/collision-check": (503, {"error": "unavailable"})})
+        os.environ["AM_BOT_ID"] = "remote-bot"
+        os.environ["AM_KIND"] = "codex"
+        self.issue(1335, title="daemon 正在更新")
+
+        code, out, err = self.run_cli("issue", "claim", "1335", "--bot", "newbie", "--child", "newbie")
+
+        self.assertEqual(code, 0, err)
+        self.assertTrue(json.loads(out)["claimed"])
+        self.assertEqual(len(self._claim_spools()), 1, "5xx 時保留一份 hook spool")
+
+    def test_a_claim_does_not_spool_on_forbidden_collision_check_but_reports_it(self):
+        self._hint_daemon({"POST /api/judge/collision-check": (403, {"error": "forbidden", "reason": "bot_proof_mismatch"})})
+        os.environ["AM_BOT_ID"] = "remote-bot"
+        os.environ["AM_KIND"] = "codex"
+        self.issue(1336, title="驗證失敗不要反覆排隊")
+
+        code, out, err = self.run_cli("issue", "claim", "1336", "--bot", "newbie", "--child", "newbie")
+
+        self.assertEqual(code, 0, err)
+        self.assertTrue(json.loads(out)["claimed"])
+        self.assertEqual(self._claim_spools(), [], "403 不應重複排隊")
+        self.assertIn("403", err)
+        self.assertIn("bot_proof_mismatch", err)
+
+    def test_a_claim_spools_when_collision_check_times_out(self):
+        self._hint_daemon()
+        os.environ["AM_BOT_ID"] = "remote-bot"
+        os.environ["AM_KIND"] = "codex"
+        self.issue(1337, title="撞題檢查逾時")
+
+        with patch.object(agm.Client, "post", side_effect=agm.AgmError("timeout", "simulated timeout", 5)):
+            code, out, err = self.run_cli("issue", "claim", "1337", "--bot", "newbie", "--child", "newbie")
+
+        self.assertEqual(code, 0, err)
+        self.assertTrue(json.loads(out)["claimed"])
+        self.assertEqual(len(self._claim_spools()), 1, "逾時之後排一份有穩定候選 key 的 spool")
 
     def test_a_claim_without_runtime_uses_injected_data_dir_for_collision_spool(self):
         os.environ["AM_BOT_ID"] = "remote-bot"
