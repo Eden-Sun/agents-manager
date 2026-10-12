@@ -3,6 +3,7 @@ import { useStore } from '../store/store'
 import { useTapCopy } from '../hooks/useTapCopy'
 import { NOT_ANSWERED, askAnswersText } from '../lib/askAnswers'
 import { msgTimeLabel, msgTimeTitle } from '../lib/msgTime'
+import { useLocalDay } from '../hooks/useLocalDay'
 import type { AskAnswers } from '../lib/askAnswers'
 import './askAnswers.css'
 
@@ -11,6 +12,7 @@ import './askAnswers.css'
  * 只讀的一張卡：不是使用者打的 prompt，沒有倒回鍵、來源標、送達標，也不碰任何送出或排隊。
  */
 export function AskAnswersCard({ msg, ask }: { msg: Message; ask: AskAnswers }) {
+  const today = useLocalDay()
   const notify = useStore((s) => s.notify)
   const tapCopy = useTapCopy(askAnswersText(ask), (ok) => {
     notify(ok ? 'info' : 'error', ok ? '已複製問答' : '複製失敗，請長按選取文字複製')
@@ -24,7 +26,7 @@ export function AskAnswersCard({ msg, ask }: { msg: Message; ask: AskAnswers }) 
           </span>
         </div>
         <time className="msg-time" dateTime={msg.created_at} title={msgTimeTitle(msg.created_at)}>
-          {msgTimeLabel(msg.created_at)}
+          {msgTimeLabel(msg.created_at, today)}
         </time>
       </div>
       <div className="ask-card bubble-copyable" {...tapCopy}>

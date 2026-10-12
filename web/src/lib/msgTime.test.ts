@@ -1,6 +1,6 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
-import { dateTimeLabel, msgTimeLabel, msgTimeTitle } from './msgTime.ts'
+import { dateTimeLabel, msgTimeLabel, msgTimeTitle, nextLocalMidnight, startOfLocalDay } from './msgTime.ts'
 
 test('訊息時間標籤：今天只有時分，較早日期帶月日，其他年份帶年', () => {
   const now = new Date(2026, 9, 11, 15, 0).getTime()
@@ -22,3 +22,10 @@ test('任意時刻的日期時間（任務完成時間等）：同年只寫月�
   assert.equal(dateTimeLabel('x', now), '')
 })
 
+test('本地「今天的開始」與下一個午夜：跨日後頁面要換成新的一天', () => {
+  const now = new Date(2026, 11, 31, 22, 0).getTime()
+  assert.equal(startOfLocalDay(now), new Date(2026, 11, 31).getTime())
+  assert.equal(nextLocalMidnight(now), new Date(2027, 0, 1).getTime())
+  // 正好在午夜：下一個午夜是明天的明天。
+  assert.equal(nextLocalMidnight(new Date(2027, 0, 1, 0, 0).getTime()), new Date(2027, 0, 2).getTime())
+})
