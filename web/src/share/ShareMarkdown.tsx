@@ -1,6 +1,7 @@
 import { Component, type ReactNode } from 'react'
 import Markdown from 'react-markdown'
 import remarkGfm from 'remark-gfm'
+import { remarkTrimAutolinkPunct } from '../lib/markdownAutolink'
 import { markdownTooDeep, markdownTooLong } from '../lib/markdownGuard'
 import { shareSafeHref } from './shareModel'
 
@@ -23,7 +24,7 @@ function MarkdownBody({ text }: { text: string }) {
   if (text === '__share_md_boom__') throw new Error('share markdown boom')
   return (
     <Markdown
-      remarkPlugins={[remarkGfm]}
+      remarkPlugins={[remarkGfm, remarkTrimAutolinkPunct]}
       skipHtml
       disallowedElements={['img']}
       unwrapDisallowed
