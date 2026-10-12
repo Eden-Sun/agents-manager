@@ -104,7 +104,8 @@ else
     for _pair in "${IDENTIFIERS[@]}"; do
       IDENTIFIER=${_pair%%|*}
       BINARY=${_pair#*|}
-      if printf '%s\n' "$AUTH_OUTPUT" | grep -F -- "$IDENTIFIER" >/dev/null 2>&1; then
+      # 整個 identifier 相等才算：plutil -p 的鍵是 `"<identifier>" => …`。只用子字串比對的話，`herdr` 會命中 `herdr-<hash>`。
+      if printf '%s\n' "$AUTH_OUTPUT" | grep -F -- "\"$IDENTIFIER\" =>" >/dev/null 2>&1; then
         echo "2/3 authorization: found identifier $IDENTIFIER"
       elif printf '%s\n' "$AUTH_OUTPUT" | grep -F -- "$BINARY" >/dev/null 2>&1; then
         echo "2/3 authorization: FAIL 只找到 binary path，沒有新版 identifier ${IDENTIFIER}（${BINARY}）"
