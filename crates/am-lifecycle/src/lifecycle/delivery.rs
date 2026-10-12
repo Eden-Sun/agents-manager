@@ -921,7 +921,8 @@ pub async fn confirm_submitted(
             SessionMatch::Unavailable => continue,
         }
         let state = box_state_within(&bot.kind, &now, typed_tail(text));
-        let proof_evidence = if state == BoxState::Empty { evidence(&bot.kind, proof, offset, &now, text).ok() } else { None };
+        // 證據不分框的狀態看：transcript 已經有本則就是送出去了。框裡還是同一則字也一樣，不能因此再補按 Enter（#1599）。
+        let proof_evidence = evidence(&bot.kind, proof, offset, &now, text).ok();
         // #749：rollout／回音還證不出來時，問 codex 自己的 thread 歷史。只有 positive evidence 會升級成 `Submitted`；
         // 歷史讀不到、沒看到都照舊往下走，不當成「沒送到」。composer 非空時也查，避免已送達的 A 讓補按送出新草稿 B。
         if !proof_evidence.is_some_and(|n| n > baseline) {
@@ -945,11 +946,6 @@ pub async fn confirm_submitted(
                 tracing::warn!(run = %run.id, bot = %bot.name, "prompt typed and submitted; no lossless evidence on this run");
                 note_codex_delivery(&bot.kind, crate::codex_history::Evidence::Screen);
                 return Ok(Delivered::Unverified);
-            }
-            BoxState::Empty if proof_evidence.is_some_and(|n| n > baseline) => {
-                tracing::info!(run = %run.id, bot = %bot.name, proof = ?proof, "prompt typed into the pane and proven submitted");
-                note_codex_delivery(&bot.kind, if matches!(proof, Proof::Transcript { .. }) { crate::codex_history::Evidence::Rollout } else { crate::codex_history::Evidence::Screen });
-                return Ok(Delivered::Submitted);
             }
             // claude 清掉隱形字元、等人 review（#205）：框裡是**清過的**字，再按一次送出去的就不是記下的那一段，
             // 證據永遠對不上。不按，交給使用者看。送出前的清理（`pane_text::for_pane`）本來就不該讓這個畫面出現。
