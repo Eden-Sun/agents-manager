@@ -19,7 +19,7 @@ import { UpdateQuotaChip } from './UpdateQuotaChip'
 import { AgyLogoutButton, AgyLogoutDialog } from './AgyLogout'
 import { agyQuotaErrorText } from '../lib/agyQuotaError'
 import { useAgyMissing } from './agyInstallState'
-import { RULE_5H, RULE_WEEKLY, resetBadge } from '../lib/quotaReset'
+import { RULE_5H, RULE_WEEKLY, fmtLeft, fmtLeftLong, resetBadge } from '../lib/quotaReset'
 import { cliLoginCommand, identityEnv, shouldUseIdentityLogin } from '../lib/quotaLogin'
 import './quotaLimitHit.css'
 import { carriedOverAt } from '../lib/quotaWindowAge'
@@ -266,28 +266,6 @@ function resetMark(resetsAt: string | null | undefined, span: number, now: numbe
   const left = t - now
   if (left <= 0) return 0
   return Math.min(100, (left / span) * 100)
-}
-
-/** `2h13m` / `4d0h` / `12m`——和狀態列同一種寫法。 */
-function fmtLeft(ms: number): string {
-  if (ms <= 0) return '即將重置'
-  const m = Math.floor(ms / 60_000)
-  const h = Math.floor(m / 60)
-  const d = Math.floor(h / 24)
-  if (d > 0) return `${d}d${h % 24}h`
-  if (h > 0) return `${h}h${m % 60}m`
-  return `${m}m`
-}
-
-/** popover 用的長寫法（`2 天 3 小時`）；`fmtLeft` 是窄處的緊縮版。 */
-function fmtLeftLong(ms: number): string {
-  if (ms <= 0) return '即將重置'
-  const m = Math.floor(ms / 60_000)
-  const h = Math.floor(m / 60)
-  const d = Math.floor(h / 24)
-  if (d > 0) return `${d} 天 ${h % 24} 小時`
-  if (h > 0) return `${h} 小時 ${m % 60} 分`
-  return `${m} 分`
 }
 
 /** 什麼時候把百分比換成倒數：5h 用完且三小時內；週窗口（7d／週／Fable）剩不到 10% 且 24 小時內（2026-09-17 使用者）。 */
