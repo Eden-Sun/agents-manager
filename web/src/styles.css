@@ -2112,6 +2112,50 @@ button.pane-toggle:hover:not(:disabled) {
   .blocked-modal-hints .hint-keys-off {
     display: none;
   }
+
+  /* 終端是這個視窗的主角：吃掉剩下的高度。標題列那串 pane／欄數在手機上擠掉標題，收起來（標題 tooltip 仍有）。 */
+  .term.blocked-modal-term {
+    flex: 1 1 auto;
+    margin: 0 10px;
+    padding: 10px;
+  }
+
+  .modal.blocked-modal .modal-head .modal-sub {
+    display: none;
+  }
+
+  .blocked-modal .blocked-title {
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+
+  /* 「原樣」開關：按下去（aria-pressed）＝看終端原樣。跟 ✕ 一起靠右。 */
+  .blocked-modal-layout {
+    flex: none;
+    align-self: center;
+    margin-left: auto;
+    min-height: 32px;
+    padding: 2px 10px;
+    font-size: 12px;
+  }
+
+  .blocked-modal-layout[aria-pressed='true'] {
+    border-color: var(--accent);
+    color: var(--accent-ink);
+  }
+
+  .modal-head .blocked-modal-layout + .icon-btn {
+    margin-left: 0;
+  }
+
+  /* 重排過的易讀版（`lib/termReflow.ts`）：字放大到內文大小、行距拉開，英文照字詞斷行（`break-all` 會把單字切一半）。 */
+  .term.blocked-modal-term.is-reflow {
+    font-size: 14px;
+    line-height: 1.6;
+    word-break: normal;
+    overflow-wrap: anywhere;
+  }
 }
 
 .term-pane .term {
