@@ -15,14 +15,17 @@ export async function rewindAndRefill(
 ): Promise<boolean | { composerDraft: string }> {
   try {
     const r = await api.rewindBot(botId, messageId, clearComposer)
-    const { drafts, setDraft, notify, loadMessages } = useStore.getState()
+    const { drafts, setDraft, notify, loadMessages, messages } = useStore.getState()
     const key = `bot:${botId}` as const
     setDraft(key, prependDraft(r.text, drafts[key] ?? ''))
+    // daemon 只回文字：附件不會跟著回來，要講清楚（撤回排隊、取消啟動那兩條都這樣講）。
+    const attachments = messages[botId]?.find((m) => m.id === messageId)?.attachments.length ?? 0
+    const attachmentNote = attachments > 0 ? `；${attachments} 個附件要重新加` : ''
     notify(
       'info',
-      r.paneCleared
+      (r.paneCleared
         ? '已倒回；原文放回輸入框了，可以改寫再送'
-        : '已倒回；原文放回輸入框了。終端的輸入列裡還留著那段字，送下一則之前先到終端清掉',
+        : '已倒回；原文放回輸入框了。終端的輸入列裡還留著那段字，送下一則之前先到終端清掉') + attachmentNote,
     )
     void loadMessages(botId)
     return true
