@@ -275,6 +275,37 @@ mod tests {
         std::fs::remove_dir_all(&dir).ok();
     }
 
+    /// #1467：遠端主機（m4p）上的專案走同一輪背景掃描：候選的 SQL 不分主機，畫面從那台主機自己的 herdr 讀
+    /// （`herdr_for_run`），不是本機那顆；一樣問一次、推一則通知、不按鍵。
+    #[tokio::test]
+    async fn a_remote_projects_queued_prompt_is_read_from_that_hosts_own_herdr() {
+        let (env, s, seen, dir) = setup(0.93, true).await;
+        let app = env.app.clone();
+        let sock = env.dir.join("data").join("herdr-m4p.sock");
+        let remote = tt::MockHerdr::start(sock.clone());
+        remote.set_screen(&s.pane_id, crate::tui_prompts::screens::AUTO_MODE);
+        let cfg = crate::config::HostCfg {
+            shared_session: false,
+            name: "m4p".into(),
+            ssh: "m4p@100.112.229.82".into(),
+            ssh_port: 22,
+            ssh_opts: vec![],
+            herdr_session: "test".into(),
+            remote_path: String::new(),
+        };
+        app.hosts.insert_remote_with_client_for_test(cfg, crate::herdr::HerdrClient::new(sock)).await;
+        sqlx::query("UPDATE projects SET host='m4p' WHERE id=?").bind(&env.project_id).execute(&app.db).await.unwrap();
+
+        sweep_once(&app).await;
+
+        assert_eq!(seen.lock().unwrap().len(), 1, "遠端專案的卡住畫面照樣問一次");
+        assert_eq!(inbox_kinds(&app).await, ["judge_stuck_screen"]);
+        assert!(!remote.calls_to("pane.read").is_empty(), "畫面是從遠端那台的 herdr 讀的");
+        assert!(env.herdr.calls_to("pane.read").is_empty(), "不是本機那顆");
+        assert!(remote.calls_to("pane.send_keys").is_empty() && env.herdr.calls_to("pane.send_keys").is_empty(), "只通知，不按鍵");
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
     /// 低機率只記帳本；輸入列空著（沒有框）連問都不問；關著什麼都不做。
     #[tokio::test]
     async fn low_probability_idle_composer_and_disabled_are_all_quiet() {
