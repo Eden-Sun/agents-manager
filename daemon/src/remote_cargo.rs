@@ -364,7 +364,14 @@ pub async fn put_settings(
         r.max_concurrent = input.max_concurrent.unwrap_or(r.max_concurrent);
     })
     .await
-    .map_err(|e| LcError::Upstream(format!("store remote Cargo settings: {e:#}")))?;
+    .map_err(|e| {
+        // 寫之前磁碟被手改：這次沒寫、可重送（409），其餘照舊當上游錯誤（#1647）。
+        if e.downcast_ref::<crate::config::ConfigChangedOnDisk>().is_some() {
+            crate::api::cfg_err(e)
+        } else {
+            LcError::Upstream(format!("store remote Cargo settings: {e:#}"))
+        }
+    })?;
     Ok(Json(sanitized(&remote, &app.data_dir)))
 }
 

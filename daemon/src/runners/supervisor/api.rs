@@ -1034,7 +1034,7 @@ async fn apply_persona(app: &(impl crate::capabilities::Cfg + crate::capabilitie
         Ok(())
     })
     .await
-    .map_err(up)?;
+    .map_err(|e| if e.downcast_ref::<crate::config::ConfigChangedOnDisk>().is_some() { crate::api::cfg_err(e) } else { up(e) })?;
     setup::write_file(&setup::agm_dir(app).join("persona.md"), text.as_bytes()).map_err(up)?;
     Ok(())
 }
