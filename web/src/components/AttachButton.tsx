@@ -7,6 +7,8 @@ import './attachButton.css'
 export function AttachButton({ command, compact }: { command: string; compact?: boolean }) {
   const [open, setOpen] = useState(false)
   const [copied, setCopied] = useState<'ok' | 'fail' | null>(null)
+  /** 最近一次複製的結果：說明文字看這個（`copied` 1.6 秒後會被清掉，不能拿來講「已複製」）。 */
+  const [lastCopy, setLastCopy] = useState<'ok' | 'fail' | null>(null)
   const wrap = useRef<HTMLSpanElement>(null)
 
   useEffect(() => {
@@ -28,6 +30,7 @@ export function AttachButton({ command, compact }: { command: string; compact?: 
   const copy = async (): Promise<'ok' | 'fail'> => {
     const r = (await copyText(command)) ? 'ok' : 'fail'
     setCopied(r)
+    setLastCopy(r)
     setTimeout(() => setCopied(null), 1600)
     return r
   }
@@ -64,7 +67,11 @@ export function AttachButton({ command, compact }: { command: string; compact?: 
       </button>
       {open ? (
         <div className="attach-pop" role="dialog" aria-label="attach 指令">
-          <div className="attach-hint">已複製到剪貼簿；在本機終端貼上即可看到同一個 herdr session：</div>
+          <div className="attach-hint">
+            {lastCopy === 'fail'
+              ? '沒能複製到剪貼簿（這個瀏覽器不讓網頁寫入）；請手動選取下方的指令再複製，在本機終端貼上即可看到同一個 herdr session。'
+              : '已複製到剪貼簿；在本機終端貼上即可看到同一個 herdr session：'}
+          </div>
           <div className="attach-row">
             <code className="attach-cmd">{command}</code>
             <button type="button" className={`btn primary${copied === 'ok' ? ' ok' : ''}`} onClick={() => void copy()}>
