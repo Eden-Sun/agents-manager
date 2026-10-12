@@ -520,3 +520,17 @@ async fn an_unrelated_writer_between_the_replay_status_read_and_the_reply_does_n
     let replies: Vec<String> = sqlx::query_scalar("SELECT content FROM messages WHERE turn_id = ? AND role = 'assistant'").bind(&turn_id).fetch_all(&app.db).await.unwrap();
     assert_eq!(replies, vec!["第一問的回覆".to_string()]);
 }
+
+/// #1653：「這個 run 記了哪些使用者訊息」每次同步都問。沒有 run 的索引時 planner 掃整張 messages 再逐列回查 turns
+/// （線上 3 萬則、1.4–2.7 秒）；要先用 `turns_run_time` 找到這個 run 的回合，再用 `messages_turn` 取訊息。
+/// 查詢計畫是決定性的，不靠計時。
+#[tokio::test]
+async fn the_run_user_prompts_lookup_seeks_turns_by_run_and_never_scans_messages() {
+    let env = tt::env().await;
+    let plan: Vec<(i64, i64, i64, String)> =
+        sqlx::query_as(&format!("EXPLAIN QUERY PLAN {RUN_USER_PROMPTS_SQL}")).fetch_all(&env.app.db).await.unwrap();
+    let details: Vec<&str> = plan.iter().map(|r| r.3.as_str()).collect();
+    assert!(details.iter().any(|d| d.starts_with("SEARCH t USING INDEX turns_run_time (run_id=?)")), "{details:#?}");
+    assert!(details.iter().any(|d| d.starts_with("SEARCH m USING INDEX messages_turn (turn_id=?)")), "{details:#?}");
+    assert!(!details.iter().any(|d| d.starts_with("SCAN")), "must not scan messages or turns: {details:#?}");
+}

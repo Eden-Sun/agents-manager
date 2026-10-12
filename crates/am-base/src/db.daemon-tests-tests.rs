@@ -1202,3 +1202,47 @@
         pool.close().await;
         let _ = std::fs::remove_dir_all(&dir);
     }
+
+    /// #1653：以 run 找回合的查詢要走 `turns_run_time`：不掃 turns，`ORDER BY created_at DESC, rowid DESC` 直接照索引順序讀、
+    /// 不開 temp b-tree；在飛的那一筆照舊走 partial 的 `turns_one_in_flight`。每一句都是正式程式碼裡那一句的形狀
+    /// （註解指出處），改了索引或查詢寫法讓它退回全表掃就在這裡紅。查詢計畫是決定性的，不靠計時。
+    #[tokio::test]
+    async fn turns_looked_up_by_run_walk_the_run_time_index() {
+        let pool = SqlitePoolOptions::new().max_connections(1).connect("sqlite::memory:").await.unwrap();
+        apply_migrations(&pool).await.unwrap();
+        for (name, sql, want) in [
+            // turn_error::last_turn、app_ports_p4 的 Completed 事件補 turn id
+            (
+                "last_turn_of_run",
+                "SELECT * FROM turns WHERE run_id = ? ORDER BY created_at DESC, rowid DESC LIMIT 1",
+                "SEARCH turns USING INDEX turns_run_time (run_id=?)",
+            ),
+            // hookrecv 補 `completed_fallback`、grok_transcript::unbound_turns
+            (
+                "fallback_of_run",
+                "SELECT * FROM turns WHERE run_id=? AND status='completed_fallback' AND native_turn_id IS NULL AND completed_at > ? \
+                 ORDER BY created_at DESC, rowid DESC LIMIT 1",
+                "SEARCH turns USING INDEX turns_run_time (run_id=?)",
+            ),
+            // supervisor responder／controller：同一個 run 有沒有更晚開始的回合
+            (
+                "newer_turn_in_run",
+                "SELECT 1 FROM turns n WHERE n.run_id = ? AND n.id <> ? AND n.created_at > ? AND n.status <> 'queued'",
+                "SEARCH n USING INDEX turns_run_time (run_id=? AND created_at>?)",
+            ),
+            // resume_nudge：這個 run 跑過幾回合
+            ("count_of_run", "SELECT COUNT(*) FROM turns WHERE run_id = ?", "SEARCH turns USING COVERING INDEX turns_run_time (run_id=?)"),
+            // db::in_flight_turn
+            (
+                "in_flight_of_run",
+                "SELECT * FROM turns WHERE run_id = ? AND status = 'in_flight'",
+                "SEARCH turns USING INDEX turns_one_in_flight (run_id=?)",
+            ),
+        ] {
+            let plan: Vec<(i64, i64, i64, String)> = sqlx::query_as(&format!("EXPLAIN QUERY PLAN {sql}")).fetch_all(&pool).await.unwrap();
+            let details: Vec<&str> = plan.iter().map(|r| r.3.as_str()).collect();
+            assert!(details.iter().any(|d| *d == want), "{name}: want `{want}` in {details:#?}");
+            assert!(!details.iter().any(|d| d.starts_with("SCAN")), "{name} must not scan turns: {details:#?}");
+            assert!(!details.iter().any(|d| d.contains("TEMP B-TREE")), "{name} must read the index in order: {details:#?}");
+        }
+    }

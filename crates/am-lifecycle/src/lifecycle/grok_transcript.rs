@@ -377,15 +377,14 @@ async fn recorded_prompt_matches(app: &impl crate::capabilities::Db, sid: &str, 
     Ok(stored.as_deref().is_some_and(|s| s.trim() == prompt.trim()))
 }
 
+/// 這個 run 已記下的使用者訊息（回合 id、內容），依訊息時間。每次同步都跑：要先用 `turns_run_time` 找到這個 run 的
+/// 幾個回合、再用 `messages_turn` 取訊息；沒有 run 的索引時 planner 反過來掃整張 messages（線上 3 萬則、1.4–2.7 秒，#1653）。
+const RUN_USER_PROMPTS_SQL: &str = "SELECT t.id, m.content FROM turns t JOIN messages m ON m.turn_id = t.id
+          WHERE t.run_id = ? AND m.role = 'user' ORDER BY m.created_at, m.rowid";
+
 async fn import(app: &impl GrokTranscriptContext, bot: &db::Bot, run: &db::Run, host: &str, sid: &str, ex: &Exchange, key: &str, newest: bool, baseline: bool) -> anyhow::Result<bool> {
     // 壓縮重寫會丟掉 prompt_index，同一句換成內容鑰匙。已經記在這個 run 的不再開一筆。
-    let prior_users: Vec<(String, String)> = sqlx::query_as(
-        "SELECT t.id, m.content FROM turns t JOIN messages m ON m.turn_id = t.id
-          WHERE t.run_id = ? AND m.role = 'user' ORDER BY m.created_at, m.rowid",
-    )
-    .bind(&run.id)
-    .fetch_all(app.db())
-    .await?;
+    let prior_users: Vec<(String, String)> = sqlx::query_as(RUN_USER_PROMPTS_SQL).bind(&run.id).fetch_all(app.db()).await?;
     if let Some((turn_id, _)) = prior_users.iter().find(|(_, c)| c.trim() == ex.prompt.trim()) {
         // SQLite 的 NULL 用 `String` 解會變成 `Some("")`（#833），未綁鑰匙的回合就被當成已綁。
         let bound: Option<String> = sqlx::query_scalar::<_, Option<String>>("SELECT native_turn_id FROM turns WHERE id = ?")

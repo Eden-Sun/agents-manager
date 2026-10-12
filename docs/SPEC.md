@@ -22,6 +22,13 @@ agent 一律由 **herdr**（terminal workspace manager，socket API protocol 20�
 
 bot `name` 是可隨時改的暱稱（不需重啟、允許 CJK，禁空白與 `@ , : ;`），唯一性在專案內。
 
+**以 run 找回合走 `turns_run_time`（`turns(run_id, created_at)`，#1653）**：hook 收件與 grok 對話檔同步問「這個 run 記了哪些使用者訊息」、
+斷線收尾找最後一回合、supervisor 問「同一個 run 有沒有更晚的回合」都靠它；`turns_one_in_flight`／`turns_one_queued` 是 partial 唯一索引，只對
+status 字面相同的查詢有用，少了一般索引時 planner 會改掃整張 messages 再逐列回查 turns（線上 3 萬則、每個 hook 1.4–2.7 秒）。協調者收件匣
+依 state 撈 `delivered`／`pending` 走 `supervisor_inbox_sup_state`（`(supervisor_id, state)`）：只有一個 supervisor_id，`supervisor_inbox_key`
+的前綴等於整張表，而 partial 的 `supervisor_inbox_open` 不被等號查詢採用（SQLite 不認 `state='x'` 蘊含 `state != 'handled'`）。
+這幾句的查詢計畫有測試釘著（`EXPLAIN QUERY PLAN` 斷言，不靠計時），改索引或改查詢讓它退回全表掃會紅。
+
 ### 2.1 Turn 狀態機
 
 ```
