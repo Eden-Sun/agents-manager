@@ -138,6 +138,21 @@ printf '%s\n' "$BAD_OUTPUT" | grep -F 'unbound variable' >/dev/null && fail "還
 printf '%s\n' "$BAD_OUTPUT" | grep -F '結果：FAIL' >/dev/null || fail "沒走到結尾的 FAIL 結論：$BAD_OUTPUT"
 ok "codesign 失敗：UTF-8 locale 下印出 FAIL、rc=1，沒 crash"
 
+# 新版 identifier 是授權表裡某個 identifier 的子字串（例如 codesign 沒給 -i，預設用檔名＝`herdr`，而表裡只有
+# `herdr-1672acdeb8e5ac40`）：不能因為子字串相符就判成「已授權」，要整個 identifier 相等才算。
+mkdir -p "$ROOT/substr"
+printf '%s\n' 'fake substring binary' > "$ROOT/substr/herdr"
+printf '%s\n' '#!/bin/bash' 'case "$2" in *substr/herdr) echo "Identifier=herdr" >&2; exit 0 ;; esac' 'echo "not signed" >&2; exit 1' > "$ROOT/bin/codesign"
+chmod +x "$ROOT/bin/codesign"
+set +e
+SUB_OUTPUT=$(PATH="$ROOT/bin:${AM_CANARY_DIR:+$AM_CANARY_DIR:}/usr/bin:/bin" HERDR_NETWORK_AUTH_PLIST="$ROOT/network.plist" HERDR_NODE_LOG="$ROOT/node.log" \
+  bash "$SCRIPT" "$ROOT/substr/herdr" 192.168.1.1 80 2>&1)
+SUB_RC=$?
+set -u
+[ "$SUB_RC" -eq 1 ] || fail "子字串相符不算授權，應 rc=1，實際 ${SUB_RC}：$SUB_OUTPUT"
+printf '%s\n' "$SUB_OUTPUT" | grep -F '2/3 authorization: FAIL 授權表沒有新版 identifier herdr' >/dev/null || fail "子字串誤判成已授權：$SUB_OUTPUT"
+ok "新版 identifier 只是授權表 identifier 的子字串：FAIL，不誤判成已授權"
+
 # #886：非 macOS 沒有「本機網路」授權可驗：SKIP、exit 0，且不碰 codesign／plutil／node（假的全部換成會炸的）。
 printf '%s\n' '#!/bin/bash' 'echo "不該被叫到：$0" >&2' 'exit 99' > "$ROOT/bin/codesign"
 cp "$ROOT/bin/codesign" "$ROOT/bin/plutil"; cp "$ROOT/bin/codesign" "$ROOT/bin/node"
@@ -155,4 +170,4 @@ printf '%s\n' "$LINUX_OUT" | grep -F '不該被叫到' >/dev/null && fail "linux
 printf '%s\n' "$LINUX_NOARG_OUT" | grep -F 'SKIP' >/dev/null || fail "linux 不帶參數沒印 SKIP：$LINUX_NOARG_OUT"
 ok "linux：SKIP、exit 0，沒有碰 macOS 的工具"
 
-echo "8 passed, 0 failed"
+echo "9 passed, 0 failed"
