@@ -635,7 +635,7 @@ async fn apply_migrations_inner(pool: &SqlitePool, fail_after_spawn_hints_drop: 
     // 唯一補得回來的做法是重建表。
     rebuild_bot_previews_fk(&mut tx).await?;
     // 建在這裡（column 一定已經存在之後），不是跟著上面的 SCHEMA 一起用 `;\n` 切開來送：這句 trigger
-    // body 自己就帶了分號，切开來就會斷成兩句送不出去。寫 `agent_status` 的地方有好幾處（events／
+    // body 自己就帶了分號，切開來就會斷成兩句送不出去。寫 `agent_status` 的地方有好幾處（events／
     // reconcile／default session／bulk_restart／stuck_turns…），用 trigger 而不是在每一處補一行：
     // 漏掉一處就會讓「起點」在那條路徑上悄悄跟丟（issue #93）。
     sync_trigger(
