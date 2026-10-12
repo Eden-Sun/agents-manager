@@ -32,7 +32,8 @@ const NOISE: RegExp[] = [
   // 工具呼叫的排水溝符號：`⏺ Bash(git status)`、`⎿  Read 12 lines`
   /^\s*[⎿⏺]/,
   // spinner 行：`✻ Thinking… (12s · ↑ 1.2k tokens)`
-  /^\s*[✻✽✢✳✶*+·]\s+\S+…/,
+  // 點字字頭（`⠀-⣿`）是舊版 spinner（`⠦ Thinking… 52s`，同 daemon is_spinner_glyph）。
+  /^\s*[✻✽✢✳✶*+·⠀-⣿]\s+\S+…/,
   /^\s*\S+…\s*[(（]\d+s\b/,
 ]
 
