@@ -3222,6 +3222,22 @@ pub(crate) async fn descendant_children(app: &Arc<App>, root: &str) -> anyhow::R
 
 /// 刪除是軟的：寫回 config.toml 條目讓 projection 清 `deleted_at`；child bot 直接清欄位。
 /// 被 `purge_bot_dir` 砍掉的工作目錄下次啟動會重新產生。
+/// 刪除前排著的 restart 在還原成功時放棄：恢復（recovery）worker 會在拿到 bot 鎖後重新檢查 intent 狀態。
+async fn abandon_pending_restart<'e, E>(exec: E, bot_id: &str) -> Result<(), sqlx::Error>
+where
+    E: sqlx::Executor<'e, Database = sqlx::Sqlite>,
+{
+    sqlx::query(
+        "UPDATE intents SET status='abandoned', last_error='bot restore superseded the pending restart', updated_at=?
+         WHERE kind='restart' AND subject_id=? AND status IN ('pending','running')",
+    )
+    .bind(db::now())
+    .bind(bot_id)
+    .execute(exec)
+    .await?;
+    Ok(())
+}
+
 pub(crate) async fn restore_bot(State(app): State<Arc<App>>, Path(id): Path<String>) -> Result<Response, LcError> {
     // 跟 delete_bot／start 同一把 per-bot 鎖（#301）：child 同時拿 parent 鎖，避免 parent delete 的 child 快照漏掉
     // 正在還原的 child。依 id 排序一次拿齊，跟 delete_bot／delete_project 的多 bot 鎖順序一致。
@@ -3248,17 +3264,7 @@ pub(crate) async fn restore_bot(State(app): State<Arc<App>>, Path(id): Path<Stri
     crate::handoff::refuse(&app.db, &id).await?;
     // A restored restricted bot keeps its profile, but a public capability from before deletion never returns.
     crate::share::revoke_bot_share(&app, &id).await.map_err(any_err)?;
-    // A pending restart from before deletion is not permission to start a bot after an explicit restore.
-    // The recovery worker also takes this bot lock and rechecks the intent status after acquiring it.
-    sqlx::query(
-        "UPDATE intents SET status='abandoned', last_error='bot restore superseded the pending restart', updated_at=?
-         WHERE kind='restart' AND subject_id=? AND status IN ('pending','running')",
-    )
-    .bind(db::now())
-    .bind(&id)
-    .execute(&app.db)
-    .await
-    .map_err(any_err)?;
+    // 放棄的 intent 只在還原真的成功時才寫（下面各分支、驗證都過之後）：被 409 擋下的還原不能先動它（交易範圍）。
     let taken: Option<String> = sqlx::query_scalar(
         "SELECT id FROM bots WHERE project_id = ? AND name = ? AND deleted_at IS NULL AND id <> ?",
     )
@@ -3304,6 +3310,8 @@ pub(crate) async fn restore_bot(State(app): State<Arc<App>>, Path(id): Path<Stri
             tx.rollback().await.map_err(any_err)?;
             return Err(LcError::conflict("the project or parent bot of this child is deleted", json!({"bot_id": id})));
         }
+        // 還原成功才放棄刪除前排著的 restart，跟復活在同一個交易裡。
+        abandon_pending_restart(&mut *tx, &id).await.map_err(any_err)?;
         tx.commit().await.map_err(any_err)?;
     } else {
         // 讀不懂的 args／env 不能當成空的寫回 config（#295）：env 可能帶帳號設定，還原後會以錯的身分起。
@@ -3346,6 +3354,7 @@ pub(crate) async fn restore_bot(State(app): State<Arc<App>>, Path(id): Path<Stri
                 projection_err(e)
             }
         })?;
+        abandon_pending_restart(&app.db, &id).await.map_err(any_err)?;
     }
     // 刪除時搬進回收區的目錄搬回來（issue #406）。本機才有；搬不回來不擋還原（下次啟動會重建需要的檔）。
     if let Ok(dir) = app.bot_dir(&id) {
@@ -14376,6 +14385,25 @@ mod child_restore_tests {
             .bind(db::ulid()).bind(db::now()).bind(&kid.id).execute(&e.app.db).await.unwrap();
         assert!(conflict_reason(restore_bot(State(e.app.clone()), Path(kid.id.clone())).await.unwrap_err()).contains("already in use"));
         assert!(matches!(restore_bot(State(e.app.clone()), Path("nope".into())).await.unwrap_err(), LcError::NotFound(_)));
+    }
+
+    /// 還原被 409 擋下（名字被同專案的活 bot 佔住）時不能先動任何東西：刪之前排著的 restart intent 還得是 pending。
+    /// 以前 `UPDATE intents … abandoned` 排在名字檢查之前，拒絕的還原照樣把它改掉（交易範圍）。
+    #[tokio::test]
+    async fn a_refused_restore_leaves_the_pending_restart_intent_alone() {
+        let e = tt::env().await;
+        let kid = live_child(&e, "dup2").await;
+        soft_delete(&e.app, &kid.id).await;
+        sqlx::query("INSERT INTO bots (id, project_id, name, kind, args_json, autostart, inject_hooks, hook_token, managed_by, parent_bot_id, created_at)
+                     SELECT ?, project_id, name, kind, '[]', 0, 0, 'tok3', 'child', parent_bot_id, ? FROM bots WHERE id=?")
+            .bind(db::ulid()).bind(db::now()).bind(&kid.id).execute(&e.app.db).await.unwrap();
+        sqlx::query("INSERT INTO intents (id, kind, subject_id, host, payload_json, status, created_at, updated_at, expires_at)
+                     VALUES (?, 'restart', ?, 'local', '{}', 'pending', ?, ?, ?)")
+            .bind(db::ulid()).bind(&kid.id).bind(db::now()).bind(db::now()).bind(db::iso_in(3600)).execute(&e.app.db).await.unwrap();
+
+        assert!(conflict_reason(restore_bot(State(e.app.clone()), Path(kid.id.clone())).await.unwrap_err()).contains("already in use"));
+        let status: String = sqlx::query_scalar("SELECT status FROM intents WHERE kind='restart' AND subject_id=?").bind(&kid.id).fetch_one(&e.app.db).await.unwrap();
+        assert_eq!(status, "pending", "被擋下的還原不能改動 intent");
     }
 
     #[tokio::test]
