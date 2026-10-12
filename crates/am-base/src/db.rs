@@ -141,6 +141,11 @@ CREATE TABLE IF NOT EXISTS late_proof_pending (
   )
 );
 CREATE INDEX IF NOT EXISTS late_proof_pending_expires ON late_proof_pending(expires_at);
+-- 以 run 找回合（issue #1653）：hook 收件與 grok 對話檔同步問「這個 run 記了哪些使用者訊息」、斷線收尾找最後一回合
+-- （`ORDER BY created_at DESC, rowid DESC`）、supervisor 問「同一個 run 有沒有更晚的回合」（`run_id = ? AND created_at > ?`）
+-- 都靠它；上面兩個 partial 唯一索引只對 status 字面相同的查詢有用，少了它 planner 會改掃整張 messages 再逐列回查 turns。
+-- 第二欄是 created_at：同 run 的回合照時間排好，依時間取最新／取「之後」不必再開 temp b-tree。
+CREATE INDEX IF NOT EXISTS turns_run_time ON turns(run_id, created_at);
 CREATE TABLE IF NOT EXISTS messages (
   id TEXT PRIMARY KEY, conversation_id TEXT NOT NULL REFERENCES conversations(id),
   turn_id TEXT REFERENCES turns(id),
@@ -387,6 +392,8 @@ pub const SCHEMA_HISTORY: &[(i64, &str)] = &[
     (58, "f1fafc8c7e9ef622"),
     // issues #1493/#1494: persist and bound pending late-delivery proof baselines.
     (59, "1d4bdc902d82f33b"),
+    // issue #1653：`turns_run_time`（以 run 找回合）與 `supervisor_inbox_sup_state`（收件匣依 state 篩），不再掃 messages／讀整張收件匣。
+    (60, "FINGERPRINT_TBD"),
 ];
 pub const SCHEMA_VERSION: i64 = SCHEMA_HISTORY[SCHEMA_HISTORY.len() - 1].0;
 

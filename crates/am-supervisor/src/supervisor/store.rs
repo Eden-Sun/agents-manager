@@ -147,6 +147,10 @@ CREATE TABLE IF NOT EXISTS supervisor_inbox (
 );
 CREATE UNIQUE INDEX IF NOT EXISTS supervisor_inbox_key ON supervisor_inbox(supervisor_id, event_key);
 CREATE INDEX IF NOT EXISTS supervisor_inbox_open ON supervisor_inbox(state) WHERE state != 'handled';
+-- 依 state 撈 `delivered`／`pending`（issue #1653）：只有一個 supervisor_id，`supervisor_inbox_key` 的前綴等於整張表；
+-- `state` 又排在 `payload_json` 後面，照它篩得把每列的 payload 讀過一遍。上面的 partial 索引幫不上——SQLite 不認
+-- `state='delivered'` 蘊含 `state != 'handled'`（`INDEXED BY` 直接 no query solution）。這個複合索引讓兩個等號一起下去。
+CREATE INDEX IF NOT EXISTS supervisor_inbox_sup_state ON supervisor_inbox(supervisor_id, state);
 -- One row per *resource* that is currently wrong, not per tick that noticed it. The partial
 -- unique index is the dedupe key: a restart cannot open a second incident for the same thing,
 -- and a fault that comes back after a resolve gets a new row (a new occurrence), not a silent
@@ -3280,6 +3284,33 @@ mod tests {
             }
         }
         p
+    }
+
+    /// #1653：收件匣只有一個 `supervisor_id`，`supervisor_inbox_key` 的前綴等於整張表；`state` 又排在 `payload_json` 後面，
+    /// 照它篩 `delivered`／`pending` 得把每列的 payload 讀過一遍（線上 2.6 千列、14 MB）。partial 的 `supervisor_inbox_open`
+    /// 幫不上（SQLite 不認 `state='delivered'` 蘊含 `state != 'handled'`），要走 `(supervisor_id, state)`。
+    /// 兩句是 `delivered_inbox`／`exhausted_inbox` 的形狀；查詢計畫是決定性的，不靠計時。
+    #[tokio::test]
+    async fn inbox_lookups_by_state_walk_the_supervisor_state_index() {
+        let p = pool().await;
+        for (name, sql) in [
+            (
+                "delivered_inbox",
+                "SELECT * FROM supervisor_inbox WHERE supervisor_id=? AND state='delivered' ORDER BY COALESCE(delivered_at, updated_at) ASC",
+            ),
+            (
+                "exhausted_inbox",
+                "SELECT COUNT(*) FROM supervisor_inbox WHERE supervisor_id=? AND state='pending' AND notify_attempts >= ? \
+                 AND COALESCE(COALESCE(claimed_by, role), 'patrol')='patrol'",
+            ),
+        ] {
+            let plan: Vec<(i64, i64, i64, String)> = sqlx::query_as(&format!("EXPLAIN QUERY PLAN {sql}")).fetch_all(&p).await.unwrap();
+            let details: Vec<&str> = plan.iter().map(|r| r.3.as_str()).collect();
+            assert!(
+                details.iter().any(|d| d.starts_with("SEARCH supervisor_inbox USING INDEX supervisor_inbox_sup_state (supervisor_id=? AND state=?)")),
+                "{name}: {details:#?}"
+            );
+        }
     }
 
     // ------------------------------------------------ issue #831：先讀後寫的交易從 BEGIN 就拿寫鎖
