@@ -63,6 +63,38 @@ fn cache() -> &'static TailCache {
     CACHE.get_or_init(TailCache::default)
 }
 
+// A per-run clock lets composition tests keep the polling cache fixed while
+// independently changing the remote transcript. Production always uses Instant::now.
+fn cache_now(_run_id: &str) -> Instant {
+    #[cfg(test)]
+    if let Some(at) = test_clocks().lock().unwrap().get(_run_id).copied() {
+        return at;
+    }
+    Instant::now()
+}
+
+#[cfg(test)]
+fn test_clocks() -> &'static Mutex<HashMap<String, Instant>> {
+    static CLOCKS: OnceLock<Mutex<HashMap<String, Instant>>> = OnceLock::new();
+    CLOCKS.get_or_init(Default::default)
+}
+
+#[cfg(test)]
+pub(super) struct FixedClock(String);
+
+#[cfg(test)]
+impl Drop for FixedClock {
+    fn drop(&mut self) {
+        test_clocks().lock().unwrap().remove(&self.0);
+    }
+}
+
+#[cfg(test)]
+pub(super) fn fixed_clock(run_id: &str) -> FixedClock {
+    test_clocks().lock().unwrap().insert(run_id.to_string(), Instant::now());
+    FixedClock(run_id.to_string())
+}
+
 /// 逾時就是 `None`；讀失敗也是 `None`（只記 debug，網頁照舊用畫面）。
 pub async fn bounded<Fut>(timeout: Duration, read: Fut) -> Option<String>
 where
@@ -84,7 +116,7 @@ where
 /// 遠端 run 的對話檔尾段（最後 [`crate::pending_question::TAIL_BYTES`]）；讀不到、路徑不在允許範圍、逾時＝`None`。
 pub async fn tail(app: &Arc<App>, bot: &db::Bot, run: &db::Run, host: &str) -> Option<String> {
     cache()
-        .read_through(&run.id, Instant::now, || {
+        .read_through(&run.id, || cache_now(&run.id), || {
             bounded(REMOTE_READ_TIMEOUT, crate::lifecycle::claude_child_log::pending_tail(app, bot, run, host, crate::pending_question::TAIL_BYTES))
         })
         .await

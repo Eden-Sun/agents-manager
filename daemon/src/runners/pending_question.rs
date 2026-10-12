@@ -253,7 +253,10 @@ mod remote_tests {
     /// #1475 的 `jev_options` 對遠端 bot 一併生效：同一支 `hint_for`（開關、專案名單、名額、mask 照舊）。
     #[tokio::test]
     async fn a_remote_bot_gets_jev_options_through_the_same_gate() {
-        let rig = rig(Some(&recorded()), || Ok(found(&ask_line("toolu_1")))).await;
+        let transcript = Arc::new(Mutex::new(ask_line("toolu_1")));
+        let reply = transcript.clone();
+        let rig = rig(Some(&recorded()), move || Ok(found(&reply.lock().unwrap()))).await;
+        let _clock = crate::runners::pending_question_remote::fixed_clock(&rig.run_id);
         let app = rig.env.app.clone();
         // 假 Jev：第一個選項 0.9、其餘 0.05。
         let route = axum::routing::post(|axum::Json(body): axum::Json<Value>| async move {
@@ -312,7 +315,28 @@ mod remote_tests {
         .expect("答案落帳後要發事件");
         let second = get(&rig).await;
         assert_eq!(second["jev_options"]["questions"], json!([{"index": 0, "scores": [0.9, 0.05], "suggested": 0}]));
-        assert_eq!(rig.reads(), 1, "題目是節流過的同一份，沒有為了 Jev 多讀一次遠端");
+        assert_eq!(rig.reads(), 7, "輪詢題目讀一次；Jev 的六個有效性檢查各自讀新鮮 transcript");
+        transcript.lock().unwrap().push_str(&format!("\n{}", json!({"message":{"content":[{"type":"tool_result","tool_use_id":"toolu_1"}]}})));
+        assert_eq!(get(&rig).await["jev_options"], Value::Null, "題目輪詢快取仍在，也不能把已回答的提問建議帶出去");
+        assert_eq!(rig.reads(), 8, "讀建議前再次繞過快取確認提問已回答");
         std::fs::remove_dir_all(&dir).ok();
+    }
+}
+
+impl crate::judge::ask_option::PendingQuestion for App {
+    async fn question_pending(&self, bot: &db::Bot, run: &db::Run, tool: &str) -> bool {
+        let Ok(host) = db::bot_host(&self.db, &bot.id).await else { return false };
+        let log = if host == crate::config::LOCAL_HOST {
+            let Some(path) = run.transcript_path.as_ref() else { return false };
+            if !crate::app_ports_p5::local_transcript_allowed(&self.shared(), bot, path).await { return false; }
+            let path = path.clone();
+            tokio::task::spawn_blocking(move || read_tail(std::path::Path::new(&path), TAIL_BYTES)).await.ok().flatten()
+        } else {
+            crate::runners::pending_question_remote::bounded(
+                crate::runners::pending_question_remote::REMOTE_READ_TIMEOUT,
+                crate::lifecycle::claude_child_log::pending_tail(&self.shared(), bot, run, &host, TAIL_BYTES),
+            ).await
+        };
+        log.and_then(|log| pending_ask_entry(&log)).is_some_and(|(id, _)| id == tool)
     }
 }
