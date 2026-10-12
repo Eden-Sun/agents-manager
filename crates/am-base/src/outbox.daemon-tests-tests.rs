@@ -476,3 +476,23 @@
         std::fs::remove_dir_all(&base).unwrap();
     }
 
+
+    /// 分享用 bot 的保留標記：outbox 那一段被換成符號連結，就不寫進連結另一頭、也不刪那頭的同名檔（不跟進去到界線外）。
+    #[tokio::test]
+    async fn the_share_keep_marker_never_goes_through_a_symlinked_outbox() {
+        let env = crate::testing::env().await;
+        let bot = crate::testing::claude_bot(&env.app, &env.project_id, "keep").await;
+        let victim = crate::testing::track(std::env::temp_dir().join(format!("am-outbox-victim-{}", crate::db::ulid())));
+        std::fs::create_dir_all(&victim).unwrap();
+        let link = env.app.data_dir.join("outbox").join(&bot.id);
+        let _ = std::fs::remove_dir_all(&link);
+        std::fs::create_dir_all(link.parent().unwrap()).unwrap();
+        std::os::unix::fs::symlink(&victim, &link).unwrap();
+
+        mark_share_keep(&env.app.data_dir, &bot.id);
+        assert!(!victim.join(SHARE_KEEP_MARK).exists(), "保留標記寫到了符號連結另一頭");
+
+        std::fs::write(victim.join(SHARE_KEEP_MARK), b"not ours").unwrap();
+        unmark_share_keep(&env.app.data_dir, &bot.id);
+        assert!(victim.join(SHARE_KEEP_MARK).exists(), "解除標記刪到了符號連結另一頭");
+    }
