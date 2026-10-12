@@ -57,7 +57,8 @@ test('閒著的 claude 有建議：輸入列上方一行，顯示那句；打字
   await openChat('am-claude', SUGGESTION)
   assert.ok(bar(), '有那一條')
   assert.match(button()!.textContent ?? '', new RegExp(SUGGESTION))
-  assert.match(button()!.textContent ?? '', /Tab/, '標明等於終端的 Tab')
+  assert.match(button()!.textContent ?? '', /^claude 建議：.*點擊送出$/s, '寫明是 claude 的建議、點了會送出')
+  assert.doesNotMatch(button()!.textContent ?? '', /Tab/, '不用終端按鍵名當標籤')
   assert.equal(button()!.disabled, false)
 
   await typeInto(textarea(), '我自己要打的')

@@ -29,13 +29,13 @@ export function SuggestionBar({ botId, attachments }: { botId: string; attachmen
         type="button"
         className="suggestion-bar-btn"
         disabled={busy}
-        title={`${text}\n\n在終端按 Tab 收下、再按 Enter 送出；這裡一鍵做同樣的事`}
+        title={`${text}\n\n點一下就送出這句（等同在終端按 Tab 收下、再按 Enter）`}
         onClick={() => void accept(botId)}
       >
-        <span className="suggestion-bar-keys" aria-hidden="true">
-          Tab ⏎
-        </span>
+        {/* 不寫「Tab ⏎」：那是終端的按鍵，網頁上看不懂（2026-10-12 使用者：「這不叫 tab，提示字為 claude 建議：… 點擊送出」）。 */}
+        <span className="suggestion-bar-keys">claude 建議：</span>
         <span className="suggestion-bar-text">{busy ? '送出中…' : text}</span>
+        {busy ? null : <span className="suggestion-bar-hint">點擊送出</span>}
       </button>
     </div>
   )
