@@ -20,7 +20,6 @@ const NOISE: RegExp[] = [
   /^\s*[(（]?\s*\?\s+for\s+shortcuts\s{2,}\S/i,
   // Codex footer: warning counter may have its own row in a narrow pane.
   /^\s*⚠ \d+ warnings? · f2 to view\s*$/,
-  /^\s*[a-z][a-z0-9._]*-[a-z0-9._-]+(?:\s+(?:default|fast|low|medium|high|xhigh|max|ultra))*\s*·\s*[~/]/i,
   // Codex idle splash（框線裡的 banner、空輸入提示、額度重置提示）。
   /OpenAI Codex \(v/i,
   /Ask Codex to do anything/i,
@@ -85,11 +84,24 @@ function isModeRow(t: string): boolean {
   return seg.endsWith('(shift+tab to cycle)') || ['manual mode on', 'plan mode on', 'accept edits on', 'bypass permissions on'].includes(seg)
 }
 
+/**
+ * codex 狀態列 `模型 [effort…] · ~/cwd …`（同 daemon `is_codex_status_row`，#1555）：模型名要含 `-` 且以英數字開頭，
+ * 所以 markdown 項目 `- 設定檔 · ~/…` 不是狀態列；effort 不限於清單（`minimal`、`none`…）。
+ */
+function isCodexStatusRow(t: string): boolean {
+  const i = t.indexOf('·')
+  if (i < 0) return false
+  const model = (t.slice(0, i).trim().split(/\s+/)[0] ?? '')
+  if (!model.includes('-') || !/^[a-z0-9]/i.test(model)) return false
+  const rest = t.slice(i + 1).trim()
+  return rest.startsWith('/') || rest.startsWith('~') || rest.includes('Context') || rest.includes('% left')
+}
+
 function isNoise(line: string): boolean {
   const t = line.trim()
   if (!t) return false // 空行由 scrub 收斂
   if (CHROME_ONLY.test(t)) return true
-  if (isModeRow(t)) return true
+  if (isModeRow(t) || isCodexStatusRow(t)) return true
   if (SHELL_ECHO.test(t)) return true
   if (/^(?:running|ran)\b[^.]*\bshell command/i.test(t)) return true
   if (SPINNER_DONE.test(t)) return true
