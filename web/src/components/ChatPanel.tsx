@@ -1,3 +1,4 @@
+import { projectNoFiveHour } from '../lib/quotaNoFiveHour'
 import { memo, useEffect, useLayoutEffect, useRef, useState, useId } from 'react'
 import { CompactButton } from './CompactButton'
 import { KeepWarmSkipButton } from './KeepWarmSkipButton'
@@ -1038,6 +1039,7 @@ function derivedStatus(
   version: string | null,
 ): StatusInfo | null {
   if (!model && !quota && !cwd && !version) return null
+  quota = projectNoFiveHour(kind, quota)
   const win = (w: QuotaWindow | null | undefined) => ({
     pct: typeof w?.used_pct === 'number' ? w.used_pct : null,
     at: w?.resets_at ? Math.floor(new Date(w.resets_at).getTime() / 1000) || null : null,
