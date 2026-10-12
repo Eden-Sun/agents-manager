@@ -250,13 +250,14 @@ async fn checkpoint_session(app: &impl crate::capabilities::Db, r: &db::Run, loc
 
 /// 新 bot 起來之後才失敗的收回：停掉它、從 config 拿掉、複製的檔刪掉。回傳是否收乾淨。
 async fn roll_back_new_bot(app: &Arc<App>, new_id: &str, staged: &Staged) -> bool {
-    let _ = lifecycle::stop_bot(app, new_id).await;
+    // 停不下來（`stop_bot` 寫不進 `stopping`、agent 可能還在跑）就不算收乾淨，回傳要反映它。
+    let stopped = lifecycle::stop_bot(app, new_id).await.is_ok();
     let removed = crate::projection::delete_from_config(&app.cfg, &app.db, crate::projection::DeleteTarget::Bot(new_id)).await;
     if removed.is_ok() {
         staged.undo();
     }
     app.emit("bot_changed", json!({"bot_id": new_id})).await;
-    removed.is_ok()
+    stopped && removed.is_ok()
 }
 
 /// 升級出來的 user bot 的設定（設定從 child 帶：模型、強度、身分；args 不帶——那是收編時看到的舊 argv）。
@@ -853,6 +854,41 @@ mod tests {
         .unwrap();
         assert_eq!(reason(promote(&r, PromoteReq::default()).await.unwrap_err()), "has_children");
         assert!(!r.dest().exists());
+    }
+
+    /// 收回時停不下來（`stopping` 寫不進 DB、agent 還在跑）：`roll_back_new_bot` 不能回報「收乾淨」，
+    /// 不然呼叫端會把 `rolled_back: true` 當成真的，而且 `abandon` 之後沒有任何東西會再停它。
+    #[tokio::test]
+    async fn a_rollback_that_could_not_stop_the_new_bot_is_not_reported_as_rolled_back() {
+        let r = rig(true).await;
+        let app = r.e.app.clone();
+        let new_id = db::ulid();
+        let child = db::bot(&app.db, &r.child).await.unwrap().unwrap();
+        let user_cfg = user_bot_cfg(&child, &new_id, "kid-top", &None, &None);
+        let pid = r.e.project_id.clone();
+        crate::projection::update_and_project(&app.cfg, &app.db, move |cfg| {
+            cfg.projects.iter_mut().find(|p| p.id.as_deref() == Some(pid.as_str())).unwrap().bots.push(user_cfg.clone());
+            Ok(())
+        })
+        .await
+        .unwrap();
+        sqlx::query(
+            "INSERT INTO runs (id, bot_id, state, agent_status, pane_id, herdr_session, started_at) VALUES (?,?,'running','idle','pane-new','test',?)",
+        )
+        .bind(db::ulid())
+        .bind(&new_id)
+        .bind(db::now())
+        .execute(&app.db)
+        .await
+        .unwrap();
+        sqlx::query("CREATE TRIGGER refuse_stopping BEFORE UPDATE OF state ON runs WHEN NEW.state = 'stopping' BEGIN SELECT RAISE(ABORT, 'disk I/O error'); END")
+            .execute(&app.db)
+            .await
+            .unwrap();
+
+        let staged = Staged { created: vec![], dest: r.dest() };
+        let rolled_back = roll_back_new_bot(&app, &new_id, &staged).await;
+        assert!(!rolled_back, "停不下來的新 bot 不能算已收回：agent 還在跑");
     }
 
     /// 啟動失敗：新 bot 從 config 拿掉、複製的檔收回、child 已停但紀錄還在（session 記在它的 run 上）。
