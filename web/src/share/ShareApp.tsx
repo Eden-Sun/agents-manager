@@ -631,7 +631,7 @@ export function ShareApp({ client }: { client: ShareClient }) {
             {pending.map((p) => (
               <li key={p.key} className={p.error ? 'err' : p.id ? 'ok' : 'up'}>
                 <span>📎 {p.name}</span>
-                <span className="sh-pending-st">{pendingStatus(p)}</span>
+                <span className="sh-pending-st" role={p.error ? 'alert' : p.id ? undefined : 'status'}>{pendingStatus(p)}</span>
                 {p.error && p.retry ? (
                   <button type="button" className="sh-retry" onClick={() => setPending((x) => x.map((y) => (y.key === p.key ? { ...y, error: null, retry: false } : y)))}>
                     再試一次
