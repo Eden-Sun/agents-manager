@@ -12716,6 +12716,45 @@ mod per_principal_auth_tests {
     /// 角色換人之後舊 bot 立刻失效。
     #[tokio::test]
     async fn a_plain_bot_cannot_use_the_agm_management_endpoints_and_a_role_swap_takes_effect_at_once() {
+        plain_bot_gate_body().await;
+    }
+
+    /// #1461 守門：同一條路徑在 1.5 MiB 的執行緒上要跑得完。測試執行緒預設 2 MiB；debug 建置下這條路徑曾經用掉約 1.85 MiB，
+    /// 整批 `per_principal_auth_tests` 以 SIGABRT 中止（stack overflow，沒有任何 FAILED 行）。餘裕不足就在這裡紅，不等整批溢位。
+    #[test]
+    fn the_plain_bot_gate_path_fits_in_a_one_and_a_half_mib_stack() {
+        std::thread::Builder::new()
+            .name("stack-budget".into())
+            .stack_size(1536 * 1024)
+            .spawn(|| {
+                tokio::runtime::Builder::new_current_thread()
+                    .enable_all()
+                    .build()
+                    .expect("runtime")
+                    .block_on(plain_bot_gate_body())
+            })
+            .expect("spawn")
+            .join()
+            .expect("the gate path overflowed a 1.5 MiB stack");
+    }
+
+    /// #1461 守門：關鍵 future 的大小上限。debug 建置下 future 會在呼叫端的 poll 框裡留一份暫存，超過這個大小就該用 Box::pin 切開。
+    #[tokio::test]
+    async fn the_supervisor_start_futures_stay_small() {
+        const LIMIT: usize = 64 * 1024;
+        let e = crate::testing::env().await;
+        let sizes = [
+            ("post_start", std::mem::size_of_val(&crate::runners::supervisor::api::post_start(State(e.app.clone())))),
+            ("start_requested", std::mem::size_of_val(&crate::runners::supervisor::start_requested(&e.app))),
+            ("start_manager", std::mem::size_of_val(&crate::runners::supervisor::start_manager(&e.app, None))),
+            ("status_json", std::mem::size_of_val(&crate::runners::supervisor::status_json(&e.app))),
+        ];
+        for (name, size) in sizes {
+            assert!(size <= LIMIT, "{name} 的 future 有 {size} 位元組，超過 {LIMIT}：用 Box::pin 切開");
+        }
+    }
+
+    async fn plain_bot_gate_body() {
         let e = crate::testing::env().await;
         let plain = distinct_bot(&e, "plain-gate").await;
         let patrol = distinct_bot(&e, "patrol-gate").await;
