@@ -1141,3 +1141,11 @@ Jev 超過門檻時只推 AGM inbox，使用者在 bot 畫面上看不到。
 - **標在使用者實際按的地方**：認得出選單時標在 `BlockedChoices` 的那一列（標題去空白後比對，被終端截成 `…` 的比前綴；對不上就不標，不猜）；原題卡（`PendingQuestionCard`）列選項時標在該選項旁，選項已在上面的選單時改成一行「Jev 建議 0.91　<選項>」，收合時標題列多一個「Jev 有建議」。
 - **更新時機**：沿用 5 秒輪詢（`usePendingQuestion`），答案落帳後最慢 5 秒內出現；不另外訂 WS `pending_question_hint`。
 - **環境設定 → Jev 第二意見的帳本**多一個場景「選項建議」：「超過門檻」＝有任何一題被標了建議的筆數；機率欄寫「建議 0.91」或「無建議（最高 0.62）」。
+
+## 草稿太大沒同步：輸入列上方一行說明，不是 toast（2026-10-12，#1656）
+
+- 草稿超過 daemon 的上限（256 KiB）時 PUT 被拒，以前只跳一則 toast（寫死「上限 256 KB」、只跳一次就消失），換裝置或重整後草稿看起來像不見了，而且畫面上沒有任何說明。
+- **常駐一行，不是 toast**：輸入列上方（`DraftTooLargeNote`，`bot` 與群組輸入框）寫「這份草稿太長（上限 256 KB），沒有同步到其他裝置；內容還留在這個輸入框裡。」。內容照舊留在本機輸入框。
+- **上限數字從 daemon 回應的 `max_bytes` 取**，web 不寫死；沒帶（舊 daemon、或 413 來自 HTTP 層）就只寫「這份草稿太長，沒有同步到其他裝置」。
+- **什麼時候收掉**：送成功（縮短到上限內、debounce 後 PUT 過）、別台寫入新版本、bot／群組被刪。打字當下不收——還沒送進 daemon 就不假裝已同步；仍超過上限時每次拒絕都照樣留著。
+- 實作：`store/draftNotice.ts`（zustand，key → 上限）、`store/draftSync.ts` 的 `onRejectedCleared`、`components/DraftTooLargeNote.tsx`。

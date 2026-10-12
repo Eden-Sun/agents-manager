@@ -39,8 +39,10 @@ export interface DraftSyncDeps {
   keys: () => string[]
   debounceMs?: number
   retryMs?: number
-  /** PUT 被 daemon 拒絕、重試無意義（400／413）。呼叫端自己去重提示。 */
+  /** PUT 被 daemon 拒絕、重試無意義（400／413）。呼叫端據此在輸入框上方顯示說明。 */
   onRejected?: (key: string, error: unknown) => void
+  /** 先前 `onRejected` 的那份提示不再適用（送成功、別台寫入、bot 被刪）：呼叫端收掉說明。只在真的通知過的 key 上呼叫。 */
+  onRejectedCleared?: (key: string) => void
 }
 
 export const DRAFT_DEBOUNCE_MS = 400
@@ -55,6 +57,8 @@ export class DraftSync {
   private readonly inflight = new Set<string>()
   /** daemon 拒收（太大…）的 key：草稿只在本機，不重送、`load()` 也不清。 */
   private readonly rejected = new Set<string>()
+  /** 已經 `onRejected` 通知過、還沒 `onRejectedCleared` 收掉的 key（比 `rejected` 晚收：打字改短不算收，送成功才算）。 */
+  private readonly shown = new Set<string>()
   /** `load()` 在飛的時候本機碰過的 key：GET 的回應比這些寫入舊，不能拿來判「daemon 沒有它＝被刪了」。 */
   private touched: Set<string> | null = null
   private loading: Promise<void> | null = null
@@ -133,6 +137,7 @@ export class DraftSync {
     this.cancel(key)
     this.dirty.delete(key)
     this.rejected.delete(key)
+    this.settle(key)
   }
 
   dispose(): void {
@@ -148,7 +153,13 @@ export class DraftSync {
     this.cancel(key)
     this.dirty.delete(key)
     this.rejected.delete(key)
+    this.settle(key)
     if (this.deps.read(key) !== text) this.deps.write(key, text)
+  }
+
+  /** 這個 key 的被拒提示已經不適用：有通知過才呼叫 `onRejectedCleared`。 */
+  private settle(key: string): void {
+    if (this.shown.delete(key)) this.deps.onRejectedCleared?.(key)
   }
 
   private cancel(key: string): void {
@@ -178,6 +189,7 @@ export class DraftSync {
       const { rev } = await this.deps.put(key, text, this.deps.clientId)
       this.rev.set(key, Math.max(this.knownRev(key), rev))
       this.touched?.add(key)
+      this.settle(key)
       if (this.deps.read(key) === text) this.dirty.delete(key)
       else this.schedule(key, this.deps.read(key) === '' ? 0 : this.debounceMs)
     } catch (e) {
@@ -190,6 +202,7 @@ export class DraftSync {
         // 重送一模一樣的字只會一直被拒：停下來，等本機改字再試。
         this.dirty.delete(key)
         this.rejected.add(key)
+        this.shown.add(key)
         this.deps.onRejected?.(key, e)
       } else {
         this.schedule(key, this.retryMs)

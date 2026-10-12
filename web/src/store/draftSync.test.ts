@@ -19,6 +19,7 @@ function rig(opts: { debounceMs?: number } = {}) {
   const server = new Map<string, { text: string; rev: number }>()
   const puts: { key: string; text: string; clientId: string }[] = []
   const rejected: string[] = []
+  const cleared: string[] = []
   const gate = { hold: null as null | Promise<void>, fetchHold: null as null | Promise<void>, fail: false, failWith: null as unknown, serverList: null as null | DraftWire[] }
   const sync = new DraftSync({
     clientId: 'me',
@@ -32,6 +33,7 @@ function rig(opts: { debounceMs?: number } = {}) {
     focused: (k) => focus.has(k),
     keys: () => Object.keys(local),
     onRejected: (key) => rejected.push(key),
+    onRejectedCleared: (key) => cleared.push(key),
     put: async (key, text, clientId) => {
       puts.push({ key, text, clientId })
       if (gate.hold) await gate.hold
@@ -54,7 +56,7 @@ function rig(opts: { debounceMs?: number } = {}) {
     else delete local[key]
     sync.localChange(key, text)
   }
-  return { sync, local, focus, server, puts, gate, type, rejected }
+  return { sync, local, focus, server, puts, gate, type, rejected, cleared }
 }
 
 /** 虛擬時間過 `ms`，並讓 PUT 的 promise 鏈跑完。 */
@@ -232,6 +234,50 @@ test('草稿太大（400）：不重送、不當成 daemon 沒有，本機改短
   assert.deepEqual(r.puts.map((p) => p.text).slice(-1), ['短了'])
   assert.equal(r.server.get('bot:a')?.text, '短了')
   assert.equal(r.sync.isDirty('bot:a'), false)
+})
+
+test('被拒的草稿：打字改短但還沒送進 daemon 前提示不收，送成功才通知收掉（#1656）', async () => {
+  const r = rig({ debounceMs: 10 })
+  r.gate.failWith = new ApiError(400, { error: 'draft_too_large', max_bytes: 262144 }, 'draft_too_large')
+  r.type('bot:a', 'x'.repeat(300_000))
+  await tick(30)
+  assert.deepEqual(r.rejected, ['bot:a'])
+  assert.deepEqual(r.cleared, [], '還是超過上限的時候不收')
+  r.gate.failWith = null
+  r.type('bot:a', '短了')
+  assert.deepEqual(r.cleared, [], '打字當下還沒送進 daemon，不收')
+  await tick(30)
+  assert.deepEqual(r.cleared, ['bot:a'])
+})
+
+test('被拒的草稿：又被拒（仍超過上限）不收、再次通知；沒被拒過的草稿送出不通知', async () => {
+  const r = rig({ debounceMs: 10 })
+  r.gate.failWith = new ApiError(400, { error: 'draft_too_large', max_bytes: 262144 }, 'draft_too_large')
+  r.type('bot:a', 'x'.repeat(300_000))
+  await tick(30)
+  r.type('bot:a', 'y'.repeat(300_000))
+  await tick(30)
+  assert.deepEqual(r.rejected, ['bot:a', 'bot:a'])
+  assert.deepEqual(r.cleared, [])
+  r.gate.failWith = null
+  r.type('bot:b', '正常')
+  await tick(30)
+  assert.deepEqual(r.cleared, [], '沒有提示過的 key 不通知')
+})
+
+test('被拒的草稿：別台寫入新版本、或 bot 被刪（forget），提示也跟著收掉', async () => {
+  const r = rig({ debounceMs: 10 })
+  r.gate.failWith = new ApiError(400, { error: 'draft_too_large', max_bytes: 262144 }, 'draft_too_large')
+  r.type('bot:a', 'x'.repeat(300_000))
+  r.type('bot:b', 'x'.repeat(300_000))
+  await tick(30)
+  assert.deepEqual(r.rejected, ['bot:a', 'bot:b'])
+  r.sync.remote({ key: 'bot:a', text: '別台的', rev: 5, client_id: 'other' })
+  assert.deepEqual(r.cleared, ['bot:a'])
+  r.sync.forget('bot:b')
+  assert.deepEqual(r.cleared, ['bot:a', 'bot:b'])
+  r.sync.forget('bot:b')
+  assert.deepEqual(r.cleared, ['bot:a', 'bot:b'], '已經收過的不重複通知')
 })
 
 test('413 也一樣不重送', async () => {

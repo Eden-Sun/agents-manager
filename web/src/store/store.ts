@@ -2,6 +2,7 @@
 
 import { gatewayErrText, networkErrText } from '../lib/netErr'
 import { DraftSync } from './draftSync'
+import { useDraftNotice } from './draftNotice'
 import { pruneDeadKeys } from './prune'
 import { forgetBlockedExcept } from '../lib/blockedPrefetch'
 import { shellDraftKey } from './shellDraft'
@@ -4194,8 +4195,6 @@ function composerFocused(key: string): boolean {
   return el instanceof HTMLElement && el.dataset.draftKey === key
 }
 
-const rejectedDraftNotified = new Set<string>()
-
 export const draftSync = new DraftSync({
   clientId: newClientId(),
   put: (key, text, clientId) => api.putDraft(key, text, clientId),
@@ -4208,11 +4207,8 @@ export const draftSync = new DraftSync({
     })),
   focused: composerFocused,
   keys: () => Object.keys(useStore.getState().drafts),
-  onRejected: (key) => {
-    if (rejectedDraftNotified.has(key)) return
-    rejectedDraftNotified.add(key)
-    useStore.getState().notify('error', '草稿太大（上限 256 KB），只留在這個分頁、不會同步到其他裝置')
-  },
+  onRejected: (key, error) => useDraftNotice.getState().mark(key, error),
+  onRejectedCleared: (key) => useDraftNotice.getState().clear(key),
 })
 
 function newClientId(): string {
