@@ -12271,6 +12271,7 @@ mod per_principal_auth_tests {
             auto_escalated: false,
             notified_at: Some(db::now()),
             pending_first: None,
+            pending_events: Vec::new(),
             dismissed: false,
             phase: crate::deploy_wait::Phase::Waiting,
             rev: 1,

@@ -2631,7 +2631,7 @@ CLI：`agents-managerd release-triage-check --kind <claude|codex> [--since <ver>
 ### 部署等太久：通知與調度 `/api/deploy/wait/*`（SPEC §18.10，使用者 2026-10-04，issue #856）
 - 一次部署（同一個 owner 連續在試 restart-window；換 commit、換核准都算同一次）從開始等窗口起滿 3 分鐘還沒拿到，daemon 通知一次：
   WS `deploy_wait {wait, first:true}` 與 supervisor inbox `deploy_waiting`（巡檢收；`payload.text` 是給人看的一句話；`wake:true` 只在放寬放不行時設，見下）。之後只在狀態轉換時推 inbox（同一個 `id`、`rev` 遞增，inbox 的 `event_key` 是 `deploy_waiting:<id>:<rev>`）：
-  使用者按鈕（現在換版／先等）、自動放寬生效、拿到窗口、換版完成（新 daemon 開機確認跑的是那顆）或放棄（15 分鐘沒再試、換版後回滾）。擋住名單變動不單獨推 inbox（WS 照發供網頁更新名單）；且拿到窗口但 §3a abort 退回等待的循環同一 sha 最多每 30 分鐘推一則。首次超過 3 分鐘的通知，只有「擋住的**只有** working 的 bot、而且放寬已排定（`escalates_at` 有值，或已自動／手動放寬）」時設 `wake:false`（幾分鐘後自己會換，只留紀錄）；其餘（有 `delivering`／`unreadable`／`lease` 擋著、沒有擋住名單或沒排放寬）設 `wake:true` 叫醒巡檢請使用者調度。後續通知一律 `wake:false` 僅供留存調度紀錄。（issue #1478）
+  使用者按鈕（現在換版／先等）、自動放寬生效、拿到窗口、換版完成（新 daemon 開機確認跑的是那顆）或放棄（15 分鐘沒再試、換版後回滾）。擋住名單變動不單獨推 inbox（WS 照發供網頁更新名單）；且拿到窗口但 §3a abort 退回等待的循環同一 sha 最多每 30 分鐘推一則。首次超過 3 分鐘的通知，只有「擋住的**只有** working 的 bot、而且放寬已排定（`escalates_at` 有值，或已自動／手動放寬）」時設 `wake:false`（幾分鐘後自己會換，只留紀錄）；其餘（有 `delivering`／`unreadable`／`lease` 擋著、沒有擋住名單或沒排放寬）設 `wake:true` 叫醒巡檢請使用者調度。後續通知一律 `wake:false` 僅供留存調度紀錄。（issue #1478）後續通知的 inbox 寫入失敗時排隊、每拍冪等重送，內容與 `rev` 照排隊當下凍結（issue #1507）。
 - `wait`（也在 `GET /api/state` 的 `deploy_wait`；沒通知過是 `null`，結束的再留 10 分鐘）：
   `{id, commit, since, waited_secs, blockers:[{bot_id|null, name, why:"working"|"delivering"|"unreadable"|"lease"}], escalates_at|null, user_escalated, auto_escalated, dismissed, phase:"waiting"|"swapping"|"done"|"abandoned", rev, notified_at, ended_at, summary}`；`auto_escalated:true` 表示等候門檻已自動放寬。
 - `POST /api/deploy/wait/escalate {id}`：「現在換版」。這次部署的**自動**核准（`decided_by=service(daemon-swap)`、同一個 owner）當成已等滿放寬門檻：working 不擋，
