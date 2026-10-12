@@ -355,7 +355,8 @@ fn is_codex_status_row(s: &str) -> bool {
     }
     let Some((head, rest)) = s.split_once('·') else { return false };
     let model = head.split_whitespace().next().unwrap_or("");
-    if !model.contains('-') {
+    // 模型名以英數字開頭：markdown 項目符號 `-` 也含 `-`，不能當成 `- 項目 · ~/路徑` 那種狀態列。
+    if !model.contains('-') || !model.starts_with(|c: char| c.is_ascii_alphanumeric()) {
         return false;
     }
     let rest = rest.trim();
@@ -2820,6 +2821,24 @@ mod limit_hit_quota_tests {
 
         let again = app.quotas.lock().await.get("codex").unwrap().limit_hit.clone().unwrap();
         assert_eq!((first.at, first.until), (again.at, again.until));
+    }
+}
+
+#[cfg(test)]
+mod codex_bullet_row_tests {
+    use super::*;
+
+    /// 回覆的 `-` 項目行（`  - 檔名 · ~/路徑 …`）第一個詞是 `-`，過去會被當成 codex 狀態列（`gpt-… · ~/cwd`）整行剝掉。
+    #[test]
+    fn a_bulleted_reply_row_with_a_path_is_content_not_the_status_row() {
+        for row in ["- 設定檔 · ~/.codex/config.toml 已更新", "- agents-manager · ~/project/agents-manager 是根目錄"] {
+            assert!(!is_codex_status_row(row), "{row}");
+        }
+        let screen = "› 專案在哪？\n• 三個位置：\n  - agents-manager · ~/project/agents-manager 是根目錄\n  - web · 前端介面\n\n› \n\n  gpt-6.1-sol default · ~/project/agents-manager\n";
+        let reply = extract_reply("codex", screen).expect("reply");
+        assert!(reply.contains("- agents-manager · ~/project/agents-manager 是根目錄"), "{reply}");
+        // 真的狀態列照舊是雜訊。
+        assert!(is_codex_status_row("  gpt-6.1-sol default · ~/project/agents-manager"));
     }
 }
 
