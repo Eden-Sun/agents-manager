@@ -896,14 +896,14 @@
         }
     }
 
-    /// 2026-09-12 使用者：量表全滿卻一直 hit limit；橫幅要黏過 app-server 輪詢。
+    /// 撞限之前的 app-server 讀數不能解除新的撞限。
     #[tokio::test]
-    async fn a_codex_limit_hit_outlives_the_app_server_poll() {
+    async fn a_codex_limit_hit_outlives_an_older_app_server_poll() {
         let app = crate::testing::env().await.app.clone();
         // 時間寫死：2026-09-13 用 `db::now()` 時 6 跑 2 敗（跨毫秒變成另一情境）。
         let hit = LimitHit {
             message: "ERROR: You've hit your usage limit.".into(),
-            until: Some("2999-01-01T00:00:00.000Z".into()),
+            until: None,
             at: "2026-09-13T14:15:30.000Z".into(),
             bucket: None,
         };
@@ -911,13 +911,14 @@
         blocked.updated_at = "2026-09-13T14:15:30.000Z".into();
         set(&app, LOCAL_HOST, "codex", blocked).await;
         let mut poll = codex_q("codex-app-server", None);
-        poll.updated_at = "2026-09-13T14:21:00.000Z".into();
+        poll.updated_at = "2026-09-13T14:14:00.000Z".into();
+        set(&app, LOCAL_HOST, "codex", poll).await;
         let got_app = app.clone();
         let got = || {
             let app = got_app.clone();
             async move { app.quotas().lock().await.get(&quota_key(LOCAL_HOST, "codex")).cloned().unwrap() }
         };
-        // 2026-09-12 不變量：只有 `until` 到了或 `clear_limit_hit` 才能清掉。
+        // 舊讀數不能解除較新的撞限。
         assert!(got().await.limit_hit.is_some(), "量表滿了不代表 CLI 收得下一句話");
         clear_limit_hit(&app, LOCAL_HOST, "codex").await;
         assert!(got().await.limit_hit.is_none());
@@ -1018,7 +1019,8 @@
 
         let mut no_7d = both.clone();
         no_7d.seven_day = None;
-        assert_eq!(recalibrate_limit_hit(hit.clone(), &no_7d), Some(hit), "讀不到 7d 不猜");
+        no_7d.source = "codex-statusline".into();
+        assert_eq!(recalibrate_limit_hit(hit.clone(), &no_7d), Some(hit), "非權威部分讀數缺 7d 不猜");
     }
 
     /// #236：窗在撞限**之前**就結束的讀數（閒置的 5h 窗：`/usage` 照樣回上一個重置時間）說不出這次撞限的事——
@@ -1431,4 +1433,105 @@
         assert_eq!(snap["kinds"]["claude"]["stale"], json!(true), "兩小時沒更新");
         assert_eq!(snap["kinds"]["claude:cc1"]["stale"], json!(false), "剛寫的");
         assert_eq!(snap["kinds"]["claude:cc2"]["stale"], json!(false), "29 分鐘還在健康節奏的容忍內");
+    }
+
+    #[tokio::test]
+    async fn authoritative_codex_week_only_reading_replaces_cached_windows_and_hits() {
+        let app = crate::testing::env().await.app.clone();
+        for host in [LOCAL_HOST, "m4p"] {
+            for bucket in [None, Some("five_hour"), Some("seven_day")] {
+                let hit = LimitHit { message: "usage limit".into(), until: None,
+                    at: "2026-10-12T13:48:00Z".into(), bucket: bucket.map(String::from) };
+                let mut old = codex_q("codex-limit-hit", Some(hit.clone()));
+                old.updated_at = hit.at.clone();
+                old.plan = Some("plus".into());
+                old.five_hour.as_mut().unwrap().used_pct = 100.0;
+                set(&app, host, "codex:cx1", old).await;
+                let mut fresh = quota_from_codex(&json!({"rateLimits": {
+                    "planType": "prolite", "primary": {"usedPercent": 0, "windowDurationMins": 10080}, "secondary": null
+                }, "rateLimitResetCredits": {"availableCount": 1, "credits": [{"status": "available", "title": "Full reset"}]}})).unwrap();
+                fresh.updated_at = "2026-10-12T13:55:00Z".into();
+                set(&app, host, "codex:cx1", fresh.clone()).await;
+                let key = quota_key(host, "codex:cx1");
+                let got = app.quotas.lock().await[&key].clone();
+                assert!(got.five_hour.is_none(), "{host}/{bucket:?}: absent authoritative window must replace old 100%");
+                assert!(got.limit_hit.is_none(), "{host}/{bucket:?}: old hit must clear");
+                assert_eq!(got.seven_day.as_ref().unwrap().used_pct, 0.0);
+                assert_eq!(got.reset_credits.as_ref().unwrap().title.as_deref(), Some("Full reset"));
+                let wire = quota_value(&got, false);
+                assert!(wire["five_hour"].is_null());
+                assert!(wire["limit_hit"].is_null());
+                assert_eq!(wire["seven_day"]["critical"], false);
+                assert_eq!(wire["seven_day"]["low"], false);
+                // A queued old hold must not resurrect the cleared hit.
+                assert!(!restore_limit_hit(&app, host, "codex:cx1", hit).await);
+                fresh.seven_day.as_mut().unwrap().used_pct = 100.0;
+                fresh.limit_hit = Some(LimitHit { message: "weekly limit".into(), until: None,
+                    at: "2026-10-12T13:56:00Z".into(), bucket: None });
+                set(&app, host, "codex:cx1", fresh.clone()).await;
+                fresh.limit_hit = None;
+                fresh.updated_at = "2026-10-12T13:57:00Z".into();
+                set(&app, host, "codex:cx1", fresh).await;
+                let got = app.quotas.lock().await[&key].clone();
+                assert!(got.limit_hit.is_some(), "a full weekly window still blocks");
+                assert!(quota_value(&got, false)["five_hour"].is_null());
+                assert_eq!(quota_value(&got, false)["seven_day"]["critical"], true);
+            }
+        }
+    }
+
+    #[test]
+    fn authoritative_codex_hit_reconciliation_requires_new_evidence_and_the_matching_window() {
+        let hit = |bucket: Option<&str>| LimitHit { message: "limit".into(), until: None,
+            at: "2026-10-12T13:48:00Z".into(), bucket: bucket.map(String::from) };
+        let mut q = codex_q("codex-app-server", None);
+        q.updated_at = "2026-10-12T13:55:00Z".into();
+        assert!(recalibrate_limit_hit(hit(None), &q).is_none(), "new non-full windows clear an unscoped hit");
+        q.five_hour.as_mut().unwrap().used_pct = 100.0;
+        assert!(recalibrate_limit_hit(hit(None), &q).is_some(), "a matching full window retains the hit");
+        assert!(recalibrate_limit_hit(hit(Some("seven_day")), &q).is_none(), "only the hit's own bucket matters");
+        q.five_hour = None;
+        assert!(recalibrate_limit_hit(hit(Some("five_hour")), &q).is_none(), "removed bucket clears the hit");
+        q.updated_at = "2026-10-12T13:40:00Z".into();
+        assert!(recalibrate_limit_hit(hit(None), &q).is_some(), "pre-hit probe cannot release a newer hit");
+        q.updated_at = "2026-10-12T13:55:00Z".into();
+        q.source = "codex-statusline".into();
+        assert!(recalibrate_limit_hit(hit(None), &q).is_some(), "partial statusline is not authoritative");
+        q.source = "claude-usage".into();
+        assert!(recalibrate_limit_hit(hit(Some("five_hour")), &q).is_some(), "Claude behavior is unchanged");
+    }
+
+    #[tokio::test]
+    async fn authoritative_codex_plan_change_clears_hit_but_partial_sources_preserve_windows() {
+        let app = crate::testing::env().await.app.clone();
+        let hit = LimitHit { message: "usage limit".into(), until: None,
+            at: "2026-10-12T13:48:00Z".into(), bucket: None };
+        for source in ["codex-statusline", "statusline", "claude-usage", "grok-usage", "agy-usage"] {
+            let mut old = codex_q("codex-limit-hit", Some(hit.clone()));
+            old.updated_at = hit.at.clone();
+            old.five_hour.as_mut().unwrap().used_pct = 100.0;
+            set(&app, LOCAL_HOST, "codex", old).await;
+            let mut partial = codex_q(source, None);
+            partial.updated_at = "2026-10-12T13:55:00Z".into();
+            partial.five_hour = None;
+            set(&app, LOCAL_HOST, "codex", partial).await;
+            let got = app.quotas.lock().await["codex"].clone();
+            assert_eq!(got.five_hour.as_ref().unwrap().used_pct, 100.0, "{source}");
+            assert!(got.limit_hit.is_some(), "{source}");
+        }
+        let mut old = codex_q("codex-limit-hit", Some(hit));
+        old.updated_at = "2026-10-12T13:48:00Z".into();
+        old.plan = Some("plus".into());
+        old.five_hour.as_mut().unwrap().used_pct = 100.0;
+        set(&app, LOCAL_HOST, "codex", old).await;
+        let mut fresh = codex_q("codex-app-server", None);
+        fresh.updated_at = "2026-10-12T13:55:00Z".into();
+        fresh.plan = Some("prolite".into());
+        fresh.five_hour = None;
+        fresh.seven_day.as_mut().unwrap().used_pct = 100.0;
+        set(&app, LOCAL_HOST, "codex", fresh).await;
+        let got = app.quotas.lock().await["codex"].clone();
+        assert!(got.limit_hit.is_none(), "changed plan clears the old hit even if its new weekly window is full");
+        let now = parse_utc("2026-10-12T13:55:00Z").unwrap();
+        assert!(got.exhausted(Bucket::SevenDay, now), "the new full weekly window still blocks on its own");
     }

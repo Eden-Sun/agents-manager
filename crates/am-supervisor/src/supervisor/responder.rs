@@ -689,6 +689,12 @@ async fn strict_bot_host(pool: &sqlx::SqlitePool, bot_id: &str) -> Option<String
         .filter(|h| !h.trim().is_empty())
 }
 
+fn shared_window_readings_complete(quota: &crate::quota::Quota, now: chrono::DateTime<chrono::Utc>) -> bool {
+    let five_known = quota.usable_window(crate::quota::Bucket::FiveHour, now).is_some()
+        || (quota.source == "codex-app-server" && quota.five_hour.is_none());
+    five_known && quota.usable_window(crate::quota::Bucket::SevenDay, now).is_some()
+}
+
 pub async fn quota_state(app: &(impl crate::capabilities::Db + crate::quota::QuotaStaleKeys + crate::quota::QuotaTables + crate::supervisor::ports::QuotaOps), bot: &crate::db::Bot) -> QuotaState {
     let Some(key) = quota_key_for(app, bot).await else { return QuotaState::Unknown };
     let model = app.running_model(bot).await;
@@ -718,7 +724,7 @@ pub async fn quota_state(app: &(impl crate::capabilities::Db + crate::quota::Quo
     if !critical.is_empty() {
         return QuotaState::Blocked(critical.iter().filter_map(|w| w.resets_at.clone()).min_by(|a, b| crate::db::cmp_ts(a, b)));
     }
-    // 「可以用」要有證據：5 小時與 7 天兩個共用視窗**都有讀數**、都沒見底，也沒撞限。
+    // 「可以用」要有證據：共用視窗都有讀數、都沒見底，也沒撞限；Codex 權威讀數可確認 5h 不存在。
     // 空的或不完整的讀數（探測只回了一半、剛起來還沒拿到）不能拿來宣稱恢復——少的那一格
     // 可能正是見底的那一格。
     // issue #475：「有讀數」要是**說得出話**的讀數——一筆比窗長還舊、又沒有重置時間的，
@@ -728,7 +734,7 @@ pub async fn quota_state(app: &(impl crate::capabilities::Db + crate::quota::Quo
     if crate::quota::reading_is_stale(quota, flagged, now) {
         return QuotaState::Unknown;
     }
-    if quota.usable_window(crate::quota::Bucket::FiveHour, now).is_some() && quota.usable_window(crate::quota::Bucket::SevenDay, now).is_some() {
+    if shared_window_readings_complete(quota, now) {
         QuotaState::Available
     } else {
         QuotaState::Unknown
@@ -1563,6 +1569,25 @@ mod flow_tests {
         assert_eq!(row.watchdog_attempts, 0, "這一次自動啟動要放掉，不算一次嘗試");
         assert_eq!(row.watchdog_last_error, None, "連失敗紀錄都不該有：根本不該試");
         assert!(crate::db::active_run(&app.db, &bot.id).await.unwrap().is_none(), "不可以把它啟動起來");
+    }
+
+    #[test]
+    fn authoritative_codex_week_only_reading_is_complete() {
+        let now = chrono::DateTime::parse_from_rfc3339("2026-10-12T13:55:00Z").unwrap().with_timezone(&chrono::Utc);
+        let mut q = available();
+        q.updated_at = "2026-10-12T13:55:00Z".into();
+        q.five_hour = None;
+        q.source = "codex-app-server".into();
+        assert!(shared_window_readings_complete(&q, now));
+        q.seven_day = None;
+        assert!(!shared_window_readings_complete(&q, now), "empty authoritative response is unknown");
+        q = available();
+        q.updated_at = "2026-10-12T13:55:00Z".into();
+        q.five_hour = None;
+        for source in ["codex-statusline", "claude-usage", "statusline", "grok-usage", "agy-usage"] {
+            q.source = source.into();
+            assert!(!shared_window_readings_complete(&q, now), "{source}: do not treat partial readings as a complete account");
+        }
     }
 
     /// 空的、不完整的讀數都不是「可以用」：少的那一格可能正是見底的那一格。

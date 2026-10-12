@@ -2120,12 +2120,13 @@ UI token 會取得 Project 底下所有存活 bot 的訊息合併。Bot token �
   statusLine 讀數、撞限、成功回合清撞限、派送與排隊的閘門都記在／看 `runs.runtime_identity`；沒有 run、或 run 沒記（收編的 pane、升級前的舊列）
   才用 `bots.identity`。讀不到 run 時閘門照擋（不拿設定的身分猜）。
 - `used_pct` 0–100；`resets_at` RFC3339 或 `null`；`five_hour` / `seven_day` 任一可為 `null`。
+  Codex `codex-app-server` 是完整權威讀數：依 `windowDurationMins` 分窗，只有 10080 分鐘週窗的方案（例如 `prolite`）回 `five_hour: null`，並清掉快取的舊 5h 窗；本機與遠端主機一致。部分 statusline 讀數仍沿用缺少的舊窗。缺窗不產生 low／critical 警示；權威週窗新鮮且未見底、沒有撞限時，AGM 額度判斷可回復可用。
 - `updated_at` 是這筆讀數的時間；`stale = true` 代表 daemon 剛重啟、先從 DB 的 `quota_cache` 回填上一輪讀數，新的探測尚未回來。這筆仍可畫量表，但 UI 要以淡色／年齡提示它不是最新值；新探測透過 `quota_updated` 回來後會變成 `stale = false`。執行中太久沒人更新（超過 30 分鐘，最慢的健康節奏是 claude `/usage` 的 10 分鐘）的讀數，`GET /api/quota` 也回 `stale = true`（探測壞掉時舊數字不會假裝新鮮）；`quota_updated` 事件帶的是剛寫入的讀數，一律 `stale = false`。讀數的重置時間已過時，開機回填沿用既有規則清掉過期的 `limit_hit`，不會拿舊的「用完了」擋派送。
 - `fable`：Claude Max 方案的 Fable 週額度（`Current week (Fable)`），形狀同 `seven_day`；沒有這個桶一律 `null`，**UI 不畫也不佔位**。
-- `reset_credits`（只有 codex）：`account/rateLimits/read` 的 `rateLimitResetCredits`——`available` = 可用張數，`title`/`expires_at` 取第一張 available 的。daemon 只讀不用。
+- `reset_credits`（只有 codex）：`account/rateLimits/read` 的 `rateLimitResetCredits`——`available` = 可用張數，`title`/`expires_at` 取第一張 available 的。daemon 只讀不用；`title` 原樣保留供應商文字（例如 `Full reset`），不補上固定的 5h／weekly 說明。
 - `limit_hit`：CLI 印的上限橫幅 `{"message","until": "…"|null,"at","bucket": "five_hour"|"seven_day"|"fable"|null}`。速率視窗可以顯示 0% 已用但 credits 用完，這一格是唯一說「現在收不了工作」的地方，所以**黏著**：
   不帶這欄的輪詢沿用舊值，直到 `until` 過了、或 codex 下一回合真的答完（`quota::clear_limit_hit_for_bot`）。帶 `bucket`（`five_hour`／`seven_day`／`fable`；claude 橫幅、agy 個人額度橫幅與 grok 撞額度畫面會帶）的撞限，
-  遇到那一桶的新讀數會校正：窗是撞限之後才開的就清掉，否則 `until` 取與該窗 `resets_at` 較早者。寫進該 bot 身份的 key。UI 標「被擋」並壓灰量表。
+  遇到那一桶的新讀數會校正：窗是撞限之後才開的就清掉，否則 `until` 取與該窗 `resets_at` 較早者。Codex 另以撞限當下或之後的權威 app-server 讀數解除舊撞限：方案名改變、指定桶不存在或不再 critical；未指定桶時，5h／7d 都沒有 critical 窗便解除。方案未變且仍有對應 critical 窗則保留撞限；撞限之前的讀數不能解除較新的撞限。舊佇列憑據回填也套用此校正。寫進該 bot 身份的 key。UI 標「被擋」並壓灰量表。
 - `low` / `critical`：daemon 算好的門檻（`quota.rs` 的 `LOW_REMAINING_PCT = 30`、`CRITICAL_REMAINING_PCT = 5`，以剩餘 % 判斷）。**前端只讀旗標，不寫死百分比。**
   `low` → 顯示剩餘數字；`critical` → 側欄 bot 列提示。
 - `?refresh=1`：立刻重讀 `local` + 每台已連線遠端（各主機併發、同一台三個 kind 也併發；claude 探測最久 40 秒、grok 25 秒）；`&host=` 只重讀那台（不存在 404）。
