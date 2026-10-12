@@ -243,4 +243,97 @@ mod tests {
             .unwrap();
         assert!(processed.is_some(), "recovered event is marked processed");
     }
+
+    /// issue #1469：Stop 比畫面備援晚到（遠端 spool 常見），走「遲到 hook 補回／蓋掉備援回覆」那幾條路；
+    /// 核心交易 commit 之後 `after_turn_end` 暫時失敗，收件匣重試同一則事件時，答案要補得上、回合與回覆不重複。
+    /// 以前這幾條只寫 native id、不寫 `source_event_id`：重試被 native id 去重吞掉並回 Ok，答案永遠遺失。
+    async fn late_stop_answer_survives_a_failed_after_turn_end(fallback_reply: Option<&str>) {
+        let env = crate::testing::env().await;
+        let app = env.app.clone();
+        let bot = crate::testing::claude_bot(&app, &env.project_id, "ask-retry-late-1469").await;
+        let run_id = crate::testing::fake_run(&app, &bot.id).await;
+        let conv = db::conversation_id(&app.db, &bot.id).await.unwrap();
+        let turn = db::ulid();
+        sqlx::query(
+            "INSERT INTO turns (id, conversation_id, run_id, origin, status, delivery, prompt_text, created_at, completed_at)
+             VALUES (?,?,?, 'web', 'completed_fallback', 'ok', ?, ?, ?)",
+        )
+        .bind(&turn)
+        .bind(&conv)
+        .bind(&run_id)
+        .bind("請選一個方案")
+        .bind(db::now())
+        .bind(db::now())
+        .execute(&app.db)
+        .await
+        .unwrap();
+        if let Some(text) = fallback_reply {
+            crate::lifecycle::insert_message(app.as_ref(), &conv, Some(&turn), "assistant", text, "terminal_fallback", true, None).await.unwrap();
+        }
+        let body = crate::hookrecv::HookBody {
+            bot_id: bot.id.clone(),
+            provider: "claude".into(),
+            payload: json!({
+                "hook_event_name": "Stop",
+                "session_id": "session-1469",
+                "prompt_id": "turn-1469",
+                "last_assistant_message": "HOOK-REPLY-1469",
+                "agm_user_text": "請選一個方案",
+                "agm_asks": [{"id":"question-1469", "at":null, "items":[{"question":"retry?","answer":"ANSWER-1469"}] }]
+            }),
+            received_at: Some(db::now()),
+            truncated: false,
+            run_id: Some(run_id.clone()),
+        };
+        assert!(crate::hook_inbox::accept(&app.db, &body, crate::hook_inbox::Source::Http).await.unwrap().is_new());
+        let event_id: String = sqlx::query_scalar("SELECT id FROM hook_events WHERE bot_id=?").bind(&bot.id).fetch_one(&app.db).await.unwrap();
+        sqlx::query(
+            "CREATE TRIGGER fail_ask_answer_1469 BEFORE INSERT ON messages
+             WHEN NEW.content LIKE '%ANSWER-1469%'
+             BEGIN SELECT RAISE(ABORT, 'injected answer write failure'); END",
+        )
+        .execute(&app.db)
+        .await
+        .unwrap();
+
+        crate::runners::hook_inbox::drain_once(&app).await.unwrap();
+        let processed: Option<String> = sqlx::query_scalar("SELECT processed_at FROM hook_events WHERE id=?").bind(&event_id).fetch_one(&app.db).await.unwrap();
+        assert!(processed.is_none(), "failed answer write leaves the durable event pending");
+        let (status, stamped): (String, Option<String>) =
+            sqlx::query_as("SELECT status, source_event_id FROM turns WHERE id=?").bind(&turn).fetch_one(&app.db).await.unwrap();
+        assert_eq!(status, "completed", "the late hook's core effects remain committed");
+        assert_eq!(stamped.as_deref(), Some(event_id.as_str()), "the turn remembers which inbox event closed it");
+
+        sqlx::query("DROP TRIGGER fail_ask_answer_1469").execute(&app.db).await.unwrap();
+        sqlx::query("UPDATE hook_events SET next_attempt_at=NULL WHERE id=?").bind(&event_id).execute(&app.db).await.unwrap();
+        crate::runners::hook_inbox::drain_once(&app).await.unwrap();
+
+        let turns: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM turns WHERE conversation_id=?").bind(&conv).fetch_one(&app.db).await.unwrap();
+        assert_eq!(turns, 1, "retry opens no extra turn");
+        let answers: Vec<String> = sqlx::query_scalar("SELECT turn_id FROM messages WHERE conversation_id=? AND content LIKE '%ANSWER-1469%'")
+            .bind(&conv)
+            .fetch_all(&app.db)
+            .await
+            .unwrap();
+        assert_eq!(answers, vec![turn.clone()], "retry records the answer exactly once on the late-closed turn");
+        let replies: Vec<(String, String)> =
+            sqlx::query_as("SELECT content, source FROM messages WHERE turn_id=? AND role='assistant' AND content LIKE '%HOOK-REPLY-1469%'")
+                .bind(&turn)
+                .fetch_all(&app.db)
+                .await
+                .unwrap();
+        assert_eq!(replies, vec![("HOOK-REPLY-1469".to_string(), "hook".to_string())], "the turn's reply is not duplicated by the retry");
+        let processed: Option<String> = sqlx::query_scalar("SELECT processed_at FROM hook_events WHERE id=?").bind(&event_id).fetch_one(&app.db).await.unwrap();
+        assert!(processed.is_some(), "recovered event is marked processed");
+    }
+
+    #[tokio::test]
+    async fn inbox_retries_a_late_hook_that_filled_a_fallback_turn_without_reply() {
+        late_stop_answer_survives_a_failed_after_turn_end(None).await;
+    }
+
+    #[tokio::test]
+    async fn inbox_retries_a_late_hook_that_replaced_the_fallback_reply() {
+        late_stop_answer_survives_a_failed_after_turn_end(Some("最後一段\n\n✻ Crunched for 40s")).await;
+    }
 }
