@@ -3488,10 +3488,10 @@ mod issue_17_tests {
         assert_eq!(count(&f, "pane.send_keys"), 2, "框裡還是同一則（只是折了行）：補按一次 Enter");
     }
 
-    /// issue #1577：送出後第一次檢查框裡已是別人的草稿，transcript 其實已經有本則。以前這裡直接 return、不記 Pending，
-    /// 背景永遠看不到證據；現在要不按 Enter、照常記下 Pending，背景看到 transcript 就升級成已送出。
+    /// issue #1577：送出後第一次檢查框裡已是別人的草稿，transcript 其實已經有本則。不按 Enter（絕不補按別人的草稿），
+    /// 證據直接認成已送出（#1599：證據不分框的狀態看），不必等背景補證。
     #[tokio::test]
-    async fn issue_1577_a_draft_typed_over_the_sent_text_leaves_it_for_the_late_proof() {
+    async fn issue_1577_a_draft_typed_over_the_sent_text_counts_the_transcript_proof() {
         let f = fixture("claude", "").await;
         with_transcript(&f, crate::testing::LivePane { after_enter_composer: Some(vec!["別人的草稿".into()]), ..wide() }).await;
         let app = f.env.app.clone();
@@ -3500,17 +3500,8 @@ mod issue_17_tests {
         let client = client_for_run(&app, &run).await.unwrap();
         let text = "Reply with PONG please";
 
-        assert_eq!(deliver_prompt(&app, &client, &run, &bot, text, false, false).await.unwrap(), Delivered::Unproven("composer_changed_or_unreadable"));
+        assert_eq!(deliver_prompt(&app, &client, &run, &bot, text, false, false).await.unwrap(), Delivered::Submitted, "transcript 已經有本則：證據直接認");
         assert_eq!(count(&f, "pane.send_keys"), 1, "框裡是別人的草稿：只按過一次 Enter，絕不補按");
-        sqlx::query("UPDATE turns SET delivery='unknown', delivery_verified=0, auto_resend=1 WHERE id=?")
-            .bind(&f.turn_id)
-            .execute(&app.db)
-            .await
-            .unwrap();
-        super::super::late_proof::arm(&app, &f.run_id, &f.bot_id, &f.turn_id);
-        let armed = super::super::late_proof::armed_in_tests().lock().unwrap().iter().find(|(t, _)| *t == f.turn_id).map(|(_, p)| p.clone());
-        let p = armed.expect("送出後框不是本則：Pending 要留給背景看");
-        assert_eq!(super::super::late_proof::look(&app, &f.bot_id, &f.turn_id, &p).await, super::super::late_proof::Look::Submitted);
     }
 
     /// issue #1599：第一次 Enter 已經把本則寫進 transcript，框裡還是同一則字。證據已經到了＝已送出，不能再補按 Enter（重複送出）。
