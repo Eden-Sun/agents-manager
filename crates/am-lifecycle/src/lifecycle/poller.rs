@@ -3351,6 +3351,144 @@ mod issue_17_tests {
         hook_event(&f, "h-tool", r#"{"hook_event_name":"PostToolUse"}"#, &db::now()).await;
         assert!(has_hook_activity(&f.env.app.db, &f.bot_id, &since, &f.turn_id).await);
     }
+
+    /// issue #1479：herdr 的 styled 讀取把 claude 的灰底回音列補成整列寬，剝掉 ANSI 之後 `❯ <text>` 後面接了一排空白。
+    /// 遠端 claude 的證據只有這一列，以前逐字相等永遠不成立——回音明明在畫面上，每則都 `not_proven_submitted`。
+    #[tokio::test]
+    async fn an_echo_row_padded_to_the_pane_width_is_still_proven() {
+        let f = fixture("claude", "").await;
+        live(&f, crate::testing::LivePane { pad_echo: true, ..wide() });
+        let app = f.env.app.clone();
+        db::set_pane_typed(&app.db, &f.run_id).await.unwrap();
+        let (run, bot) = run_and_bot(&f).await;
+        let client = client_for_run(&app, &run).await.unwrap();
+
+        let text = "Reply with PONG please";
+        assert_eq!(deliver_prompt(&app, &client, &run, &bot, text, false, false).await.unwrap(), Delivered::Submitted);
+        let screen = f.env.herdr.pane("pane-17").unwrap().render();
+        let echo = screen.lines().find(|l| l.starts_with("❯ Reply")).expect("回音列在畫面上");
+        assert!(echo.len() > "❯ ".len() + text.len() + 50, "回音列真的被補白了：{echo:?}");
+        assert_eq!(count(&f, "pane.send_text"), 1, "只送一次");
+    }
+
+    use super::super::late_proof::{self, Look};
+
+    /// 打字送出、框空了、回音列看不到（`hide_echo`）：同步窗口判不出，照呼叫端把 turn 寫成 unknown，再認領背景這一筆。
+    async fn unproven_and_armed(f: &Fixture, pane: crate::testing::LivePane, text: &str) -> late_proof::Pending {
+        live(f, pane);
+        let app = f.env.app.clone();
+        db::set_pane_typed(&app.db, &f.run_id).await.unwrap();
+        let (run, bot) = run_and_bot(f).await;
+        let client = client_for_run(&app, &run).await.unwrap();
+        assert_eq!(
+            deliver_prompt(&app, &client, &run, &bot, text, false, false).await.unwrap(),
+            Delivered::Unproven("not_proven_submitted")
+        );
+        sqlx::query("UPDATE turns SET delivery='unknown', delivery_verified=0, auto_resend=1 WHERE id=?")
+            .bind(&f.turn_id)
+            .execute(&app.db)
+            .await
+            .unwrap();
+        late_proof::arm(&app, &f.run_id, &f.bot_id, &f.turn_id);
+        let armed = late_proof::armed_in_tests().lock().unwrap().iter().find(|(t, _)| *t == f.turn_id).map(|(_, p)| p.clone());
+        armed.expect("not_proven_submitted 的那一則被認領了")
+    }
+
+    async fn delivery_row(f: &Fixture) -> (String, String, i64, i64) {
+        sqlx::query_as("SELECT status, delivery, delivery_verified, auto_resend FROM turns WHERE id = ?")
+            .bind(&f.turn_id)
+            .fetch_one(&f.env.app.db)
+            .await
+            .unwrap()
+    }
+
+    fn quiet() -> crate::testing::LivePane {
+        crate::testing::LivePane { hide_echo: true, no_spinner: true, ..wide() }
+    }
+
+    const NEVER: Duration = Duration::ZERO;
+
+    /// 同步窗口之後回音列才出現：背景升成 ok（已驗證）、不自動重送、推 turn 事件。
+    #[tokio::test]
+    async fn an_echo_row_that_shows_up_after_the_window_promotes_the_unknown_turn() {
+        let f = fixture("claude", "").await;
+        let app = f.env.app.clone();
+        let text = "Reply with PONG please";
+        let p = unproven_and_armed(&f, quiet(), text).await;
+        assert_eq!(late_proof::look(&app, &f.bot_id, &f.turn_id, &p).await, Look::Wait, "還沒有證據");
+        assert_eq!(late_proof::watch(&app, &f.run_id, &f.bot_id, &f.turn_id, &p, 2, NEVER).await, None);
+        assert_eq!(delivery_row(&f).await, ("in_flight".into(), "unknown".into(), 0, 1), "看不到就維持 unknown");
+
+        let mut pane = f.env.herdr.pane("pane-17").unwrap();
+        pane.transcript.push(format!("❯ {text}"));
+        live(&f, pane);
+        let mut events = app.subscribe();
+        assert_eq!(late_proof::look(&app, &f.bot_id, &f.turn_id, &p).await, Look::Submitted);
+        assert_eq!(late_proof::watch(&app, &f.run_id, &f.bot_id, &f.turn_id, &p, 2, NEVER).await, Some(Delivered::Submitted));
+        assert_eq!(delivery_row(&f).await, ("in_flight".into(), "ok".into(), 1, 0), "ok＋已驗證＋不重送");
+        let kind = tokio::time::timeout(Duration::from_secs(1), events.recv()).await.unwrap().unwrap().kind;
+        assert_eq!(kind, "turn_updated", "網頁要收到 turn 事件才解得開鎖");
+    }
+
+    /// 框空了、bot 在做事（herdr 說 working）但沒有無損證據：升成 ok、**未驗證**、不重送。
+    #[tokio::test]
+    async fn an_empty_box_and_a_working_agent_promote_to_unverified_not_verified() {
+        let f = fixture("claude", "").await;
+        let app = f.env.app.clone();
+        let p = unproven_and_armed(&f, quiet(), "Reply with PONG please").await;
+        sqlx::query("UPDATE runs SET agent_status = 'working' WHERE id = ?").bind(&f.run_id).execute(&app.db).await.unwrap();
+
+        assert_eq!(late_proof::look(&app, &f.bot_id, &f.turn_id, &p).await, Look::Active);
+        assert_eq!(late_proof::watch(&app, &f.run_id, &f.bot_id, &f.turn_id, &p, 1, NEVER).await, Some(Delivered::Unverified));
+        assert_eq!(delivery_row(&f).await, ("in_flight".into(), "ok".into(), 0, 0));
+        let resend: i64 = sqlx::query_scalar("SELECT resend_count FROM turns WHERE id = ?").bind(&f.turn_id).fetch_one(&app.db).await.unwrap();
+        assert_eq!(resend, MAX_PROMPT_RESENDS, "不能因為升級就被 stall watchdog 再打一次");
+    }
+
+    /// 動靜的另外兩種：回合送出之後 hook 有事件；畫面上有進行中的 spinner。
+    #[tokio::test]
+    async fn hook_activity_and_a_live_spinner_each_count_as_the_agent_working() {
+        let f = fixture("claude", "").await;
+        let app = f.env.app.clone();
+        let p = unproven_and_armed(&f, quiet(), "Reply with PONG please").await;
+        assert_eq!(late_proof::look(&app, &f.bot_id, &f.turn_id, &p).await, Look::Wait, "idle、沒有 hook、沒有 spinner");
+        hook_event(&f, "h-late", r#"{"hook_event_name":"PostToolUse"}"#, &db::now()).await;
+        assert_eq!(late_proof::look(&app, &f.bot_id, &f.turn_id, &p).await, Look::Active, "hook 有動靜");
+
+        let g = fixture("claude", "").await;
+        let q = unproven_and_armed(&g, crate::testing::LivePane { no_spinner: false, ..quiet() }, "Reply with PONG please").await;
+        assert_eq!(late_proof::look(&g.env.app, &g.bot_id, &g.turn_id, &q).await, Look::Active, "畫面上有 spinner");
+    }
+
+    /// 回合已經被別的路收掉（Stop hook、放棄、run 結束）：背景什麼都不寫。
+    #[tokio::test]
+    async fn a_turn_closed_meanwhile_is_left_alone() {
+        let f = fixture("claude", "").await;
+        let app = f.env.app.clone();
+        let p = unproven_and_armed(&f, quiet(), "Reply with PONG please").await;
+        sqlx::query("UPDATE runs SET agent_status = 'working' WHERE id = ?").bind(&f.run_id).execute(&app.db).await.unwrap();
+        sqlx::query("UPDATE turns SET status = 'failed' WHERE id = ?").bind(&f.turn_id).execute(&app.db).await.unwrap();
+
+        assert_eq!(late_proof::look(&app, &f.bot_id, &f.turn_id, &p).await, Look::Stop);
+        assert_eq!(late_proof::watch(&app, &f.run_id, &f.bot_id, &f.turn_id, &p, 1, NEVER).await, None);
+        assert_eq!(delivery_row(&f).await, ("failed".into(), "unknown".into(), 0, 1));
+        assert!(!late_proof::promote(&app, &f.turn_id, Delivered::Submitted).await.unwrap(), "CAS 擋下");
+    }
+
+    /// 字還留在框裡（Enter 被吃掉）不是 `not_proven_submitted`：沒有記下任何東西，認領不到、背景不看。
+    #[tokio::test]
+    async fn a_prompt_still_in_the_box_is_not_watched_in_the_background() {
+        let f = fixture("claude", "").await;
+        live(&f, crate::testing::LivePane { swallow_enter: true, ..wide() });
+        let app = f.env.app.clone();
+        db::set_pane_typed(&app.db, &f.run_id).await.unwrap();
+        let (run, bot) = run_and_bot(&f).await;
+        let client = client_for_run(&app, &run).await.unwrap();
+        assert_eq!(deliver_prompt(&app, &client, &run, &bot, "go", false, false).await.unwrap(), Delivered::Unproven("still_in_box"));
+
+        late_proof::arm(&app, &f.run_id, &f.bot_id, &f.turn_id);
+        assert!(late_proof::armed_in_tests().lock().unwrap().iter().all(|(t, _)| *t != f.turn_id));
+    }
 }
 
 #[cfg(all(test, feature = "daemon-test-harness"))]

@@ -528,6 +528,8 @@ pub trait QueueServices: Send + Sync {
     fn put_back_owed(&self, bot_id: &str, conversation_id: &str, turn_id: &str, reason: &str, wait_key: &str) -> impl Future<Output = anyhow::Result<()>> + Send;
     fn delivered_owed(&self, bot_id: &str, turn_id: &str, record: crate::lifecycle::DeliveryRecord) -> impl Future<Output = anyhow::Result<()>> + Send;
     fn arm_stall_and_progress(&self, run_id: &str, bot_id: &str, turn_id: &str) -> impl Future<Output = ()> + Send;
+    /// `delivery=unknown` 寫完之後：框已空的那一種（`not_proven_submitted`）背景繼續看證據（#1479）。
+    fn watch_late_proof(&self, run_id: &str, bot_id: &str, turn_id: &str);
     fn schedule_reconcile_settle(&self, run_id: &str, stuck: &str);
 }
 

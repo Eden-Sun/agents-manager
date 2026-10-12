@@ -748,6 +748,11 @@ turn JSON 同時帶 `delivery_verified` 與 `auto_resend`，前端要靠兩個�
 遠端主機讀不到 transcript 的回合不再是 `0`；備援收尾而且沒有 `native_turn_id` 的維持 `0`。
 **「未驗證」不等於「不重送」**（AGM 2026-09-16）：要不要自動重送看另一欄 `auto_resend`——打過字證不明的是 0（重送會重複派工），
 `agent.prompt` 是 1（沒送進去才會重送）。按過鍵、該有證據卻證明不了，才是 `200 {"delivery":"unknown"}`。
+`unknown` 且輸入框已空（log 的 `not_proven_submitted`）時，daemon 在背景每 3 秒再看一次、最多約 3 分鐘（SPEC §6「同步窗口判不出」，issue #1479）：
+證據長出來就把那一回合升成 `delivery:"ok"`＋`delivery_verified:1`；只看到 agent 明顯在做事（hook 有動靜、畫面有 spinner、`agent_status=working`）
+升成 `delivery:"ok"`＋`delivery_verified:0`、`auto_resend:0`（UI 標「未驗證送達」）；兩者都沒有就維持 `unknown`。升級時推 `turn_updated`，
+`delivery=unknown` 的輸入框鎖與 `409 a previous turn has unknown delivery` 隨之解開，不必等 Stop hook。網頁在 `unknown` 且 `agent_status=working`
+時只顯示中性的「送達尚未確認」，不把「放棄該回合」當成第一個建議。
 排隊中的 prompt 遇到 409 類原因放回 `queued`，以 15 秒起、每次加倍、上限 5 分鐘的退避重試（每顆 bot 同時只有一個重試
 timer；次數與下次時間存在 turn 上，重啟與其他喚醒都不會提前花掉額度），放回 12 次仍送不出就標 failed 並插 system 訊息；daemon 重啟後依 `next_flush_at` 為每顆 bot 重建一個重試 timer；
 codex 的 rollout 還沒寫出來時先放回等 3 次（只算這個原因，綁 run 與 session，換了就重算），之後照樣送出並標 `unverified`；

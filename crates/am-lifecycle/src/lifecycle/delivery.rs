@@ -221,6 +221,10 @@ pub fn echo_row_hits(kind: &str, screen: &str, text: &str) -> usize {
             // Grok right-aligns a clock and scrollbar glyph on its real prompt echoes. Ignore only
             // that known chrome before the exact comparison; otherwise a successful first paste
             // looks unproven and the retry path can submit it twice.
+            // 列尾的空白不算內容（issue #1479）：styled 讀取把 claude 回音那一列的灰底補滿整列寬，
+            // 剝掉 ANSI 之後 `❯ <text>` 後面接了一整排空白，逐字相等永遠不成立。`text` 本來就要求頭尾沒有空白
+            // （`provable_by_echo_row`），所以只放過列尾補白；marker 後多一個空白、少一個字照樣不算。
+            let row = row.trim_end();
             let exact = if kind == "grok" {
                 let plain = crate::lifecycle::screen::strip_grok_decor(row);
                 markers.iter().any(|m| plain.strip_prefix(m) == Some(text))
@@ -438,7 +442,7 @@ pub use crate::composer_parse::{
 
 /// Read the pane for the composer checks: styled when herdr can, plain when it cannot. A plain
 /// read is the fail-closed fallback — no dim flags, so a placeholder simply reads as `NonEmpty`.
-async fn read_composer(client: &HerdrClient, pane: &str) -> anyhow::Result<String> {
+pub(super) async fn read_composer(client: &HerdrClient, pane: &str) -> anyhow::Result<String> {
     read_styled(client, pane, SCAN_SOURCE, DELIVER_SCAN_LINES).await
 }
 
@@ -549,7 +553,7 @@ pub async fn plan_delivery(
 }
 
 /// Current evidence count for `proof`.
-fn evidence(kind: &str, proof: &Proof, offset: u64, screen: &str, text: &str) -> std::io::Result<usize> {
+pub(super) fn evidence(kind: &str, proof: &Proof, offset: u64, screen: &str, text: &str) -> std::io::Result<usize> {
     match proof {
         Proof::EchoRow => {
             let plain: String = screen.lines().map(strip_ansi).collect::<Vec<_>>().join("\n");
@@ -714,7 +718,7 @@ pub enum Typing {
 }
 
 /// 剛貼進去的 `text` 讓框最多多高：預設的 24 列加上它自己的列數（上限 300，`read_composer` 只讀 400 列）。
-fn typed_tail(text: &str) -> usize {
+pub(super) fn typed_tail(text: &str) -> usize {
     super::poller::COMPOSER_TAIL + (text.matches('\n').count() + 1).min(300)
 }
 
@@ -846,6 +850,9 @@ pub async fn confirm_submitted(
     let Typed { pane, proof, submit, offset, baseline, structured } = t;
     let (offset, baseline) = (*offset, *baseline);
     let read = || read_composer(client, pane);
+    // 送出鍵剛按下去：上一則沒被認領的「之後再看」作廢，這一則的起點從這一刻算（`late_proof`，#1479）。
+    super::late_proof::clear(&run.id);
+    let submitted_at = db::now();
     let mut pressed_again = false;
     let mut history_conn = None;
     for _ in 0..SUBMIT_CHECKS {
@@ -906,6 +913,8 @@ pub async fn confirm_submitted(
                     return Ok(Delivered::Submitted);
                 }
             }
+            // 框已空、證據還沒長出來：回 `Unproven` 前記下基準，呼叫端寫完 `unknown` 後背景繼續看（#1479）。
+            super::late_proof::note(&run.id, super::late_proof::Pending::new(&bot.kind, pane, proof, offset, baseline, text, submitted_at));
             "not_proven_submitted"
         }
     };
@@ -1389,6 +1398,21 @@ mod tests {
         assert_eq!(echo_row_hits("claude", &screen(&["❯  Reply with PONG"], &[]), "Reply with PONG"), 0, "多一個空白");
         // 回覆若以兩格縮排的純文字開頭，會被當成續行 → 假陰性（Unproven），不會假陽性。
         assert_eq!(echo_row_hits("claude", &screen(&["❯ ab", "  plain reply text"], &[]), "ab"), 0);
+    }
+
+    /// issue #1479：claude 的回音列是灰底整列寬，styled 讀取把列尾補成空白。補白不算內容；內容本身仍要逐字相等。
+    #[test]
+    fn a_padded_echo_row_still_counts_but_only_when_the_text_is_exact() {
+        let pad = " ".repeat(140);
+        let row = |t: &str| screen(&[&format!("❯ {t}{pad}")], &[]);
+        assert_eq!(echo_row_hits("claude", &row("Reply with PONG"), "Reply with PONG"), 1);
+        assert_eq!(echo_row_hits("claude", &row("Reply with PON"), "Reply with PONG"), 0, "少一個字");
+        assert_eq!(echo_row_hits("claude", &row("Reply with PONG!"), "Reply with PONG"), 0, "多一個字");
+        assert_eq!(echo_row_hits("claude", &row(" Reply with PONG"), "Reply with PONG"), 0, "marker 後多一個空白");
+        assert_eq!(echo_row_hits("claude", &screen(&[&format!("❯ ab{pad}"), "  cd"], &[]), "ab"), 0, "補白的列底下接縮排文字還是續行");
+        // 帶 ANSI 的灰底整列：`evidence` 先剝掉 ANSI 再數。
+        let styled = format!("\u{1b}[0m\u{1b}[48;2;55;55;55m❯ \u{1b}[38;2;255;255;255mReply with PONG{pad}\u{1b}[0m\n❯\n");
+        assert_eq!(evidence("claude", &Proof::EchoRow, 0, &styled, "Reply with PONG").unwrap(), 1);
     }
 
     #[test]

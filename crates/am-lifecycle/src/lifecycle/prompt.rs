@@ -1284,6 +1284,10 @@ async fn prompt_inner(
     if let Err(e) = written {
         return Err(super::owed_delivery::uncommitted(Some(&run.id), &turn_id, &msg_id, delivery, Some(&e)));
     }
+    // 框已空、證據還沒長出來而記成 `unknown` 的：背景繼續看，看到就升成 ok（#1479）。其他原因的 unknown 沒有記著東西，什麼都不做。
+    if delivery == "unknown" {
+        super::late_proof::arm(app, &run.id, bot_id, &turn_id);
+    }
     Ok(PromptOut { turn_id, message_id: msg_id, delivery: delivery.into(), send_now })
 }
 
@@ -1435,6 +1439,22 @@ mod prompt_tests {
         let messages: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM messages WHERE conversation_id=? AND role='user'").bind(&f.conv).fetch_one(&app.db).await.unwrap();
         assert_eq!((turns, messages), (0, 0), "沒有新 turn、沒有新 user message");
         assert!(f.env.herdr.calls_to("pane.send_text").is_empty() && f.env.herdr.calls_to("pane.send_keys").is_empty(), "一個字、一個鍵都沒打");
+    }
+
+    /// #1479：字打進去、Enter 按了、框空了，回音列卻看不到（`not_proven_submitted`）。回給呼叫端的仍是 `unknown`
+    /// （不假裝證明了），但這一則要被背景認領——之後看到證據就升成 ok、解開輸入框，不必等 Stop hook。
+    #[tokio::test]
+    async fn an_empty_box_without_evidence_is_handed_to_the_background_watch() {
+        let f = fixture("claude", "test").await;
+        let app = f.env.app.clone();
+        sqlx::query("UPDATE bots SET inject_hooks = 0 WHERE id = ?").bind(&f.bot_id).execute(&app.db).await.unwrap();
+        sqlx::query("UPDATE runs SET pane_id = 'pane-prompt-test', pane_typed = 1 WHERE id = ?").bind(&f.run_id).execute(&app.db).await.unwrap();
+        f.env.herdr.live_pane("pane-prompt-test", tt::LivePane { width: Some(120), hide_echo: true, no_spinner: true, ..Default::default() });
+
+        let out = prompt(&app, &f.bot_id, "Reply with PONG please", "late-proof-1").await.unwrap();
+        assert_eq!(out.delivery, "unknown", "{out:?}");
+        let armed = super::super::late_proof::armed_in_tests().lock().unwrap().iter().any(|(t, _)| *t == out.turn_id);
+        assert!(armed, "框已空、證據沒長出來的那一則要交給背景");
     }
 
     /// #872：run 沒換、仍 idle 就照常往下走（建 turn）；不是被 `superseded_run` 擋掉。

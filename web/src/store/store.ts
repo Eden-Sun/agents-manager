@@ -9,6 +9,7 @@ import { createResyncRunner } from './resyncQueue'
 import { createRequestId, peekRequestId, settleCreateRequest } from '../lib/createRequestId'
 import { queueSlotNotice, slotHolderFrom } from '../lib/queueSlot'
 import { groupSendDelivered, groupSkipText } from './groupSend'
+import { UNKNOWN_GROUP_NOTICE, UNKNOWN_SENT_NOTICE, unknownLock } from './deliveryUnknown'
 import { create } from 'zustand'
 import * as api from '../api'
 import {
@@ -368,6 +369,8 @@ export interface ComposerState {
   queued: boolean
   inFlightTurnId: string | null
   unknownTurnId: string | null
+  /** 送達未知、但 bot 正在跑（`agent_status=working`）：只是「還沒確認」，不把「放棄該回合」當成第一個選項（issue #1479）。 */
+  unknownWorking?: boolean
   /** Bot 沒在跑：送出＝交給 daemon 先收下、它自己啟動 bot，起來後再送（2026-09-18 使用者：不要先擋著；issue #122）。 */
   autoStart?: boolean
 }
@@ -1274,7 +1277,7 @@ export const useStore = create<StoreState>((set, get) => {
         return { turns }
       })
       if (res.sent.some((x) => x.delivery === 'unknown')) {
-        get().notify('error', '部分訊息送達狀態未知（delivery=unknown），該 bot 需先放棄該回合才能再送。')
+        get().notify('info', UNKNOWN_GROUP_NOTICE)
       }
       if (!groupSendDelivered(res)) {
         // 一顆都沒送到：回 null，輸入框才會保留草稿與附件（#340）。
@@ -1665,7 +1668,7 @@ export const useStore = create<StoreState>((set, get) => {
         if (note) get().notify(note.level, note.text)
       }
       if (res.delivery === 'unknown') {
-        get().notify('error', '訊息已送出但送達狀態未知（delivery=unknown），需先放棄該回合才能再送。')
+        get().notify('info', UNKNOWN_SENT_NOTICE)
       }
       if (res.delivery === 'failed') {
         // REVIEW B10: turn already failed; seeding a local in_flight turn would lock the composer.
@@ -1782,7 +1785,7 @@ export const useStore = create<StoreState>((set, get) => {
         try {
           const res = await api.acceptSuggestion(botId, suggestion, run.id, crid)
           settleCreateRequest(reqKey)
-          if (res.delivery === 'unknown') get().notify('error', '訊息已送出但送達狀態未知（delivery=unknown），需先放棄該回合才能再送。')
+          if (res.delivery === 'unknown') get().notify('info', UNKNOWN_SENT_NOTICE)
           if (res.delivery === 'failed') {
             get().notify('error', '訊息未送達（delivery=failed），請確認 agent 狀態後重試。')
             void get().loadMessages(botId)
@@ -4001,7 +4004,8 @@ export function composerState(state: StoreState, botId: string | null): Composer
   }
   const unknown = unknownDeliveryTurn(state, botId)
   if (unknown) {
-    return { ...base, reason: '上一回合的送達狀態未知，請先「放棄該回合」或停止 Bot', unknownTurnId: unknown.id }
+    const lock = unknownLock(run.agent_status)
+    return { ...base, reason: lock.reason, unknownTurnId: unknown.id, unknownWorking: lock.working }
   }
   const inflight = inFlightTurn(state, botId)
   if (inflight) {

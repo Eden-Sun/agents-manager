@@ -275,6 +275,10 @@ async fn flush_queued_inner<C: QueueContext>(app: &C, bot_id: &str) -> anyhow::R
     if delivery == "ok" || delivery == "unverified" {
         app.arm_stall_and_progress(&run.id, bot_id, &turn.id).await;
     }
+    // 框已空、證據還沒長出來而記成 `unknown` 的：背景繼續看，看到就升成 ok（#1479）。
+    if delivery == "unknown" && written.is_ok() {
+        app.watch_late_proof(&run.id, bot_id, &turn.id);
+    }
     written.map_err(|e| e.context("排隊的 prompt 送出去了，送達結果卻寫不進去（記成欠著）"))
 }
 
