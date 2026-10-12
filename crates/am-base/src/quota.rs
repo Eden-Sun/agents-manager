@@ -624,6 +624,11 @@ pub fn quota_from_codex(result: &Value) -> Option<Quota> {
         five = window(p);
         seven = window(s);
     }
+    // 兩個窗都讀不出來（空的 rateLimits、malformed）不是完整帳號讀數：回 None，讓呼叫端當成探測失敗，
+    // 不去清掉有效的窗與撞限（#1506）。只有週窗的方案照常是完整讀數（#1496）。
+    if five.is_none() && seven.is_none() {
+        return None;
+    }
     Some(Quota {
         five_hour: five,
         seven_day: seven,
