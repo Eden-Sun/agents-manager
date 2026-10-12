@@ -23,6 +23,7 @@ import { RULE_5H, RULE_WEEKLY, resetBadge } from '../lib/quotaReset'
 import { cliLoginCommand, identityEnv, shouldUseIdentityLogin } from '../lib/quotaLogin'
 import './quotaLimitHit.css'
 import { carriedOverAt } from '../lib/quotaWindowAge'
+import { noFiveHourCap, projectNoFiveHour } from '../lib/quotaNoFiveHour'
 import { limitHitWhen } from '../lib/limitHitWhen'
 import './quotaStrip.css'
 
@@ -61,14 +62,19 @@ function quotaTitle(host: string): string {
 }
 
 function useEntryQuota(entry: QuotaEntry, host: string): KindQuota | null {
-  return useStore((s) => {
+  const raw = useStore((s) => {
     if (entry.identity) {
       const keyed = quotaKey(host, `${entry.kind}:${entry.identity}`)
       if (s.quota[keyed] != null) return s.quota[keyed]
     }
     return s.quota[entry.fullKey] ?? null
   })
+  // codex 的方案沒有 5 小時窗時，沿用下來的舊 5h 與升級前的撞上限橫幅不畫（見 quotaNoFiveHour）。
+  return useMemo(() => projectNoFiveHour(entry.kind, raw), [entry.kind, raw])
 }
+
+/** 「5h 無上限」那一格的字（桌機量表與明細共用）。 */
+const NO_CAP_TITLE = '這個方案沒有 5 小時上限，只看週額度'
 
 /** 看該 host 的 `identity_status`（同名身份在各主機可能是不同帳號）；Gauge 與 PopRow 共用以免判斷漂移。 */
 function useLoggedOut(entry: QuotaEntry, host: string): boolean {
@@ -149,6 +155,7 @@ function label(entry: QuotaEntry, q: KindQuota | null, loggedOut = false, now = 
   }
   if (fable !== null) parts.push(`Fable 每週剩餘 ${fable}%`)
   if (q?.five_hour?.resets_at) parts.push(`5 小時 ${fmtTime(q.five_hour.resets_at)} 重置`)
+  if (noFiveHourCap(entry.kind, q)) parts.push('5 小時無上限')
   if (q?.seven_day?.resets_at) {
     parts.push(
       weeklyOnlyKind(entry.kind)
@@ -456,6 +463,7 @@ function Gauge({
       windows.push(windowBar('F', fable, q?.fable, q?.updated_at))
     }
   }
+  const uncapped = !compact && noFiveHourCap(entry.kind, q)
   const title = `${hostLabel(host)} · ${label(entry, q, loggedOut, now)}`
   const level = worst(q)
   const off = isQuotaDisabled(disabledMap, quotaDisableKey(host, entry.kind, entry.identity))
@@ -539,7 +547,15 @@ function Gauge({
           })}
         </span>
       ) : (
-      <span className={`quota-bars${windows.length === 1 ? ' single' : ''}`}>
+      <span className={`quota-bars${windows.length === 1 && !uncapped ? ' single' : ''}`}>
+        {uncapped ? (
+          <span className="quota-window">
+            <span className="quota-window-name">5h</span>
+            <span className="quota-bar-row">
+              <span className="quota-no-cap" title={NO_CAP_TITLE}>無上限</span>
+            </span>
+          </span>
+        ) : null}
         {windows.map((w) => {
           const span = WINDOW_MS[w.name]
           const mark = resetMark(w.resetsAt, span, now)
@@ -797,7 +813,20 @@ function PopRow({ entry, host, onAgyLogout }: { entry: QuotaEntry; host: string;
           </>
         ) : (
         <>
-          <PopWindow icon="⏱" name="5h" win="5h" w={q?.five_hour} now={now} />
+          {noFiveHourCap(entry.kind, q) ? (
+            <div className="quota-pop-line">
+              <span className="quota-win">
+                <span className="quota-ico" aria-hidden="true">
+                  ⏱
+                </span>
+                5h
+              </span>
+              <span className="quota-no-cap">無上限</span>
+              <span className="quota-reset">{NO_CAP_TITLE}</span>
+            </div>
+          ) : (
+            <PopWindow icon="⏱" name="5h" win="5h" w={q?.five_hour} now={now} />
+          )}
           <PopWindow icon="📅" name={weekLabel(entry.kind)} win="7d" w={q?.seven_day} now={now} />
           <PopWindow icon="✦" name="Fable" win="F" w={q?.fable} now={now} />
           <PopLimitHit hit={q?.limit_hit} />
