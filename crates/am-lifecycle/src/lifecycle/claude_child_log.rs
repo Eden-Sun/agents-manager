@@ -267,15 +267,12 @@ pub(crate) async fn record_runtime(
     }
 }
 
-fn read_script(roots: &[String], sid: &str) -> String {
-    read_script_tail(roots, sid, MAX_READ_BYTES)
-}
-
-fn read_script_tail(roots: &[String], sid: &str, max: u64) -> String {
+fn read_script_tail_with_recorded(roots: &[String], sid: &str, max: u64, recorded: Option<&str>) -> String {
     let list = roots.iter().map(|r| sh_quote(r)).collect::<Vec<_>>().join(" ");
+    let recorded = sh_quote(recorded.unwrap_or(""));
     // No unsafe shell fallback when Python is absent: callers use the screen instead.
     format!(
-        "python3 -I -c {} {} {max} {} {list} 2>/dev/null; :",
+        "python3 -I -c {} {} {max} {} {recorded} {list} 2>/dev/null; :",
         sh_quote(include_str!("claude_child_tail.py")),
         sh_quote(sid),
         sh_quote(LOG_MARK),
@@ -299,7 +296,14 @@ pub async fn load(app: &impl GrokTranscriptContext, bot: &db::Bot, run: &db::Run
     if roots.is_empty() {
         return Ok(None);
     }
-    let out = app.host_shell(host, &read_script(&roots, &sid)).await?;
+    let recorded = run
+        .transcript_path
+        .as_deref()
+        .map(str::trim)
+        .filter(|p| !p.is_empty())
+        .filter(|p| within_projects(p, &roots))
+        .filter(|p| std::path::Path::new(p).file_stem().and_then(|s| s.to_str()) == Some(sid.as_str()));
+    let out = app.host_shell(host, &read_script_tail_with_recorded(&roots, &sid, MAX_READ_BYTES, recorded)).await?;
     let Some((path, body)) = split_output(&out) else { return Ok(None) };
     if run.native_session_id.as_deref() != Some(sid.as_str()) || run.transcript_path.as_deref() != Some(path.as_str()) {
         sqlx::query("UPDATE runs SET native_session_id = ?, transcript_path = ? WHERE id = ?").bind(&sid).bind(&path).bind(&run.id).execute(app.db()).await?;
@@ -308,14 +312,21 @@ pub async fn load(app: &impl GrokTranscriptContext, bot: &db::Bot, run: &db::Run
     Ok(Some((sid, body)))
 }
 
-/// `path` 是不是某個 config root 的 `projects/` 底下的 `.jsonl`（字串層級：遠端路徑在別台機器上，這裡不碰檔案系統）。
+/// `path` 是不是某個 config root 的 `projects/<cwd>/<session>.jsonl`（字串層級：遠端路徑在別台機器上，這裡不碰檔案系統）。
 fn within_projects(path: &str, roots: &[String]) -> bool {
     let p = std::path::Path::new(path);
+    let in_root = roots.iter().any(|root| {
+        let Ok(relative) = p.strip_prefix(std::path::Path::new(root).join("projects")) else { return false };
+        let mut components = relative.components();
+        matches!(components.next(), Some(std::path::Component::Normal(_)))
+            && matches!(components.next(), Some(std::path::Component::Normal(_)))
+            && components.next().is_none()
+    });
     p.is_absolute()
         && !path.chars().any(char::is_control)
         && !p.components().any(|c| matches!(c, std::path::Component::ParentDir))
         && p.extension().and_then(|e| e.to_str()) == Some("jsonl")
-        && roots.iter().any(|r| p.starts_with(std::path::Path::new(r).join("projects")))
+        && in_root
 }
 
 /// 這顆 run 的對話檔尾段（`GET /pending-question` 用，issue #1476）：還沒被回答的 `AskUserQuestion` 在檔尾，
@@ -341,7 +352,8 @@ pub async fn pending_tail(app: &impl GrokTranscriptContext, bot: &db::Bot, run: 
             return Ok(None);
         }
     }
-    let out = app.host_shell(host, &read_script_tail(&roots, sid, max)).await?;
+    let recorded = recorded.filter(|p| within_projects(p, &roots) && stem == Some(sid));
+    let out = app.host_shell(host, &read_script_tail_with_recorded(&roots, sid, max, recorded)).await?;
     Ok(split_output(&out).map(|(_, body)| body))
 }
 

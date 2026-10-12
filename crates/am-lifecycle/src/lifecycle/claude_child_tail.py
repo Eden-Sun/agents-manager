@@ -21,7 +21,53 @@ def open_dir(path):
         raise
 
 
-def read_root(root, sid, limit):
+def read_file(cwd_fd, filename, path, limit):
+    fd = None
+    try:
+        fd = os.open(filename, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=cwd_fd)
+        info = os.fstat(fd)
+        if not stat.S_ISREG(info.st_mode) or info.st_nlink != 1:
+            return None
+        os.lseek(fd, max(0, info.st_size - limit), os.SEEK_SET)
+        body = bytearray()
+        while len(body) < limit:
+            chunk = os.read(fd, min(65536, limit - len(body)))
+            if not chunk:
+                break
+            body.extend(chunk)
+        return path, body
+    except OSError:
+        return None
+    finally:
+        if fd is not None:
+            os.close(fd)
+
+
+def read_recorded(root, recorded, sid, limit):
+    root_path = root.rstrip('/') or '/'
+    prefix = root_path.rstrip('/') + '/projects/' if root_path != '/' else '/projects/'
+    if not recorded.startswith(prefix):
+        return None
+    parts = recorded[len(prefix):].split('/')
+    if len(parts) != 2 or parts[0] in ('', '.', '..') or parts[1] != sid + '.jsonl':
+        return None
+
+    root_fd = open_dir(root)
+    try:
+        projects = os.open('projects', os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=root_fd)
+        try:
+            cwd = os.open(parts[0], os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=projects)
+            try:
+                return read_file(cwd, parts[1], recorded, limit)
+            finally:
+                os.close(cwd)
+        finally:
+            os.close(projects)
+    finally:
+        os.close(root_fd)
+
+
+def read_root(root, sid, limit, seen_paths, matches):
     root_fd = open_dir(root)
     try:
         projects = os.open('projects', os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=root_fd)
@@ -30,42 +76,54 @@ def read_root(root, sid, limit):
                 if name.startswith('.'):
                     continue
                 cwd = None
-                fd = None
                 try:
                     cwd = os.open(name, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=projects)
-                    fd = os.open(sid + '.jsonl', os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=cwd)
-                    info = os.fstat(fd)
-                    if not stat.S_ISREG(info.st_mode) or info.st_nlink != 1:
-                        continue
-                    os.lseek(fd, max(0, info.st_size - limit), os.SEEK_SET)
-                    body = bytearray()
-                    while len(body) < limit:
-                        chunk = os.read(fd, min(65536, limit - len(body)))
-                        if not chunk:
-                            break
-                        body.extend(chunk)
                     path = os.path.join(root, 'projects', name, sid + '.jsonl')
-                    return path, body
+                    result = read_file(cwd, sid + '.jsonl', path, limit)
+                    if result is not None and path not in seen_paths:
+                        seen_paths.add(path)
+                        matches.append(result)
+                        if len(matches) > 1:
+                            return True
                 except OSError:
                     continue
                 finally:
-                    if fd is not None:
-                        os.close(fd)
                     if cwd is not None:
                         os.close(cwd)
         finally:
             os.close(projects)
     finally:
         os.close(root_fd)
+    return False
 
 
-sid, limit, marker = sys.argv[1:4]
-for root in sys.argv[4:]:
-    try:
-        result = read_root(root, sid, int(limit))
-    except (OSError, ValueError):
-        continue
-    if result is not None:
-        path, body = result
-        sys.stdout.buffer.write((marker + '\n' + path + '\n').encode() + body)
-        break
+sid, limit, marker, recorded = sys.argv[1:5]
+limit = int(limit)
+roots = sys.argv[5:]
+result = None
+
+if recorded:
+    for root in roots:
+        try:
+            result = read_recorded(root, recorded, sid, limit)
+        except (OSError, ValueError):
+            continue
+        if result is not None:
+            break
+else:
+    matches = []
+    seen_paths = set()
+    ambiguous = False
+    for root in roots:
+        try:
+            if read_root(root, sid, limit, seen_paths, matches):
+                ambiguous = True
+                break
+        except (OSError, ValueError):
+            continue
+    if not ambiguous and len(matches) == 1:
+        result = matches[0]
+
+if result is not None:
+    path, body = result
+    sys.stdout.buffer.write((marker + '\n' + path + '\n').encode() + body)

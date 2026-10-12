@@ -3531,7 +3531,7 @@ bot 用 `herdr agent start` 開的 claude 子 agent（本機或遠端）沒有 h
   herdr 的綁定優先於記過的（`/clear`、`--resume` 會換 session）。找到的連同檔案路徑寫進 `runs.native_session_id`／`transcript_path`。
 - **讀檔**：`<root>/projects/*/<session id>.jsonl` 的最後 8 MiB（一般檔、非 symlink／hardlink；本機與遠端都用 `sh` 呼叫 Python 3，遠端走 ssh）。root 依序是 bot 的 `CLAUDE_CONFIG_DIR`、
   這個身分（`runs.runtime_identity`／`bots.identity`）在該主機的 config 目錄、`~/.claude`；找不到檔＝照舊看畫面。session id 只收英數與 `-`／`_`。
-  root 的每個路徑段、`projects` 與 cwd 都以 fd-relative `O_NOFOLLOW` 開啟，讀取與一般檔檢查使用同一個 fd；中途換成 symlink 不會把讀取導向 root 外。沒有 Python 3 或安全開啟失敗時不讀檔，沿用畫面備援（pending-question 回無資料）。
+  run 已記錄且符合目前 session 的 `transcript_path` 時精確讀那個檔；沒有可用的記錄路徑才 discovery，而且所有 root 合計必須只有一份候選，重複 session id 一律不讀、不改綁定。root 的每個路徑段、`projects` 與 cwd 都以 fd-relative `O_NOFOLLOW` 開啟，讀取與一般檔檢查使用同一個 fd；中途換成 symlink 不會把讀取導向 root 外。沒有 Python 3 或安全開啟失敗時不讀檔，沿用畫面備援（pending-question 回無資料）。
 - **一問一答**：`type: user` 且是人打的字（不是 `tool_result`、`isMeta`、sidechain、slash 指令回音 `<command-name>`／`<local-command-…>`）算一問，`<pasted_content>` 包裝拆回原文；
   `[Request interrupted by user…]` 結束上一問。回覆是之後 `stop_reason` 不是 `tool_use` 的 assistant 文字（帶 `tool_use` 的旁白不算，沒有 `stop_reason` 的半行不算）；
   下一問出現也算這一問結束（被打斷、沒有回覆）。回合鑰匙是 user 那行 `uuid` 的 FNV-1a（`native_turn_id = p<n>`），同一句重複打各是一問。
@@ -3542,7 +3542,7 @@ bot 用 `herdr agent start` 開的 claude 子 agent（本機或遠端）沒有 h
   第一次讀到時還沒結束的那一問不在基準裡，結束時照記。grok／agy 不用基準（它們的 session 是 run 自己開的）。
 
 - **等人回答的提問（`GET /api/bots/{id}/pending-question`，issue #1476）**：遠端 claude bot 的「還沒被回答的 `AskUserQuestion`」也從同一個對話檔讀：`claude_child_log::pending_tail` 用上面同一條 `sh`（遠端走 ssh）、只讀最後 512 KiB（本機的 `pending_question::TAIL_BYTES`）、**不寫 DB**。
-  路徑防護：檔案由這顆 bot 的 root（`CLAUDE_CONFIG_DIR`、身分在該主機的目錄、`~/.claude`）＋session id（run 記的 `native_session_id`，沒有就取記的 `transcript_path` 檔名）組出 `projects/*/<session>.jsonl`；run 記了路徑的話它必須在這些 root 的 `projects/` 底下、無 `..`、`.jsonl`、檔名等於 session，否則不讀。
+  路徑防護：檔案由這顆 bot 的 root（`CLAUDE_CONFIG_DIR`、身分在該主機的目錄、`~/.claude`）與 session id（run 記的 `native_session_id`，沒有就取記的 `transcript_path` 檔名）定位；run 記錄的路徑在這些 root 內且符合 session 時精確讀取。否則只在沒有符合目前 session 的記錄路徑時 discovery，所有 root 必須合計只有一份候選；路徑無效、沒有檔或多份候選都不讀。
   遠端讀取最多 5 秒（含查 `$HOME`），逾時或失敗當沒讀到；同一個 run 4 秒內重複請求用上一次的結果（失敗也算），同時進來的共用一次讀取（`runners::pending_question_remote`）。Jev 的有效性檢查不拿這個快取來證明提問還在（見 §4.3c 第五個場景，#1505）。讀到之後走跟本機同一個 `pending_ask_entry`，Jev 的選項建議（§4.3c 第五個場景）一併生效。
 
 ### 12.6 額度：`/usage` 探測

@@ -147,7 +147,7 @@ fn a_cut_off_first_line_does_not_overwrite_the_previous_reply() {
 
 #[test]
 fn the_read_script_only_trusts_plain_files_under_the_listed_roots() {
-    let script = read_script(&["/Users/m4p/.claude-cc0".to_string(), "/Users/m4p/.claude".to_string()], SID);
+    let script = read_script_tail_with_recorded(&["/Users/m4p/.claude-cc0".to_string(), "/Users/m4p/.claude".to_string()], SID, MAX_READ_BYTES, None);
     assert!(script.contains("'/Users/m4p/.claude-cc0' '/Users/m4p/.claude'"), "{script}");
     assert!(script.contains(SID), "{script}");
     assert!(script.contains("os.O_NOFOLLOW"), "symlink 不讀");
@@ -177,7 +177,7 @@ fn read_tail_rejects_directory_symlinks_and_keeps_root_order() {
     symlink(&outside, own.join("projects/-alias")).unwrap();
     let run = |roots: Vec<String>| {
         let out = std::process::Command::new("sh")
-            .args(["-c", &read_script_tail(&roots, SID, 4)])
+            .args(["-c", &read_script_tail_with_recorded(&roots, SID, 4, None)])
             .output()
             .unwrap();
         assert!(
@@ -228,6 +228,64 @@ fn read_tail_rejects_directory_symlinks_and_keeps_root_order() {
     assert_eq!(run(vec![good.display().to_string()]), None, "hardlink must be rejected");
 }
 
+/// 同一 session id 可能在不同 worktree 的 transcript 都出現；沒有 run 綁定路徑時，不能任選第一份。
+#[test]
+fn transcript_discovery_fails_closed_when_a_session_id_is_ambiguous() {
+    let dir = tt::track(std::env::temp_dir().join(format!("am-claude-ambiguous-{}", ulid::Ulid::new())));
+    let root = dir.join("root");
+    for (cwd, body) in [("-a", "A"), ("-b", "B")] {
+        let folder = root.join("projects").join(cwd);
+        std::fs::create_dir_all(&folder).unwrap();
+        std::fs::write(folder.join(format!("{SID}.jsonl")), body).unwrap();
+    }
+    let out = std::process::Command::new("sh")
+        .args(["-c", &read_script_tail_with_recorded(&[root.display().to_string()], SID, 64, None)])
+        .output()
+        .unwrap();
+    assert!(out.status.success());
+    assert_eq!(split_output(&String::from_utf8(out.stdout).unwrap()), None, "有兩份候選 transcript 時不能讓 glob 順序決定 run 身分");
+
+    let other_root = dir.join("other-root");
+    let folder = other_root.join("projects/-c");
+    std::fs::create_dir_all(&folder).unwrap();
+    std::fs::write(folder.join(format!("{SID}.jsonl")), "C").unwrap();
+    let out = std::process::Command::new("sh")
+        .args(["-c", &read_script_tail_with_recorded(&[root.display().to_string(), other_root.display().to_string()], SID, 64, None)])
+        .output()
+        .unwrap();
+    assert!(out.status.success());
+    assert_eq!(split_output(&String::from_utf8(out.stdout).unwrap()), None, "不同 config root 的重複 session id 也必須視為 ambiguous");
+}
+
+/// run 已記錄的路徑優先於其它 worktree 的同 id transcript。
+#[test]
+fn a_recorded_transcript_path_selects_its_exact_worktree_file() {
+    let dir = tt::track(std::env::temp_dir().join(format!("am-claude-recorded-{}", ulid::Ulid::new())));
+    let root = dir.join("root");
+    let a = root.join(format!("projects/-a/{SID}.jsonl"));
+    let b = root.join(format!("projects/-b/{SID}.jsonl"));
+    std::fs::create_dir_all(a.parent().unwrap()).unwrap();
+    std::fs::create_dir_all(b.parent().unwrap()).unwrap();
+    std::fs::write(&a, "QUESTION-A").unwrap();
+    std::fs::write(&b, "QUESTION-B").unwrap();
+    // Python reader argv: session id, byte limit, marker, optional recorded path, then roots.
+    let script = format!(
+        "python3 -I -c {} {} 64 {} {} {} 2>/dev/null; :",
+        sh_quote(include_str!("claude_child_tail.py")),
+        sh_quote(SID),
+        sh_quote(LOG_MARK),
+        sh_quote(b.to_string_lossy().as_ref()),
+        sh_quote(root.to_string_lossy().as_ref()),
+    );
+    let out = std::process::Command::new("sh").args(["-c", &script]).output().unwrap();
+    assert!(out.status.success());
+    assert_eq!(
+        split_output(&String::from_utf8(out.stdout).unwrap()),
+        Some((b.to_string_lossy().into_owned(), "QUESTION-B".into())),
+        "run.transcript_path 必須精確選到記錄的 worktree"
+    );
+}
+
 #[test]
 fn read_tail_directory_swap_keeps_the_opened_directory_fd() {
     let dir =
@@ -249,13 +307,13 @@ def swap_open(path, flags, *args, **kwargs):
     global swapped
     if path == sys.argv[1] + '.jsonl' and not swapped:
         swapped = True
-        root = sys.argv[4]
+        root = sys.argv[5]
         os.rename(root + '/projects/-cwd', root + '/projects/-saved')
         os.symlink(os.path.dirname(root) + '/outside', root + '/projects/-cwd')
     return real_open(path, flags, *args, **kwargs)
 os.open = swap_open
 "#;
-    let script = read_script_tail(&[root.display().to_string()], SID, 64);
+    let script = read_script_tail_with_recorded(&[root.display().to_string()], SID, 64, None);
     let reader = include_str!("claude_child_tail.py");
     let script = script.replace(
         &sh_quote(reader),
