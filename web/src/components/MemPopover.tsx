@@ -78,7 +78,7 @@ export function RowAction({ p, host, onDone }: { p: MemProcess; host: string; on
         >
           {stopArmed ? '再按一次確定停止' : '停止 bot'}
         </button>
-        {err ? <span className="mem-pop-err">{err}</span> : null}
+        {err ? <span className="mem-pop-err" role="alert">{err}</span> : null}
       </div>
     )
   }
@@ -100,7 +100,7 @@ export function RowAction({ p, host, onDone }: { p: MemProcess; host: string; on
       >
         {armed ? '強制' : '結束'}
       </button>
-      {err ? <span className="mem-pop-err">{err}</span> : null}
+      {err ? <span className="mem-pop-err" role="alert">{err}</span> : null}
     </div>
   )
 }
@@ -254,7 +254,7 @@ export function MemPopover({ host = LOCAL_HOST, children }: { host?: string; chi
               {tabsTotal(row.browsers) >= TABS_WARN ? `——超過 ${TABS_WARN} 個分頁，RAM 多半是它們吃的，關一些。` : '（不算在上面的 RAM 裡）'}
             </p>
           ) : null}
-          {err ? <p className="mem-pop-err">{err}</p> : null}
+          {err ? <p className="mem-pop-err" role="alert">{err}</p> : null}
           {!err && rows.length === 0 ? (
             <p className="mem-pop-empty">{loading ? '取樣中…' : '沒有程序。'}</p>
           ) : null}
