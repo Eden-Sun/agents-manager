@@ -1400,7 +1400,7 @@ stall watchdog 的自動補送走同一條驗證路徑，次數記在 `turns.res
    對帳那輪結束（pass 鎖放開）後，對 `autostart=1`、非 child、沒有 active run、最後一個 run 就是這次收掉的那個（**而且是這一輪自己記的 exited、退出原因是 `agent not found during reconcile`**：別的路先收的——使用者的 stop、使用者在 herdr 關 pane 的 `pane exited` 事件——不算遺失，不拉起來）的 bot 再 `start_bot` 一次（**丟到背景、一顆一顆補**，不讓對帳呼叫端等：後面的事件訂閱、spool 補放、工具偵測都排在對帳之後），取得 bot lock 後會重驗遺失 run、主機與 active run；使用者在補開前已經 start/stop 或主機已移走就跳過，
    並立刻推 supervisor inbox `bot_lost`（巡檢收、叫醒；`payload.outcome` = `restarted`／`failed`／`backoff`，不等 `bot_stopped` 探針的 300 秒）。
    只在該主機的開機 autostart 跑完之後才動（開機那輪由 autostart 負責，不搶著起第二次），herdr 計畫中維護期間不動；
-   補開拿 bot 鎖**不排隊**：鎖被別的操作握著就跳過這一顆（不寫決定、不開 run，之後的定時掃描或 `bot_stopped` 探針再處理），補開收尾因此不會卡住優雅關機的 `wait()`（#1429）。
+   補開拿 bot 鎖**等到拿到為止，但關機一開始就放棄等**（#1429、#1470）：平常鎖被別的操作（hook、queue flush、spool 重放、對帳收尾）握著只是等它放開，之後照常判斷、補開或記退避並寫 `bot_lost`——「對帳判定遺失」（`agent not found during reconcile`）的 run 只會交進來這一次，定時掃描只撈 `pane gone`，這裡跳過就沒有任何路徑會再補開它；關機中（`shutdown` 已 cancel）不等鎖、不寫決定、不開 pane，交給下一次開機的對帳，補開收尾因此不會卡住優雅關機的 `wait()`。
    退避：同一顆 bot 30 分鐘內最多嘗試補開 3 次；計數依 durable `bot_lost` inbox 事件判斷，daemon 重啟不會重設。超過只推 `outcome=backoff`、不再開，交給 supervisor／探針。
 
 ### 6.2 啟動 Bot（per-bot 鎖內）
