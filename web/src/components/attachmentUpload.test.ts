@@ -157,6 +157,11 @@ test('百分比往下取整、單位跟著總大小', () => {
   assert.equal(progressLabel(10, 100), '10 / 100 B · 10%')
 })
 
+test('KB 進位到 1024 時改用 MB，不印「1024 KB」（卡片上的進度字）', () => {
+  // 1023.6 KB 四捨五入是 1024：總大小要寫成 1.0 MB，已送出的那一半跟著同單位。
+  assert.equal(progressLabel(Math.round(1023.6 * 1024) / 2, Math.round(1023.6 * 1024)), '0.5 / 1.0 MB · 50%')
+})
+
 test('擋下來的大檔不記指紋：同一個檔再拖一次照樣講一次「超過上限」（issue #497）', () => {
   const seen = new Set<string>()
   const big = 60 * MB

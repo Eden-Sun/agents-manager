@@ -16,7 +16,8 @@ export function isImageFile(f: File): boolean {
 
 export function formatSize(bytes: number): string {
   if (bytes < 1024) return `${bytes} B`
-  if (bytes < 1024 * 1024) return `${Math.round(bytes / 1024)} KB`
+  // 先看四捨五入後落在哪：1023.6 KB 進位是 1024，要寫成 1.0 MB（同 `lib/outboxList.ts` 的 `fileSize`）。
+  if (Math.round(bytes / 1024) < 1024) return `${Math.round(bytes / 1024)} KB`
   return `${(bytes / (1024 * 1024)).toFixed(1)} MB`
 }
 
