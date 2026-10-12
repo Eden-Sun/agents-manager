@@ -1114,8 +1114,13 @@ export function Sidebar() {
     // 畫面上沒有那一列的跳過：子 agent 被收合、或被搜尋濾掉。專案收合的不算（選到會自動展開）。
     const offscreen = (id: string) => {
       if (query) return !document.querySelector(`[data-bot-id="${id}"]`)
-      const b = st.bots.find((x) => x.id === id)
-      return Boolean(b?.parent_bot_id && collapsed.has(b.parent_bot_id))
+      // 任何一層祖先收合，這一列都畫不出來（孫代的直屬父列沒收合，但它整串都收在頂層父列底下）。
+      let parent = st.bots.find((x) => x.id === id)?.parent_bot_id
+      for (let i = 0; parent && i < st.bots.length; i += 1) {
+        if (collapsed.has(parent)) return true
+        parent = st.bots.find((x) => x.id === parent)?.parent_bot_id
+      }
+      return false
     }
     let next = adjacentBotId(st, botId, dir)
     for (let i = 0; next && next !== botId && offscreen(next) && i < st.bots.length; i += 1) next = adjacentBotId(st, next, dir)
