@@ -67,3 +67,7 @@ test('ASCII 右括號不成對、後面接全形標點：括號不算網址（�
   // 成對的括號是網址自己的，要留著。
   assert.deepEqual(linksOf('https://en.wikipedia.org/wiki/Foo_(bar)。', true), ['https://en.wikipedia.org/wiki/Foo_(bar)'])
 })
+
+test('明確寫成的 [文字](網址) 不動：文字與目標相同、含全形標點也照原樣（它不是自動連結）', () => {
+  assert.deepEqual(linksOf('[https://example.com/x。](https://example.com/x。)', true), ['https://example.com/x。'])
+})

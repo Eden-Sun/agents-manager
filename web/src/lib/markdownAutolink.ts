@@ -18,6 +18,7 @@ interface MdNode {
   value?: string
   url?: string
   children?: MdNode[]
+  position?: { start: { offset?: number } }
 }
 
 function countOf(s: string, ch: string): number {
@@ -86,10 +87,20 @@ function linkifyText(text: string): MdNode[] {
   return out
 }
 
+/**
+ * remark 認出的連結是不是「寫成 `[文字](網址)`」：原始碼在它的開頭是 `[`。
+ * 文字與目標碰巧相同時 mdast 分不出來，只能看原始碼；讀不到原始碼就當成自動連結（舊行為）。
+ */
+function isExplicitLink(node: MdNode, src: string | null): boolean {
+  const off = node.position?.start.offset
+  return src !== null && typeof off === 'number' && src.charAt(off) === '['
+}
+
 /** 自動連結在第一個全形標點前面切開：前半還是連結，後半重新認網址、其餘變成一般文字。 */
-function splitAutolink(node: MdNode): MdNode[] | null {
+function splitAutolink(node: MdNode, src: string | null): MdNode[] | null {
   const kids = node.children
   if (!node.url || kids?.length !== 1 || kids[0].type !== 'text' || kids[0].value === undefined) return null
+  if (isExplicitLink(node, src)) return null
   const text = kids[0].value
   let at = -1
   for (let i = 0; i < text.length; i++) {
@@ -110,15 +121,15 @@ function splitAutolink(node: MdNode): MdNode[] | null {
   return [{ ...node, url, children: [textNode(head)] }, ...linkifyText(tail)]
 }
 
-function walk(node: MdNode): void {
+function walk(node: MdNode, src: string | null): void {
   if (!node.children) return
   const out: MdNode[] = []
   for (const child of node.children) {
-    const parts = child.type === 'link' ? splitAutolink(child) : null
+    const parts = child.type === 'link' ? splitAutolink(child, src) : null
     if (parts) {
       out.push(...parts)
     } else {
-      walk(child)
+      walk(child, src)
       out.push(child)
     }
   }
@@ -127,7 +138,8 @@ function walk(node: MdNode): void {
 
 /** remark 外掛：放在 `remarkGfm` 後面（`remarkPlugins={[remarkGfm, remarkTrimAutolinkPunct]}`）。 */
 export function remarkTrimAutolinkPunct() {
-  return (tree: MdNode) => {
-    walk(tree)
+  return (tree: MdNode, file?: { value?: unknown }) => {
+    const src = typeof file?.value === 'string' ? file.value : null
+    walk(tree, src)
   }
 }
