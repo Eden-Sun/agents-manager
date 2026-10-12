@@ -61,6 +61,17 @@ export function tokensLower(n: number): string {
   return tokensK(n).replace('K', 'k')
 }
 
+/** 168800 → `169k`, 1000000 → `1M`（狀態列的 context token 數）。 */
+export function compactTokens(n: number): string {
+  // 進位後滿 1000k 就換成 M（999600 寫 1M，不寫 1000k）；M 的一位小數進位到 10 時寫整數。
+  if (n >= 999_500) {
+    const m = Math.round(n / 100_000) / 10
+    return `${m >= 10 || Number.isInteger(m) ? Math.round(m) : m.toFixed(1)}M`
+  }
+  if (n >= 1000) return `${Math.round(n / 1000)}k`
+  return String(n)
+}
+
 /** claude 給的百分比是原始浮點（28.000000000000004）：最多一位小數。 */
 function pctText(n: number): string {
   const r = Math.round(n * 10) / 10

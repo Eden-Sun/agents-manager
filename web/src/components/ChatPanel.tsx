@@ -80,6 +80,7 @@ import { TerminalTab } from './TerminalTab'
 import { PreviewPanel } from './PreviewPanel'
 import { isTopLevelBot } from '../store/routeSync'
 import { ToolsHint } from './Tools'
+import { compactTokens } from '../lib/composerCost'
 import './chatPanel.css'
 
 const NO_QUEUED_ATTACHMENTS: Message['attachments'] = []
@@ -1001,16 +1002,6 @@ function Composer({
       </div>
     </div>
   )
-}
-
-/** 168800 → `169k`, 1000000 → `1M`. */
-function compactTokens(n: number): string {
-  if (n >= 1_000_000) {
-    const m = n / 1_000_000
-    return `${m >= 10 || Number.isInteger(m) ? Math.round(m) : m.toFixed(1)}M`
-  }
-  if (n >= 1000) return `${Math.round(n / 1000)}k`
-  return String(n)
 }
 
 /** claude sends these as raw floats (28.000000000000004); one decimal at most. */
