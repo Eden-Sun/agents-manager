@@ -256,6 +256,21 @@ async fn draft_proof(app: &impl LcHost, client: &HerdrClient, run: &db::Run, bot
     }
 }
 
+/// 比對用：去掉所有空白（畫面的軟換行、行尾空白跟 session log 原文不同，只看字）。
+fn squashed(text: &str) -> String {
+    text.chars().filter(|c| !c.is_whitespace()).collect()
+}
+
+/// 送出後 session log 多出來的使用者訊息不只一則（別人也在同一個 pane 送了）：挑內容跟框裡那段對得上的那一則，
+/// 對得上好幾則就取最早的。對不上（或沒有）回 `None`，呼叫端改用畫面讀來的字（issue #1578）。
+fn own_entry(entries: &[String], draft: &str) -> Option<String> {
+    let want = squashed(draft);
+    if want.is_empty() {
+        return None;
+    }
+    entries.iter().find(|e| squashed(e) == want).cloned()
+}
+
 /// `path` 在 `offset` 之後多出來的使用者訊息（原文，CLI 包起來的貼上已還原）。
 fn new_user_entries(format: LogFormat, path: &std::path::Path, offset: u64) -> std::io::Result<Vec<String>> {
     let buf = crate::transcript_read::read_since(path, offset, "session log")?;
@@ -264,7 +279,7 @@ fn new_user_entries(format: LogFormat, path: &std::path::Path, offset: u64) -> s
 }
 
 /// Enter 按下去之後：等證據。框裡還是**同一段**就再按一次（跟一般送出一樣）；換了字就不按——那是別人剛打的。
-/// 第二個值是 session log 裡那一則的原文（只有一則新的時候）：對話裡記它，不記畫面讀來的字。
+/// 第二個值是 session log 裡本則的原文（一則新的就是它；多則挑內容對得上的，挑不出就是畫面讀來的字）：對話裡記它。
 #[allow(clippy::too_many_arguments)]
 async fn confirm(
     app: &impl crate::capabilities::Db,
@@ -291,7 +306,12 @@ async fn confirm(
                 let got = new_user_entries(*format, path, offset)?;
                 if !got.is_empty() {
                     tracing::info!(run = %run.id, bot = %bot.name, "submitted the draft in the composer; the session log shows it");
-                    let exact = (got.len() == 1).then(|| got[0].clone()).filter(|t| !t.trim().is_empty());
+                    // 只有一則就是它；多則（別人也送了）挑內容對得上的那一則，挑不出就用畫面讀來的字，proof 照清（#1578）。
+                    let exact = match got.as_slice() {
+                        [one] => Some(one.clone()),
+                        many => own_entry(many, draft).or_else(|| Some(draft.to_string())),
+                    }
+                    .filter(|t| !t.trim().is_empty());
                     return Ok((Delivered::Submitted, exact));
                 }
             }
@@ -397,13 +417,21 @@ async fn retry_exact_text(app: &impl LcHost, turn: &db::Turn) -> anyhow::Result<
         _ => anyhow::bail!("composer proof format does not match its bot kind"),
     };
     let entries = new_user_entries(format, &path, checkpoint.offset)?;
-    anyhow::ensure!(entries.len() == 1 && !entries[0].trim().is_empty(), "composer proof does not contain exactly one new user message");
+    // 還沒有新訊息：log 可能還沒寫到，留給下一次重試。一則就是它；多則挑內容跟這回合的草稿對得上的，
+    // 挑不出就用這回合存下來的草稿字（#1578：不永久要求剛好一則）。
+    let draft = turn.prompt_text.clone().unwrap_or_default();
+    let text = match entries.as_slice() {
+        [] => anyhow::bail!("composer proof has no new user message yet"),
+        [one] => one.clone(),
+        many => own_entry(many, &draft).unwrap_or(draft),
+    };
+    anyhow::ensure!(!text.trim().is_empty(), "composer proof does not contain a non-blank new user message");
     let message_id = sqlx::query_scalar::<_, String>("SELECT id FROM messages WHERE turn_id=? AND role='user' ORDER BY created_at, rowid LIMIT 1")
         .bind(&turn.id)
         .fetch_optional(app.db())
         .await?
         .ok_or_else(|| anyhow::anyhow!("composer submission message is gone"))?;
-    record_exact_text(app, &turn.id, &message_id, &entries[0]).await
+    record_exact_text(app, &turn.id, &message_id, &text).await
 }
 
 #[derive(Debug)]
@@ -639,7 +667,7 @@ pub async fn submit_locked(app: &impl LcHost, bot_id: &str, expect_token: &str, 
         Ok((d @ (Delivered::Submitted | Delivered::Unverified), exact)) => {
             let correction_error = match exact {
                 Some(text) => record_exact_text(app, &turn_id, &msg_id, &text).await.err(),
-                None if matches!(proof, Proof::Transcript { .. }) => Some(anyhow::anyhow!("session log did not contain exactly one new user message")),
+                None if matches!(proof, Proof::Transcript { .. }) => Some(anyhow::anyhow!("session log did not contain a non-blank new user message")),
                 None => None,
             };
             (if matches!(d, Delivered::Submitted) { "ok" } else { "unverified" }, d.record().expect("delivered outcome records"), correction_error)
