@@ -1,4 +1,4 @@
-import { useState } from 'react'
+import { useId, useState } from 'react'
 import type { BotKind, ShareProfile } from '../api/types'
 import { shareFolderInput, shareProfileBlocked, type ShareFolderDraft } from '../lib/shareProfile'
 import { ConfirmDialog } from './ConfirmDialog'
@@ -45,6 +45,9 @@ export function ShareProfileField({
   const on = profile !== null
   const trusted = profile === 'trusted'
   const checked = on ? shareFolderInput(folder, botName) : null
+  // 驗錯文字只有一段（兩種資料夾共用），關聯到目前這個模式的輸入框（#1607）。
+  const folderErrId = useId()
+  const folderErr = checked && 'error' in checked ? checked.error : null
   const pick = (p: ShareProfile | null) => {
     if (p === 'trusted') {
       setAck(false)
@@ -113,6 +116,8 @@ export function ShareProfileField({
                 placeholder={botName || '名稱'}
                 spellCheck={false}
                 aria-label="新資料夾名稱"
+                aria-invalid={folderErr ? true : undefined}
+                aria-describedby={folderErr ? folderErrId : undefined}
                 onChange={(e) => onFolder({ ...folder, name: e.target.value })}
               />
             </div>
@@ -130,6 +135,8 @@ export function ShareProfileField({
                   placeholder="/home/you/project/docs"
                   spellCheck={false}
                   aria-label="既有資料夾路徑"
+                  aria-invalid={folderErr ? true : undefined}
+                  aria-describedby={folderErr ? folderErrId : undefined}
                   onChange={(e) => onFolder({ ...folder, path: e.target.value })}
                 />
                 <button type="button" className="btn" onClick={() => setBrowsing(true)}>
@@ -143,7 +150,7 @@ export function ShareProfileField({
               </p>
             </>
           ) : null}
-          {checked && 'error' in checked ? <span className="hint share-folder-err">{checked.error}</span> : null}
+          {folderErr ? <span id={folderErrId} className="hint share-folder-err">{folderErr}</span> : null}
           {browsing ? (
             <DirPicker
               initial={folder.path || undefined}
