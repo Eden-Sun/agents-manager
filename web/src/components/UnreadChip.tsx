@@ -149,7 +149,10 @@ function Chip({ it, dnd, lamp }: { it: ChipItem; dnd?: PinnedDnd; lamp?: boolean
         </span>
       ) : null}
       {it.unread > 0 ? <span className="unread-chip-n" aria-hidden="true">{it.unread > 99 ? '99+' : it.unread}</span> : null}
-      {it.working || it.needsReply || it.waitsKids ? <span className="unread-chip-dot" aria-hidden="true" /> : null}
+      {it.working || it.needsReply || it.waitsKids ? (
+        // 未讀蓋掉等子 agent 的晶片色時，黃點照畫（子 agent 還在跑）。
+        <span className={`unread-chip-dot${it.waitsKids && !it.needsReply && it.unread > 0 ? ' kids-wait' : ''}`} aria-hidden="true" />
+      ) : null}
       {it.kidsRunning > 0 ? <KidsBadge n={it.kidsRunning} /> : null}
       <span className="sr-only">{chipStateText({ ...it, kids: it.kidsRunning })}</span>
     </button>
@@ -498,7 +501,8 @@ function PinHint() {
 }
 
 function chipClass(it: ChipItem): string {
-  const state = it.needsReply ? ' needs-reply' : it.waitsKids ? ' waits-kids' : it.unread > 0 ? ' unread' : it.working ? ' working' : ''
+  // 緊急度：需要回應 → 完成待看（未讀）→ 等子 agent → 在跑（同 `BotStatusCard` 的 headline）。
+  const state = it.needsReply ? ' needs-reply' : it.unread > 0 ? ' unread' : it.waitsKids ? ' waits-kids' : it.working ? ' working' : ''
   return `unread-chip${it.pinned ? ' pinned' : ''}${state}${it.current ? ' current' : ''}`
 }
 
