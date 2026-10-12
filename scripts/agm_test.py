@@ -3572,5 +3572,28 @@ class PythonThreeNineTest(unittest.TestCase):
         self.assertEqual(problems, [])
 
 
+class IssueCommentPagesTest(unittest.TestCase):
+    """`gh api --paginate` 多頁時，每一頁各自輸出一個 JSON 陣列（`[…]\\n[…]`），不是合成一個陣列。
+    超過 100 則留言的票（最需要認領判斷的那種）要能讀完所有頁，不能因為 json 解不開就認領失敗。"""
+
+    class _Args:
+        repo = "o/r"
+
+    def test_comments_are_read_from_every_page_when_gh_prints_one_array_per_page(self):
+        first = [{"id": 1, "body": "a", "created_at": "2026-10-12T00:00:00Z"}]
+        second = [{"id": 2, "body": "b", "created_at": "2026-10-12T00:01:00Z"}]
+        raw = json.dumps(first) + "\n" + json.dumps(second) + "\n"
+        with patch.object(agm, "gh", return_value=raw):
+            rows = agm.all_comments(self._Args(), 5)
+        self.assertEqual([r["id"] for r in rows], [1, 2], "兩頁的留言都要讀到")
+
+    def test_a_page_that_is_not_an_array_still_fails_closed(self):
+        raw = json.dumps([{"id": 1}]) + "\n" + json.dumps({"message": "Not Found"}) + "\n"
+        with patch.object(agm, "gh", return_value=raw):
+            with self.assertRaises(agm.AgmError) as cm:
+                agm.all_comments(self._Args(), 5)
+        self.assertEqual(cm.exception.kind, "gh_failed")
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)
