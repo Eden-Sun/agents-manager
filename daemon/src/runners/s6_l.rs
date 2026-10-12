@@ -378,7 +378,7 @@ impl s6_ports::GrokTranscriptServices for App {
 
 impl s6_ports::BusySendServices for App {
     async fn prompt_message_added(&self, bot_id: &str, message_id: &str) {
-        crate::lifecycle::prompt::emit_prompt_message(&self.shared(), bot_id, message_id).await;
+        crate::lifecycle::prompt::publish_prompt_message(&self.shared(), bot_id, message_id).await;
     }
 
     async fn turn_changed(&self, turn_id: &str) {

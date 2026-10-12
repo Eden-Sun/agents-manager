@@ -655,7 +655,7 @@ pub async fn submit_locked(app: &impl LcHost, bot_id: &str, expect_token: &str, 
     };
     // 內容定稿（可能換成了 session log 的原文）才推訊息：`message_added` 以 id 去重，推了就改不回來。
     if correction_error.is_none() {
-        super::prompt::emit_prompt_message(app, bot_id, &msg_id).await;
+        super::prompt::publish_prompt_message(app, bot_id, &msg_id).await;
     }
     let written = super::owed_delivery::delivered(app, bot_id, &turn_id, rec).await;
     if delivery == "ok" || delivery == "unverified" {
