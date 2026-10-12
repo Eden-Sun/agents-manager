@@ -3513,6 +3513,39 @@ mod issue_17_tests {
         assert_eq!(super::super::late_proof::look(&app, &f.bot_id, &f.turn_id, &p).await, super::super::late_proof::Look::Submitted);
     }
 
+    /// issue #1599：第一次 Enter 已經把本則寫進 transcript，框裡還是同一則字。證據已經到了＝已送出，不能再補按 Enter（重複送出）。
+    #[tokio::test]
+    async fn issue_a_proven_submit_with_the_same_text_still_in_the_box_is_not_pressed_again() {
+        let f = fixture("claude", "").await;
+        let text = "Reply with PONG please";
+        with_transcript(&f, crate::testing::LivePane { after_enter_composer: Some(vec![text.into()]), ..wide() }).await;
+        let app = f.env.app.clone();
+        db::set_pane_typed(&app.db, &f.run_id).await.unwrap();
+        let (run, bot) = run_and_bot(&f).await;
+        let client = client_for_run(&app, &run).await.unwrap();
+
+        assert_eq!(deliver_prompt(&app, &client, &run, &bot, text, false, false).await.unwrap(), Delivered::Submitted);
+        assert_eq!(count(&f, "pane.send_keys"), 1, "transcript 已經有本則：不補按 Enter");
+    }
+
+    /// issue #1600：Enter 沒生效，框裡還找得到本則原文，只是後面被接了別的字。字還在框裡、沒送出，不能記 Pending
+    /// （之後框被清掉、agent 還在忙，背景會把它升成 unverified，等於宣告一則沒送出的 prompt 送達了）。
+    #[tokio::test]
+    async fn issue_b_text_still_in_the_box_with_more_typed_after_it_is_not_left_for_the_late_proof() {
+        let f = fixture("claude", "").await;
+        live(&f, crate::testing::LivePane { enter_redraws: Some(vec!["Reply with PONG please 還要補充".into()]), ..wide() });
+        let app = f.env.app.clone();
+        db::set_pane_typed(&app.db, &f.run_id).await.unwrap();
+        let (run, bot) = run_and_bot(&f).await;
+        let client = client_for_run(&app, &run).await.unwrap();
+        let text = "Reply with PONG please";
+
+        assert_eq!(deliver_prompt(&app, &client, &run, &bot, text, false, false).await.unwrap(), Delivered::Unproven("composer_changed_or_unreadable"));
+        super::super::late_proof::arm(&app, &f.run_id, &f.bot_id, &f.turn_id);
+        let armed = super::super::late_proof::armed_in_tests().lock().unwrap().iter().any(|(t, _)| *t == f.turn_id);
+        assert!(!armed, "字還在框裡：不記 Pending");
+    }
+
     use super::super::late_proof::{self, Look};
 
     /// 打字送出、框空了、回音列看不到（`hide_echo`）：同步窗口判不出，照呼叫端把 turn 寫成 unknown，再認領背景這一筆。
