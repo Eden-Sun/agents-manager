@@ -764,3 +764,25 @@ test('引用的選單底下是空的輸入列：不是可以點的選單（同 d
   const open = '  Do you want to proceed?\n  ❯ 1. Yes\n    2. No, and tell Claude what to do\n\n  Esc to cancel\n'
   assert.equal(parseChoiceMenu(open)?.choices.length, 2)
 })
+
+test('縮排更深的 `1.` 說明行不是選項：不能把它當成第一個選項，真正的選項反而消失', () => {
+  // 游標在第 2 項（❯ 在第 0 欄，編號欄與其他選項一樣）；第 1 項底下的說明以 `1.` 開頭、縮排更深。
+  const menu = parseChoiceMenu('  Which approach?\n  1. Fast path\n       1. skip tests\n❯ 2. Safe path\n  3. Stop\n\n  Enter to select · Esc to cancel\n')
+  assert.ok(menu)
+  assert.deepEqual(
+    menu.choices.map((c) => c.title),
+    ['Fast path', 'Safe path', 'Stop'],
+  )
+  assert.equal(menu.cursor, 1)
+  assert.equal(menu.choices[0].detail, '1. skip tests')
+})
+
+test('縮排更深的 `2.` 說明行夾在選項之間，不能讓整份選單認不出來', () => {
+  const menu = parseChoiceMenu('  Which approach?\n❯ 1. Fast path\n  2. Safe path\n       2. backup first\n  3. Stop\n\n  Enter to select\n')
+  assert.ok(menu)
+  assert.deepEqual(
+    menu.choices.map((c) => c.title),
+    ['Fast path', 'Safe path', 'Stop'],
+  )
+  assert.equal(menu.cursor, 0)
+})
