@@ -451,6 +451,7 @@ shell 面板本來只有「打一行、Enter 送出」：TUI（`top`、`vim`、�
 - **關閉時才發現是服務 pane**：清單讀到時還是 shell、之後才跑起 dev server，daemon 回 409 並附上最新那列；專案頁拿那一列直接跳確認框，不是只顯示「關閉失敗 (409)」。
   mock 實走：`docs/screenshots/side-panes-unowned/`（側欄底部那組、跑 vim 的 pane 打得進去、dev server 唯讀）。
 - ~~不給「結束 shell」~~ → **給「關閉 pane」**（2026-09-17 使用者：直接在面板裡關 pane）。當初不給是因為面板那顆只認面板自己開的 shell；後來「結束 shell」不在清單裡會改走 `POST /api/panes/{id}/close`，原因已經不成立。按鈕叫「關閉 pane」（不是這裡開的，叫「結束 shell」會誤導），一樣二次確認；服務 pane 由 daemon 先 409，第二道確認框列出 port；pane 已經不在（例如裡面打了 `exit`）當作關好、面板收起。
+- **多分頁：重整回到自己的分頁（2026-10-12）**：選取（`am.selection`）與 shell 視窗（`am.shellView`）兩邊都寫——`sessionStorage` 每個分頁一份，重整只看它；`localStorage` 是共用的，只給新開的分頁當起點，所以分頁 A 重整不會跳到分頁 B 最後選的 bot。主題（`am-theme`）由 `storage` 事件同步到其他分頁。
 - **重整回得來、唯讀照現況**：`shellView` 連 `readOnly` 一起存；深連結查不到自己開的 shell 就查 daemon 的 pane 表。原本會直接丟回首頁。從 `/` 進來（只走 `restoreShellView`）時一樣照 daemon 當下的 pane 列重算 `readOnly`／`traced`，不沿用 localStorage 的舊值。
 
 ## 「結束 shell」遇到服務 pane 要再問一次（2026-09-16，AGM 驗收 9f05b03）
