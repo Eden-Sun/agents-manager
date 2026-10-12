@@ -31,6 +31,16 @@ export interface UploadOptions {
   onProgress?: (loaded: number, total: number) => void
 }
 
+/**
+ * 非 JSON 的錯誤本文（代理的 HTML 錯誤頁等）：只有短的純文字才當成原因；整頁 HTML 留空，
+ * 讓 `ApiError` 退回帶狀態碼的 fallback（否則整頁會變成通知上的提示）。
+ */
+function plainReason(parsed: unknown): string {
+  if (typeof parsed !== 'string') return ''
+  const t = parsed.trim()
+  return t.length <= 200 && !t.includes('<') ? t : ''
+}
+
 export function abortError(): DOMException {
   return new DOMException('上傳已取消', 'AbortError')
 }
@@ -213,7 +223,7 @@ export class HttpTransport implements Transport {
       const parsed = await readBody(res)
       if (!res.ok) {
         const errBody: ApiErrorBody =
-          parsed && typeof parsed === 'object' ? (parsed as ApiErrorBody) : { reason: String(parsed ?? '') }
+          parsed && typeof parsed === 'object' ? (parsed as ApiErrorBody) : { reason: plainReason(parsed) }
         throw new ApiError(res.status, errBody, `${method} ${path} failed (${res.status})`)
       }
       return parsed
@@ -229,7 +239,7 @@ export class HttpTransport implements Transport {
     const { status, body: parsed } = await xhrUpload(`/api${path}`, file, this.token, opts)
     if (status < 200 || status >= 300) {
       const errBody: ApiErrorBody =
-        parsed && typeof parsed === 'object' ? (parsed as ApiErrorBody) : { reason: String(parsed ?? '') }
+        parsed && typeof parsed === 'object' ? (parsed as ApiErrorBody) : { reason: plainReason(parsed) }
       throw new ApiError(status, errBody, `POST ${path} failed (${status})`)
     }
     return parsed
@@ -246,7 +256,7 @@ export class HttpTransport implements Transport {
       const body: ApiErrorBody =
         parsed && typeof parsed === 'object'
           ? (parsed as ApiErrorBody)
-          : { reason: String(parsed ?? '') || res.statusText }
+          : { reason: plainReason(parsed) || res.statusText }
       throw new ApiError(res.status, body, `GET ${path} failed (${res.status})`)
     }
     return URL.createObjectURL(await res.blob())
