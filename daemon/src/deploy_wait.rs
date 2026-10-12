@@ -73,6 +73,9 @@ pub struct Wait {
     #[serde(default)]
     pub auto_escalated: bool,
     pub notified_at: Option<String>,
+    /// 首次 inbox 寫入成功前保留原 event key 與內容，重啟後也能冪等補送。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pending_first: Option<PendingFirst>,
     /// 使用者按了「先等」：header 收起來（狀態照樣更新）。
     pub dismissed: bool,
     pub phase: Phase,
@@ -82,6 +85,12 @@ pub struct Wait {
     /// 各 commit 上一次發出「拿到換版窗口」的時間，節流 3a ABORT 循環用（issue #856）。
     #[serde(default)]
     pub swap_announced_at: BTreeMap<String, String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PendingFirst {
+    pub rev: u32,
+    pub payload: Value,
 }
 
 fn path(app: &impl crate::capabilities::DataDir) -> PathBuf {
@@ -158,6 +167,10 @@ fn evaluate(w: &mut Wait, transition: Option<Announce>, now: &str) -> Option<Ann
         if w.phase == Phase::Waiting && secs_between(&w.since, now) >= NOTIFY_AFTER_SECS {
             w.notified_at = Some(now.to_string());
             w.rev += 1;
+            w.pending_first = Some(PendingFirst {
+                rev: w.rev,
+                payload: json!({"deploy_wait": view_of(w, now), "text": summary(w, now), "wake": !clears_itself(w)}),
+            });
             return Some(Announce::First);
         }
         return None;
@@ -230,6 +243,7 @@ pub async fn observe(app: &(impl crate::capabilities::DataDir + crate::capabilit
                 user_escalated: false,
                 auto_escalated: false,
                 notified_at: None,
+                pending_first: None,
                 dismissed: false,
                 phase: Phase::Waiting,
                 rev: 0,
@@ -310,21 +324,33 @@ pub async fn observe(app: &(impl crate::capabilities::DataDir + crate::capabilit
         app.emit("deploy_wait", json!({"wait": v, "first": false})).await;
     }
     for (a, w) in out {
-        announce(app, a, &w).await;
+        announce(app, a, &w, &now).await;
     }
 }
 
 /// 背景每 15 秒：門檻到了就通知；太久沒再試就收掉；結束的過一陣子清掉。
 pub async fn tick(app: &(impl crate::capabilities::DataDir + crate::capabilities::Db + crate::capabilities::Emit + crate::deploy_wait::DeployWaitState)) {
-    let now = crate::db::now();
+    tick_at(app, &crate::db::now()).await;
+}
+
+async fn tick_at(
+    app: &(impl crate::capabilities::DataDir + crate::capabilities::Db + crate::capabilities::Emit + crate::deploy_wait::DeployWaitState),
+    now: &str,
+) {
+    // 先補送原始首次通知，避免後續狀態轉換改掉它的 rev、內容或 wake。
+    let pending = app.deploy_wait().lock().unwrap_or_else(std::sync::PoisonError::into_inner)
+        .as_ref().filter(|w| w.pending_first.is_some()).cloned();
+    if let Some(w) = pending {
+        deliver_first(app, &w).await;
+    }
     let mut out = None;
     {
         let mut g = app.deploy_wait().lock().unwrap_or_else(std::sync::PoisonError::into_inner);
         let Some(w) = g.as_mut() else { return };
         match w.phase {
-            Phase::Waiting if secs_between(&w.last_attempt_at, &now) >= STALE_SECS => {
+            Phase::Waiting if secs_between(&w.last_attempt_at, now) >= STALE_SECS => {
                 w.phase = Phase::Abandoned;
-                w.ended_at = Some(now.clone());
+                w.ended_at = Some(now.to_string());
                 if w.notified_at.is_some() {
                     w.rev += 1;
                     out = Some((Announce::Abandoned, w.clone()));
@@ -333,23 +359,23 @@ pub async fn tick(app: &(impl crate::capabilities::DataDir + crate::capabilities
             }
             Phase::Waiting => {
                 if w.notified_at.is_none() {
-                    if let Some(a) = evaluate(w, None, &now) {
+                    if let Some(a) = evaluate(w, None, now) {
                         out = Some((a, w.clone()));
                         save(app, g.as_ref());
                     }
                 }
             }
             Phase::Done | Phase::Abandoned => {
-                if w.ended_at.as_deref().is_none_or(|t| secs_between(t, &now) >= KEEP_ENDED_SECS) {
+                if w.ended_at.as_deref().is_none_or(|t| secs_between(t, now) >= KEEP_ENDED_SECS) {
                     *g = None;
                     save(app, None);
                 }
             }
             Phase::Swapping => {
                 // 換版中：daemon 馬上就會被換掉；換不成（窗口逾時交還）時 kick 下一輪會再試，回到 Waiting 那條路。
-                if secs_between(&w.last_attempt_at, &now) >= STALE_SECS {
+                if secs_between(&w.last_attempt_at, now) >= STALE_SECS {
                     w.phase = Phase::Abandoned;
-                    w.ended_at = Some(now.clone());
+                    w.ended_at = Some(now.to_string());
                     if w.notified_at.is_some() {
                         w.rev += 1;
                         out = Some((Announce::Abandoned, w.clone()));
@@ -360,7 +386,7 @@ pub async fn tick(app: &(impl crate::capabilities::DataDir + crate::capabilities
         }
     }
     if let Some((a, w)) = out {
-        announce(app, a, &w).await;
+        announce(app, a, &w, now).await;
     }
 }
 
@@ -391,7 +417,7 @@ async fn startup_as(app: &(impl crate::capabilities::DataDir + crate::capabiliti
     save(app, Some(&w));
     *app.deploy_wait().lock().unwrap_or_else(std::sync::PoisonError::into_inner) = Some(w);
     if let Some((a, w)) = out {
-        announce(app, a, &w).await;
+        announce(app, a, &w, &crate::db::now()).await;
     }
 }
 
@@ -455,14 +481,17 @@ pub fn view(app: &impl crate::deploy_wait::DeployWaitState) -> Value {
     }
 }
 
-async fn announce(app: &(impl crate::capabilities::Db + crate::capabilities::Emit), a: Announce, w: &Wait) {
-    let now = crate::db::now();
-    let v = view_of(w, &now);
+async fn announce(app: &(impl crate::capabilities::DataDir + crate::capabilities::Db + crate::capabilities::Emit + crate::deploy_wait::DeployWaitState), a: Announce, w: &Wait, now: &str) {
+    let v = view_of(w, now);
     let first = a == Announce::First;
     // 只記錄類的 deploy_waiting 不設 wake（issue #856）；首次通知也只在「自己不會好」時才叫醒（issue #1478）。
     let wake = first && !clears_itself(w);
-    tracing::info!(id = %w.id, rev = w.rev, phase = ?w.phase, first, wake, "{}", summary(w, &now));
+    tracing::info!(id = %w.id, rev = w.rev, phase = ?w.phase, first, wake, "{}", summary(w, now));
     app.emit("deploy_wait", json!({"wait": v, "first": first})).await;
+    if first {
+        deliver_first(app, w).await;
+        return;
+    }
     let key = format!("deploy_waiting:{}:{}", w.id, w.rev);
     if let Err(e) = crate::supervisor::store::push_inbox(
         app.db(),
@@ -471,11 +500,29 @@ async fn announce(app: &(impl crate::capabilities::Db + crate::capabilities::Emi
         None,
         None,
         None,
-        &json!({"deploy_wait": v, "text": summary(w, &now), "wake": wake}),
+        &json!({"deploy_wait": v, "text": summary(w, now), "wake": wake}),
     )
     .await
     {
         tracing::warn!(error = %e, "could not tell AGM about the deploy wait");
+    }
+}
+
+/// 成功（包含 event key 已存在）才清 pending；await 期間不握住狀態鎖。
+async fn deliver_first(
+    app: &(impl crate::capabilities::DataDir + crate::capabilities::Db + crate::deploy_wait::DeployWaitState),
+    w: &Wait,
+) {
+    let Some(pending) = &w.pending_first else { return };
+    let key = format!("deploy_waiting:{}:{}", w.id, pending.rev);
+    if let Err(e) = crate::supervisor::store::push_inbox(app.db(), &key, "deploy_waiting", None, None, None, &pending.payload).await {
+        tracing::warn!(error = %e, event_key = %key, "could not tell AGM about the deploy wait; will retry");
+        return;
+    }
+    let mut g = app.deploy_wait().lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+    if let Some(current) = g.as_mut().filter(|current| current.id == w.id && current.pending_first.as_ref() == Some(pending)) {
+        current.pending_first = None;
+        save(app, g.as_ref());
     }
 }
 
@@ -540,7 +587,7 @@ async fn act(app: &(impl crate::capabilities::DataDir + crate::capabilities::Db 
         (w, announced)
     };
     if announced {
-        announce(app, Announce::UserAction, &w).await;
+        announce(app, Announce::UserAction, &w, &crate::db::now()).await;
     } else {
         let v = view_of(&w, &crate::db::now());
         app.emit("deploy_wait", json!({"wait": v, "first": false})).await;
