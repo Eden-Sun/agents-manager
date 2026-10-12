@@ -46,6 +46,7 @@ import { SidebarPanes, SidebarUnownedPanes } from './SidebarPanes'
 import { RunElapsed } from './RunElapsed'
 import { IdentityOptions, PersonaField, PersonaMark } from './BotSettingsPanel'
 import { ShareMark } from './ShareLinkButton'
+import { EnvSection } from './EnvSection'
 import { HostBadge, HostsPanel } from './HostsPanel'
 import { ShareProfileField } from './ShareProfileField'
 import { EMPTY_SHARE_FOLDER, shareFolderInput, shareProfileBlocked, type ShareFolderDraft } from '../lib/shareProfile'
@@ -1505,27 +1506,22 @@ export function Sidebar() {
 
       <Modal open={open === 'env'} title="環境設定" width={720} onClose={() => setOpen(null)}>
         <div className="env-panel">
-          <section className="env-sec">
-            <h3>主機</h3>
+          <EnvSection title="主機">
             <HostsPanel />
-          </section>
-          <section className="env-sec">
-            <h3>身分</h3>
+          </EnvSection>
+          <EnvSection title="身分">
             <IdentitiesPanel />
-          </section>
-          <section className="env-sec">
-            <h3>最近刪除</h3>
+          </EnvSection>
+          <EnvSection title="最近刪除">
             <DeletedBotsPanel />
-          </section>
-          <section className="env-sec">
-            <h3>Jev 第二意見</h3>
+          </EnvSection>
+          <EnvSection title="Jev 第二意見">
             <JudgePanel />
-          </section>
-          <section className="env-sec">
-            <h3>顯示</h3>
+          </EnvSection>
+          <EnvSection title="顯示">
             <KindDisplayToggle />
             <KeepAwakeToggle />
-          </section>
+          </EnvSection>
         </div>
       </Modal>
     </>

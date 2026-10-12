@@ -1,0 +1,204 @@
+/* 環境設定頁的手機版（issue #1466，使用者 2026-10-12：「修環境設定的 rwd，手機不好用」）。
+   只在 ≤640px（跟全螢幕 sheet 同一個斷點）生效，桌機與平板版面不動。
+   選擇器一律掛 `.env-panel`：特異性 0,2,0 蓋過各元件的單一 class，不必動它們的檔、也不必 `!important`
+   （輸入框的 16px 由 styles.css 的手機規則統一管，這裡不碰）。
+   規則：觸控目標 ≥44px；文字 ≥13px；欄位直排；清單不自己再捲（整頁只有 sheet 一條捲軸）；長字串折行、不橫向撐破。 */
+@media (width <= 640px) {
+  /* 每區是一條可點的標題列（`EnvSection`），區與區之間只剩一條分隔線。 */
+  .env-panel {
+    gap: 0;
+  }
+
+  .env-panel .env-sec + .env-sec {
+    margin-top: 0;
+    padding-top: 0;
+  }
+
+  .env-panel .env-sec h3 {
+    margin: 0;
+    font-size: 14px;
+    letter-spacing: 0;
+    color: var(--text);
+  }
+
+  .env-panel .env-sec-toggle {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 8px;
+    width: 100%;
+    min-height: 44px;
+    padding: 0 4px;
+    border: 0;
+    background: transparent;
+    color: inherit;
+    font: inherit;
+    font-weight: 650;
+    text-align: left;
+    cursor: pointer;
+  }
+
+  .env-panel .env-sec-toggle:focus-visible {
+    outline: 2px solid var(--ring);
+    outline-offset: -2px;
+  }
+
+  .env-panel .env-sec-toggle .chev {
+    font-size: 13px;
+    color: var(--text-faint);
+  }
+
+  .env-panel .env-sec-body {
+    padding: 2px 4px 16px;
+  }
+
+  .env-panel .env-sec-body[hidden] {
+    display: none;
+  }
+
+  /* 文字下限 13px：這些在桌機是 10.5–12px 的小字。 */
+  .env-panel .hint,
+  .env-panel .field > span,
+  .env-panel .host-count,
+  .env-panel .host-name,
+  .env-panel .host-ssh,
+  .env-panel .host-err,
+  .env-panel .host-herdr,
+  .env-panel .host-baseline,
+  .env-panel .host-result,
+  .env-panel .host-shell,
+  .env-panel .host-shell-open,
+  .env-panel .tool-mark,
+  .env-panel .identity-badge,
+  .env-panel .identity-detail,
+  .env-panel .identity-login,
+  .env-panel .identity-disabled-chip,
+  .env-panel .deleted-note,
+  .env-panel .deleted-meta,
+  .env-panel .judge-note,
+  .env-panel .keep-awake-note,
+  .env-panel .kind-display-label,
+  .env-panel .disclosure.sub,
+  .env-panel .btn,
+  .env-panel .mini-btn,
+  .env-panel .identity-login-btn,
+  .env-panel .deleted-restore {
+    font-size: 13px;
+  }
+
+  /* 觸控目標 ≥44px。 */
+  .env-panel .btn,
+  .env-panel .mini-btn,
+  .env-panel .identity-login-btn,
+  .env-panel .deleted-restore,
+  .env-panel .disclosure.sub,
+  .env-panel .host-shell-open,
+  .env-panel .kind-display .tab {
+    min-height: 44px;
+  }
+
+  .env-panel .btn,
+  .env-panel .deleted-restore {
+    padding-inline: 14px;
+  }
+
+  .env-panel .host-shell {
+    padding-right: 0;
+  }
+
+  /* 表單：標籤在上、欄位撐滿、一欄一行（輸入框 16px 由 styles.css 的手機規則管）。 */
+  .env-panel .field input:not([type='checkbox']),
+  .env-panel .field select,
+  .env-panel .field textarea {
+    min-height: 44px;
+    box-sizing: border-box;
+  }
+
+  .env-panel .field.checkbox-field,
+  .env-panel .judge-switch,
+  .env-panel .judge-projects label,
+  .env-panel .keep-awake-row {
+    min-height: 44px;
+  }
+
+  .env-panel input[type='checkbox'] {
+    flex: none;
+    width: 20px;
+    height: 20px;
+    margin: 0;
+  }
+
+  .env-panel .keep-awake-row {
+    font-size: 14px;
+  }
+
+  .env-panel .form-actions {
+    flex-wrap: wrap;
+    gap: 8px;
+  }
+
+  .env-panel .form-actions .btn {
+    flex: 1 1 140px;
+  }
+
+  .env-panel .form-actions .hint,
+  .env-panel .form-actions .judge-note {
+    flex: 1 1 100%;
+    margin: 0;
+  }
+
+  /* 主機列：燈＋名稱在上，操作鍵獨占下一行（四顆鍵並排會把名稱擠成一條縫）。 */
+  .env-panel .host-row {
+    position: relative;
+    flex-wrap: wrap;
+    row-gap: 8px;
+  }
+
+  .env-panel .host-actions {
+    flex: 1 1 100%;
+    flex-wrap: wrap;
+    justify-content: flex-start;
+    gap: 8px;
+  }
+
+  /* 長字串折行而不是被省略號吃掉：手機沒有 hover 看 title。 */
+  .env-panel .host-ssh,
+  .env-panel .identity-detail,
+  .env-panel .host-shell-open,
+  .env-panel .deleted-name {
+    white-space: normal;
+    overflow: visible;
+    text-overflow: clip;
+    overflow-wrap: anywhere;
+  }
+
+  /* attach 說明泡泡：錨在整列、撐滿列寬，不要往左衝出螢幕。 */
+  .env-panel .attach {
+    position: static;
+  }
+
+  .env-panel .attach-pop {
+    left: 0;
+    right: 0;
+    width: auto;
+  }
+
+  /* 沒有巢狀捲動：清單就長在頁面裡，整頁只有 sheet 一條捲軸。 */
+  .env-panel .deleted-list,
+  .env-panel .host-baseline-items {
+    max-height: none;
+    overflow: visible;
+  }
+
+  .env-panel .deleted-row {
+    flex-wrap: wrap;
+  }
+
+  .env-panel .identity-row {
+    flex-wrap: wrap;
+  }
+
+  .env-panel .judge-ledger-triggers {
+    padding-left: 20px;
+  }
+}

@@ -83,33 +83,35 @@ function LedgerBody({ shadow, bots }: { shadow: JudgeShadow; bots: { id: string;
   return (
     <>
       <div className="judge-ledger-scroll">
-        <table className="judge-ledger-table">
-          <thead>
-            <tr>
-              <th>場景</th>
+        <table className="judge-ledger-table" role="table">
+          <thead role="rowgroup">
+            <tr role="row">
+              <th role="columnheader">場景</th>
               {JUDGE_WINDOWS.map((w) => (
-                <th key={w.id}>{w.label}</th>
+                <th key={w.id} role="columnheader">{w.label}</th>
               ))}
-              <th>最後一次</th>
+              <th role="columnheader">最後一次</th>
             </tr>
           </thead>
-          <tbody>
+          <tbody role="rowgroup">
             {stats.map((st) => (
-              <tr key={st.scene}>
-                <td>
+              <tr key={st.scene} role="row">
+                <td role="cell" data-label="場景" className="scene">
                   <b>{sceneName(st.scene)}</b>
                   <div className="hint">{JUDGE_SCENES.find((s) => s.id === st.scene)?.when}</div>
                 </td>
                 {JUDGE_WINDOWS.map((w) => {
                   const c = st.windows[w.id as JudgeWindow]
                   return (
-                    <td key={w.id}>
+                    <td key={w.id} role="cell" data-label={w.label} className="num">
                       {c.total} 筆
                       <div className="hint">超過門檻 {c.over === null ? '—' : c.over}・錯誤 {c.errors}</div>
                     </td>
                   )
                 })}
-                <td>{st.last ? when(st.last) : '—'}</td>
+                <td role="cell" data-label="最後一次" className="num">
+                  {st.last ? when(st.last) : '—'}
+                </td>
               </tr>
             ))}
           </tbody>
@@ -117,26 +119,32 @@ function LedgerBody({ shadow, bots }: { shadow: JudgeShadow; bots: { id: string;
       </div>
       <h5>最近 20 筆</h5>
       <div className="judge-ledger-scroll">
-        <table className="judge-ledger-table">
-          <thead>
-            <tr>
-              <th>時間</th>
-              <th>場景</th>
-              <th>bot</th>
-              <th>機率</th>
-              <th>耗時 ms</th>
-              <th>錯誤</th>
+        <table className="judge-ledger-table" role="table">
+          <thead role="rowgroup">
+            <tr role="row">
+              <th role="columnheader">時間</th>
+              <th role="columnheader">場景</th>
+              <th role="columnheader">bot</th>
+              <th role="columnheader">機率</th>
+              <th role="columnheader">耗時 ms</th>
+              <th role="columnheader">錯誤</th>
             </tr>
           </thead>
-          <tbody>
+          <tbody role="rowgroup">
             {recent.map((r) => (
-              <tr key={r.id} className={overThreshold(r) === true ? 'over' : undefined}>
-                <td>{when(r.at)}</td>
-                <td>{sceneName(r.regex_verdict)}</td>
-                <td>{botLabel(r.bot_id, bots)}</td>
-                <td>{probabilityText(r)}</td>
-                <td>{r.ms ?? '—'}</td>
-                <td>{r.error ? r.error : '—'}</td>
+              <tr key={r.id} role="row" className={overThreshold(r) === true ? 'over' : undefined}>
+                <td role="cell" data-label="時間" className="num">
+                  {when(r.at)}
+                </td>
+                <td role="cell" data-label="場景">{sceneName(r.regex_verdict)}</td>
+                <td role="cell" data-label="bot">{botLabel(r.bot_id, bots)}</td>
+                <td role="cell" data-label="機率" className="num">
+                  {probabilityText(r)}
+                </td>
+                <td role="cell" data-label="耗時 ms" className="num">
+                  {r.ms ?? '—'}
+                </td>
+                <td role="cell" data-label="錯誤">{r.error ? r.error : '—'}</td>
               </tr>
             ))}
           </tbody>

@@ -80,3 +80,67 @@
   padding-left: 18px;
   font-size: 12px;
 }
+/* 數字欄不折行（桌機也一樣）；手機的卡片化在下面。 */
+.judge-ledger-table td.num {
+  white-space: nowrap;
+}
+/* 手機（issue #1466）：480px 寬的表在 360px 要橫捲，一列要來回滑才看得完。≤640px 把每列攤成一張卡片：
+   表頭收掉（視覺上；螢幕閱讀器靠每格的 role 與 data-label 仍讀得到），每格「標籤：值」。 */
+@media (width <= 640px) {
+  .judge-ledger-scroll {
+    overflow-x: visible;
+  }
+  .judge-ledger-table {
+    min-width: 0;
+    font-size: 13px;
+  }
+  .judge-ledger-table,
+  .judge-ledger-table tbody,
+  .judge-ledger-table tr,
+  .judge-ledger-table td {
+    display: block;
+  }
+  .judge-ledger-table thead {
+    position: absolute;
+    width: 1px;
+    height: 1px;
+    overflow: hidden;
+    clip-path: inset(50%);
+  }
+  .judge-ledger-table tbody {
+    display: grid;
+    gap: 8px;
+  }
+  .judge-ledger-table tr {
+    padding: 6px 10px;
+    border: 1px solid var(--border);
+    border-radius: 8px;
+  }
+  .judge-ledger-table td {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 2px 10px;
+    padding: 4px 0;
+    border-bottom: 0;
+    overflow-wrap: anywhere;
+  }
+  .judge-ledger-table td::before {
+    content: attr(data-label);
+    flex: 0 0 6.5em;
+    color: var(--text-dim);
+  }
+  .judge-ledger-table td.scene {
+    display: block;
+    padding-bottom: 6px;
+    border-bottom: 1px solid var(--border);
+  }
+  .judge-ledger-table td.scene::before {
+    content: none;
+  }
+  .judge-ledger-table td.num > .hint {
+    flex: 1 0 100%;
+  }
+  .judge-ledger-triggers {
+    font-size: 13px;
+  }
+}
