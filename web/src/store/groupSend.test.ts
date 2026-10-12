@@ -23,3 +23,25 @@ test('跳過的收件者：機器碼翻成人話，toast 不貼英文原文', ()
   assert.equal(groupSkipText({ reason: 'conflict', detail: '維護窗口開著' }), '維護窗口開著')
   assert.equal(groupSkipText({ reason: 'upstream', detail: '' }), 'upstream')
 })
+
+test('daemon 實際會回的 422／403／503 跳過理由：toast 不出現機器碼，也不出現原始 JSON', () => {
+  // daemon 的 `skip_reason`（daemon/src/group.rs）：detail 是 `human_of(body)`，沒有 message 時就是 body 裡的代碼
+  // （例如 `prompt_too_long_to_prove`），或整個 JSON 字串。
+  const shapes = [
+    { reason: 'unprocessable', detail: 'prompt_too_long_to_prove' },
+    { reason: 'unprocessable', detail: '{"error":"delivery_unprovable","reason":"prompt_too_long_to_prove","run_id":"r1","sent":false}' },
+    { reason: 'forbidden', detail: 'relay_from_mismatch' },
+    { reason: 'forbidden', detail: '{"error":"forbidden","reason":"relay_from_mismatch"}' },
+    { reason: 'unavailable', detail: 'maintenance_state_unavailable' },
+    { reason: 'unavailable', detail: '{"reason":"maintenance_state_unavailable","retryable":true,"sent":false}' },
+    { reason: 'uncommitted', detail: 'run_state_not_recorded' },
+    { reason: 'uncommitted', detail: '{"error":"run_state_not_recorded","retryable":true}' },
+  ]
+  for (const x of shapes) {
+    const text = groupSkipText(x)
+    assert.ok(text.length > 0, `${x.reason} 不能留空`)
+    assert.doesNotMatch(text, /[{}[\]"]/, `${x.reason} 不能是原始 JSON：${text}`)
+    assert.doesNotMatch(text, /[a-z]+_[a-z_]+|^[a-z_]+$/, `${x.reason} 不能是機器碼：${text}`)
+  }
+  assert.equal(groupSkipText({ reason: 'unprocessable', detail: 'prompt_too_long_to_prove' }), '這則訊息對方無法確認送達（多半是太長），請縮短後再送')
+})

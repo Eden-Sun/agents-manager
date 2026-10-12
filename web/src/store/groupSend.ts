@@ -16,6 +16,15 @@ export function groupSkipText(x: { reason: string; detail: string }): string {
       return '上一回合還在進行中'
     case 'unknown_delivery':
       return '上一回合送達狀態未知，請先放棄該回合'
+    // 下面四個 daemon 的 detail 常是機器碼或整段 JSON（`human_of` 退回 body），一律用固定的人話，不貼 detail。
+    case 'unprocessable':
+      return '這則訊息對方無法確認送達（多半是太長），請縮短後再送'
+    case 'forbidden':
+      return '沒有權限替這顆 bot 轉述'
+    case 'unavailable':
+      return '維護窗口的狀態暫時讀不到，先不送；稍後再試'
+    case 'uncommitted':
+      return '送出的結果還不確定，請到對話裡確認'
     default:
       return x.detail || x.reason
   }
