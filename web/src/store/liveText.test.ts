@@ -45,3 +45,16 @@ test('spinner 完成行才刷掉：一般英文句子含「for N s」不能整�
     assert.equal(cleanLiveText(spinner), null, spinner)
   }
 })
+
+test('⏸ 開頭的正文不是權限模式列：只剝模式列（同 daemon claude_mode::is_mode_row）', () => {
+  assert.equal(cleanLiveText('⏸ 暫停部署'), '⏸ 暫停部署')
+  assert.equal(cleanLiveText('⏸ 等使用者決定，先不部署。'), '⏸ 等使用者決定，先不部署。')
+  for (const row of [
+    '⏸ manual mode on · ← for agents',
+    '⏸ plan mode on (shift+tab to cycle) · ← for agents',
+    '⏵⏵ accept edits on (shift+tab to cycle) · ← for agents',
+    '⏵⏵ bypass permissions on (shift+tab to cycle)',
+  ]) {
+    assert.equal(cleanLiveText(row), null, row)
+  }
+})

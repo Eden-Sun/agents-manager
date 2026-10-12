@@ -16,7 +16,6 @@ const NOISE: RegExp[] = [
   /^\s*[(（]?\s*(?:ctrl|cmd|⌘|shift|alt|option)\s*\+/i,
   /^\s*[(（]?\s*(?:esc|escape)\b[^.]*\b(?:to|for)\b/i,
   /^\s*[(（]?\s*\?\s+for\s+shortcuts/i,
-  /^\s*(?:⏵⏵|⏸)/,
   // Codex footer: warning counter may have its own row in a narrow pane.
   /^\s*⚠ \d+ warnings? · f2 to view\s*$/,
   /^\s*[a-z][a-z0-9._]*-[a-z0-9._-]+(?:\s+(?:default|fast|low|medium|high|xhigh|max|ultra))*\s*·\s*[~/]/i,
@@ -72,10 +71,23 @@ function isCliSummary(line: string): boolean {
   return line.split(/,\s*/).every((clause) => SUMMARY_VERB.test(clause))
 }
 
+/**
+ * claude 權限模式列（同 daemon `claude_mode::is_mode_row`，#788）：`⏵⏵` 開頭一律算；`⏸` 只在第一段（` · ` 之前）
+ * 是模式名、或整段以 `(shift+tab to cycle)` 結尾時才算。`⏸ 暫停部署` 這種正文不是模式列。
+ */
+function isModeRow(t: string): boolean {
+  if (t.startsWith('⏵⏵')) return true
+  const low = t.toLowerCase()
+  const rest = low.startsWith('⏸') ? low.slice('⏸'.length) : low
+  const seg = (rest.split(' · ')[0] ?? '').trim()
+  return seg.endsWith('(shift+tab to cycle)') || ['manual mode on', 'plan mode on', 'accept edits on', 'bypass permissions on'].includes(seg)
+}
+
 function isNoise(line: string): boolean {
   const t = line.trim()
   if (!t) return false // 空行由 scrub 收斂
   if (CHROME_ONLY.test(t)) return true
+  if (isModeRow(t)) return true
   if (SHELL_ECHO.test(t)) return true
   if (/^(?:running|ran)\b[^.]*\bshell command/i.test(t)) return true
   if (SPINNER_DONE.test(t)) return true
