@@ -838,7 +838,21 @@ pub async fn press_submit(client: &HerdrClient, t: &Typed) -> anyhow::Result<()>
     client.pane_send_keys(&t.pane, t.submit.keys()).await
 }
 
-/// 送出鍵按下去之後：等證據，字還留在框裡就再按一次。
+fn may_press_retry_submit(
+    kind: &str,
+    screen: &str,
+    text: &str,
+    positive_evidence: bool,
+    pressed_again: bool,
+) -> bool {
+    !pressed_again
+        && !positive_evidence
+        && box_state_within(kind, screen, typed_tail(text)) == BoxState::NonEmpty
+        && !super::pane_text::invisible_review_notice(screen)
+        && crate::composer_parse::composer_text_whole(kind, screen).as_deref() == Some(text)
+}
+
+/// 送出鍵按下去之後：先看送達證據，完整原文仍留在框裡才最多補按一次。
 pub async fn confirm_submitted(
     app: &(impl crate::capabilities::Db + crate::lifecycle::send_now::ports::CodexSendPort),
     client: &HerdrClient,
@@ -863,9 +877,10 @@ pub async fn confirm_submitted(
             return Ok(Delivered::Unproven("session_changed"));
         }
         let state = box_state_within(&bot.kind, &now, typed_tail(text));
+        let proof_grew = evidence(&bot.kind, proof, offset, &now, text)? > baseline;
         // #749：rollout／回音還證不出來時，問 codex 自己的 thread 歷史。只有 positive evidence 會升級成 `Submitted`；
-        // 歷史讀不到、沒看到都照舊往下走，不當成「沒送到」。
-        if state == BoxState::Empty && evidence(&bot.kind, proof, offset, &now, text)? <= baseline {
+        // 歷史讀不到、沒看到都照舊往下走，不當成「沒送到」。composer 非空時也查，避免已送達的 A 讓補按送出新草稿 B。
+        if !proof_grew {
             if let Some(mark) = structured {
                 if app.codex_prompt_landed(mark, &mut history_conn, text).await {
                     tracing::info!(run = %run.id, bot = %bot.name, "prompt proven submitted by the codex thread history");
@@ -873,6 +888,11 @@ pub async fn confirm_submitted(
                     return Ok(Delivered::Submitted);
                 }
             }
+        }
+        if proof_grew {
+            tracing::info!(run = %run.id, bot = %bot.name, proof = ?proof, "prompt typed into the pane and proven submitted");
+            note_codex_delivery(&bot.kind, if matches!(proof, Proof::Transcript { .. }) { crate::codex_history::Evidence::Rollout } else { crate::codex_history::Evidence::Screen });
+            return Ok(Delivered::Submitted);
         }
         match state {
             // No evidence to wait for: the box took the paste and emptied on Enter. That is all
@@ -882,18 +902,17 @@ pub async fn confirm_submitted(
                 note_codex_delivery(&bot.kind, crate::codex_history::Evidence::Screen);
                 return Ok(Delivered::Unverified);
             }
-            BoxState::Empty if evidence(&bot.kind, proof, offset, &now, text)? > baseline => {
-                tracing::info!(run = %run.id, bot = %bot.name, proof = ?proof, "prompt typed into the pane and proven submitted");
-                note_codex_delivery(&bot.kind, if matches!(proof, Proof::Transcript { .. }) { crate::codex_history::Evidence::Rollout } else { crate::codex_history::Evidence::Screen });
-                return Ok(Delivered::Submitted);
-            }
             // claude 清掉隱形字元、等人 review（#205）：框裡是**清過的**字，再按一次送出去的就不是記下的那一段，
             // 證據永遠對不上。不按，交給使用者看。送出前的清理（`pane_text::for_pane`）本來就不該讓這個畫面出現。
             BoxState::NonEmpty if super::pane_text::invisible_review_notice(&now) => {
                 tracing::warn!(run = %run.id, bot = %bot.name, "claude is asking to review a prompt it cleaned of invisible characters; not pressing Enter");
                 return Ok(Delivered::Unproven("invisible_chars_review"));
             }
-            BoxState::NonEmpty if !pressed_again => {
+            BoxState::NonEmpty if crate::composer_parse::composer_text_whole(&bot.kind, &now).as_deref() != Some(text) => {
+                return Ok(Delivered::Unproven("composer_changed_or_unreadable"));
+            }
+            BoxState::Unready => return Ok(Delivered::Unproven("composer_unreadable")),
+            BoxState::NonEmpty if may_press_retry_submit(&bot.kind, &now, text, proof_grew, pressed_again) => {
                 tracing::warn!(run = %run.id, bot = %bot.name, ?submit, "prompt still in the composer after the submit key; pressing it again");
                 client.pane_send_keys(pane, submit.keys()).await?;
                 pressed_again = true;
@@ -1094,6 +1113,32 @@ mod tests {
         assert!(should_repaste(&readable, true, false), "框空、證據沒長＝第一次沒進去，要重貼");
         assert!(!should_repaste(&readable, true, true), "證據長了＝進去了，只是框已經被送掉");
         assert!(!should_repaste(&readable, false, false), "框裡有東西＝貼進去了");
+    }
+
+    #[test]
+    fn replacing_the_composer_after_the_first_enter_never_sends_a_second_enter() {
+        let before_first_enter = screen(&[], &["A"]);
+        assert_eq!(crate::composer_parse::composer_text_whole("claude", &before_first_enter).as_deref(), Some("A"));
+
+        // The first Enter has already reached the pane. A user then starts a new draft before
+        // confirmation reads the composer. The retry decision must leave that draft untouched.
+        let after_first_enter = screen(&[], &["B"]);
+        let mut enter_count = 1;
+        if may_press_retry_submit("claude", &after_first_enter, "A", false, false) {
+            enter_count += 1;
+        }
+        assert_eq!(enter_count, 1, "B was not part of this delivery and must not be submitted");
+    }
+
+    #[test]
+    fn retry_submit_requires_the_whole_original_draft_and_no_positive_evidence() {
+        let original = screen(&[], &["first", "last"]);
+        assert!(may_press_retry_submit("claude", &original, "first\nlast", false, false));
+        assert!(!may_press_retry_submit("claude", &original, "first\nlast", true, false));
+        assert!(!may_press_retry_submit("claude", &original, "first\nlast", false, true));
+        let changed = screen(&[], &["changed", "last"]);
+        assert!(!may_press_retry_submit("claude", &changed, "first\nlast", false, false));
+        assert!(!may_press_retry_submit("claude", "unreadable", "first\nlast", false, false));
     }
 
     fn screen(transcript: &[&str], box_rows: &[&str]) -> String {
