@@ -725,9 +725,17 @@ const REASON_TEXT: Record<string, string> = {
  * `maintenance_window（HTTP 409）`。以前只有 `retryable:true` 才用 `message`，不可重試的那幾條照樣只剩代碼（#233）。
  * `reason`（機器 key）與 `message`（人話）是分開的兩個欄位（API.md），兩個都在就顯示人話。
  */
+/** daemon 只給 `reason`、不給 `message` 的 422：照代碼翻成人話（不然會印出 API 路徑或代碼）。 */
+const REASON_CODE_TEXT: Record<string, string> = {
+  // `MAX_PROVABLE_CHARS`（am-lifecycle delivery.rs）：超過就證明不了送達，daemon 不送。
+  prompt_too_long_to_prove: '這則訊息超過 20 萬字，無法確認對方收到，請縮短或分段再送',
+}
+
 function reasonText(e: ApiError): string {
   const known = REASON_TEXT[e.message]
   if (known) return known
+  const byCode = typeof e.body.reason === 'string' ? REASON_CODE_TEXT[e.body.reason] : undefined
+  if (byCode) return byCode
   const human = e.body.message
   if (typeof e.body.reason === 'string' && typeof human === 'string' && human.trim()) return human.trim()
   return e.message
