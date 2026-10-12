@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict'
 import { test } from 'node:test'
-import { termPieces } from '../lib/termPieces.ts'
+import { termPieces, trimPunctSteps } from '../lib/termPieces.ts'
 
 const urlsOf = (rows: ReturnType<typeof termPieces>) => rows.flat().filter((p) => p.url).map((p) => [p.text, p.url])
 
@@ -198,4 +198,74 @@ test('中文全形標點緊接在網址後面：不算進網址（點一下複�
   assert.equal(urlsOf(termPieces('網址：https://example.com/login，然後貼上', 80))[0][1], 'https://example.com/login')
   assert.equal(urlsOf(termPieces('https://example.com/a、https://example.com/b', 80)).map((x) => x[1]).join(' '), 'https://example.com/a https://example.com/b')
   assert.equal(urlsOf(termPieces('看 https://example.com/a！', 80))[0][1], 'https://example.com/a')
+})
+
+/** 改寫前的逐步實作（每輪重數整串、再 slice）：只拿來當對照，確認線性版的結果一樣。 */
+function trimPunctReference(url: string): string {
+  let u = url
+  let prev: string
+  do {
+    prev = u
+    u = u.replace(/[.,;:!?]+$/, '')
+    const extra = (open: string, close: string) => {
+      let o = 0
+      let c = 0
+      for (const ch of u) {
+        if (ch === open) o++
+        else if (ch === close) c++
+      }
+      return c - o
+    }
+    let drop = extra('(', ')')
+    while (drop > 0 && u.endsWith(')')) {
+      u = u.slice(0, -1)
+      drop--
+    }
+    drop = extra('[', ']')
+    while (drop > 0 && u.endsWith(']')) {
+      u = u.slice(0, -1)
+      drop--
+    }
+  } while (u !== prev)
+  return u
+}
+
+/** 固定種子的 PRNG：每次跑都是同一組輸入（不靠 Math.random）。 */
+function seeded(seed: number): () => number {
+  let s = seed >>> 0
+  return () => {
+    s = (s + 0x6d2b79f5) >>> 0
+    let t = s
+    t = Math.imul(t ^ (t >>> 15), t | 1)
+    t ^= t + Math.imul(t ^ (t >>> 7), t | 61)
+    return ((t ^ (t >>> 14)) >>> 0) / 4294967296
+  }
+}
+
+/** main 現在的網址規則（#1533：結尾排除全形標點）；對照基準只換 trimPunct 的實作，URL 的切法照這份。 */
+const MAIN_URL_RE = /https?:\/\/[^\s<>"'`）」』、。，；：！？》〉】〕“”‘’]+/g
+
+test('termPieces 的網址結尾與改寫前的逐步實作一樣（含全形標點，固定種子）', () => {
+  const alphabet = ['(', ')', '[', ']', '.', ',', ';', ':', '!', '?', 'a', '/', '中', '。', '，', '、', '！', '）', '」', '（']
+  const rnd = seeded(20261012)
+  for (let k = 0; k < 4000; k++) {
+    const len = Math.floor(rnd() * 14)
+    let s = 'see https://a.b/'
+    for (let i = 0; i < len; i++) s += alphabet[Math.floor(rnd() * alphabet.length)]
+    const want = [...s.matchAll(MAIN_URL_RE)].map((m) => trimPunctReference(m[0]))
+    const got = termPieces(s, 80).flat().filter((p) => p.url).map((p) => p.url)
+    assert.deepEqual(got, want, JSON.stringify(s))
+  }
+})
+
+test('trimPunct 的步數隨長度線性：最壞情況的輸入長 N 與 2N，步數約兩倍（不是四倍）', () => {
+  // 以前 `).` 重複時每輪都重數整串再 slice：N＝8000 約 1 秒，步數是 N²。
+  const worst = (n: number) => 'https://a.b/' + ').'.repeat(n)
+  const small = trimPunctSteps(worst(1000)).steps
+  const big = trimPunctSteps(worst(2000)).steps
+  assert.ok(big <= 2 * small + 4, `N→2N 步數從 ${small} 變成 ${big}，超過線性`)
+  assert.ok(trimPunctSteps(worst(8000)).steps <= 4 * 8000 + 8, '步數上限是常數 × 長度')
+  for (const s of ['https://a.b/' + '.)'.repeat(4000), 'https://a.b/' + '.'.repeat(8000), 'https://a.b/' + '])'.repeat(4000)]) {
+    assert.ok(trimPunctSteps(s).steps <= 4 * s.length + 8, '其他最壞情況也是線性')
+  }
 })
