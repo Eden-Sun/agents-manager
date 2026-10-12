@@ -334,3 +334,12 @@ test('等額度說明照任務的 5h 撞限選項講，看得到預計重送時�
   assert.match(sw, /身分額度都用完/)
   assert.match(quotaWaitText({ on_5h_limit: 'switch', executor_kind: 'codex' }, null), /codex 只有一把額度/)
 })
+
+test('撞限的交辦已經由接手的那件續做：父列不再說「等 AGM 換身分接手」（接手的交辦已經在跑）', () => {
+  const parent = asg({ id: 'a-parent', status: 'awaiting_review', turn_status: 'identity_switch' })
+  const child = asg({ id: 'a-child', follow_up_of: 'a-parent', status: 'delivered', target_bot_id: 'mission-exec-2' })
+  // 父列 daemon 不改狀態（只寫 followup_assignment_id），網頁要靠子列指回它判斷。
+  assert.equal(assignmentLabel(parent), '撞限，等 AGM 換身分接手', '沒有接手的那件時照舊')
+  assert.equal(assignmentLabel(parent, true), '已換身分接手（見下一件）')
+  assert.equal(assignmentLabel(child), '進行中')
+})

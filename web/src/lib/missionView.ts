@@ -354,8 +354,9 @@ export function deliveryLabel(mode: string): string {
  * `turn_status` 比 `status` 精確——撞限換手與「驗證者沒 Fable」都是停在 `awaiting_review`，
  * 差別只在 `turn_status`，所以先看它。認不得的機器碼原樣顯示，不要吞掉。
  */
-export function assignmentLabel(a: MissionAssignment): string {
-  if (a.turn_status === 'identity_switch') return '撞限，等 AGM 換身分接手'
+export function assignmentLabel(a: MissionAssignment, followedUp = false): string {
+  // 接手的那件已經派出去（`followedUp`，子列的 follow_up_of 指回它）：父列不再等 AGM。daemon 只寫 followup 連結、不改父列狀態。
+  if (a.turn_status === 'identity_switch') return followedUp ? '已換身分接手（見下一件）' : '撞限，等 AGM 換身分接手'
   if (a.turn_status === 'quota_exhausted') return '沒有可用額度'
   switch (a.status) {
     case 'queued':

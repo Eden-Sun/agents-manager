@@ -477,7 +477,7 @@ function MissionCard({ mission, onNavigate }: { mission: Mission; onNavigate: Na
             <li key={a.id} className={assignmentOpen(a) ? 'open' : ''}>
               <span className="mission-role">{a.role ? ROLE_LABEL[a.role] : '—'}</span>
               <span className={`mission-asg-state${a.turn_error || a.turn_status === 'quota_exhausted' ? ' warn' : ''}`}>
-                {assignmentLabel(a)}
+                {assignmentLabel(a, view.assignments.some((c) => c.follow_up_of === a.id))}
               </span>
               {a.target_bot_id ? (
                 <span className="mission-who" title={a.target_bot_id}>
