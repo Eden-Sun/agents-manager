@@ -5,7 +5,7 @@
 //! `judge_shadow`，之後拿 `cleared_at`（撞限多久之後就被成功回合清掉）對帳。回合照收、額度照標，
 //! 這個模組的任何失敗都不影響它們。
 //!
-//! 畫面會離開這台機器，所以閘門有兩層、預設全關：`[judge] enabled` 與 `projects` 名單；送出前逐行
+//! 畫面會離開這台機器，所以閘門有兩層、預設全關：`[judge] enabled` 與 `projects` 名單（`"*"` 表示所有現在與未來的專案）；送出前逐行
 //! 遮罩（[`mask`]）。key 只存檔案路徑，每次呼叫才讀，不進 DB／log／API。
 
 use std::time::{Duration, Instant};
@@ -93,7 +93,7 @@ pub fn gate(cfg: &JudgeCfg, project_id: &str, project_label: &str, asked_last_ho
     if !cfg.enabled {
         return Some(Skip::Disabled);
     }
-    if !cfg.projects.iter().any(|p| p == project_id || p == project_label) {
+    if !cfg.projects.iter().any(|p| p == "*" || p == project_id || p == project_label) {
         return Some(Skip::ProjectNotListed);
     }
     if asked_last_hour >= cfg.max_per_hour as i64 {

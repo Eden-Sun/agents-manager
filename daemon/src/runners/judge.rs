@@ -347,6 +347,22 @@ mod tests {
         h
     }
 
+    /// `*` is a persisted all-projects selector, not a project id that must exist.
+    #[tokio::test]
+    async fn wildcard_project_setting_round_trips_through_put_and_get() {
+        let env = tt::env().await;
+        let Json(saved) = put_settings(
+            State(env.app.clone()),
+            Json(SettingsBody { enabled: Some(false), projects: Some(vec![" * ".into(), "*".into(), " ".into()]), token: None }),
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(saved["projects"], json!(["*"]));
+        assert_eq!(get_settings(State(env.app.clone())).await.0["projects"], json!(["*"]));
+        assert_eq!(env.app.cfg.get().await.judge.projects, vec!["*"]);
+    }
+
     /// 只有驗過的 bot 能問：沒帶身分、或帶了對不上的 token，都在看 body 之前就擋下（#1330）。
     #[tokio::test]
     async fn the_collision_check_is_only_for_a_proven_bot() {

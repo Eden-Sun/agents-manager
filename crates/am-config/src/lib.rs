@@ -424,7 +424,7 @@ impl AgentsCfg {
     }
 }
 
-/// `[judge]`（SPEC §4.3c）：`enabled` 與 `projects`（專案 id 或 label）兩層都要開才會把遮罩後的畫面尾段
+/// `[judge]`（SPEC §4.3c）：`enabled` 與 `projects`（專案 id、label 或 `"*"` 全專案標記）兩層都要開才會把遮罩後的畫面尾段
 /// 送到 `endpoint`。`key_file` 只是路徑，key 本身不進設定檔。
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct JudgeCfg {
