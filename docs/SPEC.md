@@ -4565,15 +4565,18 @@ incident 以資源為單位持久化（`supervisor_incidents`，`(kind, resource
 - **建置依賴**：`GET /api/supervisor/build-inputs` 列出會進 binary 的路徑（含 `include_str!` 的 `docs/goals/agm-supervisor-persona.md` 與 `scripts/agm.py`）；這些改了 binary 就落後，
   但何時重建、何時重啟由 AGM 分開判斷。清單與實際 `include_str!` 由測試綁住（`every_embedded_file_is_declared_as_a_build_input`）。
 
-### 18.12 遠端（手機）入口的可觀測性
+### 18.12 手機 Remote Control 已移除（使用者 2026-10-12，issue #1477）
 
-AGM 是使用者唯一的手機入口，但 `--remote-control AGM` 只是 argv 上的**要求**；herdr pane 狀態、hook payload、session 資料都不帶 Remote Control 資訊，
-**目前沒有可靠的觀測來源**，所以 `capability.status = unsupported`，daemon 不宣稱手機已連上。
+使用者裁示：「手機 Remote Control 不好用，廢了他」。以前 AGM（巡檢）的啟動參數帶 `--remote-control AGM`，把它當使用者唯一的手機入口；
+但 herdr pane 狀態、hook payload、session 資料都不帶 Remote Control 資訊，daemon 沒有可靠的觀測來源，狀態長期停在 `unknown`／`requested`。現況：
 
-- 狀態只有 `requested`／`verified`（有可驗證來源）／`unavailable`（有證據說不通）／`unknown`，沒有 `active`。argv、bot 自己的文字、URL 都不能推出 `verified`。
-- 觀測綁 session（run id）且 900 秒過期；AGM 重啟或換模型後舊確認失效（`revoked: session_changed`、`observation_expired`），撤銷時不再回 `url`。
-- 人工確認走 `POST /api/supervisor/remote`，只接受 User 或 AGM 角色，已驗證的一般 bot 回 403 `role_required`；`source=manual` 且**必須帶 actor**（記成「某人宣稱過」，不是量測）。
-- incident 只在 `unavailable` 時開。恢復 remote session 由 AGM 在沒有回合衝突的窗口安排，daemon 不自己多開 session。
+- **AGM 與任何 supervisor 角色啟動都不再帶 `--remote-control`**：`setup` 不寫它；既有安裝在 daemon 開機與每次 `setup` 時把 args 裡的
+  `--remote-control <name>`（或 `--remote-control=<name>`）這一對拿掉，其他 args 原樣。只改 config.toml，執行中的 session 照舊、
+  `launch_rev` 變了所以標「需重啟」（既有機制），**不自動重啟 AGM**。冪等。
+- 觀測與狀態全部拿掉：`/api/supervisor/remote` 路由、`GET /api/supervisor` 的 `remote`／`remote_provider`、incident `remote_entry`、
+  網頁總管面板的遠端入口區塊、`agm remote`、`runtime.json` 的 `remote_name`。`supervisors.remote_*` 欄位留著不讀不寫。
+- 人設（內嵌預設）不再提 Remote Control。**已存的人設是使用者資料，程式不覆寫**；要換成新的內嵌版走 `adopt-embedded`（§18.11）。
+- 一般 bot 的 `remoteControlAtStartup` 仍照各自 argv 明講（見 §18.15 的「Remote Control 明講在每顆 bot 的設定檔」）：沒有 `--remote-control` 就是 `false`。
 
 ### 18.13 回滾限制
 **回滾 binary 不等於回滾 DB。** `db::SCHEMA_VERSION`（`PRAGMA user_version`）一旦被較新的 binary 蓋上，較舊的 binary 會被 §3.1 的版本閘
@@ -4807,7 +4810,7 @@ AGM 是使用者唯一的手機入口，但 `--remote-control AGM` 只是 argv �
 | --- | --- | --- |
 | 是誰 | 原本那顆 AGM：`supervisors.bot_id`、`GET /api/supervisor` 的頂層欄位 | 第二顆 bot `AGM-responder`：`supervisor_roles` 的 `responder` 列 |
 | 模型 | cc0/fable/low → cc0/opus/low（§18.5 的控制器） | cc0/opus/high，固定，沒有自動切換（`responder setup` 可指定） |
-| 入口 | 使用者 web／手機 Remote Control（**唯一**的 remote） | 沒有 remote；只有 daemon 的通知 |
+| 入口 | 使用者 web／對話（**唯一**的使用者入口） | 沒有使用者入口；只有 daemon 的通知 |
 | 目錄 | `supervisor/AGM` | `supervisor/AGM-responder`（記在 `bots.cwd`；claude session 以 cwd 為鍵，共用會互相接到對方的 session 與 `persona.md`） |
 | 專案 | 巡檢的專案 | **同一個**（見下）；側欄上兩個角色在同一塊 |
 | 收什麼 | `health_changed`、`incident_*`（`notify_exhausted` 除外）、`bot_restart_failed`、`supervisor_restart_retry`、`responder_watchdog_gave_up`、`responder_bot_missing`、`agm_cli_stale`、`bot_shim_stale`、`bot_lost`、`deploy_waiting`、`pane_unowned`、`review_role=patrol` 的交辦回報、不認得的種類 | `bot_request`、`approval_requested`、`mission_*`、其餘交辦回報（含 `assignment_undeliverable`）；巡檢自己倒下的 `watchdog_gave_up` 與 `notify_exhausted` 的 `incident_*` |
@@ -5008,8 +5011,8 @@ AGM 是使用者唯一的手機入口，但 `--remote-control AGM` 只是 argv �
   pane 或佇列，CLI 可能下一刻才報撞限；等待期間送出後只把下一次重試推到有界間隔之後。額度狀態每個 tick 重算，
   撞限期間沒有新讀數不改 `notify_next_at`，也不重寫 DB、不推事件。
 - **Remote Control 明講在每顆 bot 的設定檔**：`claude-settings.json` 一律寫 `remoteControlAtStartup`，值就是
-  「這顆 bot 的 argv 有沒有 `--remote-control`」。使用者帳號的全域 `settings.json` 開了它的話，原本**每一顆**
-  bot 起來都會多開一個手機入口——協調者的 rc off 不能只靠 `args=[]`。
+  「這顆 bot 的 argv 有沒有 `--remote-control`」（AGM 與協調者已不帶，一律 `false`；#1477）。使用者帳號的全域 `settings.json` 開了它的話，原本**每一顆**
+  bot 起來都會多開一個手機入口——所以不能只靠 `args=[]`。
 - **協調者的 model／effort 會變成 argv**：`responder setup` 驗形狀（模型 `[a-z0-9][a-z0-9._-]{0,39}`、effort 走
   `config::normalize_effort`），擋掉旗標、空白與超長字串；不釘死型號，CLI 換代不必改。`GET /supervisor/responder`
   的 `model`／`effort` 是設定值，`runtime{model,effort,started_at}` 才是它現在實際跑的。

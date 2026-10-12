@@ -6,7 +6,7 @@
  * 同樣的操作 CLI 都有：`agm supervisor`（狀態）、`agm supervisor-{setup,start,stop,fallback}`、`agm responder …`、`agm health`。
  *
  * 這裡**不做**新的聊天室：總管就是一顆 bot，要跟它說話請開它既有的對話。這個面板只
- * 負責「環境在什麼狀態、要不要建立／啟動、遠端入口通不通、手上有哪些交辦」。
+ * 負責「環境在什麼狀態、要不要建立／啟動、手上有哪些交辦」。
  *
  * 端點還沒部署的 daemon 會讓 `fetchSupervisor()` 回 `null`——那不是錯誤，是「這台
  * daemon 還沒有這個功能」，畫面上要講清楚要做什麼才會有。
@@ -18,9 +18,8 @@ import type { SupervisorAction, SupervisorAssignment, SupervisorIncident, Superv
 import { ASSIGN_LABEL, INCIDENT_LABEL } from '../lib/supervisorLabels'
 import { useStore } from '../store/store'
 import './supervisor.css'
-import { safeHttpUrl } from '../lib/safeUrl'
 
-/** bot 起沒起來。跟遠端入口是兩件事，不要混在同一顆燈上。 */
+/** bot 起沒起來。 */
 const STATUS_LABEL: Record<string, string> = {
   not_configured: '尚未建立',
   stopped: '已停止',
@@ -45,24 +44,6 @@ const STATUS_TONE: Record<string, string> = {
   missing: 'bad',
 }
 
-/**
- * 遠端入口的四種狀態。**沒有「已連線」**：daemon 目前沒有可靠的 Remote Control 觀測來源，
- * argv 帶了參數只代表要求過，把它畫成綠燈就是替一個沒人驗過的入口背書。
- */
-const REMOTE_LABEL: Record<string, string> = {
-  requested: '已要求（未驗證）',
-  verified: '已確認可用',
-  unavailable: '確認不可用',
-  unknown: '狀態不明',
-}
-
-const REMOTE_REVOKED: Record<string, string> = {
-  session_changed: 'AGM 重啟過，先前的確認已失效',
-  observation_expired: '上次確認已過期',
-  manager_not_running: 'AGM 沒在跑',
-}
-
-
 const ASSIGN_TONE: Record<string, string> = {
   completed: 'ok',
   failed: 'bad',
@@ -86,7 +67,7 @@ function label(map: Record<string, string>, key: string): string {
 }
 
 /**
- * 兩個角色各做什麼、各被叫醒幾次。巡檢就是上面那顆 AGM（使用者入口、Remote Control）；協調者只回應
+ * 兩個角色各做什麼、各被叫醒幾次。巡檢就是上面那顆 AGM（使用者入口）；協調者只回應
  * bot。協調者停了或沒額度時事件留在 inbox，不會改由巡檢處理——這一行要讓人看得出「在等」而不是「壞了」。
  */
 function RoleSummary({ live, onOpen }: { live: SupervisorInfo; onOpen: (botId: string) => void }) {
@@ -99,7 +80,7 @@ function RoleSummary({ live, onOpen }: { live: SupervisorInfo; onOpen: (botId: s
       <div className="agm-row">
         <span className="agm-key">巡檢</span>
         <span className="agm-chip mono">{live.identity} · {live.model} · {live.effort}</span>
-        <span className="agm-note inline">使用者入口・遠端入口・健康與故障</span>
+        <span className="agm-note inline">使用者入口・健康與故障</span>
       </div>
       <p className="agm-note">{wake(live.stats)}{live.stats.merged > 0 ? `・合併重複 ${live.stats.merged} 則` : ''}</p>
       <div className="agm-row">
@@ -125,7 +106,7 @@ function RoleSummary({ live, onOpen }: { live: SupervisorInfo; onOpen: (botId: s
       </div>
       {r.configured ? (
         <p className="agm-note">
-          只回應 bot（申請、交辦回報、核准、任務），沒有遠端入口。{wake(r.stats)}
+          只回應 bot（申請、交辦回報、核准、任務）。{wake(r.stats)}
           {r.stats.duplicates > 0 ? `・擋下重複申請 ${r.stats.duplicates} 則` : ''}
         </p>
       ) : null}
@@ -359,43 +340,6 @@ export function SupervisorPanel({ onOpenChat }: { onOpenChat?: () => void }) {
           </li>
         ))}
       </ol>
-
-      <div className="agm-row">
-        <span className="agm-key">遠端入口</span>
-        <span
-          className={`agm-chip ${
-            live.remote.status === 'verified' ? 'ok' : live.remote.status === 'unavailable' ? 'bad' : 'warn'
-          }`}
-        >
-          {label(REMOTE_LABEL, live.remote.status)}
-        </span>
-        {safeHttpUrl(live.remote.url) ? (
-          <a className="agm-link" href={safeHttpUrl(live.remote.url)} target="_blank" rel="noopener noreferrer">
-            開啟連線
-          </a>
-        ) : (
-          <span className="agm-note inline">尚未取得手機可用的入口</span>
-        )}
-      </div>
-      {/* 能力限制講在前面：這不是「壞了」，是 daemon 量不到，別讓使用者把灰燈讀成故障。 */}
-      {live.remote.capability === 'unsupported' ? (
-        <p className="agm-note">
-          這台 daemon 沒有可靠的 Remote Control 觀測來源，所以它不會宣稱手機已連上。狀態只到「已要求」，
-          要確認得由人實際連一次（`agm` 的遠端觀測 API 會記下是誰、什麼時候確認的，並且會過期）。
-        </p>
-      ) : null}
-      {live.remote.revoked ? <p className="agm-note">{label(REMOTE_REVOKED, live.remote.revoked)}</p> : null}
-      {live.remote.status === 'verified' && live.remote.observedBy ? (
-        <p className="agm-note">
-          由 {live.remote.observedBy} 於 {live.remote.observedAt} 確認
-          {live.remote.source === 'manual' ? '（人工確認，不是 daemon 量到的）' : ''}
-        </p>
-      ) : null}
-      {live.remote.status !== 'verified' ? (
-        <p className="agm-note">
-          遠端入口沒確認不代表 AGM 沒起來——bot 仍會照常收交辦，只是手機上能不能連到這個對話，daemon 說不準。
-        </p>
-      ) : null}
 
       <RoleSummary live={live} onOpen={(id) => {
         selectBot(id)

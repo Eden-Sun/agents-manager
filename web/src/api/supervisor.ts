@@ -18,7 +18,7 @@ export const SUPERVISOR_CANDIDATES = [
   { model: 'opus', effort: 'low', label: 'cc0 opus low' },
 ] as const
 
-/** daemon 回的總管狀態。`remote.status` 是遠端入口，跟 `status`（bot 起沒起來）分開看。 */
+/** daemon 回的總管狀態。 */
 export interface SupervisorInfo {
   configured: boolean
   bot_id: string
@@ -27,7 +27,6 @@ export interface SupervisorInfo {
   identity: string
   effort: string
   status: string
-  remote: SupervisorRemote
   pending_count: number
   assignments: SupervisorAssignment[]
   /** 巡檢（就是上面這顆 AGM）的喚醒統計。 */
@@ -63,24 +62,6 @@ export interface SupervisorResponder {
   stats: SupervisorRoleStats
   /** 它**現在實際**跑在什麼上面（`/model` 換過就會跟設定值不一樣）。沒在跑就都是 null。 */
   runtime: { model: string | null; effort: string | null }
-}
-
-/**
- * 遠端入口（手機）。`status` 是 daemon 算過的：觀測過期或 session 換掉都會退回 `unknown`。
- *
- * 沒有 `active` 這個值。argv 帶了 `--remote-control` 只代表**要求過**（`requested`）；要說它通了
- * 得有帶 actor 的觀測。`capability.status === 'unsupported'` 表示這台 daemon 根本沒有可靠的觀測
- * 來源——那是「不知道」，不是「壞了」。
- */
-export interface SupervisorRemote {
-  status: string
-  url: string
-  source: string | null
-  observedAt: string | null
-  observedBy: string | null
-  revoked: string | null
-  capability: string
-  capabilityReason: string
 }
 
 /** 系統層級的故障。跟「AGM 起沒起來」是兩件事，所以分開拿、分開畫。 */
@@ -187,22 +168,6 @@ export function toIncident(v: unknown): SupervisorIncident | null {
   }
 }
 
-function toRemote(v: unknown): SupervisorRemote {
-  const o = isRec(v) ? v : {}
-  const cap = isRec(o.capability) ? o.capability : {}
-  return {
-    // 舊 daemon 只回 {status,url}；沒有的欄位一律當「不知道」，不要補成好看的值。
-    status: s(o.status, 'unknown'),
-    url: s(o.url),
-    source: typeof o.source === 'string' ? o.source : null,
-    observedAt: typeof o.observed_at === 'string' ? o.observed_at : null,
-    observedBy: typeof o.observed_by === 'string' ? o.observed_by : null,
-    revoked: typeof o.revoked === 'string' ? o.revoked : null,
-    capability: s(cap.status, 'unknown'),
-    capabilityReason: s(cap.reason),
-  }
-}
-
 function toStats(v: unknown): SupervisorRoleStats {
   const o = isRec(v) ? v : {}
   const t = (x: unknown) => (typeof x === 'string' ? x : null)
@@ -251,7 +216,6 @@ function toInfo(v: unknown): SupervisorInfo {
     model: s(o.model, SUPERVISOR_CANDIDATES[0].model),
     effort: s(o.effort, 'low'),
     status: s(o.status, 'unknown'),
-    remote: toRemote(o.remote),
     pending_count: n(o.pending_count),
     assignments: list(o.assignments).map(toAssignment).filter((a): a is SupervisorAssignment => a !== null),
     stats: toStats(o.stats),
@@ -273,16 +237,6 @@ const mockState: SupervisorInfo = {
   model: SUPERVISOR_CANDIDATES[0].model,
   effort: 'low',
   status: 'not_configured',
-  remote: {
-    status: 'unknown',
-    url: '',
-    source: null,
-    observedAt: null,
-    observedBy: null,
-    revoked: null,
-    capability: 'unsupported',
-    capabilityReason: '這台 daemon 沒有可靠的 Remote Control 觀測來源',
-  },
   pending_count: 0,
   assignments: [],
   stats: toStats({}),
@@ -306,8 +260,6 @@ function mockAct(action: SupervisorAction): SupervisorInfo {
     }
   } else if (action === 'start') {
     mockState.status = 'running'
-    mockState.remote.status = 'requested'
-    mockState.remote.source = 'argv'
     mockState.assignments = [
       {
         id: 'asg-1',
@@ -344,19 +296,18 @@ function mockAct(action: SupervisorAction): SupervisorInfo {
     mockState.pending_count = 2
   } else if (action === 'stop') {
     mockState.status = 'stopped'
-    mockState.remote = { ...mockState.remote, status: 'unknown', url: '', source: null }
   } else {
     // 候補：切到第二順位。切不動就維持原樣，不假裝成功。
     mockState.model = mockState.model === SUPERVISOR_CANDIDATES[0].model ? SUPERVISOR_CANDIDATES[1].model : SUPERVISOR_CANDIDATES[0].model
   }
-  return { ...mockState, remote: { ...mockState.remote }, assignments: [...mockState.assignments] }
+  return { ...mockState, assignments: [...mockState.assignments] }
 }
 
 // -------------------------------------------------------------------- 呼叫
 
 /** 這個 daemon 有沒有總管 API。`null` = 端點不存在（舊 daemon），不是錯誤。 */
 export async function fetchSupervisor(): Promise<SupervisorInfo | null> {
-  if (rawTransport.mock) return { ...mockState, remote: { ...mockState.remote }, assignments: [...mockState.assignments] }
+  if (rawTransport.mock) return { ...mockState, assignments: [...mockState.assignments] }
   try {
     return toInfo(await rawTransport.request('GET', '/supervisor'))
   } catch (e) {

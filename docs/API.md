@@ -45,7 +45,7 @@ Vite proxy 要把 `/api`、`/ws`（含 upgrade）、`/hook` 轉到 daemon。daem
 | C | `PUT /drafts/{key}` | 網頁 | UI token（key 只收 `bot:<id>`／`group:<id>`／`shell:<host>/<pane id>`、內容 ≤ 256 KiB） | 改輸入框草稿，空字串＝清掉；不碰任何 bot | 維持 |
 | C | `POST /bots/{id}/restore`、`/identities`、`DELETE /identities/{name}`、`POST /order`、`PATCH /bots/{id}`、`PATCH /projects/{id}`、start／stop／restart／fork／promote／rewind 等其餘寫入 | 網頁、`agm` | UI token（各自的狀態機檢查）；已移交專案的 bot 還原 → 409 `handed_off` | 本機設定與行程，改得回來 | 維持 |
 | D | `POST /supervisor/herdr-maintenance/open`／`end`、`/supervisor/inbox/{id}/ack`、lease `force` 接管 | AGM 角色 pane 裡的 `agm` | `require_role`／`actor_role`（沒角色 403） | — | 已有 |
-| D | `POST /supervisor/{setup,start,stop,fallback,remote}`、`/supervisor/responder/{setup,start,stop}`、`POST /supervisor/assignments/{id}/review`、`PUT /supervisor/handoff`、`POST /supervisor/ops-alerts`、`POST /supervisor/cli`、`POST /supervisor/approvals/{id}/decide` | AGM 角色 pane 裡的 `agm`、使用者網頁／shell | route layer `bot_requests::forbid_plain_bot`：被證明身分的一般 bot（不是巡檢／協調者）→ 403 `role_required`；沒帶 bot 標頭的使用者照舊；角色判斷同 `require_role`／`persona_actor`（`roles::role_of_bot`，每次讀 DB，角色換人後舊 bot 立刻失效；角色綁 bot id，改名、改身分都不影響）。`approvals/{id}/decide` 的 `approve` 另要 `require_role`；User 與 AGM 角色可 deny／revoke。 | AGM 的管理面（改總管的記憶、替總管下指令、對交辦下裁示、對 AGM 喊假警報、記錄遠端入口觀測） | 已有 |
+| D | `POST /supervisor/{setup,start,stop,fallback}`、`/supervisor/responder/{setup,start,stop}`、`POST /supervisor/assignments/{id}/review`、`PUT /supervisor/handoff`、`POST /supervisor/ops-alerts`、`POST /supervisor/cli`、`POST /supervisor/approvals/{id}/decide` | AGM 角色 pane 裡的 `agm`、使用者網頁／shell | route layer `bot_requests::forbid_plain_bot`：被證明身分的一般 bot（不是巡檢／協調者）→ 403 `role_required`；沒帶 bot 標頭的使用者照舊；角色判斷同 `require_role`／`persona_actor`（`roles::role_of_bot`，每次讀 DB，角色換人後舊 bot 立刻失效；角色綁 bot id，改名、改身分都不影響）。`approvals/{id}/decide` 的 `approve` 另要 `require_role`；User 與 AGM 角色可 deny／revoke。 | AGM 的管理面（改總管的記憶、替總管下指令、對交辦下裁示、對 AGM 喊假警報、記錄遠端入口觀測） | 已有 |
 | D | `POST /supervisor/assignments` | AGM 角色與使用者；一般 bot **只能**對 AGM 角色 bot 送 `notice` | handler 內判斷（`post_assignment`）：被證明身分的一般 bot 若是要驗收的交辦、目標不是巡檢／協調者、或帶 `mission_id`／`role` → 403 `role_required`；`kind:"notice"`（或 `expects_review:false`）且目標是角色 bot → 放行（release／herdr 更新任務裡的 `agm assign --notice --bot <巡檢>` 由專用的一般 bot 執行） | 派工＝直接叫另一顆 bot 做事 | 已有 |
 | D | `POST /supervisor/approvals/{id}/decide` | AGM 角色 pane 裡的 `agm`；使用者可 deny／revoke | `approve` 要 `require_role`；`deny`／`revoke` 放行 User 與 AGM 角色；被證明身分的一般 bot 403 `role_required` | 核准換版窗口 | 已有（#447） |
 | E | `/hook/{provider}`、`/relay/announce`、`/relay/pane`、`/relay/kids`、`/relay/spawn/*`、`/build-slots/*` | bot pane 裡的 hook／shim | 不在 `/api` 底下，驗 per-bot `X-AM-Bot-Token` | — | 已有 |
@@ -171,7 +171,6 @@ A 組與 `git/push` 標「待裁示」的原因：這幾支唯一的呼叫端是
 | GET | `/api/supervisor/leases` | User 或已登記 AGM 角色 Bot；一般 Bot → 403 `role_required`；Service 僅可走其明列 method/path scope |
 | GET | `/api/supervisor/maintenance/safety` | User 或已登記 AGM 角色 Bot；一般 Bot → 403 `role_required`；Service 僅可走其明列 method/path scope |
 | GET | `/api/supervisor/persona` | User 或已登記 AGM 角色 Bot；一般 Bot → 403 `role_required`；Service 僅可走其明列 method/path scope |
-| GET | `/api/supervisor/remote` | User 或已登記 AGM 角色 Bot；一般 Bot → 403 `role_required`；Service 僅可走其明列 method/path scope |
 | GET | `/api/supervisor/responder` | User 或已登記 AGM 角色 Bot；一般 Bot → 403 `role_required`；Service 僅可走其明列 method/path scope |
 | GET | `/api/supervisor/responder/persona` | User 或已登記 AGM 角色 Bot；一般 Bot → 403 `role_required`；Service 僅可走其明列 method/path scope |
 | GET | `/api/supervisor/state` | User 或已登記 AGM 角色 Bot；一般 Bot → 403 `role_required`；Service 僅可走其明列 method/path scope |
@@ -240,7 +239,6 @@ A 組與 `git/push` 標「待裁示」的原因：這幾支唯一的呼叫端是
 | HEAD | `/api/supervisor/leases` | User 或已登記 AGM 角色 Bot；一般 Bot → 403 `role_required`；Service 僅可走其明列 method/path scope |
 | HEAD | `/api/supervisor/maintenance/safety` | User 或已登記 AGM 角色 Bot；一般 Bot → 403 `role_required`；Service 僅可走其明列 method/path scope |
 | HEAD | `/api/supervisor/persona` | User 或已登記 AGM 角色 Bot；一般 Bot → 403 `role_required`；Service 僅可走其明列 method/path scope |
-| HEAD | `/api/supervisor/remote` | User 或已登記 AGM 角色 Bot；一般 Bot → 403 `role_required`；Service 僅可走其明列 method/path scope |
 | HEAD | `/api/supervisor/responder` | User 或已登記 AGM 角色 Bot；一般 Bot → 403 `role_required`；Service 僅可走其明列 method/path scope |
 | HEAD | `/api/supervisor/responder/persona` | User 或已登記 AGM 角色 Bot；一般 Bot → 403 `role_required`；Service 僅可走其明列 method/path scope |
 | HEAD | `/api/supervisor/state` | User 或已登記 AGM 角色 Bot；一般 Bot → 403 `role_required`；Service 僅可走其明列 method/path scope |
@@ -344,7 +342,6 @@ A 組與 `git/push` 標「待裁示」的原因：這幾支唯一的呼叫端是
 | POST | `/api/supervisor/leases/{resource}/renew` | User 或 Bot；Bot owner 必須是自己，即使升級前 lease 沒有 token；`force` 接管必須是 AGM role；daemon-swap 只可 renew／release restart lease |
 | POST | `/api/supervisor/ops-alerts` | User 或 AGM 角色 Bot；一般 Bot 403 `role_required` |
 | POST | `/api/supervisor/persona/adopt-embedded` | User 或 AGM 角色 Bot；一般 Bot 403 `role_required` |
-| POST | `/api/supervisor/remote` | User 或 AGM 角色 Bot；一般 Bot 403 `role_required` |
 | POST | `/api/supervisor/responder/setup` | User 或 AGM 角色 Bot；一般 Bot 403 `role_required` |
 | POST | `/api/supervisor/responder/start` | User 或 AGM 角色 Bot；一般 Bot 403 `role_required` |
 | POST | `/api/supervisor/responder/stop` | User 或 AGM 角色 Bot；一般 Bot 403 `role_required` |
@@ -2508,18 +2505,18 @@ CLI：`agents-managerd release-triage-check --kind <claude|codex> [--since <ver>
 
 全部走 `X-AM-Token`。未部署的 daemon 對這些路徑回 404（前端用 404 判斷「這台不支援」）。
 
-讀取 AGM 控制面資料也只接受 User principal 或已驗證的 AGM patrol/responder role；一般 Bot 對 supervisor 摘要、health、assignments、handoff、incidents、persona、build inputs、remote、approvals、maintenance safety、leases、inbox、state、CLI 狀態、herdr maintenance、responder 狀態／persona、Claude update review 與 evidence 回 `403 role_required`。role 查詢失敗時拒絕請求。`/api/supervisor`、health、state、leases 與 maintenance safety 仍可由 service principal 在其各自明列的 service scope 中讀取；此例外不擴大 Bot 權限。
+讀取 AGM 控制面資料也只接受 User principal 或已驗證的 AGM patrol/responder role；一般 Bot 對 supervisor 摘要、health、assignments、handoff、incidents、persona、build inputs、approvals、maintenance safety、leases、inbox、state、CLI 狀態、herdr maintenance、responder 狀態／persona、Claude update review 與 evidence 回 `403 role_required`。role 查詢失敗時拒絕請求。`/api/supervisor`、health、state、leases 與 maintenance safety 仍可由 service principal 在其各自明列的 service scope 中讀取；此例外不擴大 Bot 權限。
 
 ### 狀態、啟停、模型切換
-- `GET /api/supervisor` → `{configured,bot_id,project_id,model:"fable"|"opus",model_arg,identity:"cc0",effort:"low",status,status_detail,generation,cwd,quota_reset_at,remote:{…},pending_count,assignments:[]}`。
-  `status`：`not_configured` | `stopped` | `starting` | `idle` | `busy` | `waiting_quota` | `failed`。`pending_count` = 未結案 assignment + 未 ack inbox。`remote` 同 `GET /api/supervisor/remote`。
+- `GET /api/supervisor` → `{configured,bot_id,project_id,model:"fable"|"opus",model_arg,identity:"cc0",effort:"low",status,status_detail,generation,cwd,quota_reset_at,pending_count,assignments:[]}`。
+  `status`：`not_configured` | `stopped` | `starting` | `idle` | `busy` | `waiting_quota` | `failed`。`pending_count` = 未結案 assignment + 未 ack inbox。（`remote`／`remote_provider` 已隨 #1477 移除，見下「手機 Remote Control 已移除」。）
   另有 `last_deploy:{sha,sha_full,dirty,at}`＝現在跑的這顆 binary 的 commit（`sha_full` 是 40 碼完整 sha；`dirty:true`＝建置時工作樹有未提交的追蹤檔改動，這顆 binary 不是任何一個 commit，daemon-swap 的複核會拒收）（建置時編進去，拿不到 git 是 `unknown`）與**這顆 binary 第一次上線**的時間（記在 `<data_dir>/last-deploy.json`；binary 沒換的重啟不會把它往前推）；
   前端用它排除上次上線以前的舊重建申請。
-  頂層欄位都是**巡檢**（SPEC §18.15）；另有 `role:"patrol"`、`remote_provider:"patrol"`、`stats:{wakes,events_delivered,duplicates,merged,last_wake_at,last_wake_reason,last_notify_at,notify_next_at}`、
+  頂層欄位都是**巡檢**（SPEC §18.15）；另有 `role:"patrol"`、`stats:{wakes,events_delivered,duplicates,merged,last_wake_at,last_wake_reason,last_notify_at,notify_next_at}`、
   `responder`（同 `GET /api/supervisor/responder`）。
 
 ### 協調者（responder，SPEC §18.15）
-- `GET /api/supervisor/responder` → `{configured,bot_present,bot_id,project_id,identity,model,effort,remote_control:false,status,status_detail,quota_reset_at,desired_running,watchdog:{attempts,next_at,gave_up_at},inbox_open,wake_pending,stats:{…}}`。`wake_pending` = 還沒送出、會叫醒它的事件數。
+- `GET /api/supervisor/responder` → `{configured,bot_present,bot_id,project_id,identity,model,effort,status,status_detail,quota_reset_at,desired_running,watchdog:{attempts,next_at,gave_up_at},inbox_open,wake_pending,stats:{…}}`。`wake_pending` = 還沒送出、會叫醒它的事件數。
   `POST /api/supervisor/responder/start` 先記 `desired_running=true` 再啟動：啟動失敗回錯誤，但看門狗會照 §18.9 的退避重試。
   `status`：`not_configured` | `stopped` | `starting` | `idle` | `busy` | `waiting_quota` | `needs_login`（CLI 沒登入；`status_detail` 寫怎麼解） | `unavailable` | `missing`（登記過但那顆 bot 被刪了；事件仍留在它的佇列，另推一則 `responder_bot_missing` 給巡檢）。
   `unavailable_reason`：`needs_login` | `waiting_quota` | `notify_stalled` | `no_run` | `null`——**機器讀這一欄，不要解析 `status`**。
@@ -2534,14 +2531,14 @@ CLI：`agents-managerd release-triage-check --kind <claude|codex> [--since <ver>
   `runtime{model,effort,started_at}` 是它現在實際跑的（`/model` 換過就會不一樣）。
   `setup` 會驗 `model`（`[a-z0-9][a-z0-9._-]{0,39}`）與 `effort`（`config::normalize_effort`），不合格 400——這兩個值會直接變成 CLI 的 argv。
 - `POST /api/supervisor/responder/setup {identity?,model?,effort?}` → 同上加 `deployed`。冪等、只建立不啟動；預設沿用已存的（第一次 `cc0/opus/high`）。掛在**巡檢的專案**底下，cwd 是自己的 `supervisor/AGM-responder`（記在 `bots.cwd`）
-  （`CLAUDE.md`、`persona.md`、`runtime.json{role:"responder",self_bot_id,responder_bot_id,manager_bot_id}`、`bin/agm`、`handoff.md`），args 空（rc off）。身分不存在 409 `identity_missing`。
+  （`CLAUDE.md`、`persona.md`、`runtime.json{role:"responder",self_bot_id,responder_bot_id,manager_bot_id}`、`bin/agm`、`handoff.md`），args 空。身分不存在 409 `identity_missing`。
 - `POST /api/supervisor/responder/start {}` / `stop {}` → 同 GET。`start` 標應該在跑（看門狗會拉起），`stop` 先標不要再停。
   還沒 `setup` 就 `start` → 409 `{"reason":"responder_not_configured"}`（看門狗要拉起一顆不存在的協調者時同一個代碼）。
 - `GET /api/supervisor/responder/persona`、`PUT {text,expected_version?}` → 同巡檢的 persona 形狀加 `role:"responder"`；內嵌種子 `docs/goals/agm-responder-persona.md`。
 - `POST /api/supervisor/setup {}` → 同上再加 `deployed:{cwd,agm_cli}`。冪等：建立專用 Project／Bot／cwd，寫 `CLAUDE.md`、`persona.md`、`runtime.json`（**不含 token**）、`bin/agm`、
-  `handoff.md`（已存在不覆蓋）。args `["--remote-control","AGM"]`、`autostart=false`，**只建立不啟動**。`cc0` 不存在 409 `identity_missing`；專案裡有別的 `AGM` 409 `name_taken`——supervisor 列還沒記過 bot 時（第一次設定、或上一次寫進 config 之後部署／記錄失敗），daemon 目錄那個專案裡的同名 `AGM` 就是上一次寫進去的那一顆，接著用它、不回 `name_taken`（協調者的 `AGM-responder` 同一條，#181）。
+  `handoff.md`（已存在不覆蓋）。args 不帶 `--remote-control`（手機 Remote Control 已移除）；既有安裝留下的 `--remote-control <name>` 這一對在 setup 與 daemon 開機時被拿掉（其餘 args 不動，執行中的 AGM 標需重啟、不自動重啟）。`autostart=false`，**只建立不啟動**。`cc0` 不存在 409 `identity_missing`；專案裡有別的 `AGM` 409 `name_taken`——supervisor 列還沒記過 bot 時（第一次設定、或上一次寫進 config 之後部署／記錄失敗），daemon 目錄那個專案裡的同名 `AGM` 就是上一次寫進去的那一顆，接著用它、不回 `name_taken`（協調者的 `AGM-responder` 同一條，#181）。
   總管認持久化的 `bot_id`，改名不會多開一個。
-- `POST /api/supervisor/start {}` / `stop {}` → 同 GET。`start` 後 `remote.status` 是 `requested`。`start` 標「應該在跑」、`stop` 標「使用者要它停」：不是經 `stop` 停掉的
+- `POST /api/supervisor/start {}` / `stop {}` → 同 GET。`start` 標「應該在跑」、`stop` 標「使用者要它停」：不是經 `stop` 停掉的
   （被殺、崩潰、更新重啟沒回來），watchdog 自動再 `start`（30 秒，之後 60／120／300 秒退避，連續 5 次失敗寫進 `status_detail` 並停止）。`waiting_quota` 期間與 setup 後沒 start 過的不拉起。
   兩支都**先寫意圖再做副作用**，寫不進去就整個失敗、一步都不做，回 `502 could not persist desired_running (…)`，不會靜靜吞掉（issue #84，協調者的 start／stop 同規則）：
   這個旗標是 watchdog 唯一的憑據，回 200 卻沒寫進去的話，使用者停掉的 AGM 下一個 tick 就自己活回來。**啟動本身**失敗不撤銷意圖（回錯誤，交給 watchdog 重試）；
@@ -2585,12 +2582,10 @@ CLI：`agents-managerd release-triage-check --kind <claude|codex> [--since <ver>
   `role_unavailable`（issue #427／#459，舊名 `responder_needs_login`，migrate 會改寫既有的列）：resource 是角色名（`patrol`／`responder`），`detail{role,reason,bot_id,since,notify_failures,detail,action}`；`reason` 就是 `unavailable_reason` 那組字串，`needs_login` 是 critical、其餘 degraded。巡檢的 `bot_id`／狀態／detail 讀 `supervisors`（與正式 setup 相同來源；沒有 `supervisor_roles.patrol.bot_id` 不代表未設定），巡檢的 `since` 讀 health tick 記憶體；協調者則讀 `supervisor_roles`。協調者沒建立時巡檢那一筆**不推 inbox**（沒有第二條路），只留在 UI 與 `system_health`。
   `notify_exhausted` 例外：協調者建立時推（路由給協調者，開啟叫醒、恢復只記錄）；沒有協調者不入 inbox，只在這支與 `system_health` 看得到。
 
-### 遠端入口
-`GET /api/supervisor/remote` → `{status,stored_status,revoked,source,observed_at,observed_by,session_id,current_session_id,url,url_is_evidence,capability,ttl_secs}`。
-`status` 只有 `requested` | `verified` | `unavailable` | `unknown`（SPEC §18.12）；`capability.status` 目前 `unsupported`。觀測超過 `ttl_secs`（900）或 AGM 換 session 退回 `unknown`（`revoked` 說明），`url` 不回（`url_is_evidence:false`）。
-`POST /api/supervisor/remote {status,source,actor?,evidence?,url?}`：只接受 User 或 AGM 角色，已驗證的一般 bot 回 403 `role_required`；`url` 只收絕對的 http／https 網址（`javascript:`／`data:`／`file:`／相對路徑／含空白或控制字元的一律 400，什麼都不寫；前端會把它放進 `<a href>`）；`source` 只收 `manual`（`provider` 保留、`argv` 拒絕）；`verified`／`unavailable` 需要 actor、非空 evidence 與當前 AGM run，15 分鐘後失效。
-  記下來的 `observed_by` 照 #414 的形狀（issue #463）：驗過的角色寫 `AGM:<role>`，其餘寫 `user(<自稱>)`／`user`——body 的 `actor` 只是未驗證的自稱。驗過的角色不必再帶 `actor`。
-用一個**不能作證**的來源報 `verified` → 409 `{"reason":"source_cannot_verify","source":"<送來的 source>"}`：哪些來源作得了證是 `remote::Source::can_verify` 說了算，不是呼叫端說了算。
+### 手機 Remote Control 已移除（#1477，使用者 2026-10-12）
+手機 Remote Control 不好用，整套拿掉：`GET`／`POST /api/supervisor/remote` 路由不存在了（404）、`GET /api/supervisor` 沒有 `remote`／`remote_provider`、
+`GET /api/supervisor/responder` 沒有 `remote_control`、incident 不再有 `remote_entry`（舊版留下的開著的那一張由下一輪巡檢自動收掉）、
+`runtime.json` 沒有 `remote_name`、`agm remote` 子命令拿掉。`supervisors.remote_*` 欄位留在資料庫但不讀不寫（拿掉要升 `SCHEMA_VERSION`，沒有收益）。
 
 ### 人設
 - `GET /api/supervisor/persona` → `{stored:{version,hash,source,updated_at,seeded_from,length,text},embedded:{hash,length},loaded:{status,run_started_at,evidence},upgrade_available,needs_restart}`。
@@ -2826,7 +2821,7 @@ CLI：`agents-managerd release-triage-check --kind <claude|codex> [--since <ver>
 `agm issue release <n>` 拿掉 label 並留 `<!-- agm:issue-release … -->`；別人還按著的票同樣 exit 3。每次交回只結束它指向的認領；每個認領期由 REST 數字留言 ID 最小的第一則認領勝出（同秒也照此排序），輸家會追加自己的交回標記並 exit 3。過期認領允許新認領開始下一期。
 標記必須**自己佔一行**（行首只能有空白）：被「引用回覆」（`> <!-- … -->`）或夾在句子中間的標記不算，免得引用別顆 bot 的交回標記就把它的認領清掉。只清 label、沒有認領可交回時，交回標記的 `claim_id` 寫成 `label-only`（不會對上任何認領；沒有 `claim_id` 的舊標記仍是「交回當下有效的任何一筆」），讀完留言到寫入之間別人搶到的新認領不會被它清掉。
 `gh` 被限流（`rate limit`／HTTP 429）回 `gh_rate_limited`（exit 1、`retryable:true`，訊息明講「不是沒人認領」）；其他 `gh` 失敗是 `gh_failed`。兩者都不是 exit 3，呼叫端不能當成可以派工。「最後動靜」只看留言與票的 `updatedAt`，不看分支 push。
-執行期設定讀 `<cwd>/runtime.json`：`{daemon_url, manager_bot_id, responder_bot_id, bot_id, role, self_bot_id, data_dir, supervisor_id, remote_name}`（巡檢目錄的 `responder_bot_id` 在沒有協調者時是 `null`）；一般 shell CLI 執行期 `GET /api/session` 取 User token；`daemon_url` 只接受 loopback。
+執行期設定讀 `<cwd>/runtime.json`：`{daemon_url, manager_bot_id, responder_bot_id, bot_id, role, self_bot_id, data_dir, supervisor_id}`（巡檢目錄的 `responder_bot_id` 在沒有協調者時是 `null`）；一般 shell CLI 執行期 `GET /api/session` 取 User token；`daemon_url` 只接受 loopback。
 `role` 缺省＝`patrol`。Bot pane（有 `AM_BOT_ID`）裡的 `agm` API client 一律以那顆 bot 的身分請求：帶 `X-AM-Bot-Id`／`X-AM-Bot-Token`（`AM_BOT_TOKEN`；舊 pane 回退 `AM_HOOK_TOKEN`），不帶共用 UI token；缺 token 就送半套讓 daemon 回 401，不降級成 User。角色仍由 daemon 比對已驗證的 bot id（不是巡檢／協調者的 bot 照樣拿不到角色權限）。沒有 `AM_BOT_ID` 的一般 shell 才用共用 User token；`AM_SERVICE_ID`＋`AM_SERVICE_TOKEN_FILE` 一起設時改用 service principal（`daemon-swap.sh` 這樣呼叫）。mission 的 `relay_from` 由 authenticated bot id 推導或必須與它相同。
 
 **角色標頭是三態，不是兩態（issue #415）**：沒有 Bot／service header 且有有效 `X-AM-Token` = User；帶了成對 Bot headers 且 token 對得上 = 那顆已驗證 bot，再由各端點判斷它是否是角色 bot；

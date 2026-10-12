@@ -482,28 +482,6 @@ pub async fn observe(app: &(impl crate::capabilities::DataDir + crate::capabilit
         Ok(_) => {}
     }
 
-    // The phone entry point, but only when there is evidence it is *broken*. `unknown` with an
-    // unsupported capability is a documented limit, not a fault: opening an incident for it
-    // would mean a permanent red light nobody can clear.
-    match super::remote::try_status(app.db()).await {
-        Ok(remote) => {
-            let remote_status = remote.get("status").and_then(Value::as_str).unwrap_or("unknown");
-            if super::remote::severity(remote_status) == "degraded" {
-                out.push(Observation {
-                    kind: "remote_entry".into(),
-                    resource: super::setup::REMOTE_NAME.to_string(),
-                    severity: "degraded".into(),
-                    detail: remote.to_string(),
-                });
-            }
-        }
-        // 讀不到＝這條探針這一拍沒跑：開著的 remote_entry 原封不動，不當成恢復。
-        Err(e) => {
-            tracing::warn!(error = ?e, "remote_entry probe failed");
-            probed.failed.push("remote_entry");
-        }
-    }
-
     // issue #421：核准開著超過 30 分鐘還沒有**任何人**裁示。改派（`failover`）只換得動角色；
     // 兩個角色都沒登入時換到誰手上都一樣，這時要喊的是人，而不是只留一行 log——2026-09-23 那天
     // 部署停了 9 小時，全程沒有任何東西告訴使用者「有一筆核准在等你」。
@@ -1118,7 +1096,7 @@ mod tests {
         assert!(!notifiable("notify_exhausted", "responder", false), "this one would retry, exhaust, and open another incident");
         // With a responder there is a second channel whose queue never exhausts: tell it.
         assert!(notifiable("notify_exhausted", "responder", true));
-        for kind in ["host_disconnected", "bot_stopped", "assignment_stalled", "assignment_undelivered", "remote_entry", super::super::failover::STALLED_KIND] {
+        for kind in ["host_disconnected", "bot_stopped", "assignment_stalled", "assignment_undelivered", super::super::failover::STALLED_KIND] {
             assert!(notifiable(kind, "whatever", false), "{kind} is safe to wake the manager about");
         }
     }
@@ -1310,50 +1288,22 @@ mod tests {
         );
     }
 
+    /// #1477：Remote Control 的探針拿掉之後，舊版留下的 open `remote_entry` incident 不會再有人看見它，
+    /// 下一拍 sweep 要把它當成已恢復收掉——不然側欄永遠掛著一張沒人清得掉的「遠端入口異常」。
     #[tokio::test]
-    async fn an_unreadable_remote_probe_is_blind_not_a_recovery() {
-        let env = crate::testing::env().await;
-        let app = env.app.clone();
-        let bot = crate::testing::claude_bot(&app, &env.project_id, "agm-remote").await.id;
-        let run_id = crate::testing::fake_run(&app, &bot).await;
-        store::get_or_init(&app.db).await.unwrap();
-        sqlx::query("UPDATE supervisors SET bot_id=? WHERE id=?")
-            .bind(&bot)
-            .bind(store::SUPERVISOR_ID)
-            .execute(&app.db)
+    async fn a_legacy_remote_entry_incident_is_closed_by_the_next_sweep() {
+        let app = super::super::bot_requests::flow_tests::app().await;
+        store::open_incident_notifying(&app.db, "remote_entry", "AGM", "degraded", &json!({"status": "unavailable"}), false)
             .await
             .unwrap();
-        store::set_remote_observed(
-            &app.db,
-            "unavailable",
-            None,
-            "manual",
-            Some(&run_id),
-            Some("user"),
-            Some("phone cannot connect"),
-        )
-        .await
-        .unwrap();
+        let open_sql = "SELECT COUNT(*) FROM supervisor_incidents WHERE kind='remote_entry' AND status='open'";
+        let open: i64 = sqlx::query_scalar(open_sql).fetch_one(&app.db).await.unwrap();
+        assert_eq!(open, 1, "前提：舊版留下一張開著的");
 
-        let thresholds = Thresholds::from_cfg(&app.cfg.get().await.supervisor);
-        let before = observe(&app, &thresholds).await;
-        assert!(before.seen.iter().any(|o| o.kind == "remote_entry"), "前提：探針看得到 unavailable");
+        let mut detector = Detector::default();
+        sweep(&app, &mut detector).await;
 
-        crate::testing::make_table_unreadable(&app, "runs").await;
-        let blind = observe(&app, &thresholds).await;
-        crate::testing::make_table_readable(&app, "runs").await;
-        assert!(!blind.seen.iter().any(|o| o.kind == "remote_entry"));
-        assert!(blind.failed.contains(&"remote_entry"), "讀不到要記成探針沒跑：{:?}", blind.failed);
-
-        // Detector 因此不會把開著的那筆關掉
-        let mut d = Detector::default();
-        let plan = d.plan(
-            &blind.seen,
-            &[("remote_entry".into(), crate::supervisor::setup::REMOTE_NAME.to_string())],
-            &blind.failed,
-            &thresholds,
-            chrono::Utc::now().timestamp(),
-        );
-        assert!(plan.resolve.is_empty(), "{:?}", plan.resolve);
+        let open: i64 = sqlx::query_scalar(open_sql).fetch_one(&app.db).await.unwrap();
+        assert_eq!(open, 0, "沒有任何探針會再回報它：當成恢復收掉");
     }
 }

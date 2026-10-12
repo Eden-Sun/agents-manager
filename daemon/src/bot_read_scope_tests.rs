@@ -256,7 +256,6 @@ async fn supervisor_management_reads_require_user_or_a_verified_agm_role() {
         "/api/supervisor/incidents?all=1",
         "/api/supervisor/persona",
         "/api/supervisor/build-inputs",
-        "/api/supervisor/remote",
         "/api/supervisor/approvals",
         "/api/supervisor/maintenance/safety",
         "/api/supervisor/leases",

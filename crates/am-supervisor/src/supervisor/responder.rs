@@ -5,7 +5,7 @@
 //! * **自己的目錄與專案**（`supervisor/AGM-responder`）。claude 的 session 以 cwd 為鍵，兩個角色
 //!   共用一個目錄就會互相接到對方的 session、覆寫對方的 `persona.md`。
 //! * **自己的模型**（預設 cc0/opus/high），沒有 fable→opus 的切換：協調者不跑巡檢的模型政策。
-//! * **沒有 Remote Control**。使用者入口只有巡檢一個。
+//! * 使用者入口只有巡檢一個。
 //! * **額度用完就等**。事件留在 inbox、狀態寫 `waiting_quota` 與下次重試時間。**例外是核准**：
 //!   `approval_requested` 開超過 5 分鐘而協調者不可用（含撞限）時改派給巡檢，見 `failover.rs`
 //!   與 SPEC §18.15。其餘種類（bot 的申請、mission 事件）照舊留在協調者佇列等它回來。
@@ -132,7 +132,7 @@ fn claude_md(dir: &Path, bot_id: &str, port: u16) -> String {
 
 ## 邊界
 - 這個目錄不是任何專案的原始碼，不要在這裡改程式。
-- 不開 Remote Control；使用者入口是巡檢 AGM。
+- 使用者入口是巡檢 AGM。
 - 不要把 token、登入秘密或完整環境變數寫進任何檔案或回覆。
 "#,
         dir = dir.display(),
@@ -285,7 +285,7 @@ pub async fn ensure_env(
             bot.effort = Some(e2.clone());
             bot.identity = Some(i2.clone());
             bot.persona = Some(persona2.clone());
-            // rc off：使用者入口只有巡檢一個。
+            // 使用者入口只有巡檢一個：協調者不帶任何額外 args。
             bot.args = vec![];
             bot.autostart = false;
             bot.inject_hooks = true;
@@ -1037,7 +1037,6 @@ pub async fn status_json(app: &(impl crate::capabilities::Db + crate::supervisor
         "model": row.model,
         "effort": row.effort,
         "runtime": runtime,
-        "remote_control": false,
         "status": status,
         // 機器讀的原因（穩定字串，同 `health::REASON_*`、同 #421 寫進 inbox payload 的那個）：
         // `needs_login` / `waiting_quota` / `notify_stalled` / `no_run`，`null` = 這一拍看起來是好的。
@@ -1201,7 +1200,7 @@ mod tests {
         let body = persona_body();
         assert!(body.starts_with("你是 AGM 的協調者"), "{:?}", &body[..40.min(body.len())]);
         assert!(body.contains("cc0/opus/high"));
-        assert!(!body.contains("Remote Control 名稱為 AGM"), "使用者入口不是協調者的");
+        assert!(!body.contains("Remote Control"), "手機 Remote Control 已廢（#1477），人設不再提它");
     }
 
     #[test]

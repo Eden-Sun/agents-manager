@@ -17,7 +17,76 @@ use super::store;
 pub const PERSONA_DOC: &str = include_str!("../../../../docs/goals/agm-supervisor-persona.md");
 
 pub const BOT_NAME: &str = "AGM";
-pub const REMOTE_NAME: &str = "AGM";
+
+/// `--remote-control <name>`（或 `--remote-control=<name>`）從 args 拿掉，其他 args 原樣；沒有這個旗標就回 `None`。
+///
+/// 使用者 2026-10-12 裁示廢掉手機 Remote Control（#1477）：以前 setup 把 `["--remote-control","AGM"]` 寫進巡檢的 args，
+/// 既有安裝裡還留著這一對。旗標後面不是另一個旗標才算它的名字；其餘 args 是使用者的，不動。
+pub fn without_remote_control(args: &[String]) -> Option<Vec<String>> {
+    let mut out = Vec::with_capacity(args.len());
+    let mut found = false;
+    let mut it = args.iter().peekable();
+    while let Some(arg) = it.next() {
+        if arg == "--remote-control" {
+            found = true;
+            if it.peek().is_some_and(|name| !name.starts_with('-')) {
+                it.next();
+            }
+        } else if arg.starts_with("--remote-control=") {
+            found = true;
+        } else {
+            out.push(arg.clone());
+        }
+    }
+    found.then_some(out)
+}
+
+/// 既有安裝的遷移（#1477）：巡檢與協調者兩顆 bot 的 args 若還帶著 `--remote-control <name>` 就拿掉那一對。
+/// 冪等（沒有就不寫 config）；只改 config.toml 的 args——執行中的 session 照舊，`launch_rev` 一變就是「需重啟」
+/// （既有機制），**不**自動重啟 AGM。回傳改了幾顆。daemon 開機與每次 `setup` 都會跑。
+pub async fn strip_remote_control_args(app: &(impl crate::capabilities::Cfg + crate::capabilities::Db + crate::capabilities::Emit + ConfigProjection)) -> Result<usize, LcError> {
+    let up = |e: &dyn std::fmt::Display| LcError::Upstream(e.to_string());
+    let mut ids = Vec::new();
+    if let Some(id) = store::get_or_init(app.db()).await.map_err(|e| up(&e))?.bot_id {
+        ids.push(id);
+    }
+    if let Some(id) = super::roles::bot_for(app.db(), super::roles::Role::Responder).await.map_err(|e| up(&e))? {
+        ids.push(id);
+    }
+    if ids.is_empty() {
+        return Ok(0);
+    }
+    let cfg = app.cfg().get().await;
+    let stale: Vec<String> = cfg
+        .projects
+        .iter()
+        .flat_map(|p| p.bots.iter())
+        .filter(|b| without_remote_control(&b.args).is_some())
+        .filter_map(|b| b.id.clone())
+        .filter(|id| ids.contains(id))
+        .collect();
+    if stale.is_empty() {
+        return Ok(0);
+    }
+    let targets = stale.clone();
+    app.update_and_project(move |cfg| {
+        for bot in cfg.projects.iter_mut().flat_map(|p| p.bots.iter_mut()) {
+            if bot.id.as_ref().is_some_and(|id| targets.contains(id)) {
+                if let Some(args) = without_remote_control(&bot.args) {
+                    bot.args = args;
+                }
+            }
+        }
+        Ok(())
+    })
+    .await
+    .map_err(|e| up(&e))?;
+    for id in &stale {
+        tracing::info!(bot = %id, "removed the retired --remote-control argument from the supervisor bot's args (restart to apply)");
+        app.emit("bot_changed", json!({"bot_id": id})).await;
+    }
+    Ok(stale.len())
+}
 
 /// Resolve the supervisor candidate and apply the shared retired-model policy before launch.
 pub fn model_arg(candidate: &str) -> &'static str {
@@ -94,7 +163,6 @@ fn claude_md(dir: &Path, bot_id: &str, port: u16) -> String {
 ## 邊界
 - 這個目錄不是任何專案的原始碼，不要在這裡改程式。
 - 不要把 token、登入秘密或完整環境變數寫進任何檔案或回覆。
-- Remote Control 名稱是 `{REMOTE_NAME}`，由啟動環境建立；不要自己開關。
 "#,
         dir = dir.display(),
     )
@@ -132,7 +200,6 @@ fn runtime_json(port: u16, bot_id: &str, responder_id: Option<&str>, data_dir: &
         "self_bot_id": bot_id,
         "data_dir": data_dir,
         "supervisor_id": store::SUPERVISOR_ID,
-        "remote_name": REMOTE_NAME,
     })
 }
 
@@ -291,9 +358,10 @@ pub async fn ensure_env(app: &(impl crate::capabilities::Cfg + crate::capabiliti
             bot.effort = Some(effort.clone());
             bot.identity = Some(identity.clone());
             bot.persona = Some(persona_for_cfg.clone());
-            // The Remote Control entry point the phone looks for. Setup only *configures* it;
-            // whether a remote session actually came up is decided by observation, never argv.
-            bot.args = vec!["--remote-control".into(), REMOTE_NAME.into()];
+            // 手機 Remote Control 已廢（#1477）：舊安裝留下的 `--remote-control <name>` 在這裡拿掉，使用者自己加的其他 args 不動。
+            if let Some(args) = without_remote_control(&bot.args) {
+                bot.args = args;
+            }
             // Verified by hand before it is allowed to come back by itself.
             bot.autostart = false;
             bot.inject_hooks = true;
@@ -353,6 +421,7 @@ mod tests {
         assert_eq!(v["self_bot_id"], "botULID");
         let text = v.to_string().to_lowercase();
         assert!(!text.contains("token"), "no token, and no field that could hold one: {text}");
+        assert!(v.get("remote_name").is_none(), "Remote Control 已廢（#1477），沒有讀者的欄位不留");
     }
 
     /// ops 腳本測試用的 runtime.json 必須是**真的** `runtime_json()` 寫出來的形狀：上一輪測試自己造了一份
@@ -385,6 +454,97 @@ mod tests {
         write_runtime_json(&app, "bot-agm", Some("bot-resp")).unwrap();
         let v: Value = serde_json::from_str(&std::fs::read_to_string(&file).unwrap()).unwrap();
         assert_eq!((v["manager_bot_id"].as_str(), v["responder_bot_id"].as_str()), (Some("bot-agm"), Some("bot-resp")));
+    }
+
+    fn strs(v: &[&str]) -> Vec<String> {
+        v.iter().map(|s| s.to_string()).collect()
+    }
+
+    /// #1477：只移 `--remote-control <name>` 這一對；使用者的其他 args 原樣、順序不變。
+    #[test]
+    fn only_the_remote_control_pair_is_removed_from_args() {
+        assert_eq!(without_remote_control(&strs(&["--remote-control", "AGM"])), Some(vec![]));
+        assert_eq!(
+            without_remote_control(&strs(&["--verbose", "--remote-control", "AGM", "--model", "x"])),
+            Some(strs(&["--verbose", "--model", "x"]))
+        );
+        assert_eq!(without_remote_control(&strs(&["--remote-control=AGM", "--verbose"])), Some(strs(&["--verbose"])));
+        assert_eq!(
+            without_remote_control(&strs(&["--remote-control", "--verbose"])),
+            Some(strs(&["--verbose"])),
+            "旗標後面是另一個旗標：它沒有名字，只拿旗標本身"
+        );
+        assert_eq!(without_remote_control(&strs(&["--verbose"])), None, "沒有就是沒有：不重寫");
+        assert_eq!(without_remote_control(&[]), None);
+    }
+
+    /// #1477：既有安裝的巡檢 bot 還帶著 `--remote-control AGM`。開機遷移與重跑 setup 都只拿掉那一對、其他 args 不動，
+    /// 並且讓用舊設定起來的 run 變成「需重啟」（`launch_rev` 不同，既有機制）；新 setup 不再寫它。
+    #[tokio::test]
+    async fn an_existing_install_loses_only_the_remote_control_pair_and_is_marked_for_restart() {
+        let env = crate::testing::env().await;
+        let app = env.app.clone();
+        let sup = store::get_or_init(&app.db).await.unwrap();
+        app.tools.lock().await.insert(
+            crate::config::LOCAL_HOST.to_string(),
+            crate::tools::HostTools {
+                tools: Default::default(),
+                identities: Default::default(),
+                shell_identities: vec![crate::config::IdentityCfg { name: sup.identity.clone(), kind: "claude".into(), host: None, env: Default::default(), args: vec![] }],
+                utc_offset_secs: None, herdr_cli: None, checked_at: crate::db::now(),
+            },
+        );
+        let args_in_cfg = |app: std::sync::Arc<crate::state::App>, id: String| async move {
+            app.cfg.get().await.projects.iter().flat_map(|p| p.bots.iter()).find(|b| b.id.as_deref() == Some(id.as_str())).expect("bot in config").args.clone()
+        };
+
+        let (_, bot_id, _) = ensure_env(&app).await.map_err(|e| format!("{e:?}")).expect("新安裝 setup");
+        assert!(args_in_cfg(app.clone(), bot_id.clone()).await.is_empty(), "新 setup 不再帶 --remote-control");
+        assert_eq!(strip_remote_control_args(&app).await.unwrap(), 0, "沒有就不動");
+
+        // 舊安裝：args 裡有 Remote Control 一對與使用者自己加的旗標；run 是用那份設定起來的。
+        let id = bot_id.clone();
+        app.update_and_project(move |cfg| {
+            for b in cfg.projects.iter_mut().flat_map(|p| p.bots.iter_mut()) {
+                if b.id.as_deref() == Some(id.as_str()) {
+                    b.args = vec!["--remote-control".into(), "AGM".into(), "--verbose".into()];
+                }
+            }
+            Ok(())
+        })
+        .await
+        .unwrap();
+        let run_id = crate::testing::fake_run(&app, &bot_id).await;
+        let old_rev = crate::launch_rev::of(&crate::db::bot(&app.db, &bot_id).await.unwrap().unwrap());
+        sqlx::query("UPDATE runs SET launch_rev=? WHERE id=?").bind(&old_rev).bind(&run_id).execute(&app.db).await.unwrap();
+        let stale = |app: std::sync::Arc<crate::state::App>, id: String| async move {
+            let bot = crate::db::bot(&app.db, &id).await.unwrap().unwrap();
+            let run = crate::db::active_run(&app.db, &id).await.unwrap().expect("active run");
+            crate::launch_rev::is_stale(&bot, &run)
+        };
+        assert!(!stale(app.clone(), bot_id.clone()).await, "前提：run 載入的就是現在的設定");
+
+        assert_eq!(strip_remote_control_args(&app).await.unwrap(), 1);
+        assert_eq!(args_in_cfg(app.clone(), bot_id.clone()).await, strs(&["--verbose"]), "只拿掉那一對");
+        let projected = crate::db::bot(&app.db, &bot_id).await.unwrap().unwrap();
+        assert_eq!(projected.args(), strs(&["--verbose"]), "投影進資料庫的也一樣");
+        assert!(stale(app.clone(), bot_id.clone()).await, "舊 run 還拿著舊的 argv：要標需重啟，而不是被自動重啟");
+        assert_eq!(strip_remote_control_args(&app).await.unwrap(), 0, "冪等：第二次什麼都不做");
+
+        // 重跑 setup：不把它寫回去，使用者的旗標也不被蓋掉。
+        let id = bot_id.clone();
+        app.update_and_project(move |cfg| {
+            for b in cfg.projects.iter_mut().flat_map(|p| p.bots.iter_mut()) {
+                if b.id.as_deref() == Some(id.as_str()) {
+                    b.args = vec!["--verbose".into(), "--remote-control".into(), "AGM".into()];
+                }
+            }
+            Ok(())
+        })
+        .await
+        .unwrap();
+        ensure_env(&app).await.map_err(|e| format!("{e:?}")).expect("重跑 setup");
+        assert_eq!(args_in_cfg(app.clone(), bot_id.clone()).await, strs(&["--verbose"]), "setup 也順手移掉舊的一對");
     }
 
     /// 設定 AGM 做到一半失敗：config 已經寫進 `AGM` 這顆 bot，之後部署檔案（或把 bot 記進 supervisor 列）那一步失敗。

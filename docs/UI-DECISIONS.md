@@ -877,7 +877,7 @@ claude 的 `AskUserQuestion`（網頁或終端答的都一樣）答完之後，�
 - **連結一律 `target="_blank" rel="noopener noreferrer"`**；被清掉網址的連結不留 `<a>`，字還在。以前沒有，bot 給的連結一按就整個 app 換頁。
 - **太長（> 2 萬字）或巢狀太深（引用 > 20 層、行首縮排 > 80 格）預設純文字**，附「以 Markdown 顯示」讓使用者自己展開：remark 對某些輸入是平方時間（`*a` 重複 2 萬次卡 22 秒），巢狀引用 6000 層卡 87 秒、更深遞迴爆 stack；即使手動展開也不快取。轉換或輸出元件 render 真的丟例外由 boundary 退回純文字並淘汰壞樹（整個 app 沒有其他 error boundary，沒接住就白畫面且重新整理也白）。
 - 不是 Markdown 的欄位（bot／專案名、檔名、通知）一律文字節點，不用 `innerHTML`；`document.title` 只帶未讀數；沒有用 Notification API。
-- 放進 `<a href>` 的外來網址（遠端入口、交付 PR、issue）先過 `safeHttpUrl`，只收絕對 http／https；daemon 端 `POST /api/supervisor/remote` 也擋。
+- 放進 `<a href>` 的外來網址（交付 PR、issue）先過 `safeHttpUrl`，只收絕對 http／https。
 
 ## 主機一致性過期（2026-10-02）
 
@@ -1031,7 +1031,7 @@ tooltip 寫最後一次失敗的原因。主機一直離線時沒有任何事件
 ## 外部 Cargo 沒勾選就收起來；側欄拿掉「AGM 總管」（2026-10-04 使用者）
 
 - **外部 Cargo 主機**（環境設定→主機）：「啟用外部 Cargo verification」沒勾時，只顯示標題、說明、勾選框與「儲存」（取消啟用也要能存）；主機／帳號／port／jobs／工作目錄／密碼與「測試連線」勾選後才展開。隱藏不等於清空：欄位 state 與已存值原樣保留，取消勾選再儲存只送 `enabled:false`，host／user 等照舊、沒打密碼就不帶 `password`。表單有不合法值時，錯誤清單照常顯示（即使欄位收起來），以免儲存鍵被擋卻看不到原因。
-- **「AGM 總管」入口**：使用者說這個功能沒用、從來沒點過，側欄的按鈕與 Modal 拿掉。`SupervisorPanel`、`api/supervisor.ts`、daemon 端點都留著（元件只是不掛載）；AGM bot 本身與它的對話照常。原本只有這裡能做的操作改走 CLI：`agm supervisor`（狀態、遠端入口、交辦）、`agm supervisor-{setup,start,stop,fallback}`、`agm responder …`、`agm health`（故障）。
+- **「AGM 總管」入口**：使用者說這個功能沒用、從來沒點過，側欄的按鈕與 Modal 拿掉。`SupervisorPanel`、`api/supervisor.ts`、daemon 端點都留著（元件只是不掛載）；AGM bot 本身與它的對話照常。原本只有這裡能做的操作改走 CLI：`agm supervisor`（狀態、交辦）、`agm supervisor-{setup,start,stop,fallback}`、`agm responder …`、`agm health`（故障）。
 
 ## shell 裡自己跑的 agent 照樣能打字（2026-10-04 使用者）
 
