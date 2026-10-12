@@ -1242,6 +1242,9 @@ export function Sidebar() {
           const hiddenCount = all.length - shown.length
           const list = shown.filter((b) => !b.parent_bot_id)
           const childrenOf = (id: string) => shown.filter((b) => b.parent_bot_id === id)
+          // 孫代也要畫（SPEC §6.5a）：子列 → 它的子列 → 下一個子列，深度優先。
+          const descendantsOf = (id: string, seen = new Set<string>()): Bot[] =>
+            childrenOf(id).flatMap((c) => (seen.has(c.id) ? [] : (seen.add(c.id), [c, ...descendantsOf(c.id, seen)])))
           const projectSelected = selectedProjectId === p.id
           // 搜尋中一律展開。
           const projectShut = shutProjects.has(p.id) && !query
@@ -1365,7 +1368,7 @@ export function Sidebar() {
                 // 子清單是父列的兄弟，靠 aria-owns 掛回，巢狀 list 才合法。
                 <div className="bot-list" role="list" aria-label={`${p.label} 的 Bot`}>
                 {list.map((b) => {
-                  const kids = childrenOf(b.id)
+                  const kids = descendantsOf(b.id)
                   // 搜尋中一律展開。
                   const shut = kids.length > 0 && collapsed.has(b.id) && !query
                   const kidsLamp = shut ? kidsLampOf(lampState, kids.map((c) => c.id)) : null
@@ -1390,7 +1393,7 @@ export function Sidebar() {
                       {shut || kids.length === 0 ? null : (
                         <div id={`bot-kids-${b.id}`} className="bot-kids" role="list" aria-label={`${b.name} 的 ${kids.length} 個子 agent`} ref={kidsWheelRef}>
                           {kids.map((c, i) => (
-                            <div key={c.id} className={`bot-child${i === kids.length - 1 ? ' last' : ''}`}>
+                            <div key={c.id} className={`bot-child${i === kids.length - 1 ? ' last' : ''}${c.parent_bot_id !== b.id ? ' deep' : ''}`}>
                               <BotRow
                                 compact
                                 botId={c.id}
