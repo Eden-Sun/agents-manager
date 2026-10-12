@@ -844,6 +844,7 @@ StatusLine 分支（過世代圍籬之後，舊 run／舊 hook 進不來）發�
   grok 1.0.46（拋棄式 `GROK_HOME`）：`--reasoning-effort`／`--effort` 改這一輪框底、不寫 `config.toml`；`--always-approve` 同樣只作用這一輪。`/effort <level>` 會立刻寫入 `[models] default_reasoning_effort`，`/always-approve` 會寫入 `[ui] permission_mode = "always-approve"`。daemon 不送這兩個 slash。啟動不讀框底補等級。
 - **收編的 pane**三欄是 NULL = 不知道，UI 不比也不標。codex 例外：它把三個值印在狀態列上，reconcile 讀那行補 NULL（`reconcile::fill_codex_runtime`）——
   否則 UI 會拿 bots 頂上，而 `/fast` 是開關，不知道的 tier 等於切不掉。
+  讀不出狀態列（三欄仍 NULL）時不每拍（10 秒）重讀：連續讀不出來的兩次讀取之間跳過 2^(n-1) 拍，封頂 64 拍（約 10 分鐘）；讀得出來就清掉退避（#1652）。
   **之後也持續校正**（`codex_live::sync_runtime`，跟 `update_watch` 同一個 30 秒巡邏）：狀態列只認視窗底部（窄 pane 把 `Context N%` 折到下一行仍算同一列；再往上的引用不算）。跟記著的一樣就不再讀、不拿鎖；不一樣才拿 bot 鎖重讀後以它為準，有 `fast` 字樣＝開，整行讀得到卻沒有＝關（codex 關掉時省略那個字）；
   讀不到（選單開著、畫面被清）什麼都不動，不把讀不到當成 fast=false。0.157 起狀態列印顯示名（`GPT-6-Luna`）而不是 id：讀進來一律轉小寫，讀回驗證的模型比對也不分大小寫
   （#712：以前大小寫不同就 `readback_model_mismatch`，連閒著只切 fast 都退回重啟，web 也多列一行假的「模型」落差）。使用者在 TUI 手打 `/fast`／`/model`，或當場套用中途失敗，都不會讓標題列的 fast 與「需重啟」chip 卡在啟動時的舊值。
