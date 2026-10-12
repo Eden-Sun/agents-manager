@@ -464,7 +464,7 @@ pub async fn assign(
     .await
     .map_err(up)?;
     if let Some(parent) = follow_up_of {
-        let _ = store::link_followup(app.db(), parent, &a.id).await;
+        store::link_followup(app.db(), parent, &a.id).await.map_err(up)?;
     }
     // Best effort: a failure here leaves the row queued, which is the recoverable state.
     controller::dispatch(app, &a.id).await;
