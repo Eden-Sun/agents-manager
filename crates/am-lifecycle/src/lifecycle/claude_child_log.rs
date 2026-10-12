@@ -7,7 +7,7 @@
 //! * **找 session**：herdr 的 `agent.get` 回的 `agent_session`（`kind: "id"`）就是 claude 當下的 session id——herdr 自己從 claude 的
 //!   SessionStart 綁的，不必掃行程，遠端也一樣。先用 agent 名字查，名字被 herdr 拿掉（`agent start` 逾時）時改用 pane id 查；
 //!   還沒綁（claude 剛起來）就用 run 記過的，兩者都沒有＝照舊看畫面。找到的記在 `runs.native_session_id`／`transcript_path`。
-//! * **讀檔**：`<root>/projects/*/<session id>.jsonl` 的尾巴（一般檔、非 symlink），本機與遠端都用 `sh`。root 依序是：bot 的 `CLAUDE_CONFIG_DIR`、
+//! * **讀檔**：`<root>/projects/*/<session id>.jsonl` 的尾巴（一般檔、非 symlink），本機與遠端都用 `sh` 呼叫 Python 的 fd-relative reader。root 依序是：bot 的 `CLAUDE_CONFIG_DIR`、
 //!   這個身分在該主機的 config 目錄、`~/.claude`。session id 只收英數與 `-`／`_`。
 //! * **實際的 model／effort**（#880）：每則 `assistant` 行都帶 `effort`（頂層）與 `message.model`，是這顆 claude 當下真正在用的值；
 //!   最新一則寫進 `runs.runtime_model`／`runtime_effort`（網頁優先顯示 runtime，`bots.effort` 只是設定值，不回寫）。
@@ -273,9 +273,12 @@ fn read_script(roots: &[String], sid: &str) -> String {
 
 fn read_script_tail(roots: &[String], sid: &str, max: u64) -> String {
     let list = roots.iter().map(|r| sh_quote(r)).collect::<Vec<_>>().join(" ");
+    // No unsafe shell fallback when Python is absent: callers use the screen instead.
     format!(
-        "for r in {list}; do for f in \"$r\"/projects/*/{sid}.jsonl; do if [ -f \"$f\" ] && [ ! -L \"$f\" ]; then printf '%s\\n%s\\n' '{mark}' \"$f\"; tail -c {max} \"$f\"; break 2; fi; done; done; :",
-        mark = LOG_MARK,
+        "python3 -I -c {} {} {max} {} {list} 2>/dev/null; :",
+        sh_quote(include_str!("claude_child_tail.py")),
+        sh_quote(sid),
+        sh_quote(LOG_MARK),
     )
 }
 
