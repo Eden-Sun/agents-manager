@@ -42,7 +42,7 @@ export function BlockedModal({ botId, onClose }: { botId: string; onClose: () =>
   const dangerous = isDangerousRmScreen(snap?.text)
   const keysLive = passthroughLive(passthrough, dangerous)
   // 畫面上看不到題目（pane 太矮、claude 把選單裁掉）時，從 transcript 補題目（2026-09-23 使用者）。
-  const pending = usePendingQuestion(botId, false)
+  const { questions: pending, status: pendingStatus } = usePendingQuestion(botId, false)
   const showPending = pending.length > 0 && !questionVisibleOnScreen(pending, menu?.question)
   // 畫面上是原題的第幾題：補題目、補「第幾題／上一題下一題」（issue #559）。
   const pendingAt = pendingAtOnScreen(pending, menu)
@@ -160,6 +160,7 @@ export function BlockedModal({ botId, onClose }: { botId: string; onClose: () =>
 
         <CodexUpdateHint botId={botId} text={snap?.text} onAnswered={refresh} />
 
+        {pendingStatus === 'unavailable' ? <div role="status">暫時無法確認待答題目，請參考終端畫面。</div> : null}
         {/* 認不出選單時原題攤開、排在終端上面（那時它是唯一讀得懂的題目）；認得出時收進下面的主捲軸（#559）。 */}
         {showPending && !menu ? <PendingQuestionCard questions={pending} defaultOpen answerWhere="below" /> : null}
 
