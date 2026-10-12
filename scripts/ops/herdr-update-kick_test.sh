@@ -58,6 +58,11 @@ STUB
   cat > "$ROOT/stubbin/gh" <<'STUB'
 #!/bin/bash
 echo "$*" >> "$AGM_DIR/gh-calls.log"
+# 真的 gh 遇到不認得的呼叫方式是非零；少了 -R 就會去查錯的 repo，這裡要擋下來，不能照樣回 tag。
+case "$*" in
+  "release list -R ${HERDR_REPO} --exclude-pre-releases -L 1 --json tagName") ;;
+  *) echo "gh: unexpected arguments: $*" >&2; exit 2 ;;
+esac
 if [ -n "${STUB_GH_TAG:-}" ]; then
   printf '[{"tagName":"%s"}]' "$STUB_GH_TAG"
 else
