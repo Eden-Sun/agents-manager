@@ -41,3 +41,40 @@
         assert!(o.status.success());
         assert_eq!(String::from_utf8_lossy(&o.stdout).trim(), "hi");
     }
+
+    /// 逾時（或 future 被丟掉）只殺直接子行程 sh 的話，它底下的孫行程（`&` 的背景工作）會留著。這裡保留 sh 本體（不 `exec`），
+    /// 用 abort 丟掉 future 觸發收尾：跟逾時走同一條路，而且不靠時間。
+    #[tokio::test]
+    async fn a_dropped_run_takes_its_grandchildren_with_it() {
+        let pidfile = crate::testing::track(std::env::temp_dir().join(format!("am-local-sh-grandchild-{}.pid", std::process::id())));
+        let _ = std::fs::remove_file(&pidfile);
+        let script = format!("sleep 60 & echo $! > {}; wait", pidfile.display());
+        let run = tokio::spawn(async move { output_within(&script, Duration::from_secs(120)).await });
+        let grandchild = loop {
+            if let Ok(p) = std::fs::read_to_string(&pidfile) {
+                if p.ends_with('\n') && p.trim().parse::<u32>().is_ok() {
+                    break p.trim().to_string();
+                }
+            }
+            tokio::task::yield_now().await;
+        };
+        run.abort();
+        let _ = run.await;
+        let _ = std::fs::remove_file(&pidfile);
+        // 還在跑才算活著；殘留的 zombie 已經不在執行了。
+        let still_running = |pid: &str| {
+            std::process::Command::new("ps")
+                .args(["-o", "stat=", "-p", pid])
+                .output()
+                .map(|o| {
+                    let stat = String::from_utf8_lossy(&o.stdout).trim().to_string();
+                    !stat.is_empty() && !stat.starts_with('Z')
+                })
+                .unwrap_or(false)
+        };
+        let gone = crate::testing::eventually!(!still_running(&grandchild));
+        if !gone {
+            let _ = std::process::Command::new("kill").args(["-9", &grandchild]).status();
+        }
+        assert!(gone, "run 被丟掉之後，sh 底下的孫行程 {grandchild} 還活著");
+    }
