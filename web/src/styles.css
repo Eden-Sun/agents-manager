@@ -20,9 +20,6 @@
   --accent-ink: #2a63cd;
   --accent-text: #ffffff;
   --accent-soft: #e6eeff;
-  /* 完成待看（未讀）的底：黃混 50% 面板，字用 --text（10.1:1），選取藍框對底 3.0:1。 */
-  --done-fill: color-mix(in srgb, var(--lamp-yellow) 50%, var(--bg-panel));
-  --done-ink: var(--text);
 
   --bubble-user: #2f6fe4;
   --bubble-user-text: #ffffff;
@@ -86,9 +83,6 @@
     --accent-ink: #7aa5f8;
     --accent-text: #0f1115;
     --accent-soft: #26375c;
-    /* 深色：黃混 30% 面板（字 6.6:1，藍框 3.3:1）。 */
-    --done-fill: color-mix(in srgb, var(--lamp-yellow) 30%, var(--bg-panel));
-    --done-ink: var(--text);
 
     --bubble-user: #3f68cf;
     --bubble-user-text: #f2f5fb;
@@ -141,9 +135,6 @@
   --accent-ink: #7aa5f8;
   --accent-text: #0f1115;
   --accent-soft: #26375c;
-  /* 深色：黃混 30% 面板（字 6.6:1，藍框 3.3:1）。 */
-  --done-fill: color-mix(in srgb, var(--lamp-yellow) 30%, var(--bg-panel));
-  --done-ink: var(--text);
 
   --bubble-user: #3f68cf;
   --bubble-user-text: #f2f5fb;
