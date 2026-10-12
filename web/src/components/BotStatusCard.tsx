@@ -72,7 +72,8 @@ export function BotStatusCard({
 
   const status = run?.status ?? null
   const title = run?.agent_title?.trim() || ''
-  const doing = activity || title
+  // agent_title 在 run 結束前不清（API.md）：閒置時它是上一個任務的標題，不能當成現在在做的事。
+  const doing = run?.agent_status === 'working' || run?.agent_status === 'blocked' ? activity || title : ''
   const tasks = backgroundTaskLines(run)
   const model = shortModel(bot.kind, run?.runtime_model ?? bot.model ?? status?.model_name ?? null)
   const effort = status?.effort ?? run?.runtime_effort ?? bot.effort

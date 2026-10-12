@@ -57,3 +57,11 @@ test('主力 claude 有 run 才在卡片裡畫「不用保溫」（觸控版）�
   await mount(<BotStatusCard botId="b1" hints={hints} anchor={null} onClose={() => {}} onLegend={() => {}} />)
   assert.equal(document.querySelector('.keep-warm-skip-btn'), null, '沒有 run 不畫')
 })
+
+test('閒置時不寫「正在做」：agent_title 是上一個任務的，run 結束前不清（API.md agent_title），閒置就不能拿來當現在在做的事', async () => {
+  useStore.setState({ bots: [bot], runs: { b1: { ...run, agent_status: 'idle' } as Run }, busy: {} })
+  await mount(<BotStatusCard botId="b1" hints={hints} anchor={null} onClose={() => {}} onLegend={() => {}} />)
+  const text = document.querySelector('.bot-status-card')?.textContent ?? ''
+  assert.ok(!text.includes('正在做'), text)
+  assert.ok(!text.includes('跑整樹測試'), text)
+})
