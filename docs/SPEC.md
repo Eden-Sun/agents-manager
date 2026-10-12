@@ -2227,8 +2227,8 @@ pid 不拿去對 listen port。agy 的登入 TUI 會在 127.0.0.1 自己開兩�
 ### 6.5g build scheduler：全機 cargo/rustc 併發（issue #90）
 
 **問題**：多顆 agent 各自跑 `cargo build`/`check`/`test`/`clippy` 會讓 rustc 併發數乘起來，就算單一指令的資源用量合理，
-機器的 RAM／CPU 還是會被榨乾。目前是人工用一支腳本（`cargo-slot.sh`）＋兩個全機名額硬擋，每次派工都要複製一份給子 agent，
-不是 daemon 提供的機制，跨 worktree／跨 agent／跨 herdr session 沒有共同的真相來源。
+機器的 RAM／CPU 還是會被榨乾。以前是人工用一支腳本（`cargo-slot.sh`，已不在 repo）＋兩個全機名額硬擋，每次派工都要複製一份給子 agent，
+不是 daemon 提供的機制，跨 worktree／跨 agent／跨 herdr session 沒有共同的真相來源。下面是 daemon 的做法。
 
 **方向**：把「一個受管的 cargo 指令」變成 daemon 發的**租約型名額**（跟 §18.10 的 `restart`/`rebuild` 租約同一個道理，
 但輕量很多——搶不到的後果只是「慢一點」，不需要核准流程與 fence）。`cargo` PATH shim（跟 `herdr` shim 裝在同一個
