@@ -16,6 +16,8 @@ use sqlx::SqlitePool;
 
 use crate::config::JudgeCfg;
 
+#[path = "judge/ask_option.rs"]
+pub mod ask_option;
 #[path = "judge/collision.rs"]
 pub mod collision;
 #[path = "judge/report.rs"]

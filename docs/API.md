@@ -887,8 +887,27 @@ UI 標籤：`hook` 不標；`terminal_fallback` 或 `incomplete = 1` 標「終�
 `GET /api/bots/{id}/terminal?source=visible&lines=200`：`source ∈ visible | recent | recent_unwrapped | detection`（預設 `visible`），`lines` 1–2000。無 active Run → 404。
 
 `GET /api/bots/{id}/pending-question`：claude 停在 `AskUserQuestion` 時，從 transcript 讀出**還沒被回答**的那一題（最後一個 `tool_use`、之後沒有同 `tool_use_id` 的 `tool_result`）：
-`200 {"questions": [{question, header, multiSelect, options:[{label, description}]}] | null}`。只讀 transcript 最後 512 KiB。
-遠端、非 claude、沒有 transcript、沒在等題目都回 `{"questions": null}`（不是錯誤，前端照舊用畫面）。bot 或 active Run 不存在 404。
+`200 {"questions": [{question, header, multiSelect, options:[{label, description}]}] | null, "jev_options": {…} | null}`。只讀 transcript 最後 512 KiB。
+遠端、非 claude、沒有 transcript、沒在等題目都回 `{"questions": null, "jev_options": null}`（不是錯誤，前端照舊用畫面）。bot 或 active Run 不存在 404。
+
+`jev_options`（issue #1475，SPEC §4.3c 第五個場景）：Jev 對「使用者會選哪個選項」的**提示**，只提示、不代答、不送出任何東西。
+`null` ＝沒有可顯示的建議資料：Jev 沒開／專案不在名單／專案已移交、沒有單選題、還沒問或還在問、問失敗（逾時、5xx、答案壞掉、名額用完）。**題目與選項照常回，不等 Jev。**
+有答案時：
+
+```json
+"jev_options": {
+  "ledger_id": "01M…",            // judge_shadow 那一列
+  "model": "jev-1.13.0",
+  "threshold": 0.7,               // 最高分要 ≥ 這個值
+  "margin": 0.15,                 // 且比第二名高 ≥ 這個值才標
+  "questions": [
+    {"index": 0, "scores": [0.91, 0.08], "suggested": 0}   // index＝questions[] 的位置；scores 與該題 options[] 一一對應；suggested＝建議的選項位置，沒有建議是 null
+  ]
+}
+```
+
+`questions` 只列問過的題（單選、2–8 個選項；多選題不問、不列），沒列的題不顯示任何標記。`suggested: null` 時分數照給（接近或低於門檻），**網頁不該顯示建議**。
+第一次讀到某個提問（`tool_use` id）時 daemon 丟一個背景 task 去問，同一個提問只問一次、失敗不重試；答案落帳後發 WS `pending_question_hint`，網頁收到就重讀這支。
 用途：pane 太矮時 claude 會把自己的選單裁掉，題目那一行根本沒畫出來（2026-09-23 使用者：「為什麼看不見題目」）。
 
 ```json
@@ -918,6 +937,7 @@ UI 標籤：`hook` 不標；`terminal_fallback` 或 `incomplete = 1` 標「終�
 | `turn_progress` | 即時輸出，見「WS `turn_progress`」 |
 | `project_changed` | `{"project_id"}`（或 `{}`） |
 | `bot_changed` | `{"bot_id"}` |
+| `pending_question_hint` | `{"bot_id","run_id","tool_use_id"}`：Jev 對這顆 bot 正在等的 `AskUserQuestion` 的選項建議答案落帳了（issue #1475）；網頁收到就重讀 `GET /api/bots/{id}/pending-question` 的 `jev_options`。只在答案可用時發（含分數接近、偏低而 `suggested:null`）；問失敗、沒開、沒問不發 |
 | `panes_changed` | `{"host"}`：這台主機的 `panes` 表（側欄「其他 pane」的來源）真的變了——掃描、用途回報、adopt、關閉、GC 之後比對指紋，沒變不發；前端收到就重抓 `GET /api/panes` |
 | `draft_updated` | `{"key","text","rev","client_id","updated_at"}`：輸入框草稿被寫了（`PUT /api/drafts/{key}`），`text:""`＝刪除（含 bot／專案被刪）；見「輸入框草稿」 |
 | `preview_changed` | `{"bot_id", "status":"off"\|"starting"\|"running"\|"failed", "port", "source"}`（SPEC §6.12） |
@@ -2456,7 +2476,7 @@ WS `upstream_update`：快照有變或要通知時推，`data` ＝上面一筆 i
 
 ## 撞限第二意見帳本 `/api/judge/shadow`（SPEC §4.3c，issue #240）
 - `GET /api/judge/shadow?limit=`（預設 200、上限 1000）→ `{enabled, projects, model, rows:[{id,at,bot_id,run_id,kind,matched_line,composer_idle,regex_verdict,jev_is_live_ui,jev_same_work,model,ms,input_tokens,error,cleared_at,assignment_id,claims_verified,asks_parent_action}]}`，新的在前。唯讀；`matched_line` 是遮罩後的；key 與 `key_file` 不回。
-  `regex_verdict`：`limit_hit`（撞限第二意見，`jev_is_live_ui`＝那一行是介面畫的機率）、`stuck_queued`（卡在不認識的畫面，SPEC §4.3c；`jev_is_live_ui`＝畫面底部有框在等人的機率、`matched_line`＝畫面尾段指紋）、`report_evidence`（完成回報的證據旗標，issue #558；`assignment_id` 指回那筆交辦，`claims_verified`／`asks_parent_action` 是兩題 Noul，`jev_is_live_ui` 留空，`matched_line`＝遮罩後回報的指紋），或 `same_work`（撞題提示，#557；`jev_same_work`＝該不該先把兩件連起來的機率，`jev_is_live_ui` 為 null，`matched_line`＝這一對的 JSON，答案回來時候選交辦已經不會開始就多一個 `stale`＝那時的狀態、不推提示，`run_id`＝配對鍵）。`stuck_queued` ≥0.7 推 inbox `judge_stuck_screen`（payload `{bot_id,bot_name,kind,run_id,turn_id,waited_secs,probability,screen_tail,action}`）。`same_work` ≥0.5 推 inbox `judge_same_work`（payload `{assignment_id,parent_bot_id,probability,threshold,source,candidate_ref,candidate_title,existing_ref,existing_title,shadow,action}`），只提示不阻擋。`report_evidence` 在 `claims_verified` < 0.8 或 `asks_parent_action` ≥ 0.8 時推 inbox `judge_report_evidence`（payload `{assignment_id,bot_id,bot_name,parent_bot_id,turn_id,claims_verified,asks_parent_action,reasons,action}`，`reasons` 是 `missing_verification`／`needs_parent_action`）；歸交辦的驗收角色、不叫醒，不改交辦狀態。只問 `turn_status=completed` 的回報（`completed_fallback` 不送）。父 bot 另有一則系統訊息：「交辦 <id>（<bot 名>）的」＋`action`。
+  `regex_verdict`：`limit_hit`（撞限第二意見，`jev_is_live_ui`＝那一行是介面畫的機率）、`stuck_queued`（卡在不認識的畫面，SPEC §4.3c；`jev_is_live_ui`＝畫面底部有框在等人的機率、`matched_line`＝畫面尾段指紋）、`report_evidence`（完成回報的證據旗標，issue #558；`assignment_id` 指回那筆交辦，`claims_verified`／`asks_parent_action` 是兩題 Noul，`jev_is_live_ui` 留空，`matched_line`＝遮罩後回報的指紋），`ask_option`（`AskUserQuestion` 選項建議，issue #1475；`run_id`＝那一輪的 run，`matched_line`＝`{tool_use_id, questions:[{index,scores,suggested}]}`（答案回來之前只有 `tool_use_id`；不存題目與選項原文），三個機率欄位都留空，`error` 為空才是答案可用；`cleared_at` 不蓋），或 `same_work`（撞題提示，#557；`jev_same_work`＝該不該先把兩件連起來的機率，`jev_is_live_ui` 為 null，`matched_line`＝這一對的 JSON，答案回來時候選交辦已經不會開始就多一個 `stale`＝那時的狀態、不推提示，`run_id`＝配對鍵）。`stuck_queued` ≥0.7 推 inbox `judge_stuck_screen`（payload `{bot_id,bot_name,kind,run_id,turn_id,waited_secs,probability,screen_tail,action}`）。`same_work` ≥0.5 推 inbox `judge_same_work`（payload `{assignment_id,parent_bot_id,probability,threshold,source,candidate_ref,candidate_title,existing_ref,existing_title,shadow,action}`），只提示不阻擋。`report_evidence` 在 `claims_verified` < 0.8 或 `asks_parent_action` ≥ 0.8 時推 inbox `judge_report_evidence`（payload `{assignment_id,bot_id,bot_name,parent_bot_id,turn_id,claims_verified,asks_parent_action,reasons,action}`，`reasons` 是 `missing_verification`／`needs_parent_action`）；歸交辦的驗收角色、不叫醒，不改交辦狀態。只問 `turn_status=completed` 的回報（`completed_fallback` 不送）。父 bot 另有一則系統訊息：「交辦 <id>（<bot 名>）的」＋`action`。
 
 - `GET /api/judge/settings` → `{enabled, projects, model, key_present, key_error}`。key 永遠不回。
 - `PUT /api/judge/settings {enabled?, projects?, token?}` → 同上。`token` 非空＝寫進 key 檔（600）、空或省略＝不動；`projects` 是專案 id 或 label，去空白、去重；`enabled:true` 而沒有可用的 key → 409 `{error:"needs_key", reason}`；`token` 含空白／控制字元 → 400。存檔當下生效。token 與 `enabled`／`projects` 一起存是一個整體：token 先寫成暫存檔（600），config 寫成功才原子換掉現行 key；config 失敗（5xx）舊 key 與 config 都不變，換 key 失敗則把 config 退回原值。
