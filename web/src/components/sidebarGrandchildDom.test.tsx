@@ -50,3 +50,11 @@ test('鍵盤 ↑／↓ 的順序照畫面：孫代緊跟在它的子代後面（
   }
   assert.deepEqual(orderedBotIds(st as never), ['G', 'P', 'C', 'D'])
 })
+
+test('孤兒子 agent（父列不在清單裡）也要畫得出來：照頂層列處理，不能從側欄消失', async () => {
+  useStore.setState({ bots: [bot('C', 'GONE'), bot('X', null)], runs: {}, selectedBotId: 'X' } as never)
+  await mount(<Sidebar />)
+  await settle()
+  assert.ok(document.querySelector('[data-bot-id="C"]'), '父列不見了，子列也要留在側欄上（鍵盤順序已經把它算進來）')
+  assert.ok(document.querySelector('[data-bot-id="X"]'))
+})
