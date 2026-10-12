@@ -1454,6 +1454,7 @@ tab 已被回收視為完成，`tab.list` 失敗不猜。沒有 `tab_id` 的 Run
    不在框裡、畫面上也找不到 → `auto_resend=1` 的自動重送一次（本章開頭：讀 `prompt_text`、打字前被擋退還額度再試一次、按過鍵證明不了記 `unknown`）；
    都沒用才讀 `visible` 快照 → Turn `failed` + system Message，
    **判斷不了就不判**（#193）：送了什麼、run／turn／bot、重送額度讀不到或寫不進去，這一輪不判失敗，隔 10 秒整輪再看；
+   退款或 failed 與說明的交易寫入失敗也保留 watchdog；未打字的重送退款欠帳在下一輪先補成功，才重新認領額度（#1487）。
    補送按過鍵證明不了、`delivery='unknown'` 卻寫不進去就欠著，每一輪先補，補上之前不判（打過的字可能已經被收下）。
    中性敘述並原樣引用含 `Not logged in`／`/login`／`unlock-keychain`／`usage limit`／`limit` 的行（提示 ssh 下 macOS Keychain 可能讀不到）。
 8. 請求可帶 `relay_from`（**另一顆** bot 的 id，不是收件的那顆，也不是 `"daemon"`——見 §6.5d 第 6 點），

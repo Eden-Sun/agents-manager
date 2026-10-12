@@ -493,10 +493,10 @@
 
         assert!(claim_resend(&pool, "t", 1).await.unwrap(), "第一次拿得到");
         assert!(!claim_resend(&pool, "t", 1).await.unwrap(), "額度只有一次");
-        refund_resend(&pool, "t").await;
+        refund_resend(&pool, "t").await.unwrap();
         assert!(claim_resend(&pool, "t", 1).await.unwrap(), "退還之後還有一次");
-        refund_resend(&pool, "t").await;
-        refund_resend(&pool, "t").await;
+        refund_resend(&pool, "t").await.unwrap();
+        refund_resend(&pool, "t").await.unwrap();
         let n: i64 = sqlx::query_scalar("SELECT resend_count FROM turns WHERE id='t'").fetch_one(&pool).await.unwrap();
         assert_eq!(n, 0, "退還不會退成負數");
         pool.close().await;
