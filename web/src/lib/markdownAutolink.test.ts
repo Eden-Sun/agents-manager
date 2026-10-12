@@ -60,3 +60,10 @@ test('長訊息：很多網址緊接著全形標點（沒有空白）也要切�
   assert.equal(got[0], 'https://example.com/p0')
   assert.equal(got[299], 'https://example.com/p299')
 })
+
+test('ASCII 右括號不成對、後面接全形標點：括號不算網址（同終端；(https://…/a)。 的網址是 …/a）', () => {
+  assert.deepEqual(linksOf('(https://example.com/a)。', true), ['https://example.com/a'])
+  assert.deepEqual(linksOf('see (https://example.com/a)，好', true), ['https://example.com/a'])
+  // 成對的括號是網址自己的，要留著。
+  assert.deepEqual(linksOf('https://en.wikipedia.org/wiki/Foo_(bar)。', true), ['https://en.wikipedia.org/wiki/Foo_(bar)'])
+})

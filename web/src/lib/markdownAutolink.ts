@@ -20,6 +20,39 @@ interface MdNode {
   children?: MdNode[]
 }
 
+function countOf(s: string, ch: string): number {
+  let n = 0
+  for (const c of s) if (c === ch) n++
+  return n
+}
+
+/**
+ * 網址的長度（不含句尾不算的部分）：ASCII 句尾標點，以及沒有配對的右括號／右方括號（同 termPieces 的 trimPunct）。
+ * 從尾端往前剝，計數只算一次，整段線性。右括號只在「多過左括號」時才剝：成對的是網址自己的（`…/Foo_(bar)`）。
+ */
+function urlEnd(s: string): number {
+  let end = s.length
+  let open = countOf(s, '(')
+  let close = countOf(s, ')')
+  let sqOpen = countOf(s, '[')
+  let sqClose = countOf(s, ']')
+  while (end > 0) {
+    const last = s[end - 1]
+    if ('.,;:!?'.includes(last)) {
+      end--
+    } else if (last === ')' && close > open) {
+      close--
+      end--
+    } else if (last === ']' && sqClose > sqOpen) {
+      sqClose--
+      end--
+    } else {
+      break
+    }
+  }
+  return end
+}
+
 function textNode(value: string): MdNode {
   return { type: 'text', value }
 }
@@ -38,7 +71,7 @@ function linkifyText(text: string): MdNode[] {
   while ((m = re.exec(text)) !== null) {
     const start = m.index
     // 句點、逗號等 ASCII 句尾標點不算網址（同 remark 的規則）。
-    const url = m[0].replace(/[.,;:!?]+$/, '')
+    const url = m[0].slice(0, urlEnd(m[0]))
     if (!URL_START.test(url) || (start > 0 && WORD_CHAR.test(text[start - 1]))) {
       // 不是網址（例如只有 `https://`）：從下一個字再找，後面可能還有真的網址。
       re.lastIndex = start + 1
@@ -66,10 +99,11 @@ function splitAutolink(node: MdNode): MdNode[] | null {
     }
   }
   if (at <= 0) return null
-  // 全形標點前面的 ASCII 句點、逗號也不算網址（`…/x.。` 與 termPieces 同一個結果）。
-  const asciiTail = /[.,;:!?]+$/.exec(text.slice(0, at))?.[0] ?? ''
-  const head = text.slice(0, at - asciiTail.length)
-  const tail = asciiTail + text.slice(at)
+  // 全形標點前面的 ASCII 句點、逗號，以及沒配對的右括號，也不算網址（`…/x.。`、`(…/a)。` 與 termPieces 同一個結果）。
+  const cut = urlEnd(text.slice(0, at))
+  if (cut <= 0) return null
+  const head = text.slice(0, cut)
+  const tail = text.slice(cut)
   // 只認自動連結的形狀：連結文字＝網址，或網址＝`http://`＋連結文字（remark 對 `www.` 的寫法）。
   if (node.url !== text && node.url !== `http://${text}`) return null
   const url = node.url.slice(0, node.url.length - tail.length)
