@@ -25,11 +25,11 @@ pub async fn shadow_limit_hit(app: &Arc<App>, sample: Sample) {
         return;
     }
     let app = app.clone();
-    tokio::spawn(async move {
+    tokio::spawn(Box::pin(async move {
         if let Err(e) = crate::judge::observe(&app, sample).await {
             tracing::debug!(error = %e, "judge shadow skipped");
         }
-    });
+    }));
 }
 
 // ───────────── Shadow Settled ─────────────
@@ -57,11 +57,11 @@ pub async fn shadow_settled(
         report: report.to_string(),
     };
     let app = app.clone();
-    tokio::spawn(async move {
+    tokio::spawn(Box::pin(async move {
         if let Err(e) = crate::judge::report::observe(&app, &sample).await {
             tracing::debug!(error = %e, assignment = %sample.assignment_id, "judge report shadow skipped");
         }
-    });
+    }));
 }
 
 // ───────────── Stuck Sweep ─────────────

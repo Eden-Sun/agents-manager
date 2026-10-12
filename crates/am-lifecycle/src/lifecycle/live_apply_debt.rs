@@ -159,7 +159,7 @@ fn schedule_retry<A: LiveApplyDebtContext + Clone>(app: &A, run_id: &str) {
         return;
     }
     let (app, run_id) = ((*app).clone(), run_id.to_string());
-    tokio::spawn(async move {
+    tokio::spawn(Box::pin(async move {
         let mut delay = Duration::from_millis(250);
         loop {
             tokio::time::sleep(delay).await;
@@ -180,7 +180,7 @@ fn schedule_retry<A: LiveApplyDebtContext + Clone>(app: &A, run_id: &str) {
             .lock()
             .unwrap_or_else(|e| e.into_inner())
             .remove(&run_id);
-    });
+    }));
 }
 
 /// Called during daemon startup so debts survive a process restart.

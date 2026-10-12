@@ -162,7 +162,8 @@ fn drain_into<R>(pipe: Option<R>, buf: Arc<std::sync::Mutex<Vec<u8>>>) -> tokio:
 where
     R: tokio::io::AsyncRead + Unpin + Send + 'static,
 {
-    tokio::spawn(async move {
+    // Box::pin（#1465）：8 KiB 的讀取緩衝放在堆上，debug 建置下 spawn 不再把它一層一層複製。
+    tokio::spawn(Box::pin(async move {
         use tokio::io::AsyncReadExt;
         let Some(mut pipe) = pipe else { return };
         let mut chunk = [0u8; 8192];
@@ -172,7 +173,7 @@ where
                 Ok(n) => buf.lock().unwrap_or_else(|e| e.into_inner()).extend_from_slice(&chunk[..n]),
             }
         }
-    })
+    }))
 }
 
 /// 逾時時整個行程群組都砍掉（卡住的 `git merge`、pinentry 不能繼續佔著 `index.lock`），並回傳逾時前已讀到的輸出。

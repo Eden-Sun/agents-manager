@@ -108,10 +108,10 @@ pub fn schedule_deferred_live<A: DeferredLiveContext + Clone>(app: &A, bot_id: &
         return;
     }
     let (app, bot_id) = ((*app).clone(), bot_id.to_string());
-    tokio::spawn(async move {
+    tokio::spawn(Box::pin(async move {
         tokio::time::sleep(Duration::from_millis(1500)).await;
         let _ = apply_deferred_once(&app, &bot_id).await;
-    });
+    }));
 }
 
 /// Apply the current pending item without the production idle-edge delay. Kept as a helper so the

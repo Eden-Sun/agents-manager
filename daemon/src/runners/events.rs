@@ -35,7 +35,7 @@ pub async fn spawn_global_for_session(app: Arc<App>, host: String, session: Stri
         old.abort();
     }
     let (a, h, s) = (app.clone(), host.clone(), session.clone());
-    let t = tokio::spawn(async move { global_loop(a, h, s).await });
+    let t = tokio::spawn(Box::pin(async move { global_loop(a, h, s).await }));
     g.insert(key, t);
 }
 
@@ -145,12 +145,12 @@ pub async fn handle_global(app: &Arc<App>, host: &str, session: &str, ev: &crate
                 // 另開 task 並晚一拍，讓還在啟動的 agent 先報出名字與 kind。
                 let app = app.clone();
                 let host = host.to_string();
-                tokio::spawn(async move {
+                tokio::spawn(Box::pin(async move {
                     tokio::time::sleep(std::time::Duration::from_secs(2)).await;
                     if let Err(e) = app.reconcile_host(&host).await {
                         tracing::debug!(host = %host, error = ?e, "reconcile after agent detection failed");
                     }
-                });
+                }));
             }
         }
         other => tracing::trace!(host, session, event = other, "unhandled global herdr event"),
@@ -202,12 +202,12 @@ async fn end_runs_for_pane_try(app: &Arc<App>, host: &str, session: &str, pane_i
     if ended_a_child {
         let app = app.clone();
         let host = host.to_string();
-        tokio::spawn(async move {
+        tokio::spawn(Box::pin(async move {
             tokio::time::sleep(std::time::Duration::from_secs(2)).await;
             if let Err(e) = app.reconcile_host(&host).await {
                 tracing::debug!(host = %host, error = ?e, "reconcile after a child's pane closed failed");
             }
-        });
+        }));
     }
 }
 
@@ -261,10 +261,10 @@ fn retry_workspace_close(app: &Arc<App>, host: &str, session: &str, ws: &str, at
         return;
     };
     let (app, host, session, ws) = (app.clone(), host.to_string(), session.to_string(), ws.to_string());
-    tokio::spawn(async move {
+    tokio::spawn(Box::pin(async move {
         tokio::time::sleep(wait).await;
         close_workspace_try(&app, &host, &session, &ws, attempt + 1).await;
-    });
+    }));
 }
 
 fn retry_pane_close(app: &Arc<App>, host: &str, session: &str, pane_id: &str, attempt: usize) {
@@ -273,10 +273,10 @@ fn retry_pane_close(app: &Arc<App>, host: &str, session: &str, pane_id: &str, at
         return;
     };
     let (app, host, session, pane_id) = (app.clone(), host.to_string(), session.to_string(), pane_id.to_string());
-    tokio::spawn(async move {
+    tokio::spawn(Box::pin(async move {
         tokio::time::sleep(wait).await;
         end_runs_for_pane_try(&app, &host, &session, &pane_id, attempt + 1).await;
-    });
+    }));
 }
 
 /// Open (or replace) the per-run status subscription in the host's configured session.
@@ -303,7 +303,7 @@ pub async fn watch_pane_on_session(app: &Arc<App>, host: &str, session: &str, pa
     let hst = host.to_string();
     let sess = session.to_string();
     let own = key.clone();
-    let handle = tokio::spawn(async move {
+    let handle = tokio::spawn(Box::pin(async move {
         let mut backoff = HERDR_SUBSCRIBE_INITIAL_BACKOFF;
         let mut resubscribing = false;
         // 只有「證明 run 已經結束」那一種離開才算收掉這個 pane；拿不到 client（遠端斷線、session 對不上）離開時 run 還活著，
@@ -353,7 +353,7 @@ pub async fn watch_pane_on_session(app: &Arc<App>, host: &str, session: &str, pa
             backoff = (delay * 2).min(HERDR_SUBSCRIBE_MAX_BACKOFF);
         }
         forget_watcher(&app2, own, generation, run_ended).await;
-    });
+    }));
     g.insert(key, handle);
 }
 
@@ -476,14 +476,14 @@ fn replay_status_later(app: &Arc<App>, host: &str, session: &str, ev: &crate::he
         return;
     };
     let (app, host, session, ev) = (app.clone(), host.to_string(), session.to_string(), ev.clone());
-    tokio::spawn(async move {
+    tokio::spawn(Box::pin(async move {
         tokio::time::sleep(wait).await;
         // 這個 pane 之後又來過事件：那一則比這一則新，這一則不再算數。
         if status_seq().lock().unwrap().get(&key) != Some(&seq) {
             return;
         }
         handle_status_try(&app, &host, &session, &ev, attempt + 1, Some(seq)).await;
-    });
+    }));
 }
 
 async fn handle_status_try(app: &Arc<App>, host: &str, session: &str, ev: &crate::herdr::Event, attempt: usize, replay_seq: Option<u64>) {

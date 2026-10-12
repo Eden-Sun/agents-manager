@@ -117,7 +117,7 @@ pub async fn arm_progress(app: &impl LcHost, run_id: &str, bot_id: &str, turn_id
     let bot_id = bot_id.to_string();
     let turn_id = turn_id.to_string();
     let key = run_id.clone();
-    let h = tokio::spawn(async move {
+    let h = tokio::spawn(Box::pin(async move {
         let started = std::time::Instant::now();
         let interval = progress_interval(&run_id);
         // 連續讀不到幾次（#193）：讀到就歸零。
@@ -225,7 +225,7 @@ pub async fn arm_progress(app: &impl LcHost, run_id: &str, bot_id: &str, turn_id
         }
         flush_progress(&app2, &run_id, &mut pending, true).await;
         app2.progress_pollers().lock().await.remove(&run_id);
-    });
+    }));
     pollers.insert(key, h);
 }
 
@@ -1005,7 +1005,7 @@ pub async fn arm_stall(app: &impl LcHost, run_id: &str, bot_id: &str, turn_id: &
     let run_id = run_id.to_string();
     let bot_id = bot_id.to_string();
     let turn_id = turn_id.to_string();
-    tokio::spawn(async move {
+    tokio::spawn(Box::pin(async move {
         let mut st = Stall::default();
     // Every prompt gets the early look: a single line pasted into a busy TUI loses its Enter too.
         tokio::time::sleep(Duration::from_secs(NUDGE_EARLY_SECS)).await;
@@ -1033,7 +1033,7 @@ pub async fn arm_stall(app: &impl LcHost, run_id: &str, bot_id: &str, turn_id: &
         if timers.get(&run_id) == Some(&generation) {
             timers.remove(&run_id);
         }
-    });
+    }));
 }
 
 /// stall watchdog 一輪一輪之間要記得的事。

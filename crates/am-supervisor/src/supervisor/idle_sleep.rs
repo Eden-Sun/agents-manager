@@ -834,7 +834,7 @@ pub fn tick(app: &(impl crate::capabilities::BgTasks + crate::capabilities::Shut
     drop(last);
     let app = app.clone();
     let tasks = app.background_tasks().clone();
-    tasks.spawn(async move {
+    tasks.spawn(Box::pin(async move {
         let shutdown = app.shutdown().clone();
         run_sweep_task(
             guard,
@@ -842,7 +842,7 @@ pub fn tick(app: &(impl crate::capabilities::BgTasks + crate::capabilities::Shut
             SWEEP_TIMEOUT,
             shutdown,
         ).await;
-    });
+    }));
 }
 
 /// 巡一輪，一顆一顆收。序列而不是並行，理由跟 §6.9 的批次一樣：herdr 的 pane 版面與 per-bot 鎖

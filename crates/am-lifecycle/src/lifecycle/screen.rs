@@ -13,14 +13,14 @@ pub fn schedule_codex_notice_capture<C: ScreenContext>(app: &C, bot_id: &str, ru
     let app = (*app).clone();
     let bot_id = bot_id.to_string();
     let run_id = run_id.to_string();
-    tokio::spawn(async move {
+    tokio::spawn(Box::pin(async move {
         tokio::time::sleep(CODEX_NOTICE_DELAY).await;
         let lock = crate::capabilities::BotLocks::bot_lock(&app, &bot_id).await;
         let _g = lock.lock().await;
         if let Err(e) = capture_codex_usage_notices(&app, &bot_id, &run_id).await {
             tracing::debug!(bot = %bot_id, run = %run_id, error = ?e, "codex notice capture failed");
         }
-    });
+    }));
 }
 
 /// Persist newly seen Codex account notices (reset available or hard limit). Caller holds the bot lock.

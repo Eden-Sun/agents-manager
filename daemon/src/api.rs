@@ -38,6 +38,9 @@ pub(crate) async fn detach<T: Send + 'static>(
     let caller = crate::config_audit::http_caller();
     #[cfg(test)]
     let done_key = key.to_string();
+    // 先把呼叫端給的 future 裝箱（#1465）：下面兩層包裝（完成訊號、task-local scope）與 spawn 就只帶一個指標，
+    // 不再各留一份幾十 KB 的副本——debug 建置下這個函式的 poll 框原本有 150 KiB 上下。
+    let work = Box::pin(work);
     // 完成訊號在脫離的 task 裡發（handler 已經被 drop 時也要發）；只在測試編進去。
     let work = async move {
         let out = work.await;
@@ -45,7 +48,9 @@ pub(crate) async fn detach<T: Send + 'static>(
         work_done_for_test(&done_key).notify_one();
         out
     };
-    let task = tokio::spawn(crate::config_audit::HTTP_CALLER.scope(caller, work));
+    // Box::pin（#1465）：debug 建置下 spawn 會把 future 一層一層以值傳下去，脫離的工作（restart／promote／fork／刪除）
+    // 的 future 動輒數十 KB，不裝箱就是 1 MiB 上下的堆疊。
+    let task = tokio::spawn(Box::pin(crate::config_audit::HTTP_CALLER.scope(caller, work)));
     #[cfg(test)]
     work_registry().lock().unwrap_or_else(|e| e.into_inner()).insert(key.to_string(), task.abort_handle());
     let out = task.await.map_err(any_err);
@@ -12713,23 +12718,61 @@ mod per_principal_auth_tests {
         plain_bot_gate_body().await;
     }
 
-    /// #1461 守門：同一條路徑在 1.5 MiB 的執行緒上要跑得完。測試執行緒預設 2 MiB；debug 建置下這條路徑曾經用掉約 1.85 MiB，
-    /// 整批 `per_principal_auth_tests` 以 SIGABRT 中止（stack overflow，沒有任何 FAILED 行）。餘裕不足就在這裡紅，不等整批溢位。
-    #[test]
-    fn the_plain_bot_gate_path_fits_in_a_one_and_a_half_mib_stack() {
+    /// 堆疊守門的預算：1 MiB（#1465；#1461 時是 1.5 MiB）。測試執行緒預設 2 MiB，debug 建置下 async fn 的 poll 框與 tokio 的
+    /// spawn 都會在堆疊上留下 future 的多份副本，路徑一深就貼近上限；預算收到一半，餘裕才看得見。
+    const STACK_BUDGET: usize = 1024 * 1024;
+
+    /// 在 [`STACK_BUDGET`] 的執行緒上跑一段 async 內容；溢位會整個行程 SIGABRT（stack overflow，沒有任何 FAILED 行）。
+    fn on_budget_stack<Fut: std::future::Future<Output = ()>>(body: impl FnOnce() -> Fut + Send + 'static) {
         std::thread::Builder::new()
             .name("stack-budget".into())
-            .stack_size(1536 * 1024)
-            .spawn(|| {
+            .stack_size(STACK_BUDGET)
+            .spawn(move || {
                 tokio::runtime::Builder::new_current_thread()
                     .enable_all()
                     .build()
                     .expect("runtime")
-                    .block_on(plain_bot_gate_body())
+                    .block_on(body())
             })
             .expect("spawn")
             .join()
-            .expect("the gate path overflowed a 1.5 MiB stack");
+            .expect("the path panicked on the stack-budget thread");
+    }
+
+    /// #1461／#1465 守門：同一條路徑（`POST /api/supervisor/start` 經 start_requested → start_manager → 啟動 bot、送握手、
+    /// 起控制迴圈、對帳）在 1 MiB 的執行緒上要跑得完。餘裕不足就在這裡紅，不等整批 `per_principal_auth_tests` 以 SIGABRT 溢位。
+    #[test]
+    fn the_plain_bot_gate_path_fits_in_a_one_mib_stack() {
+        on_budget_stack(plain_bot_gate_body);
+    }
+
+    /// #1465 守門：控制迴圈的一整拍（二十幾段）在 1 MiB 的執行緒上跑得完。以前所有段落寫在同一個 async fn 裡，
+    /// debug 建置下那個迴圈的 poll 框有 900 KiB 以上，光是被 poll 一次就吃掉預算的大半。
+    #[test]
+    fn a_controller_tick_fits_in_a_one_mib_stack() {
+        on_budget_stack(controller_tick_body);
+    }
+
+    /// #1465 守門：重啟（鎖 → 停 → 起；restart 的脫離任務跑的就是這條）在 1 MiB 的執行緒上跑得完。
+    /// 它比單純的啟動多疊了 `restart_bot_with_authority`／`restart_stop_and_start`／`restart_start` 三層大框。
+    #[test]
+    fn a_restart_fits_in_a_one_mib_stack() {
+        on_budget_stack(restart_body);
+    }
+
+    async fn restart_body() {
+        let e = crate::testing::env().await;
+        let bot = distinct_bot(&e, "restart-gate").await;
+        lifecycle::start_bot(&e.app, &bot.id).await.unwrap();
+        lifecycle::restart_bot_with(&e.app, &bot.id, Default::default()).await.unwrap();
+    }
+
+    async fn controller_tick_body() {
+        let e = crate::testing::env().await;
+        let manager = distinct_bot(&e, "tick-gate").await;
+        crate::supervisor::store::get_or_init(&e.app.db).await.unwrap();
+        crate::supervisor::store::set_env(&e.app.db, &manager.id, &e.project_id, "/tmp").await.unwrap();
+        crate::runners::supervisor::runtime::tick_once(&e.app).await;
     }
 
     /// #1461 守門：關鍵 future 的大小上限。debug 建置下 future 會在呼叫端的 poll 框裡留一份暫存，超過這個大小就該用 Box::pin 切開。

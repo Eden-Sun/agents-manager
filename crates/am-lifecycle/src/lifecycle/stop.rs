@@ -87,7 +87,19 @@ enum StopOutcome {
     Unknown,
 }
 
-async fn stop_locked(
+/// #1465：debug 建置下呼叫端的框會放進整個 future 值（四支 `stop_for_restart_*` 各一份）；這裡 `Box::pin`，呼叫端只留指標。
+fn stop_locked<'a>(
+    app: &'a impl StopContext,
+    bot_id: &'a str,
+    for_restart: bool,
+    only_if_idle: bool,
+    refuse_background_jobs: bool,
+    host_fence: Option<&'a crate::hosts::HostFence>,
+) -> impl std::future::Future<Output = LcResult<bool>> + 'a {
+    Box::pin(stop_locked_body(app, bot_id, for_restart, only_if_idle, refuse_background_jobs, host_fence))
+}
+
+async fn stop_locked_body(
     app: &impl StopContext,
     bot_id: &str,
     for_restart: bool,

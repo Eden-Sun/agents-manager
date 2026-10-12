@@ -232,7 +232,7 @@ fn schedule_retry<C: OwedDeliveryContext>(app: &C, bot_id: &str) {
     }
     let app = (*app).clone();
     let bot_id = bot_id.to_string();
-    tokio::spawn(async move {
+    tokio::spawn(Box::pin(async move {
         for secs in RETRY_DELAYS_SECS {
             tokio::time::sleep(Duration::from_secs(secs)).await;
             if owed(&bot_id).is_empty() {
@@ -242,7 +242,7 @@ fn schedule_retry<C: OwedDeliveryContext>(app: &C, bot_id: &str) {
                 tracing::warn!(bot = %bot_id, error = %e, "欠著的送達結果還是寫不進去；稍後再試");
             }
         }
-    });
+    }));
 }
 
 /// 503：這一則的副作用已經發生（字送出去了，或 herdr 已經拒收），或確定沒送出（#158），結果還沒寫進 DB。`delivery` 是看到的
