@@ -110,11 +110,13 @@ bl_plugin() { [ -f "$1" ] && grep -Eq "\"$2@[^\"]*\"[[:space:]]*:[[:space:]]*tru
 bl_key() {
   [ -f "$1" ] || { printf 0; return; }
   [ -n "$bl_jq_path" ] && [ -x "$bl_jq_path" ] || { printf '?'; return; }
+  # jq 退出碼：0＝有、1＝沒有，其他（5＝不是合法 JSON）＝x。讀不懂不能算成沒有那個鍵。
   if [ "$2" = defaultMode ]; then
-    "$bl_jq_path" -e 'type == "object" and (.permissions | type == "object" and has("defaultMode"))' "$1" >/dev/null 2>&1 && printf 1 || printf 0
+    "$bl_jq_path" -e 'type == "object" and (.permissions | type == "object" and has("defaultMode"))' "$1" >/dev/null 2>&1
   else
-    "$bl_jq_path" -e --arg key "$2" 'type == "object" and has($key)' "$1" >/dev/null 2>&1 && printf 1 || printf 0
+    "$bl_jq_path" -e --arg key "$2" 'type == "object" and has($key)' "$1" >/dev/null 2>&1
   fi
+  case $? in 0) printf 1 ;; 1) printf 0 ;; *) printf x ;; esac
 }
 # `features.hooks = true`，或 `[features]` 表裡的 `hooks = true`。false／沒寫＝0。不開 login shell。
 bl_features_hooks() {
@@ -310,7 +312,14 @@ pub fn evaluate(out: &str) -> Option<Vec<BaselineIssue>> {
                 }
             }
             "claude-key" if f.len() >= 5 => {
-                if claude_settings && f.get(4).copied() != Some("?") && !present(f.get(4)) {
+                // `x`：jq 讀不懂整份檔。那不是「沒有這個鍵」，只報一條（四個鍵的 id 同一個，下面去重只留一條）。
+                if claude_settings && f.get(4).copied() == Some("x") {
+                    issues.push(issue(
+                        format!("claude.{}.settings.json:json", f[2]),
+                        CRITICAL,
+                        format!("claude 身分 {}：settings.json 不是合法 JSON，裡面有沒有那些鍵看不出來", f[2]),
+                    ));
+                } else if claude_settings && f.get(4).copied() != Some("?") && !present(f.get(4)) {
                     issues.push(issue(
                         format!("claude.{}.settings.json:{}", f[2], f[3]),
                         severity_of(&CLAUDE_KEYS, f[3]),
