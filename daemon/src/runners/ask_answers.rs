@@ -336,4 +336,111 @@ mod tests {
     async fn inbox_retries_a_late_hook_that_replaced_the_fallback_reply() {
         late_stop_answer_survives_a_failed_after_turn_end(Some("最後一段\n\n✻ Crunched for 40s")).await;
     }
+
+    /// A deterministic race at the normal completion CAS: a terminal path wins after the in-flight
+    /// turn was read, but this Stop still stores its reply. If after_turn_end then fails, retrying
+    /// must find the event on that turn before native-id dedup can consume it.
+    async fn inbox_retry_after_terminal_cas_race_keeps_the_stop_answer(status: &str) {
+        let env = crate::testing::env().await;
+        let app = env.app.clone();
+        let bot = crate::testing::claude_bot(&app, &env.project_id, "ask-retry-cas-1480").await;
+        let run_id = crate::testing::fake_run(&app, &bot.id).await;
+        let conv = db::conversation_id(&app.db, &bot.id).await.unwrap();
+        let turn = db::ulid();
+        sqlx::query(
+            "INSERT INTO turns (id, conversation_id, run_id, origin, status, delivery, prompt_text, created_at)
+             VALUES (?,?,?, 'web', 'in_flight', 'ok', ?, ?)",
+        )
+        .bind(&turn)
+        .bind(&conv)
+        .bind(&run_id)
+        .bind("PROMPT-1480")
+        .bind(db::now())
+        .execute(&app.db)
+        .await
+        .unwrap();
+        let body = crate::hookrecv::HookBody {
+            bot_id: bot.id.clone(),
+            provider: "claude".into(),
+            payload: json!({
+                "hook_event_name": "Stop",
+                "session_id": "session-1480",
+                "prompt_id": "turn-1480",
+                "last_assistant_message": "HOOK-REPLY-1480",
+                "agm_user_text": "PROMPT-1480",
+                "agm_asks": [{"id":"question-1480", "at":null, "items":[{"question":"retry?","answer":"ANSWER-1480"}] }]
+            }),
+            received_at: Some(db::now()),
+            truncated: false,
+            run_id: Some(run_id.clone()),
+        };
+        assert!(crate::hook_inbox::accept(&app.db, &body, crate::hook_inbox::Source::Http).await.unwrap().is_new());
+        let event_id: String = sqlx::query_scalar("SELECT id FROM hook_events WHERE bot_id=?")
+            .bind(&bot.id)
+            .fetch_one(&app.db)
+            .await
+            .unwrap();
+        let race_app = app.clone();
+        let race_turn = turn.clone();
+        let race_status = status.to_string();
+        crate::lifecycle::race_point::arm("hook_before_complete_cas", &turn, move || async move {
+            sqlx::query(
+                "UPDATE turns SET status=?, native_session_id='session-1480', native_turn_id='turn-1480', completed_at=? WHERE id=?",
+            )
+            .bind(race_status)
+            .bind(db::now())
+            .bind(race_turn)
+            .execute(&race_app.db)
+            .await
+            .unwrap();
+        });
+        sqlx::query(
+            "CREATE TRIGGER fail_ask_answer_1480 BEFORE INSERT ON messages
+             WHEN NEW.content LIKE '%ANSWER-1480%'
+             BEGIN SELECT RAISE(ABORT, 'injected answer write failure'); END",
+        )
+        .execute(&app.db)
+        .await
+        .unwrap();
+
+        crate::runners::hook_inbox::drain_once(&app).await.unwrap();
+        let processed: Option<String> = sqlx::query_scalar("SELECT processed_at FROM hook_events WHERE id=?").bind(&event_id).fetch_one(&app.db).await.unwrap();
+        assert!(processed.is_none(), "failed after_turn_end leaves the event pending");
+        let (stored_status, stamped): (String, Option<String>) =
+            sqlx::query_as("SELECT status, source_event_id FROM turns WHERE id=?").bind(&turn).fetch_one(&app.db).await.unwrap();
+        assert_eq!(stored_status, status, "the terminal path wins the completion CAS");
+        let replies: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM messages WHERE turn_id=? AND content='HOOK-REPLY-1480'")
+            .bind(&turn)
+            .fetch_one(&app.db)
+            .await
+            .unwrap();
+        assert_eq!(replies, 1, "the losing hook still stores its reply");
+        assert_eq!(stamped.as_deref(), Some(event_id.as_str()), "inbox event is recorded even after terminal CAS is lost");
+
+        sqlx::query("DROP TRIGGER fail_ask_answer_1480").execute(&app.db).await.unwrap();
+        sqlx::query("UPDATE hook_events SET next_attempt_at=NULL WHERE id=?").bind(&event_id).execute(&app.db).await.unwrap();
+        crate::runners::hook_inbox::drain_once(&app).await.unwrap();
+
+        let turns: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM turns WHERE conversation_id=?").bind(&conv).fetch_one(&app.db).await.unwrap();
+        assert_eq!(turns, 1, "the retry does not create another turn");
+        let answers: Vec<String> = sqlx::query_scalar("SELECT turn_id FROM messages WHERE conversation_id=? AND content LIKE '%ANSWER-1480%'")
+            .bind(&conv)
+            .fetch_all(&app.db)
+            .await
+            .unwrap();
+        assert_eq!(answers, vec![turn.clone()], "the retry records the answer on the terminal turn");
+        let replies: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM messages WHERE turn_id=? AND content='HOOK-REPLY-1480'")
+            .bind(&turn)
+            .fetch_one(&app.db)
+            .await
+            .unwrap();
+        assert_eq!(replies, 1, "the retry does not duplicate the hook reply");
+        let processed: Option<String> = sqlx::query_scalar("SELECT processed_at FROM hook_events WHERE id=?").bind(&event_id).fetch_one(&app.db).await.unwrap();
+        assert!(processed.is_some(), "the recovered event is marked processed");
+    }
+
+    #[tokio::test]
+    async fn inbox_retry_after_terminal_cas_races_records_event_and_stop_answer() {
+        inbox_retry_after_terminal_cas_race_keeps_the_stop_answer("failed").await;
+    }
 }
