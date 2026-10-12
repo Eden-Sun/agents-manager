@@ -61,6 +61,11 @@ function isImage(file: File): boolean {
 }
 
 let seq = 0
+/**
+ * 每次載入一個前綴。IndexedDB 是同源分頁共用的，兩個分頁各自從 1 數的鍵會互相覆蓋（後寫的蓋掉先寫的那列，
+ * 重整後拿到別人的檔案）。舊版的 `s<n>` 鍵照樣讀得回來。
+ */
+const TAB = Math.random().toString(36).slice(2, 8)
 
 export const useShelf = create<ShelfState>((set, get) => ({
   items: [],
@@ -83,7 +88,7 @@ export const useShelf = create<ShelfState>((set, get) => ({
       room -= 1
       seq += 1
       accepted.push({
-        key: `s${seq}`,
+        key: `s${TAB}${seq}`,
         file,
         name: file.name || '檔案',
         size: file.size,
