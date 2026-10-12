@@ -22,7 +22,7 @@ function GhDevicePanel({
   if (!pending && !error) return null
   return (
     <div className="gh-device">
-      {error ? <p className="gh-device-err">{error}</p> : null}
+      {error ? <p className="gh-device-err" role="alert">{error}</p> : null}
       {pending ? (
         <>
           <p className="gh-device-lead">在瀏覽器打開 GitHub，輸入這組一次性代碼：</p>
