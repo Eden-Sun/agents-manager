@@ -1496,6 +1496,17 @@ pub(super) async fn try_fallback(app: &impl LcHost, run_id: &str, expected_turn:
         remember_pane_cursor_tx(&mut tx, run_id, &read).await?;
         tx.commit().await?;
         emit_message_added(app, &bot.id, message).await;
+        // 第二意見（#240）：備援先下手時，之後 `capture_codex_usage_notices` 看到的是「已寫過、回合也不在飛」而跳過，
+        // 這一次命中就不會進帳本（#1467）。只記錄、鎖外問（spawn），回合與額度照下面的收。
+        app.shadow_limit_hit(crate::judge::Sample {
+            bot_id: bot.id.clone(),
+            run_id: run_id.to_string(),
+            project_id: bot.project_id.clone(),
+            kind: bot.kind.clone(),
+            matched_line: hit.clone(),
+            screen: read.text.clone(),
+        })
+        .await;
         // 記在這顆 bot 的主機與身分那一格。讀不到主機不退回 `local`；記不進去就欠著，派送前與 flush 照欠著的那一筆擋、
         // 之後每次查詢先補寫（#198）。回合已經收掉了，照樣回 `true`。
         if let Err(e) = crate::turn_error::mark_codex_limit_hit(app, &bot, &hit).await {
@@ -3137,6 +3148,111 @@ mod issue_17_tests {
             .await
             .unwrap();
         assert!(notes.iter().any(|n| n.contains("hit your usage limit")), "{notes:?}");
+    }
+
+    /// 開著 `[judge]`、專案在名單裡、Jev 是一個只數呼叫的假端點（回 `is_live_ui`＝0.93）。
+    async fn judge_on(f: &Fixture) -> Arc<std::sync::Mutex<Vec<Value>>> {
+        let seen = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let log = seen.clone();
+        let route = axum::routing::post(move |axum::Json(body): axum::Json<Value>| {
+            let log = log.clone();
+            async move {
+                log.lock().unwrap().push(body);
+                axum::Json(json!({"model": "jev-1.13.0", "answers": {"is_live_ui": {"type": "noul", "noul": 0.93}}, "usage": {"input_tokens": 300}}))
+            }
+        });
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("http://{}/v1/systemone", listener.local_addr().unwrap());
+        tokio::spawn(async move { axum::serve(listener, axum::Router::new().route("/v1/systemone", route)).await.unwrap() });
+        let key = tt::track(std::env::temp_dir().join(format!("am-judge-fallback-{}", db::ulid())));
+        std::fs::write(&key, "k-test\n").unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&key, std::fs::Permissions::from_mode(0o600)).unwrap();
+        }
+        let (pid, key) = (f.env.project_id.clone(), key.to_string_lossy().into_owned());
+        f.env
+            .app
+            .cfg
+            .update(move |c| {
+                c.judge.enabled = true;
+                c.judge.projects = vec![pid];
+                c.judge.key_file = key;
+                c.judge.endpoint = url;
+                Ok(())
+            })
+            .await
+            .unwrap();
+        seen
+    }
+
+    /// 把 fixture 的專案放到遠端主機 `m4p`（同一個假 herdr 當那台的 socket）。
+    async fn on_remote_host(f: &Fixture) {
+        let cfg = crate::config::HostCfg {
+            shared_session: false,
+            name: "m4p".into(),
+            ssh: "m4p@100.112.229.82".into(),
+            ssh_port: 22,
+            ssh_opts: vec![],
+            herdr_session: "test".into(),
+            remote_path: String::new(),
+        };
+        let sock = f.env.dir.join("data").join("herdr.sock");
+        f.env.app.hosts.insert_remote_with_client_for_test(cfg, crate::herdr::HerdrClient::new(sock)).await;
+        sqlx::query("UPDATE projects SET host='m4p' WHERE id=?").bind(&f.env.project_id).execute(&f.env.app.db).await.unwrap();
+    }
+
+    async fn limit_hit_rows(app: &Arc<crate::state::App>) -> Vec<(String, Option<f64>, Option<String>)> {
+        sqlx::query_as("SELECT bot_id, jev_is_live_ui, error FROM judge_shadow WHERE regex_verdict='limit_hit'").fetch_all(&app.db).await.unwrap()
+    }
+
+    /// #1467：終端備援把「畫面上的撞限橫幅」收成失敗回合時，也要把這次命中交給 Jev 做第二意見——跟
+    /// `capture_codex_usage_notices` 同一個命中、同一個閘門。以前備援先下手：它寫了訊息、標了額度，之後
+    /// `capture_codex_usage_notices` 看到的是「已寫過、回合也不在飛」，直接跳過，帳本一筆都沒有
+    /// （2026-10-03～10-10 的 12 則橫幅，本機與 m4p 都一樣，只有 1 筆 `limit_hit`）。遠端專案走同一條路。
+    #[tokio::test]
+    async fn a_banner_the_fallback_closes_a_remote_turn_on_is_put_to_jev_once() {
+        let banner = "■ You've hit your usage limit. Upgrade to Pro, or try again at Sep 19th, 2026 6:43 PM.";
+        let f = fixture("codex", &format!("› Reply with PONG\n\n{banner}\n\n› \n")).await;
+        let app = f.env.app.clone();
+        on_remote_host(&f).await;
+        let seen = judge_on(&f).await;
+
+        assert!(try_fallback(&app, &f.run_id, Some(&f.turn_id)).await.unwrap(), "回合要被收掉");
+        assert_eq!(turn(&app, &f.turn_id).await.status, "failed");
+        assert!(tt::eventually!(!limit_hit_rows(&app).await.is_empty()), "備援收掉的撞限橫幅要進帳本");
+        assert!(tt::eventually!(limit_hit_rows(&app).await.iter().all(|r| r.2.is_none() && r.1.is_some())), "答案要補上，不留 pending");
+        let rows = limit_hit_rows(&app).await;
+        assert_eq!(rows.len(), 1, "{rows:?}");
+        assert_eq!((rows[0].0.as_str(), rows[0].1), (f.bot_id.as_str(), Some(0.93)));
+
+        // 備援收完之後，畫面掃描照樣會跑一次：橫幅已經寫過、回合也不在飛，不能再問第二次。
+        capture_codex_usage_notices(&app, &f.bot_id, &f.run_id).await.unwrap();
+        tokio::time::sleep(Duration::from_millis(200)).await;
+        assert_eq!(limit_hit_rows(&app).await.len(), 1, "同一則橫幅只問一次");
+        assert_eq!(seen.lock().unwrap().len(), 1);
+        assert!(seen.lock().unwrap()[0]["state"]["screen"].as_str().is_some_and(|s| s.contains("hit your usage limit")));
+    }
+
+    /// 關著（預設）什麼都不送、不寫帳本：備援這條路也不例外。
+    #[tokio::test]
+    async fn a_banner_the_fallback_closes_is_not_put_to_jev_while_it_is_off() {
+        let banner = "■ You've hit your usage limit. Upgrade to Pro, or try again at Sep 19th, 2026 6:43 PM.";
+        let f = fixture("codex", &format!("› Reply with PONG\n\n{banner}\n\n› \n")).await;
+        let app = f.env.app.clone();
+        on_remote_host(&f).await;
+        let seen = judge_on(&f).await;
+        app.cfg.update(|c| {
+            c.judge.enabled = false;
+            Ok(())
+        })
+        .await
+        .unwrap();
+
+        assert!(try_fallback(&app, &f.run_id, Some(&f.turn_id)).await.unwrap());
+        tokio::time::sleep(Duration::from_millis(200)).await;
+        assert!(limit_hit_rows(&app).await.is_empty() && seen.lock().unwrap().is_empty());
     }
 
     const ORCHESTRATING: &str = "✽ Orchestrating… (13s · ↓ 537 tokens · thinking with high effort)\n  ⎿ Tip: Run /install-github-app to tag @claude right from your Github issues and PRs\n─────────────────────────────────────────────────────────────────────────────\n❯\n─────────────────────────────────────────────────────────────────────────────\n";
