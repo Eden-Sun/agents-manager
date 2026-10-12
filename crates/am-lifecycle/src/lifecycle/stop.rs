@@ -641,6 +641,12 @@ pub async fn interrupt_bot(app: &Arc<App>, bot_id: &str) -> LcResult<()> {
 /// 回 503 `interrupt_state_uncommitted`（不是普通的成功），欠著的收尾之後補——同一筆的重試**不再按** Esc；
 /// 不知道 Esc 進了沒有，回合留在 in_flight，等它的回聲。
 pub async fn interrupt_turn(app: &impl StopContext, bot_id: &str, expect_turn: Option<&str>) -> LcResult<()> {
+    // 沒指名哪一筆時，「這一次要打斷的」是**按下去那一刻**使用者看得到的那一筆（#1474）：在拿到 bot 鎖之前先記下來。
+    // 這一刻到拿到鎖之間，那一筆可能剛好結束、排著的 prompt 被 flush 接著送出——以前拿到鎖之後才讀「在飛的是誰」，
+    // Esc 就按在一則使用者根本沒看過是「在跑」的新回合上（送出後 117ms 被收成 `interrupted by user`，claude 把字放回框裡）。
+    let seen = if expect_turn.is_none() { in_flight_at_arrival(app, bot_id).await } else { None };
+    #[cfg(all(test, feature = "daemon-test-harness"))]
+    super::race_point::hit("interrupt_after_arrival", bot_id).await;
     let _g = app.lock_bot_for_stop(bot_id).await;
     let bot = db::bot(app.db(), bot_id).await.map_err(up)?.ok_or_else(|| LcError::NotFound("bot".into()))?;
     let run = db::active_run(app.db(), bot_id).await.map_err(up)?.ok_or_else(|| LcError::NotFound("run".into()))?;
@@ -662,6 +668,20 @@ pub async fn interrupt_turn(app: &impl StopContext, bot_id: &str, expect_turn: O
             return Err(LcError::conflict(
                 "turn_not_in_flight",
                 json!({"turn_id": want, "in_flight_turn_id": in_flight.as_ref().map(|t| t.id.clone()), "esc_sent": false}),
+            ));
+        }
+    }
+    // 沒指名哪一筆：現在在飛的跟按下去那一刻看到的不是同一筆（它結束了、接著送出的是別的回合）就不按 Esc。
+    // 欠著收尾的那一次重試例外（上面已經處理過；#166：插隊送出的帳一結清，新的那一則就掛上 run，這一次的 Esc 正是要打斷它）。
+    // 例外：到達時沒有在飛的回合、之後才冒出來的是 CLI 自己開的外部回合（畫面上本來就在跑，daemon 只是晚一步開回合）——
+    // 使用者要停的正是它。
+    if let (None, None, Some(seen), Some(now)) = (expect_turn, owed.as_deref(), seen.as_ref(), in_flight.as_ref()) {
+        let live_pane_work = seen.is_none() && now.origin == "external";
+        if seen.as_deref() != Some(now.id.as_str()) && !live_pane_work {
+            tracing::info!(bot = %bot_id, seen = ?seen, now = %now.id, "打斷的請求到達時在飛的那一筆已經結束，接著在飛的是別的回合：不按 Esc");
+            return Err(LcError::conflict(
+                "turn_not_in_flight",
+                json!({"turn_id": seen, "in_flight_turn_id": now.id, "esc_sent": false}),
             ));
         }
     }
@@ -716,6 +736,19 @@ pub async fn interrupt_turn(app: &impl StopContext, bot_id: &str, expect_turn: O
     Ok(())
 }
 
+/// 打斷的請求到達那一刻，這顆 bot 在飛的是哪一筆（沒指名 `turn_id` 時用）。`None`＝讀不到（不設防，照舊拿到鎖之後才看）；
+/// `Some(None)`＝那一刻沒有「使用者看得到在跑」的回合；`Some(Some(id))`＝那一筆。
+///
+/// 排隊的 prompt 剛被 flush 認領、還在打字（`delivery = pending`，而且 `claim_queued` 已經把 `auto_resend` 寫成 0——
+/// 直接送出的回合在送達結果寫下之前 `auto_resend` 還是預設的 1）的在飛回合不算：使用者按下去的時候畫面上它還是「排隊中」，
+/// 不是他要停的那一筆。直接送出、還在打字的回合照舊算（那是使用者剛送的那一則）。
+async fn in_flight_at_arrival(app: &impl crate::capabilities::Db, bot_id: &str) -> Option<Option<String>> {
+    let run = db::active_run(app.db(), bot_id).await.ok()?;
+    let Some(run) = run else { return Some(None) };
+    let turn = db::in_flight_turn(app.db(), &run.id).await.ok()?;
+    Some(turn.filter(|t| !(t.delivery == "pending" && t.auto_resend == 0)).map(|t| t.id))
+}
+
 /// claude 在吐出第一個字前被 `esc` 打斷，會把 prompt 放回輸入框（2026-09-08 實測），下一則
 /// 貼上會黏在後面。只清這筆被中斷回合的 prompt；草稿不同、讀不到或 run/pane/session/revision 改變就不動。只做 claude，失敗不報錯。
 ///
@@ -734,8 +767,18 @@ async fn clear_restored_prompt(app: &impl crate::capabilities::Db, client: &Herd
     if !abort_binding_is_current(app, run).await {
         return;
     }
-    let Ok(candidate) = read_styled_snapshot(client, pane, SCAN_SOURCE, DELIVER_SCAN_LINES).await else { return };
-    if candidate.pane_id != pane || !restored_prompt_matches(&bot.kind, &candidate.text, expected_prompt) {
+    let Ok(candidate) = read_styled_snapshot(client, pane, SCAN_SOURCE, DELIVER_SCAN_LINES).await else {
+        tracing::warn!(run = %run.id, "interrupt: could not read the pane to look for a restored prompt; nothing cleared");
+        return;
+    };
+    if candidate.pane_id != pane {
+        return;
+    }
+    if !restored_prompt_matches(&bot.kind, &candidate.text, expected_prompt) {
+        // 框是空的（claude 沒放回來，或還沒放回來），或框裡不是這一則的字：不按。留一筆 log 才分得出
+        // 「沒有草稿」與「有草稿卻對不上」（#1474：使用者之後得自己去終端按 Ctrl+C，daemon log 卻什麼都沒有）。
+        tracing::info!(run = %run.id, state = ?box_state(&bot.kind, &candidate.text),
+                       "interrupt: composer holds no exact copy of the interrupted prompt; not clearing");
         return;
     }
     #[cfg(all(test, feature = "daemon-test-harness"))]
