@@ -8,6 +8,8 @@ import { herdrKeyFromEvent, KEYPAD, usePaneKeys } from '../hooks/usePaneKeys'
 import { blockedKeyAction, passthroughLive } from '../lib/blockedKeys'
 import { isDangerousRmScreen } from '../lib/dangerousRm'
 import { fitRules } from '../lib/termRules'
+import { reflowForPhone } from '../lib/termReflow'
+import { PHONE_QUERY, useMediaQuery } from '../hooks/useMediaQuery'
 import { useTerminalSnapshot } from '../hooks/useTerminalSnapshot'
 import { useDialogFocus } from '../hooks/useDialogFocus'
 import { useStore } from '../store/store'
@@ -47,6 +49,18 @@ export function BlockedModal({ botId, onClose }: { botId: string; onClose: () =>
   const showRaw = !menu || extras
   const rootRef = useRef<HTMLDivElement>(null)
   const termRef = useRef<HTMLPreElement>(null)
+  // 手機：寬 pane 的畫面原樣折行讀不了，預設重排（`lib/termReflow.ts`）；「原樣」留一顆開關對照。
+  const phone = useMediaQuery(PHONE_QUERY)
+  const [rawLayout, setRawLayout] = useState(false)
+  const reflow = phone && !rawLayout
+  // 題目與選項在畫面最下面：手機第一張快照到了先捲到底，之後不再動使用者的捲動位置。
+  const scrolledRef = useRef(false)
+  const hasText = Boolean(snap?.text)
+  useEffect(() => {
+    if (!phone || !hasText || scrolledRef.current || !termRef.current) return
+    scrolledRef.current = true
+    termRef.current.scrollTop = termRef.current.scrollHeight
+  }, [phone, hasText, showRaw])
 
   // handler 每次 render 都是新的；透過 ref 讀，listener 才不必重新註冊（同 Modal.tsx）。
   const onCloseRef = useRef(onClose)
@@ -116,6 +130,17 @@ export function BlockedModal({ botId, onClose }: { botId: string; onClose: () =>
               {snap?.columns ? `・${snap.columns}×${snap.rows ?? '?'}` : ''}
             </span>
           )}
+          {phone && showRaw ? (
+            <button
+              type="button"
+              className="btn blocked-modal-layout"
+              aria-pressed={rawLayout}
+              title={rawLayout ? '現在是終端原樣；按一下改回手機易讀排版' : '現在是手機易讀排版（去掉外框、對齊用的空白與空列）；按一下看終端原樣'}
+              onClick={() => setRawLayout((v) => !v)}
+            >
+              原樣
+            </button>
+          ) : null}
           <button type="button" className="icon-btn" aria-label="關閉" title="關閉" onClick={onClose}>
             ✕
           </button>
@@ -152,8 +177,8 @@ export function BlockedModal({ botId, onClose }: { botId: string; onClose: () =>
         ) : null}
 
         {showRaw ? (
-          <pre className="term term-wrap blocked-modal-term" ref={termRef} tabIndex={0}>
-            {err ? `讀取終端失敗：${err}` : snap?.text ? fitRules(snap.text) : '讀取中…'}
+          <pre className={`term term-wrap blocked-modal-term${reflow ? ' is-reflow' : ''}`} ref={termRef} tabIndex={0}>
+            {err ? `讀取終端失敗：${err}` : snap?.text ? (reflow ? reflowForPhone(fitRules(snap.text)) : fitRules(snap.text)) : '讀取中…'}
           </pre>
         ) : null}
 
