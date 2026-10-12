@@ -48,6 +48,7 @@ export function ConfirmDialog({
   onCancel,
 }: ConfirmDialogProps) {
   const titleId = useId()
+  const bodyId = useId()
   const inputRef = useRef<HTMLInputElement>(null)
   const cancelRef = useRef<HTMLButtonElement>(null)
   const dialogRef = useRef<HTMLDivElement>(null)
@@ -115,13 +116,14 @@ export function ConfirmDialog({
         role="alertdialog"
         aria-modal="true"
         aria-labelledby={titleId}
+        aria-describedby={bodyId}
         style={{ width }}
         onMouseDown={(e) => e.stopPropagation()}
       >
         <h2 id={titleId} className="confirm-title">
           {title}
         </h2>
-        <div className="confirm-body">{body}</div>
+        <div id={bodyId} className="confirm-body">{body}</div>
         {needsMatch ? (
           <label className="confirm-require">
             <span>{requireTextLabel ?? `請輸入「${requireText}」以確認`}</span>
