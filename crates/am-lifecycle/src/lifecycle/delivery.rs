@@ -1207,6 +1207,17 @@ mod tests {
         assert!(!may_press_retry_submit("claude", &other, text, false, false), "尾段換掉＝別人的草稿");
     }
 
+    /// 中文草稿沒有空白，TUI 折行時換列前後沒有任何字元。`composer_text_whole` 回的是 `"…草稿\n…"`，
+    /// 收合空白會把那個換行變成一個空格，跟原文對不上，補按 Enter 就被擋掉（#1571 只修了有空白的情況）。
+    #[test]
+    fn a_cjk_draft_the_tui_wrapped_without_spaces_still_gets_its_retry_enter() {
+        let text = "這是一則很長的中文草稿沒有空白所以會折行";
+        let wrapped = screen(&[], &["這是一則很長的中文草稿", "沒有空白所以會折行"]);
+        assert!(may_press_retry_submit("claude", &wrapped, text, false, false), "框裡還是同一則，中文折行不會多出空白");
+        let other = screen(&[], &["這是一則很長的中文草稿", "沒有空白所以換掉了"]);
+        assert!(!may_press_retry_submit("claude", &other, text, false, false), "尾段換掉＝別人的草稿");
+    }
+
     fn screen(transcript: &[&str], box_rows: &[&str]) -> String {
         let mut s = String::new();
         for l in transcript {
