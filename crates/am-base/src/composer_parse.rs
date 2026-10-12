@@ -408,6 +408,14 @@ pub fn undecorate_row(line: &str) -> String {
     s.trim().trim_start_matches('│').trim_end_matches('│').trim().to_string()
 }
 
+/// 讀回草稿的一列。時鐘裝飾（`… 10:30 PM`）只有 grok 畫；其他 kind 的草稿文字可能正好以時間結尾，不能剪掉。
+fn undecorate_for(kind: &str, line: &str) -> String {
+    if kind == "grok" {
+        return undecorate_row(line);
+    }
+    line.trim().trim_start_matches('│').trim_end_matches('│').trim().to_string()
+}
+
 pub fn composer_text(kind: &str, screen: &str) -> Option<String> {
     composer_text_rows(kind, screen, false)
 }
@@ -429,8 +437,7 @@ fn at_marker_column(raw: &str, marker: &str) -> bool {
 /// 續行的內容。claude／codex 的非框續行先是終端畫的兩欄縮排，之後才是使用者自己打的縮排（程式碼、清單），只去掉前者。
 /// 框的續行（grok）與其他 kind 照舊整行 trim（`trimmed`）。
 fn continuation_body(kind: &str, raw: &str, trimmed: String) -> String {
-    let t = strip_grok_decor(raw);
-    let t = t.trim_end();
+    let t = raw.trim_end();
     if !matches!(kind, "claude" | "codex") || t.trim_start().starts_with('│') {
         return trimmed;
     }
@@ -448,12 +455,12 @@ fn composer_text_rows(kind: &str, screen: &str, keep_blank_rows: bool) -> Option
     let from = lines.len().saturating_sub(composer_tail(kind, &lines));
     let tail = &lines[from..];
     let idx = tail.iter().rposition(|l| {
-        let t = undecorate_row(l);
+        let t = undecorate_for(kind, l);
         at_marker_column(l, marker) && t.starts_with(marker) && !t[marker.len()..].trim().is_empty()
     })?;
     let mut out: Vec<String> = Vec::new();
     for (n, line) in tail[idx..].iter().enumerate() {
-        let row = undecorate_row(line);
+        let row = undecorate_for(kind, line);
         let body = if n == 0 { row[marker.len()..].trim().to_string() } else { continuation_body(kind, line, row) };
         if n > 0 && ((body.is_empty() && !keep_blank_rows) || is_box_rule(&body) || is_box_bottom(&body)) {
             break;
@@ -538,5 +545,12 @@ mod composer_draft_shape_tests {
     fn a_continuation_keeps_the_users_own_indentation() {
         let screen = "────────\n❯ 第一段\n      縮排的程式\n────────\n  host | pt | 5h:96%\n";
         assert_eq!(composer_text_whole("claude", screen).as_deref(), Some("第一段\n    縮排的程式"));
+    }
+
+    /// 草稿結尾是「兩個空白＋時間 AM／PM」時，不能被當成 grok 的時鐘裝飾剪掉：`strip_grok_decor` 只該給 grok 用。
+    #[test]
+    fn a_claude_draft_ending_in_a_clock_time_is_read_back_whole() {
+        let screen = "────────\n❯ call me at  10:30 PM\n────────\n  host | pt | 5h:96%\n";
+        assert_eq!(composer_text_whole("claude", screen).as_deref(), Some("call me at  10:30 PM"));
     }
 }
