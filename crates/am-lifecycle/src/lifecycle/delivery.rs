@@ -892,6 +892,12 @@ fn bare(s: &str) -> String {
     s.chars().filter(|c| !c.is_whitespace()).collect()
 }
 
+/// 框裡（去掉空白後）還找得到本則原文，只是後面可能接了別的字。claude 送出前會清掉隱形字元，所以比的是清過的樣子。
+fn text_still_in_box(kind: &str, screen: &str, text: &str) -> bool {
+    let needle = bare(&super::pane_text::for_pane(kind, text));
+    crate::composer_parse::composer_text_whole(kind, screen).is_some_and(|shown| bare(&shown).contains(&needle))
+}
+
 /// 送出鍵按下去之後：先看送達證據，完整原文仍留在框裡才最多補按一次。
 pub async fn confirm_submitted(
     app: &(impl crate::capabilities::Db + crate::lifecycle::send_now::ports::CodexSendPort),
@@ -951,7 +957,7 @@ pub async fn confirm_submitted(
             // 證據永遠對不上。不按，交給使用者看。送出前的清理（`pane_text::for_pane`）本來就不該讓這個畫面出現。
             BoxState::NonEmpty if super::pane_text::invisible_review_notice(&now) => {
                 tracing::warn!(run = %run.id, bot = %bot.name, "claude is asking to review a prompt it cleaned of invisible characters; not pressing Enter");
-                super::late_proof::note(&run.id, super::late_proof::Pending::new(&bot.kind, pane, proof, offset, baseline, text, submitted_at));
+                // 框裡是清過的同一則字，字還在框裡、沒送出：不記 Pending（#1600）。
                 return Ok(Delivered::Unproven("invisible_chars_review"));
             }
             // 框裡不是本則（空了、換成別人的字、讀不準）：不按 Enter，也不提早 return，後面的證據查詢照跑，
@@ -984,9 +990,10 @@ pub async fn confirm_submitted(
         BoxState::NonEmpty => "composer_changed_or_unreadable",
         BoxState::Empty => "not_proven_submitted",
     };
-    // 本則沒有原封不動留在框裡（框空了、讀不準、或已換成別人的字）：證據可能還在路上，回 `Unproven` 前記下基準，
-    // 呼叫端寫完 `unknown` 後背景繼續看（#1479、#1577）。
-    if why != "still_in_box" {
+    // 字還在框裡（原封不動，或後面接了別的字）就不記 Pending：它還沒送出去，框空了也不能當成送出（#1600）。
+    // 框空了、讀不準、或框裡已經找不到本則：證據可能還在路上，回 `Unproven` 前記下基準，呼叫端寫完 `unknown` 後背景繼續看（#1479、#1577）。
+    let text_in_box = state == BoxState::NonEmpty && text_still_in_box(&bot.kind, &last, text);
+    if !text_in_box {
         let pending = super::late_proof::Pending::new(&bot.kind, pane, proof, offset, baseline, text, submitted_at);
         super::late_proof::note(&run.id, pending.clone());
         if let Err(e) = super::late_proof::persist_pending(app.db(), &run.id, &pending).await {
