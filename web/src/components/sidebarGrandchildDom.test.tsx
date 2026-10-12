@@ -4,7 +4,7 @@
  */
 import test, { after, afterEach, beforeEach, before } from 'node:test'
 import assert from 'node:assert/strict'
-import { fakeApi, mount, settle, setupDom, teardownDom, unmountAll } from '../testing/domHarness'
+import { fakeApi, keydown, mount, settle, setupDom, teardownDom, unmountAll } from '../testing/domHarness'
 import { orderedBotIds, useStore } from '../store/store'
 import { Sidebar } from './Sidebar'
 
@@ -57,4 +57,20 @@ test('孤兒子 agent（父列不在清單裡）也要畫得出來：照頂層�
   await settle()
   assert.ok(document.querySelector('[data-bot-id="C"]'), '父列不見了，子列也要留在側欄上（鍵盤順序已經把它算進來）')
   assert.ok(document.querySelector('[data-bot-id="X"]'))
+})
+
+test('頂層父列收合時 ↓ 不能停在看不見的孫代（孫代的直屬父列沒收合，但整串都收在 G 底下）', async () => {
+  localStorage.setItem('am.collapsedChildren', JSON.stringify(['G']))
+  try {
+    await mount(<Sidebar />)
+    await settle()
+    assert.equal(document.querySelector('[data-bot-id="C"]'), null, 'G 收合時孫代不畫在 DOM')
+    const g = document.querySelector<HTMLElement>('[data-bot-id="G"]')!
+    g.focus()
+    await keydown(g, 'ArrowDown')
+    await settle()
+    assert.notEqual(useStore.getState().selectedBotId, 'C', '↓ 不能選到畫面上找不到的 C')
+  } finally {
+    localStorage.removeItem('am.collapsedChildren')
+  }
 })
