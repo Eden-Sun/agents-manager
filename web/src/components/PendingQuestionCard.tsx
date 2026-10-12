@@ -25,12 +25,15 @@ export function PendingQuestionCard({
 }) {
   const [open, setOpen] = useState(defaultOpen)
   if (questions.length === 0) return null
+  // Jev 的選項建議（issue #1475）：只提示、不代答；沒有建議（沒開、失敗、分數太接近、多選題）就什麼都不顯示。
+  const anyJev = questions.some((q) => q.jev)
   return (
     <div className={`pending-q${open ? ' pending-q-open' : ''}`} role="note" aria-label="agent 在問的問題（對話紀錄裡的原題）">
       <button type="button" className="pending-q-toggle" aria-expanded={open} onClick={() => setOpen((v) => !v)}>
         <span aria-hidden="true">{open ? '▾' : '▸'}</span>
         原題（{questions.length} 題）
         <span className="pending-q-src">終端沒畫出全部題目，從對話紀錄讀出</span>
+        {anyJev ? <span className="pending-q-jev">Jev 有建議</span> : null}
       </button>
       {open ? (
         <>
@@ -44,12 +47,21 @@ export function PendingQuestionCard({
                 {qi === current ? <span className="pending-q-here">畫面上這一題</span> : null}
               </p>
               <p className="pending-q-text">{q.question}</p>
-              {qi === current && answerWhere === 'above' ? null : q.options.length ? (
+              {qi === current && answerWhere === 'above' ? (
+                // 選項在上面的選單裡、這裡不再列：建議改成一行說明，不然選單與這張卡都看不到它。
+                q.jev ? (
+                  <p className="pending-q-jev-line">
+                    <span className="pending-q-jev">Jev 建議 {q.jev.score.toFixed(2)}</span>
+                    {q.jev.label}
+                  </p>
+                ) : null
+              ) : q.options.length ? (
                 <ul className="pending-q-opts">
-                  {q.options.map((o) => (
+                  {q.options.map((o, oi) => (
                     <li key={o.label}>
                       {o.label}
                       {o.description ? <span className="pending-q-desc">：{o.description}</span> : null}
+                      {q.jev && q.jev.option === oi ? <span className="pending-q-jev">Jev 建議 {q.jev.score.toFixed(2)}</span> : null}
                     </li>
                   ))}
                 </ul>

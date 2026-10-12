@@ -75,9 +75,9 @@ test('錯誤筆數與最後一次時間：空字串不算錯誤；最後一次�
   assert.equal(same!.last, ago(1), '最後一次是 1 小時前那列')
 })
 
-test('沒有紀錄：總數為 0，最後一次是 null，四個場景都有一列', () => {
+test('沒有紀錄：總數為 0，最後一次是 null，五個場景都有一列', () => {
   const stats = sceneStats([], NOW)
-  assert.equal(stats.length, 4)
+  assert.equal(stats.length, 5)
   assert.ok(stats.every((s) => s.last === null && s.windows.all.total === 0))
 })
 
@@ -125,4 +125,35 @@ test('stale 只看撞題：別的場景 matched_line 恰好含 stale，門檻照
 test('開票那條的 bot_id 是 issue:<號碼>：顯示成 #號碼（開票），不切成 issue:', () => {
   assert.equal(botLabel('issue:1330', []), '#1330（開票）')
   assert.equal(botLabel('issue:abc', []), 'issue:', '不是數字的照舊取前 6 碼')
+})
+
+// ── ask_option（AskUserQuestion 選項建議，issue #1475）──
+
+const askLine = (questions: unknown[]) => JSON.stringify({ tool_use_id: 'toolu_1', questions })
+
+test('ask_option：有任何一題 daemon 標了 suggested 才算超過門檻；沒建議、答案沒回來、錯誤都不算', () => {
+  const yes = row({ regex_verdict: 'ask_option', at: ago(1), matched_line: askLine([{ index: 0, scores: [0.91, 0.08], suggested: 0 }]) })
+  const close = row({ regex_verdict: 'ask_option', at: ago(1), matched_line: askLine([{ index: 0, scores: [0.85, 0.8], suggested: null }]) })
+  const pending = row({ regex_verdict: 'ask_option', at: ago(1), matched_line: JSON.stringify({ tool_use_id: 'toolu_1' }) })
+  const failed = row({ regex_verdict: 'ask_option', at: ago(1), error: 'http 503', matched_line: JSON.stringify({ tool_use_id: 'toolu_1' }) })
+  const multi = row({ regex_verdict: 'ask_option', at: ago(1), matched_line: askLine([{ index: 0, scores: [0.1, 0.1], suggested: null }, { index: 2, scores: [0.2, 0.9], suggested: 1 }]) })
+  assert.equal(overThreshold(yes), true)
+  assert.equal(overThreshold(close), false)
+  assert.equal(overThreshold(pending), false)
+  assert.equal(overThreshold(failed), false)
+  assert.equal(overThreshold(multi), true, '多題裡有一題有建議')
+  assert.equal(overThreshold(row({ regex_verdict: 'ask_option', at: ago(1), matched_line: 'not json' })), false)
+})
+
+test('ask_option：場景計數與機率欄', () => {
+  const rows = [
+    row({ regex_verdict: 'ask_option', at: ago(1), matched_line: askLine([{ index: 0, scores: [0.91, 0.08], suggested: 0 }]) }),
+    row({ regex_verdict: 'ask_option', at: ago(2), matched_line: askLine([{ index: 0, scores: [0.6, 0.1], suggested: null }]) }),
+    row({ regex_verdict: 'ask_option', at: ago(3), error: 'timeout' }),
+  ]
+  const st = sceneStats(rows, NOW).find((s) => s.scene === 'ask_option')!
+  assert.deepEqual(st.windows.day, { total: 3, over: 1, errors: 1 })
+  assert.equal(probabilityText(rows[0]), '建議 0.91')
+  assert.equal(probabilityText(rows[1]), '無建議（最高 0.60）')
+  assert.equal(probabilityText(rows[2]), '—')
 })
