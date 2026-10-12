@@ -97,6 +97,11 @@ test('已知 columns：最長但沒滿欄的 URL 不把下一行提示字元接�
   assert.match(rows[2][0].text, /^m4p@m4p/)
 })
 
+test('句尾標點與不成對的括號混在一起：一起剝掉，不留下句點', () => {
+  assert.equal(urlsOf(termPieces('see (https://example.com/docs/page.) here', 80))[0][1], 'https://example.com/docs/page')
+  assert.equal(urlsOf(termPieces('[see https://example.com/docs/page!)]', 80))[0][1], 'https://example.com/docs/page')
+})
+
 test('括號包住的 URL 不把不成對的結尾括號算進去', () => {
   assert.equal(urlsOf(termPieces('see (https://example.com/docs/page) here', 80))[0][1], 'https://example.com/docs/page')
   assert.equal(urlsOf(termPieces('[docs](https://example.com/docs/page)', 80))[0][1], 'https://example.com/docs/page')
