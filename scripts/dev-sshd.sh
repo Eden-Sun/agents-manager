@@ -71,7 +71,7 @@ ssh_opts_json() {
 
 case "${1:-}" in
   start)
-    ensure_material
+    ensure_material || { echo "dev-sshd start: could not create keys under $DIR" >&2; exit 1; }
     if is_running; then
       echo "dev sshd already running on 127.0.0.1:$PORT (pid $(cat "$PIDFILE"))"
     else

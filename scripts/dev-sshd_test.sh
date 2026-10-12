@@ -19,6 +19,15 @@ OUT=$(AM_DEV_SSHD_DIR="$ROOT/notadir/sub" sh "$HERE/dev-sshd.sh" ssh-opts 2>"$RO
 grep -q 'ssh-opts' "$ROOT/err" && ok "產不出金鑰：stderr 說明原因" || bad "stderr 沒有說明"
 rm -rf "$ROOT"
 
+# 1b. start 也一樣：產不出金鑰時 exit 非 0、stdout 沒有 JSON，stderr 講原因（跟 ssh-opts 同一條路，不能只剩 mkdir 的一行）。
+ROOT=$(mktemp -d)
+touch "$ROOT/notadir"
+OUT=$(AM_DEV_SSHD_DIR="$ROOT/notadir/sub" sh "$HERE/dev-sshd.sh" start 2>"$ROOT/err"); RC=$?
+[ "$RC" -ne 0 ] && ok "start 產不出金鑰：exit 非 0" || bad "start 產不出金鑰卻 exit 0（輸出：${OUT}）"
+[ -z "$OUT" ] && ok "start 產不出金鑰：stdout 不印 JSON" || bad "start stdout 不該有東西：${OUT}"
+grep -q 'could not create keys' "$ROOT/err" && ok "start 產不出金鑰：stderr 說明原因" || bad "start stderr 沒有說明：$(cat "$ROOT/err")"
+rm -rf "$ROOT"
+
 # pid 檔指到一個活著但不是 sshd 的行程：不能當成在跑，stop 更不能殺它。
 ROOT=$(mktemp -d); mkdir -p "$ROOT/d"
 sleep 300 & VICTIM=$!
