@@ -1088,6 +1088,8 @@ codex 0.159.3 的帳號安全提醒 inline banner（`› 1. Set up security`／`
   才算 `Submitted`，對話裡的訊息換成 log 那一則的原文；其他情況框在 Enter 後清空＝`Unverified`。框裡還是同一段就再按一次 Enter（換了字不按）；
   herdr 拒收 Enter 而框裡還是那一段＝沒送出，撤回回合。不會自動重送（`auto_resend=0`：那段字不是 daemon 打的）。
   原文校正與 proof checkpoint 一起寫入；校正失敗時不回一般成功，同 `client_request_id` 重試會從相同 session log 補正，不再按 Enter。
+  送出後 log 裡多出的使用者訊息不一定只有本則（別人也在同一個 pane 送了，issue #1578）：只有一則就是它；多則挑內容（去掉空白後）跟框裡那段對得上的那一則，
+  挑不出就接受畫面讀來的字，校正與 proof 照常清掉，同一 `client_request_id` 重試不會因為「不是剛好一則」永久失敗。
   `message_added` 讀取失敗時推 `resync`；同一請求重試會重新讀取訊息並補發事件，客戶端依 message id 去重。
 - **清掉再送我這則**＝在規劃送達之前按清框鍵，**重讀畫面確認框是空的**才往下打字；還有字（或 herdr 拒收那顆鍵）回 409 `draft_uncleared`、一個字都不打。
   清框鍵三種 kind 都是一次 `ctrl+c`：2026-09-26 在隔離的 herdr session（`env -i` + `--session`，daemon 看不到）實測 claude 2.1.281、codex 0.155.1、

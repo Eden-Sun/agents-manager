@@ -586,6 +586,90 @@ async fn a_failed_exact_text_correction_is_retryable_and_never_reports_success()
     assert_eq!(f.keys().len(), 1, "retry must not press Enter again");
 }
 
+/// issue #1578：送出後轉錄又多了別人的一則（同一段時間內）：兩則新的使用者訊息，其中一則是本則。
+/// 以前 `exact` 只接受「剛好一則」，兩則就回 correction_error、proof 不清，同一 client_request_id 永遠重試失敗。
+fn user_line(text: &str) -> String {
+    json!({"type": "user", "message": {"role": "user", "content": text}}).to_string()
+}
+
+/// `draft_after_enter` 時把這些行寫進 session log（像別人剛好也在這個 pane 送了一則）。
+fn arm_transcript_lines(f: &Fx, lines: Vec<String>) {
+    let path = f.env.herdr.pane("pane-d").unwrap().transcript_file.unwrap();
+    super::super::race_point::arm("draft_after_enter", &f.bot_id, move || async move {
+        std::fs::write(path, lines.iter().map(|l| format!("{l}\n")).collect::<String>()).unwrap();
+    });
+}
+
+async fn proof_of(f: &Fx, turn_id: &str) -> Option<String> {
+    sqlx::query_scalar("SELECT composer_draft_proof FROM turns WHERE id=?").bind(turn_id).fetch_one(&f.env.app.db).await.unwrap()
+}
+
+#[tokio::test]
+async fn two_new_user_messages_one_of_them_ours_picks_ours_and_clears_the_proof() {
+    let draft = "兩則裡的本則草稿";
+    let f = idle("claude", &[draft], true).await;
+    let token = current_draft_token(&f, "observe").await;
+    arm_transcript_lines(&f, vec![user_line("別人剛送的一句"), user_line(draft)]);
+    let out = submit(&f.env.app, &f.bot_id, &token, "two-ours-second").await.expect("two new messages must not fail the submit");
+    assert_eq!(out.delivery, "ok");
+    assert_eq!(f.user_message().await, draft, "對話裡記的是本則，不是別人那則");
+    assert_eq!(proof_of(&f, &out.turn_id).await, None, "校正完成就清掉 proof");
+    assert_eq!(f.keys().len(), 1, "只按一次送出鍵");
+}
+
+#[tokio::test]
+async fn two_new_user_messages_with_ours_first_still_picks_ours() {
+    let draft = "本則排在前面的草稿";
+    let f = idle("claude", &[draft], true).await;
+    let token = current_draft_token(&f, "observe").await;
+    arm_transcript_lines(&f, vec![user_line(draft), user_line("後面別人的一句")]);
+    let out = submit(&f.env.app, &f.bot_id, &token, "two-ours-first").await.expect("two new messages must not fail the submit");
+    assert_eq!(out.delivery, "ok");
+    assert_eq!(f.user_message().await, draft);
+    assert_eq!(proof_of(&f, &out.turn_id).await, None);
+}
+
+/// 挑不出本則（兩則都跟框裡的字對不上）：接受畫面讀到的字、清掉 proof，不永久重試。
+#[tokio::test]
+async fn two_new_user_messages_none_ours_accepts_the_screen_text_and_does_not_retry_forever() {
+    let draft = "畫面上讀到的草稿字";
+    let f = idle("claude", &[draft], true).await;
+    let token = current_draft_token(&f, "observe").await;
+    arm_transcript_lines(&f, vec![user_line("別人一"), user_line("別人二")]);
+    let out = submit(&f.env.app, &f.bot_id, &token, "two-none").await.expect("unmatched pair must still resolve");
+    assert_eq!(out.delivery, "ok");
+    assert_eq!(f.user_message().await, draft);
+    assert_eq!(proof_of(&f, &out.turn_id).await, None);
+    let again = submit(&f.env.app, &f.bot_id, &token, "two-none").await.expect("same request id is answered, not retried");
+    assert_eq!(again.turn_id, out.turn_id);
+}
+
+/// 更正寫入失敗之後（兩則新訊息，本則是其中一則）：同 client_request_id 重試要挑出本則補正，不能要求剛好一則。
+#[tokio::test]
+async fn retry_after_a_failed_correction_picks_ours_out_of_two_new_messages() {
+    let draft = "重試時要挑出的本則";
+    let f = idle("claude", &[draft], true).await;
+    let token = current_draft_token(&f, "observe").await;
+    arm_transcript_lines(&f, vec![user_line("別人剛送的"), user_line(draft)]);
+    sqlx::query(
+        "CREATE TRIGGER am_test_reject_pair_correction BEFORE UPDATE OF content ON messages
+         WHEN NEW.content = '重試時要挑出的本則'
+         BEGIN SELECT RAISE(ABORT, 'injected correction failure'); END",
+    )
+    .execute(&f.env.app.db)
+    .await
+    .unwrap();
+    let first = submit(&f.env.app, &f.bot_id, &token, "pair-retry").await;
+    assert!(matches!(first, Err(LcError::Upstream(_))), "failed correction must not be a normal success: {first:?}");
+    sqlx::query("DROP TRIGGER am_test_reject_pair_correction").execute(&f.env.app.db).await.unwrap();
+
+    let retried = submit(&f.env.app, &f.bot_id, &token, "pair-retry").await.expect("retry must pick ours, not demand exactly one");
+    assert_eq!(retried.delivery, "ok");
+    assert_eq!(f.user_message().await, draft);
+    assert_eq!(proof_of(&f, &retried.turn_id).await, None);
+    assert_eq!(f.keys().len(), 1, "retry must not press Enter again");
+}
+
 /// 沒有無損證據（沒有 transcript）：框在 Enter 後清空就是送出去了，記成 unverified。
 #[tokio::test]
 async fn submitting_without_a_session_log_is_unverified() {
