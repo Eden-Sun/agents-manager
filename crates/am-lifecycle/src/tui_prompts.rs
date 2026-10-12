@@ -127,7 +127,7 @@ fn sits_on_empty_composer(below: &[&str]) -> bool {
     below
         .iter()
         .filter(|l| !crate::claude_mode::is_mode_row(l))
-        .map(|l| l.chars().filter(|c| !"│┃╭╮╰╯─━▔ \t".contains(*c)).collect::<String>())
+        .map(|l| l.chars().filter(|c| !c.is_whitespace() && !"│┃╭╮╰╯─━▔".contains(*c)).collect::<String>())
         .find(|rest| !rest.is_empty())
         .is_some_and(|rest| matches!(rest.as_str(), "❯" | "›" | ">"))
 }
@@ -185,6 +185,22 @@ pub fn is_feedback_survey(screen: &str) -> bool {
         }
     }
     false
+}
+
+#[cfg(test)]
+mod survey_composer_shape_tests {
+    use super::*;
+
+    /// 2.1.285 起空的輸入列是 `❯` 接 U+00A0（`claude-2.1.287-linux-idle.txt` 同款）。問卷底下的空輸入列也是這個形狀：
+    /// 2.1.281 的真畫面（輸入列是單純的 `❯`）認得出來，換成 NBSP 就不認，問卷會一直停在畫面上。
+    #[test]
+    fn a_survey_over_the_nbsp_composer_is_still_recognised() {
+        let plain = include_str!("lifecycle/fixtures/claude-2.1.281-feedback-survey.txt");
+        assert!(is_feedback_survey(plain));
+        let nbsp = plain.replace("\n❯\n", "\n❯\u{a0}\n");
+        assert_ne!(nbsp, plain, "fixture must contain the empty composer row");
+        assert!(is_feedback_survey(&nbsp), "空輸入列是 `❯`＋NBSP 時問卷也要認得出來");
+    }
 }
 
 /// Claude Code 開場登入選單（`CLAUDE_CONFIG_DIR` 未登入）。herdr 看起來是活的，prompt 卻只打在
