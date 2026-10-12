@@ -42,7 +42,7 @@ export function ChipLegend({ onClose }: { onClose: () => void }) {
               <span className="unread-chip-name">bot</span>
               <span className="unread-chip-n">2</span>
             </span>
-            <span>黃底：做完了還沒看；數字是幾個回合</span>
+            <span>藍色數字：做完了還沒看；數字是幾個回合</span>
           </li>
           <li>
             <span className="unread-chip pinned keep-warm-replied" aria-hidden="true">
@@ -69,7 +69,7 @@ export function ChipLegend({ onClose }: { onClose: () => void }) {
             <span className="unread-chip current" aria-hidden="true">
               <span className="unread-chip-name">bot</span>
             </span>
-            <span>藍框＋粗體：你正在看的這顆（底色照它的狀態，例如黃底就是做完了還沒看）</span>
+            <span>藍框＋粗體：你正在看的這顆（其他記號照它的狀態，例如藍色數字就是做完了還沒看）</span>
           </li>
           <li>
             <span className="unread-chip pin-more needs-reply" aria-hidden="true">
