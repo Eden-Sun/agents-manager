@@ -10,7 +10,7 @@
 //! 題目不是 daemon 存的東西——它是 transcript 裡那個還沒被回答的 `tool_use`，每次 `GET /bots/{id}/pending-question`
 //! 才讀出來。所以觸發點就在那支讀取端點（[`hint_for`]）：第一次看到某個 `tool_use` 丟一個背景 task 去問，
 //! 之後的讀取只查帳本。帳本列 `regex_verdict='ask_option'`、`run_id`＝這一輪的 run，`matched_line` 是
-//! `{tool_use_id, questions:[{index, scores, suggested}]}`（答案回來之前只有 `tool_use_id`）。**不存題目與選項原文**。
+//! `{tool_use_id, turn_id, questions:[{index, scores, suggested}]}`（答案回來之前只有 `tool_use_id`）。**不存題目與選項原文**。
 
 use std::collections::BTreeSet;
 use std::sync::{Arc, Mutex};
@@ -270,13 +270,24 @@ async fn silent_gate(app: &impl crate::capabilities::Db, cfg: &crate::config::Ju
     !matches!(crate::handoff::project_handed_off_to(app.db(), &bot.project_id).await, Ok(None))
 }
 
+/// Fresh transcript check supplied by the daemon (remote reads bypass the polling cache).
+pub trait PendingQuestion: Send + Sync {
+    fn question_pending(&self, bot: &crate::db::Bot, run: &crate::db::Run, tool: &str)
+        -> impl std::future::Future<Output = bool> + Send;
+}
+impl<T: PendingQuestion + ?Sized> PendingQuestion for Arc<T> {
+    async fn question_pending(&self, bot: &crate::db::Bot, run: &crate::db::Run, tool: &str) -> bool {
+        self.as_ref().question_pending(bot, run, tool).await
+    }
+}
+
 /// `GET /bots/{id}/pending-question` 讀到一個還沒被回答的 `AskUserQuestion` 時呼叫。
 ///
 /// 回 API 的 `jev_options`：答案已經在帳本上就帶出來，否則 `None`。**不等 Jev**：帳本沒有的話丟一個
 /// 背景 task 去問就回來，答案落帳後發 [`EVENT`]。開關、專案名單、移交都在丟 task 之前先看，
 /// 不符就連 task 都不起；名額與 key 在 task 裡才占（要問的時候才占，不白燒）。
 pub async fn hint_for(
-    app: &Arc<impl crate::capabilities::Cfg + crate::capabilities::Db + crate::capabilities::Emit + crate::judge::JudgeFuse + crate::capabilities::BgTasks + crate::capabilities::Shutdown + 'static>,
+    app: &Arc<impl crate::capabilities::Cfg + crate::capabilities::Db + crate::capabilities::Emit + crate::judge::JudgeFuse + PendingQuestion + crate::capabilities::BgTasks + crate::capabilities::Shutdown + 'static>,
     bot: &crate::db::Bot,
     run_id: &str,
     tool_use_id: &str,
@@ -286,8 +297,15 @@ pub async fn hint_for(
     if !cfg.enabled || askable(input).is_empty() || tool_use_id.is_empty() || silent_gate(&**app, &cfg, bot).await {
         return None;
     }
+    let context = current_prompt(&**app, &bot.id, run_id).await.ok().flatten()?;
+    if !still_current(&**app, &cfg, &bot.id, run_id, tool_use_id, &context.0).await.ok()? { return None; }
     match lookup(&**app, run_id, tool_use_id).await {
-        Ok(Lookup::Hint(v)) => return Some(v),
+        Ok(Lookup::Hint(v)) => {
+            let matched: Option<String> = sqlx::query_scalar("SELECT matched_line FROM judge_shadow WHERE id=?")
+                .bind(v["ledger_id"].as_str()?).fetch_optional(app.db()).await.ok()?;
+            let stored: Value = serde_json::from_str(&matched?).ok()?;
+            return (stored["turn_id"].as_str() == Some(context.0.as_str())).then_some(v);
+        },
         Ok(Lookup::NoHint) | Err(_) => return None,
         Ok(Lookup::Never) => {}
     }
@@ -302,7 +320,7 @@ pub async fn hint_for(
         let _flight = flight;
         tokio::select! {
             _ = shutdown.cancelled() => {}
-            r = ask(&app, &bot_id, &run_id, &tool_use_id, &input) => {
+            r = ask_context(&app, &bot_id, &run_id, &tool_use_id, &input, Some(context)) => {
                 if let Err(e) = r {
                     tracing::debug!(bot = %bot_id, error = %e, "judge ask_option skipped");
                 }
@@ -315,11 +333,20 @@ pub async fn hint_for(
 /// 讀 prompt、問 Jev、記帳本、發事件。回 `Ok(true)`＝問了且答案可用。
 /// 關著、專案不在名單、已移交、key 讀不到、沒有 prompt、問過了、名額沒了：靜默回 `Ok(false)`，不寫帳本（名額沒了也不寫）。
 pub async fn ask(
-    app: &(impl crate::capabilities::Cfg + crate::capabilities::Db + crate::capabilities::Emit + crate::judge::JudgeFuse),
+    app: &(impl crate::capabilities::Cfg + crate::capabilities::Db + crate::capabilities::Emit + crate::judge::JudgeFuse + PendingQuestion),
     bot_id: &str,
     run_id: &str,
     tool_use_id: &str,
     input: &Value,
+) -> Result<bool> {
+    let context = current_prompt(app, bot_id, run_id).await?;
+    ask_context(app, bot_id, run_id, tool_use_id, input, context).await
+}
+
+async fn ask_context(
+    app: &(impl crate::capabilities::Cfg + crate::capabilities::Db + crate::capabilities::Emit + crate::judge::JudgeFuse + PendingQuestion),
+    bot_id: &str, run_id: &str, tool_use_id: &str, input: &Value,
+    context: Option<(String, String)>,
 ) -> Result<bool> {
     let cfg = app.cfg().get().await.judge;
     if !cfg.enabled {
@@ -338,7 +365,8 @@ pub async fn ask(
         return Ok(false);
     }
     let Ok(key) = super::read_key(&cfg.key_file) else { return Ok(false) };
-    let Some(prompt) = current_prompt(app, bot_id).await? else { return Ok(false) };
+    let Some((turn_id, prompt)) = context else { return Ok(false) };
+    if !still_current(app, &cfg, bot_id, run_id, tool_use_id, &turn_id).await? { return Ok(false); }
     let prompt = prompt_tail(&prompt);
     if prompt.is_empty() {
         return Ok(false);
@@ -352,7 +380,7 @@ pub async fn ask(
         bot_id,
         run_id,
         &bot.kind,
-        &json!({"tool_use_id": tool_use_id}).to_string(),
+        &json!({"tool_use_id": tool_use_id, "turn_id": turn_id}).to_string(),
         false,
         VERDICT,
     )
@@ -363,6 +391,10 @@ pub async fn ask(
         Err(e) if ["Fuse", "Disabled", "ProjectNotListed"].iter().any(|s| e.to_string() == *s) => return Ok(false),
         Err(e) => return Err(e),
     };
+    if !still_current(app, &cfg, bot_id, run_id, tool_use_id, &turn_id).await? {
+        sqlx::query("UPDATE judge_shadow SET error='stale' WHERE id=?").bind(&slot).execute(app.db()).await?;
+        return Ok(false);
+    }
     let body = request_body(&cfg.model, &prompt, &questions);
     let started = Instant::now();
     let answer = match super::post_systemone(&cfg, &key, &body).await {
@@ -370,8 +402,16 @@ pub async fn ask(
         Err(e) => Err(e),
     };
     let ms = started.elapsed().as_millis() as i64;
+    if !still_current(app, &cfg, bot_id, run_id, tool_use_id, &turn_id).await? {
+        sqlx::query("UPDATE judge_shadow SET error='stale', ms=? WHERE id=?").bind(ms).bind(&slot).execute(app.db()).await?;
+        return Ok(false);
+    }
     let (matched, model, tokens, error, scores) = match answer {
-        Ok((scores, model, tokens)) => (outcome(tool_use_id, &questions, &scores).to_string(), model, tokens, None, Some(scores)),
+        Ok((scores, model, tokens)) => {
+            let mut matched = outcome(tool_use_id, &questions, &scores);
+            matched["turn_id"] = json!(turn_id);
+            (matched.to_string(), model, tokens, None, Some(scores))
+        },
         Err(e) => (json!({"tool_use_id": tool_use_id}).to_string(), None, None, Some(e.to_string()), None),
     };
     sqlx::query("UPDATE judge_shadow SET matched_line=?, model=?, ms=?, input_tokens=?, error=? WHERE id=?")
@@ -386,25 +426,48 @@ pub async fn ask(
     if scores.is_none() {
         return Ok(false);
     }
+    if !still_current(app, &cfg, bot_id, run_id, tool_use_id, &turn_id).await? {
+        sqlx::query("UPDATE judge_shadow SET matched_line=?, error='stale' WHERE id=?")
+            .bind(json!({"tool_use_id": tool_use_id}).to_string()).bind(&slot).execute(app.db()).await?;
+        return Ok(false);
+    }
     app.emit("pending_question_hint", json!({"bot_id": bot_id, "run_id": run_id, "tool_use_id": tool_use_id})).await;
     Ok(true)
 }
 
-/// 這顆 bot 目前回合的使用者 prompt：在飛的那一則，沒有就最近一則已送出的。外部回合（使用者在終端自己打的）
+/// 這顆 bot 指定 run 的回合 id 與使用者 prompt：在飛的那一則，沒有就最近一則已送出的。外部回合（使用者在終端自己打的）
 /// `prompt_text` 是空的，改讀那一回合的使用者訊息。
-async fn current_prompt(app: &impl crate::capabilities::Db, bot_id: &str) -> Result<Option<String>> {
-    let text: Option<Option<String>> = sqlx::query_scalar(
-        "SELECT COALESCE(NULLIF(TRIM(t.prompt_text), ''),
+async fn current_prompt(app: &impl crate::capabilities::Db, bot_id: &str, run_id: &str) -> Result<Option<(String, String)>> {
+    let text: Option<(String, Option<String>)> = sqlx::query_as(
+        "SELECT t.id, COALESCE(NULLIF(TRIM(t.prompt_text), ''),
                          (SELECT m.content FROM messages m WHERE m.turn_id = t.id AND m.role = 'user' ORDER BY m.created_at ASC, m.id ASC LIMIT 1))
            FROM turns t JOIN conversations c ON c.id = t.conversation_id
-          WHERE c.bot_id = ? AND t.status <> 'queued'
+          WHERE c.bot_id = ? AND t.run_id = ? AND t.status <> 'queued'
           ORDER BY (t.status = 'in_flight') DESC, t.created_at DESC, t.rowid DESC
           LIMIT 1",
     )
     .bind(bot_id)
+    .bind(run_id)
     .fetch_optional(app.db())
     .await?;
-    Ok(text.flatten().filter(|t| !t.trim().is_empty()))
+    Ok(text.and_then(|(id, text)| text.filter(|t| !t.trim().is_empty()).map(|text| (id, text))))
+}
+
+async fn still_current(
+    app: &(impl crate::capabilities::Db + PendingQuestion), cfg: &crate::config::JudgeCfg,
+    bot_id: &str, run_id: &str, tool: &str, turn_id: &str,
+) -> Result<bool> {
+    let Some(bot) = crate::db::bot(app.db(), bot_id).await? else { return Ok(false) };
+    let Some(run) = crate::db::active_run(app.db(), bot_id).await? else { return Ok(false) };
+    if bot.deleted_at.is_some() || run.id != run_id || silent_gate(app, cfg, &bot).await { return Ok(false); }
+    if current_prompt(app, bot_id, run_id).await?.as_ref().map(|c| c.0.as_str()) != Some(turn_id) { return Ok(false); }
+    if !app.question_pending(&bot, &run, tool).await { return Ok(false); }
+    // Transcript I/O can yield; check the DB boundary once more afterwards.
+    let active = crate::db::active_run(app.db(), bot_id).await?;
+    let Some(bot) = crate::db::bot(app.db(), bot_id).await? else { return Ok(false) };
+    Ok(bot.deleted_at.is_none() && active.is_some_and(|r| r.id == run_id)
+        && !silent_gate(app, cfg, &bot).await
+        && current_prompt(app, bot_id, run_id).await?.as_ref().map(|c| c.0.as_str()) == Some(turn_id))
 }
 
 #[cfg(test)]
@@ -534,6 +597,7 @@ mod tests {
         /// 依 key 回分數，沒列的 0.05。
         Scores(HashMap<String, f64>),
         Status(u16),
+        Gate(Arc<tokio::sync::Notify>, Arc<tokio::sync::Notify>),
     }
 
     async fn fake_jev(mode: Mode) -> (String, Arc<Mutex<Vec<Value>>>) {
@@ -544,6 +608,11 @@ mod tests {
             async move {
                 log.lock().unwrap().push(body.clone());
                 match mode {
+                    Mode::Gate(entered, release) => {
+                        entered.notify_one();
+                        release.notified().await;
+                        (StatusCode::OK, axum::Json(json!({"answers": {"q1_a": {"noul": 0.95}, "q1_b": {"noul": 0.05}}})))
+                    }
                     Mode::Status(code) => (StatusCode::from_u16(code).unwrap(), axum::Json(json!({"error": "no"}))),
                     Mode::Scores(by_key) => {
                         let mut answers = serde_json::Map::new();
@@ -669,6 +738,94 @@ mod tests {
         .expect("答案落帳後要發事件")
     }
 
+    #[tokio::test]
+    async fn a_stored_hint_is_not_served_to_a_later_turn() {
+        let rig = stand(scores(&[("q1_a", 0.95)]), true, true).await;
+        write_ask(&rig, "toolu_1", two_options());
+        assert!(ask(&rig.env.app, &rig.bot.id, &rig.run_id, "toolu_1", &json!({"questions": two_options()})).await.unwrap());
+        let conv = db::conversation_id(&rig.env.app.db, &rig.bot.id).await.unwrap();
+        sqlx::query("UPDATE turns SET status='completed'").execute(&rig.env.app.db).await.unwrap();
+        sqlx::query("INSERT INTO turns (id,conversation_id,run_id,origin,status,delivery,prompt_text,created_at) VALUES (?,?,?,'web','in_flight','ok','LATER PROMPT','9999')")
+            .bind(db::ulid()).bind(conv).bind(&rig.run_id).execute(&rig.env.app.db).await.unwrap();
+        assert_eq!(get(&rig).await["jev_options"], Value::Null);
+        assert_eq!(rig.seen.lock().unwrap().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn a_background_question_cannot_follow_a_later_turn_before_send() {
+        let rig = stand(scores(&[("q1_a", 0.95)]), true, true).await;
+        write_ask(&rig, "toolu_1", two_options());
+        let gate = rig.env.app.judge_fuse.lock().await;
+        assert_eq!(get(&rig).await["jev_options"], Value::Null);
+        rig.env.app.background_tasks.close();
+        sqlx::query("UPDATE turns SET status='completed'").execute(&rig.env.app.db).await.unwrap();
+        let conv = db::conversation_id(&rig.env.app.db, &rig.bot.id).await.unwrap();
+        sqlx::query("INSERT INTO turns (id,conversation_id,run_id,origin,status,delivery,prompt_text,created_at) VALUES (?,?,?,'web','in_flight','ok','LATER PROMPT','9999')")
+            .bind(db::ulid()).bind(conv).bind(&rig.run_id).execute(&rig.env.app.db).await.unwrap();
+        drop(gate);
+        rig.env.app.background_tasks.wait().await;
+        assert!(rig.seen.lock().unwrap().is_empty(), "later turn must not be sent for the old question");
+        assert!(matches!(lookup(&rig.env.app, &rig.run_id, "toolu_1").await.unwrap(), Lookup::Never | Lookup::NoHint));
+        for row in ledger(&rig.env.app).await { assert_eq!(row.1.as_deref(), Some("stale")); }
+    }
+
+    #[tokio::test]
+    async fn an_old_run_never_borrows_the_new_runs_prompt() {
+        let rig = stand(scores(&[("q1_a", 0.95)]), true, true).await;
+        write_ask(&rig, "toolu_1", two_options());
+        sqlx::query("UPDATE runs SET state='exited', ended_at='ended' WHERE id=?").bind(&rig.run_id).execute(&rig.env.app.db).await.unwrap();
+        let next = tt::fake_run(&rig.env.app, &rig.bot.id).await;
+        let conv = db::conversation_id(&rig.env.app.db, &rig.bot.id).await.unwrap();
+        sqlx::query("INSERT INTO turns (id,conversation_id,run_id,origin,status,delivery,prompt_text,created_at) VALUES (?,?,?,'web','in_flight','ok','R2 PROMPT','9999')")
+            .bind(db::ulid()).bind(conv).bind(next).execute(&rig.env.app.db).await.unwrap();
+        assert!(!ask(&rig.env.app, &rig.bot.id, &rig.run_id, "toolu_1", &json!({"questions": two_options()})).await.unwrap());
+        assert!(rig.seen.lock().unwrap().is_empty());
+        assert!(ledger(&rig.env.app).await.is_empty());
+    }
+
+    #[tokio::test]
+    async fn stale_questions_never_publish_after_the_http_gate() {
+        for boundary in ["answered", "turn", "run", "handoff"] {
+            let entered = Arc::new(tokio::sync::Notify::new());
+            let release = Arc::new(tokio::sync::Notify::new());
+            let rig = stand(Mode::Gate(entered.clone(), release.clone()), true, true).await;
+            write_ask(&rig, "toolu_1", two_options());
+            let mut rx = rig.env.app.subscribe();
+            let app = rig.env.app.clone();
+            let bot = rig.bot.id.clone();
+            let run = rig.run_id.clone();
+            let task = tokio::spawn(Box::pin(async move {
+                ask(&app, &bot, &run, "toolu_1", &json!({"questions": two_options()})).await.unwrap()
+            }));
+            entered.notified().await;
+            match boundary {
+                "answered" => {
+                    let mut log = std::fs::read_to_string(&rig.transcript).unwrap();
+                    log.push_str(&json!({"message":{"content":[{"type":"tool_result","tool_use_id":"toolu_1"}]}}).to_string());
+                    std::fs::write(&rig.transcript, log).unwrap();
+                }
+                "turn" => {
+                    sqlx::query("UPDATE turns SET status='completed'").execute(&rig.env.app.db).await.unwrap();
+                    let conv = db::conversation_id(&rig.env.app.db, &rig.bot.id).await.unwrap();
+                    sqlx::query("INSERT INTO turns (id,conversation_id,run_id,origin,status,delivery,prompt_text,created_at) VALUES (?,?,?,'web','in_flight','ok','NEW PROMPT','9999')")
+                        .bind(db::ulid()).bind(conv).bind(&rig.run_id).execute(&rig.env.app.db).await.unwrap();
+                }
+                "run" => {
+                    sqlx::query("UPDATE runs SET state='exited', ended_at='ended' WHERE id=?").bind(&rig.run_id).execute(&rig.env.app.db).await.unwrap();
+                    tt::fake_run(&rig.env.app, &rig.bot.id).await;
+                }
+                "handoff" => { sqlx::query("UPDATE projects SET handed_off_to='remote' WHERE id=?").bind(&rig.env.project_id).execute(&rig.env.app.db).await.unwrap(); }
+                _ => unreachable!(),
+            }
+            release.notify_one();
+            assert!(!task.await.unwrap(), "{boundary}: stale answer must be rejected");
+            assert_eq!(lookup(&rig.env.app, &rig.run_id, "toolu_1").await.unwrap(), Lookup::NoHint, "{boundary}");
+            assert_eq!(ledger(&rig.env.app).await[0].1.as_deref(), Some("stale"), "{boundary}");
+            assert!(rig.seen.lock().unwrap()[0]["state"]["user_prompt"].as_str().unwrap().contains("連線一律走內網"));
+            while let Ok(event) = rx.try_recv() { assert_ne!(event.kind, EVENT, "{boundary}"); }
+        }
+    }
+
     /// 有明顯建議：第一次讀不等 Jev（`jev_options` 為 null、題目照給）、答案回來發事件、之後的讀帶出建議選項與分數；
     /// 同一個 `tool_use` 不再問；請求是一個、每個選項一題；prompt 與題目已遮罩、不帶 bot 識別；不按任何鍵。
     #[tokio::test]
@@ -734,8 +891,8 @@ mod tests {
     #[tokio::test]
     async fn a_failing_jev_leaves_the_question_untouched_and_is_not_retried() {
         let rig = stand(Mode::Status(503), true, true).await;
-        let input = json!({"questions": two_options()});
         write_ask(&rig, "toolu_1", two_options());
+        let input = json!({"questions": two_options()});
         assert!(!ask(&rig.env.app, &rig.bot.id, &rig.run_id, "toolu_1", &input).await.unwrap());
         let body = get(&rig).await;
         assert_eq!(body["questions"][0]["question"], "連線方式？");
@@ -788,6 +945,7 @@ mod tests {
             .execute(&rig.env.app.db)
             .await
             .unwrap();
+        write_ask(&rig, "toolu_1", two_options());
         let input = json!({"questions": two_options()});
         assert!(!ask(&rig.env.app, &rig.bot.id, &rig.run_id, "toolu_1", &input).await.unwrap());
         assert!(rig.seen.lock().unwrap().is_empty());
@@ -822,6 +980,7 @@ mod tests {
     #[tokio::test]
     async fn a_new_tool_use_is_asked_again() {
         let rig = stand(scores(&[("q1_a", 0.9)]), true, true).await;
+        write_ask(&rig, "toolu_1", two_options());
         let input = json!({"questions": two_options()});
         assert!(ask(&rig.env.app, &rig.bot.id, &rig.run_id, "toolu_1", &input).await.unwrap());
         write_ask(&rig, "toolu_2", two_options());
@@ -836,6 +995,7 @@ mod tests {
     async fn no_prompt_to_go_by_means_no_request() {
         let rig = stand(scores(&[("q1_a", 0.9)]), true, true).await;
         sqlx::query("DELETE FROM turns").execute(&rig.env.app.db).await.unwrap();
+        write_ask(&rig, "toolu_1", two_options());
         let input = json!({"questions": two_options()});
         assert!(!ask(&rig.env.app, &rig.bot.id, &rig.run_id, "toolu_1", &input).await.unwrap());
         assert!(rig.seen.lock().unwrap().is_empty());
