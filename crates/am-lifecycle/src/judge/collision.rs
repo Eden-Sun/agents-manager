@@ -25,6 +25,15 @@ use serde_json::{json, Value};
 
 use crate::release_triage::ledger::{self, IssueRef, Row};
 
+#[cfg(all(test, feature = "daemon-test-harness"))]
+struct AskedRaceGate {
+    pair: String,
+    barrier: Arc<tokio::sync::Barrier>,
+}
+
+#[cfg(all(test, feature = "daemon-test-harness"))]
+static ASKED_RACE_GATE: std::sync::OnceLock<std::sync::Mutex<Option<AskedRaceGate>>> = std::sync::OnceLock::new();
+
 /// #264 量過的門檻。低於的只記帳本。
 pub const SAME_WORK_THRESHOLD: f64 = 0.5;
 /// 一次觸發最多問幾對。評估時一張新票對上約 15 張在跑的工作。
@@ -264,8 +273,10 @@ async fn check_candidate(app: &(impl crate::capabilities::Cfg + crate::capabilit
             if asked(app, &pair).await? {
                 continue;
             }
+            #[cfg(all(test, feature = "daemon-test-harness"))]
+            gate_after_asked_for_test(&pair).await;
             let snapshot = snapshot(&pair, &mine, &other);
-            let slot = match super::reserve_slot(
+            let slot = match super::reserve_same_work_slot(
                 app,
                 &cfg,
                 &pid,
@@ -274,12 +285,11 @@ async fn check_candidate(app: &(impl crate::capabilities::Cfg + crate::capabilit
                 &pair,
                 &cand.agent_kind,
                 &snapshot,
-                false,
-                "same_work",
             )
             .await
             {
-                Ok(id) => id,
+                Ok(Some(id)) => id,
+                Ok(None) => continue,
                 Err(e) => {
                     let msg = e.to_string();
                     if msg.contains("Fuse") || msg.contains("Disabled") || msg.contains("ProjectNotListed") {
@@ -408,6 +418,20 @@ async fn asked(app: &impl crate::capabilities::Db, pair: &str) -> Result<bool> {
         .fetch_one(app.db())
         .await?;
     Ok(n > 0)
+}
+
+#[cfg(all(test, feature = "daemon-test-harness"))]
+async fn gate_after_asked_for_test(pair: &str) {
+    let barrier = ASKED_RACE_GATE
+        .get_or_init(|| std::sync::Mutex::new(None))
+        .lock()
+        .unwrap()
+        .as_ref()
+        .filter(|gate| gate.pair == pair)
+        .map(|gate| gate.barrier.clone());
+    if let Some(barrier) = barrier {
+        barrier.wait().await;
+    }
 }
 
 /// release-triage 開的票屬於 `[release_triage] repo`（`owner/name`）。專案 label 或路徑最後一段等於 `name`
@@ -815,6 +839,29 @@ mod tests {
         (url, seen, request_received)
     }
 
+    async fn gated_parallel_jev() -> (String, Arc<std::sync::Mutex<Vec<Value>>>, Arc<tokio::sync::Semaphore>, Arc<tokio::sync::Semaphore>) {
+        let seen = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let arrived = Arc::new(tokio::sync::Semaphore::new(0));
+        let release = Arc::new(tokio::sync::Semaphore::new(0));
+        let (log, arrived_in, release_in) = (seen.clone(), arrived.clone(), release.clone());
+        let route = axum::routing::post(move |axum::Json(body): axum::Json<Value>| {
+            log.lock().unwrap().push(body);
+            arrived_in.add_permits(1);
+            let release = release_in.clone();
+            async move {
+                release.acquire().await.unwrap().forget();
+                (
+                    StatusCode::OK,
+                    axum::Json(json!({"model": "jev-1.13.0", "answers": {"same_work": {"type": "noul", "noul": 0.8}}, "usage": {"input_tokens": 400}})),
+                )
+            }
+        });
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("http://{}/v1/systemone", listener.local_addr().unwrap());
+        tokio::spawn(async move { axum::serve(listener, axum::Router::new().route("/v1/systemone", route)).await.unwrap() });
+        (url, seen, arrived, release)
+    }
+
     struct Rig {
         env: tt::Env,
         dir: std::path::PathBuf,
@@ -884,12 +931,109 @@ mod tests {
             .unwrap()
     }
 
+    struct AskedRaceGateGuard;
+
+    impl AskedRaceGateGuard {
+        fn install(pair: &str, parties: usize) -> Self {
+            *ASKED_RACE_GATE.get_or_init(|| std::sync::Mutex::new(None)).lock().unwrap() = Some(super::AskedRaceGate {
+                pair: pair.to_string(),
+                barrier: Arc::new(tokio::sync::Barrier::new(parties)),
+            });
+            Self
+        }
+    }
+
+    impl Drop for AskedRaceGateGuard {
+        fn drop(&mut self) {
+            *ASKED_RACE_GATE.get_or_init(|| std::sync::Mutex::new(None)).lock().unwrap() = None;
+        }
+    }
+
     async fn inbox(app: &Arc<App>) -> Vec<crate::supervisor::store::InboxEvent> {
         crate::supervisor::store::pending_inbox(&app.db).await.unwrap().into_iter().filter(|e| e.kind == "judge_same_work").collect()
     }
 
     async fn status_of(app: &Arc<App>, id: &str) -> String {
         sqlx::query_scalar("SELECT status FROM supervisor_assignments WHERE id=?").bind(id).fetch_one(&app.db).await.unwrap()
+    }
+
+    #[tokio::test]
+    async fn same_pair_claim_race_asks_once_and_pushes_one_hint() {
+        let rig = stand(Mode::Noul(0.8), true, true).await;
+        let app = rig.env.app.clone();
+        let caller = tt::claude_bot(&app, &rig.env.project_id, "caller").await;
+        let other = tt::claude_bot(&app, &rig.env.project_id, "other").await;
+        let existing = crate::supervisor::store::insert_assignment(
+            &app.db,
+            None,
+            &other.id,
+            "existing-1499",
+            "修正同一個 Jev 撞題檢查的競態 #1499",
+            &[],
+            None,
+            true,
+        )
+        .await
+        .unwrap();
+        let pair = format!("claim:candidate:1499|asg:{}", existing.id);
+        let _gate = AskedRaceGateGuard::install(&pair, 2);
+        let ask = || ClaimAsk {
+            project_id: rig.env.project_id.clone(),
+            caller: caller.id.clone(),
+            issue: Some(1499),
+            title: "修正同一個 Jev 撞題檢查的競態 #1499".into(),
+            child: "candidate".into(),
+            branch: None,
+        };
+
+        let first_ask = ask();
+        let second_ask = ask();
+        let (first, second) = tokio::join!(check_claim(&app, &first_ask), check_claim(&app, &second_ask));
+        first.unwrap();
+        second.unwrap();
+
+        assert_eq!(rig.seen.lock().unwrap().len(), 1, "同一 pair 只送一個 Jev HTTP request");
+        assert_eq!(shadow_rows(&app).await.len(), 1, "同一 pair 只占一列帳本");
+        assert_eq!(inbox(&app).await.len(), 1, "同一 pair 只推一則通知");
+    }
+
+    #[tokio::test]
+    async fn different_pairs_reach_jev_while_the_other_request_is_pending() {
+        let rig = stand(Mode::Noul(0.8), true, true).await;
+        let app = rig.env.app.clone();
+        let (url, seen, arrived, release) = gated_parallel_jev().await;
+        app.cfg.update(move |c| {
+            c.judge.endpoint = url;
+            c.judge.timeout_ms = 10_000;
+            Ok(())
+        })
+        .await
+        .unwrap();
+        let caller = tt::claude_bot(&app, &rig.env.project_id, "caller").await;
+        let other = tt::claude_bot(&app, &rig.env.project_id, "other").await;
+        crate::supervisor::store::insert_assignment(&app.db, None, &other.id, "existing-1499", "修正撞題並行認領問題 #1499", &[], None, true).await.unwrap();
+        let ask = |issue| ClaimAsk {
+            project_id: rig.env.project_id.clone(),
+            caller: caller.id.clone(),
+            issue: Some(issue),
+            title: format!("檢查獨立工作 {issue}"),
+            child: "candidate".into(),
+            branch: None,
+        };
+        let first_app = app.clone();
+        let first_ask = ask(14991);
+        let first = tokio::spawn(async move { check_claim(&first_app, &first_ask).await });
+        let second_app = app.clone();
+        let second_ask = ask(14992);
+        let second = tokio::spawn(async move { check_claim(&second_app, &second_ask).await });
+
+        arrived.acquire_many(2).await.unwrap().forget();
+        assert_eq!(seen.lock().unwrap().len(), 2, "不同 pair 都能在前一個 Jev 回覆前送出 request");
+        release.add_permits(2);
+        first.await.unwrap().unwrap();
+        second.await.unwrap().unwrap();
+        assert_eq!(shadow_rows(&app).await.len(), 2, "不同 pair 各自留一列帳本");
+        assert_eq!(inbox(&app).await.len(), 2, "不同 pair 各自推提示");
     }
 
     #[tokio::test]
