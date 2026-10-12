@@ -21,6 +21,7 @@ import { ATTACHMENT_FAILED_NOTICE, composerPlaceholder, sendButtonLabel, sendBut
 import { queuedSendFor } from '../store/queuedSend'
 import { isImeEnter } from '../lib/ime'
 import { msgTimeLabel, msgTimeTitle } from '../lib/msgTime'
+import { useLocalDay } from '../hooks/useLocalDay'
 import { herdrIdentity } from '../lib/herdrIdentity'
 import { PaneCopy } from './PaneCopy'
 import { OutboxFiles } from './OutboxFiles'
@@ -152,6 +153,7 @@ const PlainBubble = memo(function PlainBubble({
   const quoted = msg.role === 'user' && !msg.relay_from ? quotedFrom(msg.content) : null
   // 打字送出但沒有無損證據（SPEC §4.4a）：留一個看得到的標記讓人核對。
   // 只有「沒有證據**而且**不會自動重送」才是使用者要看到的警示（`deliveryNotice`）。
+  const today = useLocalDay()
   const notice = useStore((s) =>
     msg.role === 'user' && msg.turn_id && msg.bot_id ? deliveryNotice(s.turns[msg.bot_id]?.[msg.turn_id]) : 'none',
   )
@@ -209,7 +211,7 @@ const PlainBubble = memo(function PlainBubble({
             dateTime={msg.created_at}
             title={notice === 'hint' ? `${msgTimeTitle(msg.created_at)}\n${DELIVERY_HINT_TEXT}` : msgTimeTitle(msg.created_at)}
           >
-            {msgTimeLabel(msg.created_at)}
+            {msgTimeLabel(msg.created_at, today)}
           </time>
         )}
       </div>
@@ -428,6 +430,7 @@ export function JumpToBottom({ show, onClick }: { show: boolean; onClick: () => 
  * 貼 composer 下緣（2026-09-08 依使用者要求從上緣移下來，見 UI-DECISIONS）。手機只在回合完成後顯示。
  */
 export function LastAskPeek({ msg, turnId, onJump }: { msg: Message; turnId: string; onJump: () => void }) {
+  const today = useLocalDay()
   // 狀態綁 turn：換回合自動重設，不需要 effect。
   const [ui, setUi] = useState({ turn: turnId, closed: false, open: false })
   if (ui.turn !== turnId) setUi({ turn: turnId, closed: false, open: false })
@@ -451,7 +454,7 @@ export function LastAskPeek({ msg, turnId, onJump }: { msg: Message; turnId: str
         <div className="lastq-head">
           <span className="lastq-tag">這回合的提問</span>
           <time className="lastq-time" dateTime={msg.created_at} title={msgTimeTitle(msg.created_at)}>
-            {msgTimeLabel(msg.created_at)}
+            {msgTimeLabel(msg.created_at, today)}
           </time>
           {clamped ? <span className="lastq-hint">{ui.open ? '再點一下 · 捲到這則' : '點一下 · 展開全文'}</span> : null}
           <button

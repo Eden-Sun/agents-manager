@@ -24,6 +24,18 @@ export function dateTimeLabel(iso: string, now: number = Date.now()): string {
   return `${head}${d.getMonth() + 1}/${d.getDate()} ${time}`
 }
 
+/** 本地時區「今天」的開始（0 點）。跨日時它會變，拿來當 [`msgTimeLabel`] 的 `now`，標籤才會跟著換天。 */
+export function startOfLocalDay(now: number): number {
+  const d = new Date(now)
+  return new Date(d.getFullYear(), d.getMonth(), d.getDate()).getTime()
+}
+
+/** 下一個本地午夜（嚴格在 `now` 之後）。 */
+export function nextLocalMidnight(now: number): number {
+  const d = new Date(now)
+  return new Date(d.getFullYear(), d.getMonth(), d.getDate() + 1).getTime()
+}
+
 /** tooltip 的完整時間，本地時區 `YYYY-MM-DD HH:mm:ss`；讀不懂就原樣顯示。 */
 export function msgTimeTitle(iso: string): string {
   const d = new Date(iso)
