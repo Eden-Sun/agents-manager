@@ -864,8 +864,8 @@ async fn set_inner(
             q.fable = prev.fable.clone();
         }
     }
-    // 同理 5h／7d：狀態列被截斷只讀到 5h 時不可洗掉 7d（2026-09-13 實機、使用者回報）。
-    if q.five_hour.is_none() || q.seven_day.is_none() {
+    // 部分讀數沿用缺窗；codex app-server 是完整帳號讀數，缺窗表示方案沒有該窗。
+    if q.source != "codex-app-server" && (q.five_hour.is_none() || q.seven_day.is_none()) {
         if let Some(prev) = quotas.get(&key) {
             if q.five_hour.is_none() {
                 q.five_hour = prev.five_hour.clone();
@@ -884,7 +884,12 @@ async fn set_inner(
     // 撞上限只有 CLI 橫幅看得到（§12.4），不沿用會被 app-server 輪詢洗回滿格（2026-09-12 使用者）。
     if q.limit_hit.is_none() {
         if let Some(prev) = quotas.get(&key) {
-            q.limit_hit = prev.limit_hit.clone();
+            q.limit_hit = prev.limit_hit.clone().filter(|hit| {
+                let plan_changed = q.source == "codex-app-server"
+                    && q.plan.is_some() && prev.plan.is_some() && q.plan != prev.plan
+                    && codex_reading_after_hit(hit, &fresh);
+                !plan_changed
+            });
         }
     }
     if !brings_its_own_hit {
@@ -1008,6 +1013,11 @@ pub fn parse_utc(s: &str) -> Option<chrono::DateTime<chrono::Utc>> {
     chrono::DateTime::parse_from_rfc3339(s.trim()).ok().map(|t| t.with_timezone(&chrono::Utc))
 }
 
+fn codex_reading_after_hit(hit: &LimitHit, fresh: &Quota) -> bool {
+    fresh.source == "codex-app-server"
+        && parse_utc(&fresh.updated_at).zip(parse_utc(&hit.at)).is_some_and(|(reading, at)| reading >= at)
+}
+
 /// 知道桶名的撞限（claude 橫幅）遇到**那一桶的新讀數**時校正，不然保底時間（Fable 7 天）與橫幅當下讀到的
 /// `resets_at` 之後永遠不會被真讀數改寫——claude 沒有 `clear_limit_hit`，帳號恢復後照樣擋到 7 天（review 2026-09-16 M2）。
 ///
@@ -1020,7 +1030,21 @@ pub fn parse_utc(s: &str) -> Option<chrono::DateTime<chrono::Utc>> {
 /// 沒有桶名（codex 的 credits 用完、開機回填的格子）原則上不動：那種撞限只有橫幅說得準。例外：新讀數的
 /// **5h 與 7d 兩個窗都是撞限之後才開的**——兩桶同時重開只會是整個帳號重置（提早重置券、或週窗本身到期），
 /// 撞限作廢（2026-09-27 使用者：codex 提早重置後額度全滿，還掛著「被擋、下午 02:14 恢復」）。
+/// Codex app-server 的新完整讀數另可解除已消失或不再見底的桶，只有週窗時也適用。
 pub fn recalibrate_limit_hit(mut hit: LimitHit, fresh: &Quota) -> Option<LimitHit> {
+    // 完整的 Codex 帳號讀數可證明撞限的桶已消失或不再見底。
+    // 舊探測、statusline 與其他供應商不具有這個權威性。
+    if codex_reading_after_hit(&hit, fresh) {
+        let full = match hit.bucket.as_deref() {
+            None => [&fresh.five_hour, &fresh.seven_day].into_iter().flatten().any(Window::critical),
+            Some("five_hour") => fresh.five_hour.as_ref().is_some_and(Window::critical),
+            Some("seven_day") => fresh.seven_day.as_ref().is_some_and(Window::critical),
+            _ => true,
+        };
+        if !full {
+            return None;
+        }
+    }
     if hit.bucket.is_none() {
         return if both_windows_opened_after(&hit, fresh) { None } else { Some(hit) };
     }
