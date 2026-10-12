@@ -18,18 +18,28 @@ export interface RemoteImageInfo {
   internal: boolean
 }
 
+/** IPv4 的前兩段就夠判：0/8、10/8、127/8、169.254/16、172.16/12、192.168/16。 */
+function isInternalV4(a: number, b: number): boolean {
+  return a === 0 || a === 10 || a === 127 || (a === 169 && b === 254) || (a === 172 && b >= 16 && b <= 31) || (a === 192 && b === 168)
+}
+
 /** `URL.hostname` 給的主機名（IPv6 帶方括號）是不是本機／內網位址。 */
 function isInternalHost(hostname: string): boolean {
   const h = hostname.toLowerCase()
   if (h === 'localhost' || h.endsWith('.localhost') || h.endsWith('.local')) return true
   if (h.startsWith('[')) {
     const v6 = h.slice(1, -1)
+    // IPv4-mapped（`::ffff:127.0.0.1`）：URL 會正規化成 `::ffff:7f00:1`，兩段十六進位還原成 IPv4 再判。
+    const mapped = /^::ffff:([0-9a-f]{1,4}):([0-9a-f]{1,4})$/.exec(v6)
+    if (mapped) {
+      const hi = parseInt(mapped[1], 16)
+      return isInternalV4(hi >> 8, hi & 0xff)
+    }
     return v6 === '::1' || v6 === '::' || /^f[cd][0-9a-f]{2}:/.test(v6) || /^fe[89ab][0-9a-f]:/.test(v6)
   }
   const m = /^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$/.exec(h)
   if (!m) return false
-  const [a, b] = [Number(m[1]), Number(m[2])]
-  return a === 0 || a === 10 || a === 127 || (a === 169 && b === 254) || (a === 172 && b >= 16 && b <= 31) || (a === 192 && b === 168)
+  return isInternalV4(Number(m[1]), Number(m[2]))
 }
 
 export function remoteImageInfo(src: string): RemoteImageInfo | null {

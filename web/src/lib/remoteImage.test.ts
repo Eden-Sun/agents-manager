@@ -110,3 +110,11 @@ test('不跟轉址：佔位只寫了原網址的網域，redirect 要是 error�
   }) as unknown as typeof fetch
   await assert.rejects(fetchRemoteImageBlob('https://example.com/a.png', redirected), TypeError)
 })
+
+test('IPv4-mapped IPv6 指到本機／內網時也要標成內網（URL 會正規化成十六進位，不能漏判）', () => {
+  // `http://[::ffff:127.0.0.1]/` 的 hostname 是 `[::ffff:7f00:1]`：點下去仍是這台機器發請求。
+  for (const u of ['http://[::ffff:127.0.0.1]/a.png', 'http://[::ffff:10.0.0.1]/a.png', 'http://[::ffff:192.168.1.5]/a.png']) {
+    assert.equal(remoteImageInfo(u)?.internal, true, u)
+  }
+  assert.equal(remoteImageInfo('http://[::ffff:8.8.8.8]/a.png')?.internal, false)
+})
