@@ -881,10 +881,15 @@ fn may_press_retry_submit(
 }
 
 /// 框裡還是**這一則**草稿。畫面讀來的字跟原文只在空白上不同（TUI 把長句折成多列、續行縮排、列與列之間的換行）也算；
-/// 字少了、多了、換掉都不算——那是別人剛打的字。
+/// 字少了、多了、換掉都不算——那是別人剛打的字。空白一律整個拿掉再比：中文折行時換列前後沒有任何字元，
+/// 收成一個空格就對不上原文（#1598）。
 fn composer_still_holds(kind: &str, screen: &str, text: &str) -> bool {
-    let squash = |s: &str| s.split_whitespace().collect::<Vec<_>>().join(" ");
-    crate::composer_parse::composer_text_whole(kind, screen).is_some_and(|shown| squash(&shown) == squash(text))
+    crate::composer_parse::composer_text_whole(kind, screen).is_some_and(|shown| bare(&shown) == bare(text))
+}
+
+/// 去掉所有空白字元，只用來比「是不是同一串字」。
+fn bare(s: &str) -> String {
+    s.chars().filter(|c| !c.is_whitespace()).collect()
 }
 
 /// 送出鍵按下去之後：先看送達證據，完整原文仍留在框裡才最多補按一次。
