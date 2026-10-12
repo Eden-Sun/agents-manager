@@ -119,3 +119,14 @@ test('toSharePage：一頁超過上限時丟掉的是最舊的（契約 C 是舊
   assert.equal(page.messages.at(-1)?.id, `m${SHARE_PAGE_MAX + 49}`, '最新的那則不能被丟掉')
   assert.equal(page.has_more, true, '丟掉的是更早的，還有東西可載')
 })
+
+test('一頁超過上限時留最新的，而且最新那則超長、截點落在 emoji 中間時也不留孤立代理', () => {
+  // 兩條都要成立：丟掉的是最舊的（#1564），截斷不切斷 emoji（#1605）。
+  const text = 'a'.repeat(SHARE_TEXT_STORE_MAX - 1) + '😀' + 'b'.repeat(10)
+  const msgs = Array.from({ length: SHARE_PAGE_MAX + 20 }, (_, i) => ({ id: `m${i}`, role: 'assistant', text: 'ok', created_at: '2026-10-12T00:00:00Z' }))
+  msgs[msgs.length - 1] = { id: 'newest', role: 'assistant', text, created_at: '2026-10-12T00:00:00Z' } as (typeof msgs)[number]
+  const page = toSharePage({ bot_name: 'b', status: 'idle', messages: msgs, has_more: false })
+  assert.equal(page.messages.at(-1)?.id, 'newest')
+  assert.doesNotMatch(page.messages.at(-1)!.text, /[\uD800-\uDBFF](?![\uDC00-\uDFFF])|(?<![\uD800-\uDBFF])[\uDC00-\uDFFF]/)
+  assert.equal(page.has_more, true)
+})
