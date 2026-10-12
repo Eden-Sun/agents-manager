@@ -1,4 +1,4 @@
-import { Fragment, memo, useEffect, useMemo, useRef, useState } from 'react'
+import { Fragment, memo, useEffect, useId, useMemo, useRef, useState } from 'react'
 import { persistSetDiff } from '../store/sharedSet'
 import { renderProbe } from '../lib/renderProbe'
 import { useStableCallback } from '../hooks/useStableCallback'
@@ -635,6 +635,8 @@ function NewBotForm({ onDone, initialProjectId }: { onDone: () => void; initialP
   const [busy, setBusy] = useState(false)
   const nameRef = useRef<HTMLInputElement>(null)
   const nameTouched = useRef(false)
+  const nameLabelId = useId()
+  const nameHintId = useId()
 
   // 驗 trim 過的：打到一半的 `my ` 不該先閃紅字；送出也送 trim 過的。
   const nameOk = isValidBotName(name.trim())
@@ -804,10 +806,13 @@ function NewBotForm({ onDone, initialProjectId }: { onDone: () => void; initialP
         </span>
       ) : null}
       <label className="field">
-        <span>名稱</span>
+        <span id={nameLabelId}>名稱</span>
         <input
           ref={nameRef}
           type="text"
+          aria-labelledby={nameLabelId}
+          aria-invalid={name && !nameOk ? true : undefined}
+          aria-describedby={name && !nameOk ? nameHintId : undefined}
           value={name}
           placeholder={`${kind}-1`}
           spellCheck={false}
@@ -816,7 +821,7 @@ function NewBotForm({ onDone, initialProjectId }: { onDone: () => void; initialP
             setName(e.target.value)
           }}
         />
-        {name && !nameOk ? <span className="hint">{BOT_NAME_HINT}</span> : null}
+        {name && !nameOk ? <span id={nameHintId} className="hint">{BOT_NAME_HINT}</span> : null}
         {!cliOk ? <span className="hint">此 kind 的 CLI 尚未安裝，無法建立</span> : null}
       </label>
       <PersonaField value={persona} onChange={setPersona} collapsible />
