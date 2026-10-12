@@ -15,7 +15,9 @@ const NOISE: RegExp[] = [
   // 鍵盤提示：`(ctrl+b to run in background)`、`esc to interrupt`、`? for shortcuts`
   /^\s*[(（]?\s*(?:ctrl|cmd|⌘|shift|alt|option)\s*\+/i,
   /^\s*[(（]?\s*(?:esc|escape)\b[^.]*\b(?:to|for)\b/i,
-  /^\s*[(（]?\s*\?\s+for\s+shortcuts/i,
+  // footer 只認行尾或右欄（與正文之間至少兩格空白）；`? for shortcuts explains the UI` 是正文（同 daemon #1495）。
+  /^\s*[(（]?\s*\?\s+for\s+shortcuts\s*[)）]?\s*$/i,
+  /^\s*[(（]?\s*\?\s+for\s+shortcuts\s{2,}\S/i,
   // Codex footer: warning counter may have its own row in a narrow pane.
   /^\s*⚠ \d+ warnings? · f2 to view\s*$/,
   /^\s*[a-z][a-z0-9._]*-[a-z0-9._-]+(?:\s+(?:default|fast|low|medium|high|xhigh|max|ultra))*\s*·\s*[~/]/i,

@@ -58,3 +58,10 @@ test('⏸ 開頭的正文不是權限模式列：只剝模式列（同 daemon cl
     assert.equal(cleanLiveText(row), null, row)
   }
 })
+
+test('`? for shortcuts` 後面接的正文不是 footer；footer 的右欄（至少兩格空白）照舊剝掉', () => {
+  assert.equal(cleanLiveText('? for shortcuts explains the UI'), '? for shortcuts explains the UI')
+  assert.equal(cleanLiveText('  ? for shortcuts'), null)
+  assert.equal(cleanLiveText('  ? for shortcuts    Gemini 3.8 Flash (Medium)'), null)
+  assert.equal(cleanLiveText('  ? for shortcuts        ⚠ 2 warnings · f2 to view'), null)
+})
