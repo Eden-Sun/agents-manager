@@ -1556,7 +1556,11 @@ pub async fn preflight_restricted(conn: &FencedConn, min_claude: &str) -> Result
             tracing::warn!(host = %conn.name(), error = %e, "preflight: claude --version ssh failed");
             PreflightError::Unreachable
         })?;
-    let found = parse_claude_version(&ver).unwrap_or_default();
+    // 只認恰好一行的輸出：banner、motd 夾在前面時，第一個像版本的字串（例如 `22.04`）不一定是 claude 的版本，寧可讀不到。
+    let found = match ver.trim_end_matches('\n').lines().collect::<Vec<_>>().as_slice() {
+        [one] => parse_claude_version(one).unwrap_or_default(),
+        _ => String::new(),
+    };
     if found.is_empty() || !version_at_least(&found, min_claude) {
         return Err(PreflightError::ClaudeTooOld { found });
     }

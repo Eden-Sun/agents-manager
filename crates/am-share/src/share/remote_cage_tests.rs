@@ -257,6 +257,35 @@ async fn preflight_refuses_old_claude_and_managed_settings_for_restricted_only()
         .expect("信任分享不查 managed settings");
 }
 
+/// 遠端的 `claude --version` 輸出夾著別的行（banner、motd）時，不能把第一個像版本的字串（`22.04`）當成 claude 的版本。
+#[tokio::test]
+async fn preflight_does_not_read_claude_version_from_a_banner() {
+    let e = tt::env().await;
+    let host = format!("rs2-banner-{}", &db::ulid().to_lowercase()[..8]);
+    am_base::hosts::set_ssh_fake(&host, |script: &str| {
+        if script.contains("claude --version") {
+            return Ok("Ubuntu 22.04 LTS\n1.0.5 (Claude Code)\n".to_string());
+        }
+        Ok("NONE\n".to_string())
+    });
+    let cfg = HostCfg {
+        name: host.clone(),
+        ssh: "fake-ssh".into(),
+        ssh_port: 22,
+        ssh_opts: vec![],
+        herdr_session: "test-session".into(),
+        shared_session: false,
+        remote_path: String::new(),
+    };
+    let conn = e.app.hosts.insert_remote_for_test(cfg).await;
+    conn.connected.store(true, Ordering::SeqCst);
+    let site = crate::share::site::FencedConn::new(e.app.hosts.fence(&host).await.unwrap());
+    assert!(
+        matches!(remote_fs::preflight_restricted(&site, cage::MIN_CLAUDE).await, Err(PreflightError::ClaudeTooOld { .. })),
+        "banner 裡的 22.04 不是 claude 的版本，1.0.5 也不夠新"
+    );
+}
+
 // ───────────────────────── 啟動 ─────────────────────────
 
 /// 每次啟動都重跑 preflight：建好之後 claude 被換成舊版，這次啟動就不起來；換回新版又能起。
