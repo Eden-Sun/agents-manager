@@ -627,3 +627,20 @@ async fn a_childs_runtime_is_not_written_when_its_settings_cannot_follow() {
     let bot = db::bot(&app.db, &c.bot.id).await.unwrap().unwrap();
     assert_eq!(bot.effort.as_deref(), Some("high"));
 }
+
+/// `pending_tail`（issue #1476）的路徑門：只認某個 root 的 `projects/` 底下的 `.jsonl`，絕對路徑、無 `..`、無控制字元。
+#[test]
+fn a_recorded_path_must_sit_under_a_roots_projects_dir() {
+    let roots = vec!["/Users/m4p/.claude-x".to_string(), "/Users/m4p/.claude".to_string()];
+    let ok = |p: &str| within_projects(p, &roots);
+    assert!(ok("/Users/m4p/.claude-x/projects/-work/s.jsonl"));
+    assert!(ok("/Users/m4p/.claude/projects/-work/s.jsonl"), "~/.claude 也是這顆 bot 的 root");
+    assert!(!ok("/Users/m4p/.claude-y/projects/-work/s.jsonl"), "別的身分");
+    assert!(!ok("/Users/m4p/.claude-xx/projects/-work/s.jsonl"), "前綴相同不算（比的是路徑元件）");
+    assert!(!ok("/Users/m4p/.claude-x/projects/../../.claude-y/projects/-w/s.jsonl"));
+    assert!(!ok("/Users/m4p/.claude-x/other/s.jsonl"));
+    assert!(!ok("/Users/m4p/.claude-x/projects/-work/s.txt"));
+    assert!(!ok("relative/projects/-work/s.jsonl"));
+    assert!(!ok("/Users/m4p/.claude-x/projects/-work/s\n.jsonl"));
+    assert!(!ok("/etc/passwd"));
+}
