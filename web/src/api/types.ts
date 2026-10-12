@@ -557,6 +557,10 @@ export type GroupSkipReason =
   | 'not_found'
   | 'bad_request'
   | 'upstream'
+  | 'unprocessable'
+  | 'forbidden'
+  | 'unavailable'
+  | 'uncommitted'
 
 export const GROUP_SKIP_LABEL: Record<GroupSkipReason, string> = {
   not_running: '未啟動',
@@ -567,6 +571,10 @@ export const GROUP_SKIP_LABEL: Record<GroupSkipReason, string> = {
   not_found: '找不到 bot',
   bad_request: '請求不合法',
   upstream: 'herdr / DB 錯誤',
+  unprocessable: '這則訊息對方無法確認送達',
+  forbidden: '沒有權限替這顆 bot 轉述',
+  unavailable: '暫時讀不到維護窗口狀態',
+  uncommitted: '送出結果還不確定',
 }
 
 export interface AppState {
