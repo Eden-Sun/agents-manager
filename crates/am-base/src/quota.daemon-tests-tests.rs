@@ -1220,6 +1220,31 @@
         assert_eq!(week_only.seven_day.unwrap().used_pct, 0.0);
     }
 
+    /// #1508：換方案後，app-server 缺 `rateLimitResetCredits` 不能沿用舊方案的重置券；同方案暫缺欄仍沿用，
+    /// 非 app-server 的部分讀數維持原本的保留策略。
+    #[tokio::test]
+    async fn codex_reset_credits_do_not_survive_a_plan_change() {
+        let app = crate::testing::env().await.app.clone();
+        let credit = ResetCredits { available: 1, title: Some("Full reset".into()), expires_at: None };
+        let cases = [
+            ("codex:same-plan", "codex-app-server", "plus", true),
+            ("codex:plan-changed", "codex-app-server", "prolite", false),
+            ("codex:partial-source", "codex-statusline", "prolite", true),
+        ];
+        for (key, source, plan, kept) in cases {
+            let mut old = codex_q("codex-app-server", None);
+            old.plan = Some("plus".into());
+            old.reset_credits = Some(credit.clone());
+            set(&app, LOCAL_HOST, key, old).await;
+            let mut fresh = codex_q(source, None);
+            fresh.plan = Some(plan.into());
+            fresh.reset_credits = None;
+            set(&app, LOCAL_HOST, key, fresh).await;
+            let got = app.quotas.lock().await[&quota_key(LOCAL_HOST, key)].clone();
+            assert_eq!(got.reset_credits.is_some(), kept, "{key}: {source} / {plan}");
+        }
+    }
+
     #[test]
     fn keys_are_host_scoped() {
         assert_eq!(quota_key("local", "claude"), "claude");
