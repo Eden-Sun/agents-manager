@@ -34,3 +34,13 @@ test('畫面上顯示 env 時，key／token／secret／password 類的值遮起�
   }
   assert.ok(shown.includes('ANTHROPIC_API_KEY=') && shown.includes('••'), '還看得出有這個 key、而且被遮了')
 })
+
+test('key 跟 Object.prototype 上的名字同名（constructor、__proto__）：不能被誤判成重複，也不能靜靜消失', () => {
+  const ctor = checkEnvText('constructor=1')
+  assert.deepEqual(ctor.errors, [], '沒有前面那一行，就不是重複')
+  assert.deepEqual(Object.entries(ctor.env), [['constructor', '1']])
+
+  const proto = checkEnvText('__proto__=x')
+  assert.deepEqual(proto.errors, [])
+  assert.deepEqual(Object.entries(proto.env), [['__proto__', 'x']], '不能被 __proto__ 的 setter 吃掉')
+})
