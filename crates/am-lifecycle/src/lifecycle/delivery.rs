@@ -849,7 +849,14 @@ fn may_press_retry_submit(
         && !positive_evidence
         && box_state_within(kind, screen, typed_tail(text)) == BoxState::NonEmpty
         && !super::pane_text::invisible_review_notice(screen)
-        && crate::composer_parse::composer_text_whole(kind, screen).as_deref() == Some(text)
+        && composer_still_holds(kind, screen, text)
+}
+
+/// 框裡還是**這一則**草稿。畫面讀來的字跟原文只在空白上不同（TUI 把長句折成多列、續行縮排、列與列之間的換行）也算；
+/// 字少了、多了、換掉都不算——那是別人剛打的字。
+fn composer_still_holds(kind: &str, screen: &str, text: &str) -> bool {
+    let squash = |s: &str| s.split_whitespace().collect::<Vec<_>>().join(" ");
+    crate::composer_parse::composer_text_whole(kind, screen).is_some_and(|shown| squash(&shown) == squash(text))
 }
 
 /// 送出鍵按下去之後：先看送達證據，完整原文仍留在框裡才最多補按一次。
@@ -908,7 +915,7 @@ pub async fn confirm_submitted(
                 tracing::warn!(run = %run.id, bot = %bot.name, "claude is asking to review a prompt it cleaned of invisible characters; not pressing Enter");
                 return Ok(Delivered::Unproven("invisible_chars_review"));
             }
-            BoxState::NonEmpty if crate::composer_parse::composer_text_whole(&bot.kind, &now).as_deref() != Some(text) => {
+            BoxState::NonEmpty if !composer_still_holds(&bot.kind, &now, text) => {
                 return Ok(Delivered::Unproven("composer_changed_or_unreadable"));
             }
             BoxState::Unready => return Ok(Delivered::Unproven("composer_unreadable")),
@@ -1139,6 +1146,17 @@ mod tests {
         let changed = screen(&[], &["changed", "last"]);
         assert!(!may_press_retry_submit("claude", &changed, "first\nlast", false, false));
         assert!(!may_press_retry_submit("claude", "unreadable", "first\nlast", false, false));
+    }
+
+    /// #1486 的守門不能拿畫面的換行當原文：TUI 把一則長句折成多列（續行縮排兩格），框裡還是這一則，補按 Enter 照常允許。
+    /// 字少了、多了、換掉仍然不按（上一個測試）。
+    #[test]
+    fn a_draft_the_tui_wrapped_across_rows_still_gets_its_retry_enter() {
+        let text = "alpha beta gamma delta epsilon";
+        let wrapped = screen(&[], &["alpha beta", "gamma delta epsilon"]);
+        assert!(may_press_retry_submit("claude", &wrapped, text, false, false), "框裡還是同一則，只是折了行");
+        let other = screen(&[], &["alpha beta", "gamma delta other"]);
+        assert!(!may_press_retry_submit("claude", &other, text, false, false), "尾段換掉＝別人的草稿");
     }
 
     fn screen(transcript: &[&str], box_rows: &[&str]) -> String {
