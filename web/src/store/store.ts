@@ -819,6 +819,8 @@ let supervisorProjectAsked = false
 let identityPrefsAsked = false
 /** `disabledIdentities` 被本機（按鈕、WS 事件）改過幾次；`loadIdentityPrefs` 的快照跨過任何一次就不能套（#1341）。 */
 let identityPrefsEpoch = 0
+/** `loadIdentityPrefs` 的請求序號：回來的順序不保證，只有最新一次的回應才寫入（較舊的晚到就丟掉）。 */
+let identityPrefsLoadSeq = 0
 let lastRefreshError: string | null = null
 /**
  * 送不出去的已讀。2026-09-15 改成「未讀數以 daemon 為準」之後，這個 POST 就不再是 fire-and-forget：
@@ -2482,16 +2484,19 @@ export const useStore = create<StoreState>((set, get) => {
   },
 
   async loadIdentityPrefs() {
+    const seq = ++identityPrefsLoadSeq
     // 請求在路上時本機改過（按鈕、WS 事件）：這份可能是改之前讀的，丟掉重抓一次（#1341）。
     for (;;) {
       const epoch = identityPrefsEpoch
       try {
         const list = await api.fetchDisabledIdentities()
+        // 較新的一次已經出發：這份是舊的，晚到也不能蓋掉它（#1632）。
+        if (seq !== identityPrefsLoadSeq) return
         if (epoch !== identityPrefsEpoch) continue
         set({ disabledIdentities: list })
       } catch {
         // 讀不到就當作沒有人被停用：選單多幾個選項，比整個面板掛掉好。下一次快照刷新再問一次。
-        identityPrefsAsked = false
+        if (seq === identityPrefsLoadSeq) identityPrefsAsked = false
       }
       return
     }
