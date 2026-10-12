@@ -997,6 +997,43 @@ mod tests {
         assert_eq!(state.result.as_deref(), Some("2.1.280 -ui-f1 的結論"));
     }
 
+    /// 接續的交辦（`follow_up_of`）寫進去了，但父列指回它那一步寫不進去：以前 `link_followup` 的錯誤被 `let _ =` 吞掉，
+    /// `assign` 照樣回成功、子列已經帶著 `follow_up_of` 派出去，父列卻沒有 `followup_assignment_id`，兩邊對不上。
+    #[tokio::test]
+    async fn a_continuation_whose_parent_link_cannot_be_written_is_not_reported_as_linked() {
+        let e = crate::testing::env().await;
+        let app = e.app.clone();
+        a_bot(&app, &e.project_id, "resp1").await;
+        a_bot(&app, &e.project_id, "patrol1").await;
+        app_ports_p13::supervisor_get_or_init(&app.db).await.unwrap();
+        sqlx::query("UPDATE supervisors SET bot_id='patrol1' WHERE id=?")
+            .bind(app_ports_p13::SUPERVISOR_ID)
+            .execute(&app.db)
+            .await
+            .unwrap();
+        let parent = app_ports_p13::supervisor_assign(
+            &app, "resp1", "第一件", "parent-link", None, &[], None, true, None, None, None,
+            app_ports_p13::ReplyMark::default(),
+        )
+        .await
+        .unwrap();
+        let parent_id = parent["id"].as_str().unwrap().to_string();
+        sqlx::query(
+            "CREATE TRIGGER refuse_followup_link BEFORE UPDATE OF followup_assignment_id ON supervisor_assignments
+             BEGIN SELECT RAISE(ABORT, 'disk I/O error'); END",
+        )
+        .execute(&app.db)
+        .await
+        .unwrap();
+
+        let result = app_ports_p13::supervisor_assign(
+            &app, "resp1", "接續", "child-link", None, &[], Some(&parent_id), true, None, None, None,
+            app_ports_p13::ReplyMark::default(),
+        )
+        .await;
+        assert!(result.is_err(), "父列指不回去，就不能回報接續已經派出：{result:?}");
+    }
+
     /// issue #394 情境 3：全部（-ui 與 kick 的兩條鏈）都是 superseded／failed，沒有活著或完成的——
     /// 重按不能被舊的（已死）那筆冪等擋住，要真的派出新的一筆。
     #[tokio::test]
