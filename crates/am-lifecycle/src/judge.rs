@@ -126,8 +126,49 @@ pub async fn reserve_slot(
     composer_idle: bool,
     regex_verdict: &str,
 ) -> Result<String> {
-    let id = crate::db::ulid();
     let _g = app.judge_fuse().lock().await;
+    reserve_slot_locked(app, cfg, project_id, project_label, bot_id, run_id, kind, matched_line, composer_idle, regex_verdict).await
+}
+
+/// 在同一把 fuse 鎖內重新查重並占位，避免 `same_work` 的並行入口都通過鎖外 `asked()`。
+#[allow(clippy::too_many_arguments)]
+pub async fn reserve_same_work_slot(
+    app: &(impl crate::capabilities::Db + crate::judge::JudgeFuse),
+    cfg: &JudgeCfg,
+    project_id: &str,
+    project_label: &str,
+    bot_id: &str,
+    pair: &str,
+    kind: &str,
+    matched_line: &str,
+) -> Result<Option<String>> {
+    let _g = app.judge_fuse().lock().await;
+    let existing: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM judge_shadow WHERE regex_verdict = 'same_work' AND run_id = ?")
+        .bind(pair)
+        .fetch_one(app.db())
+        .await?;
+    if existing > 0 {
+        return Ok(None);
+    }
+    reserve_slot_locked(app, cfg, project_id, project_label, bot_id, pair, kind, matched_line, false, "same_work")
+        .await
+        .map(Some)
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn reserve_slot_locked(
+    app: &impl crate::capabilities::Db,
+    cfg: &JudgeCfg,
+    project_id: &str,
+    project_label: &str,
+    bot_id: &str,
+    run_id: &str,
+    kind: &str,
+    matched_line: &str,
+    composer_idle: bool,
+    regex_verdict: &str,
+) -> Result<String> {
+    let id = crate::db::ulid();
     let asked: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM judge_shadow WHERE at >= ?")
         .bind(crate::db::iso_in(-3600))
         .fetch_one(app.db())
