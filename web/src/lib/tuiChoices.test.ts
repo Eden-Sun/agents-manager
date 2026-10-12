@@ -755,3 +755,12 @@ test('並排版面：標籤折行後的 `(Recommended)` 前面要有空白（CJK
   assert.equal(menu.choices[0].title, '改回 200 正常訊息並記錄到日誌 (Recommended)')
   assert.equal(menu.choices[1].title, '維持錯誤')
 })
+
+test('引用的選單底下是空的輸入列：不是可以點的選單（同 daemon open_choice_menu 的 composer 守衛）', () => {
+  // 回覆逐行引用權限框；回合結束後畫面底下是空的輸入列。按鍵會直送終端，不能把引文當成選單。
+  const quoted = '⏺ 權限框長這樣：\n  Do you want to proceed?\n  ❯ 1. Yes\n    2. No, and tell Claude what to do\n\n❯\n────────────\n  hunta | pt | 5h:96%\n'
+  assert.equal(parseChoiceMenu(quoted), null)
+  // 同一張框真的開著（底下沒有空輸入列）照舊認得。
+  const open = '  Do you want to proceed?\n  ❯ 1. Yes\n    2. No, and tell Claude what to do\n\n  Esc to cancel\n'
+  assert.equal(parseChoiceMenu(open)?.choices.length, 2)
+})
