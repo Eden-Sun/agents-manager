@@ -826,3 +826,13 @@
         let script = HostConn::remote_session_script(&cfg(), false);
         assert!(script.contains(&format!("while [ $i -lt {} ]", REMOTE_SESSION_WAIT_ROUNDS)), "腳本要用同一個等待圈數");
     }
+
+    /// 遠端 `pwd -P` 的路徑含換行時，舊版只取第一行，建專案會悄悄存成另一個目錄；要明確拒絕。
+    #[tokio::test]
+    async fn a_remote_directory_whose_path_has_a_newline_is_refused_not_truncated() {
+        let host = "canon-newline-host";
+        set_ssh_fake(host, |_| Ok("/home/u/a\nb\n".to_string()));
+        let conn = HostConn::remote(HostCfg { name: host.into(), ..cfg() }, None);
+        let err = remote_canonical_dir(&conn, "/home/u/a\nb").await;
+        assert!(err.is_err(), "換行的路徑不能被截成 /home/u/a：{err:?}");
+    }
