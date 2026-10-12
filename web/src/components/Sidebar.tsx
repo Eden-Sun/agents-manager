@@ -910,14 +910,17 @@ function ProjectTitle({
 /** 父列在等子 agent（使用者 2026-09-12）：`busy` 子還在跑／卡住，`reply` 子回報了未讀。展開時也畫。 */
 export type KidsWait = 'busy' | 'reply'
 
+/** 子 agent 的狀態點：blocked 最要緊；其次是有子 agent 做完還沒看（reply），最後才是還在跑（busy），同晶片的優先序。 */
 function kidsWaitOf(st: Parameters<typeof botLamp>[0], unread: Record<string, number>, ids: string[]): KidsWait | null {
-  let out: KidsWait | null = null
+  let busy = false
+  let reply = false
   for (const id of ids) {
     const l = botLamp(st, id)
-    if (l === 'working' || l === 'blocked') return 'busy'
-    if ((unread[id] ?? 0) > 0) out = 'reply'
+    if (l === 'blocked') return 'busy'
+    if (l === 'working') busy = true
+    if ((unread[id] ?? 0) > 0) reply = true
   }
-  return out
+  return reply ? 'reply' : busy ? 'busy' : null
 }
 
 /** 子 agent 最要緊的燈號：blocked > working，否則 null。 */
