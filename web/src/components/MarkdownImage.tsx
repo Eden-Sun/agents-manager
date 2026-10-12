@@ -9,6 +9,17 @@ function isRemote(src: string): boolean {
   return /^(https?:|data:|blob:)/i.test(src)
 }
 
+/** 沒寫替代文字（`![](x.png)`）時的名字：檔名。圖片包在連結裡，alt 是空的，連結就沒有任何可讀名稱（#1637）。 */
+function imageName(src: string): string {
+  if (/^(data:|blob:)/i.test(src)) return '圖片'
+  const last = src.split(/[?#]/)[0].split(/[\\/]/).pop() ?? ''
+  try {
+    return decodeURIComponent(last) || '圖片'
+  } catch {
+    return last || '圖片'
+  }
+}
+
 /**
  * 遠端 http(s) 圖片預設不載入（issue #764）：先畫佔位（網域＋「載入圖片」），點了才抓這一張。
  * 抓的方式是 `fetch`→blob（`index.html` 的 CSP 只放 `img-src 'self' data: blob:`，`<img src="https://…">` 本來就載不了）；
@@ -32,7 +43,7 @@ function RemoteImage({ src, alt }: { src: string; alt?: string }) {
   if (url) {
     return (
       <a href={url} target="_blank" rel="noreferrer" className="md-image-link">
-        <img className="md-image" src={url} alt={alt ?? ''} />
+        <img className="md-image" src={url} alt={alt || imageName(src)} />
       </a>
     )
   }
@@ -111,7 +122,7 @@ export function MarkdownImage({ botId, src, alt }: { botId: string | null | unde
   if (!raw) return null
   if (!local) {
     if (isRemoteHttpImage(raw)) return <RemoteImage src={raw} alt={alt} />
-    return <img className="md-image" src={raw} alt={alt ?? ''} loading="lazy" />
+    return <img className="md-image" src={raw} alt={alt || imageName(raw)} loading="lazy" />
   }
   if (failed || !botId) {
     return (
@@ -124,7 +135,7 @@ export function MarkdownImage({ botId, src, alt }: { botId: string | null | unde
   if (!url) return <span className="md-image-loading">🖼 {alt || raw}</span>
   return (
     <a href={url} target="_blank" rel="noreferrer" className="md-image-link">
-      <img className="md-image" src={url} alt={alt ?? ''} />
+      <img className="md-image" src={url} alt={alt || imageName(raw)} />
     </a>
   )
 }
