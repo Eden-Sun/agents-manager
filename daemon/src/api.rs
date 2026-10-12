@@ -100,13 +100,39 @@ pub(crate) fn kill_delete_work_for_test(key: &str) -> bool {
 /// 502 的定義是「herdr／DB 出錯」（SPEC §3.1）；設定不合法是**請求的問題**，混成同一個碼，呼叫端分不出
 /// 「你的設定有問題、改一下再送」跟「ssh 斷了、等一下重試」。`config_written: false` 是關鍵的一半：
 /// 跟 `projection_refused` 的 `config_written: true` 相反，這次什麼都沒寫，直接重送修正後的請求就好。
-fn cfg_err(e: anyhow::Error) -> LcError {
+pub(crate) fn cfg_err(e: anyhow::Error) -> LcError {
+    // 寫之前磁碟被手改：這次沒寫，原樣重送即可（#1647）。
+    if e.downcast_ref::<crate::config::ConfigChangedOnDisk>().is_some() {
+        return LcError::conflict(
+            "config.toml changed on disk; nothing was written",
+            json!({"reason": "config_changed_on_disk", "config_written": false, "retryable": true,
+                   "message": "config.toml 在這次寫入之前被手改了，這次沒有寫入；請重送同一個請求"}),
+        );
+    }
     match e.downcast_ref::<crate::projection::ConfigInvalid>() {
         // `to_string()` 而不是 `c.0`：Display 才帶著「（config.toml 未變更）」，那句是給人看的 recovery path。
         Some(c) => LcError::BadValue(
             json!({"error": "config_invalid", "message": c.to_string(), "config_written": false}),
         ),
         None => any_err(e),
+    }
+}
+
+#[cfg(test)]
+mod changed_on_disk_tests {
+    use super::*;
+
+    /// #1647：寫之前磁碟被手改是「這次沒寫、可以重送」，要回 409（`config_written:false`），不能是 502 upstream。
+    #[test]
+    fn a_config_changed_on_disk_is_a_retryable_conflict_not_an_upstream_failure() {
+        match cfg_err(anyhow::Error::new(crate::config::ConfigChangedOnDisk)) {
+            LcError::Conflict(v) => {
+                assert_eq!(v["reason"], "config_changed_on_disk");
+                assert_eq!(v["config_written"], false);
+                assert_eq!(v["retryable"], true);
+            }
+            other => panic!("{other:?}"),
+        }
     }
 }
 
@@ -3631,7 +3657,7 @@ async fn delete_host(
             let project_id = app.cfg.get().await.projects.into_iter().find(|p| p.host == name).and_then(|p| p.id);
             return Err(LcError::conflict("host still used by projects", json!({"project_id": project_id})));
         }
-        return Err(any_err(e));
+        return Err(cfg_err(e));
     }
     app.hosts.remove(&app, &name).await;
     app.emit("project_changed", json!({})).await;

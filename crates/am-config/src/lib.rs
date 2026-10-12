@@ -1217,6 +1217,18 @@ fn note_get() {
     GET_CALLS.with(|c| c.set(c.get() + 1));
 }
 
+/// 寫之前發現磁碟被手改，這次沒寫（#1647）：呼叫端可以原樣重送，不是上游壞掉。API 層據此回 409（`config_written:false`）。
+#[derive(Debug, Clone, Copy)]
+pub struct ConfigChangedOnDisk;
+
+impl std::fmt::Display for ConfigChangedOnDisk {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("config.toml changed on disk while it was being updated; nothing was written, retry the change")
+    }
+}
+
+impl std::error::Error for ConfigChangedOnDisk {}
+
 pub struct ConfigStore {
     pub path: PathBuf,
     inner: tokio::sync::Mutex<Loaded>,
@@ -1392,7 +1404,7 @@ impl ConfigStore {
         if next != g.cfg {
             // 寫之前確認磁碟還是我們讀到的那一份：closure 與驗證都跑過了，這中間有手改就不寫、回錯誤請呼叫端重試（#1612）。
             if std::fs::read_to_string(&self.path).ok() != base {
-                anyhow::bail!("config.toml changed on disk while it was being updated; nothing was written, retry the change");
+                return Err(anyhow::Error::new(ConfigChangedOnDisk));
             }
             write_atomic_over(&self.path, base.as_deref(), &next)?;
             g.mtime = std::fs::metadata(&self.path).ok().and_then(|m| m.modified().ok());
@@ -2412,6 +2424,25 @@ model = "gpt-6"
         AFTER_DISK_READ.with(|hook| *hook.borrow_mut() = None);
         let text = std::fs::read_to_string(&path).unwrap();
         assert!(text.contains("herdr_session = 'external'") || text.contains("herdr_session = \"external\""), "手改被蓋掉了（update 結果：{result:?}）：\n{text}");
+    }
+
+    /// 寫回前磁碟被手改而拒絕寫入：錯誤要能被呼叫端認出來是「這次沒寫、可以重試」，不能跟一般的上游失敗混在一起（#1612 之後）。
+    #[tokio::test(flavor = "current_thread")]
+    async fn a_write_refused_because_the_file_changed_is_a_typed_retryable_error() {
+        let (store, path) = store_with("[server]\nlisten = '127.0.0.1:7788'\nherdr_session = 'before'\n").await;
+        AFTER_DISK_READ.with(|hook| {
+            *hook.borrow_mut() = Some(Box::new(|p| {
+                std::fs::write(p, "[server]\nlisten = '127.0.0.1:7788'\nherdr_session = 'external'\n").unwrap();
+            }));
+        });
+        let result = store.update(|cfg| {
+            cfg.server.listen = "127.0.0.1:8899".into();
+            Ok(())
+        }).await;
+        AFTER_DISK_READ.with(|hook| *hook.borrow_mut() = None);
+        let err = result.expect_err("磁碟變了，這次不能寫");
+        assert!(err.downcast_ref::<ConfigChangedOnDisk>().is_some(), "應是型別化的錯誤：{err:#}");
+        assert!(std::fs::read_to_string(&path).unwrap().contains("external"), "手改保留");
     }
 
     #[tokio::test(flavor = "current_thread")]
