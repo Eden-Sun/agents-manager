@@ -2118,9 +2118,15 @@ def spool_claim_collision(number: int, title: str, me: str, payload: dict) -> No
     provider = os.environ.get("AM_KIND") or "claude"
     if provider not in {"claude", "codex", "grok", "agy"}:
         return
-    root = Path.home() / ".config" / "agents-manager"
-    if instance:
-        root /= "instances" / instance
+    data_dir = os.environ.get("AM_DATA_DIR", "")
+    if data_dir:
+        root = Path(data_dir)
+        if not root.is_absolute():
+            return
+    else:
+        root = Path.home() / ".config" / "agents-manager"
+        if instance:
+            root = root / "instances" / instance
     spool_dir = root / "bots" / bot_id / "hook-spool.d"
     try:
         spool_dir.mkdir(parents=True, exist_ok=True)
