@@ -92,11 +92,10 @@ import {
   markNow,
   markOfMessages,
   pruneIdleEdges,
-  pruneMarks,
+  prunePersistedMarks,
   pruneUnread,
   saveCounts,
   recordReadMark,
-  saveMarks,
   takeTurnCompletion,
   windowActive,
   type ReadMark,
@@ -1485,8 +1484,7 @@ export const useStore = create<StoreState>((set, get) => {
     const s = get()
     const liveBot = (id: string) => s.bots.some((b) => b.id === id)
     const liveProject = (id: string) => s.projects.some((p) => p.id === id)
-    readMarks = pruneMarks(readMarks, liveBot)
-    saveMarks(readMarks)
+    readMarks = prunePersistedMarks(readMarks, liveBot)
     const botUnread = pruneUnread(s.botUnread, liveBot)
     const groupUnread = pruneUnread(s.groupUnread, liveProject)
     if (Object.keys(botUnread).length === Object.keys(s.botUnread).length && Object.keys(groupUnread).length === Object.keys(s.groupUnread).length) return

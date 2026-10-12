@@ -1,7 +1,7 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
 import type { Message } from '../api/types.ts'
-import { clearHookCompletion, completionKey, countUnreadTurns, idleEdgeCompletionKey, isUnread, loadCounts, loadMarks, markHookCompletion, markOfMessages, projectUnread, pruneIdleEdges, recordReadMark, resetIdleEdges, resetTurnCompletions, saveCounts, saveMarks, takeTurnCompletion, titleUnread, unreadShown } from './unread.ts'
+import { clearHookCompletion, completionKey, countUnreadTurns, idleEdgeCompletionKey, isUnread, loadCounts, loadMarks, markHookCompletion, markOfMessages, prunePersistedMarks, projectUnread, pruneIdleEdges, recordReadMark, resetIdleEdges, resetTurnCompletions, saveCounts, saveMarks, takeTurnCompletion, titleUnread, unreadShown } from './unread.ts'
 
 /** node 沒有 localStorage；這裡只要 get/set 兩支。 */
 function stubStorage() {
@@ -276,4 +276,24 @@ test('多分頁：寫一個已讀標記時，不洗掉另一個分頁剛寫的�
   assert.deepEqual(disk['bot:b'], other, '另一個分頁的標記不能被洗掉')
   assert.deepEqual(disk['bot:c'], { at: '2026-09-07T00:00:09Z', id: 'm9', seq: 99 })
   assert.deepEqual(next['bot:b'], other, '回傳的那份也要看得到它')
+})
+
+test('修剪死掉的 bot 標記時，也不洗掉另一個分頁剛寫的標記（同 recordReadMark 的合併）', () => {
+  const map = stubStorage()
+  const mine = { 'bot:a': { at: '2026-09-07T00:00:01Z', id: 'm1', seq: 11 } }
+  const other = { at: '2026-09-07T00:00:05Z', id: 'm5', seq: 55 }
+  map.set('am.readMarks', JSON.stringify({ 'bot:a': mine['bot:a'], 'bot:b': other }))
+  const next = prunePersistedMarks(mine, (id) => id === 'a' || id === 'b')
+  const disk = JSON.parse(map.get('am.readMarks') ?? '{}')
+  assert.deepEqual(disk['bot:b'], other, '另一個分頁剛寫的標記不能被修剪洗掉')
+  assert.deepEqual(next['bot:b'], other)
+})
+
+test('修剪時死掉的 bot 不留在磁碟上', () => {
+  const map = stubStorage()
+  const mine = { 'bot:a': { at: '2026-09-07T00:00:01Z', id: 'm1', seq: 11 }, 'bot:gone': { at: '2026-09-07T00:00:02Z', id: 'm2', seq: 12 } }
+  prunePersistedMarks(mine, (id) => id === 'a')
+  const disk = JSON.parse(map.get('am.readMarks') ?? '{}')
+  assert.equal(disk['bot:gone'], undefined)
+  assert.ok(disk['bot:a'])
 })
