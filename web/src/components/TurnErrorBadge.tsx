@@ -82,6 +82,17 @@ export function TurnErrorBadge({ botId }: { botId: string }) {
     }
   }, [open])
 
+  // 打開：焦點進浮層（role=dialog 要有人接住焦點，讀屏才會唸）。等一格：第一次 render 還是 visibility: hidden，focus() 會落空。
+  useEffect(() => {
+    if (!open) return
+    const raf = requestAnimationFrame(() => popRef.current?.focus({ preventScroll: true }))
+    return () => cancelAnimationFrame(raf)
+  }, [open])
+  // 焦點在浮層裡時收起，焦點回徽章鈕，不掉到 body（同 JudgeBadge）。
+  const closePop = () => {
+    if (popRef.current?.contains(document.activeElement)) btnRef.current?.focus()
+    setOpen(false)
+  }
   // 點外面 / Esc 收起來，跟其他浮層一樣。
   useEffect(() => {
     if (!open) return
@@ -91,7 +102,7 @@ export function TurnErrorBadge({ botId }: { botId: string }) {
       setOpen(false)
     }
     const esc = (e: KeyboardEvent) => {
-      if (e.key === 'Escape') setOpen(false)
+      if (e.key === 'Escape') closePop()
     }
     document.addEventListener('mousedown', away)
     document.addEventListener('keydown', esc)
@@ -109,7 +120,7 @@ export function TurnErrorBadge({ botId }: { botId: string }) {
     void sendPrompt(botId, target.text, target.attachments).then((ok) => {
       setSending(false)
       if (ok) {
-        setOpen(false)
+        closePop()
         notify('info', '已重送上一則，接著跑同一回合的內容')
       }
     })
@@ -120,6 +131,7 @@ export function TurnErrorBadge({ botId }: { botId: string }) {
       ref={popRef}
       className="turn-error-pop"
       role="dialog"
+      tabIndex={-1}
       aria-label="回合被中斷"
       style={pos ? { left: pos.left, top: pos.top } : { left: 0, top: 0, visibility: 'hidden' }}
     >
@@ -151,7 +163,7 @@ export function TurnErrorBadge({ botId }: { botId: string }) {
               void patchBot(botId, { model: opusId() }).then((res) => {
                 setSending(false)
                 if (res) {
-                  setOpen(false)
+                  closePop()
                   notify('info', '已改用 opus，重送上一則就能繼續')
                 }
               })
