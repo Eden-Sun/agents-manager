@@ -65,7 +65,7 @@ cargo → rustc-wrapper（scripts/sccache-wrapper.sh）→ 有裝 sccache？ →
 
 ## 第二輪：root cause 確認（2026-09-18）
 
-**结論先講：查到底了，是負面結論**——sccache 0.18.0 對 Rust 的快取路徑跟「每個 worktree 各自
+**結論先講：查到底了，是負面結論**——sccache 0.18.0 對 Rust 的快取路徑跟「每個 worktree 各自
 `CARGO_TARGET_DIR`」這個架構前提衝突，不是這個 repo 設定沒調好，官方文件建議的正規化解法在
 Rust 這條路徑上也沒有實作。第一輪「不是 `--out-dir`／`-L dependency=` 本身」那條排除，**這一輪
 推翻**：第一輪的最小重現手寫了一個簡化過的 `sccache rustc` 呼叫，形狀跟 cargo 真正產生的呼叫
