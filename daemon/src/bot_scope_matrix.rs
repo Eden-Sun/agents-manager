@@ -1167,7 +1167,7 @@ async fn a_plain_bot_cannot_start_or_interrupt_another_bot_through_prompt() {
     assert_eq!(turns, 0, "a refused prompt must not open a turn on the target");
     assert!(crate::db::active_run(&env.app.db, &b).await.unwrap().is_none(), "a refused start must not start the target");
 
-    // 使用者（UI token）照舊能用这两个旗标：不是 403。
+    // 使用者（UI token）照舊能用這兩個旗標：不是 403。
     let user = client
         .post(&url)
         .header("content-type", "application/json")
