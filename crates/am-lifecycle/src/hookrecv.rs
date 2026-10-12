@@ -40,6 +40,9 @@ pub fn provider_matches_kind(provider: &str, kind: &str) -> bool {
 /// 認不出來就當使用者自己打的——寧可少標一次，也不要冤枉一句話。
 /// 遠端 shim 寫進 spool 的報備事件名（`herdr_shim.rs` 的 `am_spool_relay`）。
 pub const RELAY_ANNOUNCE_EVENT: &str = "AmRelayAnnounce";
+/// 遠端 agm 認領 issue 後寫入自己 bot spool 的撞題檢查（issue #1468）。
+pub const CLAIM_COLLISION_EVENT: &str = "AmClaimCollisionCheck";
+const MAX_CLAIM_COLLISION_TEXT_CHARS: usize = 500;
 
 /// 報備比收件方的回音晚到時補標：寄件者那台主機上、`agent_name` 是 `to_agent` 的在跑 run，它的對話裡
 /// 五分鐘內、還沒標來源、內容對得上的最新一則使用者訊息。補上就用掉那筆報備（同一句不標兩次）。
@@ -127,6 +130,8 @@ pub enum HookKind {
     /// 遠端 bot 的 herdr shim 在 `agent prompt` 之前寫進自己 spool 的報備（SPEC §6.5d）：遠端沒有 `AM_PORT`，
     /// 打不到 `/relay/announce`，只能跟 hook 走同一條 spool。寄件者就是這則 body 的 bot（spool 在它自己的目錄）。
     RelayAnnounce { to_agent: String, text: String },
+    /// 遠端 agm 認領票後交給 daemon 的 best-effort 撞題檢查（issue #1468）。
+    ClaimCollisionCheck { issue: Option<u64>, title: String, child: String, branch: Option<String> },
     Ignore(String),
 }
 
@@ -141,6 +146,7 @@ impl std::fmt::Debug for HookKind {
             HookKind::SpawnHint { .. } => "SpawnHint",
             HookKind::AskAnswered(_) => "AskAnswered",
             HookKind::RelayAnnounce { .. } => "RelayAnnounce",
+            HookKind::ClaimCollisionCheck { .. } => "ClaimCollisionCheck",
             HookKind::Ignore(reason) => {
                 let _ = reason;
                 "Ignore"
@@ -321,6 +327,29 @@ fn hook_session_id(p: &Value) -> Option<&str> {
 
 pub fn classify(provider: &str, p: &Value) -> HookKind {
     let s = |k: &str| p.get(k).and_then(|v| v.as_str()).map(String::from);
+    if p.get("hook_event_name").and_then(Value::as_str) == Some(CLAIM_COLLISION_EVENT) {
+        let issue = match p.get("issue") {
+            None | Some(Value::Null) => None,
+            Some(v) => match v.as_u64() {
+                Some(n) => Some(n),
+                None => return HookKind::Ignore("claim collision without valid issue".into()),
+            },
+        };
+        let Some(title) = s("title").map(|v| v.trim().to_string()).filter(|v| !v.is_empty()) else {
+            return HookKind::Ignore("claim collision without title".into());
+        };
+        let Some(child) = s("child").map(|v| v.trim().to_string()).filter(|v| !v.is_empty()) else {
+            return HookKind::Ignore("claim collision without child".into());
+        };
+        let branch = s("branch").map(|v| v.trim().to_string()).filter(|v| !v.is_empty());
+        if title.chars().count() > MAX_CLAIM_COLLISION_TEXT_CHARS
+            || child.chars().count() > MAX_CLAIM_COLLISION_TEXT_CHARS
+            || branch.as_ref().is_some_and(|v| v.chars().count() > MAX_CLAIM_COLLISION_TEXT_CHARS)
+        {
+            return HookKind::Ignore("claim collision text too long".into());
+        }
+        return HookKind::ClaimCollisionCheck { issue, title, child, branch };
+    }
     // shim 自己的事件，不分 claude／codex（寄件的 bot 可以是任何一種）。
     if p.get("hook_event_name").and_then(Value::as_str) == Some(RELAY_ANNOUNCE_EVENT) {
         return match (s("to_agent"), s("text")) {
@@ -526,6 +555,21 @@ mod classify_tests {
         assert!(matches!(classify("claude", &json!({"raw": ""})), HookKind::Ignore(_)));
         assert!(matches!(classify("claude", &json!({"session_id": "s1"})), HookKind::Identity { .. }), "沒有事件名、沒有 raw 的舊形狀照舊猜");
         assert!(matches!(classify("claude", &json!({"prompt_id": "p1"})), HookKind::TurnComplete { .. }));
+    }
+
+    #[test]
+    fn a_claim_collision_spool_event_is_not_treated_as_an_unknown_provider_event() {
+        let payload = json!({
+            "hook_event_name": "AmClaimCollisionCheck",
+            "issue": 1468,
+            "title": "遠端認領票",
+            "child": "worker",
+            "branch": "fix/lx1468",
+        });
+        assert!(
+            !matches!(classify("claude", &payload), HookKind::Ignore(_)),
+            "認領撞題 spool 事件應該被 hook receiver 識別，而不是靜默丟棄",
+        );
     }
 
     #[test]
@@ -1554,6 +1598,18 @@ async fn process_locked_for_with_outcome<H: HookHost>(
             let from_turn = crate::lifecycle::relay_watch::sender_turn_at(app, &bot.id, &sent_at).await?;
             crate::agent_relay::announce(&host, &bot.id, &to_agent, &text, from_turn.as_deref());
             relay_backfill(app, &bot.id, from_turn.as_deref(), &to_agent, &text).await
+        }
+        HookKind::ClaimCollisionCheck { issue, title, child, branch } => {
+            app.schedule_claim_collision(crate::judge::collision::ClaimAsk {
+                project_id: bot.project_id.clone(),
+                caller: bot.id.clone(),
+                issue,
+                title,
+                child,
+                branch,
+            })
+            .await;
+            Ok(())
         }
         HookKind::Identity { session_id, transcript_path } => {
             if let Some(r) = &run {
@@ -7133,6 +7189,11 @@ pub trait HookHost:
 {
     /// 叫醒 durable hook 收件匣的 worker（commit 之後才叫）。
     fn wake_hook_inbox(&self);
+    /// 將遠端 issue claim 的撞題查詢排進背景 task；不等待 Jev。
+    fn schedule_claim_collision<'a>(
+        &'a self,
+        ask: crate::judge::collision::ClaimAsk,
+    ) -> impl std::future::Future<Output = ()> + Send + 'a;
     /// 本機這顆 bot 的資料夾（spool 在裡面）。
     fn hook_bot_dir(&self, bot_id: &str) -> Result<std::path::PathBuf>;
     /// 回合結束 hook 處理完之後補讀 AskUserQuestion 的答案。

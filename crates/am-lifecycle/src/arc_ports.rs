@@ -39,6 +39,12 @@ mod arc_port_2_hookhost {
     use serde_json::Value;
     impl<T: crate::hookrecv::HookHost + ?Sized> crate::hookrecv::HookHost for std::sync::Arc<T> {
         fn wake_hook_inbox(&self) { <T as crate::hookrecv::HookHost>::wake_hook_inbox(self.as_ref()) }
+        fn schedule_claim_collision<'a>(
+            &'a self,
+            ask: crate::judge::collision::ClaimAsk,
+        ) -> impl std::future::Future<Output = ()> + Send + 'a {
+            async move { <T as crate::hookrecv::HookHost>::schedule_claim_collision(self.as_ref(), ask).await }
+        }
         fn hook_bot_dir(&self, bot_id: &str) -> Result<std::path::PathBuf> { <T as crate::hookrecv::HookHost>::hook_bot_dir(self.as_ref(), bot_id) }
         fn after_turn_end<'a>(
             &'a self,

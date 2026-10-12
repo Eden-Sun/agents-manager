@@ -31,6 +31,8 @@ import socket
 import stat
 import subprocess
 import sys
+import tempfile
+import time
 import uuid
 import urllib.error
 import urllib.parse
@@ -2106,9 +2108,56 @@ def claim_conflict(number: int, claim: dict) -> AgmError:
 COLLISION_TIMEOUT = 2.0
 
 
+def spool_claim_collision(number: int, title: str, me: str, payload: dict) -> None:
+    """遠端 pane 沒有本機 daemon runtime 時，把認領提示交給該 bot 的 hook spool。"""
+    bot_id = os.environ.get("AM_BOT_ID", "")
+    instance = os.environ.get("AM_INSTANCE", "")
+    component = re.compile(r"[A-Za-z0-9][A-Za-z0-9_-]{0,127}\Z")
+    if not component.fullmatch(bot_id) or (instance and not component.fullmatch(instance)):
+        return
+    provider = os.environ.get("AM_KIND") or "claude"
+    if provider not in {"claude", "codex", "grok", "agy"}:
+        return
+    root = Path.home() / ".config" / "agents-manager"
+    if instance:
+        root /= "instances" / instance
+    spool_dir = root / "bots" / bot_id / "hook-spool.d"
+    try:
+        spool_dir.mkdir(parents=True, exist_ok=True)
+        body = {
+            "bot_id": bot_id,
+            "provider": provider,
+            "truncated": False,
+            "run_id": "",
+            "received_at": datetime.datetime.now(datetime.timezone.utc).isoformat(timespec="milliseconds").replace("+00:00", "Z"),
+            "payload": {
+                "hook_event_name": "AmClaimCollisionCheck",
+                "issue": number,
+                "title": title,
+                "child": payload.get("child") or me,
+                "branch": payload.get("branch"),
+            },
+        }
+        fd, temporary = tempfile.mkstemp(prefix=".tmp.", dir=spool_dir)
+        try:
+            with os.fdopen(fd, "w", encoding="utf-8") as f:
+                json.dump(body, f, ensure_ascii=False, separators=(",", ":"))
+                f.write("\n")
+            target = spool_dir / f"{time.time_ns()}-{uuid.uuid4().hex}.json"
+            os.replace(temporary, target)
+        except OSError:
+            try:
+                os.unlink(temporary)
+            except OSError:
+                pass
+    except OSError:
+        return
+
+
 def collision_check_hint(args, number: int, title: str, me: str, payload: dict) -> None:
     """認領成功後 best-effort 問一次撞題（只記帳本、推提示，不擋認領、不改認領）。舊 daemon 的 404、連不上、
-    逾時、runtime.json 不在：一律吞掉，exit code 與認領結果都不變。"""
+    逾時、runtime.json 不在：一律吞掉，exit code 與認領結果都不變。遠端沒有 runtime.json 時改寫進 hook-spool.d，
+    由該 bot 的 daemon 日後收件，不直接回連遠端主機的 daemon port。"""
     try:
         rt = load_runtime(getattr(args, "runtime_dir", None))
         client = Client(daemon_url(rt), COLLISION_TIMEOUT, bot_auth_headers(rt))
@@ -2116,6 +2165,10 @@ def collision_check_hint(args, number: int, title: str, me: str, payload: dict) 
             "/api/judge/collision-check",
             {"issue": number, "title": title, "child": payload.get("child") or me, "branch": payload.get("branch")},
         )
+    except AgmError as e:
+        if e.kind == "no_runtime":
+            spool_claim_collision(number, title, me, payload)
+        return
     except Exception:  # noqa: BLE001 — 附帶提示的任何失敗都不能讓認領看起來失敗
         return
 
