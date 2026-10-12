@@ -1206,6 +1206,17 @@ pub trait ConfigChangeHooks: Send + Sync {
     fn audit_write(&self, at: &'static std::panic::Location<'static>, path: &Path, old: &ConfigFile, new: &ConfigFile);
 }
 
+// 測試用：這條執行緒上 `ConfigStore::get` 被呼叫幾次（`/state` 不准逐台主機 clone 整份設定，見 `api::state_query_count_tests`，#1663）。
+#[cfg(any(test, feature = "test-hooks"))]
+thread_local! {
+    pub static GET_CALLS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+fn note_get() {
+    #[cfg(any(test, feature = "test-hooks"))]
+    GET_CALLS.with(|c| c.set(c.get() + 1));
+}
+
 pub struct ConfigStore {
     pub path: PathBuf,
     inner: tokio::sync::Mutex<Loaded>,
@@ -1234,6 +1245,7 @@ impl ConfigStore {
     }
 
     pub async fn get(&self) -> ConfigFile {
+        note_get();
         self.inner.lock().await.cfg.clone()
     }
 

@@ -4,6 +4,10 @@ version = "0.1.0"
 edition = "2021"
 publish = false
 
+[features]
+# 測試用計數器（`GET_CALLS`）；daemon 的 dev-dependencies 會打開。
+test-hooks = []
+
 [dependencies]
 anyhow = "1"
 dirs = "5"
