@@ -136,6 +136,9 @@ function shortPath(path: string, max = 30): string {
 /** 拖曳中的一列，以及游標落在哪一列的哪一半（插入線畫在那裡）。 */
 type DragState = { id: string; projectId: string; overId: string | null; edge: 'before' | 'after' } | null
 
+/** 側欄 Bot 列的鍵盤排序說明（Alt＋↑↓），由 `Sidebar` 畫一次，每列 `aria-describedby` 指過來。 */
+const BOT_ROW_HINT_ID = 'sidebar-bot-row-hint'
+
 function BotRowImpl({
   botId,
   hit,
@@ -285,6 +288,8 @@ function BotRowImpl({
       role="listitem"
       aria-current={selected ? 'true' : undefined}
       aria-owns={kidsListId}
+      // 鍵盤替代拖曳（Alt＋↑↓）：說明放在側欄最上面一段畫面上看不到的文字，列掛上去（同晶片列的 PIN_HINT）。
+      aria-describedby={compact ? undefined : BOT_ROW_HINT_ID}
       // 手機子列不畫名字（styles.css），由這裡帶。
       aria-label={compact ? bot.name : undefined}
       data-bot-id={botId}
@@ -1164,6 +1169,9 @@ export function Sidebar() {
 
   return (
     <>
+      <span id={BOT_ROW_HINT_ID} className="sr-only">
+        Bot 順序可以拖曳調整，鍵盤按 Alt 加上下方向鍵移動一格。
+      </span>
       <div className="sidebar-head">
         <div className="head-brand">
           <div className="head-brand-title">
