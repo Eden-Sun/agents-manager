@@ -2,14 +2,17 @@
 
 use crate::db;
 use crate::lc_error::LcError;
-use crate::pending_question::{pending_ask, read_tail, TAIL_BYTES};
+use crate::pending_question::{pending_ask_entry, read_tail, TAIL_BYTES};
 use crate::state::App;
 use axum::extract::{Path, State};
 use axum::Json;
 use serde_json::{json, Value};
 use std::sync::Arc;
 
-/// `GET /api/bots/{id}/pending-question`：`200 {"questions": [...] | null}`。
+/// `GET /api/bots/{id}/pending-question`：`200 {"questions": [...] | null, "jev_options": {...} | null}`。
+///
+/// `jev_options` 是 Jev 對各選項的建議（issue #1475，SPEC §4.3c 第五個場景）：沒開、沒問過、還在問、失敗都是 `null`，
+/// 題目照常回；第一次讀到某個提問時丟一個背景 task 去問，答案落帳後發 WS `pending_question_hint`。
 ///
 /// 只有本機的 claude bot 讀得到（transcript 在這台）；遠端、非 claude、沒有 transcript、沒在等題目都回 `null`，
 /// 不是錯誤——網頁拿不到就照舊用畫面。bot 或 run 不存在 404。
@@ -18,19 +21,23 @@ pub async fn get_pending_question(State(app): State<Arc<App>>, Path(id): Path<St
     let bot = db::bot(&app.db, &id).await.map_err(up)?.ok_or_else(|| LcError::NotFound("bot".into()))?;
     let run = db::active_run(&app.db, &id).await.map_err(up)?.ok_or_else(|| LcError::NotFound("run".into()))?;
     if bot.kind != "claude" || db::bot_host(&app.db, &id).await.map_err(up)? != crate::config::LOCAL_HOST {
-        return Ok(Json(json!({"questions": null})));
+        return Ok(Json(json!({"questions": null, "jev_options": null})));
     }
     let Some(path) = run.transcript_path.clone().filter(|p| !p.trim().is_empty()) else {
-        return Ok(Json(json!({"questions": null})));
+        return Ok(Json(json!({"questions": null, "jev_options": null})));
     };
     if !crate::app_ports_p5::local_transcript_allowed(&app, &bot, &path).await {
-        return Ok(Json(json!({"questions": null})));
+        return Ok(Json(json!({"questions": null, "jev_options": null})));
     }
-    let input = tokio::task::spawn_blocking(move || read_tail(std::path::Path::new(&path), TAIL_BYTES).and_then(|log| pending_ask(&log)))
+    let entry = tokio::task::spawn_blocking(move || read_tail(std::path::Path::new(&path), TAIL_BYTES).and_then(|log| pending_ask_entry(&log)))
         .await
         .ok()
         .flatten();
-    Ok(Json(json!({"questions": input.and_then(|i| i.get("questions").cloned())})))
+    let Some((tool_use_id, input)) = entry else {
+        return Ok(Json(json!({"questions": null, "jev_options": null})));
+    };
+    let jev_options = crate::judge::ask_option::hint_for(&app, &bot, &run.id, &tool_use_id, &input).await;
+    Ok(Json(json!({"questions": input.get("questions").cloned(), "jev_options": jev_options})))
 }
 
 #[cfg(test)]

@@ -13,6 +13,12 @@ pub const TAIL_BYTES: u64 = 512 * 1024;
 ///
 /// 一行一筆 JSON；第一行可能因為從中間讀而被切壞，解析不了就跳過。
 pub fn pending_ask(log: &str) -> Option<Value> {
+    pending_ask_entry(log).map(|(_, input)| input)
+}
+
+/// 同 [`pending_ask`]，另帶那個 `tool_use` 的 id：同一題在同一個 run 裡再問一次是另一次提問，
+/// 要拿 id 區分（Jev 的選項建議每個 `tool_use` 問一次，issue #1475）。
+pub fn pending_ask_entry(log: &str) -> Option<(String, Value)> {
     let mut pending: Option<(String, Value)> = None;
     for line in log.lines() {
         let Ok(entry) = serde_json::from_str::<Value>(line) else { continue };
@@ -34,7 +40,7 @@ pub fn pending_ask(log: &str) -> Option<Value> {
             }
         }
     }
-    pending.map(|(_, input)| input).filter(|input| input.get("questions").and_then(Value::as_array).is_some_and(|q| !q.is_empty()))
+    pending.filter(|(_, input)| input.get("questions").and_then(Value::as_array).is_some_and(|q| !q.is_empty()))
 }
 
 pub fn read_tail(path: &std::path::Path, max: u64) -> Option<String> {
@@ -72,6 +78,14 @@ mod tests {
         assert_eq!(pending_ask(&[ask("t1", "舊題"), answer("t1")].join("\n")), None);
         let got = pending_ask(&[ask("t1", "舊題"), answer("t1"), ask("t2", "新題")].join("\n")).unwrap();
         assert_eq!(got["questions"][0]["question"], "新題");
+    }
+
+    /// 帶 id 的版本回的是同一個 `tool_use` 的 id；同一題再問一次，id 不同。
+    #[test]
+    fn the_entry_carries_the_tool_use_id() {
+        let (id, input) = pending_ask_entry(&[ask("t1", "舊題"), answer("t1"), ask("t2", "舊題")].join("\n")).unwrap();
+        assert_eq!(id, "t2");
+        assert_eq!(input["questions"][0]["question"], "舊題");
     }
 
     /// 別的工具的 tool_result 不算回答這一題。
