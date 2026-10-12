@@ -278,6 +278,8 @@ export function BlockedChoices({
     return i < 0 ? Number.POSITIVE_INFINITY : i
   })()
 
+  const previewAt = menu.choices.findIndex((c) => c.current && c.preview !== '')
+
   /** review 列對應的分頁（送出頁不算一題）。 */
   const reviewTab = (i: number) => menu.tabs.findIndex((t, k) => !t.submit && menu.tabs.slice(0, k).filter((x) => !x.submit).length === i)
 
@@ -489,6 +491,16 @@ export function BlockedChoices({
           )
         })}
       </ol>
+
+      {/* 並排預覽版面（issue #1473）：終端只畫游標所在那一項的預覽，所以只有那一項有，不替其他項補。 */}
+      {previewAt >= 0 ? (
+        <figure className="bc-preview">
+          <figcaption>
+            第 {menu.choices[previewAt].number} 項的預覽（終端只畫游標所在那一項；移動游標才看得到別項的）
+          </figcaption>
+          <pre className="bc-context bc-notes bc-preview-text">{menu.choices[previewAt].preview}</pre>
+        </figure>
+      ) : null}
 
       {menu.submit ? (
         <button type="button" className="bc-submit" disabled={Boolean(busy)} onClick={() => void submit()}>

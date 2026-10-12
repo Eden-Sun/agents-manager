@@ -34,6 +34,20 @@
   overflow-wrap: anywhere;
 }
 
+/* 並排預覽版面（issue #1473）：游標那一項的預覽，等寬字、保留縮排、長行折行不橫捲。 */
+.bc-preview {
+  margin: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.bc-preview figcaption {
+  font-size: 11px;
+  line-height: 1.5;
+  color: var(--text-dim);
+}
+
 /* 夾在虛線之間的指令：逐字對齊要留縮排（pre-wrap），但長行（URL、base64、一長串 rm 目標）要折，不橫捲（2026-10-05）。 */
 .bc-command {
   display: flex;

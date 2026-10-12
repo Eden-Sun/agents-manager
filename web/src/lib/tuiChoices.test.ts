@@ -300,10 +300,10 @@ test('貼上之後標題被取代、換行進說明；customAnswerShown 認得�
 })
 
 test('窄 pane 把長答案折行（中文折在字中間）也算出現過，不會卡住不按 Enter', () => {
-  const wrapped = { number: 3, title: '要一個能讓非工程師自己發文章的後', detail: '台，順便把舊文章一起搬過去', checked: null, current: true }
+  const wrapped = { number: 3, title: '要一個能讓非工程師自己發文章的後', detail: '台，順便把舊文章一起搬過去', checked: null, current: true, preview: '' }
   assert.equal(customAnswerShown(wrapped, '要一個能讓非工程師自己發文章的後台，順便把舊文章一起搬過去'), true)
   // 英文折在空格上，照樣認得。
-  const latin = { number: 3, title: 'let editors publish posts', detail: 'without touching markdown', checked: null, current: true }
+  const latin = { number: 3, title: 'let editors publish posts', detail: 'without touching markdown', checked: null, current: true, preview: '' }
   assert.equal(customAnswerShown(latin, 'let editors publish posts without touching markdown'), true)
   // 完全不同的字仍然不算（不能因為比較寬鬆就亂認）。
   assert.equal(customAnswerShown(wrapped, '換一個完全不同的答案'), false)
@@ -580,4 +580,101 @@ test('警語與問句之間沒有空白列：⚠ 倒數不會黏進題目', () =
   assert.equal(menu.question, 'Do you want to proceed?')
   assert.ok(menu.context.join('\n').includes('automatically deny'))
   assert.equal(menu.command.length, 14)
+})
+
+/** 2026-10-12 真機（console-pm，213×55）：AskUserQuestion 帶 `preview`＝左邊編號選項、右邊是游標那一項的預覽框。 */
+const ASKQ_PREVIEW = readFileSync(new URL('./__fixtures__/claude-askq-preview-213x55.txt', import.meta.url), 'utf8')
+
+test('並排預覽版面（左選項、右預覽框）：認得題目、兩個選項、游標與預覽 (issue #1473)', () => {
+  const menu = parseChoiceMenu(ASKQ_PREVIEW)
+  assert.ok(menu)
+  assert.ok(menu.question?.startsWith('承保公司不在支援範圍時，回應要改成哪一種？'))
+  assert.equal(menu.choices.length, 2)
+  assert.deepEqual(
+    menu.choices.map((c) => c.number),
+    [1, 2],
+  )
+  assert.equal(menu.cursor, 0)
+  assert.equal(menu.choices[0].current, true)
+  assert.equal(menu.choices[1].current, false)
+  assert.equal(menu.multi, false)
+  assert.equal(menu.footer, true)
+})
+
+test('並排預覽：折到第二行的 (Recommended) 接回標籤，不是說明也不是選項', () => {
+  const menu = parseChoiceMenu(ASKQ_PREVIEW)
+  assert.ok(menu)
+  assert.equal(menu.choices[0].title, '改回 200 正常訊息 (Recommended)')
+  assert.equal(menu.choices[0].detail, '')
+  assert.equal(menu.choices[1].title, '維持錯誤，只改訊息')
+  assert.equal(menu.choices[1].detail, '')
+})
+
+test('並排預覽：預覽只掛在游標所在那一項，去掉框線、保留縮排', () => {
+  const menu = parseChoiceMenu(ASKQ_PREVIEW)
+  assert.ok(menu)
+  const p = menu.choices[0].preview
+  assert.ok(p.startsWith('HTTP 200\n{\n  "status": "insurer_not_supported",'))
+  assert.ok(p.includes('"insurer": {"name": "台灣產物保險股份有限公司", "code": null},'))
+  assert.ok(p.endsWith('\n}'))
+  assert.ok(!/[│┌┐└┘]/.test(p))
+  assert.ok(!p.includes('Notes:'))
+  assert.equal(menu.choices[1].preview, '')
+})
+
+test('並排預覽：Notes 提示與 Chat about this 不被當成選項、不混進預覽', () => {
+  const menu = parseChoiceMenu(ASKQ_PREVIEW)
+  assert.ok(menu)
+  const all = JSON.stringify(menu)
+  assert.ok(!all.includes('Chat about this'))
+  assert.ok(!all.includes('press n to add notes'))
+  assert.deepEqual(menu.context.map((l) => l.trim()), ['☐ 回應格式'])
+})
+
+test('並排預覽：預覽框裡的「1. …」編號行不會被當成選項', () => {
+  const lines = ASKQ_PREVIEW.split('\n')
+  const at = lines.findIndex((l) => l.includes('HTTP 200'))
+  const pad = lines[at].slice(0, lines[at].indexOf('│') + 2)
+  lines[at + 2] = `${pad}1. 先備份`.padEnd(lines[at].length - 1) + '│'
+  lines[at + 3] = `${pad}2. 再升級`.padEnd(lines[at].length - 1) + '│'
+  const menu = parseChoiceMenu(lines.join('\n'))
+  assert.ok(menu)
+  assert.equal(menu.choices.length, 2)
+  assert.equal(menu.choices[0].title, '改回 200 正常訊息 (Recommended)')
+  assert.ok(menu.choices[0].preview.includes('1. 先備份\n2. 再升級'))
+})
+
+test('並排預覽：游標在第 2 項時預覽掛在第 2 項，keysToSelect 走 ↑↓＋Enter', () => {
+  const lines = ASKQ_PREVIEW.split('\n')
+  const a = lines.findIndex((l) => l.startsWith('❯ 1.'))
+  lines[a] = lines[a].replace('❯ 1.', '  1.')
+  const b = lines.findIndex((l) => l.startsWith('  2.'))
+  lines[b] = lines[b].replace('  2.', '❯ 2.')
+  const menu = parseChoiceMenu(lines.join('\n'))
+  assert.ok(menu)
+  assert.equal(menu.cursor, 1)
+  assert.equal(menu.choices[0].preview, '')
+  assert.ok(menu.choices[1].preview.includes('"status": "insurer_not_supported"'))
+  assert.deepEqual(keysToSelect(menu, 0), ['up', 'enter'])
+  const first = parseChoiceMenu(ASKQ_PREVIEW)
+  assert.ok(first)
+  assert.deepEqual(keysToSelect(first, 1), ['down', 'enter'])
+  assert.ok(sameChoices(first, menu))
+})
+
+test('沒有預覽框的既有選單：preview 一律是空字串', () => {
+  const menu = parseChoiceMenu(CARBIS)
+  assert.ok(menu)
+  assert.ok(menu.choices.every((c) => c.preview === ''))
+})
+
+test('並排預覽：游標走到沒編號的 Chat about this 時不認（真機：第 2 項的 ❯ 還留著，會算成游標在第 2 項而答錯）', () => {
+  // 2026-10-12 真機（claude 2.1.296，tmux 213×55）：↓ 過最後一個選項後畫面是 `❯ 2. …` 與 `❯ Chat about this` 兩個記號。
+  const onChat = ASKQ_PREVIEW.replace('  Chat about this', '❯ Chat about this')
+  const lines = onChat.split('\n')
+  const a = lines.findIndex((l) => l.startsWith('❯ 1.'))
+  lines[a] = lines[a].replace('❯ 1.', '  1.')
+  const b = lines.findIndex((l) => l.startsWith('  2.'))
+  lines[b] = lines[b].replace('  2.', '❯ 2.')
+  assert.equal(parseChoiceMenu(lines.join('\n')), null)
 })
