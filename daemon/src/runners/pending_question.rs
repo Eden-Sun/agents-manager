@@ -197,31 +197,73 @@ mod remote_tests {
         assert_eq!(rig.reads(), 1);
     }
 
-    /// 路徑不在這顆 bot 的 config root 底下（別的身分、`..`、不是 jsonl、檔名跟 session 對不上）→ null，而且不發遠端讀取。
+    /// 記的路徑不在這顆 bot 的 config root 底下、而且檔名就是 live session（別的身分、`..`、不是 jsonl、不在 `projects/` 下）→ null，而且不發遠端讀取。
     #[tokio::test]
-    async fn a_recorded_path_outside_the_bots_roots_is_null_and_never_read() {
+    async fn a_recorded_path_outside_the_roots_that_names_the_live_session_is_null_and_never_read() {
         for forged in [
-            "/etc/passwd".to_string(),
             format!("/Users/m4p/.claude-other/projects/-work/{SID}.jsonl"),
             format!("{ROOT}/projects/../../.claude-other/projects/-work/{SID}.jsonl"),
             format!("{ROOT}/projects/-work/{SID}.txt"),
-            format!("{ROOT}/projects/-work/00000000-0000-4000-8000-000000000000.jsonl"),
             format!("{ROOT}/other/{SID}.jsonl"),
         ] {
             let rig = rig(Some(&forged), || Ok(found(&ask_line("toolu_1")))).await;
             let body = get(&rig).await;
             assert_eq!(body["questions"], Value::Null, "{forged}");
             assert_eq!(rig.reads(), 0, "{forged}: 不能發出遠端讀取");
+            assert!(rig.scripts.lock().unwrap().iter().all(|s| !s.contains(&forged)), "{forged}: 偽造路徑不能出現在遠端指令裡");
         }
     }
 
-    /// run 沒記 session（`native_session_id` 與路徑都空）：沒有檔可找，null、不讀。
+    /// 記的路徑指向別的 session（`/etc/passwd`、另一支 uuid）：它的 stem 不是 live session，所以當成過期或偽造而忽略——
+    /// 路徑從頭到尾不進遠端指令；讀取只限 roots 底下 live session 的那一支檔（#1503：以 live session 為準）。
     #[tokio::test]
-    async fn a_run_without_a_recorded_session_is_null_and_never_read() {
-        let rig = rig(None, || Ok(found(&ask_line("toolu_1")))).await;
+    async fn a_recorded_path_naming_another_session_is_ignored_and_only_the_live_session_under_the_roots_is_read() {
+        for forged in [
+            "/etc/passwd".to_string(),
+            format!("{ROOT}/projects/-work/00000000-0000-4000-8000-000000000000.jsonl"),
+        ] {
+            let rig = rig(Some(&forged), || Ok(found(&ask_line("toolu_1")))).await;
+            let body = get(&rig).await;
+            assert_eq!(body["questions"][0]["question"], "連線方式？", "{forged}: 題目來自 live session 的檔");
+            assert_eq!(rig.reads(), 1, "{forged}");
+            let scripts = rig.scripts.lock().unwrap().clone();
+            assert!(scripts.iter().all(|s| !s.contains(&forged)), "{forged}: 偽造路徑不能出現在遠端指令裡");
+            let read = scripts.iter().find(|s| s.contains(LOG_MARK)).expect("有一次遠端讀取");
+            assert!(read.contains(ROOT) && read.contains(SID), "{forged}: 讀取只限 roots 底下 live session 的檔\n{read}");
+        }
+    }
+
+    /// run 沒記 session（`native_session_id` 與路徑都空），herdr 這顆 pane 上也沒有 live session：沒有檔可找，null、不讀。
+    #[tokio::test]
+    async fn a_run_with_no_recorded_or_live_session_is_null_and_never_read() {
+        let rig = rig_with(None, None, || Ok(found(&ask_line("toolu_1")))).await;
         sqlx::query("UPDATE runs SET native_session_id=NULL WHERE id=?").bind(&rig.run_id).execute(&rig.env.app.db).await.unwrap();
         assert_eq!(get(&rig).await["questions"], Value::Null);
         assert_eq!(rig.reads(), 0);
+    }
+
+    /// #1503 的新行為：run 沒記 session，但 herdr 報了 live session → 讀 roots 底下那一支檔，不再要求先記過 session。
+    #[tokio::test]
+    async fn a_run_without_a_recorded_session_reads_the_live_session_file_under_the_roots() {
+        let rig = rig_with(None, Some(SID), || Ok(found(&ask_line("toolu_1")))).await;
+        sqlx::query("UPDATE runs SET native_session_id=NULL WHERE id=?").bind(&rig.run_id).execute(&rig.env.app.db).await.unwrap();
+        assert_eq!(get(&rig).await["questions"][0]["question"], "連線方式？");
+        assert_eq!(rig.reads(), 1);
+        let scripts = rig.scripts.lock().unwrap().clone();
+        let read = scripts.iter().find(|s| s.contains(LOG_MARK)).expect("有一次遠端讀取");
+        assert!(read.contains(ROOT) && read.contains(SID), "{read}");
+    }
+
+    /// herdr 報的 session id 會被拿去組路徑與 glob，必須是 session id 的形狀（英數、`-`、`_`，≤64）。
+    /// 不合形狀的一律當成沒有 live session：null、不讀（即使 run 自己記了一個合法的 session）。
+    #[tokio::test]
+    async fn a_live_session_that_is_not_a_plain_session_id_is_null_and_never_read() {
+        for bad in ["../../etc/passwd", "*", "99b1*", "99b1f189?", "99b1 f189", "99b1\nf189", "../", "a/b"] {
+            let rig = rig_with(Some(&recorded()), Some(bad), || Ok(found(&ask_line("toolu_1")))).await;
+            let body = get(&rig).await;
+            assert_eq!(body["questions"], Value::Null, "{bad:?}");
+            assert_eq!(rig.reads(), 0, "{bad:?}: 不能發出遠端讀取");
+        }
     }
 
     /// 遠端讀取失敗（ssh 斷線）或讀不到檔：null，不是錯誤；失敗的結果也節流，不會每個請求都重試。
