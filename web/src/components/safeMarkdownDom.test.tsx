@@ -133,3 +133,10 @@ test('轉換中丟了例外：error boundary 接住、退回純文字，不是�
     console.error = origError
   }
 })
+
+test('自動連結的全形標點：連結只包網址，句尾的「。」「，」與不成對的括號在連結外面', async () => {
+  const root = await render('請開 https://example.com/login。然後 (https://example.com/a)，好')
+  const hrefs = [...root.querySelectorAll('a')].map((a) => a.getAttribute('href'))
+  assert.deepEqual(hrefs, ['https://example.com/login', 'https://example.com/a'], JSON.stringify(hrefs))
+  assert.ok(root.textContent?.includes('請開 https://example.com/login。然後'), root.textContent ?? '')
+})
