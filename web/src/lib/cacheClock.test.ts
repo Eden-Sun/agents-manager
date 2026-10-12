@@ -91,3 +91,9 @@ test('chipCache：keep_warm_skip=true 無倒數、false／未帶照常倒數、�
   assert.equal(chipCache(undefined, T0), null)
   assert.deepEqual(chipCache({ ...run, keep_warm_skip: false }, T0), cacheState(run.last_api_at, 3600, T0, false, null))
 })
+
+test('跨年：上次活動在去年，tooltip 的時間要帶年份', () => {
+  const now = new Date(2027, 0, 1, 0, 20).getTime()
+  const last = new Date(2026, 11, 31, 23, 30).toISOString()
+  assert.equal(cacheState(last, 3600, now)!.title, '快取約 10 分後到期（上次活動 2026/12/31 23:30）')
+})

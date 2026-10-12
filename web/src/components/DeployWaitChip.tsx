@@ -3,8 +3,8 @@ import { BLOCKER_WHY, dismissDeployWait, escalateDeployWait, type DeployWait } f
 import { setDeployWait, useDeployWait } from '../store/deployWait'
 import { useStore } from '../store/store'
 import './deployWait.css'
+import { limitHitWhen } from '../lib/limitHitWhen'
 
-const hhmm = (iso: string | null) => (iso ? new Date(iso).toLocaleTimeString('zh-TW', { hour: '2-digit', minute: '2-digit', hour12: false }) : '')
 
 /**
  * 側欄標題列的「⏳ 部署等 N 分」（SPEC §18.10，使用者 2026-10-04：等待部署超過 3 分鐘，馬上通知 user 調度）。
@@ -112,7 +112,7 @@ export function DeployWaitChip() {
             {wait.user_escalated
               ? '已按「現在換版」：working 不再擋，送達中、別人握著窗口、讀不到狀態照樣擋。'
               : wait.escalates_at
-                ? `沒動作的話約 ${hhmm(wait.escalates_at)} 自動放寬（working 不再擋）。`
+                ? `沒動作的話約 ${limitHitWhen(wait.escalates_at, now) ?? ''} 自動放寬（working 不再擋）。`
                 : '已自動放寬，只剩送達中、別人握著窗口或讀不到狀態在擋。'}
           </p>
           <div className="deploy-wait-actions">
