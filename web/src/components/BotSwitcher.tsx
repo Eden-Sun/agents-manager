@@ -59,11 +59,16 @@ export function BotSwitcher({ botId, name }: { botId?: string; name: string }) {
   }, [open])
 
   // 照側欄的順序（拖曳排過的專案與 bot）；只列母 bot（既有決定），收起來的不列，正在看的那顆例外（#1243）。
+  // 父列還在這個專案裡的子 agent 掛在父列底下不單獨列；父列不在（孤兒）就照頂層列出來（同側欄，#1538）。
   const groups = orderedProjects({ projects, projectOrder })
-    .map((p) => ({
-      project: p,
-      bots: botsOfProject({ bots, botOrder }, p.id).filter((b) => !b.parent_bot_id && (b.id === botId || !hidden.includes(b.id))),
-    }))
+    .map((p) => {
+      const all = botsOfProject({ bots, botOrder }, p.id)
+      const ids = new Set(all.map((b) => b.id))
+      return {
+        project: p,
+        bots: all.filter((b) => (!b.parent_bot_id || !ids.has(b.parent_bot_id)) && (b.id === botId || !hidden.includes(b.id))),
+      }
+    })
     .filter((g) => g.bots.length > 0)
 
   return (
