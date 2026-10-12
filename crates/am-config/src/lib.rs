@@ -27,6 +27,9 @@ fn default_true() -> bool {
 fn default_ssh_port() -> u16 {
     22
 }
+fn is_default_ssh_port(port: &u16) -> bool {
+    *port == default_ssh_port()
+}
 pub fn default_host() -> String {
     LOCAL_HOST.to_string()
 }
@@ -250,7 +253,7 @@ pub struct HostCfg {
     pub name: String,
     pub ssh: String,
     /// Only emitted when != 22, so ssh_config aliases keep their Port.
-    #[serde(default = "default_ssh_port")]
+    #[serde(default = "default_ssh_port", skip_serializing_if = "is_default_ssh_port")]
     pub ssh_port: u16,
     /// Beyond SPEC §11.2 — needed for the loopback dev sshd (§11.8 R5).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -1672,6 +1675,16 @@ mod v40_tests {
             attach_command(Some(&host(2222)), "x"),
             "herdr --remote ssh://m4p@100.112.229.82:2222 --session agents-manager"
         );
+    }
+
+    /// `ssh_port` 的註解寫「只有不是 22 才寫出來」；以前沒有 `skip_serializing_if`，每次寫回 config.toml 都多一行 `ssh_port = 22`。
+    #[test]
+    fn host_cfg_omits_the_default_ssh_port_when_serialized() {
+        let default = toml::to_string_pretty(&host(22)).unwrap();
+        assert!(!default.contains("ssh_port"), "預設 22 不寫出來：\n{default}");
+        assert_eq!(toml::from_str::<HostCfg>(&default).unwrap().ssh_port, 22, "省略後讀回來仍是 22");
+        let custom = toml::to_string_pretty(&host(2222)).unwrap();
+        assert!(custom.contains("ssh_port = 2222"), "{custom}");
     }
 
     #[test]
