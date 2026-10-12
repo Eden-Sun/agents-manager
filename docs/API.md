@@ -888,7 +888,7 @@ UI 標籤：`hook` 不標；`terminal_fallback` 或 `incomplete = 1` 標「終�
 
 `GET /api/bots/{id}/terminal?source=visible&lines=200`：`source ∈ visible | recent | recent_unwrapped | detection`（預設 `visible`），`lines` 1–2000。無 active Run → 404。
 
-`GET /api/bots/{id}/pending-question`：claude 停在 `AskUserQuestion` 時，從 transcript 讀出**還沒被回答**的那一題（最後一個 `tool_use`、之後沒有同 `tool_use_id` 的 `tool_result`）：
+`GET /api/bots/{id}/pending-question`：claude 停在 `AskUserQuestion` 時，從 transcript 讀出**還沒被回答**的主線提問（最後一個 assistant `tool_use`、之後沒有同 `tool_use_id` 的 user `tool_result`）。`isSidechain: true` 的旁支事件不會替換主線提問或將它標成已回答：
 `200 {"questions": [{question, header, multiSelect, options:[{label, description}]}] | null, "jev_options": {…} | null}`。只讀 transcript 最後 512 KiB。
 非 claude、沒有 transcript、讀不到、沒在等題目都回 `{"questions": null, "jev_options": null}`（不是錯誤，前端照舊用畫面）。bot 或 active Run 不存在 404。
 **遠端主機的 claude bot 也讀**（issue #1476）：對話檔在那台機器上，經 SPEC §12.5b 那條 `sh`／ssh 只讀最後 `TAIL_BYTES`（同本機的 512 KiB），不另開通道。
