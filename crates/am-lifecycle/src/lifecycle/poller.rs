@@ -3744,6 +3744,183 @@ mod issue_17_tests {
         assert!(!late_proof::armed_in_tests().lock().unwrap().iter().any(|(t, _)| t == &f.turn_id), "不能為換過的 session 開 watcher");
     }
 
+    /// #1654：另起一顆 bot、一個 running run、一個 in-flight 回合（`runs_one_active` 限制每顆 bot 只能有一個 active run）。
+    async fn seed_in_flight_run(f: &Fixture) -> (String, String) {
+        let bot_id = db::ulid();
+        sqlx::query("INSERT INTO bots (id, project_id, name, kind, hook_token, created_at) VALUES (?,?,?, 'claude', 'tok', ?)")
+            .bind(&bot_id)
+            .bind(&f.env.project_id)
+            .bind(format!("seed-{bot_id}"))
+            .bind(db::now())
+            .execute(&f.env.app.db)
+            .await
+            .unwrap();
+        let conversation_id = db::conversation_id(&f.env.app.db, &bot_id).await.unwrap();
+        let run_id = db::ulid();
+        sqlx::query("INSERT INTO runs (id, bot_id, state, agent_status, pane_id, herdr_session, started_at) VALUES (?,?,'running','idle','pane-17','test',?)")
+            .bind(&run_id)
+            .bind(&bot_id)
+            .bind(db::now())
+            .execute(&f.env.app.db)
+            .await
+            .unwrap();
+        let turn_id = db::ulid();
+        sqlx::query("INSERT INTO turns (id, conversation_id, run_id, origin, status, delivery, created_at) VALUES (?,?,?,'web','in_flight','ok',?)")
+            .bind(&turn_id)
+            .bind(&conversation_id)
+            .bind(&run_id)
+            .bind(db::now())
+            .execute(&f.env.app.db)
+            .await
+            .unwrap();
+        (run_id, turn_id)
+    }
+
+    async fn durable_rows(f: &Fixture) -> i64 {
+        sqlx::query_scalar("SELECT COUNT(*) FROM late_proof_pending").fetch_one(&f.env.app.db).await.unwrap()
+    }
+
+    fn late_proof_armed(turn_id: &str) -> bool {
+        late_proof::armed_in_tests().lock().unwrap().iter().any(|(t, _)| t == turn_id)
+    }
+
+    /// #1654：開機恢復的篩選（pane 不符、run 已停、回合已不在飛、delivery 已不是 unknown、已過 10 分鐘 TTL）各自都不接回；對照組仍接回。
+    #[tokio::test]
+    async fn issue_1654_startup_skips_durable_rows_that_no_longer_match() {
+        use super::super::delivery::{LogFormat, Proof};
+
+        let now = "2026-10-12T12:00:00.000Z";
+        // (情境, 打字後套用的 SQL（{run}／{turn} 代入），開機時間，預期接回幾筆)
+        let cases: [(&str, &str, &str, usize); 6] = [
+            ("對照：沒有變動，仍接回", "", "2026-10-12T12:01:00.000Z", 1),
+            ("pane 不符", "UPDATE runs SET pane_id='pane-99' WHERE id='{run}'", "2026-10-12T12:01:00.000Z", 0),
+            ("run 已停", "UPDATE runs SET state='stopped', ended_at='2026-10-12T12:00:30.000Z' WHERE id='{run}'", "2026-10-12T12:01:00.000Z", 0),
+            ("回合已完成", "UPDATE turns SET status='completed', completed_at='2026-10-12T12:00:30.000Z' WHERE id='{turn}'", "2026-10-12T12:01:00.000Z", 0),
+            ("delivery 已是 ok", "UPDATE turns SET delivery='ok' WHERE id='{turn}'", "2026-10-12T12:01:00.000Z", 0),
+            ("已過 TTL", "", "2026-10-12T12:10:01.000Z", 0),
+        ];
+        for (label, sql, restart_at, expected) in cases {
+            let f = fixture("claude", "").await;
+            let app = f.env.app.clone();
+            let path = with_transcript(&f, quiet()).await;
+            let proof = Proof::Transcript { format: LogFormat::Claude, path, session_id: "sess-1".into() };
+            let pending = late_proof::Pending::new("claude", "pane-17", &proof, 0, 0, "Reply with PONG please", now.into());
+            late_proof::persist_pending_at(&app.db, &f.run_id, &pending, now).await.unwrap();
+            sqlx::query("UPDATE turns SET delivery='unknown', delivery_verified=0 WHERE id=?").bind(&f.turn_id).execute(&app.db).await.unwrap();
+            if !sql.is_empty() {
+                let sql = sql.replace("{run}", &f.run_id).replace("{turn}", &f.turn_id);
+                sqlx::query(&sql).execute(&app.db).await.unwrap();
+            }
+            let restarted = tt::restart_app(&f.env).await;
+            assert_eq!(late_proof::recover_at_startup_at(&restarted, restart_at).await.unwrap(), expected, "{label}");
+            assert_eq!(late_proof_armed(&f.turn_id), expected == 1, "{label}：watcher 與接回筆數一致");
+        }
+    }
+
+    /// #1654：durable 登錄最多 256 筆（剛好 256 不刪；第 257 筆進來才刪掉最舊的那一筆）。
+    #[tokio::test]
+    async fn issue_1654_durable_registry_keeps_256_rows_and_drops_only_the_oldest() {
+        use super::super::delivery::Proof;
+
+        let f = fixture("claude", "").await;
+        let app = f.env.app.clone();
+        let at = |i: usize| format!("2026-10-12T12:{:02}:{:02}.000Z", i / 60, i % 60);
+        let mut runs = vec![f.run_id.clone()];
+        while runs.len() < 257 {
+            runs.push(seed_in_flight_run(&f).await.0);
+        }
+        let pending = late_proof::Pending::new("claude", "pane-17", &Proof::EchoRow, 0, 0, "Reply with PONG please", at(0));
+        for (i, run) in runs.iter().enumerate().take(256) {
+            late_proof::persist_pending_at(&app.db, run, &pending, &at(i)).await.unwrap();
+        }
+        assert_eq!(durable_rows(&f).await, 256, "剛好 256 筆不刪");
+
+        late_proof::persist_pending_at(&app.db, &runs[256], &pending, &at(256)).await.unwrap();
+        assert_eq!(durable_rows(&f).await, 256, "第 257 筆進來要裁回 256");
+        for (run, kept) in [(&runs[0], 0), (&runs[1], 1), (&runs[256], 1)] {
+            let n: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM late_proof_pending WHERE run_id = ?").bind(run).fetch_one(&app.db).await.unwrap();
+            assert_eq!(n, kept, "最舊的那筆被刪、其餘保留（run {run}）");
+        }
+    }
+
+    /// #1654：欠帳補寫成 unknown 後，記憶體登錄已經沒有這一筆時，改從 durable 列接回同一回合的基準；寫回前不接。
+    #[tokio::test]
+    async fn issue_1654_owed_unknown_write_restores_its_baseline_from_durable_storage() {
+        use super::super::delivery::{LogFormat, Proof};
+
+        let f = fixture("claude", "").await;
+        let app = f.env.app.clone();
+        let path = with_transcript(&f, quiet()).await;
+        let proof = Proof::Transcript { format: LogFormat::Claude, path, session_id: "sess-1".into() };
+        let text = "Reply with PONG please";
+        // 列的 TTL 以注入的時間判斷，不靠牆鐘：寫入與接回都用同一個固定時間。
+        let now = "2026-10-12T12:00:00.000Z";
+        let pending = late_proof::Pending::new("claude", "pane-17", &proof, 0, 0, text, now.into());
+        late_proof::persist_pending_at(&app.db, &f.run_id, &pending, now).await.unwrap();
+
+        assert!(!late_proof::restore_owed_from_durable_at(&app, &f.run_id, &f.bot_id, &f.turn_id, now).await.unwrap(), "delivery 仍是 ok：還沒寫成 unknown，不接回");
+        assert!(!late_proof_armed(&f.turn_id));
+        sqlx::query("UPDATE turns SET delivery='unknown', delivery_verified=0 WHERE id=?").bind(&f.turn_id).execute(&app.db).await.unwrap();
+        assert!(late_proof::restore_owed_from_durable_at(&app, &f.run_id, &f.bot_id, &f.turn_id, now).await.unwrap(), "欠帳寫成 unknown 後要從 durable 列接回");
+        let restored = late_proof::armed_in_tests().lock().unwrap().iter().find(|(t, _)| t == &f.turn_id).map(|(_, p)| p.clone()).expect("接回的基準已認領");
+        assert_eq!((restored.kind.as_str(), restored.text.as_str()), ("claude", text));
+    }
+
+    /// #1654：開機恢復時一筆清理失敗（DELETE 出錯）只影響它自己；同一批其餘的基準仍要接回。
+    #[tokio::test]
+    async fn issue_1654_one_failed_cleanup_does_not_stop_the_startup_restore() {
+        use super::super::delivery::{LogFormat, Proof};
+
+        let f = fixture("claude", "").await;
+        let app = f.env.app.clone();
+        let path = with_transcript(&f, quiet()).await;
+        // 好的那筆（EchoRow 不看 session）較舊；壞的那筆（transcript，session 已換）較新，所以先被處理。
+        let (good_run, good_turn) = seed_in_flight_run(&f).await;
+        let good = late_proof::Pending::new("claude", "pane-17", &Proof::EchoRow, 0, 0, "good", "2026-10-12T12:00:00.000Z".into());
+        late_proof::persist_pending_at(&app.db, &good_run, &good, "2026-10-12T12:00:00.000Z").await.unwrap();
+        let bad_proof = Proof::Transcript { format: LogFormat::Claude, path, session_id: "sess-1".into() };
+        let bad = late_proof::Pending::new("claude", "pane-17", &bad_proof, 0, 0, "bad", "2026-10-12T12:00:05.000Z".into());
+        late_proof::persist_pending_at(&app.db, &f.run_id, &bad, "2026-10-12T12:00:05.000Z").await.unwrap();
+        sqlx::query("UPDATE turns SET delivery='unknown', delivery_verified=0 WHERE id IN (?, ?)").bind(&f.turn_id).bind(&good_turn).execute(&app.db).await.unwrap();
+        sqlx::query("UPDATE runs SET native_session_id='sess-2' WHERE id=?").bind(&f.run_id).execute(&app.db).await.unwrap();
+        // 只讓壞的那筆 DELETE 失敗。
+        sqlx::query(&format!(
+            "CREATE TRIGGER issue_1654_fail_cleanup BEFORE DELETE ON late_proof_pending WHEN OLD.turn_id = '{}' BEGIN SELECT RAISE(ABORT, 'injected cleanup failure'); END",
+            f.turn_id
+        ))
+        .execute(&app.db)
+        .await
+        .unwrap();
+
+        let restarted = tt::restart_app(&f.env).await;
+        assert_eq!(
+            late_proof::recover_at_startup_at(&restarted, "2026-10-12T12:01:00.000Z").await.unwrap(),
+            1,
+            "壞的那筆清不掉，不能中止整批；好的那筆仍要接回"
+        );
+        assert!(late_proof_armed(&good_turn), "同一批排在後面的好基準要接回");
+        assert!(!late_proof_armed(&f.turn_id), "session 已換的壞基準不為它開 watcher");
+    }
+
+    /// #1654：補證 watcher 要登記在關機屏障內：關機時要能取消，不能活到 60 次觀察跑完。
+    #[tokio::test]
+    async fn issue_1654_late_proof_watcher_is_tracked_and_stops_at_shutdown() {
+        use super::super::delivery::{LogFormat, Proof};
+
+        let f = fixture("claude", "").await;
+        let app = f.env.app.clone();
+        let path = with_transcript(&f, quiet()).await;
+        let proof = Proof::Transcript { format: LogFormat::Claude, path, session_id: "sess-1".into() };
+        let pending = late_proof::Pending::new("claude", "pane-17", &proof, 0, 0, "Reply with PONG please", db::now());
+        late_proof::spawn_watch(&app, &f.run_id, &f.bot_id, &f.turn_id, pending);
+        assert_eq!(app.background_tasks.len(), 1, "補證 watcher 要登記在 background_tasks");
+
+        app.shutdown.cancel();
+        app.background_tasks.close();
+        tokio::time::timeout(Duration::from_secs(5), app.background_tasks.wait()).await.expect("關機時補證 watcher 要立即離開");
+        assert_eq!(app.background_tasks.len(), 0);
+    }
+
     async fn delivery_row(f: &Fixture) -> (String, String, i64, i64) {
         sqlx::query_as("SELECT status, delivery, delivery_verified, auto_resend FROM turns WHERE id = ?")
             .bind(&f.turn_id)

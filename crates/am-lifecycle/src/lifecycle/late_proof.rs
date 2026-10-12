@@ -574,17 +574,26 @@ pub fn arm_after_owed_write(app: &(impl LcHost + Clone + 'static), run_id: &str,
         let app = (*app).clone();
         let (run_id, bot_id, turn_id) = (run_id.to_string(), bot_id.to_string(), turn_id.to_string());
         tokio::spawn(async move {
-            match load_pending_for_owed(app.db(), &run_id, &turn_id).await {
-                Ok(Some(p)) => arm_pending(&app, &run_id, &bot_id, &turn_id, p),
-                Ok(None) => {}
-                Err(e) => tracing::warn!(run = %run_id, turn = %turn_id, error = %e, "could not restore late proof after owed unknown write"),
+            if let Err(e) = restore_owed_from_durable_at(&app, &run_id, &bot_id, &turn_id, &db::now()).await {
+                tracing::warn!(run = %run_id, turn = %turn_id, error = %e, "could not restore late proof after owed unknown write");
             }
         });
     }
 }
 
-#[cfg(not(test))]
-async fn load_pending_for_owed(pool: &sqlx::SqlitePool, run_id: &str, turn_id: &str) -> anyhow::Result<Option<Pending>> {
+/// 欠帳補寫成 unknown 後，從 durable 列接回同一回合的基準。`Ok(false)`＝列不在或回合還不是 unknown，什麼都不做。
+/// 用注入的時間判斷列還有沒有效（測試不靠牆鐘）。
+pub(crate) async fn restore_owed_from_durable_at(app: &impl LcHost, run_id: &str, bot_id: &str, turn_id: &str, now: &str) -> anyhow::Result<bool> {
+    match load_pending_for_owed(app.db(), run_id, turn_id, now).await? {
+        Some(p) => {
+            arm_pending(app, run_id, bot_id, turn_id, p);
+            Ok(true)
+        }
+        None => Ok(false),
+    }
+}
+
+async fn load_pending_for_owed(pool: &sqlx::SqlitePool, run_id: &str, turn_id: &str, now: &str) -> anyhow::Result<Option<Pending>> {
     let row: Option<(
         String, String, String, Option<String>, Option<String>, Option<String>, i64, i64, String, String,
     )> = sqlx::query_as(
@@ -596,7 +605,7 @@ async fn load_pending_for_owed(pool: &sqlx::SqlitePool, run_id: &str, turn_id: &
     )
     .bind(run_id)
     .bind(turn_id)
-    .bind(db::now())
+    .bind(now)
     .fetch_optional(pool)
     .await?;
     let Some((kind, pane, proof_kind, proof_format, proof_path, proof_session_id, offset, baseline, text, since)) = row else { return Ok(None) };
@@ -628,10 +637,15 @@ fn arm_pending(app: &impl LcHost, run_id: &str, bot_id: &str, turn_id: &str, p: 
     }
     #[cfg(not(test))]
     {
-        let app = (*app).clone();
-        let (run_id, bot_id, turn_id) = (run_id.to_string(), bot_id.to_string(), turn_id.to_string());
-        tokio::spawn(async move {
-            watch(&app, &run_id, &bot_id, &turn_id, &p, CHECKS, CHECK_EVERY).await;
-        });
+        spawn_watch(app, run_id, bot_id, turn_id, p);
     }
+}
+
+/// 真的開一條背景 watcher（測試也能直接呼叫，驗它跟關機屏障的關係）。
+pub(crate) fn spawn_watch(app: &impl LcHost, run_id: &str, bot_id: &str, turn_id: &str, p: Pending) {
+    let app = (*app).clone();
+    let (run_id, bot_id, turn_id) = (run_id.to_string(), bot_id.to_string(), turn_id.to_string());
+    tokio::spawn(async move {
+        watch(&app, &run_id, &bot_id, &turn_id, &p, CHECKS, CHECK_EVERY).await;
+    });
 }
