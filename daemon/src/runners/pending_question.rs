@@ -104,22 +104,31 @@ mod remote_tests {
         }
     }
 
-    /// 遠端主機上一顆 claude bot，run 記了 session 與 transcript 路徑；`reply` 是遠端 script 的回應。
+    /// 遠端主機上一顆 claude bot，run 記了 session 與 transcript 路徑，herdr 在它的 pane 上報的 live session 是 `SID`。
     async fn rig(recorded_path: Option<&str>, reply: impl Fn() -> anyhow::Result<String> + Send + Sync + 'static) -> Rig {
+        rig_with(recorded_path, Some(SID), reply).await
+    }
+
+    /// 同 [`rig`]，但 herdr 報的 live session 由呼叫端決定；`None`＝這顆 pane 上 herdr 沒有 claude agent。
+    async fn rig_with(recorded_path: Option<&str>, live: Option<&str>, reply: impl Fn() -> anyhow::Result<String> + Send + Sync + 'static) -> Rig {
         let env = tt::env().await;
         let app = env.app.clone();
         let host = format!("m4p-pq-{}", db::ulid());
+        // 遠端的 herdr 接到同一顆 mock：#1503 起遠端讀取要先問 live session（herdr），所以 host 的 client 得真的能問。
         let conn = app
             .hosts
-            .insert_remote_for_test(crate::config::HostCfg {
-                shared_session: false,
-                name: host.clone(),
-                ssh: "unused".into(),
-                ssh_port: 22,
-                ssh_opts: vec![],
-                herdr_session: "am-test".into(),
-                remote_path: String::new(),
-            })
+            .insert_remote_with_client_for_test(
+                crate::config::HostCfg {
+                    shared_session: false,
+                    name: host.clone(),
+                    ssh: "unused".into(),
+                    ssh_port: 22,
+                    ssh_opts: vec![],
+                    herdr_session: "am-test".into(),
+                    remote_path: String::new(),
+                },
+                crate::herdr::HerdrClient::new(env.dir.join("data").join("herdr.sock")),
+            )
             .await;
         conn.connected.store(true, std::sync::atomic::Ordering::SeqCst);
         let project = db::ulid();
@@ -134,7 +143,11 @@ mod remote_tests {
         let bot = tt::claude_bot(&app, &project, "remote-asker").await;
         sqlx::query("UPDATE bots SET env_json=? WHERE id=?").bind(json!({"CLAUDE_CONFIG_DIR": ROOT}).to_string()).bind(&bot.id).execute(&app.db).await.unwrap();
         let run_id = tt::fake_run(&app, &bot.id).await;
-        sqlx::query("UPDATE runs SET native_session_id=?, transcript_path=? WHERE id=?").bind(SID).bind(recorded_path).bind(&run_id).execute(&app.db).await.unwrap();
+        sqlx::query("UPDATE runs SET native_session_id=?, transcript_path=?, herdr_session='am-test' WHERE id=?").bind(SID).bind(recorded_path).bind(&run_id).execute(&app.db).await.unwrap();
+        // 這顆 run 的 pane 上，herdr 報的 live Claude session（`herdr_session` 以它為準；沒有就是 None）。
+        if let Some(live) = live {
+            env.herdr.set_unnamed_agent(&format!("pane-{}", bot.id), Some(live));
+        }
         let scripts = Arc::new(Mutex::new(Vec::<String>::new()));
         let seen = scripts.clone();
         crate::hosts::set_ssh_fake(&host, move |script| {
