@@ -9,6 +9,7 @@ export function humanBytes(n: number): string {
     const one = Math.round(g * 10) / 10
     return `${one < 10 ? g.toFixed(1) : Math.round(g)}G`
   }
-  if (m >= 1) return `${Math.round(m)}M`
+  // KB 四捨五入到 1024 也改寫成 M（1023.9K 不寫 1024K）。
+  if (m >= 1 || Math.round(n / 1024) >= 1024) return `${Math.round(m)}M`
   return `${Math.max(1, Math.round(n / 1024))}K`
 }
