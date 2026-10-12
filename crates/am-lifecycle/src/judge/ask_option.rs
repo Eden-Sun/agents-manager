@@ -286,19 +286,23 @@ impl<T: PendingQuestion + ?Sized> PendingQuestion for Arc<T> {
 /// 回 API 的 `jev_options`：答案已經在帳本上就帶出來，否則 `None`。**不等 Jev**：帳本沒有的話丟一個
 /// 背景 task 去問就回來，答案落帳後發 [`EVENT`]。開關、專案名單、移交都在丟 task 之前先看，
 /// 不符就連 task 都不起；名額與 key 在 task 裡才占（要問的時候才占，不白燒）。
+///
+/// `fresh_pending`：呼叫端這一次剛讀的檔尾是現讀的，而且顯示這題還在等（不是快取）。是的話有效性檢查直接沿用，不再讀一次。
 pub async fn hint_for(
     app: &Arc<impl crate::capabilities::Cfg + crate::capabilities::Db + crate::capabilities::Emit + crate::judge::JudgeFuse + PendingQuestion + crate::capabilities::BgTasks + crate::capabilities::Shutdown + 'static>,
     bot: &crate::db::Bot,
     run_id: &str,
     tool_use_id: &str,
     input: &Value,
+    fresh_pending: bool,
 ) -> Option<Value> {
     let cfg = app.cfg().get().await.judge;
     if !cfg.enabled || askable(input).is_empty() || tool_use_id.is_empty() || silent_gate(&**app, &cfg, bot).await {
         return None;
     }
     let context = current_prompt(&**app, &bot.id, run_id).await.ok().flatten()?;
-    if !still_current(&**app, &cfg, &bot.id, run_id, tool_use_id, &context.0).await.ok()? { return None; }
+    let mut fresh = Fresh(fresh_pending.then_some(true));
+    if !still_current(&**app, &cfg, &bot.id, run_id, tool_use_id, &context.0, &mut fresh).await.ok()? { return None; }
     match lookup(&**app, run_id, tool_use_id).await {
         Ok(Lookup::Hint(v)) => {
             let matched: Option<String> = sqlx::query_scalar("SELECT matched_line FROM judge_shadow WHERE id=?")
@@ -366,7 +370,9 @@ async fn ask_context(
     }
     let Ok(key) = super::read_key(&cfg.key_file) else { return Ok(false) };
     let Some((turn_id, prompt)) = context else { return Ok(false) };
-    if !still_current(app, &cfg, bot_id, run_id, tool_use_id, &turn_id).await? { return Ok(false); }
+    // 投 Jev 之前的幾道閘是同一段：段內只隔著 DB 寫入，共用一次新鮮讀取；投 Jev 之後另開一段（見下）。
+    let mut fresh = Fresh::default();
+    if !still_current(app, &cfg, bot_id, run_id, tool_use_id, &turn_id, &mut fresh).await? { return Ok(false); }
     let prompt = prompt_tail(&prompt);
     if prompt.is_empty() {
         return Ok(false);
@@ -391,7 +397,7 @@ async fn ask_context(
         Err(e) if ["Fuse", "Disabled", "ProjectNotListed"].iter().any(|s| e.to_string() == *s) => return Ok(false),
         Err(e) => return Err(e),
     };
-    if !still_current(app, &cfg, bot_id, run_id, tool_use_id, &turn_id).await? {
+    if !still_current(app, &cfg, bot_id, run_id, tool_use_id, &turn_id, &mut fresh).await? {
         sqlx::query("UPDATE judge_shadow SET error='stale' WHERE id=?").bind(&slot).execute(app.db()).await?;
         return Ok(false);
     }
@@ -402,7 +408,9 @@ async fn ask_context(
         Err(e) => Err(e),
     };
     let ms = started.elapsed().as_millis() as i64;
-    if !still_current(app, &cfg, bot_id, run_id, tool_use_id, &turn_id).await? {
+    // 投 Jev 的等待中提問可能已經被答掉：這一段的檢查一定重讀，不沿用投 Jev 之前那次。
+    let mut fresh = Fresh::default();
+    if !still_current(app, &cfg, bot_id, run_id, tool_use_id, &turn_id, &mut fresh).await? {
         sqlx::query("UPDATE judge_shadow SET error='stale', ms=? WHERE id=?").bind(ms).bind(&slot).execute(app.db()).await?;
         return Ok(false);
     }
@@ -426,7 +434,7 @@ async fn ask_context(
     if scores.is_none() {
         return Ok(false);
     }
-    if !still_current(app, &cfg, bot_id, run_id, tool_use_id, &turn_id).await? {
+    if !still_current(app, &cfg, bot_id, run_id, tool_use_id, &turn_id, &mut fresh).await? {
         sqlx::query("UPDATE judge_shadow SET matched_line=?, error='stale' WHERE id=?")
             .bind(json!({"tool_use_id": tool_use_id}).to_string()).bind(&slot).execute(app.db()).await?;
         return Ok(false);
@@ -453,15 +461,33 @@ async fn current_prompt(app: &impl crate::capabilities::Db, bot_id: &str, run_id
     Ok(text.and_then(|(id, text)| text.filter(|t| !t.trim().is_empty()).map(|text| (id, text))))
 }
 
+/// 一段有效性檢查共用的一次新鮮讀取（`Some(true)`＝檔尾還顯示這題在等）。段內的檢查只隔著 DB 寫入，共用同一次讀取；
+/// 跨過 Jev 的 HTTP 呼叫就另開一段（`Fresh::default()`），回來之後的檢查一定重讀。
+#[derive(Default)]
+struct Fresh(Option<bool>);
+
+impl Fresh {
+    async fn pending(&mut self, app: &impl PendingQuestion, bot: &crate::db::Bot, run: &crate::db::Run, tool: &str) -> bool {
+        match self.0 {
+            Some(seen) => seen,
+            None => {
+                let seen = app.question_pending(bot, run, tool).await;
+                self.0 = Some(seen);
+                seen
+            }
+        }
+    }
+}
+
 async fn still_current(
     app: &(impl crate::capabilities::Db + PendingQuestion), cfg: &crate::config::JudgeCfg,
-    bot_id: &str, run_id: &str, tool: &str, turn_id: &str,
+    bot_id: &str, run_id: &str, tool: &str, turn_id: &str, fresh: &mut Fresh,
 ) -> Result<bool> {
     let Some(bot) = crate::db::bot(app.db(), bot_id).await? else { return Ok(false) };
     let Some(run) = crate::db::active_run(app.db(), bot_id).await? else { return Ok(false) };
     if bot.deleted_at.is_some() || run.id != run_id || silent_gate(app, cfg, &bot).await { return Ok(false); }
     if current_prompt(app, bot_id, run_id).await?.as_ref().map(|c| c.0.as_str()) != Some(turn_id) { return Ok(false); }
-    if !app.question_pending(&bot, &run, tool).await { return Ok(false); }
+    if !fresh.pending(app, &bot, &run, tool).await { return Ok(false); }
     // Transcript I/O can yield; check the DB boundary once more afterwards.
     let active = crate::db::active_run(app.db(), bot_id).await?;
     let Some(bot) = crate::db::bot(app.db(), bot_id).await? else { return Ok(false) };
