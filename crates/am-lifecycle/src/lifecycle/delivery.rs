@@ -979,8 +979,12 @@ pub async fn confirm_submitted(
                     return Ok(Delivered::Submitted);
                 }
             }
-            // 框已空、證據還沒長出來：回 `Unproven` 前記下基準，呼叫端寫完 `unknown` 後背景繼續看（#1479）。
-            super::late_proof::note(&run.id, super::late_proof::Pending::new(&bot.kind, pane, proof, offset, baseline, text, submitted_at));
+            // 框已空、證據還沒長出來：記憶體 watcher 立即接手，並先持久化相同基準供重啟恢復（#1479、#1493）。
+            let pending = super::late_proof::Pending::new(&bot.kind, pane, proof, offset, baseline, text, submitted_at);
+            super::late_proof::note(&run.id, pending.clone());
+            if let Err(e) = super::late_proof::persist_pending(app.db(), &run.id, &pending).await {
+                tracing::warn!(run = %run.id, bot = %bot.name, error = %e, "could not persist late proof baseline; the in-process watcher remains active");
+            }
             "not_proven_submitted"
         }
     };

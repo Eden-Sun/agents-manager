@@ -3531,6 +3531,56 @@ mod issue_17_tests {
         assert_eq!(late_proof::look(&app, &f.bot_id, &f.turn_id, &p).await, Look::Submitted, "transcript 可讀後照原證據升級");
     }
 
+    /// #1493：daemon 重啟會清掉進程內 registry；持久化的 proof 基準仍能恢復 unknown turn，並以 CAS 補證而不重送。
+    #[tokio::test]
+    async fn issue_1493_startup_restores_a_persisted_late_proof_without_resending() {
+        use super::super::delivery::{LogFormat, Proof};
+
+        let f = fixture("claude", "").await;
+        let path = with_transcript(&f, quiet()).await;
+        let text = "Reply with PONG please";
+        let proof = Proof::Transcript { format: LogFormat::Claude, path: path.clone(), session_id: "sess-1".into() };
+        let since = "2026-10-12T12:00:00.000Z".to_string();
+        let pending = late_proof::Pending::new("claude", "pane-17", &proof, 0, 0, text, since);
+        late_proof::note(&f.run_id, pending.clone());
+        late_proof::persist_pending_at(&f.env.app.db, &f.run_id, &pending, "2026-10-12T12:00:00.000Z").await.unwrap();
+        assert_eq!(late_proof::watch(&f.env.app, &f.run_id, &f.bot_id, &f.turn_id, &pending, 0, NEVER).await, None);
+        let durable_count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM late_proof_pending WHERE turn_id=?")
+            .bind(&f.turn_id)
+            .fetch_one(&f.env.app.db)
+            .await
+            .unwrap();
+        assert_eq!(durable_count, 1, "無結論的 watcher 到期後仍保留基準，讓下次重啟能重試");
+        sqlx::query("UPDATE turns SET delivery='unknown', delivery_verified=0 WHERE id=?")
+            .bind(&f.turn_id)
+            .execute(&f.env.app.db)
+            .await
+            .unwrap();
+
+        let pane_sends_before = f.env.herdr.calls_to("pane.send_text").len();
+        late_proof::forget_pending_for_restart_test(&f.run_id);
+        let restarted = tt::restart_app(&f.env).await;
+        assert_eq!(
+            late_proof::recover_at_startup_at(&restarted, "2026-10-12T12:01:00.000Z").await.unwrap(),
+            1,
+            "有效且仍為 in_flight/unknown 的 durable watcher 要在開機接回"
+        );
+        let restored = late_proof::armed_in_tests()
+            .lock()
+            .unwrap()
+            .iter()
+            .find(|(turn_id, _)| turn_id == &f.turn_id)
+            .map(|(_, pending)| pending.clone())
+            .expect("開機恢復原 proof 基準");
+        assert_eq!((restored.offset, restored.baseline, restored.text.as_str()), (0, 0, text));
+
+        std::fs::write(&path, format!("{{\"type\":\"user\",\"message\":{{\"role\":\"user\",\"content\":{}}}}}\n", serde_json::to_string(text).unwrap())).unwrap();
+        assert_eq!(late_proof::look(&restarted, &f.bot_id, &f.turn_id, &restored).await, Look::Submitted, "重啟後仍採用原 transcript baseline");
+        assert!(late_proof::promote(&restarted, &f.turn_id, Delivered::Submitted).await.unwrap(), "still-in-flight unknown 的 CAS 可補升級");
+        assert_eq!(delivery_row(&f).await.1, "ok");
+        assert_eq!(f.env.herdr.calls_to("pane.send_text").len(), pane_sends_before, "恢復補證不能重新送 prompt");
+    }
+
     async fn delivery_row(f: &Fixture) -> (String, String, i64, i64) {
         sqlx::query_as("SELECT status, delivery, delivery_verified, auto_resend FROM turns WHERE id = ?")
             .bind(&f.turn_id)

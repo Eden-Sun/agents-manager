@@ -124,6 +124,23 @@ CREATE UNIQUE INDEX IF NOT EXISTS turns_one_queued ON turns(conversation_id) WHE
 CREATE UNIQUE INDEX IF NOT EXISTS turns_client_req ON turns(conversation_id, client_request_id) WHERE client_request_id IS NOT NULL;
 CREATE UNIQUE INDEX IF NOT EXISTS turns_native ON turns(native_session_id, native_turn_id) WHERE native_turn_id IS NOT NULL;
 CREATE INDEX IF NOT EXISTS turns_conv_time ON turns(conversation_id, created_at);
+-- #1493: delivery proof baselines needed to resume an unknown in-flight turn after daemon restart.
+CREATE TABLE IF NOT EXISTS late_proof_pending (
+  turn_id TEXT PRIMARY KEY REFERENCES turns(id) ON DELETE CASCADE,
+  run_id TEXT NOT NULL UNIQUE REFERENCES runs(id) ON DELETE CASCADE,
+  kind TEXT NOT NULL, pane TEXT NOT NULL,
+  proof_kind TEXT NOT NULL CHECK (proof_kind IN ('echo_row','unverified','transcript')),
+  proof_format TEXT, proof_path TEXT, proof_session_id TEXT,
+  proof_offset INTEGER NOT NULL CHECK (proof_offset >= 0),
+  baseline INTEGER NOT NULL CHECK (baseline >= 0),
+  prompt_text TEXT NOT NULL, since TEXT NOT NULL,
+  created_at TEXT NOT NULL, expires_at TEXT NOT NULL,
+  CHECK (
+    (proof_kind = 'transcript' AND proof_format IS NOT NULL AND proof_format IN ('claude','codex','agy') AND proof_path IS NOT NULL AND proof_session_id IS NOT NULL)
+    OR (proof_kind IN ('echo_row','unverified') AND proof_format IS NULL AND proof_path IS NULL AND proof_session_id IS NULL)
+  )
+);
+CREATE INDEX IF NOT EXISTS late_proof_pending_expires ON late_proof_pending(expires_at);
 CREATE TABLE IF NOT EXISTS messages (
   id TEXT PRIMARY KEY, conversation_id TEXT NOT NULL REFERENCES conversations(id),
   turn_id TEXT REFERENCES turns(id),
@@ -368,6 +385,8 @@ pub const SCHEMA_HISTORY: &[(i64, &str)] = &[
     (57, "97ff8e05ebd65f0c"),
     // issue #1488：原文校正寫入失敗時保留 session-log proof，讓同請求重試能補正。
     (58, "f1fafc8c7e9ef622"),
+    // issues #1493/#1494: persist and bound pending late-delivery proof baselines.
+    (59, "1d4bdc902d82f33b"),
 ];
 pub const SCHEMA_VERSION: i64 = SCHEMA_HISTORY[SCHEMA_HISTORY.len() - 1].0;
 

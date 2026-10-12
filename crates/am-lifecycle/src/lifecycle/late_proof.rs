@@ -27,6 +27,8 @@ pub const CHECK_EVERY: Duration = Duration::from_secs(3);
 pub const CHECKS: u32 = 60;
 /// 記下來之後多久內要被認領；過了就當是別一則的殘影。
 const CLAIM_WITHIN: Duration = Duration::from_secs(60);
+/// A durable watcher survives a restart for a short window; expired evidence must not pin prompt text.
+const DURABLE_TTL: Duration = Duration::from_secs(10 * 60);
 
 /// 打字那一刻的證據基準，加上之後讀畫面要用的東西。
 #[derive(Debug, Clone)]
@@ -67,8 +69,163 @@ pub fn note(run_id: &str, p: Pending) {
     registry().lock().unwrap_or_else(|e| e.into_inner()).insert(run_id.to_string(), p);
 }
 
+/// 保存 watcher 的證據基準，讓 daemon 重啟後能接回尚未結束的 unknown turn。
+pub async fn persist_pending(pool: &sqlx::SqlitePool, run_id: &str, p: &Pending) -> anyhow::Result<()> {
+    persist_pending_at(pool, run_id, p, &db::now()).await
+}
+
+/// 用注入的時間保存資料，測試不需等待牆鐘。
+pub async fn persist_pending_at(pool: &sqlx::SqlitePool, run_id: &str, p: &Pending, now: &str) -> anyhow::Result<()> {
+    use anyhow::Context;
+
+    let turn_id = sqlx::query_scalar::<_, String>(
+        "SELECT id FROM turns WHERE run_id = ? AND status = 'in_flight' AND delivery IN ('pending','unknown','ok') ORDER BY created_at DESC LIMIT 1",
+    )
+    .bind(run_id)
+    .fetch_optional(pool)
+    .await?
+    .ok_or_else(|| anyhow::anyhow!("late proof has no in-flight turn for run {run_id}"))?;
+    let expires_at = chrono::DateTime::parse_from_rfc3339(now)
+        .context("parse late proof created_at")?
+        .with_timezone(&chrono::Utc)
+        .checked_add_signed(chrono::Duration::from_std(DURABLE_TTL)?)
+        .ok_or_else(|| anyhow::anyhow!("late proof expiry overflow"))?
+        .to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
+    let (proof_kind, proof_format, proof_path, proof_session_id) = match &p.proof {
+        Proof::EchoRow => ("echo_row", None, None, None),
+        Proof::Unverified => ("unverified", None, None, None),
+        Proof::Transcript { format, path, session_id } => (
+            "transcript",
+            Some(match format {
+                super::delivery::LogFormat::Claude => "claude",
+                super::delivery::LogFormat::Codex => "codex",
+                super::delivery::LogFormat::Agy => "agy",
+            }),
+            Some(path.to_string_lossy().into_owned()),
+            Some(session_id.as_str()),
+        ),
+    };
+    prune_durable(pool, now).await?;
+    sqlx::query(
+        "INSERT INTO late_proof_pending
+             (turn_id, run_id, kind, pane, proof_kind, proof_format, proof_path, proof_session_id,
+              proof_offset, baseline, prompt_text, since, created_at, expires_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+         ON CONFLICT(run_id) DO UPDATE SET
+             turn_id=excluded.turn_id, kind=excluded.kind, pane=excluded.pane, proof_kind=excluded.proof_kind,
+             proof_format=excluded.proof_format, proof_path=excluded.proof_path,
+             proof_session_id=excluded.proof_session_id, proof_offset=excluded.proof_offset,
+             baseline=excluded.baseline, prompt_text=excluded.prompt_text, since=excluded.since,
+             created_at=excluded.created_at, expires_at=excluded.expires_at",
+    )
+    .bind(turn_id)
+    .bind(run_id)
+    .bind(&p.kind)
+    .bind(&p.pane)
+    .bind(proof_kind)
+    .bind(proof_format)
+    .bind(proof_path)
+    .bind(proof_session_id)
+    .bind(p.offset.min(i64::MAX as u64) as i64)
+    .bind(p.baseline.min(i64::MAX as usize) as i64)
+    .bind(&p.text)
+    .bind(&p.since)
+    .bind(now)
+    .bind(expires_at)
+    .execute(pool)
+    .await?;
+    Ok(())
+}
+
+/// 用注入的時間做啟動恢復；正式啟動透過 [`recover_at_startup`] 使用目前時間。
+pub async fn recover_at_startup_at(app: &(impl LcHost + Clone + 'static), now: &str) -> anyhow::Result<usize> {
+    prune_durable(app.db(), now).await?;
+    let rows: Vec<(
+        String, String, String, String, String, String, Option<String>, Option<String>, Option<String>, i64, i64, String, String,
+    )> = sqlx::query_as(
+        "SELECT p.turn_id, p.run_id, r.bot_id, p.kind, p.pane, p.proof_kind,
+                p.proof_format, p.proof_path, p.proof_session_id, p.proof_offset, p.baseline, p.prompt_text, p.since
+           FROM late_proof_pending p
+           JOIN runs r ON r.id = p.run_id
+           JOIN turns t ON t.id = p.turn_id AND t.run_id = p.run_id
+          WHERE p.expires_at > ? AND r.state = 'running' AND r.pane_id = p.pane
+            AND t.status = 'in_flight' AND t.delivery = 'unknown'
+          ORDER BY p.created_at DESC",
+    )
+    .bind(now)
+    .fetch_all(app.db())
+    .await?;
+    let mut restored = 0;
+    for (turn_id, run_id, bot_id, kind, pane, proof_kind, proof_format, proof_path, proof_session_id, offset, baseline, text, since) in rows {
+        let proof = match proof_kind.as_str() {
+            "echo_row" => Proof::EchoRow,
+            "unverified" => Proof::Unverified,
+            "transcript" => {
+                let Some((format, path, session_id)) = proof_format.zip(proof_path).zip(proof_session_id).map(|((f, p), s)| (f, p, s)) else {
+                    tracing::warn!(run = %run_id, turn = %turn_id, "discarding incomplete durable late proof");
+                    delete_durable_for_turn(app.db(), &turn_id).await?;
+                    continue;
+                };
+                let format = match format.as_str() {
+                    "claude" => super::delivery::LogFormat::Claude,
+                    "codex" => super::delivery::LogFormat::Codex,
+                    "agy" => super::delivery::LogFormat::Agy,
+                    _ => {
+                        tracing::warn!(run = %run_id, turn = %turn_id, "discarding durable late proof with unknown transcript format");
+                        delete_durable_for_turn(app.db(), &turn_id).await?;
+                        continue;
+                    }
+                };
+                Proof::Transcript { format, path: std::path::PathBuf::from(path), session_id }
+            }
+            _ => {
+                tracing::warn!(run = %run_id, turn = %turn_id, "discarding durable late proof with unknown proof kind");
+                delete_durable_for_turn(app.db(), &turn_id).await?;
+                continue;
+            }
+        };
+        let pending = Pending::new(&kind, &pane, &proof, offset.max(0) as u64, baseline.max(0) as usize, &text, since);
+        arm_pending(app, &run_id, &bot_id, &turn_id, pending);
+        restored += 1;
+    }
+    Ok(restored)
+}
+
+/// 找回 DB 裡仍有效、且對應 `in_flight/unknown` turn 的補證工作。
+pub async fn recover_at_startup(app: &(impl LcHost + Clone + 'static)) -> anyhow::Result<usize> {
+    recover_at_startup_at(app, &db::now()).await
+}
+
+async fn prune_durable(pool: &sqlx::SqlitePool, now: &str) -> anyhow::Result<u64> {
+    let removed = sqlx::query(
+        "DELETE FROM late_proof_pending AS p
+          WHERE p.expires_at <= ?
+             OR NOT EXISTS (
+                 SELECT 1 FROM turns t JOIN runs r ON r.id = p.run_id
+                  WHERE t.id = p.turn_id AND t.run_id = p.run_id
+                    AND t.status = 'in_flight' AND t.delivery IN ('pending','unknown')
+                    AND r.state = 'running' AND r.pane_id = p.pane
+             )",
+    )
+    .bind(now)
+    .execute(pool)
+    .await?
+    .rows_affected();
+    Ok(removed)
+}
+
+async fn delete_durable_for_turn(pool: &sqlx::SqlitePool, turn_id: &str) -> anyhow::Result<()> {
+    sqlx::query("DELETE FROM late_proof_pending WHERE turn_id = ?").bind(turn_id).execute(pool).await?;
+    Ok(())
+}
+
 /// 新的一輪送達開始：上一則沒被認領的殘影不能留給這一則。
 pub fn clear(run_id: &str) {
+    registry().lock().unwrap_or_else(|e| e.into_inner()).remove(run_id);
+}
+
+#[cfg(all(test, feature = "daemon-test-harness"))]
+pub(crate) fn forget_pending_for_restart_test(run_id: &str) {
     registry().lock().unwrap_or_else(|e| e.into_inner()).remove(run_id);
 }
 
@@ -170,6 +327,16 @@ pub async fn promote(app: &impl LcHost, turn_id: &str, how: Delivered) -> anyhow
 
 /// 一輪一輪看到有結論或看完為止。回升級成什麼（沒升級＝`None`）。`checks`／`every` 給測試用。
 pub async fn watch(app: &impl LcHost, run_id: &str, bot_id: &str, turn_id: &str, p: &Pending, checks: u32, every: Duration) -> Option<Delivered> {
+    let result = watch_loop(app, run_id, bot_id, turn_id, p, checks, every).await;
+    // A successful proof needs no recovery row. If the bounded watch ends without a conclusion,
+    // retain the baseline until its durable TTL so a later daemon restart can retry it.
+    if result.is_some() {
+        delete_durable_for_turn(app.db(), turn_id).await.ok();
+    }
+    result
+}
+
+async fn watch_loop(app: &impl LcHost, run_id: &str, bot_id: &str, turn_id: &str, p: &Pending, checks: u32, every: Duration) -> Option<Delivered> {
     for _ in 0..checks {
         tokio::time::sleep(every).await;
         let how = match look(app, bot_id, turn_id, p).await {
@@ -209,9 +376,60 @@ pub fn arm(app: &impl LcHost, run_id: &str, bot_id: &str, turn_id: &str) {
 }
 
 /// 欠帳的 unknown 寫入結清時，Pending 對應的回合已明確，原本的認領期限不再適用。
-pub fn arm_after_owed_write(app: &impl LcHost, run_id: &str, bot_id: &str, turn_id: &str) {
-    let Some(p) = take_after_owed_write(run_id) else { return };
-    arm_pending(app, run_id, bot_id, turn_id, p);
+pub fn arm_after_owed_write(app: &(impl LcHost + Clone + 'static), run_id: &str, bot_id: &str, turn_id: &str) {
+    if let Some(p) = take_after_owed_write(run_id) {
+        arm_pending(app, run_id, bot_id, turn_id, p);
+        return;
+    }
+    #[cfg(not(test))]
+    {
+        let app = (*app).clone();
+        let (run_id, bot_id, turn_id) = (run_id.to_string(), bot_id.to_string(), turn_id.to_string());
+        tokio::spawn(async move {
+            match load_pending_for_owed(app.db(), &run_id, &turn_id).await {
+                Ok(Some(p)) => arm_pending(&app, &run_id, &bot_id, &turn_id, p),
+                Ok(None) => {}
+                Err(e) => tracing::warn!(run = %run_id, turn = %turn_id, error = %e, "could not restore late proof after owed unknown write"),
+            }
+        });
+    }
+}
+
+#[cfg(not(test))]
+async fn load_pending_for_owed(pool: &sqlx::SqlitePool, run_id: &str, turn_id: &str) -> anyhow::Result<Option<Pending>> {
+    let row: Option<(
+        String, String, String, Option<String>, Option<String>, Option<String>, i64, i64, String, String,
+    )> = sqlx::query_as(
+        "SELECT p.kind, p.pane, p.proof_kind, p.proof_format, p.proof_path, p.proof_session_id,
+                p.proof_offset, p.baseline, p.prompt_text, p.since
+           FROM late_proof_pending p JOIN turns t ON t.id = p.turn_id
+          WHERE p.run_id = ? AND p.turn_id = ? AND p.expires_at > ?
+            AND t.status = 'in_flight' AND t.delivery = 'unknown'",
+    )
+    .bind(run_id)
+    .bind(turn_id)
+    .bind(db::now())
+    .fetch_optional(pool)
+    .await?;
+    let Some((kind, pane, proof_kind, proof_format, proof_path, proof_session_id, offset, baseline, text, since)) = row else { return Ok(None) };
+    let proof = match proof_kind.as_str() {
+        "echo_row" => Proof::EchoRow,
+        "unverified" => Proof::Unverified,
+        "transcript" => {
+            let (Some(format), Some(path), Some(session_id)) = (proof_format, proof_path, proof_session_id) else {
+                anyhow::bail!("incomplete durable transcript proof for run {run_id} turn {turn_id}");
+            };
+            let format = match format.as_str() {
+                "claude" => super::delivery::LogFormat::Claude,
+                "codex" => super::delivery::LogFormat::Codex,
+                "agy" => super::delivery::LogFormat::Agy,
+                _ => anyhow::bail!("unknown durable transcript format {format}"),
+            };
+            Proof::Transcript { format, path: std::path::PathBuf::from(path), session_id }
+        }
+        _ => anyhow::bail!("unknown durable proof kind {proof_kind}"),
+    };
+    Ok(Some(Pending::new(&kind, &pane, &proof, offset.max(0) as u64, baseline.max(0) as usize, &text, since)))
 }
 
 fn arm_pending(app: &impl LcHost, run_id: &str, bot_id: &str, turn_id: &str, p: Pending) {
