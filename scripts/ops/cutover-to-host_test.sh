@@ -240,9 +240,12 @@ EOF
 kill -0 "$SRC_PID" 2>/dev/null && echo "$SRC_PID"
 exit 0
 EOF
+    # 真的 curl 連不上會以非零結束（exit 7）；`curl -sf … && exit 0` 的等待迴圈靠這個判斷，不能一律回 0。
     cat > "$ROOT/bin/curl" <<'EOF'
 #!/bin/bash
-echo "curl $*" >> "$ROOT/curl.log"; exit 0
+echo "curl $*" >> "$ROOT/curl.log"
+[ -n "${CUTOVER_FAKE_DST_DOWN:-}" ] && exit 7
+exit 0
 EOF
     cat > "$ROOT/rbin/ss" <<'EOF'
 #!/bin/bash
@@ -587,6 +590,16 @@ check "失敗在 host-state 傳輸" "injected rsync failure" "$ROOT/out"
 [ -e "$ST/host-state-shipped" ]; check_eq "沒有標成 host-state 已傳好" 1 $?
 kill -0 "$DST_PID" 2>/dev/null; check_eq "失敗後沒有停目標 daemon" 0 $?
 check_no "失敗後沒有正式 import" "import --bundle" "$ROOT/ssh.log"
+teardown
+
+echo "# --execute：目標 daemon 起不來：失敗訊息要給續跑的指令，不能只說看 log"
+setup
+export CUTOVER_FAKE_DST_DOWN=1
+run "$ROOT/out" cutover --execute --foreground
+unset CUTOVER_FAKE_DST_DOWN
+check_eq "結束碼非 0" 1 "$(cat "$ROOT/out.rc")"
+check "說明目標 daemon 起不來" "目標 daemon 起不來" "$ROOT/out"
+check "給續跑的指令（--from start-dst）" "--from start-dst --state-dir" "$ROOT/out"
 teardown
 
 # ---------------------------------------------------------------- rollback
