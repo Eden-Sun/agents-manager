@@ -3848,7 +3848,7 @@ CLI 結束後重驗一次登入狀態並寫回快取；快取有變時用目前�
 使用者 2026-09-28 搬 ubuntu 時發現兩台 CLI 設定差很多（缺 statusline、全域 CLAUDE.md／RTK.md、rtk hook、codex approval_policy、缺 rtk／zsh、`.gitconfig` 內嵌 token）。
 每次工具偵測（daemon 啟動、重連、手動重新偵測）在**同一趟 ssh** 後面接一段只讀的 `BASELINE_SH`（`crates/am-base/src/host_baseline.rs`），逐項對照基準，結果放 `hosts[].baseline`（API §12.6）。
 
-- **只報、不修**：不寫任何檔、不裝任何東西（自動安裝／同步要使用者另行同意，沒有做）。測試用假 `$HOME` 驗證跑完後目錄快照不變。
+- **只報、不修**：不寫任何檔、不裝任何東西；新增身分也不自動套設定。這張票維持唯讀，因為目前基準只判斷檔案／設定鍵是否存在，沒有能安全套用的宣告式檔案內容；自動安裝還會依作業系統執行外部安裝步驟。發現差異後由使用者自行修正，再由下次偵測確認。測試用假 `$HOME` 驗證跑完後目錄快照不變。
 - **基準**（寫在 `host_baseline.rs` 的常數與腳本裡，路徑一律 `$HOME`）：
   - 工具（嚴重）：`herdr rtk zsh bun jq gh`，用登入 shell 找（只認絕對路徑，跟 §16.1 的 `am_abs` 同一規則，但六個一次問完）。claude／codex／grok 本身要不要裝由各主機決定，看 `tools`，不在這裡。
   - 每個 claude 身分（`$CLAUDE_CONFIG_DIR`、`~/.claude`、`~/.claude-cc<N>`，以及登入 shell alias `cc0`–`cc6` 的 `CLAUDE_CONFIG_DIR`——路徑可以不在那個 glob 裡，例如 `~/.claude-work`；PROBE_SH 留在 `$al`，沒有就讀 `~/.zshrc`，不多開一次 login shell）：`settings.json`、`statusline-command.sh`（嚴重）、`CLAUDE.md`、`RTK.md`（提醒）；`settings.json` 有沒有頂層 `statusLine`、`hooks`（嚴重）、`permissions`，以及 `permissions.defaultMode`（提醒）——只看鍵在不在，不比內容。那台沒有 `jq` 時這些鍵無法查，略過不列（`jq` 本身已列為缺工具）。
@@ -3864,7 +3864,7 @@ CLI 結束後重驗一次登入狀態並寫回快取；快取有變時用目前�
   對外 `stale = 最後一次失敗 || checked_at 超過 RECHECK_EVERY + STALE_GRACE（6h15m）`，讀取時算（`BaselineReport::snapshot`）。失敗當下推 `host_changed`。
   網頁：`stale` 或本機算出超過同一條線（主機一直離線時沒有事件，所以前端自己也算）→ 「一致性：上次檢查於 MM-DD HH:mm，目前無法連線」，舊的差異淡色照列、
   tooltip 寫最後一次失敗的原因；過期時連「與基準一致」也不說。
-- 這一版沒做：自動安裝／同步（要使用者另行同意）。
+- 本票不做自動安裝／同步或新增身分時自動套用：保持只讀，避免在沒有可驗證模板與逐主機明確開啟機制時改寫 host 設定或安裝工具。若日後要做，需另行定義模板、備份／還原與明確的逐主機啟用流程。
 
 ## 16b. 輸入框草稿以 daemon 為準（使用者 2026-10-01）
 
