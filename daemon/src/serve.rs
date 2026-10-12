@@ -210,6 +210,21 @@ pub async fn serve(config_path: Option<PathBuf>, dev_watch_all_panes: bool) -> R
         Ok(n) => tracing::info!(n, "re-armed late delivery proof watchers after restart"),
         Err(e) => tracing::warn!(error = ?e, "could not restore late delivery proof watchers"),
     }
+    let sweep_app = app.clone();
+    app.background_tasks.spawn(async move {
+        let mut interval = tokio::time::interval(lifecycle::late_proof::SWEEP_EVERY);
+        interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+        loop {
+            tokio::select! {
+                _ = sweep_app.shutdown.cancelled() => break,
+                _ = interval.tick() => {
+                    if let Err(e) = lifecycle::late_proof::sweep(&sweep_app).await {
+                        tracing::warn!(error = ?e, "late delivery proof cleanup failed; a later sweep will retry");
+                    }
+                }
+            }
+        }
+    });
     lifecycle::relay_watch::rearm_host(&app, config::LOCAL_HOST).await;
     // #564：上一顆 daemon 沒收尾的 codex 安裝，等那台的安裝鎖放掉再收尾（不重跑安裝）。
     cli_update::recover_at_startup(&app).await;

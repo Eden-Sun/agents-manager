@@ -17,7 +17,7 @@
 
 use super::delivery::{box_state_within, evidence, read_composer, same_session, typed_tail, BoxState, Delivered, Proof, SessionMatch};
 use super::*;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::{Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
@@ -27,8 +27,12 @@ pub const CHECK_EVERY: Duration = Duration::from_secs(3);
 pub const CHECKS: u32 = 60;
 /// 記下來之後多久內要被認領；過了就當是別一則的殘影。
 const CLAIM_WITHIN: Duration = Duration::from_secs(60);
+/// Registry entries are deliberately bounded even if many runs fail their unknown write at once.
+const MAX_PENDING: usize = 256;
 /// A durable watcher survives a restart for a short window; expired evidence must not pin prompt text.
 const DURABLE_TTL: Duration = Duration::from_secs(10 * 60);
+/// How often the daemon prunes abandoned registry rows and in-memory prompts.
+pub const SWEEP_EVERY: Duration = Duration::from_secs(15);
 
 /// 打字那一刻的證據基準，加上之後讀畫面要用的東西。
 #[derive(Debug, Clone)]
@@ -42,10 +46,16 @@ pub struct Pending {
     /// 送出鍵按下去的時刻（`db::now()` 格式）：hook 動靜從這之後算起，不算排隊期間別人的事件。
     pub since: String,
     noted: Instant,
+    /// 這筆基準屬於哪個回合（`persist_pending_at` 查到並綁上）；欠帳結清只認領綁同一回合的項目。
+    bound_turn: Option<String>,
 }
 
 impl Pending {
     pub fn new(kind: &str, pane: &str, proof: &Proof, offset: u64, baseline: usize, text: &str, since: String) -> Pending {
+        Self::new_at(kind, pane, proof, offset, baseline, text, since, Instant::now())
+    }
+
+    pub(crate) fn new_at(kind: &str, pane: &str, proof: &Proof, offset: u64, baseline: usize, text: &str, since: String, noted: Instant) -> Pending {
         Pending {
             kind: kind.to_string(),
             pane: pane.to_string(),
@@ -54,19 +64,98 @@ impl Pending {
             baseline,
             text: text.to_string(),
             since,
-            noted: Instant::now(),
+            noted,
+            bound_turn: None,
         }
     }
 }
 
-fn registry() -> &'static Mutex<HashMap<String, Pending>> {
-    static M: OnceLock<Mutex<HashMap<String, Pending>>> = OnceLock::new();
+#[derive(Default)]
+struct PendingRegistry {
+    by_run: HashMap<String, Pending>,
+}
+
+impl PendingRegistry {
+    fn insert_at(&mut self, run_id: String, pending: Pending, now: Instant) -> bool {
+        self.prune_expired(now);
+        let evicted = if !self.contains(&run_id) && self.by_run.len() >= MAX_PENDING {
+            let oldest = self.by_run.iter().min_by_key(|(_, p)| p.noted).map(|(id, _)| id.clone());
+            oldest.is_some_and(|id| self.by_run.remove(&id).is_some())
+        } else {
+            false
+        };
+        self.by_run.insert(run_id, pending);
+        evicted
+    }
+
+    fn remove(&mut self, run_id: &str) -> Option<Pending> {
+        self.by_run.remove(run_id)
+    }
+
+    fn sweep_at(&mut self, now: Instant, active_runs: &HashSet<String>) -> usize {
+        let before = self.by_run.len();
+        self.by_run.retain(|run_id, p| active_runs.contains(run_id) && now.saturating_duration_since(p.noted) <= CLAIM_WITHIN);
+        before - self.by_run.len()
+    }
+
+    fn prune_expired(&mut self, now: Instant) -> usize {
+        let before = self.by_run.len();
+        self.by_run.retain(|_, p| now.saturating_duration_since(p.noted) <= CLAIM_WITHIN);
+        before - self.by_run.len()
+    }
+
+    fn take(&mut self, run_id: &str, now: Instant) -> Option<Pending> {
+        let p = self.remove(run_id)?;
+        (now.saturating_duration_since(p.noted) <= CLAIM_WITHIN).then_some(p)
+    }
+
+    fn bind_turn(&mut self, run_id: &str, turn_id: &str) {
+        if let Some(p) = self.by_run.get_mut(run_id) {
+            p.bound_turn = Some(turn_id.to_string());
+        }
+    }
+
+    /// 欠帳結清只認領綁到同一回合的項目；別的回合（或沒綁）的留著、不動，也不升級。
+    fn take_for_turn(&mut self, run_id: &str, turn_id: &str) -> Option<Pending> {
+        if self.by_run.get(run_id)?.bound_turn.as_deref() != Some(turn_id) {
+            return None;
+        }
+        self.remove(run_id)
+    }
+
+    fn contains(&self, run_id: &str) -> bool {
+        self.by_run.contains_key(run_id)
+    }
+
+    fn len(&self) -> usize {
+        self.by_run.len()
+    }
+}
+
+fn registry() -> &'static Mutex<PendingRegistry> {
+    static M: OnceLock<Mutex<PendingRegistry>> = OnceLock::new();
     M.get_or_init(Default::default)
 }
 
 /// 這個 run 剛判不出來的那一則（`confirm_submitted` 呼叫）。同一個 run 只留最新的一筆。
 pub fn note(run_id: &str, p: Pending) {
-    registry().lock().unwrap_or_else(|e| e.into_inner()).insert(run_id.to_string(), p);
+    let now = Instant::now();
+    let mut registry = registry().lock().unwrap_or_else(|e| e.into_inner());
+    let removed_expired = registry.prune_expired(now);
+    let evicted_oldest = registry.insert_at(run_id.to_string(), p, now);
+    if removed_expired > 0 || evicted_oldest {
+        tracing::debug!(removed_expired, evicted_oldest, pending = registry.len(), "late proof memory registry pruned");
+    }
+}
+
+/// 把登記的基準綁到它所屬的回合（持久化時查到的那一回合）。
+pub fn bind_turn(run_id: &str, turn_id: &str) {
+    registry().lock().unwrap_or_else(|e| e.into_inner()).bind_turn(run_id, turn_id);
+}
+
+/// Current number of not-yet-claimed in-memory prompts, exposed for diagnostics.
+pub fn pending_count() -> usize {
+    registry().lock().unwrap_or_else(|e| e.into_inner()).len()
 }
 
 /// 保存 watcher 的證據基準，讓 daemon 重啟後能接回尚未結束的 unknown turn。
@@ -118,7 +207,7 @@ pub async fn persist_pending_at(pool: &sqlx::SqlitePool, run_id: &str, p: &Pendi
              baseline=excluded.baseline, prompt_text=excluded.prompt_text, since=excluded.since,
              created_at=excluded.created_at, expires_at=excluded.expires_at",
     )
-    .bind(turn_id)
+    .bind(turn_id.clone())
     .bind(run_id)
     .bind(&p.kind)
     .bind(&p.pane)
@@ -134,6 +223,8 @@ pub async fn persist_pending_at(pool: &sqlx::SqlitePool, run_id: &str, p: &Pendi
     .bind(expires_at)
     .execute(pool)
     .await?;
+    bind_turn(run_id, &turn_id);
+    trim_durable(pool).await?;
     Ok(())
 }
 
@@ -150,9 +241,11 @@ pub async fn recover_at_startup_at(app: &(impl LcHost + Clone + 'static), now: &
            JOIN turns t ON t.id = p.turn_id AND t.run_id = p.run_id
           WHERE p.expires_at > ? AND r.state = 'running' AND r.pane_id = p.pane
             AND t.status = 'in_flight' AND t.delivery = 'unknown'
-          ORDER BY p.created_at DESC",
+          ORDER BY p.created_at DESC
+          LIMIT ?",
     )
     .bind(now)
+    .bind(MAX_PENDING as i64)
     .fetch_all(app.db())
     .await?;
     let mut restored = 0;
@@ -214,9 +307,43 @@ async fn prune_durable(pool: &sqlx::SqlitePool, now: &str) -> anyhow::Result<u64
     Ok(removed)
 }
 
+async fn trim_durable(pool: &sqlx::SqlitePool) -> anyhow::Result<()> {
+    sqlx::query(
+        "DELETE FROM late_proof_pending WHERE turn_id IN (
+             SELECT turn_id FROM late_proof_pending ORDER BY created_at DESC, turn_id DESC LIMIT -1 OFFSET ?
+         )",
+    )
+    .bind(MAX_PENDING as i64)
+    .execute(pool)
+    .await?;
+    Ok(())
+}
+
 async fn delete_durable_for_turn(pool: &sqlx::SqlitePool, turn_id: &str) -> anyhow::Result<()> {
     sqlx::query("DELETE FROM late_proof_pending WHERE turn_id = ?").bind(turn_id).execute(pool).await?;
     Ok(())
+}
+
+/// Deterministic registry and durable-row sweep. `wall_now` drives SQLite expiry; `monotonic_now`
+/// drives in-memory entry TTLs, so both paths can be tested without sleeping.
+pub async fn sweep_at(app: &impl LcHost, wall_now: &str, monotonic_now: Instant) -> anyhow::Result<(usize, u64)> {
+    let durable_removed = prune_durable(app.db(), wall_now).await?;
+    let active: Vec<String> = sqlx::query_scalar(
+        "SELECT DISTINCT r.id FROM runs r JOIN turns t ON t.run_id = r.id
+          WHERE r.state = 'running' AND t.status = 'in_flight' AND t.delivery IN ('pending','unknown')",
+    )
+    .fetch_all(app.db())
+    .await?;
+    let active: HashSet<String> = active.into_iter().collect();
+    let memory_removed = registry().lock().unwrap_or_else(|e| e.into_inner()).sweep_at(monotonic_now, &active);
+    if memory_removed > 0 || durable_removed > 0 {
+        tracing::debug!(memory_removed, durable_removed, pending = pending_count(), "late proof registry sweep");
+    }
+    Ok((memory_removed, durable_removed))
+}
+
+pub async fn sweep(app: &impl LcHost) -> anyhow::Result<(usize, u64)> {
+    sweep_at(app, &db::now(), Instant::now()).await
 }
 
 /// 新的一輪送達開始：上一則沒被認領的殘影不能留給這一則。
@@ -230,18 +357,73 @@ pub(crate) fn forget_pending_for_restart_test(run_id: &str) {
 }
 
 fn take(run_id: &str) -> Option<Pending> {
-    let p = registry().lock().unwrap_or_else(|e| e.into_inner()).remove(run_id)?;
-    (p.noted.elapsed() <= CLAIM_WITHIN).then_some(p)
+    let now = Instant::now();
+    registry().lock().unwrap_or_else(|e| e.into_inner()).take(run_id, now)
 }
 
-fn take_after_owed_write(run_id: &str) -> Option<Pending> {
-    registry().lock().unwrap_or_else(|e| e.into_inner()).remove(run_id)
+fn take_after_owed_write(run_id: &str, turn_id: &str) -> Option<Pending> {
+    registry().lock().unwrap_or_else(|e| e.into_inner()).take_for_turn(run_id, turn_id)
 }
 
 #[cfg(all(test, feature = "daemon-test-harness"))]
 pub(crate) fn expire_pending_for_test(run_id: &str) {
-    if let Some(p) = registry().lock().unwrap_or_else(|e| e.into_inner()).get_mut(run_id) {
+    if let Some(p) = registry().lock().unwrap_or_else(|e| e.into_inner()).by_run.get_mut(run_id) {
         p.noted = Instant::now() - CLAIM_WITHIN - Duration::from_secs(1);
+    }
+}
+
+#[cfg(all(test, feature = "daemon-test-harness"))]
+mod registry_tests {
+    use super::*;
+
+    fn pending(noted: Instant) -> Pending {
+        Pending::new_at("claude", "pane-test", &Proof::EchoRow, 0, 0, "prompt", "2026-10-12T12:00:00.000Z".into(), noted)
+    }
+
+    #[test]
+    fn issue_1494_registry_caps_1000_runs_and_expires_without_waiting() {
+        let base = Instant::now();
+        let mut registry = PendingRegistry::default();
+        for n in 0..1000u64 {
+            let noted = base + Duration::from_millis(n);
+            registry.insert_at(format!("run-{n}"), pending(noted), noted);
+        }
+
+        assert_eq!(registry.len(), MAX_PENDING, "容量上限應淘汰最舊的 prompt");
+        assert!(!registry.contains("run-0"));
+        assert!(registry.contains("run-999"));
+        let active_runs = (0..1000).map(|n| format!("run-{n}")).collect();
+        let expired_at = base + Duration::from_millis(999) + CLAIM_WITHIN + Duration::from_millis(1);
+        assert_eq!(registry.sweep_at(expired_at, &active_runs), MAX_PENDING, "TTL 到期應清掉所有 prompt");
+        assert_eq!(registry.len(), 0);
+
+        let mut completed = PendingRegistry::default();
+        completed.insert_at("run-completed".into(), pending(base), base);
+        assert_eq!(completed.sweep_at(base, &HashSet::new()), 1, "run 已完成／消失就立即清掉 prompt");
+        assert!(!completed.contains("run-completed"));
+    }
+
+    #[test]
+    fn owed_take_refuses_a_pending_bound_to_another_turn() {
+        // 欠帳的 T1 結清時，run 的登記已被 T2 的 Pending 取代：不能把 T2 的基準認領到 T1 上（#1483 複查）。
+        let base = Instant::now();
+        let mut registry = PendingRegistry::default();
+        registry.insert_at("run-1".into(), pending(base), base);
+        registry.bind_turn("run-1", "turn-2");
+
+        assert!(registry.take_for_turn("run-1", "turn-1").is_none(), "T2 的 Pending 不能升級 T1");
+        assert!(registry.contains("run-1"), "屬於 T2 的項目留給 T2 自己認領");
+        assert!(registry.take_for_turn("run-1", "turn-2").is_some(), "同一回合仍可認領");
+    }
+
+    #[test]
+    fn owed_take_refuses_an_unbound_pending() {
+        // 沒有綁到任何回合（持久化失敗）時寧可不認領：fail closed，回合留給 Stop hook／stuck_turns。
+        let base = Instant::now();
+        let mut registry = PendingRegistry::default();
+        registry.insert_at("run-1".into(), pending(base), base);
+
+        assert!(registry.take_for_turn("run-1", "turn-1").is_none());
     }
 }
 
@@ -377,7 +559,7 @@ pub fn arm(app: &impl LcHost, run_id: &str, bot_id: &str, turn_id: &str) {
 
 /// 欠帳的 unknown 寫入結清時，Pending 對應的回合已明確，原本的認領期限不再適用。
 pub fn arm_after_owed_write(app: &(impl LcHost + Clone + 'static), run_id: &str, bot_id: &str, turn_id: &str) {
-    if let Some(p) = take_after_owed_write(run_id) {
+    if let Some(p) = take_after_owed_write(run_id, turn_id) {
         arm_pending(app, run_id, bot_id, turn_id, p);
         return;
     }

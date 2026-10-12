@@ -1044,6 +1044,11 @@ user 文字先照 CLI 自己的拆法還原（`lifecycle::pasted_content`，只�
   （`still_in_box`）、框狀態讀不到（`composer_unreadable`）、`nothing_typed` 等原因沒有基準可看，維持原行為。session 確認的 DB 暫時讀取錯誤、
   transcript 暫時讀取錯誤都回 `Wait`，下一輪重試；run 已消失或 session 確認不相符才停止。持久 watcher 最多保留 10 分鐘；若一次 60 次觀察仍無結論，
   保留原基準到 TTL，讓下一次 daemon 重啟仍能恢復觀察。
+- **late_proof 記憶體登錄有界清理**（issue #1494）：未認領的 Pending 最多保留 60 秒、最多 256 筆；新項目滿額時淘汰最舊項目。
+  daemon 每 15 秒依 run／turn 狀態清掉已結束的項目，並刪除到期或不再有效的 durable watcher；資料庫最多同樣保留 256 筆、10 分鐘。
+  `late_proof::pending_count()` 提供目前記憶體筆數供診斷。
+  欠帳結清（owed unknown 寫入成功後）只認領**綁到同一回合**的基準：持久化時把基準綁上查到的回合；綁到別回合、或沒綁的，一律不認領、不升級（fail closed）。
+  這避免 T1 的欠帳結清時誤把 T2 登記的基準升級 T1（#1483 複查）。
 - **長段貼上要拆段送**（issue #382，2026-09-21 實測 herdr 0.9.1＋claude）：一次 `pane.send_text` 超過約 1024 位元組（≥ 1024 B 就中；≤ 1020 B 完整），
   **最前面的 1024 位元組不見了**，只剩尾巴進框（1048 B 只剩最後 4 行、1804 B 只剩最後 46 行；使用者 58 行的數字清單就這樣只送到最後 3 行，
   泡泡卻顯示整段）。`HerdrClient::pane_send_text` 一律拆成每段 ≤ 1000 B（優先在換行後切、不切斷多位元組字元）依序送——

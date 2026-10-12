@@ -3581,6 +3581,48 @@ mod issue_17_tests {
         assert_eq!(f.env.herdr.calls_to("pane.send_text").len(), pane_sends_before, "恢復補證不能重新送 prompt");
     }
 
+    /// #1494：durable prompt 只保留到 TTL；run 已結束時下一輪 sweep 就清掉，不等到期。
+    #[tokio::test]
+    async fn issue_1494_sweeps_expired_unknown_write_and_gone_run_rows() {
+        use super::super::delivery::{LogFormat, Proof};
+        use std::time::Instant;
+
+        let expired = fixture("claude", "").await;
+        let expired_path = with_transcript(&expired, quiet()).await;
+        let proof = Proof::Transcript { format: LogFormat::Claude, path: expired_path, session_id: "sess-1".into() };
+        let pending = late_proof::Pending::new("claude", "pane-17", &proof, 0, 0, "unknown write", "2026-10-12T12:00:00.000Z".into());
+        late_proof::persist_pending_at(&expired.env.app.db, &expired.run_id, &pending, "2026-10-12T12:00:00.000Z").await.unwrap();
+        let expiry = "2026-10-12T12:10:01.000Z";
+        let (memory_removed, durable_removed) = late_proof::sweep_at(&expired.env.app, expiry, Instant::now()).await.unwrap();
+        assert_eq!(memory_removed, 0);
+        assert_eq!(durable_removed, 1, "unknown 寫回失敗後的 prompt 到期就刪除");
+        let remaining: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM late_proof_pending WHERE run_id=?")
+            .bind(&expired.run_id)
+            .fetch_one(&expired.env.app.db)
+            .await
+            .unwrap();
+        assert_eq!(remaining, 0);
+
+        let gone = fixture("claude", "").await;
+        let gone_path = with_transcript(&gone, quiet()).await;
+        let proof = Proof::Transcript { format: LogFormat::Claude, path: gone_path, session_id: "sess-1".into() };
+        let pending = late_proof::Pending::new("claude", "pane-17", &proof, 0, 0, "stopped run", "2026-10-12T12:00:00.000Z".into());
+        late_proof::persist_pending_at(&gone.env.app.db, &gone.run_id, &pending, "2026-10-12T12:00:00.000Z").await.unwrap();
+        sqlx::query("UPDATE runs SET state='stopped', ended_at='2026-10-12T12:00:01.000Z' WHERE id=?")
+            .bind(&gone.run_id)
+            .execute(&gone.env.app.db)
+            .await
+            .unwrap();
+        let (_, durable_removed) = late_proof::sweep_at(&gone.env.app, "2026-10-12T12:00:01.000Z", Instant::now()).await.unwrap();
+        assert_eq!(durable_removed, 1, "run 消失就不再保留 prompt");
+        let remaining: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM late_proof_pending WHERE run_id=?")
+            .bind(&gone.run_id)
+            .fetch_one(&gone.env.app.db)
+            .await
+            .unwrap();
+        assert_eq!(remaining, 0);
+    }
+
     async fn delivery_row(f: &Fixture) -> (String, String, i64, i64) {
         sqlx::query_as("SELECT status, delivery, delivery_verified, auto_resend FROM turns WHERE id = ?")
             .bind(&f.turn_id)
