@@ -1314,7 +1314,9 @@ mod arc_port_79_default_sync_lock {
 }
 
 impl<T> crate::lifecycle::LcHost for std::sync::Arc<T> where
-    std::sync::Arc<T>: crate::lifecycle::start::StartContext
+    std::sync::Arc<T>: crate::capabilities::Shutdown
+        + crate::capabilities::BgTasks
+        + crate::lifecycle::start::StartContext
         + crate::lifecycle::s6_ports::StuckTurnContext
         + crate::lifecycle::s6_ports::DeferredLiveContext
         + crate::lifecycle::s6_ports::SendNowContext

@@ -3,7 +3,9 @@
 /// Host capabilities shared by lifecycle entry points. Composition-specific behavior is exposed
 /// through the small service ports in `s6_ports` and `send_now::ports`.
 pub trait LcHost:
-    crate::lifecycle::start::StartContext
+    crate::capabilities::Shutdown
+    + crate::capabilities::BgTasks
+    + crate::lifecycle::start::StartContext
     + crate::lifecycle::s6_ports::StuckTurnContext
     + crate::lifecycle::s6_ports::DeferredLiveContext
     + crate::lifecycle::s6_ports::SendNowContext
