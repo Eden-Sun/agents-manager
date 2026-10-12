@@ -339,16 +339,31 @@ fn within_projects(path: &str, roots: &[String]) -> bool {
 /// 檔名等於 session id，否則回 `None` **而且不讀**——偽造的 hook 不能因此讓 daemon 去讀別的身分或任意路徑。
 /// session 沒記、檔案找不到都是 `None`。
 pub async fn pending_tail(app: &impl GrokTranscriptContext, bot: &db::Bot, run: &db::Run, host: &str, max: u64) -> anyhow::Result<Option<String>> {
+    let Some(sid) = app.claude_herdr_session(run).await.filter(|s| super::grok_transcript::valid_session_id(s)) else { return Ok(None) };
+    pending_tail_for_session(app, bot, run, host, &sid, max).await
+}
+
+/// Read the pending-question tail for an already verified live session. Remote callers use this
+/// form so session selection and its cache identity share the same herdr observation.
+pub async fn pending_tail_for_session(
+    app: &impl GrokTranscriptContext,
+    bot: &db::Bot,
+    run: &db::Run,
+    host: &str,
+    sid: &str,
+    max: u64,
+) -> anyhow::Result<Option<String>> {
+    if !super::grok_transcript::valid_session_id(sid) {
+        return Ok(None);
+    }
     let recorded = run.transcript_path.as_deref().map(str::trim).filter(|p| !p.is_empty());
     let stem = recorded.and_then(|p| std::path::Path::new(p).file_stem().and_then(|s| s.to_str())).filter(|s| super::grok_transcript::valid_session_id(s));
-    let known = run.native_session_id.as_deref().filter(|s| super::grok_transcript::valid_session_id(s));
-    let Some(sid) = known.or(stem) else { return Ok(None) };
     let roots = app.claude_config_roots(bot, run, host).await;
     if roots.is_empty() {
         return Ok(None);
     }
     if let Some(p) = recorded {
-        if !within_projects(p, &roots) || stem != Some(sid) {
+        if stem == Some(sid) && !within_projects(p, &roots) {
             return Ok(None);
         }
     }

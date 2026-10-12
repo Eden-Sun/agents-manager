@@ -892,9 +892,9 @@ UI 標籤：`hook` 不標；`terminal_fallback` 或 `incomplete = 1` 標「終�
 `200 {"questions": [{question, header, multiSelect, options:[{label, description}]}] | null, "jev_options": {…} | null}`。只讀 transcript 最後 512 KiB。
 非 claude、沒有 transcript、讀不到、沒在等題目都回 `{"questions": null, "jev_options": null}`（不是錯誤，前端照舊用畫面）。bot 或 active Run 不存在 404。
 **遠端主機的 claude bot 也讀**（issue #1476）：對話檔在那台機器上，經 SPEC §12.5b 那條 `sh`／ssh 只讀最後 `TAIL_BYTES`（同本機的 512 KiB），不另開通道。
-檔案不是直接把 hook 回報的 `transcript_path` 當 shell 路徑重開，而是由這顆 bot 自己的 config root（`CLAUDE_CONFIG_DIR`、身分在該主機的目錄、`~/.claude`）與 run 記的 session 定位；有效且符合 session 的記錄路徑會精確讀取，沒有時才 discovery，所有 root 合計必須只有一份候選。
-記錄路徑不在這些 root 的 `projects/` 底下、含 `..`、不是 `.jsonl`、檔名對不上 session、找不到檔或 discovery 有多份候選 ⇒ `null` 且不發不安全的遠端讀取。
-整段遠端讀取最多 5 秒（含查遠端 `$HOME`），逾時或 ssh 失敗⇒ `null`；同一個 run 4 秒內重複請求直接用上一次的結果（失敗也算，不會每次輪詢都打 ssh），同時進來的只有一個真的去讀。
+檔案不是直接把 hook 回報的 `transcript_path` 當 shell 路徑重開，而是由這顆 bot 自己的 config root（`CLAUDE_CONFIG_DIR`、身分在該主機的目錄、`~/.claude`）與 session 定位。遠端 claude child 使用 herdr 當下回報並驗證過的 live session；不使用 run 裡可能過期的 `native_session_id` 或 `transcript_path` 決定 session。記錄路徑在允許 root 內且檔名符合 live session 時精確讀取，否則 discovery 必須在所有 root 合計只有一份候選。
+記錄路徑不在這些 root 的 `projects/` 底下、含 `..`、不是 `.jsonl`、檔名對不上 session、找不到檔或 discovery 有多份候選 ⇒ `null` 且不發不安全的遠端讀取。讀取前後會確認 run、host connection fence 與 live session 仍一致。
+整段遠端讀取最多 5 秒（含查遠端 `$HOME`），逾時或 ssh 失敗⇒ `null`；同一個 run generation、host connection 與 live session 4 秒內重複請求直接用上一次的結果（失敗也算，不會每次輪詢都打 ssh），同時進來的只有一個真的去讀。
 
 `jev_options`（issue #1475，SPEC §4.3c 第五個場景）：Jev 對「使用者會選哪個選項」的**提示**，只提示、不代答、不送出任何東西。
 `null` ＝沒有可顯示的建議資料：Jev 沒開／專案不在名單／專案已移交、沒有單選題、還沒問或還在問、問失敗（逾時、5xx、答案壞掉、名額用完），或 run／回合／提問已過期。**題目與選項照常回，不等 Jev。**

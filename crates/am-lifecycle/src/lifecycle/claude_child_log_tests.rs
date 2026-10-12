@@ -576,6 +576,87 @@ async fn a_remote_claude_child_reads_its_transcript_over_ssh() {
     assert!(msgs.iter().all(|(_, _, source)| source == "transcript"));
 }
 
+/// /clear 或 resume 已讓 pane 換成新 session、DB 尚未同步時，pending-question 只讀 herdr 回報的 live session。
+#[tokio::test]
+async fn pending_tail_uses_live_herdr_session() {
+    let old_key = crate::runners::pending_question_remote::cache_key_parts("run-1", "started-1", Some("pane-1"), "m4p", "host-id", 1, "sess-old");
+    assert_ne!(
+        old_key,
+        crate::runners::pending_question_remote::cache_key_parts("run-1", "started-1", Some("pane-1"), "m4p", "host-id", 1, "sess-new"),
+        "cache identity must include the live session"
+    );
+    assert_ne!(
+        old_key,
+        crate::runners::pending_question_remote::cache_key_parts("run-1", "started-1", Some("pane-1"), "m4p", "other-host-id", 2, "sess-old"),
+        "cache identity must include the host connection generation"
+    );
+    assert_ne!(
+        old_key,
+        crate::runners::pending_question_remote::cache_key_parts("run-1", "started-2", Some("pane-2"), "m4p", "host-id", 1, "sess-old"),
+        "cache identity must include the run generation"
+    );
+
+    let e = tt::env().await;
+    let sock = tt::track(std::env::temp_dir().join(format!("am-claude-live-pending-{}", db::ulid())));
+    std::fs::create_dir_all(&sock).unwrap();
+    let herdr = tt::MockHerdr::start(sock.join("herdr.sock"));
+    let host = format!("m4p-{}", db::ulid().to_ascii_lowercase());
+    let conn = e
+        .app
+        .hosts
+        .insert_remote_with_client_for_test(
+            crate::config::HostCfg {
+                shared_session: false,
+                name: host.clone(),
+                ssh: "unused".into(),
+                ssh_port: 22,
+                ssh_opts: vec![],
+                herdr_session: "test".into(),
+                remote_path: String::new(),
+            },
+            crate::herdr::HerdrClient::new(sock.join("herdr.sock")),
+        )
+        .await;
+    conn.connected.store(true, std::sync::atomic::Ordering::SeqCst);
+    *conn.remote_home.lock().await = Some("/Users/m4p".into());
+
+    let seen: Arc<std::sync::Mutex<Vec<String>>> = Default::default();
+    {
+        let seen = seen.clone();
+        crate::hosts::set_ssh_fake(&host, move |script| {
+            seen.lock().unwrap().push(script.to_string());
+            let (sid, question) = if script.contains("sess-new") { ("sess-new", "Q-new") } else { ("sess-old", "Q-old") };
+            Ok(format!("{LOG_MARK}\n/Users/m4p/.claude/projects/-Users-m4p-project-wt/{sid}.jsonl\n{question}"))
+        });
+    }
+
+    let c = claude_child_in(e, None, Some(&host)).await;
+    herdr.tabs.lock().unwrap().push(tt::MockTab { tab_id: "tab-1".into(), workspace_id: "ws-1".into(), label: "t".into(), panes: vec![c.pane.clone()] });
+    herdr.set_agent("hub-midplat", &c.pane, true);
+    herdr.agents.lock().unwrap().iter_mut().for_each(|a| {
+        a["agent_session"]["value"] = json!("sess-old");
+    });
+    sqlx::query("UPDATE runs SET native_session_id = 'sess-old', transcript_path = ? WHERE id = ?")
+        .bind("/Users/m4p/.claude/projects/-Users-m4p-project-wt/sess-old.jsonl")
+        .bind(&c.run_id)
+        .execute(&c.env.app.db)
+        .await
+        .unwrap();
+
+    let run = db::run(&c.env.app.db, &c.run_id).await.unwrap().unwrap();
+    let _clock = crate::runners::pending_question_remote::fixed_clock(&run.id);
+    let (old_tail, _) = crate::runners::pending_question_remote::tail(&c.env.app, &c.bot, &run, &host).await;
+    assert_eq!(old_tail.as_deref(), Some("Q-old"));
+    herdr.agents.lock().unwrap().iter_mut().for_each(|a| {
+        a["agent_session"]["value"] = json!("sess-new");
+    });
+    let (new_tail, _) = crate::runners::pending_question_remote::tail(&c.env.app, &c.bot, &run, &host).await;
+    assert_eq!(new_tail.as_deref(), Some("Q-new"), "DB 還記舊 session 時也不能回傳舊題");
+    let scripts = seen.lock().unwrap();
+    assert!(scripts.iter().any(|script| script.contains("sess-old")), "{scripts:?}");
+    assert!(scripts.iter().any(|script| script.contains("sess-new")), "{scripts:?}");
+}
+
 fn history() -> Vec<String> {
     vec![
         user_at("u1", "早就處理過的一問", "2026-10-07T10:00:00.000Z"),
