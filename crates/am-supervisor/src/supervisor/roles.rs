@@ -258,19 +258,75 @@ fn known_route(kind: &str, payload: &Value, review_role: Option<&str>) -> Option
     }
 }
 
+/// 同一件未解決的提醒，第一次叫醒之後多久內不再為它叫醒（issue #1478）。
+///
+/// 近 7 天巡檢 93 次 `ops_alert` 喚醒裡，大半是同一支腳本的同一個 `reason` 每小時換一個 `event_key`
+/// （小時格）重講一次：`swap_probe_skipped` 從「累計 70 次」講到「101 次」。第一次講了、使用者或協調者已經看見，
+/// 之後 12 小時內同一件事照樣入列（稽核、UI 看得到），只是 `wake=0`，搭下一次有事的喚醒一起送。
+pub const REPEAT_WAKE_BACKOFF_SECS: i64 = 12 * 3600;
+
+/// 哪些種類套用 [`REPEAT_WAKE_BACKOFF_SECS`]。只放「同一件事會被排程重複喊」的：`ops_alert`。
+/// `pane_unowned`、`bot_request`、核准這些每一筆都是**不同**的對象或申請，不是同一則重複，不在這裡。
+fn repeat_backoff_kind(kind: &str) -> bool {
+    kind == "ops_alert"
+}
+
+/// 這一筆是不是「同一件事」在退避窗內的重複：同 kind、同寄件對象（`bot_id` 欄）、同 `source`／`reason`／`subject`，
+/// 而且窗內已經有一筆**叫醒過**（`wake=1`）的。`detail` 不比——計數、時間每次都變，那正是重複的樣子。
+/// 新的 `reason`、新的 `source`、別顆 bot 的同一個 reason 都不是重複，照常叫醒。
+///
+/// 只看 `wake=1` 的前一筆：被退避壓成 `wake=0` 的不算，所以窗是從**上一次真的叫醒**起算，
+/// 一直沒解決的事每 12 小時最多再提醒一次，不會被自己的退避無限延後。
+async fn repeats_recent_wake(pool: &SqlitePool, id: &str, kind: &str, payload: &Value, bot_id: Option<&str>, created_at: &str) -> Result<bool> {
+    let Some(at) = crate::db::parse_ts(created_at) else { return Ok(false) };
+    let Some(delta) = chrono::Duration::try_seconds(REPEAT_WAKE_BACKOFF_SECS) else { return Ok(false) };
+    let since = crate::db::iso_at(at - delta);
+    let field = |k: &str| payload.get(k).and_then(Value::as_str).unwrap_or("").to_string();
+    let ts = crate::db::ts_sql("created_at");
+    let sql = format!(
+        "SELECT 1 FROM supervisor_inbox
+          WHERE kind=?1 AND id<>?2 AND wake=1
+            AND COALESCE(bot_id,'')=?3
+            AND COALESCE(json_extract(payload_json,'$.source'),'')=?4
+            AND COALESCE(json_extract(payload_json,'$.reason'),'')=?5
+            AND COALESCE(json_extract(payload_json,'$.subject'),'')=?6
+            AND {ts} >= ?7 AND {ts} <= ?8
+          LIMIT 1"
+    );
+    let hit: Option<(i64,)> = sqlx::query_as(&sql)
+        .bind(kind)
+        .bind(id)
+        .bind(bot_id.unwrap_or(""))
+        .bind(field("source"))
+        .bind(field("reason"))
+        .bind(field("subject"))
+        .bind(since)
+        .bind(crate::db::iso_at(at))
+        .fetch_optional(pool)
+        .await?;
+    Ok(hit.is_some())
+}
+
 /// 把還沒分類的 inbox 列補上角色與喚醒旗標。寫入端（store、mission、bulk_restart）都不用改，
 /// 路由只存在這一個地方。
+///
+/// 路由表算出「叫醒」之後還要過一關重複退避（[`repeat_backoff_kind`]）：由舊到新逐筆處理，前一筆寫完 `wake`
+/// 後一筆才查，所以同一批裡的同一件事也只有最舊那筆叫醒。
 pub async fn classify(pool: &SqlitePool) -> Result<usize> {
-    let rows: Vec<(String, String, String, Option<String>)> = sqlx::query_as(
-        "SELECT i.id, i.kind, i.payload_json, a.review_role
+    let rows: Vec<(String, String, String, Option<String>, String, Option<String>)> = sqlx::query_as(
+        "SELECT i.id, i.kind, i.payload_json, a.review_role, i.created_at, i.bot_id
            FROM supervisor_inbox i LEFT JOIN supervisor_assignments a ON a.id = i.assignment_id
-          WHERE i.role IS NULL",
+          WHERE i.role IS NULL
+          ORDER BY i.created_at ASC, i.rowid ASC",
     )
     .fetch_all(pool)
     .await?;
-    for (id, kind, payload, review_role) in &rows {
+    for (id, kind, payload, review_role, created_at, bot_id) in &rows {
         let p: Value = serde_json::from_str(payload).unwrap_or_else(|_| json!({}));
-        let rt = route(kind, &p, review_role.as_deref());
+        let mut rt = route(kind, &p, review_role.as_deref());
+        if rt.wake && repeat_backoff_kind(kind) && repeats_recent_wake(pool, id, kind, &p, bot_id.as_deref(), created_at).await? {
+            rt.wake = false;
+        }
         sqlx::query("UPDATE supervisor_inbox SET role=?, wake=? WHERE id=? AND role IS NULL")
             .bind(rt.role.as_str())
             .bind(i64::from(rt.wake))
@@ -1519,5 +1575,100 @@ mod tests {
             .unwrap();
         assert_eq!(i2_resolved.0, "handled");
         assert_eq!(i2_resolved.1.as_deref(), Some("daemon"));
+    }
+
+    /// 直接寫一筆還沒分類的 inbox 列（`role` 留 NULL），`created_at` 由測試指定——不靠牆鐘。
+    async fn raw_event(p: &SqlitePool, key: &str, kind: &str, bot_id: Option<&str>, payload: Value, created_at: &str) {
+        sqlx::query(
+            "INSERT INTO supervisor_inbox (id, supervisor_id, event_key, bot_id, kind, payload_json, state, created_at, updated_at)
+             VALUES (?,?,?,?,?,?,'pending',?,?)",
+        )
+        .bind(format!("id-{key}"))
+        .bind(super::super::store::SUPERVISOR_ID)
+        .bind(key)
+        .bind(bot_id)
+        .bind(kind)
+        .bind(payload.to_string())
+        .bind(created_at)
+        .bind(created_at)
+        .execute(p)
+        .await
+        .unwrap();
+    }
+
+    async fn wake_of(p: &SqlitePool, key: &str) -> i64 {
+        sqlx::query_scalar("SELECT wake FROM supervisor_inbox WHERE event_key=?").bind(key).fetch_one(p).await.unwrap()
+    }
+
+    fn alert(source: &str, reason: &str, detail: &str) -> Value {
+        json!({"source": source, "reason": reason, "detail": detail})
+    }
+
+    /// issue #1478：同一件未解決的 `ops_alert`（同 source＋reason）每小時換一個 event_key 重講，
+    /// 退避窗內只有第一次叫醒；新種類、別的對象、窗外照常叫醒。
+    #[tokio::test]
+    async fn a_repeated_ops_alert_inside_the_backoff_window_is_recorded_without_waking() {
+        let p = pool().await;
+        let t = |h: i64, m: i64| format!("2026-10-10T{:02}:{:02}:00.000Z", h, m);
+        raw_event(&p, "first", "ops_alert", None, alert("daemon-update-kick", "swap_probe_skipped", "已連續 70 次略過"), &t(0, 5)).await;
+        // 一小時後同一件事、計數不同、event_key 不同（小時格）。
+        raw_event(&p, "hour-later", "ops_alert", None, alert("daemon-update-kick", "swap_probe_skipped", "已連續 71 次略過"), &t(1, 5)).await;
+        raw_event(&p, "eleven-later", "ops_alert", None, alert("daemon-update-kick", "swap_probe_skipped", "已連續 80 次略過"), &t(11, 5)).await;
+        // 新種類（reason 不同）、別支腳本（source 不同）：不是重複。
+        raw_event(&p, "new-reason", "ops_alert", None, alert("daemon-update-kick", "swap_rolled_back", "回滾"), &t(1, 10)).await;
+        raw_event(&p, "new-source", "ops_alert", None, alert("ops-sync", "swap_probe_skipped", "別支腳本"), &t(1, 15)).await;
+        // 同 source／reason 但是另一顆 bot 的：不是同一件事。
+        raw_event(&p, "bot-a", "ops_alert", Some("bot-a"), alert("daemon", "agent_md_unreadable", "a"), &t(2, 0)).await;
+        raw_event(&p, "bot-b", "ops_alert", Some("bot-b"), alert("daemon", "agent_md_unreadable", "b"), &t(2, 1)).await;
+        raw_event(&p, "bot-a-again", "ops_alert", Some("bot-a"), alert("daemon", "agent_md_unreadable", "a 又來"), &t(3, 0)).await;
+        classify(&p).await.unwrap();
+
+        assert_eq!(wake_of(&p, "first").await, 1, "第一次要叫醒");
+        assert_eq!(wake_of(&p, "hour-later").await, 0, "1 小時後的同一件事只記錄");
+        assert_eq!(wake_of(&p, "eleven-later").await, 0, "11 小時後仍在窗內");
+        assert_eq!(wake_of(&p, "new-reason").await, 1, "新的 reason 照常叫醒");
+        assert_eq!(wake_of(&p, "new-source").await, 1, "別支腳本的同名 reason 照常叫醒");
+        assert_eq!(wake_of(&p, "bot-a").await, 1);
+        assert_eq!(wake_of(&p, "bot-b").await, 1, "別顆 bot 的同一個 reason 照常叫醒");
+        assert_eq!(wake_of(&p, "bot-a-again").await, 0, "同一顆 bot 的同一件事退避");
+
+        // 窗外：距離上一次**真的叫醒**滿 12 小時就再提醒一次（被退避壓掉的不算，窗不會被自己延後）。
+        raw_event(&p, "after-window", "ops_alert", None, alert("daemon-update-kick", "swap_probe_skipped", "已連續 90 次略過"), &t(12, 10)).await;
+        classify(&p).await.unwrap();
+        assert_eq!(wake_of(&p, "after-window").await, 1, "距上次叫醒超過 12 小時：再提醒一次");
+        raw_event(&p, "after-window-2", "ops_alert", None, alert("daemon-update-kick", "swap_probe_skipped", "已連續 91 次略過"), &t(13, 10)).await;
+        classify(&p).await.unwrap();
+        assert_eq!(wake_of(&p, "after-window-2").await, 0, "再提醒之後又進入新的窗");
+
+        // 退避只壓 wake，角色照分，事件照入列、照送：稽核與 UI 看得到。
+        let role: String = sqlx::query_scalar("SELECT role FROM supervisor_inbox WHERE event_key='hour-later'").fetch_one(&p).await.unwrap();
+        assert_eq!(role, "patrol");
+        let due = due_for(&p, Role::Patrol, true, "2999-01-01T00:00:00Z", 5).await.unwrap();
+        assert!(due.iter().any(|e| e.event_key == "hour-later" && e.wake == Some(0)), "只記錄的重複提醒仍會跟下一次喚醒一起送");
+    }
+
+    /// issue #1478：真的要處理的事件照常送達——退避只管 `ops_alert` 的重複，
+    /// 其他種類（每一筆是不同對象或申請）不受影響，即使內容一樣也各自叫醒。
+    #[tokio::test]
+    async fn events_that_need_a_decision_are_never_backed_off() {
+        let p = pool().await;
+        let at = |m: i64| format!("2026-10-10T00:{m:02}:00.000Z");
+        for (i, kind) in ["pane_unowned", "bot_restart_failed", "child_retire_refused", "incident_opened"].into_iter().enumerate() {
+            for n in 0..2 {
+                let payload = json!({"source": "x", "reason": "same", "incident": {"kind": "bot_stopped"}});
+                raw_event(&p, &format!("{kind}-{n}"), kind, None, payload, &at((i * 2 + n) as i64)).await;
+            }
+        }
+        // 核准單 failover：改派給巡檢的核准要照常叫醒。
+        raw_event(&p, "approval-0", "approval_requested", None, json!({"to_role": "patrol"}), &at(20)).await;
+        raw_event(&p, "approval-1", "approval_requested", None, json!({"to_role": "patrol"}), &at(21)).await;
+        classify(&p).await.unwrap();
+        for key in [
+            "pane_unowned-0", "pane_unowned-1", "bot_restart_failed-0", "bot_restart_failed-1",
+            "child_retire_refused-0", "child_retire_refused-1", "incident_opened-0", "incident_opened-1",
+            "approval-0", "approval-1",
+        ] {
+            assert_eq!(wake_of(&p, key).await, 1, "{key} 要叫醒");
+        }
     }
 }

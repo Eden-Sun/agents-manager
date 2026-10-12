@@ -90,7 +90,7 @@ async fn a_wait_under_three_minutes_says_nothing_and_one_over_says_it_once() {
     let text = rows[0].1["text"].as_str().unwrap();
     assert!(text.contains("abcdef12") && text.contains("alpha") && text.contains("4 分鐘") && text.contains("2026-10-04T12:30:00.000Z"), "{text}");
     assert_eq!(view(app)["blockers"][0]["name"], "alpha");
-    assert_eq!(rows[0].1["wake"], true, "首次通知要叫醒巡檢調度");
+    assert_eq!(rows[0].1["wake"], false, "只有 working 擋著、放寬已排定：自己會好，只記錄不叫醒（issue #1478）");
 
     // 一樣的人擋著、再試十次：不洗版。tick 也不重送。
     for _ in 0..10 {
@@ -117,6 +117,61 @@ async fn a_wait_under_three_minutes_says_nothing_and_one_over_says_it_once() {
     assert_eq!(rows[1].1["wake"], false, "拿到窗口等只記錄不叫醒");
     let w = current(app).unwrap();
     assert!(crate::supervisor::maintenance::waited_secs(&w.since, &crate::db::now()) >= 240, "換核准不歸零：{}", w.since);
+}
+
+/// restart-window 的拒絕，擋住的是 `delivering`（送達臨界區）而不是 working：放寬也放不行。
+fn delivering(name: &str, escalates_at: Option<&str>) -> LcError {
+    LcError::conflict(
+        "a prompt is in the delivery critical section",
+        json!({"reason": "not_idle", "escalates_at": escalates_at,
+               "safety": {"working": [], "delivering": [{"bot_id": "d1", "name": name}], "unreadable": [], "held_leases": []}}),
+    )
+}
+
+/// issue #1478：首次通知只在「自己不會好」時叫醒巡檢。
+#[tokio::test]
+async fn the_first_notice_wakes_agm_only_when_waiting_will_not_clear_itself() {
+    // 擋住的只有 working、放寬已排定 → 不叫醒（上面那條測試的情境）；inbox 照記、WS 照發。
+    let e = tt::env().await;
+    let app = &e.app;
+    let id = approval_waiting(app, SHA, 240).await;
+    observe(app, OWNER, &id, SHA, Err(&not_idle(&[("b1", "alpha")]))).await;
+    let rows = inbox(app).await;
+    assert_eq!(rows.len(), 1, "inbox 照記：{rows:?}");
+    assert_eq!(rows[0].1["wake"], false);
+    assert!(view(app)["blockers"][0]["name"] == "alpha", "web header 照常看得到");
+
+    // 送達臨界區擋著：放寬不放行 → 叫醒。
+    let e = tt::env().await;
+    let app = &e.app;
+    let id = approval_waiting(app, SHA, 240).await;
+    observe(app, OWNER, &id, SHA, Err(&delivering("dora", Some("2026-10-04T12:30:00.000Z")))).await;
+    assert_eq!(inbox(app).await[0].1["wake"], true, "送達中擋著要人看");
+
+    // working 擋著、但沒有排定放寬（不知道何時會好）→ 叫醒。
+    let e = tt::env().await;
+    let app = &e.app;
+    let id = approval_waiting(app, SHA, 240).await;
+    let no_eta = LcError::conflict(
+        "something is still running; wait for a safe window",
+        json!({"reason": "not_idle", "escalates_at": null,
+               "safety": {"working": [{"bot_id": "b1", "name": "alpha"}], "delivering": [], "unreadable": [], "held_leases": []}}),
+    );
+    observe(app, OWNER, &id, SHA, Err(&no_eta)).await;
+    assert_eq!(inbox(app).await[0].1["wake"], true, "沒有排定放寬時仍叫醒");
+
+    // 擋住名單是 working ＋ 別人的租約：租約放寬不掉 → 叫醒。
+    let e = tt::env().await;
+    let app = &e.app;
+    let id = approval_waiting(app, SHA, 240).await;
+    let leased = LcError::conflict(
+        "a lease is held",
+        json!({"reason": "not_idle", "escalates_at": "2026-10-04T12:30:00.000Z",
+               "safety": {"working": [{"bot_id": "b1", "name": "alpha"}], "delivering": [], "unreadable": [],
+                          "held_leases": [{"owner": "someone", "own": false}]}}),
+    );
+    observe(app, OWNER, &id, SHA, Err(&leased)).await;
+    assert_eq!(inbox(app).await[0].1["wake"], true, "別人的租約擋著要人看");
 }
 
 #[tokio::test]

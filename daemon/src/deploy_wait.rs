@@ -6,7 +6,7 @@
 //! - **一次部署**＝同一個 owner（`daemon-update-kick`）連續在試的那段：每次試窗口都回報到這裡（[`observe`]），換 commit 或換核准
 //!   都算同一次；換版拿到窗口、換版完成、或 [`STALE_SECS`] 沒再試（kick 放棄、請求取消）才算結束。
 //! - 從開始等窗口（核准的 `waiting_since`）起滿 [`NOTIFY_AFTER_SECS`] 還沒拿到，就**通知一次**：WS `deploy_wait`（網頁 header＋toast）
-//!   與 supervisor inbox `deploy_waiting`（巡檢收、叫醒；它有使用者手機上的 Remote Control）。之後只有使用者操作、自動放寬生效、
+//!   與 supervisor inbox `deploy_waiting`（巡檢收；擋住的只有 working 且放寬已排定時只記錄、不叫醒，見 [`clears_itself`]，issue #1478）。之後只有使用者操作、自動放寬生效、
 //!   拿到窗口、換版完成或放棄才推 inbox（同一個 `id`，`rev` 遞增）；擋住名單變動只推 WS，不每 15 秒洗 inbox。
 //!   「拿到窗口→§3a abort 交還」同一個 commit 最多每 [`SWAP_CYCLE_THROTTLE_SECS`] 推一次。
 //! - 使用者在 header 按「現在換版」＝這次部署直接放寬（[`user_escalated_for`]，等同等滿門檻：working 不擋，送達臨界區、
@@ -459,7 +459,8 @@ async fn announce(app: &(impl crate::capabilities::Db + crate::capabilities::Emi
     let now = crate::db::now();
     let v = view_of(w, &now);
     let first = a == Announce::First;
-    let wake = first; // 只記錄類的 deploy_waiting 不設 wake（issue #856）
+    // 只記錄類的 deploy_waiting 不設 wake（issue #856）；首次通知也只在「自己不會好」時才叫醒（issue #1478）。
+    let wake = first && !clears_itself(w);
     tracing::info!(id = %w.id, rev = w.rev, phase = ?w.phase, first, wake, "{}", summary(w, &now));
     app.emit("deploy_wait", json!({"wait": v, "first": first})).await;
     let key = format!("deploy_waiting:{}:{}", w.id, w.rev);
@@ -476,6 +477,16 @@ async fn announce(app: &(impl crate::capabilities::Db + crate::capabilities::Emi
     {
         tracing::warn!(error = %e, "could not tell AGM about the deploy wait");
     }
+}
+
+/// 這次等待不用任何人動手就會自己放行：擋住的**只有** working 的 bot，而放寬已經排定（`escalates_at`）或已生效。
+///
+/// 等滿門檻後 working 就不再擋，所以這種等待最多再幾分鐘就換版（近 7 天 45 次首次通知全是這一種，每次叫醒巡檢只換來一句
+/// 「收到」，issue #1478）。使用者要看的通知（WS 與 web header）照發、inbox 照記，只是不叫醒 LLM。
+/// 有送達中、讀不到狀態、別人的租約擋著、沒有擋住名單，或根本沒排放寬時，放寬也放不行，仍然叫醒巡檢請使用者調度。
+pub fn clears_itself(w: &Wait) -> bool {
+    let relaxation_coming = w.escalates_at.is_some() || w.auto_escalated || w.user_escalated;
+    relaxation_coming && !w.blockers.is_empty() && w.blockers.iter().all(|b| b.why == "working")
 }
 
 /// 這張核准要不要因為使用者按了「現在換版」而放寬：只認這次部署（同一個 owner、還在等或已拿到窗口在換）的**自動**核准

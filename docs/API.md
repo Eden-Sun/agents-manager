@@ -2576,7 +2576,7 @@ CLI：`agents-managerd release-triage-check --kind <claude|codex> [--since <ver>
   `items` 是 failing 的**樣本**（最多 20 筆、試最多次的在前、帶 `last_error`），`items_truncated:true` 代表還有更多沒列出來——要全部就看 `failing`。
   因為數字精確、樣本有界，這一段**不分頁**：它是健康快照裡一段固定大小的摘要，不是列表 API。讀不到時整段是 `null`——觀測不該變成新的故障點。
 - `POST /api/supervisor/ops-alerts {source,reason,detail?}` → `{queued,inbox_event_id,event_key}`。排程腳本（`scripts/ops/*`）卡住、自己解不開時喊人：
-  寫一則 inbox `ops_alert`（路由給巡檢、叫醒）。`source`／`reason` 各 1–64 字的 `[A-Za-z0-9._-]`（不合格 400），`detail` 截到 2000 字。
+  寫一則 inbox `ops_alert`（路由給巡檢；同一件事——同 `source`+`reason`+bot——12 小時內只有第一則叫醒，之後只記錄 `wake:false`，SPEC §18.15、issue #1478）。`source`／`reason` 各 1–64 字的 `[A-Za-z0-9._-]`（不合格 400），`detail` 截到 2000 字。
   event_key 帶小時格：同 `source`+`reason` 每小時最多一則（`queued:false` = 這小時已經有了）。
 - `GET /api/supervisor/incidents?all=0|1` → `{incidents:[{id,kind,resource,severity,status,detail,occurrences,first_seen_at,last_seen_at,resolved_at}],open,all}`。
   `kind`：`host_disconnected` | `bot_stopped` | `assignment_stalled` | `assignment_undelivered` | `notify_exhausted` | `role_unavailable` | `responder_undeliverable` | `approval_stalled` | `inbox_classify_failing` | `remote_shim_stale`（SPEC §18.9／§18.15；`inbox_classify_failing` 是 issue #472——`roles::classify` 連續 3 拍失敗，critical，resource 固定是 `inbox`，detail 帶 `consecutive_failures`／`action`；**這一種不入 inbox**，理由見下一行；`responder_undeliverable` 是 issue #420，`approval_stalled` 是 issue #421——核准開著 30 分鐘沒有任何人裁示，critical，resource 是核准 id，detail 帶 `approval_id`／`waiting_secs`／`requester`／`action`；`remote_shim_stale` 是 issue #534——遠端 shim 補版退避重試（立刻／5 分／15 分／60 分）都失敗、或有檔案換不動，degraded，resource 是 host 名，detail 帶 `why`／`action`，補成就自動恢復）。一個 resource 同時只有一筆 open；開啟與恢復各推 inbox `incident_opened` / `incident_resolved`。
@@ -2626,8 +2626,8 @@ CLI：`agents-managerd release-triage-check --kind <claude|codex> [--since <ver>
 
 ### 部署等太久：通知與調度 `/api/deploy/wait/*`（SPEC §18.10，使用者 2026-10-04，issue #856）
 - 一次部署（同一個 owner 連續在試 restart-window；換 commit、換核准都算同一次）從開始等窗口起滿 3 分鐘還沒拿到，daemon 通知一次：
-  WS `deploy_wait {wait, first:true}` 與 supervisor inbox `deploy_waiting`（巡檢收、叫醒 `wake:true`；`payload.text` 是給人看的一句話）。之後只在狀態轉換時推 inbox（同一個 `id`、`rev` 遞增，inbox 的 `event_key` 是 `deploy_waiting:<id>:<rev>`）：
-  使用者按鈕（現在換版／先等）、自動放寬生效、拿到窗口、換版完成（新 daemon 開機確認跑的是那顆）或放棄（15 分鐘沒再試、換版後回滾）。擋住名單變動不單獨推 inbox（WS 照發供網頁更新名單）；且拿到窗口但 §3a abort 退回等待的循環同一 sha 最多每 30 分鐘推一則。除首次超過 3 分鐘設 `wake:true` 叫醒巡檢外，其餘通知設 `wake:false` 僅供留存調度紀錄。
+  WS `deploy_wait {wait, first:true}` 與 supervisor inbox `deploy_waiting`（巡檢收；`payload.text` 是給人看的一句話；`wake:true` 只在放寬放不行時設，見下）。之後只在狀態轉換時推 inbox（同一個 `id`、`rev` 遞增，inbox 的 `event_key` 是 `deploy_waiting:<id>:<rev>`）：
+  使用者按鈕（現在換版／先等）、自動放寬生效、拿到窗口、換版完成（新 daemon 開機確認跑的是那顆）或放棄（15 分鐘沒再試、換版後回滾）。擋住名單變動不單獨推 inbox（WS 照發供網頁更新名單）；且拿到窗口但 §3a abort 退回等待的循環同一 sha 最多每 30 分鐘推一則。首次超過 3 分鐘的通知，只有「擋住的**只有** working 的 bot、而且放寬已排定（`escalates_at` 有值，或已自動／手動放寬）」時設 `wake:false`（幾分鐘後自己會換，只留紀錄）；其餘（有 `delivering`／`unreadable`／`lease` 擋著、沒有擋住名單或沒排放寬）設 `wake:true` 叫醒巡檢請使用者調度。後續通知一律 `wake:false` 僅供留存調度紀錄。（issue #1478）
 - `wait`（也在 `GET /api/state` 的 `deploy_wait`；沒通知過是 `null`，結束的再留 10 分鐘）：
   `{id, commit, since, waited_secs, blockers:[{bot_id|null, name, why:"working"|"delivering"|"unreadable"|"lease"}], escalates_at|null, user_escalated, auto_escalated, dismissed, phase:"waiting"|"swapping"|"done"|"abandoned", rev, notified_at, ended_at, summary}`；`auto_escalated:true` 表示等候門檻已自動放寬。
 - `POST /api/deploy/wait/escalate {id}`：「現在換版」。這次部署的**自動**核准（`decided_by=service(daemon-swap)`、同一個 owner）當成已等滿放寬門檻：working 不擋，

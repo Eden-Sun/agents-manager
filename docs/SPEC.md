@@ -4398,7 +4398,7 @@ incident 以資源為單位持久化（`supervisor_incidents`，`(kind, resource
   門檻使用首次觀測後的單調經過時間，系統時鐘往回調不會把正在累積的 120／300 秒 incident 延後；重啟後仍從首次觀測重新計時。incident 已達門檻但開啟交易失敗時會保留待補通知，即使探針先看到恢復也會先補開，下一拍再關閉。`health_changed` 只有 inbox 寫入成功後才確認 debounce，寫入失敗會以同一個 event key 重試。
   例外 `notify_exhausted`：它說的是巡檢的通知送不出去，推給巡檢等於送進壞掉的那條路（事件又會用盡、再開一筆）。協調者建立時推給**協調者**（佇列沒有次數上限，不會遞迴）；沒有協調者就只留在 UI 與 `system_health`，不入 inbox。
 - `assignment_undelivered` 獨立一條：每次重試 `defer` 會推 `updated_at`，stalled 看不到它。被拒的真正理由（`bot has no active run`、`needs_login`）記在 `error`。
-- **排程腳本卡住**：`scripts/ops/*` 停住而且自己解不開時走 `POST /api/supervisor/ops-alerts`，寫一則 inbox `ops_alert`（巡檢收、叫醒），
+- **排程腳本卡住**：`scripts/ops/*` 停住而且自己解不開時走 `POST /api/supervisor/ops-alerts`，寫一則 inbox `ops_alert`（巡檢收、叫醒；同一件事 12 小時內只有第一則叫醒，§18.15），
   同 `source`+`reason` 每小時最多一則。以前那幾支只寫自己的 log 就 `exit 0`——正式 daemon 從此不再自動換版而沒有任何人知道（review 2026-09-16 c1 M1）。
   `daemon-update-kick.sh` 與 `release-triage-kick.sh` 的目錄鎖帶 pid 與時間，另以 OS advisory lock 串行化鎖建立與殘留回收，避免兩個排程同時刪掉對方剛重建的鎖、重複建置或派工。執行者不在了（強制關機、SIGKILL）且沒有行程仍持 advisory lock 時就回收接手；活 runner 在安靜門檻內不洗 log，超過 `AGM_LOCK_HUNG_SECS`（部署 7200 秒、分診 3600 秒）才喊人。若子行程仍握著 advisory lock、owner 已無法驗證，超過 hung 門檻也會告警，不會無限安靜跳過。
   例行部署不再開核准單，所以沒有「協調者不裁示」這一種卡法（2026-09-29 拿掉 `approval_undecided`）。
@@ -4530,7 +4530,7 @@ incident 以資源為單位持久化（`supervisor_incidents`，`(kind, resource
 - **部署等太久就請使用者調度**（使用者 2026-10-04：「等待部署超過 3 分鐘，馬上通知 user 調度」，`daemon/src/deploy_wait.rs`，issue #856）：
   例行自動部署與立即部署都走 daemon-swap → restart-window，每次試窗口都回報。**一次部署**＝同一個 owner 連續在試的那段（換 commit、換核准都算同一次；
   拿到窗口換好、15 分鐘沒再試、或換版後回滾才結束）。從開始等窗口（核准的 `waiting_since`）滿 **3 分鐘**還沒拿到就通知一次：WS `deploy_wait`（網頁側欄標題列
-  「⏳ 部署等 N 分」＋toast）與 inbox `deploy_waiting`（巡檢收、叫醒 `wake:true`，由它經 Remote Control 告訴使用者）；內容是要上的 commit、等了多久、被誰擋
+  「⏳ 部署等 N 分」＋toast）與 inbox `deploy_waiting`（巡檢收；擋住的**只有** working 的 bot 且放寬已排定時 `wake:false`——幾分鐘後自己會換，只記錄不叫醒 LLM；有送達中、讀不到狀態、別人的租約擋著，或沒排放寬時 `wake:true`，issue #1478）；內容是要上的 commit、等了多久、被誰擋
   （working／送達中的 bot 名、讀不到狀態、別人的租約）、預計幾點自動放寬。之後只在狀態轉換時推 inbox（同一個 `id`、`rev` 遞增）：使用者按鈕（現在換版／先等）、
   自動放寬生效、拿到窗口、換好（新 daemon 開機確認跑的是那顆）或放棄才更新同一則；擋住名單變動不單獨推 inbox（WS frame 照常推送供網頁即時更新名單），
   且「拿到窗口→§3a 複查 abort 退回交還」的循環同一 sha 最多每 30 分鐘推一則；`wait.auto_escalated` 表示等待門檻已自動放寬。除首次超過 3 分鐘設 `wake:true` 叫醒巡檢外，其餘轉換皆為 `wake:false` 僅做紀錄。
@@ -4548,7 +4548,7 @@ incident 以資源為單位持久化（`supervisor_incidents`，`(kind, resource
   新開的那張接過它的 `waiting_since`（換 commit 也接）——以前每輪都在瞬間閒置時拿到窗口、§3a 複查又看到有人 working 而交還，
   `escalates_at` 每輪往後推 5 分鐘，忙碌的機群永遠等不到放寬。等滿門檻後 acquire 與 §3a 複查（同一張核准的 safety）一樣只剩送達臨界區、
   別人的租約、讀不到狀態會擋。
-  被擋的 bot 名字可以點，直接跳過去看它在忙什麼。AGM 看到 `deploy_waiting` 也要立刻轉告使用者、請使用者調度，不自己默默等（兩份 persona）。
+  被擋的 bot 名字可以點，直接跳過去看它在忙什麼。AGM 看到 `wake:true` 的 `deploy_waiting` 要立刻轉告使用者、請使用者調度，不自己默默等（兩份 persona）；`wake:false` 的使用者在網頁 header／toast 已經看到，AGM 不必再講。
 - 運維腳本在 `scripts/ops/`，附隔離測試（`scripts/ops/daemon-update-kick_test.sh`，假 CLI + 暫存 repo）。
 - 邊界：租約只約束走 API 與這些腳本的路徑，shell 仍可直接 kill daemon 或 `cargo build --release`。租約讓「問過 AGM」在執行期間持續成立，不取代它。
 
@@ -4837,6 +4837,13 @@ AGM 是使用者唯一的手機入口，但 `--remote-control AGM` 只是 argv �
   **不從「寄件時在哪種回合」推斷**（review 2026-09-16 H1）：以前 bot 在通知型交辦的回合裡、或角色在收到對方那一批的回合裡送出的一律當回覆，
   「已核准可以建置」回合裡接著送的「建置完成，請核准重啟」、協調者交接回巡檢的「要使用者裁示」都被標成只記錄而吞掉。沒標記、或 `reply_to` 對不上的一律叫醒；
   角色之間的回信迴圈靠 persona 要求回信帶 `--ack`／`--reply-to`，以及兩邊各自的喚醒節流（巡檢 600 秒、協調者短窗批次）收斂。
+- **重複提醒退避**（issue #1478）：同一件**未解決**的 `ops_alert`（同 `source`＋`reason`＋`subject`＋`bot_id`，`detail` 不比）在 `roles::REPEAT_WAKE_BACKOFF_SECS`（12 小時）內只有第一次 `wake=1`，窗內的重複照常入列（稽核、UI 看得到、跟下一次喚醒一起送）但 `wake=0`。
+  窗從**上一次真的叫醒**起算（被退避壓掉的不算），所以沒解決的事每 12 小時最多再提醒一次。判斷在 `roles::classify`（路由表算出叫醒之後的最後一關），只套用 `ops_alert`：近 7 天 93 次 `ops_alert` 喚醒大半是同一支腳本的同一個 `reason` 每小時換小時格 `event_key` 重講（`swap_probe_skipped` 從「累計 70 次」講到「101 次」）。
+  新的 `reason`／`source`、別顆 bot 的同一個 `reason`、`pane_unowned`、`bot_request`、核准、incident 不在這條裡，各自照常叫醒。
+- **叫醒／只記錄的清單**（近 7 天 172 回合只有 2 回合是使用者交辦，其餘是 ack 通知，issue #1478）：
+  - **需要 AGM 判斷（`wake=1`）**：`ops_alert` 的新類型與退避窗外的再提醒、`incident_opened`（含 `role_unavailable`／`notify_exhausted` 給對方角色）、`bot_restart_failed`／`supervisor_restart_retry`／`bot_lost`、`responder_watchdog_gave_up`／`responder_bot_missing`／`watchdog_gave_up`、`pane_unowned`／`pane_orphaned`、`child_retire_refused`、`persona_changed`、`judge_stuck_screen`／`judge_same_work`、核准單（`approval_requested`，含 failover 改派給巡檢的）、未標回覆的 `bot_request`、交辦回報（`assignment_completed`／`failed`／`undeliverable`）、mission 事件、`health_changed` 任一半非 `healthy`、`deploy_waiting` 首次通知且放寬放不行（`deploy_wait::clears_itself` 為否）。
+  - **只留紀錄（`wake=0`）**：`health_changed` 兩半都 `healthy`（恢復）、`deploy_waiting` 的後續更新（自動放寬、拿到窗口、完成、放棄、使用者操作）與「只有 working 擋著、放寬已排定」的首次通知、`incident_resolved`、退避窗內重複的 `ops_alert`、`assignment_noticed`／`queued`／`quota_*`、`judge_report_evidence`、`--ack`／`--reply-to` 的 `bot_request` 回覆。
+  - 不認得的新事件種類仍預設叫醒巡檢（寧可被看見一次）；要降噪就在 `roles::known_route` 明寫分支。
 - **巡檢送前合併**：還沒送出的 `health_changed` 只留最新一筆；同一個 incident 在送出前就開了又恢復，兩筆一起結案（`acked_by=daemon`）。
 - **bot 找 AGM**：`POST /api/bots/{巡檢或協調者}/prompt` 帶 `relay_from=<bot>`、或 pane 裡 `herdr agent prompt <AGM>`（shim 先打 `/relay/announce`），
   協調者建立後都**不開回合**：寫成 `bot_request`（202，`routed`），shim 看到 `routed` 就不打進 pane。
