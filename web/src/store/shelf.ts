@@ -131,8 +131,10 @@ export const useShelf = create<ShelfState>((set, get) => ({
       const back: ShelfItem[] = []
       for (const it of items) {
         if (have.has(it.key) || s.items.length + back.length >= SHELF_MAX) continue
-        const n = Number(it.key.replace(/^s/, ''))
-        if (Number.isFinite(n) && n > seq) seq = n
+        // 只認舊版的 `s<n>` 計數鍵；新鍵的隨機前綴可能像數字或科學記號，不能當計數器（#1624）。
+        const legacy = /^s(\d+)$/.exec(it.key)
+        const n = legacy ? Number(legacy[1]) : NaN
+        if (Number.isSafeInteger(n) && n > seq) seq = n
         back.push({
           key: it.key,
           file: it.file,
