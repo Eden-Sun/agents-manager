@@ -302,7 +302,7 @@ pub(crate) async fn put_settings(State(app): State<Arc<App>>, Json(body): Json<S
             Ok(())
         })
         .await
-        .map_err(|e| LcError::Upstream(e.to_string()))?;
+        .map_err(crate::api::cfg_err)?;
     if let Some(staged) = staged {
         if let Err(e) = staged.publish() {
             let _ = app
