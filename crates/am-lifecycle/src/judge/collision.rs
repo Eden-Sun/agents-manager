@@ -973,6 +973,36 @@ mod tests {
         assert_eq!(inbox(&app).await.len(), hints.len());
     }
 
+    /// #1467：專案在遠端主機（m4p）時，派工與認領兩個入口跟本機專案一樣問、一樣記帳本、一樣推提示——daemon 這一側
+    /// 不看主機。（`agm issue claim` 從遠端 pane 送不進這支路由是另一回事：遠端沒有 `AM_PORT`，見 SPEC §4.3c。）
+    #[tokio::test]
+    async fn a_remote_hosts_project_is_compared_by_assignment_and_by_claim_like_a_local_one() {
+        let rig = stand(Mode::Noul(0.8), true, true).await;
+        let app = rig.env.app.clone();
+        sqlx::query("UPDATE projects SET host='m4p' WHERE id=?").bind(&rig.env.project_id).execute(&app.db).await.unwrap();
+        let bot = tt::claude_bot(&app, &rig.env.project_id, "ops-web").await;
+        let other = tt::claude_bot(&app, &rig.env.project_id, "ops-master").await;
+        crate::supervisor::store::insert_assignment(&app.db, None, &other.id, "old", "修 sidebar 的捲動 #1467", &[], None, true).await.unwrap();
+
+        let a = crate::supervisor::store::insert_assignment(&app.db, None, &bot.id, "new", "修 sidebar 的捲動殘影 #1467", &[], None, true).await.unwrap();
+        check_assignment(&app, &a.id).await.unwrap();
+        assert_eq!(shadow_rows(&app).await.len(), 1, "派工入口問了");
+        assert_eq!(inbox(&app).await.len(), 1);
+
+        let ask = ClaimAsk {
+            project_id: rig.env.project_id.clone(),
+            caller: bot.id.clone(),
+            issue: Some(1467),
+            title: "修 sidebar 的捲動殘影".into(),
+            child: "ops-web".into(),
+            branch: None,
+        };
+        check_claim(&app, &ask).await.unwrap();
+        let rows = shadow_rows(&app).await;
+        assert_eq!(rows.len(), 2, "認領入口也問了：{rows:?}");
+        assert!(rows.iter().all(|r| r.1 == Some(0.8) && r.2.is_none()));
+    }
+
     #[tokio::test]
     async fn half_hints_and_just_under_only_records() {
         let rig = stand(Mode::Noul(0.5), true, true).await;
