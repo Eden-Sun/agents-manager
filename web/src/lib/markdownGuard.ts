@@ -26,7 +26,8 @@ export function markdownTooDeep(text: string): boolean {
     }
     if (indent > MARKDOWN_MAX_INDENT && i < n && text[i] !== '\n') return true // 只有空白的行不算
     let quotes = 0
-    while (i < n && (text[i] === '>' || text[i] === ' ')) {
+    // `>` 之間的空白（空格或 tab）都跳過：remark 把 `>\t>` 照樣解析成巢狀。
+    while (i < n && (text[i] === '>' || text[i] === ' ' || text[i] === '\t')) {
       if (text[i] === '>' && ++quotes > MARKDOWN_MAX_QUOTE_DEPTH) return true
       i++
     }
