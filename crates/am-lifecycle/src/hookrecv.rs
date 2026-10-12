@@ -1750,6 +1750,8 @@ async fn process_locked_for_with_outcome<H: HookHost>(
                 // 收件匣重試時才不會被去重擋掉、留下一筆沒有回覆的 completed 回合。
                 let mut tx = app.db().begin().await?;
                 let native = native_evidence(app, &bot.id, session_id.as_deref(), turn_id.as_deref()).await?;
+                #[cfg(all(test, feature = "daemon-test-harness"))]
+                crate::lifecycle::race_point::hit("hook_before_complete_cas", &t.id).await;
                 let claimed = tx.complete_with_native_evidence(&t.id, admitted, native).await?;
                 match &claimed {
                     lifecycle::turn_controller::Outcome::Applied => {
@@ -1770,6 +1772,11 @@ async fn process_locked_for_with_outcome<H: HookHost>(
                         store_resent_prompt(app, &bot.id, &conv, &t, run.as_ref(), &body.payload, transcript_read_path.as_deref()).await?;
                         *accepted_turn_id = Some(t.id.clone());
                         return Ok(());
+                    }
+                    // This hook still writes its reply after losing to another terminal status;
+                    // make the inbox replay key atomic with that accepted reply as well.
+                    lifecycle::turn_controller::Outcome::Raced { .. } => {
+                        stamp_source_event(&mut tx, &t.id, event_id).await?;
                     }
                     _ => {}
                 }
