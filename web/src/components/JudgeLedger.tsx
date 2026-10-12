@@ -7,6 +7,9 @@ import { fetchJudgeShadow, type JudgeShadow } from '../api/judge'
 import { useStore } from '../store/store'
 import { botLabel, JUDGE_SCENES, JUDGE_WINDOWS, overThreshold, probabilityText, recentRows, sceneStats, type JudgeWindow } from '../lib/judgeStats'
 
+/** 帳本一次拿的筆數（`fetchJudgeShadow` 預設值）；到了這個數字，統計只算得到這麼多筆。 */
+const LEDGER_LIMIT = 200
+
 type LedgerLoad = { kind: 'loading' } | { kind: 'unsupported' } | { kind: 'error'; message: string } | { kind: 'ok'; shadow: JudgeShadow }
 
 const sceneName = (id: string) => JUDGE_SCENES.find((s) => s.id === id)?.name ?? id
@@ -24,7 +27,7 @@ export function JudgeLedger() {
 
   useEffect(() => {
     let alive = true
-    fetchJudgeShadow()
+    fetchJudgeShadow(LEDGER_LIMIT)
       .then((shadow) => {
         if (!alive) return
         setLoad(shadow ? { kind: 'ok', shadow } : { kind: 'unsupported' })
@@ -82,6 +85,9 @@ function LedgerBody({ shadow, bots }: { shadow: JudgeShadow; bots: { id: string;
   const recent = recentRows(shadow.rows, 20)
   return (
     <>
+      {shadow.rows.length >= LEDGER_LIMIT ? (
+        <p className="hint">只統計最近 {LEDGER_LIMIT} 筆：「全部」與「近 7 天」可能少算更早的紀錄。</p>
+      ) : null}
       <div className="judge-ledger-scroll">
         <table className="judge-ledger-table" role="table">
           <thead role="rowgroup">

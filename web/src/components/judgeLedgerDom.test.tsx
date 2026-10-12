@@ -143,3 +143,16 @@ test('讀失敗（500）：顯示真正的錯誤並給重試；按重試會再�
   await settle(200)
   assert.equal(hits['/judge/shadow'], 2, '重試要重新打一次')
 })
+
+test('帳本只拿到最近 200 筆時要講清楚：「全部」與「近 7 天」是這 200 筆裡算的，不是全部紀錄', async () => {
+  setBots()
+  const rows = Array.from({ length: 200 }, () => row({ regex_verdict: 'stuck_queued', at: ago(1), jev_is_live_ui: 0.1 }))
+  stubApi({
+    '/judge/settings': { status: 200, body: SETTINGS },
+    '/judge/shadow': { status: 200, body: { enabled: true, projects: [], model: 'jev-1.13.0', rows } },
+  })
+  const root = await mount(<JudgePanel />)
+  await settle(200)
+  const ledger = root.querySelector('.judge-ledger')!
+  assert.match(ledger.textContent ?? '', /最近 200 筆/, '到上限就要說明，不能讓「全部」看起來是全部')
+})
