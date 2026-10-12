@@ -81,3 +81,17 @@ test('#546：畫面換掉了就不送，講一句讓人再點一次', async () =
     assert.deepEqual(gone.pressed, [], `不該送出任何鍵：${JSON.stringify(screen)}`)
   }
 })
+
+test('非 CSI 的 escape（字元集切換 `ESC ( B`、OSC 標題）夾在提示前面也要認得出來', () => {
+  const ESC = String.fromCharCode(27)
+  const screen = [
+    '  ✨ Update available! 0.153.4 -> 0.154.0',
+    '  Release notes: https://github.com/openai/codex/releases',
+    "> 1. Update now (runs `sh -c 'curl -fsSL ...'`)",
+    '  2. Skip',
+  ]
+  const want = { from: '0.153.4', to: '0.154.0', interactive: true }
+  assert.deepEqual(parseCodexUpdatePrompt(`${ESC}(B${ESC}[m${screen.join('\n')}`), want, 'ESC ( B')
+  assert.deepEqual(parseCodexUpdatePrompt(`${ESC}]0;codex\x07${screen.join('\n')}`), want, 'OSC（BEL 結尾）')
+  assert.deepEqual(parseCodexUpdatePrompt(`${ESC}]0;codex${ESC}\\${screen.join('\n')}`), want, 'OSC（ST 結尾）')
+})
