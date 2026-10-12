@@ -45,6 +45,11 @@ pub async fn is_shared(app: &impl SharedHostEnv, host: &str) -> bool {
     host != crate::config::LOCAL_HOST && app.host_flagged_shared(host).await
 }
 
+/// [`is_shared`] 的同義讀取，但讀呼叫端已經取好的設定快照：`/state` 一次請求只 clone 一次設定（#1663）。
+pub fn flagged_in(cfg: &crate::config::ConfigFile, host: &str) -> bool {
+    host != crate::config::LOCAL_HOST && cfg.hosts.iter().any(|h| h.name == host && h.shared_session)
+}
+
 /// 這顆 daemon 在一台主機上擁有的 herdr 物件。
 #[derive(Debug, Default)]
 pub struct Owned {

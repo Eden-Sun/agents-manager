@@ -1394,7 +1394,7 @@ pub(crate) fn lamp(connected: bool, run: Option<&db::Run>) -> &'static str {
 }
 
 /// SPEC §11.6. `local` always comes first.
-async fn hosts_list(app: &Arc<App>) -> Vec<Value> {
+async fn hosts_list(app: &Arc<App>, cfg: &crate::config::ConfigFile) -> Vec<Value> {
     let mut out = Vec::new();
     let tools = app.tools.lock().await.clone();
     let baselines = app.host_baseline.lock().await.clone();
@@ -1409,7 +1409,7 @@ async fn hosts_list(app: &Arc<App>) -> Vec<Value> {
             "herdr_session": c.cfg.as_ref().map(|x| x.herdr_session.clone()).unwrap_or_else(|| app.herdr_session.clone()),
             "remote_path": c.cfg.as_ref().map(|x| x.remote_path.clone()),
             // #709：讀當下的設定（改了不重連，連線上的快照會是舊的）。
-            "shared_session": crate::shared_host::is_shared(app, &c.name).await,
+            "shared_session": crate::shared_host::flagged_in(cfg, &c.name),
             "connected": connected,
             "error": c.error_string().await,
             // 遠端斷線起點；連著／本機為 null（UI 的離線警示條算「離線多久」）。
@@ -1431,6 +1431,8 @@ async fn hosts_list(app: &Arc<App>) -> Vec<Value> {
 }
 
 pub async fn state_json(app: &Arc<App>) -> Result<Value, LcError> {
+    // 整份設定一次請求只取一份（#1663）：hosts 逐台讀會是 N 次整份 clone。
+    let cfg = app.cfg.get().await;
     let connected = app.connected.load(Ordering::SeqCst);
     let projects = db::live_projects(&app.db).await.map_err(any_err)?;
     let bots = db::live_bots(&app.db).await.map_err(any_err)?;
@@ -1529,8 +1531,8 @@ pub async fn state_json(app: &Arc<App>) -> Result<Value, LcError> {
         "connected": connected,
         "default_connected": app.default_connected.load(Ordering::SeqCst),
         "herdr_session": app.herdr_session,
-        "hosts": hosts_list(app).await,
-        "identities": app.cfg.get().await.identities,
+        "hosts": hosts_list(app, &cfg).await,
+        "identities": cfg.identities,
         "projects": out,
     }))
 }
@@ -4651,7 +4653,7 @@ mod project_tests {
         let app = e.app.clone();
         crate::runners::am_base_tests::shared_host::tests::shared_host(&e, true).await;
         let flag = |app: Arc<App>| async move {
-            hosts_list(&app).await.into_iter().find(|h| h["name"] == "sh1").unwrap()["shared_session"].clone()
+            hosts_list(&app, &app.cfg.get().await).await.into_iter().find(|h| h["name"] == "sh1").unwrap()["shared_session"].clone()
         };
         assert_eq!(flag(app.clone()).await, json!(true));
 
@@ -15109,6 +15111,39 @@ mod state_query_count_tests {
         assert_eq!(lamp("idle"), "disconnected");
     }
 
+    /// #1663：`/state` 取 config 的次數不隨主機數成長。舊寫法 `hosts_list` 每台主機的 `is_shared` 各 clone 一次整份設定，
+    /// web 在 herdr 斷線時每 3 秒打一次 `/state`，就是 N 次 clone。
+    #[tokio::test]
+    async fn config_reads_per_state_do_not_grow_with_hosts() {
+        let env = crate::testing::env().await;
+        for i in 0..5 {
+            let b = crate::testing::claude_bot(&env.app, &env.project_id, &format!("cfg{i}")).await;
+            crate::testing::fake_run(&env.app, &b.id).await;
+        }
+        let reads = |app: Arc<App>| async move {
+            am_config::GET_CALLS.with(|c| c.set(0));
+            state_json(&app).await.unwrap();
+            am_config::GET_CALLS.with(|c| c.get())
+        };
+        let local_only = reads(env.app.clone()).await;
+        for i in 0..10 {
+            env.app
+                .hosts
+                .insert_remote_for_test(crate::config::HostCfg {
+                    shared_session: false,
+                    name: format!("cfg-host-{i}"),
+                    ssh: "unused".into(),
+                    ssh_port: 22,
+                    ssh_opts: vec![],
+                    herdr_session: "am-test".into(),
+                    remote_path: String::new(),
+                })
+                .await;
+        }
+        let with_hosts = reads(env.app.clone()).await;
+        assert_eq!(with_hosts, local_only, "/state 取 config 的次數不能隨主機數成長（只有本機 {local_only} 次，加 10 台後 {with_hosts} 次）");
+    }
+
     #[tokio::test]
     async fn state_projects_a_short_name_for_legacy_children_without_rewriting_the_database() {
         let env = crate::testing::env().await;
@@ -15192,7 +15227,7 @@ mod state_cost_tests {
         med("queued_turn x bots", || async { for id in &ids { let _ = db::queued_turn_for_bot(&app.db, id).await; } }).await;
         med("bot_connected x bots", || async { for id in &ids { let _ = app.bot_connected(id).await; } }).await;
         med("cli_updates", || crate::cli_update::running_list(&app)).await;
-        med("hosts_list", || hosts_list(&app)).await;
+        med("hosts_list", || async { hosts_list(&app, &app.cfg.get().await).await }).await;
         med("cfg identities", || async { app.cfg.get().await.identities }).await;
         eprintln!("STATE bots={bots} size={size}B build p50={:?} max={:?} | serialize p50={:?} max={:?}", build[15], build[29], ser[15], ser[29]);
 

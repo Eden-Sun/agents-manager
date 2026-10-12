@@ -53,6 +53,7 @@ image = { version = "0.25", default-features = false, features = ["jpeg", "png",
 
 [dev-dependencies]
 am-base = { path = "../crates/am-base", features = ["test-hooks"] }
+am-config = { path = "../crates/am-config", features = ["test-hooks"] }
 # paused Tokio time for timer tests (lifecycle/queue.rs): same tokio crate, test builds only.
 tokio = { version = "1", features = ["full", "test-util"] }
 tower = { version = "0.5", features = ["util"] }
