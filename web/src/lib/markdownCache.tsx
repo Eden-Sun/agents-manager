@@ -9,6 +9,7 @@
  */
 import Markdown, { type UrlTransform } from 'react-markdown'
 import remarkGfm from 'remark-gfm'
+import { remarkTrimAutolinkPunct } from './markdownAutolink'
 import type { ReactNode } from 'react'
 import { markdownComponents } from './markdownComponents'
 import { markdownUrlTransform } from './markdownUrl'
@@ -67,7 +68,7 @@ export function renderMarkdown(
     chars -= content.length
   }
   parses++
-  const node = Markdown({ remarkPlugins: [remarkGfm], components, urlTransform, children: content })
+  const node = Markdown({ remarkPlugins: [remarkGfm, remarkTrimAutolinkPunct], components, urlTransform, children: content })
   if (content.length <= MARKDOWN_CACHE_MAX_ONE) {
     cache.set(content, { botId: bot, components, linkComponent: components.a, imageComponent: components.img, urlTransform, node })
     chars += content.length

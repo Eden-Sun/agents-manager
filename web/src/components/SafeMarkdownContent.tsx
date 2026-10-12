@@ -1,5 +1,6 @@
 import Markdown from 'react-markdown'
 import remarkGfm from 'remark-gfm'
+import { remarkTrimAutolinkPunct } from '../lib/markdownAutolink'
 import { renderMarkdown } from '../lib/markdownCache'
 import { markdownComponents } from '../lib/markdownComponents'
 import { markdownUrlTransform } from '../lib/markdownUrl'
@@ -8,7 +9,7 @@ import { markdownUrlTransform } from '../lib/markdownUrl'
 export default function SafeMarkdownContent({ text, botId, cache }: { text: string; botId?: string | null; cache: boolean }) {
   if (!cache)
     return (
-      <Markdown remarkPlugins={[remarkGfm]} components={markdownComponents(botId)} urlTransform={markdownUrlTransform}>
+      <Markdown remarkPlugins={[remarkGfm, remarkTrimAutolinkPunct]} components={markdownComponents(botId)} urlTransform={markdownUrlTransform}>
         {text}
       </Markdown>
     )

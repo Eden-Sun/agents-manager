@@ -21,6 +21,8 @@ test('src/share 只 import 自己資料夾、react、markdown 套件', () => {
         spec === '../lib/markdownGuard' ||
         // 送出的冪等鍵（#921）：純 sessionStorage 的小函式，自己不 import 任何東西（下面的測試守著這點）。
         spec === '../lib/createRequestId' ||
+        // 分享頁的訊息連結規則（#1556：同終端的網址規則）：純字串處理的 remark 外掛，不 import 任何東西（下面的測試守著這點）。
+        spec === '../lib/markdownAutolink' ||
         ['react', 'react-dom/client', 'react-markdown', 'remark-gfm'].includes(spec)
       assert.ok(ok, `${f} import 了 ${spec}：分享頁不能帶主 UI 的程式碼`)
     }
@@ -28,7 +30,7 @@ test('src/share 只 import 自己資料夾、react、markdown 套件', () => {
 })
 
 test('分享頁可 import 的 ../lib 檔自己不 import 任何東西（不能經它帶進 store／api）', () => {
-  for (const name of ['createRequestId.ts']) {
+  for (const name of ['createRequestId.ts', 'markdownAutolink.ts']) {
     const src = readFileSync(join(dir, '..', 'lib', name), 'utf8')
     assert.equal(/(?:from|import)\s*\(?\s*'/.test(src), false, `${name} 不能有 import`)
   }
