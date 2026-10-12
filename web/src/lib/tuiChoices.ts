@@ -258,6 +258,9 @@ export function parseChoiceMenu(text: string | null | undefined): TuiChoiceMenu 
     if (++tail > TAIL_LIMIT) return null
   }
   if (end < 0) return null
+  // 選項底下是空的輸入列（單獨一個 `❯`／`›`）＝這份選單是回覆裡的引文：真的選單會佔住輸入列，回合結束後底下
+  // 一定還印著空輸入列（同 daemon `tui_prompts::open_choice_menu` 的 composer 守衛）。按鍵直送終端，寧可不認。
+  if (lines.slice(end + 1).some((l) => /^[❯›]$/.test(l.replace(/[\s │┃╭╮╰╯─━▔]/g, '')))) return null
 
   // 2. 往上收到編號 1。編號間的非編號行都當說明（縮排靠不住：單選縮 5、多選縮 2），
   // 只挑出沒編號的 `Submit` 列。
