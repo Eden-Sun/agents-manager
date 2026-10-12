@@ -188,6 +188,13 @@
     免得把上一輪的問句抓成題目。截圖：`docs/screenshots/blocked-question-bullets/`（`before-1440` 是修正前，重現使用者那張）。
     ![修正前](screenshots/blocked-question-bullets/before-1440.png) ![修正後](screenshots/blocked-question-bullets/after-1440.png) ![手機](screenshots/blocked-question-bullets/after-390.png)
   - 單選送 ↓／↑ × n ＋ Enter（送前重讀畫面，選項變了就不送）；單選問卷用 radio。
+  - **AskUserQuestion 帶 `preview` 的並排版面**（2026-10-12 console-pm，issue #1473）：左欄編號選項、右欄是**游標所在那一項**的預覽框（`┌─┐ │ │ └─┘`），
+    框底下一行 `Notes: press n to add notes`、選項區底下沒編號的 `Chat about this`。`lib/tuiPreviewPane.ts` 先按終端格寬（CJK 兩格）把右欄切掉，
+    其餘照原解析器走；框內文字進 `choice.preview`（去框線、保留縮排），**只掛在游標那一項**——畫面上只有它，不替其他項捏造；移動游標才看得到別項的。
+    UI 把預覽用等寬字畫在選項清單下面（`bc-preview`，折行不橫捲）。左欄折到下一行的 `(Recommended)` 接回標題，不是說明。
+    `Notes:` 與 `Chat about this` 不是選項、不進預覽。**游標走到 `Chat about this` 時整份不認**：畫面上第 N 項的 `❯` 還留著（真機 2.1.296），
+    照認會把「游標在第 N 項」當真，Enter 其實落在 Chat about this。按鍵 2026-10-12 真機實測（claude 2.1.296、tmux 213×55）：↑／↓ 移游標、預覽跟著換，
+    Enter 選定；**數字鍵只移游標、不送出**——所以仍是 ↑／↓ × n ＋ Enter，不用數字鍵。
   - **多分頁／複選問卷走草稿模式**（`lib/choiceDraft.ts`，使用者指定「先讀完、離線作答、最後一次送出」）：只用導覽鍵預載每一頁 →
     本地作答不碰終端 → 送出時逐頁比對、只送差集、對不上就停。review 頁畫分頁列與「每題 → 答案」，點題目回那頁改。換頁送 ←／→，不送會改答案的鍵。
     **預載不走進 `✔ Submit` 頁**（2026-09-25 使用者：「輸入窗太怪了」）：送出頁照本地作答合成，只走到最後一題；只有一題的問卷完全不換頁。

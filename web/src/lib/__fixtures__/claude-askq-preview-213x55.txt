@@ -1,0 +1,54 @@
+             async with self.gate.slot():
+                 try:
+                     with http_errors("e-CALI"):
+                         return await ecard.lookup_insurers(client, insured_id, plate_no, self._captcha)
+                 except CaliError as e:
+                     if e.code is CaliErrorCode.BLOCKED:
+                         e.retry_after = self.gate.mark_blocked()
+                         log.error("e-CALI 封鎖我方 IP（%s），%d 秒內不再查詢", e.reason, e.retry_after)
+                     raise
+
+         async def _download_certificate(self, client: httpx.AsyncClient, insured_id: str, plate_no: str,
+                                         insurer_name: str, source: str, warnings: list[str],
+                                         queried_at: datetime) -> CaliCertificate:
+             insurer = find_insurer(insurer_name)
+             if insurer is None:
+                 raise CaliError(CaliErrorCode.INSURER_NOT_SUPPORTED, "承保公司的下載頁尚未接",
+                                 insurer=insurer_name)
+             try:
+                 with http_errors(f"{insurer.code} 下載頁"):
+                     download = await insurer.download(client, insured_id, plate_no, self._captcha)
+             except CaliError as e:
+                 e.insurer = insurer_name
+                 raise
+
+             fields: CertificateFields | None = None
+             try:
+
+─────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+ ☐ 回應格式
+
+│ 承保公司不在支援範圍時，回應要改成哪一種？（目前是 HTTP 501 錯誤，code=CALI_INSURER_NOT_SUPPORTED，已附 insurer 與中文說明）
+
+❯ 1. 改回 200 正常訊息            ┌──────────────────────────────────────────────────────────────────────────────────────────────────────────────────┐
+    (Recommended)                 │ HTTP 200                                                                                                         │
+  2. 維持錯誤，只改訊息           │ {                                                                                                                │
+                                  │   "status": "insurer_not_supported",                                                                             │
+                                  │   "plate_no": "ABC-1234",                                                                                        │
+                                  │   "insurer": {"name": "台灣產物保險股份有限公司", "code": null},                                                 │
+                                  │   "insurer_source": "ecard",                                                                                     │
+                                  │   "message": "已查到承保公司為台灣產物保險股份有限公司，本服務尚未支援該公司的強制證下載，請至該公司官網下載。", │
+                                  │   "compulsory_expiry": null,                                                                                     │
+                                  │   "certificate": null,                                                                                           │
+                                  │   "pdf": null,                                                                                                   │
+                                  │   "warnings": [],                                                                                                │
+                                  │   "queried_at": "..."                                                                                            │
+                                  │ }                                                                                                                │
+                                  └──────────────────────────────────────────────────────────────────────────────────────────────────────────────────┘
+
+                                  Notes: press n to add notes
+
+─────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+  Chat about this
+
+Enter to select · ↑/↓ to navigate · n to add notes · Esc to cancel

@@ -10,6 +10,8 @@
  * 整塊在畫面底（TAIL_LIMIT），缺一回 `null`，UI 退回按鍵面板。
  */
 
+import { splitPreviewPane } from './tuiPreviewPane.ts'
+
 export interface TuiChoice {
   /** 畫面上印的編號；送鍵時不靠它。 */
   number: number
@@ -20,6 +22,11 @@ export interface TuiChoice {
   current: boolean
   /** 多選的勾選狀態；單選一律 `null`。 */
   checked: boolean | null
+  /**
+   * 並排預覽版面（右欄預覽框，issue #1473）裡游標所在這一項的預覽文字，框線已去、縮排保留。
+   * 畫面上只有游標那一項有預覽，其他項與沒有預覽框的選單一律是空字串；不替其他項捏造。
+   */
+  preview: string
 }
 
 /** 分頁列的一格（問卷裡的一題）。 */
@@ -230,7 +237,10 @@ function dedentBlock(block: string[]): string[] {
 /** 認不出來回 `null`，呼叫端畫按鍵面板，不要猜。 */
 export function parseChoiceMenu(text: string | null | undefined): TuiChoiceMenu | null {
   if (!text) return null
-  const all = text.split('\n').map(stripBox)
+  // 並排預覽版面先把右欄切掉（見 tuiPreviewPane.ts）；沒有那種框就是原樣。
+  const raw = text.split('\n')
+  const side = splitPreviewPane(raw)
+  const all = (side ? side.lines : raw).map(stripBox)
   const lines = all.slice(Math.max(0, all.length - SCAN_LINES))
 
   // 1. 由下往上找最後一個選項行。
@@ -291,6 +301,12 @@ export function parseChoiceMenu(text: string | null | undefined): TuiChoiceMenu 
     }
   }
 
+  // 並排預覽版面：游標走到選項底下沒編號的 `Chat about this` 時，畫面上第 N 項的 `❯` 還留著（真機 2.1.296），
+  // 算下去會把「游標在第 N 項」當真而按錯鍵——Enter 其實落在 Chat about this。底下有記號行就整份不認。
+  if (side) {
+    for (let i = end + 1; i < lines.length; i++) if (hasMarker(lines[i])) return null
+  }
+
   // 游標記號剛好一個：零個＝捲出畫面算不出步數，多個＝正文引用之類不是選單。
   const blockTop = rows[0].line
   const blockEnd = Math.max(end, submitLine)
@@ -313,7 +329,17 @@ export function parseChoiceMenu(text: string | null | undefined): TuiChoiceMenu 
       if (idx + 1 === rows.length && indentOf(s) < 2) break
       detail = joinWrapped(detail, s.trim())
     }
-    return { number: row.number, title: row.title, detail, current: row.marker, checked: row.checked }
+    // 並排版面的左欄只有標籤、沒有說明：下一行縮進的 `(Recommended)` 是標籤折下來的，接回標題。
+    // claude 自己加的 ` (Recommended)` 前面本來就是空白，CJK 結尾時 joinWrapped 會把它黏死。
+    const title = side ? (detail.startsWith('(') ? `${row.title} ${detail}` : joinWrapped(row.title, detail)) : row.title
+    return {
+      number: row.number,
+      title,
+      detail: side ? '' : detail,
+      current: row.marker,
+      checked: row.checked,
+      preview: side && row.marker ? side.preview : '',
+    }
   })
 
   // 4. 問題。
