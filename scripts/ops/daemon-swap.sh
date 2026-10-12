@@ -38,17 +38,23 @@ PLATFORM="${AGM_OPS_PLATFORM:-$(uname -s | tr 'A-Z' 'a-z')}"
 PGREP="${PGREP_BIN:-pgrep}"
 PYTHON="${PYTHON_BIN:-python3}"
 HERDR="${HERDR_BIN:-herdr}"
-# 3b 自測對象，順序：SWAP_PROBE_BOT ＞ $AGM_DIR/runtime.json 的 swap_probe_bot_id ＞ 舊常數（AGM 的 browser-gc child，搬家後常常不在，issue #882）。
+# 3b 自測對象，順序：SWAP_PROBE_BOT ＞ $AGM_DIR/runtime.json 的 swap_probe_bot_id ＞ 同檔的 manager_bot_id（巡檢 AGM 本人：常駐、一定在）。
+# 以前最後一順位是寫死的 browser-gc child id（issue #882）：那顆早就不跑，自測連續略過上百次（使用者 2026-10-12 裁示改指 AGM）。
+# 三個都拿不到就留空，3b 照「對象沒有 run」的既有路徑略過並計數。
 PROBE_BOT="${SWAP_PROBE_BOT:-}"
 if [ -z "$PROBE_BOT" ]; then
     PROBE_BOT=$("$PYTHON" -c 'import json,sys
 try:
-    v = json.load(open(sys.argv[1])).get("swap_probe_bot_id")
+    d = json.load(open(sys.argv[1]))
 except Exception:
-    v = None
-print(v.strip() if isinstance(v, str) and v.strip() and len(v.split()) == 1 else "")' "$AGM_DIR/runtime.json" 2>/dev/null) || PROBE_BOT=""
+    d = {}
+ok = lambda v: isinstance(v, str) and v.strip() and len(v.split()) == 1
+for k in ("swap_probe_bot_id", "manager_bot_id"):
+    v = d.get(k) if isinstance(d, dict) else None
+    if ok(v):
+        print(v.strip())
+        break' "$AGM_DIR/runtime.json" 2>/dev/null) || PROBE_BOT=""
 fi
-[ -n "$PROBE_BOT" ] || PROBE_BOT="01M248GA4H1TAHJCZRKVR73S3C"
 PROBE_SKIPS="$AGM_DIR/daemon-swap.probe-skips"   # 連續略過 3b 自測的次數（daemon-update-kick 讀它喊人）
 PROBE_TRIES="${SWAP_PROBE_TRIES:-12}"   # 對方正在跑回合時，等它結束重送的次數上限
 SETTLE="${SWAP_SETTLE_SECS:-45}"          # 重啟後等多久再看 supervisor／名單（測試會調小）
@@ -497,6 +503,10 @@ fi
 # 沒有東西可以送，不是送達線壞了；這一步略過（上面的 herdr 讀取仍然做了），不能讓每趟自動換版都卡在這。
 PROBE_SKIPPED=no
 i=0
+# 沒有任何自測對象（runtime.json 讀不到）：跟「對象沒有 run」同一條路略過並計數，不是送達線壞了。
+if [ -z "$PROBE_BOT" ]; then
+    PROBE="no active run (沒有設定自測對象)"; PROBE_SKIPPED=yes; i="$PROBE_TRIES"; PROBE_BOT="（未設定）"
+fi
 while [ "$i" -lt "$PROBE_TRIES" ]; do
     i=$((i + 1))
     PROBE=$(agm_probe "$PROBE_BOT")

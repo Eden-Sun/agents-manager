@@ -1260,7 +1260,7 @@ check_eq "略過計數：自測成功 rc=0" "0" "$rc"
 check_file "自測 200 成功就清掉計數檔" no "$AGM_DIR/daemon-swap.probe-skips"
 teardown
 
-# 16f-3. 自測對象的來源：SWAP_PROBE_BOT ＞ runtime.json 的 swap_probe_bot_id ＞ 舊常數。
+# 16f-3. 自測對象的來源：SWAP_PROBE_BOT ＞ runtime.json 的 swap_probe_bot_id ＞ runtime.json 的 manager_bot_id（AGM 本人）。
 setup 10 10
 unset SWAP_PROBE_BOT
 printf '{"swap_probe_bot_id": "bot-from-runtime"}\n' > "$AGM_DIR/runtime.json"
@@ -1270,10 +1270,27 @@ check "自測送給 runtime.json 的 bot" "bot-from-runtime" "$AGM_DIR/probe.log
 teardown
 setup 10 10
 unset SWAP_PROBE_BOT
-printf '{"swap_probe_bot_id": ""}\n' > "$AGM_DIR/runtime.json"
+printf '{"swap_probe_bot_id": "", "manager_bot_id": "bot-agm-self"}\n' > "$AGM_DIR/runtime.json"
 rc=$(run)
 check_eq "runtime.json 的值是空：rc=0" "0" "$rc"
-check "空值退回舊常數" "01M248GA4H1TAHJCZRKVR73S3C" "$AGM_DIR/probe.log"
+check "空值退回 manager_bot_id（AGM 本人）" "bot-agm-self" "$AGM_DIR/probe.log"
+check_no "不再用寫死的 browser-gc id" "01M248GA4H1TAHJCZRKVR73S3C" "$AGM_DIR/probe.log"
+teardown
+setup 10 10
+unset SWAP_PROBE_BOT
+printf '{"manager_bot_id": "bot-agm-self"}\n' > "$AGM_DIR/runtime.json"
+rc=$(run)
+check_eq "沒有 swap_probe_bot_id：rc=0" "0" "$rc"
+check "沒設就用 manager_bot_id" "bot-agm-self" "$AGM_DIR/probe.log"
+teardown
+setup 10 10
+unset SWAP_PROBE_BOT
+rm -f "$AGM_DIR/runtime.json" "$AGM_DIR/probe.log"
+rc=$(run)
+check_eq "完全沒有自測對象：略過、照樣換版（rc=0）" "0" "$rc"
+check "log 講明是略過" "3b 自測略過" "$SWAP_LOG"
+check_file "沒有對象就不送自測" no "$AGM_DIR/probe.log"
+check_file "略過要計數" yes "$AGM_DIR/daemon-swap.probe-skips"
 teardown
 setup 10 10
 printf '{"swap_probe_bot_id": "bot-from-runtime"}\n' > "$AGM_DIR/runtime.json"
