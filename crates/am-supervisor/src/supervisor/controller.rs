@@ -1208,7 +1208,7 @@ impl TurnEnd<'_> {
 /// This is the restart path, and the only correct handling of `unknown` delivery: look, do
 /// not re-send.
 pub async fn reconcile(app: &(impl crate::capabilities::Db + crate::capabilities::Emit + MissionOps + QuotaOps + JudgeOps + MissionCancellation)) {
-    let Ok(open) = store::open_assignments(app.db()).await else { return };
+    let Ok(open) = Box::pin(store::open_assignments(app.db())).await else { return };
     for a in open {
         let Some(turn_id) = a.turn_id.clone() else { continue };
         let Ok(turn) = sqlx::query_as::<_, crate::db::Turn>("SELECT * FROM turns WHERE id=?")
@@ -1221,16 +1221,16 @@ pub async fn reconcile(app: &(impl crate::capabilities::Db + crate::capabilities
         let Some(turn) = turn else {
             // The turn is gone (a purge, a rebuilt bot). We cannot say what became of the
             // work, so it goes to review rather than being called failed and forgotten.
-            settle(app, &a, "turn_missing", false, None, Some("turn no longer exists")).await;
+            Box::pin(settle(app, &a, "turn_missing", false, None, Some("turn no longer exists"))).await;
             continue;
         };
         if turn.status != "in_flight" && turn.status != "queued" {
-            on_turn_done(app, &turn_id, &turn.status).await;
+            Box::pin(on_turn_done(app, &turn_id, &turn.status)).await;
         }
     }
-    sweep_missing_events(app.db()).await;
-    sweep_late_replies(app).await;
-    app.collect_cancelled_missions().await;
+    Box::pin(sweep_missing_events(app.db())).await;
+    Box::pin(sweep_late_replies(app)).await;
+    Box::pin(app.collect_cancelled_missions()).await;
 }
 
 /// 已經結算過、但回合後來被遲到的 hook 補上回覆的交辦（`open_assignments` 只列執行中的，掃不到它們）。
@@ -1249,7 +1249,7 @@ async fn sweep_late_replies(app: &(impl crate::capabilities::Db + crate::capabil
     let Ok(rows) = rows else { return };
     for a in rows {
         let Some(turn_id) = a.turn_id.clone() else { continue };
-        late_reply(app, &a, &turn_id).await;
+        Box::pin(late_reply(app, &a, &turn_id)).await;
     }
 }
 

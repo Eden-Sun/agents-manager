@@ -55,8 +55,9 @@ pub async fn post_setup(State(app): State<Arc<App>>) -> Result<Json<Value>, LcEr
 /// `super::stop_requested`，不由每個呼叫端各自維護（issue #84）。
 pub async fn post_start(State(app): State<Arc<App>>) -> Result<Json<Value>, LcError> {
     let _g = super::lock().await;
-    super::start_requested(&app).await?;
-    Ok(Json(super::status_json(app.as_ref()).await?))
+    // 大 future 包成 Box（#1461）：debug 建置下 future 會在呼叫端的 poll 框裡各留一份，巢狀一深就撐爆測試執行緒的 2 MiB 堆疊。
+    Box::pin(super::start_requested(&app)).await?;
+    Ok(Json(Box::pin(super::status_json(app.as_ref())).await?))
 }
 
 pub async fn post_stop(State(app): State<Arc<App>>) -> Result<Json<Value>, LcError> {
