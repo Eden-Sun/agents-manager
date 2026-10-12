@@ -76,8 +76,8 @@ function del(keys: string[]): Promise<void> {
 
 let started = false
 
-/** Idempotent. */
-export function startShelfPersistence(): void {
+/** Idempotent. `shelf` defaults to the page's store; tests pass a second instance to play a second tab. */
+export function startShelfPersistence(shelf: typeof useShelf = useShelf): void {
   if (started) return
   started = true
 
@@ -87,7 +87,7 @@ export function startShelfPersistence(): void {
     const dead = rows.filter((r) => r.addedAt < cutoff).map((r) => r.key)
     if (dead.length) void del(dead)
     if (live.length) {
-      useShelf.getState().restore(
+      shelf.getState().restore(
         live
           .sort((a, b) => a.addedAt - b.addedAt)
           .map((r) => ({ key: r.key, file: new File([r.blob], r.name, { type: r.type }), addedAt: r.addedAt })),
@@ -95,8 +95,8 @@ export function startShelfPersistence(): void {
     }
   })
 
-  let prev = useShelf.getState().items
-  useShelf.subscribe((s) => {
+  let prev = shelf.getState().items
+  shelf.subscribe((s) => {
     if (s.items === prev) return
     const before = new Set(prev.map((it) => it.key))
     const after = new Set(s.items.map((it) => it.key))
@@ -107,5 +107,5 @@ export function startShelfPersistence(): void {
     if (removed.length) void del(removed)
   })
 
-  setInterval(() => useShelf.getState().expire(), SWEEP_MS)
+  setInterval(() => shelf.getState().expire(), SWEEP_MS)
 }
