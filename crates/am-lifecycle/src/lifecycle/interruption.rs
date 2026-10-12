@@ -598,7 +598,7 @@ pub fn schedule_retry<C: InterruptionContext>(app: &C, bot_id: &str) {
     }
     let app = (*app).clone();
     let bot_id = bot_id.to_string();
-    tokio::spawn(async move {
+    tokio::spawn(Box::pin(async move {
         for secs in RETRY_DELAYS_SECS {
             tokio::time::sleep(Duration::from_secs(secs)).await;
             // 欠著的補寫；待證的 Esc 再看一次 log（#223：它等不到回聲）。
@@ -609,7 +609,7 @@ pub fn schedule_retry<C: InterruptionContext>(app: &C, bot_id: &str) {
                 tracing::warn!(bot = %bot_id, error = %e, "打斷的收尾還是寫不進去；稍後再試");
             }
         }
-    });
+    }));
 }
 
 /// 鍵生效了、回合狀態沒寫成（#147）：503，跟 start／stop 的 `*_state_uncommitted` 同一種——外面的副作用已經做了、

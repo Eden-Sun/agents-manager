@@ -9,11 +9,11 @@ pub fn on_child_blocked(app: &Arc<App>, run: &db::Run) {
     }
     let (app, run) = (app.clone(), run.clone());
     let working = crate::child_alerts::Working::start(&run.bot_id);
-    tokio::spawn(async move {
+    tokio::spawn(Box::pin(async move {
         let _working = working;
         tokio::time::sleep(crate::child_alerts::SETTLE).await;
         crate::child_alerts::keep_telling(&app, &run, &crate::child_alerts::RETRY).await;
-    });
+    }));
 }
 
 /// 定時的安全網（#192，跟著卡住回合的定時掃描每分鐘一次）
@@ -39,10 +39,10 @@ pub async fn sweep(app: &Arc<App>) -> usize {
             continue;
         }
         let app = app.clone();
-        tokio::spawn(async move {
+        tokio::spawn(Box::pin(async move {
             let _working = working;
             crate::child_alerts::keep_telling(&app, &run, &crate::child_alerts::RETRY).await;
-        });
+        }));
     }
     started
 }

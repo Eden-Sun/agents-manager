@@ -125,7 +125,18 @@ pub async fn start_bot_locked_with(app: &impl StartContext, bot_id: &str, opts: 
     start_bot_locked_with_host_fence(app, bot_id, opts, None).await
 }
 
-async fn start_bot_locked_with_host_fence(
+/// #1465：debug 建置下 async fn 的 poll 框＝裡面每個 await 的暫存加總，呼叫端會把被呼叫的 future 整個值放進自己的框。
+/// 這幾支（start／restart 鏈上的大框）在**被呼叫端**這側 `Box::pin`：呼叫端只留一個指標，future 本體在 heap。
+fn start_bot_locked_with_host_fence<'a>(
+    app: &'a impl StartContext,
+    bot_id: &'a str,
+    opts: StartOpts,
+    fence: Option<&'a crate::hosts::HostFence>,
+) -> impl std::future::Future<Output = LcResult<String>> + 'a {
+    Box::pin(start_bot_locked_with_host_fence_body(app, bot_id, opts, fence))
+}
+
+async fn start_bot_locked_with_host_fence_body(
     app: &impl StartContext,
     bot_id: &str,
     opts: StartOpts,
@@ -1165,7 +1176,19 @@ async fn stage_persona(
     }
 }
 
-async fn start_inner(
+fn start_inner<'a>(
+    app: &'a impl StartContext,
+    bot: &'a db::Bot,
+    project: &'a db::Project,
+    run_id: &'a str,
+    session: &'a str,
+    opts: StartOpts,
+    fence: Option<&'a crate::hosts::HostFence>,
+) -> impl std::future::Future<Output = LcResult<()>> + 'a {
+    Box::pin(start_inner_body(app, bot, project, run_id, session, opts, fence))
+}
+
+async fn start_inner_body(
     app: &impl StartContext,
     bot: &db::Bot,
     project: &db::Project,
@@ -1632,7 +1655,16 @@ pub async fn restart_bot_with_host_fence(
     restart_bot_with_authority(app, bot_id, opts, Some(fence)).await
 }
 
-async fn restart_bot_with_authority(
+fn restart_bot_with_authority<'a>(
+    app: &'a impl StartContext,
+    bot_id: &'a str,
+    opts: StartOpts,
+    fence: Option<&'a crate::hosts::HostFence>,
+) -> impl std::future::Future<Output = LcResult<String>> + 'a {
+    Box::pin(restart_bot_with_authority_body(app, bot_id, opts, fence))
+}
+
+async fn restart_bot_with_authority_body(
     app: &impl StartContext,
     bot_id: &str,
     opts: StartOpts,
@@ -1724,7 +1756,17 @@ async fn settle_restart_intent(app: &(impl crate::capabilities::Db + crate::life
 }
 
 /// 停 → 起（原本 `restart_bot_with` 鎖裡的後半段，行為不變）。
-async fn restart_stop_and_start(
+fn restart_stop_and_start<'a>(
+    app: &'a impl StartContext,
+    bot_id: &'a str,
+    opts: StartOpts,
+    stopping: Option<String>,
+    fence: Option<&'a crate::hosts::HostFence>,
+) -> impl std::future::Future<Output = LcResult<String>> + 'a {
+    Box::pin(restart_stop_and_start_body(app, bot_id, opts, stopping, fence))
+}
+
+async fn restart_stop_and_start_body(
     app: &impl StartContext,
     bot_id: &str,
     opts: StartOpts,
@@ -1819,7 +1861,16 @@ pub async fn left_down_by_restart(app: &impl StartContext, bot_id: &str, run_id:
     }
 }
 
-pub async fn restart_start(
+pub fn restart_start<'a>(
+    app: &'a impl StartContext,
+    bot_id: &'a str,
+    opts: StartOpts,
+    fence: Option<&'a crate::hosts::HostFence>,
+) -> impl std::future::Future<Output = LcResult<String>> + 'a {
+    Box::pin(restart_start_body(app, bot_id, opts, fence))
+}
+
+async fn restart_start_body(
     app: &impl StartContext,
     bot_id: &str,
     opts: StartOpts,

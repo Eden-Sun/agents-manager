@@ -209,7 +209,7 @@ fn schedule<C: ResumeNudgeContext>(app: &C, bot_id: &str, delay: Duration) {
     }
     let app = (*app).clone();
     let bot_id = bot_id.to_string();
-    tokio::spawn(async move {
+    tokio::spawn(Box::pin(async move {
         if delay.is_zero() {
             tokio::task::yield_now().await;
         } else {
@@ -218,7 +218,7 @@ fn schedule<C: ResumeNudgeContext>(app: &C, bot_id: &str, delay: Duration) {
         let lock = app.bot_lock(&bot_id).await;
         let _g = lock.lock_owned().await;
         check_at(&app, &bot_id, Instant::now()).await;
-    });
+    }));
 }
 
 enum Verdict {

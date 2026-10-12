@@ -298,7 +298,7 @@ fn schedule_turn_event_retry(app: &impl LcHost, turn_id: &str) {
     };
 
     let (app, turn_id) = ((*app).clone(), turn_id.to_string());
-    tokio::spawn(async move {
+    tokio::spawn(Box::pin(async move {
         tokio::time::sleep(delay).await;
         let should_retry = TURN_EVENT_RETRIES.get_or_init(Default::default).lock().map(|mut retries| {
             retries.get_mut(&turn_id).filter(|retry| retry.pending == Some(generation)).map(|retry| {
@@ -308,7 +308,7 @@ fn schedule_turn_event_retry(app: &impl LcHost, turn_id: &str) {
         if should_retry {
             emit_turn(&app, &turn_id).await;
         }
-    });
+    }));
 }
 
 #[cfg(all(test, feature = "daemon-test-harness"))]

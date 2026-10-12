@@ -175,7 +175,7 @@ pub async fn rearm_queued_prompt_restamps(app: &(impl crate::capabilities::Db + 
 fn schedule_restamp_retry(app: &Arc<impl crate::capabilities::Db + crate::capabilities::Emit + crate::capabilities::Emit + crate::capabilities::BotStatusEmit + 'static>, turn_id: &str) {
     let app = (*app).clone();
     let turn_id = turn_id.to_string();
-    tokio::spawn(async move {
+    tokio::spawn(Box::pin(async move {
         let mut attempt = 0;
         loop {
             tokio::time::sleep(restamp_retry_delay(attempt)).await;
@@ -187,7 +187,7 @@ fn schedule_restamp_retry(app: &Arc<impl crate::capabilities::Db + crate::capabi
                 }
             }
         }
-    });
+    }));
 }
 
 fn restamp_retry_delay(attempt: usize) -> std::time::Duration {

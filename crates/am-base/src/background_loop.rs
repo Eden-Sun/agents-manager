@@ -42,10 +42,13 @@ where
     static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
     let id = NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     unfinished().lock().unwrap_or_else(|e| e.into_inner()).insert(id, name);
-    tracker.spawn(async move {
+    // Box::pin（#1465）：debug 建置下 tokio 的 spawn 會把 future 一層一層以值傳下去（每層一份副本），一個 25 KB 的 future 就用掉
+    // 1 MiB 以上的堆疊；先裝箱，外面兩層（登記守衛、spawn）就只搬一個指標。行為與沒裝箱時相同。
+    let fut = Box::pin(fut);
+    tracker.spawn(Box::pin(async move {
         let _registered = Registered(id);
         fut.await
-    })
+    }))
 }
 
 /// 現在還沒結束的工作名字（關機等待逾時時記進 log）。
@@ -110,7 +113,8 @@ where
             return;
         }
         let make = factory.clone();
-        let mut task = tokio::spawn(async move { make().await });
+        // Box::pin：理由同 `spawn_named`（#1465）。
+        let mut task = tokio::spawn(Box::pin(async move { make().await }));
         tokio::select! {
             result = &mut task => match result {
                 Ok(()) => return,

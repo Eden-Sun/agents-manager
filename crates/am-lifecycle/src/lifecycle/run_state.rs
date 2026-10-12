@@ -147,7 +147,7 @@ pub fn schedule_settle<A: RunStateServices + Clone>(app: &A, run_id: &str, how: 
     }
     let app = (*app).clone();
     let run_id = run_id.to_string();
-    tokio::spawn(async move {
+    tokio::spawn(Box::pin(async move {
         let mut settled = false;
         for secs in [2u64, 5, 15, 30, 60, 120] {
             tokio::time::sleep(Duration::from_secs(secs)).await;
@@ -162,7 +162,7 @@ pub fn schedule_settle<A: RunStateServices + Clone>(app: &A, run_id: &str, how: 
         if !settled {
             tracing::error!(run = %run_id, ?how, "run state still not settled after retries; the next reconcile (reconnect or restart) takes it");
         }
-    });
+    }));
 }
 
 /// 重試一次；回傳這顆 run 是不是已經不再等這一種重試。

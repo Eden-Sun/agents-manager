@@ -604,7 +604,7 @@ where
         g
     };
     let bot_id = bot_id.to_string();
-    tokio::spawn(async move {
+    tokio::spawn(Box::pin(async move {
         tokio::time::sleep(delay).await;
         let mine = timers.lock().map(|mut map| {
             if map.get(&bot_id).map(|(g, _)| *g) == Some(generation) {
@@ -617,7 +617,7 @@ where
         if mine.unwrap_or(false) {
             fire();
         }
-    });
+    }));
     true
 }
 
@@ -724,7 +724,7 @@ pub fn schedule_flush_queued<C: QueueContext>(app: &C, bot_id: &str) {
     {
         let app = (*app).clone();
         let bot_id = bot_id.to_string();
-        tokio::spawn(async move {
+        tokio::spawn(Box::pin(async move {
             // Let the caller finish its current event / status write before taking the same lock.
             tokio::task::yield_now().await;
             let lock = crate::capabilities::BotLocks::bot_lock(&app, &bot_id).await;
@@ -732,7 +732,7 @@ pub fn schedule_flush_queued<C: QueueContext>(app: &C, bot_id: &str) {
             if let Err(e) = flush_queued_locked(&app, &bot_id).await {
                 tracing::warn!(bot = %bot_id, error = ?e, "queued prompt flush failed");
             }
-        });
+        }));
     }
 }
 

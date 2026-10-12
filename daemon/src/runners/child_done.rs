@@ -62,7 +62,7 @@ pub fn on_completed_turn(app: &Arc<App>, turn_id: &str) {
         return;
     };
     let (app, turn_id) = (app.clone(), turn_id.to_string());
-    tokio::spawn(async move {
+    tokio::spawn(Box::pin(async move {
         let _working = working;
         // 畫面備援收的回合不一定是結尾：先等它安定，notify_turn 再看子 agent 是不是又在忙。
         let fallback: Option<String> = sqlx::query_scalar("SELECT status FROM turns WHERE id = ? AND status = 'completed_fallback'")
@@ -77,7 +77,7 @@ pub fn on_completed_turn(app: &Arc<App>, turn_id: &str) {
         if let Err(e) = notify_turn(&app, &turn_id).await {
             tracing::warn!(turn = %turn_id, error = ?e, "could not notify parent about completed child turn; sweep will retry");
         }
-    });
+    }));
 }
 
 /// Notify all completed child turns that have no durable parent notice yet.
