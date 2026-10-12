@@ -132,3 +132,22 @@ it('5h、7d、F 全部沒有值時保留「5h —」佔位', async () => {
   const names = [...cell.querySelectorAll('.quota-window-name')].map((el) => el.textContent)
   assert.deepEqual(names, ['5h'], `佔位仍是 5h，實際 ${JSON.stringify(names)}`)
 })
+
+test('cc0 共用裸 claude 額度：舊的 claude:cc0 殘留格不能蓋過落點（照 quotaBaseKey，只讀裸 key）', { timeout: 30_000 }, async () => {
+  const base = originalClaude ?? {}
+  const fresh = (used: number) => ({ ...base, five_hour: { ...(base.five_hour as Record<string, unknown>), used_pct: used, low: false, critical: false, resets_at: null }, seven_day: null, fable: null })
+  mock.quota.claude = fresh(10)
+  mock.quota['claude:cc0'] = fresh(99)
+  try {
+    mockApi(sharedMock)
+    await useStore.getState().refreshState()
+    await useStore.getState().loadQuota()
+    await mount(<QuotaStrip />)
+    await until(() => cellOf('cc0') !== null, 'cc0 格畫出來')
+    const title = cellOf('cc0')!.getAttribute('title') ?? ''
+    assert.match(title, /5 小時剩餘 90%/, title)
+  } finally {
+    mock.quota.claude = originalClaude
+    delete mock['quota']['claude:cc0']
+  }
+})

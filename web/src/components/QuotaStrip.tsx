@@ -61,14 +61,9 @@ function quotaTitle(host: string): string {
   return host === LOCAL_HOST ? '本機額度' : `${host} 的額度`
 }
 
-function useEntryQuota(entry: QuotaEntry, host: string): KindQuota | null {
-  const raw = useStore((s) => {
-    if (entry.identity) {
-      const keyed = quotaKey(host, `${entry.kind}:${entry.identity}`)
-      if (s.quota[keyed] != null) return s.quota[keyed]
-    }
-    return s.quota[entry.fullKey] ?? null
-  })
+function useEntryQuota(entry: QuotaEntry): KindQuota | null {
+  // 落點已經由 `collectEntries`（`quotaBaseKey`）定好：不能先看「自己那一格有沒有數字」，共用預設帳號的身分殘留的舊 `claude:<id>` 會蓋過裸 key。
+  const raw = useStore((s) => s.quota[entry.fullKey] ?? null)
   // codex 的方案沒有 5 小時窗時，沿用下來的舊 5h 與升級前的撞上限橫幅不畫（見 quotaNoFiveHour）。
   return useMemo(() => projectNoFiveHour(entry.kind, raw), [entry.kind, raw])
 }
@@ -395,7 +390,7 @@ function Gauge({
   open: boolean
   onOpen: () => void
 }) {
-  const q = useEntryQuota(entry, host)
+  const q = useEntryQuota(entry)
   const loggedOut = useLoggedOut(entry, host)
   const five = remaining(q?.five_hour)
   const seven = remaining(q?.seven_day)
@@ -590,7 +585,7 @@ function DisableToggle({ on, label: name, onToggle }: { on: boolean; label: stri
 
 /** 條上的停用開關（主要入口）；條子擠只留方塊，說明走 aria-label 與 `.icon-tip`。 */
 function StripDisableToggle({ entry, host }: { entry: QuotaEntry; host: string }) {
-  const q = useEntryQuota(entry, host)
+  const q = useEntryQuota(entry)
   const disabledMap = useDisabledQuota()
   const key = quotaDisableKey(host, entry.kind, entry.identity)
   const off = isQuotaDisabled(disabledMap, key)
@@ -715,7 +710,7 @@ function PopWindow({
 }
 
 function PopRow({ entry, host, onAgyLogout }: { entry: QuotaEntry; host: string; onAgyLogout: () => void }) {
-  const q = useEntryQuota(entry, host)
+  const q = useEntryQuota(entry)
   const now = useMinuteNow()
   const known = useStore((s) => {
     if (entry.identity && quotaKey(host, `${entry.kind}:${entry.identity}`) in s.quota) return true
