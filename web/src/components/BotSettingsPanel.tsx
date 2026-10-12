@@ -1,4 +1,4 @@
-import { useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
+import { useEffect, useId, useLayoutEffect, useMemo, useRef, useState } from 'react'
 import type { BotKind, IdentityStatus, PatchBotInput } from '../api/types'
 import { PHONE_QUERY, useMediaQuery } from '../hooks/useMediaQuery'
 import { useDialogFocus } from '../hooks/useDialogFocus'
@@ -270,6 +270,8 @@ export function BotSettingsPanel({ botId }: { botId: string }) {
   const [loginSent, setLoginSent] = useState(false)
   const [cliOpening, setCliOpening] = useState(false)
   const nameRef = useRef<HTMLInputElement>(null)
+  const nameLabelId = useId()
+  const nameHintId = useId()
   const formRef = useRef<BotFormValues>({ name: '', model: null, effort: null, fast: false, persona: '', identity: '' })
   formRef.current = { name, model, effort, fast, persona, identity }
   // 手機是全螢幕 sheet，不用 anchor 座標（只會推歪）。
@@ -380,6 +382,7 @@ export function BotSettingsPanel({ botId }: { botId: string }) {
   // 名稱不做前端檢查（2026-09-09 使用者決定）：規則在 daemon，前端會漂走。
   // 同 daemon `valid_bot_name`（送出去不前後裁空白）：不符就停用儲存，原因寫在欄位下面。
   const nameOk = isValidBotName(name)
+  const nameBad = touched.has('name') && name !== '' && !nameOk
   const hostLabel = !host || host === 'local' ? '本機' : host
   /** claude 用獨立終端跑 `claude auth login`（`startCliLogin`）；grok 仍把 `/login` 送進 Bot 的畫面。 */
   const cliLogin = bot.kind === 'claude'
@@ -517,10 +520,13 @@ export function BotSettingsPanel({ botId }: { botId: string }) {
           }}
         >
           <label className="field">
-            <span>名稱</span>
+            <span id={nameLabelId}>名稱</span>
             <input
               ref={nameRef}
               type="text"
+              aria-labelledby={nameLabelId}
+              aria-invalid={nameBad || undefined}
+              aria-describedby={nameBad ? nameHintId : undefined}
               value={form.name}
               spellCheck={false}
               enterKeyHint="done"
@@ -529,7 +535,7 @@ export function BotSettingsPanel({ botId }: { botId: string }) {
                 setName(e.target.value)
               }}
             />
-            {touched.has('name') && name && !nameOk ? <span className="hint">{BOT_NAME_HINT}</span> : null}
+            {nameBad ? <span id={nameHintId} className="hint">{BOT_NAME_HINT}</span> : null}
           </label>
 
           <ApiModelFields
