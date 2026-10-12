@@ -267,7 +267,7 @@ test('捲動或改視窗大小時關掉浮層（fixed 的浮層不跟著列走�
 
 test('捲浮層裡的命中行不關浮層（長命中行要捲得完）', async () => {
   freshBadgeState()
-  seed([row({ id: 'long-1', regex_verdict: 'stuck_queued', at: ago(1), jev_is_live_ui: 0.9, matched_line: 'x\n'.repeat(50) })])
+  seed([row({ id: 'long-1', regex_verdict: 'same_work', at: ago(1), jev_same_work: 0.8, matched_line: JSON.stringify({ candidate_title: 'x '.repeat(80), existing_title: 'y' }) })])
   const root = await mount(<JudgeBadge botId="bot-a" />)
   const pop = await openBadge(root)
   assert.ok(pop)
@@ -327,4 +327,39 @@ test('Esc 關浮層時把事件標成已處理（側欄抽屜的 Esc 不會一�
   await settle(20)
   assert.deepEqual(seen, [true], '冒泡到 window 時要已經 preventDefault')
   assert.equal(root.querySelector('.judge-badge-pop'), null)
+})
+
+const popText = async (root: HTMLElement) => {
+  await click(root.querySelector('.judge-badge')!)
+  await settle(20)
+  return root.querySelector('.judge-badge-pop')?.textContent ?? ''
+}
+
+test('浮層不印機器碼：same_work 的 JSON 只留兩邊的標題', async () => {
+  freshBadgeState()
+  const pairJson = JSON.stringify({ pair: 'a|b', candidate_ref: 'x', existing_ref: 'y', candidate_title: '修登入頁', existing_title: '登入頁改版', source: 'issue' })
+  seed([row({ id: 'sw', regex_verdict: 'same_work', at: ago(1), jev_same_work: 0.8, matched_line: pairJson })])
+  const root = await mount(<JudgeBadge botId="bot-a" />)
+  const text = await popText(root)
+  assert.match(text, /修登入頁 ↔ 登入頁改版/)
+  assert.doesNotMatch(text, /[{}]|candidate_ref|"pair"/)
+})
+
+test('浮層不印機器碼：ask_option 的 JSON 不印', async () => {
+  freshBadgeState()
+  const json = JSON.stringify({ tool_use_id: 'toolu_1', questions: [{ index: 0, scores: [0.9, 0.1], suggested: 0 }] })
+  seed([row({ id: 'ao', regex_verdict: 'ask_option', at: ago(1), matched_line: json })])
+  const root = await mount(<JudgeBadge botId="bot-a" />)
+  const text = await popText(root)
+  assert.match(text, /選項建議/)
+  assert.doesNotMatch(text, /[{}]|toolu_1/)
+})
+
+test('浮層不印機器碼：stuck_queued 存的是指紋雜湊，不印', async () => {
+  freshBadgeState()
+  seed([row({ id: 'st', regex_verdict: 'stuck_queued', at: ago(1), jev_is_live_ui: 0.9, matched_line: '3f9a0c12d4e5b6a7' })])
+  const root = await mount(<JudgeBadge botId="bot-a" />)
+  const text = await popText(root)
+  assert.match(text, /卡在不認識的畫面/)
+  assert.doesNotMatch(text, /3f9a0c12d4e5b6a7/)
 })

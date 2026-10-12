@@ -4,7 +4,7 @@
  */
 import { useEffect, useLayoutEffect, useRef, useState } from 'react'
 import { JUDGE_SCENES, probabilityText } from '../lib/judgeStats'
-import { judgeBadgeFor, popPosition } from '../lib/judgeBadge'
+import { badgeLineText, judgeBadgeFor, popPosition } from '../lib/judgeBadge'
 import { useJudgeLedger } from '../store/judgeLedger'
 import { useStore } from '../store/store'
 import './judgeBadge.css'
@@ -105,7 +105,7 @@ export function JudgeBadge({ botId }: { botId: string }) {
             <b>{scene}</b>・機率 {prob}
           </p>
           <p className="hint">{Number.isNaN(at) ? row.at : new Date(at).toLocaleString('zh-TW', { hour12: false })}</p>
-          {row.matched_line ? <pre className="judge-badge-line">{row.matched_line}</pre> : null}
+          {badgeLineText(row) ? <pre className="judge-badge-line">{badgeLineText(row)}</pre> : null}
           <p className="hint">這只是第二意見，不會自動動作。</p>
           <button
             type="button"
