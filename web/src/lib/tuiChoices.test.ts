@@ -1,6 +1,7 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
 import { readFileSync } from 'node:fs'
+import { splitPreviewPane } from './tuiPreviewPane.ts'
 import {
   customAnswerChecked,
   customAnswerShown,
@@ -720,4 +721,22 @@ test('並排預覽：游標走到沒編號的 Chat about this 時不認（真機
   const b = lines.findIndex((l) => l.startsWith('  2.'))
   lines[b] = lines[b].replace('  2.', '❯ 2.')
   assert.equal(parseChoiceMenu(lines.join('\n')), null)
+})
+
+test('並排預覽框的左欄含 ✅／⭐（Emoji_Presentation、終端佔兩格）：框還是對得上，選項與預覽都認得出來', () => {
+  // ✅ 在左欄：左欄 14 格（"  ❯ 1. ✅ 批准" 的 ✅ 佔兩格），框從第 16 格開始。
+  const lines = [
+    'Which one?',
+    '  ❯ 1. ✅ 批准  ┌──────────┐',
+    '    2. 拒絕     │ HTTP 200 │',
+    '                └──────────┘',
+    'Enter to select · ↑/↓ to navigate · Esc to cancel',
+  ]
+  const menu = parseChoiceMenu(lines.join('\n'))
+  assert.ok(menu, '認得出選單（不能因為 ✅ 寬度算錯就整份不認）')
+  assert.deepEqual(menu.choices.map((c) => c.number), [1, 2])
+  assert.equal(menu.choices[0].preview, 'HTTP 200')
+  const side = splitPreviewPane(lines)
+  assert.ok(side && !('malformed' in side), '框要對得上，不能是 malformed')
+  assert.equal(side.preview, 'HTTP 200')
 })

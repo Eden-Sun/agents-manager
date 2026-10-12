@@ -30,7 +30,9 @@ function codePointCellWidth(cp: number): number {
     (cp >= 0xff00 && cp <= 0xff60) ||
     (cp >= 0xffe0 && cp <= 0xffe6) ||
     (cp >= 0x1f300 && cp <= 0x1faff) ||
-    (cp >= 0x20000 && cp <= 0x3fffd)
+    (cp >= 0x20000 && cp <= 0x3fffd) ||
+    // 預設就是彩色的 emoji（✅ ❌ ⭐ ⏰ …）在範圍外的 U+2600–27BF、U+2B50 等，終端也佔兩格（#1484 只補了組合字元）。
+    /\p{Emoji_Presentation}/u.test(String.fromCodePoint(cp))
     ? 2
     : 1
 }
