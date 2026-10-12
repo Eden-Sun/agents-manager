@@ -261,7 +261,7 @@ pub(crate) fn open_dir(path: &Path) -> io::Result<File> {
 }
 
 /// `requested` 拆成一串一般 component：`..`、`.`、`/` 開頭（絕對路徑）、空字串一律 `None`。呼叫端要嘛已經
-/// 把絕對路徑用字串比對砍成相對於信任邊界的殘餘，要嘛本來就是相對路徑——這裡不処理「怎麼變成相對的」，
+/// 把絕對路徑用字串比對砍成相對於信任邊界的殘餘，要嘛本來就是相對路徑——這裡不處理「怎麼變成相對的」，
 /// 只確認拆出來的每一段都是普通檔名，不會被解讀成往上跳或跳到別的分支。
 pub fn safe_relative_components(requested: &Path) -> Option<Vec<&OsStr>> {
     let mut out = Vec::new();
