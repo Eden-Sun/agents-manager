@@ -177,7 +177,9 @@ test('payload 讀不到就留白，不會壞掉也不會亂猜', () => {
   assert.equal(v.latest?.text, 'payload 是字串')
 })
 
-test('沒認出來的暫停原因原樣顯示，不要吞掉', () => {
+test('daemon 自己設的停下來問人原因都有人話；沒認出來的原樣顯示，不要吞掉', () => {
+  // daemon 的 `mission pause --reason clarify`（SPEC §18.14 第 1 步）：指示不清楚，問使用者要怎麼做。
+  assert.equal(pausedLabel('clarify'), '指示不清楚，需要你釐清')
   assert.equal(pausedLabel('something_new'), 'something_new')
   assert.equal(pausedLabel('user_pause'), '你按了暫停')
   assert.equal(deliveryLabel('push_main'), '直接推 main')

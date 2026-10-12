@@ -1090,7 +1090,7 @@ export interface Mission {
   on_5h_limit: MissionOn5h
   max_rounds: number
   rounds_used: number
-  /** `max_rounds` / `no_fable_for_verifier` / `push_main_failed` / `pr_failed`，或呼叫端自訂。 */
+  /** `max_rounds` / `no_fable_for_verifier` / `push_main_failed` / `pr_failed` / `clarify`，或呼叫端自訂。 */
   paused_reason: string | null
   paused_detail: string | null
   result_summary: string | null

@@ -80,7 +80,7 @@ export interface MissionDelivered {
 
 /** 停下來問人時，卡片上要顯示什麼。 */
 export interface MissionAsk {
-  /** `max_rounds` / `no_fable_for_verifier` / `push_main_failed` / `pr_failed` / 自訂。 */
+  /** `max_rounds` / `no_fable_for_verifier` / `push_main_failed` / `pr_failed` / `clarify` / 自訂。 */
   reason: string
   detail: string | null
   /** AGM 在群組問的那句話（最後一則 `paused` 事件的文字）。 */
@@ -338,6 +338,8 @@ export function pausedLabel(reason: string): string {
       return '推 main 失敗'
     case 'pr_failed':
       return '開 PR 失敗'
+    case 'clarify':
+      return '指示不清楚，需要你釐清'
     default:
       return reason
   }
