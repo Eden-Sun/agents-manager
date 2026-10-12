@@ -2161,9 +2161,7 @@ def spool_claim_collision(number: int, title: str, me: str, payload: dict) -> No
 
 
 def collision_check_hint(args, number: int, title: str, me: str, payload: dict) -> None:
-    """認領成功後 best-effort 問一次撞題（只記帳本、推提示，不擋認領、不改認領）。舊 daemon 的 404、連不上、
-    逾時、runtime.json 不在：一律吞掉，exit code 與認領結果都不變。遠端沒有 runtime.json 時改寫進 hook-spool.d，
-    由該 bot 的 daemon 日後收件，不直接回連遠端主機的 daemon port。"""
+    """認領成功後 best-effort 問一次撞題，不擋認領。無法確認 daemon 收件時排入 bot spool。"""
     try:
         rt = load_runtime(getattr(args, "runtime_dir", None))
         client = Client(daemon_url(rt), COLLISION_TIMEOUT, bot_auth_headers(rt))
@@ -2172,10 +2170,22 @@ def collision_check_hint(args, number: int, title: str, me: str, payload: dict) 
             {"issue": number, "title": title, "child": payload.get("child") or me, "branch": payload.get("branch")},
         )
     except AgmError as e:
-        if e.kind == "no_runtime":
+        status = e.extra.get("status")
+        retryable = e.kind in {"no_runtime", "connect_failed", "connection_lost", "timeout"}
+        if e.kind == "http_error" and isinstance(status, int) and 500 <= status < 600:
+            retryable = True
+        if retryable:
             spool_claim_collision(number, title, me, payload)
-        return
-    except Exception:  # noqa: BLE001 — 附帶提示的任何失敗都不能讓認領看起來失敗
+            return
+        detail = e.extra.get("detail")
+        reason = detail.get("reason") or detail.get("error") if isinstance(detail, dict) else None
+        if not isinstance(reason, str) or not reason.strip():
+            reason = e.kind
+        reason = " ".join(reason.split())[:200]
+        label = f"HTTP {status}: {reason}" if isinstance(status, int) else reason
+        print(f"agm: collision check failed ({label}); not spooled", file=sys.stderr)
+    except Exception as e:  # noqa: BLE001 — 附帶提示的任何失敗都不能讓認領看起來失敗
+        print(f"agm: collision check failed ({type(e).__name__}); not spooled", file=sys.stderr)
         return
 
 
