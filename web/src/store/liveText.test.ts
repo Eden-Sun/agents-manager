@@ -65,3 +65,11 @@ test('`? for shortcuts` 後面接的正文不是 footer；footer 的右欄（至
   assert.equal(cleanLiveText('  ? for shortcuts    Gemini 3.8 Flash (Medium)'), null)
   assert.equal(cleanLiveText('  ? for shortcuts        ⚠ 2 warnings · f2 to view'), null)
 })
+
+test('codex 狀態列的模型名不限於清單裡的 effort（minimal／none…），同 daemon is_codex_status_row', () => {
+  for (const row of ['gpt-5.6-sol minimal · ~/p', 'gpt-5.6-sol none · ~/p', 'GPT-6.1-Sol default · ~/project/agents-manager · 接手修復 GitHub issue #1486']) {
+    assert.equal(cleanLiveText(row), null, row)
+  }
+  // 項目符號不是模型名（#1555 在 daemon 的同一條）。
+  assert.equal(cleanLiveText('- 設定檔 · ~/.codex/config.toml 已更新'), '- 設定檔 · ~/.codex/config.toml 已更新')
+})
