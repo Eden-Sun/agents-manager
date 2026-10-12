@@ -1204,6 +1204,22 @@
         assert!(quota_from_codex(&r).unwrap().reset_credits.is_none());
     }
 
+    /// #1506：app-server 回空的 rateLimits（或兩個窗都讀不出來）不是完整帳號讀數，不能當權威去清掉有效的窗與撞限。
+    /// 只有週窗的方案（#1496）仍然是完整讀數。
+    #[test]
+    fn codex_payload_without_a_usable_window_is_not_a_reading() {
+        for r in [
+            json!({"rateLimits": {}}),
+            json!({"rateLimits": {"primary": null, "secondary": null, "planType": "plus"}}),
+            json!({"rateLimits": {"primary": {"windowDurationMins": 300}}}),
+        ] {
+            assert!(quota_from_codex(&r).is_none(), "{r}");
+        }
+        let week_only = quota_from_codex(&json!({"rateLimits": {"primary": {"usedPercent": 0, "windowDurationMins": 10080}}})).unwrap();
+        assert!(week_only.five_hour.is_none());
+        assert_eq!(week_only.seven_day.unwrap().used_pct, 0.0);
+    }
+
     #[test]
     fn keys_are_host_scoped() {
         assert_eq!(quota_key("local", "claude"), "claude");
