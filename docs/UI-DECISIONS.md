@@ -25,6 +25,9 @@
 - 「未驗證送達」標記**只給沒人補救的那一種**（2026-09-16 AGM 裁示）：這個標記對使用者的意思是「可能悄悄沒送到，而且沒有人會再試一次」。
   無證據但 `auto_resend=1`（herdr `agent.prompt`）有自動重送的安全網，只放在時間的 hover 說明，不佔注意力——claude 多數 prompt 走這條，全標會讓真正該看的那筆被淹掉；
   無證據且 `auto_resend=0`（打過字、證不明，例如 grok 多行）才畫「未驗證送達」。判斷集中在 `lib/deliveryNotice.ts`，不要在元件裡各自判。
+  **事後證據撤掉標記**（2026-10-12，issue #1471）：遠端 bot 讀不到 transcript、補送過一次（`auto_resend=0`）的回合，之後 hook 回報並完成，
+  「可能沒送到、也沒人會再試」的前提就不成立。證據是 daemon 知道的事，所以由 daemon 在 hook 收尾那一刻把 `delivery_verified` 寫成 1，
+  前端判斷不變、不另加「已完成就不標」的第二套規則（AGM 交辦的 `delivery` 也一起變對）。備援（終端畫面）收尾、沒有 hook 證據的回合照舊標。
 - Composer 只在首次掛載／切換對象時還原選取；自動 focus 前 `activeElement` 必須是 `body` 或同一個 composer 內，手機一律不自動 focus（不彈鍵盤）。
 - 每個畫面有自己的 URL（`lib/routes.ts` 純函式 + `store/routeSync.ts`）。網址是 store 的投影：入口照舊走 store，不改成 `<a href>`。
   對話↔終端用 `replaceState`；設定浮窗與手機抽屜用 `pushState`（上一頁＝關掉）。壞連結回首頁並提示；`?token=` 不留在網址上。

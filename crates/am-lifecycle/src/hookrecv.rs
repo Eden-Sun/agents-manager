@@ -821,6 +821,9 @@ async fn upgrade_clipped_user_message(conn: &mut sqlx::SqliteConnection, turn_id
 
 /// 把 hook 帶來的 native id（去重鑰匙）記到回合上：只填空的、只動備援關掉或剛由它升級的回合。
 /// 沒有這兩道保護時，晚到 hook 手上的是舊快照，回合若已被別的路收好並蓋了自己的鑰匙，這裡會整個蓋掉。
+///
+/// 綁上 native turn id（這一句之後它非空）就是 hook 的事後證據：`delivery_verified` 一併寫成 1（issue #1471）。
+/// 只有 session id、沒有 turn id 的不算；備援收尾又沒有 hook 證據的回合維持原判。
 async fn stamp_native_ids(
     conn: &mut sqlx::SqliteConnection,
     turn_id: &str,
@@ -829,10 +832,12 @@ async fn stamp_native_ids(
 ) -> Result<()> {
     sqlx::query(
         "UPDATE turns SET native_session_id=COALESCE(native_session_id, ?),
-                          native_turn_id=COALESCE(native_turn_id, ?)
+                          native_turn_id=COALESCE(native_turn_id, ?),
+                          delivery_verified=CASE WHEN COALESCE(native_turn_id, ?) IS NOT NULL THEN 1 ELSE delivery_verified END
           WHERE id=? AND status IN ('completed_fallback','completed')",
     )
     .bind(session_id)
+    .bind(native_turn_id)
     .bind(native_turn_id)
     .bind(turn_id)
     .execute(&mut *conn)
@@ -5545,6 +5550,98 @@ mod external_claim_tests {
         .await
         .unwrap();
         assert_eq!(assistant_messages, 1);
+    }
+
+    /// issue #1471：補送過一次（`auto_resend=0`、`resend_count=1`）而且送出當下沒有逐字證據（`delivery_verified=0`）的回合，
+    /// 之後 hook 回報並完成——hook 就是事後證據，daemon 在收尾那一刻把 `delivery_verified` 寫成 1，
+    /// 其他消費者（turn JSON、AGM 交辦的 `delivery`）一起變對。還沒完成的照舊 0。
+    #[tokio::test]
+    async fn a_hook_that_completes_a_resent_unverified_turn_marks_its_delivery_verified() {
+        let env = tt::env().await;
+        let app = env.app.clone();
+        let bot_id = db::ulid();
+        sqlx::query(
+            "INSERT INTO bots (id, project_id, name, kind, args_json, autostart, inject_hooks, hook_token, created_at)
+             VALUES (?,?,'hook-resent','claude','[]',0,1,'tok',?)",
+        )
+        .bind(&bot_id)
+        .bind(&env.project_id)
+        .bind(db::now())
+        .execute(&app.db)
+        .await
+        .unwrap();
+        let conversation_id = db::conversation_id(&app.db, &bot_id).await.unwrap();
+        let run_id = db::ulid();
+        sqlx::query(
+            "INSERT INTO runs (id, bot_id, state, agent_status, workspace_id, pane_id, agent_name, herdr_session, started_at)
+             VALUES (?,?,'running','working','ws-1','pane-1','agent','test',?)",
+        )
+        .bind(&run_id)
+        .bind(&bot_id)
+        .bind(db::now())
+        .execute(&app.db)
+        .await
+        .unwrap();
+        let turn_id = db::ulid();
+        sqlx::query(
+            "INSERT INTO turns (id, conversation_id, run_id, origin, status, delivery, delivery_verified, auto_resend, resend_count, created_at)
+             VALUES (?,?,?,'web','in_flight','ok',0,0,1,?)",
+        )
+        .bind(&turn_id)
+        .bind(&conversation_id)
+        .bind(&run_id)
+        .bind(db::now())
+        .execute(&app.db)
+        .await
+        .unwrap();
+        let read = || async {
+            let t = sqlx::query_as::<_, db::Turn>("SELECT * FROM turns WHERE id=?").bind(&turn_id).fetch_one(&app.db).await.unwrap();
+            (t.status.clone(), serde_json::to_value(&t).unwrap()["delivery_verified"].clone(), t.native_turn_id.clone())
+        };
+        assert_eq!(read().await, ("in_flight".into(), json!(0), None), "還沒有 hook 回報：照舊標未驗證");
+
+        process(
+            &app,
+            &HookBody {
+                bot_id,
+                provider: "claude".into(),
+                payload: json!({
+                    "hook_event_name": "Stop",
+                    "session_id": "native-session",
+                    "prompt_id": "native-turn",
+                    "last_assistant_message": "hook reply",
+                }),
+                received_at: None,
+                truncated: false,
+                run_id: None,
+            },
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(read().await, ("completed".into(), json!(1), Some("native-turn".into())), "hook 收尾就是事後證據");
+    }
+
+    /// issue #1471 的反面：備援（終端畫面）收尾、沒有 hook 證據的回合維持原判；晚到 hook 帶著 native turn id
+    /// 才算證據，沒有 turn id 的（只知道 session）不算。
+    #[tokio::test]
+    async fn only_a_late_hook_that_binds_a_native_turn_id_verifies_a_fallback_turn() {
+        let env = tt::env().await;
+        let app = env.app.clone();
+        let (conv, turn_id) = late_hook_fixture(&env, "late-verify", "completed_fallback").await;
+        sqlx::query("UPDATE turns SET delivery_verified=0, auto_resend=0, resend_count=1 WHERE id=?").bind(&turn_id).execute(&app.db).await.unwrap();
+        lifecycle::insert_message(&app, &conv, Some(&turn_id), "assistant", "備援抓的回覆", "terminal_fallback", true, None).await.unwrap();
+        let verified = || async { sqlx::query_scalar::<_, i64>("SELECT delivery_verified FROM turns WHERE id=?").bind(&turn_id).fetch_one(&app.db).await.unwrap() };
+        let turn = sqlx::query_as::<_, db::Turn>("SELECT * FROM turns WHERE id=?").bind(&turn_id).fetch_one(&app.db).await.unwrap();
+        assert_eq!(verified().await, 0, "備援收尾、沒有 hook 證據");
+
+        // 同一回合的晚到 hook，但沒有 native turn id：沒有證據可以綁。
+        fill_or_drop_late_hook(&app, &turn, "", &Some("s1".into()), &None, true).await.unwrap();
+        assert_eq!(verified().await, 0, "只有 session id 不是這一回合的證據");
+
+        // 同一回合的晚到 hook 帶著 native turn id：綁上了就是證據。
+        fill_or_drop_late_hook(&app, &turn, "", &Some("s1".into()), &Some("n1".into()), true).await.unwrap();
+        assert_eq!(verified().await, 1, "hook 綁上 native turn id 後視為已送達");
     }
 
     /// Hook vs. fallback race (review 2026-09-12 #5). The BEFORE UPDATE trigger stands in for the

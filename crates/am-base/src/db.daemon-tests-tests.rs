@@ -626,6 +626,53 @@
         std::fs::remove_dir_all(&dir).unwrap();
     }
 
+    /// issue #1471 回填：hook 收掉的回合（`completed`、有 native turn id、有收件匣 event id）是事後證據，
+    /// 舊 daemon 留下的 `delivery_verified=0` 開 DB 時補成 1。沒有 hook 證據的（備援收尾、沒綁 native turn id、
+    /// 還在飛、沒有 event id）一個都不動。可重入。
+    #[tokio::test]
+    async fn opening_backfills_delivery_verified_for_turns_a_hook_completed() {
+        let dir = crate::testing::track(std::env::temp_dir().join(format!("am-verified-backfill-{}", ulid())));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("old.sqlite3");
+        let pool = open(&path).await.unwrap();
+        sqlx::query("INSERT INTO projects (id,path,label,created_at) VALUES ('p','/tmp','p',?)").bind(now()).execute(&pool).await.unwrap();
+        sqlx::query("INSERT INTO bots (id,project_id,name,kind,hook_token,created_at) VALUES ('b','p','b','claude','t',?)").bind(now()).execute(&pool).await.unwrap();
+        let conv = conversation_id(&pool, "b").await.unwrap();
+        // (id, status, native_turn_id, source_event_id)
+        for (id, status, native, event) in [
+            ("hooked", "completed", Some("n1"), Some("e1")),
+            ("fallback", "completed_fallback", None, None),
+            ("no-native", "completed", None, Some("e2")),
+            ("no-event", "completed", Some("n2"), None),
+            ("flying", "in_flight", Some("n3"), Some("e3")),
+        ] {
+            sqlx::query(
+                "INSERT INTO turns (id,conversation_id,origin,status,delivery,delivery_verified,auto_resend,native_turn_id,source_event_id,created_at)
+                 VALUES (?,?,'web',?,'ok',0,0,?,?,?)",
+            )
+            .bind(id).bind(&conv).bind(status).bind(native).bind(event).bind(now())
+            .execute(&pool).await.unwrap();
+        }
+        pool.close().await;
+
+        for _ in 0..2 {
+            let pool = open(&path).await.unwrap();
+            let rows: Vec<(String, i64)> = sqlx::query_as("SELECT id, delivery_verified FROM turns ORDER BY id").fetch_all(&pool).await.unwrap();
+            assert_eq!(
+                rows,
+                vec![
+                    ("fallback".to_string(), 0),
+                    ("flying".to_string(), 0),
+                    ("hooked".to_string(), 1),
+                    ("no-event".to_string(), 0),
+                    ("no-native".to_string(), 0),
+                ]
+            );
+            pool.close().await;
+        }
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
     /// schema 變更（additive）`bots.instruction_files`（issue #213，已棄用不再讀寫）：沒有這一欄的舊 DB 開起來仍會補上，
     /// `SELECT *` 照樣讀得進 `Bot`。少了這條 ALTER，`check_schema_drift` 會讓 daemon 起不來。
     #[tokio::test]

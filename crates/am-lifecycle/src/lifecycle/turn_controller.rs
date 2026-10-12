@@ -156,6 +156,9 @@ fn edge(from: &str, to: &str, shape: &str) -> Result<()> {
 /// **hook 收尾**：`in_flight -> completed`。同一句寫 native 證據、把「證不明」（`unknown`）的送達升成 `ok`
 /// （回覆到了就是送到了），收尾時間只記第一次。只動還掛在圍籬放行那一代 run 上的回合。
 ///
+/// `delivery_verified` 也在這一句寫成 1（issue #1471）：送出當下沒有逐字證據（遠端主機、補送過一次）的回合，
+/// hook 回報並完成就是事後證據，「可能沒送到、也沒人會再試」的前提已經不成立。重送閘門看 `auto_resend`，不看這一欄。
+///
 /// 呼叫端要跟回覆訊息綁在同一個交易裡（#115），所以只有交易內版本。
 pub async fn complete_with_native_evidence(
     conn: &mut sqlx::SqliteConnection,
@@ -166,6 +169,7 @@ pub async fn complete_with_native_evidence(
     edge("in_flight", "completed", "hook 收尾")?;
     let done = sqlx::query(
         "UPDATE turns SET status='completed', delivery=CASE WHEN delivery='unknown' THEN 'ok' ELSE delivery END,
+                          delivery_verified=1,
                           completed_at=COALESCE(completed_at, ?), native_session_id=?, native_turn_id=?
           WHERE id=? AND status='in_flight' AND run_id=?",
     )
