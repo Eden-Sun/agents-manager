@@ -281,3 +281,11 @@
         assert!(cooling_down(&mine), "遠端不受本機 forget 影響");
         park(&mine, Duration::from_millis(1));
     }
+
+    /// DST 跳過的那一段本地時間（紐約 2026-03-08 02:30 不存在）：不能換成明年同一天。
+    #[test]
+    fn a_reset_inside_a_dst_gap_is_not_moved_to_next_year() {
+        let now = chrono::DateTime::parse_from_rfc3339("2026-03-07T10:00:00-05:00").unwrap().with_timezone(&chrono_tz::America::New_York);
+        let r = parse_reset(" March 8, 02:30", now);
+        assert!(r.as_deref().map_or(true, |s| s.starts_with("2026-03-08")), "{r:?}");
+    }
