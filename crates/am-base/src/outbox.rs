@@ -177,24 +177,32 @@ pub fn share_usage_json(usage: TreeUsage) -> serde_json::Value {
 
 /// 替分享用 bot 的 outbox 放 [`SHARE_KEEP_MARK`]（啟動、建立、daemon 開機時都補一次；bot 自己刪掉也會被補回）。
 /// 寫不起來只記 warning：少了標記只是檔案照一般的 1 小時清，不該讓 bot 起不來。
+/// 走 fd 邊界（[`trusted_open::create_bound_dirs`]＋`O_EXCL|O_NOFOLLOW`）：`outbox`／bot 那兩段被換成符號連結就寫不進去，
+/// 不會跟進連結另一頭寫到界線外（bot 自己有 outbox 的寫入權，路徑寫法擋不住這個）。
 pub fn mark_share_keep(data_dir: &Path, bot_id: &str) {
-    let Some(dir) = ensure(data_dir, bot_id) else { return };
-    let mark = dir.join(SHARE_KEEP_MARK);
-    if std::fs::symlink_metadata(&mark).is_ok() {
-        return;
-    }
-    if let Err(e) = std::fs::write(&mark, b"share bot outbox: share retention policy in outbox-gc.sh (SPEC 20, #850)\n") {
-        tracing::warn!(bot = bot_id, dir = %dir.display(), error = %e, "could not mark the share bot's outbox as kept");
+    let Some(dir) = dir_for(data_dir, bot_id) else { return };
+    let marked = trusted_open::create_bound_dirs(data_dir, &[OsStr::new("outbox"), OsStr::new(bot_id)]).and_then(|fd| {
+        trusted_open::write_new_file_in(&fd, OsStr::new(SHARE_KEEP_MARK), b"share bot outbox: share retention policy in outbox-gc.sh (SPEC 20, #850)\n")
+    });
+    match marked {
+        Ok(()) => {}
+        Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {}
+        Err(e) => tracing::warn!(bot = bot_id, dir = %dir.display(), error = %e, "could not mark the share bot's outbox as kept"),
     }
 }
 
 /// bot 或專案刪掉了：拿掉標記，outbox 回到一般的 1 小時清（不然刪掉的分享用 bot 的檔永遠留著）。還原後啟動時再補。
+/// 同 [`mark_share_keep`]，經過 [`open_trusted_dir`] 才刪；不可信（符號連結、擁有者不同）就不去動那個目錄。
 pub fn unmark_share_keep(data_dir: &Path, bot_id: &str) {
     let Some(dir) = dir_for(data_dir, bot_id) else { return };
-    match std::fs::remove_file(dir.join(SHARE_KEEP_MARK)) {
-        Ok(()) => {}
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
-        Err(e) => tracing::warn!(bot = bot_id, error = %e, "could not unmark a deleted share bot's outbox"),
+    match open_trusted_dir(data_dir, &dir) {
+        Ok(Some(fd)) => match trusted_open::unlink_in(&fd, OsStr::new(SHARE_KEEP_MARK)) {
+            Ok(()) => {}
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+            Err(e) => tracing::warn!(bot = bot_id, error = %e, "could not unmark a deleted share bot's outbox"),
+        },
+        Ok(None) => {}
+        Err(()) => tracing::warn!(bot = bot_id, dir = %dir.display(), "outbox is a symlink or not ours; not touching its share marker"),
     }
 }
 
