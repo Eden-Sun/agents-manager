@@ -277,6 +277,12 @@ pub async fn recover_at_startup_at(app: &(impl LcHost + Clone + 'static), now: &
                 continue;
             }
         };
+        // session 已換：這份基準不再對得上這個 run，不恢復也不再留著（SPEC：pane 與 session 都相符才恢復）。
+        if matches!(same_session(app, &run_id, &proof).await, SessionMatch::Changed) {
+            tracing::info!(run = %run_id, turn = %turn_id, "discarding durable late proof: the session changed before restart");
+            delete_durable_for_turn(app.db(), &turn_id).await?;
+            continue;
+        }
         let pending = Pending::new(&kind, &pane, &proof, offset.max(0) as u64, baseline.max(0) as usize, &text, since);
         arm_pending(app, &run_id, &bot_id, &turn_id, pending);
         restored += 1;
