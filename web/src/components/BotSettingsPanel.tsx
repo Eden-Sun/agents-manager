@@ -15,6 +15,7 @@ import { CopyChip } from './CopyChip'
 import { KindTag } from './KindTag'
 import { ApiModelFields } from './ModelPicker'
 import { computeBotPatch, effectiveForm, pruneSaved, settledKeys, type BotFormKey, type BotFormValues } from './botSettingsForm'
+import { BOT_NAME_HINT, isValidBotName } from '../lib/botName'
 import './botSettings.css'
 
 /**
@@ -377,7 +378,8 @@ export function BotSettingsPanel({ botId }: { botId: string }) {
   }
 
   // 名稱不做前端檢查（2026-09-09 使用者決定）：規則在 daemon，前端會漂走。
-  const nameOk = name.trim().length > 0
+  // 同 daemon `valid_bot_name`（送出去不前後裁空白）：不符就停用儲存，原因寫在欄位下面。
+  const nameOk = isValidBotName(name)
   const hostLabel = !host || host === 'local' ? '本機' : host
   /** claude 用獨立終端跑 `claude auth login`（`startCliLogin`）；grok 仍把 `/login` 送進 Bot 的畫面。 */
   const cliLogin = bot.kind === 'claude'
@@ -527,6 +529,7 @@ export function BotSettingsPanel({ botId }: { botId: string }) {
                 setName(e.target.value)
               }}
             />
+            {touched.has('name') && name && !nameOk ? <span className="hint">{BOT_NAME_HINT}</span> : null}
           </label>
 
           <ApiModelFields
