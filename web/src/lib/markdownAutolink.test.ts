@@ -22,7 +22,6 @@ function linksOf(md: string, withTrim: boolean): string[] {
   return out
 }
 
-
 test('全形標點緊接在網址後面：自動連結不包含它（請開 https://…/login。）', () => {
   assert.deepEqual(linksOf('請開 https://example.com/login。', true), ['https://example.com/login'])
 })
@@ -45,22 +44,6 @@ test('句點跟全形標點連在一起：句點一起剝掉（`…/x.。` 與�
   assert.deepEqual(linksOf('https://a.b/x.。好', true), ['https://a.b/x'])
 })
 
-test('同一段的第二個網址是大寫 scheme：照樣認得出來，不能變成不能點的文字', () => {
-  assert.deepEqual(linksOf('https://a.com/x、HTTPS://b.com/y', true), ['https://a.com/x', 'HTTPS://b.com/y'])
-})
-
-test('同一段的第二個網址是 www.：照樣認得出來（連結目標是 http:// 加上 www.…）', () => {
-  assert.deepEqual(linksOf('https://a.com/x，www.b.com/y', true), ['https://a.com/x', 'http://www.b.com/y'])
-})
-
-test('長訊息：很多網址緊接著全形標點（沒有空白）也要切得對、而且每一個都認得出來', () => {
-  const md = Array.from({ length: 300 }, (_, i) => `https://example.com/p${i}，`).join('')
-  const got = linksOf(md, true)
-  assert.equal(got.length, 300)
-  assert.equal(got[0], 'https://example.com/p0')
-  assert.equal(got[299], 'https://example.com/p299')
-})
-
 test('ASCII 右括號不成對、後面接全形標點：括號不算網址（同終端；(https://…/a)。 的網址是 …/a）', () => {
   assert.deepEqual(linksOf('(https://example.com/a)。', true), ['https://example.com/a'])
   assert.deepEqual(linksOf('see (https://example.com/a)，好', true), ['https://example.com/a'])
@@ -70,4 +53,25 @@ test('ASCII 右括號不成對、後面接全形標點：括號不算網址（�
 
 test('明確寫成的 [文字](網址) 不動：文字與目標相同、含全形標點也照原樣（它不是自動連結）', () => {
   assert.deepEqual(linksOf('[https://example.com/x。](https://example.com/x。)', true), ['https://example.com/x。'])
+})
+
+test('同一段的第二個網址是大寫 scheme：照樣認得出來，不能變成不能點的文字', () => {
+  assert.deepEqual(linksOf('https://a.com/x、HTTPS://b.com/y', true), ['https://a.com/x', 'HTTPS://b.com/y'])
+})
+
+test('同一段的第二個網址是 www.：照樣認得出來（連結目標是 http:// 加上 www.…）', () => {
+  assert.deepEqual(linksOf('https://a.com/x，www.b.com/y', true), ['https://a.com/x', 'http://www.b.com/y'])
+})
+
+test('ASCII 引號與角括號也不算網址（同終端：`"` `\'` 與反引號、`<` `>` 不在網址裡）', () => {
+  assert.deepEqual(linksOf('https://example.com/x"，好', true), ['https://example.com/x'])
+  assert.deepEqual(linksOf('https://example.com/x>，好', true), ['https://example.com/x'])
+})
+
+test('長訊息：很多網址緊接著全形標點（沒有空白）也要切得對、而且每一個都認得出來', () => {
+  const md = Array.from({ length: 300 }, (_, i) => `https://example.com/p${i}，`).join('')
+  const got = linksOf(md, true)
+  assert.equal(got.length, 300)
+  assert.equal(got[0], 'https://example.com/p0')
+  assert.equal(got[299], 'https://example.com/p299')
 })
