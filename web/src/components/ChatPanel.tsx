@@ -427,7 +427,7 @@ export function JumpToBottom({ show, onClick }: { show: boolean; onClick: () => 
  * 「這回合的提問」浮窗：輸出把提問推遠時不必往回捲。浮窗不佔高度，免得回合開始／結束讓清單跳動；
  * 貼 composer 下緣（2026-09-08 依使用者要求從上緣移下來，見 UI-DECISIONS）。手機只在回合完成後顯示。
  */
-function LastAskPeek({ msg, turnId, onJump }: { msg: Message; turnId: string; onJump: () => void }) {
+export function LastAskPeek({ msg, turnId, onJump }: { msg: Message; turnId: string; onJump: () => void }) {
   // 狀態綁 turn：換回合自動重設，不需要 effect。
   const [ui, setUi] = useState({ turn: turnId, closed: false, open: false })
   if (ui.turn !== turnId) setUi({ turn: turnId, closed: false, open: false })
@@ -468,7 +468,8 @@ function LastAskPeek({ msg, turnId, onJump }: { msg: Message; turnId: string; on
           ref={bodyRef}
           type="button"
           className="lastq-body"
-          aria-expanded={ui.open}
+          // 沒夾掉時點了是捲到那則、不展開：不宣告折疊狀態（#1596）。
+          aria-expanded={clamped ? ui.open : undefined}
           title={jumpable ? '捲到這則訊息' : '展開全文'}
           onClick={() => {
             if (!jumpable) {
