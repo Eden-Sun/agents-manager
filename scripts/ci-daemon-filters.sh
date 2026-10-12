@@ -14,19 +14,27 @@
 set -euo pipefail
 
 # 模組自己（含子目錄）沒有任何測試時，照檔名推的過濾字串一定選到 0 條，check.sh changed 會以「沒有選到任何測試」拒絕放行（#1338）。
-# 這時退到上一層模組（share/store.rs → share::，share 底下有測試）；頂層檔就不出過濾字串（check.sh 會印「沒有可挑的測試子集」）。
+# 這時退到上一層模組（share/store.rs → share::，share 底下有測試）；一路退到頂層都沒有測試就不出過濾字串（check.sh 會印「沒有可挑的測試子集」）。
 # 檔案不存在（被刪掉、或測試給的假路徑）照舊照檔名推。mod.rs 的子目錄就是它自己，子模組有測試也算有測試。
+# 模組有沒有測試：模組檔（<m>.rs 或 <m>/mod.rs）裡有 #[test] 或 `mod …tests;` 宣告，或 <m>/ 底下任何檔有 #[test]。
+module_has_tests() { # module_has_tests <src 根目錄> <用 / 分隔的模組路徑>
+    local root="$1" m="$2" file
+    for file in "$root/$m.rs" "$root/$m/mod.rs"; do
+        [ -f "$file" ] && grep -Eq '#\[(tokio::)?test|mod [a-z_0-9]*tests?[a-z_0-9]*[[:space:]]*;' "$file" && return 0
+    done
+    [ -d "$root/$m" ] && grep -rEq '#\[(tokio::)?test' "$root/$m" && return 0
+    return 1
+}
+
 emit_mod() { # emit_mod <repo 相對路徑> <用 / 分隔的模組路徑>
-    local f="$1" mod="$2" sub
+    local f="$1" mod="$2" base root
     if [ -f "$f" ]; then
-        case "$f" in
-            */mod.rs) sub="${f%/mod.rs}" ;;
-            *) sub="${f%.rs}" ;;
-        esac
-        if ! grep -Eq '#\[(tokio::)?test|mod [a-z_0-9]*tests?[a-z_0-9]*[[:space:]]*;' "$f" \
-            && { [ ! -d "$sub" ] || ! grep -rEq '#\[(tokio::)?test' "$sub"; }; then
+        # 模組路徑從 src 根目錄起算：去掉副檔名與 /mod，再去掉模組路徑那一段尾巴，剩下的就是 src 根目錄。
+        base="${f%.rs}"; base="${base%/mod}"
+        root="${base%/"$mod"}"
+        while ! module_has_tests "$root" "$mod"; do
             case "$mod" in */*) mod="${mod%/*}" ;; *) return 0 ;; esac
-        fi
+        done
     fi
     printf '%s::\n' "${mod//\//::}"
 }

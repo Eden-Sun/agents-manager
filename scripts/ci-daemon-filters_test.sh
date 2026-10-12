@@ -93,5 +93,35 @@ check "__all__" "crates/am-core/Cargo.toml"
 check "__all__ share::portal::" "crates/am-share/src/lib.rs" "crates/am-share/src/share/portal.rs"
 check "runners::am_base_tests::" "crates/am-base/src/lib.rs"
 
+# 巢狀、自己與上層都沒有測試的模組（zz/yy/xx.rs；zz 與 zz/yy 都沒有 #[test]）：只退一層還是 zz::yy::（選到零個，check.sh 拒絕放行，#1338 的同一件事）。
+# 要一路退到真的有測試的那一層；一直退到頂層都沒有就不出過濾字串。用 mktemp 的假目錄跑，不碰真的 repo 檔案。
+REPO_ROOT="$(pwd)"
+NEST=$(mktemp -d)
+mkdir -p "$NEST/daemon/src/zz/yy" "$NEST/daemon/src/ww"
+printf 'pub fn f() {}\n' > "$NEST/daemon/src/zz/yy/xx.rs"
+printf 'pub fn g() {}\n' > "$NEST/daemon/src/zz/mod.rs"
+printf '#[test]\nfn t() {}\n' > "$NEST/daemon/src/ww/mod.rs"
+printf 'pub fn h() {}\n' > "$NEST/daemon/src/ww/vv.rs"
+nest_got() { (cd "$NEST" && printf '%s\n' "$1" | bash "$REPO_ROOT/scripts/ci-daemon-filters.sh" | tr '\n' ' ' | sed 's/ $//'); }
+got="$(nest_got daemon/src/zz/yy/xx.rs)"
+if [ -n "$got" ]; then
+    printf 'FAIL: 巢狀沒有測試的模組 daemon/src/zz/yy/xx.rs → got [%s] want []\n' "$got" >&2
+    fail=1
+fi
+got="$(nest_got daemon/src/ww/vv.rs)"
+if [ "$got" != "ww::" ]; then
+    printf 'FAIL: 同層檔沒有測試、上一層 ww/mod.rs 有測試 → got [%s] want [ww::]\n' "$got" >&2
+    fail=1
+fi
+# #1517 的形狀：a/mod.rs 有測試，a/b/c.rs 與 a/b/ 都沒有：要退到 a::，不能停在 a::b::（選到零個）。
+mkdir -p "$NEST/daemon/src/aa/bb"
+printf '#[test]\nfn t() {}\n' > "$NEST/daemon/src/aa/mod.rs"
+printf 'pub fn k() {}\n' > "$NEST/daemon/src/aa/bb/c.rs"
+got="$(nest_got daemon/src/aa/bb/c.rs)"
+if [ "$got" != "aa::" ]; then
+    printf 'FAIL: a/b/c.rs（a 有測試、a/b 沒有）→ got [%s] want [aa::]\n' "$got" >&2
+    fail=1
+fi
+
 if [ "$fail" = 0 ]; then echo "ci-daemon-filters: OK"; fi
 exit "$fail"
