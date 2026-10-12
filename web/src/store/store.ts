@@ -3881,10 +3881,18 @@ export function orderedBotIds(state: {
     // 父列不在這個清單裡（被收起、被刪）的子 agent 不跟父列，就照 botsOfProject 的順序原地放進來，鍵盤仍走得到。
     const list = botsOfProject(state, p.id).filter((b) => !hidden.has(b.id))
     const ids = new Set(list.map((b) => b.id))
+    // 子列之後接它的孫代（深度優先），跟側欄畫的一樣（SPEC §6.5a）。
+    const emit = (id: string) => {
+      for (const c of list) {
+        if (c.parent_bot_id !== id || out.includes(c.id)) continue
+        out.push(c.id)
+        emit(c.id)
+      }
+    }
     for (const b of list) {
       if (b.parent_bot_id && ids.has(b.parent_bot_id)) continue // 跟在父列後面放
-      out.push(b.id)
-      for (const c of list) if (c.parent_bot_id === b.id) out.push(c.id)
+      if (!out.includes(b.id)) out.push(b.id)
+      emit(b.id)
     }
   }
   // A bot whose project vanished from the list would otherwise be unreachable by keyboard.
