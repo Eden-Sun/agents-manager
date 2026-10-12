@@ -462,8 +462,10 @@ export function ShareApp({ client }: { client: ShareClient }) {
   const textChars = shareTextChars(text)
   const tooLong = textChars > SHARE_TEXT_MAX
   const tooMany = ready.length > ATTACH_MAX
+  // 有附件沒傳上去：照送會少一個檔案、bot 以為沒有，擋下來講清楚（同主 UI 的 ATTACHMENT_FAILED_NOTICE）。
+  const failedAttach = pending.some((p) => p.error !== null)
   // bot 還沒回完不給送：daemon 一段對話同時只排一則，再送會 409（API.md §5.6）。
-  const canSend = !busy && !sending && !uploading && !tooLong && !tooMany && (text.trim().length > 0 || ready.length > 0)
+  const canSend = !busy && !sending && !uploading && !failedAttach && !tooLong && !tooMany && (text.trim().length > 0 || ready.length > 0)
 
   const loadOlder = async () => {
     const oldest = messages[0]?.id
@@ -644,13 +646,15 @@ export function ShareApp({ client }: { client: ShareClient }) {
             ))}
           </ul>
         ) : null}
-        {sendError || tooLong || tooMany ? (
+        {sendError || tooLong || tooMany || failedAttach ? (
           <p className="sh-send-err" role="alert">
             {tooMany
               ? `一次最多送 ${ATTACH_MAX} 個檔案，請先移除 ${ready.length - ATTACH_MAX} 個，剩下的下一則再送。`
               : tooLong
                 ? `太長了（${textChars}／${SHARE_TEXT_MAX} 字），請分成幾段送。`
-                : sendError}
+                : failedAttach
+                  ? '有附件沒傳上去，請移除它或再試一次，再送出。'
+                  : sendError}
           </p>
         ) : null}
         <div className="sh-input-row">
