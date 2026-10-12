@@ -21,7 +21,7 @@ use serde_json::Value;
 
 /// 一次最多讀檔尾多少（跟 grok 同一個上限；從一行中間切開時，解析時自然跳過）。
 const MAX_READ_BYTES: u64 = 8 * 1024 * 1024;
-const LOG_MARK: &str = "---AM-CLAUDE-LOG---";
+pub const LOG_MARK: &str = "---AM-CLAUDE-LOG---";
 
 /// uuid → 穩定的 `prompt_index`（FNV-1a 64；不用 `DefaultHasher`，重啟才不會把同一問再記一次）。
 fn index_of(uuid: &str) -> u64 {
@@ -268,11 +268,14 @@ pub(crate) async fn record_runtime(
 }
 
 fn read_script(roots: &[String], sid: &str) -> String {
+    read_script_tail(roots, sid, MAX_READ_BYTES)
+}
+
+fn read_script_tail(roots: &[String], sid: &str, max: u64) -> String {
     let list = roots.iter().map(|r| sh_quote(r)).collect::<Vec<_>>().join(" ");
     format!(
         "for r in {list}; do for f in \"$r\"/projects/*/{sid}.jsonl; do if [ -f \"$f\" ] && [ ! -L \"$f\" ]; then printf '%s\\n%s\\n' '{mark}' \"$f\"; tail -c {max} \"$f\"; break 2; fi; done; done; :",
         mark = LOG_MARK,
-        max = MAX_READ_BYTES,
     )
 }
 
@@ -300,6 +303,43 @@ pub async fn load(app: &impl GrokTranscriptContext, bot: &db::Bot, run: &db::Run
         tracing::info!(run = %run.id, session = %sid, host, "claude transcript: bound the pane to its claude session");
     }
     Ok(Some((sid, body)))
+}
+
+/// `path` 是不是某個 config root 的 `projects/` 底下的 `.jsonl`（字串層級：遠端路徑在別台機器上，這裡不碰檔案系統）。
+fn within_projects(path: &str, roots: &[String]) -> bool {
+    let p = std::path::Path::new(path);
+    p.is_absolute()
+        && !path.chars().any(char::is_control)
+        && !p.components().any(|c| matches!(c, std::path::Component::ParentDir))
+        && p.extension().and_then(|e| e.to_str()) == Some("jsonl")
+        && roots.iter().any(|r| p.starts_with(std::path::Path::new(r).join("projects")))
+}
+
+/// 這顆 run 的對話檔尾段（`GET /pending-question` 用，issue #1476）：還沒被回答的 `AskUserQuestion` 在檔尾，
+/// 遠端 bot 的檔在那台機器上，用跟 [`load`] 同一條 `sh`（遠端走 ssh）讀，只是只讀最後 `max` 位元組，也**不寫 DB**。
+///
+/// 路徑防護（遠端沒有本機那種 `local_transcript_allowed`）：檔案**不是**拿 hook 回報的 `transcript_path` 直接讀，
+/// 而是 `<bot 的 config root>/projects/*/<session id>.jsonl` 組出來的——root 只有這顆 bot 自己的 `CLAUDE_CONFIG_DIR`、
+/// 它身分在該主機的 config 目錄、`~/.claude`（同 §12.5b）；session id 取自 run 記的 `native_session_id`（沒有就取
+/// `transcript_path` 的檔名），只收英數與 `-`／`_`。run 記了 `transcript_path` 的話，它必須就在這些 root 的 `projects/` 底下、
+/// 檔名等於 session id，否則回 `None` **而且不讀**——偽造的 hook 不能因此讓 daemon 去讀別的身分或任意路徑。
+/// session 沒記、檔案找不到都是 `None`。
+pub async fn pending_tail(app: &impl GrokTranscriptContext, bot: &db::Bot, run: &db::Run, host: &str, max: u64) -> anyhow::Result<Option<String>> {
+    let recorded = run.transcript_path.as_deref().map(str::trim).filter(|p| !p.is_empty());
+    let stem = recorded.and_then(|p| std::path::Path::new(p).file_stem().and_then(|s| s.to_str())).filter(|s| super::grok_transcript::valid_session_id(s));
+    let known = run.native_session_id.as_deref().filter(|s| super::grok_transcript::valid_session_id(s));
+    let Some(sid) = known.or(stem) else { return Ok(None) };
+    let roots = app.claude_config_roots(bot, run, host).await;
+    if roots.is_empty() {
+        return Ok(None);
+    }
+    if let Some(p) = recorded {
+        if !within_projects(p, &roots) || stem != Some(sid) {
+            return Ok(None);
+        }
+    }
+    let out = app.host_shell(host, &read_script_tail(&roots, sid, max)).await?;
+    Ok(split_output(&out).map(|(_, body)| body))
 }
 
 #[cfg(all(test, feature = "daemon-test-harness"))]

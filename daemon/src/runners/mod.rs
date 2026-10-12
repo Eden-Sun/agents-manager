@@ -37,6 +37,7 @@ pub mod models;
 pub mod pane_identity;
 pub mod panes;
 pub mod pending_question;
+pub mod pending_question_remote;
 pub mod primary_keep_warm;
 pub mod prompt_cache;
 pub mod prompt_suggestion;

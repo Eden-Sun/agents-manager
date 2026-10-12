@@ -725,8 +725,8 @@ Jev 不負責回合收尾、額度記帳或競態判斷；這些依 run、turn�
   - **何時算有建議**：最高分 ≥ 0.7 **且**比第二名高 ≥ 0.15（比的是千分位，剛好 0.7、剛好差 0.15 算過）；同分不標。否則只留分數、不標。結果連同每個選項的分數寫進 `judge_shadow`（`regex_verdict='ask_option'`，`run_id`＝這一輪的 run，`matched_line`＝`{tool_use_id, questions:[{index,scores,suggested}]}`，**不存題目與選項原文**，三個機率欄位留空；`cleared_at` 不蓋）。「環境設定 → Jev 第二意見」的帳本照 `regex_verdict` 分場景計數，這一類是第五個。
   - **新的外送內容**：state 帶題目（上限 400 字）、各選項 label（120 字）＋description（300 字）、這顆 bot 目前回合的使用者 prompt 尾段（先走 `mask` 再留最後 2,000 字元；在飛的那一則，沒有就最近一則已送出的）——**題目、選項與使用者 prompt 尾段會送到 TypeSafe**。不送 bot／專案識別；指令文字裡只有我們自己的題號與字母，不夾使用者內容。其餘照 §4.3c 既有的界線：`[judge] enabled` 與專案名單兩層閘門、`reserve_slot` 先占位的 `max_per_hour` 保險絲（一個請求占一個名額，名額沒了就不問、不寫帳本）、`mask`、key 只存路徑；專案已移交（`handed_off_to`）不問（比照 #1421）。
   - **只提示**：不按鍵、不送字、不開回合、不改 bot 狀態。Jev 逾時、5xx、答案缺題或超出 0–1、key 讀不到、超過名額：問題照常顯示，`jev_options` 是 `null`，網頁什麼都不標。失敗仍占一筆帳本（`error` 有原因）。
-  - **範圍**：只有本機的 claude bot（`pending-question` 讀的是本機 transcript）；遠端主機上的 bot、非 claude 的 bot 沒有這個提示。
-- **遠端主機的專案（#1467）**：四個場景的觸發點都不看主機，遠端專案跟本機專案同一條路——卡畫面掃描經 `herdr_for_run` 從那台主機自己的 herdr 讀畫面，派工撞題與完成回報只看 bot 與專案，撞限橫幅經 `read_run_pane`（run 所在主機）讀。終端備援（`try_fallback`）把畫面上的撞限橫幅收成失敗回合時，也走同一個閘門把這次命中交給 Jev（備援先下手時 `capture_codex_usage_notices` 會因「已寫過、回合不在飛」跳過，所以備援自己要交）。**本來就問不到的**：(0) 選項建議（第五個場景）的題目從本機 transcript 讀，遠端主機的 bot 沒有；(1) 認領票的撞題提示由 pane 裡的 `agm` 打 `POST /api/judge/collision-check`，遠端 bot 沒有 `AM_PORT`、也沒有 `runtime.json`（§11.4 不開反向埠），`collision_check_hint` 照規則吞掉，遠端認領不會到 daemon；(2) 撞限這個場景只看 codex／grok 的畫面橫幅，claude bot 不問（額度走 statusLine 的數字）；(3) 撞題候選只收其他 child 在跑的工作與未結案、要驗收的交辦，頂層 bot 的標題不算——專案裡只有頂層 bot、AGM 也沒對它們開過要驗收的交辦時（m4p 現況），收得到認領也沒有可比的對象；完成回報只問 hook 回報的 `completed`，通知型交辦（`expects_review=0`）照樣問。「帳本沒有遠端列」要先分辨是這三條還是單純沒有觸發事件（2026-10-12 的帳本：m4p 最後一筆 AGM 派工是 09-22，早於撞題與完成回報上線）。
+  - **範圍**：claude bot，本機與遠端主機都有（遠端的 `pending-question` 讀法見 §12.5b 末段，issue #1476：同一條 `sh`／ssh、只讀檔尾、有逾時與節流）；非 claude 的 bot 沒有。遠端讀不到（斷線、逾時、檔案不在）時 `jev_options` 同樣是 `null`。
+- **遠端主機的專案（#1467）**：四個場景的觸發點都不看主機，遠端專案跟本機專案同一條路——卡畫面掃描經 `herdr_for_run` 從那台主機自己的 herdr 讀畫面，派工撞題與完成回報只看 bot 與專案，撞限橫幅經 `read_run_pane`（run 所在主機）讀。終端備援（`try_fallback`）把畫面上的撞限橫幅收成失敗回合時，也走同一個閘門把這次命中交給 Jev（備援先下手時 `capture_codex_usage_notices` 會因「已寫過、回合不在飛」跳過，所以備援自己要交）。**本來就問不到的**：(1) 認領票的撞題提示由 pane 裡的 `agm` 打 `POST /api/judge/collision-check`，遠端 bot 沒有 `AM_PORT`、也沒有 `runtime.json`（§11.4 不開反向埠），`collision_check_hint` 照規則吞掉，遠端認領不會到 daemon；(2) 撞限這個場景只看 codex／grok 的畫面橫幅，claude bot 不問（額度走 statusLine 的數字）；(3) 撞題候選只收其他 child 在跑的工作與未結案、要驗收的交辦，頂層 bot 的標題不算——專案裡只有頂層 bot、AGM 也沒對它們開過要驗收的交辦時（m4p 現況），收得到認領也沒有可比的對象；完成回報只問 hook 回報的 `completed`，通知型交辦（`expects_review=0`）照樣問。「帳本沒有遠端列」要先分辨是這三條還是單純沒有觸發事件（2026-10-12 的帳本：m4p 最後一筆 AGM 派工是 09-22，早於撞題與完成回報上線）。
 - 模型釘 `jev-1.13.0`。離線量測與題目來源在 `reports/jev-spike/`。Jev 的答案目前**不**作為否決票；要升級得先看帳本的數字。
 
 ### 4.4 hook 子命令（`agents-managerd hook claude|codex|grok|agy`）最低契約
@@ -3493,6 +3493,10 @@ bot 用 `herdr agent start` 開的 claude 子 agent（本機或遠端）沒有 h
   `runs.transcript_baseline_at` 為 NULL＝這個 run 還沒讀過：第一次讀只把「已經結束的問」當基準——對得上既有回合的（派工開的在飛回合）照舊收掉，
   其餘不開回合、不通知，基準時間（已結束的最後一問的 user 行 `timestamp`）寫進該欄（檔裡沒有任何一問＝空字串）。之後只記 `timestamp` 比基準晚的問；
   第一次讀到時還沒結束的那一問不在基準裡，結束時照記。grok／agy 不用基準（它們的 session 是 run 自己開的）。
+
+- **等人回答的提問（`GET /api/bots/{id}/pending-question`，issue #1476）**：遠端 claude bot 的「還沒被回答的 `AskUserQuestion`」也從同一個對話檔讀：`claude_child_log::pending_tail` 用上面同一條 `sh`（遠端走 ssh）、只讀最後 512 KiB（本機的 `pending_question::TAIL_BYTES`）、**不寫 DB**。
+  路徑防護：檔案由這顆 bot 的 root（`CLAUDE_CONFIG_DIR`、身分在該主機的目錄、`~/.claude`）＋session id（run 記的 `native_session_id`，沒有就取記的 `transcript_path` 檔名）組出 `projects/*/<session>.jsonl`；run 記了路徑的話它必須在這些 root 的 `projects/` 底下、無 `..`、`.jsonl`、檔名等於 session，否則不讀。
+  遠端讀取最多 5 秒（含查 `$HOME`），逾時或失敗當沒讀到；同一個 run 4 秒內重複請求用上一次的結果（失敗也算），同時進來的共用一次讀取（`runners::pending_question_remote`）。讀到之後走跟本機同一個 `pending_ask_entry`，Jev 的選項建議（§4.3c 第五個場景）一併生效。
 
 ### 12.6 額度：`/usage` 探測
 grok 沒有 usage 子命令或 RPC，數字只在 TUI 的 `/usage` 對話框裡，所以開**用完即丟**的 workspace 探測，跑在**專屬 herdr session `am-quota`**（需要時起、永不 attach）：
