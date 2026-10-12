@@ -240,6 +240,7 @@ export function parseChoiceMenu(text: string | null | undefined): TuiChoiceMenu 
   // 並排預覽版面先把右欄切掉（見 tuiPreviewPane.ts）；沒有那種框就是原樣。
   const raw = text.split('\n')
   const side = splitPreviewPane(raw)
+  if (side && 'malformed' in side) return null
   const all = (side ? side.lines : raw).map(stripBox)
   const lines = all.slice(Math.max(0, all.length - SCAN_LINES))
 

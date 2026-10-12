@@ -20,8 +20,8 @@ export interface PreviewSplit {
   preview: string
 }
 
-/** 終端格寬：CJK 全形字、全形標點與 emoji 佔兩格，其餘一格（組合字元不處理，pane 內文用不到）。 */
-function cellWidth(cp: number): number {
+/** 終端格寬：CJK 全形字、全形標點與 emoji 佔兩格，其餘一格。 */
+function codePointCellWidth(cp: number): number {
   return (cp >= 0x1100 && cp <= 0x115f) ||
     (cp >= 0x2e80 && cp <= 0xa4cf) ||
     (cp >= 0xac00 && cp <= 0xd7a3) ||
@@ -35,15 +35,32 @@ function cellWidth(cp: number): number {
     : 1
 }
 
+const graphemes = new Intl.Segmenter(undefined, { granularity: 'grapheme' })
+const MARK = /^\p{Mark}$/u
+
+/** 一個 grapheme cluster 只按基底字元的最大格寬計算；組合記號與 ZWJ 不另外佔格。 */
+function cellWidth(cluster: string): number {
+  let width = 0
+  for (const ch of cluster) {
+    if (ch === '\u200d' || MARK.test(ch)) continue
+    width = Math.max(width, codePointCellWidth(ch.codePointAt(0) ?? 0))
+  }
+  // 國旗與 emoji variation/keycap 序列是多碼點、單一 grapheme，但終端仍佔兩格。
+  const codePoints = [...cluster].map((ch) => ch.codePointAt(0) ?? 0)
+  const regionalIndicators = codePoints.filter((cp) => cp >= 0x1f1e6 && cp <= 0x1f1ff)
+  if (regionalIndicators.length >= 2 || codePoints.includes(0xfe0f) || codePoints.includes(0x20e3)) {
+    return 2
+  }
+  return width
+}
+
 /** `col` 這一格起頭的字元在字串裡的索引；那格落在雙格字中間或超出行尾回 -1。 */
 function indexAtCell(line: string, col: number): number {
   let at = 0
-  let i = 0
-  for (const ch of line) {
-    if (at === col) return i
+  for (const { index, segment } of graphemes.segment(line)) {
+    if (at === col) return index
     if (at > col) return -1
-    at += cellWidth(ch.codePointAt(0) ?? 0)
-    i += ch.length
+    at += cellWidth(segment)
   }
   return -1
 }
@@ -51,11 +68,9 @@ function indexAtCell(line: string, col: number): number {
 /** 字串索引 `idx` 之前佔了幾格。 */
 function cellsBefore(line: string, idx: number): number {
   let at = 0
-  let i = 0
-  for (const ch of line) {
-    if (i >= idx) break
-    at += cellWidth(ch.codePointAt(0) ?? 0)
-    i += ch.length
+  for (const { index, segment } of graphemes.segment(line)) {
+    if (index >= idx) break
+    at += cellWidth(segment)
   }
   return at
 }
@@ -68,8 +83,10 @@ const LEFT_OK = /^(\s*|\s*([❯›▶>]\s)?\d{1,2}[.)]\s+\S.*)$/
 
 const NOTES = /^\s*Notes:\s/i
 
-/** 認不出並排版面回 `null`，呼叫端照原樣解析。 */
-export function splitPreviewPane(lines: string[]): PreviewSplit | null {
+/** `null` 表示沒有候選預覽框；`malformed` 表示已找到框頂但內框欄位錯位。 */
+export type PreviewSplitResult = PreviewSplit | { malformed: true } | null
+
+export function splitPreviewPane(lines: string[]): PreviewSplitResult {
   // 由下往上找最後一個框頂。
   let top = -1
   for (let i = lines.length - 1; i >= 0; i--) {
@@ -107,6 +124,8 @@ export function splitPreviewPane(lines: string[]): PreviewSplit | null {
       closed = true
       break
     }
+    // 框頂已成立、但這行的框線跑到另一欄：不要把整份畫面交給會掃描預覽欄的 parser。
+    if (lines[i].includes('│') || lines[i].includes('└')) return { malformed: true }
     // 框在這一行斷掉（pane 截尾或別的畫面）：到此為止。
     bottom = i - 1
     break

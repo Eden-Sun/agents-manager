@@ -189,8 +189,8 @@
     ![修正前](screenshots/blocked-question-bullets/before-1440.png) ![修正後](screenshots/blocked-question-bullets/after-1440.png) ![手機](screenshots/blocked-question-bullets/after-390.png)
   - 單選送 ↓／↑ × n ＋ Enter（送前重讀畫面，選項變了就不送）；單選問卷用 radio。
   - **AskUserQuestion 帶 `preview` 的並排版面**（2026-10-12 console-pm，issue #1473）：左欄編號選項、右欄是**游標所在那一項**的預覽框（`┌─┐ │ │ └─┘`），
-    框底下一行 `Notes: press n to add notes`、選項區底下沒編號的 `Chat about this`。`lib/tuiPreviewPane.ts` 先按終端格寬（CJK 兩格）把右欄切掉，
-    其餘照原解析器走；框內文字進 `choice.preview`（去框線、保留縮排），**只掛在游標那一項**——畫面上只有它，不替其他項捏造；移動游標才看得到別項的。
+    框底下一行 `Notes: press n to add notes`、選項區底下沒編號的 `Chat about this`。`lib/tuiPreviewPane.ts` 先按 grapheme cluster 的終端格寬（CJK 兩格）把右欄切掉；
+    若已找到框頂但內框邊線欄位對不上，整份選單不認、不回退掃描原始畫面。正常切欄後其餘照原解析器走；框內文字進 `choice.preview`（去框線、保留縮排），**只掛在游標那一項**——畫面上只有它，不替其他項捏造；移動游標才看得到別項的。
     UI 把預覽用等寬字畫在選項清單下面（`bc-preview`，折行不橫捲）。左欄折到下一行的 `(Recommended)` 接回標題，不是說明。
     `Notes:` 與 `Chat about this` 不是選項、不進預覽。**游標走到 `Chat about this` 時整份不認**：畫面上第 N 項的 `❯` 還留著（真機 2.1.296），
     照認會把「游標在第 N 項」當真，Enter 其實落在 Chat about this。按鍵 2026-10-12 真機實測（claude 2.1.296、tmux 213×55）：↑／↓ 移游標、預覽跟著換，
