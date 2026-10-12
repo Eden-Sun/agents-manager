@@ -750,6 +750,10 @@ impl s6_ports::OwedDeliveryServices for App {
         crate::lifecycle::mark_delivery(&self.shared(), turn_id, record, delivered_at).await
     }
 
+    fn watch_late_proof_after_owed(&self, run_id: &str, bot_id: &str, turn_id: &str) {
+        crate::lifecycle::late_proof::arm_after_owed_write(&self.shared(), run_id, bot_id, turn_id);
+    }
+
     async fn queue_put_back(
         &self,
         bot_id: &str,

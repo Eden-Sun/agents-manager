@@ -180,7 +180,19 @@ async fn settle<C: OwedDeliveryContext>(app: &C, bot_id: &str) -> anyhow::Result
 async fn write<C: OwedDeliveryContext>(app: &C, bot_id: &str, o: &Owed) -> anyhow::Result<bool> {
     let applied = match &o.write {
         Write::Delivered { rec, at } => {
+            let run_id = if rec.stored == "unknown" {
+                sqlx::query_scalar::<_, Option<String>>("SELECT run_id FROM turns WHERE id=?")
+                    .bind(&o.turn_id)
+                    .fetch_optional(app.db())
+                    .await?
+                    .flatten()
+            } else {
+                None
+            };
             app.mark_delivery(&o.turn_id, *rec, at).await?;
+            if let Some(run_id) = run_id {
+                app.watch_late_proof_after_owed(&run_id, bot_id, &o.turn_id);
+            }
             true
         }
         Write::Closed { delivery, note } => {

@@ -112,7 +112,7 @@ async fn planned_authority_matches(app: &impl crate::capabilities::Db, run: &db:
         return false;
     }
     match proof {
-        Some(proof) => super::delivery::same_session(app, &run.id, proof).await,
+        Some(proof) => super::delivery::same_session(app, &run.id, proof).await == super::delivery::SessionMatch::Same,
         None => true,
     }
 }
@@ -281,8 +281,10 @@ async fn confirm(
         #[cfg(not(all(test, feature = "daemon-test-harness")))]
         tokio::time::sleep(std::time::Duration::from_millis(SUBMIT_SETTLE_MS)).await;
         let screen = read_styled(client, pane, SCAN_SOURCE, DELIVER_SCAN_LINES).await?;
-        if !same_session(app, &run.id, proof).await {
-            return Ok((Delivered::Unproven("session_changed"), None));
+        match same_session(app, &run.id, proof).await {
+            super::delivery::SessionMatch::Same => {}
+            super::delivery::SessionMatch::Changed => return Ok((Delivered::Unproven("session_changed"), None)),
+            super::delivery::SessionMatch::Unavailable => continue,
         }
         match (box_state(&bot.kind, &screen), proof) {
             (BoxState::Empty, Proof::Transcript { format, path, .. }) => {

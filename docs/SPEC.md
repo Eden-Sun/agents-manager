@@ -1035,10 +1035,11 @@ user 文字先照 CLI 自己的拆法還原（`lifecycle::pasted_content`，只�
   - 框仍是空的、而且 agent 明顯在做事（送出鍵之後 hook 有動靜、畫面有進行中的 spinner、或 `agent_status=working`）→ 升成 `ok`＋
     `delivery_verified=0`、`auto_resend=0`（同 `Unverified`：UI 標「未驗證送達」、絕不自動重送）；
   - 兩種都沒有（框空了但 bot 沒動、也沒有證據）→ 維持 `unknown`，**不**放寬成「沒證據也當 ok」，之後由 Stop hook／stuck_turns 收。
-  升級只用 CAS（`status='in_flight' AND delivery='unknown'`）：Stop hook、放棄、run 結束先到就什麼都不寫；成功後推 `turn_updated`、
-  掛 stall／progress 看門狗（跟一般 `ok`／`unverified` 同一套）。只有 `not_proven_submitted`（框已空）才認領；字還在框裡
-  （`still_in_box`）、讀不到（`composer_unreadable`）、`nothing_typed` 等原因沒有基準可看，維持原行為。daemon 重啟後記憶體裡的基準就沒了，
-  留給 `rearm_progress`／Stop hook。
+  呼叫端寫成 `unknown` 後立即認領；stall watchdog 重送也在 unknown 寫入成功後認領。若 unknown 寫入記成欠帳，補寫成功時仍認領同一回合的 Pending，
+  不受 60 秒認領期限影響。升級只用 CAS（`status='in_flight' AND delivery='unknown'`）：Stop hook、放棄、run 結束先到就什麼都不寫；成功後推 `turn_updated`、
+  掛 stall／progress 看門狗（跟一般 `ok`／`unverified` 同一套）。只有 `not_proven_submitted`（框已空）才有基準可認領；字還在框裡
+  （`still_in_box`）、框狀態讀不到（`composer_unreadable`）、`nothing_typed` 等原因沒有基準可看，維持原行為。session 確認的 DB 暫時讀取錯誤、
+  transcript 暫時讀取錯誤都回 `Wait`，下一輪重試；run 已消失或 session 確認不相符才停止。daemon 重啟後記憶體裡的基準就沒了，留給 `rearm_progress`／Stop hook。
 - **長段貼上要拆段送**（issue #382，2026-09-21 實測 herdr 0.9.1＋claude）：一次 `pane.send_text` 超過約 1024 位元組（≥ 1024 B 就中；≤ 1020 B 完整），
   **最前面的 1024 位元組不見了**，只剩尾巴進框（1048 B 只剩最後 4 行、1804 B 只剩最後 46 行；使用者 58 行的數字清單就這樣只送到最後 3 行，
   泡泡卻顯示整段）。`HerdrClient::pane_send_text` 一律拆成每段 ≤ 1000 B（優先在換行後切、不切斷多位元組字元）依序送——
