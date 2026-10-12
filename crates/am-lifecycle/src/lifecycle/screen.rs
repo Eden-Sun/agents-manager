@@ -339,6 +339,20 @@ pub fn is_noise(s: &str) -> bool {
 /// `gpt-… · <cwd>`，舊規則要 `Context`／`left` 才認，完成時間行就不在回覆尾巴（#207 真畫面）。
 fn is_codex_status_row(s: &str) -> bool {
     let s = s.trim();
+    // The warning counter is either its own footer row or right-aligned beside shortcuts.
+    let warning = |row: &str| {
+        let Some(rest) = row.strip_prefix("⚠ ") else { return false };
+        let Some((count, tail)) = rest.split_once(' ') else { return false };
+        !count.is_empty()
+            && count.chars().all(|c| c.is_ascii_digit())
+            && matches!(tail, "warning · f2 to view" | "warnings · f2 to view")
+    };
+    if warning(s) {
+        return true;
+    }
+    if let Some(rest) = s.strip_prefix("? for shortcuts") {
+        return rest.is_empty() || (rest.starts_with(char::is_whitespace) && warning(rest.trim()));
+    }
     let Some((head, rest)) = s.split_once('·') else { return false };
     let model = head.split_whitespace().next().unwrap_or("");
     if !model.contains('-') {
@@ -2806,5 +2820,54 @@ mod limit_hit_quota_tests {
 
         let again = app.quotas.lock().await.get("codex").unwrap().limit_hit.clone().unwrap();
         assert_eq!((first.at, first.until), (again.at, again.until));
+    }
+}
+
+#[cfg(test)]
+mod codex_warning_footer_tests {
+    use super::*;
+
+    const STATUS: &str = "  GPT-6.1-Sol default · ~/project/agents-manager · 接手修復 GitHub issue #1486";
+
+    #[test]
+    fn real_warning_footer_rows_are_chrome() {
+        for row in [
+            "  ? for shortcuts",
+            "⚠ 1 warning · f2 to view",
+            "  ⚠ 2 warnings · f2 to view",
+            "  ? for shortcuts        ⚠ 2 warnings · f2 to view",
+        ] {
+            assert!(is_noise(row), "footer row: {row}");
+        }
+        for row in ["There are 2 warnings · f2 to view", "? for shortcuts explains the UI"] {
+            assert!(!is_codex_status_row(row), "ordinary text: {row}");
+        }
+    }
+
+    #[test]
+    fn warning_footer_does_not_change_reply_runtime_busy_or_composer() {
+        use crate::composer_parse::{box_state, BoxState};
+        for footer in [
+            "  ? for shortcuts\n⚠ 1 warning · f2 to view",
+            "  ? for shortcuts        ⚠ 2 warnings · f2 to view",
+        ] {
+            let screen = format!("› fix\n• 修復完成。\n\n› \n\n{STATUS}\n{footer}\n");
+            assert_eq!(extract_reply("codex", &screen).as_deref(), Some("修復完成。"));
+            assert_eq!(clean_screen("codex", &screen).as_deref(), Some("• 修復完成。"));
+            assert_eq!(crate::lifecycle::poller::live_reply("codex", &screen).as_deref(), Some("修復完成。"));
+            assert!(crate::lifecycle::poller::pane_awaits_input("codex", &screen));
+            // A clipped snapshot can retain the footer without its composer row.
+            let clipped = screen.replace("\n› \n", "\n");
+            assert_eq!(extract_reply("codex", &clipped).as_deref(), Some("修復完成。"));
+            assert_eq!(crate::lifecycle::poller::live_reply("codex", &clipped).as_deref(), Some("修復完成。"));
+            let runtime = crate::codex_live::parse_status_line(&screen).expect("footer runtime");
+            assert_eq!(runtime.model, "gpt-6.1-sol");
+            assert_eq!(Some(runtime), crate::codex_live::parse_status_line(STATUS));
+            assert_eq!(box_state("codex", &screen), BoxState::Empty);
+            assert!(!crate::lifecycle::poller::pane_still_busy(&screen));
+            let working = format!("• Working (4s • esc to interrupt)\n\n› \n\n{STATUS}\n{footer}\n");
+            assert!(crate::lifecycle::poller::pane_still_busy(&working));
+            assert_eq!(box_state("codex", &screen.replace("\n› \n", "\n› typed draft\n")), BoxState::NonEmpty);
+        }
     }
 }
