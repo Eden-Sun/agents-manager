@@ -492,7 +492,7 @@ export function ShareApp({ client }: { client: ShareClient }) {
         // 游標那一則已經不在對話裡（撤回、刪掉）：照 API.md 重載第一頁，不拿同一個游標反覆重試。
         messageResyncGen.current++
         void load()
-      } else setOlderError(shareErrorText(e, 'load'))
+      } else setOlderError(shareErrorText(e, 'older'))
     } finally {
       setLoadingOlder(false)
     }

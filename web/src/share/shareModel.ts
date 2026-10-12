@@ -177,7 +177,7 @@ export class ShareHttpError extends Error {
 }
 
 /** 給 end user 看的錯誤；不帶任何內部細節。404＝連結失效（token 錯或分享已關，契約 C 不分）。 */
-export function shareErrorText(e: unknown, what: 'send' | 'upload' | 'load'): string {
+export function shareErrorText(e: unknown, what: 'send' | 'upload' | 'load' | 'older'): string {
   if (e instanceof ShareHttpError) {
     if (e.status === 404) return '這個分享連結已失效。'
     if (e.status === 429) return e.retryAfter ? `傳得太快了，請 ${e.retryAfter} 秒後再試。` : '傳得太快了，請稍等一下再試。'
@@ -192,5 +192,7 @@ export function shareErrorText(e: unknown, what: 'send' | 'upload' | 'load'): st
   }
   if (what === 'upload') return '上傳失敗，請再試一次。'
   if (what === 'send') return '送出失敗，請再試一次；你打的字還在。'
+  // 載入較早訊息是手動的（按重試才再抓），不能寫成「正在重試」。
+  if (what === 'older') return '連不上，請按重試再試一次。'
   return '連不上，正在重試…'
 }
