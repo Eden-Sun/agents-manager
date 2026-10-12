@@ -4,7 +4,7 @@ import App from './App.tsx'
 import './styles.css'
 import './components/mobileBotHead.css'
 import './components/desktopBotHead.css'
-import { applyTheme, loadTheme } from './lib/theme'
+import { applyTheme, loadTheme, themeFromStorageEvent } from './lib/theme'
 import { startRouteSync } from './store/routeSync'
 import { startShelfPersistence } from './store/shelfPersist'
 
@@ -13,6 +13,7 @@ startShelfPersistence()
 startRouteSync()
 
 applyTheme(loadTheme())
+window.addEventListener('storage', (e) => themeFromStorageEvent(e.key, e.newValue))
 
 createRoot(document.getElementById('root')!).render(
   <StrictMode>
