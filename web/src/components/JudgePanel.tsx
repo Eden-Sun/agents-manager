@@ -87,9 +87,11 @@ export function JudgePanel() {
   if (settings === null) return <JudgeLoadNotice state={{ kind: 'unsupported' }} onRetry={() => setReload((n) => n + 1)} />
 
   // 名單裡可能是 id 也可能是 label（手寫 config）；勾選一律存 id。
-  const isPicked = (p: { id: string; label: string }) => picked.includes(p.id) || picked.includes(p.label)
+  const allProjectsPicked = picked.includes('*')
+  const isPicked = (p: { id: string; label: string }) => allProjectsPicked || picked.includes(p.id) || picked.includes(p.label)
   const toggle = (p: { id: string; label: string }) =>
     setPicked((cur) => (isPicked(p) ? cur.filter((x) => x !== p.id && x !== p.label) : [...cur, p.id]))
+  const toggleAllProjects = () => setPicked((cur) => (cur.includes('*') ? cur.filter((x) => x !== '*') : [...cur, '*']))
   const willHaveKey = settings.key_present || token.trim() !== ''
   const dirty = enabled !== settings.enabled || token.trim() !== '' || [...picked].sort().join('\n') !== [...settings.projects].sort().join('\n')
 
@@ -145,10 +147,14 @@ export function JudgePanel() {
         </label>
         <fieldset className="judge-projects" disabled={!enabled}>
           <legend>適用的專案（沒勾＝不送）</legend>
+          <label className="judge-all-projects">
+            <input type="checkbox" checked={allProjectsPicked} onChange={toggleAllProjects} />
+            <span>全部專案（含之後新建的；所有專案的對應內容都會送到 TypeSafe）</span>
+          </label>
           {allProjects.length === 0 ? <span className="hint">還沒有專案。</span> : null}
           {allProjects.map((p) => (
             <label key={p.id}>
-              <input type="checkbox" checked={isPicked(p)} onChange={() => toggle(p)} />
+              <input type="checkbox" checked={isPicked(p)} disabled={allProjectsPicked} onChange={() => toggle(p)} />
               <span>{p.label}</span>
             </label>
           ))}
