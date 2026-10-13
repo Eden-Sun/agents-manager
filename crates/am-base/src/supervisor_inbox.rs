@@ -241,6 +241,60 @@ pub async fn push_inbox_tx(
     Ok((res.rows_affected() > 0).then_some(id))
 }
 
+/// 這些 bot 是不是都還在：沒刪、專案沒移交。空清單算在。
+pub async fn bots_live(pool: &SqlitePool, ids: &[String]) -> Result<bool> {
+    let ids = serde_json::to_string(ids)?;
+    let alive: i64 = sqlx::query_scalar(
+        "SELECT COUNT(DISTINCT b.id) FROM bots b JOIN projects p ON p.id = b.project_id
+          WHERE b.id IN (SELECT value FROM json_each(?)) AND b.deleted_at IS NULL AND p.handed_off_to IS NULL",
+    )
+    .bind(&ids)
+    .fetch_one(pool)
+    .await?;
+    let want: i64 = sqlx::query_scalar("SELECT COUNT(DISTINCT value) FROM json_each(?)").bind(&ids).fetch_one(pool).await?;
+    Ok(alive == want)
+}
+
+/// 同 [`push_inbox`]，但只在 `live_bots` 全部還在（沒刪、專案沒移交）時才寫。
+/// 條件跟寫入是同一句 SQL，所以刪除或移交不會插在「檢查」與「寫入」中間（#1626：撞題查詢等 Jev 期間 bot 可能被刪）。
+pub async fn push_inbox_if_live(
+    pool: &SqlitePool,
+    event_key: &str,
+    kind: &str,
+    assignment_id: Option<&str>,
+    bot_id: Option<&str>,
+    turn_id: Option<&str>,
+    payload: &Value,
+    live_bots: &[String],
+) -> Result<Option<String>> {
+    let id = crate::db::ulid();
+    let now = crate::db::now();
+    let live = serde_json::to_string(live_bots)?;
+    let res = sqlx::query(
+        "INSERT OR IGNORE INTO supervisor_inbox
+           (id, supervisor_id, event_key, assignment_id, bot_id, turn_id, kind, payload_json, state, created_at, updated_at)
+         SELECT ?,?,?,?,?,?,?,?, 'pending', ?, ?
+          WHERE (SELECT COUNT(DISTINCT b.id) FROM bots b JOIN projects p ON p.id = b.project_id
+                  WHERE b.id IN (SELECT value FROM json_each(?)) AND b.deleted_at IS NULL AND p.handed_off_to IS NULL)
+              = (SELECT COUNT(DISTINCT value) FROM json_each(?))",
+    )
+    .bind(&id)
+    .bind(SUPERVISOR_ID)
+    .bind(event_key)
+    .bind(assignment_id)
+    .bind(bot_id)
+    .bind(turn_id)
+    .bind(kind)
+    .bind(payload.to_string())
+    .bind(&now)
+    .bind(&now)
+    .bind(&live)
+    .bind(&live)
+    .execute(pool)
+    .await?;
+    Ok((res.rows_affected() > 0).then_some(id))
+}
+
 pub async fn push_inbox(
     pool: &SqlitePool,
     event_key: &str,
