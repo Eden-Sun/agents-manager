@@ -139,11 +139,11 @@ pub async fn limit_cleared_since(app: &Arc<App>, bot: &crate::db::Bot, since: ch
 pub async fn refresh_codex_from_panes(app: &Arc<App>, host: &str) -> usize {
     // 讀 pane 要好幾趟 RPC：途中同名主機被換掉，舊機器 pane 上的讀數不能寫進新機器的 key（#347），所以先記下權威。
     let Some(fence) = app.hosts.fence(host).await else { return 0 };
-    let rows: Vec<(String, Option<String>, Option<String>)> = match sqlx::query_as(
+    let rows: Vec<(String, String, Option<String>, Option<String>)> = match sqlx::query_as(
         // 最近有動靜的 pane 排前面：它的狀態列最新。閒著的 pane 也會刷新，但剛跑完回合的那顆最準。
         // 第三欄是那顆 pane 畫面的年紀：最後一回合結束（或開始）的時間，沒有回合就是 run 起來的時間。
         // run 實際的身分（issue #238）：記了就用它，沒記才用 bot 設定的。
-        "SELECT r.pane_id, CASE WHEN r.runtime_identity IS NULL THEN b.identity ELSE NULLIF(TRIM(r.runtime_identity), '') END,
+        "SELECT r.id, r.pane_id, CASE WHEN r.runtime_identity IS NULL THEN b.identity ELSE NULLIF(TRIM(r.runtime_identity), '') END,
                 COALESCE((SELECT MAX(COALESCE(t.completed_at, t.created_at)) FROM turns t WHERE t.run_id = r.id), r.started_at)
            FROM runs r JOIN bots b ON b.id = r.bot_id JOIN projects p ON p.id = b.project_id
           WHERE p.host = ? AND b.kind = 'codex' AND r.state = 'running' AND r.pane_id IS NOT NULL
@@ -162,15 +162,17 @@ pub async fn refresh_codex_from_panes(app: &Arc<App>, host: &str) -> usize {
     };
     let mut wrote = 0;
     let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
-    for (pane_id, identity, screen_at) in rows {
+    for (run_id, pane_id, identity, screen_at) in rows {
         let base = quota_base_for_host(&**app, host, "codex", identity.as_deref()).await;
-        // 同一個身分讀到一次就夠——但要「讀到」才算：那顆 pane 正在壓縮對話、捲動中讀不到狀態列時，
+        let client = fence.conn().client.clone();
+        let Ok(read) = client.pane_read(&pane_id, "visible", 60).await else { continue };
+        // 每顆 pane 的模型列都寫進它自己的 run（網頁狀態列、context 用量，#1671），不受下面「同帳號讀一次」限制。
+        crate::codex_live::record_footer_from_screen(app, &run_id, &read.text).await;
+        // 額度：同一個身分讀到一次就夠——但要「讀到」才算：那顆 pane 正在壓縮對話、捲動中讀不到狀態列時，
         // 換同帳號的下一顆，而不是整個帳號這輪都停在 app-server 落後的數字（2026-09-15）。
         if seen.contains(&base) {
             continue;
         }
-        let client = fence.conn().client.clone();
-        let Ok(read) = client.pane_read(&pane_id, "visible", 60).await else { continue };
         let Some(parsed) = crate::codex_live::parse_status_quota(&read.text) else { continue };
         seen.insert(base.clone());
         let reading = format!("{:?}/{:?}", parsed.five_hour_left, parsed.weekly_left);
@@ -394,6 +396,38 @@ mod tests {
         env.herdr.screens.lock().unwrap().insert(old_pane, line(70));
         assert_eq!(refresh_codex_from_panes(&app, LOCAL_HOST).await, 1);
         assert_eq!(used(app.clone()).await, 30.0);
+    }
+
+    /// #1671：真實快照（warning 直接接在模型列右側）。同一次讀畫面既要寫 weekly 窗，也要把模型列寫進 run 的 status_line。
+    #[tokio::test]
+    async fn a_codex_footer_with_a_warning_beside_the_model_row_feeds_the_run_and_the_weekly_window() {
+        let env = crate::testing::env().await;
+        let app = env.app.clone();
+        let bot = crate::db::ulid();
+        sqlx::query(
+            "INSERT INTO bots (id, project_id, name, kind, args_json, autostart, inject_hooks, hook_token, managed_by, created_at)
+             VALUES (?,?,'cx1671','codex','[]',0,1,'tok','user',?)",
+        )
+        .bind(&bot)
+        .bind(&env.project_id)
+        .bind(crate::db::now())
+        .execute(&app.db)
+        .await
+        .unwrap();
+        let run = crate::testing::fake_run(&app, &bot).await;
+        let pane = crate::db::run(&app.db, &run).await.unwrap().unwrap().pane_id.unwrap();
+        let fixture: serde_json::Value = serde_json::from_str(include_str!("../../../crates/am-lifecycle/src/lifecycle/fixtures/codex-1671-model-row-with-warning.json")).unwrap();
+        env.herdr.screens.lock().unwrap().insert(pane, fixture["text"].as_str().unwrap().to_string());
+
+        assert_eq!(refresh_codex_from_panes(&app, LOCAL_HOST).await, 1);
+        let q = app.quotas.lock().await.get("codex").cloned().unwrap();
+        assert_eq!((q.source.as_str(), q.seven_day.map(|w| w.used_pct)), ("codex-statusline", Some(0.0)));
+        let r = crate::db::run(&app.db, &run).await.unwrap().unwrap();
+        assert_eq!(
+            r.status_line.as_deref(),
+            Some("GPT-6.1-Sol high · ~/project/hermes-agents/projects/rt · Context 17% used · weekly 100% left")
+        );
+        assert!(r.status_json.unwrap().contains("\"used_percentage\":17"));
     }
 
     #[tokio::test]

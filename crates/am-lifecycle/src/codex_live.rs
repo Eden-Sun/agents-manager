@@ -164,6 +164,29 @@ pub async fn correct_runtime_from_screen(app: &(impl crate::capabilities::BotSta
     wrote
 }
 
+/// 把畫面底部的模型列寫進 `runs.status_line`／`status_json`（網頁狀態列與 context 用量）。回傳 `true` = 有改動。
+pub async fn record_footer_from_screen(app: &(impl crate::capabilities::BotStatusEmit + crate::capabilities::Db + crate::capabilities::Emit), run_id: &str, screen: &str) -> bool {
+    // 讀不到模型列（壓縮中、選單開著）不清掉舊值。
+    let Some(footer) = am_base::codex_status::parse_footer(screen) else { return false };
+    let Ok(Some(run)) = db::run(app.db(), run_id).await else { return false };
+    // 鍵名照 claude statusLine，網頁 `toStatusInfo` 讀 `context_window.used_percentage`。
+    let json = footer.context_used_pct.map(|p| serde_json::json!({"context_window": {"used_percentage": p}}).to_string());
+    if run.status_line.as_deref() == Some(footer.line.as_str()) && run.status_json == json {
+        return false;
+    }
+    let wrote = sqlx::query("UPDATE runs SET status_line = ?, status_json = ? WHERE id = ?")
+        .bind(&footer.line)
+        .bind(&json)
+        .bind(run_id)
+        .execute(app.db())
+        .await
+        .is_ok();
+    if wrote {
+        app.emit_bot_status(&run.bot_id).await;
+    }
+    wrote
+}
+
 pub async fn hint_moves_runtime(app: &impl crate::capabilities::Db, run_id: &str, screen: &str) -> bool {
     let Some(seen) = parse_status_line(screen) else { return false };
     let Ok(Some(run)) = db::run(app.db(), run_id).await else { return true };
@@ -1234,5 +1257,70 @@ mod tests {
         assert!(busy_fast_blocked(draft, draft), "使用者的草稿：/fast 會接在後面一起送出");
         assert!(busy_fast_blocked(migration, working), "選擇畫面開著");
         assert!(busy_fast_blocked(working, "gpt-6-luna max · /tmp · Context 1% used\n"), "讀不出輸入框：不打");
+    }
+    /// #1671 真實快照（m4p、gpt-6.1-sol、213×55）：沒有 `? for shortcuts` 行，warning 接在模型列右側。
+    fn fixture_1671() -> String {
+        let v: serde_json::Value = serde_json::from_str(include_str!("lifecycle/fixtures/codex-1671-model-row-with-warning.json")).unwrap();
+        v["text"].as_str().unwrap().to_string()
+    }
+
+    const MODEL_ROW_1671: &str = "GPT-6.1-Sol high · ~/project/hermes-agents/projects/rt · Context 17% used · weekly 100% left";
+
+    #[test]
+    fn the_footer_model_row_loses_its_right_aligned_warning_and_keeps_the_context_percent() {
+        use am_base::codex_status::{parse_footer, CodexFooter};
+        assert_eq!(parse_footer(&fixture_1671()), Some(CodexFooter { line: MODEL_ROW_1671.into(), context_used_pct: Some(17.0) }));
+        // 模型列在 shortcuts 行上面、只有主題段（沒有 Context）：照樣是那一列，沒有百分比。
+        let topic = "• 完成\n\n› Ask Codex to do anything\n\n  GPT-6-Astra default · ~/project/agents-manager · 解決 issue #1664\n  ? for shortcuts      ⚠ 1 warning · f2 to view\n";
+        assert_eq!(
+            parse_footer(topic),
+            Some(CodexFooter { line: "GPT-6-Astra default · ~/project/agents-manager · 解決 issue #1664".into(), context_used_pct: None })
+        );
+        // 沒有 warning、帶 5h 段。
+        let five = "› Ask Codex to do anything\n\n  GPT-6.1-Sol high · /tmp · Context 5% used · 5h 96% left · weekly 48% left\n";
+        assert_eq!(parse_footer(five).unwrap().line, "GPT-6.1-Sol high · /tmp · Context 5% used · 5h 96% left · weekly 48% left");
+    }
+
+    #[test]
+    fn a_quoted_model_row_above_the_viewport_tail_is_not_the_footer() {
+        let screen = format!("  {MODEL_ROW_1671}\n{}", "• 回覆\n".repeat(10));
+        assert_eq!(am_base::codex_status::parse_footer(&screen), None);
+        assert_eq!(am_base::codex_status::parse_footer("› 草稿\n"), None);
+    }
+
+    #[test]
+    fn the_real_1671_snapshot_still_reads_runtime_and_the_weekly_window() {
+        let rt = parse_status_line(&fixture_1671()).expect("底部那列是狀態列");
+        assert_eq!((rt.model.as_str(), rt.effort.as_deref(), rt.fast), ("gpt-6.1-sol", Some("high"), false));
+        let q = parse_status_quota(&fixture_1671()).unwrap();
+        assert_eq!((q.five_hour_left, q.weekly_left), (None, Some(100.0)));
+    }
+
+    #[tokio::test]
+    async fn the_footer_is_written_to_the_run_only_when_it_changes_and_never_cleared_by_an_unreadable_screen() {
+        let env = crate::testing::env().await;
+        let bot = crate::testing::claude_bot(&env.app, &env.project_id, "footer").await;
+        let run = crate::testing::fake_run(&env.app, &bot.id).await;
+        let read = |env: &crate::testing::Env, run: &str| {
+            let db = env.app.db.clone();
+            let run = run.to_string();
+            async move {
+                let r = db::run(&db, &run).await.unwrap().unwrap();
+                (r.status_line, r.status_json)
+            }
+        };
+        assert!(record_footer_from_screen(&env.app, &run, &fixture_1671()).await);
+        let (line, json) = read(&env, &run).await;
+        assert_eq!(line.as_deref(), Some(MODEL_ROW_1671));
+        let json: serde_json::Value = serde_json::from_str(&json.unwrap()).unwrap();
+        assert_eq!(json["context_window"]["used_percentage"], 17.0);
+
+        assert!(!record_footer_from_screen(&env.app, &run, &fixture_1671()).await, "同一張畫面不重寫");
+        assert!(!record_footer_from_screen(&env.app, &run, "• Compacting context (1s • esc to interrupt)\n").await, "讀不到不清掉舊值");
+        assert_eq!(read(&env, &run).await.0.as_deref(), Some(MODEL_ROW_1671));
+
+        let next = fixture_1671().replace("Context 17% used", "Context 18% used");
+        assert!(record_footer_from_screen(&env.app, &run, &next).await);
+        assert!(read(&env, &run).await.0.unwrap().contains("Context 18% used"));
     }
 }
