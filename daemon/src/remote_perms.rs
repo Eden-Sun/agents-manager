@@ -103,10 +103,13 @@ pub(crate) fn tighten_script(root: &str) -> String {
     format!(
         "B=\"$HOME/{root}/bots\"\n\
          [ -d \"$B\" ] || exit 0\n\
-         chmod 700 \"$B\" 2>/dev/null || true\n\
+         root_ok=1\n\
+         chmod 700 \"$B\" 2>/dev/null || root_ok=0\n\
+         seen=0\n\
          for d in \"$B\"/*/; do\n\
          [ -d \"$d\" ] || continue\n\
-         ok=1\n\
+         seen=1\n\
+         ok=$root_ok\n\
          chmod 700 \"$d\" 2>/dev/null || ok=0\n\
          for f in \"$d\"/*; do\n\
          [ -e \"$f\" ] || continue\n\
@@ -114,6 +117,7 @@ pub(crate) fn tighten_script(root: &str) -> String {
          done\n\
          if [ \"$ok\" = 1 ]; then printf 'AM_TIGHTENED\\n'; else printf 'AM_TIGHTEN_FAILED\\n'; fi\n\
          done\n\
+         [ \"$root_ok\" = 1 ] || [ \"$seen\" = 1 ] || printf 'AM_TIGHTEN_FAILED\\n'\n\
          exit 0\n"
     )
 }
@@ -180,6 +184,33 @@ mod tests {
         assert!(out.status.success(), "一顆失敗不能讓整趟變成錯");
         let stdout = String::from_utf8_lossy(&out.stdout).into_owned();
         assert_eq!(count(&stdout), Tightened { tightened: 0, failed: 1 }, "{stdout}");
+        let _ = std::fs::remove_dir_all(&home);
+    }
+
+    #[test]
+    fn a_bots_root_chmod_failure_is_reported_as_failed() {
+        let home = crate::testing::track(std::env::temp_dir().join(format!("am-tighten-{}", crate::db::ulid())));
+        let bots = home.join(crate::startup::REMOTE_ROOT).join("bots");
+        let old = bots.join("b-old");
+        std::fs::create_dir_all(&old).unwrap();
+        std::fs::write(old.join("hook-spool.jsonl"), "secret\n").unwrap();
+        let bin = home.join("bin");
+        std::fs::create_dir_all(&bin).unwrap();
+        crate::testing::write_exec(
+            bin.join("chmod"),
+            "#!/bin/sh\ncase \"$2\" in */bots) exit 1 ;; esac\nexec /bin/chmod \"$@\"\n",
+        );
+
+        let out = std::process::Command::new("/bin/sh")
+            .arg("-c")
+            .arg(tighten_script(crate::startup::REMOTE_ROOT))
+            .env("HOME", &home)
+            .env("PATH", format!("{}:/usr/bin:/bin", bin.display()))
+            .output()
+            .unwrap();
+        assert!(out.status.success(), "一個 chmod 失敗不能中止整趟");
+        let stdout = String::from_utf8_lossy(&out.stdout).into_owned();
+        assert_eq!(count(&stdout), Tightened { tightened: 0, failed: 1 }, "bots 根目錄收不成也要回報失敗，讓週期補跑；輸出：{stdout}");
         let _ = std::fs::remove_dir_all(&home);
     }
 
