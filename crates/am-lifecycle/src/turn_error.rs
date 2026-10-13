@@ -246,6 +246,30 @@ pub fn kind_of(line: &str) -> &'static str {
     }
 }
 
+/// codex 把 API 的 4xx／5xx 回應原樣印成 `■ {"type":"error","status":400,"error":{"type":"invalid_request_error","message":"…"}}`
+/// （#1675：子 agent 連上舊版共用 app-server，`gpt-6.1-sol` 被 400 拒絕，回合卻照常收成完成）。
+/// 只認行首的 `■` 加上帶 `error.message` 的 JSON；釘上的是狀態碼、錯誤種類與訊息。
+fn codex_json_error(line: &str) -> Option<String> {
+    // 跟滿載橫幅同一條規則：`■` 要在原始行的行首，縮排的續行是引文。
+    if !line.starts_with('■') {
+        return None;
+    }
+    let body = undecorated(line).strip_prefix('■')?.trim();
+    if !body.starts_with('{') {
+        return None;
+    }
+    let v: serde_json::Value = serde_json::from_str(body).ok()?;
+    let err = v.get("error")?;
+    let message = err.get("message")?.as_str()?.trim();
+    if message.is_empty() {
+        return None;
+    }
+    let status = v.get("status").and_then(serde_json::Value::as_u64).map(|s| s.to_string());
+    let kind = err.get("type").and_then(serde_json::Value::as_str);
+    let head = [status.as_deref(), kind].into_iter().flatten().collect::<Vec<_>>().join(" ");
+    Some(if head.is_empty() { format!("API 拒絕這次請求：{message}") } else { format!("API 拒絕這次請求（{head}）：{message}") })
+}
+
 /// 只認**行首**的 `■`：codex 的回覆行是 `•`，縮排的續行是引文，談到這句話的回覆不是橫幅。
 fn is_model_at_capacity(line: &str) -> bool {
     line.starts_with('■') && body_of(undecorated(line)).to_ascii_lowercase().starts_with("selected model is at capacity")
@@ -263,6 +287,9 @@ pub fn api_error_line(screen: &str) -> Option<String> {
         }
         if is_model_at_capacity(line) {
             return Some(MODEL_AT_CAPACITY.to_string());
+        }
+        if let Some(reason) = codex_json_error(line) {
+            return Some(reason);
         }
         // 用帶記號的那串：`is_noise` 靠 `✻` 認出 spinner 收尾行。
         if !is_chrome(raw) {
@@ -540,6 +567,37 @@ mod tests {
         assert_eq!(kind_of(&capacity), "model_at_capacity");
         assert_eq!(kind_of("You've reached your 5-hour limit"), "quota_limit");
         assert_eq!(kind_of("API Error: Connection lost mid-response."), "api_error");
+    }
+
+    /// #1675：m4p 的 codex 子 agent 連上舊版共用 app-server，OpenAI 回 400 `invalid_request_error`，
+    /// codex 把整段 JSON 原樣印成 `■` 橫幅。回合要記成錯誤，原因寫出狀態碼與訊息，不能收成「完成」。
+    #[test]
+    fn a_codex_json_error_banner_is_a_turn_error_with_the_reason() {
+        let screen = "\
+› 你是 `robins-hub-gd6afd` 的子 agent：先讀 console/AGENTS.md
+■ {\"type\":\"error\",\"status\":400,\"error\":{\"type\":\"invalid_request_error\",\"message\":\"The 'gpt-6.1-sol' model is not supported when using Codex with a ChatGPT account.\"}}
+
+›
+  gpt-6.1-sol medium · ~/project/hermes-agents/projects/rt · 5h 90% left · weekly 98% left
+";
+        let line = api_error_line(screen).expect("400 的 JSON 橫幅要命中");
+        assert_eq!(
+            line,
+            "API 拒絕這次請求（400 invalid_request_error）：The 'gpt-6.1-sol' model is not supported when using Codex with a ChatGPT account."
+        );
+        assert_eq!(kind_of(&line), "api_error");
+        assert!(!is_quota_limit(&line));
+        assert!(!is_quota_exhaustion(&line));
+    }
+
+    /// 只認行首的 `■` 加上帶 `error.message` 的 JSON：回覆（`•`）、縮排引文、不是錯誤的 JSON 都不算。
+    #[test]
+    fn json_that_is_not_a_codex_error_banner_is_left_alone() {
+        let json = r#"{"type":"error","status":400,"error":{"type":"invalid_request_error","message":"nope"}}"#;
+        assert_eq!(api_error_line(&format!("› hi\n• 錯誤長這樣：{json}\n\n›\n")), None);
+        assert_eq!(api_error_line(&format!("› hi\n• 錯誤長這樣：\n  ■ {json}\n\n›\n")), None);
+        assert_eq!(api_error_line("› hi\n■ {\"status\":200,\"ok\":true}\n\n›\n"), None);
+        assert_eq!(api_error_line("› hi\n■ {壞掉的 JSON\n\n›\n"), None);
     }
 
     #[test]

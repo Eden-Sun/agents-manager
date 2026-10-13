@@ -688,7 +688,8 @@ claude 連線在回應中途掉了時，pane 只多一行 `⏺ API Error: Connec
   `hit your monthly spend limit`、`fast limit`、團隊預算不是速率桶用完，不當撞限（2026-09-15；以前非 Fable 一律記 5h，撞週額度會把 5h 釘滿、等 5h 重置就當成解除）。
   關鍵是「最後一件事」：`API error · Retrying…` 之後又把答案講完的是重試成功，不算。
   codex 模型滿載（`■ Selected model is at capacity. Please try a different model.`，行首必須是 `■`；`•` 回覆與縮排引文不算）同樣是回合錯誤，
-  釘成人話「模型目前滿載，請換模型或稍後再試（原文）」。它**不是**額度撞限：不記撞限、不擋派工、不自動重送或換模型（#1673）。run 物件帶結構化的 `turn_error_kind`（`model_at_capacity`／`quota_limit`／`api_error`，由 `turn_error::kind_of` 依 daemon 自己釘的原因判定、不落 DB，下一回合 `turn_error` 清掉就是 `null`），網頁靠它畫「模型滿載」的獨立標示、不比對文字（#1674，UI-DECISIONS）。
+  釘成人話「模型目前滿載，請換模型或稍後再試（原文）」。它**不是**額度撞限：不記撞限、不擋派工、不自動重送或換模型（#1673）。
+  codex 把 API 的 4xx／5xx 回應原樣印成行首 `■ {"type":"error","status":400,"error":{"type":"invalid_request_error","message":"…"}}` 時（例：子 agent 連上舊版共用 app-server，`gpt-6.1-sol` 被拒），同樣是回合錯誤，釘成「API 拒絕這次請求（400 invalid_request_error）：<message>」；只認行首 `■` 加帶 `error.message` 的 JSON，`•` 回覆、縮排引文、不是錯誤的 JSON 不算。種類是 `api_error`、不是額度（#1675）。run 物件帶結構化的 `turn_error_kind`（`model_at_capacity`／`quota_limit`／`api_error`，由 `turn_error::kind_of` 依 daemon 自己釘的原因判定、不落 DB，下一回合 `turn_error` 清掉就是 `null`），網頁靠它畫「模型滿載」的獨立標示、不比對文字（#1674，UI-DECISIONS）。
 - **記錄**：原文寫 `runs.turn_error`（屬於這個 CLI 程序，重啟即清），對話補一則釘在該回合的 `system` 訊息（`incomplete = 1`、附快照）；
   回合還 `in_flight` 就收成 `failed`（不然輸入框鎖死）。同一行只記一次。三件事**同一個交易**、要讀的先讀：`turn_error` 就是「只記一次」的標記，
   以前它先寫、後面失敗的話下一次擷取被標記擋掉，訊息沒釘、回合不收，再也不重來（#198 同類）。
