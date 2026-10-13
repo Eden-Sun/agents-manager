@@ -1251,7 +1251,7 @@ cancel 撤掉的是還沒送出的那則時，review 回應不再帶「turn 還�
 5. daemon 重啟：開機對帳完成、autostart 那一步（`reconcile::autostart_after_reconcile` → `start_send::resume_after_boot`），
    還在等、沒有 run 的再替它起一次（重啟前那次可能沒做完）。每次開機最多一次。清單或那顆 bot 在哪台主機讀不到就先不起、30 秒後再看那幾顆
    （#198）——以前讀不到主機當成本機，本機開機時把還沒對帳的遠端 bot 也起一顆（同一顆 bot 兩個 agent）。
-前端（`store/startingSend.ts`）只從 daemon 給的 turn 與訊息推出「有一則在等 bot 起來」：輸入框上方一條「啟動中，起來後自動送出」，
+前端（`store/startingSend.ts`）只從 daemon 給的 turn 與訊息推出「有一則在等 bot 起來」（有好幾則時取最早排的那一則，與 daemon 起來後先送的順序一致，#1697）：輸入框上方一條「啟動中，起來後自動送出」，
 失敗時「沒能啟動（原因），還沒送出」＋重新啟動（`POST /start`，起來後照樣由 flush 送）／取消；有這一條時不再另外顯示「啟動」列。
 `queued` 的 `turn_updated` 不算回合完成（不然未讀先多一，真正完成那次又被同一個 turn id 去重吃掉）。
 **回合中送出**（issue #733）：web 的 `POST /prompt` 帶 `queue_if_busy:true`。bot 有 in-flight turn 或 agent 尚未 idle 時，daemon 在 bot 鎖內把一筆 `origin:"web"`、`delivery:"pending"`、`awaits_idle=1` 的 queued turn、user message 與附件綁定寫進同一個交易，commit 後回 `200 {delivery:"queued",turn_id,message_id}`；空閒時照原本立即送出。每顆 bot 同時只有一格 `awaits_idle`，已佔用時再送回 `409 {reason:"queue_slot_taken",turn_id}`，不改動原佇列。舊版未帶 `queue_if_busy` 的呼叫仍維持原本 409 行為。
