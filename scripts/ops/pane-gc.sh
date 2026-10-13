@@ -1,5 +1,5 @@
 #!/bin/zsh
-# 收掉 herdr 的殭屍 pane。由 browser-gc-kick.sh 每 6 小時呼叫，也可手動跑。
+# 收掉 herdr 的殭屍 pane。由 browser-gc-kick.sh 每次 kick 呼叫（macOS launchd 與 Linux systemd timer 都是每 30 分鐘），也可手動跑。
 # 規則（純機械，不花 LLM）：
 #   1. 前景程式是卡住的互動式登入（claude auth login / gcloud auth login / codex login）
 #      且活超過 MAX_AGE 秒（預設 24h）→ 關 pane。
