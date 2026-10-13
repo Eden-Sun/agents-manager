@@ -71,7 +71,6 @@ pub fn slim_payload(input: &str, status_line: Option<&str>) -> Option<serde_json
     let v: serde_json::Value = serde_json::from_str(input).ok()?;
     let o = v.as_object()?;
     let mut out = serde_json::Map::new();
-    out.insert("hook_event_name".into(), serde_json::json!("StatusLine"));
     // The daemon tracks the transcript path elsewhere.
     for (k, v) in o {
         if k == "transcript_path" {
@@ -79,6 +78,8 @@ pub fn slim_payload(input: &str, status_line: Option<&str>) -> Option<serde_json
         }
         out.insert(k.clone(), v.clone());
     }
+    // 放在複製之後：輸入裡同名的 `hook_event_name` 不能蓋掉它（daemon 靠這個欄位分辨 StatusLine 與其他事件，#1734）。
+    out.insert("hook_event_name".into(), serde_json::json!("StatusLine"));
     if let Some(t) = status_line.map(str::trim).filter(|t| !t.is_empty()) {
         out.insert("status_line".into(), serde_json::json!(t));
     }
@@ -374,5 +375,11 @@ mod tests {
         let decoded: serde_json::Value = serde_json::from_str(&encoded).unwrap();
         assert_eq!(decoded["status_line"], injected);
         assert!(decoded.get("provider").is_none());
+    }
+
+    #[test]
+    fn slim_payload_is_a_statusline_event_whatever_event_name_the_input_carries() {
+        let v = slim_payload(r#"{"session_id":"s","hook_event_name":"Notification"}"#, None).unwrap();
+        assert_eq!(v["hook_event_name"], "StatusLine", "daemon 靠這個欄位分辨 StatusLine 與其他事件");
     }
 }
