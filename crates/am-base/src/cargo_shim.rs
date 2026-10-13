@@ -107,11 +107,18 @@ am_remote_cargo_eligible() {
     esac
 }
 
-# 會跑 libtest 測試的子指令（issue #813）：名額本來就罩住整個 test run（cargo 退出才放），但 `CARGO_BUILD_JOBS` 只限 rustc，
-# 測試執行緒照 libtest 預設開到核心數——32 核上每支 test binary 80 個執行緒、吃 8 核以上，6 個名額加起來遠超過整台機器。
+# 會跑測試的子指令（issue #813）：名額本來就罩住整個 test run（cargo 退出才放），但 `CARGO_BUILD_JOBS` 只限 rustc；測試 runner
+# 預設依 CPU 數平行，6 個名額一起跑時會遠超過整台機器的負載預算。
 am_cargo_runs_tests() {
     case "$1" in
         t | test) return 0 ;;
+        nextest)
+            shift
+            while [ "$#" -gt 0 ] && [ "$1" != nextest ]; do shift; done
+            [ "$#" -gt 0 ] || return 1
+            shift
+            case "${1:-}" in run | r) return 0 ;; *) return 1 ;; esac
+            ;;
         *) return 1 ;;
     esac
 }
@@ -675,29 +682,48 @@ am_cargo() {
     _ttl=$(am_json_field lease_ttl_secs "$_resp")
     case "$_jobs" in *[!0-9]* | '') _jobs=2 ;; esac
     case "$_ttl" in *[!0-9]* | '') _ttl=180 ;; esac
-    # 測試執行緒上限跟著名額走（issue #813）：呼叫端自己設了 `RUST_TEST_THREADS` 就尊重（`--test-threads` 本來就優先於環境變數）；
-    # 沒設才注入名額回應的 `test_threads`。舊 daemon 的回應沒有這個欄位＝用預設 8；`0`＝daemon 明講不設，交給 libtest 的預設。
+    # 測試執行緒上限跟著名額走（issue #813、#1711）：libtest 用 `RUST_TEST_THREADS`，nextest 用 `NEXTEST_TEST_THREADS`。
+    # 呼叫端設的值不超過名額就尊重；沒設才注入名額回應的 `test_threads`。舊 daemon 沒有欄位＝用預設 8；`0`＝daemon 明講不設。
     _test_env=""
     _tt_cap=""
-    if am_cargo_runs_tests "$_sub"; then
+    if am_cargo_runs_tests "$_sub" "$@"; then
         _tt=$(am_json_field test_threads "$_resp")
         case "$_tt" in *[!0-9]* | '') _tt=8 ;; esac
         # 受管的 bot：名額給的上限是上限，不是預設值（issue #1441）；人工 shell 與 `0`（daemon 明講不設）完全不動。
         if [ "$_tt" -gt 0 ] && am_is_managed; then _tt_cap=$_tt; fi
-        if [ -z "${RUST_TEST_THREADS:-}" ]; then
-            [ "$_tt" -eq 0 ] || _test_env="RUST_TEST_THREADS=$_tt"
-        elif [ -n "$_tt_cap" ] && [ "$RUST_TEST_THREADS" -gt "$_tt_cap" ] 2>/dev/null; then
-            printf 'agents-manager: RUST_TEST_THREADS=%s 超過名額的測試執行緒上限 %s，改用 %s（要超過請 AM_CARGO_BYPASS_SCHEDULER=1 明講）\n' "$RUST_TEST_THREADS" "$_tt_cap" "$_tt_cap" >&2
-            _test_env="RUST_TEST_THREADS=$_tt_cap"
+        if [ "$_sub" = nextest ]; then
+            _test_var=NEXTEST_TEST_THREADS
+            _test_value=${NEXTEST_TEST_THREADS:-}
+        else
+            _test_var=RUST_TEST_THREADS
+            _test_value=${RUST_TEST_THREADS:-}
+        fi
+        if [ -z "$_test_value" ]; then
+            [ "$_tt" -eq 0 ] || _test_env="$_test_var=$_tt"
+        elif [ -n "$_tt_cap" ]; then
+            case "$_test_value" in
+                *[!0-9]* | '')
+                    if [ "$_sub" = nextest ]; then
+                        printf 'agents-manager: %s=%s 超過名額的測試執行緒上限 %s，改用 %s（要超過請 AM_CARGO_BYPASS_SCHEDULER=1 明講）\n' "$_test_var" "$_test_value" "$_tt_cap" "$_tt_cap" >&2
+                        _test_env="$_test_var=$_tt_cap"
+                    fi
+                    ;;
+                *)
+                    if [ "$_test_value" -gt "$_tt_cap" ] 2>/dev/null; then
+                        printf 'agents-manager: %s=%s 超過名額的測試執行緒上限 %s，改用 %s（要超過請 AM_CARGO_BYPASS_SCHEDULER=1 明講）\n' "$_test_var" "$_test_value" "$_tt_cap" "$_tt_cap" >&2
+                        _test_env="$_test_var=$_tt_cap"
+                    fi
+                    ;;
+            esac
         fi
     fi
-    # 命令列的參數優先於環境變數（cargo 的 `-j`／`--jobs`、libtest 的 `--test-threads`），所以受管的 bot 的命令列也要夾
-    # （issue #1441、#1442）。`-j`／`--jobs` 只看第一個 `--` 之前的參數，`--test-threads` 只看 `--` 之後的；其餘參數順序不動。
+    # 命令列的參數優先於環境變數，所以受管 bot 的命令列也要夾（issue #1441、#1442、#1711）：Cargo `-j`／`--jobs` 在 `--` 前，
+    # libtest `--test-threads` 在 `--` 後，nextest 的 `--test-threads`／`-j` 在 nextest 子指令後、`--` 前；其餘參數順序不動。
     # 超過名額（或非整數：cargo 接受 `default` 與負數）就夾成名額的值，夾到就在 stderr 印一行。
     _jobs_cap=""
     if [ "$_jobs" -gt 0 ] 2>/dev/null && am_is_managed; then _jobs_cap=$_jobs; fi
     if [ -n "$_tt_cap" ] || [ -n "$_jobs_cap" ]; then
-        _n=$#; _dd=""; _fix=""; _clamp_from=""; _clamp_kind=""
+        _n=$#; _dd=""; _nx=""; _fix=""; _clamp_from=""; _clamp_kind=""
         while [ "$_n" -gt 0 ]; do
             _a=$1; shift; _n=$((_n - 1))
             if [ -n "$_fix" ]; then
@@ -709,6 +735,22 @@ am_cargo() {
                 esac
             elif [ "$_a" = "--" ] && [ -z "$_dd" ]; then
                 _dd=1
+            elif [ "$_sub" = nextest ] && [ -z "$_nx" ] && [ "$_a" = nextest ]; then
+                _nx=1
+            elif [ "$_sub" = nextest ] && [ -n "$_nx" ] && [ -z "$_dd" ]; then
+                case "$_a" in
+                    --test-threads | -j) [ -z "$_tt_cap" ] || _fix=tt ;;
+                    --test-threads=*) _v=${_a#--test-threads=}
+                         if [ -n "$_tt_cap" ]; then
+                             case "$_v" in *[!0-9]* | '') _clamp_from=$_v; _clamp_kind=tt; _a="--test-threads=$_tt_cap" ;;
+                                 *) [ "$_v" -le "$_tt_cap" ] || { _clamp_from=$_v; _clamp_kind=tt; _a="--test-threads=$_tt_cap"; } ;; esac
+                         fi ;;
+                    -j*) _v=${_a#-j}
+                         if [ -n "$_tt_cap" ]; then
+                             case "$_v" in *[!0-9]* | '') _clamp_from=$_v; _clamp_kind=tt; _a="-j$_tt_cap" ;;
+                                 *) [ "$_v" -le "$_tt_cap" ] || { _clamp_from=$_v; _clamp_kind=tt; _a="-j$_tt_cap"; } ;; esac
+                         fi ;;
+                esac
             elif [ -z "$_dd" ]; then
                 case "$_a" in
                     -j | --jobs) [ -z "$_jobs_cap" ] || _fix=jobs ;;
@@ -723,7 +765,7 @@ am_cargo() {
                                  *) [ "$_v" -le "$_jobs_cap" ] || { _clamp_from=$_v; _clamp_kind=jobs; _a="--jobs=$_jobs_cap"; } ;; esac
                          fi ;;
                 esac
-            else
+            elif [ "$_sub" != nextest ]; then
                 case "$_a" in
                     --test-threads) [ -z "$_tt_cap" ] || _fix=tt ;;
                     --test-threads=*) _v=${_a#--test-threads=}
