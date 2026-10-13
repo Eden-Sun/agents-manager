@@ -616,6 +616,7 @@ hook body 另外帶 `run_id`＝這個 CLI 行程 pane env 的 `AM_RUN_ID`（本�
   我們自己的 prompt 就被當成 agent 的回覆存下來。
 - **Codex warning footer**（#1495）：底部 `⚠ N warning(s) · f2 to view` 獨立一行或與 `? for shortcuts` 同列時，均屬狀態列 chrome。
   終端備援及網頁即時文字不把它併入回答；模型／強度讀值、busy 與空輸入框判斷沿用原有規則，warning 數不另加 UI 欄位。唯讀終端快照保留原畫面。
+  `› Ask Codex to do anything` 與 `GPT-6-Astra high · ~/… · Context 72% used · weekly 74% left` 同樣屬於 chrome（#1664）。對話泡泡會過濾；終端分頁以及「需要回應」彈窗／留守面板的原始終端區保留快照，不套用回答過濾器。
 - **codex 0.155 的畫面**（#207；程式先照 rust-v0.155.0 原始碼做，真畫面 0.155.1 已驗）：
   - 狀態列 `• {字頭} ({經過時間} • esc to interrupt)`，後面可能再接 ` · {訊息}`。字頭預設 `Working`，壓縮時 `Compacting context`，
     reasoning summary 開著時是 summary 的最新一行（0.155.0 預設開、0.155.1 預設關回去，身分的 config 明寫的照開）。「還在忙」認**結構**
