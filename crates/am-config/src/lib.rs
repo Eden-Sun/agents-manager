@@ -347,7 +347,11 @@ impl ShareCfg {
     pub fn base(&self) -> Option<String> {
         let b = self.base_url.as_deref()?.trim().trim_end_matches('/');
         let rest = b.strip_prefix("https://").or_else(|| b.strip_prefix("http://"))?;
-        (!rest.is_empty() && !rest.contains(char::is_whitespace)).then(|| b.to_string())
+        (!rest.is_empty()
+            && !rest.contains(char::is_whitespace)
+            && !rest.contains('?')
+            && !rest.contains('#'))
+            .then(|| b.to_string())
     }
 }
 
@@ -2569,5 +2573,29 @@ mod canonical_path_tests {
         assert_eq!(canonical_path("~/").unwrap(), home.to_string_lossy());
         // `~foo` 不是家目錄底下的東西，照舊當相對路徑（不存在就是 Err）。
         assert!(canonical_path("~no-such-user-dir-xyz").is_err());
+    }
+}
+
+#[cfg(test)]
+mod share_cfg_tests {
+    use super::ShareCfg;
+
+    #[test]
+    fn a_share_base_url_with_a_query_cannot_be_used_as_a_link_prefix() {
+        for base_url in [
+            "https://share.example.com?campaign=summer",
+            "https://share.example.com#dashboard",
+        ] {
+            let cfg = ShareCfg {
+                base_url: Some(base_url.into()),
+                ..ShareCfg::default()
+            };
+
+            assert_eq!(
+                cfg.base(),
+                None,
+                "appending /s/<token> after a query or fragment cannot route to the share page: {base_url}"
+            );
+        }
     }
 }
