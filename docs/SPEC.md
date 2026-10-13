@@ -952,7 +952,7 @@ label = "foo"
   照字面寫等於第一次寫入就把指到 dotfiles 的連結換成一般檔，之後 daemon 的每次寫入都進不去而 `git status` 什麼都看不出來。
   資料目錄仍然留在連結所在的目錄（§3.1），兩件事不同。檔案還不存在時（第一次寫預設設定）照原路徑建。
 - 改 `listen` port 需重啟 daemon，既有 agent 的 hook 會打舊 port（靠 spool + 對帳補入）。
-- `[share]`（§20）：`listen`（分享入口的獨立 listener，只准 loopback）、`base_url`（Funnel 的對外網址）與 `folders_root`（受限 bot「新資料夾」的根目錄，預設 `~/shared-bots`，要在 daemon 資料目錄之外；建 bot 時當下讀）。都不寫＝沒有分享入口；`listen` 改了要重啟 daemon。
+- `[share]`（§20）：`listen`（分享入口的獨立 listener，只准 loopback）、`base_url`（Funnel 的對外網址；只接受 `http(s)://` 且不含 query 或 fragment，因分享路徑會接在網址後面）與 `folders_root`（受限 bot「新資料夾」的根目錄，預設 `~/shared-bots`，要在 daemon 資料目錄之外；建 bot 時當下讀）。都不寫＝沒有分享入口；`listen` 改了要重啟 daemon。
 - `[supervisor] notify_interval_secs`（預設 600）：事件照舊即時寫入 `supervisor_inbox`；被節流的只有「喚醒總管」——每 ≥ 這個秒數一次，
   把累積的未 ack 事件彙整成一則 `[AG Man 通知]`。health 偵測、watchdog、控制器 TICK 不受影響。總管 busy 時延後，送成功才開始下一個視窗。
   `0` = 不節流。上次喚醒時間存 `supervisors.last_notify_at`。改值要重啟 daemon。只管巡檢；協調者見 §18.15。
