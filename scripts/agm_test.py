@@ -3477,6 +3477,17 @@ class CliHardeningTest(CliCase):
             self.assertEqual(json.loads(err)["error"], "bad_args", argv)
         self.assertEqual([r for r in FakeDaemon.seen if r["path"] != "/api/session"], [], "參數錯誤不能打到 daemon")
 
+    def test_a_lease_ttl_above_the_cap_is_refused_not_silently_clamped(self):
+        """`--ttl` 的說明寫「上限 3600」。daemon 會把超過的悄悄夾到 3600 然後回成功：呼叫端要 2 小時，拿到 1 小時、exit 0。
+        跟 `--limit`／`--timeout` 一樣在解析階段拒絕，不打到 daemon。"""
+        for ttl in ("3601", "7200", "999999999999"):
+            code, out, err = self.run_cli("lease", "acquire", "rebuild", "--approval", "a1", "--ttl", ttl)
+            self.assertEqual((code, out), (2, ""), ttl)
+            self.assertEqual(json.loads(err)["error"], "bad_args", ttl)
+        self.assertEqual([r for r in FakeDaemon.seen if r["path"] != "/api/session"], [], "超過上限不能打到 daemon")
+        args = agm.build_parser().parse_args(["lease", "acquire", "rebuild", "--approval", "a1", "--ttl", "3600"])
+        self.assertEqual(args.ttl, 3600)
+
     def test_ids_must_be_non_empty_single_line_values(self):
         for bad in ("", "  ", "a\nb", "a\x00b", "x" * 300):
             code, _out, err = self.run_cli("messages", bad)

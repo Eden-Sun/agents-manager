@@ -2482,6 +2482,17 @@ def _positive_int_arg(raw: str) -> int:
     return value
 
 
+#: 租約長度上限，跟 daemon 的 `MAX_TTL_SECS`（crates/am-supervisor）同值。daemon 會把超過的悄悄夾到這裡，CLI 先拒絕（#1723）。
+MAX_TTL_SECS = 3600
+
+
+def _ttl_arg(raw: str) -> int:
+    value = _positive_int_arg(raw)
+    if value > MAX_TTL_SECS:
+        raise argparse.ArgumentTypeError(f"要在 1 到 {MAX_TTL_SECS} 之間，收到 {value}")
+    return value
+
+
 def _id_arg(raw: str) -> str:
     v = raw.strip()
     if not v or len(v) > MAX_ID_CHARS or any(ord(c) < 32 or ord(c) == 127 for c in v):
@@ -2658,7 +2669,7 @@ def build_parser() -> argparse.ArgumentParser:
     )
     s.add_argument("--approval", help="acquire：核准 id；safety：用這筆核准的等待時間判斷要不要縮小封鎖面")
     s.add_argument("--commit", help="acquire：要處理的 commit，必須符合核准")
-    s.add_argument("--ttl", type=_positive_int_arg, metavar="SECS", help="租約長度（預設 900，上限 3600）")
+    s.add_argument("--ttl", type=_ttl_arg, metavar="SECS", help="租約長度（預設 900，上限 3600）")
     s.add_argument("--fence", type=int, help="renew/release：acquire 回傳的 fence")
     s.add_argument(
         "--lease-token",
