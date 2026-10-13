@@ -92,3 +92,27 @@ test('progress 不再各自 set，但看過的 seq 一點都沒丟：下一個�
   assert.equal(useStore.getState().lastSeq, 10)
   assert.equal(useStore.getState().lastDurableSeq, 10, '耐久 seq 只跟著耐久幀走')
 })
+
+/**
+ * 前一回合的 partial 還留在 `liveReply`（它的完成幀還沒到），新回合的頭幀在 250 ms 節流窗內：
+ * 合併的尾幀要照套，不能因為 `liveReply` 還是前一回合就丟掉——否則新回合的 partial 要等下一幀才出現。
+ */
+test('前一回合的 partial 還在時，新回合節流窗內的尾幀照樣套上', async () => {
+  const timers = installManualTimers()
+  try {
+    reset()
+    routeDaemon(() => json({}))
+    const turn = (id: string) => ({ id, conversation_id: 'c', run_id: 'r', origin: 'web', status: 'in_flight', delivery: 'ok', created_at: '2026-10-03T00:00:00Z' })
+    dispatchFrameForTest({ type: 'turn_updated', data: { bot_id: 'b1', turn: turn('tA') } })
+    dispatchFrameForTest({ type: 'turn_progress', data: { bot_id: 'b1', turn_id: 'tA', text: 'A partial', revision: 1 } })
+    dispatchFrameForTest({ type: 'turn_updated', data: { bot_id: 'b1', turn: turn('tB') } })
+    dispatchFrameForTest({ type: 'turn_progress', data: { bot_id: 'b1', turn_id: 'tB', text: 'B 1', revision: 1 } })
+    dispatchFrameForTest({ type: 'turn_progress', data: { bot_id: 'b1', turn_id: 'tB', text: 'B 2', revision: 2 } })
+    await timers.clock.advance(250)
+    assert.equal(useStore.getState().liveReply.b1?.turnId, 'tB', '新回合的尾幀要換掉前一回合的 partial')
+    assert.equal(useStore.getState().liveReply.b1?.text, 'B 2')
+  } finally {
+    await timers.clock.advance(250)
+    timers.restore()
+  }
+})

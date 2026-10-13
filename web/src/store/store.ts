@@ -3483,9 +3483,9 @@ export function handleFrame(set: SetFn, get: GetFn, frame: { seq?: number; type:
           // Frames can only move forward within a turn; a new turn always replaces.
           if (prev && prev.turnId === turnId && prev.revision > revision) return {}
           // 合併到下一拍的那一幀：回合若已在這 250ms 內結束（`message_added`／`turn_updated` 清掉了
-          // liveReply），別把舊的 partial 寫回去留到下一回合。認不得的 turn（還沒進 map）照套。
+          // liveReply），別把舊的 partial 寫回去留到下一回合。認不得的 turn（還沒進 map）照套，
+          // 前一回合的 liveReply 還在也一樣（它的完成幀還沒到，不代表這一幀是舊的）。
           if (trailing) {
-            if (prev?.turnId !== turnId) return {}
             const st = s.turns[botId]?.[turnId]?.status
             if (st !== undefined && st !== 'in_flight') return {}
           }
