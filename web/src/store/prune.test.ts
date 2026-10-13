@@ -4,7 +4,7 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
 import { reset, requests, routeDaemon } from './storeEnv.harness.ts'
-import { noteMessagePageForTest, reloadLoadedConversations, storeMemoKeysForTest, useStore } from './store.ts'
+import { dispatchFrameForTest, noteMessagePageForTest, reloadLoadedConversations, storeMemoKeysForTest, useStore } from './store.ts'
 import { pruneDeadKeys } from './prune.ts'
 import type { Bot, Message, Mission, Project } from '../api/types.ts'
 
@@ -125,4 +125,40 @@ test('已刪 bot 留著的 queued 回合被帶走後，重連不再重抓它', a
     false,
     '重連不再整頁重抓已刪的 bot',
   )
+})
+
+/** bot 已刪、快照裡沒有了，它的遲到幀（完成訊息、回合更新）不能把訊息／回合／未讀重新建出來。 */
+test('已刪 bot 遲到的 message_added／turn_updated：不重建 messages、turns、botUnread', () => {
+  seed()
+  useStore.setState({ bots: [bot('b-live'), bot('b-gone')] })
+  useStore.getState().pruneDead()
+  useStore.setState({ bots: [bot('b-live')] })
+  useStore.getState().pruneDead()
+  routeDaemon(() => new Response('{}', { status: 200 }))
+  const turn = { id: 't9', conversation_id: 'c', run_id: 'r', origin: 'web', status: 'done', delivery: 'ok', created_at: '2026-10-03T00:00:00Z' }
+  dispatchFrameForTest({ type: 'turn_updated', data: { bot_id: 'b-gone', turn } })
+  dispatchFrameForTest({
+    type: 'message_added',
+    data: { bot_id: 'b-gone', message: { id: 'm9', conversation_id: 'c', turn_id: 't9', role: 'assistant', content: 'late', source: 'hook', created_at: '2026-10-03T00:00:01Z' } },
+  })
+  const s = useStore.getState()
+  assert.equal(s.messages['b-gone'], undefined, '訊息不能重建')
+  assert.equal(s.turns['b-gone'], undefined, '回合表不能重建')
+  assert.equal(s.botUnread['b-gone'], undefined, '未讀不能重建')
+})
+
+test('軟刪除的 bot 復原（回到名單）後，遲到幀照常套用', () => {
+  seed()
+  useStore.setState({ bots: [bot('b-live'), bot('b-gone')] })
+  useStore.getState().pruneDead()
+  useStore.setState({ bots: [bot('b-live')] })
+  useStore.getState().pruneDead()
+  useStore.setState({ bots: [bot('b-live'), bot('b-gone')] })
+  useStore.getState().pruneDead()
+  routeDaemon(() => new Response('{}', { status: 200 }))
+  dispatchFrameForTest({
+    type: 'message_added',
+    data: { bot_id: 'b-gone', message: { id: 'm9', conversation_id: 'c', turn_id: null, role: 'assistant', content: 'back', source: 'hook', created_at: '2026-10-03T00:00:01Z' } },
+  })
+  assert.equal(useStore.getState().messages['b-gone']?.[0]?.content, 'back')
 })

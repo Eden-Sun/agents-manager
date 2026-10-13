@@ -117,6 +117,17 @@ const missionListLoads = new Map<string, () => Promise<void>>()
 /** 整頁重抓成功後遞增；跨過重抓的較早頁回應不能再接到新的時間軸前面。 */
 const messagePageGenerations = new Map<string, number>()
 let legacyQueueMigrationAttempted = false
+/** 上一次快照看到的 bot id；之後不見了的（刪除／軟刪除）進 `goneBotIds`，它的遲到幀不再重建訊息、回合、未讀。 */
+let knownBotIds = new Set<string>()
+const goneBotIds = new Set<string>()
+
+/** 快照之間被拿掉的 bot 記成已刪；又回到名單（軟刪除復原）就移出。`pruneDead` 每次快照後都會呼叫。 */
+function noteGoneBots(bots: Bot[]): void {
+  const now = new Set(bots.map((b) => b.id))
+  for (const id of knownBotIds) if (!now.has(id)) goneBotIds.add(id)
+  for (const id of now) goneBotIds.delete(id)
+  knownBotIds = now
+}
 
 /**
  * 模組層的帳（不在 state 裡，`pruneDeadKeys` 管不到）：不在快照名單上的 bot／專案／任務不留。
@@ -1505,6 +1516,7 @@ export const useStore = create<StoreState>((set, get) => {
 
   pruneDead: () => {
     const s = get()
+    noteGoneBots(s.bots)
     pruneStoreMemo(s)
     pruneStoredIds({ botIds: s.bots.map((b) => b.id), projectIds: s.projects.map((p) => p.id) })
     const patch = pruneDeadKeys(s)
@@ -2982,6 +2994,8 @@ function turnStillOpen(status: Turn['status']): boolean {
 export function resetStoreForTest(): void {
   for (const slot of liveThrottle.values()) clearTimeout(slot.timer)
   liveThrottle.clear()
+  knownBotIds = new Set()
+  goneBotIds.clear()
   disconnect?.()
   disconnect = null
   if (quotaSweep) clearInterval(quotaSweep)
@@ -3383,6 +3397,8 @@ export function handleFrame(set: SetFn, get: GetFn, frame: { seq?: number; type:
     }
     case 'message_added': {
       const botId = frameBotId(data)
+      // 已刪 bot 的遲到幀（daemon 還在送完成訊息）：不重建它的訊息、未讀。
+      if (botId && goneBotIds.has(botId)) return
       const msg = toMessage(unwrap(data, 'message'), botId ?? undefined)
       if (msg) noteGroupPrompt(msg)
       if (!msg || !botId) {
@@ -3445,7 +3461,7 @@ export function handleFrame(set: SetFn, get: GetFn, frame: { seq?: number; type:
     case 'turn_updated': {
       const botId = frameBotId(data)
       const turn = toTurn(unwrap(data, 'turn'), botId ?? undefined)
-      if (!turn || !botId) return
+      if (!turn || !botId || goneBotIds.has(botId)) return
       if (turn.status !== 'in_flight' && turn.status !== 'queued') clearLiveThrottle(botId, turn.id)
       set((s) => ({
         // issue #25：舊回合沒人讀，不剪會只增不減。
