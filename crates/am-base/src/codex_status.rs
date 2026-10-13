@@ -13,6 +13,62 @@ impl CodexStatusQuota {
     }
 }
 
+/// codex 畫面底部的模型列（`<model> <effort> · <cwd> · Context N% used · …`），去掉右側的 warning 段。
+#[derive(Debug, Clone, PartialEq)]
+pub struct CodexFooter {
+    pub line: String,
+    pub context_used_pct: Option<f64>,
+}
+
+/// 只看畫面最後幾列：更上面同形狀的列是啟動 banner 或回覆裡引用的舊列。
+const FOOTER_TAIL_LINES: usize = 8;
+
+pub fn parse_footer(screen: &str) -> Option<CodexFooter> {
+    let lines: Vec<&str> = screen.lines().collect();
+    let mut out = None;
+    for raw in &lines[lines.len().saturating_sub(FOOTER_TAIL_LINES)..] {
+        let row = without_warning(raw.trim());
+        if is_model_row(row) {
+            // 最後一個相符的才是現在那列。
+            out = Some(CodexFooter { line: row.to_string(), context_used_pct: context_pct(row) });
+        }
+    }
+    out
+}
+
+/// 去掉右側靠右的 `⚠ N warning(s) · f2 to view`（跟前面的內容隔兩格以上空白，#1671）。
+fn without_warning(row: &str) -> &str {
+    let Some(i) = row.rfind('⚠') else { return row };
+    let (head, tail) = row.split_at(i);
+    let counted = tail.strip_prefix("⚠ ").and_then(|t| t.split_once(' '));
+    let is_warning = counted.is_some_and(|(n, rest)| {
+        !n.is_empty() && n.chars().all(|c| c.is_ascii_digit()) && matches!(rest, "warning · f2 to view" | "warnings · f2 to view")
+    });
+    if is_warning && head.ends_with("  ") {
+        head.trim_end()
+    } else {
+        row
+    }
+}
+
+/// `<model> [effort] [fast] · <cwd 或 Context／額度段…>`；模型名以英數字開頭、含 `-`（markdown 項目符號不算）。
+fn is_model_row(row: &str) -> bool {
+    let Some((head, rest)) = row.split_once('·') else { return false };
+    let mut words = head.split_whitespace();
+    let Some(model) = words.next() else { return false };
+    let model_like = model.contains('-')
+        && model.starts_with(|c: char| c.is_ascii_alphanumeric())
+        && model.chars().all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '.' | '_'));
+    let rest = rest.trim();
+    model_like && words.count() <= 2 && (rest.starts_with('/') || rest.starts_with('~') || rest.contains("Context") || rest.contains("% left"))
+}
+
+fn context_pct(row: &str) -> Option<f64> {
+    let after = row.split("Context ").nth(1)?;
+    let n: String = after.chars().take_while(|c| c.is_ascii_digit() || *c == '.').collect();
+    after[n.len()..].starts_with('%').then(|| n.parse().ok()).flatten().filter(|v| (0.0..=100.0).contains(v))
+}
+
 /// 截點可能在任何字元；`%` 之後被截才讀得到，所以 `left` 不是必要的字。
 pub fn parse_status_quota(screen: &str) -> Option<CodexStatusQuota> {
     let mut out = None;
