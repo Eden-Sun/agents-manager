@@ -5,7 +5,7 @@ import test from 'node:test'
 import assert from 'node:assert/strict'
 import type { ShareClient } from './shareApi'
 import { ShareHttpError } from './shareModel'
-import { PhotoUnreadableError, PHOTO_MAX_EDGE, preparePhoto, uploadErrorText, uploadPatiently, uploadRetryable, type ImageCodec } from './shareUpload'
+import { PhotoUnreadableError, PHOTO_MAX_EDGE, UploadCancelledError, preparePhoto, uploadErrorText, uploadPatiently, uploadRetryable, type ImageCodec } from './shareUpload'
 
 /** 假的解碼／編碼：記下畫成多大，回固定大小的 JPEG。 */
 function fakeCodec(width: number, height: number, opts: { decodable?: boolean; outBytes?: number } = {}) {
@@ -150,4 +150,44 @@ test('429 與 503 重試額度各自計算，且交錯失敗的總次數有限',
   await assert.rejects(uploadPatiently(second.client, file('a.txt', 'text/plain', 3), { sleep: async (ms) => void sleeps.push(ms) }), (e: unknown) => e instanceof ShareHttpError && e.status === 503)
   assert.equal(second.calls(), 16, '最多初次上傳加 12 次 429 與 3 次 503 重試')
   assert.equal(sleeps.length, 15)
+})
+
+test('取消（#1661）：退避等待中被中止，sleep 還沒回也立刻丟出來，不再重傳', async () => {
+  const ctl = new AbortController()
+  const { client, calls } = clientWith(Array.from({ length: 5 }, () => new ShareHttpError(429, 1)))
+  await assert.rejects(
+    uploadPatiently(client, file('a.txt', 'text/plain', 3), {
+      signal: ctl.signal,
+      // 等的途中使用者按了移除：sleep 永遠不回，中止也要讓它立刻結束。
+      sleep: () => {
+        ctl.abort()
+        return new Promise<void>(() => {})
+      },
+    }),
+    UploadCancelledError,
+  )
+  assert.equal(calls(), 1, '中止之後不再呼叫 upload')
+})
+
+test('取消（#1661）：等完才發現已中止，醒來後不再重傳', async () => {
+  const ctl = new AbortController()
+  const { client, calls } = clientWith(Array.from({ length: 5 }, () => new ShareHttpError(503, 1)))
+  await assert.rejects(
+    uploadPatiently(client, file('a.txt', 'text/plain', 3), {
+      signal: ctl.signal,
+      sleep: async () => {
+        ctl.abort()
+      },
+    }),
+    UploadCancelledError,
+  )
+  assert.equal(calls(), 1)
+})
+
+test('取消（#1661）：進來時就已中止，不碰照片、不送出', async () => {
+  const ctl = new AbortController()
+  ctl.abort()
+  const { client, calls } = clientWith([null])
+  await assert.rejects(uploadPatiently(client, file('a.txt', 'text/plain', 3), { signal: ctl.signal }), UploadCancelledError)
+  assert.equal(calls(), 0)
 })

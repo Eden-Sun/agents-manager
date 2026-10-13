@@ -176,7 +176,8 @@ export function ShareApp({ client }: { client: ShareClient }) {
   const anchor = useRef<{ at: string; id: string | null } | null>(null)
   const listRef = useRef<HTMLDivElement>(null)
   const fileInput = useRef<HTMLInputElement>(null)
-  const uploadBusy = useRef(false)
+  // 正在傳的那一張（序列佇列的名額）。移除時換掉，舊的上傳晚回就對不上、不碰下一張的名額（#1661）。
+  const uploadJob = useRef<{ key: string; ctl: AbortController } | null>(null)
   const stick = useRef(true)
   /** 載入較早訊息前的捲動位置：畫完之後把多出來的高度補回去，人留在原來那一則。 */
   const restore = useRef<{ height: number; top: number } | null>(null)
@@ -433,20 +434,41 @@ export function ShareApp({ client }: { client: ShareClient }) {
     if (fileInput.current) fileInput.current.value = ''
   }
 
+  // 移除：正在傳的那張先中止、放掉名額，下一張由下面的 effect 接著開始（#1661）。
+  const removePending = (key: string) => {
+    if (uploadJob.current?.key === key) {
+      uploadJob.current.ctl.abort()
+      uploadJob.current = null
+    }
+    setPending((x) => x.filter((y) => y.key !== key))
+  }
+
+  // 離開頁面：還在傳的那張中止，不讓它在沒人看的時候繼續送（#1661）。
+  useEffect(
+    () => () => {
+      uploadJob.current?.ctl.abort()
+      uploadJob.current = null
+    },
+    [],
+  )
+
   useEffect(() => {
-    if (uploadBusy.current) return
+    if (uploadJob.current) return
     const next = pending.find((p) => !p.id && !p.error && !p.active)
     if (!next) return
-    uploadBusy.current = true
+    const job = { key: next.key, ctl: new AbortController() }
+    uploadJob.current = job
     const patch = (fields: Partial<Pending>) => setPending((p) => p.map((x) => (x.key === next.key ? { ...x, ...fields } : x)))
     patch({ active: true })
-    uploadPatiently(client, next.file).then(
+    uploadPatiently(client, next.file, { signal: job.ctl.signal }).then(
       (r) => {
-        uploadBusy.current = false
+        if (uploadJob.current !== job) return
+        uploadJob.current = null
         patch({ id: r.id, name: r.name, active: false })
       },
       (e) => {
-        uploadBusy.current = false
+        if (uploadJob.current !== job) return
+        uploadJob.current = null
         if (e instanceof ShareHttpError && e.status === 404) {
           linkGone.current = true
           stopLive.current()
@@ -658,7 +680,7 @@ export function ShareApp({ client }: { client: ShareClient }) {
                     再試一次
                   </button>
                 ) : null}
-                <button type="button" aria-label={`移除 ${p.name}`} onClick={() => setPending((x) => x.filter((y) => y.key !== p.key))}>
+                <button type="button" aria-label={`移除 ${p.name}`} onClick={() => removePending(p.key)}>
                   ✕
                 </button>
               </li>
