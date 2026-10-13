@@ -1026,6 +1026,8 @@ export const useStore = create<StoreState>((set, get) => {
 
   // issue #23：single-flight + trailing，N 個 frame 只換一、兩次請求；`acceptStateSeq` 丟掉較舊快照。
   refreshState: singleFlight(async () => {
+    // 請求送出時的耐久 seq：快照的 `daemon_seq` 比它還小，才是 daemon 重啟（seq 從頭數起），見下面 `lastDurableSeq`。
+    const durableAtStart = get().lastDurableSeq
     const st = await api.fetchState()
     const seq = acceptStateSeq(appliedStateSeq, st.daemon_seq)
     if (seq === null) {
@@ -1118,10 +1120,10 @@ export const useStore = create<StoreState>((set, get) => {
           ephemeralSeq = 0
           return st.daemon_seq < seen ? st.daemon_seq : Math.max(seen, st.daemon_seq)
         })(),
-        // 這份快照反映到 `daemon_seq` 為止的所有狀態，所以耐久 seq 直接對到它：比現在的小（daemon 重啟）要跟著降、
-        // 比現在的大就跟上——兩條路都等於 `st.daemon_seq`，不寫成三元式，免得看起來像有「不往下降」的分支
-        // （i264 的複看，2026-09-24）。
-        lastDurableSeq: st.daemon_seq,
+        // 快照比請求送出時還小＝daemon 重啟（seq 從頭數起）：要跟著降，否則 `?since=` 送未來的數字。
+        // 快照只是比請求期間已經套用的耐久幀舊（幀在請求送出後才進來）：不能往回掉，否則重連會把那些幀再送一次
+        // （累加型幀會重算）；追補的那次快照（`behindFrames`）會把它對到正確的值（#1732）。
+        lastDurableSeq: st.daemon_seq < durableAtStart ? st.daemon_seq : Math.max(s.lastDurableSeq, st.daemon_seq),
         // 手上的一鍵重啟進度跟快照對帳（issue #492）：`bots_restart_done` 收不到時（批次中途 daemon 重啟、
         // 或落到全量 resync）它會永遠停在「重啟中 k/N」，而那顆晶片一直蓋著一鍵重啟的觸發鈕。
         restartBatch: reconcileBatch(s.restartBatch, st.restart_batch),
