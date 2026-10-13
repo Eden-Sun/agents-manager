@@ -1618,11 +1618,11 @@ pub fn parse_dir_listing(out: &str, hidden: bool) -> Result<serde_json::Value> {
         } else if let Some(e) = line.strip_prefix("AM_ERR=") {
             bail!("{}", e.trim());
         } else if let Some(v) = line.strip_prefix("AM_HOME=") {
-            home = v.trim_end().to_string();
+            home = v.to_string();
         } else if let Some(v) = line.strip_prefix("AM_PATH=") {
-            cwd = v.trim_end().to_string();
+            cwd = v.to_string();
         } else if let Some(v) = line.strip_prefix("AM_PARENT=") {
-            parent = Some(v.trim_end().to_string());
+            parent = Some(v.to_string());
         } else if let Some(v) = line.strip_prefix("AM_D\t") {
             let mut it = v.trim_end_matches('\n').splitn(2, '\t');
             let name = it.next().unwrap_or("").to_string();
@@ -1731,7 +1731,7 @@ pub async fn remote_canonical_dir(conn: &HostConn, path: &str) -> Result<String>
     // 路徑含換行或控制字元時只取第一行會悄悄存成另一個目錄（建專案）：要求輸出恰好一行、沒有控制字元，否則拒絕。
     let mut lines = out.lines();
     let line = match (lines.next(), lines.next()) {
-        (Some(one), None) if !one.chars().any(char::is_control) => one.trim(),
+        (Some(one), None) if !one.chars().any(char::is_control) => one,
         (Some(_), _) => bail!("remote directory path has control characters or several lines: {path}"),
         _ => "",
     };
