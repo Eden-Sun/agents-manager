@@ -119,8 +119,9 @@ export function pendingIndexOnScreen(
   const squash = (s: string) => s.replace(/\s+/g, '')
   if (menu.question) {
     const shown = squash(menu.question)
-    const byQuestion = pending.findIndex((q) => shown.includes(squash(q.question).slice(0, 12)))
-    if (byQuestion >= 0) return byQuestion
+    // 前 12 字相同的兩題（issue #1687）問句對不出是哪一題：只認唯一命中，多題命中就改看選項，不猜第一題。
+    const byQuestion = pending.flatMap((q, i) => (shown.includes(squash(q.question).slice(0, 12)) ? [i] : []))
+    if (byQuestion.length === 1) return byQuestion[0]
   }
   const titles = menu.choices.map((c) => squash(c.title))
   const hits = pending

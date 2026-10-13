@@ -150,3 +150,15 @@ test('pendingAtOnScreen 把建議帶給畫面上那一題；標題比對去空�
   assert.equal(jevMatchesTitle('內網', '…'), false)
   assert.equal(jevMatchesTitle('', ''), false)
 })
+
+test('畫面上是第幾題：兩題問句前 12 個字一樣時，問句不能當證據一律回第一題（不猜，改看選項）', () => {
+  const same = toPendingQuestions([
+    { question: '請選擇這次要使用的資料庫類型（第一題）', options: [{ label: 'PostgreSQL' }, { label: 'MySQL' }] },
+    { question: '請選擇這次要使用的資料庫類型（第二題）', options: [{ label: '是' }, { label: '否' }] },
+  ])
+  assert.equal(
+    pendingIndexOnScreen(same, { question: '請選擇這次要使用的資料庫類型（第二題）', choices: [{ title: '是' }, { title: '否' }] }),
+    1,
+    '畫面問句是第二題；前 12 字對得上兩題，不能回 0',
+  )
+})
