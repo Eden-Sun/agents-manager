@@ -275,13 +275,13 @@ def operate(store, job, config):
 
 def recover_under_lock(store):
     ids = store.recover()
-    for row in store.list():
-        if row["status"] == "unknown":
-            # Preserve a URL learned before the previous worker was interrupted.
-            try:
-                journal_state(store, row["id"])
-            except Exception:
-                pass  # unknown stays blocked; never retry on unreadable evidence
+    # 全部的 unknown，不能用 store.list()（只回最新 100 筆）：更舊的 unknown 也要保住它學到的 url。
+    for (ident,) in store.db.execute("SELECT id FROM requests WHERE status='unknown'").fetchall():
+        # Preserve a URL learned before the previous worker was interrupted.
+        try:
+            journal_state(store, ident)
+        except Exception:
+            pass  # unknown stays blocked; never retry on unreadable evidence
     return ids
 
 

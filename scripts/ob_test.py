@@ -266,6 +266,18 @@ class QueueTests(unittest.TestCase):
         self.assertEqual(r["answer"], "recovered")
         self.assertEqual(len(self.s.list()), 1)
 
+    def test_recovery_keeps_the_journal_url_of_an_unknown_older_than_the_list_window(self):
+        # recover_under_lock 要替每筆 unknown 保住 journal 裡學到的 url；它不能靠 store.list()（只回最新 100 筆），
+        # 否則 unknown 排到第 101 筆以後時 url 不會被記下來。
+        a = self.ask()
+        self.s.claim()
+        operator.journal_for(self.s, a["id"]).write_text(json.dumps({"phase": "dispatching", "url": UA}))
+        for i in range(100):
+            self.ask(rid=f"newer-{i}", text=f"newer question {i}")
+        operator.recover_under_lock(self.s)
+        self.assertEqual(self.s.get(a["id"])["status"], "unknown")
+        self.assertEqual(self.s.get(a["id"])["url"], UA)
+
     def test_worker_lock_is_exclusive_and_survives_lock_file_reuse(self):
         path = Path(self.tmp.name) / "worker.lock"
         with exclusive(path):
