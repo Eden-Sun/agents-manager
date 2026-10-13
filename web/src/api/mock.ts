@@ -975,8 +975,8 @@ export class MockTransport implements Transport {
     { const r = this.shares.handle(method, rawPath, b); if (r !== undefined) return r }
     // 前端已樂觀套用排序，mock 收下就好。
     // 跨裝置已讀：mock 只有一個瀏覽器，記下來就好。
-    { const m = rawPath.match(/^\/projects\/([^/]+)\/group\/read$/); if (method === 'POST' && m) return { project_id: decodeURIComponent(m[1]), read_mark: { at: typeof b.at === 'string' ? b.at : new Date().toISOString(), id: typeof b.message_id === 'string' ? b.message_id : '' }, unread: 0 } }
-    { const m = rawPath.match(/^\/bots\/([^/]+)\/read$/); if (method === 'POST' && m) return { bot_id: decodeURIComponent(m[1]), read_mark: { at: typeof b.at === 'string' ? b.at : new Date().toISOString(), id: typeof b.message_id === 'string' ? b.message_id : '' }, unread: 0 } }
+    { const m = rawPath.match(/^\/projects\/([^/]+)\/group\/read$/); if (method === 'POST' && m) return { project_id: decodeURIComponent(m[1]), read_mark: { at: this.readMarkAt(b), id: typeof b.message_id === 'string' ? b.message_id : '' }, unread: 0 } }
+    { const m = rawPath.match(/^\/bots\/([^/]+)\/read$/); if (method === 'POST' && m) return { bot_id: decodeURIComponent(m[1]), read_mark: { at: this.readMarkAt(b), id: typeof b.message_id === 'string' ? b.message_id : '' }, unread: 0 } }
     // §6.5e：專案底下的非 agent pane（只回這個專案自己的，沒歸屬的走 `?unowned=1`）。
     { const m = rawPath.match(/^\/projects\/([^/]+)\/panes$/); if (method === 'GET' && m) return this.projectPanes(decodeURIComponent(m[1])) }
     // 全部被 trace 的 pane；`unowned=1` 只回對不到專案的，並標哪一顆是 scratch（§6.5e）。
@@ -2406,6 +2406,13 @@ export class MockTransport implements Transport {
     })
     // Only run start/stop moves the number, so ride that instead of a `setInterval`.
     this.emit('mem_updated', this.mem())
+  }
+
+  /** API.md §6：`at` 省略時，有 `message_id` 就取那則訊息的時間，沒有才取現在。 */
+  private readMarkAt(b: Rec): string {
+    if (typeof b.at === 'string') return b.at
+    const hit = typeof b.message_id === 'string' ? this.messages.find((m) => m.id === b.message_id) : undefined
+    return hit?.created_at ?? new Date().toISOString()
   }
 
   private addMessage(
