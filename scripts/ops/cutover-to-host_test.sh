@@ -367,6 +367,15 @@ check_no "不再要求手動補來源 config 段落" "切換後在目標補上" 
 check_no_ere "已移交的 hub 不碰" "$standalone_bot_id" "$ROOT/out"
 teardown
 
+echo "# preflight：協調者專案的 label 在快照裡找不到 → 停在 preflight，不靜默漏搬協調者"
+setup
+export CUTOVER_SUPERVISOR_PROJECT="沒有這個專案"
+run "$ROOT/sup-missing" cutover
+unset CUTOVER_SUPERVISOR_PROJECT
+check_eq "協調者專案找不到：結束碼非 0" 1 "$(cat "$ROOT/sup-missing.rc")"
+check "協調者專案找不到：講明原因" "協調者專案" "$ROOT/sup-missing"
+teardown
+
 echo "# preflight：來源版本太舊時明確拒絕，避免模組載入時才失敗"
 setup
 cat > "$ROOT/bin/python-old" <<'EOF'
