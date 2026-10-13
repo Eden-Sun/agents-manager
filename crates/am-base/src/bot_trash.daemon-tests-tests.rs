@@ -25,6 +25,25 @@
         std::fs::remove_dir_all(data).unwrap();
     }
 
+    #[cfg(unix)]
+    #[test]
+    fn a_moved_bot_directory_symlink_can_be_found_and_restored() {
+        let data = crate::testing::track(std::env::temp_dir().join(format!("am-trash-link-{}", crate::db::ulid())));
+        let target = data.join("target");
+        std::fs::create_dir_all(&target).unwrap();
+        std::fs::write(target.join("keep.txt"), "target stays intact").unwrap();
+        let dir = data.join("bots").join("b1");
+        std::fs::create_dir_all(dir.parent().unwrap()).unwrap();
+        std::os::unix::fs::symlink(&target, &dir).unwrap();
+
+        let moved = move_in(&data, "b1", &dir).unwrap().expect("symlink entry moved to trash");
+        assert!(std::fs::symlink_metadata(&moved).unwrap().file_type().is_symlink());
+        assert_eq!(latest(&data, "b1", None), Some(moved.clone()), "the moved entry is the latest bot backup");
+        assert_eq!(restore(&data, "b1", &dir).unwrap(), Some(moved));
+        assert!(std::fs::symlink_metadata(&dir).unwrap().file_type().is_symlink(), "restore preserves the symlink itself");
+        assert_eq!(std::fs::read_to_string(dir.join("keep.txt")).unwrap(), "target stays intact");
+    }
+
     /// `bots/<id>` 若是 symlink，`Path::exists` 會跟著走、把回收區留在原地。還原必須只拆連結，
     /// 把垃圾桶搬回原位，不能把檔案寫進連結指到的目錄。真的目錄仍不覆蓋。
     #[test]

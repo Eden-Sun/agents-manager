@@ -143,7 +143,7 @@ fn latest_name_in(root_dir: &File, bot_id: &str, kind: Option<&str>) -> Option<O
         .ok()?
         .into_iter()
         .filter_map(|e| {
-            if !e.is_dir { return None; }
+            if !e.is_dir && !e.is_symlink { return None; }
             let name = e.name.to_str()?;
             // `<id>.attachments.<ms>` 在 kind=None 時 strip 出來是 `attachments.<ms>`，parse 失敗＝不是 bot 目錄。
             let ms: u128 = name.strip_prefix(&prefix)?.parse().ok()?;
