@@ -37,6 +37,14 @@
         }
     }
 
+    /// 逾時前已經印完整的額度 JSON（agy 印完卻沒結束）：那份讀數照樣可用，不能因為逾時整個丟掉。
+    #[test]
+    fn a_local_probe_that_printed_its_usage_and_then_hung_still_reads_it() {
+        let got = read_local_run("local", true, &real(), "", 40).expect("逾時前已印出完整的額度，照讀");
+        assert_eq!(got.iter().map(|(k, _)| *k).collect::<Vec<_>>(), ["agy"]);
+        assert!(got[0].1.seven_day.is_some(), "週窗照常填入");
+    }
+
     #[test]
     fn a_finished_local_probe_reads_usage_from_stdout_and_only_stderr_can_add_the_login_wall() {
         assert!(read_local_run("local", false, &real(), "", 40).is_ok());

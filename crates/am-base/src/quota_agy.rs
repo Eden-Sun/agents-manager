@@ -241,6 +241,10 @@ pub fn read_usage(host: &str, rc: Option<i32>, text: &str) -> Result<Vec<(&'stat
 /// stderr 也看（agy 的警告與登入提示不一定在 stdout）；正常結束時額度仍只從 stdout 讀。
 pub fn read_local_run(host: &str, timed_out: bool, stdout: &str, stderr: &str, timeout_secs: u64) -> Result<Vec<(&'static str, Quota)>, ProbeFail> {
     if timed_out {
+        // 逾時前已經印出完整的額度 JSON（agy 印完卻沒結束）：讀得到就照常用，跟正常結束的讀法一樣（#1725）。
+        if let Ok(found) = read_usage(host, None, stdout) {
+            return Ok(found);
+        }
         if auth_required(stdout) || auth_required(stderr) {
             return Err(ProbeFail::AuthRequired);
         }
