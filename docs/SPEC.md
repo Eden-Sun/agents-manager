@@ -812,7 +812,7 @@ claude 在對話裡印 `⎿  Set model to Sonnet 5.5 and saved …`／`⎿  Set 
 `--resume` 接回的、畫面上的那行是上一個 session 的：同一個 run 第一次看到的只當基準，之後變了才採用；AG Man 用全新對話起的 run
 （argv 沒有 `--resume`／`--continue`）起 run 時就記空基準（`claude_live::start_fresh`），第一輪巡邏前使用者打的 `/model`、`/effort` 直接採用（#742）；
 接回、分支、收編的 run 維持第一次只當基準（那一刻起的切換在 daemon 重啟後也一樣當基準）。已知限制：切換那行在
-下一輪巡邏前就被捲出 80 行就漏掉（忙的 pane）；巡邏列舉 active run 失敗（DB 暫時讀不到）就整輪跳過，基準與背景工作帳都不動，只有成功列舉出的清單才用來清掉已結束 run 的帳（#744）；指令行先被捲出而確認行還在，也當沒有。
+下一輪巡邏前就被捲出 80 行就漏掉（忙的 pane）；巡邏列舉 active run 失敗（DB 暫時讀不到）就整輪跳過，基準與背景工作帳都不動，只有成功列舉出的清單才用來清掉已結束 run 的帳（#744）；一般 bot 的 runs 寫入失敗時基準不前進，下一輪同一份畫面還會再試（#1735）；指令行先被捲出而確認行還在，也當沒有。
 
 **在 TUI 裡被換掉（grok、codex 的子 agent，2026-10-03）**：grok 沒有 hook 也沒有確認行可抓，argv 只讀一次而且 TUI 不理
 `--reasoning-effort`（#215）；唯一的現況是輸入框框底 `╰── Grok 4.7 (low) · always-approve ─╯`。畫面巡邏對 grok run 拿 bot 鎖

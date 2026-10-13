@@ -168,11 +168,11 @@ pub async fn observe(app: &(impl crate::capabilities::BotLocks + crate::capabili
                 return;
             }
             Some(prev) if *prev == seen => return,
-            Some(_) => {
-                b.insert(run.id.clone(), seen.clone());
-            }
+            Some(_) => {}
         }
     }
+    // 基準要等寫進去才前進（見下面）：寫失敗時留著舊的，下一輪同一份畫面還會再試（#1735）。
+    let baseline = seen.clone();
     let Ok(Some(run)) = db::run(app.db(), &run.id).await else { return };
     // run 的落差（跟 runtime 比）與 bot 設定的落差（跟 bots.* 比）分開算（#743）：bot 的 UPDATE 失敗時 runtime 已經對了，
     // 下一輪只剩 bot 落後，仍要補寫，不能因為 runtime 已收斂就當作完成。
@@ -198,6 +198,9 @@ pub async fn observe(app: &(impl crate::capabilities::BotLocks + crate::capabili
         }
         changed = true;
         tracing::info!(run = %run.id, bot = %bot.name, ?model, ?effort, child, "claude runtime switched in the TUI");
+    }
+    if !child {
+        baselines().lock().unwrap_or_else(|e| e.into_inner()).insert(run.id.clone(), baseline);
     }
     if bot_model.is_some() || bot_effort.is_some() {
         let wrote = sqlx::query("UPDATE bots SET model = COALESCE(?, model), effort = COALESCE(?, effort) WHERE id = ?")
