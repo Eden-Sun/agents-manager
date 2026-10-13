@@ -337,29 +337,17 @@ async fn flush_queued_inner<C: QueueContext>(app: &C, bot_id: &str) -> anyhow::R
     written.map_err(|e| e.context("排隊的 prompt 送出去了，送達結果卻寫不進去（記成欠著）"))
 }
 
-/// 排著的這一則是使用者自己從網頁送的：User /prompt 排的（`origin = web`，bot 忙碌時排的是 `awaits_idle = 1`，
-/// bot 沒在跑時送的是 `awaits_start = 1`，#1362），而且它的使用者訊息沒有轉寄來源（`relay_from` 空）。
-/// AGM 派工排的是 `awaits_idle = 0`、`awaits_start = 0`。讀不到就當不是（照舊受寬限擋，跟改之前一樣）。
-async fn queued_from_the_user(app: &impl crate::capabilities::Db, turn: &db::Turn) -> bool {
-    if turn.origin != "web" || (turn.awaits_idle != 1 && turn.awaits_start != 1) {
-        return false;
-    }
-    let relayed: Result<Option<i64>, _> = sqlx::query_scalar(
-        "SELECT COUNT(*) FROM messages WHERE turn_id = ? AND role = 'user' AND relay_from IS NOT NULL",
-    )
-    .bind(&turn.id)
-    .fetch_optional(app.db())
-    .await;
-    let users: Result<Option<i64>, _> = sqlx::query_scalar("SELECT COUNT(*) FROM messages WHERE turn_id = ? AND role = 'user'")
-        .bind(&turn.id)
-        .fetch_optional(app.db())
-        .await;
-    matches!((relayed, users), (Ok(Some(0)), Ok(Some(n))) if n > 0)
+/// 排著的這一則是使用者自己送的：User lane 的 `/prompt` 排的（`origin = web`，bot 忙碌時排的是 `awaits_idle = 1`，
+/// bot 沒在跑時送的是 `awaits_start = 1`，#1362）。Relay 與 daemon 通知依 lane 仍受 interrupt grace 擋。
+async fn queued_from_the_user(_app: &impl crate::capabilities::Db, turn: &db::Turn) -> bool {
+    turn.origin == "web"
+        && turn.queue_class == super::prompt::QueueClass::User.as_str()
+        && (turn.awaits_idle == 1 || turn.awaits_start == 1)
 }
 
 /// Undo a `queued -> in_flight` claim that never became a delivery, and arm a retry timer for it —
 /// the same backoff and retry limit as any other put-back (`defer_queued_turn`). Bot lock held and
-/// only for a turn this flush claimed, so the queued-slot unique indexes (`turns_one_queued_user`/`_daemon`) cannot be violated.
+/// only for a turn this flush claimed, so the queued-slot unique indexes (`turns_one_queued_user`/`_relay`/`_daemon`) cannot be violated.
 /// 寫不進去回 `Err`，不當成放回去了（#158）：flush 經 [`put_back_or_owe`] 記成欠著，由 `owed_delivery` 補。
 pub async fn put_back<C: QueueContext>(app: &C, bot_id: &str, conv: &str, turn_id: &str, reason: &str, wait_key: &str) -> anyhow::Result<()> {
     match defer_queued_turn(app, conv, turn_id, reason, wait_key).await? {
@@ -452,12 +440,12 @@ async fn defer_queued_turn(
     }
     // 先讀重試次數再寫：deferred 的話讀完之後別的 writer 一 commit 就 517，這一筆放不回佇列、只能記成欠著（#831）。
     let mut tx = db::begin_write(app.db()).await?;
-    let (retries, crid): (i64, Option<String>) =
-        sqlx::query_as("SELECT flush_retries, client_request_id FROM turns WHERE id = ?").bind(turn_id).fetch_one(&mut *tx).await?;
+    let (retries, queue_class): (i64, String) =
+        sqlx::query_as("SELECT flush_retries, queue_class FROM turns WHERE id = ?").bind(turn_id).fetch_one(&mut *tx).await?;
     #[cfg(all(test, feature = "daemon-test-harness"))]
     super::race_point::hit("defer_after_retries_read", turn_id).await;
     // daemon 自己排的通知擋在佇列頭，後面的使用者訊息就排不到：它的上限短得多（#562）。
-    let notice = super::daemon_notice::is_daemon_notice(crid.as_deref());
+    let notice = queue_class == super::prompt::QueueClass::DaemonNotice.as_str();
     if retries >= if notice { super::daemon_notice::RETRY_LIMIT } else { QUEUE_RETRY_LIMIT } {
         let out = super::turn_controller::fail_on(&mut tx, turn_id, super::turn_controller::DeliveryOnFail::Failed, "退避次數用完").await?;
         // 沒收到的（別的路徑先收掉了）不補「試了 N 次」的說明：那不是它結束的原因。
@@ -1829,7 +1817,7 @@ mod flush_queue_tests {
         sqlx::query("DELETE FROM turns WHERE id = ?").bind(&f.turn_id).execute(app.db()).await.unwrap();
         note_user_interrupt(&f.bot_id);
         super::super::stuck_turns::observe_at(&f.run_id, "idle", std::time::Instant::now());
-        let out = prompt_relayed_queueable(&app, &f.bot_id, "新的派工", "crid-grace", None).await.unwrap();
+        let out = prompt_relayed_queueable(&app, &f.bot_id, "新的派工", "crid-grace", None, super::QueueClass::Relay).await.unwrap();
         assert_eq!(out.delivery, "queued");
         assert_eq!(typed(&f, "新的派工"), 0);
         assert!(queue_retry_timer_armed(&f.bot_id));
@@ -2206,8 +2194,8 @@ mod flush_queue_tests {
         assert_eq!(f.env.herdr.methods().iter().filter(|m| *m == "pane.send_text").count(), 1, "exactly once");
     }
 
-    /// The new web queue entry waits for a real idle status and keeps its created_at position
-    /// relative to AGM dispatch turns and #122 start_if_stopped turns.
+    /// The new web queue entry waits for a real idle status; when it can flush, user turns
+    /// precede queued AGM dispatches, with created_at ordering preserved within the user lane.
     #[tokio::test]
     async fn awaits_idle_queue_turns_wait_for_idle_and_keep_created_at_order() {
         let f = queued("test").await;
@@ -2215,11 +2203,9 @@ mod flush_queue_tests {
         db::set_pane_typed(app.db(), &f.run_id).await.unwrap();
         f.env.herdr.live_pane("pane-1", crate::testing::LivePane { width: Some(120), ..Default::default() });
         sqlx::query("DROP INDEX turns_one_queued_user").execute(app.db()).await.unwrap();
-        sqlx::query("DROP INDEX turns_one_queued_daemon").execute(app.db()).await.unwrap();
 
-        let oldest = chrono::Utc::now() - chrono::Duration::seconds(5);
         let created = |seconds: i64| {
-            (oldest + chrono::Duration::seconds(seconds)).to_rfc3339_opts(chrono::SecondsFormat::Millis, true)
+            format!("2024-01-01T00:00:{seconds:02}.000Z")
         };
         let awaits_idle = &f.turn_id;
         let assignment_turn = db::ulid();
@@ -2231,8 +2217,8 @@ mod flush_queue_tests {
             .await
             .unwrap();
         sqlx::query(
-            "INSERT INTO turns (id, conversation_id, origin, status, delivery, prompt_text, created_at)
-             VALUES (?,?,'web','queued','pending','AGM dispatch',?)",
+            "INSERT INTO turns (id, conversation_id, origin, status, delivery, prompt_text, created_at, queue_class)
+             VALUES (?,?,'web','queued','pending','AGM dispatch',?,'relay')",
         )
         .bind(&assignment_turn)
         .bind(&f.conv)
@@ -2277,8 +2263,8 @@ mod flush_queue_tests {
         sqlx::query("UPDATE runs SET agent_status='idle' WHERE id=?").bind(&f.run_id).execute(app.db()).await.unwrap();
         for (id, expected) in [
             (awaits_idle.as_str(), "web waits for idle"),
-            (assignment_turn.as_str(), "AGM dispatch"),
             (awaits_start.as_str(), "start_if_stopped"),
+            (assignment_turn.as_str(), "AGM dispatch"),
         ] {
             flush_queued_locked(&app, &f.bot_id).await.unwrap();
             assert_eq!(turn(&app, id).await.status, "in_flight", "created_at order selected {expected}");
@@ -2532,7 +2518,7 @@ mod flush_queue_tests {
         assert!(t.next_flush_at.is_some(), "有下一次嘗試的時間");
         assert!(queue_retry_timer_armed(&f.bot_id), "timer 已經掛上");
 
-        // Still retryable: requeueing didn't poison `turns_one_queued` or the CAS.
+        // Still retryable: requeueing didn't poison the relay-lane index or the CAS.
         f.env.herdr.set_agent("agent", "pane-1", true);
         sqlx::query("UPDATE runs SET herdr_session = 'test' WHERE id = ?")
             .bind(&f.run_id)

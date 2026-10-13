@@ -119,7 +119,14 @@ pub trait TurnCommands {
         incomplete: bool,
         snapshot: Option<&str>,
     ) -> Result<db::Message>;
-    async fn prompt_relayed_queueable(&self, bot_id: &str, text: &str, client_request_id: &str, relay_from: Option<&str>) -> LcResult<PromptOut>;
+    async fn prompt_relayed_queueable(
+        &self,
+        bot_id: &str,
+        text: &str,
+        client_request_id: &str,
+        relay_from: Option<&str>,
+        queue_class: crate::lifecycle::QueueClass,
+    ) -> LcResult<PromptOut>;
 }
 
 /// 在同一個寫入交易（連線）裡設回合狀態（原 `lifecycle::turn_controller::*`）。實作在 `SqliteConnection` 上，

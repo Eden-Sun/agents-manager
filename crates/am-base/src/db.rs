@@ -110,6 +110,7 @@ CREATE TABLE IF NOT EXISTS turns (
   status TEXT NOT NULL CHECK (status IN ('queued','in_flight','completed','completed_fallback','failed')),
   delivery TEXT NOT NULL DEFAULT 'pending' CHECK (delivery IN ('pending','ok','unknown','failed')),
   client_request_id TEXT,
+  queue_class TEXT NOT NULL DEFAULT 'user' CHECK (queue_class IN ('user','relay','daemon')),
   native_session_id TEXT, native_turn_id TEXT,
   created_at TEXT NOT NULL, completed_at TEXT,
   -- The exact text to hand to the CLI when a queued web prompt is activated. NULL for
@@ -120,11 +121,6 @@ CREATE TABLE IF NOT EXISTS turns (
   composer_draft_proof TEXT
 );
 CREATE UNIQUE INDEX IF NOT EXISTS turns_one_in_flight ON turns(run_id) WHERE status = 'in_flight';
--- #1685：排隊的槽分兩條，各自同時最多一筆：daemon 自己排的通知（`child-done:`／`child-blocked:`／`resume-nudge:`）一條，
--- 使用者／AGM／別顆 bot 一條。兩條互不擋，所以排著的通知不會把使用者的訊息擋在門外。條件要跟 [`daemon_notice_sql`] 同步。
-DROP INDEX IF EXISTS turns_one_queued;
-CREATE UNIQUE INDEX IF NOT EXISTS turns_one_queued_user ON turns(conversation_id) WHERE status = 'queued' AND IFNULL((client_request_id GLOB 'child-done:*') OR (client_request_id GLOB 'child-blocked:*') OR (client_request_id GLOB 'resume-nudge:*'), 0) = 0;
-CREATE UNIQUE INDEX IF NOT EXISTS turns_one_queued_daemon ON turns(conversation_id) WHERE status = 'queued' AND IFNULL((client_request_id GLOB 'child-done:*') OR (client_request_id GLOB 'child-blocked:*') OR (client_request_id GLOB 'resume-nudge:*'), 0) = 1;
 CREATE UNIQUE INDEX IF NOT EXISTS turns_client_req ON turns(conversation_id, client_request_id) WHERE client_request_id IS NOT NULL;
 CREATE UNIQUE INDEX IF NOT EXISTS turns_native ON turns(native_session_id, native_turn_id) WHERE native_turn_id IS NOT NULL;
 CREATE INDEX IF NOT EXISTS turns_conv_time ON turns(conversation_id, created_at);
@@ -445,6 +441,8 @@ pub const SCHEMA_HISTORY: &[(i64, &str)] = &[
     (61, "912947f9ac233189"),
     // 手動執行 key 的 mapping（schedule_manual_requests，2026-10-13 補）：重試回同一筆 occurrence。
     (62, "cf53e353ad0b9965"),
+    // issue #1685：使用者、relay、daemon 通知各有自己的 queued 槽，使用者 flush 優先。
+    (63, "d4d0ceedaa3c5f2f"),
 ];
 pub const SCHEMA_VERSION: i64 = SCHEMA_HISTORY[SCHEMA_HISTORY.len() - 1].0;
 
@@ -568,6 +566,7 @@ async fn apply_migrations_inner(pool: &SqlitePool, fail_after_spawn_hints_drop: 
         "資料庫的 schema 版本是 {stored_version}，這顆 daemon 只認得到 {SCHEMA_VERSION}（比較舊）。\
          代表已經有更新版的 daemon 動過這個檔案；請先把這顆升級到那個版本以上，不要用舊版繼續開它。"
     );
+    let had_queue_class = has_column(&mut *tx, "turns", "queue_class").await?;
     for stmt in SCHEMA.split(";\n") {
         let s = stmt.trim();
         if s.is_empty() {
@@ -624,6 +623,8 @@ async fn apply_migrations_inner(pool: &SqlitePool, fail_after_spawn_hints_drop: 
         ("turns", "awaits_idle", "ALTER TABLE turns ADD COLUMN awaits_idle INTEGER NOT NULL DEFAULT 0"),
         // issue #1488: retain the composer submission's transcript proof until exact message text is committed.
         ("turns", "composer_draft_proof", "ALTER TABLE turns ADD COLUMN composer_draft_proof TEXT"),
+        // #1685：寫入時依可信來源保存 queued turn 分類；舊列在下方用 message relay metadata 回填。
+        ("turns", "queue_class", "ALTER TABLE turns ADD COLUMN queue_class TEXT NOT NULL DEFAULT 'user' CHECK (queue_class IN ('user','relay','daemon'))"),
         // 舊庫裡的每一列都是舊流程「先寫檔、DB insert 最後做」留下來的——insert 成功就代表檔案已經寫完，
         // 一律當 'ready'（issue #88）。
         (
@@ -688,6 +689,37 @@ async fn apply_migrations_inner(pool: &SqlitePool, fail_after_spawn_hints_drop: 
         if !has_column(&mut *tx, table, col).await? {
             sqlx::query(ddl).execute(&mut *tx).await.with_context(|| format!("add {table}.{col}"))?;
         }
+    }
+    if !had_queue_class {
+        // Drop the v60 single-slot index and the earlier prefix-derived v61 indexes once, before
+        // creating the writer-class indexes below. Do not rebuild them on every daemon startup.
+        for name in ["turns_one_queued", "turns_one_queued_user", "turns_one_queued_daemon", "turns_one_queued_relay"] {
+            sqlx::query(&format!("DROP INDEX IF EXISTS {name}")).execute(&mut *tx).await?;
+        }
+        // v60 的 daemon 通知也會保存 relay_from（child id 或 daemon sentinel）；沒有 relay metadata 的
+        // 外部使用者列一律留在 user lane，即使它選了 child-done: 之類的 idempotency key。
+        sqlx::query(
+            "UPDATE turns AS t
+                SET queue_class = CASE
+                  WHEN EXISTS (SELECT 1 FROM messages m WHERE m.turn_id=t.id AND m.role='user' AND m.relay_from='daemon') THEN 'daemon'
+                  WHEN EXISTS (SELECT 1 FROM messages m WHERE m.turn_id=t.id AND m.role='user' AND m.relay_from IS NOT NULL)
+                       AND (t.client_request_id GLOB 'child-done:*' OR t.client_request_id GLOB 'child-blocked:*' OR t.client_request_id GLOB 'resume-nudge:*') THEN 'daemon'
+                  WHEN EXISTS (SELECT 1 FROM messages m WHERE m.turn_id=t.id AND m.role='user' AND m.relay_from IS NOT NULL) THEN 'relay'
+                  ELSE 'user'
+                END
+              WHERE t.status='queued'",
+        )
+        .execute(&mut *tx)
+        .await
+        .context("backfill queued turn classes")?;
+    }
+    // The indexes follow the additive column migration so opening an existing database does not
+    // try to index a column before it exists. The classes remain disjoint and each lane has one slot.
+    for (name, class) in [("turns_one_queued_user", "user"), ("turns_one_queued_relay", "relay"), ("turns_one_queued_daemon", "daemon")] {
+        sqlx::query(&format!("CREATE UNIQUE INDEX IF NOT EXISTS {name} ON turns(conversation_id) WHERE status='queued' AND queue_class='{class}'"))
+            .execute(&mut *tx)
+            .await
+            .with_context(|| format!("index turns queued {class} lane"))?;
     }
     // 一則 hook 最多收成一個回合：唯一鍵讓重播（收件匣 at-least-once）命中既有結果，而不是再開一個。
     sqlx::query("CREATE UNIQUE INDEX IF NOT EXISTS turns_source_event ON turns(source_event_id) WHERE source_event_id IS NOT NULL")
@@ -1316,6 +1348,10 @@ pub struct Turn {
     pub status: String,
     pub delivery: String,
     pub client_request_id: Option<String>,
+    /// Trusted writer classification used to choose a queued lane; never derived from the request id.
+    #[sqlx(default)]
+    #[serde(skip_serializing)]
+    pub queue_class: String,
     pub native_session_id: Option<String>,
     pub native_turn_id: Option<String>,
     pub created_at: String,
@@ -1557,11 +1593,10 @@ pub async fn active_runs_by_bot(pool: &SqlitePool) -> Result<std::collections::H
 /// 每顆 bot 排最前面的 `queued` 回合，一次讀完（同 [`queued_turn_for_bot`] 的排序）。
 pub async fn queued_turns_by_bot(pool: &SqlitePool) -> Result<std::collections::HashMap<String, Turn>> {
     use sqlx::{FromRow, Row};
-    let rows = sqlx::query(&format!(
+    let rows = sqlx::query(
         "SELECT t.*, c.bot_id AS queue_bot_id FROM turns t JOIN conversations c ON c.id = t.conversation_id
-          WHERE t.status = 'queued' ORDER BY {}, t.created_at, t.id",
-        daemon_notice_sql("t.")
-    ))
+          WHERE t.status = 'queued' ORDER BY CASE t.queue_class WHEN 'user' THEN 0 WHEN 'relay' THEN 1 ELSE 2 END, t.created_at, t.id",
+    )
     .fetch_all(pool)
     .await?;
     let mut out = std::collections::HashMap::new();
@@ -1772,21 +1807,11 @@ pub async fn in_flight_turn(pool: &SqlitePool, run_id: &str) -> Result<Option<Tu
         .await?)
 }
 
-/// 排隊槽的「daemon 通知」述詞（#1685）：真＝這一則是 daemon 自己排的（`child-done:`／`child-blocked:`／`resume-nudge:`）。
-/// `alias` 是 turns 的表別名（沒有就空字串）。跟 SCHEMA 裡 `turns_one_queued_user`／`turns_one_queued_daemon` 的條件、
-/// `am-lifecycle` 的 `daemon_notice::PREFIXES` 必須同步（`daemon_notice` 的測試會對一遍）。
-pub fn daemon_notice_sql(alias: &str) -> String {
-    format!(
-        "IFNULL(({alias}client_request_id GLOB 'child-done:*') OR ({alias}client_request_id GLOB 'child-blocked:*') OR ({alias}client_request_id GLOB 'resume-nudge:*'), 0)"
-    )
-}
-
-/// 一段對話排最前面的 `queued` 回合：使用者（與 AGM、別顆 bot）的先，daemon 通知的排後面（#1685）；同一條內照 `created_at, id`。
+/// 一段對話排最前面的 `queued` 回合：使用者先於 relay 與 daemon 通知（#1685）；lane 內照 `created_at, id`。
 pub async fn queued_turn(pool: &SqlitePool, conversation_id: &str) -> Result<Option<Turn>> {
-    Ok(sqlx::query_as::<_, Turn>(&format!(
-        "SELECT * FROM turns WHERE conversation_id = ? AND status = 'queued' ORDER BY {}, created_at, id LIMIT 1",
-        daemon_notice_sql("")
-    ))
+    Ok(sqlx::query_as::<_, Turn>(
+        "SELECT * FROM turns WHERE conversation_id = ? AND status = 'queued' ORDER BY CASE queue_class WHEN 'user' THEN 0 WHEN 'relay' THEN 1 ELSE 2 END, created_at, id LIMIT 1",
+    )
     .bind(conversation_id)
     .fetch_optional(pool)
     .await?)
@@ -1794,11 +1819,10 @@ pub async fn queued_turn(pool: &SqlitePool, conversation_id: &str) -> Result<Opt
 
 pub async fn queued_turn_for_bot(pool: &SqlitePool, bot_id: &str) -> Result<Option<Turn>> {
     note_per_bot_lookup();
-    Ok(sqlx::query_as::<_, Turn>(&format!(
+    Ok(sqlx::query_as::<_, Turn>(
         "SELECT t.* FROM turns t JOIN conversations c ON c.id = t.conversation_id
-         WHERE c.bot_id = ? AND t.status = 'queued' ORDER BY {}, t.created_at, t.id LIMIT 1",
-        daemon_notice_sql("t.")
-    ))
+         WHERE c.bot_id = ? AND t.status = 'queued' ORDER BY CASE t.queue_class WHEN 'user' THEN 0 WHEN 'relay' THEN 1 ELSE 2 END, t.created_at, t.id LIMIT 1",
+    )
     .bind(bot_id)
     .fetch_optional(pool)
     .await?)

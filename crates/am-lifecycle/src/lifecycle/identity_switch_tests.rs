@@ -163,7 +163,7 @@ async fn quota_on_identity_a_then_switching_to_b_resumes_the_exact_same_session(
     assert_eq!(outcome_now().await, (Some(S.to_string()), None), "舊行程的回報不能冒充新行程接回了");
 
     // ---- 4. 驗證前：派工排隊、使用者 409、flush 不動（一個字都沒進 B 的 pane）
-    let dispatch = prompt_relayed_queueable(&app, &bot.id, "換身分之後的派工", "agm-after-switch", Some(crate::agent_relay::DAEMON_SENDER))
+    let dispatch = prompt_relayed_queueable(&app, &bot.id, "換身分之後的派工", "agm-after-switch", Some(crate::agent_relay::DAEMON_SENDER), QueueClass::Relay)
         .await
         .unwrap();
     assert_eq!(dispatch.delivery, "queued");
@@ -276,7 +276,7 @@ async fn a_dispatch_queued_before_the_switch_survives_the_restart_and_goes_out_e
     .await
     .unwrap();
     // A 還在回合中：AGM 的派工排在後面。
-    let dispatch = prompt_relayed_queueable(&app, &bot.id, "撞額度之前就排好的派工", "agm-before-switch", Some(crate::agent_relay::DAEMON_SENDER))
+    let dispatch = prompt_relayed_queueable(&app, &bot.id, "撞額度之前就排好的派工", "agm-before-switch", Some(crate::agent_relay::DAEMON_SENDER), QueueClass::Relay)
         .await
         .unwrap();
     assert_eq!(dispatch.delivery, "queued");
@@ -376,7 +376,7 @@ async fn dispatch_queued_behind_a_turn(e: &tt::Env, name: &str) -> (db::Bot, Str
     .execute(&app.db)
     .await
     .unwrap();
-    let dispatch = prompt_relayed_queueable(&app, &bot.id, "撞額度後排著的派工", &format!("agm-{name}"), Some(crate::agent_relay::DAEMON_SENDER))
+    let dispatch = prompt_relayed_queueable(&app, &bot.id, "撞額度後排著的派工", &format!("agm-{name}"), Some(crate::agent_relay::DAEMON_SENDER), QueueClass::Relay)
         .await
         .unwrap();
     assert_eq!(dispatch.delivery, "queued");

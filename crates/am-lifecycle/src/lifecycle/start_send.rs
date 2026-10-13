@@ -170,12 +170,13 @@ async fn accept_locked(
     let mark = if run.is_none() { Starting::begin(bot_id) } else { None };
     let mut tx = app.db().begin().await.map_err(up)?;
     let queued = sqlx::query(
-        "INSERT INTO turns (id, conversation_id, run_id, origin, status, delivery, client_request_id, created_at, prompt_text, awaits_start)
-         VALUES (?,?,NULL,'web','queued','pending',?,?,?,1)",
+        "INSERT INTO turns (id, conversation_id, run_id, origin, status, delivery, client_request_id, queue_class, created_at, prompt_text, awaits_start)
+         VALUES (?,?,NULL,'web','queued','pending',?,?,?, ?,1)",
     )
     .bind(&turn_id)
     .bind(&conv)
     .bind(client_request_id)
+    .bind(relay.queue_class.as_str())
     .bind(db::now())
     .bind(&deliver)
     .execute(&mut *tx)
@@ -483,8 +484,8 @@ pub async fn withdraw_turn(app: &impl LcHost, turn_id: &str) -> LcResult<Withdra
         .map_err(up)?
         .ok_or_else(|| LcError::NotFound("turn".into()))?;
     let _g = crate::lifecycle::s6_ports::StartServices::lock_bot_for_start(app, &bot_id).await;
-    let (status, awaits_start, awaits_idle, origin, crid): (String, i64, i64, String, Option<String>) = sqlx::query_as(
-        "SELECT status, awaits_start, awaits_idle, origin, client_request_id FROM turns WHERE id=?",
+    let (status, awaits_start, awaits_idle, origin, queue_class): (String, i64, i64, String, String) = sqlx::query_as(
+        "SELECT status, awaits_start, awaits_idle, origin, queue_class FROM turns WHERE id=?",
     )
     .bind(turn_id)
     .fetch_one(app.db())
@@ -495,7 +496,7 @@ pub async fn withdraw_turn(app: &impl LcHost, turn_id: &str) -> LcResult<Withdra
         "使用者取消了這一則：它是 bot 沒在跑時送的，還在等 bot 起來，沒有送出，不會再送。"
     } else if awaits_idle == 1 && origin == "web" {
         "使用者取消了這一則：bot 忙碌時先排進佇列，還沒送出，不會再送。"
-    } else if super::daemon_notice::is_daemon_notice(crid.as_deref()) {
+    } else if queue_class == super::prompt::QueueClass::DaemonNotice.as_str() {
         super::daemon_notice::WITHDRAWN_WHY
     } else {
         ""

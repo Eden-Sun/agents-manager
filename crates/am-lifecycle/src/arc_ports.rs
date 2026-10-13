@@ -121,7 +121,7 @@ mod arc_port_4_turncommands {
         async fn close_pane_and_tab(&self, client: &crate::herdr::HerdrClient, workspace_id: Option<&str>, tab_id: Option<&str>, pane_id: &str) { <T as crate::events::ports::TurnCommands>::close_pane_and_tab(self.as_ref(), client, workspace_id, tab_id, pane_id).await }
         fn observe_agent_status(&self, run_id: &str, agent_status: &str) { <T as crate::events::ports::TurnCommands>::observe_agent_status(self.as_ref(), run_id, agent_status) }
         async fn insert_message(&self, conversation_id: &str, turn_id: Option<&str>, role: &str, content: &str, source: &str, incomplete: bool, snapshot: Option<&str>) -> Result<db::Message> { <T as crate::events::ports::TurnCommands>::insert_message(self.as_ref(), conversation_id, turn_id, role, content, source, incomplete, snapshot).await }
-        async fn prompt_relayed_queueable(&self, bot_id: &str, text: &str, client_request_id: &str, relay_from: Option<&str>) -> LcResult<PromptOut> { <T as crate::events::ports::TurnCommands>::prompt_relayed_queueable(self.as_ref(), bot_id, text, client_request_id, relay_from).await }
+        async fn prompt_relayed_queueable(&self, bot_id: &str, text: &str, client_request_id: &str, relay_from: Option<&str>, queue_class: crate::lifecycle::QueueClass) -> LcResult<PromptOut> { <T as crate::events::ports::TurnCommands>::prompt_relayed_queueable(self.as_ref(), bot_id, text, client_request_id, relay_from, queue_class).await }
     }
 }
 

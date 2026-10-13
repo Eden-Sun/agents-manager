@@ -145,8 +145,8 @@ impl TurnCommands for App {
     ) -> Result<db::Message> {
         lifecycle::insert_message(&self.shared(), conversation_id, turn_id, role, content, source, incomplete, snapshot).await
     }
-    async fn prompt_relayed_queueable(&self, bot_id: &str, text: &str, client_request_id: &str, relay_from: Option<&str>) -> LcResult<PromptOut> {
-        lifecycle::prompt_relayed_queueable(&self.shared(), bot_id, text, client_request_id, relay_from).await
+    async fn prompt_relayed_queueable(&self, bot_id: &str, text: &str, client_request_id: &str, relay_from: Option<&str>, queue_class: lifecycle::QueueClass) -> LcResult<PromptOut> {
+        lifecycle::prompt_relayed_queueable(&self.shared(), bot_id, text, client_request_id, relay_from, queue_class).await
     }
 }
 
