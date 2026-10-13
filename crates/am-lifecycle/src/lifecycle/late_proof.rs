@@ -132,9 +132,20 @@ impl PendingRegistry {
     }
 }
 
+#[cfg(not(all(test, feature = "daemon-test-harness")))]
 fn registry() -> &'static Mutex<PendingRegistry> {
     static M: OnceLock<Mutex<PendingRegistry>> = OnceLock::new();
     M.get_or_init(Default::default)
+}
+
+/// 測試裡每條測試執行緒（current-thread runtime 跑在它上面）各一份 registry：全進程共用的 static 會讓
+/// 平行測試留下的條目被別條的清掃算進去（#1670）。正式程式碼仍是全進程一份。
+#[cfg(all(test, feature = "daemon-test-harness"))]
+fn registry() -> &'static Mutex<PendingRegistry> {
+    thread_local! {
+        static M: &'static Mutex<PendingRegistry> = Box::leak(Box::default());
+    }
+    M.with(|m| *m)
 }
 
 /// 這個 run 剛判不出來的那一則（`confirm_submitted` 呼叫）。同一個 run 只留最新的一筆。
