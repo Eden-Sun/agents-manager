@@ -293,3 +293,30 @@
 ";
         assert_eq!(parse(screen), Switch::default());
     }
+
+    /// 一般 bot 的 runs 寫入失敗：基準不能先記成新畫面，否則下一輪看到同一份畫面會被當成「沒變」，切換永遠漏記。
+    #[tokio::test]
+    async fn a_user_switch_whose_run_write_failed_is_adopted_on_the_next_sweep() {
+        let env = crate::testing::env().await;
+        let app = env.app.clone();
+        let user = crate::testing::claude_bot(&app, &env.project_id, "user-retry").await;
+        let run_id = crate::testing::fake_run(&app, &user.id).await;
+        let run = db::run(&app.db, &run_id).await.unwrap().unwrap();
+        let base = "❯ /model opus\n  ⎿  Set model to Opus 5.5 and saved as your default for new sessions\n";
+        env.herdr.set_screen(&format!("pane-{}", user.id), base);
+        observe(&app, &run, base).await;
+        // 切到 Sonnet，但 runs 的 UPDATE 失敗（確認行還在畫面上）。
+        sqlx::query("CREATE TRIGGER refuse_run_runtime BEFORE UPDATE ON runs BEGIN SELECT RAISE(ABORT, 'boom'); END")
+            .execute(&app.db)
+            .await
+            .unwrap();
+        env.herdr.set_screen(&format!("pane-{}", user.id), SCREEN);
+        observe(&app, &run, SCREEN).await;
+        let r = db::run(&app.db, &run_id).await.unwrap().unwrap();
+        assert_eq!(r.runtime_model, None, "寫入失敗，什麼都沒記");
+        // DB 恢復，下一輪畫面還是同一份：要重試採用，不能因為基準已經是它就略過。
+        sqlx::query("DROP TRIGGER refuse_run_runtime").execute(&app.db).await.unwrap();
+        observe(&app, &run, SCREEN).await;
+        let r = db::run(&app.db, &run_id).await.unwrap().unwrap();
+        assert_eq!(r.runtime_model.as_deref(), Some("claude-sonnet-5-5"), "下一輪補上");
+    }
