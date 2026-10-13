@@ -113,6 +113,19 @@ test('撞限換手讀 daemon 的 from_identity／to_identity，而且 note 不�
   assert.equal(v.actors[0].bot, 'exec-b', '角色指向接手的那一顆，不是 daemon')
 })
 
+test('撞限換手後角色的身分指向接手的那一個，不沿用撞限那顆的身分', () => {
+  // 接手的新 bot 還沒送出任何事件時，身分不能還是剛撞限的 cc2（daemon 的 note 寫的是 to_identity=cc1）。
+  const parent = asg({ id: 'a-first', target_bot_id: 'exec-a', status: 'awaiting_review', turn_status: 'identity_switch', turn_error: 'usage limit' })
+  const child = asg({ follow_up_of: 'a-first', target_bot_id: 'exec-b' })
+  const v = missionView(
+    mission({ phase: 'executing' }),
+    [ev('report', '開工', { role: 'executor', bot: 'exec-a', identity: 'cc2', model: 'fable' }), switchNote('a-first', 'cc2', 'cc1', 'opus')],
+    [parent, child],
+  )
+  assert.equal(v.actors[0].bot, 'exec-b')
+  assert.equal(v.actors[0].identity, 'cc1', '撞限的是 cc2，現在跑的是 cc1')
+})
+
 test('沒有第二個身分當 reviewer：讀 daemon 記的 decision，之後真的派出 reviewer 就撤掉標記', () => {
   const note = ev('note', '改走執行者自審＋驗證者把關', { decision: { decision: 'no_independent_reviewer', reason: '只有 cc2 有額度' } })
   assert.equal(missionView(mission(), [note], [asg({ role: 'executor' })]).soloReview, true)
