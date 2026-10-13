@@ -339,6 +339,37 @@
         let _ = std::fs::remove_dir_all(&d);
     }
 
+    /// BSD `find` rejects GNU's `-maxdepth`; a stale remote-sync temporary must still be cleaned.
+    #[cfg(unix)]
+    #[test]
+    fn remote_sync_cleans_stale_temps_when_find_rejects_maxdepth() {
+        let d = tmp();
+        let bot = d.join("bot");
+        let bin = bot.join("bin");
+        std::fs::create_dir_all(&bin).unwrap();
+        let stale = bin.join(".herdr.tmp-stale");
+        std::fs::write(&stale, "partial shim").unwrap();
+
+        let fake = d.join("fakebin");
+        std::fs::create_dir_all(&fake).unwrap();
+        write_shim(
+            &fake.join("find"),
+            r#"#!/bin/sh
+for arg do [ "$arg" != -maxdepth ] || exit 2; done
+case " $* " in *" -mmin +10 "*) rm -f "$1";; esac
+"#,
+            0o755,
+        );
+
+        let dirs = vec![bot.to_string_lossy().into_owned()];
+        let script = remote_sync_script(&dirs, &[], false);
+        let out = run_script(&script, Some(&format!("{}:/usr/bin:/bin", fake.display())));
+
+        assert!(parse_remote_sync(&out).is_ok(), "sync completes despite a stale-temp cleanup command: {out}");
+        assert!(!stale.exists(), "BSD find must not leave an old temporary file behind");
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
     /// Remote sync must not let a preexisting predictable temp symlink redirect `cp` into another file.
     #[cfg(unix)]
     #[test]
