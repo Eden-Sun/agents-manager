@@ -655,6 +655,17 @@ am_size() {{
 case "$K" in ''|.|..|*/*|*[[:cntrl:]]*) am_missing;; esac
 case "$N" in ''|.|..|*/*|*[[:cntrl:]]*) am_missing;; esac
 case "$N" in *.jsonl) ;; *) am_missing;; esac
+# 兩個身分共用同一個 projects（一邊是指向另一邊的 symlink；m4p 的 `~/.claude-cc1/projects` → `~/.claude/projects`）：
+# 檔案本來就在新身分讀得到的位置，不用搬。2026-10-13 ops-web 從 cc1 換回 cc0，來源那邊是 symlink，被下面
+# 「來源不能是 symlink」擋成 AM_MISSING、開了新對話；反方向（目的是 symlink）一直都回 AM_SAME。
+# 只在兩邊解析後是同一個目錄時才放行，而且那個檔本身仍然不能是 symlink——沒有任何東西被複製。
+if [ -d "$OLD" ] && [ -d "$NEW" ]; then
+  o=$(cd -- "$OLD" 2>/dev/null && pwd -P) || o=
+  n=$(cd -- "$NEW" 2>/dev/null && pwd -P) || n=
+  if [ -n "$o" ] && [ "$o" = "$n" ] && [ -d "$o/$K" ] && [ ! -L "$o/$K" ] && [ -f "$o/$K/$N" ] && [ ! -L "$o/$K/$N" ]; then
+    printf 'AM_SAME\n'; exit 0
+  fi
+fi
 [ ! -L "$OLD" ] && [ -d "$OLD" ] || am_missing
 cd -- "$OLD" 2>/dev/null || am_missing
 [ ! -L "$OLD" ] && am_same "$OLD" . || am_missing
@@ -3484,6 +3495,32 @@ esac
             let path = format!("{}:{}", bsd_stat_dir().display(), std::env::var("PATH").unwrap_or_default());
             let out = std::process::Command::new("/bin/sh").arg("-c").arg(&same).env("PATH", path).output().unwrap();
             assert!(String::from_utf8_lossy(&out.stdout).contains("AM_SAME"), "{}", String::from_utf8_lossy(&out.stdout));
+            let _ = std::fs::remove_dir_all(&base);
+        }
+
+        /// 2026-10-13 ops-web（m4p）：`~/.claude-cc1/projects` 是指向 `~/.claude/projects` 的 symlink。從 cc1 換回 cc0 時
+        /// 來源那邊是 symlink，以前回 AM_MISSING、開新對話。兩個方向都要回 AM_SAME，而且不留下任何暫存檔。
+        #[test]
+        fn identities_sharing_one_projects_dir_through_a_symlink_are_the_same_place_both_ways() {
+            let base = tmp();
+            let real = base.join("real-projects");
+            std::fs::create_dir_all(real.join("k")).unwrap();
+            std::fs::write(real.join("k/sid.jsonl"), "{\"a\":1}\n").unwrap();
+            let link = base.join("linked-projects");
+            std::os::unix::fs::symlink(&real, &link).unwrap();
+            for (old, new) in [(&link, &real), (&real, &link)] {
+                let script = remote_stage_script(&old.to_string_lossy(), &new.to_string_lossy(), "k", "sid.jsonl", None);
+                let out = run_script_locally(&script);
+                assert!(out.contains("AM_SAME"), "{} → {}：{out}", old.display(), new.display());
+            }
+            let names: Vec<_> = std::fs::read_dir(real.join("k")).unwrap().map(|e| e.unwrap().file_name()).collect();
+            assert_eq!(names.len(), 1, "不該留下暫存檔或備份：{names:?}");
+            // 共用目錄裡那個檔本身是 symlink 時照舊不認。
+            let secret = base.join("secret");
+            std::fs::write(&secret, "TOKEN").unwrap();
+            std::os::unix::fs::symlink(&secret, real.join("k/evil.jsonl")).unwrap();
+            let script = remote_stage_script(&link.to_string_lossy(), &real.to_string_lossy(), "k", "evil.jsonl", None);
+            assert!(run_script_locally(&script).contains("AM_MISSING"));
             let _ = std::fs::remove_dir_all(&base);
         }
 
