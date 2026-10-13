@@ -23,7 +23,7 @@ bun test                        # 單元測試（見下：走 bunfig.toml 的 pr
 
 - `vite.config.ts` 把 `/api`、`/hook` 轉 http、`/ws` 轉 ws，**`changeOrigin: true` 必要**（daemon 檢查 `Host`）；`server.host: true` 讓手機／LAN 連得到。proxy 把 Host／Origin 改成 daemon 自己的位址，所以不管用 IP、`.ts.net` 還是 `localhost` 連 5173，daemon 的 Host／Origin 檢查（含 `allow_lan` 的名稱白名單，API.md §0）都看到 loopback、不會 403；也因此 5173 自己才是擋 DNS rebinding 的那道：`server.allowedHosts`（`src/lib/devHosts.ts`，只放 IP／localhost／`agm`／`.ts.net`）擋一般 HTTP，proxy 的 WebSocket upgrade 不經過它，`/ws` 的 `bypass` 用同一份名單補上。`.env*`、`/@fs/` 越界、`../` 路徑 vite 預設就擋（fs.strict／fs.deny），ui-token 在 web 根目錄之外取不到。
 - 有 AGM 的機器上 5173 由看門狗維護、只跟 `origin/main`（SPEC §18.1）；驗自己未提交的改動用自己的 port。
-- UI 改動要看真畫面（ego-browser 或 `scripts/` 裡的截圖腳本），手機至少看 390px。
+- UI 改動要看真畫面（一律 `agent-browser`，見 AGENTS.md），手機至少看 390px。
 
 ## 結構
 
