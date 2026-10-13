@@ -2381,11 +2381,12 @@ rustup 換位置或遠端主機上反而是錯的——讓 shim 每次在 pane �
   `the_check_script_env_still_offloads_without_leaking_the_data_dir` 拿 `check.sh` 實際那一行去跑 shim，把兩邊綁在一起。
   daemon 連不上時遠端編譯照樣能跑（它不需要 daemon）。
 - `CARGO_BUILD_JOBS` 由 daemon 的 acquire 回應決定（`build.cargo_jobs`，預設 2），不吃 cargo 自己抓核心數的預設值。
-- **測試執行緒跟著名額走（issue #813）**：名額罩住整個 `cargo test`（cargo 退出才放，含 test binary 執行階段），但 `CARGO_BUILD_JOBS` 只限 rustc；
-  libtest 預設開到核心數，32 核上每支 test binary 約 80 個執行緒、吃 8 核以上，6 個名額加起來遠超過整台機器。所以 `test`／`t` 在呼叫端沒設
-  `RUST_TEST_THREADS` 時，shim 注入 acquire 回應的 `test_threads`（`build.test_threads`，預設 8；回應沒有這個欄位的舊 daemon 也用 8；`0`＝不注入）。
-  受管的 bot 在呼叫端自己設的 `RUST_TEST_THREADS`、命令列 `--` 之後的 `--test-threads` 超過名額的上限時，夾成名額的上限（#1441，名額是上限，不是預設值；
-  沒超過的照呼叫端的）；人工 shell 與 `0` 完全不動。`-j N`／`--jobs N`（`--` 之前）同樣夾到名額的 `cargo_jobs`，非整數（`default`、負數）也夾（#1442）。不經過 shim 的 `cargo test`（ubuntu-ci、把 `~/.cargo/bin` 擺到 PATH 前面的腳本、
+- **測試執行緒跟著名額走（issue #813、#1711）**：名額罩住整個測試執行階段（cargo 退出才放），但 `CARGO_BUILD_JOBS` 只限 rustc；測試 runner 預設依 CPU 數平行，
+  多個名額可能因此把整台機器壓滿。`test`／`t` 在呼叫端沒設 `RUST_TEST_THREADS` 時，shim 注入 acquire 回應的 `test_threads`（`build.test_threads`，預設 8；
+  舊 daemon 沒有此欄位也用 8；`0`＝不注入）。`nextest run` 同樣用名額值注入 `NEXTEST_TEST_THREADS`（其預設是 CPU 數）。
+  受管的 bot 若把環境或命令列執行緒數設得高於名額，shim 會夾到名額上限：libtest 的 `RUST_TEST_THREADS` 與 `--` 之後的 `--test-threads`（#1441），
+  nextest 的 `NEXTEST_TEST_THREADS` 與 nextest 子指令後、`--` 之前的 `--test-threads`／`-j`（#1711）。沒超過的保留呼叫端設定；人工 shell 與 `0` 完全不動。
+  `-j N`／`--jobs N`（Cargo 的 `--` 之前）同樣夾到名額的 `cargo_jobs`，非整數（`default`、負數）也夾（#1442）。不經過 shim 的 `cargo test`（ubuntu-ci、把 `~/.cargo/bin` 擺到 PATH 前面的腳本、
   非受管 shell）在這個 repo 裡由 `.cargo/config.toml` 的 `[env] RUST_TEST_THREADS = "8"` 兜底（不 `force`，環境變數優先）。
   8 沿用 issue #202 在 32 vCPU 上量到的最快值（`[build.remote] test_threads` 同一個數字）。
 - 建置跑完（不管成功失敗）都會 release；`trap ... EXIT INT TERM` 保證中斷／被砍也會放。

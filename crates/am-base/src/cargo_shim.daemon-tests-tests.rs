@@ -1176,6 +1176,42 @@ esac
         }
     }
 
+    #[test]
+    fn a_managed_nextest_run_receives_the_granted_test_thread_cap() {
+        let s = Sandbox::new();
+        let d = s.dir.display();
+        write_exec(
+            s.dir.join("real/cargo"),
+            format!("#!/bin/sh\nprintf '%s|%s\\n' \"NEXTEST_TEST_THREADS=${{NEXTEST_TEST_THREADS-unset}}\" \"$*\" > '{d}/nextest.log'\n"),
+        );
+        s.install_fake_curl(
+            "case \"$*\" in *acquire*) printf '{\"granted\":true,\"token\":\"tok-1\",\"cargo_jobs\":2,\"lease_ttl_secs\":30,\"test_threads\":4}' ;; *) printf '{}' ;; esac",
+        );
+
+        let managed = [("AM_BOT_ID", "b1"), ("AM_HOOK_TOKEN", "tok"), ("AM_PORT", "1")];
+        let cases: [(&[&str], &[(&str, &str)], &str); 8] = [
+            (&["nextest", "run"], &[], "NEXTEST_TEST_THREADS=4|nextest run"),
+            (&["nextest", "run"], &[("NEXTEST_TEST_THREADS", "2")], "NEXTEST_TEST_THREADS=2|nextest run"),
+            (&["nextest", "run"], &[("NEXTEST_TEST_THREADS", "16")], "NEXTEST_TEST_THREADS=4|nextest run"),
+            (&["nextest", "run", "--test-threads=16"], &[], "NEXTEST_TEST_THREADS=4|nextest run --test-threads=4"),
+            (&["nextest", "run", "--test-threads", "16"], &[], "NEXTEST_TEST_THREADS=4|nextest run --test-threads 4"),
+            (&["nextest", "run", "-j16"], &[], "NEXTEST_TEST_THREADS=4|nextest run -j4"),
+            (&["nextest", "run", "-j", "16"], &[], "NEXTEST_TEST_THREADS=4|nextest run -j 4"),
+            (&["nextest", "run"], &[("NEXTEST_TEST_THREADS", "num-cpus")], "NEXTEST_TEST_THREADS=4|nextest run"),
+        ];
+        for (args, extra, want) in cases {
+            let mut cmd = s.command(&s.path());
+            cmd.args(args).env_remove("NEXTEST_TEST_THREADS");
+            for (key, value) in managed.iter().copied().chain(extra.iter().copied()) {
+                cmd.env(key, value);
+            }
+            let (_, err, rc) = s.run_group(cmd, None);
+            assert_eq!(rc, 0, "{args:?} {extra:?}: {err}");
+            let got = std::fs::read_to_string(s.dir.join("nextest.log")).unwrap();
+            assert_eq!(got.trim(), want, "{args:?} {extra:?}");
+        }
+    }
+
     /// issue #813：`RUST_TEST_THREADS` 只注入 `test`／`t`，而且只在呼叫端沒設的時候；名額回應沒有這個欄位（舊 daemon）＝預設 8，
     /// 回 `0`＝daemon 明講不設。
     #[test]
