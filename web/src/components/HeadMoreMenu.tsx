@@ -5,7 +5,18 @@ import { MoreIcon } from './Icons'
 import './headMoreMenu.css'
 
 /** 標題列／側欄 project 列的 `⋯`：刪除收進來，照 UI-DECISIONS「一般畫面最多一個常駐危險操作」。 */
-export function HeadMoreMenu({ children, label }: { children: ReactNode; label: string }) {
+export function HeadMoreMenu({
+  children,
+  label,
+  trigger,
+  triggerClassName,
+}: {
+  children: ReactNode
+  label: string
+  /** 觸發鈕的內容（預設 `⋯`）；專案「＋」等沿用同一套選單、鍵盤與定位時用。 */
+  trigger?: ReactNode
+  triggerClassName?: string
+}) {
   const [open, setOpen] = useState(false)
   const wrap = useRef<HTMLDivElement>(null)
   const pop = useRef<HTMLDivElement>(null)
@@ -54,14 +65,14 @@ export function HeadMoreMenu({ children, label }: { children: ReactNode; label: 
       <button
         ref={btn}
         type="button"
-        className={`icon-btn head-menu-btn icon-tip${open ? ' on' : ''}`}
+        className={`${triggerClassName ?? 'icon-btn head-menu-btn icon-tip'}${open ? ' on' : ''}`}
         aria-haspopup="menu"
         aria-expanded={open}
         aria-label={label}
         data-tip={open ? undefined : label}
         onClick={() => setOpen((v) => !v)}
       >
-        <MoreIcon />
+        {trigger ?? <MoreIcon />}
       </button>
       {open ? (
         <div ref={pop} className="head-menu-pop" role="menu" aria-label={label} onClick={() => setOpen(false)} onKeyDown={menuKeys}>

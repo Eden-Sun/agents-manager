@@ -44,6 +44,9 @@ import { DeletedBotsPanel } from './DeletedBotsPanel'
 import { IdentitiesPanel, IdentityBadge } from './IdentitiesPanel'
 import { Modal } from './Modal'
 import { SidebarPanes, SidebarUnownedPanes } from './SidebarPanes'
+import { ProjectAddMenu } from '../schedules/ProjectAddMenu'
+import { ProjectSchedules } from '../schedules/ProjectSchedules'
+import { ScheduleEditor } from '../schedules/ScheduleEditor'
 import { RunElapsed } from './RunElapsed'
 import { IdentityOptions, PersonaField, PersonaMark } from './BotSettingsPanel'
 import { ShareMark } from './ShareLinkButton'
@@ -633,7 +636,7 @@ function defaultKindForProject(projectId: string, tools: ReturnType<typeof tools
   return installed[0] ?? BOT_KINDS[0]
 }
 
-function NewBotForm({ onDone, initialProjectId }: { onDone: () => void; initialProjectId?: string }) {
+export function NewBotForm({ onDone, initialProjectId, onCreated }: { onDone: () => void; initialProjectId?: string; onCreated?: (botId: string) => void }) {
   const projects = useStore((s) => s.projects)
   const hosts = useStore((s) => s.hosts)
   const bots = useStore((s) => s.bots)
@@ -732,6 +735,7 @@ function NewBotForm({ onDone, initialProjectId }: { onDone: () => void; initialP
             } catch {
               /* ignore */
             }
+            onCreated?.(id)
             onDone()
             await startBot(id)
           }
@@ -1017,6 +1021,7 @@ export function Sidebar() {
   const deleteTarget = deleteProject ? projects.find((p) => p.id === deleteProject.id) : undefined
   const deleteBlockers = deleteProject ? projectDeleteBlockers(bots, runs, deleteProject.id) : { total: 0, active: 0 }
   const [botFormFor, setBotFormFor] = useState<string | null>(null)
+  const [scheduleEditor, setScheduleEditor] = useState<{ projectId: string; scheduleId: string | null } | null>(null)
   const [botSheetOpen, setBotSheetOpen] = useState(false)
   const openBotSheetFor = useStore((s) => s.openBotSheetFor)
   const clearOpenBotSheet = useStore((s) => s.clearOpenBotSheet)
@@ -1345,18 +1350,7 @@ export function Sidebar() {
                 <ProjectTitle projectId={p.id} label={p.label} host={p.host} path={p.path} hostUp={hostUp(p.host)} folded={projectShut} draggable={!query} />
                 {/* 同 `.bot-actions`：⋯ 的觸發鍵與選單空白處的點擊不能冒泡到整列的「選取專案」。 */}
                 <span className="project-head-actions" onClick={(e) => e.stopPropagation()}>
-                  <button
-                    type="button"
-                    className="icon-btn add icon-tip"
-                    aria-label={`在 ${p.label} 新增 Bot`}
-                    data-tip={`新增 Bot · ${p.label}`}
-                    onClick={(e) => {
-                      e.stopPropagation()
-                      openBotSheet(p.id)
-                    }}
-                  >
-                    ＋
-                  </button>
+                  <ProjectAddMenu label={p.label} onBot={() => openBotSheet(p.id)} onSchedule={() => setScheduleEditor({ projectId: p.id, scheduleId: null })} />
                   {/* 刪除這種破壞性動作收進 ⋯，不跟 ＋ 並排。 */}
                   <HeadMoreMenu label={`更多動作 · ${p.label}`}>
                     <button
@@ -1455,6 +1449,7 @@ export function Sidebar() {
                 </div>
               )}
               {/* 這個專案被 trace 的 shell／服務 pane（§6.5e）：點一下在這裡打開，不是任開任關。 */}
+              {projectShut ? null : <ProjectSchedules projectId={p.id} onOpen={(sid) => setScheduleEditor({ projectId: p.id, scheduleId: sid })} />}
               {projectShut ? null : <SidebarPanes projectId={p.id} />}
               {/* 腳註交代隱藏數，免得以為 bot 不見了。 */}
               {!projectShut && list.length > 0 && hiddenCount > 0 ? (
@@ -1515,6 +1510,15 @@ export function Sidebar() {
       >
         <NewBotForm key={botFormFor ?? 'pick'} initialProjectId={botFormFor ?? undefined} onDone={closeBotSheet} />
       </Modal>
+
+      {scheduleEditor ? (
+        <ScheduleEditor
+          projectId={scheduleEditor.projectId}
+          scheduleId={scheduleEditor.scheduleId}
+          onClose={() => setScheduleEditor(null)}
+          onSelect={(id) => setScheduleEditor((cur) => (cur ? { ...cur, scheduleId: id } : cur))}
+        />
+      ) : null}
 
       <ConfirmDialog
         open={deleteProject !== null}

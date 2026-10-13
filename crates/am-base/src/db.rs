@@ -214,6 +214,49 @@ CREATE TABLE IF NOT EXISTS intents (
   created_at TEXT NOT NULL, updated_at TEXT NOT NULL, expires_at TEXT NOT NULL
 );
 CREATE UNIQUE INDEX IF NOT EXISTS intents_one_open ON intents(kind, subject_id) WHERE status IN ('pending','running');
+-- 專案排程（使用者 2026-10-13）：schedule 是設定，schedule_occurrences 是帳本。occurrence 凍結 prompt／bot，
+-- 綁定的 turn_id 與 conversation_id 寫在同一個交易裡；每個排程最多一筆未結束的 occurrence。
+CREATE TABLE IF NOT EXISTS schedules (
+  id TEXT PRIMARY KEY, project_id TEXT NOT NULL REFERENCES projects(id), bot_id TEXT NOT NULL REFERENCES bots(id),
+  name TEXT NOT NULL, prompt TEXT NOT NULL,
+  mode TEXT NOT NULL CHECK (mode IN ('once','interval','daily','weekly')),
+  tz TEXT NOT NULL, spec_json TEXT NOT NULL,
+  next_due TEXT, enabled INTEGER NOT NULL DEFAULT 1 CHECK (enabled IN (0,1)),
+  generation INTEGER NOT NULL DEFAULT 1, notify TEXT NOT NULL DEFAULT 'failure',
+  -- 建立的冪等 key（同 project 內唯一）與內容 fingerprint：回應遺失後原樣重送，回原筆，不建第二顆。
+  create_crid TEXT, create_fp TEXT,
+  created_at TEXT NOT NULL, updated_at TEXT NOT NULL, deleted_at TEXT
+);
+CREATE INDEX IF NOT EXISTS schedules_project ON schedules(project_id, deleted_at);
+CREATE UNIQUE INDEX IF NOT EXISTS schedules_create_key ON schedules(project_id, create_crid) WHERE create_crid IS NOT NULL;
+CREATE TABLE IF NOT EXISTS schedule_occurrences (
+  id TEXT PRIMARY KEY, schedule_id TEXT NOT NULL REFERENCES schedules(id),
+  source TEXT NOT NULL CHECK (source IN ('scheduled','manual')),
+  scheduled_for TEXT NOT NULL, generation INTEGER NOT NULL,
+  bot_id TEXT NOT NULL, prompt TEXT NOT NULL,
+  client_request_id TEXT,
+  -- unknown：綁定的 turn 送出後結果不明（delivery unknown），需要人工確認；不自動重送、不算未結束。
+  status TEXT NOT NULL DEFAULT 'pending' CHECK (status IN ('pending','queued','done','failed','cancelled','unknown')),
+  -- 等待的原因（pending 時）：bot_busy／stopping／maintenance／handed_off／bot_unavailable 等，給 UI 顯示。
+  waiting_reason TEXT,
+  -- 終態通知是否已送出（去重：狀態轉移只通知一次）。
+  notified INTEGER NOT NULL DEFAULT 0 CHECK (notified IN (0,1)),
+  merged_count INTEGER NOT NULL DEFAULT 0,
+  conversation_id TEXT, turn_id TEXT, error TEXT,
+  created_at TEXT NOT NULL, updated_at TEXT NOT NULL
+);
+CREATE UNIQUE INDEX IF NOT EXISTS schedule_occ_trigger_once ON schedule_occurrences(schedule_id, scheduled_for) WHERE source = 'scheduled';
+CREATE UNIQUE INDEX IF NOT EXISTS schedule_occ_one_open ON schedule_occurrences(schedule_id) WHERE status IN ('pending','queued');
+CREATE UNIQUE INDEX IF NOT EXISTS schedule_occ_request ON schedule_occurrences(schedule_id, client_request_id) WHERE client_request_id IS NOT NULL;
+-- 手動執行的 key → 實際落在哪一筆 occurrence（重試的權威：回應遺失後同 key 重送，回同一筆，不多排 turn）。
+-- 不論合併進排程來的或手動來的 occurrence，都寫下這張表；schedule_occurrences.client_request_id 只留作稽核。
+CREATE TABLE IF NOT EXISTS schedule_manual_requests (
+  schedule_id TEXT NOT NULL REFERENCES schedules(id),
+  client_request_id TEXT NOT NULL,
+  occurrence_id TEXT NOT NULL REFERENCES schedule_occurrences(id),
+  created_at TEXT NOT NULL,
+  PRIMARY KEY (schedule_id, client_request_id)
+);
 -- 額度最後一次探測結果（issue #392）；daemon 重啟後先顯示這份，API 會標成 stale。
 CREATE TABLE IF NOT EXISTS quota_cache (
   key TEXT PRIMARY KEY,
@@ -394,6 +437,10 @@ pub const SCHEMA_HISTORY: &[(i64, &str)] = &[
     (59, "1d4bdc902d82f33b"),
     // issue #1653：`turns_run_time`（以 run 找回合）與 `supervisor_inbox_sup_state`（收件匣依 state 篩），不再掃 messages／讀整張收件匣。
     (60, "174c28815b653271"),
+    // 專案排程（schedules／schedule_occurrences，2026-10-13）：ledger、冪等 key、通知去重、等待原因與 unknown 狀態。
+    (61, "912947f9ac233189"),
+    // 手動執行 key 的 mapping（schedule_manual_requests，2026-10-13 補）：重試回同一筆 occurrence。
+    (62, "cf53e353ad0b9965"),
 ];
 pub const SCHEMA_VERSION: i64 = SCHEMA_HISTORY[SCHEMA_HISTORY.len() - 1].0;
 

@@ -6,6 +6,40 @@ use super::*;
 use super::s6_ports::QueueContext;
 use super::send_now::ports::{MaintenancePort, SupervisorSendRepo};
 
+/// Only linked schedule turns are fenced; ordinary prompts keep their existing admission rules.
+/// Callers pass a SQL expression from source code, never request input. Keep soft-deleted rows
+/// so cancelling a schedule cannot turn its queued prompt into an unlinked, eligible prompt.
+pub(super) fn scheduled_turn_allowed_sql(turn_id: &str) -> String {
+    format!(
+        "NOT EXISTS (SELECT 1 FROM schedule_occurrences o LEFT JOIN schedules s ON s.id=o.schedule_id
+          WHERE o.turn_id={turn_id} AND (o.status NOT IN ('pending','queued') OR s.id IS NULL
+            OR s.enabled<>1 OR s.deleted_at IS NOT NULL OR o.generation<>s.generation))"
+    )
+}
+
+/// Bot lock held. Retract a cancelled schedule and its queued turn in the same transaction.
+async fn withdraw_invalid_schedule<C: QueueContext>(app: &C, turn_id: &str) -> anyhow::Result<bool> {
+    let mut tx = db::begin_write(app.db()).await?;
+    let allowed: bool = sqlx::query_scalar(&format!("SELECT {}", scheduled_turn_allowed_sql("?")))
+        .bind(turn_id)
+        .fetch_one(&mut *tx)
+        .await?;
+    if allowed {
+        return Ok(false);
+    }
+    let why = "排程已停用、刪除或修改，尚未送出的任務已撤回";
+    let revoked = revoke_queued_turn_tx(&mut tx, turn_id, why).await?;
+    if revoked.is_some() {
+        sqlx::query("UPDATE schedule_occurrences SET status='cancelled', error=?, updated_at=? WHERE turn_id=? AND status IN ('pending','queued')")
+            .bind(why).bind(db::now()).bind(turn_id).execute(&mut *tx).await?;
+    }
+    tx.commit().await?;
+    if let Some(revoked) = revoked {
+        announce_revoked(app, turn_id, revoked).await;
+    }
+    Ok(true)
+}
+
 /// Hand the oldest queued prompt to the agent, if it can take one now. Caller holds the bot lock
 /// (the one-in-flight / one-queued unique indexes make a lost race an error). Early returns leave
 /// the turn queued; after the claim, any give-up must put it back or fail it — `in_flight` +
@@ -73,6 +107,11 @@ async fn flush_queued_inner<C: QueueContext>(app: &C, bot_id: &str) -> anyhow::R
             schedule_read_failure_retry(app, bot_id, WITHDRAWAL_RECHECK);
             return Err(e.context("讀不到交辦是否已撤回：排著的 prompt 留在佇列"));
         }
+    }
+    // Read errors fail closed through the normal queue retry path. A disabled schedule must
+    // release the single queued slot instead of merely failing its claim forever.
+    if withdraw_invalid_schedule(app, &turn.id).await? {
+        return Ok(());
     }
     // Put back with a backoff: other wake-ups must not spend its retries early. Its timer brings it back.
     if let Some(at) = turn.next_flush_at.as_deref().and_then(|t| chrono::DateTime::parse_from_rfc3339(t).ok()) {
@@ -1078,6 +1117,56 @@ mod flush_queue_tests {
         conv: String,
         run_id: String,
         turn_id: String,
+    }
+
+    async fn link_schedule(f: &Fixture) -> String {
+        let id = db::ulid();
+        let now = db::now();
+        sqlx::query("INSERT INTO schedules (id,project_id,bot_id,name,prompt,mode,tz,spec_json,created_at,updated_at) VALUES (?,?,?,'schedule','ping','once','UTC','{}',?,?)")
+            .bind(&id).bind(&f.env.project_id).bind(&f.bot_id).bind(&now).bind(&now).execute(f.env.app.db()).await.unwrap();
+        sqlx::query("INSERT INTO schedule_occurrences (id,schedule_id,source,scheduled_for,generation,bot_id,prompt,status,turn_id,conversation_id,created_at,updated_at) VALUES (?,?,'scheduled',?,1,?,'ping','queued',?,?,?,?)")
+            .bind(db::ulid()).bind(&id).bind(&now).bind(&f.bot_id).bind(&f.turn_id).bind(&f.conv).bind(&now).bind(&now).execute(f.env.app.db()).await.unwrap();
+        id
+    }
+
+    #[tokio::test]
+    async fn a_cancelled_schedule_is_retracted_before_flush_and_frees_the_user_queue() {
+        for change in ["enabled=0", "deleted_at='2026-10-13T00:00:00.000Z'", "generation=2"] {
+            let f = queued("test").await;
+            let id = link_schedule(&f).await;
+            sqlx::query(&format!("UPDATE schedules SET {change} WHERE id=?")).bind(&id).execute(f.env.app.db()).await.unwrap();
+            let lock = f.env.app.bot_lock(&f.bot_id).await;
+            let _guard = lock.lock().await;
+            flush_queued_locked(&f.env.app, &f.bot_id).await.unwrap();
+            assert_eq!(turn(&f.env.app, &f.turn_id).await.status, "failed");
+            assert!(db::queued_turn(f.env.app.db(), &f.conv).await.unwrap().is_none());
+            let status: String = sqlx::query_scalar("SELECT status FROM schedule_occurrences WHERE turn_id=?")
+                .bind(&f.turn_id).fetch_one(f.env.app.db()).await.unwrap();
+            assert_eq!(status, "cancelled");
+            assert!(!f.env.herdr.methods().iter().any(|m| m == "agent.prompt" || m == "pane.send_text"));
+        }
+    }
+
+    #[tokio::test]
+    async fn a_schedule_claim_checks_cancellation_atomically_and_keeps_active_occurrences_eligible() {
+        let f = queued("test").await;
+        let id = link_schedule(&f).await;
+        sqlx::query("UPDATE schedules SET enabled=0 WHERE id=?").bind(&id).execute(f.env.app.db()).await.unwrap();
+        let mut conn = f.env.app.db().acquire().await.unwrap();
+        assert!(matches!(super::super::turn_controller::claim_queued(&mut conn, &f.turn_id, &f.run_id).await.unwrap(), super::super::turn_controller::Outcome::Fenced(_)));
+        assert_eq!(turn(&f.env.app, &f.turn_id).await.status, "queued");
+        sqlx::query("UPDATE schedules SET enabled=1 WHERE id=?").bind(&id).execute(&mut *conn).await.unwrap();
+        assert_eq!(super::super::turn_controller::claim_queued(&mut conn, &f.turn_id, &f.run_id).await.unwrap(), super::super::turn_controller::Outcome::Applied);
+    }
+
+    #[tokio::test]
+    async fn unreadable_schedule_state_does_not_deliver_or_discard_a_queued_prompt() {
+        let f = queued("test").await;
+        link_schedule(&f).await;
+        sqlx::query("ALTER TABLE schedule_occurrences RENAME TO unavailable_occurrences").execute(f.env.app.db()).await.unwrap();
+        assert!(flush_queued_locked(&f.env.app, &f.bot_id).await.is_err());
+        assert_eq!(turn(&f.env.app, &f.turn_id).await.status, "queued");
+        assert!(!f.env.herdr.methods().iter().any(|m| m == "agent.prompt" || m == "pane.send_text"));
     }
 
     /// Running bot with one queued prompt. `session` other than `"test"` makes `client_for_run` fail

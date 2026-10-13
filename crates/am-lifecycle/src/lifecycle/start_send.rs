@@ -259,8 +259,27 @@ pub async fn start_for_waiting(app: &Arc<App>, bot_id: &str) {
 
 /// 成功 → 叫醒 flush（起來、閒下來就送）；失敗 → 留在佇列，`start_error` 寫原因。`mark` 在啟動做完時放掉。
 async fn start_with(app: &impl LcHost, bot_id: &str, mark: Starting) {
+    // The kick may outlive a withdrawal/stop. Recheck at actual start admission under the
+    // same lock as cancellation, then use the locked wake/start surfaces below.
+    let bot_guard = crate::lifecycle::s6_ports::StartServices::lock_bot_for_start(app, bot_id).await;
+    let waiting = sqlx::query_scalar::<_, bool>(&format!(
+        "SELECT EXISTS (SELECT 1 FROM turns t JOIN conversations c ON c.id=t.conversation_id
+          WHERE c.bot_id=? AND t.status='queued' AND t.awaits_start=1 AND {})",
+        super::queue::scheduled_turn_allowed_sql("t.id")
+    ))
+    .bind(bot_id)
+    .fetch_one(app.db())
+    .await;
+    match waiting {
+        Ok(true) => {}
+        Ok(false) => return,
+        Err(error) => {
+            tracing::warn!(bot = bot_id, error = %error, "cannot verify a waiting prompt; refusing queued start");
+            return;
+        }
+    }
     set_start_error(app, bot_id, None, false).await;
-    let res = match app.idle_sleep_wake(bot_id, "有一則訊息等著它起來送").await {
+    let res = match app.idle_sleep_wake_locked(bot_id, "有一則訊息等著它起來送").await {
         Ok(true) => Started::Yes,
         Ok(false) => match start_stopped(app, bot_id).await {
             Ok(_) => Started::Yes,
@@ -280,6 +299,7 @@ async fn start_with(app: &impl LcHost, bot_id: &str, mark: Starting) {
             _ => Started::Failed(format!("{e:#}")),
         },
     };
+    drop(bot_guard);
     drop(mark);
     match res {
         Started::Yes => {
@@ -303,7 +323,7 @@ async fn start_stopped(app: &impl LcHost, bot_id: &str) -> LcResult<String> {
     } else {
         StartOpts { resume_native: true, ..Default::default() }
     };
-    start_bot_with(app, bot_id, opts).await
+    start_bot_locked_with(app, bot_id, opts).await
 }
 
 enum Started {
@@ -522,10 +542,11 @@ const RESUME_RETRY: std::time::Duration = std::time::Duration::from_secs(30);
 
 /// `only`：重看時只看上一次讀不到主機的那幾顆。
 async fn resume_waiting(app: &impl LcHost, host: &str, only: Option<HashSet<String>>) -> usize {
-    let bots: Vec<String> = match sqlx::query_scalar(
+    let bots: Vec<String> = match sqlx::query_scalar(&format!(
         "SELECT DISTINCT c.bot_id FROM turns t JOIN conversations c ON c.id = t.conversation_id JOIN bots b ON b.id = c.bot_id
           WHERE t.status = 'queued' AND t.awaits_start = 1 AND b.deleted_at IS NULL
-            AND NOT EXISTS (SELECT 1 FROM runs r WHERE r.bot_id = c.bot_id AND r.state IN ('starting','running','stopping'))",
+            AND NOT EXISTS (SELECT 1 FROM runs r WHERE r.bot_id = c.bot_id AND r.state IN ('starting','running','stopping'))
+            AND {}", super::queue::scheduled_turn_allowed_sql("t.id")),
     )
     .fetch_all(app.db())
     .await
@@ -576,6 +597,34 @@ mod tests {
     use crate::testing as tt;
 
     const TEXT: &str = "起來後幫我跑一次測試";
+
+    #[tokio::test]
+    async fn a_delayed_kick_after_withdrawal_does_not_restart_the_stopped_bot() {
+        let e = tt::env().await;
+        let bot = tt::claude_bot(&e.app, &e.project_id, "withdraw-before-kick").await;
+        let out = prompt_starting(&e.app, &bot.id, TEXT, "withdraw-before-kick", &[], RelaySrc::default()).await.unwrap();
+        revoke_queued_turn(&e.app, &out.turn_id, "使用者已撤回").await.unwrap();
+        start_for_waiting(&e.app, &bot.id).await;
+        assert_eq!(started(&e), 0);
+        assert!(db::active_run(&e.app.db, &bot.id).await.unwrap().is_none());
+    }
+
+    #[tokio::test]
+    async fn a_disabled_schedule_does_not_wake_its_bot_on_a_delayed_kick_or_boot() {
+        let e = tt::env().await;
+        let bot = tt::claude_bot(&e.app, &e.project_id, "disabled-before-kick").await;
+        let out = prompt_starting(&e.app, &bot.id, TEXT, "disabled-before-kick", &[], RelaySrc::default()).await.unwrap();
+        let id = db::ulid();
+        let now = db::now();
+        sqlx::query("INSERT INTO schedules (id,project_id,bot_id,name,prompt,mode,tz,spec_json,enabled,created_at,updated_at) VALUES (?,?,?,'schedule',?,'once','UTC','{}',0,?,?)")
+            .bind(&id).bind(&e.project_id).bind(&bot.id).bind(TEXT).bind(&now).bind(&now).execute(&e.app.db).await.unwrap();
+        sqlx::query("INSERT INTO schedule_occurrences (id,schedule_id,source,scheduled_for,generation,bot_id,prompt,status,turn_id,created_at,updated_at) VALUES (?,?,'scheduled',?,1,?,?,'queued',?,?,?)")
+            .bind(db::ulid()).bind(&id).bind(&now).bind(&bot.id).bind(TEXT).bind(&out.turn_id).bind(&now).bind(&now).execute(&e.app.db).await.unwrap();
+        start_for_waiting(&e.app, &bot.id).await;
+        assert_eq!(resume_after_boot(&e.app, LOCAL_HOST).await, 0);
+        assert_eq!(started(&e), 0);
+        assert!(db::active_run(&e.app.db, &bot.id).await.unwrap().is_none());
+    }
 
     async fn turn_of(app: &Arc<App>, crid: &str) -> db::Turn {
         sqlx::query_as::<_, db::Turn>("SELECT * FROM turns WHERE client_request_id=?").bind(crid).fetch_one(&app.db).await.unwrap()

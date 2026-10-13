@@ -362,6 +362,16 @@ A 組與 `git/push` 標「待裁示」的原因：這幾支唯一的呼叫端是
 | POST | `/relay/spawn/finish` | Bot per-bot `X-AM-Bot-Token`；body 身分／permit 需和驗證憑證一致 |
 | PUT | `/api/build/remote` | User-only；一般 Bot → 403 `user_only`；已登記 AGM 角色略過共用 fence，仍受既有路由／資源權限限制 |
 | PUT | `/api/drafts/{key}` | User-only；Bot 與 AGM role 均 → 403 `user_only`；Service 依明列 path scope（本路徑未授權） |
+| GET | `/api/projects/{id}/schedules` | User-only；Bot 與 AGM role 均 → 403 `user_only`；Service 依明列 path scope（本路徑未授權） |
+| HEAD | `/api/projects/{id}/schedules` | User-only；Bot 與 AGM role 均 → 403 `user_only`；Service 依明列 path scope（本路徑未授權） |
+| POST | `/api/projects/{id}/schedules` | User-only；Bot 與 AGM role 均 → 403 `user_only`；Service 依明列 path scope（本路徑未授權） |
+| GET | `/api/schedules/{id}` | User-only；Bot 與 AGM role 均 → 403 `user_only`；Service 依明列 path scope（本路徑未授權） |
+| HEAD | `/api/schedules/{id}` | User-only；Bot 與 AGM role 均 → 403 `user_only`；Service 依明列 path scope（本路徑未授權） |
+| PATCH | `/api/schedules/{id}` | User-only；Bot 與 AGM role 均 → 403 `user_only`；Service 依明列 path scope（本路徑未授權） |
+| DELETE | `/api/schedules/{id}` | User-only；Bot 與 AGM role 均 → 403 `user_only`；Service 依明列 path scope（本路徑未授權） |
+| POST | `/api/schedules/{id}/run` | User-only；Bot 與 AGM role 均 → 403 `user_only`；Service 依明列 path scope（本路徑未授權） |
+| GET | `/api/schedules/{id}/history` | User-only；Bot 與 AGM role 均 → 403 `user_only`；Service 依明列 path scope（本路徑未授權） |
+| HEAD | `/api/schedules/{id}/history` | User-only；Bot 與 AGM role 均 → 403 `user_only`；Service 依明列 path scope（本路徑未授權） |
 | PUT | `/api/identities/{name}/disabled` | User-only；一般 Bot → 403 `user_only`；已登記 AGM 角色略過共用 fence，仍受既有路由／資源權限限制 |
 | PUT | `/api/judge/settings` | User-only；一般 Bot → 403 `user_only`；已登記 AGM 角色略過共用 fence，仍受既有路由／資源權限限制 |
 | PUT | `/api/supervisor/handoff` | User 或 AGM 角色 Bot；一般 Bot 403 `role_required` |
@@ -949,6 +959,8 @@ UI 標籤：`hook` 不標；`terminal_fallback` 或 `incomplete = 1` 標「終�
 | `pending_question_hint` | `{"bot_id","run_id","tool_use_id"}`：Jev 對這顆 bot 正在等的 `AskUserQuestion` 的選項建議答案落帳了（issue #1475）；網頁收到就重讀 `GET /api/bots/{id}/pending-question` 的 `jev_options`。只在答案可用時發（含分數接近、偏低而 `suggested:null`）；問失敗、沒開、沒問不發 |
 | `panes_changed` | `{"host"}`：這台主機的 `panes` 表（側欄「其他 pane」的來源）真的變了——掃描、用途回報、adopt、關閉、GC 之後比對指紋，沒變不發；前端收到就重抓 `GET /api/panes` |
 | `draft_updated` | `{"key","text","rev","client_id","updated_at"}`：輸入框草稿被寫了（`PUT /api/drafts/{key}`），`text:""`＝刪除（含 bot／專案被刪）；見「輸入框草稿」 |
+| `schedules_changed` | `{"project_id","id"}`：專案排程或它的 occurrence 狀態變了（建立、編輯、停用、排進佇列、終態）。只帶 id，網頁自己重抓，prompt 不進全域 state。 |
+| `schedule_notice` | `{"project_id","schedule_id","schedule_name","occurrence_id","status","error"}`：排程終態且依 `notify` 該通知（`failure`＝failed／unknown；`all`＝另加 done）。每筆終態只推一次（`notified` 去重）。 |
 | `preview_changed` | `{"bot_id", "status":"off"\|"starting"\|"running"\|"failed", "port", "source"}`（SPEC §6.12） |
 | `daemon_status` | `{"herdr_connected", "hosts": {"<name>": {"connected","error"?,"disconnected_since"}}}` |
 | `host_changed` | `{"name","connected","error"?,"disconnected_since","herdr","tools"?,"identities"?,"shell_identities"?,"tools_checked_at"?}`（`herdr` 見 §12.6b；有偵測快取時一併帶上） |
@@ -3009,3 +3021,27 @@ payload `{mission_id, project_id, text, message, action, next, flow, idle_since,
 ### OB 本機 CLI（網頁 GPT）
 
 OB 不新增 daemon HTTP endpoint；`python3 scripts/ob.py ask --project-id <id> --request-id <stable-id> "問題"` 透過既有 `GET /api/supervisor/state` 核對 project ID，排入本機 SQLite 佇列，由單一 Sonnet-low worker 操作專案固定 ChatGPT 對話。`status <id>` 回 `{id,project_id,request_id,status,answer,url,error,...}`；只有 `done` 表示網頁原文已保存。`waiting_quota` 留待恢復、不切回 Fable；`unknown` 用 `collect` 對帳，不盲目重送。`recover` 回 `{worker_running,recovered[]}`：僅在 worker lock 可取得時把孤立的 `running` 轉成 `unknown`；不重新送出。`status` 也會執行此恢復，無 id 的回應附 `recovered[]`。完整狀態、安裝與舊 label 登錄轉 ID 的明確綁定方式見 [OB 操作文件](CHATGPT-CONSULT.md)。
+
+### 專案排程（User-only）
+
+排程是「到時間就排進既有 Bot 佇列」的工作；只建立、不立即執行（除非按「立即執行」）。實作見 `daemon/src/schedules/`。
+
+| 方法 | 路徑 | 說明 |
+|---|---|---|
+| GET | `/api/projects/{id}/schedules` | 未軟刪的排程；每筆帶 `open`（未結束的 occurrence，含 `turn_status`／`turn_delivery`／`waiting_reason`） |
+| POST | `/api/projects/{id}/schedules` | 建立。body：`client_request_id`（必填，1–128 個 `[A-Za-z0-9._:-]`）、`name`、`prompt`、`bot_id`、`tz`（IANA）、`spec`（見下）、`notify`（`failure`／`all`／`none`，預設 `failure`）。同專案同 key 同內容回原筆；同 key 不同內容 → 409 `client_request_id_reused` |
+| GET | `/api/schedules/{id}` | 排程、`open`、`recent`（最近 10 筆，含 turn 狀態） |
+| PATCH | `/api/schedules/{id}` | 部分更新（`name`、`prompt`、`bot_id`、`tz`、`spec`、`notify`、`enabled`）。內容、Bot、時間或停用時：同一個 bot 鎖與交易內撤回尚未送出的排隊、升 generation；已送出的回合照跑。換 Bot 時有未結束執行 → 409 `schedule_open` |
+| DELETE | `/api/schedules/{id}` | 軟刪；同樣撤回未送出的排隊 |
+| POST | `/api/schedules/{id}/run` | 手動執行。body 可帶 `client_request_id`；已有未結束的 occurrence 就回那一筆；停用中 → 409 |
+| GET | `/api/schedules/{id}/history?limit=&offset=` | 分頁，`limit` 1–100（預設 20），`offset` ≥ 0 |
+
+`spec`：`{"mode":"once","at":"YYYY-MM-DDTHH:MM"}`（本地時間，不存在的 DST 時間拒絕，重複取較早）、`{"mode":"interval","every_secs":N}`（60 秒到一年，以建立時為錨點）、`{"mode":"daily","time":"HH:MM"}`、`{"mode":"weekly","time":"HH:MM","weekdays":[0..6]}`（0＝週一）。不做任意 cron。
+
+Bot 資格：同專案、`managed_by='user'`、非 child、非分享、非受限，專案未刪未移交。
+
+WS 事件（耐久、只帶 id，網頁自己重抓）：
+- `schedules_changed {project_id, id}`：排程或 occurrence 的任何狀態變動（建立、編輯、停用、排進佇列、終態）。
+- `schedule_notice {project_id, schedule_id, occurrence_id, status, error}`：終態且依 `notify` 該通知（`failure`＝失敗或結果不明；`all`＝另加完成）。每筆終態只推一次（`notified` 去重）。
+
+`occurrence.status`：`pending`（等待，`waiting_reason`：`bot_busy`／`stopping`）→ `queued`（已綁定 turn，等它進終態）→ `done`／`failed`／`cancelled`／`unknown`。`unknown`＝綁定的 turn 送出結果不明（delivery unknown），同交易把排程暫停（`enabled=false`），不會自動重跑；使用者到 Bot 對話確認後明確重新啟用，才會排未來的執行。
