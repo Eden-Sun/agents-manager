@@ -3293,15 +3293,19 @@ mod tests {
     #[tokio::test]
     async fn inbox_lookups_by_state_walk_the_supervisor_state_index() {
         let p = pool().await;
+        // 歸屬的定義只有 `roles::OWNER` 一份（#504 的守門測試不准再抄一份），這裡照 `exhausted_inbox` 的寫法組出來。
+        let owner = super::super::roles::OWNER;
         for (name, sql) in [
             (
                 "delivered_inbox",
-                "SELECT * FROM supervisor_inbox WHERE supervisor_id=? AND state='delivered' ORDER BY COALESCE(delivered_at, updated_at) ASC",
+                "SELECT * FROM supervisor_inbox WHERE supervisor_id=? AND state='delivered' ORDER BY COALESCE(delivered_at, updated_at) ASC".to_string(),
             ),
             (
                 "exhausted_inbox",
-                "SELECT COUNT(*) FROM supervisor_inbox WHERE supervisor_id=? AND state='pending' AND notify_attempts >= ? \
-                 AND COALESCE(COALESCE(claimed_by, role), 'patrol')='patrol'",
+                format!(
+                    "SELECT COUNT(*) FROM supervisor_inbox WHERE supervisor_id=? AND state='pending' AND notify_attempts >= ? \
+                     AND COALESCE({owner}, 'patrol')='patrol'"
+                ),
             ),
         ] {
             let plan: Vec<(i64, i64, i64, String)> = sqlx::query_as(&format!("EXPLAIN QUERY PLAN {sql}")).fetch_all(&p).await.unwrap();
