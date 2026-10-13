@@ -415,6 +415,8 @@ User principal 保留完整快照。Bot principal（包括 AGM 角色 bot）只�
 daemon 重啟前開始、正在接手確認的那筆也在，`recovered:true`、`phase:"recovering"`。同一個理由：進度只走 WS，
 `cli_update_done` 收不到時前端拿它對帳——手上那一次不在清單裡就清掉（header 的 chip 變回可以按）；欄位不存在（舊 daemon）不動。
 
+`codex_reset`：第三方 [資料：codex-reset.com](https://codex-reset.com/) 的全域公告快照，首次成功讀取前為 `null`；舊 daemon 可省略。格式 `{source,checked_at,source_updated_at,last_reset_at,upcoming,latest,notice}`，時間皆 RFC3339；`latest`／`notice` 為 `{id,at,text,url}` 或 `null`。`upcoming` 只表示 forecast 的非空 `official_signal`，不由機率推導；個人額度與重置時間不因此修改。`notice` 保留最近一批新消息的最新一則，客戶端依 `id` 去重。daemon 啟動即讀取，其後每 30 分鐘刷新；失敗保留前次快照，客戶端以 `checked_at` 判斷過期。
+
 `herdr_updates`：進行中的 herdr 一鍵更新（§12.7b）`[{"update_id","host","target_version","phase","started_at"}]`，沒有就是 `[]`。只在記憶體：
 daemon 重啟後就是空的（那次不會再推 `herdr_update_done`，前端照樣清掉手上那一筆）。
 
@@ -951,6 +953,7 @@ UI 標籤：`hook` 不標；`terminal_fallback` 或 `incomplete = 1` 標「終�
 | `daemon_status` | `{"herdr_connected", "hosts": {"<name>": {"connected","error"?,"disconnected_since"}}}` |
 | `host_changed` | `{"name","connected","error"?,"disconnected_since","herdr","tools"?,"identities"?,"shell_identities"?,"tools_checked_at"?}`（`herdr` 見 §12.6b；有偵測快取時一併帶上） |
 | `quota_updated` | 見 §12.5 |
+| `codex_reset_updated` | 與 §2 `codex_reset` 同格式；成功刷新後推送，通知依 `notice.id` 去重；資料來源 https://codex-reset.com/ |
 | `mem_updated` | 與 `GET /api/mem` 同形 |
 | `bots_restart_progress` / `bots_restart_done` | 見 §10.3a |
 | `cli_update_progress` / `cli_update_done` | 見 §12.7a |

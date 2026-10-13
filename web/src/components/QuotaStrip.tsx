@@ -1,3 +1,5 @@
+import { CodexResetHint } from './CodexResetHint'
+import { useCodexReset } from '../store/codexReset'
 import { QUOTA_FIT_START, nextQuotaFit } from '../lib/quotaLayout'
 import type { QuotaFitState } from '../lib/quotaLayout'
 import { Fragment, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
@@ -868,6 +870,7 @@ export function QuotaStrip({
   host?: string
 }) {
   const quota = useStore((s) => s.quota)
+  const hasResetInfo = useCodexReset((s) => s.info !== null)
   const configured = useStore((s) => s.identities)
   // 身份清單跟著該主機（SPEC §16）：遠端 cc1 可能是不同帳號。
   const idStatus = useStore((s) => identityStatusOfHost(s, host))
@@ -920,7 +923,7 @@ export function QuotaStrip({
     )
   }, [quota, configured, idStatus, host, disabledIdentities])
 
-  const fitKey = `${host}|${ordered.map(entryReactKey).join(',')}`
+  const fitKey = `${host}|${ordered.map(entryReactKey).join(',')}|reset:${hasResetInfo}`
   const fit = fitState.key === fitKey ? fitState.s : QUOTA_FIT_START
 
   // layout effect：首次繪製前量到並收斂（每換一階段就同步重畫、再量），不會先閃一次全部攤開或疊字。
@@ -964,6 +967,7 @@ export function QuotaStrip({
       <div className={`quota-open${collapsed ? ' collapsed' : ''}`}>
         {/* 更新 chip 放最左邊，避免夾在兩個 kind 間被誤認（2026-09-11 使用者）。手機搬到標題列 ★ 左邊（ChatPanel，2026-09-19 使用者）。 */}
         {phone ? null : <UpdateQuotaChip />}
+        {shown.some((entry) => entry.kind === 'codex') ? <CodexResetHint /> : null}
         {/* 不掛主機名牌（2026-09-29 使用者）：標題列左邊的 `@host` 已經說了是哪台；tooltip／popover 標題仍寫主機。 */}
         {shown.map((entry) => {
           let focused = false

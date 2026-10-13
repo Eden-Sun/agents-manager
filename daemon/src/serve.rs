@@ -281,6 +281,7 @@ pub async fn serve(config_path: Option<PathBuf>, dev_watch_all_panes: bool) -> R
     // #406：回收區不能只在開機收，常駐好幾天會一路長。
     bot_trash::spawn_gc(app.clone());
     crate::runners::quota::spawn_codex_poller(app.clone());
+    crate::codex_reset::spawn(app.clone());
     memstat::spawn_poller(app.clone());
     crate::runners::quota_claude::spawn_claude_poller(app.clone());
     runners::quota_grok::spawn_grok_poller(app.clone());
