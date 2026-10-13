@@ -15,8 +15,9 @@ export function splitCodexTerminalFooter(text: string): { body: string; footer: 
     const warning = /^(?:\? for shortcuts\s+)?⚠ (\d+) warnings? · f2 to view$/.exec(row)
     if (warning) {
       warnings = Number(warning[1])
+      found = true
     } else if (row === '? for shortcuts') {
-      // Keyboard help is chrome, not another status field.
+      // Keyboard help is chrome, not another status field: alone it is not a footer.
     } else if (/^[a-z0-9][\w.-]*-[\w.-]+(?:\s+[^·]+)?\s*·\s*[~/]/i.test(row)) {
       // The warning can sit on the model row itself, set apart by 2+ spaces (#1671).
       const tail = /\s{2,}⚠ (\d+) warnings? · f2 to view$/.exec(row)
@@ -27,7 +28,6 @@ export function splitCodexTerminalFooter(text: string): { body: string; footer: 
     } else {
       break
     }
-    found = true
   }
   return found ? { body: text, footer: { modelLine, warnings } } : { body: text, footer: null }
 }

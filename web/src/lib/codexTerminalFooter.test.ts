@@ -45,3 +45,9 @@ test('#1671 模型列右側 warning：複數與沒有 warning', () => {
   const none = splitCodexTerminalFooter(`› Ask Codex to do anything\n\n  ${model}\n`)
   assert.deepEqual(none.footer, { modelLine: model, warnings: null })
 })
+
+test('只有 `? for shortcuts` 這行（沒有模型列、沒有 warning）不算 footer：它是 chrome，不是狀態欄位', () => {
+  // 空 footer 會讓 StatusLineBar 畫出一條空的狀態列、並蓋掉 status_line 的文字。
+  const text = '• 正文\n  ? for shortcuts'
+  assert.deepEqual(splitCodexTerminalFooter(text), { body: text, footer: null })
+})
