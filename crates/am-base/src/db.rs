@@ -393,7 +393,7 @@ pub const SCHEMA_HISTORY: &[(i64, &str)] = &[
     // issues #1493/#1494: persist and bound pending late-delivery proof baselines.
     (59, "1d4bdc902d82f33b"),
     // issue #1653：`turns_run_time`（以 run 找回合）與 `supervisor_inbox_sup_state`（收件匣依 state 篩），不再掃 messages／讀整張收件匣。
-    (60, "FINGERPRINT_TBD"),
+    (60, "174c28815b653271"),
 ];
 pub const SCHEMA_VERSION: i64 = SCHEMA_HISTORY[SCHEMA_HISTORY.len() - 1].0;
 
