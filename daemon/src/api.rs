@@ -2741,6 +2741,14 @@ async fn patch_unprojected_bot(app: &Arc<App>, id: &str, b: &PatchBot, effort: &
     if let Some(a) = b.auto_approve {
         push("auto_approve", Some((a as i64).to_string()));
     }
+    if let Some(pin) = b.is_primary {
+        if pin {
+            sets.push("is_primary = 1".into());
+            sets.push("primary_position = CASE WHEN primary_position = 0 THEN (SELECT COALESCE(MAX(primary_position), 0) + 1 FROM bots) ELSE primary_position END".into());
+        } else {
+            sets.push("is_primary = 0".into());
+        }
+    }
     if sets.is_empty() {
         return Ok(());
     }
@@ -2862,16 +2870,22 @@ async fn patch_bot(
         }
     }
     // child bot 不在 config.toml，cfg.update 只會 404（2026-09-09 使用者：child 身分改不了）→ 直接改 DB。
-    if let Some(pin) = b.is_primary {
-        let n = crate::primary_order::set_pinned(&app.db, &id, pin).await.map_err(any_err)?;
-        if n == 0 {
-            return Err(LcError::NotFound("bot".into()));
+    // child 的 primary 與其他欄位都在 bots 表，交給同一條 UPDATE，避免失敗時留下半套狀態。
+    let managed_by = db::bot(&app.db, &id).await.map_err(any_err)?.map(|x| x.managed_by).unwrap_or_default();
+    if managed_by == "user" {
+        if let Some(pin) = b.is_primary {
+            let n = crate::primary_order::set_pinned(&app.db, &id, pin).await.map_err(any_err)?;
+            if n == 0 {
+                return Err(LcError::NotFound("bot".into()));
+            }
         }
     }
     let touches_config =
         restart_relevant || b.name.is_some() || b.autostart.is_some();
-    let managed_by = db::bot(&app.db, &id).await.map_err(any_err)?.map(|x| x.managed_by).unwrap_or_default();
     if !touches_config {
+        if managed_by != "user" && b.is_primary.is_some() {
+            patch_unprojected_bot(&app, &id, &b, &effort).await?;
+        }
         app.emit("bot_changed", json!({"bot_id": id})).await;
         return Ok((StatusCode::OK, Json(json!({"needs_restart": false}))).into_response());
     }
@@ -14495,6 +14509,7 @@ mod ct_eq_tests {
 mod mixed_store_tests {
     use super::*;
     use crate::testing::{env, Env};
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
     async fn seed_project(e: &Env) {
         let (pid, repo) = (e.project_id.clone(), e.repo.to_string_lossy().to_string());
@@ -14524,6 +14539,93 @@ mod mixed_store_tests {
 
     async fn model_of(e: &Env, id: &str) -> Option<String> {
         e.app.cfg.get().await.projects[0].bots.iter().find(|b| b.id.as_deref() == Some(id)).unwrap().model.clone()
+    }
+
+    async fn child(e: &Env, name: &str) -> String {
+        let bot = crate::testing::claude_bot(&e.app, &e.project_id, name).await;
+        sqlx::query("UPDATE bots SET managed_by = 'child' WHERE id = ?")
+            .bind(&bot.id)
+            .execute(&e.app.db)
+            .await
+            .unwrap();
+        bot.id
+    }
+
+    async fn patch_http(e: &Env, id: &str, body: Value) -> String {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let app = super::router(e.app.clone());
+        let server = tokio::spawn(async move {
+            axum::serve(listener, app.into_make_service_with_connect_info::<std::net::SocketAddr>()).await
+        });
+        let payload = serde_json::to_string(&body).unwrap();
+        let request = format!(
+            "PATCH /api/bots/{id} HTTP/1.1\r\nHost: 127.0.0.1\r\nX-AM-Token: {}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{payload}",
+            e.app.ui_token,
+            payload.len(),
+        );
+        let mut connection = tokio::net::TcpStream::connect(addr).await.unwrap();
+        connection.write_all(request.as_bytes()).await.unwrap();
+        let mut response = String::new();
+        connection.read_to_string(&mut response).await.unwrap();
+        server.abort();
+        response
+    }
+
+    async fn child_fields(e: &Env, id: &str) -> (i64, i64, Option<String>) {
+        sqlx::query_as("SELECT is_primary, primary_position, model FROM bots WHERE id = ?")
+            .bind(id)
+            .fetch_one(&e.app.db)
+            .await
+            .unwrap()
+    }
+
+    #[tokio::test]
+    async fn child_mixed_patch_failure_leaves_pin_and_model_unchanged_and_emits_no_change_event() {
+        let e = env().await;
+        let id = child(&e, "atomic-failure").await;
+        let before = child_fields(&e, &id).await;
+        assert_eq!(before.0, 0);
+        assert_eq!(before.1, 0);
+        sqlx::query(
+            "CREATE TRIGGER fail_child_model_patch BEFORE UPDATE OF model ON bots
+             BEGIN SELECT RAISE(ABORT, 'injected model write failure'); END",
+        )
+        .execute(&e.app.db)
+        .await
+        .unwrap();
+        let mut events = e.app.subscribe();
+
+        let response = patch_http(&e, &id, json!({"primary": true, "model": "opus"})).await;
+        assert!(response.starts_with("HTTP/1.1 502"), "失敗的 PATCH 要回 upstream 錯誤：{response}");
+        assert_eq!(child_fields(&e, &id).await, before, "同一條 UPDATE 失敗時所有欄位都不變");
+        while let Ok(event) = events.try_recv() {
+            assert!(
+                event.kind != "bot_changed" || event.data["bot_id"] != id,
+                "失敗的 PATCH 不能送出 bot_changed：{event:?}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn child_mixed_patch_applies_pin_and_model_and_single_field_patches_still_work() {
+        let e = env().await;
+        let id = child(&e, "atomic-success").await;
+
+        let response = patch_http(&e, &id, json!({"primary": true, "model": "opus"})).await;
+        assert!(response.starts_with("HTTP/1.1 200"), "有效的 child 混送要成功：{response}");
+        let (pinned, position, model) = child_fields(&e, &id).await;
+        assert_eq!((pinned, position), (1, 1), "primary 與位置要一併生效");
+        assert_eq!(model.as_deref(), Some("claude-opus-5-5"), "model 要一併生效");
+
+        let response = patch_http(&e, &id, json!({"primary": false})).await;
+        assert!(response.starts_with("HTTP/1.1 200"), "child 單獨取消釘選要成功：{response}");
+        assert_eq!(child_fields(&e, &id).await.0, 0);
+        assert_eq!(child_fields(&e, &id).await.1, 1, "取消釘選保留原位置");
+
+        let response = patch_http(&e, &id, json!({"model": "sonnet"})).await;
+        assert!(response.starts_with("HTTP/1.1 200"), "child 單獨改 model 要成功：{response}");
+        assert_eq!(child_fields(&e, &id).await.2.as_deref(), Some("sonnet"));
     }
 
     #[tokio::test]
