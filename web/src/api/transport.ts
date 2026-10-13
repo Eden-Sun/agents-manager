@@ -284,20 +284,36 @@ export class HttpTransport implements Transport {
   }
 
   async blobUrl(path: string): Promise<string> {
-    const send = (tok: string) => fetch(`/api${path}`, { headers: tok ? { 'X-AM-Token': tok } : {} })
-    const res = await this.withFreshToken(send, async (r) => r)
-    if (!res.ok) {
-      // daemon 講的原因在 body 裡（`{error, reason, …}`）。以前只拿 `res.statusText`，畫面上就只剩
-      // 「Not Found」／「Conflict」（HTTP/2 連 statusText 都是空字串），連 `file_too_large` 帶的
-      // size／max 也一起丟掉（issue #547）。
-      const parsed = parseText(res.status, await res.text().catch(() => ''))
-      const body: ApiErrorBody =
-        parsed && typeof parsed === 'object'
-          ? (parsed as ApiErrorBody)
-          : { reason: plainReason(parsed) || res.statusText }
-      throw new ApiError(res.status, body, `GET ${path} failed (${res.status})`)
+    // 同 `request` 的 GET：掛住不回就要有期限（issue #1731）。否則 promise 永遠 pending，呼叫端還會把它快取住，之後每次都是同一個轉圈。
+    const timers = this.opts.timers ?? realTimers
+    const limitMs = this.opts.getTimeoutMs ?? GET_TIMEOUT_MS
+    const ctl = new AbortController()
+    let timedOut = false
+    const timeoutId = timers.setTimeout(() => {
+      timedOut = true
+      ctl.abort()
+    }, limitMs)
+    try {
+      const send = (tok: string) => fetch(`/api${path}`, { headers: tok ? { 'X-AM-Token': tok } : {}, signal: ctl.signal })
+      const res = await untilAborted(this.withFreshToken(send, async (r) => r, ctl.signal), ctl.signal)
+      if (!res.ok) {
+        // daemon 講的原因在 body 裡（`{error, reason, …}`）。以前只拿 `res.statusText`，畫面上就只剩
+        // 「Not Found」／「Conflict」（HTTP/2 連 statusText 都是空字串），連 `file_too_large` 帶的
+        // size／max 也一起丟掉（issue #547）。
+        const parsed = parseText(res.status, await untilAborted(res.text().catch(() => ''), ctl.signal))
+        const body: ApiErrorBody =
+          parsed && typeof parsed === 'object'
+            ? (parsed as ApiErrorBody)
+            : { reason: plainReason(parsed) || res.statusText }
+        throw new ApiError(res.status, body, `GET ${path} failed (${res.status})`)
+      }
+      return URL.createObjectURL(await untilAborted(res.blob(), ctl.signal))
+    } catch (e) {
+      if (timedOut) throw new Error(`GET ${path} 逾時：${limitMs / 1000} 秒沒有回應`)
+      throw e
+    } finally {
+      timers.clearTimeout(timeoutId)
     }
-    return URL.createObjectURL(await res.blob())
   }
 
   openSocket(handlers: SocketHandlers, liveness: LivenessDeps = realLivenessDeps): () => void {

@@ -228,3 +228,21 @@ test('呼叫端中止只放掉自己那一趟：共用的 token 更新還在，�
   assert.equal(f.sessionCalls(), 1)
   assert.equal(timers.pending(), 0)
 })
+
+/**
+ * blobUrl（附件縮圖、outbox 預覽、對話裡的本機圖）也是 GET：掛住不回就要有期限。否則那個 promise 永遠不結束，
+ * 而呼叫端把它快取住（`outboxPreviewCache`、`Attachments` 的 urlCache），之後每次滑過都是同一個轉圈，直到重整頁面。
+ */
+test('blobUrl 掛住不回：GET 有期限會逾時丟錯，計時器清掉', async () => {
+  const timers = fakeTimers()
+  const t = new HttpTransport({ timers })
+  globalThis.fetch = ((_: string, init?: RequestInit) =>
+    new Promise((_resolve, reject) => {
+      init?.signal?.addEventListener('abort', () => reject(new DOMException('aborted', 'AbortError')))
+    })) as unknown as typeof fetch
+  const pending = t.blobUrl('/attachments/a1')
+  timers.fireAll()
+  const out = await outcomeAfterTick(pending)
+  assert.ok(out instanceof Error && /逾時/.test(out.message), String(out))
+  assert.equal(timers.pending(), 0)
+})
