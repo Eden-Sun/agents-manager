@@ -32,7 +32,7 @@ pub fn create_private_truncate(path: &Path) -> std::io::Result<std::fs::File> {
     #[cfg(unix)]
     {
         use std::os::unix::fs::OpenOptionsExt as _;
-        o.mode(0o600);
+        o.mode(0o600).custom_flags(libc::O_NOFOLLOW);
     }
     o.open(path)
 }
@@ -45,7 +45,7 @@ pub fn append_private(path: &Path) -> std::io::Result<std::fs::File> {
     #[cfg(unix)]
     {
         use std::os::unix::fs::OpenOptionsExt as _;
-        o.mode(0o600);
+        o.mode(0o600).custom_flags(libc::O_NOFOLLOW);
     }
     o.open(path)
 }
