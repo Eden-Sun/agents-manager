@@ -3221,7 +3221,7 @@ label = "foo@m4p"
   本機同一組檔案同樣是 0700／0600（`private_files`）。
   安裝只在**啟動 bot** 時跑，所以換版當下還在跑的遠端 bot 另外靠**連上時掃一次**收緊
   （`remote_perms::spawn_tighten`，冪等）；drain 自己建的 `.replaying` 由 `claim_script` 的 `umask 077` 負責。
-  掃描每顆 bot 印 `AM_TIGHTENED`／`AM_TIGHTEN_FAILED`，失敗（ssh 掛掉或有 `chmod` 不成功）記 `warn!` 並
+  掃描每顆 bot 印 `AM_TIGHTENED`／`AM_TIGHTEN_FAILED`（`bots` 根目錄收不成時也會回報失敗），失敗（ssh 掛掉或有 `chmod` 不成功）記 `warn!` 並
   把那台記成欠著，每 5 分鐘補跑到成功為止——觸發時機正是 ssh 最不穩的時候，而一台不重連的主機不會有第二次機會（#500 複看）。
 
 #### 11.4.3 daemon 端：狀態事件 → 讀 spool → 重放
