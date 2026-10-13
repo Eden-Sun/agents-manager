@@ -29,10 +29,11 @@ const entries = new Map<string, Entry>()
 function begin(key: string, start: StartPreload): Entry {
   const controller = new AbortController()
   const entry: Entry = { job: Promise.resolve(null), controller, refs: 0, listeners: new Set(), last: null, drop: null }
+  // 丟例外也是失敗：收成 `null`，持有者與下面的「失敗不留表」才一致（issue #1718）。
   entry.job = start((done, total) => {
     entry.last = { done, total }
     for (const l of entry.listeners) l(done, total)
-  }, controller.signal)
+  }, controller.signal).catch(() => null)
   void entry.job.then((d) => {
     if (d === null && entries.get(key) === entry) entries.delete(key)
   })
