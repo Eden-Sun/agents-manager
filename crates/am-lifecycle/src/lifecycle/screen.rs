@@ -2890,3 +2890,18 @@ mod codex_warning_footer_tests {
         }
     }
 }
+
+#[cfg(test)]
+mod issue_1664_screenshot_tests {
+    use super::*;
+
+    #[test]
+    fn exact_screenshot_footer_is_not_a_reply() {
+        let screenshot = "› Ask Codex to do anything\n\nGPT-6-Astra high · ~/project/hermes-agents/projects/rt · Context 72% used · weekly 74% left\n  ? for shortcuts\n⚠ 1 warning · f2 to view";
+        assert_eq!(clean_screen("codex", screenshot), None);
+        assert_eq!(crate::lifecycle::poller::live_reply("codex", screenshot), None);
+        let reply = format!("› fix\n• 修復完成。\n\n{screenshot}");
+        assert_eq!(extract_reply("codex", &reply).as_deref(), Some("修復完成。"));
+        assert_eq!(crate::lifecycle::poller::live_reply("codex", &reply).as_deref(), Some("修復完成。"));
+    }
+}

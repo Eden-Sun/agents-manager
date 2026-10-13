@@ -78,3 +78,14 @@ test('舊版 spinner（`⠦ Thinking… 52s`，沒有括號）是雜訊，同 da
   assert.equal(cleanLiveText('⠦ Thinking… 52s'), null)
   assert.equal(cleanLiveText('好的，我來處理。\n⠦ Thinking… 52s'), '好的，我來處理。')
 })
+
+// issue #1664: exact screenshot shape, including the empty composer and weekly quota.
+test('issue 1664 screenshot chrome never becomes a live reply', () => {
+  const screenshot = `› Ask Codex to do anything
+
+GPT-6-Astra high · ~/project/hermes-agents/projects/rt · Context 72% used · weekly 74% left
+  ? for shortcuts
+⚠ 1 warning · f2 to view`
+  assert.equal(cleanLiveText(screenshot), null)
+  assert.equal(cleanLiveText(`修復完成。\n${screenshot}`), '修復完成。')
+})
