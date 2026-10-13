@@ -24,6 +24,13 @@ test('codex steer 成功（send_now: steered）顯示「已插入進行中的回
   assert.ok(!texts.some((t) => t.includes('claude') || t.includes('沒有插隊')), JSON.stringify(texts))
 })
 
+test('插隊按鈕的預覽截在 40 格時不留孤立代理（emoji 跨過第 40 個 UTF-16 單位）', () => {
+  const pending = `${'a'.repeat(39)}😀後面還有字`
+  const { title } = sendNowButton('claude', pending)!
+  assert.doesNotMatch(title, /[\uD800-\uDBFF](?![\uDC00-\uDFFF])|(?<![\uD800-\uDBFF])[\uDC00-\uDFFF]/, JSON.stringify(title))
+  assert.ok(title.endsWith(`${'a'.repeat(39)}😀…`), JSON.stringify(title))
+})
+
 test('claude 真的插隊（interrupted）或閒著（idle）不跳任何「沒插隊」說明', async () => {
   for (const sendNow of ['interrupted', 'idle']) {
     seed('claude')

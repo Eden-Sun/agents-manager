@@ -15,7 +15,9 @@ export interface SendNowButton {
 }
 
 export function sendNowButton(kind: string | null | undefined, pending: string): SendNowButton | null {
-  const preview = `${pending.slice(0, 40)}${pending.length > 40 ? '…' : ''}`
+  // 以 code point 計：截點不能落在 emoji 代理對中間（同 relayPreview）。
+  const chars = [...pending]
+  const preview = `${chars.slice(0, 40).join('')}${chars.length > 40 ? '…' : ''}`
   if (kind === 'claude') {
     return { label: '插隊', title: `打斷目前這一輪，改送這一句（需要 claude 2.1.275 以上）：${preview}` }
   }
