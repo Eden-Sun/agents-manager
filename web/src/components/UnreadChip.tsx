@@ -21,6 +21,7 @@ import type { Bot } from '../api/types'
 import { useMediaQuery } from '../hooks/useMediaQuery'
 import { clipAfterRows, layoutBoxes, lineBudget, moreTitle } from '../lib/chipOverflow'
 import { chipTracked } from '../lib/supervisorProject'
+import { requestBotToTop } from '../lib/scrollBot'
 import { loadPinGridRows, pinGridLayout, pinGridRowsNeeded, rowsFromDrag, savePinGridRows, sortPinned } from '../lib/pinnedOrder'
 import { useChipFlip } from './useChipFlip'
 import { useShallow } from 'zustand/react/shallow'
@@ -242,7 +243,10 @@ export function UnreadChip() {
       out.push({
         id: b.id,
         name: b.name,
-        go: () => selectBot(b.id),
+        go: () => {
+          selectBot(b.id)
+          if (pinned) requestBotToTop(b.id) // 主力晶片：側欄把那顆 bot 捲到頂端（#1676）
+        },
         position: b.primary_position,
         index: out.length,
         current,

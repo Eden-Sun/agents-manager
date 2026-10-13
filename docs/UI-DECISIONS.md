@@ -1000,6 +1000,10 @@ tooltip 寫最後一次失敗的原因。主機一直離線時沒有任何事件
 
 點選左邊 menu 的專案標題（`ProjectTitle`／`.project-head`）＝選取後側欄把那個專案捲到頂端（`lib/scrollProject.ts`，與 Control+1…9 共用；2026-10-08 使用者）。
 
+點**主力（★）晶片**＝選取後側欄把那顆 bot 的列捲到可視區頂端（`lib/scrollBot.ts`＋`hooks/useBotScrollTop.ts`；2026-10-13 使用者：「點了主力的 bot 後，menu 要 scroll 到該 bot 置頂的位置」，#1676）。
+只有這個入口置頂；鍵盤 ↑↓、搜尋、通知等其他入口沒有前例，維持原本的 `nearest`（選取換了才捲進畫面）。父專案收合、任何一層祖先子列收合（孫代整串收在頂層父列底下）都先展開再捲；已經選著的那顆再點一次也捲。
+直接捲 `.sidebar-scroll` 容器、不用 `scrollIntoView`：手機側欄是抽屜、點晶片時關著，`scrollIntoView` 會連帶捲祖先；只動自己的容器，之後打開抽屜就已經在位（不另在開抽屜時才捲）。版面量測沒有用真畫面確認，DOM 測試以 stub 的 `getBoundingClientRect` 斷言目標 scrollTop。
+
 ## 燈號轉圈只給子 agent（2026-10-04 使用者）
 
 使用者：「沒有 child 也在轉，轉個毛」（包括協調者自己）。轉圈原本給「回合結束、背景還有 shell」；但那多半是 sleep／等待之類，不值得轉。改成：燈號外圈的藍色轉圈**只在自己閒著、底下有子 agent 在跑（working／blocked）時**出現；只有背景 shell 就是一般綠點，旁邊照舊寫「背景 N」。各處燈號（側欄、標題、主力晶片、群組、狀態卡）同一套。
