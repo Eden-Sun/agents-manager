@@ -3488,6 +3488,46 @@ mod issue_17_tests {
         assert_eq!(count(&f, "pane.send_keys"), 2, "框裡還是同一則（只是折了行）：補按一次 Enter");
     }
 
+    /// issue #1666：第一次 Enter 沒生效，使用者把框裡的字改成只差一個行內空白的另一則（`ann a`→`anna`、`a b`→`ab`），
+    /// 沒有任何 transcript 證據。補按的 Enter 會把使用者剛改的字送出去：只按過一次。
+    #[tokio::test]
+    async fn issue_1666_a_whitespace_only_edit_after_the_first_enter_is_never_submitted() {
+        for (text, edited) in [("send to ann a", "send to anna"), ("處理 a b", "處理 ab")] {
+            let f = fixture("claude", "").await;
+            live(&f, crate::testing::LivePane { enter_redraws: Some(vec![edited.into()]), ..wide() });
+            let app = f.env.app.clone();
+            db::set_pane_typed(&app.db, &f.run_id).await.unwrap();
+            let (run, bot) = run_and_bot(&f).await;
+            let client = client_for_run(&app, &run).await.unwrap();
+
+            let out = deliver_prompt(&app, &client, &run, &bot, text, false, false).await.unwrap();
+            assert_eq!(out, Delivered::Unproven("composer_changed_or_unreadable"), "{text:?} → {edited:?}");
+            assert_eq!(count(&f, "pane.send_keys"), 1, "{text:?} → {edited:?}：框裡是改過的字，只按過一次 Enter");
+        }
+    }
+
+    /// issue #1666 的對照：沒被改過的草稿照補按。中文被硬折（接縫沒有字元）、原文自己有換行與縮排，畫面讀回的列逐列對得上。
+    #[tokio::test]
+    async fn issue_1666_an_unedited_draft_is_still_pressed_again_however_it_was_wrapped() {
+        for (text, rows) in [
+            ("這是一則很長的中文草稿沒有空白所以會折行", vec!["這是一則很長的中文草稿", "沒有空白所以會折行"]),
+            ("第一行\n    縮排的程式\n結尾", vec!["第一行", "    縮排的程式", "結尾"]),
+            ("send to ann a", vec!["send to ann a"]),
+        ] {
+            let f = fixture("claude", "").await;
+            // 多行草稿只認 transcript 證據（沒有 transcript 會停在 `transcript_not_ready`）；Enter 被重畫吃掉，transcript 沒有新的一則。
+            with_transcript(&f, crate::testing::LivePane { enter_redraws: Some(rows.iter().map(|r| r.to_string()).collect()), ..wide() }).await;
+            let app = f.env.app.clone();
+            db::set_pane_typed(&app.db, &f.run_id).await.unwrap();
+            let (run, bot) = run_and_bot(&f).await;
+            let client = client_for_run(&app, &run).await.unwrap();
+
+            let out = deliver_prompt(&app, &client, &run, &bot, text, false, false).await.unwrap();
+            assert_eq!(out, Delivered::Unproven("still_in_box"), "{text:?}");
+            assert_eq!(count(&f, "pane.send_keys"), 2, "{text:?}：框裡還是同一則：補按一次 Enter");
+        }
+    }
+
     /// issue #1577：送出後第一次檢查框裡已是別人的草稿，transcript 其實已經有本則。不按 Enter（絕不補按別人的草稿），
     /// 證據直接認成已送出（#1599：證據不分框的狀態看），不必等背景補證。
     #[tokio::test]

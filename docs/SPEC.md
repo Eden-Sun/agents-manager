@@ -1473,7 +1473,7 @@ tab 已被回收視為完成，`tab.list` 失敗不猜。沒有 `tab_id` 的 Run
    `agent.prompt` 的 client 與 HostFence 成對保留；最後 pane guard 前與其讀取完成後、RPC 前都確認 fence 仍有效。世代被重連或改指取代時不依 host 名稱重新解析 client，回可重試的 `NotAttempted(host_changed)`；直接送撤回未送出的 turn 回 409，排隊送出放回佇列。
 4. 鎖內照規劃送出，結果五種見本章開頭：`Submitted`／`Handed`／`Unverified` → `delivery=ok`（證據與能否重送分開記）；
    打第一個字之前才出現的 `NotAttempted` → 撤回 turn 與訊息回 409（turn 已被別的路徑收掉時不刪、照現況回 200，見 §4.4a）；
-   `Unproven` 與打字後的錯誤 → `unknown`（不重送）；`agent_blocked` → `failed`。打字送出後的確認迴圈最多補按一次 Enter：每次補按前重讀 composer，只有完整讀出的內容（去掉所有空白後，折行與中文折行都算同一則）仍等於本次送出的文字、且尚無該文字的送達正面證據才按；看到正面證據就記 `Submitted`，不論框裡現在是什麼（同一則字也不補按，#1599）。內容不同或無法完整讀取時不補按，證據不足則記 `unknown`（#1486、#1598）。字還在框裡（後面接了別的字）時不記 Pending，只有框空了、讀不準、或框裡已找不到本則才交給背景（#1600）。
+   `Unproven` 與打字後的錯誤 → `unknown`（不重送）；`agent_blocked` → `failed`。打字送出後的確認迴圈最多補按一次 Enter：每次補按前重讀 composer，只有完整讀出的內容（畫面的列逐列對得上原文：列內的字與空白逐字相同，只有列與列之間的接縫可以是「沒有字元」＝中文或長字硬折、「一段空白」＝在空白處折行、「換行」＝原文本來就換行；行內空白被改動的 `send to ann a`→`send to anna` 不算同一則，#1666）仍等於本次送出的文字、且尚無該文字的送達正面證據才按；看到正面證據就記 `Submitted`，不論框裡現在是什麼（同一則字也不補按，#1599）。內容不同或無法完整讀取時不補按，證據不足則記 `unknown`（#1486、#1598）。字還在框裡（後面接了別的字）時不記 Pending，只有框空了、讀不準、或框裡已找不到本則才交給背景（#1600）。
 5. 完成靠 hook（§6.7）或備援（§4.3）。Turn 在送 prompt 之前已 `in_flight`，所以 hook 早於 RPC 回應也配得到。
 6. `interrupt`（送 `esc`）／`stop` 把 in-flight Turn 標 `failed` 並加 system Message。
 7. **stall watchdog**：`delivery = ok` 後 12 秒內沒收到 `working`／`blocked` 且仍 idle/unknown → 先看字是不是還在框裡（在就補按 Enter、給寬限）；
