@@ -175,7 +175,10 @@ pub fn remote_sync_script(bot_dirs: &[String], names: &[&str], create_missing: b
     [ -d "$D" ] || {{ [ "{create}" = 1 ] && mkdir -p "$D" || continue; }}
     B="$D/bin"
     [ -d "$B" ] || {{ [ "{create}" = 1 ] && mkdir -p "$B" || continue; }}
-    find "$B" -maxdepth 1 -name '.*.tmp-*' -mmin +10 -exec rm -f {{}} + 2>/dev/null
+    for stale_tmp in "$B"/.*.tmp-*; do
+        [ -e "$stale_tmp" ] || continue
+        find "$stale_tmp" -mmin +10 -exec rm -f {{}} + 2>/dev/null
+    done
     for name in {list}; do
         f="$B/$name"
         if [ ! -f "$f" ]; then
