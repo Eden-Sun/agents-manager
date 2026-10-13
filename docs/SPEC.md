@@ -2851,7 +2851,7 @@ header 的 herdr 徽章確認後 `POST /api/hosts/{name}/herdr-update`（API §1
   判斷一路握到 `stop_bot_locked` 結束（判斷、寫標記、停機是同一個序列化邊界；叫醒也在這把鎖裡，看不到「已標記、
   還沒停」的中間狀態）。背景工作那一項是鎖外問的（貴），沿用到鎖裡，並在停機前再讀一次帳本，避免等待期間到達的 Stop hook 被漏掉——安全的理由是 daemon 經手的新工作一定先建
   turn／訊息，鎖裡重讀的 in-flight、排隊、交辦、最後動作時間看得到；一個剛開始又結束的回合會把「最後動作」推到現在。
-  過了才 `bot_sleeps` 先寫一列（**先寫再停**：中間死掉留下的是
+  過了才用鎖內重讀到的 run 的 `native_session_id` 寫 `bot_sleeps`（**先寫再停**：中間死掉留下的是
   「它應該是睡著的」，叫醒那條路會處理；反過來死在中間就變成一顆沒人知道要 `--resume` 的 bot），再走
   `lifecycle::stop_bot_locked_if_idle`——ctrl+c ×2 收 agent、關 pane，等於在 pane 裡下 exit。
   **收機許可**（issue #144）：bot 鎖擋不住使用者直接在 pane 裡打字——那條路是 `events::handle_status`，不拿鎖就寫

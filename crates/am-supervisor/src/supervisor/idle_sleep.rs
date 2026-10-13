@@ -598,7 +598,7 @@ fn unreadable(c: &Cand, what: &str, e: &anyhow::Error) {
 /// 這把鎖從最後一次判斷一路握到 `stop_bot_locked` 結束（issue #123）：最後的 admission check、寫標記、停機是同一個
 /// 序列化邊界，[`wake`] 與 `prompt` 的叫醒也在這把鎖裡，看不到「已標記、還沒停」的中間狀態。
 /// 鎖裡重讀的證據只要有一項**讀不到**就不收——跟背景工作那一項同一個規矩：只有 affirmative 的安全證據才能收。
-async fn sleep_one(app: &(impl crate::capabilities::BotLocks + crate::capabilities::Db + crate::capabilities::Emit + crate::supervisor::ports::HostProbes + crate::supervisor::ports::LocalAccountView + crate::supervisor::ports::TurnOps), c: &Cand, session: Option<String>, threshold: i64) {
+async fn sleep_one(app: &(impl crate::capabilities::BotLocks + crate::capabilities::Db + crate::capabilities::Emit + crate::supervisor::ports::HostProbes + crate::supervisor::ports::LocalAccountView + crate::supervisor::ports::TurnOps), c: &Cand, threshold: i64) {
     let lock = app.bot_lock(&c.bot_id).await;
     let _g = lock.lock().await;
     let run = match db::active_run(app.db(), &c.bot_id).await {
@@ -632,7 +632,7 @@ async fn sleep_one(app: &(impl crate::capabilities::BotLocks + crate::capabiliti
         tracing::info!(bot = %c.name, background_jobs = n, "idle sweep: the background-work account changed before stopping; leaving the bot running");
         return;
     }
-    if let Err(e) = mark_asleep(app.db(), &fresh, session.as_deref()).await {
+    if let Err(e) = mark_asleep(app.db(), &fresh, run.native_session_id.as_deref()).await {
         tracing::warn!(bot = %c.name, error = %e, "could not record the sleep; leaving the bot running");
         return;
     }
@@ -880,7 +880,6 @@ async fn sweep(app: &(impl crate::capabilities::BotLocks + crate::capabilities::
                 continue;
             }
         };
-        let session = run.native_session_id.clone();
         let mut f = match cand_for(app, &run, &sup).await {
             Ok(Some(f)) => f,
             Ok(None) => continue,
@@ -915,7 +914,7 @@ async fn sweep(app: &(impl crate::capabilities::BotLocks + crate::capabilities::
         #[cfg(all(test, feature = "daemon-test-harness"))]
         crate::lifecycle::race_point::hit("idle_sleep_before_sleep_one", &c.bot_id).await;
         if decide(&f, threshold).is_ok() {
-            sleep_one(app, &f, session, threshold).await;
+            sleep_one(app, &f, threshold).await;
         }
     }
 }
@@ -1329,7 +1328,7 @@ mod tests {
             .await
             .unwrap();
 
-        sleep_one(&app, &stale, Some("sid-1".into()), 90).await;
+        sleep_one(&app, &stale, 90).await;
 
         let status: String = sqlx::query_scalar("SELECT status FROM turns WHERE id=?").bind(&turn).fetch_one(&app.db).await.unwrap();
         assert_eq!(status, "in_flight", "剛派進去的回合不能被收起來的那一下砍掉");
@@ -1345,9 +1344,42 @@ mod tests {
             .execute(&app.db)
             .await
             .unwrap();
-        sleep_one(&app, &stale, Some("sid-1".into()), 90).await;
+        sleep_one(&app, &stale, 90).await;
         assert!(asleep(&app, &bot).await.is_some(), "閒著的照樣收起來");
         assert!(db::active_run(&app.db, &bot).await.unwrap().is_none());
+    }
+
+    #[tokio::test]
+    async fn idle_sleep_keeps_the_session_from_the_run_it_stops() {
+        let env = crate::testing::env().await;
+        let app = env.app.clone();
+        let bot = crate::testing::claude_bot(&app, &env.project_id, "session-refresh").await.id;
+        let run_id = crate::testing::fake_run(&app, &bot).await;
+        sqlx::query("UPDATE runs SET native_session_id='stale-session', agent_status='idle' WHERE id=?")
+            .bind(&run_id)
+            .execute(&app.db)
+            .await
+            .unwrap();
+        let _shell = provably_no_background_work(&env, &bot);
+
+        // This is after the sweep's old-session snapshot and external inspection, before its locked re-read.
+        let db = app.db.clone();
+        let run_for_race = run_id.clone();
+        crate::lifecycle::race_point::arm("idle_sleep_before_sleep_one", &bot, move || async move {
+            sqlx::query("UPDATE runs SET native_session_id='current-session' WHERE id=?")
+                .bind(&run_for_race)
+                .execute(&db)
+                .await
+                .unwrap();
+        });
+        sweep(&app, i64::MIN).await;
+
+        let stored: Option<String> = sqlx::query_scalar("SELECT native_session_id FROM bot_sleeps WHERE bot_id=?")
+            .bind(&bot)
+            .fetch_one(&app.db)
+            .await
+            .unwrap();
+        assert_eq!(stored.as_deref(), Some("current-session"), "wake must resume the session on the run that was actually stopped");
     }
 
     /// 一顆閒置 120 分鐘、可續接的 bot（`the_idle_clock_starts_at_the_last_thing_that_happened` 同一個情境）。
@@ -1379,7 +1411,7 @@ mod tests {
         crate::lifecycle::race_point::arm("idle_sleep.marked", &bot, move || async move {
             sqlx::query("UPDATE runs SET agent_status='working' WHERE id=?").bind(&run2).execute(&db2).await.unwrap();
         });
-        sleep_one(&app, &stale, Some("sid-1".into()), 90).await;
+        sleep_one(&app, &stale, 90).await;
 
         let now = db::active_run(&app.db, &bot).await.unwrap().expect("使用者剛開始打字的 bot 不能被停掉");
         assert_eq!(now.state, "running");
@@ -1405,7 +1437,7 @@ mod tests {
         .await
         .unwrap();
 
-        sleep_one(&app, &c, Some("sid-1".into()), 90).await;
+        sleep_one(&app, &c, 90).await;
         let state: String = sqlx::query_scalar("SELECT state FROM runs WHERE id=?").bind(&run).fetch_one(&app.db).await.unwrap();
         assert_eq!(state, "stopping", "前提：pane 關了、stopped 沒記下");
         assert!(asleep(&app, &bot).await.is_some(), "它其實已經睡了，標記要留著");
@@ -1435,7 +1467,7 @@ mod tests {
         .execute(&app.db)
         .await
         .unwrap();
-        sleep_one(&app, &c, Some("sid-1".into()), 90).await;
+        sleep_one(&app, &c, 90).await;
         let run = db::active_run(&app.db, &bot).await.unwrap().expect("還在跑");
         assert_eq!(run.state, "running");
         assert!(asleep(&app, &bot).await.is_none(), "沒停就不是睡著的");
@@ -1462,7 +1494,7 @@ mod tests {
             env.herdr.fail_next("pane.get", crate::testing::Fault::Refuse);
         }
 
-        sleep_one(&app, &stale, Some("sid-1".into()), 90).await;
+        sleep_one(&app, &stale, 90).await;
         let state: String = sqlx::query_scalar("SELECT state FROM runs WHERE id=?").bind(&run).fetch_one(&app.db).await.unwrap();
         assert_eq!(state, "stopping", "前提：停機確認不了，留給對帳");
         assert!(asleep(&app, &bot).await.is_some(), "pane 已經關了、只是證實不了：標記要留著");
@@ -1500,7 +1532,7 @@ mod tests {
         assert_eq!(stored, "idle", "前提：working 真的沒寫進去");
 
         let c = candidates(&app).await.unwrap().into_iter().find(|c| c.bot_id == bot).unwrap();
-        sleep_one(&app, &c, Some("sid-1".into()), 90).await;
+        sleep_one(&app, &c, 90).await;
         assert!(db::active_run(&app.db, &bot).await.unwrap().is_some(), "事件流說它在工作，DB 寫不進去不代表它閒著");
         assert!(asleep(&app, &bot).await.is_none());
     }
@@ -1614,7 +1646,7 @@ mod tests {
         let _shell = provably_no_background_work(&env, &bot);
 
         sqlx::query("DROP TABLE supervisor_assignments").execute(&app.db).await.unwrap();
-        sleep_one(&app, &stale, Some("sid-1".into()), 90).await;
+        sleep_one(&app, &stale, 90).await;
         assert_left_running(&app, &bot, "交辦查不到（鎖裡重讀）").await;
         sweep(&app, 90).await;
         assert_left_running(&app, &bot, "交辦查不到（整輪巡邏）").await;
@@ -1635,7 +1667,7 @@ mod tests {
         crate::lifecycle::insert_message(&app, &conv, None, "user", "還在嗎", "web", false, None).await.unwrap();
 
         sqlx::query("DROP TABLE messages").execute(&app.db).await.unwrap();
-        sleep_one(&app, &stale, Some("sid-1".into()), 90).await;
+        sleep_one(&app, &stale, 90).await;
         assert_left_running(&app, &bot, "活動時間查不到（鎖裡重讀）").await;
         sweep(&app, 90).await;
         assert_left_running(&app, &bot, "活動時間查不到（整輪巡邏）").await;
@@ -1666,7 +1698,7 @@ mod tests {
 
             sqlx::query(&format!("DROP TABLE {broken}")).execute(&app.db).await.unwrap();
             assert!(candidates(&app).await.is_err(), "{broken} 讀不到：名單不能照樣湊出來（漏掉的總管會被當成 worker）");
-            sleep_one(&app, &stale, Some("sid-1".into()), 90).await;
+            sleep_one(&app, &stale, 90).await;
             assert_left_running(&app, &bot, &format!("{broken} 讀不到（鎖裡重讀）")).await;
             sweep(&app, 90).await;
             assert_left_running(&app, &bot, &format!("{broken} 讀不到（整輪巡邏）")).await;
@@ -1785,7 +1817,7 @@ mod tests {
 
         let (app2, bot2) = (app.clone(), bot.clone());
         let landing = land_in_the_window(&bot, move || async move { wake(&app2, &bot2, "測試").await.map_err(|e| e.to_string()) });
-        sleep_one(&app, &stale, Some("sid-1".into()), 90).await;
+        sleep_one(&app, &stale, 90).await;
 
         assert!(!landing.finished_inside_the_window.load(Ordering::SeqCst), "叫醒不能在巡邏握著鎖的時候就跑完");
         assert_eq!(landing.result().await, Ok(true), "停機做完之後，叫醒看到標記、把它 --resume 接回來");
@@ -1810,7 +1842,7 @@ mod tests {
                 .await
                 .map(|r| r.map(|_| ()).map_err(|e| format!("{e:?}")))
         });
-        sleep_one(&app, &stale, Some("sid-1".into()), 90).await;
+        sleep_one(&app, &stale, 90).await;
 
         assert!(!landing.finished_inside_the_window.load(Ordering::SeqCst), "prompt 不能在巡邏握著鎖的時候就跑完");
         let out = landing.result().await.expect("prompt 沒有卡住");
@@ -1832,7 +1864,7 @@ mod tests {
 
         let (app2, stale2) = (app.clone(), stale.clone());
         crate::lifecycle::race_point::arm("prompt_before_bot_lock", &bot, move || async move {
-            sleep_one(&app2, &stale2, Some("sid-1".into()), 90).await;
+            sleep_one(&app2, &stale2, 90).await;
         });
         let out = tokio::time::timeout(std::time::Duration::from_secs(30), crate::lifecycle::prompt(&app, &bot, "還在嗎", "req-on-its-way"))
             .await
@@ -1867,7 +1899,7 @@ mod tests {
         .execute(&app.db)
         .await
         .unwrap();
-        sleep_one(&app, &stale, Some("sid-1".into()), 90).await;
+        sleep_one(&app, &stale, 90).await;
         assert_left_running(&app, &bot, "交辦在最後一次判斷之後才出現").await;
     }
 
@@ -1889,7 +1921,7 @@ mod tests {
         let stale = stale_cand(&app, &bot).await;
         let hit = watch_the_mark(&bot);
         observe_status(&run, "working");
-        sleep_one(&app, &stale, Some("sid-1".into()), 90).await;
+        sleep_one(&app, &stale, 90).await;
         assert!(!hit.load(Ordering::SeqCst), "標記之前就該擋下：連睡著的標記都不能寫");
         assert_left_running(&app, &bot, "事件流說它在忙").await;
     }
@@ -1907,7 +1939,7 @@ mod tests {
             h.store(true, Ordering::SeqCst);
             observe_status(&run, "working");
         });
-        sleep_one(&app, &stale, Some("sid-1".into()), 90).await;
+        sleep_one(&app, &stale, 90).await;
         assert!(hit.load(Ordering::SeqCst), "前提：走到了「已標記、還沒停」");
         assert_left_running(&app, &bot, "標記之後事件流才說它開始忙").await;
     }
@@ -1930,7 +1962,7 @@ mod tests {
             .await
             .unwrap();
         let hit = watch_the_mark(&bot);
-        sleep_one(&app, &stale, Some("sid-1".into()), 90).await;
+        sleep_one(&app, &stale, 90).await;
         assert!(!hit.load(Ordering::SeqCst), "有排隊中的訊息：標記之前就該擋下");
         assert_left_running(&app, &bot, "有排隊中的訊息").await;
     }
@@ -1954,7 +1986,7 @@ mod tests {
             .execute(&app.db)
             .await
             .unwrap();
-        sleep_one(&app, &stale, Some("sid-1".into()), 90).await;
+        sleep_one(&app, &stale, 90).await;
         assert_left_running(&app, &bot, "判斷之後有一個回合來了又走了").await;
     }
 
