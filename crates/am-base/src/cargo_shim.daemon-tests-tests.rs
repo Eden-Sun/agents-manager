@@ -2400,28 +2400,38 @@ while time.time() < end:
 
     /// #1257：停機期間 port 被別的 socket 佔住（不帶 SO_REUSEADDR 的 client 撞上 ephemeral port），重綁要等它放掉，
     /// 不能一綁不上就 `unwrap()` 炸掉。佔住的那一方先綁上、才通知我們去重綁。
+    /// port 由佔位的 socket 自己綁 0 拿（#1678）：先另外綁一次問出 port 再放掉的話，放掉到佔位之間有空窗，
+    /// 整樹平行跑時別的測試的連線會把它拿去當 ephemeral port，佔位的 bind 就失敗了。
     #[test]
     fn bind_on_waits_out_another_socket_holding_the_port() {
-        let port = std::net::TcpListener::bind("127.0.0.1:0").unwrap().local_addr().unwrap().port();
         let (bound_tx, bound_rx) = std::sync::mpsc::channel();
+        let (release_tx, release_rx) = std::sync::mpsc::channel::<()>();
         let holder = std::thread::spawn(move || {
             let fd = unsafe { libc::socket(libc::AF_INET, libc::SOCK_STREAM, 0) };
             assert!(fd >= 0, "socket");
             let mut addr: libc::sockaddr_in = unsafe { std::mem::zeroed() };
             addr.sin_family = libc::AF_INET as _;
-            addr.sin_port = port.to_be();
+            addr.sin_port = 0;
             addr.sin_addr = libc::in_addr { s_addr: u32::from_ne_bytes([127, 0, 0, 1]) };
             #[cfg(target_vendor = "apple")]
             {
                 addr.sin_len = std::mem::size_of::<libc::sockaddr_in>() as u8;
             }
-            let rc = unsafe { libc::bind(fd, &addr as *const libc::sockaddr_in as *const libc::sockaddr, std::mem::size_of_val(&addr) as libc::socklen_t) };
+            let mut len = std::mem::size_of_val(&addr) as libc::socklen_t;
+            let rc = unsafe { libc::bind(fd, &addr as *const libc::sockaddr_in as *const libc::sockaddr, len) };
             assert_eq!(rc, 0, "佔位的 bind");
-            bound_tx.send(()).unwrap();
+            let rc = unsafe { libc::getsockname(fd, &mut addr as *mut libc::sockaddr_in as *mut libc::sockaddr, &mut len) };
+            assert_eq!(rc, 0, "佔位的 getsockname");
+            bound_tx.send(u16::from_be(addr.sin_port)).unwrap();
+            // 等對方確認過「現在綁不上」才開始倒數放手：確認那一步不跟這 300ms 賽跑。
+            let _ = release_rx.recv();
             std::thread::sleep(std::time::Duration::from_millis(300));
             unsafe { libc::close(fd) };
         });
-        bound_rx.recv().unwrap();
+        let port = bound_rx.recv().unwrap();
+        assert_ne!(port, 0);
+        assert!(std::net::TcpListener::bind(("127.0.0.1", port)).is_err(), "佔位期間這個 port 綁不上，bind_on 才真的有等");
+        release_tx.send(()).unwrap();
         let l = bind_on(port);
         assert_eq!(l.local_addr().unwrap().port(), port);
         holder.join().unwrap();
