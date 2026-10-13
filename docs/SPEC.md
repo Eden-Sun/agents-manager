@@ -3587,7 +3587,7 @@ daemon 以識別專案的 User-Agent 讀取 [資料：codex-reset.com](https://c
 
 第一次成功讀取建立基線，不彈歷史通知；其後新增的正式 signal／reset／boost／limits／credits／banked／codex 公告或 `last_reset_at` 變更，每批只彈最新一則。公告 ledger 與快照原子寫入資料目錄 `codex-reset.json`，重啟沿用；WS `codex_reset_updated` 與 `/api/state.codex_reset` 帶同份快照，瀏覽器依公告 ID 存 localStorage 去重，重連、重整不再彈。同一公告每個瀏覽器一次；離線回來只補最後一則，超過 48 小時不補通知。
 
-來源 forecast／feed 時間超過 90 分鐘、feed 標為 stale、格式錯誤、HTTP 失敗或寫檔失敗均保留舊快照，不廣播成功。UI 最後成功讀取超過 70 分鐘改標「Codex 重置資料過期」，停止顯示即將重置與彈通知。額度區提示及通知都提供 codex-reset.com 來源連結，提示顯示最近全域重置與最後讀取時間；手機沿用同一提示。無快照不畫提示。
+來源 forecast／feed 時間超過 90 分鐘、feed 標為 stale、格式錯誤、HTTP 失敗或寫檔失敗均保留舊快照，不廣播成功。UI 最後成功讀取超過 70 分鐘只在 Codex 明細變灰標「資料過期」，停止顯示即將重置與彈通知。只有未過期的正式預告才在每個 Codex 額度格的 head 顯示小標，空間不足及手機改為 kind 圖示旁的小點；非 Codex 格不顯示，沒有正式預告時不保留常態標籤。Codex 明細底部固定提供最近全域重置及 codex-reset.com 來源連結，title 保留最後讀取時間；手機正式預告時明細改成強調的公告預告文字。量表與個人重置倒數位置不動。無快照或無 Codex 額度格不畫提示。
 
 ### 12.6 額度：`/usage` 探測
 grok 沒有 usage 子命令或 RPC，數字只在 TUI 的 `/usage` 對話框裡，所以開**用完即丟**的 workspace 探測，跑在**專屬 herdr session `am-quota`**（需要時起、永不 attach）：
