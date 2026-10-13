@@ -1111,7 +1111,7 @@ export class MockTransport implements Transport {
         if (action === 'rewind') return this.rewind(botId, b)
         if (action === 'fork') return this.fork(botId, b)
         if (action === 'promote') return this.promote(botId, b)
-        if (action === 'interrupt') return this.interrupt(botId)
+        if (action === 'interrupt') return this.interrupt(botId, b)
     if (action === 'abort') return this.abort(botId)
         if (action === 'login') return this.login(botId)
         if (action === 'prompt') return this.prompt(botId, b)
@@ -3203,10 +3203,18 @@ export class MockTransport implements Transport {
     return { ok: true }
   }
 
-  private interrupt(botId: string) {
+  private interrupt(botId: string, b: Rec = {}) {
     const run = this.activeRun(botId)
     if (!run) throw new ApiError(409, { reason: 'Bot 未在執行中' }, 'conflict')
     const inFlight = this.turns.find((t) => t.run_id === run.id && t.status === 'in_flight')
+    // daemon：帶 `turn_id` 而那一筆已不在飛 → 409，不按 esc、不動任何回合（API.md §4）。
+    if (typeof b.turn_id === 'string' && b.turn_id !== inFlight?.id) {
+      throw new ApiError(
+        409,
+        { error: 'conflict', reason: 'turn_not_in_flight', turn_id: b.turn_id, in_flight_turn_id: inFlight?.id ?? null, esc_sent: false },
+        'turn_not_in_flight',
+      )
+    }
     if (inFlight) this.updateTurn(inFlight, { status: 'failed', completed_at: now() })
     setAgentStatus(run, 'idle')
     this.emitBotStatus(botId)
