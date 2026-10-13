@@ -1176,10 +1176,20 @@ pub fn extract_reply(kind: &str, text: &str) -> Option<String> {
     }
 }
 
+fn codex_fold_hint(s: &str) -> bool {
+    let Some(rest) = s.strip_prefix('+') else { return false };
+    let digits = rest.bytes().take_while(u8::is_ascii_digit).count();
+    digits > 0 && (rest[digits..].starts_with(" lines (") || rest[digits..].starts_with(" line ("))
+        && (s.ends_with("to view transcript)") || s.ends_with("to expand)"))
+}
+
 /// Codex's terminal renders failure/interruption notices and completed subagent activity after
 /// the preserved stream. API transport banners can also appear with the ordinary assistant marker.
 fn codex_non_reply_row(line: &str) -> bool {
     let s = line.trim_start();
+    if super::poller::is_codex_working_line(s) || codex_fold_hint(s) || s == "+ Show details" {
+        return true;
+    }
     if s.starts_with("■ ") || s.strip_prefix("• Completed ").is_some_and(|tail| tail.starts_with('`') && tail.ends_with('`')) {
         return true;
     }
@@ -1463,6 +1473,22 @@ gpt-5.6-luna max fast · ~/project/hermes-agents/projects/pt · Context 0% used 
         // 真的工具列照舊遮掉：回覆是它後面那一則。
         let with_tool = "› 跑\n\n• Ran ls\n  └ a.txt\n\n• 只有一個檔案。\n";
         assert_eq!(extract_reply("codex", with_tool).as_deref(), Some("只有一個檔案。"));
+    }
+
+    #[test]
+    fn codex_control_rows_are_not_streamed_as_reply() {
+        for row in ["• Working (4m 12s • esc to interrupt)", "    +304 lines (^t to view transcript)", "    +2 lines (⌃t to expand)", "    +1 line (^t to view transcript)", "    + Show details"] {
+            let screen = format!("› 查狀態\n• 已確認正在執行。\n{row}\n› Ask Codex to do anything\n");
+            assert_eq!(extract_reply("codex", &screen).as_deref(), Some("已確認正在執行。"));
+            assert_eq!(crate::lifecycle::poller::live_reply("codex", &screen).as_deref(), Some("已確認正在執行。"));
+        }
+    }
+
+    #[test]
+    fn codex_prose_mentioning_transcript_controls_is_preserved() {
+        let prose = "Use this key (to view transcript)\nClick here (to expand)\n+many lines (to expand)";
+        let screen = format!("› 說明\n• {prose}\n› Ask Codex to do anything\n");
+        assert_eq!(extract_reply("codex", &screen).as_deref(), Some(prose));
     }
 
     /// grok 的 chrome 只認真的格式：`Worked for 3.6s` 頁尾、`Grok Build  1.0.13` 橫幅。回覆裡剛好以這兩個詞起頭的句子是內容。

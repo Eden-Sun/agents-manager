@@ -3539,6 +3539,8 @@ bot 用 `herdr agent start --kind grok` 開的子 agent 沒有 hook（pane 環�
   回合被收掉就結束；檔裡這一問還沒結束就留在飛（輪詢器下一輪再看，§4.3b 兜底）；沒有 prompt 的回合、檔裡又沒有在跑的一問，只收回合、不存畫面；
   這一問根本不在檔裡、或讀不到檔，才照 §4.3 看畫面。
 
+Codex 新 pane 尚未完成第一個 notify hook 時，巡邏以 herdr `agent.get <pane>` 明確綁定的 `agent_session.kind=id` 補 `runs.native_session_id`；本機 rollout 只按該 session id 查找並記錄路徑，不用最新檔案猜 session，也不覆蓋已有但不同的 hook session。run 為 unknown 而 herdr 已有狀態時，沿用狀態事件流程補上漏掉的邊；保留 #732 的 Codex unknown→idle 相容折疊（launch_pending 啟動中的 unknown 不折），但畫面仍 busy 時不合成 idle 邊。adopted 終端備援只收 idle／done，畫面仍有 Working／spinner 時不建完成回合；Working 計時與 `+N lines` 展開提示不算 assistant 回覆。adopted pane 即使尚無 in-flight turn，只要是 unknown／idle／done 且畫面非 busy，巡邏也依 §4.3a 記錄最後的 API error，不建立完成問答。
+
 ### 12.5b 沒有 hook 的 claude 子 agent：讀 `projects/*/<session>.jsonl`（`lifecycle::claude_child_log`，issue #878）
 bot 用 `herdr agent start` 開的 claude 子 agent（本機或遠端）沒有 hook，以前只能刮畫面：`runs.native_session_id`／`transcript_path` 都是空的，
 回覆是折行截斷、標「可能不完整」的終端殘片。現在跟 grok／agy 同一條路（§12.5、`grok_transcript::sync_locked`）：對話檔是主要來源、畫面只是備援。

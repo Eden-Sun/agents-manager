@@ -1422,6 +1422,15 @@ pub(super) async fn try_fallback(app: &impl LcHost, run_id: &str, expected_turn:
         tracing::debug!(run_id, "pane is waiting at a numbered menu; not completing the turn from it");
         return Ok(false);
     }
+    let fresh_error = slice_after_cursor(&read.text, run.last_read_tail_hash.as_deref());
+    // A Codex JSON HTTP rejection must fail while still in flight. Capturing it only
+    // after the generic fallback has claimed completed_fallback cannot change that terminal status.
+    if bot.kind == "codex" && fresh_error.lines().any(|l| l.starts_with("■ {"))
+        && crate::turn_error::api_error_line(&fresh_error).is_some()
+    {
+        crate::turn_error::capture(app, &bot.id, run_id).await?;
+        return Ok(db::in_flight_turn(app.db(), run_id).await?.is_none());
+    }
     let fresh_probe = slice_after_cursor(&read.text, run.last_read_tail_hash.as_deref());
     let probe = extract_reply(&bot.kind, &fresh_probe).or_else(|| clean_screen(&bot.kind, &fresh_probe)).unwrap_or_default();
     if is_tool_progress(&probe) {
@@ -1580,7 +1589,7 @@ pub fn pane_still_busy(screen: &str) -> bool {
 /// 壓縮時是 `Compacting context`，reasoning summary 開著時是 summary 的最新一行（0.155 起，#207）——只認 `Working (`
 /// 的話，還在想的 codex 會被當成停了，備援把狀態列當回覆收掉回合。所以認結構：括號裡是經過時間、` • `、`… to interrupt`
 /// （中斷鍵可以改綁）。格式照 codex `status_indicator_widget.rs`。
-fn is_codex_working_line(s: &str) -> bool {
+pub(super) fn is_codex_working_line(s: &str) -> bool {
     let Some(rest) = s.trim().strip_prefix('•') else { return false };
     rest.match_indices(" (").any(|(i, _)| {
         let Some((elapsed, tail)) = rest[i + 2..].split_once(" • ") else { return false };
@@ -1661,7 +1670,7 @@ pub(super) async fn capture_hookless_turn_locked(app: &impl LcHost, run_id: &str
         return Ok(false);
     }
     // Like §4.3: a modal waiting for an answer is not an ended turn.
-    if run.agent_status == "blocked" {
+    if !matches!(run.agent_status.as_str(), "idle" | "done") {
         return Ok(false);
     }
     // An in-flight turn belongs to `try_fallback`; capturing too would store it twice.
@@ -1687,7 +1696,7 @@ pub(super) async fn capture_hookless_turn_locked(app: &impl LcHost, run_id: &str
         .ok_or_else(|| anyhow::anyhow!("no Herdr session is available for run `{}`", run.id))?;
     let read = client.pane_read(&pane_id, "recent_unwrapped", 200).await?;
     // 同 `try_fallback`：停在編號選單上不是回合結束，選單不是回覆。
-    if crate::tui_prompts::awaits_menu_choice(&read.text) {
+    if crate::tui_prompts::awaits_menu_choice(&read.text) || is_screen_busy(&read.text) {
         return Ok(false);
     }
     let fresh = slice_after_cursor(&read.text, run.last_read_tail_hash.as_deref());
@@ -1987,6 +1996,20 @@ mod hookless_capture_tests {
         .unwrap()
     }
 
+    #[tokio::test]
+    async fn a_codex_adoption_never_captures_a_busy_or_unknown_pane() {
+        let busy = "› 調查記憶體\n• 我會先查紀錄。\n• Working (6s • esc to interrupt)\n› Ask Codex to do anything\n";
+        for (status, screen) in [("unknown", EXCHANGE), ("working", EXCHANGE), ("idle", busy)] {
+            let c = child(status, screen, 0, 1).await;
+            let app = c.env.app.clone();
+            sqlx::query("UPDATE bots SET kind='codex' WHERE id=?").bind(&c.bot_id).execute(&app.db).await.unwrap();
+            assert!(!capture_hookless_turn_locked(&app, &c.run_id, true).await.unwrap());
+            assert!(messages(&app, &c.conv).await.is_empty());
+            let turns: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM turns WHERE run_id=?").bind(&c.run_id).fetch_one(&app.db).await.unwrap();
+            assert_eq!(turns, 0, "busy/unknown adoption is not a finished exchange");
+        }
+    }
+
     /// The bug: a child adopted mid-answer hits `working -> idle` with no turn in flight, and
     /// `try_fallback` bails — 對話 stayed empty. The edge now becomes a turn of its own.
     #[tokio::test]
@@ -2176,6 +2199,23 @@ mod issue_17_tests {
         .unwrap();
         env.herdr.set_screen("pane-17", screen);
         Fixture { env, bot_id, conversation_id, run_id, turn_id }
+    }
+
+    #[tokio::test]
+    async fn codex_json_rejection_fails_before_generic_fallback_can_complete_it() {
+        let screen = r#"› 查狀態
+■ {"type":"error","status":400,"error":{"type":"invalid_request_error","message":"The 'gpt-6.1-sol' model is not supported when using Codex with a ChatGPT account."}}
+› Ask Codex to do anything
+"#;
+        let f = fixture("codex", screen).await;
+        assert!(try_fallback(&f.env.app, &f.run_id, Some(&f.turn_id)).await.unwrap());
+        let turn = db::in_flight_turn(&f.env.app.db, &f.run_id).await.unwrap();
+        assert!(turn.is_none());
+        let status: String = sqlx::query_scalar("SELECT status FROM turns WHERE id=?").bind(&f.turn_id).fetch_one(&f.env.app.db).await.unwrap();
+        assert_eq!(status, "failed");
+        let replies: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM messages WHERE turn_id=? AND role='assistant'").bind(&f.turn_id).fetch_one(&f.env.app.db).await.unwrap();
+        assert_eq!(replies, 0);
+        assert_eq!(db::run(&f.env.app.db, &f.run_id).await.unwrap().unwrap().turn_error.as_deref(), Some("API 拒絕這次請求（400 invalid_request_error）：The 'gpt-6.1-sol' model is not supported when using Codex with a ChatGPT account."));
     }
 
     /// 補 Enter 的看門狗（「字還在框裡就再按一次 Enter」）不能把 claude 2.1.280 的 dim「建議下一句」當成我們沒送出的字：
