@@ -34,3 +34,18 @@ test('某一輪丟例外也不卡住：下一個 resync 還能跑', async () => 
   trigger()
   assert.equal(runs, 2)
 })
+
+test('重抓進行中又來 resync，這一輪丟例外：排著的那次不能被吞掉，照樣補跑一次', async () => {
+  let runs = 0
+  let fail: (e: Error) => void = () => {}
+  const trigger = createResyncRunner(async () => {
+    runs += 1
+    if (runs === 1) await new Promise<void>((_, rej) => (fail = rej))
+  })
+  trigger()
+  trigger()
+  assert.equal(runs, 1)
+  fail(new Error('x'))
+  await new Promise((r) => setTimeout(r, 5))
+  assert.equal(runs, 2, '第二個 resync 所指的變動還沒被抓過，不能因為前一輪出錯就丟掉')
+})
