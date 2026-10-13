@@ -133,3 +133,98 @@ test('代理回的 HTML 錯誤頁：錯誤訊息要是短短一句，不能把�
     (e: unknown) => e instanceof ApiError && e.status === 502 && !e.message.includes('<') && e.message.length < 80,
   )
 })
+
+function jsonRes(status: number, body: unknown): Response {
+  return {
+    ok: status >= 200 && status < 300,
+    status,
+    headers: new Headers({ 'content-type': 'application/json' }),
+    text: async () => JSON.stringify(body),
+  } as unknown as Response
+}
+
+/**
+ * 假的 fetch：`/api/state` 只認 token `good`，其餘 401。`/api/session` 第一次呼叫會掛住（`where` 指定掛在
+ * headers 還是 body），直到測試呼叫 `release()`；掛住時不理 signal（最壞情況：代理把連線吊著）。第二次之後立即回 `good`。
+ * `started` 讓測試等到真的送出第一次 session 才往下，不靠固定毫秒。
+ */
+function refreshFetch(where: 'headers' | 'body') {
+  let sessionCalls = 0
+  let markStarted!: () => void
+  const started = new Promise<void>((r) => (markStarted = r))
+  let release!: () => void
+  const gate = new Promise<void>((r) => (release = r))
+  globalThis.fetch = (async (input: string, init?: RequestInit) => {
+    const url = String(input)
+    if (url === '/api/session') {
+      sessionCalls += 1
+      if (sessionCalls > 1) return jsonRes(200, { token: 'good' })
+      markStarted()
+      if (where === 'headers') {
+        await gate
+        return jsonRes(200, { token: 'good' })
+      }
+      return {
+        ok: true,
+        status: 200,
+        headers: new Headers({ 'content-type': 'application/json' }),
+        text: async () => {
+          await gate
+          return JSON.stringify({ token: 'good' })
+        },
+      } as unknown as Response
+    }
+    const tok = (init?.headers as Record<string, string> | undefined)?.['X-AM-Token']
+    return tok === 'good' ? jsonRes(200, { ok: true }) : jsonRes(401, { error: 'missing or bad X-AM-Token' })
+  }) as unknown as typeof fetch
+  return { started, release, sessionCalls: () => sessionCalls }
+}
+
+/**
+ * 等 event loop 轉完一圈再看 `p` 的結果（只清一輪 macrotask，不是等牆鐘）。
+ * `'hung'` 表示 `p` 還沒結束：紅測時回報失敗，不讓測試永遠掛住。
+ */
+async function outcomeAfterTick(p: Promise<unknown>): Promise<unknown> {
+  const done = p.then(
+    (v) => v,
+    (e: unknown) => e,
+  )
+  return Promise.race([done, new Promise((r) => setTimeout(() => r('hung'), 0))])
+}
+
+/** 2026-10-13 #1629：401 後的 token 更新（`GET /api/session`）掛住，GET 會永遠不結束，`refreshing` 也永遠清不掉。 */
+for (const where of ['headers', 'body'] as const) {
+  test(`token 更新掛住（${where} 不回）：GET 有期限會逾時，之後 refreshing 可重建、下一次 GET 能成功`, async () => {
+    const timers = fakeTimers()
+    const t = new HttpTransport({ timers })
+    const f = refreshFetch(where)
+    const first = t.request('GET', '/state')
+    const second = t.request('GET', '/state')
+    await f.started
+    timers.fireAll()
+    for (const p of [first, second]) {
+      const out = await outcomeAfterTick(p)
+      assert.ok(out instanceof Error && /逾時/.test(out.message), String(out))
+    }
+    assert.deepEqual(await t.request('GET', '/state'), { ok: true })
+    assert.equal(f.sessionCalls(), 2)
+    assert.equal(timers.pending(), 0)
+  })
+}
+
+test('呼叫端中止只放掉自己那一趟：共用的 token 更新還在，其他等它的 GET 照樣拿到結果', async () => {
+  const timers = fakeTimers()
+  const t = new HttpTransport({ timers })
+  const f = refreshFetch('headers')
+  const ctl = new AbortController()
+  const mine = t.request('GET', '/state', undefined, ctl.signal)
+  const theirs = t.request('GET', '/state')
+  await f.started
+  ctl.abort()
+  const out = await outcomeAfterTick(mine)
+  assert.ok(out instanceof Error && out.name === 'AbortError', String(out))
+  f.release()
+  assert.deepEqual(await theirs, { ok: true })
+  assert.equal(f.sessionCalls(), 1)
+  assert.equal(timers.pending(), 0)
+})
