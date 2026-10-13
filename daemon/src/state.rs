@@ -731,6 +731,7 @@ impl App {
         // 讀不到最近回合就只靠記憶體帳推算（`cache_clock`）：這只是倒數的提示，不值得為它擋掉整個 frame。
         let last_turn = crate::cache_clock::last_turn_for_bot(&self.db, bot_id).await.ok().flatten();
         crate::cache_clock::annotate(&mut run_v, &bot.kind, last_turn.as_ref());
+        crate::send_now_capability::annotate(&mut run_v, &bot.kind, run.as_ref(), self.cfg.get().await.codex.instant_interrupt);
         self.emit(
             "bot_status",
             json!({

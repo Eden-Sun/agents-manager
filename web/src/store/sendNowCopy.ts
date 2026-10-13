@@ -5,7 +5,7 @@
  * - codex：不按任何鍵、不打斷、不開新回合——字照一般方式打進忙碌的 TUI，由 codex 的 `instant_interrupt`（0.159 起）
  *   把它 steer 進**同一個**進行中的回合。daemon 端旗標（`[codex] instant_interrupt`）預設關，codex 自己那一側也要開。
  *
- * 按鈕不看版本就畫（前端猜不準 pane 跑哪一版）；不合資格時 daemon 回 409 與中文原因，store 原樣顯示。
+ * Composer 只在 daemon 回報 send_now_supported 時畫按鈕；送出時仍由 daemon 再確認。
  */
 export type SendNowKind = 'claude' | 'codex'
 

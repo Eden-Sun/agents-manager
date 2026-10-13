@@ -718,6 +718,7 @@ function Composer({
   // 插隊／補充是 claude 專屬（使用者 2026-09-27）：send-now 鍵與「打進 pane 併進這一輪」只在 claude 上驗過。
   const isClaude = useStore((s) => s.bots.find((b) => b.id === botId)?.kind === 'claude')
   const botKind = useStore((s) => s.bots.find((b) => b.id === botId)?.kind)
+  const sendNowSupported = useStore((s) => s.runs[botId]?.send_now_supported === true)
   const aborting = useStore((s) => Boolean(s.busy[`abort:${botId}`]))
   const startBot = useStore((s) => s.startBot)
   const sendText = useStore((s) => s.sendText)
@@ -917,12 +918,12 @@ function Composer({
               ESC 中斷
             </button>
           ) : null}
-          {state.inFlightTurnId && pending.trim() && sendNowButton(botKind, pending) ? (
+          {state.inFlightTurnId && pending.trim() && (isClaude || sendNowSupported) && sendNowButton(botKind, pending) ? (
             <>
               {/* 插隊＝claude 的 send-now 鍵（2.1.275 起）：它打斷目前那一輪、收掉它，再收下這句；
                   codex 是「插入」（#748）：不打斷、不開新回合，由 instant_interrupt 併進同一輪。文案在 sendNowCopy。
-                  不合資格時 daemon 回 409 並說原因（旗標關、版本不足），這裡照原樣顯示。 */}
-              <button
+                  只有 daemon 的同一個閘門確認支援時才顯示（#1672）；送出時仍由 daemon 再確認。 */}
+              {sendNowSupported ? <button
                 type="button"
                 className="mini-btn"
                 disabled={aborting || sending || files.uploading}
@@ -930,7 +931,7 @@ function Composer({
                 onClick={() => void sendNow()}
               >
                 {sendNowButton(botKind, pending)!.label}
-              </button>
+              </button> : null}
               {/* 補充＝直接打進 pane，不是第二輪：daemon 一次只認一個 turn（SPEC §2）。只給 claude。 */}
               {isClaude ? (
                 <button

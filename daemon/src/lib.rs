@@ -279,6 +279,7 @@ mod test_home;
 mod timestamp_compat_tests;
 #[cfg(test)]
 mod same_ms_order_tests;
+mod send_now_capability;
 pub mod serve;
 pub mod cli;
 pub use cli::{Cli, Cmd};

@@ -490,6 +490,7 @@ export function toRun(v: unknown, botId?: string): Run | null {
     agent_title: optStr(pick(v, 'agent_title')),
     status_line: optStr(pick(v, 'status_line')),
     status: toStatusInfo(pick(v, 'status_json')),
+    send_now_supported: v.send_now_supported === true,
     update_notice: optStr(pick(v, 'update_notice')),
     // null＝巡邏還沒看過這個 run（#767，沒有證據）；沒帶（舊 daemon）照舊當 0。
     // （`pick` 把 null 當沒有，所以這裡直接讀欄位。）
