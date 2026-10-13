@@ -78,6 +78,19 @@ function ulid(prefix: string): string {
 }
 const now = () => new Date().toISOString()
 
+/** API.md §12.4：每窗的 `low`（剩餘 <30%）／`critical`（剩餘 <5%）由 daemon 算好，前端只讀旗標；mock 的讀數照樣算。 */
+function withQuotaFlags(q: Rec | null): Rec | null {
+  if (!q) return q
+  const out: Rec = { ...q }
+  for (const k of ['five_hour', 'seven_day', 'fable']) {
+    const w = q[k]
+    if (!w || typeof w !== 'object') continue
+    const remaining = Math.max(0, 100 - Number((w as Rec).used_pct))
+    out[k] = { ...(w as Rec), low: remaining < 30, critical: remaining < 5 }
+  }
+  return out
+}
+
 /** herdr workspace 總欄數（2026-09-06 實測 185）；同分頁 pane 平分，獨佔分頁全拿。 */
 const WORKSPACE_COLUMNS = 185
 
@@ -931,7 +944,7 @@ export class MockTransport implements Transport {
       const fh = q.five_hour as Rec
       fh.used_pct = Math.min(100, Number(fh.used_pct) + 1)
       q.updated_at = now()
-      this.emit('quota_updated', { kind: 'codex', host: 'local', quota: q })
+      this.emit('quota_updated', { kind: 'codex', host: 'local', quota: withQuotaFlags(q) })
     }, 20000)
     return () => {
       if (this.handlers === handlers) {
@@ -987,7 +1000,7 @@ export class MockTransport implements Transport {
       return this.dirs(q.get('path') ?? '', q.get('host') ?? '', q.get('hidden') === '1')
     }
     if (method === 'GET' && rawPath === '/models') return this.models(q.get('kind') ?? '', q.get('host') ?? '', q.get('identity') ?? '')
-    if (method === 'GET' && rawPath === '/quota') return { kinds: this.quota }
+    if (method === 'GET' && rawPath === '/quota') return { kinds: Object.fromEntries(Object.entries(this.quota).map(([k, v]) => [k, withQuotaFlags(v)])) }
     if (method === 'GET' && rawPath === '/mem') return this.mem()
     if (method === 'GET' && rawPath === '/mem/processes') return this.memProcesses(q.get('host') ?? 'local')
     if (method === 'POST' && rawPath === '/mem/processes/kill') return this.killMemProcess(b)
@@ -1623,7 +1636,7 @@ export class MockTransport implements Transport {
       updated_at: now(),
       host: remote ? remote.name : 'local',
     }
-    this.emit('quota_updated', { kind: `${prefix}agy`, host: remote ? remote.name : 'local', quota: this.quota[`${prefix}agy`] })
+    this.emit('quota_updated', { kind: `${prefix}agy`, host: remote ? remote.name : 'local', quota: withQuotaFlags(this.quota[`${prefix}agy`]) })
     this.emit('host_changed', { name: remote ? remote.name : 'local', connected: true, tools })
   }
 
@@ -1875,7 +1888,7 @@ export class MockTransport implements Transport {
     }
     Object.assign(this.quota, rows)
     for (const [kind, quota] of Object.entries(rows)) {
-      this.emit('quota_updated', { kind, host: h.name, quota })
+      this.emit('quota_updated', { kind, host: h.name, quota: withQuotaFlags(quota) })
     }
   }
 
@@ -1946,7 +1959,7 @@ export class MockTransport implements Transport {
     if (h) {
       this.quota[`${host}/grok`] = { five_hour: { used_pct: 12, resets_at: inHours(0.2) }, seven_day: { used_pct: 55, resets_at: inHours(80) }, plan: 'SuperGrok', updated_at: now(), host }
       h.tools.grok = { ...TOOLS_ALL_OK.grok }
-      this.emit('quota_updated', { kind: 'grok', host, quota: this.quota[`${host}/grok`] })
+      this.emit('quota_updated', { kind: 'grok', host, quota: withQuotaFlags(this.quota[`${host}/grok`]) })
     }
     const path = `/Users/me/project/hermes-agents/${host}-hub`
     const pid = this.projects.find((p) => p.path === path)?.id
