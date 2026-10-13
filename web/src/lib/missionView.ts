@@ -197,6 +197,8 @@ export function missionView(m: Mission, events: MissionEvent[], assignments: Mis
   const handoffs: MissionHandoff[] = []
   /** 事件已經記過的換手，對應到撞限的那件交辦——交辦那邊推出來的就不要再算一次。 */
   const handedOff = new Set<string>()
+  /** 同一份換手 note 的接手身分與模型（以撞限的那件交辦為鍵）：接手那顆的身分只有它講得準。 */
+  const handoffTo = new Map<string, { to: string | null; model: string | null }>()
   let soloSince: string | null = null
   let verified: MissionEvent | null = null
   let delivered: MissionDelivered | null = null
@@ -208,7 +210,10 @@ export function missionView(m: Mission, events: MissionEvent[], assignments: Mis
     const handoff = handoffOf(p)
     if (handoff) {
       handoffs.push({ from: handoff.from, to: handoff.to, model: handoff.model, reason: handoff.reason, at: e.created_at })
-      if (handoff.assignment) handedOff.add(handoff.assignment)
+      if (handoff.assignment) {
+        handedOff.add(handoff.assignment)
+        handoffTo.set(handoff.assignment, { to: handoff.to, model: handoff.model })
+      }
     }
     const role = roleOf(e)
     // 換手 note 也帶 `role`，但它是 daemon 記的、不是那個角色的 bot 在說話：拿它當「誰在跑」會把角色寫成 daemon。
@@ -241,11 +246,13 @@ export function missionView(m: Mission, events: MissionEvent[], assignments: Mis
   for (const a of assignments) {
     if (!a.role) continue
     const from = byRole.get(a.role)
+    // 接手的那一件（follow_up_of 指回撞限那件）：身分以換手 note 的 to_identity 為準，事件串裡的是撞限那顆的。
+    const hand = a.follow_up_of ? handoffTo.get(a.follow_up_of) : undefined
     byRole.set(a.role, {
       role: a.role,
       bot: a.target_bot_id ?? from?.bot ?? null,
-      identity: from?.identity ?? null,
-      model: from?.model ?? null,
+      identity: hand ? hand.to : (from?.identity ?? null),
+      model: hand?.model ?? from?.model ?? null,
       at: a.created_at || (from?.at ?? ''),
     })
     // 撞限換手在交辦上是「follow-up ＋ 上一件停在 identity_switch」。事件串讀不到（舊資料）才用它，
