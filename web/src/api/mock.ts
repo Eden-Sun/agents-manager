@@ -3319,7 +3319,8 @@ export class MockTransport implements Transport {
   private prompt(botId: string, b: Rec, groupId: string | null = null, replyOverride: string | null = null) {
     this.refuseHandedOff(botId)
     const run = this.activeRun(botId)
-    if (!run && b.start_if_stopped === true) return this.promptStarting(botId, b)
+    // API.md §5：沒有 active run，或 run 還在 starting，都算「沒在跑」：先收下排隊（awaits_start），不 409。
+    if (b.start_if_stopped === true && (!run || run.state === 'starting')) return this.promptStarting(botId, b)
     if (!run) throw new ApiError(409, { error: 'conflict', reason: 'bot has no active run' }, 'conflict')
     if (run.state !== 'running') {
       throw new ApiError(409, { error: 'conflict', reason: 'run is not running', state: run.state }, 'conflict')
