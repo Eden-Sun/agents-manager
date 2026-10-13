@@ -2108,10 +2108,11 @@ def claim_scope_mismatch(claim: dict, args) -> bool:
 
 
 def held_by_other(claim: dict | None, me: str, args) -> dict | None:
-    """別人還按著這張票就回那筆認領；沒人、是我自己且範圍沒變、或已經放到過期都回 None。"""
+    """別人還按著這張票就回那筆認領；沒人、是我自己且範圍沒變、或已經放到過期都回 None。
+    `args` 為 None 時不比範圍（交回用：範圍欄位只有 claim 才有意義，#1720）。"""
     if claim is None or claim.get("stale"):
         return None
-    if claim.get("bot") == me and not claim_scope_mismatch(claim, args):
+    if claim.get("bot") == me and (args is None or not claim_scope_mismatch(claim, args)):
         return None
     return claim
 
@@ -2278,10 +2279,11 @@ def cmd_issue(_client, _cfg: dict, args) -> object:
     if claim is not None and CLAIM_LABEL not in labels and not claim.get("stale"):
         issue, claim = reconcile_claim_label(args, number)
         labels = [l.get("name") for l in issue.get("labels") or []]
-    blocker = held_by_other(claim, me, args)
+    # 交回不比範圍：`--child`／`--worktree`／`--branch` 只有 claim 用得到（#1720）。
+    blocker = held_by_other(claim, me, None if args.op == "release" else args)
     if blocker is not None:
         raise claim_conflict(number, blocker)
-    now = datetime.datetime.now(datetime.timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z")
+    now =datetime.datetime.now(datetime.timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z")
 
     if args.op == "release":
         out = {"issue": number, "title": issue.get("title"), "bot": me, "released": True, "was_claimed": claim is not None}

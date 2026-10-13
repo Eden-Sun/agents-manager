@@ -3250,6 +3250,15 @@ class IssueClaimTest(unittest.TestCase):
         self.assertEqual(json.loads(err)["claimed_by"], "kd61te")
         self.assertFalse([c for c in self.calls() if c[:2] == ["issue", "edit"]], "別人的票不准把 label 拿掉")
 
+    def test_the_holder_can_release_even_when_a_scope_flag_differs(self):
+        """交回不看範圍：`--child`／`--worktree`／`--branch` 是 claim 才有意義的欄位。自己握著的票，
+        帶了一個跟認領時不同的範圍去交回，不能被擋成「已經由自己認領，不要再派第二顆」（那會逼人等 24 小時）。"""
+        self.issue(425, labels=["wip"], comments=[self.claim_comment("vvyyg1", age_secs=300, child="child-a", worktree="/w/a", branch="fix/a")])
+        code, out, err = self.run_cli("issue", "release", "425", "--child", "child-b", "--worktree", "/w/b")
+        self.assertEqual(code, 0, err)
+        self.assertTrue(json.loads(out)["released"])
+        self.assertIsNone(agm.current_claim(json.loads((self.state / "issue-425.json").read_text())))
+
     def test_release_on_an_unclaimed_issue_is_a_no_op(self):
         self.issue(425)
         got = json.loads(self.run_cli("issue", "release", "425")[1])
