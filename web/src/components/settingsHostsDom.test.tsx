@@ -82,6 +82,19 @@ it('新增主機：非法 herdr_session（含 /）、打錯的 port 前端先擋
   assert.equal(hostNames().includes('evil2'), false)
 })
 
+it('新增主機：進階欄位打錯後收起「進階」，按鈕鎖住的原因仍看得到（以前收起就只剩一顆灰鈕）', async () => {
+  const requests = await open()
+  await click(buttonByText(document.body, '進階'))
+  const inputs = () => [...document.querySelectorAll<HTMLInputElement>('.hosts-panel form input')]
+  await typeInto(input('m4p'), 'evil3')
+  await typeInto(input('m4p@100.112.229.82'), 'build-box')
+  await typeInto(inputs().find((i) => i.value === '22')!, '2222x')
+  await click(buttonByText(document.body, '進階'))
+  assert.equal(buttonByText(document.body, '新增並連線').disabled, true, '打錯的 port 鎖住送出')
+  assert.match(document.querySelector('.hosts-panel form')!.textContent ?? '', /port 要是 1–65535/, '收起後原因仍在畫面上')
+  assert.equal(posts(requests).length, 0)
+})
+
 it('新增主機：合法就出現在清單、表單清空、顯示就緒；刪除要先確認', async () => {
   const requests = await open()
   await fillAndSubmit('dom3ok', 'builder@10.1.2.3')
