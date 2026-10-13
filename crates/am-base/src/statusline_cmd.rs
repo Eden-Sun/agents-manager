@@ -202,8 +202,14 @@ fn run_user_command(cmd: &str, input: &str, deadline: Instant) -> Option<Command
                 Err(std::sync::mpsc::TryRecvError::Empty) => {}
             }
         }
-        if child_exited {
+        // stdout 已讀到 EOF：輸出是完整的，不等指令結束（它可能還睡很久）；還活著的行程收掉。#1741
+        if child_exited || output.is_some() {
             if let Some(buf) = output {
+                if !child_exited {
+                    kill_process_group(pgid);
+                    let _ = child.kill();
+                    let _ = child.wait();
+                }
                 return Some(buf);
             }
         }
@@ -381,5 +387,15 @@ mod tests {
     fn slim_payload_is_a_statusline_event_whatever_event_name_the_input_carries() {
         let v = slim_payload(r#"{"session_id":"s","hook_event_name":"Notification"}"#, None).unwrap();
         assert_eq!(v["hook_event_name"], "StatusLine", "daemon 靠這個欄位分辨 StatusLine 與其他事件");
+    }
+
+    #[test]
+    fn output_written_before_stdout_closed_is_kept_even_if_the_command_lingers() {
+        // 指令印完、關掉 stdout 之後還睡 30 秒：輸出已經讀到 EOF，不能等到 deadline 才整個丟掉（pane 的 statusLine 會空白）。
+        // deadline 給 10 秒（遠大於讀到 EOF 所需），高負載下不誤判（#1153）。
+        let output = run_user_command("printf statusline; exec 1>&-; sleep 30", "{}", Instant::now() + Duration::from_secs(10))
+            .expect("stdout 已經關了、輸出完整，該回傳，不該等到 deadline 才丟掉");
+        assert_eq!(output.bytes, b"statusline");
+        assert!(!output.truncated);
     }
 }
