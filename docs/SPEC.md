@@ -2295,6 +2295,7 @@ rustup 換位置或遠端主機上反而是錯的——讓 shim 每次在 pane �
 - **daemon 重啟不會留下永久卡住的名額**：`build_slots` 表本身活在 SQLite 裡（cargo 行程不是 daemon 的子行程，daemon
   重啟不代表建置真的停了，硬把表清空反而讓重啟後的名額數失真）；真正的保證是 TTL——沒人續約，名額最多卡 `lease_ttl_secs`
   就被收回，不會無限期卡死。
+- `acquire`、`renew`、`release`、`sweep` 與 status 的過期名額清理共用同一把鎖；`renew` 更新時會比對讀取到的 token、held 狀態與到期時間，且必須恰好更新一列才回成功。status 清理因此不會在續約讀寫之間刪掉持有列；若續約更新時該列已失效，回 `404` 要求重新 acquire。
 - 等待中的列也要能觀察（issue 要求 `waiting_for_build_slot`／`building` 可查）：`last_seen` 是「還在 poll 嗎」，
   `since` 是「排隊排多久了」，兩者分開存——不然一個排很久但一直在 poll 的呼叫者，會被誤判成早就死掉的呼叫者。
 

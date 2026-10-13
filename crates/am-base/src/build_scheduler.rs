@@ -271,15 +271,22 @@ pub async fn renew(app: &(impl crate::build_scheduler::BuildSlotLock + crate::ca
     if row.token != token {
         return Ok(Err(RenewErr::TokenMismatch));
     }
+    let current_expires_at = row.expires_at.as_deref().expect("held slots have an expiry");
     let expires_at = expires_at_after(&cfg)?;
-    sqlx::query("UPDATE build_slots SET expires_at = ?, last_seen = ? WHERE holder = ? AND token = ?")
+    let affected = sqlx::query("UPDATE build_slots SET expires_at = ?, last_seen = ? WHERE holder = ? AND token = ? AND status = 'held' AND expires_at = ?")
         .bind(&expires_at)
         .bind(&now)
         .bind(holder)
         .bind(token)
+        .bind(current_expires_at)
         .execute(app.db())
-        .await?;
-    Ok(Ok(expires_at))
+        .await?
+        .rows_affected();
+    match affected {
+        0 => Ok(Err(RenewErr::NotFound)),
+        1 => Ok(Ok(expires_at)),
+        count => Err(anyhow::anyhow!("renew updated {count} build-slot rows for one holder")),
+    }
 }
 
 /// 放：一律幂等（找不到、已經過期、token 對不上都當作「已經不是你的事了」，回成功——釋放路徑
@@ -332,9 +339,12 @@ struct StatusRow {
     expires_at: Option<String>,
 }
 
-pub async fn status(app: &(impl crate::capabilities::Cfg + crate::capabilities::DataDir + crate::capabilities::Db)) -> Result<Value> {
+pub async fn status(app: &(impl crate::build_scheduler::BuildSlotLock + crate::capabilities::Cfg + crate::capabilities::DataDir + crate::capabilities::Db)) -> Result<Value> {
+    {
+        let _g = app.build_slot_lock().lock().await;
+        reap_expired_held(app.db(), &now_str()).await?;
+    }
     let cfg = app.cfg().build_fresh().await;
-    reap_expired_held(app.db(), &now_str()).await?;
     let rows: Vec<StatusRow> = sqlx::query_as(
         "SELECT holder, status, bot_id, purpose, host, since, last_seen, expires_at FROM build_slots ORDER BY since",
     )
