@@ -244,6 +244,13 @@ fn read_capped<R: Read>(reader: R, max: usize) -> io::Result<(Vec<u8>, bool)> {
         .read_to_end(&mut buf)?;
     let truncated = buf.len() > max;
     buf.truncate(max);
+    if truncated {
+        if let Err(error) = std::str::from_utf8(&buf) {
+            if error.error_len().is_none() {
+                buf.truncate(error.valid_up_to());
+            }
+        }
+    }
     Ok((buf, truncated))
 }
 
@@ -347,6 +354,16 @@ mod tests {
         let (kept, truncated) = read_capped(input.as_slice(), 32).unwrap();
         assert_eq!(kept, input);
         assert!(!truncated);
+    }
+
+    #[test]
+    fn read_capped_trims_incomplete_utf8_at_cap() {
+        let input = "status 🙂";
+        let max = "status ".len() + 1;
+        let (kept, truncated) = read_capped(input.as_bytes(), max).unwrap();
+
+        assert!(truncated);
+        assert_eq!(String::from_utf8_lossy(&kept), "status ");
     }
 
     #[test]
