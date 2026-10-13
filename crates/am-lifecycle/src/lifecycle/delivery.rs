@@ -880,11 +880,36 @@ fn may_press_retry_submit(
         && composer_still_holds(kind, screen, text)
 }
 
-/// 框裡還是**這一則**草稿。畫面讀來的字跟原文只在空白上不同（TUI 把長句折成多列、續行縮排、列與列之間的換行）也算；
-/// 字少了、多了、換掉都不算——那是別人剛打的字。空白一律整個拿掉再比：中文折行時換列前後沒有任何字元，
-/// 收成一個空格就對不上原文（#1598）。
+/// 框裡還是**這一則**草稿：畫面讀回的列逐列對得上原文。列**內**的字與空白要跟原文逐字相同；只有列與列之間的接縫可以是
+/// 原文的「沒有字元」（中文或長字被硬折）、「一段空白」（在空白處折行）、「換行」（原文本來就換行）。
+/// 以前整個把空白拿掉再比（#1598），`send to ann a` 與 `send to anna` 也算同一則，補按的 Enter 把使用者剛改的字送出去（#1666）。
 fn composer_still_holds(kind: &str, screen: &str, text: &str) -> bool {
-    crate::composer_parse::composer_text_whole(kind, screen).is_some_and(|shown| bare(&shown) == bare(text))
+    crate::composer_parse::composer_text_whole(kind, screen).is_some_and(|shown| rows_spell_text(&shown, text))
+}
+
+/// `shown` 是 `composer_text_whole` 以 `\n` 接起來的列。空列要對上原文的空行（一個空列＝多一個換行），
+/// 接縫沒有任何字元時畫面不能多出縮排（原文沒有空白，那是加進去的）。
+fn rows_spell_text(shown: &str, text: &str) -> bool {
+    let mut rest = text.trim();
+    let mut blank_rows = 0;
+    for row in shown.split('\n') {
+        let body = row.trim_start();
+        if body.is_empty() {
+            blank_rows += 1;
+            continue;
+        }
+        let after_seam = rest.trim_start();
+        let seam = &rest[..rest.len() - after_seam.len()];
+        let newlines = seam.matches('\n').count();
+        let lines_ok = if blank_rows > 0 { newlines == blank_rows + 1 } else { newlines <= 1 };
+        if !lines_ok || (seam.is_empty() && body.len() < row.len()) {
+            return false;
+        }
+        let Some(after_row) = after_seam.strip_prefix(body) else { return false };
+        rest = after_row;
+        blank_rows = 0;
+    }
+    rest.is_empty()
 }
 
 /// 去掉所有空白字元，只用來比「是不是同一串字」。
@@ -1224,6 +1249,52 @@ mod tests {
         assert!(may_press_retry_submit("claude", &wrapped, text, false, false), "框裡還是同一則，中文折行不會多出空白");
         let other = screen(&[], &["這是一則很長的中文草稿", "沒有空白所以換掉了"]);
         assert!(!may_press_retry_submit("claude", &other, text, false, false), "尾段換掉＝別人的草稿");
+    }
+
+    /// issue #1666：#1598 為了中文折行把所有空白刪掉再比，行內的詞界也跟著不見——`send to ann a` 與 `send to anna`、
+    /// `處理 a b` 與 `處理 ab` 被當成同一則，使用者剛改的字被補按的 Enter 送出去。列**內**的字與空白要逐字相同。
+    #[test]
+    fn issue_1666_a_whitespace_only_edit_inside_a_row_never_earns_a_retry_enter() {
+        for (text, shown) in [
+            ("send to ann a", "send to anna"),
+            ("send to anna", "send to ann a"),
+            ("處理 a b", "處理 ab"),
+            ("處理 ab", "處理 a b"),
+            ("alpha beta", "alpha  beta"),
+            ("alpha  beta", "alpha beta"),
+        ] {
+            let box_screen = screen(&[], &[shown]);
+            assert!(!may_press_retry_submit("claude", &box_screen, text, false, false), "{text:?} 被改成 {shown:?}：別人的草稿，不補按");
+            let untouched = screen(&[], &[text]);
+            assert!(may_press_retry_submit("claude", &untouched, text, false, false), "{text:?} 原封不動：補按");
+        }
+    }
+
+    /// issue #1666：只有列與列之間的接縫可以對上原文的「沒有字元」（硬折）、「空白」（在空白處折）或「換行」（原文本來就換行）；
+    /// 原文自己的換行、縮排、空行逐列對得上就是同一則。
+    #[test]
+    fn issue_1666_only_the_seams_between_rows_may_stand_for_a_missing_wrap() {
+        let multi = "第一行\n    縮排的程式\n\n結尾";
+        let same = screen(&[], &["第一行", "    縮排的程式", "", "結尾"]);
+        assert!(may_press_retry_submit("claude", &same, multi, false, false), "原文的換行、縮排、空行都在");
+        let no_blank = screen(&[], &["第一行", "    縮排的程式", "結尾"]);
+        assert!(!may_press_retry_submit("claude", &no_blank, multi, false, false), "空行被拿掉＝改過");
+        let extra_blank = screen(&[], &["第一行", "", "    縮排的程式", "", "結尾"]);
+        assert!(!may_press_retry_submit("claude", &extra_blank, multi, false, false), "多了一個空行＝改過");
+        let flat = screen(&[], &["第一行", "", "結尾"]);
+        assert!(!may_press_retry_submit("claude", &flat, "第一行\n結尾", false, false), "原文沒有空行，畫面多了一列空的");
+
+        let hard = screen(&[], &["abcdefghij", "klmnop"]);
+        assert!(may_press_retry_submit("claude", &hard, "abcdefghijklmnop", false, false), "長字被硬折：接縫沒有字元");
+        let soft = screen(&[], &["abcde", "fghij"]);
+        assert!(may_press_retry_submit("claude", &soft, "abcde fghij", false, false), "在空白處折：接縫是一段空白");
+        assert!(may_press_retry_submit("claude", &soft, "abcde\nfghij", false, false), "原文本來就換行");
+        let padded = screen(&[], &["abcde", " fghij"]);
+        assert!(!may_press_retry_submit("claude", &padded, "abcdefghij", false, false), "原文接縫沒有空白，畫面卻多出縮排＝加了字");
+        let trailing = screen(&[], &["abcde", "fghij", "k"]);
+        assert!(!may_press_retry_submit("claude", &trailing, "abcde fghij", false, false), "後面多了字");
+        let short = screen(&[], &["abcde"]);
+        assert!(!may_press_retry_submit("claude", &short, "abcde fghij", false, false), "少了字");
     }
 
     fn screen(transcript: &[&str], box_rows: &[&str]) -> String {
