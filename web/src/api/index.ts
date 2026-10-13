@@ -436,7 +436,7 @@ export async function patchBot(botId: string, input: PatchBotInput): Promise<Pat
   const la = isRec(o.live_apply) ? o.live_apply : null
   return {
     needs_restart: o.needs_restart === true || o.restart_required === true,
-    ...(la ? { live_apply: { applied: la.applied === true, deferred: la.deferred === true, reason: typeof la.reason === 'string' ? la.reason : null } } : {}),
+    ...(la ? { live_apply: { applied: la.applied === true, deferred: la.deferred === true, interrupted: la.interrupted === true, reason: typeof la.reason === 'string' ? la.reason : null } } : {}),
     remapped_model: toModelRemap(o.remapped),
   }
 }

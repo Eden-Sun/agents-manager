@@ -281,6 +281,8 @@ export function BotSettingsPanel({ botId }: { botId: string }) {
     const r = s.runs[botId]
     return r ? r.state !== 'stopped' && r.state !== 'exited' : false
   })
+  // codex 回合進行中改 model／effort：儲存會先按 Esc 停下回合、套用後送 continue 接著跑（#1681），儲存前先講清楚。
+  const turnWorking = useStore((s) => s.runs[botId]?.agent_status === 'working')
   const cardRef = useRef<HTMLDivElement>(null)
   const [pos, setPos] = useState<{ left: number; top: number; maxHeight: number } | null>(null)
   useLayoutEffect(() => {
@@ -414,6 +416,7 @@ export function BotSettingsPanel({ botId }: { botId: string }) {
   const changedKeys = Object.keys(patch)
   const dirty = changedKeys.length > 0
   const canSave = dirty && (patch.name === undefined || nameOk) && !saving
+  const interruptsTurn = bot.kind === 'codex' && turnWorking && (patch.model !== undefined || patch.effort !== undefined)
 
   const save = () => {
     if (!canSave) return
@@ -679,6 +682,13 @@ export function BotSettingsPanel({ botId }: { botId: string }) {
         </div>
       </div>
 
+      {interruptsTurn ? (
+        <div className="bs-banner warn" role="note">
+          <span>
+            這顆正在跑回合：儲存會先按 Esc 停下目前回合，套用新設定後自動送出 <code>continue</code> 接著跑（立即生效，不用等回合結束）。
+          </span>
+        </div>
+      ) : null}
       <div className="bs-actions">
         <span className="hint">{dirty ? `已變更：${changedKeys.join(', ')}` : '沒有變更'}</span>
         <span className="spacer" />

@@ -86,6 +86,9 @@
 - **忙的時候改 fast 不問重啟**（#712，2026-09-28 使用者：「codex 的 fast 切換根本不用重啟」）：codex 回合中照樣吃 `/fast`，所以只差 fast 時徽章是「⟳ fast 當場套用」，
   忙也直接切、不跳重啟確認框；輸入框有字（打 `/fast` 會接在草稿後面一起送出）或改到 model／effort 才排到回合結束，徽章變 `⏳ fast待套用`（按不動，tooltip 寫「回合結束後自動套用」），
   設定卡片寫「已儲存，回合結束後自動套用。」。回合結束仍套不上才出現重啟。
+- **codex 回合中改 model／effort 先說會打斷**（#1681，2026-10-13 使用者：要立即生效）：bot 回合進行中（`agent_status=working`）、codex、這次有改 model 或 effort 時，儲存鈕上方多一條警示色說明
+  「這顆正在跑回合：儲存會先按 Esc 停下目前回合，套用新設定後自動送出 continue 接著跑（立即生效，不用等回合結束）」。只改 fast 不出現（本來就不打斷）。結果不另開彈窗：對話裡有一則 system 說明
+  （成功／套不上但已接著跑／continue 送不出去），套不上時照一般的「需重啟」徽章。
   落差清單照 runtime 比設定：codex 0.157 狀態列印顯示名 `GPT-6-Luna`，模型不分大小寫比——以前多列一行「換成模型 gpt-6-luna」，也讓只差 fast 的落差被當成要重啟。
   重啟確認框寫「重啟後換成設定的值：fast 開 → 關」（實際 → 設定），不寫成沒改過的欄位也要改。
   ![修正前：多列模型、跳重啟框](screenshots/issue-712/before-restart-dialog.png) ![修正後：只差 fast](screenshots/issue-712/after-busy-fast-only.png) ![有草稿時待套用](screenshots/issue-712/after-deferred-draft.png)

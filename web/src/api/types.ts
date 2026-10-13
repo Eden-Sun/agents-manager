@@ -801,7 +801,7 @@ export interface ModelRemap {
 export interface PatchBotResult {
   needs_restart: boolean
   /** 只有真的試過當場套用才有（codex model／effort／fast，SPEC §4.4a）。`deferred`＝bot 正忙、排到下次 idle 再套（#393）。 */
-  live_apply?: { applied: boolean; deferred: boolean; reason: string | null }
+  live_apply?: { applied: boolean; deferred: boolean; /** 這次按了 Esc 停下回合（回合中改 codex 的 model／effort，#1681）。 */ interrupted: boolean; reason: string | null }
   /** 送進去的 model 是停用別名、daemon 換成別的才有；沒換就是 `null`（issue #539）。 */
   remapped_model: ModelRemap | null
 }

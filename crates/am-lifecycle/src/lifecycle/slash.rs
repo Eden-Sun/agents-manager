@@ -177,7 +177,7 @@ async fn apply_live_setting_with_run(
     let target_rev = crate::launch_rev::of(&bot);
     // 呼叫端沒有「改設定前」的版本：不知道 run 原本的落差是不是只來自這次的欄位，所以只落 runtime，
     // 不寫 `live_rev` 豁免（SPEC §4.4a 第 4 點）。空字串不會等於任何 `launch_rev`。
-    apply_live_setting_locked(app, bot_id, fields, "", &target_rev).await
+    apply_live_setting_locked(app, bot_id, fields, "", &target_rev, None).await
 }
 
 pub async fn apply_live_setting_with_revision(
@@ -189,7 +189,24 @@ pub async fn apply_live_setting_with_revision(
 ) -> LiveApplyOutcome {
     let lock = app.bot_lock(bot_id).await;
     let _guard = lock.lock().await;
-    apply_live_setting_locked(app, bot_id, fields, baseline_rev, target_rev).await
+    apply_live_setting_locked(app, bot_id, fields, baseline_rev, target_rev, None).await
+}
+
+/// [`apply_live_setting_with_revision`]，回合中改 codex 的 model／effort 時允許打斷（#1681，只有 PATCH 這條路用）：
+/// 先按 Esc 停下目前回合、套用、再送 `continue` 讓它接著做（見 [`interrupt_and_apply`]）。打斷不了照舊回忙的理由、排到回合結束。
+/// 第二個值＝這次真的按了 Esc（不論之後套用成不成功，回合都被停過、並已嘗試接著跑）。
+pub async fn apply_live_setting_interrupting(
+    app: &impl LcHost,
+    bot_id: &str,
+    fields: &[&str],
+    baseline_rev: &str,
+    target_rev: &str,
+) -> (LiveApplyOutcome, bool) {
+    let interrupted = std::sync::atomic::AtomicBool::new(false);
+    let lock = app.bot_lock(bot_id).await;
+    let _guard = lock.lock().await;
+    let outcome = apply_live_setting_locked(app, bot_id, fields, baseline_rev, target_rev, Some(&interrupted)).await;
+    (outcome, interrupted.load(std::sync::atomic::Ordering::SeqCst))
 }
 
 async fn apply_live_setting_locked(
@@ -198,6 +215,7 @@ async fn apply_live_setting_locked(
     fields: &[&str],
     baseline_rev: &str,
     target_rev: &str,
+    interrupt: Option<&std::sync::atomic::AtomicBool>,
 ) -> LiveApplyOutcome {
     match db::active_run(app.db(), bot_id).await {
         Ok(Some(run)) => {
@@ -213,7 +231,7 @@ async fn apply_live_setting_locked(
             return LiveApplyOutcome::Failed(format!("active_run_read_failed: {error}"));
         }
     }
-    let result = match apply_live_setting_inner(app, bot_id, fields, target_rev).await {
+    let result = match apply_live_setting_inner(app, bot_id, fields, target_rev, interrupt).await {
         Err(why) => LiveApplyOutcome::Failed(why),
         Ok(receipt) => {
             let debt = super::live_apply_debt::RuntimeDebt {
@@ -259,10 +277,11 @@ async fn apply_live_setting_locked(
 }
 
 async fn apply_live_setting_inner(
-    app: &(impl crate::capabilities::Db + crate::capabilities::HerdrRoutes + crate::hosts::HostsAccess),
+    app: &impl LcHost,
     bot_id: &str,
     fields: &[&str],
     target_rev: &str,
+    interrupt: Option<&std::sync::atomic::AtomicBool>,
 ) -> Result<LiveApplyReceipt, String> {
     let Ok(Some(bot)) = db::bot(app.db(), bot_id).await else {
         return Err("bot_missing".into());
@@ -276,6 +295,16 @@ async fn apply_live_setting_inner(
     let in_flight = !matches!(db::in_flight_turn(app.db(), &run.id).await, Ok(None));
     let (pane_id, during_turn) = match live_gate(&run, in_flight, &bot.kind, fields) {
         Ok(gate) => gate,
+        // 回合中改 codex 的 model／effort（#1681）：PATCH 那條路打斷回合立刻套用，其餘（idle 邊補套、blocked）照舊排著。
+        Err(why @ (SlashBlocked::AgentBusy | SlashBlocked::TurnInFlight)) => {
+            let interruptible = bot.kind == "codex"
+                && run.agent_status != "blocked"
+                && fields.iter().any(|f| matches!(*f, "model" | "effort"));
+            match interrupt {
+                Some(flag) if interruptible => return interrupt_and_apply(app, &bot, &run, fields, flag).await,
+                _ => return Err(format!("slash_gate: {}", why.reason())),
+            }
+        }
         Err(why) => return Err(format!("slash_gate: {}", why.reason())),
     };
     let Ok(client) = client_for_run(app, &run).await else {
@@ -394,6 +423,102 @@ async fn apply_live_setting_inner(
         run_id: run.id,
         bot_id: bot_id.to_string(),
         snapshot,
+    })
+}
+
+/// 回合中改 codex 的 model／effort（#1681，SPEC §4.4a）：Esc 把目前回合停下來 → 閒著時的 `codex_live::apply` → 送 `continue`
+/// 讓它接著做，立即生效。呼叫端握著 bot 鎖，整段都在鎖裡：hook 的收尾、§4.3 備援、排隊的 flush 都要同一把鎖，
+/// 不會在打斷到接著跑之間把這個回合收掉、或讓排著的 prompt 插進去變成亂序。
+///
+/// 回合的記帳：**不收這個回合**。Esc 在這裡不是使用者中止（不走 `interruption`、不記接管、不發中斷通知），回合照舊
+/// in_flight；`continue` 記成它的補充（`sent_via = 'supplement'`，hook 的 `input-messages` 才對得上），codex 接著跑完的
+/// Stop 把同一個回合收成 completed——`continue` 是原回合的延續，不是新回合。
+///
+/// 一個鍵都還沒按之前碰到任何一道閘都回忙的理由，照舊排到回合結束：回合不是真的在飛（送達結果沒定案、欠著打斷的收尾）、
+/// 維護窗口握著、畫面不是「回合進行中、輸入框空、沒選單」。Esc 之後確認不了回到可輸入也一樣不盲打。
+/// Esc 進去之後 bot 不能卡在打斷的狀態：套用失敗照樣送 `continue`（`Err` 帶回原因、留下需重啟）；
+/// `continue` 送不出去就把回合收成 failed、對話裡寫明原因，使用者到終端接手。
+async fn interrupt_and_apply(
+    app: &impl LcHost,
+    bot: &db::Bot,
+    run: &db::Run,
+    fields: &[&str],
+    interrupted: &std::sync::atomic::AtomicBool,
+) -> Result<LiveApplyReceipt, String> {
+    let busy = || format!("codex: {}", crate::codex_live::BUSY_NOT_READY);
+    let Some(pane_id) = run.pane_id.as_deref().map(str::trim).filter(|p| !p.is_empty()).map(str::to_string) else {
+        return Err("slash_gate: no_pane".into());
+    };
+    let turn = match db::in_flight_turn(app.db(), &run.id).await {
+        Ok(Some(t)) => t,
+        _ => return Err(busy()),
+    };
+    // 送達臨界區：這一回合的送達結果還沒定案（pending／unknown）、或上一次打斷欠著的收尾還沒補——不再按鍵。
+    if turn.delivery != "ok" || super::interruption::owes(&bot.id, &turn.id) {
+        return Err(busy());
+    }
+    // 維護窗口握著（讀不到也算）：正要被重啟的 session 不要再去碰它。
+    match crate::lifecycle::send_now::ports::MaintenancePort::window_held(app).await {
+        Ok(None) => {}
+        _ => return Err(busy()),
+    }
+    let Ok(client) = client_for_run(app, run).await else {
+        return Err("no_herdr_client".into());
+    };
+    mark_pane_typed(app, &run.id).await?;
+    if let Err(why) = crate::codex_live::interrupt_for_apply(&client, &pane_id).await {
+        return Err(format!("codex: {why}"));
+    }
+    interrupted.store(true, std::sync::atomic::Ordering::SeqCst);
+
+    // 從這裡起 Esc 已經停下了回合：不論套用成不成功都要讓它接著跑。
+    let was_fast = run.runtime_fast.map(|v| v != 0);
+    let applied = crate::codex_live::apply(&client, &pane_id, bot, was_fast, fields).await;
+    let resumed = crate::codex_live::send_resume(&client, &pane_id).await;
+    tracing::info!(bot_id = %bot.id, ?fields, applied = ?applied.as_ref().err(), resumed = ?resumed.as_ref().err(), "codex live apply interrupted the turn");
+
+    let what = fields
+        .iter()
+        .filter_map(|f| match *f {
+            "model" => Some("模型"),
+            "effort" => Some("強度"),
+            "fast" => Some("fast"),
+            _ => None,
+        })
+        .collect::<Vec<_>>()
+        .join("、");
+    match (&applied, &resumed) {
+        (_, Err(why)) => {
+            let note = format!(
+                "改{what}時已按 Esc 停下這個回合，但接著跑的 `{}` 沒能送出（{why}）；回合到此為止，請到終端輸入 continue 或重新下指令。",
+                crate::codex_live::RESUME_TEXT
+            );
+            if let Err(e) = super::interruption::close_turn(app, &bot.id, &run.id, &turn.id, &note).await {
+                tracing::warn!(bot_id = %bot.id, turn = %turn.id, error = %e, "could not close the turn after a failed resume");
+            }
+        }
+        (applied, Ok(())) => {
+            let note = match applied {
+                Ok(_) => format!("改{what}：已按 Esc 停下這個回合、套用新設定，並送出 `{}` 接著跑。", crate::codex_live::RESUME_TEXT),
+                Err(why) => format!(
+                    "改{what}：已按 Esc 停下這個回合，但新設定沒套上（{why}），已送出 `{}` 接著跑；設定需重啟才會生效。",
+                    crate::codex_live::RESUME_TEXT
+                ),
+            };
+            if let Err(e) = record_supplement(app, &bot.id, &run.id, crate::codex_live::RESUME_TEXT).await {
+                tracing::warn!(bot_id = %bot.id, error = %e, "the resume text was typed but could not be recorded as a supplement");
+            }
+            if let Err(e) = super::messages::insert_message(app, &turn.conversation_id, Some(&turn.id), "system", &note, "system", false, None).await {
+                tracing::warn!(bot_id = %bot.id, error = %e, "could not write the interrupted-apply note");
+            }
+        }
+    }
+
+    let seen = applied.map_err(|why| format!("codex: {why}"))?;
+    Ok(LiveApplyReceipt {
+        run_id: run.id.clone(),
+        bot_id: bot.id.clone(),
+        snapshot: RuntimeSnapshot { model: Some(seen.model), effort: seen.effort, fast: Some(i64::from(seen.fast)) },
     })
 }
 

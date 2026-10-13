@@ -539,7 +539,7 @@ config.toml 裡沒有的 id（child、已刪）忽略。成功推 `project_chang
 
 **`needs_restart`（`GET /api/state` 的 bot，#353）**：執行中的 CLI 載入的啟動設定（model／effort／fast／persona／args／identity／env／inject_hooks／auto_approve）跟現在存的不同＝`true`。從資料算：run 啟動時記下載入的版本（`runs.launch_rev`），bot 目前的版本對不上就是過期；`PATCH` 回應掉了、daemon 之後重啟，這個旗標都還在，重啟（新 run 載入新版本）或當場套用成功（`live_apply.applied`）才清掉。沒記版本的 run（adopt 來的、升版前的）不誤報，改設定的那一刻才開始追蹤。
 
-**`live_apply_deferred`（`GET /api/state` 的 bot，#712）**：只改可即時套用的欄位而 bot 正忙、這次送不進去時，`PATCH` 回 `needs_restart:false`、`live_apply.deferred:true`（`reason` 是 `slash_gate: agent_busy`／`slash_gate: turn_in_flight`／`codex: busy_not_ready`）；state 的 bot 帶 `live_apply_deferred:true`、`needs_restart:false`，回合結束後自動套用。codex 只改 `fast` 時回合中會直接送（`live_apply.applied:true`），只有輸入框有字或選單開著才排。回合結束後仍因選單或讀回失敗而套不上，才恢復 `needs_restart:true`。claude／grok 已經排著別的欄位時不合併，直接回 `needs_restart:true`。待套用狀態存在 daemon 記憶體，daemon 重啟後若設定仍有差異，會依啟動版本顯示需重啟。
+**`live_apply_deferred`（`GET /api/state` 的 bot，#712）**：只改可即時套用的欄位而 bot 正忙、這次送不進去時，`PATCH` 回 `needs_restart:false`、`live_apply.deferred:true`（`reason` 是 `slash_gate: agent_busy`／`slash_gate: turn_in_flight`／`codex: busy_not_ready`）；state 的 bot 帶 `live_apply_deferred:true`、`needs_restart:false`，回合結束後自動套用。codex 只改 `fast` 時回合中會直接送（`live_apply.applied:true`），只有輸入框有字或選單開著才排；改 model／effort 時回合中走「Esc 打斷 → 套用 → continue」（`live_apply.interrupted:true`，見 §10.2 #1681），打斷不了才排。回合結束後仍因選單或讀回失敗而套不上，才恢復 `needs_restart:true`。claude／grok 已經排著別的欄位時不合併，直接回 `needs_restart:true`。待套用狀態存在 daemon 記憶體，daemon 重啟後若設定仍有差異，會依啟動版本顯示需重啟。
 
 **`primary`（主力那列的固定順序，issue #344）**：bot id 陣列，位置（**1 起算**）寫進 `bots.primary_position`；沒點名的維持原值。
 只存 DB、不進 config.toml（同 `primary`：手機與桌機追的是同一組），所以只送 `primary` 的請求不碰 config.toml。`GET /api/state` 每顆 bot 有
@@ -1802,12 +1802,14 @@ body 所有欄位可省；`model`、`identity` 傳 `null` 或 `""` 清除；`env
 AGM CLI 可用 `agm bot set <bot_id> [--model M] [--effort E] [--identity I]` 更新這三欄；只會 PATCH 命令列有帶的欄位，至少要帶一欄。成功時完整輸出 daemon 回應（包括 `needs_restart` 與可能出現的 `live_apply`）；4xx／5xx 以 CLI 結構化錯誤輸出至 stderr 並以非 0 退出。
 
 回 `200 {"needs_restart": bool}`，成功推 `bot_changed`。真的試過「當場套用」時多一個
-`live_apply: {fields, applied, deferred, pending_bookkeeping, reason}`（2026-09-13；`deferred` 是 #393）：`reason` 是機器可讀 key——
+`live_apply: {fields, applied, deferred, interrupted, pending_bookkeeping, reason}`（2026-09-13；`deferred` 是 #393；`interrupted` 是 #1681）：`reason` 是機器可讀 key——
 `bot_missing` / `no_active_run` / `slash_gate: <not_running|agent_busy|turn_in_flight|no_pane>` /
 `no_herdr_client` / `<field>_cleared_to_default` / `no_slash_command_for_<field>` / `slash_send_failed` /
 `not_a_single_field`，codex 另有 `codex: <picker_failed|fast_toggle_failed|no_status_line|
 readback_model_mismatch|readback_effort_mismatch|readback_fast_mismatch|busy_not_ready>`；DB-only recovery 另有 `live_runtime_debt_store_failed`、`live_runtime_write_failed` 與 `live_bookkeeping_still_pending`。以前失敗是**靜默**的：
 只回 `needs_restart: true`、log 也沒寫，「codex 改 effort 明明不用重啟，為什麼又重啟」查不出來。`applied: true` 代表 TUI readback 與 runtime snapshot 已寫入同一個目標 run；若後續 `launch_rev` stamp 失敗，`live_rev` marker 會留在該 run，避免假的 restart badge，背景只重試 stamp。若 runtime 寫入失敗，回 `applied: false`、`pending_bookkeeping: true`、`needs_restart: true`，daemon 持久化 readback snapshot 並只重試 DB 寫入，不重送指令。
+
+**回合中改 codex 的 model／effort（#1681）**：`PATCH` 當下 agent `working`／回合在飛、畫面是「回合進行中、輸入框空、沒選單」時，daemon 先按 Esc 停下回合、套用、再送 `continue` 接著跑，`live_apply.applied: true`、`live_apply.interrupted: true`（回合不收、不算使用者中止，`continue` 是該回合的補充訊息；SPEC §4.4a）。Esc 之後套用失敗：`applied: false`、`interrupted: true`、`needs_restart: true`，`reason` 照一般 codex reason，回合已送 `continue` 接著跑。blocked、送達結果沒定案、維護窗口握著、輸入框有字、Esc 後畫面確認不了回到可輸入，一律不盲打、走下面的排隊（`interrupted: false` 或 Esc 之後確認不了時 `deferred: true`、`reason: codex: busy_not_ready`）。`interrupted` 沒有時為 `false`。
 
 **忙的時候（#393、#712）**：codex 只改 `fast` 時回合中直接送（`applied: true`，SPEC §4.4a「回合中只切 fast」）。送不進去、`reason` 是 `slash_gate: agent_busy`、`slash_gate: turn_in_flight` 或 `codex: busy_not_ready`（回合中輸入框有字／選單開著）時，
 `live_apply.deferred: true`、`needs_restart: false`——daemon 把要套的欄位與 revision 基準記在記憶體，等這顆 bot 的 idle 邊（working／blocked／unknown → idle）或回合收掉再走同一條 `apply_live_setting`

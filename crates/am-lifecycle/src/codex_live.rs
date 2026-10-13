@@ -218,7 +218,8 @@ pub fn picker_number(screen: &str, needle: &str) -> Option<u32> {
         };
         let matches = match needle {
             "(current)" | "(default)" => marker == Some(needle),
-            _ => plain_label == needle,
+            // 0.162 的選單印顯示名（`GPT-6.1-Sol`），設定裡是 id（`gpt-6.1-sol`）：不分大小寫比（#1681 實測）。
+            _ => plain_label.eq_ignore_ascii_case(needle),
         };
         if matches {
             if found.is_some() {
@@ -585,6 +586,104 @@ pub async fn apply_fast_during_turn(
 
 /// [`apply_fast_during_turn`] 碰不得畫面時的理由：跟「agent 忙」一樣排到回合結束（`deferred_live::is_busy_reason`）。
 pub const BUSY_NOT_READY: &str = "busy_not_ready";
+
+/// 回合中改 model／effort 打斷後接著跑送的那一句（#1681）。
+pub const RESUME_TEXT: &str = "continue";
+
+/// 打斷之後等畫面回到可輸入的讀取次數與間隔（連續兩次讀到同一個「沒在跑、輸入框空」才算穩）。
+const INTERRUPT_SETTLE_READS: u32 = 10;
+
+fn interrupt_settle_poll() -> Duration {
+    Duration::from_millis(if cfg!(test) { 20 } else { 400 })
+}
+
+/// 回合中改 model／effort（#1681）：model／effort 要開選單，回合跑著不能碰，所以先按 Esc 把回合停下來，
+/// 讓呼叫端接著走閒著時的 [`apply`]、再用 [`send_resume`] 讓它接著做。
+///
+/// 只有畫面確定是「回合進行中、輸入框空的、沒有選單」才按（跟 [`apply_fast_during_turn`] 同一道閘：輸入框有使用者的草稿
+/// 就不碰）。按完讀畫面直到它真的回到可輸入——連續兩次讀到一樣的「沒在跑、輸入框空、沒選單」。
+/// `Err(`[`BUSY_NOT_READY`]`)`：沒按 Esc，或按了但畫面確認不了回到可輸入——**不盲打**，呼叫端照舊排到回合結束。
+/// `Err("pane_read_failed")`：開頭讀不到畫面，什麼都沒按。
+pub async fn interrupt_for_apply(client: &HerdrClient, pane_id: &str) -> Result<(), &'static str> {
+    // 一律讀帶樣式的那份、自己剝掉樣式再判斷「在跑／有選單」：herdr 沒有帶樣式的讀法時 `read_styled` 退回純文字，
+    // 輸入框就讀成 NonEmpty（佔位字當草稿），這裡照 [`busy_fast_blocked`] 的保守作法不碰。
+    let styled = crate::composer_parse::read_styled(client, pane_id, "visible", 60)
+        .await
+        .map_err(|_| "pane_read_failed")?;
+    let plain = unstyled(&styled);
+    if !crate::lifecycle::poller::pane_still_busy(&plain) || busy_fast_blocked(&plain, &styled) {
+        return Err(BUSY_NOT_READY);
+    }
+    if !key(client, pane_id, "Escape").await {
+        return Err(BUSY_NOT_READY);
+    }
+    #[cfg(all(test, feature = "daemon-test-harness"))]
+    crate::race_point::hit("codex_interrupt_after_esc", pane_id).await;
+    let mut prev: Option<String> = None;
+    for _ in 0..INTERRUPT_SETTLE_READS {
+        tokio::time::sleep(interrupt_settle_poll()).await;
+        let Ok(styled) = crate::composer_parse::read_styled(client, pane_id, "visible", 60).await else {
+            prev = None;
+            continue;
+        };
+        let plain = unstyled(&styled);
+        let ready = !crate::lifecycle::poller::pane_still_busy(&plain)
+            && !picker_open(&plain)
+            && crate::composer_parse::box_state("codex", &styled) == crate::composer_parse::BoxState::Empty;
+        if ready && prev.as_deref() == Some(plain.as_str()) {
+            return Ok(());
+        }
+        prev = ready.then_some(plain);
+    }
+    tracing::warn!(pane_id, "codex: Esc sent for a live apply but the pane never settled back to an empty composer");
+    Err(BUSY_NOT_READY)
+}
+
+/// 帶樣式讀法的文字剝掉樣式（一列一列）。
+fn unstyled(styled: &str) -> String {
+    styled.lines().map(crate::composer_parse::strip_ansi).collect::<Vec<_>>().join("\n")
+}
+
+/// 打斷＋套用之後讓它接著做（#1681）：把 [`RESUME_TEXT`] 打進輸入框、Enter。畫面上選單開著、輸入框有字就不打；
+/// Enter 之後輸入框還留著那句字就再按一次（最多兩次），仍然留著回 `Err("resume_not_submitted")`。
+/// 打得進去但畫面讀不到也算送出（hook 會照常收尾這個回合），不為了讀不到把已經送出的 continue 報成失敗。
+pub async fn send_resume(client: &HerdrClient, pane_id: &str) -> Result<(), &'static str> {
+    let snap = crate::composer_parse::read_styled_snapshot(client, pane_id, "visible", 60)
+        .await
+        .map_err(|_| "pane_read_failed")?;
+    if picker_open(&unstyled(&snap.text)) {
+        return Err("picker_open");
+    }
+    let styled = snap.format == "ansi";
+    if styled && crate::composer_parse::box_state("codex", &snap.text) == crate::composer_parse::BoxState::NonEmpty {
+        return Err("composer_not_empty");
+    }
+    if !text(client, pane_id, RESUME_TEXT).await {
+        return Err("resume_send_failed");
+    }
+    tokio::time::sleep(Duration::from_millis(if cfg!(test) { 20 } else { 600 })).await;
+    for press in 0..2 {
+        if !key(client, pane_id, "Enter").await {
+            return Err("resume_send_failed");
+        }
+        tokio::time::sleep(Duration::from_millis(if cfg!(test) { 20 } else { 900 })).await;
+        #[cfg(all(test, feature = "daemon-test-harness"))]
+        crate::race_point::hit("codex_resume_after_enter", pane_id).await;
+        let Ok(snap) = crate::composer_parse::read_styled_snapshot(client, pane_id, "visible", 60).await else {
+            return Ok(());
+        };
+        let still_typed = snap.format == "ansi"
+            && !crate::lifecycle::poller::pane_still_busy(&unstyled(&snap.text))
+            && crate::composer_parse::box_state("codex", &snap.text) == crate::composer_parse::BoxState::NonEmpty;
+        if !still_typed {
+            return Ok(());
+        }
+        if press == 1 {
+            return Err("resume_not_submitted");
+        }
+    }
+    Err("resume_not_submitted")
+}
 
 #[cfg(all(test, feature = "daemon-test-harness"))]
 mod tests {
@@ -1165,6 +1264,25 @@ mod tests {
         assert!(picker_number(EFFORT_MENU_0154, effort_menu_label("max")).is_none(), "max 藏在下一層");
         // `(default)` 那一列不能被 `Extra high` 的描述文字搶走（描述在兩格空白之後）。
         assert_eq!(picker_number(EFFORT_MENU_0154, "(default)"), Some(1));
+    }
+
+    /// codex 0.162.1（2026-10-13 在 w0:pAJ 實測，#1681）：選單的模型印顯示名（`GPT-6.1-Sol`），設定裡是 id（`gpt-6.1-sol`）；
+    /// 以前整串比對、大小寫不同就找不到那一列，live 套用一律 `picker_failed` 退回重啟。
+    #[test]
+    fn the_0_162_menus_print_display_names_that_match_ids_without_case() {
+        let menu = "\
+  Select Model and Effort
+
+› 1. GPT-6.1-Sol (current)  Latest workhorse model for coding and everyday work.
+  2. GPT-6-Luna             Fast and affordable model for easier tasks.
+
+  enter select · esc back
+";
+        assert!(picker_open(menu));
+        assert_eq!(picker_number(menu, "gpt-6-luna"), Some(2));
+        assert_eq!(picker_number(menu, "gpt-6.1-sol"), Some(1));
+        assert_eq!(picker_number(menu, "(current)"), Some(1));
+        assert_eq!(picker_number(menu, "gpt-6"), None, "不是前綴比對");
     }
 
     /// 2026-09-13 使用者截圖那一行（行尾被截斷）。
