@@ -876,7 +876,22 @@ StatusLine 分支（過世代圍籬之後，舊 run／舊 hook 進不來）發�
   `• Service tier set to priority`／`default`、狀態列 `fast` 立刻出現／消失、回合照常跑完）。所以 codex 只改 fast、agent `working` 或回合在飛時
   `slash::live_gate` 放行，走 `codex_live::apply_fast_during_turn`：**絕不按 Esc**（回合中 Esc＝中斷），選單／選擇畫面開著或輸入框不是空的
   （帶樣式讀 `box_state`；使用者的草稿後面接 `/fast` 再 Enter 會把整段送出）就不碰，回 `codex: busy_not_ready` 走下面的排隊。`blocked` 照舊不碰。
-  model／effort 要開選單，回合中不送。
+  model／effort 要開選單，回合中不直接送——改走下一條的「打斷 → 套用 → continue」。
+- **回合中改 model／effort：Esc 打斷 → 套用 → continue 接著跑**（#1681，2026-10-13 使用者：改了要立即生效，不要排到回合結束；codex 0.162.1 在使用者授權的 w0:pAJ 上實測 Esc 後輸入列立刻可用、
+  `/model` 兩層選單照開、`continue` 送進去 `Working` 接著跑）。只在 `PATCH` 那一刻做（`slash::apply_live_setting_interrupting`；idle 邊補套照舊不打斷新回合），
+  只限 codex、欄位含 model 或 effort（fast 一起改也行；只改 fast 仍走上一條，不打斷）。整段握著 bot 鎖：hook 收尾、§4.3 備援、排隊的 flush 都等同一把鎖，不會在中間把回合收掉或讓排著的 prompt 插隊。
+  閘（任何一道擋下都**一個鍵都不按**，照舊排到回合結束）：agent `blocked`；沒有在飛的回合、或它的 `delivery` 不是 `ok`（送達臨界區）、或這顆 bot 還欠著打斷的收尾；維護窗口握著（讀不到也算）；
+  畫面不是「回合進行中（`Working … esc to interrupt`）、輸入框空（帶樣式讀）、沒選單」。
+  流程：`mark_pane_typed` → Esc（`pane.send_keys Escape`）→ 連續兩次讀到「沒在跑、輸入框空、沒選單」同一個畫面才算回到可輸入（`codex_live::interrupt_for_apply`；確認不了＝回 `codex: busy_not_ready`
+  排到回合結束，**不盲打**）→ 閒著時的 `codex_live::apply`（同一套選單與讀回）→ `codex_live::send_resume` 打 `continue` ＋ Enter（輸入框還留著那句就補按一次 Enter，最多兩次）。
+  **回合的記帳**：Esc 在這裡不是使用者中止——不走 `interruption`、不記接管（`note_user_interrupt`）、不寫「interrupted by user」、不發中斷通知；那個回合**留在 in_flight**，
+  `continue` 記成它的補充（`sent_via='supplement'`，hook 的 `input-messages` 才對得上 `with_supplements`），codex 接著跑完的 Stop 把同一個回合收成 completed——`continue` 是原回合的延續，不是新回合。
+  對話裡多一則 system 說明（「改強度：已按 Esc 停下這個回合、套用新設定，並送出 continue 接著跑」）。
+  **Esc 之後 bot 不能卡住**：套用失敗（選單開不出來、讀回對不上）照樣送 `continue`，`live_apply` 回該 reason、`needs_restart:true`，對話寫「新設定沒套上（原因），已送出 continue 接著跑」；
+  `continue` 送不出去（選單開著、輸入框有字、herdr 拒收、Enter 後字還留在框裡）就把回合收成 failed（`interruption::close_turn`，有 partial 回覆就一併存），system 說明寫明原因與「請到終端輸入 continue」。
+  `PATCH` 回應的 `live_apply.interrupted` 告訴呼叫端這次有沒有按過 Esc。web 在 codex 回合進行中、改 model／effort 時於儲存前就說明「會先停下目前回合、套用後送 continue 接著跑」。
+- **選單的模型標籤不分大小寫比**（#1681）：0.162.1 的 `/model` 選單印顯示名（`GPT-6.1-Sol`），設定與 runtime 是 id（`gpt-6.1-sol`）；以前整串比對找不到那一列，live 套用一律 `picker_failed`。
+  選單頁尾也多了 `enter default · s session · esc back`（`s` 只套這個 session）；daemon 仍按數字，與「存成預設」的行為不變。
   閒著時的 `codex_live::apply` 同樣先帶樣式讀輸入框：有使用者的草稿（`NonEmpty`）就回 `codex: composer_not_empty`、一個鍵都不按，回退成需重啟（herdr 不給帶樣式讀法時分不出佔位字，不擋）。
 - **忙的時候不重啟**（#393、#712）：碰不得的時候（上面以外的忙：working／blocked／有回合在飛），`PATCH` 不回退成重啟，而是把欄位、PATCH 前版本與目標版本記進 `lifecycle/deferred_live.rs`（排程本身在記憶體），
   等 idle 邊（`events.rs`：working→idle，以及 blocked／unknown→idle）或回合收掉（`messages::emit_turn`：agent 早已 idle、只剩回合紀錄在飛時不會再有 idle 邊）再套；

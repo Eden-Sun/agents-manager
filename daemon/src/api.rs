@@ -2956,6 +2956,8 @@ async fn patch_bot(
     };
     // 失敗要說得出哪一步（2026-09-13 使用者：codex 改 effort 靜默落回重啟）。只在真的試過時才出現。
     let mut live_revisions = None;
+    // 回合中改 codex 的 model／effort 時，live 套用會按 Esc 停下回合、套用後送 continue 接著跑（#1681）：這次有沒有按。
+    let mut live_interrupted = false;
     let live = if needs_restart && !live_fields.is_empty() {
         let target_rev = match db::bot(&app.db, &id).await {
             Ok(Some(bot)) => crate::launch_rev::of(&bot),
@@ -2969,6 +2971,7 @@ async fn patch_bot(
                     "fields": live_fields,
                     "applied": false,
                     "deferred": false,
+                    "interrupted": false,
                     "pending_bookkeeping": false,
                     "reason": format!("target_revision_unreadable: {e}"),
                 });
@@ -2977,16 +2980,16 @@ async fn patch_bot(
         };
         let baseline_rev = pre_patch_rev.clone().unwrap_or_else(|| target_rev.clone());
         live_revisions = Some((baseline_rev.clone(), target_rev.clone()));
-        Some(
-            lifecycle::apply_live_setting_with_revision(
-                &app,
-                &id,
-                &live_fields,
-                &baseline_rev,
-                &target_rev,
-            )
-            .await,
+        let (outcome, interrupted) = lifecycle::apply_live_setting_interrupting(
+            &app,
+            &id,
+            &live_fields,
+            &baseline_rev,
+            &target_rev,
         )
+        .await;
+        live_interrupted = interrupted;
+        Some(outcome)
     } else {
         None
     };
@@ -3035,6 +3038,7 @@ async fn patch_bot(
             "fields": live_fields,
             "applied": applied,
             "deferred": deferred,
+            "interrupted": live_interrupted,
             "pending_bookkeeping": pending_bookkeeping,
             "reason": reason,
         });
@@ -10758,6 +10762,238 @@ mod bot_config_tests {
             assert!(e.herdr.calls_to("pane.send_text").is_empty(), "{patch_body}: 草稿後面不能再打字: {:?}", e.herdr.calls_to("pane.send_text"));
             assert!(e.herdr.calls_to("pane.send_keys").is_empty(), "{patch_body}: 一個鍵都不按（Enter 會送出草稿）: {:?}", e.herdr.calls_to("pane.send_keys"));
         }
+    }
+
+    const CODEX_IDLE_ANSI: &str = include_str!("../../crates/am-lifecycle/src/lifecycle/fixtures/codex-0.155-idle.ansi");
+
+    /// 回合被 Esc 停下之後的輸入列（空的、沒有 Working），最後一列換成指定的狀態列。
+    fn codex_idle_screen(status: &str) -> String {
+        let mut rows: Vec<&str> = CODEX_IDLE_ANSI.lines().collect();
+        rows.pop();
+        rows.push(status);
+        rows.join("\n") + "\n"
+    }
+
+    /// codex 0.162 的選單印顯示名（`GPT-6-Luna`），設定裡是 id（`gpt-6-luna`）。
+    const CODEX_MODEL_MENU: &str = "\
+  Select Model and Effort
+
+› 1. GPT-6.1-Sol (current)  Latest workhorse model for coding and everyday work.
+  2. GPT-6-Astra            Frontier intelligence for the most demanding work.
+  3. GPT-6-Luna             Fast and affordable model for easier tasks.
+
+  enter select · esc back
+";
+    const CODEX_EFFORT_MENU: &str = "\
+  Select Reasoning Level for GPT-6-Luna
+
+  1. Low (default)     Fast responses with lighter reasoning
+  2. Medium            Balances speed and reasoning depth for everyday tasks
+  3. High              Greater reasoning depth for complex problems
+  4. Extra high        Extra high reasoning depth for complex problems
+  5. More reasoning…   Max and Ultra consume usage limits faster
+
+  enter default · s session · esc back
+";
+
+    /// 在飛的回合（已確定送達），讓 `busy_codex` 的 bot 回合進行中。回 turn id。
+    async fn in_flight_turn_for(e: &tt::Env, id: &str, run_id: &str, delivery: &str) -> String {
+        let conv = db::conversation_id(&e.app.db, id).await.unwrap();
+        let turn_id = db::ulid();
+        sqlx::query("INSERT INTO turns (id, conversation_id, run_id, origin, status, delivery, created_at) VALUES (?,?,?,'web','in_flight',?,?)")
+            .bind(&turn_id)
+            .bind(&conv)
+            .bind(run_id)
+            .bind(delivery)
+            .bind(db::now())
+            .execute(&e.app.db)
+            .await
+            .unwrap();
+        turn_id
+    }
+
+    async fn sent_texts(e: &tt::Env) -> Vec<String> {
+        e.herdr.calls_to("pane.send_text").iter().map(|v| v["text"].as_str().unwrap_or_default().to_string()).collect()
+    }
+
+    fn sent_keys(e: &tt::Env) -> Vec<String> {
+        e.herdr
+            .calls_to("pane.send_keys")
+            .iter()
+            .flat_map(|v| v["keys"].as_array().cloned().unwrap_or_default())
+            .map(|k| k.as_str().unwrap_or_default().to_string())
+            .collect()
+    }
+
+    async fn turn_status(e: &tt::Env, turn_id: &str) -> String {
+        sqlx::query_scalar("SELECT status FROM turns WHERE id = ?").bind(turn_id).fetch_one(&e.app.db).await.unwrap()
+    }
+
+    /// 回合中改強度的整段流程用的畫面腳本：Esc 之後回到輸入列、`/model` 兩層選單、選完回到輸入列（狀態列換成新強度）。
+    fn script_interrupt_apply(e: &tt::Env, pane: &str, after_esc: String, after_apply: String) {
+        let screens = e.herdr.screens.clone();
+        let (pane_a, screens_a) = (pane.to_string(), screens.clone());
+        crate::lifecycle::race_point::arm("codex_interrupt_after_esc", pane, move || async move {
+            screens_a.lock().unwrap().insert(pane_a, after_esc);
+        });
+        let (pane_b, screens_b) = (pane.to_string(), screens.clone());
+        crate::lifecycle::race_point::arm("codex_apply_before_model_picker_read", pane, move || async move {
+            screens_b.lock().unwrap().insert(pane_b, CODEX_MODEL_MENU.into());
+        });
+        let (pane_c, screens_c) = (pane.to_string(), screens.clone());
+        crate::lifecycle::race_point::arm("codex_apply_before_effort_picker_read", pane, move || async move {
+            screens_c.lock().unwrap().insert(pane_c, CODEX_EFFORT_MENU.into());
+        });
+        let (pane_d, screens_d) = (pane.to_string(), screens);
+        crate::lifecycle::race_point::arm("codex_picker_before_final_read", pane, move || async move {
+            screens_d.lock().unwrap().insert(pane_d, after_apply);
+        });
+    }
+
+    /// #1681：回合中改強度——Esc 停下回合 → 套用 → 送 continue 接著跑，立即生效、不排到回合結束。
+    /// 回合不收（不是使用者中止）：continue 記成它的補充，Stop 之後同一個回合收成 completed。
+    #[tokio::test]
+    async fn a_busy_effort_change_interrupts_applies_and_resumes_the_same_turn() {
+        let e = env().await;
+        let (id, run_id, pane) = busy_codex(&e, "effort-interrupt").await;
+        let turn_id = in_flight_turn_for(&e, &id, &run_id, "ok").await;
+        e.herdr.set_screen(&pane, &codex_working_screen("  GPT-6-Luna max · /tmp · Context 43% used · 5h 12% left"));
+        script_interrupt_apply(
+            &e,
+            &pane,
+            codex_idle_screen("  GPT-6-Luna max · /tmp · Context 43% used · 5h 12% left"),
+            codex_idle_screen("  GPT-6-Luna high · /tmp · Context 43% used · 5h 12% left"),
+        );
+
+        let out = patch(&e, &id, json!({"effort": "high"})).await.unwrap();
+        assert_eq!(out["live_apply"]["applied"], json!(true), "立即套用: {out}");
+        assert_eq!(out["live_apply"]["interrupted"], json!(true), "{out}");
+        assert_eq!(out["live_apply"]["deferred"], json!(false), "{out}");
+        assert_eq!(out["needs_restart"], json!(false), "{out}");
+        assert!(!lifecycle::is_deferred(&id), "不排到回合結束");
+        assert_eq!(sent_keys(&e).first().map(String::as_str), Some("Escape"), "第一個鍵是 Esc: {:?}", sent_keys(&e));
+        assert_eq!(sent_texts(&e).await, vec!["/model", "3", "3", "continue"], "選單兩層（顯示名大小寫不同也認得）再接著跑");
+        assert_eq!(sent_keys(&e).last().map(String::as_str), Some("Enter"), "最後送出 continue");
+        assert_eq!(turn_status(&e, &turn_id).await, "in_flight", "回合沒被記成失敗／使用者中止");
+        let users: Vec<(String, Option<String>)> =
+            sqlx::query_as("SELECT content, sent_via FROM messages WHERE turn_id = ? AND role = 'user'").bind(&turn_id).fetch_all(&e.app.db).await.unwrap();
+        assert_eq!(users, vec![("continue".to_string(), Some("supplement".to_string()))], "continue 是原回合的補充");
+        let notes: Vec<String> = sqlx::query_scalar("SELECT content FROM messages WHERE turn_id = ? AND role = 'system'").bind(&turn_id).fetch_all(&e.app.db).await.unwrap();
+        assert_eq!(notes.len(), 1, "{notes:?}");
+        assert!(notes[0].contains("Esc") && notes[0].contains("強度"), "{notes:?}");
+        let runtime_effort: Option<String> = sqlx::query_scalar("SELECT runtime_effort FROM runs WHERE id = ?").bind(&run_id).fetch_one(&e.app.db).await.unwrap();
+        assert_eq!(runtime_effort.as_deref(), Some("high"));
+    }
+
+    /// #1681：套用失敗（選單開不出來）也不能讓回合停在被打斷的狀態——照樣送 continue，留下需重啟與原因。
+    #[tokio::test]
+    async fn a_failed_apply_after_the_interrupt_still_resumes_the_turn() {
+        let e = env().await;
+        let (id, run_id, pane) = busy_codex(&e, "effort-interrupt-fail").await;
+        let turn_id = in_flight_turn_for(&e, &id, &run_id, "ok").await;
+        e.herdr.set_screen(&pane, &codex_working_screen("  GPT-6-Luna max · /tmp · Context 43% used · 5h 12% left"));
+        let replace = e.herdr.set_screen_later();
+        let idle = codex_idle_screen("  GPT-6-Luna max · /tmp · Context 43% used · 5h 12% left");
+        let pane_after = pane.clone();
+        crate::lifecycle::race_point::arm("codex_interrupt_after_esc", &pane, move || async move {
+            replace(&pane_after, &idle);
+        });
+
+        let out = patch(&e, &id, json!({"effort": "high"})).await.unwrap();
+        assert_eq!(out["live_apply"]["applied"], json!(false), "{out}");
+        assert_eq!(out["live_apply"]["interrupted"], json!(true), "{out}");
+        assert_eq!(out["live_apply"]["reason"], json!("codex: picker_failed"), "{out}");
+        assert_eq!(out["needs_restart"], json!(true), "套不上就要看得到需重啟: {out}");
+        assert_eq!(sent_texts(&e).await, vec!["/model", "continue"], "套用失敗仍送 continue");
+        assert_eq!(turn_status(&e, &turn_id).await, "in_flight");
+        let notes: Vec<String> = sqlx::query_scalar("SELECT content FROM messages WHERE turn_id = ? AND role = 'system'").bind(&turn_id).fetch_all(&e.app.db).await.unwrap();
+        assert!(notes.iter().any(|n| n.contains("沒套上") && n.contains("picker_failed")), "{notes:?}");
+    }
+
+    /// #1681：continue 送不出去時 bot 不能卡在「被打斷、沒人接著跑」：回合收成 failed、對話寫明原因。設定照常算套用。
+    #[tokio::test]
+    async fn a_resume_that_cannot_be_typed_fails_the_turn_with_a_visible_reason() {
+        let e = env().await;
+        let (id, run_id, pane) = busy_codex(&e, "effort-interrupt-resume-fail").await;
+        let turn_id = in_flight_turn_for(&e, &id, &run_id, "ok").await;
+        e.herdr.set_screen(&pane, &codex_working_screen("  GPT-6-Luna max · /tmp · Context 43% used · 5h 12% left"));
+        script_interrupt_apply(
+            &e,
+            &pane,
+            codex_idle_screen("  GPT-6-Luna max · /tmp · Context 43% used · 5h 12% left"),
+            codex_idle_screen("  GPT-6-Luna high · /tmp · Context 43% used · 5h 12% left"),
+        );
+        let fail = e.herdr.fail_later();
+        let pane_hook = pane.clone();
+        let screens = e.herdr.screens.clone();
+        let after_apply = codex_idle_screen("  GPT-6-Luna high · /tmp · Context 43% used · 5h 12% left");
+        crate::lifecycle::race_point::arm("codex_picker_before_final_read", &pane, move || async move {
+            screens.lock().unwrap().insert(pane_hook, after_apply);
+            fail("pane.send_text", tt::Fault::Refuse);
+        });
+
+        let out = patch(&e, &id, json!({"effort": "high"})).await.unwrap();
+        assert_eq!(out["live_apply"]["applied"], json!(true), "設定已經落地: {out}");
+        assert_eq!(out["live_apply"]["interrupted"], json!(true), "{out}");
+        assert_eq!(turn_status(&e, &turn_id).await, "failed", "沒人接著跑：回合要收掉，不能掛在 in_flight");
+        let notes: Vec<String> = sqlx::query_scalar("SELECT content FROM messages WHERE turn_id = ? AND role = 'system'").bind(&turn_id).fetch_all(&e.app.db).await.unwrap();
+        assert!(notes.iter().any(|n| n.contains("continue") && n.contains("沒能送出")), "{notes:?}");
+    }
+
+    /// #1681：Esc 之後畫面確認不了回到可輸入——不盲打，退回排到回合結束（沒有 /model、沒有 continue）。
+    #[tokio::test]
+    async fn an_esc_that_never_settles_falls_back_to_waiting_for_the_turn_end() {
+        let e = env().await;
+        let (id, run_id, pane) = busy_codex(&e, "effort-interrupt-unsettled").await;
+        in_flight_turn_for(&e, &id, &run_id, "ok").await;
+        e.herdr.set_screen(&pane, &codex_working_screen("  GPT-6-Luna max · /tmp · Context 43% used · 5h 12% left"));
+
+        let out = patch(&e, &id, json!({"effort": "high"})).await.unwrap();
+        assert_eq!(out["live_apply"]["deferred"], json!(true), "{out}");
+        assert_eq!(out["live_apply"]["interrupted"], json!(false), "{out}");
+        assert_eq!(out["live_apply"]["reason"], json!("codex: busy_not_ready"), "{out}");
+        assert_eq!(out["needs_restart"], json!(false), "{out}");
+        assert_eq!(sent_keys(&e), vec!["Escape"], "只按過那一次 Esc");
+        assert!(sent_texts(&e).await.is_empty(), "不盲打");
+        lifecycle::apply_deferred_once(&e.app, &id).await;
+    }
+
+    /// #1681：該排著的照舊排著、一個鍵都不按——blocked（等人回答）、送達結果沒定案、輸入框有使用者的草稿。
+    #[tokio::test]
+    async fn blocked_unsettled_delivery_and_a_draft_are_never_interrupted() {
+        for case in ["blocked", "pending_delivery", "draft"] {
+            let e = env().await;
+            let (id, run_id, pane) = busy_codex(&e, &format!("noint-{case}")).await;
+            let delivery = if case == "pending_delivery" { "pending" } else { "ok" };
+            in_flight_turn_for(&e, &id, &run_id, delivery).await;
+            if case == "blocked" {
+                sqlx::query("UPDATE runs SET agent_status = 'blocked' WHERE id = ?").bind(&run_id).execute(&e.app.db).await.unwrap();
+            }
+            let screen = if case == "draft" { CODEX_DRAFT_ANSI.to_string() } else { codex_working_screen("  GPT-6-Luna max · /tmp · Context 43% used · 5h 12% left") };
+            e.herdr.set_screen(&pane, &screen);
+
+            let out = patch(&e, &id, json!({"effort": "high"})).await.unwrap();
+            assert_eq!(out["live_apply"]["deferred"], json!(true), "{case}: {out}");
+            assert_eq!(out["live_apply"]["interrupted"], json!(false), "{case}: {out}");
+            assert_eq!(out["needs_restart"], json!(false), "{case}: {out}");
+            assert!(sent_keys(&e).is_empty(), "{case}: 一個鍵都不按: {:?}", sent_keys(&e));
+            assert!(sent_texts(&e).await.is_empty(), "{case}: 一個字都不打");
+            lifecycle::apply_deferred_once(&e.app, &id).await;
+        }
+    }
+
+    /// #1681：只有 PATCH 那一刻會打斷；idle 邊補套（`apply_live_setting_with_revision`）回合又起來時照舊排回去，不去打斷新回合。
+    #[tokio::test]
+    async fn the_deferred_retry_never_interrupts_a_new_turn() {
+        let e = env().await;
+        let (id, run_id, pane) = busy_codex(&e, "effort-retry-no-interrupt").await;
+        in_flight_turn_for(&e, &id, &run_id, "ok").await;
+        e.herdr.set_screen(&pane, &codex_working_screen("  GPT-6-Luna max · /tmp · Context 43% used · 5h 12% left"));
+        let rev = crate::launch_rev::of(&db::bot(&e.app.db, &id).await.unwrap().unwrap());
+
+        let outcome = lifecycle::apply_live_setting_with_revision(&e.app, &id, &["effort"], &rev, &rev).await;
+        assert_eq!(outcome, lifecycle::LiveApplyOutcome::Failed("slash_gate: agent_busy".into()));
+        assert!(sent_keys(&e).is_empty(), "{:?}", sent_keys(&e));
     }
 
     /// 排著的 live 套用在 `limit` 內被取走（`schedule_deferred_live` 延遲 1.5 秒後 `take`）。
