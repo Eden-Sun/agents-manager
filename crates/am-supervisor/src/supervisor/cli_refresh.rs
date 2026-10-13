@@ -79,7 +79,13 @@ pub fn refresh_cli(dir: &Path, embedded: &str) -> std::io::Result<Outcome> {
         Err(e) => return Err(e),
     };
     if old.as_deref() == Some(embedded.as_bytes()) {
-        return Ok(Outcome::Unchanged);
+        let mode = std::fs::metadata(&bin)?.permissions().mode() & 0o777;
+        if mode == 0o755 {
+            return Ok(Outcome::Unchanged);
+        }
+        let hash = short_hash(embedded.as_bytes());
+        install_executable(&bin, embedded.as_bytes())?;
+        return Ok(Outcome::Refreshed { old_hash: Some(hash.clone()), new_hash: hash, backup: None });
     }
     let old_hash = old.as_deref().map(short_hash);
     let mut backup = None;
@@ -128,8 +134,11 @@ pub async fn status(app: &(impl crate::capabilities::DataDir + crate::capabiliti
         let bin_dir = dir.join("bin");
         let path = bin_dir.join("agm");
         let installed_hash = std::fs::read(&path).ok().map(|b| short_hash(&b));
+        let executable = std::fs::metadata(&path)
+            .ok()
+            .is_some_and(|metadata| metadata.permissions().mode() & 0o777 == 0o755);
         let state = match &installed_hash {
-            Some(h) if *h == embedded_hash => "ok",
+            Some(h) if *h == embedded_hash && executable => "ok",
             // 換得動：`POST /api/supervisor/cli` 或下一次開機就會補上，不必重建 binary。
             Some(_) => "stale",
             None if bin_dir.is_dir() => "missing",
@@ -306,10 +315,30 @@ mod tests {
     #[test]
     fn same_content_is_not_rewritten() {
         let d = with_bin("NEW");
-        let before = std::fs::metadata(d.join("bin/agm")).unwrap().modified().unwrap();
+        let bin = d.join("bin/agm");
+        std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let before = std::fs::metadata(&bin).unwrap().modified().unwrap();
         assert_eq!(refresh_cli(&d, "NEW").unwrap(), Outcome::Unchanged);
-        assert_eq!(std::fs::metadata(d.join("bin/agm")).unwrap().modified().unwrap(), before);
+        assert_eq!(std::fs::metadata(&bin).unwrap().modified().unwrap(), before);
         assert!(baks(&d).is_empty());
+    }
+
+    #[tokio::test]
+    async fn same_content_non_executable_cli_is_reported_stale_and_repaired() {
+        let env = crate::testing::env().await;
+        let d = with_bin("NEW");
+        let bin = d.join("bin/agm");
+        std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o644)).unwrap();
+        store::get_or_init(&env.app.db).await.unwrap();
+        store::set_env(&env.app.db, "patrol-bot", &env.project_id, &d.to_string_lossy()).await.unwrap();
+
+        let before = status(&env.app, "NEW").await;
+        assert_eq!(before["roles"][0]["state"], "stale", "same bytes without execute permission are unusable: {before}");
+
+        let result = refresh_with(&env.app, "NEW").await;
+        assert_eq!(result[0]["outcome"], "refreshed", "{result:?}");
+        assert_eq!(std::fs::metadata(&bin).unwrap().permissions().mode() & 0o777, 0o755);
+        assert_eq!(status(&env.app, "NEW").await["roles"][0]["state"], "ok");
     }
 
     #[test]
