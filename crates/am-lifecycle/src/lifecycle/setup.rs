@@ -1260,11 +1260,12 @@ PATH 上的 herdr 會補 `-p`、`--no-daemon`、`-c project_doc_max_bytes=0`：*
 \n\
 瀏覽器（同樣是硬規則）：\n\
 \n\
-- **一律用 ego lite**（`ego-browser` skill）。**禁止**開 Chrome、**禁止**用其他 headless 或內建的瀏覽器工具。\n\
-- **一個 bot 最多一個分頁**（你和你的子 agent 各自算一個）：用 `openOrReuseTab` 在同一個分頁裡換頁，\
-**禁止**一個網址開一個新分頁；task space 一律重用（`useOrCreateTaskSpace(\"{agent_name}\")`）。\n\
-- **結束就關分頁**：工作做完、或收掉子 agent 之前，**必須先** `closeTab` / `completeTaskSpace(…, {{ keep: false }})`。\
-分頁留著不關，RAM 就是這樣被吃光的。\n\
+- **一律用 agent-browser**（CLI，使用者 2026-10-13 裁示；用法先看 `agent-browser skills get core`）。\
+**禁止**用 ego lite、**禁止**自己另起 Chrome、**禁止**用其他 headless 或內建的瀏覽器工具。\n\
+- **一個 bot 最多一個 session**（你和你的子 agent 各自算一個）：每個指令都帶 `--session {agent_name}`，\
+在同一個 session 裡用 `open` 換頁，**禁止**另開 session、**禁止**一個網址開一個新分頁。\n\
+- **結束就關**：工作做完、或收掉子 agent 之前，**必須先** `agent-browser --session {agent_name} close`。\
+瀏覽器留著不關，RAM 就是這樣被吃光的。\n\
 \n\
 輸出檔案（同樣是硬規則，使用者 2026-09-16 裁示）：\n\
 \n\
@@ -1278,7 +1279,7 @@ PATH 上的 herdr 會補 `-p`、`--no-daemon`、`-c project_doc_max_bytes=0`：*
 CLI 登入／OAuth（同樣是硬規則，使用者 2026-10-03 裁示）：\n\
 \n\
 - **一律用不開瀏覽器的模式**：CLI 要做 OAuth 或登入時（gcloud、gh、az、aws sso、firebase…），**禁止**讓它在這台機器開瀏覽器，\
-**禁止**用 ego 或其他瀏覽器替使用者登入，**禁止**搬瀏覽器的 cookie 或 session。\n\
+**禁止**用 agent-browser 或其他瀏覽器替使用者登入，**禁止**搬瀏覽器的 cookie 或 session。\n\
 - **旗標**：`gcloud auth login --no-browser`（ADC 用 `gcloud auth application-default login --no-browser`）、`az login --use-device-code`、\
 `aws sso login --use-device-code`、`firebase login --no-localhost`、gh 用 `GH_BROWSER=echo gh auth login --web`（印出網址與一次性碼）。\
 使用者回覆手邊沒有裝 gcloud 的電腦時，gcloud 改用 `--no-launch-browser`（網址＋驗證碼，手機就能完成）。\n\
@@ -1908,7 +1909,7 @@ mod model_args_tests {
     #[test]
     fn the_herdr_skill_names_no_particular_bot() {
         let doc = super::herdr_skill_doc("---\nname: herdr\ndescription: x\n---\n# herdr\n");
-        assert!(doc.contains("useOrCreateTaskSpace(\"$AM_AGENT_NAME\")"), "{doc}");
+        assert!(doc.contains("`--session $AM_AGENT_NAME`"), "{doc}");
         assert!(doc.contains("echo \"$AM_AGENT_NAME\""), "說明這是環境變數");
         assert!(!doc.contains("proj-abc123"), "{doc}");
     }
@@ -1956,10 +1957,11 @@ mod model_args_tests {
         b.persona = None;
         assert_eq!(persona_args(&b, "proj-abc123", None, None), vec!["--append-system-prompt".to_string(), rule.clone()]);
         assert!(rule.contains("`proj-abc123-`"));
-        // 瀏覽器規則：只用 ego lite、一個 bot 一個分頁、bot 結束就關分頁，task space 用自己的名字。
-        assert!(rule.contains("ego lite"));
-        assert!(rule.contains("useOrCreateTaskSpace(\"proj-abc123\")"));
-        assert!(rule.contains("{ keep: false }"));
+        // 瀏覽器規則：只用 agent-browser、一個 bot 一個 session（用自己的名字）、結束就關。
+        assert!(rule.contains("**一律用 agent-browser**"));
+        assert!(rule.contains("**禁止**用 ego lite"));
+        assert!(rule.contains("`--session proj-abc123`"));
+        assert!(rule.contains("`agent-browser --session proj-abc123 close`"));
     }
 
     #[test]
@@ -2071,7 +2073,7 @@ mod model_args_tests {
         for want in ["gcloud auth login --no-browser", "--use-device-code", "firebase login --no-localhost", "GH_BROWSER=echo", "--no-launch-browser"] {
             assert!(rule.contains(want), "要點名旗標：{want}");
         }
-        assert!(rule.contains("禁止**用 ego 或其他瀏覽器替使用者登入"));
+        assert!(rule.contains("禁止**用 agent-browser 或其他瀏覽器替使用者登入"));
         assert!(rule.contains("herdr pane split --pane \"$HERDR_PANE_ID\""), "互動式指令放 pane，不在 shell 工具裡卡住");
         assert!(rule.contains("herdr pane send-text"));
         assert!(rule.contains("**結束這一回合**"));

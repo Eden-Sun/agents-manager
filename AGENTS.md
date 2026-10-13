@@ -45,7 +45,7 @@
 - shell 腳本裡變數後面接全形標點一律寫 `${VAR}`：macOS 的 bash 3.2 會把標點併進變數名，`set -u` 下直接 unbound variable 而中止。`scripts/ops/lint-shell-vars.sh`（`scripts/check.sh ops` 與 CI 的 ops job 都會跑）會擋住。
 - 改動 shell／行程／signal 或 BSD 與 GNU 工具差異時，要在 Mac 本機跑 `scripts/check.sh macos-local`；不要為了驗證去等或觸發 GitHub Actions（使用者 2026-09-28：CI 一律在 agm-host 或 Mac 本機跑）。新測試若散在其他模組，函式名加 `macos_local_` 前綴，讓入口自動納入。
 - 工作樹裡別人的 WIP 讓編譯掛掉時，對**你 staged 的內容**驗：`git archive` 出來或用 `git stash --keep-index` 以外的方式，總之不能碰別人的檔。
-- UI 改動要看真畫面：**一律用 ego lite（`ego-browser`）**，禁止自己開 Chrome／headless（AG Man 硬規則；`scripts/ui-goal-shots.mjs` 會自己起 headless Chrome，不准用）；截圖放 `docs/screenshots/<feature>/`。沒有 ego 可用就只做 DOM／純函式測試，回報時講清楚沒看過真畫面。
+- UI 改動要看真畫面：**一律用 agent-browser**（CLI，使用者 2026-10-13 裁示；`agent-browser --session <你的 agent 名> open <網址>`、`screenshot`、`snapshot`，用法看 `agent-browser skills get core`；用完 `close`）。禁止用 ego lite、禁止自己另起 Chrome／其他 headless（AG Man 硬規則；`scripts/ui-goal-shots.mjs` 會自己起 headless Chrome，不准用）；截圖放 `docs/screenshots/<feature>/`。主機沒裝 agent-browser 就只做 DOM／純函式測試，回報時講清楚沒看過真畫面。
 - daemon 在 `127.0.0.1:7788`，token 在 `~/.config/agents-manager/ui-token`，header `X-AM-Token`。
 - **完整 CI 在 ubuntu 背景跑，不要等**（issue #716，使用者 2026-09-28）：agm-host 上的 `scripts/ops/ubuntu-ci.sh` 每分鐘撿最新的 main HEAD 跑整樹 `scripts/check.sh`（同時只跑一輪、中間的 sha 不補跑），結果寫成 commit status `ubuntu-ci`。推完就去做下一件事；之後用 `gh api repos/Eden-Sun/agents-manager/commits/<sha>/status -q '.statuses[]|select(.context=="ubuntu-ci")'` 看結果。GitHub Actions 只剩 PR 與每日排程，**任何收尾、驗收、restart 判斷都不等它**（使用者 2026-09-28）。
 
@@ -75,7 +75,7 @@ nohup ./target/release/agents-managerd serve >> ~/.config/agents-manager/daemon.
 - 做完的子 agent 關掉 pane（`herdr pane close`），不要留一堆 done 的 pane。
 
 ## OB（網頁 GPT 外腦，使用者 2026-09-15）
-- 「問 OB／請 OB review」＝透過 ego lite 的 ChatGPT 網頁取得第二意見。先查本機事實；一般諮詢不用先問 AGM，也不是每個請求必問。
+- 「問 OB／請 OB review」＝透過共用 worker 操作的 ChatGPT 網頁取得第二意見（worker 自己用 ego lite，是「一律 agent-browser」的唯一例外；bot 不直接碰那個瀏覽器）。先查本機事實；一般諮詢不用先問 AGM，也不是每個請求必問。
 - 透過 `python3 scripts/ob.py ask --project-id <AG Man project ID> --request-id <穩定請求ID> --wait 600 "問題"` 提交。用 ID，不用 label、worktree 或 bot 名。父 bot 派工／重用 child 時傳遞同一 project ID 與本指引。
 - 共用一個 Sonnet-low worker，逐筆用乾淨 context 操作；每專案獨立固定 ChatGPT 對話。額度不足保留佇列，不切回 Fable。原任務 bot 自己判讀與驗證回覆，不把 OB 建議當授權。
 - `done` 才有答案；`pending/running/waiting_quota` 用 `status <id>` 查原單。`unknown` 要對帳／`collect`，不可換 request ID 重送。不要各自直接操作瀏覽器。
@@ -84,7 +84,7 @@ nohup ./target/release/agents-managerd serve >> ~/.config/agents-manager/daemon.
 ## 給使用者的檔案：outbox，不是 scratchpad（使用者 2026-09-16）
 - scratchpad 只放中間產物，不再當成給使用者的輸出目錄。
 - 要交給使用者的檔案放 outbox：`$AM_OUTBOX`＝`~/.config/agents-manager/outbox/<AM_BOT_ID>/`（本機 bot 啟動時 daemon 注入並建好，子 pane 繼承；沒有這個變數的舊 pane 自己拼同一個路徑）。空目錄會被清理收掉，**寫之前一律 `mkdir -p "$AM_OUTBOX"`**。只保留 1 小時（從檔案**搬進** outbox 起算，`mv`／`cp -p` 進來的舊檔不會立刻被清），AGM 的 `com.agm.outbox-gc` 每 10 分鐘清掉超過 1 小時的檔；要長期保留的放 repo 或 `reports/`。網頁「檔案暫存」只列 outbox 的檔案，scratchpad 一律看不到（SPEC §6.5f）。
-- 私鑰、憑證、DB（含 DB 複本、瀏覽器 profile 這類會帶 cookie／token 的目錄）一律不得放 scratchpad 或 outbox；瀏覽器一律走 ego lite，不自己開 headless、不留 profile 目錄。複本 migrate 之類要用 DB 複本的驗證，做完當下刪掉複本。
+- 私鑰、憑證、DB（含 DB 複本、瀏覽器 profile 這類會帶 cookie／token 的目錄）一律不得放 scratchpad 或 outbox；瀏覽器一律走 agent-browser，不另起別的 headless、不留 profile 目錄（不要用 `--profile`／`--state` 存登入態）。複本 migrate 之類要用 DB 複本的驗證，做完當下刪掉複本。
 
 ## 回報格式
 三到五行：做了什麼（commit hash）、怎麼驗的（數字）、要派工者做的事（例如重啟 daemon）、沒做到的與原因。不要貼整段 diff。
