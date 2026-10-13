@@ -20,7 +20,14 @@ function rig(opts: { debounceMs?: number } = {}) {
   const puts: { key: string; text: string; clientId: string }[] = []
   const rejected: string[] = []
   const cleared: string[] = []
-  const gate = { hold: null as null | Promise<void>, fetchHold: null as null | Promise<void>, fail: false, failWith: null as unknown, serverList: null as null | DraftWire[] }
+  const gate = {
+    hold: null as null | Promise<void>,
+    fetchHold: null as null | Promise<void>,
+    fail: false,
+    failWith: null as unknown,
+    serverList: null as null | DraftWire[],
+    onCommit: null as null | ((key: string, text: string, rev: number) => void),
+  }
   const sync = new DraftSync({
     clientId: 'me',
     debounceMs: opts.debounceMs ?? 400,
@@ -43,6 +50,7 @@ function rig(opts: { debounceMs?: number } = {}) {
       if (cur && cur.text === text) return { rev: cur.rev }
       const rev = (cur?.rev ?? 0) + 1
       server.set(key, { text, rev })
+      gate.onCommit?.(key, text, rev)
       return { rev }
     },
     fetchAll: async () => {
@@ -124,6 +132,137 @@ test('沒焦點但有未同步的修改：套用別人的，本機排著的 PUT 
   assert.equal(r.local['bot:a'], '別人的')
   await tick(50)
   assert.equal(r.puts.length, 0)
+})
+
+test('在飛 PUT 較晚提交時，本機套回它確認寫入的版本；自己的回音先到', async () => {
+  const r = rig({ debounceMs: 10 })
+  let release = () => {}
+  r.gate.hold = new Promise<void>((res) => (release = res))
+  r.server.set('bot:a', { text: 'phone-B', rev: 2 })
+  r.type('bot:a', 'desktop-A')
+  await tick(30)
+  assert.deepEqual(r.puts.map((p) => p.text), ['desktop-A'])
+
+  r.sync.remote({ key: 'bot:a', text: 'phone-B', rev: 2, client_id: 'phone' })
+  assert.equal(r.local['bot:a'], 'phone-B')
+  r.gate.onCommit = (key, text, rev) => r.sync.remote({ key, text, rev, client_id: 'me' })
+  r.gate.hold = null
+  release()
+  await tick(30)
+
+  assert.equal(r.local['bot:a'], 'desktop-A')
+  assert.deepEqual(r.server.get('bot:a'), { text: 'desktop-A', rev: 3 })
+  assert.equal(r.sync.knownRev('bot:a'), 3)
+  assert.equal(r.sync.isDirty('bot:a'), false)
+  await r.sync.load()
+  assert.equal(r.local['bot:a'], 'desktop-A', '同 rev 的 load 不得留下不同內容')
+  assert.equal(r.puts.length, 1)
+})
+
+test('在飛 PUT 較晚提交時，本機套回它確認寫入的版本；自己的回音晚到', async () => {
+  const r = rig({ debounceMs: 10 })
+  let release = () => {}
+  r.gate.hold = new Promise<void>((res) => (release = res))
+  r.server.set('bot:a', { text: 'phone-B', rev: 2 })
+  r.type('bot:a', 'desktop-A')
+  await tick(30)
+  r.sync.remote({ key: 'bot:a', text: 'phone-B', rev: 2, client_id: 'phone' })
+
+  r.gate.hold = null
+  release()
+  await tick(30)
+  assert.equal(r.local['bot:a'], 'desktop-A')
+  assert.equal(r.sync.knownRev('bot:a'), 3)
+  r.sync.remote({ key: 'bot:a', text: 'desktop-A', rev: 3, client_id: 'me' })
+  assert.equal(r.local['bot:a'], 'desktop-A')
+  assert.equal(r.sync.isDirty('bot:a'), false)
+  assert.equal(r.puts.length, 1)
+})
+
+test('在飛 PUT 較晚提交時，遠端清空也不會讓同 rev 的畫面與 daemon 分歧', async () => {
+  const r = rig({ debounceMs: 10 })
+  let release = () => {}
+  r.gate.hold = new Promise<void>((res) => (release = res))
+  r.server.set('bot:a', { text: 'phone-B', rev: 2 })
+  r.type('bot:a', 'desktop-A')
+  await tick(30)
+  r.sync.remote({ key: 'bot:a', text: '', rev: 2, client_id: 'phone' })
+  assert.equal(r.local['bot:a'], undefined)
+
+  r.gate.hold = null
+  release()
+  await tick(30)
+
+  assert.equal(r.local['bot:a'], 'desktop-A')
+  assert.deepEqual(r.server.get('bot:a'), { text: 'desktop-A', rev: 3 })
+  assert.equal(r.sync.knownRev('bot:a'), 3)
+  assert.equal(r.sync.isDirty('bot:a'), false)
+  await r.sync.load()
+  assert.equal(r.local['bot:a'], 'desktop-A')
+  assert.equal(r.puts.length, 1)
+})
+
+test('在飛 PUT 失敗時保留已接受的遠端版本，不排空的重試', async () => {
+  const r = rig({ debounceMs: 10 })
+  let release = () => {}
+  r.gate.hold = new Promise<void>((res) => (release = res))
+  r.gate.failWith = new TypeError('Failed to fetch')
+  r.server.set('bot:a', { text: 'phone-B', rev: 2 })
+  r.type('bot:a', 'desktop-A')
+  await tick(30)
+  r.sync.remote({ key: 'bot:a', text: 'phone-B', rev: 2, client_id: 'phone' })
+
+  r.gate.hold = null
+  release()
+  await tick(30)
+  await tick(30_000)
+
+  assert.equal(r.local['bot:a'], 'phone-B')
+  assert.deepEqual(r.server.get('bot:a'), { text: 'phone-B', rev: 2 })
+  assert.equal(r.sync.knownRev('bot:a'), 2)
+  assert.equal(r.sync.isDirty('bot:a'), false)
+  assert.equal(r.puts.length, 1)
+})
+
+test('PUT 回應前已接受更高 rev 時保留較新的遠端草稿', async () => {
+  const r = rig({ debounceMs: 10 })
+  let release = () => {}
+  r.gate.hold = new Promise<void>((res) => (release = res))
+  r.server.set('bot:a', { text: 'phone-B', rev: 2 })
+  r.type('bot:a', 'desktop-A')
+  await tick(30)
+  r.sync.remote({ key: 'bot:a', text: 'phone-B', rev: 2, client_id: 'phone' })
+  r.gate.onCommit = (key, _text) => {
+    r.server.set(key, { text: 'phone-C', rev: 4 })
+    r.sync.remote({ key, text: 'phone-C', rev: 4, client_id: 'another-phone' })
+  }
+
+  r.gate.hold = null
+  release()
+  await tick(30)
+
+  assert.equal(r.local['bot:a'], 'phone-C')
+  assert.deepEqual(r.server.get('bot:a'), { text: 'phone-C', rev: 4 })
+  assert.equal(r.sync.knownRev('bot:a'), 4)
+  assert.equal(r.sync.isDirty('bot:a'), false)
+  assert.equal(r.puts.length, 1, '不應把較舊版本再排隊寫回')
+})
+
+test('forget 取消在飛寫入後，成功回應不會把輸入框草稿復活', async () => {
+  const r = rig({ debounceMs: 10 })
+  let release = () => {}
+  r.gate.hold = new Promise<void>((res) => (release = res))
+  r.type('bot:a', 'old')
+  await tick(30)
+  r.sync.forget('bot:a')
+  delete r.local['bot:a']
+
+  r.gate.hold = null
+  release()
+  await tick(30)
+
+  assert.equal(r.local['bot:a'], undefined)
+  assert.equal(r.sync.isDirty('bot:a'), false)
 })
 
 test('自己的回音不重套：只記 rev', async () => {
