@@ -258,6 +258,24 @@ pub async fn return_to_queue(conn: &mut sqlx::SqliteConnection, turn_id: &str, n
     settled(&mut *conn, turn_id, "in_flight", "queued", "放回佇列").await
 }
 
+/// **認領過但沒打字、而且不是送達失敗的，放回佇列**（#1683）：`in_flight -> queued`，拔掉 run、排下一次嘗試，
+/// `flush_retries` 原封不動——維護窗口在認領之後才看到，這不是送不進去，不該花掉送達重試（[`return_to_queue`]）。
+pub async fn return_to_queue_unspent(conn: &mut sqlx::SqliteConnection, turn_id: &str, next_flush_at: &str) -> Result<Outcome> {
+    edge("in_flight", "queued", "放回佇列（不花重試）")?;
+    let done = sqlx::query(
+        "UPDATE turns SET status='queued', run_id=NULL, next_flush_at=?
+          WHERE id=? AND status='in_flight'",
+    )
+    .bind(next_flush_at)
+    .bind(turn_id)
+    .execute(&mut *conn)
+    .await?;
+    if done.rows_affected() > 0 {
+        return Ok(Outcome::Applied);
+    }
+    settled(&mut *conn, turn_id, "in_flight", "queued", "放回佇列").await
+}
+
 /// **撤銷還在排隊的**：`queued -> failed`，同一句寫 `delivery='failed'`（一個字都沒送）、清掉 `next_flush_at`。
 /// 已經被認領（`in_flight`）或送出的撤不回來，不假裝撤回。
 pub async fn retract_queued(conn: &mut sqlx::SqliteConnection, turn_id: &str) -> Result<Outcome> {

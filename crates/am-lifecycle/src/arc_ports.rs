@@ -1135,6 +1135,7 @@ mod arc_port_69_queueservices {
         fn fail_in_flight_or_owe(&self, run_id: &str, note: &str) -> impl Future<Output = anyhow::Result<()>> + Send { <T as crate::lifecycle::s6_ports::QueueServices>::fail_in_flight_or_owe(self.as_ref(), run_id, note) }
         fn close_owed(&self, bot_id: &str, turn_id: &str, delivery: &'static str, note: &str) -> impl Future<Output = anyhow::Result<bool>> + Send { <T as crate::lifecycle::s6_ports::QueueServices>::close_owed(self.as_ref(), bot_id, turn_id, delivery, note) }
         fn put_back_owed(&self, bot_id: &str, conversation_id: &str, turn_id: &str, reason: &str, wait_key: &str) -> impl Future<Output = anyhow::Result<()>> + Send { <T as crate::lifecycle::s6_ports::QueueServices>::put_back_owed(self.as_ref(), bot_id, conversation_id, turn_id, reason, wait_key) }
+        fn release_claim_owed(&self, bot_id: &str, turn_id: &str, until: &str) -> impl Future<Output = anyhow::Result<()>> + Send { <T as crate::lifecycle::s6_ports::QueueServices>::release_claim_owed(self.as_ref(), bot_id, turn_id, until) }
         fn delivered_owed(&self, bot_id: &str, turn_id: &str, record: crate::lifecycle::DeliveryRecord) -> impl Future<Output = anyhow::Result<()>> + Send { <T as crate::lifecycle::s6_ports::QueueServices>::delivered_owed(self.as_ref(), bot_id, turn_id, record) }
         fn arm_stall_and_progress(&self, run_id: &str, bot_id: &str, turn_id: &str) -> impl Future<Output = ()> + Send { <T as crate::lifecycle::s6_ports::QueueServices>::arm_stall_and_progress(self.as_ref(), run_id, bot_id, turn_id) }
         fn watch_late_proof(&self, run_id: &str, bot_id: &str, turn_id: &str) { <T as crate::lifecycle::s6_ports::QueueServices>::watch_late_proof(self.as_ref(), run_id, bot_id, turn_id) }
@@ -1158,6 +1159,7 @@ mod arc_port_70_oweddeliveryservices {
             reason: &str,
             wait_key: &str,
         ) -> impl Future<Output = anyhow::Result<()>> + Send { <T as crate::lifecycle::s6_ports::OwedDeliveryServices>::queue_put_back(self.as_ref(), bot_id, conversation_id, turn_id, reason, wait_key) }
+        fn queue_release_claim(&self, bot_id: &str, turn_id: &str, until: &str) -> impl Future<Output = anyhow::Result<()>> + Send { <T as crate::lifecycle::s6_ports::OwedDeliveryServices>::queue_release_claim(self.as_ref(), bot_id, turn_id, until) }
         fn message_added(&self, bot_id: &str, message: db::Message) -> impl Future<Output = ()> + Send { <T as crate::lifecycle::s6_ports::OwedDeliveryServices>::message_added(self.as_ref(), bot_id, message) }
         fn turn_changed(&self, turn_id: &str) -> impl Future<Output = ()> + Send { <T as crate::lifecycle::s6_ports::OwedDeliveryServices>::turn_changed(self.as_ref(), turn_id) }
     }
