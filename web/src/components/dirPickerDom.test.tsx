@@ -293,3 +293,16 @@ test('過濾框：組字中的 Esc 不清過濾也不離開', async () => {
   await keydown(filter, 'Escape', { isComposing: true })
   assert.equal(d.cancelled(), 0)
 })
+
+test('選取的目錄名超過 14 個字：截斷不切壞 emoji 代理對（按鈕文字不能有落單的代理字元）', async () => {
+  // 「aaaaaaaaaaaa😀bc」以字元計 15 個（UTF-16 計 16 個）：截成 13 個字元加「…」，😀 整個留著。
+  const name = `${'a'.repeat(12)}😀bc`
+  fakeApi((req) => (req.path.includes('/fs/dirs') ? { ...listing('/home/u'), entries: [{ name, path: `/home/u/${name}`, git: false }] } : undefined))
+  await mount(<DirPicker initial="/home/u" onPick={() => {}} onCancel={() => {}} />)
+  await settle()
+  const dialog = document.querySelector<HTMLElement>('[role=dialog]')!
+  await keydown(dialog, 'ArrowDown')
+  const label = [...dialog.querySelectorAll('button')].map((b) => b.textContent ?? '').find((t) => t.startsWith('選擇「'))!
+  assert.equal(label, '選擇「aaaaaaaaaaaa😀…」')
+  assert.doesNotMatch(label, /[\uD800-\uDBFF](?![\uDC00-\uDFFF])|(?<![\uD800-\uDBFF])[\uDC00-\uDFFF]/, '不能留下落單的代理字元')
+})
