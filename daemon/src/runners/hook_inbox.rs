@@ -63,6 +63,18 @@ pub(crate) static TICKS: std::sync::atomic::AtomicUsize = std::sync::atomic::Ato
 /// 同時處理幾顆 bot 的列（每顆 bot 一個 task）。
 const MAX_BOT_TASKS: usize = 8;
 
+/// 測試用：每列處理完（`mark_done`）就發一則它的 id。測試等的是這個訊號，不是輪詢 DB 或牆鐘。
+#[cfg(test)]
+pub(crate) fn done_tx() -> &'static tokio::sync::broadcast::Sender<String> {
+    static DONE: OnceLock<tokio::sync::broadcast::Sender<String>> = OnceLock::new();
+    DONE.get_or_init(|| tokio::sync::broadcast::channel(4096).0)
+}
+
+#[cfg(test)]
+fn signal_done(id: &str) {
+    let _ = done_tx().send(id.to_string());
+}
+
 /// 正在被某個 task 處理的 bot：同一顆 bot 不會有兩個 task 同時吃它的列（組內要照 rowid 順序）。
 fn busy_bots() -> &'static std::sync::Mutex<HashSet<String>> {
     static BUSY: OnceLock<std::sync::Mutex<HashSet<String>>> = OnceLock::new();
@@ -98,6 +110,8 @@ async fn drain_bot(app: Arc<App>, rows: Vec<Pending>, _claim: BotClaim) -> Resul
             Ok(body) => match app.process_hook(&body, Some(&row.id)).await {
                 Ok(()) => {
                     mark_done(&app.db, &row.id).await?;
+                    #[cfg(test)]
+                    signal_done(&row.id);
                     done += 1;
                 }
                 Err(e) => {
@@ -236,6 +250,8 @@ fn spawn_claim_check(app: &Arc<App>, claims: &mut JoinSet<Result<usize>>, row: P
         match app.process_hook(&body, Some(&row.id)).await {
             Ok(()) => {
                 mark_done(&app.db, &row.id).await?;
+                #[cfg(test)]
+                signal_done(&row.id);
                 Ok(1)
             }
             Err(e) => {
@@ -507,16 +523,11 @@ mod tests {
         assert_eq!(left, 0, "A 的 130 列也要全部處理完");
     }
 
-    /// 假 Jev：每個請求先計數，再等 `gate` 放行才回答 same_work 0.8。撞題查詢因此能停在「已送到 Jev、還沒回」，不靠 sleep。
+    /// 假 Jev：每個請求到了就送一則到 `arrivals`（測試據此知道「撞題查詢已經送到 Jev」，不靠 sleep），
+    /// 再等 `gate` 放行才回答 same_work 0.8。
     struct GatedJev {
-        requests: Arc<std::sync::atomic::AtomicUsize>,
+        arrivals: tokio::sync::mpsc::UnboundedReceiver<()>,
         gate: Arc<tokio::sync::Semaphore>,
-    }
-
-    impl GatedJev {
-        fn count(&self) -> usize {
-            self.requests.load(std::sync::atomic::Ordering::SeqCst)
-        }
     }
 
     /// 開啟撞題判斷、接到假 Jev。key 檔放在測試暫存目錄，不碰真的 HOME；每小時上限拉高，
@@ -531,16 +542,15 @@ mod tests {
             use std::os::unix::fs::PermissionsExt;
             std::fs::set_permissions(&key_file, std::fs::Permissions::from_mode(0o600)).unwrap();
         }
-        let requests = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let (arrivals_tx, arrivals) = tokio::sync::mpsc::unbounded_channel();
         let gate = Arc::new(tokio::sync::Semaphore::new(0));
         let route = {
-            let requests = requests.clone();
             let gate = gate.clone();
             axum::routing::post(move |axum::Json(_body): axum::Json<serde_json::Value>| {
-                let requests = requests.clone();
+                let arrivals_tx = arrivals_tx.clone();
                 let gate = gate.clone();
                 async move {
-                    requests.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                    let _ = arrivals_tx.send(());
                     gate.acquire().await.unwrap().forget();
                     (
                         axum::http::StatusCode::OK,
@@ -572,7 +582,27 @@ mod tests {
             })
             .await
             .unwrap();
-        GatedJev { requests, gate }
+        GatedJev { arrivals, gate }
+    }
+
+    /// 等下一個請求送到假 Jev。上限只是失敗時不掛住（不用來決定先後）。
+    async fn next_arrival(jev: &mut GatedJev) {
+        let got = tokio::time::timeout(Duration::from_secs(30), jev.arrivals.recv()).await;
+        assert!(matches!(got, Ok(Some(()))), "撞題查詢應該已經送到 Jev");
+    }
+
+    /// 等 `id` 那一列處理完（收件匣的完成訊號）。上限只是失敗時不掛住（不用來決定先後）。
+    async fn wait_done(done: &mut tokio::sync::broadcast::Receiver<String>, id: &str) {
+        let found = tokio::time::timeout(Duration::from_secs(30), async {
+            while let Ok(got) = done.recv().await {
+                if got == id {
+                    return true;
+                }
+            }
+            false
+        })
+        .await;
+        assert!(matches!(found, Ok(true)), "列 {id} 應該處理完");
     }
 
     /// 一顆正在跑的同專案 bot：撞題查詢的候選。
@@ -618,7 +648,8 @@ mod tests {
         let caller = tt::claude_bot(&app, &env.project_id, "slow-claim-caller").await;
         tt::fake_run(&app, &caller.id).await;
         running_peer(&app, &env.project_id, "slow-claim-peer", "正在做別的事").await;
-        let jev = gated_jev(&app, &env.project_id).await;
+        let mut jev = gated_jev(&app, &env.project_id).await;
+        let mut done = done_tx().subscribe();
 
         assert!(crate::hook_inbox::accept(&app.db, &claim(&caller.id, &caller.name, 1626), crate::hook_inbox::Source::Remote).await.unwrap().is_new());
         assert!(crate::hook_inbox::accept(&app.db, &stop(&caller.id, "pa"), crate::hook_inbox::Source::Http).await.unwrap().is_new());
@@ -627,16 +658,16 @@ mod tests {
 
         let drain_app = app.clone();
         let drain = tokio::spawn(async move { drain_once(&drain_app).await });
-        assert!(tt::eventually!(jev.count() >= 1), "撞題查詢應該已經送到 Jev");
-        assert!(tt::eventually!(processed_at(&app, &stop_id).await.is_some()), "Jev 還沒回，同一顆 bot 的 Stop 仍要處理完");
+        next_arrival(&mut jev).await;
+        wait_done(&mut done, &stop_id).await;
         let lock = app.bot_lock(&caller.id).await;
         assert!(lock.try_lock().is_ok(), "撞題查詢不得占住 bot 鎖");
         drop(lock);
         assert!(processed_at(&app, &claim_id).await.is_none(), "檢查沒完成前不 ACK（#1500）");
 
         jev.gate.add_permits(1);
-        assert!(tt::eventually!(processed_at(&app, &claim_id).await.is_some()), "放行後檢查完成才 ACK");
         tokio::time::timeout(Duration::from_secs(30), drain).await.expect("放行後 drain 結束").unwrap().unwrap();
+        assert!(processed_at(&app, &claim_id).await.is_some(), "放行後檢查完成才 ACK");
     }
 
     /// #1626：八顆 bot 的撞題查詢都卡在 Jev 上（以前會占住八個 bot task 名額），第九顆 bot 的 Stop 仍要處理完。
@@ -645,7 +676,8 @@ mod tests {
         let env = tt::env().await;
         let app = env.app.clone();
         running_peer(&app, &env.project_id, "slow-claim-peer", "正在做別的事").await;
-        let jev = gated_jev(&app, &env.project_id).await;
+        let mut jev = gated_jev(&app, &env.project_id).await;
+        let mut done = done_tx().subscribe();
 
         let mut claim_ids = Vec::new();
         for i in 0..8 {
@@ -660,28 +692,35 @@ mod tests {
 
         let drain_app = app.clone();
         let drain = tokio::spawn(async move { drain_once(&drain_app).await });
-        assert!(tt::eventually!(jev.count() >= 1), "撞題查詢應該已經送到 Jev");
-        assert!(tt::eventually!(processed_at(&app, &quiet_stop).await.is_some()), "八顆 bot 卡在 Jev 時，第九顆 bot 的 hook 仍要處理完");
+        // 撞題 lane 同時最多 4 個在問 Jev：等其中四個到了，其餘的八顆 bot 都還卡著。
+        for _ in 0..4 {
+            next_arrival(&mut jev).await;
+        }
+        wait_done(&mut done, &quiet_stop).await;
 
         jev.gate.add_permits(1000);
         tokio::time::timeout(Duration::from_secs(30), drain).await.expect("放行後 drain 結束").unwrap().unwrap();
         for id in &claim_ids {
-            assert!(tt::eventually!(processed_at(&app, id).await.is_some()), "放行後每顆 bot 的撞題查詢都要 ACK");
+            assert!(processed_at(&app, id).await.is_some(), "放行後每顆 bot 的撞題查詢都要 ACK");
         }
     }
 
-    /// #1626：撞題列一批就佔滿 [`BATCH`]（64 列，全是同一顆 bot 的慢查詢），排在後面的別顆 bot 的 Stop 不能被擠出這一批。
-    /// 已經交給撞題 lane 的列要從撈列的 SQL 排除。
+    /// #1626：撞題列一批就佔滿 [`BATCH`]，而且全是不同 bot 的慢查詢（每顆 bot 只有一列，互相沒有忙碌排除），
+    /// 排在後面的別顆 bot 的 Stop 不能被擠出撈列的窗口。已經交給撞題 lane 的列要從撈列的 SQL 排除。
+    /// 在修正前：八顆 bot 的組占滿 bot task，其餘的撞題列每輪都撈回同一批，Stop 永遠排不到。
     #[tokio::test]
-    async fn slow_claim_checks_filling_the_batch_do_not_hide_other_bots_hooks() {
+    async fn slow_claim_checks_across_many_bots_do_not_hide_a_later_bots_hooks() {
         let env = tt::env().await;
         let app = env.app.clone();
-        let caller = tt::claude_bot(&app, &env.project_id, "starve-claim-caller").await;
         running_peer(&app, &env.project_id, "starve-claim-peer", "正在做別的事").await;
-        let jev = gated_jev(&app, &env.project_id).await;
+        let mut jev = gated_jev(&app, &env.project_id).await;
+        let mut done = done_tx().subscribe();
 
-        for i in 0..BATCH {
-            assert!(crate::hook_inbox::accept(&app.db, &claim(&caller.id, &caller.name, 2000 + i as u64), crate::hook_inbox::Source::Remote).await.unwrap().is_new());
+        let mut claim_ids = Vec::new();
+        for i in 0..(BATCH + 16) {
+            let bot = tt::claude_bot(&app, &env.project_id, &format!("starve-claim-{i}")).await;
+            assert!(crate::hook_inbox::accept(&app.db, &claim(&bot.id, &bot.name, 2000 + i as u64), crate::hook_inbox::Source::Remote).await.unwrap().is_new());
+            claim_ids.push(event_ids(&app, &bot.id).await.remove(0));
         }
         let quiet = tt::claude_bot(&app, &env.project_id, "starve-claim-quiet").await;
         tt::fake_run(&app, &quiet.id).await;
@@ -690,10 +729,56 @@ mod tests {
 
         let drain_app = app.clone();
         let drain = tokio::spawn(async move { drain_once(&drain_app).await });
-        assert!(tt::eventually!(jev.count() >= 1), "撞題查詢應該已經送到 Jev");
-        assert!(tt::eventually!(processed_at(&app, &quiet_stop).await.is_some()), "一整批撞題卡在 Jev 時，別顆 bot 的 Stop 仍要處理完");
+        next_arrival(&mut jev).await;
+        wait_done(&mut done, &quiet_stop).await;
 
         jev.gate.add_permits(1000);
         tokio::time::timeout(Duration::from_secs(30), drain).await.expect("放行後 drain 結束").unwrap().unwrap();
+        for id in &claim_ids {
+            assert!(processed_at(&app, id).await.is_some(), "放行後每列撞題都要 ACK");
+        }
+    }
+
+    /// #1626：Jev 卡住期間刪掉 caller，放行後不得寫入撞題提示。撞題 lane 不再持有 bot 鎖，
+    /// 所以刪除不會等它；答案回來時 caller 已經不在，結果要丟掉（帳本記下原因、不留答案，也不推提示）。
+    #[tokio::test]
+    async fn a_claim_whose_bot_is_deleted_during_the_jev_check_writes_no_hint() {
+        let env = tt::env().await;
+        let app = env.app.clone();
+        let caller = tt::claude_bot(&app, &env.project_id, "deleted-claim-caller").await;
+        // child 由母 agent 開：刪除走 SQL 軟刪，不查 config.toml（user 管理的那種刪除要比對設定檔）。
+        sqlx::query("UPDATE bots SET managed_by='child' WHERE id=?").bind(&caller.id).execute(&app.db).await.unwrap();
+        running_peer(&app, &env.project_id, "deleted-claim-peer", "正在做同一件事").await;
+        let mut jev = gated_jev(&app, &env.project_id).await;
+        let mut done = done_tx().subscribe();
+
+        assert!(crate::hook_inbox::accept(&app.db, &claim(&caller.id, &caller.name, 1800), crate::hook_inbox::Source::Remote).await.unwrap().is_new());
+        let claim_id = event_ids(&app, &caller.id).await.remove(0);
+
+        let drain_app = app.clone();
+        let drain = tokio::spawn(async move { drain_once(&drain_app).await });
+        next_arrival(&mut jev).await;
+        // Jev 還沒回：刪 caller。失敗時（例如鎖死）這裡會被上限擋下，不會掛住。
+        tokio::time::timeout(Duration::from_secs(30), crate::api::delete_bot(axum::extract::State(app.clone()), axum::extract::Path(caller.id.clone())))
+            .await
+            .expect("Jev 等待中刪 bot 不得被撞題查詢擋住")
+            .unwrap();
+
+        jev.gate.add_permits(1);
+        wait_done(&mut done, &claim_id).await;
+        tokio::time::timeout(Duration::from_secs(30), drain).await.expect("放行後 drain 結束").unwrap().unwrap();
+
+        let hints: Vec<String> = crate::supervisor::store::pending_inbox(&app.db)
+            .await
+            .unwrap()
+            .into_iter()
+            .filter(|e| e.kind == "judge_same_work")
+            .map(|e| e.event_key)
+            .collect();
+        assert!(hints.is_empty(), "caller 已刪除，不得寫入撞題提示：{hints:?}");
+        let (answer, error): (Option<f64>, Option<String>) =
+            sqlx::query_as("SELECT jev_same_work, error FROM judge_shadow WHERE regex_verdict='same_work'").fetch_one(&app.db).await.unwrap();
+        assert_eq!(error.as_deref(), Some("bot_gone"), "帳本記下丟掉的原因");
+        assert_eq!(answer, None, "丟掉的結果不留答案");
     }
 }
