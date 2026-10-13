@@ -1167,6 +1167,7 @@ Jev 超過門檻時只推 AGM inbox，使用者在 bot 畫面上看不到。
 使用者定案：「沒有 parsing 到 1 warning 至 statusline」。問題在終端快照呈現，不在已儲存的對話訊息；原始快照 API 仍保留原文。
 
 - 終端分頁與需要回應面板／彈窗，把快照尾端的模型列、`? for shortcuts`、`⚠ N warning(s) · f2 to view` 從正文切出。獨立 warning 行與 shortcuts 右欄同樣處理；只剝尾端連續 footer，不刪正文裡的歷史引用或輸入列。
+- **#1680 修正**：桌機終端分頁因此看不到最底下那行。現在終端畫面照 pane 原樣顯示（footer 行留在正文裡），三處都不再另畫 `statusline-bar`；footer 只解析給對話面板的狀態列用。
 - 模型整列放進既有 `statusline-bar`，保留 `· Context N% used · weekly N% left` 等後續段。warning 數放最前面，避免長模型列把它擠出窄畫面；保留 F2 查看內容的提示，不以過濾代替解決 warning 成因。shortcuts 不作為正文或獨立狀態欄。
 - 桌面共用頁面原有狀態列；手機原有狀態列收在 Git 資訊抽屜，因此快照旁也顯示同款狀態列。需要回應彈窗顯示自己的狀態列，避免數字被遮罩蓋住。既有 compact／keep-warm 控制保留。
 - warning 只投影目前顯示的 bot／run 快照；換 bot、換 run、卸載快照或新快照不再含 warning 時不沿用舊數字。CLI 操作選單與危險操作判斷仍使用原始 API text。

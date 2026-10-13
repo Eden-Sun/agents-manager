@@ -1,4 +1,3 @@
-import { CodexTerminalFooterBar } from './CodexTerminalFooter'
 import { useCodexTerminalFooter } from '../hooks/useCodexTerminalFooter'
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { useScrollTail } from '../hooks/useScrollTail'
@@ -189,7 +188,6 @@ export function TerminalTab({ botId }: { botId: string }) {
           讀取終端失敗：{err}（下面是上一次成功讀到的畫面，會自動重試）
         </div>
       ) : null}
-      <CodexTerminalFooterBar footer={terminal.footer} mobileOnly />
       {/* 內容全部在一行：`<pre>` 會照實吐出換行與縮排，JSX 的排版不能溜進終端畫面。 */}
       <pre className={`term${wrap ? ' term-wrap' : ''}`} ref={tail.ref} onScroll={tail.onScroll}>{linkifyTerm(body, snap?.columns)}</pre>
     </div>
