@@ -9668,6 +9668,12 @@ mod bot_config_tests {
         Ok(serde_json::from_slice(&bytes).unwrap())
     }
 
+    fn replace_config_bot_name(text: &str, old: &str, new: &str) -> String {
+        let needle = format!("name = \"{old}\"");
+        assert_eq!(text.matches(&needle).count(), 1, "config.toml should contain exactly one {needle:?}");
+        text.replacen(&needle, &format!("name = \"{new}\""), 1)
+    }
+
     /// 這顆 bot 的 `persona` 在 config.toml 與 DB 兩邊各是什麼。
     async fn stored(e: &Env, id: &str) -> (Option<String>, Option<String>) {
         let cfg = e.app.cfg.get().await;
@@ -9711,6 +9717,42 @@ mod bot_config_tests {
         }
         // 合法的照常：model 清空、env 設 CLAUDE_CONFIG_DIR。
         patch(&e, &id, json!({"model": "", "env": {"CLAUDE_CONFIG_DIR": "$HOME/.claude-x"}})).await.unwrap();
+    }
+
+    /// #1658：可解析但語意不合法的磁碟設定，應能由合法 PATCH 修復；若 mutation 後仍有其他非法值，照樣拒絕且不落盤。
+    #[tokio::test]
+    async fn patch_repairs_a_semantically_invalid_external_config_and_keeps_final_validation() {
+        let e = env().await;
+        seed_project(&e).await;
+        let target = add(&e, json!({"name": "repair-me", "kind": "claude"})).await.unwrap();
+        add(&e, json!({"name": "other", "kind": "claude"})).await.unwrap();
+        let path = e.app.cfg.path.clone();
+
+        let disk = std::fs::read_to_string(&path).unwrap();
+        let invalid = replace_config_bot_name(&disk, "repair-me", "bad@name");
+        std::fs::write(&path, &invalid).unwrap();
+
+        patch(&e, &target, json!({"name": "fixed-name"})).await.unwrap();
+        let disk = std::fs::read_to_string(&path).unwrap();
+        assert!(disk.contains("name = \"fixed-name\""), "合法修正要寫進 TOML");
+        assert!(!disk.contains("bad@name"), "修正後的非法舊值不能殘留");
+        let in_memory = e.app.cfg.get().await;
+        assert_eq!(in_memory.projects[0].bots.iter().find(|b| b.id.as_deref() == Some(target.as_str())).unwrap().name, "fixed-name");
+        assert_eq!(db::bot(&e.app.db, &target).await.unwrap().unwrap().name, "fixed-name", "TOML 與 DB 要同步");
+
+        // 另一筆仍非法時，修 target 不能把整份無效設定寫出去。
+        let disk = replace_config_bot_name(&disk, "other", "bad@name");
+        std::fs::write(&path, &disk).unwrap();
+        let err = patch(&e, &target, json!({"name": "fixed-again"})).await.unwrap_err();
+        match err {
+            LcError::BadValue(body) => {
+                assert_eq!(body["error"], "config_invalid", "仍要回設定驗證錯誤：{body}");
+                assert_eq!(body["config_written"], false, "拒絕時不可落盤：{body}");
+            }
+            other => panic!("仍有非法設定時應拒絕 PATCH，得到 {other:?}"),
+        }
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), disk, "失敗的 mutation 不可改 TOML");
+        assert_eq!(db::bot(&e.app.db, &target).await.unwrap().unwrap().name, "fixed-name", "失敗的 mutation 不可改 DB");
     }
 
     /// 專案：本機路徑要絕對（相對路徑會解成 daemon 自己的工作目錄）、要是目錄、標籤不得含控制字元。

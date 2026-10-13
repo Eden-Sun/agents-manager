@@ -226,6 +226,7 @@ React 前端 (Vite) ◄── REST + WebSocket ──► Rust daemon (axum) ◄�
   `projection::validate` 乾跑 → 原子寫入（唯一暫存檔 + `rename`）」。
   真正不存在的設定檔可以建立預設值；解析不了的 symlink（含目標消失）則拒絕載入或寫入，保留連結以免覆蓋設定。
   重讀時空檔檢查與解析使用同一份已讀內容；檔案在讀取後被截斷，不會把預設設定載入記憶體。
+  mutation 在同一個 ConfigStore 鎖內重讀並取得更新前快照，再套用修改；完整驗證仍針對 mutation 後的整份設定，所以合法修改能修復可解析但語意不合法的舊值，其他非法值仍會阻止落盤（#1658）。若後續 SQLite 投影失敗，rollback 會還原該快照，即使快照含有原本要修復的語意錯誤。
   **每次寫入與外部改動都記 log**（issue #406）：寫出去記 INFO `config.toml written`；重讀時內容跟 daemon 記得的不同（＝不是 daemon 自己寫的）記 WARN
   `config.toml changed outside this daemon`。兩者都帶呼叫位置（`#[track_caller]`，`projection` 的公開函式把自己的呼叫端傳下來）、觸發它的 HTTP 請求
   （`api::auth` 對非 GET 請求設的 task-local：method／path／對端／User-Agent／Origin／Referer，不含 token；身分分兩格——`bot=` 是驗過的
