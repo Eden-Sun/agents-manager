@@ -224,7 +224,12 @@ pub async fn in_progress(app: &impl crate::capabilities::Db, agm_dir: &Path) -> 
 /// 請求檔還在、讀得懂才算。壞掉的檔 kick 會自己清掉並記 log，這裡不把它當成有部署在跑。
 fn read_request(agm_dir: &Path) -> Option<Value> {
     let txt = std::fs::read_to_string(agm_dir.join(REQUEST_FILE)).ok()?;
-    serde_json::from_str::<Value>(&txt).ok().filter(|v| v.get("sha").and_then(Value::as_str).is_some())
+    serde_json::from_str::<Value>(&txt).ok().filter(|v| {
+        v.get("sha").and_then(Value::as_str).is_some_and(|sha| {
+            let sha = sha.trim();
+            !sha.is_empty() && !sha.contains(' ')
+        })
+    })
 }
 
 /// 正在 `working` 的 bot（確認框列出來：換 binary 要等它們，不是按了就砍）。
@@ -488,6 +493,14 @@ mod tests {
         let e = start(&f.env.app, &f.ctx, None, &kick).await.unwrap_err();
         assert!(matches!(&e, LcError::Conflict(v) if v["reason"] == "deploy_in_progress" && v["running"]["kind"] == "requested"), "{e:?}");
         assert_eq!(kick.calls.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn a_request_with_a_blank_sha_is_not_reported_as_deployment_in_progress() {
+        let f = fixture().await;
+        std::fs::write(f.ctx.agm_dir.join(REQUEST_FILE), r#"{"sha":"   "}"#).unwrap();
+
+        assert_eq!(in_progress(&f.env.app, &f.ctx.agm_dir).await.unwrap(), None);
     }
 
     #[tokio::test]
