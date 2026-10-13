@@ -40,9 +40,21 @@ async fn identity_args(app: &impl IdentityAccess, bot: &db::Bot, host: &str) -> 
 
 /// `-c tui.show_tooltips=false`：codex 0.158 起回合超過 30 秒、以及第三回合起的回合結束後會插一行隨機 tip
 /// （openai/codex#48352），畫面備援擷取可能把它當成回覆結尾（issue #728）。不依賴使用者的 config.toml，固定關掉。
+///
+/// `-c allow_login_shell=false`（issue #1675）：codex 的 shell 工具預設用 `$SHELL -lc` 跑指令，login shell 的 profile
+/// 會重建 `PATH`（macOS `path_helper`、`brew shellenv`、`~/.local/bin`），把 pane env 裡擺在最前面的 herdr／cargo shim
+/// 擠到真 herdr 後面。bot 打 `herdr agent start` 就繞過 shim：不補 `--no-daemon`、`-p`，codex 子 agent 連上版本較舊的共用
+/// app-server，新模型被拒。關掉之後工具的 shell 直接繼承 pane 的 `PATH`。
 fn codex_pane_guard_args(kind: &str) -> Vec<String> {
     if kind == "codex" {
-        vec!["--no-daemon".into(), "--no-alt-screen".into(), "-c".into(), "tui.show_tooltips=false".into()]
+        vec![
+            "--no-daemon".into(),
+            "--no-alt-screen".into(),
+            "-c".into(),
+            "tui.show_tooltips=false".into(),
+            "-c".into(),
+            "allow_login_shell=false".into(),
+        ]
     } else {
         Vec::new()
     }
@@ -2275,6 +2287,10 @@ mod resume_args_tests {
         assert!(args.contains(&"--no-alt-screen".into()), "Codex must keep its screen readable: {args:?}");
         assert!(args.contains(&"--yolo".into()), "existing auto-approve args must be preserved: {args:?}");
         assert!(args.windows(2).any(|w| w == ["-c", "tui.show_tooltips=false"]), "Codex turn tips must stay off: {args:?}");
+        assert!(
+            args.windows(2).any(|w| w == ["-c", "allow_login_shell=false"]),
+            "Codex tool shells must not be login shells (they rebuild PATH and push the herdr shim behind the real herdr, #1675): {args:?}"
+        );
         stop_bot(&e.app, &bot.id).await.unwrap();
 
         // resume：子命令排最前面，guard 參數一樣要帶。
@@ -2292,6 +2308,7 @@ mod resume_args_tests {
         assert_eq!(&args[..2], ["resume", "codex-previous"], "{args:?}");
         assert!(args.contains(&"--no-daemon".into()), "resumed Codex must not reuse a shared app server: {args:?}");
         assert!(args.windows(2).any(|w| w == ["-c", "tui.show_tooltips=false"]), "resumed Codex turn tips must stay off: {args:?}");
+        assert!(args.windows(2).any(|w| w == ["-c", "allow_login_shell=false"]), "resumed Codex tool shells must not be login shells: {args:?}");
     }
 
     #[tokio::test]
@@ -4081,6 +4098,7 @@ mod child_restart_tests {
         assert!(args.contains(&"--no-daemon"), "Codex must not reuse a shared app server: {args:?}");
         assert!(args.contains(&"--no-alt-screen"), "Codex must keep its screen readable: {args:?}");
         assert!(args.windows(2).any(|w| w == ["-c", "tui.show_tooltips=false"]), "Codex turn tips must stay off: {args:?}");
+        assert!(args.windows(2).any(|w| w == ["-c", "allow_login_shell=false"]), "Codex tool shells must not be login shells: {args:?}");
     }
 
     /// 稽核：herdr 0.9.2+ 的閒著 codex 永遠回 `unknown`、不會再有狀態事件。原地重啟新 run 以 `unknown` 起頭，
