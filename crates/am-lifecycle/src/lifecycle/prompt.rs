@@ -520,7 +520,7 @@ pub async fn prompt_relayed_queueable(
 
 /// 排一筆 `queued` turn 等下一回合（只有 AGM 派工走這裡）。
 ///
-/// 界線都靠 DB：`turns_one_queued`（每個對話最多一筆 queued）擋住「同一顆 bot 疊第二筆」，
+/// 界線都靠 DB：`turns_one_queued_user`／`turns_one_queued_daemon`（每條槽每個對話最多一筆 queued，#1685）擋住「同一顆 bot 疊第二筆」，
 /// `turns_client_req` 擋住「同一筆交辦重試疊出第二筆」——撞到就回原本的 409，讓呼叫端照舊退避。
 /// `prompt_text` 存要送的內容（含附件路徑展開後的樣子），與 queue flush 用的是同一欄。
 #[allow(clippy::too_many_arguments)]
@@ -989,7 +989,7 @@ async fn prompt_inner(
     if queue_awaits_idle {
         // A queued turn can remain pending briefly after its predecessor ends; do not let a direct
         // prompt overtake that occupied user slot during the queue worker's wake-up window.
-        super::busy_send::refuse_if_slot_taken(app, &conv).await?;
+        super::busy_send::refuse_if_slot_taken(app, &conv, client_request_id).await?;
     }
     // 維護窗口的入場閘門（issue #86）：`restart` 租約握著的時候，daemon 這一側不再開新回合。
     // 擋在規劃與 turn 之前，所以連一列都不會建，同一個 `client_request_id` 之後原樣重送是乾淨的。

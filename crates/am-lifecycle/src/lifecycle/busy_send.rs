@@ -56,11 +56,15 @@ async fn slot_holder(app: &(impl crate::capabilities::Db + SupervisorSendRepo), 
 
 /// Enforce the single `awaits_idle` slot before taking the direct-send path too. A queued send
 /// can still be waiting for the queue worker after its predecessor has ended.
-pub(super) async fn refuse_if_slot_taken(app: &(impl crate::capabilities::Db + SupervisorSendRepo), conversation_id: &str) -> LcResult<()> {
-    let existing: Option<String> = sqlx::query_scalar(
-        "SELECT id FROM turns WHERE conversation_id=? AND status='queued' AND awaits_idle=1 ORDER BY created_at, id LIMIT 1",
-    )
+///
+/// 槽照來源分兩條（#1685）：這一則是 daemon 通知就只看通知那一條，使用者（與 AGM、別顆 bot）只看自己那一條。
+pub(super) async fn refuse_if_slot_taken(app: &(impl crate::capabilities::Db + SupervisorSendRepo), conversation_id: &str, client_request_id: &str) -> LcResult<()> {
+    let existing: Option<String> = sqlx::query_scalar(&format!(
+        "SELECT id FROM turns WHERE conversation_id=? AND status='queued' AND awaits_idle=1 AND ({}) = ? ORDER BY created_at, id LIMIT 1",
+        db::daemon_notice_sql("")
+    ))
     .bind(conversation_id)
+    .bind(daemon_lane(client_request_id))
     .fetch_optional(app.db())
     .await
     .map_err(up)?;
@@ -68,6 +72,11 @@ pub(super) async fn refuse_if_slot_taken(app: &(impl crate::capabilities::Db + S
         Some(turn_id) => Err(slot_taken(app, &turn_id).await),
         None => Ok(()),
     }
+}
+
+/// 這一則排哪一條槽：1＝daemon 通知（`daemon_notice_sql` 為真），0＝使用者／AGM／別顆 bot（#1685）。
+fn daemon_lane(client_request_id: &str) -> i64 {
+    super::daemon_notice::is_daemon_notice(Some(client_request_id)) as i64
 }
 
 /// Insert the turn, user message, and attachment bindings as one durable queue admission.
@@ -87,10 +96,12 @@ pub(super) async fn queue_awaiting_idle(
     // 先讀槽再寫：bot 鎖只排得住這顆 bot 自己，擋不住別的 writer（對帳、收件匣）在讀與寫之間 commit；deferred 交易
     // 這時升級寫鎖直接 517，空著的槽也把使用者的 prompt 拒掉（#821）。
     let mut tx = db::begin_write(app.db()).await.map_err(up)?;
-    let existing: Option<String> = sqlx::query_scalar(
-        "SELECT id FROM turns WHERE conversation_id=? AND status='queued' AND awaits_idle=1 ORDER BY created_at, id LIMIT 1",
-    )
+    let existing: Option<String> = sqlx::query_scalar(&format!(
+        "SELECT id FROM turns WHERE conversation_id=? AND status='queued' AND awaits_idle=1 AND ({}) = ? ORDER BY created_at, id LIMIT 1",
+        db::daemon_notice_sql("")
+    ))
     .bind(conversation_id)
+    .bind(daemon_lane(client_request_id))
     .fetch_optional(&mut *tx)
     .await
     .map_err(up)?;
@@ -119,9 +130,13 @@ pub(super) async fn queue_awaiting_idle(
         // 唯一索引（每個對話最多一筆 queued）擋下來＝槽被 AGM 派工、別的 bot、啟動等待佔著：說是誰，不要只回一句英文。
         if error.as_database_error().is_some_and(|d| d.is_unique_violation()) {
             drop(tx);
-            let occupant: Option<String> = sqlx::query_scalar("SELECT id FROM turns WHERE conversation_id=? AND status='queued' ORDER BY created_at, id LIMIT 1")
-                .bind(conversation_id)
-                .fetch_optional(app.db())
+            let occupant: Option<String> = sqlx::query_scalar(&format!(
+                "SELECT id FROM turns WHERE conversation_id=? AND status='queued' AND ({}) = ? ORDER BY created_at, id LIMIT 1",
+                db::daemon_notice_sql("")
+            ))
+            .bind(conversation_id)
+            .bind(daemon_lane(client_request_id))
+            .fetch_optional(app.db())
                 .await
                 .ok()
                 .flatten();
@@ -199,6 +214,126 @@ mod tests {
         assert_eq!(*other.lock().unwrap(), Some(false), "the admission holds the write lock from its read on; the other writer waits");
         assert_eq!(out.delivery, "queued");
         assert_eq!(queued(&e.app, &conv).await, (1, 1), "the queued turn and its user message commit exactly once");
+    }
+
+    /// daemon 自己排的通知（production 是 `RelaySrc` 帶 `daemon` 來源，見 `daemon/src/api.rs` 的 `DAEMON_SENDER`）。
+    async fn admit_notice(app: &Arc<App>, conv: &str, bot_id: &str, text: &str, crid: &str) -> LcResult<prompt::PromptOut> {
+        queue_awaiting_idle(app, conv, bot_id, text, text, crid, None, prompt::RelaySrc::trusted(Some("daemon")), &[]).await
+    }
+
+    async fn queued_rows(app: &Arc<App>, conv: &str) -> i64 {
+        sqlx::query_scalar("SELECT COUNT(*) FROM turns WHERE conversation_id=? AND status='queued'")
+            .bind(conv)
+            .fetch_one(app.db())
+            .await
+            .unwrap()
+    }
+
+    /// #1685：排著一則 daemon 通知（`child-done:`），使用者自己打的那一句照樣排得進去，不被通知擋在門外；
+    /// 使用者那一句排在通知前面送。使用者的槽照舊只收一筆（第二句回 `queue_slot_taken`，`holder` 是使用者自己）。
+    #[tokio::test]
+    async fn a_user_prompt_queues_behind_nothing_when_a_daemon_notice_holds_the_queue() {
+        let e = tt::env().await;
+        let bot = tt::claude_bot(&e.app, &e.project_id, "busy-1685-notice-first").await;
+        let conv = db::conversation_id(e.app.db(), &bot.id).await.unwrap();
+        let notice = admit_notice(&e.app, &conv, &bot.id, "子 agent 完成了", "child-done:c1:t1").await.expect("the notice takes the daemon slot");
+
+        let user = admit(&e.app, &conv, &bot.id, "使用者的一句", "busy-1685-user")
+            .await
+            .expect("a user prompt must not be refused because a daemon notice holds the queue");
+        assert_eq!(queued_rows(&e.app, &conv).await, 2, "the notice and the user's line both stay queued");
+        let head = db::queued_turn(e.app.db(), &conv).await.unwrap().expect("something is queued");
+        assert_eq!(head.id, user.turn_id, "the user's line goes first, the notice follows");
+
+        match admit(&e.app, &conv, &bot.id, "再一句", "busy-1685-user-2").await {
+            Err(LcError::Conflict(body)) => {
+                assert_eq!(body["reason"], "queue_slot_taken", "{body}");
+                assert_eq!(body["turn_id"], user.turn_id.as_str(), "{body}");
+                assert_eq!(body["holder"]["kind"], "user", "{body}");
+            }
+            other => panic!("a second user prompt keeps the one user slot, got {:?}", other.map(|o| o.turn_id)),
+        }
+        assert_eq!(queued_rows(&e.app, &conv).await, 2);
+        assert_eq!(notice.delivery, "queued");
+    }
+
+    /// #1685：使用者的一句已經排著，子 agent 的 `child-blocked:` 通知照樣排得進去；通知之間仍只收一則（daemon 的槽照舊一筆）。
+    #[tokio::test]
+    async fn a_daemon_notice_queues_behind_a_user_prompt_and_the_daemon_slot_still_takes_one() {
+        let e = tt::env().await;
+        let bot = tt::claude_bot(&e.app, &e.project_id, "busy-1685-user-first").await;
+        let conv = db::conversation_id(e.app.db(), &bot.id).await.unwrap();
+        let user = admit(&e.app, &conv, &bot.id, "先排的使用者", "busy-1685-u").await.expect("the user prompt takes the user slot");
+
+        let alert = admit_notice(&e.app, &conv, &bot.id, "子 agent 卡住了", "child-blocked:c2:q1")
+            .await
+            .expect("a daemon notice must not be refused because a user prompt holds the queue");
+        assert_eq!(queued_rows(&e.app, &conv).await, 2);
+        assert_eq!(db::queued_turn(e.app.db(), &conv).await.unwrap().expect("queued").id, user.turn_id);
+
+        match admit_notice(&e.app, &conv, &bot.id, "又一則通知", "resume-nudge:01RUN").await {
+            Err(LcError::Conflict(body)) => {
+                assert_eq!(body["reason"], "queue_slot_taken", "{body}");
+                assert_eq!(body["turn_id"], alert.turn_id.as_str(), "{body}");
+                assert_eq!(body["holder"]["kind"], "daemon", "{body}");
+            }
+            other => panic!("the daemon slot keeps one notice, got {:?}", other.map(|o| o.turn_id)),
+        }
+    }
+
+    /// #1685（驗收 2、3）：使用者的一句被 flush 認領（`in_flight`）之後，原本排著的 daemon 通知還在佇列裡、是下一則；
+    /// 投影給 web 的 `queued_turn`（`queued_turns_by_bot`）在使用者那一句還排著的時候，就是使用者自己的那一句。
+    #[tokio::test]
+    async fn a_queued_daemon_notice_survives_the_user_line_being_claimed_and_is_next_in_line() {
+        let e = tt::env().await;
+        let app = e.app.clone();
+        let bot = tt::claude_bot(&app, &e.project_id, "busy-1685-survive").await;
+        let conv = db::conversation_id(&app.db, &bot.id).await.unwrap();
+        let notice = admit_notice(&app, &conv, &bot.id, "子 agent 完成了", "child-done:c3:t3").await.unwrap();
+        let user = admit(&app, &conv, &bot.id, "使用者的一句", "busy-1685-survive-u").await.unwrap();
+
+        let projected = db::queued_turns_by_bot(&app.db).await.unwrap();
+        assert_eq!(projected.get(&bot.id).map(|t| t.id.as_str()), Some(user.turn_id.as_str()), "web 的 queued_turn 是使用者自己那一句");
+
+        let run = tt::fake_run(&app, &bot.id).await;
+        sqlx::query("UPDATE turns SET status='in_flight', run_id=? WHERE id=?").bind(&run).bind(&user.turn_id).execute(&app.db).await.unwrap();
+        let head = db::queued_turn(app.db(), &conv).await.unwrap().expect("the notice is still queued");
+        assert_eq!(head.id, notice.turn_id, "the notice is next once the user line is claimed");
+        assert_eq!(queued_rows(&app, &conv).await, 1, "exactly the notice remains queued");
+    }
+
+    /// #1685（驗收 4，撤回）：撤回排著的 daemon 通知只撤它一則，使用者那一句照舊排著、仍是佇列頭。
+    #[tokio::test]
+    async fn withdrawing_the_notice_leaves_the_user_line_queued_at_the_head() {
+        let e = tt::env().await;
+        let app = e.app.clone();
+        let bot = tt::claude_bot(&app, &e.project_id, "busy-1685-withdraw").await;
+        let conv = db::conversation_id(&app.db, &bot.id).await.unwrap();
+        let notice = admit_notice(&app, &conv, &bot.id, "子 agent 完成了", "child-done:c4:t4").await.unwrap();
+        let user = admit(&app, &conv, &bot.id, "使用者的一句", "busy-1685-withdraw-u").await.unwrap();
+
+        crate::lifecycle::withdraw_turn(&app, &notice.turn_id).await.expect("a queued daemon notice can be withdrawn");
+        assert_eq!(queued_rows(&app, &conv).await, 1, "only the withdrawn notice leaves the queue");
+        let head = db::queued_turn(app.db(), &conv).await.unwrap().expect("the user line is still queued");
+        assert_eq!(head.id, user.turn_id);
+    }
+
+    /// #1685（驗收 4，送達臨界區）：兩條槽各排一則時，`DELIVERY_CRITICAL_PREDICATE` 照舊判成臨界區，`acquire_lease`（quiet）照舊拿不到。
+    #[tokio::test]
+    async fn the_delivery_critical_predicate_and_quiet_lease_hold_with_two_queued_rows() {
+        let e = tt::env().await;
+        let app = e.app.clone();
+        let bot = tt::claude_bot(&app, &e.project_id, "busy-1685-critical").await;
+        let conv = db::conversation_id(&app.db, &bot.id).await.unwrap();
+        admit_notice(&app, &conv, &bot.id, "子 agent 完成了", "child-done:c5:t5").await.unwrap();
+        admit(&app, &conv, &bot.id, "使用者的一句", "busy-1685-critical-u").await.unwrap();
+        tt::fake_run(&app, &bot.id).await;
+
+        assert!(crate::supervisor::store::delivery_critical_anywhere(&app.db).await.unwrap(), "a queued row on a live idle run is delivery-critical");
+        let lease = crate::supervisor::store::acquire_lease(&app.db, "restart", "runner", None, None, &db::iso_in(600), true, None, &json!({}))
+            .await
+            .unwrap();
+        assert!(lease.is_none(), "the quiet lease is refused while either lane has a queued row");
     }
 
     /// #821：真的有第二個排隊請求在同一瞬搶同一個槽時，它照舊拿到 `queue_slot_taken`（不是 `database is locked`），
