@@ -110,10 +110,10 @@ export function DeployWaitChip() {
           ) : null}
           <p className="deploy-wait-note">
             {wait.user_escalated
-              ? '已按「現在換版」：working 不再擋，送達中、別人握著窗口、讀不到狀態照樣擋。'
+              ? '已按「現在換版」：working 不再擋（它身上等回合結束才送的排隊訊息也不擋），正在送訊息、別人握著窗口、讀不到狀態照樣擋。'
               : wait.escalates_at
                 ? `沒動作的話約 ${limitHitWhen(wait.escalates_at, now) ?? ''} 自動放寬（working 不再擋）。`
-                : '已自動放寬，只剩送達中、別人握著窗口或讀不到狀態在擋。'}
+                : '已自動放寬，只剩正在送訊息（或閒著的 bot 排隊訊息即將送出）、別人握著窗口或讀不到狀態在擋。'}
           </p>
           <div className="deploy-wait-actions">
             <button type="button" className="btn" disabled={busy} onClick={() => void run(() => dismissDeployWait(wait.id), '先等：部署照樣在等，到時候自動放寬')}>

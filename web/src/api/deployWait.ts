@@ -66,7 +66,7 @@ export async function dismissDeployWait(id: string): Promise<DeployWait | null> 
 
 export const BLOCKER_WHY: Record<string, string> = {
   working: '工作中',
-  delivering: '送達中',
+  delivering: '正在送訊息或排隊待送',
   unreadable: '讀不到狀態',
   lease: '握著窗口',
 }

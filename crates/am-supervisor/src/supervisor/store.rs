@@ -2867,13 +2867,18 @@ pub async fn leases(pool: &SqlitePool) -> Result<Vec<Lease>> {
 
 /// **送達臨界區的唯一定義**（SPEC §18.10）：這一筆 turn 此刻是不是「daemon 正要把字送進 pane，
 /// 中途被打斷會掉東西」。兩種：
-/// - `queued` 而且這顆 bot 還有活著、不在 `blocked` 的 run（有人會來送它）；
+/// - `queued` 而且這顆 bot 還有活著、不在 `blocked`、也不在 `working` 的 run（flush 隨時會領它去打字）。
+///   `working` 不算（issue #1677）：flush 在 working 時一個字都不會打（`queue::flush_queued_locked`），
+///   排隊跨 daemon 重啟保得住、回合結束的邊在新 daemon 照樣收得到；算進來的話長回合加一則排隊訊息就讓部署永遠拿不到窗口；
 /// - `in_flight` 而 `delivery` 還是 `pending`（正在打字／送出）。
+///
+/// flush 讀完 run 之後 bot 才轉 working、窗口恰好此時拿走的那一瞬，由 flush **認領之後**再看一次窗口收尾，
+/// 不靠這個條件。
 ///
 /// 安全檢查（`maintenance::safety`）、`acquire_lease` 的條件式寫入與入場閘門都讀這一份，
 /// 才不會養出兩套會漂移的規則（issue #86）。用的別名固定是 `t`（turns）與 `c`（conversations）。
 pub const DELIVERY_CRITICAL_PREDICATE: &str = "(t.status='queued' AND EXISTS (SELECT 1 FROM runs r WHERE r.bot_id = c.bot_id
-                       AND r.state IN ('starting','running','stopping') AND r.agent_status <> 'blocked'))
+                       AND r.state IN ('starting','running','stopping') AND r.agent_status NOT IN ('blocked','working')))
       OR (t.status='in_flight' AND t.delivery='pending')";
 
 /// 上面那份條件套在「任何一顆 bot」上，給 `NOT EXISTS (…)` 用。沒有 bind 參數。
