@@ -53,6 +53,10 @@ type Timer = ReturnType<typeof setTimeout>
 export class DraftSync {
   private readonly rev = new Map<string, number>()
   private readonly dirty = new Set<string>()
+  /** 本機輸入次數，以及最後接受的遠端版本接受時所見的輸入次數。 */
+  private readonly localEpoch = new Map<string, number>()
+  private readonly acceptedEpoch = new Map<string, number>()
+  private readonly forgetEpoch = new Map<string, number>()
   private readonly timers = new Map<string, Timer>()
   private readonly inflight = new Set<string>()
   /** daemon 拒收（太大…）的 key：草稿只在本機，不重送、`load()` 也不清。 */
@@ -78,6 +82,7 @@ export class DraftSync {
 
   /** 本機改了這個輸入框（打字、倒回放回原文、退回排隊那則…）。 */
   localChange(key: string, text: string): void {
+    this.localEpoch.set(key, (this.localEpoch.get(key) ?? 0) + 1)
     this.rejected.delete(key)
     this.dirty.add(key)
     this.touched?.add(key)
@@ -135,8 +140,11 @@ export class DraftSync {
   /** bot／專案被刪、草稿被清掉：不用再送。 */
   forget(key: string): void {
     this.cancel(key)
+    this.forgetEpoch.set(key, (this.forgetEpoch.get(key) ?? 0) + 1)
     this.dirty.delete(key)
     this.rejected.delete(key)
+    this.localEpoch.delete(key)
+    this.acceptedEpoch.delete(key)
     this.settle(key)
   }
 
@@ -150,6 +158,7 @@ export class DraftSync {
     this.rev.set(key, rev)
     if (mine) return
     if (this.dirty.has(key) && this.deps.focused(key)) return
+    this.acceptedEpoch.set(key, this.localEpoch.get(key) ?? 0)
     this.cancel(key)
     this.dirty.delete(key)
     this.rejected.delete(key)
@@ -184,14 +193,28 @@ export class DraftSync {
     // 前一個 PUT 還在飛：它回來之後會看到本機又變了、自己再排一次。
     if (this.inflight.has(key)) return
     const text = this.deps.read(key)
+    const forgetEpoch = this.forgetEpoch.get(key) ?? 0
     this.inflight.add(key)
     try {
       const { rev } = await this.deps.put(key, text, this.deps.clientId)
-      this.rev.set(key, Math.max(this.knownRev(key), rev))
+      const observedRev = this.knownRev(key)
+      this.rev.set(key, Math.max(observedRev, rev))
       this.touched?.add(key)
       this.settle(key)
+      if ((this.forgetEpoch.get(key) ?? 0) !== forgetEpoch && (this.localEpoch.get(key) ?? 0) === 0) return
       if (this.deps.read(key) === text) this.dirty.delete(key)
-      else this.schedule(key, this.deps.read(key) === '' ? 0 : this.debounceMs)
+      else if ((this.localEpoch.get(key) ?? 0) > (this.acceptedEpoch.get(key) ?? 0)) {
+        // 新的本機輸入尚未被接受的遠端版本取代，仍要排隊送出。
+        this.dirty.add(key)
+        this.schedule(key, this.deps.read(key) === '' ? 0 : this.debounceMs)
+      } else if (observedRev <= rev) {
+        // 在飛期間接受過的遠端版本比這次 PUT 舊；PUT 成功才是較新的 server 內容。
+        this.deps.write(key, text)
+        this.dirty.delete(key)
+      } else {
+        // 已知有更高 rev 的 server 版本，保留已套用的遠端內容。
+        this.dirty.delete(key)
+      }
     } catch (e) {
       if (e instanceof ApiError && (e.status === 400 || e.status === 413)) {
         // 拒絕的是送出去那一版；拒絕之前本機又改了（PUT 在飛時打的字）就照新的字排隊送，不標成被拒（#1514）。
