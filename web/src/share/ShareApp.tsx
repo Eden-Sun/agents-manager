@@ -194,6 +194,8 @@ export function ShareApp({ client }: { client: ShareClient }) {
   const linkGone = useRef(false)
   const messageResyncGen = useRef(0)
   const appliedResyncGen = useRef(0)
+  /** resync 還沒套用前，SSE 收到的新訊息，連同收到時的 resync 世代（#1684）。只在有待套用的 resync 時記。 */
+  const resyncDelta = useRef<{ gen: number; msg: ShareMessage }[]>([])
   /** SSE 斷過：重新連上時要補抓一次（斷線期間的事件不會重播）。 */
   const wasDown = useRef(false)
   /** 手上看過的最新一則 bot 回覆；頁面帶來更新的一則＝bot 剛回完，檔案清單要重抓（輪詢模式沒有 SSE 的 message 事件）。 */
@@ -244,13 +246,17 @@ export function ShareApp({ client }: { client: ShareClient }) {
     [client],
   )
 
-  const applyPage = useCallback((page: SharePage, replace: boolean, statusAt: number) => {
+  const applyPage = useCallback((page: SharePage, replace: boolean, statusAt: number, resyncGen: number) => {
     const statusFresh = statusAt === statusEvents.current
     setBotName(page.bot_name)
     if (statusFresh) setStatus(page.status)
     if (replace) {
       sawOlder.current = false
-      setMessages(mergeMessages([], page.messages))
+      // 快照是倒回之後才組的，但回來得晚：這個世代發出請求之後才從 SSE 收到的回覆照樣放回快照上面（#1684）。
+      // 更早世代收到的，是倒回前的狀態，快照已經不含它，丟掉；之後的世代還要用，留著。
+      const replay = resyncDelta.current.filter((d) => d.gen >= resyncGen)
+      resyncDelta.current = resyncDelta.current.filter((d) => d.gen > resyncGen)
+      setMessages(mergeMessages(page.messages, replay.map((d) => d.msg)))
     } else setMessages((cur) => mergeMessages(cur, page.messages))
     const newest = page.messages.findLast((m) => m.role === 'assistant')?.id ?? null
     const first = !pageSeen.current
@@ -298,7 +304,7 @@ export function ShareApp({ client }: { client: ShareClient }) {
         settledMessageGen.current = Math.max(settledMessageGen.current, gen)
         const replace = resyncGen > appliedResyncGen.current
         if (replace) appliedResyncGen.current = resyncGen
-        applyPage(page, replace, statusAt)
+        applyPage(page, replace, statusAt, resyncGen)
       },
       (e) => {
         const kind = e instanceof ShareHttpError && e.status === 404 ? 'not_found' : 'failure'
@@ -328,6 +334,7 @@ export function ShareApp({ client }: { client: ShareClient }) {
     const stop = client.subscribe({
       onMessage: (m) => {
         setMessages((cur) => mergeMessages(cur, [m]))
+        if (messageResyncGen.current > appliedResyncGen.current) resyncDelta.current.push({ gen: messageResyncGen.current, msg: m })
         if (m.role === 'assistant') {
           lastAssistant.current = m.id
           setAwaiting(false)
