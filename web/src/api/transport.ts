@@ -49,6 +49,20 @@ export function isAbortError(e: unknown): boolean {
   return typeof e === 'object' && e !== null && (e as { name?: unknown }).name === 'AbortError'
 }
 
+/**
+ * 等 `p`，但 `signal` 中止就立刻以中止原因 reject，不等 `p`。`p` 之後的結果照樣消化（不留未處理的 rejection）。
+ * 給共享的工作用：呼叫端只放掉自己的等待，不去中止別人還在等的那一趟。
+ */
+function untilAborted<T>(p: Promise<T>, signal: AbortSignal | undefined): Promise<T> {
+  if (!signal) return p
+  return new Promise<T>((resolve, reject) => {
+    const onAbort = () => reject(signal.reason ?? abortError())
+    p.then(resolve, reject).finally(() => signal.removeEventListener('abort', onAbort))
+    if (signal.aborted) onAbort()
+    else signal.addEventListener('abort', onAbort, { once: true })
+  })
+}
+
 function parseText(status: number, text: string): unknown {
   if (status === 204 || !text) return null
   try {
@@ -121,7 +135,10 @@ export interface TransportOptions {
 /** 純文字 token：沒有空白、沒有 HTML 的尖括號，長度有上限。 */
 const TOKEN_TEXT = /^[^\s<>]{1,256}$/
 
-/** GET 超過這麼久沒回就中止：掛住的 GET 會讓 `singleFlight` 的 `refreshState` 永遠卡在那一趟。 */
+/**
+ * GET 超過這麼久沒回就中止：掛住的 GET 會讓 `singleFlight` 的 `refreshState` 永遠卡在那一趟。
+ * token 更新（`GET /api/session`）用同一個期限：它是共享的，掛住時要能收掉，`refreshing` 才會重建。
+ */
 const GET_TIMEOUT_MS = 30_000
 const realTimers: TransportTimers = {
   setTimeout: (fn, ms) => setTimeout(fn, ms),
@@ -144,23 +161,28 @@ export class HttpTransport implements Transport {
    * 401，畫面就卡在「讀取終端失敗：missing or bad X-AM-Token」直到使用者自己重新整理
    * （2026-09-20 使用者在 blocked 面板上看到）。所以 401 時重拿一次 token 再重試一次。
    */
-  private async refreshToken(): Promise<string> {
+  private async refreshToken(signal?: AbortSignal): Promise<string> {
     if (!this.refreshing) {
       this.refreshing = this.session().finally(() => {
         this.refreshing = null
       })
     }
-    return this.refreshing
+    // 共享的這一趟不隨任一呼叫端中止；呼叫端的期限只管它自己的等待。
+    return untilAborted(this.refreshing, signal)
   }
 
   /** 重試過還是 401 就照實丟出去（token 真的不對，重試再多次也一樣）。 */
-  private async withFreshToken<T>(send: (tok: string) => Promise<Response>, run: (res: Response) => Promise<T>): Promise<T> {
+  private async withFreshToken<T>(
+    send: (tok: string) => Promise<Response>,
+    run: (res: Response) => Promise<T>,
+    signal?: AbortSignal,
+  ): Promise<T> {
     let res = await send(this.token)
     if (res.status === 401) {
       const before = this.token
       let tok = ''
       try {
-        tok = await this.refreshToken()
+        tok = await this.refreshToken(signal)
       } catch {
         return run(res)
       }
@@ -170,7 +192,19 @@ export class HttpTransport implements Transport {
   }
 
   async session(): Promise<string> {
-    const res = await fetch('/api/session', { headers: { Accept: 'application/json' } })
+    // 期限包住整趟（headers 與 body）：fetch 不理 signal、body 掛住也一樣，`refreshing` 才收得掉、之後能重建。
+    const timers = this.opts.timers ?? realTimers
+    const ctl = new AbortController()
+    const timeoutId = timers.setTimeout(() => ctl.abort(), GET_TIMEOUT_MS)
+    try {
+      return await untilAborted(this.fetchSession(ctl.signal), ctl.signal)
+    } finally {
+      timers.clearTimeout(timeoutId)
+    }
+  }
+
+  private async fetchSession(signal: AbortSignal): Promise<string> {
+    const res = await fetch('/api/session', { headers: { Accept: 'application/json' }, signal })
     const body = await readBody(res)
     if (!res.ok) {
       throw new ApiError(res.status, (body ?? {}) as ApiErrorBody, `GET /api/session failed (${res.status})`)
@@ -218,9 +252,13 @@ export class HttpTransport implements Transport {
           signal: effective,
         })
       }
-      // 只有 GET 敢重試：POST/PATCH 401 時 daemon 根本沒跑到處理函式，但重送一次仍可能重複送出。
-      const res = method === 'GET' ? await this.withFreshToken(send, async (r) => r) : await send(this.token)
-      const parsed = await readBody(res)
+      // 期限要罩住整段（401 後等 token 更新、重送、讀 body）：只中止第一個 fetch，掛住的 token 更新會讓這趟永遠等。
+      const exchange = async () => {
+        // 只有 GET 敢重試：POST/PATCH 401 時 daemon 根本沒跑到處理函式，但重送一次仍可能重複送出。
+        const res = method === 'GET' ? await this.withFreshToken(send, async (r) => r, effective) : await send(this.token)
+        return { res, parsed: await readBody(res) }
+      }
+      const { res, parsed } = await untilAborted(exchange(), effective)
       if (!res.ok) {
         const errBody: ApiErrorBody =
           parsed && typeof parsed === 'object' ? (parsed as ApiErrorBody) : { reason: plainReason(parsed) }
