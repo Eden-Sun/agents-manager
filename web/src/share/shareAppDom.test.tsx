@@ -1462,3 +1462,120 @@ test('resync 之後才開始的載入較早訊息照常套用 (issue #1659)', as
   assert.deepEqual([...document.querySelectorAll('.sh-bubble')].map((n) => n.textContent?.trim()), ['m3', 'm4', 'm5', 'm6'])
   assert.equal(document.querySelector('.sh-older'), null)
 })
+
+/** #1684：resync 的快照在飛的時候，bot 在倒回後又回了一則（SSE 先到）；快照晚回，不能把這則新回覆蓋掉。 */
+test('resync 快照在飛時 SSE 收到的新回覆不被快照蓋掉 (issue #1684)', async () => {
+  let ev!: ShareEvents
+  const pending: ((value: ReturnType<typeof page>) => void)[] = []
+  let calls = 0
+  const client = clientWith(
+    () => {
+      calls++
+      if (calls === 1) return Promise.resolve(page([msgAt('m1', 'user', 1), msgAt('m2', 'assistant', 2)]))
+      return new Promise((resolve) => pending.push(resolve))
+    },
+    (events) => {
+      ev = events
+      return () => {}
+    },
+  )
+  const ids = () => [...document.querySelectorAll('.sh-bubble')].map((n) => n.textContent?.trim())
+  await mount(<ShareApp client={client} />)
+  await flushSharePromises()
+  assert.deepEqual(ids(), ['m1', 'm2'])
+
+  await act(async () => ev.onResync?.())
+  await act(async () => ev.onMessage(msgAt('m3', 'assistant', 3)))
+  assert.deepEqual(ids(), ['m1', 'm2', 'm3'], '快照還沒回來時，新回覆先畫出來')
+
+  await act(async () => pending[0]({ ...page([msgAt('m1', 'user', 1)]), has_more: false }))
+  await settle(50)
+  assert.deepEqual(ids(), ['m1', 'm3'], '倒回的 m2 要消失，快照之後才到的 m3 要留著')
+})
+
+/** #1684：兩次 resync 中間收到的回覆，是倒回前的狀態；後一次快照已經不含它，就不能因為前一次的 SSE 又冒出來。 */
+test('兩次 resync 之間收到的回覆不跨世代復活 (issue #1684)', async () => {
+  let ev!: ShareEvents
+  const pending: ((value: ReturnType<typeof page>) => void)[] = []
+  let calls = 0
+  const client = clientWith(
+    () => {
+      calls++
+      if (calls === 1) return Promise.resolve(page([msgAt('m1', 'user', 1), msgAt('m2', 'assistant', 2)]))
+      return new Promise((resolve) => pending.push(resolve))
+    },
+    (events) => {
+      ev = events
+      return () => {}
+    },
+  )
+  const ids = () => [...document.querySelectorAll('.sh-bubble')].map((n) => n.textContent?.trim())
+  await mount(<ShareApp client={client} />)
+  await flushSharePromises()
+
+  await act(async () => ev.onResync?.())
+  await act(async () => ev.onMessage(msgAt('m3', 'assistant', 3)))
+  await act(async () => ev.onResync?.())
+  await act(async () => pending[1]({ ...page([msgAt('m1', 'user', 1)]), has_more: false }))
+  await act(async () => pending[0]({ ...page([msgAt('m1', 'user', 1), msgAt('m2', 'assistant', 2)]), has_more: false }))
+  await settle(50)
+  assert.deepEqual(ids(), ['m1'], '第二次快照已經不含 m3，舊的 SSE 不能讓它復活')
+})
+
+/** #1684：resync 的重抓失敗後，SSE 收到的回覆要留到重試成功的快照套用時。 */
+test('resync 重抓失敗後重試成功：期間收到的回覆仍保留 (issue #1684)', async () => {
+  let ev!: ShareEvents
+  const pending: { resolve: (value: ReturnType<typeof page>) => void; reject: (e: unknown) => void }[] = []
+  let calls = 0
+  const client = clientWith(
+    () => {
+      calls++
+      if (calls === 1) return Promise.resolve(page([msgAt('m1', 'user', 1), msgAt('m2', 'assistant', 2)]))
+      return new Promise((resolve, reject) => pending.push({ resolve, reject }))
+    },
+    (events) => {
+      ev = events
+      return () => {}
+    },
+  )
+  const ids = () => [...document.querySelectorAll('.sh-bubble')].map((n) => n.textContent?.trim())
+  await mount(<ShareApp client={client} />)
+  await flushSharePromises()
+
+  await act(async () => ev.onResync?.())
+  await act(async () => ev.onMessage(msgAt('m3', 'assistant', 3)))
+  await act(async () => pending[0].reject(new Error('network')))
+  await act(async () => {
+    ev.onDown()
+    ev.onUp?.()
+  })
+  await act(async () => pending[1].resolve({ ...page([msgAt('m1', 'user', 1)]), has_more: false }))
+  await settle(50)
+  assert.deepEqual(ids(), ['m1', 'm3'], '重試拿到的快照套用時，m3 仍在')
+})
+
+/** #1684：快照與 SSE 同一則（同 id）只畫一次；SSE 後到的內容覆蓋快照裡的同 id。 */
+test('resync 快照與 SSE 收到同一則訊息：同 id 只畫一次', async () => {
+  let ev!: ShareEvents
+  const pending: ((value: ReturnType<typeof page>) => void)[] = []
+  let calls = 0
+  const client = clientWith(
+    () => {
+      calls++
+      if (calls === 1) return Promise.resolve(page([msgAt('m1', 'user', 1)]))
+      return new Promise((resolve) => pending.push(resolve))
+    },
+    (events) => {
+      ev = events
+      return () => {}
+    },
+  )
+  await mount(<ShareApp client={client} />)
+  await flushSharePromises()
+  await act(async () => ev.onResync?.())
+  await act(async () => ev.onMessage({ ...msgAt('m3', 'assistant', 3), text: 'm3 新版' }))
+  await act(async () => pending[0]({ ...page([msgAt('m1', 'user', 1), msgAt('m3', 'assistant', 3)]), has_more: false }))
+  await settle(50)
+  const texts = [...document.querySelectorAll('.sh-bubble')].map((n) => n.textContent?.trim())
+  assert.deepEqual(texts, ['m1', 'm3 新版'])
+})
