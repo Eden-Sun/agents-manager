@@ -252,6 +252,9 @@ do_preflight() {
     fi
     local snap="$pre" id
     [ -f "$snap" ] || snap="$STATE/snapshot.json"
+    # 協調者專案要在快照裡找得到：找不到時 sup_id 會是空的，export／import 就靜默不帶 --with-supervisor（#1714）。
+    project_id_of "$snap" "$SUP_LABEL" >/dev/null 2>&1 \
+        || die "快照裡找不到協調者專案（CUTOVER_SUPERVISOR_PROJECT=${SUP_LABEL}）：它要在 CUTOVER_PROJECTS 裡，否則協調者資料會漏搬"
     for id in $(project_ids "$snap"); do
         rsh "grep -q -F $(q "\"$id\"") $(q "$DST_DATA/config.toml")" && warn "目標 config.toml 已有專案 ${id}：之前 import 過（import 冪等、會跳過已有的列）"
     done
@@ -564,6 +567,8 @@ run_drill() {
     local args=() l
     for l in "${LABELS[@]}"; do args+=(--label "$l"); done
     shelper snapshot "${args[@]}" --out "$STATE/snapshot.json" | sed 's/^/    /' || die "Mac daemon 讀不到兩個專案"
+    project_id_of "$STATE/snapshot.json" "$SUP_LABEL" >/dev/null 2>&1 \
+        || die "快照裡找不到協調者專案（CUTOVER_SUPERVISOR_PROJECT=${SUP_LABEL}）：它要在 CUTOVER_PROJECTS 裡，否則協調者資料會漏搬"
     "$PY" "$PT" export --help 2>/dev/null | grep -q -- --with-supervisor && pt_sup=1
     [ "$pt_sup" = 1 ] || warn "$PT 沒有 --with-supervisor（#720 未合）：演練不帶協調者資料"
     rsh "test -f $(q "$DST_DATA/agents-manager.sqlite3")" || die "目標沒有 DB"
