@@ -11,10 +11,13 @@ export function createResyncRunner(run: () => Promise<void>): () => void {
     try {
       do {
         again = false
-        await run()
+        // 這一輪出錯不能把排著的那次一起丟掉（#1698）：錯誤在這裡吞掉，`again` 照常決定要不要補跑。
+        try {
+          await run()
+        } catch {
+          /* run 自己負責回報；這裡只保證不漏跑排著的那次 */
+        }
       } while (again)
-    } catch {
-      /* run 自己負責回報；這裡只保證旗標會放開 */
     } finally {
       running = false
     }
