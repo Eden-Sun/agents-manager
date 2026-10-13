@@ -1,22 +1,9 @@
 //! daemon 自己產生、排進佇列的通知（#562）：子 agent 停在 blocked（`child_alerts`）、重啟後的續行提示（`resume_nudge`）。
 //!
-//! 它們不是使用者送的、也不是 AGM 派工，卻跟那些共用同一條佇列（#1685 起排隊槽分兩條：通知一條、使用者／AGM／別顆 bot 一條，互不擋；每條每個對話最多一筆 queued）。一則通知送不進去時，
+//! 它們不是使用者送的、也不是 AGM 派工，寫入時由 daemon 指定獨立 lane（#1685：使用者、relay、通知各自最多一筆 queued）。一則通知送不進去時，
 //! 照一般 prompt 的重試上限（12 次）要擋約 40 分鐘，後面的使用者訊息一直排不到。所以：
 //! - 放回佇列的上限短得多（[`RETRY_LIMIT`]），用完就收成 failed＋一則 system 說明，讓佇列往下走；
 //! - `POST /api/turns/{id}/withdraw` 可以撤回還在排的這一種（使用者訊息、AGM 派工照舊 409）。
-
-pub const RESUME_NUDGE_CRID_PREFIX: &str = "resume-nudge:";
-
-/// 這些 `client_request_id` 前綴的 turn 是 daemon 自己寫的。
-const PREFIXES: [&str; 3] = [
-    crate::child_alerts::CRID_PREFIX,
-    crate::child_done::CRID_PREFIX,
-    RESUME_NUDGE_CRID_PREFIX,
-];
-
-pub fn is_daemon_notice(client_request_id: Option<&str>) -> bool {
-    client_request_id.is_some_and(|c| PREFIXES.iter().any(|p| c.starts_with(p)))
-}
 
 /// daemon 通知最多放回佇列幾次：退避 15＋30＋60 秒，大約兩分鐘就讓路（一般 prompt 是 12 次、約 40 分鐘）。
 pub const RETRY_LIMIT: i64 = 3;
@@ -36,13 +23,13 @@ mod tests {
     use super::*;
     use crate::db;
     use crate::lc_error::LcError;
-    use crate::lifecycle::{flush_queued_locked, withdraw_turn};
+    use crate::lifecycle::{flush_queued_locked, withdraw_turn, QueueClass};
     use crate::state::App;
     use crate::testing as tt;
     use std::sync::Arc;
 
     /// 一顆閒著的 grok，框裡一直有使用者的草稿（打不進去＝`composer_busy`），佇列頭排著一則 `crid` 的 turn。
-    async fn stuck_head(crid: Option<&str>) -> (tt::Env, String, String, String) {
+    async fn stuck_head(crid: Option<&str>, queue_class: QueueClass) -> (tt::Env, String, String, String) {
         let env = tt::env().await;
         let app = env.app.clone();
         let bot = tt::claude_bot(&app, &env.project_id, "notice").await;
@@ -61,19 +48,20 @@ mod tests {
         db::set_pane_typed(&app.db, &run).await.unwrap();
         env.herdr.live_pane("pane-1", tt::LivePane { width: Some(120), boxed: true, composer: vec!["草稿".into()], ..Default::default() });
         let conv = db::conversation_id(&app.db, &bot.id).await.unwrap();
-        let turn = queue_turn(&app, &conv, crid).await.unwrap();
+        let turn = queue_turn(&app, &conv, crid, queue_class).await.unwrap();
         (env, bot.id, conv, turn)
     }
 
-    async fn queue_turn(app: &Arc<App>, conv: &str, crid: Option<&str>) -> Result<String, sqlx::Error> {
+    async fn queue_turn(app: &Arc<App>, conv: &str, crid: Option<&str>, queue_class: QueueClass) -> Result<String, sqlx::Error> {
         let id = db::ulid();
         sqlx::query(
-            "INSERT INTO turns (id, conversation_id, origin, status, delivery, prompt_text, client_request_id, created_at)
-             VALUES (?,?,'web','queued','pending','通知',?,?)",
+            "INSERT INTO turns (id, conversation_id, origin, status, delivery, prompt_text, client_request_id, queue_class, created_at)
+             VALUES (?,?,'web','queued','pending','通知',?,?,?)",
         )
         .bind(&id)
         .bind(conv)
         .bind(crid)
+        .bind(queue_class.as_str())
         .bind(db::now())
         .execute(&app.db)
         .await?;
@@ -100,7 +88,7 @@ mod tests {
     /// 同樣卡住的使用者訊息照舊用一般的上限，不會被這條提早放棄。
     #[tokio::test]
     async fn a_notice_that_cannot_be_typed_gives_way_after_its_short_limit() {
-        let (env, bot, conv, turn) = stuck_head(Some("child-blocked:01CHILD:1:ff")).await;
+        let (env, bot, conv, turn) = stuck_head(Some("child-blocked:01CHILD:1:ff"), QueueClass::DaemonNotice).await;
         let app = env.app.clone();
         flush_times(&app, &bot, &turn, RETRY_LIMIT).await;
         assert_eq!(status(&app, &turn).await.0, "queued", "上限之內照常放回");
@@ -108,10 +96,13 @@ mod tests {
         assert_eq!(status(&app, &turn).await, ("failed".into(), "failed".into()));
         let notes = system_notes(&app, &turn).await;
         assert!(notes.len() == 1 && notes[0].contains("daemon 自動通知") && notes[0].contains("composer_busy"), "{notes:?}");
-        assert!(queue_turn(&app, &conv, Some("web-behind")).await.is_ok(), "讓路：後面的訊息排得進來（#1685 起通知佔自己那一條，使用者的訊息本來就排得進來）");
+        assert!(
+            queue_turn(&app, &conv, Some("web-behind"), QueueClass::User).await.is_ok(),
+            "讓路：後面的使用者訊息排得進自己的 lane",
+        );
         assert_eq!(env.herdr.methods().iter().filter(|m| m.starts_with("pane.send")).count(), 0, "從頭到尾沒打過字");
 
-        let (env, bot, _, turn) = stuck_head(Some("web-1234")).await;
+        let (env, bot, _, turn) = stuck_head(Some("web-1234"), QueueClass::User).await;
         flush_times(&env.app, &bot, &turn, RETRY_LIMIT + 1).await;
         assert_eq!(status(&env.app, &turn).await.0, "queued", "使用者的訊息不吃這個短上限");
     }
@@ -124,42 +115,22 @@ mod tests {
         let bot = tt::claude_bot(&app, &env.project_id, "withdraw-notice").await;
         let conv = db::conversation_id(&app.db, &bot.id).await.unwrap();
 
-        let user = queue_turn(&app, &conv, Some("web-1234")).await.unwrap();
+        let user = queue_turn(&app, &conv, Some("web-1234"), QueueClass::User).await.unwrap();
         assert!(matches!(withdraw_turn(&app, &user).await, Err(LcError::Conflict(_))), "使用者排的不歸這裡撤");
         assert_eq!(status(&app, &user).await.0, "queued", "原樣不動");
         sqlx::query("DELETE FROM turns WHERE id=?").bind(&user).execute(&app.db).await.unwrap();
 
-        let notice = queue_turn(&app, &conv, Some("child-blocked:01CHILD:1:ff")).await.unwrap();
+        let notice = queue_turn(&app, &conv, Some("child-blocked:01CHILD:1:ff"), QueueClass::DaemonNotice).await.unwrap();
         withdraw_turn(&app, &notice).await.unwrap();
         assert_eq!(status(&app, &notice).await, ("failed".into(), "failed".into()));
         assert_eq!(system_notes(&app, &notice).await, vec![super::WITHDRAWN_WHY.to_string()]);
         assert!(matches!(withdraw_turn(&app, &notice).await, Err(LcError::Conflict(_))), "撤過的不能再撤");
 
-        let sending = queue_turn(&app, &conv, Some("resume-nudge:01RUN")).await.unwrap();
+        let sending = queue_turn(&app, &conv, Some("resume-nudge:01RUN"), QueueClass::DaemonNotice).await.unwrap();
         let run = tt::fake_run(&app, &bot.id).await;
         sqlx::query("UPDATE turns SET status='in_flight', run_id=? WHERE id=?").bind(&run).bind(&sending).execute(&app.db).await.unwrap();
         assert!(matches!(withdraw_turn(&app, &sending).await, Err(LcError::Conflict(_))), "已經在送的撤不回來");
         assert_eq!(status(&app, &sending).await.0, "in_flight");
     }
 
-    /// #1685：排隊槽的 SQL 述詞（`db::daemon_notice_sql`，決定排哪一條槽）跟 `is_daemon_notice`／`PREFIXES` 必須同進同出。
-    #[tokio::test]
-    async fn the_queue_lane_sql_agrees_with_the_prefixes() {
-        let e = tt::env().await;
-        for crid in [Some("child-done:01A:01TURN"), Some("child-blocked:01A:3:ff"), Some("resume-nudge:01RUN"), Some("web-1234"), Some("agm-1"), Some("child-doneX"), None] {
-            let sql = format!("SELECT {} FROM (SELECT ? AS client_request_id)", db::daemon_notice_sql(""));
-            let lane: i64 = sqlx::query_scalar(&sql).bind(crid).fetch_one(&e.app.db).await.unwrap();
-            assert_eq!(lane == 1, is_daemon_notice(crid), "{crid:?}");
-        }
-    }
-
-    #[test]
-    fn only_notices_the_daemon_writes_itself_count() {
-        assert!(is_daemon_notice(Some("child-blocked:01A:3:ff")));
-        assert!(is_daemon_notice(Some("child-done:01A:01TURN")));
-        assert!(is_daemon_notice(Some("resume-nudge:01RUN")));
-        for other in [None, Some(""), Some("web-1234"), Some("agm-1"), Some("mission:1:question:x"), Some("tools-install:codex:1")] {
-            assert!(!is_daemon_notice(other), "{other:?}");
-        }
-    }
 }

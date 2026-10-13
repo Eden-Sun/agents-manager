@@ -38,7 +38,7 @@ pub trait TurnOps {
         attachment_ids: &[String],
         relay_from: Option<&str>,
     ) -> LcResult<PromptOut>;
-    async fn prompt_relayed_queueable(&self, bot_id: &str, text: &str, client_request_id: &str, relay_from: Option<&str>) -> LcResult<PromptOut>;
+    async fn prompt_relayed_queueable(&self, bot_id: &str, text: &str, client_request_id: &str, relay_from: Option<&str>, queue_class: crate::lifecycle::QueueClass) -> LcResult<PromptOut>;
     #[allow(clippy::too_many_arguments)]
     fn insert_message<'a>(
         &'a self,

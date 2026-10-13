@@ -247,7 +247,7 @@ pub async fn dispatch(app: &(impl crate::capabilities::Db + crate::capabilities:
     };
     // 對方回合中就排隊，不要每五分鐘賭一次它剛好在兩個回合之間（AGM 2026-09-16 裁示）。
     // 只有這條派工路徑排隊；使用者與 web 的 `/prompt` 維持 409。
-    match app.prompt_relayed_queueable(&a.target_bot_id, &a.text, &a.dispatch_crid(), Some(&from)).await {
+    match app.prompt_relayed_queueable(&a.target_bot_id, &a.text, &a.dispatch_crid(), Some(&from), crate::lifecycle::QueueClass::Relay).await {
         Ok(out) => {
             // `failed` from the CLI itself is terminal; `unknown` means we do not know whether
             // it landed, and is reconciled against the turn rather than re-sent.

@@ -312,7 +312,13 @@ pub(crate) async fn notify_turn(app: &Arc<App>, turn_id: &str) -> anyhow::Result
 
     let message = message_for(&turn.child_name, &quoted_reply);
     match app
-        .prompt_relayed_queueable(&turn.parent_id, &message, &client_request_id, Some(&turn.child_id))
+        .prompt_relayed_queueable(
+            &turn.parent_id,
+            &message,
+            &client_request_id,
+            Some(&turn.child_id),
+            crate::lifecycle::QueueClass::DaemonNotice,
+        )
         .await
     {
         Ok(out) => {

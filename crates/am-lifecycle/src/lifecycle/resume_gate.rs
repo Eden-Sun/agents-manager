@@ -433,7 +433,7 @@ mod tests {
         let turns: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM turns").fetch_one(&app.db).await.unwrap();
         assert_eq!(turns, 0, "被擋下的那一則不留任何 turn：同一個 request id 之後原樣重送是乾淨的");
 
-        let out = prompt_relayed_queueable(&app, &bot.id, "AGM 派的工作", "req-agm", Some(crate::agent_relay::DAEMON_SENDER)).await.unwrap();
+        let out = prompt_relayed_queueable(&app, &bot.id, "AGM 派的工作", "req-agm", Some(crate::agent_relay::DAEMON_SENDER), QueueClass::Relay).await.unwrap();
         assert_eq!(out.delivery, "queued");
         assert_eq!(turn(&app, &out.turn_id).await.status, "queued");
         assert!(!e.herdr.methods().iter().any(|m| m == "pane.send_text" || m == "agent.prompt"), "一個字都沒打");

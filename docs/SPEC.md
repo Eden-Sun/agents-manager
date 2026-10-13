@@ -23,7 +23,7 @@ agent 一律由 **herdr**（terminal workspace manager，socket API protocol 20�
 bot `name` 是可隨時改的暱稱（不需重啟、允許 CJK，禁空白與 `@ , : ;`），唯一性在專案內。
 
 **以 run 找回合走 `turns_run_time`（`turns(run_id, created_at)`，#1653）**：hook 收件與 grok 對話檔同步問「這個 run 記了哪些使用者訊息」、
-斷線收尾找最後一回合、supervisor 問「同一個 run 有沒有更晚的回合」都靠它；`turns_one_in_flight`／`turns_one_queued_user`／`turns_one_queued_daemon` 是 partial 唯一索引，只對
+斷線收尾找最後一回合、supervisor 問「同一個 run 有沒有更晚的回合」都靠它；`turns_one_in_flight`／`turns_one_queued_user`／`turns_one_queued_relay`／`turns_one_queued_daemon` 是 partial 唯一索引，只對
 status 字面相同的查詢有用，少了一般索引時 planner 會改掃整張 messages 再逐列回查 turns（線上 3 萬則、每個 hook 1.4–2.7 秒）。協調者收件匣
 依 state 撈 `delivered`／`pending` 走 `supervisor_inbox_sup_state`（`(supervisor_id, state)`）：只有一個 supervisor_id，`supervisor_inbox_key`
 的前綴等於整張表，而 partial 的 `supervisor_inbox_open` 不被等號查詢採用（SQLite 不認 `state='x'` 蘊含 `state != 'handled'`）。
@@ -1199,12 +1199,12 @@ marker 列與框的邊之間多出任何一列（含空白列）、marker 後多
 `lifecycle::prompt::prompt_relayed_queueable` 排隊；bot 沒在跑時帶 `start_if_stopped` 的送出也會排隊（issue #122）。
 使用者與 web 的 `POST /api/bots/{id}/prompt` 預設仍回 409；帶 `queue_if_busy:true` 時，若 bot 有 in-flight turn
 或 agent 尚未 idle，則落地一筆 `awaits_idle=1` 的 queued turn。三種 turn 都走 `lifecycle::queue::flush_queued_locked`，
-依 `created_at, id` 領取，一次只送一筆；`awaits_idle=1` 必須等 run 的 agent 狀態明確為 `idle`，`unknown` 不算 idle。已軟刪的 bot 即使 run 還在跑也不領排著的 prompt：flush 撤掉它（`bot 已被刪除，排著的 prompt 不再送出`），跟直送 prompt 擋已刪 bot（#338）一致。
-排隊槽分兩條（issue #1685）：daemon 自己排的通知（`client_request_id` 前綴 `child-done:`／`child-blocked:`／`resume-nudge:`，述詞 `db::daemon_notice_sql`）一條（`turns_one_queued_daemon`），使用者、AGM、別顆 bot 的一條（`turns_one_queued_user`）；每條同一對話最多一筆 queued，兩條互不擋。同一顆 bot 再送忙碌中的 web 訊息，若使用者那一條已有一筆，才回 `queue_slot_taken`，不覆蓋佇列；通知排著不會擋住使用者的訊息。排著多筆時 flush、`queued_turn` 投影都先取使用者那一條（同一條內照 `created_at, id`），通知接在後面送，撤回只撤那一則。
+使用者 lane 先於 relay、daemon lane；同一 lane 依 `created_at, id` 領取，一次只送一筆；`awaits_idle=1` 必須等 run 的 agent 狀態明確為 `idle`，`unknown` 不算 idle。已軟刪的 bot 即使 run 還在跑也不領排著的 prompt：flush 撤掉它（`bot 已被刪除，排著的 prompt 不再送出`），跟直送 prompt 擋已刪 bot（#338）一致。
+排隊槽分三條（issue #1685）：使用者訊息、AGM／bot relay、daemon 自動通知各一條（`turns_one_queued_user`、`turns_one_queued_relay`、`turns_one_queued_daemon`），lane 在 daemon 寫入 turn 時依可信呼叫路徑保存，絕不由呼叫端提供的 `client_request_id` 前綴決定；每條同一對話最多一筆 queued。使用者 busy prompt 只會被同一 user lane 的 queued turn 擋住，AGM 派工／relay／daemon 通知排著時仍可排入；每次 flush 與 `queued_turn` 投影都先取使用者 lane，再取 relay、daemon lane，各 lane 內照 `created_at, id`。因此舊的通知、relay 與派工都保留，使用者的訊息先送；撤回仍只作用在該筆 turn。
 兩個分頁同句送出時，web 只有在 daemon 明確回 `holder.kind="user"`、沒有附件，而且已排佇列正文與本次文字只差頭尾空白時，才視為另一分頁已排入；holder 缺漏或未知就把本次輸入退回草稿，不猜它是使用者自己的佇列。
 daemon 重啟會重掛所有 queued turn，包括沒有 `next_flush_at` 的列，回到 idle 後照原順序接續送出。
 
-界線：每個對話每條槽最多一筆 `queued`（`turns_one_queued_user`／`turns_one_queued_daemon`，#1685），同一筆交辦重試回同一筆（`turns_client_req`），撞到就回 409 照舊退避；
+界線：每個對話每條槽最多一筆 `queued`（`turns_one_queued_user`／`turns_one_queued_relay`／`turns_one_queued_daemon`，#1685），同一筆交辦重試回同一筆（`turns_client_req`），撞到就回 409 照舊退避；
 排超過 `[supervisor] assignment_queue_wait_secs`（預設 1800 秒）還沒送出，controller 撤回那則 queued、把交辦停在 `blocked`，並推 `assignment_undeliverable`（見下面「交辦不要了」）；
 daemon 重啟時把所有 `queued` turn（含沒有 `next_flush_at` 的）重新掛上 flush，不留孤兒。送出時機與證據記錄完全沿用下面這套。
 
@@ -1256,7 +1256,7 @@ cancel 撤掉的是還沒送出的那則時，review 回應不再帶「turn 還�
 前端（`store/startingSend.ts`）只從 daemon 給的 turn 與訊息推出「有一則在等 bot 起來」（有好幾則時取最早排的那一則，與 daemon 起來後先送的順序一致，#1697）：輸入框上方一條「啟動中，起來後自動送出」，
 失敗時「沒能啟動（原因），還沒送出」＋重新啟動（`POST /start`，起來後照樣由 flush 送）／取消；有這一條時不再另外顯示「啟動」列。
 `queued` 的 `turn_updated` 不算回合完成（不然未讀先多一，真正完成那次又被同一個 turn id 去重吃掉）。
-**回合中送出**（issue #733）：web 的 `POST /prompt` 帶 `queue_if_busy:true`。bot 有 in-flight turn 或 agent 尚未 idle 時，daemon 在 bot 鎖內把一筆 `origin:"web"`、`delivery:"pending"`、`awaits_idle=1` 的 queued turn、user message 與附件綁定寫進同一個交易，commit 後回 `200 {delivery:"queued",turn_id,message_id}`；空閒時照原本立即送出。使用者那一條每顆 bot 同時只有一格 `awaits_idle`，已佔用時再送回 `409 {reason:"queue_slot_taken",turn_id}`，不改動原佇列；daemon 通知佔的是另一條（#1685），不擋使用者。舊版未帶 `queue_if_busy` 的呼叫仍維持原本 409 行為。
+**回合中送出**（issue #733）：web 的 `POST /prompt` 帶 `queue_if_busy:true`。bot 有 in-flight turn 或 agent 尚未 idle 時，daemon 在 bot 鎖內把一筆 `origin:"web"`、`delivery:"pending"`、`awaits_idle=1` 的 queued turn、user message 與附件綁定寫進同一個交易，commit 後回 `200 {delivery:"queued",turn_id,message_id}`；使用者 lane 每顆 bot 同時只有一筆 queued user turn，已佔用時再送回 `409 {reason:"queue_slot_taken",turn_id}`，不改動原佇列。AGM／bot relay 與 daemon 通知各在自己的 lane，不擋使用者，並由使用者先 flush（#1685）。舊版未帶 `queue_if_busy` 的呼叫仍維持原本 409 行為。
 這一則完全由 daemon 保存；`GET /api/state` 的 `queued_turn`、訊息／turn 頁與 socket 更新讓任何網址、分頁或裝置投影同一筆，不以瀏覽器記憶體或 `am.drafts` 當佇列。composer 顯示「已排隊，Bot 這回合結束後會自動送出」與原文，提供「撤回並放回」；撤回走 `POST /api/turns/{id}/withdraw`，daemon 只在 flush 尚未領走時回原文及附件 id，標 failed 並寫 system 說明，前端把原文和已上傳附件卡片放回輸入列。flush 已領走、turn 成為 `in_flight` 時回 409，前端更新狀態並說明可能已送出，不把文字再塞回輸入框。
 `queued` 的 `turn_updated` 不算回合完成（不然未讀先多一，真正完成那次又被同一個 turn id 去重吃掉）。重連、`resync` 與初次載入依 daemon state／turns／messages 重建這條狀態；前端不再 flush 或重送本機的 `queuedSends`。
 **單顆重啟連點會合併**（`restart_coalesce`，`POST /bots/{id}/restart`）：兩個請求本來會在 bot 鎖裡排隊、各重啟一次，剛起好的新 run 馬上又被收掉（`agent.start` 三次）。同一顆 bot、同樣的重啟種類**仍在進行中**，後來的等它做完、回同一個 `run_id`（回應多 `coalesced:true`）；做完之後再來的是新的一次（改設定後馬上重啟必須套用新設定，所以沒有「剛做完」窗口）；種類不同照做；領頭的失敗，等著的自己重試。web 的三個重啟鈕（⟳ 徽章、設定面板、更新徽章）共用 store 的 `busy['restart:<id>']`，任何一處在重啟，其他的也 disable。
@@ -1370,8 +1370,7 @@ abort 之後照常 flush 出去（但先照下一段等寬限）。要取消排�
 下次時間存在 `turns.flush_retries`／`turns.next_flush_at`，時間未到的其他喚醒不動它，但**要補掛一個到期才燒的 timer**
 （叫醒它的那個 timer 燒掉後就不在了，不補的話這顆 bot 一個 timer 都沒有，排隊的派工要等 30 分鐘保險絲，review3 L1）；
 每顆 bot 同時只有一個重試 timer，**更早的會換掉已經掛著的**（差 1 秒以內算同一個，不換）；放回
-12 次仍送不出就標 failed 並插說明（同一個 transaction）。daemon 自己排的通知（`client_request_id` 前綴 `child-blocked:`／`resume-nudge:`，
-`lifecycle::daemon_notice`）上限只有 3 次（約兩分鐘）：它擋在佇列頭時後面的使用者訊息排不到，用完就標 failed＋說明讓路（#562）。daemon 重啟（`reconcile::rearm_progress`）時掃描**所有** queued turn
+12 次仍送不出就標 failed 並插說明（同一個 transaction）。daemon 自己排的通知（turn 的可信 queue class 為 `daemon`，`lifecycle::daemon_notice`）上限只有 3 次（約兩分鐘）：用完就標 failed＋說明讓路（#562）。daemon 重啟（`reconcile::rearm_progress`）時掃描**所有** queued turn
 （沒有 `next_flush_at` 的當作現在到期），以 `max(now, next_flush_at)` 為每顆 bot 重建唯一的 timer。直接送出的 409 回應則由呼叫端（或 AGM
 交辦的既有退避）重試。
 
@@ -1880,7 +1879,7 @@ Claude Stop hook 的 `background_tasks`（含 Monitor、subagent、workflow）�
 transcript／hook 收的回合（`completed`）不受影響。
 同一 child 在 5 分鐘內回覆文字正規化後編輯距離不超過 20% 時視為近似通知，只送一則。`client_request_id` 使用
 `child-done:<child bot id>:<turn id>`（第 0 次無後綴），並以 DB 唯一鍵處理即時事件與 sweep 競速。通知被佇列收成 failed 且 `delivery='failed'`（字沒打進去）時，冷卻 2 分鐘後以 `:r<n>` 後綴重送，最多 3 次（#874，沿用 `child_alerts::last_sent` 的 attempt 判定，全部從 DB 推導）；使用者撤回不重送；送到、結果不明（`delivery` 為 `ok`/`unknown`）、還在路上都不重送。無回覆、failed turn、非 child、已刪 child、無 parent
-或 child 已自行回報的 turn 都不通知。daemon 通知重試與撤回辨識也涵蓋 `child-done:` 前綴。
+或 child 已自行回報的 turn 都不通知。`child-done:` 是通知冪等鍵的一部分；通知的短重試與撤回依 turn 寫入時保存的 daemon lane 判斷，不依 client request id 前綴判斷。
 **串行範圍只到同一位 parent**（#1033）：DB 判斷與送出（含 `prompt_relayed_queueable`）以 parent 為單位串行，不同 parent 互不等；畫面讀取與背景工作查詢這類外部 I/O 在鎖外做。sweep 依 parent 分組，不同 parent 並行（同時至多 8 位），同一 parent 內照最新優先的順序一個一個處理。
 
 ### 6.5b herdr PATH shim（命名規則做成機制）

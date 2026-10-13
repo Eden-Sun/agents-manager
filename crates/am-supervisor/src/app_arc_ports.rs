@@ -35,8 +35,8 @@ impl<T: TurnOps + ?Sized> TurnOps for Arc<T> {
     ) -> crate::lifecycle::LcResult<crate::lifecycle::PromptOut> {
         (**self).prompt_relayed(bot_id, text, client_request_id, attachment_ids, relay_from).await
     }
-    async fn prompt_relayed_queueable(&self, bot_id: &str, text: &str, client_request_id: &str, relay_from: Option<&str>) -> crate::lifecycle::LcResult<crate::lifecycle::PromptOut> {
-        (**self).prompt_relayed_queueable(bot_id, text, client_request_id, relay_from).await
+    async fn prompt_relayed_queueable(&self, bot_id: &str, text: &str, client_request_id: &str, relay_from: Option<&str>, queue_class: crate::lifecycle::QueueClass) -> crate::lifecycle::LcResult<crate::lifecycle::PromptOut> {
+        (**self).prompt_relayed_queueable(bot_id, text, client_request_id, relay_from, queue_class).await
     }
     fn insert_message<'a>(
         &'a self,

@@ -45,6 +45,7 @@ pub async fn notify_parent_relayed(
             text,
             request_id,
             Some(crate::agent_relay::DAEMON_SENDER),
+            crate::lifecycle::QueueClass::Relay,
         )
         .await
         {

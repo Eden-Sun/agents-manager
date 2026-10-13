@@ -107,7 +107,7 @@ impl SvgCheckEnv for App {
         let app = app.clone();
         let (bot_id, text, crid) = (bot_id.to_string(), text.to_string(), crid.to_string());
         async move {
-            let src = crate::lifecycle::RelaySrc { from: Some(crate::agent_relay::DAEMON_SENDER), unverified: false };
+            let src = crate::lifecycle::RelaySrc::daemon_notice(Some(crate::agent_relay::DAEMON_SENDER));
             crate::lifecycle::start_send::prompt_starting_or_queue(&app, &bot_id, &text, &crid, &[], src, true)
                 .await
                 .map(|_| ())
@@ -153,7 +153,7 @@ impl PortalEnv for App {
         let app = app.clone();
         let (bot_id, composed, crid, token) = (bot_id.to_string(), composed.to_string(), crid.to_string(), token.to_string());
         async move {
-            let src = crate::lifecycle::RelaySrc::trusted(Some(crate::share::SHARE_SENDER));
+            let src = crate::lifecycle::RelaySrc::user(Some(crate::share::SHARE_SENDER));
             match crate::lifecycle::prompt_starting_or_queue_with_share_token(&app, &bot_id, &composed, &crid, &[], src, true, &token).await {
                 Ok(out) => SendOutcome::Accepted { message_id: out.message_id, delivery: out.delivery },
                 Err(LcError::NotFound(_)) => SendOutcome::NotFound,

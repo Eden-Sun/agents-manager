@@ -571,8 +571,8 @@ mod tests {
         let (bot, conv, _run) = idle_bot(env, kind).await;
         let turn_id = db::ulid();
         sqlx::query(
-            "INSERT INTO turns (id, conversation_id, origin, status, delivery, client_request_id, prompt_text, created_at)
-             VALUES (?,?,'web','queued','pending','crid-q',?,?)",
+            "INSERT INTO turns (id, conversation_id, origin, status, delivery, client_request_id, prompt_text, queue_class, created_at)
+             VALUES (?,?,'web','queued','pending','crid-q',?,'relay',?)",
         )
         .bind(&turn_id)
         .bind(&conv)
@@ -786,7 +786,7 @@ mod tests {
         assert!(matches!(owed_as_unknown(Err(LcError::Bad("x".into()))), Err(LcError::Bad(_))));
     }
 
-    /// #903：認領後放回佇列那一句寫不進去而記成欠著，等補寫的時候，同一段對話的唯一佇列名額（`turns_one_queued`）
+    /// #903：認領後放回佇列那一句寫不進去而記成欠著，等補寫的時候，同一段對話同 lane 的佇列名額
     /// 已經被後來的那則佔走——以前每次補寫都撞唯一鍵、帳永遠欠著，T1 永遠 in_flight＋pending 擋住後面所有的回合。
     /// 現在收成 failed＋說明（一個字都沒送出），帳清掉，後來那則照常被認領。
     #[tokio::test]
@@ -811,7 +811,7 @@ mod tests {
         assert_eq!(owed(&bot).len(), 1, "記成欠著");
 
         // T1 還欠著的時候，後來的 P2 排進佇列，佔走名額。
-        let p2 = prompt_relayed_queueable(&app, &bot, "P2", "crid-p2", Some(crate::agent_relay::DAEMON_SENDER)).await.expect("P2 排進佇列");
+        let p2 = prompt_relayed_queueable(&app, &bot, "P2", "crid-p2", Some(crate::agent_relay::DAEMON_SENDER), super::QueueClass::Relay).await.expect("P2 排進佇列");
         assert_eq!(turn(&app, &p2.turn_id).await.status, "queued");
 
         sqlx::query("DROP TRIGGER refuse_requeue").execute(app.db()).await.unwrap();

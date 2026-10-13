@@ -312,7 +312,7 @@ mod delivery_tests {
             .await
             .unwrap();
         let dirty = "派工\u{200b}內容\u{1b}[1m";
-        let queued = prompt_relayed_queueable(&app, &f.bot_id, dirty, "agm-clean", Some(crate::agent_relay::DAEMON_SENDER)).await.unwrap();
+        let queued = prompt_relayed_queueable(&app, &f.bot_id, dirty, "agm-clean", Some(crate::agent_relay::DAEMON_SENDER), QueueClass::Relay).await.unwrap();
         assert_eq!(queued.delivery, "queued");
         assert_eq!(stored(&f, &queued.turn_id).await, ("派工內容".to_string(), dirty.to_string()));
 

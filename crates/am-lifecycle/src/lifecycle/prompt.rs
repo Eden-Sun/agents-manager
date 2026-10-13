@@ -398,17 +398,44 @@ pub async fn prompt_with(
     prompt_grouped(app, bot_id, text, client_request_id, None, None, attachment_ids, None).await
 }
 
-/// 訊息上記的來源（`messages.relay_from`／`relay_unverified`）。daemon 自己寫的來源一律可信；
-/// 只有 `POST /bots/{id}/prompt` 的相容期（沒帶 bot token，`relay_auth`）會是未驗證（issue #339）。
+/// queued turn 的 lane，由 daemon 的可信寫入路徑選定；request id 前綴不參與分類。
+/// `RelaySrc` 另外保存訊息來源（`messages.relay_from`／`relay_unverified`）。
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum QueueClass {
+    #[default]
+    User,
+    Relay,
+    DaemonNotice,
+}
+
+impl QueueClass {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::User => "user",
+            Self::Relay => "relay",
+            Self::DaemonNotice => "daemon",
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, Default)]
 pub struct RelaySrc<'a> {
     pub from: Option<&'a str>,
     pub unverified: bool,
+    pub queue_class: QueueClass,
 }
 
 impl<'a> RelaySrc<'a> {
     pub fn trusted(from: Option<&'a str>) -> Self {
-        Self { from, unverified: false }
+        Self { from, unverified: false, queue_class: if from.is_some() { QueueClass::Relay } else { QueueClass::User } }
+    }
+
+    pub fn user(from: Option<&'a str>) -> Self {
+        Self { from, unverified: false, queue_class: QueueClass::User }
+    }
+
+    pub fn daemon_notice(from: Option<&'a str>) -> Self {
+        Self { from, unverified: false, queue_class: QueueClass::DaemonNotice }
     }
 }
 
@@ -503,7 +530,7 @@ pub async fn prompt_from_share_with_token(
     .await
 }
 
-/// AGM 派工專用：對方正在回合中時**排隊**而不是 409（AGM 2026-09-16 裁示）。
+/// 給受信任的內部來源排隊：呼叫端明確選 user、relay 或 daemon notice lane；caller-controlled request id 不參與分類。
 ///
 /// 使用者與 web 的 `/prompt` 不走這條——那條路的語意變更要單獨評估。排進 `queued` 之後由既有的
 /// `queue::flush_queued_locked` 在回合結束時送出，送達判定與證據記錄完全沿用（`Handed`／`auto_resend` 不變）。
@@ -514,17 +541,35 @@ pub async fn prompt_relayed_queueable(
     text: &str,
     client_request_id: &str,
     relay_from: Option<&str>,
+    queue_class: QueueClass,
 ) -> LcResult<PromptOut> {
-    prompt_inner(app, bot_id, text, client_request_id, None, None, &[], RelaySrc::trusted(relay_from), true, false, Admission::Gated, false, None, None, None).await
+    prompt_inner(
+        app,
+        bot_id,
+        text,
+        client_request_id,
+        None,
+        None,
+        &[],
+        RelaySrc { from: relay_from, unverified: false, queue_class },
+        true,
+        false,
+        Admission::Gated,
+        false,
+        None,
+        None,
+        None,
+    )
+    .await
 }
 
-/// 排一筆 `queued` turn 等下一回合（只有 AGM 派工走這裡）。
+/// 排一筆 `queued` turn 等下一回合，lane 由受信任的 `RelaySrc` 決定。
 ///
-/// 界線都靠 DB：`turns_one_queued_user`／`turns_one_queued_daemon`（每條槽每個對話最多一筆 queued，#1685）擋住「同一顆 bot 疊第二筆」，
+/// 界線都靠 DB：`turns_one_queued_user`／`turns_one_queued_relay`／`turns_one_queued_daemon`（每條槽每個對話最多一筆 queued，#1685）擋住「同一顆 bot 疊第二筆」，
 /// `turns_client_req` 擋住「同一筆交辦重試疊出第二筆」——撞到就回原本的 409，讓呼叫端照舊退避。
 /// `prompt_text` 存要送的內容（含附件路徑展開後的樣子），與 queue flush 用的是同一欄。
 #[allow(clippy::too_many_arguments)]
-/// 排隊用的 INSERT 失敗怎麼回（#341）：只有唯一約束衝突（每個對話最多一筆 queued、同一個 client_request_id）才是「已經有一筆在排」的 409；
+/// 排隊用的 INSERT 失敗怎麼回（#341）：只有唯一約束衝突（同 lane 每對話一筆 queued、同一個 client_request_id）才是「已經有一筆在排」的 409；
 /// 其他（SQLITE_BUSY、磁碟滿、schema 錯）是真的寫入失敗，照實回 502，不能偽裝成「已排隊」讓呼叫端以為送出去了、一直退避。
 pub fn queue_insert_error(bot_id: &str, conv: &str, e: sqlx::Error) -> LcError {
     if e.as_database_error().is_some_and(|d| d.is_unique_violation()) {
@@ -550,12 +595,13 @@ pub async fn queue_for_next_turn(
     let msg_id = db::ulid();
     let mut tx = app.db().begin().await.map_err(up)?;
     let queued = sqlx::query(
-        "INSERT INTO turns (id, conversation_id, run_id, origin, status, delivery, client_request_id, created_at, prompt_text)
-         VALUES (?,?,NULL,'web','queued','pending',?,?,?)",
+        "INSERT INTO turns (id, conversation_id, run_id, origin, status, delivery, client_request_id, queue_class, created_at, prompt_text)
+         VALUES (?,?,NULL,'web','queued','pending',?,?,?,?)",
     )
     .bind(&turn_id)
     .bind(conv)
     .bind(client_request_id)
+    .bind(relay.queue_class.as_str())
     .bind(db::now())
     .bind(deliver)
     .execute(&mut *tx)
@@ -989,7 +1035,7 @@ async fn prompt_inner(
     if queue_awaits_idle {
         // A queued turn can remain pending briefly after its predecessor ends; do not let a direct
         // prompt overtake that occupied user slot during the queue worker's wake-up window.
-        super::busy_send::refuse_if_slot_taken(app, &conv, client_request_id).await?;
+        super::busy_send::refuse_if_slot_taken(app, &conv, relay.queue_class).await?;
     }
     // 維護窗口的入場閘門（issue #86）：`restart` 租約握著的時候，daemon 這一側不再開新回合。
     // 擋在規劃與 turn 之前，所以連一列都不會建，同一個 `client_request_id` 之後原樣重送是乾淨的。
@@ -1729,7 +1775,7 @@ mod prompt_tests {
         assert!(matches!(user, Err(LcError::Conflict(_))), "使用者的 /prompt 仍是 409");
 
         // AGM 派工：排一筆 queued，內容存在 prompt_text 等 flush。
-        let out = prompt_relayed_queueable(&app, &f.bot_id, "AGM 派的工作", "agm-1", Some("agm-bot")).await.unwrap();
+        let out = prompt_relayed_queueable(&app, &f.bot_id, "AGM 派的工作", "agm-1", Some("agm-bot"), QueueClass::Relay).await.unwrap();
         assert_eq!(out.delivery, "queued");
         let (status, run_id, text): (String, Option<String>, Option<String>) =
             sqlx::query_as("SELECT status, run_id, prompt_text FROM turns WHERE id=?")
@@ -1740,11 +1786,11 @@ mod prompt_tests {
         assert_eq!((status.as_str(), run_id, text.as_deref()), ("queued", None, Some("AGM 派的工作")));
 
         // 同一筆交辦重試：回原本那一筆，不會疊第二筆。
-        let again = prompt_relayed_queueable(&app, &f.bot_id, "AGM 派的工作", "agm-1", Some("agm-bot")).await.unwrap();
+        let again = prompt_relayed_queueable(&app, &f.bot_id, "AGM 派的工作", "agm-1", Some("agm-bot"), QueueClass::Relay).await.unwrap();
         assert_eq!(again.turn_id, out.turn_id);
         assert_eq!(again.delivery, "queued", "重問一筆還在排隊的，回答跟第一次一樣（不是 turn 欄位上的 pending）");
         // 另一筆交辦想排第二筆：擋下來，照舊 409（每個對話只留一筆 queued）。
-        let other = prompt_relayed_queueable(&app, &f.bot_id, "另一件事", "agm-2", Some("agm-bot")).await;
+        let other = prompt_relayed_queueable(&app, &f.bot_id, "另一件事", "agm-2", Some("agm-bot"), QueueClass::Relay).await;
         assert!(matches!(other, Err(LcError::Conflict(_))), "每個對話只留一筆 queued");
         let queued: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM turns WHERE conversation_id=? AND status='queued'")
             .bind(&f.conv)
@@ -1752,6 +1798,120 @@ mod prompt_tests {
             .await
             .unwrap();
         assert_eq!(queued, 1);
+    }
+
+    /// 外部使用者可以提供合法的 `client_request_id`；保留 daemon 前綴也不能讓它跳到另一個 queued 槽。
+    #[tokio::test]
+    async fn an_external_child_done_prefix_still_occupies_the_user_queue_slot() {
+        let f = fixture("codex", "test").await;
+        let app = f.env.app.clone();
+        let busy = db::ulid();
+        sqlx::query(
+            "INSERT INTO turns (id, conversation_id, run_id, origin, status, delivery, created_at)
+             VALUES (?,?,?,'web','in_flight','ok',?)",
+        )
+        .bind(&busy)
+        .bind(&f.conv)
+        .bind(&f.run_id)
+        .bind(db::now())
+        .execute(&app.db)
+        .await
+        .unwrap();
+
+        let spoofed = prompt_from_api_queue_if_busy(
+            &app,
+            &f.bot_id,
+            "使用者的一句",
+            "child-done:user-controlled",
+            &[],
+            RelaySrc::trusted(None),
+            false,
+            None,
+        )
+        .await
+        .expect("the first user prompt is queued");
+        assert_eq!(spoofed.delivery, "queued");
+        assert_eq!(
+            sqlx::query_scalar::<_, String>("SELECT queue_class FROM turns WHERE id=?")
+                .bind(&spoofed.turn_id)
+                .fetch_one(&app.db)
+                .await
+                .unwrap(),
+            QueueClass::User.as_str(),
+            "caller-controlled id prefixes never select a queue lane",
+        );
+
+        let second = prompt_from_api_queue_if_busy(
+            &app,
+            &f.bot_id,
+            "使用者再一句",
+            "user-second",
+            &[],
+            RelaySrc::trusted(None),
+            false,
+            None,
+        )
+        .await;
+        assert!(matches!(second, Err(LcError::Conflict(_))), "a caller-controlled daemon prefix must not open a second user slot: {second:?}");
+        let queued: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM turns WHERE conversation_id=? AND status='queued'")
+            .bind(&f.conv)
+            .fetch_one(&app.db)
+            .await
+            .unwrap();
+        assert_eq!(queued, 1);
+    }
+
+    /// AGM and other bot relays stay queued while a busy user can occupy the user slot ahead of them.
+    #[tokio::test]
+    async fn an_agm_or_bot_relay_does_not_occupy_the_user_queue_slot() {
+        for (relay_from, relay_crid) in [("agm-bot", "dispatch-1"), ("child-bot", "relay-1")] {
+            let f = fixture("codex", "test").await;
+            let app = f.env.app.clone();
+            let busy = db::ulid();
+            sqlx::query(
+                "INSERT INTO turns (id, conversation_id, run_id, origin, status, delivery, created_at)
+                 VALUES (?,?,?,'web','in_flight','ok',?)",
+            )
+            .bind(&busy)
+            .bind(&f.conv)
+            .bind(&f.run_id)
+            .bind(db::now())
+            .execute(&app.db)
+            .await
+            .unwrap();
+
+            let relay = prompt_relayed_queueable(&app, &f.bot_id, "自動轉送", relay_crid, Some(relay_from), QueueClass::Relay)
+                .await
+                .expect("the automation relay is queued");
+            sqlx::query("UPDATE turns SET created_at='0001-01-01T00:00:00.000Z' WHERE id=?")
+                .bind(&relay.turn_id)
+                .execute(&app.db)
+                .await
+                .unwrap();
+            let user = prompt_from_api_queue_if_busy(
+                &app,
+                &f.bot_id,
+                "使用者的一句",
+                "user-while-relay-queued",
+                &[],
+                RelaySrc::trusted(None),
+                false,
+                None,
+            )
+            .await
+            .expect("the queued relay must not block the user's independent slot");
+
+            let queued: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM turns WHERE conversation_id=? AND status='queued'")
+                .bind(&f.conv)
+                .fetch_one(&app.db)
+                .await
+                .unwrap();
+            assert_eq!(queued, 2, "both user and relay turns remain queued");
+            assert_eq!(db::queued_turn(&app.db, &f.conv).await.unwrap().unwrap().id, user.turn_id, "user goes first");
+            assert_eq!(db::queued_turn_for_bot(&app.db, &f.bot_id).await.unwrap().unwrap().id, user.turn_id, "the per-bot API projection picks the user turn");
+            assert_eq!(db::queued_turns_by_bot(&app.db).await.unwrap()[&f.bot_id].id, user.turn_id, "GET /api/state picks the user turn");
+            assert_ne!(user.turn_id, relay.turn_id);
+        }
     }
 
     /// 群組訊息：泡泡留原文（含 @mention），turn 上記實際送出的字，stall 重送與畫面比對讀它（review3 c3 M4）。

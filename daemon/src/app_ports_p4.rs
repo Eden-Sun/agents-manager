@@ -105,7 +105,7 @@ impl TurnControl for AppTurnControl<'_> {
                 &notice.text,
                 &request_id,
                 &[],
-                lifecycle::RelaySrc::trusted(Some("daemon")),
+                lifecycle::RelaySrc::daemon_notice(Some("daemon")),
                 false,
                 None,
             )

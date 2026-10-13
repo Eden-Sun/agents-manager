@@ -134,6 +134,59 @@
         pool.close().await;
     }
 
+    /// #1685：從 v60 升級時既有 queued turn 不因索引拆 lane 而令 migration 失敗；使用者選的通知前綴也不能變成 daemon lane。
+    #[tokio::test]
+    async fn v60_queued_turns_migrate_to_writer_classes_without_using_user_prefixes() {
+        let (pool, _) = bare_wal_pool().await;
+        let old_schema = SCHEMA.replace(
+            "  queue_class TEXT NOT NULL DEFAULT 'user' CHECK (queue_class IN ('user','relay','daemon')),\n",
+            "",
+        );
+        for stmt in old_schema.split(";\n") {
+            let stmt = stmt.trim();
+            if !stmt.is_empty() {
+                sqlx::query(stmt).execute(&pool).await.unwrap();
+            }
+        }
+        sqlx::query("CREATE UNIQUE INDEX turns_one_queued ON turns(conversation_id) WHERE status='queued'")
+            .execute(&pool).await.unwrap();
+        sqlx::query("INSERT INTO projects (id,path,label,host,created_at) VALUES ('p','/tmp/p','p','local','2026-10-01T00:00:00.000Z')")
+            .execute(&pool).await.unwrap();
+        for (bot, conv) in [("b1", "c1"), ("b2", "c2"), ("b3", "c3")] {
+            sqlx::query("INSERT INTO bots (id,project_id,name,kind,hook_token,created_at) VALUES (?, 'p', ?, 'claude', 'tok', '2026-10-01T00:00:00.000Z')")
+                .bind(bot).bind(bot).execute(&pool).await.unwrap();
+            sqlx::query("INSERT INTO conversations (id,bot_id,created_at) VALUES (?,?,'2026-10-01T00:00:00.000Z')")
+                .bind(conv).bind(bot).execute(&pool).await.unwrap();
+        }
+        for (turn, conv, crid) in [
+            ("t-user", "c1", "child-done:user-controlled"),
+            ("t-relay", "c2", "dispatch:1"),
+            ("t-notice", "c3", "child-done:daemon-generated"),
+        ] {
+            sqlx::query("INSERT INTO turns (id,conversation_id,origin,status,delivery,client_request_id,created_at) VALUES (?,?,'web','queued','pending',?,'2026-10-01T00:00:00.000Z')")
+                .bind(turn).bind(conv).bind(crid).execute(&pool).await.unwrap();
+        }
+        for (turn, conv, relay_from) in [
+            ("t-relay", "c2", Some("b1")),
+            ("t-notice", "c3", Some("b2")),
+        ] {
+            sqlx::query("INSERT INTO messages (id,conversation_id,turn_id,role,content,source,relay_from,created_at) VALUES (?, ?, ?, 'user', 'x', 'web', ?, '2026-10-01T00:00:00.000Z')")
+                .bind(format!("m-{turn}")).bind(conv).bind(turn).bind(relay_from).execute(&pool).await.unwrap();
+        }
+        sqlx::query("PRAGMA user_version = 60").execute(&pool).await.unwrap();
+
+        crate::runners::am_base_tests::apply_migrations(&pool).await.expect("v60 database with queued turns must migrate");
+        let classes: Vec<(String, String)> = sqlx::query_as("SELECT id, queue_class FROM turns WHERE status='queued' ORDER BY id")
+            .fetch_all(&pool).await.unwrap();
+        assert_eq!(classes, [("t-notice".into(), "daemon".into()), ("t-relay".into(), "relay".into()), ("t-user".into(), "user".into())]);
+        let old_index: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM sqlite_master WHERE type='index' AND name='turns_one_queued'")
+            .fetch_one(&pool).await.unwrap();
+        assert_eq!(old_index, 0, "the v60 single-slot index is replaced");
+        let version: i64 = sqlx::query_scalar("PRAGMA user_version").fetch_one(&pool).await.unwrap();
+        assert_eq!(version, SCHEMA_VERSION);
+        pool.close().await;
+    }
+
     async fn columns(pool: &SqlitePool, table: &str) -> Vec<String> {
         sqlx::query_scalar::<_, String>(&format!("SELECT name FROM pragma_table_info('{table}')"))
             .fetch_all(pool)

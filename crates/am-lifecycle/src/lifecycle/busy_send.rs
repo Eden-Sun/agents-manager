@@ -13,11 +13,11 @@ async fn slot_taken(app: &(impl crate::capabilities::Db + SupervisorSendRepo), t
 }
 
 /// 佔槽的是誰：`{"kind": "user"｜"start"｜"daemon"｜"agm"｜"bot"｜"unknown", "bot_id"?, "bot_name"?}`。
-/// `user`＝使用者自己（可能是另一個分頁）排的 `awaits_idle`；`start`＝在等 bot 起來的那一則（#122）；`daemon`＝daemon 的通知；
+/// `user`＝使用者自己排的；`start`＝在等 bot 起來的那一則（#122）；`daemon`＝daemon 的通知；
 /// `agm`／`bot`＝別人派來的（`relay_from` 是 bot id；是 AGM 的 bot 算 `agm`；**自稱**的 `relay_from`〔沒帶 bot token，`relay_unverified`〕只說 `bot`，不帶名字與 id）。讀不到就是 `unknown`，不猜。
 async fn slot_holder(app: &(impl crate::capabilities::Db + SupervisorSendRepo), turn_id: &str) -> Value {
-    let row: Option<(i64, i64, Option<String>, Option<String>, Option<i64>)> = sqlx::query_as(
-        "SELECT t.awaits_idle, t.awaits_start, t.client_request_id,
+    let row: Option<(String, i64, i64, Option<String>, Option<i64>)> = sqlx::query_as(
+        "SELECT t.queue_class, t.awaits_idle, t.awaits_start,
                 (SELECT m.relay_from FROM messages m WHERE m.turn_id = t.id AND m.role = 'user' ORDER BY m.created_at, m.rowid LIMIT 1),
                 (SELECT m.relay_unverified FROM messages m WHERE m.turn_id = t.id AND m.role = 'user' ORDER BY m.created_at, m.rowid LIMIT 1)
            FROM turns t WHERE t.id = ?",
@@ -27,14 +27,14 @@ async fn slot_holder(app: &(impl crate::capabilities::Db + SupervisorSendRepo), 
     .await
     .ok()
     .flatten();
-    let Some((awaits_idle, awaits_start, crid, relay_from, relay_unverified)) = row else { return json!({"kind": "unknown"}) };
+    let Some((queue_class, awaits_idle, awaits_start, relay_from, relay_unverified)) = row else { return json!({"kind": "unknown"}) };
     if awaits_start == 1 {
         return json!({"kind": "start"});
     }
-    if awaits_idle == 1 && relay_from.is_none() {
+    if queue_class == prompt::QueueClass::User.as_str() && awaits_idle == 1 {
         return json!({"kind": "user"});
     }
-    if relay_from.as_deref() == Some("daemon") || super::daemon_notice::is_daemon_notice(crid.as_deref()) {
+    if queue_class == prompt::QueueClass::DaemonNotice.as_str() {
         return json!({"kind": "daemon"});
     }
     if let Some(from) = relay_from {
@@ -57,14 +57,13 @@ async fn slot_holder(app: &(impl crate::capabilities::Db + SupervisorSendRepo), 
 /// Enforce the single `awaits_idle` slot before taking the direct-send path too. A queued send
 /// can still be waiting for the queue worker after its predecessor has ended.
 ///
-/// 槽照來源分兩條（#1685）：這一則是 daemon 通知就只看通知那一條，使用者（與 AGM、別顆 bot）只看自己那一條。
-pub(super) async fn refuse_if_slot_taken(app: &(impl crate::capabilities::Db + SupervisorSendRepo), conversation_id: &str, client_request_id: &str) -> LcResult<()> {
-    let existing: Option<String> = sqlx::query_scalar(&format!(
-        "SELECT id FROM turns WHERE conversation_id=? AND status='queued' AND awaits_idle=1 AND ({}) = ? ORDER BY created_at, id LIMIT 1",
-        db::daemon_notice_sql("")
-    ))
+/// User, relay, and daemon notices each keep their own single queued slot (#1685).
+pub(super) async fn refuse_if_slot_taken(app: &(impl crate::capabilities::Db + SupervisorSendRepo), conversation_id: &str, queue_class: prompt::QueueClass) -> LcResult<()> {
+    let existing: Option<String> = sqlx::query_scalar(
+        "SELECT id FROM turns WHERE conversation_id=? AND status='queued' AND awaits_idle=1 AND queue_class=? ORDER BY created_at, id LIMIT 1",
+    )
     .bind(conversation_id)
-    .bind(daemon_lane(client_request_id))
+    .bind(queue_class.as_str())
     .fetch_optional(app.db())
     .await
     .map_err(up)?;
@@ -72,11 +71,6 @@ pub(super) async fn refuse_if_slot_taken(app: &(impl crate::capabilities::Db + S
         Some(turn_id) => Err(slot_taken(app, &turn_id).await),
         None => Ok(()),
     }
-}
-
-/// 這一則排哪一條槽：1＝daemon 通知（`daemon_notice_sql` 為真），0＝使用者／AGM／別顆 bot（#1685）。
-fn daemon_lane(client_request_id: &str) -> i64 {
-    super::daemon_notice::is_daemon_notice(Some(client_request_id)) as i64
 }
 
 /// Insert the turn, user message, and attachment bindings as one durable queue admission.
@@ -96,12 +90,11 @@ pub(super) async fn queue_awaiting_idle(
     // 先讀槽再寫：bot 鎖只排得住這顆 bot 自己，擋不住別的 writer（對帳、收件匣）在讀與寫之間 commit；deferred 交易
     // 這時升級寫鎖直接 517，空著的槽也把使用者的 prompt 拒掉（#821）。
     let mut tx = db::begin_write(app.db()).await.map_err(up)?;
-    let existing: Option<String> = sqlx::query_scalar(&format!(
-        "SELECT id FROM turns WHERE conversation_id=? AND status='queued' AND awaits_idle=1 AND ({}) = ? ORDER BY created_at, id LIMIT 1",
-        db::daemon_notice_sql("")
-    ))
+    let existing: Option<String> = sqlx::query_scalar(
+        "SELECT id FROM turns WHERE conversation_id=? AND status='queued' AND awaits_idle=1 AND queue_class=? ORDER BY created_at, id LIMIT 1",
+    )
     .bind(conversation_id)
-    .bind(daemon_lane(client_request_id))
+    .bind(relay.queue_class.as_str())
     .fetch_optional(&mut *tx)
     .await
     .map_err(up)?;
@@ -116,12 +109,13 @@ pub(super) async fn queue_awaiting_idle(
     let message_id = db::ulid();
     let now = db::now();
     let inserted = sqlx::query(
-        "INSERT INTO turns (id, conversation_id, run_id, origin, status, delivery, client_request_id, created_at, prompt_text, awaits_idle)
-         VALUES (?, ?, NULL, 'web', 'queued', 'pending', ?, ?, ?, 1)",
+        "INSERT INTO turns (id, conversation_id, run_id, origin, status, delivery, client_request_id, queue_class, created_at, prompt_text, awaits_idle)
+         VALUES (?, ?, NULL, 'web', 'queued', 'pending', ?, ?, ?, ?, 1)",
     )
     .bind(&turn_id)
     .bind(conversation_id)
     .bind(client_request_id)
+    .bind(relay.queue_class.as_str())
     .bind(&now)
     .bind(deliver)
     .execute(&mut *tx)
@@ -130,12 +124,11 @@ pub(super) async fn queue_awaiting_idle(
         // 唯一索引（每個對話最多一筆 queued）擋下來＝槽被 AGM 派工、別的 bot、啟動等待佔著：說是誰，不要只回一句英文。
         if error.as_database_error().is_some_and(|d| d.is_unique_violation()) {
             drop(tx);
-            let occupant: Option<String> = sqlx::query_scalar(&format!(
-                "SELECT id FROM turns WHERE conversation_id=? AND status='queued' AND ({}) = ? ORDER BY created_at, id LIMIT 1",
-                db::daemon_notice_sql("")
-            ))
+            let occupant: Option<String> = sqlx::query_scalar(
+                "SELECT id FROM turns WHERE conversation_id=? AND status='queued' AND queue_class=? ORDER BY created_at, id LIMIT 1",
+            )
             .bind(conversation_id)
-            .bind(daemon_lane(client_request_id))
+            .bind(relay.queue_class.as_str())
             .fetch_optional(app.db())
                 .await
                 .ok()
@@ -216,9 +209,9 @@ mod tests {
         assert_eq!(queued(&e.app, &conv).await, (1, 1), "the queued turn and its user message commit exactly once");
     }
 
-    /// daemon 自己排的通知（production 是 `RelaySrc` 帶 `daemon` 來源，見 `daemon/src/api.rs` 的 `DAEMON_SENDER`）。
+    /// daemon 自己排的通知（lane 由受信任的 caller 指定，來源標記只供 UI 顯示）。
     async fn admit_notice(app: &Arc<App>, conv: &str, bot_id: &str, text: &str, crid: &str) -> LcResult<prompt::PromptOut> {
-        queue_awaiting_idle(app, conv, bot_id, text, text, crid, None, prompt::RelaySrc::trusted(Some("daemon")), &[]).await
+        queue_awaiting_idle(app, conv, bot_id, text, text, crid, None, prompt::RelaySrc::daemon_notice(Some("daemon")), &[]).await
     }
 
     async fn queued_rows(app: &Arc<App>, conv: &str) -> i64 {

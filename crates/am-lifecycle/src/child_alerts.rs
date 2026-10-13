@@ -370,7 +370,7 @@ pub fn forget(bot_id: &str) {
     episodes().lock().unwrap().remove(bot_id);
 }
 
-/// 這則通知的 `client_request_id` 前綴（`lifecycle::daemon_notice` 靠它認出 daemon 自己排的通知，#562）。
+/// 這類通知的冪等鍵前綴（lane 由呼叫 `prompt_relayed_queueable` 時明確指定，不依賴這個前綴）。
 pub const CRID_PREFIX: &str = "child-blocked:";
 
 /// 把通知送給 parent（`prompt_relayed_queueable`：parent 在回合中就排隊，不插隊、不打斷）。
@@ -396,7 +396,14 @@ async fn deliver_attempt(
     attempt: u32,
 ) -> crate::lc_error::LcResult<crate::lc_error::PromptOut> {
     let crid = attempt_crid(&crid_base(child_id, question), attempt);
-    app.prompt_relayed_queueable(parent_id, &message_for(child_name, question), &crid, Some(child_id)).await
+    app.prompt_relayed_queueable(
+        parent_id,
+        &message_for(child_name, question),
+        &crid,
+        Some(child_id),
+        crate::lifecycle::QueueClass::DaemonNotice,
+    )
+    .await
 }
 
 /// 冪等鍵＝這一次 blocked（episode）＋問題：同一次的重試不 fan-out，解除後再卡住是新的一則（issue #134）。
