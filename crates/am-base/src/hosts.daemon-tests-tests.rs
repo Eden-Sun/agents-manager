@@ -836,3 +836,17 @@
         let err = remote_canonical_dir(&conn, "/home/u/a\nb").await;
         assert!(err.is_err(), "換行的路徑不能被截成 /home/u/a：{err:?}");
     }
+
+    #[tokio::test]
+    async fn remote_canonical_dir_preserves_trailing_spaces_in_the_path() {
+        let host = format!("canon-space-{}", crate::db::ulid());
+        set_ssh_fake(&host, |_| Ok("/home/u/project  \n".to_string()));
+        let conn = HostConn::remote(HostCfg { name: host, ..cfg() }, None);
+        let path = remote_canonical_dir(&conn, "/home/u/project  ").await.unwrap();
+        assert_eq!(path, "/home/u/project  ");
+
+        let listing = parse_dir_listing("AM_HOME=/home/u  \nAM_PATH=/home/u/project  \nAM_PARENT=/home/u  \n", true).unwrap();
+        assert_eq!(listing["home"], "/home/u  ");
+        assert_eq!(listing["path"], "/home/u/project  ");
+        assert_eq!(listing["parent"], "/home/u  ");
+    }
