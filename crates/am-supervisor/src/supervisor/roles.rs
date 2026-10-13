@@ -828,6 +828,7 @@ pub async fn coalesce_patrol(pool: &SqlitePool) -> Result<usize> {
     let mut merged = 0usize;
     let health: Vec<(String,)> = sqlx::query_as(
         "SELECT id FROM supervisor_inbox WHERE state='pending' AND kind='health_changed'
+            AND notify_turn_id IS NULL AND delivered_at IS NULL
           ORDER BY created_at DESC, rowid DESC",
     )
     .fetch_all(pool)
@@ -1492,6 +1493,56 @@ mod tests {
             sqlx::query_as("SELECT state, merged_into FROM supervisor_inbox WHERE event_key='health:old'").fetch_one(&p).await.unwrap();
         assert_eq!(merged_state, "handled");
         assert_eq!(merged_into.as_deref(), Some("01AAAAAAAAAAAAAAAAAAAAAAAA"));
+    }
+
+    #[tokio::test]
+    async fn coalesce_patrol_preserves_a_health_change_that_was_already_delivered() {
+        let p = pool().await;
+        for (id, key, at) in [
+            ("health-delivered", "health:delivered", "2026-09-18T00:00:00.000Z"),
+            ("health-middle", "health:middle", "2026-09-18T00:00:01.000Z"),
+            ("health-latest", "health:latest", "2026-09-18T00:00:02.000Z"),
+        ] {
+            sqlx::query(
+                "INSERT INTO supervisor_inbox (id, supervisor_id, event_key, kind, state, role, created_at, updated_at)
+                 VALUES (?,?,?,'health_changed','pending','patrol',?,?)",
+            )
+            .bind(id)
+            .bind(super::super::store::SUPERVISOR_ID)
+            .bind(key)
+            .bind(at)
+            .bind(at)
+            .execute(&p)
+            .await
+            .unwrap();
+        }
+        sqlx::query(
+            "UPDATE supervisor_inbox
+                SET notify_turn_id='turn-1', delivered_at='2026-09-18T00:00:00.500Z', claimed_by='patrol'
+              WHERE event_key='health:delivered'",
+        )
+        .execute(&p)
+        .await
+        .unwrap();
+
+        assert_eq!(coalesce_patrol(&p).await.unwrap(), 1, "只合併兩筆未送出的健康變化");
+        let (state, merged_into): (String, Option<String>) = sqlx::query_as(
+            "SELECT state, merged_into FROM supervisor_inbox WHERE event_key='health:delivered'",
+        )
+        .fetch_one(&p)
+        .await
+        .unwrap();
+        assert_eq!(state, "pending", "送達過的健康事件仍須可再次送達／確認");
+        assert_eq!(merged_into, None, "不可把已送達事件標成另一筆的合併來源");
+
+        let (state, merged_into): (String, Option<String>) = sqlx::query_as(
+            "SELECT state, merged_into FROM supervisor_inbox WHERE event_key='health:middle'",
+        )
+        .fetch_one(&p)
+        .await
+        .unwrap();
+        assert_eq!(state, "handled");
+        assert_eq!(merged_into.as_deref(), Some("health-latest"));
     }
 
     #[tokio::test]
