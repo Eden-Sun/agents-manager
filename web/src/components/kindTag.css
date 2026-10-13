@@ -163,3 +163,22 @@
   bottom: auto;
   right: -7px;
 }
+
+/* 側欄列（#1682）：閃電疊在 logo 右下，縮成 11px 並少凸出去一點——列高固定（精簡列 32px、overflow-y: hidden），
+   凸出 5px 會被切掉，也會蓋到下一行的第一顆晶片。右下是因為右上已經是更新記號。 */
+.bot-kind-wrap .kind-fast {
+  right: -4px;
+  bottom: -4px;
+  width: 11px;
+  height: 11px;
+}
+
+.bot-kind-wrap .kind-fast svg {
+  width: 7px;
+  height: 10px;
+}
+
+.bot-row.compact .bot-kind-wrap .kind-fast {
+  right: -3px;
+  bottom: -2px;
+}

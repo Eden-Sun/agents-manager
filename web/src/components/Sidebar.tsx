@@ -77,7 +77,7 @@ import { UpdateAllBanner } from './UpdateAllBanner'
 import { ApiModelFields } from './ModelPicker'
 import { InstallToolButton } from './Tools'
 import { UpdateBadge } from './UpdateBadge'
-import { quotaIdentity, runtimeIdentity, runtimeSettingsKnown } from '../lib/runtimeDrift'
+import { quotaIdentity, runningFast, runtimeIdentity, runtimeSettingsKnown } from '../lib/runtimeDrift'
 import { syncKidsScroll, wheelKidsScroll } from '../lib/kidsScroll'
 import { createHitSearch } from '../lib/hitSearch'
 import { useWheelRef } from '../hooks/useWheelRef'
@@ -234,6 +234,11 @@ function BotRowImpl({
   )
   // 回合被 API 斷線截斷：燈號仍是綠的，只有這個說「其實沒做完」。
   const turnError = useStore((s) => s.runs[botId]?.turn_error ?? null)
+  // codex 正在跑 fast（#1682）：閃電疊在 kind logo 上——model 標籤在窄列會被截斷，fast 只在 tooltip 等於看不見。
+  const fast = useStore((s) => {
+    const b = s.bots.find((x) => x.id === botId)
+    return b?.kind === 'codex' && runningFast(b, s.runs[botId] ?? null)
+  })
   // codex 模型滿載（#1674）：獨立的標示，不跟「⚠ 中斷」「要你回答」「撞額度」混在一起。
   const capacity = useStore((s) => modelAtCapacity(s.runs[botId]))
   const runningIdentity = runtimeIdentity(run)
@@ -394,7 +399,7 @@ function BotRowImpl({
         <span className="bot-ident">
           {/* 新版記號在 kind icon 右上、綠色（使用者 2026-09-10）；可直接點（2026-09-11）。 */}
           <span className={`bot-kind-wrap${hasUpdate ? ' has-update' : ''}`}>
-            <KindTag kind={bot.kind} className="bot-kind" />
+            <KindTag kind={bot.kind} className="bot-kind" fast={fast} />
             <UpdateBadge botId={botId} variant="dot" />
             {/* 精簡列：身分用小字放在 kind 圖示正下方（2026-10-04 使用者：「在 kind 下就好了」）。 */}
             {compact && showIdentity ? (

@@ -57,6 +57,16 @@ export function runtimeSettingsKnown(run: Run | null): boolean {
   return run.runtime_model !== null || run.runtime_effort !== null || run.runtime_fast !== null
 }
 
+/**
+ * 正在跑的 fast：CLI 狀態列回報 → `run.runtime_fast` → `bots.fast`（設定）。model 標籤的 tooltip 與側欄 logo 上的
+ * 閃電共用這一份，兩邊才不會一個說 fast、另一個說沒有（設定改了還沒重啟時，設定值跟實際在跑的不同）。
+ */
+export function runningFast(bot: Bot, run: Run | null): boolean {
+  const reported = run?.status?.fast_mode
+  if (reported != null) return Boolean(reported)
+  return Boolean(runtimeSettingsKnown(run) ? (run!.runtime_fast ?? bot.fast) : bot.fast)
+}
+
 /** runtime 欄位全未知＝收編 pane：別拿 `bots` 設定假裝成 runtime。 */
 export function runtimeKnown(run: Run | null): boolean {
   return runtimeSettingsKnown(run) || runtimeIdentity(run) !== undefined
