@@ -615,7 +615,7 @@ hook body 另外帶 `run_id`＝這個 CLI 行程 pane env 的 `AM_RUN_ID`（本�
   run 或 bot 沒了才退出——以前一次讀錯就退出，Stop hook 又剛好漏掉的話那一回合就沒人收。讀不到 agent 狀態的那一輪不算閒著。
 - **讀不到送了什麼就不收**（#193）：`try_fallback` 剝回音要的「送了什麼」讀不到時回錯、回合留在飛，下一次再來——當成什麼都沒送，
   我們自己的 prompt 就被當成 agent 的回覆存下來。
-- **Codex warning footer**（#1495）：底部 `⚠ N warning(s) · f2 to view` 獨立一行或與 `? for shortcuts` 同列時，均屬狀態列 chrome。
+- **Codex warning footer**（#1495）：底部 `⚠ N warning(s) · f2 to view` 獨立一行或與 `? for shortcuts` 同列時，均屬狀態列 chrome。只有 `? for shortcuts` 一行（沒有模型列、沒有 warning）不算 footer，尾端照原樣回傳（#1706）。
   終端備援及網頁即時文字不把它併入回答；模型／強度讀值、busy 與空輸入框判斷沿用原有規則。API 快照保留原文，網頁將 Codex 尾端 footer 分離到狀態列並顯示 warning 數（#1664）。
   `› Ask Codex to do anything` 與 `GPT-6-Astra high · ~/… · Context 72% used · weekly 74% left` 同樣屬於 chrome（#1664）。對話泡泡會過濾；終端分頁以及「需要回應」彈窗／留守面板照 pane 原樣顯示快照，尾端的模型列、shortcuts 與 warning 列也留在終端內容裡，不另畫一條（#1680）。尾端 footer 只解析給對話面板的狀態列用：保留模型整列（含 Context、weekly 等段），warning 數獨立顯示。只展示當前 bot／run 的快照讀數，新快照無 warning 就清掉舊數字；選單判斷、危險操作偵測仍讀未修改的 API 原文。
 - **codex 0.155 的畫面**（#207；程式先照 rust-v0.155.0 原始碼做，真畫面 0.155.1 已驗）：
