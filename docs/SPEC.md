@@ -3969,14 +3969,17 @@ claude 的預設強度來自**帳號的 `settings.json`**：
 { "effortLevel": "high", "modelSettings": { "claude-opus-5": { "effortLevel": "low" } } }
 ```
 
-- `effortLevel` 全域；`modelSettings.<真實 model id>.effortLevel` per-model 覆寫。真實 id 不是啟動用的 alias（`--model opus` 跑的是 `claude-opus-5`），
-  所以用**子字串**比對 key 是否含 `opus`/`sonnet`/`haiku`/`fable`；不吻合就沒有提示，不猜。
-- 兩者都沒有、讀不到、非法 JSON → claude 內建預設按模型分（`models::claude_builtin_default_effort`）：**haiku `medium`**，其餘 **`high`**（2026-10-08 Claude Code 2.1.293 實測：沒帶 `--effort`、settings 沒有 `effortLevel`，haiku 的對話紀錄每則 assistant 都是 `"effort":"medium"`，sonnet 是 high；#880）。沒有 hook 的 claude 子 agent 另以對話紀錄最新一則 assistant 的 `effort`／`message.model` 寫進 `runs.runtime_effort`／`runtime_model`（`claude_child_log::record_runtime`，§12.5b），網頁顯示優先用 runtime、`bots.effort` 只是設定值，不回寫。
+- `effortLevel` 全域；`modelSettings.<真實 model id>.effortLevel` 是 CLI 記住的「這個帳號上次對該模型選的強度」（**不是廠商推薦**）。CLI 照**完整 model id** 查這張表，沒有那一列就用內建預設，
+  所以 daemon 也只對完整 id：裸別名先換成目前版本的完整 id（`models::claude_current_model_id`：opus→`claude-opus-5-5`、sonnet→`claude-sonnet-5-5`、haiku→`claude-haiku-5-5`、fable→`claude-fable-5-1`）再查，
+  完整 id 只認完全相等（不分大小寫，不做子字串）；檔案只有**舊版**的列＝沒有，不拿舊版的值頂替（#1679；舊寫法「取該家族版本最高的那列」會把 cc1 的 `claude-opus-5: xhigh` 套到 opus-5-5）。這張表要跟著新模型上線更新，過期時查不到列、退回內建預設，不會錯標。
+- **兩個欄位分開**（#1679）：`GET /api/models` 的 claude `default_effort` 只放廠商內建預設（每個帳號一樣）；帳號記住的值（目前版本那一列 > 全域 `effortLevel`）放 `account_default_effort`，
+  跟內建相同或沒有就是 `null`。不帶 `--effort` 實際會跑的是 `account_default_effort ?? default_effort`（`claude_default_effort`；對帳記進 bot 的就是這個值）。
+- 兩者都沒有、讀不到、非法 JSON → claude 內建預設按模型分（`models::claude_builtin_default_effort`）：**haiku `medium`**，其餘 **`high`**（2026-10-08 Claude Code 2.1.293 實測：沒帶 `--effort`、settings 沒有 `effortLevel`，haiku 的對話紀錄每則 assistant 都是 `"effort":"medium"`，sonnet 是 high；#880）。opus／fable 的內建預設**尚未實測**（#1679：實測需要乾淨且已登入的帳號，cc2 沒登入；cc2 沒有 settings.json 的對話紀錄裡 `claude-opus-5-5` 全是 `high`，但無法排除當時帶過 `--effort`），暫沿用 `high`，要實測時照 haiku 那次的做法。沒有 hook 的 claude 子 agent 另以對話紀錄最新一則 assistant 的 `effort`／`message.model` 寫進 `runs.runtime_effort`／`runtime_model`（`claude_child_log::record_runtime`，§12.5b），網頁顯示優先用 runtime、`bots.effort` 只是設定值，不回寫。
 - `GET /api/models?kind=claude&host=&identity=` 的 `identity` 決定讀哪個 `CLAUDE_CONFIG_DIR/settings.json`（`identities_for_host`）；不指定或不存在 → 預設帳號 `~/.claude/settings.json`。
   本機讀檔、遠端 ssh `cat`。快取 key `{host}/{kind}/{identity}`，10 分鐘 TTL。
 - **預設標記（`is_default`）跟著同一份 settings.json 的頂層 `model`**（#941）：對到哪個系列別名就標哪顆（`claude_alias_of`：整段相等，或 `claude-<alias>-…` 開頭；不做子字串）。沒有 `model`、或對不到 → 一顆都不標，不猜 `opus`。
 - **codex／grok 也看身分的家目錄**（#941）：codex 的 `model/list` 帶 `CODEX_HOME`，並讀身分 `config.toml` 頂層 `model`（標預設）與 `model_reasoning_effort`（覆寫那顆的 `default_effort`）；grok 的 `grok models` 帶 `GROK_HOME`，讀它的 `config.toml`（`default_reasoning_effort`）與 `models_cache.json`。沒有身分或身分沒設家目錄 → daemon 預設家目錄（`~/.codex`、`~/.grok`）。
-- UI tooltip 講來源：「不帶 --effort（帳號目前設定 高）」，不寫「模型預設」。
+- UI（#1679）：強度鈕上「廠推薦」只標 `default_effort`；`account_default_effort` 另標虛線框「此帳號預設」，沒指定強度時亮的是帳號值（`account_default_effort ?? default_effort`）。tooltip：「廠推薦：高」、「此帳號預設（不帶 --effort 會跑這一級）：低」。
 - `--effort bogus` 只印警告並用預設，不會讓 run 掛掉。
 
 ## 18. 總管（AGM）運維規範

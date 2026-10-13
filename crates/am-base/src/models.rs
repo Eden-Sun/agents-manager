@@ -3,7 +3,8 @@
 //! * codex: `codex app-server` `model/list`. The server never exits on its own, so we kill it
 //!   locally / let `awk` cut the remote stream at the answer.
 //! * grok: `grok models` text + `~/.grok/models_cache.json` efforts (`config.toml` fallback).
-//! * claude: static aliases (no list API); `default_effort` from that identity's `settings.json`.
+//! * claude: static aliases (no list API); `default_effort` = vendor built-in (same on every account),
+//!   `account_default_effort` = that identity's remembered `settings.json` value when it differs (#1679).
 
 use crate::config::{expand_home, LOCAL_HOST};
 use crate::hosts::sh_quote;
@@ -273,8 +274,8 @@ pub fn codex_apply_identity_config(mut models: Vec<Value>, cfg_text: &str) -> Ve
     models
 }
 
-/// Unparsable is `(None, {})`, never an error. Overrides are keyed by real model id and matched
-/// to aliases by substring (verified against local + m4p `settings.json`, 2026-09-07).
+/// Unparsable is `(None, {})`, never an error. Overrides are keyed by real model id (`claude-opus-5-5`);
+/// 別名對 id 看 [`claude_effort_override`]。
 pub fn parse_claude_effort_settings(text: &str) -> (Option<String>, BTreeMap<String, String>) {
     let mut per_model = BTreeMap::new();
     let Ok(v) = serde_json::from_str::<Value>(text) else { return (None, per_model) };
@@ -373,31 +374,37 @@ pub fn claude_builtin_default_effort(alias: &str) -> &'static str {
     }
 }
 
-/// `modelSettings` 裡該模型的 `effortLevel` 覆寫（issue #937）。
+/// 裸別名現在對到的完整 model id（`modelSettings` 與對話紀錄用的是完整 id）。opus 跟 [`remap_deprecated_model`] 一致；
+/// 其餘照 Claude Code 2.1.296 的別名解析。新版上線前這張表是舊的 → 查不到列，退回內建預設（不會拿舊版的列頂替）。
+const CLAUDE_CURRENT_MODEL_IDS: [(&str, &str); 4] = [
+    ("opus", "claude-opus-5-5"),
+    ("sonnet", "claude-sonnet-5-5"),
+    ("haiku", "claude-haiku-5-5"),
+    ("fable", "claude-fable-5-1"),
+];
+
+/// 裸家族別名（opus／sonnet／haiku／fable，不分大小寫）→ 目前版本的完整 id；完整 id 或別的字串回 `None`。
+pub fn claude_current_model_id(alias: &str) -> Option<&'static str> {
+    let alias = alias.trim().to_ascii_lowercase();
+    CLAUDE_CURRENT_MODEL_IDS.iter().find(|(a, _)| *a == alias).map(|(_, id)| *id)
+}
+
+/// `modelSettings` 裡該模型的 `effortLevel` 覆寫（issue #937、#1679）。
 ///
-/// 以前用 `key.contains(alias)` 掃字典序的 `BTreeMap`，一律先撞到**舊版**那一列（`claude-sonnet-5` 排在 `claude-sonnet-5-5` 前面，
-/// 完整 id `claude-sonnet-5` 還會 `contains` 到 `claude-sonnet-5-5`），預設強度因此記錯又標錯。現在：
-/// 1. key 與 `model` 不分大小寫完全相等 → 用它；
-/// 2. `model` 是裸家族別名（opus／sonnet／haiku／fable）→ 只看 `claude-<別名>-` 開頭的 key，取版本最高的（別名指到該家族最新版）；
-///    版本＝`-` 分段的數字段逐段比數值，`[1m]` 這類非數字尾巴剝掉；
-/// 3. 其他（完整 id 但沒有完全相等的 key）→ `None`，不做子字串比對。
+/// CLI 自己是照完整 model id 查 `modelSettings`，沒有那一列就用內建預設，所以這裡也只做完全相等（不分大小寫）：
+/// 1. `model` 是完整 id → 只認 key 完全相等的那一列，不做子字串比對（#937：`claude-sonnet-5` 不會 `contains` 到 `claude-sonnet-5-5`）；
+/// 2. `model` 是裸家族別名 → 先換成目前版本的完整 id（[`claude_current_model_id`]）再查。檔案裡只有**舊版**的列就是沒有，
+///    不拿舊版的值頂替（#1679：cc1 只有 `claude-opus-5: xhigh`，opus-5-5 實際跑的是內建預設）。
 pub fn claude_effort_override(per_model: &BTreeMap<String, String>, model: &str) -> Option<String> {
     let model = model.trim().to_ascii_lowercase();
-    if let Some((_, v)) = per_model.iter().find(|(k, _)| k.to_ascii_lowercase() == model) {
-        return Some(v.clone());
-    }
-    if !["opus", "sonnet", "haiku", "fable"].contains(&model.as_str()) {
-        return None;
-    }
-    let prefix = format!("claude-{model}-");
-    let version = |rest: &str| -> Vec<u64> {
-        rest.split('-').map_while(|seg| seg.chars().take_while(char::is_ascii_digit).collect::<String>().parse::<u64>().ok()).collect()
-    };
-    per_model
-        .iter()
-        .filter_map(|(k, v)| k.to_ascii_lowercase().strip_prefix(&prefix).map(|rest| (version(rest), k.clone(), v.clone())))
-        .max_by(|a, b| a.0.cmp(&b.0).then_with(|| a.1.cmp(&b.1)))
-        .map(|(_, _, v)| v)
+    let key = claude_current_model_id(&model).unwrap_or(&model);
+    per_model.iter().find(|(k, _)| k.to_ascii_lowercase() == key).map(|(_, v)| v.clone())
+}
+
+/// 帳號 settings.json 記住的強度：該模型目前版本那一列 > 全域 `effortLevel`。**不是廠推薦**，是 CLI 記住的「這個帳號上次選的」。
+/// 沒有就 `None`。
+pub fn claude_account_effort(global: Option<&str>, per_model: &BTreeMap<String, String>, model: &str) -> Option<String> {
+    claude_effort_override(per_model, model).or_else(|| global.map(str::to_string))
 }
 
 /// What "不帶 `--effort`" resolves to; fills a spawned child's effort, since its argv never says.
@@ -406,9 +413,7 @@ pub async fn claude_default_effort(app: &Arc<impl crate::hosts::HostsAccess + cr
     let dir = claude_config_dir(app, host, identity).await?;
     let (global, per_model, _) = read_claude_effort_settings(app, host, dir.as_deref()).await?;
     let alias = alias.to_ascii_lowercase();
-    Ok(claude_effort_override(&per_model, &alias)
-        .or(global)
-        .unwrap_or_else(|| claude_builtin_default_effort(&alias).to_string()))
+    Ok(claude_account_effort(global.as_deref(), &per_model, &alias).unwrap_or_else(|| claude_builtin_default_effort(&alias).to_string()))
 }
 
 /// settings.json 的 `model` 對到哪個系列別名（`sonnet`、`opus[1m]`、`claude-sonnet-5-5`…）；對不到就 `None`。
@@ -421,6 +426,7 @@ pub fn claude_alias_of(model: &str) -> Option<&'static str> {
 }
 
 /// `default_model` 是帳號 settings.json 的頂層 `model`：`is_default` 只標它對到的那一顆；沒有就一顆都不標（不猜 opus）。
+/// `default_effort` 是廠商內建預設（每個帳號都一樣）；帳號自己記住的值放 `account_default_effort`，跟內建相同或沒有就是 `null`（#1679）。
 pub fn claude_static_models(global: Option<&str>, per_model: &BTreeMap<String, String>, default_model: Option<&str>) -> Vec<Value> {
     // claude 沒有 per-model effort 清單，每個 alias 都用 `--effort` 那五級。
     let efforts: Vec<Value> = crate::config::efforts_for_kind("claude").iter().map(|e| json!(e)).collect();
@@ -428,11 +434,11 @@ pub fn claude_static_models(global: Option<&str>, per_model: &BTreeMap<String, S
     ["opus", "sonnet", "haiku", "fable"]
         .iter()
         .map(|id| {
-            let overridden = claude_effort_override(per_model, id);
-            let default_effort = overridden.or_else(|| global.map(str::to_string)).unwrap_or_else(|| claude_builtin_default_effort(id).to_string());
+            let default_effort = claude_builtin_default_effort(id);
+            let account_effort = claude_account_effort(global, per_model, id).filter(|e| e != default_effort);
             json!({
                 "id": id, "display_name": id, "description": "", "is_default": default_alias == Some(*id),
-                "default_effort": default_effort, "efforts": efforts, "service_tiers": [],
+                "default_effort": default_effort, "account_default_effort": account_effort, "efforts": efforts, "service_tiers": [],
             })
         })
         .collect()

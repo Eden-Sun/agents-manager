@@ -876,6 +876,7 @@ export function toModels(raw: unknown): ModelInfo[] {
         description: str(pick(m, 'description')),
         is_default: bool(pick(m, 'is_default'), false),
         default_effort: optStr(pick(m, 'default_effort')),
+        account_default_effort: optStr(pick(m, 'account_default_effort')),
         efforts: arr(pick(m, 'efforts')).map((e) => str(e)).filter(Boolean),
         service_tiers: arr(pick(m, 'service_tiers'))
           .filter(isRec)

@@ -890,8 +890,10 @@ export interface ModelInfo {
   display_name: string
   description: string
   is_default: boolean
-  /** null = 不適用 */
+  /** 廠商內建預設（「廠推薦」）；claude 在每個帳號都一樣。null = 不適用 */
   default_effort: string | null
+  /** 這個帳號 settings.json 記住的強度（「此帳號預設」），只在跟 `default_effort` 不同時才有；codex／grok／agy 與舊 daemon 沒有（#1679）。 */
+  account_default_effort?: string | null
   /** 空陣列 = 該模型不支援 */
   efforts: string[]
   /** 含 `priority` 時 UI 才顯示「Fast」開關 */

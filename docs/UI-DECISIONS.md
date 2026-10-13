@@ -73,6 +73,10 @@
   claude 的 `GET /api/models` 目前回的就是 `opus`，濾掉等於讓人選不到；改成**被換時 `store.patchBot` 講一句**，
   設定面板記的是 daemon 實際採用的值（記送出的那個會讓欄位一直顯示一個沒在用的模型）。
   前端自己送出的地方（靜態後備清單 `MODEL_OPTIONS`、「改用 opus」按鈕）一律寫正式 id，別再製造 remap。
+- **強度鈕上「廠推薦」不跟帳號走，帳號記住的值另標「此帳號預設」**（#1679，2026-10-13）：同一個 opus 在 cc0 標 medium、cc1 標 xhigh，
+  是因為以前把各帳號 settings.json 的 `modelSettings`（CLI 記住的上次選擇）當成廠推薦。現在「廠推薦」只標 `default_effort`（廠商內建，每個帳號一樣）；
+  帳號值（`account_default_effort`，跟內建不同才有）用虛線框「此帳號預設」標在它自己那一級，tooltip 寫「不帶 --effort 會跑這一級」，
+  沒指定強度時亮的就是這一級。兩者不會標在同一顆上。
 - **codex fast 在 logo 上疊閃電**（2026-09-22 使用者）：正在跑的 codex 是 fast（priority tier）時，kind logo 右下（手機右上，右下會被額度列蓋掉）疊一個琥珀色 ⚡，
   來源跟 model chip 的「· fast」同一份（`status.fast_mode`，實際在跑的，不是設定值）。fast 額度燒得快，只寫在 chip 尾巴太容易漏看。
 - 更新 chip 只寫 `${kind} 有更新`；額度列的更新 chip 有列到當前 bot（閒置或在忙那組都算）就不畫，免得同一個 ⌃⌃ 出現兩次（2026-09-19 使用者：「logo 重工了」）；只剩非 claude 的會畫。這顆自己要套用走 context bar 版本號旁的「升級」。
