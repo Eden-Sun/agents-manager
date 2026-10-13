@@ -76,6 +76,9 @@ struct Candidate {
     agent_kind: String,
     parent_bot_id: Option<String>,
     assignment_id: Option<String>,
+    /// 寫提示前、答案回來後都要還在的 bot（沒刪、專案沒移交）。撞題查詢不持 bot 鎖，等 Jev 期間它們可能被刪（#1626）；
+    /// 空＝不檢查（交辦那條照舊）。
+    live_bots: Vec<String>,
 }
 
 impl Candidate {
@@ -178,6 +181,9 @@ pub async fn check_claim(app: &(impl crate::capabilities::Cfg + crate::capabilit
         summary = format!("{summary}\nbranch {branch}");
     }
     let key = format!("claim:{}:{}", ask.child, ask.issue.map_or_else(|| "-".to_string(), |n| n.to_string()));
+    // 呼叫端、候選（child 或呼叫端）與它的父 bot：提示會掛在後兩者之一，呼叫端也要還在（#1626）。
+    let mut live_bots = vec![ask.caller.clone(), bot_id.clone()];
+    live_bots.extend(parent_bot_id.clone());
     check_candidate(
         app,
         &Candidate {
@@ -191,6 +197,7 @@ pub async fn check_claim(app: &(impl crate::capabilities::Cfg + crate::capabilit
             agent_kind,
             parent_bot_id,
             assignment_id: None,
+            live_bots,
         },
     )
     .await
@@ -227,6 +234,7 @@ pub async fn check_assignment(app: &(impl crate::capabilities::Cfg + crate::capa
             agent_kind: bot.kind,
             parent_bot_id: bot.parent_bot_id,
             assignment_id: Some(a.id),
+            live_bots: Vec::new(),
         },
     )
     .await
@@ -273,6 +281,10 @@ async fn check_candidate(app: &(impl crate::capabilities::Cfg + crate::capabilit
             if asked(app, &pair).await? {
                 continue;
             }
+            // #1626：caller 已經刪了或移交了，就不再問、也不占帳本。
+            if !cand.live_bots.is_empty() && !crate::supervisor_inbox::bots_live(app.db(), &cand.live_bots).await? {
+                return Ok(());
+            }
             #[cfg(all(test, feature = "daemon-test-harness"))]
             gate_after_asked_for_test(&pair).await;
             let snapshot = snapshot(&pair, &mine, &other);
@@ -307,6 +319,12 @@ async fn check_candidate(app: &(impl crate::capabilities::Cfg + crate::capabilit
                 Ok(a) => (Some(a.value), a.model.clone(), a.input_tokens, None),
                 Err(e) => (None, None, None, Some(e.to_string())),
             };
+            // #1626：Jev 等待中不持 bot 鎖，答案回來時 caller（或候選、父 bot）可能已被刪或移交：這次結果丟掉，
+            // 帳本記下原因、不留答案，也不推提示（寫提示的那句 SQL 還會再檢查一次，兩者之間的刪除也擋得住）。
+            if !cand.live_bots.is_empty() && !crate::supervisor_inbox::bots_live(app.db(), &cand.live_bots).await? {
+                settle_same_work(app, &slot, None, None, ms, None, Some("bot_gone".into())).await?;
+                return Ok(());
+            }
             settle_same_work(app, &slot, p, model, ms, tokens, error).await?;
             // 問的時候交辦被取消、收掉或裁示了：答案照記，但標成過時、不推提示，後面的對也不再問（#568）。
             // 第一對之前 `check_assignment` 看過；之後每一對之前都剛經過這裡，中間沒有 HTTP。
@@ -384,16 +402,22 @@ async fn push_hint(app: &(impl crate::capabilities::Db + crate::capabilities::Em
         "action": action,
     });
     let event_key = format!("judge_same_work:{pair}");
-    let id = crate::supervisor_inbox::push_inbox(
-        app.db(),
-        &event_key,
-        "judge_same_work",
-        cand.assignment_id.as_deref(),
-        Some(&parent),
-        None,
-        &payload,
-    )
-    .await?;
+    let id = if cand.live_bots.is_empty() {
+        crate::supervisor_inbox::push_inbox(app.db(), &event_key, "judge_same_work", cand.assignment_id.as_deref(), Some(&parent), None, &payload).await?
+    } else {
+        // #1626：撞題提示只在 bot 還在時寫（檢查與寫入同一句 SQL）。
+        crate::supervisor_inbox::push_inbox_if_live(
+            app.db(),
+            &event_key,
+            "judge_same_work",
+            cand.assignment_id.as_deref(),
+            Some(&parent),
+            None,
+            &payload,
+            &cand.live_bots,
+        )
+        .await?
+    };
     if id.is_some() {
         app.emit("supervisor_changed", json!({"judge_same_work": event_key})).await;
     }
@@ -608,6 +632,7 @@ fn opened_candidates(before: &[IssueRef], after: &Row) -> Vec<Candidate> {
             agent_kind: "issue".into(),
             parent_bot_id: None,
             assignment_id: None,
+            live_bots: Vec::new(),
         });
     }
     out
