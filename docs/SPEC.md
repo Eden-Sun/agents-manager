@@ -1444,6 +1444,7 @@ stall watchdog 的自動補送走同一條驗證路徑，次數記在 `turns.res
    失敗 → Run `exited`、回 502。
 5. 更新 Run 的 `workspace_id`／`pane_id`／`tab_id`；先寫 `runs.agent_name`，再 `agent.start {name, kind, pane_id, args: injected ++ bot.args, timeout_ms: 60000}`
    （立即回 `launch_pending`）。之後所有 herdr 目標一律用 `run.agent_name`。pane 建好到 start 成功之間任何失敗 → Run `exited` + 盡力關 pane（tab 空了一併關）。
+   經 herdr shim 新開的 Codex 子 agent（包含 `fork`／`resume`）同樣補 `--no-daemon`，呼叫者已帶時不重複。明確選用 embedded server，避免 AG Man 注入的 profile／`-c` 觸發「Running without the shared background server」啟動 warning；不修改使用者的 config 或 sandbox 政策（#1664）。
    Codex 啟動（包含 resume／fork 與子 agent 原地重啟）在 `bot.args` 後固定加 `--no-daemon --no-alt-screen -c tui.show_tooltips=false`：0.157 的 `--no-daemon` 不會連上或啟動共用背景 server，該 pane 使用自己的 embedded server；`--no-alt-screen` 強制終端 transcript 模式，即使 Codex 預設開啟 fullscreen transcript 也保留一般可讀畫面與 scrollback。這讓每個 pane 的 `AM_*`／hook 環境留在自己的 Codex 執行個體。`-c tui.show_tooltips=false` 關掉 0.158 起回合中（超過 30 秒）與回合後（第三回合起）插入的隨機 tip，免得畫面備援擷取把它當成回覆結尾（issue #728）。
 6. 開該 pane 的狀態訂閱。
 7. `agent.wait {until:[idle,done,blocked], timeout_ms: 60000}`（codex 改成每 500ms 輪詢折過的 `agent.get`、到 `launch_pending` 結束才算，#732）：idle/done → running+idle；blocked → running+blocked（例如 trust 提示）；

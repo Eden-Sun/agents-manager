@@ -297,6 +297,7 @@ am_agent_start() {
     _has_instr=0
     _has_docs=0
     _has_profile=0
+    _has_no_daemon=0
     while [ "$_i" -lt "$_n" ]; do
         _a=$1
         shift
@@ -343,6 +344,7 @@ am_agent_start() {
                 --append-system-prompt | --append-system-prompt=* | --append-system-prompt-file* | developer_instructions=* | --rules | --rules=*) _has_instr=1 ;;
                 project_doc_max_bytes=*) _has_docs=1 ;;
                 -p | --profile | --profile=*) _has_profile=1 ;;
+                --no-daemon) _has_no_daemon=1 ;;
             esac
         elif [ "$_named" = 0 ]; then
             case "$_prev" in
@@ -426,6 +428,13 @@ am_agent_start() {
                 [ "$_stop" = 1 ] || set -- "$@" --
                 _stop=1
                 set -- "$@" -c project_doc_max_bytes=0
+            fi
+            # Same embedded-server policy as daemon-managed Codex panes. Explicit intent avoids
+            # the startup warning caused by our profile / -c overrides (issue #1664).
+            if [ "$_has_no_daemon" = 0 ]; then
+                [ "$_stop" = 1 ] || set -- "$@" --
+                _stop=1
+                set -- "$@" --no-daemon
             fi
             ;;
         grok)

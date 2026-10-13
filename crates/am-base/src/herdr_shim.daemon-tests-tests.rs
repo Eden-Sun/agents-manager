@@ -754,7 +754,7 @@
         let s = Sandbox::new();
         let (out, err) =
             s.run(&[("AM_AGENT_NAME", "proj-abc123")], &["agent", "start", "proj-abc123-ui", "--kind", "codex"]);
-        assert_eq!(out, ["agent", "start", "proj-abc123-ui", "--kind", "codex"]);
+        assert_eq!(out, ["agent", "start", "proj-abc123-ui", "--kind", "codex", "--", "--no-daemon"]);
         assert_eq!(err, "");
 
         let (out, _) = s.run(
@@ -772,7 +772,7 @@
         let s = Sandbox::new();
         let env = [("AM_AGENT_NAME", "p-1"), ("AM_KIND", "claude"), ("AM_MODEL", "opus"), ("AM_EFFORT", "medium")];
         let (out, _) = s.run(&env, &["agent", "start", "kid", "--kind=codex"]);
-        assert_eq!(out, ["agent", "start", "p-1-kid", "--kind=codex"], "別的 kind 不借母 bot 的模型：{out:?}");
+        assert_eq!(out, ["agent", "start", "p-1-kid", "--kind=codex", "--", "--no-daemon"], "別的 kind 不借母 bot 的模型：{out:?}");
 
         let bot = [("AM_BOT_ID", "b1"), ("AM_HOOK_TOKEN", "tok"), ("AM_PORT", "1"), ("AM_AGENT_NAME", "p-1")];
         let (_, err, rc) = s.run_full(&bot, &["agent", "start", "kid", "--kind", "claude", "--pane=w1:p3"]);
@@ -829,15 +829,15 @@
         assert_eq!(out, ["agent", "start", "p-1-kid", "--kind", "claude", "--", "--model", "sonnet"]);
 
         let (out, _) = s.run(&env, &["agent", "start", "kid", "--kind", "codex"]);
-        assert_eq!(out, ["agent", "start", "p-1-kid", "--kind", "codex"]);
+        assert_eq!(out, ["agent", "start", "p-1-kid", "--kind", "codex", "--", "--no-daemon"]);
 
         let cenv = [("AM_AGENT_NAME", "p-1"), ("AM_KIND", "codex"), ("AM_MODEL", "gpt-5.6-luna")];
         let (out, _) = s.run(&cenv, &["agent", "start", "kid", "--kind", "codex", "--", "-m", "o3"]);
-        assert_eq!(out, ["agent", "start", "p-1-kid", "--kind", "codex", "--", "-m", "o3"]);
+        assert_eq!(out, ["agent", "start", "p-1-kid", "--kind", "codex", "--", "-m", "o3", "--no-daemon"]);
         let (out, _) = s.run(&cenv, &["agent", "start", "kid", "--", "-c", "model=o3"]);
-        assert_eq!(out, ["agent", "start", "p-1-kid", "--", "-c", "model=o3"]);
+        assert_eq!(out, ["agent", "start", "p-1-kid", "--", "-c", "model=o3", "--no-daemon"]);
         let (out, _) = s.run(&cenv, &["agent", "start", "kid", "--", "-m=o3"]);
-        assert_eq!(out, ["agent", "start", "p-1-kid", "--", "-m=o3"]);
+        assert_eq!(out, ["agent", "start", "p-1-kid", "--", "-m=o3", "--no-daemon"]);
 
         let (out, _) = s.run(&env, &["agent", "start", "kid", "--", "--verbose"]);
         assert_eq!(out, ["agent", "start", "p-1-kid", "--", "--verbose", "--model", "opus", "--effort", "medium"]);
@@ -1069,7 +1069,7 @@
         assert_eq!(out.iter().filter(|a| a.starts_with("--append-system-prompt")).count(), 1, "{out:?}");
         let gone = s.dir.join("gone.md");
         let (out, _) = s.run(&[("AM_AGENT_NAME", "p-1"), ("AM_INSTRUCTIONS_FILE", gone.to_str().unwrap()), ("CODEX_HOME", ch)], &["agent", "start", "kid", "--kind", "codex", "--pane", "w1:p9"]);
-        assert_eq!(&out[out.len() - 3..], ["--", "-c", "project_doc_max_bytes=0"]);
+        assert_eq!(&out[out.len() - 4..], ["--", "-c", "project_doc_max_bytes=0", "--no-daemon"]);
         // 母 bot 有指示檔讀不到（#769）：daemon 給 `AM_KEEP_CLI_DOCS`，這一輪不關 AGENTS.md，其餘照舊。
         let (out, _) = s.run(
             &[("AM_AGENT_NAME", "p-1"), ("AM_INSTRUCTIONS_FILE", gone.to_str().unwrap()), ("AM_KEEP_CLI_DOCS", "1"), ("CODEX_HOME", ch)],
@@ -1935,4 +1935,27 @@
         assert!(out.is_empty(), "token 不對，herdr 不能跑：{out:?} {err}");
         assert_ne!(rc, 0, "{err}");
         server.abort();
+    }
+
+    #[test]
+    fn macos_local_codex_child_explicitly_selects_embedded_mode() {
+        let s = Sandbox::new();
+        let (f, home) = codex_child(&s, b"test instructions");
+        let env = [("AM_AGENT_NAME", "p"), ("AM_KIND", "codex"),
+            ("AM_INSTRUCTIONS_FILE", f.to_str().unwrap()), ("CODEX_HOME", home.to_str().unwrap())];
+        for args in [
+            vec!["agent", "start", "kid", "--kind", "codex"],
+            vec!["agent", "start", "kid", "--kind=codex", "--", "fork", "--last", "task"],
+            vec!["agent", "start", "kid", "--", "resume", "--last"],
+            vec!["agent", "start", "kid", "--kind", "codex", "--", "--no-daemon"],
+        ] {
+            let (out, err) = s.run(&env, &args);
+            let split = out.iter().position(|a| a == "--").unwrap();
+            assert_eq!(out[split + 1..].iter().filter(|a| a.as_str() == "--no-daemon").count(), 1,
+                "Codex config/profile overrides must explicitly select embedded mode: {out:?} {err}");
+        }
+        for kind in ["claude", "grok"] {
+            let (out, _) = s.run(&env, &["agent", "start", "kid", "--kind", kind]);
+            assert!(!out.iter().any(|a| a == "--no-daemon"), "{out:?}");
+        }
     }
