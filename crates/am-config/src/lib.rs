@@ -1356,6 +1356,26 @@ impl ConfigStore {
         F: FnOnce(&mut ConfigFile) -> Result<T>,
         G: FnOnce(&ConfigFile) -> Result<()>,
     {
+        self.update_guarded_inner(at, f, guard, true).await
+    }
+
+    /// 還原先前已載入的完整快照。這是投影失敗時的 rollback；快照可能包含 mutation 正在修復的舊語意錯誤，
+    /// 因此只保留重讀、外部變更稽核與寫前競態檢查，不再驗證這份舊狀態。
+    pub async fn restore_snapshot_at(&self, at: &'static std::panic::Location<'static>, snapshot: ConfigFile) -> Result<()> {
+        self.update_guarded_inner(at, move |cfg| { *cfg = snapshot; Ok(()) }, |_| Ok(()), false).await
+    }
+
+    async fn update_guarded_inner<F, T, G>(
+        &self,
+        at: &'static std::panic::Location<'static>,
+        f: F,
+        guard: G,
+        validate: bool,
+    ) -> Result<T>
+    where
+        F: FnOnce(&mut ConfigFile) -> Result<T>,
+        G: FnOnce(&ConfigFile) -> Result<()>,
+    {
         let mut g = self.inner.lock().await;
         // 讀進來的磁碟內容（寫之前拿來比對、也是合併的底稿）；檔案不存在時是 `None`。
         let mut base: Option<String> = None;
@@ -1394,10 +1414,11 @@ impl ConfigStore {
         // 一筆會被擋下的修改等於把 TOML 改壞了才回錯誤——現場已經變了，daemon 下次啟動才爆。
         // 這裡失敗就直接 `?` 出去：`next` 被丟掉，`g.cfg` 沒動，檔案一個字都沒寫。
         //
-        // 不論這次改了什麼都驗整份：一來每個 mutation 走的都是這支，規則只有一份；二來 config 已經壞掉時
-        // 本來就不該再往上疊寫。
+        // 不論這次改了什麼都驗整份；mutation 可以修復舊值，但不能讓其他不合法設定跟著落盤。
         // 失敗是 `ConfigInvalid`：原因留在最前面（呼叫端與測試都在看它），型別讓 API 分得出這不是上游壞掉。
-        self.hooks.validate_projection(&next)?;
+        if validate {
+            self.hooks.validate_projection(&next)?;
+        }
         // 純驗證過了才問需要 DB 的那一類（同一條理由：驗不過就不寫，guard 也不例外）。
         guard(&next)?;
         // 沒變就不寫（issue #38）；有變的話 `write_atomic` 就地改、保留註解與未知鍵。

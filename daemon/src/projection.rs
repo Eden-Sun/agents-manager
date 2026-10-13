@@ -372,31 +372,35 @@ where
     let _g = PROJECTION.lock().await;
     // 投影失敗要把這次寫進去的 TOML 退回。child 名字不在 config 裡，唯一約束會在寫檔之後才爆，
     // 不退的話這個檔之後每一次投影都 502（#654）。
-    // 先把磁碟上的手改讀進記憶體（no-op 更新只做重讀），快照才是寫入之前真正的內容：投影失敗退回時不能把手改蓋掉（#1580）。
-    if let Err(e) = store.update_guarded_at(at, |_: &mut crate::config::ConfigFile| Ok(()), |_| Ok(())).await {
-        alert_on_refusal(pool, &e).await;
-        return Err(e);
-    }
-    let snapshot = store.get().await;
     let db_bots: Vec<db::Bot> =
         db::live_bots(pool).await?.into_iter().filter(|b| b.managed_by == "user").collect();
     let db_projects = db::live_projects(pool).await?;
     let owned = pool.load_owned().await?;
     let recent = recently_removed_bots(pool).await?;
-    let out = store
-        .update_guarded_at(at, f, |next| {
-            let (live_projects, live_bots) = live_ids(next);
-            match bulk_removal_check(&db_bots, &db_projects, &live_projects, &live_bots, &owned, recent) {
-                Ok(()) => Ok(()),
-                Err(refused) => {
-                    tracing::warn!(caller = %at, http = %crate::config_audit::http_caller(), "拒絕投影 config.toml；本次不執行軟刪：{}", refused.detail);
-                    Err(anyhow::Error::new(refused))
+    // 在 ConfigStore 同一把鎖內重讀、取更新前快照並套用 mutation。不可用 no-op update 重讀：它會先驗證
+    // 舊設定，讓合法 mutation 無法修復外部手改後的語意錯誤（#1658）。最終 next 仍由 update_guarded_at 完整驗證。
+    let (snapshot, out) = match store
+        .update_guarded_at(
+            at,
+            move |cfg| {
+                let snapshot = cfg.clone();
+                let out = f(cfg)?;
+                Ok((snapshot, out))
+            },
+            |next| {
+                let (live_projects, live_bots) = live_ids(next);
+                match bulk_removal_check(&db_bots, &db_projects, &live_projects, &live_bots, &owned, recent) {
+                    Ok(()) => Ok(()),
+                    Err(refused) => {
+                        tracing::warn!(caller = %at, http = %crate::config_audit::http_caller(), "拒絕投影 config.toml；本次不執行軟刪：{}", refused.detail);
+                        Err(anyhow::Error::new(refused))
+                    }
                 }
-            }
-        })
-        .await;
-    let out = match out {
-        Ok(v) => v,
+            },
+        )
+        .await
+    {
+        Ok(result) => result,
         Err(e) => {
             alert_on_refusal(pool, &e).await;
             return Err(e);
@@ -420,7 +424,7 @@ where
 
 /// 把記憶體與磁碟上的 config 退成 `snapshot`。內容相同就不會重寫。
 async fn restore_config(at: &'static Location<'static>, store: &ConfigStore, snapshot: crate::config::ConfigFile) -> Result<()> {
-    store.update_guarded_at(at, |cfg| { *cfg = snapshot; Ok(()) }, |_| Ok(())).await.map(|_| ())
+    store.restore_snapshot_at(at, snapshot).await
 }
 
 async fn project_inner(
@@ -1320,11 +1324,14 @@ mod tests {
         .unwrap();
         let store = crate::runners::app_ports_p2::load_config(path.clone()).await.unwrap();
 
-        // 使用者手改檔案（記憶體還不知道）：改 `[server] herdr_session`，一個非熱區段。
-        let edited = config_text(&["alfa"]).replacen("[server]\nlisten = '127.0.0.1:7788'\n", "[server]\nlisten = '127.0.0.1:7788'\nherdr_session = 'hand-edited'\n", 1);
+        // 使用者手改檔案（記憶體還不知道）：改 `[server] herdr_session`，也把 bot 名改成可解析但不合法。
+        let edited = config_text(&["alfa"])
+            .replacen("[server]\nlisten = '127.0.0.1:7788'\n", "[server]\nlisten = '127.0.0.1:7788'\nherdr_session = 'hand-edited'\n", 1)
+            .replacen("name = 'alfa'", "name = 'bad@name'", 1);
         std::fs::write(&path, &edited).unwrap();
 
         let err = update_and_project(&store, &pool, |cfg| {
+            cfg.projects[0].bots[0].name = "alfa".into();
             let mut bot = cfg.projects[0].bots[0].clone();
             bot.id = Some("user-review".into());
             bot.name = "review".into();
@@ -1334,8 +1341,12 @@ mod tests {
         .await
         .unwrap_err();
         assert!(err.to_string().contains("UNIQUE"), "{err}");
-        assert!(std::fs::read_to_string(&path).unwrap().contains("hand-edited"), "投影失敗的退回不能把使用者的手改蓋掉");
-        assert_eq!(store.get().await.server.herdr_session, "hand-edited", "記憶體也要是手改後的內容");
+        let restored = std::fs::read_to_string(&path).unwrap();
+        assert!(restored.contains("hand-edited"), "投影失敗的退回不能把使用者的手改蓋掉");
+        assert!(restored.contains("bad@name"), "rollback 要能還原原本語意不合法的外部設定");
+        let in_memory = store.get().await;
+        assert_eq!(in_memory.server.herdr_session, "hand-edited", "記憶體也要是手改後的內容");
+        assert_eq!(in_memory.projects[0].bots[0].name, "bad@name", "記憶體要回到更新前快照");
 
         pool.close().await;
         std::fs::remove_dir_all(&dir).unwrap();
