@@ -91,6 +91,22 @@ test('預載失敗（null）不留在表裡，下一次掛上來會重試', asyn
   assert.equal(s2.calls, 1)
 })
 
+test('預載丟例外（reject）也算失敗：持有者拿到 null、不留在表裡，下一次掛上來會重試', async () => {
+  let calls = 0
+  const boom = (): Promise<Draft | null> => {
+    calls += 1
+    return Promise.reject(new Error('send failed'))
+  }
+  const a = acquirePreload('b1:q', boom)
+  assert.equal(await a.job, null, '例外要收成「沒有草稿」，不能把 rejected promise 交給持有者')
+  await tick()
+  assert.equal(hasPreload('b1:q'), false, '失敗不留表')
+  const s2 = starter()
+  acquirePreload('b1:q', s2.start)
+  assert.equal(calls, 1)
+  assert.equal(s2.calls, 1, '失敗之後下一次掛上來要重新預載，不能拿到那個壞掉的 entry')
+})
+
 test('「重新讀取」換一份新的；舊持有者放掉不會把新的丟掉', async () => {
   const s1 = starter()
   const a = acquirePreload('b1:q', s1.start)
