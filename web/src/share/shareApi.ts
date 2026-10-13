@@ -25,7 +25,8 @@ export interface ShareClient {
   messages(before?: string): Promise<SharePage>
   /** 回應可省（舊 client、mock）：呼叫端把 `undefined` 當成「照舊，沒有額外資訊」。 */
   send(text: string, clientRequestId: string, attachments: string[]): Promise<ShareSendResult | void>
-  upload(file: File): Promise<{ id: string; name: string }>
+  /** `signal` 中止時 fetch 跟著中止（#1661：移除正在傳的附件）。 */
+  upload(file: File, signal?: AbortSignal): Promise<{ id: string; name: string }>
   files(): Promise<ShareFile[]>
   fileUrl(name: string): string
   /** 圖片預覽用的網址（`?inline=1`，只有圖片類 daemon 才回 inline）；`version` 變了瀏覽器才重抓。 */
@@ -96,10 +97,10 @@ export function httpShareClient(token: string, opts: ShareClientOptions = {}): S
         messageId: typeof o.message_id === 'string' && o.message_id ? o.message_id : undefined,
       }
     },
-    async upload(file) {
+    async upload(file, signal) {
       const fd = new FormData()
       fd.append('file', file, file.name)
-      const o = (await json('/upload', { method: 'POST', body: fd })) as Record<string, unknown>
+      const o = (await json('/upload', { method: 'POST', body: fd, signal })) as Record<string, unknown>
       return { id: String(o.id ?? ''), name: typeof o.name === 'string' ? o.name : file.name }
     },
     async files() {

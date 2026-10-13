@@ -29,6 +29,37 @@ export class PhotoUnreadableError extends Error {
   }
 }
 
+/** 上傳途中被取消（使用者移除了這張）：不是失敗，不顯示錯誤、也不重試。 */
+export class UploadCancelledError extends Error {
+  constructor() {
+    super('upload_cancelled')
+  }
+}
+
+const throwIfCancelled = (signal?: AbortSignal) => {
+  if (signal?.aborted) throw new UploadCancelledError()
+}
+
+/** 等 `p`，但取消訊號一到就立刻丟 [`UploadCancelledError`]：底層還在跑的（解碼、被忽略訊號的 client）不再讓這一層等。 */
+function untilCancelled<T>(p: Promise<T>, signal?: AbortSignal): Promise<T> {
+  if (!signal) return p
+  throwIfCancelled(signal)
+  return new Promise<T>((resolve, reject) => {
+    const onAbort = () => reject(new UploadCancelledError())
+    signal.addEventListener('abort', onAbort, { once: true })
+    p.then(
+      (v) => {
+        signal.removeEventListener('abort', onAbort)
+        resolve(v)
+      },
+      (e) => {
+        signal.removeEventListener('abort', onAbort)
+        reject(e)
+      },
+    )
+  })
+}
+
 const isHeic = (f: File) => /^image\/hei[cf]/i.test(f.type) || /\.hei[cf]s?$/i.test(f.name)
 const isJpeg = (f: File) => /^image\/jpe?g$/i.test(f.type) || /\.jpe?g$/i.test(f.name)
 
@@ -101,22 +132,27 @@ export interface UploadOptions {
   /** 等多久（測試換掉）。 */
   sleep?: (ms: number) => Promise<void>
   codec?: ImageCodec
+  /** 取消（使用者移除了這張）：還在等的（解碼、退避）立刻丟 [`UploadCancelledError`]，不再發下一次請求。 */
+  signal?: AbortSignal
 }
 
 const defaultSleep = (ms: number) => new Promise<void>((r) => setTimeout(r, ms))
 
-/** 先整理照片，再上傳；429 最多重試 [`RETRY_MAX`] 次、503 最多 [`RETRY_503_MAX`] 次，合計最多 [`RETRY_TOTAL_MAX`] 次，其他錯誤照拋。 */
+/** 先整理照片，再上傳；429 最多重試 [`RETRY_MAX`] 次、503 最多 [`RETRY_503_MAX`] 次，合計最多 [`RETRY_TOTAL_MAX`] 次，其他錯誤照拋。取消照 `signal` 立刻丟 [`UploadCancelledError`]。 */
 export async function uploadPatiently(client: ShareClient, f: File, opts: UploadOptions = {}): Promise<{ id: string; name: string }> {
   const sleep = opts.sleep ?? defaultSleep
-  const file = await preparePhoto(f, opts.codec)
+  const { signal } = opts
+  throwIfCancelled(signal)
+  const file = await untilCancelled(preparePhoto(f, opts.codec), signal)
   // 照片縮過才量：原尺寸超過 25 MB 的照片縮完多半就放得下。
   if (file.size > SHARE_FILE_MAX) throw new ShareHttpError(413)
   let rateLimited = 0
   let busy = 0
   let retries = 0
   for (;;) {
+    throwIfCancelled(signal)
     try {
-      return await client.upload(file)
+      return await untilCancelled(client.upload(file, signal), signal)
     } catch (e) {
       if (!(e instanceof ShareHttpError) || retries >= RETRY_TOTAL_MAX) throw e
       if (e.status === 503) {
@@ -127,7 +163,7 @@ export async function uploadPatiently(client: ShareClient, f: File, opts: Upload
         rateLimited++
       } else throw e
       retries++
-      await sleep(Math.min(e.retryAfter ?? 3, RETRY_WAIT_MAX_S) * 1000)
+      await untilCancelled(sleep(Math.min(e.retryAfter ?? 3, RETRY_WAIT_MAX_S) * 1000), signal)
     }
   }
 }
