@@ -1415,7 +1415,7 @@ rustup 的 minimal profile 不含它——UI 據此提示「按安裝補上」�
 
 ### `POST /build-slots/renew`（表單）
 `{holder, token}`。`holder` 與 `token` 各最多 200 個字元，超過回 400。**不驗 bot／UI token**，`token` 本身就是憑證。只有還在 `held` 且沒過期的名額能續：
-`200 {"renewed":true,"expires_at"}`；找不到這一列（沒拿過／已過期被收回）→ `404`；`token` 不對 → `403 {"error":"token_mismatch"}`。
+`200 {"renewed":true,"expires_at"}`；找不到這一列（沒拿過／已過期被收回），或更新時該列已失效 → `404`；`token` 不對 → `403 {"error":"token_mismatch"}`。只有確認恰好更新一列才回續約成功。
 cargo shim 把這兩個明確的拒絕（`not_found`／`token_mismatch`）視為**名額已失去**，立刻停掉前景的 cargo 行程樹、退 75（issue #128，SPEC §6.5g）；
 其他失敗（連不上、5xx）在到期前一直重試，撐到保守估的 deadline 仍續不上也停。
 

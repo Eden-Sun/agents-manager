@@ -279,16 +279,75 @@
         let env = tt::env().await;
         let app = env.app.clone();
         set_max_concurrent(&app, 1).await;
-        let Acquired::Granted { token, expires_at: first_exp } = acquire(&app, "me", None, "test", "local").await.unwrap() else { panic!() };
+        let Acquired::Granted { token, .. } = acquire(&app, "me", None, "test", "local").await.unwrap() else { panic!() };
 
         assert_eq!(renew(&app, "me", "wrong-token").await.unwrap(), Err(RenewErr::TokenMismatch));
         assert_eq!(renew(&app, "nobody", "anything").await.unwrap(), Err(RenewErr::NotFound));
 
-        // 毫秒級的時間戳：兩次呼叫緊接在一起，機器夠快就可能落在同一毫秒——睡一下確保牆上時間真的往前走，
-        // 不然這條斷言測的是「機器夠不夠慢」而不是「續約有沒有真的延長」。
-        tokio::time::sleep(std::time::Duration::from_millis(5)).await;
         let Ok(new_exp) = renew(&app, "me", &token).await.unwrap() else { panic!() };
-        assert!(new_exp > first_exp, "續約要往後延");
+        let stored_exp: Option<String> = sqlx::query_scalar("SELECT expires_at FROM build_slots WHERE holder = 'me'")
+            .fetch_optional(&app.db)
+            .await
+            .unwrap();
+        assert_eq!(stored_exp.as_deref(), Some(new_exp.as_str()), "成功續約的回應要和實際名額狀態一致");
+
+        sqlx::query("UPDATE build_slots SET expires_at = '0001-01-01T00:00:00.000Z' WHERE holder = 'me'")
+            .execute(&app.db)
+            .await
+            .unwrap();
+        assert_eq!(renew(&app, "me", &token).await.unwrap(), Err(RenewErr::NotFound), "過期的名額要重新 acquire");
+    }
+
+    #[tokio::test]
+    async fn renew_does_not_report_success_when_its_update_changes_no_row() {
+        let env = tt::env().await;
+        let app = env.app.clone();
+        set_max_concurrent(&app, 1).await;
+        let Acquired::Granted { token, .. } = acquire(&app, "A", None, "test", "local").await.unwrap() else { panic!() };
+        sqlx::query(
+            "CREATE TRIGGER remove_slot_during_renew BEFORE UPDATE OF expires_at ON build_slots
+             BEGIN DELETE FROM build_slots WHERE holder = OLD.holder; SELECT RAISE(IGNORE); END",
+        )
+        .execute(&app.db)
+        .await
+        .unwrap();
+
+        let error = post_renew(State(app.clone()), Form(RenewIn { holder: "A".into(), token }))
+            .await
+            .unwrap_err();
+        assert!(matches!(error, LcError::NotFound(_)), "更新零列時不能回 renewed:true：{error:?}");
+        let rows: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM build_slots WHERE holder = 'A'")
+            .fetch_one(&app.db)
+            .await
+            .unwrap();
+        assert_eq!(rows, 0, "模擬競態中的舊名額確實已消失");
+        assert!(matches!(acquire(&app, "B", None, "test", "local").await.unwrap(), Acquired::Granted { .. }), "A 的名額消失後，B 應能取得實際空位");
+    }
+
+    #[tokio::test]
+    async fn build_slot_status_waits_for_the_same_critical_section_as_renew() {
+        use std::future::Future;
+        use std::task::{Context, Poll};
+
+        let env = tt::env().await;
+        let app = env.app.clone();
+        let Acquired::Granted { .. } = acquire(&app, "A", None, "test", "local").await.unwrap() else { panic!() };
+
+        let guard = app.build_slot_lock.lock().await;
+        let mut response = Box::pin(get_status(State(app.clone())));
+        let waker = futures::task::noop_waker();
+        let mut context = Context::from_waker(&waker);
+        assert!(matches!(response.as_mut().poll(&mut context), Poll::Pending));
+        drop(guard);
+
+        let status_queued_for_the_lock = app.build_slot_lock.try_lock().is_err();
+        if let Ok(guard) = app.build_slot_lock.try_lock() {
+            drop(guard);
+        }
+        assert!(status_queued_for_the_lock, "GET /build-slots must wait while renew owns the build-slot critical section");
+
+        let response = response.await.unwrap();
+        assert_eq!(response.0["active"], 1, "鎖釋放後 status 仍回報實際持有的名額");
     }
 
     #[tokio::test]
