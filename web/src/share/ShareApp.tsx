@@ -172,6 +172,8 @@ export function ShareApp({ client }: { client: ShareClient }) {
   // 世代號：SSE 若在 POST resolve 之前先到，不能再被後到的 resolve 設回 true。
   const [awaiting, setAwaiting] = useState(false)
   const awaitGen = useRef(0)
+  /** SSE 每到一則 status 就加一。messages 快照發出時記下它；回來時若已變，快照的 status 比 SSE 舊，只採用訊息（#1667）。 */
+  const statusEvents = useRef(0)
   /** 這一輪送出的錨點：`at` 是瀏覽器時鐘（只在 POST 還沒回 `message_id` 之前當備用），`id` 是 daemon 回的那則 user 訊息。 */
   const anchor = useRef<{ at: string; id: string | null } | null>(null)
   const listRef = useRef<HTMLDivElement>(null)
@@ -242,9 +244,10 @@ export function ShareApp({ client }: { client: ShareClient }) {
     [client],
   )
 
-  const applyPage = useCallback((page: SharePage, replace: boolean) => {
+  const applyPage = useCallback((page: SharePage, replace: boolean, statusAt: number) => {
+    const statusFresh = statusAt === statusEvents.current
     setBotName(page.bot_name)
-    setStatus(page.status)
+    if (statusFresh) setStatus(page.status)
     if (replace) {
       sawOlder.current = false
       setMessages(mergeMessages([], page.messages))
@@ -269,7 +272,7 @@ export function ShareApp({ client }: { client: ShareClient }) {
       const answered = a.id
         ? at >= 0 && page.messages.slice(at + 1).some((m) => m.role === 'assistant')
         : page.messages.some((m) => m.role === 'assistant' && m.created_at >= a.at)
-      if (page.status === 'working' || answered) setAwaiting(false)
+      if ((statusFresh && page.status === 'working') || answered) setAwaiting(false)
     }
     setNetError(null)
     setLoadFails(0)
@@ -279,6 +282,7 @@ export function ShareApp({ client }: { client: ShareClient }) {
   const load = useCallback(() => {
     const gen = ++messageLoadGen.current
     const resyncGen = messageResyncGen.current
+    const statusAt = statusEvents.current
     return client.messages().then(
       (page) => {
         const decision = decideMessageResponse({
@@ -294,7 +298,7 @@ export function ShareApp({ client }: { client: ShareClient }) {
         settledMessageGen.current = Math.max(settledMessageGen.current, gen)
         const replace = resyncGen > appliedResyncGen.current
         if (replace) appliedResyncGen.current = resyncGen
-        applyPage(page, replace)
+        applyPage(page, replace, statusAt)
       },
       (e) => {
         const kind = e instanceof ShareHttpError && e.status === 404 ? 'not_found' : 'failure'
@@ -332,6 +336,7 @@ export function ShareApp({ client }: { client: ShareClient }) {
         }
       },
       onStatus: (s) => {
+        statusEvents.current++
         setStatus(s)
         // 只在這一輪送出之後的 working／idle 清掉。POST resolve 不再把 awaiting 設回 true。
         if (anchor.current) setAwaiting(false)
