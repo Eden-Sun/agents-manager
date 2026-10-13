@@ -3,7 +3,7 @@
  * 開法：`VITE_MOCK=1 npx vite` 後開 `/share.html?token=demo_share_token_0123456789`；token 換成 `expired_…` 開頭演「連結已失效」。
  */
 import type { ShareClient, ShareEvents } from './shareApi'
-import { ShareHttpError, SHARE_FILE_MAX, SHARE_TEXT_MAX, type ShareFile, type ShareMessage, type ShareStatus } from './shareModel'
+import { ShareHttpError, SHARE_FILE_MAX, SHARE_TEXT_MAX, shareTextChars, type ShareFile, type ShareMessage, type ShareStatus } from './shareModel'
 
 const ago = (min: number) => new Date(Date.now() - min * 60_000).toISOString()
 let n = 0
@@ -64,7 +64,7 @@ export function mockShareClient(token: string): ShareClient {
     },
     async send(text, _crid, attachments) {
       await guard()
-      if (text.length > SHARE_TEXT_MAX) throw new ShareHttpError(413)
+      if (shareTextChars(text) > SHARE_TEXT_MAX) throw new ShareHttpError(413)
       if (text.includes('429')) throw new ShareHttpError(429, 30)
       // 同 daemon：一段對話同時只排一則，上一則還沒回完就 409 not_accepted。
       if (status === 'working' || replying) throw new ShareHttpError(409)
@@ -72,7 +72,7 @@ export function mockShareClient(token: string): ShareClient {
       push({ id: id(), role: 'user', text, created_at: new Date().toISOString(), attachments: attachments.map((a) => ({ name: uploads.get(a) ?? a })) })
       setTimeout(() => setStatus('working'), 300)
       setTimeout(() => {
-        push({ id: id(), role: 'assistant', text: `收到：「${text.slice(0, 40)}」。這是 mock 的回覆。`, created_at: new Date().toISOString(), attachments: [] })
+        push({ id: id(), role: 'assistant', text: `收到：「${[...text].slice(0, 40).join('')}」。這是 mock 的回覆。`, created_at: new Date().toISOString(), attachments: [] })
         replying = false
         setStatus('idle')
       }, 2600)
