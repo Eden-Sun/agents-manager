@@ -5,25 +5,34 @@
 export function singleFlight(run: () => Promise<void>, onError?: (e: unknown) => void): () => Promise<void> {
   let inflight: Promise<void> | null = null
   let again = false
+  // 迴圈還會不會再看 `again`。收尾是同步的（`finally` 裡只設這個旗標），`inflight` 要等 `.finally` 才清，
+  // 中間進來的呼叫不能當成合併：迴圈已經不會再跑，那次刷新會被吞掉（#1690）。
+  let looping = false
   return () => {
-    if (inflight) {
+    if (inflight && looping) {
       again = true
       return inflight
     }
-    inflight = (async () => {
-      do {
-        again = false
-        try {
-          await run()
-        } catch (e) {
-          if (!onError) throw e
-          onError(e)
-        }
-      } while (again)
+    looping = true
+    const p: Promise<void> = (async () => {
+      try {
+        do {
+          again = false
+          try {
+            await run()
+          } catch (e) {
+            if (!onError) throw e
+            onError(e)
+          }
+        } while (again)
+      } finally {
+        looping = false
+      }
     })().finally(() => {
-      inflight = null
+      if (inflight === p) inflight = null
     })
-    return inflight
+    inflight = p
+    return p
   }
 }
 
