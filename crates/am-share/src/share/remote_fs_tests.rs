@@ -665,6 +665,7 @@ async fn remote_instructions_survive_a_cut_multibyte_char() {
 
     let s = site.instructions().await.unwrap();
     assert!(s.contains("中中中"));
+    assert!(!s.contains('\u{fffd}'), "UTF-8 截尾不能把完整中文字前綴污染成 replacement character");
 }
 
 #[tokio::test]

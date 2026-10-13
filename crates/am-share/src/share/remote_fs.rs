@@ -474,8 +474,12 @@ pub fn parse_instructions(out: &[u8]) -> Result<String, RfsError> {
         if f.tag != "FILE" {
             continue;
         }
-        // 截斷的半個字變成 U+FFFD，不讓整份指示失敗（#983）。
-        let line = String::from_utf8_lossy(&f.data).into_owned();
+        // `head -c` 可切在 UTF-8 字元中間：略過不完整尾字元，但保留內部壞位元組的 lossy 處理。
+        let data = match std::str::from_utf8(&f.data) {
+            Err(error) if error.error_len().is_none() => &f.data[..error.valid_up_to()],
+            _ => &f.data[..],
+        };
+        let line = String::from_utf8_lossy(data).into_owned();
         let mut parts = line.splitn(2, '\t');
         let label = parts.next().unwrap_or("").trim();
         let content = parts.next().unwrap_or("").trim_end();
