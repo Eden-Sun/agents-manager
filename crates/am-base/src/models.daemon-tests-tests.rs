@@ -93,6 +93,13 @@
         crate::hosts::set_ssh_fake(&host, |_| Ok(r#"{"effortLevel":"low"}"#.into()));
         assert_eq!(of("haiku").await, "low", "settings 的 effortLevel 蓋過內建預設");
         assert_eq!(of("sonnet").await, "low");
+
+        // #1679：檔案只有舊版那一列（claude-opus-5）→ 目前版本沒有列，用內建預設，不拿舊版頂替。
+        crate::hosts::set_ssh_fake(&host, |_| Ok(r#"{"modelSettings":{"claude-opus-5":{"effortLevel":"xhigh"}}}"#.into()));
+        assert_eq!(of("opus").await, "high");
+        assert_eq!(of("claude-opus-5").await, "xhigh", "完整 id 照完全相等的那一列");
+        crate::hosts::set_ssh_fake(&host, |_| Ok(r#"{"modelSettings":{"claude-opus-5-5":{"effortLevel":"medium"}}}"#.into()));
+        assert_eq!(of("opus").await, "medium");
     }
 
     /// #268：遠端 settings.json 讀不到（ssh 失敗）不是「沒設定」——以前讀成 `""`，預設 effort 變成內建的 `high`，
@@ -138,13 +145,14 @@
         *answer.lock().unwrap() = r#"{"effortLevel":"max"}"#.into();
         crate::hosts::set_ssh_delay(host, Duration::ZERO);
         let fresh = list(&e.app, host, "claude", None, true).await.expect("B 自己的清單");
-        assert_eq!(fresh["models"][0]["default_effort"], "max");
+        assert_eq!(fresh["models"][0]["account_default_effort"], "max");
+        assert_eq!(fresh["models"][0]["default_effort"], "high", "廠推薦不跟帳號設定走");
         *answer.lock().unwrap() = r#"{"effortLevel":"low"}"#.into();
 
         let r = stale.await.unwrap();
         assert!(r.is_err(), "A 的結果作廢，不能當答案回：{r:?}");
         let cached = e.app.models_cache.lock().await.get(&format!("{host}/claude/")).map(|(_, v)| v.clone()).expect("B 的還在");
-        assert_eq!(cached["models"][0]["default_effort"], "max", "快取要留著 B 的清單");
+        assert_eq!(cached["models"][0]["account_default_effort"], "max", "快取要留著 B 的清單");
     }
 
     /// 缺檔是答案不是錯誤：本機回 `""`，遠端腳本要 exit 0（`ssh_exec` 看 exit code）。
@@ -317,48 +325,73 @@
         assert_eq!(grok_effort_from_screen(screen).as_deref(), Some("high"));
     }
 
-    /// Real `settings.json` shapes seen on this machine and on m4p, 2026-09-07: an account
-    /// with a global default and one override, and a host with only an override (no global).
+    /// Real `settings.json` shapes seen on this machine and on m4p. 「廠推薦」（`default_effort`）只看模型、不看帳號；
+    /// 帳號 settings.json 記住的值另放 `account_default_effort`，且只在跟內建不同時才有（#1679）。
     #[test]
-    fn claude_effort_hint_prefers_the_per_model_override() {
+    fn claude_vendor_default_ignores_the_account_and_the_account_value_is_its_own_field() {
         let (global, per_model) = parse_claude_effort_settings(
-            r#"{"effortLevel":"high","modelSettings":{"claude-opus-5":{"effortLevel":"low"}}}"#,
+            r#"{"effortLevel":"high","modelSettings":{"claude-opus-5-5":{"effortLevel":"low"}}}"#,
         );
         assert_eq!(global.as_deref(), Some("high"));
-        assert_eq!(per_model.get("claude-opus-5").map(String::as_str), Some("low"));
+        assert_eq!(per_model.get("claude-opus-5-5").map(String::as_str), Some("low"));
 
         let models = claude_static_models(global.as_deref(), &per_model, None);
-        let of = |id: &str| models.iter().find(|m| m["id"] == id).unwrap()["default_effort"].as_str().map(String::from);
-        assert_eq!(of("opus"), Some("low".into()), "per-model override wins");
-        assert_eq!(of("sonnet"), Some("high".into()), "falls back to the account default");
+        let field = |models: &[Value], id: &str, f: &str| models.iter().find(|m| m["id"] == id).unwrap()[f].clone();
+        assert_eq!(field(&models, "opus", "default_effort"), json!("high"), "廠推薦不是帳號記住的 low");
+        assert_eq!(field(&models, "opus", "account_default_effort"), json!("low"), "帳號對目前版本那一列的值");
+        assert_eq!(field(&models, "sonnet", "default_effort"), json!("high"));
+        assert_eq!(field(&models, "sonnet", "account_default_effort"), Value::Null, "全域 high 跟內建一樣：不另外標");
+        assert_eq!(field(&models, "haiku", "default_effort"), json!("medium"), "haiku 內建是 medium（#880）");
+        assert_eq!(field(&models, "haiku", "account_default_effort"), json!("high"), "帳號全域 high 跟 haiku 內建不同：另標");
 
-        // m4p: no top-level `effortLevel`, only a fable override.
+        // m4p：沒有頂層 `effortLevel`，只有 fable 的列。
         let (global2, per_model2) =
             parse_claude_effort_settings(r#"{"modelSettings":{"claude-fable-5-1":{"effortLevel":"low"}}}"#);
         assert_eq!(global2, None);
         let models2 = claude_static_models(global2.as_deref(), &per_model2, None);
-        let of2 = |id: &str| models2.iter().find(|m| m["id"] == id).unwrap()["default_effort"].clone();
-        assert_eq!(of2("fable"), json!("low"));
-        // No override and no global: the CLI's own default (verified on a fresh cc2 identity).
-        assert_eq!(of2("opus"), json!("high"));
+        assert_eq!(field(&models2, "fable", "default_effort"), json!("high"));
+        assert_eq!(field(&models2, "fable", "account_default_effort"), json!("low"));
+        assert_eq!(field(&models2, "opus", "account_default_effort"), Value::Null);
 
-        // Unreadable / not JSON: no override, no global — same built-in fallback.
+        // 讀不到／不是 JSON：沒有帳號值，廠推薦照舊。
         let (g3, m3) = parse_claude_effort_settings("");
         assert_eq!(g3, None);
         assert!(m3.is_empty());
         let models3 = claude_static_models(g3.as_deref(), &m3, None);
-        assert_eq!(models3[0]["default_effort"], json!("high"));
-        // #880：haiku 的內建預設是 medium；有 global 或 override 時照設定。
-        let of3 = |id: &str| models3.iter().find(|m| m["id"] == id).unwrap()["default_effort"].clone();
-        assert_eq!(of3("haiku"), json!("medium"));
-        assert_eq!(of3("sonnet"), json!("high"));
-        let models4 = claude_static_models(Some("low"), &BTreeMap::new(), None);
-        assert_eq!(models4.iter().find(|m| m["id"] == "haiku").unwrap()["default_effort"], json!("low"));
+        for m in &models3 {
+            assert_eq!(m["account_default_effort"], Value::Null, "{m}");
+        }
+        assert_eq!(field(&models3, "opus", "default_effort"), json!("high"));
+        assert_eq!(field(&models3, "haiku", "default_effort"), json!("medium"));
+        assert_eq!(field(&models3, "sonnet", "default_effort"), json!("high"));
     }
 
-    /// issue #937：m4p 的 `modelSettings`。別名要對到該家族最新版，完整 id 只認完全相等，不做子字串比對。
+    /// #1679：同一個 opus，cc0（目前版本有列）與 cc1（只有舊版 opus-5 的列）的「廠推薦」一樣；
+    /// cc1 沒有目前版本那一列，就沒有帳號值，更不能拿舊版的 xhigh 頂替。
     #[test]
-    fn claude_effort_override_resolves_aliases_to_the_latest_family_version() {
+    fn claude_vendor_default_is_the_same_on_every_account() {
+        let cc0 = parse_claude_effort_settings(
+            r#"{"modelSettings":{"claude-opus-5-5":{"effortLevel":"medium"},"claude-opus-5":{"effortLevel":"high"}}}"#,
+        );
+        let cc1 = parse_claude_effort_settings(
+            r#"{"modelSettings":{"claude-opus-5":{"effortLevel":"xhigh"},"claude-fable-5-1":{"effortLevel":"low"}}}"#,
+        );
+        let list = |(g, m): &(Option<String>, BTreeMap<String, String>)| claude_static_models(g.as_deref(), m, None);
+        let (m0, m1) = (list(&cc0), list(&cc1));
+        let field = |models: &[Value], id: &str, f: &str| models.iter().find(|m| m["id"] == id).unwrap()[f].clone();
+        for id in ["opus", "sonnet", "haiku", "fable"] {
+            assert_eq!(field(&m0, id, "default_effort"), field(&m1, id, "default_effort"), "{id} 的廠推薦不能跟帳號走");
+        }
+        assert_eq!(field(&m0, "opus", "account_default_effort"), json!("medium"));
+        assert_eq!(field(&m1, "opus", "account_default_effort"), Value::Null, "cc1 沒有 claude-opus-5-5 這一列");
+        assert_eq!(claude_effort_override(&cc1.1, "opus"), None, "不帶 --effort 實際跑的是內建預設，不是舊版的 xhigh");
+        assert_eq!(claude_effort_override(&cc1.1, "claude-opus-5-5"), None);
+    }
+
+    /// issue #937／#1679：裸別名只對到「目前版本」那一列（`claude_current_model_id`），舊版的列不頂替；
+    /// 完整 id 只認完全相等，不做子字串比對。CLI 自己也是照完整 model id 查 `modelSettings`。
+    #[test]
+    fn claude_effort_override_looks_up_only_the_current_version_of_an_alias() {
         let (global, per_model) = parse_claude_effort_settings(
             r#"{"modelSettings":{
                 "claude-fable-5-1":{"effortLevel":"medium"},
@@ -370,11 +403,11 @@
         );
         assert_eq!(global, None);
         let of = |m: &str| claude_effort_override(&per_model, m);
-        assert_eq!(of("sonnet").as_deref(), Some("high"), "sonnet → claude-sonnet-5-5，不是字典序較前的舊版");
+        assert_eq!(of("sonnet").as_deref(), Some("high"), "sonnet → claude-sonnet-5-5");
         assert_eq!(of("opus").as_deref(), Some("medium"));
         assert_eq!(of("claude-sonnet-5").as_deref(), Some("low"), "完整 id 只認完全相等，不會 contains 到 -5-5");
         assert_eq!(of("claude-sonnet-5-5").as_deref(), Some("high"));
-        assert_eq!(of("haiku").as_deref(), Some("medium"));
+        assert_eq!(of("haiku"), None, "目前版本是 claude-haiku-5-5；檔案只有舊的 4-5：不頂替");
         assert_eq!(of("claude-haiku-5-5"), None, "沒有這個 key：不做子字串比對");
         assert_eq!(of("fable").as_deref(), Some("medium"));
         assert_eq!(of("Claude-Sonnet-5-5").as_deref(), Some("high"), "大小寫不同仍算相等");
@@ -382,19 +415,22 @@
         assert_eq!(of("gpt-5"), None);
 
         let models = claude_static_models(global.as_deref(), &per_model, None);
-        let eff = |id: &str| models.iter().find(|m| m["id"] == id).unwrap()["default_effort"].clone();
-        assert_eq!(eff("sonnet"), json!("high"));
+        let eff = |id: &str| models.iter().find(|m| m["id"] == id).unwrap()["account_default_effort"].clone();
+        assert_eq!(eff("sonnet"), Value::Null, "high 跟內建一樣");
         assert_eq!(eff("opus"), json!("medium"));
+        assert_eq!(eff("haiku"), Value::Null);
     }
 
-    /// 版本逐段比數值（10 > 9），`[1m]` 之類非數字尾巴不影響比較。
+    /// 別名對到哪個完整 id 要跟啟動時一致：opus 就是 `remap_deprecated_model` 換成的那個。
     #[test]
-    fn claude_effort_override_compares_versions_numerically() {
-        let m: BTreeMap<String, String> = [("claude-opus-5-9", "low"), ("claude-opus-5-10", "high"), ("claude-opus-5[1m]", "medium")]
-            .iter()
-            .map(|(k, v)| (k.to_string(), v.to_string()))
-            .collect();
-        assert_eq!(claude_effort_override(&m, "opus").as_deref(), Some("high"));
+    fn claude_current_model_ids_match_the_alias_remap() {
+        assert_eq!(claude_current_model_id("opus"), Some("claude-opus-5-5"));
+        assert_eq!(Some(claude_current_model_id("opus").unwrap()), remap_deprecated_model("claude", "opus"));
+        for alias in ["opus", "sonnet", "haiku", "fable"] {
+            let id = claude_current_model_id(alias).unwrap();
+            assert_eq!(claude_alias_of(id), Some(alias), "{id} 要對回 {alias}");
+        }
+        assert_eq!(claude_current_model_id("claude-opus-5-5"), None, "只有裸別名才要解析");
     }
 
     /// #941：claude 的預設標記跟著帳號 settings.json 的頂層 `model`，不是寫死 opus。

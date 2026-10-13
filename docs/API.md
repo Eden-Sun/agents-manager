@@ -2069,7 +2069,9 @@ UI token 會取得 Project 底下所有存活 bot 的訊息合併。Bot token �
 
 Codex 清單排除上述改派值；app-server 的預設若是被排除的模型，`is_default` 移到改派目標。身分 `config.toml` 設了舊值時，同樣以改派目標標預設與套用 `model_reasoning_effort`；目標不在清單時不標預設。既存 DB 的 `gpt-6-sol` 啟動參數改用 `gpt-6.1-sol`，不回寫 DB。
 
-- `default_effort`：codex/grok 是模型回報的值（可能 `null`）；claude 一律有值——帳號 `settings.json` 的 per-model 覆寫 > `effortLevel` > 內建 `"high"`。
+- `default_effort`：codex/grok 是模型回報的值（可能 `null`）；claude 一律有值——**廠商內建預設**（haiku `"medium"`，其餘 `"high"`），每個帳號都一樣，UI 標「廠推薦」。
+- `account_default_effort`（只有 claude 帶；其餘 kind 沒有這個欄位）：該身分 `settings.json` 記住的強度——目前版本那一列 `modelSettings.<完整 id>.effortLevel` > 頂層 `effortLevel`；沒有、或跟 `default_effort` 相同就是 `null`。
+  不帶 `--effort` 時實際會跑 `account_default_effort ?? default_effort`；UI 標「此帳號預設」，不冒充廠推薦（#1679，SPEC §17.1）。
 - `display_name` / `description` 可能為空字串。
 - 失敗（CLI 不存在、逾時、解析失敗、ssh 失敗）→ 502，**前端退回靜態清單**。`kind` 不合法 400；host 不存在 404。
 

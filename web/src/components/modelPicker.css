@@ -29,7 +29,8 @@
   margin: 0;
 }
 
-/* 「廠推薦」：原廠回報的實際預設級（docs/API.md §12.1 `default_effort`），不是猜的；標在按鈕上不必 hover。 */
+/* 「廠推薦」：原廠回報的實際預設級（docs/API.md §12.1 `default_effort`），不是猜的；標在按鈕上不必 hover。
+   「此帳號預設」（`account_default_effort`）是帳號 settings.json 記住的上次選擇，用虛線框跟廠推薦分開（#1679）。 */
 
 .opt-group .opt .effort-recommended {
   flex: none;
@@ -41,6 +42,13 @@
   background: var(--accent-soft);
   color: var(--accent-ink);
   line-height: 1.5;
+}
+
+.opt-group .opt .effort-recommended.effort-account {
+  margin-left: 4px;
+  background: transparent;
+  outline: 1px dashed var(--accent-ink);
+  outline-offset: -1px;
 }
 
 .opt-group .opt.on .effort-recommended {

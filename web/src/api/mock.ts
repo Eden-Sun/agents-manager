@@ -419,7 +419,7 @@ const MODELS: Record<BotKind, Rec[]> = {
 }
 
 /**
- * claude `default_effort` 來自帳號 settings.json 的全域＋per-model `effortLevel`（SPEC §17.1），數字照真機實測。
+ * claude `default_effort` 是廠商內建預設；`account_default_effort` 來自帳號 settings.json 的全域＋per-model `effortLevel`（SPEC §17.1），數字照真機實測。
  * 都沒設時內建預設是 `high`（官方文件；2026-09-07 乾淨 cc2 實測 `Sonnet 5 with high effort`）。
  */
 const CLAUDE_BUILTIN_DEFAULT_EFFORT = 'high'
@@ -433,10 +433,12 @@ const CLAUDE_ACCOUNT_EFFORT: Record<string, { global?: string; overrides?: Recor
 
 function claudeModelsForIdentity(identity: string): Rec[] {
   const cfg = CLAUDE_ACCOUNT_EFFORT[identity] ?? CLAUDE_ACCOUNT_EFFORT['']
-  return MODELS.claude.map((m) => ({
-    ...m,
-    default_effort: cfg.overrides?.[String(m.id)] ?? cfg.global ?? (String(m.id) === 'haiku' ? 'medium' : CLAUDE_BUILTIN_DEFAULT_EFFORT),
-  }))
+  return MODELS.claude.map((m) => {
+    const builtin = String(m.id) === 'haiku' ? 'medium' : CLAUDE_BUILTIN_DEFAULT_EFFORT
+    const account = cfg.overrides?.[String(m.id)] ?? cfg.global ?? null
+    // 廠推薦每個帳號一樣；帳號記住的值另放 account_default_effort，跟內建相同就不給（#1679）。
+    return { ...m, default_effort: builtin, account_default_effort: account !== builtin ? account : null }
+  })
 }
 
 /** 幾小時前（ISO）：mock 用來造「沿用的那一桶」。 */

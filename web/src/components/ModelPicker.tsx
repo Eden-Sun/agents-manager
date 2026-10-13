@@ -91,7 +91,7 @@ export function ApiModelFields({
   const current = (model && (models.find((m) => m.id === model) ?? models.find((m) => modelMatches(m.id, model)))) || defaultModel
   const efforts = current?.efforts ?? []
   const selectedModel = model ?? defaultModel?.id ?? null
-  const selectedEffort = effort ?? current?.default_effort ?? null
+  const selectedEffort = effort ?? effectiveDefaultEffort(current)
   const hasFast = current?.service_tiers.some((t) => t.id === FAST_TIER) ?? false
 
   // 不支援的存值只標出來、不自動清（自動清會讓表單無故 dirty，docs/reviews/2026-09-12/web.md §1 ModelPicker）。
@@ -154,15 +154,11 @@ export function ApiModelFields({
                 role="radio"
                 aria-checked={selectedEffort === e}
                 className={`opt${selectedEffort === e ? ' on' : ''}`}
-                title={current?.default_effort === e ? `${defaultEffortNote(kind)}：${effortLabel(e)}` : e}
+                title={effortTitle(kind, current, e) ?? e}
                 onClick={() => onEffort(e)}
               >
                 {effortLabel(e)}
-                {current?.default_effort === e ? (
-                  <span className="effort-recommended" aria-hidden="true">
-                    廠推薦
-                  </span>
-                ) : null}
+                {effortBadges(current, e)}
               </button>
             ))}
           </div>
@@ -215,9 +211,33 @@ export function ApiModelFields({
   )
 }
 
-/** claude 的預設強度來自帳號 `settings.json`（SPEC §17.1），不是模型內建。 */
-function defaultEffortNote(kind: BotKind): string {
-  return kind === 'claude' ? '帳號目前設定' : '模型預設'
+/** 沒指定強度時實際會跑的那一級：帳號 settings.json 記住的值（有的話），否則廠商預設（SPEC §17.1、#1679）。 */
+function effectiveDefaultEffort(m: ModelInfo | undefined): string | null {
+  return m?.account_default_effort ?? m?.default_effort ?? null
+}
+
+/** 「廠推薦」只標廠商內建預設（每個帳號一樣）；帳號記住的值另標「此帳號預設」，不冒充廠推薦。 */
+function effortBadges(m: ModelInfo | undefined, e: string): ReactNode {
+  return (
+    <>
+      {m?.default_effort === e ? (
+        <span className="effort-recommended" aria-hidden="true">
+          廠推薦
+        </span>
+      ) : null}
+      {m?.account_default_effort === e ? (
+        <span className="effort-recommended effort-account" aria-hidden="true">
+          此帳號預設
+        </span>
+      ) : null}
+    </>
+  )
+}
+
+function effortTitle(kind: BotKind, m: ModelInfo | undefined, e: string): string | undefined {
+  if (m?.account_default_effort === e) return `此帳號預設（不帶 --effort 會跑這一級）：${effortLabel(e)}`
+  if (m?.default_effort === e) return `${kind === 'claude' ? '廠推薦' : '模型預設'}：${effortLabel(e)}`
+  return undefined
 }
 
 function liveFast(kind: BotKind): boolean {
@@ -316,7 +336,7 @@ export function ModelQuickPicker({
   const efforts = current?.efforts ?? []
   // 沒設就標 CLI 預設那顆（同 ApiModelFields；2026-09-09 使用者決定不放「預設」選項）。
   const selectedModel = model ?? current?.id ?? null
-  const selectedEffort = effort ?? current?.default_effort ?? null
+  const selectedEffort = effort ?? effectiveDefaultEffort(current)
 
   const apply = async (input: PatchBotInput) => {
     const res = await patchBot(botId, input)
@@ -406,15 +426,11 @@ export function ModelQuickPicker({
                   tabIndex={-1}
                   className={`opt${selectedEffort === e ? ' on' : ''}`}
                   disabled={patching}
-                  title={current?.default_effort === e ? `${defaultEffortNote(kind)}：${effortLabel(e)}` : undefined}
+                  title={effortTitle(kind, current, e)}
                   onClick={() => pickEffort(e)}
                 >
                   {effortLabel(e)}
-                  {current?.default_effort === e ? (
-                    <span className="effort-recommended" aria-hidden="true">
-                      廠推薦
-                    </span>
-                  ) : null}
+                  {effortBadges(current, e)}
                 </button>
               ))}
             </div>

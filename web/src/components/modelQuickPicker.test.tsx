@@ -126,3 +126,30 @@ test('沒指定時點亮著的預設那顆仍會送出', async () => {
   await click(opus)
   assert.deepEqual(patches, [{ model: 'opus' }])
 })
+
+// #1679：「廠推薦」只標廠商內建預設；帳號 settings.json 記住的值另標「此帳號預設」，沒指定強度時亮的是帳號值（CLI 實際會跑的）。
+test('帳號記住的強度另標「此帳號預設」，不冒充廠推薦；沒指定時亮帳號值', async () => {
+  setup('claude-opus-5-5')
+  useStore.setState({
+    models: { 'claude@local@': [model('opus', { is_default: true, default_effort: 'high', account_default_effort: 'low' })] },
+  })
+  await openMenu()
+  const buttons = [...document.querySelectorAll<HTMLButtonElement>('[aria-label="強度"] button')]
+  const text = (label: string) => buttons.find((b) => b.textContent?.startsWith(label))?.textContent ?? ''
+  assert.equal(text('High'), 'High廠推薦')
+  assert.equal(text('Low'), 'Low此帳號預設')
+  assert.equal(text('Medium'), 'Medium')
+  const checked = buttons.filter((b) => b.getAttribute('aria-checked') === 'true').map((b) => b.textContent)
+  assert.deepEqual(checked, ['Low此帳號預設'])
+})
+
+test('沒有帳號記住的值：只有廠推薦，亮的是廠推薦那一級', async () => {
+  setup('claude-opus-5-5')
+  useStore.setState({
+    models: { 'claude@local@': [model('opus', { is_default: true, default_effort: 'high', account_default_effort: null })] },
+  })
+  await openMenu()
+  assert.equal(document.querySelectorAll('.effort-account').length, 0)
+  const checked = [...document.querySelectorAll('[aria-label="強度"] button[aria-checked="true"]')].map((b) => b.textContent)
+  assert.deepEqual(checked, ['High廠推薦'])
+})
