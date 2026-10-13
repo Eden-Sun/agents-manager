@@ -31,6 +31,8 @@ check "" ""
 check "daemon" "docs/goals/agm-supervisor-persona.md"
 check "daemon" "docs/goals/agm-responder-persona.md"
 check "daemon" "daemon/src/release_triage/fixtures/claude_2.1.276-278.md"
+# crates 底下的 .md 也可能是測試 fixture：release_triage 的 claude_2.1.276-278.md 由 daemon 的測試（runners/release_triage.rs、bot_scope_matrix.rs）include_str! 編進去，不是「只有文件」。
+check "daemon" "crates/am-base/src/release_triage/fixtures/claude_2.1.276-278.md"
 check "" "docs/goals/other-goal.md"
 # chatgpt-consult.sh 是 scripts/ 底下的 shell：lint-shell-vars 與 canary 在 ops，不能只跑 ob。
 check "ops ob" "scripts/chatgpt-consult.sh"

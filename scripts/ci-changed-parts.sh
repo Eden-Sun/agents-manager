@@ -32,6 +32,8 @@ while IFS= read -r f; do
         docs/SPEC.md) specs=1 ;;
         # AGENTS.md 也有測試釘住內容（scripts/lint_scope_test.sh 要求 clippy 指令涵蓋 workspace，#1077）：歸 ops。
         AGENTS.md) ops=1 ;;
+        # crates 底下的 .md 也可能是測試 fixture（release_triage 的 claude_2.1.276-278.md 由 daemon 測試 include_str! 編進去）：不是「只有文件」，要先於下面的 *.md（#1699）。
+        crates/*.md) daemon=1 ;;
         docs/* | *.md | LICENSE | .gitignore | .github/ISSUE_TEMPLATE/*) ;;
         web/*) web=1 ;;
         daemon/* | crates/* | Cargo.toml | Cargo.lock | rust-toolchain* | .cargo/*) daemon=1 ;;
