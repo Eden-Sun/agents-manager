@@ -1,3 +1,5 @@
+import { terminalFooterFor } from '../hooks/useCodexTerminalFooter'
+import { CodexTerminalFooterItems } from './CodexTerminalFooter'
 import { projectNoFiveHour } from '../lib/quotaNoFiveHour'
 import { memo, useEffect, useLayoutEffect, useRef, useState, useId } from 'react'
 import { CompactButton } from './CompactButton'
@@ -1103,13 +1105,15 @@ function ContextBar({ issues, status, hasStatus, phoneFiles, mobileOpen, onClose
 
 export function StatusLineBar({ botId, status, text }: { botId: string; status: StatusInfo | null; text: string | null }) {
   const phone = useMediaQuery(PHONE_QUERY)
+  const footer = useStore((s) => terminalFooterFor(s, botId))
+  const footerHasContext = /·\s*Context \d+% used/.test(footer?.modelLine ?? '')
   const line = text?.trim() ?? ''
   if (!status) {
-    if (!line) return null
+    if (!line && !footer) return null
     return (
       <div className="statusline-bar" title={line}>
         {/* CLI 自己截掉的尾巴（`· …`）不畫：那三個點不說任何事。完整原文留在 title。 */}
-        <span className="statusline-text mono">{trimClippedTail(line)}</span>
+        {footer ? <CodexTerminalFooterItems footer={footer} /> : <span className="statusline-text mono">{trimClippedTail(line)}</span>}
       </div>
     )
   }
@@ -1120,6 +1124,7 @@ export function StatusLineBar({ botId, status, text }: { botId: string; status: 
       : null
   return (
     <div className="statusline-bar" title={line || undefined}>
+      <CodexTerminalFooterItems footer={footer} />
       {status.account_warning ? (
         <SlItem k="帳號" className="sl-account sl-warn" title={status.account_warning}>
           ⚠ 未登入，用的是預設帳號
@@ -1129,14 +1134,14 @@ export function StatusLineBar({ botId, status, text }: { botId: string; status: 
         <SlItem k="帳號" className="sl-account">
           {status.account_email}
         </SlItem>
-      ) : status.cwd ? (
+      ) : status.cwd && !footer?.modelLine ? (
         <SlItem k="目錄" title={status.cwd}>
           {status.cwd.replace(/^\/Users\/[^/]+/, '~')}
         </SlItem>
       ) : null}
       {status.context_used_pct !== null ? (
         <SlItem k="context" title={ctxDetail ? `已用 ${ctxDetail} tokens` : undefined}>
-          {pct(status.context_used_pct)}{ctxDetail ? <span className="sl-dim"> · {ctxDetail}</span> : null}
+          {!footerHasContext ? <>{pct(status.context_used_pct)}{ctxDetail ? <span className="sl-dim"> · {ctxDetail}</span> : null}</> : null}
           <CompactButton botId={botId} />
           {/* 手機改在長按主力晶片的狀態卡裡（BotStatusCard，觸控目標 ≥ 40px），這裡不重複。 */}
           {phone ? null : <KeepWarmSkipButton botId={botId} />}
@@ -1161,6 +1166,7 @@ export function ChatPanel({ onOpenSidebar }: { onOpenSidebar: () => void }) {
   const botId = useStore((s) => s.selectedBotId)
   const bot = useStore((s) => s.bots.find((b) => b.id === s.selectedBotId) ?? null)
   const run = useStore((s) => (s.selectedBotId ? (s.runs[s.selectedBotId] ?? null) : null))
+  const terminalFooter = useStore((s) => terminalFooterFor(s, botId))
   const runningIdentity = runtimeIdentity(run)
   // 這顆 bot 的未讀：看著就清掉，只在人離開時亮。
   const headUnread = useStore((s) => (s.selectedBotId ? (s.botUnread[s.selectedBotId] ?? 0) : 0))
@@ -1481,7 +1487,7 @@ export function ChatPanel({ onOpenSidebar }: { onOpenSidebar: () => void }) {
           ) : null
         }
         status={<StatusLineBar botId={botId} status={statusInfo} text={run?.status_line ?? null} />}
-        hasStatus={Boolean(statusInfo) || Boolean(run?.status_line?.trim())}
+        hasStatus={Boolean(statusInfo) || Boolean(run?.status_line?.trim()) || Boolean(terminalFooter)}
         phoneFiles={<OutboxFiles />}
       />
 

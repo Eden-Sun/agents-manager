@@ -1,3 +1,5 @@
+import { CodexTerminalFooterBar } from './CodexTerminalFooter'
+import { useCodexTerminalFooter } from '../hooks/useCodexTerminalFooter'
 import { useState } from 'react'
 import { useChoiceMenu } from '../hooks/useChoiceMenu'
 import { usePendingQuestion } from '../hooks/usePendingQuestion'
@@ -28,6 +30,7 @@ export function BlockedPanel({
   onExpand?: () => void
 }) {
   const { snap, err, refresh } = useTerminalSnapshot(botId, { source: 'visible', lines: 40, paused })
+  const terminal = useCodexTerminalFooter(botId, snap)
   const press = usePaneKeys(botId, refresh)
   // 折不折行跟終端分頁共用一個開關（切換鍵在那條 term-bar 上）。
   const wrap = useTermWrap()
@@ -41,7 +44,7 @@ export function BlockedPanel({
   // `pre` 是 white-space: pre，內容一律當成一個字串算好再放進去，免得 JSX 的排版縮排跑進畫面。
   const body = err
     ? `讀取終端失敗：${err}`
-    : (snap?.text ?? (paused ? '（全畫面終端開著，這裡暫停更新）' : '讀取中…'))
+    : (snap ? terminal.body : (paused ? '（全畫面終端開著，這裡暫停更新）' : '讀取中…'))
   /** 選單模式預設把這兩樣收起來；認不出選單時它們就是這塊面板本身。 */
   const showTerm = !menu || extras
   const showKeys = !menu || extras
@@ -73,6 +76,7 @@ export function BlockedPanel({
           </button>
         ) : null}
       </div>
+      <CodexTerminalFooterBar footer={terminal.footer} mobileOnly />
       <CodexUpdateHint botId={botId} text={snap?.text} onAnswered={refresh} />
       {pendingStatus === 'unavailable' ? <div role="status">暫時無法確認待答題目，請參考終端畫面。</div> : null}
       {/* 同 `BlockedModal`：認得出選單時原題收成一行排在選項後面，認不出才攤開在最上面（issue #559）。 */}
