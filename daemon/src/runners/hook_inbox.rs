@@ -437,4 +437,194 @@ mod tests {
         let left: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM hook_events WHERE processed_at IS NULL").fetch_one(&app.db).await.unwrap();
         assert_eq!(left, 0, "A 的 130 列也要全部處理完");
     }
+
+    /// 假 Jev：每個請求先計數，再等 `gate` 放行才回答 same_work 0.8。撞題查詢因此能停在「已送到 Jev、還沒回」，不靠 sleep。
+    struct GatedJev {
+        requests: Arc<std::sync::atomic::AtomicUsize>,
+        gate: Arc<tokio::sync::Semaphore>,
+    }
+
+    impl GatedJev {
+        fn count(&self) -> usize {
+            self.requests.load(std::sync::atomic::Ordering::SeqCst)
+        }
+    }
+
+    /// 開啟撞題判斷、接到假 Jev。key 檔放在測試暫存目錄，不碰真的 HOME；每小時上限拉高，
+    /// 免得超過預設的 60 次後查詢提早結束，就測不到「慢查詢」。
+    async fn gated_jev(app: &Arc<App>, project_id: &str) -> GatedJev {
+        let dir = tt::track(std::env::temp_dir().join(format!("am-hook-claim-gate-{}", db::ulid())));
+        std::fs::create_dir_all(&dir).unwrap();
+        let key_file = dir.join("key");
+        std::fs::write(&key_file, "test-key\n").unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&key_file, std::fs::Permissions::from_mode(0o600)).unwrap();
+        }
+        let requests = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let gate = Arc::new(tokio::sync::Semaphore::new(0));
+        let route = {
+            let requests = requests.clone();
+            let gate = gate.clone();
+            axum::routing::post(move |axum::Json(_body): axum::Json<serde_json::Value>| {
+                let requests = requests.clone();
+                let gate = gate.clone();
+                async move {
+                    requests.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                    gate.acquire().await.unwrap().forget();
+                    (
+                        axum::http::StatusCode::OK,
+                        axum::Json(json!({
+                            "model": "jev-test",
+                            "answers": {"same_work": {"type": "noul", "noul": 0.8}},
+                            "usage": {"input_tokens": 1}
+                        })),
+                    )
+                }
+            })
+        };
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let endpoint = format!("http://{}/v1/systemone", listener.local_addr().unwrap());
+        tokio::spawn(async move {
+            axum::serve(listener, axum::Router::new().route("/v1/systemone", route)).await.unwrap();
+        });
+        let project_id = project_id.to_string();
+        let key_path = key_file.to_string_lossy().into_owned();
+        app.cfg
+            .update(move |cfg| {
+                cfg.judge.enabled = true;
+                cfg.judge.projects = vec![project_id];
+                cfg.judge.key_file = key_path;
+                cfg.judge.endpoint = endpoint;
+                cfg.judge.timeout_ms = 60_000;
+                cfg.judge.max_per_hour = 1_000;
+                Ok(())
+            })
+            .await
+            .unwrap();
+        GatedJev { requests, gate }
+    }
+
+    /// 一顆正在跑的同專案 bot：撞題查詢的候選。
+    async fn running_peer(app: &Arc<App>, project_id: &str, name: &str, title: &str) {
+        let peer = tt::claude_bot(app, project_id, name).await;
+        let run_id = tt::fake_run(app, &peer.id).await;
+        sqlx::query("UPDATE runs SET agent_title=? WHERE id=?").bind(title).bind(&run_id).execute(&app.db).await.unwrap();
+    }
+
+    /// 遠端 spool 來的撞題檢查。`received_at` 每票不同，才不會被當成重播。
+    fn claim(bot_id: &str, child: &str, issue: u64) -> HookBody {
+        HookBody {
+            bot_id: bot_id.into(),
+            provider: "claude".into(),
+            payload: json!({
+                "hook_event_name": "AmClaimCollisionCheck",
+                "issue": issue,
+                "title": format!("修正遠端 claim 撞題提醒 {issue}"),
+                "child": child,
+                "branch": format!("fix/pm{issue}"),
+            }),
+            received_at: Some(format!("2026-10-13T00:00:00.000Z-{issue}")),
+            truncated: false,
+            run_id: None,
+        }
+    }
+
+    /// 同一顆 bot 的收件匣事件，照寫入順序（rowid）。
+    async fn event_ids(app: &Arc<App>, bot_id: &str) -> Vec<String> {
+        sqlx::query_scalar("SELECT id FROM hook_events WHERE bot_id=? ORDER BY rowid").bind(bot_id).fetch_all(&app.db).await.unwrap()
+    }
+
+    async fn processed_at(app: &Arc<App>, event_id: &str) -> Option<String> {
+        sqlx::query_scalar("SELECT processed_at FROM hook_events WHERE id=?").bind(event_id).fetch_one(&app.db).await.unwrap()
+    }
+
+    /// #1626：撞題查詢卡在 Jev 上（還沒回）時，不得占住 bot 鎖，也不得擋住同一顆 bot 之後到的 Stop；
+    /// 檢查沒完成前，撞題那一列仍不 ACK（#1500）。
+    #[tokio::test]
+    async fn a_slow_claim_check_does_not_hold_the_bot_lock_or_delay_its_stop() {
+        let env = tt::env().await;
+        let app = env.app.clone();
+        let caller = tt::claude_bot(&app, &env.project_id, "slow-claim-caller").await;
+        tt::fake_run(&app, &caller.id).await;
+        running_peer(&app, &env.project_id, "slow-claim-peer", "正在做別的事").await;
+        let jev = gated_jev(&app, &env.project_id).await;
+
+        assert!(crate::hook_inbox::accept(&app.db, &claim(&caller.id, &caller.name, 1626), crate::hook_inbox::Source::Remote).await.unwrap().is_new());
+        assert!(crate::hook_inbox::accept(&app.db, &stop(&caller.id, "pa"), crate::hook_inbox::Source::Http).await.unwrap().is_new());
+        let ids = event_ids(&app, &caller.id).await;
+        let (claim_id, stop_id) = (ids[0].clone(), ids[1].clone());
+
+        let drain_app = app.clone();
+        let drain = tokio::spawn(async move { drain_once(&drain_app).await });
+        assert!(tt::eventually!(jev.count() >= 1), "撞題查詢應該已經送到 Jev");
+        assert!(tt::eventually!(processed_at(&app, &stop_id).await.is_some()), "Jev 還沒回，同一顆 bot 的 Stop 仍要處理完");
+        let lock = app.bot_lock(&caller.id).await;
+        assert!(lock.try_lock().is_ok(), "撞題查詢不得占住 bot 鎖");
+        drop(lock);
+        assert!(processed_at(&app, &claim_id).await.is_none(), "檢查沒完成前不 ACK（#1500）");
+
+        jev.gate.add_permits(1);
+        assert!(tt::eventually!(processed_at(&app, &claim_id).await.is_some()), "放行後檢查完成才 ACK");
+        tokio::time::timeout(Duration::from_secs(30), drain).await.expect("放行後 drain 結束").unwrap().unwrap();
+    }
+
+    /// #1626：八顆 bot 的撞題查詢都卡在 Jev 上（以前會占住八個 bot task 名額），第九顆 bot 的 Stop 仍要處理完。
+    #[tokio::test]
+    async fn slow_claim_checks_do_not_take_the_hook_workers_from_other_bots() {
+        let env = tt::env().await;
+        let app = env.app.clone();
+        running_peer(&app, &env.project_id, "slow-claim-peer", "正在做別的事").await;
+        let jev = gated_jev(&app, &env.project_id).await;
+
+        let mut claim_ids = Vec::new();
+        for i in 0..8 {
+            let bot = tt::claude_bot(&app, &env.project_id, &format!("slow-claim-{i}")).await;
+            assert!(crate::hook_inbox::accept(&app.db, &claim(&bot.id, &bot.name, 1700 + i), crate::hook_inbox::Source::Remote).await.unwrap().is_new());
+            claim_ids.push(event_ids(&app, &bot.id).await.remove(0));
+        }
+        let quiet = tt::claude_bot(&app, &env.project_id, "slow-claim-quiet").await;
+        tt::fake_run(&app, &quiet.id).await;
+        assert!(crate::hook_inbox::accept(&app.db, &stop(&quiet.id, "pq"), crate::hook_inbox::Source::Http).await.unwrap().is_new());
+        let quiet_stop = event_ids(&app, &quiet.id).await.remove(0);
+
+        let drain_app = app.clone();
+        let drain = tokio::spawn(async move { drain_once(&drain_app).await });
+        assert!(tt::eventually!(jev.count() >= 1), "撞題查詢應該已經送到 Jev");
+        assert!(tt::eventually!(processed_at(&app, &quiet_stop).await.is_some()), "八顆 bot 卡在 Jev 時，第九顆 bot 的 hook 仍要處理完");
+
+        jev.gate.add_permits(1000);
+        tokio::time::timeout(Duration::from_secs(30), drain).await.expect("放行後 drain 結束").unwrap().unwrap();
+        for id in &claim_ids {
+            assert!(tt::eventually!(processed_at(&app, id).await.is_some()), "放行後每顆 bot 的撞題查詢都要 ACK");
+        }
+    }
+
+    /// #1626：撞題列一批就佔滿 [`BATCH`]（64 列，全是同一顆 bot 的慢查詢），排在後面的別顆 bot 的 Stop 不能被擠出這一批。
+    /// 已經交給撞題 lane 的列要從撈列的 SQL 排除。
+    #[tokio::test]
+    async fn slow_claim_checks_filling_the_batch_do_not_hide_other_bots_hooks() {
+        let env = tt::env().await;
+        let app = env.app.clone();
+        let caller = tt::claude_bot(&app, &env.project_id, "starve-claim-caller").await;
+        running_peer(&app, &env.project_id, "starve-claim-peer", "正在做別的事").await;
+        let jev = gated_jev(&app, &env.project_id).await;
+
+        for i in 0..BATCH {
+            assert!(crate::hook_inbox::accept(&app.db, &claim(&caller.id, &caller.name, 2000 + i as u64), crate::hook_inbox::Source::Remote).await.unwrap().is_new());
+        }
+        let quiet = tt::claude_bot(&app, &env.project_id, "starve-claim-quiet").await;
+        tt::fake_run(&app, &quiet.id).await;
+        assert!(crate::hook_inbox::accept(&app.db, &stop(&quiet.id, "pq"), crate::hook_inbox::Source::Http).await.unwrap().is_new());
+        let quiet_stop = event_ids(&app, &quiet.id).await.remove(0);
+
+        let drain_app = app.clone();
+        let drain = tokio::spawn(async move { drain_once(&drain_app).await });
+        assert!(tt::eventually!(jev.count() >= 1), "撞題查詢應該已經送到 Jev");
+        assert!(tt::eventually!(processed_at(&app, &quiet_stop).await.is_some()), "一整批撞題卡在 Jev 時，別顆 bot 的 Stop 仍要處理完");
+
+        jev.gate.add_permits(1000);
+        tokio::time::timeout(Duration::from_secs(30), drain).await.expect("放行後 drain 結束").unwrap().unwrap();
+    }
 }
