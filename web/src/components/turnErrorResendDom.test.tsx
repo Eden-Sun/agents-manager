@@ -61,3 +61,14 @@ test('只有附件的上一則仍可重送', async () => {
   const prompt = requests.find((request) => request.method === 'POST' && request.path.endsWith('/bots/b1/prompt'))
   assert.deepEqual((prompt?.body as { attachments?: string[] } | undefined)?.attachments, ['a1', 'a2'])
 })
+
+test('重送提示文字截 60 字：截點落在 emoji 代理對中間時不留落單的代理字元', async () => {
+  // 59 個 a 加一顆 😀：UTF-16 的第 60 個單位剛好是 😀 的高位代理，以 code point 計才會整顆留下或整顆拿掉。
+  setup(`${'a'.repeat(59)}😀bc`)
+  await mount(<TurnErrorBadge botId="b1" />)
+  await act(() => document.querySelector<HTMLButtonElement>('.turn-error-badge')!.click())
+  const button = [...document.querySelectorAll<HTMLButtonElement>('button')]
+    .find((candidate) => candidate.textContent?.trim() === '重送上一則')!
+  assert.equal(button.title, `重送：${'a'.repeat(59)}😀`)
+  assert.doesNotMatch(button.title, /[\uD800-\uDBFF](?![\uDC00-\uDFFF])|(?<![\uD800-\uDBFF])[\uDC00-\uDFFF]/, '不能留下落單的代理字元')
+})
