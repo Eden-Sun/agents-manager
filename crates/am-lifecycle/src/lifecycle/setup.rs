@@ -1240,6 +1240,10 @@ codex 的子代理、grok 的同類功能），也**禁止**在自己的 pane �
 PATH 上的 herdr 會幫你補，但你自己要寫對。\n\
 - **開 pane**：一律 `herdr pane split --pane \"$HERDR_PANE_ID\"`（或 `--current`）。\
 **禁止省略目標**——省略時 herdr 會去拆使用者正在看的那個 pane。\n\
+- **開 codex 子 agent 的完整寫法**（照抄、換掉 `<>`，**禁止**為此去讀 `herdr_shim.rs` 或 API 文件）：先 `herdr pane split --pane \"$HERDR_PANE_ID\"` 拿新 pane id，\
+全新題目 `herdr agent start <名稱> --kind codex --pane <新 pane> -- \"<派工 prompt>\"`；要接著你這段脈絡就 `herdr agent start <名稱> --kind codex --pane <新 pane> -- fork --last \"<派工 prompt>\"`。\
+要指定模型才加 `--model <模型>`，codex 的旗標一律放在 `--` 之後、子命令（`fork`／`resume`）之前，例：`-- --model <模型> fork --last \"…\"`。\
+PATH 上的 herdr 會補 `-p`、`--no-daemon`、`-c project_doc_max_bytes=0`：**禁止**自己補，也**禁止**用真 herdr 的絕對路徑繞過它。\n\
 - **環境變數**：帳號與 hook 會自動帶進子 pane（`CLAUDE_CONFIG_DIR`、`AM_*`）。**禁止覆蓋**這些變數。\n\
 - **禁止 `git stash`、禁止 `--autostash`**：同一個工作樹上有別的 agent 還沒提交的改動，弄丟了算你的。\n\
 - 你開的子 agent 會被 AG Man 掛在**你底下**追蹤（側欄縮排顯示）。做完**必須**自己把它的 pane 收掉，不准留著。\n\
@@ -2041,6 +2045,23 @@ mod model_args_tests {
         assert!(rule.contains("禁止再開子 agent"));
         assert!(rule.contains("由 parent 決定"));
         assert!(rule.contains("你是 `proj-abc123` 的子 agent"), "派工 prompt 要帶上的那句話用自己的名字");
+    }
+
+    /// issue #1675：codex bot 花了一整個回合讀 `herdr_shim.rs` 與 API 文件才弄懂怎麼開 codex 子 agent。
+    /// 規則要直接給可照抄的指令：全新題目、`fork --last`、旗標位置，以及不准自己補 shim 會補的參數。
+    #[test]
+    fn the_rules_give_a_copy_paste_way_to_start_a_codex_child() {
+        let rule = super::child_agent_rules("proj-abc123");
+        for want in [
+            "herdr agent start <名稱> --kind codex --pane <新 pane> -- \"<派工 prompt>\"",
+            "herdr agent start <名稱> --kind codex --pane <新 pane> -- fork --last \"<派工 prompt>\"",
+            "-- --model <模型> fork --last",
+            "`--` 之後、子命令",
+            "`--no-daemon`",
+            "**禁止**自己補，也**禁止**用真 herdr 的絕對路徑繞過它",
+        ] {
+            assert!(rule.contains(want), "要給 codex 子 agent 的照抄寫法：{want}\n{rule}");
+        }
     }
 
     /// 使用者 2026-10-03：CLI 要 OAuth 時一律走不開瀏覽器的模式，互動式指令放進 shell pane，網址／碼交給使用者後結束回合。

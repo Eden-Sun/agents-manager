@@ -1933,6 +1933,7 @@ pane 打 `cargo` 就 permission denied）時，只 chmod 回 0755，不重寫內
    派工只准走 herdr pane（禁止 CLI 內建子代理：Claude 的 `Agent`／`Task`／`Workflow`、codex／grok 的同類功能，也禁止在自己 pane 另起 agent CLI——AG Man 追不到；開子 agent 一律 `herdr agent start <名稱> --kind … --pane <新 pane>`，禁止 `herdr pane run <pane> "claude …"`／`"codex …"` 直接起 CLI，那樣 agent 在 herdr 沒有名稱、認領不到，#1472）；
    派工 prompt 必須寫明「你是 `<parent>` 的子 agent、禁止再開子 agent、要人手由 parent 決定」；有 `$AM_CHILD_OF` 的子 agent 不開子 agent，要人手在回報裡講、由 parent 決定是否另派兄弟（§6.5b）。
 
+`child_agent_rules` 附一段 codex 子 agent 的照抄寫法（#1675，`the_rules_give_a_copy_paste_way_to_start_a_codex_child` 守）：全新題目與 `fork --last` 兩種完整指令、旗標放 `--` 之後且在子命令前、shim 會補的參數禁止自己補、禁止用真 herdr 絕對路徑繞過——codex bot 不必再為了開 child 去讀 `herdr_shim.rs` 與 API 文件。
 herdr 的 CLI 說明原樣保留（升級會帶進新文字）。裝不起來只 warning。`child_agent_rules` 是同一份文字來源：claude skill 與三種 kind 的 persona
 （`--append-system-prompt` / `--rules` / `developer_instructions`）都用它；後面接 `[agents]` 的 agent md（§6.5i）。
 
