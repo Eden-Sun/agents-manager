@@ -144,17 +144,16 @@ async fn fail_attempt(app: &Arc<App>, id: &str, why: String) -> Outcome {
     }
 }
 
-fn snapshot(intent: &Intent) -> Vec<(String, String)> {
-    intent
-        .payload()
-        .get("bots")
-        .and_then(|v| v.as_array())
-        .map(|a| {
-            a.iter()
-                .filter_map(|b| Some((b.get("id")?.as_str()?.to_string(), b.get("managed_by").and_then(|m| m.as_str()).unwrap_or("child").to_string())))
-                .collect()
+fn snapshot(intent: &Intent) -> Result<Vec<(String, String)>, String> {
+    let payload: Value = serde_json::from_str(&intent.payload_json).map_err(|e| format!("invalid delete intent payload: {e}"))?;
+    let bots = payload.get("bots").and_then(Value::as_array).ok_or_else(|| "delete intent has no bot snapshot array".to_string())?;
+    bots.iter()
+        .map(|b| {
+            let id = b.get("id").and_then(Value::as_str).ok_or_else(|| "delete intent bot snapshot has no string id".to_string())?;
+            let managed_by = b.get("managed_by").and_then(Value::as_str).ok_or_else(|| "delete intent bot snapshot has no string managed_by".to_string())?;
+            Ok((id.to_string(), managed_by.to_string()))
         })
-        .unwrap_or_default()
+        .collect()
 }
 
 /// 鎖住整批之後再確認這件還是我們認領的（等鎖的時間裡活著的 handler 可能已經收尾）。
@@ -168,7 +167,7 @@ async fn in_config_bot(app: &impl crate::capabilities::Cfg, id: &str) -> bool {
 
 async fn resume_bot(app: &Arc<App>, intent: &Intent) -> Result<(), String> {
     let parent = intent.subject_id.clone();
-    let children = snapshot(intent);
+    let children = snapshot(intent)?;
     let mut ids: Vec<String> = children.iter().map(|(id, _)| id.clone()).collect();
     ids.push(parent.clone());
     let (_ids, _guards) = lock_bots_in_order(app, ids).await;
@@ -216,7 +215,7 @@ async fn resume_bot(app: &Arc<App>, intent: &Intent) -> Result<(), String> {
 
 async fn resume_project(app: &Arc<App>, intent: &Intent) -> Result<(), String> {
     let project_id = intent.subject_id.clone();
-    let bots = snapshot(intent);
+    let bots = snapshot(intent)?;
     let (_ids, _guards) = lock_bots_in_order(app, bots.iter().map(|(id, _)| id.clone()).collect()).await;
     if !still_ours(app, intent).await? {
         return Ok(());
@@ -251,4 +250,59 @@ async fn resume_project(app: &Arc<App>, intent: &Intent) -> Result<(), String> {
     app.emit("project_changed", json!({"project_id": project_id})).await;
     intents::complete(&app.db, &intent.id).await.map_err(|e| format!("{e:#}"))?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    async fn child_bot(env: &crate::testing::Env, parent: &str) -> String {
+        let id = db::ulid();
+        sqlx::query(
+            "INSERT INTO bots (id, project_id, name, kind, args_json, autostart, inject_hooks, hook_token, managed_by, parent_bot_id, created_at)
+             VALUES (?,?,?,'claude','[]',0,1,'tok','child',?,?)",
+        )
+        .bind(&id)
+        .bind(&env.project_id)
+        .bind(format!("kid-{id}"))
+        .bind(parent)
+        .bind(db::now())
+        .execute(&env.app.db)
+        .await
+        .unwrap();
+        id
+    }
+
+    /// A damaged snapshot must not let recovery report success while the child it should delete is still live.
+    #[tokio::test]
+    async fn a_missing_bot_snapshot_does_not_complete_while_a_child_is_live() {
+        let env = crate::testing::env().await;
+        let parent = crate::testing::claude_bot(&env.app, &env.project_id, "parent").await;
+        let child = child_bot(&env, &parent.id).await;
+        sqlx::query("UPDATE bots SET deleted_at = ? WHERE id = ?")
+            .bind(db::now())
+            .bind(&parent.id)
+            .execute(&env.app.db)
+            .await
+            .unwrap();
+        let Inserted::New(intent) = intents::insert(
+            &env.app.db,
+            "delete_bot",
+            &parent.id,
+            crate::config::LOCAL_HOST,
+            &json!({"requested_by": "test"}),
+            3600,
+        )
+        .await
+        .unwrap()
+        else {
+            panic!("test intent is new")
+        };
+
+        let outcome = drive_once(&env.app, &intent.id).await;
+
+        assert!(matches!(outcome, Outcome::Retry(_)), "missing `bots` snapshot must remain retryable: {outcome:?}");
+        assert_eq!(intents::get(&env.app.db, &intent.id).await.unwrap().unwrap().status, "pending");
+        assert!(db::bot(&env.app.db, &child).await.unwrap().unwrap().deleted_at.is_none(), "the child remains live until its snapshot can be read");
+    }
 }
