@@ -47,11 +47,35 @@ export function parseUpstreamItem(raw: unknown): UpstreamItem | null {
   }
 }
 
+/** 版本號逐段拆開（同 daemon `parse_version`）；拆不出來回 `null`。 */
+function versionParts(v: string): number[] | null {
+  const tok = (v.trim().split(/\s+/)[0] ?? '').replace(/^\[|\]$/g, '').replace(/^v/, '')
+  const parts = tok.split('.').map((p) => (/^\d+$/.test(p) ? Number(p) : NaN))
+  return parts.every(Number.isFinite) ? parts : null
+}
+
+/**
+ * `latest` 比 `seen` 新（或還沒看過）才算。daemon 只在比上次通知更新時推（`should_notify`）：npm `latest` 被退回舊版
+ * 再推回來，不能重報；所以比版本號，不比字串（`"2.1.9" > "2.1.10"` 在字串比較下是反的）。拆不出來才退回「不一樣就算」。
+ */
+export function isNewerVersion(latest: string, seen: string | undefined): boolean {
+  if (seen === undefined) return true
+  const a = versionParts(latest)
+  const b = versionParts(seen)
+  if (!a || !b) return latest !== seen
+  for (let i = 0; i < Math.max(a.length, b.length); i++) {
+    const x = a[i] ?? 0
+    const y = b[i] ?? 0
+    if (x !== y) return x > y
+  }
+  return false
+}
+
 /** 要跳哪一則；`seen` 是這個瀏覽器看過的版本（kind → 版本）。 */
 export function upstreamNotice(item: UpstreamItem, seen: Record<string, string>): { kind: 'info' | 'error'; text: string } | null {
   if (!item.text) return null
   if (item.notify === 'error') return { kind: 'error', text: item.text }
-  if (item.hasUpdate && item.latest && seen[item.kind] !== item.latest) return { kind: 'info', text: item.text }
+  if (item.hasUpdate && item.latest && isNewerVersion(item.latest, seen[item.kind])) return { kind: 'info', text: item.text }
   return null
 }
 
