@@ -14,7 +14,9 @@ import './dirPicker.css'
  */
 /** Long folder names would otherwise stretch the primary button past the sidebar. */
 function short(name: string) {
-  return name.length > 14 ? `${name.slice(0, 13)}…` : name
+  // 以 code point 計：`slice` 會把 emoji 的代理對切成兩半（#1692）。
+  const chars = Array.from(name)
+  return chars.length > 14 ? `${chars.slice(0, 13).join('')}…` : name
 }
 
 export function DirPicker({
