@@ -230,7 +230,10 @@ fn fresh_enough(created_at: &str) -> bool {
 fn fresh_enough_at(created_at: &str, now: chrono::DateTime<chrono::Utc>) -> bool {
     const MAX_AGE_SECS: i64 = 120;
     chrono::DateTime::parse_from_rfc3339(created_at)
-        .map(|t| (now - t.with_timezone(&chrono::Utc)).num_seconds() <= MAX_AGE_SECS)
+        .map(|t| {
+            let age = now - t.with_timezone(&chrono::Utc);
+            age >= chrono::Duration::zero() && age.num_seconds() <= MAX_AGE_SECS
+        })
         .unwrap_or(false)
 }
 
@@ -1813,6 +1816,7 @@ mod compat_tests {
         assert!(fresh(chrono::Duration::seconds(119)));
         assert!(fresh(chrono::Duration::seconds(120)), "剛好 120 秒還算新");
         assert!(!fresh(chrono::Duration::seconds(121)));
+        assert!(!fresh(chrono::Duration::seconds(-1)), "未來的送出時間不該當成剛送出");
         assert!(!fresh(chrono::Duration::hours(3)));
         assert!(!super::fresh_enough_at("not-a-time", now), "讀不懂時間就不要補");
         assert!(super::fresh_enough(&iso(chrono::Duration::seconds(5))), "帶牆鐘的版本只驗大方向");
