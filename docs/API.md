@@ -1783,7 +1783,7 @@ env 前綴跟登入是同一段程式算出來的——少帶 `CLAUDE_CONFIG_DIR
 | `fast` | bool | §12.2 |
 | `auto_approve` | bool，預設 `true` | 注入略過權限確認的旗標：claude `--dangerously-skip-permissions`、codex `--yolo`、grok `--always-approve`、agy `--dangerously-skip-permissions` |
 | `inject_hooks` | bool，預設 `true` | `false` 時回覆走終端備援 |
-| `primary` | bool，預設 `false` | 純顯示用釘選（標題列下面那一列排最前）。不影響 argv/env，永遠 `needs_restart:false`；不進 config.toml（`bots.is_primary`），child bot 也能釘，手機與電腦同步；新釘的排到主力那列最後（`primary_position`，見 `POST /api/order`）。**不能跟會寫 config.toml 的欄位（name／autostart／model／effort／args／identity／env…）同一個 PATCH 送**（config 內的 bot）：混送 400、什麼都不寫，分兩次（#350，兩個 store 不可能同一個交易）；child bot 全在 DB，不受此限 |
+| `primary` | bool，預設 `false` | 純顯示用釘選（標題列下面那一列排最前）。不影響 argv/env，永遠 `needs_restart:false`；不進 config.toml（`bots.is_primary`），child bot 也能釘，手機與電腦同步；新釘的排到主力那列最後（`primary_position`，見 `POST /api/order`）。**不能跟會寫 config.toml 的欄位（name／autostart／model／effort／args／identity／env…）同一個 PATCH 送**（config 內的 bot）：混送 400、什麼都不寫，分兩次（#350，兩個 store 不可能同一個交易）；child bot 全在 DB，不受此限，混送時同一條 `bots` UPDATE 寫入，失敗不會部分生效 |
 | `identity` / `env` | 見身份一節 | |
 | `persona` | §12.8 | |
 | `managed_by` / `parent_bot_id` | 唯讀 | `user` = config.toml 的 bot；`child` = bot 自己開的子 agent（§子 agent） |

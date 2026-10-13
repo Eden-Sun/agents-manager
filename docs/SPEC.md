@@ -851,6 +851,8 @@ StatusLine 分支（過世代圍籬之後，舊 run／舊 hook 進不來）發�
 
 `PATCH /api/bots/{id}` 只在**真的送不進去**（沒 pane、選單不對、回讀對不上，或 agent 忙但這次改的欄位排不進回合結束的待套用）才回 `needs_restart: true`；此時 UI 不可顯示新設定。agent 忙／回合在飛本身不算：見下面「忙的時候不重啟」。
 
+`managed_by = child` 的 bot 不進 config.toml，`primary` 與 model 等欄位同在 `bots` 表；混送 PATCH 由同一條 SQLite `UPDATE` 寫入。UPDATE 失敗時欄位都維持原值，也不推 `bot_changed`。config bot 仍依 #350 拒絕 `primary` 與會寫 config 的欄位混送。
+
 - **daemon 記 runtime**：`start_inner` 在 `agent.start` 前用 `models::model_effort_from_argv` 從最終 argv 讀回，存 `runs.runtime_model/effort/fast`
   （讀 argv 而非抄 bots：`effort_checked` 會丟掉模型不收的等級，`bot.args` 也可能自帶 `-m`）。slash 指令套用成功就同步改。
   grok 1.0.46（拋棄式 `GROK_HOME`）：`--reasoning-effort`／`--effort` 改這一輪框底、不寫 `config.toml`；`--always-approve` 同樣只作用這一輪。`/effort <level>` 會立刻寫入 `[models] default_reasoning_effort`，`/always-approve` 會寫入 `[ui] permission_mode = "always-approve"`。daemon 不送這兩個 slash。啟動不讀框底補等級。
