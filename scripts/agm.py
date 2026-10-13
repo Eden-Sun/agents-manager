@@ -1480,6 +1480,9 @@ def _plist_semantics(raw: bytes) -> dict:
         d = plistlib.loads(raw)
     except Exception as e:  # noqa: BLE001 - 壞掉的 plist 要報成落差，不是炸掉整份報告
         return {"_error": f"{type(e).__name__}: {e}"}
+    # 合法的 plist 根也可以是 array／string 等；沒有鍵值表就沒有語意可比，當成讀不懂（#1717）。
+    if not isinstance(d, dict):
+        return {"_error": f"plist 根節點不是 dict（是 {type(d).__name__}）"}
     return {k: ("<ignored>" if k in PLIST_IGNORED_KEYS else v) for k, v in d.items()}
 
 

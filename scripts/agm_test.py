@@ -2214,6 +2214,20 @@ class OpsSyncTest(CliCase):
             self.plist("com.agm.x", 1800, extra="<key>StandardOutPath</key><string>/tmp/x.log</string>"),
             encoding="utf-8")
 
+    def test_a_plist_whose_root_is_not_a_dict_is_drift_not_a_crash(self):
+        """根不是 dict 的 plist（合法的 `<array>`）：`plistlib` 解得出來，但沒有 `.items()`。以前這裡直接丟
+        AttributeError，整份報告變成 internal 錯誤、其他列也一起不見；應該像壞檔一樣報成這一列的落差。"""
+        self.with_plists()
+        (self.agents / "com.agm.x.plist").write_text(
+            '<?xml version="1.0" encoding="UTF-8"?>\n<plist version="1.0"><array><string>x</string></array></plist>\n',
+            encoding="utf-8")
+        code, out, err = self.run_cli("ops-sync", "--check", "--repo", str(self.repo))
+        self.assertNotIn("internal", err)
+        self.assertEqual(code, 1, err)
+        r = json.loads(out)
+        [row] = [x for x in r["drift"] if x["target"] == "LaunchAgents/com.agm.x.plist"]
+        self.assertIn("_error", row["diff"])
+
     def test_log_path_drift_is_reported(self):
         """issue #499：`StandardOutPath`／`StandardErrorPath` 是 log 的落點。browser-gc 這種沒有
         ops-alert 管道的，失敗只留 log——路徑漂掉卻報同步，等於證據來源斷了還顯示綠燈。
