@@ -481,6 +481,18 @@ exit 1
         base
     }
 
+    /// The listing loop runs in a pipeline subshell; BSD lsof must inspect that shell's fds.
+    #[test]
+    fn macos_local_remote_listing_includes_regular_nested_files() {
+        let base = sandbox("listing-pipeline");
+        let d = base.join("outbox");
+        std::fs::create_dir(d.join("DM_Console")).unwrap();
+        std::fs::write(d.join("DM_Console/report.txt"), b"hello").unwrap();
+        let listed = parse_list(&run_list(&d), 1_000).unwrap();
+        assert!(listed.iter().any(|f| f["name"] == "DM_Console/report.txt" && f["size"] == 5), "regular nested file missing: {listed:?}");
+        std::fs::remove_dir_all(&base).unwrap();
+    }
+
     /// 正常下載：一般檔案原樣回來；符號連結、目錄、不存在都是 MISSING。
     #[test]
     fn macos_local_remote_download_serves_a_regular_file_only() {

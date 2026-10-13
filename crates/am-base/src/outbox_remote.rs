@@ -129,7 +129,10 @@ pub fn file_identity_helpers_with_paths(lsof_path: &str, fallback_lsof_path: &st
   lsof_bin=__AM_LSOF_PATH__
   [ -x "$lsof_bin" ] || lsof_bin=__AM_LSOF_FALLBACK__
   [ -x "$lsof_bin" ] || { exec 4<&-; return 1; }
-  lsof_out=$("$lsof_bin" -a -p "$$" -d 3,4 -FfDin 2>/dev/null) || { exec 4<&-; return 1; }
+  # $$ stays the parent shell PID in a pipeline subshell; ask a child for its parent.
+  fd_pid=$(/bin/sh -c 'printf "%s\n" "$PPID"') || { exec 4<&-; return 1; }
+  case "$fd_pid" in ''|*[!0-9]*) exec 4<&-; return 1 ;; esac
+  lsof_out=$("$lsof_bin" -a -p "$fd_pid" -d 3,4 -FfDin 2>/dev/null) || { exec 4<&-; return 1; }
   ids=$(printf '%s\n' "$lsof_out" | /usr/bin/awk -v expected="$expected" '
     /^f3$/ || /^f3[^0-9]/ { if (seen3++) bad=1; fd=3; next }
     /^f4$/ || /^f4[^0-9]/ { if (seen4++) bad=1; fd=4; next }
