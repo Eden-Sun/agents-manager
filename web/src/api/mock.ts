@@ -87,6 +87,7 @@ const MOCK_LOGIN_URL =
   'https://claude.com/cai/oauth/authorize?code=true&client_id=00000000-0000-0000-0000-000000000000&response_type=code&redirect_uri=https%3A%2F%2Fplatform.claude.com%2Foauth%2Fcode%2Fcallback&scope=user%3Ainference&code_challenge=FAKEchallengeFAKEchallengeFAKEchallenge00&code_challenge_method=S256&state=FAKEstateFAKEstateFAKEstateFAKEstate000'
 
 interface MockRun {
+  send_now_supported: boolean
   id: string
   bot_id: string
   state: 'starting' | 'running' | 'stopping' | 'stopped' | 'exited'
@@ -3025,6 +3026,7 @@ export class MockTransport implements Transport {
     const existing = this.activeRun(botId)
     if (existing) throw new ApiError(409, { error: 'conflict', reason: 'active run already exists', run_id: existing.id }, 'conflict')
     const run: MockRun = {
+      send_now_supported: this.bot(botId).kind === 'claude',
       id: ulid('run'),
       bot_id: botId,
       state: 'starting',

@@ -1486,6 +1486,7 @@ pub async fn state_json(app: &Arc<App>) -> Result<Value, LcError> {
             let bot_connected = app.bot_connected_on(b, &p.host).await;
             let mut run_v = crate::background_jobs::run_json(app, &run, run.as_ref().map(|r| r.id.as_str()));
             crate::cache_clock::annotate(&mut run_v, &b.kind, last_turns.get(&b.id));
+            crate::send_now_capability::annotate(&mut run_v, &b.kind, run.as_ref(), cfg.codex.instant_interrupt);
             bl.push(json!({
                 "id": b.id,
                 "project_id": b.project_id,

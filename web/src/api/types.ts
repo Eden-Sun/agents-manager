@@ -322,6 +322,8 @@ export interface BlockedReason {
 }
 
 export interface Run {
+  /** daemon 的 send-now 閘門確認支援；舊 daemon 沒帶時隱藏按鈕。 */
+  send_now_supported?: boolean
   id: string
   bot_id: string
   state: RunState
