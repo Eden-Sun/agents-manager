@@ -128,19 +128,22 @@ pub async fn drain_once(app: &Arc<App>) -> Result<usize> {
     let mut done = 0usize;
     let mut first_err: Option<anyhow::Error> = None;
     let mut tasks: JoinSet<Result<usize>> = JoinSet::new();
+    let mut claims: JoinSet<Result<usize>> = JoinSet::new();
     loop {
         // 出錯之後不再起新的 task：手上的收完就回傳第一個錯誤（同舊行為）。
-        if first_err.is_none() && tasks.len() < MAX_BOT_TASKS {
-            match pending_excluding(&app.db, &db::now(), BATCH, &busy_bot_ids()).await {
-                Ok(rows) => start_tasks(app, rows, &mut tasks),
+        // 撈列每輪都做：撞題 lane 的列不占 bot task 名額，bot 名額滿了也要看得到撞題列以外的列。
+        if first_err.is_none() {
+            match pending_excluding(&app.db, &db::now(), BATCH, &busy_bot_ids(), &claims_in_flight_ids()).await {
+                Ok(rows) => start_tasks(app, rows, &mut tasks, &mut claims),
                 Err(e) => first_err = Some(e),
             }
         }
-        if tasks.is_empty() {
+        if tasks.is_empty() && claims.is_empty() {
             break;
         }
         tokio::select! {
             Some(res) = tasks.join_next() => settle(res, &mut done, &mut first_err),
+            Some(res) = claims.join_next() => settle(res, &mut done, &mut first_err),
             _ = app.hook_inbox_wake.notified() => {}
             _ = tokio::time::sleep(RESCAN_EVERY) => {}
         }
@@ -149,9 +152,14 @@ pub async fn drain_once(app: &Arc<App>) -> Result<usize> {
 }
 
 /// 替這一批裡沒人在處理的 bot 起 task（最多到 [`MAX_BOT_TASKS`] 顆）。被別人佔著的 bot 跳過，下一輪再看。
-fn start_tasks(app: &Arc<App>, rows: Vec<Pending>, tasks: &mut JoinSet<Result<usize>>) {
+/// 撞題檢查不進 bot 的組，交給撞題 lane（#1626）。
+fn start_tasks(app: &Arc<App>, rows: Vec<Pending>, tasks: &mut JoinSet<Result<usize>>, claims: &mut JoinSet<Result<usize>>) {
     let mut groups: Vec<(String, Vec<Pending>)> = Vec::new();
     for row in rows {
+        if let Some(body) = claim_check_body(&row) {
+            spawn_claim_check(app, claims, row, body);
+            continue;
+        }
         match groups.iter_mut().find(|(bot, _)| *bot == row.bot_id) {
             Some((_, g)) => g.push(row),
             None => groups.push((row.bot_id.clone(), vec![row])),
@@ -177,6 +185,67 @@ fn settle(res: Result<Result<usize>, tokio::task::JoinError>, done: &mut usize, 
             first_err.get_or_insert(anyhow::anyhow!("hook inbox task failed: {e}"));
         }
     }
+}
+
+/// 撞題檢查（#1626）：獨立 lane，同時最多 [`MAX_CLAIM_CHECKS`] 個在問 Jev。不占 bot 的組，也不占 [`MAX_BOT_TASKS`] 名額。
+/// 列在收件匣裡維持未 processed，檢查結束才 `mark_done`（#1500）；換版中斷留給重播。
+const MAX_CLAIM_CHECKS: usize = 4;
+
+fn claim_checks() -> &'static tokio::sync::Semaphore {
+    static SLOTS: OnceLock<tokio::sync::Semaphore> = OnceLock::new();
+    SLOTS.get_or_init(|| tokio::sync::Semaphore::new(MAX_CLAIM_CHECKS))
+}
+
+/// 已經交給 lane、還沒 ACK 的撞題列。撈列時排除它們（否則它們會佔滿整批 [`BATCH`]，後面的列撈不到），也不重派。
+fn claims_in_flight() -> &'static std::sync::Mutex<HashSet<String>> {
+    static IN_FLIGHT: OnceLock<std::sync::Mutex<HashSet<String>>> = OnceLock::new();
+    IN_FLIGHT.get_or_init(Default::default)
+}
+
+fn claims_in_flight_ids() -> Vec<String> {
+    claims_in_flight().lock().unwrap_or_else(|e| e.into_inner()).iter().cloned().collect()
+}
+
+/// task 結束（成功、失敗或被取消）就放掉 in-flight 標記。
+struct InFlight(String);
+
+impl Drop for InFlight {
+    fn drop(&mut self) {
+        claims_in_flight().lock().unwrap_or_else(|e| e.into_inner()).remove(&self.0);
+    }
+}
+
+/// 撞題列才解：先用子字串預篩，免得每列都 parse。解不開或不是撞題的照常走 bot 的組。
+fn claim_check_body(row: &Pending) -> Option<HookBody> {
+    if !row.body_json.contains(crate::hookrecv::CLAIM_COLLISION_EVENT) {
+        return None;
+    }
+    serde_json::from_str::<HookBody>(&row.body_json).ok().filter(crate::hookrecv::is_claim_collision)
+}
+
+/// 把一列撞題檢查交給撞題 lane；已經在跑的不重派。
+/// 成功才 `mark_done`，失敗記退避（同 bot 的組規則）；DB 寫不進去就回錯，跟 bot 的列一樣由 drain 回報。
+fn spawn_claim_check(app: &Arc<App>, claims: &mut JoinSet<Result<usize>>, row: Pending, body: HookBody) {
+    if !claims_in_flight().lock().unwrap_or_else(|e| e.into_inner()).insert(row.id.clone()) {
+        return;
+    }
+    let app = app.clone();
+    claims.spawn(async move {
+        let _in_flight = InFlight(row.id.clone());
+        let _permit = claim_checks().acquire().await?;
+        match app.process_hook(&body, Some(&row.id)).await {
+            Ok(()) => {
+                mark_done(&app.db, &row.id).await?;
+                Ok(1)
+            }
+            Err(e) => {
+                let attempts = row.attempts + 1;
+                tracing::warn!(id = %row.id, attempts, error = ?e, "claim check failed; will retry");
+                mark_failed(&app.db, &row.id, attempts, &format!("{e:#}")).await?;
+                Ok(0)
+            }
+        }
+    });
 }
 
 #[cfg(test)]
