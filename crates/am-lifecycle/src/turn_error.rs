@@ -230,6 +230,15 @@ fn body_of(s: &str) -> &str {
     }
 }
 
+/// codex 模型滿載的橫幅（#1673）：原文是 `■ Selected model is at capacity. Please try a different model.`，
+/// 釘上的是人話，原文附在後面。不是額度撞限，所以不走 `limit_hit` 那套。
+const MODEL_AT_CAPACITY: &str = "模型目前滿載，請換模型或稍後再試（Selected model is at capacity. Please try a different model.）";
+
+/// 只認**行首**的 `■`：codex 的回覆行是 `•`，縮排的續行是引文，談到這句話的回覆不是橫幅。
+fn is_model_at_capacity(line: &str) -> bool {
+    line.starts_with('■') && body_of(undecorated(line)).to_ascii_lowercase().starts_with("selected model is at capacity")
+}
+
 /// 必須是「最後一件事」：重試成功後橫幅仍留在畫面上，但下面還有回覆，不算斷線。
 pub fn api_error_line(screen: &str) -> Option<String> {
     let lines: Vec<&str> = screen.lines().collect();
@@ -239,6 +248,9 @@ pub fn api_error_line(screen: &str) -> Option<String> {
         let body = body_of(raw);
         if is_api_error(body) {
             return Some(body.to_string());
+        }
+        if is_model_at_capacity(line) {
+            return Some(MODEL_AT_CAPACITY.to_string());
         }
         // 用帶記號的那串：`is_noise` 靠 `✻` 認出 spinner 收尾行。
         if !is_chrome(raw) {
@@ -490,6 +502,33 @@ mod tests {
         assert!(!is_quota_exhaustion(screen));
         // A real exhausted-bucket banner remains classifiable despite the new recommendation.
         assert!(is_quota_limit("You've hit your weekly limit. Switch to gpt-6-luna for lower credit usage."));
+    }
+
+    /// #1673：codex 模型滿載（`■ Selected model is at capacity…`，2026-10-13 截圖）是回合錯誤，原因寫人話；不是額度撞限。
+    #[test]
+    fn codex_model_at_capacity_is_a_turn_error_not_a_quota_limit() {
+        let screen = "\
+› 幫我看一下 repo 狀態
+■ Selected model is at capacity. Please try a different model.
+
+›
+  gpt-6.1-sol medium · ~/project/agents-manager · 5h 82% left · weekly 97% left
+";
+        let line = api_error_line(screen).expect("滿載要命中");
+        assert_eq!(line, "模型目前滿載，請換模型或稍後再試（Selected model is at capacity. Please try a different model.）");
+        assert!(!is_quota_limit(&line));
+        assert!(!is_quota_exhaustion(&line));
+    }
+
+    /// #1673：回覆談到這句話不算。codex 的回覆行是 `•`，縮排的續行也不是行首的 `■`。
+    #[test]
+    fn a_reply_that_quotes_the_capacity_message_is_not_an_error() {
+        let quoted = "› 這是什麼意思\n• 畫面上的 ■ Selected model is at capacity 表示模型滿載，請換模型。\n\n›\n";
+        assert_eq!(api_error_line(quoted), None);
+        let bullet = "› 解釋一下\n• Selected model is at capacity. Please try a different model.\n\n›\n";
+        assert_eq!(api_error_line(bullet), None);
+        let indented = "› 解釋一下\n• 這個錯誤長這樣：\n  ■ Selected model is at capacity. Please try a different model.\n\n›\n";
+        assert_eq!(api_error_line(indented), None);
     }
 
     #[test]
@@ -1333,6 +1372,41 @@ mod quota_limit_tests {
         assert_eq!(notes, 1);
         let marked: Option<String> = sqlx::query_scalar("SELECT turn_error FROM runs WHERE id=?").bind(&run).fetch_one(app.db()).await.unwrap();
         assert_eq!(marked.as_deref(), Some("API Error: Connection lost mid-response."));
+    }
+
+    /// #1673：codex 滿載收掉的回合要收成失敗、釘上人話原因；不記撞限（那會把排著的派工壓住）。
+    #[tokio::test]
+    async fn codex_model_at_capacity_fails_the_turn_with_a_plain_reason() {
+        let env = crate::testing::env().await;
+        let app = env.app.clone();
+        let bot = crate::testing::claude_bot(&app, &env.project_id, "codex-capacity").await;
+        sqlx::query("UPDATE bots SET kind='codex' WHERE id=?").bind(&bot.id).execute(app.db()).await.unwrap();
+        let run = crate::testing::fake_run(&app, &bot.id).await;
+        let conv = db::conversation_id(app.db(), &bot.id).await.unwrap();
+        let turn = db::ulid();
+        sqlx::query("INSERT INTO turns (id, conversation_id, run_id, origin, status, delivery, created_at) VALUES (?,?,?,'web','in_flight','ok',?)")
+            .bind(&turn)
+            .bind(&conv)
+            .bind(&run)
+            .bind(db::now())
+            .execute(app.db())
+            .await
+            .unwrap();
+        env.herdr.set_screen(
+            &format!("pane-{}", bot.id),
+            "› skill repo 先pull\n■ Selected model is at capacity. Please try a different model.\n\n›\n  gpt-6.1-sol medium · ~/project/agents-manager · 5h 82% left\n",
+        );
+
+        capture(&app, &bot.id, &run).await.unwrap();
+
+        let status: String = sqlx::query_scalar("SELECT status FROM turns WHERE id=?").bind(&turn).fetch_one(app.db()).await.unwrap();
+        assert_eq!(status, "failed");
+        let reason = "模型目前滿載，請換模型或稍後再試（Selected model is at capacity. Please try a different model.）";
+        let notes: Vec<String> = sqlx::query_scalar("SELECT content FROM messages WHERE turn_id=? AND role='system'").bind(&turn).fetch_all(app.db()).await.unwrap();
+        assert_eq!(notes, vec![reason.to_string()]);
+        let marked: Option<String> = sqlx::query_scalar("SELECT turn_error FROM runs WHERE id=?").bind(&run).fetch_one(app.db()).await.unwrap();
+        assert_eq!(marked.as_deref(), Some(reason));
+        assert!(crate::runners::quota::limit_hit_for_bot(&app, &bot).await.is_none(), "滿載不是額度撞限");
     }
 
     #[tokio::test]
