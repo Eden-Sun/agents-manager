@@ -1166,6 +1166,7 @@ codex 0.159.3 的帳號安全提醒 inline banner（`› 1. Set up security`／`
   ② `update_watch` 的 30 秒巡邏本來就讀一份純文字畫面——輸入列是空的就不再讀，輸入列有字才多讀一次樣式畫面分辨「灰字」與「草稿」（順便抓到使用者在終端打字、建議消失）；③ 離開 idle（回合開始）就忘掉。讀不到畫面什麼都不動。
 - **送**（`POST /bots/{id}/suggestion/accept`，只有使用者本人；集中路由政策與 handler 都拒絕 Bot／Service）：**對 pane 送 Tab 再送 Enter**，全程在 bot 鎖內：先過一般送出的閘門（維護窗口、回合在飛、對話框、接回未驗證…，`composer_draft::submit_gates`），並重查 run 仍是 `idle`；忙碌或狀態未知時回 `409 agent is busy`、一個鍵都不按，
   重讀樣式畫面，建議還在而且跟 body 的字相同（比對去掉空白）才按 Tab——否則 409 `suggestion_gone`／`suggestion_changed`，**一個鍵都不按**；Tab 之後等重畫再讀，框裡要變成那一句（真字、不再是灰字）；
+  Tab 之後、按 Enter 之前還要過一道逐字比對（#1669）：框裡讀回的列接回一句（接縫規則同讀建議句時一樣：兩邊都是 ASCII 才補一個空白）後，要與建議句**逐字相同**，列內的空白也算——`send to ann a` 與 `send to anna` 不是同一句。不同就一個 Enter 都不按，409 `draft_changed`，走既有的草稿流程。
   然後走「送出框裡那段」的既有流程（`composer_draft::submit_locked`：回合＋使用者訊息在 Enter **之前**寫進 DB、證明送達、掛 stall／progress）。**記錄**：`origin=web`、訊息 `source=web`、`sent_via` 空——跟網頁送出的 prompt 完全一樣
   （不新增 `sent_via` 值：那欄有 CHECK，加值要重建 messages 表，而且使用者要的就是「跟打字送出沒有兩樣」），所以不是外部回合、也不重複記兩則，對話窗、未讀、回合追蹤照舊；訊息內容換成 session log 的原文。同一個 `client_request_id` 重送回原本那一筆、不再按鍵。
 - **Tab 之後對不上時的還原**（Tab 已經把那句放進框裡，鍵收不回來）：框裡**還是**那一句、且在 Enter 之前確定未送出（閘門擋下、DB 暫態失敗等 pre-Enter 錯誤，且無進行中回合擁有它）→ 補一個 `ctrl+c` 清成乾淨的空框（`composer_draft::clear`，它自己再驗一次框裡就是那一句、沒有回合在跑才按），
@@ -1496,7 +1497,7 @@ tab 已被回收視為完成，`tab.list` 失敗不猜。沒有 `tab_id` 的 Run
    `Unproven` 與打字後的錯誤 → `unknown`（不重送）；`agent_blocked` → `failed`。打字送出後的確認迴圈最多補按一次 Enter：每次補按前重讀 composer，只有完整讀出的內容（畫面的列逐列對得上原文：列內的字與空白逐字相同，只有列與列之間的接縫可以是「沒有字元」＝中文或長字硬折、「一段空白」＝在空白處折行、「換行」＝原文本來就換行；行內空白被改動的 `send to ann a`→`send to anna` 不算同一則，#1666）仍等於本次送出的文字、且尚無該文字的送達正面證據才按；看到正面證據就記 `Submitted`，不論框裡現在是什麼（同一則字也不補按，#1599）。內容不同或無法完整讀取時不補按，證據不足則記 `unknown`（#1486、#1598）。字還在框裡（後面接了別的字）時不記 Pending，只有框空了、讀不準、或框裡已找不到本則才交給背景（#1600）。
 5. 完成靠 hook（§6.7）或備援（§4.3）。Turn 在送 prompt 之前已 `in_flight`，所以 hook 早於 RPC 回應也配得到。
 6. `interrupt`（送 `esc`）／`stop` 把 in-flight Turn 標 `failed` 並加 system Message。
-7. **stall watchdog**：`delivery = ok` 後 12 秒內沒收到 `working`／`blocked` 且仍 idle/unknown → 先看字是不是還在框裡（在就補按 Enter、給寬限）；
+7. **stall watchdog**：`delivery = ok` 後 12 秒內沒收到 `working`／`blocked` 且仍 idle/unknown → 先看字是不是還在框裡（在就補按 Enter、給寬限；「在框裡」＝框裡讀回的列逐列對得上原文的一段，列內的字與空白逐字相同，接縫不計；尾段被改、或後面接了別的字就不是我們那則，不按 Enter，#1669）；
    不在框裡、畫面上也找不到 → `auto_resend=1` 的自動重送一次（本章開頭：讀 `prompt_text`、打字前被擋退還額度再試一次、按過鍵證明不了記 `unknown`）；
    都沒用才讀 `visible` 快照 → Turn `failed` + system Message，
    **判斷不了就不判**（#193）：送了什麼、run／turn／bot、重送額度讀不到或寫不進去，這一輪不判失敗，隔 10 秒整輪再看；
