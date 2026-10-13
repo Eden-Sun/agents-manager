@@ -358,6 +358,8 @@ function NewHostForm({ onResult }: { onResult: (r: HostResult | null) => void })
       <button type="button" className="disclosure sub" aria-expanded={advanced} onClick={() => setAdvanced(!advanced)}>
         <span className="chev">{advanced ? '▼' : '▶'}</span> 進階（都有預設值）
       </button>
+      {/* 收起時進階欄位不掛載，但它的錯誤仍會鎖住送出：原因要留在這一列上，不然只剩一顆灰鈕。 */}
+      {!advanced && (portHint || sessionHint) ? <span className="hint">進階欄位：{[portHint, sessionHint].filter(Boolean).join('；')}</span> : null}
       {advanced ? (
         <>
             <label className="field">
