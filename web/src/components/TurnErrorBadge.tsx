@@ -4,6 +4,7 @@ import { useShallow } from 'zustand/react/shallow'
 import { projectHostName, useStore } from '../store/store'
 import { canonicalModel, quotaKey } from '../api/types'
 import { resendTarget } from '../lib/resendTarget'
+import { modelAtCapacity } from '../lib/modelCapacity'
 import './turnErrorBadge.css'
 
 /**
@@ -19,6 +20,8 @@ const opusId = () => canonicalModel('claude', 'opus')
  */
 export function TurnErrorBadge({ botId }: { botId: string }) {
   const notice = useStore((s) => s.runs[botId]?.turn_error ?? null)
+  // 模型滿載有自己的標示（輸入框上方一行、側欄與晶片的專屬色，#1674），這顆「⚠ 回合被中斷」不重複畫。
+  const capacity = useStore((s) => modelAtCapacity(s.runs[botId]))
   // 額度用盡跟斷線分開講：重送沒用，要等重置或換模型（2026-09-12 使用者：「已用盡卻沒有正確的提示」）。
   const quotaLimit = notice !== null && /^you've reached your .*limit/i.test(notice)
   const quotaName = notice && /fable/i.test(notice) ? 'Fable' : '5 小時'
@@ -112,7 +115,7 @@ export function TurnErrorBadge({ botId }: { botId: string }) {
     }
   }, [open])
 
-  if (!notice) return null
+  if (!notice || capacity) return null
 
   const resend = () => {
     if (!target) return

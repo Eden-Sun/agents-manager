@@ -214,6 +214,9 @@ pub fn run_json<T: serde::Serialize>(app: &(impl crate::background_hook::HookSna
         // claude 輸入框裡那句灰字「建議下一句」（`prompt_suggestion.rs`）：只在 idle 帶，其他一律 null。
         let status = o.get("agent_status").and_then(Value::as_str).map(str::to_owned);
         o.insert("prompt_suggestion".into(), crate::prompt_suggestion::json(id, status.as_deref()));
+        // #1674：`turn_error` 的種類（`turn_error::kind_of`），網頁靠它畫「模型滿載」，不比對文字；沒有錯誤是 null。
+        let kind = o.get("turn_error").and_then(Value::as_str).filter(|e| !e.trim().is_empty()).map(crate::turn_error::kind_of);
+        o.insert("turn_error_kind".into(), kind.into());
     }
     v
 }
@@ -341,6 +344,27 @@ mod tests {
         assert_eq!((v["background_since"].clone(), v["background_stuck"].clone()), (Value::Null, false.into()));
         let health = crate::supervisor::health::snapshot(&app).await.unwrap();
         assert_eq!(health["background_stuck"], serde_json::json!([]));
+    }
+
+    /// #1674：回合錯誤的種類跟著 run 一起出去（`/api/state` 與 `bot_status` 共用這支），下一回合清掉就沒有。
+    #[tokio::test]
+    async fn run_json_carries_the_turn_error_kind() {
+        let env = crate::testing::env().await;
+        let app = env.app.clone();
+        let bot = crate::testing::claude_bot(&app, &env.project_id, "alfa").await;
+        let run_id = crate::testing::fake_run(&app, &bot.id).await;
+        let kind_now = || async {
+            let run = Some(db::run(&app.db, &run_id).await.unwrap().unwrap());
+            run_json(&app, &run, Some(&run_id))["turn_error_kind"].clone()
+        };
+        assert_eq!(kind_now().await, Value::Null, "沒有錯誤：欄位在、值是 null");
+        let capacity = "模型目前滿載，請換模型或稍後再試（Selected model is at capacity. Please try a different model.）";
+        sqlx::query("UPDATE runs SET turn_error=? WHERE id=?").bind(capacity).bind(&run_id).execute(&app.db).await.unwrap();
+        assert_eq!(kind_now().await, "model_at_capacity");
+        sqlx::query("UPDATE runs SET turn_error=? WHERE id=?").bind("API Error: Connection lost mid-response.").bind(&run_id).execute(&app.db).await.unwrap();
+        assert_eq!(kind_now().await, "api_error");
+        sqlx::query("UPDATE runs SET turn_error=NULL WHERE id=?").bind(&run_id).execute(&app.db).await.unwrap();
+        assert_eq!(kind_now().await, Value::Null);
     }
 
     #[tokio::test]

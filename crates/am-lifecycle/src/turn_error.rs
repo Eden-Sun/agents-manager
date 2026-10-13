@@ -234,6 +234,18 @@ fn body_of(s: &str) -> &str {
 /// 釘上的是人話，原文附在後面。不是額度撞限，所以不走 `limit_hit` 那套。
 const MODEL_AT_CAPACITY: &str = "模型目前滿載，請換模型或稍後再試（Selected model is at capacity. Please try a different model.）";
 
+/// 這一行 `runs.turn_error` 是哪一種（#1674，`run.turn_error_kind`）：網頁靠它分辨，不去比對文字。
+/// `model_at_capacity`＝OpenAI 模型滿載（#1673，不是額度、也不是卡住）；`quota_limit`＝額度撞限；其餘 `api_error`。
+pub fn kind_of(line: &str) -> &'static str {
+    if line == MODEL_AT_CAPACITY {
+        "model_at_capacity"
+    } else if is_quota_limit(line) {
+        "quota_limit"
+    } else {
+        "api_error"
+    }
+}
+
 /// 只認**行首**的 `■`：codex 的回覆行是 `•`，縮排的續行是引文，談到這句話的回覆不是橫幅。
 fn is_model_at_capacity(line: &str) -> bool {
     line.starts_with('■') && body_of(undecorated(line)).to_ascii_lowercase().starts_with("selected model is at capacity")
@@ -408,7 +420,7 @@ async fn last_turn(db: &DbContext<sqlx::SqlitePool>, run_id: &str) -> Result<Opt
 mod tests {
     use am_ports::DbContext;
     use crate::capabilities::Db;
-    use super::{agy_reset_until, api_error_line, is_quota_exhaustion, is_quota_limit};
+    use super::{agy_reset_until, api_error_line, is_quota_exhaustion, is_quota_limit, kind_of};
 
     /// 同一毫秒的兩個回合：「這個 run 的最後一回合」要看寫入順序，不是隨便一個（`created_at` 只到毫秒，id 的隨機段不遞增）。
     #[tokio::test]
@@ -521,6 +533,15 @@ mod tests {
     }
 
     /// #1673：回覆談到這句話不算。codex 的回覆行是 `•`，縮排的續行也不是行首的 `■`。
+    /// #1674：種類由 daemon 定，網頁不比對文字。
+    #[test]
+    fn turn_error_kind_tells_capacity_from_quota_and_plain_api_errors() {
+        let capacity = api_error_line("› hi\n■ Selected model is at capacity. Please try a different model.\n\n›\n").unwrap();
+        assert_eq!(kind_of(&capacity), "model_at_capacity");
+        assert_eq!(kind_of("You've reached your 5-hour limit"), "quota_limit");
+        assert_eq!(kind_of("API Error: Connection lost mid-response."), "api_error");
+    }
+
     #[test]
     fn a_reply_that_quotes_the_capacity_message_is_not_an_error() {
         let quoted = "› 這是什麼意思\n• 畫面上的 ■ Selected model is at capacity 表示模型滿載，請換模型。\n\n›\n";

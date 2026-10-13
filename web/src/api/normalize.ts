@@ -502,6 +502,7 @@ export function toRun(v: unknown, botId?: string): Run | null {
     background_tasks: toBackgroundTasks(v.background_tasks),
     session_crons: toSessionCrons(v.session_crons),
     turn_error: optStr(pick(v, 'turn_error')),
+    turn_error_kind: optStr(pick(v, 'turn_error_kind')),
     // SPEC §4.4a：null = daemon 不知道，不能當 false
     runtime_model: optStr(pick(v, 'runtime_model')),
     runtime_effort: optStr(pick(v, 'runtime_effort')),

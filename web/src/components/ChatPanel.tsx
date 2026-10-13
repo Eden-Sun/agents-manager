@@ -76,6 +76,7 @@ import { ShareLinkButton } from './ShareLinkButton'
 import { UpdateQuotaChip } from './UpdateQuotaChip'
 import { UnreadChip } from './UnreadChip'
 import { ComposerCostHint } from './ComposerCostHint'
+import { ModelCapacityNote } from './ModelCapacityNote'
 import { StatusCache } from './StatusCache'
 import { StatusLamp } from './StatusLamp'
 import { DELIVERY_HINT_TEXT, DELIVERY_WARN_TEXT, deliveryNotice } from '../lib/deliveryNotice'
@@ -960,6 +961,7 @@ function Composer({
           ) : null}
         </div>
       ) : null}
+      <ModelCapacityNote botId={botId} />
       <ComposerCostHint botId={botId} />
       <AttachTray items={files.items} onRemove={files.remove} onRetry={files.retry} disabled={sending} />
       <DraftTooLargeNote draftKey={draftKey} />

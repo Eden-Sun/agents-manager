@@ -359,6 +359,8 @@ export interface Run {
    * null = 正常收尾；下一回合開始時清掉。
    */
   turn_error: string | null
+  /** `turn_error` 的種類（#1674，daemon 定）：`model_at_capacity`＝codex 模型滿載、`quota_limit`、`api_error`；沒有錯誤／舊 daemon＝null。網頁不比對 `turn_error` 的文字。 */
+  turn_error_kind?: string | null
   /** SPEC §4.4a：從實際 argv 讀回的模型／強度／fast；`null` = 不知道（例如被收編的 pane），不做比對。 */
   runtime_model: string | null
   runtime_effort: string | null
