@@ -1,3 +1,5 @@
+import { CodexTerminalFooterBar } from './CodexTerminalFooter'
+import { useCodexTerminalFooter } from '../hooks/useCodexTerminalFooter'
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { useScrollTail } from '../hooks/useScrollTail'
 import { movePaneToTab } from '../api'
@@ -97,10 +99,11 @@ export function TerminalTab({ botId }: { botId: string }) {
   const narrow = snap?.columns != null && snap.columns < READABLE_COLUMNS
   const moved = movedBot === botId
   const moveErrText = moveErr?.botId === botId ? moveErr.text : null
+  const terminal = useCodexTerminalFooter(botId, snap)
   const body = useMemo(() => {
     if (!snap) return err ? `讀取終端失敗：${err}` : '讀取中…'
-    return tight ? squeeze(snap.text) : snap.text
-  }, [err, snap, tight])
+    return tight ? squeeze(terminal.body) : terminal.body
+  }, [err, snap, tight, terminal.body])
 
   // 貼底顯示最新輸出，除非使用者自己往上捲（`useScrollTail`）。
   const tail = useScrollTail<HTMLPreElement>([body])
@@ -186,6 +189,7 @@ export function TerminalTab({ botId }: { botId: string }) {
           讀取終端失敗：{err}（下面是上一次成功讀到的畫面，會自動重試）
         </div>
       ) : null}
+      <CodexTerminalFooterBar footer={terminal.footer} mobileOnly />
       {/* 內容全部在一行：`<pre>` 會照實吐出換行與縮排，JSX 的排版不能溜進終端畫面。 */}
       <pre className={`term${wrap ? ' term-wrap' : ''}`} ref={tail.ref} onScroll={tail.onScroll}>{linkifyTerm(body, snap?.columns)}</pre>
     </div>

@@ -809,6 +809,7 @@ export function toTerminal(raw: unknown, source: TerminalSource): TerminalSnapsh
   const rev = pick(o, 'revision')
   return {
     text,
+    ...(o.run_id !== undefined ? { run_id: optStr(o.run_id) } : {}),
     revision: rev === undefined ? null : num(rev, 0),
     truncated: bool(o.truncated),
     source: oneOf<TerminalSource>(pick(o, 'source'), ['visible', 'recent_unwrapped'], source),

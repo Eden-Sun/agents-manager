@@ -615,6 +615,8 @@ export interface AppState {
 }
 
 export interface TerminalSnapshot {
+  /** Present on bot snapshots; absent on older daemons and host shells. */
+  run_id?: string | null
   text: string
   revision: number | null
   truncated: boolean

@@ -1,3 +1,5 @@
+import { CodexTerminalFooterBar } from './CodexTerminalFooter'
+import { useCodexTerminalFooter } from '../hooks/useCodexTerminalFooter'
 import { useEffect, useRef, useState, type CSSProperties } from 'react'
 import { createPortal } from 'react-dom'
 import { useChoiceMenu } from '../hooks/useChoiceMenu'
@@ -36,6 +38,7 @@ export function BlockedModal({ botId, onClose }: { botId: string; onClose: () =>
   const bot = useStore((s) => s.bots.find((b) => b.id === botId) ?? null)
   const [passthrough, setPassthrough] = useState(false)
   const { snap, err, refresh } = useTerminalSnapshot(botId, { source: 'visible', lines: 200 })
+  const terminal = useCodexTerminalFooter(botId, snap)
   const press = usePaneKeys(botId, refresh)
   const menu = useChoiceMenu(botId, snap?.text)
   /** #423 的防誤刪框：直通鎖死、開關不給開（SPEC §3.2「只有使用者本人能核准」）。 */
@@ -182,6 +185,7 @@ export function BlockedModal({ botId, onClose }: { botId: string; onClose: () =>
           </div>
         ) : null}
 
+        <CodexTerminalFooterBar footer={terminal.footer} />
         {showRaw ? (
           <pre
             className={`term blocked-modal-term${reflow ? ' term-wrap is-reflow' : fit ? ' is-fit' : ' term-wrap'}`}
@@ -189,7 +193,7 @@ export function BlockedModal({ botId, onClose }: { botId: string; onClose: () =>
             ref={termRef}
             tabIndex={0}
           >
-            {err ? `讀取終端失敗：${err}` : snap?.text ? (reflow ? reflowForPhone(fitRules(snap.text)) : fitRules(snap.text)) : '讀取中…'}
+            {err ? `讀取終端失敗：${err}` : snap?.text ? (reflow ? reflowForPhone(fitRules(terminal.body)) : fitRules(terminal.body)) : '讀取中…'}
           </pre>
         ) : null}
 

@@ -1,3 +1,4 @@
+import type { TerminalFooterView } from '../lib/codexTerminalFooter'
 /** Single Zustand store: server state from `GET /api/state` + `/ws`, plus UI state. Event flow / resync: SPEC §7.3. */
 
 import { gatewayErrText, networkErrText } from '../lib/netErr'
@@ -417,6 +418,7 @@ export interface StoreState {
   identities: Identity[]
   projects: Project[]
   bots: Bot[]
+  terminalFooter: TerminalFooterView | null
   runs: Record<string, Run | null>
   turns: Record<string, Record<string, Turn>>
   messages: Record<string, Message[]>
@@ -938,6 +940,7 @@ export const useStore = create<StoreState>((set, get) => {
   identities: [],
   projects: [],
   bots: [],
+  terminalFooter: null,
   runs: {},
   turns: {},
   messages: {},

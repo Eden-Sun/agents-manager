@@ -1149,3 +1149,13 @@ Jev 超過門檻時只推 AGM inbox，使用者在 bot 畫面上看不到。
 - **上限數字從 daemon 回應的 `max_bytes` 取**，web 不寫死；沒帶（舊 daemon、或 413 來自 HTTP 層）就只寫「這份草稿太長，沒有同步到其他裝置」。
 - **什麼時候收掉**：送成功（縮短到上限內、debounce 後 PUT 過）、別台寫入新版本、bot／群組被刪。打字當下不收——還沒送進 daemon 就不假裝已同步；仍超過上限時每次拒絕都照樣留著。
 - 實作：`store/draftNotice.ts`（zustand，key → 上限）、`store/draftSync.ts` 的 `onRejectedCleared`、`components/DraftTooLargeNote.tsx`。
+
+
+## Codex 快照 footer 移入狀態列（2026-10-13，#1664）
+
+使用者定案：「沒有 parsing 到 1 warning 至 statusline」。問題在終端快照呈現，不在已儲存的對話訊息；原始快照 API 仍保留原文。
+
+- 終端分頁與需要回應面板／彈窗，把快照尾端的模型列、`? for shortcuts`、`⚠ N warning(s) · f2 to view` 從正文切出。獨立 warning 行與 shortcuts 右欄同樣處理；只剝尾端連續 footer，不刪正文裡的歷史引用或輸入列。
+- 模型整列放進既有 `statusline-bar`，保留 `· Context N% used · weekly N% left` 等後續段。warning 數放最前面，避免長模型列把它擠出窄畫面；保留 F2 查看內容的提示，不以過濾代替解決 warning 成因。shortcuts 不作為正文或獨立狀態欄。
+- 桌面共用頁面原有狀態列；手機原有狀態列收在 Git 資訊抽屜，因此快照旁也顯示同款狀態列。需要回應彈窗顯示自己的狀態列，避免數字被遮罩蓋住。既有 compact／keep-warm 控制保留。
+- warning 只投影目前顯示的 bot／run 快照；換 bot、換 run、卸載快照或新快照不再含 warning 時不沿用舊數字。CLI 操作選單與危險操作判斷仍使用原始 API text。
