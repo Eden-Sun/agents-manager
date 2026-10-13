@@ -133,7 +133,9 @@ function PaneBadge() {
 
 /** Keep the tail of a long path readable without relying on RTL text tricks. */
 function shortPath(path: string, max = 30): string {
-  return path.length <= max ? path : `…${path.slice(-(max - 1))}`
+  // 以 code point 計：`slice` 會把尾端切在 emoji 代理對中間（#1695）。
+  const chars = Array.from(path)
+  return chars.length <= max ? path : `…${chars.slice(-(max - 1)).join('')}`
 }
 
 /** 拖曳中的一列，以及游標落在哪一列的哪一半（插入線畫在那裡）。 */
