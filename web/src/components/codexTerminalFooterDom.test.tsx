@@ -14,7 +14,7 @@ afterEach(async () => { await unmountAll(); resetStoreForTest() })
 after(teardownDom)
 
 for (const view of ['terminal', 'panel', 'modal'] as const) {
-  test(`${view}: 真實 pane footer 移到 statusline，正文保留`, async () => {
+  test(`${view}: 終端畫面保留 footer 行（不另畫一條），狀態列仍只有對話面板那條（#1680）`, async () => {
     let deliver!: (snap: TerminalSnapshot) => void
     useStore.setState({
       selectedBotId: 'b1', bots: [{ id: 'b1', kind: 'codex' } as Bot],
@@ -29,10 +29,11 @@ for (const view of ['terminal', 'panel', 'modal'] as const) {
     await act(async () => { deliver(fixture as TerminalSnapshot) })
     const body = document.querySelector('pre.term')?.textContent ?? ''
     assert.ok(body.includes('Working (12s'), body)
-    assert.ok(!body.includes('GPT-6-Astra') && !body.includes('? for shortcuts') && !body.includes('f2 to view'), body)
+    assert.ok(body.includes('GPT-6-Astra') && body.includes('? for shortcuts') && body.includes('f2 to view'), body)
+    assert.equal(document.querySelectorAll('.statusline-bar').length, 1)
+    assert.equal(document.querySelector('.term-pane .statusline-bar, .blocked-modal .statusline-bar'), null)
     const bar = document.querySelector('.statusline-bar')?.textContent ?? ''
     assert.ok(bar.includes('GPT-6-Astra') && bar.includes('1 warning'), bar)
-    if (view === 'modal') assert.ok(document.querySelector('.blocked-modal .statusline-bar')?.textContent?.includes('1 warning'))
   })
 }
 
@@ -44,7 +45,7 @@ test('狀態列不沿用別顆 bot 或前一個 run 的 warning', async () => {
   assert.equal(document.querySelector('.statusline-bar'), null)
 })
 
-test('手機在快照旁顯示 warning；刷新沒有 warning 時清掉舊數字', async () => {
+test('手機終端不另畫 footer 條；warning 留在畫面裡，刷新沒有 warning 時 statusline 不留舊數字', async () => {
   const original = window.matchMedia
   window.matchMedia = ((q: string) => ({ matches: q.includes('max-width: 640px'), media: q, addEventListener() {}, removeEventListener() {} })) as unknown as typeof window.matchMedia
   try {
@@ -52,11 +53,12 @@ test('手機在快照旁顯示 warning；刷新沒有 warning 時清掉舊數字
     useStore.setState({ bots: [{ id: 'b1', kind: 'codex' } as Bot], readTerminal: () => new Promise((resolve) => { deliver = resolve }) })
     await mount(<TerminalTab botId="b1" />)
     await act(async () => { deliver(fixture as TerminalSnapshot) })
-    assert.ok(document.querySelector('.term-pane .statusline-bar')?.textContent?.includes('1 warning'))
+    assert.equal(document.querySelector('.term-pane .statusline-bar'), null)
+    assert.ok(document.querySelector('pre.term')?.textContent?.includes('1 warning'))
     await act(async () => { (document.querySelector('.term-bar button') as HTMLButtonElement).click() })
     await act(async () => { deliver({ ...fixture, text: '正文\nGPT-6-Astra high · ~/repo\n? for shortcuts' } as TerminalSnapshot) })
     assert.ok(!document.querySelector('.statusline-bar')?.textContent?.includes('warning'))
-    assert.equal(document.querySelector('pre.term')?.textContent, '正文')
+    assert.equal(document.querySelector('pre.term')?.textContent, '正文\nGPT-6-Astra high · ~/repo\n? for shortcuts')
   } finally {
     await unmountAll()
     window.matchMedia = original

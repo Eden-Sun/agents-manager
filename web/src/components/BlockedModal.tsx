@@ -1,4 +1,3 @@
-import { CodexTerminalFooterBar } from './CodexTerminalFooter'
 import { useCodexTerminalFooter } from '../hooks/useCodexTerminalFooter'
 import { useEffect, useRef, useState, type CSSProperties } from 'react'
 import { createPortal } from 'react-dom'
@@ -185,7 +184,6 @@ export function BlockedModal({ botId, onClose }: { botId: string; onClose: () =>
           </div>
         ) : null}
 
-        <CodexTerminalFooterBar footer={terminal.footer} />
         {showRaw ? (
           <pre
             className={`term blocked-modal-term${reflow ? ' term-wrap is-reflow' : fit ? ' is-fit' : ' term-wrap'}`}

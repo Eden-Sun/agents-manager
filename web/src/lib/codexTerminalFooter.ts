@@ -1,4 +1,4 @@
-/** Only peel the contiguous CLI footer at the end; historical output stays intact. */
+/** Parse the contiguous CLI footer at the end for the status bar; the terminal keeps every line (#1680). */
 export interface CodexTerminalFooter {
   modelLine: string | null
   warnings: number | null
@@ -6,7 +6,6 @@ export interface CodexTerminalFooter {
 
 export function splitCodexTerminalFooter(text: string): { body: string; footer: CodexTerminalFooter | null } {
   const lines = text.split('\n')
-  let start = lines.length
   let modelLine: string | null = null
   let warnings: number | null = null
   let found = false
@@ -23,16 +22,14 @@ export function splitCodexTerminalFooter(text: string): { body: string; footer: 
       const tail = /\s{2,}⚠ (\d+) warnings? · f2 to view$/.exec(row)
       if (tail) warnings = Number(tail[1])
       modelLine = tail ? row.slice(0, tail.index) : row
-      start = i
       found = true
       break
     } else {
       break
     }
-    start = i
     found = true
   }
-  return found ? { body: lines.slice(0, start).join('\n').trimEnd(), footer: { modelLine, warnings } } : { body: text, footer: null }
+  return found ? { body: text, footer: { modelLine, warnings } } : { body: text, footer: null }
 }
 
 export interface TerminalFooterView {
