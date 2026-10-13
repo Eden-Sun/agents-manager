@@ -47,8 +47,28 @@ fn err(text: &str, offset: usize, message: impl Into<String>) -> SvgError {
     SvgError { line, col, message: message.into() }
 }
 
-/// `&` 後面要是預先定義的五個實體或數字字元參照。回傳第一個壞掉的 `&` 的位移（相對 `s`）。
-fn bad_entity(s: &[u8]) -> Option<usize> {
+/// XML 1.0 `Char` 範圍內的十進位或十六進位數值參照。
+fn valid_xml_char_reference(name: &[u8]) -> bool {
+    let (digits, radix) = if let Some(digits) = name.strip_prefix(b"#x").or_else(|| name.strip_prefix(b"#X")) {
+        (digits, 16)
+    } else if let Some(digits) = name.strip_prefix(b"#") {
+        (digits, 10)
+    } else {
+        return false;
+    };
+    if digits.is_empty() || !digits.iter().all(|b| if radix == 16 { b.is_ascii_hexdigit() } else { b.is_ascii_digit() }) {
+        return false;
+    }
+    let Ok(digits) = std::str::from_utf8(digits) else { return false };
+    let Ok(codepoint) = u32::from_str_radix(digits, radix) else { return false };
+    matches!(codepoint, 0x9 | 0xA | 0xD)
+        || (0x20..=0xD7FF).contains(&codepoint)
+        || (0xE000..=0xFFFD).contains(&codepoint)
+        || (0x10000..=0x10FFFF).contains(&codepoint)
+}
+
+/// `&` 後面要是預先定義的五個實體或合法的數值字元參照。回傳第一個壞掉的 `&` 的位移（相對 `s`）。
+fn bad_entity(s: &[u8], check_named_entities: bool) -> Option<usize> {
     let mut i = 0;
     while i < s.len() {
         if s[i] == b'&' {
@@ -56,10 +76,15 @@ fn bad_entity(s: &[u8]) -> Option<usize> {
             // 找不到 `;`：這個 `&` 就是壞的（不能當成「沒有壞實體」）。
             let Some(end) = rest.iter().position(|&b| b == b';') else { return Some(i) };
             let name = &rest[..end];
-            let ok = matches!(name, b"lt" | b"gt" | b"amp" | b"quot" | b"apos")
-                || (name.len() > 2 && name[0] == b'#' && (name[1] == b'x' || name[1] == b'X') && name[2..].iter().all(u8::is_ascii_hexdigit))
-                || (name.len() > 1 && name[0] == b'#' && name[1..].iter().all(u8::is_ascii_digit));
-            if !ok || end == 0 || end > 32 {
+            let numeric = name.first() == Some(&b'#');
+            let ok = if numeric {
+                valid_xml_char_reference(name)
+            } else if check_named_entities {
+                matches!(name, b"lt" | b"gt" | b"amp" | b"quot" | b"apos")
+            } else {
+                true // 有 DOCTYPE 時不解析自訂具名實體，但數值參照仍照 XML 1.0 驗證。
+            };
+            if !ok || end == 0 || (check_named_entities && end > 32) {
                 return Some(i);
             }
             i += end + 2;
@@ -82,10 +107,8 @@ fn bad_attrs(raw: &[u8], check_entities: bool) -> Option<(usize, String)> {
             if let Some(p) = value.iter().position(|&b| b == b'<') {
                 return Some((i + 1 + p, "屬性值裡不能有 `<`".into()));
             }
-            if check_entities {
-                if let Some(p) = bad_entity(value) {
-                    return Some((i + 1 + p, "屬性值裡的 `&` 不是合法的實體（要寫成 `&amp;`）".into()));
-                }
+            if let Some(p) = bad_entity(value, check_entities) {
+                return Some((i + 1 + p, "屬性值裡的 `&` 不是合法的實體（要寫成 `&amp;`）".into()));
             }
             let next = raw.get(close + 1).copied();
             if let Some(n) = next {
@@ -148,7 +171,7 @@ pub fn check(text: &str) -> Result<(), SvgError> {
                     return Err(err(text, before + p, "根元素外面不能有文字"));
                 }
                 if !has_doctype {
-                    if let Some(p) = bad_entity(bytes) {
+                    if let Some(p) = bad_entity(bytes, true) {
                         return Err(err(text, before + p, "文字裡的 `&` 不是合法的實體（要寫成 `&amp;`）"));
                     }
                 }
@@ -156,8 +179,13 @@ pub fn check(text: &str) -> Result<(), SvgError> {
             // quick-xml 把文字裡的 `&名稱;` 切成獨立事件（`before` 指在 `&`）。
             Event::GeneralRef(ref g) => {
                 let name: &[u8] = g.as_ref();
-                let ok = matches!(name, b"lt" | b"gt" | b"amp" | b"quot" | b"apos") || name.first() == Some(&b'#');
-                if !ok && !has_doctype {
+                let numeric = name.first() == Some(&b'#');
+                let ok = if numeric {
+                    valid_xml_char_reference(name)
+                } else {
+                    matches!(name, b"lt" | b"gt" | b"amp" | b"quot" | b"apos") || has_doctype
+                };
+                if !ok {
                     return Err(err(text, before, format!("文字裡的 `&{};` 不是 XML 認得的實體（要寫成 `&amp;` 或數字參照）", String::from_utf8_lossy(name))));
                 }
             }
@@ -437,6 +465,23 @@ mod tests {
         assert!(check("<svg><text>AT&T</text></svg>").is_err(), "裸 &（quick-xml 自己報）");
         assert!(bad("<svg a=\"1\" a=\"2\"/>").message.contains("屬性"), "重複屬性");
         assert!(bad("").message.contains("根元素"), "空檔");
+    }
+
+    #[test]
+    fn numeric_character_references_must_name_xml_characters() {
+        for reference in ["&#0;", "&#x1;", "&#xD800;", "&#xFFFE;", "&#x110000;"] {
+            let svg = format!("<svg>{reference}</svg>");
+            assert!(check(&svg).is_err(), "{reference} is not an XML 1.0 character");
+            assert!(check(&format!("<svg value=\"{reference}\"/>")).is_err(), "attribute {reference} is not an XML 1.0 character");
+            assert!(check(&format!("<!DOCTYPE svg><svg>{reference}</svg>")).is_err(), "DOCTYPE does not permit {reference}");
+            assert!(check(&format!("<!DOCTYPE svg><svg value=\"{reference}\"/>")).is_err(), "DOCTYPE does not permit attribute {reference}");
+        }
+        for reference in ["&#9;", "&#xA;", "&#xD;", "&#x20;", "&#xD7FF;", "&#xE000;", "&#xFFFD;", "&#x10000;", "&#x10FFFF;"] {
+            let svg = format!("<svg>{reference}</svg>");
+            assert_eq!(check(&svg), Ok(()), "{reference} is a legal XML 1.0 character");
+            assert_eq!(check(&format!("<svg value=\"{reference}\"/>")), Ok(()), "attribute {reference} is legal");
+            assert_eq!(check(&format!("<!DOCTYPE svg><svg value=\"{reference}\"/>")), Ok(()), "DOCTYPE still permits legal attribute {reference}");
+        }
     }
 
     #[test]
