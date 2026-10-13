@@ -1101,6 +1101,14 @@ export class MockTransport implements Transport {
             )
           }
         }
+        // daemon：`resume=native` 接不回（這顆 bot 從來沒有記錄過原生對話）→ 409 `cannot_resume`，不啟動、不開新對話（API.md §4）。
+        if ((action === 'start' || action === 'restart') && q.get('resume') === 'native' && !this.runs.some((r) => r.bot_id === botId && r.native_session_id)) {
+          throw new ApiError(
+            409,
+            { error: 'conflict', reason: 'cannot_resume', resumed: false, resume_reason: 'no_session_id', bot_id: botId },
+            'cannot_resume',
+          )
+        }
         if (action === 'start') {
           const r = this.start(botId)
           this.flushWaiting(botId)
