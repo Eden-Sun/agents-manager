@@ -120,7 +120,11 @@ CREATE TABLE IF NOT EXISTS turns (
   composer_draft_proof TEXT
 );
 CREATE UNIQUE INDEX IF NOT EXISTS turns_one_in_flight ON turns(run_id) WHERE status = 'in_flight';
-CREATE UNIQUE INDEX IF NOT EXISTS turns_one_queued ON turns(conversation_id) WHERE status = 'queued';
+-- #1685：排隊的槽分兩條，各自同時最多一筆：daemon 自己排的通知（`child-done:`／`child-blocked:`／`resume-nudge:`）一條，
+-- 使用者／AGM／別顆 bot 一條。兩條互不擋，所以排著的通知不會把使用者的訊息擋在門外。條件要跟 [`daemon_notice_sql`] 同步。
+DROP INDEX IF EXISTS turns_one_queued;
+CREATE UNIQUE INDEX IF NOT EXISTS turns_one_queued_user ON turns(conversation_id) WHERE status = 'queued' AND IFNULL((client_request_id GLOB 'child-done:*') OR (client_request_id GLOB 'child-blocked:*') OR (client_request_id GLOB 'resume-nudge:*'), 0) = 0;
+CREATE UNIQUE INDEX IF NOT EXISTS turns_one_queued_daemon ON turns(conversation_id) WHERE status = 'queued' AND IFNULL((client_request_id GLOB 'child-done:*') OR (client_request_id GLOB 'child-blocked:*') OR (client_request_id GLOB 'resume-nudge:*'), 0) = 1;
 CREATE UNIQUE INDEX IF NOT EXISTS turns_client_req ON turns(conversation_id, client_request_id) WHERE client_request_id IS NOT NULL;
 CREATE UNIQUE INDEX IF NOT EXISTS turns_native ON turns(native_session_id, native_turn_id) WHERE native_turn_id IS NOT NULL;
 CREATE INDEX IF NOT EXISTS turns_conv_time ON turns(conversation_id, created_at);
@@ -1550,13 +1554,14 @@ pub async fn active_runs_by_bot(pool: &SqlitePool) -> Result<std::collections::H
     Ok(out)
 }
 
-/// 每顆 bot 排最前面的 `queued` 回合，一次讀完（同 [`queued_turn_for_bot`] 的排序：`created_at, id`）。
+/// 每顆 bot 排最前面的 `queued` 回合，一次讀完（同 [`queued_turn_for_bot`] 的排序）。
 pub async fn queued_turns_by_bot(pool: &SqlitePool) -> Result<std::collections::HashMap<String, Turn>> {
     use sqlx::{FromRow, Row};
-    let rows = sqlx::query(
+    let rows = sqlx::query(&format!(
         "SELECT t.*, c.bot_id AS queue_bot_id FROM turns t JOIN conversations c ON c.id = t.conversation_id
-          WHERE t.status = 'queued' ORDER BY t.created_at, t.id",
-    )
+          WHERE t.status = 'queued' ORDER BY {}, t.created_at, t.id",
+        daemon_notice_sql("t.")
+    ))
     .fetch_all(pool)
     .await?;
     let mut out = std::collections::HashMap::new();
@@ -1767,10 +1772,21 @@ pub async fn in_flight_turn(pool: &SqlitePool, run_id: &str) -> Result<Option<Tu
         .await?)
 }
 
-pub async fn queued_turn(pool: &SqlitePool, conversation_id: &str) -> Result<Option<Turn>> {
-    Ok(sqlx::query_as::<_, Turn>(
-        "SELECT * FROM turns WHERE conversation_id = ? AND status = 'queued' ORDER BY created_at, id LIMIT 1",
+/// 排隊槽的「daemon 通知」述詞（#1685）：真＝這一則是 daemon 自己排的（`child-done:`／`child-blocked:`／`resume-nudge:`）。
+/// `alias` 是 turns 的表別名（沒有就空字串）。跟 SCHEMA 裡 `turns_one_queued_user`／`turns_one_queued_daemon` 的條件、
+/// `am-lifecycle` 的 `daemon_notice::PREFIXES` 必須同步（`daemon_notice` 的測試會對一遍）。
+pub fn daemon_notice_sql(alias: &str) -> String {
+    format!(
+        "IFNULL(({alias}client_request_id GLOB 'child-done:*') OR ({alias}client_request_id GLOB 'child-blocked:*') OR ({alias}client_request_id GLOB 'resume-nudge:*'), 0)"
     )
+}
+
+/// 一段對話排最前面的 `queued` 回合：使用者（與 AGM、別顆 bot）的先，daemon 通知的排後面（#1685）；同一條內照 `created_at, id`。
+pub async fn queued_turn(pool: &SqlitePool, conversation_id: &str) -> Result<Option<Turn>> {
+    Ok(sqlx::query_as::<_, Turn>(&format!(
+        "SELECT * FROM turns WHERE conversation_id = ? AND status = 'queued' ORDER BY {}, created_at, id LIMIT 1",
+        daemon_notice_sql("")
+    ))
     .bind(conversation_id)
     .fetch_optional(pool)
     .await?)
@@ -1778,10 +1794,11 @@ pub async fn queued_turn(pool: &SqlitePool, conversation_id: &str) -> Result<Opt
 
 pub async fn queued_turn_for_bot(pool: &SqlitePool, bot_id: &str) -> Result<Option<Turn>> {
     note_per_bot_lookup();
-    Ok(sqlx::query_as::<_, Turn>(
+    Ok(sqlx::query_as::<_, Turn>(&format!(
         "SELECT t.* FROM turns t JOIN conversations c ON c.id = t.conversation_id
-         WHERE c.bot_id = ? AND t.status = 'queued' ORDER BY t.created_at, t.id LIMIT 1",
-    )
+         WHERE c.bot_id = ? AND t.status = 'queued' ORDER BY {}, t.created_at, t.id LIMIT 1",
+        daemon_notice_sql("t.")
+    ))
     .bind(bot_id)
     .fetch_optional(pool)
     .await?)
