@@ -45,7 +45,7 @@ pub fn is_ephemeral(kind: &str) -> bool {
 
 /// 事件廣播給所有 UI 連線，也留在重播環裡：欄位名含 `token` 或 `secret` 一律不外送（含巢狀；token 使用量計數除外）。
 /// 呼叫端本來就不該放（`db::Bot::hook_token` 是 `skip_serializing`），這是最後一道，防哪個 payload 手滑把整個物件塞進來。
-const TOKEN_METRIC_KEYS: [&str; 9] = [
+const TOKEN_METRIC_KEYS: [&str; 10] = [
     "input_tokens",
     "output_tokens",
     "total_tokens",
@@ -53,17 +53,31 @@ const TOKEN_METRIC_KEYS: [&str; 9] = [
     "completion_tokens",
     "reasoning_tokens",
     "cached_tokens",
+    "thinking_tokens",
     "cache_read_input_tokens",
     "cache_creation_input_tokens",
+];
+const TOKEN_METRIC_SUFFIXES: [&str; 7] = [
+    "_input_tokens",
+    "_output_tokens",
+    "_prompt_tokens",
+    "_completion_tokens",
+    "_reasoning_tokens",
+    "_cached_tokens",
+    "_thinking_tokens",
 ];
 
 fn is_credential_key(key: &str) -> bool {
     let key = key.to_ascii_lowercase();
-    // 用量計數（`recache_tokens_if_cold`、`context_used_tokens`、`input_tokens`…）是遙測不是憑證：
-    // 精確列在 `TOKEN_METRIC_KEYS`，或以 `_tokens` 結尾、或含 `_tokens_`。名字含 `secret` 的一律當憑證，不吃這條放行。
-    // 其餘含 `token`／`secret` 的名字照刪，含 `token_value` 這類前綴與 snake／camel／連字號寫法。
+    // 用量計數是遙測不是憑證：只放行已知計數鍵、明確的 token 類別後綴與計數鍵的細節欄位。
+    // 不能只憑 `_tokens` 判斷，因為 `service_tokens` 也可能是憑證集合。名字含 `secret` 的一律當憑證。
     let usage_counter = !key.contains("secret")
-        && (TOKEN_METRIC_KEYS.contains(&key.as_str()) || key.ends_with("_tokens") || key.contains("_tokens_"));
+        && (TOKEN_METRIC_KEYS.contains(&key.as_str())
+            || matches!(key.as_str(), "recache_tokens_if_cold" | "context_used_tokens")
+            || TOKEN_METRIC_SUFFIXES.iter().any(|suffix| key.ends_with(suffix))
+            || TOKEN_METRIC_KEYS.iter().any(|metric| {
+                key.strip_prefix(metric).is_some_and(|suffix| suffix.starts_with('_'))
+            }));
     !usage_counter && (key.contains("token") || key.contains("secret"))
 }
 
@@ -867,6 +881,8 @@ mod scrub_tests {
         assert_eq!(scrubbed(v.clone()), v);
         let v = json!({"cache_read_input_tokens": 3, "cached_tokens": 4});
         assert_eq!(scrubbed(v.clone()), v);
+        let v = json!({"output_tokens_details": {"thinking_tokens": 2}, "total_tokens_reminder": true});
+        assert_eq!(scrubbed(v.clone()), v);
     }
 
     #[test]
@@ -878,6 +894,12 @@ mod scrub_tests {
             "keep": 1,
         });
         assert_eq!(scrubbed(v), json!({"nested": [{}], "keep": 1}));
+    }
+
+    #[test]
+    fn service_token_collections_are_scrubbed_as_credentials() {
+        let v = scrubbed(json!({"service_tokens": {"daemon-swap": "SERVICE_SECRET_TOKEN"}}));
+        assert_eq!(v, json!({}), "service token collections must not leave in an event");
     }
 
     /// 名字當 key 的 map：主機／身分／kind 的名字含 token／secret 不能整筆消失，但裡面的憑證欄位照刪。
