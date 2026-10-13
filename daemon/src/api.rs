@@ -3475,6 +3475,10 @@ struct NewHost {
     shared_session: Option<bool>,
 }
 
+// A host config write and its HostManager update are one mutation. Serialize create/update and
+// delete so a concurrent same-name request cannot remove or install a stale connection afterward.
+static HOST_CONFIG_MUTATION: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
 /// 這次更新會不會改變「這個名字指到哪台機器或 SSH 身分」。`ssh_opts` 可以改 `User`、`IdentityFile` 等登入身分，
 /// 因此有 live project 時任何 `ssh_opts` 變更都要明確確認；`remote_path` 只影響同一台上的工具路徑。
 fn repoints_host(old: &HostCfg, new: &HostCfg) -> bool {
@@ -3534,6 +3538,7 @@ async fn create_host(
     if let Some(why) = crate::config::ssh_opts_problem(b.ssh_opts.as_deref().unwrap_or_default()) {
         return Err(LcError::Bad(why));
     }
+    let host_mutation = HOST_CONFIG_MUTATION.lock().await;
     // 共用 session 是安全開關（#709）：沒帶就沿用，不因為一次只改 ssh 的更新而悄悄關掉。
     let prev_shared = app.cfg.get().await.hosts.iter().any(|h| h.name == b.name && h.shared_session);
     let cfg = HostCfg {
@@ -3629,6 +3634,9 @@ async fn create_host(
     }
     let hosts = app.cfg.get().await.hosts;
     let changed_hosts = app.hosts.apply_config(&app, &hosts).await;
+    #[cfg(test)]
+    crate::lifecycle::race_point::hit("create_host_after_apply_config", &b.name).await;
+    drop(host_mutation);
     let (connected, error) = if changed_hosts.contains(&b.name) {
         match app.hosts.get(&b.name).await {
             Some(conn) => app.hosts.wait_for_connection(conn).await.unwrap_or((false, Some("host vanished".into()))),
@@ -3651,6 +3659,7 @@ async fn delete_host(
     if name == LOCAL_HOST {
         return Err(LcError::Bad("`local` cannot be removed".into()));
     }
+    let _host_mutation = HOST_CONFIG_MUTATION.lock().await;
     for p in db::live_projects(&app.db).await.map_err(any_err)? {
         if p.host == name {
             return Err(LcError::conflict("host still used by projects", json!({"project_id": p.id})));
@@ -3691,6 +3700,8 @@ async fn delete_host(
         }
         return Err(cfg_err(e));
     }
+    #[cfg(test)]
+    crate::lifecycle::race_point::hit("delete_host_after_config_remove", &name).await;
     app.hosts.remove(&app, &name).await;
     app.emit("project_changed", json!({})).await;
     Ok((StatusCode::OK, Json(json!({}))).into_response())
@@ -4351,6 +4362,79 @@ mod identity_auth_error_tests {
                 .ssh,
             "old-test-target"
         );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn deleting_a_host_keeps_a_connection_recreated_after_its_config_removal() {
+        let e = crate::testing::env().await;
+        let app = e.app.clone();
+        let host = format!("race-{}", &db::ulid().to_ascii_lowercase()[..20]);
+        app.cfg
+            .update({
+                let host = host.clone();
+                move |f| {
+                    f.hosts.push(HostCfg {
+                        shared_session: false,
+                        name: host,
+                        ssh: "old-test-target".into(),
+                        ssh_port: 22,
+                        ssh_opts: vec![],
+                        herdr_session: "agents-manager".into(),
+                        remote_path: String::new(),
+                    });
+                    Ok(())
+                }
+            })
+            .await
+            .unwrap();
+        crate::hosts::set_ssh_fake(&host, |_script| Err(anyhow::anyhow!("test fake: no SSH")));
+
+        let (connected_app, connected_host) = (app.clone(), host.clone());
+        crate::lifecycle::race_point::arm("create_host_after_apply_config", &host, move || async move {
+            if let Some(conn) = connected_app.hosts.get(&connected_host).await {
+                conn.connected.store(true, std::sync::atomic::Ordering::SeqCst);
+            }
+        });
+
+        let recreate_task = Arc::new(tokio::sync::Mutex::new(None));
+        let callback_task = recreate_task.clone();
+        let (recreate_app, recreate_host) = (app.clone(), host.clone());
+        crate::lifecycle::race_point::arm("delete_host_after_config_remove", &host, move || async move {
+            let task = tokio::spawn(async move {
+                create_host(
+                    State(recreate_app),
+                    Query(DeleteQuery::default()),
+                    Extension(RequestPrincipal::User),
+                    Json(NewHost {
+                        name: recreate_host,
+                        ssh: "new-test-target".into(),
+                        ssh_port: None,
+                        ssh_opts: None,
+                        herdr_session: None,
+                        remote_path: None,
+                        shared_session: None,
+                    }),
+                )
+                .await
+            });
+            *callback_task.lock().await = Some(task);
+            tokio::task::yield_now().await;
+        });
+
+        delete_host(State(app.clone()), Path(host.clone()), Extension(RequestPrincipal::User))
+            .await
+            .expect("the in-flight delete itself succeeds");
+        recreate_task
+            .lock()
+            .await
+            .take()
+            .expect("the overlapping POST started")
+            .await
+            .expect("the overlapping POST task completed")
+            .expect("a create queued behind the delete can restore the host");
+
+        assert!(app.cfg.get().await.hosts.iter().any(|h| h.name == host), "the later create committed the host config");
+        assert!(app.hosts.get(&host).await.is_some(), "DELETE must not remove a connection installed by the later create");
     }
 
     /// issue #1384：不認得的主機一律 404 `what:"host"`（API.md §1，同其他 17 處）；那句話放 message，不塞進 what。
