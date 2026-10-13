@@ -3624,7 +3624,8 @@ export function handleFrame(set: SetFn, get: GetFn, frame: { seq?: number; type:
       set({
         restartBatch: {
           ...b,
-          done: okNames.length + failed.length,
+          // 跳過的也算處理過（同 `restartProgress` 的 skipped），不然收尾後 done 跟進度事件對不上。
+          done: okNames.length + failed.length + skipped.length,
           current: null,
           ok: okNames,
           failed,

@@ -1637,3 +1637,26 @@ test('#766：群組時間軸翻頁收到 404 before_message_gone：同樣重載�
   assert.deepEqual(noticeTexts(), [])
   assert.deepEqual(useStore.getState().groupMessages.p1.map((m) => m.id), [capMsg(1).id, capMsg(102).id, capMsg(103).id])
 })
+
+/** 進度事件把跳過的也算「處理過」（done 計 ok＋failed＋skipped）；收尾的 `bots_restart_done` 要用同一套算，不然 done 前後對不上。 */
+test('一鍵重啟收尾：跳過的也算處理過，done 跟進度事件對得上', async () => {
+  seed()
+  const { dispatchFrameForTest } = await import('./store.ts')
+  routeDaemon(() => json({}, 200))
+  useStore.setState({ restartBatch: { id: 'batch-1', total: 2, done: 0, current: null, ok: [], failed: [], skipped: [], finished: false } })
+  dispatchFrameForTest({ type: 'bots_restart_progress', data: { batch_id: 'batch-1', total: 2, bot_id: 'b1', name: 'A', status: 'skipped', reason: 'no_longer_pending', reason_label: '開始回合了' } })
+  dispatchFrameForTest({ type: 'bots_restart_progress', data: { batch_id: 'batch-1', total: 2, bot_id: 'b2', name: 'B', status: 'ok' } })
+  assert.equal(useStore.getState().restartBatch?.done, 2)
+  dispatchFrameForTest({
+    type: 'bots_restart_done',
+    data: {
+      batch_id: 'batch-1',
+      ok: [{ bot_id: 'b2', name: 'B', run_id: 'r2' }],
+      failed: [],
+      skipped: [{ bot_id: 'b1', name: 'A', reason: 'no_longer_pending', reason_label: '開始回合了' }],
+    },
+  })
+  const b = useStore.getState().restartBatch
+  assert.equal(b?.finished, true)
+  assert.equal(b?.done, 2, '收尾的 done 要把跳過的算進去，跟進度事件一致')
+})
