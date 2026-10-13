@@ -43,3 +43,15 @@ test('the daemon turn JSON carries awaits_start and start_error through to the s
   assert.equal(old.awaitsStart, false, '舊 daemon 沒有這一欄：當作 AGM 的排隊')
   assert.equal(old.startError, null)
 })
+
+test('兩則都在等 bot 起來：拿最早排的那一則，不是 map 插入順序的第一則（daemon 回的 turns 是 created_at 倒序）', () => {
+  // API.md §6：messages 頁的 turns 依 created_at 倒序回來，loadMessages 照這個順序插入 map。
+  const newer = turn({ id: 't2', created_at: '2026-10-13T10:00:02.000Z' })
+  const older = turn({ id: 't1', created_at: '2026-10-13T10:00:01.000Z' })
+  const s = startingSend({ t2: newer, t1: older }, [
+    msg({ id: 'm2', turn_id: 't2', content: '第二則' }),
+    msg({ id: 'm1', turn_id: 't1', content: '第一則' }),
+  ])
+  assert.equal(s?.turnId, 't1', 'daemon 先起來的是最早排的那一則；撤回也要撤這一則')
+  assert.equal(s?.text, '第一則')
+})
