@@ -222,6 +222,11 @@ pub fn router(app: Arc<App>) -> Router {
         // 對話輸入框的草稿（各瀏覽器共用，見 `drafts.rs`）。
         .route("/drafts", get(crate::drafts::get_http))
         .route("/drafts/{key}", axum::routing::put(crate::drafts::put_http))
+        // 專案排程（User-only，見 `schedules/api.rs`）。
+        .route("/projects/{id}/schedules", get(crate::schedules::api::list_for_project).post(crate::schedules::api::create))
+        .route("/schedules/{id}", get(crate::schedules::api::get_one).patch(crate::schedules::api::patch).delete(crate::schedules::api::delete))
+        .route("/schedules/{id}/run", post(crate::schedules::api::run_now))
+        .route("/schedules/{id}/history", get(crate::schedules::api::history))
         .route("/projects/{id}", patch(patch_project).delete(delete_project_http))
         .route("/projects/{id}/bots", post(create_bot))
         .route("/projects/{id}/messages", get(get_project_messages))
@@ -921,6 +926,13 @@ const BOT_ROUTE_POLICIES: &[(&str, &str, BotRoutePolicy)] = &[
     ("POST", "/api/panes/{id}/focus", BotRoutePolicy::UserOnly),
     ("POST", "/api/projects/{id}/group/read", BotRoutePolicy::UserOnly),
     ("PUT", "/api/drafts/{key}", BotRoutePolicy::UserOnly),
+    ("GET", "/api/projects/{id}/schedules", BotRoutePolicy::UserOnly),
+    ("POST", "/api/projects/{id}/schedules", BotRoutePolicy::UserOnly),
+    ("GET", "/api/schedules/{id}", BotRoutePolicy::UserOnly),
+    ("PATCH", "/api/schedules/{id}", BotRoutePolicy::UserOnly),
+    ("DELETE", "/api/schedules/{id}", BotRoutePolicy::UserOnly),
+    ("POST", "/api/schedules/{id}/run", BotRoutePolicy::UserOnly),
+    ("GET", "/api/schedules/{id}/history", BotRoutePolicy::UserOnly),
     ("GET", "/api/fs/dirs", BotRoutePolicy::UserOrAgm),
     ("POST", "/api/fs/dirs", BotRoutePolicy::UserOnly),
     ("GET", "/api/build/remote", BotRoutePolicy::UserOrAgm),

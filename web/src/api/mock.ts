@@ -14,6 +14,7 @@ import { MockShares } from './mockShare'
 import { MockHerdrUpdate, type MockHerdrOpts } from './mockHerdrUpdate'
 import { later, sleep } from './mockClock'
 import { MockServerDrafts } from './mockServerDrafts'
+import { MockServerSchedules } from './mockServerSchedules'
 import { MockRemoteCargo } from './mockRemoteCargo'
 import type { HttpMethod, SocketHandlers, Transport, UploadOptions } from './transport'
 import { MockComposerDrafts } from './mockComposerDraft'
@@ -645,6 +646,10 @@ export class MockTransport implements Transport {
     (id) => this.bots.find((x) => x.id === id)?.share_profile === 'trusted',
   )
   readonly serverDrafts = new MockServerDrafts()
+  /** 專案排程（`mockServerSchedules.ts`）：Bot 資格照 daemon 的規則（同專案、一般 Bot、非 child／分享／受限）。 */
+  readonly serverSchedules = new MockServerSchedules(
+    (botId, projectId) => this.bots.some((b) => b.id === botId && b.project_id === projectId && b.managed_by === 'user' && !b.parent_bot_id && !b.share_profile),
+  )
   readonly remoteCargo = new MockRemoteCargo()
   /** header 的 herdr 一鍵更新（`mockHerdrUpdate.ts`，`__amMock.herdrUpdate()`）。 */
   readonly herdrUpdate = new MockHerdrUpdate({
@@ -971,6 +976,7 @@ export class MockTransport implements Transport {
     if (method === 'GET' && rawPath === '/upstream-updates') return { items: this.upstreamItems }
     { const r = this.releaseTriage.handle(method, rawPath, q, b); if (r !== undefined) return r }
     { const r = this.serverDrafts.handle(method, rawPath, b, (t, d) => this.emit(t, d)); if (r !== undefined) return r }
+    { const r = this.serverSchedules.handle(method, rawPath, b, (t, d) => this.emit(t, d)); if (r !== undefined) return r }
     { const r = this.remoteCargo.handle(method, rawPath, b); if (r !== undefined) return r }
     { const r = this.shares.handle(method, rawPath, b); if (r !== undefined) return r }
     // 前端已樂觀套用排序，mock 收下就好。

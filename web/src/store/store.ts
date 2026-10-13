@@ -910,6 +910,9 @@ type GetFn = () => StoreState
 let boundSet: SetFn | null = null
 let boundGet: GetFn | null = null
 
+/** 已經跳過 toast 的排程終態（occurrence＋狀態）：重連重播不重複跳。 */
+const seenScheduleNotices = new Set<string>()
+
 export const useStore = create<StoreState>((set, get) => {
   boundSet = set
   boundGet = get
@@ -3243,6 +3246,27 @@ export function handleFrame(set: SetFn, get: GetFn, frame: { seq?: number; type:
       const rev = num(pick(data, 'rev'), 0)
       if (!key || rev <= 0) return
       draftSync.remote({ key, text: str(pick(data, 'text')), rev, client_id: str(pick(data, 'client_id')) })
+      return
+    }
+    case 'schedules_changed': {
+      // `{project_id, id}`：只通知網頁重抓該專案／該排程（prompt 不進全域 state）。
+      window.dispatchEvent(new CustomEvent('agm:schedules_changed', { detail: isRec(data) ? { project_id: str(pick(data, 'project_id')), id: str(pick(data, 'id')) } : {} }))
+      return
+    }
+    case 'schedule_notice': {
+      // 終態通知（依排程的 notify 設定；後端每筆終態只推一次）。重連會重播事件，所以以 occurrence＋狀態去重，不重複跳 toast。
+      if (!isRec(data)) return
+      const occ = str(pick(data, 'occurrence_id'))
+      const status = str(pick(data, 'status'))
+      const key = `${occ}:${status}`
+      if (!occ || seenScheduleNotices.has(key)) return
+      seenScheduleNotices.add(key)
+      if (seenScheduleNotices.size > 500) seenScheduleNotices.clear()
+      const name = str(pick(data, 'schedule_name')) || '排程'
+      const error = str(pick(data, 'error'))
+      if (status === 'done') useStore.getState().notify('info', `排程「${name}」已完成`)
+      else if (status === 'unknown') useStore.getState().notify('error', `排程「${name}」上次結果不明，請先到 Bot 對話確認；確認後可重新啟用`)
+      else if (status === 'failed') useStore.getState().notify('error', `排程「${name}」失敗${error ? `：${error}` : ''}`)
       return
     }
     case 'identity_prefs_changed': {

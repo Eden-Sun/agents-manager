@@ -224,10 +224,12 @@ pub async fn claim_queued(conn: &mut sqlx::SqliteConnection, turn_id: &str, run_
     edge("queued", "in_flight", "認領排隊")?;
     // 掛的交辦此刻已經不要了也不認領（#159）：flush 讀完交辦到這一句之間才被取消的，同一句擋下。
     let withdrawn = super::queue::WITHDRAWN_ASSIGNMENT.map(|s| format!("'{s}'")).join(",");
+    let schedule_allowed = super::queue::scheduled_turn_allowed_sql("turns.id");
     let done = sqlx::query(&format!(
         "UPDATE turns SET status='in_flight', run_id=?, auto_resend=0, claimed_from_queue=1
           WHERE id=? AND status='queued' AND EXISTS (SELECT 1 FROM runs WHERE id=? AND state='running')
-            AND NOT EXISTS (SELECT 1 FROM supervisor_assignments a WHERE a.turn_id = turns.id AND a.status IN ({withdrawn}))",
+            AND NOT EXISTS (SELECT 1 FROM supervisor_assignments a WHERE a.turn_id = turns.id AND a.status IN ({withdrawn}))
+            AND {schedule_allowed}",
     ))
     .bind(run_id)
     .bind(turn_id)

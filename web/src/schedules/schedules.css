@@ -1,0 +1,94 @@
+/* 專案排程：＋選單、專案底下的排程列、編輯器。窄視窗（側欄收合、手機）要能換行、不橫向捲動。 */
+
+.project-schedules {
+  list-style: none;
+  margin: 0 0 4px 22px;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.project-schedule-row {
+  width: 100%;
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 1px;
+  padding: 4px 8px;
+  border: 0;
+  border-radius: 6px;
+  background: transparent;
+  color: inherit;
+  text-align: left;
+  font: inherit;
+  cursor: pointer;
+  min-width: 0;
+}
+
+.project-schedule-row:hover,
+.project-schedule-row:focus-visible {
+  background: var(--bg-hover);
+  outline: none;
+}
+
+.project-schedule-name,
+.project-schedule-status {
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.project-schedule-status {
+  font-size: 0.85em;
+  opacity: 0.75;
+}
+
+.schedule-editor .field {
+  width: 100%;
+  min-width: 0;
+}
+
+.schedule-editor select,
+.schedule-editor input,
+.schedule-editor textarea {
+  max-width: 100%;
+}
+
+.schedule-editor .inline-check {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  margin-right: 10px;
+}
+
+.schedule-editor .form-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.schedule-status p {
+  margin: 2px 0;
+}
+
+.schedule-history {
+  margin: 6px 0 0;
+  padding-left: 18px;
+  font-size: 0.9em;
+  max-height: 160px;
+  overflow: auto;
+  overflow-wrap: anywhere;
+}
+
+.schedule-error {
+  color: var(--danger);
+  overflow-wrap: anywhere;
+}
+
+@media (max-width: 480px) {
+  .schedule-editor .form-actions .btn {
+    flex: 1 1 auto;
+  }
+}

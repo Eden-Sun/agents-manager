@@ -5487,3 +5487,21 @@ daemon 要能在 Linux（目標：Ubuntu，外部編譯主機 192.168.1.46，#67
 
 ### G.7 環境變數與自動更新
 `AGY_CLI_DISABLE_AUTO_UPDATE=true` 關背景自我更新（官方文件列出；**沒有在有新版時實測**）。其他官方列出的：`GEMINI_API_KEY`（搭配 `modelProvider:"gemini"`）、`GOOGLE_GEMINI_BASE_URL`。AG Man 不依賴未文件化的 `AGY_*`。
+
+## 專案排程（2026-10-13）
+
+- **模式**：單次、固定間隔、每天、每週。不做任意 cron。時區存 IANA 名稱（daemon 依賴 chrono-tz）。
+- **DST**：單次在本地不存在的時間拒絕（要求重選）；重複時間取較早的一次。每天／每週遇不存在的時間跳過當天；重複時間只跑較早那次，不補跑第二次。固定間隔以建立時的 UTC 錨點計算，與上次完成時間無關。
+- **帳本**：`schedules` 是設定；`schedule_occurrences` 是每一次執行的帳本，凍結 prompt、bot、generation，綁定 `turn_id`／`conversation_id`。同一排程最多一筆未結束（pending／queued）；`scheduled_for` 在同排程內唯一。到期時若還有未結束的，只記 `merged_count`，不另開，不補跑風暴。
+- **綁定**：bot 鎖內，同一個 SQLite 交易裡寫 turn（`queued`，`awaits_idle=1`，沒有 run 或還在 starting 時 `awaits_start=1`）、message（`relay_from='daemon'`），並把 occurrence 設為 `queued` 綁 turn。commit 後放鎖，再叫既有 kick（沒有 run）與 flush。不 steer、不 interrupt、不覆蓋使用者已排的佇列（既有上限每個會話 1 筆 queued，已有人排著就等，`waiting_reason=bot_busy`）。Bot 停止中（`stopping`）不收不踢，`waiting_reason=stopping`。
+- **終態收斂**（tick 每 20 秒，啟動後 5 秒先跑一輪）：`completed`＋delivery ok → `done`；`completed_fallback`／`failed`＋delivery unknown → `unknown`（同交易暫停排程）；`failed` → `failed`；turn 不見了 → `cancelled`。`queued`／`in_flight` 繼續等，不提早取消已送出的執行。
+- **停用／編輯／刪除**：同 bot 鎖、同交易撤回未送出的排隊（`revoke_queued_turn_tx`），pending 直接取消；已送出的照跑。編輯與刪除在鎖內重讀，Bot 變了回 409。刪除是軟刪（保留關聯）。
+- **建立冪等**：`client_request_id` 加上 `(project_id)` 唯一；同內容回原筆、不同內容 409。手動執行同樣有 key 去重。
+- **通知**：只靠 WS 事件（見 API.md）。狀態轉移由 `notified` 去重，不靠前端記數。
+- **未完成（待 lifecycle 補）**：maintenance 窗口的入口閘（`prompt::maintenance_refusal` 目前是 `pub(super)`，排程入口還沒接）；restart 後 `awaits_start` 的 kick 門檻依 lifecycle 的 claim gate 與 start admission 檢查。
+
+### 排程的手動執行去重（2026-10-13 補）
+
+- `schedule_manual_requests(schedule_id, client_request_id, occurrence_id, created_at)`，主鍵 `(schedule_id, client_request_id)`：每個手動執行的 key 都記下它實際落在哪一筆 occurrence。這張表是重試的權威，不靠 `schedule_occurrences.client_request_id`（那一欄只留作稽核）。
+- `POST /api/schedules/{id}/run` 在 `BEGIN IMMEDIATE` 交易內：先查這個 key 的 mapping，有就回那一筆；沒有就併進未結束的 occurrence（不論它是排程來的或手動來的），或新開一筆；不論併進哪一筆，都寫下 key → occurrence 的 mapping。所以回應丟失後的重送，不論那筆是否已經結束，都回同一筆，不多排 turn。
+- 前端的 key 走共用的 `createRequestId("schedule-run:<scheduleId>")`（存在 sessionStorage，關掉再開仍沿用）；伺服器收下（回應成功）才 `settleCreateRequest`；明確的 4xx 拒絕也 settle；網路錯誤與 5xx 保留同一個 key。
