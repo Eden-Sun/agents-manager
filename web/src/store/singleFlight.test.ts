@@ -63,3 +63,14 @@ test('acceptStateSeq drops older snapshots and keeps newer / equal ones', () => 
   assert.equal(acceptStateSeq(10, 9), null)
   assert.equal(acceptStateSeq(10, Number.NaN), 10)
 })
+
+test('singleFlight: a call made after the last loop check but before the flight is cleared still starts a run', async () => {
+  let runs = 0
+  const refresh = singleFlight(async () => { runs++ })
+  const first = refresh()
+  // 排在迴圈收尾之後、清 inflight 之前：這個呼叫不能被當成「合併進已經不會再跑的那一趟」而吞掉。
+  queueMicrotask(() => { void refresh() })
+  await first
+  await new Promise((r) => setImmediate(r))
+  assert.equal(runs, 2)
+})
