@@ -186,7 +186,7 @@ export function TurnErrorBadge({ botId }: { botId: string }) {
                 ? '額度還沒重置，重送只會再被拒絕一次；先換模型'
               : busy
                 ? '它正在忙，等這一輪停下來再重送'
-                : `重送：${target.text.slice(0, 60) || `（${target.attachments.length} 個附件）`}`
+                : `重送：${Array.from(target.text).slice(0, 60).join('') || `（${target.attachments.length} 個附件）`}`
           }
           onClick={resend}
         >
