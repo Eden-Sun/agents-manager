@@ -2803,7 +2803,6 @@ export class MockTransport implements Transport {
         }, 4000)
       } else needs_restart = false
     }
-    if (needs_restart && bot.kind === 'grok' && only('effort') && bot.effort) needs_restart = false
     if (needs_restart && bot.kind === 'grok' && (only('model') || only('model', 'effort')) && bot.model) needs_restart = false
     if (needs_restart && bot.kind === 'claude' && only('model') && bot.model) needs_restart = false
     if (needs_restart && bot.kind === 'claude' && only('effort') && bot.effort) needs_restart = false
