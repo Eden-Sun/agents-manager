@@ -438,6 +438,13 @@ mod registry_tests {
 
         assert!(registry.take_for_turn("run-1", "turn-1").is_none());
     }
+
+    #[test]
+    fn issue_1670_registry_is_private_to_each_test_thread() {
+        // 別的測試（另一條執行緒）留下的條目，不能被這條測試的清掃算進去（#1670：全進程共用 static 會互踩）。
+        std::thread::spawn(|| note("run-left-by-another-test", pending(Instant::now()))).join().unwrap();
+        assert_eq!(pending_count(), 0, "別的測試留下的 prompt 不屬於這條測試的 registry");
+    }
 }
 
 /// 一次檢查的結論。
