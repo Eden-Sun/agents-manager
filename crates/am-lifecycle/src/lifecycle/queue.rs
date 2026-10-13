@@ -314,7 +314,7 @@ async fn queued_from_the_user(app: &impl crate::capabilities::Db, turn: &db::Tur
 
 /// Undo a `queued -> in_flight` claim that never became a delivery, and arm a retry timer for it —
 /// the same backoff and retry limit as any other put-back (`defer_queued_turn`). Bot lock held and
-/// only for a turn this flush claimed, so `turns_one_queued` cannot be violated.
+/// only for a turn this flush claimed, so the queued-slot unique indexes (`turns_one_queued_user`/`_daemon`) cannot be violated.
 /// 寫不進去回 `Err`，不當成放回去了（#158）：flush 經 [`put_back_or_owe`] 記成欠著，由 `owed_delivery` 補。
 pub async fn put_back<C: QueueContext>(app: &C, bot_id: &str, conv: &str, turn_id: &str, reason: &str, wait_key: &str) -> anyhow::Result<()> {
     match defer_queued_turn(app, conv, turn_id, reason, wait_key).await? {
@@ -2094,7 +2094,8 @@ mod flush_queue_tests {
         let app = f.env.app.clone();
         db::set_pane_typed(app.db(), &f.run_id).await.unwrap();
         f.env.herdr.live_pane("pane-1", crate::testing::LivePane { width: Some(120), ..Default::default() });
-        sqlx::query("DROP INDEX turns_one_queued").execute(app.db()).await.unwrap();
+        sqlx::query("DROP INDEX turns_one_queued_user").execute(app.db()).await.unwrap();
+        sqlx::query("DROP INDEX turns_one_queued_daemon").execute(app.db()).await.unwrap();
 
         let oldest = chrono::Utc::now() - chrono::Duration::seconds(5);
         let created = |seconds: i64| {

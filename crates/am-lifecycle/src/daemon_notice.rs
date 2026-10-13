@@ -1,6 +1,6 @@
 //! daemon 自己產生、排進佇列的通知（#562）：子 agent 停在 blocked（`child_alerts`）、重啟後的續行提示（`resume_nudge`）。
 //!
-//! 它們不是使用者送的、也不是 AGM 派工，卻跟那些共用同一條佇列（每個對話最多一筆 queued）。一則通知送不進去時，
+//! 它們不是使用者送的、也不是 AGM 派工，卻跟那些共用同一條佇列（#1685 起排隊槽分兩條：通知一條、使用者／AGM／別顆 bot 一條，互不擋；每條每個對話最多一筆 queued）。一則通知送不進去時，
 //! 照一般 prompt 的重試上限（12 次）要擋約 40 分鐘，後面的使用者訊息一直排不到。所以：
 //! - 放回佇列的上限短得多（[`RETRY_LIMIT`]），用完就收成 failed＋一則 system 說明，讓佇列往下走；
 //! - `POST /api/turns/{id}/withdraw` 可以撤回還在排的這一種（使用者訊息、AGM 派工照舊 409）。
@@ -104,12 +104,11 @@ mod tests {
         let app = env.app.clone();
         flush_times(&app, &bot, &turn, RETRY_LIMIT).await;
         assert_eq!(status(&app, &turn).await.0, "queued", "上限之內照常放回");
-        assert!(queue_turn(&app, &conv, Some("web-behind")).await.is_err(), "它還佔著這個對話唯一的排隊名額");
         flush_times(&app, &bot, &turn, 1).await;
         assert_eq!(status(&app, &turn).await, ("failed".into(), "failed".into()));
         let notes = system_notes(&app, &turn).await;
         assert!(notes.len() == 1 && notes[0].contains("daemon 自動通知") && notes[0].contains("composer_busy"), "{notes:?}");
-        assert!(queue_turn(&app, &conv, Some("web-behind")).await.is_ok(), "讓路：後面的訊息排得進來");
+        assert!(queue_turn(&app, &conv, Some("web-behind")).await.is_ok(), "讓路：後面的訊息排得進來（#1685 起通知佔自己那一條，使用者的訊息本來就排得進來）");
         assert_eq!(env.herdr.methods().iter().filter(|m| m.starts_with("pane.send")).count(), 0, "從頭到尾沒打過字");
 
         let (env, bot, _, turn) = stuck_head(Some("web-1234")).await;
@@ -141,6 +140,17 @@ mod tests {
         sqlx::query("UPDATE turns SET status='in_flight', run_id=? WHERE id=?").bind(&run).bind(&sending).execute(&app.db).await.unwrap();
         assert!(matches!(withdraw_turn(&app, &sending).await, Err(LcError::Conflict(_))), "已經在送的撤不回來");
         assert_eq!(status(&app, &sending).await.0, "in_flight");
+    }
+
+    /// #1685：排隊槽的 SQL 述詞（`db::daemon_notice_sql`，決定排哪一條槽）跟 `is_daemon_notice`／`PREFIXES` 必須同進同出。
+    #[tokio::test]
+    async fn the_queue_lane_sql_agrees_with_the_prefixes() {
+        let e = tt::env().await;
+        for crid in [Some("child-done:01A:01TURN"), Some("child-blocked:01A:3:ff"), Some("resume-nudge:01RUN"), Some("web-1234"), Some("agm-1"), Some("child-doneX"), None] {
+            let sql = format!("SELECT {} FROM (SELECT ? AS client_request_id)", db::daemon_notice_sql(""));
+            let lane: i64 = sqlx::query_scalar(&sql).bind(crid).fetch_one(&e.app.db).await.unwrap();
+            assert_eq!(lane == 1, is_daemon_notice(crid), "{crid:?}");
+        }
     }
 
     #[test]
