@@ -1084,7 +1084,7 @@ bot 或 active Run 不存在 404。
 - `expires_at` = mtime 與 ctime（檔案搬進 outbox 的時間）較晚的那個 + `ttl_secs`（`modified` 仍是 mtime）；`remaining_secs` 是回應當下還剩幾秒，到期是 0（AGM 的 `com.agm.outbox-gc` 每 10 分鐘才清一次，0 的檔案還會出現一下）。前端從回應那一刻往下扣，不拿瀏覽器時鐘比 `expires_at`。
 - **一律不列**：隱藏檔、資料庫與旁檔（檔名含 `.sqlite`，或 `.db` 結尾／`.db-`／`.db.`）、金鑰與憑證（`.pem` `.key` `.p12` `.pfx` `.jks` `.keystore` `.ppk` `.kdbx` `.env` `.token` `.keychain`、`id_rsa*` 等，以及 `auth.json`、`credentials.json`、`application_default_credentials.json`、`hosts.yml`、`ui-token`），以及檔頭是 `SQLite format 3` 或 PEM 私鑰的檔案。規則本來就禁止放這些，這是第二道。
 - 目錄不存在（還沒寫過、被清理收掉）→ `200` 空清單。bot 不存在 404。
-- **遠端主機的 bot**：outbox 在那台機器上（`~/<remote root>/outbox/<bot_id>/`），daemon 走 ssh 列，回應多一個 `host`；列一般檔（含子資料夾裡的：`name` 為相對路徑，深度上限同本機，不進符號連結目錄），symlink／hardlink 與私鑰／憑證／DB 一樣不列；列表與下載都從已驗證的 fd 讀，硬連結要求 link count 為 1；列表時順手刪掉超過 `ttl_secs` 的檔（遠端沒有 AGM 的 gc）。outbox 是符號連結 → `reason:"outbox_untrusted"`；連不上那台 → `200 {"files":[],"ttl_secs":3600,"reason":"outbox_remote_unreachable","host":…}`。舊版 daemon 回的 `reason:"outbox_remote"` 已不再出現。
+- **遠端主機的 bot**：outbox 在那台機器上（`~/<remote root>/outbox/<bot_id>/`），daemon 走 ssh 列，回應多一個 `host`；列一般檔（含子資料夾裡的：`name` 為相對路徑，深度上限同本機，不進符號連結目錄），symlink／hardlink 與私鑰／憑證／DB 一樣不列；列表與下載都從已驗證的 fd 讀，硬連結要求 link count 為 1；macOS 的 `lsof` 驗證使用實際開啟 fd 的 shell PID（含管線子 shell）；列表時順手刪掉超過 `ttl_secs` 的檔（遠端沒有 AGM 的 gc）。outbox 是符號連結 → `reason:"outbox_untrusted"`；連不上那台 → `200 {"files":[],"ttl_secs":3600,"reason":"outbox_remote_unreachable","host":…}`。舊版 daemon 回的 `reason:"outbox_remote"` 已不再出現。
 - 本機的 `outbox` 或 `<bot_id>` 是符號連結、擁有者跟資料目錄不同，或遠端 outbox 路徑任一元件是符號連結、無法列舉或清單回應缺少完整協定標記 → `200 {"files":[],"ttl_secs":3600,"reason":"outbox_untrusted"}`，下載 404：界線不能跟著連結搬到別處（例如 `~/.codex`），也不把遠端讀取失敗或截斷輸出當成空清單。
 
 ### `GET /api/bots/{id}/outbox/file?path=<相對路徑>`

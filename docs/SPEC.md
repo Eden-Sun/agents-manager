@@ -2204,6 +2204,7 @@ pid 不拿去對 listen port。agy 的登入 TUI 會在 127.0.0.1 自己開兩�
 - **env**：本機 bot 啟動時 daemon `mkdir -p` 並注入 `AM_OUTBOX=<絕對路徑>`。跟 `AM_DATA_DIR` 一樣是保留變數：
   在 identity.env／bot.env 合併**之後**才由 daemon 蓋回去（被改掉的話 bot 寫到別處，使用者看不到）。
   herdr shim 的轉發清單帶 `AM_OUTBOX`（§6.5b），子 pane 繼承母 bot 的 outbox。
+- 遠端 macOS 列表的 fd 身分驗證以實際持有 fd 的 shell PID 呼叫 `lsof`；管線子 shell 的 `$$` 仍是母 shell PID，不能用它查子 shell 開啟的檔案。
 - **遠端主機的 bot**（使用者 2026-10-01）：`AM_OUTBOX` 指到**那台上**的 `~/<remote root>/outbox/<bot_id>/`（跟 bot 目錄同一個實例根，
   bot.env 的自訂值一樣蓋掉；目錄由 bot 寫檔前自己 `mkdir -p`）。網頁列表與下載由 daemon 走 ssh（`outbox_remote`）：列一般檔，含子資料夾裡的（相對路徑、深度上限同本機、不進符號連結目錄；
   符號連結不算；遠端 outbox 路徑任一元件是符號連結就整個不列），擋檔名（資料夾名也算）與內容的規則同本機；下載收相對路徑（逐段驗證、逐層確認不是符號連結），內容以 base64 傳回、大小上限同本機。清理前逐段拒絕符號連結，進入已驗證目錄後用相對路徑清理，避免沿父層符號連結刪到外面。列檔與下載都先把檔案開在 fd 3，再確認路徑與 fd 3 指向同一個檔、拒絕硬連結（`stat -c %h`／`stat -f %l` 必須為 1）。GNU Linux 用 `/proc/self/fd/3` 確認已開啟 fd 的實際路徑仍是 outbox 項目，再以 `-ef` 比 device＋inode；macOS 的 `/dev/fd/N` 經 devfs 顯示時 device 不同，改由 `lsof` 確認 fd 3、重新開啟的 fd 4 路徑與實際 device＋inode 都吻合；無法確認 identity 時一律 fail closed。下載只從 fd 3 讀，並用 `head -c <上限+1> <&3` 封頂（超過由 daemon 判 `file_too_large`）；開檔時 `$F` 若是連結、之後被換回一般檔案，仍會因 identity 不符而拒絕。
