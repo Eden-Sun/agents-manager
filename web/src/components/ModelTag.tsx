@@ -1,7 +1,7 @@
 import { useStore } from '../store/store'
 import { effortLabel, effortShort } from '../api/types'
 import { shortModel } from '../lib/shortModel'
-import { driftTitle, runtimeDrift, runtimeSettingsKnown } from '../lib/runtimeDrift'
+import { driftTitle, runningFast, runtimeDrift, runtimeSettingsKnown } from '../lib/runtimeDrift'
 
 /**
  * The model a bot is on, with its reasoning effort. Separator `-` (`opus-高`) is user-specified — do not
@@ -19,7 +19,7 @@ export function ModelTag({ botId, short = false }: { botId: string; /** 精簡�
   const effort = reported?.effort ?? (live ? run!.runtime_effort : bot.effort)
   const chipExtra = effort ? effortLabel(effort) : ''
   const shownExtra = effort ? (short ? effortShort(effort) : chipExtra) : ''
-  const fast = reported?.fast_mode ?? (live ? (run!.runtime_fast ?? bot.fast) : bot.fast)
+  const fast = runningFast(bot, run)
   const detail = [chipExtra, fast ? 'fast' : null, reported?.thinking ? 'thinking' : null].filter(Boolean).join(' · ')
 
   // Null model = CLI default: show the reported `model_name`, not `CLI 預設` that reads as another model (2026-09-08).

@@ -79,6 +79,9 @@
   沒指定強度時亮的就是這一級。兩者不會標在同一顆上。
 - **codex fast 在 logo 上疊閃電**（2026-09-22 使用者）：正在跑的 codex 是 fast（priority tier）時，kind logo 右下（手機右上，右下會被額度列蓋掉）疊一個琥珀色 ⚡，
   來源跟 model chip 的「· fast」同一份（`status.fast_mode`，實際在跑的，不是設定值）。fast 額度燒得快，只寫在 chip 尾巴太容易漏看。
+  **側欄列也畫**（#1682，2026-10-13 使用者截圖：子 agent 列 `so-outbox` fast 開著卻看不出來）：主列與子 agent 精簡列的 kind logo 同樣疊閃電，來源與 model tag 的 tooltip 共用 `runningFast`
+  （`status.fast_mode` → `run.runtime_fast` → 設定值）。不做在 model tag 上——窄列的 tag 會被截斷，fast 擠在強度後面第一個被切；logo 在最左邊不受影響。fast 關著不畫、不佔位；
+  列高固定，閃電比標題列小一點（11px）、少凸出去一些，免得被精簡列的 `overflow-y: hidden` 切掉。這些列以前就沒有 fast 標示（只在 tooltip），不是回歸。
 - 更新 chip 只寫 `${kind} 有更新`；額度列的更新 chip 有列到當前 bot（閒置或在忙那組都算）就不畫，免得同一個 ⌃⌃ 出現兩次（2026-09-19 使用者：「logo 重工了」）；只剩非 claude 的會畫。這顆自己要套用走 context bar 版本號旁的「升級」。
 - **忙的時候改 fast 不問重啟**（#712，2026-09-28 使用者：「codex 的 fast 切換根本不用重啟」）：codex 回合中照樣吃 `/fast`，所以只差 fast 時徽章是「⟳ fast 當場套用」，
   忙也直接切、不跳重啟確認框；輸入框有字（打 `/fast` 會接在草稿後面一起送出）或改到 model／effort 才排到回合結束，徽章變 `⏳ fast待套用`（按不動，tooltip 寫「回合結束後自動套用」），
