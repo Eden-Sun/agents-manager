@@ -3900,6 +3900,10 @@ export class MockTransport implements Transport {
   private abandon(turnId: string) {
     const turn = this.turns.find((t) => t.id === turnId)
     if (!turn) throw new ApiError(404, { reason: 'turn not found' }, 'not found')
+    // daemon：只收在飛或送達未知的回合（API.md §4，#16 的 CAS）；已結束的不改寫、不動 bot 狀態。
+    if (!(turn.status === 'in_flight' || turn.delivery === 'unknown')) {
+      throw new ApiError(409, { error: 'conflict', reason: 'turn is neither in-flight nor of unknown delivery', turn_id: turnId }, 'conflict')
+    }
     this.updateTurn(turn, { status: 'failed', completed_at: now() })
     this.setIdle(turn.bot_id)
     return { ok: true }
