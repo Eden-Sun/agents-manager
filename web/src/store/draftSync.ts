@@ -195,6 +195,7 @@ export class DraftSync {
     const text = this.deps.read(key)
     const forgetEpoch = this.forgetEpoch.get(key) ?? 0
     this.inflight.add(key)
+    const knownAtSend = this.knownRev(key)
     try {
       const { rev } = await this.deps.put(key, text, this.deps.clientId)
       const observedRev = this.knownRev(key)
@@ -202,8 +203,11 @@ export class DraftSync {
       this.touched?.add(key)
       this.settle(key)
       if ((this.forgetEpoch.get(key) ?? 0) !== forgetEpoch && (this.localEpoch.get(key) ?? 0) === 0) return
-      if (this.deps.read(key) === text) this.dirty.delete(key)
-      else if ((this.localEpoch.get(key) ?? 0) > (this.acceptedEpoch.get(key) ?? 0)) {
+      if (this.deps.read(key) === text) {
+        // 在飛期間來的遠端版本比這次寫入新、又因為有焦點被略過：daemon 是遠端那版，本機這段字不能當成已同步，依本機優先再送一次（#1665）。
+        if (observedRev > rev && observedRev > knownAtSend && this.dirty.has(key)) this.schedule(key, text === '' ? 0 : this.debounceMs)
+        else this.dirty.delete(key)
+      } else if ((this.localEpoch.get(key) ?? 0) > (this.acceptedEpoch.get(key) ?? 0)) {
         // 新的本機輸入尚未被接受的遠端版本取代，仍要排隊送出。
         this.dirty.add(key)
         this.schedule(key, this.deps.read(key) === '' ? 0 : this.debounceMs)

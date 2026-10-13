@@ -22,6 +22,8 @@ function rig(opts: { debounceMs?: number } = {}) {
   const cleared: string[] = []
   const gate = {
     hold: null as null | Promise<void>,
+    /** daemon 已經 commit，只把 HTTP 回應延後（PUT 回應晚到的時序）。 */
+    replyHold: null as null | Promise<void>,
     fetchHold: null as null | Promise<void>,
     fail: false,
     failWith: null as unknown,
@@ -51,6 +53,7 @@ function rig(opts: { debounceMs?: number } = {}) {
       const rev = (cur?.rev ?? 0) + 1
       server.set(key, { text, rev })
       gate.onCommit?.(key, text, rev)
+      if (gate.replyHold) await gate.replyHold
       return { rev }
     },
     fetchAll: async () => {
@@ -200,6 +203,62 @@ test('在飛 PUT 較晚提交時，遠端清空也不會讓同 rev 的畫面與 
   await r.sync.load()
   assert.equal(r.local['bot:a'], 'desktop-A')
   assert.equal(r.puts.length, 1)
+})
+
+/**
+ * 焦點在輸入框、本機 A 已被 daemon commit 為 rev1，但 PUT 回應還沒回來；這段時間 daemon 又提交了較新的遠端版本，
+ * 輸入框因為有焦點而略過它。PUT 回應之後，本機不能把 A 當成已同步（daemon 其實是遠端那版）。
+ */
+async function focusedRemoteSkippedBeforeReply(
+  remote: { text: string; rev: number },
+  opts: { echoFirst?: boolean; blurBeforeReply?: boolean } = {},
+) {
+  const r = rig({ debounceMs: 10 })
+  let releaseReply = () => {}
+  r.gate.replyHold = new Promise<void>((res) => (releaseReply = res))
+  r.focus.add('bot:a')
+  r.type('bot:a', 'desktop-A')
+  await tick(30)
+  assert.deepEqual(r.server.get('bot:a'), { text: 'desktop-A', rev: 1 }, 'PUT(A) 已 commit，只差回應')
+  if (opts.echoFirst) r.sync.remote({ key: 'bot:a', text: 'desktop-A', rev: 1, client_id: 'me' })
+  r.server.set('bot:a', remote)
+  r.sync.remote({ key: 'bot:a', ...remote, client_id: 'phone' })
+  assert.equal(r.local['bot:a'], 'desktop-A', '有焦點且有未同步修改：略過遠端')
+  if (opts.blurBeforeReply) r.focus.delete('bot:a')
+  r.gate.replyHold = null
+  releaseReply()
+  await tick(30)
+  return r
+}
+
+function assertConvergedOnDesktopA(r: ReturnType<typeof rig>) {
+  assert.equal(r.local['bot:a'], 'desktop-A')
+  assert.deepEqual(r.server.get('bot:a'), { text: 'desktop-A', rev: 3 }, '本機 A 要被再送一次，daemon 與畫面一致')
+  assert.equal(r.sync.knownRev('bot:a'), 3)
+  assert.equal(r.sync.isDirty('bot:a'), false)
+  assert.deepEqual(r.puts.map((p) => p.text), ['desktop-A', 'desktop-A'])
+}
+
+test('有焦點略過較新的遠端版本、PUT 回應晚到：本機 A 不能被當成已同步，再送一次（#1665 回歸）', async () => {
+  const r = await focusedRemoteSkippedBeforeReply({ text: 'phone-B', rev: 2 })
+  assertConvergedOnDesktopA(r)
+  await r.sync.load()
+  assert.equal(r.local['bot:a'], 'desktop-A', '同 rev 的 load 不得留下不同內容')
+})
+
+test('有焦點略過的遠端是清空：回應晚到後仍收斂到本機 A（#1665 回歸）', async () => {
+  const r = await focusedRemoteSkippedBeforeReply({ text: '', rev: 2 })
+  assertConvergedOnDesktopA(r)
+})
+
+test('有焦點略過較新的遠端版本，自己的回音先到：仍收斂到本機 A（#1665 回歸）', async () => {
+  const r = await focusedRemoteSkippedBeforeReply({ text: 'phone-B', rev: 2 }, { echoFirst: true })
+  assertConvergedOnDesktopA(r)
+})
+
+test('有焦點略過較新的遠端版本，回應前焦點離開：仍收斂到本機 A（#1665 回歸）', async () => {
+  const r = await focusedRemoteSkippedBeforeReply({ text: 'phone-B', rev: 2 }, { blurBeforeReply: true })
+  assertConvergedOnDesktopA(r)
 })
 
 test('在飛 PUT 失敗時保留已接受的遠端版本，不排空的重試', async () => {
