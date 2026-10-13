@@ -8,8 +8,8 @@
 //!
 //! 順序刻意把「回不去的一步」排最後，前面每一步失敗都原樣收回：
 //! 1. 驗證（只收 child、claude、本機、沒有孫 agent、名字可用）→ 2. 找 session 與 transcript →
-//! 3. 複製 transcript → 4. 停掉 child（停不掉就收回複製、不動）→ 5. 建 user bot 並種下 session →
-//! 6. native resume 啟動（失敗就把新 bot 與複製收回）→ 7. 收掉 child 紀錄。
+//! 3. 預先複製 transcript 做停機前檢查 → 4. 停掉 child（停不掉就收回複製、不動）→ 4a. 驗證來源穩定後原子更新本次擁有的 staged 檔 →
+//! 5. 建 user bot 並種下 session → 6. native resume 啟動（失敗就把新 bot 與複製收回）→ 7. 收掉 child 紀錄。
 //!
 //! child 的 pane 是母 agent 開的、daemon 重開不了它，所以第 4 步之後 child 不會自己回來；但 session 已經記在
 //! child 最後一個 run 上（步驟 4 之前寫），同一個請求可以原樣再送一次。
@@ -134,6 +134,41 @@ struct Staged {
     /// 這次真的新建的檔（收回時只刪這些）。
     created: Vec<PathBuf>,
     dest: PathBuf,
+    source_identity: Option<FileIdentity>,
+    dest_identity: Option<FileIdentity>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub(crate) struct FileIdentity {
+    pub(crate) dev: u64,
+    pub(crate) ino: u64,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct FileVersion {
+    identity: FileIdentity,
+    len: u64,
+    mtime: i64,
+    mtime_nsec: i64,
+    ctime: i64,
+    ctime_nsec: i64,
+}
+
+fn file_identity(file: &std::fs::File) -> std::io::Result<FileIdentity> {
+    let m = file.metadata()?;
+    Ok(FileIdentity { dev: m.dev(), ino: m.ino() })
+}
+
+fn file_version(file: &std::fs::File) -> std::io::Result<FileVersion> {
+    let m = file.metadata()?;
+    Ok(FileVersion {
+        identity: FileIdentity { dev: m.dev(), ino: m.ino() },
+        len: m.len(),
+        mtime: m.mtime(),
+        mtime_nsec: m.mtime_nsec(),
+        ctime: m.ctime(),
+        ctime_nsec: m.ctime_nsec(),
+    })
 }
 
 impl Staged {
@@ -155,7 +190,7 @@ impl Staged {
 fn stage_transcript(src: &FsPath, dest_dir: &FsPath, session_id: &str) -> Result<Staged, LcError> {
     use lifecycle::transcript_stage as ts;
     let dest = dest_dir.join(format!("{session_id}.jsonl"));
-    let mut staged = Staged { created: vec![], dest: dest.clone() };
+    let mut staged = Staged { created: vec![], dest: dest.clone(), source_identity: None, dest_identity: None };
     let bad = |e: std::io::Error| refuse("transcript_copy_failed", json!({"message": e.to_string()}));
     if !ts::is_claude_transcript(src) {
         return Err(refuse("transcript_copy_failed", json!({"message": "來源不是 projects/<cwd>/<id>.jsonl 的一般檔"})));
@@ -168,6 +203,7 @@ fn stage_transcript(src: &FsPath, dest_dir: &FsPath, session_id: &str) -> Result
     let parts = [std::ffi::OsStr::new("projects"), cwd_key];
     let dest_fd = crate::trusted_open::create_private_bound_dirs(config_dir, &parts).map_err(bad)?;
     let src_fd = crate::transcript_read::open_regular(src).map_err(bad)?;
+    staged.source_identity = Some(file_identity(&src_fd).map_err(bad)?);
     let dest_name = dest.file_name().ok_or_else(|| refuse("transcript_copy_failed", json!({"message": "目的 transcript 名稱不存在"})))?;
     let current = match crate::trusted_open::open_entry_in(&dest_fd, dest_name) {
         Ok(f) => Some(f),
@@ -203,7 +239,8 @@ fn stage_transcript(src: &FsPath, dest_dir: &FsPath, session_id: &str) -> Result
         }
         return Err(bad(e));
     }
-    staged.created.push(dest);
+    staged.created.push(dest.clone());
+    staged.dest_identity = Some(file_identity(&crate::trusted_open::open_entry_in(&dest_fd, dest_name).map_err(bad)?).map_err(bad)?);
     // 同名附屬目錄（subagent 對話等）：沒有就跳過，複製失敗不影響主對話，但不留下半份目錄。
     if let (Some(parent), Some(stem)) = (src.parent(), src.file_stem()) {
         let cs = parent.join(stem);
@@ -221,6 +258,120 @@ fn stage_transcript(src: &FsPath, dest_dir: &FsPath, session_id: &str) -> Result
         }
     }
     Ok(staged)
+}
+
+fn validate_complete_transcript(file: &mut std::fs::File) -> std::io::Result<()> {
+    use std::io::{BufRead as _, Seek as _, SeekFrom};
+    if file.metadata()?.len() == 0 {
+        return Err(std::io::Error::new(std::io::ErrorKind::InvalidData, "empty Claude transcript"));
+    }
+    file.seek(SeekFrom::Start(0))?;
+    let mut reader = std::io::BufReader::new(file);
+    let mut line = Vec::new();
+    loop {
+        line.clear();
+        if reader.read_until(b'\n', &mut line)? == 0 { return Ok(()); }
+        if line.last() != Some(&b'\n') {
+            return Err(std::io::Error::new(std::io::ErrorKind::InvalidData, "transcript ends with an incomplete JSONL record"));
+        }
+        line.pop();
+        if line.last() == Some(&b'\r') { line.pop(); }
+        if !line.is_empty() {
+            serde_json::from_slice::<serde_json::Value>(&line)
+                .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, format!("incomplete JSONL record: {e}")))?;
+        }
+    }
+}
+
+/// 停止 transcript writer 後，把這次 promote 擁有的 staged inode 原子更新成最後一致的來源。
+/// 舊 intent 沒有 ownership metadata 時，只能在目標已等於來源時完成，不猜測是否可以覆寫。
+pub(crate) fn finalize_staged_transcript(
+    src: &FsPath,
+    dest: &FsPath,
+    session_id: &str,
+    source_identity: Option<FileIdentity>,
+    staged_identity: Option<FileIdentity>,
+) -> Result<(), LcError> {
+    use lifecycle::transcript_stage as ts;
+    use std::io::Write as _;
+    let bad = |e: std::io::Error| refuse("transcript_copy_failed", json!({"message": e.to_string()}));
+    if !ts::is_claude_transcript(src) || src.file_stem() != Some(std::ffi::OsStr::new(session_id)) {
+        return Err(refuse("transcript_copy_failed", json!({"message": "最終來源不是預期 session 的一般 transcript"})));
+    }
+    let mut source = crate::transcript_read::open_regular(src).map_err(bad)?;
+    let before = file_version(&source).map_err(bad)?;
+    if source_identity.is_some_and(|identity| identity != before.identity) {
+        return Err(refuse("transcript_copy_failed", json!({"message": "來源 transcript 身分在 staging 後改變"})));
+    }
+    let Some(dest_dir) = dest.parent() else { return Err(refuse("transcript_copy_failed", json!({"message": "目的 transcript 沒有目錄"}))) };
+    let Some(projects_dir) = dest_dir.parent().filter(|p| p.file_name() == Some(std::ffi::OsStr::new("projects"))) else {
+        return Err(refuse("transcript_copy_failed", json!({"message": "目的目錄不是 projects/<cwd>"})));
+    };
+    let Some(config_dir) = projects_dir.parent() else { return Err(refuse("transcript_copy_failed", json!({"message": "目的 projects 沒有帳號根目錄"}))) };
+    let Some(cwd_key) = dest_dir.file_name() else { return Err(refuse("transcript_copy_failed", json!({"message": "目的 cwd 不存在"}))) };
+    let parts = [std::ffi::OsStr::new("projects"), cwd_key];
+    let dest_fd = crate::trusted_open::open_bound_dir(config_dir, &parts, None).map_err(bad)?;
+    let dest_name = dest.file_name().ok_or_else(|| refuse("transcript_copy_failed", json!({"message": "目的 transcript 名稱不存在"})))?;
+    let existing = crate::trusted_open::open_entry_in(&dest_fd, dest_name).map_err(bad)?;
+    let current_identity = file_identity(&existing).map_err(bad)?;
+    let contents_equal = |left: &std::fs::File, right: &std::fs::File| -> Result<bool, LcError> {
+        let (lm, rm) = (left.metadata().map_err(bad)?, right.metadata().map_err(bad)?);
+        if lm.len() != rm.len() { return Ok(false); }
+        Ok(ts::is_prefix_of(left, right).map_err(bad)? && ts::is_prefix_of(right, left).map_err(bad)?)
+    };
+
+    // Already-final copies make retries idempotent; source==destination is a no-op too.
+    if contents_equal(&source, &existing)? {
+        validate_complete_transcript(&mut source).map_err(bad)?;
+        if file_version(&source).map_err(bad)? != before {
+            return Err(refuse("transcript_copy_failed", json!({"message": "來源 transcript 在最終驗證期間仍有變動"})));
+        }
+        return Ok(());
+    }
+    let Some(expected_dest) = staged_identity else {
+        return Err(refuse("transcript_copy_failed", json!({"message": "目的 transcript 不屬於這次 promote，且尚未包含最後來源"})));
+    };
+    if current_identity != expected_dest {
+        return Err(refuse("transcript_copy_failed", json!({"message": "staged transcript 身分在 promote 後改變"})));
+    }
+    if !ts::is_prefix_of(&existing, &source).map_err(bad)? {
+        return Err(refuse("transcript_copy_failed", json!({"message": "staged transcript 與來源內容分岔，拒絕覆寫"})));
+    }
+
+    let mut tmp_name = std::ffi::OsString::from(".promote-final-");
+    tmp_name.push(db::ulid());
+    tmp_name.push(".tmp");
+    let copied = (|| {
+        let mut out = crate::trusted_open::create_new_file_in(&dest_fd, &tmp_name, 0o600)?;
+        std::io::copy(&mut source, &mut out)?;
+        out.flush()?;
+        out.sync_all()?;
+        drop(out);
+        let mut staged = crate::trusted_open::open_entry_in(&dest_fd, &tmp_name)?;
+        validate_complete_transcript(&mut staged)?;
+        if file_version(&source)? != before {
+            return Err(std::io::Error::new(std::io::ErrorKind::Other, "source transcript changed during final copy"));
+        }
+        let source_now = crate::transcript_read::open_regular(src)?;
+        if file_version(&source_now)? != before {
+            return Err(std::io::Error::new(std::io::ErrorKind::Other, "source transcript path changed during final copy"));
+        }
+        let current = crate::trusted_open::open_entry_in(&dest_fd, dest_name)?;
+        if file_identity(&current)? != expected_dest {
+            return Err(std::io::Error::new(std::io::ErrorKind::AlreadyExists, "staged transcript identity changed before publish"));
+        }
+        crate::trusted_open::rename_in(&dest_fd, &tmp_name, dest_name)?;
+        let published = crate::trusted_open::open_entry_in(&dest_fd, dest_name)?;
+        if file_identity(&published)? != file_identity(&staged)? {
+            return Err(std::io::Error::new(std::io::ErrorKind::Other, "final transcript publication could not be verified"));
+        }
+        Ok::<(), std::io::Error>(())
+    })();
+    if let Err(e) = copied {
+        let _ = crate::trusted_open::unlink_in(&dest_fd, &tmp_name);
+        return Err(bad(e));
+    }
+    Ok(())
 }
 
 /// 把 session 記在 child 的 run 上。已經有記錄就必須是同一段 session、transcript 還在；否則不放行。
@@ -384,7 +535,8 @@ async fn promote_detached(app: Arc<App>, id: String, req: PromoteReq) -> Result<
     let new_id = db::ulid();
     let payload = json!({
         "child_id": id, "new_id": new_id, "project_id": child.project_id, "name": name, "model": model, "effort": effort,
-        "session_id": located.session_id, "dest": staged.dest.to_string_lossy(),
+        "session_id": located.session_id, "source": located.src.to_string_lossy(), "dest": staged.dest.to_string_lossy(),
+        "source_identity": staged.source_identity, "staged_identity": staged.dest_identity,
         "created": staged.created.iter().map(|p| p.to_string_lossy().to_string()).collect::<Vec<_>>(),
     });
     let intent = match crate::delete_intents::begin(&app, "promote", &id, LOCAL_HOST, &payload).await {
@@ -413,6 +565,25 @@ async fn promote_detached(app: Arc<App>, id: String, req: PromoteReq) -> Result<
             return Err(refuse("stop_failed", json!({"message": "子 agent 停不掉，什麼都沒動。"})));
         }
     }
+    #[cfg(test)]
+    lifecycle::race_point::hit("promote_before_final_transcript", &id).await;
+
+    // 確認 writer 已停止後再讀來源，並原子更新本次 promote 擁有的 staged 檔。
+    let (src, dest, session, source_identity, dest_identity) = (
+        located.src.clone(), staged.dest.clone(), located.session_id.clone(), staged.source_identity, staged.dest_identity,
+    );
+    let finalized = match tokio::task::spawn_blocking(move || finalize_staged_transcript(&src, &dest, &session, source_identity, dest_identity)).await {
+        Ok(result) => result,
+        Err(e) => {
+            crate::promote_intents::spawn_retry(app.clone(), intent.clone(), format!("final transcript sync task failed: {e}"));
+            return Err(refuse("transcript_copy_failed", json!({"message": e.to_string()})));
+        }
+    };
+    if let Err(e) = finalized {
+        crate::promote_intents::spawn_retry(app.clone(), intent.clone(), format!("final transcript sync failed: {e:?}"));
+        return Err(e);
+    }
+
     #[cfg(test)]
     lifecycle::race_point::hit("promote_after_stop", &id).await;
 
@@ -613,7 +784,11 @@ mod tests {
     }
 
     async fn promote(r: &Rig, req: PromoteReq) -> Result<Value, LcError> {
-        let res = promote_bot(State(r.e.app.clone()), Path(r.child.clone()), Extension(crate::api::RequestPrincipal::User), Some(Json(req))).await?;
+        promote_owned(r.e.app.clone(), r.child.clone(), req).await
+    }
+
+    async fn promote_owned(app: Arc<App>, child: String, req: PromoteReq) -> Result<Value, LcError> {
+        let res = promote_bot(State(app), Path(child), Extension(crate::api::RequestPrincipal::User), Some(Json(req))).await?;
         let bytes = axum::body::to_bytes(res.into_body(), 1 << 20).await.unwrap();
         Ok(serde_json::from_slice(&bytes).unwrap())
     }
@@ -716,6 +891,171 @@ mod tests {
         assert_eq!(resume.as_deref(), Some(SID));
 
         assert_eq!(child_state(&r).await, (true, None), "child 收掉、沒有活的 run");
+    }
+
+    #[tokio::test]
+    async fn a_transcript_append_after_staging_is_included_in_the_promoted_session() {
+        let r = rig(true).await;
+        let reached = Arc::new(tokio::sync::Notify::new());
+        let release = Arc::new(tokio::sync::Notify::new());
+        let (r2, go) = (reached.clone(), release.clone());
+        lifecycle::race_point::arm("promote_after_intent", &r.child, move || async move {
+            r2.notify_one();
+            go.notified().await;
+        });
+        let (app, child) = (r.e.app.clone(), r.child.clone());
+        let task = tokio::spawn(async move { promote_owned(app, child, PromoteReq::default()).await });
+        reached.notified().await;
+        use std::io::Write as _;
+        let mut src = std::fs::OpenOptions::new().append(true).open(r.src()).unwrap();
+        writeln!(src, "{{\"type\":\"assistant\",\"message\":\"last-before-stop\"}}").unwrap();
+        drop(src);
+        release.notify_one();
+
+        let out = task.await.unwrap().unwrap();
+        assert!(out["run_id"].is_string(), "{out}");
+        assert_eq!(std::fs::read_to_string(r.dest()).unwrap(), std::fs::read_to_string(r.src()).unwrap(), "seeded resume copy includes the final complete message");
+        assert!(std::fs::read_to_string(r.dest()).unwrap().contains("last-before-stop"));
+        assert!(r.src().is_file(), "source transcript is retained");
+    }
+
+    #[tokio::test]
+    async fn staging_a_transcript_onto_itself_is_a_noop() {
+        let r = rig(true).await;
+        let before = std::fs::read(&r.src()).unwrap();
+        let staged = stage_transcript(&r.src(), r.src().parent().unwrap(), SID).unwrap();
+        assert_eq!(staged.dest, r.src());
+        assert!(staged.created.is_empty());
+        assert_eq!(std::fs::read(r.src()).unwrap(), before);
+    }
+
+    #[tokio::test]
+    async fn promote_recovery_finalizes_the_owned_copy_before_native_resume() {
+        use std::os::unix::fs::MetadataExt as _;
+
+        let r = rig(true).await;
+        let staged = stage_transcript(&r.src(), r.dest().parent().unwrap(), SID).unwrap();
+        let source_meta = std::fs::metadata(r.src()).unwrap();
+        let staged_meta = std::fs::metadata(r.dest()).unwrap();
+        use std::io::Write as _;
+        let mut src = std::fs::OpenOptions::new().append(true).open(r.src()).unwrap();
+        writeln!(src, "{{\"type\":\"assistant\",\"message\":\"recovered-final-message\"}}").unwrap();
+        drop(src);
+        sqlx::query("UPDATE runs SET state = 'stopped', native_session_id = ?, transcript_path = ? WHERE bot_id = ?")
+            .bind(SID)
+            .bind(r.src().to_string_lossy().to_string())
+            .bind(&r.child)
+            .execute(&r.e.app.db)
+            .await
+            .unwrap();
+
+        let new_id = db::ulid();
+        let payload = json!({
+            "new_id": new_id,
+            "name": "kid-recovered",
+            "model": null,
+            "effort": null,
+            "project_id": r.e.project_id,
+            "session_id": SID,
+            "source": r.src().to_string_lossy(),
+            "source_identity": {"dev": source_meta.dev(), "ino": source_meta.ino()},
+            "staged_identity": {"dev": staged_meta.dev(), "ino": staged_meta.ino()},
+            "dest": staged.dest.to_string_lossy(),
+            "created": staged.created.iter().map(|p| p.to_string_lossy().to_string()).collect::<Vec<_>>(),
+        });
+        let intent = crate::delete_intents::begin(&r.e.app, "promote", &r.child, LOCAL_HOST, &payload).await.unwrap();
+        assert!(matches!(crate::promote_intents::drive_once(&r.e.app, &intent).await, crate::runners::restart_intents::Outcome::Finished));
+
+        assert_eq!(std::fs::read_to_string(r.dest()).unwrap(), std::fs::read_to_string(r.src()).unwrap(), "recovery must refresh before seeding or starting");
+        assert!(std::fs::read_to_string(r.dest()).unwrap().contains("recovered-final-message"));
+        let seeded: Option<String> = sqlx::query_scalar("SELECT transcript_path FROM runs WHERE bot_id = ? AND native_session_id = ? ORDER BY rowid DESC LIMIT 1")
+            .bind(&new_id)
+            .bind(SID)
+            .fetch_optional(&r.e.app.db)
+            .await
+            .unwrap();
+        let dest_path = r.dest().to_string_lossy().to_string();
+        assert_eq!(seeded.as_deref(), Some(dest_path.as_str()));
+        assert!(r.src().is_file());
+    }
+
+    #[tokio::test]
+    async fn a_stopped_promote_recovered_before_final_sync_includes_the_last_message() {
+        let r = rig(true).await;
+        let src_path = r.src();
+        lifecycle::race_point::arm("promote_after_intent", &r.child, move || async move {
+            use std::io::Write as _;
+            let mut src = std::fs::OpenOptions::new().append(true).open(src_path).unwrap();
+            writeln!(src, "{{\"type\":\"assistant\",\"message\":\"last-before-recovery\"}}").unwrap();
+        });
+
+        die_at(&r, "promote_before_final_transcript").await;
+        assert_eq!(intent_status(&r.e.app, &r.child).await, vec!["running"]);
+        assert!(!std::fs::read_to_string(r.dest()).unwrap().contains("last-before-recovery"));
+        assert_eq!(child_state(&r).await, (false, None), "child stopped before recovery");
+
+        let app2 = crate::testing::restart_app(&r.e).await;
+        let intent: String = sqlx::query_scalar("SELECT id FROM intents WHERE subject_id = ? AND kind = 'promote'")
+            .bind(&r.child)
+            .fetch_one(&app2.db)
+            .await
+            .unwrap();
+        assert!(matches!(crate::promote_intents::drive_once(&app2, &intent).await, crate::runners::restart_intents::Outcome::Finished));
+        assert_eq!(intent_status(&app2, &r.child).await, vec!["done"]);
+        assert_eq!(std::fs::read_to_string(r.dest()).unwrap(), std::fs::read_to_string(r.src()).unwrap());
+        assert!(std::fs::read_to_string(r.dest()).unwrap().contains("last-before-recovery"));
+        let new_id = app2.cfg.get().await.projects[0].bots[0].id.clone().unwrap();
+        assert!(db::active_run(&app2.db, &new_id).await.unwrap().is_some());
+    }
+
+    #[tokio::test]
+    async fn a_destination_replaced_after_staging_is_never_overwritten() {
+        let r = rig(true).await;
+        let reached = Arc::new(tokio::sync::Notify::new());
+        let release = Arc::new(tokio::sync::Notify::new());
+        let (r2, go) = (reached.clone(), release.clone());
+        lifecycle::race_point::arm("promote_after_intent", &r.child, move || async move {
+            r2.notify_one();
+            go.notified().await;
+        });
+        let (app, child) = (r.e.app.clone(), r.child.clone());
+        let task = tokio::spawn(async move { promote_owned(app, child, PromoteReq::default()).await });
+        reached.notified().await;
+        std::fs::remove_file(r.dest()).unwrap();
+        std::fs::write(r.dest(), "owned by someone else\n").unwrap();
+        release.notify_one();
+
+        let error = task.await.unwrap().unwrap_err();
+        assert_eq!(reason(error), "transcript_copy_failed");
+        assert_eq!(std::fs::read_to_string(r.dest()).unwrap(), "owned by someone else\n");
+        assert_eq!(child_state(&r).await, (false, None));
+        assert!(cfg_bot_names(&r).await.is_empty());
+    }
+
+    #[tokio::test]
+    async fn an_incomplete_final_jsonl_record_cannot_be_promoted() {
+        let r = rig(true).await;
+        let reached = Arc::new(tokio::sync::Notify::new());
+        let release = Arc::new(tokio::sync::Notify::new());
+        let (r2, go) = (reached.clone(), release.clone());
+        lifecycle::race_point::arm("promote_after_intent", &r.child, move || async move {
+            r2.notify_one();
+            go.notified().await;
+        });
+        let (app, child) = (r.e.app.clone(), r.child.clone());
+        let task = tokio::spawn(async move { promote_owned(app, child, PromoteReq::default()).await });
+        reached.notified().await;
+        use std::io::Write as _;
+        let mut src = std::fs::OpenOptions::new().append(true).open(r.src()).unwrap();
+        src.write_all(b"{\"type\":\"assistant\"").unwrap();
+        drop(src);
+        release.notify_one();
+
+        let error = task.await.unwrap().unwrap_err();
+        assert_eq!(reason(error), "transcript_copy_failed");
+        assert_eq!(child_state(&r).await, (false, None));
+        assert!(cfg_bot_names(&r).await.is_empty());
+        assert!(r.src().is_file());
     }
 
     /// #413：收掉 child 走退役的唯一入口，log 留得下是 promote 收的、從哪一行。
@@ -886,7 +1226,7 @@ mod tests {
             .await
             .unwrap();
 
-        let staged = Staged { created: vec![], dest: r.dest() };
+        let staged = Staged { created: vec![], dest: r.dest(), ..Staged::default() };
         let rolled_back = roll_back_new_bot(&app, &new_id, &staged).await;
         assert!(!rolled_back, "停不下來的新 bot 不能算已收回：agent 還在跑");
     }
