@@ -60,7 +60,9 @@ export function PersonaField({ value, onChange, collapsible }: { value: string; 
 /** Small marker shown next to a bot that has a persona; hover = the first 80 chars. */
 export function PersonaMark({ persona }: { persona: string | null }) {
   if (!persona) return null
-  const short = persona.length > 80 ? `${persona.slice(0, 80)}…` : persona
+  // 以 code point 計：`slice` 會把 emoji 的代理對切成兩半（#1702）。
+  const chars = Array.from(persona)
+  const short = chars.length > 80 ? `${chars.slice(0, 80).join('')}…` : persona
   return (
     <span className="persona-mark" role="img" aria-label="有人設" title={`人設：${short}`}>
       <svg viewBox="0 0 16 16" width="1em" height="1em" aria-hidden="true">
