@@ -15,9 +15,14 @@ export interface StartingSend {
   startError: string | null
 }
 
-/** 這顆 bot 有沒有一則「送出時 bot 沒在跑、正在等它起來」的訊息。 */
+/**
+ * 這顆 bot 有沒有一則「送出時 bot 沒在跑、正在等它起來」的訊息。有好幾則時取最早排的（daemon 起來後先送它）：
+ * 頁面回來的 turns 是 created_at 倒序，不能取插入順序的第一個（#1697）。
+ */
 export function startingSend(turns: Record<string, Turn> | undefined, messages: Message[] | undefined): StartingSend | null {
-  const turn = Object.values(turns ?? {}).find((t) => t.status === 'queued' && t.awaitsStart)
+  const turn = Object.values(turns ?? {})
+    .filter((t) => t.status === 'queued' && t.awaitsStart)
+    .sort((a, b) => a.created_at.localeCompare(b.created_at))[0]
   if (!turn) return null
   const msg = (messages ?? []).find((m) => m.turn_id === turn.id && m.role === 'user')
   return {
