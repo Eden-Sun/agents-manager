@@ -4184,7 +4184,8 @@ export class MockTransport implements Transport {
       } else if (k === 'up' || k === 'down') {
         /* 不模擬歷史 */
       } else if (k === 'backspace') {
-        s.typed = s.typed.slice(0, -1)
+        // 以 code point 退一格：emoji 是兩個 UTF-16 單位，只砍一個會留下落單的代理字元。
+        s.typed = [...s.typed].slice(0, -1).join('')
       } else if (k === 'space') {
         // herdr 的鍵名：空白要寫 `space`（`usePaneKeys.herdrKeyFromEvent` 實測過）。
         s.typed += ' '
