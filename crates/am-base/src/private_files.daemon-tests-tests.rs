@@ -33,3 +33,24 @@
         assert_eq!(std::fs::read_to_string(&p).unwrap(), "a\nb\n", "第二次是附加，不是覆蓋");
         let _ = std::fs::remove_dir_all(&dir);
     }
+
+    #[test]
+    fn private_file_helpers_refuse_symlink_targets() {
+        let dir = crate::testing::track(std::env::temp_dir().join(format!("am-private-symlink-{}", crate::db::ulid())));
+        create_private_dir(&dir).unwrap();
+        let append_target = dir.join("append-target");
+        let truncate_target = dir.join("truncate-target");
+        std::fs::write(&append_target, b"keep append target").unwrap();
+        std::fs::write(&truncate_target, b"keep truncate target").unwrap();
+        std::os::unix::fs::symlink(&append_target, dir.join("spool.jsonl")).unwrap();
+        std::os::unix::fs::symlink(&truncate_target, dir.join("spool.trim")).unwrap();
+
+        let append_refused = append_private(&dir.join("spool.jsonl")).is_err();
+        let truncate_refused = create_private_truncate(&dir.join("spool.trim")).is_err();
+
+        assert_eq!(
+            (append_refused, truncate_refused, std::fs::read(&append_target).unwrap(), std::fs::read(&truncate_target).unwrap()),
+            (true, true, b"keep append target".to_vec(), b"keep truncate target".to_vec()),
+            "private spool helpers must reject symlinks without changing their targets"
+        );
+    }
