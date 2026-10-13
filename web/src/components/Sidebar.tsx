@@ -35,6 +35,7 @@ import { GearIcon, TerminalIcon } from './Icons'
 import { StatusLamp } from './StatusLamp'
 import { LAMP_LABEL } from './lampLabel'
 import { ConfirmDialog } from './ConfirmDialog'
+import { CAPACITY_LABEL, CAPACITY_TITLE, modelAtCapacity } from '../lib/modelCapacity'
 import { PHONE_QUERY, useMediaQuery } from '../hooks/useMediaQuery'
 import { projectDeleteBlockers } from './projectDeleteGuard'
 import { HeadMoreMenu } from './HeadMoreMenu'
@@ -231,6 +232,8 @@ function BotRowImpl({
   )
   // 回合被 API 斷線截斷：燈號仍是綠的，只有這個說「其實沒做完」。
   const turnError = useStore((s) => s.runs[botId]?.turn_error ?? null)
+  // codex 模型滿載（#1674）：獨立的標示，不跟「⚠ 中斷」「要你回答」「撞額度」混在一起。
+  const capacity = useStore((s) => modelAtCapacity(s.runs[botId]))
   const runningIdentity = runtimeIdentity(run)
   const identityUnknown = Boolean(run && (run.state === 'running' || run.state === 'starting') && run.runtime_identity === null)
   // 這個 kind 在這台主機上只有一個帳號時整顆晶片都不畫（連「未知」「預設」都不畫，2026-09-22 使用者）：
@@ -341,7 +344,7 @@ function BotRowImpl({
       {/* 燈號在上、收合鈕在正下方（使用者 2026-09-13），子列縮排才對齊父列。 */}
       <span className="bot-gutter">
         <span className="bot-gutter-top">
-          <StatusLamp lamp={lamp} background={bgJobs} kids={kidsRunning} title={`${bot.name}：${stateLabel}${agentTitle && !showTitle ? ` · ${agentTitle}` : ''}`} />
+          <StatusLamp lamp={lamp} background={bgJobs} kids={kidsRunning} capacity={capacity} title={`${bot.name}：${capacity && lamp === 'idle' ? CAPACITY_LABEL : stateLabel}${agentTitle && !showTitle ? ` · ${agentTitle}` : ''}`} />
           {/* 黃點：紅色留給「要你本人回答」。 */}
           {kidsWait ? (
             <span
@@ -409,7 +412,11 @@ function BotRowImpl({
             {compact ? null : <PersonaMark persona={bot.persona} />}
             <ShareMark botId={botId} />
             {/* 燈號說 idle 但回合是斷的，不能只留 tooltip；重送在 header chip。 */}
-            {turnError ? (
+            {capacity ? (
+              <span className="bot-capacity" title={`${turnError ?? ''}｜${CAPACITY_TITLE}`}>
+                {CAPACITY_LABEL}
+              </span>
+            ) : turnError ? (
               <span className="bot-turn-error" title={`${turnError}｜這一回合被 API 中斷，回應不完整。點進去可以重送上一則`}>
                 ⚠ 中斷
               </span>

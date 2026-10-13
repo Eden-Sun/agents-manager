@@ -2431,6 +2431,7 @@ row（`local_path`／`agent_path`／`host` 都已經定案），再真的寫檔�
 | `runtime_model` / `runtime_effort` / `runtime_fast` | run **實際**在跑的值（SPEC §4.4a），跟 `bot.*`（下次啟動的設定）分開。三個都 `null` = 不知道（收編的 pane），前端不比對不標。執行中在 TUI 打的 `/model`、`/effort` 由畫面巡邏（約 30 秒）讀回：claude 的確認行、codex 的狀態列、grok 的輸入框框底；讀不到時沿用最後已知值。子 agent（`managed_by=child`）的 `bot.model`／`bot.effort` 跟著這些切換改，並推 `bot_changed` |
 | `runtime_identity` | run 用哪個身分起來的（issue #238）：`""`＝沒有身分（預設帳號）、`null`＝不知道（收編的 pane、升級前的舊列）。改了 `bot.identity` 之後、重啟之前兩者不同；額度一律記在這個身分上 |
 | `turn_error` | 上一回合被 API 中斷或額度拒絕時 pane 上那行原文，否則 `null`；下一回合開始清回（SPEC §4.3a）。命中時對話多一則釘在回合上的 system 訊息（`incomplete = 1`、附 `terminal_snapshot`），回合還 in_flight 就收成 failed。重送就是再 `POST /prompt` 最後一則 user 訊息 |
+| `turn_error_kind` | `turn_error` 的種類（`/api/state` 與 WS `bot_status` 的 run 物件；`background_jobs::run_json` 投影，不落 DB）：`model_at_capacity`＝codex 模型滿載（OpenAI 容量不夠，不是額度、不是卡住，#1673）、`quota_limit`＝額度撞限、`api_error`＝其他 API 錯誤；`turn_error` 是 `null` 時為 `null`（下一回合開始跟著清掉）。網頁認這個值，別比對 `turn_error` 的文字；舊前端忽略 |
 
 `turn_error` 為額度用盡（`You've reached your Fable limit…`）時，daemon 同時把該 bot 帳號的額度格標 `limit_hit`，`until` 取橫幅講的桶（`Fable` → `fable`，否則 5h）的 `resets_at`；
 **不**在下一回合成功時清掉（換 opus 能跑不代表 Fable 恢復），只靠 `until` 到期。UI chip「⛔ Fable 額度用盡」、給重置時間與「改用 opus」，重送鍵在重置前灰掉。

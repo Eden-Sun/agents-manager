@@ -1156,3 +1156,12 @@ Jev 超過門檻時只推 AGM inbox，使用者在 bot 畫面上看不到。
 - 模型整列放進既有 `statusline-bar`，保留 `· Context N% used · weekly N% left` 等後續段。warning 數放最前面，避免長模型列把它擠出窄畫面；保留 F2 查看內容的提示，不以過濾代替解決 warning 成因。shortcuts 不作為正文或獨立狀態欄。
 - 桌面共用頁面原有狀態列；手機原有狀態列收在 Git 資訊抽屜，因此快照旁也顯示同款狀態列。需要回應彈窗顯示自己的狀態列，避免數字被遮罩蓋住。既有 compact／keep-warm 控制保留。
 - warning 只投影目前顯示的 bot／run 快照；換 bot、換 run、卸載快照或新快照不再含 warning 時不沿用舊數字。CLI 操作選單與危險操作判斷仍使用原始 API text。
+
+## codex「模型滿載」的獨立標示（2026-10-13，#1674）
+
+使用者：「模型滿載 要有 codex 獨立的 busy 標示而不是卡住」。#1673 讓 `■ Selected model is at capacity` 收成失敗，但畫面上跟一般失敗、卡住長得一樣。
+
+- **只認 daemon 的結構化種類**：`run.turn_error_kind === "model_at_capacity"`（`lib/modelCapacity.ts`），網頁不比對 `turn_error` 文字。下一個回合開始 daemon 清掉 `turn_error`，標示就跟著消失（使用者再送、換模型都算）。不自動重送、不自動換模型。
+- **顏色用紫（`--capacity`／`--lamp-capacity`，`modelCapacity.css`），一律配「模型滿載」字**：跟 needs-reply 紅、等子 agent 黃、撞額度的紅框、在跑的藍都不同色，也不只靠顏色。
+- **三處各自顯示**：側欄列——閒置燈換紫、名字旁一枚「模型滿載」小籤（取代「⚠ 中斷」，不並列）；晶片——`at-capacity` 紫框紫點、tooltip／sr-only／狀態卡／顏色說明都有；對話面板——輸入框上方一行（`ModelCapacityNote`）說明「OpenAI 容量不夠、不是卡住也不是額度、點標題列的模型標籤換模型或稍後再送」，標題列的「⚠ 回合被中斷」同時讓位不重複畫。
+- **緊急度放哪一級**：要你回答（紅）＞ **模型滿載** ＞ 完成待看 ＞ 等子 agent ＞ 在跑。理由：它要使用者做決定（換模型或等），但回合已經停了、不像權限框那樣擋著 bot；比「做完了還沒看」急，因為那個回合根本沒做。不在 `show` 條件裡漏掉：沒釘的 bot 滿載時也會上晶片列。

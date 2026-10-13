@@ -4,6 +4,7 @@ import { useDialogFocus } from '../hooks/useDialogFocus'
 import { StatusLamp } from './StatusLamp'
 import './chipLegend.css'
 import './keepWarmChip.css'
+import './modelCapacity.css'
 
 /**
  * 主力晶片的顏色說明（2026-10-04 使用者：「手機版主力長按說明顏色意義；電腦版你自己想」）。
@@ -36,6 +37,13 @@ export function ChipLegend({ onClose }: { onClose: () => void }) {
               <span className="unread-chip-name">bot</span>
             </span>
             <span>停在等你回答（問題、權限框）——最急</span>
+          </li>
+          <li>
+            <span className="unread-chip at-capacity" aria-hidden="true">
+              <span className="unread-chip-dot" />
+              <span className="unread-chip-name">bot</span>
+            </span>
+            <span>紫色：模型滿載（OpenAI 容量不夠，這一回合沒跑）——不是卡住、也不是額度用完；換模型或稍後再送</span>
           </li>
           <li>
             <span className="unread-chip unread" aria-hidden="true">

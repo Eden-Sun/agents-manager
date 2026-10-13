@@ -11,6 +11,7 @@ import { cleanLiveActivity } from '../store/liveText'
 import { StatusLamp } from './StatusLamp'
 import { KeepWarmSkipButton } from './KeepWarmSkipButton'
 import { KEEP_WARM_REPLIED_TEXT } from '../lib/chipStateText'
+import { CAPACITY_LABEL } from '../lib/modelCapacity'
 import './chipLegend.css'
 
 /** 晶片列給的這顆 bot 的提示狀態（跟晶片顏色同一份判斷，免得卡片跟顏色講不一樣）。 */
@@ -19,6 +20,8 @@ export interface ChipHints {
   unread: number
   needsReply: boolean
   waitsKids: boolean
+  /** codex 模型滿載（#1674）：晶片是紫色，排在要你回答之後。 */
+  atCapacity?: boolean
   kidsRunning: number
   /** 快取倒數的說明（`cacheClock`）；沒有是 null。 */
   cacheTitle: string | null
@@ -26,9 +29,10 @@ export interface ChipHints {
   keepWarmReplied?: boolean
 }
 
-/** 先講「該不該去看」，跟晶片的顏色同一個優先序：要你回答 → 未讀 → 等子 agent → 在跑。 */
+/** 先講「該不該去看」，跟晶片的顏色同一個優先序：要你回答 → 模型滿載 → 未讀 → 等子 agent → 在跑。 */
 function headline(h: ChipHints, label: string, blockedReason: string): string {
   if (h.needsReply) return blockedReason ? `停在等你回答：${blockedReason}` : '停在等你回答'
+  if (h.atCapacity) return `${CAPACITY_LABEL}：這一回合沒跑，換個模型或稍後再送`
   if (h.unread > 0) return `有 ${h.unread} 個回合做完了還沒看`
   if (h.waitsKids) return '在等子 agent（或子 agent 回報了還沒人看）'
   return label

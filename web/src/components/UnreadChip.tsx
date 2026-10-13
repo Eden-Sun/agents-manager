@@ -14,6 +14,8 @@
  */
 import { chipStateText, kidsText, KEEP_WARM_REPLIED_TEXT } from '../lib/chipStateText'
 import { keepWarmReplied } from '../lib/keepWarm'
+import { CAPACITY_LABEL, modelAtCapacity } from '../lib/modelCapacity'
+import './modelCapacity.css'
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type CSSProperties, type RefObject } from 'react'
 import type { Bot } from '../api/types'
 import { useMediaQuery } from '../hooks/useMediaQuery'
@@ -60,6 +62,8 @@ interface ChipItem {
   pinned: boolean
   unread: number
   needsReply: boolean
+  /** codex 模型滿載（#1674）：紫色，排在 needs-reply 之後、未讀之前。 */
+  atCapacity: boolean
   waitsKids: boolean
   /** parent_bot_id 指到這顆、且 working／blocked 的子 bot 數（#344 補充 4）；不受自己狀態影響。 */
   kidsRunning: number
@@ -99,7 +103,7 @@ function ChipLamp({ id }: { id: string }) {
 }
 
 function chipHints(it: ChipItem): ChipHints {
-  return { current: it.current, unread: it.unread, needsReply: it.needsReply, waitsKids: it.waitsKids, kidsRunning: it.kidsRunning, cacheTitle: it.cache?.title ?? (it.noWarm ? NO_WARM_TEXT : null), keepWarmReplied: it.keepWarmReplied }
+  return { current: it.current, unread: it.unread, needsReply: it.needsReply, atCapacity: it.atCapacity, waitsKids: it.waitsKids, kidsRunning: it.kidsRunning, cacheTitle: it.cache?.title ?? (it.noWarm ? NO_WARM_TEXT : null), keepWarmReplied: it.keepWarmReplied }
 }
 
 function Chip({ it, dnd, lamp }: { it: ChipItem; dnd?: PinnedDnd; lamp?: boolean }) {
@@ -149,7 +153,7 @@ function Chip({ it, dnd, lamp }: { it: ChipItem; dnd?: PinnedDnd; lamp?: boolean
         </span>
       ) : null}
       {it.unread > 0 ? <span className="unread-chip-n" aria-hidden="true">{it.unread > 99 ? '99+' : it.unread}</span> : null}
-      {it.working || it.needsReply || it.waitsKids ? (
+      {it.working || it.needsReply || it.atCapacity || it.waitsKids ? (
         // 未讀蓋掉等子 agent 的晶片色時，黃點照畫（子 agent 還在跑）。
         <span className={`unread-chip-dot${it.waitsKids && !it.needsReply && it.unread > 0 ? ' kids-wait' : ''}`} aria-hidden="true" />
       ) : null}
@@ -228,11 +232,12 @@ export function UnreadChip() {
       const n = botUnread[b.id] ?? 0
       const lamp = lamps[b.id]
       const needsReply = lamp === 'blocked'
+      const atCapacity = !needsReply && modelAtCapacity(runs[b.id])
       const working = lamp === 'working'
       const nKids = kidsRunning(b.id)
       const kids = !needsReply && nKids > 0
       const current = b.id === selectedBotId
-      const show = pinned || (tracked(b) && (n > 0 || b.id === keptId || working || needsReply))
+      const show = pinned || (tracked(b) && (n > 0 || b.id === keptId || working || needsReply || atCapacity))
       if (!show) continue
       out.push({
         id: b.id,
@@ -244,10 +249,11 @@ export function UnreadChip() {
         pinned,
         unread: n,
         needsReply,
+        atCapacity,
         waitsKids: kids,
         kidsRunning: nKids,
         working,
-        title: botTitle(b.name, pinned, n, needsReply, kids, current) + (nKids > 0 ? `（${kidsText(nKids)}）` : ''),
+        title: botTitle(b.name, pinned, n, needsReply, kids, current, atCapacity) + (nKids > 0 ? `（${kidsText(nKids)}）` : ''),
         keepWarmReplied: pinned && keepWarmReplied(runs[b.id], now),
         cache: pinned ? chipCache(runs[b.id], now, working) : null,
         noWarm: pinned && runs[b.id]?.keep_warm_skip === true,
@@ -417,7 +423,7 @@ function PinGrid({
     return chip ? chip.offsetHeight + gap : 0
   }
   // 藏起來的裡面有要你回答／未讀，+N 就吃那個顏色，不然看不出被藏的那顆在等你（跟桌機 `+N` 的提示同一個規則）。
-  const moreState = hidden.some((h) => h.needsReply) ? ' needs-reply' : hidden.some((h) => h.unread > 0) ? ' unread' : ''
+  const moreState = hidden.some((h) => h.needsReply) ? ' needs-reply' : hidden.some((h) => h.atCapacity) ? ' at-capacity' : hidden.some((h) => h.unread > 0) ? ' unread' : ''
   return (
     <div className={`unread-bar-wrap row${canResize ? ' pin-resizable' : ''}`}>
       <div className="unread-pin-grid" ref={gridRef} role="status" aria-live="polite" aria-label="主力 bot">
@@ -501,15 +507,16 @@ function PinHint() {
 }
 
 function chipClass(it: ChipItem): string {
-  // 緊急度：需要回應 → 完成待看（未讀）→ 等子 agent → 在跑（同 `BotStatusCard` 的 headline）。
-  const state = it.needsReply ? ' needs-reply' : it.unread > 0 ? ' unread' : it.waitsKids ? ' waits-kids' : it.working ? ' working' : ''
+  // 緊急度：需要回應 → 模型滿載（#1674，要使用者換模型）→ 完成待看（未讀）→ 等子 agent → 在跑（同 `BotStatusCard` 的 headline）。
+  const state = it.needsReply ? ' needs-reply' : it.atCapacity ? ' at-capacity' : it.unread > 0 ? ' unread' : it.waitsKids ? ' waits-kids' : it.working ? ' working' : ''
   return `unread-chip${it.pinned ? ' pinned' : ''}${state}${it.current ? ' current' : ''}`
 }
 
-function botTitle(name: string, pinned: boolean, n: number, needsReply: boolean, kids: boolean, current: boolean): string {
+function botTitle(name: string, pinned: boolean, n: number, needsReply: boolean, kids: boolean, current: boolean, atCapacity = false): string {
   const who = pinned ? `${name}（主要執行的 bot）` : name
   const tail = current ? '你正在看的就是它' : '點一下跳過去'
   if (needsReply) return `${who} 停在一個要你回答的提示上。${current ? tail : '點一下過去回答'}`
+  if (atCapacity) return `${who}：${CAPACITY_LABEL}，這一回合沒跑（不是卡住）。${tail}`
   if (n > 0) return `${who} 有 ${n} 個回合已完成、還沒看過。${tail}`
   if (kids) return `${who} 在等子 agent 完成。${tail}`
   return `${who}。${tail}`
