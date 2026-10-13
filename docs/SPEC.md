@@ -4089,7 +4089,7 @@ AGM 控制面讀取（總管摘要、health、handoff、assignments、inbox、pe
 ### 18.2a 已安裝的 `bin/agm` 跟著換版；ops 腳本仍要手動裝
 
 - `bin/agm` 是 binary 內嵌的 `scripts/agm.py`。**daemon 每次開機**對已設定的巡檢與協調者（有登記 bot 的角色）各自的工作目錄比對 `bin/agm`：
-  相同不寫；不同先把舊檔留成 `bin/agm.bak-<舊內容 FNV-1a 前 12 碼>`（同名已在就不重複留），再 tmp＋rename 原子寫入、權限 0755，記 info log（角色、舊→新雜湊、備份檔名）。
+  內容與權限 0755 都相同就不寫；內容相同但權限不符時原子修復權限，不留內容備份；內容不同則先把舊檔留成 `bin/agm.bak-<舊內容 FNV-1a 前 12 碼>`（同名已在就不重複留），再 tmp＋rename 原子寫入、權限 0755，記 info log（角色、舊→新雜湊、備份檔名）。
   角色沒設定、目錄或 `bin/` 不存在就跳過，不代建。
 - **只動 `bin/agm`**：`CLAUDE.md`、`persona.md`、`runtime.json`、身分／model／effort 一律不碰（那些只在 `agm supervisor-setup`／`responder setup` 寫；開機不走 setup）。
 - **AGM 目錄裡的檔一律原子寫**（#919，`am_base::atomic_file`）：`CLAUDE.md`、`persona.md`、`runtime.json`、`handoff.md`（巡檢目錄；`PUT /api/supervisor/handoff` 與 persona 同步也是）同目錄暫存檔 `create_new` ＋ 一開始 0600 → `fsync` → 套 0644 → `rename` → 目錄 `fsync`，失敗刪暫存；

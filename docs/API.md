@@ -2809,7 +2809,7 @@ CLI：`agents-managerd release-triage-check --kind <claude|codex> [--since <ver>
     `bot_request` 與 `mission_*` 照舊留在協調者佇列等它回來。
 - `GET /api/supervisor/cli` → `{embedded_hash, roles:[{role,dir,path,installed_hash,state}]}`（SPEC §18.2a、issue #532）。
   `embedded_hash` 是**這顆 binary 內嵌的** `scripts/agm.py` 的 FNV-1a 64 前 12 碼（跟備份檔名 `agm.bak-<雜湊>` 同一個算法）；
-  `state`：`ok`（安裝的就是內嵌那份）、`stale`（不一樣）、`missing`（有 `bin/` 沒有 `agm`）、`not_set_up`（沒有 `bin/`）。
+  `state`：`ok`（內容與內嵌版相同且權限為 0755）、`stale`（內容或權限不符）、`missing`（有 `bin/` 沒有 `agm`）、`not_set_up`（沒有 `bin/`）。
   只列**已設定**的角色（有登記 bot 的巡檢／協調者）。
   `POST /api/supervisor/cli` `{}` → 就地把 `bin/agm` 換成內嵌那份（只動 `bin/agm`，不碰 `CLAUDE.md`／`persona.md`／`runtime.json`），
   回同一份狀態。**不必等下一次開機**：`agm ops-sync --check --refresh-cli` 走的就是這條。
