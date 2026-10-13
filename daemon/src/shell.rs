@@ -368,7 +368,16 @@ pub async fn read(app: &Arc<App>, host: &str, pane_id: &str, source: &str, lines
     if !["visible", "recent", "recent_unwrapped", "detection"].contains(&source) {
         return Err(LcError::Bad("bad source".into()));
     }
-    let (client, _) = client_for(app, host).await?;
+    let (client, session) = client_for(app, host).await?;
+    if session != shell.herdr_session {
+        return Err(LcError::NotFound("shell".into()));
+    }
+    let Some(current) = client.pane_get(pane_id).await.map_err(up)? else {
+        return Err(LcError::NotFound("shell".into()));
+    };
+    if !same_pane(&shell, &current) {
+        return Err(LcError::NotFound("shell".into()));
+    }
     let read = client.pane_read(pane_id, source, lines).await.map_err(up)?;
     // Best effort, as in `get_terminal`: a snapshot is still worth returning without geometry.
     let (columns, rows) = match client.pane_size(pane_id).await {
@@ -1128,6 +1137,36 @@ mod tests {
         *app.host_shells.lock().await = vec![reg("some-other-tab")];
         assert!(list(app, "local").await.unwrap().is_empty(), "別人的 pane 不能列成我們的 shell");
         assert!(app.host_shells.lock().await.is_empty(), "死掉的登記要清掉，不然一直佔 MAX_PER_HOST");
+    }
+
+    /// A stale host-shell registration must not expose the terminal of a pane that reused its id.
+    #[tokio::test]
+    async fn a_reused_pane_id_is_not_read_as_our_shell_terminal() {
+        let env = crate::testing::env().await;
+        let app = &env.app;
+        let session = app.session_for_host("local").await.unwrap();
+        let (_, pane) = app.herdr.workspace_create("/tmp", "shell", json!({})).await.unwrap();
+        *app.host_shells.lock().await = vec![HostShell {
+            host: "local".into(),
+            herdr_session: session,
+            workspace_id: pane.workspace_id.clone(),
+            tab_id: pane.tab_id.clone(),
+            pane_id: pane.pane_id.clone(),
+            cwd: "/tmp".into(),
+            created_at: crate::db::now(),
+        }];
+        env.herdr.set_screen(&pane.pane_id, "private output from the new pane");
+
+        // Herdr reused the id in another tab after the registered shell went away.
+        {
+            let mut tabs = env.herdr.tabs.lock().unwrap();
+            let tab = tabs.iter_mut().find(|t| t.panes.contains(&pane.pane_id)).expect("mock pane tab");
+            tab.tab_id = "another-tab".into();
+        }
+
+        let result = read(app, "local", &pane.pane_id, "recent", 20).await;
+        assert!(matches!(result, Err(LcError::NotFound(_))), "a reused id is no longer our shell: {result:?}");
+        assert!(env.herdr.calls_to("pane.read").is_empty(), "must reject before reading the new pane's output");
     }
 
     /// 登記的 pane id 被重用：關掉的只能是登記的那顆；現在佔用這個 id 的別人的 pane 不能被關（#1353）。
