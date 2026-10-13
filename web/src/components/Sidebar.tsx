@@ -82,6 +82,8 @@ import { syncKidsScroll, wheelKidsScroll } from '../lib/kidsScroll'
 import { createHitSearch } from '../lib/hitSearch'
 import { useWheelRef } from '../hooks/useWheelRef'
 import { scrollProjectIntoView } from '../lib/scrollProject'
+import { botTopPending } from '../lib/scrollBot'
+import { useBotScrollTop } from '../hooks/useBotScrollTop'
 import './sidebar.css'
 
 function ConnBadge({ socket, connected }: { socket: SocketStatus; connected: boolean }) {
@@ -1069,12 +1071,14 @@ export function Sidebar() {
     }
     // 展開後才進 DOM，等下一 frame。
     const id = requestAnimationFrame(() => {
+      if (botTopPending(selectedBotId)) return // 主力晶片點的：由 useBotScrollTop 置頂（#1676）
       document.querySelector<HTMLElement>(`[data-bot-id="${selectedBotId}"]`)?.scrollIntoView({ block: 'nearest' })
     })
     return () => cancelAnimationFrame(id)
     // 故意不依賴 shutProjects：手動收合選取中的專案不該被彈開。
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [selectedBotId, selectedBotProject])
+  useBotScrollTop(setShutProjects, setCollapsed)
   const toggleProject = (id: string) =>
     setShutProjects((prev) => {
       const next = new Set(prev)
