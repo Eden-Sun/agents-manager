@@ -858,7 +858,8 @@ mod tests {
         sqlx::query("INSERT INTO bots (id,project_id,name,kind,hook_token,created_at) VALUES ('q',?,'q','claude','tok-q',?)")
             .bind(&e.project_id).bind(&now).execute(&app.db).await.unwrap();
         sqlx::query("INSERT INTO conversations (id,bot_id,created_at) VALUES ('cq','q',?)").bind(&now).execute(&app.db).await.unwrap();
-        sqlx::query("INSERT INTO runs (id,bot_id,state,agent_status,started_at) VALUES ('rq','q','running','working',?)")
+        // 閒著的 run（flush 隨時會領）；working 的情形見 `a_queued_prompt_behind_a_working_turn_does_not_hold_the_window`。
+        sqlx::query("INSERT INTO runs (id,bot_id,state,agent_status,started_at) VALUES ('rq','q','running','idle',?)")
             .bind(&now).execute(&app.db).await.unwrap();
         sqlx::query("INSERT INTO turns (id,conversation_id,origin,status,delivery,prompt_text,created_at) VALUES ('tq','cq','web','queued','pending','x',?)")
             .bind(&now).execute(&app.db).await.unwrap();
@@ -901,7 +902,9 @@ mod tests {
             async move { sqlx::query("UPDATE runs SET agent_status=? WHERE id='ra'").bind(status).execute(&db).await.unwrap(); }
         };
 
-        // 還在 working：queued 算臨界區，窗口拿不到。
+        // 閒下來（flush 隨時會開始打字）：queued 算臨界區，窗口拿不到。（working 的情形見
+        // `a_queued_prompt_behind_a_working_turn_does_not_hold_the_window`。）
+        set("idle").await;
         assert_eq!(delivery_critical(&app.db, "ask").await.unwrap().as_deref(), Some("tq_next"));
         let refused = acquire(app, "rebuild", "ops", &waited, None, 300, true, &[]).await.unwrap_err();
         let LcError::Conflict(detail) = &refused else { panic!("expected a conflict, got {refused:?}") };
@@ -915,7 +918,7 @@ mod tests {
         assert_eq!(s["blocked_waiting_for_user"][0]["bot_id"], "ask", "照實回報在等使用者");
 
         // 使用者回答了（離開 blocked）：立刻回到臨界區，不沿用剛才的判定。
-        set("working").await;
+        set("idle").await;
         assert_eq!(delivery_critical(&app.db, "ask").await.unwrap().as_deref(), Some("tq_next"));
         assert_eq!(safety_for(app, &[], Some(&waited)).await.unwrap()["safe"], false);
 
@@ -929,6 +932,48 @@ mod tests {
         sqlx::query("UPDATE turns SET delivery='ok' WHERE id='tq_next'").execute(&app.db).await.unwrap();
         let taken = acquire(app, "rebuild", "ops", &waited, None, 300, true, &[]).await.unwrap();
         assert_eq!(taken["lease"]["owner"], "ops", "送達之後只剩思考中，縮小封鎖面就放行");
+    }
+
+    /// issue #1677：bot 還在 working，排在後面的 queued 不算送達臨界區——flush 在 working 時不會開始打字
+    /// （排隊跨重啟保得住，回合結束的邊在新 daemon 照樣收得到），所以不能讓它把部署（含使用者按了「現在換版」）擋死。
+    /// 對照：同一則訊息在 bot 閒下來之後（flush 隨時會領）照擋，已經開始送的（in_flight＋pending）也照擋。
+    #[tokio::test]
+    async fn a_queued_prompt_behind_a_working_turn_does_not_hold_the_window() {
+        let e = crate::testing::env().await;
+        let (app, pid) = (&e.app, e.project_id.clone());
+        thinking_bot(app, &pid, "w").await;
+        let now = crate::db::now();
+        sqlx::query("INSERT INTO turns (id,conversation_id,origin,status,delivery,prompt_text,created_at) VALUES ('tw_next','w','web','queued','pending','x',?)")
+            .bind(&now).execute(&app.db).await.unwrap();
+        let waited = approved_window(app, 40).await;
+
+        assert_eq!(delivery_critical(&app.db, "w").await.unwrap(), None, "working：排隊的還沒有人會去送它");
+        let s = safety_for(app, &[], Some(&waited)).await.unwrap();
+        assert_eq!((s["safe"].as_bool(), s["delivering"].as_array().map(Vec::len)), (Some(true), Some(0)), "放寬之後只剩 working 不擋：{s}");
+        assert_eq!(s["working"][0]["bot_id"], "w", "照實回報它還在 working");
+        let until = (chrono::Utc::now() + chrono::Duration::minutes(5)).to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
+        let lease = |quiet: bool| {
+            let db = app.db.clone();
+            let until = until.clone();
+            async move { store::acquire_lease(&db, "restart", "ops", None, None, &until, quiet, None, &json!({})).await.unwrap() }
+        };
+        assert!(lease(true).await.is_some(), "acquire 那一句的條件也放過它");
+        store::release_lease(&app.db, "restart", "ops", 1).await.unwrap();
+
+        // 閒下來：flush 隨時會領，照擋。
+        sqlx::query("UPDATE runs SET agent_status='idle' WHERE id='w'").execute(&app.db).await.unwrap();
+        assert_eq!(delivery_critical(&app.db, "w").await.unwrap().as_deref(), Some("tw_next"));
+        assert!(lease(true).await.is_none(), "閒著的 bot 排著一則：窗口拿不到（raced）");
+
+        // 已經開始送（打字中）：不管 working 與否照擋。
+        sqlx::query("UPDATE turns SET status='completed' WHERE id='w'").execute(&app.db).await.unwrap();
+        sqlx::query("UPDATE turns SET status='in_flight', run_id='w' WHERE id='tw_next'").execute(&app.db).await.unwrap();
+        sqlx::query("UPDATE runs SET agent_status='working' WHERE id='w'").execute(&app.db).await.unwrap();
+        assert_eq!(delivery_critical(&app.db, "w").await.unwrap().as_deref(), Some("tw_next"));
+        assert!(lease(true).await.is_none(), "正在打字的那一刻仍然擋");
+        let s = safety_for(app, &[], Some(&waited)).await.unwrap();
+        assert_eq!(s["safe"], false, "{s}");
+        assert_eq!(s["delivering"][0]["turn_id"], "tw_next");
     }
 
     /// 一顆有 active run、正在 working、而且該筆 turn 已經送達的 bot：思考中的樣子。
@@ -1263,13 +1308,18 @@ mod tests {
         assert_eq!(s["safe"], false, "送達臨界區不能被打斷");
         assert_eq!(s["delivering"][0]["bot_id"], "user");
 
-        // b) 送完了，但還有一筆排隊中的 prompt 等著進去。
+        // b) 送完了，但還有一筆排隊中的 prompt 等著進去。bot 還在 working：flush 這時不會打字，不算臨界區（issue #1677）。
         sqlx::query("UPDATE turns SET delivery='ok' WHERE id='user'").execute(&app.db).await.unwrap();
         sqlx::query("INSERT INTO turns (id,conversation_id,origin,status,delivery,created_at) VALUES ('q','user','web','queued','pending',?)")
             .bind(crate::db::now()).execute(&app.db).await.unwrap();
         let s = safety(app, &[]).await.unwrap();
-        assert_eq!(s["safe"], false, "排隊中待送的 prompt 也算臨界區");
+        assert_eq!((s["safe"].as_bool(), s["delivering"].as_array().map(Vec::len)), (Some(true), Some(0)), "working 的 bot 身上排隊的不擋：{s}");
+        // 閒下來之後 flush 隨時會領它去打字：排隊中待送的 prompt 算臨界區。
+        sqlx::query("UPDATE runs SET agent_status='idle' WHERE id='user'").execute(&app.db).await.unwrap();
+        let s = safety(app, &[]).await.unwrap();
+        assert_eq!(s["safe"], false, "閒著的 bot 排隊中待送的 prompt 也算臨界區");
         assert_eq!(s["delivering"][0]["turn_id"], "q");
+        sqlx::query("UPDATE runs SET agent_status='working' WHERE id='user'").execute(&app.db).await.unwrap();
 
         // c) 沒有任何待送，但別人還握著窗口。
         sqlx::query("DELETE FROM turns WHERE id='q'").execute(&app.db).await.unwrap();

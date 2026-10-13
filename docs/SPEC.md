@@ -1339,7 +1339,7 @@ abort 之後照常 flush 出去（但先照下一段等寬限）。要取消排�
   那則在跑時派工本來就排在後面；那一回合結束後照一般規則馬上送，不再等寬限。AGM 自己排進去的 queued 不算使用者輸入。
 - **寬限內 AGM 直接派新的一件**（對方沒有 in_flight，本來會直接打字）：一樣排進佇列等寬限，不直接打。
 - **不變的**：一般回合結束照舊立刻 flush；不撤 queued（上面的 abort 裁示）；撤銷檢查排在寬限之前（不要的派工照樣當場撤）；
-  寬限中的 queued 對 §18.10 `delivery_critical` **照原規則算**——bot 有活著的 run 且不是 `blocked` 就是臨界區，不另開例外。
+  寬限中的 queued 對 §18.10 `delivery_critical` **照原規則算**——bot 有活著的 run 且不是 `blocked`／`working` 就是臨界區，不另開例外。
   接管最久算 30 分鐘，之後回到一般排隊（不讓一次 Esc 永遠壓著佇列）；計時與網頁的接管標記都在記憶體，
   daemon 重啟後從第一次看到 idle 重新算（log 裡的中斷照樣認得）。
 
@@ -4572,9 +4572,11 @@ incident 以資源為單位持久化（`supervisor_incidents`，`(kind, resource
   - **誰等太久就放寬誰**（AGM 裁示 2026-09-16）：`acquire` 只看**當下這筆核准自己**等了多久，別人放著沒用掉的核准不算數——否則一張被遺忘的核准等於把所有人的窗口都打開。
     唯讀的 `safety` 帶 `?approval=<id>`（CLI `agm lease safety --approval <id>`）時同樣只看那一筆；不帶（純查詢，還不知道會用哪一筆）才退回看最早那筆還活著的核准。回傳的 `escalation_approval_id` 就是這次計時用的那一筆。
     認不得、已消耗、被撤、過期或還沒決定的核准一律不計時（＝不放寬）。
-  - **仍然擋**：送達臨界區（`turns.status='queued'` **且那顆 bot 還有活著的 run、run 此刻不是 `blocked`**——沒有 run 的 queued 沒有人會送，是遺留的，會被撤銷（§4.4a），算進來的話永遠 unsafe；
+  - **仍然擋**：送達臨界區（`turns.status='queued'` **且那顆 bot 還有活著的 run、run 此刻不是 `blocked`、也不是 `working`**——沒有 run 的 queued 沒有人會送，是遺留的，會被撤銷（§4.4a），算進來的話永遠 unsafe；
     run 停在 `blocked`（等使用者回答）時 flush 不會開始打字、queued 跨 daemon 重啟保得住，放行才不會「有人在等使用者」就整台不能換版（AGM 裁示 2026-09-16）。
-    這個判定讀 runs 的即時狀態、acquire 在鎖內重判：一離開 blocked 就立刻回到臨界區；或 `status='in_flight'` 且 `delivery='pending'`——daemon 正在往 pane 打字／送出）、**別人**還握著的租約、讀不到狀態的 bot（`unreadable`）。
+    這個判定讀 runs 的即時狀態、acquire 在鎖內重判：一離開 blocked 就立刻回到臨界區；
+    **`working` 也不算**（issue #1677，2026-10-13 使用者按了「現在換版」仍被 console-pm 長回合＋一則排隊訊息擋了 70 分鐘）：flush 在 working 時一個字都不會打（`flush_queued_locked` 的閘門讀同一欄 `runs.agent_status`），排隊那一筆在 DB 裡、跨 daemon 重啟保得住（`reconcile::rearm_progress` 重掛所有 queued）；換版期間回合結束的訊號由 hook spool 與 herdr 狀態邊在新 daemon 補上，照原順序送出、不重複（測試 `a_prompt_queued_behind_a_working_turn_is_sent_once_after_a_restart_that_took_the_window`）。算進臨界區的話，只要有一顆 bot 跑長回合又排著一則訊息，部署就整個小時拿不到窗口，連「現在換版」也沒用。一轉成 `idle`／`unknown` 就回到臨界區（flush 隨時會領）；**flush 認領之後、打字之前還要再看一次維護窗口**：讀完 run（idle）到認領之間 bot 轉 working、窗口恰好此時拿走的那一瞬，acquire 不擋（working），所以靠認領後的複查收尾——窗口握著（或讀不到）就把那一筆放回佇列、一個字都不打（測試 `a_window_taken_between_the_flush_check_and_the_claim_stops_the_typing`）；認領先 commit 的話（`in_flight`＋`pending`）acquire 的條件式 UPDATE 被擋，兩邊加起來才是「acquire 回 Ok 之後不會有任何一個字進 pane」。
+    臨界區還剩的：`status='in_flight'` 且 `delivery='pending'`——daemon 正在往 pane 打字／送出）、**別人**還握著的租約、讀不到狀態的 bot（`unreadable`）。
   - **自己的租約不擋自己**（AGM 2026-09-16，58d3587 的規格漏洞）：跟這次 acquire **同一個 owner** 握著的租約不算擋。標準換版是同一人先拿 rebuild、build 完再拿 restart；把自己手上的 rebuild 也算成「別人握著窗口」，restart 就會被卡到 rebuild 自己到期為止（09:26Z 實測：k8bw2f 握 rebuild fence 21，restart 的 safety 列出來的就是它自己）。別人的照擋，「窗口一次只給一個人」的語意不變。唯讀 safety 帶 `owner` 時套同一條規則，不帶就維持舊行為（每一把都算擋）；`held_leases` 每一筆都帶 `owner` 與 `own`。全靜止模式本來就不看租約，不受影響。
   - **不再擋**：bot 只是在 `working`／思考（已送達的 `in_flight`）。`blocked` 照舊只回報不擋。`delivery='unknown'` 是停在那裡等人處理的狀態，不算臨界區。
   - **放寬只會放寬**（review 2 總管 4）：`safe = 全靜止 || 縮小封鎖面的條件`。全靜止成立的窗口，等滿門檻之後也一定成立——
@@ -4600,7 +4602,7 @@ incident 以資源為單位持久化（`supervisor_incidents`，`(kind, resource
   例行自動部署與立即部署都走 daemon-swap → restart-window，每次試窗口都回報。**一次部署**＝同一個 owner 連續在試的那段（換 commit、換核准都算同一次；
   拿到窗口換好、15 分鐘沒再試、或換版後回滾才結束）。從開始等窗口（核准的 `waiting_since`）滿 **3 分鐘**還沒拿到就通知一次：WS `deploy_wait`（網頁側欄標題列
   「⏳ 部署等 N 分」＋toast）與 inbox `deploy_waiting`（巡檢收；擋住的**只有** working 的 bot 且放寬已排定時 `wake:false`——幾分鐘後自己會換，只記錄不叫醒 LLM；有送達中、讀不到狀態、別人的租約擋著，或沒排放寬時 `wake:true`，issue #1478）；內容是要上的 commit、等了多久、被誰擋
-  （working／送達中的 bot 名、讀不到狀態、別人的租約）、預計幾點自動放寬。之後只在狀態轉換時推 inbox（同一個 `id`、`rev` 遞增）：使用者按鈕（現在換版／先等）、
+  （working／送達中的 bot 名、讀不到狀態、別人的租約；「送達中」＝正在打字，或閒著的 bot 身上排隊訊息即將送出，網頁寫成「正在送訊息或排隊待送」；working 的 bot 身上等回合結束才送的排隊訊息不擋）、預計幾點自動放寬。之後只在狀態轉換時推 inbox（同一個 `id`、`rev` 遞增）：使用者按鈕（現在換版／先等）、
   自動放寬生效、拿到窗口、換好（新 daemon 開機確認跑的是那顆）或放棄才更新同一則；擋住名單變動不單獨推 inbox（WS frame 照常推送供網頁即時更新名單），
   且「拿到窗口→§3a 複查 abort 退回交還」的循環同一 sha 最多每 30 分鐘推一則；`wait.auto_escalated` 表示等待門檻已自動放寬。除首次超過 3 分鐘設 `wake:true` 叫醒巡檢外，其餘轉換皆為 `wake:false` 僅做紀錄。
   首次 inbox 通知寫入失敗時保留原 `event_key`（`deploy_waiting:<id>:<rev>`）、內容與 `wake`，每拍冪等補送，成功才清除待送狀態（issue #1485）；不因 `notified_at` 已設定而漏送，也不重複發首次 WS。後續通知（使用者操作、拿到窗口、換版完成、放棄）的 inbox 寫入失敗時，同樣排進 `pending_events`（照 rev 順序、`event_key` 與內容排隊當下凍結），每拍依序冪等重送、送達才清；前一則送不進就不越過它送後面的。有待送的等待記錄不因結束過期而清掉；換掉一次部署時，它還沒送出的通知搬到新的那次（issue #1507）。

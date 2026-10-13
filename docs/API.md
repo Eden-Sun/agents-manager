@@ -2687,7 +2687,7 @@ CLI：`agents-managerd release-triage-check --kind <claude|codex> [--since <ver>
   escalated,waited_secs,escalation_approval_id,escalate_after_secs,delivering,held_leases,owner}`。唯讀快照；`blocked` 只回報不阻擋。
   CLI `agm lease safety --exclude-bot <id>` 傳此查詢。
   `escalated=true`＝最早那筆已核准未消耗的 rebuild／restart 核准等超過 `escalate_after_secs`（預設 1800，`AM_MAINTENANCE_ESCALATE_MINS` 可調；從 `min(wait_since, decided_at)` 算），
-  此時 `safe` 只看 `delivering`（送達臨界區：`queued` 或 `in_flight`＋`delivery='pending'`）、`held_leases`（還握著的租約）與 `unreadable`，`working` 只回報不阻擋（SPEC §18.10）。
+  此時 `safe` 只看 `delivering`（送達臨界區：`queued` 且 bot 的 run 不在 `blocked`／`working`，或 `in_flight`＋`delivery='pending'`；working 的 bot 身上排隊等回合結束的訊息不算，issue #1677）、`held_leases`（還握著的租約）與 `unreadable`，`working` 只回報不阻擋（SPEC §18.10）。
   沒有這種核准時 `waited_secs`／`escalation_approval_id` 是 `null`，`safe` 的判準完全照舊。
   `approval=<id>`＝只看**那一筆**核准等了多久（acquire 一律這樣算，用它自己的 `approval_id`）；不帶才退回看最早那筆還活著的。
   認不得、已消耗、被撤或過期的 id 不放寬也不報錯。

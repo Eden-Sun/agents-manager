@@ -199,6 +199,16 @@ async fn flush_queued_inner<C: QueueContext>(app: &C, bot_id: &str) -> anyhow::R
     }
     app.turn_changed(&turn.id).await;
 
+    // 認領之後再看一次維護窗口（issue #1677）。上面那次是認領前讀的；排隊訊息在 working 的 bot 上不算送達臨界區，
+    // 所以 flush 讀完 run（idle）之後 bot 轉 working、窗口恰好在這一瞬被拿走是可能的。認領已經 commit 的話
+    // （in_flight＋pending），acquire 的條件式 UPDATE 會被它擋下來；acquire 先 commit 的話，這裡一定讀得到租約。
+    // 兩邊加起來才是「窗口拿到之後不會有任何一個字進 pane」。讀不到也當作握著（fail closed，#127）。
+    if !matches!(app.window_held().await, Ok(None)) {
+        let wait_key = rollout_wait_key(&run);
+        tracing::info!(bot = %bot_id, turn = %turn.id, "認領後發現維護窗口已經握著：一個字都不打，放回佇列");
+        return put_back_or_owe(app, bot_id, &conv, &turn.id, "maintenance window opened after the claim", &wait_key).await;
+    }
+
     let wait_key = rollout_wait_key(&run);
     // Refused by a screen check → back on the queue **with a timed retry**: a bot left idle on a
     // menu it cannot close produces no `working -> idle` edge, so waiting for one parked the prompt
@@ -2439,6 +2449,81 @@ mod flush_queue_tests {
         assert_eq!((t.status.as_str(), t.run_id.as_deref()), ("queued", None), "留在佇列，不掛到死掉的 run 上");
         assert_eq!(typed(&f, "給舊 run 的派工"), 0, "一個字都沒打進舊 pane");
         assert_eq!(t.flush_retries, 0, "不是這一筆送不出去，不花它的重試");
+    }
+
+    fn window_until(mins: i64) -> String {
+        (chrono::Utc::now() + chrono::Duration::minutes(mins)).to_rfc3339_opts(chrono::SecondsFormat::Secs, true)
+    }
+
+    /// issue #1677：排隊訊息在 working 的 bot 上不算送達臨界區（flush 這時不會開始打字），窗口拿得到。
+    /// 但 flush 讀完 run（idle）、還沒認領的那一瞬 bot 又開始 working、窗口就在這時被拿走的話，
+    /// 認領下去之後必須再看一次窗口：一個字都不能打進一個正要被重啟的 pane，這一筆留在佇列。
+    #[tokio::test]
+    async fn a_window_taken_between_the_flush_check_and_the_claim_stops_the_typing() {
+        let f = queued("test").await;
+        let app = f.env.app.clone();
+        f.env.herdr.live_pane("pane-1", crate::testing::LivePane { width: Some(120), ..Default::default() });
+        sqlx::query("UPDATE turns SET prompt_text = '窗口開了還打字' WHERE id = ?").bind(&f.turn_id).execute(app.db()).await.unwrap();
+        let (app2, run2) = (app.clone(), f.run_id.clone());
+        super::super::race_point::arm("flush_before_claim", &f.bot_id, move || async move {
+            sqlx::query("UPDATE runs SET agent_status='working' WHERE id=?").bind(&run2).execute(app2.db()).await.unwrap();
+            let taken = crate::supervisor::store::acquire_lease(app2.db(), "restart", "ops", None, None, &window_until(5), true, None, &json!({}))
+                .await
+                .unwrap();
+            assert!(taken.is_some(), "working 的 bot 上排著的訊息不擋窗口：租約拿得到");
+        });
+
+        flush_queued_locked(&app, &f.bot_id).await.unwrap();
+
+        assert_eq!(typed(&f, "窗口開了還打字"), 0, "窗口握著，一個字都不能打進 pane");
+        let t = turn(&app, &f.turn_id).await;
+        assert_eq!((t.status.as_str(), t.run_id.as_deref()), ("queued", None), "認領撤回，留在佇列");
+        assert!(
+            db::in_flight_turn(app.db(), &f.run_id).await.unwrap().is_none(),
+            "不留 in_flight＋pending：那會把窗口永遠擋在門外",
+        );
+    }
+
+    /// issue #1677 (a)：換版前排隊在 working 的 bot 上、窗口拿到了，換版期間回合結束；新 daemon 起來（開機放掉窗口、
+    /// 重掛排隊）之後照樣送出，而且只送一次。
+    #[tokio::test]
+    async fn a_prompt_queued_behind_a_working_turn_is_sent_once_after_a_restart_that_took_the_window() {
+        let f = queued("test").await;
+        let app = f.env.app.clone();
+        db::set_pane_typed(app.db(), &f.run_id).await.unwrap();
+        f.env.herdr.live_pane("pane-1", crate::testing::LivePane { width: Some(120), ..Default::default() });
+        sqlx::query("UPDATE turns SET prompt_text = '換版後才送', next_flush_at = NULL WHERE id = ?").bind(&f.turn_id).execute(app.db()).await.unwrap();
+        // 回合進行中：已送達的那一則 in_flight，bot working。
+        sqlx::query("UPDATE runs SET agent_status='working' WHERE id=?").bind(&f.run_id).execute(app.db()).await.unwrap();
+        sqlx::query("INSERT INTO turns (id, conversation_id, run_id, origin, status, delivery, created_at) VALUES ('busy', ?, ?, 'web', 'in_flight', 'ok', ?)")
+            .bind(&f.conv).bind(&f.run_id).bind(db::now()).execute(app.db()).await.unwrap();
+
+        let taken = crate::supervisor::store::acquire_lease(app.db(), "restart", "ops", None, None, &window_until(5), true, None, &json!({}))
+            .await
+            .unwrap();
+        assert!(taken.is_some(), "working 的回合後面排著訊息：窗口拿得到");
+        flush_queued_locked(&app, &f.bot_id).await.unwrap();
+        assert_eq!(turn(&app, &f.turn_id).await.status, "queued");
+
+        // 換版期間：回合結束（hook 重播的結果），bot 閒下來。舊行程的 timer 隨行程消失。
+        sqlx::query("UPDATE turns SET status='completed' WHERE id='busy'").execute(app.db()).await.unwrap();
+        sqlx::query("UPDATE runs SET agent_status='idle' WHERE id=?").bind(&f.run_id).execute(app.db()).await.unwrap();
+        forget_queue_retry_timer(&f.bot_id);
+        drop(app);
+        let fresh = tt::restart_app(&f.env).await;
+        crate::supervisor::maintenance::release_restart_on_startup(&fresh).await;
+        assert!(fresh.window_held().await.unwrap().is_none(), "新 daemon 起來就放掉窗口");
+        let fired = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let seen = fired.clone();
+        assert_eq!(rearm_queue_retries_with(&fresh, move |bot: String| seen.lock().unwrap().push(bot)).await.unwrap(), 1, "重啟後重掛排隊");
+        let _ = crate::testing::eventually!(!fired.lock().unwrap().is_empty());
+
+        let lock = fresh.bot_lock(&f.bot_id).await;
+        let _guard = lock.lock().await;
+        flush_queued_locked(&fresh, &f.bot_id).await.unwrap();
+        assert_eq!(turn(&fresh, &f.turn_id).await.status, "in_flight");
+        flush_queued_locked(&fresh, &f.bot_id).await.unwrap();
+        assert_eq!(typed(&f, "換版後才送"), 1, "只送一次，不重複");
     }
 
     /// issue #125：放回佇列之前，這一筆已經被不拿 bot 鎖的路徑收掉（run 結束的 `fail_in_flight`）。
