@@ -1392,3 +1392,73 @@ test('放大檢視開著時檔案換版：檢視裡的「還在修」也變回�
   assert.ok(document.querySelector('.sh-viewer .sh-png-btn'), '檢視裡修好的那一版要有按鈕')
   assert.equal(document.querySelector('.sh-viewer .sh-png-note'), null)
 })
+
+/** #1659：載入較早訊息在飛的時候對話被倒回、resync 已經套用；遲到的舊頁不能把倒回的訊息加回來，也不能改 has_more。 */
+test('載入較早訊息在飛時對話被倒回（resync 已套用）：遲到的舊頁整份丟掉 (issue #1659)', async () => {
+  let ev!: ShareEvents
+  let head = [msgAt('m5', 'user', 5), msgAt('m6', 'assistant', 6)]
+  let headHasMore = true
+  const older: { before: string; resolve: (p: ReturnType<typeof page>) => void }[] = []
+  const client: ShareClient = {
+    ...clientWith(
+      async () => ({ bot_name: 'b', status: 'idle', has_more: headHasMore, messages: head }),
+      (events) => {
+        ev = events
+        return () => {}
+      },
+    ),
+    messages: (before) => {
+      if (!before) return Promise.resolve({ bot_name: 'b', status: 'idle', has_more: headHasMore, messages: head })
+      return new Promise((resolve) => older.push({ before, resolve }))
+    },
+  }
+  await mount(<ShareApp client={client} />)
+  await flushSharePromises()
+  const olderBtn = () => [...document.querySelectorAll('button')].find((b) => /較早/.test(b.textContent ?? ''))
+  await click(olderBtn()!)
+  await flushSharePromises()
+  assert.equal(older.length, 1, '按了載入較早，請求還在飛')
+  assert.equal(older[0].before, 'm5')
+
+  head = [msgAt('m1', 'user', 1), msgAt('m2', 'assistant', 2)]
+  headHasMore = false
+  await act(async () => ev.onResync?.())
+  await settle(50)
+  assert.deepEqual([...document.querySelectorAll('.sh-bubble')].map((n) => n.textContent?.trim()), ['m1', 'm2'])
+
+  await act(async () => older[0].resolve({ ...page([msgAt('m3', 'user', 3), msgAt('m4', 'assistant', 4)]), has_more: true }))
+  await settle(50)
+  assert.deepEqual([...document.querySelectorAll('.sh-bubble')].map((n) => n.textContent?.trim()), ['m1', 'm2'], '倒回的訊息不能被遲到的舊頁加回')
+  assert.equal(olderBtn(), undefined, '舊頁的 has_more 不能蓋掉 resync 的結果')
+  assert.equal(document.querySelector<HTMLButtonElement>('.sh-older'), null)
+})
+
+test('resync 之後才開始的載入較早訊息照常套用 (issue #1659)', async () => {
+  let ev!: ShareEvents
+  let head = [msgAt('m5', 'user', 5), msgAt('m6', 'assistant', 6)]
+  const older: { resolve: (p: ReturnType<typeof page>) => void }[] = []
+  const client: ShareClient = {
+    ...clientWith(
+      async () => ({ bot_name: 'b', status: 'idle', has_more: true, messages: head }),
+      (events) => {
+        ev = events
+        return () => {}
+      },
+    ),
+    messages: (before) => {
+      if (!before) return Promise.resolve({ bot_name: 'b', status: 'idle', has_more: true, messages: head })
+      return new Promise((resolve) => older.push({ resolve }))
+    },
+  }
+  await mount(<ShareApp client={client} />)
+  await flushSharePromises()
+  await act(async () => ev.onResync?.())
+  await settle(50)
+  const btn = [...document.querySelectorAll('button')].find((b) => /較早/.test(b.textContent ?? ''))
+  await click(btn!)
+  await flushSharePromises()
+  await act(async () => older[0].resolve({ ...page([msgAt('m3', 'user', 3), msgAt('m4', 'assistant', 4)]), has_more: false }))
+  await settle(50)
+  assert.deepEqual([...document.querySelectorAll('.sh-bubble')].map((n) => n.textContent?.trim()), ['m3', 'm4', 'm5', 'm6'])
+  assert.equal(document.querySelector('.sh-older'), null)
+})

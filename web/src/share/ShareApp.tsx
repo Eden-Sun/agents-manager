@@ -480,9 +480,12 @@ export function ShareApp({ client }: { client: ShareClient }) {
     stick.current = false
     setLoadingOlder(true)
     setOlderError(null)
+    const resyncGen = messageResyncGen.current
     try {
       const page = await client.messages(oldest)
       if (linkGone.current) return
+      // 請求在飛的時候對話被倒回（resync 已發出）：這頁是倒回前的快照，整份丟掉，以重抓的結果為準（#1659）。
+      if (messageResyncGen.current !== resyncGen) return
       const el = listRef.current
       // 較早的訊息插在上面：畫完之後把多出來的高度補回去，人留在原來那一則。
       restore.current = el ? { height: el.scrollHeight, top: el.scrollTop } : null
