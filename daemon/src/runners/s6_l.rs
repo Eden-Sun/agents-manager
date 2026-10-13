@@ -722,6 +722,10 @@ impl s6_ports::QueueServices for App {
         crate::lifecycle::owed_delivery::put_back(&self.shared(), bot_id, conversation_id, turn_id, reason, wait_key).await
     }
 
+    async fn release_claim_owed(&self, bot_id: &str, turn_id: &str, until: &str) -> anyhow::Result<()> {
+        crate::lifecycle::owed_delivery::release_claim(&self.shared(), bot_id, turn_id, until).await
+    }
+
     async fn delivered_owed(&self, bot_id: &str, turn_id: &str, record: crate::lifecycle::DeliveryRecord) -> anyhow::Result<()> {
         crate::lifecycle::owed_delivery::delivered(&self.shared(), bot_id, turn_id, record).await
     }
@@ -763,6 +767,10 @@ impl s6_ports::OwedDeliveryServices for App {
         wait_key: &str,
     ) -> anyhow::Result<()> {
         crate::lifecycle::queue::put_back(&self.shared(), bot_id, conversation_id, turn_id, reason, wait_key).await
+    }
+
+    async fn queue_release_claim(&self, bot_id: &str, turn_id: &str, until: &str) -> anyhow::Result<()> {
+        crate::lifecycle::queue::release_claim(&self.shared(), bot_id, turn_id, until).await
     }
 
     async fn message_added(&self, bot_id: &str, message: crate::db::Message) {

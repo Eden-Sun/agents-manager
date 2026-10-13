@@ -39,6 +39,8 @@ enum Write {
     Closed { delivery: &'static str, note: String },
     /// 從佇列認領了、一個字都沒打：放回佇列（照退避與重試上限，[`super::queue::put_back`]）。
     PutBack { conv: String, reason: String, wait_key: String },
+    /// 認領了、一個字都沒打，而且是窗口握著（或讀不到）：放回佇列、不花送達重試，`until` 之後再試（#1683）。
+    Release { until: String },
 }
 
 impl Write {
@@ -48,7 +50,7 @@ impl Write {
             Write::Delivered { rec, .. } if rec.stored == "ok" && !rec.verified => "unverified",
             Write::Delivered { rec, .. } => rec.stored,
             Write::Closed { delivery, .. } => delivery,
-            Write::PutBack { .. } => "queued",
+            Write::PutBack { .. } | Write::Release { .. } => "queued",
         }
     }
 }
@@ -118,6 +120,12 @@ pub async fn closed<C: OwedDeliveryContext>(app: &C, bot_id: &str, turn_id: &str
 pub async fn put_back<C: OwedDeliveryContext>(app: &C, bot_id: &str, conv: &str, turn_id: &str, reason: &str, wait_key: &str) -> anyhow::Result<()> {
     let write = Write::PutBack { conv: conv.to_string(), reason: reason.to_string(), wait_key: wait_key.to_string() };
     owe(app, bot_id, Owed { turn_id: turn_id.to_string(), write }).await.map(drop)
+}
+
+/// 認領了排隊的那一筆、窗口握著（或讀不到）、一個字都沒打：放回佇列、不花送達重試，`until` 之後再試（#1683）。
+/// 寫不進去同 [`put_back`]。
+pub async fn release_claim<C: OwedDeliveryContext>(app: &C, bot_id: &str, turn_id: &str, until: &str) -> anyhow::Result<()> {
+    owe(app, bot_id, Owed { turn_id: turn_id.to_string(), write: Write::Release { until: until.to_string() } }).await.map(drop)
 }
 
 /// 同一筆回合**任何一次寫成**都是它最新的送達結果：之前欠著的那一條跟著作廢（#149 重開）。留著的話定時重試會把舊的
@@ -215,18 +223,25 @@ async fn write<C: OwedDeliveryContext>(app: &C, bot_id: &str, o: &Owed) -> anyho
         }
         Write::PutBack { conv, reason, wait_key } => match app.queue_put_back(bot_id, conv, &o.turn_id, reason, wait_key).await {
             Ok(()) => true,
-            // 補寫的時候，這段對話的唯一佇列名額（`turns_one_queued`）已經被後來的那則佔走：這一則放不回去，
-            // 再補也永遠一樣（#903）。它一個字都沒送出，收成 failed＋說明，別讓帳永遠欠著、佇列被一直卡住。
-            Err(e) if is_unique_violation(&e) => {
-                tracing::warn!(bot = bot_id, turn = %o.turn_id, error = %e, "放回佇列時名額已被後來的那則佔走：改收成 failed");
-                let closed = Owed { turn_id: o.turn_id.clone(), write: Write::Closed { delivery: "failed", note: SLOT_TAKEN_NOTE.to_string() } };
-                return Box::pin(write(app, bot_id, &closed)).await;
-            }
+            Err(e) if is_unique_violation(&e) => return slot_taken(app, bot_id, o, &e).await,
+            Err(e) => return Err(e),
+        },
+        Write::Release { until } => match app.queue_release_claim(bot_id, &o.turn_id, until).await {
+            Ok(()) => true,
+            Err(e) if is_unique_violation(&e) => return slot_taken(app, bot_id, o, &e).await,
             Err(e) => return Err(e),
         },
     };
     app.turn_changed(&o.turn_id).await;
     Ok(applied)
+}
+
+/// 補寫放回佇列的時候，這段對話的唯一佇列名額（`turns_one_queued`）已經被後來的那則佔走：這一則放不回去，
+/// 再補也永遠一樣（#903）。它一個字都沒送出，收成 failed＋說明，別讓帳永遠欠著、佇列被一直卡住。
+async fn slot_taken<C: OwedDeliveryContext>(app: &C, bot_id: &str, o: &Owed, e: &anyhow::Error) -> anyhow::Result<bool> {
+    tracing::warn!(bot = bot_id, turn = %o.turn_id, error = %e, "放回佇列時名額已被後來的那則佔走：改收成 failed");
+    let closed = Owed { turn_id: o.turn_id.clone(), write: Write::Closed { delivery: "failed", note: SLOT_TAKEN_NOTE.to_string() } };
+    Box::pin(write(app, bot_id, &closed)).await
 }
 
 /// 放回佇列時名額已被佔走、收成 failed 的說明（#903）。

@@ -526,6 +526,8 @@ pub trait QueueServices: Send + Sync {
     fn fail_in_flight_or_owe(&self, run_id: &str, note: &str) -> impl Future<Output = anyhow::Result<()>> + Send;
     fn close_owed(&self, bot_id: &str, turn_id: &str, delivery: &'static str, note: &str) -> impl Future<Output = anyhow::Result<bool>> + Send;
     fn put_back_owed(&self, bot_id: &str, conversation_id: &str, turn_id: &str, reason: &str, wait_key: &str) -> impl Future<Output = anyhow::Result<()>> + Send;
+    /// 認領之後窗口握著：放回佇列、不花送達重試（#1683）。寫不進去記成欠著。
+    fn release_claim_owed(&self, bot_id: &str, turn_id: &str, until: &str) -> impl Future<Output = anyhow::Result<()>> + Send;
     fn delivered_owed(&self, bot_id: &str, turn_id: &str, record: crate::lifecycle::DeliveryRecord) -> impl Future<Output = anyhow::Result<()>> + Send;
     fn arm_stall_and_progress(&self, run_id: &str, bot_id: &str, turn_id: &str) -> impl Future<Output = ()> + Send;
     /// `delivery=unknown` 寫完之後：框已空的那一種（`not_proven_submitted`）背景繼續看證據（#1479）。
@@ -561,6 +563,8 @@ pub trait OwedDeliveryServices: Send + Sync {
         reason: &str,
         wait_key: &str,
     ) -> impl Future<Output = anyhow::Result<()>> + Send;
+    /// 窗口握著、認領之後的放回（不花送達重試，#1683）：`until` 是租約到期的時刻。
+    fn queue_release_claim(&self, bot_id: &str, turn_id: &str, until: &str) -> impl Future<Output = anyhow::Result<()>> + Send;
     fn message_added(&self, bot_id: &str, message: db::Message) -> impl Future<Output = ()> + Send;
     fn turn_changed(&self, turn_id: &str) -> impl Future<Output = ()> + Send;
 }

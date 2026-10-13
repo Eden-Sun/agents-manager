@@ -203,10 +203,16 @@ async fn flush_queued_inner<C: QueueContext>(app: &C, bot_id: &str) -> anyhow::R
     // 所以 flush 讀完 run（idle）之後 bot 轉 working、窗口恰好在這一瞬被拿走是可能的。認領已經 commit 的話
     // （in_flight＋pending），acquire 的條件式 UPDATE 會被它擋下來；acquire 先 commit 的話，這裡一定讀得到租約。
     // 兩邊加起來才是「窗口拿到之後不會有任何一個字進 pane」。讀不到也當作握著（fail closed，#127）。
-    if !matches!(app.window_held().await, Ok(None)) {
-        let wait_key = rollout_wait_key(&run);
-        tracing::info!(bot = %bot_id, turn = %turn.id, "認領後發現維護窗口已經握著：一個字都不打，放回佇列");
-        return put_back_or_owe(app, bot_id, &conv, &turn.id, "maintenance window opened after the claim", &wait_key).await;
+    // 放回佇列時不花送達重試（#1683）：擋住它的是窗口，不是送不進去；掛到租約到期，讀不到就短退避。
+    let held = app.window_held().await;
+    if !matches!(held, Ok(None)) {
+        let until = match &held {
+            Ok(Some(w)) => chrono::Utc::now() + chrono::Duration::seconds(w.retry_after_secs(&db::now()).max(1)),
+            _ => chrono::Utc::now() + chrono::Duration::seconds(<C as MaintenancePort>::UNREADABLE_RETRY_SECS),
+        };
+        tracing::info!(bot = %bot_id, turn = %turn.id, until = %until, "認領後發現維護窗口已經握著（或讀不到）：一個字都不打，放回佇列，不花重試");
+        let until = until.to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
+        return release_claim_or_owe(app, bot_id, &turn.id, &until).await;
     }
 
     let wait_key = rollout_wait_key(&run);
@@ -334,6 +340,31 @@ async fn put_back_or_owe<C: QueueContext>(app: &C, bot_id: &str, conv: &str, tur
     app.put_back_owed(bot_id, conv, turn_id, reason, wait_key)
         .await
         .map_err(|e| e.context("認領了排隊的 prompt、一個字都沒打，卻放不回佇列（記成欠著）"))
+}
+
+/// 認領之後窗口握著（或讀不到）：放回佇列、不花送達重試（#1683）。寫不進去同 [`put_back_or_owe`]：記成欠著、之後補。
+async fn release_claim_or_owe<C: QueueContext>(app: &C, bot_id: &str, turn_id: &str, until: &str) -> anyhow::Result<()> {
+    app.release_claim_owed(bot_id, turn_id, until)
+        .await
+        .map_err(|e| e.context("認領了排隊的 prompt、一個字都沒打，卻放不回佇列（記成欠著）"))
+}
+
+/// 放回佇列、不花送達重試（#1683）：`in_flight -> queued`，`flush_retries` 不動，`until` 之後再試。
+/// 別的路徑已經收掉的就不掛 timer（同 [`defer_queued_turn`] 的 `Settled`）。
+pub async fn release_claim<C: QueueContext>(app: &C, bot_id: &str, turn_id: &str, until: &str) -> anyhow::Result<()> {
+    let mut tx = db::begin_write(app.db()).await?;
+    if super::turn_controller::return_to_queue_unspent(&mut tx, turn_id, until).await? != super::turn_controller::Outcome::Applied {
+        tracing::info!(turn = turn_id, "要放回佇列時已經被別的路徑收掉：不掛 timer");
+        return Ok(());
+    }
+    tx.commit().await?;
+    let delay = chrono::DateTime::parse_from_rfc3339(until)
+        .ok()
+        .and_then(|t| (t.with_timezone(&chrono::Utc) - chrono::Utc::now()).to_std().ok())
+        .unwrap_or_default();
+    tracing::info!(bot = %bot_id, turn = turn_id, retry_in_s = delay.as_secs(), "維護窗口握著：排隊的 prompt 放回佇列，不花送達重試");
+    schedule_flush_retry(app, bot_id, delay);
+    Ok(())
 }
 
 /// Put-backs a queued prompt spends waiting for a codex rollout that has not been written yet.
@@ -2482,6 +2513,120 @@ mod flush_queue_tests {
             db::in_flight_turn(app.db(), &f.run_id).await.unwrap().is_none(),
             "不留 in_flight＋pending：那會把窗口永遠擋在門外",
         );
+    }
+
+    /// issue #1683：認領之後才看到窗口（或讀不到），一個字都不打，而且不花送達重試——`flush_retries` 原封不動，不判 failed。
+    /// 以前這條路照一般 put-back 加一次重試，seed 在上限（12）時直接把還沒送出的訊息判成失敗、請使用者重送。
+    /// 掛到租約到期（讀不到就短退避）；窗口放掉、退避到了之後照常送一次。
+    #[tokio::test]
+    async fn a_window_seen_after_the_claim_spends_no_delivery_retry() {
+        for (seeded, unreadable) in [(0, false), (QUEUE_RETRY_LIMIT, false), (0, true), (QUEUE_RETRY_LIMIT, true)] {
+            let f = queued("test").await;
+            let app = f.env.app.clone();
+            f.env.herdr.live_pane("pane-1", crate::testing::LivePane { width: Some(120), ..Default::default() });
+            db::set_pane_typed(app.db(), &f.run_id).await.unwrap();
+            sqlx::query("UPDATE turns SET prompt_text = '認領後才看到窗口', flush_retries = ? WHERE id = ?")
+                .bind(seeded)
+                .bind(&f.turn_id)
+                .execute(app.db())
+                .await
+                .unwrap();
+            let (app2, run2) = (app.clone(), f.run_id.clone());
+            super::super::race_point::arm("flush_before_claim", &f.bot_id, move || async move {
+                sqlx::query("UPDATE runs SET agent_status='working' WHERE id=?").bind(&run2).execute(app2.db()).await.unwrap();
+                let taken = crate::supervisor::store::acquire_lease(app2.db(), "restart", "ops", None, None, &window_until(5), true, None, &json!({}))
+                    .await
+                    .unwrap();
+                assert!(taken.is_some(), "認領前的窗口查詢是空的，這時才拿到租約");
+                if unreadable {
+                    // 租約還沒放、到期時間讀不懂：窗口狀態讀不到（#127），認領後的第二次查詢照樣 fail closed。
+                    sqlx::query("UPDATE supervisor_leases SET expires_at = 'not-a-time' WHERE resource = 'restart'")
+                        .execute(app2.db())
+                        .await
+                        .unwrap();
+                }
+            });
+
+            flush_queued_locked(&app, &f.bot_id).await.unwrap();
+
+            assert_eq!(typed(&f, "認領後才看到窗口"), 0, "窗口握著（或讀不到），一個字都不能打進 pane");
+            let t = turn(&app, &f.turn_id).await;
+            assert_eq!(
+                (t.status.as_str(), t.run_id.as_deref(), t.flush_retries),
+                ("queued", None, seeded),
+                "放回佇列，送達重試一次都不花（seed={seeded}, unreadable={unreadable}）",
+            );
+            assert!(t.next_flush_at.is_some() && queue_retry_timer_armed(&f.bot_id), "掛了 timer 等租約到期或短退避");
+            assert!(db::in_flight_turn(app.db(), &f.run_id).await.unwrap().is_none(), "不留 in_flight＋pending");
+
+            // 窗口放掉、退避到了：照常送出，只送一次。回合已結束，bot 閒下來（working 的 bot 不認領）。
+            crate::supervisor::maintenance::release_restart_on_startup(&app).await;
+            sqlx::query("UPDATE runs SET agent_status='idle' WHERE id=?").bind(&f.run_id).execute(app.db()).await.unwrap();
+            forget_queue_retry_timer(&f.bot_id);
+            sqlx::query("UPDATE turns SET next_flush_at = NULL WHERE id = ?").bind(&f.turn_id).execute(app.db()).await.unwrap();
+            flush_queued_locked(&app, &f.bot_id).await.unwrap();
+            assert_eq!(turn(&app, &f.turn_id).await.status, "in_flight", "窗口放掉之後照常認領");
+            flush_queued_locked(&app, &f.bot_id).await.unwrap();
+            assert_eq!(typed(&f, "認領後才看到窗口"), 1, "只送一次，不重複");
+        }
+    }
+
+    /// issue #1683：認領之後的窗口放回佇列那一句寫不進去：記成欠著（flush 回 `Err`，不留 in_flight＋pending）。
+    /// DB 好了補上，仍然不花重試；窗口放掉之後照常送一次。
+    #[tokio::test]
+    async fn a_window_release_that_cannot_be_written_is_owed_and_still_spends_no_retry() {
+        let f = queued("test").await;
+        let app = f.env.app.clone();
+        f.env.herdr.live_pane("pane-1", crate::testing::LivePane { width: Some(120), ..Default::default() });
+        db::set_pane_typed(app.db(), &f.run_id).await.unwrap();
+        sqlx::query("UPDATE turns SET prompt_text = '欠著也不花重試', flush_retries = ? WHERE id = ?")
+            .bind(QUEUE_RETRY_LIMIT)
+            .bind(&f.turn_id)
+            .execute(app.db())
+            .await
+            .unwrap();
+        forget_queue_retry_timer(&f.bot_id);
+        // 放回佇列會寫 `next_flush_at`；這個觸發器讓那一句寫不進去。
+        sqlx::query("CREATE TRIGGER lost_window_release BEFORE UPDATE OF next_flush_at ON turns BEGIN SELECT RAISE(ABORT, 'disk I/O error'); END")
+            .execute(app.db())
+            .await
+            .unwrap();
+        let (app2, run2) = (app.clone(), f.run_id.clone());
+        super::super::race_point::arm("flush_before_claim", &f.bot_id, move || async move {
+            sqlx::query("UPDATE runs SET agent_status='working' WHERE id=?").bind(&run2).execute(app2.db()).await.unwrap();
+            let taken = crate::supervisor::store::acquire_lease(app2.db(), "restart", "ops", None, None, &window_until(5), true, None, &json!({}))
+                .await
+                .unwrap();
+            assert!(taken.is_some(), "認領前的窗口查詢是空的，這時才拿到租約");
+        });
+
+        assert!(flush_queued_locked(&app, &f.bot_id).await.is_err(), "放不回去，flush 不回普通的成功");
+        let t = turn(&app, &f.turn_id).await;
+        assert_eq!(
+            (t.status.as_str(), t.delivery.as_str(), t.flush_retries),
+            ("in_flight", "pending", QUEUE_RETRY_LIMIT),
+            "寫不進去就還沒放回去，重試次數也還沒動",
+        );
+        assert_eq!(typed(&f, "欠著也不花重試"), 0, "窗口握著，一個字都沒打");
+
+        sqlx::query("DROP TRIGGER lost_window_release").execute(app.db()).await.unwrap();
+        super::super::owed_delivery::settle_locked(&app, &f.bot_id).await.expect("DB 好了：補上");
+        let t = turn(&app, &f.turn_id).await;
+        assert_eq!(
+            (t.status.as_str(), t.run_id.as_deref(), t.flush_retries),
+            ("queued", None, QUEUE_RETRY_LIMIT),
+            "補回佇列，重試次數不動",
+        );
+        assert!(t.next_flush_at.is_some() && queue_retry_timer_armed(&f.bot_id), "掛了下一次的 timer");
+
+        crate::supervisor::maintenance::release_restart_on_startup(&app).await;
+        sqlx::query("UPDATE runs SET agent_status='idle' WHERE id=?").bind(&f.run_id).execute(app.db()).await.unwrap();
+        forget_queue_retry_timer(&f.bot_id);
+        sqlx::query("UPDATE turns SET next_flush_at = NULL WHERE id = ?").bind(&f.turn_id).execute(app.db()).await.unwrap();
+        flush_queued_locked(&app, &f.bot_id).await.unwrap();
+        assert_eq!(turn(&app, &f.turn_id).await.status, "in_flight", "窗口放掉之後照常認領");
+        flush_queued_locked(&app, &f.bot_id).await.unwrap();
+        assert_eq!(typed(&f, "欠著也不花重試"), 1, "只送一次，不重複");
     }
 
     /// issue #1677 (a)：換版前排隊在 working 的 bot 上、窗口拿到了，換版期間回合結束；新 daemon 起來（開機放掉窗口、
