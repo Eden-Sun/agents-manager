@@ -1,0 +1,5 @@
+.codex-reset-hint { display:flex; flex:none; white-space:nowrap; flex-direction:column; font-size:10px; line-height:1.3; color:var(--text-dim); text-decoration:none; max-width:130px; }
+.codex-reset-hint small { font-size:9px; }
+.codex-reset-hint.upcoming { color:var(--warn, #d69a36); }
+.codex-reset-hint.stale { opacity:.65; }
+.codex-reset-hint:hover { text-decoration:underline; }

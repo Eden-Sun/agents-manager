@@ -1552,6 +1552,7 @@ pub async fn state_json(app: &Arc<App>) -> Result<Value, LcError> {
         "restart_batch": crate::runners::bulk_restart::running_batch(&app.data_dir),
         // 還沒收尾的 codex 升級（同一個理由：`cli_update_done` 收不到時的對帳來源）；存在 DB，daemon 重啟後也還在（#564）。
         "cli_updates": crate::cli_update::running_list(app).await,
+        "codex_reset": app.codex_resets.lock().await.snapshot.clone(),
         "herdr_updates": crate::herdr_upgrade::running_list(app),
         // 等換版窗口超過 3 分鐘、已通知使用者的那一次部署（SPEC §18.10）；WS `deploy_wait` 收不到時的對帳來源。
         "deploy_wait": crate::deploy_wait::view(app),

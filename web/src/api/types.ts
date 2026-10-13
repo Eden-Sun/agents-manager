@@ -582,6 +582,8 @@ export const GROUP_SKIP_LABEL: Record<GroupSkipReason, string> = {
 }
 
 export interface AppState {
+  /** Public announcements, independent of personal quota windows. */
+  codex_reset?: unknown
   daemon_seq: number
   /**
    * 現在正在跑的那一批一鍵重啟的 id（issue #492）。進度只走 WS，`bots_restart_done` 收不到時

@@ -3562,6 +3562,14 @@ bot 用 `herdr agent start` 開的 claude 子 agent（本機或遠端）沒有 h
   路徑防護：檔案由這顆 bot 的 root（`CLAUDE_CONFIG_DIR`、身分在該主機的目錄、`~/.claude`）與 herdr 當下回報的 live session id 定位；只有 live session 通過驗證才讀，不用 run 裡可能過期的 `native_session_id` 或 `transcript_path` 決定 session。記錄路徑在這些 root 內且檔名符合 live session 時精確讀取；否則 discovery 必須在所有 root 合計只有一份候選；路徑無效、沒有檔或多份候選都不讀。
   遠端讀取最多 5 秒（含查 `$HOME`），逾時或失敗當沒讀到；同一個 run generation、host connection 與 live session 4 秒內重複請求用上一次的結果（失敗也算），同時進來的共用一次讀取（`runners::pending_question_remote`）。讀取前後確認 run、host fence 與 live session 仍一致；Jev 的有效性檢查不拿這個快取來證明提問還在（見 §4.3c 第五個場景，#1505）。讀到之後走跟本機同一個 `pending_ask_entry`，只接受主線事件並略過 `isSidechain: true` 的旁支問題與結果，Jev 的選項建議（§4.3c 第五個場景）一併生效。
 
+### Codex 全域重置公告（2026-10-13）
+
+daemon 以識別專案的 User-Agent 讀取 [資料：codex-reset.com](https://codex-reset.com/) 的 `/api/forecast` 與 `/api/feed`，啟動時一次，之後每 30 分鐘一次。這是第三方公告，獨立於帳號 quota，不改 `used_pct`、個人 `resets_at` 或自動解除帳號停用。只由非空 `official_signal` 顯示「Codex 即將重置」並說明尚未確認生效；歷史機率、普通暗示和 banked credits 不表示即將重置。
+
+第一次成功讀取建立基線，不彈歷史通知；其後新增的正式 signal／reset／boost／limits／credits／banked／codex 公告或 `last_reset_at` 變更，每批只彈最新一則。公告 ledger 與快照原子寫入資料目錄 `codex-reset.json`，重啟沿用；WS `codex_reset_updated` 與 `/api/state.codex_reset` 帶同份快照，瀏覽器依公告 ID 存 localStorage 去重，重連、重整不再彈。同一公告每個瀏覽器一次；離線回來只補最後一則，超過 48 小時不補通知。
+
+來源 forecast／feed 時間超過 90 分鐘、feed 標為 stale、格式錯誤、HTTP 失敗或寫檔失敗均保留舊快照，不廣播成功。UI 最後成功讀取超過 70 分鐘改標「Codex 重置資料過期」，停止顯示即將重置與彈通知。額度區提示及通知都提供 codex-reset.com 來源連結，提示顯示最近全域重置與最後讀取時間；手機沿用同一提示。無快照不畫提示。
+
 ### 12.6 額度：`/usage` 探測
 grok 沒有 usage 子命令或 RPC，數字只在 TUI 的 `/usage` 對話框裡，所以開**用完即丟**的 workspace 探測，跑在**專屬 herdr session `am-quota`**（需要時起、永不 attach）：
 pane 寬度來自 attach 的 client，窄終端會把百分比截掉；沒有 client 的 session 用寬預設格線。也避免在使用者的 workspace 閃 pane。

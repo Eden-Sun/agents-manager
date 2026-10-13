@@ -1,3 +1,4 @@
+import { receiveCodexReset } from './codexReset'
 import type { TerminalFooterView } from '../lib/codexTerminalFooter'
 /** Single Zustand store: server state from `GET /api/state` + `/ws`, plus UI state. Event flow / resync: SPEC §7.3. */
 
@@ -1129,6 +1130,7 @@ export const useStore = create<StoreState>((set, get) => {
         selectedProjectId: selectedProject,
       }
     })
+    receiveCodexReset(st.codex_reset, get().notify)
     applyHerdrSnapshot(st.herdr_updates)
     applyDeployWaitSnapshot(st.deploy_wait)
     {
@@ -3486,6 +3488,10 @@ export function handleFrame(set: SetFn, get: GetFn, frame: { seq?: number; type:
     case 'upstream_update': {
       const item = applyUpstreamItem(data, get().notify)
       if (item) set((s) => ({ upstreamUpdates: { ...s.upstreamUpdates, [item.kind]: item } }))
+      return
+    }
+    case 'codex_reset_updated': {
+      receiveCodexReset(data, get().notify)
       return
     }
     case 'quota_updated': {

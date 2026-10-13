@@ -712,6 +712,7 @@ export function toState(raw: unknown): AppState {
 
   return {
     daemon_seq: num(pick(root, 'daemon_seq'), 0),
+    codex_reset: pick(root, 'codex_reset'),
     // 三態（issue #492）：欄位不在＝`undefined`＝舊 daemon、不知道；在但空＝`null`＝沒有批次在跑。
     // 存在與否**只能**用 `in` 判：`pick` 把 `null` 也收斂成 `undefined`（它的用途是「挑第一個有值的鍵」），
     // 拿它判存在會把 daemon 說的「現在沒有批次」講成「不知道」——而那正是要用來清掉卡住的進度的那一格。

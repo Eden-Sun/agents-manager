@@ -225,6 +225,8 @@ pub struct App {
     pub role_faults: Mutex<HashMap<String, crate::supervisor::role_faults::RoleFault>>,
     /// v4.0: `GET /api/models` cache, key `<host>/<kind>` (10 min TTL).
     pub models_cache: Mutex<HashMap<String, (std::time::Instant, Value)>>,
+    /// Public reset announcements; independent of account-specific quota windows.
+    pub codex_resets: Mutex<crate::codex_reset::State>,
     /// v4.0: quota per kind key (`codex`, `claude`, `claude:<identity>`).
     pub quotas: Mutex<std::collections::BTreeMap<String, crate::quota::Quota>>,
     /// 額度讀數是開機從 `quota_cache` 回填的，直到下一次探測前只供顯示，不能當成新證據。
@@ -344,6 +346,7 @@ impl App {
         let (bus, _) = broadcast::channel(1024);
         let (turn_bus, _) = broadcast::channel(1024);
         let (startup_ready_watch, _) = tokio::sync::watch::channel(true);
+        let codex_resets = crate::codex_reset::load(&data_dir);
         Arc::new_cyclic(|self_weak| Self {
             self_weak: self_weak.clone(),
             boot_id: crate::db::ulid(),
@@ -399,6 +402,7 @@ impl App {
             survey_revisions: Mutex::new(HashMap::new()),
             role_faults: Mutex::new(HashMap::new()),
             models_cache: Mutex::new(HashMap::new()),
+            codex_resets: Mutex::new(codex_resets),
             quotas: Mutex::new(std::collections::BTreeMap::new()),
             quota_stale: Mutex::new(std::collections::BTreeSet::new()),
             tools: Mutex::new(HashMap::new()),
