@@ -7,7 +7,8 @@ import { ApiError } from './types'
 
 type Rec = Record<string, unknown>
 
-const KEY = /^(bot|group):[A-Za-z0-9._-]+$/
+// API.md「輸入框草稿」：bot／group 之外還收 host shell 面板的 `shell:<host>/<pane id>`（#758）。
+const KEY = /^((bot|group):[A-Za-z0-9._-]+|shell:[A-Za-z0-9._:@+-]+\/[A-Za-z0-9._:@+-]+)$/
 
 export class MockServerDrafts {
   private rows = new Map<string, { text: string; rev: number; updated_at: string }>()
