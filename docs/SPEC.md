@@ -3171,6 +3171,7 @@ label = "foo@m4p"
    清掉 `app.tools[host]`（身分、登入、herdr CLI 版本）、`app.host_baseline[host]`、該 host 的 shim 補版 incident、`<host>/…` 額度（連重啟快取列）、`<host>/<kind>/<identity>` 模型快取、這台的 shell 清單、以及這台專案的 GitHub origin 快取（#830），
    新連線上線後由偵測與探測重新填。先換連線再清：清完之後才發布的舊觀測過不了第 7 點的檢查（額度的檢查在 `app.quotas` 鎖裡做）。
    單純重連（同一條設定）不清。
+9. `POST /api/hosts`（新增／更新）與 `DELETE /api/hosts/{name}` 對主機設定與 `HostManager` 的變更共用序列化鎖；同名請求重疊時，後完成設定提交的請求會在連線管理器中完成對應更新，舊 DELETE 不會按名稱移除新 POST 安裝的連線（issue #1736）。
 
 ### 11.4 遠端 hook：herdr 事件 + spool 檔
 
