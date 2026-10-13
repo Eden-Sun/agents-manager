@@ -2063,6 +2063,26 @@ https://chatgpt.com/codex/settings/usage to purchase more credits or try again a
         assert!(!composer_holds_prompt("codex", &folded, sent));
     }
 
+    /// 草稿的開頭還是我們那則的前 12 個字，尾段被使用者改掉：不是我們那則，補 Enter 會把改過的草稿送出去（#1669）。
+    #[test]
+    fn a_draft_whose_tail_was_edited_is_not_our_prompt() {
+        let sent = "請幫我整理這週的會議紀錄並列出每個人的待辦事項";
+        let edited = "請幫我整理這週的會議紀錄並把每個人的待辦改成表格";
+        assert_eq!(sent.chars().take(12).collect::<String>(), edited.chars().take(12).collect::<String>());
+        let screen = CLAUDE_UNSENT_PROMPT.replace(
+            "❯ [Image #6]試著對claude max方案增加 fable用量的讀取\n  附加圖片（請讀取這個檔案來查看）：",
+            &format!("❯ {edited}"),
+        );
+        assert_eq!(composer_text("claude", &screen).as_deref(), Some(edited));
+        assert!(!composer_holds_prompt("claude", &screen, sent));
+        // 同一則原文沒被改過的時候照樣認得（上面那個 fixture 的寫法）。
+        let intact = CLAUDE_UNSENT_PROMPT.replace(
+            "❯ [Image #6]試著對claude max方案增加 fable用量的讀取\n  附加圖片（請讀取這個檔案來查看）：",
+            &format!("❯ {sent}"),
+        );
+        assert!(composer_holds_prompt("claude", &intact, sent));
+    }
+
     /// A prompt too short to identify is never matched — every screen contains "hi".
     #[test]
     fn a_very_short_prompt_is_not_matched() {

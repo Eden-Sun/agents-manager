@@ -695,16 +695,48 @@ pub use crate::composer_parse::{
 
 /// Is our prompt still unsent in the box? 2026-09-07 11:21: claude swallowed the Enter while
 /// compacting; the turn failed as a stall with the message one keystroke from sent.
+///
+/// 逐列比字（#1669）：框裡讀回的列要是原文的一段，列內的字與空白逐字相同；列與列之間的接縫不計。
+/// 以前只比前 12 個字、用 `contains`，使用者改過尾段也會被當成我們那則、照樣按 Enter。
 pub fn composer_holds_prompt(kind: &str, screen: &str, sent: &str) -> bool {
     let Some(box_text) = composer_text(kind, screen) else { return false };
     if kind == "claude" && is_our_folded_paste(&box_text, sent) {
         return true;
     }
-    let needle: String = squash(sent).chars().take(COMPOSER_HEAD).collect();
-    if needle.chars().count() < COMPOSER_HEAD_MIN {
+    composer_text_whole(kind, screen).is_some_and(|shown| rows_within(&shown, sent))
+}
+
+/// 框的第一列前面可能掛著 claude 的 `[Image #N]`，那一段不是草稿的字。
+fn strip_image_chip(row: &str) -> &str {
+    row.strip_prefix("[Image #")
+        .and_then(|rest| rest.split_once(']'))
+        .filter(|(n, _)| !n.is_empty() && n.chars().all(|c| c.is_ascii_digit()))
+        .map_or(row, |(_, after)| after.trim_start())
+}
+
+/// `shown` 的列（`\n` 接起來，可能只是原文的一段：框捲動、或 claude 只畫出尾端）是不是 `sent` 裡連續的一段。
+/// 每一列要在 `sent` 裡緊接著上一列出現，列內逐字相同；多出來的字（使用者接著打的）對不上就不是。
+/// 至少要對上 [`COMPOSER_HEAD_MIN`] 個字，免得兩三個字在哪個畫面都找得到。
+fn rows_within(shown: &str, sent: &str) -> bool {
+    let mut rows: Vec<&str> = shown.split('\n').map(str::trim).filter(|r| !r.is_empty()).collect();
+    if let Some(first) = rows.first_mut() {
+        *first = strip_image_chip(*first);
+    }
+    rows.retain(|r| !r.is_empty());
+    let Some((head, tail)) = rows.split_first() else { return false };
+    if rows.iter().map(|r| r.chars().filter(|c| !c.is_whitespace()).count()).sum::<usize>() < COMPOSER_HEAD_MIN {
         return false;
     }
-    squash(&box_text).contains(&needle)
+    sent.match_indices(*head).any(|(at, _)| {
+        let mut rest = &sent[at + head.len()..];
+        tail.iter().all(|row| match rest.trim_start().strip_prefix(*row) {
+            Some(after) => {
+                rest = after;
+                true
+            }
+            None => false,
+        })
+    })
 }
 
 /// claude 把長段貼上摺成 `[Pasted text #3 +10 lines]`，框裡看不到原文，上面的比對永遠落空：

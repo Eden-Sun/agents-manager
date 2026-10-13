@@ -26,6 +26,39 @@ fn squash(s: &str) -> String {
     s.chars().filter(|c| !c.is_whitespace()).collect()
 }
 
+/// 框裡讀回的草稿（`\n` 接起來）是不是建議句本身。把列接回一句，接縫的規則跟 `composer_parse::prompt_suggestion`
+/// 一樣（兩邊都是 ASCII 才補一個空白），然後逐字比——列內的空白也要一樣，`send to ann a`≠`send to anna`（#1666）。
+/// 這是按 Enter 前的最後一道，比對不能比去掉空白的版本。
+fn same_sentence(draft: &str, expect: &str) -> bool {
+    let mut text = String::new();
+    for part in draft.split('\n').map(str::trim).filter(|p| !p.is_empty()) {
+        if text.chars().next_back().is_some_and(|a| a.is_ascii()) && part.chars().next().is_some_and(|b| b.is_ascii()) {
+            text.push(' ');
+        }
+        text.push_str(part);
+    }
+    text == expect.trim()
+}
+
+#[cfg(test)]
+mod same_sentence_tests {
+    use super::same_sentence;
+
+    /// 窄 pane 折行的接縫（在空白處折、或中文硬折）要還原成建議句原來的樣子。
+    #[test]
+    fn a_wrapped_suggestion_is_the_same_sentence() {
+        assert!(same_sentence("send to ann\na", "send to ann a"));
+        assert!(same_sentence("今天天\n氣很好", "今天天氣很好"));
+    }
+
+    /// 只差一個空白就不是同一句（#1666：`send to ann a` 與 `send to anna`，補按的 Enter 會把改過的字送出去）。
+    #[test]
+    fn a_whitespace_only_edit_is_another_sentence() {
+        assert!(!same_sentence("send to anna", "send to ann a"));
+        assert!(!same_sentence("send to ann  a", "send to ann a"));
+    }
+}
+
 /// 409 的共同欄位：這次沒送出去（`sent: false`）、按過 Tab 沒有（`tab_sent`）。
 fn refused(reason: &str, run: &db::Run, tab_sent: bool, extra: Value) -> LcError {
     let mut body = json!({"run_id": run.id, "retryable": true, "sent": false, "tab_sent": tab_sent});
@@ -136,6 +169,8 @@ pub async fn accept(
         .await
         .map_err(|_| composer_draft::unreadable(&run))?
         .text;
+    // 這裡比去掉空白：Tab 只把建議句收進框裡、還送不出去，逐字的比對在 Tab 之後（`same_sentence`，按 Enter 之前）。
+    // 網頁的建議句是壓平過的字串，沒有列的資訊；窄 pane 寬度一變，折行位置就跟著變，這裡逐字比會誤擋。
     match suggestion_on(&screen) {
         Some(now) if squash(&now) == squash(expect) => {}
         Some(now) => {
@@ -188,7 +223,7 @@ pub async fn accept(
             }
         }
     }
-    let Some(draft) = taken.filter(|d| squash(d) == squash(expect)) else {
+    let Some(draft) = taken.filter(|d| same_sentence(d, expect)) else {
         // 框裡是別的字（使用者剛在終端打字、或 Tab 做了別的事）：不認得、不碰，照草稿流程讓人處理。
         let now = composer_draft::read_draft(&client, &pane, "claude").await.ok().and_then(|(_, d, _)| d);
         let mut err = composer_draft::refusal("draft_changed", &run, true, "claude", now.as_deref());
