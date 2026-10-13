@@ -360,18 +360,22 @@ pub async fn read_claude_effort_settings(
     Ok((global, per_model, parse_claude_default_model(&text)))
 }
 
-/// claude's built-in default with no `effortLevel` / override: docs and a fresh identity both say
-/// `high` (2026-09-07); the documented exception (Opus 4.7) is none of our aliases.
-const CLAUDE_BUILTIN_DEFAULT_EFFORT: &str = "high";
+/// claude 的「廠推薦」一律 `medium`（使用者 2026-10-13 裁示：「廠推一律用 medium 就好，這樣比較簡單」）。
+/// 不照模型分：Anthropic 文件（https://code.claude.com/docs/en/model-config ）裡 Opus／Sonnet／Haiku 5.5 本來就是 `medium`，
+/// Fable 5.1、Opus 5 等文件寫 `high`——這裡刻意不跟，換來每個模型、每個帳號同一個答案。
+const CLAUDE_BUILTIN_DEFAULT_EFFORT: &str = "medium";
 
-/// haiku 的內建預設是 `medium`（2026-10-08 實測 Claude Code 2.1.293：沒帶 `--effort`、settings 沒有 `effortLevel`，
-/// 對話紀錄每則 assistant 都是 `"effort":"medium"`；sonnet 是 high，#880）。`alias` 可以是 `haiku` 或完整 id。
-pub fn claude_builtin_default_effort(alias: &str) -> &'static str {
-    if alias.to_ascii_lowercase().contains("haiku") {
-        "medium"
-    } else {
-        CLAUDE_BUILTIN_DEFAULT_EFFORT
-    }
+/// 參數留著只為了呼叫端不用改；回傳值不看模型。
+pub fn claude_builtin_default_effort(_alias: &str) -> &'static str {
+    CLAUDE_BUILTIN_DEFAULT_EFFORT
+}
+
+/// 頂層 `effortLevel` 對這個模型算不算數。文件：「a top-level `effortLevel` in your user settings file doesn't count for
+/// Opus 5.5 … it keeps applying where it applied before, on Opus 5, Fable 5.1, and earlier models」。文件點名的只有 Opus 5.5，
+/// 其他照舊算數。
+pub fn claude_global_effort_applies(model: &str) -> bool {
+    let model = model.trim().to_ascii_lowercase();
+    !claude_current_model_id(&model).unwrap_or(&model).starts_with("claude-opus-5-5")
 }
 
 /// 裸別名現在對到的完整 model id（`modelSettings` 與對話紀錄用的是完整 id）。opus 跟 [`remap_deprecated_model`] 一致；
@@ -401,10 +405,10 @@ pub fn claude_effort_override(per_model: &BTreeMap<String, String>, model: &str)
     per_model.iter().find(|(k, _)| k.to_ascii_lowercase() == key).map(|(_, v)| v.clone())
 }
 
-/// 帳號 settings.json 記住的強度：該模型目前版本那一列 > 全域 `effortLevel`。**不是廠推薦**，是 CLI 記住的「這個帳號上次選的」。
+/// 帳號 settings.json 記住的強度：該模型目前版本那一列 > 全域 `effortLevel`（Opus 5.5 不吃全域那個，見 [`claude_global_effort_applies`]）。**不是廠推薦**，是 CLI 記住的「這個帳號上次選的」。
 /// 沒有就 `None`。
 pub fn claude_account_effort(global: Option<&str>, per_model: &BTreeMap<String, String>, model: &str) -> Option<String> {
-    claude_effort_override(per_model, model).or_else(|| global.map(str::to_string))
+    claude_effort_override(per_model, model).or_else(|| global.filter(|_| claude_global_effort_applies(model)).map(str::to_string))
 }
 
 /// What "不帶 `--effort`" resolves to; fills a spawned child's effort, since its argv never says.

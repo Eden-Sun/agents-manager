@@ -86,20 +86,24 @@
         };
         assert_eq!(of("haiku").await, "medium");
         assert_eq!(of("claude-haiku-5-5").await, "medium", "完整 id 也認得");
-        assert_eq!(of("sonnet").await, "high");
-        assert_eq!(of("claude-sonnet-5-5").await, "high");
-        assert_eq!(of("opus").await, "high");
+        assert_eq!(of("sonnet").await, "medium", "廠推薦一律 medium");
+        assert_eq!(of("claude-sonnet-5-5").await, "medium");
+        assert_eq!(of("opus").await, "medium");
+        assert_eq!(of("fable").await, "medium", "廠推薦一律 medium，不照模型分");
+        assert_eq!(of("claude-opus-5").await, "medium");
 
         crate::hosts::set_ssh_fake(&host, |_| Ok(r#"{"effortLevel":"low"}"#.into()));
         assert_eq!(of("haiku").await, "low", "settings 的 effortLevel 蓋過內建預設");
         assert_eq!(of("sonnet").await, "low");
+        assert_eq!(of("opus").await, "medium", "文件：頂層 effortLevel 對 Opus 5.5 不算數");
+        assert_eq!(of("claude-opus-5").await, "low", "Opus 5 照舊吃頂層那個");
 
         // #1679：檔案只有舊版那一列（claude-opus-5）→ 目前版本沒有列，用內建預設，不拿舊版頂替。
         crate::hosts::set_ssh_fake(&host, |_| Ok(r#"{"modelSettings":{"claude-opus-5":{"effortLevel":"xhigh"}}}"#.into()));
-        assert_eq!(of("opus").await, "high");
-        assert_eq!(of("claude-opus-5").await, "xhigh", "完整 id 照完全相等的那一列");
-        crate::hosts::set_ssh_fake(&host, |_| Ok(r#"{"modelSettings":{"claude-opus-5-5":{"effortLevel":"medium"}}}"#.into()));
         assert_eq!(of("opus").await, "medium");
+        assert_eq!(of("claude-opus-5").await, "xhigh", "完整 id 照完全相等的那一列");
+        crate::hosts::set_ssh_fake(&host, |_| Ok(r#"{"modelSettings":{"claude-opus-5-5":{"effortLevel":"low"}}}"#.into()));
+        assert_eq!(of("opus").await, "low");
     }
 
     /// #268：遠端 settings.json 讀不到（ssh 失敗）不是「沒設定」——以前讀成 `""`，預設 effort 變成內建的 `high`，
@@ -145,14 +149,14 @@
         *answer.lock().unwrap() = r#"{"effortLevel":"max"}"#.into();
         crate::hosts::set_ssh_delay(host, Duration::ZERO);
         let fresh = list(&e.app, host, "claude", None, true).await.expect("B 自己的清單");
-        assert_eq!(fresh["models"][0]["account_default_effort"], "max");
-        assert_eq!(fresh["models"][0]["default_effort"], "high", "廠推薦不跟帳號設定走");
+        assert_eq!(fresh["models"][1]["account_default_effort"], "max");
+        assert_eq!(fresh["models"][1]["default_effort"], "medium", "廠推薦不跟帳號設定走");
         *answer.lock().unwrap() = r#"{"effortLevel":"low"}"#.into();
 
         let r = stale.await.unwrap();
         assert!(r.is_err(), "A 的結果作廢，不能當答案回：{r:?}");
         let cached = e.app.models_cache.lock().await.get(&format!("{host}/claude/")).map(|(_, v)| v.clone()).expect("B 的還在");
-        assert_eq!(cached["models"][0]["account_default_effort"], "max", "快取要留著 B 的清單");
+        assert_eq!(cached["models"][1]["account_default_effort"], "max", "快取要留著 B 的清單");
     }
 
     /// 缺檔是答案不是錯誤：本機回 `""`，遠端腳本要 exit 0（`ssh_exec` 看 exit code）。
@@ -337,19 +341,25 @@
 
         let models = claude_static_models(global.as_deref(), &per_model, None);
         let field = |models: &[Value], id: &str, f: &str| models.iter().find(|m| m["id"] == id).unwrap()[f].clone();
-        assert_eq!(field(&models, "opus", "default_effort"), json!("high"), "廠推薦不是帳號記住的 low");
+        assert_eq!(field(&models, "opus", "default_effort"), json!("medium"), "廠推薦不是帳號記住的 low");
         assert_eq!(field(&models, "opus", "account_default_effort"), json!("low"), "帳號對目前版本那一列的值");
-        assert_eq!(field(&models, "sonnet", "default_effort"), json!("high"));
-        assert_eq!(field(&models, "sonnet", "account_default_effort"), Value::Null, "全域 high 跟內建一樣：不另外標");
-        assert_eq!(field(&models, "haiku", "default_effort"), json!("medium"), "haiku 內建是 medium（#880）");
+        assert_eq!(field(&models, "sonnet", "default_effort"), json!("medium"));
+        assert_eq!(field(&models, "sonnet", "account_default_effort"), json!("high"), "帳號全域 high 跟 sonnet 內建不同：另標");
+        assert_eq!(field(&models, "fable", "default_effort"), json!("medium"));
+        assert_eq!(field(&models, "fable", "account_default_effort"), json!("high"));
+        assert_eq!(field(&models, "haiku", "default_effort"), json!("medium"));
         assert_eq!(field(&models, "haiku", "account_default_effort"), json!("high"), "帳號全域 high 跟 haiku 內建不同：另標");
+        // 文件：頂層 effortLevel 對 Opus 5.5 不算數——沒有 opus-5-5 那一列時，全域 high 不會變成它的帳號值。
+        let only_global = parse_claude_effort_settings(r#"{"effortLevel":"high"}"#);
+        let m = claude_static_models(only_global.0.as_deref(), &only_global.1, None);
+        assert_eq!(field(&m, "opus", "account_default_effort"), Value::Null);
 
         // m4p：沒有頂層 `effortLevel`，只有 fable 的列。
         let (global2, per_model2) =
             parse_claude_effort_settings(r#"{"modelSettings":{"claude-fable-5-1":{"effortLevel":"low"}}}"#);
         assert_eq!(global2, None);
         let models2 = claude_static_models(global2.as_deref(), &per_model2, None);
-        assert_eq!(field(&models2, "fable", "default_effort"), json!("high"));
+        assert_eq!(field(&models2, "fable", "default_effort"), json!("medium"));
         assert_eq!(field(&models2, "fable", "account_default_effort"), json!("low"));
         assert_eq!(field(&models2, "opus", "account_default_effort"), Value::Null);
 
@@ -361,9 +371,10 @@
         for m in &models3 {
             assert_eq!(m["account_default_effort"], Value::Null, "{m}");
         }
-        assert_eq!(field(&models3, "opus", "default_effort"), json!("high"));
+        assert_eq!(field(&models3, "opus", "default_effort"), json!("medium"));
         assert_eq!(field(&models3, "haiku", "default_effort"), json!("medium"));
-        assert_eq!(field(&models3, "sonnet", "default_effort"), json!("high"));
+        assert_eq!(field(&models3, "sonnet", "default_effort"), json!("medium"));
+        assert_eq!(field(&models3, "fable", "default_effort"), json!("medium"));
     }
 
     /// #1679：同一個 opus，cc0（目前版本有列）與 cc1（只有舊版 opus-5 的列）的「廠推薦」一樣；
@@ -382,7 +393,7 @@
         for id in ["opus", "sonnet", "haiku", "fable"] {
             assert_eq!(field(&m0, id, "default_effort"), field(&m1, id, "default_effort"), "{id} 的廠推薦不能跟帳號走");
         }
-        assert_eq!(field(&m0, "opus", "account_default_effort"), json!("medium"));
+        assert_eq!(field(&m0, "opus", "account_default_effort"), Value::Null, "cc0 記的 medium 跟內建一樣：不另外標");
         assert_eq!(field(&m1, "opus", "account_default_effort"), Value::Null, "cc1 沒有 claude-opus-5-5 這一列");
         assert_eq!(claude_effort_override(&cc1.1, "opus"), None, "不帶 --effort 實際跑的是內建預設，不是舊版的 xhigh");
         assert_eq!(claude_effort_override(&cc1.1, "claude-opus-5-5"), None);
@@ -416,8 +427,8 @@
 
         let models = claude_static_models(global.as_deref(), &per_model, None);
         let eff = |id: &str| models.iter().find(|m| m["id"] == id).unwrap()["account_default_effort"].clone();
-        assert_eq!(eff("sonnet"), Value::Null, "high 跟內建一樣");
-        assert_eq!(eff("opus"), json!("medium"));
+        assert_eq!(eff("sonnet"), json!("high"), "跟廠推薦 medium 不同：另標");
+        assert_eq!(eff("opus"), Value::Null, "medium 跟廠推薦一樣：不另外標");
         assert_eq!(eff("haiku"), Value::Null);
     }
 
