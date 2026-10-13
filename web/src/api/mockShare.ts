@@ -29,11 +29,11 @@ export class MockShares {
   private shares = new Map<string, Share>()
   private restricted: (botId: string) => boolean | null
 
-  private changed: (botId: string, enabled: boolean) => void
+  private changed: (botId: string, enabled: boolean, allowEmbed: boolean) => void
 
   private trusted: (botId: string) => boolean
 
-  constructor(restricted: (botId: string) => boolean | null, changed: (botId: string, enabled: boolean) => void = () => {}, trusted: (botId: string) => boolean = () => false) {
+  constructor(restricted: (botId: string) => boolean | null, changed: (botId: string, enabled: boolean, allowEmbed: boolean) => void = () => {}, trusted: (botId: string) => boolean = () => false) {
     this.restricted = restricted
     this.changed = changed
     this.trusted = trusted
@@ -72,8 +72,9 @@ export class MockShares {
     if (method === 'GET' && !m[2]) return this.view(botId)
     if (method === 'POST' && m[2]) {
       if (!this.shares.has(botId)) throw new ApiError(409, { error: 'conflict', reason: 'share_disabled' }, 'share disabled')
-      this.shares.set(botId, { token: newToken(), created_at: new Date().toISOString(), last_used_at: null, allow_embed: false })
-      this.changed(botId, true)
+      const keep = this.shares.get(botId)?.allow_embed ?? false
+      this.shares.set(botId, { token: newToken(), created_at: new Date().toISOString(), last_used_at: null, allow_embed: keep })
+      this.changed(botId, true, keep)
       return this.view(botId)
     }
     if (method === 'POST') {
@@ -82,12 +83,12 @@ export class MockShares {
         // 已開著：不換 token，回同一條。
         if (!this.shares.has(botId)) {
           this.shares.set(botId, { token: newToken(), created_at: new Date().toISOString(), last_used_at: null, allow_embed: false })
-          this.changed(botId, true)
+          this.changed(botId, true, false)
         }
         if (b.allow_embed !== undefined) this.shares.get(botId)!.allow_embed = b.allow_embed === true
         return this.view(botId)
       }
-      if (this.shares.delete(botId)) this.changed(botId, false)
+      if (this.shares.delete(botId)) this.changed(botId, false, false)
       return this.view(botId)
     }
     return undefined

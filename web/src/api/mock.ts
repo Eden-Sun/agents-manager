@@ -641,7 +641,7 @@ export class MockTransport implements Transport {
       const b = this.bots.find((x) => x.id === id)
       return b ? b.share_profile != null : null
     },
-    (id, enabled) => this.emit('bot_share_changed', { bot_id: id, enabled }),
+    (id, enabled, allowEmbed) => this.emit('bot_share_changed', { bot_id: id, enabled, allow_embed: allowEmbed }),
     (id) => this.bots.find((x) => x.id === id)?.share_profile === 'trusted',
   )
   readonly serverDrafts = new MockServerDrafts()
