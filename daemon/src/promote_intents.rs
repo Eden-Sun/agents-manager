@@ -1,6 +1,6 @@
 //! 開機補完被打斷的 promote（#355 P4；#248）。
 //!
-//! promote＝複製 transcript → **停 child（回不去）** → 建 user bot（承諾點）→ 種下 session → native resume 啟動 → 收掉 child。
+//! promote＝預先複製 transcript → **停 child（回不去）** → 最終同步來源 → 建 user bot（承諾點）→ 種下 session → native resume 啟動 → 收掉 child。
 //! handler 在停 child 之前先 commit `promote` intent（payload＝新 bot id、名字、模型、session、複製了哪些檔）。daemon 死掉的話，
 //! 開機／主機重連對帳成功後（`recover_host`）檢查世界，**往前補完、不回滾**（使用者 2026-09-20 裁示）：
 //!
@@ -52,6 +52,11 @@ async fn retry_loop(app: &Arc<App>, id: &str) {
     }
 }
 
+pub(crate) fn spawn_retry(app: Arc<App>, id: String, why: String) {
+    tracing::warn!(intent = %id, error = %why, "final transcript sync failed; retrying promote recovery in the background");
+    tokio::spawn(async move { retry_loop(&app, &id).await });
+}
+
 pub async fn drive_once(app: &Arc<App>, id: &str) -> Outcome {
     match intents::claim(&app.db, id, &app.boot_id).await {
         Ok(true) => {}
@@ -98,6 +103,13 @@ fn s(p: &serde_json::Value, k: &str) -> Option<String> {
     p.get(k).and_then(|v| v.as_str()).map(str::to_string)
 }
 
+fn parse_file_identity(payload: &serde_json::Value, key: &str) -> Result<Option<crate::promote::FileIdentity>, String> {
+    match payload.get(key) {
+        None | Some(serde_json::Value::Null) => Ok(None),
+        Some(value) => serde_json::from_value(value.clone()).map(Some).map_err(|e| format!("the promote intent has invalid {key}: {e}")),
+    }
+}
+
 /// 種下 native resume 要讀的那一列（handler 與開機補完共用）。**`started_at` 與 `ended_at` 必須是同一個值**：
 /// 補完靠 `ended_at = started_at` 認出「這列是種的、這顆還沒真的起過」。以前兩欄各叫一次 `db::now()`，
 /// 兩次呼叫跨過毫秒邊界時這列就像「起過又停了」，補完跳過 native resume、直接收 child 記 `done`——
@@ -132,6 +144,22 @@ async fn resume(app: &Arc<App>, intent: &Intent) -> Result<(), String> {
     else {
         return Err("the promote intent payload is unreadable".into());
     };
+    let source = match s(&p, "source") {
+        Some(path) => Some(path),
+        None => sqlx::query_scalar::<_, String>(
+            "SELECT transcript_path FROM runs
+              WHERE bot_id = ? AND native_session_id = ? AND transcript_path IS NOT NULL
+              ORDER BY started_at DESC, rowid DESC LIMIT 1",
+        )
+        .bind(&child_id)
+        .bind(&session_id)
+        .fetch_optional(&app.db)
+        .await
+        .map_err(|x| x.to_string())?,
+    }
+    .ok_or_else(|| "the promote intent has no recorded source transcript".to_string())?;
+    let source_identity = parse_file_identity(&p, "source_identity")?;
+    let staged_identity = parse_file_identity(&p, "staged_identity")?;
     let model = s(&p, "model");
     let effort = s(&p, "effort");
     let created: Vec<PathBuf> = p.get("created").and_then(|v| v.as_array()).map(|a| a.iter().filter_map(|x| x.as_str().map(PathBuf::from)).collect()).unwrap_or_default();
@@ -152,6 +180,15 @@ async fn resume(app: &Arc<App>, intent: &Intent) -> Result<(), String> {
         intents::abandon(&app.db, &intent.id, "the child was never stopped").await.map_err(|x| format!("{x:#}"))?;
         return Ok(());
     }
+
+    // Recovery must refresh the staged copy after the child has stopped and before seed/start.
+    let (source_path, dest_path, session) = (PathBuf::from(source), PathBuf::from(&dest), session_id.clone());
+    tokio::task::spawn_blocking(move || {
+        crate::promote::finalize_staged_transcript(&source_path, &dest_path, &session, source_identity, staged_identity)
+    })
+    .await
+    .map_err(|x| format!("cannot join final transcript sync: {x}"))?
+    .map_err(|x| format!("cannot finalize the promoted transcript: {x:?}"))?;
 
     // 往前補完。1. 目標 bot 沒建就建。
     let in_cfg = app.cfg.get().await.projects.iter().any(|q| q.bots.iter().any(|b| b.id.as_deref() == Some(new_id.as_str())));
