@@ -96,7 +96,7 @@ export function AuthLoginAction({ msg }: { msg: Message }) {
             agentBusy
               ? '它正在忙，等這一輪停下來再重試'
               : target
-                ? `重新偵測 ${who}，登入了就重送：${target.text.slice(0, 60) || `（${target.attachments.length} 個附件）`}`
+                ? `重新偵測 ${who}，登入了就重送：${Array.from(target.text).slice(0, 60).join('') || `（${target.attachments.length} 個附件）`}`
                 : `重新偵測 ${who} 的登入狀態`
           }
           onClick={() => void retry()}
