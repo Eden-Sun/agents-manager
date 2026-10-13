@@ -42,6 +42,10 @@ pub fn provider_matches_kind(provider: &str, kind: &str) -> bool {
 pub const RELAY_ANNOUNCE_EVENT: &str = "AmRelayAnnounce";
 /// 遠端 agm 認領 issue 後寫入自己 bot spool 的撞題檢查（issue #1468）。
 pub const CLAIM_COLLISION_EVENT: &str = "AmClaimCollisionCheck";
+/// 這一則是不是撞題檢查（#1626：收件匣的撞題 lane 與 [`process_for`] 都用它分流；`classify` 也是同一個判斷）。
+pub fn is_claim_collision(body: &HookBody) -> bool {
+    body.payload.get("hook_event_name").and_then(Value::as_str) == Some(CLAIM_COLLISION_EVENT)
+}
 const MAX_CLAIM_COLLISION_TEXT_CHARS: usize = 500;
 
 /// 報備比收件方的回音晚到時補標：寄件者那台主機上、`agent_name` 是 `to_agent` 的在跑 run，它的對話裡
@@ -623,6 +627,12 @@ pub async fn process<H: HookHost>(app: &H, body: &HookBody) -> Result<()> {
 /// 穩定的鑰匙，重播就再開一個外部回合與訊息。這把 id 跟回合同一個交易寫進 `turns.source_event_id`（唯一索引），
 /// 重播先查它：命中就只把 commit 後才發的通知補發一次（`message_added` 靠 id 去重、回合事件本來就是 at-least-once）。
 pub async fn process_for<H: HookHost>(app: &H, body: &HookBody, event_id: Option<&str>) -> Result<()> {
+    // #1626：撞題檢查等 Jev（可能很慢），而它只寫撞題帳本與提示、不改這顆 bot 的回合狀態，所以不取 bot 鎖；
+    // 占著鎖的話同一顆 bot 之後的 Stop 與其他要這把鎖的操作都得排在後面。移交、世代、provider 等檢查照常走 process_locked。
+    if is_claim_collision(body) {
+        process_locked_for_with_outcome(app, body, event_id, &mut None).await?;
+        return Ok(());
+    }
     let lock = app.bot_lock(&body.bot_id).await;
     let _g = lock.lock().await;
     let mut accepted_turn_id = None;

@@ -228,26 +228,36 @@ pub struct Pending {
 /// （否則 Stop 先失敗、後來的 UserPromptSubmit 先跑，回合順序就翻了）。其他 bot 的列不受影響。
 /// 更早但**已到期**的列不擋：它跟後面的列一起出現在這一批，由 runner 在同一顆 bot 內照順序處理。
 pub async fn pending(pool: &SqlitePool, now: &str, limit: i64) -> Result<Vec<Pending>> {
-    pending_excluding(pool, now, limit, &[]).await
+    pending_excluding(pool, now, limit, &[], &[]).await
 }
 
-/// 同 [`pending`]，但略過 `exclude` 裡的 bot（呼叫端已經有 task 在處理它們）。
+/// 同 [`pending`]，但略過 `exclude_bots` 裡的 bot（呼叫端已經有 task 在處理它們），也略過 `exclude_events` 裡的列
+/// （已經交給別的 lane 在處理，例如撞題檢查，#1626）。
 ///
 /// #1066：只取前 `limit` 列時，一顆卡住的 bot 的積壓會佔滿整批，其他 bot 的列永遠撈不到。
-/// 忙碌的 bot 在 SQL 就排除，後面的列才會進到這一批。
-pub async fn pending_excluding(pool: &SqlitePool, now: &str, limit: i64, exclude: &[String]) -> Result<Vec<Pending>> {
-    let exclude = serde_json::to_string(exclude)?;
+/// 忙碌的 bot 在 SQL 就排除，後面的列才會進到這一批；在途的列同理，否則它們會佔滿整批。
+pub async fn pending_excluding(
+    pool: &SqlitePool,
+    now: &str,
+    limit: i64,
+    exclude_bots: &[String],
+    exclude_events: &[String],
+) -> Result<Vec<Pending>> {
+    let exclude_bots = serde_json::to_string(exclude_bots)?;
+    let exclude_events = serde_json::to_string(exclude_events)?;
     Ok(sqlx::query_as::<_, Pending>(
         "SELECT e.id, e.bot_id, e.body_json, e.attempts FROM hook_events e
          WHERE e.processed_at IS NULL AND (e.next_attempt_at IS NULL OR e.next_attempt_at <= ?)
            AND e.bot_id NOT IN (SELECT value FROM json_each(?))
+           AND e.id NOT IN (SELECT value FROM json_each(?))
            AND NOT EXISTS (
              SELECT 1 FROM hook_events o
               WHERE o.bot_id = e.bot_id AND o.processed_at IS NULL AND o.rowid < e.rowid AND o.next_attempt_at > ?)
          ORDER BY e.rowid LIMIT ?",
     )
     .bind(now)
-    .bind(exclude)
+    .bind(exclude_bots)
+    .bind(exclude_events)
     .bind(now)
     .bind(limit)
     .fetch_all(pool)
@@ -596,9 +606,27 @@ mod tests {
         other.bot_id = "b2".into();
         accept(&p, &other, Source::Http).await.unwrap();
 
-        let rows = pending_excluding(&p, &db::now(), 2, &["b1".to_string()]).await.unwrap();
+        let rows = pending_excluding(&p, &db::now(), 2, &["b1".to_string()], &[]).await.unwrap();
         assert_eq!(rows.iter().map(|r| r.bot_id.as_str()).collect::<Vec<_>>(), vec!["b2"], "b1 的三列不佔這一批，b2 撈得到");
         assert_eq!(pending(&p, &db::now(), 10).await.unwrap().len(), 4, "被排除的列沒有被標記，之後照常出列");
+    }
+
+    /// #1626：已經交給撞題 lane 的列（`exclude_events`）不佔這一批，後面的列照常撈得到。
+    #[tokio::test]
+    async fn excluded_events_do_not_fill_the_batch_and_keep_their_rows() {
+        let p = pool().await;
+        for i in 0..3 {
+            accept(&p, &body(&format!("a{i}"), "2026-09-17T12:00:00.000Z"), Source::Http).await.unwrap();
+        }
+        let mut other = body("o1", "2026-09-17T12:00:03.000Z");
+        other.bot_id = "b2".into();
+        accept(&p, &other, Source::Http).await.unwrap();
+
+        let in_flight: Vec<String> = sqlx::query_scalar("SELECT id FROM hook_events ORDER BY rowid LIMIT 2").fetch_all(&p).await.unwrap();
+        let rows = pending_excluding(&p, &db::now(), 2, &[], &in_flight).await.unwrap();
+        assert_eq!(rows.len(), 2, "在途的兩列不佔這一批，後面的列撈得到");
+        assert!(rows.iter().all(|r| !in_flight.contains(&r.id)), "在途的列不再被撈出來");
+        assert_eq!(pending(&p, &db::now(), 10).await.unwrap().len(), 4, "在途的列沒有被標記，之後照常出列");
     }
 
     #[test]
