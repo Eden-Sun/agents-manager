@@ -89,3 +89,12 @@ GPT-6-Astra high · ~/project/hermes-agents/projects/rt · Context 72% used · w
   assert.equal(cleanLiveText(screenshot), null)
   assert.equal(cleanLiveText(`修復完成。\n${screenshot}`), '修復完成。')
 })
+
+test('esc 按鍵提示只認 `esc to <動作>` 的形狀；以 Escape 開頭的正文不是提示', () => {
+  for (const prose of ['Escape the string to avoid injection', 'Escape to the shell when done', 'escape sequences are used for keys']) {
+    assert.equal(cleanLiveText(prose), prose, prose)
+  }
+  for (const hint of ['esc to interrupt', '(esc to interrupt)', 'esc to interrupt · ctrl+t to show todos']) {
+    assert.equal(cleanLiveText(hint), null, hint)
+  }
+})

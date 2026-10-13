@@ -12,9 +12,10 @@ const NOISE: RegExp[] = [
   // `✘ Auto-update failed · Run claude doctor`
   /Auto-?update\s+(?:failed|available|installed)/i,
   /\brun\s+claude\s+doctor\b/i,
-  // 鍵盤提示：`(ctrl+b to run in background)`、`esc to interrupt`、`? for shortcuts`
+  // 鍵盤提示：`(ctrl+b to run in background)`、`esc to interrupt`、`? for shortcuts`。
+  // esc 提示的形狀是 `esc to <動作>` 後面接行尾或 `·`／括號；`Escape the string to avoid …` 是正文（#1689）。
   /^\s*[(（]?\s*(?:ctrl|cmd|⌘|shift|alt|option)\s*\+/i,
-  /^\s*[(（]?\s*(?:esc|escape)\b[^.]*\b(?:to|for)\b/i,
+  /^\s*[(（]?\s*(?:esc|escape)\s+(?:\w+\s+)?(?:to|for)\s+\w+\s*[)）]?\s*(?:[·•|]|$)/i,
   // footer 只認行尾或右欄（與正文之間至少兩格空白）；`? for shortcuts explains the UI` 是正文（同 daemon #1495）。
   /^\s*[(（]?\s*\?\s+for\s+shortcuts\s*[)）]?\s*$/i,
   /^\s*[(（]?\s*\?\s+for\s+shortcuts\s{2,}\S/i,
