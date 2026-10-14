@@ -2326,7 +2326,7 @@ class OpsSyncTest(CliCase):
     # ── systemd user unit（issue #677，Linux 主機）──────────────────────────────
     SERVICE = (
         "# 註解不算語意\n[Unit]\nDescription=x\n\n[Service]\nType=oneshot\n"
-        "Environment=PATH=/opt/repo\nExecStart=/bin/bash %h/AGM/bin/x.sh\n"
+        "Environment=PATH=/opt/repo\nOOMPolicy=continue\nExecStart=/bin/bash %h/AGM/bin/x.sh\n"
         "StandardOutput=append:%h/AGM/x.systemd.log\n"
     )
     TIMER = "[Unit]\nDescription=x\n\n[Timer]\nOnActiveSec={0}s\nOnUnitActiveSec={0}s\n\n[Install]\nWantedBy=timers.target\n"
@@ -2377,6 +2377,18 @@ class OpsSyncTest(CliCase):
         rows = {x["target"]: x["diff"] for x in r["drift"]}
         self.assertEqual(rows["systemd/com.agm.x.timer"]["Timer.OnUnitActiveSec"], {"repo": ["1800s"], "installed": ["600s"]})
         self.assertEqual(rows["systemd/com.agm.x.service"]["Service.Environment"], {"repo": "<ignored>", "installed": None})
+
+    def test_linux_ops_sync_reports_oom_policy_drift(self):
+        """#1753：ops-sync 必須偵測安裝 unit 遺漏或改錯 OOMPolicy。"""
+        self.with_units()
+        (self.units / "com.agm.x.service").write_text(
+            self.SERVICE.replace("OOMPolicy=continue", "OOMPolicy=stop"), encoding="utf-8")
+        (self.units / "com.agm.x.timer").write_text(self.TIMER.format(1800), encoding="utf-8")
+        code, out, _ = self.run_cli("ops-sync", "--check", "--repo", str(self.repo))
+        self.assertEqual(code, 1)
+        rows = {x["target"]: x["diff"] for x in json.loads(out)["drift"]}
+        self.assertEqual(rows["systemd/com.agm.x.service"]["Service.OOMPolicy"],
+                         {"repo": ["continue"], "installed": ["stop"]})
 
     def report(self):
         code, out, err = self.run_cli("ops-sync", "--check", "--repo", str(self.repo))
@@ -2593,6 +2605,13 @@ class SystemdParityTest(unittest.TestCase):
                          ["/usr/bin/python3 %h/.config/agents-manager/supervisor/AGM/bin/browser_gc_linux.py"])
         self.assertEqual(timer["Timer.OnUnitActiveSec"], ["1800s"])
         self.assertEqual(timer["Timer.OnActiveSec"], ["1800s"])
+
+    def test_herdr_unit_keeps_server_alive_after_pane_oom(self):
+        """#1753：OOM kill pane process 不應讓 systemd 停掉 herdr server。"""
+        path = self.REPO / "scripts/ops/systemd/herdr@.service"
+        service = agm._unit_semantics(path.read_bytes())
+        self.assertEqual(service["Service.KillMode"], ["process"])
+        self.assertEqual(service["Service.OOMPolicy"], ["continue"])
 
     def test_every_launchd_job_has_an_equivalent_unit_pair(self):
         import plistlib
