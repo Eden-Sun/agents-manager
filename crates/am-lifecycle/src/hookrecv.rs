@@ -1067,6 +1067,27 @@ async fn replace_fallback_reply(
     Ok(())
 }
 
+/// #1760：這個 run 在飛、已打字送出（`delivered_at`）卻沒有逐字證據的回合，在送出之後收到 PostToolUse 就補 `delivery_verified=1`。
+/// `at` 是 hook 在 bot 那台機器上的時間（遠端 spool 晚到也不會被當成送出前的活動）；沒有就用現在。重送閘門看 `auto_resend`，不動。
+async fn confirm_delivery_by_tool_use<H: HookHost>(app: &H, run: &db::Run, at: Option<&str>) -> Result<()> {
+    let at = at.map(str::to_string).unwrap_or_else(db::now);
+    let verified: Option<String> = sqlx::query_scalar(
+        "UPDATE turns SET delivery_verified = 1
+          WHERE run_id = ? AND status = 'in_flight' AND delivery = 'ok' AND delivery_verified = 0
+            AND delivered_at IS NOT NULL AND delivered_at <= ?
+          RETURNING id",
+    )
+    .bind(&run.id)
+    .bind(&at)
+    .fetch_optional(app.db())
+    .await?;
+    if let Some(turn) = verified {
+        tracing::info!(turn = %turn, run = %run.id, "tool activity after delivery proves the prompt arrived");
+        app.emit_turn(&turn).await;
+    }
+    Ok(())
+}
+
 /// Consume the one-shot `resume_native` request. Clearing the column before recording a mismatch
 /// makes retries idempotent.
 pub async fn consume_resume_session(
@@ -1297,6 +1318,13 @@ async fn process_locked_for_with_outcome<H: HookHost>(
             bot = %bot.name, provider = %body.provider, truncated = body.truncated,
             "hook payload was truncated or unparseable; the event itself is lost and the turn will close via the terminal fallback",
         );
+    }
+    // #1760：送出當下沒有逐字證據的回合（遠端 claude 不送 UserPromptSubmit、補送過一次），送出之後 agent 跑了工具就是收到了；
+    // 以前要等 Stop 收尾（#1471）才補，回合進行中一直掛著「未驗證送達」。
+    if provider == "claude" && body.payload.get("hook_event_name").and_then(Value::as_str) == Some("PostToolUse") {
+        if let Some(r) = &run {
+            confirm_delivery_by_tool_use(app, r, body.received_at.as_deref()).await?;
+        }
     }
     if matches!(kind, HookKind::StatusLine) {
         tracing::debug!(bot = %bot.name, "statusline received");
@@ -5851,6 +5879,44 @@ mod external_claim_tests {
         .unwrap();
 
         assert_eq!(read().await, ("completed".into(), json!(1), Some("native-turn".into())), "hook 收尾就是事後證據");
+    }
+
+    /// #1760：遠端 claude 不送 UserPromptSubmit；補送過、沒有逐字證據的回合，送出之後收到 PostToolUse 就補 `delivery_verified=1`，
+    /// 不等 Stop。送出之前的工具活動（上一則的尾巴、spool 晚到）不算。
+    #[tokio::test]
+    async fn a_tool_hook_after_delivery_verifies_an_in_flight_turn() {
+        let env = tt::env().await;
+        let app = env.app.clone();
+        let bot = tt::claude_bot(&app, &env.project_id, "tool-verify").await;
+        let run_id = tt::fake_run(&app, &bot.id).await;
+        let conversation_id = db::conversation_id(&app.db, &bot.id).await.unwrap();
+        let turn_id = db::ulid();
+        sqlx::query(
+            "INSERT INTO turns (id, conversation_id, run_id, origin, status, delivery, delivery_verified, auto_resend, resend_count, delivered_at, created_at)
+             VALUES (?,?,?,'web','in_flight','ok',0,0,1,'2026-10-14T08:35:33.557Z',?)",
+        )
+        .bind(&turn_id)
+        .bind(&conversation_id)
+        .bind(&run_id)
+        .bind(db::now())
+        .execute(&app.db)
+        .await
+        .unwrap();
+        let verified = || async { sqlx::query_scalar::<_, i64>("SELECT delivery_verified FROM turns WHERE id=?").bind(&turn_id).fetch_one(&app.db).await.unwrap() };
+        let tool = |at: &str| HookBody {
+            bot_id: bot.id.clone(),
+            provider: "claude".into(),
+            payload: json!({"hook_event_name": "PostToolUse", "tool_name": "Read", "tool_input": {}, "tool_response": {}}),
+            received_at: Some(at.into()),
+            truncated: false,
+            run_id: None,
+        };
+        process(&app, &tool("2026-10-14T08:35:20Z")).await.unwrap();
+        assert_eq!(verified().await, 0, "送出之前的工具活動不算");
+        process(&app, &tool("2026-10-14T08:35:43Z")).await.unwrap();
+        assert_eq!(verified().await, 1, "送出之後跑了工具＝收到了");
+        let status: String = sqlx::query_scalar("SELECT status FROM turns WHERE id=?").bind(&turn_id).fetch_one(&app.db).await.unwrap();
+        assert_eq!(status, "in_flight", "只補證據，不收回合");
     }
 
     /// issue #1471 的反面：備援（終端畫面）收尾、沒有 hook 證據的回合維持原判；晚到 hook 帶著 native turn id
