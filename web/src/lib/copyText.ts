@@ -44,3 +44,12 @@ function legacyCopy(text: string): boolean {
   prev?.focus?.({ preventScroll: true })
   return ok
 }
+
+/**
+ * 等過網路才複製（先抓連結、再寫剪貼簿）做不做得到。非 secure context（手機用 http 開 LAN 位址）沒有
+ * `navigator.clipboard`，而 `execCommand('copy')` 只在同一個點擊手勢裡有效：await 之後一定失敗。
+ * 做不到時不要給「複製」鈕讓使用者按了才失敗，直接給可選取的文字（2026-10-14 使用者）。
+ */
+export function asyncCopyAvailable(): boolean {
+  return typeof window !== 'undefined' && window.isSecureContext === true && Boolean(navigator.clipboard)
+}
