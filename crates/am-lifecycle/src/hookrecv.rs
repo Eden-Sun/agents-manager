@@ -561,6 +561,36 @@ mod classify_tests {
         assert!(matches!(classify("claude", &json!({"prompt_id": "p1"})), HookKind::TurnComplete { .. }));
     }
 
+    /// #1757：claude 2.1.299 實錄（`claude -p "/hicmd abc"`、`claude -p "/greet"`，路徑與 session_id 改過）。新版 `UserPromptSubmit`
+    /// 在 slash 指令／skill 展開前觸發，`prompt` 是原始的 `/指令`。daemon 不掛也不讀這個事件（一律 Ignore），
+    /// 回合起點與送達看 transcript、結束看 Stop 的 `prompt_id`——同一回合的兩個事件 `prompt_id` 相同，Stop 照舊配得上。
+    const CLAUDE_2_1_299_SLASH: [(&str, &str); 2] = [
+        (
+            r#"{"session_id":"9f0c51f6-61b5-4f4e-9d0b-0a4f39b7c1d2","transcript_path":"/x/t.jsonl","cwd":"/x","permission_mode":"default","prompt_id":"3041d9db-7bbc-4a44-a695-bc0ac9ceca3a","hook_event_name":"UserPromptSubmit","prompt":"/hicmd abc"}"#,
+            r#"{"session_id":"9f0c51f6-61b5-4f4e-9d0b-0a4f39b7c1d2","transcript_path":"/x/t.jsonl","cwd":"/x","permission_mode":"default","prompt_id":"3041d9db-7bbc-4a44-a695-bc0ac9ceca3a","effort":{"level":"medium"},"hook_event_name":"Stop","stop_hook_active":false,"last_assistant_message":"HI-CMD abc","background_tasks":[],"session_crons":[]}"#,
+        ),
+        (
+            r#"{"session_id":"5b2e8d07-3c1a-4e8f-a2d6-7e9f0c4b1a35","transcript_path":"/x/t2.jsonl","cwd":"/x","permission_mode":"default","prompt_id":"c4ef1704-0d91-4bd4-8722-b8c7c3052d66","hook_event_name":"UserPromptSubmit","prompt":"/greet"}"#,
+            r#"{"session_id":"5b2e8d07-3c1a-4e8f-a2d6-7e9f0c4b1a35","transcript_path":"/x/t2.jsonl","cwd":"/x","permission_mode":"default","prompt_id":"c4ef1704-0d91-4bd4-8722-b8c7c3052d66","effort":{"level":"medium"},"hook_event_name":"Stop","stop_hook_active":false,"last_assistant_message":"HI-SKILL","background_tasks":[],"session_crons":[]}"#,
+        ),
+    ];
+
+    #[test]
+    fn claude_2_1_299_slash_and_skill_prompt_submit_is_ignored_and_stop_still_pairs() {
+        for (submit, stop) in CLAUDE_2_1_299_SLASH {
+            let submit: Value = serde_json::from_str(submit).unwrap();
+            assert!(submit["prompt"].as_str().unwrap().starts_with('/'), "新版給的是展開前的原始指令");
+            assert!(matches!(classify("claude", &submit), HookKind::Ignore(_)), "{submit}");
+            match classify("claude", &serde_json::from_str(stop).unwrap()) {
+                HookKind::TurnComplete { turn_id, assistant, .. } => {
+                    assert_eq!(turn_id.as_deref(), submit["prompt_id"].as_str());
+                    assert!(assistant.unwrap().starts_with("HI-"));
+                }
+                other => panic!("{other:?}"),
+            }
+        }
+    }
+
     #[test]
     fn a_claim_collision_spool_event_is_not_treated_as_an_unknown_provider_event() {
         let payload = json!({
