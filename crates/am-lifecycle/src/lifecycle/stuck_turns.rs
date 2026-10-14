@@ -291,6 +291,7 @@ async fn close_locked(app: &impl StuckTurnContext, run: &db::Run, turn: &db::Tur
         CloseWhy::SessionPaused => 0,
     };
     let status = if reply.is_some() { "completed" } else { "completed_fallback" };
+    let quiet = reply.is_none() && matches!(why, CloseWhy::Idle(_)) && compaction_only(app, &bot.id, turn).await?;
 
     let mut tx = app.db().begin().await?;
     // 這裡的終點是**算出來的**（有證得出來的回覆就 `completed`，否則 `completed_fallback`），
@@ -304,6 +305,8 @@ async fn close_locked(app: &impl StuckTurnContext, run: &db::Run, turn: &db::Tur
         // 回覆已經有一份（例如 hook 寫了訊息卻沒收掉 turn）：不再寫第二份。
         Some(_) if already_answered => None,
         Some(text) => Some(insert_message_tx(&mut tx, &turn.conversation_id, Some(&turn.id), "assistant", text, "transcript", false, None).await?),
+        // CLI 自己壓縮對話開出來的空回合：照常收，不寫「沒有偵測到結束」（#1758）。
+        None if quiet => None,
         None => {
             let why = match why {
                 CloseWhy::SessionPaused => "claude 的 Session paused 選單關掉了、這個回合沒有回覆（被暫停），直接收尾，不再顯示等待中。".to_string(),
@@ -322,6 +325,29 @@ async fn close_locked(app: &impl StuckTurnContext, run: &db::Run, turn: &db::Tur
     }
     app.emit_turn(&turn.id).await;
     Ok(true)
+}
+
+/// #1758：claude 閒置時自己壓縮對話，pane 轉 working 開了一筆 external 空回合；壓縮只送 SubagentStop 與
+/// `SessionStart`（source=compact），不送 Stop，閒置門檻到了由這裡收。這筆回合沒有 prompt、沒有任何訊息，
+/// 回合開始後又收過 compact 的 SessionStart，就是 CLI 自己的壓縮，不是使用者的回合沒結束，不必在對話裡留說明。
+async fn compaction_only(app: &impl StuckTurnContext, bot_id: &str, turn: &db::Turn) -> anyhow::Result<bool> {
+    if turn.origin != "external" || turn.prompt_text.as_deref().is_some_and(|p| !p.trim().is_empty()) {
+        return Ok(false);
+    }
+    let compacted: bool = sqlx::query_scalar(
+        "SELECT NOT EXISTS(SELECT 1 FROM messages WHERE turn_id = ?)
+            AND EXISTS(SELECT 1 FROM hook_events WHERE bot_id = ? AND received_at >= ?
+                AND json_extract(body_json, '$.payload.hook_event_name') = 'SessionStart'
+                AND json_extract(body_json, '$.payload.source') = 'compact')",
+    )
+    .bind(&turn.id)
+    .bind(bot_id)
+    .bind(&turn.created_at)
+    .fetch_one(app.db())
+    .await
+    // 收件匣表不在（舊 DB）或查不到：照舊寫說明，寧可多一則也不吞掉真的卡住。
+    .unwrap_or(false);
+    Ok(compacted)
 }
 
 /// 讀 transcript／rollout 尾端：我們送的 prompt 之後，agent 有沒有完整回完。本機 claude／codex 才讀得到。
@@ -818,6 +844,42 @@ mod tests {
 
         // 已經收掉的不會再收一次。
         assert!(sweep_at(&app, None, t0 + 20 * MIN, 5 * MIN).await.is_empty());
+    }
+
+    /// #1758：閒置自動壓縮開出來的 external 空回合，回合開始後收過 compact 的 SessionStart → 照常收，不寫說明；
+    /// 沒收過 compact 的同樣空回合照舊寫說明。
+    #[tokio::test]
+    async fn an_empty_external_turn_opened_by_compaction_is_closed_without_a_note() {
+        for compacted in [true, false] {
+            let f = stuck("x").await;
+            let app = f.env.app.clone();
+            sqlx::query("DELETE FROM messages WHERE turn_id = ?").bind(&f.turn_id).execute(app.db()).await.unwrap();
+            sqlx::query("UPDATE turns SET origin='external', delivery='ok', created_at=? WHERE id=?")
+                .bind(db::iso_in(-600))
+                .bind(&f.turn_id)
+                .execute(app.db())
+                .await
+                .unwrap();
+            let _ = am_base::hook_inbox::migrate(app.db()).await;
+            let source = if compacted { "compact" } else { "resume" };
+            let body = serde_json::json!({"bot_id": f.bot_id, "provider": "claude",
+                "payload": {"hook_event_name": "SessionStart", "source": source}});
+            sqlx::query("INSERT INTO hook_events (id, bot_id, provider, source, body_json, received_at) VALUES (?, ?, 'claude', 'http', ?, ?)")
+                .bind(db::ulid())
+                .bind(&f.bot_id)
+                .bind(body.to_string())
+                .bind(db::iso_in(-300))
+                .execute(app.db())
+                .await
+                .unwrap();
+
+            let t0 = Instant::now();
+            observe_at(&f.run_id, "idle", t0);
+            assert_eq!(sweep_at(&app, None, t0 + 6 * MIN, 5 * MIN).await, vec![f.turn_id.clone()]);
+            assert_eq!(turn(&app, &f.turn_id).await.status, "completed_fallback");
+            let notes = messages(&app, &f.turn_id).await.into_iter().filter(|m| m.0 == "system").count();
+            assert_eq!(notes, usize::from(!compacted), "compacted={compacted}");
+        }
     }
 
     /// #903：`delivery='pending'` ＝ 從來沒送出去（送達結果沒寫、也沒有字進過 pane）的 in_flight 回合，閒置 watchdog
