@@ -9388,6 +9388,31 @@ mod prompt_route_tests {
     }
 
     #[tokio::test]
+    async fn external_notice_prefixes_and_state_projection_keep_writer_lanes() {
+        let e = crate::testing::env().await;
+        let bot = typed_bot(&e, "grok").await;
+        let conv = db::conversation_id(&e.app.db, &bot).await.unwrap();
+        let run: String = sqlx::query_scalar("SELECT id FROM runs WHERE bot_id=?").bind(&bot).fetch_one(&e.app.db).await.unwrap();
+        sqlx::query("INSERT INTO turns(id,conversation_id,run_id,origin,status,delivery,created_at) VALUES(?,?,?,'web','in_flight','ok',?)")
+            .bind(db::ulid()).bind(&conv).bind(run).bind(db::now()).execute(&e.app.db).await.unwrap();
+        let notice = lifecycle::prompt_relayed_queueable(&e.app, &bot, "notice", "child-done:internal", Some("daemon"), lifecycle::QueueClass::DaemonNotice).await.unwrap();
+        let relay = lifecycle::prompt_relayed_queueable(&e.app, &bot, "relay", "dispatch:internal", Some("other-bot"), lifecycle::QueueClass::Relay).await.unwrap();
+        let (status, user) = call_queue_if_busy(&e, &bot, "user", "child-done:external", &[]).await;
+        assert_eq!(status, StatusCode::OK, "{user}");
+        let user_id = user["turn_id"].as_str().unwrap();
+        let lane: String = sqlx::query_scalar("SELECT queue_class FROM turns WHERE id=?").bind(user_id).fetch_one(&e.app.db).await.unwrap();
+        assert_eq!(lane, "user");
+        let (status, _) = call_queue_if_busy(&e, &bot, "second user", "resume-nudge:external", &[]).await;
+        assert_eq!(status, StatusCode::CONFLICT);
+        let projected = |state: Value| state["projects"][0]["bots"].as_array().unwrap().iter().find(|b| b["id"] == bot).unwrap()["queued_turn"]["id"].clone();
+        assert_eq!(projected(state_json(&e.app).await.unwrap()), user_id);
+        withdraw_turn(State(e.app.clone()), Path(user_id.to_string())).await.unwrap();
+        assert_eq!(projected(state_json(&e.app).await.unwrap()), relay.turn_id);
+        withdraw_turn(State(e.app.clone()), Path(relay.turn_id)).await.unwrap();
+        assert_eq!(projected(state_json(&e.app).await.unwrap()), notice.turn_id);
+    }
+
+    #[tokio::test]
     async fn a_user_prompt_can_claim_the_single_busy_queue_slot_idempotently() {
         let e = crate::testing::env().await;
         let bot = typed_bot(&e, "grok").await;

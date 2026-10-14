@@ -2197,6 +2197,35 @@ mod flush_queue_tests {
     /// The new web queue entry waits for a real idle status; when it can flush, user turns
     /// precede queued AGM dispatches, with created_at ordering preserved within the user lane.
     #[tokio::test]
+    async fn three_queue_lanes_flush_user_first_without_losing_automation() {
+        let f = queued("test").await;
+        let app = f.env.app.clone();
+        db::set_pane_typed(app.db(), &f.run_id).await.unwrap();
+        f.env.herdr.live_pane("pane-1", crate::testing::LivePane { width: Some(120), ..Default::default() });
+        sqlx::query("UPDATE turns SET awaits_idle=1, prompt_text='user first', created_at='2026-10-14T00:00:00Z' WHERE id=?")
+            .bind(&f.turn_id).execute(app.db()).await.unwrap();
+        let relay = db::ulid();
+        let notice = db::ulid();
+        for (id, lane, text) in [(&relay, "relay", "relay second"), (&notice, "daemon", "notice third")] {
+            sqlx::query("INSERT INTO turns (id,conversation_id,origin,status,delivery,prompt_text,created_at,queue_class,awaits_idle) VALUES (?,?,'web','queued','pending',?,'2020-01-01T00:00:00Z',?,1)")
+                .bind(id).bind(&f.conv).bind(text).bind(lane).execute(app.db()).await.unwrap();
+        }
+        for (id, text) in [(&f.turn_id, "user first"), (&relay, "relay second"), (&notice, "notice third")] {
+            flush_queued_locked(&app, &f.bot_id).await.unwrap();
+            assert_eq!(turn(&app, id).await.status, "in_flight", "flush selected {text}");
+            assert_eq!(typed(&f, text), 1);
+            for pending in [&relay, &notice] {
+                if pending != id && typed(&f, if pending == &relay { "relay second" } else { "notice third" }) == 0 {
+                    assert_eq!(turn(&app, pending).await.status, "queued");
+                }
+            }
+            sqlx::query("UPDATE turns SET status='completed', completed_at=? WHERE id=?")
+                .bind(db::now()).bind(id).execute(app.db()).await.unwrap();
+        }
+        assert!(db::queued_turn(app.db(), &f.conv).await.unwrap().is_none());
+    }
+
+    #[tokio::test]
     async fn awaits_idle_queue_turns_wait_for_idle_and_keep_created_at_order() {
         let f = queued("test").await;
         let app = f.env.app.clone();

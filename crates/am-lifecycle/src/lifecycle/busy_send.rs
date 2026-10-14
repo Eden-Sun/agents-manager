@@ -318,8 +318,8 @@ mod tests {
         let app = e.app.clone();
         let bot = tt::claude_bot(&app, &e.project_id, "busy-1685-critical").await;
         let conv = db::conversation_id(&app.db, &bot.id).await.unwrap();
-        admit_notice(&app, &conv, &bot.id, "子 agent 完成了", "child-done:c5:t5").await.unwrap();
-        admit(&app, &conv, &bot.id, "使用者的一句", "busy-1685-critical-u").await.unwrap();
+        let notice = admit_notice(&app, &conv, &bot.id, "子 agent 完成了", "child-done:c5:t5").await.unwrap();
+        let user = admit(&app, &conv, &bot.id, "使用者的一句", "busy-1685-critical-u").await.unwrap();
         tt::fake_run(&app, &bot.id).await;
 
         assert!(crate::supervisor::store::delivery_critical_anywhere(&app.db).await.unwrap(), "a queued row on a live idle run is delivery-critical");
@@ -327,6 +327,36 @@ mod tests {
             .await
             .unwrap();
         assert!(lease.is_none(), "the quiet lease is refused while either lane has a queued row");
+
+        sqlx::query("UPDATE turns SET status='failed', delivery='failed', completed_at=? WHERE id=?")
+            .bind(db::now())
+            .bind(&notice.turn_id)
+            .execute(&app.db)
+            .await
+            .unwrap();
+        assert!(crate::supervisor::store::delivery_critical_anywhere(&app.db).await.unwrap(), "the user row remains delivery-critical after the notice is withdrawn");
+        assert!(
+            crate::supervisor::store::acquire_lease(&app.db, "restart", "runner", None, None, &db::iso_in(600), true, None, &json!({}))
+                .await
+                .unwrap()
+                .is_none(),
+            "the user lane alone still refuses the quiet lease",
+        );
+
+        sqlx::query("UPDATE turns SET status='failed', delivery='failed', completed_at=? WHERE id=?")
+            .bind(db::now())
+            .bind(&user.turn_id)
+            .execute(&app.db)
+            .await
+            .unwrap();
+        assert!(!crate::supervisor::store::delivery_critical_anywhere(&app.db).await.unwrap(), "no queued lane remains");
+        assert!(
+            crate::supervisor::store::acquire_lease(&app.db, "restart", "runner", None, None, &db::iso_in(600), true, None, &json!({}))
+                .await
+                .unwrap()
+                .is_some(),
+            "the quiet lease becomes available after both rows leave the queue",
+        );
     }
 
     /// #821：真的有第二個排隊請求在同一瞬搶同一個槽時，它照舊拿到 `queue_slot_taken`（不是 `database is locked`），
