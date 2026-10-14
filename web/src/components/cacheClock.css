@@ -26,6 +26,14 @@
   background-position: left center;
 }
 
+/* 紅色每 5 秒才重算一次（`CACHE_RED_TICK_MS`），底色寬度用 5 秒線性補間，看起來是連續流掉；只動 `background-size`，
+   `transform`（拖曳讓位）照 `unreadChip.css` 的 0.16s。減少動態效果的人不補間。 */
+@media (prefers-reduced-motion: no-preference) {
+  .unread-chip.pinned.cache-low {
+    transition: transform 0.16s cubic-bezier(0.2, 0.8, 0.2, 1), background-size 5s linear;
+  }
+}
+
 /* 中性底（閒置、在跑、等子 agent）原本是淡字：疊了色調後 12px 字在淺色模式掉到 4.5:1 以下，字往 `--text` 靠一半；
    hover 的底更亮（深色模式 `--bg-active`），黃色那級會掉到 4.3:1，hover 時直接用 `--text`。 */
 .unread-chip.pinned:is(.cache-fresh, .cache-warn, .cache-low):not(.unread, .needs-reply, .current) {
