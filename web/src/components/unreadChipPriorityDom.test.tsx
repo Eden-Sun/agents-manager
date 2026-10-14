@@ -43,5 +43,7 @@ test('完成待看（未讀）蓋過等子 agent：晶片的狀態 class 是 unr
   const c = chip('b1')
   assert.ok(c, '父晶片要在')
   assert.ok(c.classList.contains('unread'), '有做完還沒看的回合，要亮完成待看')
-  assert.ok(!c.classList.contains('waits-kids'), '不能被子 agent 的黃點蓋掉')
+  assert.ok(!c.classList.contains('waits-kids'), '未讀的樣式不被等待狀態蓋掉')
+  assert.ok(c.querySelector('.unread-chip-working-ring'), '未讀與 child 執行中的外框並存')
+  assert.equal(c.querySelector('.unread-chip-dot'), null, '不重複畫等待的小點')
 })

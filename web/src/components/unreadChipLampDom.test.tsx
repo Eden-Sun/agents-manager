@@ -46,12 +46,20 @@ test('子 agent 的 run 已 exited 不算在跑：父晶片沒有等子 agent �
   await mount(<UnreadChip />)
   assert.equal(chip('b1')!.querySelector('.unread-chip-kids'), null, 'pane 死了的子 agent 不算')
   assert.ok(!chip('b1')!.classList.contains('waits-kids'))
+  assert.equal(chip('b1')!.querySelector('.unread-chip-working-ring'), null, '沒有執行中的 child 就不轉')
 
   await act(async () => {
     useStore.setState({ runs: { b1: run('b1', 'running', 'idle'), k: run('k', 'running', 'working') } } as never)
   })
   assert.ok(chip('b1')!.querySelector('.unread-chip-kids'), '子 agent 真的在跑，分叉圖示要出現')
   assert.ok(chip('b1')!.classList.contains('waits-kids'))
+  assert.ok(chip('b1')!.querySelector('.unread-chip-working-ring'), 'child 在跑，父晶片也用旋轉外框')
+  assert.equal(chip('b1')!.querySelector('.unread-chip-dot'), null, '不重複畫等待的小點')
+
+  await act(async () => {
+    useStore.setState({ runs: { b1: run('b1', 'running', 'idle'), k: run('k', 'exited', 'working') } } as never)
+  })
+  assert.equal(chip('b1')!.querySelector('.unread-chip-working-ring'), null, 'child 結束後外框停止旋轉')
 })
 
 test('exited 的頂層 bot 不留在「在跑」那排；仍在跑時才出現並帶旋轉外框', async () => {

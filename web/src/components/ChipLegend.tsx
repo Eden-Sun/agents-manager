@@ -61,10 +61,10 @@ export function ChipLegend({ onClose }: { onClose: () => void }) {
           </li>
           <li>
             <span className="unread-chip waits-kids" aria-hidden="true">
-              <span className="unread-chip-dot" />
+              <span className="unread-chip-working-ring" />
               <span className="unread-chip-name">bot</span>
             </span>
-            <span>黃點：在等子 agent，或子 agent 回報了還沒人看</span>
+            <span>黃色旋轉外框＋分叉圖示：child 還在跑，父 Bot 等它完成</span>
           </li>
           <li>
             <span className="unread-chip working" aria-hidden="true">

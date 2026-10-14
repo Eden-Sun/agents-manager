@@ -100,7 +100,7 @@ const LAMP_SHOWN = new Set<Lamp>(['working', 'blocked', 'unknown', 'disconnected
 function ChipLamp({ id }: { id: string }) {
   const { lamp, background, kids } = useBotLamp(id)
   // 執行中改由整個晶片外框提示，手機也不重複畫小燈。
-  if (lamp === 'working') return null
+  if (lamp === 'working' || (lamp === 'idle' && kids > 0)) return null
   // idle 平常不畫；子 agent 還在跑（轉圈）或背景還有工作（一般綠點，#714）才畫，不能看起來像停了。
   return LAMP_SHOWN.has(lamp) || background > 0 || kids > 0 ? <StatusLamp lamp={lamp} background={background} kids={kids} /> : null
 }
@@ -141,7 +141,7 @@ function Chip({ it, dnd, lamp }: { it: ChipItem; dnd?: PinnedDnd; lamp?: boolean
       onPointerDown={drag ? (e) => drag.onPointerDown(e, it.id) : undefined}
       onKeyDown={drag ? (e) => drag.onKeyDown(e, it.id) : undefined}
     >
-      {it.working ? <span className="unread-chip-working-ring" aria-hidden="true" /> : null}
+      {it.working || it.waitsKids ? <span className="unread-chip-working-ring" aria-hidden="true" /> : null}
       {lamp ? <ChipLamp id={it.id} /> : null}
       <span className="unread-chip-name">{it.name}</span>
       {it.keepWarmReplied ? (
@@ -150,9 +150,8 @@ function Chip({ it, dnd, lamp }: { it: ChipItem; dnd?: PinnedDnd; lamp?: boolean
         </span>
       ) : null}
       {it.unread > 0 ? <span className="unread-chip-n" aria-hidden="true">{it.unread > 99 ? '99+' : it.unread}</span> : null}
-      {it.needsReply || it.atCapacity || it.waitsKids ? (
-        // 未讀蓋掉等子 agent 的晶片色時，黃點照畫（子 agent 還在跑）。
-        <span className={`unread-chip-dot${it.waitsKids && !it.needsReply && it.unread > 0 ? ' kids-wait' : ''}`} aria-hidden="true" />
+      {it.needsReply || it.atCapacity ? (
+        <span className="unread-chip-dot" aria-hidden="true" />
       ) : null}
       {it.kidsRunning > 0 ? <KidsBadge n={it.kidsRunning} /> : null}
       <span className="sr-only">{chipStateText({ ...it, kids: it.kidsRunning })}</span>
