@@ -71,7 +71,7 @@ export function ChipLegend({ onClose }: { onClose: () => void }) {
               <span className="unread-chip-working-ring" />
               <span className="unread-chip-name">bot</span>
             </span>
-            <span>旋轉的整圈外框：還在執行</span>
+            <span>黃色旋轉的整圈外框：還在執行</span>
           </li>
           <li>
             <span className="unread-chip current" aria-hidden="true">
