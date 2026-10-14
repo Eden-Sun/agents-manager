@@ -151,10 +151,12 @@ pub fn parse_claude_reset(line: &str, now: DateTime<Local>) -> Option<String> {
         }
         _ => {
             // Time-only: today, or tomorrow if that time already passed (both in `tz`, not host local).
+            // 明天是「日曆上的明天、同一個牆上時刻」，不能 `+ 24 小時`：跨 DST 的那一天會差一小時（#1743）。
             let today = now.date_naive().and_hms_opt(h, m, 0)?;
             let mut dt = tz.from_local_datetime(&today).earliest()?;
             if dt <= now {
-                dt += chrono::Duration::days(1);
+                let tomorrow = now.date_naive().succ_opt()?.and_hms_opt(h, m, 0)?;
+                dt = tz.from_local_datetime(&tomorrow).earliest()?;
             }
             dt
         }
