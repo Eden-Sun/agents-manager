@@ -1,5 +1,6 @@
 import { terminalFooterFor } from '../hooks/useCodexTerminalFooter'
 import { CodexTerminalFooterItems } from './CodexTerminalFooter'
+import { splitCodexTerminalFooter } from '../lib/codexTerminalFooter'
 import { projectNoFiveHour } from '../lib/quotaNoFiveHour'
 import { memo, useEffect, useLayoutEffect, useRef, useState, useId } from 'react'
 import { CompactButton } from './CompactButton'
@@ -1108,9 +1109,11 @@ function ContextBar({ issues, status, hasStatus, phoneFiles, mobileOpen, onClose
 
 export function StatusLineBar({ botId, status, text }: { botId: string; status: StatusInfo | null; text: string | null }) {
   const phone = useMediaQuery(PHONE_QUERY)
-  const footer = useStore((s) => terminalFooterFor(s, botId))
-  const footerHasContext = /·\s*Context \d+% used/.test(footer?.modelLine ?? '')
+  const kind = useStore((s) => s.bots.find((b) => b.id === botId)?.kind)
   const line = text?.trim() ?? ''
+  // 終端解析的 footer 優先（帶 warning）；沒掛終端時（對話分頁）用 daemon 寫進 run.status_line 的同一行（#1755）。
+  const footer = useStore((s) => terminalFooterFor(s, botId)) ?? (kind === 'codex' && line ? splitCodexTerminalFooter(line).footer : null)
+  const footerHasContext = /·\s*Context \d+% used/.test(footer?.modelLine ?? '')
   if (!status) {
     if (!line && !footer) return null
     return (
