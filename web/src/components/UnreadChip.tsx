@@ -37,6 +37,7 @@ import { BotStatusCard, type ChipHints } from './BotStatusCard'
 import './unreadChip.css'
 import './cacheClock.css'
 import './keepWarmChip.css'
+import { FrozenBadge } from './FrozenBadge'
 
 /** 與 `unreadChip.css` 斷點同值。 */
 const NARROW_QUERY = '(max-width: 720px)'
@@ -144,6 +145,7 @@ function Chip({ it, dnd, lamp }: { it: ChipItem; dnd?: PinnedDnd; lamp?: boolean
       {it.working || it.waitsKids ? <span className="unread-chip-working-ring" aria-hidden="true" /> : null}
       {lamp ? <ChipLamp id={it.id} /> : null}
       <span className="unread-chip-name">{it.name}</span>
+      {it.noWarm ? <FrozenBadge /> : null}
       {it.keepWarmReplied ? (
         <span className="unread-chip-warm" aria-hidden="true">
           ♨︎

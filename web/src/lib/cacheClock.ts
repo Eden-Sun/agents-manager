@@ -83,8 +83,8 @@ export function cacheState(
   return { level, remainingSecs, frac, title }
 }
 
-/** 「不保溫中」時晶片 tooltip／狀態卡講的一句話（不顯示快取倒數）。 */
-export const NO_WARM_TEXT = '不保溫中（不顯示快取倒數）'
+/** 「不用保溫」（冰凍）時晶片 tooltip／狀態卡講的一句話（不顯示快取倒數；context 夠大時 cache 到期前會自動壓縮一次，SPEC §6.5k）。 */
+export const NO_WARM_TEXT = '不保溫：cache 到期前會自動壓縮（context 夠大時）'
 
 /**
  * 主力晶片用的快取狀態：使用者已按「不用保溫」（`run.keep_warm_skip`）就不畫倒數底色（回 `null`、晶片回一般樣式），

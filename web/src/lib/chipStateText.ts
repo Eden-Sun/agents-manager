@@ -9,13 +9,15 @@ export interface ChipState {
   kids?: number
   /** 保溫回覆到了、使用者還沒送新 prompt（`lib/keepWarm.ts`）。 */
   keepWarmReplied?: boolean
+  /** 按了「不用保溫」（冰凍）：晶片畫雪花，這裡補成字。 */
+  noWarm?: boolean
 }
 
 /** 晶片上只有顏色／點／數字表達的狀態，補成讀屏念得出來的字（畫面上用 sr-only，不佔版面）。 */
-export function chipStateText({ needsReply, unread, waitsKids, working, atCapacity = false, kids = 0, keepWarmReplied = false }: ChipState): string {
+export function chipStateText({ needsReply, unread, waitsKids, working, atCapacity = false, kids = 0, keepWarmReplied = false, noWarm = false }: ChipState): string {
   const own = needsReply ? '（需要回應）' : atCapacity ? '（模型滿載）' : unread > 0 ? `（${unread} 個回合未讀）` : waitsKids ? '（等子 agent）' : working ? '（執行中）' : ''
   const kidsPart = kids > 0 ? `（${kidsText(kids)}）` : ''
-  return `${own}${kidsPart}${keepWarmReplied ? `（${KEEP_WARM_REPLIED_TEXT}）` : ''}`
+  return `${own}${kidsPart}${noWarm ? '（不保溫）' : ''}${keepWarmReplied ? `（${KEEP_WARM_REPLIED_TEXT}）` : ''}`
 }
 
 /** 保溫回覆提示的白話：晶片 ♨ 符號之外的文字版（sr-only、tooltip、狀態卡共用）。 */

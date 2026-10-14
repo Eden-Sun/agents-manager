@@ -1507,7 +1507,7 @@ tab 已被回收視為完成，`tab.list` 失敗不猜。沒有 `tab_id` 的 Run
    `Unproven` 與打字後的錯誤 → `unknown`（不重送）；`agent_blocked` → `failed`。打字送出後的確認迴圈最多補按一次 Enter：每次補按前重讀 composer，只有完整讀出的內容（畫面的列逐列對得上原文：列內的字與空白逐字相同，只有列與列之間的接縫可以是「沒有字元」＝中文或長字硬折、「一段空白」＝在空白處折行、「換行」＝原文本來就換行；行內空白被改動的 `send to ann a`→`send to anna` 不算同一則，#1666）仍等於本次送出的文字、且尚無該文字的送達正面證據才按；看到正面證據就記 `Submitted`，不論框裡現在是什麼（同一則字也不補按，#1599）。內容不同或無法完整讀取時不補按，證據不足則記 `unknown`（#1486、#1598）。字還在框裡（後面接了別的字）時不記 Pending，只有框空了、讀不準、或框裡已找不到本則才交給背景（#1600）。
 5. 完成靠 hook（§6.7）或備援（§4.3）。Turn 在送 prompt 之前已 `in_flight`，所以 hook 早於 RPC 回應也配得到。
 6. `interrupt`（送 `esc`）／`stop` 把 in-flight Turn 標 `failed` 並加 system Message。
-7. **stall watchdog**：`delivery = ok` 後 12 秒（遠端 bot 42 秒＝12 秒加一輪 spool 掃描 30 秒，#1769：遠端 hook 先躺在那台的 spool，晚於本機才進 `hook_events`）內沒收到 `working`／`blocked` 且仍 idle/unknown → 先看字是不是還在框裡（在就補按 Enter、給寬限；「在框裡」＝框裡讀回的列逐列對得上原文的一段，列內的字與空白逐字相同，接縫不計；尾段被改、或後面接了別的字就不是我們那則，不按 Enter，#1669）；
+7. **stall watchdog**：`delivery = ok` 後 12 秒內沒收到 `working`／`blocked` 且仍 idle/unknown → 先看字是不是還在框裡（在就補按 Enter、給寬限；「在框裡」＝框裡讀回的列逐列對得上原文的一段，列內的字與空白逐字相同，接縫不計；尾段被改、或後面接了別的字就不是我們那則，不按 Enter，#1669）；
    不在框裡、畫面上也找不到 → `auto_resend=1` 的自動重送一次（本章開頭：讀 `prompt_text`、打字前被擋退還額度再試一次、按過鍵證明不了記 `unknown`）；
    都沒用才讀 `visible` 快照 → Turn `failed` + system Message，
    **判斷不了就不判**（#193）：送了什麼、run／turn／bot、重送額度讀不到或寫不進去，這一輪不判失敗，隔 10 秒整輪再看；
@@ -2580,6 +2580,11 @@ pt-hub = ["~/project/pt/CLAUDE.md", "~/project/pt/AGENTS.md"]      # 多份照�
   狀態存在 `keep_warm_skip` 表（bot_id、按下的時間；daemon 重啟不忘）。**真的活動**＝使用者或 bot 的新回合（錨點晚於按下的時間；保溫／熱壓自己造成的不算）：
   送 prompt 的入口（`primary_keep_warm::note_prompt`，非保溫的 `client_request_id`）立刻清掉，巡邏（`settle_skip`）再補抓 bot 自己的新回合與 statusLine 活動，清掉時推 `bot_status`。
   `plan` 另外判斷「錨點不晚於按下的時間就不動」，所以即使清除晚一拍也不會在活動前誤送。
+  **冰凍熱壓（使用者 2026-10-14）**：按了「不用保溫」的主力（冰凍）不保溫、不送 `any updates`，但 context 超過熱壓門檻（同上：claude 30%、codex 50%）時，
+  在 cache 到期前 6 分鐘（`FROZEN_COMPACT_LEAD_SECS`）內壓一次 `/compact`（`primary_keep_warm::decide_frozen`）：cache 年齡落在 [TTL − 6 分，TTL − 2 分）、這個錨點之後還沒熱壓過、用量超過門檻才壓，
+  走同一條熱壓路徑（綁 run、收據 `primary_cache_actions`、系統訊息）。過了 TTL − 2 分就不壓（讓它涼掉），用量不夠同樣讓它涼；TTL 短於 12 分的 kind 不做。
+  壓縮自己造成的活動（`is_warm_compact_echo`）不清掉「不用保溫」，所以壓完仍然冰凍，直到真的活動重新計時。
+  **網頁**：冰凍的主力在快取晶片名字旁、側欄列的名字旁畫雪花（`FrozenBadge`，inline SVG、不用 emoji），tooltip 寫「不保溫：cache 到期前會自動壓縮（context 夠大時）」；不畫快取倒數底色。
 - **保溫回覆與未讀**：保溫回合的訊息（`any updates` 與 bot 的回覆）帶 `messages.keep_warm = 1`（trigger `messages_keep_warm_mark` 在寫入時蓋，舊列開 DB 時回填），訊息 JSON 的 `keep_warm`；
   daemon 算的未讀（`read_marks` 的 `unread`）一律不計這些回合。run JSON 的 `keep_warm_replied_at`＝最近一次保溫回覆完成時間，從回合紀錄推算：保溫回合完成後、還沒有任何非保溫回合才有值，
   使用者送出新的 prompt（新回合出現）就是 `null`（「之後」以寫入順序 `rowid` 判，同一毫秒也分得出先後；保溫在飛時排進來的使用者回合也算在保溫之後；「最近回合」的第二鍵同樣用 `rowid`，#867），隨 `bot_status` 廣播；網頁據此把主力晶片框上色。

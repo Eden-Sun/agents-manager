@@ -113,6 +113,27 @@ test('保溫回覆：TTL 內帶 ♨ 提示、過 TTL 消失、送 prompt 立即�
   assert.equal(chip(id)!.querySelector('.unread-chip-warm'), null, '送 prompt 後 ♨ 消失')
 })
 
+/** 冰凍（不用保溫）：主力晶片畫雪花（inline SVG），tooltip 講 cache 到期前自動壓縮；取消後雪花消失。 */
+test('冰凍：按了「不用保溫」的主力晶片畫雪花圖示，取消後消失', async () => {
+  const { id } = await running('am-claude')
+  await act(() => useStore.getState().refreshState())
+  await act(() => useStore.setState({ botUnread: {}, selectedBotId: null }))
+  await mount(<UnreadChip />)
+  assert.equal(chip(id)!.querySelector('.frozen-badge'), null, '一開始沒有雪花')
+
+  await mock.request('POST', `/bots/${id}/keep-warm/skip`, { skip: true })
+  await act(() => useStore.getState().refreshState())
+  await until(() => chip(id)!.querySelector('.frozen-badge') !== null, '按了不用保溫就畫雪花')
+  assert.ok(chip(id)!.querySelector('.frozen-badge svg'), '用 inline SVG，不用 emoji（#1180）')
+  assert.equal(chip(id)!.querySelector('.frozen-badge')!.getAttribute('aria-hidden'), 'true', '文字在 tooltip 與 sr-only')
+  assert.match(chip(id)!.title, /不保溫：cache 到期前會自動壓縮（context 夠大時）/)
+  assert.match(chip(id)!.querySelector('.sr-only')!.textContent ?? '', /（不保溫）/)
+  assert.equal(chip(id)!.querySelector('.unread-chip-warm'), null, '冰凍跟 ♨ 是不同的記號')
+
+  await mock.request('POST', `/bots/${id}/keep-warm/skip`, { skip: false })
+  await act(() => useStore.getState().refreshState())
+  await until(() => chip(id)!.querySelector('.frozen-badge') === null, '取消後雪花消失')
+})
 
 /** 手機寬度：`matchMedia` 對 640px 斷點回 true。 */
 function asPhone(): () => void {

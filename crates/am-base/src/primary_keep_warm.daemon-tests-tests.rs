@@ -332,9 +332,10 @@
 
         assert!(set_skip(&env.app.db, &bot.id, true).await.unwrap(), "第一次按：狀態變了");
         assert!(!set_skip(&env.app.db, &bot.id, true).await.unwrap(), "再按同一個值是 no-op");
-        assert_eq!(plan(&env.app, &bot, &run, now).await.unwrap(), None, "跳過這一輪：不保溫");
+        let idle = |p: Option<Plan>| p.is_none_or(|p| p.step == Step::Wait);
+        assert!(idle(plan(&env.app, &bot, &run, now).await.unwrap()), "跳過這一輪：不保溫");
         let later = now + chrono::Duration::minutes(55);
-        assert_eq!(plan(&env.app, &bot, &run, later).await.unwrap(), None, "也不熱壓");
+        assert!(idle(plan(&env.app, &bot, &run, later).await.unwrap()), "cache 已過期、context 不明：也不壓縮");
         // 沒有活動：巡邏不會把它清掉。
         settle_skip(&env, &bot, &run, later).await;
         assert!(skip_since(&env.app.db, &bot.id).await.unwrap().is_some());
@@ -352,6 +353,38 @@
         assert!(skip_since(&env.app.db, &bot.id).await.unwrap().is_none(), "活動後自動恢復");
         let p = plan(&env.app, &bot, &run, fresh + chrono::Duration::minutes(59)).await.unwrap().unwrap();
         assert_eq!(p.step, Step::KeepWarm, "新的錨點照樣到 58 分才保溫");
+    }
+
+    /// 冰凍（不用保溫）的主力：不保溫，context 超過熱壓門檻時在 cache 到期前 6 分鐘內壓一次（使用者 2026-10-14）；
+    /// 太早、太晚（剩不到 2 分鐘）、context 不夠大都不壓；壓縮自己的活動不會把「不用保溫」清掉。
+    #[tokio::test]
+    async fn a_frozen_primary_compacts_once_just_before_the_cache_expires() {
+        let env = tt::env().await;
+        let now = chrono::Utc::now();
+        let (bot, run) = primary(&env, "kw-frozen", "idle").await;
+        let ctx = |pct: f64| serde_json::json!({"context_window": {"used_percentage": pct}}).to_string();
+        sqlx::query("UPDATE runs SET status_json = ? WHERE id = ?").bind(ctx(45.0)).bind(&run.id).execute(&env.app.db).await.unwrap();
+        let run = db::active_run(&env.app.db, &bot.id).await.unwrap().unwrap();
+        turn(&env, &bot, "t-real", None, "completed", &at(60, now), Some(&at(60, now))).await;
+        set_skip(&env.app.db, &bot.id, true).await.unwrap();
+
+        let at_min = |m: i64| now + chrono::Duration::minutes(m);
+        let step = |p: Option<Plan>| p.map(|p| p.step);
+        assert_eq!(step(plan(&env.app, &bot, &run, at_min(-10)).await.unwrap()), None, "活動後 50 分：還早");
+        assert_eq!(step(plan(&env.app, &bot, &run, at_min(-5)).await.unwrap()), Some(Step::WarmCompact), "55 分、cache 還熱：壓");
+        assert_eq!(step(plan(&env.app, &bot, &run, at_min(-1)).await.unwrap()), Some(Step::Wait), "59 分：剩不到 2 分鐘，不壓");
+        assert_eq!(decide_frozen(55 * 60, 3600, true, Some(45.0), 30.0), Step::Wait, "這個錨點壓過了不再壓");
+        assert_eq!(decide_frozen(55 * 60, 3600, false, Some(20.0), 30.0), Step::Wait, "context 不夠大：讓它涼");
+        assert_eq!(decide_frozen(4 * 60, 5 * 60, false, Some(90.0), 30.0), Step::Wait, "TTL 太短不壓");
+
+        // 壓完：壓縮的回音（收據之後 10 分鐘內的錨點）不是使用者回來，「不用保溫」留著。
+        let anchor = plan(&env.app, &bot, &run, at_min(-5)).await.unwrap().unwrap().anchor;
+        assert!(claim_warm_compact(&env.app.db, &bot.id, &anchor, &run.id, 55).await.unwrap());
+        settle_warm_compact(&env.app.db, &bot.id, &anchor).await.unwrap();
+        let echo = chrono::Utc::now() + chrono::Duration::seconds(30);
+        turn(&env, &bot, "t-compact-echo", None, "completed", &db::iso_at(echo), Some(&db::iso_at(echo))).await;
+        settle_skip(&env, &bot, &run, echo + chrono::Duration::seconds(5)).await;
+        assert!(skip_since(&env.app.db, &bot.id).await.unwrap().is_some(), "壓縮自己的活動不算回來");
     }
 
     /// 即使巡邏還沒來，新的（非保溫）prompt 一進來就恢復；保溫自己的 prompt 不算。
@@ -378,7 +411,8 @@
         drop_window(&run.id);
         let reopened = crate::app_ports_p1::open(&env.dir.join("data").join("db.sqlite3")).await.unwrap();
         assert!(skip_since(&reopened, &bot.id).await.unwrap().is_some(), "重開 DB 後還在");
-        assert_eq!(plan(&env.app, &bot, &run, now).await.unwrap(), None);
+        // 冰凍：不保溫，錨點 59 分（已過 58 分保溫視窗、cache 還沒到 60 分的壓縮窗）→ 這一輪只回 Wait，沒有任何動作。
+        assert_eq!(plan(&env.app, &bot, &run, now).await.unwrap().map(|p| p.step), Some(Step::Wait), "重啟後仍然不保溫");
         let last = cache_clock::last_turn_for_bot(&reopened, &bot.id).await.unwrap().unwrap();
         assert!(last.keep_warm_skip, "run JSON 的 keep_warm_skip 也從 DB 來");
     }

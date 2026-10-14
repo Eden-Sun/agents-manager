@@ -99,7 +99,7 @@ test('不用保溫（keep_warm_skip）：晶片不畫倒數底色、tooltip 講�
   assert.ok(![...chip('fresh').classList].some((c) => c.startsWith('cache-')), '沒有 cache- class')
   assert.equal(chip('fresh').style.getPropertyValue('--cache-fill'), '')
   const text = await hoverText('fresh')
-  assert.match(text, /不保溫中/)
+  assert.match(text, /不保溫：cache 到期前會自動壓縮（context 夠大時）/)
   assert.doesNotMatch(text, /快取約/)
   await setSkip(false)
   assert.ok(chip('fresh').classList.contains('cache-fresh'))
