@@ -923,6 +923,7 @@ let boundGet: GetFn | null = null
 
 /** 已經跳過 toast 的排程終態（occurrence＋狀態）：重連重播不重複跳。 */
 const seenScheduleNotices = new Set<string>()
+const seenHerdrRecoveryNotices = new Set<string>()
 
 export const useStore = create<StoreState>((set, get) => {
   boundSet = set
@@ -3281,6 +3282,30 @@ export function handleFrame(set: SetFn, get: GetFn, frame: { seq?: number; type:
       if (status === 'done') useStore.getState().notify('info', `排程「${name}」已完成`)
       else if (status === 'unknown') useStore.getState().notify('error', `排程「${name}」上次結果不明，請先到 Bot 對話確認；確認後可重新啟用`)
       else if (status === 'failed') useStore.getState().notify('error', `排程「${name}」失敗${error ? `：${error}` : ''}`)
+      return
+    }
+    case 'herdr_recovery_done': {
+      if (!isRec(data)) return
+      const recoveryId = str(pick(data, 'recovery_id'))
+      if (!recoveryId || seenHerdrRecoveryNotices.has(recoveryId)) return
+      seenHerdrRecoveryNotices.add(recoveryId)
+      if (seenHerdrRecoveryNotices.size > 500) seenHerdrRecoveryNotices.clear()
+      const resumed = arr(pick(data, 'resumed'))
+      const failed = arr(pick(data, 'failed'))
+      const children = arr(pick(data, 'children_lost'))
+      const names = (rows: unknown[]) => rows.map((row) => isRec(row) ? str(pick(row, 'name')) : '').filter(Boolean)
+      const failedNames = names(failed)
+      const childNames = names(children)
+      const suffix = bool(pick(data, 'limited'))
+        ? '短時間內重連次數過多，已達自動接回上限。'
+        : str(pick(data, 'skipped')) ? '連線狀態再次改變，部分接回已略過。' : ''
+      const detail = [
+        failedNames.length ? `失敗：${failedNames.join('、')}` : '',
+        childNames.length ? `遺失 child：${childNames.join('、')}` : '',
+        suffix,
+      ].filter(Boolean).join('；')
+      const text = `herdr 意外重啟：接回 ${resumed.length} 顆頂層 bot，${failed.length} 顆失敗，${children.length} 個 child pane 遺失。${detail}`
+      get().notify(failed.length || bool(pick(data, 'limited')) ? 'error' : 'info', text.slice(0, 500))
       return
     }
     case 'identity_prefs_changed': {
