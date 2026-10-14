@@ -60,6 +60,8 @@ origin:   web | external                     （external = 非本系統送出、
 
 標題列的 Bot 晶片以整圈黃色旋轉外框表示 `working`，取代小色點（桌機與手機一致）；只旋轉邊緣漸層，文字、快取底色與選取狀態保持可辨識。父 Bot 等待仍在跑的 child（`waitsKids`，沿用 working／blocked 的子 Bot 定義）時也畫同一圈，保留分叉圖示與數量、不重複畫等待小點或手機小燈；child 全部結束後移除，父 Bot 自己需要回應時保留紅色提示。藍色外框表示 focus，執行中外框用黃色系避免混淆。自己與 child 都沒有執行中工作就不畫旋轉框；`prefers-reduced-motion` 時改為靜態黃框，讀屏沿用執行中／child 狀態文字。側欄燈號沿用原規則。
 
+同時 focus 與執行中時，藍色選取框完整保留在外側，黃色進度圈內縮為 1px，不覆蓋選取 border 與 inset ring；桌機、手機與等待 child 都沿用這個排列。
+
 herdr 0.9.2 起（上游 #4507），codex 畫面沒有任何偵測規則對上時回 `unknown`（`agent explain`：`codex_state_ambiguous`）；0.9.1 同一個畫面回
 `idle`（`default_known_agent_idle_fallback`）。codex 的 manifest 沒有 idle 規則，閒著的 codex 在 0.9.2+ 因此永遠是 `unknown`。herdr client
 只在帶有 `launch_pending` 的 `AgentInfo` 上，將「codex、`launch_pending=false`、`unknown`」折回 `idle`。`PaneInfo` 和

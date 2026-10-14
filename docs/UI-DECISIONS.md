@@ -674,6 +674,7 @@ claude（2.1.280 起）回合結束後在終端輸入框畫一句灰字建議，
   ![手機 13 顆收合](screenshots/pin-3rows/phone-13-collapsed-390.png) ![手機 13 顆展開](screenshots/pin-3rows/phone-13-expanded-390.png) ![桌機主力三行](screenshots/pin-3rows/desktop-3rows.png) ![桌機主力三行＋要你回答仍佔自己那行](screenshots/pin-3rows/desktop-3rows-with-others.png)
 - **執行中的晶片整圈旋轉外框（2026-10-14 使用者）**：桌機與手機的 `working` 晶片不再用小色點，而以 2px 黃色漸層（`--lamp-yellow`，深淺色主題各自適配）沿完整外框旋轉，每圈 1.8 秒；文字與膠囊本身不轉。黃色表示執行中，藍色仍表示 focus，避免混淆。外框透明遮罩只畫邊緣，保留快取底色與選取樣式；停止執行時立即移除。偏好減少動態時改成靜態完整黃框。讀屏沿用「執行中」文字；紅色需要回應、模型滿載、等子 agent 的記號照原狀態保留。
   黃色外框的深淺色與手機實景：`docs/screenshots/working-ring-yellow/`。
+  **focus 不被進度蓋掉（2026-10-14 使用者）**：`.current` 晶片的黃色旋轉圈往內收（inset 1px、圈寬 1px、圓角 4px），外側原本的完整藍框與選取左條保留；名字與底色不變。自己 working 或等待 child 都適用，沒有 focus 的進度圈仍為 2px。
 - **手機主力晶片：★ 換成狀態燈（2026-09-20，#344 再追加）**：那一區全是釘選的，★ 每顆一樣、只佔寬度。空出來的位置放跟側欄同一顆的燈（`botLamp`，語意與顏色照 SPEC §2.2）：
   idle 綠、working 改為晶片整圈旋轉外框（不重複畫小燈）、blocked 紅（加一圈光暈，並保留晶片本來的 needs-reply 樣式與 `!`）、unknown 黃灰、離線空心圈、斷線灰。原本晶片右側的狀態點是同一件事，在這一區隱藏。
   未讀數字照舊並存；其餘燈是 `role="img"` 帶狀態文字，working 沿用晶片的讀屏文字。桌機與手機的主力晶片都不畫重複的 ★（使用者 2026-10-14：「這裡的本來就都是星的，沒意義」），主力與其他 Bot 仍分兩排，working 同樣用旋轉外框。截圖：`docs/screenshots/chip-no-star/`。
