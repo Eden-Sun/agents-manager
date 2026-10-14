@@ -13,13 +13,12 @@ before(setupDom)
 after(teardownDom)
 
 // 測試要在掛載後改 active：用一個能從外面叫的 setter 代替 props 重畫（domHarness 沒有 rerender）。
-let setActive: (v: boolean) => void = () => {}
-let setRed: (v: boolean) => void = () => {}
+const ctl: { setActive?: (v: boolean) => void; setRed?: (v: boolean) => void } = {}
 function Probe() {
   const [active, set] = useState(false)
   const [red, setR] = useState(false)
-  setActive = set
-  setRed = setR
+  ctl.setActive = set
+  ctl.setRed = setR
   return <span>{useCacheTick(active, red)}</span>
 }
 
@@ -33,7 +32,7 @@ test('active 從 false 變 true：立刻換成新的 now，不等 15 秒', async
 
     const fake = realNow() + 3_600_000
     Date.now = () => fake
-    await act(async () => setActive(true))
+    await act(async () => ctl.setActive!(true))
     await settle(5)
     assert.equal(shown(), String(fake), 'active 變 true 後要立刻補一次，不是等 15 秒的 interval')
   } finally {
@@ -50,13 +49,13 @@ test('紅色（red）時重算每 5 秒，其他時候照 15 秒', async () => {
   }) as typeof window.setInterval
   try {
     await mount(<Probe />)
-    await act(async () => setActive(true))
+    await act(async () => ctl.setActive!(true))
     await settle(5)
     assert.equal(delays.at(-1), 15_000)
-    await act(async () => setRed(true))
+    await act(async () => ctl.setRed!(true))
     await settle(5)
     assert.equal(delays.at(-1), 5_000, '有主力在紅色：每 5 秒')
-    await act(async () => setRed(false))
+    await act(async () => ctl.setRed!(false))
     await settle(5)
     assert.equal(delays.at(-1), 15_000, '紅色解除：回到 15 秒')
   } finally {

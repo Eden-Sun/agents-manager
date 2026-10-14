@@ -222,7 +222,7 @@ export function UnreadChip() {
   const [primaryRed, setPrimaryRed] = useState(false)
   const now = useCacheTick(bots.some((b) => b.primary), primaryRed)
   const redNow = bots.some((b) => b.primary && chipCache(runs[b.id], now)?.level === 'low')
-  useEffect(() => setPrimaryRed(redNow), [redNow])
+  if (redNow !== primaryRed) setPrimaryRed(redNow)
 
   const items = useMemo(() => {
     const tracked = (b: Bot) => chipTracked(b, supervisorProjectId)
