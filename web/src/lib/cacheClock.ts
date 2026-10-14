@@ -2,13 +2,16 @@
  * 主力晶片的 prompt cache 倒數（SPEC §6.5j）：晶片原本的底色就是倒數，不另加元素、不改尺寸。
  *
  * daemon 在 run 上帶 `last_api_at`（最後一次 API 活動）與 `cache_ttl_secs`（claude／codex 3600，grok 不帶）；
- * 這裡只做算術：剩餘＝`last_api_at + ttl - now`，回合進行中＝滿。網頁每 15 秒重算一次（`CACHE_TICK_MS`）。
+ * 這裡只做算術：剩餘＝`last_api_at + ttl - now`，回合進行中＝滿。網頁每 15 秒重算一次（`CACHE_TICK_MS`）；
+ * 紅色時每 5 秒（`CACHE_RED_TICK_MS`）：紅色那級的底色改以 5 分鐘為滿刻度重算，見 `frac`。
  * 主力的 prompt cache「保溫」（`primary_keepalive`，SPEC §6.5k）：`cache_kept_warm_at` 是保溫／熱壓讓 cache 實際變熱的時間，
  * 顏色與剩餘從 `max(last_api_at, cache_kept_warm_at)` 起算；`last_api_at` 仍是真實年齡（保溫不算活動，只在 tooltip 講）。
  * 門檻：剩 > 15 分鐘綠、5–15 分鐘黃、< 5 分鐘紅、到期＝「已涼」（回到一般底色，只在 tooltip 講）。
  */
 
 export const CACHE_TICK_MS = 15_000
+/** 有主力在紅色（< 5 分）時的重算間隔：紅色只剩 5 分鐘，15 秒一跳看不出流失（使用者 2026-10-14）。 */
+export const CACHE_RED_TICK_MS = 5_000
 
 export type CacheLevel = 'fresh' | 'warn' | 'low' | 'cold'
 
@@ -16,7 +19,11 @@ export interface CacheState {
   level: CacheLevel
   /** 剩餘秒數（≥ 0）。 */
   remainingSecs: number
-  /** 剩餘佔 TTL 的比例，0–1；底色由左往右填這麼多。 */
+  /**
+   * 底色由左往右填的比例，0–1，只拿來畫寬度（不是數字，tooltip 的「約 N 分」照剩餘秒數算）。
+   * 綠、黃＝剩餘／TTL；紅（`level === 'low'`，與剩餘 ≤ 5 分鐘）＝剩餘／5 分鐘，剛變紅時是滿的、5 分鐘內流到 0。
+   * 「剩 300 秒」這一秒仍照黃的 `level`，但比例已按紅色算（滿條），免得從黃轉紅時底色跳一下。
+   */
   frac: number
   /** tooltip 用的一句話。 */
   title: string
@@ -71,7 +78,9 @@ export function cacheState(
     ? `上次活動 ${clock(new Date(at), nowMs)}，已保溫 ${clock(new Date(hotSince), nowMs)}`
     : `上次活動 ${clock(new Date(at), nowMs)}`
   const title = level === 'cold' ? `快取已涼（${last}）` : `快取約 ${Math.max(1, Math.ceil(remainingSecs / 60))} 分後到期（${last}）`
-  return { level, remainingSecs, frac: remainingSecs / ttlSecs, title }
+  // 紅色（≤ 5 分）改以 5 分鐘為滿刻度，見 `CacheState.frac`；綠、黃照舊。
+  const frac = remainingSecs <= LOW_SECS ? Math.min(1, remainingSecs / LOW_SECS) : remainingSecs / ttlSecs
+  return { level, remainingSecs, frac, title }
 }
 
 /** 「不保溫中」時晶片 tooltip／狀態卡講的一句話（不顯示快取倒數）。 */

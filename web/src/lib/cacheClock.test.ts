@@ -1,6 +1,6 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
-import { cacheLevel, cacheState, chipCache } from './cacheClock.ts'
+import { CACHE_RED_TICK_MS, CACHE_TICK_MS, cacheLevel, cacheState, chipCache } from './cacheClock.ts'
 
 const T0 = Date.parse('2026-10-04T12:00:00.000Z')
 const at = (minAgo: number) => new Date(T0 - minAgo * 60_000).toISOString()
@@ -96,4 +96,33 @@ test('跨年：上次活動在去年，tooltip 的時間要帶年份', () => {
   const now = new Date(2027, 0, 1, 0, 20).getTime()
   const last = new Date(2026, 11, 31, 23, 30).toISOString()
   assert.equal(cacheState(last, 3600, now)!.title, '快取約 10 分後到期（上次活動 2026/12/31 23:30）')
+})
+
+test('紅色（< 5 分）底色以 5 分為滿刻度：剛變紅是滿的，5 分內流到 0', () => {
+  // 剩餘秒數直接給（不經分鐘取整）：`at(m)` 的剩餘是 3600 - m×60。
+  const left = (secs: number) => new Date(T0 - (3600 - secs) * 1000).toISOString()
+  // 剩 300 秒：黃的 level，但比例已按紅色算成滿條（從黃轉紅時不跳）。
+  assert.equal(cacheState(left(300), 3600, T0)!.level, 'warn')
+  assert.equal(cacheState(left(300), 3600, T0)!.frac, 1)
+  assert.equal(cacheState(left(299), 3600, T0)!.level, 'low')
+  assert.equal(cacheState(left(299), 3600, T0)!.frac, 299 / 300)
+  assert.equal(cacheState(left(150), 3600, T0)!.frac, 0.5)
+  assert.equal(cacheState(left(1), 3600, T0)!.level, 'low')
+  assert.ok(cacheState(left(1), 3600, T0)!.frac < 0.01, '剩 1 秒幾乎是 0')
+  // 到期：已涼，比例 0。
+  assert.equal(cacheState(left(0), 3600, T0)!.frac, 0)
+})
+
+test('綠、黃仍是剩餘／TTL（不因紅色的改法而變）', () => {
+  const left = (secs: number) => new Date(T0 - (3600 - secs) * 1000).toISOString()
+  assert.equal(cacheState(left(960), 3600, T0)!.level, 'fresh')
+  assert.equal(cacheState(left(960), 3600, T0)!.frac, 960 / 3600)
+  assert.equal(cacheState(left(600), 3600, T0)!.level, 'warn')
+  assert.equal(cacheState(left(600), 3600, T0)!.frac, 600 / 3600)
+  assert.equal(cacheState(left(301), 3600, T0)!.frac, 301 / 3600)
+})
+
+test('紅色重算間隔 5 秒、其他 15 秒', () => {
+  assert.equal(CACHE_RED_TICK_MS, 5_000)
+  assert.equal(CACHE_TICK_MS, 15_000)
 })

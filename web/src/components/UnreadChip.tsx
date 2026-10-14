@@ -217,8 +217,12 @@ export function UnreadChip() {
   const keptId = keepSelectedRow(selectedBotId, botUnread)
 
   const narrow = useMediaQuery(NARROW_QUERY)
-  // 快取倒數每 15 秒重算；沒有主力就不跑計時器。
-  const now = useCacheTick(bots.some((b) => b.primary))
+  // 快取倒數每 15 秒重算；沒有主力就不跑計時器。有主力在紅色（< 5 分）時改每 5 秒（使用者 2026-10-14）：
+  // 紅色的重算頻率看上一拍算出來的結果，下一拍就換頻率，所以從黃轉紅最多慢一拍（15 秒）。
+  const [primaryRed, setPrimaryRed] = useState(false)
+  const now = useCacheTick(bots.some((b) => b.primary), primaryRed)
+  const redNow = bots.some((b) => b.primary && chipCache(runs[b.id], now)?.level === 'low')
+  useEffect(() => setPrimaryRed(redNow), [redNow])
 
   const items = useMemo(() => {
     const tracked = (b: Bot) => chipTracked(b, supervisorProjectId)
