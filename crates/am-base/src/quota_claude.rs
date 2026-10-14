@@ -188,7 +188,17 @@ fn resets_tail(line: &str) -> Option<&str> {
 
 /// `None` when the plan lines are not there (logged out, or not drawn yet).
 pub fn parse_claude_usage(screen: &str, now: DateTime<Local>, account: Option<&str>) -> Option<Quota> {
-    let lines: Vec<String> = screen.lines().map(clean).filter(|l| !l.is_empty()).collect();
+    let mut lines: Vec<String> = screen.lines().map(clean).filter(|l| !l.is_empty()).collect();
+    // stream-json 的 local_command_source 也含有可讀 `/usage` 文字；pane capture 偶爾會讓
+    // usage_report key 不完整，這時仍可從該欄位取回額度與重置時間。
+    // 只讀明確的 local_command_source 欄位，再交給既有標題與百分比判斷，避免誤讀貢獻統計。
+    for value in captured_json_values(screen) {
+        let Some(source) = value.get("local_command_source").and_then(Value::as_str) else { continue };
+        let source = source
+            .replace("<local-command-stdout>", "")
+            .replace("</local-command-stdout>", "");
+        lines.extend(source.lines().map(clean).filter(|l| !l.is_empty()));
+    }
     let mut five: Option<Window> = None;
     let mut seven: Option<Window> = None;
     let mut fable: Option<Window> = None;
@@ -378,11 +388,12 @@ pub fn probe_command(bin: &str, env: &BTreeMap<String, String>, with_usage: bool
     let b = crate::hosts::sh_quote(bin);
     let auth = crate::tools::CLAUDE_LOGIN_ARGS.join(" ");
     // `/usage` 先要結構化版本（claude 2.1.273 起：`usage_report` 帶 kind／percent／ISO resets_at／scope）。
+    // JSON 行很長，先明確切成短行，避免終端／pane capture 對單行折行或截斷；解析端會接回片段。
     // `grep -m1` 沒抓到（舊 CLI 不認 `--output-format`、或還沒有這個欄位）才跑純文字版給 [`parse_claude_usage`]。
     // 只要登入答案的 target（[`Target::login_only`]）不跑 `/usage`：那一格的額度由裸 target 負責，多跑一次是純成本。
     let usage = if with_usage {
         format!(
-            "{pfx}{b} -p '/usage' --output-format stream-json --verbose </dev/null 2>/dev/null | grep -m1 usage_report \
+            "{pfx}{b} -p '/usage' --output-format stream-json --verbose </dev/null 2>/dev/null | grep -m1 usage_report | fold -w 120 \
                || {pfx}{b} -p '/usage' </dev/null 2>&1; rc=$?; "
         )
     } else {
@@ -399,9 +410,7 @@ pub fn probe_command(bin: &str, env: &BTreeMap<String, String>, with_usage: bool
 /// `session`→5h、`weekly_all`→7d、`weekly_scoped` 且 scope 是 Fable→Fable 桶。其餘 scoped 列（別的模型）
 /// 沒有對應的桶，先忽略。時間直接用 `resets_at`，不必再解析「Sep 16 at 7:50am」這種跟語系綁在一起的字。
 pub fn parse_claude_usage_report(segment: &str, account: Option<&str>) -> Option<Quota> {
-    let line = segment.lines().find(|l| l.contains("\"usage_report\""))?;
-    let start = line.find('{')?;
-    let v: Value = serde_json::from_str(line[start..].trim_end()).ok()?;
+    let v = captured_json_values(segment).into_iter().find(|v| v.get("usage_report").is_some())?;
     let limits = v.pointer("/usage_report/rate_limits/limits")?.as_array()?;
     let iso = |row: &Value| -> Option<String> {
         let s = row.get("resets_at")?.as_str()?;
@@ -441,6 +450,32 @@ pub fn parse_claude_usage_report(segment: &str, account: Option<&str>) -> Option
         account: account.map(String::from),
         host: LOCAL_HOST.into(),
     })
+}
+
+/// Parse complete stream-json objects, including a record split into short hard-wrapped pane
+/// lines by [`probe_command`]. Newlines are removed only while rebuilding a record; ordinary text
+/// remains line-oriented for [`parse_claude_usage`].
+fn captured_json_values(segment: &str) -> Vec<Value> {
+    let lines: Vec<&str> = segment.lines().collect();
+    let mut values = Vec::new();
+    for i in 0..lines.len() {
+        let Some(start) = lines[i].find('{') else { continue };
+        let mut candidate = lines[i][start..].trim().to_string();
+        if let Ok(value) = serde_json::from_str::<Value>(&candidate) {
+            values.push(value);
+            continue;
+        }
+        for line in lines.iter().skip(i + 1).take(256) {
+            if line.contains(USAGE_DONE) { break; }
+            candidate.push_str(line.trim());
+            if candidate.len() > 64 * 1024 { break; }
+            if let Ok(value) = serde_json::from_str::<Value>(&candidate) {
+                values.push(value);
+                break;
+            }
+        }
+    }
+    values
 }
 
 /// Searched from the **end**: a retyped command leaves two runs in scrollback; only the last finished.

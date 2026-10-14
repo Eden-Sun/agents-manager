@@ -227,6 +227,36 @@ AM_USAGE_DONE=0
         assert!(parse_claude_usage_report("{\"usage_report\":{\"rate_limits\":{\"limi", None).is_none());
     }
 
+    /// Pane 收到的舊失敗輸出是合法 JSON，但頂層欄位在長行擷取時成了 `usage_repor`；
+    /// structured parser 因而拒讀。`local_command_source` 仍有權威 `/usage` 文字可用，
+    /// contribution 百分比沒有 `Current session/week` 標題，不得被當成額度。
+    #[test]
+    fn damaged_usage_report_capture_falls_back_to_its_command_text() {
+        let captured = include_str!("fixtures/claude-usage-repor-capture.jsonl");
+        assert!(parse_claude_usage_report(captured, Some("cc1")).is_none(), "舊 parser 的欄位缺字情形");
+        let q = parse_claude_usage(captured, at("2026-10-14T12:00:00+00:00"), Some("cc1")).expect("local command text");
+        let five = q.five_hour.unwrap();
+        let seven = q.seven_day.unwrap();
+        assert_eq!(five.used_pct, 95.0);
+        assert_eq!(five.resets_at.as_deref(), Some("2026-10-14T18:00:00.000Z"));
+        assert_eq!(seven.used_pct, 81.0);
+        assert_eq!(seven.resets_at.as_deref(), Some("2026-10-19T23:59:00.000Z"));
+        assert!(q.fable.is_none(), "contribution 行的 83% 不能形成 quota bucket");
+        assert_eq!(q.account.as_deref(), Some("cc1"));
+    }
+
+    /// 短行輸出再由 parser 接回完整 JSON，保留結構化數字與 UTC 重置時間。
+    #[test]
+    fn a_folded_usage_report_keeps_percentages_and_utc_resets() {
+        let line = r#"{"usage_report":{"rate_limits":{"limits":[{"kind":"session","percent":95,"resets_at":"2026-10-14T18:00:00Z"},{"kind":"weekly_all","percent":81,"resets_at":"2026-10-19T23:59:00Z"}]}}}"#;
+        let folded = line.as_bytes().chunks(120).map(std::str::from_utf8).collect::<std::result::Result<Vec<_>, _>>().unwrap().join("\n");
+        let q = parse_claude_usage_report(&folded, Some("cc1")).expect("folded structured report");
+        assert_eq!(q.five_hour.as_ref().unwrap().used_pct, 95.0);
+        assert_eq!(q.five_hour.as_ref().unwrap().resets_at.as_deref(), Some("2026-10-14T18:00:00.000Z"));
+        assert_eq!(q.seven_day.as_ref().unwrap().used_pct, 81.0);
+        assert_eq!(q.seven_day.as_ref().unwrap().resets_at.as_deref(), Some("2026-10-19T23:59:00.000Z"));
+    }
+
     #[test]
     fn session_and_week_all_models_map() {
         let q = parse_claude_usage(SCREEN, at("2026-09-06T10:00:00+08:00"), Some("cc0")).unwrap();
