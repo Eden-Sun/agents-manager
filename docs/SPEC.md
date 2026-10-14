@@ -2542,7 +2542,7 @@ pt-hub = ["~/project/pt/CLAUDE.md", "~/project/pt/AGENTS.md"]      # 多份照�
   `source:"statusline"`）；沒有這塊（舊版 claude）為 `null`。codex 沒有 statusLine，巡邏（`update_watch::sweep_runs`，30 秒）對每顆本機 codex run 讀它的
   rollout（`$CODEX_HOME/sessions/…/rollout-*-<native_session_id>.jsonl`，沿用 `codex_session_log`）**新增的整行**——記路徑與位移，不整檔重讀；第一次只讀檔尾 256 KB——
   取最後一筆 `event_msg`／`token_count` 的 `info`：`last_token_usage.input_tokens`＝這次請求讀進去的整段 context（也是 `recache_tokens_if_cold` 的近似）、
-  `cached_input_tokens`÷`input_tokens`＝命中率、`input_tokens`÷`model_context_window`＝context %；到期＝該事件 `timestamp`＋`cache_ttl_secs`（推算，
+  `cached_input_tokens`÷`input_tokens`＝命中率、`input_tokens`÷`model_context_window`＝context %（網頁對 codex 的 gpt-6.1-sol 例外：分母固定 500k，只用實際 token，見 UI-DECISIONS「gpt-6.1-sol 的 context 分母固定 500k」）；到期＝該事件 `timestamp`＋`cache_ttl_secs`（推算，
   `source:"rollout_estimate"`，網頁字面加「約」）。讀數變了才推 `bot_status`；換 session 作廢舊位移與讀數，run 結束由巡邏清掉。
   網頁：有 `prompt_cache` 就一律用它判熱冷（`warm`＋`expires_at`，閒置時 `warm:true` 也以時間為準），冷了寫「送出這則會重寫約 N K」；
   沒有（舊版 claude、codex 還沒讀到 rollout、舊 daemon）才退回 `last_api_at`＋`cache_ttl_secs` 推算。回合進行中不顯示過期。只提示，不擋送出。

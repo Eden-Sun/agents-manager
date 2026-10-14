@@ -88,6 +88,7 @@ import { PreviewPanel } from './PreviewPanel'
 import { isTopLevelBot } from '../store/routeSync'
 import { ToolsHint } from './Tools'
 import { compactTokens } from '../lib/composerCost'
+import { GPT_61_SOL_CONTEXT_WINDOW, effectiveModelOf, sol500kContext, solWindowApplies } from '../lib/codexContextWindow'
 import './chatPanel.css'
 
 const NO_QUEUED_ATTACHMENTS: Message['attachments'] = []
@@ -1125,6 +1126,12 @@ function ContextBar({ issues, status, hasStatus, phoneFiles, mobileOpen, onClose
 export function StatusLineBar({ botId, status, text }: { botId: string; status: StatusInfo | null; text: string | null }) {
   const phone = useMediaQuery(PHONE_QUERY)
   const kind = useStore((s) => s.bots.find((b) => b.id === botId)?.kind)
+  // gpt-6.1-sol 的 context：有效模型（正在跑的優先，空白不算）＋實際 token，分母固定 500k，不沿用 CLI 的 475k 百分比。
+  const effectiveModel = useStore((s) => {
+    const r = s.runs[botId]
+    return effectiveModelOf(r?.runtime_model, s.bots.find((b) => b.id === botId)?.model)
+  })
+  const runPromptCache = useStore((s) => s.runs[botId]?.prompt_cache ?? null)
   const line = text?.trim() ?? ''
   // 終端解析的 footer 優先（帶 warning）；沒掛終端時（對話分頁）用 daemon 寫進 run.status_line 的同一行（#1755）。
   const footer = useStore((s) => terminalFooterFor(s, botId)) ?? (kind === 'codex' && line ? splitCodexTerminalFooter(line).footer : null)
@@ -1140,9 +1147,13 @@ export function StatusLineBar({ botId, status, text }: { botId: string; status: 
     )
   }
 
-  const ctxPct = fields?.contextUsedPct ?? status?.context_used_pct ?? null
-  const ctxDetail =
-    status && status.context_used_tokens !== null && status.context_size !== null
+  const solOn = solWindowApplies(kind, effectiveModel)
+  // token 先取 daemon 的 prompt_cache（rollout 實際值），沒有才用 statusLine 的實際值；都沒有就不畫（不退回 CLI 的 `Context N% used`）。
+  const solCtx = solOn ? sol500kContext(kind, effectiveModel, runPromptCache?.context_used_tokens ?? status?.context_used_tokens) : null
+  const ctxPct = solOn ? (solCtx?.pct ?? null) : (fields?.contextUsedPct ?? status?.context_used_pct ?? null)
+  const ctxDetail = solOn
+    ? solCtx ? `${compactTokens(solCtx.tokens)}/${compactTokens(GPT_61_SOL_CONTEXT_WINDOW)}` : null
+    : status && status.context_used_tokens !== null && status.context_size !== null
       ? `${compactTokens(status.context_used_tokens)}/${compactTokens(status.context_size)}`
       : null
   const cwd = fields?.cwd ?? status?.cwd ?? null

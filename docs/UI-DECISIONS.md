@@ -1055,6 +1055,14 @@ tooltip 寫最後一次失敗的原因。主機一直離線時沒有任何事件
   閒置時 `warm:true` 過了 `expires_at` 也算冷。舊 daemon／舊版 claude／codex 還沒讀到 rollout 才退回 `last_api_at`＋`cache_ttl_secs` 推算（`lib/cacheClock.ts`）。
   token 數以 daemon 算好的為準（statusLine 的 `total_input_tokens` 是累計值，最後才用）。
 
+## gpt-6.1-sol 的 context 分母固定 500k（2026-10-14 使用者）
+
+- 只套在 **codex** bot、而且**有效**模型（正在跑的 `runtime_model`，空白不算，沒有才用設定值）等於 `gpt-6.1-sol`（不分大小寫）。`gpt-6-sol`、`gpt-5.6-sol`、Luna、Astra、claude、grok 照既有規則。
+- 分母固定 500,000。分子只用實際 token：`run.prompt_cache.context_used_tokens`（rollout 最近一筆的 `input_tokens`），沒有時退用 statusLine 的 `context_used_tokens`。百分比＝實際 token ÷ 500k，例如 73,000 → `14.6%`（`73k/500k`）；0 token 合法，顯示 `0%`。
+- **不沿用 CLI 的百分比**：codex 自己的 `Context N% used`（footer）與 rollout 的 `model_context_window` 都用 475k 算，所以主顯示路徑（狀態列 context 段）與無 statusLine 的補位（`StatusCache`）都不再拿那個百分比；沒有實際 token 就整段不畫，不拿舊百分比乘 500k。
+- 只改顯示：daemon 的 `prompt_cache` 投影、CLI 設定、實際 auto compact 門檻都不動。
+- 實作：`web/src/lib/codexContextWindow.ts`（純函式）；`StatusLineBar`（ChatPanel）與 `composerCost.contextFallback` 共用它。
+
 ## 外部 Cargo 沒勾選就收起來；側欄拿掉「AGM 總管」（2026-10-04 使用者）
 
 - **外部 Cargo 主機**（環境設定→主機）：「啟用外部 Cargo verification」沒勾時，只顯示標題、說明、勾選框與「儲存」（取消啟用也要能存）；主機／帳號／port／jobs／工作目錄／密碼與「測試連線」勾選後才展開。隱藏不等於清空：欄位 state 與已存值原樣保留，取消勾選再儲存只送 `enabled:false`，host／user 等照舊、沒打密碼就不帶 `password`。表單有不合法值時，錯誤清單照常顯示（即使欄位收起來），以免儲存鍵被擋卻看不到原因。

@@ -12,6 +12,7 @@
  * 回合進行中快取一直被刷新：一律熱，不顯示過期。
  */
 import { cacheState } from './cacheClock'
+import { GPT_61_SOL_CONTEXT_WINDOW, sol500kContext, solWindowApplies } from './codexContextWindow'
 import type { PromptCacheInfo } from '../api/types'
 
 export interface CostStatus {
@@ -25,6 +26,8 @@ export interface CacheInput {
   kind: string | null | undefined
   /** daemon 的 `run.prompt_cache`。 */
   promptCache?: PromptCacheInfo | null
+  /** bot 的有效模型（`runtime_model ?? model`）；只有 gpt-6.1-sol 會改 context 分母（見 `codexContextWindow`）。 */
+  model?: string | null
   status: CostStatus | null | undefined
   lastApiAt: string | null | undefined
   /** 主力 cache 保溫讓 cache 變熱的時間（`run.cache_kept_warm_at`）；只影響退回 `last_api_at` 推算的那條路。 */
@@ -91,11 +94,19 @@ export function contextTokens(s: CostStatus | null | undefined, pc?: PromptCache
   return null
 }
 
-/** statusLine 沒有 context（codex）時，由 `prompt_cache` 補：`{pct:'7%', detail:'17k/258k'}`。 */
+/**
+ * statusLine 沒有 context（codex）時，由 `prompt_cache` 補：`{pct:'7%', detail:'17k/258k'}`。
+ * 有 `status.context_used_pct` 就回 null：那一段由 `StatusLineBar` 畫（主顯示路徑，gpt-6.1-sol 在那裡也改用 500k），這裡不重複。
+ */
 export function contextFallback(input: CacheInput): { pct: string; detail: string | null } | null {
   if (input.kind !== 'claude' && input.kind !== 'codex') return null
   if (input.status?.context_used_pct != null) return null
   const pc = input.promptCache ?? input.status?.prompt_cache ?? null
+  if (solWindowApplies(input.kind, input.model)) {
+    // gpt-6.1-sol：只用實際 token 除 500k；沒有 token 就不畫（不拿 CLI 的 475k 百分比乘回去）。
+    const v = sol500kContext(input.kind, input.model, pc?.context_used_tokens ?? input.status?.context_used_tokens)
+    return v ? { pct: pctText(v.pct), detail: `${tokensLower(v.tokens)}/${tokensLower(GPT_61_SOL_CONTEXT_WINDOW)}` } : null
+  }
   if (pc?.context_used_pct == null) return null
   const used = contextTokens(input.status, pc)
   const detail = used !== null && pc.context_size ? `${tokensLower(used)}/${tokensLower(pc.context_size)}` : null
