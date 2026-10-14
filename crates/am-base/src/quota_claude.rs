@@ -444,12 +444,20 @@ pub fn parse_claude_usage_report(segment: &str, account: Option<&str>) -> Option
 }
 
 /// Searched from the **end**: a retyped command leaves two runs in scrollback; only the last finished.
+/// 沒有 `DONE` 標記（pipeline 印完結構化的 `usage_report` 卻沒結束，#1744）時，只有那一行完整的 JSON 算答案：
+/// 它一次寫完，解得開就不會少桶子；文字版寫到一半就停，仍不算（`an_unfinished_run_has_no_answer_yet`）。
 pub fn split_probe_output(out: &str) -> Option<(String, String)> {
-    let done = out.rfind(USAGE_DONE)?;
-    let head = &out[..done];
+    let (head, finished) = match out.rfind(USAGE_DONE) {
+        Some(done) => (&out[..done], true),
+        None => (out, false),
+    };
     let e = head.rfind(AUTH_END)?;
     let b = head[..e].rfind(AUTH_BEGIN)? + AUTH_BEGIN.len();
-    Some((head[b..e].to_string(), head[e + AUTH_END.len()..].to_string()))
+    let usage = &head[e + AUTH_END.len()..];
+    if !finished && parse_claude_usage_report(usage, None).is_none() {
+        return None;
+    }
+    Some((head[b..e].to_string(), usage.to_string()))
 }
 
 async fn send_line(client: &HerdrClient, pane_id: &str, line: &str) -> Result<()> {

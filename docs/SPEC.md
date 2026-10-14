@@ -3789,6 +3789,7 @@ Bot 個別與專案群組的 `POST .../read` 都只接受 User principal；Bot�
   `/usage` 先跑 `--output-format stream-json --verbose` 並 `grep -m1 usage_report`：claude 2.1.273 起那一行帶結構化的 `usage_report.rate_limits.limits[]`
   （`kind` = `session`／`weekly_all`／`weekly_scoped`＋`scope.model.display_name`、`percent`、ISO `resets_at`、`severity`），分桶一律看 `kind` 不看顯示字串，重置時間直接用 ISO；Fable 列認 `display_name` 的第一個字（`Fable`、`Fable 5.1` 都算）。
   `grep` 沒抓到（舊 CLI 不認這個旗標或還沒有這個欄位）才跑純文字版，交給既有的文字解析（`parse_claude_usage`）。
+  `DONE` 標記還沒到、但結構化那一行已經是完整 JSON（pipeline 印完卻沒結束）時，就以那一行為答案、不等逾時（#1744）；文字版寫到一半仍不算。
   只有時刻的重置時間（`Resets 1:30am (Tz)`）今天已過就滾到明天**同一個牆上時刻**，跨 DST 那天不差一小時（#1743）。
   這支 pane 打的每一段命令都帶 `CLAUDE_CODE_MCP_STARTUP_WAIT_MS=0`（claude 2.1.274 起認得）：探測只問登入狀態跟 `/usage`，
   從不用工具，不該被 MCP server 起得慢或掛掉拖住甚至拖到 timeout；舊版 CLI 當成一般環境變數忽略，行為不變、安全。
