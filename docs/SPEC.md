@@ -3786,10 +3786,11 @@ Bot 個別與專案群組的 `POST .../read` 都只接受 User principal；Bot�
   **裸的預設帳號一樣吃退避**，「有 bot 在講話」只縮短退避、不再蓋過退避——以前兩者都豁免，`/usage` 一壞這些帳號每 60 秒開一個 pane、佔住 `probe_lock`（review 2026-09-16）。
   只有 **env 整個是空的**身分併進裸 `claude` 那一趟（用空 env 探）；env 不空、卻沒有自己 `CLAUDE_CONFIG_DIR` 的身分（`ANTHROPIC_API_KEY`…）額度仍落在裸 `claude`，
   但登入答案另開一趟**帶它自己的 env、不跑 `/usage`** 去問，而且登入已知就不再問——以前用空 env 探，預設帳號的 email／方案被記到它名下（review 2026-09-16）。
-  `/usage` 先跑 `--output-format stream-json --verbose` 並 `grep -m1 usage_report | fold -w 120`，避免 pane 對超長單行輸出折行或截斷；parser 會接回短行後的完整 JSON。claude 2.1.273 起那一行帶結構化的 `usage_report.rate_limits.limits[]`
+  `/usage` 先跑 `--output-format stream-json --verbose`，shell 先完整讀取 stdout，再用 Python 只抽出至少含一個可用額度桶的 `usage_report`，序列化後以 ASCII base64 固定 8 字元短行及短 begin/end 標記傳過 pane；這保留 JSON bytes、字串空白與 Unicode，短行不依賴一般 pane 欄寬。若沒有可用 report（舊 CLI 不認旗標或缺少額度欄位），才另跑一次純文字版；完整讀取避免管線早關造成的 CLI SIGPIPE／重跑。
+  claude 2.1.273 起那一行帶結構化的 `usage_report.rate_limits.limits[]`
   （`kind` = `session`／`weekly_all`／`weekly_scoped`＋`scope.model.display_name`、`percent`、ISO `resets_at`、`severity`），分桶一律看 `kind` 不看顯示字串，重置時間直接用 ISO；Fable 列認 `display_name` 的第一個字（`Fable`、`Fable 5.1` 都算）。
-  `grep` 沒抓到（舊 CLI 不認這個旗標或還沒有這個欄位）才跑純文字版，交給既有的文字解析（`parse_claude_usage`）。若 capture 中 JSON 可解析但結構化欄位不完整，文字解析只回退讀 JSON 的 `local_command_source`，仍須符合 `Current session`／`Current week` 標題；單獨的 usage contribution 百分比不會被當成額度。
-  `DONE` 標記還沒到、但結構化那一行已經是完整 JSON（pipeline 印完卻沒結束）時，就以那一行為答案、不等逾時（#1744）；文字版寫到一半仍不算。
+  extractor 沒抽到可用額度桶（舊 CLI 不認這個旗標或還沒有這個欄位）才跑純文字版，交給既有的文字解析（`parse_claude_usage`）。若 capture 中 JSON 可解析但結構化欄位不完整，文字解析只回退讀 JSON 的 `local_command_source`，仍須符合 `Current session`／`Current week` 標題；單獨的 usage contribution 百分比不會被當成額度。
+  `DONE` 標記還沒到、但結構化 frame 已完整（或舊版完整 JSON 行已到，CLI 印完卻沒結束）時，就以它為答案、不等逾時（#1744）；文字版寫到一半仍不算。
   只有時刻的重置時間（`Resets 1:30am (Tz)`）今天已過就滾到明天**同一個牆上時刻**，跨 DST 那天不差一小時（#1743）。
   這支 pane 打的每一段命令都帶 `CLAUDE_CODE_MCP_STARTUP_WAIT_MS=0`（claude 2.1.274 起認得）：探測只問登入狀態跟 `/usage`，
   從不用工具，不該被 MCP server 起得慢或掛掉拖住甚至拖到 timeout；舊版 CLI 當成一般環境變數忽略，行為不變、安全。
