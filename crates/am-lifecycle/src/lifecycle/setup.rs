@@ -421,6 +421,100 @@ except Exception:
       fi ;;
   esac
 fi
+# issue #1759: claude compacting its conversation sends no Stop, only `SessionStart` with `source: "compact"`, and the
+# daemon cannot read this machine's transcript to tell an idle compaction from a manual `/compact`. Read the newest
+# `compact_boundary` of the LOCAL transcript and carry it as `agm_compact` (`trigger`, `idle`, `pre_tokens`, `post_tokens`).
+# Best effort like the blocks above: without it the daemon still writes a plain "compacted" note.
+if [ "$PROVIDER" = "claude" ] && [ "$TRUNC" = false ]; then
+  case "$PAYLOAD" in
+    *'"source":"compact"'*|*'"source": "compact"'*)
+      if command -v python3 >/dev/null 2>&1; then
+        WITH=$(printf '%s' "$PAYLOAD" | python3 -c 'import json,os,stat,sys
+def _am_transcript(path):
+    cfg=os.environ.get("CLAUDE_CONFIG_DIR") or os.path.expanduser("~/.claude")
+    proj=os.path.join(os.path.realpath(cfg),"projects")
+    nofollow=getattr(os,"O_NOFOLLOW",None)
+    directory=getattr(os,"O_DIRECTORY",0)
+    if not isinstance(path,str) or not os.path.isabs(path) or nofollow is None:
+        raise SystemExit
+    project_stat=os.lstat(proj)
+    if stat.S_ISLNK(project_stat.st_mode) or not stat.S_ISDIR(project_stat.st_mode) or os.path.islink(path):
+        raise SystemExit
+    dir_flags=os.O_RDONLY|directory|nofollow|os.O_NONBLOCK
+    dirfd=os.open(proj,dir_flags)
+    try:
+        opened=os.fstat(dirfd)
+        if not stat.S_ISDIR(opened.st_mode) or (opened.st_dev,opened.st_ino)!=(project_stat.st_dev,project_stat.st_ino):
+            raise SystemExit
+        absolute=os.path.abspath(path)
+        ancestor=absolute
+        rel=None
+        while True:
+            if os.path.realpath(ancestor)==proj:
+                rel=os.path.relpath(absolute,ancestor)
+                break
+            parent=os.path.dirname(ancestor)
+            if parent==ancestor:
+                break
+            ancestor=parent
+        if rel in (None,"", "."):
+            raise SystemExit
+        parts=rel.split(os.sep)
+        if not parts or any(part in ("",".","..") for part in parts):
+            raise SystemExit
+        for part in parts[:-1]:
+            nextfd=os.open(part,dir_flags,dir_fd=dirfd)
+            if not stat.S_ISDIR(os.fstat(nextfd).st_mode):
+                os.close(nextfd)
+                raise SystemExit
+            os.close(dirfd)
+            dirfd=nextfd
+        fd=os.open(parts[-1],os.O_RDONLY|os.O_NONBLOCK|nofollow,dir_fd=dirfd)
+    finally:
+        os.close(dirfd)
+    try:
+        st=os.fstat(fd)
+        if not stat.S_ISREG(st.st_mode) or st.st_nlink!=1:
+            raise SystemExit
+        with os.fdopen(fd,"rb") as f:
+            fd=None
+            f.seek(max(0,st.st_size-524288))
+            return f.read(524288).decode("utf-8","replace")
+    finally:
+        if fd is not None:
+            os.close(fd)
+try:
+    p=json.loads(sys.stdin.buffer.read().decode("utf-8","replace"))
+    path=p.get("transcript_path") or p.get("transcriptPath")
+    if p.get("hook_event_name")!="SessionStart" or p.get("source")!="compact" or not path:
+        raise SystemExit
+    found=None
+    for line in _am_transcript(path).splitlines():
+        try:
+            v=json.loads(line)
+        except Exception:
+            continue
+        if not isinstance(v,dict) or v.get("type")!="system":
+            continue
+        if v.get("subtype")=="compact_boundary":
+            m=v.get("compactMetadata") if isinstance(v.get("compactMetadata"),dict) else {}
+            found={"idle":False}
+            if isinstance(m.get("trigger"),str):
+                found["trigger"]=m["trigger"]
+            for k,o in (("preTokens","pre_tokens"),("postTokens","post_tokens")):
+                if isinstance(m.get(k),int):
+                    found[o]=m[k]
+        elif found is not None and isinstance(v.get("content"),str) and v["content"].startswith("Compacted while idle"):
+            found["idle"]=True
+    if found is not None:
+        p["agm_compact"]=found
+        sys.stdout.buffer.write(json.dumps(p,separators=(",",":")).encode("ascii"))
+except Exception:
+    pass' 2>/dev/null)
+        case "$WITH" in '{'*) PAYLOAD="$WITH" ;; esac
+      fi ;;
+  esac
+fi
 NOW=$(date -u +%Y-%m-%dT%H:%M:%SZ)
 # The run this CLI process was started for: `--resume` makes an old and a new process report the
 # same session, so this is how the daemon tells their late hooks apart (issue #92). Only id-safe
@@ -2350,6 +2444,41 @@ mod remote_hook_tests {
         let p = serde_json::from_str::<serde_json::Value>(&last).expect("spool 行是合法 JSON")["payload"].clone();
         assert_eq!(p["agm_user_text"], "跑完整測試", "{p}");
         assert_eq!(p["agm_origin_kind"], "human", "{p}");
+    }
+
+    /// #1759：遠端壓縮做完的 `SessionStart`（source=compact）帶上那台 transcript 最後一個 compact_boundary（含閒置提示）。
+    #[test]
+    fn a_remote_compact_session_start_carries_the_last_boundary() {
+        let sb = Sandbox::new(false);
+        let project_dir = sb.dir.join(".claude/projects/project");
+        std::fs::create_dir_all(&project_dir).unwrap();
+        let transcript = project_dir.join("t.jsonl");
+        let lines = [
+            serde_json::json!({"type": "system", "subtype": "compact_boundary", "compactMetadata": {"trigger": "manual", "preTokens": 5000}}),
+            serde_json::json!({"type": "system", "subtype": "informational", "content": "Compacted while idle, before the prompt cache expired"}),
+            serde_json::json!({"type": "system", "subtype": "compact_boundary", "compactMetadata": {"trigger": "auto", "preTokens": 286047, "postTokens": 11362}}),
+            serde_json::json!({"type": "user", "isCompactSummary": true, "message": {"content": "summary"}}),
+            serde_json::json!({"type": "system", "subtype": "informational", "content": "Compacted while idle, before the prompt cache expired"}),
+        ];
+        std::fs::write(&transcript, lines.iter().map(|l| format!("{l}\n")).collect::<String>()).unwrap();
+        let payload = |source: &str| {
+            serde_json::json!({"hook_event_name": "SessionStart", "source": source, "session_id": "s-1", "transcript_path": transcript.to_string_lossy()}).to_string()
+        };
+        let spooled = |sb: &Sandbox| -> serde_json::Value {
+            let events = sb.read("hook-spool.jsonl");
+            let last = events.lines().rev().find(|l| !l.trim().is_empty()).expect("spool 有一行").to_string();
+            serde_json::from_str::<serde_json::Value>(&last).expect("spool 行是合法 JSON")["payload"].clone()
+        };
+        let (_, ok) = sb.run(&["claude", &sb.bot, "-"], &payload("compact"));
+        assert!(ok);
+        assert_eq!(
+            spooled(&sb)["agm_compact"],
+            serde_json::json!({"trigger": "auto", "idle": true, "pre_tokens": 286047, "post_tokens": 11362})
+        );
+        // 不是壓縮的 SessionStart：不帶。
+        let sb = Sandbox::new(false);
+        sb.run(&["claude", &sb.bot, "-"], &payload("resume"));
+        assert!(spooled(&sb).get("agm_compact").is_none());
     }
 
     /// 2026-10-02：遠端 transcript 在那台機器上，`hook.sh` 在 Stop／StopFailure 前把已答完（或取消）的 `AskUserQuestion`

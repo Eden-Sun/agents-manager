@@ -1519,6 +1519,11 @@ pub(super) async fn try_fallback(app: &impl LcHost, run_id: &str, expected_turn:
             tracing::info!(turn = %turn.id, "terminal fallback of a prompt-less external turn re-read the previous reply; not storing it again");
             None
         }
+        // claude 自己壓縮對話（#1759）：畫面只剩「Compacted while idle…」，不是回覆；說明由 SessionStart(compact) 寫。
+        Some(r) if turn.origin == "external" && bot.kind == "claude" && crate::compaction::is_screen_notice(&r) && turn_echo_texts(app, &turn.id).await?.is_empty() => {
+            tracing::info!(turn = %turn.id, "terminal fallback saw only a compaction notice; storing no reply");
+            None
+        }
         r => r,
     };
 

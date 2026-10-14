@@ -22,6 +22,7 @@ pub use am_lifecycle::{
     child_alerts,
     child_done,
     codex_history,
+    compaction,
     codex_live,
     codex_model_migration,
     daemon_notice,
@@ -55,6 +56,9 @@ pub mod child_alerts;
 #[cfg(test)]
 #[path = "../../crates/am-lifecycle/src/child_done.rs"]
 pub mod child_done;
+#[cfg(test)]
+#[path = "../../crates/am-lifecycle/src/compaction.rs"]
+pub mod compaction;
 #[cfg(test)]
 #[path = "../../crates/am-lifecycle/src/codex_history.rs"]
 pub mod codex_history;
