@@ -2056,8 +2056,8 @@ UI token 會取得 Project 底下所有存活 bot 的訊息合併。Bot token �
   spinner 行，沒有它氣泡會永遠停在「等待回覆」。辨識取聯集、以最後命中的一行為準：glyph 白名單（claude/codex `✻ ✽ ✶ ✳ ✢ ·`、grok `◆`），或結構後備 `is_activity_shape`
   （`<單字>… (…)` 且括號內含 `tokens` 或 `12s`/`3m`/`1h`）。**spinner 動詞是隨機的**，不可字面比對。
 - `alert`：重試／API 錯誤橫幅（`API error · Retrying in 0s · attempt 1/10`、`stream error: 503 upstream; retrying 2/5 in 1s`），≤ 120 字元、純文字、不寫 DB。
-  CLI 重試上游時回合看起來完全健康，這是唯一說出這件事的訊號。辨識：最後一行 ≤ 240 字元且**同時**有 error／錯誤／overloaded 與重試 token（retry／retrying／attempt／reconnect／retries／重試），
-  或以 `API error` 開頭（兩條件都要，擋掉 agent 回覆裡談論錯誤的散文）。
+  CLI 重試上游時回合看起來完全健康，這是唯一說出這件事的訊號。辨識：最後一行 ≤ 240 字元，行首（剝掉前導 spinner／bullet 記號後）必須是 CLI 自己印的固定前綴 `API error`（claude）或 `stream error`（codex），
+  且**同時**有重試 token（retry／retrying／attempt／reconnect／retries／重試）；`API Error:`（帶冒號）不要求重試 token。擋掉兩類誤認（#1686）：工具輸出（`⎿` 縮排，或 sed／cat 印出的程式碼如 `Err(e) => tracing::warn!(…; retrying)`，2026-10-13 黃色橫幅就是這樣來的）與 agent 回覆裡談論錯誤的散文。
 - **節流**：同一 `run_id` 每秒最多 4 幀（間隔 ≥ 250 ms），窗內只留最新一幀（快照非增量，不漏內容）；回合結束時壓著的最後一幀無條件補送。
 - 只在 `text`／`activity`／`alert` 任一變化時推；回合結束後停止。前端顯示為即時氣泡，收到同 turn 的 assistant `message_added` 或非 in_flight 的 `turn_updated` 時移除。
 

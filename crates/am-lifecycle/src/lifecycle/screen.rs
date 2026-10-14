@@ -1795,6 +1795,25 @@ https://chatgpt.com/codex/settings/usage to purchase more credits or try again a
         assert!(live_alert("claude", r#"{"error":"timeout","retry":true}"#).is_none());
         // …but a real banner still gets through.
         assert!(live_alert("claude", "API error · Retrying in 2s · attempt 2/10").is_some());
+        // 回覆裡談到 API error 處理的散文（有 error、沒有重試字眼、沒有冒號）也不是橫幅。
+        assert_eq!(live_alert("claude", "API error handling 已補上，之後再看"), None);
+    }
+
+    #[test]
+    fn live_alert_ignores_code_and_tool_output_that_says_error_and_retrying() {
+        // 2026-10-13 A-leader：sed 印出 herdr_upgrade.rs 的一行，黃色錯誤橫幅的內容就是這一行（#1686）。
+        let code = r#"Err(e) => tracing::warn!(error = ?e, "herdr update: cannot read bot states; retrying"),"#;
+        let screen = format!("❯ 看一下 herdr_upgrade\n⏺ Bash(sed -n '1,80p' daemon/src/herdr_upgrade.rs)\n  ⎿  {code}\n✻ Thinking…\n");
+        assert_eq!(live_alert("claude", &screen), None);
+        // 工具輸出的續行（沒有 ⎿）也一樣。
+        assert_eq!(live_alert("claude", &format!("      {code}")), None);
+        // 工具輸出裡剛好有一行 `API error · Retrying`（例如 cat 一份 log）也不是 CLI 的橫幅。
+        assert_eq!(live_alert("claude", "  ⎿  API error · Retrying in 3s · attempt 1/10"), None);
+        // codex 的程式碼片段同理：只認固定前綴，不看 error／retrying 字眼。
+        assert_eq!(live_alert("codex", &format!("• {code}")), None);
+        // 真的橫幅（✻ 前綴、codex 的 stream error）照樣認。
+        assert!(live_alert("claude", "✻ API error · Retrying in 3s · attempt 1/10").is_some());
+        assert!(live_alert("codex", "stream error: 503 upstream; retrying 2/5 in 1s").is_some());
     }
 
     #[test]
