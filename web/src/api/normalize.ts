@@ -592,6 +592,8 @@ export function toMessage(v: unknown, botId?: string): Message | null {
     attachments: toAttachments(pick(v, 'attachments_json')),
     relay_from: optStr(pick(v, 'relay_from')),
     relay_unverified: bool(pick(v, 'relay_unverified')),
+    relay_from_name: optStr(pick(v, 'relay_from_name')),
+    relay_from_deleted: bool(pick(v, 'relay_from_deleted')),
     terminal_snapshot: optStr(pick(v, 'terminal_snapshot')),
     created_at: str(v.created_at),
     rewound_at: optStr(pick(v, 'rewound_at')),
