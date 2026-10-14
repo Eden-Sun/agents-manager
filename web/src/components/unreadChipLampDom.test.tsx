@@ -54,7 +54,7 @@ test('子 agent 的 run 已 exited 不算在跑：父晶片沒有等子 agent �
   assert.ok(chip('b1')!.classList.contains('waits-kids'))
 })
 
-test('exited 的頂層 bot 不留在「在跑」那排；仍在跑時才出現並帶閃動的點', async () => {
+test('exited 的頂層 bot 不留在「在跑」那排；仍在跑時才出現並帶旋轉外框', async () => {
   useStore.setState({ runs: { b1: run('b1', 'running', 'idle'), x: run('x', 'exited', 'working') } } as never)
   await mount(<UnreadChip />)
   assert.equal(chip('x'), null, '已停的 bot 不該掛在在跑那排')
@@ -65,7 +65,8 @@ test('exited 的頂層 bot 不留在「在跑」那排；仍在跑時才出現�
   // 非主力晶片要等溢出量測的 effect 跑完才穩定，直接斷言會看到中間態。
   await settle(50)
   assert.ok(chip('x'), '真的在跑就要出現')
-  assert.ok(chip('x')!.querySelector('.unread-chip-dot'), '在跑的點')
+  assert.ok(chip('x')!.querySelector('.unread-chip-working-ring'), '在跑的整圈外框')
+  assert.equal(chip('x')!.querySelector('.unread-chip-dot'), null, '不重複畫小色點')
 })
 
 test('主機斷線：那台 bot 最後的 blocked 不亮「要你回答」；連回來才亮（正對照）', async () => {

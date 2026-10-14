@@ -126,6 +126,7 @@
 
 /* 兩個狀態**正交**，分兩條規則不互蓋（2026-09-11 使用者）：`unread`＝藍色數字籤＋深字，`current`＝邊框＋ring＋粗體。基底是中性的。 */
 .unread-chip {
+  position: relative;
   display: inline-flex;
   align-items: center;
   gap: 5px;
@@ -160,6 +161,33 @@
   color: var(--text-dim);
 }
 
+@property --chip-ring-angle {
+  syntax: '<angle>';
+  inherits: false;
+  initial-value: 0deg;
+}
+
+/* 固定膠囊形狀，只讓亮色沿整圈邊框旋轉；不遮住快取底色、文字與選取框。 */
+.unread-chip-working-ring {
+  position: absolute;
+  inset: -1px;
+  border-radius: inherit;
+  padding: 2px;
+  pointer-events: none;
+  background: conic-gradient(from var(--chip-ring-angle),
+    transparent 0deg, var(--status-working) 90deg,
+    var(--status-working) 270deg, transparent 360deg);
+  -webkit-mask: linear-gradient(#fff 0 0) content-box, linear-gradient(#fff 0 0);
+  -webkit-mask-composite: xor;
+  mask: linear-gradient(#fff 0 0) content-box, linear-gradient(#fff 0 0);
+  mask-composite: exclude;
+  animation: unread-ring-turn 1.8s linear infinite;
+}
+
+@keyframes unread-ring-turn {
+  to { --chip-ring-angle: 360deg; }
+}
+
 .unread-chip-dot {
   flex: none;
   width: 6px;
@@ -175,6 +203,10 @@
 }
 
 @media (prefers-reduced-motion: reduce) {
+  .unread-chip-working-ring {
+    animation: none;
+    background: var(--status-working);
+  }
   .unread-chip-dot {
     animation: none;
   }
