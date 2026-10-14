@@ -828,6 +828,9 @@ export function effortShort(level: string): string {
   return short[level.toLowerCase()] ?? effortLabel(level)
 }
 
+/** agy 的預設模型；daemon `AGY_DEFAULT_MODEL` 同一份。 */
+export const AGY_DEFAULT_MODEL = 'gemini-3.8-flash-medium'
+
 export const MODEL_OPTIONS: Record<BotKind, readonly string[]> = {
   // 由輕到重（2026-09-09 使用者決定）；`sortModels` 以此排序 API 清單。停用別名一律寫替換後的正式 id（#539）。
   claude: ['haiku', 'sonnet', 'claude-opus-5-5', 'fable'],
@@ -835,7 +838,8 @@ export const MODEL_OPTIONS: Record<BotKind, readonly string[]> = {
   codex: ['gpt-6-luna', 'gpt-6-sol', 'gpt-6-astra'],
   // `grok models`（grok 1.0.40，2026-09-22）
   grok: ['grok-4.7', 'grok-4.7-build-fast', 'grok-4.6', 'grok-4.5'],
-  // agy：effort 變體已經在 slug 裡（`-high`／`-low`…），所以沒有獨立的強度檔。只留 Gemini 3.8 Flash 三檔（2026-10-05 使用者：「agy 的 model 只限 3.8」），最前面是預設；daemon `agy_static_models` 同一份。
+  // agy：effort 變體已經在 slug 裡（`-high`／`-low`…），所以沒有獨立的強度檔。這是 API 讀不到時的後備清單（Gemini 3.8 Flash 三檔，最前面是預設；daemon `agy_static_models` 同一份）。
+  // API 讀得到就用 `agy models` 的結果，經 `agyModelAllowed` 過濾（2026-10-14 使用者：「agy 只收 Gemini，3.8 含以上」）。
   agy: [
     'gemini-3.8-flash-medium',
     'gemini-3.8-flash-high',
@@ -861,26 +865,20 @@ export const DEPRECATED_MODELS: Readonly<Record<string, string>> = {
   'codex:gpt-5.6-sol': 'gpt-6-sol',
   'codex:gpt-5.6-terra': 'gpt-6-sol',
   'codex:gpt-5.6-luna': 'gpt-6-luna',
-  // agy 拿掉的模型（2026-10-05）：3.7／3.6 Flash、3.1 Pro、claude、gpt-oss 一律換成 3.8 medium；daemon `AGY_RETIRED_MODELS` 同一份。
-  ...Object.fromEntries(
-    [
-      'gemini-3.7-flash-high',
-      'gemini-3.7-flash-medium',
-      'gemini-3.7-flash-low',
-      'gemini-3.6-flash-high',
-      'gemini-3.6-flash-medium',
-      'gemini-3.6-flash-low',
-      'gemini-3.1-pro-high',
-      'gemini-3.1-pro-low',
-      'claude-sonnet-4-6',
-      'claude-opus-4-6-thinking',
-      'gpt-oss-120b-medium',
-    ].map((id) => [`agy:${id}`, 'gemini-3.8-flash-medium']),
-  ),
 }
 
-/** 這個 kind 的這個 model id 的正式寫法（不是別名就原樣回）。 */
+/** agy 的模型 slug 收不收（2026-10-14 使用者：「agy 只收 Gemini，版本 3.8 含以上」）：`gemini-<主>[.<次>]-…` 的版本 ≥ 3.8。daemon `agy_model_allowed` 同一條，兩邊要一起改。 */
+export function agyModelAllowed(id: string): boolean {
+  const m = /^gemini-(\d+)(?:\.(\d+))?(?=-|$)/.exec(id)
+  if (!m) return false
+  const major = Number(m[1])
+  const minor = Number(m[2] ?? 0)
+  return major > 3 || (major === 3 && minor >= 8)
+}
+
+/** 這個 kind 的這個 model id 的正式寫法（不是別名就原樣回）。agy 不收的一律換成 3.8 medium（daemon `remap_deprecated_model` 同一條）。 */
 export function canonicalModel(kind: BotKind, id: string): string {
+  if (kind === 'agy' && !agyModelAllowed(id)) return AGY_DEFAULT_MODEL
   return DEPRECATED_MODELS[`${kind}:${id}`] ?? id
 }
 
