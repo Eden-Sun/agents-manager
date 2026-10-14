@@ -12,7 +12,7 @@
  * 回合進行中快取一直被刷新：一律熱，不顯示過期。
  */
 import { cacheState } from './cacheClock'
-import { GPT_61_SOL_CONTEXT_WINDOW, sol500kContext, solWindowApplies } from './codexContextWindow'
+import { solWindowApplies } from './codexContextWindow'
 import type { PromptCacheInfo } from '../api/types'
 
 export interface CostStatus {
@@ -102,11 +102,8 @@ export function contextFallback(input: CacheInput): { pct: string; detail: strin
   if (input.kind !== 'claude' && input.kind !== 'codex') return null
   if (input.status?.context_used_pct != null) return null
   const pc = input.promptCache ?? input.status?.prompt_cache ?? null
-  if (solWindowApplies(input.kind, input.model)) {
-    // gpt-6.1-sol：只用實際 token 除 500k；沒有 token 就不畫（不拿 CLI 的 475k 百分比乘回去）。
-    const v = sol500kContext(input.kind, input.model, pc?.context_used_tokens ?? input.status?.context_used_tokens)
-    return v ? { pct: pctText(v.pct), detail: `${tokensLower(v.tokens)}/${tokensLower(GPT_61_SOL_CONTEXT_WINDOW)}` } : null
-  }
+  // gpt-6.1-sol 的 context 整段由 `StatusLineBar` 畫（實際 token ÷ 500k，不論有沒有 statusLine）；這裡不重複，避免同一段畫兩次。
+  if (solWindowApplies(input.kind, input.model)) return null
   if (pc?.context_used_pct == null) return null
   const used = contextTokens(input.status, pc)
   const detail = used !== null && pc.context_size ? `${tokensLower(used)}/${tokensLower(pc.context_size)}` : null
