@@ -2592,6 +2592,7 @@ pt-hub = ["~/project/pt/CLAUDE.md", "~/project/pt/AGENTS.md"]      # 多份照�
   daemon 起的 claude bot（parent）在 `claude-settings.json` 寫 `idleCompaction: false`（`lifecycle::setup::claude_settings`，本機與遠端同一份，issue #1756），閒置一律交給本節的保溫／熱壓；
   `herdr agent start` 開的 claude child 不帶 daemon 的 `--settings`，吃帳號自己的設定，**保留原生閒置壓縮**（child 不在保溫對象內，沒有別的機制替它省 context）。
   設定檔只在 bot 啟動時寫，修正前就在跑的 parent 要重啟一次才生效；不要在帳號層的 `settings.json` 關掉它，那樣 child 也一起關了。
+- **壓縮中（`compacting.rs`，issue #1770）**：claude 的 `PreCompact` hook（`claude_settings` 與遠端 hook.sh 同一份設定，手動、閒置、自動壓縮都送）把這顆 run 標成「壓縮中」，記憶體帳，投影成 run 的 `compacting_since`。收掉的時機是壓縮做完的 `SessionStart`（source=compact）、`Stop`／`StopFailure`，或超過 10 分鐘；終端備援讀到畫面上 `Compacting conversation…` spinner 也會標（畫面消失只收掉自己標的）。網頁側欄與對話區寫「壓縮中…」，燈號照舊。遠端 bot 要重啟才會裝上新的 `PreCompact` 設定。
 - **壓縮說明（`compaction.rs`，issue #1759）**：claude 壓縮對話不送 Stop，只送 SubagentStop 與 `SessionStart`（`source: "compact"`），pane 轉 working 時已開了一筆沒有 prompt 的 external 回合。
   收到 compact 的 SessionStart：讀 transcript 尾端最後一個 `compact_boundary`（本機 daemon 自己讀；遠端由 hook.sh 在那台讀好、帶 `agm_compact`），寫一則系統訊息——
   「Claude 閒置壓縮」（boundary 後跟著 `Compacted while idle…`）、「Claude 自動壓縮（context 快滿）」（trigger=auto）、「手動 /compact」（trigger=manual），附 tokens 前→後；讀不到就寫「Claude 壓縮了對話」。

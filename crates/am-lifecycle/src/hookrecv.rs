@@ -115,6 +115,9 @@ pub enum HookKind {
     },
     /// Claude Code statusLine input — never a Turn.
     StatusLine,
+    /// claude 的 `PreCompact`（issue #1770）：這顆 run 開始壓縮對話（手動、閒置、自動都會送）。只標記「壓縮中」
+    /// （`compacting.rs`），不建立、不動 Turn——閒置壓縮的空回合是 pane 轉 working 時開出來的。
+    CompactStarting,
     /// claude 原生 `SubagentStart`／`SubagentStop`（issue #82）：純可見性快照，從不建立或動 Turn，
     /// 也從不影響 §6.5a 的血緣認領——只覆蓋這顆 run 的 `subagent_json`。`event` 是 `"start"` 或
     /// `"stop"`；`SubagentStart` 沒有 transcript path，`SubagentStop` 才有。
@@ -146,6 +149,7 @@ impl std::fmt::Debug for HookKind {
             HookKind::TurnComplete { .. } => "TurnComplete",
             HookKind::TurnFailed { .. } => "TurnFailed",
             HookKind::StatusLine => "StatusLine",
+            HookKind::CompactStarting => "CompactStarting",
             HookKind::SubagentEvent { .. } => "SubagentEvent",
             HookKind::SpawnHint { .. } => "SpawnHint",
             HookKind::AskAnswered(_) => "AskAnswered",
@@ -374,6 +378,7 @@ pub fn classify(provider: &str, p: &Value) -> HookKind {
                 .unwrap_or_else(|| if p.get("prompt_id").is_some() { "Stop".into() } else { "SessionStart".into() });
             match ev.as_str() {
                 "StatusLine" => HookKind::StatusLine,
+                "PreCompact" => HookKind::CompactStarting,
                 "SessionStart" => HookKind::Identity { session_id: s("session_id"), transcript_path: s("transcript_path") },
                 // 回合失敗收尾的原生訊號（issue #79）：以前只有 `Stop`，失敗的回合要等 §4.3 備援或
                 // stuck watchdog 才被發現，中間一直掛在 in_flight。
@@ -1338,6 +1343,17 @@ async fn process_locked_for_with_outcome<H: HookHost>(
         record_limit_hit_only(app, body, &bot, run.as_ref(), &kind).await?;
         return Err(e.context("could not tell whether the hook's project was handed off; retrying"));
     }
+    // 壓縮中的標記（`compacting.rs`，#1770）收掉的時機：壓縮做完的 SessionStart（source=compact）、回合收尾的 Stop／StopFailure。
+    let compact_ends = match &kind {
+        HookKind::TurnComplete { .. } | HookKind::TurnFailed { .. } => true,
+        HookKind::Identity { .. } => body.payload.get("source").and_then(Value::as_str) == Some("compact"),
+        _ => false,
+    };
+    if let (true, Some(r)) = (compact_ends, &run) {
+        if am_base::compacting::end(&r.id) {
+            app.emit_bot_status(&bot.id).await;
+        }
+    }
 
     // 世代圍籬（issue #69）：這一則屬於哪一代。只在這裡問一次，`fence` 是唯一的規則所在地——
     // 散在 hook／reconcile／fallback 各判一次，遲早會漂成三套。舊世代的事件只記錄，一個欄位都不改。
@@ -1618,6 +1634,15 @@ async fn process_locked_for_with_outcome<H: HookHost>(
                     .bind(&r.id)
                     .execute(app.db())
                     .await;
+            }
+            Ok(())
+        }
+        // issue #1770：壓縮開始。只標記這顆 run「壓縮中」，不建立、不動任何 Turn；沒有活著的 run 就沒地方標。
+        HookKind::CompactStarting => {
+            if let Some(r) = &run {
+                if am_base::compacting::begin(&r.id, chrono::Utc::now()) {
+                    app.emit_bot_status(&bot.id).await;
+                }
             }
             Ok(())
         }
@@ -4863,6 +4888,36 @@ mod external_claim_tests {
         // 完全脫鉤：這顆 run 底下的 turn 沒有被碰過。
         let t = turn_row(&app, &turn_id).await;
         assert_eq!(t.status, "in_flight", "subagent 事件不該動到任何 turn");
+    }
+
+    /// issue #1770：`PreCompact` 分類成 `CompactStarting`，不認得的 `PostCompact` 照舊被 `Ignore`。
+    #[test]
+    fn pre_compact_classifies_as_a_pure_compacting_marker() {
+        assert!(matches!(classify("claude", &json!({"hook_event_name": "PreCompact", "trigger": "auto"})), HookKind::CompactStarting));
+        assert!(matches!(classify("claude", &json!({"hook_event_name": "PostCompact"})), HookKind::Ignore(_)));
+    }
+
+    /// issue #1770：`PreCompact` 把這顆 run 標成「壓縮中」，投影帶出 `compacting_since`；turn 不被碰。
+    /// 壓縮做完的 `SessionStart`（source=compact）收掉標記；回合失敗收尾（`StopFailure`）也收。
+    #[tokio::test]
+    async fn pre_compact_marks_the_run_until_the_compaction_session_or_the_turn_ends() {
+        let env = tt::env().await;
+        let app = env.app.clone();
+        let (bot_id, _conv, turn_id) = delivered_turn(&app, &env.project_id).await;
+        let run_id: String = sqlx::query_scalar("SELECT id FROM runs WHERE bot_id = ?").bind(&bot_id).fetch_one(&app.db).await.unwrap();
+        let marked = |now| am_base::compacting::json_at(&run_id, now) != Value::Null;
+
+        process(&app, &stop_failure(&bot_id, json!({"hook_event_name": "PreCompact", "trigger": "manual"}))).await.unwrap();
+        assert!(marked(chrono::Utc::now()), "PreCompact 標成壓縮中");
+        assert_eq!(turn_row(&app, &turn_id).await.status, "in_flight", "PreCompact 不收、不開 turn");
+
+        process(&app, &stop_failure(&bot_id, json!({"hook_event_name": "SessionStart", "source": "compact", "session_id": "s-cmp"}))).await.unwrap();
+        assert!(!marked(chrono::Utc::now()), "壓縮做完的 SessionStart 收掉標記");
+
+        process(&app, &stop_failure(&bot_id, json!({"hook_event_name": "PreCompact", "trigger": "auto"}))).await.unwrap();
+        assert!(marked(chrono::Utc::now()));
+        process(&app, &stop_failure(&bot_id, json!({"hook_event_name": "StopFailure", "session_id": "s-cmp", "prompt_id": turn_id, "reason": "429 rate_limit"}))).await.unwrap();
+        assert!(!marked(chrono::Utc::now()), "回合失敗收尾也收掉標記");
     }
 
     /// 沒有活著的 run（例如 bot 剛好在重啟中間）：安靜丟掉，不報錯、也不憑空造一列。

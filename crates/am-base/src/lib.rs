@@ -9,6 +9,7 @@ mod arc_app_impls;
 mod quota_conversions;
 
 pub mod codex_status;
+pub mod compacting;
 pub mod agent_relay;
 pub mod agy_remote;
 pub mod agy_screen;

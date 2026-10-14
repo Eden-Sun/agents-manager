@@ -159,6 +159,10 @@ pub async fn arm_progress(app: &impl LcHost, run_id: &str, bot_id: &str, turn_id
             // `clean_screen` drops the spinner row, so a thinking / tool phase needs its own `activity` field.
             let activity = live_activity(&bot.kind, &read.text).unwrap_or_default();
             let alert = live_alert(&bot.kind, &read.text).unwrap_or_default();
+            // 壓縮中的畫面備援（`compacting.rs`，#1770）：spinner 還在就標記，畫面沒了只收掉自己標的（hook 來的等 hook 收）。
+            if am_base::compacting::observe_screen(&run_id, am_base::compacting::screen_shows(&read.text), chrono::Utc::now()) {
+                crate::capabilities::BotStatusEmit::emit_bot_status(&app2, &bot_id).await;
+            }
             if live != last.0 || activity != last.1 || alert != last.2 {
                 last = (live.clone(), activity.clone(), alert.clone());
                 quiet = 0;

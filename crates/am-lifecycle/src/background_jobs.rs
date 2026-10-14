@@ -214,6 +214,8 @@ pub fn run_json<T: serde::Serialize>(app: &(impl crate::background_hook::HookSna
         // claude 輸入框裡那句灰字「建議下一句」（`prompt_suggestion.rs`）：只在 idle 帶，其他一律 null。
         let status = o.get("agent_status").and_then(Value::as_str).map(str::to_owned);
         o.insert("prompt_suggestion".into(), crate::prompt_suggestion::json(id, status.as_deref()));
+        // 壓縮中（claude `PreCompact` hook 或畫面的 spinner，`compacting.rs`，#1770）：超過 10 分鐘或已收掉就 null。
+        o.insert("compacting_since".into(), am_base::compacting::json_at(id, chrono::Utc::now()));
         // #1674：`turn_error` 的種類（`turn_error::kind_of`），網頁靠它畫「模型滿載」，不比對文字；沒有錯誤是 null。
         let kind = o.get("turn_error").and_then(Value::as_str).filter(|e| !e.trim().is_empty()).map(crate::turn_error::kind_of);
         o.insert("turn_error_kind".into(), kind.into());

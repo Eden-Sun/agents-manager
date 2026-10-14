@@ -1,5 +1,5 @@
 import type { Lamp } from '../api/types'
-import { botStateLabel } from '../components/lampLabel'
+import { botStateLabel, isCompacting } from '../components/lampLabel'
 import { backgroundJobs } from '../lib/backgroundJobs'
 import { blockedReasonOf } from '../lib/blockedReason'
 import { botLamp, useStore } from '../store/store'
@@ -15,12 +15,14 @@ export function useKidsRunning(botId: string | null): number {
   )
 }
 
-export function useBotLamp(botId: string | null): { lamp: Lamp; background: number; label: string; blockedReason: string; kids: number } {
+export function useBotLamp(botId: string | null): { lamp: Lamp; background: number; label: string; blockedReason: string; kids: number; compacting: boolean } {
   const lamp = useStore((s) => (botId ? botLamp(s, botId) : 'offline'))
   const background = useStore((s) => (botId && botLamp(s, botId) === 'idle' ? backgroundJobs(s.runs[botId]) : 0))
   const label = useStore((s) => (botId ? botStateLabel(botLamp(s, botId), s.runs[botId]) : botStateLabel('offline', null)))
   // blocked 的原因（daemon 的 `run.blocked_reason.text`）；不是 blocked 或沒有原因是空字串。
   const blockedReason = useStore((s) => (botId && botLamp(s, botId) === 'blocked' ? blockedReasonOf(s.runs[botId]) : ''))
   const kids = useKidsRunning(botId)
-  return { lamp, background, label, blockedReason, kids }
+  // 壓縮中（#1770）：側欄的狀態字要換成「壓縮中…」，燈號照舊。
+  const compacting = useStore((s) => (botId ? isCompacting(botLamp(s, botId), s.runs[botId]) : false))
+  return { lamp, background, label, blockedReason, kids, compacting }
 }

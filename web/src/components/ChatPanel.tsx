@@ -88,6 +88,7 @@ import { PreviewPanel } from './PreviewPanel'
 import { isTopLevelBot } from '../store/routeSync'
 import { ToolsHint } from './Tools'
 import { compactTokens } from '../lib/composerCost'
+import { COMPACTING_LABEL } from './lampLabel'
 import { GPT_61_SOL_CONTEXT_WINDOW, effectiveModelOf, sol500kContext, solWindowApplies } from '../lib/codexContextWindow'
 import './chatPanel.css'
 
@@ -371,12 +372,14 @@ export function LiveReplyBubble({
   const text = useStore((s) => cleanLiveText(liveReplyOf(s, botId)?.text))
   const activity = useStore((s) => cleanLiveActivity(liveReplyOf(s, botId)?.activity))
   const alert = useStore((s) => liveReplyOf(s, botId)?.alert ?? null)
+  // claude 壓縮對話中（#1770）：階段字換成「壓縮中…」，不假裝是在做事。
+  const compacting = useStore((s) => Boolean(s.runs[botId]?.compacting_since))
 
   if (!active) return null
   return (
     <LiveBubble
       text={text}
-      activity={activity}
+      activity={compacting ? COMPACTING_LABEL : activity}
       alert={alert}
       kind={kind}
       from={from}
