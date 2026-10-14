@@ -445,6 +445,23 @@ AM_USAGE_DONE=0
         assert!(split_probe_output(&screen).is_none());
     }
 
+    /// 結構化的 `usage_report` 是一行完整 JSON（一次寫完，不會少桶子）。印完它之後 pipeline 卡住、`DONE` 標記一直
+    /// 等不到，也不能把它丟掉：否則逾時、這一輪讀數全沒，身分還要停 5 分鐘（同 agy #1725）。截斷的 JSON 仍不算答案。
+    #[test]
+    fn a_complete_usage_report_printed_before_a_hang_still_counts() {
+        let line = r#"{"usage_report":{"rate_limits":{"limits":[{"kind":"session","percent":30,"resets_at":"2026-09-15T23:50:00.594923+00:00"},{"kind":"weekly_all","percent":66,"resets_at":"2026-09-21T04:00:00.594948+00:00"}]}}}"#;
+        let screen = format!("{AUTH_BEGIN}\n{{\"loggedIn\":true}}\n{AUTH_END}\n{line}\n");
+        let (auth, usage) = split_probe_output(&screen).expect("the usage line is complete; a hang after it is no reason to drop it");
+        assert!(auth.contains("loggedIn"), "{auth}");
+        let q = parse_claude_usage_report(&usage, Some("cc1")).expect("structured report");
+        assert_eq!(q.five_hour.unwrap().used_pct, 30.0);
+        assert_eq!(q.seven_day.unwrap().used_pct, 66.0);
+
+        let cut = &line[..line.len() / 2];
+        let screen = format!("{AUTH_BEGIN}\n{{\"loggedIn\":true}}\n{AUTH_END}\n{cut}\n");
+        assert!(split_probe_output(&screen).is_none(), "截斷的 JSON 不是答案");
+    }
+
     /// m4p's `cc1` right after a daemon restart: no statusLine yet, but a live run is proof enough.
     #[test]
     fn a_live_bot_run_beats_the_login_answer() {
