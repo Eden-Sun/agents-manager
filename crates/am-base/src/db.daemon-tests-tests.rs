@@ -175,7 +175,7 @@
         }
         sqlx::query("PRAGMA user_version = 62").execute(&pool).await.unwrap();
 
-        crate::runners::am_base_tests::apply_migrations(&pool).await.expect("pre-queue-class database with queued turns must migrate");
+        crate::runners::am_base_tests::migrate(&pool).await.expect("pre-queue-class database with queued turns must migrate");
         let classes: Vec<(String, String)> = sqlx::query_as("SELECT id, queue_class FROM turns WHERE status='queued' ORDER BY id")
             .fetch_all(&pool).await.unwrap();
         assert_eq!(classes, [("t-notice".into(), "daemon".into()), ("t-relay".into(), "relay".into()), ("t-user".into(), "user".into())]);
