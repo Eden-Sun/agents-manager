@@ -1670,6 +1670,12 @@ async fn process_locked_for_with_outcome<H: HookHost>(
                 .execute(app.db())
                 .await?;
                 app.emit_bot_status(&bot.id).await;
+                // #1759：壓縮做完的 SessionStart。說明寫不進去不擋身分更新。
+                if provider == "claude" && body.payload.get("source").and_then(Value::as_str) == Some("compact") {
+                    if let Err(e) = crate::compaction::record(app, &bot, r, &body.payload, transcript_path.as_deref()).await {
+                        tracing::warn!(bot = %bot.name, error = ?e, "could not record a claude compaction");
+                    }
+                }
             }
             Ok(())
         }
@@ -5234,6 +5240,63 @@ mod external_claim_tests {
         let dir = root.join("projects/-t");
         std::fs::create_dir_all(&dir).unwrap();
         dir.join(name)
+    }
+
+    /// #1759：本機 claude 閒置壓縮做完的 SessionStart(compact)：讀 transcript 寫一則壓縮說明、壓縮開出來的空 external 回合
+    /// 收成 completed（沒有回覆泡泡）；收件匣重播不寫第二則；遠端帶來的 `agm_compact` 一樣認得。
+    #[tokio::test]
+    async fn a_compact_session_start_notes_the_compaction_and_closes_the_empty_turn() {
+        let env = tt::env().await;
+        let app = env.app.clone();
+        let bot = tt::claude_bot(&app, &env.project_id, "cmp").await;
+        let run_id = tt::fake_run(&app, &bot.id).await;
+        let conv = db::conversation_id(&app.db, &bot.id).await.unwrap();
+        let turn_id = db::ulid();
+        sqlx::query("INSERT INTO turns (id, conversation_id, run_id, origin, status, delivery, created_at) VALUES (?,?,?,'external','in_flight','ok',?)")
+            .bind(&turn_id)
+            .bind(&conv)
+            .bind(&run_id)
+            .bind(db::now())
+            .execute(&app.db)
+            .await
+            .unwrap();
+        let path = own_projects_file(&app, &bot.id, &env.dir, "cmp.jsonl").await;
+        let lines = [
+            json!({"type": "system", "subtype": "compact_boundary", "compactMetadata": {"trigger": "auto", "preTokens": 286047, "postTokens": 11362}}),
+            json!({"type": "system", "subtype": "informational", "content": "Compacted while idle, before the prompt cache expired"}),
+        ];
+        std::fs::write(&path, lines.iter().map(|l| format!("{l}\n")).collect::<String>()).unwrap();
+        let start = |extra: Value| {
+            let mut payload = json!({"hook_event_name": "SessionStart", "source": "compact", "session_id": "s-cmp", "transcript_path": path.to_string_lossy()});
+            for (k, v) in extra.as_object().cloned().unwrap_or_default() {
+                payload[k] = v;
+            }
+            HookBody { bot_id: bot.id.clone(), provider: "claude".into(), payload, received_at: None, truncated: false, run_id: None }
+        };
+        process(&app, &start(json!({}))).await.unwrap();
+        process(&app, &start(json!({}))).await.unwrap();
+
+        let status: String = sqlx::query_scalar("SELECT status FROM turns WHERE id=?").bind(&turn_id).fetch_one(&app.db).await.unwrap();
+        assert_eq!(status, "completed");
+        let msgs: Vec<(String, String, Option<String>)> =
+            sqlx::query_as("SELECT role, content, turn_id FROM messages WHERE conversation_id=? ORDER BY created_at, rowid")
+                .bind(&conv)
+                .fetch_all(&app.db)
+                .await
+                .unwrap();
+        assert_eq!(msgs, vec![("system".into(), "Claude 閒置壓縮：286K tokens → 摘要 11K tokens".into(), Some(turn_id.clone()))]);
+
+        // 遠端：transcript 讀不到，用 hook.sh 帶來的 `agm_compact`（兩分鐘內已有說明就不寫，先把舊的推到更早）。
+        sqlx::query("UPDATE messages SET created_at='2026-01-01T00:00:00.000Z' WHERE conversation_id=?").bind(&conv).execute(&app.db).await.unwrap();
+        process(&app, &start(json!({"transcript_path": "/Users/m4p/.claude/projects/x/s.jsonl", "agm_compact": {"trigger": "manual", "idle": false, "pre_tokens": 900}})))
+            .await
+            .unwrap();
+        let last: String = sqlx::query_scalar("SELECT content FROM messages WHERE conversation_id=? ORDER BY created_at DESC, rowid DESC LIMIT 1")
+            .bind(&conv)
+            .fetch_one(&app.db)
+            .await
+            .unwrap();
+        assert_eq!(last, "手動 /compact：900 tokens → 摘要");
     }
 
     /// 本機 bot：transcript 在這台，daemon 自己讀 `origin.kind`，不需要 hook.sh 帶。

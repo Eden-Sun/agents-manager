@@ -12,6 +12,7 @@ pub mod background_jobs;
 pub mod blocked_reason;
 pub mod child_alerts;
 pub mod child_done;
+pub mod compaction;
 pub mod codex_history;
 pub mod codex_live;
 pub mod codex_model_migration;

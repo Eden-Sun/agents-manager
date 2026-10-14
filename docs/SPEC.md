@@ -2581,6 +2581,12 @@ pt-hub = ["~/project/pt/CLAUDE.md", "~/project/pt/AGENTS.md"]      # 多份照�
   daemon 起的 claude bot（parent）在 `claude-settings.json` 寫 `idleCompaction: false`（`lifecycle::setup::claude_settings`，本機與遠端同一份，issue #1756），閒置一律交給本節的保溫／熱壓；
   `herdr agent start` 開的 claude child 不帶 daemon 的 `--settings`，吃帳號自己的設定，**保留原生閒置壓縮**（child 不在保溫對象內，沒有別的機制替它省 context）。
   設定檔只在 bot 啟動時寫，修正前就在跑的 parent 要重啟一次才生效；不要在帳號層的 `settings.json` 關掉它，那樣 child 也一起關了。
+- **壓縮說明（`compaction.rs`，issue #1759）**：claude 壓縮對話不送 Stop，只送 SubagentStop 與 `SessionStart`（`source: "compact"`），pane 轉 working 時已開了一筆沒有 prompt 的 external 回合。
+  收到 compact 的 SessionStart：讀 transcript 尾端最後一個 `compact_boundary`（本機 daemon 自己讀；遠端由 hook.sh 在那台讀好、帶 `agm_compact`），寫一則系統訊息——
+  「Claude 閒置壓縮」（boundary 後跟著 `Compacted while idle…`）、「Claude 自動壓縮（context 快滿）」（trigger=auto）、「手動 /compact」（trigger=manual），附 tokens 前→後；讀不到就寫「Claude 壓縮了對話」。
+  15 分鐘內有熱壓收據的手動壓縮是熱壓本身，已有「主力熱壓」說明，不再寫；兩分鐘內已有壓縮說明也不重寫（收件匣重播）。
+  那筆 external 回合若沒有 prompt、沒有任何訊息就直接收成 `completed`，說明掛在它底下；有 prompt 的回合（自動壓縮發生在使用者回合中間）照常等 Stop。
+  終端備援先到時，畫面只剩壓縮提示（每一行都含 `compacted`）就不存成終端擷取泡泡；stuck sweep 收這種空回合也不寫「沒有偵測到結束」（#1758）。
 - **巡邏**：`supervisor::controller` 的控制迴圈每拍呼叫 `primary_keep_warm::tick`，自己節流成 30 秒一次、丟背景跑（測試版不跑）。
 - **顯示**：`last_api_at` 因此是真實年齡（網頁 tooltip 的「上次活動」與數字照樣上數）；run JSON 另帶 `cache_kept_warm_at`（API.md）＝最近一次成功保溫回合讓 cache 實際變熱的時間（熱壓不算；比最近一次熱壓早的保溫也不算，熱壓後是 `null`、等新活動後的新保溫），
   網頁（`cacheState`）用 `max(last_api_at, cache_kept_warm_at)` 算顏色與剩餘，所以 60 分不會誤判變涼；另帶 `keep_warm_skip`、`keep_warm_replied_at`。
