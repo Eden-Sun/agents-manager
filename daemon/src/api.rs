@@ -6721,8 +6721,65 @@ async fn get_messages(
     Ok(Json(json!({"bot_id": id, "conversation_id": conv, "messages": msgs, "turns": turns, "has_more": has_more})))
 }
 
-/// `GET /api/bots/{id}/messages`：在 `get_messages` 的結果上補代發來源的名字。來源 bot 軟刪後，前端的 bots 清單找不到它，
-/// 只剩 ID（看起來像 child 沒正確調用）。只給 User principal：Bot principal 讀到的範圍是自己與後代，名字不外洩樹外的 bot。
+/// `id → (名字, 已收掉)`。不濾 `deleted_at`：已收掉的 child 也要認得出名字。`?` 數量受一頁 500 則限制，低於 SQLite 的 999。
+async fn relay_names(app: &App, ids: &[&str]) -> Result<HashMap<String, (String, bool)>, LcError> {
+    if ids.is_empty() {
+        return Ok(HashMap::new());
+    }
+    let sql = format!("SELECT id, name, deleted_at IS NOT NULL FROM bots WHERE id IN ({})", vec!["?"; ids.len()].join(","));
+    let mut query = sqlx::query_as::<_, (String, String, bool)>(&sql);
+    for id in ids {
+        query = query.bind(*id);
+    }
+    Ok(query
+        .fetch_all(&app.db)
+        .await
+        .map_err(any_err)?
+        .into_iter()
+        .map(|(id, name, gone)| (id, (name, gone)))
+        .collect())
+}
+
+/// 把 `relay_from_name`／`relay_from_deleted` 補到一則訊息的 JSON 上（查得到才補）。
+fn stamp_relay_name(m: &mut Value, names: &HashMap<String, (String, bool)>) {
+    if let Some((name, gone)) = m["relay_from"].as_str().and_then(|id| names.get(id)).cloned() {
+        m["relay_from_name"] = json!(name);
+        m["relay_from_deleted"] = json!(gone);
+    }
+}
+
+/// 整頁 `messages` 補代發來源名字（REST 的單 bot 與群組兩條路共用）。
+async fn add_relay_names(app: &App, body: &mut Value) -> Result<(), LcError> {
+    let Some(msgs) = body.get_mut("messages").and_then(Value::as_array_mut) else {
+        return Ok(());
+    };
+    let mut ids: Vec<String> = msgs.iter().filter_map(|m| m["relay_from"].as_str()).filter(|id| *id != "daemon").map(str::to_owned).collect();
+    ids.sort_unstable();
+    ids.dedup();
+    let refs: Vec<&str> = ids.iter().map(String::as_str).collect();
+    let names = relay_names(app, &refs).await?;
+    for m in msgs.iter_mut() {
+        stamp_relay_name(m, &names);
+    }
+    Ok(())
+}
+
+/// WS 幀：`message_added` 補代發來源名字（同 REST）；其餘原樣。WS 只接 User（見 `ws_handler`），不再判 principal。
+/// 查不到名字（DB 讀失敗）就照舊送原幀，前端靠記住的名字兜底。
+async fn ws_frame_text(app: &App, e: &crate::state::WsEvent) -> String {
+    if e.kind != "message_added" {
+        return serde_json::to_string(e).unwrap();
+    }
+    let mut v = serde_json::to_value(e).unwrap();
+    let relay = v["data"]["message"]["relay_from"].as_str().filter(|id| *id != "daemon").map(str::to_owned);
+    if let Some(id) = relay {
+        if let Ok(names) = relay_names(app, &[id.as_str()]).await {
+            stamp_relay_name(&mut v["data"]["message"], &names);
+        }
+    }
+    v.to_string()
+}
+
 async fn get_messages_with_relay_names(
     State(app): State<Arc<App>>,
     Path(id): Path<String>,
@@ -6736,39 +6793,6 @@ async fn get_messages_with_relay_names(
     Ok(Json(body))
 }
 
-/// 不濾 `deleted_at`：已收掉的 child 也要認得出名字。`relay_from_deleted` 讓前端標「已收掉」。
-async fn add_relay_names(app: &App, body: &mut Value) -> Result<(), LcError> {
-    let Some(msgs) = body.get_mut("messages").and_then(Value::as_array_mut) else {
-        return Ok(());
-    };
-    let mut ids: Vec<String> = msgs.iter().filter_map(|m| m["relay_from"].as_str()).filter(|id| *id != "daemon").map(str::to_owned).collect();
-    ids.sort_unstable();
-    ids.dedup();
-    if ids.is_empty() {
-        return Ok(());
-    }
-    // `?` 佔位符數量受一頁最多 500 則限制，低於 SQLite 的 999 上限。
-    let sql = format!("SELECT id, name, deleted_at IS NOT NULL FROM bots WHERE id IN ({})", vec!["?"; ids.len()].join(","));
-    let mut query = sqlx::query_as::<_, (String, String, bool)>(&sql);
-    for id in &ids {
-        query = query.bind(id);
-    }
-    let names: HashMap<String, (String, bool)> = query
-        .fetch_all(&app.db)
-        .await
-        .map_err(any_err)?
-        .into_iter()
-        .map(|(id, name, gone)| (id, (name, gone)))
-        .collect();
-    for m in msgs.iter_mut() {
-        if let Some((name, gone)) = m["relay_from"].as_str().and_then(|id| names.get(id)).cloned() {
-            m["relay_from_name"] = json!(name);
-            m["relay_from_deleted"] = json!(gone);
-        }
-    }
-    Ok(())
-}
-
 /// SPEC §13.4.
 async fn get_project_messages(
     State(app): State<Arc<App>>,
@@ -6778,11 +6802,15 @@ async fn get_project_messages(
 ) -> Result<Json<Value>, LcError> {
     let limit: i64 = q.get("limit").and_then(|s| s.parse().ok()).unwrap_or(100);
     let before = q.get("before").map(|s| s.as_str()).filter(|s| !s.is_empty());
-    let messages = match principal {
+    let user = principal == RequestPrincipal::User;
+    let mut messages = match principal {
         RequestPrincipal::User => crate::group::messages(&app, &id, before, limit).await?,
         RequestPrincipal::Bot(bot_id) => crate::group::messages_for_bot_tree(&app, &id, before, limit, &bot_id).await?,
         RequestPrincipal::Service(_) => return Err(bot_user_only()),
     };
+    if user {
+        add_relay_names(&app, &mut messages).await?;
+    }
     Ok(Json(messages))
 }
 
@@ -6925,7 +6953,7 @@ async fn ws_loop(app: Arc<App>, mut socket: WebSocket, since: Option<u64>) {
         Some(evs) => {
             for e in evs {
                 sent_through = sent_through.max(e.seq);
-                if !ws_send(&mut socket, WsMessage::Text(serde_json::to_string(&e).unwrap().into()), send_timeout).await {
+                if !ws_send(&mut socket, WsMessage::Text(ws_frame_text(&app, &e).await.into()), send_timeout).await {
                     return;
                 }
             }
@@ -6950,7 +6978,7 @@ async fn ws_loop(app: Arc<App>, mut socket: WebSocket, since: Option<u64>) {
                 Ok(e) if e.seq <= sent_through => {}
                 Ok(e) => {
                     sent_through = e.seq;
-                    if !ws_send(&mut socket, WsMessage::Text(serde_json::to_string(&e).unwrap().into()), send_timeout).await { return; }
+                    if !ws_send(&mut socket, WsMessage::Text(ws_frame_text(&app, &e).await.into()), send_timeout).await { return; }
                 }
                 Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {
                     // 帶 seq，跟重連那條一樣（API.md §8：`{"type":"resync","seq":12}`）——少了它，
@@ -7453,6 +7481,28 @@ mod message_tests {
         let Json(bot) = get_messages_with_relay_names(State(app), Path(target.into()), Query(HashMap::new()), Extension(RequestPrincipal::Bot(listener.into()))).await.unwrap();
         assert!(bot["messages"][0].get("relay_from_name").is_none(), "{bot}");
         assert_eq!(bot["messages"][0]["relay_from"], relay);
+    }
+
+    /// WS 的 `message_added` 幀也要帶來源名字（已收掉的 child 照樣認得出）；其他事件原樣。
+    #[tokio::test]
+    async fn ws_message_added_frames_carry_the_relay_name_of_a_retired_bot() {
+        let e = crate::testing::env().await;
+        let app = e.app.clone();
+        sqlx::query("INSERT INTO bots (id, project_id, name, kind, hook_token, deleted_at, created_at) VALUES ('ws-retired-child',?,'lx1752','claude','tok',?,?)")
+            .bind(&e.project_id)
+            .bind(db::now())
+            .bind(db::now())
+            .execute(&app.db)
+            .await
+            .unwrap();
+        let frame = |kind: &str, relay: &str| crate::state::WsEvent { seq: 1, kind: kind.into(), data: json!({"bot_id": "x", "message": {"id": "m", "relay_from": relay}}) };
+        let v: Value = serde_json::from_str(&ws_frame_text(&app, &frame("message_added", "ws-retired-child")).await).unwrap();
+        assert_eq!(v["data"]["message"]["relay_from_name"], "lx1752");
+        assert_eq!(v["data"]["message"]["relay_from_deleted"], true);
+        let daemon: Value = serde_json::from_str(&ws_frame_text(&app, &frame("message_added", "daemon")).await).unwrap();
+        assert!(daemon["data"]["message"].get("relay_from_name").is_none());
+        let other: Value = serde_json::from_str(&ws_frame_text(&app, &frame("turn_updated", "ws-retired-child")).await).unwrap();
+        assert!(other["data"]["message"].get("relay_from_name").is_none());
     }
 
     /// 同一毫秒的訊息、id 不照插入序：每一則帶 `seq`（SQLite rowid，單調遞增），前端在 created_at 相同時靠它排，
