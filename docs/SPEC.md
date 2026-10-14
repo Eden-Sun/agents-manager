@@ -2800,6 +2800,10 @@ header 的 herdr 徽章確認後 `POST /api/hosts/{name}/herdr-update`（API §1
   claude、grok 附 `--resume <id> --fork-session`；codex 的 `fork` 是子命令，`fork <id>` 排在所有參數最前（三家 CLI help 2026-09-14 實測）。不寫 `runs.resume_session_id`：fork 本來就會拿到新 id，不能當成 resume mismatch。
 - 對話檔（claude）：只找來源 bot 自己的 run（`bot_id` ＋同 sid，取最新一筆；別顆 bot 的同 sid 不算，`native_session_id` 是 provider 的 id，不是全域的 run id；#1168）。搬到新 bot 的身分失敗（檔不在、複製失敗）就**不啟動**、`fork_ops` 記 `failed` 與 `start_error`，不再只記 warn 硬開一顆接不到對話的 fork。
 - 之後兩顆各走各的：新 bot 的下一次重啟用它自己的新 session（照 §6.9 的 resume）。分叉前的訊息不複製到新 bot 的對話紀錄（CLI 裡有），改在新 bot 對話放一則系統訊息指回來源。
+- **還沒記到自己 session 就重啟（#1761）**：fork 出來的第一代還沒回報 session（剛 fork 就換身分重啟；遠端 hook 經 spool 晚幾秒才到），
+  接回原對話時任何一代都沒有 `native_session_id`，以前寫「接不回」、開空白新對話。現在只要 `fork_ops` 有這顆（`created`／`started`）、
+  而且它沒有任何一代記到 session，就改從 fork 的來源 session 再分一次（`--resume <來源> --fork-session`，對話檔照樣搬到新身分），
+  `resume_required` 也不擋；第一代沒有回合，重分的脈絡跟原本一樣。一旦記到自己的 session，就照 §6.9 接自己的。
 - 跟「開同類分身並啟動」的差別只在脈絡：分身是全新對話。
 - **冪等（issue #348）**：body 的 `client_request_id` 是這次 fork 的身分，持久記在 `fork_ops`（`crates/am-base/src/fork_ops.rs`）。驗證通過後**先記**（目標 bot id、來源 session、名字、`planned`）再動 config，
   之後 `planned → created → started｜failed` 每一步都先看做過沒有：config 已有那個 id 就沿用、說明訊息已寫過不再寫。目標 bot 鎖在投影前取得，UI 收到 `bot_changed` 後若立刻啟動也會等 fork 確定完成。重送時若目標已有活著的 run 就沿用；若只留下 pane 已不在的 `starting` run，照 lifecycle 收掉孤兒 run 後接著啟動同一個 fork。已結束且有 session 記錄的 run 視為 fork 曾啟動過、不再對 provider 分岔；結果未能確認且沒有 session 記錄時回 `start_error`，不猜成功也不重複分岔。

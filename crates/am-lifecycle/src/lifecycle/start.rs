@@ -174,7 +174,10 @@ async fn start_bot_locked_with_host_fence_body(
     if opts.resume_native && opts.resume_required {
         let host = db::bot_host(app.db(), bot_id).await.map_err(up)?;
         if let Err(why) = native_resume_plan(app, &bot, &host, false, opts.resume_session.as_deref()).await? {
-            return Err(cannot_resume(bot_id, why.reason));
+            // #1761：還沒記到自己 session 的 fork 會改從來源再分一次，不算接不回。
+            if why.reason != "no_session_id" || unsettled_fork(app, bot_id).await.is_none() {
+                return Err(cannot_resume(bot_id, why.reason));
+            }
         }
     }
     let project = db::project(app.db(), &bot.project_id)
@@ -857,6 +860,24 @@ pub fn fork_args_by_kind(kind: &str, session_id: &str) -> Result<Vec<String>, &'
 }
 
 /// 這顆 bot 之前從來沒有 run、對話裡也沒有任何 user／assistant 訊息（#1001）。`run_id` 是這次啟動剛插進去的那一列，不算。
+/// #1761：這顆 bot 是 fork 出來的（`fork_ops` 有它），但任何一代都還沒記到自己的 native session——第一代還沒回報就被重啟
+/// （剛 fork 就換身分；遠端 hook 經 spool 晚幾秒才到）。回傳 fork 的來源 session 與來源 bot，讓這次啟動再從來源分一次；
+/// 第一代沒有回合（有回合就會有 session），重分一次的脈絡跟原本一樣。查不到（舊 DB 沒有這張表）當作不是。
+async fn unsettled_fork(app: &impl Db, bot_id: &str) -> Option<(String, String)> {
+    sqlx::query_as::<_, (String, String)>(
+        "SELECT session_id, source_bot_id FROM fork_ops
+          WHERE target_bot_id = ? AND state IN ('created','started') AND session_id != ''
+            AND NOT EXISTS (SELECT 1 FROM runs WHERE bot_id = ? AND native_session_id IS NOT NULL AND native_session_id != '')
+          ORDER BY created_at DESC LIMIT 1",
+    )
+    .bind(bot_id)
+    .bind(bot_id)
+    .fetch_optional(app.db())
+    .await
+    .ok()
+    .flatten()
+}
+
 async fn is_first_contact(app: &impl Db, bot: &db::Bot, run_id: &str) -> LcResult<bool> {
     let conv = db::conversation_id(app.db(), &bot.id).await.map_err(up)?;
     let seen: i64 = sqlx::query_scalar(
@@ -1352,9 +1373,18 @@ async fn start_inner_body(
 
     // Reopen only: resolve the previous native session after preflight. The requested id is
     // persisted before `agent.start`; hookrecv uses it to detect a provider that ignored resume.
+    let mut opts = opts;
     let resume = if opts.resume_native {
         match native_resume_plan(app, bot, &host, false, opts.resume_session.as_deref()).await? {
             Ok(plan) => Some(plan),
+            Err(failure) if failure.reason == "no_session_id" && opts.fork_session.is_none() && unsettled_fork(app, &bot.id).await.is_some() => {
+                // #1761：還沒記到自己 session 的 fork（剛 fork 就換身分重啟、遠端 hook 晚到）：再從來源分一次，不開空白新對話。
+                let (from, source) = unsettled_fork(app, &bot.id).await.unwrap_or_default();
+                tracing::info!(bot = %bot.name, from = %from, "fork has no session of its own yet; forking again from its source");
+                opts.fork_session = Some(from);
+                opts.fork_source_bot = Some(source);
+                None
+            }
             Err(failure) => {
                 // 預檢過了、這裡才接不回（遠端搬檔那趟 ssh 失敗、檔案在這幾秒不見…）：`resume_required` 的約定是不啟動，
                 // 不是悄悄開新對話。這裡還沒開 pane，直接回 409（#1123）。
@@ -1721,7 +1751,10 @@ async fn restart_bot_with_authority_body(
     if opts.resume_native && opts.resume_required {
         let host = db::bot_host(app.db(), bot_id).await.map_err(up)?;
         if let Err(why) = native_resume_plan(app, &bot, &host, true, opts.resume_session.as_deref()).await? {
-            return Err(cannot_resume(bot_id, why.reason));
+            // #1761：還沒記到自己 session 的 fork 會改從來源再分一次，不算接不回。
+            if why.reason != "no_session_id" || unsettled_fork(app, bot_id).await.is_none() {
+                return Err(cannot_resume(bot_id, why.reason));
+            }
         }
     }
     let stopping = db::active_run(app.db(), bot_id).await.map_err(up)?.map(|r| r.id);
@@ -2881,6 +2914,69 @@ mod resume_args_tests {
         let staged = e.dir.join("own-cfg/projects/-own/sid-src.jsonl");
         assert_eq!(std::fs::read_to_string(&staged).unwrap(), "{}\n", "來源對話要搬到 fork 出來的身分底下");
         assert!(started_args(&e).pop().unwrap().windows(3).any(|w| w == ["--resume", "sid-src", "--fork-session"]), "{:?}", started_args(&e));
+    }
+
+    /// #1761：剛 fork 就換身分重啟，第一代還沒回報 session（遠端 hook 晚到）：接回原對話時改從 fork 的來源再分一次，
+    /// 不寫「接不回」、不開空白新對話；`resume_required` 也不擋。這顆 bot 一旦記到自己的 session 就不再重分。
+    #[tokio::test]
+    async fn a_fork_restarted_before_its_session_is_known_forks_again_from_the_source() {
+        let e = env().await;
+        let src = claude_bot(&e.app, &e.project_id, "src-1761").await;
+        let fork = claude_bot(&e.app, &e.project_id, "fork-1761").await;
+        let _ = own_transcript(&e, &fork, "unused").await;
+        let old = e.dir.join("old-cfg/projects/-own/sid-src.jsonl");
+        std::fs::create_dir_all(old.parent().unwrap()).unwrap();
+        std::fs::write(&old, "{}\n").unwrap();
+        sqlx::query(
+            "INSERT INTO runs (id, bot_id, state, agent_status, native_session_id, transcript_path, started_at, ended_at)
+             VALUES (?,?,'stopped','idle','sid-src',?,'2026-09-01T00:00:00Z','2026-09-01T00:01:00Z')",
+        )
+        .bind(db::ulid())
+        .bind(&src.id)
+        .bind(old.to_str().unwrap())
+        .execute(e.app.db())
+        .await
+        .unwrap();
+        crate::fork_ops::migrate(e.app.db()).await.unwrap();
+        let first_gen = db::ulid();
+        crate::fork_ops::insert(
+            e.app.db(),
+            &crate::fork_ops::ForkOp {
+                client_request_id: db::ulid(),
+                source_bot_id: src.id.clone(),
+                requested_name: String::new(),
+                target_bot_id: fork.id.clone(),
+                session_id: "sid-src".into(),
+                name: fork.name.clone(),
+                state: "started".into(),
+                run_id: Some(first_gen.clone()),
+                start_error: None,
+            },
+        )
+        .await
+        .unwrap();
+        sqlx::query(
+            "INSERT INTO runs (id, bot_id, state, agent_status, started_at, ended_at)
+             VALUES (?,?,'stopped','idle','2026-09-02T00:00:00Z','2026-09-02T00:00:20Z')",
+        )
+        .bind(&first_gen)
+        .bind(&fork.id)
+        .execute(e.app.db())
+        .await
+        .unwrap();
+
+        start_bot_with(&e.app, &fork.id, StartOpts { resume_native: true, resume_required: true, ..Default::default() }).await.unwrap();
+        assert!(started_args(&e).pop().unwrap().windows(3).any(|w| w == ["--resume", "sid-src", "--fork-session"]), "{:?}", started_args(&e));
+        let conv = db::conversation_id(e.app.db(), &fork.id).await.unwrap();
+        let notes: Vec<String> = sqlx::query_scalar("SELECT content FROM messages WHERE conversation_id=? AND role='system'")
+            .bind(&conv)
+            .fetch_all(e.app.db())
+            .await
+            .unwrap();
+        assert!(!notes.iter().any(|n| n.contains(CONTEXT_LOST_PREFIX)), "不是接不回：{notes:?}");
+
+        sqlx::query("UPDATE runs SET native_session_id='sid-fork' WHERE id=?").bind(&first_gen).execute(e.app.db()).await.unwrap();
+        assert!(crate::lifecycle::start::unsettled_fork(&e.app, &fork.id).await.is_none(), "記到自己的 session 就不再從來源重分");
     }
 
     /// #1168：fork 只接來源 bot 自己的對話檔。兩顆 bot 的 run 用同一個 sid（不同檔）、時間先後任意：
