@@ -2,7 +2,7 @@ import { useEffect, useId, useLayoutEffect, useRef, useState } from 'react'
 import type { ReactNode } from 'react'
 import { createPortal } from 'react-dom'
 import type { BotKind, ModelInfo, PatchBotInput } from '../api/types'
-import { CLAUDE_EFFORT_OPTIONS, CODEX_EFFORT_OPTIONS, EFFORT_OPTIONS, FAST_TIER, HIDDEN_MODELS, MODEL_OPTIONS, canonicalModel, effortLabel } from '../api/types'
+import { CLAUDE_EFFORT_OPTIONS, CODEX_EFFORT_OPTIONS, EFFORT_OPTIONS, FAST_TIER, HIDDEN_MODELS, MODEL_OPTIONS, agyModelAllowed, canonicalModel, effortLabel } from '../api/types'
 import { useMenuKeys } from '../hooks/useMenuKeys'
 import { modelMatches } from '../lib/modelMatches'
 import { modelSwitchPatch } from '../lib/modelSwitch'
@@ -25,6 +25,12 @@ function staticModels(kind: BotKind): ModelInfo[] {
     efforts,
     service_tiers: [],
   }))
+}
+
+/** daemon 給的清單；agy 再照規則過濾一次（daemon 已經過濾，這裡是防舊快取）。 */
+function apiModelList(kind: BotKind, cached: ModelInfo[] | null | undefined): ModelInfo[] {
+  if (!Array.isArray(cached)) return []
+  return kind === 'agy' ? cached.filter((m) => agyModelAllowed(m.id)) : cached
 }
 
 /** 拿掉 `HIDDEN_MODELS` 但留下目前選的，否則看起來像設定被改掉。 */
@@ -84,8 +90,9 @@ export function ApiModelFields({
   }, [cached, kind, host, identity, loadModels])
 
   const loading = cached === undefined
-  const fromApi = Array.isArray(cached) && cached.length > 0
-  const models = fromApi ? cached : staticModels(kind)
+  const apiModels = apiModelList(kind, cached)
+  const fromApi = apiModels.length > 0
+  const models = fromApi ? apiModels : staticModels(kind)
   const shownModels = sortModels(kind, visibleModels(models, model))
   const defaultModel = models.find((m) => m.is_default) ?? models[0]
   const current = (model && (models.find((m) => m.id === model) ?? models.find((m) => modelMatches(m.id, model)))) || defaultModel
@@ -99,7 +106,7 @@ export function ApiModelFields({
   const effortUnsupported = fromApi && effort !== null && efforts.length > 0 && !efforts.includes(effort)
   const fastUnsupported = fromApi && fast && !hasFast
 
-  // agy 拿掉的模型（只留 3.8 Flash）：存著的值照舊標出來、daemon 啟動時換成 3.8 medium，這裡講清楚並給一鍵改掉。
+  // agy 不收的模型（只收 Gemini 3.8 含以上）：存著的值照舊標出來、daemon 啟動時換成 3.8 medium，這裡講清楚並給一鍵改掉。
   const retiredTo = kind === 'agy' && model ? canonicalModel(kind, model) : null
   const retiredModel = retiredTo !== null && retiredTo !== model ? { from: model as string, to: retiredTo } : null
 
@@ -325,8 +332,9 @@ export function ModelQuickPicker({
     }
   }, [open])
 
-  const fromApi = Array.isArray(cached) && cached.length > 0
-  const models = fromApi ? cached : staticModels(kind)
+  const apiModels = apiModelList(kind, cached)
+  const fromApi = apiModels.length > 0
+  const models = fromApi ? apiModels : staticModels(kind)
   const loading = open && cached === undefined
   const model = bot?.model ?? null
   const shownModels = sortModels(kind, visibleModels(models, model))

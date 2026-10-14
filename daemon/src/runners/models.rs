@@ -6,7 +6,7 @@ use tokio::io::{AsyncBufReadExt, AsyncWriteExt};
 use crate::config::LOCAL_HOST;
 use crate::hosts::sh_quote;
 use crate::models::{
-    agy_static_models, claude_config_dir, claude_static_models, codex_apply_identity_config,
+    agy_models_from_text, agy_models_script, agy_static_models, claude_config_dir, claude_static_models, codex_apply_identity_config,
     codex_models_from_rpc, enrich_grok_models, find_response, grok_models_from_text,
     home_env_prefix, home_file_expr, identity_home_dir, read_claude_effort_settings,
     read_optional_text, rpc_lines, CACHE_TTL,
@@ -15,6 +15,8 @@ use crate::state::App;
 
 const LOCAL_RPC_TIMEOUT: Duration = Duration::from_secs(20);
 const REMOTE_RPC_HOLD_SECS: u32 = 6;
+/// `agy models` 要起一個約 200 MB 的執行檔，比 `--version` 慢；逾時就退回寫死的清單。
+const AGY_MODELS_TIMEOUT: Duration = Duration::from_secs(30);
 
 /// 本機找 `exe` 的絕對路徑：含 `/` 直接用，否則走 login shell 探測。探測走 [`crate::hosts::sh_local_stdout`]，
 /// 逾時整個行程群組收掉（卡住的 `-lic` 互動 shell 不會留下來，issue #889）。
@@ -104,6 +106,22 @@ pub async fn codex_rpc_in(app: &Arc<App>, host: &str, home: Option<&str>, method
     find_response(&out, ID).ok_or_else(|| anyhow!("codex app-server on {host}: no response to `{method}`:\n{}", out.trim()))?
 }
 
+/// agy 的模型清單：本機跑 `agy models`（經 [`agy_models_from_text`] 過濾，只收 Gemini 3.8 含以上）。讀不到、解不出來、逾時，
+/// 或是遠端（ssh 進去讀不到 Keychain，會回未登入）都退回寫死的 3.8 Flash 三檔。exe 沒有快取就不猜 PATH，同樣退回。
+async fn agy_model_list(app: &Arc<App>, host: &str) -> (&'static str, Vec<Value>) {
+    if host == LOCAL_HOST {
+        if let Some(exe) = crate::tools::cached_path(app, host, "agy").await {
+            if let Ok(run) = crate::hosts::sh_local_capture(&agy_models_script(&exe), AGY_MODELS_TIMEOUT).await {
+                let models = agy_models_from_text(&String::from_utf8_lossy(&run.stdout));
+                if !run.timed_out && !models.is_empty() {
+                    return ("agy-cli", models);
+                }
+            }
+        }
+    }
+    ("static", agy_static_models())
+}
+
 pub async fn fetch(app: &Arc<App>, host: &str, kind: &str, identity: Option<&str>) -> Result<Value> {
     let (source, models) = match kind {
         "codex" => {
@@ -147,7 +165,7 @@ pub async fn fetch(app: &Arc<App>, host: &str, kind: &str, identity: Option<&str
             let (global, per_model, default_model) = read_claude_effort_settings(app.as_ref(), host, config_dir.as_deref()).await?;
             ("static", claude_static_models(global.as_deref(), &per_model, default_model.as_deref()))
         }
-        "agy" => ("static", agy_static_models()),
+        "agy" => agy_model_list(app, host).await,
         other => bail!("unknown kind `{other}`"),
     };
     Ok(json!({

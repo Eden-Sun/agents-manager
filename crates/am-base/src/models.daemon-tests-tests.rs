@@ -293,27 +293,96 @@
         assert_eq!(model_effort_from_argv("agy", &["agy".into(), "--model".into(), "gemini-3.8-flash-high".into()]).0.as_deref(), Some("gemini-3.8-flash-high"));
     }
 
-    /// 2026-10-05：agy 只留 Gemini 3.8 Flash 三檔，預設還是 3.8 medium；拿掉的模型（3.7／3.6 Flash、3.1 Pro、claude、gpt-oss）一個都不在清單裡，
-    /// 已存在的 bot 設了它們就換成 3.8 medium（啟動、寫設定、adopted 的 argv 都是同一支 `canonical_model`）。
+    /// 2026-10-14：agy 只收 Gemini 3.8 含以上。判斷式（daemon 的 `agy_model_allowed`，web 的 `agyModelAllowed` 同一條）：
+    /// 3.7 以下、非 Gemini、沒有版號的都不收；4、4-argon、3.10 收。
     #[test]
-    fn agy_models_are_gemini_38_flash_only_and_retired_ones_fall_back_to_the_default() {
-        let ids: Vec<String> = agy_static_models().iter().map(|m| m["id"].as_str().unwrap().to_string()).collect();
-        assert_eq!(ids, ["gemini-3.8-flash-medium", "gemini-3.8-flash-high", "gemini-3.8-flash-low"]);
-        assert_eq!(agy_static_models()[0]["is_default"], true, "預設維持 3.8 medium");
-        assert_eq!(AGY_DEFAULT_MODEL, ids[0]);
-        for retired in AGY_RETIRED_MODELS {
-            assert!(!ids.iter().any(|i| i == retired), "{retired} 不該還在清單裡");
+    fn agy_model_rule_is_gemini_38_and_up() {
+        for ok in ["gemini-3.8-flash-medium", "gemini-3.8-flash-high", "gemini-3.8-flash-low", "gemini-4-argon", "gemini-4.1-argon-high", "gemini-3.10-flash-low", "gemini-5-whatever"] {
+            assert!(agy_model_allowed(ok), "{ok} 該收");
+        }
+        for no in [
+            "gemini-3.7-flash-high",
+            "gemini-3.6-flash-medium",
+            "gemini-3.1-pro-high",
+            "gemini-3-flash",
+            "gemini-3.8.1-flash",
+            "gemini-",
+            "gemini-argon",
+            "gemini3.8-flash",
+            "claude-sonnet-4-6",
+            "claude-opus-4-6-thinking",
+            "gpt-oss-120b-medium",
+            "",
+        ] {
+            assert!(!agy_model_allowed(no), "{no} 不該收");
+        }
+    }
+
+    /// 不收的 agy 模型一律換成預設（啟動、寫設定、adopted 的 argv 都是同一支 `canonical_model`）；收的原樣。
+    #[test]
+    fn agy_models_outside_the_rule_fall_back_to_the_default() {
+        for retired in [
+            "gemini-3.7-flash-high",
+            "gemini-3.7-flash-medium",
+            "gemini-3.7-flash-low",
+            "gemini-3.6-flash-high",
+            "gemini-3.6-flash-medium",
+            "gemini-3.6-flash-low",
+            "gemini-3.1-pro-high",
+            "gemini-3.1-pro-low",
+            "claude-sonnet-4-6",
+            "claude-opus-4-6-thinking",
+            "gpt-oss-120b-medium",
+        ] {
             assert_eq!(canonical_model("agy", retired), AGY_DEFAULT_MODEL, "{retired}");
             assert_eq!(remap_deprecated_model("agy", retired), Some(AGY_DEFAULT_MODEL));
         }
-        assert_eq!(AGY_RETIRED_MODELS.len(), 11, "3.7×3、3.6×3、3.1 Pro×2、claude×2、gpt-oss");
-        // 清單裡的三檔與別的 kind 的同名字串、沒見過的新 slug 都原樣。
-        for id in &ids {
-            assert_eq!(canonical_model("agy", id), id);
+        assert_eq!(AGY_DEFAULT_MODEL, "gemini-3.8-flash-medium", "預設維持 3.8 medium");
+        for kept in ["gemini-3.8-flash-high", "gemini-3.8-flash-low", "gemini-4-argon", "gemini-3.9-flash-high"] {
+            assert_eq!(canonical_model("agy", kept), kept, "{kept} 使用者自己的選擇不動");
+            assert_eq!(remap_deprecated_model("agy", kept), None, "{kept}");
         }
-        assert_eq!(canonical_model("agy", "gemini-3.9-flash-high"), "gemini-3.9-flash-high", "使用者自己的選擇不動");
         assert_eq!(remap_deprecated_model("claude", "claude-sonnet-4-6"), None, "只對 agy");
         assert_eq!(model_effort_from_argv("agy", &["agy".into(), "--model".into(), "gemini-3.1-pro-high".into()]).0.as_deref(), Some("gemini-3.8-flash-medium"));
+    }
+
+    /// `agy models` 的輸出：`slug<TAB>顯示名` 一行一個，只留規則內的，預設排第一、其餘保持 CLI 順序。
+    #[test]
+    fn agy_models_output_is_filtered_and_default_first() {
+        let text = "claude-sonnet-4-6\tClaude Sonnet 4.6\n\
+gemini-3.8-flash-low\tGemini 3.8 Flash (Low)\n\
+gemini-3.7-flash-high\tGemini 3.7 Flash (High)\n\
+gemini-3.8-flash-medium\tGemini 3.8 Flash (Medium)\n\
+gpt-oss-120b-medium\tGPT-OSS 120B\n\
+gemini-4-argon\n";
+        let models = agy_models_from_text(text);
+        let ids: Vec<&str> = models.iter().map(|m| m["id"].as_str().unwrap()).collect();
+        assert_eq!(ids, ["gemini-3.8-flash-medium", "gemini-3.8-flash-low", "gemini-4-argon"]);
+        assert_eq!(models.iter().filter(|m| m["is_default"] == true).count(), 1);
+        assert_eq!(models[0]["is_default"], true);
+        assert_eq!(models[0]["display_name"], "Gemini 3.8 Flash (Medium)");
+        assert_eq!(models[2]["display_name"], "gemini-4-argon", "沒有顯示名就用 slug");
+        for m in &models {
+            assert_eq!(m["efforts"], json!([]));
+        }
+    }
+
+    /// 未登入或沒有可用的輸出：解出來是空的，呼叫端就退回寫死的清單。
+    #[test]
+    fn agy_models_output_without_a_usable_line_is_empty() {
+        assert!(agy_models_from_text("").is_empty());
+        assert!(agy_models_from_text("Please sign in to Antigravity to continue.\n").is_empty());
+        assert!(agy_models_from_text("claude-sonnet-4-6\tClaude\ngpt-oss-120b-medium\tGPT-OSS\n").is_empty());
+    }
+
+    /// 本機沒有偵測到 agy 就不猜 PATH，直接是寫死的 3.8 Flash 三檔（測試環境不會去起真的 agy）。
+    #[tokio::test]
+    async fn agy_list_without_a_detected_binary_is_the_static_fallback() {
+        let env = crate::testing::env().await;
+        let v = list(&env.app, "local", "agy", None, true).await.unwrap();
+        assert_eq!(v["source"], "static");
+        let ids: Vec<&str> = v["models"].as_array().unwrap().iter().map(|m| m["id"].as_str().unwrap()).collect();
+        assert_eq!(ids, ["gemini-3.8-flash-medium", "gemini-3.8-flash-high", "gemini-3.8-flash-low"]);
     }
 
     /// `/effort` 之後對話裡還留著上一則 `Switched to … (low effort)`。回讀必須用框底，不能用上面那則。

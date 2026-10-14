@@ -2080,7 +2080,7 @@ UI token 會取得 Project 底下所有存活 bot 的訊息合併。Bot token �
 | `codex` | `codex-app-server` | `codex app-server` JSON-RPC `model/list` | 每個模型的 `supportedReasoningEfforts` | 每個模型的 `serviceTiers`（目前只有 `priority` = Fast） |
 | `grok` | `grok-cli` | `grok models` + `~/.grok/models_cache.json` 的 per-model `reasoning_efforts`（無 cache 退回 low/medium/high） | 依模型 | `[]` |
 | `claude` | `static` | `opus / sonnet / haiku / fable` | 每個 alias 都是 `low…max` 五級 | `[]` |
-| `agy` | `static` | 只留 Gemini 3.8 Flash 三檔（`gemini-3.8-flash-{medium,high,low}`，使用者 2026-10-05：「agy 的 model 只限 3.8」；預設 `gemini-3.8-flash-medium`；第一階段寫死）。`agy models` 還列的 3.7／3.6 Flash、3.1 Pro、claude、gpt-oss 不給；已存在的 bot 設了這些，寫設定時 `remapped_model` 回報換成 3.8 medium，啟動時也照換 | `[]`（強度在 slug 裡） | `[]` |
+| `agy` | `agy-cli`（本機讀到 `agy models`）／`static`（讀不到、遠端） | 只收 Gemini 3.8 含以上（`gemini-<主>[.<次>]-…` 版本 ≥ 3.8，使用者 2026-10-14：「agy 只收 Gemini，3.8 含以上」；取代 2026-10-05 的 3.8 Flash 三檔）。本機清單來自 `agy models` 經規則過濾；讀不到就是寫死的 `gemini-3.8-flash-{medium,high,low}`。預設 `gemini-3.8-flash-medium` 排第一。claude、gpt-oss、3.7 以下不給；已存在的 bot 設了這些，寫設定時 `remapped_model` 回報換成 3.8 medium，啟動時也照換 | `[]`（強度在 slug 裡） | `[]` |
 
 `GET /api/models` 提供可選 alias 清單；bot 的 `model` 設定則會交給對應 CLI。Claude 可設定 alias（例如 `opus`）或完整 CLI 模型名（例如 `claude-opus-5-5`），完整名稱不必出現在 alias 清單；Codex 的模型名（例如 `gpt-6-luna`）同樣交給 `-m`。精確舊值 `gpt-6-sol`／`gpt-5.6-sol`／`gpt-5.6-terra`／`gpt-5.6-luna` 不列在 Codex 清單，送入 create 或 PATCH 時會回報並採用上面的遷移目標。CLI 不會先以 `/api/models` 限制 PATCH 的其他模型字串。
 

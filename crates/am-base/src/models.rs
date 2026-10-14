@@ -102,28 +102,58 @@ pub fn codex_models_from_rpc(result: &Value) -> Vec<Value> {
         .unwrap_or_default()
 }
 
-/// agy 的預設模型（清單第一個）；被拿掉的 agy 模型一律換成它。
+/// agy 的預設模型（清單第一個）；不收的 agy 模型一律換成它。
 pub const AGY_DEFAULT_MODEL: &str = "gemini-3.8-flash-medium";
 
-/// agy 已經拿掉的模型（2026-10-05 使用者：「agy 的 model 只限 3.8」）：3.7／3.6 Flash（agy 公告即將下架）、3.1 Pro、
-/// claude-sonnet-4-6、claude-opus-4-6-thinking、gpt-oss-120b-medium。已存在的 bot 設了其中之一，啟動時與寫入設定時都換成 [`AGY_DEFAULT_MODEL`]。
-pub const AGY_RETIRED_MODELS: &[&str] = &[
-    "gemini-3.7-flash-high",
-    "gemini-3.7-flash-medium",
-    "gemini-3.7-flash-low",
-    "gemini-3.6-flash-high",
-    "gemini-3.6-flash-medium",
-    "gemini-3.6-flash-low",
-    "gemini-3.1-pro-high",
-    "gemini-3.1-pro-low",
-    "claude-sonnet-4-6",
-    "claude-opus-4-6-thinking",
-    "gpt-oss-120b-medium",
-];
+/// agy 收的模型（2026-10-14 使用者：「agy 只收 Gemini，版本 3.8 含以上」）：slug 以 `gemini-` 開頭，版本號 `gemini-<主>[.<次>]-…` ≥ 3.8。
+/// 例：`gemini-3.8-flash-high`、`gemini-4-argon`、`gemini-3.10-…` 收；`gemini-3.7-…`、`gemini-3-…`、`claude-*`、`gpt-oss-*` 不收。
+/// 權威在這裡，web 的 `agyModelAllowed`（`web/src/api/types.ts`）是同一條判斷式，兩邊要一起改。
+pub fn agy_model_allowed(slug: &str) -> bool {
+    let Some(ver) = slug.strip_prefix("gemini-").and_then(|rest| rest.split('-').next()) else { return false };
+    let mut parts = ver.split('.').map(|p| p.parse::<u32>());
+    let Some(Ok(major)) = parts.next() else { return false };
+    let minor = match parts.next() {
+        None => 0,
+        Some(Ok(m)) => m,
+        Some(Err(_)) => return false,
+    };
+    parts.next().is_none() && (major, minor) >= (3, 8)
+}
+
+/// 解析 `agy models` 的輸出（每行 `slug<TAB>顯示名`，純文字）：只留 [`agy_model_allowed`] 的，預設排第一。
+/// 未登入時的訊息沒有 tab、slug 也不是 `gemini-` 開頭，會被過濾掉，結果為空，呼叫端就退回 [`agy_static_models`]。
+pub fn agy_models_from_text(text: &str) -> Vec<Value> {
+    let mut models: Vec<Value> = text
+        .lines()
+        .filter_map(|line| {
+            let mut cols = line.split('\t');
+            let id = cols.next()?.trim();
+            if !agy_model_allowed(id) {
+                return None;
+            }
+            let name = cols.next().map(str::trim).filter(|s| !s.is_empty()).unwrap_or(id);
+            Some(json!({"id": id, "display_name": name, "description": "", "is_default": false, "default_effort": null, "efforts": [], "service_tiers": []}))
+        })
+        .collect();
+    models.sort_by_key(|m| m["id"].as_str() != Some(AGY_DEFAULT_MODEL));
+    if let Some(first) = models.first_mut() {
+        first["is_default"] = json!(true);
+    }
+    models
+}
+
+/// 本機探測 `agy models` 的指令：拋棄式 cwd、不讀 stdin、關自動更新、跑完刪目錄（同 `quota_agy::probe_script`）。
+pub fn agy_models_script(exe: &str) -> String {
+    format!(
+        "d=$(mktemp -d 2>/dev/null) || exit 1; cd \"$d\" || exit 1; \
+         AGY_CLI_DISABLE_AUTO_UPDATE=true {exe} models </dev/null; rc=$?; cd / ; rm -rf \"$d\"; exit $rc",
+        exe = sh_quote(exe)
+    )
+}
 
 /// Map only explicitly retired names and aliases; other full model ids stay intact.
 pub fn remap_deprecated_model(kind: &str, model: &str) -> Option<&'static str> {
-    if kind == "agy" && AGY_RETIRED_MODELS.contains(&model) {
+    if kind == "agy" && !agy_model_allowed(model) {
         return Some(AGY_DEFAULT_MODEL);
     }
     match (kind, model) {
@@ -448,9 +478,8 @@ pub fn claude_static_models(global: Option<&str>, per_model: &BTreeMap<String, S
         .collect()
 }
 
-/// agy 的模型 slug：只留 Gemini 3.8 Flash 三檔（2026-10-05 使用者：「agy 的 model 只限 3.8」；`agy models` 還列的 3.7／3.6 Flash 即將下架，
-/// 其餘 3.1 Pro、claude、gpt-oss 也不要，見 [`AGY_RETIRED_MODELS`]）。effort 變體已經在 slug 裡，所以 `efforts` 是空的。
-/// 寫死的原因：`agy models` 要登入才答、清單隨帳號不同；第二階段改成讀 `agy models --output-format json`。最前面那個是預設。
+/// agy 的後備模型清單：Gemini 3.8 Flash 三檔（2026-10-05 起的寫死清單）。`fetch` 能讀到 `agy models` 就用它的結果（[`agy_models_from_text`]），
+/// 讀不到（未登入、逾時、遠端）才退回這一份。effort 變體已經在 slug 裡，所以 `efforts` 是空的。最前面那個是預設。
 pub fn agy_static_models() -> Vec<Value> {
     [
         (AGY_DEFAULT_MODEL, "Gemini 3.8 Flash (Medium)"),
