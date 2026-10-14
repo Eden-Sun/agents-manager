@@ -335,12 +335,6 @@
 }
 
 
-.unread-chip-star {
-  flex: none;
-  color: var(--lamp-yellow);
-  font-size: 11px;
-}
-
 .icon-btn.primary-star {
   color: var(--text-faint);
 }
@@ -404,12 +398,6 @@
     max-width: 108px;
     gap: 3px;
     padding: 0 5px;
-    line-height: 20px;
-  }
-
-  /* 手機上星號是辨識主要 bot 最快的符號，放大；左右留白只留觸控所需。 */
-  .unread-chip-star {
-    font-size: 18px;
     line-height: 20px;
   }
 
@@ -560,13 +548,12 @@
     justify-content: center;
   }
 
-  /* 名字長就省略號；星號、未讀數、狀態點固定寬度不縮。 */
+  /* 名字長就省略號；未讀數、狀態點固定寬度不縮。 */
   .unread-pin-grid .unread-chip-name {
     flex: 0 1 auto;
     min-width: 0;
   }
 
-  .unread-pin-grid .unread-chip-star,
   .unread-pin-grid .unread-chip-n,
   .unread-pin-grid .unread-chip-dot {
     flex: none;
