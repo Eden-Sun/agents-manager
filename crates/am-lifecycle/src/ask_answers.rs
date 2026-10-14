@@ -127,6 +127,10 @@ pub fn asks_from_transcript(log: &str) -> Vec<AskRecord> {
     let mut out = Vec::new();
     for line in log.lines() {
         let Ok(entry) = serde_json::from_str::<Value>(line) else { continue };
+        // claude 2.1.300 的 `api-request-blob` 也帶 `message.content`（請求裡的訊息副本），不是對話；只認 user／assistant（issue #1771）。
+        if entry.get("type").and_then(Value::as_str).is_some_and(|t| t != "assistant" && t != "user") {
+            continue;
+        }
         let Some(content) = entry.pointer("/message/content").and_then(Value::as_array) else { continue };
         for block in content {
             match block.get("type").and_then(Value::as_str) {
@@ -327,6 +331,21 @@ mod tests {
         assert_eq!(got[0].at.as_deref(), Some("2026-10-02T08:34:54.635Z"));
         let q: Vec<_> = got[0].items.iter().map(|i| (i.header.as_deref().unwrap(), i.question.as_str(), i.answer.as_deref().unwrap())).collect();
         assert_eq!(q, [("拋單倉庫", "拋單怎麼處理？", "拿掉拋單"), ("go API", "go API 放哪？", "自己寫的：放 gateway\n第二行")]);
+        assert!(got[0].answered());
+    }
+
+    /// issue #1771：claude 2.1.300 的請求紀錄（實錄 fixture）與 `api-request-blob` 裡的訊息副本不產生紀錄，也不重複記一題。
+    #[test]
+    fn api_request_blob_copies_do_not_produce_records() {
+        let log = include_str!("lifecycle/fixtures/claude_2.1.300_api_request.jsonl");
+        let blob = |line: String| {
+            let v: Value = serde_json::from_str(&line).unwrap();
+            json!({"type": "api-request-blob", "hash": "h", "sessionId": "s", "message": v["message"]}).to_string()
+        };
+        let reply = answered("t1", "2026-10-14T18:57:30.000Z", json!({"拋單怎麼處理？": "拿掉拋單"}));
+        assert!(asks_from_transcript(&[log.trim_end().to_string(), blob(ask("t1", qs())), blob(reply.clone())].join("\n")).is_empty());
+        let got = asks_from_transcript(&[ask("t1", qs()), log.trim_end().to_string(), blob(ask("t1", qs())), blob(reply.clone()), reply].join("\n"));
+        assert_eq!(got.len(), 1);
         assert!(got[0].answered());
     }
 
