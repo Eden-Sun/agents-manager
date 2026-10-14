@@ -255,6 +255,13 @@ pub async fn bots_live(pool: &SqlitePool, ids: &[String]) -> Result<bool> {
     Ok(alive == want)
 }
 
+/// Claim 提示的所有權快照；不含回合狀態，所以同一 run 的 Stop 不會使 claim 過時。
+const CLAIM_OWNERSHIP: &str = "SELECT json_group_array(json_object('id',b.id,'project',b.project_id,'kind',b.kind,'parent',b.parent_bot_id,'host',p.host,'run',r.id,'session',r.native_session_id,'run_host',r.host,'generation',r.host_generation)) FROM bots b JOIN projects p ON p.id=b.project_id LEFT JOIN runs r ON r.id=(SELECT id FROM runs WHERE bot_id=b.id ORDER BY rowid DESC LIMIT 1) WHERE b.id IN (SELECT value FROM json_each(?)) AND b.deleted_at IS NULL AND p.handed_off_to IS NULL ORDER BY b.id";
+
+pub async fn claim_ownership(pool: &SqlitePool, ids: &[String]) -> Result<String> {
+    Ok(sqlx::query_scalar(CLAIM_OWNERSHIP).bind(serde_json::to_string(ids)?).fetch_one(pool).await?)
+}
+
 /// 同 [`push_inbox`]，但只在 `live_bots` 全部還在（沒刪、專案沒移交）時才寫。
 /// 條件跟寫入是同一句 SQL，所以刪除或移交不會插在「檢查」與「寫入」中間（#1626：撞題查詢等 Jev 期間 bot 可能被刪）。
 pub async fn push_inbox_if_live(
@@ -266,18 +273,18 @@ pub async fn push_inbox_if_live(
     turn_id: Option<&str>,
     payload: &Value,
     live_bots: &[String],
+    ownership: &str,
 ) -> Result<Option<String>> {
     let id = crate::db::ulid();
     let now = crate::db::now();
     let live = serde_json::to_string(live_bots)?;
-    let res = sqlx::query(
-        "INSERT OR IGNORE INTO supervisor_inbox
+    let statement = format!("INSERT OR IGNORE INTO supervisor_inbox
            (id, supervisor_id, event_key, assignment_id, bot_id, turn_id, kind, payload_json, state, created_at, updated_at)
          SELECT ?,?,?,?,?,?,?,?, 'pending', ?, ?
           WHERE (SELECT COUNT(DISTINCT b.id) FROM bots b JOIN projects p ON p.id = b.project_id
                   WHERE b.id IN (SELECT value FROM json_each(?)) AND b.deleted_at IS NULL AND p.handed_off_to IS NULL)
-              = (SELECT COUNT(DISTINCT value) FROM json_each(?))",
-    )
+              = (SELECT COUNT(DISTINCT value) FROM json_each(?)) AND ({CLAIM_OWNERSHIP}) = ?");
+    let res = sqlx::query(&statement)
     .bind(&id)
     .bind(SUPERVISOR_ID)
     .bind(event_key)
@@ -290,6 +297,8 @@ pub async fn push_inbox_if_live(
     .bind(&now)
     .bind(&live)
     .bind(&live)
+    .bind(&live)
+    .bind(ownership)
     .execute(pool)
     .await?;
     Ok((res.rows_affected() > 0).then_some(id))

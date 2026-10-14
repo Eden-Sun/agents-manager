@@ -75,6 +75,13 @@ fn signal_done(id: &str) {
     let _ = done_tx().send(id.to_string());
 }
 
+/// 測試用：排程器遇到 bot worker 名額已滿時，回報第一筆無法派送的列。
+#[cfg(test)]
+fn blocked_tx() -> &'static tokio::sync::broadcast::Sender<String> {
+    static BLOCKED: OnceLock<tokio::sync::broadcast::Sender<String>> = OnceLock::new();
+    BLOCKED.get_or_init(|| tokio::sync::broadcast::channel(4096).0)
+}
+
 /// 正在被某個 task 處理的 bot：同一顆 bot 不會有兩個 task 同時吃它的列（組內要照 rowid 順序）。
 fn busy_bots() -> &'static std::sync::Mutex<HashSet<String>> {
     static BUSY: OnceLock<std::sync::Mutex<HashSet<String>>> = OnceLock::new();
@@ -181,6 +188,8 @@ fn start_tasks(app: &Arc<App>, rows: Vec<Pending>, tasks: &mut JoinSet<Result<us
     }
     for (bot_id, rows) in groups {
         if tasks.len() >= MAX_BOT_TASKS {
+            #[cfg(test)]
+            let _ = blocked_tx().send(rows[0].id.clone());
             break;
         }
         // 別的 task（或別的 drain）正在處理這顆 bot：不搶，等它做完。
@@ -585,24 +594,34 @@ mod tests {
         GatedJev { arrivals, gate }
     }
 
-    /// 等下一個請求送到假 Jev。上限只是失敗時不掛住（不用來決定先後）。
     async fn next_arrival(jev: &mut GatedJev) {
-        let got = tokio::time::timeout(Duration::from_secs(30), jev.arrivals.recv()).await;
-        assert!(matches!(got, Ok(Some(()))), "撞題查詢應該已經送到 Jev");
+        assert_eq!(jev.arrivals.recv().await, Some(()), "撞題查詢應該已經送到 Jev");
     }
 
-    /// 等 `id` 那一列處理完（收件匣的完成訊號）。上限只是失敗時不掛住（不用來決定先後）。
     async fn wait_done(done: &mut tokio::sync::broadcast::Receiver<String>, id: &str) {
-        let found = tokio::time::timeout(Duration::from_secs(30), async {
-            while let Ok(got) = done.recv().await {
-                if got == id {
-                    return true;
+        loop {
+            if done.recv().await.expect("完成訊號") == id {
+                return;
+            }
+        }
+    }
+
+    /// 等實際完成，或由排程器直接證明已被 gate 中的 claim 占滿名額；不以時間推定卡住。
+    async fn wait_unblocked(
+        done: &mut tokio::sync::broadcast::Receiver<String>,
+        blocked: &mut tokio::sync::broadcast::Receiver<String>,
+        id: &str,
+        claim_ids: &[String],
+    ) {
+        loop {
+            tokio::select! {
+                got = done.recv() => if got.expect("完成訊號") == id { return; },
+                got = blocked.recv() => {
+                    let got = got.expect("排程訊號");
+                    assert!(got != id && !claim_ids.contains(&got), "gate 中的 claim 不得占滿 bot worker，擋住列 {got}");
                 }
             }
-            false
-        })
-        .await;
-        assert!(matches!(found, Ok(true)), "列 {id} 應該處理完");
+        }
     }
 
     /// 一顆正在跑的同專案 bot：撞題查詢的候選。
@@ -652,21 +671,22 @@ mod tests {
         let mut done = done_tx().subscribe();
 
         assert!(crate::hook_inbox::accept(&app.db, &claim(&caller.id, &caller.name, 1626), crate::hook_inbox::Source::Remote).await.unwrap().is_new());
-        assert!(crate::hook_inbox::accept(&app.db, &stop(&caller.id, "pa"), crate::hook_inbox::Source::Http).await.unwrap().is_new());
-        let ids = event_ids(&app, &caller.id).await;
-        let (claim_id, stop_id) = (ids[0].clone(), ids[1].clone());
+        let claim_id = event_ids(&app, &caller.id).await.remove(0);
 
         let drain_app = app.clone();
         let drain = tokio::spawn(async move { drain_once(&drain_app).await });
         next_arrival(&mut jev).await;
-        wait_done(&mut done, &stop_id).await;
         let lock = app.bot_lock(&caller.id).await;
         assert!(lock.try_lock().is_ok(), "撞題查詢不得占住 bot 鎖");
         drop(lock);
+        assert!(crate::hook_inbox::accept(&app.db, &stop(&caller.id, "pa"), crate::hook_inbox::Source::Http).await.unwrap().is_new());
+        let stop_id = event_ids(&app, &caller.id).await.remove(1);
+        app.hook_inbox_wake.notify_one();
+        wait_done(&mut done, &stop_id).await;
         assert!(processed_at(&app, &claim_id).await.is_none(), "檢查沒完成前不 ACK（#1500）");
 
         jev.gate.add_permits(1);
-        tokio::time::timeout(Duration::from_secs(30), drain).await.expect("放行後 drain 結束").unwrap().unwrap();
+        drain.await.unwrap().unwrap();
         assert!(processed_at(&app, &claim_id).await.is_some(), "放行後檢查完成才 ACK");
     }
 
@@ -679,6 +699,7 @@ mod tests {
         let mut jev = gated_jev(&app, &env.project_id).await;
         let mut done = done_tx().subscribe();
 
+        let mut blocked = blocked_tx().subscribe();
         let mut claim_ids = Vec::new();
         for i in 0..8 {
             let bot = tt::claude_bot(&app, &env.project_id, &format!("slow-claim-{i}")).await;
@@ -696,10 +717,11 @@ mod tests {
         for _ in 0..4 {
             next_arrival(&mut jev).await;
         }
-        wait_done(&mut done, &quiet_stop).await;
+        app.hook_inbox_wake.notify_one();
+        wait_unblocked(&mut done, &mut blocked, &quiet_stop, &claim_ids).await;
 
         jev.gate.add_permits(1000);
-        tokio::time::timeout(Duration::from_secs(30), drain).await.expect("放行後 drain 結束").unwrap().unwrap();
+        drain.await.unwrap().unwrap();
         for id in &claim_ids {
             assert!(processed_at(&app, id).await.is_some(), "放行後每顆 bot 的撞題查詢都要 ACK");
         }
@@ -716,6 +738,7 @@ mod tests {
         let mut jev = gated_jev(&app, &env.project_id).await;
         let mut done = done_tx().subscribe();
 
+        let mut blocked = blocked_tx().subscribe();
         let mut claim_ids = Vec::new();
         for i in 0..(BATCH + 16) {
             let bot = tt::claude_bot(&app, &env.project_id, &format!("starve-claim-{i}")).await;
@@ -730,10 +753,11 @@ mod tests {
         let drain_app = app.clone();
         let drain = tokio::spawn(async move { drain_once(&drain_app).await });
         next_arrival(&mut jev).await;
-        wait_done(&mut done, &quiet_stop).await;
+        app.hook_inbox_wake.notify_one();
+        wait_unblocked(&mut done, &mut blocked, &quiet_stop, &claim_ids).await;
 
         jev.gate.add_permits(1000);
-        tokio::time::timeout(Duration::from_secs(30), drain).await.expect("放行後 drain 結束").unwrap().unwrap();
+        drain.await.unwrap().unwrap();
         for id in &claim_ids {
             assert!(processed_at(&app, id).await.is_some(), "放行後每列撞題都要 ACK");
         }
@@ -758,15 +782,12 @@ mod tests {
         let drain_app = app.clone();
         let drain = tokio::spawn(async move { drain_once(&drain_app).await });
         next_arrival(&mut jev).await;
-        // Jev 還沒回：刪 caller。失敗時（例如鎖死）這裡會被上限擋下，不會掛住。
-        tokio::time::timeout(Duration::from_secs(30), crate::api::delete_bot(axum::extract::State(app.clone()), axum::extract::Path(caller.id.clone())))
-            .await
-            .expect("Jev 等待中刪 bot 不得被撞題查詢擋住")
-            .unwrap();
+        // Jev 還沒回時完成實際刪除，再放行答案。
+        crate::api::delete_bot(axum::extract::State(app.clone()), axum::extract::Path(caller.id.clone())).await.unwrap();
 
         jev.gate.add_permits(1);
         wait_done(&mut done, &claim_id).await;
-        tokio::time::timeout(Duration::from_secs(30), drain).await.expect("放行後 drain 結束").unwrap().unwrap();
+        drain.await.unwrap().unwrap();
 
         let hints: Vec<String> = crate::supervisor::store::pending_inbox(&app.db)
             .await
@@ -776,6 +797,68 @@ mod tests {
             .map(|e| e.event_key)
             .collect();
         assert!(hints.is_empty(), "caller 已刪除，不得寫入撞題提示：{hints:?}");
+        let (answer, error): (Option<f64>, Option<String>) =
+            sqlx::query_as("SELECT jev_same_work, error FROM judge_shadow WHERE regex_verdict='same_work'").fetch_one(&app.db).await.unwrap();
+        assert_eq!(error.as_deref(), Some("bot_gone"), "帳本記下丟掉的原因");
+        assert_eq!(answer, None, "丟掉的結果不留答案");
+    }
+    /// Jev 回來前 caller 啟動新 run，舊所有權的結果不得提交。
+    #[tokio::test]
+    async fn a_claim_whose_run_changes_during_the_jev_check_writes_no_hint() {
+        claim_owner_changes_during_jev("run").await;
+    }
+
+    #[tokio::test]
+    async fn a_claim_whose_project_is_handed_off_during_the_jev_check_writes_no_hint() {
+        claim_owner_changes_during_jev("handoff").await;
+    }
+
+    #[tokio::test]
+    async fn a_claim_whose_session_changes_during_the_jev_check_writes_no_hint() {
+        claim_owner_changes_during_jev("session").await;
+    }
+
+    async fn claim_owner_changes_during_jev(change: &str) {
+        let env = tt::env().await;
+        let app = env.app.clone();
+        let caller = tt::claude_bot(&app, &env.project_id, "deleted-claim-caller").await;
+        let run_id = tt::fake_run(&app, &caller.id).await;
+        running_peer(&app, &env.project_id, "deleted-claim-peer", "正在做同一件事").await;
+        let mut jev = gated_jev(&app, &env.project_id).await;
+        let mut done = done_tx().subscribe();
+
+        assert!(crate::hook_inbox::accept(&app.db, &claim(&caller.id, &caller.name, 1800), crate::hook_inbox::Source::Remote).await.unwrap().is_new());
+        let claim_id = event_ids(&app, &caller.id).await.remove(0);
+
+        let drain_app = app.clone();
+        let drain = tokio::spawn(async move { drain_once(&drain_app).await });
+        next_arrival(&mut jev).await;
+        match change {
+            "run" => {
+                sqlx::query("UPDATE runs SET state='exited' WHERE id=?").bind(&run_id).execute(&app.db).await.unwrap();
+                tt::fake_run(&app, &caller.id).await;
+            }
+            "handoff" => {
+                sqlx::query("UPDATE projects SET handed_off_to='other-daemon' WHERE id=?").bind(&env.project_id).execute(&app.db).await.unwrap();
+            }
+            "session" => {
+                sqlx::query("UPDATE runs SET native_session_id='replacement-session' WHERE id=?").bind(&run_id).execute(&app.db).await.unwrap();
+            }
+            _ => unreachable!(),
+        }
+
+        jev.gate.add_permits(1);
+        wait_done(&mut done, &claim_id).await;
+        drain.await.unwrap().unwrap();
+
+        let hints: Vec<String> = crate::supervisor::store::pending_inbox(&app.db)
+            .await
+            .unwrap()
+            .into_iter()
+            .filter(|e| e.kind == "judge_same_work")
+            .map(|e| e.event_key)
+            .collect();
+        assert!(hints.is_empty(), "caller 已換代，不得寫入撞題提示：{hints:?}");
         let (answer, error): (Option<f64>, Option<String>) =
             sqlx::query_as("SELECT jev_same_work, error FROM judge_shadow WHERE regex_verdict='same_work'").fetch_one(&app.db).await.unwrap();
         assert_eq!(error.as_deref(), Some("bot_gone"), "帳本記下丟掉的原因");
