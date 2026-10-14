@@ -24,7 +24,23 @@
         assert!(last_token_count("").is_none());
     }
 
-    /// 保溫的熱壓門檻讀它：codex 的 context 用量＝最近一筆 `token_count` 的 input ÷ 視窗。
+    /// 使用者 2026-10-14：檔尾（256 KB）全是工具輸出、找不到 token_count 時往前多找，冷掉之後才知道冷前用了多少 context。
+#[test]
+fn a_token_count_older_than_the_tail_is_still_found() {
+    let dir = crate::testing::scratch_dir("am-rollout-tail");
+    let path = dir.join("rollout.jsonl");
+    let filler = format!("{}\n", serde_json::json!({"type": "response_item", "payload": {"output": "x".repeat(4000)}}));
+    let mut body = ROLLOUT.to_string();
+    for _ in 0..((TAIL_BYTES as usize / filler.len()) + 10) {
+        body.push_str(&filler);
+    }
+    std::fs::write(&path, &body).unwrap();
+    let (tail, end) = read_new(&path, 0).unwrap();
+    assert!(last_token_count(&tail).is_none(), "檔尾裡沒有 token_count");
+    assert_eq!(last_token_count_before(&path, end), last_token_count(ROLLOUT), "往前找到最後一筆");
+}
+
+/// 保溫的熱壓門檻讀它：codex 的 context 用量＝最近一筆 `token_count` 的 input ÷ 視窗。
     #[test]
     fn codex_context_pct_is_the_last_request_over_the_window() {
         let run = "r-codex-ctx-pct";

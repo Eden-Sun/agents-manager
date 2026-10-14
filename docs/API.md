@@ -2153,6 +2153,7 @@ Codex 清單排除上述改派值；app-server 的預設若是被排除的模型
   不帶這欄的輪詢沿用舊值，直到 `until` 過了、或 codex 下一回合真的答完（`quota::clear_limit_hit_for_bot`）。帶 `bucket`（`five_hour`／`seven_day`／`fable`；claude 橫幅、agy 個人額度橫幅與 grok 撞額度畫面會帶）的撞限，
   遇到那一桶的新讀數會校正：窗是撞限之後才開的就清掉，否則 `until` 取與該窗 `resets_at` 較早者。Codex 另以撞限當下或之後的權威 app-server 讀數解除舊撞限：方案名改變、指定桶不存在或不再 critical；未指定桶時，5h／7d 都沒有 critical 窗便解除。方案未變且仍有對應 critical 窗則保留撞限；撞限之前的讀數不能解除較新的撞限。舊佇列憑據回填也套用此校正。寫進該 bot 身份的 key。UI 標「被擋」並壓灰量表。
 - `low` / `critical`：daemon 算好的門檻（`quota.rs` 的 `LOW_REMAINING_PCT = 30`、`CRITICAL_REMAINING_PCT = 5`，以剩餘 % 判斷）。**前端只讀旗標，不寫死百分比。**
+  `low` 看速度（使用者 2026-10-14）：剩餘 < 30% **而且**少於「離重置的時間佔窗長的比例」才算（5h 窗以 5 小時、7d／Fable 以 7 天計；不知道重置時間或讀數已跨過重置時只看 30%）。`critical` 不看速度。
   `low` → 顯示剩餘數字；`critical` → 側欄 bot 列提示。
 - `?refresh=1`：立刻重讀 `local` + 每台已連線遠端（各主機併發、同一台三個 kind 也併發；claude 探測最久 40 秒、grok 25 秒）；`&host=` 只重讀那台（不存在 404）。
   最多等 20 秒就回當下的快照；還沒跑完的探測留在背景（跑完照樣推 `quota_updated`），回應帶 header `X-AM-Quota-Refresh: pending`。

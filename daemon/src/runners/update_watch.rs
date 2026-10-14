@@ -100,7 +100,16 @@ pub async fn sweep_runs(app: &Arc<App>, runs: anyhow::Result<Vec<db::Run>>) {
         }
         if kind == "codex" {
             crate::runners::codex_live::sync_runtime(app, &client, &run.bot_id, &run.id, &pane, Some(&read.text)).await;
-            crate::runners::prompt_cache::refresh_codex(app, &run).await;
+            // herdr 開的 codex child 沒有 hook 回報 session（`native_session_id` 是空的）：用 herdr 綁在 agent 上的
+            // session 讀 rollout，不然它的快取晶片永遠沒有 context 用量，冷了也算不出重寫要多少（使用者 2026-10-14）。
+            // 只拿來讀檔，不寫回 runs（接回原對話的判斷不受影響）。
+            let mut cache_run = run.clone();
+            if cache_run.native_session_id.as_deref().is_none_or(|s| s.trim().is_empty()) {
+                if let Ok(Some(info)) = client.agent_get(&pane).await {
+                    cache_run.native_session_id = crate::lifecycle::dead_panes::herdr_session_id(&info);
+                }
+            }
+            crate::runners::prompt_cache::refresh_codex(app, &cache_run).await;
         }
         let observation_fence;
         let seen = if kind == "codex" {
