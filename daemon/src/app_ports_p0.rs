@@ -83,6 +83,10 @@ impl<T: crate::gh_auth::GhDevice + ?Sized> crate::gh_auth::GhDevice for Arc<T> {
 }
 
 impl crate::judge::JudgeFuse for App {
+    async fn claim_host_fence(&self, bot: &str) -> Option<crate::hosts::HostFence> {
+        let host = crate::db::bot_host(&self.db, bot).await.ok()?;
+        self.hosts.fence(&host).await
+    }
     fn judge_fuse(&self) -> &tokio::sync::Mutex<()> {
         &self.judge_fuse
     }

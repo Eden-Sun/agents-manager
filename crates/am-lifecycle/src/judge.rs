@@ -696,4 +696,5 @@ mod tests;
 /// judge 的「一次只放一個影子判斷」保險絲。（欄位在 `App`，由 composition 層 `app_ports_p0` 實作這個窄能力。）
 pub trait JudgeFuse: Send + Sync {
     fn judge_fuse(&self) -> &tokio::sync::Mutex<()>;
+    fn claim_host_fence(&self, bot: &str) -> impl std::future::Future<Output = Option<crate::hosts::HostFence>> + Send;
 }
