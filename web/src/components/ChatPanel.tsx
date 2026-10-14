@@ -130,7 +130,7 @@ const RelayFrom = memo(function RelayFrom({
       to: toId ? (s.bots.find((b) => b.id === toId)?.name ?? '') : '',
     })),
   )
-  const fromName = relayFromName({ liveName: names.from, savedName, deleted: savedDeleted })
+  const fromName = relayFromName({ fromId, liveName: names.from, savedName, deleted: savedDeleted })
   const label = relaySource({ fromId, fromName, toName: names.to, unverified })
   return (
     <span className={`msg-targets relay${fromName ? '' : ' daemon'}${unverified ? ' unverified' : ''}`} title={label.title}>

@@ -1,7 +1,19 @@
-/** 代發來源的顯示名。活著的 bot 直接用前端清單的名字；已收掉的 bot 不在清單裡，改用 daemon 補的名字並標「已收掉」。
- * 兩個都沒有才回空字串，呼叫端退回 ID。 */
-export function relayFromName(input: { liveName: string; savedName?: string | null; deleted?: boolean }): string {
-  const name = input.liveName || input.savedName || ''
-  if (!name) return ''
-  return input.deleted ? `${name}（已收掉）` : name
+import { recallRelayName, rememberRelayName } from './relayNameMemo.ts'
+
+const RETIRED = '（已收掉）'
+
+/** 代發來源的顯示名，依序找：
+ * 1. 清單找得到的活 bot → 用清單的名字（順手記住）；`deleted` 為真才標已收掉。
+ * 2. 清單找不到：daemon 補的 `savedName`（活著就照樣顯示，已收掉才標）。
+ * 3. 都沒有：曾經解析到的名字（記憶），標已收掉。
+ * 以上都沒有才回空字串，呼叫端退回 ID。 */
+export function relayFromName(input: { fromId: string; liveName: string; savedName?: string | null; deleted?: boolean }): string {
+  const { fromId, liveName, savedName, deleted } = input
+  if (liveName) {
+    rememberRelayName(fromId, liveName)
+    return deleted ? `${liveName}${RETIRED}` : liveName
+  }
+  if (savedName) return deleted ? `${savedName}${RETIRED}` : savedName
+  const remembered = recallRelayName(fromId)
+  return remembered ? `${remembered}${RETIRED}` : ''
 }
