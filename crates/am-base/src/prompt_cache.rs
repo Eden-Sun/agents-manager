@@ -9,7 +9,8 @@
 //!   `source:"rollout_estimate"`）。`recache_tokens_if_cold` 用 `input_tokens` 近似。
 //!
 //! 檔案只讀新增的部分：記住每個 run 的路徑與位移，下一輪只讀位移之後的整行；第一次（沒位移）只讀檔尾
-//! [`TAIL_BYTES`]。記憶體帳，daemon 重啟後第一輪重讀檔尾即可補回；run 結束由巡邏清掉（[`retain_runs`]）。
+//! [`TAIL_BYTES`]，檔尾裡沒有 `token_count` 才往前多找 [`BACKWARD_BYTES`]。herdr 開的 codex child 沒有 `native_session_id`，
+//! 由巡邏改用 herdr 綁在 agent 上的 session 找 rollout。記憶體帳，daemon 重啟後第一輪重讀檔尾即可補回；run 結束由巡邏清掉（[`retain_runs`]）。
 
 use crate::db;
 use am_ports::{CodexRolloutAccess, DbContext, EventSink};
@@ -103,6 +104,20 @@ pub fn read_new(path: &Path, offset: u64) -> std::io::Result<(String, u64)> {
     Ok((text, start + end as u64))
 }
 
+/// 往前找的上限：一輪工具輸出再長也很少超過這麼多；只在還沒有任何讀數時讀一次。
+pub const BACKWARD_BYTES: u64 = 32 * 1024 * 1024;
+
+/// `path` 在 `end` 之前（往前最多 [`BACKWARD_BYTES`]）最後一筆 `token_count`。讀不到回 `None`。
+pub fn last_token_count_before(path: &Path, end: u64) -> Option<CodexUsage> {
+    let mut f = std::fs::File::open(path).ok()?;
+    let start = end.saturating_sub(BACKWARD_BYTES);
+    f.seek(SeekFrom::Start(start)).ok()?;
+    let mut buf = Vec::with_capacity((end - start) as usize);
+    f.take(end - start).read_to_end(&mut buf).ok()?;
+    let from = if start > 0 { buf.iter().position(|b| *b == b'\n').map_or(buf.len(), |i| i + 1) } else { 0 };
+    last_token_count(&String::from_utf8_lossy(&buf[from..]))
+}
+
 /// Run-scoped Codex cache observation. The App wrapper supplies only the database, local rollout
 /// resolver, and bot-status event capability; parsing and incremental file reads stay here.
 pub async fn refresh_codex_with_ports<R, E>(
@@ -136,8 +151,22 @@ pub async fn refresh_codex_with_ports<R, E>(
         }
     };
     let p2 = path.clone();
-    let Ok(Ok((text, new_offset))) = tokio::task::spawn_blocking(move || read_new(&p2, offset)).await else { return };
-    let latest = last_token_count(&text);
+    let known = store().lock().unwrap_or_else(|e| e.into_inner()).get(&run.id).is_some_and(|e| e.usage.is_some());
+    let Ok(Ok((text, new_offset, latest))) = tokio::task::spawn_blocking(move || {
+        let (text, new_offset) = read_new(&p2, offset)?;
+        let mut latest = last_token_count(&text);
+        // 還沒有任何讀數（daemon 剛重啟、第一次看到這個 run），檔尾又剛好全是工具輸出：往前多找一段，
+        // 不然冷掉之後永遠不知道冷前用了多少 context（使用者 2026-10-14）。
+        if latest.is_none() && !known {
+            latest = last_token_count_before(&p2, new_offset);
+        }
+        Ok::<_, std::io::Error>((text, new_offset, latest))
+    })
+    .await
+    else {
+        return;
+    };
+    let _ = text;
     let changed = {
         let mut s = store().lock().unwrap_or_else(|e| e.into_inner());
         let Some(e) = s.get_mut(&run.id).filter(|e| e.session_id == session_id) else { return };

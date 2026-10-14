@@ -2,6 +2,43 @@
     use super::*;
     use crate::runners::quota::{clear_limit_hit_for_bot, limit_hit_for_bot, try_limit_hit_for_bot};
 
+    /// 使用者 2026-10-14：黃燈看速度。cc1 的 7d 剩 16%、10.5 小時後重置（剩 6% 的時間）→ 不黃；同樣剩 16% 但還有一半時間 → 黃。
+    /// 見底不看速度；不知道重置時間退回門檻。序列化出去的 `low` 依桶的窗長算。
+    #[test]
+    fn low_follows_the_pace_until_the_reset() {
+        let t = |s: &str| chrono::DateTime::parse_from_rfc3339(s).unwrap().with_timezone(&chrono::Utc);
+        let now = t("2026-10-14T16:30:00Z");
+        let w = |used: f64, resets: Option<&str>| Window { observed_at: None, used_pct: used, resets_at: resets.map(String::from) };
+        let week = SEVEN_DAY_LEN;
+        assert!(!w(84.0, Some("2026-10-15T03:00:00Z")).low_paced(week, now), "剩 16%、只剩 6% 的時間：用不完");
+        assert!(w(84.0, Some("2026-10-18T00:00:00Z")).low_paced(week, now), "剩 16%、還有一半時間：偏低");
+        assert!(!w(50.0, Some("2026-10-18T00:00:00Z")).low_paced(week, now), "高於 30% 一律不黃");
+        assert!(w(97.0, Some("2026-10-14T17:00:00Z")).low_paced(week, now), "見底不看速度");
+        assert!(w(84.0, None).low_paced(week, now), "不知道重置時間：照門檻");
+        assert!(!w(80.0, Some("2026-10-14T17:00:00Z")).low_paced(FIVE_HOUR_LEN, now), "5h 剩 20%、30 分後重置（10% 的時間）");
+
+        let q = Quota {
+            five_hour: None,
+            seven_day: Some(w(84.0, Some("2026-10-15T03:00:00Z"))),
+            fable: None,
+            reset_credits: None,
+            limit_hit: None,
+            plan: None,
+            updated_at: String::new(),
+            source: String::new(),
+            account: None,
+            host: "local".into(),
+        };
+        let v = serde_json::to_value(&q).unwrap();
+        // 這裡用真的現在時間：重置設在 10 小時後，剩 16% 一定比剩餘時間比例多。
+        let soon = (chrono::Utc::now() + chrono::Duration::hours(10)).to_rfc3339();
+        let q2 = Quota { seven_day: Some(w(84.0, Some(&soon))), ..q };
+        let v2 = serde_json::to_value(&q2).unwrap();
+        assert_eq!(v2["seven_day"]["low"], false, "{v2}");
+        assert_eq!(v2["seven_day"]["critical"], false);
+        assert!(v["five_hour"].is_null());
+    }
+
     /// issue #464（i407 review）：`Window::exhausted_at` 是三處共用的那一份判斷，
     /// 其中「解不開的時間戳當成已重置」沿用 `supervisor::policy::past` 的先例。
     #[test]

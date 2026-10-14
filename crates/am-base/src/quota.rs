@@ -275,6 +275,23 @@ impl Window {
         self.remaining_pct() < CRITICAL_REMAINING_PCT
     }
 
+    /// 網頁的「偏低」（黃燈）看速度，不是只看剩幾 %（使用者 2026-10-14：cc1 的 7d 剩 16% 就黃，其實 10 小時後就重置）。
+    /// 剩餘 % 低於 [`LOW_REMAINING_PCT`] **而且**比「離重置還有的時間佔窗長的比例」還少，才算偏低——
+    /// 照整個窗口平均的速度用到重置都用不完，就不必提醒。不知道重置時間、或這筆讀數已經跨過重置，退回只看門檻。
+    /// 見底（[`Self::critical`]）不看速度：剩不到 5% 隨時會撞限，跟重置早晚無關。
+    pub fn low_paced(&self, len: chrono::Duration, now: chrono::DateTime<chrono::Utc>) -> bool {
+        if !self.low() {
+            return false;
+        }
+        if self.critical() || self.reset_passed(now) {
+            return true;
+        }
+        let Some(resets) = self.resets_at.as_deref().and_then(parse_utc) else { return true };
+        let left = (resets - now).num_seconds().clamp(0, len.num_seconds());
+        let time_left_pct = left as f64 / len.num_seconds() as f64 * 100.0;
+        self.remaining_pct() < time_left_pct
+    }
+
     /// **這筆讀數跨過了重置**嗎（＝它比重置還舊，所以它說的百分比已經沒有意義）。
     ///
     /// 兩個條件都要成立：
@@ -329,6 +346,26 @@ impl Window {
     }
 }
 
+/// 放在 [`Quota`] 裡的窗知道自己是哪一桶：`low` 用 [`Window::low_paced`]（看離重置多久）。
+fn ser_bucket<S: Serializer>(w: &Option<Window>, len: chrono::Duration, s: S) -> Result<S::Ok, S::Error> {
+    let Some(w) = w else { return s.serialize_none() };
+    let mut st = s.serialize_struct("Window", 5)?;
+    st.serialize_field("used_pct", &w.used_pct)?;
+    st.serialize_field("resets_at", &w.resets_at)?;
+    st.serialize_field("observed_at", &w.observed_at)?;
+    st.serialize_field("low", &w.low_paced(len, chrono::Utc::now()))?;
+    st.serialize_field("critical", &w.critical())?;
+    st.end()
+}
+
+fn ser_five_hour<S: Serializer>(w: &Option<Window>, s: S) -> Result<S::Ok, S::Error> {
+    ser_bucket(w, FIVE_HOUR_LEN, s)
+}
+
+fn ser_weekly<S: Serializer>(w: &Option<Window>, s: S) -> Result<S::Ok, S::Error> {
+    ser_bucket(w, SEVEN_DAY_LEN, s)
+}
+
 /// Manual impl so `low` / `critical` go over the wire as computed fields.
 impl Serialize for Window {
     fn serialize<S: Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
@@ -368,9 +405,12 @@ pub struct LimitHit {
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct Quota {
+    #[serde(serialize_with = "ser_five_hour")]
     pub five_hour: Option<Window>,
+    #[serde(serialize_with = "ser_weekly")]
     pub seven_day: Option<Window>,
     /// Max 方案才有的 Fable 週額度；`None` 時 UI 完全不畫。
+    #[serde(serialize_with = "ser_weekly")]
     pub fable: Option<Window>,
     pub reset_credits: Option<ResetCredits>,
     pub limit_hit: Option<LimitHit>,
