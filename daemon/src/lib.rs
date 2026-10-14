@@ -253,6 +253,7 @@ pub use am_share::share;
 #[path = "../../crates/am-share/src/share/mod.rs"]
 pub mod share;
 mod herdr_upgrade;
+mod herdr_recovery;
 mod swap_window;
 #[cfg(test)]
 #[path = "../../crates/am-supervisor/src/mission/mod.rs"]
