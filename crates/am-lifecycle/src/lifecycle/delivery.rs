@@ -1689,6 +1689,20 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
+    /// issue #1771：claude 2.1.300 的請求紀錄（`api-request*`，blob 也帶 `message.content`）夾在中間，送達計數不變。
+    #[test]
+    fn api_request_records_do_not_change_the_delivery_count() {
+        let log = include_str!("fixtures/claude_2.1.300_api_request.jsonl");
+        let dir = crate::testing::track(std::env::temp_dir().join(format!("am-transcript-{}", db::ulid())));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("t.jsonl");
+        let blob = json!({"type": "api-request-blob", "hash": "h", "message": {"role": "user", "content": [{"type": "text", "text": "送出的那句"}]}}).to_string();
+        std::fs::write(&path, [log.trim_end(), &user_entry(json!("送出的那句")), log.trim_end(), &blob].join("\n") + "\n").unwrap();
+        assert_eq!(transcript_hits_since(&path, 0, "送出的那句").unwrap(), 1);
+        assert!(log.lines().all(|l| transcript_user_text(l).is_none()));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     /// #218：claude 2.1.278 把**貼上事件**（herdr `agent.prompt`、人在終端貼上）包成 `<pasted_content id=…>` 才寫進
     /// transcript。真 transcript（2026-09-19 實測）：包起來的、20 字門檻下沒包的、字面標籤被 CLI 跳脫的，都認得是同一則；
     /// 只是被包含的一段不算。
