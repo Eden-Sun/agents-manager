@@ -50,6 +50,8 @@ import { ScheduleEditor } from '../schedules/ScheduleEditor'
 import { RunElapsed } from './RunElapsed'
 import { IdentityOptions, PersonaField, PersonaMark } from './BotSettingsPanel'
 import { ShareMark } from './ShareLinkButton'
+import { FrozenBadge } from './FrozenBadge'
+import { NO_WARM_TEXT } from '../lib/cacheClock'
 import { EnvSection } from './EnvSection'
 import { HostBadge, HostsPanel } from './HostsPanel'
 import { ShareProfileField } from './ShareProfileField'
@@ -185,6 +187,8 @@ function BotRowImpl({
   renderProbe('BotRow')
   const bot = useStore((s) => s.bots.find((b) => b.id === botId))
   const run = useStore((s) => s.runs[botId] ?? null)
+  // 主力按了「不用保溫」（冰凍）：列名旁畫雪花（SPEC §6.5k）。
+  const frozen = bot?.primary === true && run?.keep_warm_skip === true
   const { lamp, background: bgJobs, label: stateLabel, blockedReason, kids: kidsRunning } = useBotLamp(botId)
   const hostDown = useBotOfflineHost(botId)
   // 額度 critical 時整列反灰並加警示晶片（API.md §12.4）。botQuotaWarning 每次回新物件，不 useShallow 會無限重繪。
@@ -423,6 +427,7 @@ function BotRowImpl({
           <BotNameField botId={botId} name={bot.name} variant="row" armed={selected} hint={herdrIdentity(run, bot.agent_name)?.title}>
             {compact ? null : <PersonaMark persona={bot.persona} />}
             <ShareMark botId={botId} />
+            {frozen ? <FrozenBadge title={NO_WARM_TEXT} /> : null}
             {/* 燈號說 idle 但回合是斷的，不能只留 tooltip；重送在 header chip。 */}
             {capacity ? (
               <span className="bot-capacity" title={`${turnError ?? ''}｜${CAPACITY_TITLE}`}>

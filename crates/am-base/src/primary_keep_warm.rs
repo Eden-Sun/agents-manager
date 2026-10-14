@@ -14,7 +14,8 @@
 //!   `TurnControl` 呼叫 `/compact`，並以 `SystemMessageWriter` 記下聊天室說明。cache 冷了就不壓縮，等真的活動重新計時。
 //! * 對象只有主力（`bots.is_primary`）的 claude／codex，run 在跑、`agent_status == idle`、沒有在飛或排隊的回合。`blocked`（停在問題／
 //!   權限提示）絕不送——打進去的字會變成回答那個問題。
-//! * **不用保溫**（`keep_warm_skip` 表，使用者按鈕）：這顆主力「這一輪閒置」跳過保溫與熱壓；錨點（真的活動）晚於按下的時間就自動恢復，
+//! * **不用保溫**（`keep_warm_skip` 表，使用者按鈕；網頁畫冰凍圖示）：這顆主力「這一輪閒置」不保溫；context 超過熱壓門檻時，在 cache
+//!   到期前 [`FROZEN_COMPACT_LEAD_SECS`] 壓一次（[`decide_frozen`]），省下次回來重寫整段 context。錨點（真的活動）晚於按下的時間就自動恢復，
 //!   持久（daemon 重啟不忘）。
 //!
 //! 「這個錨點之後是否做過」不放記憶體：保溫看有沒有 `keep-warm:`（舊資料 `keepalive:`）回合比錨點晚；壓縮以 `primary_cache_actions`
@@ -50,6 +51,9 @@ pub fn warm_compact_min_context_pct(kind: &str) -> Option<f64> {
 }
 /// 壓縮至少要在 cache TTL 到期前留這麼多時間。
 const WARM_COMPACT_TTL_MARGIN_SECS: i64 = 2 * 60;
+/// 「不用保溫」的主力（冰凍）在 cache 到期前這麼久就壓縮（使用者 2026-10-14）：比照 claude 原生閒置壓縮約 54 分的時機，
+/// 趁 cache 還熱、讀 context 很便宜時把它壓小，下次回來只要重寫摘要。
+pub const FROZEN_COMPACT_LEAD_SECS: i64 = 6 * 60;
 /// 送進去的保溫 prompt。
 pub const KEEP_WARM_TEXT: &str = "any updates";
 /// 保溫視窗至少開這麼久才允許被關（送出到 hook 回報 working 之間有空窗）。
@@ -206,6 +210,21 @@ pub fn decide(
     }
 }
 
+/// 純規則：「不用保溫」（冰凍）的主力不保溫，只在 cache 快到期時壓一次：cache 年齡進入到期前 [`FROZEN_COMPACT_LEAD_SECS`]、
+/// 還留 [`WARM_COMPACT_TTL_MARGIN_SECS`] 餘裕、這個錨點之後還沒壓過、context 用量超過熱壓門檻。TTL 太短（不到兩倍提前量）不壓。
+pub fn decide_frozen(cache_age_secs: i64, ttl_secs: i64, compacted_since_anchor: bool, context_pct: Option<f64>, min_context_pct: f64) -> Step {
+    if ttl_secs >= 2 * FROZEN_COMPACT_LEAD_SECS
+        && !compacted_since_anchor
+        && cache_age_secs >= ttl_secs - FROZEN_COMPACT_LEAD_SECS
+        && cache_age_secs < ttl_secs - WARM_COMPACT_TTL_MARGIN_SECS
+        && context_pct.is_some_and(|p| p > min_context_pct)
+    {
+        Step::WarmCompact
+    } else {
+        Step::Wait
+    }
+}
+
 /// 純規則：這顆 run 現在能不能被碰。`blocked`／`working`／`unknown` 一律不送。
 pub fn eligible(kind: &str, is_primary: bool, run_state: &str, agent_status: &str, in_flight: bool, queued: bool) -> bool {
     is_primary && matches!(kind, "claude" | "codex") && run_state == "running" && agent_status == "idle" && !in_flight && !queued
@@ -277,7 +296,12 @@ pub async fn settle_skip_with<E: EventSink>(db: &DbContext<SqlitePool>, events: 
         return;
     }
     let Ok((Some(anchor), _)) = anchor_of(db, bot, run, now).await else { return };
-    if db::parse_ts(&anchor).is_some_and(|a| a > since) {
+    let Some(anchor_t) = db::parse_ts(&anchor) else { return };
+    // 冰凍壓縮自己造成的活動不是使用者回來了：壓完照樣不保溫（壓縮的回音另見 `is_warm_compact_echo`）。
+    if is_warm_compact_echo(anchor_t, last_warm_compact_at(db.pool(), &bot.id).await.ok().flatten()) {
+        return;
+    }
+    if anchor_t > since {
         clear_skip_with(db, events, &bot.id).await;
     }
 }
@@ -483,12 +507,15 @@ async fn plan_with_db(db: &DbContext<SqlitePool>, bot: &db::Bot, run: &db::Run, 
     let (anchor, last_turn) = anchor_of(db, bot, run, now).await?;
     let Some(anchor) = anchor else { return Ok(None) };
     let Some(anchor_t) = db::parse_ts(&anchor) else { return Ok(None) };
-    // 「不用保溫」：按下之後沒有真的活動（錨點不晚於按下的時間）就跳過這一輪，不保溫也不熱壓。
-    if skip_since(db.pool(), &bot.id).await?.is_some_and(|since| anchor_t <= since) {
-        return Ok(None);
-    }
+    // 「不用保溫」（冰凍）：按下之後沒有真的活動（錨點不晚於按下的時間）就不保溫；context 夠大時只在 cache 到期前壓一次（[`decide_frozen`]）。
+    let frozen = skip_since(db.pool(), &bot.id).await?.is_some_and(|since| anchor_t <= since);
     let age_secs = (now - anchor_t).num_seconds();
-    if age_secs < KEEP_WARM_AFTER_SECS {
+    let first_look_secs = if frozen {
+        cache_clock::ttl_secs(&bot.kind).map_or(i64::MAX, |ttl| ttl - FROZEN_COMPACT_LEAD_SECS)
+    } else {
+        KEEP_WARM_AFTER_SECS
+    };
+    if age_secs < first_look_secs {
         return Ok(None);
     }
     let Some(cache_ttl_secs) = cache_clock::ttl_secs(&bot.kind) else { return Ok(None) };
@@ -525,6 +552,11 @@ async fn plan_with_db(db: &DbContext<SqlitePool>, bot: &db::Bot, run: &db::Run, 
         return Ok(None);
     }
     let compacted = last_compact.is_some_and(|t| t > anchor_t);
+    let context_pct = context_used_pct(&bot.kind, &run.id, run.status_json.as_deref());
+    let min_context_pct = warm_compact_min_context_pct(&bot.kind).unwrap_or(f64::INFINITY);
+    if frozen {
+        return Ok(Some(Plan { step: decide_frozen(cache_age_secs, cache_ttl_secs, compacted, context_pct, min_context_pct), anchor, age_secs }));
+    }
     Ok(Some(Plan { step: decide(
             age_secs,
             cache_age_secs,

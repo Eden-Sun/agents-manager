@@ -4,6 +4,7 @@ import { useDialogFocus } from '../hooks/useDialogFocus'
 import { StatusLamp } from './StatusLamp'
 import './chipLegend.css'
 import './keepWarmChip.css'
+import { FrozenBadge } from './FrozenBadge'
 import './modelCapacity.css'
 
 /**
@@ -58,6 +59,13 @@ export function ChipLegend({ onClose }: { onClose: () => void }) {
               <span className="unread-chip-warm">♨︎</span>
             </span>
             <span>♨ 標記：保溫回覆到了（cache 還熱），送出新 prompt 才恢復；不算未讀</span>
+          </li>
+          <li>
+            <span className="unread-chip pinned" aria-hidden="true">
+              <span className="unread-chip-name">bot</span>
+              <FrozenBadge />
+            </span>
+            <span>雪花：「不用保溫」（冰凍）；這一輪閒置不保溫，context 夠大時 cache 到期前自動壓縮一次；有新活動就恢復</span>
           </li>
           <li>
             <span className="unread-chip waits-kids" aria-hidden="true">

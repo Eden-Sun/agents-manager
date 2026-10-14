@@ -16,6 +16,28 @@
   --keep-warm: #e879f9;
 }
 
+/* 不用保溫（冰凍）：雪花用冷青色，跟 ♨ 的洋紅、未讀的藍數字分開（SPEC §6.5k）。 */
+:root {
+  --frozen: #0e7490;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    --frozen: #67e8f9;
+  }
+}
+
+:root[data-theme="dark"] {
+  --frozen: #67e8f9;
+}
+
+.frozen-badge {
+  flex: none;
+  display: inline-flex;
+  color: var(--frozen);
+  line-height: 1;
+}
+
 .unread-chip-warm {
   flex: none;
   color: var(--keep-warm);
@@ -24,6 +46,7 @@
 }
 
 /* 實心紅（要回答 hover）底上洋紅字會糊掉：反白。未讀不塗底（2026-10-12），保溫記號維持 --keep-warm（#1402）。 */
-.unread-chip.needs-reply:hover .unread-chip-warm {
+.unread-chip.needs-reply:hover .unread-chip-warm,
+.unread-chip.needs-reply:hover .frozen-badge {
   color: #fff;
 }

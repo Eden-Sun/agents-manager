@@ -4438,6 +4438,9 @@ function installDevHelpers(mock: MockTransport) {
     // 截圖用：直接 PATCH 設定（`__amMock.patchBot('am-codex', {model: 'gpt-6-luna'})`），回 daemon 的回應。
     patchBot: (botIdOrName: string, body: Rec) =>
       mock.request('PATCH', `/bots/${encodeURIComponent(mock.botIdByName(botIdOrName) ?? botIdOrName)}`, body),
+    // 截圖用：按「不用保溫」（冰凍，晶片畫雪花）：`__amMock.keepWarmSkip('am-claude')`，`false` 取消。
+    keepWarmSkip: (botIdOrName: string, skip = true) =>
+      mock.request('POST', `/bots/${encodeURIComponent(mock.botIdByName(botIdOrName) ?? botIdOrName)}/keep-warm/skip`, { skip }),
     // 截圖用：改名（演長名字在手機標題列被擠的情況）
     rename: (botIdOrName: string, name: string) =>
       mock.request('PATCH', `/bots/${encodeURIComponent(mock.botIdByName(botIdOrName) ?? botIdOrName)}`, { name }),
