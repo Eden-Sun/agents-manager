@@ -36,6 +36,7 @@
 - **新增／修改資料表、欄位、索引、trigger（含各子模組的 `migrate`）＝升 `SCHEMA_VERSION`**：在 `crates/am-base/src/db.rs` 的 `SCHEMA_HISTORY` 最後加一行 `(N+1, "<指紋>")`（指紋照 `schema_guard` 測試失敗訊息給的值），不准改既有那幾行。沒升版＝pin 測試紅，而且舊 binary 會照開一個它不懂的 schema。已合流的別人的 schema 變更沒升版時，以主幹現況重算、併進同一版，不要只顧自己那一行。
 
 ## 驗證（收尾前必跑）
+- **瀏覽器簡稱（使用者 2026-10-14）**：對話與派工中的 `ab` 一律指 `agent-browser`；實際 CLI 指令仍用 `agent-browser`，沿用自己的 `--session <agent 名>`，做完 `close`。
 - Claude 端另有 project skill `verify`（`.claude/skills/verify/`，issue #747）在 commit 前叫起同一個 `scripts/check.sh changed`；它只是這條規則的入口，不另有判斷，Ubuntu Full CI 仍非同步。
 - 收尾跑 `scripts/check.sh changed`（issue #716）：只跑改到的部分（跟 `origin/main` 比）；daemon 若會跑改到模組的測試（`scripts/ci-daemon-filters.sh` 由路徑挑），由 `cargo test` 編譯 targets，不另跑重複的 `cargo check --all-targets`；`CHECK_TESTS=none` 或自動挑不到 daemon 測試時仍跑 check。跨模組的連帶影響抓不到，交給 ubuntu-ci。要明講跑哪些加 `CHECK_TESTS=<過濾字串>`（只收一個過濾字串），不跑測試用 `CHECK_TESTS=none`。改動範圍大、或改到共用基礎時再跑整樹 `scripts/check.sh`。
 - **主機負載高時等它降下來，用共用的閘，不要自己手寫迴圈**（issue #813）：`CHECK_MAX_LOAD=40 scripts/check.sh changed`，或在任何 cargo 前面接 `scripts/wait-load.sh --max 40 && …`。逾時（`CHECK_LOAD_TIMEOUT`／`--timeout`，預設 1800 秒）一律回非 0、後面的指令不跑——手寫迴圈逾時回成功、在 load≈152 照跑的事故就是這樣來的（#789）。也不要為了快把 `~/.cargo/bin` 擺到 PATH 前面或設 `AM_REAL_CARGO` 繞過 cargo shim：那樣不佔名額，整樹 `cargo test` 直接疊在別人的名額上。
