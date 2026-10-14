@@ -105,7 +105,17 @@ fn is_note(content: &str) -> bool {
 /// 不是 agent 的回覆，不存成終端擷取泡泡。
 pub fn is_screen_notice(text: &str) -> bool {
     let lines: Vec<&str> = text.lines().map(str::trim).filter(|l| !l.is_empty()).collect();
-    !lines.is_empty() && text.chars().count() <= 400 && lines.iter().all(|l| l.to_lowercase().contains("compacted"))
+    // `/compact` 做完 claude 會列出摘要裡帶回來的檔案（`Referenced file …`、`Read … (N lines)`，#1762）。
+    let restored = |l: &str| {
+        l.starts_with("Referenced file ") || (l.starts_with("Read ") && l.ends_with(" lines)")) || l.starts_with("Loaded ")
+    };
+    text.chars().count() <= 2000
+        && lines.iter().any(|l| l.to_lowercase().contains("compacted"))
+        && lines.iter().all(|l| l.to_lowercase().contains("compacted") || restored(l))
+}
+
+fn is_compact_command(prompt: &str) -> bool {
+    prompt == "/compact" || prompt.starts_with("/compact ")
 }
 
 /// `SessionStart` source=compact：寫說明、收掉壓縮開出來的空回合。呼叫端握著 bot 鎖。
@@ -133,17 +143,38 @@ pub async fn record<H: HookHost>(app: &H, bot: &db::Bot, run: &db::Run, payload:
             .await?;
     let write_note = !warm && !recent.iter().any(|c| is_note(c));
 
-    // 壓縮開出來的空回合：external、沒有 prompt、沒有任何訊息。有 prompt 的回合（自動壓縮發生在使用者的回合中間）照常等 Stop。
-    let empty_turn = match db::in_flight_turn(app.db(), &run.id).await? {
-        Some(t) if t.origin == "external" && t.prompt_text.as_deref().is_none_or(|p| p.trim().is_empty()) => {
-            let has_messages: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM messages WHERE turn_id = ?)")
-                .bind(&t.id)
-                .fetch_one(app.db())
-                .await?;
-            (!has_messages).then_some(t)
+    // 這次壓縮自己的回合：(a) pane 轉 working 開出來的 external 空回合（沒有 prompt、沒有任何訊息）；
+    // (b) 使用者打的 `/compact`（終端直接打的 UserPromptSubmit 或網頁送的，#1762）——只有 `/compact` 這則 user 訊息、
+    // 還沒有回覆。兩種都不會有 Stop，這裡收掉；終端備援就不會再把畫面上的壓縮提示存成回覆。
+    // 其他有 prompt 的回合（自動壓縮發生在使用者回合中間）照常等 Stop。
+    let own_turn = match db::in_flight_turn(app.db(), &run.id).await? {
+        Some(t) => {
+            let (users, others): (i64, i64) = sqlx::query_as(
+                "SELECT COUNT(*) FILTER (WHERE role = 'user'), COUNT(*) FILTER (WHERE role <> 'user') FROM messages WHERE turn_id = ?",
+            )
+            .bind(&t.id)
+            .fetch_one(app.db())
+            .await?;
+            let compact_users: i64 = sqlx::query_scalar(
+                "SELECT COUNT(*) FROM messages WHERE turn_id = ? AND role = 'user' AND (trim(content) = '/compact' OR trim(content) LIKE '/compact %')",
+            )
+            .bind(&t.id)
+            .fetch_one(app.db())
+            .await?;
+            let prompt = t.prompt_text.as_deref().map(str::trim).unwrap_or("");
+            let empty = t.origin == "external" && prompt.is_empty() && users == 0 && others == 0;
+            let command = others == 0
+                && (is_compact_command(prompt) || (prompt.is_empty() && users > 0 && users == compact_users));
+            (empty || command).then_some((t, command))
         }
-        _ => None,
+        None => None,
     };
+    let manual_command = own_turn.as_ref().is_some_and(|(_, command)| *command);
+    // 遠端沒帶 `agm_compact`（hook.sh 還是舊版）時，至少知道是手動 `/compact`。
+    if manual_command && info.is_none() {
+        info = Some(CompactInfo { trigger: Some("manual".into()), ..Default::default() });
+    }
+    let empty_turn = own_turn.map(|(t, _)| t);
 
     let mut tx = app.db().begin().await?;
     let mut closed = None;
@@ -215,5 +246,8 @@ mod tests {
         assert!(is_screen_notice("✻ Conversation compacted · ctrl+o for history\n\nCompacted while idle, before the prompt cache expired"));
         assert!(!is_screen_notice("我把對話 compacted 了，接著修 #12\n修好了"));
         assert!(!is_screen_notice(""));
+        assert!(is_screen_notice("Compacted\nReferenced file scripts/net-pin.sh\nRead scripts/rollback.sh (145 lines)\nReferenced file scripts/package-ota.sh"));
+        assert!(!is_screen_notice("Referenced file a.sh"), "沒有壓縮提示就不是");
+        assert!(!is_screen_notice("Compacted\n修好了，接著跑測試"));
     }
 }
