@@ -184,6 +184,13 @@
   animation: unread-ring-turn 1.8s linear infinite;
 }
 
+/* 選取的藍框完整保留在外側；黃色進度圈往內收，不蓋掉 border 與 inset focus ring。 */
+.unread-chip.current .unread-chip-working-ring {
+  inset: 1px;
+  padding: 1px;
+  border-radius: 4px;
+}
+
 @keyframes unread-ring-turn {
   to { --chip-ring-angle: 360deg; }
 }
