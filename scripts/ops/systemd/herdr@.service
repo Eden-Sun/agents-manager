@@ -7,6 +7,7 @@
 #
 # KillMode=process：只收 herdr server 本身，跟 launchd 一樣不去掃 pane 裡的行程。預設的 control-group 會在
 # server 掛掉、Restart 之前把整個 cgroup（每個 pane 的 agent）一起殺掉。
+# OOMPolicy=continue：pane 裡的行程被 OOM killer 殺掉時繼續運行 unit，不要連帶停掉 herdr server。
 [Unit]
 Description=herdr server（session %i）
 
@@ -18,6 +19,7 @@ ExecStart=/usr/bin/env herdr --session %i server
 Restart=always
 RestartSec=2
 KillMode=process
+OOMPolicy=continue
 StandardOutput=append:/tmp/herdr-%i.log
 StandardError=append:/tmp/herdr-%i.log
 

@@ -127,6 +127,15 @@ systemctl --user enable com.agm.daemon-boot.service herdr@agents-manager.service
 loginctl enable-linger "$USER"   # 必須：沒登入也要在開機時跑 user manager
 ```
 
+已安裝主機更新 `herdr@.service` 時，需手動重裝來源檔並 reload。`ops-sync` 只會比對並回報落差，不會安裝或 reload。
+
+```sh
+install -m 644 scripts/ops/systemd/herdr@.service ~/.config/systemd/user/
+systemctl --user daemon-reload
+```
+
+`OOMPolicy=continue` 會在 pane 裡的行程遭 OOM killer 終止時保留 herdr server。設定要等 herdr 下次重啟才生效；不要為此手動重啟 herdr，因為重啟會中斷所有 pane。
+
 驗收：`qm shutdown 114 && qm start 114` 後不碰任何東西，`curl 127.0.0.1:7788/api/session` 有回應、bot 被 supervisor 接回。
 隔離測試：`bash scripts/ops/daemon-boot_test.sh`（假 `systemd-run`／`curl`／`agm`，HOME 指到暫存目錄）。
 
