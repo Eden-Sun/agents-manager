@@ -13,7 +13,7 @@
 //! 進行中的狀態只在記憶體（同 `bulk_restart` 的批次）：daemon 半途重啟時，維護窗口最多 30 分鐘自己到期，
 //! 換到一半的 binary 有 `.bak` 可人工換回，每一步都寫在 `<data_dir>/herdr-update.log`。
 //! 會碰外面世界的動作（下載、`--version`、重啟 server、接回 bot、通知母 bot）都經過 [`Ops`]，測試用假的跑完整流程。
-//! 這版只做 local：遠端（尤其 `shared_session` 的 m4p，別顆 daemon 也在用那台 herdr）一律 409。
+//! 本機與非 shared_session 遠端共用流程；主機上的檔案與服務操作都經過可替換介面。
 
 use crate::changelog::{cli_version_string, parse_version, version_string};
 use crate::lifecycle::LcError;
@@ -60,7 +60,28 @@ impl Default for Timing {
 /// 會碰外面世界的動作。`Err` 都是給人看的原因。
 pub trait Ops: Send + Sync {
     /// 現行 herdr binary 的路徑（server 重啟時 exec 的那一個）。
-    fn install_path(&self) -> Result<PathBuf, String>;
+    fn install_path(&self) -> BoxFuture<'_, Result<PathBuf, String>>;
+    fn staging<'a>(&'a self, app: &'a Arc<App>, version: &'a str) -> BoxFuture<'a, Result<PathBuf, String>> {
+        Box::pin(async move {
+            let path = app.data_dir.join(STAGING_DIR).join(version).join("herdr");
+            std::fs::create_dir_all(path.parent().unwrap()).map_err(|e| e.to_string())?;
+            Ok(path)
+        })
+    }
+    fn cleanup<'a>(&'a self, app: &'a Arc<App>, version: &'a str) -> BoxFuture<'a, Result<(), String>> {
+        Box::pin(async move {
+            let dir = app.data_dir.join(STAGING_DIR).join(version);
+            if dir.exists() { std::fs::remove_dir_all(dir).map_err(|e| e.to_string())?; }
+            Ok(())
+        })
+    }
+    fn swap<'a>(&'a self, staging: &'a Path, install: &'a Path, from: &'a str) -> BoxFuture<'a, Result<PathBuf, String>> {
+        Box::pin(async move { swap_in(staging, install, from) })
+    }
+    fn swap_outcome_uncertain(&self) -> bool { false }
+    fn rollback<'a>(&'a self, backup: &'a Path, install: &'a Path) -> BoxFuture<'a, Result<(), String>> {
+        Box::pin(async move { restore(backup, install) })
+    }
     /// 把 `version` 的 release asset 下載到 `dest`（可執行）。
     fn download<'a>(&'a self, version: &'a str, dest: &'a Path) -> BoxFuture<'a, Result<(), String>>;
     /// 下載好的 `path` 對得上 release 公布的 sha256 嗎。**在執行它之前**（`--version` 就是執行）；對不上、或查不到公布值都是 `Err`。
@@ -86,6 +107,8 @@ pub struct Progress {
     pub target_version: String,
     pub phase: String,
     pub started_at: String,
+    pub session: String,
+    pub manual_upgrade_command: String,
 }
 
 /// 以 data_dir 分（測試同一個行程裡有很多顆 App）。同時只跑一個。
@@ -94,9 +117,9 @@ fn running() -> &'static Mutex<HashMap<PathBuf, Progress>> {
     M.get_or_init(Default::default)
 }
 
-/// 這台 daemon 眼中是否有 herdr 更新在跑（cli_update 開工前問）。
-pub fn is_running(app: &impl crate::capabilities::DataDir) -> bool {
-    running().lock().unwrap_or_else(|e| e.into_inner()).contains_key(app.data_dir())
+/// 這顆 daemon 是否正在更新指定主機的 herdr（cli_update 開工前問）。
+pub fn is_running(app: &impl crate::capabilities::DataDir, host: &str) -> bool {
+    running().lock().unwrap_or_else(|e| e.into_inner()).get(app.data_dir()).is_some_and(|p| p.host == host)
 }
 
 /// 這幾個階段 herdr server 即將被（或正在）砍：新的 prompt／relay／交辦打進去，回合會直接被殺，
@@ -117,6 +140,11 @@ pub fn gate(app: &impl crate::capabilities::DataDir) -> Option<Progress> {
 /// 測試用：佔住這顆 App 的更新位置，掉了就放。
 #[cfg(test)]
 pub(crate) fn hold_slot_for_test(app: &App) -> impl Drop + '_ {
+    hold_slot_for_host_for_test(app, "local")
+}
+
+#[cfg(test)]
+pub(crate) fn hold_slot_for_host_for_test<'a>(app: &'a App, host: &str) -> impl Drop + 'a {
     struct Held<'a>(&'a App);
     impl Drop for Held<'_> {
         fn drop(&mut self) {
@@ -125,7 +153,7 @@ pub(crate) fn hold_slot_for_test(app: &App) -> impl Drop + '_ {
     }
     running().lock().unwrap_or_else(|e| e.into_inner()).insert(
         app.data_dir.clone(),
-        Progress { update_id: "held".into(), host: "local".into(), target_version: "0.0.0".into(), phase: "downloading".into(), started_at: crate::db::now() },
+        Progress { update_id: "held".into(), host: host.into(), target_version: "0.0.0".into(), phase: "downloading".into(), started_at: crate::db::now(), session: "agents-manager".into(), manual_upgrade_command: manual_upgrade_command().into() },
     );
     Held(app)
 }
@@ -176,7 +204,7 @@ pub struct Affected {
     pub busy: Vec<String>,
 }
 
-/// 這台（local）上會被 server 重啟打斷的 bot。使用者自己的 `default` session 不在這個 server 上，不算。
+/// 目標主機上會被 server 重啟打斷的 bot。使用者自己的 `default` session 不在這個 server 上，不算。
 pub async fn affected(app: &impl crate::capabilities::Db, host: &str) -> anyhow::Result<Affected> {
     let mut out = Affected::default();
     for run in crate::db::all_active_runs(app.db()).await? {
@@ -242,7 +270,9 @@ pub async fn post_herdr_update(
 ) -> Result<Response, LcError> {
     let b = body.map(|Json(b)| b).unwrap_or_default();
     let current = crate::upstream_update::behind_target_for_host(&app, "herdr", &host).await;
-    let v = start(&app, &headers, &host, b.target_version.as_deref(), current, Arc::new(Real), Timing::default()).await?;
+    let conn = app.hosts.get(&host).await.ok_or_else(|| LcError::NotFound("host".into()))?;
+    let ops = Arc::new(Real::new(conn));
+    let v = start(&app, &headers, &host, b.target_version.as_deref(), current, ops, Timing::default()).await?;
     Ok((StatusCode::ACCEPTED, Json(v)).into_response())
 }
 
@@ -268,11 +298,8 @@ pub async fn start(
     }
     if crate::shared_host::is_shared(app, host).await {
         return Err(LcError::conflict("shared_session", json!({"host": host,
-            "message": format!("{host} 的 herdr session 也是別顆 daemon 在用的，這裡不能重啟它")})));
-    }
-    if host != crate::config::LOCAL_HOST {
-        return Err(LcError::conflict("unsupported_host", json!({"host": host,
-            "message": "herdr 一鍵更新目前只支援本機"})));
+            "manual_upgrade_command": manual_upgrade_command(),
+            "message": format!("{host} 的 herdr session 也是別顆 daemon 在用的；確認沒有別的 daemon 後，到主機設定關閉共用 session 再試")})));
     }
     if current_target.as_deref().and_then(parse_version) != parse_version(&target) {
         let message = match &current_target {
@@ -284,12 +311,15 @@ pub async fn start(
     }
     let plan = affected(app, host).await.map_err(|e| LcError::Upstream(format!("讀不到 bot 狀態，沒有開始：{e:#}")))?;
     let update_id = crate::db::ulid();
+    let session = session_for_response(app, host).await;
     let progress = Progress {
         update_id: update_id.clone(),
         host: host.to_string(),
         target_version: target.clone(),
         phase: "downloading".into(),
         started_at: crate::db::now(),
+        session: session.clone(),
+        manual_upgrade_command: manual_upgrade_command().into(),
     };
     {
         let mut g = running().lock().unwrap_or_else(|e| e.into_inner());
@@ -317,19 +347,21 @@ pub async fn start(
             return Err(LcError::Upstream(format!("讀不到 CLI 安裝紀錄，沒有開始：{e}")));
         }
     }
-    let session = app.cfg.get().await.server.herdr_session.clone();
-    let ctx = Ctx { update_id: update_id.clone(), host: host.to_string(), session, target: target.clone() };
+    let ctx = Ctx { update_id: update_id.clone(), host: host.to_string(), session: session.clone(), target: target.clone() };
     let app2 = app.clone();
-    tokio::spawn(async move {
+    tokio::spawn(Box::pin(async move {
         let done = run(&app2, ops.as_ref(), timing, &ctx).await;
         release_slot(&app2, &ctx.update_id);
         app2.emit("herdr_update_done", done).await;
-    });
+    }));
     Ok(json!({
         "update_id": update_id,
         "host": host,
         "target_version": target,
         "started": true,
+        "phase": "downloading",
+        "session": session,
+        "manual_upgrade_command": manual_upgrade_command(),
         "will_resume": plan.resume,
         "children_lost": plan.children,
     }))
@@ -346,6 +378,7 @@ struct Ctx {
 
 #[derive(Default)]
 struct Outcome {
+    failed_phase: Option<String>,
     from: Option<String>,
     reason: Option<&'static str>,
     detail: Option<String>,
@@ -374,21 +407,27 @@ fn log_line(app: &impl crate::capabilities::DataDir, ctx: &Ctx, phase: &str, msg
 async fn phase(app: &(impl crate::capabilities::DataDir + crate::capabilities::Db + crate::capabilities::Emit), ctx: &Ctx, phase: &str, msg: &str) {
     set_phase(app, &ctx.update_id, phase);
     log_line(app, ctx, phase, msg);
-    app.emit("herdr_update_progress", json!({"update_id": ctx.update_id, "host": ctx.host, "target_version": ctx.target, "phase": phase}))
+    app.emit("herdr_update_progress", json!({"update_id": ctx.update_id, "host": ctx.host, "target_version": ctx.target, "phase": phase,
+        "session": ctx.session, "manual_upgrade_command": manual_upgrade_command()}))
         .await;
 }
 
 async fn run(app: &Arc<App>, ops: &dyn Ops, timing: Timing, ctx: &Ctx) -> Value {
-    let out = steps(app, ops, timing, ctx).await;
+    let mut out = steps(app, ops, timing, ctx).await;
+    if out.reason.is_some() && out.failed_phase.is_none() {
+        out.failed_phase = running_list(app).first().map(|p| p.phase.clone());
+    }
     // staging 只在 steps 裡用：成功時已經複製進安裝位置，失敗時下次會重新下載、重新驗。不清的話每一版永久留一顆（#1048）。
-    let _ = std::fs::remove_dir_all(app.data_dir.join(STAGING_DIR).join(&ctx.target));
+    if let Err(e) = ops.cleanup(app, &ctx.target).await {
+        log_line(app, ctx, "cleanup", &e);
+    }
     let ok = out.reason.is_none();
     let msg = match (&out.reason, &out.detail) {
         (None, _) => format!("ok：resumed {}，failed {}，children_lost {}", out.resumed.len(), out.failed.len(), out.children_lost.len()),
         (Some(r), d) => format!("{r}：{}", d.as_deref().unwrap_or("")),
     };
     log_line(app, ctx, "done", &msg);
-    if ok {
+    if ok || out.reason == Some("resume_failed") {
         crate::upstream_update::note_installed(app, "herdr", &ctx.host, &ctx.target).await;
     }
     // 版本快取（hosts[].herdr）不等下一輪 60 秒巡邏。測試不跑：它會去執行本機真的 `herdr --version`。
@@ -398,6 +437,8 @@ async fn run(app: &Arc<App>, ops: &dyn Ops, timing: Timing, ctx: &Ctx) -> Value 
     let mut v = json!({
         "update_id": ctx.update_id, "host": ctx.host, "ok": ok, "from": out.from, "to": ctx.target,
         "resumed": out.resumed, "failed": out.failed, "children_lost": out.children_lost,
+        "phase": "done", "failed_phase": out.failed_phase, "session": ctx.session,
+        "manual_upgrade_command": manual_upgrade_command(),
     });
     if let Some(r) = out.reason {
         v["reason"] = json!(r);
@@ -410,7 +451,7 @@ async fn steps(app: &Arc<App>, ops: &dyn Ops, timing: Timing, ctx: &Ctx) -> Outc
     let mut out = Outcome::default();
     // 1. 下載到 staging、驗版本；現行 binary 不動。
     phase(app, ctx, "downloading", "下載到 staging").await;
-    let install = match ops.install_path() {
+    let install = match ops.install_path().await {
         Ok(p) => p,
         Err(e) => return out.fail("install_path_unsupported", e),
     };
@@ -418,17 +459,14 @@ async fn steps(app: &Arc<App>, ops: &dyn Ops, timing: Timing, ctx: &Ctx) -> Outc
         return out.fail("restart_unsupported", format!("{e}；什麼都沒動，請自己重啟 herdr server"));
     }
     out.from = ops.binary_version(&install).await.ok();
-    let staging = app.data_dir.join(STAGING_DIR).join(&ctx.target).join("herdr");
-    if let Some(dir) = staging.parent() {
-        if let Err(e) = std::fs::create_dir_all(dir) {
-            return out.fail("download_failed", format!("{}: {e}", dir.display()));
-        }
-    }
+    let staging = match ops.staging(app, &ctx.target).await {
+        Ok(p) => p,
+        Err(e) => return out.fail("download_failed", e),
+    };
     if let Err(e) = ops.download(&ctx.target, &staging).await {
         return out.fail("download_failed", e);
     }
     if let Err(e) = ops.verify_download(&ctx.target, &staging).await {
-        let _ = std::fs::remove_file(&staging);
         return out.fail("checksum_mismatch", format!("下載的 binary 沒通過校驗（沒有執行它）：{e}；現行 binary 沒動"));
     }
     match ops.binary_version(&staging).await {
@@ -436,7 +474,6 @@ async fn steps(app: &Arc<App>, ops: &dyn Ops, timing: Timing, ctx: &Ctx) -> Outc
             log_line(app, ctx, "downloading", &format!("staging {} = {v}；現行 {} = {:?}", staging.display(), install.display(), out.from));
         }
         got => {
-            let _ = std::fs::remove_file(&staging);
             return out.fail("version_mismatch", format!("下載的 binary 回報 {got:?}，不是 {}；現行 binary 沒動", ctx.target));
         }
     }
@@ -481,36 +518,43 @@ async fn steps(app: &Arc<App>, ops: &dyn Ops, timing: Timing, ctx: &Ctx) -> Outc
     phase(app, ctx, "stopping", &format!("窗口 {} 開了；要接回 {:?}，子 agent 會沒了 {}", window.opened_at, names, plan.children.len())).await;
 
     // 4. 換 binary → 重啟。
-    // binary 有幾十 MB（硬連結不行就是整份複製）：放到 blocking pool。
-    let swapped = {
-        let (staging, install, from) = (staging.clone(), install.clone(), out.from.clone().unwrap_or_else(|| "unknown".to_string()));
-        tokio::task::spawn_blocking(move || swap_in(&staging, &install, &from)).await.unwrap_or_else(|e| Err(format!("swap_in 沒跑完：{e}")))
-    };
+    // 主機側先備份，再複製到同目錄、原子 rename；傳輸與檔案操作都經 Ops。
+    let from = out.from.clone().unwrap_or_else(|| "unknown".into());
+    let swapped = ops.swap(&staging, &install, &from).await;
+    let mut swap_error = None;
     let backup = match swapped {
         Ok(b) => b,
+        Err(e) if ops.swap_outcome_uncertain() => {
+            // SSH may lose its acknowledgement after rename. Treat the install as changed and restore the known backup.
+            swap_error = Some(e);
+            let name = install.file_name().and_then(|n| n.to_str()).unwrap_or("herdr");
+            install.with_file_name(format!("{name}.bak-{from}"))
+        }
         Err(e) => {
             let _ = crate::runners::herdr_maintenance::close_as(app, &window, "herdr_update", Some("換 binary 失敗，沒有重啟")).await;
             return out.fail("swap_failed", format!("{e}；server 沒有重啟"));
         }
     };
     phase(app, ctx, "restarting", &format!("{} 換成 {}（舊的在 {}），重啟 herdr@{}", install.display(), ctx.target, backup.display(), ctx.session)).await;
-    let restarted = match ops.restart_server(&ctx.session).await {
-        Ok(()) => wait_server(app, &ctx.target, timing).await,
-        Err(e) => Err(e),
+    let restarted = if let Some(e) = &swap_error {
+        Err(e.clone())
+    } else {
+        match ops.restart_server(&ctx.session).await {
+            Ok(()) => wait_server(app, &ctx.host, &ctx.target, timing).await,
+            Err(e) => Err(e),
+        }
     };
     // 5. 失敗就換回 `.bak` 再重啟一次；bot 照樣接回（舊版也比沒有 bot 好）。
     if let Err(e) = restarted {
-        out.reason = Some("restart_failed");
+        out.reason = Some(if swap_error.is_some() { "swap_failed" } else { "restart_failed" });
         phase(app, ctx, "rolling_back", &format!("新版沒起來：{e}；換回 {}", backup.display())).await;
-        let rolled_back = {
-            let (backup, install) = (backup.clone(), install.clone());
-            tokio::task::spawn_blocking(move || restore(&backup, &install)).await.unwrap_or_else(|e| Err(format!("restore 沒跑完：{e}")))
-        };
+        out.failed_phase = Some(if swap_error.is_some() { "stopping" } else { "restarting" }.into());
+        let rolled_back = ops.rollback(&backup, &install).await;
         let rolled = match rolled_back {
             Ok(()) => match ops.restart_server(&ctx.session).await {
                 Ok(()) => match out.from.as_deref() {
-                    Some(from) => wait_server(app, from, timing).await,
-                    None => wait_server_any(app, timing).await,
+                    Some(from) => wait_server(app, &ctx.host, from, timing).await,
+                    None => wait_server_any(app, &ctx.host, timing).await,
                 },
                 Err(e) => Err(e),
             },
@@ -518,14 +562,23 @@ async fn steps(app: &Arc<App>, ops: &dyn Ops, timing: Timing, ctx: &Ctx) -> Outc
         };
         out.detail = Some(match rolled {
             Ok(v) => format!("新版沒起來（{e}）；已換回 {v}"),
-            Err(e2) => format!("新版沒起來（{e}）；換回舊版也沒起來（{e2}），要人工處理 {}", backup.display()),
+            Err(e2) => {
+                out.reason = Some("rollback_failed");
+                out.failed_phase = Some("rolling_back".into());
+                format!("新版沒起來（{e}）；換回舊版也沒起來（{e2}），要人工處理 {}", backup.display())
+            },
         });
     }
 
     // 6. 接回頂層 bot；子 agent 通知母 bot。
     phase(app, ctx, "resuming", &format!("接回 {} 顆", plan.resume.len())).await;
     for r in &plan.resume {
-        match ops.resume(app, &r.bot_id).await {
+        let resumed = if out.reason == Some("rollback_failed") {
+            Err("server 未通過回滾後 ping，沒有嘗試 resume".into())
+        } else {
+            ops.resume(app, &r.bot_id).await
+        };
+        match resumed {
             Ok(run_id) => {
                 log_line(app, ctx, "resuming", &format!("{} → {run_id}", r.name));
                 out.resumed.push(json!({"bot_id": r.bot_id, "name": r.name, "run_id": run_id}));
@@ -536,8 +589,17 @@ async fn steps(app: &Arc<App>, ops: &dyn Ops, timing: Timing, ctx: &Ctx) -> Outc
             }
         }
     }
+    if !out.failed.is_empty() && out.reason.is_none() {
+        out.reason = Some("resume_failed");
+        out.failed_phase = Some("resuming".into());
+        out.detail = Some("binary 已更新，但部分頂層 bot 接回失敗，請檢查 failed".into());
+    }
     for (parent, kids) in group_by_parent(&plan.children) {
-        let text = parent_notice(&ctx.target, out.reason.is_none(), &kids);
+        let mut text = parent_notice(&ctx.target, out.reason.is_none() || out.reason == Some("resume_failed"), &kids);
+        if out.reason == Some("rollback_failed") {
+            text = format!("[系統] herdr 更新與回滾失敗，請先檢查主機 {} 的 server 與 binary。\n失去的子 agent：\n{}", ctx.host,
+                kids.iter().map(|k| format!("- {}：{}", k.name, k.title.as_deref().unwrap_or("（沒有任務標題）"))).collect::<Vec<_>>().join("\n"));
+        }
         let request_id = format!("herdr-update-{}-{parent}", ctx.update_id);
         if let Err(e) = ops.notify_parent(app, &parent, &text, &request_id).await {
             log_line(app, ctx, "resuming", &format!("通知母 bot {parent} 失敗：{e}"));
@@ -552,11 +614,11 @@ async fn steps(app: &Arc<App>, ops: &dyn Ops, timing: Timing, ctx: &Ctx) -> Outc
     out
 }
 
-/// 等 local 的 herdr ping 回來且版本＝`expected`，回讀到的版本。
-async fn wait_server(app: &impl crate::hosts::HostsAccess, expected: &str, timing: Timing) -> Result<String, String> {
+/// 等目標主機的 herdr ping 回來且版本＝`expected`，回讀到的版本。
+async fn wait_server(app: &impl crate::hosts::HostsAccess, host: &str, expected: &str, timing: Timing) -> Result<String, String> {
     let deadline = Instant::now() + timing.restart_max;
     loop {
-        let last = match ping_version(app).await {
+        let last = match ping_version(app, host).await {
             // 版本對了還要 daemon 認得它的 protocol：不認得的話之後每個 RPC 都會壞，bot 一顆也接不回，不如現在換回舊版。
             Ok((v, protocol)) if parse_version(&v) == parse_version(expected) && crate::herdr::protocol_supported(protocol) => return Ok(v),
             Ok((v, protocol)) if parse_version(&v) == parse_version(expected) => {
@@ -573,10 +635,10 @@ async fn wait_server(app: &impl crate::hosts::HostsAccess, expected: &str, timin
 }
 
 /// 舊版讀不到版本時，換回之後只要 server 回來就算。
-async fn wait_server_any(app: &impl crate::hosts::HostsAccess, timing: Timing) -> Result<String, String> {
+async fn wait_server_any(app: &impl crate::hosts::HostsAccess, host: &str, timing: Timing) -> Result<String, String> {
     let deadline = Instant::now() + timing.restart_max;
     loop {
-        match ping_version(app).await {
+        match ping_version(app, host).await {
             Ok((v, _)) => return Ok(v),
             Err(e) if Instant::now() >= deadline => return Err(e),
             Err(_) => tokio::time::sleep(timing.restart_poll).await,
@@ -584,8 +646,8 @@ async fn wait_server_any(app: &impl crate::hosts::HostsAccess, timing: Timing) -
     }
 }
 
-async fn ping_version(app: &impl crate::hosts::HostsAccess) -> Result<(String, u32), String> {
-    let conn = app.hosts().get(crate::config::LOCAL_HOST).await.ok_or("沒有 local 主機")?;
+async fn ping_version(app: &impl crate::hosts::HostsAccess, host: &str) -> Result<(String, u32), String> {
+    let conn = app.hosts().get(host).await.ok_or_else(|| format!("沒有 {host} 主機"))?;
     let pong = conn.client.ping().await.map_err(|e| format!("ping：{e:#}"))?;
     let protocol = pong.protocol;
     Ok((cli_version_string(&pong.version).or_else(|| version_string(&pong.version)).unwrap_or(pong.version), protocol))
@@ -656,7 +718,20 @@ pub fn parent_notice(target: &str, ok: bool, kids: &[LostChild]) -> String {
 
 // ---------------------------------------------------------------- 真的實作
 
-pub struct Real;
+#[path = "herdr_upgrade/real.rs"]
+mod real;
+use real::Real;
+
+fn manual_upgrade_command() -> &'static str {
+    "if command -v brew >/dev/null 2>&1 && brew list --versions herdr >/dev/null 2>&1; then brew upgrade herdr; else curl -fsSL https://herdr.dev/install.sh | sh; fi"
+}
+
+async fn session_for_response(app: &Arc<App>, host: &str) -> String {
+    match app.hosts.get(host).await.and_then(|c| c.cfg.clone()) {
+        Some(cfg) => cfg.herdr_session,
+        None => app.cfg.get().await.server.herdr_session.clone(),
+    }
+}
 
 /// 下載 release asset 的 curl 參數：只准 https（含被導向的下一跳），不接受降到 http／其他協定。
 fn curl_args(url: &str, part: &Path) -> Vec<String> {
@@ -678,6 +753,7 @@ fn published_digest(body: &str, asset: &str) -> Result<String, String> {
         .ok_or_else(|| format!("{asset} 的 digest 不是 sha256：{digest}"))
 }
 
+#[cfg(test)]
 fn sha256_hex(path: &Path) -> Result<String, String> {
     use sha2::{Digest, Sha256};
     let mut f = std::fs::File::open(path).map_err(|e| format!("{}: {e}", path.display()))?;
@@ -686,22 +762,13 @@ fn sha256_hex(path: &Path) -> Result<String, String> {
     Ok(format!("{:x}", h.finalize()))
 }
 
-fn asset_name() -> Option<&'static str> {
-    match (std::env::consts::OS, std::env::consts::ARCH) {
-        ("linux", "x86_64") => Some("herdr-linux-x86_64"),
-        ("linux", "aarch64") => Some("herdr-linux-aarch64"),
-        ("macos", "x86_64") => Some("herdr-macos-x86_64"),
-        ("macos", "aarch64") => Some("herdr-macos-aarch64"),
-        _ => None,
-    }
-}
-
 /// systemd 實例名／launchd label 要原樣可用（同 `herdr_unit`）。
 fn session_ok(s: &str) -> bool {
     !s.is_empty() && !s.starts_with('.') && s.bytes().all(|b| b.is_ascii_alphanumeric() || matches!(b, b'-' | b'_' | b'.'))
 }
 
 /// launchd `program` must resolve to the file being replaced, otherwise kickstart reloads another binary.
+#[cfg(test)]
 fn ensure_launchd_program(output: &str, install: &Path) -> Result<(), String> {
     let program = output
         .lines()
@@ -736,128 +803,6 @@ async fn command_output(mut cmd: tokio::process::Command, timeout: Duration) -> 
     }
 }
 
-impl Ops for Real {
-    /// herdr 自己的安裝器裝在 `~/.local/bin/herdr`（systemd unit 的 PATH 也是它排第一）。symlink 是套件管理器
-    /// （Homebrew 之類）裝的，換它會跟套件管理器打架，不自動換。
-    fn install_path(&self) -> Result<PathBuf, String> {
-        let home = std::env::var_os("HOME").map(PathBuf::from).ok_or("沒有 HOME")?;
-        let candidates = [home.join(".local/bin/herdr"), PathBuf::from("/usr/local/bin/herdr"), PathBuf::from("/opt/homebrew/bin/herdr")];
-        let p = candidates.into_iter().find(|p| p.symlink_metadata().is_ok()).ok_or("找不到 herdr binary")?;
-        let meta = p.symlink_metadata().map_err(|e| e.to_string())?;
-        if !meta.file_type().is_file() {
-            return Err(format!("{} 不是一般檔案（套件管理器裝的？），不自動換", p.display()));
-        }
-        Ok(p)
-    }
-
-    fn download<'a>(&'a self, version: &'a str, dest: &'a Path) -> BoxFuture<'a, Result<(), String>> {
-        Box::pin(async move {
-            let asset = asset_name().ok_or_else(|| format!("{}/{} 沒有對應的 release asset", std::env::consts::OS, std::env::consts::ARCH))?;
-            let url = format!("{RELEASE_BASE}/v{version}/{asset}");
-            let part = dest.with_extension("part");
-            let mut cmd = tokio::process::Command::new("curl");
-            cmd.args(curl_args(&url, &part));
-            command_output(cmd, Duration::from_secs(320)).await.map_err(|e| format!("curl {url}: {e}"))?;
-            set_exec(&part)?;
-            std::fs::rename(&part, dest).map_err(|e| format!("{}: {e}", dest.display()))
-        })
-    }
-
-    /// release 的 sha256 取自 GitHub release API 的 `assets[].digest`（herdr 沒有另外發 checksum 檔）；
-    /// 查不到（限流、asset 沒有 digest）也算沒過：沒有校驗就不執行下載來的東西。
-    fn verify_download<'a>(&'a self, version: &'a str, path: &'a Path) -> BoxFuture<'a, Result<(), String>> {
-        Box::pin(async move {
-            let asset = asset_name().ok_or("沒有對應的 release asset")?;
-            let url = format!("https://api.github.com/repos/herdrdev/herdr/releases/tags/v{version}");
-            let mut cmd = tokio::process::Command::new("curl");
-            cmd.args(["-fsSL", "--proto", "=https", "--proto-redir", "=https", "--max-time", "30", "-H", "Accept: application/vnd.github+json", &url]);
-            let body = command_output(cmd, Duration::from_secs(40)).await.map_err(|e| format!("查不到 {version} 公布的 sha256（{url}）：{e}"))?;
-            let want = published_digest(&body, asset)?;
-            let got = sha256_hex(path)?;
-            if got == want {
-                Ok(())
-            } else {
-                Err(format!("{asset} 的 sha256 是 {got}，release 公布的是 {want}"))
-            }
-        })
-    }
-
-    /// Linux：`herdr@<session>.service` 要是 active（daemon 自己 spawn 的 server `systemctl restart` 會另外起一顆搶 socket）；
-    /// macOS：launchd job 要存在。
-    fn preflight_restart<'a>(&'a self, session: &'a str, install: &'a Path) -> BoxFuture<'a, Result<(), String>> {
-        Box::pin(async move {
-            if !session_ok(session) {
-                return Err(format!("session 名 `{session}` 不能當 systemd/launchd 名稱"));
-            }
-            // SAFETY: getuid 沒有前置條件，也不會失敗。
-            let uid = unsafe { libc::getuid() };
-            if cfg!(target_os = "macos") {
-                let mut cmd = tokio::process::Command::new("launchctl");
-                cmd.args(["print", &format!("gui/{uid}/dev.agents-manager.herdr-{session}")]);
-                let output = command_output(cmd, Duration::from_secs(15))
-                    .await
-                    .map_err(|e| format!("launchd job dev.agents-manager.herdr-{session} 不存在（server 不是 launchd 在管的？）：{e}"))?;
-                ensure_launchd_program(&output, install).map_err(|e| format!("launchd job binary 不符：{e}"))
-            } else {
-                let unit = format!("herdr@{session}.service");
-                let mut cmd = tokio::process::Command::new("systemctl");
-                cmd.args(["--user", "is-active", &unit]);
-                if std::env::var_os("XDG_RUNTIME_DIR").is_none() {
-                    cmd.env("XDG_RUNTIME_DIR", format!("/run/user/{uid}"));
-                }
-                match command_output(cmd, Duration::from_secs(15)).await {
-                    Ok(out) if out.trim() == "active" => Ok(()),
-                    other => Err(format!("{unit} 不是 active（server 不是 systemd 在管的，restart 會另外起一顆）：{other:?}")),
-                }
-            }
-        })
-    }
-
-    fn binary_version<'a>(&'a self, path: &'a Path) -> BoxFuture<'a, Result<String, String>> {
-        Box::pin(async move {
-            let mut cmd = tokio::process::Command::new(path);
-            cmd.arg("--version");
-            let out = command_output(cmd, Duration::from_secs(15)).await?;
-            cli_version_string(&out).ok_or_else(|| format!("看不懂 `{} --version`：{}", path.display(), out.trim()))
-        })
-    }
-
-    fn restart_server<'a>(&'a self, session: &'a str) -> BoxFuture<'a, Result<(), String>> {
-        Box::pin(async move {
-            if !session_ok(session) {
-                return Err(format!("session 名 `{session}` 不能當 systemd/launchd 名稱"));
-            }
-            // SAFETY: getuid 沒有前置條件，也不會失敗。
-            let uid = unsafe { libc::getuid() };
-            let mut cmd;
-            if cfg!(target_os = "macos") {
-                cmd = tokio::process::Command::new("launchctl");
-                cmd.args(["kickstart", "-k", &format!("gui/{uid}/dev.agents-manager.herdr-{session}")]);
-            } else {
-                cmd = tokio::process::Command::new("systemctl");
-                cmd.args(["--user", "restart", &format!("herdr@{session}.service")]);
-                if std::env::var_os("XDG_RUNTIME_DIR").is_none() {
-                    cmd.env("XDG_RUNTIME_DIR", format!("/run/user/{uid}"));
-                }
-            }
-            command_output(cmd, Duration::from_secs(60)).await.map(|_| ())
-        })
-    }
-
-    fn resume<'a>(&'a self, app: &'a Arc<App>, bot_id: &'a str) -> BoxFuture<'a, Result<String, String>> {
-        Box::pin(async move {
-            crate::app_ports_p12::restart_bot_resume_native(app, bot_id).await
-        })
-    }
-
-    /// 母 bot 剛被接回、多半還在啟動：走 AGM 派工那條會排隊的路，失敗再等一下重試（最多約 2 分鐘）。
-    fn notify_parent<'a>(&'a self, app: &'a Arc<App>, parent_bot_id: &'a str, text: &'a str, request_id: &'a str) -> BoxFuture<'a, Result<(), String>> {
-        Box::pin(async move {
-            crate::app_ports_p12::notify_parent_relayed(app, parent_bot_id, text, request_id).await
-        })
-    }
-}
-
 #[cfg(test)]
 mod tests {
     /// 驗版本用的 `--version` 撞上 `ETXTBSY`（binary 剛複製進來、寫入 fd 還被別的 fork 出來的子行程握著）不能算「binary 壞了」：
@@ -876,7 +821,7 @@ mod tests {
             std::thread::sleep(Duration::from_millis(80));
             drop(f);
         });
-        let got = Real.binary_version(&bin).await;
+        let got = Real::local().binary_version(&bin).await;
         release.join().unwrap();
         assert_eq!(got.as_deref(), Ok("0.9.3"));
         let _ = std::fs::remove_dir_all(&dir);
@@ -898,6 +843,8 @@ mod tests {
     /// 假的外部世界：binary 是寫著 `herdr X.Y.Z` 的純文字檔；「重啟」＝讓 mock herdr 的 ping 回報現行檔案寫的版本
     /// （就像 systemd 用現行路徑上的 binary 拉起 server）。
     struct Fake {
+        version_probes: Mutex<Vec<PathBuf>>,
+        fail_at: Mutex<Option<String>>,
         install: PathBuf,
         download_as: String,
         /// 前 N 次重啟起來的不是現行檔案寫的版本（模擬新版起不來／起成別的）。
@@ -924,6 +871,8 @@ mod tests {
             std::fs::write(&install, format!("herdr {installed}\n")).unwrap();
             *env.herdr.pong.lock().unwrap() = (installed.to_string(), 22);
             Arc::new(Fake {
+                version_probes: Mutex::new(vec![]),
+                fail_at: Mutex::new(None),
                 install,
                 download_as: download_as.into(),
                 bad_restarts: AtomicUsize::new(0),
@@ -937,20 +886,39 @@ mod tests {
                 before_restart: Mutex::new(None),
             })
         }
+        fn check(&self, stage: &str) -> Result<(), String> {
+            if self.fail_at.lock().unwrap().as_deref() == Some(stage) { Err(format!("fake {stage} failed")) } else { Ok(()) }
+        }
         fn installed(&self) -> String {
             std::fs::read_to_string(&self.install).unwrap().trim().to_string()
         }
     }
 
     impl Ops for Fake {
-        fn install_path(&self) -> Result<PathBuf, String> {
-            Ok(self.install.clone())
+        fn install_path(&self) -> BoxFuture<'_, Result<PathBuf, String>> {
+            Box::pin(async move { self.check("install")?; Ok(self.install.clone()) })
+        }
+        fn staging<'a>(&'a self, app: &'a Arc<App>, version: &'a str) -> BoxFuture<'a, Result<PathBuf, String>> {
+            Box::pin(async move {
+                self.check("staging")?;
+                let p = app.data_dir.join(STAGING_DIR).join(version).join("herdr");
+                std::fs::create_dir_all(p.parent().unwrap()).map_err(|e| e.to_string())?;
+                Ok(p)
+            })
+        }
+        fn swap<'a>(&'a self, staging: &'a Path, install: &'a Path, from: &'a str) -> BoxFuture<'a, Result<PathBuf, String>> {
+            Box::pin(async move { self.check("swap")?; let backup = swap_in(staging, install, from)?; self.check("swap_ack")?; Ok(backup) })
+        }
+        fn swap_outcome_uncertain(&self) -> bool { self.fail_at.lock().unwrap().as_deref() == Some("swap_ack") }
+        fn rollback<'a>(&'a self, backup: &'a Path, install: &'a Path) -> BoxFuture<'a, Result<(), String>> {
+            Box::pin(async move { self.check("rollback")?; restore(backup, install) })
         }
         fn download<'a>(&'a self, _v: &'a str, dest: &'a Path) -> BoxFuture<'a, Result<(), String>> {
-            Box::pin(async move { std::fs::write(dest, format!("herdr {}\n", self.download_as)).map_err(|e| e.to_string()) })
+            Box::pin(async move { self.check("download")?; std::fs::write(dest, format!("herdr {}\n", self.download_as)).map_err(|e| e.to_string()) })
         }
         fn binary_version<'a>(&'a self, path: &'a Path) -> BoxFuture<'a, Result<String, String>> {
             Box::pin(async move {
+                self.version_probes.lock().unwrap().push(path.to_path_buf());
                 let s = std::fs::read_to_string(path).map_err(|e| e.to_string())?;
                 cli_version_string(&s).ok_or(s)
             })
@@ -974,6 +942,10 @@ mod tests {
                     hook.await;
                 }
                 self.restarts.lock().unwrap().push(session.to_string());
+                self.check("restart")?;
+                if self.fail_at.lock().unwrap().as_deref() == Some("restart_once") && self.restarts.lock().unwrap().len() == 1 {
+                    return Err("fake restart command failed".into());
+                }
                 let v = if self.bad_restarts.load(Ordering::SeqCst) > 0 {
                     self.bad_restarts.fetch_sub(1, Ordering::SeqCst);
                     "0.0.1".to_string()
@@ -988,6 +960,7 @@ mod tests {
         }
         fn resume<'a>(&'a self, _app: &'a Arc<App>, bot_id: &'a str) -> BoxFuture<'a, Result<String, String>> {
             Box::pin(async move {
+                self.check("resume")?;
                 self.resumed.lock().unwrap().push(bot_id.to_string());
                 Ok(format!("run-{bot_id}"))
             })
@@ -1144,6 +1117,8 @@ mod tests {
     async fn only_the_destructive_phases_close_the_gate() {
         let env = tt::env().await;
         let _held = hold_slot_for_test(&env.app);
+        assert!(is_running(&env.app, "local"));
+        assert!(!is_running(&env.app, "remote"));
         for (phase, closed) in [("downloading", false), ("waiting_idle", false), ("stopping", true), ("restarting", true), ("rolling_back", true), ("resuming", false)] {
             set_phase(&env.app, "held", phase);
             assert_eq!(gate(&env.app).is_some(), closed, "{phase}");
@@ -1242,6 +1217,7 @@ mod tests {
         let (_, done) = go(&env, &fake, "0.9.3").await;
         assert_eq!((done["ok"].clone(), done["reason"].clone()), (json!(false), json!("checksum_mismatch")), "{done}");
         assert_eq!(fake.installed(), "herdr 0.9.1");
+        assert_eq!(*fake.version_probes.lock().unwrap(), vec![fake.install.clone()], "校驗失敗不執行 staging --version");
         assert!(!fake.install.with_file_name("herdr.bak-0.9.1").exists());
         assert!(fake.restarts.lock().unwrap().is_empty() && fake.resumed.lock().unwrap().is_empty());
         assert!(!window_open(&env.app).await);
@@ -1357,7 +1333,7 @@ mod tests {
             remote_path: String::new(), shared_session: shared,
         };
         app.hosts.insert_remote_for_test(cfg("build1", false)).await;
-        assert!(matches!(call(HeaderMap::new(), "build1", Some("0.9.3"), Some("0.9.3")).await, LcError::Conflict(v) if v["reason"] == "unsupported_host"));
+        assert!(matches!(call(HeaderMap::new(), "build1", Some("0.9.2"), Some("0.9.3")).await, LcError::Conflict(v) if v["reason"] == "stale_target"));
         app.hosts.insert_remote_for_test(cfg("m4p", true)).await;
         let m4p = cfg("m4p", true);
         app.cfg
@@ -1374,6 +1350,137 @@ mod tests {
         assert!(matches!(&gone, LcError::Conflict(v) if v["reason"] == "stale_target" && v["current_target"].is_null()), "{gone:?}");
         assert!(running_list(app).is_empty(), "被拒的不佔位");
         assert!(fake.restarts.lock().unwrap().is_empty());
+    }
+
+    async fn remote_env(env: &tt::Env, host: &str) -> tt::MockHerdr {
+        let cfg = crate::config::HostCfg {
+            name: host.into(), ssh: "never-connect.invalid".into(), ssh_port: 22, ssh_opts: vec![],
+            herdr_session: "remote-owner".into(), remote_path: String::new(), shared_session: false,
+        };
+        let socket = env.dir.join("remote-herdr.sock");
+        let remote = tt::MockHerdr::start(socket.clone());
+        let client = crate::herdr::HerdrClient::new(socket);
+        env.app.hosts.insert_remote_with_client_for_test(cfg, client).await;
+        sqlx::query("UPDATE projects SET host = ? WHERE id = ?").bind(host).bind(&env.project_id).execute(&env.app.db).await.unwrap();
+        remote
+    }
+
+    fn remote_fake(env: &tt::Env, remote: &tt::MockHerdr, download: &str) -> Arc<Fake> {
+        let mut fake = Fake::new(env, "0.9.1", download);
+        *remote.pong.lock().unwrap() = ("0.9.1".into(), 22);
+        Arc::get_mut(&mut fake).unwrap().pong = remote.pong.clone();
+        fake
+    }
+
+    async fn go_host(env: &tt::Env, fake: &Arc<Fake>, host: &str) -> (Value, Value, Vec<String>) {
+        let mut rx = env.app.subscribe();
+        let accepted = start(&env.app, &HeaderMap::new(), host, Some("0.9.3"), Some("0.9.3".into()), fake.clone(), fast()).await.unwrap();
+        let mut phases = vec![];
+        let done = tokio::time::timeout(Duration::from_secs(30), async {
+            loop {
+                let ev = rx.recv().await.unwrap();
+                if ev.kind == "herdr_update_progress" {
+                    assert_eq!(ev.data["host"], host);
+                    assert_eq!(ev.data["session"], "remote-owner");
+                    phases.push(ev.data["phase"].as_str().unwrap().to_string());
+                }
+                if ev.kind == "herdr_update_done" { return ev.data; }
+            }
+        }).await.unwrap();
+        (accepted, done, phases)
+    }
+
+    #[tokio::test]
+    async fn remote_success_runs_all_phases_and_ignores_busy_bots_on_other_hosts() {
+        let env = tt::env().await;
+        let remote = remote_env(&env, "remote-test").await;
+        let bot = top(&env, "remote-owner", "idle").await;
+        let kid = child_of(&env, &bot, "remote-child", "remote task").await;
+        let other = crate::db::ulid();
+        sqlx::query("INSERT INTO projects (id, path, label, host, created_at) VALUES (?, '/tmp/other-lx1752', 'other', 'local', ?)")
+            .bind(&other).bind(crate::db::now()).execute(&env.app.db).await.unwrap();
+        let local = tt::claude_bot(&env.app, &other, "busy-local").await;
+        let run = tt::fake_run(&env.app, &local.id).await;
+        sqlx::query("UPDATE runs SET agent_status = 'working' WHERE id = ?").bind(run).execute(&env.app.db).await.unwrap();
+        let fake = remote_fake(&env, &remote, "0.9.3");
+        let (accepted, done, phases) = go_host(&env, &fake, "remote-test").await;
+        assert_eq!(accepted["session"], "remote-owner");
+        assert_eq!(accepted["will_resume"].as_array().unwrap().len(), 1);
+        assert_eq!(accepted["children_lost"][0]["bot_id"], kid);
+        assert_eq!(done["ok"], true, "{done}");
+        assert_eq!(done["host"], "remote-test");
+        assert_eq!(done["phase"], "done");
+        assert!(done["failed_phase"].is_null());
+        assert!(done["manual_upgrade_command"].as_str().unwrap().contains("brew upgrade herdr"));
+        assert_eq!(phases, ["downloading", "waiting_idle", "stopping", "restarting", "resuming"]);
+        assert_eq!(*fake.restarts.lock().unwrap(), ["remote-owner"]);
+        assert_eq!(*fake.resumed.lock().unwrap(), [bot]);
+        assert_eq!(fake.notified.lock().unwrap().len(), 1);
+        assert!(!window_open(&env.app).await);
+    }
+
+    #[tokio::test]
+    async fn remote_failure_matrix_preserves_or_restores_binary_and_closes_window() {
+        for (failure, reason, phase, restarts, resumed) in [
+            ("install", "install_path_unsupported", "downloading", 0, 0),
+            ("preflight", "restart_unsupported", "downloading", 0, 0),
+            ("download", "download_failed", "downloading", 0, 0),
+            ("staging", "download_failed", "downloading", 0, 0),
+            ("checksum", "checksum_mismatch", "downloading", 0, 0),
+            ("version", "version_mismatch", "downloading", 0, 0),
+            ("busy", "busy_timeout", "waiting_idle", 0, 0),
+            ("maintenance", "maintenance_busy", "waiting_idle", 0, 0),
+            ("swap", "swap_failed", "stopping", 0, 0),
+            ("swap_ack", "swap_failed", "stopping", 1, 1),
+            ("wrong_version", "restart_failed", "restarting", 2, 1),
+            ("protocol", "restart_failed", "restarting", 2, 1),
+            ("restart", "rollback_failed", "rolling_back", 2, 0),
+            ("restart_once", "restart_failed", "restarting", 2, 1),
+            ("rollback_ping", "rollback_failed", "rolling_back", 2, 0),
+            ("rollback", "rollback_failed", "rolling_back", 1, 0),
+            ("resume", "resume_failed", "resuming", 1, 0),
+        ] {
+            let env = tt::env().await;
+            let remote = remote_env(&env, "remote-test").await;
+            let bot = top(&env, "target-bot", if failure == "busy" { "working" } else { "idle" }).await;
+            let fake = remote_fake(&env, &remote, if failure == "version" { "0.9.2" } else { "0.9.3" });
+            let mut existing_window = None;
+            match failure {
+                "preflight" => *fake.preflight_err.lock().unwrap() = Some("job program mismatch".into()),
+                "checksum" => { fake.bad_checksum.store(1, Ordering::SeqCst); }
+                "wrong_version" | "rollback" => { fake.bad_restarts.store(1, Ordering::SeqCst); }
+                "rollback_ping" => { fake.bad_restarts.store(2, Ordering::SeqCst); }
+                "protocol" => { fake.new_protocol.store(99, Ordering::SeqCst); }
+                "maintenance" => {
+                    existing_window = crate::runners::herdr_maintenance::open_as(&env.app, 30, "test", "already held").await.unwrap();
+                }
+                _ => {}
+            }
+            if ["install", "download", "staging", "swap", "swap_ack", "restart", "restart_once", "rollback", "resume"].contains(&failure) {
+                *fake.fail_at.lock().unwrap() = Some(failure.into());
+            }
+            let (_, done, phases) = go_host(&env, &fake, "remote-test").await;
+            assert_eq!(done["reason"], reason, "{failure}: {done}");
+            assert_eq!(done["failed_phase"], phase, "{failure}: {done}");
+            if failure == "checksum" {
+                assert_eq!(*fake.version_probes.lock().unwrap(), vec![fake.install.clone()], "不執行未通過校驗的遠端 staging");
+            }
+            assert_eq!(fake.restarts.lock().unwrap().len(), restarts, "{failure}");
+            assert_eq!(fake.resumed.lock().unwrap().len(), resumed, "{failure}");
+            let installed = if ["rollback", "resume"].contains(&failure) { "herdr 0.9.3" } else { "herdr 0.9.1" };
+            assert_eq!(fake.installed(), installed, "{failure}");
+            if ["swap_ack", "wrong_version", "protocol", "restart", "restart_once", "rollback", "rollback_ping"].contains(&failure) {
+                assert!(phases.iter().any(|p| p == "rolling_back"), "{failure}");
+            }
+            if resumed == 1 { assert_eq!(fake.resumed.lock().unwrap()[0], bot); }
+            if let Some(w) = existing_window {
+                assert!(window_open(&env.app).await, "must not close someone else's window");
+                crate::runners::herdr_maintenance::close_as(&env.app, &w, "test", None).await.unwrap();
+            }
+            assert!(!window_open(&env.app).await, "{failure}");
+            assert!(!env.app.data_dir.join(STAGING_DIR).join("0.9.3").exists(), "{failure}: staging cleaned");
+            assert!(running_list(&env.app).is_empty());
+        }
     }
 
     #[test]

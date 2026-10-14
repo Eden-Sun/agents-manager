@@ -431,7 +431,7 @@ daemon 重啟前開始、正在接手確認的那筆也在，`recovered:true`、
 
 `codex_reset`：第三方 [資料：codex-reset.com](https://codex-reset.com/) 的全域公告快照，首次成功讀取前為 `null`；舊 daemon 可省略。格式 `{source,checked_at,source_updated_at,last_reset_at,upcoming,latest,notice}`，時間皆 RFC3339；`latest`／`notice` 為 `{id,at,text,url}` 或 `null`。`upcoming` 只表示 forecast 的非空 `official_signal`，不由機率推導；個人額度與重置時間不因此修改。`notice` 保留最近一批新消息的最新一則，客戶端依 `id` 去重。daemon 啟動即讀取，其後每 30 分鐘刷新；失敗保留前次快照，客戶端以 `checked_at` 判斷過期。
 
-`herdr_updates`：進行中的 herdr 一鍵更新（§12.7b）`[{"update_id","host","target_version","phase","started_at"}]`，沒有就是 `[]`。只在記憶體：
+`herdr_updates`：進行中的 herdr 一鍵更新（§12.7b）`[{"update_id","host","session","target_version","phase","started_at","manual_upgrade_command"}]`，沒有就是 `[]`。只在記憶體：
 daemon 重啟後就是空的（那次不會再推 `herdr_update_done`，前端照樣清掉手上那一筆）。
 
 ```json
@@ -2285,32 +2285,38 @@ WS（`update_id`／`host`／`kind`／`target_version`／`log_path` 每則都帶�
 `{"target_version":"0.9.3"}`。只由使用者在 header 確認框送出。下載驗版 → 等閒置 → 維護窗口裡重啟這顆 daemon 的 herdr server → 頂層 bot `resume_native` 接回（SPEC §6.9b）。
 
 ```json
-202 {"update_id":"01M4…","host":"local","target_version":"0.9.3","started":true,
+202 {"update_id":"01M4…","host":"remote1","session":"agents-manager","target_version":"0.9.3","started":true,
+     "phase":"downloading","manual_upgrade_command":"if command -v brew >/dev/null 2>&1 && brew list --versions herdr >/dev/null 2>&1; then brew upgrade herdr; else curl -fsSL https://herdr.dev/install.sh | sh; fi",
      "will_resume":[{"bot_id":"01M2…","name":"agents-manager-kd61te"}],
      "children_lost":[{"bot_id":"01M3…","name":"agents-manager-kd61te-fix","parent_bot_id":"01M2…"}]}
 ```
 `will_resume`／`children_lost` 是按下去那一刻的預估（真的接回的是窗口開了之後那一刻的名單，見 `herdr_update_done`）。
 - 403 `{"reason":"ui_only"}`：帶 `X-AM-Bot-Id` 或 `X-AM-Bot-Token`。400：沒帶或看不懂 `target_version`。404：不認得的主機。
-- 409 `{"reason":"shared_session","host","message"}`：那台設了 `shared_session`。409 `{"reason":"unsupported_host","host","message"}`：不是 `local`（這版不做遠端）。
+- 409 `{"reason":"shared_session","host","message","manual_upgrade_command"}`：那台設了 `shared_session`；確認沒有其他 daemon 共用後，到主機設定關閉共用 session 再試。本機與非 shared_session 遠端皆支援，不再回 `unsupported_host`。
 - 409 `{"reason":"stale_target","host","target_version","current_target","message"}`：不等於 `GET /api/upstream-updates` 裡 `kind:"herdr"` 這台落後時的目標（`null`＝沒有待升級的新版）。
 - 409 `{"reason":"herdr_update_in_progress","update_id","host","message"}`：這顆 daemon 已經在跑一個。
-- 409 `{"reason":"cli_update_in_progress","update_id","host","kind","message"}`：這台正在安裝 claude／codex CLI（安裝完會重啟 bot），先等它結束。反過來，herdr 更新進行中 `POST /hosts/local/cli-update` 回 409 `herdr_update_in_progress`（不留 `running` 那一列）。
+- 409 `{"reason":"cli_update_in_progress","update_id","host","kind","message"}`：這台正在安裝 claude／codex CLI（安裝完會重啟 bot），先等它結束。反過來，同一台 herdr 更新進行中 `POST /hosts/{name}/cli-update` 回 409 `herdr_update_in_progress`（不留 `running` 那一列）。
 
 意外重啟偵測沿用同一條本機 global event stream：只在曾連上後斷線、重連時確認所有 active run 的舊 pane 都已消失或沒有 agent occupant，且沒有更新維護窗口時恢復；pane id 雖仍存在但已成空 shell 也算遺失。recovery 先於 reconnect reconcile，並持有同一把 host reconcile lock，避免 run 在接回前被標記 exited；以既有 `restart_bot_with(resume_native)` 接回頂層 bot，流程會關閉舊空 pane/tab，child pane 留給 reconcile 退休。30 分鐘內最多執行三批接回，批次間隔 2 秒、10 秒、30 秒；超限後 `herdr_recovery_done.limited=true`，等待人工處理或新的 30 分鐘窗口。此流程不新增 HTTP 路由。
 
-WS（每則帶 `update_id`／`host`／`target_version`）：`herdr_update_progress` 的 `phase` 依序 `downloading` → `waiting_idle` → `stopping` → `restarting` →（失敗時 `rolling_back`）→ `resuming`。
+
+WS（每則帶 `update_id`／`host`／`session`／`target_version`／`manual_upgrade_command`；完成事件目標版欄位沿用 `to`）：`herdr_update_progress` 的 `phase` 依序 `downloading` → `waiting_idle` → `stopping` → `restarting` →（失敗時 `rolling_back`）→ `resuming`。
 
 ```json
-{"update_id":"01M4…","host":"local","ok":true,"from":"0.9.1","to":"0.9.3",
- "resumed":[{"bot_id":"01M2…","name":"…","run_id":"01M5…"}],"failed":[{"bot_id":"…","name":"…","error":"…"}],
+{"update_id":"01M4…","host":"remote1","session":"agents-manager","phase":"done","failed_phase":null,"ok":true,"from":"0.9.1","to":"0.9.3",
+ "manual_upgrade_command":"if command -v brew >/dev/null 2>&1 && brew list --versions herdr >/dev/null 2>&1; then brew upgrade herdr; else curl -fsSL https://herdr.dev/install.sh | sh; fi",
+ "resumed":[{"bot_id":"01M2…","name":"…","run_id":"01M5…"}],"failed":[],
  "children_lost":[{"bot_id":"…","name":"…","parent_bot_id":"…"}]}
-{"update_id":"01M4…","host":"local","ok":false,"from":"0.9.1","to":"0.9.3","reason":"busy_timeout","detail":"等了 1800s 仍有 bot 在忙：x (working)；什麼都沒動",
+{"update_id":"01M4…","host":"remote1","session":"agents-manager","phase":"done","failed_phase":"waiting_idle","ok":false,"from":"0.9.1","to":"0.9.3","manual_upgrade_command":"if command -v brew >/dev/null 2>&1 && brew list --versions herdr >/dev/null 2>&1; then brew upgrade herdr; else curl -fsSL https://herdr.dev/install.sh | sh; fi","reason":"busy_timeout","detail":"等了 1800s 仍有 bot 在忙：x (working)；什麼都沒動",
  "resumed":[],"failed":[],"children_lost":[]}
 ```
+- `host` 是目標主機名稱；`session` 本機採 `server.herdr_session`，遠端採該 host 的 `herdr_session`。只重啟此 session；同機其他 session 不重啟，共用 binary 下次自行重啟才生效。
+- `phase`：202 為 `downloading`，進度／state 為目前階段，done 為 `done`；done 的 `failed_phase` 成功為 null，失敗為最初失敗階段，回滾失敗則為 `rolling_back`。`reason`／`detail` 只在失敗的 done 出現。`manual_upgrade_command` 在 202、state、進度、done 與 shared_session 拒絕都提供，為**在 `host` 那台執行**的 binary 安裝命令（Homebrew 已裝 herdr 用 `brew upgrade herdr`，其他用官方 installer）；不包含停止 bot、服務重啟或接回，daemon 不執行它。
 - `reason`（`ok:false` 才有，另帶給人看的 `detail`）：沒動到 server 的——`install_path_unsupported`（現行 binary 是 symlink 或找不到）、`download_failed`、
-  `restart_unsupported`（換 binary 之前的檢查沒過：Linux `herdr@<session>.service` 不是 active、macOS 沒有 launchd job，或 launchd 的 `program` 不是 updater 要替換的 binary——無法保證 restart 載入新版；請自己整理服務路徑後重試）、`checksum_mismatch`（下載的檔對不上 GitHub release API 公布的 sha256，或查不到公布值；**沒有執行它**）、`version_mismatch`（下載的 `--version` 不是目標）、`busy_timeout`（30 分鐘沒等到頂層 bot 全閒置）、`maintenance_busy`（別人開著 herdr 維護窗口）、
-  `swap_failed`（換 binary 失敗，server 沒重啟）；動過 server 的——`restart_failed`（新版 2 分鐘內沒以目標版本回來，或回來了但 protocol 是這顆 daemon 不認得的；已換回 `.bak` 再重啟；bot 照樣接回，`resumed`／`failed` 照填）。
-- 每一步附加到 `<data_dir>/herdr-update.log`；舊 binary 留在同目錄 `herdr.bak-<舊版>`。
+  `restart_unsupported`（換 binary 之前的檢查沒過：Linux `herdr@<session>.service` 不是 active、macOS 沒有 launchd job，或 Linux `ExecStart`／launchd `program` 解析後不是 updater 要替換的 binary——無法保證 restart 載入新版；請自己整理服務路徑後重試）、`checksum_mismatch`（下載的檔對不上 GitHub release API 公布的 sha256，或查不到公布值；**沒有執行它**）、`version_mismatch`（下載的 `--version` 不是目標）、`busy_timeout`（30 分鐘沒等到頂層 bot 全閒置）、`maintenance_busy`（別人開著 herdr 維護窗口）、
+  `swap_failed`（換 binary 失敗；確定未換檔時 server 不重啟，SSH 成功回覆遺失等結果不確定時用已知 `.bak` 回滾並重啟、ping 成功才接回）；動過 server 的——`restart_failed`（新版 2 分鐘內沒以目標版本回來，或回來了但 protocol 是這顆 daemon 不認得的；已換回 `.bak` 再重啟；bot 照樣接回，`resumed`／`failed` 照填）、`rollback_failed`（換回 `.bak`、再次重啟或舊版 ping 失敗；不嘗試 resume，未接回者列在 `failed`）、`resume_failed`（新版 server 已正常起來，部分頂層 bot 接回失敗；binary 保持新版，版本快照仍修正）。SSH 連線、命令與逾時錯誤依發生步驟歸入以上 reason，`detail` 保留主機與實際錯誤。
+- staging／下載／sha256／`--version`／換檔／回滾／服務管理器皆由可替換操作介面執行；遠端經該 host 的 SSH，本機與遠端共用流程。遠端 staging 在那台 `$HOME/.config/agents-manager[/instances/<slug>]/herdr-staging/<ver>/herdr`，依那台 `uname` 選 asset，sha256 驗過才執行。只等這顆 daemon 在該 host 的頂層 bot，其他主機忙碌不阻擋。
+- 每一步附加到 daemon 本機 `<data_dir>/herdr-update.log`；舊 binary 留在目標主機 binary 同目錄 `herdr.bak-<舊版>`。symlink 安裝一律 `install_path_unsupported`，不改套件管理器 binary。
 
 ### 12.7c herdr integration 更新總覽 `GET /api/integration-updates`、`POST /api/hosts/{name}/herdr-integration`（SPEC §6.9c，issue #1772）
 

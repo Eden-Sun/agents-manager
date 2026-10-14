@@ -602,7 +602,7 @@ pub async fn start(
     }
     // herdr 一鍵更新在跑（server 要重啟、所有 pane 會消失）：同一台不能同時裝 CLI 再 scoped 重啟 bot。
     // 先寫自己的列、再看那邊（herdr_upgrade 反過來：先佔位、再看這邊的列）；被擋就把剛寫的列拿掉，不然這台從此被自己的殘列卡住。
-    if host == crate::config::LOCAL_HOST && crate::herdr_upgrade::is_running(app) {
+    if crate::herdr_upgrade::is_running(app, host) {
         let _ = sqlx::query("DELETE FROM cli_updates WHERE id = ?").bind(&update_id).execute(&app.db).await;
         return Err(LcError::conflict(
             "herdr_update_in_progress",
@@ -2858,6 +2858,20 @@ mod tests {
         assert!(matches!(&err, LcError::Conflict(v) if v["reason"] == "herdr_update_in_progress"), "{err:?}");
         assert_eq!(fake.installs(), 0);
         let rows: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM cli_updates WHERE host = 'local'").fetch_one(&env.app.db).await.unwrap();
+        assert_eq!(rows, 0, "被擋的不留列");
+    }
+
+    #[tokio::test]
+    async fn a_remote_herdr_update_blocks_a_cli_install_on_the_same_remote_host() {
+        let env = crate::testing::env().await;
+        let host = "herdr-upgrade-remote";
+        configure_codex_target(&env, host, "0.159.0", "0.159.0").await;
+        let _held = crate::herdr_upgrade::hold_slot_for_host_for_test(&env.app, host);
+        let fake = Fake::new(&["codex-cli 0.158.0", "codex-cli 0.159.0"], Ok("ok"));
+        let err = start(&env.app, &HeaderMap::new(), host, Some("codex"), Some("0.159.0"), fake.clone()).await.unwrap_err();
+        assert!(matches!(&err, LcError::Conflict(v) if v["reason"] == "herdr_update_in_progress" && v["host"] == host), "{err:?}");
+        assert_eq!(fake.installs(), 0);
+        let rows: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM cli_updates WHERE host = ?").bind(host).fetch_one(&env.app.db).await.unwrap();
         assert_eq!(rows, 0, "被擋的不留列");
     }
 

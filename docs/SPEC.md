@@ -2786,20 +2786,21 @@ claude 下載新版後只能靠重啟套用（`runs.update_notice`，§3.1）。
 
 **擋新派送**（#893）：開維護窗口後、複查閒置**之前**先把 phase 設成 `stopping`——`stopping`／`restarting`／`rolling_back` 三個階段，`MaintenancePort::window_held`（`lifecycle::prompt`、排隊 flush 的入場閘門，AGM 派工遇到 409 就留在佇列）回 409 `herdr_updating`（`sent:false`、`retryable:true`），不送任何字也不建 turn；複查發現又忙起來就退回 `waiting_idle`、閘門重開。`resuming` 起恢復。
 header 的 herdr 徽章確認後 `POST /api/hosts/{name}/herdr-update`（API §12.7b，`daemon/src/herdr_upgrade.rs`）。不用 live handoff：
-換 binary → 在維護窗口（§6.5.2）裡重啟這顆 daemon 的 herdr server → 頂層 bot `resume_native` 接回。**只做 local**；遠端（尤其 `shared_session`，
-別顆 daemon 也在用那台的 herdr）一律 409。同一顆 daemon 同時只跑一個，進行中的狀態只在記憶體（`GET /api/state` 的 `herdr_updates`）。**跟 CLI 安裝（cli-update，API §12.7a）互斥**：同一台有 `running` 的 cli-update 列就 409 `cli_update_in_progress`；herdr 更新在跑時 `POST /hosts/local/cli-update` 回 409 `herdr_update_in_progress`（兩邊都是先佔自己的位、再看對方，同時開的最壞結果是互相退讓）。更新後不需要另外重寫 shim：shim 內容來自 daemon binary（開機與遠端連線時 `shim_refresh`），binary 路徑不變，接回的 bot 啟動時也會重裝自己的 shim。
+換 binary → 在維護窗口（§6.5.2）裡重啟這顆 daemon 的 herdr server → 頂層 bot `resume_native` 接回。本機與非 `shared_session` 遠端共用同一份階段流程及可替換操作介面；遠端檔案、下載、校驗與服務管理器動作全部經該主機 `HostConn` 的 SSH 執行，ping 也用該主機 client。`shared_session=true` 仍回 409，提示確認沒有其他 daemon 後到主機設定關閉共用 session；本流程不更改設定。同一顆 daemon 同時只跑一個，進行中的狀態只在記憶體（`GET /api/state` 的 `herdr_updates`）。**跟 CLI 安裝（cli-update，API §12.7a）互斥**：同一台有 `running` 的 cli-update 列就 409 `cli_update_in_progress`；同一台 herdr 更新在跑時 `POST /hosts/{name}/cli-update` 回 409 `herdr_update_in_progress`（兩邊都是先佔自己的位、再看對方，同時開的最壞結果是互相退讓）。更新後不需要另外重寫 shim：shim 內容來自 daemon binary（開機與遠端連線時 `shim_refresh`），binary 路徑不變，接回的 bot 啟動時也會重裝自己的 shim。
 
-1. `downloading`：先做重啟前的檢查（Linux `systemctl --user is-active herdr@<session>.service` 要是 active、macOS `launchctl print` 要有 job，而且 `program` 必須解析到即將替換的 binary；server 不是它們在管的，`restart` 會另外起一顆搶 socket，或 job 會重啟另一份 binary，
-   不通就 `restart_unsupported`，連下載都不做）。release asset（`herdr-{linux,macos}-{x86_64,aarch64}`，curl 只准 https、含導向）下載到 `<data_dir>/herdr-staging/<ver>/herdr`，**先驗 sha256**（GitHub release API `assets[].digest`；herdr 沒另外發 checksum 檔；
-   對不上或查不到公布值＝`checksum_mismatch`，檔案刪掉、**沒有執行它**），再 `--version` 必須等於目標，否則 `version_mismatch`，現行 binary 不動。現行 binary 只認 herdr 安裝器那種一般檔案（`~/.local/bin/herdr` 優先）；symlink（套件管理器裝的）不自動換，`install_path_unsupported`。
-2. `waiting_idle`：頂層 bot 沒有 `working`／`blocked`／回合在飛才往下（子 agent 反正會沒，不等），最多 30 分鐘；逾時 `busy_timeout`，窗口都沒開、什麼都沒動。
+1. `downloading`：先做重啟前的檢查（Linux `systemctl --user is-active herdr@<session>.service` 要是 active，且 `systemctl --user show --property=ExecStart --value` 的 program 要解析到即將替換的 binary；macOS `launchctl print` 要有 job，而且 `program` 必須解析到即將替換的 binary；server 不是它們在管的，`restart` 會另外起一顆搶 socket，或 job 會重啟另一份 binary，
+   不通就 `restart_unsupported`，連下載都不做）。release asset（`herdr-{linux,macos}-{x86_64,aarch64}`，curl 只准 https、含導向）依目標主機 `uname` 選 asset，本機下載到 `<data_dir>/herdr-staging/<ver>/herdr`，遠端下載到那台 `$HOME/.config/agents-manager[/instances/<slug>]/herdr-staging/<ver>/herdr`（這顆 daemon 的遠端 root）；成功與失敗都由同一操作介面嘗試清掉該版 staging（SSH 中斷等 cleanup 失敗記在 log）。**先驗 sha256**（GitHub release API `assets[].digest`；herdr 沒另外發 checksum 檔；
+   對不上或查不到公布值＝`checksum_mismatch`，檔案刪掉、**沒有執行它**），再 `--version` 必須等於目標，否則 `version_mismatch`，現行 binary 不動。現行 binary 只認 herdr 安裝器那種一般檔案（`~/.local/bin/herdr` 優先）；symlink（套件管理器裝的，包括 Homebrew）不自動換，`install_path_unsupported`。API 給 `host` 與 `manual_upgrade_command`，由使用者在該台執行安裝命令；daemon 不執行 `brew upgrade`。
+2. `waiting_idle`：只等這顆 daemon 管理、屬於目標 host 的頂層 bot，其他 host 的忙碌 bot 不阻擋；頂層 bot 沒有 `working`／`blocked`／回合在飛才往下（子 agent 反正會沒，不等），最多 30 分鐘；逾時 `busy_timeout`，窗口都沒開、什麼都沒動。
 3. `stopping`：以 `herdr_update` 名義開維護窗口（已有人開著＝`maintenance_busy`，不搶），窗口裡再看一次閒置（剛好有人送出就關窗口回去等），記下要接回的頂層 bot（總管排最後）與會失去的子 agent。
 4. 換 binary：新檔先複製到同目錄再 rename 蓋過去（原子），舊的留 `herdr.bak-<舊版>`。`restarting`：Linux `systemctl --user restart herdr@<session>.service`、
-   macOS `launchctl kickstart -k gui/<uid>/dev.agents-manager.herdr-<session>`，只動這顆 daemon 的 session。
-5. 等 ping 回來且 server 版本＝目標、protocol 是這顆 daemon 認得的（`herdr::SUPPORTED_PROTOCOLS`；不認得的話之後每個 RPC 都壞，bot 一顆也接不回）（最多 2 分鐘）。不是就 `rolling_back`：`.bak` 換回、再重啟一次、等舊版回來，`reason:"restart_failed"`，bot 照樣接回。
+   macOS `launchctl kickstart -k gui/<uid>/dev.agents-manager.herdr-<session>`，本機採 `server.herdr_session`、遠端採該 host 的 `herdr_session`，只動這個 session。同機其他 session 不重啟；共用 binary 已換新，其他 session 下次自行重啟才載入新版。SSH 若在換檔後失去成功回覆，視為可能已換檔，嘗試用已知 `.bak` 回滾，不把它當成完全沒動。
+5. 等 ping 回來且 server 版本＝目標、protocol 是這顆 daemon 認得的（`herdr::SUPPORTED_PROTOCOLS`；不認得的話之後每個 RPC 都壞，bot 一顆也接不回）（最多 2 分鐘）。不是就 `rolling_back`：`.bak` 換回、再重啟一次、等舊版回來，回滾成功則 `reason:"restart_failed"`（換檔回覆不確定則 `swap_failed`），bot 照樣接回；回滾、再次重啟或舊版 ping 失敗則 `rollback_failed`，不嘗試 resume，`failed` 列出未接回的 bot，需人工處理。
 6. `resuming`：記下的頂層 bot 逐顆 `restart_bot_with(resume_native)`。子 agent 的 pane 是母 bot 開的，daemon 重建不了：給每個母 bot 一則
-   daemon 來源的訊息（走 AGM 派工那條會排隊的路），列出失去的子 agent 名與原任務標題（run 的 `agent_title`），由母 bot 決定要不要重開。
+   daemon 來源的訊息（走 AGM 派工那條會排隊的路），列出失去的子 agent 名與原任務標題（run 的 `agent_title`），由母 bot 決定要不要重開。若 binary/server 已更新成功，但部分 resume 失敗，回 `resume_failed`，保留新版並更新上游版本快照，`failed` 逐顆列出原因。
 7. 關窗口（沒接回的子 agent 由 §6.5.2 第 3 條照原規則退休），推 `herdr_update_done`；成功時順手修正 `upstream-updates` 快照與 `hosts[].herdr`。
+
+202、進度與 `GET /api/state.herdr_updates` 帶 `host`、`session`、`phase`、`manual_upgrade_command`；完成事件 `phase:"done"`，`failed_phase` 指出失敗階段（成功為 null），`reason`／`detail` 指出失敗原因（API §12.7b）。手動命令只安裝 binary，不代替閒置、重啟與接回步驟。
 
 本機 global event stream 曾建立後中斷，重連成功時若確認所有 active run 的舊 pane 都已消失或沒有 agent occupant，且沒有 herdr 更新或維護窗口持有重連，視為非預期 server 重啟；server 重啟後仍存在、但已是空 shell 的 pane 也算遺失。recovery 先於 reconnect reconcile，並持有同一把 host reconcile lock，避免 run 在接回前被標記 exited。沿用本節的頂層 `resume_native` 路徑接回原 native session；既有 restart 流程會關閉舊空 pane/tab，child pane 不重建，交給 reconcile 退休。恢復批次最多每 30 分鐘三次，間隔依序 2、10、30 秒；超限即停止自動接回。一次確認的重啟會推 WS `herdr_recovery_done` 供網頁側欄提示，並以既有 `ops_alert` 寫入 AGM inbox；子 agent 遺失、接回失敗或熔斷都列入摘要。重連時重查 panes 與維護狀態，避免和更新流程或已自行恢復的 server 競爭。
 
