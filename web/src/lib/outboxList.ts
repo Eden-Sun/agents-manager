@@ -3,7 +3,7 @@ import type { OutboxFile } from '../api'
 import { ApiError } from '../api/types'
 import type { Turn } from '../api/types'
 
-/** `18 KB` / `1.1 MB`：一行要看得懂，個位數才給小數。跟 MemBadge 的 `humanBytes` 不同單位詞：
+/** `18 KB` / `1.1 MB` / `1.0 GB`：一行要看得懂，個位數才給小數。跟 MemBadge 的 `humanBytes` 不同單位詞：
  *  那邊是一格寬度的 RAM（`1.4G`），這邊是檔案大小，使用者看的是「下載會多大」。 */
 export function fileSize(bytes: number): string {
   if (!Number.isFinite(bytes) || bytes <= 0) return '0 B'
@@ -15,7 +15,10 @@ export function fileSize(bytes: number): string {
   const kb = bytes / 1024
   if (kb < 1) return `${Math.round(bytes)} B`
   if (Math.round(kb) < 1024) return `${num(kb)} KB`
-  return `${num(bytes / 1024 ** 2)} MB`
+  const mb = bytes / 1024 ** 2
+  // MB 四捨五入到 1024 也改寫成 GB（1023.6 MB 不寫 1024 MB），同 humanBytes 的 M→G。
+  if (Math.round(mb) < 1024) return `${num(mb)} MB`
+  return `${num(bytes / 1024 ** 3)} GB`
 }
 
 /**

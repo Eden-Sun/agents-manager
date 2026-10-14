@@ -161,3 +161,13 @@ test('fileSize 邊界：進位後不出現「1024 KB」「10.0 KB」「10.0 MB�
   assert.equal(fileSize(1.1 * 1024 ** 2), '1.1 MB')
   assert.equal(fileSize(0), '0 B')
 })
+
+test('fileSize 進位到 1 GB 要寫成 GB，不印「1024 MB」「10199 MB」（#1751）', () => {
+  assert.equal(fileSize(1024 ** 2 * 1023.6), '1.0 GB')
+  assert.equal(fileSize(1073741823), '1.0 GB', '1 GiB 減 1 byte 不能寫成 1024 MB')
+  assert.equal(fileSize(1024 ** 3), '1.0 GB')
+  assert.equal(fileSize(1024 ** 3 * 1.5), '1.5 GB')
+  assert.equal(fileSize(1024 ** 3 * 10.7), '11 GB', '≥10 的 GB 寫整數，不寫 10199 MB')
+  assert.equal(fileSize(1024 ** 3 * 9.96), '10 GB', '9.96 進位到 10，不寫 10.0 GB')
+  assert.equal(fileSize(1024 ** 2 * 1023), '1023 MB', 'MB 還沒進位就照舊')
+})
