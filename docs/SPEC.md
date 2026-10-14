@@ -2589,7 +2589,8 @@ pt-hub = ["~/project/pt/CLAUDE.md", "~/project/pt/AGENTS.md"]      # 多份照�
   「Claude 閒置壓縮」（boundary 後跟著 `Compacted while idle…`）、「Claude 自動壓縮（context 快滿）」（trigger=auto）、「手動 /compact」（trigger=manual），附 tokens 前→後；讀不到就寫「Claude 壓縮了對話」。
   15 分鐘內有熱壓收據的手動壓縮是熱壓本身，已有「主力熱壓」說明，不再寫；兩分鐘內已有壓縮說明也不重寫（收件匣重播）。
   那筆 external 回合若沒有 prompt、沒有任何訊息就直接收成 `completed`，說明掛在它底下；有 prompt 的回合（自動壓縮發生在使用者回合中間）照常等 Stop。
-  終端備援先到時，畫面只剩壓縮提示（每一行都含 `compacted`）就不存成終端擷取泡泡；stuck sweep 收這種空回合也不寫「沒有偵測到結束」（#1758）。
+  使用者自己打的 `/compact`（終端 UserPromptSubmit 或網頁送的，只有那則 user 訊息、還沒回覆）也是壓縮自己的回合，一樣收掉，沒帶 `agm_compact` 時至少標「手動 /compact」（#1762）。
+  終端備援先到時，畫面只剩壓縮提示（至少一行含 `compacted`，其餘是壓縮後列出的 `Referenced file …`／`Read … lines)`／`Loaded …`）就不存成終端擷取泡泡；stuck sweep 收這種空回合也不寫「沒有偵測到結束」（#1758）。
 - **巡邏**：`supervisor::controller` 的控制迴圈每拍呼叫 `primary_keep_warm::tick`，自己節流成 30 秒一次、丟背景跑（測試版不跑）。
 - **顯示**：`last_api_at` 因此是真實年齡（網頁 tooltip 的「上次活動」與數字照樣上數）；run JSON 另帶 `cache_kept_warm_at`（API.md）＝最近一次成功保溫回合讓 cache 實際變熱的時間（熱壓不算；比最近一次熱壓早的保溫也不算，熱壓後是 `null`、等新活動後的新保溫），
   網頁（`cacheState`）用 `max(last_api_at, cache_kept_warm_at)` 算顏色與剩餘，所以 60 分不會誤判變涼；另帶 `keep_warm_skip`、`keep_warm_replied_at`。

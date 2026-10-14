@@ -5327,6 +5327,50 @@ mod external_claim_tests {
         assert_eq!(last, "手動 /compact：900 tokens → 摘要");
     }
 
+    /// #1762：使用者在終端打 `/compact`（UserPromptSubmit 記成一則 user 訊息、沒有 Stop）。遠端 hook.sh 舊版沒帶 `agm_compact`：
+    /// 照樣認出是手動 `/compact`、把那個回合收掉（終端備援不會再把「Compacted / Referenced file …」存成回覆）。
+    #[tokio::test]
+    async fn a_typed_compact_command_turn_is_closed_and_noted_as_manual() {
+        let env = tt::env().await;
+        let app = env.app.clone();
+        let bot = tt::claude_bot(&app, &env.project_id, "cmp-manual").await;
+        let run_id = tt::fake_run(&app, &bot.id).await;
+        let conv = db::conversation_id(&app.db, &bot.id).await.unwrap();
+        let turn_id = db::ulid();
+        sqlx::query("INSERT INTO turns (id, conversation_id, run_id, origin, status, delivery, created_at) VALUES (?,?,?,'external','in_flight','ok',?)")
+            .bind(&turn_id)
+            .bind(&conv)
+            .bind(&run_id)
+            .bind(db::now())
+            .execute(&app.db)
+            .await
+            .unwrap();
+        lifecycle::insert_message(&app, &conv, Some(&turn_id), "user", "/compact", "hook", false, None).await.unwrap();
+        let payload = json!({"hook_event_name": "SessionStart", "source": "compact", "session_id": "s-m", "transcript_path": "/Users/m4p/.claude/projects/x/s.jsonl"});
+        process(&app, &HookBody { bot_id: bot.id.clone(), provider: "claude".into(), payload, received_at: None, truncated: false, run_id: None }).await.unwrap();
+
+        let status: String = sqlx::query_scalar("SELECT status FROM turns WHERE id=?").bind(&turn_id).fetch_one(&app.db).await.unwrap();
+        assert_eq!(status, "completed");
+        let notes: Vec<String> = sqlx::query_scalar("SELECT content FROM messages WHERE turn_id=? AND role='system'").bind(&turn_id).fetch_all(&app.db).await.unwrap();
+        assert_eq!(notes, vec!["手動 /compact。".to_string()]);
+
+        // 使用者回合中間的自動壓縮（user 訊息不是 /compact）：回合不動。
+        let busy = db::ulid();
+        sqlx::query("INSERT INTO turns (id, conversation_id, run_id, origin, status, delivery, created_at) VALUES (?,?,?,'web','in_flight','ok',?)")
+            .bind(&busy)
+            .bind(&conv)
+            .bind(&run_id)
+            .bind(db::now())
+            .execute(&app.db)
+            .await
+            .unwrap();
+        lifecycle::insert_message(&app, &conv, Some(&busy), "user", "修 bug", "web", false, None).await.unwrap();
+        let payload = json!({"hook_event_name": "SessionStart", "source": "compact", "session_id": "s-m", "transcript_path": "/Users/m4p/.claude/projects/x/s.jsonl"});
+        process(&app, &HookBody { bot_id: bot.id.clone(), provider: "claude".into(), payload, received_at: None, truncated: false, run_id: None }).await.unwrap();
+        let status: String = sqlx::query_scalar("SELECT status FROM turns WHERE id=?").bind(&busy).fetch_one(&app.db).await.unwrap();
+        assert_eq!(status, "in_flight");
+    }
+
     /// 本機 bot：transcript 在這台，daemon 自己讀 `origin.kind`，不需要 hook.sh 帶。
     #[tokio::test]
     async fn a_local_transcript_decides_whether_the_stop_stores_a_resent_prompt() {
