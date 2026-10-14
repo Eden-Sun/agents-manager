@@ -8,6 +8,7 @@ use crate::config::{expand_home, LOCAL_HOST};
 use crate::herdr::HerdrClient;
 use crate::quota::{Quota, Window};
 use anyhow::{anyhow, Result};
+use base64::Engine as _;
 use chrono::{DateTime, Datelike, Local, NaiveDate, TimeZone};
 use serde_json::Value;
 use std::collections::BTreeMap;
@@ -352,6 +353,10 @@ impl Drop for Probe {
 pub const AUTH_BEGIN: &str = "AM_AUTH_BEGIN";
 pub const AUTH_END: &str = "AM_AUTH_END";
 pub const USAGE_DONE: &str = "AM_USAGE_DONE=";
+pub const USAGE_REPORT_BEGIN: &str = "AM_BEGIN";
+pub const USAGE_REPORT_END: &str = "AM_END";
+
+const USAGE_REPORT_FRAMER_PY: &str = "import base64,json,sys\ndata=sys.stdin.read()\nfor line in data.splitlines():\n try: value=json.loads(line)\n except (json.JSONDecodeError,ValueError): continue\n report=value.get('usage_report') if isinstance(value,dict) else None\n limits=report.get('rate_limits',{}).get('limits',[]) if isinstance(report,dict) and isinstance(report.get('rate_limits'),dict) else []\n def usable(row):\n  if not isinstance(row,dict) or type(row.get('percent')) not in (int,float): return False\n  kind=row.get('kind')\n  if kind in ('session','weekly_all'): return True\n  model=row.get('scope',{}).get('model',{}).get('display_name','') if isinstance(row.get('scope'),dict) and isinstance(row.get('scope',{}).get('model'),dict) else ''\n  return kind=='weekly_scoped' and model.split()[0:1]==['Fable']\n if isinstance(limits,list) and any(usable(row) for row in limits):\n  raw=json.dumps({'usage_report':report},ensure_ascii=True,separators=(',',':')).encode('ascii')\n  encoded=base64.b64encode(raw).decode('ascii')\n  sys.stdout.write('AM_BEGIN\\n'+'\\n'.join(encoded[i:i+8] for i in range(0,len(encoded),8))+'\\nAM_END\\n')\n  sys.exit(0)\nsys.exit(1)";
 
 #[derive(Debug, Default)]
 pub struct ProbeOutcome {
@@ -388,13 +393,16 @@ pub fn probe_command(bin: &str, env: &BTreeMap<String, String>, with_usage: bool
     let b = crate::hosts::sh_quote(bin);
     let auth = crate::tools::CLAUDE_LOGIN_ARGS.join(" ");
     // `/usage` 先要結構化版本（claude 2.1.273 起：`usage_report` 帶 kind／percent／ISO resets_at／scope）。
-    // JSON 行很長，先明確切成短行，避免終端／pane capture 對單行折行或截斷；解析端會接回片段。
-    // `grep -m1` 沒抓到（舊 CLI 不認 `--output-format`、或還沒有這個欄位）才跑純文字版給 [`parse_claude_usage`]。
+    // stdout 先完整讀入 shell 變數，避免消費端提前關閉 pipe 讓 Claude 收 SIGPIPE；Python 只輸出
+    // usage_report 欄位的 ASCII base64 短行 frame，pane 寬度與 UTF-8 折行不再影響 JSON 位元組。
+    // 沒有有效 report（包含舊 CLI 不認旗標）才另跑純文字版給 [`parse_claude_usage`]。
     // 只要登入答案的 target（[`Target::login_only`]）不跑 `/usage`：那一格的額度由裸 target 負責，多跑一次是純成本。
     let usage = if with_usage {
+        let framer = crate::hosts::sh_quote(USAGE_REPORT_FRAMER_PY);
         format!(
-            "{pfx}{b} -p '/usage' --output-format stream-json --verbose </dev/null 2>/dev/null | grep -m1 usage_report | fold -w 120 \
-               || {pfx}{b} -p '/usage' </dev/null 2>&1; rc=$?; "
+            "usage_raw=$({pfx}{b} -p '/usage' --output-format stream-json --verbose </dev/null 2>/dev/null); \\
+             if printf '%s' \"$usage_raw\" | python3 -c {framer} 2>/dev/null; then rc=0; \\
+             else {pfx}{b} -p '/usage' </dev/null 2>&1; rc=$?; fi; unset usage_raw; "
         )
     } else {
         "rc=0; ".to_string()
@@ -452,35 +460,60 @@ pub fn parse_claude_usage_report(segment: &str, account: Option<&str>) -> Option
     })
 }
 
-/// Parse complete stream-json objects, including a record split into short hard-wrapped pane
-/// lines by [`probe_command`]. Newlines are removed only while rebuilding a record; ordinary text
-/// remains line-oriented for [`parse_claude_usage`].
-fn captured_json_values(segment: &str) -> Vec<Value> {
-    let lines: Vec<&str> = segment.lines().collect();
+/// Decode explicitly framed base64 records. Legacy one-line stream-json is still accepted, while
+/// arbitrary pane chunks are never trimmed and concatenated as if they were raw JSON bytes.
+pub fn captured_json_values(segment: &str) -> Vec<Value> {
     let mut values = Vec::new();
-    for i in 0..lines.len() {
-        let Some(start) = lines[i].find('{') else { continue };
-        let mut candidate = lines[i][start..].trim().to_string();
-        if let Ok(value) = serde_json::from_str::<Value>(&candidate) {
-            values.push(value);
-            continue;
+    let mut frame = String::new();
+    let mut in_frame = false;
+    let mut invalid_frame = false;
+    for line in segment.lines() {
+        let mut rest = line;
+        if !in_frame {
+            let Some(start) = rest.find(USAGE_REPORT_BEGIN) else { continue };
+            rest = &rest[start + USAGE_REPORT_BEGIN.len()..];
+            in_frame = true;
+            frame.clear();
+            invalid_frame = false;
         }
-        for line in lines.iter().skip(i + 1).take(256) {
-            if line.contains(USAGE_DONE) { break; }
-            candidate.push_str(line.trim());
-            if candidate.len() > 64 * 1024 { break; }
-            if let Ok(value) = serde_json::from_str::<Value>(&candidate) {
-                values.push(value);
-                break;
+        if in_frame {
+            if let Some(end) = rest.find(USAGE_REPORT_END) {
+                append_frame_bytes(&mut frame, &mut invalid_frame, &rest[..end]);
+                if !invalid_frame {
+                    if let Ok(bytes) = base64::engine::general_purpose::STANDARD.decode(&frame) {
+                        if let Ok(value) = serde_json::from_slice::<Value>(&bytes) {
+                            values.push(value);
+                        }
+                    }
+                }
+                in_frame = false;
+                frame.clear();
+            } else {
+                append_frame_bytes(&mut frame, &mut invalid_frame, rest);
             }
         }
     }
+    // Compatibility with already captured stream-json rows; only complete individual rows count.
+    values.extend(segment.lines().filter_map(|line| {
+        let start = line.find('{')?;
+        serde_json::from_str::<Value>(line[start..].trim()).ok()
+    }));
     values
 }
 
+fn append_frame_bytes(frame: &mut String, invalid: &mut bool, chunk: &str) {
+    for c in chunk.chars() {
+        if c.is_ascii_alphanumeric() || matches!(c, '+' | '/' | '=') {
+            frame.push(c);
+        } else if !c.is_ascii_whitespace() {
+            *invalid = true;
+        }
+    }
+}
+
 /// Searched from the **end**: a retyped command leaves two runs in scrollback; only the last finished.
-/// 沒有 `DONE` 標記（pipeline 印完結構化的 `usage_report` 卻沒結束，#1744）時，只有那一行完整的 JSON 算答案：
-/// 它一次寫完，解得開就不會少桶子；文字版寫到一半就停，仍不算（`an_unfinished_run_has_no_answer_yet`）。
+/// 沒有 `DONE` 標記（結構化輸出完成後行程卻沒結束，#1744）時，完整 frame 或舊版完整 JSON 行仍算答案；
+/// 文字版寫到一半就停，仍不算（`an_unfinished_run_has_no_answer_yet`）。
 pub fn split_probe_output(out: &str) -> Option<(String, String)> {
     let (head, finished) = match out.rfind(USAGE_DONE) {
         Some(done) => (&out[..done], true),

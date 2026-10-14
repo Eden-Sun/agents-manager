@@ -1,6 +1,7 @@
 
     use super::*;
     use serde_json::json;
+    use base64::Engine as _;
     use crate::runners::quota_claude::{force_probe, refresh_claude};
 
     /// #408：假 herdr 上跑 [`run_probe_pane`]；回傳 herdr 此刻還開著的 workspace label（Drop 的關閉是 spawn 出去的，等它一下）。
@@ -215,7 +216,7 @@ AM_USAGE_DONE=0
         assert!(parse_claude_usage_report(&row("Fabled"), None).is_none());
     }
 
-    /// 舊 CLI 沒有這個欄位（`grep` 沒抓到 → 跑純文字版）：JSON 解析回 None，交給原本的文字解析。
+    /// 舊 CLI 沒有這個欄位（無可用 report → 跑純文字版）：JSON 解析回 None，交給原本的文字解析。
     #[test]
     fn a_plain_text_usage_screen_is_left_to_the_text_parser() {
         let screen = "Current session: 30% used · resets Sep 16 at 7:50am
@@ -227,34 +228,55 @@ AM_USAGE_DONE=0
         assert!(parse_claude_usage_report("{\"usage_report\":{\"rate_limits\":{\"limi", None).is_none());
     }
 
-    /// Pane 收到的舊失敗輸出是合法 JSON，但頂層欄位在長行擷取時成了 `usage_repor`；
-    /// structured parser 因而拒讀。`local_command_source` 仍有權威 `/usage` 文字可用，
-    /// contribution 百分比沒有 `Current session/week` 標題，不得被當成額度。
+    /// daemon 曾收到的純文字失敗輸出；reset 時間與 CLI 顯示一致，contribution 百分比
+    /// 沒有 `Current session/week` 標題，不得被當成額度。
     #[test]
-    fn damaged_usage_report_capture_falls_back_to_its_command_text() {
-        let captured = include_str!("fixtures/claude-usage-repor-capture.jsonl");
-        assert!(parse_claude_usage_report(captured, Some("cc1")).is_none(), "舊 parser 的欄位缺字情形");
+    fn plain_usage_capture_keeps_real_cli_utc_resets_and_rejects_contribution_pct() {
+        let captured = include_str!("fixtures/claude-usage-text-capture.txt");
+        assert!(parse_claude_usage_report(captured, Some("cc1")).is_none());
         let q = parse_claude_usage(captured, at("2026-10-14T12:00:00+00:00"), Some("cc1")).expect("local command text");
         let five = q.five_hour.unwrap();
         let seven = q.seven_day.unwrap();
         assert_eq!(five.used_pct, 95.0);
-        assert_eq!(five.resets_at.as_deref(), Some("2026-10-14T18:00:00.000Z"));
+        assert_eq!(five.resets_at.as_deref(), Some("2026-10-14T15:00:00.000Z"));
         assert_eq!(seven.used_pct, 81.0);
-        assert_eq!(seven.resets_at.as_deref(), Some("2026-10-19T23:59:00.000Z"));
+        assert_eq!(seven.resets_at.as_deref(), Some("2026-10-15T03:00:00.000Z"));
         assert!(q.fable.is_none(), "contribution 行的 83% 不能形成 quota bucket");
         assert_eq!(q.account.as_deref(), Some("cc1"));
     }
 
-    /// 短行輸出再由 parser 接回完整 JSON，保留結構化數字與 UTC 重置時間。
+    /// 任意窄的 ASCII base64 chunk 可無損接回 JSON bytes，包含字串空白及 Unicode。
     #[test]
-    fn a_folded_usage_report_keeps_percentages_and_utc_resets() {
-        let line = r#"{"usage_report":{"rate_limits":{"limits":[{"kind":"session","percent":95,"resets_at":"2026-10-14T18:00:00Z"},{"kind":"weekly_all","percent":81,"resets_at":"2026-10-19T23:59:00Z"}]}}}"#;
-        let folded = line.as_bytes().chunks(120).map(std::str::from_utf8).collect::<std::result::Result<Vec<_>, _>>().unwrap().join("\n");
-        let q = parse_claude_usage_report(&folded, Some("cc1")).expect("folded structured report");
+    fn framed_usage_report_roundtrips_arbitrary_chunks_without_losing_json_bytes() {
+        let value = json!({"usage_report":{"rate_limits":{"limits":[{"kind":"session","percent":95,"resets_at":"2026-10-14T15:00:00Z"},{"kind":"weekly_all","percent":81,"resets_at":"2026-10-15T03:00:00Z"}],"note":"spaces  stay 雪 🌐"}}});
+        let bytes = serde_json::to_vec(&value).unwrap();
+        let encoded = base64::engine::general_purpose::STANDARD.encode(&bytes);
+        let widths = [1, 3, 5, 7, 11, 13];
+        let mut chunks = Vec::new();
+        let (mut pos, mut wi) = (0, 0);
+        while pos < encoded.len() {
+            let end = (pos + widths[wi % widths.len()]).min(encoded.len());
+            chunks.push(&encoded[pos..end]);
+            pos = end;
+            wi += 1;
+        }
+        let framed = format!("{USAGE_REPORT_BEGIN}\n{}\n{USAGE_REPORT_END}", chunks.join("\n"));
+        let decoded = captured_json_values(&framed);
+        assert_eq!(decoded, vec![value]);
+        let q = parse_claude_usage_report(&framed, Some("cc1")).expect("framed structured report");
         assert_eq!(q.five_hour.as_ref().unwrap().used_pct, 95.0);
-        assert_eq!(q.five_hour.as_ref().unwrap().resets_at.as_deref(), Some("2026-10-14T18:00:00.000Z"));
+        assert_eq!(q.five_hour.as_ref().unwrap().resets_at.as_deref(), Some("2026-10-14T15:00:00.000Z"));
         assert_eq!(q.seven_day.as_ref().unwrap().used_pct, 81.0);
-        assert_eq!(q.seven_day.as_ref().unwrap().resets_at.as_deref(), Some("2026-10-19T23:59:00.000Z"));
+        assert_eq!(q.seven_day.as_ref().unwrap().resets_at.as_deref(), Some("2026-10-15T03:00:00.000Z"));
+    }
+
+    #[test]
+    fn json_local_command_text_fallback_parses_quota_without_misspelled_report_key() {
+        let value = json!({"type":"assistant","local_command_source":"<local-command-stdout>Current session: 95% used · resets Oct 14 at 3pm (UTC)\nCurrent week (all models): 81% used · resets Oct 15 at 3am (UTC)\n83% of your usage was at >150k context</local-command-stdout>"});
+        let q = parse_claude_usage(&value.to_string(), at("2026-10-14T12:00:00+00:00"), Some("cc1")).unwrap();
+        assert_eq!(q.five_hour.as_ref().unwrap().used_pct, 95.0);
+        assert_eq!(q.seven_day.as_ref().unwrap().used_pct, 81.0);
+        assert!(q.fable.is_none());
     }
 
     #[test]
@@ -426,7 +448,57 @@ AM_USAGE_DONE=0
         assert!(!cmd.contains("bad name"), "{cmd}");
         assert!(cmd.contains("auth status --json"), "{cmd}");
         assert!(cmd.contains("-p '/usage'"), "{cmd}");
+        assert!(!cmd.contains("grep -m1") && !cmd.contains("fold -w"), "{cmd}");
         assert!(!cmd.contains(AUTH_BEGIN) && !cmd.contains(AUTH_END) && !cmd.contains(USAGE_DONE), "{cmd}");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn structured_probe_only_falls_back_when_no_report_and_preserves_cli_exit() {
+        use std::os::unix::fs::PermissionsExt;
+
+        fn run_mock(structured: &str, structured_rc: &str, plain: &str, plain_rc: &str) -> (String, Vec<String>) {
+            let dir = crate::testing::track(std::env::temp_dir().join(format!("am-qc-cli-{}", crate::db::ulid())));
+            std::fs::create_dir_all(&dir).unwrap();
+            let script = dir.join("claude");
+            let calls = dir.join("calls");
+            let structured_path = dir.join("structured");
+            let plain_path = dir.join("plain");
+            std::fs::write(&structured_path, structured).unwrap();
+            std::fs::write(&plain_path, plain).unwrap();
+            std::fs::write(&script, "#!/bin/sh\nprintf '%s\\n' \"$*\" >> \"$MOCK_CALLS\"\nif [ \"$1\" = auth ]; then printf '{\"loggedIn\":true}\\n'; exit 0; fi\nif [ \"$3\" = --output-format ]; then cat \"$MOCK_STRUCTURED\"; exit \"$MOCK_STRUCTURED_RC\"; fi\ncat \"$MOCK_PLAIN\"; exit \"$MOCK_PLAIN_RC\"\n").unwrap();
+            std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+            let command = probe_command(script.to_str().unwrap(), &BTreeMap::new(), true);
+            let output = std::process::Command::new("/bin/sh")
+                .arg("-c").arg(command)
+                .env("MOCK_CALLS", &calls)
+                .env("MOCK_STRUCTURED", &structured_path)
+                .env("MOCK_STRUCTURED_RC", structured_rc)
+                .env("MOCK_PLAIN", &plain_path)
+                .env("MOCK_PLAIN_RC", plain_rc)
+                .output().unwrap();
+            assert!(output.status.success());
+            let output = String::from_utf8(output.stdout).unwrap();
+            let calls = std::fs::read_to_string(calls).unwrap().lines().map(str::to_owned).collect();
+            std::fs::remove_dir_all(dir).unwrap();
+            (output, calls)
+        }
+
+        let report = r#"{"usage":"CLI body must not reach the pane; details details details","usage_report":{"rate_limits":{"limits":[{"kind":"session","percent":95,"resets_at":"2026-10-14T15:00:00Z"},{"kind":"weekly_all","percent":81,"resets_at":"2026-10-15T03:00:00Z"}]},"note":"spaces  stay 雪 🌐"}}"#;
+        let (out, calls) = run_mock(report, "0", "plain should not run", "0");
+        assert!(out.contains(USAGE_REPORT_BEGIN) && out.contains(USAGE_REPORT_END), "{out}");
+        let frame = out.split_once(&format!("{USAGE_REPORT_BEGIN}\n")).unwrap().1.split_once(USAGE_REPORT_END).unwrap().0;
+        assert!(frame.lines().all(|line| line.len() <= 8 && line.is_ascii()), "{frame}");
+        assert!(!out.contains("CLI body must not reach the pane"), "only usage_report should be emitted: {out}");
+        assert!(out.contains("AM_USAGE_DONE=0"), "{out}");
+        assert_eq!(calls.len(), 2, "structured report should avoid retry: {calls:?}");
+
+        let (out, calls) = run_mock("not JSON and no report\n", "7", "Current session: 95% used · resets Oct 14 at 3pm (UTC)\n", "9");
+        assert!(out.contains("Current session: 95% used"), "{out}");
+        assert!(out.contains("AM_USAGE_DONE=9"), "fallback command exit must be reported: {out}");
+        assert_eq!(calls.len(), 3, "missing report should run fallback once: {calls:?}");
+        assert!(calls[1].contains("--output-format stream-json"), "{calls:?}");
+        assert_eq!(calls[2], "-p /usage");
     }
 
     /// #80：quota probe 只問登入狀態跟 `/usage`，從不用工具，MCP server 起得慢或掛掉不該拖慢探測、
