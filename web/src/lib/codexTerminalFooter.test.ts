@@ -2,7 +2,9 @@ import test from 'node:test'
 import assert from 'node:assert/strict'
 import fixture from '../testing/fixtures/codex-1664-terminal.json'
 import fixture1671 from '../testing/fixtures/codex-1671-terminal.json'
-import { splitCodexTerminalFooter } from './codexTerminalFooter'
+import { parseCodexModelLine, splitCodexTerminalFooter } from './codexTerminalFooter'
+import context1755 from '../testing/fixtures/codex-1755-terminal-context.json'
+import shortcuts1755 from '../testing/fixtures/codex-1755-terminal-shortcuts.json'
 
 test('真實 pane、獨立 warning 行及 Context/weekly 新段均只切出尾端 footer', () => {
   const model = 'GPT-6-Astra high · ~/project/hermes-agents/projects/rt · Context 72% used · weekly 74% left'
@@ -50,4 +52,22 @@ test('只有 `? for shortcuts` 這行（沒有模型列、沒有 warning）不�
   // 空 footer 會讓 StatusLineBar 畫出一條空的狀態列、並蓋掉 status_line 的文字。
   const text = '• 正文\n  ? for shortcuts'
   assert.deepEqual(splitCodexTerminalFooter(text), { body: text, footer: null })
+})
+
+test('#1755 模型列拆成欄位：模型、effort、fast、目錄、context、額度，其餘是主題', () => {
+  const ctx = splitCodexTerminalFooter(context1755.text).footer!.modelLine!
+  assert.deepEqual(parseCodexModelLine(ctx), {
+    model: 'GPT-6.1-Sol', effort: 'low', fast: false, cwd: '~/project/hermes-agents/projects/rt',
+    contextUsedPct: 18, limits: [{ label: 'weekly', leftPct: 78 }], title: null,
+  })
+  const topic = splitCodexTerminalFooter(shortcuts1755.text).footer!.modelLine!
+  assert.deepEqual(parseCodexModelLine(topic), {
+    model: 'GPT-6.1-Sol', effort: 'low', fast: false, cwd: '~/project/agm-lx1685',
+    contextUsedPct: null, limits: [], title: '接手並完成 issue #1685',
+  })
+  assert.deepEqual(parseCodexModelLine('GPT-6.1-Sol high fast · ~/repo · Context 5% used · 5h 96% left · weekly 48% …'), {
+    model: 'GPT-6.1-Sol', effort: 'high', fast: true, cwd: '~/repo', contextUsedPct: 5,
+    limits: [{ label: '5h', leftPct: 96 }, { label: 'weekly', leftPct: 48 }], title: null,
+  })
+  assert.equal(parseCodexModelLine('GPT-6-Astra default · ~/x · 主題 · 含 · 分隔').title, '主題 · 含 · 分隔')
 })

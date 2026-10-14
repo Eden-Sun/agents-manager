@@ -834,9 +834,10 @@
     text-overflow: ellipsis;
   }
 
-  /* 帳號欄 `display: none` 仍是 `.sl-item + .sl-item` 的兄弟，context 開頭會多一條分隔線。 */
+  /* 帳號／目錄欄 `display: none` 仍是 `.sl-item + .sl-item` 的兄弟，context 開頭會多一條分隔線。 */
 
-  .context-bar .sl-item.sl-account:not(.sl-warn) + .sl-item {
+  .context-bar .sl-item.sl-account:not(.sl-warn) + .sl-item,
+  .context-bar .sl-item[data-k='目錄'] + .sl-item {
     padding-left: 0;
     border-left: 0;
     margin-left: 0;

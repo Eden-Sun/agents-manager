@@ -55,19 +55,39 @@ for (const phone of [false, true]) {
   }
 }
 
-test('對話分頁沒掛終端：狀態列用 run.status_line 畫出 codex 的模型列，不重複 context 百分比', async () => {
+/** claude 那條：帳號／目錄、context、快取、版本；每個欄位是 `.sl-item`，不塞原文字串。 */
+function items() {
+  return [...document.querySelectorAll('.statusline-bar > .sl-item')].map((e) => ({
+    k: e.getAttribute('data-k') ?? '', v: e.querySelector('.sl-v')?.textContent ?? '',
+  }))
+}
+
+test('對話分頁沒掛終端：codex 跟 claude 同一種欄位（目錄、context 百分比），不塞 footer 原文，也沒有孤零零的 context 字樣', async () => {
   useStore.setState({ bots: [{ id: 'b1', kind: 'codex' } as Bot] })
   await mount(<StatusLineBar botId="b1" status={status} text={CONTEXT_LINE} />)
-  const bar = document.querySelector('.statusline-bar')?.textContent ?? ''
-  assert.ok(bar.includes(CONTEXT_LINE), bar)
-  assert.equal(bar.match(/18%/g)?.length, 1, `context 只畫一次：${bar}`)
-  assert.equal(bar.match(/projects\/rt/g)?.length, 1, `目錄只畫一次：${bar}`)
+  const bar = document.querySelector('.statusline-bar')!
+  assert.equal(bar.querySelector('.statusline-text'), null, '不畫原文字串')
+  assert.ok(!(bar.textContent ?? '').includes('weekly'), bar.textContent ?? '')
+  const got = items()
+  assert.deepEqual(got.slice(0, 2).map((x) => x.k), ['目錄', 'context'])
+  assert.equal(got[0].v, '~/project/hermes-agents/projects/rt', '目錄用 pane 上那個寫法')
+  assert.ok(got[1].v.startsWith('18%'), got[1].v)
+  for (const it of got) assert.ok(it.v.trim() !== '', `${it.k} 不能是空值（孤零零的標籤）`)
+  assert.equal(bar.getAttribute('title'), CONTEXT_LINE, '原文留在 title')
 })
 
-test('對話分頁沒有 status 物件時一樣畫 run.status_line 的 codex 模型列', async () => {
+test('對話分頁沒有 status 物件時，codex 的 footer 一樣拆成目錄＋context 欄位', async () => {
+  useStore.setState({ bots: [{ id: 'b1', kind: 'codex' } as Bot] })
+  await mount(<StatusLineBar botId="b1" status={null} text={CONTEXT_LINE} />)
+  assert.equal(document.querySelector('.statusline-bar .statusline-text'), null)
+  assert.deepEqual(items().map((x) => x.k), ['目錄', 'context'])
+  assert.ok(items()[1].v.startsWith('18%'))
+})
+
+test('footer 沒有 Context 段時不畫 context 欄位；主題不畫', async () => {
   useStore.setState({ bots: [{ id: 'b1', kind: 'codex' } as Bot] })
   await mount(<StatusLineBar botId="b1" status={null} text={SHORTCUTS_LINE} />)
-  assert.ok((document.querySelector('.statusline-bar')?.textContent ?? '').includes(SHORTCUTS_LINE))
+  assert.deepEqual(items(), [{ k: '目錄', v: '~/project/agm-lx1685' }])
 })
 
 test('終端分頁開著時，狀態列以終端解析的 footer 為準（含 warning），不再多畫一份 status_line', async () => {
@@ -78,8 +98,9 @@ test('終端分頁開著時，狀態列以終端解析的 footer 為準（含 wa
   })
   await mount(<><StatusLineBar botId="b1" status={status} text={CONTEXT_LINE} /><TerminalTab botId="b1" /></>)
   await act(async () => { await new Promise((r) => setTimeout(r, 20)) })
-  const bar = document.querySelector('.statusline-bar')?.textContent ?? ''
-  assert.equal(bar.split('Context 18% used').length - 1, 1, bar)
+  assert.equal(document.querySelectorAll('.statusline-bar').length, 1)
+  assert.deepEqual(items().slice(0, 2).map((x) => x.k), ['目錄', 'context'])
+  assert.equal(document.querySelector('.statusline-bar .statusline-text'), null)
 })
 
 test('非 codex 的 status_line 不當成 codex footer 解析', async () => {
@@ -87,4 +108,5 @@ test('非 codex 的 status_line 不當成 codex footer 解析', async () => {
   await mount(<StatusLineBar botId="b1" status={status} text={CONTEXT_LINE} />)
   const bar = document.querySelector('.statusline-bar')?.textContent ?? ''
   assert.ok(!bar.includes('weekly 78% left'), bar)
+  assert.equal(document.querySelector('.statusline-bar .statusline-text'), null)
 })

@@ -33,7 +33,7 @@ for (const view of ['terminal', 'panel', 'modal'] as const) {
     assert.equal(document.querySelectorAll('.statusline-bar').length, 1)
     assert.equal(document.querySelector('.term-pane .statusline-bar, .blocked-modal .statusline-bar'), null)
     const bar = document.querySelector('.statusline-bar')?.textContent ?? ''
-    assert.ok(bar.includes('GPT-6-Astra') && bar.includes('1 warning'), bar)
+    assert.ok(bar.includes('~/project/agents-manager') && bar.includes('1 warning'), bar)
   })
 }
 

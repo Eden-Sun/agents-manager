@@ -1172,6 +1172,7 @@ Jev 超過門檻時只推 AGM inbox，使用者在 bot 畫面上看不到。
 - 終端分頁與需要回應面板／彈窗，把快照尾端的模型列、`? for shortcuts`、`⚠ N warning(s) · f2 to view` 從正文切出。獨立 warning 行與 shortcuts 右欄同樣處理；只剝尾端連續 footer，不刪正文裡的歷史引用或輸入列。
 - **#1680 修正**：桌機終端分頁因此看不到最底下那行。現在終端畫面照 pane 原樣顯示（footer 行留在正文裡），三處都不再另畫 `statusline-bar`；footer 只解析給對話面板的狀態列用。
 - **#1755 查證與補洞**：線上（含 #1680）終端分頁桌機與手機寬度都畫得出 pane 最底下的 codex footer（`GET /api/bots/{id}/terminal` 的 `text` 本來就保留，fixture：`web/src/testing/fixtures/codex-1755-terminal-*.json`）。缺的是對話分頁：footer 只在終端畫面掛著時才解析進 store，沒掛時桌機狀態列只剩 context 百分比、沒有模型／目錄／額度那串。現在 `StatusLineBar` 在 codex bot 沒有終端 footer 時，改用 daemon 寫進 `run.status_line` 的同一行（同一個解析、同一個畫法，終端有掛時以終端解析為準，不重複畫）。手機的對話分頁狀態列仍收在「Git／專案資訊」彈窗裡，要看 footer 走終端分頁。
+- **#1755 後續：codex 狀態列跟 claude 同一套欄位**（使用者 2026-10-14：codex 那行要和 claude 一致）。codex footer 先由 `parseCodexModelLine`（`lib/codexTerminalFooter.ts`）拆成模型／effort／fast／目錄／Context／額度／主題，`StatusLineBar` 再用 claude 那條共用的 `SlItem` 畫：目錄（claude 是帳號，手機同樣收掉）、context 百分比＋壓縮／保溫按鈕、快取、版本。模型與 effort 已在頂端主力晶片、額度在頂端額度列，狀態列不重複；主題不畫；原文只留在 `title`。warning 照舊單獨一格。手機目錄收掉時，後面的 context 不留開頭分隔線。原本多出的孤零零 `context` 字樣是 Context 段被原文吃掉後，`SlItem` 只剩標籤、值是空的；現在 context 百分比以 footer 為準，沒有值就不畫這格。
 - 模型整列放進既有 `statusline-bar`，保留 `· Context N% used · weekly N% left` 等後續段。warning 數放最前面，避免長模型列把它擠出窄畫面；保留 F2 查看內容的提示，不以過濾代替解決 warning 成因。shortcuts 不作為正文或獨立狀態欄。
 - 桌面共用頁面原有狀態列；手機原有狀態列收在 Git 資訊抽屜，因此快照旁也顯示同款狀態列。需要回應彈窗顯示自己的狀態列，避免數字被遮罩蓋住。既有 compact／keep-warm 控制保留。
 - warning 只投影目前顯示的 bot／run 快照；換 bot、換 run、卸載快照或新快照不再含 warning 時不沿用舊數字。CLI 操作選單與危險操作判斷仍使用原始 API text。
