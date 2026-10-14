@@ -9408,8 +9408,9 @@ mod prompt_route_tests {
         assert_eq!(projected(state_json(&e.app).await.unwrap()), user_id);
         withdraw_turn(State(e.app.clone()), Path(user_id.to_string())).await.unwrap();
         assert_eq!(projected(state_json(&e.app).await.unwrap()), relay.turn_id);
-        withdraw_turn(State(e.app.clone()), Path(relay.turn_id)).await.unwrap();
-        assert_eq!(projected(state_json(&e.app).await.unwrap()), notice.turn_id);
+        assert!(withdraw_turn(State(e.app.clone()), Path(relay.turn_id.clone())).await.is_err(), "AGM relay keeps its own withdrawal policy");
+        withdraw_turn(State(e.app.clone()), Path(notice.turn_id)).await.unwrap();
+        assert_eq!(projected(state_json(&e.app).await.unwrap()), relay.turn_id);
     }
 
     #[tokio::test]

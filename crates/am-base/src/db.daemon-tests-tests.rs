@@ -160,7 +160,7 @@
         }
         for (turn, conv, crid) in [
             ("t-user", "c1", "child-done:user-controlled"),
-            ("t-relay", "c2", "dispatch:1"),
+            ("t-relay", "c2", "child-done:external-bot"),
             ("t-notice", "c3", "child-done:daemon-generated"),
         ] {
             sqlx::query("INSERT INTO turns (id,conversation_id,origin,status,delivery,client_request_id,created_at) VALUES (?,?,'web','queued','pending',?,'2026-10-01T00:00:00.000Z')")
@@ -168,7 +168,7 @@
         }
         for (turn, conv, relay_from) in [
             ("t-relay", "c2", Some("b1")),
-            ("t-notice", "c3", Some("b2")),
+            ("t-notice", "c3", Some("daemon")),
         ] {
             sqlx::query("INSERT INTO messages (id,conversation_id,turn_id,role,content,source,relay_from,created_at) VALUES (?, ?, ?, 'user', 'x', 'web', ?, '2026-10-01T00:00:00.000Z')")
                 .bind(format!("m-{turn}")).bind(conv).bind(turn).bind(relay_from).execute(&pool).await.unwrap();

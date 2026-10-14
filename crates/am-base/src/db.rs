@@ -442,7 +442,7 @@ pub const SCHEMA_HISTORY: &[(i64, &str)] = &[
     // 手動執行 key 的 mapping（schedule_manual_requests，2026-10-13 補）：重試回同一筆 occurrence。
     (62, "cf53e353ad0b9965"),
     // issue #1685：使用者、relay、daemon 通知各有自己的 queued 槽，使用者 flush 優先。
-    (63, "d4d0ceedaa3c5f2f"),
+    (63, "56fa10c366935e77"),
 ];
 pub const SCHEMA_VERSION: i64 = SCHEMA_HISTORY[SCHEMA_HISTORY.len() - 1].0;
 
@@ -696,14 +696,12 @@ async fn apply_migrations_inner(pool: &SqlitePool, fail_after_spawn_hints_drop: 
         for name in ["turns_one_queued", "turns_one_queued_user", "turns_one_queued_daemon", "turns_one_queued_relay"] {
             sqlx::query(&format!("DROP INDEX IF EXISTS {name}")).execute(&mut *tx).await?;
         }
-        // v60 的 daemon 通知也會保存 relay_from（child id 或 daemon sentinel）；沒有 relay metadata 的
-        // 外部使用者列一律留在 user lane，即使它選了 child-done: 之類的 idempotency key。
+        // 舊資料沒有可信 lane；只有 daemon sentinel 可確定為通知。
+        // 其餘 relay 即使帶通知前綴也保守歸 relay，不能把外部 bot 的冪等鍵當來源證明。
         sqlx::query(
             "UPDATE turns AS t
                 SET queue_class = CASE
                   WHEN EXISTS (SELECT 1 FROM messages m WHERE m.turn_id=t.id AND m.role='user' AND m.relay_from='daemon') THEN 'daemon'
-                  WHEN EXISTS (SELECT 1 FROM messages m WHERE m.turn_id=t.id AND m.role='user' AND m.relay_from IS NOT NULL)
-                       AND (t.client_request_id GLOB 'child-done:*' OR t.client_request_id GLOB 'child-blocked:*' OR t.client_request_id GLOB 'resume-nudge:*') THEN 'daemon'
                   WHEN EXISTS (SELECT 1 FROM messages m WHERE m.turn_id=t.id AND m.role='user' AND m.relay_from IS NOT NULL) THEN 'relay'
                   ELSE 'user'
                 END

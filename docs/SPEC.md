@@ -1256,6 +1256,7 @@ cancel 撤掉的是還沒送出的那則時，review 回應不再帶「turn 還�
 前端（`store/startingSend.ts`）只從 daemon 給的 turn 與訊息推出「有一則在等 bot 起來」（有好幾則時取最早排的那一則，與 daemon 起來後先送的順序一致，#1697）：輸入框上方一條「啟動中，起來後自動送出」，
 失敗時「沒能啟動（原因），還沒送出」＋重新啟動（`POST /start`，起來後照樣由 flush 送）／取消；有這一條時不再另外顯示「啟動」列。
 `queued` 的 `turn_updated` 不算回合完成（不然未讀先多一，真正完成那次又被同一個 turn id 去重吃掉）。
+舊 DB 升級時，只把訊息來源為 daemon sentinel 的 queued 列歸入 daemon lane；其他有 relay metadata 的列歸 relay，沒有的歸 user。舊資料的通知前綴不能證明來源，原本 queued 列全部保留。
 **回合中送出**（issue #733）：web 的 `POST /prompt` 帶 `queue_if_busy:true`。bot 有 in-flight turn 或 agent 尚未 idle 時，daemon 在 bot 鎖內把一筆 `origin:"web"`、`delivery:"pending"`、`awaits_idle=1` 的 queued turn、user message 與附件綁定寫進同一個交易，commit 後回 `200 {delivery:"queued",turn_id,message_id}`；使用者 lane 每顆 bot 同時只有一筆 queued user turn，已佔用時再送回 `409 {reason:"queue_slot_taken",turn_id}`，不改動原佇列。AGM／bot relay 與 daemon 通知各在自己的 lane，不擋使用者，並由使用者先 flush（#1685）。舊版未帶 `queue_if_busy` 的呼叫仍維持原本 409 行為。
 這一則完全由 daemon 保存；`GET /api/state` 的 `queued_turn`、訊息／turn 頁與 socket 更新讓任何網址、分頁或裝置投影同一筆，不以瀏覽器記憶體或 `am.drafts` 當佇列。composer 顯示「已排隊，Bot 這回合結束後會自動送出」與原文，提供「撤回並放回」；撤回走 `POST /api/turns/{id}/withdraw`，daemon 只在 flush 尚未領走時回原文及附件 id，標 failed 並寫 system 說明，前端把原文和已上傳附件卡片放回輸入列。flush 已領走、turn 成為 `in_flight` 時回 409，前端更新狀態並說明可能已送出，不把文字再塞回輸入框。
 `queued` 的 `turn_updated` 不算回合完成（不然未讀先多一，真正完成那次又被同一個 turn id 去重吃掉）。重連、`resync` 與初次載入依 daemon state／turns／messages 重建這條狀態；前端不再 flush 或重送本機的 `queuedSends`。
