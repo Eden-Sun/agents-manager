@@ -192,6 +192,12 @@ async fn sweep_with(app: &impl StuckTurnContext, host: Option<&str>, now: Instan
         if turn.id != turn_id {
             continue;
         }
+        // 遠端 pane 的狀態可能一直報 idle，hook 卻還在進來（長跑的 Bash、spool 晚到；cf-優化-fork1 2026-10-14 12:37 被誤收，
+        // 一分鐘後 Stop 才到，#1763）：門檻內還有 hook 活動就是在做，從現在重新計時。
+        if hook_active_within(app, &bot_id, threshold).await {
+            observe_at(&run_id, "working", now);
+            continue;
+        }
         // run 閒置夠久還不算：這筆也要送出夠久（見 [`stuck_for`]）。
         let stuck = stuck_for(idle, turn_age(&turn, wall_at(now)));
         if stuck < threshold {
@@ -210,6 +216,21 @@ async fn sweep_with(app: &impl StuckTurnContext, host: Option<&str>, now: Instan
         }
     }
     closed
+}
+
+/// 這顆 bot 在門檻內有沒有收到過回合中的 hook（工具、子代理、Stop…；不含 SessionStart 這種開場事件）。以 daemon 處理的時間
+/// （`processed_at`，本機鐘）判斷，遠端主機的鐘不準也不影響。收件匣表不在（舊 DB）或查不到當作沒有。
+async fn hook_active_within(app: &impl StuckTurnContext, bot_id: &str, threshold: Duration) -> bool {
+    let since = db::iso_in(-(threshold.as_secs() as i64));
+    sqlx::query_scalar::<_, bool>(
+        "SELECT EXISTS(SELECT 1 FROM hook_events WHERE bot_id = ? AND processed_at >= ?
+            AND COALESCE(json_extract(body_json, '$.payload.hook_event_name'), '') NOT IN ('SessionStart', 'StatusLine'))",
+    )
+    .bind(bot_id)
+    .bind(&since)
+    .fetch_one(app.db())
+    .await
+    .unwrap_or(false)
 }
 
 /// 為什麼收：閒置太久（一般），或 claude 的 Session paused 選單剛關掉、沒有回覆（不必等滿閒置門檻）。
@@ -880,6 +901,34 @@ mod tests {
             let notes = messages(&app, &f.turn_id).await.into_iter().filter(|m| m.0 == "system").count();
             assert_eq!(notes, usize::from(!compacted), "compacted={compacted}");
         }
+    }
+
+    /// #1763：run 報 idle 已過門檻，但門檻內還有 PostToolUse 進來（遠端長跑的 Bash）：不收，重新計時；hook 停了之後才照常收。
+    #[tokio::test]
+    async fn recent_hook_activity_keeps_an_idle_reported_turn_open() {
+        let f = stuck("部署 demo").await;
+        let app = f.env.app.clone();
+        let _ = am_base::hook_inbox::migrate(app.db()).await;
+        let body = serde_json::json!({"bot_id": f.bot_id, "provider": "claude", "payload": {"hook_event_name": "PostToolUse", "tool_name": "Bash"}});
+        sqlx::query("INSERT INTO hook_events (id, bot_id, provider, source, body_json, received_at, processed_at) VALUES (?, ?, 'claude', 'http', ?, ?, ?)")
+            .bind(db::ulid())
+            .bind(&f.bot_id)
+            .bind(body.to_string())
+            .bind(db::iso_in(-60))
+            .bind(db::iso_in(-60))
+            .execute(app.db())
+            .await
+            .unwrap();
+        sqlx::query("UPDATE turns SET created_at=? WHERE id=?").bind(db::iso_in(-600)).bind(&f.turn_id).execute(app.db()).await.unwrap();
+
+        let t0 = Instant::now();
+        observe_at(&f.run_id, "idle", t0);
+        assert!(sweep_at(&app, None, t0 + 6 * MIN, 5 * MIN).await.is_empty(), "一分鐘前還有工具 hook：不收");
+        assert_eq!(turn(&app, &f.turn_id).await.status, "in_flight");
+
+        sqlx::query("UPDATE hook_events SET processed_at=? WHERE bot_id=?").bind(db::iso_in(-900)).bind(&f.bot_id).execute(app.db()).await.unwrap();
+        assert!(sweep_at(&app, None, t0 + 8 * MIN, 5 * MIN).await.is_empty(), "從上次看到活動重新計時，還沒滿門檻");
+        assert_eq!(sweep_at(&app, None, t0 + 14 * MIN, 5 * MIN).await, vec![f.turn_id.clone()], "hook 停了、再閒置滿門檻才收");
     }
 
     /// #903：`delivery='pending'` ＝ 從來沒送出去（送達結果沒寫、也沒有字進過 pane）的 in_flight 回合，閒置 watchdog

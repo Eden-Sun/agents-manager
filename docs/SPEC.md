@@ -668,6 +668,7 @@ hook body 另外帶 `run_id`＝這個 CLI 行程 pane env 的 `AM_RUN_ID`（本�
 （實例：k8bw2f `01M2MR95RXVHADA4TS8M0YHVH7` 09:20 起、09:59 已 idle、10:22 重啟才清，期間部署交辦 409 七次被保險絲標 `blocked`；
 R-部署console-fork `01M2MG74HFY3PYD8FMBJKEJX8J` 是 AskUserQuestion 被中斷；AGM-responder 09-15 08:49 卡 6.5 小時。）
 - **觸發**：run 的 `agent_status` **持續** `idle` 超過門檻（預設 5 分鐘，環境變數 `AM_STUCK_TURN_IDLE_MINS`，看不懂／0／負數回預設）仍有 `in_flight` Turn。
+  門檻內還收到這顆 bot 的回合中 hook（工具、子代理、Stop…，不含 SessionStart；以 daemon 的 `processed_at` 計）就是還在做，不收、從那一刻重新計時——遠端 pane 長跑工具時狀態可能一直報 idle（#1763）。
   `working`／`blocked`（等使用者回答，例如 AskUserQuestion 還開著）一律不收；**中間閃一下 working 就重算**——每個
   `pane.agent_status_changed` 事件都記一次，每輪掃描也拿 DB 的現況再對一次（事件漏掉時靠這個）。idle 計時在記憶體：
   daemon 重啟後從第一次看到 idle 重新算，寧可晚收。
