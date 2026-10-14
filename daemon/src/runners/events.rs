@@ -48,6 +48,8 @@ async fn global_loop(app: Arc<App>, host: String, session: String) {
     let is_local_main = host == LOCAL_HOST && session == app.herdr_session.as_str();
     let is_local_default = host == LOCAL_HOST && session == "default";
     let mut backoff = HERDR_SUBSCRIBE_INITIAL_BACKOFF;
+    let mut reconnect_pending = false;
+    let mut recovery_guard = crate::herdr_recovery::RecoveryGuard::default();
     loop {
         let Some(client) = app.herdr_for_session(&host, &session).await else {
             tracing::info!(host = %host, "host gone; stopping global subscription");
@@ -75,6 +77,19 @@ async fn global_loop(app: Arc<App>, host: String, session: String) {
                     let (app2, host2) = (app.clone(), host.clone());
                     tokio::spawn(async move { app2.refresh_herdr_version(&host2).await });
                 }
+                if is_local_main && reconnect_pending {
+                    if let Some(report) = crate::herdr_recovery::recover_after_reconnect(&app, &client, &mut recovery_guard).await {
+                        tracing::info!(
+                            resumed = report.resumed.len(),
+                            failed = report.failed.len(),
+                            children = report.children_lost.len(),
+                            limited = report.limited,
+                            skipped = ?report.skipped,
+                            "herdr unexpected-restart recovery finished"
+                        );
+                    }
+                    reconnect_pending = false;
+                }
                 // Reconcile after every (re)connect.
                 if is_local_default {
                     if let Err(e) = app.sync_default_session().await {
@@ -92,6 +107,7 @@ async fn global_loop(app: Arc<App>, host: String, session: String) {
                 if is_local_main {
                     app.connected.store(false, Ordering::SeqCst);
                     app.emit_daemon_status().await;
+                    reconnect_pending = true;
                 }
                 if is_local_default {
                     app.set_default_connected(false).await;
