@@ -340,7 +340,7 @@
         assert_eq!(told.map(|(p, _)| p).as_deref(), Some("top-q"), "mid 是被自己的回合 X 卡住，不是讀了那則通知：top 要收到");
     }
 
-    /// parent 這一刻收不下這則（每個對話最多一筆 queued：另一顆 child 的通知或 AGM 的派工已經排著；parent 自己卡在提問；
+    /// parent 這一刻收不下這則（daemon lane 已有另一顆 child 的通知排著；parent 自己卡在提問；
     /// 維護窗口）：`prompt` 回 409。以前「送不出去就把指紋收回來，下一次事件再試」——可是 child 停在同一個問題上不會再有
     /// 狀態事件，那個「下一次」永遠不來，parent 一直不知道它在等。child 還卡著，就要自己再試（issue #169）。
     #[tokio::test]
@@ -350,10 +350,10 @@
         let parent = crate::testing::claude_bot(&app, &e.project_id, "p-retry").await.id;
         let prun = crate::testing::fake_run(&app, &parent).await;
         let conv = db::conversation_id(&app.db, &parent).await.unwrap();
-        // parent 正在回合中，而它唯一的排隊名額已經被另一則佔走。
-        for (id, status) in [("t-busy-r", "in_flight"), ("t-other-r", "queued")] {
-            sqlx::query("INSERT INTO turns (id,conversation_id,run_id,origin,status,delivery,created_at,prompt_text) VALUES (?,?,?,'web',?,'pending',?,'別的事')")
-                .bind(id).bind(&conv).bind(&prun).bind(status).bind(db::now()).execute(&app.db).await.unwrap();
+        // parent 正在回合中，而 daemon lane 已被另一則通知佔走；使用者與 relay 的槽不會擋通知。
+        for (id, status, queue_class) in [("t-busy-r", "in_flight", "user"), ("t-other-r", "queued", "daemon")] {
+            sqlx::query("INSERT INTO turns (id,conversation_id,run_id,origin,status,delivery,created_at,prompt_text,queue_class) VALUES (?,?,?,'web',?,'pending',?,'別的事',?)")
+                .bind(id).bind(&conv).bind(&prun).bind(status).bind(db::now()).bind(queue_class).execute(&app.db).await.unwrap();
         }
         let kid = db::ulid();
         sqlx::query(

@@ -3579,8 +3579,8 @@ mod queue_dispatch_tests {
         let turn_id = crate::db::ulid();
         let created = (chrono::Utc::now() - chrono::Duration::seconds(age_secs)).to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
         sqlx::query(
-            "INSERT INTO turns (id, conversation_id, run_id, origin, status, delivery, client_request_id, created_at, prompt_text)
-             VALUES (?,?,NULL,'web','queued','pending','crid-q',?,'做這件事')",
+            "INSERT INTO turns (id, conversation_id, run_id, origin, status, delivery, client_request_id, created_at, prompt_text, queue_class)
+             VALUES (?,?,NULL,'web','queued','pending','crid-q',?,'做這件事','relay')",
         )
         .bind(&turn_id)
         .bind(&conv)
@@ -3748,8 +3748,8 @@ mod queue_dispatch_tests {
         let conv = crate::db::conversation_id(&app.db, &bot).await.unwrap();
         let turn_id = crate::db::ulid();
         sqlx::query(
-            "INSERT INTO turns (id, conversation_id, run_id, origin, status, delivery, client_request_id, created_at, prompt_text)
-             VALUES (?,?,NULL,'web','queued','pending','crid-quota',?,'做這件事')",
+            "INSERT INTO turns (id, conversation_id, run_id, origin, status, delivery, client_request_id, created_at, prompt_text, queue_class)
+             VALUES (?,?,NULL,'web','queued','pending','crid-quota',?,'做這件事','relay')",
         )
         .bind(&turn_id)
         .bind(&conv)
@@ -3919,8 +3919,8 @@ mod queue_dispatch_tests {
         let turn_id = crate::db::ulid();
         let now = chrono::Utc::now();
         sqlx::query(
-            "INSERT INTO turns (id, conversation_id, run_id, origin, status, delivery, client_request_id, created_at, prompt_text)
-             VALUES (?,?,NULL,'web','queued','pending','crid-restart-hold',?,'做這件事')",
+            "INSERT INTO turns (id, conversation_id, run_id, origin, status, delivery, client_request_id, created_at, prompt_text, queue_class)
+             VALUES (?,?,NULL,'web','queued','pending','crid-restart-hold',?,'做這件事','relay')",
         )
         .bind(&turn_id)
         .bind(&conv)
@@ -4967,8 +4967,8 @@ mod mission_state_dispatch_tests {
         let conversation = crate::db::conversation_id(&app.db, &assignment.target_bot_id).await.unwrap();
         let turn_id = "cancelled-mission-still-queued";
         sqlx::query(
-            "INSERT INTO turns (id,conversation_id,origin,status,delivery,client_request_id,created_at,prompt_text)
-             VALUES (?,?,'web','queued','pending',?,?, '做 X')",
+            "INSERT INTO turns (id,conversation_id,origin,status,delivery,client_request_id,created_at,prompt_text,queue_class)
+             VALUES (?,?,'web','queued','pending',?,?, '做 X','relay')",
         )
         .bind(turn_id)
         .bind(conversation)
