@@ -1883,6 +1883,13 @@ mod flush_queue_tests {
 
     /// 這一則的使用者訊息（`role = 'user'`），`relay_from` 空＝使用者自己從網頁送的。
     async fn user_message_of(app: &Arc<App>, f: &Fixture, relay_from: Option<&str>) {
+        // This fixture writes the turn directly, so it must persist the same trusted lane as the writer.
+        sqlx::query("UPDATE turns SET queue_class=? WHERE id=?")
+            .bind(if relay_from.is_some() { "relay" } else { "user" })
+            .bind(&f.turn_id)
+            .execute(app.db())
+            .await
+            .unwrap();
         sqlx::query(
             "INSERT INTO messages (id, conversation_id, turn_id, role, content, source, created_at, relay_from) VALUES (?,?,?,'user','改好了，繼續','web',?,?)",
         )
