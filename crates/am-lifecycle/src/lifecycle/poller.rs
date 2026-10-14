@@ -624,6 +624,10 @@ pub fn live_alert(kind: &str, text: &str) -> Option<String> {
         } else {
             line.trim()
         };
+        // `⎿` 是工具輸出的縮排（sed、cat 印出來的程式碼或 log），不是 CLI 自己說的話（#1686）。要在剝前導記號之前認。
+        if s.starts_with('⎿') {
+            continue;
+        }
         // Drop a leading spinner / bullet glyph so `✻ API error …` matches too.
         let s = match s.chars().next() {
             Some(c) if !c.is_alphanumeric() => s[c.len_utf8()..].trim(),
@@ -643,8 +647,15 @@ pub fn live_alert(kind: &str, text: &str) -> Option<String> {
         if s.contains('{') || s.contains('}') || s.matches('|').count() >= 2 {
             continue;
         }
+        // 只認 CLI 自己印的橫幅：固定前綴（claude `API error`、codex `stream error`）。光有 error＋retry 字眼不夠，
+        // `Err(e) => tracing::warn!(…, "…; retrying")` 這種程式碼行（#1686，2026-10-13 A-leader 的黃色橫幅）就是這樣被認成橫幅的。
+        let banner = low.starts_with("api error") || low.starts_with("stream error");
+        if !banner {
+            continue;
+        }
         let retrying = RETRY_TOKENS.iter().any(|t| if t.is_ascii() { has_word(&low, t) } else { low.contains(t) });
-        if !retrying && !low.starts_with("api error") {
+        // 談論 API error 處理的散文沒有重試字眼，也沒有 claude 的 `API Error:` 冒號。
+        if !retrying && !low.starts_with("api error:") {
             continue;
         }
         // The newest banner is the one still true.
