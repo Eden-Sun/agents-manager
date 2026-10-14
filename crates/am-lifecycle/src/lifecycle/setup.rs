@@ -946,6 +946,10 @@ fn claude_settings(hook_cmd: &str, statusline: &str, wants_remote: bool, auto_ap
         // 還會把 `"tui": "fullscreen"` 寫進 `~/.claude/settings.json`。`tui_prompts`、畫面備援、回音剝除都照一般渲染寫，
         // 所以 bot 一律釘 `default`：`--settings` 優先於使用者設定，而且只要 `tui` 有值，那個選單的條件就不成立。
         "tui": "default",
+        // issue #1756：claude 2.1.299 起，200K+ 的 session 閒置約 54 分會在 cache 過期前自己壓縮。保溫／熱壓與 cache
+        // 時鐘由 daemon 自己管（`cache_clock.rs`），CLI 再壓一次會重疊、讓 cache 剩幾分失真，壓縮當下送的話還可能被吞
+        // Enter。所以釘 `false`；2.1.290 以前不認得這個鍵就忽略（未知鍵不報 settings 錯誤）。
+        "idleCompaction": false,
         // 同一版的「Make auto mode your default permission mode?」（游標預設在 Yes）只在 user settings 有
         // `permissions.defaultMode`、而 `--settings` 這類較高層沒有時才跳。照這顆 bot 自己的 auto_approve 寫，
         // 不會因此放大權限（沒開 auto_approve 的就是 `default`，跟不寫一樣）。
@@ -3410,6 +3414,16 @@ mod claude_settings_tests {
         let asks = claude_settings("hook", "sl", false, false);
         assert_eq!(asks["tui"], json!("default"));
         assert_eq!(asks["permissions"]["defaultMode"], json!("default"));
+    }
+
+    /// issue #1756：閒置壓縮交給 daemon 的保溫／熱壓，不讓 2.1.299 的 idle compaction 自己跑。
+    #[test]
+    fn bots_turn_off_upstream_idle_compaction() {
+        for auto in [false, true] {
+            for remote in [false, true] {
+                assert_eq!(claude_settings("hook", "sl", remote, auto)["idleCompaction"], json!(false));
+            }
+        }
     }
 }
 
