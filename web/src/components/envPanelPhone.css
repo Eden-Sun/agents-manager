@@ -97,6 +97,12 @@
     min-height: 44px;
   }
 
+  /* styles.css 有同權（0,2,0）或更高的規則把這兩種鍵壓回 28px／40px，這裡要更高的特異性才蓋得過。 */
+  .env-panel .mini-btn.install-btn,
+  .env-panel .btn.primary {
+    min-height: 44px;
+  }
+
   .env-panel .btn,
   .env-panel .deleted-restore {
     padding-inline: 14px;
