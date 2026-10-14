@@ -972,7 +972,7 @@ UI 標籤：`hook` 不標；`terminal_fallback` 或 `incomplete = 1` 標「終�
 | `bots_restart_progress` / `bots_restart_done` | 見 §10.3a |
 | `cli_update_progress` / `cli_update_done` | 見 §12.7a |
 | `herdr_update_progress` / `herdr_update_done` | 見 §12.7b |
-| `herdr_recovery_done` | `{"recovery_id","resumed":[{"bot_id","name","run_id"}],"failed":[{"bot_id","name","error"}],"children_lost":[{"bot_id","name","parent_bot_id","title"}],"limited","skipped"}`：本機 herdr 全域事件串流曾建立、之後中斷並重連，且確認所有 pane 消失時送出；只以原 native session 接回頂層 bot，child 不接回。側欄顯示摘要；同一 `recovery_id` 的 WS 重播只提示一次。AGM 同時收到一筆 `ops_alert`（`reason:"herdr_unexpected_restart"`），寫入後推 `supervisor_changed` |
+| `herdr_recovery_done` | `{"recovery_id","resumed":[{"bot_id","name","run_id"}],"failed":[{"bot_id","name","error"}],"children_lost":[{"bot_id","name","parent_bot_id","title"}],"limited","skipped"}`：本機 herdr 全域事件串流曾建立、之後中斷並重連，且 active run 的舊 pane 都已消失或不再有 agent occupant 時送出；重啟後仍存在的空 shell pane 也算遺失。只以原 native session 接回頂層 bot，child 不接回；既有 restart 流程會關閉舊空 pane/tab。側欄顯示摘要；同一 `recovery_id` 的 WS 重播只提示一次。AGM 同時收到一筆 `ops_alert`（`reason:"herdr_unexpected_restart"`），寫入後推 `supervisor_changed` |
 | `supervisor_health` | 見「總管」一節 |
 | `supervisor_changed` | 總管面板的失效通知，`data` 是一個小物件、形狀依觸發原因而不同（`{"bot_id"}`、`{"assignment_id","status"}`、`{"summary_version"}`、`{"acked"}`、`{"ops_alert"}`、`{"deploy_now":{"sha"}}`、`{"remote":true}`…）；客戶端不要靠欄位判斷，收到就重拉自己開著的總管資料（「總管 AGM」一節） |
 | `mission_updated` | `{"mission_id","project_id","status"}`：任務狀態有變（「群組任務（mission）」一節） |
@@ -2291,7 +2291,7 @@ WS（`update_id`／`host`／`kind`／`target_version`／`log_path` 每則都帶�
 - 409 `{"reason":"herdr_update_in_progress","update_id","host","message"}`：這顆 daemon 已經在跑一個。
 - 409 `{"reason":"cli_update_in_progress","update_id","host","kind","message"}`：這台正在安裝 claude／codex CLI（安裝完會重啟 bot），先等它結束。反過來，herdr 更新進行中 `POST /hosts/local/cli-update` 回 409 `herdr_update_in_progress`（不留 `running` 那一列）。
 
-意外重啟偵測沿用同一條本機 global event stream：只在曾連上後斷線、重連時確認 pane list 為空，且沒有更新維護窗口時恢復；以既有 `restart_bot_with(resume_native)` 接回頂層 bot，child pane 留給 reconcile 退休。30 分鐘內最多執行三批接回，批次間隔 2 秒、10 秒、30 秒；超限後 `herdr_recovery_done.limited=true`，等待人工處理或新的 30 分鐘窗口。此流程不新增 HTTP 路由。
+意外重啟偵測沿用同一條本機 global event stream：只在曾連上後斷線、重連時確認所有 active run 的舊 pane 都已消失或沒有 agent occupant，且沒有更新維護窗口時恢復；pane id 雖仍存在但已成空 shell 也算遺失。recovery 先於 reconnect reconcile，並持有同一把 host reconcile lock，避免 run 在接回前被標記 exited；以既有 `restart_bot_with(resume_native)` 接回頂層 bot，流程會關閉舊空 pane/tab，child pane 留給 reconcile 退休。30 分鐘內最多執行三批接回，批次間隔 2 秒、10 秒、30 秒；超限後 `herdr_recovery_done.limited=true`，等待人工處理或新的 30 分鐘窗口。此流程不新增 HTTP 路由。
 
 WS（每則帶 `update_id`／`host`／`target_version`）：`herdr_update_progress` 的 `phase` 依序 `downloading` → `waiting_idle` → `stopping` → `restarting` →（失敗時 `rolling_back`）→ `resuming`。
 
