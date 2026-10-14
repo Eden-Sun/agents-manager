@@ -316,6 +316,17 @@ AM_USAGE_DONE=0
         assert!(r.starts_with("2026-09-06T"), "{r}");
     }
 
+    /// 只有時刻的重置滾到「明天」要是明天**同一個牆上時刻**，不是隔 24 小時：跨 DST 那一天 24 小時會差一個鐘頭。
+    /// 紐約 2026-11-01 03:00 EST（＝08:00Z）看到 "1:30am"：今天 1:30 EDT 已過，應是 11-02 01:30 EST（06:30Z）。
+    /// 2026-03-08 03:00 EDT（＝07:00Z）看到 "1:30am"：應是 03-09 01:30 EDT（05:30Z）。
+    #[test]
+    fn time_only_reset_rolls_to_the_same_wall_clock_across_dst() {
+        let r = parse_claude_reset("Resets 1:30am (America/New_York)", at("2026-11-01T08:00:00Z")).unwrap();
+        assert_eq!(r, "2026-11-02T06:30:00.000Z", "{r}");
+        let r = parse_claude_reset("Resets 1:30am (America/New_York)", at("2026-03-08T07:00:00Z")).unwrap();
+        assert_eq!(r, "2026-03-09T05:30:00.000Z", "{r}");
+    }
+
     /// 跨年：2027-01-01 00:30（+08:00）看到的 "Dec 31 at 11pm" 是一個半小時前剛過的重置（去年的），不是明年的。
     #[test]
     fn a_reset_that_just_passed_across_new_years_eve_stays_last_year() {
