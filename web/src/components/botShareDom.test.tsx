@@ -15,6 +15,9 @@ import { ShareLinkButton, ShareMark } from './ShareLinkButton'
 import { SentViaTag } from './SentViaTag'
 import { shareProfileBlocked } from '../lib/shareProfile'
 
+// 預設當成 https（剪貼簿可用）；非 secure context 的行為由專門那條測試覆寫。
+Object.defineProperty(window, 'isSecureContext', { configurable: true, value: true })
+
 afterEach(async () => {
   await unmountAll()
   resetStoreForTest()
@@ -127,6 +130,8 @@ test('聊天區頂端分享鈕：一般 bot 沒有；未分享按下＝開啟並
   Object.defineProperty(navigator, 'clipboard', { configurable: true, value: { writeText: async (t: string) => void copied.push(t) } })
   const origExec = document.execCommand
   document.execCommand = () => false
+  const origSecure = Object.getOwnPropertyDescriptor(window, 'isSecureContext')
+  Object.defineProperty(window, 'isSecureContext', { configurable: true, value: true })
   const setOn = (on: boolean) => act(async () => useStore.setState((s) => ({ bots: s.bots.map((b) => (b.id === shared.id ? { ...b, share_enabled: on } : b)) })))
   try {
     await act(async () => useStore.setState({ notify: (_k: string, m: string) => void msgs.push(m) } as never))
@@ -177,6 +182,46 @@ test('聊天區頂端分享鈕：一般 bot 沒有；未分享按下＝開啟並
   } finally {
     document.execCommand = origExec
     Object.defineProperty(navigator, 'clipboard', { configurable: true, value: origClip })
+    if (origSecure) Object.defineProperty(window, 'isSecureContext', origSecure)
+    else delete (window as unknown as { isSecureContext?: boolean }).isSecureContext
+  }
+})
+
+test('手機 http（非 secure context、沒有 clipboard）：開分享後直接打開選單給可選取的連結，不給複製鈕、不試著複製', async () => {
+  const { mock, shared } = await setup()
+  await mock.request('POST', `/bots/${shared.id}/share`, { enabled: false })
+  const msgs: string[] = []
+  let execCalls = 0
+  const nav = navigator as unknown as { clipboard?: unknown }
+  const origClip = nav.clipboard
+  Object.defineProperty(navigator, 'clipboard', { configurable: true, value: undefined })
+  const origExec = document.execCommand
+  document.execCommand = () => {
+    execCalls += 1
+    return false
+  }
+  const origSecure = Object.getOwnPropertyDescriptor(window, 'isSecureContext')
+  Object.defineProperty(window, 'isSecureContext', { configurable: true, value: false })
+  try {
+    await act(async () => useStore.setState({ notify: (_k: string, m: string) => void msgs.push(m) } as never))
+    await act(async () => useStore.setState((s) => ({ bots: s.bots.map((b) => (b.id === shared.id ? { ...b, share_enabled: false } : b)) })))
+    await mount(<ShareLinkButton botId={shared.id} />)
+    await click(mainBtn())
+    await settle(50)
+    const g = (await mock.request('GET', `/bots/${shared.id}/share`)) as { url: string }
+    assert.equal(execCalls, 0, '預判做不到，不試著複製')
+    assert.match(msgs.at(-1)!, /長按選取後複製/)
+    assert.ok(!msgs.some((m) => m.includes('複製失敗')), '不會出現複製失敗')
+    const field = document.querySelector<HTMLInputElement>('.share-link-menu .share-link-url')
+    assert.ok(field, '選單第一項是可選取的連結')
+    assert.equal(field.value, g.url)
+    assert.equal(field.readOnly, true)
+    assert.deepEqual([...document.querySelectorAll('.share-link-menu [role="menuitem"]')].map((b) => b.textContent), ['重產連結', '關閉分享'], '沒有複製連結鈕')
+  } finally {
+    document.execCommand = origExec
+    Object.defineProperty(navigator, 'clipboard', { configurable: true, value: origClip })
+    if (origSecure) Object.defineProperty(window, 'isSecureContext', origSecure)
+    else delete (window as unknown as { isSecureContext?: boolean }).isSecureContext
   }
 })
 

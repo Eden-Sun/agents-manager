@@ -29,6 +29,11 @@
 }
 
 @media (width <= 640px) {
+  .share-link-url {
+    width: 100%;
+    min-width: 0;
+  }
+
   .icon-btn.share-link-main {
     width: 40px;
     height: 40px;
@@ -84,4 +89,27 @@
 
 .share-mark.trusted.on {
   filter: drop-shadow(0 0 1px var(--warn));
+}
+
+/* 非 https 的手機：選單第一項是可選取的連結（不能寫剪貼簿，不給複製鈕）。 */
+.share-link-url {
+  box-sizing: border-box;
+  width: min(100%, 320px);
+  min-width: min(70vw, 320px);
+  margin-bottom: 4px;
+  padding: 6px 8px;
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  background: var(--bg);
+  color: var(--text);
+  font: inherit;
+  font-size: 16px;
+  user-select: all;
+}
+
+.share-link-url-note {
+  max-width: min(70vw, 320px);
+  padding: 6px 10px;
+  color: var(--text-dim);
+  font-size: 0.85em;
 }
