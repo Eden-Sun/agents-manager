@@ -315,7 +315,7 @@ async fn close_picker_checked(client: &HerdrClient, pane_id: &str) -> Result<boo
         if crate::tui_prompts::is_codex_model_migration_prompt(&screen) || rate_limit_switch_prompt_open(&screen) || crate::codex_update::update_menu_open(&screen) {
             return Ok(false);
         }
-        if !picker_open(&screen) {
+        if !picker_open(&screen) && !transcript_browser_open(&screen) {
             return Ok(true);
         }
         if !key(client, pane_id, "Escape").await {
@@ -325,7 +325,20 @@ async fn close_picker_checked(client: &HerdrClient, pane_id: &str) -> Result<boo
     }
     #[cfg(all(test, feature = "daemon-test-harness"))]
     crate::race_point::hit("codex_picker_before_final_read", pane_id).await;
-    Ok(!picker_open(&read(client, pane_id).await?))
+    let last = read(client, pane_id).await?;
+    Ok(!picker_open(&last) && !transcript_browser_open(&last))
+}
+
+/// codex 的對話紀錄瀏覽（輸入框空著時連按兩下 Esc 就會進去，底列 `Browsing transcript · … · esc back`）：
+/// 輸入框不在畫面上，送 prompt 一直是 `composer_unreadable`、排著的通知重試到放棄（xxdzvt 2026-10-14 15:00–16:00，#1766）。
+/// 只認最後一行的底列；Esc 回輸入框，不動對話。
+pub fn transcript_browser_open(screen: &str) -> bool {
+    screen
+        .lines()
+        .rev()
+        .map(str::trim)
+        .find(|l| !l.is_empty())
+        .is_some_and(|l| l.to_lowercase().starts_with("browsing transcript") && l.to_lowercase().contains("esc back"))
 }
 
 pub async fn close_picker(client: &HerdrClient, pane_id: &str) -> bool {
@@ -1212,6 +1225,10 @@ mod tests {
         assert!(!picker_open(COMPOSER));
         assert!(!picker_open(STATUS));
         assert!(!picker_open(""));
+        // #1766：對話紀錄瀏覽要 Esc 回輸入框；只認最後一行的底列，對話裡提到這幾個字不算。
+        assert!(transcript_browser_open("• Ran herdr agent list\n\nBrowsing transcript · ↑↓/jk scroll · ←→/hl prompts · ^t details · ↵ rewind · esc back\n"));
+        assert!(!transcript_browser_open("Browsing transcript · esc back 是 codex 的瀏覽模式\n› Ask Codex to do anything\n"));
+        assert!(!transcript_browser_open(COMPOSER));
     }
 
     #[test]
