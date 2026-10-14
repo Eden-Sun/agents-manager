@@ -61,6 +61,7 @@ pub(crate) struct Failed {
 /// Result of a confirmed full pane loss. `limited` means the fuse is open and no bot was started.
 #[derive(Debug, Clone, Serialize)]
 pub(crate) struct RecoveryReport {
+    pub recovery_id: String,
     pub resumed: Vec<Resumed>,
     pub failed: Vec<Failed>,
     pub children_lost: Vec<crate::herdr_upgrade::LostChild>,
@@ -71,11 +72,92 @@ pub(crate) struct RecoveryReport {
 impl RecoveryReport {
     fn empty(children_lost: Vec<crate::herdr_upgrade::LostChild>) -> Self {
         Self {
+            recovery_id: crate::db::ulid(),
             resumed: Vec::new(),
             failed: Vec::new(),
             children_lost,
             limited: false,
             skipped: None,
+        }
+    }
+}
+
+/// Tell the browser and AGM about a confirmed unexpected local herdr restart.
+pub(crate) async fn publish_recovery_report(app: &Arc<App>, report: &RecoveryReport) {
+    let data = serde_json::to_value(report).unwrap_or_default();
+    app.emit("herdr_recovery_done", data).await;
+
+    let resumed = report
+        .resumed
+        .iter()
+        .map(|bot| bot.name.as_str())
+        .collect::<Vec<_>>();
+    let failed = report
+        .failed
+        .iter()
+        .map(|bot| format!("{}（{}）", bot.name, bot.error))
+        .collect::<Vec<_>>();
+    let children = report
+        .children_lost
+        .iter()
+        .map(|child| child.name.as_str())
+        .collect::<Vec<_>>();
+    let describe = |names: &[&str]| {
+        if names.is_empty() {
+            "無".to_string()
+        } else {
+            names.join("、")
+        }
+    };
+    let detail = format!(
+        "herdr 本機非預期重啟：頂層 bot 接回 {} 顆（{}），失敗 {} 顆（{}），遺失 child pane {} 個（{}）。{}{}",
+        resumed.len(),
+        describe(&resumed),
+        failed.len(),
+        if failed.is_empty() { "無".to_string() } else { failed.join("、") },
+        children.len(),
+        describe(&children),
+        if report.limited { "已達自動接回上限。" } else { "" },
+        report.skipped.as_deref().map_or(String::new(), |reason| format!("接回略過：{reason}。")),
+    );
+    let event_key = format!(
+        "ops_alert:daemon:herdr_unexpected_restart:{}",
+        report.recovery_id
+    );
+    let payload = serde_json::json!({
+        "source": "daemon",
+        "reason": "herdr_unexpected_restart",
+        "subject": "local herdr",
+        "recovery_id": report.recovery_id,
+        "resumed_count": report.resumed.len(),
+        "failed_count": report.failed.len(),
+        "children_lost_count": report.children_lost.len(),
+        "limited": report.limited,
+        "skipped": report.skipped,
+        "detail": detail,
+        "action": "請檢查 herdr 與 bot 狀態；遺失的 child pane 不會由 daemon 重建。",
+    });
+    match crate::supervisor::store::push_inbox(
+        &app.db,
+        &event_key,
+        "ops_alert",
+        None,
+        None,
+        None,
+        &payload,
+    )
+    .await
+    {
+        Ok(Some(_)) => {
+            app.emit(
+                "supervisor_changed",
+                serde_json::json!({"ops_alert": event_key}),
+            )
+            .await
+        }
+        Ok(None) => {}
+        Err(error) => {
+            tracing::error!(recovery_id = %report.recovery_id, error = ?error, "could not queue the herdr recovery ops_alert")
         }
     }
 }
@@ -211,6 +293,7 @@ async fn maintenance_owns_reconnect(app: &Arc<App>) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::testing as tt;
 
     #[test]
     fn recovery_backoff_is_bounded_and_resets_after_the_window() {
@@ -232,6 +315,99 @@ mod tests {
         assert_eq!(
             guard.delay(start + ATTEMPT_WINDOW + Duration::from_secs(2)),
             Some(BACKOFF[0])
+        );
+    }
+
+    #[tokio::test]
+    async fn full_pane_loss_resumes_only_the_parent_and_notifies_the_browser_and_agm() {
+        let env = tt::env().await;
+        let parent = tt::claude_bot(&env.app, &env.project_id, "top-level").await;
+        sqlx::query(
+            "UPDATE bots SET kind='codex', model='gpt-6.1-sol', auto_approve=1 WHERE id = ?",
+        )
+        .bind(&parent.id)
+        .execute(&env.app.db)
+        .await
+        .unwrap();
+        let parent_run = tt::fake_run(&env.app, &parent.id).await;
+        sqlx::query(
+            "UPDATE runs SET native_session_id = 'codex-session-before-restart' WHERE id = ?",
+        )
+        .bind(&parent_run)
+        .execute(&env.app.db)
+        .await
+        .unwrap();
+
+        let child_id = crate::db::ulid();
+        sqlx::query(
+            "INSERT INTO bots (id, project_id, name, kind, args_json, autostart, inject_hooks, hook_token, managed_by, parent_bot_id, created_at)
+             VALUES (?,?,?,'claude','[]',0,1,'tok','child',?,?)",
+        )
+        .bind(&child_id)
+        .bind(&env.project_id)
+        .bind("top-level-worker")
+        .bind(&parent.id)
+        .bind(crate::db::now())
+        .execute(&env.app.db)
+        .await
+        .unwrap();
+        let _child_run = tt::fake_run(&env.app, &child_id).await;
+
+        let mut events = env.app.subscribe();
+        let mut guard = RecoveryGuard::default();
+        let report = recover_after_reconnect(&env.app, &env.app.herdr, &mut guard)
+            .await
+            .expect("confirmed full pane loss");
+
+        assert_eq!(report.resumed.len(), 1);
+        assert_eq!(report.resumed[0].bot_id, parent.id);
+        assert!(report.failed.is_empty(), "{:?}", report.failed);
+        assert_eq!(report.children_lost.len(), 1);
+        assert_eq!(report.children_lost[0].bot_id, child_id);
+        let starts = env.herdr.calls_to("agent.start");
+        assert_eq!(
+            starts.len(),
+            1,
+            "child agent is never started independently: {starts:?}"
+        );
+        assert!(starts[0]["name"].as_str().is_some_and(|name| !name.is_empty()));
+        let start_args = starts[0]["args"].as_array().unwrap();
+        assert_eq!(
+            &start_args[..2],
+            ["resume", "codex-session-before-restart"],
+            "the top-level bot reuses its prior native Codex session"
+        );
+
+        publish_recovery_report(&env.app, &report).await;
+        let alerts: Vec<(String, String)> = sqlx::query_as(
+            "SELECT event_key, payload_json FROM supervisor_inbox WHERE kind='ops_alert'",
+        )
+        .fetch_all(&env.app.db)
+        .await
+        .unwrap();
+        assert_eq!(alerts.len(), 1);
+        let (event_key, payload) = &alerts[0];
+        let payload: serde_json::Value = serde_json::from_str(payload).unwrap();
+        assert!(event_key.contains(&report.recovery_id));
+        assert_eq!(payload["reason"], "herdr_unexpected_restart");
+        assert_eq!(payload["resumed_count"], 1);
+        assert_eq!(payload["children_lost_count"], 1);
+        assert!(payload["detail"].as_str().unwrap().contains(&parent.name));
+
+        let mut saw_browser_notice = false;
+        let mut saw_agm_refresh = false;
+        while let Ok(event) = events.try_recv() {
+            saw_browser_notice |= event.kind == "herdr_recovery_done"
+                && event.data["recovery_id"] == report.recovery_id;
+            saw_agm_refresh |= event.kind == "supervisor_changed";
+        }
+        assert!(
+            saw_browser_notice,
+            "browser event must carry the recovery report"
+        );
+        assert!(
+            saw_agm_refresh,
+            "AGM inbox insert invalidates the open AGM panel"
         );
     }
 }

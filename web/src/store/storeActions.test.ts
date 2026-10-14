@@ -1546,6 +1546,27 @@ test('supervisor_changed：supervisorRev 加一，AGM 面板開著時據此重�
   assert.equal(useStore.getState().supervisorRev, before + 2)
 })
 
+test('herdr_recovery_done：顯示接回與 child 遺失摘要，重播同一事件不重複通知', async () => {
+  seed()
+  useStore.setState({ notices: [] })
+  const { handleFrame } = await import('./store.ts')
+  const data = {
+    recovery_id: 'test-herdr-recovery-notice-1754',
+    resumed: [{ bot_id: 'b1', name: 'top-level', run_id: 'r2' }],
+    failed: [],
+    children_lost: [{ bot_id: 'c1', name: 'worker', parent_bot_id: 'b1' }],
+    limited: false,
+    skipped: null,
+  }
+  handleFrame(useStore.setState, useStore.getState, { type: 'herdr_recovery_done', data })
+  assert.equal(useStore.getState().notices.length, 1)
+  assert.equal(useStore.getState().notices[0].kind, 'info')
+  assert.match(useStore.getState().notices[0].text, /接回 1 顆頂層 bot/)
+  assert.match(useStore.getState().notices[0].text, /遺失 child：worker/)
+  handleFrame(useStore.setState, useStore.getState, { type: 'herdr_recovery_done', data })
+  assert.equal(useStore.getState().notices.length, 1, '跨 WS 重連重播不能重複跳出')
+})
+
 test('panes_changed：重抓 pane 清單（別的裝置開／關／改用途的 pane 不必等 30 秒輪詢）', async () => {
   seed()
   const { handleFrame } = await import('./store.ts')

@@ -87,6 +87,7 @@ async fn global_loop(app: Arc<App>, host: String, session: String) {
                             skipped = ?report.skipped,
                             "herdr unexpected-restart recovery finished"
                         );
+                        crate::herdr_recovery::publish_recovery_report(&app, &report).await;
                     }
                     reconnect_pending = false;
                 }
