@@ -56,16 +56,19 @@ pub async fn list(pool: &SqlitePool) -> sqlx::Result<Vec<Draft>> {
     sqlx::query_as("SELECT key, text, rev, updated_at FROM composer_drafts WHERE text <> '' ORDER BY key").fetch_all(pool).await
 }
 
-async fn get(pool: &SqlitePool, key: &str) -> sqlx::Result<Option<Draft>> {
-    sqlx::query_as("SELECT key, text, rev, updated_at FROM composer_drafts WHERE key = ?").bind(key).fetch_optional(pool).await
+async fn get<'c, E: sqlx::Executor<'c, Database = sqlx::Sqlite>>(ex: E, key: &str) -> sqlx::Result<Option<Draft>> {
+    sqlx::query_as("SELECT key, text, rev, updated_at FROM composer_drafts WHERE key = ?").bind(key).fetch_optional(ex).await
 }
 
 /// 寫一份草稿。回傳（現況, 這次有沒有真的改到）；沒改到時 rev 不動。空字串＝刪除（留墓碑）。
 ///
 /// 改到的時候回報的是**這一次寫入產生的那一列**（`RETURNING`），不是寫完之後另外讀的：兩個分頁幾乎同時寫時，
-/// 先寫的那一個不能拿到後寫的版本當自己的回音（#1062）。沒回列＝內容沒變（或刪一份不存在的），才讀現況。
+/// 先寫的那一個不能拿到後寫的版本當自己的回音（#1062）。沒回列＝內容沒變（或刪一份不存在的），才讀現況；
+/// 這次讀取跟那句寫入同一個交易，中間不能插進別的寫入者（否則 rev 是它的、text 卻是我們送來的那份，#1062 第 10 輪）。
+/// 交易第一句就是寫，寫鎖從那句開始就握著，不需要 `begin_write`。
 pub async fn put(pool: &SqlitePool, key: &str, text: &str) -> sqlx::Result<(Option<Draft>, bool)> {
     let now = crate::db::now();
+    let mut tx = pool.begin().await?;
     let written: Option<Draft> = if text.is_empty() {
         sqlx::query_as(
             "UPDATE composer_drafts SET text = '', rev = rev + 1, updated_at = ? WHERE key = ? AND text <> ''
@@ -73,7 +76,7 @@ pub async fn put(pool: &SqlitePool, key: &str, text: &str) -> sqlx::Result<(Opti
         )
         .bind(&now)
         .bind(key)
-        .fetch_optional(pool)
+        .fetch_optional(&mut *tx)
         .await?
     } else {
         sqlx::query_as(
@@ -85,13 +88,19 @@ pub async fn put(pool: &SqlitePool, key: &str, text: &str) -> sqlx::Result<(Opti
         .bind(key)
         .bind(text)
         .bind(&now)
-        .fetch_optional(pool)
+        .fetch_optional(&mut *tx)
         .await?
     };
-    match written {
-        Some(d) => Ok((Some(d), true)),
-        None => Ok((get(pool, key).await?, false)),
-    }
+    let out = match written {
+        Some(d) => (Some(d), true),
+        None => {
+            #[cfg(test)]
+            crate::lifecycle::race_point::hit("draft_put_after_noop", &crate::db::file_key(&mut tx).await).await;
+            (get(&mut *tx, key).await?, false)
+        }
+    };
+    tx.commit().await?;
+    Ok(out)
 }
 
 fn event(d: &Draft, client_id: &str) -> Value {
@@ -267,6 +276,39 @@ mod tests {
         assert_eq!((ev.data["text"].as_str(), ev.data["rev"].as_i64(), ev.data["client_id"].as_str()), (Some("mine"), Some(1), Some("tab-1")));
         let now = get(&app.db, "bot:b1").await.unwrap().unwrap();
         assert_eq!((now.text.as_str(), now.rev), ("theirs", 2), "另一個寫入者的版本還在，沒有被這次的回報蓋掉");
+    }
+
+    /// #1062 第 10 輪：內容沒變的 PUT 回報的也要是**我們讀到的**那一版。no-op 寫入之後、讀現況之前，另一個寫入者
+    /// 想改這份草稿：它另開一條連線、`busy_timeout = 0`，要被擋下（no-op 那句寫入已經握著寫鎖），回報仍是 `same`／rev 1。
+    #[tokio::test]
+    async fn an_unchanged_put_cannot_report_another_writers_version() {
+        use sqlx::ConnectOptions as _;
+        let app = app().await;
+        let _ = put(&app.db, "bot:b1", "same").await.unwrap();
+        let file = crate::db::file_key(&mut *app.db.acquire().await.unwrap()).await;
+        let db_file = app.db.connect_options().get_filename().to_path_buf();
+        let seen = Arc::new(std::sync::Mutex::new(None::<bool>));
+        let cell = seen.clone();
+        crate::lifecycle::race_point::arm("draft_put_after_noop", &file, move || async move {
+            let mut other = sqlx::sqlite::SqliteConnectOptions::new()
+                .filename(&db_file)
+                .busy_timeout(std::time::Duration::ZERO)
+                .connect()
+                .await
+                .unwrap();
+            let wrote = sqlx::query("UPDATE composer_drafts SET text = 'theirs', rev = rev + 1 WHERE key = 'bot:b1'")
+                .execute(&mut other)
+                .await
+                .is_ok();
+            *cell.lock().unwrap() = Some(wrote);
+        });
+        let (draft, changed) = put(&app.db, "bot:b1", "same").await.unwrap();
+        assert!(!changed, "內容沒變，不算改到");
+        let draft = draft.expect("the draft exists");
+        assert_eq!((draft.text.as_str(), draft.rev), ("same", 1), "回報的是我們讀到的版本，不是別人寫進來的");
+        assert_eq!(*seen.lock().unwrap(), Some(false), "另一個寫入者必須在這個窗口裡被擋下");
+        let now = get(&app.db, "bot:b1").await.unwrap().unwrap();
+        assert_eq!((now.text.as_str(), now.rev), ("same", 1));
     }
 
     #[tokio::test]
