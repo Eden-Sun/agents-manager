@@ -252,14 +252,28 @@ async fn text(client: &HerdrClient, pane_id: &str, t: &str) -> bool {
 /// Enter switched the model. Migration and rate-limit prompts are user decisions; never dismiss
 /// them from this helper.
 pub fn picker_open(screen: &str) -> bool {
-    let t = screen.to_lowercase();
     crate::tui_prompts::is_codex_model_migration_prompt(screen)
         || rate_limit_switch_prompt_open(screen)
         // 啟動時的更新選單（預設選 Update now）：`/model`、`/fast` 打進去、Enter 就是替使用者按下「現在更新」。
         || crate::codex_update::update_menu_open(screen)
-        || t.contains("press enter to confirm or esc to go back")
-        || t.contains("select model and effort")
-        || t.contains("select reasoning level")
+        || model_menu_open(screen)
+}
+
+/// `/model` 的兩層選單是畫面最底下的彈出框，取代輸入框。對話裡印出來的同一串字（agent 讀別的 pane、引用選單）不算：
+/// 以前整個畫面找字，xxdzvt 2026-10-14 畫面上留著一行 `Select Reasoning Level for GPT-6-Luna`，送 prompt 前每次都被當成
+/// 選單連按 Esc，codex 被按進對話紀錄瀏覽，排著的通知 composer_unreadable 一小時（#1766）。
+/// 選單字樣要在最後一個輸入框列（`› ` 開頭、不是 `› 4.` 這種選單列）之後，而且落在畫面尾端。
+fn model_menu_open(screen: &str) -> bool {
+    const MENU_TAIL_LINES: usize = 24;
+    let lines: Vec<String> = screen.lines().filter(|l| !l.trim().is_empty()).map(|l| l.trim().to_lowercase()).collect();
+    let tail_from = lines.len().saturating_sub(MENU_TAIL_LINES);
+    let marker = |l: &str| {
+        l.contains("press enter to confirm or esc to go back") || l.contains("select model and effort") || l.contains("select reasoning level")
+    };
+    let composer = |l: &str| l.strip_prefix('›').is_some_and(|rest| !rest.trim_start().starts_with(|c: char| c.is_ascii_digit()));
+    let Some(menu_at) = lines.iter().rposition(|l| marker(l)) else { return false };
+    let composer_at = lines.iter().rposition(|l| composer(l));
+    menu_at >= tail_from && composer_at.is_none_or(|c| c < menu_at)
 }
 
 /// Codex 0.157.0's quota warning offers a model switch using the bottom selection popup.
@@ -1225,6 +1239,10 @@ mod tests {
         assert!(!picker_open(COMPOSER));
         assert!(!picker_open(STATUS));
         assert!(!picker_open(""));
+        // #1766：對話裡印出來的選單字樣（輸入框還在它下面）不是選單。
+        let quoted = format!("• Ran herdr agent read child\n  └\n      Select Reasoning Level for GPT-6-Luna\n      Press enter to confirm or esc to go back\n{COMPOSER}");
+        assert!(!picker_open(&quoted), "輸入框在選單字樣下面：只是對話內容");
+        assert!(picker_open(&format!("{COMPOSER}\n{EFFORT_MENU}")), "選單真的開在最底下");
         // #1766：對話紀錄瀏覽要 Esc 回輸入框；只認最後一行的底列，對話裡提到這幾個字不算。
         assert!(transcript_browser_open("• Ran herdr agent list\n\nBrowsing transcript · ↑↓/jk scroll · ←→/hl prompts · ^t details · ↵ rewind · esc back\n"));
         assert!(!transcript_browser_open("Browsing transcript · esc back 是 codex 的瀏覽模式\n› Ask Codex to do anything\n"));
