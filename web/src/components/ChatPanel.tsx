@@ -1,8 +1,8 @@
 import { terminalFooterFor } from '../hooks/useCodexTerminalFooter'
 import { CodexTerminalFooterItems } from './CodexTerminalFooter'
-import { splitCodexTerminalFooter } from '../lib/codexTerminalFooter'
+import { parseCodexModelLine, splitCodexTerminalFooter } from '../lib/codexTerminalFooter'
 import { projectNoFiveHour } from '../lib/quotaNoFiveHour'
-import { memo, useEffect, useLayoutEffect, useRef, useState, useId } from 'react'
+import { memo, useEffect, useLayoutEffect, useRef, useState, useId, useMemo } from 'react'
 import { CompactButton } from './CompactButton'
 import { KeepWarmSkipButton } from './KeepWarmSkipButton'
 import type { ReactNode, RefObject } from 'react'
@@ -1128,49 +1128,52 @@ export function StatusLineBar({ botId, status, text }: { botId: string; status: 
   const line = text?.trim() ?? ''
   // 終端解析的 footer 優先（帶 warning）；沒掛終端時（對話分頁）用 daemon 寫進 run.status_line 的同一行（#1755）。
   const footer = useStore((s) => terminalFooterFor(s, botId)) ?? (kind === 'codex' && line ? splitCodexTerminalFooter(line).footer : null)
-  const footerHasContext = /·\s*Context \d+% used/.test(footer?.modelLine ?? '')
-  if (!status) {
-    if (!line && !footer) return null
+  // codex 的 footer 拆成欄位，欄位交給下面跟 claude 同一套 SlItem 畫（模型與 effort 在頂端的主力晶片，額度在頂端額度列，這裡不重複）。
+  const fields = useMemo(() => (footer?.modelLine ? parseCodexModelLine(footer.modelLine) : null), [footer?.modelLine])
+  if (!status && !footer) {
+    if (!line) return null
     return (
       <div className="statusline-bar" title={line}>
         {/* CLI 自己截掉的尾巴（`· …`）不畫：那三個點不說任何事。完整原文留在 title。 */}
-        {footer ? <CodexTerminalFooterItems footer={footer} /> : <span className="statusline-text mono">{trimClippedTail(line)}</span>}
+        <span className="statusline-text mono">{trimClippedTail(line)}</span>
       </div>
     )
   }
 
+  const ctxPct = fields?.contextUsedPct ?? status?.context_used_pct ?? null
   const ctxDetail =
-    status.context_used_tokens !== null && status.context_size !== null
+    status && status.context_used_tokens !== null && status.context_size !== null
       ? `${compactTokens(status.context_used_tokens)}/${compactTokens(status.context_size)}`
       : null
+  const cwd = fields?.cwd ?? status?.cwd ?? null
   return (
-    <div className="statusline-bar" title={line || undefined}>
+    <div className="statusline-bar" title={line || footer?.modelLine || undefined}>
       <CodexTerminalFooterItems footer={footer} />
-      {status.account_warning ? (
+      {status?.account_warning ? (
         <SlItem k="帳號" className="sl-account sl-warn" title={status.account_warning}>
           ⚠ 未登入，用的是預設帳號
         </SlItem>
-      ) : status.account_email ? (
+      ) : status?.account_email ? (
         // `sl-account`：手機上 CSS 收掉（最長也最不急）。
         <SlItem k="帳號" className="sl-account">
           {status.account_email}
         </SlItem>
-      ) : status.cwd && !footer?.modelLine ? (
-        <SlItem k="目錄" title={status.cwd}>
-          {status.cwd.replace(/^\/Users\/[^/]+/, '~')}
+      ) : cwd ? (
+        <SlItem k="目錄" title={status?.cwd ?? cwd}>
+          {cwd.replace(/^\/Users\/[^/]+/, '~')}
         </SlItem>
       ) : null}
-      {status.context_used_pct !== null ? (
+      {ctxPct !== null ? (
         <SlItem k="context" title={ctxDetail ? `已用 ${ctxDetail} tokens` : undefined}>
-          {!footerHasContext ? <>{pct(status.context_used_pct)}{ctxDetail ? <span className="sl-dim"> · {ctxDetail}</span> : null}</> : null}
+          {pct(ctxPct)}{ctxDetail ? <span className="sl-dim"> · {ctxDetail}</span> : null}
           <CompactButton botId={botId} />
           {/* 手機改在長按主力晶片的狀態卡裡（BotStatusCard，觸控目標 ≥ 40px），這裡不重複。 */}
           {phone ? null : <KeepWarmSkipButton botId={botId} />}
         </SlItem>
       ) : null}
-      <StatusCache botId={botId} status={status} />
+      {status ? <StatusCache botId={botId} status={status} /> : null}
       {/* 花費不放（2026-09-12 使用者）。版本貼最右，窄視窗先讓位。 */}
-      {status.version ? (
+      {status?.version ? (
         <SlItem k="版本" className="sl-version">
           {status.version}
         </SlItem>
