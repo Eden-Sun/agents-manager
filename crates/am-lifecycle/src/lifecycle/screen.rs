@@ -2110,8 +2110,16 @@ https://chatgpt.com/codex/settings/usage to purchase more credits or try again a
 
     #[test]
     fn the_stall_message_says_an_enter_was_re_sent() {
-        assert!(stall_reason(&[], true).contains("補送"));
-        assert!(!stall_reason(&[], false).contains("補送"));
+        assert!(stall_reason(&[], true, 12).contains("補送"));
+        assert!(!stall_reason(&[], false, 12).contains("補送"));
+    }
+
+    /// issue #1769：訊息要寫出判定用的那個期限（遠端比本機久），不能一律寫死「12 秒」。
+    #[test]
+    fn the_stall_message_names_the_deadline_it_was_judged_by() {
+        assert!(stall_reason(&[], false, 12).contains("12 秒"));
+        assert!(stall_reason(&[], false, 42).contains("42 秒"));
+        assert!(!stall_reason(&[], false, 42).contains("12 秒"));
     }
 
     /// grok 撞週限的真畫面（2026-09-19 w168:pB7）：那三個編號不是選單，是 grok 用文字講出路
