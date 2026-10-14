@@ -189,7 +189,7 @@ function BotRowImpl({
   const run = useStore((s) => s.runs[botId] ?? null)
   // 主力按了「不用保溫」（冰凍）：列名旁畫雪花（SPEC §6.5k）。
   const frozen = bot?.primary === true && run?.keep_warm_skip === true
-  const { lamp, background: bgJobs, label: stateLabel, blockedReason, kids: kidsRunning } = useBotLamp(botId)
+  const { lamp, background: bgJobs, label: stateLabel, blockedReason, kids: kidsRunning, compacting } = useBotLamp(botId)
   const hostDown = useBotOfflineHost(botId)
   // 額度 critical 時整列反灰並加警示晶片（API.md §12.4）。botQuotaWarning 每次回新物件，不 useShallow 會無限重繪。
   const quotaWarning = useStore(
@@ -442,7 +442,7 @@ function BotRowImpl({
             {showTitle ? null : compact ? (
               <BackgroundJobsBadge botId={botId} variant="mini" />
             ) : (
-              hostDown ? <HostDownState /> : <BackgroundJobsBadge botId={botId} variant="state" fallback={<BotStateText lamp={lamp} reason={blockedReason} />} />
+              hostDown ? <HostDownState /> : <BackgroundJobsBadge botId={botId} variant="state" fallback={<BotStateText lamp={lamp} reason={blockedReason} compacting={compacting} />} />
             )}
           </BotNameField>
         </span>

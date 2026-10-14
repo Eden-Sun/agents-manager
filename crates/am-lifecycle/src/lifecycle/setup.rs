@@ -1052,6 +1052,9 @@ fn claude_settings(hook_cmd: &str, statusline: &str, wants_remote: bool, auto_ap
         "hooks": {
             "SessionStart": [{"hooks": [{"type": "command", "command": hook_cmd, "timeout": 5}]}],
             "Stop": [{"hooks": [{"type": "command", "command": hook_cmd, "timeout": 5}]}],
+            // issue #1770：壓縮開始（手動 `/compact`、閒置壓縮、自動壓縮都送）。daemon 據此在網頁標「壓縮中…」；
+            // 壓縮做完是 `SessionStart`（source=compact）收掉。舊版 claude 不認得就忽略。
+            "PreCompact": [{"hooks": [{"type": "command", "command": hook_cmd, "timeout": 5}]}],
             // 回合**失敗**收尾（API／auth／額度…）也是一級訊號，不是只有答完才算結束（issue #79）。
             // 沒有它的話，失敗的回合要等 §4.3 備援或 stuck watchdog 才被發現，中間一直掛在 in_flight。
             // 舊版 claude 不認得這個鍵就忽略它，不影響既有兩個 hook。
@@ -1660,6 +1663,7 @@ mod hook_cmd_parts_tests {
 
     /// issue #79：claude 的 `--settings` 要訂 `StopFailure`，daemon 才收得到「回合失敗收尾」的原生訊號；
     /// 既有的兩個 hook 一個都不能掉，三個都指向同一支 hook 指令（分類在 daemon 裡做）。
+    /// issue #1770：`PreCompact` 也訂，壓縮中的標記才有來源。
     #[test]
     fn a_claude_bot_subscribes_to_stop_failure_as_well_as_stop() {
         let v = claude_settings("/usr/bin/agents-managerd hook claude --bot b1", "/usr/bin/agents-managerd statusline", false, true);
@@ -1668,10 +1672,10 @@ mod hook_cmd_parts_tests {
         names.sort();
         assert_eq!(
             names,
-            vec!["PostToolUse", "SessionStart", "Stop", "StopFailure", "SubagentStart", "SubagentStop"],
+            vec!["PostToolUse", "PreCompact", "SessionStart", "Stop", "StopFailure", "SubagentStart", "SubagentStop"],
             "{hooks:?}"
         );
-        for name in ["SessionStart", "Stop", "StopFailure", "SubagentStart", "SubagentStop", "PostToolUse"] {
+        for name in ["SessionStart", "Stop", "StopFailure", "PreCompact", "SubagentStart", "SubagentStop", "PostToolUse"] {
             let cmd = hooks[name][0]["hooks"][0]["command"].as_str().unwrap_or_default();
             assert!(cmd.contains("hook claude"), "{name} 要指向同一支 hook 指令：{cmd}");
         }

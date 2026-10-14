@@ -7,7 +7,8 @@ import assert from 'node:assert/strict'
 import { renderToStaticMarkup } from 'react-dom/server'
 import type { Run } from '../api/types.ts'
 import { backgroundLabel } from '../lib/backgroundJobs.ts'
-import { LAMP_LABEL, botStateLabel } from './lampLabel.ts'
+import { COMPACTING_LABEL, LAMP_LABEL, botStateLabel, isCompacting } from './lampLabel.ts'
+import { BotStateText } from './BotStateText.tsx'
 import { StatusLamp } from './StatusLamp.tsx'
 
 const run = (over: Partial<Run> = {}) => ({ ...({} as Run), state: 'running', agent_status: 'idle', background_jobs: 2, ...over }) as Run
@@ -38,4 +39,24 @@ test('StatusLamp：只有背景工作不轉圈（字寫背景執行中）；閒�
   assert.doesNotMatch(renderToStaticMarkup(<StatusLamp lamp="working" background={3} />), /lamp-bg/)
   // 呼叫端給了 title（例如「名字：狀態」）就用它。
   assert.match(renderToStaticMarkup(<StatusLamp lamp="idle" background={3} title="a：背景執行中（3）" />), /title="a：背景執行中（3）"/)
+})
+
+/**
+ * issue #1770：claude 壓縮對話（`PreCompact` 標成 `compacting_since`）時，側欄與對話區寫「壓縮中…」，跟「執行中」分開；
+ * 燈號照舊（working／idle），斷線與等待回應不被蓋掉；沒有標記或舊 daemon（沒這個欄位）一律照舊文案。
+ */
+test('壓縮中：執行中或閒置時文案是「壓縮中…」，燈號與其他狀態不被蓋掉', () => {
+  const compacting = run({ agent_status: 'working', compacting_since: '2026-10-14T18:00:00.000Z' })
+  assert.equal(botStateLabel('working', compacting), COMPACTING_LABEL)
+  assert.equal(botStateLabel('idle', run({ compacting_since: '2026-10-14T18:00:00.000Z', background_jobs: 2 })), COMPACTING_LABEL, '壓縮中排在背景數字前面')
+  assert.equal(botStateLabel('blocked', run({ agent_status: 'blocked', compacting_since: '2026-10-14T18:00:00.000Z' })), LAMP_LABEL.blocked)
+  assert.equal(botStateLabel('disconnected', compacting), LAMP_LABEL.disconnected)
+  assert.equal(botStateLabel('working', run({ agent_status: 'working', compacting_since: null })), LAMP_LABEL.working, '沒有標記照舊')
+  assert.equal(isCompacting('working', null), false)
+})
+
+test('側欄狀態字：壓縮中時寫「壓縮中…」，不是「執行中」', () => {
+  assert.match(renderToStaticMarkup(<BotStateText lamp="working" reason="" compacting />), /壓縮中…/)
+  assert.doesNotMatch(renderToStaticMarkup(<BotStateText lamp="working" reason="" compacting />), /執行中/)
+  assert.match(renderToStaticMarkup(<BotStateText lamp="working" reason="" />), /執行中/, '沒有壓縮就照舊')
 })

@@ -350,6 +350,8 @@ export interface Run {
   blocked_reason?: BlockedReason | null
   /** claude 輸入框裡那句灰字「建議下一句」（`run.prompt_suggestion`）；只在 idle 才有，其他一律 `null`，舊 daemon 沒這個欄位也是 `null`。 */
   prompt_suggestion?: string | null
+  /** claude 壓縮對話中（`PreCompact` hook 或畫面的 spinner，daemon 的 `compacting.rs`，issue #1770）：開始的時間；不在壓縮中、超過 10 分鐘、舊 daemon 一律 `null`。網頁顯示「壓縮中…」，不另當成 working。 */
+  compacting_since?: string | null
   /** claude ≥ 2.1.287 的 Stop hook 報的背景工作明細（SPEC §6.14）；null＝沒報過（舊版 claude、剛重啟，數字來自畫面判斷）；`[]`＝報過「沒有」。 */
   background_tasks?: BackgroundTask[] | null
   /** 同一則 Stop 報的 session 排程（/loop、ScheduleWakeup…）：只當資訊，不算背景工作。 */
