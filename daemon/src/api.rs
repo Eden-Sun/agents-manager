@@ -295,7 +295,7 @@ pub fn router(app: Arc<App>) -> Router {
         .route("/bots/{id}/keys", post(keys_bot))
         .route("/bots/{id}/text", post(text_bot))
         .route("/bots/{id}/suggestion/accept", post(accept_suggestion))
-        .route("/bots/{id}/messages", get(get_messages))
+        .route("/bots/{id}/messages", get(get_messages_with_relay_names))
         .route("/bots/{id}/terminal", get(get_terminal))
         .route("/bots/{id}/pending-question", get(crate::runners::pending_question::get_pending_question))
         .route("/bots/{id}/local-image", get(crate::app_ports_p10::get))
@@ -6721,6 +6721,54 @@ async fn get_messages(
     Ok(Json(json!({"bot_id": id, "conversation_id": conv, "messages": msgs, "turns": turns, "has_more": has_more})))
 }
 
+/// `GET /api/bots/{id}/messages`：在 `get_messages` 的結果上補代發來源的名字。來源 bot 軟刪後，前端的 bots 清單找不到它，
+/// 只剩 ID（看起來像 child 沒正確調用）。只給 User principal：Bot principal 讀到的範圍是自己與後代，名字不外洩樹外的 bot。
+async fn get_messages_with_relay_names(
+    State(app): State<Arc<App>>,
+    Path(id): Path<String>,
+    Query(q): Query<HashMap<String, String>>,
+    Extension(principal): Extension<RequestPrincipal>,
+) -> Result<Json<Value>, LcError> {
+    let Json(mut body) = get_messages(State(app.clone()), Path(id), Query(q)).await?;
+    if principal == RequestPrincipal::User {
+        add_relay_names(&app, &mut body).await?;
+    }
+    Ok(Json(body))
+}
+
+/// 不濾 `deleted_at`：已收掉的 child 也要認得出名字。`relay_from_deleted` 讓前端標「已收掉」。
+async fn add_relay_names(app: &App, body: &mut Value) -> Result<(), LcError> {
+    let Some(msgs) = body.get_mut("messages").and_then(Value::as_array_mut) else {
+        return Ok(());
+    };
+    let mut ids: Vec<String> = msgs.iter().filter_map(|m| m["relay_from"].as_str()).filter(|id| *id != "daemon").map(str::to_owned).collect();
+    ids.sort_unstable();
+    ids.dedup();
+    if ids.is_empty() {
+        return Ok(());
+    }
+    // `?` 佔位符數量受一頁最多 500 則限制，低於 SQLite 的 999 上限。
+    let sql = format!("SELECT id, name, deleted_at IS NOT NULL FROM bots WHERE id IN ({})", vec!["?"; ids.len()].join(","));
+    let mut query = sqlx::query_as::<_, (String, String, bool)>(&sql);
+    for id in &ids {
+        query = query.bind(id);
+    }
+    let names: HashMap<String, (String, bool)> = query
+        .fetch_all(&app.db)
+        .await
+        .map_err(any_err)?
+        .into_iter()
+        .map(|(id, name, gone)| (id, (name, gone)))
+        .collect();
+    for m in msgs.iter_mut() {
+        if let Some((name, gone)) = m["relay_from"].as_str().and_then(|id| names.get(id)).cloned() {
+            m["relay_from_name"] = json!(name);
+            m["relay_from_deleted"] = json!(gone);
+        }
+    }
+    Ok(())
+}
+
 /// SPEC §13.4.
 async fn get_project_messages(
     State(app): State<Arc<App>>,
@@ -7369,6 +7417,42 @@ mod message_tests {
             get_messages(State(app), Path(bot_id.into()), Query(q)).await,
             Err(LcError::NotFoundValue(_))
         ));
+    }
+
+    /// 代發來源的 bot 已收掉（`deleted_at` 有值）仍回得出名字；Bot principal 看不到樹外的名字。
+    #[tokio::test]
+    async fn relay_from_keeps_the_name_of_a_retired_bot_for_users_only() {
+        let e = crate::testing::env().await;
+        let app = e.app.clone();
+        let (listener, relay, target) = ("relay-listener-bot", "relay-retired-child", "relay-target-bot");
+        for (id, name, deleted) in [(relay, "lx1752", Some(db::now())), (listener, "listener", None), (target, "target", None)] {
+            sqlx::query("INSERT INTO bots (id, project_id, name, kind, hook_token, deleted_at, created_at) VALUES (?,?,?,'claude','tok',?,?)")
+                .bind(id)
+                .bind(&e.project_id)
+                .bind(name)
+                .bind(deleted)
+                .bind(db::now())
+                .execute(&app.db)
+                .await
+                .unwrap();
+        }
+        let conv = db::conversation_id(&app.db, target).await.unwrap();
+        sqlx::query("INSERT INTO messages (id, conversation_id, role, content, source, relay_from, created_at) VALUES ('relayed', ?, 'user', 'x', 'web', ?, ?)")
+            .bind(&conv)
+            .bind(relay)
+            .bind(db::now())
+            .execute(&app.db)
+            .await
+            .unwrap();
+
+        let Json(user) = get_messages_with_relay_names(State(app.clone()), Path(target.into()), Query(HashMap::new()), Extension(RequestPrincipal::User)).await.unwrap();
+        let m = &user["messages"][0];
+        assert_eq!(m["relay_from_name"], "lx1752");
+        assert_eq!(m["relay_from_deleted"], true);
+
+        let Json(bot) = get_messages_with_relay_names(State(app), Path(target.into()), Query(HashMap::new()), Extension(RequestPrincipal::Bot(listener.into()))).await.unwrap();
+        assert!(bot["messages"][0].get("relay_from_name").is_none(), "{bot}");
+        assert_eq!(bot["messages"][0]["relay_from"], relay);
     }
 
     /// 同一毫秒的訊息、id 不照插入序：每一則帶 `seq`（SQLite rowid，單調遞增），前端在 created_at 相同時靠它排，

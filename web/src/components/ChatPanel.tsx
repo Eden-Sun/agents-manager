@@ -67,6 +67,7 @@ import { trimClippedTail } from '../lib/statusLineTail'
 import { quotedFrom } from '../lib/agmQuote'
 import { relaySource } from '../lib/relaySource'
 import { relayPreview } from '../lib/relayPreview'
+import { relayFromName } from '../lib/relayFromName'
 import { pastedFiles } from '../lib/pasteFiles'
 import { runtimeIdentity, runtimeSettingsKnown } from '../lib/runtimeDrift'
 import { shortModel } from '../lib/shortModel'
@@ -108,17 +109,31 @@ function systemNoticeText(content: string): string {
   return n === '1' ? 'Codex 還有 1 次額度重置可用' : `Codex 還有 ${n} 次額度重置可用`
 }
 
-/** `relay_from` 有值＝別的 bot 代為交辦，不標會被當成使用者自己派的工；對不到 bot 就退回 ID。 */
-const RelayFrom = memo(function RelayFrom({ fromId, toId, unverified }: { fromId: string; toId: string | null; unverified: boolean }) {
+/** `relay_from` 有值＝別的 bot 代為交辦，不標會被當成使用者自己派的工；對不到 bot 就退回 ID。
+ * 來源已收掉時清單找不到它，改用 daemon 補的 `savedName`（見 `relayFromName`）。 */
+const RelayFrom = memo(function RelayFrom({
+  fromId,
+  toId,
+  unverified,
+  savedName,
+  savedDeleted,
+}: {
+  fromId: string
+  toId: string | null
+  unverified: boolean
+  savedName?: string | null
+  savedDeleted: boolean
+}) {
   const names = useStore(
     useShallow((s) => ({
       from: s.bots.find((b) => b.id === fromId)?.name ?? '',
       to: toId ? (s.bots.find((b) => b.id === toId)?.name ?? '') : '',
     })),
   )
-  const label = relaySource({ fromId, fromName: names.from, toName: names.to, unverified })
+  const fromName = relayFromName({ liveName: names.from, savedName, deleted: savedDeleted })
+  const label = relaySource({ fromId, fromName, toName: names.to, unverified })
   return (
-    <span className={`msg-targets relay${names.from ? '' : ' daemon'}${unverified ? ' unverified' : ''}`} title={label.title}>
+    <span className={`msg-targets relay${fromName ? '' : ' daemon'}${unverified ? ' unverified' : ''}`} title={label.title}>
       {label.text}
     </span>
   )
@@ -182,7 +197,7 @@ const PlainBubble = memo(function PlainBubble({
               {from}
             </span>
           ) : null}
-          {msg.role === 'user' && msg.relay_from ? <RelayFrom fromId={msg.relay_from} toId={msg.bot_id ?? null} unverified={msg.relay_unverified === true} /> : null}
+          {msg.role === 'user' && msg.relay_from ? <RelayFrom fromId={msg.relay_from} toId={msg.bot_id ?? null} unverified={msg.relay_unverified === true} savedName={msg.relay_from_name} savedDeleted={msg.relay_from_deleted === true} /> : null}
           {quoted ? (
             <span className="msg-targets relay quoted" title={`這一則的內容來自 ${quoted}，不是使用者自己打的`}>
               {quoted}（轉述）
