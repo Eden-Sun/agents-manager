@@ -2778,7 +2778,7 @@ header 的 herdr 徽章確認後 `POST /api/hosts/{name}/herdr-update`（API §1
    daemon 來源的訊息（走 AGM 派工那條會排隊的路），列出失去的子 agent 名與原任務標題（run 的 `agent_title`），由母 bot 決定要不要重開。
 7. 關窗口（沒接回的子 agent 由 §6.5.2 第 3 條照原規則退休），推 `herdr_update_done`；成功時順手修正 `upstream-updates` 快照與 `hosts[].herdr`。
 
-本機 global event stream 曾建立後中斷，重連成功時若確認 herdr 的 pane list 全空，且沒有 herdr 更新或維護窗口持有重連，視為非預期 server 重啟。一般 reconcile 前先沿用本節的頂層 `resume_native` 路徑接回原 native session；child pane 不重建，交給 reconcile 退休。恢復批次最多每 30 分鐘三次，間隔依序 2、10、30 秒；超限即停止自動接回。一次確認的重啟會推 WS `herdr_recovery_done` 供網頁側欄提示，並以既有 `ops_alert` 寫入 AGM inbox；子 agent 遺失、接回失敗或熔斷都列入摘要。重連時重查 panes 與維護狀態，避免和更新流程或已自行恢復的 server 競爭。
+本機 global event stream 曾建立後中斷，重連成功時若確認所有 active run 的舊 pane 都已消失或沒有 agent occupant，且沒有 herdr 更新或維護窗口持有重連，視為非預期 server 重啟；server 重啟後仍存在、但已是空 shell 的 pane 也算遺失。recovery 先於 reconnect reconcile，並持有同一把 host reconcile lock，避免 run 在接回前被標記 exited。沿用本節的頂層 `resume_native` 路徑接回原 native session；既有 restart 流程會關閉舊空 pane/tab，child pane 不重建，交給 reconcile 退休。恢復批次最多每 30 分鐘三次，間隔依序 2、10、30 秒；超限即停止自動接回。一次確認的重啟會推 WS `herdr_recovery_done` 供網頁側欄提示，並以既有 `ops_alert` 寫入 AGM inbox；子 agent 遺失、接回失敗或熔斷都列入摘要。重連時重查 panes 與維護狀態，避免和更新流程或已自行恢復的 server 競爭。
 
 每一步附加到 `<data_dir>/herdr-update.log`（`時間 update_id 目標版 phase 訊息`）。daemon 半途重啟時沒有接手：窗口 30 分鐘自己到期，換到一半的話 `.bak` 在旁邊、log 寫著做到哪。
 
