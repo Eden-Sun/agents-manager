@@ -63,7 +63,8 @@ test('工作中：帶 working，不帶 unread（數字籤只給完成待看）',
   const r = chipNamed('bot-run')!
   assert.ok(r, '在跑的那顆要在列上')
   assert.ok(r.classList.contains('working') && !r.classList.contains('unread'), r.className)
-  assert.ok(r.querySelector('.unread-chip-dot'), '工作中是脈動點，不是數字籤')
+  assert.ok(r.querySelector('.unread-chip-working-ring'), '工作中是旋轉外框，不是數字籤')
+  assert.equal(r.querySelector('.unread-chip-dot'), null, '工作中不畫舊的小色點')
 })
 
 // ---- CSS：照 styles.css 的 token 重算，不另外寫色票 ----

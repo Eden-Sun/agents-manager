@@ -68,10 +68,10 @@ export function ChipLegend({ onClose }: { onClose: () => void }) {
           </li>
           <li>
             <span className="unread-chip working" aria-hidden="true">
-              <span className="unread-chip-dot" />
+              <span className="unread-chip-working-ring" />
               <span className="unread-chip-name">bot</span>
             </span>
-            <span>閃動的點：還在執行</span>
+            <span>旋轉的整圈外框：還在執行</span>
           </li>
           <li>
             <span className="unread-chip current" aria-hidden="true">
