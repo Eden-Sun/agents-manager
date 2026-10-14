@@ -27,6 +27,11 @@ pub fn pending_ask_entry(log: &str) -> Option<(String, Value)> {
         if entry.get("isSidechain").and_then(Value::as_bool) == Some(true) {
             continue;
         }
+        // claude 2.1.300 起每次 API 請求另記 `api-request-blob`，也帶 `message.content`（請求裡送出的訊息副本），
+        // 不是對話本身；只認對話的那兩種，副本不能重新問一次或答掉一題（issue #1771）。
+        if entry.get("type").and_then(Value::as_str).is_some_and(|t| t != "assistant" && t != "user") {
+            continue;
+        }
         let Some(content) = entry.pointer("/message/content").and_then(Value::as_array) else { continue };
         for block in content {
             match block.get("type").and_then(Value::as_str) {
@@ -125,5 +130,28 @@ mod tests {
         let bad = json!({"message": {"content": [{"type": "tool_use", "id": "t1", "name": "AskUserQuestion", "input": {}}]}}).to_string();
         assert_eq!(pending_ask(&bad), None);
     }
-}
 
+    /// claude 2.1.300 實錄的請求紀錄（字串已遮蔽，結構與大小照原樣）。
+    const API_REQUEST_LOG: &str = include_str!("../../../crates/am-lifecycle/src/lifecycle/fixtures/claude_2.1.300_api_request.jsonl");
+
+    /// issue #1771：題目後面夾著一回合的請求紀錄，固定大小的檔尾仍找得到；`api-request-blob` 裡的訊息副本不算提問也不算回答。
+    #[test]
+    fn api_request_records_after_the_question_do_not_hide_or_answer_it() {
+        assert!(API_REQUEST_LOG.lines().any(|l| l.contains("\"type\":\"api-request-shape\"")));
+        let blob = |m: serde_json::Value| json!({"type": "api-request-blob", "hash": "h", "sessionId": "s", "message": m}).to_string();
+        let copy_answer = blob(serde_json::from_str::<serde_json::Value>(&answer("t1")).unwrap()["message"].clone());
+        let copy_ask = blob(serde_json::from_str::<serde_json::Value>(&ask("t9", "副本")).unwrap()["message"].clone());
+        // 一回合十幾次請求（各帶新的 shape 與 blob）都塞在題目之後。
+        let mut lines = vec![ask("t1", "還在等")];
+        for _ in 0..4 {
+            lines.extend(API_REQUEST_LOG.lines().map(str::to_string));
+        }
+        lines.extend([copy_answer, copy_ask]);
+        let log = lines.join("\n");
+        assert!(log.len() < TAIL_BYTES as usize, "實測一回合遠小於檔尾：{}", log.len());
+        let (id, input) = pending_ask_entry(&log).expect("題目還在等");
+        assert_eq!(id, "t1");
+        assert_eq!(input["questions"][0]["question"], "還在等");
+        assert!(pending_ask(&[log, answer("t1")].join("\n")).is_none());
+    }
+}
