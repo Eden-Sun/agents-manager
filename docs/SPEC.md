@@ -2577,6 +2577,10 @@ pt-hub = ["~/project/pt/CLAUDE.md", "~/project/pt/AGENTS.md"]      # 多份照�
 - **保溫回覆與未讀**：保溫回合的訊息（`any updates` 與 bot 的回覆）帶 `messages.keep_warm = 1`（trigger `messages_keep_warm_mark` 在寫入時蓋，舊列開 DB 時回填），訊息 JSON 的 `keep_warm`；
   daemon 算的未讀（`read_marks` 的 `unread`）一律不計這些回合。run JSON 的 `keep_warm_replied_at`＝最近一次保溫回覆完成時間，從回合紀錄推算：保溫回合完成後、還沒有任何非保溫回合才有值，
   使用者送出新的 prompt（新回合出現）就是 `null`（「之後」以寫入順序 `rowid` 判，同一毫秒也分得出先後；保溫在飛時排進來的使用者回合也算在保溫之後；「最近回合」的第二鍵同樣用 `rowid`，#867），隨 `bot_status` 廣播；網頁據此把主力晶片框上色。
+- **Claude 原生閒置壓縮只留給 child（使用者 2026-10-14）**：claude 2.1.299 起內建閒置壓縮（對話 ≥ 200K tokens、閒置約 54 分就自己 `/compact`，比 58 分的保溫早）。
+  daemon 起的 claude bot（parent）在 `claude-settings.json` 寫 `idleCompaction: false`（`lifecycle::setup::claude_settings`，本機與遠端同一份，issue #1756），閒置一律交給本節的保溫／熱壓；
+  `herdr agent start` 開的 claude child 不帶 daemon 的 `--settings`，吃帳號自己的設定，**保留原生閒置壓縮**（child 不在保溫對象內，沒有別的機制替它省 context）。
+  設定檔只在 bot 啟動時寫，修正前就在跑的 parent 要重啟一次才生效；不要在帳號層的 `settings.json` 關掉它，那樣 child 也一起關了。
 - **巡邏**：`supervisor::controller` 的控制迴圈每拍呼叫 `primary_keep_warm::tick`，自己節流成 30 秒一次、丟背景跑（測試版不跑）。
 - **顯示**：`last_api_at` 因此是真實年齡（網頁 tooltip 的「上次活動」與數字照樣上數）；run JSON 另帶 `cache_kept_warm_at`（API.md）＝最近一次成功保溫回合讓 cache 實際變熱的時間（熱壓不算；比最近一次熱壓早的保溫也不算，熱壓後是 `null`、等新活動後的新保溫），
   網頁（`cacheState`）用 `max(last_api_at, cache_kept_warm_at)` 算顏色與剩餘，所以 60 分不會誤判變涼；另帶 `keep_warm_skip`、`keep_warm_replied_at`。
