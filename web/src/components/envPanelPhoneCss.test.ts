@@ -52,6 +52,12 @@ test('手機：可點的目標 ≥44px', () => {
   }
 })
 
+test('手機：安裝鍵與主要鍵也 ≥44px（蓋過 styles.css 同權或後載入的規則）', () => {
+  // styles.css 的 `.mini-btn.install-btn`（28px）與 `.btn.primary`（40px）同為 0,2,0 或更高，要靠更高的特異性壓過。
+  assert.match(decl(phone.inside, '.env-panel .mini-btn.install-btn'), /min-height:\s*44px/)
+  assert.match(decl(phone.inside, '.env-panel .btn.primary'), /min-height:\s*44px/)
+})
+
 test('手機：文字 ≥13px、輸入框不另設小字級', () => {
   const sizes = [...phone.inside.matchAll(/font-size:\s*([\d.]+)px/g)].map((m) => Number(m[1]))
   assert.ok(sizes.length > 0)
