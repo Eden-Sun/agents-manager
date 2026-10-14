@@ -134,9 +134,9 @@
         pool.close().await;
     }
 
-    /// #1685：從 v60 升級時既有 queued turn 不因索引拆 lane 而令 migration 失敗；使用者選的通知前綴也不能變成 daemon lane。
+    /// #1685：從目前 v62 schema 升級時既有 queued turn 不因索引拆 lane 而令 migration 失敗；使用者選的通知前綴也不能變成 daemon lane。
     #[tokio::test]
-    async fn v60_queued_turns_migrate_to_writer_classes_without_using_user_prefixes() {
+    async fn pre_queue_class_queued_turns_migrate_to_writer_classes_without_using_user_prefixes() {
         let (pool, _) = bare_wal_pool().await;
         let old_schema = SCHEMA.replace(
             "  queue_class TEXT NOT NULL DEFAULT 'user' CHECK (queue_class IN ('user','relay','daemon')),\n",
@@ -173,9 +173,9 @@
             sqlx::query("INSERT INTO messages (id,conversation_id,turn_id,role,content,source,relay_from,created_at) VALUES (?, ?, ?, 'user', 'x', 'web', ?, '2026-10-01T00:00:00.000Z')")
                 .bind(format!("m-{turn}")).bind(conv).bind(turn).bind(relay_from).execute(&pool).await.unwrap();
         }
-        sqlx::query("PRAGMA user_version = 60").execute(&pool).await.unwrap();
+        sqlx::query("PRAGMA user_version = 62").execute(&pool).await.unwrap();
 
-        crate::runners::am_base_tests::apply_migrations(&pool).await.expect("v60 database with queued turns must migrate");
+        crate::runners::am_base_tests::apply_migrations(&pool).await.expect("pre-queue-class database with queued turns must migrate");
         let classes: Vec<(String, String)> = sqlx::query_as("SELECT id, queue_class FROM turns WHERE status='queued' ORDER BY id")
             .fetch_all(&pool).await.unwrap();
         assert_eq!(classes, [("t-notice".into(), "daemon".into()), ("t-relay".into(), "relay".into()), ("t-user".into(), "user".into())]);
