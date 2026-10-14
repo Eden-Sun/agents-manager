@@ -527,6 +527,7 @@ mod arc_port_34_judgefuse {
     use sqlx::SqlitePool;
     use crate::config::JudgeCfg;
     impl<T: crate::judge::JudgeFuse + ?Sized> crate::judge::JudgeFuse for std::sync::Arc<T> {
+        async fn claim_host_fence(&self, bot: &str) -> Option<crate::hosts::HostFence> { <T as crate::judge::JudgeFuse>::claim_host_fence(self.as_ref(), bot).await }
         fn judge_fuse(&self) -> &tokio::sync::Mutex<()> { <T as crate::judge::JudgeFuse>::judge_fuse(self.as_ref()) }
     }
 }
