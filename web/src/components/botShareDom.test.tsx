@@ -15,14 +15,16 @@ import { ShareLinkButton, ShareMark } from './ShareLinkButton'
 import { SentViaTag } from './SentViaTag'
 import { shareProfileBlocked } from '../lib/shareProfile'
 
-// 預設當成 https（剪貼簿可用）；非 secure context 的行為由專門那條測試覆寫。
-Object.defineProperty(window, 'isSecureContext', { configurable: true, value: true })
-
 afterEach(async () => {
   await unmountAll()
   resetStoreForTest()
 })
-before(setupDom)
+// 預設當成 https（剪貼簿可用）；非 secure context 的行為由專門那條測試覆寫。要在 setupDom 之後設：
+// 整套一起跑時前一個測試檔 teardown 掉了 window，這裡才註冊新的（#1765：模組載入時設在舊的 window 上）。
+before(() => {
+  setupDom()
+  Object.defineProperty(window, 'isSecureContext', { configurable: true, value: true })
+})
 after(async () => {
   resetStoreForTest()
   await teardownDom()
