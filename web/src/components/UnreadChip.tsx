@@ -142,14 +142,7 @@ function Chip({ it, dnd, lamp }: { it: ChipItem; dnd?: PinnedDnd; lamp?: boolean
       onKeyDown={drag ? (e) => drag.onKeyDown(e, it.id) : undefined}
     >
       {it.working ? <span className="unread-chip-working-ring" aria-hidden="true" /> : null}
-      {lamp ? (
-        // 手機主力區（#344）：整區都是釘選的，★ 每顆一樣只佔寬；改放側欄那顆燈號。
-        <ChipLamp id={it.id} />
-      ) : it.pinned ? (
-        <span className="unread-chip-star" aria-hidden="true">
-          ★
-        </span>
-      ) : null}
+      {lamp ? <ChipLamp id={it.id} /> : null}
       <span className="unread-chip-name">{it.name}</span>
       {it.keepWarmReplied ? (
         <span className="unread-chip-warm" aria-hidden="true">
