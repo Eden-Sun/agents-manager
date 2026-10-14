@@ -58,7 +58,7 @@ origin:   web | external                     （external = 非本系統送出、
 
 燈號：disconnected 灰；stopped/exited 離線；starting 黃閃；stopping 黃；running+idle 綠；+working 藍動畫；+blocked 紅；+unknown 灰黃。
 
-標題列的 Bot 晶片以整圈藍色旋轉外框表示 `working`，取代小色點（桌機與手機一致）；只旋轉邊緣漸層，文字、快取底色與選取狀態保持可辨識。非 working 不畫旋轉框；`prefers-reduced-motion` 時改為靜態藍框，讀屏仍讀「執行中」。側欄燈號沿用原規則。
+標題列的 Bot 晶片以整圈黃色旋轉外框表示 `working`，取代小色點（桌機與手機一致）；只旋轉邊緣漸層，文字、快取底色與選取狀態保持可辨識。藍色外框表示 focus，執行中外框用黃色系避免混淆。非 working 不畫旋轉框；`prefers-reduced-motion` 時改為靜態黃框，讀屏仍讀「執行中」。側欄燈號沿用原規則。
 
 herdr 0.9.2 起（上游 #4507），codex 畫面沒有任何偵測規則對上時回 `unknown`（`agent explain`：`codex_state_ambiguous`）；0.9.1 同一個畫面回
 `idle`（`default_known_agent_idle_fallback`）。codex 的 manifest 沒有 idle 規則，閒著的 codex 在 0.9.2+ 因此永遠是 `unknown`。herdr client
