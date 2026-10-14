@@ -115,26 +115,14 @@ test('codex 的 context 補進狀態列同一段格式；claude 已有 context �
   assert.equal(contextFallback(codex({ context_used_pct: null })), null)
 })
 
-test('gpt-6.1-sol：context 分母 500k，分子用實際 token（73000 → 14.6%）；沒有 token 不畫；其他模型照舊', () => {
-  // CLI／rollout 的視窗是 475k：76000 會被寫成 16%，這裡要換成 500k 算。
+test('gpt-6.1-sol：context 整段由 StatusLineBar 畫，contextFallback 不重複；其他模型照舊', () => {
   const sol = codex({ context_used_pct: 16, context_used_tokens: 73_000, context_size: 475_000 }, { model: 'gpt-6.1-sol' })
-  assert.deepEqual(contextFallback(sol), { pct: '14.6%', detail: '73k/500k' })
-  assert.equal(contextFallback({ ...sol, promptCache: daemonPc({ context_used_pct: 16, context_used_tokens: null, context_size: 475_000 }) }), null)
-  assert.deepEqual(contextFallback({ ...sol, model: 'GPT-6.1-Sol' }), { pct: '14.6%', detail: '73k/500k' })
-  // 其他 Sol 版本與 Luna：仍用 rollout 給的視窗。
+  assert.equal(contextFallback(sol), null)
+  assert.equal(contextFallback({ ...sol, model: 'GPT-6.1-Sol' }), null)
+  assert.equal(contextFallback({ ...sol, promptCache: null, status: { context_used_pct: null, context_used_tokens: 73_000, context_size: null } }), null)
+  // 其他 Sol 版本與 Luna、以及 claude 的同名模型：仍用 rollout 給的視窗。
   assert.deepEqual(contextFallback({ ...sol, model: 'gpt-6-sol' }), { pct: '16%', detail: '73k/475k' })
   assert.deepEqual(contextFallback({ ...sol, model: 'gpt-6-luna' }), { pct: '16%', detail: '73k/475k' })
-  // 有 statusLine 的 pct：主顯示路徑（StatusLineBar）負責，這裡不重複。
-  assert.equal(contextFallback({ ...sol, status: { context_used_pct: 16, context_used_tokens: null, context_size: null } }), null)
-})
-
-test('gpt-6.1-sol：0 token 顯示 0%；沒有 prompt_cache 時退用 statusLine 的實際 token；claude 同model不套', () => {
-  assert.deepEqual(contextFallback(codex({ context_used_pct: 16, context_used_tokens: 0, context_size: 475_000 }, { model: 'gpt-6.1-sol' })), { pct: '0%', detail: '0/500k' })
-  const noPc = { kind: 'codex', model: 'gpt-6.1-sol', promptCache: null, status: { context_used_pct: null, context_used_tokens: 73_000, context_size: null }, lastApiAt: null, ttlSecs: null, nowMs: NOW, working: false } as CacheInput
-  assert.deepEqual(contextFallback(noPc), { pct: '14.6%', detail: '73k/500k' })
-  // 沒有任何實際 token：不畫，不拿 pct 乘 500k。
-  assert.equal(contextFallback({ ...noPc, status: { context_used_pct: null, context_used_tokens: null, context_size: null } }), null)
-  // claude 的 bot 就算設成 gpt-6.1-sol 也不走 Sol 規則（仍是既有 statusLine 規則，這裡只看 pc 欄位）。
   assert.deepEqual(contextFallback(codex({ context_used_pct: 16, context_used_tokens: 73_000, context_size: 475_000 }, { kind: 'claude', model: 'gpt-6.1-sol' })), { pct: '16%', detail: '73k/475k' })
 })
 
