@@ -690,6 +690,22 @@ mod nbsp_composer_tests {
 
 const STALL_SECS: u64 = 12;
 
+/// 期限（秒）。遠端 bot 的 hook 先躺在那台的 spool，要等下一輪掃描（[`crate::hookrecv::SCAN_EVERY`]）才進 `hook_events`，
+/// 所以多等一輪；本機的 hook 直接寫進 DB，期限不變（issue #1769）。
+pub fn stall_deadline_secs(remote: bool) -> u64 {
+    if remote {
+        STALL_SECS + crate::hookrecv::SCAN_EVERY.as_secs()
+    } else {
+        STALL_SECS
+    }
+}
+
+/// 這顆 bot 的 stall 期限：看它的 host 是不是遠端。讀不到 host 當本機（期限最短，跟以前一樣）。
+async fn stall_deadline_for(app: &impl LcHost, bot_id: &str) -> u64 {
+    let remote = db::bot_host(app.db(), bot_id).await.is_ok_and(|h| h != crate::config::LOCAL_HOST);
+    stall_deadline_secs(remote)
+}
+
 /// Rows above the bottom the composer can start (it grows with its text; claude adds a hint row).
 pub const COMPOSER_TAIL: usize = 24;
 
@@ -1046,9 +1062,10 @@ async fn resend_with_retry(
     Some((last, blocked))
 }
 
-/// The agent must leave `idle` within `STALL_SECS` after delivery, or the Turn sits `in_flight`
+/// The agent must leave `idle` within the stall deadline (`stall_deadline_secs`) after delivery, or the Turn sits `in_flight`
 /// forever (not logged in, invisible modal). Cancelled by the first `working` / `blocked` event.
 pub async fn arm_stall(app: &impl LcHost, run_id: &str, bot_id: &str, turn_id: &str) {
+    let deadline = stall_deadline_for(app, bot_id).await;
     let mut timers = app.stall_timers().lock().await;
     static NEXT_GENERATION: AtomicU64 = AtomicU64::new(0);
     let generation = NEXT_GENERATION.fetch_add(1, Ordering::Relaxed);
@@ -1073,7 +1090,7 @@ pub async fn arm_stall(app: &impl LcHost, run_id: &str, bot_id: &str, turn_id: &
                 Err(e) => tracing::debug!(turn = %turn_id, error = %e, "early nudge could not read the turn; the deadline looks again"),
             }
         }
-        tokio::time::sleep(Duration::from_secs(STALL_SECS - NUDGE_EARLY_SECS)).await;
+        tokio::time::sleep(Duration::from_secs(deadline - NUDGE_EARLY_SECS)).await;
         loop {
             match stall_round(&app2, &run_id, &bot_id, &turn_id, generation, &mut st, Duration::from_secs(NUDGE_GRACE_SECS)).await {
                 StallRound::Replaced => return,
@@ -1263,7 +1280,7 @@ async fn fail_stalled_turn(
             }
         }
     }
-    let mut reason = stall_reason(&hints, nudged);
+    let mut reason = stall_reason(&hints, nudged, stall_deadline_for(app, bot_id).await);
     if resent {
         reason.push_str(&format!("\n（第一次送出後畫面上完全沒有這則訊息，已自動重送 {MAX_PROMPT_RESENDS} 次，仍沒有反應。）"));
     } else if let Some(why) = resend_blocked {
@@ -1311,8 +1328,8 @@ fn stall_hint_lines(screen: &str) -> Vec<String> {
 }
 
 /// Neutral wording: symptom + quoted screen + keychain caveat; never claim "not logged in".
-pub fn stall_reason(hints: &[String], nudged: bool) -> String {
-    let head = format!("agent 在 {STALL_SECS} 秒內沒有對訊息作出反應。");
+pub fn stall_reason(hints: &[String], nudged: bool, secs: u64) -> String {
+    let head = format!("agent 在 {secs} 秒內沒有對訊息作出反應。");
     // `nudged`: tell the user we already pressed Enter for text left in the box.
     let head = if nudged {
         format!("{head}訊息還留在輸入框沒送出（TUI 忙碌時會把多行文字當成貼上，吞掉最後的 Enter），已嘗試補送一次 Enter，等 {NUDGE_GRACE_SECS} 秒仍沒有反應。")
@@ -3464,6 +3481,14 @@ mod issue_17_tests {
         let idle = fixture("claude", IDLE_BOX).await;
         fail_stalled_turn(&idle.env.app, &idle.run_id, &idle.bot_id, &idle.turn_id, false, false, None).await.unwrap();
         assert_eq!(turn_status(&idle).await, "failed", "沒有任何活動跡象：照舊判 STALL");
+    }
+
+    /// issue #1769：遠端 hook 先躺在那台的 spool，要等一輪掃描才進 `hook_events`；本機的 12 秒不能原封不動套給遠端。
+    /// 遠端的期限至少要等得到一輪 spool 掃描（[`crate::hookrecv::SCAN_EVERY`]），本機不變。
+    #[test]
+    fn a_remote_bot_gets_a_deadline_that_outlasts_one_spool_scan() {
+        assert_eq!(stall_deadline_secs(false), STALL_SECS, "本機的 hook 直接進 DB，期限不變");
+        assert!(stall_deadline_secs(true) >= STALL_SECS + crate::hookrecv::SCAN_EVERY.as_secs(), "遠端要等得到下一輪 spool 掃描");
     }
 
     /// 同一個 issue 的另一半：畫面是空框、herdr 沒報 working，但 hook 已經有動靜（`PostToolUse`）＝agent 在處理，不判失敗也不重送。

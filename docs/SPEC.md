@@ -1507,7 +1507,7 @@ tab 已被回收視為完成，`tab.list` 失敗不猜。沒有 `tab_id` 的 Run
    `Unproven` 與打字後的錯誤 → `unknown`（不重送）；`agent_blocked` → `failed`。打字送出後的確認迴圈最多補按一次 Enter：每次補按前重讀 composer，只有完整讀出的內容（畫面的列逐列對得上原文：列內的字與空白逐字相同，只有列與列之間的接縫可以是「沒有字元」＝中文或長字硬折、「一段空白」＝在空白處折行、「換行」＝原文本來就換行；行內空白被改動的 `send to ann a`→`send to anna` 不算同一則，#1666）仍等於本次送出的文字、且尚無該文字的送達正面證據才按；看到正面證據就記 `Submitted`，不論框裡現在是什麼（同一則字也不補按，#1599）。內容不同或無法完整讀取時不補按，證據不足則記 `unknown`（#1486、#1598）。字還在框裡（後面接了別的字）時不記 Pending，只有框空了、讀不準、或框裡已找不到本則才交給背景（#1600）。
 5. 完成靠 hook（§6.7）或備援（§4.3）。Turn 在送 prompt 之前已 `in_flight`，所以 hook 早於 RPC 回應也配得到。
 6. `interrupt`（送 `esc`）／`stop` 把 in-flight Turn 標 `failed` 並加 system Message。
-7. **stall watchdog**：`delivery = ok` 後 12 秒內沒收到 `working`／`blocked` 且仍 idle/unknown → 先看字是不是還在框裡（在就補按 Enter、給寬限；「在框裡」＝框裡讀回的列逐列對得上原文的一段，列內的字與空白逐字相同，接縫不計；尾段被改、或後面接了別的字就不是我們那則，不按 Enter，#1669）；
+7. **stall watchdog**：`delivery = ok` 後 12 秒（遠端 bot 42 秒＝12 秒加一輪 spool 掃描 30 秒，#1769：遠端 hook 先躺在那台的 spool，晚於本機才進 `hook_events`）內沒收到 `working`／`blocked` 且仍 idle/unknown → 先看字是不是還在框裡（在就補按 Enter、給寬限；「在框裡」＝框裡讀回的列逐列對得上原文的一段，列內的字與空白逐字相同，接縫不計；尾段被改、或後面接了別的字就不是我們那則，不按 Enter，#1669）；
    不在框裡、畫面上也找不到 → `auto_resend=1` 的自動重送一次（本章開頭：讀 `prompt_text`、打字前被擋退還額度再試一次、按過鍵證明不了記 `unknown`）；
    都沒用才讀 `visible` 快照 → Turn `failed` + system Message，
    **判斷不了就不判**（#193）：送了什麼、run／turn／bot、重送額度讀不到或寫不進去，這一輪不判失敗，隔 10 秒整輪再看；
