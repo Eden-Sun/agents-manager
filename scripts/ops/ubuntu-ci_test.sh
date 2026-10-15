@@ -31,6 +31,7 @@ setup() {
   git init -q --bare "$ROOT/origin.git"
   git clone -q "$ROOT/origin.git" "$ROOT/work" 2>/dev/null
   mkdir -p "$ROOT/work/scripts"
+  cp "$HERE/../ci-changed-parts.sh" "$ROOT/work/scripts/ci-changed-parts.sh"
   # 假 check.sh：每段看 $FIX/rc.<段> 決定 rc，預設 0；$FIX/hang.<段> 存在就忽略 TERM 睡很久。
   cat > "$ROOT/work/scripts/check.sh" <<'CK'
 #!/bin/bash
@@ -620,6 +621,65 @@ echo 124 > "$FIX/rc.ops"
 equals "中斷（rc=124）仍 exit 0" "$(run)" "0"
 check "中斷：error 的 reason 是 interrupted" '"reason":"interrupted"' "$CI/status.json"
 equals "中斷：status.json 也有四段 parts" "$(parts_ok "$CI/status.json")" "ok"
+teardown
+
+# A full successful ancestor is required; docs skips never advance that baseline.
+setup
+equals "沒有完整基準先全跑" "$(run)" "0"
+BASE=$(git -C "$ROOT/work" rev-parse HEAD)
+equals "全綠建立完整基準" "$(cat "$CI/full-success-sha")" "$BASE"
+push_file() {
+  mkdir -p "$(dirname "$ROOT/work/$1")"
+  printf '%s\n' "$2" > "$ROOT/work/$1"
+  (cd "$ROOT/work" && git add -A && git commit -qm "$2" && git push -q origin main)
+}
+push_file docs/review.md docs
+: > "$FIX/gh.log"
+equals "純文件 exit 0" "$(run)" "0"
+DOCS=$(git -C "$ROOT/work" rev-parse HEAD)
+check "純文件送 success 並標記 skip" 'state=success.*docs-only skip' "$FIX/gh.log"
+check_no "純文件沒有跑四段" '==> fake' "$CI/logs/$DOCS.log"
+equals "skip 不前進完整基準" "$(cat "$CI/full-success-sha")" "$BASE"
+equals "skip 更新 last-sha" "$(cat "$CI/last-sha")" "$DOCS"
+push_file docs/review.md more-docs
+equals "連續文件 SHA 沿用完整基準" "$(run)" "0"
+equals "完整基準仍不前進" "$(cat "$CI/full-success-sha")" "$BASE"
+# A failed code SHA followed by docs must still exercise the code difference from BASE.
+push_file web/src/change.ts code
+echo 1 > "$FIX/rc.web"
+run >/dev/null
+equals "紅燈不前進完整基準" "$(cat "$CI/full-success-sha")" "$BASE"
+push_file docs/review.md mixed
+run >/dev/null
+MIXED=$(git -C "$ROOT/work" rev-parse HEAD)
+check "混合範圍仍跑全套" '==> fake daemon' "$CI/logs/$MIXED.log"
+check "文件不能掩蓋前一個 code 紅燈" '"state":"failure"' "$CI/status.json"
+rm "$FIX/rc.web"
+push_file unknown-input opaque
+run >/dev/null
+UNKNOWN=$(git -C "$ROOT/work" rev-parse HEAD)
+check "未知路徑仍全跑" '==> fake daemon' "$CI/logs/$UNKNOWN.log"
+equals "完整成功才前進基準" "$(cat "$CI/full-success-sha")" "$UNKNOWN"
+# A valid but unrelated commit, a missing object, and a broken classifier all fail closed.
+UNRELATED=$(printf unrelated | git -C "$ROOT/work" commit-tree "$(git -C "$ROOT/work" rev-parse HEAD^{tree})")
+printf '%s\n' "$UNRELATED" > "$CI/full-success-sha"
+push_file docs/review.md unrelated
+run >/dev/null
+check "非祖先基準仍全跑" '==> fake daemon' "$CI/logs/$(git -C "$ROOT/work" rev-parse HEAD).log"
+printf '%040d\n' 0 > "$CI/full-success-sha"
+push_file docs/review.md missing-base
+run >/dev/null
+check "缺基準 object 仍全跑" '==> fake daemon' "$CI/logs/$(git -C "$ROOT/work" rev-parse HEAD).log"
+# Moving code into docs must preserve the deleted code path in the classification.
+(cd "$ROOT/work" && git mv web/src/change.ts docs/moved.md && git commit -qm rename && git push -q origin main)
+run >/dev/null
+check "程式改名到 docs 仍全跑" '==> fake daemon' "$CI/logs/$(git -C "$ROOT/work" rev-parse HEAD).log"
+push_file scripts/ci-changed-parts.sh '#!/bin/bash
+exit 1'
+run >/dev/null
+push_file docs/review.md classifier-failed
+run >/dev/null
+check "分類器失敗仍全跑" '==> fake daemon' "$CI/logs/$(git -C "$ROOT/work" rev-parse HEAD).log"
 teardown
 
 echo "ubuntu-ci_test: $PASS passed, $FAIL failed"
