@@ -321,8 +321,8 @@ for f in web/src/lib/shared.ts web/vite.config.ts web/package.json web/bun.lock;
     export AM_TEST_DIFF_HEAD="$f"
     output="$(changed)" || fail "$f 的 changed 失敗：$output"
     grep -qx 'test' "$AM_TEST_BUN_LOG" || fail "${f}：bun test 要不帶任何過濾字串跑全部：$(tr '\n' '|' <"$AM_TEST_BUN_LOG")"
-    grep -qx 'run build' "$AM_TEST_BUN_LOG" || fail "${f}：沒跑 build：$(tr '\n' '|' <"$AM_TEST_BUN_LOG")"
-    grep -q 'tsc -p tsconfig.app.json' "$AM_TEST_BUN_LOG" || fail "${f}：沒跑 tsc：$(tr '\n' '|' <"$AM_TEST_BUN_LOG")"
+    grep -qx 'bunx vite build' "$AM_TEST_BUN_LOG" || fail "${f}：沒跑 build：$(tr '\n' '|' <"$AM_TEST_BUN_LOG")"
+    grep -q 'tsc -b' "$AM_TEST_BUN_LOG" || fail "${f}：沒跑 tsc：$(tr '\n' '|' <"$AM_TEST_BUN_LOG")"
     grep -q 'install --frozen-lockfile' "$AM_TEST_BUN_LOG" || fail "${f}：沒驗鎖檔：$(tr '\n' '|' <"$AM_TEST_BUN_LOG")"
 done
 
