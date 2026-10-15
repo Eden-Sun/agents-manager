@@ -25,7 +25,7 @@ esac
 # CI（.github/workflows/ci.yml）的同一組範圍斷言先不在這裡：那個檔的改動需要有 workflow scope 的人套用，
 # 套用之後再把 CI clippy／CI fmt 兩條加回來（見 #1077 的留言）。
 
-if grep -q -- '--workspace --exclude agents-manager-desktop --lib --bins' "$ROOT/AGENTS.md"; then
+if grep -q -- '--workspace --exclude agents-manager-desktop --exclude agents-managerd --lib --bins' "$ROOT/AGENTS.md"; then
   ok "AGENTS.md 的 clippy 指令涵蓋 workspace"
 else
   bad "AGENTS.md 還只寫 cargo clippy -p agents-managerd（跟實際範圍不一致）"
