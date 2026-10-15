@@ -89,7 +89,7 @@ fn schedule_json(s: &Schedule) -> Value {
         "id": s.id, "project_id": s.project_id, "bot_id": s.bot_id, "name": s.name, "prompt": s.prompt,
         "mode": s.mode, "tz": s.tz, "spec": serde_json::from_str::<Value>(&s.spec_json).unwrap_or(Value::Null),
         "next_due": s.next_due, "enabled": s.enabled == 1, "generation": s.generation, "notify": s.notify,
-        "created_at": s.created_at, "updated_at": s.updated_at,
+        "clear_after": s.clear_after == 1, "created_at": s.created_at, "updated_at": s.updated_at,
     })
 }
 
@@ -116,6 +116,9 @@ pub struct CreateIn {
     pub spec: SpecIn,
     #[serde(default = "default_notify")]
     pub notify: String,
+    /// 跑完就清空對話（issue #1779）：缺省＝false。
+    #[serde(default)]
+    pub clear_after: bool,
 }
 
 fn default_notify() -> String {
@@ -123,8 +126,13 @@ fn default_notify() -> String {
 }
 
 /// 內容 fingerprint（不含時間錨點）：同 key 但內容不同 → 409，不會默默回舊的。
-fn create_fingerprint(b: &CreateIn) -> String {
-    json!({"name": b.name.trim(), "prompt": b.prompt, "bot_id": b.bot_id, "tz": b.tz, "spec": b.spec, "notify": b.notify}).to_string()
+/// `clear_after` 只在勾了的時候才進 fingerprint：沒勾的排程跟升版前建的 fingerprint 一樣，原樣重送仍回原筆。
+pub(super) fn create_fingerprint(b: &CreateIn) -> String {
+    let mut v = json!({"name": b.name.trim(), "prompt": b.prompt, "bot_id": b.bot_id, "tz": b.tz, "spec": b.spec, "notify": b.notify});
+    if b.clear_after {
+        v["clear_after"] = json!(true);
+    }
+    v.to_string()
 }
 
 /// `GET /api/projects/{id}/schedules`
@@ -170,6 +178,7 @@ pub async fn create(State(app): State<Arc<App>>, Path(project_id): Path<String>,
         enabled: 1,
         generation: 1,
         notify: b.notify.clone(),
+        clear_after: i64::from(b.clear_after),
         create_crid: Some(b.client_request_id.clone()),
         create_fp: Some(fp),
         created_at: stamp.clone(),
@@ -203,6 +212,7 @@ pub struct PatchIn {
     pub tz: Option<String>,
     pub spec: Option<SpecIn>,
     pub notify: Option<String>,
+    pub clear_after: Option<bool>,
     pub enabled: Option<bool>,
 }
 
@@ -224,6 +234,8 @@ pub async fn patch(State(app): State<Arc<App>>, Path(id): Path<String>, Json(b):
     let prompt = b.prompt.clone().unwrap_or_else(|| cur.prompt.clone());
     let tz = b.tz.clone().unwrap_or_else(|| cur.tz.clone());
     let notify = b.notify.clone().unwrap_or_else(|| cur.notify.clone());
+    // 只影響之後的 done；不算內容變動（不撤回已排的、不升 generation）。
+    let clear_after = i64::from(b.clear_after.unwrap_or(cur.clear_after == 1));
     check_text(&name, &prompt)?;
     check_notify(&notify)?;
     let bot_id = b.bot_id.clone().unwrap_or_else(|| cur.bot_id.clone());
@@ -264,7 +276,7 @@ pub async fn patch(State(app): State<Arc<App>>, Path(id): Path<String>, Json(b):
     };
     let generation = if content_changed { cur.generation + 1 } else { cur.generation };
     sqlx::query(
-        "UPDATE schedules SET name = ?, prompt = ?, bot_id = ?, mode = ?, tz = ?, spec_json = ?, next_due = ?, enabled = ?, generation = ?, notify = ?, updated_at = ?
+        "UPDATE schedules SET name = ?, prompt = ?, bot_id = ?, mode = ?, tz = ?, spec_json = ?, next_due = ?, enabled = ?, generation = ?, notify = ?, clear_after = ?, updated_at = ?
           WHERE id = ?",
     )
     .bind(&name)
@@ -277,6 +289,7 @@ pub async fn patch(State(app): State<Arc<App>>, Path(id): Path<String>, Json(b):
     .bind(if enabled { 1_i64 } else { 0 })
     .bind(generation)
     .bind(&notify)
+    .bind(clear_after)
     .bind(&now)
     .bind(&id)
     .execute(&mut *tx)
