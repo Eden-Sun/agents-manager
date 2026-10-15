@@ -32,6 +32,7 @@ Vite proxy 要把 `/api`、`/ws`（含 upgrade）、`/hook` 轉到 daemon。daem
 | A | `GET /hosts/{name}/gh`、`POST /hosts/{name}/gh/{login,cancel}`、`POST /hosts/{name}/identities/{identity}/{login,logout}`、`POST /hosts/{name}/tools/{refresh,install}`、`POST /hosts/{name}/reconnect` | 只有網頁 | User principal；Bot／service principal 403 `user_only` | 操作 daemon 使用者的遠端 SSH、GitHub 或 CLI 身分 | 維持 |
 | A | `POST /hosts/{name}/cli-update` | 只有網頁（確認框之後） | UI token；帶 `X-AM-Bot-Id` 或 `X-AM-Bot-Token` 一律 403 `ui_only`；指令寫死、同一台 409 | 安裝該主機共用的 Claude 或 Codex CLI；Codex 安裝後 scoped restart，Claude 留待使用者另按「重啟套用」 | 維持（網頁已有確認框） |
 | A | `POST /hosts/{name}/herdr-update` | 只有網頁（確認框之後） | UI token；帶 Bot headers 一律 403 `ui_only`；只收 local、同時只跑一個 | 換 herdr binary、重啟這顆 daemon 的 herdr server（所有 bot 中斷約 1 分鐘，子 agent 結束） | 維持（網頁已有確認框） |
+| A | `POST /hosts/{name}/herdr-integration` | 只有網頁（設定頁「更新檢查」確認框之後） | UI token；帶 Bot headers 一律 403 `ui_only`；`name` 只收 claude／codex／antigravity-cli／grok、沒裝的與已最新的 409、同一台同時只跑一個 | 在該主機跑 `herdr integration install <name>`，改那台的 agent hook 設定（`~/.claude`、`~/.codex` 等） | 維持 User-only |
 | A | `POST /bots/{id}/prompt`、`/text`、`/keys` | 網頁、`scripts/remote-loop-test.sh`、`scripts/hook-timing-test.sh`；Bot pane 內的 `agm`／shim | 網頁與測試腳本用 User `X-AM-Token`；Bot 用成對 Bot headers；`relay_from` 不能覆蓋已驗身分；寫給 AGM 的排進 inbox | 驅動任一顆 agent | 網頁維持 User；Bot principal 按 caller 身分驗證 |
 | A | `POST /bots/{id}/credential/rotate` | 只有網頁／User `agm` | User `X-AM-Token`；執行中的 bot 先在同一 SQLite transaction 記錄可恢復的 restart intent，再輪替 token；舊值失效並重啟，daemon 重啟會接續；live child／grandchild 仍繼承時先回 `409 live_children_use_credential`，不改 token；不回傳新值 | 使該 bot 的舊 hook/API proof 失效 | User-only，Bot／service principal 403 |
 | A | `PUT /build/remote`、`POST /build/remote/install-toolchain` | 只有網頁 | UI token | 改外部編譯主機＝之後的 cargo 送到哪台機器跑 | 待裁示 |
@@ -174,6 +175,7 @@ A 組與 `git/push` 標「待裁示」的原因：這幾支唯一的呼叫端是
 | GET | `/api/supervisor/responder` | User 或已登記 AGM 角色 Bot；一般 Bot → 403 `role_required`；Service 僅可走其明列 method/path scope |
 | GET | `/api/supervisor/responder/persona` | User 或已登記 AGM 角色 Bot；一般 Bot → 403 `role_required`；Service 僅可走其明列 method/path scope |
 | GET | `/api/supervisor/state` | User 或已登記 AGM 角色 Bot；一般 Bot → 403 `role_required`；Service 僅可走其明列 method/path scope |
+| GET | `/api/integration-updates` | User 或 Bot principal；只讀 herdr integration status 快照，不在 GET 時執行 herdr；Service 僅可走其明列 method/path scope |
 | GET | `/api/upstream-updates` | User 或 Bot principal；只讀既有 upstream version metadata snapshot，不在 GET 時抓取；Service 僅可走其明列 method/path scope |
 | GET | `/ws` | query token；TCP loopback、Host 與 Origin 守衛 |
 | HEAD | `/*` | 無 principal；前端靜態檔 fallback |
@@ -242,6 +244,7 @@ A 組與 `git/push` 標「待裁示」的原因：這幾支唯一的呼叫端是
 | HEAD | `/api/supervisor/responder` | User 或已登記 AGM 角色 Bot；一般 Bot → 403 `role_required`；Service 僅可走其明列 method/path scope |
 | HEAD | `/api/supervisor/responder/persona` | User 或已登記 AGM 角色 Bot；一般 Bot → 403 `role_required`；Service 僅可走其明列 method/path scope |
 | HEAD | `/api/supervisor/state` | User 或已登記 AGM 角色 Bot；一般 Bot → 403 `role_required`；Service 僅可走其明列 method/path scope |
+| HEAD | `/api/integration-updates` | User 或 Bot principal；Service 僅可走其明列 method/path scope |
 | HEAD | `/api/upstream-updates` | User 或 Bot principal；Service 僅可走其明列 method/path scope |
 | HEAD | `/ws` | query token；TCP loopback、Host 與 Origin 守衛 |
 | PATCH | `/api/bots/{id}` | User-only；一般 Bot → 403 `user_only`；已登記 AGM 角色略過共用 fence，仍受既有路由／資源權限限制 |
@@ -279,6 +282,7 @@ A 組與 `git/push` 標「待裁示」的原因：這幾支唯一的呼叫端是
 | POST | `/api/hosts` | User-only；一般 Bot → 403 `user_only`；已登記 AGM 角色略過共用 fence，仍受既有路由／資源權限限制 |
 | POST | `/api/fs/dirs` | User-only；Bot 與 AGM role 均 → 403 `user_only`；Service 依明列 path scope（本路徑未授權）；在上層目錄新建單一資料夾，不能借名字跳出上層，也不能在憑證／設定目錄底下建 |
 | POST | `/api/hosts/{name}/cli-update` | User-only；Bot → 403 `ui_only` |
+| POST | `/api/hosts/{name}/herdr-integration` | User-only；Bot → 403 `ui_only` |
 | POST | `/api/hosts/{name}/gh/cancel` | User-only；一般 Bot → 403 `user_only`；已登記 AGM 角色略過共用 fence，仍受既有路由／資源權限限制 |
 | POST | `/api/hosts/{name}/gh/login` | User-only；一般 Bot → 403 `user_only`；已登記 AGM 角色略過共用 fence，仍受既有路由／資源權限限制 |
 | POST | `/api/hosts/{name}/herdr-update` | User-only；Bot → 403 `ui_only` |
@@ -2307,6 +2311,32 @@ WS（每則帶 `update_id`／`host`／`target_version`）：`herdr_update_progre
   `restart_unsupported`（換 binary 之前的檢查沒過：Linux `herdr@<session>.service` 不是 active、macOS 沒有 launchd job，或 launchd 的 `program` 不是 updater 要替換的 binary——無法保證 restart 載入新版；請自己整理服務路徑後重試）、`checksum_mismatch`（下載的檔對不上 GitHub release API 公布的 sha256，或查不到公布值；**沒有執行它**）、`version_mismatch`（下載的 `--version` 不是目標）、`busy_timeout`（30 分鐘沒等到頂層 bot 全閒置）、`maintenance_busy`（別人開著 herdr 維護窗口）、
   `swap_failed`（換 binary 失敗，server 沒重啟）；動過 server 的——`restart_failed`（新版 2 分鐘內沒以目標版本回來，或回來了但 protocol 是這顆 daemon 不認得的；已換回 `.bak` 再重啟；bot 照樣接回，`resumed`／`failed` 照填）。
 - 每一步附加到 `<data_dir>/herdr-update.log`；舊 binary 留在同目錄 `herdr.bak-<舊版>`。
+
+### 12.7c herdr integration 更新總覽 `GET /api/integration-updates`、`POST /api/hosts/{name}/herdr-integration`（SPEC §6.9c，issue #1772）
+
+`GET /api/integration-updates`：唯讀、不觸發抓取，回最近一輪（每 10 分鐘；daemon 啟動後約 1 分鐘第一輪）每台主機的 `herdr integration status` 快照；第一輪還沒跑完是 `{"hosts":[]}`。User 或 Bot principal 都可讀。
+
+```json
+{ "hosts": [{ "host": "local", "checked_at": "2026-10-14T12:00:00.000Z", "error": null,
+  "items": [
+    { "name": "claude", "state": "outdated", "installed_version": 8, "required_version": 11, "path": "/home/u/.claude/hooks/herdr-agent-state.sh", "detail": null },
+    { "name": "codex", "state": "current", "installed_version": 10, "required_version": 10, "path": "/home/u/.codex/herdr-agent-state.sh", "detail": null },
+    { "name": "antigravity-cli", "state": "not_installed", "installed_version": null, "required_version": null, "path": "/home/u/.gemini/config/hooks/herdr-agent-state.sh", "detail": null },
+    { "name": "grok", "state": "unknown", "installed_version": null, "required_version": null, "path": null, "detail": "原文" } ] }] }
+```
+- `items` 只有 `claude`、`codex`、`antigravity-cli`、`grok`（順序固定；herdr 印了別的 agent 的 integration 不列）。`state`：`current`｜`outdated`｜`not_installed`｜`unknown`（不認得的狀態，`detail` 是 herdr 原文，**不是最新**）。
+  `installed_version`／`required_version` 是 hook 腳本的版本號（`v8` 的 8）。
+- `error`：這一輪讀不到的原因（`主機未連線`、ssh 逾時、`這台找不到 herdr`…）；此時 `items` 還是上一次成功的，不當成「沒有」。
+
+`POST /api/hosts/{name}/herdr-integration`：`{"name":"claude"}`。只由使用者在設定頁「更新檢查」確認後送；在那台跑 `herdr integration install <name>`（逾時 60 秒），再讀一次狀態。
+
+```json
+200 {"host":"local","name":"claude","state":"current",
+     "integration":{"name":"claude","state":"current","installed_version":11,"required_version":11,"path":"…","detail":null},"output":"…"}
+```
+- 403 `{"reason":"ui_only"}`：帶 `X-AM-Bot-Id` 或 `X-AM-Bot-Token`。400：`name` 不是那四家。404：不認得的主機。
+- 409：`not_installed`（沒裝的只顯示，不自動裝）、`already_current`、`state_unknown`（還沒巡過這台）、`install_in_progress`（同一台同時只跑一個）；都帶寫好的 `message`。
+- 502：指令失敗（訊息尾段含輸出）；快照不動。`state` 不是 `current` 時裝完仍落後，由畫面講清楚。
 
 ### 12.7 透過現有 agent 安裝 `POST /api/hosts/{name}/tools/install`
 `{ "kind": "grok", "via_bot_id": "01M1…" }`：daemon 組一則安裝 prompt（官方安裝方式：claude `curl -fsSL https://claude.ai/install.sh | bash`、codex `npm i -g @openai/codex`、

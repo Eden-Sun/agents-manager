@@ -419,6 +419,7 @@ pub fn router(app: Arc<App>) -> Router {
         .merge(crate::runners::supervisor::responder_api::routes(app.clone()))
         .merge(crate::runners::release_triage::routes())
         .merge(crate::runners::upstream_update::routes())
+        .merge(crate::herdr_integration::routes())
         .merge(crate::runners::judge::routes())
         .merge(crate::deleted_bots::routes())
         .route("/bots/{id}/restore", post(restore_bot))

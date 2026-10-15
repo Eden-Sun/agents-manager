@@ -2805,6 +2805,25 @@ header 的 herdr 徽章確認後 `POST /api/hosts/{name}/herdr-update`（API §1
 
 每一步附加到 `<data_dir>/herdr-update.log`（`時間 update_id 目標版 phase 訊息`）。daemon 半途重啟時沒有接手：窗口 30 分鐘自己到期，換到一半的話 `.bak` 在旁邊、log 寫著做到哪。
 
+### 6.9c 設定頁「更新檢查」總覽與 herdr integration（issue #1772）
+
+使用者（2026-10-14）：「herdr integration for claude codex agy grok 也是需要 check upgrade 的 list。把所有要 check upgrade 的 list 放在設定頁裡」。
+
+- **herdr integration 沒人檢查過**：herdr 升版後各 agent 的 hook 腳本（`~/.claude/hooks/herdr-agent-state.sh` 之類）版本會跟不上，
+  `herdr integration status` 印 `claude: outdated (v8 < v11)`，以前沒有任何畫面提醒。daemon 現在每 10 分鐘（跟 `upstream_update` 同節奏，開機後約 1 分鐘第一輪）
+  在每台連得上的主機跑**唯讀**的 `herdr integration status`（`daemon/src/herdr_integration.rs`），只留 `claude`、`codex`、`antigravity-cli`、`grok` 四家，
+  快照給 `GET /api/integration-updates`（API §12.7c）。狀態：`current`、`outdated`、`not_installed`、`unknown`（herdr 印了不認得的狀態，原文放 `detail`，**不當成最新**）。
+  這一輪讀失敗（ssh 逾時、主機未連線、找不到 herdr）時保留上次的 `items`、只寫 `error`；主機被刪就整筆丟掉。
+- **只在使用者按鈕時才改機器**：`POST /api/hosts/{name}/herdr-integration {name}` 才在那台跑 `herdr integration install <name>`（會改那台 `~/.claude`、`~/.codex` 的設定）。
+  帶 bot 身分一律 403 `ui_only`；`name` 只准那四家（400）；`not_installed` 的**只顯示、不裝**（409 `not_installed`）；已是 `current` 的 409 `already_current`；
+  還沒巡過的 409 `state_unknown`；同一台同時只跑一個（409 `install_in_progress`）。裝完立刻再讀一次那台的狀態，回的是實際狀態，不是「指令沒報錯」。daemon 不會自己跑 install。
+- **設定頁（環境設定 →「更新檢查」）每台主機一張表**，列：herdr CLI、herdr server、Claude／Codex／Grok／Antigravity（agy）CLI、四家 integration；
+  欄位：目前版本、最新或需要的版本、狀態（最新／可更新／未安裝／查不到）、動作。資料全是既有的：`hosts[].herdr`／`tools`（工具探測）、`GET /api/upstream-updates`
+  （上游版）與上面的 integration 快照；表是**總覽**，既有入口（header 徽章、`cli-update`、`herdr-update`）一個都沒拆，按鈕送的是同一批 API，只有 integration 是新的。
+  agy 沒有公開的版本來源，只列目前版本、狀態「查不到」；Grok 沒有一鍵更新入口，只提示 `grok update`；herdr 的更新維持 §6.9b 的限制（只做本機、非 shared session），
+  遠端落後的那列照樣標「可更新」但不給按鈕、寫原因。
+- 更新動作都要確認：CLI 沿用 §6.9 的 `cli-update`（綁確認框那一版）；herdr 是危險樣式（所有 Bot 中斷）；integration 的確認框寫明會改那台的 agent 設定檔。
+
 ### 6.10 Fork 頂層 bot（接續對話脈絡）
 - 入口：側欄 bot 列 `⋯` →「開同類分身…」→ 選「接續對話（fork）」→ `POST /api/bots/:id/fork`（`daemon/src/fork.rs`）；選「全新對話」走原本的建 bot＋啟動。只給頂層 bot：child 的 pane 與帳號環境是母 agent 開的，daemon 重建不出來；從 default session 匯入的也不行（§6.5.1）。
 - 來源 session：來源 bot 最近一次有 `native_session_id` 的 run（跑著的也算——三家 CLI 的 fork 都是讀對話檔，不打擾原本那顆）。本機對話檔不在就拒絕，避免 CLI 找不到對話直接退出。

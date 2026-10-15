@@ -53,6 +53,11 @@ async fn upstream_update_watcher_is_tracked_and_stops_at_shutdown() {
 }
 
 #[tokio::test]
+async fn herdr_integration_watcher_is_tracked_and_stops_at_shutdown() {
+    tracked_and_stops(true, crate::herdr_integration::spawn).await;
+}
+
+#[tokio::test]
 async fn build_scheduler_sweeper_is_tracked_and_stops_at_shutdown() {
     let _serial = SERIAL.lock().await;
     tracked_and_stops(true, crate::runners::build_scheduler::spawn_sweeper).await;

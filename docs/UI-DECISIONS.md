@@ -816,6 +816,23 @@ cc1 的 bot 好幾個回合都收在 `authentication_failed`，對話只寫「�
 ![更新中](screenshots/herdr-update/desktop-progress.png) ![結果](screenshots/herdr-update/desktop-result.png) ![換回舊版](screenshots/herdr-update/desktop-rollback-result.png)
 ![手機選單](screenshots/herdr-update/phone-menu.png) ![手機確認框](screenshots/herdr-update/phone-dialog.png) ![手機結果（一顆沒接回）](screenshots/herdr-update/phone-result.png)
 
+## 環境設定「更新檢查」：每台主機一張表，總覽、不是新的入口（2026-10-14，issue #1772）
+
+使用者：「herdr integration for claude codex agy grok 也是需要 check upgrade 的 list。把所有要 check upgrade 的 list 放在設定頁裡」。
+
+- **位置**：環境設定的一區，排在「主機」之後（EnvSection，手機同其他區預設收起）。每台主機（本機＋遠端）一張表，標題旁一句「N 項可更新／都是最新」。
+- **列的順序固定**：herdr CLI、herdr server、Claude／Codex／Grok／agy CLI、四家 integration。欄位：項目、目前、最新／需要、狀態徽章、動作。
+  狀態四種：最新、可更新（強調色）、未安裝、查不到（灰）。**查不到不畫成最新**：抓不到上游、讀不到那台版本、herdr 印了不認得的 integration 狀態，都是「查不到」。
+- **動作沿用既有 API，不拆既有入口**：header 徽章還在。可更新的 Claude／Codex 列「更新…」→ 確認框 → `cli-update`；herdr 列是 danger 確認框（所有 Bot 中斷）；
+  遠端／shared 的 herdr 列照樣標「可更新」但沒有按鈕、旁邊寫原因（跟 header 徽章同一個取捨：落後是事實，藏了就沒人知道）。
+- **integration 只在這裡按才會改機器**：確認框寫明「在 <主機> 跑 `herdr integration install <name>`、會改那台 `~/.claude`／`~/.codex` 等設定」。
+  沒裝的列沒有按鈕、只寫「還沒安裝；這裡只顯示，不自動裝」。裝完重讀那台的狀態，不是 current 就跳錯誤通知。
+- **還沒有快照**（daemon 剛開機、舊 daemon 沒這支路由）：CLI／herdr 的列照常顯示，integration 那段寫「還沒讀到這台的狀態」或「讀不到：原因」，不假裝沒有。
+- **手機**（≤640px）：欄位表頭拿掉、每列變一張小卡（名稱＋徽章一行，目前／最新各一行，動作最後），不橫向捲動。
+- 驗證：`VITE_MOCK=1`，截圖在 `docs/screenshots/upgrade-check/`。
+
+![桌機](screenshots/upgrade-check/desktop.png) ![手機](screenshots/upgrade-check/phone.png)
+
 ## 已移交的專案：標「由 <host> 管理」、輸入框鎖住（2026-09-28，issue #708）
 
 使用者要把專案交給另一台主機的 daemon 接手；這顆 daemon 對它的 bot 一律不動（SPEC §6.5h）。

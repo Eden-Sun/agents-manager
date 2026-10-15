@@ -54,6 +54,7 @@ import { FrozenBadge } from './FrozenBadge'
 import { NO_WARM_TEXT } from '../lib/cacheClock'
 import { EnvSection } from './EnvSection'
 import { HostBadge, HostsPanel } from './HostsPanel'
+import { UpdateCheckPanel } from './UpdateCheckPanel'
 import { ShareProfileField } from './ShareProfileField'
 import { EMPTY_SHARE_FOLDER, shareFolderInput, shareProfileBlocked, type ShareFolderDraft } from '../lib/shareProfile'
 import { HostDownState } from './HostOffline'
@@ -1561,6 +1562,9 @@ export function Sidebar() {
         <div className="env-panel">
           <EnvSection title="主機">
             <HostsPanel />
+          </EnvSection>
+          <EnvSection title="更新檢查">
+            <UpdateCheckPanel />
           </EnvSection>
           <EnvSection title="身分">
             <IdentitiesPanel />
