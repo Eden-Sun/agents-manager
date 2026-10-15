@@ -1945,6 +1945,7 @@ pane 打 `cargo` 就 permission denied）時，只 chmod 回 0755，不重寫內
   沒有 bot 身分的人工 shell 不標。**有 `AM_CHILD_OF` 的 pane 打 `agent start` 一律 exit 77、不呼叫 herdr**，stderr 講明「要人手就在回報裡寫清楚，由 parent 決定另派兄弟」——
   子代只有一層，狀態都掛在同一個 parent 底下追蹤。`pane split` 不擋（子代開 dev server 之類的 pane 仍可以）。
 - `agent start` 補子 agent 的指示檔、關掉 CLI 自己的指示檔：見 §6.5i。`agent start --help`（`-h`）原樣轉給 herdr，不走 spawn 流程（以前會把 env 補送打進呼叫者自己的 pane）。目標 pane 只認明寫的 `--pane`，不退回 `$HERDR_PANE_ID`：受管的 bot 沒帶或帶空的 `--pane`（多半是前面的 `pane split` 失敗）exit 2、不呼叫 herdr；`--pane` 指到呼叫者自己的 pane 一律 exit 2——補送 env 那行會被打進它自己的輸入框（2026-10-01 實際灌了四行給使用者）。`herdr pane get` 說目標 pane 裡已經在跑 agent（別顆 bot 的 pane、拿錯的 id）也 exit 2、什麼都不送；問不到才照舊交給 herdr（2026-10-02 A issuers-1 拿錯 pane id 又灌了一行給別顆 bot）。
+- **指定身分（`--identity <名>`，issue #1775）**：母 bot 要讓子 agent 用這台的別的帳號時，寫 `herdr agent start … --identity <身分>`（`--` 之前）。身分清單是 daemon 注入母 pane 的 `AM_IDENTITIES`（單行、`;` 分隔，格式 `<kind>/<名稱>[:CLAUDE_CONFIG_DIR=…]`，只帶帳號目錄三個 key、路徑展開成那台的家目錄；本機與遠端同一條，見 `lifecycle/pane_identities.rs`）。shim 在 `exec` 之前把帳號目錄換成那個身分的，身分沒有目錄（預設帳號）就 `unset`，`--identity` 不轉給 herdr；這台沒有那個身分 exit 2、不呼叫 herdr。`AM_IDENTITIES` 不在傳遞清單：子 agent 不能再開子 agent，不往下傳。以前子 agent 只能吃母 pane 的帳號，要換身分就只剩自己起 CLI（禁止）。
 - `herdr agent prompt`：見 §6.5d。其他子指令 `exec` 真正的 herdr（`$AM_REAL_HERDR`，否則 `PATH` 上第一個不是自己的）。
 
 **PATH 只靠 pane env 不夠**：herdr 用 login shell 開 pane，profile 之後才跑並重建 `PATH`（macOS `path_helper` + `brew shellenv` 會把 shim 擠到後面）。

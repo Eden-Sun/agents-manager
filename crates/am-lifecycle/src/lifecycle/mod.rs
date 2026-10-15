@@ -41,6 +41,7 @@ pub mod lc_host;
 pub use lc_host::LcHost;
 pub mod queue;
 pub mod setup;
+pub mod pane_identities;
 pub mod agent_md;
 pub mod grok_hook;
 pub mod agy_hook;

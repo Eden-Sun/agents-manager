@@ -1242,6 +1242,9 @@ pub async fn pane_env_for_fence(
             }
         }
     }
+    // issue #1775：這台看得到的身分清單，母 pane 的 herdr shim 查 `agent start --identity <名>` 用（只給母 pane，子 pane 不往下傳）。
+    let identities = crate::tools::identities_for_host(app, host).await;
+    env.insert("AM_IDENTITIES".into(), json!(crate::lifecycle::pane_identities::identities_env(&identities, &home)));
     for (k, v) in bot.env() {
         env.insert(k, json!(crate::config::expand_home(&v, &home)));
     }
@@ -1344,8 +1347,11 @@ PATH 上的 herdr 會幫你補，但你自己要寫對。\n\
 - **開 codex 子 agent 的完整寫法**（照抄、換掉 `<>`，**禁止**為此去讀 `herdr_shim.rs` 或 API 文件）：先 `herdr pane split --pane \"$HERDR_PANE_ID\"` 拿新 pane id，\
 全新題目 `herdr agent start <名稱> --kind codex --pane <新 pane> -- \"<派工 prompt>\"`；要接著你這段脈絡就 `herdr agent start <名稱> --kind codex --pane <新 pane> -- fork --last \"<派工 prompt>\"`。\
 要指定模型才加 `--model <模型>`，codex 的旗標一律放在 `--` 之後、子命令（`fork`／`resume`）之前，例：`-- --model <模型> fork --last \"…\"`。\
+換身分就在 `--` 之前加 `--identity <身分>`（可用的身分看 `$AM_IDENTITIES`）。\
 PATH 上的 herdr 會補 `-p`、`--no-daemon`、`-c project_doc_max_bytes=0`：**禁止**自己補，也**禁止**用真 herdr 的絕對路徑繞過它。\n\
-- **環境變數**：帳號與 hook 會自動帶進子 pane（`CLAUDE_CONFIG_DIR`、`AM_*`）。**禁止覆蓋**這些變數。\n\
+- **環境變數與身分**：帳號與 hook 會自動帶進子 pane（`CLAUDE_CONFIG_DIR`、`AM_*`）。**禁止**自己 export／`env -u`／`unset` 這些變數。\
+要讓子 agent 用別的身分：`herdr agent start <名稱> --kind <kind> --pane <新 pane> --identity <身分> -- …`（`--identity` 寫在 `--` 之前）；\
+這台可用的身分看 `$AM_IDENTITIES`（格式 `<kind>/<名稱>[:KEY=路徑]`，本機與遠端一樣）。**禁止**用 `herdr pane run <pane> \"claude …\"` 之類自己起 CLI 來換帳號。\n\
 - **禁止 `git stash`、禁止 `--autostash`**：同一個工作樹上有別的 agent 還沒提交的改動，弄丟了算你的。\n\
 - 你開的子 agent 會被 AG Man 掛在**你底下**追蹤（側欄縮排顯示）。做完**必須**自己把它的 pane 收掉，不准留著。\n\
 - **派工 prompt 必須寫明**：「你是 `{agent_name}` 的子 agent：禁止再開子 agent（含內建子代理、另起 agent CLI）；\
@@ -3285,6 +3291,36 @@ mod pane_env_tests {
     }
 
     /// #92 live-SSH：CLI 只裝在遠端的 `~/.local/bin`（`remote_path` 就是為這個設的），pane 的 PATH 卻寫死成
+    /// issue #1775：母 pane 的 shim 用 `AM_IDENTITIES` 查 `agent start --identity <名>`。只列那台看得到的身分
+    /// （別台的 cc9 不列），帳號目錄展開成那台的家目錄，其他 key（這裡的 API key）不進清單。
+    #[tokio::test]
+    async fn a_pane_lists_the_identities_its_host_can_use_for_the_shim() {
+        let env = tt::env().await;
+        let bot = tt::claude_bot(&env.app, &env.project_id, "alfa").await;
+        remote_home(&env.app, "box", "/home/remote").await;
+        let on = |name: &str, kind: &str, host: &str, vars: &[(&str, &str)]| crate::config::IdentityCfg {
+            name: name.into(),
+            kind: kind.into(),
+            host: Some(host.into()),
+            env: vars.iter().map(|(k, v)| (k.to_string(), v.to_string())).collect(),
+            args: vec![],
+        };
+        env.app
+            .cfg
+            .update(|c| {
+                c.identities = vec![
+                    on("cc1", "claude", "box", &[("CLAUDE_CONFIG_DIR", "$HOME/.claude-cc1")]),
+                    on("cx1", "codex", "box", &[("CODEX_HOME", "~/.codex-cx1"), ("OPENAI_API_KEY", "sk-secret")]),
+                    on("cc9", "claude", "local", &[("CLAUDE_CONFIG_DIR", "/home/me/.claude-cc9")]),
+                ];
+                Ok(())
+            })
+            .await
+            .unwrap();
+        let e = pane_env(&env.app, &bot, "box", "run-1", "proj-alfa", None).await.unwrap();
+        assert_eq!(e["AM_IDENTITIES"], json!("claude/cc1:CLAUDE_CONFIG_DIR=/home/remote/.claude-cc1;codex/cx1:CODEX_HOME=/home/remote/.codex-cx1"));
+    }
+
     /// `<shim>:/usr/local/bin:…`，claude 起不來（`command not found`）。遠端 pane 的 PATH 要照 host 的 `remote_path`，
     /// 開頭的 `$HOME`／`~` 展開成那台的 home（herdr 照字面設 env，不經 shell）。
     #[tokio::test]

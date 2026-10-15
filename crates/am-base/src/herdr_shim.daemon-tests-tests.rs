@@ -337,10 +337,11 @@
     #[test]
     fn every_env_key_the_daemon_injects_reaches_child_panes_or_is_deliberately_left_out() {
         // 刻意不傳。
-        const LEFT_OUT: [(&str, &str); 3] = [
+        const LEFT_OUT: [(&str, &str); 4] = [
             ("CLAUDE_CODE_CHILD_SESSION", "空字串：daemon 用來洗掉它自己環境裡的 claude 標記；herdr server 開的子 pane 本來就沒有"),
             ("CLAUDECODE", "同上"),
             ("AGY_CLI_DISABLE_AUTO_UPDATE", "只給 agy bot 自己的 pane；agy 的 child agent 是第二階段（設計 #16），到時候要傳"),
+            ("AM_IDENTITIES", "只給母 pane 的 shim 查 `agent start --identity <名>`；子 agent 不能再開子 agent，不往下傳（issue #1775）"),
         ];
         let listed: Vec<&str> = super::SHIM_SH
             .lines()
@@ -1012,6 +1013,103 @@
         assert!(text.contains("export AM_INSTANCE='a1b2'"), "隔離實例的保留變數也補：{text}");
         assert!(text.contains("export AM_DATA_DIR='/data/iso'"), "{text}");
         assert!(text.contains("export AM_CHILD_OF='p-1'"), "子 agent 的 pane 要標出 parent：{text}");
+    }
+
+    /// issue #1775：`agent start --identity <名>` 用母 pane 的 `AM_IDENTITIES` 挑這台的身分。帳號目錄照那個身分走，
+    /// 母 pane 自己的 `CLAUDE_CONFIG_DIR` 不帶過去；`--identity` 只在 shim 這裡認，不轉給 herdr。
+    #[test]
+    fn an_identity_start_unsets_the_account_dir_the_parent_had_and_strips_the_flag() {
+        let s = Sandbox::new();
+        let log = s.dir.join("sendtext.log");
+        let env = [
+            ("AM_AGENT_NAME", "p-1"),
+            ("AM_BOT_ID", "b1"),
+            ("AM_HOOK_TOKEN", "tok"),
+            ("AM_PORT", "7788"),
+            ("CLAUDE_CONFIG_DIR", "/h/.claude-cc1"),
+            ("AM_IDENTITIES", "claude/cc0;claude/cc1:CLAUDE_CONFIG_DIR=/h/.claude-cc1"),
+            ("AM_TEST_SENDTEXT_LOG", log.to_str().unwrap()),
+            ("TMPDIR", s.dir.to_str().unwrap()),
+        ];
+        let (out, _) = s.run(&env, &["agent", "start", "kid", "--kind", "claude", "--pane", "w1:p9", "--identity", "cc0", "--", "--model", "sonnet"]);
+        assert_eq!(out, ["agent", "start", "p-1-kid", "--kind", "claude", "--pane", "w1:p9", "--", "--model", "sonnet"], "--identity 不轉給 herdr");
+        let (pane, text) = s.sourced_env();
+        assert_eq!(pane, "w1:p9", "補的是 --pane 指到的目標");
+        assert!(text.contains("unset CLAUDE_CONFIG_DIR"), "cc0 是預設帳號，沒有 CLAUDE_CONFIG_DIR：{text}");
+        assert!(!text.contains("export CLAUDE_CONFIG_DIR"), "母 pane 的 cc1 不能帶過去：{text}");
+        assert!(text.contains("export AM_BOT_ID='b1'"), "其他保留變數照舊：{text}");
+    }
+
+    /// 母 pane 沒有帳號目錄、`--identity=cc1`：子 pane 要拿到 cc1 的目錄（等號寫法同義）。沒有 AM_BOT_ID 的人工 shell 也一樣。
+    #[test]
+    fn an_identity_start_exports_its_account_dir_when_the_parent_had_none() {
+        let s = Sandbox::new();
+        let log = s.dir.join("sendtext.log");
+        let env = [
+            ("AM_AGENT_NAME", "p-1"),
+            ("AM_IDENTITIES", "claude/cc0;claude/cc1:CLAUDE_CONFIG_DIR=/h/.claude-cc1"),
+            ("AM_TEST_SENDTEXT_LOG", log.to_str().unwrap()),
+            ("TMPDIR", s.dir.to_str().unwrap()),
+        ];
+        s.run(&env, &["agent", "start", "kid", "--kind", "claude", "--pane", "w1:p9", "--identity=cc1"]);
+        let (_, text) = s.sourced_env();
+        assert!(text.contains("export CLAUDE_CONFIG_DIR='/h/.claude-cc1'"), "{text}");
+        assert!(!text.contains("unset CLAUDE_CONFIG_DIR"), "{text}");
+    }
+
+    /// 這台沒有那個身分：exit 2、不呼叫 herdr、不送任何東西進 pane，stderr 列出這台同 kind 可用的身分。
+    #[test]
+    fn an_identity_this_host_does_not_have_stops_before_herdr_or_any_pane() {
+        let s = Sandbox::new();
+        let log = s.dir.join("sendtext.log");
+        let env = [
+            ("AM_AGENT_NAME", "p-1"),
+            ("AM_IDENTITIES", "claude/cc0;claude/cc1:CLAUDE_CONFIG_DIR=/h/.claude-cc1"),
+            ("AM_TEST_SENDTEXT_LOG", log.to_str().unwrap()),
+            ("TMPDIR", s.dir.to_str().unwrap()),
+        ];
+        let (out, err, rc) = s.run_full(&env, &["agent", "start", "kid", "--kind", "claude", "--pane", "w1:p9", "--identity=nope"]);
+        assert_eq!(rc, 2, "{err}");
+        assert!(out.is_empty(), "沒有呼叫 herdr：{out:?}");
+        assert!(!log.exists(), "沒有送任何東西進 pane");
+        assert!(err.contains("nope") && err.contains("cc0") && err.contains("cc1"), "要列出可用的身分：{err}");
+    }
+
+    /// 遠端 bot（沒有 `AM_PORT`，不走 spawn fence）同樣能用 `--identity`，`--identity=` 寫在名字前面也一樣。
+    #[test]
+    fn a_remote_bot_without_a_daemon_port_gets_the_same_identity_switch() {
+        let s = Sandbox::new();
+        let log = s.dir.join("sendtext.log");
+        let env = [
+            ("AM_AGENT_NAME", "p-1"),
+            ("AM_BOT_ID", "b1"),
+            ("CLAUDE_CONFIG_DIR", "/h/.claude-cc1"),
+            ("AM_IDENTITIES", "claude/cc0;claude/cc1:CLAUDE_CONFIG_DIR=/h/.claude-cc1"),
+            ("AM_TEST_SENDTEXT_LOG", log.to_str().unwrap()),
+            ("TMPDIR", s.dir.to_str().unwrap()),
+        ];
+        let (out, _) = s.run(&env, &["agent", "start", "--identity=cc0", "kid", "--kind", "claude", "--pane", "w1:p9"]);
+        assert_eq!(out, ["agent", "start", "p-1-kid", "--kind", "claude", "--pane", "w1:p9"]);
+        let (_, text) = s.sourced_env();
+        assert!(text.contains("unset CLAUDE_CONFIG_DIR") && !text.contains("export CLAUDE_CONFIG_DIR"), "{text}");
+    }
+
+    /// 沒有 `--identity` 時照舊：母 pane 的帳號目錄照樣帶下去，`AM_IDENTITIES` 不影響。
+    #[test]
+    fn without_identity_the_parents_account_dir_is_still_passed_down() {
+        let s = Sandbox::new();
+        let log = s.dir.join("sendtext.log");
+        let env = [
+            ("AM_AGENT_NAME", "p-1"),
+            ("CLAUDE_CONFIG_DIR", "/h/.claude-cc1"),
+            ("AM_IDENTITIES", "claude/cc0;claude/cc1:CLAUDE_CONFIG_DIR=/h/.claude-cc1"),
+            ("AM_TEST_SENDTEXT_LOG", log.to_str().unwrap()),
+            ("TMPDIR", s.dir.to_str().unwrap()),
+        ];
+        s.run(&env, &["agent", "start", "kid", "--kind", "claude", "--pane", "w1:p9"]);
+        let (_, text) = s.sourced_env();
+        assert!(text.contains("export CLAUDE_CONFIG_DIR='/h/.claude-cc1'"), "{text}");
+        assert!(!text.contains("unset CLAUDE_CONFIG_DIR"), "{text}");
     }
 
     /// macOS 的 /bin/sh 是 bash 3.2：`$VAR` 後面直接接全形標點會被併進變數名（#412）。shim 是寫在 Rust 字串裡的
