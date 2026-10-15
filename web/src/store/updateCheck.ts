@@ -1,0 +1,179 @@
+/**
+ * 設定頁「更新檢查」總覽（issue #1772）：把各處已有的更新資料整成每台主機一張表。
+ * 全是純函式、不碰 store；資料來源都是既有的——`hosts[].herdr`／`tools`（工具探測）、`GET /api/upstream-updates`（上游版）、
+ * `GET /api/integration-updates`（herdr integration）。動作也沿用既有 API，這裡只決定「這一列有沒有按鈕、按了送什麼」。
+ */
+import type { HerdrVersion, ToolMap, ToolStatus } from '../api/types'
+import type { IntegrationHost, IntegrationRow } from '../api/integrationUpdates'
+import type { UpstreamItem } from './upstreamUpdate'
+
+export type CheckStatus = 'latest' | 'update' | 'missing' | 'unknown'
+export type CheckGroup = 'herdr' | 'cli' | 'integration'
+
+export type CheckAction =
+  | { kind: 'cli'; cliKind: 'claude' | 'codex'; target: string }
+  | { kind: 'herdr'; target: string }
+  | { kind: 'integration'; name: string }
+
+export interface CheckRow {
+  id: string
+  group: CheckGroup
+  label: string
+  current: string | null
+  latest: string | null
+  status: CheckStatus
+  /** 給人看的補充一句（為什麼不能按、為什麼查不到）。 */
+  note: string | null
+  action: CheckAction | null
+}
+
+export const STATUS_LABEL: Record<CheckStatus, string> = {
+  latest: '最新',
+  update: '可更新',
+  missing: '未安裝',
+  unknown: '查不到',
+}
+
+/** `herdr 0.9.5`、`2.1.300 (Claude Code)`、`codex-cli 0.157.0` → `0.9.5`／`2.1.300`／`0.157.0`；認不出來回 null。 */
+export function cleanVersion(raw: string | null | undefined): string | null {
+  const m = (raw ?? '').match(/\d+(?:\.\d+)+/)
+  return m ? m[0] : null
+}
+
+/** a < b（逐段比，缺的段當 0）；任一邊認不出來回 null。 */
+export function versionLess(a: string | null, b: string | null): boolean | null {
+  if (!a || !b) return null
+  const x = a.split('.').map(Number)
+  const y = b.split('.').map(Number)
+  for (let i = 0; i < Math.max(x.length, y.length); i++) {
+    const p = x[i] ?? 0
+    const q = y[i] ?? 0
+    if (p !== q) return p < q
+  }
+  return false
+}
+
+const CLI_LABEL: Record<string, string> = { claude: 'Claude CLI', codex: 'Codex CLI', grok: 'Grok CLI', agy: 'Antigravity（agy）CLI' }
+const INTEGRATION_LABEL: Record<string, string> = {
+  claude: 'integration：claude',
+  codex: 'integration：codex',
+  'antigravity-cli': 'integration：antigravity-cli',
+  grok: 'integration：grok',
+}
+
+function hostEntry(item: UpstreamItem | undefined, host: string) {
+  return item?.hosts.find((h) => h.host === host) ?? null
+}
+
+function herdrRows(host: string, herdr: HerdrVersion | undefined, item: UpstreamItem | undefined, blockedWhy: string | null): CheckRow[] {
+  const cli = cleanVersion(herdr?.cli_version)
+  const server = cleanVersion(herdr?.server_version)
+  const latest = item?.latest ?? null
+  const entry = hostEntry(item, host)
+  const behind = entry ? entry.behind : versionLess(cli, latest)
+  const target = item?.target ?? latest
+  const cliStatus: CheckStatus = !herdr?.cli_version ? 'missing' : latest === null ? 'unknown' : behind === true ? 'update' : behind === false ? 'latest' : 'unknown'
+  const cliRow: CheckRow = {
+    id: `${host}:herdr-cli`,
+    group: 'herdr',
+    label: 'herdr CLI',
+    current: cli ?? (herdr?.cli_version || null),
+    latest,
+    status: cliStatus,
+    note:
+      cliStatus === 'update'
+        ? blockedWhy ?? '更新會重啟 herdr server，所有 Bot 中斷約 1 分鐘後接回'
+        : cliStatus === 'unknown' && latest === null
+          ? '查不到上游版本'
+          : null,
+    action: cliStatus === 'update' && target && !blockedWhy ? { kind: 'herdr', target } : null,
+  }
+  const serverBehind = versionLess(server, latest)
+  const serverStatus: CheckStatus = !server ? 'unknown' : latest === null ? 'unknown' : serverBehind === true ? 'update' : 'latest'
+  const serverRow: CheckRow = {
+    id: `${host}:herdr-server`,
+    group: 'herdr',
+    label: 'herdr server',
+    current: server,
+    latest,
+    status: serverStatus,
+    note: !server ? '主機沒連上，讀不到 server 版本' : server && cli && server !== cli ? `server 與 CLI 不同版（CLI ${cli}），重啟 herdr server 後才換` : null,
+    action: null,
+  }
+  return [cliRow, serverRow]
+}
+
+function cliRow(host: string, kind: string, tool: ToolStatus | undefined, item: UpstreamItem | undefined, updatable: boolean): CheckRow {
+  const base = { id: `${host}:cli-${kind}`, group: 'cli' as const, label: CLI_LABEL[kind] ?? kind }
+  if (!tool?.installed) return { ...base, current: null, latest: item?.latest ?? null, status: 'missing', note: null, action: null }
+  const current = cleanVersion(tool.version) ?? tool.version
+  // agy 沒有公開的版本來源：只列目前版本，狀態是「查不到」。
+  if (kind === 'agy') return { ...base, current, latest: null, status: 'unknown', note: '沒有公開的版本來源，無法比對最新版', action: null }
+  const entry = hostEntry(item, host)
+  if (!item || item.latest === null) return { ...base, current, latest: null, status: 'unknown', note: '查不到上游版本', action: null }
+  if (entry?.error) return { ...base, current, latest: item.latest, status: 'unknown', note: `讀不到這台的版本：${entry.error}`, action: null }
+  const behind = entry ? entry.behind : versionLess(cleanVersion(current), item.target ?? item.latest)
+  if (behind === null) return { ...base, current, latest: item.latest, status: 'unknown', note: null, action: null }
+  if (!behind) return { ...base, current, latest: item.latest, status: 'latest', note: null, action: null }
+  const target = item.target ?? item.latest
+  if (updatable && (kind === 'claude' || kind === 'codex')) {
+    return { ...base, current, latest: target, status: 'update', note: null, action: { kind: 'cli', cliKind: kind, target } }
+  }
+  return {
+    ...base,
+    current,
+    latest: target,
+    status: 'update',
+    note: kind === 'grok' ? '沒有一鍵更新，請在那台跑 grok update' : null,
+    action: null,
+  }
+}
+
+function integrationRow(host: string, row: IntegrationRow): CheckRow {
+  const v = (n: number | null) => (n === null ? null : `v${n}`)
+  const base = { id: `${host}:integration-${row.name}`, group: 'integration' as const, label: INTEGRATION_LABEL[row.name] ?? `integration：${row.name}` }
+  switch (row.state) {
+    case 'outdated':
+      return { ...base, current: v(row.installed_version), latest: v(row.required_version), status: 'update', note: null, action: { kind: 'integration', name: row.name } }
+    case 'current':
+      return { ...base, current: v(row.installed_version), latest: v(row.required_version), status: 'latest', note: null, action: null }
+    case 'not_installed':
+      return { ...base, current: null, latest: null, status: 'missing', note: '還沒安裝；這裡只顯示，不自動裝', action: null }
+    default:
+      return { ...base, current: null, latest: null, status: 'unknown', note: row.detail, action: null }
+  }
+}
+
+export interface HostCheck {
+  host: string
+  /** integration 那一段讀不到的原因（`rows` 裡的 integration 仍是上一次成功的）。 */
+  integrationError: string | null
+  /** 還沒收到這台的 integration 快照（daemon 第一輪還沒跑完、或舊 daemon）。 */
+  integrationPending: boolean
+  rows: CheckRow[]
+}
+
+export interface HostCheckInput {
+  host: string
+  tools: ToolMap | undefined
+  herdr: HerdrVersion | undefined
+  upstream: Record<string, UpstreamItem>
+  integration: IntegrationHost | null
+  /** herdr 這台不能從這裡更新的原因（遠端、共用 session）；null＝可以。 */
+  herdrBlocked: string | null
+}
+
+export function buildHostCheck(input: HostCheckInput): HostCheck {
+  const { host, tools, herdr, upstream, integration } = input
+  const rows: CheckRow[] = [...herdrRows(host, herdr, upstream.herdr, input.herdrBlocked)]
+  for (const kind of ['claude', 'codex', 'grok', 'agy']) {
+    rows.push(cliRow(host, kind, (tools as Record<string, ToolStatus> | undefined)?.[kind], upstream[kind], true))
+  }
+  for (const row of integration?.items ?? []) rows.push(integrationRow(host, row))
+  return { host, integrationError: integration?.error ?? null, integrationPending: integration === null, rows }
+}
+
+/** 這台有幾項可更新（表頭的小計）。 */
+export function updatableCount(rows: CheckRow[]): number {
+  return rows.filter((r) => r.status === 'update').length
+}

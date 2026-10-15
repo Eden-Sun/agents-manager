@@ -16,6 +16,7 @@ import { later, sleep } from './mockClock'
 import { MockServerDrafts } from './mockServerDrafts'
 import { MockServerSchedules } from './mockServerSchedules'
 import { MockRemoteCargo } from './mockRemoteCargo'
+import { MockIntegrationUpdates } from './mockIntegrationUpdates'
 import type { HttpMethod, SocketHandlers, Transport, UploadOptions } from './transport'
 import { MockComposerDrafts } from './mockComposerDraft'
 
@@ -651,6 +652,8 @@ export class MockTransport implements Transport {
     (botId, projectId) => this.bots.some((b) => b.id === botId && b.project_id === projectId && b.managed_by === 'user' && !b.parent_bot_id && !b.share_profile),
   )
   readonly remoteCargo = new MockRemoteCargo()
+  /** 設定頁「更新檢查」的 herdr integration（`mockIntegrationUpdates.ts`，#1772）。 */
+  readonly integrationUpdates = new MockIntegrationUpdates()
   /** header 的 herdr 一鍵更新（`mockHerdrUpdate.ts`，`__amMock.herdrUpdate()`）。 */
   readonly herdrUpdate = new MockHerdrUpdate({
     emit: (type, data) => this.emit(type, data),
@@ -978,6 +981,7 @@ export class MockTransport implements Transport {
     { const r = this.serverDrafts.handle(method, rawPath, b, (t, d) => this.emit(t, d)); if (r !== undefined) return r }
     { const r = this.serverSchedules.handle(method, rawPath, b, (t, d) => this.emit(t, d)); if (r !== undefined) return r }
     { const r = this.remoteCargo.handle(method, rawPath, b); if (r !== undefined) return r }
+    { const r = this.integrationUpdates.handle(method, rawPath, seg, b); if (r !== undefined) return r }
     { const r = this.shares.handle(method, rawPath, b); if (r !== undefined) return r }
     // 前端已樂觀套用排序，mock 收下就好。
     // 跨裝置已讀：mock 只有一個瀏覽器，記下來就好。

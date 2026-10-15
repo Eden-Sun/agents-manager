@@ -273,6 +273,8 @@ fn rules() -> Vec<Rule> {
         rule("POST", "/api/schedules/{id}/run", Expect::Forbidden, None),
         rule("GET", "/api/schedules/{id}/history", Expect::Forbidden, None),
         allow_rule("GET", "/api/upstream-updates", "Returns the existing upstream update metadata snapshot; GET does not fetch or mutate remote state."),
+        allow_rule("GET", "/api/integration-updates", "Returns the cached herdr integration status snapshot; GET does not run herdr or mutate remote state."),
+        rule("POST", "/api/hosts/{name}/herdr-integration", Expect::Forbidden, None),
         rule("GET", "/api/bots/{id}/promote", Expect::Forbidden, None),
         rule("POST", "/api/bots/{id}/promote", Expect::Forbidden, None),
         rule("PUT", "/api/bots/{id}/promote", Expect::Forbidden, None),

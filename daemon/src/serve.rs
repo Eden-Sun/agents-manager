@@ -315,6 +315,8 @@ pub async fn serve(config_path: Option<PathBuf>, dev_watch_all_panes: bool) -> R
     crate::runners::update_watch::spawn_update_watcher(app.clone());
     // issue #707：claude／codex 上游有新版、磁碟上還沒有（跟上面的「重啟套用」分開）。
     crate::runners::upstream_update::spawn(app.clone());
+    // issue #1772：herdr integration（claude／codex／antigravity-cli／grok 的 hook 腳本）落後 herdr 要求的版本時，設定頁「更新檢查」要看得到。
+    crate::herdr_integration::spawn(app.clone());
     // SPEC §11.4.4: remote hook spools whose status event never arrived (one ssh per host, 30s).
     runners::hook_inbox::spawn_worker(app.clone());
     runners::hookrecv::spawn_spool_scanner(app.clone());
