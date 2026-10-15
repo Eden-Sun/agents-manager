@@ -138,7 +138,10 @@ macro_rules! unread_sql {
            LEFT JOIN messages read_m ON read_m.id = r.message_id AND read_m.created_at = r.read_at
             AND read_m.conversation_id = c.id
           WHERE ", $scope, "m.conversation_id = c.id AND m.created_at >= COALESCE(r.read_at, '') AND m.role = 'assistant'
-            AND NOT EXISTS (SELECT 1 FROM turns kt WHERE kt.id = m.turn_id AND (kt.client_request_id LIKE 'keep-warm:%' OR kt.client_request_id LIKE 'keepalive:%'))
+            AND NOT EXISTS (SELECT 1 FROM turns kt WHERE kt.id = m.turn_id AND (kt.client_request_id LIKE 'keep-warm:%' OR kt.client_request_id LIKE 'keepalive:%'
+                 OR ((kt.client_request_id LIKE 'child-done:%' OR kt.client_request_id LIKE 'child-blocked:%')
+                     AND NOT EXISTS (SELECT 1 FROM messages um WHERE um.turn_id = kt.id AND um.role = 'user'
+                                      AND um.content NOT LIKE '[daemon 自動通知，不是 bot_request]%'))))
             AND (r.bot_id IS NULL OR m.created_at > r.read_at OR (m.created_at = r.read_at AND
                  CASE WHEN read_m.rowid IS NULL THEN m.id > r.message_id ELSE m.rowid > read_m.rowid END))
           GROUP BY c.bot_id")
@@ -962,6 +965,29 @@ mod tests {
         assert!(mark_group(&pool, "p", "2026-09-15T02:00:00.000Z", "").await.unwrap().unwrap().1);
         assert!(!mark_group(&pool, "p", "2026-09-15T02:00:00.000Z", "").await.unwrap().unwrap().1);
         assert!(mark_group(&pool, "no-such", "2026-09-15T02:00:00.000Z", "").await.unwrap().is_none());
+        std::fs::remove_dir_all(dir).ok();
+    }
+
+    /// 子 agent 通知回合（`child-done:`／`child-blocked:`）的回覆不算未讀：網頁把它們收成一行（#1781），使用者不必看。
+    #[tokio::test]
+    async fn child_notice_turn_replies_are_not_unread() {
+        let (pool, dir) = pool().await;
+        seed(&pool).await;
+        sqlx::query("DELETE FROM bot_reads").execute(&pool).await.unwrap();
+        let before = unread_count_for(&pool, "b").await.unwrap();
+        for (turn, crid) in [("cd", "child-done:kid:t1"), ("cb", "child-blocked:kid:1:ff")] {
+            sqlx::query("INSERT INTO turns (id,conversation_id,origin,status,client_request_id,created_at,completed_at) VALUES (?,'c','web','completed',?,'2026-09-15T06:00:00.000Z','2026-09-15T06:00:00.000Z')")
+                .bind(turn).bind(crid).execute(&pool).await.unwrap();
+            sqlx::query("INSERT INTO messages (id,conversation_id,turn_id,role,content,source,created_at) VALUES (?,'c',?,'assistant','ok','hook','2026-09-15T06:00:00.000Z')")
+                .bind(format!("a-{turn}")).bind(turn).execute(&pool).await.unwrap();
+        }
+        assert_eq!(unread_count_for(&pool, "b").await.unwrap(), before);
+        assert_eq!(unread_counts(&pool).await.unwrap().get("b").copied().unwrap_or(0), before);
+        // 使用者在那一回合補了話（supplement）：網頁不收合，這回合照算未讀。
+        sqlx::query("INSERT INTO messages (id,conversation_id,turn_id,role,content,source,created_at) VALUES ('u-cd','c','cd','user','順便看一下','web','2026-09-15T06:00:00.000Z')")
+            .execute(&pool).await.unwrap();
+        assert_eq!(unread_count_for(&pool, "b").await.unwrap(), before + 1);
+        assert_eq!(unread_counts(&pool).await.unwrap().get("b").copied().unwrap_or(0), before + 1);
         std::fs::remove_dir_all(dir).ok();
     }
 
