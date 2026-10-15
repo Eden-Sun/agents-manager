@@ -52,6 +52,18 @@ export interface HerdrUpdateResult {
   resumed: (HerdrBotRef & { run_id: string })[]
   failed: (HerdrBotRef & { error: string })[]
   childrenLost: HerdrChildLost[]
+  /** 要在那台執行的手動升級指令（只有 daemon 帶了才有）；失敗時畫面顯示它。 */
+  manualCommand: string | null
+  /** 那台上要處理的每一份 herdr（server 跑的、CLI／shim 解析到的；同一檔只列一次）。 */
+  binaries: HerdrBinary[]
+}
+
+/** daemon `done.binaries[]`：`stale`＝更新前版本不是目標版（畫面講「哪一份舊」）。 */
+export interface HerdrBinary {
+  role: 'server' | 'cli'
+  path: string
+  version: string | null
+  stale: boolean
 }
 
 /** 一則 `herdr_update_progress`。手上沒有（別的分頁按的）也收：header 要看得到正在更新。 */
@@ -87,12 +99,33 @@ export function parseHerdrDone(data: Rec): HerdrUpdateResult {
       isRec(x) && str(pick(x, 'bot_id')) ? [{ bot_id: str(pick(x, 'bot_id')), name: str(pick(x, 'name')), error: str(pick(x, 'error')) }] : [],
     ),
     childrenLost: toChildrenLost(pick(data, 'children_lost')),
+    manualCommand: str(pick(data, 'manual_upgrade_command')) || null,
+    binaries: arr(pick(data, 'binaries')).flatMap((x) =>
+      isRec(x) && str(pick(x, 'path'))
+        ? [{
+            role: str(pick(x, 'role')) === 'cli' ? ('cli' as const) : ('server' as const),
+            path: str(pick(x, 'path')),
+            version: str(pick(x, 'version')) || null,
+            stale: pick(x, 'stale') === true,
+          }]
+        : [],
+    ),
   }
+}
+
+/** 「server 跑的」「CLI／shim 解析到的」＋路徑＋版本；舊的那份標出來。 */
+export function herdrBinaryText(b: HerdrBinary): string {
+  const who = b.role === 'server' ? 'server 跑的' : 'CLI／shim 解析到的'
+  return `${who} ${b.path}：${b.version ?? '讀不到版本'}${b.stale ? '（舊）' : ''}`
 }
 
 /** daemon `herdr_upgrade.rs` 的 `reason`（API.md §12.7b）。`restart_failed` 以外都沒動到 server。 */
 const REASON: Record<string, string> = {
-  install_path_unsupported: '現行 herdr 是 symlink 或找不到，不能原地換，什麼都沒動',
+  install_path_unsupported: 'server 跑的或 CLI 那份 herdr 是套件管理器的 symlink（或找不到），不能原地換，什麼都沒動；請在那台跑手動升級指令',
+  restart_unsupported: 'herdr server 不是 systemd／launchd 管的，或服務跑的不是要換的 binary，什麼都沒動',
+  checksum_mismatch: '下載的檔案沒通過 sha256 校驗，什麼都沒動',
+  rollback_failed: '新版起不來、換回舊版也失敗，要人工處理',
+  resume_failed: 'herdr 已升級，但有 Bot 沒接回',
   download_failed: '下載新版失敗，什麼都沒動',
   version_mismatch: '下載的檔案版本不是目標版，什麼都沒動',
   busy_timeout: '等了 30 分鐘還有 Bot 在忙，什麼都沒動',
@@ -164,9 +197,11 @@ export interface HerdrUpdatePlan {
   childrenLost: { botId: string; name: string; parentName: string }[]
 }
 
+/** 只有 shared_session 的主機不能從這裡更新（遠端主機也能，#1752）。 */
 export function herdrHostBlocked(host: string, sharedHosts: ReadonlySet<string>): string | null {
-  if (sharedHosts.has(host)) return '共用 session：別的 daemon 也在用這台的 herdr，不能從這裡重啟'
-  if (host !== 'local') return '遠端主機：這版只支援更新本機的 herdr，請到那台手動更新'
+  if (sharedHosts.has(host)) {
+    return '共用 session：別的 daemon 也在用這台的 herdr，不能從這裡重啟；確認沒有別的 daemon 之後，到主機設定把「共用 session」關掉再試'
+  }
   return null
 }
 

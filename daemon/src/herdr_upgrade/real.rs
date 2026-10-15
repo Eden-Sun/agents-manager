@@ -8,6 +8,14 @@ pub(super) trait Exec: Send + Sync {
         script: &'a str,
         timeout: Duration,
     ) -> BoxFuture<'a, Result<String, String>>;
+    /// 跟 `run` 一樣，但帶這台主機設定的 `remote_path`（跟版本探測找 herdr 用同一條 PATH）。
+    fn run_with_path<'a>(
+        &'a self,
+        script: &'a str,
+        timeout: Duration,
+    ) -> BoxFuture<'a, Result<String, String>> {
+        self.run(script, timeout)
+    }
 }
 
 struct HostExec(Arc<HostConn>);
@@ -27,6 +35,28 @@ impl Exec for HostExec {
                     .map_err(|e| format!("SSH {}：{e:#}", self.0.name))
             }
         })
+    }
+    fn run_with_path<'a>(
+        &'a self,
+        script: &'a str,
+        timeout: Duration,
+    ) -> BoxFuture<'a, Result<String, String>> {
+        Box::pin(async move {
+            if self.0.is_local() {
+                local_exec(script, timeout).await
+            } else {
+                self.0
+                    .ssh_exec_path_timeout(script, timeout)
+                    .await
+                    .map_err(|e| self.ssh_err(e))
+            }
+        })
+    }
+}
+
+impl HostExec {
+    fn ssh_err(&self, e: anyhow::Error) -> String {
+        format!("SSH {}：{e:#}", self.0.name)
     }
 }
 
@@ -107,47 +137,106 @@ impl Real {
 /// Resolve both files on the target host, rather than in the daemon's filesystem.
 const RESOLVE: &str = "perl -MCwd=abs_path -e 'my $a=abs_path($ARGV[0]); my $b=abs_path($ARGV[1]); die \"cannot resolve service program\\n\" unless defined($a) && defined($b); die \"service program differs from install binary\\n\" unless $a eq $b'";
 
-pub(super) fn service_script(session: &str, install: Option<&Path>) -> Result<String, String> {
-    if !session_ok(session) {
-        return Err(format!(
-            "session 名 `{session}` 不能當 systemd/launchd 名稱"
-        ));
-    }
-    let unit = sh_quote(&format!("herdr@{session}.service"));
-    let label = sh_quote(&format!("dev.agents-manager.herdr-{session}"));
-    let action = match install {
-        Some(install) => format!(
-            r#"
+/// Sets `$program` to the binary the session's launchd job / systemd unit executes. Needs `uid`, `XDG_RUNTIME_DIR` set.
+fn program_lookup(label: &str, unit: &str) -> String {
+    format!(
+        r#"
 case "$(uname -s)" in
 Darwin)
   job=$(launchctl print "gui/$uid/"{label})
   program=$(printf '%s\n' "$job" | sed -n 's/^[[:space:]]*program = //p' | sed 's/[[:space:]]*$//' | head -1)
-  test -n "$program"
-  {RESOLVE} "$program" {install}
   ;;
 Linux)
   test "$(systemctl --user is-active {unit})" = active
   job=$(systemctl --user show {unit} --property=ExecStart --value)
   program=$(printf '%s\n' "$job" | sed -n 's/.*path=\([^;]*\);.*/\1/p' | sed 's/[[:space:]]*$//' | head -1)
-  test -n "$program"
-  {RESOLVE} "$program" {install}
   ;;
 *) echo 'unsupported service platform' >&2; exit 1 ;;
 esac
+test -n "$program"
+"#
+    )
+}
+
+fn service_names(session: &str) -> Result<(String, String), String> {
+    if !session_ok(session) {
+        return Err(format!(
+            "session 名 `{session}` 不能當 systemd/launchd 名稱"
+        ));
+    }
+    Ok((
+        sh_quote(&format!("herdr@{session}.service")),
+        sh_quote(&format!("dev.agents-manager.herdr-{session}")),
+    ))
+}
+
+const SERVICE_PRELUDE: &str = "set -eu\nuid=$(id -u)\nexport XDG_RUNTIME_DIR=${XDG_RUNTIME_DIR:-/run/user/$uid}\n";
+
+/// Prints the (regular-file) binary the session's server really runs; a package-manager symlink is refused.
+pub(super) fn program_script(session: &str) -> Result<String, String> {
+    let (unit, label) = service_names(session)?;
+    Ok(format!(
+        r#"{SERVICE_PRELUDE}{lookup}
+case "$program" in /*) ;; *) echo "service program is not an absolute path: $program" >&2; exit 1 ;; esac
+if test -L "$program" || ! test -f "$program"; then echo "server 跑的 $program is not a regular file (package manager install)" >&2; exit 1; fi
+printf '%s' "$program"
 "#,
+        lookup = program_lookup(&label, &unit)
+    ))
+}
+
+/// Prints the CLI that login shells / shims resolve (same lookup as the version probe) only when it is a different
+/// file than `server`; prints nothing when it is the same file or there is none.
+pub(super) fn cli_script(server: &Path) -> String {
+    format!(
+        r#"set -eu
+hp=$( "${{SHELL:-/bin/sh}}" -lic "command -v herdr" 2>/dev/null | tail -1 )
+case "$hp" in /*) ;; *) hp="" ;; esac
+[ -n "$hp" ] || hp=$(command -v herdr 2>/dev/null || true)
+case "$hp" in /*) ;; *) hp="" ;; esac
+[ -n "$hp" ] || exit 0
+a=$(perl -MCwd=abs_path -e 'print abs_path($ARGV[0])' "$hp")
+b=$(perl -MCwd=abs_path -e 'print abs_path($ARGV[0])' {server})
+if test -n "$a" && test "$a" = "$b"; then exit 0; fi
+if test -L "$hp" || ! test -f "$hp"; then echo "CLI／shim 解析到的 $hp is not a regular file (package manager install)" >&2; exit 1; fi
+printf '%s' "$hp"
+"#,
+        server = sh_quote(&server.to_string_lossy())
+    )
+}
+
+pub(super) fn service_script(session: &str, install: Option<&Path>) -> Result<String, String> {
+    let (unit, label) = service_names(session)?;
+    let action = match install {
+        Some(install) => format!(
+            "{lookup}{RESOLVE} \"$program\" {install}\n",
+            lookup = program_lookup(&label, &unit),
             install = sh_quote(&install.to_string_lossy())
         ),
+        // macOS：換了 binary 之後 `kickstart -k` 會因為 job 還綁著舊 binary 的簽章 spawn failed（OS_REASON_CODESIGNING），
+        // 要 bootout 再 bootstrap。bootout 是非同步的，bootstrap 失敗就等一下重試；最後仍失敗＝這一步失敗，呼叫端會換回舊版。
         None => format!(
             r#"
 case "$(uname -s)" in
-Darwin) launchctl kickstart -k "gui/$uid/"{label} ;;
+Darwin)
+  plist=$(launchctl print "gui/$uid/"{label} | sed -n 's/^[[:space:]]*path = //p' | sed 's/[[:space:]]*$//' | head -1)
+  case "$plist" in *.plist) ;; *) plist="$HOME/Library/LaunchAgents/"{label}".plist" ;; esac
+  test -f "$plist"
+  launchctl bootout "gui/$uid/"{label} || true
+  n=0
+  until launchctl bootstrap "gui/$uid" "$plist"; do
+    n=$((n+1))
+    test "$n" -lt 10
+    sleep 1
+  done
+  ;;
 Linux) systemctl --user restart {unit} ;;
 *) echo 'unsupported service platform' >&2; exit 1 ;;
 esac
 "#
         ),
     };
-    Ok(format!("set -eu\nuid=$(id -u)\nexport XDG_RUNTIME_DIR=${{XDG_RUNTIME_DIR:-/run/user/$uid}}\n{action}"))
+    Ok(format!("{SERVICE_PRELUDE}{action}"))
 }
 
 pub(super) fn swap_script(staging: &Path, install: &Path, backup: &Path) -> String {
@@ -174,22 +263,34 @@ mv -f "$fresh" "$install"
 }
 
 impl Ops for Real {
-    fn install_path(&self) -> BoxFuture<'_, Result<PathBuf, String>> {
+    fn install_path<'a>(&'a self, session: &'a str) -> BoxFuture<'a, Result<PathBuf, String>> {
         Box::pin(async move {
-            let path = self.exec.run(r#"set -eu
-for p in "$HOME/.local/bin/herdr" /usr/local/bin/herdr /opt/homebrew/bin/herdr; do
-  if test -e "$p" || test -L "$p"; then
-    if test -L "$p" || ! test -f "$p"; then echo "$p is not a regular file (package manager install)" >&2; exit 1; fi
-    printf '%s' "$p"; exit 0
-  fi
-done
-echo 'herdr binary not found' >&2; exit 1
-"#, Duration::from_secs(15)).await?;
+            let path = self
+                .exec
+                .run(&program_script(session)?, Duration::from_secs(15))
+                .await?;
             let p = PathBuf::from(path.trim());
             if !p.is_absolute() {
                 return Err("binary 路徑不是絕對路徑".into());
             }
             Ok(p)
+        })
+    }
+    fn cli_path<'a>(&'a self, server: &'a Path) -> BoxFuture<'a, Result<Option<PathBuf>, String>> {
+        Box::pin(async move {
+            let out = self
+                .exec
+                .run_with_path(&cli_script(server), Duration::from_secs(15))
+                .await?;
+            let p = out.trim();
+            if p.is_empty() {
+                return Ok(None);
+            }
+            let p = PathBuf::from(p);
+            if !p.is_absolute() {
+                return Err("CLI 路徑不是絕對路徑".into());
+            }
+            Ok(Some(p))
         })
     }
     fn staging<'a>(
@@ -392,7 +493,9 @@ mod tests {
         let captured = calls.clone();
         crate::hosts::set_ssh_fake(&name, move |script| {
             captured.lock().unwrap().push(script.into());
-            Ok(if script.contains("for p in") {
+            Ok(if script.contains("printf '%s' \"$program\"") {
+                "/opt/remote/bin/herdr".into()
+            } else if script.contains("command -v herdr") {
                 "/remote/home/.local/bin/herdr".into()
             } else if script == "printf '%s' \"$HOME\"" {
                 "/remote/home".into()
@@ -413,7 +516,14 @@ mod tests {
         });
         let conn = env.app.hosts.insert_remote_for_test(cfg).await;
         let real = Real::new(conn);
-        let install = real.install_path().await.unwrap();
+        let install = real.install_path("remote-owner").await.unwrap();
+        assert_eq!(install, Path::new("/opt/remote/bin/herdr"));
+        let cli = real.cli_path(&install).await.unwrap();
+        assert_eq!(
+            cli.as_deref(),
+            Some(Path::new("/remote/home/.local/bin/herdr")),
+            "CLI 另外一份也要看"
+        );
         real.preflight_restart("remote-owner", &install)
             .await
             .unwrap();
@@ -437,6 +547,11 @@ mod tests {
         assert!(scripts.contains("--proto-redir") && scripts.contains("=https"));
         assert!(scripts.contains("dev.agents-manager.herdr-remote-owner"));
         assert!(scripts.contains("herdr@remote-owner.service"));
+        assert!(
+            scripts.contains("launchctl bootout") && scripts.contains("launchctl bootstrap"),
+            "macOS 換 binary 後要 bootout＋bootstrap"
+        );
+        assert!(!scripts.contains("kickstart"), "kickstart 會因舊簽章 spawn failed");
         assert!(scripts.contains(".bak-0.9.1"));
         assert!(
             !scripts.contains(&env.app.data_dir.to_string_lossy().to_string()),
@@ -470,6 +585,8 @@ mod tests {
             sh_quote(&dir.to_string_lossy())
         );
         mock_bin(&dir, "id", "echo 123");
+        let plist = dir.join("dev.agents-manager.herdr-remote-owner.plist");
+        std::fs::write(&plist, "<plist/>").unwrap();
         for platform in ["Darwin", "Linux"] {
             mock_bin(&dir, "uname", &format!("echo {platform}"));
             for (program, active) in [(&install, true), (&other, true), (&install, false)] {
@@ -481,12 +598,14 @@ mod tests {
                         r#"
 if test "$1" = print; then
   {active} || exit 1
+  printf 'path = %s\n' {plist}
   printf 'program = %s\n' {program}
 else
   printf '%s\n' "$*" >> {marker}
 fi"#,
                         active = if active { "true" } else { "false" },
                         program = sh_quote(&program),
+                        plist = sh_quote(&plist.to_string_lossy()),
                         marker = sh_quote(&marker.to_string_lossy())
                     ),
                 );
@@ -528,45 +647,108 @@ esac"#,
         assert_eq!(
             calls.lines().collect::<Vec<_>>(),
             [
-                "kickstart -k gui/123/dev.agents-manager.herdr-remote-owner",
-                "--user restart herdr@remote-owner.service",
+                "bootout gui/123/dev.agents-manager.herdr-remote-owner".to_string(),
+                format!("bootstrap gui/123 {}", plist.display()),
+                "--user restart herdr@remote-owner.service".to_string(),
             ]
         );
         assert!(service_script("bad/session", None).is_err());
     }
 
-    #[tokio::test]
-    async fn install_detection_rejects_a_symlink_before_using_any_package_manager() {
-        struct Sandbox(PathBuf);
-        impl Exec for Sandbox {
-            fn run<'a>(
-                &'a self,
-                script: &'a str,
-                timeout: Duration,
-            ) -> BoxFuture<'a, Result<String, String>> {
-                Box::pin(async move {
-                    let mut cmd = tokio::process::Command::new("/bin/sh");
-                    cmd.args(["-c", script]).env("HOME", &self.0);
-                    command_output(cmd, timeout).await
-                })
-            }
+    /// A sandbox: fake `uname`/`id`/`systemctl` and a fake login shell that prints `$MOCK_HERDR` for `command -v herdr`.
+    struct Sandbox {
+        dir: PathBuf,
+        shell_answer: Mutex<String>,
+    }
+    impl Exec for Sandbox {
+        fn run<'a>(
+            &'a self,
+            script: &'a str,
+            timeout: Duration,
+        ) -> BoxFuture<'a, Result<String, String>> {
+            Box::pin(async move {
+                let mut cmd = tokio::process::Command::new("/bin/sh");
+                let path = format!("{}:/usr/bin:/bin", self.dir.display());
+                cmd.args(["-c", script])
+                    .env("HOME", &self.dir)
+                    .env("PATH", path)
+                    .env("SHELL", self.dir.join("shell"))
+                    .env("MOCK_HERDR", self.shell_answer.lock().unwrap().clone());
+                command_output(cmd, timeout).await
+            })
         }
-        let dir = crate::testing::scratch_dir("herdr-install-detection");
-        let bin = dir.join(".local/bin");
-        std::fs::create_dir_all(&bin).unwrap();
-        let install = bin.join("herdr");
-        std::fs::write(&install, "regular file").unwrap();
-        let real = Real {
-            exec: Arc::new(Sandbox(dir.clone())),
-            remote_root: None,
-        };
-        assert_eq!(real.install_path().await.unwrap(), install);
+    }
+
+    fn sandbox(name: &str) -> (Real, PathBuf, Arc<Sandbox>) {
+        let dir = crate::testing::scratch_dir(name);
+        mock_bin(&dir, "uname", "echo Linux");
+        mock_bin(&dir, "id", "echo 123");
+        mock_bin(&dir, "shell", r#"test -z "$MOCK_HERDR" || printf '%s\n' "$MOCK_HERDR""#);
+        let sb = Arc::new(Sandbox {
+            dir: dir.clone(),
+            shell_answer: Mutex::new(String::new()),
+        });
+        (
+            Real {
+                exec: sb.clone(),
+                remote_root: None,
+            },
+            dir,
+            sb,
+        )
+    }
+
+    /// The server binary is whatever the systemd unit / launchd job executes; a package-manager symlink is refused.
+    #[tokio::test]
+    async fn install_detection_follows_the_service_program_and_rejects_a_symlink() {
+        let (real, dir, _) = sandbox("herdr-install-detection");
+        let program = dir.join("program-herdr");
+        std::fs::write(&program, "regular file").unwrap();
+        mock_bin(
+            &dir,
+            "systemctl",
+            &format!(
+                r#"case "$2" in is-active) echo active ;; show) printf '{{ path=%s ; argv[]=herdr server ; }}\n' {} ;; esac"#,
+                sh_quote(&program.to_string_lossy())
+            ),
+        );
+        assert_eq!(real.install_path("remote-owner").await.unwrap(), program);
         let target = dir.join("package-managed-herdr");
-        std::fs::rename(&install, &target).unwrap();
-        std::os::unix::fs::symlink(&target, &install).unwrap();
-        let error = real.install_path().await.unwrap_err();
+        std::fs::rename(&program, &target).unwrap();
+        std::os::unix::fs::symlink(&target, &program).unwrap();
+        let error = real.install_path("remote-owner").await.unwrap_err();
         assert!(error.contains("package manager install"), "{error}");
         assert_eq!(std::fs::read_to_string(&target).unwrap(), "regular file");
+    }
+
+    /// m4p：launchd 跑 `/opt/homebrew/bin/herdr`，login shell 解析到 `~/.local/bin/herdr`——不同檔要找得出來，
+    /// 同一檔（含 symlink 指到同一檔）不重複，套件管理器的 symlink 拒絕。
+    #[tokio::test]
+    async fn the_cli_binary_is_found_when_it_is_a_different_file_from_the_server_binary() {
+        let (real, dir, sb) = sandbox("herdr-cli-detection");
+        let server = dir.join("server-herdr");
+        let cli = dir.join("cli-herdr");
+        std::fs::write(&server, "server").unwrap();
+        std::fs::write(&cli, "cli").unwrap();
+
+        *sb.shell_answer.lock().unwrap() = cli.to_string_lossy().to_string();
+        assert_eq!(real.cli_path(&server).await.unwrap(), Some(cli.clone()));
+
+        *sb.shell_answer.lock().unwrap() = server.to_string_lossy().to_string();
+        assert_eq!(real.cli_path(&server).await.unwrap(), None, "同一檔不重複列");
+        let alias = dir.join("alias-herdr");
+        std::os::unix::fs::symlink(&server, &alias).unwrap();
+        *sb.shell_answer.lock().unwrap() = alias.to_string_lossy().to_string();
+        assert_eq!(real.cli_path(&server).await.unwrap(), None, "symlink 指到同一檔也算同一檔");
+
+        let managed = dir.join("managed-herdr");
+        std::os::unix::fs::symlink(&cli, &managed).unwrap();
+        *sb.shell_answer.lock().unwrap() = managed.to_string_lossy().to_string();
+        let error = real.cli_path(&server).await.unwrap_err();
+        assert!(error.contains("package manager install") && error.contains("CLI"), "{error}");
+
+        *sb.shell_answer.lock().unwrap() = String::new();
+        assert_eq!(real.cli_path(&server).await.unwrap(), None, "找不到 CLI 就沒有第二份");
     }
 
     #[tokio::test]

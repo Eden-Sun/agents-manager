@@ -1562,13 +1562,13 @@ Project 可在另一台機器，daemon 透過 SSH 轉發連遠端 herdr。`host`
 |---|---|---|
 | `name` | ✅ | `[a-z][a-z0-9_-]{0,31}`，`"local"` 保留 |
 | `ssh` | ✅ | `user@host` 或 ssh_config 別名；不得以 `-` 開頭（會被 ssh 當成選項）、不得含空白或控制字元，否則 400 |
-| `ssh_port` | | `22` |
-| `herdr_session` | | `"agents-manager"`；1–64 個 `[A-Za-z0-9._-]`、開頭是字母或數字，否則 400（它會進遠端 session 路徑與 plist） |
-| `remote_path` | | `""`（前置到遠端 PATH）。以 `:` 分項、每項各自 quote；項目開頭的 `$HOME`／`${HOME}`／`~` 展開成遠端 home，其他 `$`、`;` 都是字面（#241） |
-| `ssh_opts` | | `[]`，附加到每個 ssh 指令。只收 `-i <檔>`、`-o Key=Value`（Key 限連線／驗證／逾時類：ConnectTimeout、StrictHostKeyChecking、UserKnownHostsFile、IdentityFile、ServerAliveInterval…）、`-4`／`-6`／`-q`；`ProxyCommand`／`LocalCommand`／`KnownHostsCommand`／`Include`／`*Forward`／`-F`／`-J`／`-p` 都 400（它們會在跑 daemon 的機器上執行命令或開通道；埠用 `ssh_port`，跳板寫進 ssh_config 別名）。`projection::validate` 同一條，手改 `config.toml` 一樣擋 |
+| `ssh_port` | | 新主機 `22`；更新時不帶＝沿用舊值 |
+| `herdr_session` | | 新主機 `"agents-manager"`、更新時不帶＝沿用舊值；1–64 個 `[A-Za-z0-9._-]`、開頭是字母或數字，否則 400（它會進遠端 session 路徑與 plist） |
+| `remote_path` | | 新主機 `""`、更新時不帶＝沿用舊值（明確帶 `""` 才清空；#1752）（前置到遠端 PATH）。以 `:` 分項、每項各自 quote；項目開頭的 `$HOME`／`${HOME}`／`~` 展開成遠端 home，其他 `$`、`;` 都是字面（#241） |
+| `ssh_opts` | | 新主機 `[]`、更新時不帶＝沿用舊值（明確帶 `[]` 才清空），附加到每個 ssh 指令。只收 `-i <檔>`、`-o Key=Value`（Key 限連線／驗證／逾時類：ConnectTimeout、StrictHostKeyChecking、UserKnownHostsFile、IdentityFile、ServerAliveInterval…）、`-4`／`-6`／`-q`；`ProxyCommand`／`LocalCommand`／`KnownHostsCommand`／`Include`／`*Forward`／`-F`／`-J`／`-p` 都 400（它們會在跑 daemon 的機器上執行命令或開通道；埠用 `ssh_port`，跳板寫進 ssh_config 別名）。`projection::validate` 同一條，手改 `config.toml` 一樣擋 |
 | `shared_session` | | 新主機 `false`；更新時不帶＝沿用舊值。`true`＝這個 session 也是另一顆 daemon 的（SPEC §11.10），這顆只碰自己的 pane、絕不 `herdr server stop`。改它不觸發重連 |
 
-回 `200 {"name","connected","error"}`；連不上仍 200（設定已寫入）。名稱不合法或為 `local` 400。同名視為更新（先斷舊連線）。
+回 `200 {"name","connected","error"}`；連不上仍 200（設定已寫入）。名稱不合法或為 `local` 400。同名視為更新（先斷舊連線），**沒帶的選填欄位（`ssh_port`、`herdr_session`、`remote_path`、`ssh_opts`、`shared_session`）一律沿用舊值**，只有 `name`、`ssh` 每次必帶。
 同一組規則（保留字 `local`、slug 格式、`ssh` 不得為空且不得以 `-` 開頭（`user@` 後面的主機名也一樣）或含空白／控制字元、`ssh_opts` 只收白名單形狀、`herdr_session` 限 1–64 個 `[A-Za-z0-9._-]`、不得同名重複）從 issue #506 起也由 `projection::validate` 把關，
 所以手改 `config.toml` 寫進去的 `[[hosts]]` 一樣擋得住：之後任何一次寫設定都回 **400 `config_invalid`**（`config.toml` 未變更），
 開機那一次投影則直接拒絕啟動並說明——以前這條路全部放行，而一列 `name = "local"` 會把本機那顆連線換成 ssh 遠端。
@@ -2286,7 +2286,7 @@ WS（`update_id`／`host`／`kind`／`target_version`／`log_path` 每則都帶�
 
 ```json
 202 {"update_id":"01M4…","host":"remote1","session":"agents-manager","target_version":"0.9.3","started":true,
-     "phase":"downloading","manual_upgrade_command":"if command -v brew >/dev/null 2>&1 && brew list --versions herdr >/dev/null 2>&1; then brew upgrade herdr; else curl -fsSL https://herdr.dev/install.sh | sh; fi",
+     "phase":"downloading","manual_upgrade_command":"if command -v brew >/dev/null 2>&1 && brew list --versions herdr >/dev/null 2>&1; then if brew list --pinned 2>/dev/null | grep -qx herdr; then brew unpin herdr; brew upgrade herdr; brew pin herdr; else brew upgrade herdr; fi; if [ -f \"$HOME/.local/bin/herdr\" ] && [ ! -L \"$HOME/.local/bin/herdr\" ]; then curl -fsSL https://herdr.dev/install.sh | sh; fi; else curl -fsSL https://herdr.dev/install.sh | sh; fi",
      "will_resume":[{"bot_id":"01M2…","name":"agents-manager-kd61te"}],
      "children_lost":[{"bot_id":"01M3…","name":"agents-manager-kd61te-fix","parent_bot_id":"01M2…"}]}
 ```
@@ -2299,22 +2299,22 @@ WS（`update_id`／`host`／`kind`／`target_version`／`log_path` 每則都帶�
 
 意外重啟偵測沿用同一條本機 global event stream：只在曾連上後斷線、重連時確認所有 active run 的舊 pane 都已消失或沒有 agent occupant，且沒有更新維護窗口時恢復；pane id 雖仍存在但已成空 shell 也算遺失。recovery 先於 reconnect reconcile，並持有同一把 host reconcile lock，避免 run 在接回前被標記 exited；以既有 `restart_bot_with(resume_native)` 接回頂層 bot，流程會關閉舊空 pane/tab，child pane 留給 reconcile 退休。30 分鐘內最多執行三批接回，批次間隔 2 秒、10 秒、30 秒；超限後 `herdr_recovery_done.limited=true`，等待人工處理或新的 30 分鐘窗口。此流程不新增 HTTP 路由。
 
-
 WS（每則帶 `update_id`／`host`／`session`／`target_version`／`manual_upgrade_command`；完成事件目標版欄位沿用 `to`）：`herdr_update_progress` 的 `phase` 依序 `downloading` → `waiting_idle` → `stopping` → `restarting` →（失敗時 `rolling_back`）→ `resuming`。
 
 ```json
 {"update_id":"01M4…","host":"remote1","session":"agents-manager","phase":"done","failed_phase":null,"ok":true,"from":"0.9.1","to":"0.9.3",
- "manual_upgrade_command":"if command -v brew >/dev/null 2>&1 && brew list --versions herdr >/dev/null 2>&1; then brew upgrade herdr; else curl -fsSL https://herdr.dev/install.sh | sh; fi",
+ "manual_upgrade_command":"if command -v brew >/dev/null 2>&1 && brew list --versions herdr >/dev/null 2>&1; then if brew list --pinned 2>/dev/null | grep -qx herdr; then brew unpin herdr; brew upgrade herdr; brew pin herdr; else brew upgrade herdr; fi; if [ -f \"$HOME/.local/bin/herdr\" ] && [ ! -L \"$HOME/.local/bin/herdr\" ]; then curl -fsSL https://herdr.dev/install.sh | sh; fi; else curl -fsSL https://herdr.dev/install.sh | sh; fi",
  "resumed":[{"bot_id":"01M2…","name":"…","run_id":"01M5…"}],"failed":[],
  "children_lost":[{"bot_id":"…","name":"…","parent_bot_id":"…"}]}
-{"update_id":"01M4…","host":"remote1","session":"agents-manager","phase":"done","failed_phase":"waiting_idle","ok":false,"from":"0.9.1","to":"0.9.3","manual_upgrade_command":"if command -v brew >/dev/null 2>&1 && brew list --versions herdr >/dev/null 2>&1; then brew upgrade herdr; else curl -fsSL https://herdr.dev/install.sh | sh; fi","reason":"busy_timeout","detail":"等了 1800s 仍有 bot 在忙：x (working)；什麼都沒動",
+{"update_id":"01M4…","host":"remote1","session":"agents-manager","phase":"done","failed_phase":"waiting_idle","ok":false,"from":"0.9.1","to":"0.9.3","manual_upgrade_command":"if command -v brew >/dev/null 2>&1 && brew list --versions herdr >/dev/null 2>&1; then if brew list --pinned 2>/dev/null | grep -qx herdr; then brew unpin herdr; brew upgrade herdr; brew pin herdr; else brew upgrade herdr; fi; if [ -f \"$HOME/.local/bin/herdr\" ] && [ ! -L \"$HOME/.local/bin/herdr\" ]; then curl -fsSL https://herdr.dev/install.sh | sh; fi; else curl -fsSL https://herdr.dev/install.sh | sh; fi","reason":"busy_timeout","detail":"等了 1800s 仍有 bot 在忙：x (working)；什麼都沒動",
  "resumed":[],"failed":[],"children_lost":[]}
 ```
 - `host` 是目標主機名稱；`session` 本機採 `server.herdr_session`，遠端採該 host 的 `herdr_session`。只重啟此 session；同機其他 session 不重啟，共用 binary 下次自行重啟才生效。
-- `phase`：202 為 `downloading`，進度／state 為目前階段，done 為 `done`；done 的 `failed_phase` 成功為 null，失敗為最初失敗階段，回滾失敗則為 `rolling_back`。`reason`／`detail` 只在失敗的 done 出現。`manual_upgrade_command` 在 202、state、進度、done 與 shared_session 拒絕都提供，為**在 `host` 那台執行**的 binary 安裝命令（Homebrew 已裝 herdr 用 `brew upgrade herdr`，其他用官方 installer）；不包含停止 bot、服務重啟或接回，daemon 不執行它。
-- `reason`（`ok:false` 才有，另帶給人看的 `detail`）：沒動到 server 的——`install_path_unsupported`（現行 binary 是 symlink 或找不到）、`download_failed`、
+- `phase`：202 為 `downloading`，進度／state 為目前階段，done 為 `done`；done 的 `failed_phase` 成功為 null，失敗為最初失敗階段，回滾失敗則為 `rolling_back`。`reason`／`detail` 只在失敗的 done 出現。`manual_upgrade_command` 在 202、state、進度、done 與 shared_session 拒絕都提供，為**在 `host` 那台執行**的 binary 安裝命令（Homebrew 已裝 herdr 用 `brew upgrade herdr`，formula 被 `brew pin` 住時先 `brew unpin herdr`、升完再 `brew pin herdr`；`~/.local/bin/herdr` 另有一份獨立的檔時一併用官方 installer 升，其他用官方 installer）；不包含停止 bot、服務重啟或接回，daemon 不執行它。
+- `binaries`（done 事件）：這台要處理的每一份 herdr，`[{role:"server"|"cli",path,version,stale}]`。`server`＝這個 session 的 launchd job `program`／systemd `ExecStart` 實際執行的檔；`cli`＝login shell／shim 的 `command -v herdr` 解析到的檔，**跟 server 不同檔才列**（同機常有兩份，例如 launchd 跑 `/opt/homebrew/bin/herdr`、shim 用 `~/.local/bin/herdr`）。兩份版本不是目標的（`stale:true`）都換，已是目標的不動；任何一份是套件管理器的 symlink 都 `install_path_unsupported`。`GET /api/upstream-updates` 的 herdr `installed_version` 取 server（ping）與 CLI 兩份中較舊的那份。
+- `reason`（`ok:false` 才有，另帶給人看的 `detail`）：沒動到 server 的——`install_path_unsupported`（server 跑的或 CLI 那份是 symlink（套件管理器裝的）或找不到，`detail` 寫是哪一份）、`download_failed`、
   `restart_unsupported`（換 binary 之前的檢查沒過：Linux `herdr@<session>.service` 不是 active、macOS 沒有 launchd job，或 Linux `ExecStart`／launchd `program` 解析後不是 updater 要替換的 binary——無法保證 restart 載入新版；請自己整理服務路徑後重試）、`checksum_mismatch`（下載的檔對不上 GitHub release API 公布的 sha256，或查不到公布值；**沒有執行它**）、`version_mismatch`（下載的 `--version` 不是目標）、`busy_timeout`（30 分鐘沒等到頂層 bot 全閒置）、`maintenance_busy`（別人開著 herdr 維護窗口）、
-  `swap_failed`（換 binary 失敗；確定未換檔時 server 不重啟，SSH 成功回覆遺失等結果不確定時用已知 `.bak` 回滾並重啟、ping 成功才接回）；動過 server 的——`restart_failed`（新版 2 分鐘內沒以目標版本回來，或回來了但 protocol 是這顆 daemon 不認得的；已換回 `.bak` 再重啟；bot 照樣接回，`resumed`／`failed` 照填）、`rollback_failed`（換回 `.bak`、再次重啟或舊版 ping 失敗；不嘗試 resume，未接回者列在 `failed`）、`resume_failed`（新版 server 已正常起來，部分頂層 bot 接回失敗；binary 保持新版，版本快照仍修正）。SSH 連線、命令與逾時錯誤依發生步驟歸入以上 reason，`detail` 保留主機與實際錯誤。
+  `swap_failed`（換 binary 失敗；確定未換檔時 server 不重啟，兩份中前面已換的會換回去，SSH 成功回覆遺失等結果不確定時用已知 `.bak` 回滾並重啟、ping 成功才接回）；動過 server 的——`restart_failed`（新版 2 分鐘內沒以目標版本回來（macOS 的 bootstrap 失敗也算），或回來了但 protocol 是這顆 daemon 不認得的；已換回 `.bak`（兩份都換回）再重啟；bot 照樣接回，`resumed`／`failed` 照填）、`rollback_failed`（換回 `.bak`、再次重啟或舊版 ping 失敗；不嘗試 resume，未接回者列在 `failed`）、`resume_failed`（新版 server 已正常起來，部分頂層 bot 接回失敗；binary 保持新版，版本快照仍修正）。SSH 連線、命令與逾時錯誤依發生步驟歸入以上 reason，`detail` 保留主機與實際錯誤。
 - staging／下載／sha256／`--version`／換檔／回滾／服務管理器皆由可替換操作介面執行；遠端經該 host 的 SSH，本機與遠端共用流程。遠端 staging 在那台 `$HOME/.config/agents-manager[/instances/<slug>]/herdr-staging/<ver>/herdr`，依那台 `uname` 選 asset，sha256 驗過才執行。只等這顆 daemon 在該 host 的頂層 bot，其他主機忙碌不阻擋。
 - 每一步附加到 daemon 本機 `<data_dir>/herdr-update.log`；舊 binary 留在目標主機 binary 同目錄 `herdr.bak-<舊版>`。symlink 安裝一律 `install_path_unsupported`，不改套件管理器 binary。
 

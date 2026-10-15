@@ -33,3 +33,16 @@
 .herdr-update-hosts {
   margin-top: 6px;
 }
+
+/* 手動升級指令：要在那台主機貼上執行，長指令換行、可選取。 */
+.herdr-update-cmd {
+  margin: 4px 0 0;
+  padding: 6px 8px;
+  border-radius: var(--radius);
+  background: var(--bg-elev, var(--danger-soft));
+  color: var(--text);
+  font-size: 11px;
+  white-space: pre-wrap;
+  word-break: break-all;
+  user-select: all;
+}

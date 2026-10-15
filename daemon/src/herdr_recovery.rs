@@ -329,7 +329,7 @@ async fn all_run_panes_are_unoccupied(
 }
 
 async fn maintenance_owns_reconnect(app: &Arc<App>) -> bool {
-    if crate::herdr_upgrade::is_running(app) {
+    if crate::herdr_upgrade::is_running(app, crate::config::LOCAL_HOST) {
         return true;
     }
     match crate::runners::herdr_maintenance::active(app).await {

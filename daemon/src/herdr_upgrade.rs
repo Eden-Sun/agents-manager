@@ -59,8 +59,14 @@ impl Default for Timing {
 
 /// 會碰外面世界的動作。`Err` 都是給人看的原因。
 pub trait Ops: Send + Sync {
-    /// 現行 herdr binary 的路徑（server 重啟時 exec 的那一個）。
-    fn install_path(&self) -> BoxFuture<'_, Result<PathBuf, String>>;
+    /// `session` 的 server 實際執行的 herdr binary 路徑（launchd job 的 program／systemd 的 ExecStart，重啟時 exec 的那一個）。
+    fn install_path<'a>(&'a self, session: &'a str) -> BoxFuture<'a, Result<PathBuf, String>>;
+    /// 這台主機上 bot／shim 解析到的 herdr CLI（login shell 的 `command -v herdr`）：跟 `server` 是**不同檔**才回 `Some`
+    /// （同機常有兩份：launchd 跑 `/opt/homebrew/bin/herdr`、login shell 解析到 `~/.local/bin/herdr`）。兩份都要換，
+    /// 只換一份就會留下 server／CLI 版本不一致（protocol_mismatch，畫面繼續顯示要更新）。
+    fn cli_path<'a>(&'a self, _server: &'a Path) -> BoxFuture<'a, Result<Option<PathBuf>, String>> {
+        Box::pin(async { Ok(None) })
+    }
     fn staging<'a>(&'a self, app: &'a Arc<App>, version: &'a str) -> BoxFuture<'a, Result<PathBuf, String>> {
         Box::pin(async move {
             let path = app.data_dir.join(STAGING_DIR).join(version).join("herdr");
@@ -385,6 +391,30 @@ struct Outcome {
     resumed: Vec<Value>,
     failed: Vec<Value>,
     children_lost: Vec<LostChild>,
+    /// 這台上要換的每一份 herdr（server 跑的那份、CLI 那份；同一檔只列一次）：`role`／`path`／`version`／`stale`。
+    binaries: Vec<Value>,
+}
+
+/// 一份要處理的 herdr binary。
+struct Binary {
+    role: &'static str,
+    path: PathBuf,
+    version: Option<String>,
+}
+
+impl Binary {
+    fn needs_swap(&self, target: &str) -> bool {
+        self.version.as_deref().and_then(parse_version) != parse_version(target)
+    }
+    fn json(&self, target: &str) -> Value {
+        json!({"role": self.role, "path": self.path.to_string_lossy(), "version": self.version, "stale": self.needs_swap(target)})
+    }
+    fn label(&self) -> String {
+        format!("{} {}（{}）", self.role_text(), self.path.display(), self.version.as_deref().unwrap_or("讀不到版本"))
+    }
+    fn role_text(&self) -> &'static str {
+        if self.role == "server" { "server 跑的" } else { "CLI／shim 解析到的" }
+    }
 }
 
 impl Outcome {
@@ -438,7 +468,7 @@ async fn run(app: &Arc<App>, ops: &dyn Ops, timing: Timing, ctx: &Ctx) -> Value 
         "update_id": ctx.update_id, "host": ctx.host, "ok": ok, "from": out.from, "to": ctx.target,
         "resumed": out.resumed, "failed": out.failed, "children_lost": out.children_lost,
         "phase": "done", "failed_phase": out.failed_phase, "session": ctx.session,
-        "manual_upgrade_command": manual_upgrade_command(),
+        "manual_upgrade_command": manual_upgrade_command(), "binaries": out.binaries,
     });
     if let Some(r) = out.reason {
         v["reason"] = json!(r);
@@ -451,7 +481,12 @@ async fn steps(app: &Arc<App>, ops: &dyn Ops, timing: Timing, ctx: &Ctx) -> Outc
     let mut out = Outcome::default();
     // 1. 下載到 staging、驗版本；現行 binary 不動。
     phase(app, ctx, "downloading", "下載到 staging").await;
-    let install = match ops.install_path().await {
+    let install = match ops.install_path(&ctx.session).await {
+        Ok(p) => p,
+        Err(e) => return out.fail("install_path_unsupported", e),
+    };
+    // 同機常有兩份 herdr（launchd 跑的與 login shell／shim 解析到的是不同檔）：兩份都看、都換，不然 server／CLI 會留下版本不一致。
+    let cli = match ops.cli_path(&install).await {
         Ok(p) => p,
         Err(e) => return out.fail("install_path_unsupported", e),
     };
@@ -459,6 +494,12 @@ async fn steps(app: &Arc<App>, ops: &dyn Ops, timing: Timing, ctx: &Ctx) -> Outc
         return out.fail("restart_unsupported", format!("{e}；什麼都沒動，請自己重啟 herdr server"));
     }
     out.from = ops.binary_version(&install).await.ok();
+    let mut binaries = vec![Binary { role: "server", path: install.clone(), version: out.from.clone() }];
+    if let Some(path) = cli {
+        let version = ops.binary_version(&path).await.ok();
+        binaries.push(Binary { role: "cli", path, version });
+    }
+    out.binaries = binaries.iter().map(|b| b.json(&ctx.target)).collect();
     let staging = match ops.staging(app, &ctx.target).await {
         Ok(p) => p,
         Err(e) => return out.fail("download_failed", e),
@@ -471,7 +512,7 @@ async fn steps(app: &Arc<App>, ops: &dyn Ops, timing: Timing, ctx: &Ctx) -> Outc
     }
     match ops.binary_version(&staging).await {
         Ok(v) if parse_version(&v) == parse_version(&ctx.target) => {
-            log_line(app, ctx, "downloading", &format!("staging {} = {v}；現行 {} = {:?}", staging.display(), install.display(), out.from));
+            log_line(app, ctx, "downloading", &format!("staging {} = {v}；現行 {}", staging.display(), binaries.iter().map(Binary::label).collect::<Vec<_>>().join("；")));
         }
         got => {
             return out.fail("version_mismatch", format!("下載的 binary 回報 {got:?}，不是 {}；現行 binary 沒動", ctx.target));
@@ -518,24 +559,35 @@ async fn steps(app: &Arc<App>, ops: &dyn Ops, timing: Timing, ctx: &Ctx) -> Outc
     phase(app, ctx, "stopping", &format!("窗口 {} 開了；要接回 {:?}，子 agent 會沒了 {}", window.opened_at, names, plan.children.len())).await;
 
     // 4. 換 binary → 重啟。
-    // 主機側先備份，再複製到同目錄、原子 rename；傳輸與檔案操作都經 Ops。
-    let from = out.from.clone().unwrap_or_else(|| "unknown".into());
-    let swapped = ops.swap(&staging, &install, &from).await;
+    // 主機側先備份，再複製到同目錄、原子 rename；傳輸與檔案操作都經 Ops。已經是目標版的那份不動。
+    let mut swapped: Vec<(PathBuf, PathBuf)> = Vec::new();
     let mut swap_error = None;
-    let backup = match swapped {
-        Ok(b) => b,
-        Err(e) if ops.swap_outcome_uncertain() => {
-            // SSH may lose its acknowledgement after rename. Treat the install as changed and restore the known backup.
-            swap_error = Some(e);
-            let name = install.file_name().and_then(|n| n.to_str()).unwrap_or("herdr");
-            install.with_file_name(format!("{name}.bak-{from}"))
+    for bin in binaries.iter().filter(|b| b.needs_swap(&ctx.target)) {
+        let from = bin.version.clone().unwrap_or_else(|| "unknown".into());
+        match ops.swap(&staging, &bin.path, &from).await {
+            Ok(backup) => swapped.push((bin.path.clone(), backup)),
+            Err(e) if ops.swap_outcome_uncertain() => {
+                // SSH may lose its acknowledgement after rename. Treat the install as changed and restore the known backup.
+                let name = bin.path.file_name().and_then(|n| n.to_str()).unwrap_or("herdr");
+                swapped.push((bin.path.clone(), bin.path.with_file_name(format!("{name}.bak-{from}"))));
+                swap_error = Some(e);
+                break;
+            }
+            Err(e) => {
+                // 前面已經換掉的換回去（server 還沒動過，不必重啟）。
+                let undo = restore_all(ops, &swapped).await;
+                let _ = crate::runners::herdr_maintenance::close_as(app, &window, "herdr_update", Some("換 binary 失敗，沒有重啟")).await;
+                let tail = match undo {
+                    Ok(()) if swapped.is_empty() => String::new(),
+                    Ok(()) => "；已換的那份換回舊版".into(),
+                    Err(e2) => format!("；前面已換的那份換回舊版也失敗：{e2}（備份在 {}）", swapped.iter().map(|(_, b)| b.display().to_string()).collect::<Vec<_>>().join("、")),
+                };
+                return out.fail("swap_failed", format!("{}：{e}；server 沒有重啟{tail}", bin.label()));
+            }
         }
-        Err(e) => {
-            let _ = crate::runners::herdr_maintenance::close_as(app, &window, "herdr_update", Some("換 binary 失敗，沒有重啟")).await;
-            return out.fail("swap_failed", format!("{e}；server 沒有重啟"));
-        }
-    };
-    phase(app, ctx, "restarting", &format!("{} 換成 {}（舊的在 {}），重啟 herdr@{}", install.display(), ctx.target, backup.display(), ctx.session)).await;
+    }
+    let swapped_text = swapped.iter().map(|(i, b)| format!("{}（舊的在 {}）", i.display(), b.display())).collect::<Vec<_>>().join("、");
+    phase(app, ctx, "restarting", &format!("{} 換成 {}，重啟 herdr@{}", if swapped.is_empty() { "沒有檔案需要換".to_string() } else { swapped_text }, ctx.target, ctx.session)).await;
     let restarted = if let Some(e) = &swap_error {
         Err(e.clone())
     } else {
@@ -547,9 +599,10 @@ async fn steps(app: &Arc<App>, ops: &dyn Ops, timing: Timing, ctx: &Ctx) -> Outc
     // 5. 失敗就換回 `.bak` 再重啟一次；bot 照樣接回（舊版也比沒有 bot 好）。
     if let Err(e) = restarted {
         out.reason = Some(if swap_error.is_some() { "swap_failed" } else { "restart_failed" });
-        phase(app, ctx, "rolling_back", &format!("新版沒起來：{e}；換回 {}", backup.display())).await;
+        let backups = swapped.iter().map(|(_, b)| b.display().to_string()).collect::<Vec<_>>().join("、");
+        phase(app, ctx, "rolling_back", &format!("新版沒起來：{e}；換回 {backups}")).await;
         out.failed_phase = Some(if swap_error.is_some() { "stopping" } else { "restarting" }.into());
-        let rolled_back = ops.rollback(&backup, &install).await;
+        let rolled_back = restore_all(ops, &swapped).await;
         let rolled = match rolled_back {
             Ok(()) => match ops.restart_server(&ctx.session).await {
                 Ok(()) => match out.from.as_deref() {
@@ -565,7 +618,7 @@ async fn steps(app: &Arc<App>, ops: &dyn Ops, timing: Timing, ctx: &Ctx) -> Outc
             Err(e2) => {
                 out.reason = Some("rollback_failed");
                 out.failed_phase = Some("rolling_back".into());
-                format!("新版沒起來（{e}）；換回舊版也沒起來（{e2}），要人工處理 {}", backup.display())
+                format!("新版沒起來（{e}）；換回舊版也沒起來（{e2}），要人工處理 {backups}")
             },
         });
     }
@@ -612,6 +665,17 @@ async fn steps(app: &Arc<App>, ops: &dyn Ops, timing: Timing, ctx: &Ctx) -> Outc
         Err(e) => log_line(app, ctx, "resuming", &format!("關維護窗口失敗（{e:#}），會在截止時間自己結束")),
     }
     out
+}
+
+/// 把 `(安裝位置, 備份)` 全部換回（後換的先換回）；任何一份失敗都繼續換其餘的，回第一個錯誤。
+async fn restore_all(ops: &dyn Ops, swapped: &[(PathBuf, PathBuf)]) -> Result<(), String> {
+    let mut first_error = None;
+    for (install, backup) in swapped.iter().rev() {
+        if let Err(e) = ops.rollback(backup, install).await {
+            first_error.get_or_insert(e);
+        }
+    }
+    first_error.map_or(Ok(()), Err)
 }
 
 /// 等目標主機的 herdr ping 回來且版本＝`expected`，回讀到的版本。
@@ -723,7 +787,9 @@ mod real;
 use real::Real;
 
 fn manual_upgrade_command() -> &'static str {
-    "if command -v brew >/dev/null 2>&1 && brew list --versions herdr >/dev/null 2>&1; then brew upgrade herdr; else curl -fsSL https://herdr.dev/install.sh | sh; fi"
+    // Homebrew 的 formula 常被 `brew pin` 住（pinned 時 `brew upgrade` 直接拒絕）：先 unpin、升完照原樣 pin 回去。
+    // Homebrew 與 `~/.local/bin` 是兩份獨立的檔：兩份都在就兩份都升。
+    "if command -v brew >/dev/null 2>&1 && brew list --versions herdr >/dev/null 2>&1; then if brew list --pinned 2>/dev/null | grep -qx herdr; then brew unpin herdr; brew upgrade herdr; brew pin herdr; else brew upgrade herdr; fi; if [ -f \"$HOME/.local/bin/herdr\" ] && [ ! -L \"$HOME/.local/bin/herdr\" ]; then curl -fsSL https://herdr.dev/install.sh | sh; fi; else curl -fsSL https://herdr.dev/install.sh | sh; fi"
 }
 
 async fn session_for_response(app: &Arc<App>, host: &str) -> String {
@@ -846,6 +912,11 @@ mod tests {
         version_probes: Mutex<Vec<PathBuf>>,
         fail_at: Mutex<Option<String>>,
         install: PathBuf,
+        /// 另一份 herdr（login shell／shim 解析到的 CLI，跟 server 跑的不同檔）。
+        cli: Mutex<Option<PathBuf>>,
+        cli_err: Mutex<Option<String>>,
+        /// 換這個路徑時失敗（模擬第二份換不上去）。
+        fail_swap_path: Mutex<Option<PathBuf>>,
         download_as: String,
         /// 前 N 次重啟起來的不是現行檔案寫的版本（模擬新版起不來／起成別的）。
         bad_restarts: AtomicUsize,
@@ -874,6 +945,9 @@ mod tests {
                 version_probes: Mutex::new(vec![]),
                 fail_at: Mutex::new(None),
                 install,
+                cli: Mutex::new(None),
+                cli_err: Mutex::new(None),
+                fail_swap_path: Mutex::new(None),
                 download_as: download_as.into(),
                 bad_restarts: AtomicUsize::new(0),
                 bad_checksum: AtomicUsize::new(0),
@@ -892,11 +966,28 @@ mod tests {
         fn installed(&self) -> String {
             std::fs::read_to_string(&self.install).unwrap().trim().to_string()
         }
+        /// 另放一份 CLI（不同目錄、不同檔），回它的路徑。
+        fn add_cli(&self, env: &tt::Env, version: &str) -> PathBuf {
+            let dir = env.dir.join("cli");
+            std::fs::create_dir_all(&dir).unwrap();
+            let path = dir.join("herdr");
+            std::fs::write(&path, format!("herdr {version}\n")).unwrap();
+            *self.cli.lock().unwrap() = Some(path.clone());
+            path
+        }
     }
 
     impl Ops for Fake {
-        fn install_path(&self) -> BoxFuture<'_, Result<PathBuf, String>> {
+        fn install_path<'a>(&'a self, _session: &'a str) -> BoxFuture<'a, Result<PathBuf, String>> {
             Box::pin(async move { self.check("install")?; Ok(self.install.clone()) })
+        }
+        fn cli_path<'a>(&'a self, _server: &'a Path) -> BoxFuture<'a, Result<Option<PathBuf>, String>> {
+            Box::pin(async move {
+                if let Some(e) = self.cli_err.lock().unwrap().clone() {
+                    return Err(e);
+                }
+                Ok(self.cli.lock().unwrap().clone())
+            })
         }
         fn staging<'a>(&'a self, app: &'a Arc<App>, version: &'a str) -> BoxFuture<'a, Result<PathBuf, String>> {
             Box::pin(async move {
@@ -907,7 +998,15 @@ mod tests {
             })
         }
         fn swap<'a>(&'a self, staging: &'a Path, install: &'a Path, from: &'a str) -> BoxFuture<'a, Result<PathBuf, String>> {
-            Box::pin(async move { self.check("swap")?; let backup = swap_in(staging, install, from)?; self.check("swap_ack")?; Ok(backup) })
+            Box::pin(async move {
+                self.check("swap")?;
+                if self.fail_swap_path.lock().unwrap().as_deref() == Some(install) {
+                    return Err(format!("fake swap of {} failed", install.display()));
+                }
+                let backup = swap_in(staging, install, from)?;
+                self.check("swap_ack")?;
+                Ok(backup)
+            })
         }
         fn swap_outcome_uncertain(&self) -> bool { self.fail_at.lock().unwrap().as_deref() == Some("swap_ack") }
         fn rollback<'a>(&'a self, backup: &'a Path, install: &'a Path) -> BoxFuture<'a, Result<(), String>> {
@@ -1186,6 +1285,103 @@ mod tests {
         .unwrap();
         assert_eq!(done["ok"], true, "{done}");
         assert_eq!(*fake.resumed.lock().unwrap(), vec![bot]);
+    }
+
+    fn text(p: &Path) -> String {
+        std::fs::read_to_string(p).unwrap().trim().to_string()
+    }
+
+    /// issue #1752：launchd 跑的與 login shell／shim 解析到的 CLI 是兩份不同的檔——兩份一起換（server 只重啟一次），
+    /// 已經是目標版的那份不動；結果逐份列出路徑、版本與誰舊（畫面據此講清楚）。
+    #[tokio::test]
+    async fn the_server_binary_and_a_separate_cli_binary_are_both_replaced_and_reported() {
+        let env = tt::env().await;
+        let fake = Fake::new(&env, "0.9.1", "0.9.3");
+        let cli = fake.add_cli(&env, "0.9.2");
+        let _bot = top(&env, "boss", "idle").await;
+        let (_, done) = go(&env, &fake, "0.9.3").await;
+        assert_eq!(done["ok"], true, "{done}");
+        assert_eq!(text(&fake.install), "herdr 0.9.3");
+        assert_eq!(text(&cli), "herdr 0.9.3", "CLI 那份也要換，不然 server／CLI 版本不一致");
+        assert_eq!(text(&cli.with_file_name("herdr.bak-0.9.2")), "herdr 0.9.2");
+        assert_eq!(fake.restarts.lock().unwrap().len(), 1, "server 只重啟一次");
+        assert_eq!(
+            done["binaries"],
+            json!([
+                {"role": "server", "path": fake.install.to_string_lossy(), "version": "0.9.1", "stale": true},
+                {"role": "cli", "path": cli.to_string_lossy(), "version": "0.9.2", "stale": true},
+            ]),
+            "{done}"
+        );
+        assert!(!env.app.data_dir.join(STAGING_DIR).join("0.9.3").exists());
+    }
+
+    #[tokio::test]
+    async fn a_cli_binary_that_is_already_the_target_is_left_alone() {
+        let env = tt::env().await;
+        let fake = Fake::new(&env, "0.9.1", "0.9.3");
+        let cli = fake.add_cli(&env, "0.9.3");
+        let (_, done) = go(&env, &fake, "0.9.3").await;
+        assert_eq!(done["ok"], true, "{done}");
+        assert!(!cli.with_file_name("herdr.bak-0.9.3").exists(), "已是目標版就不備份、不換");
+        assert_eq!(done["binaries"][1]["stale"], false, "{done}");
+        assert_eq!(text(&fake.install), "herdr 0.9.3");
+    }
+
+    /// 第二份換不上去：第一份已經換掉的要換回去，server 沒動過所以不重啟、什麼都沒壞。
+    #[tokio::test]
+    async fn a_failed_second_swap_restores_the_first_and_never_restarts() {
+        let env = tt::env().await;
+        let fake = Fake::new(&env, "0.9.1", "0.9.3");
+        let cli = fake.add_cli(&env, "0.9.2");
+        *fake.fail_swap_path.lock().unwrap() = Some(cli.clone());
+        let _bot = top(&env, "boss", "idle").await;
+        let (_, done) = go(&env, &fake, "0.9.3").await;
+        assert_eq!((done["ok"].clone(), done["reason"].clone()), (json!(false), json!("swap_failed")), "{done}");
+        assert!(done["detail"].as_str().unwrap().contains(&cli.to_string_lossy().to_string()), "要講清楚是哪一份：{done}");
+        assert_eq!(text(&fake.install), "herdr 0.9.1", "第一份換回去");
+        assert_eq!(text(&cli), "herdr 0.9.2");
+        assert!(fake.restarts.lock().unwrap().is_empty());
+        assert!(!window_open(&env.app).await);
+    }
+
+    /// 新版 server 起不來：兩份都換回舊版，再重啟一次，bot 照樣接回。
+    #[tokio::test]
+    async fn a_failed_restart_rolls_back_both_binaries() {
+        let env = tt::env().await;
+        let fake = Fake::new(&env, "0.9.1", "0.9.3");
+        let cli = fake.add_cli(&env, "0.9.2");
+        fake.bad_restarts.store(1, Ordering::SeqCst);
+        let bot = top(&env, "boss", "idle").await;
+        let (_, done) = go(&env, &fake, "0.9.3").await;
+        assert_eq!(done["reason"], "restart_failed", "{done}");
+        assert_eq!(text(&fake.install), "herdr 0.9.1");
+        assert_eq!(text(&cli), "herdr 0.9.2", "CLI 也要換回");
+        assert_eq!(fake.restarts.lock().unwrap().len(), 2);
+        assert_eq!(*fake.resumed.lock().unwrap(), vec![bot]);
+    }
+
+    /// CLI 那份是套件管理器的 symlink：什麼都不動（不碰 server 那份），reason 是 install_path_unsupported。
+    #[tokio::test]
+    async fn an_unswappable_cli_binary_refuses_before_anything_is_touched() {
+        let env = tt::env().await;
+        let fake = Fake::new(&env, "0.9.1", "0.9.3");
+        *fake.cli_err.lock().unwrap() = Some("CLI／shim 解析到的 /opt/homebrew/bin/herdr is not a regular file (package manager install)".into());
+        let (_, done) = go(&env, &fake, "0.9.3").await;
+        assert_eq!(done["reason"], "install_path_unsupported", "{done}");
+        assert!(done["detail"].as_str().unwrap().contains("/opt/homebrew/bin/herdr"), "{done}");
+        assert_eq!(text(&fake.install), "herdr 0.9.1");
+        assert!(fake.restarts.lock().unwrap().is_empty() && !window_open(&env.app).await);
+    }
+
+    /// m4p 手動升級的教訓：Homebrew formula 被 `brew pin` 住時 `brew upgrade` 會直接拒絕，手動指令要 unpin → upgrade → pin。
+    #[test]
+    fn the_manual_command_unpins_upgrades_and_repins_a_homebrew_formula() {
+        let cmd = manual_upgrade_command();
+        let (unpin, upgrade, pin) = (cmd.find("brew unpin herdr"), cmd.find("brew upgrade herdr"), cmd.find("brew pin herdr"));
+        assert!(unpin.is_some() && upgrade.is_some() && pin.is_some(), "{cmd}");
+        assert!(unpin < upgrade && upgrade < pin, "順序要 unpin → upgrade → pin：{cmd}");
+        assert!(cmd.contains("install.sh"), "沒有 Homebrew 時退到官方安裝腳本：{cmd}");
     }
 
     #[tokio::test]

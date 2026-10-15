@@ -6,6 +6,7 @@ import { reviewErrText } from '../lib/claudeReviewErr'
 import {
   HERDR_PHASE_LABEL,
   dismissHerdrResult,
+  herdrBinaryText,
   herdrReasonText,
   startHerdr,
   useHerdrUpdate,
@@ -29,6 +30,7 @@ export function HerdrUpdateChip({ control }: { control?: DialogControl } = {}) {
   const active = useHerdrUpdate((s) => s.active)
   const result = useHerdrUpdate((s) => s.result)
   const notify = useStore((s) => s.notify)
+  const herdrVersions = useStore((s) => s.hosts.find((h) => h.name === (plan?.host ?? ''))?.herdr)
   const [localOpen, setLocalOpen] = useState(false)
   const open = control ? control.open : localOpen
   const close = () => (control ? control.close() : setLocalOpen(false))
@@ -93,6 +95,12 @@ export function HerdrUpdateChip({ control }: { control?: DialogControl } = {}) {
                   先在 <strong>{host}</strong> 下載 {target} 並驗證版本（這時還不換），再等所有頂層 Bot 都閒下來（最多 30 分鐘，等不到就什麼都不動），
                   然後換上新版、重啟 herdr。新版起不來會自動換回 {from ?? '舊版'}。
                 </p>
+                {herdrVersions?.mismatch ? (
+                  <p className="confirm-note herdr-update-sub">
+                    目前 server 是 {herdrVersions.server_version ?? '讀不到'}、CLI 是 {herdrVersions.cli_version ?? '讀不到'}：
+                    {herdrOlder(herdrVersions.server_version, herdrVersions.cli_version)}那一份比較舊；同一台有兩份 herdr（launchd／systemd 跑的與 shim 用的不同檔）時，兩份會一起換。
+                  </p>
+                ) : null}
                 {plan.willResume.length > 0 ? (
                   <>
                     <p className="confirm-note herdr-update-sub">重啟後接回這 {plan.willResume.length} 顆：</p>
@@ -167,6 +175,16 @@ export function HerdrUpdateChip({ control }: { control?: DialogControl } = {}) {
   )
 }
 
+/** server／CLI 版本不同時，較舊的是哪一份。 */
+function herdrOlder(server: string | null, cli: string | null): string {
+  const v = (x: string | null) => (x ?? '').split('.').map((n) => Number.parseInt(n, 10) || 0)
+  const [a, b] = [v(server), v(cli)]
+  for (let i = 0; i < Math.max(a.length, b.length); i++) {
+    if ((a[i] ?? 0) !== (b[i] ?? 0)) return (a[i] ?? 0) < (b[i] ?? 0) ? 'server ' : 'CLI '
+  }
+  return ''
+}
+
 /** 更新跑完：✓／⚠ 留在 header，點開看誰接回、誰沒接回、哪些子 agent 沒了；「知道了」才收起。 */
 function ResultChip({ result, control }: { result: HerdrUpdateResult; control?: DialogControl }) {
   const bots = useStore((s) => s.bots)
@@ -202,6 +220,22 @@ function ResultChip({ result, control }: { result: HerdrUpdateResult; control?: 
                 ? `${result.host}：${result.from ?? '舊版'} → ${result.to ?? '新版'}。`
                 : `${result.host}：${herdrReasonText(result.reason)}${result.detail ? `（${result.detail}）` : ''}。`}
             </p>
+            {result.binaries.length > 1 || (result.binaries.length === 1 && !result.ok) ? (
+              <>
+                <p className="confirm-note herdr-update-sub">這台的 herdr：</p>
+                <ul className="confirm-list dim">
+                  {result.binaries.map((b) => (
+                    <li key={b.path}>{herdrBinaryText(b)}</li>
+                  ))}
+                </ul>
+              </>
+            ) : null}
+            {!result.ok && result.manualCommand && (result.reason === 'install_path_unsupported' || result.reason === 'restart_unsupported') ? (
+              <>
+                <p className="confirm-note herdr-update-sub">在 {result.host} 上手動升級（只換 binary；升完再回來按更新，或自己重啟 herdr server）：</p>
+                <pre className="herdr-update-cmd">{result.manualCommand}</pre>
+              </>
+            ) : null}
             {result.resumed.length > 0 ? (
               <>
                 <p className="confirm-note herdr-update-sub">已接回 {result.resumed.length} 顆：</p>
