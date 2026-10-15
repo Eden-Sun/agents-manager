@@ -17,10 +17,6 @@ mkdir -p "$fixture/scripts" "$fixture/web" "$fixture/bin"
 cp "$ROOT/scripts/check.sh" "$fixture/scripts/check.sh"
 cp "$ROOT/scripts/ci-changed-parts.sh" "$fixture/scripts/ci-changed-parts.sh"
 cp "$ROOT/scripts/ci-daemon-filters.sh" "$fixture/scripts/ci-daemon-filters.sh"
-# SPEC 契約測試的替身：只記一筆，證明 changed 有叫它。
-printf '#!/usr/bin/env bash\necho jev-ran >>"${AM_TEST_JEV_LOG:?}"\n' >"$fixture/scripts/jev-role_test.sh"
-chmod +x "$fixture/scripts/jev-role_test.sh"
-export AM_TEST_JEV_LOG="$tmp/jev.log"
 # Rust test mount check stand-in: record ordering alongside cargo and support a deterministic failure.
 cat >"$fixture/scripts/rust_test_mount_test.sh" <<'SH'
 #!/usr/bin/env bash
@@ -267,17 +263,8 @@ if out="$(changed)"; then fail "ls-files 失敗卻放行了：$out"; else rc=$?;
 [ "$rc" = 2 ] || fail "git ls-files 失敗應回 2，實際 ${rc}：${out}"
 unset AM_TEST_GIT_FAIL
 
-# 只改 docs/SPEC.md：跑 SPEC 契約測試（Jev 角色政策那幾句），但不跑 ops 整包、也不碰 cargo。
-: >"$AM_TEST_CARGO_LOG"; : >"$AM_TEST_JEV_LOG"
-export AM_TEST_DIFF_HEAD=docs/SPEC.md
-output="$(changed)" || fail "只改 SPEC 的 changed 失敗：$output"
-grep -q jev-ran "$AM_TEST_JEV_LOG" || fail "只改 SPEC 沒有跑 jev-role_test.sh：$output"
-[ ! -s "$AM_TEST_CARGO_LOG" ] || fail "只改 SPEC 不該動 cargo"
-# 其他文件不跑它。
-: >"$AM_TEST_JEV_LOG"
 export AM_TEST_DIFF_HEAD=docs/API.md
 changed >/dev/null || fail "只改 API.md 的 changed 失敗"
-[ ! -s "$AM_TEST_JEV_LOG" ] || fail "只改 API.md 不該跑 SPEC 契約測試"
 
 # 平台敏感的 daemon 模組（macos-local 的三組測試所在）改了：Linux 上跑不了 macos-local，至少要明講請去 Mac 跑，
 # 不能安靜地綠燈讓人以為都驗過了。

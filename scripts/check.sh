@@ -330,11 +330,6 @@ check_changed() {
         return
     fi
     if echo "$parts" | grep -qx ob; then check_ob; fi
-    if echo "$parts" | grep -qx specs; then
-        # 釘住 SPEC 內容的契約測試（Jev 角色政策）；ops 部分也會跑它，這裡是「只改了 SPEC」的快路徑。
-        step "docs: SPEC 契約（scripts/jev-role_test.sh）"
-        bash scripts/jev-role_test.sh
-    fi
     if echo "$parts" | grep -qx ops; then check_ops; fi
     if echo "$parts" | grep -qx web; then check_web; fi
     if echo "$parts" | grep -qx daemon; then
