@@ -1,0 +1,12 @@
+.child-notice-group { min-width: 0; margin: 8px 0; }
+.child-notice-toggle {
+  display: flex; align-items: center; gap: 8px; width: 100%; min-height: 36px;
+  padding: 6px 10px; border: 0; border-radius: 6px; background: transparent;
+  color: var(--text-dim); font: inherit; font-size: 13px; cursor: pointer; text-align: left;
+}
+.child-notice-toggle:hover { background: color-mix(in srgb, var(--text) 8%, transparent); }
+.child-notice-toggle:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+.child-notice-label { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.child-notice-toggle time { flex-shrink: 0; font-size: 12px; }
+.child-notice-content { padding-top: 8px; }
+@media (max-width: 600px) { .child-notice-toggle { min-height: 44px; } }

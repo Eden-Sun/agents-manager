@@ -1881,6 +1881,10 @@ child 轉成 `blocked` 並且**穩定 8 秒**（daemon 自己按掉的對話框�
 中途提問、進度回報（同一回合、內容跟最後回覆不像）不會吞掉完成通知（#868）。
 通知結尾是 `child_alerts::NOTICE_END`（#1778）：寫明「不用回覆 daemon，但看完照回報接著做你的事」，不能只寫「不需要回覆」——後者讓 parent 只回 No response requested. 而不接手。引用解析新舊結尾都認（舊通知仍能去重）。
 
+**網頁呈現**（#1781）：有 relay 來源、非未驗證 relay，且以 `ALERT_MARK` 和完成／blocked 固定首行開頭的 user 訊息，連同同 `turn_id` 的 assistant 回覆與串流，預設收成
+`↳ child <名字> 回報完成`／`↳ child <名字> 在等人回答` 一行。相鄰通知回合合併，列出不同名字與回合數；點開一次顯示兩邊全文。
+一般訊息會中斷分組；使用者自己送的訊息、主動回覆及同回合使用者補充不收合。通知回合不浮出提問預覽，前端完成事件與歷史未讀重算排除這些回合。
+
 Stop hook 與終端備援提交回覆後都經 `lifecycle::messages::emit_turn` 觸發通知；每分鐘 sweep 另從最近一小時完成的 turn
 與 assistant message 補送漏掉的事件，避免部署後把較舊的未通知回合整批倒灌；**parent 離線期間完成的**（完成當下沒有任何涵蓋那一刻的 parent run）
 放寬到 7 天，parent 的 run 回來後補送（#871；parent 在線時完成的回合即時事件一定觸發過，仍維持一小時）。每顆 child 最多補一則，較舊的視為被取代。若 child 的 run 已知仍有背景工作，完成回合先保留待 sweep；

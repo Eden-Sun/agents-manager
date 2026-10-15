@@ -13,6 +13,12 @@
   `relay_unverified`（寄件端自稱那顆 bot、沒帶它的 bot token，issue #339 相容期）在來源後面加「（未驗證）」文字、tooltip 講原因；
   不另上色——位置照舊靠左（本來就不是使用者），靠文字分辨，免得跟「紅＝要你動手」混在一起（`lib/relaySource.ts`）。
   ![桌機](screenshots/relay-auth/desktop-1440.png) ![手機](screenshots/relay-auth/phone-390.png)
+- **子 agent 的 daemon 通知回合預設收合成一行**（使用者指定，#1781）：只認 user 訊息有已驗證的 `relay_from`、以
+  `[daemon 自動通知，不是 bot_request]` 開頭，且首行符合完成／blocked 通知格式；通知和同 `turn_id` 的 parent 回覆（含串流）一起收合。
+  完成寫 `↳ child <名字> 回報完成`，blocked 寫 `↳ child <名字> 在等人回答`；相鄰通知回合合併，名字去重、括號保留回合數，混合狀態分別寫清楚。
+  點同一行一次就能看通知全文和 parent 回覆，避免還得再展開 relay 摘要；桌機與手機一致。長名字單行截斷、完整標題留在 tooltip。
+  使用者訊息、主動回覆與同回合使用者補充照舊顯示；通知不再出現「這回合的提問」浮窗，前端未讀重算及完成事件不把它當成新回覆。
+  ![桌機](screenshots/child-notice-fold/after-desktop.png) ![手機](screenshots/child-notice-fold/after-phone.png)
 - **紅色只代表「要你本人動手」**（blocked、回合被中斷、需要回應）；黃＝在等（子 agent、額度）；綠＝好消息（有新版、目前使用中外框）；
   藍（accent）＝未讀／可操作（**2026-10-11 起：未讀改黃，藍只剩「你正在看」，見檔尾**）。狀態不能只靠顏色：一律還有文字、形狀或記號。
 - 燈號說「現在在做什麼」，徽章說「還沒看過幾個回合」——兩個獨立記號，不互相染色。
