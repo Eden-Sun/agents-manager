@@ -90,6 +90,8 @@ import { ToolsHint } from './Tools'
 import { compactTokens } from '../lib/composerCost'
 import { COMPACTING_LABEL } from './lampLabel'
 import { GPT_61_SOL_CONTEXT_WINDOW, effectiveModelOf, sol500kContext, solWindowApplies } from '../lib/codexContextWindow'
+import { ChildNoticeMessages } from './ChildNoticeMessages'
+import { childNotice } from '../lib/childNotice'
 import './chatPanel.css'
 
 const NO_QUEUED_ATTACHMENTS: Message['attachments'] = []
@@ -149,6 +151,7 @@ interface BubbleProps {
   kind?: BotKind
   /** 被「這回合的提問」浮窗捲過來時閃一下（見 `LastAskPeek`）。 */
   flash?: boolean
+  expandRelay?: boolean
 }
 
 /** 一則訊息。claude 的提問與使用者的回答（`ask:` 系統訊息）畫成「Claude 問／你答」卡，其餘照一般泡泡。 */
@@ -165,6 +168,7 @@ const PlainBubble = memo(function PlainBubble({
   fromTitle,
   kind,
   flash,
+  expandRelay,
 }: BubbleProps) {
   const fallback = msg.source === 'terminal_fallback'
   const system = msg.role === 'system'
@@ -182,7 +186,7 @@ const PlainBubble = memo(function PlainBubble({
   // 代發與轉述（AGM 交辦、bot 互轉）預設收合成一行（2026-09-14 使用者：「不用全顯示，收合就好」）。
   const preview = msg.role === 'user' && (msg.relay_from || quoted) ? relayPreview(msg.content) : null
   const [expanded, setExpanded] = useState(false)
-  const folded = Boolean(preview?.truncated) && !expanded
+  const folded = Boolean(preview?.truncated) && !expanded && !expandRelay
   // 點擊複製的回報在事件裡才用 `notify`：不為它掛 selector（清單幾百則，每個 selector 都要在每次 store 更新時跑一遍）。
   const tapCopy = useTapCopy(system ? systemNoticeText(msg.content) : msg.content, (ok) => {
     useStore.getState().notify(ok ? 'info' : 'error', ok ? '已複製訊息' : '複製失敗，請長按選取文字複製')
@@ -254,7 +258,7 @@ const PlainBubble = memo(function PlainBubble({
         {msg.attachments.length && !folded ? <MessageAttachments items={msg.attachments} /> : null}
         <TerminalSnapshot msg={msg} />
       </div>
-      {preview?.truncated ? (
+      {preview?.truncated && !expandRelay ? (
         <button type="button" className="disclosure sub relay-fold" aria-expanded={expanded} onClick={() => setExpanded((v) => !v)}>
           <span className="chev">{expanded ? '▼' : '▶'}</span> {expanded ? '收合' : '展開全文'}
           <span className="disclosure-note">
@@ -660,7 +664,8 @@ function MessageList({ botId }: { botId: string }) {
   const turnId = phone
     ? (!working && !inFlight && completedAnswered ? latestCompletedTurnId : null)
     : inFlightTurnId
-  const lastAsk = turnId ? lastAskOf(list, turnId) : null
+  const ask = turnId ? lastAskOf(list, turnId) : null
+  const lastAsk = ask && !childNotice(ask) ? ask : null
   const askVisible = useMsgVisible(tail.ref, lastAsk?.id ?? null, list.length)
 
   // 用 rect 差：`offsetTop` 會差一個 wrap 的 padding；`scrollIntoView` 會連帶捲外層容器。
@@ -703,9 +708,10 @@ function MessageList({ botId }: { botId: string }) {
           {loaded ? '在下方輸入框寫下第一則訊息。' : '載入訊息中…'}
         </EmptyState>
       ) : (
-        list.map((m) => <Bubble key={m.id} msg={m} flash={m.id === flashId} />)
+        <ChildNoticeMessages messages={list} renderMessage={(m, expanded) => <Bubble msg={m} flash={m.id === flashId} expandRelay={expanded} />}
+          liveTurnId={inFlightTurnId} liveReply={<LiveReplyBubble botId={botId} abandon />} />
       )}
-      <LiveReplyBubble botId={botId} abandon />
+      {list.length === 0 ? <LiveReplyBubble botId={botId} abandon /> : null}
     </div>
     {turnId && lastAsk && !askVisible ? (
       <LastAskPeek key={botId} msg={lastAsk} turnId={turnId} onJump={() => jumpTo(lastAsk.id)} />
