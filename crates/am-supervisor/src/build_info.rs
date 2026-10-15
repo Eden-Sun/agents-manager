@@ -24,7 +24,7 @@ pub const VERSION: &str = concat!(env!("CARGO_PKG_VERSION"), " ", env!("AM_BUILD
 
 /// 讀 `--version` 的那一行 → `(完整 sha 或 unknown, 是否髒樹)`；沒有 sha（舊 binary 只印名字與版本）或格式不對是 `None`。
 /// 腳本讀的是同一個形狀（最後一個空白分隔的欄位）。
-#[cfg(test)]
+#[cfg(all(test, not(feature = "daemon-test-harness")))]
 pub fn parse_version_line(line: &str) -> Option<(String, bool)> {
     let mut fields = line.split_whitespace();
     let _name = fields.next()?;
@@ -92,7 +92,7 @@ pub fn last_deploy() -> serde_json::Value {
     serde_json::json!({"sha": BUILD_SHA, "sha_full": BUILD_SHA_FULL, "dirty": BUILD_DIRTY, "at": DEPLOYED_AT.get().cloned().unwrap_or_else(started_at)})
 }
 
-#[cfg(test)]
+#[cfg(all(test, not(feature = "daemon-test-harness")))]
 mod tests {
     use super::*;
 
@@ -126,12 +126,6 @@ mod tests {
             assert!(BUILD_SHA_FULL.starts_with(BUILD_SHA), "short sha 是完整 sha 的前綴");
         }
         assert_eq!(VERSION, format!("{} {}{}", env!("CARGO_PKG_VERSION"), BUILD_SHA_FULL, if BUILD_DIRTY { "-dirty" } else { "" }));
-        #[cfg(feature = "daemon-test-harness")]
-        {
-            use clap::CommandFactory as _;
-            let cmd = crate::Cli::command();
-            assert_eq!(cmd.get_version(), Some(VERSION), "--version 印的就是 VERSION");
-        }
         assert_eq!(parse_version_line(&format!("agents-managerd {VERSION}")), Some((BUILD_SHA_FULL.to_string(), BUILD_DIRTY)));
     }
 
@@ -177,5 +171,21 @@ mod tests {
         assert_eq!(deployed_at(&dir, "unknown", "2026-09-17T11:00:00Z"), "2026-09-17T11:00:00Z");
         assert_eq!(std::fs::read_to_string(dir.join(FILE)).unwrap(), before);
         std::fs::remove_dir_all(&dir).unwrap();
+    }
+}
+
+// Keep one daemon-only wiring smoke while pure cases run in their owning crate targets.
+#[cfg(all(test, feature = "daemon-test-harness"))]
+mod daemon_wiring_smoke {
+    #[test]
+    fn extracted_features_and_the_cli_remain_wired_into_the_daemon() {
+        use clap::CommandFactory as _;
+        assert_eq!(crate::Cli::command().get_version(), Some(super::VERSION));
+        let payload = serde_json::json!({});
+        assert!(crate::ask_answers::carried(&payload).is_empty());
+        assert!(am_lifecycle::ask_answers::carried(&payload).is_empty());
+        assert!(crate::share::svg_check::check("<svg/>").is_ok());
+        assert!(am_share::share::svg_check::check("<svg/>").is_ok());
+        assert_eq!(crate::supervisor::assignment_state::ALL.len(), am_supervisor::supervisor::assignment_state::ALL.len());
     }
 }

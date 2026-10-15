@@ -260,29 +260,15 @@ pub async fn set_status_on(conn: &mut SqliteConnection, id: &str, from: Assignme
 }
 
 #[cfg(test)]
+async fn row(p: &SqlitePool, crid: &str) -> String {
+    crate::supervisor::store::insert_assignment(p, None, "bot1", crid, "x", &[], None, true).await.unwrap().id
+}
+
+#[cfg(all(test, not(feature = "daemon-test-harness")))]
 mod tests {
     use super::*;
 
-    /// #831：裝守衛讀完現在那一份、還沒換的那一瞬，另一個 writer commit 了一筆。deferred 交易這時 DROP 直接 517，
-    /// daemon 起不來；寫鎖從讀之前就拿著，對方等，守衛照樣裝上。
-    #[cfg(all(test, feature = "daemon-test-harness"))]
-    #[tokio::test]
-    async fn an_unrelated_writer_between_the_trigger_read_and_the_swap_does_not_fail_the_install() {
-        let dir = crate::testing::track(std::env::temp_dir().join(format!("am-831-guard-{}", crate::db::ulid())));
-        std::fs::create_dir_all(&dir).unwrap();
-        let p = crate::app_ports_p1::open(&dir.join("t.sqlite3")).await.unwrap();
-        sqlx::query("DROP TRIGGER supervisor_assignments_status_transition").execute(&p).await.unwrap();
-        let key = crate::db::file_key(&mut *p.acquire().await.unwrap()).await;
-        let other = crate::testing::arm_foreign_writer(std::path::Path::new(&key), "sync_trigger_after_read", &key);
 
-        install_guard(&p).await.expect("an unrelated writer must not fail the guard install");
-        assert_eq!(*other.lock().unwrap(), Some(false), "the install holds the write lock from its read on; the other writer waits");
-        let installed: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM sqlite_master WHERE type='trigger' AND name='supervisor_assignments_status_transition'")
-            .fetch_one(&p)
-            .await
-            .unwrap();
-        assert_eq!(installed, 1);
-    }
 
     /// issue #71 點名的兩條：結案的工作不可以被弄活過來。
     #[test]
@@ -399,9 +385,6 @@ mod tests {
         p
     }
 
-    async fn row(p: &SqlitePool, crid: &str) -> String {
-        crate::supervisor::store::insert_assignment(p, None, "bot1", crid, "x", &[], None, true).await.unwrap().id
-    }
 
     /// `set_status`：非法邊當場回錯（連 SQL 都不必送），轉移沒發生時講得出「它現在是什麼」，
     /// 值不變的重寫（重播）照樣放行。跟 `turn_controller::set_status_reports_why_a_transition_did_not_happen`
@@ -458,10 +441,55 @@ mod tests {
         sqlx::query("UPDATE supervisor_assignments SET status='completed' WHERE id=?").bind(&id).execute(&p).await.expect("冪等重寫不該被擋");
     }
 
+
+
+    /// 表跟 trigger 讀的是同一份 `allowed()`：合法的邊（同一份清單 `sources_for` 已經釘過）走 SQL
+    /// 一樣通，不會因為多了一層 trigger 就變嚴。
+    #[tokio::test]
+    async fn the_guard_permits_every_edge_the_table_calls_legal() {
+        let p = pool().await;
+        for (from, to) in [("queued", "blocked"), ("delivered", "blocked"), ("queued", "quota_blocked"), ("quota_blocked", "queued")] {
+            let id = row(&p, &format!("c-{from}-{to}")).await;
+            if from != "queued" {
+                sqlx::query("UPDATE supervisor_assignments SET status=? WHERE id=?").bind(from).bind(&id).execute(&p).await.unwrap();
+            }
+            sqlx::query("UPDATE supervisor_assignments SET status=? WHERE id=?")
+                .bind(to)
+                .bind(&id)
+                .execute(&p)
+                .await
+                .unwrap_or_else(|e| panic!("{from} -> {to} 表上是合法的，trigger 不該擋：{e}"));
+        }
+    }
+}
+
+#[cfg(all(test, feature = "daemon-test-harness"))]
+mod tests {
+    use super::*;
+
+    /// #831：裝守衛讀完現在那一份、還沒換的那一瞬，另一個 writer commit 了一筆。deferred 交易這時 DROP 直接 517，
+    /// daemon 起不來；寫鎖從讀之前就拿著，對方等，守衛照樣裝上。
+    #[tokio::test]
+    async fn an_unrelated_writer_between_the_trigger_read_and_the_swap_does_not_fail_the_install() {
+        let dir = crate::testing::track(std::env::temp_dir().join(format!("am-831-guard-{}", crate::db::ulid())));
+        std::fs::create_dir_all(&dir).unwrap();
+        let p = crate::app_ports_p1::open(&dir.join("t.sqlite3")).await.unwrap();
+        sqlx::query("DROP TRIGGER supervisor_assignments_status_transition").execute(&p).await.unwrap();
+        let key = crate::db::file_key(&mut *p.acquire().await.unwrap()).await;
+        let other = crate::testing::arm_foreign_writer(std::path::Path::new(&key), "sync_trigger_after_read", &key);
+
+        install_guard(&p).await.expect("an unrelated writer must not fail the guard install");
+        assert_eq!(*other.lock().unwrap(), Some(false), "the install holds the write lock from its read on; the other writer waits");
+        let installed: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM sqlite_master WHERE type='trigger' AND name='supervisor_assignments_status_transition'")
+            .fetch_one(&p)
+            .await
+            .unwrap();
+        assert_eq!(installed, 1);
+    }
+
     /// issue #186：守衛 trigger 的內容由轉移表產生，以前用 `CREATE TRIGGER IF NOT EXISTS` 建——轉移表改了之後，舊 DB
     /// 裡那一份已經存在，永遠不會換：新增的合法邊被舊守衛擋下、拿掉的邊照樣放行。turns 那一個（#68，`turn_controller`）同一個做法。
     /// 只在測試的暫存 DB 驗：開一次、換成舊版的守衛、關掉重開（＝升級後的 daemon 開同一個 DB）。
-    #[cfg(all(test, feature = "daemon-test-harness"))]
     #[tokio::test]
     async fn guards_left_by_an_older_build_are_replaced_when_the_db_is_opened() {
         let dir = crate::testing::track(std::env::temp_dir().join(format!("agm-guard-refresh-{}", crate::db::ulid())));
@@ -509,24 +537,5 @@ mod tests {
         assert!(format!("{err}").contains("illegal assignment status transition"), "{err}");
         p.close().await;
         let _ = std::fs::remove_dir_all(&dir);
-    }
-
-    /// 表跟 trigger 讀的是同一份 `allowed()`：合法的邊（同一份清單 `sources_for` 已經釘過）走 SQL
-    /// 一樣通，不會因為多了一層 trigger 就變嚴。
-    #[tokio::test]
-    async fn the_guard_permits_every_edge_the_table_calls_legal() {
-        let p = pool().await;
-        for (from, to) in [("queued", "blocked"), ("delivered", "blocked"), ("queued", "quota_blocked"), ("quota_blocked", "queued")] {
-            let id = row(&p, &format!("c-{from}-{to}")).await;
-            if from != "queued" {
-                sqlx::query("UPDATE supervisor_assignments SET status=? WHERE id=?").bind(from).bind(&id).execute(&p).await.unwrap();
-            }
-            sqlx::query("UPDATE supervisor_assignments SET status=? WHERE id=?")
-                .bind(to)
-                .bind(&id)
-                .execute(&p)
-                .await
-                .unwrap_or_else(|e| panic!("{from} -> {to} 表上是合法的，trigger 不該擋：{e}"));
-        }
     }
 }

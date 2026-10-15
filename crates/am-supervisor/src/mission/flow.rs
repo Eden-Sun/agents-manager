@@ -532,7 +532,7 @@ pub fn needs_worktree_proof(assignments: &[Assignment]) -> bool {
     assignments.iter().any(|a| role(a) == "executor")
 }
 
-#[cfg(test)]
+#[cfg(all(test, not(feature = "daemon-test-harness")))]
 mod tests {
     use super::*;
 

@@ -206,6 +206,7 @@ fn site(at: &'static std::panic::Location<'static>) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[cfg(not(feature = "daemon-test-harness"))]
     use std::sync::Arc;
 
     /// 這張表是**行程共用**的，而且測試是平行跑的：所以每個測試只用自己的 key、**不清表**
@@ -221,6 +222,7 @@ mod tests {
     }
 
     /// 百分位取最近鄰：p95 要的是真的發生過的那個數字。
+    #[cfg(not(feature = "daemon-test-harness"))]
     #[test]
     fn percentiles_pick_a_sample_that_really_happened() {
         let one_to_hundred: Vec<u64> = (1..=100).collect();
@@ -236,6 +238,7 @@ mod tests {
     }
 
     /// 統計是對的，而且只給統計不給樣本。
+    #[cfg(not(feature = "daemon-test-harness"))]
     #[test]
     fn the_snapshot_reports_p50_p95_and_max() {
         for ms in [10u64, 20, 30, 40, 1_000] {
@@ -251,6 +254,7 @@ mod tests {
     }
 
     /// 每個 key 各自統計，互不混到一起。
+    #[cfg(not(feature = "daemon-test-harness"))]
     #[test]
     fn keys_are_counted_separately() {
         record("lock:wait:a.rs:1", Duration::from_millis(5));
@@ -262,6 +266,7 @@ mod tests {
     }
 
     /// 樣本有上限：長時間跑下來記憶體不會跟著流量走。
+    #[cfg(not(feature = "daemon-test-harness"))]
     #[test]
     fn samples_are_capped_per_key() {
         for i in 0..(MAX_SAMPLES + 500) {
@@ -326,6 +331,7 @@ mod tests {
     }
 
     /// 等鎖：超過 1 秒才寫，而且要寫出是**哪個拿鎖點**。持有時間只進統計、不寫 log。
+    #[cfg(not(feature = "daemon-test-harness"))]
     #[tokio::test(flavor = "current_thread")]
     async fn only_a_long_lock_wait_is_logged_and_it_names_the_site() {
         let (logs, _guard) = crate::config_audit::capture::start();
@@ -360,6 +366,7 @@ mod tests {
     ///
     /// 驗法是**探針**，不是「佔住樣本表再看鎖放了沒」（i204 審 #473：那會讓平行跑的其他測試卡在
     /// `record()` 上，整樹跑偶發紅）。探針只認自己這個拿鎖點，別人的 drop 進來看一眼就走。
+    #[cfg(not(feature = "daemon-test-harness"))]
     #[tokio::test]
     async fn dropping_the_guard_frees_the_op_lock_before_it_books_the_hold() {
         let seen: Arc<Mutex<Option<bool>>> = Arc::new(Mutex::new(None));

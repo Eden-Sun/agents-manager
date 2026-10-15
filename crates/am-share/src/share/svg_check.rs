@@ -401,7 +401,7 @@ pub fn spawn_check<H: SvgCheckEnv>(app: &Arc<H>, bot_id: &str, files: &[serde_js
     });
 }
 
-#[cfg(test)]
+#[cfg(all(test, not(feature = "daemon-test-harness")))]
 mod tests {
     use super::*;
 

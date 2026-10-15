@@ -52,7 +52,7 @@ pub fn new_token() -> String {
     (0..32).map(|_| std::char::from_digit(rng.gen_range(0..16), 16).unwrap()).collect()
 }
 
-#[cfg(test)]
+#[cfg(all(test, not(feature = "daemon-test-harness")))]
 mod notify_crid_tests {
     use super::inbox_notify_crid;
 

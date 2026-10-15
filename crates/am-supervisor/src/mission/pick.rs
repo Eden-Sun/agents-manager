@@ -297,7 +297,7 @@ fn pick_verifier(candidates: &[Candidate], on_5h: On5hLimit, now: DateTime<Utc>)
     Pick::AskUser { reason: "沒有任何身分的 Fable 週桶有有效額度，驗證者必須用 Fable".into(), resets }
 }
 
-#[cfg(test)]
+#[cfg(all(test, not(feature = "daemon-test-harness")))]
 mod tests {
     use super::*;
 
@@ -813,7 +813,7 @@ pub fn quota_policy(current_identity: Option<&str>, current_model: Option<&str>,
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, not(feature = "daemon-test-harness")))]
 mod quota_policy_tests {
     use super::*;
 

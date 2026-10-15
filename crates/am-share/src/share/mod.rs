@@ -22,7 +22,7 @@ pub mod site;
 pub mod store;
 pub mod svg_check;
 
-#[cfg(test)]
+#[cfg(all(test, not(feature = "daemon-test-harness")))]
 mod remote_fs_tests;
 
 #[cfg(all(test, feature = "daemon-test-harness"))]

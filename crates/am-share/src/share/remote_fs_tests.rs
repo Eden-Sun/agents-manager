@@ -930,7 +930,6 @@ fn a_photo_that_changed_while_reading_is_not_a_permanent_not_found() {
 }
 
 #[test]
-#[test]
 fn parse_photo_stats_subsecond_gnu_and_bsd_formats() {
     // 1. 純整數奈秒
     let p_int = b"0\t42 100 1700000000123456789";

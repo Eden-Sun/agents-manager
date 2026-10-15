@@ -49,7 +49,7 @@ pub async fn observe(app: &(impl crate::capabilities::Db + crate::capabilities::
     app.push_codex_security_banner_alert(run, REASON).await;
 }
 
-#[cfg(test)]
+#[cfg(all(test, not(feature = "daemon-test-harness")))]
 mod tests {
     use super::*;
 

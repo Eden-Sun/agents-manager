@@ -2871,7 +2871,7 @@ mod limit_hit_quota_tests {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, not(feature = "daemon-test-harness")))]
 mod codex_bullet_row_tests {
     use super::*;
 
@@ -2889,7 +2889,7 @@ mod codex_bullet_row_tests {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, not(feature = "daemon-test-harness")))]
 mod codex_warning_footer_tests {
     use super::*;
 
@@ -2938,7 +2938,7 @@ mod codex_warning_footer_tests {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, not(feature = "daemon-test-harness")))]
 mod issue_1664_screenshot_tests {
     use super::*;
 

@@ -106,7 +106,7 @@ fn find(hay: &[u8], needle: &[u8], from: usize) -> Option<usize> {
     hay[from..].windows(needle.len()).position(|w| w == needle).map(|i| i + from)
 }
 
-#[cfg(test)]
+#[cfg(all(test, not(feature = "daemon-test-harness")))]
 mod tests {
     use super::*;
 

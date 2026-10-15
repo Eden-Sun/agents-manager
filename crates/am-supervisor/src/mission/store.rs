@@ -1271,7 +1271,7 @@ pub async fn set_identity_disabled(pool: &SqlitePool, host: &str, kind: &str, id
     Ok(())
 }
 
-#[cfg(test)]
+#[cfg(all(test, not(feature = "daemon-test-harness")))]
 mod tests {
     use super::*;
     use serde_json::json;

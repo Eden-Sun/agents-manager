@@ -42,7 +42,7 @@ mod tests {
         let mut i = 0;
         while i < lines.len() {
             if lines[i].trim_start().starts_with("#[cfg(test)]")
-                || lines[i].trim_start().starts_with("#[cfg(all(test, feature = \"daemon-test-harness\"))]")
+                || lines[i].trim_start().starts_with("#[cfg(all(test,")
             {
                 let (mut depth, mut seen, mut j) = (0i32, false, i);
                 while j < lines.len() {

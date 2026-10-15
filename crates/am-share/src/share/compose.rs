@@ -607,7 +607,7 @@ fn encode(img: &DynamicImage) -> Result<(&'static str, Vec<u8>), &'static str> {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, not(feature = "daemon-test-harness")))]
 mod tests {
     use super::*;
     use std::path::PathBuf;
