@@ -12,20 +12,17 @@ function ruleBody(selector: string): string {
   return m[1]
 }
 
-/**
- * #1238 之後的 #1268：收合（寬度不夠放完整量表）時，每格框要貼著內容。
- * 格子的 `flex-grow` 會把標題列剩下的寬度分給每一格，框內就多出一段空白（留白在數字右邊）；
- * 圖示欄 `3.2em` 固定寬，左邊也比右邊多一截。收合格改成內容寬，多出來的寬度留在格子外面。
- */
-test('收合的格子不吃標題列剩下的寬度：flex 不 grow、也不寫死寬度（框貼著內容）', () => {
+/** #1780：收合後仍填滿剩餘寬，不能把省下的空間留在 agy 右邊。 */
+test('收合格均分剩餘寬，量過的內容寬是下限', () => {
   const body = ruleBody('.main-head .quota-open.collapsed .quota-hp')
-  assert.match(body, /flex:\s*0 0 auto;/, '收合的格子要 flex: 0 0 auto，不能 grow')
-  assert.doesNotMatch(body, /\bwidth:/, '收合的格子不寫死寬度')
+  assert.match(body, /flex:\s*1 0 0;/)
+  assert.match(body, /min-width:\s*var\(--quota-cell-min, max-content\);/)
 })
 
-test('收合的額度列靠左貼著標題，剩下的寬度留在最右（不在框裡、也不在標題與額度之間，#1269）', () => {
-  const body = ruleBody('.main-head .quota-open.collapsed')
-  assert.match(body, /justify-content:\s*flex-start;/)
+test('收合量表隨格子增長，最窄仍保留 24px', () => {
+  const body = ruleBody('.main-head .quota-open.collapsed .quota-bar-wrap')
+  assert.match(body, /flex:\s*1 0 24px;/)
+  assert.match(body, /min-width:\s*24px;/)
 })
 
 test('收合的圖示欄跟內容等寬：左內距只剩格子自己的 7px（不再有 3.2em 的空欄）', () => {

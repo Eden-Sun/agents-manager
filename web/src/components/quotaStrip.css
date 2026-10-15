@@ -902,7 +902,7 @@
    自己可長，量表條跟著長，手機的 compact chip 不受影響（見上面 640px 區塊）。 */
 @media (width > 640px) {
   .main-head > .quota-strip {
-    flex: 1 1 auto;
+    flex: 1 1 0;
     min-width: 0;
     justify-content: flex-end;
   }
@@ -913,8 +913,8 @@
   }
 
   .main-head .quota-hp {
-    flex: 1 1 auto;
-    min-width: 0;
+    flex: 1 0 0;
+    min-width: var(--quota-cell-min, max-content);
   }
 
   .main-head .quota-bars-open {
@@ -937,28 +937,16 @@
     flex: 1 1 auto;
   }
 
-  /* 條本身可長；上限 120px，再長也讀不出更多。 */
+  /* 條跟著等寬格增長，剩餘空間不留在格內。 */
   .main-head .quota-bar-wrap {
     flex: 1 1 38px;
     width: auto;
     min-width: 38px;
-    max-width: 120px;
+    max-width: none;
   }
 
   .main-head .quota-bar {
     width: 100%;
-  }
-}
-
-/* 每個帳號一格等寬（2026-09-16 使用者）：basis 0 才會均分，不然寬度跟著內容跑。 */
-@media (width > 1024px) {
-  .main-head .quota-hp {
-    flex: 1 1 0;
-  }
-
-  /* 格子均分之後條就別再設上限，不然多出來的寬度變成空白。 */
-  .main-head .quota-bar-wrap {
-    max-width: none;
   }
 }
 
@@ -1013,26 +1001,32 @@
   text-align: right;
 }
 
-/* 收合（寬度不夠放完整量表）時每格**直向疊出全部窗口**（一列一個：窗口名＋24px 條＋數字／倒數，2026-10-10 使用者，#1158；
-   取代 #314 的單窗口收合）：條縮到 24px、字級收小到三列塞得進 60px 的標題列，格不縮到比內容小，放不下的尾巴直接裁掉（明細點開看）；
+/* 收合（寬度不夠放完整量表）時每格**直向疊出全部窗口**（一列一個：窗口名＋至少 24px 條＋數字／倒數，2026-10-10 使用者，#1158；
+   取代 #314 的單窗口收合）：條下限 24px、字級收小到三列塞得進 60px 的標題列，格不縮到比內容小，放不下的尾巴直接裁掉（明細點開看）；
    `clip` 不是 `auto`——後者會把往下開的提示（停用方塊）一起裁掉。 */
 @media (width > 640px) {
   /* 完整量表的格子也不縮到比內容小（2026-09-28 使用者截圖：遠端主機時五格互相疊字）：放不下由
-     `nextQuotaFit` 量到後先收主機名牌、再收合，不再靠格子擠壓把字疊到下一格。 */
+     `nextQuotaFit` 量到後收合，不再靠格子擠壓把字疊到下一格。 */
   .main-head .quota-open:not(.collapsed) .quota-hp {
     /* 不是 min-content：格內的 grid 項目是 `min-width: 0`，min-content 會算成比條加數字還窄（實測 90 vs 118px）。 */
-    min-width: max-content;
+    min-width: var(--quota-cell-min, max-content);
   }
 
-  /* 收合時格子照內容寬（框貼著內容，#1268）：標題列剩下的寬度留在格子外面，不平分進每格的框裡；
-     靠左貼著標題排，不然剩下的寬度會變成標題與額度之間的空白（#1269）。 */
+  /* 收合只縮窗口與字級；格子仍均分剩餘寬。原本 flex:0 0 auto 讓容器已填滿、agy 右邊卻空一段（#1780）。
+     量測提供最寬格的下限，真的連收合格都放不下時才裁掉尾巴。 */
   .main-head .quota-open.collapsed {
     overflow-x: clip;
     justify-content: flex-start;
   }
 
   .main-head .quota-open.collapsed .quota-hp {
+    flex: 1 0 0;
+    min-width: var(--quota-cell-min, max-content);
+  }
+
+  .main-head .quota-open .quota-hp.off {
     flex: 0 0 auto;
+    min-width: max-content;
   }
 
   /* 圖示欄收成內容寬：3.2em 是完整量表時的欄寬；收合後 cc0 這種短名只佔一小段，留著就是左邊的空白。
@@ -1047,7 +1041,7 @@
   }
 
   .main-head .quota-open.collapsed .quota-bar-wrap {
-    flex: 0 0 24px;
+    flex: 1 0 24px;
     min-width: 24px;
   }
 
@@ -1059,16 +1053,6 @@
   .main-head .quota-open.collapsed .quota-bar-pct,
   .main-head .quota-open.collapsed .quota-reset-at {
     font-size: 9.5px;
-  }
-}
-
-/* 桌機名字那塊固定寬（>1024）。沒收合時額度區不拿內容寬當基準（max-content 比完整量表寬，會把旁邊的
-   遠端記憶體白白擠掉），而是分剩下的、保底是完整量表的內容寬；不夠時遠端記憶體先讓（shrink 1000），還不夠才收合。
-   收合後照內容寬當基準，一樣是遠端記憶體先讓，裁掉的格子才會最少。 */
-@media (width > 1024px) {
-  .main-head > .quota-strip:has(> .quota-open:not(.collapsed)) {
-    flex-basis: 0;
-    min-width: min-content;
   }
 }
 
