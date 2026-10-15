@@ -1,6 +1,7 @@
 import { CodexResetHint } from './CodexResetHint'
 import { QUOTA_FIT_START, nextQuotaFit, withFreshNeed } from '../lib/quotaLayout'
 import type { QuotaFitState } from '../lib/quotaLayout'
+import { measureQuotaAvail, measureQuotaRow } from '../lib/quotaMeasure'
 import { Fragment, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
 import type { ReactNode } from 'react'
 import type { BotKind, Identity, KindQuota, QuotaLimitHit, QuotaMap, QuotaResetCredits, QuotaWindow } from '../api/types'
@@ -821,44 +822,7 @@ function PopRow({ entry, host, onAgyLogout }: { entry: QuotaEntry; host: string;
   )
 }
 
-/** 顯示中的子節點（`display: none` 的漢堡鈕、spacer 不算，也不吃 gap）。 */
-function shownChildren(el: Element): HTMLElement[] {
-  return [...el.children].filter((c): c is HTMLElement => c instanceof HTMLElement && c.getClientRects().length > 0)
-}
-
-/**
- * 額度區能拿到的寬：標題列扣掉內距、gap 與其他東西。遠端記憶體（`.mem-wrap`）會自己縮到 0（收縮優先序在量表前面），
- * 所以它的寬算在可用裡；它的 gap 還是扣掉，縮到 0 時那 10px 照樣在。
- */
-function quotaAvail(head: HTMLElement, strip: HTMLElement): number {
-  const cs = getComputedStyle(head)
-  const kids = shownChildren(head)
-  let used = (parseFloat(cs.paddingLeft) || 0) + (parseFloat(cs.paddingRight) || 0) + (parseFloat(cs.columnGap) || 0) * Math.max(0, kids.length - 1)
-  for (const k of kids) {
-    if (k !== strip && !k.classList.contains('mem-wrap')) used += k.getBoundingClientRect().width
-  }
-  return head.clientWidth - used
-}
-
-/**
- * 額度列照內容排開要多寬：量第一格到最後一格的外框（不用 scrollWidth：停用方塊的提示是絕對定位，會把它撐大）。
- * 格子平常會 flex-grow 填滿，量的當下暫時關掉，量到的才是「需要」而不是「分到」；同步量完就還原，不會畫出來。
- */
-function quotaContent(row: HTMLElement): number {
-  const kids = shownChildren(row)
-  if (kids.length === 0) return 0
-  for (const k of kids) k.style.flexGrow = '0'
-  const first = kids[0]
-  const last = kids[kids.length - 1]
-  const cs = getComputedStyle(row)
-  const width =
-    last.getBoundingClientRect().right - first.getBoundingClientRect().left
-    + (parseFloat(getComputedStyle(first).marginLeft) || 0) + (parseFloat(getComputedStyle(last).marginRight) || 0)
-    + (parseFloat(cs.paddingLeft) || 0) + (parseFloat(cs.paddingRight) || 0)
-  for (const k of kids) k.style.flexGrow = ''
-  return width
-}
-
+/** Quota row for one host: desktop cells fill the remaining header width; phone cells scroll. */
 export function QuotaStrip({
   focusKind,
   focusIdentity,
@@ -936,25 +900,38 @@ export function QuotaStrip({
     const row = strip?.querySelector<HTMLElement>('.quota-open')
     if (!drawn || phone || !strip || !head || !row) return
     const remeasure = () => {
-      const avail = quotaAvail(head, strip)
-      // 收合時內容已變窄，需求寬要量完整的：同步拿掉 collapsed 量完再加回去，不會畫出來（#1777）。
-      let base = fit
-      if (fit.level === 2) {
-        row.classList.remove('collapsed')
-        base = withFreshNeed(fit, quotaContent(row))
-        row.classList.add('collapsed')
+      const avail = measureQuotaAvail(head, strip)
+      // Full layout must fit count × widest active cell, not the sum of unequal cell widths.
+      // Measure it even after a narrow viewport or late data made the row collapse.
+      const wasCollapsed = row.classList.contains('collapsed')
+      row.classList.remove('collapsed')
+      let full
+      try {
+        full = measureQuotaRow(row)
+      } finally {
+        row.classList.toggle('collapsed', wasCollapsed)
       }
-      const next = nextQuotaFit(base, avail, quotaContent(row), false)
+      const next = nextQuotaFit(withFreshNeed(fit, full.width), avail, full.width, false)
+      row.classList.toggle('collapsed', next.level === 2)
+      const current = next.level === 2 ? measureQuotaRow(row) : full
+      row.classList.toggle('collapsed', wasCollapsed)
+      row.style.setProperty('--quota-cell-min', `${current.cellMin}px`)
       if (next.level !== fit.level || next.need[0] !== fit.need[0] || next.need[1] !== fit.need[1]) {
         setFitState({ key: fitKey, s: next })
       }
     }
     remeasure()
-    if (typeof ResizeObserver === 'undefined') return
-    const ro = new ResizeObserver(remeasure)
-    for (const el of [head, ...head.children, ...row.children]) ro.observe(el)
-    return () => ro.disconnect()
-  }, [drawn, phone, fit, fitKey])
+    const ro = typeof ResizeObserver === 'undefined' ? null : new ResizeObserver(remeasure)
+    for (const el of [head, ...head.children, ...row.children]) ro?.observe(el)
+    // Equal-width cells can stay the same size when their text changes. ResizeObserver
+    // alone cannot notice new quota text or a loaded font changing the natural minimum.
+    const fonts = document.fonts
+    fonts?.addEventListener('loadingdone', remeasure)
+    return () => {
+      ro?.disconnect()
+      fonts?.removeEventListener('loadingdone', remeasure)
+    }
+  }, [drawn, phone, fit, fitKey, ordered])
 
   const popEntries = ordered
 
