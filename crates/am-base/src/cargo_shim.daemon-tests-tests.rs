@@ -1445,9 +1445,9 @@ esac
     }
 
     /// 這台機器上有的 shell（沒有的略過）。macOS 的 `/bin/sh`／`/bin/bash` 是 3.2——腳本改動要在那個版本也驗。
-    /// 守衛測試每個執行緒跑幾次；`AM_TEST_GUARD_ITERS` 可以拉高（壓測找極低機率的競態用）。
+    /// 每次提交每個執行緒跑 5 次；每日 CI 設 `AM_TEST_GUARD_ITERS=60` 壓測極低機率競態。
     fn guard_iterations() -> usize {
-        std::env::var("AM_TEST_GUARD_ITERS").ok().and_then(|v| v.parse().ok()).unwrap_or(60)
+        std::env::var("AM_TEST_GUARD_ITERS").ok().and_then(|v| v.parse().ok()).unwrap_or(5)
     }
 
     fn shells() -> Vec<&'static str> {
