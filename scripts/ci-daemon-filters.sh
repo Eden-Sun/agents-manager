@@ -91,7 +91,13 @@ while IFS= read -r f; do
         crates/am-base/src/*)
             rel="${f#crates/am-base/src/}"
             case "$rel" in
-                *.rs) printf 'runners::am_base_tests::\n' ;;
+                *.rs)
+                    if [ -f scripts/ci-am-base-filters.py ]; then
+                        python3 -B scripts/ci-am-base-filters.py "$f" || printf 'runners::am_base_tests::\n'
+                    else
+                        printf 'runners::am_base_tests::\n'
+                    fi
+                    ;;
                 *) printf '__all__\n' ;;
             esac
             ;;
