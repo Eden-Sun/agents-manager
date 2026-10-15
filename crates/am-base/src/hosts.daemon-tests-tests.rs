@@ -850,3 +850,27 @@
         assert_eq!(listing["path"], "/home/u/project  ");
         assert_eq!(listing["parent"], "/home/u  ");
     }
+
+    /// issue #1773：目標指紋只看 ssh／ssh_port／herdr_session（＝這個名字指到哪台機器）；改 remote_path、ssh_opts、
+    /// shared_session 不換機器，指紋不動；改了任一個被看的欄位就變。跨行程要算得出一樣的數字（決定性）。
+    #[test]
+    fn target_epoch_follows_the_machine_not_the_settings() {
+        let base = HostCfg {
+            shared_session: false,
+            name: "m4p".into(),
+            ssh: "m4p@100.112.229.82".into(),
+            ssh_port: 22,
+            ssh_opts: vec![],
+            herdr_session: "agents-manager".into(),
+            remote_path: String::new(),
+        };
+        let e = target_epoch(&base);
+        assert!(e >= 0, "指紋去掉符號位：{e}");
+        assert_eq!(target_epoch(&base.clone()), e);
+        assert_eq!(target_epoch(&HostCfg { remote_path: "/opt/bin".into(), ..base.clone() }), e, "remote_path 不換機器");
+        assert_eq!(target_epoch(&HostCfg { ssh_opts: vec!["-o".into(), "ConnectTimeout=5".into()], ..base.clone() }), e, "ssh_opts 不換機器");
+        assert_eq!(target_epoch(&HostCfg { shared_session: true, ..base.clone() }), e, "shared_session 不換機器");
+        assert_ne!(target_epoch(&HostCfg { ssh: "m4p@10.0.0.9".into(), ..base.clone() }), e, "ssh 目標換了就是另一台");
+        assert_ne!(target_epoch(&HostCfg { ssh_port: 2222, ..base.clone() }), e);
+        assert_ne!(target_epoch(&HostCfg { herdr_session: "other".into(), ..base.clone() }), e);
+    }

@@ -1158,9 +1158,14 @@ impl HostFence {
         &self.conn
     }
 
-    /// 這一個 fence 綁的主機世代（`replace`／改設定／重連會換代）。issue #1035：run 啟動時記下它，admission 比對。
+    /// 這一個 fence 綁的主機世代（`replace`／改設定／重連會換代）。連線層的圍籬用它；run 不記它（見 [`Self::target_epoch`]）。
     pub fn generation(&self) -> u64 {
         self.generation
+    }
+
+    /// 這個主機名指到的機器（[`target_epoch`]）；本機沒有 ssh 目標，回 `None`。issue #1035／#1773：run 啟動時記下它，admission 比對。
+    pub fn target_epoch(&self) -> Option<i64> {
+        self.conn.cfg.as_ref().map(target_epoch)
     }
 
     pub fn authority_scope(&self) -> String {
@@ -1558,6 +1563,26 @@ pub fn cfg_differs(a: &HostCfg, b: &HostCfg) -> bool {
         || a.ssh_opts != b.ssh_opts
         || a.herdr_session != b.herdr_session
         || a.remote_path != b.remote_path
+}
+
+/// 主機名指到的是哪一台機器的指紋（issue #1773）：`ssh`、`ssh_port`、`herdr_session` 三欄（`\0` 串接）的 FNV-1a 64，
+/// 去掉符號位。只看這三欄：改 `remote_path`、`ssh_opts`、`shared_session` 不換機器，run 的 hook 照常收；
+/// 決定性（不靠 `DefaultHasher`），跨 daemon 重啟也算得出一樣的數字，所以寫進 `runs.host_generation` 之後仍可比對。
+pub fn target_epoch(cfg: &HostCfg) -> i64 {
+    let mut h: u64 = 0xcbf2_9ce4_8422_2325;
+    let mut feed = |bytes: &[u8]| {
+        for b in bytes {
+            h ^= u64::from(*b);
+            h = h.wrapping_mul(0x0000_0100_0000_01b3);
+        }
+    };
+    feed(cfg.ssh.as_bytes());
+    feed(&[0]);
+    feed(cfg.ssh_port.to_string().as_bytes());
+    feed(&[0]);
+    feed(cfg.herdr_session.as_bytes());
+    feed(&[0]);
+    (h & i64::MAX as u64) as i64
 }
 
 /// 一次最多列幾個子目錄（本機與遠端同一個數字）；超過就截斷並回 `truncated:true`。

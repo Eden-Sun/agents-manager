@@ -539,6 +539,10 @@ hook body 另外帶 `run_id`＝這個 CLI 行程 pane env 的 `AM_RUN_ID`（本�
   不屬於任何更早的 run。**最後一種是刻意放行的**：claude 在同一個 CLI 裡 `/clear` 會換一個 session id 而 run 沒變，
   若改成「session 不一樣就丟」，`/clear` 之後每一則 Stop 都會被殺掉、回合再也不會完成。
   圍籬擋的是**證明得出來是舊世代**的事件，不是「遲到就丟」——§4.3 那條遲到 hook 補回覆的行為（`4fac036`）原樣保留。
+- **主機換機**（#1035，#1773）：遠端 run 在啟動時把主機目標的指紋（`hosts::target_epoch`：`ssh`、`ssh_port`、`herdr_session` 三欄的 FNV-1a）寫進 `runs.host_generation`（欄位名沿用）。
+  之後 hook 來時若這個名字指到的目標指紋不同（`?confirm=repoint` 把它指到別台）＝上一代主機的事件，丟棄並推 `hook_fenced`（`why=host_generation`）。
+  **只有換機器才丟**：改 `remote_path`、`ssh_opts`、`shared_session`，重連（`reconnect`）、連線換了一條，都不換指紋，run 的 hook 照常收。
+  連線世代（`HostFence::generation`）只給連線層的圍籬用，run 不記它。daemon 重啟時（套完設定之後）還沒結束的遠端 run 會改記目前的指紋（`rebase_active_run_host_epoch`），只動那一顆主機的 active run。
 
 `runs.transcript_path` 由 SessionStart 回填；`messages.source` 保留 `transcript` 值（尚未實作回補）。
 

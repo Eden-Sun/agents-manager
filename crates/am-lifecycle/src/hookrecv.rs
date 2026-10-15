@@ -1255,7 +1255,7 @@ async fn record_limit_hit_only<H: HookHost>(app: &H, body: &HookBody, bot: &db::
     let Some(d) = detail.as_deref().filter(|d| crate::turn_error::is_quota_exhaustion(d)) else { return Ok(()) };
     let Some(r) = run else { return Ok(()) };
     let host_moved = match db::run_host_generation(app.db(), &r.id).await.ok().flatten() {
-        Some(was) => app.admitted_host_fence(bot).await.is_some_and(|f| f.generation() as i64 != was),
+        Some(was) => app.admitted_host_fence(bot).await.is_some_and(|f| f.target_epoch().is_some_and(|now| now != was)),
         None => false,
     };
     if host_moved {
@@ -1362,11 +1362,12 @@ async fn process_locked_for_with_outcome<H: HookHost>(
     // 放行的那一代主機世代（#1024）：agy 的授權失敗只改這一代，換代了就不改。
     let mut admitted_fence = None;
     if let Some(r) = &run {
-        // 主機世代（#1035）：這一run 啟動時所在的遠端主機已經換代（`?confirm=repoint` 換指、改設定）＝這一則是上一代主機的，
-        // 跟上面的 run 世代一樣：只記錄、不改任何欄位。
+        // 主機換機（#1035）：這一run 啟動時所在的遠端主機名已經指到別台（`?confirm=repoint` 換了 ssh 目標）＝這一則是上一代主機的，
+        // 跟上面的 run 世代一樣：只記錄、不改任何欄位。比的是主機目標指紋（`target_epoch`），不是連線世代：
+        // 同一台機器改 remote_path、重連都不算換機器（#1773）。
         let run_host_generation = db::run_host_generation(app.db(), &r.id).await.ok().flatten();
         let host_moved = match run_host_generation {
-            Some(was) => app.admitted_host_fence(&bot).await.is_some_and(|f| f.generation() as i64 != was),
+            Some(was) => app.admitted_host_fence(&bot).await.is_some_and(|f| f.target_epoch().is_some_and(|now| now != was)),
             None => false,
         };
         if host_moved {
@@ -3731,8 +3732,8 @@ mod external_claim_tests {
         .unwrap();
         let conv = db::conversation_id(&app.db, &bot_id).await.unwrap();
 
-        // 起在 A 上的 run：啟動當下記下 A 的世代（start 會這樣寫，這裡直接種）。
-        let gen_a = app.hosts.fence(&host).await.unwrap().generation() as i64;
+        // 起在 A 上的 run：啟動當下記下 A 的目標指紋（start 會這樣寫，這裡直接種）。
+        let gen_a = app.hosts.fence(&host).await.unwrap().target_epoch().unwrap();
         let run = db::ulid();
         sqlx::query(
             "INSERT INTO runs (id, bot_id, state, agent_status, pane_id, native_session_id, started_at, host, host_generation)
@@ -3788,6 +3789,107 @@ mod external_claim_tests {
         let ev = tokio::time::timeout(std::time::Duration::from_secs(1), events.recv()).await.unwrap().unwrap();
         assert_eq!(ev.kind, "hook_fenced");
         assert_eq!(ev.data["why"], "host_generation");
+    }
+
+    fn stop_hook(bot_id: &str, session: &str, prompt: &str, reply: &str) -> HookBody {
+        HookBody {
+            bot_id: bot_id.into(),
+            provider: "claude".into(),
+            payload: json!({"hook_event_name": "Stop", "session_id": session, "prompt_id": prompt, "last_assistant_message": reply}),
+            received_at: None,
+            truncated: false,
+            run_id: None,
+        }
+    }
+
+    async fn insert_in_flight_turn(pool: &sqlx::SqlitePool, turn: &str, conv: &str, run: &str, prompt: &str) {
+        sqlx::query(
+            "INSERT INTO turns (id, conversation_id, run_id, origin, status, delivery, prompt_text, created_at)
+             VALUES (?,?,?,'web','in_flight','ok',?,?)",
+        )
+        .bind(turn)
+        .bind(conv)
+        .bind(run)
+        .bind(prompt)
+        .bind(db::now())
+        .execute(pool)
+        .await
+        .unwrap();
+    }
+
+    /// 回合是 hook 收的：狀態 `completed`，回覆的來源是 `hook`（不是終端備援）。
+    async fn assert_hook_completed(pool: &sqlx::SqlitePool, turn: &str, reply: &str) {
+        let status: String = sqlx::query_scalar("SELECT status FROM turns WHERE id=?").bind(turn).fetch_one(pool).await.unwrap();
+        assert_eq!(status, "completed", "hook 收得到的 Stop 不准被圍掉");
+        let replies: Vec<(String, String)> =
+            sqlx::query_as("SELECT content, source FROM messages WHERE turn_id=? AND role='assistant'").bind(turn).fetch_all(pool).await.unwrap();
+        assert_eq!(replies, vec![(reply.to_string(), "hook".to_string())]);
+    }
+
+    /// issue #1773：遠端 run 在 m4p 上跑著，之後只改了 `remote_path`（同一台機器，連線換了一條、世代變了），或單純重連，
+    /// 這個 run 的 Stop 照常收成回合與原文。舊版拿連線世代比，這兩步一做，之後每一則 Stop 都被丟，回合只好由終端備援收尾（incomplete）。
+    #[tokio::test]
+    async fn a_same_machine_reconfigure_or_reconnect_keeps_the_run_hooks() {
+        let env = tt::env().await;
+        let app = env.app.clone();
+        let host = format!("samemachine-{}", db::ulid());
+        let host_cfg = |remote_path: &str| crate::config::HostCfg {
+            shared_session: false,
+            name: host.clone(),
+            ssh: "m4p@100.112.229.82".into(),
+            ssh_port: 22,
+            ssh_opts: vec![],
+            herdr_session: "test".into(),
+            remote_path: remote_path.into(),
+        };
+        app.hosts
+            .insert_remote_with_client_for_test(host_cfg(""), crate::herdr::HerdrClient::new(env.dir.join("a.sock")))
+            .await;
+        sqlx::query("UPDATE projects SET host=? WHERE id=?").bind(&host).bind(&env.project_id).execute(&app.db).await.unwrap();
+        let bot_id = db::ulid();
+        sqlx::query(
+            "INSERT INTO bots (id, project_id, name, kind, args_json, autostart, inject_hooks, hook_token, created_at)
+             VALUES (?,?,'same-machine','claude','[]',0,1,'tok',?)",
+        )
+        .bind(&bot_id)
+        .bind(&env.project_id)
+        .bind(db::now())
+        .execute(&app.db)
+        .await
+        .unwrap();
+        let conv = db::conversation_id(&app.db, &bot_id).await.unwrap();
+
+        // run 啟動時記下的是目標指紋（start 會這樣寫）。
+        let epoch = app.hosts.fence(&host).await.unwrap().target_epoch().unwrap();
+        let run = db::ulid();
+        sqlx::query(
+            "INSERT INTO runs (id, bot_id, state, agent_status, pane_id, native_session_id, started_at, host, host_generation)
+             VALUES (?,?,'running','working','pane-m4p','s-m4p',?,?,?)",
+        )
+        .bind(&run)
+        .bind(&bot_id)
+        .bind(db::now())
+        .bind(&host)
+        .bind(epoch)
+        .execute(&app.db)
+        .await
+        .unwrap();
+
+        // 1. 只改 remote_path：連線換了一條（世代變了），機器沒變。
+        app.hosts
+            .replace_remote_with_client_for_test(&app, host_cfg("/opt/bin"), crate::herdr::HerdrClient::new(env.dir.join("b.sock")))
+            .await;
+        let first = db::ulid();
+        insert_in_flight_turn(&app.db, &first, &conv, &run, "第一句").await;
+        process(&app, &stop_hook(&bot_id, "s-m4p", "p-1", "第一則的回覆")).await.unwrap();
+        assert_hook_completed(&app.db, &first, "第一則的回覆").await;
+
+        // 2. 重連：同一條設定，世代再加一。
+        app.hosts.bump_generation_for_test(&host).await;
+        let second = db::ulid();
+        insert_in_flight_turn(&app.db, &second, &conv, &run, "第二句").await;
+        process(&app, &stop_hook(&bot_id, "s-m4p", "p-2", "第二則的回覆")).await.unwrap();
+        assert_hook_completed(&app.db, &second, "第二則的回覆").await;
     }
 
     /// issue #69 的 race，整條走一遍：使用者 interrupt → bot 重啟（舊 run 收掉、新 run 起來並開了新回合）

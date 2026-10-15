@@ -265,11 +265,12 @@ async fn start_bot_locked_with_host_fence_body(
     // 身分跟著 run 走（issue #238）：pane 用這一刻的身分起來，之後 PATCH 改身分要重啟才生效，額度要記在這個身分上。
     let run_id = db::ulid();
     let started_identity = bot.identity.as_deref().map(str::trim).unwrap_or("").to_string();
-    // 遠端 run 記下啟動當下所在主機的世代（#1035）：之後 `?confirm=repoint` 換了主機，舊 run 的 hook 就認得出是上一代。本機不記。
+    // 遠端 run 記下啟動當下所在主機的目標指紋（#1035，#1773）：之後 `?confirm=repoint` 把名字指到別台，舊 run 的 hook 就認得出是上一代。
+    // 存的是 ssh 目標的指紋、不是連線世代：改 remote_path、重連、daemon 重啟都不換這個數字。本機不記。
     let host_generation = if project.host == crate::config::LOCAL_HOST {
         None
     } else {
-        app.hosts().fence(&project.host).await.map(|f| f.generation() as i64)
+        app.hosts().fence(&project.host).await.and_then(|f| f.target_epoch())
     };
     let ins = sqlx::query(
         "INSERT INTO runs (id, bot_id, state, agent_status, herdr_session, runtime_identity, launch_rev, started_at, host, host_generation) VALUES (?,?,'starting','unknown',?,?,?,?,?,?)",

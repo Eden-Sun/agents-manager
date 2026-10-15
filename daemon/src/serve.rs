@@ -193,6 +193,14 @@ pub async fn serve(config_path: Option<PathBuf>, dev_watch_all_panes: bool) -> R
 
     // §11.3: each remote host's supervisor reconciles on connect.
     app.hosts.apply_config(&app, &host_cfg).await;
+    // #1773：舊版 run 記的是連線世代，重啟後對不上；還沒結束的遠端 run 改記這台目前設定的目標指紋（之後只有換機器才圍掉）。
+    for h in host_cfg.iter().filter(|h| h.name != config::LOCAL_HOST) {
+        match db::rebase_active_run_host_epoch(&app.db, &h.name, am_base::hosts::target_epoch(h)).await {
+            Ok(0) => {}
+            Ok(n) => tracing::info!(host = %h.name, n, "rebased active runs onto the host target fingerprint"),
+            Err(e) => tracing::warn!(host = %h.name, error = ?e, "could not rebase active run host fingerprints"),
+        }
+    }
 
     // §6.1.3 reconcile, §6.1.4 event connections, §6.1.5 spool replay, §6.1.6 autostart.
     let local_reconciled = match crate::runners::reconcile::reconcile_host(&app, config::LOCAL_HOST).await {

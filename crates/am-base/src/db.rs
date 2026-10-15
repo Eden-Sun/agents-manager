@@ -1534,6 +1534,17 @@ pub async fn run_host_generation(pool: &SqlitePool, run_id: &str) -> Result<Opti
     Ok(row.flatten())
 }
 
+/// issue #1773：daemon 重啟時，還沒結束的遠端 run 改記這台主機目前的 [`crate::hosts::target_epoch`]。舊版記的是連線世代，
+/// 重啟後那個數字不再對得上，run 的 hook 會全被圍掉。只在開機、套完設定之後呼叫；只動沒結束的 run。
+pub async fn rebase_active_run_host_epoch(pool: &SqlitePool, host: &str, epoch: i64) -> Result<u64> {
+    let res = sqlx::query("UPDATE runs SET host_generation = ? WHERE host = ? AND state IN ('starting','running','stopping') AND host_generation IS NOT NULL")
+        .bind(epoch)
+        .bind(host)
+        .execute(pool)
+        .await?;
+    Ok(res.rows_affected())
+}
+
 pub async fn active_run(pool: &SqlitePool, bot_id: &str) -> Result<Option<Run>> {
     note_per_bot_lookup();
     Ok(sqlx::query_as::<_, Run>(
