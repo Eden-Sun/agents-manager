@@ -3,7 +3,8 @@
  */
 import test, { after, afterEach, before } from 'node:test'
 import assert from 'node:assert/strict'
-import { act, mount, setupDom, teardownDom, unmountAll, settle } from '../testing/domHarness'
+import { installManualClockTimers } from '../testing/manualClockTimers'
+import { act, mount, setupDom, teardownDom, unmountAll } from '../testing/domHarness'
 import type { MemProcess } from '../api/types'
 import { MemPaneModal } from './MemPaneModal'
 
@@ -30,34 +31,44 @@ function holdPaneReads() {
 }
 
 test('上一趟還沒回來就不發下一趟', async () => {
-  const h = holdPaneReads()
+  const timers = installManualClockTimers()
   try {
-    await mount(<MemPaneModal host="local" p={proc} onClose={() => {}} />)
-    await settle(4500)
-    assert.equal(h.calls.n, 1, '兩個 2 秒週期過去，第一趟還沒回來：只有那一條在飛')
+    const h = holdPaneReads()
+    try {
+      await mount(<MemPaneModal host="local" p={proc} onClose={() => {}} />)
+      await act(async () => timers.clock.advance(4500))
+      assert.equal(h.calls.n, 1, '兩個 2 秒週期過去，第一趟還沒回來：只有那一條在飛')
+    } finally {
+      h.restore()
+    }
   } finally {
-    h.restore()
+    timers.restore()
   }
 })
 
 test('回來之後才排下一趟，畫面是最後回來的那一張', async () => {
-  const h = holdPaneReads()
+  const timers = installManualClockTimers()
   try {
-    await mount(<MemPaneModal host="local" p={proc} onClose={() => {}} />)
-    await settle(20)
-    await act(async () => {
-      h.resolvers[0](frame('frame-1'))
-      await new Promise((r) => setTimeout(r, 20))
-    })
-    await settle(2200)
-    assert.equal(h.calls.n, 2, '第一趟回來後約 2 秒發第二趟')
-    await act(async () => {
-      h.resolvers[1](frame('frame-2'))
-      await new Promise((r) => setTimeout(r, 20))
-    })
-    await settle(50)
-    assert.match(document.querySelector('.mem-pane-term')!.textContent ?? '', /frame-2/)
+    const h = holdPaneReads()
+    try {
+      await mount(<MemPaneModal host="local" p={proc} onClose={() => {}} />)
+      await act(async () => timers.clock.advance(20))
+      await act(async () => {
+        h.resolvers[0](frame('frame-1'))
+        await timers.clock.advance(20)
+      })
+      await act(async () => timers.clock.advance(2200))
+      assert.equal(h.calls.n, 2, '第一趟回來後約 2 秒發第二趟')
+      await act(async () => {
+        h.resolvers[1](frame('frame-2'))
+        await timers.clock.advance(20)
+      })
+      await act(async () => timers.clock.advance(50))
+      assert.match(document.querySelector('.mem-pane-term')!.textContent ?? '', /frame-2/)
+    } finally {
+      h.restore()
+    }
   } finally {
-    h.restore()
+    timers.restore()
   }
 })
