@@ -37,7 +37,7 @@ pub(crate) async fn after_turn_end(app: &Arc<App>, body: &crate::hook_body::Hook
         }
         let host_generation = db::run_host_generation(&app.db, run_id).await?;
         if let Some(was) = host_generation {
-            if app.admitted_host_fence(&bot).await.is_some_and(|f| f.generation() as i64 != was) {
+            if app.admitted_host_fence(&bot).await.is_some_and(|f| f.target_epoch().is_some_and(|now| now != was)) {
                 return Ok(());
             }
         }

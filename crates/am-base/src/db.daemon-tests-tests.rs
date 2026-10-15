@@ -1299,3 +1299,42 @@
             assert!(!details.iter().any(|d| d.contains("TEMP B-TREE")), "{name} must read the index in order: {details:#?}");
         }
     }
+
+    /// issue #1773：daemon 重啟後，還沒結束的遠端 run 改記這台主機目前的目標指紋（舊的連線世代對不上了）；
+    /// 結束了的 run、別台主機的 run 一個欄位都不動。
+    #[tokio::test]
+    async fn rebase_moves_only_the_active_runs_of_that_host() {
+        let dir = tmp_dir();
+        let pool = open(&dir.join("t.sqlite3")).await.unwrap();
+        sqlx::query("INSERT INTO projects (id,path,label,created_at) VALUES ('p','/tmp','p',?)").bind(now()).execute(&pool).await.unwrap();
+        for bot in ["b", "c"] {
+            sqlx::query("INSERT INTO bots (id,project_id,name,kind,hook_token,created_at) VALUES (?,'p',?,'claude','t',?)")
+                .bind(bot)
+                .bind(bot)
+                .bind(now())
+                .execute(&pool)
+                .await
+                .unwrap();
+        }
+        let gen = 16_777_216_i64;
+        for (id, bot, state, host) in [("act", "b", "running", "m4p"), ("done", "b", "exited", "m4p"), ("other", "c", "running", "other")] {
+            sqlx::query("INSERT INTO runs (id,bot_id,state,started_at,host,host_generation) VALUES (?,?,?,?,?,?)")
+                .bind(id)
+                .bind(bot)
+                .bind(state)
+                .bind(now())
+                .bind(host)
+                .bind(gen)
+                .execute(&pool)
+                .await
+                .unwrap();
+        }
+
+        assert_eq!(rebase_active_run_host_epoch(&pool, "m4p", 42).await.unwrap(), 1);
+        assert_eq!(run_host_generation(&pool, "act").await.unwrap(), Some(42));
+        assert_eq!(run_host_generation(&pool, "done").await.unwrap(), Some(gen), "結束了的 run 不改");
+        assert_eq!(run_host_generation(&pool, "other").await.unwrap(), Some(gen), "別台主機的 run 不改");
+
+        pool.close().await;
+        std::fs::remove_dir_all(&dir).unwrap();
+    }

@@ -190,7 +190,7 @@ pub async fn check_claim(app: &(impl crate::capabilities::Cfg + crate::capabilit
     let host_fence = app.claim_host_fence(&ask.caller).await;
     // Hook admission 與這裡之間也可能已 repoint；不可把舊 run 配上新 host authority。
     if let (Some(fence), Some(run)) = (&host_fence, crate::db::active_run(app.db(), &ask.caller).await?) {
-        if crate::db::run_host_generation(app.db(), &run.id).await?.is_some_and(|was| was != fence.generation() as i64) {
+        if crate::db::run_host_generation(app.db(), &run.id).await?.is_some_and(|was| fence.target_epoch().is_some_and(|now| now != was)) {
             return Ok(());
         }
     }
