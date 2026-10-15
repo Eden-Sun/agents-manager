@@ -93,6 +93,29 @@ check "__all__" "crates/am-core/Cargo.toml"
 check "__all__ share::portal::" "crates/am-share/src/lib.rs" "crates/am-share/src/share/portal.rs"
 check "runners::am_base_tests::" "crates/am-base/src/lib.rs"
 
+# am-base uses the actual composition mount table, including aliases and shared fallbacks.
+check "runners::am_base_tests::attach::" "crates/am-base/src/attach.rs"
+check "runners::am_base_tests::capture_claude::" "crates/am-base/src/capture.rs"
+check "runners::am_base_tests::capture_claude::" "crates/am-base/src/capture/claude.daemon-tests-reply_boundary_tests.rs"
+check "runners::am_base_tests::rewind:: runners::am_base_tests::rewind_anchor::" "crates/am-base/src/rewind/anchor.rs"
+check "runners::am_base_tests::login_assist::" "crates/am-base/src/login_assist/tests.rs"
+check "runners::am_base_tests::release_triage::" "crates/am-base/src/release_triage/tests_publish.rs"
+for f in lib.rs db.rs db/schema_guard.rs shared_host.rs race_point.rs unrecognised.rs; do
+    check "runners::am_base_tests::" "crates/am-base/src/$f"
+done
+# A different alias is read from the table, and missing/broken mounts fall back broadly.
+MOUNTS=$(mktemp -d)
+mkdir -p "$MOUNTS/daemon/src/runners/am_base_tests" "$MOUNTS/crates/am-base/src"
+printf '#[path = "am_base_tests/alias.rs"]\nmod renamed;\n' > "$MOUNTS/daemon/src/runners/am_base_tests.rs"
+printf '#[path = "../../../../crates/am-base/src/attach.daemon-tests-tests.rs"]\nmod tests;\n' > "$MOUNTS/daemon/src/runners/am_base_tests/alias.rs"
+am_filter() { (cd "$MOUNTS" && PATH="${AM_CANARY_DIR:+$AM_CANARY_DIR:}$PATH" python3 -B "$OLDPWD/scripts/ci-am-base-filters.py" crates/am-base/src/attach.rs); }
+[ "$(am_filter)" = 'runners::am_base_tests::renamed::' ] || fail=1
+rm "$MOUNTS/daemon/src/runners/am_base_tests/alias.rs"
+[ "$(am_filter)" = 'runners::am_base_tests::' ] || fail=1
+rm "$MOUNTS/daemon/src/runners/am_base_tests.rs"
+[ "$(am_filter)" = 'runners::am_base_tests::' ] || fail=1
+rm -rf "$MOUNTS"
+
 # 巢狀、自己與上層都沒有測試的模組（zz/yy/xx.rs；zz 與 zz/yy 都沒有 #[test]）：只退一層還是 zz::yy::（選到零個，check.sh 拒絕放行，#1338 的同一件事）。
 # 要一路退到真的有測試的那一層；一直退到頂層都沒有就不出過濾字串。用 mktemp 的假目錄跑，不碰真的 repo 檔案。
 REPO_ROOT="$(pwd)"
