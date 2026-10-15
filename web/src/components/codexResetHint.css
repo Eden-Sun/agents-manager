@@ -18,3 +18,8 @@
   .codex-reset-detail.upcoming .codex-reset-record { display:none; }
   .codex-reset-detail.upcoming .codex-reset-announcement { display:inline; }
 }
+/* 桌機收合（#1776）：收合時 .quota-head 是 width:auto，container-type 會讓 codex 名字量成 0 而疊到量表上。
+   收合不顯示重置文字標籤，不需要 container，改回 normal。 */
+@media (width > 640px) {
+  .main-head .quota-open.collapsed .quota-hp.codex > .quota-head { container-type:normal; }
+}
