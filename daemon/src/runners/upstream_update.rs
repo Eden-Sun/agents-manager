@@ -74,10 +74,45 @@ impl Sources for Live {
     fn installed<'a>(&'a self, host: &'a str, kind: &'a str) -> BoxFuture<'a, Result<String>> {
         if kind == "herdr" {
             return Box::pin(async move {
-                self.0.tools.lock().await.get(host).and_then(|t| t.herdr_cli.clone()).ok_or_else(|| anyhow!("讀不到 `herdr --version`"))
+                let cli = self.0.tools.lock().await.get(host).and_then(|t| t.herdr_cli.clone()).ok_or_else(|| anyhow!("讀不到 `herdr --version`"))?;
+                // 同機常有兩份 herdr（launchd 跑的 server 與 login shell／shim 的 CLI 是不同檔，#1752）：
+                // 只看 CLI 會把「CLI 新、server 舊」當成已是最新。server 只在連著時才有可信的版本。
+                let server = match self.0.hosts.get(host).await {
+                    Some(conn) => {
+                        let connected = if conn.is_local() { self.0.connected.load(std::sync::atomic::Ordering::SeqCst) } else { conn.is_connected() };
+                        connected.then(|| conn.client.last_pong()).flatten().map(|p| p.version)
+                    }
+                    None => None,
+                };
+                Ok(older_herdr_version(cli, server.as_deref()))
             });
         }
         Box::pin(changelog::installed_version(&self.0, host, kind))
+    }
+}
+
+/// server 與 CLI 版本不同時取較舊的那份；讀不到 server 或看不懂版本就用 CLI 的。
+fn older_herdr_version(cli: String, server: Option<&str>) -> String {
+    let cli_v = changelog::cli_version_string(&cli).and_then(|v| changelog::parse_version(&v));
+    let server_v = server.and_then(changelog::cli_version_string).and_then(|v| changelog::parse_version(&v));
+    match (cli_v, server_v) {
+        (Some(c), Some(sv)) if sv < c => server.map(str::to_string).unwrap_or(cli),
+        _ => cli,
+    }
+}
+
+#[cfg(test)]
+mod herdr_installed_tests {
+    use super::older_herdr_version;
+
+    /// #1752：server 0.9.4／CLI 0.9.3 與反過來，都以較舊的那份為「磁碟版本」，畫面才會繼續提示更新。
+    #[test]
+    fn the_older_of_server_and_cli_is_the_installed_version() {
+        assert_eq!(older_herdr_version("herdr 0.9.3".into(), Some("0.9.4")), "herdr 0.9.3");
+        assert_eq!(older_herdr_version("herdr 0.9.4".into(), Some("0.9.3")), "0.9.3");
+        assert_eq!(older_herdr_version("herdr 0.9.4".into(), Some("herdr 0.9.4")), "herdr 0.9.4");
+        assert_eq!(older_herdr_version("herdr 0.9.4".into(), None), "herdr 0.9.4");
+        assert_eq!(older_herdr_version("herdr 0.9.4".into(), Some("garbage")), "herdr 0.9.4");
     }
 }
 

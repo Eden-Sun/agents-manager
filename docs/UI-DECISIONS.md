@@ -804,8 +804,10 @@ cc1 的 bot 好幾個回合都收在 `authentication_failed`，對話只寫「�
   起不來會換回舊版），再列「重啟後接回這 N 顆」與「這 N 個子 agent 會被結束、不會自動接回，由母 Bot 視需要重開」。名單是前端照
   「那台在跑的頂層／子 agent」估的，實際以 202 回的 `will_resume`／`children_lost` 為準（進度 tooltip 用的是 daemon 回的）。
   確認鈕是 danger 樣式：這顆按下去影響的是全部 Bot，不是一台的一種 CLI。
-- **遠端或 shared 主機：徽章照樣出現、按鈕停用並講原因**：只有遠端落後時 chip 退成灰（`waiting`），點開框底只寫原因（「遠端主機：這版只支援
-  更新本機」或「共用 session：別的 daemon 也在用」），確認鈕「無法從這裡更新」。不藏起來：落後是事實，藏了就沒人知道要去那台手動升。
+- **只有 shared 主機停用**（#1752）：非 shared 的遠端主機跟本機走同一條更新；`shared_session` 的主機徽章照樣出現、按鈕停用並講原因（「共用 session：別的 daemon 也在用…，確認沒有別的 daemon 後到主機設定把『共用 session』關掉」），
+  確認鈕「無法從這裡更新」。不藏起來：落後是事實，藏了就沒人知道要去那台處理。
+- **server／CLI 兩份**：同一台的 server 與 shim 用的 CLI 版本不一致（`hosts[].herdr.mismatch`）時，確認框講「server x／CLI y，哪一份舊，兩份會一起換」；
+  結果框列 `binaries`（server 跑的／CLI 解析到的、路徑、版本、舊的標「（舊）」）。失敗是 `install_path_unsupported`／`restart_unsupported` 時，結果框把 `manual_upgrade_command` 當成要在那台貼上的指令顯示（Homebrew 被 pin 住時含 unpin／upgrade／pin）。
 - **手機**跟 codex／claude 一樣併進合成的 ⌃⌃ 選單（第四項），各自打開原本的框。
 - 狀態放自己的 store（`store/herdrUpdate.ts`），不塞進 `useStore`：同時只會有一次，結果要留到人看完，跟快照替換無關。重整後靠
   `GET /api/state` 的 `herdr_updates` 接回進度；daemon 說沒在跑就清掉漏掉 done 留下的進度。

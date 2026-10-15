@@ -3540,21 +3540,23 @@ async fn create_host(
         return Err(LcError::Bad(why));
     }
     let host_mutation = HOST_CONFIG_MUTATION.lock().await;
-    // 共用 session 是安全開關（#709）：沒帶就沿用，不因為一次只改 ssh 的更新而悄悄關掉。
-    let prev_shared = app.cfg.get().await.hosts.iter().any(|h| h.name == b.name && h.shared_session);
+    // 更新既有主機時，沒帶的選填欄位一律沿用舊值（共用 session 是安全開關 #709；remote_path 被清掉會讓遠端 PATH 找不到 herdr，#1752）。
+    // 新主機才用預設值。
+    let prev = app.cfg.get().await.hosts.into_iter().find(|h| h.name == b.name);
     let cfg = HostCfg {
         name: b.name.clone(),
         ssh: b.ssh.trim().to_string(),
-        ssh_port: b.ssh_port.unwrap_or(22),
-        ssh_opts: b.ssh_opts.unwrap_or_default(),
+        ssh_port: b.ssh_port.or(prev.as_ref().map(|p| p.ssh_port)).unwrap_or(22),
+        ssh_opts: b.ssh_opts.or_else(|| prev.as_ref().map(|p| p.ssh_opts.clone())).unwrap_or_default(),
         // trim 跟 `ssh` 同一條規矩：存進 config 的字就是之後直接交給 herdr 的字。
         herdr_session: b
             .herdr_session
             .map(|s| s.trim().to_string())
             .filter(|s| !s.is_empty())
+            .or_else(|| prev.as_ref().map(|p| p.herdr_session.clone()))
             .unwrap_or_else(|| crate::config::DEFAULT_HERDR_SESSION.to_string()),
-        remote_path: b.remote_path.unwrap_or_default(),
-        shared_session: b.shared_session.unwrap_or(prev_shared),
+        remote_path: b.remote_path.or_else(|| prev.as_ref().map(|p| p.remote_path.clone())).unwrap_or_default(),
+        shared_session: b.shared_session.or(prev.as_ref().map(|p| p.shared_session)).unwrap_or(false),
     };
     // 這支同時是新增與**更新**（docs/API.md）。更新到「指去另一台機器」時要跟 `delete_host` 一樣先確認
     // 主機上沒有活著的專案（issue #544）：`apply_config` 會把連線整個換掉，但 `runs` 一列都不動——
@@ -4813,6 +4815,58 @@ mod project_tests {
         assert!(app.cfg.get().await.hosts.iter().any(|h| h.name == "sh1" && h.shared_session), "沒帶就沿用");
         create_host(State(app.clone()), Query(DeleteQuery::default()), Extension(RequestPrincipal::User), Json(update(Some(false)))).await.unwrap();
         assert_eq!(flag(app.clone()).await, json!(false));
+    }
+
+    /// #1752：`POST /api/hosts` 更新既有主機時沒帶的選填欄位沿用舊值（`remote_path` 被清成空字串，m4p 的 PATH 就找不到 herdr）；
+    /// 明確帶了才改（包含明確帶空字串清掉）。
+    #[tokio::test]
+    async fn a_host_update_that_omits_optional_fields_keeps_the_stored_values() {
+        let e = crate::testing::env().await;
+        let app = e.app.clone();
+        app.cfg
+            .update(|f| {
+                f.hosts.push(HostCfg {
+                    name: "keep1".into(),
+                    ssh: "keep1.invalid".into(),
+                    ssh_port: 2222,
+                    ssh_opts: vec!["-o".into(), "ConnectTimeout=5".into()],
+                    herdr_session: "agents-manager".into(),
+                    remote_path: "/opt/homebrew/bin:$HOME/.local/bin".into(),
+                    shared_session: false,
+                });
+                Ok(())
+            })
+            .await
+            .unwrap();
+        let stored = |app: Arc<App>| async move { app.cfg.get().await.hosts.into_iter().find(|h| h.name == "keep1").unwrap() };
+        let post = |ssh_port, ssh_opts, herdr_session, remote_path| NewHost {
+            name: "keep1".into(),
+            ssh: "keep1.invalid".into(),
+            ssh_port,
+            ssh_opts,
+            herdr_session,
+            remote_path,
+            shared_session: None,
+        };
+        create_host(State(app.clone()), Query(DeleteQuery::default()), Extension(RequestPrincipal::User), Json(post(None, None, None, None)))
+            .await
+            .unwrap();
+        let kept = stored(app.clone()).await;
+        assert_eq!(kept.remote_path, "/opt/homebrew/bin:$HOME/.local/bin", "沒帶 remote_path 不能被清空");
+        assert_eq!(kept.ssh_port, 2222);
+        assert_eq!(kept.ssh_opts, vec!["-o".to_string(), "ConnectTimeout=5".to_string()]);
+        assert_eq!(kept.herdr_session, "agents-manager");
+
+        create_host(
+            State(app.clone()),
+            Query(DeleteQuery::default()),
+            Extension(RequestPrincipal::User),
+            Json(post(Some(22), Some(vec![]), None, Some(String::new()))),
+        )
+        .await
+        .unwrap();
+        let cleared = stored(app.clone()).await;
+        assert_eq!((cleared.ssh_port, cleared.remote_path.as_str(), cleared.ssh_opts.len()), (22, "", 0), "明確帶了就照帶的");
     }
 
     /// #708：`handed_off_to` 設得上、清得掉，寫進 config.toml、投影進 DB、`GET /api/state` 看得到；空字串與非字串是 400。

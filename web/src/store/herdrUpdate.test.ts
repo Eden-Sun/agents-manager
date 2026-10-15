@@ -3,6 +3,7 @@ import assert from 'node:assert/strict'
 import type { Bot, Run } from '../api/types.ts'
 import type { UpstreamItem } from './upstreamUpdate.ts'
 import {
+  herdrBinaryText,
   herdrDoneMessage,
   herdrMenuItem,
   herdrProgress,
@@ -76,23 +77,49 @@ test('計畫：本機落後才可按；遠端、shared 停用並講原因；名�
   assert.deepEqual(p.childrenLost, [{ botId: 'kid', name: 'kid', parentName: 'top' }])
   assert.match(p.hosts[1].blocked ?? '', /^共用 session/)
 
+  // 非 shared 的遠端主機可以從這裡更新（#1752）；只有 shared_session 的才停用。
   const remoteOnly = herdrUpdatePlan(
     item([
       { host: 'local', installedVersion: '0.9.3', error: null, behind: false },
-      { host: 'buildbox', installedVersion: '0.9.1', error: null, behind: true },
+      { host: 'm4p', installedVersion: '0.9.1', error: null, behind: true },
     ]),
     new Set(),
     bots,
     runs,
     hostOf,
   )!
-  assert.equal(remoteOnly.host, null)
-  assert.match(remoteOnly.blockedWhy ?? '', /^遠端主機/)
-  assert.deepEqual(remoteOnly.willResume, [])
+  assert.deepEqual([remoteOnly.host, remoteOnly.from, remoteOnly.blockedWhy], ['m4p', '0.9.1', null])
+  assert.deepEqual(remoteOnly.willResume.map((b) => b.name), ['far'], '名單算那台在跑的頂層 Bot')
+  const sharedOnly = herdrUpdatePlan(
+    item([{ host: 'm4p', installedVersion: '0.9.1', error: null, behind: true }]),
+    new Set(['m4p']),
+    bots,
+    runs,
+    hostOf,
+  )!
+  assert.equal(sharedOnly.host, null)
+  assert.match(sharedOnly.blockedWhy ?? '', /^共用 session.*關掉/)
+  assert.deepEqual(sharedOnly.willResume, [])
 
   assert.equal(herdrUpdatePlan(item([{ host: 'local', installedVersion: '0.9.3', error: null, behind: false }]), new Set(), bots, runs, hostOf), null)
   assert.equal(herdrUpdatePlan({ ...both, kind: 'codex' }, new Set(), bots, runs, hostOf), null)
   assert.equal(herdrUpdatePlan(undefined, new Set(), bots, runs, hostOf), null)
+})
+
+test('done 帶 binaries 與手動指令：講清楚哪一份舊', () => {
+  const r = parseHerdrDone({
+    ...base, ok: false, reason: 'install_path_unsupported', detail: 'x', manual_upgrade_command: 'brew unpin herdr; brew upgrade herdr; brew pin herdr',
+    binaries: [
+      { role: 'server', path: '/opt/homebrew/bin/herdr', version: '0.9.4', stale: false },
+      { role: 'cli', path: '/Users/m/.local/bin/herdr', version: '0.9.3', stale: true },
+    ],
+  })
+  assert.equal(r.manualCommand, 'brew unpin herdr; brew upgrade herdr; brew pin herdr')
+  assert.deepEqual(r.binaries.map(herdrBinaryText), [
+    'server 跑的 /opt/homebrew/bin/herdr：0.9.4',
+    'CLI／shim 解析到的 /Users/m/.local/bin/herdr：0.9.3（舊）',
+  ])
+  assert.deepEqual(parseHerdrDone({ ...base, ok: true }).binaries, [])
 })
 
 test('WS 幀走到 store：progress 更新、done 清掉進度並留結果', () => {
