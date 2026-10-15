@@ -1434,8 +1434,15 @@ esac
     #[test]
     fn a_reserved_port_refuses_connections_and_cannot_be_taken_until_it_listens() {
         let r = reserve_port();
-        let refused = std::net::TcpStream::connect(("127.0.0.1", r.port)).unwrap_err();
-        assert_eq!(refused.kind(), std::io::ErrorKind::ConnectionRefused, "{refused}");
+        // Linux 對 bind 未 listen 的 port 回 RST（ConnectionRefused）；macOS 不回、SYN 等到逾時（TimedOut）。兩者都是「連不上」。
+        let addr = std::net::SocketAddr::from(([127, 0, 0, 1], r.port));
+        let refused = std::net::TcpStream::connect_timeout(&addr, std::time::Duration::from_secs(1)).unwrap_err();
+        let expected: &[std::io::ErrorKind] = if cfg!(target_os = "macos") {
+            &[std::io::ErrorKind::ConnectionRefused, std::io::ErrorKind::TimedOut]
+        } else {
+            &[std::io::ErrorKind::ConnectionRefused]
+        };
+        assert!(expected.contains(&refused.kind()), "{refused}");
         let taken = std::net::TcpListener::bind(("127.0.0.1", r.port)).unwrap_err();
         assert_eq!(taken.kind(), std::io::ErrorKind::AddrInUse, "{taken}");
         let port = r.port;
