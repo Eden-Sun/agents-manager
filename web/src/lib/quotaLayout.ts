@@ -17,6 +17,15 @@ export const QUOTA_FIT_START: QuotaFitState = { level: 0, need: [null, null] }
 const SLACK = 0.5
 
 /**
+ * 收合（階段 2）時內容會變窄，`need` 卻停在「當初放不下那一刻」的舊寬，展開條件永遠達不到（#1777）。
+ * 收合中就用現在量到的完整寬（`full`）更新兩個階段的需求；階段 0 沒有收合，原樣回傳。
+ */
+export function withFreshNeed(s: QuotaFitState, full: number): QuotaFitState {
+  if (s.level === 0) return s
+  return { level: s.level, need: [full, full] }
+}
+
+/**
  * 依量到的寬度決定下一個階段。`avail`＝額度區能拿到的寬（遠端記憶體會自己縮，算在可用裡），
  * `content`＝目前階段每一格照內容排開的寬（格子不縮到比內容小）。
  *
