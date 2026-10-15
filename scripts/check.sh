@@ -196,7 +196,11 @@ check_ob() {
 }
 
 check_ops() {
-    local t
+    local t selected=__all__
+    if [ -n "${1:-}" ] && [ -f scripts/ci-ops-tests.py ]; then
+        selected="$(printf '%s\n' "$1" | python3 -B scripts/ci-ops-tests.py)" || selected=__all__
+        [ -n "$selected" ] || selected=__all__
+    fi
     # macOS 的 bash 3.2 會把變數名後面緊接的全形標點併進變數名，set -u 下直接 unbound
     # variable 而中止（issue #412，三天內踩到三次）。修法一律是 ${VAR}。
     step "ops: shell 變數後面緊接非 ASCII 字元"
@@ -233,6 +237,7 @@ check_ops() {
     fi
     # 新的 *_test.sh 放在 scripts/ 或 scripts/ops/ 就會被撈到；需要外部工具的測試自己 skip 並印原因。
     for t in scripts/*_test.sh scripts/ops/*_test.sh; do
+        if [ "$selected" != __all__ ] && ! printf '%s\n' "$selected" | grep -qxF -- "$t"; then continue; fi
         step "ops: $t"
         AM_CANARY_TEST="$t" bash "$t"
     done
@@ -242,8 +247,10 @@ check_ops() {
     # AGM 的每一條指令都走它——它的測試不該只靠「改到它的人自己記得跑」。
     # 放在護欄裡面跑：它自己起一個 loopback 的假 daemon 與假 gh，不連正式 daemon、不碰正式環境。
     # `-B` 跟 `ob_test.py` 一致：不要在工作樹留 __pycache__（`check_ob` 有一條守衛在擋）。
-    step "ops: scripts/agm_test.py"
-    AM_CANARY_TEST="scripts/agm_test.py" python3 -B scripts/agm_test.py
+    if [ "$selected" = __all__ ] || printf '%s\n' "$selected" | grep -qxF scripts/agm_test.py; then
+        step "ops: scripts/agm_test.py"
+        AM_CANARY_TEST="scripts/agm_test.py" python3 -B scripts/agm_test.py
+    fi
     if ! scripts/ops/destructive-canary.sh hits "${canary}"; then
         echo "上面這些測試真的叫到了破壞性指令（已被擋下，但那條路要修）：見 scripts/ops/destructive-canary.sh" >&2
         /bin/rm -rf "${canary}"
@@ -330,7 +337,7 @@ check_changed() {
         return
     fi
     if echo "$parts" | grep -qx ob; then check_ob; fi
-    if echo "$parts" | grep -qx ops; then check_ops; fi
+    if echo "$parts" | grep -qx ops; then check_ops "$files"; fi
     if echo "$parts" | grep -qx web; then check_web; fi
     if echo "$parts" | grep -qx daemon; then
         local release_triage_submission_test=0 daemon_tests_will_run=0
