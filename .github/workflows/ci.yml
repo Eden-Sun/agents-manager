@@ -93,6 +93,8 @@ jobs:
       - run: scripts/check.sh daemon
         env:
           TZ: Asia/Taipei
+          # 高次數競態壓測只在每日排程；PR／手動觸發保留快速守門。
+          AM_TEST_GUARD_ITERS: ${{ github.event_name == 'schedule' && '60' || '5' }}
 
   lint:
     runs-on: macos-latest
