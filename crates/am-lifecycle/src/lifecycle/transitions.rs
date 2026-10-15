@@ -75,7 +75,7 @@ pub const TURN_STATUS_EDGES: &[(&str, &str, &str)] = &[
 /// 時不再組通知、`event_new` 直接是 false；釘住的測試是
 /// `supervisor::store::a_cancelled_assignment_gets_no_stale_completion_notification`。
 
-#[cfg(test)]
+#[cfg(all(test, not(feature = "daemon-test-harness")))]
 mod tests {
     use super::*;
 

@@ -174,7 +174,7 @@ pub trait GroupTurnOps {
     fn cursor_not_found(&self, reason: &str, message_id: &str) -> LcError;
 }
 
-#[cfg(test)]
+#[cfg(all(test, not(feature = "daemon-test-harness")))]
 mod tests {
     /// 受護欄管的 mission 側 production 檔（含 `group`／`relay_auth` 等同包檔案）。
     const SOURCES: &[(&str, &str)] = &[
@@ -292,9 +292,19 @@ mod tests {
         }
     }
 
+
+
+    #[test]
+    fn test_mask_skips_cfg_test_items() {
+        assert!(test_mask("fn a() {}\n#[cfg(test)]\nmod t {\n    fn b() {}\n}\nfn c() {}\n") == vec![false, true, true, true, true, false]);
+        assert!(test_mask("fn a() {}\n#[cfg(all(test, feature = \"daemon-test-harness\"))]\n#[tokio::test]\nasync fn t() {\n    let x = 1;\n}\nfn c() {}\n") == vec![false, true, true, true, true, true, false]);
+    }
+}
+
+#[cfg(all(test, feature = "daemon-test-harness"))]
+mod tests {
     /// 走介面拿 supervisor 鎖，鎖統計（issue #473）記的拿鎖點仍是**呼叫端**那一檔，不是 adapter：
     /// `#[track_caller]` 要能穿過 trait 方法，不然所有 mission 的拿鎖點都會糊成 `app_ports_p7.rs`。
-    #[cfg(all(test, feature = "daemon-test-harness"))]
     #[tokio::test]
     async fn supervisor_lock_through_the_port_is_attributed_to_the_caller() {
         use super::SupervisorOps;
@@ -304,11 +314,5 @@ mod tests {
         let snap = crate::supervisor::timing::snapshot();
         let sites: Vec<&String> = snap["stats"].as_object().unwrap().keys().filter(|k| k.starts_with("lock:hold:")).collect();
         assert!(sites.iter().any(|k| k.ends_with("mission/ports.rs")), "拿鎖點沒記在呼叫端：{sites:?}");
-    }
-
-    #[test]
-    fn test_mask_skips_cfg_test_items() {
-        assert!(test_mask("fn a() {}\n#[cfg(test)]\nmod t {\n    fn b() {}\n}\nfn c() {}\n") == vec![false, true, true, true, true, false]);
-        assert!(test_mask("fn a() {}\n#[cfg(all(test, feature = \"daemon-test-harness\"))]\n#[tokio::test]\nasync fn t() {\n    let x = 1;\n}\nfn c() {}\n") == vec![false, true, true, true, true, true, false]);
     }
 }

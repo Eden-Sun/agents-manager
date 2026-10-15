@@ -296,7 +296,7 @@ pub async fn record_in_flight(
     record_on_turn(app, bot_id, conversation_id, &turn_id, &turn_started, records).await
 }
 
-#[cfg(test)]
+#[cfg(all(test, not(feature = "daemon-test-harness")))]
 mod tests {
     use super::*;
 

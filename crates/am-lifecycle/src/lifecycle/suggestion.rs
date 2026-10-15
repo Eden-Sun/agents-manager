@@ -40,7 +40,7 @@ fn same_sentence(draft: &str, expect: &str) -> bool {
     text == expect.trim()
 }
 
-#[cfg(test)]
+#[cfg(all(test, not(feature = "daemon-test-harness")))]
 mod same_sentence_tests {
     use super::same_sentence;
 

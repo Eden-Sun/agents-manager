@@ -28,6 +28,12 @@ module_has_tests() { # module_has_tests <src 根目錄> <用 / 分隔的模組�
 
 emit_mod() { # emit_mod <repo 相對路徑> <用 / 分隔的模組路徑>
     local f="$1" mod="$2" base root
+    case "$f" in
+        crates/am-lifecycle/src/*.rs | crates/am-share/src/*.rs | crates/am-supervisor/src/*.rs)
+            # These tests already run in the owning crate target. Keep mixed/App modules below.
+            if [ -f scripts/ci-crate-only-tests.py ] && python3 -B scripts/ci-crate-only-tests.py "$f"; then return 0; fi
+            ;;
+    esac
     if [ -f "$f" ]; then
         # 模組路徑從 src 根目錄起算：去掉副檔名與 /mod，再去掉模組路徑那一段尾巴，剩下的就是 src 根目錄。
         base="${f%.rs}"; base="${base%/mod}"
@@ -69,6 +75,8 @@ while IFS= read -r f; do
             mod="${mod%_tests.rs}"
             printf '%s::tests::\n' "${mod//\//::}"
             ;;
+        crates/am-lifecycle/src/session_ports.rs) printf 'lifecycle::start::ports::\n' ;;
+        crates/am-lifecycle/src/send_ports.rs) printf 'lifecycle::send_now::ports::\n' ;;
         crates/am-lifecycle/src/lifecycle/force_abort_tests.rs) printf 'lifecycle::stop::force_abort_tests::\n' ;;
         crates/am-share/src/share/trusted_tests.rs) printf 'share::tests::trusted::\n' ;;
         crates/am-share/src/share/portal_upload_tests.rs) printf 'share::portal::upload_tests::\n' ;;

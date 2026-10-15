@@ -416,7 +416,7 @@ async fn remote_tip_is_only_rewritten(dir: &Path, tip: &str, head: &str) -> Resu
     }))
 }
 
-#[cfg(test)]
+#[cfg(all(test, not(feature = "daemon-test-harness")))]
 mod tests {
     use super::*;
     use std::process::Command as StdCommand;

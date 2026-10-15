@@ -147,7 +147,7 @@ pub async fn apply_deferred_once(
     Some(outcome)
 }
 
-#[cfg(test)]
+#[cfg(all(test, not(feature = "daemon-test-harness")))]
 mod retain_tests {
     use super::*;
 
@@ -163,7 +163,7 @@ mod retain_tests {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, not(feature = "daemon-test-harness")))]
 mod tests {
     use super::*;
 

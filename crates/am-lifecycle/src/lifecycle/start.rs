@@ -5368,7 +5368,7 @@ mod agy_resume_tests {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, not(feature = "daemon-test-harness")))]
 mod account_file_tests {
     use std::collections::BTreeMap;
 

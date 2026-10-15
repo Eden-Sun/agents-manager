@@ -151,7 +151,7 @@ pub fn decide(sup: &Supervisor, quota: Option<&Quota>, liveness: &str, now: Date
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, not(feature = "daemon-test-harness")))]
 mod tests {
     use super::*;
 

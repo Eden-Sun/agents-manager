@@ -45,7 +45,7 @@ check "api::bot_scope_matrix::" "daemon/src/bot_scope_matrix.rs"
 check "runners::s6_l::app_ports_p4sess::" "daemon/src/app_ports_p4sess.rs"
 # 直接 `mod x_tests;` 宣告的不受影響。
 check "lifecycle::agy_tests::" "crates/am-lifecycle/src/lifecycle/agy_tests.rs"
-check "share::remote_fs_tests::" "crates/am-share/src/share/remote_fs_tests.rs"
+check "" "crates/am-share/src/share/remote_fs_tests.rs"
 # Build inputs, crate wiring, shared test helpers, and include data can affect tests across modules.
 check "__all__" "daemon/build.rs"
 check "__all__" "Cargo.toml"
@@ -93,6 +93,14 @@ check "__all__" "crates/am-core/Cargo.toml"
 check "__all__ share::portal::" "crates/am-share/src/lib.rs" "crates/am-share/src/share/portal.rs"
 check "runners::am_base_tests::" "crates/am-base/src/lib.rs"
 
+check "lifecycle::start::ports::" "crates/am-lifecycle/src/session_ports.rs"
+check "lifecycle::send_now::ports::" "crates/am-lifecycle/src/send_ports.rs"
+check "share::budget_remote_tests::" "crates/am-share/src/share/budget_remote_tests.rs"
+# Crate-owned pure modules need no daemon subset; App/mixed modules still select their tests.
+check "" "crates/am-lifecycle/src/ask_answers.rs"
+check "" "crates/am-share/src/share/svg_check.rs"
+check "supervisor::timing::" "crates/am-supervisor/src/supervisor/timing.rs"
+check "build_info::" "crates/am-supervisor/src/build_info.rs"
 # am-base uses the actual composition mount table, including aliases and shared fallbacks.
 check "runners::am_base_tests::attach::" "crates/am-base/src/attach.rs"
 check "runners::am_base_tests::capture_claude::" "crates/am-base/src/capture.rs"

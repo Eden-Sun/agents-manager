@@ -410,7 +410,7 @@ pub fn latest_opus_in(models: &Value) -> Option<String> {
     best.map(|(_, id)| id).or(alias)
 }
 
-#[cfg(test)]
+#[cfg(all(test, not(feature = "daemon-test-harness")))]
 mod tests {
     use super::*;
 

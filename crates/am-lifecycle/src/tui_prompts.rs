@@ -187,7 +187,7 @@ pub fn is_feedback_survey(screen: &str) -> bool {
     false
 }
 
-#[cfg(test)]
+#[cfg(all(test, not(feature = "daemon-test-harness")))]
 mod survey_composer_shape_tests {
     use super::*;
 

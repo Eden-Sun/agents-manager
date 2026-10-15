@@ -806,7 +806,7 @@ mod tests {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, not(feature = "daemon-test-harness")))]
 mod probe_cache_tests {
     use super::*;
     use std::sync::atomic::{AtomicUsize, Ordering};
