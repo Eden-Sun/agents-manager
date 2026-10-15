@@ -269,6 +269,67 @@ am_child_name() {
     printf '%s' "$_full"
 }
 
+# `--identity <名>`（issue #1775）：`$AM_IDENTITIES` 是 daemon 注入的這台身分清單，單行、`;` 分隔，格式
+# `<kind>/<名稱>[:KEY=路徑,KEY=路徑…]`（見 lifecycle/pane_identities.rs）。am_identity_find 印出那一筆的 KEY=路徑
+# （沒有就空），找不到回 1；am_identity_names 列出同 kind 的名字給錯誤訊息用。
+am_identity_find() {
+    _want="$1/$2"
+    _rest=${AM_IDENTITIES:-}
+    while [ -n "$_rest" ]; do
+        _e=${_rest%%;*}
+        case "$_rest" in
+            *';'*) _rest=${_rest#*;} ;;
+            *) _rest= ;;
+        esac
+        case "$_e" in
+            "$_want" | "$_want":*) ;;
+            *) continue ;;
+        esac
+        case "$_e" in
+            *:*) printf '%s' "${_e#*:}" ;;
+        esac
+        return 0
+    done
+    return 1
+}
+
+am_identity_names() {
+    _rest=${AM_IDENTITIES:-}
+    _out=""
+    while [ -n "$_rest" ]; do
+        _e=${_rest%%;*}
+        case "$_rest" in
+            *';'*) _rest=${_rest#*;} ;;
+            *) _rest= ;;
+        esac
+        case "$_e" in
+            "$1"/*)
+                _nm=${_e%%:*}
+                _nm=${_nm#*/}
+                if [ -n "$_out" ]; then _out="${_out}、"; fi
+                _out="${_out}${_nm}"
+                ;;
+        esac
+    done
+    printf '%s' "$_out"
+}
+
+# 在 `KEY=路徑,KEY=路徑` 裡找 `$2` 這個 KEY 的值；沒有就回 1。
+am_kv_get() {
+    _rest=$1
+    while [ -n "$_rest" ]; do
+        _p=${_rest%%,*}
+        case "$_rest" in
+            *,*) _rest=${_rest#*,} ;;
+            *) _rest= ;;
+        esac
+        case "$_p" in
+            "$2"=*) printf '%s' "${_p#*=}"; return 0 ;;
+        esac
+    done
+    return 1
+}
+
 # `herdr agent start [flags] <name> …` — rewrite the first bare word after `start`, which is
 # the agent name. Flags may come first, so skip options and the values of the ones that take
 # one, and stop at `--` (everything after it is the agent's own argv).
@@ -298,11 +359,27 @@ am_agent_start() {
     _has_docs=0
     _has_profile=0
     _has_no_daemon=0
+    _idset=0
+    _idn=""
     while [ "$_i" -lt "$_n" ]; do
         _a=$1
         shift
         _i=$((_i + 1))
         _orig=$_a
+        # `--identity <名>`（issue #1775）：只在 `--` 之前認，認了就剝掉，不轉給 herdr。
+        if [ "$_stop" = 0 ]; then
+            case "$_a" in
+                --identity)
+                    [ "$_i" -lt "$_n" ] || { printf 'agents-manager: --identity 後面要接身分名\n' >&2; exit 2; }
+                    _idn=$1
+                    _idset=1
+                    shift
+                    _i=$((_i + 1))
+                    continue
+                    ;;
+                --identity=*) _idn=${_a#--identity=}; _idset=1; continue ;;
+            esac
+        fi
         # 保留變數（見 am_forward_with_env）：`--` 之前帶這兩個 key 的 `--env` 一律丟掉。
         # 只剝、不補：`herdr agent start` 沒有 `--env`（它在既有 pane 裡開 agent，env 在建 pane 時就注入了），
         # 補上去會變成未知旗標，每一次開 child 都失敗（sol 六輪，herdr 0.8.2 實測）。
@@ -368,6 +445,22 @@ am_agent_start() {
         _prev=$_orig
         set -- "$@" "$_a"
     done
+    # `--identity`（issue #1775）：子 pane 用這台的哪一個帳號。這台沒有就 exit 2、不呼叫 herdr；kind 取 `--kind`，沒給用母 bot 的 `AM_KIND`。
+    _idacct=""
+    _idkv=""
+    if [ "$_idset" = 1 ]; then
+        _ik=${_kind:-${AM_KIND:-}}
+        case "$_ik" in
+            claude) _idacct=CLAUDE_CONFIG_DIR ;;
+            codex) _idacct=CODEX_HOME ;;
+            grok) _idacct=GROK_HOME ;;
+        esac
+        _idkv=$(am_identity_find "$_ik" "$_idn") || {
+            _names=$(am_identity_names "$_ik")
+            printf 'agents-manager: 這台沒有 %s 身分 %s；可用：%s\n' "$_ik" "$_idn" "${_names:-（無）}" >&2
+            exit 2
+        }
+    fi
     # 沒指定模型的子 agent 會跑 CLI 的預設（claude 現在是 fable），跟母 bot 明明選的 opus 對不上，
     # 側欄就多出一顆「claude-fable-5-1」看不懂的。母 bot 的模型／強度在 AM_MODEL / AM_EFFORT，
     # 同 kind 就補上；自己有寫 --model 的一律尊重。
@@ -472,7 +565,7 @@ am_agent_start() {
     fi
     am_spawn_begin || exit $?
     trap 'am_spawn_abort; exit 130' INT TERM
-    am_reexport_env_before_start "$_pane"
+    am_reexport_env_before_start "$_pane" "$_idkv" "$_idacct"
     if [ -z "${AM_BOT_ID:-}" ]; then
         exec "$AM_HERDR" agent start "$@"
     fi
@@ -494,10 +587,15 @@ am_agent_start() {
 # pty 會緩衝這行輸入，pane 還沒起殻也不怕；pane 早有正確值時只是重覆設一次，無害。
 am_reexport_env_before_start() {
     _pane=$1
+    # `--identity` 指定了身分（issue #1775）：$2 是那個身分的 KEY=路徑、$3 是那個 kind 的帳號目錄 key。
+    # 帳號目錄照身分走，母 pane 自己的值不帶過去（見下面）。沒有身分時兩個都是空字串，行為照舊。
+    _acct_kv=$2
+    _acct_key=$3
     [ -n "$_pane" ] || return 0
     _body=""
     _line=""
     for _k in $AM_RESERVED_ENV_KEYS AM_INSTANCE AM_DATA_DIR; do
+        [ -z "$_acct_key" ] || [ "$_k" != "$_acct_key" ] || continue
         eval "_v=\${$_k:-}"
         [ -n "$_v" ] || continue
         [ "$_k" != PATH ] || _v=$(am_dedupe_path "$_v")
@@ -506,6 +604,19 @@ am_reexport_env_before_start() {
 "
         _line="${_line}export $_k='$_esc'; "
     done
+    if [ -n "$_acct_key" ]; then
+        _v=$(am_kv_get "$_acct_kv" "$_acct_key")
+        if [ -n "$_v" ]; then
+            _esc=$(printf '%s' "$_v" | sed "s/'/'\\\\''/g")
+            _body="${_body}export $_acct_key='$_esc'
+"
+            _line="${_line}export $_acct_key='$_esc'; "
+        else
+            _body="${_body}unset $_acct_key
+"
+            _line="${_line}unset $_acct_key; "
+        fi
+    fi
     _v=$(am_child_of_value)
     if [ -n "$_v" ]; then
         _esc=$(printf '%s' "$_v" | sed "s/'/'\\\\''/g")
