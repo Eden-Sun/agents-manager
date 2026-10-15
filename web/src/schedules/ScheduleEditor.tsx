@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState } from 'react'
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
 import { createPortal } from 'react-dom'
 import { ConfirmDialog } from '../components/ConfirmDialog'
 import { Modal } from '../components/Modal'
@@ -19,9 +19,11 @@ import { useStore } from '../store/store'
 import { createRequestId, settleCreateRequest } from '../lib/createRequestId'
 import { newClientRequestId } from '../api'
 import { ApiError } from '../api/types'
+import { isImeEnter } from '../lib/ime'
 import { defaultTimeZone, formatDue, OCCURRENCE_LABEL, occurrenceLine, timeZoneOptions } from './format'
 import { useLiveTurnStatus, useOnTurnChange } from './liveTurn'
 import './schedules.css'
+import './scheduleEditor.css'
 
 const WEEKDAYS = ['週一', '週二', '週三', '週四', '週五', '週六', '週日']
 
@@ -36,10 +38,11 @@ interface FormState {
   everyMin: number
   time: string
   weekdays: number[]
+  clearAfter: boolean
 }
 
 function emptyForm(botId: string): FormState {
-  return { name: '', prompt: '', botId, tz: defaultTimeZone(), notify: 'failure', mode: 'daily', at: '', everyMin: 60, time: '09:00', weekdays: [0] }
+  return { name: '', prompt: '', botId, tz: defaultTimeZone(), notify: 'failure', mode: 'daily', at: '', everyMin: 60, time: '09:00', weekdays: [0], clearAfter: false }
 }
 
 function fromDetail(d: ScheduleDetail): FormState {
@@ -55,6 +58,7 @@ function fromDetail(d: ScheduleDetail): FormState {
     everyMin: spec.every_secs ? Math.round(spec.every_secs / 60) : 60,
     time: spec.time ?? '09:00',
     weekdays: spec.weekdays ?? [0],
+    clearAfter: d.clear_after === true,
   }
 }
 
@@ -145,6 +149,14 @@ export function ScheduleEditor({
 
   const set = <K extends keyof FormState>(k: K, v: FormState[K]) => setForm((f) => ({ ...f, [k]: v }))
 
+  // 任務內容框只在內容超出目前高度時長高（最少 8 行由 rows 決定，最多 60vh 由 CSS 限制）；使用者手動拉高的不會被縮回去。
+  const promptRef = useRef<HTMLTextAreaElement>(null)
+  useLayoutEffect(() => {
+    const el = promptRef.current
+    if (!el || el.scrollHeight <= el.clientHeight) return
+    el.style.height = `${el.scrollHeight + (el.offsetHeight - el.clientHeight)}px`
+  }, [form.prompt])
+
   const botLabel = (id: string) => {
     const b = bots.find((x) => x.id === id)
     if (!b) return '（找不到這顆 Bot）'
@@ -170,6 +182,7 @@ export function ScheduleEditor({
           tz: form.tz,
           spec: specOf(form),
           notify: form.notify,
+          clear_after: form.clearAfter,
         })
         setNotice('已建立。排程不會立即執行，到時間才會排進 Bot。')
         onSelect(s.id)
@@ -181,6 +194,7 @@ export function ScheduleEditor({
           tz: form.tz,
           spec: specOf(form),
           notify: form.notify,
+          clear_after: form.clearAfter,
         })
         // 儲存回來的是 Schedule（不帶 recent）：合進既有詳情，不取代成缺欄位的物件。
         setDetail((prev) => (prev ? { ...prev, ...d, recent: prev.recent } : prev))
@@ -253,25 +267,31 @@ export function ScheduleEditor({
           <p>下次：{formatDue(detail.next_due, detail.tz)}</p>
           <p>狀態：{detail.enabled ? (detail.open ? occurrenceLine(detail.open, liveStatus) : '啟用中') : '已停用'}</p>
           {detail.open?.waiting_reason ? <p className="hint">{occurrenceLine(detail.open, liveStatus)}</p> : null}
-          {(detail.recent ?? []).length > 0 ? (
-            <ul className="schedule-history" aria-label="最近執行">
-              {(detail.recent ?? []).map((o) => (
-                <li key={o.id}>
-                  {o.source === 'manual' ? '手動' : '排程'} · {new Date(o.scheduled_for).toLocaleString('zh-TW', { timeZone: detail.tz })} · {OCCURRENCE_LABEL[o.status]}
-                  {o.error ? `（${o.error}）` : ''}
-                  {o.merged_count > 0 ? ` · 合併 ${o.merged_count} 次` : ''}
-                </li>
-              ))}
-            </ul>
-          ) : (
-            <p className="hint">還沒有執行紀錄。</p>
-          )}
         </section>
       ) : null}
 
       <label className="field">
         <span>名稱</span>
         <input value={form.name} maxLength={80} onChange={(e) => set('name', e.target.value)} />
+      </label>
+
+      <label className="field">
+        <span>
+          任務內容<small className="hint schedule-prompt-hint">⌘/Ctrl+Enter 儲存</small>
+        </span>
+        <textarea
+          ref={promptRef}
+          className="schedule-prompt"
+          rows={8}
+          value={form.prompt}
+          onChange={(e) => set('prompt', e.target.value)}
+          onKeyDown={(e) => {
+            // 跟「儲存」按鈕同一支函式；輸入法選字中的 Enter 不算。
+            if (busy || e.key !== 'Enter' || !(e.ctrlKey || e.metaKey) || isImeEnter(e.nativeEvent)) return
+            e.preventDefault()
+            void save()
+          }}
+        />
       </label>
 
       <label className="field">
@@ -305,11 +325,6 @@ export function ScheduleEditor({
           開啟 Bot 對話
         </button>
       ) : null}
-
-      <label className="field">
-        <span>任務內容</span>
-        <textarea rows={4} value={form.prompt} onChange={(e) => set('prompt', e.target.value)} />
-      </label>
 
       <label className="field">
         <span>模式</span>
@@ -374,6 +389,12 @@ export function ScheduleEditor({
         </select>
       </label>
 
+      <label className="inline-check schedule-clear-after">
+        <input type="checkbox" checked={form.clearAfter} onChange={(e) => set('clearAfter', e.target.checked)} />
+        跑完就清空對話（不留記憶、不佔 context）
+      </label>
+      <p className="hint">每次跑完會讓這顆 Bot 開新對話；它跟你手動聊的內容也會一起清掉，建議搭配專用 Bot。</p>
+
       {error ? <p className="hint schedule-error" role="alert">{error}</p> : null}
       {notice ? <p className="hint" role="status">{notice}</p> : null}
 
@@ -395,13 +416,32 @@ export function ScheduleEditor({
           </>
         ) : null}
       </div>
+
+      {detail ? (
+        <details className="schedule-recent">
+          <summary>最近執行（{(detail.recent ?? []).length}）</summary>
+          {(detail.recent ?? []).length > 0 ? (
+            <ul className="schedule-history" aria-label="最近執行">
+              {(detail.recent ?? []).map((o) => (
+                <li key={o.id}>
+                  {o.source === 'manual' ? '手動' : '排程'} · {new Date(o.scheduled_for).toLocaleString('zh-TW', { timeZone: detail.tz })} · {OCCURRENCE_LABEL[o.status]}
+                  {o.error ? `（${o.error}）` : ''}
+                  {o.merged_count > 0 ? ` · 合併 ${o.merged_count} 次` : ''}
+                </li>
+              ))}
+            </ul>
+          ) : (
+            <p className="hint">還沒有執行紀錄。</p>
+          )}
+        </details>
+      ) : null}
     </div>
   )
 
   // 掛到 body：側欄是 transform 容器，裡面的 fixed 遮罩會被它限在側欄寬度內（手機上彈窗被裁）。只這裡處理，不動全站 Modal。
   return createPortal(
     <>
-      <Modal open title={scheduleId ? '排程' : '新增排程'} onClose={onClose}>
+      <Modal open width={760} title={scheduleId ? '排程' : '新增排程'} onClose={onClose}>
         {body}
       </Modal>
       <Modal open={botSheet} title="新增專用 Bot" onClose={() => setBotSheet(false)}>
