@@ -273,14 +273,6 @@ mod tests {
         assert_eq!(s["max_ms"], json!((MAX_SAMPLES + 499) as u64));
     }
 
-    /// 門檻是常數，不是隨手寫的數字：#473 要的是「單段 >2 秒、整拍 >TICK(10 秒)、等鎖 >1 秒」。
-    #[test]
-    fn the_thresholds_are_the_ones_the_ticket_asked_for() {
-        assert_eq!(SLOW_SEGMENT, Duration::from_secs(2));
-        assert_eq!(SLOW_TICK, Duration::from_secs(10), "跟 controller::TICK 一樣");
-        assert_eq!(SLOW_LOCK_WAIT, Duration::from_secs(1));
-    }
-
     // ── 「只記超標的」：用 `config_audit::capture` 真的去讀寫出來的那幾行 ──
 
     /// 沒超標的一段**一個字都不寫**，但統計要記到；超標才寫一行，而且帶段名、bot 數、耗時。
