@@ -57,16 +57,15 @@ for f in crates/am-base/src/db.rs crates/am-supervisor/src/supervisor/store.rs c
 done
 check "daemon" "daemon/src/api.rs"
 
-# 有測試釘住內容的文件：docs/SPEC.md（scripts/jev-role_test.sh 要求裡面有 Jev 角色政策那幾句）。
-# 只改這份文件不必跑整包 ops，單獨一個 `specs` 部分只跑那支契約測試。
-check "specs" "docs/SPEC.md"
-check "daemon specs" "docs/SPEC.md" "docs/API.md"
-check "daemon specs" "docs/SPEC.md" "daemon/src/api.rs"
-check "ops specs" "docs/SPEC.md" "scripts/ops/README.md"
+# SPEC 的敘述不需要執行測試；API 等執行期契約文件仍按原分類。
+check "" "docs/SPEC.md"
+check "daemon" "docs/SPEC.md" "docs/API.md"
+check "daemon" "docs/SPEC.md" "daemon/src/api.rs"
+check "ops" "docs/SPEC.md" "scripts/ops/README.md"
 # 有測試釘住內容的根目錄文件：AGENTS.md（scripts/lint_scope_test.sh 要求 clippy 指令涵蓋 workspace，#1077）。
 # 只改它也要跑 ops，不能當成「只有文件」（#1252）。
 check "ops" "AGENTS.md"
-check "ops specs" "AGENTS.md" "docs/SPEC.md"
+check "ops" "AGENTS.md" "docs/SPEC.md"
 # 其他根目錄文件仍是「只有文件」。
 check "" "README.md"
 

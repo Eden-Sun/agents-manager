@@ -1,10 +1,10 @@
 #!/usr/bin/env bash
 # 讀 stdin 的改動檔案清單（一行一個 repo 相對路徑），印出 `scripts/check.sh changed` 要跑的部分
-# （web／daemon／ops／ob／specs，一行一個、去重、照這個順序）。認不得的路徑一律印 `full`，寧可多跑。
+# （web／daemon／ops／ob，一行一個、去重、照這個順序）。認不得的路徑一律印 `full`，寧可多跑。
 # issue #716：小修改不必每次跑完整 CI；完整驗證交給 ubuntu 的背景 CI（scripts/ops/ubuntu-ci.sh）。
 set -euo pipefail
 
-web=0 daemon=0 ops=0 ob=0 specs=0 full=0
+web=0 daemon=0 ops=0 ob=0 full=0
 while IFS= read -r f; do
     [ -n "$f" ] || continue
     case "$f" in
@@ -27,9 +27,6 @@ while IFS= read -r f; do
         # daemon 用 include_str! 編進去的文件（`supervisor::persona::BUILD_INPUTS`，那邊的測試擋「又多一個沒列」）與 daemon 底下的
         # .md fixture 不是「只有文件」：改名、刪掉會編不過，也要先於下面的文件規則。
         docs/goals/agm-supervisor-persona.md | docs/goals/agm-responder-persona.md | docs/API.md | daemon/*) daemon=1 ;;
-        # 有測試釘住內容的文件：docs/SPEC.md（scripts/jev-role_test.sh 要求裡面有 Jev 角色政策那幾句）。
-        # 只改它不必跑整包 ops，獨立一個 `specs` 部分只跑那支契約測試（check.sh changed 處理）。
-        docs/SPEC.md) specs=1 ;;
         # AGENTS.md 也有測試釘住內容（scripts/lint_scope_test.sh 要求 clippy 指令涵蓋 workspace，#1077）：歸 ops。
         AGENTS.md) ops=1 ;;
         # crates 底下的 .md 也可能是測試 fixture（release_triage 的 claude_2.1.276-278.md 由 daemon 測試 include_str! 編進去）：不是「只有文件」，要先於下面的 *.md（#1699）。
@@ -56,5 +53,4 @@ fi
 [ "$daemon" = 1 ] && echo daemon
 [ "$ops" = 1 ] && echo ops
 [ "$ob" = 1 ] && echo ob
-[ "$specs" = 1 ] && echo specs
 exit 0
