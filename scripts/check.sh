@@ -14,8 +14,8 @@
 #   scripts/check.sh changed [base] # 只跑改到的部分（跟 base，預設 origin/main 比），daemon 有測試時由 cargo test 編 targets，否則 cargo check（CHECK_TESTS=none 關掉測試）；issue #716
 #
 # 注意：
-# - web 的型別檢查一定要 `tsc -p tsconfig.app.json`；根目錄的 tsconfig.json 只有
-#   references 沒有 files，`tsc --noEmit` 什麼都不檢查（假綠燈）。
+# - web 用 `tsc -b` 一次檢查 references 裡的 app 與 vite config，再單獨 vite build；
+#   不帶 -b 的根目錄 `tsc --noEmit` 沒有 files，什麼都不檢查（假綠燈）。
 # - web 的單元測試用 `bun test`（不是 `node --test`）：測試檔是 `node:test` 寫的，bun 直接吃，
 #   而且會解析 `.tsx` 與沒副檔名的 import；node 的 --experimental-strip-types 對那兩種都會
 #   ERR_MODULE_NOT_FOUND。
@@ -79,14 +79,14 @@ if [ "${1:-default}" != changed ]; then load_gate; fi
 check_web() {
     step "web: bun install --frozen-lockfile"
     (cd web && bun install --frozen-lockfile)
-    step "web: tsc -p tsconfig.app.json --noEmit"
-    (cd web && bunx tsc -p tsconfig.app.json --noEmit)
+    step "web: tsc -b（app 與 vite config，一次檢查）"
+    (cd web && bunx tsc -b)
     step "web: oxlint src"
     (cd web && bunx oxlint src)
     step "web: bun test"
     (cd web && bun test)
-    step "web: bun run build"
-    (cd web && bun run build)
+    step "web: vite build"
+    (cd web && bunx vite build)
 }
 
 # cargo test 一次吐幾千行：紅了就把紅的測試名單獨列在最後（高負載偶發紅時，一眼看出是哪一條、有幾條）。

@@ -84,7 +84,7 @@ run_case() { # <name> <changed path> <want regex（行首）...> -- <forbidden r
     done
 }
 
-run_case web web/src/a.ts 'bunx tsc -p tsconfig.app.json' 'bun test' -- 'cargo' 'python3'
+run_case web web/src/a.ts 'bunx tsc -b' 'bun test' -- 'cargo' 'python3'
 run_case daemon daemon/src/api.rs 'cargo test -p agents-managerd --locked -- api::' -- 'cargo check -p agents-managerd --all-targets' 'bun' 'python3'
 run_case ops scripts/ops/x.sh 'lint-shell-vars' 'ops-test ran' 'python3 -B scripts/agm_test\.' -- 'cargo' 'bunx tsc'
 run_case ob scripts/ob_x.txt 'python3 -B scripts/ob_test\.' 'node --test scripts/ob_browser_test\.' -- 'cargo' 'bun'
