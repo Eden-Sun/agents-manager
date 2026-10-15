@@ -21,6 +21,10 @@ const MERGED_ROUTE_SOURCES: &[(&str, &str)] = &[
         "crate::deleted_bots",
         include_str!("../src/deleted_bots.rs"),
     ),
+    (
+        "crate::herdr_integration",
+        include_str!("../src/herdr_integration.rs"),
+    ),
 ];
 
 #[test]
