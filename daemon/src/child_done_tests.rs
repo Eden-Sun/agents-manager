@@ -546,6 +546,26 @@
         assert_eq!(quoted_reply(&message_for("child", reply)), Some(reply));
     }
 
+    /// 結尾不能讓 parent 以為「不用處理」：回報裡要它接手的事（例如等它 merge）照做，不只回 No response requested.（#1778）。
+    #[test]
+    fn the_notice_tells_the_parent_to_act_on_the_report_not_just_skip_it() {
+        let m = message_for("child", "PR 已開，等 parent merge");
+        assert!(m.contains("看完照回報接著做你的事"), "{m}");
+        assert!(!m.contains("不需要回覆這則通知"), "{m}");
+    }
+
+    /// DB 裡還留著舊結尾的通知，去重仍要取得出引用（#1778）。
+    #[test]
+    fn a_notice_with_the_legacy_ending_still_yields_its_quoted_reply() {
+        let reply = "completed with `inline code`";
+        let legacy = message_for("child", reply).replace(
+            "這則是 daemon 的通知，不用回覆 daemon；看完照回報接著做你的事（驗收、合併、派下一步，或向使用者回報）。",
+            "不需要回覆這則通知。",
+        );
+        assert!(legacy.ends_with("不需要回覆這則通知。"), "{legacy}");
+        assert_eq!(quoted_reply(&legacy), Some(reply));
+    }
+
     // ---- #874：字沒打進去的通知補送 ----
 
     fn base_crid(f: &Fixture) -> String {
