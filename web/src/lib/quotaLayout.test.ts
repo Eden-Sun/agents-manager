@@ -1,6 +1,6 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
-import { QUOTA_FIT_START, nextQuotaFit } from './quotaLayout.ts'
+import { QUOTA_FIT_START, nextQuotaFit, withFreshNeed } from './quotaLayout.ts'
 import type { QuotaFitState } from './quotaLayout.ts'
 
 /** 模擬一次次量測直到穩定：`contentAt(level)` 是那個階段量到的內容寬。 */
@@ -62,4 +62,19 @@ test('左半縮到內容寬釋出的寬度，讓收合的額度列展開（#1269
   // 釋出 72px（252 → 180）：先回到階段 1（名牌＋完整量表要 634，還差一點）。
   assert.equal(settle(collapsed, 632, remote, true).level, 1)
   assert.equal(settle(collapsed, 640, remote, true).level, 0)
+})
+
+/** #1777：收合後內容變窄，`need[0]` 是放不下那一刻的舊寬，要用現在量到的完整寬更新，不然永遠收合。 */
+test('收合時內容已變窄：用現在的完整寬更新需求，放得下就展開（#1777）', () => {
+  const stale: QuotaFitState = { level: 2, need: [900, null] }
+  assert.equal(nextQuotaFit(withFreshNeed(stale, 600), 760, 500, false).level, 0)
+})
+
+test('收合時現在的完整寬還是比可用寬大：維持收合（#1777）', () => {
+  const stale: QuotaFitState = { level: 2, need: [900, null] }
+  assert.equal(nextQuotaFit(withFreshNeed(stale, 800), 760, 500, false).level, 2)
+})
+
+test('完整量表階段不動需求寬（#1777）', () => {
+  assert.equal(withFreshNeed(QUOTA_FIT_START, 600), QUOTA_FIT_START)
 })

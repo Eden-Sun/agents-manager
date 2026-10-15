@@ -1,5 +1,5 @@
 import { CodexResetHint } from './CodexResetHint'
-import { QUOTA_FIT_START, nextQuotaFit } from '../lib/quotaLayout'
+import { QUOTA_FIT_START, nextQuotaFit, withFreshNeed } from '../lib/quotaLayout'
 import type { QuotaFitState } from '../lib/quotaLayout'
 import { Fragment, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
 import type { ReactNode } from 'react'
@@ -936,8 +936,18 @@ export function QuotaStrip({
     const row = strip?.querySelector<HTMLElement>('.quota-open')
     if (!drawn || phone || !strip || !head || !row) return
     const remeasure = () => {
-      const next = nextQuotaFit(fit, quotaAvail(head, strip), quotaContent(row), false)
-      if (next !== fit) setFitState({ key: fitKey, s: next })
+      const avail = quotaAvail(head, strip)
+      // 收合時內容已變窄，需求寬要量完整的：同步拿掉 collapsed 量完再加回去，不會畫出來（#1777）。
+      let base = fit
+      if (fit.level === 2) {
+        row.classList.remove('collapsed')
+        base = withFreshNeed(fit, quotaContent(row))
+        row.classList.add('collapsed')
+      }
+      const next = nextQuotaFit(base, avail, quotaContent(row), false)
+      if (next.level !== fit.level || next.need[0] !== fit.need[0] || next.need[1] !== fit.need[1]) {
+        setFitState({ key: fitKey, s: next })
+      }
     }
     remeasure()
     if (typeof ResizeObserver === 'undefined') return
