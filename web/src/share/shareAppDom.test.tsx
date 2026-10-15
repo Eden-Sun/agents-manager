@@ -157,114 +157,124 @@ test('送出期間 SSE 先到齊，不能在 POST resolve 之後又卡回思考�
 })
 
 test('EventSource 停在 CONNECTING 也要改輪詢；404 關流，恢復 open 就停輪詢', { timeout: 20_000 }, async () => {
-  const sources: FakeSource[] = []
-  class FakeSource {
-    static CONNECTING = 0
-    static OPEN = 1
-    static CLOSED = 2
-    readyState = 0
-    url: string
-    onerror: (() => void) | null = null
-    onopen: (() => void) | null = null
-    closed = false
-    constructor(url: string) {
-      this.url = url
-      sources.push(this)
-    }
-    addEventListener() {}
-    close() {
-      this.closed = true
-      this.readyState = FakeSource.CLOSED
-    }
-    emitOpen() {
-      this.readyState = FakeSource.OPEN
-      this.onopen?.()
-    }
-    emitError() {
-      this.readyState = FakeSource.CONNECTING
-      this.onerror?.()
-    }
-  }
-  const orig = globalThis.EventSource
-  globalThis.EventSource = FakeSource as unknown as typeof EventSource
-  const calls: string[] = []
-  let status = 200
-  const origFetch = globalThis.fetch
-  globalThis.fetch = (async (url: string) => {
-    calls.push(String(url))
-    if (status === 404) return new Response('', { status: 404 })
-    return new Response(JSON.stringify({ bot_name: 'b', status: 'idle', messages: [{ id: 'm', role: 'assistant', content: 'hi', created_at: '2024-01-01T00:00:00Z' }], has_more: false }), { status: 200 })
-  }) as typeof fetch
+  const timers = installManualClockTimers()
   try {
-    await mount(<ShareApp client={httpShareClient('tok_0123456789abcdef')} />)
-    await settle(30)
-    assert.equal(sources.length, 1)
-    await act(async () => {
-      sources[0].emitOpen()
-      sources[0].emitError()
-    })
-    const before = calls.length
-    await settle(POLL_WAIT)
-    assert.ok(calls.length > before, 'CONNECTING 的 error 也要開始輪詢')
-    status = 404
-    await settle(POLL_WAIT)
-    assert.match(document.body.textContent!, /這個分享連結已失效/)
-    assert.equal(sources[0].closed, true)
+    const sources: FakeSource[] = []
+    class FakeSource {
+      static CONNECTING = 0
+      static OPEN = 1
+      static CLOSED = 2
+      readyState = 0
+      url: string
+      onerror: (() => void) | null = null
+      onopen: (() => void) | null = null
+      closed = false
+      constructor(url: string) {
+        this.url = url
+        sources.push(this)
+      }
+      addEventListener() {}
+      close() {
+        this.closed = true
+        this.readyState = FakeSource.CLOSED
+      }
+      emitOpen() {
+        this.readyState = FakeSource.OPEN
+        this.onopen?.()
+      }
+      emitError() {
+        this.readyState = FakeSource.CONNECTING
+        this.onerror?.()
+      }
+    }
+    const orig = globalThis.EventSource
+    globalThis.EventSource = FakeSource as unknown as typeof EventSource
+    const calls: string[] = []
+    let status = 200
+    const origFetch = globalThis.fetch
+    globalThis.fetch = (async (url: string) => {
+      calls.push(String(url))
+      if (status === 404) return new Response('', { status: 404 })
+      return new Response(JSON.stringify({ bot_name: 'b', status: 'idle', messages: [{ id: 'm', role: 'assistant', content: 'hi', created_at: '2024-01-01T00:00:00Z' }], has_more: false }), { status: 200 })
+    }) as typeof fetch
+    try {
+      await mount(<ShareApp client={httpShareClient('tok_0123456789abcdef')} />)
+      await act(async () => timers.clock.advance(30))
+      assert.equal(sources.length, 1)
+      await act(async () => {
+        sources[0].emitOpen()
+        sources[0].emitError()
+      })
+      const before = calls.length
+      await act(async () => timers.clock.advance(POLL_WAIT))
+      assert.ok(calls.length > before, 'CONNECTING 的 error 也要開始輪詢')
+      status = 404
+      await act(async () => timers.clock.advance(POLL_WAIT))
+      assert.match(document.body.textContent!, /這個分享連結已失效/)
+      assert.equal(sources[0].closed, true)
+    } finally {
+      globalThis.EventSource = orig
+      globalThis.fetch = origFetch
+    }
   } finally {
-    globalThis.EventSource = orig
-    globalThis.fetch = origFetch
+    timers.restore()
   }
 })
 
 test('輪詢恢復後 EventSource 又 open，就不要一直打 messages', { timeout: 20_000 }, async () => {
-  const sources: { emitOpen: () => void; emitError: () => void }[] = []
-  class FakeSource {
-    readyState = 0
-    onerror: (() => void) | null = null
-    onopen: (() => void) | null = null
-    constructor(_url: string) {
-      sources.push(this)
-    }
-    addEventListener() {}
-    close() {}
-    emitOpen() {
-      this.readyState = 1
-      this.onopen?.()
-    }
-    emitError() {
-      this.readyState = 0
-      this.onerror?.()
-    }
-  }
-  const orig = globalThis.EventSource
-  globalThis.EventSource = FakeSource as unknown as typeof EventSource
-  let n = 0
-  const origFetch = globalThis.fetch
-  globalThis.fetch = (async () => {
-    n++
-    return new Response(JSON.stringify({ bot_name: 'b', status: 'idle', messages: [], has_more: false }), { status: 200 })
-  }) as typeof fetch
+  const timers = installManualClockTimers()
   try {
-    await mount(<ShareApp client={httpShareClient('tok_0123456789abcdef')} />)
-    await settle(20)
-    await act(async () => {
-      sources[0].emitError()
-    })
-    await settle(POLL_WAIT)
-    const mid = n
-    assert.ok(mid > 2, 'error 之後要有輪詢')
-    await act(async () => {
-      sources[0].emitOpen()
-    })
-    await settle(50)
-    // #1093：斷過又連上補抓一次（訊息＋檔案各一發）。
-    const afterUp = n
-    assert.equal(afterUp, mid + 2, 'SSE 重新連上補抓一次訊息與檔案')
-    await settle(POLL_WAIT)
-    assert.equal(n, afterUp, 'SSE 恢復後停止輪詢')
+    const sources: { emitOpen: () => void; emitError: () => void }[] = []
+    class FakeSource {
+      readyState = 0
+      onerror: (() => void) | null = null
+      onopen: (() => void) | null = null
+      constructor(_url: string) {
+        sources.push(this)
+      }
+      addEventListener() {}
+      close() {}
+      emitOpen() {
+        this.readyState = 1
+        this.onopen?.()
+      }
+      emitError() {
+        this.readyState = 0
+        this.onerror?.()
+      }
+    }
+    const orig = globalThis.EventSource
+    globalThis.EventSource = FakeSource as unknown as typeof EventSource
+    let n = 0
+    const origFetch = globalThis.fetch
+    globalThis.fetch = (async () => {
+      n++
+      return new Response(JSON.stringify({ bot_name: 'b', status: 'idle', messages: [], has_more: false }), { status: 200 })
+    }) as typeof fetch
+    try {
+      await mount(<ShareApp client={httpShareClient('tok_0123456789abcdef')} />)
+      await act(async () => timers.clock.advance(20))
+      await act(async () => {
+        sources[0].emitError()
+      })
+      await act(async () => timers.clock.advance(POLL_WAIT))
+      const mid = n
+      assert.ok(mid > 2, 'error 之後要有輪詢')
+      await act(async () => {
+        sources[0].emitOpen()
+      })
+      await act(async () => timers.clock.advance(50))
+      // #1093：斷過又連上補抓一次（訊息＋檔案各一發）。
+      const afterUp = n
+      assert.equal(afterUp, mid + 2, 'SSE 重新連上補抓一次訊息與檔案')
+      await act(async () => timers.clock.advance(POLL_WAIT))
+      assert.equal(n, afterUp, 'SSE 恢復後停止輪詢')
+    } finally {
+      globalThis.EventSource = orig
+      globalThis.fetch = origFetch
+    }
   } finally {
-    globalThis.EventSource = orig
-    globalThis.fetch = origFetch
+    timers.restore()
   }
 })
 
@@ -887,26 +897,31 @@ test('resync 快照先完成時，較舊的訊息請求不能合回已移除的�
 })
 
 test('assistant 回覆後才出現的檔案會在短暫背景輪詢中顯示', { timeout: 15_000 }, async () => {
-  let ev!: ShareEvents
-  let fileCalls = 0
-  const client: ShareClient = {
-    ...clientWith(async () => page([]), (events) => {
-      ev = events
-      return () => {}
-    }),
-    async files() {
-      fileCalls++
-      return fileCalls >= 3 ? [{ name: 'late.txt', size: 4, modified_at: null, version: null }] : []
-    },
+  const timers = installManualClockTimers()
+  try {
+    let ev!: ShareEvents
+    let fileCalls = 0
+    const client: ShareClient = {
+      ...clientWith(async () => page([]), (events) => {
+        ev = events
+        return () => {}
+      }),
+      async files() {
+        fileCalls++
+        return fileCalls >= 3 ? [{ name: 'late.txt', size: 4, modified_at: null, version: null }] : []
+      },
+    }
+    await mount(<ShareApp client={client} />)
+    await act(async () => timers.clock.advance(50))
+    await act(async () => ev.onMessage(msgAt('answer', 'assistant', 1)))
+    await act(async () => timers.clock.advance(50))
+    assert.equal(fileCalls, 2, '開頁與 assistant 事件各抓一次')
+    await act(async () => timers.clock.advance(POLL_WAIT + 300))
+    assert.equal(fileCalls, 3, 'assistant 回覆後短暫重抓檔案清單')
+    assert.equal(document.querySelector('.sh-file-name')?.textContent, 'late.txt', '不用新訊息或手動整理也會顯示晚到的檔案')
+  } finally {
+    timers.restore()
   }
-  await mount(<ShareApp client={client} />)
-  await settle(50)
-  await act(async () => ev.onMessage(msgAt('answer', 'assistant', 1)))
-  await settle(50)
-  assert.equal(fileCalls, 2, '開頁與 assistant 事件各抓一次')
-  await settle(POLL_WAIT + 300)
-  assert.equal(fileCalls, 3, 'assistant 回覆後短暫重抓檔案清單')
-  assert.equal(document.querySelector('.sh-file-name')?.textContent, 'late.txt', '不用新訊息或手動整理也會顯示晚到的檔案')
 })
 
 test('檔案清單重抓重疊時只採用最新開始的回應', async () => {
@@ -968,75 +983,90 @@ test('分享頁元件卸載後會取消還在等候的圖片下載', async () =>
 })
 
 test('第一次載入失敗而 SSE 連著：自己重試，不會停在「載入中…」', { timeout: 20_000 }, async () => {
-  let calls = 0
-  const client = clientWith(
-    async () => {
-      calls++
-      if (calls === 1) throw new ShareHttpError(503, 5)
-      return page([msgAt('a1', 'assistant', 2)])
-    },
-    (e) => {
-      e.onUp?.()
-      return () => {}
-    },
-  )
-  await mount(<ShareApp client={client} />)
-  await settle(50)
-  assert.match(document.querySelector('.sh-net')!.textContent!, /連不上/)
-  assert.match(document.querySelector('.sh-list')!.textContent!, /載入中…/)
-  await settle(POLL_WAIT)
-  assert.equal(document.querySelectorAll('.sh-msg').length, 1)
-  assert.equal(document.querySelector('.sh-net'), null)
-  assert.doesNotMatch(document.querySelector('.sh-list')!.textContent!, /載入中…/)
-  assert.equal(calls, 2)
-  await settle(POLL_WAIT)
-  assert.equal(calls, 2, '成功後不再打')
+  const timers = installManualClockTimers()
+  try {
+    let calls = 0
+    const client = clientWith(
+      async () => {
+        calls++
+        if (calls === 1) throw new ShareHttpError(503, 5)
+        return page([msgAt('a1', 'assistant', 2)])
+      },
+      (e) => {
+        e.onUp?.()
+        return () => {}
+      },
+    )
+    await mount(<ShareApp client={client} />)
+    await act(async () => timers.clock.advance(50))
+    assert.match(document.querySelector('.sh-net')!.textContent!, /連不上/)
+    assert.match(document.querySelector('.sh-list')!.textContent!, /載入中…/)
+    await act(async () => timers.clock.advance(POLL_WAIT))
+    assert.equal(document.querySelectorAll('.sh-msg').length, 1)
+    assert.equal(document.querySelector('.sh-net'), null)
+    assert.doesNotMatch(document.querySelector('.sh-list')!.textContent!, /載入中…/)
+    assert.equal(calls, 2)
+    await act(async () => timers.clock.advance(POLL_WAIT))
+    assert.equal(calls, 2, '成功後不再打')
+  } finally {
+    timers.restore()
+  }
 })
 
 test('resync 的重抓失敗：重試成功後仍以重抓結果取代清單', { timeout: 20_000 }, async () => {
-  let calls = 0
-  let ev!: ShareEvents
-  const client = clientWith(
-    async () => {
-      calls++
-      if (calls === 1) return page([msgAt('a', 'user', 1), msgAt('b', 'assistant', 2)])
-      if (calls === 2) throw new ShareHttpError(503, 5)
-      return page([msgAt('a', 'user', 1)])
-    },
-    (e) => {
-      ev = e
-      return () => {}
-    },
-  )
-  await mount(<ShareApp client={client} />)
-  await settle(100)
-  assert.equal(document.querySelectorAll('.sh-msg').length, 2)
-  await act(async () => {
-    ev.onResync?.()
-  })
-  await settle(50)
-  assert.equal(document.querySelectorAll('.sh-msg').length, 2, '重抓失敗前清單不能被丟掉')
-  assert.ok(document.querySelector('.sh-net'))
-  await settle(POLL_WAIT)
-  assert.equal(document.querySelectorAll('.sh-msg').length, 1, '重試成功後以重抓結果取代')
-  assert.equal(document.querySelector('.sh-net'), null)
+  const timers = installManualClockTimers()
+  try {
+    let calls = 0
+    let ev!: ShareEvents
+    const client = clientWith(
+      async () => {
+        calls++
+        if (calls === 1) return page([msgAt('a', 'user', 1), msgAt('b', 'assistant', 2)])
+        if (calls === 2) throw new ShareHttpError(503, 5)
+        return page([msgAt('a', 'user', 1)])
+      },
+      (e) => {
+        ev = e
+        return () => {}
+      },
+    )
+    await mount(<ShareApp client={client} />)
+    await act(async () => timers.clock.advance(100))
+    assert.equal(document.querySelectorAll('.sh-msg').length, 2)
+    await act(async () => {
+      ev.onResync?.()
+    })
+    await act(async () => timers.clock.advance(50))
+    assert.equal(document.querySelectorAll('.sh-msg').length, 2, '重抓失敗前清單不能被丟掉')
+    assert.ok(document.querySelector('.sh-net'))
+    await act(async () => timers.clock.advance(POLL_WAIT))
+    assert.equal(document.querySelectorAll('.sh-msg').length, 1, '重試成功後以重抓結果取代')
+    assert.equal(document.querySelector('.sh-net'), null)
+  } finally {
+    timers.restore()
+  }
 })
 
 test('輪詢開著時失敗不另外多排一條重試', { timeout: 20_000 }, async () => {
-  let calls = 0
-  const client = clientWith(
-    async () => {
-      calls++
-      throw new ShareHttpError(503, 5)
-    },
-    (e) => {
-      e.onDown()
-      return () => {}
-    },
-  )
-  await mount(<ShareApp client={client} />)
-  await settle(POLL_WAIT * 2 + 300)
-  assert.ok(calls <= 3, `開頁 1 次＋兩個 interval tick，實際 ${calls}`)
+  const timers = installManualClockTimers()
+  try {
+    let calls = 0
+    const client = clientWith(
+      async () => {
+        calls++
+        throw new ShareHttpError(503, 5)
+      },
+      (e) => {
+        e.onDown()
+        return () => {}
+      },
+    )
+    await mount(<ShareApp client={client} />)
+    await act(async () => timers.clock.advance(POLL_WAIT * 2 + 300))
+    assert.ok(calls <= 3, `開頁 1 次＋兩個 interval tick，實際 ${calls}`)
+  } finally {
+    timers.restore()
+  }
 })
 
 /** #1093：SSE 在背景斷線又連上、回到前景：訊息與檔案各補抓一次（斷線期間的事件不會重播）。 */
@@ -1083,30 +1113,35 @@ function reconnectHarness() {
 }
 
 test('SSE 在背景斷線又連上：連上時補抓一次訊息與檔案', { timeout: 20_000 }, async () => {
-  const h = reconnectHarness()
+  const timers = installManualClockTimers()
   try {
-    await mount(<ShareApp client={httpShareClient('tok_0123456789abcdef')} />)
-    await settle(20)
-    await act(async () => {
-      h.sources[0].emitOpen()
-    })
-    await settle(20)
-    h.setVis('hidden')
-    await act(async () => {
-      h.sources[0].emitError()
-    })
-    const m0 = h.counts.messages
-    const f0 = h.counts.files
-    await settle(POLL_WAIT)
-    assert.equal(h.counts.messages, m0, '背景不輪詢')
-    await act(async () => {
-      h.sources.at(-1)!.emitOpen()
-    })
-    await settle(50)
-    assert.equal(h.counts.messages, m0 + 1)
-    assert.equal(h.counts.files, f0 + 1)
+    const h = reconnectHarness()
+    try {
+      await mount(<ShareApp client={httpShareClient('tok_0123456789abcdef')} />)
+      await act(async () => timers.clock.advance(20))
+      await act(async () => {
+        h.sources[0].emitOpen()
+      })
+      await act(async () => timers.clock.advance(20))
+      h.setVis('hidden')
+      await act(async () => {
+        h.sources[0].emitError()
+      })
+      const m0 = h.counts.messages
+      const f0 = h.counts.files
+      await act(async () => timers.clock.advance(POLL_WAIT))
+      assert.equal(h.counts.messages, m0, '背景不輪詢')
+      await act(async () => {
+        h.sources.at(-1)!.emitOpen()
+      })
+      await act(async () => timers.clock.advance(50))
+      assert.equal(h.counts.messages, m0 + 1)
+      assert.equal(h.counts.files, f0 + 1)
+    } finally {
+      h.restore()
+    }
   } finally {
-    h.restore()
+    timers.restore()
   }
 })
 

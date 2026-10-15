@@ -4,7 +4,8 @@
  */
 import test, { afterEach, before, after } from 'node:test'
 import assert from 'node:assert/strict'
-import { mount, settle, setupDom, teardownDom, unmountAll } from '../testing/domHarness'
+import { act, mount, setupDom, teardownDom, unmountAll } from '../testing/domHarness'
+import { installManualClockTimers } from '../testing/manualClockTimers'
 import { ShareApp } from './ShareApp'
 import type { ShareClient } from './shareApi'
 import { mockShareClient } from './shareMock'
@@ -19,22 +20,27 @@ const POLL_WAIT = 4200
 
 for (const status of [401, 403]) {
   test(`分享入口回 ${status}：畫出「打不開」說明、停止輪詢，不寫「正在重試」`, { timeout: 20_000 }, async () => {
-    let calls = 0
-    const base = mockShareClient(TOKEN)
-    const client: ShareClient = {
-      ...base,
-      messages: async () => {
-        calls++
-        throw new ShareHttpError(status)
-      },
+    const timers = installManualClockTimers()
+    try {
+      let calls = 0
+      const base = mockShareClient(TOKEN)
+      const client: ShareClient = {
+        ...base,
+        messages: async () => {
+          calls++
+          throw new ShareHttpError(status)
+        },
+      }
+      await mount(<ShareApp client={client} />)
+      await act(async () => timers.clock.advance(300))
+      assert.ok(document.querySelector('.sh-gone'), '要有明確的說明畫面')
+      assert.match(document.body.textContent!, /打不開/)
+      assert.equal(document.querySelector('.sh-net'), null, '不能掛著「連不上，正在重試…」')
+      const before = calls
+      await act(async () => timers.clock.advance(POLL_WAIT))
+      assert.equal(calls, before, '打不開就不再輪詢')
+    } finally {
+      timers.restore()
     }
-    await mount(<ShareApp client={client} />)
-    await settle(300)
-    assert.ok(document.querySelector('.sh-gone'), '要有明確的說明畫面')
-    assert.match(document.body.textContent!, /打不開/)
-    assert.equal(document.querySelector('.sh-net'), null, '不能掛著「連不上，正在重試…」')
-    const before = calls
-    await settle(POLL_WAIT)
-    assert.equal(calls, before, '打不開就不再輪詢')
   })
 }

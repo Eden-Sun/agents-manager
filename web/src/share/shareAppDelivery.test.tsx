@@ -5,6 +5,7 @@
  */
 import test, { after, afterEach, before } from 'node:test'
 import assert from 'node:assert/strict'
+import { installManualClockTimers } from '../testing/manualClockTimers'
 import { act, click, mount, settle, setupDom, teardownDom, typeInto, unmountAll } from '../testing/domHarness'
 import { installManualTimers } from '../testing/manualTimers'
 import { ShareApp } from './ShareApp'
@@ -90,28 +91,33 @@ test('delivery=unknown：保留思考中、字已送出，但提示還不確定'
 })
 
 test('用 message_id 當錨點：回覆的 created_at 比手機時鐘早 10 分鐘，輪詢看到仍清掉思考中', { timeout: 20_000 }, async () => {
-  const early = new Date(Date.now() - 10 * 60_000).toISOString()
-  let replied = false
-  await mount(
-    <ShareApp
-      client={client({
-        send: () => ({ delivery: 'sent', messageId: 'u1' }),
-        page: () => ({
-          status: 'idle',
-          messages: replied ? [msg('u1', 'user', early), msg('a1', 'assistant', early)] : [msg('u1', 'user', early)],
-        }),
-        down: true,
-      })}
-    />,
-  )
-  await settle(20)
-  await typeInto(box(), '手機時鐘比 daemon 快')
-  await click(sendBtn())
-  await settle(50)
-  assert.ok(thinking(), '回覆還沒來')
-  replied = true
-  await settle(4400) // 輪詢（POLL_MS 4000）抓到 u1 之後的 assistant
-  assert.equal(thinking(), null, 'u1 之後有 assistant 就清掉，不比 created_at')
+  const timers = installManualClockTimers()
+  try {
+    const early = new Date(Date.now() - 10 * 60_000).toISOString()
+    let replied = false
+    await mount(
+      <ShareApp
+        client={client({
+          send: () => ({ delivery: 'sent', messageId: 'u1' }),
+          page: () => ({
+            status: 'idle',
+            messages: replied ? [msg('u1', 'user', early), msg('a1', 'assistant', early)] : [msg('u1', 'user', early)],
+          }),
+          down: true,
+        })}
+      />,
+    )
+    await act(async () => timers.clock.advance(20))
+    await typeInto(box(), '手機時鐘比 daemon 快')
+    await click(sendBtn())
+    await act(async () => timers.clock.advance(50))
+    assert.ok(thinking(), '回覆還沒來')
+    replied = true
+    await act(async () => timers.clock.advance(4400)) // 輪詢（POLL_MS 4000）抓到 u1 之後的 assistant
+    assert.equal(thinking(), null, 'u1 之後有 assistant 就清掉，不比 created_at')
+  } finally {
+    timers.restore()
+  }
 })
 
 test('90 秒上限：送出成功但永遠沒有 status／回覆，送出鈕恢復並提示', async () => {
