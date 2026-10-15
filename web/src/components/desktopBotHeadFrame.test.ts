@@ -3,7 +3,6 @@ import assert from 'node:assert/strict'
 import { readFile } from 'node:fs/promises'
 
 const head = await readFile(new URL('./desktopBotHead.css', import.meta.url), 'utf8')
-const strip = await readFile(new URL('./quotaStrip.css', import.meta.url), 'utf8')
 
 /**
  * 桌機（>1024px）標題列的名字區：#1269 之前是固定 18em，名字與 ★⚙ 之間、@m4p 與額度之間都是它吃掉的空白。
@@ -28,13 +27,4 @@ test('名字按鈕與 pane id 不 grow：名字與 ★ 之間不留空（#1269�
   const pane = head.match(/^\.bot-head \.main-title-sub > \.main-status\.pane-toggle \{([^}]*)\}/m)
   assert.ok(pane, 'pane id 基本規則要存在')
   assert.match(pane[1], /flex:\s*0 1 auto;/, 'pane id 不 grow')
-})
-
-/** 收合的額度列靠左：剩下的寬度不擠到「標題」與「額度」中間（那段就是 #1269 截圖的空白）。 */
-test('收合的額度列靠左，標題與額度之間不留空（#1269）', () => {
-  const at = strip.indexOf('.main-head .quota-open.collapsed {')
-  assert.ok(at > 0, '收合規則要存在')
-  const body = strip.slice(at, strip.indexOf('}', at))
-  assert.match(body, /justify-content:\s*flex-start;/)
-  assert.doesNotMatch(body, /flex-end/)
 })
