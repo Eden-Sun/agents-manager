@@ -4,7 +4,7 @@ use super::api::{self, CreateIn, RunIn, SpecIn};
 use super::runner;
 use super::store::{self, Occurrence, Schedule};
 use crate::db;
-use crate::lifecycle::LcError;
+use crate::lifecycle::{self, LcError};
 use crate::testing;
 use axum::extract::{Path, State};
 use axum::Json;
@@ -24,6 +24,7 @@ fn daily(bot: &str, prompt: &str) -> CreateIn {
         tz: "UTC".into(),
         spec: SpecIn { mode: "daily".into(), at: None, every_secs: None, time: Some("09:00".into()), weekdays: None },
         notify: "failure".into(),
+        clear_after: false,
     }
 }
 
@@ -43,6 +44,7 @@ async fn schedule(app: &std::sync::Arc<crate::state::App>, project: &str, bot: &
         enabled: 1,
         generation: 1,
         notify: "failure".into(),
+        clear_after: 0,
         create_crid: None,
         create_fp: None,
         created_at: now.clone(),
@@ -184,7 +186,7 @@ async fn disable_does_not_touch_a_turn_that_is_already_in_flight() {
         .await
         .unwrap();
     sqlx::query("UPDATE schedule_occurrences SET status='queued', turn_id=?, conversation_id=? WHERE id=?").bind(&inflight).bind(&conv).bind(&occ).execute(&e.app.db).await.unwrap();
-    let _ = api::patch(State(e.app.clone()), Path(s.id.clone()), Json(api::PatchIn { name: None, prompt: None, bot_id: None, tz: None, spec: None, notify: None, enabled: Some(false) }))
+    let _ = api::patch(State(e.app.clone()), Path(s.id.clone()), Json(api::PatchIn { name: None, prompt: None, bot_id: None, tz: None, spec: None, notify: None, clear_after: None, enabled: Some(false) }))
         .await
         .unwrap();
     assert_eq!(turn_status(&e.app, &inflight).await, "in_flight", "已送出的回合照跑");
@@ -308,4 +310,125 @@ async fn manual_key_absorbed_by_a_scheduled_occurrence_with_no_key_replays_that_
     assert_eq!(run_with(&e.app, &s.id, "m1").await, scheduled, "重放回同一筆");
     assert_eq!(count(&e.app, "SELECT COUNT(*) FROM schedule_occurrences WHERE schedule_id = ?", &s.id).await, 1);
     assert_eq!(turns_for(&e.app, &bot.id).await, 1, "不多排 turn");
+}
+
+fn patch_in() -> api::PatchIn {
+    api::PatchIn { name: None, prompt: None, bot_id: None, tz: None, spec: None, notify: None, clear_after: None, enabled: None }
+}
+
+#[tokio::test]
+async fn clear_after_round_trips_through_create_get_and_patch() {
+    let (e, bot) = setup().await;
+    let pid = e.project_id.clone();
+    let mut input = daily(&bot.id, "一");
+    input.clear_after = true;
+    let created = api::create(State(e.app.clone()), Path(pid.clone()), Json(input)).await.unwrap().0;
+    assert_eq!(created["clear_after"], true, "POST 回應要帶 clear_after");
+    let sid = created["id"].as_str().unwrap().to_string();
+    let got = api::get_one(State(e.app.clone()), Path(sid.clone())).await.unwrap().0;
+    assert_eq!(got["clear_after"], true, "GET 回 true");
+    // 只帶 enabled 的部分更新不碰 clear_after。
+    let stopped = api::patch(State(e.app.clone()), Path(sid.clone()), Json(api::PatchIn { enabled: Some(false), ..patch_in() })).await.unwrap().0;
+    assert_eq!(stopped["clear_after"], true, "沒帶就保留原值");
+    let edited = api::patch(State(e.app.clone()), Path(sid.clone()), Json(api::PatchIn { clear_after: Some(false), ..patch_in() })).await.unwrap().0;
+    assert_eq!(edited["clear_after"], false, "PATCH 改成 false");
+    let got = api::get_one(State(e.app.clone()), Path(sid)).await.unwrap().0;
+    assert_eq!(got["clear_after"], false);
+}
+
+#[tokio::test]
+async fn clear_after_is_part_of_the_create_key_fingerprint() {
+    let (e, bot) = setup().await;
+    let pid = e.project_id.clone();
+    let plain = daily(&bot.id, "一");
+    let legacy = api::create_fingerprint(&plain);
+    assert!(!legacy.contains("clear_after"), "沒勾的 fingerprint 維持升版前的樣子，原樣重送仍回原筆");
+    api::create(State(e.app.clone()), Path(pid.clone()), Json(plain)).await.unwrap();
+    let mut other = daily(&bot.id, "一");
+    other.clear_after = true;
+    let r = api::create(State(e.app.clone()), Path(pid), Json(other)).await;
+    assert!(matches!(r, Err(LcError::Conflict(_))), "同 key 只差 clear_after：要 409，不默默回舊的");
+}
+
+#[test]
+fn only_done_clears_the_bot_conversation() {
+    let t = |status: &str, clear_after: bool| store::Transition {
+        schedule_id: "s".into(),
+        schedule_name: "n".into(),
+        project_id: "p".into(),
+        occurrence_id: "o".into(),
+        status: status.into(),
+        notify: "failure".into(),
+        error: None,
+        bot_id: "b".into(),
+        clear_after,
+    };
+    assert!(runner::should_clear_after(&t("done", true)));
+    assert!(!runner::should_clear_after(&t("done", false)), "沒勾就不清");
+    for status in ["failed", "unknown", "cancelled"] {
+        assert!(!runner::should_clear_after(&t(status, true)), "{status} 留著，讓使用者看得出出了什麼事");
+    }
+}
+
+/// 排一筆已綁定、已完成（completed＋delivery ok）的 occurrence，回傳 settle 出來的終態轉移。
+async fn finished_occurrence(app: &std::sync::Arc<crate::state::App>, s: &Schedule) -> store::Transition {
+    let occ = pending(app, s).await;
+    let conv = db::conversation_id(&app.db, &s.bot_id).await.unwrap();
+    let t = db::ulid();
+    sqlx::query("INSERT INTO turns (id, conversation_id, origin, status, delivery, created_at) VALUES (?,?,'web','completed','ok',?)")
+        .bind(&t)
+        .bind(&conv)
+        .bind(db::now())
+        .execute(&app.db)
+        .await
+        .unwrap();
+    sqlx::query("UPDATE schedule_occurrences SET status='queued', turn_id=?, conversation_id=? WHERE id=?").bind(&t).bind(&conv).bind(&occ).execute(&app.db).await.unwrap();
+    let mut transitions = store::settle_queued(&app.db, &db::now()).await.unwrap();
+    assert_eq!(transitions.len(), 1);
+    transitions.remove(0)
+}
+
+#[tokio::test]
+async fn a_done_clear_after_schedule_opens_a_fresh_conversation_on_a_running_bot() {
+    let (e, bot) = setup().await;
+    let run1 = lifecycle::start_bot(&e.app, &bot.id).await.unwrap();
+    let s = schedule(&e.app, &e.project_id, &bot.id).await;
+    sqlx::query("UPDATE schedules SET clear_after = 1 WHERE id = ?").bind(&s.id).execute(&e.app.db).await.unwrap();
+    let t = finished_occurrence(&e.app, &s).await;
+    assert_eq!(t.status, "done");
+    assert!(runner::should_clear_after(&t));
+    let run2 = runner::clear_bot_after(&e.app, &t.bot_id).await.unwrap().expect("done 且條件成立：要重啟");
+    assert_ne!(run2, run1, "新的 run（新對話）");
+    assert_eq!(db::active_run(&e.app.db, &bot.id).await.unwrap().unwrap().id, run2);
+}
+
+#[tokio::test]
+async fn clear_does_not_start_a_bot_that_is_not_running() {
+    let (e, bot) = setup().await;
+    assert_eq!(runner::clear_bot_after(&e.app, &bot.id).await.unwrap(), None, "沒在跑就不替它啟動");
+    assert!(db::active_run(&e.app.db, &bot.id).await.unwrap().is_none());
+}
+
+#[tokio::test]
+async fn clear_waits_when_the_bot_has_another_queued_turn_or_schedule() {
+    let (e, bot) = setup().await;
+    let run1 = lifecycle::start_bot(&e.app, &bot.id).await.unwrap();
+    let s = schedule(&e.app, &e.project_id, &bot.id).await;
+    // 使用者另外排的回合還在佇列裡：不清（不覆蓋、不撤回別人的）。
+    let conv = db::conversation_id(&e.app.db, &bot.id).await.unwrap();
+    sqlx::query("INSERT INTO turns (id, conversation_id, origin, status, delivery, created_at, awaits_idle) VALUES (?,?,'web','queued','pending',?,1)")
+        .bind(db::ulid())
+        .bind(&conv)
+        .bind(db::now())
+        .execute(&e.app.db)
+        .await
+        .unwrap();
+    assert_eq!(runner::clear_bot_after(&e.app, &bot.id).await.unwrap(), None);
+    assert_eq!(db::active_run(&e.app.db, &bot.id).await.unwrap().unwrap().id, run1, "沒有重啟");
+    // 另一筆排程的 occurrence 還沒結束：也不清。
+    // 使用者那筆撤掉（queued→failed 是合法轉移）；之後只剩排程的未結束 occurrence 擋著。
+    sqlx::query("UPDATE turns SET status = 'failed', delivery = 'failed' WHERE conversation_id = ? AND status = 'queued'").bind(&conv).execute(&e.app.db).await.unwrap();
+    let _other = pending(&e.app, &s).await;
+    assert_eq!(runner::clear_bot_after(&e.app, &bot.id).await.unwrap(), None);
+    assert_eq!(db::active_run(&e.app.db, &bot.id).await.unwrap().unwrap().id, run1);
 }

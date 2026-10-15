@@ -24,6 +24,8 @@ pub struct Schedule {
     pub enabled: i64,
     pub generation: i64,
     pub notify: String,
+    /// 跑完就清空對話（0／1）：這顆排程 done 之後，綁定的 Bot 開新對話。
+    pub clear_after: i64,
     #[serde(skip)]
     pub create_crid: Option<String>,
     #[serde(skip)]
@@ -65,6 +67,10 @@ pub struct Transition {
     pub status: String,
     pub notify: String,
     pub error: Option<String>,
+    /// 綁定的 Bot（done 之後跑「跑完就清空對話」用）。
+    pub bot_id: String,
+    /// 排程勾了「跑完就清空對話」。
+    pub clear_after: bool,
 }
 
 /// 這個終態要不要通知（依排程的 notify 設定）。
@@ -78,8 +84,8 @@ pub fn wants_notice(notify: &str, status: &str) -> bool {
 
 pub async fn insert_schedule_tx(tx: &mut Transaction<'_, Sqlite>, s: &Schedule) -> Result<()> {
     sqlx::query(
-        "INSERT INTO schedules (id, project_id, bot_id, name, prompt, mode, tz, spec_json, next_due, enabled, generation, notify, create_crid, create_fp, created_at, updated_at, deleted_at)
-         VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,NULL)",
+        "INSERT INTO schedules (id, project_id, bot_id, name, prompt, mode, tz, spec_json, next_due, enabled, generation, notify, clear_after, create_crid, create_fp, created_at, updated_at, deleted_at)
+         VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,NULL)",
     )
     .bind(&s.id)
     .bind(&s.project_id)
@@ -93,6 +99,7 @@ pub async fn insert_schedule_tx(tx: &mut Transaction<'_, Sqlite>, s: &Schedule) 
     .bind(s.enabled)
     .bind(s.generation)
     .bind(&s.notify)
+    .bind(s.clear_after)
     .bind(&s.create_crid)
     .bind(&s.create_fp)
     .bind(&s.created_at)
@@ -250,8 +257,8 @@ pub async fn finish_open_tx(tx: &mut Transaction<'_, Sqlite>, occurrence_id: &st
 
 /// 終態同步：queued 的 occurrence 依綁定 turn 的狀態收斂（見檔頭）。回傳這次剛發生的終態轉移（每筆只一次，靠 notified 去重）。
 pub async fn settle_queued(pool: &SqlitePool, now: &str) -> Result<Vec<Transition>> {
-    let rows: Vec<(String, String, String, String, Option<String>, Option<String>, Option<String>)> = sqlx::query_as(
-        "SELECT o.id, o.schedule_id, s.project_id, s.name, o.turn_id, t.status, t.delivery
+    let rows: Vec<(String, String, String, String, Option<String>, Option<String>, Option<String>, String, String, i64)> = sqlx::query_as(
+        "SELECT o.id, o.schedule_id, s.project_id, s.name, o.turn_id, t.status, t.delivery, o.bot_id, s.notify, s.clear_after
            FROM schedule_occurrences o
            JOIN schedules s ON s.id = o.schedule_id
            LEFT JOIN turns t ON t.id = o.turn_id
@@ -260,7 +267,7 @@ pub async fn settle_queued(pool: &SqlitePool, now: &str) -> Result<Vec<Transitio
     .fetch_all(pool)
     .await?;
     let mut out = Vec::new();
-    for (occ_id, schedule_id, project_id, schedule_name, turn_id, turn_status, delivery) in rows {
+    for (occ_id, schedule_id, project_id, schedule_name, turn_id, turn_status, delivery, bot_id, notify, clear_after) in rows {
         let (next, error): (&str, Option<&str>) = match (turn_id.as_deref(), turn_status.as_deref()) {
             (None, _) => ("cancelled", Some("綁定的 turn 已不存在")),
             (Some(_), None) => ("cancelled", Some("綁定的 turn 已不存在")),
@@ -288,7 +295,6 @@ pub async fn settle_queued(pool: &SqlitePool, now: &str) -> Result<Vec<Transitio
         }
         tx.commit().await?;
         if done.rows_affected() == 1 {
-            let notify: String = sqlx::query_scalar("SELECT notify FROM schedules WHERE id = ?").bind(&schedule_id).fetch_one(pool).await?;
             out.push(Transition {
                 schedule_id,
                 schedule_name,
@@ -297,6 +303,8 @@ pub async fn settle_queued(pool: &SqlitePool, now: &str) -> Result<Vec<Transitio
                 status: next.into(),
                 notify,
                 error: error.map(str::to_string),
+                bot_id,
+                clear_after: clear_after == 1,
             });
         }
     }

@@ -223,6 +223,8 @@ CREATE TABLE IF NOT EXISTS schedules (
   tz TEXT NOT NULL, spec_json TEXT NOT NULL,
   next_due TEXT, enabled INTEGER NOT NULL DEFAULT 1 CHECK (enabled IN (0,1)),
   generation INTEGER NOT NULL DEFAULT 1, notify TEXT NOT NULL DEFAULT 'failure',
+  -- 跑完就清空對話（issue #1779）：這顆排程的回合 done 之後，讓綁定的 Bot 開新對話。
+  clear_after INTEGER NOT NULL DEFAULT 0 CHECK (clear_after IN (0,1)),
   -- 建立的冪等 key（同 project 內唯一）與內容 fingerprint：回應遺失後原樣重送，回原筆，不建第二顆。
   create_crid TEXT, create_fp TEXT,
   created_at TEXT NOT NULL, updated_at TEXT NOT NULL, deleted_at TEXT
@@ -443,6 +445,8 @@ pub const SCHEMA_HISTORY: &[(i64, &str)] = &[
     (62, "cf53e353ad0b9965"),
     // issue #1685：使用者、relay、daemon 通知各有自己的 queued 槽，使用者 flush 優先。
     (63, "56fa10c366935e77"),
+    // issue #1779：`schedules.clear_after`（排程跑完就讓 Bot 開新對話，不留記憶、不佔 context）。
+    (64, "18d72ba10ff77a10"),
 ];
 pub const SCHEMA_VERSION: i64 = SCHEMA_HISTORY[SCHEMA_HISTORY.len() - 1].0;
 
@@ -685,6 +689,8 @@ async fn apply_migrations_inner(pool: &SqlitePool, fail_after_spawn_hints_drop: 
         // 兩者之間 daemon 重啟，重播的同一則 hook 沒有 native turn id 可去重，會再開一個外部回合與訊息。回合與這把鑰匙同一個交易寫，
         // 重播先查它（見 `hookrecv::process_for`）。NULL＝不是 hook 收件匣收的（網頁送出的、備援抓的、舊列）。
         ("turns", "source_event_id", "ALTER TABLE turns ADD COLUMN source_event_id TEXT"),
+        // issue #1779：跑完就清空對話（排程勾了 clear_after）。
+        ("schedules", "clear_after", "ALTER TABLE schedules ADD COLUMN clear_after INTEGER NOT NULL DEFAULT 0 CHECK (clear_after IN (0,1))"),
     ] {
         if !has_column(&mut *tx, table, col).await? {
             sqlx::query(ddl).execute(&mut *tx).await.with_context(|| format!("add {table}.{col}"))?;

@@ -7,6 +7,7 @@
 use super::store::{self, Occurrence, Schedule, Transition};
 use super::time::{self, Spec};
 use crate::db;
+use crate::lifecycle;
 use crate::state::App;
 use anyhow::{Context, Result};
 use chrono::{DateTime, SecondsFormat, Utc};
@@ -32,6 +33,9 @@ pub async fn tick(app: &Arc<App>) -> Result<()> {
     }
     for t in store::settle_queued(&pool, &now).await? {
         notify_transition(app, &t).await;
+        if should_clear_after(&t) {
+            spawn_clear_after(app, t.bot_id.clone());
+        }
     }
     for occ in store::open_occurrences(&pool).await? {
         if occ.status != "pending" {
@@ -58,6 +62,49 @@ pub async fn tick(app: &Arc<App>) -> Result<()> {
         }
     }
     Ok(())
+}
+
+/// 這次終態要不要做「跑完就清空對話」：只有 done 且排程勾了（failed／unknown／cancelled 留著，讓使用者看得出出了什麼事）。
+pub(crate) fn should_clear_after(t: &Transition) -> bool {
+    t.clear_after && t.status == "done"
+}
+
+/// 跑完就清空對話：放到背景做，tick 不等它（重啟要拿 bot 鎖，可能要等一陣子）。
+fn spawn_clear_after(app: &Arc<App>, bot_id: String) {
+    let app = app.clone();
+    tokio::spawn(Box::pin(async move {
+        if let Err(e) = clear_bot_after(&app, &bot_id).await {
+            tracing::warn!(bot = %bot_id, error = %e, "clear-after-done restart failed");
+        }
+    }));
+}
+
+/// 排程跑完（done）且勾了「跑完就清空對話」：讓這顆 Bot 開新對話（`StartOpts::default()`，同 `restart?resume=fresh`）。
+/// 條件全成立才做，任一不成立就什麼都不動、回 `None`：Bot 還在跑（沒在跑不替它啟動）、沒有排隊或執行中的回合、
+/// 沒有其他未結束的排程 occurrence、維護窗口沒開。重啟本身在 bot 鎖內再確認一次閒置（`require_idle`），
+/// 不閒置就回錯、不動。回傳新的 run id（真的重啟了）。
+pub(crate) async fn clear_bot_after(app: &Arc<App>, bot_id: &str) -> Result<Option<String>> {
+    let pool = app.db.clone();
+    if db::active_run(&pool, bot_id).await?.is_none() {
+        return Ok(None);
+    }
+    let open: i64 = sqlx::query_scalar(
+        "SELECT (SELECT COUNT(*) FROM turns t JOIN conversations c ON c.id = t.conversation_id
+                  WHERE c.bot_id = ? AND t.status IN ('queued','in_flight'))
+              + (SELECT COUNT(*) FROM schedule_occurrences WHERE bot_id = ? AND status IN ('pending','queued'))",
+    )
+    .bind(bot_id)
+    .bind(bot_id)
+    .fetch_one(&pool)
+    .await?;
+    if open > 0 || !matches!(app.window_held().await, Ok(None)) {
+        return Ok(None);
+    }
+    let opts = lifecycle::StartOpts { require_idle: true, ..Default::default() };
+    // 重啟的 future 很大：裝箱，不放進這個 async fn 的 poll 框（AGENTS.md 的 1 MiB 堆疊守門）。
+    let run = Box::pin(lifecycle::restart_bot_with(app, bot_id, opts)).await.map_err(|e| anyhow::anyhow!("{e:?}"))?;
+    tracing::info!(bot = %bot_id, run = %run, "schedule cleared the bot conversation after done");
+    Ok(Some(run))
 }
 
 /// 終態：一律推 `schedules_changed`（只帶 id，網頁自己重抓）；依 notify 設定另推 `schedule_notice`。
@@ -259,6 +306,8 @@ async fn notify_terminal(app: &Arc<App>, sched: &Schedule, occurrence_id: &str, 
         status: status.into(),
         notify: sched.notify.clone(),
         error: error.map(str::to_string),
+        bot_id: sched.bot_id.clone(),
+        clear_after: sched.clear_after == 1,
     };
     notify_transition(app, &t).await;
 }
