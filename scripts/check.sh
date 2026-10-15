@@ -262,10 +262,10 @@ check_fmt() {
 }
 
 check_clippy() {
-    # 整個 workspace 的 lib／bin（不含 desktop：tauri build script 要 sidecar）。crate 的測試 target 在 daemon 的 #[path] 裡
+    # workspace 的 lib／bin（desktop 要 sidecar；daemon 由下一條 all-targets 驗，避免重跑）。crate 的測試 target 在 daemon 的 #[path] 裡
     # 已由下面那條跑過；直接 `--all-targets` 會讓 am-supervisor 的 lib test 編不過（issue #1077）。範圍擴大後的既有 warning 不在這裡修、不加 -D warnings。
     step "workspace: cargo clippy（lib／bin）"
-    cargo clippy --workspace --exclude agents-manager-desktop --lib --bins --locked
+    cargo clippy --workspace --exclude agents-manager-desktop --exclude agents-managerd --lib --bins --locked
     step "daemon: cargo clippy --all-targets"
     cargo clippy -p agents-managerd --all-targets --locked -- -D warnings
 }
