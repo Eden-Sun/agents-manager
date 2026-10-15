@@ -292,6 +292,23 @@ trap on_exit EXIT
 git checkout -q --detach -f "${sha}"
 git clean -q -fdx -e target -e web/node_modules
 
+# Only a fully tested ancestor can justify skipping a documentation-only descendant. A failed
+# last-sha or another skipped SHA is never promoted to this baseline. Any unreadable input falls
+# back to the full suite, including renames out of a tested path and classifier failures.
+docs_only=0
+full_success="$(cat "${CI_ROOT}/full-success-sha" 2>/dev/null || true)"
+docs_only_since_full_success() {
+    local files parts
+    case "${full_success}" in *[!0-9a-f]*|'') return 1 ;; esac
+    [ "${#full_success}" = 40 ] || return 1
+    git merge-base --is-ancestor "${full_success}" "${sha}" || return 1
+    files="$(git -c core.quotePath=false diff --no-renames --name-only "${full_success}" "${sha}")" || return 1
+    [ -n "${files}" ] || return 1
+    parts="$(printf '%s\n' "${files}" | bash scripts/ci-changed-parts.sh)" || return 1
+    [ -z "${parts}" ]
+}
+if docs_only_since_full_success; then docs_only=1; fi
+
 # 四段各自跑完再彙總：一段紅了（例如只在 Linux 紅的 ops 腳本）也照樣拿得到其他段的結果。
 rc=0
 failed=""
@@ -313,6 +330,7 @@ for candidate in "${AM_REAL_HERDR:-}" "$(type -P herdr 2>/dev/null || true)"; do
     real_herdr="${candidate}"
     break
 done
+if [ "${docs_only}" = 0 ]; then
 for part in ob ops web daemon; do
     prc=0
     part_start=${SECONDS}
@@ -343,6 +361,9 @@ for part in ob ops web daemon; do
         esac
     fi
 done
+else
+    printf '==> [ubuntu-ci] docs-only skip (full success: %s)\n' "${full_success}" >> "${log}"
+fi
 
 finished="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 parts_json="$(printf '"parts":{"ob":%s,"ops":%s,"web":%s,"daemon":%s}' "${ob_secs}" "${ops_secs}" "${web_secs}" "${daemon_secs}")"
@@ -395,7 +416,12 @@ fi
 rm -f -- "${irc_file}"
 if [ "${rc}" = 0 ]; then
     state=success
-    desc="ob+ops+web+daemon 全綠"
+    if [ "${docs_only}" = 1 ]; then
+        desc="docs-only skip（沿用完整成功基準 ${full_success:0:8}）"
+    else
+        desc="ob+ops+web+daemon 全綠"
+        echo "${sha}" > "${CI_ROOT}/full-success-sha"
+    fi
 else
     state=failure
     # 紅的段落＋第一個紅段死掉前的最後一個 step 標題；GitHub description 上限 140 字。
