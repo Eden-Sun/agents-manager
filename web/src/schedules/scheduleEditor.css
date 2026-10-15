@@ -1,0 +1,28 @@
+/* 排程編輯器的任務內容框：最少 8 行，超過才長高，最多 60vh 再捲動；可手動拉高。 */
+
+.schedule-editor .schedule-prompt {
+  font-family: var(--font-mono);
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  resize: vertical;
+  max-height: 60vh;
+  overflow-y: auto;
+}
+
+.schedule-editor .schedule-prompt-hint {
+  font-weight: normal;
+  opacity: 0.7;
+  margin-left: 6px;
+}
+
+.schedule-editor .schedule-clear-after {
+  align-items: flex-start;
+}
+
+.schedule-editor .schedule-recent {
+  margin-top: 4px;
+}
+
+.schedule-editor .schedule-recent > summary {
+  cursor: pointer;
+}

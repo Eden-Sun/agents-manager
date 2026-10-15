@@ -6,7 +6,7 @@
  */
 import test, { after, afterEach, before, beforeEach } from 'node:test'
 import assert from 'node:assert/strict'
-import { act, click, fakeApi, mount, settle, setupDom, teardownDom, typeInto, unmountAll } from '../testing/domHarness'
+import { act, click, fakeApi, keydown, mount, settle, setupDom, teardownDom, typeInto, unmountAll } from '../testing/domHarness'
 import { useStore } from '../store/store'
 import { Sidebar } from '../components/Sidebar'
 
@@ -422,4 +422,142 @@ test('手動執行：POST 已收下、詳情 GET 503 → 再按用同一個 key�
   } finally {
     globalThis.fetch = realFetch
   }
+})
+
+const scheduleRow = (over: Record<string, unknown> = {}) => ({
+  id: 's1', project_id: 'p1', bot_id: 'b1', name: '每日摘要', prompt: '請整理今天的進度', mode: 'daily', tz: 'UTC', spec: { mode: 'daily', time: '09:00' },
+  next_due: '2030-01-01T00:00:00.000Z', enabled: true, generation: 1, notify: 'failure', clear_after: false, created_at: '', updated_at: '', open: null, ...over,
+})
+
+test('編輯器：任務內容在名稱之後、Bot 選單之前，textarea 至少 8 行', async () => {
+  fakeApi(() => ({ schedules: [] }))
+  await mount(<Sidebar />)
+  await settle()
+  await click(addButton('proj-p1'))
+  await click(menuItem('新增排程'))
+  await settle()
+  const dialog = dialogs().find((d) => d.textContent?.includes('新增排程'))!
+  const name = dialog.querySelector<HTMLInputElement>('input')!
+  const prompt = dialog.querySelector<HTMLTextAreaElement>('textarea')!
+  const bot = dialog.querySelector<HTMLSelectElement>('select')!
+  const follows = Node.DOCUMENT_POSITION_FOLLOWING
+  assert.ok(name.compareDocumentPosition(prompt) & follows, '任務內容要在名稱之後')
+  assert.ok(prompt.compareDocumentPosition(bot) & follows, '任務內容要在 Bot 選單之前')
+  assert.equal(prompt.getAttribute('rows'), '8', '任務內容框最少 8 行')
+  assert.match(dialog.textContent ?? '', /⌘\/Ctrl\+Enter 儲存/, 'label 旁要有快捷鍵提示')
+})
+
+test('編輯器：最近執行收在預設收合的 <details> 裡，放在表單最下方', async () => {
+  const recent = [{ id: 'o1', schedule_id: 's1', source: 'scheduled', scheduled_for: '2030-01-01T00:00:00.000Z', generation: 1, bot_id: 'b1', prompt: 'x', status: 'done', waiting_reason: null, merged_count: 0, conversation_id: null, turn_id: null, error: null, created_at: '', updated_at: '' }]
+  fakeApi((req) => {
+    if (req.method === 'GET' && req.path.endsWith('/projects/p1/schedules')) return { schedules: [scheduleRow()] }
+    if (req.method === 'GET' && req.path.endsWith('/schedules/s1')) return { ...scheduleRow(), recent }
+    return undefined
+  })
+  await mount(<Sidebar />)
+  await settle()
+  await click(document.querySelector<HTMLButtonElement>('.project-schedule-row')!)
+  await settle()
+  const dialog = dialogs().find((d) => d.textContent?.includes('排程'))!
+  const details = dialog.querySelector<HTMLDetailsElement>('details.schedule-recent')!
+  assert.ok(details, '最近執行要在 details 裡')
+  assert.equal(details.open, false, '預設收合')
+  assert.match(details.querySelector('summary')!.textContent ?? '', /最近執行（1）/)
+  assert.ok(details.querySelector('ul[aria-label="最近執行"]'), '列表還在 details 內')
+  assert.equal(dialog.querySelector('.schedule-status ul[aria-label="最近執行"]'), null, '頂部不再放列表')
+  const form = dialog.querySelector('.schedule-editor')!
+  assert.equal(form.lastElementChild, details, 'details 是表單最後一個區塊')
+})
+
+test('編輯器：Ctrl+Enter（⌘+Enter）＝儲存；單按 Enter 只是換行', async () => {
+  const requests = fakeApi((req) => {
+    if (req.method === 'GET' && req.path.endsWith('/projects/p1/schedules')) return { schedules: [scheduleRow()] }
+    if (req.method === 'GET' && req.path.endsWith('/schedules/s1')) return { ...scheduleRow(), recent: [] }
+    if (req.method === 'PATCH') return scheduleRow({ prompt: (req.body as { prompt: string }).prompt })
+    return undefined
+  })
+  await mount(<Sidebar />)
+  await settle()
+  await click(document.querySelector<HTMLButtonElement>('.project-schedule-row')!)
+  await settle()
+  const dialog = dialogs().find((d) => d.textContent?.includes('排程'))!
+  const prompt = dialog.querySelector<HTMLTextAreaElement>('textarea')!
+  await typeInto(prompt, '第一行\n第二行')
+  await keydown(prompt, 'Enter')
+  await settle()
+  assert.equal(requests.filter((r) => r.method === 'PATCH').length, 0, '單按 Enter 不儲存')
+  await keydown(prompt, 'Enter', { ctrlKey: true })
+  await settle()
+  await keydown(prompt, 'Enter', { metaKey: true })
+  await settle()
+  const patches = requests.filter((r) => r.method === 'PATCH')
+  assert.ok(patches.length >= 1, 'Ctrl+Enter 要送出儲存')
+  assert.equal((patches[0].body as { prompt: string }).prompt, '第一行\n第二行', '送的是任務內容')
+})
+
+test('編輯器：Ctrl+Enter 在輸入法選字中不儲存', async () => {
+  const requests = fakeApi((req) => {
+    if (req.method === 'GET' && req.path.endsWith('/projects/p1/schedules')) return { schedules: [scheduleRow()] }
+    if (req.method === 'GET' && req.path.endsWith('/schedules/s1')) return { ...scheduleRow(), recent: [] }
+    return undefined
+  })
+  await mount(<Sidebar />)
+  await settle()
+  await click(document.querySelector<HTMLButtonElement>('.project-schedule-row')!)
+  await settle()
+  const dialog = dialogs().find((d) => d.textContent?.includes('排程'))!
+  const prompt = dialog.querySelector<HTMLTextAreaElement>('textarea')!
+  // 選字中的 Ctrl+Enter：isComposing 為真，不能當成儲存。
+  const composing = new KeyboardEvent('keydown', { key: 'Enter', ctrlKey: true, bubbles: true, cancelable: true })
+  Object.defineProperty(composing, 'isComposing', { value: true })
+  await act(async () => {
+    prompt.dispatchEvent(composing)
+  })
+  await settle()
+  assert.equal(requests.filter((r) => r.method === 'PATCH').length, 0)
+})
+
+test('「跑完就清空對話」勾選：建立送出 clear_after:true；編輯時可改、GET 回的值會勾上', async () => {
+  const requests = fakeApi((req) => {
+    if (req.method === 'GET' && req.path.endsWith('/projects/p1/schedules')) return { schedules: [] }
+    if (req.method === 'POST') return scheduleRow({ clear_after: true })
+    return undefined
+  })
+  await mount(<Sidebar />)
+  await settle()
+  await click(addButton('proj-p1'))
+  await click(menuItem('新增排程'))
+  await settle()
+  const dialog = dialogs().find((d) => d.textContent?.includes('新增排程'))!
+  assert.match(dialog.textContent ?? '', /建議搭配專用 Bot/, '勾選框下要有說明')
+  await typeInto(dialog.querySelector<HTMLInputElement>('input')!, '每日摘要')
+  await typeInto(dialog.querySelector<HTMLTextAreaElement>('textarea')!, '請整理今天的進度')
+  const check = dialog.querySelector<HTMLInputElement>('input[type="checkbox"]')!
+  assert.equal(check.checked, false, '預設不勾')
+  await act(async () => check.click())
+  await click([...dialog.querySelectorAll<HTMLButtonElement>('button')].find((b) => b.textContent?.trim() === '建立排程')!)
+  await settle()
+  const post = requests.find((r) => r.method === 'POST')!
+  assert.equal((post.body as { clear_after: boolean }).clear_after, true, '建立要送 clear_after:true')
+
+  // 編輯既有排程：GET 回 true → 勾選框是勾的；取消勾選後 PATCH 送 false。
+  await unmountAll()
+  const editRequests = fakeApi((req) => {
+    if (req.method === 'GET' && req.path.endsWith('/projects/p1/schedules')) return { schedules: [scheduleRow({ clear_after: true })] }
+    if (req.method === 'GET' && req.path.endsWith('/schedules/s1')) return { ...scheduleRow({ clear_after: true }), recent: [] }
+    if (req.method === 'PATCH') return scheduleRow({ clear_after: false })
+    return undefined
+  })
+  await mount(<Sidebar />)
+  await settle()
+  await click(document.querySelector<HTMLButtonElement>('.project-schedule-row')!)
+  await settle()
+  const edit = dialogs().find((d) => d.textContent?.includes('排程'))!
+  const editCheck = edit.querySelector<HTMLInputElement>('input[type="checkbox"]')!
+  assert.equal(editCheck.checked, true, '編輯時要反映 clear_after')
+  await act(async () => editCheck.click())
+  await click([...edit.querySelectorAll<HTMLButtonElement>('button')].find((b) => b.textContent?.trim() === '儲存')!)
+  await settle()
+  const patch = editRequests.find((r) => r.method === 'PATCH')!
+  assert.equal((patch.body as { clear_after: boolean }).clear_after, false)
 })
