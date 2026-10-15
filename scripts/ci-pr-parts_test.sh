@@ -19,15 +19,16 @@ export CI_EVENT=pull_request CI_BASE_STATUS="$tmp/status.json"
 printf '{"sha":"%s","statuses":[{"context":"ubuntu-ci","state":"success","description":"ob+ops+web+daemon 全綠"}]}' "$CI_BASE" > "$CI_BASE_STATUS"
 all=$'ob=true\nops=true\nweb=true\ndaemon=true\nlint=true'
 run() { (cd "$tmp" && PATH="${AM_CANARY_DIR:+$AM_CANARY_DIR:}$tmp/bin:$PATH" python3 -B "$repo/scripts/ci-pr-parts.py"); }
-check() { local want="$1" actual; export CI_TEST_PATHS="$2"; actual=$(run); [ "$actual" = "$want" ] || { echo "FAIL: $2 → $actual"; exit 1; }; }
+check() { local want="$1" actual; want="$want"$'\nops_base='"${3:-}"; export CI_TEST_PATHS="$2"; actual=$(run); [ "$actual" = "$want" ] || { echo "FAIL: $2 → $actual"; exit 1; }; }
 check $'ob=false\nops=false\nweb=false\ndaemon=false\nlint=false' docs/readme.md
 check $'ob=false\nops=false\nweb=true\ndaemon=false\nlint=false' web/src/x.ts
 check $'ob=false\nops=false\nweb=false\ndaemon=true\nlint=true' crates/am-share/src/share/store.rs
-check $'ob=false\nops=true\nweb=false\ndaemon=false\nlint=false' scripts/ops/outbox-gc.sh
-check $'ob=true\nops=true\nweb=false\ndaemon=false\nlint=false' scripts/chatgpt-consult.sh
+check $'ob=false\nops=true\nweb=false\ndaemon=false\nlint=false' scripts/ops/outbox-gc.sh "$CI_BASE"
+check $'ob=true\nops=true\nweb=false\ndaemon=false\nlint=false' scripts/chatgpt-consult.sh "$CI_BASE"
 check $'ob=false\nops=false\nweb=true\ndaemon=true\nlint=true' $'web/src/x.ts\ncrates/am-share/src/share/store.rs'
 check "$all" unknown-input
-CI_EVENT=schedule check "$all" docs/readme.md
+CI_EVENT=schedule check "$all" scripts/ops/outbox-gc.sh
+CI_EVENT=workflow_dispatch check "$all" scripts/ops/outbox-gc.sh
 CI_TEST_ANCESTOR_RC=1 check "$all" docs/readme.md
 CI_BASE=invalid check "$all" docs/readme.md
 printf '{"sha":"%s","statuses":[{"context":"ubuntu-ci","state":"failure"}]}' "$CI_BASE" > "$CI_BASE_STATUS"
@@ -42,6 +43,7 @@ printf '{"sha":"%s","statuses":[{"context":"ubuntu-ci","state":"success","descri
 check "$all" docs/readme.md
 printf '{"sha":"3333333333333333333333333333333333333333","statuses":[{"context":"ubuntu-ci","state":"success","description":"ob+ops+web+daemon 全綠"}]}' > "$CI_BASE_STATUS"
 check $'ob=false\nops=false\nweb=false\ndaemon=false\nlint=false' docs/readme.md
+check $'ob=false\nops=true\nweb=false\ndaemon=false\nlint=false' scripts/ops/outbox-gc.sh 3333333333333333333333333333333333333333
 printf '#!/bin/bash\nexit 1\n' > "$tmp/scripts/ci-changed-parts.sh"
 check "$all" docs/readme.md
 # Required jobs remain present with stable names and an explicit classification failure gate.
@@ -54,6 +56,11 @@ for job in ('web', 'daemon'):
     block = re.split(r'\n  [a-z_]+:\n', text.split('\n  ' + job + ':\n', 1)[1], maxsplit=1)[0]
     assert 'if: ${{ always() }}' in block
     assert "needs.parts.result != 'success'" in block
+ops = text.split('\n  ob:\n', 1)[1].split('\n  web:\n', 1)[0]
+assert 'fetch-depth: 0' in ops
+assert 'scripts/check.sh ops "$CI_OPS_BASE" "$CI_OPS_HEAD"' in ops
+assert 'CI_OPS_BASE: ${{ needs.parts.outputs.ops_base }}' in ops
+assert 'CI_OPS_HEAD: ${{ github.event.pull_request.head.sha }}' in ops
 assert 'workflow_dispatch:' in text and 'schedule:' in text
 PY
 echo 'ci-pr-parts: docs/scoped/full selection and conservative fallbacks passed'

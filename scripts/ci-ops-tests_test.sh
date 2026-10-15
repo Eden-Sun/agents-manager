@@ -59,4 +59,26 @@ if printf '%s\n' "$selected" | grep -Eq 'unrelated-suite|agm-suite'; then echo '
 full=$(run_changed scripts/check.sh)
 printf '%s\n' "$full" | grep -q unrelated-suite
 printf '%s\n' "$full" | grep -q agm-suite
+# PR range dispatch must use the full-success baseline, keep guards, and fail open to all
+# tests when git cannot compare. No args (Ubuntu/daily/manual) must remain full.
+cat > "$fx/bin/git" <<'SH'
+#!/bin/bash
+case "$*" in
+ '-c core.quotePath=false diff --no-renames --name-only full-success pr-head') echo scripts/ops/outbox-gc.sh ;;
+ '-c core.quotePath=false diff --no-renames --name-only full-success mixed-head') printf '%s\n' scripts/ops/outbox-gc.sh scripts/ops/unknown.sh ;;
+ *) exit 90 ;;
+esac
+SH
+run_ops() { (cd "$fx" && PATH="$fx/bin:$PATH" bash scripts/check.sh ops "$@"); }
+selected=$(run_ops full-success pr-head)
+printf '%s\n' "$selected" | grep -q selected-outbox
+for guard in rust_test_mount db_filename test_discovery; do
+    printf '%s\n' "$selected" | grep -q "guard-$guard"
+done
+if printf '%s\n' "$selected" | grep -Eq 'unrelated-suite|agm-suite'; then echo 'FAIL: PR ran unrelated suite'; exit 1; fi
+for args in 'full-success missing-head' 'full-success mixed-head' ''; do
+    full=$(run_ops $args)
+    printf '%s\n' "$full" | grep -q unrelated-suite
+    printf '%s\n' "$full" | grep -q agm-suite
+done
 echo 'ci-ops-tests: selection, aliases, fallbacks and real check.sh dispatch passed'

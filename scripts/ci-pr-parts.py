@@ -1,5 +1,7 @@
 #!/usr/bin/env python3
 """Select PR jobs using the same path classifier as ubuntu-ci; uncertainty runs everything."""
+from __future__ import annotations
+
 import json
 import os
 import re
@@ -10,7 +12,7 @@ from pathlib import Path
 PARTS = ("ob", "ops", "web", "daemon", "lint")
 
 
-def choose(event: str, base: str, head: str, baseline: dict) -> set[str]:
+def choose(event: str, base: str, head: str, baseline: dict, scope: dict | None = None) -> set[str]:
     if event != "pull_request":
         return set(PARTS)
     # Only inherit a completed full main run, never a failed/pending/docs-only status.
@@ -28,6 +30,8 @@ def choose(event: str, base: str, head: str, baseline: dict) -> set[str]:
     selected = set(result.stdout.split())
     if not selected <= set(PARTS) or "full" in selected:
         return set(PARTS)
+    if scope is not None and "ops" in selected:
+        scope["ops_base"] = full
     if "daemon" in selected:
         selected.add("lint")
     return selected
@@ -47,9 +51,11 @@ if __name__ == "__main__":
         except (OSError, ValueError, KeyError, TypeError, AttributeError):
             pass
         sys.exit(0)
+    scope = {}
     try:
         status = json.loads(Path(os.environ["CI_BASE_STATUS"]).read_text())
-        parts = choose(os.environ["CI_EVENT"], os.environ.get("CI_BASE", ""), os.environ.get("CI_HEAD", ""), status)
+        parts = choose(os.environ["CI_EVENT"], os.environ.get("CI_BASE", ""), os.environ.get("CI_HEAD", ""), status, scope)
     except (OSError, ValueError, KeyError, TypeError, AttributeError, subprocess.SubprocessError):
         parts = set(PARTS)
     print("\n".join(f"{part}={'true' if part in parts else 'false'}" for part in PARTS))
+    print(f"ops_base={scope.get('ops_base', '')}")

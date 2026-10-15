@@ -5,6 +5,7 @@
 #   scripts/check.sh web        # bun install --frozen-lockfile、tsc、oxlint、bun test、vite build
 #   scripts/check.sh daemon     # cargo test -p agents-managerd（要先有 web/dist）
 #   scripts/check.sh ops        # shell 變數寫法的 lint，加上 scripts/*_test.sh 與 scripts/ops/*_test.sh（shell 腳本的隔離測試，假 agm／假 gh／假 sccache，不碰正式環境）
+#   scripts/check.sh ops <base> <head> # PR：依已驗證基準到 head 的完整差異挑 ops suite；比較失敗就全跑
 #   scripts/check.sh ob         # 沒有被追蹤的 bytecode；OB queue/operator 與瀏覽器契約（隔離，不用登入）
 #   scripts/check.sh macos-local # shell／行程／signal 的原生 macOS 測試（不走 cargo shim）
 #   scripts/check.sh fmt        # cargo fmt --check（只報告，現況不乾淨）
@@ -420,7 +421,19 @@ case "${1:-default}" in
     daemon) check_daemon ;;
     macos-local) check_macos_local ;;
     ob) check_ob ;;
-    ops) check_ops ;;
+    ops)
+        # PR 傳入完整成功基準，不能只比 PR base，否則會漏掉基準之後尚未驗過的 main 改動。
+        if [ -n "${2:-}" ] && [ -n "${3:-}" ]; then
+            if ops_files="$(git -c core.quotePath=false diff --no-renames --name-only "$2" "$3")"; then
+                check_ops "$ops_files"
+            else
+                echo "ops: 無法比較基準，改跑完整測試" >&2
+                check_ops
+            fi
+        else
+            check_ops
+        fi
+        ;;
     fmt) check_fmt ;;
     clippy) check_clippy ;;
     default) check_ob; check_ops; check_web; check_daemon ;;

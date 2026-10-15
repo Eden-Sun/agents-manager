@@ -39,6 +39,7 @@ jobs:
     outputs:
       ob: ${{ steps.parts.outputs.ob }}
       ops: ${{ steps.parts.outputs.ops }}
+      ops_base: ${{ steps.parts.outputs.ops_base }}
       web: ${{ steps.parts.outputs.web }}
       daemon: ${{ steps.parts.outputs.daemon }}
       lint: ${{ steps.parts.outputs.lint }}
@@ -76,6 +77,8 @@ jobs:
     runs-on: macos-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
       - uses: actions/setup-node@v4
         with:
           node-version: 22
@@ -86,7 +89,10 @@ jobs:
           bun-version: 1.3.14
       - run: scripts/check.sh ob
         if: ${{ needs.parts.outputs.ob == 'true' }}
-      - run: scripts/check.sh ops
+      - run: scripts/check.sh ops "$CI_OPS_BASE" "$CI_OPS_HEAD"
+        env:
+          CI_OPS_BASE: ${{ needs.parts.outputs.ops_base }}
+          CI_OPS_HEAD: ${{ github.event.pull_request.head.sha }}
         if: ${{ needs.parts.outputs.ops == 'true' }}
 
   # Required status names remain web/daemon. Even a docs-only PR runs these jobs and reports
