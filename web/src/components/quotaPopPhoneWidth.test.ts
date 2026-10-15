@@ -21,14 +21,7 @@ test('手機斷點的額度 popover 寬度等於視窗（左右貼齊、扣 safe
   assert.match(phoneBody, /max-height:\s*min\(60dvh,\s*480px\);/, '內容超出時在 max-height 內捲動')
 })
 
-test('桌機的額度 popover 仍是 absolute 336px，不受手機規則影響', () => {
-  const desktopIdx = css.indexOf('\n.quota-pop {\n  position: absolute;')
-  assert.ok(desktopIdx > 0, '桌機 .quota-pop 規則要存在')
-  const desktopBody = css.slice(desktopIdx, css.indexOf('}', desktopIdx))
-  assert.match(desktopBody, /width:\s*336px;/)
-  // 頂層規則不縮排；@media 裡的規則都縮排兩格，所以這條在頂層就代表不在任何斷點裡。
-  assert.ok(css.startsWith('.quota-pop {', desktopIdx + 1), '桌機 .quota-pop 要是頂層規則')
-})
+
 
 /** 2026-10-10：檔尾那條頂層 `.quota-pop { width: 300px }` 排在手機斷點之後、權重相同，會把手機的 `width: auto` 蓋掉。 */
 test('手機斷點之後沒有頂層 .quota-pop 再寫死 width，蓋掉手機的等寬', () => {

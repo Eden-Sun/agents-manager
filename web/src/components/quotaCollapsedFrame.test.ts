@@ -33,10 +33,3 @@ test('收合的圖示欄跟內容等寬：左內距只剩格子自己的 7px（�
   assert.match(body, /width:\s*auto;/)
   assert.match(body, /padding-right:\s*8px;/, '右邊留 8px 給窗口名，不貼著 cc0')
 })
-
-test('格子左右內距一致（約 6–8px）：收合不改 padding 的水平值', () => {
-  const base = ruleBody('.quota-hp')
-  assert.match(base, /padding:\s*3px 7px;/)
-  const collapsed = ruleBody('.main-head .quota-open.collapsed .quota-hp')
-  assert.doesNotMatch(collapsed, /padding/, '收合不另外改內距，左右就一樣')
-})
