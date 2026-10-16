@@ -382,6 +382,8 @@ select_parts() {
     local p cp files out tok
     run_parts=""
     if [ "${force_full}" = 1 ]; then select_full periodic; return 0; fi
+    # 舊版沒有待驗狀態，無法證明舊成功基準之後沒有失敗；完成一輪四段結果記錄後才可增量。
+    read_sha_file "${CI_ROOT}/part-outcomes-v1" >/dev/null || { select_full no_outcome_state; return 0; }
     if ! has_pending_parts && docs_only_since_full_success; then mode=docs_only; select_reason=docs_only; return 0; fi
     is_sha "${full_success}" && git merge-base --is-ancestor "${full_success}" "${sha}" 2>/dev/null \
         || { select_full no_full_baseline; return 0; }
@@ -497,6 +499,10 @@ for part in ${PARTS}; do
         esac
     fi
 done
+if [ "${mode}" = full ]; then
+    # 所有段都已留下 pending 或寫入成功基準；中途退出不能提前宣稱升級完成。
+    write_sha_file "${CI_ROOT}/part-outcomes-v1" "${sha}"
+fi
 else
     printf '==> [ubuntu-ci] docs-only skip (full success: %s)\n' "${full_success}" >> "${log}"
     for part in ${PARTS}; do
