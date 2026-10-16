@@ -17,7 +17,7 @@ scripts/check.sh changed
 - 分支不是從 `origin/main` 切出來時，才多帶 base：`scripts/check.sh changed <base>`。
 - daemon 做 `cargo check --all-targets`，再跑**改到的模組自己的測試**（`scripts/ci-daemon-filters.sh` 由路徑挑，例如改 `lifecycle/queue.rs` 跑 `lifecycle::queue::`）。要明講跑哪些：`CHECK_TESTS=<過濾字串> scripts/check.sh changed`；一個測試都不跑：`CHECK_TESTS=none`。
   不要為了「保險」跑整樹 daemon 測試、`scripts/flaky-sweep.sh`，也不要等 GitHub Actions。
-- 整樹測試是另一道、非同步的關卡：Ubuntu 背景的 `ubuntu-ci`（commit status）會對 main HEAD 跑整樹 `scripts/check.sh`，**不在 commit 的 critical path 上**，推完就做下一件事。
+- 整樹測試是另一道、非同步的關卡：Ubuntu 背景的 `ubuntu-ci`（commit status）會依成功基準驗 main HEAD 的受影響部分，預設每 24 小時補整樹 `scripts/check.sh`，**不在 commit 的 critical path 上**，推完就做下一件事。
 
 ## 結果怎麼處理
 
