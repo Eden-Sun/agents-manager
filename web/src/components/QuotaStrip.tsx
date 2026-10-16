@@ -349,14 +349,21 @@ function Bar({
 }
 
 /** 倒數模式的列都不在列內寫倒數，統一在所有窗口下方另起一行（2026-10-16 第三版，方案 B）：
- *  重置時刻彼此相差 ≤ 60 秒就只寫一個時間（`└ 3h05`），否則逐列標窗口名（`└ 7d 3h05 · F 9h`）。 */
+ *  重置時刻彼此相差 ≤ 60 秒的列算同一刻，只寫第一列的窗口名與時間——F 跟 7d 同一刻時 F 不另寫
+ *  （2026-10-16 使用者：「不需要 fable 的餘時間因為與 7d 是一樣的」）。全部同一刻就只寫時間（`└ 3h05`），
+ *  否則 `└ 5h 1h21 · 7d 0h51`。完整對照在 title。 */
 const SHARED_RESET_MS = 60_000
 function resetLineOf(rows: { name: WindowName; back: string; resetsAt: string }[]): { text: string; title: string } | null {
   if (rows.length === 0) return null
-  const ms = rows.map((r) => new Date(r.resetsAt).getTime())
-  const same = Math.max(...ms) - Math.min(...ms) <= SHARED_RESET_MS
-  if (same) return { text: `└ ${rows[0]!.back}`, title: `${rows.map((r) => r.name).join('／')} 還有 ${rows[0]!.back} 重置` }
-  return { text: `└ ${rows.map((r) => `${r.name} ${r.back}`).join(' · ')}`, title: rows.map((r) => `${r.name} 還有 ${r.back} 重置`).join('；') }
+  const groups: { name: WindowName; back: string; at: number }[] = []
+  for (const r of rows) {
+    const at = new Date(r.resetsAt).getTime()
+    if (!groups.some((g) => Math.abs(g.at - at) <= SHARED_RESET_MS)) groups.push({ name: r.name, back: r.back, at })
+  }
+  const title = rows.map((r) => `${r.name} 還有 ${r.back} 重置`).join('；')
+  // 窗口名與時間之間是不換行空白：格子窄時只在「·」換行，不把 `7d` 跟它的時間拆開。
+  if (groups.length === 1) return { text: `└\u00a0${groups[0]!.back}`, title }
+  return { text: `└\u00a0${groups.map((g) => `${g.name}\u00a0${g.back}`).join(' · ')}`, title }
 }
 
 /** `staleAt`：這一桶是沿用上一份讀數時，它自己的觀測時間（#540）；不是沿用就 `null`。 */

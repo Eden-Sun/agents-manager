@@ -34,12 +34,12 @@ function win({ remaining, inMs }: Win) {
   }
 }
 
-async function mountQuota(seven: Win, fable: Win | null = null) {
+async function mountQuota(seven: Win, fable: Win | null = null, five: Win | null = null) {
   resetStoreForTest()
   useStore.setState({
     quota: {
       claude: {
-        five_hour: null,
+        five_hour: five ? win(five) : null,
         seven_day: win(seven),
         fable: fable ? win(fable) : null,
         reset_credits: null,
@@ -103,16 +103,16 @@ test('倒數模式的列：列內沒有倒數文字，只有條和百分比；�
   assert.equal(row.querySelector('.quota-reset-at'), null)
   assert.deepEqual([...row.children].map((c) => (c.classList.contains('quota-bar-wrap') ? 'bar' : c.classList.contains('quota-bar-pct') ? 'pct' : '?')), ['bar', 'pct'])
   assert.equal(cell.querySelectorAll('.quota-reset-at').length, 0)
-  assert.match(line(cell)!.textContent ?? '', /^└ \d+h\d\d$/)
-  assert.ok(!/重置/.test(line(cell)!.textContent ?? ''))
+  assert.match((line(cell)!.textContent ?? '').replace(/\u00a0/g, ' '), /^└ \d+h\d\d$/)
+  assert.ok(!/重置/.test((line(cell)!.textContent ?? '').replace(/\u00a0/g, ' ')))
 })
 
 test('7d 與 F 同一刻重置：底下一行只寫一個時間，不寫「重置」', async () => {
   const cell = await mountQuota({ remaining: 3, inMs: 3 * HOUR_MS }, { remaining: 0, inMs: 3 * HOUR_MS + 30_000 })
   const lines = cell.querySelectorAll('.quota-reset-line')
   assert.equal(lines.length, 1)
-  assert.match(lines[0]!.textContent ?? '', /^└ \d+h\d\d$/)
-  assert.ok(!/重置|7d|F/.test(lines[0]!.textContent ?? ''))
+  assert.match((lines[0]!.textContent ?? '').replace(/\u00a0/g, ' '), /^└ \d+h\d\d$/)
+  assert.ok(!/重置|7d|F/.test((lines[0]!.textContent ?? '').replace(/\u00a0/g, ' ')))
   const rows = cell.querySelectorAll('.quota-bar-row')
   assert.equal(rows.length, 2)
   assert.deepEqual([...rows].map((r) => r.querySelector('.quota-bar-pct')!.textContent), ['3%', '0%'])
@@ -123,7 +123,7 @@ test('7d 與 F 同一刻重置：底下一行只寫一個時間，不寫「重�
 test('7d 與 F 不同一刻重置（差 5 分鐘）：底下一行兩個時間分別標 7d、F', async () => {
   const cell = await mountQuota({ remaining: 3, inMs: 3 * HOUR_MS }, { remaining: 0, inMs: 3 * HOUR_MS + 5 * 60_000 })
   assert.equal(cell.querySelectorAll('.quota-reset-line').length, 1)
-  assert.match(line(cell)!.textContent ?? '', /^└ 7d \d+h\d\d · F \d+h\d\d$/)
+  assert.match((line(cell)!.textContent ?? '').replace(/\u00a0/g, ' '), /^└ 7d \d+h\d\d · F \d+h\d\d$/)
   assert.equal(cell.querySelectorAll('.quota-reset-at').length, 0)
 })
 
@@ -134,7 +134,7 @@ test('沒有任何列在倒數：不出底下那一行', async () => {
 
 test('7d 在倒數、F 還有很多：底下一行只寫 7d 的時間', async () => {
   const cell = await mountQuota({ remaining: 3, inMs: 3 * HOUR_MS }, { remaining: 60, inMs: 3 * HOUR_MS })
-  assert.match(line(cell)!.textContent ?? '', /^└ \d+h\d\d$/)
+  assert.match((line(cell)!.textContent ?? '').replace(/\u00a0/g, ' '), /^└ \d+h\d\d$/)
   assert.equal(cell.querySelectorAll('.quota-reset-line').length, 1)
 })
 
@@ -147,4 +147,16 @@ test('popover 的低額度列用同一種條，不加底下那一行', async () 
   assert.equal(pop.querySelector('.quota-reset-line'), null)
   assert.ok(pop.querySelector('.quota-bar-pct')!.classList.contains('has-unit'), 'popover 的 CSS 會補 %，已帶 % 的不能再補一次')
   assert.equal(pop.querySelector('.quota-bar-zoom'), null)
+})
+
+test('5h 另一刻、7d 與 F 同一刻：F 不另寫時間（2026-10-16 使用者：跟 7d 一樣就不用）', async () => {
+  const cell = await mountQuota(
+    { remaining: 3, inMs: 51 * 60_000 },
+    { remaining: 0, inMs: 51 * 60_000 },
+    { remaining: 0, inMs: 81 * 60_000 },
+  )
+  assert.equal(cell.querySelectorAll('.quota-reset-line').length, 1)
+  assert.match((line(cell)!.textContent ?? '').replace(/\u00a0/g, ' '), /^└ 5h \d+h\d\d · 7d \d+h\d\d$/)
+  assert.doesNotMatch((line(cell)!.textContent ?? '').replace(/\u00a0/g, ' '), /F/)
+  assert.match(line(cell)!.getAttribute('title') ?? '', /F 還有/)
 })
