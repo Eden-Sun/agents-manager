@@ -544,9 +544,10 @@ function Gauge({
         /* 手機風險不能只剩顏色（UI-DECISIONS：百分比始終保留），寫成數字。 */
         <span className="quota-compact">
           {windows.map((w) => {
-            const soon = soonLabel(w.name, w.resetsAt, now)
             // 快回來了就寫倒數（2026-09-14／09-17 使用者）：5h 用完且三小時內；週窗口剩不到 10% 且 24 小時內。
             const back = resetBadge(w.pct, w.resetsAt, now, resetRule(w.name))
+            // 已經寫倒數就別再把窗口名換成剩幾分（同桌機那邊）：手機上會變成「40m 0h40」同一個時間寫兩次（2026-10-16 使用者）。
+            const soon = back ? null : soonLabel(w.name, w.resetsAt, now)
             return (
             <span key={w.name} className={`quota-compact-win ${levelOf(w)}`}>
               <span className={`quota-window-name${soon ? ' soon' : ''}${w.staleAt ? ' carried' : ''}`} title={soon ? `${w.name} 還有 ${soon} 重置` : undefined}>
