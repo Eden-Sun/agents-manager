@@ -595,6 +595,7 @@ class MigrationTests(unittest.TestCase):
                 errors = [err for p in procs for _, err in [p.communicate(30)] if p.returncode]
                 self.assertEqual(errors, [])
                 s = Store(tmp)
+                self.addCleanup(s.db.close)
                 cols = [r[1] for r in s.db.execute("PRAGMA table_info(requests)")]
                 self.assertEqual(cols.count("claim_token"), 1)
                 self.assertEqual(s.get("r")["status"], "running")  # upgrade alone never touches requests
@@ -647,6 +648,23 @@ class CLITests(unittest.TestCase):
                 self.assertEqual(ob.cli(['--data-dir', tmp, 'status']), 0)
             self.assertIn('requests', json.loads(out.getvalue()))
 
+    def test_cli_closes_its_store_so_stderr_stays_json(self):
+        # Python 3.13+ 對沒關的 sqlite 連線在 GC 時往 stderr 印 ResourceWarning；成功與失敗路徑都不能留著連線，
+        # 不然呼叫端解析 JSON 錯誤輸出會被警告字樣打斷（GitHub macOS runner 的 3.15 就是這樣紅的）。
+        opened = []
+        class Tracking(ob.Store):  # 子類別：ob.py 會讀 Store.ROTATE_TURNS 這類類別屬性
+            def __init__(self, *a, **k):
+                super().__init__(*a, **k)
+                opened.append(self)
+        with tempfile.TemporaryDirectory() as tmp, patch.object(ob, 'Store', Tracking):
+            for argv, code in ((['status', '--project-id', 'not-an-id'], 1), (['status', '--project-id', A], 0)):
+                with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
+                    self.assertEqual(ob.cli(['--data-dir', tmp, *argv]), code, argv)
+            self.assertEqual(len(opened), 2)
+            for s in opened:
+                with self.assertRaises(sqlite3.ProgrammingError):
+                    s.db.execute('select 1')
+
     def test_ask_wait_rejects_nan(self):
         # nan 跟任何數比都是 False：舊的範圍檢查放過它，等於 --wait 0 又不報錯。
         with tempfile.TemporaryDirectory() as tmp, patch.object(ob, 'daemon_project', return_value={"id": A, "label": "AM"}), patch.dict(os.environ, {"AM_BOT_ID": "caller"}):
@@ -655,7 +673,8 @@ class CLITests(unittest.TestCase):
                 with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(err):
                     self.assertEqual(ob.cli(['--data-dir', tmp, 'ask', '--request-id', 'w1', '--no-start', '--wait', wait, 'Question']), 1, wait)
                 self.assertIn('--wait', json.loads(err.getvalue())['error'])
-            self.assertEqual(Store(tmp).list(A), [])
+            with Store(tmp) as check:
+                self.assertEqual(check.list(A), [])
             with contextlib.redirect_stdout(io.StringIO()):
                 self.assertEqual(ob.cli(['--data-dir', tmp, 'ask', '--request-id', 'w0', '--no-start', '--wait', '0', 'Question']), 0)
 

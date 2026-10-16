@@ -158,6 +158,15 @@ def main(argv=None):
     args = parser.parse_args(argv)
     os.umask(0o077)
     store = Store(args.data_dir)
+    try:
+        return _run(args, store)
+    finally:
+        # 不關的話，連線留到 GC 才收：Python 3.13+ 會在那一刻對 stderr 印 ResourceWarning，
+        # 混進呼叫端要解析的 JSON 錯誤輸出（GitHub macOS runner 的 3.15 就是這樣紅的）。
+        store.close()
+
+
+def _run(args, store):
     if args.command == "_mcp":
         from ob_operator import mcp_server
         mcp_server(store.root, args.id, args.token)
