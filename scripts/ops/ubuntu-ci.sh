@@ -172,13 +172,16 @@ full_due() {
     # 未來的時間戳（時鐘跳回、檔案寫壞）一律當沒有紀錄：否則 now-latest 為負、定期完整永遠不到期。
     for f in full-success-at full-attempt-at; do
         t="$(cat "${CI_ROOT}/${f}" 2>/dev/null || echo 0)"
-        case "${t}" in *[!0-9]*|'') t=0 ;; esac
+        # 非正規 epoch（08 會被 $(( )) 當八進位而中止、過長會溢位）一律當沒有紀錄；其餘用 10# 強制十進位。
+        case "${t}" in *[!0-9]*|''|0[0-9]*) t=0 ;; esac
+        [ "${#t}" -le 12 ] || t=0
+        t=$((10#${t}))
         [ "${t}" -le "${now}" ] || t=0
         [ "${t}" -le "${latest}" ] || latest="${t}"
     done
     if [ "${latest}" = 0 ] && [ -f "${CI_ROOT}/full-success-sha" ]; then
         latest="$(stat -c %Y "${CI_ROOT}/full-success-sha" 2>/dev/null || echo 0)"
-        case "${latest}" in *[!0-9]*|'') latest=0 ;; esac
+        case "${latest}" in *[!0-9]*|''|0[0-9]*) latest=0 ;; esac
         [ "${latest}" -le "${now}" ] || latest=0
     fi
     [ $((now - latest)) -ge "${FULL_INTERVAL}" ]
@@ -508,7 +511,7 @@ fi
 if [ "${rc}" != 0 ] && { [ "${disk_full}" = 1 ] || { [ -n "${interrupted}" ] && [ "${signal_only}" = 1 ] \
     && ! grep -Eq '^test .* \.\.\. FAILED$|^FAIL - ' "${log}"; }; }; then
     irc_count="$(cat "${irc_file}" 2>/dev/null || echo 0)"
-    case "${irc_count}" in *[!0-9]*|'') irc_count=0 ;; esac
+    case "${irc_count}" in *[!0-9]*|''|0[0-9]*) irc_count=0 ;; esac
     irc_count=$((irc_count + 1))
     if [ "${disk_full}" = 1 ]; then
         reason=disk_full
