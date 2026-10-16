@@ -10,7 +10,7 @@ before(setupDom)
 after(teardownDom)
 afterEach(unmountAll)
 
-test('收合只一行；點一次同時展開通知全文、parent 回覆，再點收起', async () => {
+test('通知收成一行、點開看全文；parent 的回覆一直可見', async () => {
   useStore.setState({ bots: [], turns: {} })
   const msg = notice('t')
   msg.content += '\n' + '原文內容'.repeat(100)
@@ -18,34 +18,29 @@ test('收合只一行；點一次同時展開通知全文、parent 回覆，再�
   const button = document.querySelector<HTMLButtonElement>('.child-notice-toggle')!
   assert.equal(button.getAttribute('aria-expanded'), 'false')
   assert.match(button.textContent!, /↳ child sc1779 回報完成/)
-  assert.equal(document.querySelector('.msg'), null)
+  assert.equal(document.querySelector('.msg.user'), null)
+  assert.match(document.querySelector('.msg.assistant')!.textContent!, /parent 回覆全文/, '收合時 parent 的回報照樣看得到')
   await click(button)
   assert.equal(button.getAttribute('aria-expanded'), 'true')
-  assert.equal(document.querySelectorAll('.msg').length, 2)
   assert.equal(document.querySelector('.msg.user .bubble')!.textContent, msg.content)
-  assert.match(document.querySelector('.msg.assistant')!.textContent!, /parent 回覆全文/)
   assert.equal(document.querySelector('.relay-fold'), null)
   await click(button)
-  assert.equal(document.querySelector('.msg'), null)
+  assert.equal(document.querySelector('.msg.user'), null)
+  assert.ok(document.querySelector('.msg.assistant'))
 })
 
-test('連續通知共一列，使用者自己的訊息與普通回覆始終可見', async () => {
-  const msgs = [notice('t'), message('a', 't', 'assistant'), notice('t2', 'qs1780'), message('a2', 't2', 'assistant'),
+test('相鄰通知共一列，使用者訊息與回覆始終可見', async () => {
+  const msgs = [notice('t'), notice('t2', 'qs1780'), message('a2', 't2', 'assistant', 'parent 的回報'),
     message('own', 'u', 'user', '我自己的提問'), message('answer', 'u', 'assistant', '普通回覆')]
   await mount(<ChildNoticeMessages messages={msgs} renderMessage={(m) => <p data-role={m.role}>{m.content}</p>} />)
   assert.equal(document.querySelectorAll('.child-notice-toggle').length, 1)
   assert.match(document.querySelector('.child-notice-toggle')!.textContent!, /sc1779、qs1780 回報完成（2）/)
   assert.equal(document.querySelector('[data-role="user"]')!.textContent, '我自己的提問')
-  assert.equal(document.querySelector('[data-role="assistant"]')!.textContent, '普通回覆')
+  assert.deepEqual([...document.querySelectorAll('[data-role="assistant"]')].map((e) => e.textContent), ['parent 的回報', '普通回覆'])
 })
 
-test('通知觸發的串流回覆收在同一列；一般串流照舊可見', async () => {
-  await mount(<ChildNoticeMessages messages={[notice('t', 'x', true)]} renderMessage={(m) => <p>{m.content}</p>} liveTurnId="t" liveReply={<p data-live>串流回覆</p>} />)
-  assert.equal(document.querySelector('[data-live]'), null)
-  await click(document.querySelector('.child-notice-toggle')!)
+test('通知觸發的串流回覆也直接可見', async () => {
+  await mount(<ChildNoticeMessages messages={[notice('t', 'x', true)]} renderMessage={(m) => <p>{m.content}</p>} liveReply={<p data-live>串流回覆</p>} />)
   assert.ok(document.querySelector('[data-live]'))
   assert.match(document.querySelector('.child-notice-toggle')!.textContent!, /在等人回答/)
-  await unmountAll()
-  await mount(<ChildNoticeMessages messages={[message('u', 'normal', 'user')]} renderMessage={(m) => <p>{m.content}</p>} liveTurnId="normal" liveReply={<p data-live>普通串流</p>} />)
-  assert.ok(document.querySelector('[data-live]'))
 })

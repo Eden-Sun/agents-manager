@@ -13,10 +13,6 @@ export function childNotice(msg: Message): ChildNotice | null {
   return blocked ? { name: blocked[1], status: 'blocked' } : null
 }
 
-export function isChildNoticeRequestId(id: string | null | undefined): boolean {
-  return !!id && (id.startsWith('child-done:') || id.startsWith('child-blocked:'))
-}
-
 /** A user supplement in the same turn must remain visible, together with its reply. */
 export function childNoticeTurns(messages: readonly Message[]): Set<string> {
   const turns = new Set<string>()
@@ -30,25 +26,21 @@ export function childNoticeTurns(messages: readonly Message[]): Set<string> {
   return turns
 }
 
-export function isChildNoticeTurn(messages: readonly Message[], turnId: string | null, requestId?: string | null): boolean {
-  if (turnId && messages.some((m) => m.turn_id === turnId && m.role === 'user' && !childNotice(m))) return false
-  return isChildNoticeRequestId(requestId) || (turnId !== null && childNoticeTurns(messages).has(turnId))
-}
-
 export type ChildNoticeRow = { kind: 'message'; message: Message } | {
   kind: 'notices'; id: string; messages: Message[]; notices: ChildNotice[]; turnIds: Set<string>
 }
 
-/** Keep order intact: any ordinary message breaks a consecutive run of notice turns. */
+/**
+ * Only the daemon's notice itself folds; the parent's reply to it stays a normal message, because that reply is the
+ * parent reporting to the user (2026-10-16 使用者：w2ER:p6Y「回報完成」收起來後 parent 的回報看不到). Adjacent notices
+ * still share one row; any other message breaks the run so order stays intact.
+ */
 export function groupChildNotices(messages: readonly Message[]): ChildNoticeRow[] {
   const turns = childNoticeTurns(messages)
-  const byTurn = new Map(messages.flatMap((m) => {
-    const notice = childNotice(m)
-    return notice && m.turn_id ? [[m.turn_id, notice] as const] : []
-  }))
   const rows: ChildNoticeRow[] = []
   for (const msg of messages) {
-    if (!msg.turn_id || !turns.has(msg.turn_id) || (msg.role !== 'user' && msg.role !== 'assistant')) {
+    const notice = msg.turn_id && turns.has(msg.turn_id) ? childNotice(msg) : null
+    if (!notice || !msg.turn_id) {
       rows.push({ kind: 'message', message: msg })
       continue
     }
@@ -58,8 +50,7 @@ export function groupChildNotices(messages: readonly Message[]): ChildNoticeRow[
       rows.push(row)
     }
     row.messages.push(msg)
-    const notice = byTurn.get(msg.turn_id)
-    if (notice && !row.turnIds.has(msg.turn_id)) row.notices.push(notice)
+    if (!row.turnIds.has(msg.turn_id)) row.notices.push(notice)
     row.turnIds.add(msg.turn_id)
   }
   return rows

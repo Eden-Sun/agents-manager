@@ -1,4 +1,3 @@
-import { isChildNoticeTurn } from '../lib/childNotice'
 import { receiveCodexReset } from './codexReset'
 import type { TerminalFooterView } from '../lib/codexTerminalFooter'
 /** Single Zustand store: server state from `GET /api/state` + `/ws`, plus UI state. Event flow / resync: SPEC §7.3. */
@@ -3154,7 +3153,6 @@ const resyncTrigger = (() => {
 
 /** 回合完成（訊息與 `turn_updated` 都會觸發，`takeTurnCompletion` 只算一次）；沒在看就記未讀。 */
 function noteTurnDone(set: SetFn, get: GetFn, botId: string, turnId: string) {
-  if (isChildNoticeTurn(get().messages[botId] ?? [], turnId, get().turns[botId]?.[turnId]?.client_request_id)) return
   if (viewingBot(get(), botId) && windowActive()) {
     get().markBotRead(botId)
     return
@@ -3176,7 +3174,6 @@ function noteGroupTurnDone(set: SetFn, get: GetFn, projectId: string, turnId: st
 
 /** 只有群組回合才記到專案（`store/groupUnread.ts`）；要抓訊息確認時非同步記。 */
 function noteGroupCompletion(set: SetFn, get: GetFn, botId: string, turnId: string | null, key: string, turn: Turn | null | undefined) {
-  if (isChildNoticeTurn(get().messages[botId] ?? [], turnId, turn?.client_request_id)) return
   const pid = get().bots.find((b) => b.id === botId)?.project_id
   if (!pid) return
   void confirmGroupTurn(botId, turnId, turn, (id, tid, before) => api.fetchMessages(id, 50, before, { turnId: tid, role: 'user' })).then((yes) => {
