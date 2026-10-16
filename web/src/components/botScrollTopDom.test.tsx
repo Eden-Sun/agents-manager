@@ -6,6 +6,7 @@
 import test, { after, afterEach, before, beforeEach } from 'node:test'
 import assert from 'node:assert/strict'
 import { act, click, fakeApi, mount, settle, setupDom, teardownDom, unmountAll } from '../testing/domHarness'
+import { requestBotToTop } from '../lib/scrollBot'
 import { useStore } from '../store/store'
 import { Sidebar } from './Sidebar'
 import { UnreadChip } from './UnreadChip'
@@ -95,6 +96,42 @@ test('已經選著的主力 bot 再點一次晶片也要捲到頂端（選取沒
     assert.deepEqual(calls.at(-1), { top: 410, behavior: 'smooth' }, JSON.stringify(calls))
   } finally {
     restore()
+  }
+})
+
+test('主力晶片的置頂請求先被處理掉，選取換了的 nearest 捲動也不能打斷置頂（#1786）', async () => {
+  // jsdom／happy-dom 的 scrollIntoView 不會動版面：記下是哪一列被叫到，才看得出 nearest 有沒有跑。
+  const intoView: string[] = []
+  const origIntoView = Element.prototype.scrollIntoView
+  Element.prototype.scrollIntoView = function (this: Element) {
+    intoView.push(this.getAttribute('data-bot-id') ?? '')
+  }
+  try {
+    await mount(<Sidebar />)
+    await settle()
+    await act(async () => {
+      await frame()
+      await frame()
+    })
+    intoView.length = 0 // 掛載時選 a 的 nearest 不算
+    const { calls, restore } = stubLayout()
+    try {
+      // 照 UnreadChip.go()：先 selectBot、再 requestBotToTop，同一個事件裡完成；effect 在這之後才跑。
+      await act(async () => {
+        useStore.getState().selectBot('C')
+        requestBotToTop('C')
+      })
+      await act(async () => {
+        await frame()
+        await frame()
+      })
+      assert.deepEqual(intoView, [], '選取換了的 nearest 不該碰 C 那列')
+      assert.deepEqual(calls.at(-1), { top: 410, behavior: 'smooth' }, JSON.stringify(calls))
+    } finally {
+      restore()
+    }
+  } finally {
+    Element.prototype.scrollIntoView = origIntoView
   }
 })
 
