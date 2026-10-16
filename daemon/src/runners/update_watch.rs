@@ -83,7 +83,7 @@ pub async fn sweep_runs(app: &Arc<App>, runs: anyhow::Result<Vec<db::Run>>) {
     }
     for run in runs.into_iter().filter(|r| r.state == "running") {
         let kind = match db::bot(&app.db, &run.bot_id).await {
-            Ok(Some(b)) if matches!(b.kind.as_str(), "claude" | "codex" | "grok") => b.kind,
+            Ok(Some(b)) if matches!(b.kind.as_str(), "claude" | "codex" | "grok" | "agy") => b.kind,
             _ => continue,
         };
         let Some(pane) = run.pane_id.clone() else { continue };
@@ -91,6 +91,11 @@ pub async fn sweep_runs(app: &Arc<App>, runs: anyhow::Result<Vec<db::Run>>) {
         if kind == "grok" {
             let Ok(read) = client.pane_read(&pane, "visible", 60).await else { continue };
             crate::grok_live::sync_runtime(app, &client, &run.bot_id, &run.id, &pane, Some(&read.text)).await;
+            continue;
+        }
+        if kind == "agy" {
+            let Ok(read) = client.pane_read(&pane, "visible", 60).await else { continue };
+            crate::agy_live::sync_runtime(app, &client, &run.bot_id, &run.id, &pane, &read.text).await;
             continue;
         }
         let Ok(read) = client.pane_read(&pane, "visible", 80).await else { continue };
