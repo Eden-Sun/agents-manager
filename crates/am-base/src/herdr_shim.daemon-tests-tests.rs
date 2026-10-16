@@ -1641,6 +1641,32 @@
         assert!(!std::fs::read_to_string(&log).unwrap_or_default().contains("/relay/spawn/claim"), "遠端不打 curl");
     }
 
+    /// herdr 回 timeout（agent 還沒起好、之後才起來）也要登記：2026-10-16 m4p ro-ocr 開 cifable 就是這樣漏登記。
+    #[test]
+    fn a_timed_out_agent_start_still_spools_a_spawn_claim() {
+        let s = Sandbox::new();
+        let home = s.dir.join("home");
+        let spool = home.join(".config/agents-manager/bots/B-REMOTE/hook-spool.d");
+        std::fs::create_dir_all(spool.parent().unwrap()).unwrap();
+        let home_s = home.to_string_lossy().to_string();
+        let env = [
+            ("HOME", home_s.as_str()),
+            ("AM_AGENT_NAME", "parent"),
+            ("AM_BOT_ID", "B-REMOTE"),
+            ("AM_KIND", "claude"),
+            ("AM_HOOK_TOKEN", "tok"),
+            ("HERDR_PANE_ID", "w1:p0"),
+            ("AM_TEST_HERDR_RC", "1"),
+            ("TMPDIR", s.dir.to_str().unwrap()),
+        ];
+        let (out, err, rc) = s.run_full(&env, &["agent", "start", "kid", "--pane", "w1:p1"]);
+        assert_eq!(rc, 1, "herdr 的失敗碼照樣傳回：{out:?} {err}");
+        let files: Vec<_> = std::fs::read_dir(&spool).unwrap().map(|e| e.unwrap().path()).filter(|p| p.extension().is_some_and(|x| x == "json")).collect();
+        assert_eq!(files.len(), 1, "start 失敗（timeout）也有一則登記：{files:?}");
+        let body: serde_json::Value = serde_json::from_str(std::fs::read_to_string(&files[0]).unwrap().trim()).unwrap();
+        assert_eq!(body["payload"]["pane_id"], "w1:p1");
+    }
+
     /// #664：herdr 還在跑時被中斷，trap 也要 abort。
     #[test]
     fn an_interrupted_agent_start_releases_the_spawn_permit() {

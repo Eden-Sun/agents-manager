@@ -1785,8 +1785,8 @@ parent 算出來是 0，連字尾都取不到，退而用完整 herdr agent name
 **同 tab 但名字對不上時以名字為準**（2026-10-01 使用者：cf-優化在 verify 的 tab 裡開了 `<cf-優化>-memleak`，被掛到 verify 底下，側欄看不到）：同 tab 的候選前綴分數是 0、而別處有一顆的 agent 名正是它的前綴，就掛到那一顆；同 tab 而且名字也對得上的照舊優先，誰的前綴都不是才退回同 tab。順序：spawn hint → 同 tab 且名字對得上 → 名字前綴 → 同 tab。
 
 **shim 登記（`spawn_claims`，issue #1790）**：2026-10-16 m4p 的 fork `ops-交貨` 把自己 `agent rename` 成 `ops` 的前綴，開的三顆子 agent 被名字前綴掛到原 bot `ops` 底下；
-而那條 `agent start` 的 stdout 被 pipe 到只剩 `agent_started`，hook 撈不到 JSON、沒有 hint。所以歸屬不再只靠名字或 bot 把輸出留在 stdout：herdr shim 在 `agent start` **成功後一律**登記「這顆 pane 是 `$AM_BOT_ID` 開的」，
-失敗只印 warn、不讓 start 失敗。本機（有 `AM_PORT`）打 `POST /relay/spawn/claim`（API.md；token 必須是 body `bot_id` 自己的，daemon 核對，不能替別的 bot 登記）；
+而那條 `agent start` 的 stdout 被 pipe 到只剩 `agent_started`，hook 撈不到 JSON、沒有 hint。所以歸屬不再只靠名字或 bot 把輸出留在 stdout：herdr shim 在 `agent start` **之後一律**登記「這顆 pane 是 `$AM_BOT_ID` 開的」——**herdr 回失敗（例如 `timeout`）也登記**：pane 已確認是空的、是這顆 bot 要用的，agent 常常在 timeout 之後才起來被收編（2026-10-16 m4p ro-ocr 開 cifable 漏登記）；沒起來的 pane 關掉後 claim 會被清掉。
+登記失敗只印 warn、不讓 start 失敗。本機（有 `AM_PORT`）打 `POST /relay/spawn/claim`（API.md；token 必須是 body `bot_id` 自己的，daemon 核對，不能替別的 bot 登記）；
 遠端（有 bot 身分、沒有 `AM_PORT`，§11.4）寫一則 `{"hook_event_name":"AmSpawnClaim","pane_id"}` 進自己 bot 的 `hook-spool.d/`（跟 `AmRelayAnnounce` 同一條路，`python3` 寫暫存檔再 rename；沒有 bot 目錄或 python3 就只印 warn），daemon 收 spool 時記成那個 bot 的 claim。
 claim 存在 `spawn_claims((host, pane_id) 唯一, bot_id, created_at)`，**不過期、認領成功也不消耗**：同一個 `(host, pane_id)` 再登記以新的為準（pane id 被回收）；每輪 `reconcile_host` 開頭把已經不在 herdr snapshot 裡的 pane 的 claim 清掉
 （登記不到兩分鐘的、snapshot 一顆 pane 都沒有的都不清）。認領時 claim 與 hint 合成同一張 `pane_id -> bot_id` 表餵進規則 1。
