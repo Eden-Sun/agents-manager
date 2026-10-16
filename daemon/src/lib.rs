@@ -242,6 +242,7 @@ mod app_ports_p3;
 mod app_ports_p5;
 pub(crate) mod app_ports_p8;
 mod app_ports_r2a8;
+mod agy_live;
 mod grok_live;
 mod fork;
 mod remote_perms;
