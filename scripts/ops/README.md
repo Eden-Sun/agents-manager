@@ -679,16 +679,20 @@ install -m 755 scripts/ops/herdr-full-restart.sh ~/.config/agents-manager/superv
   要嘛補裝、要嘛把那行 install 拿掉，兩邊挑一個對齊。
 - `daemon-swap.sh`、`daemon-start.py`、`herdr-upgrade-runbook.md` 本來就不裝（從 checkout 跑），不是缺口。
 
-## ubuntu 背景完整 CI（issue #716）
+## ubuntu 背景 CI 與定期完整驗證（issue #716）
 
 main 的每個 push 不再等 GitHub Actions：agm-host 上的 systemd user timer 每分鐘叫一次 `scripts/ops/ubuntu-ci.sh`，
-只驗最新的 main HEAD（同時一輪、中間的 sha 不補跑），跑整樹 `scripts/check.sh`，結果寫成 commit status `ubuntu-ci`、
+只驗最新的 main HEAD（同時一輪、中間的 sha 不補跑），依各段成功基準選擇 ob／ops／web／daemon，結果寫成 commit status `ubuntu-ci`、
 `~/.cache/agents-manager/ci/status.json` 與 `logs/<sha>.log`。pending 送出後腳本自己中斷（checkout 失敗之類）會補 `error`
 status、status.json 寫 `error`，不讓 pending 掛著（last-sha 不動，下一輪重試）；每段 `timeout -k`（`AGM_CI_KILL_AFTER`，預設 60s），
 step 不理 TERM 也收得掉、不會卡住鎖。跑到一半 ENOSPC（log 有 `No space left on device` 或 check.sh 的「失敗時磁碟只剩」、或跑完再量剩餘空間已低於 `AGM_CI_MIN_FREE_GB`）
 不是這個 commit 的錯：記 `error`（status.json `reason=disk_full`）、不動 last-sha，跟被訊號收掉的中斷共用 `interrupted-<sha>` 計數，連續 3 次才當 failure（#945）。`git clone`／`git fetch` 有時限（`AGM_CI_CLONE_TIMEOUT` 預設 600 秒、`AGM_CI_FETCH_TIMEOUT` 預設 300 秒；網路半開時不會握著鎖不放），
-service 設 `TimeoutStartSec=3h15m`（4 段 × 45m ＋ 15m）。每段花的秒數（#1448）：log 每段結尾 `==> [ubuntu-ci] <段> rc=<n> secs=<s>`；`status.json` 的 success／failure／中斷都有 `"parts":{"ob":<s>,"ops":<s>,"web":<s>,"daemon":<s>}`（daemon 含 herdr argv 那一小段）。拿到鎖就寫 `~/.cache/agents-manager/ci/running-since`；拿不到鎖而且它超過 `AGM_CI_HUNG_AFTER` 秒（預設 11700）
+service 設 `TimeoutStartSec=3h15m`（4 段 × 45m ＋ 15m）。每段花的秒數（#1448）：log 每段結尾 `==> [ubuntu-ci] <段> rc=<n> secs=<s>`；`status.json` 的 success／failure／中斷都有 `"parts":{"ob":<s>,"ops":<s>,"web":<s>,"daemon":<s>}`（daemon 含 herdr argv 那一小段；未執行的段為 `null`）。`mode`、`select_reason`、`full_baseline`、`part_state` 與 `part_base` 區分本輪執行與沿用成功基準。拿到鎖就寫 `~/.cache/agents-manager/ci/running-since`；拿不到鎖而且它超過 `AGM_CI_HUNG_AFTER` 秒（預設 11700）
 就對 CI clone 的 `agm.py` 喊 `ops-alert --source ubuntu-ci --reason ci_hung`（同 source+reason 每小時一則；喊人失敗吞掉）（#946）。
+
+各段基準存在 `part-success/<段>`，只在該段確實成功後前進；從其成功祖先到 HEAD 的累積差異交給 `ci-changed-parts.sh` 分類，避免漏掉中間失敗或未驗的改動。基準缺失、非祖先、未知路徑或分類失敗一律四段全跑，首次更新也會完整跑一次建立基準。`full-success-sha` 只在本輪四段都成功時前進。完整成功的 status 描述維持 `ob+ops+web+daemon 全綠`；部分驗證為 `scoped <段+段>（沿用完整成功基準 <8hex>）`，全部沿用為 `scoped none（沿用完整成功基準 <8hex>）`；純文件沿用原有 `docs-only skip` 格式。Rust-only 仍以當前 HEAD 建真正的 web bundle 供嵌入，但不重跑無關的 web 單元測試。
+
+`AGM_CI_FULL_INTERVAL` 預設 86400 秒，每隔 24 小時補完整四段，即使 main 沒有新提交；設為 0 可停用定期完整驗證，非法值退回預設。完整執行結束時寫 `full-attempt-at`，成功另寫 `full-success-at`，失敗不會造成每分鐘重跑。損壞或未來的時間戳保守處理，不讓定期驗證永久失效。這些檔案都位於 CI 狀態目錄，不進 repo。
 **改了 `ubuntu-ci.service` 要人手重裝**：`cp` 到 `~/.config/systemd/user/` 再 `systemctl --user daemon-reload`（腳本本身 merge 後下一輪自動生效，unit 不會）。
 隔離測試：`bash scripts/ops/ubuntu-ci_test.sh`（本地 bare repo＋假 gh、`AGM_CI_GIT_BIN` 假 git）。安裝（agm-host，需 `loginctl enable-linger ubuntu`）：
 
