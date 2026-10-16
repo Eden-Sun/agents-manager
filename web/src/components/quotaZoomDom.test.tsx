@@ -123,7 +123,7 @@ test('7d 與 F 同一刻重置：底下一行只寫一個時間，不寫「重�
 test('7d 與 F 不同一刻重置（差 5 分鐘）：底下一行兩個時間分別標 7d、F', async () => {
   const cell = await mountQuota({ remaining: 3, inMs: 3 * HOUR_MS }, { remaining: 0, inMs: 3 * HOUR_MS + 5 * 60_000 })
   assert.equal(cell.querySelectorAll('.quota-reset-line').length, 1)
-  assert.match((line(cell)!.textContent ?? '').replace(/\u00a0/g, ' '), /^└ 7d \d+h\d\d · F \d+h\d\d$/)
+  assert.match((line(cell)!.textContent ?? '').replace(/\u00a0/g, ' '), /^└7d \d+h\d\d·F \d+h\d\d$/)
   assert.equal(cell.querySelectorAll('.quota-reset-at').length, 0)
 })
 
@@ -156,7 +156,7 @@ test('5h 另一刻、7d 與 F 同一刻：F 不另寫時間（2026-10-16 使用�
     { remaining: 0, inMs: 81 * 60_000 },
   )
   assert.equal(cell.querySelectorAll('.quota-reset-line').length, 1)
-  assert.match((line(cell)!.textContent ?? '').replace(/\u00a0/g, ' '), /^└ 5h \d+h\d\d · 7d \d+h\d\d$/)
+  assert.match((line(cell)!.textContent ?? '').replace(/\u00a0/g, ' '), /^└5h \d+h\d\d·7d \d+h\d\d$/)
   assert.doesNotMatch((line(cell)!.textContent ?? '').replace(/\u00a0/g, ' '), /F/)
   assert.match(line(cell)!.getAttribute('title') ?? '', /F 還有/)
 })
