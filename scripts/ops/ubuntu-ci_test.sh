@@ -941,5 +941,21 @@ run >/dev/null
 equals "全部恢復後文件才能零測試成功" "$(ran web)$(ran ob)$(ran ops)$(ran daemon):$(json_get mode):$(json_get state)" "0000:docs_only:success"
 teardown
 
+# 14c. 升級前的失敗沒有 pending 記錄，必須先全量建立可靠的結果狀態，不能直接 docs-only。
+new_baseline
+rm "$CI/part-outcomes-v1"
+echo 1 > "$FIX/rc.daemon"
+push_file docs/upgrade.md legacy-failure
+run >/dev/null
+equals "舊版成功基準不能證明沒有後續失敗：首次仍全跑" "$(ran web)$(ran ob)$(ran ops)$(ran daemon):$(json_get state)" "1111:failure"
+push_file docs/upgrade.md after-upgrade
+run >/dev/null
+equals "建立新狀態後只補驗未恢復的 daemon" "$(ran web)$(ran ob)$(ran ops)$(ran daemon):$(json_get state)" "0001:failure"
+rm "$FIX/rc.daemon"
+push_file docs/upgrade.md recovered-after-upgrade
+run >/dev/null
+equals "失敗真的恢復後才能成功" "$(ran web)$(ran ob)$(ran ops)$(ran daemon):$(json_get state)" "0001:success"
+teardown
+
 echo "ubuntu-ci_test: $PASS passed, $FAIL failed"
 [ "$FAIL" = 0 ]
