@@ -70,6 +70,7 @@ GH
   cat > "$ROOT/bin/cargo" <<'CARGO'
 #!/bin/bash
 echo "AM_TEST_REAL_HERDR=${AM_TEST_REAL_HERDR:-} AM_REAL_HERDR=${AM_REAL_HERDR:-} $*" >> "$FIX/cargo.log"
+exit "$(cat "$FIX/cargo.rc" 2>/dev/null || echo 0)"
 CARGO
   chmod +x "$ROOT/bin/cargo"
   # PATH shim 不算真 herdr；ubuntu-ci 不應只因 pane 注入的 shim 就啟用測試。
@@ -79,6 +80,9 @@ exit 0
 HERDR
   chmod +x "$ROOT/bin/herdr"
   export PATH="$ROOT/bin:$PATH"
+  # web 段沒跑時 daemon 前要重建 bundle：測試用假指令（記錄呼叫、做出 web/dist/index.html），不碰 bun。$FIX/bundle.rc 決定回傳碼。
+  export AGM_CI_WEB_BUNDLE_CMD='echo bundle >> "$FIX/bundle.log"; mkdir -p web/dist && echo x > web/dist/index.html; exit "$(cat "$FIX/bundle.rc" 2>/dev/null || echo 0)"'
+  unset AGM_CI_FULL_INTERVAL
   export AGM_CI_ROOT="$ROOT/ci" AGM_CI_REPO_URL="$ROOT/origin.git" AGM_CI_GH_REPO=o/r AGM_CI_TIMEOUT=30s AGM_CI_KILL_AFTER=1s AGM_CI_MIN_FREE_GB=0
   CI="$AGM_CI_ROOT"; : > "$FIX/gh.log"; : > "$FIX/gh.attempts"; export AGM_CI_STATUS_RETRY_SLEEP=0
 }
@@ -652,7 +656,9 @@ equals "紅燈不前進完整基準" "$(cat "$CI/full-success-sha")" "$BASE"
 push_file docs/review.md mixed
 run >/dev/null
 MIXED=$(git -C "$ROOT/work" rev-parse HEAD)
-check "混合範圍仍跑全套" '==> fake daemon' "$CI/logs/$MIXED.log"
+# 每段有自己的基準：紅的 web 基準沒前進，後面的文件提交拿 web 基準算累積差異，仍選到 web（其他段沿用完整基準）。
+check "文件提交仍重驗前一個紅的 web" '==> fake web' "$CI/logs/$MIXED.log"
+check_no "累積差異與 daemon 無關：daemon 沿用" '==> fake daemon' "$CI/logs/$MIXED.log"
 check "文件不能掩蓋前一個 code 紅燈" '"state":"failure"' "$CI/status.json"
 rm "$FIX/rc.web"
 push_file unknown-input opaque
@@ -673,13 +679,209 @@ check "缺基準 object 仍全跑" '==> fake daemon' "$CI/logs/$(git -C "$ROOT/w
 # Moving code into docs must preserve the deleted code path in the classification.
 (cd "$ROOT/work" && git mv web/src/change.ts docs/moved.md && git commit -qm rename && git push -q origin main)
 run >/dev/null
-check "程式改名到 docs 仍全跑" '==> fake daemon' "$CI/logs/$(git -C "$ROOT/work" rev-parse HEAD).log"
+check "程式改名到 docs 仍重驗被改名的 web 程式" '==> fake web' "$CI/logs/$(git -C "$ROOT/work" rev-parse HEAD).log"
 push_file scripts/ci-changed-parts.sh '#!/bin/bash
 exit 1'
 run >/dev/null
 push_file docs/review.md classifier-failed
 run >/dev/null
 check "分類器失敗仍全跑" '==> fake daemon' "$CI/logs/$(git -C "$ROOT/work" rev-parse HEAD).log"
+teardown
+
+# 13. 只跑受影響的段：每段有自己的已成功基準（part-success/<段>），拿它到 HEAD 的累積差異問共用分類器。
+#     full-success-sha 只在四段本輪全跑成功才前進；部分成功的 description 是 `scoped <段+段>（沿用完整成功基準 <8碼>）`。
+push_file() {
+  mkdir -p "$(dirname "$ROOT/work/$1")"
+  printf '%s\n' "$2" > "$ROOT/work/$1"
+  (cd "$ROOT/work" && git add -A && git commit -qm "$2" && git push -q origin main)
+}
+cur() { git -C "$ROOT/work" rev-parse HEAD; }
+ran() { grep -c "^==> fake $1$" "$CI/logs/$(cur).log"; }
+json_get() { python3 -c 'import json,sys; d=json.load(open(sys.argv[1]))
+for k in sys.argv[2].split("."): d=d[k]
+print(d)' "$CI/status.json" "$1" 2>&1; }
+new_baseline() { setup; run >/dev/null; BASE=$(cur); B8=${BASE:0:8}; }
+
+# 13a. web 只改前端：只跑 web；Rust 與 ob／ops 不重跑，daemon 的 bundle 不重建。
+new_baseline
+equals "完整四段建立各段基準" "$(cat "$CI/part-success/daemon")" "$BASE"
+rm -f "$FIX/bundle.log"
+push_file web/src/a.ts web1
+: > "$FIX/gh.log"
+equals "web-only exit 0" "$(run)" "0"
+equals "只跑 web" "$(ran web)$(ran ob)$(ran ops)$(ran daemon)" "1000"
+check "description 是 scoped web（字面 scoped 前綴）" "state=success.*scoped web（沿用完整成功基準 ${B8}）" "$FIX/gh.log"
+equals "部分成功不前進完整基準" "$(cat "$CI/full-success-sha")" "$BASE"
+equals "web 基準前進" "$(cat "$CI/part-success/web")" "$(cur)"
+equals "沒跑的 daemon 基準不動" "$(cat "$CI/part-success/daemon")" "$BASE"
+equals "status.json mode" "$(json_get mode)" "scoped"
+equals "status.json 標 web 真的跑" "$(json_get part_state.web)" "run"
+equals "status.json 標 daemon 是 reused" "$(json_get part_state.daemon)" "reused"
+equals "reused 的段附上沿用基準" "$(json_get part_base.daemon)" "$BASE"
+equals "沒跑的段 secs 是 null 不是 0" "$(json_get parts.daemon)" "None"
+equals "跑過的段有秒數" "$(json_get parts.web | grep -c '^[0-9][0-9]*$')" "1"
+[ ! -e "$FIX/bundle.log" ] && echo "ok   - web-only 不重建 bundle" && PASS=$((PASS + 1)) || { echo "FAIL - web-only 不該重建 bundle"; FAIL=$((FAIL + 1)); }
+
+# 13b. Rust-only：只跑 daemon（web 沒跑，bundle 由本輪 HEAD 重建）；不重跑 ob／ops／web。
+push_file daemon/src/x.rs rust1
+: > "$FIX/gh.log"
+equals "rust-only exit 0" "$(run)" "0"
+equals "只跑 daemon" "$(ran web)$(ran ob)$(ran ops)$(ran daemon)" "0001"
+check "description 是 scoped daemon" "scoped daemon（沿用完整成功基準 ${B8}）" "$FIX/gh.log"
+equals "daemon 前重建過 bundle" "$(wc -l < "$FIX/bundle.log" | tr -d ' ')" "1"
+equals "web 基準仍是上一個 web 提交（沒因為別段而前進）" "$(cat "$CI/part-success/web")" "$(git -C "$ROOT/work" rev-parse HEAD~1)"
+
+# 13c. 純文件接在部分成功之後：每段累積差異都與自己無關，沒有任何段要跑 → docs-only 格式，完整基準不前進。
+push_file docs/n.md docs1
+: > "$FIX/gh.log"
+equals "docs exit 0" "$(run)" "0"
+equals "沒有任何段執行" "$(ran web)$(ran ob)$(ran ops)$(ran daemon)" "0000"
+check "A..C 含 web 程式碼：不是 docs-only，用 scoped none" "state=success.*scoped none（沿用完整成功基準 ${B8}）" "$FIX/gh.log"
+check_no "不標 docs-only skip" "docs-only skip" "$FIX/gh.log"
+equals "status.json mode 是 reuse" "$(json_get mode)" "reuse"
+equals "完整基準仍不前進" "$(cat "$CI/full-success-sha")" "$BASE"
+teardown
+
+# 13d. 跨數個提交的累積差異＋失敗的段基準不前進：daemon 紅了，之後只改 web 的提交仍要重驗 daemon。
+new_baseline
+push_file daemon/src/y.rs rust-red
+echo 1 > "$FIX/rc.daemon"
+: > "$FIX/gh.log"
+run >/dev/null
+check "daemon 紅 → failure" "state=failure" "$FIX/gh.log"
+equals "紅的 daemon 基準不前進" "$(cat "$CI/part-success/daemon")" "$BASE"
+rm "$FIX/rc.daemon"
+push_file web/src/b.ts web-after-red
+: > "$FIX/gh.log"
+run >/dev/null
+equals "web+daemon 都跑（按 ob/ops/web/daemon 順序）" "$(ran web)$(ran ob)$(ran ops)$(ran daemon)" "1001"
+check "description 照段落順序 scoped web+daemon" "scoped web+daemon（沿用完整成功基準 ${B8}）" "$FIX/gh.log"
+equals "紅過又補驗成功：daemon 基準前進" "$(cat "$CI/part-success/daemon")" "$(cur)"
+equals "仍不前進完整基準" "$(cat "$CI/full-success-sha")" "$BASE"
+# 失敗輪裡跑成功的段，基準照樣前進；沒跑的不動。
+push_file web/src/c.ts web-ok
+push_file daemon/src/z.rs rust-red2
+echo 1 > "$FIX/rc.daemon"
+run >/dev/null
+equals "同輪成功的 web 基準前進" "$(cat "$CI/part-success/web")" "$(cur)"
+equals "同輪紅的 daemon 基準不動" "$(cat "$CI/part-success/daemon")" "$(git -C "$ROOT/work" rev-parse HEAD~2)"
+teardown
+
+# 13e. 共用檔／未知路徑／分類器：scripts/check.sh 同時歸 ops+daemon；未知路徑全跑並前進完整基準。
+new_baseline
+push_file scripts/check.sh '#!/bin/bash'"
+"'part="$1"; echo "==> fake $part"; exit 0'
+: > "$FIX/gh.log"
+run >/dev/null
+equals "check.sh 改動跑 ops+daemon" "$(ran web)$(ran ob)$(ran ops)$(ran daemon)" "0011"
+check "description 是 scoped ops+daemon" "scoped ops+daemon（沿用完整成功基準 ${B8}）" "$FIX/gh.log"
+push_file opaque-unknown x
+run >/dev/null
+equals "未知路徑四段全跑" "$(ran web)$(ran ob)$(ran ops)$(ran daemon)" "1111"
+equals "全跑成功才前進完整基準" "$(cat "$CI/full-success-sha")" "$(cur)"
+check "full 成功 description 不變" "ob+ops+web+daemon 全綠" "$FIX/gh.log"
+teardown
+
+# 13f. 基準缺失／讀錯／非祖先 → 全跑。
+new_baseline
+rm "$CI/part-success/web"
+push_file docs/n.md d1
+push_file web/src/m.ts m1
+run >/dev/null
+equals "缺一段基準：四段全跑" "$(ran web)$(ran ob)$(ran ops)$(ran daemon)" "1111"
+push_file web/src/m.ts m2
+echo garbage > "$CI/part-success/ops"
+run >/dev/null
+equals "基準讀錯：四段全跑" "$(ran web)$(ran ob)$(ran ops)$(ran daemon)" "1111"
+UNREL=$(printf unrel | git -C "$ROOT/work" commit-tree "$(git -C "$ROOT/work" rev-parse 'HEAD^{tree}')")
+git -C "$ROOT/work" push -q origin "$UNREL:refs/heads/other" 2>/dev/null
+printf '%s\n' "$UNREL" > "$CI/part-success/ob"
+push_file web/src/m.ts m3
+run >/dev/null
+equals "基準非祖先：四段全跑" "$(ran web)$(ran ob)$(ran ops)$(ran daemon)" "1111"
+teardown
+
+# 13g. daemon 的 bundle 重建失敗／herdr 契約測試失敗 → daemon 這段紅，不前進 daemon 基準。real-herdr 只在選到 daemon 時跑。
+new_baseline
+export AM_REAL_HERDR=/bin/true
+: > "$FIX/cargo.log"
+push_file web/src/q.ts q1
+run >/dev/null
+check_no "web-only 不跑 real-herdr smoke" "the_generated_argv_parses_with_the_real_herdr" "$FIX/cargo.log"
+push_file daemon/src/q.rs q2
+echo 1 > "$FIX/bundle.rc"
+: > "$FIX/gh.log"
+run >/dev/null
+check "bundle 重建失敗 → daemon 紅" "state=failure.*紅：daemon" "$FIX/gh.log"
+equals "bundle 失敗時 daemon 測試不跑" "$(ran daemon)" "0"
+equals "daemon 基準不動" "$(cat "$CI/part-success/daemon")" "$BASE"
+rm "$FIX/bundle.rc"
+rm -rf "$ROOT/work/web/dist"
+echo 1 > "$FIX/cargo.rc"
+push_file daemon/src/q.rs q3
+: > "$FIX/gh.log"
+run >/dev/null
+check "daemon 跑了（含 real-herdr smoke）" "the_generated_argv_parses_with_the_real_herdr" "$FIX/cargo.log"
+check "herdr smoke 失敗 → daemon 紅" "state=failure.*紅：daemon" "$FIX/gh.log"
+equals "herdr smoke 失敗不記 daemon 成功" "$(cat "$CI/part-success/daemon")" "$BASE"
+rm -f "$FIX/cargo.rc"; export AM_REAL_HERDR=""
+teardown
+
+# 13h. 定期完整四段：到期時同一個 sha 也補跑；失敗後不會每分鐘重跑；沒到期的同 sha 不跑。
+new_baseline
+: > "$FIX/gh.log"
+run >/dev/null
+equals "沒到期的同 sha 不重跑" "$(wc -l < "$FIX/gh.log" | tr -d ' ')" "0"
+echo 1 > "$CI/full-success-at"; rm -f "$CI/full-attempt-at"
+equals "到期的同 sha exit 0" "$(run)" "0"
+check "到期補跑完整四段並送 success" "state=success.*ob+ops+web+daemon 全綠" "$FIX/gh.log"
+equals "補跑重新計時" "$(( $(date +%s) - $(cat "$CI/full-success-at") < 100 ))" "1"
+# 失敗的定期完整輪：記 attempt，下一分鐘不再重跑（沒有風暴）。
+echo 1 > "$CI/full-success-at"; rm -f "$CI/full-attempt-at"
+echo 1 > "$FIX/rc.web"
+: > "$FIX/gh.log"
+run >/dev/null
+check "到期補跑失敗送 failure" "state=failure" "$FIX/gh.log"
+equals "完整基準沒被失敗輪前進" "$(cat "$CI/full-success-sha")" "$BASE"
+: > "$FIX/gh.log"
+run >/dev/null
+equals "失敗後下一輪不重跑" "$(wc -l < "$FIX/gh.log" | tr -d ' ')" "0"
+# 到期又有新 commit：本輪強制完整四段（即使只是 web）。
+rm "$FIX/rc.web"; echo 1 > "$CI/full-success-at"; echo 1 > "$CI/full-attempt-at"
+push_file web/src/p.ts p1
+run >/dev/null
+equals "到期時新提交也跑完整四段" "$(ran web)$(ran ob)$(ran ops)$(ran daemon)" "1111"
+teardown
+
+# 13j. 定期完整的設定／紀錄壞掉不能悄悄關掉它：非法／負值間隔退回預設；未來時間戳當沒有紀錄。0 才是明確關閉。
+new_baseline
+echo 1 > "$CI/full-success-at"; rm -f "$CI/full-attempt-at"
+: > "$FIX/gh.log"
+AGM_CI_FULL_INTERVAL=abc run >/dev/null
+check "非法間隔退回預設、到期照補" "state=success" "$FIX/gh.log"
+check "警告非法間隔" "不是非負整數" "$ROOT/out"
+echo 1 > "$CI/full-success-at"; rm -f "$CI/full-attempt-at"
+: > "$FIX/gh.log"
+AGM_CI_FULL_INTERVAL=-5 run >/dev/null
+check "負值間隔也退回預設" "state=success" "$FIX/gh.log"
+echo $(( $(date +%s) + 99999 )) > "$CI/full-success-at"; rm -f "$CI/full-attempt-at"
+touch -d '2 days ago' "$CI/full-success-sha"
+: > "$FIX/gh.log"
+run >/dev/null
+check "未來時間戳視為沒有紀錄、照補" "state=success" "$FIX/gh.log"
+echo 1 > "$CI/full-success-at"; rm -f "$CI/full-attempt-at"
+: > "$FIX/gh.log"
+AGM_CI_FULL_INTERVAL=0 run >/dev/null
+equals "間隔 0＝明確關閉" "$(wc -l < "$FIX/gh.log" | tr -d ' ')" "0"
+teardown
+
+# 13i. 舊版狀態（只有 full-success-sha、沒有 part-success）：安全地全跑一次。
+setup
+run >/dev/null
+rm -rf "$CI/part-success" "$CI/full-success-at" "$CI/full-attempt-at"
+push_file web/src/o.ts o1
+run >/dev/null
+equals "未知舊狀態全跑" "$(ran web)$(ran ob)$(ran ops)$(ran daemon)" "1111"
 teardown
 
 echo "ubuntu-ci_test: $PASS passed, $FAIL failed"
