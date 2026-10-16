@@ -278,3 +278,51 @@ pub fn read_tail(path: &Path, max: u64) -> std::io::Result<String> {
     f.take(max).read_to_end(&mut buf)?;
     Ok(String::from_utf8_lossy(&buf).into_owned())
 }
+
+/// `lsof -Fn` 的輸出（每個開著的檔一行 `n<路徑>`；遠端 `Site::open_conversations` 用）裡的對話 id，去重。
+pub fn parse_lsof_conversations(out: &str) -> Vec<String> {
+    let mut ids: Vec<String> = Vec::new();
+    for id in out.lines().filter_map(|l| l.strip_prefix('n')).filter_map(conversation_from_link) {
+        if !ids.contains(&id) {
+            ids.push(id);
+        }
+    }
+    ids
+}
+
+/// 遠端 `date -r <紀錄檔>` 的輸出（每行 `<對話 id> <epoch 秒>`，沒有紀錄檔的不印）→ 紀錄檔的修改時間。
+pub fn parse_mtimes(out: &str) -> std::collections::HashMap<String, std::time::SystemTime> {
+    out.lines()
+        .filter_map(|l| {
+            let (id, secs) = l.trim().split_once(' ')?;
+            let secs: u64 = secs.trim().parse().ok()?;
+            Some((id.to_string(), std::time::UNIX_EPOCH + std::time::Duration::from_secs(secs)))
+        })
+        .collect()
+}
+
+#[cfg(test)]
+mod lsof_and_mtime_tests {
+    use super::*;
+    use std::time::{Duration, UNIX_EPOCH};
+
+    /// 遠端 lsof 的輸出：對話 id 去重、`-wal`／`-shm` 認得、非對話檔與 `p`／`f` 行略過。
+    #[test]
+    fn lsof_lines_name_the_open_conversations_once() {
+        let dir = "/Users/m4p/.gemini/antigravity-cli/conversations";
+        let out = format!("p901\nn/Users/m4p/.zshrc\nn{dir}/abc-1.db\nn{dir}/abc-1.db-wal\nn{dir}/abc-1.db-shm\nn{dir}/xyz.db\nn{dir}/bad.name.db\n/tmp/x\n\n");
+        assert_eq!(parse_lsof_conversations(&out), ["abc-1", "xyz"]);
+        assert!(parse_lsof_conversations("").is_empty(), "空輸出");
+        assert!(parse_lsof_conversations("p901\nn/tmp/y.db\n").is_empty(), "不在 conversations 底下");
+    }
+
+    /// 遠端 `date -r` 的輸出：每行 `id epoch`；壞行、空行略過。
+    #[test]
+    fn date_lines_become_transcript_times() {
+        let m = parse_mtimes("abc-1 1700000000\nxyz  1700000100 \nbroken\n\nq notanumber\n");
+        assert_eq!(m.len(), 2);
+        assert_eq!(m["abc-1"], UNIX_EPOCH + Duration::from_secs(1_700_000_000));
+        assert_eq!(m["xyz"], UNIX_EPOCH + Duration::from_secs(1_700_000_100));
+        assert!(parse_mtimes("").is_empty(), "空輸出");
+    }
+}
