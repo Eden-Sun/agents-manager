@@ -142,6 +142,15 @@ class Store:
                     (row[0], row[1], stats[1] or time.time(), stats[0] or 0),
                 )
 
+    def close(self):
+        self.db.close()
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc):
+        self.close()
+
     @contextlib.contextmanager
     def transaction(self):
         self.db.execute("BEGIN IMMEDIATE")
