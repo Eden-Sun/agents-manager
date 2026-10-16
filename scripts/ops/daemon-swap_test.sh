@@ -1596,6 +1596,46 @@ check_eq "父 row 存在但沒有 active run：child 仍回滾（rc=7）" "7" "$
 check "沒有 active parent run 時 child 保持 missing" 'missing=\[kid \]' "$SWAP_LOG"
 teardown
 
+# 34d. 換版前就已經死掉的 child（2026-10-16 66378ada 誤回滾）：last_run 在窗口前就結束、現在沒有 active run，
+#      新 daemon 以 reconcile_run_already_ended／agent_missing（pane 被別的 agent 佔用）退役 → 不算遺失。
+setup 10 10
+export STUB_NAMES_BEFORE='["a","mom","kid"]' STUB_NAMES_AFTER='["a","mom"]'
+seed_audit "INSERT INTO bots (id,name,project_id,deleted_at,managed_by,parent_bot_id,created_at)
+    VALUES ('id-mom','mom','p1',NULL,'user',NULL,'2000-01-01T00:00:00.000Z'),
+           ('id-kid','kid','p1','2099-01-01T00:00:02.000Z','child','id-mom','2000-01-01T00:00:00.000Z');
+  INSERT INTO runs VALUES ('id-mom','running');
+  INSERT INTO intents VALUES ('it1','retire_child','id-kid','{\"why\":\"reconcile_run_already_ended\",\"cause\":\"agent_missing\",\"mode\":\"implicit\",\"pane\":\"present\",\"parent_bot_id\":\"id-mom\",\"last_run\":{\"state\":\"exited\",\"ended_at\":\"2000-01-01T00:00:01.000Z\",\"exit_reason\":\"pane gone\"}}','done','2099-01-01T00:00:01.000Z');"
+rc=$(run)
+check_eq "換版前就結束的 child 被退役：不回滾（rc=0）" "0" "$rc"
+check "被認成預期退役" 'missing=\[\] deleted_in_window=\[kid \]' "$SWAP_LOG"
+teardown
+
+# 34d 對照組：以下都照樣回滾（rc=7）。
+#   ended_late：last_run 在窗口內才結束（換版前還活著）；
+#   no_last_run：payload 沒有 last_run；
+#   agent_gone：why 是 reconcile_agent_gone（換版前 run 還活著）；
+#   live_run：它現在還有 active run。
+for c in ended_late no_last_run agent_gone live_run; do
+  setup 10 10
+  export STUB_NAMES_BEFORE='["a","mom","kid"]' STUB_NAMES_AFTER='["a","mom"]'
+  why=reconcile_run_already_ended; last=',\"last_run\":{\"state\":\"exited\",\"ended_at\":\"2000-01-01T00:00:01.000Z\"}'; extra=""
+  case "$c" in
+    ended_late) last=',\"last_run\":{\"state\":\"exited\",\"ended_at\":\"2099-01-01T00:00:00.500Z\"}' ;;
+    no_last_run) last="" ;;
+    agent_gone) why=reconcile_agent_gone ;;
+    live_run) extra="INSERT INTO runs VALUES ('id-kid','running');" ;;
+  esac
+  seed_audit "INSERT INTO bots (id,name,project_id,deleted_at,managed_by,parent_bot_id,created_at)
+      VALUES ('id-mom','mom','p1',NULL,'user',NULL,'2000-01-01T00:00:00.000Z'),
+             ('id-kid','kid','p1','2099-01-01T00:00:02.000Z','child','id-mom','2000-01-01T00:00:00.000Z');
+    INSERT INTO runs VALUES ('id-mom','running'); $extra
+    INSERT INTO intents VALUES ('it1','retire_child','id-kid','{\"why\":\"$why\",\"cause\":\"agent_missing\",\"mode\":\"implicit\",\"pane\":\"present\",\"parent_bot_id\":\"id-mom\"$last}','done','2099-01-01T00:00:01.000Z');"
+  rc=$(run)
+  check_eq "34d 對照 ${c}：照樣回滾（rc=7）" "7" "$rc"
+  check "34d 對照 ${c}：child 列在 missing" 'missing=\[kid \]' "$SWAP_LOG"
+  teardown
+done
+
 # 35. rollback 還原 DB 前要辨認窗口中新 daemon 收編的 child，並在還原後明確警示它仍有 live pane
 #     （只有升過 schema、往前修失敗才會還原 DB，所以這案用 setup 11 10）。
 setup 11 10
