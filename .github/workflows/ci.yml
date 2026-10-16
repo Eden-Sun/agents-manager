@@ -39,6 +39,7 @@ jobs:
     outputs:
       ob: ${{ steps.parts.outputs.ob }}
       ops: ${{ steps.parts.outputs.ops }}
+      ops_base: ${{ steps.parts.outputs.ops_base }}
       web: ${{ steps.parts.outputs.web }}
       daemon: ${{ steps.parts.outputs.daemon }}
       lint: ${{ steps.parts.outputs.lint }}
@@ -76,6 +77,8 @@ jobs:
     runs-on: macos-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
       - uses: actions/setup-node@v4
         with:
           node-version: 22
@@ -86,15 +89,23 @@ jobs:
           bun-version: 1.3.14
       - run: scripts/check.sh ob
         if: ${{ needs.parts.outputs.ob == 'true' }}
-      - run: scripts/check.sh ops
+      - run: scripts/check.sh ops "$CI_OPS_BASE" "$CI_OPS_MAIN" "$CI_OPS_HEAD"
+        env:
+          CI_OPS_BASE: ${{ needs.parts.outputs.ops_base }}
+          CI_OPS_MAIN: ${{ github.event.pull_request.base.sha }}
+          CI_OPS_HEAD: ${{ github.event.pull_request.head.sha }}
         if: ${{ needs.parts.outputs.ops == 'true' }}
 
   # Required status names remain web/daemon. Even a docs-only PR runs these jobs and reports
   # success explicitly; a classification/dependency failure must never look like a successful skip.
+  # The embedded bundle is built and uploaded first, so unit-test/tsc/oxlint failures turn `web` red
+  # without stopping daemon; daemon only requires a valid bundle (outputs.bundle), never a green web.
   web:
     needs: parts
     if: ${{ always() }}
     runs-on: macos-latest
+    outputs:
+      bundle: ${{ steps.bundle.outputs.ok }}
     steps:
       - run: exit 1
         if: ${{ needs.parts.result != 'success' }}
@@ -104,11 +115,8 @@ jobs:
         if: ${{ needs.parts.outputs.web == 'true' || needs.parts.outputs.daemon == 'true' }}
         with:
           bun-version: 1.3.14
-      - run: scripts/check.sh web
-        if: ${{ needs.parts.outputs.web == 'true' }}
-      # Rust-only changes need the embedded bundle, without rerunning unrelated web unit tests.
-      - run: cd web && bun install --frozen-lockfile && bun run build
-        if: ${{ needs.parts.outputs.web != 'true' && needs.parts.outputs.daemon == 'true' }}
+      - run: scripts/check.sh web-bundle
+        if: ${{ needs.parts.outputs.web == 'true' || needs.parts.outputs.daemon == 'true' }}
       - uses: actions/upload-artifact@v4
         if: ${{ needs.parts.outputs.daemon == 'true' }}
         with:
@@ -116,17 +124,23 @@ jobs:
           path: web/dist
           if-no-files-found: error
           retention-days: 3
+      - id: bundle
+        run: echo ok=true >> "$GITHUB_OUTPUT"
+        if: ${{ needs.parts.outputs.daemon == 'true' }}
+      # Rust-only changes skip these, so unrelated web unit tests are not rerun.
+      - run: scripts/check.sh web-verify
+        if: ${{ needs.parts.outputs.web == 'true' }}
       - run: echo 'web checks skipped by conservative path classification'
         if: ${{ needs.parts.outputs.web != 'true' && needs.parts.outputs.daemon != 'true' }}
 
   daemon:
-    # rust-embed 在編譯時把 web/dist 嵌進 daemon，所以一定要等 web build 完。
+    # rust-embed 在編譯時把 web/dist 嵌進 daemon，所以要等 web job 產出並上傳 bundle（web 的單元測試紅不擋）。
     needs: [parts, web]
     if: ${{ always() }}
     runs-on: macos-latest
     steps:
       - run: exit 1
-        if: ${{ needs.parts.result != 'success' || (needs.parts.outputs.daemon == 'true' && needs.web.result != 'success') }}
+        if: ${{ needs.parts.result != 'success' || (needs.parts.outputs.daemon == 'true' && needs.web.outputs.bundle != 'true') }}
       - run: echo 'daemon checks skipped by conservative path classification'
         if: ${{ needs.parts.outputs.daemon != 'true' }}
       - uses: actions/checkout@v4
