@@ -950,13 +950,50 @@
   }
 }
 
-/* 寫倒數的那一列不畫量表條、只有數字（2026-09-17 使用者：剩不到 10% 的條太小看不出東西）。
-   倒數（「22h18」）靠右對齊到跟其他列的百分比同一欄。 */
+/* 寫倒數的那一列也畫條（2026-10-16 使用者取代 09-17「倒數列不畫條」：條改用 0–10% 刻度後看得出東西了）。
+   順序是條、倒數、百分比；條可以比 38px 窄（24px），免得格子撐太寬。倒數（「22h18」）靠右對齊到跟其他列的百分比同一欄。 */
 .quota-bar-row.countdown {
   justify-content: flex-end;
   gap: 4px;
-  /* 倒數＋百分比比 38px 的條寬：讓這一列撐開欄寬，不要往左蓋到窗口名（7d／43m）。 */
+  /* 條＋倒數＋百分比比 38px 的條寬：讓這一列撐開欄寬，不要往左蓋到窗口名（7d／43m）。 */
   min-width: max-content;
+}
+
+.quota-bar-row.countdown .quota-bar-wrap {
+  width: 24px;
+}
+
+.quota-bar-row.countdown .quota-bar {
+  width: 24px;
+}
+
+@media (width > 640px) {
+  .main-head .quota-bar-row.countdown .quota-bar-wrap {
+    flex: 1 1 24px;
+    min-width: 24px;
+  }
+}
+
+/* ×10：條放大成 0–10% 刻度的記號。掛在條右邊的外面（wrap 右邊界之外、不佔條長），
+   靠 margin-right 預留位置，刻度針的 left% 才仍以條為準。 */
+.quota-bar-wrap.zoomed {
+  margin-right: 13px;
+}
+
+.quota-bar-zoom {
+  position: absolute;
+  left: 100%;
+  top: 50%;
+  margin-left: 2px;
+  transform: translateY(-50%);
+  font-size: 7px;
+  font-weight: 700;
+  line-height: 1;
+  vertical-align: baseline;
+  white-space: nowrap;
+  font-family: var(--font-mono);
+  color: var(--text-dim);
+  cursor: help;
 }
 
 /* 勾了停用的帳號不分剩餘寬度，空間留給啟用的（2026-09-18 使用者）。量表整排收掉，只留 logo、名稱與停用方塊
