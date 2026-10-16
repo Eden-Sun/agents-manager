@@ -48,7 +48,7 @@
 - 工作樹裡別人的 WIP 讓編譯掛掉時，對**你 staged 的內容**驗：`git archive` 出來或用 `git stash --keep-index` 以外的方式，總之不能碰別人的檔。
 - UI 改動要看真畫面：**一律用 agent-browser**（CLI，使用者 2026-10-13 裁示；`agent-browser --session <你的 agent 名> open <網址>`、`screenshot`、`snapshot`，用法看 `agent-browser skills get core`；用完 `close`）。禁止用 ego lite、禁止自己另起 Chrome／其他 headless（AG Man 硬規則；`scripts/ui-goal-shots.mjs` 會自己起 headless Chrome，不准用）；截圖放 `docs/screenshots/<feature>/`。主機沒裝 agent-browser 就只做 DOM／純函式測試，回報時講清楚沒看過真畫面。
 - daemon 在 `127.0.0.1:7788`，token 在 `~/.config/agents-manager/ui-token`，header `X-AM-Token`。
-- **完整 CI 在 ubuntu 背景跑，不要等**（issue #716，使用者 2026-09-28）：agm-host 上的 `scripts/ops/ubuntu-ci.sh` 每分鐘撿最新的 main HEAD 跑整樹 `scripts/check.sh`（同時只跑一輪、中間的 sha 不補跑），結果寫成 commit status `ubuntu-ci`。推完就去做下一件事；之後用 `gh api repos/Eden-Sun/agents-manager/commits/<sha>/status -q '.statuses[]|select(.context=="ubuntu-ci")'` 看結果。GitHub Actions 只剩 PR 與每日排程，**任何收尾、驗收、restart 判斷都不等它**（使用者 2026-09-28）。
+- **完整 CI 在 ubuntu 背景跑，不要等**（issue #716，使用者 2026-09-28）：agm-host 上的 `scripts/ops/ubuntu-ci.sh` 每分鐘撿最新的 main HEAD，依各段成功祖先到 HEAD 的累積差異挑受影響部分，預設每 24 小時補整樹 `scripts/check.sh`（同時只跑一輪、中間的 sha 不補跑；基準失效或未知路徑仍全跑），結果寫成 commit status `ubuntu-ci`。推完就去做下一件事；之後用 `gh api repos/Eden-Sun/agents-manager/commits/<sha>/status -q '.statuses[]|select(.context=="ubuntu-ci")'` 看結果。GitHub Actions 只剩 PR 與每日排程，**任何收尾、驗收、restart 判斷都不等它**（使用者 2026-09-28）。
 
 ## 提交
 - 只在自己的 worktree 改與 commit；只 `git add` 自己改的檔案與 hunk（混檔用 `git apply --cached` 過濾），一個功能一個 commit。
