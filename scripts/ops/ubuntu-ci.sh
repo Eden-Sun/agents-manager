@@ -344,6 +344,16 @@ write_sha_file() { # write_sha_file <路徑> <sha>
     return 1
 }
 
+# 先記錄「尚未確實成功」，涵蓋測試失敗與行程中斷；舊成功基準不能蓋過後來已知的失敗。
+# 只看存在與否，不信任檔案內容；損壞的 marker 也必須重驗。
+has_pending_parts() {
+    local p
+    for p in ${PARTS}; do
+        if [ -e "${CI_ROOT}/part-pending/${p}" ] || [ -L "${CI_ROOT}/part-pending/${p}" ]; then return 0; fi
+    done
+    return 1
+}
+
 # Only a fully tested ancestor can justify skipping a documentation-only descendant. A failed
 # last-sha or another skipped SHA is never promoted to this baseline. Any unreadable input falls
 # back to the full suite, including renames out of a tested path and classifier failures.
@@ -372,12 +382,16 @@ select_parts() {
     local p cp files out tok
     run_parts=""
     if [ "${force_full}" = 1 ]; then select_full periodic; return 0; fi
-    if docs_only_since_full_success; then mode=docs_only; select_reason=docs_only; return 0; fi
+    if ! has_pending_parts && docs_only_since_full_success; then mode=docs_only; select_reason=docs_only; return 0; fi
     is_sha "${full_success}" && git merge-base --is-ancestor "${full_success}" "${sha}" 2>/dev/null \
         || { select_full no_full_baseline; return 0; }
     for p in ${PARTS}; do
         cp="$(read_sha_file "${CI_ROOT}/part-success/${p}")" || { select_full "no_baseline_${p}"; return 0; }
         git merge-base --is-ancestor "${cp}" "${sha}" 2>/dev/null || { select_full "not_ancestor_${p}"; return 0; }
+        if [ -e "${CI_ROOT}/part-pending/${p}" ] || [ -L "${CI_ROOT}/part-pending/${p}" ]; then
+            run_parts="${run_parts}${run_parts:+ }${p}"
+            continue
+        fi
         if [ "${cp}" = "${sha}" ]; then part_base[${p}]="${cp}"; continue; fi
         files="$(git -c core.quotePath=false diff --no-renames --name-only "${cp}" "${sha}")" || { select_full diff_failed; return 0; }
         [ -n "${files}" ] || { select_full "empty_diff_${p}"; return 0; }
@@ -434,6 +448,8 @@ for part in ${PARTS}; do
     fi
     part_state_json="${part_state_json}${part_state_json:+,}\"${part}\":\"run\""
     part_base_json="${part_base_json}${part_base_json:+,}\"${part}\":\"\""
+    # 寫不下 marker 就中止，不能執行後讓已知失敗失去紀錄。成功基準同 SHA 也仍需這個 marker。
+    write_sha_file "${CI_ROOT}/part-pending/${part}" "${sha}"
     prc=0
     bundle_failed=0
     part_start=${SECONDS}
@@ -465,8 +481,12 @@ for part in ${PARTS}; do
         daemon) daemon_secs=${part_secs} ;;
     esac
     if [ "${prc}" = 0 ]; then
-        # 這段的基準只在它本輪真的跑成功時前進（部分成功不影響其他段；紅的段留在舊基準，下個提交的累積差異還含著它）。
-        write_sha_file "${CI_ROOT}/part-success/${part}" "${sha}" || echo "ubuntu-ci: 寫不下 ${part} 的成功基準，下一輪該段會全跑" >&2
+        # 先寫成功基準再解除待驗狀態；任何一步中斷都保留下一輪必須重驗的證據。
+        if write_sha_file "${CI_ROOT}/part-success/${part}" "${sha}"; then
+            rm -f -- "${CI_ROOT}/part-pending/${part}"
+        else
+            echo "ubuntu-ci: 寫不下 ${part} 的成功基準，保留待驗狀態" >&2
+        fi
     fi
     if [ "${prc}" != 0 ]; then
         rc="${prc}"

@@ -894,5 +894,52 @@ run >/dev/null
 equals "未知舊狀態全跑" "$(ran web)$(ran ob)$(ran ops)$(ran daemon)" "1111"
 teardown
 
+# 14. 定期全量發現的新失敗不能被舊成功基準掩蓋，即使後續完全沒改那一段。
+new_baseline
+echo 1 > "$CI/full-success-at"; echo 1 > "$CI/full-attempt-at"
+echo 1 > "$FIX/rc.ops"
+run >/dev/null
+equals "定期全量 ops 失敗" "$(json_get state)" "failure"
+push_file web/src/retry.ts web-after-periodic-failure
+run >/dev/null
+equals "舊 ops 基準仍相同也必須補驗 ops+web" "$(ran web)$(ran ob)$(ran ops)$(ran daemon)" "1010"
+equals "ops 持續失敗不得被 web 成功蓋掉" "$(json_get state)" "failure"
+push_file docs/retry.md docs-after-periodic-failure
+run >/dev/null
+equals "文件提交仍補驗失敗的 ops" "$(ran web)$(ran ob)$(ran ops)$(ran daemon)" "0010"
+equals "文件不能假綠" "$(json_get state)" "failure"
+: > "$FIX/gh.log"
+run >/dev/null
+equals "持續失敗仍保留同 SHA 節流" "$(wc -l < "$FIX/gh.log" | tr -d ' ')" "0"
+rm "$FIX/rc.ops"
+push_file docs/retry.md docs-recover
+run >/dev/null
+equals "新提交真的補驗 ops 成功才恢復" "$(ran web)$(ran ob)$(ran ops)$(ran daemon):$(json_get state)" "0010:success"
+push_file web/src/retry.ts web-after-recovery
+run >/dev/null
+equals "恢復後不再重跑無關的 ops" "$(ran web)$(ran ob)$(ran ops)$(ran daemon)" "1000"
+teardown
+
+# 14b. 純文件捷徑及多段獨立恢復：只清掉確實成功的段，其他失敗不得被清掉。
+new_baseline
+echo 1 > "$CI/full-success-at"; echo 1 > "$CI/full-attempt-at"
+echo 1 > "$FIX/rc.ops"; echo 1 > "$FIX/rc.daemon"
+run >/dev/null
+push_file docs/recover.md docs-with-two-failures
+run >/dev/null
+equals "有效完整基準也不能走 docs-only 掩蓋兩段失敗" "$(ran web)$(ran ob)$(ran ops)$(ran daemon):$(json_get state)" "0011:failure"
+rm "$FIX/rc.ops"
+push_file docs/recover.md docs-one-recovers
+run >/dev/null
+equals "ops 恢復仍要保留 daemon 失敗" "$(ran web)$(ran ob)$(ran ops)$(ran daemon):$(json_get state)" "0011:failure"
+rm "$FIX/rc.daemon"
+push_file docs/recover.md docs-both-recover
+run >/dev/null
+equals "下一筆只補驗尚未恢復的 daemon" "$(ran web)$(ran ob)$(ran ops)$(ran daemon):$(json_get state)" "0001:success"
+push_file docs/recover.md docs-skip-after-recovery
+run >/dev/null
+equals "全部恢復後文件才能零測試成功" "$(ran web)$(ran ob)$(ran ops)$(ran daemon):$(json_get mode):$(json_get state)" "0000:docs_only:success"
+teardown
+
 echo "ubuntu-ci_test: $PASS passed, $FAIL failed"
 [ "$FAIL" = 0 ]
