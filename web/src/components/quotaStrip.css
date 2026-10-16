@@ -984,7 +984,13 @@
   color: var(--text-dim);
   font-family: var(--font-mono);
   font-variant-numeric: tabular-nums;
-  white-space: nowrap;
+  /* 這行不能決定格子寬度：#1780 的等寬是「最寬那格 × 格數」，這行一長所有格子都被撐寬，
+     窄一點的視窗右邊的 grok／agy 就被擠出畫面（2026-10-16 使用者）。寬度 0、最少撐滿格子；
+     放不下就在「·」換行（窗口名與時間之間是不換行空白），不截字。 */
+  width: 0;
+  min-width: 100%;
+  white-space: normal;
+  line-height: 1.15;
 }
 
 .quota-reset-line.warn {
