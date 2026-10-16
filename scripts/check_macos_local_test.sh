@@ -33,6 +33,17 @@ SH
 
 cat >"$native/cargo" <<'SH'
 #!/bin/sh
+if [ -n "${AM_TEST_LONG_CARGO:-}" ]; then
+    # 假的長時間編譯：底下再掛一個孫行程，看門狗要連整個行程群組一起砍。
+    "$AM_TEST_REAL_SLEEP" 300 &
+    printf '%s\n' "$!" >"$AM_TEST_LONG_CARGO.grandchild"
+    printf '%s\n' "$$" >"$AM_TEST_LONG_CARGO"
+    exec "$AM_TEST_REAL_SLEEP" 300
+fi
+if [ -n "${AM_TEST_CARGO_WAITS_FOR:-}" ]; then
+    # 等看門狗至少進到一次 sleep 再結束，才驗得到「正常結束會收掉看門狗」。
+    while [ ! -s "$AM_TEST_CARGO_WAITS_FOR" ]; do "$AM_TEST_REAL_SLEEP" 0.05; done
+fi
 {
     printf 'CALL\n'
     for arg in "$@"; do printf 'ARG:%s\n' "$arg"; done
@@ -78,7 +89,11 @@ export AM_TEST_LOCAL_RUSTC="$native/rustc"
 export AM_TEST_LOCAL_RUSTDOC="$native/rustdoc"
 export AM_TEST_LOCAL_CARGO_LOG="$tmp/local-cargo.log"
 export AM_TEST_REMOTE_CARGO="$tmp/remote-cargo.log"
+export AM_TEST_REAL_SLEEP="$(command -v sleep)"
 export PATH="$bin:$PATH"
+# 記憶體閘與看門狗都讀這個假檔（第一欄 free%、第二欄壓力等級），不看這台機器的真記憶體。
+export WAIT_MEM_FILE="$tmp/mem"
+printf '80 1\n' >"$WAIT_MEM_FILE"
 
 if output="$(AM_TEST_UNAME=Linux "$ROOT/scripts/check.sh" macos-local 2>&1)"; then
     echo "macos-local must reject a non-macOS host" >&2
@@ -147,6 +162,90 @@ if output="$(AM_TEST_UNAME=Darwin AM_TEST_ZERO_TESTS=1 "$ROOT/scripts/check.sh" 
 fi
 if [[ "$output" != *"required cohort cli_update::tests selected zero tests"* ]]; then
     printf 'unexpected empty-selection failure: %s\n' "$output" >&2
+    exit 1
+fi
+
+# 記憶體閘（issue #1783）：可用記憶體不夠就不開編，逾時 124。
+/bin/rm -f "$AM_TEST_LOCAL_CARGO_LOG"
+printf '10 1\n' >"$WAIT_MEM_FILE"
+rc=0
+output="$(AM_TEST_UNAME=Darwin CHECK_LOAD_TIMEOUT=0 "$ROOT/scripts/check.sh" macos-local 2>&1)" || rc=$?
+if [[ "$rc" != 124 ]]; then
+    printf 'macos-local must refuse to compile when free memory is low (rc=%s): %s\n' "$rc" "$output" >&2
+    exit 1
+fi
+if [[ "$output" != *"記憶體閘"* || "$output" != *"可用記憶體 10% < 30%"* ]]; then
+    printf 'unexpected memory gate refusal: %s\n' "$output" >&2
+    exit 1
+fi
+if [[ -e "$AM_TEST_LOCAL_CARGO_LOG" ]]; then
+    echo "macos-local ran cargo although the memory gate refused" >&2
+    exit 1
+fi
+AM_TEST_UNAME=Darwin CHECK_MIN_FREE_MEM=5 CHECK_LOAD_TIMEOUT=0 "$ROOT/scripts/check.sh" macos-local >/dev/null 2>&1 || {
+    echo "CHECK_MIN_FREE_MEM must lower the memory threshold" >&2
+    exit 1
+}
+
+# 看門狗：編譯中壓力升到 critical 就砍掉整個 cargo 行程群組。假的 sleep（看門狗每輪呼叫）等假 cargo 起來後把壓力改成 4。
+watch_bin="$tmp/watch-bin"
+mkdir -p "$watch_bin"
+cat >"$watch_bin/sleep" <<'SH'
+#!/bin/sh
+if [ -n "${AM_TEST_LONG_CARGO:-}" ]; then
+    while [ ! -s "$AM_TEST_LONG_CARGO" ]; do "$AM_TEST_REAL_SLEEP" 0.05; done
+    printf '80 4\n' >"$WAIT_MEM_FILE"
+    exit 0
+fi
+printf '%s\n' "$$" >"$AM_TEST_WATCH_SLEEP"
+exec "$AM_TEST_REAL_SLEEP" 300
+SH
+chmod +x "$watch_bin/sleep"
+gone() {
+    local i
+    for i in $(seq 1 100); do
+        kill -0 "$1" 2>/dev/null || return 0
+        "$AM_TEST_REAL_SLEEP" 0.05
+    done
+    return 1
+}
+
+/bin/rm -f "$AM_TEST_LOCAL_CARGO_LOG"
+printf '80 1\n' >"$WAIT_MEM_FILE"
+rc=0
+output="$(PATH="$watch_bin:$PATH" AM_TEST_UNAME=Darwin AM_TEST_LONG_CARGO="$tmp/long-cargo.pid" \
+    "$ROOT/scripts/check.sh" macos-local 2>&1)" || rc=$?
+if [[ "$rc" == 0 ]]; then
+    echo "macos-local must fail when memory pressure turns critical" >&2
+    exit 1
+fi
+if [[ "$output" != *"記憶體壓力 critical，已中止 macos-local，避免整台機器卡死"* ]]; then
+    printf 'missing critical-pressure explanation: %s\n' "$output" >&2
+    exit 1
+fi
+if [[ "$output" == *"macOS tests: cargo_shim::tests"* ]]; then
+    echo "macos-local kept compiling the next cohort after a critical abort" >&2
+    exit 1
+fi
+for pid in "$(cat "$tmp/long-cargo.pid")" "$(cat "$tmp/long-cargo.pid.grandchild")"; do
+    if ! gone "$pid"; then
+        printf 'the watchdog left cargo process %s running\n' "$pid" >&2
+        kill -KILL "$pid" 2>/dev/null || true
+        exit 1
+    fi
+done
+
+# 正常結束要收掉看門狗（連它正在睡的 sleep）。
+printf '80 1\n' >"$WAIT_MEM_FILE"
+export AM_TEST_WATCH_SLEEP="$tmp/watch-sleep.pid"
+PATH="$watch_bin:$PATH" AM_TEST_UNAME=Darwin AM_TEST_CARGO_WAITS_FOR="$AM_TEST_WATCH_SLEEP" \
+    "$ROOT/scripts/check.sh" macos-local >/dev/null 2>&1 || {
+    echo "macos-local must pass when memory pressure stays normal" >&2
+    exit 1
+}
+if ! gone "$(cat "$AM_TEST_WATCH_SLEEP")"; then
+    echo "macos-local left its memory watchdog running after a normal finish" >&2
+    kill -KILL "$(cat "$AM_TEST_WATCH_SLEEP")" 2>/dev/null || true
     exit 1
 fi
 

@@ -6,7 +6,7 @@
 #   scripts/check.sh daemon     # cargo test -p agents-managerd（要先有 web/dist）
 #   scripts/check.sh ops        # shell 變數寫法的 lint，加上 scripts/*_test.sh 與 scripts/ops/*_test.sh（shell 腳本的隔離測試，假 agm／假 gh／假 sccache，不碰正式環境）
 #   scripts/check.sh ob         # 沒有被追蹤的 bytecode；OB queue/operator 與瀏覽器契約（隔離，不用登入）
-#   scripts/check.sh macos-local # shell／行程／signal 的原生 macOS 測試（不走 cargo shim）
+#   scripts/check.sh macos-local # shell／行程／signal 的原生 macOS 測試（不走 cargo shim）；開編前等可用記憶體 ≥ CHECK_MIN_FREE_MEM%（預設 30），編譯中壓力 critical 就中止（issue #1783）
 #   scripts/check.sh fmt        # cargo fmt --check（只報告，現況不乾淨）
 #   scripts/check.sh clippy     # cargo clippy（只報告，現況不乾淨）
 #   scripts/check.sh all        # 以上全部
@@ -126,8 +126,51 @@ check_daemon() {
     done
 }
 
+# 記憶體壓力等級（macOS：1=normal、2=warn、4=critical）；讀不到印空字串。WAIT_MEM_FILE 的第二欄可蓋過（測試用，跟 wait-load.sh 同一個來源）。
+mem_pressure_level() {
+    if [ -n "${WAIT_MEM_FILE:-}" ]; then
+        awk 'NR == 1 {print $2}' "${WAIT_MEM_FILE}" 2>/dev/null || true
+    else
+        sysctl -n kern.memorystatus_vm_pressure_level 2>/dev/null || true
+    fi
+}
+
+# 跑一條指令（輸出寫進 $1），旁邊起看門狗（issue #1783）：每 CHECK_MEM_WATCH_INTERVAL 秒（預設 5）看一次記憶體壓力，
+# 到 critical（4）就砍掉這條指令的整個行程群組（cargo 連同底下的 rustc／測試），失敗並說明原因。16 GB 的 Mac 編到記憶體耗盡
+# 會整台卡死到 kernel watchdog panic，寧可這輪紅。`set -m` 讓背景工作各自成一個行程群組，才砍得到整棵樹。
+run_with_pressure_watchdog() {
+    local out="$1" tripped="$1.critical" cpid wpid rc=0
+    shift
+    set -m
+    "$@" </dev/null >"$out" 2>&1 &
+    cpid=$!
+    (
+        while :; do
+            if [ "$(mem_pressure_level)" = 4 ]; then
+                : >"$tripped"
+                kill -KILL -- "-$cpid" 2>/dev/null || true
+                exit 0
+            fi
+            sleep "${CHECK_MEM_WATCH_INTERVAL:-5}"
+        done
+    ) </dev/null >/dev/null 2>&1 &
+    wpid=$!
+    set +m
+    # 背景群組收不到終端的 Ctrl-C：自己轉送，不留下孤兒 cargo。
+    trap 'kill -KILL -- "-$cpid" "-$wpid" 2>/dev/null; exit 130' INT TERM
+    wait "$cpid" 2>/dev/null || rc=$?
+    kill -KILL -- "-$wpid" 2>/dev/null || true
+    wait "$wpid" 2>/dev/null || true
+    trap - INT TERM
+    if [ -e "$tripped" ]; then
+        echo "記憶體壓力 critical，已中止 macos-local，避免整台機器卡死" >&2
+        return 1
+    fi
+    return "$rc"
+}
+
 check_macos_local() {
-    local local_cargo local_rustc local_rustdoc path_cargo filter output
+    local local_cargo local_rustc local_rustdoc path_cargo tmp rc=0
     if [ "$(uname -s)" != Darwin ]; then
         echo "macos-local tests only run on macOS（這是 Linux／其他系統，什麼都沒驗）：請在 Mac 本機跑 scripts/check.sh macos-local" >&2
         return 2
@@ -155,6 +198,19 @@ check_macos_local() {
     fi
     step "macOS native Cargo: $local_cargo"
 
+    # 記憶體閘（issue #1783）：不管有沒有設 CHECK_MAX_LOAD 都先等記憶體夠才開編（CPU 負載由上面的 CHECK_MAX_LOAD 閘管，這裡不看）。
+    step "記憶體閘：可用記憶體 ≥ ${CHECK_MIN_FREE_MEM:-30}% 且壓力 normal 才開編（最多等 ${CHECK_LOAD_TIMEOUT:-1800} 秒）"
+    bash scripts/wait-load.sh --max 999999 --min-free-mem "${CHECK_MIN_FREE_MEM:-30}" --timeout "${CHECK_LOAD_TIMEOUT:-1800}" || return $?
+
+    tmp="$(mktemp -d "${TMPDIR:-/tmp}/am-macos-local.XXXXXX")"
+    macos_local_cohorts "$local_cargo" "$local_rustc" "$local_rustdoc" "$tmp/cargo.log" || rc=$?
+    rm -rf "$tmp"
+    return "$rc"
+}
+
+macos_local_cohorts() {
+    local local_cargo="$1" local_rustc="$2" local_rustdoc="$3" log="$4" filter output
+
     # cli_update::tests is the existing process-lock suite (#455/#591); cargo_shim::tests covers
     # process trees and signals. shell::tests has a real ps/lsof smoke test under the macos_local_
     # prefix; future platform-sensitive tests in other modules use that prefix too. Every cohort
@@ -163,12 +219,13 @@ check_macos_local() {
     local filters=("cli_update::tests" "cargo_shim::tests" "macos_local_")
     for filter in "${filters[@]}"; do
         step "macOS tests: $filter"
-        if output="$(env -u AM_MODEL -u AM_EFFORT -u AM_DATA_DIR -u CARGO_BUILD_TARGET \
+        if run_with_pressure_watchdog "$log" env -u AM_MODEL -u AM_EFFORT -u AM_DATA_DIR -u CARGO_BUILD_TARGET \
             RUSTC="$local_rustc" RUSTDOC="$local_rustdoc" \
-            "$local_cargo" test --color never --locked -j 1 -p agents-managerd "$filter" -- --test-threads=1 2>&1)"; then
+            "$local_cargo" test --color never --locked -j 1 -p agents-managerd "$filter" -- --test-threads=1; then
+            output="$(cat "$log")"
             printf '%s\n' "$output"
         else
-            printf '%s\n' "$output" >&2
+            cat "$log" >&2
             return 1
         fi
         if ! printf '%s\n' "$output" | grep -Eq '^test result: ok\. [1-9][0-9]* passed;'; then
