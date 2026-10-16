@@ -131,6 +131,12 @@ pub struct SpawnBegin {
 }
 
 #[derive(Deserialize)]
+pub struct SpawnClaim {
+    pub bot_id: String,
+    pub pane_id: String,
+}
+
+#[derive(Deserialize)]
 pub struct SpawnFinish {
     pub bot_id: String,
     pub permit_id: String,
@@ -203,6 +209,28 @@ pub async fn begin(State(app): State<Arc<App>>, headers: axum::http::HeaderMap, 
         return fail(StatusCode::CONFLICT, "spawn_authority_changed", "bot host or run changed while reserving spawn; retry");
     }
     (StatusCode::OK, Json(json!({"permit_id": permit_id})))
+}
+
+/// `POST /relay/spawn/claim` (issue #1790): the shim registers that `bot_id` itself just started the agent in `pane_id`.
+/// Child attribution follows this durable fact instead of the herdr name prefix. A bot can only claim as itself:
+/// the token must be that `bot_id`'s own.
+pub async fn claim(State(app): State<Arc<App>>, headers: axum::http::HeaderMap, axum::extract::Form(body): axum::extract::Form<SpawnClaim>) -> (StatusCode, Json<Value>) {
+    let token = headers.get("X-AM-Bot-Token").and_then(|v| v.to_str().ok()).unwrap_or("");
+    let bot = match authenticated_bot(&app, &body.bot_id, token).await {
+        Ok(bot) => bot,
+        Err(response) => return response,
+    };
+    let pane_id = body.pane_id.trim();
+    if pane_id.is_empty() {
+        return fail(StatusCode::BAD_REQUEST, "pane_id_missing", "herdr did not identify the started pane");
+    }
+    match crate::spawn_hints::claim(&app, &bot.id, pane_id).await {
+        Ok(()) => (StatusCode::OK, Json(json!({"pane_id": pane_id, "claimed": true}))),
+        Err(e) => {
+            tracing::warn!(bot = %bot.id, pane = %pane_id, error = %e, "spawn claim could not be recorded");
+            fail(StatusCode::SERVICE_UNAVAILABLE, "claim_unrecorded", "spawn claim could not be recorded")
+        }
+    }
 }
 
 /// `POST /relay/spawn/finish`: record the inherited-credential pane before dropping its permit.

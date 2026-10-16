@@ -40,6 +40,8 @@ pub fn provider_matches_kind(provider: &str, kind: &str) -> bool {
 /// 認不出來就當使用者自己打的——寧可少標一次，也不要冤枉一句話。
 /// 遠端 shim 寫進 spool 的報備事件名（`herdr_shim.rs` 的 `am_spool_relay`）。
 pub const RELAY_ANNOUNCE_EVENT: &str = "AmRelayAnnounce";
+/// 遠端 shim 開完子 agent 後寫進自己 bot spool 的登記（issue #1790，`herdr_shim.rs` 的 `am_spawn_claim`）。
+pub const SPAWN_CLAIM_EVENT: &str = "AmSpawnClaim";
 /// 遠端 agm 認領 issue 後寫入自己 bot spool 的撞題檢查（issue #1468）。
 pub const CLAIM_COLLISION_EVENT: &str = "AmClaimCollisionCheck";
 /// 這一則是不是撞題檢查（#1626：收件匣的撞題 lane 與 [`process_for`] 都用它分流；`classify` 也是同一個判斷）。
@@ -137,6 +139,9 @@ pub enum HookKind {
     /// 遠端 bot 的 herdr shim 在 `agent prompt` 之前寫進自己 spool 的報備（SPEC §6.5d）：遠端沒有 `AM_PORT`，
     /// 打不到 `/relay/announce`，只能跟 hook 走同一條 spool。寄件者就是這則 body 的 bot（spool 在它自己的目錄）。
     RelayAnnounce { to_agent: String, text: String },
+    /// 遠端 bot 的 herdr shim 在 `agent start` 成功後寫進自己 spool 的登記（issue #1790）：這顆 pane 是這顆 bot 開的。
+    /// 本機走 `/relay/spawn/claim`，遠端沒有 `AM_PORT`，跟 `RelayAnnounce` 同一條 spool。
+    SpawnClaim { pane_id: String },
     /// 遠端 agm 認領票後交給 daemon 的撞題檢查（issue #1468）；耐久 hook worker 等檢查完成才 ACK。
     ClaimCollisionCheck { issue: Option<u64>, title: String, child: String, branch: Option<String> },
     Ignore(String),
@@ -154,6 +159,7 @@ impl std::fmt::Debug for HookKind {
             HookKind::SpawnHint { .. } => "SpawnHint",
             HookKind::AskAnswered(_) => "AskAnswered",
             HookKind::RelayAnnounce { .. } => "RelayAnnounce",
+            HookKind::SpawnClaim { .. } => "SpawnClaim",
             HookKind::ClaimCollisionCheck { .. } => "ClaimCollisionCheck",
             HookKind::Ignore(reason) => {
                 let _ = reason;
@@ -363,6 +369,12 @@ pub fn classify(provider: &str, p: &Value) -> HookKind {
         return match (s("to_agent"), s("text")) {
             (Some(to_agent), Some(text)) if !to_agent.trim().is_empty() && !text.trim().is_empty() => HookKind::RelayAnnounce { to_agent, text },
             _ => HookKind::Ignore("relay announce without to_agent/text".into()),
+        };
+    }
+    if p.get("hook_event_name").and_then(Value::as_str) == Some(SPAWN_CLAIM_EVENT) {
+        return match s("pane_id").map(|v| v.trim().to_string()).filter(|v| !v.is_empty()) {
+            Some(pane_id) => HookKind::SpawnClaim { pane_id },
+            None => HookKind::Ignore("spawn claim without pane_id".into()),
         };
     }
     match provider {
@@ -1692,6 +1704,11 @@ async fn process_locked_for_with_outcome<H: HookHost>(
             let from_turn = crate::lifecycle::relay_watch::sender_turn_at(app, &bot.id, &sent_at).await?;
             crate::agent_relay::announce(&host, &bot.id, &to_agent, &text, from_turn.as_deref());
             relay_backfill(app, &bot.id, from_turn.as_deref(), &to_agent, &text).await
+        }
+        // issue #1790：遠端 shim 開完子 agent 後的登記（本機走 `/relay/spawn/claim`）；只記「這顆 pane 是這顆 bot 開的」。
+        HookKind::SpawnClaim { pane_id } => {
+            crate::spawn_hints::claim(app, &bot.id, &pane_id).await?;
+            Ok(())
         }
         HookKind::ClaimCollisionCheck { issue, title, child, branch } => {
             app.check_claim_collision(crate::judge::collision::ClaimAsk {
@@ -5080,6 +5097,21 @@ mod external_claim_tests {
 
         let recorded: Option<String> =
             sqlx::query_scalar("SELECT bot_id FROM spawn_hints WHERE pane_id = 'w1:p2'").fetch_optional(&env.app.db).await.unwrap();
+        assert_eq!(recorded.as_deref(), Some(bot.id.as_str()));
+    }
+
+    /// issue #1790：遠端 shim 開完子 agent 寫進 spool 的 `AmSpawnClaim`，`process` 記成「這顆 pane 是送這則的 bot 開的」；
+    /// 沒有 pane_id 的丟掉。不需要活著的 run、不動 Turn。
+    #[tokio::test]
+    async fn a_spooled_spawn_claim_is_recorded_against_the_bot_that_wrote_it() {
+        let env = tt::env().await;
+        let bot = tt::claude_bot(&env.app, &env.project_id, "alfa").await;
+        assert!(matches!(classify("claude", &json!({"hook_event_name": "AmSpawnClaim"})), HookKind::Ignore(_)), "沒有 pane_id 不收");
+
+        process(&env.app, &stop_failure(&bot.id, json!({"hook_event_name": "AmSpawnClaim", "pane_id": "w1:p7"}))).await.unwrap();
+
+        let recorded: Option<String> =
+            sqlx::query_scalar("SELECT bot_id FROM spawn_claims WHERE pane_id = 'w1:p7'").fetch_optional(&env.app.db).await.unwrap();
         assert_eq!(recorded.as_deref(), Some(bot.id.as_str()));
     }
 

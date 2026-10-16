@@ -331,6 +331,7 @@ fn rules() -> Vec<Rule> {
         rule("PATCH", "/api/bots/{id}/stop", Expect::Forbidden, None),
         rule("DELETE", "/api/bots/{id}/stop", Expect::Forbidden, None),
         rule("POST", "/relay/spawn/finish", Expect::Allow, None),
+        rule("POST", "/relay/spawn/claim", Expect::Allow, None),
         rule("GET", "/api/supervisor/start", Expect::Forbidden, None),
         rule("POST", "/api/supervisor/start", Expect::Forbidden, None),
         rule("PUT", "/api/supervisor/start", Expect::Forbidden, None),

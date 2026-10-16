@@ -1566,6 +1566,81 @@
         assert!(!sent.contains("/relay/spawn/finish"), "失敗沒有新 pane，不能 finish：{sent}");
     }
 
+    /// issue #1790：`agent start` 成功後，shim 一律向 daemon 登記「這顆 pane 是我（`AM_BOT_ID`）開的」，
+    /// daemon 之後以它認 parent，不看 herdr 名字前綴。
+    #[test]
+    fn a_successful_agent_start_registers_the_pane_as_this_bots_own() {
+        let s = Sandbox::new();
+        let log = curl_log(&s);
+        let env = [
+            ("AM_AGENT_NAME", "parent"),
+            ("AM_BOT_ID", "b1"),
+            ("AM_HOOK_TOKEN", "tok"),
+            ("AM_PORT", "7788"),
+            ("HERDR_PANE_ID", "w1:p0"),
+            ("TMPDIR", s.dir.to_str().unwrap()),
+        ];
+        let (out, err, rc) = s.run_full(&env, &["agent", "start", "kid", "--pane", "w1:p1"]);
+        assert_eq!(rc, 0, "{out:?} {err}");
+        let sent = std::fs::read_to_string(&log).unwrap();
+        let claim: Vec<&str> = sent.lines().filter(|l| l.contains("/relay/spawn/claim")).collect();
+        assert_eq!(claim.len(), 1, "登記一次：{sent}");
+        assert!(claim[0].contains("bot_id=b1") && claim[0].contains("pane_id=w1:p1"), "{}", claim[0]);
+    }
+
+    /// issue #1790：登記失敗（daemon 回 5xx、連不上）只印 warn，`agent start` 照樣成功。
+    #[test]
+    fn a_failed_spawn_claim_does_not_fail_agent_start() {
+        let s = Sandbox::new();
+        s.install_fake_curl(
+            "case \"$*\" in\n\
+               */relay/spawn/begin*) printf '{\"permit_id\":\"test-permit\"}\\n200'; exit 0 ;;\n\
+               */relay/spawn/finish*) printf '{\"registered\":true}\\n200'; exit 0 ;;\n\
+               */relay/spawn/claim*) printf '{}\\n503'; exit 0 ;;\n\
+             esac\n",
+        );
+        let env = [
+            ("AM_AGENT_NAME", "parent"),
+            ("AM_BOT_ID", "b1"),
+            ("AM_HOOK_TOKEN", "tok"),
+            ("AM_PORT", "7788"),
+            ("HERDR_PANE_ID", "w1:p0"),
+            ("TMPDIR", s.dir.to_str().unwrap()),
+        ];
+        let (out, err, rc) = s.run_full(&env, &["agent", "start", "kid", "--pane", "w1:p1"]);
+        assert_eq!(rc, 0, "登記失敗不能讓 start 失敗：{out:?} {err}");
+        assert!(err.contains("登記") && err.contains("w1:p1"), "要有一行 warn：{err}");
+    }
+
+    /// issue #1790：遠端 bot（沒有 `AM_PORT`）打不到 daemon，登記改寫進自己 bot 的 hook spool（跟報備同一條路）。
+    #[test]
+    fn a_remote_bots_agent_start_spools_a_spawn_claim() {
+        let s = Sandbox::new();
+        let log = curl_log(&s);
+        let home = s.dir.join("home");
+        let spool = home.join(".config/agents-manager/bots/B-REMOTE/hook-spool.d");
+        std::fs::create_dir_all(spool.parent().unwrap()).unwrap();
+        let home_s = home.to_string_lossy().to_string();
+        let env = [
+            ("HOME", home_s.as_str()),
+            ("AM_AGENT_NAME", "parent"),
+            ("AM_BOT_ID", "B-REMOTE"),
+            ("AM_KIND", "claude"),
+            ("AM_HOOK_TOKEN", "tok"),
+            ("HERDR_PANE_ID", "w1:p0"),
+            ("TMPDIR", s.dir.to_str().unwrap()),
+        ];
+        let (out, err, rc) = s.run_full(&env, &["agent", "start", "kid", "--pane", "w1:p1"]);
+        assert_eq!(rc, 0, "{out:?} {err}");
+        let files: Vec<_> = std::fs::read_dir(&spool).unwrap().map(|e| e.unwrap().path()).filter(|p| p.extension().is_some_and(|x| x == "json")).collect();
+        assert_eq!(files.len(), 1, "一則登記：{files:?}");
+        let body: serde_json::Value = serde_json::from_str(std::fs::read_to_string(&files[0]).unwrap().trim()).unwrap();
+        assert_eq!(body["bot_id"], "B-REMOTE");
+        assert_eq!(body["payload"]["hook_event_name"], "AmSpawnClaim");
+        assert_eq!(body["payload"]["pane_id"], "w1:p1");
+        assert!(!std::fs::read_to_string(&log).unwrap_or_default().contains("/relay/spawn/claim"), "遠端不打 curl");
+    }
+
     /// #664：herdr 還在跑時被中斷，trap 也要 abort。
     #[test]
     fn an_interrupted_agent_start_releases_the_spawn_permit() {

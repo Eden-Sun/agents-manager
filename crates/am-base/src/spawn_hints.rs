@@ -139,3 +139,50 @@ pub async fn consume(app: &impl crate::capabilities::Db, host: &str, pane_id: &s
 pub async fn prune_stale(app: &impl crate::capabilities::Db) {
     let _ = sqlx::query("DELETE FROM spawn_hints WHERE created_at < ?").bind(cutoff()).execute(app.db()).await;
 }
+
+/// 新登記的 claim 在這段時間內不因「pane 不在 snapshot 裡」被清：snapshot 可能比 `agent start` 早拍。
+pub const CLAIM_GRACE_SECS: i64 = 2 * 60;
+
+/// issue #1790：shim 開子 agent 成功後登記「這個 pane 是 `bot_id` 自己開的」（本機走 `/relay/spawn/claim`，遠端寫 spool
+/// 的 `AmSpawnClaim`）。比 [`record`] 的 hint 可靠——不靠 bot 把 herdr 的 JSON 留在 stdout，也不過期、認領後不消耗：
+/// pane 還活著就一直算那顆 bot 的，所以 child 之後被改名也不會因名字前綴換 parent。pane id 只在各自的 host 內唯一，
+/// 同一個 `(host, pane_id)` 再登記＝重試或 id 被回收給新 pane（新的才是真的）。
+pub async fn claim(app: &impl crate::capabilities::Db, bot_id: &str, pane_id: &str) -> anyhow::Result<()> {
+    let host = db::bot_host(app.db(), bot_id).await?;
+    sqlx::query(
+        "INSERT INTO spawn_claims (pane_id, host, bot_id, created_at) VALUES (?,?,?,?)
+         ON CONFLICT(host, pane_id) DO UPDATE SET bot_id=excluded.bot_id, created_at=excluded.created_at",
+    )
+    .bind(pane_id)
+    .bind(&host)
+    .bind(bot_id)
+    .bind(db::now())
+    .execute(app.db())
+    .await?;
+    Ok(())
+}
+
+/// 這台主機所有的 claim，`pane_id -> bot_id`。
+pub async fn claims_for_host(app: &impl crate::capabilities::Db, host: &str) -> anyhow::Result<HashMap<String, String>> {
+    let rows: Vec<(String, String)> =
+        sqlx::query_as("SELECT pane_id, bot_id FROM spawn_claims WHERE host = ?").bind(host).fetch_all(app.db()).await?;
+    Ok(rows.into_iter().collect())
+}
+
+/// 已經不在 herdr 裡的 pane 的 claim 要清掉：herdr 重開後 pane id 會被回收，留著會把使用者新開的 agent 認給舊的 bot。
+/// `live_panes` 是這一輪 snapshot 的全部 pane id；空的（讀不到、不是真的一顆都沒有）就一個都不清，剛登記的也先留著。
+pub async fn prune_dead_claims(app: &impl crate::capabilities::Db, host: &str, live_panes: &[String]) {
+    if live_panes.is_empty() {
+        return;
+    }
+    let young = (chrono::Utc::now() - chrono::Duration::seconds(CLAIM_GRACE_SECS)).to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
+    let rows: Vec<(String,)> = sqlx::query_as("SELECT pane_id FROM spawn_claims WHERE host = ? AND created_at < ?")
+        .bind(host)
+        .bind(&young)
+        .fetch_all(app.db())
+        .await
+        .unwrap_or_default();
+    for (pane_id,) in rows.into_iter().filter(|(p,)| !live_panes.contains(p)) {
+        let _ = sqlx::query("DELETE FROM spawn_claims WHERE host = ? AND pane_id = ?").bind(host).bind(&pane_id).execute(app.db()).await;
+    }
+}

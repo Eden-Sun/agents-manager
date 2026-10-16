@@ -1772,7 +1772,7 @@ herdr server 重啟會讓**所有** pane 同時消失。照 §6.5 的規則，�
 
 一個 bot 一個 tab。對帳的逐 bot 迴圈走完後，`agent.list` 裡**沒有 bot 認領**的 agent 依序試三條線索：
 
-1. **spawn hint（issue #94，最優先）**：`spawn_hints` 表裡 `(host, pane_id)` 對得上的那筆 → hint 記的那顆 bot（見下方）。
+1. **登記與 spawn hint（最優先）**：`(host, pane_id)` 在 `spawn_claims`（issue #1790，shim 登記）或 `spawn_hints`（issue #94，hook 撈 stdout）裡對得上 → 記的那顆 bot（見下方）；兩邊不一致時 claim 為準。
 2. **血緣**：它的 `tab_id` 等於某 bot 活動 run 的 `tab_id` → 那顆 bot 的子 agent（子 pane 從父 pane split 出來，必然在父的 tab 裡，不需要 agent 配合）。
    同一 tab 有多顆 bot（父 + 已認領的子）時取名字前綴最長者，平手取非 `child`——孫代因此掛在子代下面。
 3. **名字前綴**：`<某 bot 的 agent 名>-<字尾>`，取最長匹配。跨 tab 只有這條。
@@ -1783,6 +1783,15 @@ herdr server 重啟會讓**所有** pane 同時消失。照 §6.5 的規則，�
 parent 算出來是 0，連字尾都取不到，退而用完整 herdr agent name 建 bot，於是又多長出重複 bot。`spawn_hints` 直接把「這個 pane_id 是
 哪顆 bot 剛開的」這個事實排在血緣前面，繞過整個「同 tab 就算」的推斷，從根本上不讓鏈條長出來。三條都沒中就跳過。
 **同 tab 但名字對不上時以名字為準**（2026-10-01 使用者：cf-優化在 verify 的 tab 裡開了 `<cf-優化>-memleak`，被掛到 verify 底下，側欄看不到）：同 tab 的候選前綴分數是 0、而別處有一顆的 agent 名正是它的前綴，就掛到那一顆；同 tab 而且名字也對得上的照舊優先，誰的前綴都不是才退回同 tab。順序：spawn hint → 同 tab 且名字對得上 → 名字前綴 → 同 tab。
+
+**shim 登記（`spawn_claims`，issue #1790）**：2026-10-16 m4p 的 fork `ops-交貨` 把自己 `agent rename` 成 `ops` 的前綴，開的三顆子 agent 被名字前綴掛到原 bot `ops` 底下；
+而那條 `agent start` 的 stdout 被 pipe 到只剩 `agent_started`，hook 撈不到 JSON、沒有 hint。所以歸屬不再只靠名字或 bot 把輸出留在 stdout：herdr shim 在 `agent start` **成功後一律**登記「這顆 pane 是 `$AM_BOT_ID` 開的」，
+失敗只印 warn、不讓 start 失敗。本機（有 `AM_PORT`）打 `POST /relay/spawn/claim`（API.md；token 必須是 body `bot_id` 自己的，daemon 核對，不能替別的 bot 登記）；
+遠端（有 bot 身分、沒有 `AM_PORT`，§11.4）寫一則 `{"hook_event_name":"AmSpawnClaim","pane_id"}` 進自己 bot 的 `hook-spool.d/`（跟 `AmRelayAnnounce` 同一條路，`python3` 寫暫存檔再 rename；沒有 bot 目錄或 python3 就只印 warn），daemon 收 spool 時記成那個 bot 的 claim。
+claim 存在 `spawn_claims((host, pane_id) 唯一, bot_id, created_at)`，**不過期、認領成功也不消耗**：同一個 `(host, pane_id)` 再登記以新的為準（pane id 被回收）；每輪 `reconcile_host` 開頭把已經不在 herdr snapshot 裡的 pane 的 claim 清掉
+（登記不到兩分鐘的、snapshot 一顆 pane 都沒有的都不清）。認領時 claim 與 hint 合成同一張 `pane_id -> bot_id` 表餵進規則 1。
+**改名不換 parent**：child 已經有 parent 之後，它的 herdr 名字被改掉時，只要 claim／hint 說那顆 pane 是它的 parent 開的（pane 仍是 run 記的那一顆），就視為同一顆 child 改名——run 留著、`runs.agent_name` 換成新名字，
+不當成「agent 不見」退休，新名字也不會再被名字前綴認成別顆 parent 的新 child。沒有登記的 pane 被改名照舊（run 收掉）。
 
 **spawn hint 從哪來**：頂層 bot 自己的 `PostToolUse` hook（`matcher: "Bash"`，issue #94）——它自己的 Bash 工具跑
 `herdr pane split`／`agent start` 時，那條指令的 stdout 是 herdr 自己回的一個或多個 JSON-RPC 回應（`{"id":"cli:pane:split",
@@ -3152,7 +3161,7 @@ child 把長工作（遠端 cargo）丟到背景就結束回合：agent 真的 i
   daemon 原地重啟 child 也不重建 env，所以對 child 輪替回 409 `child_uses_parent_credential`；若母 bot 有仍活著的 child／grandchild 後代 pane 繼承憑證，輪替亦回 409 `live_children_use_credential` 並列出依賴後代，不改 token、不重啟。child 以母 bot 的名義呼叫 API（跟它本來就能替母 bot 做事同一條界線）。Service token 在 `<data_dir>/service-tokens/` 建立（目錄 0700、token 檔 0600），重啟保持不變；`/api/capabilities` 的
   `service_principals` 標記代表 launchd clients 不得在憑證遺失時退回 User。service scope 與固定維運 route 見 API.md。
   開發版（`App::allow_lan`，跟 bind `0.0.0.0` 同一個判斷）對端與 `Origin` 都直接放行，同網段誰都拿得到 token：使用者裁示保留（`e7392dd` 撤掉配對碼時記明）。
-- `/hook/*`、`/relay/announce`、`/relay/pane`、`/relay/spawn/begin`、`/relay/spawn/finish`、`/relay/spawn/abort` 驗 **per-bot** `X-AM-Bot-Token`。
+- `/hook/*`、`/relay/announce`、`/relay/pane`、`/relay/spawn/begin`、`/relay/spawn/finish`、`/relay/spawn/abort`、`/relay/spawn/claim` 驗 **per-bot** `X-AM-Bot-Token`。
   shim 在建立會繼承 bot proof 的 pane／child agent 前取得 spawn permit；permit 捕獲目前 host、session 與可選的 active run；managed shell 沒有 active run 時仍可取得 permit，這允許母 CLI 停止後、同 host/session 上仍執行的 child 繼續建立 pane。輪替在讀 descendants 前立起同 daemon 共用的 fence。permit 未完成且未過期（60 秒；`agent start` 帶 `--timeout` 時涵蓋它再加 30 秒、上限 330 秒）時輪替回 409，fence 存在時 shim 不呼叫 herdr；`finish` 確認 host、session 與 active run 仍符合 permit（run 仍缺席可完成；run 出現或 ID 改變、host/session 改變則拒絕），再用捕獲的 herdr session 呼叫 `pane.get` 確認 pane 存在（空 shell pane 不要求已有 agent），原子綁定唯一 `pane_id` 並登記到 `panes` inventory 才釋放 permit。找不到 pane 時回 503 並保留 permit，允許相同 pane id 重試。同一 permit 並行重送不能登記第二個 pane，finish 註冊期間的 abort 不會釋放它；登記失敗保留 pane 綁定，只有相同 pane id 可重試（不同 id 回 409）。herdr 失敗且沒有新 pane id、或 shim 被中斷，走 `POST /relay/spawn/abort` 釋放（#664）。Bot 或 DB 讀取失敗時 spawn／rotation 都 fail closed。遠端主機上的 bot（有 bot 身分、沒有 `AM_PORT`，§11.4）不走 fence：問不到 daemon 不是「確認不了」，子 pane 照開、不打 curl（遠端子 pane 本來也登記不到 `panes`）。
 
 ### 7.3 WebSocket `/ws`
@@ -3457,7 +3466,7 @@ AGM-DM-GRUP 專案（AGM、AGM-responder 等 bot）搬到 agm-host 本機跑時�
 | `supervisor_incidents` | 只搬 `resolved`；開著的由目標自己的探測重新判定 |
 | `supervisor_approvals` | 只搬已結案的；`pending`／`approved` 授權的是來源那台的動作 |
 | `supervisor_inbox`（Mac 上約 96 MB，daemon 不清） | 沒處理完的（`state <> 'handled'`）＋最近 `--inbox-days` 天（`created_at` 先正規化成毫秒格式再比，舊版寫的秒格式才比得對），再補 `merged_into` 指到的。**搬過去的未處理事件不再通知**：寫成 `gave_up`（還沒結案、協調者看得到、daemon 不再推；直接寫成 gave_up 不會觸發「放棄補送就叫醒另一個角色」，那只發生在 delivered→gave_up 的當下），`notify_error` 註明是搬過來的 |
-| 不搬 | `supervisor_leases`（開機會強制釋放、帶 token）、`bot_sleeps`、`intents`、`spawn_hints`、`judge_shadow`、`fork_ops`：這顆 daemon 自己的執行期狀態 |
+| 不搬 | `supervisor_leases`（開機會強制釋放、帶 token）、`bot_sleeps`、`intents`、`spawn_hints`、`spawn_claims`、`judge_shadow`、`fork_ops`：這顆 daemon 自己的執行期狀態 |
 
 **撞唯一索引**（交辦／核准／任務的 `client_request_id`、inbox 的 `event_key`——`persona:{版本}:changed`、`ops_alert:…:{小時}` 這類兩邊可能同名、requests 的 `source_key`）：
 跳過那一筆、列進報告的 `skipped_unique`，不整批中止；被跳過的交辦，它的驗收一起跳過。已存在的 id 照舊跳過，所以重跑冪等（重跑什麼都沒變就不再寫 transfer 那筆）。

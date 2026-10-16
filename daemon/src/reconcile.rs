@@ -470,6 +470,20 @@ async fn may_retire_child(app: &impl ReconcileHostEnv, host: &str, bot: &db::Bot
     }
 }
 
+/// issue #1790：child 的 herdr 名字被改掉（`agent rename`）時，它的 run 還在原本那顆 pane、佔著 pane 的 agent 換了名字。
+/// 登記（claim／hint）說這顆 pane 是這顆 child 的 parent 開的，就是同一個 child 改名；回新名字。
+/// 不然 run 會被當成「agent 不見」收掉、新名字再被名字前綴認成別顆 parent 的新 child。
+fn renamed_claimed_child(
+    bot: &db::Bot,
+    occupant: &crate::herdr::AgentInfo,
+    owners: &Result<HashMap<String, String>>,
+    claimed: &std::collections::HashSet<String>,
+) -> Option<String> {
+    let parent_id = bot.parent_bot_id.as_deref().filter(|_| bot.managed_by == "child")?;
+    let name = occupant.name.as_deref().filter(|n| !n.is_empty() && !claimed.contains(*n))?;
+    (owners.as_ref().ok()?.get(&occupant.pane_id).map(String::as_str) == Some(parent_id)).then(|| name.to_string())
+}
+
 /// A missing child is a deliberate replacement only when its parent still has a live run and
 /// herdr lists an unclaimed successor that the normal child-adoption pass will attribute to it.
 /// A hint naming a different parent is authoritative and blocks the weaker tab/name fallbacks.
@@ -624,6 +638,7 @@ pub(crate) async fn reconcile_host_locked(app: &impl ReconcileHostEnv, host: &st
     // still-running parent launched the pane which this same pass will adopt as its successor.
     // Keep read failure distinct from an empty result; adoption is already fail-closed below.
     app.prune_stale_spawn_hints().await;
+    crate::spawn_hints::prune_dead_claims(app, host, &live_panes).await;
     let spawn_hints = app.spawn_hints_for_host(host).await;
     // Unclaimed agent names are strangers, candidates for someone's child (below).
     let mut claimed: std::collections::HashSet<String> = std::collections::HashSet::new();
@@ -821,6 +836,24 @@ pub(crate) async fn reconcile_host_locked(app: &impl ReconcileHostEnv, host: &st
                                 .bind(&run.id)
                                 .execute(app.db())
                                 .await?;
+                            claimed.insert(name);
+                            app.emit_bot_status(&bot.id).await;
+                            continue;
+                        }
+                        // issue #1790：child 自己（或有人）把 herdr 名字改掉，pane 還是同一顆、登記的開的人也還是它的 parent：
+                        // 這是改名，不是 agent 不見——run 留著、記新名字，不退休也不讓名字前綴重新認 parent。
+                        Ok(Some(occupant)) if renamed_claimed_child(&bot, &occupant, &spawn_hints, &claimed).is_some() => {
+                            let name = occupant.name.clone().unwrap_or_default();
+                            let status = occupant.agent_status.normalized().as_str().to_string();
+                            sqlx::query("UPDATE runs SET agent_name=?, agent_status=?, state=CASE WHEN state='starting' OR (state='stopping' AND ?=0) THEN 'running' ELSE state END WHERE id=?")
+                                .bind(&name)
+                                .bind(&status)
+                                .bind(preserve_stopping)
+                                .bind(&run.id)
+                                .execute(app.db())
+                                .await?;
+                            tracing::info!(host, bot = %bot.name, run = %run.id, pane = %p, agent = %name,
+                                "reconcile: a claimed child's agent was renamed in place; run kept, parent unchanged");
                             claimed.insert(name);
                             app.emit_bot_status(&bot.id).await;
                             continue;
@@ -4472,6 +4505,111 @@ mod compat_tests {
     }
 
     /// A run whose agent herdr no longer lists still exits, tab or not.
+    /// issue #1790（2026-10-16 m4p）：fork 出來的 `ops-交貨` 開的子 agent 被名字前綴掛到原 bot `ops` 底下。shim 登記了
+    /// 「這顆 pane 是 B 開的」（claim）就以它為準，優先於名字前綴；而且 claim 不消耗——child 之後被改名成 A 的前綴，
+    /// 還是同一顆 child、同一個 parent（不被收掉、也不被名字前綴重新認給 A）。
+    #[tokio::test]
+    async fn a_claimed_child_keeps_its_parent_against_the_name_prefix_and_a_later_rename() {
+        let env = tt::env().await;
+        let app = env.app.clone();
+        let client = crate::herdr::HerdrClient::new(env.dir.join("data/herdr.sock"));
+        let (ws, root) = client.workspace_create("/tmp/p", "proj", json!({})).await.unwrap();
+        let tab_b = client.tab_create(&ws.workspace_id, "/tmp/p", "b", json!({})).await.unwrap();
+        let kids = client.tab_create(&ws.workspace_id, "/tmp/p", "kids", json!({})).await.unwrap();
+
+        let a = a_bot(&env, "alfa").await;
+        let b = a_bot(&env, "bravo").await;
+        let (a_agent, b_agent) = (crate::config::agent_name("proj", &a), crate::config::agent_name("proj", &b));
+        for (bot, agent, pane) in [(&a, &a_agent, &root), (&b, &b_agent, &tab_b)] {
+            sqlx::query(
+                "INSERT INTO runs (id, bot_id, state, agent_status, workspace_id, pane_id, tab_id, agent_name, herdr_session, started_at)
+                 VALUES (?,?,'running','idle',?,?,?,?,'test',?)",
+            )
+            .bind(db::ulid())
+            .bind(bot)
+            .bind(&ws.workspace_id)
+            .bind(&pane.pane_id)
+            .bind(&pane.tab_id)
+            .bind(agent)
+            .bind(db::now())
+            .execute(&app.db)
+            .await
+            .unwrap();
+        }
+        let agent_json = |name: &str, pane: &crate::herdr::PaneInfo| {
+            json!({"name": name, "agent": "claude", "agent_status": "idle",
+                   "workspace_id": ws.workspace_id, "tab_id": pane.tab_id, "pane_id": pane.pane_id, "cwd": "/tmp/p"})
+        };
+        let kid_name = format!("{a_agent}-kid");
+        *env.herdr.agents.lock().unwrap() = vec![agent_json(&a_agent, &root), agent_json(&b_agent, &tab_b), agent_json(&kid_name, &kids)];
+        // B 開的：名字前綴說是 A、同 tab 也沒有任何一顆 bot——沒有 claim 就會掛到 A。
+        crate::spawn_hints::claim(&app, &b, &kids.pane_id).await.unwrap();
+
+        super::reconcile_host(&app, crate::config::LOCAL_HOST).await.unwrap();
+        let kids_of = |parent: String| {
+            let app = app.clone();
+            async move {
+                sqlx::query_as::<_, db::Bot>("SELECT * FROM bots WHERE parent_bot_id = ? AND deleted_at IS NULL").bind(parent).fetch_all(&app.db).await.unwrap()
+            }
+        };
+        let adopted = kids_of(b.clone()).await;
+        assert_eq!(adopted.len(), 1, "掛在登記的 B 底下：{adopted:?}");
+        assert!(kids_of(a.clone()).await.is_empty(), "不是名字前綴說的 A");
+        let kid = adopted[0].clone();
+        let claims = crate::spawn_hints::claims_for_host(&app, crate::config::LOCAL_HOST).await.unwrap();
+        assert_eq!(claims.get(&kids.pane_id), Some(&b), "認領之後 claim 還在");
+
+        // 之後被改名成別的前綴（還是 A 的）：同一顆 child、同一個 parent，run 記新名字。
+        let renamed = format!("{a_agent}-renamed");
+        *env.herdr.agents.lock().unwrap() = vec![agent_json(&a_agent, &root), agent_json(&b_agent, &tab_b), agent_json(&renamed, &kids)];
+        super::reconcile_host(&app, crate::config::LOCAL_HOST).await.unwrap();
+
+        let all = all_children(&app).await;
+        assert_eq!(all.len(), 1, "沒有收掉、也沒有多長一顆：{all:?}");
+        assert_eq!((all[0].id.as_str(), all[0].parent_bot_id.as_deref()), (kid.id.as_str(), Some(b.as_str())), "同一顆 child、同一個 parent");
+        let run = db::active_run(&app.db, &kid.id).await.unwrap().expect("run 沒有被當成 agent 不見而收掉");
+        assert_eq!(run.agent_name.as_deref(), Some(renamed.as_str()), "run 記新名字");
+        assert_eq!(run.pane_id.as_deref(), Some(kids.pane_id.as_str()));
+    }
+
+    /// 對照（issue #1790）：沒有登記的 pane 被改名，行為照舊——run 當成 agent 不見而收掉（不因為這次改動多留任何 run）。
+    #[tokio::test]
+    async fn an_unclaimed_rename_is_still_treated_as_the_agent_being_gone() {
+        let env = tt::env().await;
+        let app = env.app.clone();
+        let client = crate::herdr::HerdrClient::new(env.dir.join("data/herdr.sock"));
+        let (ws, root) = client.workspace_create("/tmp/p", "proj", json!({})).await.unwrap();
+        let parent = a_bot(&env, "alfa").await;
+        let parent_agent = crate::config::agent_name("proj", &parent);
+        let kid_pane = client.tab_create(&ws.workspace_id, "/tmp/p", "kids", json!({})).await.unwrap();
+        let (_kid, kid_run) = a_child(&env, &parent, "kid", &format!("{parent_agent}-kid"), &ws.workspace_id, &kid_pane.tab_id, &kid_pane.pane_id).await;
+        let agent_json = |name: &str, pane: &crate::herdr::PaneInfo| {
+            json!({"name": name, "agent": "claude", "agent_status": "idle",
+                   "workspace_id": ws.workspace_id, "tab_id": pane.tab_id, "pane_id": pane.pane_id, "cwd": "/tmp/p"})
+        };
+        sqlx::query(
+            "INSERT INTO runs (id, bot_id, state, agent_status, workspace_id, pane_id, tab_id, agent_name, herdr_session, started_at)
+             VALUES (?,?,'running','idle',?,?,?,?,'test',?)",
+        )
+        .bind(db::ulid())
+        .bind(&parent)
+        .bind(&ws.workspace_id)
+        .bind(&root.pane_id)
+        .bind(&root.tab_id)
+        .bind(&parent_agent)
+        .bind(db::now())
+        .execute(&app.db)
+        .await
+        .unwrap();
+        *env.herdr.agents.lock().unwrap() =
+            vec![agent_json(&parent_agent, &root), agent_json(&format!("{parent_agent}-other"), &kid_pane)];
+
+        super::reconcile_host(&app, crate::config::LOCAL_HOST).await.unwrap();
+
+        let state: String = sqlx::query_scalar("SELECT state FROM runs WHERE id = ?").bind(&kid_run).fetch_one(&app.db).await.unwrap();
+        assert_eq!(state, "exited", "沒有登記，改名照舊視為 agent 不見");
+    }
+
     #[tokio::test]
     async fn a_run_whose_agent_is_gone_still_exits() {
         let env = tt::env().await;
