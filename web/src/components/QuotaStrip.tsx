@@ -315,15 +315,32 @@ function Bar({
   critical: boolean
   mark: number | null
   markTitle?: string
-  /** 快回來的那條：右邊的百分比換成倒數（2026-09-14 使用者）；這時**量表條也不畫**（2026-09-17 使用者：
-   *  剩不到 10% 的條又短又細，看不出東西，只要數字），百分比照樣印。 */
+  /** 快回來的那條：右邊的百分比換成倒數（2026-09-14 使用者）；條照畫（2026-10-16 使用者取代 09-17「倒數列不畫條」），
+   *  順序是條、倒數、百分比。 */
   instead?: ReactNode
 }) {
   const lv = levelOf({ low, critical })
-  // 條拿掉、數字留著（同日使用者：「雖然除去條，但也要數字」）：倒數在前，百分比照舊留在最右那一欄。
+  // 剩量和重置刻度都在 10% 以下：整條改成 0–10% 的刻度（2026-10-16 使用者：「低於 10% 時 scale 至 1–10% 更好讀」）。
+  const zoom = pct !== null && pct < 10 && (mark === null || mark < 10)
+  const k = zoom ? 10 : 1
+  const bar = (
+    <span className={`quota-bar-wrap${zoom ? ' zoomed' : ''}`}>
+      <span className={`quota-bar ${lv}${pct === null ? ' nodata' : ''}`}>
+        <span className="quota-bar-fill" style={{ width: pct === null ? '0%' : `${Math.min(100, pct * k)}%` }} />
+      </span>
+      {mark !== null ? <span className="quota-bar-mark" style={{ left: `${Math.min(100, mark * k)}%` }} title={markTitle} /> : null}
+      {/* 不能只靠條長變化讓人看出放大了：旁邊掛一個字（UI-DECISIONS：狀態不只靠顏色或形狀）。 */}
+      {zoom ? (
+        <sup className="quota-bar-zoom" title="刻度放大：整條＝10%">
+          ×10
+        </sup>
+      ) : null}
+    </span>
+  )
   if (instead)
     return (
       <span className="quota-bar-row countdown">
+        {bar}
         {instead}
         {/* 倒數那列旁邊是 `21h22` 這種數字，裸的 `0` 讀不出是百分比：這裡帶 `%`（2026-10-02 使用者）。 */}
         <span className={`quota-bar-pct ${lv}${pct === null ? ' nodata' : ''}`} aria-hidden="true">
@@ -333,19 +350,11 @@ function Bar({
     )
   return (
     <span className="quota-bar-row">
-      <span className="quota-bar-wrap">
-        <span className={`quota-bar ${lv}${pct === null ? ' nodata' : ''}`}>
-          <span className="quota-bar-fill" style={{ width: pct === null ? '0%' : `${pct}%` }} />
-        </span>
-        {mark !== null ? <span className="quota-bar-mark" style={{ left: `${mark}%` }} title={markTitle} /> : null}
+      {bar}
+      {/* 數字一律印（UI-DECISIONS：百分比始終保留；2026-09-09 使用者截圖）。 */}
+      <span className={`quota-bar-pct ${lv}${pct === null ? ' nodata' : ''}`} aria-hidden="true">
+        {pct === null ? '—' : fmtPct(pct)}
       </span>
-      {/* 數字一律印（UI-DECISIONS：百分比始終保留；2026-09-09 使用者截圖）。歸零那條例外：
-          0 不會再變，換成「幾點回來 · 還有多久」才是這時唯一還在動的數字。 */}
-      {instead ?? (
-        <span className={`quota-bar-pct ${lv}${pct === null ? ' nodata' : ''}`} aria-hidden="true">
-          {pct === null ? '—' : fmtPct(pct)}
-        </span>
-      )}
     </span>
   )
 }
