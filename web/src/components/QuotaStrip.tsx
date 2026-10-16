@@ -3,7 +3,6 @@ import { QUOTA_FIT_START, nextQuotaFit, withFreshNeed } from '../lib/quotaLayout
 import type { QuotaFitState } from '../lib/quotaLayout'
 import { measureQuotaAvail, measureQuotaRow } from '../lib/quotaMeasure'
 import { Fragment, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
-import type { ReactNode } from 'react'
 import type { BotKind, Identity, KindQuota, QuotaLimitHit, QuotaMap, QuotaResetCredits, QuotaWindow } from '../api/types'
 import { LOCAL_HOST, quotaKey } from '../api/types'
 import { identityPrefKey } from '../api'
@@ -308,29 +307,27 @@ function Bar({
   critical,
   mark,
   markTitle,
-  instead,
-  sharedReset,
+  unit,
 }: {
   pct: number | null
   low: boolean
   critical: boolean
   mark: number | null
   markTitle?: string
-  /** 快回來的那條：右邊的百分比換成倒數（2026-09-14 使用者）；條照畫（2026-10-16 使用者取代 09-17「倒數列不畫條」），
-   *  順序是條、倒數、百分比。 */
-  instead?: ReactNode
-  /** 這一列的倒數由旁邊跨列的共用倒數負責（7d 與 F 同一刻重置）：不帶倒數，只帶百分比（帶 `%`，旁邊沒有別的數字）。 */
-  sharedReset?: boolean
+  /** 百分比帶 `%`：這一列在倒數模式，底下那一行寫的是時間，裸的 `0` 讀不出是百分比（2026-10-02 使用者）。 */
+  unit?: boolean
 }) {
   const lv = levelOf({ low, critical })
-  // 剩量和重置刻度都在 10% 以下：改畫 10 個小格，每格 1%（2026-10-16 第二版：×10 連續條在 3% 只剩幾 px，0% 是空的）。
-  const cells = pct !== null && pct < 10 && (mark === null || mark < 10)
-  const on = pct === null ? 0 : Math.round(pct)
-  const bar = cells ? (
-    <span className="quota-bar-wrap quota-cells" role="img" aria-label={`剩 ${fmtPct(pct!)}%（每格 1%）`} title={`剩 ${fmtPct(pct!)}%（每格 1%）`}>
-      {Array.from({ length: 10 }, (_, i) => (
-        <span key={i} className={`quota-cell ${lv}${i < on ? ' on' : ''}`} />
-      ))}
+  // 剩量和重置刻度都在 10% 以下：改畫 0–10% 刻度的連續條，兩端各一根豎線標出 0 和 10%（2026-10-16 第三版，方案 B；
+  // 取代 #1785 的 10 格點陣）。這個模式不畫黑針（時間由底下那一行負責），百分比帶 `%`。
+  const zoom = pct !== null && pct < 10 && (mark === null || mark < 10)
+  const bar = zoom ? (
+    <span className="quota-bar-wrap zoomed" title={`剩 ${fmtPct(pct)}%（條的刻度是 0–10%）`}>
+      <span className={`quota-bar ${lv}`}>
+        <span className="quota-bar-fill" style={{ width: `${Math.min(100, pct * 10)}%` }} />
+      </span>
+      <span className="quota-bar-end start" aria-hidden="true" />
+      <span className="quota-bar-end finish" aria-hidden="true" />
     </span>
   ) : (
     <span className="quota-bar-wrap">
@@ -340,39 +337,26 @@ function Bar({
       {mark !== null ? <span className="quota-bar-mark" style={{ left: `${mark}%` }} title={markTitle} /> : null}
     </span>
   )
-  if (instead)
-    return (
-      <span className="quota-bar-row countdown">
-        {bar}
-        {instead}
-        {/* 倒數那列旁邊是 `21h22` 這種數字，裸的 `0` 讀不出是百分比：這裡帶 `%`（2026-10-02 使用者）。 */}
-        <span className={`quota-bar-pct ${lv}${pct === null ? ' nodata' : ''}`} aria-hidden="true">
-          {pct === null ? '—' : `${fmtPct(pct)}%`}
-        </span>
-      </span>
-    )
   return (
     <span className="quota-bar-row">
       {bar}
       {/* 數字一律印（UI-DECISIONS：百分比始終保留；2026-09-09 使用者截圖）。 */}
-      <span className={`quota-bar-pct ${lv}${pct === null ? ' nodata' : ''}`} aria-hidden="true">
-        {pct === null ? '—' : sharedReset ? `${fmtPct(pct)}%` : fmtPct(pct)}
+      <span className={`quota-bar-pct ${lv}${pct === null ? ' nodata' : ''}${unit || zoom ? ' has-unit' : ''}`} aria-hidden="true">
+        {pct === null ? '—' : unit || zoom ? `${fmtPct(pct)}%` : fmtPct(pct)}
       </span>
     </span>
   )
 }
 
-/** 7d 與 F 兩列都在倒數、而且重置只差 60 秒內：倒數只寫一次（2026-10-16 第二版）。 */
+/** 倒數模式的列都不在列內寫倒數，統一在所有窗口下方另起一行（2026-10-16 第三版，方案 B）：
+ *  重置時刻彼此相差 ≤ 60 秒就只寫一個時間（`└ 3h05`），否則逐列標窗口名（`└ 7d 3h05 · F 9h`）。 */
 const SHARED_RESET_MS = 60_000
-function sharedResetOf(windows: WindowBar[], now: number): { first: WindowName; second: WindowName; back: string; title: string } | null {
-  const week = windows.find((w) => w.name === '7d' || w.name === '週')
-  const fable = windows.find((w) => w.name === 'F')
-  if (!week || !fable || !week.resetsAt || !fable.resetsAt) return null
-  const backW = resetBadge(week.pct, week.resetsAt, now, RULE_WEEKLY)
-  const backF = resetBadge(fable.pct, fable.resetsAt, now, RULE_WEEKLY)
-  if (!backW || !backF) return null
-  if (Math.abs(new Date(week.resetsAt).getTime() - new Date(fable.resetsAt).getTime()) > SHARED_RESET_MS) return null
-  return { first: week.name, second: fable.name, back: backW, title: `${week.name}／F 同時重置，還有 ${backW}` }
+function resetLineOf(rows: { name: WindowName; back: string; resetsAt: string }[]): { text: string; title: string } | null {
+  if (rows.length === 0) return null
+  const ms = rows.map((r) => new Date(r.resetsAt).getTime())
+  const same = Math.max(...ms) - Math.min(...ms) <= SHARED_RESET_MS
+  if (same) return { text: `└ ${rows[0]!.back}`, title: `${rows.map((r) => r.name).join('／')} 還有 ${rows[0]!.back} 重置` }
+  return { text: `└ ${rows.map((r) => `${r.name} ${r.back}`).join(' · ')}`, title: rows.map((r) => `${r.name} 還有 ${r.back} 重置`).join('；') }
 }
 
 /** `staleAt`：這一桶是沿用上一份讀數時，它自己的觀測時間（#540）；不是沿用就 `null`。 */
@@ -464,14 +448,12 @@ function Gauge({
       windows.push(windowBar('F', fable, q?.fable, q?.updated_at))
     }
   }
-  const shared = compact ? null : sharedResetOf(windows, now)
-  const winRow = (w: WindowBar, sharedReset: boolean) => {
+  const winRow = (w: WindowBar, countdown: boolean) => {
     const span = WINDOW_MS[w.name]
     const mark = resetMark(w.resetsAt, span, now)
     const left = msUntil(w.resetsAt, now)
-    const back = resetBadge(w.pct, w.resetsAt, now, resetRule(w.name))
-    // 那一列已經寫倒數了，窗口名就別再換成剩幾分——同一個時間寫兩次，還會擠在一起。
-    const soon = back ? null : soonLabel(w.name, w.resetsAt, now)
+    // 那一列已經在底下那一行寫倒數了，窗口名就別再換成剩幾分——同一個時間寫兩次。
+    const soon = countdown ? null : soonLabel(w.name, w.resetsAt, now)
     return (
       <span key={w.name} className="quota-window">
         <span className={`quota-window-name${soon ? ' soon' : ''}${w.staleAt ? ' carried' : ''}`} title={soon ? `${w.name} 還有 ${soon} 重置` : undefined}>
@@ -484,18 +466,17 @@ function Gauge({
           critical={w.critical}
           mark={mark}
           markTitle={left === null ? undefined : `${w.name} 還有 ${fmtLeft(left)} 重置`}
-          sharedReset={sharedReset}
-          instead={
-            back && !sharedReset ? (
-              <span className="quota-reset-at" title={`${w.pct !== null && w.pct > 0 ? `剩 ${fmtPct(w.pct)}%` : '用完了'}，還有 ${back} 重置`}>
-                {back}
-              </span>
-            ) : undefined
-          }
+          unit={countdown}
         />
       </span>
     )
   }
+  const countdownRows = windows.flatMap((w) => {
+    const back = resetBadge(w.pct, w.resetsAt, now, resetRule(w.name))
+    return back && w.resetsAt ? [{ name: w.name, back, resetsAt: w.resetsAt, win: w }] : []
+  })
+  const resetLine = compact ? null : resetLineOf(countdownRows)
+  const resetLineLevel = countdownRows.some((r) => r.win.critical) ? 'crit' : countdownRows.some((r) => r.win.low) ? 'warn' : ''
   const uncapped = !compact && noFiveHourCap(entry.kind, q)
   const title = `${hostLabel(host)} · ${label(entry, q, loggedOut, now)}`
   const level = worst(q)
@@ -590,22 +571,12 @@ function Gauge({
             </span>
           </span>
         ) : null}
-        {windows.map((w) =>
-          shared && w.name === shared.first ? (
-            <span key="shared" className="quota-shared">
-              <span className="quota-shared-rows">
-                {winRow(w, true)}
-                {winRow(windows.find((x) => x.name === shared.second)!, true)}
-              </span>
-              <span className="quota-shared-reset" title={shared.title}>
-                <span className="quota-bracket" aria-hidden="true" />
-                <span className="quota-reset-at">{shared.back}</span>
-              </span>
-            </span>
-          ) : shared && w.name === shared.second ? null : (
-            winRow(w, false)
-          ),
-        )}
+        {windows.map((w) => winRow(w, countdownRows.some((r) => r.name === w.name)))}
+        {resetLine ? (
+          <span className={`quota-reset-line ${resetLineLevel}`} title={resetLine.title}>
+            {resetLine.text}
+          </span>
+        ) : null}
       </span>
       )}
       </button>
