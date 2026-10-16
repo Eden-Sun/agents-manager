@@ -198,6 +198,12 @@ CREATE TABLE IF NOT EXISTS spawn_hints (
   pane_id TEXT NOT NULL, host TEXT NOT NULL, bot_id TEXT NOT NULL REFERENCES bots(id),
   created_at TEXT NOT NULL, PRIMARY KEY(host, pane_id)
 );
+-- issue #1790：shim 開子 agent 成功後直接向 daemon 登記「這個 pane 是 bot_id 開的」。跟 `spawn_hints` 不同：
+-- 認領後不消耗、也不照 10 分鐘過期，pane 還活著就一直算數（改名不換 parent；見 `spawn_hints::claim`）。
+CREATE TABLE IF NOT EXISTS spawn_claims (
+  pane_id TEXT NOT NULL, host TEXT NOT NULL, bot_id TEXT NOT NULL REFERENCES bots(id),
+  created_at TEXT NOT NULL, PRIMARY KEY(host, pane_id)
+);
 -- 預覽模式（issue #253）：頂層 bot 的專案起的 vite dev server。一顆 bot 一列；`status` 是 off／starting／running／failed，
 -- `pane_id` 是放在該 bot 那個 tab 裡的 service pane，`off` 時是 NULL、`port` 也不再算被佔用。
 CREATE TABLE IF NOT EXISTS bot_previews (
@@ -447,6 +453,8 @@ pub const SCHEMA_HISTORY: &[(i64, &str)] = &[
     (63, "56fa10c366935e77"),
     // issue #1779：`schedules.clear_after`（排程跑完就讓 Bot 開新對話，不留記憶、不佔 context）。
     (64, "18d72ba10ff77a10"),
+    // issue #1790：`spawn_claims`（shim 登記「這個 pane 是 bot 開的」，子 agent 歸屬以它為準、改名不換 parent）。
+    (65, "243128a550c2ec96"),
 ];
 pub const SCHEMA_VERSION: i64 = SCHEMA_HISTORY[SCHEMA_HISTORY.len() - 1].0;
 

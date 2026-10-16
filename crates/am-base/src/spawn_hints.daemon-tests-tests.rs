@@ -171,3 +171,52 @@
         let n: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM spawn_hints WHERE pane_id = 'w1:p9'").fetch_one(&env.app.db).await.unwrap();
         assert_eq!(n, 0, "prune actually removes it");
     }
+
+    /// issue #1790：claim 不像 hint——不過期、認領後不消耗，pane 還活著就一直算；同一個 pane 再登記以新的為準。
+    #[tokio::test]
+    async fn a_claim_outlives_the_hint_window_and_the_newest_claim_wins() {
+        let env = crate::testing::env().await;
+        let first = crate::testing::claude_bot(&env.app, &env.project_id, "alfa").await;
+        let second = crate::testing::claude_bot(&env.app, &env.project_id, "bravo").await;
+        let old = (chrono::Utc::now() - chrono::Duration::seconds(MAX_AGE_SECS * 100)).to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
+        sqlx::query("INSERT INTO spawn_claims (pane_id, host, bot_id, created_at) VALUES ('w1:p2', 'local', ?, ?)")
+            .bind(&first.id)
+            .bind(&old)
+            .execute(&env.app.db)
+            .await
+            .unwrap();
+        assert_eq!(claims_for_host(&env.app, crate::config::LOCAL_HOST).await.unwrap().get("w1:p2"), Some(&first.id), "再久也算數");
+
+        claim(&env.app, &second.id, "w1:p2").await.unwrap();
+        assert_eq!(claims_for_host(&env.app, crate::config::LOCAL_HOST).await.unwrap().get("w1:p2"), Some(&second.id), "新的登記覆蓋舊的");
+        let n: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM spawn_claims WHERE pane_id = 'w1:p2'").fetch_one(&env.app.db).await.unwrap();
+        assert_eq!(n, 1);
+        assert!(for_host(&env.app, crate::config::LOCAL_HOST).await.unwrap().is_empty(), "claim 不混進 hint 表");
+    }
+
+    /// issue #1790：pane 不在 herdr 了才清 claim（pane id 會被回收）；剛登記的、或 snapshot 是空的，都不清。
+    #[tokio::test]
+    async fn dead_claims_are_pruned_but_young_and_live_ones_stay() {
+        let env = crate::testing::env().await;
+        let bot = crate::testing::claude_bot(&env.app, &env.project_id, "alfa").await;
+        let old = (chrono::Utc::now() - chrono::Duration::seconds(CLAIM_GRACE_SECS + 60)).to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
+        for pane in ["w1:live", "w1:dead"] {
+            sqlx::query("INSERT INTO spawn_claims (pane_id, host, bot_id, created_at) VALUES (?, 'local', ?, ?)")
+                .bind(pane)
+                .bind(&bot.id)
+                .bind(&old)
+                .execute(&env.app.db)
+                .await
+                .unwrap();
+        }
+        claim(&env.app, &bot.id, "w1:young").await.unwrap();
+
+        prune_dead_claims(&env.app, crate::config::LOCAL_HOST, &[]).await;
+        assert_eq!(claims_for_host(&env.app, crate::config::LOCAL_HOST).await.unwrap().len(), 3, "snapshot 是空的一個都不清");
+
+        prune_dead_claims(&env.app, crate::config::LOCAL_HOST, &["w1:live".to_string(), "w1:other".to_string()]).await;
+        let left = claims_for_host(&env.app, crate::config::LOCAL_HOST).await.unwrap();
+        let mut panes: Vec<&str> = left.keys().map(String::as_str).collect();
+        panes.sort();
+        assert_eq!(panes, ["w1:live", "w1:young"], "死掉的清掉，活著的與剛登記的留著");
+    }

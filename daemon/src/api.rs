@@ -449,6 +449,8 @@ pub fn router(app: Arc<App>) -> Router {
         .route("/relay/spawn/begin", post(crate::runners::credential_spawn::begin))
         .route("/relay/spawn/finish", post(crate::runners::credential_spawn::finish))
         .route("/relay/spawn/abort", post(crate::runners::credential_spawn::abort))
+        // issue #1790：開完子 agent 後登記「這顆 pane 是我開的」，歸屬以它為準。
+        .route("/relay/spawn/claim", post(crate::runners::credential_spawn::claim))
         // §6.5e：bot 開完 pane 後回報用途（歸屬另外從行程環境推斷）。
         .route("/relay/pane", post(relay_pane))
         // 母 bot 的 `herdr agent list` 附上子 agent 的 cache 還熱多久（kids_cache）。
@@ -14358,6 +14360,44 @@ mod per_principal_auth_tests {
         .await
         .unwrap();
         assert_eq!(registered, 1, "losing replay must not leave a second credential-bearing pane registered");
+    }
+
+    async fn spawn_claim(app: Arc<App>, bot_id: &str, token: &str, pane_id: &str) -> String {
+        let body = format!("bot_id={bot_id}&pane_id={pane_id}");
+        raw(
+            app,
+            format!(
+                "POST /relay/spawn/claim HTTP/1.1\r\nHost: 127.0.0.1\r\nX-AM-Bot-Token: {token}\r\nContent-Type: application/x-www-form-urlencoded\r\nConnection: close\r\nContent-Length: {}\r\n\r\n{body}",
+                body.len()
+            ),
+        )
+        .await
+    }
+
+    /// issue #1790：shim 開完子 agent 登記「這顆 pane 是我開的」；bot 只能替自己登記（token 要屬於 body 的 `bot_id`）。
+    #[tokio::test]
+    async fn a_spawn_claim_registers_the_pane_for_the_authenticated_bot_only() {
+        let e = crate::testing::env().await;
+        let bot_a = distinct_bot(&e, "claim-a").await;
+        let bot_b = distinct_bot(&e, "claim-b").await;
+        let owner = |pane: &str| {
+            let app = e.app.clone();
+            let pane = pane.to_string();
+            async move {
+                sqlx::query_scalar::<_, String>("SELECT bot_id FROM spawn_claims WHERE pane_id = ?").bind(pane).fetch_optional(&app.db).await.unwrap()
+            }
+        };
+
+        let forged = spawn_claim(e.app.clone(), &bot_b.id, &bot_a.hook_token, "w1:p-forged").await;
+        assert!(forged.starts_with("HTTP/1.1 401"), "Bot A 不能替 Bot B 登記：{forged}");
+        assert_eq!(owner("w1:p-forged").await, None, "被拒絕就不留任何登記");
+
+        let missing = spawn_claim(e.app.clone(), &bot_a.id, &bot_a.hook_token, "").await;
+        assert!(missing.starts_with("HTTP/1.1 400"), "{missing}");
+
+        let ok = spawn_claim(e.app.clone(), &bot_a.id, &bot_a.hook_token, "w1:p-mine").await;
+        assert!(ok.starts_with("HTTP/1.1 200") && ok.contains("\"claimed\":true"), "{ok}");
+        assert_eq!(owner("w1:p-mine").await.as_deref(), Some(bot_a.id.as_str()));
     }
 
     #[tokio::test]

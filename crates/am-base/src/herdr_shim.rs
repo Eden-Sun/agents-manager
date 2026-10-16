@@ -218,6 +218,44 @@ am_spawn_abort() {
     return 0
 }
 
+# issue #1790：`agent start` 成功後登記「這顆 pane 是我（${AM_BOT_ID}）開的」。daemon 以這個事實認 parent，不看 herdr 名字前綴
+# （bot 常把輸出 pipe 掉，PostToolUse 撈 stdout 的 spawn hint 不可靠）。本機走 `/relay/spawn/claim`；遠端沒有 `AM_PORT`，
+# 寫一則 `AmSpawnClaim` 進自己 bot 的 hook spool（跟 `am_spool_relay` 同一條路）。登記失敗只印 warn，不讓 start 失敗。
+am_spawn_claim() {
+    _cpane=$1
+    [ -n "${AM_BOT_ID:-}" ] && [ -n "$_cpane" ] || return 0
+    if [ -n "${AM_PORT:-}" ]; then
+        if [ -n "$(am_bot_token)" ] && command -v curl >/dev/null 2>&1; then
+            _cout=$(am_curl_bot -s -m 2 -w '\n%{http_code}' -X POST "http://127.0.0.1:${AM_PORT}/relay/spawn/claim" \
+                --data-urlencode "bot_id=${AM_BOT_ID}" \
+                --data-urlencode "pane_id=${_cpane}" 2>/dev/null)
+            [ "$(printf '%s\n' "$_cout" | tail -n 1)" = 200 ] && return 0
+        fi
+        printf 'agents-manager: 子 agent 開成功了，但向 daemon 登記 pane %s 失敗；歸屬會退回名字推斷\n' "$_cpane" >&2
+        return 0
+    fi
+    _sd="$HOME/.config/agents-manager${AM_INSTANCE:+/instances/$AM_INSTANCE}/bots/${AM_BOT_ID}"
+    if [ -d "$_sd" ] && command -v python3 >/dev/null 2>&1 \
+        && python3 - "$_sd/hook-spool.d" "$AM_BOT_ID" "${AM_KIND:-claude}" "$_cpane" <<'AMPY' >/dev/null 2>&1
+import datetime, json, os, sys, tempfile, time
+sd, bot, kind, pane = sys.argv[1:5]
+os.makedirs(sd, exist_ok=True)
+now = datetime.datetime.now(datetime.timezone.utc).isoformat(timespec="milliseconds").replace("+00:00", "Z")
+body = {"bot_id": bot, "provider": kind, "truncated": False, "run_id": "",
+        "received_at": now,
+        "payload": {"hook_event_name": "AmSpawnClaim", "pane_id": pane}}
+fd, tmp = tempfile.mkstemp(prefix=".tmp.", dir=sd)
+with os.fdopen(fd, "w") as f:
+    f.write(json.dumps(body, ensure_ascii=False) + "\n")
+os.replace(tmp, os.path.join(sd, "%d-%d.json" % (time.time_ns(), os.getpid())))
+AMPY
+    then
+        return 0
+    fi
+    printf 'agents-manager: 子 agent 開成功了，但寫不進 spool 登記 pane %s；歸屬會退回名字推斷\n' "$_cpane" >&2
+    return 0
+}
+
 # The positional name after `herdr agent start` becomes `<AM_AGENT_NAME>-<name>`, unless it
 # already carries the prefix. herdr agent names
 # are `[a-z][a-z0-9_-]{0,31}` (32 chars). A blind `cut -c1-32` turns a 32-char parent into itself
@@ -604,6 +642,7 @@ am_agent_start() {
         exit "$_rc"
     fi
     trap - INT TERM
+    am_spawn_claim "$_pane"
     am_spawn_finish "$_pane" "" || exit $?
     exit 0
 }
