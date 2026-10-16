@@ -875,6 +875,16 @@ AGM_CI_FULL_INTERVAL=0 run >/dev/null
 equals "間隔 0＝明確關閉" "$(wc -l < "$FIX/gh.log" | tr -d ' ')" "0"
 teardown
 
+# 13k. 時間戳寫成 08（$(( )) 會當八進位而中止）：當沒有紀錄、照補，不能炸成每分鐘 error。
+new_baseline
+printf '08\n' > "$CI/full-success-at"; printf '09\n' > "$CI/full-attempt-at"
+touch -d '2 days ago' "$CI/full-success-sha"
+: > "$FIX/gh.log"
+equals "壞時間戳 exit 0" "$(run)" "0"
+check "壞時間戳視為沒有紀錄、補跑完整並 success" "state=success.*全綠" "$FIX/gh.log"
+check_no "不是 error" "state=error" "$FIX/gh.log"
+teardown
+
 # 13i. 舊版狀態（只有 full-success-sha、沒有 part-success）：安全地全跑一次。
 setup
 run >/dev/null
