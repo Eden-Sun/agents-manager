@@ -50,8 +50,10 @@ pub fn parse_footer(screen: &str) -> Option<String> {
 
 /// 啟動橫幅最多往回讀幾行捲動紀錄（窄 pane 一行字會折成好幾行）。
 const BANNER_LINES: u32 = 1000;
-/// 開起來多久內還去捲動紀錄找橫幅；再久橫幅多半已捲出 herdr 的紀錄，就不再每輪多讀一次。
-const BANNER_WINDOW_SECS: i64 = 600;
+/// 每個 run 最多去捲動紀錄找幾輪橫幅（30 秒一輪，約 10 分鐘）；找不到多半是橫幅已捲出 herdr 的紀錄，就不再每輪多讀一次。
+/// 從 daemon 看到這個 run 起算，daemon 換版後已經在跑的 child 也會補上。
+const BANNER_TRIES: u32 = 20;
+static BANNER_TRIED: std::sync::LazyLock<std::sync::Mutex<std::collections::HashMap<String, u32>>> = std::sync::LazyLock::new(Default::default);
 
 /// 框底被窄 pane 截掉時的備援：捲動紀錄裡**最後一個**啟動橫幅（`Antigravity CLI 1.4.0` 底下兩行的 `Gemini 3.8 Flash (High)`）。
 /// 窄 pane 會把它折成 `  Gemini 3` / `.8 Flash (` / `High)`（m4p 真畫面，10 欄寬，2026-10-16），所以先把每行去掉頭尾空白接起來再找；
@@ -97,8 +99,17 @@ pub fn parse_banner(scrollback: &str) -> Option<String> {
     crate::models::agy_model_allowed(&slug).then_some(slug)
 }
 
-fn just_started(started_at: &str) -> bool {
-    chrono::DateTime::parse_from_rfc3339(started_at).is_ok_and(|t| (chrono::Utc::now() - t.with_timezone(&chrono::Utc)).num_seconds() < BANNER_WINDOW_SECS)
+/// 這個 run 還能不能再找一輪橫幅（順便記一輪）。
+fn banner_try(run_id: &str) -> bool {
+    let mut tried = BANNER_TRIED.lock().unwrap_or_else(|e| e.into_inner());
+    let n = tried.entry(run_id.to_string()).or_insert(0);
+    *n += 1;
+    *n <= BANNER_TRIES
+}
+
+/// 巡邏把已經不在跑的 run 從紀錄裡拿掉。
+pub fn retain_runs(active: &[String]) {
+    BANNER_TRIED.lock().unwrap_or_else(|e| e.into_inner()).retain(|id, _| active.contains(id));
 }
 
 /// 畫面讀到的模型跟記著的不一樣才回它。一般 bot 只校正**已知**的 runtime（`NULL`＝沒指定、CLI 預設，補上會多一條
@@ -135,12 +146,12 @@ async fn record(app: &(impl crate::capabilities::BotStatusEmit + crate::capabili
 }
 
 /// 巡邏用。`hint` 是鎖外已經讀過的畫面：跟 runtime 一樣就停；不一樣才拿 bot 鎖確認還是同一個 run 再校正。
-/// 框底讀不到（窄 pane 截掉）而且 child 還不知道模型時，剛開起來那幾分鐘改找捲動紀錄裡的啟動橫幅（[`parse_banner`]）。
+/// 框底讀不到（窄 pane 截掉）而且 child 還不知道模型時，每個 run 頭 20 輪改找捲動紀錄裡的啟動橫幅（[`parse_banner`]）。
 pub async fn sync_runtime(app: &(impl crate::capabilities::BotLocks + crate::capabilities::BotStatusEmit + crate::capabilities::Db + crate::capabilities::Emit), client: &HerdrClient, bot_id: &str, run_id: &str, pane_id: &str, hint: &str) {
     let Ok(Some(run)) = db::run(app.db(), run_id).await else { return };
     let child = matches!(db::bot(app.db(), bot_id).await, Ok(Some(b)) if b.managed_by == "child");
     let Some(seen) = parse_footer(hint) else {
-        if child && run.runtime_model.is_none() && just_started(&run.started_at) {
+        if child && run.runtime_model.is_none() && banner_try(run_id) {
             let Ok(read) = client.pane_read(pane_id, "recent", BANNER_LINES).await else { return };
             if let Some(seen) = parse_banner(&read.text) {
                 let lock = app.bot_lock(bot_id).await;
@@ -225,6 +236,18 @@ mod tests {
         assert_eq!(parse_banner("我們用 Gemini 3.8 Flash (High) 試過\n"), None, "沒有橫幅就不認");
         assert_eq!(parse_banner("關於 Antigravity CLI 的說明：Gemini 3.8 Flash (High)\n"), None, "後面不是版本號就不是橫幅");
         assert_eq!(parse_banner("Antigravity CLI 1.4.0\nGemini 3.1 Pro (High)\n"), None, "agy 不收的模型不認");
+    }
+
+    #[test]
+    fn the_banner_is_looked_for_a_bounded_number_of_sweeps() {
+        let run = "agy-live-test-run";
+        for _ in 0..BANNER_TRIES {
+            assert!(banner_try(run));
+        }
+        assert!(!banner_try(run), "找不到就不再每輪多讀一次捲動紀錄");
+        retain_runs(&[]);
+        assert!(banner_try(run), "run 結束後紀錄清掉");
+        retain_runs(&[]);
     }
 
     #[test]
