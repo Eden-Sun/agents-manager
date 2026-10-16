@@ -126,24 +126,52 @@ mod tests {
         file: std::path::PathBuf,
     }
 
+    const REMOTE_HOME: &str = "/Users/m4p";
+
     /// 一顆沒有 hook 的 agy 子 agent：adopted、`inject_hooks = 0`、已經綁了對話（pane 環境的探測不在這裡測）、有一筆在飛的回合。
     async fn agy_child(sid: &str, transcript: &str) -> Child {
-        let env = tt::env().await;
+        agy_child_on(tt::env().await, None, sid, transcript).await
+    }
+
+    /// `host`＝`None` 是本機（對話檔寫進 HOME）；遠端只建專案、bot、run，對話檔在那台（測試用假 ssh 回）。
+    async fn agy_child_on(env: tt::Env, host: Option<&str>, sid: &str, transcript: &str) -> Child {
         let app = env.app.clone();
+        let project_id = match host {
+            None => env.project_id.clone(),
+            Some(h) => {
+                let id = db::ulid();
+                sqlx::query("INSERT INTO projects (id, path, label, host, created_at) VALUES (?,?,?,?,?)")
+                    .bind(&id)
+                    .bind(format!("{REMOTE_HOME}/project/wt"))
+                    .bind("remote")
+                    .bind(h)
+                    .bind(db::now())
+                    .execute(&app.db)
+                    .await
+                    .unwrap();
+                id
+            }
+        };
         let bot_id = db::ulid();
         sqlx::query(
             "INSERT INTO bots (id, project_id, name, kind, model, args_json, autostart, inject_hooks, managed_by, hook_token, created_at)
              VALUES (?,?,'a1','agy','gemini-3.8-flash-medium','[]',0,0,'child','tok',?)",
         )
         .bind(&bot_id)
-        .bind(&env.project_id)
+        .bind(&project_id)
         .bind(db::now())
         .execute(&app.db)
         .await
         .unwrap();
-        let file = crate::agy_support::transcript_path(&crate::home::dir().unwrap(), sid);
-        std::fs::create_dir_all(file.parent().unwrap()).unwrap();
-        std::fs::write(&file, transcript).unwrap();
+        let file = match host {
+            None => {
+                let file = crate::agy_support::transcript_path(&crate::home::dir().unwrap(), sid);
+                std::fs::create_dir_all(file.parent().unwrap()).unwrap();
+                std::fs::write(&file, transcript).unwrap();
+                file
+            }
+            Some(_) => crate::agy_support::transcript_path(Path::new(REMOTE_HOME), sid),
+        };
         let run_id = db::ulid();
         sqlx::query(
             "INSERT INTO runs (id, bot_id, state, agent_status, workspace_id, pane_id, adopted, agent_name, herdr_session, native_session_id, started_at)
@@ -228,5 +256,70 @@ mod tests {
         std::fs::create_dir_all(c.file.parent().unwrap()).unwrap();
         std::fs::write(&c.file, [user(0, "x"), step(1, "PLANNER_RESPONSE", "y", None)].join("\n")).unwrap();
         assert_eq!(sync_locked(&c.env.app, &c.run_id).await.unwrap(), Synced::Unavailable, "有 hook 的 bot 由 hook 收，不重複記");
+    }
+
+    /// 遠端（m4p）的 agy 子 agent（issue #1788）：pane 裡的行程開著兩段對話，只有一段有紀錄檔 → 綁到有紀錄檔那段；
+    /// `/proc` 換成那台的 `lsof`，紀錄檔的時間與尾巴都經 ssh 從那台讀，路徑是那台家目錄底下的。
+    #[tokio::test]
+    async fn a_remote_agy_child_binds_the_open_conversation_that_has_a_transcript_over_ssh() {
+        let e = tt::env().await;
+        let sock = tt::track(std::env::temp_dir().join(format!("am-agy-remote-{}", db::ulid())));
+        std::fs::create_dir_all(&sock).unwrap();
+        let host = format!("m4p-{}", db::ulid().to_ascii_lowercase());
+        let conn = e
+            .app
+            .hosts
+            .insert_remote_with_client_for_test(
+                crate::config::HostCfg {
+                    shared_session: false,
+                    name: host.clone(),
+                    ssh: "unused".into(),
+                    ssh_port: 22,
+                    ssh_opts: vec![],
+                    herdr_session: "test".into(),
+                    remote_path: String::new(),
+                },
+                crate::herdr::HerdrClient::new(sock.join("herdr.sock")),
+            )
+            .await;
+        conn.connected.store(true, std::sync::atomic::Ordering::SeqCst);
+        *conn.remote_home.lock().await = Some(REMOTE_HOME.into());
+
+        let sid = format!("c-{}", db::ulid());
+        let other = format!("d-{}", db::ulid());
+        let text = [user(0, "say PONG"), step(1, "PLANNER_RESPONSE", "PONG", Some(11824))].join("\n");
+        let c = agy_child_on(e, Some(&host), &sid, &text).await;
+        let pane = db::run(&c.env.app.db, &c.run_id).await.unwrap().unwrap().pane_id.expect("pane");
+        let seen: std::sync::Arc<std::sync::Mutex<Vec<String>>> = Default::default();
+        {
+            let (seen, sid, other, pane, text) = (seen.clone(), sid.clone(), other.clone(), pane.clone(), text.clone());
+            crate::hosts::set_ssh_fake(&host, move |script| {
+                seen.lock().unwrap().push(script.to_string());
+                Ok(if script.contains("ps -Awwo") {
+                    // 行程表只要環境段：pane 裡的 agy 行程。
+                    format!("---AM-ENV---\n  901 agy HERDR_PANE_ID={pane}\n")
+                } else if script.contains("lsof") {
+                    // 開著的兩段對話，外加一個不是對話的檔。
+                    format!("p901\nn{REMOTE_HOME}/.zshrc\nn{REMOTE_HOME}/.gemini/antigravity-cli/conversations/{other}.db\nn{REMOTE_HOME}/.gemini/antigravity-cli/conversations/{sid}.db\n")
+                } else if script.contains("date -r") {
+                    // 只有 `sid` 有紀錄檔。
+                    format!("{sid} 1700000000\n")
+                } else if script.contains("tail -c") {
+                    text.clone()
+                } else {
+                    String::new()
+                })
+            });
+        }
+
+        let app = c.env.app.clone();
+        assert_eq!(sync_locked(&app, &c.run_id).await.unwrap(), Synced::Read { imported: 1, pending: None });
+        assert_eq!(replies(&c).await, [("PONG".to_string(), "transcript".to_string())]);
+        let r = db::run(&app.db, &c.run_id).await.unwrap().unwrap();
+        assert_eq!(r.native_session_id.as_deref(), Some(sid.as_str()));
+        assert_eq!(r.transcript_path.as_deref(), c.file.to_str());
+        assert!(c.file.starts_with(REMOTE_HOME), "{:?}", c.file);
+        let scripts = seen.lock().unwrap().clone();
+        assert!(scripts.iter().any(|s| s.contains("lsof") && s.contains("-p 901")), "{scripts:?}");
     }
 }
