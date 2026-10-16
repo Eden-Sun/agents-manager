@@ -76,18 +76,26 @@ load_gate() {
 }
 if [ "${1:-default}" != changed ]; then load_gate; fi
 
-check_web() {
+web_install() {
     step "web: bun install --frozen-lockfile"
     (cd web && bun install --frozen-lockfile)
+}
+web_build() {
+    step "web: vite build"
+    (cd web && bunx vite build)
+}
+web_verify() {
     step "web: tsc -b（app 與 vite config，一次檢查）"
     (cd web && bunx tsc -b)
     step "web: oxlint src"
     (cd web && bunx oxlint src)
     step "web: bun test"
     (cd web && bun test)
-    step "web: vite build"
-    (cd web && bunx vite build)
 }
+check_web() { web_install; web_verify; web_build; }
+# CI 的 web job 拆兩段：先出 bundle 並上傳（daemon 只依賴它），再跑 tsc／oxlint／bun test。
+check_web_bundle() { web_install; web_build; }
+check_web_verify() { web_verify; }
 
 # cargo test 一次吐幾千行：紅了就把紅的測試名單獨列在最後（高負載偶發紅時，一眼看出是哪一條、有幾條）。
 # 輸出照常印到終端；編譯錯誤沒有 `... FAILED` 行，那種紅看 cargo 自己的訊息。
@@ -474,10 +482,28 @@ check_changed() {
 case "${1:-default}" in
     changed) check_changed "${2:-origin/main}" ;;
     web) check_web ;;
+    web-bundle) check_web_bundle ;;
+    web-verify) check_web_verify ;;
     daemon) check_daemon ;;
     macos-local) check_macos_local ;;
     ob) check_ob ;;
-    ops) check_ops ;;
+    ops)
+        # PR：ops <full> <head> 或 ops <full> <base> <head>。差異取「完整成功基準→main tip」與「基準→PR head」
+        # 的聯集（merge 結果變動檔案的超集），否則會漏掉基準之後尚未驗過的 main 改動。
+        if [ -n "${2:-}" ] && [ -n "${3:-}" ]; then
+            if ops_files="$(
+                git -c core.quotePath=false diff --no-renames --name-only "$2" "$3" &&
+                    if [ -n "${4:-}" ]; then git -c core.quotePath=false diff --no-renames --name-only "$2" "$4"; fi
+            )"; then
+                check_ops "$ops_files"
+            else
+                echo "ops: 無法比較基準，改跑完整測試" >&2
+                check_ops
+            fi
+        else
+            check_ops
+        fi
+        ;;
     fmt) check_fmt ;;
     clippy) check_clippy ;;
     default) check_ob; check_ops; check_web; check_daemon ;;
