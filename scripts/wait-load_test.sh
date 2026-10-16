@@ -66,6 +66,58 @@ for bad in "--max abc" "--timeout -1" "--interval 0" "--bogus"; do
   equals "參數錯（${bad}）回 2" "${rc}" 2
 done
 
+# 記憶體閘（issue #1783）：可用記憶體從假檔案讀（WAIT_MEM_FILE：第一欄 free%、第二欄壓力等級），負載固定很低。
+MEM="${ROOT}/mem"
+echo "1.00 1 1" > "${LOAD}"
+echo "80 1" > "${MEM}"
+WAIT_LOAD_FILE="${LOAD}" WAIT_MEM_FILE="${MEM}" bash "${WAIT}" --max 40 --min-free-mem 30 --timeout 0 >/dev/null 2>&1; rc=$?
+equals "記憶體夠、壓力 normal：放行" "${rc}" 0
+echo "30" > "${MEM}"
+WAIT_LOAD_FILE="${LOAD}" WAIT_MEM_FILE="${MEM}" bash "${WAIT}" --max 40 --min-free-mem 30 --timeout 0 >/dev/null 2>&1; rc=$?
+equals "剛好等於記憶體門檻、沒有壓力欄（Linux）也放行" "${rc}" 0
+echo "12 1" > "${MEM}"
+out="$(WAIT_LOAD_FILE="${LOAD}" WAIT_MEM_FILE="${MEM}" bash "${WAIT}" --max 40 --min-free-mem 30 --timeout 0 2>&1)"; rc=$?
+equals "可用記憶體不夠、--timeout 0：逾時 124" "${rc}" 124
+has "失敗時講明可用記憶體" "${out}" "可用記憶體 12%"
+echo "80 2" > "${MEM}"
+out="$(WAIT_LOAD_FILE="${LOAD}" WAIT_MEM_FILE="${MEM}" bash "${WAIT}" --max 40 --min-free-mem 30 --timeout 0 2>&1)"; rc=$?
+equals "free% 夠但壓力是 warn：不放行（124）" "${rc}" 124
+has "失敗時講明壓力等級" "${out}" "記憶體壓力等級 2"
+echo "80 1" > "${MEM}"
+echo "152.30 1 1" > "${LOAD}"
+WAIT_LOAD_FILE="${LOAD}" WAIT_MEM_FILE="${MEM}" bash "${WAIT}" --max 40 --min-free-mem 30 --timeout 0 >/dev/null 2>&1; rc=$?
+equals "記憶體夠但負載太高：兩個條件都要過（124）" "${rc}" 124
+echo "1.00 1 1" > "${LOAD}"
+# 等的途中記憶體回來：假的 sleep（PATH 最前面）一被叫就把記憶體檔改成夠，不靠牆鐘。
+fakebin="${ROOT}/fakebin"
+mkdir -p "${fakebin}"
+printf '#!/bin/sh
+echo "slept $*" >> "%s/slept"
+echo "75 1" > "%s"
+' "${ROOT}" "${MEM}" > "${fakebin}/sleep"
+chmod +x "${fakebin}/sleep"
+echo "10 4" > "${MEM}"
+out="$(PATH="${fakebin}:${PATH}" WAIT_LOAD_FILE="${LOAD}" WAIT_MEM_FILE="${MEM}" bash "${WAIT}" --max 40 --min-free-mem 30 --timeout 600 --interval 7 2>&1)"; rc=$?
+equals "等的途中記憶體回來就放行" "${rc}" 0
+has "等待時講明卡在記憶體" "${out}" "可用記憶體 10% < 30%"
+has "放行時講一聲" "${out}" "放行"
+equals "只等了一輪（照 --interval）" "$(cat "${ROOT}/slept" 2>/dev/null)" "slept 7"
+WAIT_LOAD_FILE="${LOAD}" WAIT_MEM_FILE="${ROOT}/nope" bash "${WAIT}" --max 40 --min-free-mem 30 --timeout 0 >/dev/null 2>&1; rc=$?
+equals "讀不到記憶體：不放行（3）" "${rc}" 3
+echo "lots 1" > "${MEM}"
+WAIT_LOAD_FILE="${LOAD}" WAIT_MEM_FILE="${MEM}" bash "${WAIT}" --max 40 --min-free-mem 30 --timeout 0 >/dev/null 2>&1; rc=$?
+equals "記憶體看不懂：不放行（3）" "${rc}" 3
+echo "80 high" > "${MEM}"
+WAIT_LOAD_FILE="${LOAD}" WAIT_MEM_FILE="${MEM}" bash "${WAIT}" --max 40 --min-free-mem 30 --timeout 0 >/dev/null 2>&1; rc=$?
+equals "壓力等級看不懂：不放行（3）" "${rc}" 3
+WAIT_LOAD_FILE="${LOAD}" WAIT_MEM_FILE="${ROOT}/nope" bash "${WAIT}" --max 40 --timeout 0 >/dev/null 2>&1; rc=$?
+equals "沒給 --min-free-mem（預設 0）就不看記憶體" "${rc}" 0
+for bad in "--min-free-mem abc" "--min-free-mem 101" "--min-free-mem -5"; do
+  # shellcheck disable=SC2086
+  WAIT_LOAD_FILE="${LOAD}" bash "${WAIT}" ${bad} >/dev/null 2>&1; rc=$?
+  equals "參數錯（${bad}）回 2" "${rc}" 2
+done
+
 # check.sh 的負載閘：在任何一步之前就擋下（這裡用一個不存在的模式，閘放行才會走到「用法」的 exit 2）。
 echo "152.30 1 1" > "${LOAD}"
 out="$(cd "${HERE}/.." && WAIT_LOAD_FILE="${LOAD}" CHECK_MAX_LOAD=40 CHECK_LOAD_TIMEOUT=0 bash scripts/check.sh no-such-mode 2>&1)"; rc=$?
@@ -120,6 +172,8 @@ case "${out}" in *"負載閘"*) echo "FAIL - check.sh changed：base 錯誤仍�
 out="$(bash "${WAIT}" --help 2>&1)"; rc=$?
 equals "--help 回 2" "${rc}" 2
 has "--help 印出旗標說明" "${out}" "--timeout"
+has "--help 印出記憶體旗標" "${out}" "--min-free-mem"
+has "--help 印到記憶體來源" "${out}" "WAIT_MEM_FILE"
 has "--help 印到檔頭最後一行" "${out}" "WAIT_LOAD_FILE"
 case "${out}" in *"set -euo pipefail"*) echo "FAIL - --help 印到程式碼"; FAIL=$((FAIL + 1)) ;; *) echo "ok   - --help 沒印到程式碼"; PASS=$((PASS + 1)) ;; esac
 
