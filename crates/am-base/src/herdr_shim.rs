@@ -330,6 +330,33 @@ am_kv_get() {
     return 1
 }
 
+# `herdr agent rename <目標> <新名字>|--clear`（issue #1789）：fork 出來的 bot 會把子 agent 改名回原 bot 的前綴，
+# `agent start` 補前綴的規則不經這裡，daemon 就把它掛到原 bot 底下。只管 bot 自己的 pane（`AM_AGENT_NAME` 有值、沒有 `AM_CHILD_OF`）：
+# 新名字不是 `$AM_AGENT_NAME-` 開頭就 exit 2、不呼叫 herdr；`--clear` 沒有新名字，照舊轉發。
+am_agent_rename() {
+    if [ -z "${AM_AGENT_NAME:-}" ] || [ -n "${AM_CHILD_OF:-}" ]; then
+        exec "$AM_HERDR" "$@"
+    fi
+    # 位置參數：`agent rename` 之後第一個是目標、第二個才是新名字；旗標（`--clear`）不算。
+    _i=0
+    _n=0
+    _new=""
+    for _a in "$@"; do
+        _i=$((_i + 1))
+        [ "$_i" -le 2 ] && continue
+        case "$_a" in
+            -*) continue ;;
+        esac
+        _n=$((_n + 1))
+        [ "$_n" -eq 2 ] && _new=$_a
+    done
+    case "$_new" in
+        "" | "$AM_AGENT_NAME"-*) exec "$AM_HERDR" "$@" ;;
+    esac
+    printf 'agents-manager: 你的 agent 名稱是 `%s`，子 agent 只能叫 `%s-<字尾>`；`%s` 是別的 bot 的前綴（多半是 fork 前那顆），沒有改名\n' "$AM_AGENT_NAME" "$AM_AGENT_NAME" "$_new" >&2
+    exit 2
+}
+
 # `herdr agent start [flags] <name> …` — rewrite the first bare word after `start`, which is
 # the agent name. Flags may come first, so skip options and the values of the ones that take
 # one, and stop at `--` (everything after it is the agent's own argv).
@@ -969,6 +996,7 @@ fi
 
 case "${1:-} ${2:-}" in
     "agent start") am_agent_start "$@" ;;
+    "agent rename") am_agent_rename "$@" ;;
     "agent prompt") am_agent_prompt "$@" ;;
     "agent list") am_agent_list "$@" ;;
     # `workspace create` 也會開一個 root pane（herdr 0.8.2 有 `--env`）。`worktree create/open` 同樣開 workspace，

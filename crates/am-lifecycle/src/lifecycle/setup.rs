@@ -1323,7 +1323,7 @@ pub fn toml_basic_string(s: &str) -> String {
 /// the agent's mental model matching the sidebar.
 pub fn child_agent_rules(agent_name: &str) -> String {
     format!(
-        "你在 agents-manager（AG Man）裡的 agent 名稱是 `{agent_name}`。\
+        "你在 agents-manager（AG Man）裡的 agent 名稱是 `{agent_name}`。對話歷史裡若出現別的 agent 名稱（例如你是從別的 bot fork 出來的），那是原 bot、不是你；原 bot 的子 agent 不歸你，開子 agent、改名一律用 `{agent_name}-` 前綴，派工 prompt 也寫你自己的名稱。\
 以下是**硬規則，不是建議**：一律照做，不要自行判斷要不要遵守，也不要事後才補。違反就是錯誤。\n\
 \n\
 需要開子任務或平行工作時，一律用 herdr 開子 agent：\n\
@@ -2157,6 +2157,15 @@ mod model_args_tests {
         assert!(rule.contains("禁止再開子 agent"));
         assert!(rule.contains("由 parent 決定"));
         assert!(rule.contains("你是 `proj-abc123` 的子 agent"), "派工 prompt 要帶上的那句話用自己的名字");
+    }
+
+    /// issue #1789：fork 出來的 bot 會把原 bot 的名字當成自己的（對話歷史裡有），規則要說清楚那不是自己，改名也一律用自己的前綴。
+    #[test]
+    fn a_name_in_forked_history_is_not_ours() {
+        let rule = super::child_agent_rules("proj-abc123");
+        for want in ["對話歷史裡若出現別的 agent 名稱", "那是原 bot、不是你", "原 bot 的子 agent 不歸你", "改名一律用 `proj-abc123-` 前綴"] {
+            assert!(rule.contains(want), "要說清楚 fork 來的名字不是自己：{want}\n{rule}");
+        }
     }
 
     /// issue #1675：codex bot 花了一整個回合讀 `herdr_shim.rs` 與 API 文件才弄懂怎麼開 codex 子 agent。

@@ -1928,6 +1928,7 @@ pane 打 `cargo` 就 permission denied）時，只 chmod 回 0755，不重寫內
 - **失敗要退避重試、放棄要開票**（issue #534）：重試節奏是立刻／5 分／15 分／60 分（`REMOTE_RETRY_WAITS`）——以前是 20 與 60 秒，只夠撐過「ssh 抖一下」，那台在重開機、網路斷幾分鐘時三次全都趕不上，而下一次機會要等它**掉線再連上**（一直連著就等到 daemon 重啟）。都失敗、或腳本跑完但有檔案換不動時，記一行「gave up」（不再寫 will retry）並開 `remote_shim_stale` incident（degraded，`resource` 是 host 名，detail 帶原因與該去那台機器看什麼）；下一次補成就自動消失。
 
 - `herdr agent start <name> …`：`<name>` 不以 `$AM_AGENT_NAME-` 開頭就補前綴。herdr 名稱上限 32 字。放得下就用 `<parent>-<suffix>`；放不下就把母名前綴截到 25 字再接字尾的 6 位數字雜湊（#665），**不會**截成母 bot 自己的名字，不同字尾也不會變成同一個前綴。算不出尾碼或結果仍是母名就 exit 75、不呼叫 herdr。頂層 `agent_name` 上限 24 字，留 8 字給 `-` 與子 agent 字尾。旗標可在名字前面，`--kind`/`--pane`/`--timeout` 的值不誤認，`--` 之後原封不動。
+- `herdr agent rename <目標> <新名字>`（#1789）：`agent start` 的補前綴不經這條路，所以 fork 出來的 bot 會把子 agent 改回原 bot 的前綴、daemon 就掛到原 bot 底下。`$AM_AGENT_NAME` 有值且沒有 `$AM_CHILD_OF` 時，新名字不是 `$AM_AGENT_NAME-` 開頭就 exit 2、不呼叫 herdr；`--clear` 與沒有 `$AM_AGENT_NAME` 的 pane 照舊轉發。
   **模型沿用**：`--` 之後沒有 `--model` 且 `--kind` 與母 bot 相同（或沒寫）時補 `-- --model $AM_MODEL`，claude 再補 `--effort $AM_EFFORT`；
   子 agent 自己寫的一律尊重（`--model`、codex/grok 的 `-m`、codex 的 `-c model=` / `-c model_reasoning_effort=`）。
   **帳號／hook 補救（issue #57）**：`agent start` 沒有 `--env`，只能假設 `--pane` 指到的 pane 是 `pane split` 剛開的、帳號早注入了；

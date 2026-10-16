@@ -383,6 +383,40 @@
         assert_eq!(out, ["agent", "start", "hub-kytpg9-hub-dgs9j9-dev", "--kind", "claude"]);
     }
 
+    /// #1789：fork 出來的 bot 繼承了原 bot 的對話，會把子 agent 改名回原 bot 的前綴，daemon 就把它掛到原 bot 底下。
+    /// `agent start` 有補前綴，`agent rename` 不經那條規則；這裡擋掉別人的前綴，不呼叫 herdr。
+    #[test]
+    fn agent_rename_refuses_another_bots_prefix() {
+        let s = Sandbox::new();
+        let (out, err, rc) = s.run_full(&[("AM_AGENT_NAME", "hub-bbbbbb")], &["agent", "rename", "old-name", "hub-aaaaaa-sd1"]);
+        assert!(out.is_empty(), "herdr 不該被呼叫：{out:?}");
+        assert_eq!(rc, 2, "{err}");
+        assert!(err.contains("hub-bbbbbb") && err.contains("hub-aaaaaa-sd1") && err.contains("沒有改名"), "{err}");
+    }
+
+    #[test]
+    fn agent_rename_to_own_prefix_is_forwarded() {
+        let s = Sandbox::new();
+        let (out, _) = s.run(&[("AM_AGENT_NAME", "hub-aaaaaa")], &["agent", "rename", "old-name", "hub-aaaaaa-sd1"]);
+        assert_eq!(out, ["agent", "rename", "old-name", "hub-aaaaaa-sd1"]);
+    }
+
+    /// `--clear` 沒有新名字，不是改成別人的前綴，照舊轉發。
+    #[test]
+    fn agent_rename_clear_is_forwarded() {
+        let s = Sandbox::new();
+        let (out, _) = s.run(&[("AM_AGENT_NAME", "hub-aaaaaa")], &["agent", "rename", "old-name", "--clear"]);
+        assert_eq!(out, ["agent", "rename", "old-name", "--clear"]);
+    }
+
+    /// 沒有 `AM_AGENT_NAME`（使用者自己的 pane）不套規則。
+    #[test]
+    fn agent_rename_without_an_agent_name_is_forwarded() {
+        let s = Sandbox::new();
+        let (out, _) = s.run(&[], &["agent", "rename", "old-name", "hub-bbbbbb-sd1"]);
+        assert_eq!(out, ["agent", "rename", "old-name", "hub-bbbbbb-sd1"]);
+    }
+
     /// 回報 daemon 失敗（測試裡沒有 daemon）也不能擋住轉發。
     #[test]
     fn agent_prompt_prefixes_the_target_and_forwards_the_text() {
