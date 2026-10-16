@@ -69,31 +69,11 @@ function runTurn(turnId: string, crid: string | null, keepWarm: boolean) {
 }
 
 for (const crid of ['child-done:child:t', 'child-blocked:child:t']) {
-  test(`${crid} 完成事件／assistant／idle 不增加未讀；普通回合仍增加`, () => {
+  test(`${crid}：parent 回覆完就算未讀，跟普通回合一樣（使用者 2026-10-16）`, () => {
     seed()
     runTurn('t1', crid, false)
-    assert.equal(useStore.getState().botUnread.b1 ?? 0, 0)
-    assert.equal(useStore.getState().groupUnread.p1 ?? 0, 0)
-    runTurn('t2', 'web-1', false)
     assert.equal(useStore.getState().botUnread.b1, 1)
-  })
-  test(`${crid} 只有 working→idle 備援也不增加未讀`, () => {
-    seed()
-    dispatchFrameForTest({ type: 'turn_updated', data: { bot_id: 'b1', turn: turn('t1', 'in_flight', crid) } })
-    dispatchFrameForTest(status('working'))
-    dispatchFrameForTest(status('idle'))
-    assert.equal(useStore.getState().botUnread.b1 ?? 0, 0)
+    runTurn('t2', 'web-1', false)
+    assert.equal(useStore.getState().botUnread.b1, 2)
   })
 }
-
-test('回合 metadata 還沒載入時，從通知訊息配對回覆仍不增加未讀', () => {
-  seed()
-  dispatchFrameForTest({ type: 'message_added', data: { bot_id: 'b1', message: {
-    id: 'notice', conversation_id: 'c', turn_id: 't1', role: 'user', source: 'web', relay_from: 'child',
-    content: '[daemon 自動通知，不是 bot_request]子 agent sc1779 已完成一個回合。', created_at: '2026-10-05T10:00:00Z',
-  } } })
-  dispatchFrameForTest({ type: 'message_added', data: { bot_id: 'b1', message: reply('a1', 't1', false) } })
-  assert.equal(useStore.getState().botUnread.b1 ?? 0, 0)
-  dispatchFrameForTest({ type: 'turn_updated', data: { bot_id: 'b1', turn: turn('t1', 'completed', null) } })
-  assert.equal(useStore.getState().botUnread.b1 ?? 0, 0)
-})

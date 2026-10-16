@@ -3,7 +3,6 @@
  * 數字與已讀標記都存：標記是真相，但重整後只有正在看的 bot 有訊息可重算，其他靠存下的數字。
  */
 
-import { childNoticeTurns } from '../lib/childNotice'
 import type { Message } from '../api/types'
 import { writeShared } from './mobilePreview'
 import { laterMark } from './sharedUnread'
@@ -142,9 +141,8 @@ export function isUnread(msg: Pick<Message, 'id' | 'created_at' | 'seq'>, mark: 
 /** 以回合計數：同回合多則 assistant 訊息算一個；沒 turn_id 的各算一個。 */
 export function countUnreadTurns(messages: readonly Message[], mark: ReadMark | undefined): number {
   const turns = new Set<string>()
-  const quiet = childNoticeTurns(messages)
   for (const m of messages) {
-    if (!completesTurn(m) || (m.turn_id && quiet.has(m.turn_id)) || !isUnread(m, mark)) continue
+    if (!completesTurn(m) || !isUnread(m, mark)) continue
     turns.add(m.turn_id ?? `msg:${m.id}`)
   }
   return turns.size

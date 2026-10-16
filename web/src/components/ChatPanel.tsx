@@ -709,7 +709,7 @@ function MessageList({ botId }: { botId: string }) {
         </EmptyState>
       ) : (
         <ChildNoticeMessages messages={list} renderMessage={(m, expanded) => <Bubble msg={m} flash={m.id === flashId} expandRelay={expanded} />}
-          liveTurnId={inFlightTurnId} liveReply={<LiveReplyBubble botId={botId} abandon />} />
+          liveReply={<LiveReplyBubble botId={botId} abandon />} />
       )}
       {list.length === 0 ? <LiveReplyBubble botId={botId} abandon /> : null}
     </div>

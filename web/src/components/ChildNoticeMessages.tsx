@@ -8,8 +8,8 @@ import { useLocalDay } from '../hooks/useLocalDay'
 import './childNoticeMessages.css'
 
 type NoticeGroup = Extract<ChildNoticeRow, { kind: 'notices' }>
-function ChildNoticeGroup({ row, renderMessage, children }: {
-  row: NoticeGroup; renderMessage: (msg: Message, expanded?: boolean) => ReactNode; children?: ReactNode
+function ChildNoticeGroup({ row, renderMessage }: {
+  row: NoticeGroup; renderMessage: (msg: Message, expanded?: boolean) => ReactNode
 }) {
   const [open, setOpen] = useState(false)
   const id = useId()
@@ -24,21 +24,19 @@ function ChildNoticeGroup({ row, renderMessage, children }: {
     </button>
     {open ? <div id={id} className="child-notice-content">
       {row.messages.map((msg) => <Fragment key={msg.id}>{renderMessage(msg, true)}</Fragment>)}
-      {children}
     </div> : null}
   </section>
 }
 
-export function ChildNoticeMessages({ messages, renderMessage, liveTurnId, liveReply }: {
-  messages: readonly Message[]; renderMessage: (msg: Message, expanded?: boolean) => ReactNode
-  liveTurnId?: string | null; liveReply?: ReactNode
+/** parent 對通知的回覆（含串流）照一般訊息顯示，只有通知本身收成一行。 */
+export function ChildNoticeMessages({ messages, renderMessage, liveReply }: {
+  messages: readonly Message[]; renderMessage: (msg: Message, expanded?: boolean) => ReactNode; liveReply?: ReactNode
 }) {
   const rows = useMemo(() => groupChildNotices(messages), [messages])
-  const liveRow = liveTurnId ? rows.findLast((r) => r.kind === 'notices' && r.turnIds.has(liveTurnId)) : null
   return <>
     {rows.map((row) => row.kind === 'message'
       ? <Fragment key={row.message.id}>{renderMessage(row.message)}</Fragment>
-      : <ChildNoticeGroup key={row.id} row={row} renderMessage={renderMessage}>{row === liveRow ? liveReply : null}</ChildNoticeGroup>)}
-    {liveRow ? null : liveReply}
+      : <ChildNoticeGroup key={row.id} row={row} renderMessage={renderMessage} />)}
+    {liveReply}
   </>
 }
