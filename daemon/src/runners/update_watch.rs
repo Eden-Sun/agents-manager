@@ -72,6 +72,7 @@ pub async fn sweep_runs(app: &Arc<App>, runs: anyhow::Result<Vec<db::Run>>) {
     let active: Vec<String> = runs.iter().map(|r| r.id.clone()).collect();
     crate::background_jobs::retain_runs(app, &active);
     crate::claude_live::retain_runs(&active);
+    crate::agy_live::retain_runs(&active);
     #[cfg(not(test))]
     {
         crate::codex_update::retain_runs(&active);
