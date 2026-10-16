@@ -361,9 +361,9 @@ function resetLineOf(rows: { name: WindowName; back: string; resetsAt: string }[
     if (!groups.some((g) => Math.abs(g.at - at) <= SHARED_RESET_MS)) groups.push({ name: r.name, back: r.back, at })
   }
   const title = rows.map((r) => `${r.name} 還有 ${r.back} 重置`).join('；')
-  // 窗口名與時間之間是不換行空白：格子窄時只在「·」換行，不把 `7d` 跟它的時間拆開。
+  // 一律一行：格子高度只放得下三列加這一行（2026-10-16 使用者截圖：換成兩行就蓋到底下那排）。兩組時間時省掉空白，`└5h 1h14·7d 0h44`。
   if (groups.length === 1) return { text: `└\u00a0${groups[0]!.back}`, title }
-  return { text: `└\u00a0${groups.map((g) => `${g.name}\u00a0${g.back}`).join(' · ')}`, title }
+  return { text: `└${groups.map((g) => `${g.name}\u00a0${g.back}`).join('·')}`, title }
 }
 
 /** `staleAt`：這一桶是沿用上一份讀數時，它自己的觀測時間（#540）；不是沿用就 `null`。 */
