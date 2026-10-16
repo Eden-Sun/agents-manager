@@ -587,7 +587,7 @@ export class MockTransport implements Transport {
   }
   /** SPEC §14：裸 key 是本機，遠端加 `<host>/` 前綴（`seedHostQuota()` 故意給不同數字）。 */
   private quota: Record<string, Rec | null> = {
-    // 7d 剩 3%、F 剩 0%，同一刻（3 小時多後）重置：10 格點陣＋兩列共用一個倒數（#1785）。
+    // 7d 剩 3%、F 剩 0%，同一刻（3 小時多後）重置：0–10% 長條＋底下一行共用倒數（#1787）。
     claude: { five_hour: { used_pct: 18, resets_at: inHours(2.4) }, seven_day: { used_pct: 97, resets_at: inHours(3.1) }, fable: { used_pct: 100, resets_at: inHours(3.1) }, plan: 'Max 20x', updated_at: now(), host: 'local' },
     // 沿用上一份讀數的那一桶（issue #540）：`observed_at` 比 `updated_at` 舊＝狀態列這幾次沒帶 5h，
     // mock 固定留一格這種狀態，量表上的「舊」標記才有東西可看。
@@ -599,7 +599,7 @@ export class MockTransport implements Transport {
       host: 'local',
     },
     // zshrc 身份也有額度列（SPEC §16）。
-    // 5h 剩 5%、24 分後重置：10 格點陣但不是倒數列（#1784）。
+    // 5h 剩 5%、24 分後重置：0–10% 長條但不是倒數列（#1784）。
     'claude:cc2': { five_hour: { used_pct: 95, resets_at: inHours(0.4) }, seven_day: { used_pct: 51, resets_at: inHours(88) }, plan: 'Pro', updated_at: now(), host: 'local' },
     // 重置券（codex `rateLimitResetCredits`）：固定給一張讓明細有東西可看。
     codex: {
