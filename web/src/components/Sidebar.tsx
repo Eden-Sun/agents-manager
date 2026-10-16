@@ -1087,9 +1087,12 @@ export function Sidebar() {
         return next
       })
     }
+    // 置頂請求在這個 effect 之前就記下了（UnreadChip go() 先 requestBotToTop）；要在同步段讀下來，
+    // 因為 useBotScrollTop 的 rAF 比下面這個 rAF 先跑，等到那時 pending 已經清掉（#1786）。
+    const toTop = botTopPending(selectedBotId)
     // 展開後才進 DOM，等下一 frame。
     const id = requestAnimationFrame(() => {
-      if (botTopPending(selectedBotId)) return // 主力晶片點的：由 useBotScrollTop 置頂（#1676）
+      if (toTop || botTopPending(selectedBotId)) return // 主力晶片點的：由 useBotScrollTop 置頂（#1676）
       document.querySelector<HTMLElement>(`[data-bot-id="${selectedBotId}"]`)?.scrollIntoView({ block: 'nearest' })
     })
     return () => cancelAnimationFrame(id)
