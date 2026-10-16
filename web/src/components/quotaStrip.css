@@ -975,27 +975,24 @@
 }
 
 /* 剩不到 10%：10 個小格、每格 1%（2026-10-16 第二版，取代 ×10 連續條）。空心格有框線，0% 也看得出畫了 10 格。
-   外層同時是 `.quota-bar-wrap`，沿用條的寬度規則（收合時填滿、手機等寬格），格子 flex 均分、間距 1px。 */
-.quota-cells {
+   每格至少 5px（框線 1px，裡面還剩 3px 的空心）、間距 1px，所以整條至少 59px；外層同時是 `.quota-bar-wrap`，
+   寬度規則被這裡蓋掉：不低於 59px，有多的空間照樣跟條一樣一起長（格子 flex 均分）。 */
+.quota-cells,
+.main-head .quota-cells,
+.main-head .quota-open.collapsed .quota-cells,
+.quota-bar-row.countdown .quota-cells,
+.main-head .quota-bar-row.countdown .quota-cells {
   display: flex;
   align-items: center;
   gap: 1px;
-}
-
-.quota-bar-row.countdown .quota-cells {
-  width: 38px;
-}
-
-@media (width > 640px) {
-  .main-head .quota-bar-row.countdown .quota-cells {
-    flex: 1 1 38px;
-    min-width: 38px;
-  }
+  flex: 1 1 59px;
+  width: auto;
+  min-width: 59px;
 }
 
 .quota-cell {
   flex: 1 1 0;
-  min-width: 0;
+  min-width: 5px;
   height: 7px;
   box-sizing: border-box;
   border: 1px solid var(--text-dim);
@@ -1022,7 +1019,8 @@
   height: 9px;
 }
 
-/* 7d 與 F 同一刻重置：兩列右側共用一個倒數，用 CSS 邊框做的括號（┐┘）跨兩列。 */
+/* 7d 與 F 同一刻重置：兩列右側共用一個倒數，用 CSS 邊框做的括號（┐┘）跨兩列。
+   兩列用 subgrid 共用欄寬，窗口名欄與格子才會上下對齊；倒數欄的間距收到最小，省出寬度給格子。 */
 .quota-shared {
   display: flex;
   align-items: stretch;
@@ -1030,18 +1028,29 @@
 
 .quota-shared-rows {
   display: grid;
+  grid-template-columns: minmax(12px, auto) auto;
+}
+
+.quota-shared-rows .quota-bar-pct {
+  min-width: 0;
+  padding-left: 2px;
+}
+
+.quota-shared-rows > .quota-window {
+  grid-column: 1 / -1;
+  grid-template-columns: subgrid;
 }
 
 .quota-shared-reset {
   display: flex;
   align-items: center;
-  gap: 3px;
+  gap: 1px;
   padding-left: 2px;
 }
 
 .quota-bracket {
   align-self: stretch;
-  width: 4px;
+  width: 3px;
   margin: 5px 0;
   border: 1px solid var(--text-faint);
   border-left: 0;
