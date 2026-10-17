@@ -329,6 +329,7 @@ export function toBot(v: unknown, projectId?: string): Bot | null {
     env: envMap(pick(v, 'env')),
     managed_by: oneOf<BotManagedBy>(pick(v, 'managed_by'), ['user', 'child'], 'user'),
     parent_bot_id: optStr(pick(v, 'parent_bot_id')),
+    create_request_id: optStr(pick(v, 'create_request_id')),
     primary: bool(pick(v, 'primary')),
     needs_restart: bool(pick(v, 'needs_restart')),
     live_apply_deferred: bool(pick(v, 'live_apply_deferred')),

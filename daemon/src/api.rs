@@ -1491,6 +1491,13 @@ pub async fn state_json(app: &Arc<App>) -> Result<Value, LcError> {
     let mut queued_turns = db::queued_turns_by_bot(&app.db).await.map_err(any_err)?;
     // 快取倒數（`cache_clock`）：每顆 bot 最近一筆送出去的回合，一次讀完。
     let last_turns = crate::cache_clock::last_turns_by_bot(&app.db).await.map_err(any_err)?;
+    // 建立時帶的冪等鍵（只在 config.toml，不在 DB）：前端用它把「建立中」佔位列對到真 bot，不靠名字（#1796）。
+    let create_request_ids: std::collections::HashMap<&str, &str> = cfg
+        .projects
+        .iter()
+        .flat_map(|p| p.bots.iter())
+        .filter_map(|c| Some((c.id.as_deref()?, c.create_request_id.as_deref()?)))
+        .collect();
     let mut out = Vec::new();
     for p in projects {
         let mut bl = Vec::new();
@@ -1522,6 +1529,7 @@ pub async fn state_json(app: &Arc<App>) -> Result<Value, LcError> {
                 "herdr_session": b.herdr_session.clone(),
                 "managed_by": b.managed_by,
                 "parent_bot_id": b.parent_bot_id,
+                "create_request_id": create_request_ids.get(b.id.as_str()),
                 // 使用者釘的主要 bot（純顯示）。
                 "primary": b.is_primary == 1,
                 // 主力那列的固定順序（#344）：1 起算，0＝沒排過；取消釘選不清。
@@ -6893,11 +6901,24 @@ async fn get_project_messages(
     Ok(Json(messages))
 }
 
+/// `POST /projects/{id}/chat` 的 body：比 `PromptIn` 多 `recipient_ids`（issue #1796）。
+#[derive(Deserialize)]
+struct ChatIn {
+    #[serde(default)]
+    text: String,
+    client_request_id: Option<String>,
+    #[serde(default)]
+    attachments: Vec<String>,
+    /// 收件 bot id（有帶就只認 id，文字裡的 `@名字` 只是顯示）；沒帶＝照舊解析文字裡的 mention。
+    #[serde(default)]
+    recipient_ids: Vec<String>,
+}
+
 /// SPEC §13.4: `@<bot>` / `@all` fan-out. No valid mention → 400 `{error:"no_mention", bots}`.
 async fn project_chat(
     State(app): State<Arc<App>>,
     Path(id): Path<String>,
-    Json(b): Json<PromptIn>,
+    Json(b): Json<ChatIn>,
 ) -> Response {
     let crid = match b.client_request_id.as_deref().map(str::trim).filter(|c| !c.is_empty()) {
         Some(c) => match crate::request_id::validate("client_request_id", c) {
@@ -6906,7 +6927,7 @@ async fn project_chat(
         },
         None => db::ulid(),
     };
-    match crate::group::chat(&app, &id, &b.text, &crid, &b.attachments).await {
+    match crate::group::chat(&app, &id, &b.text, &crid, &b.attachments, &b.recipient_ids).await {
         Ok(v) => (StatusCode::OK, Json(v)).into_response(),
         Err(crate::group::Response400::Lc(e)) => e.into_response(),
         Err(crate::group::Response400::NoMention(bots)) => (
@@ -10269,6 +10290,19 @@ mod bot_config_tests {
         let st = state_json(&e.app).await.unwrap();
         let bot = st["projects"][0]["bots"].as_array().unwrap().iter().find(|b| b["id"] == json!(id)).unwrap().clone();
         assert!(bot.get("instruction_files").is_none(), "state 不再輸出這個欄位：{bot}");
+    }
+
+    /// #1796：前端把「建立中」佔位列對到真 bot 靠建立請求的冪等鍵，不靠名字；state 要把 config 裡的鍵帶出來（沒帶鍵的 bot 是 null）。
+    #[tokio::test]
+    async fn state_carries_the_create_request_id_so_a_placeholder_can_be_matched_without_the_name() {
+        let e = env().await;
+        seed_project(&e).await;
+        let with = add(&e, json!({"name": "clone-a", "kind": "claude", "client_request_id": "crid-clone-1"})).await.unwrap();
+        let without = add(&e, json!({"name": "clone-b", "kind": "claude"})).await.unwrap();
+        let st = state_json(&e.app).await.unwrap();
+        let find = |id: &str| st["projects"][0]["bots"].as_array().unwrap().iter().find(|b| b["id"] == json!(id)).unwrap().clone();
+        assert_eq!(find(&with)["create_request_id"], json!("crid-clone-1"));
+        assert_eq!(find(&without)["create_request_id"], Value::Null);
     }
 
     #[tokio::test]

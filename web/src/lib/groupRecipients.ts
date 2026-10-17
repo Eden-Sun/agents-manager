@@ -35,3 +35,20 @@ export function applyRecipients(text: string, mode: 'all' | string[], names: str
   const prefix = mode.map((n) => `@${n}`).join(' ')
   return body ? `${prefix} ${body}` : `${prefix} `
 }
+
+/** 打字當下的成員名單：`@名字` 只在這份名單裡解析成 bot id（#1796）。 */
+export interface MentionSnapshot<T> {
+  text: string
+  members: T[]
+}
+
+/** 文字沒變就沿用舊快照（之後的改名不影響已打好的收件人）；文字一變就換成當下的名單。 */
+export function nextMentionSnapshot<T>(prev: MentionSnapshot<T> | null, text: string, members: T[]): MentionSnapshot<T> {
+  return prev && prev.text === text ? prev : { text, members }
+}
+
+/** 把快照解析出的收件人換成**現在**的成員（顯示用現在的名字）；已不在專案裡的 bot 不算。 */
+export function resolveTargetsById<T extends { id: string }>(resolved: T[], current: T[]): T[] {
+  const ids = new Set(resolved.map((r) => r.id))
+  return current.filter((m) => ids.has(m.id))
+}

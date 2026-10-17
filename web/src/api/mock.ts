@@ -4032,7 +4032,8 @@ export class MockTransport implements Transport {
     const text = String(b.text ?? '')
     const crid = typeof b.client_request_id === 'string' && b.client_request_id ? b.client_request_id : ulid('crid')
     const members = this.bots.filter((x) => x.project_id === projectId)
-    const targets = parseMentions(text, members)
+    const ids = Array.isArray(b.recipient_ids) ? b.recipient_ids.filter((x): x is string => typeof x === 'string') : []
+    const targets = ids.length ? members.filter((m) => ids.includes(m.id)) : parseMentions(text, members)
     if (targets.length === 0) {
       throw new ApiError(
         400,

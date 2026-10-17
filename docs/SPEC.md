@@ -3799,6 +3799,7 @@ hook 與 statusLine 只有 AG Man 自己啟動的 agy bot 才有（dispatcher �
   暱稱唯一性分大小寫（`Claude` 與 `claude` 可以同時在）。提及先對大小寫完全相同的那顆；沒有完全相同、而且摺完恰好一顆時才不分大小寫。摺完有兩顆以上就都不算，這樣第二顆才點得到（#657）。
 - 暱稱可以有空白（2026-09-19）：`@` 後面正好接著某個有空白的暱稱**整段**（不分大小寫、後面是結尾或標點／空白）就是它，最長的先比（`@my bot 2` 不會被 `my bot` 搶走）；沒對上的照原本逐字規則（`@my botanist` → `my`）。
 - `@` 須在開頭或非字元之後（`me@example.com` 不算）。沒有有效 mention → 400 `{error:"no_mention", message, bots}`。目標依專案內 bot 順序去重。
+- **收件人認 id，不認名字**（#1796）：`POST .../chat` 可帶 `recipient_ids`（bot id 陣列）；有帶就只看 id（依專案內 bot 順序），文字裡的 `@名字` 只是顯示，解析不再看名字——輸入後、送出前改名或舊名被別人接手，都不會漏送、送錯。不在專案裡的 id 進 `skipped`（`reason:"not_found"`）。沒帶就照上面的文字規則（腳本、bot 對 bot 等舊呼叫端）。前端在**打字當下**用當時的成員名單把 `@名字` 解析成 id（文字沒變就沿用，之後改名不重算），chip 與送出都看 id，顯示用現在的名字。
 
 ### 13.3 不可送的 bot（略過，不自動啟動）
 沒有 active Run、非 `running`、`blocked`、已有 in-flight Turn、有 `delivery=unknown` → 略過，列在 `skipped:[{bot_id, bot_name, reason, detail}]`
@@ -3817,6 +3818,7 @@ Bot token 讀群組時間軸時只會取得自己與 descendant bots 的訊息�
 - `bot_changed` 刷新 bot 快照後，若 bot 名稱或所屬 project 改變、被刪除或復原，同步已載入群組時間軸的徽章名稱與成員；新增成員合併最新頁並保留已翻出的歷史。
 - 單 bot 訊息依 `(created_at, seq)` 顯示；翻頁游標依已載入訊息中 `seq` 最小的一則選取，避免 daemon 時鐘校正後把時間排序的第一則誤當成插入序最早的一則。群組時間軸依 `seq` 插入序顯示。
 - 載入更早的訊息與整頁重抓重疊時，重抓套用後才回來的舊頁丟棄；下一頁從重抓後清單插入序最早的一則接續分頁。單 bot 與群組時間軸一致。
+- 「開同類分身」送出到 daemon 建好之間的灰色佔位列，靠建立請求的 `client_request_id`（`GET /api/state` 的 `bots[].create_request_id`，daemon 從 config.toml 帶出）對到真 bot，**不比對名字**（#1796）：建立期間真 bot 被改名佔位照樣被換掉，同名的既有 bot 吃不掉佔位；鍵還沒出現就佔位列留著。
 - 輸入 `@` 彈出成員與 `all` 自動完成；沒有 mention 時送出鈕 disabled；列出收件者並標示將被略過的。**專案內至少一個 bot 可送就不鎖輸入框。**
 - 未打開群組時 sidebar 顯示未讀計數（打開即歸零）。**數字與已讀標記以 daemon 為準、跨裝置共用**（#756）：`project_group_reads` 存每個專案的標記，`GET /api/state` 每個專案帶 `group_unread`／`group_read_mark`（API.md `POST /api/projects/{id}/group/read`），前端只留記憶體裡的即時 +1，由下一次快照校正。已軟刪專案的標記端點回 404，upsert 也以存檔當下 project 仍存活為條件，避免併發刪除留下標記。**只算群組回覆**（2026-09-15）：回的是群組訊息的那一回合（該 bot 對話裡有同 `turn_id`、帶 `group_id` 的 user 訊息）完成才 +1；成員各自的單獨對話不算。群組來源以持久化的 `messages.group_id` 確認；未載入原訊息時，`client_request_id` 的 `<crid>:<bot_id>` 僅作查詢候選，再向訊息 API 查該 bot、該回合的 user 訊息，不以命名或歷史頁數當證據。daemon 的算法：標記之後、同回合 user 訊息帶 `group_id` 的 assistant 回合，依 `turn_id` 去重；相同訊息時間依 `seq` 插入序判斷。本機不再存群組計數（舊版的 `group:` 鍵忽略）。
 Bot 個別與專案群組的 `POST .../read` 都只接受 User principal；Bot（包含 AGM 角色）不能推進這些跨裝置已讀標記，service principal 的 scope 不包含這些路徑。

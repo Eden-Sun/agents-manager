@@ -49,7 +49,7 @@ pub async fn view_for_bot(app: &(impl crate::capabilities::Db + crate::events::p
                     if !parent_is_visible {
                         fields.remove("parent_bot_id");
                     }
-                    for key in ["persona", "args", "identity", "env", "herdr_session", "unread", "read_mark"] {
+                    for key in ["persona", "args", "identity", "env", "herdr_session", "unread", "read_mark", "create_request_id"] {
                         fields.remove(key);
                     }
                 }

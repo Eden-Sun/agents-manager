@@ -235,6 +235,23 @@ pub async fn members(app: &impl crate::capabilities::Db, project_id: &str) -> Lc
     Ok(bots.into_iter().filter(|b| b.project_id == project_id).collect())
 }
 
+/// 收件人（issue #1796）：帶了 `recipient_ids` 就只認 id（依專案內 bot 順序），文字裡的 `@名字` 只是顯示——
+/// 輸入後、送出前改名或名字被別人接手，都不會漏送或送錯；不在專案裡的 id 原樣回報成 `unknown`。
+/// 沒帶就照舊用文字裡的 mention 解析。
+pub fn resolve_targets(text: &str, members: &[Member], recipient_ids: &[String]) -> (Vec<Member>, Vec<String>) {
+    if recipient_ids.is_empty() {
+        return (parse_mentions(text, members), Vec::new());
+    }
+    let targets: Vec<Member> = members.iter().filter(|m| recipient_ids.contains(&m.id)).cloned().collect();
+    let mut unknown: Vec<String> = Vec::new();
+    for id in recipient_ids {
+        if !members.iter().any(|m| &m.id == id) && !unknown.contains(id) {
+            unknown.push(id.clone());
+        }
+    }
+    (targets, unknown)
+}
+
 /// `POST /api/projects/:id/chat` (SPEC §13.4). The group id **is** the client request id, so a
 /// retry reaches the same per-bot Turns and adds no second "skipped" note.
 pub async fn chat(
@@ -243,6 +260,7 @@ pub async fn chat(
     text: &str,
     client_request_id: &str,
     attachment_ids: &[String],
+    recipient_ids: &[String],
 ) -> Result<Value, Response400> {
     let project = db::project(app.db(), project_id)
         .await
@@ -257,8 +275,8 @@ pub async fn chat(
     }
     let bots = members(app, &project.id).await.map_err(Response400::Lc)?;
     let member_list: Vec<Member> = bots.iter().map(|b| Member { id: b.id.clone(), name: b.name.clone() }).collect();
-    let targets = parse_mentions(text, &member_list);
-    if targets.is_empty() {
+    let (targets, unknown_ids) = resolve_targets(text, &member_list, recipient_ids);
+    if targets.is_empty() && unknown_ids.is_empty() {
         return Err(Response400::NoMention(
             bots.iter().map(|b| json!({"id": b.id, "name": b.name, "kind": b.kind})).collect(),
         ));
@@ -268,7 +286,10 @@ pub async fn chat(
     // Bots must not see the routing syntax: `@all echo 1` reaches each bot as `echo 1`.
     let deliver = strip_mentions(text, &member_list);
     let mut sent = Vec::new();
-    let mut skipped = Vec::new();
+    let mut skipped: Vec<Value> = unknown_ids
+        .iter()
+        .map(|id| json!({"bot_id": id, "bot_name": "", "reason": "not_found", "detail": "bot is not a member of this project"}))
+        .collect();
     for t in targets {
         let crid = format!("{client_request_id}:{}", t.id);
         // #167：字已經打進去、只是送達結果寫不進 DB（`Uncommitted`）——那是「結果不明」，不是「沒送」：放進 `sent`
@@ -447,6 +468,27 @@ mod tests {
 
     fn names(text: &str) -> Vec<String> {
         parse_mentions(text, &members()).into_iter().map(|m| m.name).collect()
+    }
+
+    #[test]
+    fn recipient_ids_survive_a_rename_and_a_name_taken_by_someone_else() {
+        // 輸入框裡打的是 `@g-claude`；送出前 1 被改名、舊名被 4 接手：文字不再對得上，但收件人仍是 id 1。
+        let after = vec![
+            Member { id: "1".into(), name: "g-renamed".into() },
+            Member { id: "4".into(), name: "g-claude".into() },
+        ];
+        let (by_text, _) = resolve_targets("@g-claude hi", &after, &[]);
+        assert_eq!(by_text.iter().map(|m| m.id.as_str()).collect::<Vec<_>>(), vec!["4"], "沒帶 id 時照舊看文字（舊行為）");
+        let (by_id, unknown) = resolve_targets("@g-claude hi", &after, &["1".to_string()]);
+        assert_eq!(by_id.iter().map(|m| m.id.as_str()).collect::<Vec<_>>(), vec!["1"], "帶 id 就只認 id，不看名字");
+        assert!(unknown.is_empty());
+    }
+
+    #[test]
+    fn recipient_ids_keep_project_order_and_report_unknown_ids() {
+        let (t, unknown) = resolve_targets("x", &members(), &["3".to_string(), "1".to_string(), "9".to_string(), "9".to_string()]);
+        assert_eq!(t.iter().map(|m| m.id.as_str()).collect::<Vec<_>>(), vec!["1", "3"]);
+        assert_eq!(unknown, vec!["9".to_string()]);
     }
 
     #[test]
@@ -682,7 +724,7 @@ mod uncommitted_tests {
         env.herdr.live_pane("pane-api", tt::LivePane { width: Some(120), ..Default::default() });
         lose_delivery_writes(&app).await;
 
-        let out = chat(&app, &env.project_id, "@grp-owed 跑一下測試", "crid-grp", &[]).await.ok().expect("chat 本身要成功");
+        let out = chat(&app, &env.project_id, "@grp-owed 跑一下測試", "crid-grp", &[], &[]).await.ok().expect("chat 本身要成功");
         assert_eq!(typed(&env), 1, "字已經打進 pane 了");
         assert!(out["skipped"].as_array().unwrap().is_empty(), "已送出的收件人不能算「跳過」：{out}");
         let sent = out["sent"].as_array().unwrap();
@@ -704,15 +746,15 @@ mod uncommitted_tests {
         env.herdr.live_pane("pane-api", tt::LivePane { width: Some(120), ..Default::default() });
         lose_delivery_writes(&app).await;
 
-        let first = chat(&app, &env.project_id, "@grp-retry 跑一下測試", "crid-retry", &[]).await.ok().unwrap();
+        let first = chat(&app, &env.project_id, "@grp-retry 跑一下測試", "crid-retry", &[], &[]).await.ok().unwrap();
         let turn_id = first["sent"][0]["turn_id"].as_str().unwrap().to_string();
-        let again = chat(&app, &env.project_id, "@grp-retry 跑一下測試", "crid-retry", &[]).await.ok().unwrap();
+        let again = chat(&app, &env.project_id, "@grp-retry 跑一下測試", "crid-retry", &[], &[]).await.ok().unwrap();
         assert!(again["skipped"].as_array().unwrap().is_empty(), "{again}");
         assert_eq!(again["sent"][0]["turn_id"], turn_id.as_str(), "同一個回合：{again}");
         assert_eq!(typed(&env), 1, "DB 還壞著：重送不再打字");
 
         sqlx::query("DROP TRIGGER lost_delivery_write").execute(&app.db).await.unwrap();
-        let healed = chat(&app, &env.project_id, "@grp-retry 跑一下測試", "crid-retry", &[]).await.ok().unwrap();
+        let healed = chat(&app, &env.project_id, "@grp-retry 跑一下測試", "crid-retry", &[], &[]).await.ok().unwrap();
         assert_eq!(healed["sent"][0]["turn_id"], turn_id.as_str(), "{healed}");
         assert_eq!(healed["sent"][0]["delivery"], "ok", "DB 好了：拿到寫好的結果：{healed}");
         assert_eq!(typed(&env), 1, "從頭到尾只打了一次");
@@ -729,13 +771,32 @@ mod uncommitted_tests {
         env.herdr.live_pane("pane-api", tt::LivePane { width: Some(120), ..Default::default() });
         lose_delivery_writes(&app).await;
 
-        let out = chat(&app, &env.project_id, "@all 跑一下測試", "crid-mix", &[]).await.ok().unwrap();
+        let out = chat(&app, &env.project_id, "@all 跑一下測試", "crid-mix", &[], &[]).await.ok().unwrap();
         assert_eq!(out["sent"].as_array().unwrap().len(), 1, "{out}");
         assert_eq!(out["sent"][0]["bot_name"], "grp-a", "{out}");
         let skipped = out["skipped"].as_array().unwrap();
         assert_eq!(skipped.len(), 1, "{out}");
         assert_eq!(skipped[0]["bot_id"], stopped.id.as_str(), "{out}");
         assert_eq!(skipped[0]["reason"], "not_running", "{out}");
+    }
+
+    /// #1796：帶 `recipient_ids` 時收件人只看 id——文字裡的名字對不上（改名後）也照送，不會誤送給接手舊名的人；未知 id 回 `not_found`。
+    #[tokio::test]
+    async fn recipient_ids_pick_the_bots_even_when_the_typed_name_no_longer_matches() {
+        let env = tt::env().await;
+        let app = env.app.clone();
+        let renamed = tt::claude_bot(&app, &env.project_id, "grp-renamed").await;
+        let heir = tt::claude_bot(&app, &env.project_id, "grp-old").await;
+        env.herdr.live_pane("pane-api", tt::LivePane { width: Some(120), ..Default::default() });
+
+        let ids = vec![renamed.id.clone(), "gone-bot".to_string()];
+        let out = chat(&app, &env.project_id, "@grp-old 看一下", "crid-ids", &[], &ids).await.ok().unwrap();
+        let skipped = out["skipped"].as_array().unwrap();
+        let by_id = |id: &str| skipped.iter().find(|x| x["bot_id"] == id).cloned();
+        assert_eq!(by_id(renamed.id.as_str()).unwrap()["reason"], "not_running", "收件人是 id 指的那顆：{out}");
+        assert_eq!(by_id("gone-bot").unwrap()["reason"], "not_found", "{out}");
+        assert!(by_id(heir.id.as_str()).is_none(), "接手舊名的那顆不是收件人：{out}");
+        assert!(system_notes(&app, &db::conversation_id(&app.db, &heir.id).await.unwrap()).await.is_empty());
     }
 
     /// #340：一顆都沒送到要明說（delivered:false），前端才不會清掉草稿；重送後那顆送到了，先前的「未送達」note 要撤掉。
@@ -747,7 +808,7 @@ mod uncommitted_tests {
         let conv = db::conversation_id(&app.db, &stopped.id).await.unwrap();
         env.herdr.live_pane("pane-api", tt::LivePane { width: Some(120), ..Default::default() });
 
-        let out = chat(&app, &env.project_id, "@all hi", "crid-none", &[]).await.ok().unwrap();
+        let out = chat(&app, &env.project_id, "@all hi", "crid-none", &[], &[]).await.ok().unwrap();
         assert_eq!(out["delivered"], false, "{out}");
         assert_eq!(out["sent"].as_array().unwrap().len(), 0);
         assert_eq!(system_notes(&app, &conv).await.len(), 1, "有一則未送達 note");
@@ -762,7 +823,7 @@ mod uncommitted_tests {
         .execute(&app.db)
         .await
         .unwrap();
-        let out = chat(&app, &env.project_id, "@all hi", "crid-none", &[]).await.ok().unwrap();
+        let out = chat(&app, &env.project_id, "@all hi", "crid-none", &[], &[]).await.ok().unwrap();
         assert_eq!(out["delivered"], true, "{out}");
         assert!(system_notes(&app, &conv).await.is_empty(), "送到了，先前的未送達 note 要撤掉");
     }
@@ -775,7 +836,7 @@ mod uncommitted_tests {
         let app = env.app.clone();
         let stopped = tt::claude_bot(&app, &env.project_id, "grp-evt").await;
         env.herdr.live_pane("pane-evt", tt::LivePane { width: Some(120), ..Default::default() });
-        let out = chat(&app, &env.project_id, "@all hi", "crid-evt", &[]).await.ok().unwrap();
+        let out = chat(&app, &env.project_id, "@all hi", "crid-evt", &[], &[]).await.ok().unwrap();
         assert_eq!(out["delivered"], false, "{out}");
         sqlx::query(
             "INSERT INTO runs (id, bot_id, state, agent_status, workspace_id, pane_id, agent_name, herdr_session, pane_typed, started_at)
@@ -788,7 +849,7 @@ mod uncommitted_tests {
         .await
         .unwrap();
         let mut events = app.subscribe();
-        let out = chat(&app, &env.project_id, "@all hi", "crid-evt", &[]).await.ok().unwrap();
+        let out = chat(&app, &env.project_id, "@all hi", "crid-evt", &[], &[]).await.ok().unwrap();
         assert_eq!(out["delivered"], true, "{out}");
         let mut resynced = false;
         while let Ok(ev) = events.try_recv() {
