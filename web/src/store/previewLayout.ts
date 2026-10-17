@@ -55,12 +55,36 @@ export function readStoredWidth(): number | null {
   }
 }
 
+interface LayoutState {
+  open: Record<string, true>
+  width: number | null
+}
+
+/**
+ * 記憶體這一份是 snapshot 的來源：寫入先更新它，儲存受阻（無痕、配額）時這一頁仍生效（issue #1809）。
+ * 只在別的分頁寫入（`storage` 事件）時重讀 localStorage。物件只在內容真的變了才換新，snapshot 才會穩定。
+ */
+let state: LayoutState | null = null
+
+function readState(): LayoutState {
+  return { open: readOpenMap(), width: readStoredWidth() }
+}
+
+function current(): LayoutState {
+  state ??= readState()
+  return state
+}
+
 function subscribe(onChange: () => void): () => void {
+  const onStorage = () => {
+    state = readState()
+    onChange()
+  }
   window.addEventListener(EVENT, onChange)
-  window.addEventListener('storage', onChange)
+  window.addEventListener('storage', onStorage)
   return () => {
     window.removeEventListener(EVENT, onChange)
-    window.removeEventListener('storage', onChange)
+    window.removeEventListener('storage', onStorage)
   }
 }
 
@@ -68,28 +92,43 @@ function subscribe(onChange: () => void): () => void {
 export function usePreviewColOpen(botId: string | null): boolean {
   return useSyncExternalStore(
     subscribe,
-    () => (botId ? readOpenMap()[botId] === true : false),
+    () => (botId ? current().open[botId] === true : false),
     () => false,
   )
 }
 
 export function usePreviewColWidth(): number | null {
-  return useSyncExternalStore(subscribe, readStoredWidth, () => null)
+  return useSyncExternalStore(
+    subscribe,
+    () => current().width,
+    () => null,
+  )
 }
 
-function write(key: string, value: string): void {
+function persist(key: string, value: string): void {
   try {
     window.localStorage.setItem(key, value)
   } catch {
-    // 無痕寫不進去：這一輪仍要生效，照樣發事件。
+    // 無痕寫不進去：記憶體那份已更新，這一頁照樣生效。
   }
   window.dispatchEvent(new Event(EVENT))
 }
 
 export function setPreviewColOpen(botId: string, open: boolean): void {
-  const map = readOpenMap()
+  const map = { ...current().open }
   if (open) map[botId] = true
   else delete map[botId]
-  write(OPEN_KEY, JSON.stringify(map))
+  state = { ...current(), open: map }
+  persist(OPEN_KEY, JSON.stringify(map))
 }
-export const setPreviewColWidth = (w: number) => write(WIDTH_KEY, String(Math.round(w)))
+
+export function setPreviewColWidth(w: number): void {
+  const width = Math.round(w)
+  state = { ...current(), width }
+  persist(WIDTH_KEY, String(width))
+}
+
+/** 測試用：丟掉記憶體快照，下一次讀取重新從 localStorage 來。 */
+export function resetPreviewLayoutForTest(): void {
+  state = null
+}

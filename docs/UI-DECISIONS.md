@@ -644,6 +644,7 @@ claude（2.1.280 起）回合結束後在終端輸入框畫一句灰字建議，
   兩者都沒有就只說「指令由 daemon 依專案決定」，不猜。`candidates` 同時吃字串與 `{dir, command}`。
 - **v5：預覽欄的開／關是 by parent bot（2026-09-20，#253）**：A 開著、切到 B 不跟著開，切回 A 還原。每顆 bot 各記一格，存 localStorage `am.previewCol.openBots`（`{botId: true}`，沒記＝收合），重整照舊。
   欄寬維持全域一份（調一次就好）。收合條的開關位置不變，按下去只影響當下這顆。舊的全域旗標 `am.previewCol.open` 不遷移：升級後每顆 bot 預設收合。
+  儲存受阻（無痕擋寫、配額滿、讀取被封鎖）時，開關與寬度靠這一頁的記憶體快照照樣生效、只是關頁就沒了；別的分頁寫入（`storage` 事件）時才從 localStorage 重讀（#1809）。手機預覽開關（`am.mobilePreview.open`）同樣處理。
   （mock 的 bot id 每次載入都重新產生，所以 mock 下重整看不到還原；真 daemon 的 id 是穩定的。）
 - **v6：清單一筆一行、認得出的排前面、unknown 收起（2026-09-20，#253）**：原本每筆印完整絕對路徑、折兩行，八筆洗掉整個面板。現在
   `[kind chip] :port 短路徑 ……接這個`，一行、超出省略、完整路徑與 pid 放 `title`。短路徑（`lib/previewList.ts`，有測試）：在這顆 bot 的專案根底下＝相對於根（根本身取最後一段），

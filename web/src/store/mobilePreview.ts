@@ -57,26 +57,47 @@ function read(): boolean {
   }
 }
 
+/**
+ * 記憶體這一份是 snapshot 的來源：寫入先更新它，儲存受阻時這一頁仍生效（issue #1809）。
+ * 只在別的分頁寫入（`storage` 事件）時重讀 localStorage。
+ */
+let memOn: boolean | null = null
+
+function current(): boolean {
+  memOn ??= read()
+  return memOn
+}
+
 function subscribe(onChange: () => void): () => void {
+  const onStorage = () => {
+    memOn = read()
+    onChange()
+  }
   window.addEventListener(EVENT, onChange)
-  window.addEventListener('storage', onChange)
+  window.addEventListener('storage', onStorage)
   return () => {
     window.removeEventListener(EVENT, onChange)
-    window.removeEventListener('storage', onChange)
+    window.removeEventListener('storage', onStorage)
   }
 }
 
 /** 在預覽自己裡面一律 `false`。 */
 export function useMobilePreviewOpen(): boolean {
-  const on = useSyncExternalStore(subscribe, read, () => false)
+  const on = useSyncExternalStore(subscribe, current, () => false)
   return on && !IN_MOBILE_PREVIEW
 }
 
 export function setMobilePreviewOpen(open: boolean): void {
+  memOn = open
   try {
     window.localStorage.setItem(KEY, open ? '1' : '0')
   } catch {
-    // 無痕寫不進去：這一輪仍要生效，照樣發事件。
+    // 無痕寫不進去：記憶體那份已更新，這一頁照樣生效。
   }
   window.dispatchEvent(new Event(EVENT))
+}
+
+/** 測試用：丟掉記憶體快照，下一次讀取重新從 localStorage 來。 */
+export function resetMobilePreviewForTest(): void {
+  memOn = null
 }
