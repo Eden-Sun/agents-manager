@@ -560,7 +560,11 @@ export function customAnswerChecked(choice: TuiChoice, text: string): boolean {
   return choice.checked === true && customAnswerShown(choice, text)
 }
 
-/** 貼上後那列是否已長出這段字：換行貼上時第一行在標題、其餘在說明；答完會多 `✔`。 */
+/**
+ * 貼上後那列是否已長出這段字：換行貼上時第一行在標題、其餘在說明；答完會多 `✔`。
+ * 完整比對要過（空白不計）。只看到前綴（多行答案只露第一行）不算出現：只有說明結尾有裁切記號 `…`、
+ * 而已見的部分是答案的完整前綴時才認，否則可能是第二行根本沒送到，交卷前要停下讓使用者看（#1818）。
+ */
 export function customAnswerShown(choice: TuiChoice, text: string): boolean {
   // 空白全部拿掉再比：窄 pane 會把長答案硬折行（中文沒有空格，折在字中間），折出來的斷點在
   // 標題與說明之間變成一個空格，照原樣比就永遠對不上——會判成「沒出現」而不按 Enter，重送又變成
@@ -568,10 +572,12 @@ export function customAnswerShown(choice: TuiChoice, text: string): boolean {
   const squash = (s: string) => s.replace(/\s+/g, '')
   const want = squash(text)
   if (!want) return false
-  const title = choice.title.replace(/\s*✔\s*$/, '')
-  const blob = squash(`${title} ${choice.detail ?? ''}`)
-  const first = squash(text.split('\n')[0] ?? '')
-  return blob.includes(want) || (first !== '' && blob.includes(first))
+  const visible = `${choice.title.replace(/\s*✔\s*$/, '')} ${choice.detail ?? ''}`.trim()
+  const shown = squash(visible)
+  if (shown.includes(want)) return true
+  const cut = /…$/.test(visible)
+  const seen = squash(visible.replace(/…$/, ''))
+  return cut && seen !== '' && want.startsWith(seen)
 }
 
 /** 送鍵前確認選單還是同一份（↓ 次數是相對的）。不比勾選與游標：那是我們自己按出來的。 */

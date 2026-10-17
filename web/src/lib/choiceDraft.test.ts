@@ -1040,3 +1040,51 @@ test('#1816 起點停在 Review：起點照舊用 startTab，不走新的起點�
   assert.match(res.error ?? '', /走不到送出頁/)
   assert.deepEqual(sent, ['right', 'tab'])
 })
+
+test('#1818 commit：多行自訂答案貼上後只出現第一行（沒有裁切記號）→ 不按 Enter、不交卷', async () => {
+  const tabs: TuiTab[] = [
+    { label: 'q', done: false, submit: false },
+    { label: 'Submit', done: false, submit: true },
+  ]
+  const choice = (title: string, number: number, current: boolean) => ({ number, title, detail: '', current, checked: null, preview: '' })
+  const screen = (second: string, cursor: number): TuiChoiceMenu => ({
+    question: 'Q',
+    context: [],
+    command: [],
+    commandCut: false,
+    notes: [],
+    choices: [choice('Option', 1, cursor === 0), choice(second, 2, cursor === 1)],
+    cursor,
+    footer: false,
+    multi: false,
+    tabs,
+    tabAt: 0,
+    review: [],
+    submit: null,
+  })
+  const draft: Draft = {
+    pages: [
+      { tab: 0, label: 'q', question: 'Q', choices: screen('Type something.', 1).choices, multi: false, hasSubmitRow: false, review: [], isSubmit: false },
+      { tab: 1, label: 'Submit', question: null, choices: [], multi: false, hasSubmitRow: false, review: [], isSubmit: true },
+    ],
+    startTab: 0,
+    tabs,
+  }
+  let typed: string | null = null
+  const sent: string[] = []
+  const io: Io = {
+    read: async () => screen(typed ?? 'Type something.', 1),
+    send: async (keys) => {
+      sent.push(...keys)
+    },
+    wait: async () => {},
+    paste: async (text) => {
+      // 終端只留下第一行。
+      typed = text.split('\n')[0]
+    },
+  }
+  const res = await commit(io, draft, [[false, true]], undefined, ['第一行\n第二行很重要'])
+  assert.equal(res.ok, false)
+  assert.match(res.error ?? '', /沒有出現/)
+  assert.equal(sent.includes('enter'), false)
+})
