@@ -1348,6 +1348,7 @@ PATH 上的 herdr 會幫你補，但你自己要寫對。\n\
 全新題目 `herdr agent start <名稱> --kind codex --pane <新 pane> -- \"<派工 prompt>\"`；要接著你這段脈絡就 `herdr agent start <名稱> --kind codex --pane <新 pane> -- fork --last \"<派工 prompt>\"`。\
 要指定模型才加 `--model <模型>`，codex 的旗標一律放在 `--` 之後、子命令（`fork`／`resume`）之前，例：`-- --model <模型> fork --last \"…\"`。\
 換身分就在 `--` 之前加 `--identity <身分>`（可用的身分看 `$AM_IDENTITIES`）。\
+**agy 子 agent 的模型**：除非使用者指定，**禁止**帶 `--model`，PATH 上的 herdr 會補最低強度 `gemini-3.8-flash-low`；使用者點名模型或強度才帶 `-- --model <slug>`（例 `gemini-3.8-flash-high`）。\
 PATH 上的 herdr 會補 `-p`、`--no-daemon`、`-c project_doc_max_bytes=0`：**禁止**自己補，也**禁止**用真 herdr 的絕對路徑繞過它。\n\
 - **環境變數與身分**：帳號與 hook 會自動帶進子 pane（`CLAUDE_CONFIG_DIR`、`AM_*`）。**禁止**自己 export／`env -u`／`unset` 這些變數。\
 要讓子 agent 用別的身分：`herdr agent start <名稱> --kind <kind> --pane <新 pane> --identity <身分> -- …`（`--identity` 寫在 `--` 之前）；\

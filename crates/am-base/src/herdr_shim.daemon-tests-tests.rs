@@ -878,6 +878,23 @@
         assert_eq!(out, ["agent", "start", "p-1-kid", "--", "--verbose", "--model", "opus", "--effort", "medium"]);
     }
 
+    /// 2026-10-17：agy 子 agent 沒指定模型用最低強度（agy 自己的預設是 high）；自己寫了 `--model` 的照用，母 bot 是 agy 也不沿用。
+    #[test]
+    fn an_agy_child_without_a_model_runs_at_the_lowest_effort() {
+        let s = Sandbox::new();
+        let env = [("AM_AGENT_NAME", "p-1"), ("AM_KIND", "claude"), ("AM_MODEL", "opus")];
+        let (out, err) = s.run(&env, &["agent", "start", "kid", "--kind", "agy"]);
+        assert_eq!(out, ["agent", "start", "p-1-kid", "--kind", "agy", "--", "--model", "gemini-3.8-flash-low"]);
+        assert!(err.contains("最低強度"), "{err}");
+
+        let (out, _) = s.run(&env, &["agent", "start", "kid", "--kind", "agy", "--", "--model", "gemini-3.8-flash-high"]);
+        assert_eq!(out, ["agent", "start", "p-1-kid", "--kind", "agy", "--", "--model", "gemini-3.8-flash-high"]);
+
+        let aenv = [("AM_AGENT_NAME", "p-1"), ("AM_KIND", "agy"), ("AM_MODEL", "gemini-3.8-flash-high")];
+        let (out, _) = s.run(&aenv, &["agent", "start", "kid"]);
+        assert_eq!(out, ["agent", "start", "p-1-kid", "--", "--model", "gemini-3.8-flash-low"]);
+    }
+
     #[test]
     fn an_option_value_is_never_mistaken_for_the_name() {
         let s = Sandbox::new();
