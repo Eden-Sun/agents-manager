@@ -5,7 +5,7 @@
  */
 import test from 'node:test'
 import assert from 'node:assert/strict'
-import { formatDue, formatZoned } from './format.ts'
+import { formatDue, formatOccurrenceTime, formatZoned } from './format.ts'
 
 const ISO = '2030-01-01T00:00:00.000Z'
 
@@ -64,4 +64,18 @@ test('無效日期：原字串原樣回傳，不丟例外', () => {
 
 test('沒有下一次：維持原本的文字', () => {
   assert.equal(formatDue(null, 'UTC'), '沒有下一次（已完成或已停用）')
+})
+
+test('支援的時區：最近執行列的文字與改動前（預設選項、不附時區名）完全相同', () => {
+  for (const tz of ['UTC', 'Asia/Taipei', 'America/New_York']) {
+    const legacy = new Date(ISO).toLocaleString('zh-TW', { timeZone: tz })
+    assert.equal(formatOccurrenceTime(ISO, tz), legacy, tz)
+  }
+})
+
+test('不認識的時區：最近執行列退回 UTC 並標出原時區與不支援', () => {
+  withUnknownZones(['UTC'], () => {
+    const out = formatOccurrenceTime(ISO, 'America/Coyhaique')
+    assert.match(out, /America\/Coyhaique 這台瀏覽器不支援，以 UTC 顯示/)
+  })
 })
