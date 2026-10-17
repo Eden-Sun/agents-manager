@@ -521,40 +521,14 @@ pub async fn safety_as(
 }
 
 /// Take a window: approval checked, safety re-checked and the lease taken, all under the
-/// 這個 owner／requester 是哪一顆 bot（沒有對應的 bot——例如 `daemon-update-kick` 這種腳本
-/// 身分，或名字不唯一——就是 `None`）。先當成 bot id 查，查不到再用名字對。
+/// requester 只接受穩定 bot id；人類／外部腳本沒有 bot 身分，不由顯示名稱推斷。
 pub async fn requester_bot_id(app: &impl crate::capabilities::Db, owner: &str) -> Option<String> {
     try_requester_bot_id(app.db(), owner).await.unwrap_or(None)
 }
 
-/// [`requester_bot_id`] 的「讀不到就說讀不到」版（issue #436、#681）：DB 出錯或名字對到多顆 bot 時**不能**跟
-/// 「這個名字不是任何一顆 bot」回同一個 `None`。用它下**否決**類的判斷（自我核准的守衛）：那裡的 `None` 等於放行，
-/// 把讀取失敗或歧義吞成 `None` 就是 fail-open——這個模組其他地方讀不到是不下結論，只有這裡「不下結論」剛好等於通過。
+/// DB 讀取錯誤必須傳回守衛，不能當成「不是申請者」。
 pub async fn try_requester_bot_id(db: &SqlitePool, owner: &str) -> anyhow::Result<Option<String>> {
-    let owner = owner.trim();
-    if owner.is_empty() {
-        return Ok(None);
-    }
-    if crate::db::bot(db, owner).await?.is_some() {
-        return Ok(Some(owner.to_string()));
-    }
-    // Bot 名只在專案內唯一（issue #681）；同名時不能取排序第一顆，agent 名也不能撞到另一顆 bot 名。
-    // UNION 以 bot id 去重：一顆 bot 的名字與 agent_name 都符合時仍是唯一結果；多顆就讓呼叫端 fail closed。
-    let mut matches = sqlx::query_scalar::<_, String>(
-        "SELECT id FROM bots WHERE name = ? AND deleted_at IS NULL
-         UNION
-         SELECT runs.bot_id FROM runs JOIN bots ON bots.id = runs.bot_id
-         WHERE runs.agent_name = ? AND runs.state = 'running' AND bots.deleted_at IS NULL",
-    )
-    .bind(owner)
-    .bind(owner)
-    .fetch_all(db)
-    .await?;
-    match matches.len() {
-        0 => Ok(None),
-        1 => Ok(matches.pop()),
-        _ => anyhow::bail!("requester name is ambiguous; use a bot id or a unique bot/agent name"),
-    }
+    Ok(crate::db::bot(db, owner).await?.filter(|b| b.deleted_at.is_none()).map(|b| b.id))
 }
 
 /// 送達臨界區真正要放過的那一顆：申請者自己，而且它確實出現在 `--exclude-bot` 裡。
@@ -678,7 +652,10 @@ pub async fn acquire_with_request(
 
     // 排除對象綁**這筆核准的申請者**（上面已驗過 `requester == owner`）：申請人自己那顆 bot。
     // 別顆 bot 一律不能被排除掉——那等於拿一張自己的核准，把別人正在打字的 pane 也算成閒置。
-    let self_bot = requester_bot_id(app, owner).await;
+    let self_bot = match store::approval_principal(app.db(), &approval.id).await.map_err(super::up)? {
+        Some(store::ApprovalPrincipal::Bot { bot_id }) => Some(bot_id),
+        _ => None,
+    };
     if EXCLUSIVE.contains(&resource) {
         if let Some(bad) = exclude.iter().find(|id| Some(id.as_str()) != self_bot.as_deref()) {
             return Err(LcError::conflict(
@@ -1424,7 +1401,8 @@ mod tests {
             .bind(&e.project_id).bind(&now).execute(&app.db).await.unwrap();
         sqlx::query("INSERT INTO bots (id,project_id,name,kind,hook_token,created_at) VALUES ('other',?,'other','claude','tok-other',?)")
             .bind(&e.project_id).bind(&now).execute(&app.db).await.unwrap();
-        let a = store::create_approval(&app.db, "mine", "restart", "release", None, None, None).await.unwrap().approval;
+        let a = store::create_approval_principal_notifying(&app.db, "mine", "restart", "release", None, None, None, None, None,
+            &store::ApprovalPrincipal::Bot { bot_id: "mine".into() }).await.unwrap().approval;
         store::decide_approval(&app.db, &a.id, "approved", "AGM", None, None).await.unwrap();
 
         let err = acquire(app, "restart", "mine", &a.id, None, 300, true, &["other".to_string()]).await.unwrap_err();
@@ -1437,11 +1415,9 @@ mod tests {
         assert_eq!(ok.get("lease").and_then(|l| l.get("owner")).and_then(|o| o.as_str()), Some("mine"), "{ok}");
     }
 
-    /// requester 用的是 **agent 名**（`AM_AGENT_NAME`）而不是 bot 名時，也要認得出是同一顆
-    /// （2026-09-19：bot 叫 AM-m3、agent 叫 agents-manager-15m2dg，restart 因此一律 409
-    /// `exclude_not_requester`，人只好去試 --allow-busy）。
+    /// 顯示名稱即使唯一也不能證明 requester；只有穩定 bot id 可解析。
     #[tokio::test]
-    async fn the_requester_can_be_the_agent_name_not_just_the_bot_name() {
+    async fn the_requester_must_be_a_bot_id_instead_of_a_display_name() {
         let e = crate::testing::env().await;
         let app = &e.app;
         let now = crate::db::now();
@@ -1455,15 +1431,15 @@ mod tests {
         .bind(&now).execute(&app.db).await.unwrap();
 
         assert_eq!(requester_bot_id(app, "b-m3").await.as_deref(), Some("b-m3"), "bot id");
-        assert_eq!(requester_bot_id(app, "AM-m3").await.as_deref(), Some("b-m3"), "bot 名");
-        assert_eq!(requester_bot_id(app, "agents-manager-15m2dg").await.as_deref(), Some("b-m3"), "agent 名");
+        assert_eq!(requester_bot_id(app, "AM-m3").await.as_deref(), None, "bot 名不是身分");
+        assert_eq!(requester_bot_id(app, "agents-manager-15m2dg").await.as_deref(), None, "agent 名不是身分");
         assert!(requester_bot_id(app, "daemon-update-kick").await.is_none(), "腳本身分對不到 bot");
         assert!(requester_bot_id(app, "  ").await.is_none());
     }
 
     /// issue #681：bot 名只在專案內唯一，不能把跨專案同名的第一筆當成申請者。
     #[tokio::test]
-    async fn requester_names_must_resolve_to_one_live_bot() {
+    async fn requester_names_are_unknown_even_when_unique() {
         let e = crate::testing::env().await;
         let app = &e.app;
         let now = crate::db::now();
@@ -1476,15 +1452,28 @@ mod tests {
             sqlx::query("INSERT INTO runs (id,bot_id,state,agent_status,agent_name,started_at) VALUES (?,?,'running','idle',?,?)")
                 .bind(format!("run-{id}")).bind(id).bind(agent).bind(&now).execute(&app.db).await.unwrap();
         }
-        assert_eq!(try_requester_bot_id(&app.db, "agent-a").await.unwrap().as_deref(), Some("fixer-a"), "唯一 agent 名仍可用");
+        assert_eq!(try_requester_bot_id(&app.db, "agent-a").await.unwrap().as_deref(), None, "唯一 agent 名也不是身分");
         // 同一個 agent 名可能出現在不同 live bot 的 run 上，也必須拒絕猜第一筆。
         sqlx::query("UPDATE runs SET agent_name='shared-agent' WHERE bot_id IN ('fixer-a','fixer-b')")
             .execute(&app.db).await.unwrap();
 
         assert_eq!(try_requester_bot_id(&app.db, "fixer-a").await.unwrap().as_deref(), Some("fixer-a"), "bot id 無歧義");
-        assert!(try_requester_bot_id(&app.db, "fixer").await.is_err(), "跨專案重名不可任選一顆");
+        assert_eq!(try_requester_bot_id(&app.db, "fixer").await.unwrap(), None, "名稱不是身分");
         assert_eq!(requester_bot_id(app, "fixer").await, None, "舊呼叫端遇到歧義必須 fail closed");
-        assert!(try_requester_bot_id(&app.db, "shared-agent").await.is_err(), "重複 agent 名不可任選一顆");
+        assert_eq!(try_requester_bot_id(&app.db, "shared-agent").await.unwrap(), None, "名稱不是身分");
+    }
+
+    #[tokio::test]
+    async fn nr_relay_requester_names_are_never_identity_evidence() {
+        let e = crate::testing::env().await;
+        let bot = crate::testing::claude_bot(&e.app, &e.project_id, "old-requester").await;
+        crate::testing::fake_run(&e.app, &bot.id).await;
+        assert_eq!(requester_bot_id(&e.app, "old-requester").await, None);
+        sqlx::query("UPDATE bots SET name='renamed' WHERE id=?").bind(&bot.id).execute(&e.app.db).await.unwrap();
+        crate::testing::claude_bot(&e.app, &e.project_id, "old-requester").await;
+        assert_eq!(requester_bot_id(&e.app, "old-requester").await, None);
+        assert_eq!(requester_bot_id(&e.app, &bot.id).await, Some(bot.id));
+        assert_eq!(requester_bot_id(&e.app, "agent").await, None);
     }
 
     /// 拿不到窗口時要講得出「還要等多久」：只回 not_idle 會讓人以為沒有出路（2026-09-19 實測）。

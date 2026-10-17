@@ -21,12 +21,13 @@ use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
 struct Pending {
-    /// 寄件者所在的主機：agent 名字（`<專案>-<bot>`）只在一台主機內唯一，兩台各有同名 agent 並不稀奇，
-    /// 報備只能由同一台主機上的收件方認領。
+    /// 寄件者所在的主機；只能由已驗證的收件 run 認領。
     host: String,
     from_bot: String,
-    /// shim 補完前綴之後的名字。
-    agent: String,
+    /// 穩定的收件 run id，從不以 agent 名稱認領。
+    run_id: String,
+    delivery_id: String,
+    claimed: bool,
     text: String,
     /// 寄件 bot 送這句話當下正在跑的回合（#927）。送的時候找不到就是 `None`。
     from_turn: Option<String>,
@@ -48,7 +49,7 @@ const MIN_MATCH: usize = 12;
 
 /// 存下來比對用的字數上限（#1352）：回音只會比兩邊較短的那一段開頭（`same_prompt`），留開頭就夠認。
 const MAX_TEXT_CHARS: usize = 4_000;
-/// 同一顆寄件 bot 最多留幾筆未認領的；超過先丟它自己最舊的（#1352）。
+/// 同一顆寄件 bot 最多留幾筆報備（含已認領的 delivery）；超過先丟它自己最舊的（#1352）。
 const MAX_PER_SENDER: usize = 64;
 /// 整張表的上限（防很多顆同時失控）；超過丟最舊的（#1352）。
 const MAX_PENDING: usize = 1_024;
@@ -74,12 +75,21 @@ pub fn same_prompt(pending: &str, echo: &str) -> bool {
     head(&a) == head(&b)
 }
 
-pub fn announce(host: &str, from_bot: &str, agent: &str, text: &str, from_turn: Option<&str>) {
-    if from_bot.is_empty() || agent.is_empty() || text.trim().is_empty() {
-        return;
+/// 呼叫端必須先驗證 run id 與 bot id／host 的關係；名字只作傳輸及顯示。
+pub fn announce(host: &str, from_bot: &str, run_id: &str, text: &str, from_turn: Option<&str>) {
+    announce_delivery(host, from_bot, run_id, &crate::db::ulid(), text, from_turn);
+}
+
+/// 同一 delivery 的 spool 重播不能再次標記另一句回音；已認領的記錄保留到 TTL／容量界限。
+pub fn announce_delivery(host: &str, from_bot: &str, run_id: &str, delivery_id: &str, text: &str, from_turn: Option<&str>) -> bool {
+    if from_bot.is_empty() || run_id.is_empty() || delivery_id.is_empty() || text.trim().is_empty() {
+        return false;
     }
     let mut s = store().lock().unwrap();
     s.retain(|p| p.at.elapsed() < TTL);
+    if s.iter().any(|p| p.host == host && p.from_bot == from_bot && p.delivery_id == delivery_id) {
+        return false;
+    }
     // 上限（#1352）：這顆寄件 bot 滿了就先丟它自己最舊的（`Vec` 是插入順序，第一筆就是最舊的）；整張表滿了丟最舊的。
     if s.iter().filter(|p| p.from_bot == from_bot).count() >= MAX_PER_SENDER {
         if let Some(i) = s.iter().position(|p| p.from_bot == from_bot) {
@@ -92,34 +102,48 @@ pub fn announce(host: &str, from_bot: &str, agent: &str, text: &str, from_turn: 
     s.push(Pending {
         host: host.to_string(),
         from_bot: from_bot.to_string(),
-        agent: agent.to_string(),
+        run_id: run_id.to_string(),
+        delivery_id: delivery_id.to_string(),
+        claimed: false,
         text: text.chars().take(MAX_TEXT_CHARS).collect(),
         from_turn: from_turn.map(str::to_string),
         at: Instant::now(),
     });
+    true
 }
 
 /// 認出來就**用掉**那一筆，同一句不會被標兩次。
-pub fn claim_relayed(host: &str, agent: &str, echo: &str) -> Option<Relayed> {
+pub fn claim_relayed(host: &str, run_id: &str, echo: &str) -> Option<Relayed> {
     let mut s = store().lock().unwrap();
     s.retain(|p| p.at.elapsed() < TTL);
-    let i = s.iter().position(|p| p.host == host && p.agent == agent && same_prompt(&p.text, echo))?;
-    let p = s.remove(i);
-    Some(Relayed { from_bot: p.from_bot, from_turn: p.from_turn })
+    let i = s.iter().position(|p| !p.claimed && p.host == host && p.run_id == run_id && same_prompt(&p.text, echo))?;
+    let p = &mut s[i];
+    p.claimed = true;
+    Some(Relayed { from_bot: p.from_bot.clone(), from_turn: p.from_turn.clone() })
 }
 
 /// 同 [`claim_relayed`]，只要寄件 bot。
-pub fn claim(host: &str, agent: &str, echo: &str) -> Option<String> {
-    claim_relayed(host, agent, echo).map(|r| r.from_bot)
+pub fn claim(host: &str, run_id: &str, echo: &str) -> Option<String> {
+    claim_relayed(host, run_id, echo).map(|r| r.from_bot)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
+    #[test]
+    fn nr_relay_a_consumed_delivery_cannot_be_replayed_to_another_echo() {
+        let text = "同一 delivery 的延遲報備不能標到第二句回音";
+        assert!(announce_delivery("nr-host", "nr-from", "nr-run", "nr-delivery", text, None));
+        assert_eq!(claim("nr-host", "nr-other-run", text), None);
+        assert_eq!(claim("nr-host", "nr-run", text).as_deref(), Some("nr-from"));
+        assert!(!announce_delivery("nr-host", "nr-from", "nr-run", "nr-delivery", text, None));
+        assert_eq!(claim("nr-host", "nr-run", text), None);
+    }
+
     const H: &str = "local";
 
-    // 表是行程全域、測試平行跑：每個測試用自己的 agent 名字。
+    // 表是行程全域、測試平行跑：每個測試用自己的 run id。
 
     #[test]
     fn an_echo_is_attributed_to_the_agent_that_typed_it() {
@@ -186,7 +210,7 @@ mod tests {
         assert_eq!(claim(H, "t-long", &long), Some("bot-long".into()), "完整的原文要認得");
 
         announce(H, "bot-long", "t-long-2", &long, None);
-        let stored = store().lock().unwrap().iter().filter(|p| p.agent == "t-long-2").map(|p| p.text.chars().count()).collect::<Vec<_>>();
+        let stored = store().lock().unwrap().iter().filter(|p| p.run_id == "t-long-2").map(|p| p.text.chars().count()).collect::<Vec<_>>();
         assert_eq!(stored, vec![4000], "存進去的只有前 4000 字");
         let head: String = long.chars().take(100).collect();
         assert_eq!(claim(H, "t-long-2", &head), Some("bot-long".into()), "截斷的回音照舊認得");

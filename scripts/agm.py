@@ -1090,8 +1090,8 @@ def cmd_lease(client: Client, cfg: dict, args) -> object:
         return client.get("/api/supervisor/maintenance/safety", query or None)
     if not args.resource:
         raise AgmError("bad_args", f"lease {args.op} 需要 resource（rebuild / restart）", 2)
-    # acquire／renew／release 一定要有 owner：沒帶就用 $AM_AGENT_NAME（safety 則刻意不補，見上）。
-    owner = args.owner or os.environ.get("AM_AGENT_NAME", "agm-ops")
+    # acquire／renew／release 一定要有 owner：沒帶就用穩定的 $AM_BOT_ID（外部人類為 principal:user；safety 則刻意不補，見上）。
+    owner = args.owner or os.environ.get("AM_BOT_ID", "principal:user")
     path = f"/api/supervisor/leases/{path_segment(args.resource)}/{args.op}"
     if args.op == "acquire":
         if not args.approval:
@@ -2642,7 +2642,7 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("op", choices=["request", "decide", "list"])
     s.add_argument("approval_id", nargs="?", help="decide 的目標")
     s.add_argument("--id", help="list：只查這一筆（清單只回最新 100 筆，舊的要用這個查）")
-    s.add_argument("--requester", help="request：申請者（bot id、腳本名或唯一 bot／agent 名；名稱有歧義時拒絕）")
+    s.add_argument("--requester", help="request：申請者（已驗證的 bot id；User principal 使用 principal:user；名稱不是身分）")
     s.add_argument("--purpose", choices=["rebuild", "restart"], help="request：要做什麼")
     s.add_argument("--scope", help="request：會動到什麼")
     s.add_argument("--commit", help="request：針對哪個 commit（之後 acquire 要對得上）")
@@ -2671,7 +2671,7 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("resource", nargs="?", choices=["rebuild", "restart"], help="acquire/renew/release 的目標")
     s.add_argument(
         "--owner",
-        help="acquire/renew/release：誰持有（預設 $AM_AGENT_NAME）；safety：以這個人的身分問，他自己握的租約不算擋（不帶＝每一把都算擋）",
+        help="acquire/renew/release：誰持有（預設 $AM_BOT_ID，外部人類為 principal:user）；safety：以這個人的身分問，他自己握的租約不算擋（不帶＝每一把都算擋）",
     )
     s.add_argument("--approval", help="acquire：核准 id；safety：用這筆核准的等待時間判斷要不要縮小封鎖面")
     s.add_argument("--commit", help="acquire：要處理的 commit，必須符合核准")

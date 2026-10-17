@@ -77,12 +77,10 @@ pub enum Step {
     GaveUp,
 }
 
-/// Resolve a herdr target only among runs on the sender's host and session. Pane IDs are local to
-/// a herdr server/session, so an ambiguous target is ignored instead of guessed by start time.
-/// A target whose project was handed off to another host is not this daemon's (#1363): it returns
-/// `None`, so announce opens no turn and watches nothing; the shim delivers the text directly.
-pub async fn resolve(app: &(impl crate::capabilities::Db + crate::capabilities::HerdrRoutes), from_bot: &str, to_agent: &str) -> anyhow::Result<Option<db::Run>> {
-    let to = to_agent.trim();
+/// Resolve an explicit run ID only within the sender's host/session. Names and pane addresses
+/// are never identity evidence. Handed-off projects belong to another daemon.
+pub async fn resolve(app: &(impl crate::capabilities::Db + crate::capabilities::HerdrRoutes), from_bot: &str, to_run_id: &str) -> anyhow::Result<Option<db::Run>> {
+    let to = to_run_id.trim();
     if to.is_empty() {
         return Ok(None);
     }
@@ -97,7 +95,7 @@ pub async fn resolve(app: &(impl crate::capabilities::Db + crate::capabilities::
     let ids: Vec<String> = sqlx::query_scalar(
         "SELECT r.id FROM runs r JOIN bots b ON b.id = r.bot_id JOIN projects p ON p.id = b.project_id
           WHERE r.state = 'running' AND b.deleted_at IS NULL AND p.handed_off_to IS NULL AND p.host = ?1
-            AND COALESCE(r.herdr_session, ?2) = ?3 AND (r.agent_name = ?4 OR r.pane_id = ?4)
+            AND COALESCE(r.herdr_session, ?2) = ?3 AND r.id = ?4
           LIMIT 2",
     )
     .bind(&host)
@@ -113,10 +111,9 @@ pub async fn resolve(app: &(impl crate::capabilities::Db + crate::capabilities::
     db::run(app.db(), id).await
 }
 
-/// #1460：收件名字對得到一顆 running run，但它的專案已移交給別台主機（`resolve` 因此回 `None`）。只給 log 用：
-/// 同寄件主機、同名的 agent，不比 session（這裡是提示，不是認領）。
-pub async fn handed_off_target(app: &impl crate::capabilities::Db, from_bot: &str, to_agent: &str) -> anyhow::Result<bool> {
-    let to = to_agent.trim();
+/// #1460：只用穩定 run id 檢查目標是否已移交；結果只供 log。
+pub async fn handed_off_target(app: &impl crate::capabilities::Db, from_bot: &str, to_run_id: &str) -> anyhow::Result<bool> {
+    let to = to_run_id.trim();
     if to.is_empty() {
         return Ok(false);
     }
@@ -124,7 +121,7 @@ pub async fn handed_off_target(app: &impl crate::capabilities::Db, from_bot: &st
     let n: i64 = sqlx::query_scalar(
         "SELECT COUNT(*) FROM runs r JOIN bots b ON b.id = r.bot_id JOIN projects p ON p.id = b.project_id
           WHERE r.state = 'running' AND b.deleted_at IS NULL AND p.handed_off_to IS NOT NULL AND p.host = ?1
-            AND (r.agent_name = ?2 OR r.pane_id = ?2)",
+            AND r.id = ?2",
     )
     .bind(&host)
     .bind(to)
@@ -135,16 +132,16 @@ pub async fn handed_off_target(app: &impl crate::capabilities::Db, from_bot: &st
 
 /// #1460：announce 因移交而不盯梢時留一行 log（`relay_handoff_direct`），營運看得到「這句只靠 shim 直送、兩顆 daemon 都不記」。
 /// 讀不到就不記，不影響送出。
-pub async fn note_handoff_direct(app: &impl crate::capabilities::Db, from_bot: &str, to_agent: &str) {
-    match handed_off_target(app, from_bot, to_agent).await {
+pub async fn note_handoff_direct(app: &impl crate::capabilities::Db, from_bot: &str, to_run_id: &str) {
+    match handed_off_target(app, from_bot, to_run_id).await {
         Ok(true) => tracing::info!(
             event = "relay_handoff_direct",
             bot = from_bot,
-            to = to_agent,
+            to = to_run_id,
             "relay announce to an agent whose project was handed off: the shim delivers it directly; no turn is recorded on either daemon (SPEC §6.5d)"
         ),
         Ok(false) => {}
-        Err(e) => tracing::debug!(bot = from_bot, to = to_agent, error = ?e, "could not check whether a relay target was handed off"),
+        Err(e) => tracing::debug!(bot = from_bot, to = to_run_id, error = ?e, "could not check whether a relay target was handed off"),
     }
 }
 
@@ -461,8 +458,19 @@ mod tests {
         sqlx::query_scalar("SELECT status FROM turns WHERE id=?").bind(turn).fetch_one(f.env.app.db()).await.unwrap()
     }
 
-    /// 名字對得到在跑的 bot：開進行中的回合，使用者訊息標 `relay_from`；已經有回合在飛就不重開。
-    /// #927：寄件 bot 送報備當下正在跑的回合：時間落在 `[created_at, completed_at]` 之間、最新的那一回合。
+    #[tokio::test]
+    async fn nr_relay_watch_uses_the_run_after_rename_and_name_reuse() {
+        let f = fixture("nr-relay-stable").await;
+        let app = f.env.app.clone();
+        let sender = tt::claude_bot(&app, &f.env.project_id, "nr-relay-sender").await;
+        sqlx::query("UPDATE runs SET agent_name='renamed' WHERE id=?").bind(&f.run_id).execute(app.db()).await.unwrap();
+        let other = tt::claude_bot(&app, &f.env.project_id, "nr-relay-other").await;
+        tt::fake_run(&app, &other.id).await;
+        assert_eq!(resolve(&app, &sender.id, &f.run_id).await.unwrap().map(|r| r.id), Some(f.run_id.clone()));
+        assert!(resolve(&app, &sender.id, "agent").await.unwrap().is_none());
+    }
+
+    /// #927：送出時間落在回合存續區間內，選當時最新的回合。
     #[tokio::test]
     async fn the_sender_turn_is_the_one_running_when_it_sent() {
         let f = fixture("sender-turn").await;
@@ -529,8 +537,8 @@ mod tests {
         assert_eq!((content.as_str(), from.as_deref()), (TEXT, Some(sender.id.as_str())));
         assert!(open_turn(&app, &run, &sender.id, None, "第二句").await.is_none(), "已經有回合在飛：不重開");
 
-        assert_eq!(resolve(&app, &sender.id, "agent").await.unwrap().map(|r| r.id), Some(f.run_id.clone()), "agent 名對得到");
-        assert_eq!(resolve(&app, &sender.id, &f.pane).await.unwrap().map(|r| r.id), Some(f.run_id.clone()), "pane id 對得到");
+        assert_eq!(resolve(&app, &sender.id, &f.run_id).await.unwrap().map(|r| r.id), Some(f.run_id.clone()), "run id 對得到");
+        assert!(resolve(&app, &sender.id, &f.pane).await.unwrap().is_none(), "pane 地址本身不是 run 身分");
         assert!(resolve(&app, &sender.id, "沒有這個人").await.unwrap().is_none());
     }
 
@@ -668,7 +676,7 @@ mod tests {
             .await
             .unwrap();
 
-        assert_eq!(resolve(&app, &sender.id, &f.pane).await.unwrap().map(|r| r.id), Some(f.run_id.clone()));
+        assert_eq!(resolve(&app, &sender.id, &f.run_id).await.unwrap().map(|r| r.id), Some(f.run_id.clone()));
         assert!(resolve(&app, &sender.id, "local-target").await.unwrap().is_none(), "herdr does not resolve a bot's DB name");
     }
 
@@ -679,17 +687,17 @@ mod tests {
         let f = fixture("handoff-target").await;
         let app = f.env.app.clone();
         let sender = tt::claude_bot(&app, &f.env.project_id, "handoff-sender").await;
-        assert_eq!(resolve(&app, &sender.id, &f.pane).await.unwrap().map(|r| r.id), Some(f.run_id.clone()), "移交前：收件方在這顆 daemon 底下");
+        assert_eq!(resolve(&app, &sender.id, &f.run_id).await.unwrap().map(|r| r.id), Some(f.run_id.clone()), "移交前：收件方在這顆 daemon 底下");
 
         sqlx::query("UPDATE projects SET handed_off_to = 'agm-host' WHERE id = ?").bind(&f.env.project_id).execute(app.db()).await.unwrap();
-        assert!(resolve(&app, &sender.id, &f.pane).await.unwrap().is_none(), "已移交：不是這顆 daemon 管的目標");
-        let run = resolve(&app, &sender.id, &f.pane).await.unwrap();
+        assert!(resolve(&app, &sender.id, &f.run_id).await.unwrap().is_none(), "已移交：不是這顆 daemon 管的目標");
+        let run = resolve(&app, &sender.id, &f.run_id).await.unwrap();
         on_resolved_announce(&app, &sender.id, None, TEXT, run).await;
         let external: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM turns WHERE origin='external'").fetch_one(app.db()).await.unwrap();
         assert_eq!(external, 0, "沒有替已移交的 bot 開回合");
 
         sqlx::query("UPDATE projects SET handed_off_to = NULL WHERE id = ?").bind(&f.env.project_id).execute(app.db()).await.unwrap();
-        assert_eq!(resolve(&app, &sender.id, &f.pane).await.unwrap().map(|r| r.id), Some(f.run_id.clone()), "移交清掉：又認得到");
+        assert_eq!(resolve(&app, &sender.id, &f.run_id).await.unwrap().map(|r| r.id), Some(f.run_id.clone()), "移交清掉：又認得到");
     }
 
     /// #1460：`resolve` 因為移交而回 `None` 時，log 要認得出「這句是送給移交出去的 agent」（只給 log 用，不影響送出）。
@@ -699,10 +707,10 @@ mod tests {
         let f = fixture("handoff-log").await;
         let app = f.env.app.clone();
         let sender = tt::claude_bot(&app, &f.env.project_id, "handoff-log-sender").await;
-        assert!(!handed_off_target(&app, &sender.id, &f.pane).await.unwrap(), "移交前：本機的收件方不算移交");
+        assert!(!handed_off_target(&app, &sender.id, &f.run_id).await.unwrap(), "移交前：本機的收件方不算移交");
 
         sqlx::query("UPDATE projects SET handed_off_to = 'agm-host' WHERE id = ?").bind(&f.env.project_id).execute(app.db()).await.unwrap();
-        assert!(handed_off_target(&app, &sender.id, &f.pane).await.unwrap(), "移交後：認得出是移交出去的 agent");
+        assert!(handed_off_target(&app, &sender.id, &f.run_id).await.unwrap(), "移交後：認得出是移交出去的 agent");
         assert!(!handed_off_target(&app, &sender.id, "no-such-agent").await.unwrap(), "不是它的 agent 不算");
     }
 
@@ -721,7 +729,7 @@ mod tests {
             .await
             .unwrap();
 
-        assert!(resolve(&app, &sender.id, &f.pane).await.unwrap().is_none(), "do not choose by started_at when multiple recipients match");
+        assert!(resolve(&app, &sender.id, &f.pane).await.unwrap().is_none(), "pane addresses alone are not recipient identity");
     }
 
     /// 2026-09-21 實機：字卡在輸入列、agent idle。超過 N 秒補一次 Enter，字進 transcript；沒到 N 秒不動。
@@ -941,7 +949,7 @@ mod tests {
         let app = f.env.app.clone();
         let sender = tt::claude_bot(&app, &f.env.project_id, "dead-sender").await;
         close_pane(&f);
-        let run = resolve(&app, &sender.id, "agent").await.unwrap();
+        let run = resolve(&app, &sender.id, &f.run_id).await.unwrap();
         on_resolved_announce(&app, &sender.id, None, TEXT, run).await;
         assert_eq!(run_state(&f).await, "exited");
         let turns: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM turns WHERE run_id=?").bind(&f.run_id).fetch_one(app.db()).await.unwrap();

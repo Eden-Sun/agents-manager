@@ -445,25 +445,11 @@ pub async fn queue(
     }))
 }
 
-/// shim 的 `to_agent` 是 herdr 的 agent 名字（或原名、pane id）：對回兩個角色 bot 之一。
-pub async fn role_bot_by_agent(app: &impl crate::capabilities::Db, agent: &str) -> Result<Option<String>, LcError> {
-    let agent = agent.trim();
-    if agent.is_empty() {
-        return Ok(None);
-    }
+/// relay 的角色收件人只由明確 bot id 對角色表；顯示名稱與 pane 地址不代表角色。
+pub async fn role_bot_by_id(app: &impl crate::capabilities::Db, bot_id: &str) -> Result<Option<String>, LcError> {
     for role in [Role::Patrol, Role::Responder] {
-        let Some(id) = roles::bot_for(app.db(), role).await.map_err(up)? else { continue };
-        let Some(bot) = crate::db::bot(app.db(), &id).await.map_err(up)? else { continue };
-        let run = crate::db::active_run(app.db(), &id).await.map_err(up)?;
-        let mut names = vec![bot.name.clone(), crate::db::agent_name_for_bot(app.db(), &bot).await.map_err(up)?];
-        if let Some(r) = run {
-            names.push(crate::db::run_target(&r, &bot));
-            if let Some(p) = r.pane_id {
-                names.push(p);
-            }
-        }
-        if names.iter().any(|n| n == agent) {
-            return Ok(Some(id));
+        if roles::bot_for(app.db(), role).await.map_err(up)?.as_deref() == Some(bot_id) {
+            return Ok(Some(bot_id.to_string()));
         }
     }
     Ok(None)
@@ -700,6 +686,19 @@ pub(crate) mod flow_tests {
 
     async fn inbox(app: &Arc<App>) -> Vec<(String, String, Option<String>, Option<i64>)> {
         sqlx::query_as("SELECT kind, event_key, role, wake FROM supervisor_inbox ORDER BY created_at, id").fetch_all(&app.db).await.unwrap()
+    }
+
+    #[tokio::test]
+    async fn nr_relay_role_recipient_is_a_bot_id() {
+        let app = app().await;
+        configure_responder(&app).await;
+        sqlx::query("UPDATE bots SET name='renamed-role' WHERE id='resp'").execute(&app.db).await.unwrap();
+        assert_eq!(role_bot_by_id(&app, "resp").await.unwrap().as_deref(), Some("resp"));
+        assert_eq!(role_bot_by_id(&app, "renamed-role").await.unwrap(), None);
+        sqlx::query("UPDATE bots SET name='AGM-responder' WHERE id='w2'").execute(&app.db).await.unwrap();
+        assert_eq!(role_bot_by_id(&app, "AGM-responder").await.unwrap(), None);
+        assert_eq!(role_bot_by_id(&app, "w2").await.unwrap(), None);
+        assert_eq!(role_bot_by_id(&app, "resp").await.unwrap().as_deref(), Some("resp"));
     }
 
     #[tokio::test]

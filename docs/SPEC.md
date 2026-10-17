@@ -1984,32 +1984,36 @@ herdr 的 CLI 說明原樣保留（升級會帶進新文字）。裝不起來只
 
 ### 6.5d agent 對 agent 的 prompt 標出來源
 
+relay 身分只使用穩定 ID（issue #1794）：`to_agent` 只供顯示／herdr 傳輸；報備必須攜 `to_bot_id`、`to_run_id`、`delivery_id`，角色收件由 bot id 對角色表，監看由 run id 對 host／herdr session。shim 自有旗標 `--to-bot-id`／`--to-run-id`（遠端另加 `--to-pane-id`）不傳給 herdr，本機送字以 daemon 回傳的 pane 地址為準；本機 curl 重試及遠端 spool v2 沿用同一 delivery id。缺 ID 的舊 shim／spool 保持未知，不用名稱補猜，不開監看、不補標或攔進 AGM 佇列。回音按 run id 認領，遲到報備還須訊息的 turn 明確屬於該 run；同一 delivery 的已認領記錄保留在有界、五分鐘的行程內表內，避免 spool 重播誤標第二句（重啟不保留此去重）。移交目標不標記來源。
+
+核准申請的 bot principal 必須以經驗證的 bot id 作 requester／lease owner，不接受 bot 名或 agent 名。自我核准比較 bot id，不因改名或舊名重用改變。User principal 可用保留 ID `principal:user` 申請，在申請交易內同時寫入既有 `supervisor_notes` 的 `approval_principal` 證據，記錄獨立人類身分／bot id，不由舊 requester 字串回推；其他外部／舊申請未保存獨立 principal 證據時保持未知，拒絕核准（`requester_identity_unknown`，可 deny／revoke 或以已驗證 bot id 重申請）；此票不新增 schema。既有 daemon-swap service 與使用者立即部署的專用核准流程不變。
+
+
 走 daemon 的派工（`POST /api/bots/{id}/prompt` 帶 `relay_from`、總管的 assignment）會寫 `messages.relay_from`，UI 畫成「X → 這顆 bot」。
 agent 自己 `herdr agent prompt <名字> …` 時 daemon 沒參與，那句話只以 prompt 回音從 hook 回來，會跟使用者打的字長得一樣。補法同 §6.5b，做成機制：
 
 1. shim 攔 `agent prompt`：目標名 herdr 認得（`herdr agent get` 找得到：AGM、其他頂層 bot、pane id）就照原名送，找不到才當自己的子 agent 補前綴。
-   決定名字後先 `POST /relay/announce`（表單 `bot_id`／`to_agent`／`text`／`ack`／`reply_to`，header `X-AM-Bot-Token` 用該 bot 的 hook token），再轉給真的 herdr。
+   決定名字後先 `POST /relay/announce`（表單 `bot_id`／`to_bot_id`／`to_run_id`／`delivery_id`／顯示用 `to_agent`／`text`／`ack`／`reply_to`，header `X-AM-Bot-Token` 用該 bot 的 hook token），再轉給真的 herdr。
    `text` 只含 TEXT 位置參數（herdr 的 `--wait`／`--until`／`--timeout` 不算）；`--ack`、`--reply-to <id>` 是 shim 自己的旗標（§18.15），送給 daemon、不轉給 herdr。
    **「確定沒送到 daemon」與「送了但回覆不明」分開（issue #143）**：只有 **curl 7（連線根本沒建立，request 一定沒進 daemon）**才照舊直送。
    其餘都不直送——逾時（28）、空回應（52）、連線被重置（56）、送到一半（55）、傳輸中斷（18）這類「request 可能已經進 daemon、只是回覆沒收完整」的，
    同一個請求再問一次（第二次 15 秒；沒帶 request id 的申請 daemon 以內容指紋去重，重問不會變兩筆），還是不明就 exit 75；HTTP 非 2xx
-   （400／404／5xx，身分被拒的 401／403 是 exit 77）與看不懂的 2xx 一律 exit 75、不直送。daemon 明確回 `routed` 就不打進 pane，回 `{}`（announce 已記下、
-   不是給協調者的）才直送。受管的 bot（有 bot 身分與 `AM_PORT`）沒有 curl 也 exit 75。直送會變成佇列一份、pane 一份，而且不能把認證失敗變成繞過控制面的旁路。
+   （400／404／5xx，身分被拒的 401／403 是 exit 77）與看不懂的 2xx 一律 exit 75、不直送。daemon 明確回 `routed` 就不打進 pane，回 `to_pane_id` 就按該地址直送；回 `{}` 則為未知／移交，不記來源而按傳輸目標直送。受管的 bot（有 bot 身分與 `AM_PORT`）沒有 curl 也 exit 75。直送會變成佇列一份、pane 一份，而且不能把認證失敗變成繞過控制面的旁路。
    報不成功只是少一次標示；名字前面帶旗標時整串原樣轉發。
-2. daemon 把「誰要送什麼給哪個 agent」記在行程內的短命表（5 分鐘；上限：每顆寄件 bot 最多 64 筆未認領的、超過丟它自己最舊的，整張表最多 1024 筆，每筆只留 `text` 的前 4000 字；#1352），連同寄件者所在的主機（agent 名字只在一台主機內唯一）與**寄件當下寄件 bot 正在跑的回合**
+2. daemon 把「誰要送什麼給哪個 run」記在行程內的短命表（5 分鐘；上限：每顆寄件 bot 最多 64 筆報備（含已認領的 delivery 去重記錄）、超過丟它自己最舊的，整張表最多 1024 筆，每筆只留 `text` 的前 4000 字；#1352），連同寄件者所在的主機及 delivery id與**寄件當下寄件 bot 正在跑的回合**
    （`sender_turn_at`：本機 API 用現在；遠端 spool 用 shim 寫進報備的 `received_at`，取時間落在 `[created_at, completed_at]` 之間、最新的那一回合；找不到就 NULL）。
-   shim 本身不改，不需要重啟遠端 bot。
-3. 回音從 hook 回來時用 run 的**主機**與 `agent_name` 認領（另一台主機的同名 agent 不能認領）：忽略所有空白（TUI 任意折行），長度取兩邊較短者且至少 12 字元；更短就要完全一樣。
+   遠端 bot 須載入新版 shim 才能產生 v2 身分報備。
+3. 回音從 hook 回來時用 run 的**主機**與穩定 `run_id` 認領（改名不影響；另一個同名 run 不能認領）：忽略所有空白（TUI 任意折行），長度取兩邊較短者且至少 12 字元；更短就要完全一樣。
    認到就在**插入當下**寫 `relay_from`（事後補的話 `message_added` 已經推出去了），同一筆寫入 `relay_turn_id`＝報備記下的寄件回合（#927）。
 4. 認不出來維持 NULL = 使用者自己打的。寧可少標，不把使用者的話說成別人送的。
 5. **遠端 bot 走 spool**（2026-09-30 使用者：console-rpa 直送給 cicd 的一句被當成使用者打的）：遠端 bot 有 bot 身分但沒有 `AM_PORT`（遠端不開回 daemon 的埠），
    打不到 `/relay/announce`。shim 改在打字前寫一則 `{"hook_event_name":"AmRelayAnnounce","to_agent","text"}` 的 hook body 進**自己** bot 目錄的
    `hook-spool.d/`（`python3` 寫暫存檔再 rename，一則一檔；沒有 bot 目錄或 python3 就不寫、照舊直送），daemon 收 spool 時一起收（寄件者＝那個目錄的 bot）。
-   spool 每 30 秒左右才收一次，收件方的回音常常先到、已經存成使用者訊息：收到報備時除了照第 2 點記下，也回頭找寄件者那台主機上 `agent_name` 是 `to_agent`
-   的在跑 run；只從五分鐘內來源為 `hook` 或 `terminal_fallback`、還沒標來源且內容對得上（同第 3 點）的最新一則使用者訊息補標 `relay_from`（`relay_unverified=0`）。
+   spool 每 30 秒左右才收一次，收件方的回音常常先到、已經存成使用者訊息：收到報備時除了照第 2 點記下，也回頭找寄件者那台主機上 `id` 是 `to_run_id`、bot id 符合 `to_bot_id`
+   的在跑 run，且訊息的 turn 必須屬於該 run；只從五分鐘內來源為 `hook` 或 `terminal_fallback`、還沒標來源且內容對得上（同第 3 點）的最新一則使用者訊息補標 `relay_from`（`relay_unverified=0`）。
    `web` 訊息不列入候選，即使內容相同；補標成功才用掉那筆報備，再推一次同 id 的 `message_added`（前端同 id 來源變了就換掉）。這一條要等遠端 bot 重啟、裝到新版 shim 才生效。
-5. **announce 之後盯收件方**（#380、#680，`lifecycle::relay_watch`）：`to_agent`（herdr agent 名或 pane id）只在寄件 bot 所在的 host 與 herdr session 解析；
-   舊 run 沒記 session 時以該 host 的設定為準。只有唯一一顆 running run 符合才盯梢；bot 的資料庫名稱不是 herdr 目標，多筆相符時略過、不猜一筆。
+5. **announce 之後盯收件方**（#380、#680，`lifecycle::relay_watch`）：`to_run_id` 只在寄件 bot 所在的 host 與 herdr session 解析，並驗證收件 bot id；
+   舊 run 沒記 session 時以該 host 的設定為準。只有明確 ID 對到 running run 才盯梢；顯示名稱與單獨 pane id 都不作身分對應。
    找到目標時，daemon 立刻開一個進行中的 `external` 回合（使用者訊息帶 `relay_from`；收件方已有回合在飛就不開），側欄與標題列看得出在跑，
    收尾照既有 hook／終端備援。收件方是**沒有 hook 的 grok**（§12.5）時另有兩條：單行的 slash 指令（`/effort high` 這類）不是對話，不開回合、不記訊息；
    收件方忙著（已有回合在飛）時這句先記成**還沒有回合**的使用者訊息（帶 `relay_from`），等 grok 對話檔出現這一問時收進它自己的回合——
@@ -4662,30 +4666,9 @@ incident 以資源為單位持久化（`supervisor_incidents`，`(kind, resource
   提示：**升級就是這種情況的出口**，只回 `not_idle` 會讓呼叫端以為沒有路，轉而想繞過租約（2026-09-19 實測）。
 - **申請理由**：`POST /api/supervisor/approvals` 收 `reason`，存在 `supervisor_approvals.request_reason`，
   跟 AGM 裁示寫的 `reason` **分開兩欄**——共用一欄的話裁示一寫就把申請理由蓋掉，事後查不到「他當初為什麼申請」。
-- **申請者的身分**：`requester` 可以是 bot id、全域唯一的 live bot 名，或只對到一顆 live bot 的 running agent 名（`AM_AGENT_NAME`）。
-  ID 直接解析；名稱同時比對 bot 名與 agent 名，只有唯一 bot ID 才接受。名字跨專案撞到多顆 bot 時 fail closed，不取排序第一顆；改用 bot id 或唯一名稱。
-  `maintenance::requester_bot_id` 仍支援 agent 名：2026-09-19 之前只認 bot id／bot 名，bot 叫 `AM-m3`、agent 叫 `agents-manager-15m2dg`
-  的情形下「排除申請者自己」永遠對不上，restart 一律 409 `exclude_not_requester`。
-- **申請人要跟憑證綁在一起（issue #436）**：`#414` 之後「誰裁示」已經只有驗過的角色寫得出 `AGM:<role>`，
-  「誰申請」卻還是 body 說了算——同一筆核准一半可信一半不可信，而「不能自己核准自己」也沒有可信的申請人可比。
-  現在 `POST /api/supervisor/approvals` 收標頭：**帶了 `X-AM-Bot-Id`＋自己的 hook token 就只能用自己的名義申請**
-  （填別人＝403 `requester_not_the_caller`）；**有效 User principal 不帶 Bot 身分照收**，那筆記成
-  `requester_unverified`（`daemon-update-kick.sh` 這類 launchd 腳本就是這樣申請的，擋掉等於停掉例行重建）。
-  daemon **不改寫** `requester`：它要跟 acquire 的 `owner` 逐字相等（上面那條），改寫等於讓申請人自己開不了窗口。
-  裁示端據此擋掉**自己核准自己**：`requester` 解析出來就是裁示的那顆 bot 時，`approve` 回 403
-  `self_approval_forbidden`（`deny`／`revoke` 不擋，那是收回自己的申請）。
-  **不看那筆申請驗過沒**（2026-09-24 裁示）：本來只比對驗過的申請，於是守衛變成被約束者自己選配的——
-  申請時不帶 `X-AM-Bot-Id`、裁示時才帶自己的身分，整段就跳過。沒驗過的被擋下來也是對的：要嘛真的是它送的，
-  要嘛有人冒它的名，兩種都該去查。`requester_unverified` 因此只剩「這筆申請人可不可信」的標示（API 看得到），
-  不再是守衛的條件。
-- **守衛是裁示當下重新解析名字，有它的界線**（issue #436）：`requester` 逐字留著給 lease 對，所以裁示時是拿那串字
-  重新解析（`maintenance::try_requester_bot_id`）。申請人**改名、被軟刪、或用 agent 名申請而那個 run 已經結束**，
-  就解析不到、守衛放行——這是已知的漏網，不是保證。**但讀不到不能等於放行**：DB 讀取失敗一律 503
-  `requester_lookup_failed`（`retryable:true`、`sent:false`），不猜「大概不是它」。
-  這條只在 `approve` 上：**DB 壞著的時候永遠還能說不**（`deny`／`revoke` 碰不到這段守衛），
-  沒有 bot 身分的裁示者（走 UI 的人）也不會被它擋到——守衛根本不查。要徹底解決得把驗過的 bot id
-  另存一欄、比 id 不比字串；現階段不加欄位（2026-09-24 裁示，避免再動 schema）。真正的界線仍是共用 UI token
-  （見 #432），那要 per-bot token 才解得掉。
+- **申請者的身分**：Bot principal 的 `requester`／lease `owner` 必須逐字等於驗證後的 bot id；bot 名與 agent 名不作身分依據。CLI 未指定 owner 時取 `$AM_BOT_ID`，外部人類為 `principal:user`。
+- **申請與來源證據同一交易**：經驗證的 bot request 把 `{kind:"bot",bot_id}`，User principal 以保留 requester `principal:user` 申請則把 `{kind:"user"}`，寫進既有 `supervisor_notes` 的 `approval_principal` 紀錄，ID 綁 approval id。不新增資料表或欄位；不改寫 requester，lease owner 仍須與它逐字相等。自由文字的外部申請照收，但沒有 principal 證據，不由名稱補猜。
+- **自我核准守衛**：`approve` 只比較申請時已保存的 bot id 與裁示者 bot id，相同回 403 `self_approval_forbidden`。改名、舊名重用、舊 run 結束都不影響；User principal 為獨立人類身分。沒有 `approval_principal` 的舊紀錄（即使舊 `requester_unverified=0`）保持未知，核准回 503 `requester_identity_unknown`（`retryable:false`、`sent:false`），需以可驗證 principal 重申請。DB／證據解碼失敗回 503 `requester_lookup_failed`（`retryable:true`、`sent:false`）。`deny`／`revoke` 不受這個守衛阻擋。重啟窗口排除申請者自己時同樣只用該 principal 的 bot id；外部／未知申請沒有可排除的 bot。
 - **等太久就縮小封鎖面**（AGM 裁示 2026-09-16）：在這台機器的負載下「任何 bot 在回合中就不換」等同永遠不安全——2026-09-15 那筆核准卡了 11 小時，每 5 分鐘那一輪都撞到有人在講話。
   所以同一筆**已核准、未消耗**的 `rebuild`／`restart` 申請，從**核准時間**（`decided_at`；換 commit 接續的見下）起連續等超過門檻（常數 5 分鐘——使用者 2026-10-04「太久，改成 5 分鐘或者累積三個版本」，原本 30 分鐘；**另外**線上 binary 落後 origin/main ≥ 3 個動到程式碼的 commit 也直接放寬（`ESCALATE_BEHIND_COMMITS`，算法同 `GET /api/deploy/status` 的 `code_commits`，快取 60 秒）；`AM_MAINTENANCE_ESCALATE_MINS` 可調；0、負數或看不懂的值當沒設）之後，安全窗口改判「縮小封鎖面」：
   - **誰等太久就放寬誰**（AGM 裁示 2026-09-16）：`acquire` 只看**當下這筆核准自己**等了多久，別人放著沒用掉的核准不算數——否則一張被遺忘的核准等於把所有人的窗口都打開。

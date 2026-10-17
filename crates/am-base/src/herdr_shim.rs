@@ -736,15 +736,16 @@ am_spool_relay() {
     _sd="$HOME/.config/agents-manager${AM_INSTANCE:+/instances/$AM_INSTANCE}/bots/${AM_BOT_ID}"
     [ -d "$_sd" ] || return 0
     command -v python3 >/dev/null 2>&1 || return 0
-    python3 - "$_sd/hook-spool.d" "$AM_BOT_ID" "${AM_KIND:-claude}" "$1" "$2" <<'AMPY' >/dev/null 2>&1 || true
+    python3 - "$_sd/hook-spool.d" "$AM_BOT_ID" "${AM_KIND:-claude}" "$1" "$2" "$_to_bot_id" "$_to_run_id" "$_delivery_id" <<'AMPY' >/dev/null 2>&1 || true
 import datetime, json, os, sys, tempfile, time
-sd, bot, kind, to_agent, text = sys.argv[1:6]
+sd, bot, kind, to_agent, text, to_bot_id, to_run_id, delivery_id = sys.argv[1:9]
 os.makedirs(sd, exist_ok=True)
 # 跟 daemon 的 db::now() 同一種毫秒 UTC 格式：hook_events.received_at 只存這種（issue #101／#730）。
 now = datetime.datetime.now(datetime.timezone.utc).isoformat(timespec="milliseconds").replace("+00:00", "Z")
 body = {"bot_id": bot, "provider": kind, "truncated": False, "run_id": "",
         "received_at": now,
-        "payload": {"hook_event_name": "AmRelayAnnounce", "to_agent": to_agent, "text": text}}
+        "payload": {"hook_event_name": "AmRelayAnnounce", "version": 2, "to_agent": to_agent,
+                    "to_bot_id": to_bot_id, "to_run_id": to_run_id, "delivery_id": delivery_id, "text": text}}
 fd, tmp = tempfile.mkstemp(prefix=".tmp.", dir=sd)
 with os.fdopen(fd, "w") as f:
     f.write(json.dumps(body, ensure_ascii=False) + "\n")
@@ -769,6 +770,11 @@ am_agent_prompt() {
     fi
     # 我們自己的旗標（SPEC §18.15）：`--ack`（純告知，不叫醒 AGM）、`--reply-to <id>`（回哪一則事件／交辦）。
     # 真的 herdr 不認得，一律剝掉；沒帶就是新的事，AGM 會被叫醒。
+    _to_pane_id=""
+    _to_bot_id=""
+    _to_run_id=""
+    # 一次投遞的 ID 在 curl 重試與 spool 裡沿用；產不出來就維持未知。
+    _delivery_id=$(python3 -c 'import uuid; print(uuid.uuid4())' 2>/dev/null) || _delivery_id=""
     _ack=""
     _reply_to=""
     _n=$#
@@ -778,6 +784,17 @@ am_agent_prompt() {
         shift
         _i=$((_i + 1))
         case "$_a" in
+            --to-bot-id | --to-run-id | --to-pane-id)
+                if [ "$_i" -lt "$_n" ]; then
+                    case "$_a" in --to-bot-id) _to_bot_id=$1 ;; --to-run-id) _to_run_id=$1 ;; --to-pane-id) _to_pane_id=$1 ;; esac
+                    shift
+                    _i=$((_i + 1))
+                fi
+                continue
+                ;;
+            --to-pane-id=*) _to_pane_id=${_a#--to-pane-id=}; continue ;;
+            --to-bot-id=*) _to_bot_id=${_a#--to-bot-id=}; continue ;;
+            --to-run-id=*) _to_run_id=${_a#--to-run-id=}; continue ;;
             --ack)
                 _ack=1
                 continue
@@ -797,6 +814,7 @@ am_agent_prompt() {
         esac
         set -- "$@" "$_a"
     done
+    [ -z "$_to_pane_id" ] || _name=$_to_pane_id
     # 正文只是 TEXT 那個位置參數：`--wait`、`--until X`、`--timeout X` 是 herdr 的旗標，混進正文會讓
     # 同一句申請因為逾時值不同就變成兩個指紋。
     _text=""
@@ -832,6 +850,9 @@ am_agent_prompt() {
             _out=$(am_curl_bot -s -m "$_m" -w '\n%{http_code}' -X POST "http://127.0.0.1:${AM_PORT}/relay/announce" \
                 --data-urlencode "bot_id=${AM_BOT_ID}" \
                 --data-urlencode "to_agent=${_name}" \
+                --data-urlencode "to_bot_id=${_to_bot_id}" \
+                --data-urlencode "to_run_id=${_to_run_id}" \
+                --data-urlencode "delivery_id=${_delivery_id}" \
                 --data-urlencode "text=${_text}" \
                 --data-urlencode "ack=${_ack}" \
                 --data-urlencode "reply_to=${_reply_to}" 2>/dev/null)
@@ -862,6 +883,11 @@ am_agent_prompt() {
                             exit 0
                             ;;
                         # daemon 明確說「不是給協調者的」（announce 已記下）：照舊直送。
+                        *'"to_pane_id":'*)
+                            _pane=$(printf '%s' "$_resp" | sed -n 's/.*"to_pane_id" *: *"\([^"\]*\)".*/\1/p')
+                            [ -n "$_pane" ] || am_announce_refuse 75 "$_name" "daemon 未提供可驗證的 pane 地址"
+                            _name=$_pane
+                            ;;
                         '{}') : ;;
                         *) am_announce_refuse 75 "$_name" "daemon 回了看不懂的內容：$(printf '%s' "$_resp" | cut -c1-200)" ;;
                     esac
@@ -875,7 +901,14 @@ am_agent_prompt() {
             esac
         fi
     elif [ -n "${AM_BOT_ID:-}" ] && [ -z "${AM_PORT:-}" ]; then
-        am_spool_relay "$_name" "$_text"
+        # 遠端沒有 daemon 可以解 run→pane；沒有明確 pane 地址的舊呼叫不報備身分。
+        if [ -n "$_to_pane_id" ]; then
+            am_spool_relay "$_name" "$_text"
+        else
+            _to_bot_id=""
+            _to_run_id=""
+            am_spool_relay "$_name" "$_text"
+        fi
     fi
     exec "$AM_HERDR" agent prompt "$_name" "$@"
 }

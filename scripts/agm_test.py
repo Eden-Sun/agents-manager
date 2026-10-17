@@ -997,6 +997,19 @@ class ReviewCommandTest(CliCase):
         self.assertEqual(code, 2)
 
 
+class RelayPrincipalOwnerTest(unittest.TestCase):
+    def test_nr_relay_default_owner_survives_agent_rename_and_name_reuse(self):
+        class Capture:
+            def post(self, path, body):
+                return body
+
+        args = agm.build_parser().parse_args(["lease", "acquire", "rebuild", "--approval", "ap", "--request-id", "stable-request"])
+        for name in ("old-name", "renamed-agent"):
+            with patch.dict(os.environ, {"AM_BOT_ID": "stable-bot-id", "AM_AGENT_NAME": name}):
+                body = agm.cmd_lease(Capture(), {}, args)
+            self.assertEqual(body["owner"], "stable-bot-id")
+
+
 class ApprovalLeaseCommandTest(CliCase):
     def setUp(self):
         super().setUp()
