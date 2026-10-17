@@ -1693,9 +1693,13 @@ tab 已被回收視為完成，`tab.list` 失敗不猜。沒有 `tab_id` 的 Run
 
 ### 6.5 對帳（啟動、事件連線重連；逐 bot 在鎖內）
 1. `session.snapshot` + `agent.list`。
-2. DB 的 active Run：清單上找得到它的 agent name → 維持，更新 `pane_id`（pane move 會改 id）；`agent_status` 在鎖內再 `agent.get` 一次
-   （清單是拿鎖前讀的，用舊的 idle 蓋掉已 working 的 run，真正的 `working→idle` 就不會觸發備援與排隊 prompt）。找不到 → `exited`。
-3. 清單上的 name 對得到某 bot 但 DB 無 active Run → 建 Run（`running`、`adopted=1`），沿用同一 Conversation。
+2. 在 host＋herdr session 內以 active Run 的 pane ID／native session ID 查找 agent，拿 bot 鎖後再用 pane ID 查一次最新 occupant。
+   一般 active run 尚無 native session 時可依既有 pane ID 維持；child 必須有相符 native session 才確認仍為同一 instance。
+   名稱只更新 `runs.agent_name` 快照，不以 bot 暱稱、歷史 agent 名或 project label 推算名稱查找。
+   pane 有 occupant 但缺少／衝突的 child instance 證據時保持未知：不改 run、不退役，也不把這個 pane 再收成別人的 child。
+   缺 ID 或 RPC 讀失敗也保留；pane 上確認沒有 agent 才結束 run。
+3. 沒有 active Run 時，只憑同 host/session 的既有 native session 身分接回 bot，建 `running`、`adopted=1` 的 Run；
+   名稱重用不沿用舊 bot 的歷史與設定，沒有穩定身分證據就不自動接回。
 4. orphan pane 回收：`exited/stopped` Run 的 `pane_id` 仍在 snapshot 且沒有 agent → `pane.close`。
    **但 `panes` 已經記著這顆、而且它的 `first_seen` 晚於那個 Run 的 `ended_at` 就不關**（issue #469）：herdr 重開後
    pane id 會被重用，而 `runs.pane_id` 結束後不清、`runs` 也沒有保留期，所以每一顆歷史 Run 的 id 都是候選——
@@ -1777,50 +1781,27 @@ herdr server 重啟會讓**所有** pane 同時消失。照 §6.5 的規則，�
 任何一步沒通或 skip 都停下，回報「需要使用者授權本機網路」，不要靠重啟硬試；授權完成後從同一個 herdr pane 重跑，
 通過前不得宣告升級完成。
 
-### 6.5a 子 agent 認領（提示優先，其次血緣）
+### 6.5a 子 agent 認領（明確 pane ownership）
 
-一個 bot 一個 tab。對帳的逐 bot 迴圈走完後，`agent.list` 裡**沒有 bot 認領**的 agent 依序試三條線索：
+對帳只用 `spawn_claims`／spawn hint 登記的 pane→parent bot ID 選 parent；parent 必須是目前 host/session 的有效 bot；有明確 claim 的具名 child，即使 parent 已無 active run 仍可認領。
+缺登記、登記指向不存在或不可確認的 parent，就保持未知，不用名稱前綴、同 tab、project label 或 argv `--name` 推測血緣（#1791）。
+claim 與 hint 衝突時以 claim 為準。它們只證明 parent，不證明同 pane 的 occupant 仍是先前那顆 child。
+對帳在目前 host/session 以 pane ID 去重，顯示名字重複或改名不會遮蔽另一顆 pane。
 
-1. **登記與 spawn hint（最優先）**：`(host, pane_id)` 在 `spawn_claims`（issue #1790，shim 登記）或 `spawn_hints`（issue #94，hook 撈 stdout）裡對得上 → 記的那顆 bot（見下方）；兩邊不一致時 claim 為準。
-2. **血緣**：它的 `tab_id` 等於某 bot 活動 run 的 `tab_id` → 那顆 bot 的子 agent（子 pane 從父 pane split 出來，必然在父的 tab 裡，不需要 agent 配合）。
-   同一 tab 有多顆 bot（父 + 已認領的子）時取名字前綴最長者，平手取非 `child`——孫代因此掛在子代下面。
-3. **名字前綴**：`<某 bot 的 agent 名>-<字尾>`，取最長匹配。跨 tab 只有這條。
+既有 child 的接回／沿用須有同 parent、同 herdr session、同 kind 的 native session ID；子 bot 暱稱與歷史 `agent_name` 都不是 lookup key。
+同 pane 換 agent 卻缺少 child instance／replacement 證據時維持未知，不推定改名、不改 parent、不接上舊 child 設定。
+新 pane 的明確 ownership 可以認領新 child，但名稱相似不能證明舊 child 被刻意替換；replacement 判斷只接受明確 ownership，且舊 pane 已確認不存在。
 
-**hint 優先於血緣的理由（2026-09-17 使用者實戰）**：一顆 parent 一次在**新** tab 裡連續開好幾顆子代理時，「血緣」這條線索
-會在第一顆被認領之後，把它自己也變成那個 tab 的候選 parent（規則 2 完全不看 `prefix_score` 高低，同一 tab 只要有候選就贏）——
-第二顆因此掛在第一顆底下、第三顆掛在第二顆底下，一顆掛一顆串成鏈；短名字被前一顆占用時 `child_name` 的 `prefix_score` 對錯的那個
-parent 算出來是 0，連字尾都取不到，退而用完整 herdr agent name 建 bot，於是又多長出重複 bot。`spawn_hints` 直接把「這個 pane_id 是
-哪顆 bot 剛開的」這個事實排在血緣前面，繞過整個「同 tab 就算」的推斷，從根本上不讓鏈條長出來。三條都沒中就跳過。
-**同 tab 但名字對不上時以名字為準**（2026-10-01 使用者：cf-優化在 verify 的 tab 裡開了 `<cf-優化>-memleak`，被掛到 verify 底下，側欄看不到）：同 tab 的候選前綴分數是 0、而別處有一顆的 agent 名正是它的前綴，就掛到那一顆；同 tab 而且名字也對得上的照舊優先，誰的前綴都不是才退回同 tab。順序：spawn hint → 同 tab 且名字對得上 → 名字前綴 → 同 tab。
-
-**shim 登記（`spawn_claims`，issue #1790）**：2026-10-16 m4p 的 fork `ops-交貨` 把自己 `agent rename` 成 `ops` 的前綴，開的三顆子 agent 被名字前綴掛到原 bot `ops` 底下；
-而那條 `agent start` 的 stdout 被 pipe 到只剩 `agent_started`，hook 撈不到 JSON、沒有 hint。所以歸屬不再只靠名字或 bot 把輸出留在 stdout：herdr shim 在 `agent start` **之後一律**登記「這顆 pane 是 `$AM_BOT_ID` 開的」——**herdr 回失敗（例如 `timeout`）也登記**：pane 已確認是空的、是這顆 bot 要用的，agent 常常在 timeout 之後才起來被收編（2026-10-16 m4p ro-ocr 開 cifable 漏登記）；沒起來的 pane 關掉後 claim 會被清掉。
-登記失敗只印 warn、不讓 start 失敗。本機（有 `AM_PORT`）打 `POST /relay/spawn/claim`（API.md；token 必須是 body `bot_id` 自己的，daemon 核對，不能替別的 bot 登記）；
-遠端（有 bot 身分、沒有 `AM_PORT`，§11.4）寫一則 `{"hook_event_name":"AmSpawnClaim","pane_id"}` 進自己 bot 的 `hook-spool.d/`（跟 `AmRelayAnnounce` 同一條路，`python3` 寫暫存檔再 rename；沒有 bot 目錄或 python3 就只印 warn），daemon 收 spool 時記成那個 bot 的 claim。
-claim 存在 `spawn_claims((host, pane_id) 唯一, bot_id, created_at)`，**不過期、認領成功也不消耗**：同一個 `(host, pane_id)` 再登記以新的為準（pane id 被回收）；每輪 `reconcile_host` 開頭把已經不在 herdr snapshot 裡的 pane 的 claim 清掉
-（登記不到兩分鐘的、snapshot 一顆 pane 都沒有的都不清）。認領時 claim 與 hint 合成同一張 `pane_id -> bot_id` 表餵進規則 1。
-**改名不換 parent**：child 已經有 parent 之後，它的 herdr 名字被改掉時，只要 claim／hint 說那顆 pane 是它的 parent 開的（pane 仍是 run 記的那一顆），就視為同一顆 child 改名——run 留著、`runs.agent_name` 換成新名字，
-不當成「agent 不見」退休，新名字也不會再被名字前綴認成別顆 parent 的新 child。沒有登記的 pane 被改名照舊（run 收掉）。
-
-**spawn hint 從哪來**：頂層 bot 自己的 `PostToolUse` hook（`matcher: "Bash"`，issue #94）——它自己的 Bash 工具跑
-`herdr pane split`／`agent start` 時，那條指令的 stdout 是 herdr 自己回的一個或多個 JSON-RPC 回應（`{"id":"cli:pane:split",
-"result":{"pane":{"pane_id":...}}}` 或 `{"id":"cli:agent:start","result":{"agent":{"pane_id":...}}}`，`crates/am-base/src/spawn_hints.rs`
-對照真的 herdr 0.8.2 驗過）；Bash loop 的多個回應都逐一解析並記成 hint。**只信這兩個 `id`**：`pane:get`／`pane:current`／`pane:list` 回的是同一種 `{"pane":{...}}` 形狀，
-只看 `type` 會把「看一眼」也當成「剛創造」。記進 `spawn_hints((host, pane_id) 唯一, bot_id, created_at)`；pane ID 只在各自的 host 內唯一，
-不同 host 的同號 pane 各自保留。10 分鐘沒被用到就當過期（`prune_stale`，每次 `reconcile_host` 開頭跑一次）；被拿去認領成功只刪掉該 host 的 hint，重複跑不會重複建立。這條**只影響「這個 pane
-歸誰」，不影響「pane 裡到底有沒有 agent」**——`adopt_child` 認領前仍然要求那個 pane_id 在 `agent.list` 裡真的有一個沒被認領的
-agent，hint 錯了或指到不存在的 agent，最多就是這一顆這一輪沒被認領，不會憑空冒出 bot。
-**child 沒有這條路**：`managed_by='child'` 的 bot 一律沒有 hook（§4.3），沒有 Bash 工具事件流可看，子代自己開孫代時完全沒有
-hint 可用，退回規則 2／3——這條沒有、也不打算改掉子代 hookless 這件事。
-
-三條都沒中的照舊只退回血緣／前綴（規則 2、3）。
-**共用 session 的主機**（§11.10）上三條都只看落在自己 workspace／tab／pane 裡的 agent；**已移交的專案**（§6.5h）的 agent 一律不認領，它的 bot 也不當父候選。
-**hint 讀不到不等於沒有 hint**（#94 重開）：`spawn_hints` 這一輪 SELECT 失敗（busy／I/O）時，hint 可能好好地在表裡——退回規則 2、3
-正好會把新 tab 裡的一排子代理串回鏈。所以這一輪**一顆都不認領**，排一輪 15 秒後的補跑對帳（同 §6.5.2 第 2 條的延後機制）；
-讀到空的（`Ok`、沒有列）才是真的沒有，照舊退回規則 2、3。認領：`managed_by='child'`、`parent_bot_id`、`adopted=1` 的 run；同一父 bot 底下同名的 live child 直接重用。
+spawn hint 仍由 hook 的 Bash 工具輸出抽取 `herdr pane split`／`agent start` 的 pane ID，驗證清單上確有該 agent 後才採用。
+讀取 claim/hint 失敗時這一輪一顆都不認領、不改名，排延後補跑；讀到空集合也不退回名字／tab 猜測。
+共用 session 的主機（§11.10）只收自己 workspace／tab／pane 裡有明確 ownership 的 agent；已移交專案（§6.5h）的 agent 不認領，其 bot 不當父候選。
+認領記 `managed_by='child'`、`parent_bot_id` 與 `adopted=1` 的 run；可取得時一併保存 native session ID。
 子 bot `name`：先去掉實際 parent 的 herdr 名稱前綴，再去掉 child suffix 中重複的專案 bot agent 前綴（`<專案 slug>-<bot id 尾 6 碼>-`），保存剩下的短名；herdr 名稱本身仍維持 `<parent>-<suffix>` 與 32 字元預算。沒有可識別前綴時沿用 herdr 名（去空白與 `@,:;`、截 32 字）。短名已被專案中的 live bot 使用時仍改存完整 herdr 名，以保持唯一。既有 child 列的重複前綴只在 `GET /api/state` 與 herdr 更新的 child-loss 清單顯示時移除，不改 DB，避免啟動時改名撞上專案唯一索引或改變歷史資料。
 每顆認領各自成敗：失敗只 log 跳過，不中止整台主機的對帳。
-**無名 agent（issue #1472）**：用 `herdr pane run <pane> "claude …"` 在新 pane 直接起 CLI（沒走 `herdr agent start`）的子 agent，herdr 認得出是哪個 CLI 但**沒有名稱**。無名 agent 只在有證據時才認領：(a) spawn hint 指向一顆活著的 parent（它的 agent 在 `agent.list` 裡），或 (b) 該 pane 行程 argv 的 `--name`／`-n` 以某顆活著的 parent 名稱加 `-` 開頭、而且與那顆 parent 同 tab（等同 hint）。證據成立才用 `agent.rename`（目標是 pane id）補上 `<parent 的 agent 名>-<字尾>`——字尾優先取 argv `--name` 去掉 parent 前綴後的部分（只含 `[a-z0-9_-]`、整個名字不超過 32 字才用），否則由 pane id 產生（小寫、非英數換成 `-`，放不進 32 字就留右邊）——再照上面的流程認領，`runs.agent_name` 是新名字。沒有證據的無名 agent **不收也不改名**（同 tab 裡可能是使用者自己開的 claude）。rename 失敗（舊版 herdr、撞名）只記 log、這一輪不收、hint 保留、下一輪再試，不中斷整台主機的對帳。住著某顆 bot 的 active run 的 pane 不算新的子 agent（那是名字被清掉，由逐 bot 迴圈放回去）；共用主機只收自己的（#709）、已移交的專案不收（#708）兩個條件照樣先過；hint 讀不到的那一輪無名 agent 也一顆都不收、不改名（同上面的延後補跑）。觸發點只有 `pane.agent_detected`（herdr 沒有「agent 改名」事件，只有 workspace／tab 的 renamed）：偵測事件本來就不帶名字，`detection_wants_reconcile` 只擋額度探測的 workspace，無名 agent 被偵測到後兩秒的那一輪對帳就會補名並認領。
+**無名 agent（issue #1472）**：只有明確 spawn claim/hint 指向活著的 parent 才補顯示名稱並認領。
+argv 的 `--name`／`-n` 只供已確定 parent 後挑顯示字尾，不參與 parent 判斷；否則由 pane ID 產生字尾。
+rename 失敗只跳過該 agent、保留 hint 下輪再試。既有 active run 佔用的 pane 不當新 child。
+
 
 **子 agent 退役**：子 agent 只活在它的 pane 裡，pane 沒了就退役（`bots.deleted_at`，對話保留）。**還原**走既有的 `POST /api/bots/{id}/restore`（API §10.4a；子 agent 不開 run；CLI `agm bot restore <id>`），不直接改 DB。還原後記十分鐘寬限期：這段期間 reconcile 不會只因沒有 active run 而退休，讓父 bot 有時間用 herdr 在原 pane 重開；寬限期到仍未回來就照原規則退休。寬限期存於 `supervisor_notes`，daemon 重啟後仍有效（#397）。退役寫入前會在同一個寫交易內重新檢查寬限期與 restart 保護，因此已經開始的 reconcile pass 也不能在還原提交後立即把 child 再退役。**子 agent 的 `start`／`restart` 一律 409 `child_restart_forbidden`**：pane 是父 bot 用 herdr 開的，daemon 不代開、也不原地重啟（對子 agent 下 restart 而 pane 已不在，反而讓 reconcile 把它退役）；一鍵重啟（§6.9）也跳過子 agent（`skipped` 理由 `child`，2026-09-22）。若內部原地重啟收到 herdr 的 `agent_name_taken`，回錯並記下永久保護原因；新 run 保持 active，reconcile 不會把它解讀成 bot 消失（#396）。兩條路都要接：reconcile 發現 run 在、agent 不見；
 以及 `pane_closed` 事件**先**結束 run、reconcile 後到——bot 沒有 active run、herdr 清單找不到它、且至少有一個已結束的 run，一樣退役。
@@ -2489,7 +2470,7 @@ pane 沒有立即影響。等這套機制在正式環境跑穩，`cargo-slot.sh`
 空字串不合法）。有值時這顆 daemon 對這個專案的 bot／pane **一律不動**：
 
 - **對帳**（§6.5）：逐 bot 迴圈整顆跳過——不建 run、不收編、不結束 run、不退役 child；不清它的 `projects.workspace_id`；
-  結束的 run 留下的 pane 不當孤兒關。它的 agent（名字、活著的 run 的 pane／tab、它的 workspace 對得上）**不是任何 bot 的
+  結束的 run 留下的 pane 不當孤兒關。它的 agent（同 herdr session 的活著 run 的 pane／tab／workspace ID 對得上）**不是任何 bot 的
   新 child**（§6.5a），它自己也不當父候選。`workspace.closed` 事件同樣不清它的映射；pane 狀態事件整則略過（狀態、外部回合、
   備援、通知 parent 都不做）；pane 狀態修復（#1293）欠著的登記也一起丟掉，定時修復迴圈對它不打 herdr RPC（#1409）。
 - **收口的寫入**：`mark_run_exited` 對它回 `AlreadyEnded`（什麼都不寫；pane 關閉事件、dead-pane 巡邏、default session 都經過它），
@@ -2500,7 +2481,7 @@ pane 沒有立即影響。等這套機制在正式環境跑穩，`cargo-slot.sh`
   一起擋下）；佇列原樣留著、一則都不送（收回後照常送）；`client_for_run`／`App::herdr_for_run` 不給 client，所以 keys／text／
   interrupt／login 與背景巡邏（survey、update watch、child alerts……）一個 pane RPC 都不打，連讀畫面都不讀；直接拿主機 client 的
   codex 額度讀狀態列、對帳補 codex runtime 也把它排除。卡住回合的巡邏（§6.6）不收它的 in-flight 回合。
-- **pane**（§6.5e）：它的 workspace、活著的 run 的 tab／pane 裡的 pane 不進 `panes`——不 GC、不推 `pane_unowned`／`pane_orphaned`、
+- **pane**（§6.5e）：同 herdr session 的活著 run 的 workspace／tab／pane 裡的 pane 不進 `panes`——不 GC、不推 `pane_unowned`／`pane_orphaned`、
   不當 scratch。
 - **hook**：`process_locked` 記一行 `hook for a handed-off project; ignored` 就丟（spool 重播、spawn hint 也一樣）。移交查詢本身讀失敗＝不知道歸誰：不當成「我的」去處理，也不當成「移交了」丟掉；這一則不做任何 hook 副作用，回錯、收件匣退避重試（#1259）。唯一的例外是撞額度的記帳（#108）：撞限是帳號的事實，照記，排著的派工才擋得住。
 - **relay announce**（§6.5d）：收件方在已移交的專案裡時，`relay_watch::resolve` 回 `None`＝不是這顆 daemon 管的目標：announce 照舊回 200、
@@ -2645,6 +2626,8 @@ daemon 另外唯讀觀察本機 Herdr `default` session（`~/.config/herdr/herdr
 1. `agent.list`，只處理 `claude`/`codex`/`grok`。
 2. agent 的 `foreground_cwd`（沒有用 `cwd`）與既有 local Project 的 canonical path **完全相等**才配對；不自動建 Project、不採用普通 shell pane。
 3. 有採用紀錄就更新 Run；否則建 `herdr_session = "default"` 的 Bot 設定（寫回 config.toml）與 `adopted = 1` 的 active Run。
+   採用紀錄以本機＋`default` session 的 active pane ID 或相符 native session ID 查找，不以暱稱／歷史 agent 名查找；改名維持同 bot，舊名重用不覆寫其他 run。
+   已知 native session 的 pane 出現不同／缺失 native session 時保留未知，不覆寫既有 run。
 4. default workspace 不寫 `projects.workspace_id`；default pane 消失只結束 Run，不回收使用者 pane。`stop` 只送 ctrl+c、不 `pane.close`；
    `start`/`restart`/credential rotate 回 409 `default_session`；credential rotate 不改 token、不建 restart intent，§6.9 批次重啟跳過。credential-rotation intent 恢復也須在送 ctrl+c 前拒絕 default-session bot。
 

@@ -59,14 +59,37 @@ pub async fn sync(app: &(impl crate::capabilities::BotLocks + crate::capabilitie
         .filter(|p| p.handed_off_to.is_none())
         .collect();
     let mut seen_bots = HashSet::new();
+    let mut native_ids = HashSet::new();
+    let mut ambiguous_native_ids = HashSet::new();
+    for agent in &agents {
+        if let Some(native) = crate::lifecycle::dead_panes::herdr_session_id(agent) {
+            let key = (agent_kind(agent), native);
+            if !native_ids.insert(key.clone()) { ambiguous_native_ids.insert(key); }
+        }
+    }
 
     for agent in agents {
+        if agent.pane_id.is_empty() { continue; }
+        if crate::lifecycle::dead_panes::herdr_session_id(&agent)
+            .is_some_and(|native| ambiguous_native_ids.contains(&(agent_kind(&agent), native))) { continue; }
         let Some(kind) = agent_kind(&agent) else { continue };
-        let Some(agent_name) = agent.name.as_deref().filter(|s| !s.trim().is_empty()) else { continue };
+        let agent_name = agent.name.as_deref().filter(|s| !s.trim().is_empty()).unwrap_or("default-bot");
         let Some(cwd) = agent_cwd(&agent) else { continue };
         let Some(project) = projects.iter().find(|p| same_workdir(cwd, &p.path)) else { continue };
 
-        let (bot, created) = ensure_imported_bot(app, project, agent_name, kind).await?;
+        // A different/missing native session in an already occupied pane is unknown.
+        let occupied: Option<(String, Option<String>)> = sqlx::query_as(
+            "SELECT r.bot_id, r.native_session_id FROM runs r JOIN bots b ON b.id=r.bot_id
+             WHERE b.project_id=? AND b.deleted_at IS NULL AND r.herdr_session=? AND r.pane_id=?
+             AND r.state IN ('starting','running','stopping') LIMIT 1",
+        ).bind(&project.id).bind(SESSION).bind(&agent.pane_id).fetch_optional(app.db()).await?;
+        if let Some((bot_id, Some(native))) = occupied {
+            if crate::lifecycle::dead_panes::herdr_session_id(&agent).as_deref() != Some(native.as_str()) {
+                seen_bots.insert(bot_id);
+                continue;
+            }
+        }
+        let (bot, created) = ensure_imported_bot(app, project, &agent, agent_name, kind).await?;
         let bot_id = bot.id.clone();
         seen_bots.insert(bot_id.clone());
         let lock = app.bot_lock(&bot_id).await;
@@ -80,9 +103,15 @@ pub async fn sync(app: &(impl crate::capabilities::BotLocks + crate::capabilitie
             if run.herdr_session.as_deref().map(|s| s != SESSION).unwrap_or(false) {
                 continue;
             }
+            let native = crate::lifecycle::dead_panes::herdr_session_id(&agent);
+            if run.native_session_id.as_ref().is_some_and(|sid| Some(sid.as_str()) != native.as_deref())
+                || (run.native_session_id.is_none() && run.pane_id.as_deref() != Some(agent.pane_id.as_str()))
+            {
+                continue;
+            }
             sqlx::query(
                 "UPDATE runs SET pane_id=?, workspace_id=?, tab_id=?, agent_status=?, agent_name=?,
-                 herdr_session=?, adopted=1, state=CASE WHEN state='starting' THEN 'running' ELSE state END,
+                 herdr_session=?, native_session_id=COALESCE(native_session_id, ?), adopted=1, state=CASE WHEN state='starting' THEN 'running' ELSE state END,
                  ended_at=NULL WHERE id=?",
             )
             .bind(&agent.pane_id)
@@ -91,6 +120,7 @@ pub async fn sync(app: &(impl crate::capabilities::BotLocks + crate::capabilitie
             .bind(&status)
             .bind(agent_name)
             .bind(SESSION)
+            .bind(crate::lifecycle::dead_panes::herdr_session_id(&agent))
             .bind(&run.id)
             .execute(app.db())
             .await?;
@@ -107,7 +137,7 @@ pub async fn sync(app: &(impl crate::capabilities::BotLocks + crate::capabilitie
             let run_id = db::ulid();
             sqlx::query(
                 "INSERT INTO runs (id, bot_id, state, agent_status, workspace_id, pane_id, tab_id, adopted,
-                 agent_name, herdr_session, started_at) VALUES (?,?,'running',?,?,?,?,1,?,?,?)",
+                 agent_name, herdr_session, native_session_id, started_at) VALUES (?,?,'running',?,?,?,?,1,?,?,?,?)",
             )
             .bind(&run_id)
             .bind(&bot.id)
@@ -117,6 +147,7 @@ pub async fn sync(app: &(impl crate::capabilities::BotLocks + crate::capabilitie
             .bind(&agent.tab_id)
             .bind(agent_name)
             .bind(SESSION)
+            .bind(crate::lifecycle::dead_panes::herdr_session_id(&agent))
             .bind(db::now())
             .execute(app.db())
             .await?;
@@ -142,8 +173,8 @@ pub async fn sync(app: &(impl crate::capabilities::BotLocks + crate::capabilitie
             continue;
         }
         if let Some(run) = db::active_run(app.db(), &bot.id).await? {
-            let target = run.pane_id.as_deref().filter(|p| !p.is_empty()).map(str::to_string).or_else(|| run.agent_name.clone());
-            let still_there = match target.as_deref() {
+            let target = run.pane_id.as_deref().filter(|p| !p.is_empty());
+            let still_there = match target {
                 Some(t) => match client.agent_get(t).await {
                     Ok(Some(_)) => true,
                     Ok(None) => false,
@@ -152,7 +183,7 @@ pub async fn sync(app: &(impl crate::capabilities::BotLocks + crate::capabilitie
                         true
                     }
                 },
-                None => false,
+                None => true, // Missing stable IDs cannot prove the run disappeared.
             };
             if still_there {
                 continue;
@@ -218,27 +249,24 @@ fn imported_name(raw: &str, used: &HashSet<String>) -> String {
 async fn ensure_imported_bot(
     app: &(impl crate::capabilities::Db + DefaultSessionProjection),
     project: &db::Project,
+    agent: &AgentInfo,
     agent_name: &str,
     kind: &str,
 ) -> Result<(db::Bot, bool)> {
-    // A renamed imported bot is found through its historical default-session Run. A bot that
-    // has never had a Run is found by its original nickname.
-    let existing_id: Option<String> = sqlx::query_scalar(
-        "SELECT b.id FROM bots b
-         WHERE b.project_id=? AND b.deleted_at IS NULL AND b.herdr_session=?
-           AND (b.name=? OR EXISTS (
-             SELECT 1 FROM runs r WHERE r.bot_id=b.id AND r.agent_name=? AND r.herdr_session=?
-           ))
-         ORDER BY CASE WHEN b.name=? THEN 0 ELSE 1 END, b.created_at LIMIT 1",
-    )
-    .bind(&project.id)
-    .bind(SESSION)
-    .bind(agent_name)
-    .bind(agent_name)
-    .bind(SESSION)
-    .bind(agent_name)
-    .fetch_optional(app.db())
-    .await?;
+    // Native session proves continuity across panes; otherwise use only an active pane
+    // in the observed default session. A nickname never imports another bot's history.
+    let native = crate::lifecycle::dead_panes::herdr_session_id(agent);
+    let ids: Vec<String> = sqlx::query_scalar(
+        "SELECT DISTINCT b.id FROM bots b JOIN runs r ON r.bot_id=b.id
+         WHERE b.project_id=? AND b.deleted_at IS NULL AND b.herdr_session=? AND b.kind=?
+           AND r.herdr_session=? AND (
+             (? IS NOT NULL AND r.native_session_id=?) OR
+             (r.state IN ('starting','running','stopping') AND r.pane_id=?
+              AND r.native_session_id IS NULL))",
+    ).bind(&project.id).bind(SESSION).bind(kind).bind(SESSION)
+        .bind(&native).bind(&native).bind(&agent.pane_id).fetch_all(app.db()).await?;
+    anyhow::ensure!(ids.len() <= 1, "ambiguous default-session identity");
+    let existing_id = ids.into_iter().next();
     if let Some(id) = existing_id {
         let bot = db::bot(app.db(), &id).await?.ok_or_else(|| anyhow::anyhow!("imported bot disappeared"))?;
         return Ok((bot, false));
@@ -302,6 +330,56 @@ mod tests {
         assert_eq!(imported_name("agent", &used), "agent-2");
         assert_eq!(imported_name("agent bad", &HashSet::new()), "agentbad");
         assert_eq!(imported_name("bad name", &HashSet::from(["badname".to_string()])), "badname-2");
+    }
+
+    #[tokio::test]
+    async fn nr1791_default_import_survives_rename_without_following_reused_name() {
+        let env = tt::env().await;
+        let app = &env.app;
+        let client = crate::herdr::HerdrClient::new(env.dir.join("data/herdr.sock"));
+        let (ws, root) = client.workspace_create("/tmp/p", "proj", json!({})).await.unwrap();
+        let other = client.tab_create(&ws.workspace_id, "/tmp/p", "other", json!({})).await.unwrap();
+        let entry = |name: &str, pane: &crate::herdr::PaneInfo, sid: &str| json!({
+            "name":name,"agent":"claude","agent_status":"idle","cwd":env.repo.to_string_lossy(),
+            "workspace_id":ws.workspace_id,"tab_id":pane.tab_id,"pane_id":pane.pane_id,
+            "agent_session":{"kind":"id","value":sid}});
+        app.cfg.update(|cfg| {
+            cfg.projects.push(crate::config::ProjectCfg {
+                id: Some(env.project_id.clone()), path: env.repo.to_string_lossy().into_owned(),
+                label: "proj".into(), host: "local".into(), handed_off_to: None, bots: vec![],
+            });
+            Ok(())
+        }).await.unwrap();
+        *env.herdr.agents.lock().unwrap() = vec![entry("old", &root, "native-1")];
+        sync(app).await.unwrap();
+        let imported: String = sqlx::query_scalar("SELECT bot_id FROM runs WHERE herdr_session='default'").fetch_one(&app.db).await.unwrap();
+        *env.herdr.agents.lock().unwrap() = vec![entry("renamed", &root, "native-1"), entry("old", &other, "native-2")];
+        sync(app).await.unwrap();
+        let kept = db::active_run(&app.db, &imported).await.unwrap().unwrap();
+        assert_eq!(kept.pane_id.as_deref(), Some(root.pane_id.as_str()));
+        assert_eq!(kept.agent_name.as_deref(), Some("renamed"));
+        let count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM bots WHERE herdr_session='default'").fetch_one(&app.db).await.unwrap();
+        assert_eq!(count, 2, "only the new native identity creates a second bot");
+        *env.herdr.agents.lock().unwrap() = vec![entry("replacement", &root, "different-instance"), entry("old", &other, "native-2")];
+        sync(app).await.unwrap();
+        let unknown = db::active_run(&app.db, &imported).await.unwrap().unwrap();
+        assert_eq!(unknown.id, kept.id);
+        assert_eq!(unknown.native_session_id.as_deref(), Some("native-1"));
+        assert_eq!(unknown.agent_name.as_deref(), Some("renamed"));
+        let count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM bots WHERE herdr_session='default'").fetch_one(&app.db).await.unwrap();
+        assert_eq!(count, 2, "a conflicting occupant stays unknown instead of creating or overwriting a bot");
+
+    }
+
+    #[tokio::test]
+    async fn nr1791_default_run_without_a_pane_id_stays_unknown() {
+        let env = tt::env().await;
+        let bot = tt::claude_bot(&env.app, &env.project_id, "imported").await;
+        sqlx::query("UPDATE bots SET herdr_session='default' WHERE id=?").bind(&bot.id).execute(&env.app.db).await.unwrap();
+        let run = tt::fake_run(&env.app, &bot.id).await;
+        sqlx::query("UPDATE runs SET pane_id=NULL, herdr_session='default', agent_name='old' WHERE id=?").bind(&run).execute(&env.app.db).await.unwrap();
+        sync(&env.app).await.unwrap();
+        assert_eq!(db::active_run(&env.app.db, &bot.id).await.unwrap().unwrap().id, run);
     }
 
     /// `agent.list` 暫時回空、但 `agent.get` 還找得到：不能把 default-session 的 run 標成 exited。

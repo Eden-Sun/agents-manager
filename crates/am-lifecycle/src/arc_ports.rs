@@ -198,7 +198,7 @@ mod arc_port_10_handoffrepo {
     use std::future::Future;
     impl<T: crate::events::ports::HandoffRepo + ?Sized> crate::events::ports::HandoffRepo for std::sync::Arc<T> {
         async fn bot_handed_off_to(&self, bot_id: &str) -> Result<Option<String>> { <T as crate::events::ports::HandoffRepo>::bot_handed_off_to(self.as_ref(), bot_id).await }
-        async fn handoff_footprint(&self, host: &str) -> Result<Footprint> { <T as crate::events::ports::HandoffRepo>::handoff_footprint(self.as_ref(), host).await }
+        async fn handoff_footprint(&self, host: &str, session: &str, host_session: &str) -> Result<Footprint> { <T as crate::events::ports::HandoffRepo>::handoff_footprint(self.as_ref(), host, session, host_session).await }
     }
 }
 
