@@ -242,29 +242,25 @@ fn reap_in_background(mut child: std::process::Child) {
 
 /// Probe workspaces orphaned by a daemon that died mid-probe still hold a live grok process.
 pub async fn sweep_stale(app: &(impl crate::capabilities::HerdrRoutes + crate::hosts::HostsAccess + crate::shared_host::SharedHostEnv)) {
+    crate::probe_ws::init(app.data_dir());
     if let Ok(c) = probe_client().await {
-        sweep_probes(&c, None).await;
+        sweep_probes(&c).await;
     }
     sweep_stale_on_hosts(app).await;
 }
 
-/// Remote probes live in the remote session by design — see [`client_for`]. 共用 session 的主機只清帶本 daemon 標記的（#709）。
+/// Remote probes live in the remote session by design — see [`client_for`]. 只清自己登記過的（#709、#1795）。
 pub async fn sweep_stale_on_hosts(app: &(impl crate::capabilities::HerdrRoutes + crate::hosts::HostsAccess + crate::shared_host::SharedHostEnv)) {
     for host in crate::quota::pollable_hosts(app).await {
         if let Some(c) = app.herdr_for(&host).await {
-            sweep_probes(&c, crate::shared_host::probe_tag(app, &host).await.as_deref()).await;
+            sweep_probes(&c).await;
         }
     }
 }
 
-async fn sweep_probes(c: &HerdrClient, own_tag: Option<&str>) {
-    let Ok(list) = c.workspace_list().await else { return };
-    for ws in list.iter().filter(|w| w.label.as_deref().is_some_and(|l| crate::shared_host::sweepable(l, own_tag, |l| l == PROBE_LABEL))) {
-        match c.workspace_close(&ws.workspace_id).await {
-            Ok(()) => tracing::info!(workspace = %ws.workspace_id, "closed a stale grok quota probe"),
-            Err(e) => tracing::warn!(workspace = %ws.workspace_id, error = %e, "stale probe not closed"),
-        }
-    }
+/// claude／agy／grok 的探測共用同一份登記（[`crate::probe_ws`]），一次全收。
+async fn sweep_probes(c: &HerdrClient) {
+    crate::quota_claude::sweep_probes_with(c, "stale").await;
 }
 
 /// 共用 session 的主機上 label 帶本 daemon 的標記（#709）。
@@ -297,8 +293,9 @@ impl Drop for Probe {
     fn drop(&mut self) {
         let (client, ws) = (self.client.clone(), self.workspace_id.clone());
         tokio::spawn(async move {
-            if let Err(e) = client.workspace_close(&ws).await {
-                tracing::warn!(workspace = %ws, error = %e, "grok quota probe workspace not closed");
+            match client.workspace_close(&ws).await {
+                Ok(()) => crate::probe_ws::closed(client.socket_path(), &ws),
+                Err(e) => tracing::warn!(workspace = %ws, error = %e, "grok quota probe workspace not closed"),
             }
         });
     }

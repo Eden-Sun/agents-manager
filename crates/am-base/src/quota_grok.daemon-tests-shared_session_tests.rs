@@ -1,5 +1,5 @@
 
-    //! #709：同 `quota_claude` 那一條，grok 的探測。
+    //! #709：同 `quota_claude` 那一條，grok 的探測（認登記過的 workspace id）。
     use crate::runners::am_base_tests::shared_host::tests::{set_shared, shared_host, HOST};
     use serde_json::json;
 
@@ -16,14 +16,14 @@
         let sh = shared_host(&env, true).await;
         let tag = crate::shared_host::probe_tag(&app, HOST).await.unwrap();
         assert_eq!(super::probe_label(&app, HOST).await, format!("am-quota-grok@{tag}"));
-        for l in [format!("am-quota-grok@{tag}"), "am-quota-grok@other".into(), "am-quota-grok".into(), "proj".into()] {
-            sh.client.workspace_create("/tmp", &l, json!({})).await.unwrap();
+        let (ws, _) = sh.client.workspace_create("/tmp", &format!("am-quota-grok@{tag}"), json!({})).await.unwrap();
+        drop(crate::probe_ws::ProbeWorkspace::register(sh.client.socket_path(), &ws.workspace_id));
+        for l in ["am-quota-grok@other", "am-quota-grok", "proj"] {
+            sh.client.workspace_create("/tmp", l, json!({})).await.unwrap();
         }
         super::sweep_stale_on_hosts(&app).await;
-        assert_eq!(labels(&sh.client).await, ["am-quota-grok", "am-quota-grok@other", "proj"]);
+        assert_eq!(labels(&sh.client).await, ["am-quota-grok", "am-quota-grok@other", "proj"], "沒登記的不動");
 
         set_shared(&app, false).await;
         assert_eq!(super::probe_label(&app, HOST).await, "am-quota-grok");
-        super::sweep_stale_on_hosts(&app).await;
-        assert_eq!(labels(&sh.client).await, ["proj"]);
     }

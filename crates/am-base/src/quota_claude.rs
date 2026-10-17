@@ -290,19 +290,18 @@ async fn probe_client() -> Result<HerdrClient> {
 }
 
 pub async fn sweep_stale(app: &(impl crate::capabilities::HerdrRoutes + crate::hosts::HostsAccess + crate::shared_host::SharedHostEnv)) {
+    crate::probe_ws::init(app.data_dir());
     if let Ok(c) = probe_client().await {
-        sweep_probes(&c, None, "stale").await;
+        sweep_probes(&c, "stale").await;
     }
     sweep_stale_on_hosts(app).await;
 }
 
-/// 主 session 上的探測殘留（遠端主機的探測借它開）。共用 session 的主機只清帶本 daemon 標記的（#709）。
+/// 主 session 上的探測殘留（遠端主機的探測借它開）。共用 session 的主機只清自己登記過的（#709、#1795）。
 pub async fn sweep_stale_on_hosts(app: &(impl crate::capabilities::HerdrRoutes + crate::hosts::HostsAccess + crate::shared_host::SharedHostEnv)) {
     for host in crate::quota::pollable_hosts(app).await {
         if let Some(c) = app.herdr_for(&host).await {
-            let tag = crate::shared_host::probe_tag(app, &host).await;
-            sweep_probes(&c, tag.as_deref(), "stale").await;
-            sweep_probes_with(&c, tag.as_deref(), "stale", crate::quota_agy::is_probe_label).await;
+            sweep_probes(&c, "stale").await;
         }
     }
 }
@@ -318,8 +317,9 @@ struct Probe {
 impl Probe {
     async fn close(mut self) {
         self.closed = true;
-        if let Err(e) = self.client.workspace_close(&self.workspace_id).await {
-            tracing::warn!(workspace = %self.workspace_id, error = %e, "claude quota probe workspace not closed");
+        match self.client.workspace_close(&self.workspace_id).await {
+            Ok(()) => crate::probe_ws::closed(self.client.socket_path(), &self.workspace_id),
+            Err(e) => tracing::warn!(workspace = %self.workspace_id, error = %e, "claude quota probe workspace not closed"),
         }
     }
 }
@@ -331,8 +331,9 @@ impl Drop for Probe {
         }
         let (client, ws) = (self.client.clone(), self.workspace_id.clone());
         tokio::spawn(async move {
-            if let Err(e) = client.workspace_close(&ws).await {
-                tracing::warn!(workspace = %ws, error = %e, "claude quota probe workspace not closed");
+            match client.workspace_close(&ws).await {
+                Ok(()) => crate::probe_ws::closed(client.socket_path(), &ws),
+                Err(e) => tracing::warn!(workspace = %ws, error = %e, "claude quota probe workspace not closed"),
             }
         });
     }
@@ -468,18 +469,22 @@ async fn send_line(client: &HerdrClient, pane_id: &str, line: &str) -> Result<()
 
 /// 上一輪 `workspace.close` 失敗（ssh 斷一下）留下的 claude 探測 workspace：開新的之前先收，
 /// 不然要等 daemon 重啟的 [`sweep_stale`] 才收，中間每一輪都可能再多留一個（#408）。
-/// 呼叫端握著這台的 `probe_lock`，同一台同時只有一個 claude 探測在跑，所以此刻同前綴的一定是殘留。
-async fn sweep_leftovers(client: &HerdrClient, label: &str, is_label: fn(&str) -> bool) {
-    // #709：這一輪的 label 帶 `@<標記>`＝共用 session 的主機，只清同一個標記的（別顆 daemon 的探測可能正在跑）。
-    sweep_probes_with(client, label.rsplit_once('@').map(|(_, tag)| tag), "leftover", is_label).await
+/// 認殘留的依據是登記過的 `(socket, workspace id)`（[`crate::probe_ws::leftovers`]，#1795），不看 label；
+/// 還在跑的探測（含 grok 的）不算殘留，所以不會互相收掉對方正在跑的 workspace。
+async fn sweep_leftovers(client: &HerdrClient) {
+    sweep_probes_with(client, "leftover").await
 }
 
-async fn sweep_probes(client: &HerdrClient, own_tag: Option<&str>, what: &str) {
-    sweep_probes_with(client, own_tag, what, is_probe_label).await
+async fn sweep_probes(client: &HerdrClient, what: &str) {
+    sweep_probes_with(client, what).await
 }
 
-/// `is_label` 認「哪一種探測的 label」：claude 與 agy 的探測各自一個前綴、各自的鎖，不能互相把對方正在跑的 workspace 收掉。
-pub(crate) async fn sweep_probes_with(client: &HerdrClient, own_tag: Option<&str>, what: &str, is_label: fn(&str) -> bool) {
+/// 收掉這個 session 上登記過、還沒確認關掉的探測 workspace；herdr 已經沒有的就直接撤掉登記。
+pub(crate) async fn sweep_probes_with(client: &HerdrClient, what: &str) {
+    let ours = crate::probe_ws::leftovers(client.socket_path());
+    if ours.is_empty() {
+        return;
+    }
     let list = match client.workspace_list().await {
         Ok(l) => l,
         Err(e) => {
@@ -487,10 +492,17 @@ pub(crate) async fn sweep_probes_with(client: &HerdrClient, own_tag: Option<&str
             return;
         }
     };
-    for ws in list.iter().filter(|w| w.label.as_deref().is_some_and(|l| crate::shared_host::sweepable(l, own_tag, is_label))) {
-        match client.workspace_close(&ws.workspace_id).await {
-            Ok(()) => tracing::info!(workspace = %ws.workspace_id, what, "closed a claude quota probe left behind"),
-            Err(e) => tracing::warn!(workspace = %ws.workspace_id, what, error = %e, "claude probe left behind not closed"),
+    for id in ours {
+        if !list.iter().any(|w| w.workspace_id == id) {
+            crate::probe_ws::closed(client.socket_path(), &id);
+            continue;
+        }
+        match client.workspace_close(&id).await {
+            Ok(()) => {
+                crate::probe_ws::closed(client.socket_path(), &id);
+                tracing::info!(workspace = %id, what, "closed a claude quota probe left behind");
+            }
+            Err(e) => tracing::warn!(workspace = %id, what, error = %e, "claude probe left behind not closed"),
         }
     }
 }
@@ -543,11 +555,11 @@ pub async fn run_marked_pane<T>(
     cmd: &str,
     timeout: Duration,
     begin: &str,
-    is_label: fn(&str) -> bool,
+    _is_label: fn(&str) -> bool,
     done: impl Fn(&str) -> Option<T>,
     early: impl Fn(&str) -> bool,
 ) -> Result<MarkedRun<T>> {
-    sweep_leftovers(client, label, is_label).await;
+    sweep_leftovers(client).await;
     let (ws, pane) = client.workspace_create(cwd, label, env_json).await?;
     let probe = Probe {
         client: client.clone(),
