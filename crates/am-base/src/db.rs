@@ -1786,8 +1786,10 @@ pub async fn agent_name_for_bot(pool: &SqlitePool, bot: &Bot) -> Result<String> 
     Ok(crate::config::agent_name(label.as_deref().unwrap_or(""), &bot.id))
 }
 
-pub fn run_target(run: &Run, bot: &Bot) -> String {
-    run.agent_name.clone().filter(|s| !s.is_empty()).unwrap_or_else(|| bot.name.clone())
+/// An existing run is addressed only inside its captured host/herdr session, by pane ID.
+/// Empty means the address is unknown; callers must not send an RPC or fall back to a name.
+pub fn run_target(run: &Run, _bot: &Bot) -> String {
+    run.pane_id.as_deref().map(str::trim).unwrap_or_default().to_string()
 }
 
 /// Keeps the Stop hook from re-adding a prompt already scraped off the pane's echo.

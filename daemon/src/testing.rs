@@ -758,7 +758,9 @@ impl MockHerdr {
                                 st.agents
                                     .lock()
                                     .unwrap()
-                                    .retain(|a| a.get("name").and_then(Value::as_str) != Some(target.as_str()));
+                                    .retain(|a| a.get("ignore_ctrl_c").and_then(Value::as_bool) == Some(true)
+                                        || (a.get("name").and_then(Value::as_str) != Some(target.as_str())
+                                            && a.get("pane_id").and_then(Value::as_str) != Some(target.as_str())));
                             }
                             json!({"id": id, "result": {}})
                         }
@@ -817,7 +819,8 @@ impl MockHerdr {
                                 .lock()
                                 .unwrap()
                                 .iter()
-                                .find(|a| a.get("name").and_then(Value::as_str) == Some(target.as_str()))
+                                .find(|a| a.get("name").and_then(Value::as_str) == Some(target.as_str())
+                                    || (!is_stale(a) && a.get("pane_id").and_then(Value::as_str) == Some(target.as_str())))
                                 .cloned()
                             {
                                 Some(agent) => json!({"id": id, "result": {"agent": agent}}),

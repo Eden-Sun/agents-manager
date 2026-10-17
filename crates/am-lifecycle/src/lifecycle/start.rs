@@ -1607,12 +1607,12 @@ async fn start_inner_body(
 
     // 7. wait for readiness
     let until = [AgentStatus::Idle, AgentStatus::Done, AgentStatus::Blocked];
-    let status = match client.agent_wait_ready(&bot.kind, &agent, &until, 60_000).await {
+    let status = match client.agent_wait_ready(&bot.kind, &pane_id, &until, 60_000).await {
         Ok(info) => info.agent_status.normalized(),
         Err(e) => {
             tracing::warn!(bot = %bot.name, error = %e, "agent.wait did not settle");
             // Do NOT close the pane on timeout (SPEC §6.2.7).
-            match client.agent_get(&agent).await {
+            match client.agent_get(&pane_id).await {
                 Ok(Some(info)) => info.agent_status.normalized(),
                 _ => {
                     close_pane_and_tab(&client, Some(&workspace_id), Some(&tab_id), &pane_id).await;
@@ -1988,6 +1988,7 @@ pub async fn restart_child_in_pane_with(app: &impl StartContext, bot_id: &str, r
     };
     let host = db::bot_host(app.db(), bot_id).await.map_err(up)?;
     let client = client_for_run(app, &run).await?;
+    let target = super::dead_panes::execution_target(&client, &run, &bot).await?;
     let agent = run.agent_name.clone().unwrap_or_else(|| bot.name.clone());
 
     // A concurrent reconcile can observe the gap after the old agent exits but before agent.start
@@ -2032,7 +2033,6 @@ pub async fn restart_child_in_pane_with(app: &impl StartContext, bot_id: &str, r
         return Err(super::turn_unwritable(app, bot_id, &run.id, "重啟", e).await);
     }
 
-    let target = db::run_target(&run, &bot);
     for _ in 0..2 {
         let _ = client.agent_send_keys(&target, &["ctrl+c".to_string()]).await;
         tokio::time::sleep(Duration::from_millis(500)).await;
@@ -2208,7 +2208,7 @@ pub async fn restart_child_in_pane_with(app: &impl StartContext, bot_id: &str, r
         tracing::warn!(bot = bot_id, error = %e, "child restart succeeded but its hand-off grace could not be cleared");
     }
     let until = [AgentStatus::Idle, AgentStatus::Done, AgentStatus::Blocked];
-    match client.agent_wait_ready(&bot.kind, &agent, &until, 60_000).await {
+    match client.agent_wait_ready(&bot.kind, &pane_id, &until, 60_000).await {
         // 新 run 以 `unknown` 起頭、`running` 時沒帶狀態；閒著的 codex（herdr 0.9.2+）不會再有狀態事件，
         // 不把 ready 的結果記下來就一直停在 `unknown`。只補還是 `unknown` 的，不蓋掉期間來的事件。
         Ok(info) => {
@@ -4098,10 +4098,9 @@ mod child_restart_tests {
         .execute(app.db())
         .await
         .unwrap();
-        // The mock drops an agent on ctrl+c only by name; `name: null` (herdr 0.8.2 after a same-named
-        // restart) stays put — a stand-in for one ignoring ctrl+c.
+        // Explicitly model an agent ignoring ctrl+c, independently of its display name.
         *env.herdr.agents.lock().unwrap() = vec![json!({
-            "name": null, "agent": "claude", "agent_status": "idle",
+            "name": null, "agent": "claude", "agent_status": "idle", "ignore_ctrl_c": true,
             "workspace_id": ws.workspace_id, "tab_id": kid_pane.tab_id, "pane_id": kid_pane.pane_id,
             "cwd": "/tmp/p"})];
 

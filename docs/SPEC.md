@@ -15,7 +15,7 @@ agent 一律由 **herdr**（terminal workspace manager，socket API protocol 20�
 |---|---|---|---|
 | **Project** | 以目錄為單位的分組，canonical path 唯一 | `project_id`（`[A-Za-z0-9_-]{1,64}`，缺省產生 ULID） | 一個 `workspace`（記 `workspace_id`；對帳發現不存在就設 NULL，下次啟動 bot 時重建） |
 | **Bot** | agent 設定：暱稱 `name`、kind、`model`、`effort`、args…，屬於一個 Project | `bot_id`（同上規則，永久） | — |
-| **Run** | Bot 的一次執行。**每個 Bot 最多一個 active Run（DB 部分唯一索引）**。含 `agent_name`、`native_session_id`、`transcript_path`（hook 回填） | `run_id`（ULID） | `pane_id` + herdr agent name = `agent_name(project.label, bot.id)` = `<label slug>-<id 尾 6 碼>`（與暱稱無關） |
+| **Run** | Bot 的一次執行。**每個 Bot 最多一個 active Run（DB 部分唯一索引）**。含 `agent_name`、`native_session_id`、`transcript_path`（hook 回填） | `run_id`（ULID） | `pane_id` ＋ host ＋ herdr session；`native_session_id` 驗證 pane 是否換人，`agent_name` 只供顯示 |
 | **Conversation** | 與 Bot 1:1，跨 Run 延續，不拆分 | `conversation_id` | — |
 | **Turn** | 一次「prompt → 回覆完成」。**每個 active Run 最多一筆 in-flight** | `turn_id` | Claude `prompt_id` / Codex `turn-id` |
 | **Message** | `role ∈ {user, assistant, system}` | `message_id` | — |
@@ -2020,9 +2020,10 @@ agent 自己 `herdr agent prompt <名字> …` 時 daemon 沒參與，那句話�
    watcher 由 daemon 的 `TaskTracker` 管理；shutdown 會等目前的 pane RPC／DB 更新完成，再停止後續輪詢。未完成的 relay external turn 保留在 DB，daemon 啟動或該 host 重連且完成 reconcile 後，依回合與使用者訊息重建 watcher。
    **死 pane 的 run**（`lifecycle::dead_panes`，隨 60 秒的 stuck-turn sweeper 跑）：herdr 明確回 `pane_not_found` 的 running run 收成 exited。
    pane id 還在、但這顆 run 的 agent 已經不在、而且這個 id 上是別的 agent（herdr 重用 id）也收成 exited；RPC 失敗不是證據。
-   **沒有名字的 agent 不算別的 agent**（#878）：herdr 的 `agent start` 等不到 agent 準備好（約 30 秒）會把名字從 pane 上拿掉，pane 與 CLI 照跑；
-   用名字查不到、改用 pane id 查到一顆沒有名字的 agent 時，只有兩邊的 session id 都知道且對不上才算被別人佔走，否則這顆 run 照活（以前 29 秒就收成 `pane gone`，遠端 child 因此被誤殺）。
-   打字（`send_text` 與 prompt 的 type 路徑）在這兩種情況，以及自己的 agent 已經換到別的 pane 時，不把字送進舊 id。
+   **名稱不作執行身分（issue #1792）**：prompt、按鍵、停止與重啟的既有 run 只用該 run 的 host／herdr session client 與 pane_id，沒有 pane_id 就不送，不回退 bot／agent 名稱。
+   pane 上的 native session 與 runs.native_session_id 都知道且不同，才證明地址已換人；缺少 session 證據維持未知，名字改掉、清掉或舊名被其他 pane 使用都不算回收。
+   原 native session 仍在同一 herdr session 的另一 pane 時只拒絕舊地址的操作，不將 run 收成 exited；無法讀 agent list 時也不判定已退出。
+   直接 prompt 的建回合 CAS 比對 run_id、bot_id、running、pane_id、herdr_session 與 native_session_id，不比較可改的 agent_name；plan 與送出前都驗證 native session。
    herdr 計畫中的維護期間不動（§6.5.2）；補上對帳只在開機／重連／事件時才跑、pane-exit 事件漏了就一直畫成活的那個洞。盯梢的時間由呼叫端傳入、pane 走 herdr client，測試不睡覺。
 6. **`POST /api/bots/{id}/prompt` 與 mission 的 `relay_from` 是來源標記，不是 principal**（issue #339、#409、#556，`relay_auth.rs`）：User 沿用共用 UI token；User 未帶 Bot 身分 header 且 prompt `relay_from` 指活 bot 時，一律 403 `relay_from_token_required`（#339 相容期已在 #410 結束；歷史訊息的 `relay_unverified = 1` 保留，UI 照舊標「未驗證」）。Bot principal 必須帶成對 `X-AM-Bot-Id`＋`X-AM-Bot-Token`，後者驗該 bot 現行的 `hook_token`（pane 的 `AM_BOT_TOKEN`；hook 開關另控制 `AM_HOOK_TOKEN`）。`X-AM-Bot-Id` 或 token header 一旦出現就選了 Bot principal；欄位缺少、值錯、或混帶 UI/service 身分都拒絕，不得降為 User。Bot 省略或留空 `relay_from` 時由 daemon 以驗證過的 id 標記；明確自稱別顆 bot 回 403 `relay_from_mismatch`。
    User 請求帶 `X-AM-Bot-Id`／`X-AM-Bot-Token` 卻無有效 Bot principal 時，在 auth 中介層先回 401，不進相容分支。未帶 Bot 身分 header 且有有效 `X-AM-Token` 的請求是 User；這保留使用者裁示接受的共用 UI token／`allow_lan` 風險，並不提供額外的人類證明。Bot 憑證沿用 hook token，User 用 credential rotation 立即失效；活 bot 重啟取得新值，停止 bot 下次啟動取得。

@@ -484,6 +484,12 @@ pub async fn plan_delivery(
     waited_for_log: bool,
 ) -> anyhow::Result<Result<Plan, Delivered>> {
     let target = db::run_target(run, bot);
+    if target.is_empty() {
+        return Ok(Err(Delivered::NotAttempted { reason: "no_pane_to_type_into", retry: true }));
+    }
+    if super::dead_panes::pane_target_stale(client, run).await {
+        return Ok(Err(Delivered::NotAttempted { reason: "pane_reused", retry: false }));
+    }
     let marked = crate::lifecycle::pane_typed_memo(&run.id)
         || match db::pane_typed(app.db(), &run.id).await {
             Ok(v) => v,
@@ -653,14 +659,13 @@ pub async fn prepare_delivery(
     text: &str,
     plan: Plan,
 ) -> Result<Ready, Delivered> {
+    if super::dead_panes::pane_target_stale(client, run).await {
+        return Err(Delivered::NotAttempted { reason: "pane_reused", retry: false });
+    }
     let (pane, proof, submit) = match plan {
         Plan::AgentPrompt { target } => return Ok(Ready::AgentPrompt { target }),
         Plan::Type { pane, proof, submit } => (pane, proof, submit),
     };
-    if super::dead_panes::pane_target_stale(client, run).await {
-        tracing::warn!(run = %run.id, pane, "refusing to type into a pane id herdr reused");
-        return Err(Delivered::NotAttempted { reason: "pane_reused", retry: false });
-    }
     // Persist "this pane gets typed into" before the first keystroke (sol review round three #2).
     crate::lifecycle::remember_pane_typed(&run.id);
     // 寫不進去時一個字都還沒打：跟其他「打第一個字之前」的失敗一樣是可重試的 NotAttempted。以前回 `Err`，
