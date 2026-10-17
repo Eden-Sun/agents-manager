@@ -96,8 +96,12 @@ function RemoteImage({ src, alt }: { src: string; alt?: string }) {
 export function MarkdownImage({ botId, src, alt }: { botId: string | null | undefined; src?: string; alt?: string }) {
   const raw = typeof src === 'string' ? src : ''
   const local = raw !== '' && !isRemote(raw)
-  const [url, setUrl] = useState<string | null>(null)
-  const [failed, setFailed] = useState(false)
+  // 結果綁定來源（botId＋raw）：換了來源，上一張的 URL 或失敗狀態不沿用，要等新來源自己的結果（#1801）。
+  const scope = `${botId ?? ''}\n${raw}`
+  const [result, setResult] = useState<{ scope: string; url?: string; failed?: boolean }>({ scope: '' })
+  const current = result.scope === scope ? result : null
+  const url = current?.url ?? null
+  const failed = current?.failed ?? false
 
   useEffect(() => {
     if (!local || !botId) return
@@ -107,21 +111,22 @@ export function MarkdownImage({ botId, src, alt }: { botId: string | null | unde
       .localImageUrl(botId, raw)
       .then((u) => {
         made = u
-        if (alive) setUrl(u)
+        if (alive) setResult({ scope, url: u })
         else URL.revokeObjectURL(u)
       })
       .catch(() => {
-        if (alive) setFailed(true)
+        if (alive) setResult({ scope, failed: true })
       })
     return () => {
       alive = false
       if (made) URL.revokeObjectURL(made)
     }
-  }, [local, botId, raw])
+  }, [local, botId, raw, scope])
 
   if (!raw) return null
   if (!local) {
-    if (isRemoteHttpImage(raw)) return <RemoteImage src={raw} alt={alt} />
+    // key＝src：換了網址就整個重來，上一張的授權結果與 blob 不沿用，新網址要重新手動按「載入圖片」。
+    if (isRemoteHttpImage(raw)) return <RemoteImage key={raw} src={raw} alt={alt} />
     return <img className="md-image" src={raw} alt={alt || imageName(raw)} loading="lazy" />
   }
   if (failed || !botId) {
