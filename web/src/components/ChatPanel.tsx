@@ -18,6 +18,7 @@ import { useTapCopy } from '../hooks/useTapCopy'
 import { cleanLiveActivity, cleanLiveText } from '../store/liveText'
 import { typeAlongside } from '../store/alongside'
 import { sendNowButton } from '../store/sendNowCopy'
+import { trackDraftEdits } from '../store/draftEdits'
 import { SentViaTag } from './SentViaTag'
 import { startingSend, startingSendLabel } from '../store/startingSend'
 import { ATTACHMENT_FAILED_NOTICE, composerPlaceholder, sendButtonLabel, sendButtonTitle } from '../lib/composerLabels'
@@ -812,11 +813,13 @@ function Composer({
     }
     setSending(true)
     const sent = files.ids
+    const edits = trackDraftEdits(draftKey)
     // Enter always opts into daemon queueing; idle bots still follow the ordinary immediate-send path.
     void sendPrompt(botId, body, sent, false, Boolean(state.autoStart), undefined, true).then((ok) => {
       setSending(false)
+      edits.stop()
       if (ok) {
-        setText('')
+        if (edits.untouched()) setText('')
         files.clearSent(sent)
       }
     })
@@ -841,10 +844,12 @@ function Composer({
       return
     }
     setSending(true)
+    const edits = trackDraftEdits(draftKey)
     const ok = await sendPrompt(botId, body, ids, true)
     setSending(false)
+    edits.stop()
     if (ok) {
-      setText('')
+      if (edits.untouched()) setText('')
       files.clearSent(ids)
     }
   }
@@ -855,10 +860,12 @@ function Composer({
     if (!body) return
     setSending(true)
     // 整段走 `POST /bots/:id/text`、Enter 另送（見 store/alongside.ts）；拆鍵名會把 `\n` 當鍵弄丟內容。
+    const edits = trackDraftEdits(draftKey)
     const ok = await typeAlongside({ sendText }, botId, body)
     setSending(false)
+    edits.stop()
     // 併送帶不了附件：附件列留著。
-    if (ok) setText('')
+    if (ok && edits.untouched()) setText('')
   }
 
   const withdrawQueuedIdleSend = async () => {

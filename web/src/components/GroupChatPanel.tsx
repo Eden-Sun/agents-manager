@@ -6,6 +6,7 @@ import { applyRecipients, hasAllMention, nextMentionSnapshot, resolveTargetsById
 import type { Bot, GroupMessage } from '../api/types'
 import { useScrollTail } from '../hooks/useScrollTail'
 import { attachCommandOf, composerState, groupComposerState, projectHostName, useStore } from '../store/store'
+import { trackDraftEdits } from '../store/draftEdits'
 import { ATTACHMENT_FAILED_NOTICE } from '../lib/composerLabels'
 import { useBotLamp } from '../hooks/useBotLamp'
 import { useEnterToSend } from '../hooks/useEnterToSend'
@@ -365,10 +366,12 @@ function GroupComposer({
     }
     setSending(true)
     const sent = files.ids
+    const edits = trackDraftEdits(draftKey)
     void sendGroupChat(projectId, body, sent, targets.map((t) => t.id)).then((res) => {
       setSending(false)
+      edits.stop()
       if (res) {
-        setText('')
+        if (edits.untouched()) setText('')
         files.clearSent(sent)
       }
     })
