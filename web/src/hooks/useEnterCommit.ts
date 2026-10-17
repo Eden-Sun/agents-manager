@@ -15,6 +15,8 @@ export function useEnterCommit(ref: RefObject<HTMLInputElement | null>, commit: 
     const el = ref.current
     if (!el) return
     const onBeforeInput = (ev: InputEvent) => {
+      // 組字中的換行是 IME 的選字確認，不是送出；不 preventDefault，讓組字自己收尾。
+      if (ev.isComposing) return
       const linebreak =
         ev.inputType === 'insertLineBreak' ||
         ev.inputType === 'insertParagraph' ||
