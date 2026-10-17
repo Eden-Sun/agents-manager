@@ -1240,6 +1240,8 @@ export const useStore = create<StoreState>((set, get) => {
         }
       })
     } catch (e) {
+      // 已經有更新的整頁請求開始（或已經成功）：這一次的失敗不算數，不跳通知（#1802 review）。
+      if (generation !== messagePageGeneration('group', projectId)) return
       get().notify('error', `載入群組訊息失敗：${errText(e)}`)
     }
   },
@@ -1453,6 +1455,8 @@ export const useStore = create<StoreState>((set, get) => {
       })
       get().recountBot(botId)
     } catch (e) {
+      // 已經有更新的整頁請求開始（或已經成功）：這一次的失敗不算數，不設旗標、不跳通知（#1802 review）。
+      if (generation !== messagePageGeneration('bot', botId)) return
       // 已經載入過的對話重載失敗不換畫面，照舊只跳通知（#1240）。
       if (!get().loadedBots[botId]) set((s) => ({ messageLoadFailed: { ...s.messageLoadFailed, [botId]: true } }))
       get().notify('error', `載入訊息失敗：${errText(e)}`)
