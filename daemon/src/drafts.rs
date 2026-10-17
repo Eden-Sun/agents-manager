@@ -162,12 +162,23 @@ pub async fn clear_keys(app: &(impl crate::capabilities::Db + crate::capabilitie
 mod tests {
     use super::*;
 
+    /// 草稿的目標要真的存在（#1806）：活著的專案 `p1`，底下的 bot `b1`、`b2`、`keep`。
     async fn app() -> Arc<App> {
         let dir = crate::testing::scratch_dir("agm-drafts");
         let db = crate::app_ports_p1::open(&dir.join("test.sqlite")).await.unwrap();
         let cfg = crate::runners::app_ports_p2::load_config(dir.join("config.toml")).await.unwrap();
         let client = crate::herdr::HerdrClient::new(dir.join("absent.sock"));
-        App::new(db, client.clone(), client, cfg, dir.clone(), dir.join("daemon"), 7799, "test".into(), "test".into(), false)
+        let app = App::new(db, client.clone(), client, cfg, dir.clone(), dir.join("daemon"), 7799, "test".into(), "test".into(), false);
+        sqlx::query("INSERT INTO projects (id, path, label, created_at) VALUES ('p1', '/p1', 'p1', 't')").execute(&app.db).await.unwrap();
+        for id in ["b1", "b2", "keep"] {
+            sqlx::query("INSERT INTO bots (id, project_id, name, kind, hook_token, created_at) VALUES (?, 'p1', ?, 'claude', 'tok', 't')")
+                .bind(id)
+                .bind(id)
+                .execute(&app.db)
+                .await
+                .unwrap();
+        }
+        app
     }
 
     fn put_in(text: &str, client: &str) -> Json<PutIn> {
@@ -373,5 +384,52 @@ mod tests {
         // 復原後 key 再出現：rev 接著加，不從 1 重來。
         let r = put_http(State(app.clone()), Path("bot:b1".into()), put_in("back", "c")).await.unwrap().0;
         assert_eq!(r["rev"], 3);
+    }
+
+    /// #1806：bot 刪了、草稿清成墓碑之後，另一個分頁晚到的非空 PUT 不能把草稿寫回去（不復活、不推事件）。
+    #[tokio::test]
+    async fn a_late_put_after_the_bot_is_deleted_does_not_resurrect_its_draft() {
+        let app = app().await;
+        let _ = put_http(State(app.clone()), Path("bot:b1".into()), put_in("abc", "c")).await.unwrap();
+        sqlx::query("UPDATE bots SET deleted_at = 't' WHERE id = 'b1'").execute(&app.db).await.unwrap();
+        clear_keys(&app, &["bot:b1".into()]).await;
+        let mut rx = app.subscribe();
+        let err = put_http(State(app.clone()), Path("bot:b1".into()), put_in("late old draft", "c")).await.unwrap_err();
+        assert!(format!("{err:?}").contains("draft_target_gone"), "{err:?}");
+        assert!(list(&app.db).await.unwrap().is_empty(), "the late write must not come back");
+        assert!(rx.try_recv().is_err(), "a rejected write announces nothing");
+        let tomb = get(&app.db, "bot:b1").await.unwrap().unwrap();
+        assert_eq!((tomb.text.as_str(), tomb.rev), ("", 2), "墓碑與 rev 不動");
+        // 清除本身照舊冪等：再清一次不寫、不推。
+        let r = put_http(State(app.clone()), Path("bot:b1".into()), put_in("", "c")).await.unwrap().0;
+        assert_eq!(r["rev"], 2);
+    }
+
+    /// #1806：專案刪了，底下的 bot 草稿與群組草稿都不能被晚到的 PUT 復活。
+    #[tokio::test]
+    async fn a_late_put_after_the_project_is_deleted_does_not_resurrect_group_or_bot_drafts() {
+        let app = app().await;
+        let _ = put_http(State(app.clone()), Path("group:p1".into()), put_in("g", "c")).await.unwrap();
+        let _ = put_http(State(app.clone()), Path("bot:b1".into()), put_in("x", "c")).await.unwrap();
+        sqlx::query("UPDATE projects SET deleted_at = 't' WHERE id = 'p1'").execute(&app.db).await.unwrap();
+        clear_keys(&app, &["group:p1".into(), "bot:b1".into()]).await;
+        for key in ["group:p1", "bot:b1"] {
+            let err = put_http(State(app.clone()), Path(key.into()), put_in("late", "c")).await.unwrap_err();
+            assert!(format!("{err:?}").contains("draft_target_gone"), "{key}: {err:?}");
+        }
+        assert!(list(&app.db).await.unwrap().is_empty());
+    }
+
+    /// #1806：bot 從垃圾桶復原後，草稿照常寫入，rev 接著加（墓碑沒有被整列刪掉）。
+    #[tokio::test]
+    async fn a_restored_bot_takes_new_drafts_with_rev_continuing() {
+        let app = app().await;
+        let _ = put_http(State(app.clone()), Path("bot:b1".into()), put_in("abc", "c")).await.unwrap();
+        sqlx::query("UPDATE bots SET deleted_at = 't' WHERE id = 'b1'").execute(&app.db).await.unwrap();
+        clear_keys(&app, &["bot:b1".into()]).await;
+        sqlx::query("UPDATE bots SET deleted_at = NULL WHERE id = 'b1'").execute(&app.db).await.unwrap();
+        let r = put_http(State(app.clone()), Path("bot:b1".into()), put_in("back", "c")).await.unwrap().0;
+        assert_eq!((r["rev"].as_i64(), r["key"].as_str()), (Some(3), Some("bot:b1")));
+        assert_eq!(list(&app.db).await.unwrap()[0].text, "back");
     }
 }
