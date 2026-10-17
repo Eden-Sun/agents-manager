@@ -1473,7 +1473,7 @@ stall watchdog 的自動補送走同一條驗證路徑，次數記在 `turns.res
 1. `INSERT runs (state='starting')`；違反 active Run 唯一索引 → 409 附既有 `run_id`。
 2. workspace：`projects.workspace_id` 存在且 `workspace.get` 成功就用，否則 `workspace.create {cwd, label, focus:false}` 並更新映射。
 3. 先做不需要 pane 的準備（hook 注入檔、CLI 參數；遠端可能 ssh 上傳）與執行檔 preflight。失敗 → Run `exited`，**不建 tab／pane**。
-4. 取得 pane：workspace 剛建立 → 用 `root_pane`；否則 `tab.create {workspace_id, cwd, label: tab_label(bot), focus:false, env}` 取 `root_pane`。
+4. 取得 pane：workspace 剛建立 → 用 `root_pane`；否則 `tab.create {workspace_id, cwd, label: tab_label(bot), focus:false, env}` 取 `root_pane`。bot 改名（`PATCH /api/bots/{id}` 帶 `name`）時，在跑的 run 的分頁跟著 `tab.rename` 成新名（背景做、失敗只記 log；子 agent 跟 parent 同分頁，不動），herdr 的分頁選單才不會只剩舊名（2026-10-17：分身 `衣服-fork` 改名後被當成 pane 不見）。
    **一個 bot 一個 tab**，不 `pane.split`——共用 tab 會把 pane 越切越窄，窄到 TUI 一列一個字時備援完全讀不出東西（§4.3）。
    `env`：`AM_BOT_ID`、`AM_RUN_ID`（診斷）、`AM_PORT`、`AM_BOT_TOKEN`（一律注入，作為每 bot 的 API 身分；目前重用 `bots.hook_token`）、`AM_HOOK_TOKEN`（只在 `inject_hooks=true` 時給 hook）、`CLAUDE_CODE_CHILD_SESSION=""`、`CLAUDECODE=""`。User 透過 `POST /api/bots/{id}/credential/rotate` 立即輪替：執行中的 bot 先把 credential-rotation restart intent 與新 token 放進同一 SQLite transaction；交易失敗舊值仍有效，提交後舊值立即失效並由 restart intent 替換仍在跑、握著舊 token 的 pane。daemon 在提交後當機會於下次 recovery 冪等補完；如果原 run 已經停止或退出，recovery 只收尾 intent，不會把 bot 拉起來，之後由下次啟動取得新值。
    失敗 → Run `exited`、回 502。

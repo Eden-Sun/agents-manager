@@ -583,6 +583,11 @@ impl HerdrClient {
         self.call_as("tab.list", json!({"workspace_id": workspace_id}), "tabs").await
     }
 
+    pub async fn tab_rename(&self, tab_id: &str, label: &str) -> Result<()> {
+        self.call("tab.rename", json!({"tab_id": tab_id, "label": label})).await?;
+        Ok(())
+    }
+
     /// `Ok(false)` = already gone (herdr reaps a tab when its last pane closes); not a failure.
     pub async fn tab_close(&self, tab_id: &str) -> Result<bool> {
         match self.call("tab.close", json!({"tab_id": tab_id})).await {

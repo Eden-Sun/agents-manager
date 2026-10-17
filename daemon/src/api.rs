@@ -2779,6 +2779,23 @@ async fn patch_unprojected_bot(app: &Arc<App>, id: &str, b: &PatchBot, effort: &
     Ok(())
 }
 
+/// 改名後 herdr 的分頁標籤跟著換（2026-10-17 使用者：分身 `衣服-fork` 改名 `衣服-PM` 後，herdr 選單只看得到舊名，以為 pane 不見了）。
+/// 分頁標籤是開 run 時寫的 [`tab_label`](crate::lifecycle::start::tab_label)。子 agent 跟 parent 同一個分頁，不動。失敗只記 log。
+async fn relabel_tab(app: &App, bot_id: &str) {
+    let Ok(Some(bot)) = db::bot(&app.db, bot_id).await else { return };
+    if bot.parent_bot_id.is_some() {
+        return;
+    }
+    let Ok(Some(run)) = db::active_run(&app.db, bot_id).await else { return };
+    let Some(tab_id) = run.tab_id.clone() else { return };
+    let Some(client) = app.herdr_for_run(&run).await else { return };
+    let label = crate::lifecycle::start::tab_label(&bot);
+    match client.tab_rename(&tab_id, &label).await {
+        Ok(()) => tracing::info!(bot = %bot.name, tab_id, "herdr tab relabelled after rename"),
+        Err(e) => tracing::warn!(bot = %bot.name, tab_id, error = %e, "could not relabel the herdr tab after rename"),
+    }
+}
+
 async fn patch_bot(
     State(app): State<Arc<App>>,
     Path(id): Path<String>,
@@ -2953,6 +2970,11 @@ async fn patch_bot(
     .map_err(|e| if e.to_string() == "no-bot" { LcError::NotFound("bot".into()) } else { projection_err(e) })?;
     }
     app.emit("bot_changed", json!({"bot_id": id})).await;
+    if b.name.is_some() {
+        // 遠端主機要經 ssh，不讓改名的回應等它。
+        let (app, id) = (app.clone(), id.clone());
+        tokio::spawn(async move { relabel_tab(&app, &id).await });
+    }
     // 只動可用 slash 指令當場套用的欄位就不用重啟；grok `/model <id> <effort>` 可順帶 effort。
     let extras = |skip: &[&str]| {
         let hit = |name: &str, present: bool| present && !skip.contains(&name);
