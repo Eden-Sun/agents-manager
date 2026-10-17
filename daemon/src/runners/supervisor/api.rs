@@ -832,6 +832,8 @@ pub async fn get_persona(State(app): State<Arc<App>>) -> Result<Json<Value>, LcE
     let sup = store::get_or_init(&app.db).await.map_err(up)?;
     let embedded = setup::persona_body();
     let embedded_hash = super::persona::hash(&embedded);
+    // A row without a stored hash is judged by the text it actually holds.
+    let stored_hash = sup.persona_hash.clone().unwrap_or_else(|| super::persona::hash(&text));
     let run_started = match sup.bot_id.as_deref() {
         Some(id) => crate::db::active_run(&app.db, id).await.map_err(up)?.map(|r| r.started_at),
         None => None,
@@ -858,7 +860,7 @@ pub async fn get_persona(State(app): State<Arc<App>>) -> Result<Json<Value>, LcE
         },
         // The embedded text moved on. Reported, never applied on its own — that is
         // `POST /api/supervisor/persona/adopt-embedded`.
-        "upgrade_available": sup.persona_seed_hash.as_deref().is_some_and(|h| h != embedded_hash),
+        "upgrade_available": super::persona::upgrade_available(&stored_hash, sup.persona_seed_hash.as_deref(), &embedded_hash),
         "needs_restart": loaded.needs_restart(),
     })))
 }

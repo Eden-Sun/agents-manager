@@ -2672,7 +2672,7 @@ CLI：`agents-managerd release-triage-check --kind <claude|codex> [--since <ver>
 
 ### 人設
 - `GET /api/supervisor/persona` → `{stored:{version,hash,source,updated_at,seeded_from,length,text},embedded:{hash,length},loaded:{status,run_started_at,evidence},upgrade_available,needs_restart}`。
-  持久版是權威（SPEC §18.11）。`loaded.status`：`unknown`（沒在跑）、`stale`（session 比人設舊，確定沒載到）、`unverified`（帶著這份啟動，但看不到 session 現在握著什麼）；`needs_restart` 只在 `stale` 時 true。
+  持久版是權威（SPEC §18.11）。`upgrade_available` 只在「內嵌版已不同於 `seeded_from`、**而且**持久版的 hash 還不等於內嵌版」時為 true；持久版已經是內嵌版（例如手動套用過同一段文字，只是 seed 還是舊的）回 false。持久版缺 hash 的舊資料，改以實際文字算 hash 比對。只回報，不套用；套用要明確呼叫 `adopt-embedded`。`loaded.status`：`unknown`（沒在跑）、`stale`（session 比人設舊，確定沒載到）、`unverified`（帶著這份啟動，但看不到 session 現在握著什麼）；`needs_restart` 只在 `stale` 時 true。
 - `PUT /api/supervisor/persona {text,expected_version?}` → 同上。正文改變才版本 +1，並改寫 config.toml 的 bot persona 與 `persona.md`（副本，不要手改）。
   **身分（issue #462、#556）**：User principal 照收（網頁使用共用 UI token）；有效 Bot principal 且是角色 bot → 照收；有效 Bot principal、**那顆不是角色 bot** → 403 `role_required`；Bot／service 身分標頭不完整、憑證錯誤或混帶其他 principal → 全域中介層 401，不退回 User。
   改動成功一律留痕：`daemon.log` 記一行，並推一則 inbox `persona_changed` 給巡檢（payload `{actor,verified,how,version,old_hash,new_hash,old_bytes,new_bytes,old_lines,new_lines}`，

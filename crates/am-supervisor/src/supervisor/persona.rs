@@ -31,6 +31,13 @@ pub fn hash(text: &str) -> String {
     format!("fnv1a64:{h:016x}")
 }
 
+/// Whether the embedded text has moved on past both the seed and the stored copy. The stored
+/// copy already holding the embedded text is not an upgrade, even when the seed is old. Used by
+/// both the supervisor and the responder, so the rule lives here once.
+pub fn upgrade_available(stored_hash: &str, seed_hash: Option<&str>, embedded_hash: &str) -> bool {
+    seed_hash.is_some_and(|s| s != embedded_hash) && stored_hash != embedded_hash
+}
+
 /// Files that are compiled **into** the daemon binary.
 ///
 /// The update script used to diff `daemon web Cargo.toml Cargo.lock` and call everything else
@@ -144,6 +151,28 @@ mod tests {
         assert!(Loaded::Stale.needs_restart());
         assert!(!Loaded::StartedWithCurrent.needs_restart(), "started with it ≠ must restart");
         assert!(!Loaded::NotRunning.needs_restart());
+    }
+
+    #[test]
+    fn no_upgrade_is_offered_once_the_stored_copy_already_holds_the_embedded_text() {
+        let old = hash("舊內嵌版");
+        let new = hash("新內嵌版");
+        assert!(!upgrade_available(&new, Some(&old), &new), "stored == embedded: nothing to upgrade");
+        assert!(!upgrade_available(&new, Some(&new), &new));
+    }
+
+    #[test]
+    fn an_upgrade_is_offered_when_the_embedded_text_moved_past_the_seed_and_the_stored_copy() {
+        let old = hash("舊內嵌版");
+        let new = hash("新內嵌版");
+        assert!(upgrade_available(&old, Some(&old), &new));
+    }
+
+    #[test]
+    fn no_upgrade_without_a_seed_or_when_the_seed_is_already_current() {
+        let new = hash("新內嵌版");
+        assert!(!upgrade_available(&hash("手動改過"), None, &new));
+        assert!(!upgrade_available(&hash("手動改過"), Some(&new), &new));
     }
 
     /// The build-input list has to keep up with the code, not with somebody remembering to edit
