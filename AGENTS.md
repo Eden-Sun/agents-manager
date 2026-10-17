@@ -36,19 +36,11 @@
 - **新增／修改資料表、欄位、索引、trigger（含各子模組的 `migrate`）＝升 `SCHEMA_VERSION`**：在 `crates/am-base/src/db.rs` 的 `SCHEMA_HISTORY` 最後加一行 `(N+1, "<指紋>")`（指紋照 `schema_guard` 測試失敗訊息給的值），不准改既有那幾行。沒升版＝pin 測試紅，而且舊 binary 會照開一個它不懂的 schema。已合流的別人的 schema 變更沒升版時，以主幹現況重算、併進同一版，不要只顧自己那一行。
 
 ## 驗證（收尾前必跑）
-- **瀏覽器簡稱（使用者 2026-10-14）**：對話與派工中的 `ab` 一律指 `agent-browser`；實際 CLI 指令仍用 `agent-browser`，沿用自己的 `--session <agent 名>`，做完 `close`。
-- Claude 端另有 project skill `verify`（`.claude/skills/verify/`，issue #747）在 commit 前叫起同一個 `scripts/check.sh changed`；它只是這條規則的入口，不另有判斷，Ubuntu Full CI 仍非同步。
-- 收尾跑 `scripts/check.sh changed`（issue #716）：只跑改到的部分（跟 `origin/main` 比）；daemon 若會跑改到模組的測試（`scripts/ci-daemon-filters.sh` 由路徑挑），由 `cargo test` 編譯 targets，不另跑重複的 `cargo check --all-targets`；`CHECK_TESTS=none` 或自動挑不到 daemon 測試時仍跑 check。跨模組的連帶影響抓不到，交給 ubuntu-ci。要明講跑哪些加 `CHECK_TESTS=<過濾字串>`（只收一個過濾字串），不跑測試用 `CHECK_TESTS=none`。改動範圍大、或改到共用基礎時再跑整樹 `scripts/check.sh`。
-- **主機負載高時等它降下來，用共用的閘，不要自己手寫迴圈**（issue #813）：`CHECK_MAX_LOAD=40 scripts/check.sh changed`，或在任何 cargo 前面接 `scripts/wait-load.sh --max 40 && …`。逾時（`CHECK_LOAD_TIMEOUT`／`--timeout`，預設 1800 秒）一律回非 0、後面的指令不跑——手寫迴圈逾時回成功、在 load≈152 照跑的事故就是這樣來的（#789）。也不要為了快把 `~/.cargo/bin` 擺到 PATH 前面或設 `AM_REAL_CARGO` 繞過 cargo shim：那樣不佔名額，整樹 `cargo test` 直接疊在別人的名額上。記憶體一樣有閘（issue #1783）：`scripts/wait-load.sh --min-free-mem <百分比>` 等可用記憶體夠（macOS 另要壓力 normal）才放行；`scripts/check.sh macos-local` 開編前一律等可用記憶體 ≥ `CHECK_MIN_FREE_MEM`%（預設 30），編譯中壓力到 critical 就砍掉整個 cargo 行程群組、整輪失敗——m4p 編到記憶體耗盡曾整台卡死到 kernel panic。
-- 整樹測試「單跑都綠、整樹偶發紅」：`scripts/flaky-sweep.sh -n 5 -c 2`（高並行連跑 N 輪、可同時開多份製造負載，列出紅過的測試與次數、有紅 exit 1、一輪都沒跑到或少跑 exit 2）；修完要用它連跑證明不再紅。**本機預設禁跑**（協調者 2026-09-24 裁示）：它繞過 cargo shim、開高 `--test-threads` 又同時開好幾份，要驗 flaky 走遠端編譯主機或 CI；真的要在本機跑得在命令列加 `--i-know`（唯一的同意方式，沒有環境變數繞法）並先跟協調者講一聲。
-- daemon 個別指令：`cargo build --release -p agents-managerd`、`cargo test -p agents-managerd`、`cargo clippy --workspace --exclude agents-manager-desktop --exclude agents-managerd --lib --bins` 加 `cargo clippy -p agents-managerd --all-targets`（既有 warning 很多，數字看 CI lint job 的 summary，暫不加 `-D warnings`；`scripts/check.sh clippy` 跑的就是這兩條）。
-- web 個別指令：`cd web && bunx tsc -p tsconfig.app.json --noEmit && bunx oxlint src && bun run build`（既有 warning 不算，新增的要清）。
-- shell 腳本裡變數後面接全形標點一律寫 `${VAR}`：macOS 的 bash 3.2 會把標點併進變數名，`set -u` 下直接 unbound variable 而中止。`scripts/ops/lint-shell-vars.sh`（`scripts/check.sh ops` 與 CI 的 ops job 都會跑）會擋住。
-- 改動 shell／行程／signal 或 BSD 與 GNU 工具差異時，要在 Mac 本機跑 `scripts/check.sh macos-local`；不要為了驗證去等或觸發 GitHub Actions（使用者 2026-09-28：CI 一律在 agm-host 或 Mac 本機跑）。新測試若散在其他模組，函式名加 `macos_local_` 前綴，讓入口自動納入。
-- 工作樹裡別人的 WIP 讓編譯掛掉時，對**你 staged 的內容**驗：`git archive` 出來或用 `git stash --keep-index` 以外的方式，總之不能碰別人的檔。
-- UI 改動要看真畫面：**一律用 agent-browser**（CLI，使用者 2026-10-13 裁示；`agent-browser --session <你的 agent 名> open <網址>`、`screenshot`、`snapshot`，用法看 `agent-browser skills get core`；用完 `close`）。禁止用 ego lite、禁止自己另起 Chrome／其他 headless（AG Man 硬規則；`scripts/ui-goal-shots.mjs` 會自己起 headless Chrome，不准用）；截圖放 `docs/screenshots/<feature>/`。主機沒裝 agent-browser 就只做 DOM／純函式測試，回報時講清楚沒看過真畫面。
-- daemon 在 `127.0.0.1:7788`，token 在 `~/.config/agents-manager/ui-token`，header `X-AM-Token`。
-- **完整 CI 在 ubuntu 背景跑，不要等**（issue #716，使用者 2026-09-28）：agm-host 上的 `scripts/ops/ubuntu-ci.sh` 每分鐘撿最新的 main HEAD，依各段成功祖先到 HEAD 的累積差異挑受影響部分，預設每 24 小時補整樹 `scripts/check.sh`（同時只跑一輪、中間的 sha 不補跑；基準失效或未知路徑仍全跑），結果寫成 commit status `ubuntu-ci`。推完就去做下一件事；之後用 `gh api repos/Eden-Sun/agents-manager/commits/<sha>/status -q '.statuses[]|select(.context=="ubuntu-ci")'` 看結果。GitHub Actions 只剩 PR 與每日排程，**任何收尾、驗收、restart 判斷都不等它**（使用者 2026-09-28）。
+- 開始驗證前，必讀 [`docs/AGENT-VERIFY.md`](docs/AGENT-VERIFY.md)；完整的負載閘、Mac 原生驗證、UI 真畫面與 CI 分工都在該檔，這裡不複製第二份。
+- 在自己的 worktree 跑 `CHECK_MAX_LOAD=40 scripts/check.sh changed`；共用基礎或大範圍改動才依細則擴大，不為保險另跑整樹或等待 GitHub Actions。
+- 修改 shell／行程／signal 或平台差異仍須 Mac 原生驗證；UI 改動仍須 agent-browser 真畫面驗證。不可把未執行或中斷的檢查報成通過。
+
+- clippy 的固定範圍：`cargo clippy --workspace --exclude agents-manager-desktop --exclude agents-managerd --lib --bins`，另跑 `cargo clippy -p agents-managerd --all-targets`（完整用法見驗證細則）。
 
 ## 提交
 - 只在自己的 worktree 改與 commit；只 `git add` 自己改的檔案與 hunk（混檔用 `git apply --cached` 過濾），一個功能一個 commit。
