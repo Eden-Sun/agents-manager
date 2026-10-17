@@ -3084,7 +3084,7 @@ OB 不新增 daemon HTTP endpoint；`python3 scripts/ob.py ask --project-id <id>
 | GET | `/api/projects/{id}/schedules` | 未軟刪的排程；每筆帶 `open`（未結束的 occurrence，含 `turn_status`／`turn_delivery`／`waiting_reason`） |
 | POST | `/api/projects/{id}/schedules` | 建立。body：`client_request_id`（必填，1–128 個 `[A-Za-z0-9._:-]`）、`name`、`prompt`、`bot_id`、`tz`（IANA）、`spec`（見下）、`notify`（`failure`／`all`／`none`，預設 `failure`）、`clear_after`（bool，預設 `false`，跑完就清空對話，見 SPEC「專案排程」）。同專案同 key 同內容回原筆；同 key 不同內容 → 409 `client_request_id_reused` |
 | GET | `/api/schedules/{id}` | 排程（含 `clear_after`）、`open`、`recent`（最近 10 筆，含 turn 狀態） |
-| PATCH | `/api/schedules/{id}` | 部分更新（`name`、`prompt`、`bot_id`、`tz`、`spec`、`notify`、`clear_after`、`enabled`）。`clear_after` 只影響之後的 done，不撤回排隊、不升 generation。內容、Bot、時間或停用時：同一個 bot 鎖與交易內撤回尚未送出的排隊、升 generation；已送出的回合照跑。換 Bot 時有未結束執行 → 409 `schedule_open` |
+| PATCH | `/api/schedules/{id}` | 部分更新（`name`、`prompt`、`bot_id`、`tz`、`spec`、`notify`、`clear_after`、`enabled`）。`spec` 每次送出都會重新錨定間隔（`anchor` 取現在、升 generation），不改時間就不要帶（網頁只在時間欄位真的變了才送，#1807）。`clear_after` 只影響之後的 done，不撤回排隊、不升 generation。內容、Bot、時間或停用時：同一個 bot 鎖與交易內撤回尚未送出的排隊、升 generation；已送出的回合照跑。換 Bot 時有未結束執行 → 409 `schedule_open` |
 | DELETE | `/api/schedules/{id}` | 軟刪；同樣撤回未送出的排隊 |
 | POST | `/api/schedules/{id}/run` | 手動執行。body 可帶 `client_request_id`；已有未結束的 occurrence 就回那一筆；停用中 → 409 |
 | GET | `/api/schedules/{id}/history?limit=&offset=` | 分頁，`limit` 1–100（預設 20），`offset` ≥ 0 |

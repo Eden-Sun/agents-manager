@@ -35,14 +35,15 @@ interface FormState {
   notify: ScheduleNotify
   mode: ScheduleMode
   at: string
-  everyMin: number
+  /** 間隔的秒數：保留 API 收的精度（例如 61 秒）；分鐘欄只是顯示與改分鐘用，沒動就沿用原值。 */
+  everySecs: number
   time: string
   weekdays: number[]
   clearAfter: boolean
 }
 
 function emptyForm(botId: string): FormState {
-  return { name: '', prompt: '', botId, tz: defaultTimeZone(), notify: 'failure', mode: 'daily', at: '', everyMin: 60, time: '09:00', weekdays: [0], clearAfter: false }
+  return { name: '', prompt: '', botId, tz: defaultTimeZone(), notify: 'failure', mode: 'daily', at: '', everySecs: 3600, time: '09:00', weekdays: [0], clearAfter: false }
 }
 
 function fromDetail(d: ScheduleDetail): FormState {
@@ -55,7 +56,7 @@ function fromDetail(d: ScheduleDetail): FormState {
     notify: d.notify,
     mode: d.mode,
     at: spec.at ?? '',
-    everyMin: spec.every_secs ? Math.round(spec.every_secs / 60) : 60,
+    everySecs: spec.every_secs || 3600,
     time: spec.time ?? '09:00',
     weekdays: spec.weekdays ?? [0],
     clearAfter: d.clear_after === true,
@@ -67,7 +68,7 @@ function specOf(f: FormState): ScheduleSpecIn {
     case 'once':
       return { mode: 'once', at: f.at }
     case 'interval':
-      return { mode: 'interval', every_secs: f.everyMin * 60 }
+      return { mode: 'interval', every_secs: f.everySecs }
     case 'daily':
       return { mode: 'daily', time: f.time }
     case 'weekly':
@@ -113,6 +114,8 @@ export function ScheduleEditor({
     return () => window.removeEventListener('agm:schedules_changed', onChanged)
   }, [scheduleId, reload])
   const [form, setForm] = useState<FormState>(() => emptyForm(''))
+  // 載入當下的排程時間（`specOf`）：存檔時跟表單比，沒變就不送 spec（#1807）。
+  const [baseline, setBaseline] = useState<ScheduleSpecIn | null>(null)
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState<string | null>(null)
   const [notice, setNotice] = useState<string | null>(null)
@@ -135,7 +138,9 @@ export function ScheduleEditor({
       .then((d) => {
         if (!alive) return
         setDetail(d)
-        setForm(fromDetail(d))
+        const loaded = fromDetail(d)
+        setForm(loaded)
+        setBaseline(specOf(loaded))
         setLoadError(null)
       })
       .catch((e: unknown) => alive && setLoadError(errText(e)))
@@ -187,15 +192,19 @@ export function ScheduleEditor({
         setNotice('已建立。排程不會立即執行，到時間才會排進 Bot。')
         onSelect(s.id)
       } else {
+        // 只有排程時間真的變了才送 spec：後端每收到一次 spec 就重新錨定間隔、升 generation（#1807）。
+        const spec = specOf(form)
+        const timingChanged = JSON.stringify(spec) !== JSON.stringify(baseline)
         const d = await patchSchedule(scheduleId, {
           name: form.name.trim(),
           prompt: form.prompt,
           bot_id: effectiveBotId,
           tz: form.tz,
-          spec: specOf(form),
+          ...(timingChanged ? { spec } : {}),
           notify: form.notify,
           clear_after: form.clearAfter,
         })
+        if (timingChanged) setBaseline(spec)
         // 儲存回來的是 Schedule（不帶 recent）：合進既有詳情，不取代成缺欄位的物件。
         setDetail((prev) => (prev ? { ...prev, ...d, recent: prev.recent } : prev))
         setNotice('已儲存。已排的未送出執行會被撤回，已送出的照跑。')
@@ -344,7 +353,7 @@ export function ScheduleEditor({
       {form.mode === 'interval' ? (
         <label className="field">
           <span>每幾分鐘（以建立時為起點，不隨任務耗時漂移）</span>
-          <input type="number" min={1} max={525600} value={form.everyMin} onChange={(e) => set('everyMin', Number(e.target.value))} />
+          <input type="number" min={1} max={525600} value={Math.round(form.everySecs / 60)} onChange={(e) => set('everySecs', Number(e.target.value) * 60)} />
         </label>
       ) : null}
       {form.mode === 'daily' || form.mode === 'weekly' ? (
