@@ -69,10 +69,25 @@ function submitPage(tab: number, label: string): DraftPage {
 }
 
 /**
+ * 頁面身分：題目、選項（編號與標題）、分頁列（名稱與答過與否）、review。游標位置不算，它在同一頁裡也會動。
+ * 只比題目分不出換頁：pane 太矮時題目會被切成 `null`，兩頁問句相同的也分不出（2026-10-17，#1816）。
+ */
+export function pageKey(menu: TuiChoiceMenu): string {
+  return JSON.stringify([
+    menu.question,
+    menu.choices.map((c) => [c.number, c.title]),
+    menu.tabs.map((t) => [t.label, t.done]),
+    menu.review,
+  ])
+}
+
+/**
  * 走一格分頁並確認畫面換了。先 ←／→（別處無副作用），沒反應才 `tab`／`shift+tab`；走不動回 `null`。
+ * 身分換了才算翻頁（見 `pageKey`）。題目是 `null` 時分不出「翻了」與「沒翻」，這時不補第二顆鍵（補了會跳題），直接回 `null`。
  * `signal` 中止後不再送任何鍵（issue #908：bot 已經離開 blocked，導覽鍵會打進正在工作的 TUI）。
  */
 export async function moveTab(io: Io, dir: 1 | -1, from: TuiChoiceMenu, signal?: AbortSignal): Promise<TuiChoiceMenu | null> {
+  const before = pageKey(from)
   for (const key of dir > 0 ? ['right', 'tab'] : ['left', 'shift+tab']) {
     if (signal?.aborted) return null
     await io.send([key])
@@ -80,8 +95,9 @@ export async function moveTab(io: Io, dir: 1 | -1, from: TuiChoiceMenu, signal?:
       if (signal?.aborted) return null
       await io.wait(SETTLE_STEP)
       const now = await io.read()
-      if (now && (now.question !== from.question || now.review.length !== from.review.length)) return now
+      if (now && pageKey(now) !== before) return now
     }
+    if (from.question === null) return null
   }
   return null
 }
@@ -187,12 +203,16 @@ export function togglesFor(now: TuiChoiceMenu['choices'], want: boolean[]): numb
   return out
 }
 
-/** 從畫面題目反查分頁位置。別用 `tabAt`：它照 ☒ 猜，按過 Submit 會跳但終端還在原地。 */
+/**
+ * 從畫面題目反查分頁位置。別用 `tabAt`：它照 ☒ 猜，按過 Submit 會跳但終端還在原地。
+ * 先比整頁（題目加選項）；只有整頁對不上、且題目加選項數只對到一頁時才用它。兩頁都對得上就回 `null`，不猜。
+ */
 export function locate(draft: Draft, now: TuiChoiceMenu): number | null {
-  const i = draft.pages.findIndex(
-    (p) => !p.isSubmit && p.question === now.question && p.choices.length === now.choices.length,
-  )
-  if (i >= 0) return draft.pages[i].tab
+  const pages = draft.pages.filter((p) => !p.isSubmit)
+  const exact = pages.filter((p) => samePage(p, now))
+  const loose = pages.filter((p) => p.question === now.question && p.choices.length === now.choices.length)
+  const hits = exact.length ? exact : loose
+  if (hits.length === 1) return hits[0].tab
   // 送出頁在草稿裡是合成的（沒有題目、沒有選項），照題目比永遠對不上：看畫面長得像送出頁就算（2026-10-02 事發：
   // 最後一題 Enter 之後終端已經跳到 Review，`at` 卻還停在最後一題，再按 → 就「走不到送出頁」）。
   return isSubmitMenu(now) ? (draft.pages.find((p) => p.isSubmit)?.tab ?? null) : null
