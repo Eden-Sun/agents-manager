@@ -346,10 +346,11 @@ function GroupComposer({
       }
       setSending(true)
       // crid 由 store 的 `missionRequests` 給：同一段草稿重送回同一筆任務，手滑連按兩下不會開兩個。
+      const edits = trackDraftEdits(draftKey)
       void startMission(projectId, { text: body, ...missionOpts }).then((id) => {
         setSending(false)
-        if (id) setText('')
-      })
+        if (id && edits.untouched()) setText('')
+      }).finally(edits.stop)
       return
     }
     if (targets.length === 0) return
@@ -369,12 +370,11 @@ function GroupComposer({
     const edits = trackDraftEdits(draftKey)
     void sendGroupChat(projectId, body, sent, targets.map((t) => t.id)).then((res) => {
       setSending(false)
-      edits.stop()
       if (res) {
         if (edits.untouched()) setText('')
         files.clearSent(sent)
       }
-    })
+    }).finally(edits.stop)
   }
   const enterToSend = useEnterToSend()
 
