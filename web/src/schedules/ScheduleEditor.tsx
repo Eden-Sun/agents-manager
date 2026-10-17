@@ -20,7 +20,7 @@ import { createRequestId, settleCreateRequest } from '../lib/createRequestId'
 import { newClientRequestId } from '../api'
 import { ApiError } from '../api/types'
 import { isImeEnter } from '../lib/ime'
-import { defaultTimeZone, formatDue, formatZoned, OCCURRENCE_LABEL, occurrenceLine, timeZoneOptions } from './format'
+import { defaultTimeZone, formatDue, formatOccurrenceTime, OCCURRENCE_LABEL, occurrenceLine, timeZoneOptions } from './format'
 import { useLiveTurnStatus, useOnTurnChange } from './liveTurn'
 import './schedules.css'
 import './scheduleEditor.css'
@@ -433,7 +433,7 @@ export function ScheduleEditor({
             <ul className="schedule-history" aria-label="最近執行">
               {(detail.recent ?? []).map((o) => (
                 <li key={o.id}>
-                  {o.source === 'manual' ? '手動' : '排程'} · {formatZoned(o.scheduled_for, detail.tz)} · {OCCURRENCE_LABEL[o.status]}
+                  {o.source === 'manual' ? '手動' : '排程'} · {formatOccurrenceTime(o.scheduled_for, detail.tz)} · {OCCURRENCE_LABEL[o.status]}
                   {o.error ? `（${o.error}）` : ''}
                   {o.merged_count > 0 ? ` · 合併 ${o.merged_count} 次` : ''}
                 </li>

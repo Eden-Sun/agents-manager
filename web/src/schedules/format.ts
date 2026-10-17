@@ -1,19 +1,33 @@
 import type { OccurrenceStatus, Schedule } from '../api/schedules'
 
+const DUE_OPTIONS: Intl.DateTimeFormatOptions = { year: 'numeric', month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit', hour12: false }
+
 /**
- * 依排程自己的時區格式化，附上時區名稱。後端接受的合法時區瀏覽器 Intl 可能不認識（tzdb 版本差）：
- * 那時退回 UTC 顯示，並明講這台瀏覽器不支援，不靜默當成本地時區（#1812）。
+ * 依 `tz` 排版；瀏覽器 Intl 不認識 `tz`（後端接受的合法時區，tzdb 版本差）時退回 UTC，並標示不支援（#1812）。
+ * `ok` 為 false 表示退回了 UTC（字串已自帶原時區名）。
  */
+function zonedText(d: Date, tz: string, options: Intl.DateTimeFormatOptions): { text: string; ok: boolean } {
+  try {
+    return { text: d.toLocaleString('zh-TW', { ...options, timeZone: tz }), ok: true }
+  } catch (e) {
+    if (!(e instanceof RangeError)) throw e
+    return { text: `${d.toLocaleString('zh-TW', { ...options, timeZone: 'UTC' })} UTC（${tz} 這台瀏覽器不支援，以 UTC 顯示）`, ok: false }
+  }
+}
+
+/** 排程時區的時間字串，附上時區名（下次執行用）。無效日期原樣回傳。 */
 export function formatZoned(iso: string, tz: string): string {
   const d = new Date(iso)
   if (Number.isNaN(d.getTime())) return iso
-  const options: Intl.DateTimeFormatOptions = { year: 'numeric', month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit', hour12: false }
-  try {
-    return `${d.toLocaleString('zh-TW', { ...options, timeZone: tz })}（${tz}）`
-  } catch (e) {
-    if (!(e instanceof RangeError)) throw e
-    return `${d.toLocaleString('zh-TW', { ...options, timeZone: 'UTC' })} UTC（${tz} 這台瀏覽器不支援，以 UTC 顯示）`
-  }
+  const { text, ok } = zonedText(d, tz, DUE_OPTIONS)
+  return ok ? `${text}（${tz}）` : text
+}
+
+/** 最近執行列的時間：沿用改動前的預設選項（含秒、不附時區名）；瀏覽器不認識時區才退回 UTC 並標示。 */
+export function formatOccurrenceTime(iso: string, tz: string): string {
+  const d = new Date(iso)
+  if (Number.isNaN(d.getTime())) return iso
+  return zonedText(d, tz, {}).text
 }
 
 /** 下次執行時間，附上排程自己的時區名稱（不把 UTC 字串直接丟給使用者）。 */
