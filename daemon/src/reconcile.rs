@@ -609,8 +609,8 @@ pub(crate) async fn reconcile_host_locked(app: &impl ReconcileHostEnv, host: &st
     // still-running parent launched the pane which this same pass will adopt as its successor.
     // Keep read failure distinct from an empty result; adoption is already fail-closed below.
     app.prune_stale_spawn_hints().await;
-    crate::spawn_hints::prune_dead_claims(app, host, &live_panes).await;
-    let spawn_hints = app.spawn_hints_for_host(host).await;
+    crate::spawn_hints::prune_dead_claims(app, host, &session, &live_panes).await;
+    let spawn_hints = app.spawn_hints_for_host(host, &session).await;
     // Deduplicate panes within this observed host/session, never display names.
     let mut claimed: std::collections::HashSet<String> = std::collections::HashSet::new();
     let mut parents: Vec<Parent> = Vec::new();

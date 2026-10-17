@@ -1787,6 +1787,8 @@ herdr server 重啟會讓**所有** pane 同時消失。照 §6.5 的規則，�
 
 對帳只用 `spawn_claims`／spawn hint 登記的 pane→parent bot ID 選 parent；parent 必須是目前 host/session 的有效 bot；有明確 claim 的具名 child，即使 parent 已無 active run 仍可認領。
 缺登記、登記指向不存在或不可確認的 parent，就保持未知，不用名稱前綴、同 tab、project label 或 argv `--name` 推測血緣（#1791）。
+claim 存在 `spawn_claims((host, herdr_session, pane_id) 唯一, bot_id, parent_run_id, created_at)`（schema v66，issue #1793）。本機表單與遠端 spool 都必須帶送出當下的 `parent_run_id`；daemon 核對它仍是該 bot 的 active run，並由該 run 取得非空的 herdr session。缺證據的舊 claim 不參與歸屬，也不以目前 run 補猜；延遲到下一代 run 的遠端事件不登記。
+認領只讀目前 snapshot session、parent run 仍 active 且 session 相符的 claim；parent 或 child 改名均不換 bot ID。不同 session 的同號 pane 可共存；同 session 再登記以新證據為準。claim 不按時間過期、認領不消耗；每輪只清該 snapshot session 裡已不在 herdr 的 pane（兩分鐘 grace／空 snapshot 保護照舊）。
 claim 與 hint 衝突時以 claim 為準。它們只證明 parent，不證明同 pane 的 occupant 仍是先前那顆 child。
 對帳在目前 host/session 以 pane ID 去重，顯示名字重複或改名不會遮蔽另一顆 pane。
 
@@ -1930,7 +1932,8 @@ pane 打 `cargo` 就 permission denied）時，只 chmod 回 0755，不重寫內
 - **失敗要退避重試、放棄要開票**（issue #534）：重試節奏是立刻／5 分／15 分／60 分（`REMOTE_RETRY_WAITS`）——以前是 20 與 60 秒，只夠撐過「ssh 抖一下」，那台在重開機、網路斷幾分鐘時三次全都趕不上，而下一次機會要等它**掉線再連上**（一直連著就等到 daemon 重啟）。都失敗、或腳本跑完但有檔案換不動時，記一行「gave up」（不再寫 will retry）並開 `remote_shim_stale` incident（degraded，`resource` 是 host 名，detail 帶原因與該去那台機器看什麼）；下一次補成就自動消失。
 
 - `herdr agent start <name> …`：`<name>` 不以 `$AM_AGENT_NAME-` 開頭就補前綴。herdr 名稱上限 32 字。放得下就用 `<parent>-<suffix>`；放不下就把母名前綴截到 25 字再接字尾的 6 位數字雜湊（#665），**不會**截成母 bot 自己的名字，不同字尾也不會變成同一個前綴。算不出尾碼或結果仍是母名就 exit 75、不呼叫 herdr。頂層 `agent_name` 上限 24 字，留 8 字給 `-` 與子 agent 字尾。旗標可在名字前面，`--kind`/`--pane`/`--timeout` 的值不誤認，`--` 之後原封不動。
-- `herdr agent rename <目標> <新名字>`（#1789）：`agent start` 的補前綴不經這條路，所以 fork 出來的 bot 會把子 agent 改回原 bot 的前綴、daemon 就掛到原 bot 底下。`$AM_AGENT_NAME` 有值且沒有 `$AM_CHILD_OF` 時，新名字不是 `$AM_AGENT_NAME-` 開頭就 exit 2、不呼叫 herdr；`--clear` 與沒有 `$AM_AGENT_NAME` 的 pane 照舊轉發。
+- `herdr agent rename <目標> <新名字>`：名稱只作顯示，不再依 `$AM_AGENT_NAME-` 前綴拒絕改名或推斷 parent；歸屬由 scoped spawn claim 的 bot ID 決定。
+- `AM_CHILD_OF` 的新值是 parent **bot ID**，非空就禁止再開子 agent（舊 pane 的標記也有效）。parent run 世代由 `AM_RUN_ID` 隨 claim 傳送。
   **模型沿用**：`--` 之後沒有 `--model` 且 `--kind` 與母 bot 相同（或沒寫）時補 `-- --model $AM_MODEL`，claude 再補 `--effort $AM_EFFORT`；
   子 agent 自己寫的一律尊重（`--model`、codex/grok 的 `-m`、codex 的 `-c model=` / `-c model_reasoning_effort=`）。
   **帳號／hook 補救（issue #57）**：`agent start` 沒有 `--env`，只能假設 `--pane` 指到的 pane 是 `pane split` 剛開的、帳號早注入了；
@@ -1950,7 +1953,7 @@ pane 打 `cargo` 就 permission denied）時，只 chmod 回 0755，不重寫內
   傳遞清單（`AM_RESERVED_ENV_KEYS`）與 daemon 注入端（`lifecycle/setup.rs` 的 `env.insert`）綁了一條測試：daemon 注入的每個 key 要嘛在清單裡、要嘛明列成「刻意不傳」。
   呼叫端自己給的同名 `--env` 不動。
 - **子 agent 不再開子 agent（使用者 2026-09-30）**：bot 經 shim 開的 pane（`pane split`／`pane new`／`tab create`／`workspace create` 補 `--env`，`agent start` 補 export）一律帶
-  `AM_CHILD_OF=<母 agent 名>`；呼叫端已經有 `AM_CHILD_OF`（子代自己開的 pane）就沿用同一個值，不往下疊；呼叫者自帶的 `--env AM_CHILD_OF=…` 一律剝掉。
+  `AM_CHILD_OF=<母 bot_id>`；呼叫端已經有 `AM_CHILD_OF`（子代自己開的 pane）就沿用同一個值，不往下疊；呼叫者自帶的 `--env AM_CHILD_OF=…` 一律剝掉。
   沒有 bot 身分的人工 shell 不標。**有 `AM_CHILD_OF` 的 pane 打 `agent start` 一律 exit 77、不呼叫 herdr**，stderr 講明「要人手就在回報裡寫清楚，由 parent 決定另派兄弟」——
   子代只有一層，狀態都掛在同一個 parent 底下追蹤。`pane split` 不擋（子代開 dev server 之類的 pane 仍可以）。
 - `agent start` 補子 agent 的指示檔、關掉 CLI 自己的指示檔：見 §6.5i。`agent start --help`（`-h`）原樣轉給 herdr，不走 spawn 流程（以前會把 env 補送打進呼叫者自己的 pane）。目標 pane 只認明寫的 `--pane`，不退回 `$HERDR_PANE_ID`：受管的 bot 沒帶或帶空的 `--pane`（多半是前面的 `pane split` 失敗）exit 2、不呼叫 herdr；`--pane` 指到呼叫者自己的 pane 一律 exit 2——補送 env 那行會被打進它自己的輸入框（2026-10-01 實際灌了四行給使用者）。`herdr pane get` 說目標 pane 裡已經在跑 agent（別顆 bot 的 pane、拿錯的 id）也 exit 2、什麼都不送；問不到才照舊交給 herdr（2026-10-02 A issuers-1 拿錯 pane id 又灌了一行給別顆 bot）。
@@ -1993,14 +1996,15 @@ relay 身分只使用穩定 ID（issue #1794）：`to_agent` 只供顯示／herd
 走 daemon 的派工（`POST /api/bots/{id}/prompt` 帶 `relay_from`、總管的 assignment）會寫 `messages.relay_from`，UI 畫成「X → 這顆 bot」。
 agent 自己 `herdr agent prompt <名字> …` 時 daemon 沒參與，那句話只以 prompt 回音從 hook 回來，會跟使用者打的字長得一樣。補法同 §6.5b，做成機制：
 
-1. shim 攔 `agent prompt`：目標名 herdr 認得（`herdr agent get` 找得到：AGM、其他頂層 bot、pane id）就照原名送，找不到才當自己的子 agent 補前綴。
-   決定名字後先 `POST /relay/announce`（表單 `bot_id`／`to_bot_id`／`to_run_id`／`delivery_id`／顯示用 `to_agent`／`text`／`ack`／`reply_to`，header `X-AM-Bot-Token` 用該 bot 的 hook token），再轉給真的 herdr。
+1. shim 的 `agent prompt` 接受 pane ID、`bot:<bot_id>`，或作為一次性選取器的顯示名稱。child 簡稱先查顯示前綴補成的候選，再查原字串；選取成功後立即從 `agent get` 回應固定 pane ID。查不到 pane 證據就 exit 75，不猜名字。
+   決定 ID 後先 `POST /relay/announce`（表單 `bot_id`／`to_bot_id`／`to_run_id`／`delivery_id`／`to_agent`／`text`／`ack`／`reply_to`，header `X-AM-Bot-Token`），再用固定 pane ID 轉給真的 herdr。daemon 不再按名字查身分；舊 shim 只送名稱而無 ID 證據時保持未知。
+   `bot:<bot_id>` 由 daemon 以 ID 路由角色 bot，或在寄件 host／session 範圍內取得唯一 running run 的 pane ID（缺證據回 409）。非角色解析成功回 `target_pane_id`，shim 使用該 ID；遠端無 daemon 時須直接使用 pane ID。
    `text` 只含 TEXT 位置參數（herdr 的 `--wait`／`--until`／`--timeout` 不算）；`--ack`、`--reply-to <id>` 是 shim 自己的旗標（§18.15），送給 daemon、不轉給 herdr。
-   **「確定沒送到 daemon」與「送了但回覆不明」分開（issue #143）**：只有 **curl 7（連線根本沒建立，request 一定沒進 daemon）**才照舊直送。
+   **「確定沒送到 daemon」與「送了但回覆不明」分開（issue #143）**：只有 **curl 7（連線根本沒建立，request 一定沒進 daemon）**才容許已固定 pane ID 的直送（尚未解析的 bot ID 仍拒絕）。
    其餘都不直送——逾時（28）、空回應（52）、連線被重置（56）、送到一半（55）、傳輸中斷（18）這類「request 可能已經進 daemon、只是回覆沒收完整」的，
    同一個請求再問一次（第二次 15 秒；沒帶 request id 的申請 daemon 以內容指紋去重，重問不會變兩筆），還是不明就 exit 75；HTTP 非 2xx
    （400／404／5xx，身分被拒的 401／403 是 exit 77）與看不懂的 2xx 一律 exit 75、不直送。daemon 明確回 `routed` 就不打進 pane，回 `to_pane_id` 就按該地址直送；回 `{}` 則為未知／移交，不記來源而按傳輸目標直送。受管的 bot（有 bot 身分與 `AM_PORT`）沒有 curl 也 exit 75。直送會變成佇列一份、pane 一份，而且不能把認證失敗變成繞過控制面的旁路。
-   報不成功只是少一次標示；名字前面帶旗標時整串原樣轉發。
+   target 必須在旗標前面；缺 pane 證據時 exit 75。
 2. daemon 把「誰要送什麼給哪個 run」記在行程內的短命表（5 分鐘；上限：每顆寄件 bot 最多 64 筆報備（含已認領的 delivery 去重記錄）、超過丟它自己最舊的，整張表最多 1024 筆，每筆只留 `text` 的前 4000 字；#1352），連同寄件者所在的主機及 delivery id與**寄件當下寄件 bot 正在跑的回合**
    （`sender_turn_at`：本機 API 用現在；遠端 spool 用 shim 寫進報備的 `received_at`，取時間落在 `[created_at, completed_at]` 之間、最新的那一回合；找不到就 NULL）。
    遠端 bot 須載入新版 shim 才能產生 v2 身分報備。

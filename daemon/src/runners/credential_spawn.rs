@@ -133,6 +133,8 @@ pub struct SpawnBegin {
 #[derive(Deserialize)]
 pub struct SpawnClaim {
     pub bot_id: String,
+    #[serde(default)]
+    pub parent_run_id: String,
     pub pane_id: String,
 }
 
@@ -224,7 +226,7 @@ pub async fn claim(State(app): State<Arc<App>>, headers: axum::http::HeaderMap, 
     if pane_id.is_empty() {
         return fail(StatusCode::BAD_REQUEST, "pane_id_missing", "herdr did not identify the started pane");
     }
-    match crate::spawn_hints::claim(&app, &bot.id, pane_id).await {
+    match crate::spawn_hints::claim_for_run(&app, &bot.id, &body.parent_run_id, pane_id).await {
         Ok(()) => (StatusCode::OK, Json(json!({"pane_id": pane_id, "claimed": true}))),
         Err(e) => {
             tracing::warn!(bot = %bot.id, pane = %pane_id, error = %e, "spawn claim could not be recorded");

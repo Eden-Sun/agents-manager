@@ -140,7 +140,7 @@ pub enum HookKind {
     RelayAnnounce { to_bot_id: String, to_run_id: String, delivery_id: String, text: String },
     /// 遠端 bot 的 herdr shim 在 `agent start` 成功後寫進自己 spool 的登記（issue #1790）：這顆 pane 是這顆 bot 開的。
     /// 本機走 `/relay/spawn/claim`，遠端沒有 `AM_PORT`，跟 `RelayAnnounce` 同一條 spool。
-    SpawnClaim { pane_id: String },
+    SpawnClaim { pane_id: String, parent_run_id: String },
     /// 遠端 agm 認領票後交給 daemon 的撞題檢查（issue #1468）；耐久 hook worker 等檢查完成才 ACK。
     ClaimCollisionCheck { issue: Option<u64>, title: String, child: String, child_bot_id: Option<String>, claim_id: Option<String>, branch: Option<String> },
     Ignore(String),
@@ -378,7 +378,10 @@ pub fn classify(provider: &str, p: &Value) -> HookKind {
     }
     if p.get("hook_event_name").and_then(Value::as_str) == Some(SPAWN_CLAIM_EVENT) {
         return match s("pane_id").map(|v| v.trim().to_string()).filter(|v| !v.is_empty()) {
-            Some(pane_id) => HookKind::SpawnClaim { pane_id },
+            Some(pane_id) => match s("parent_run_id").filter(|s| !s.trim().is_empty()) {
+                Some(parent_run_id) => HookKind::SpawnClaim { pane_id, parent_run_id },
+                None => HookKind::Ignore("spawn claim without parent run evidence".into()),
+            },
             None => HookKind::Ignore("spawn claim without pane_id".into()),
         };
     }
@@ -1741,8 +1744,11 @@ async fn process_locked_for_with_outcome<H: HookHost>(
             Ok(())
         }
         // issue #1790：遠端 shim 開完子 agent 後的登記（本機走 `/relay/spawn/claim`）；只記「這顆 pane 是這顆 bot 開的」。
-        HookKind::SpawnClaim { pane_id } => {
-            crate::spawn_hints::claim(app, &bot.id, &pane_id).await?;
+        HookKind::SpawnClaim { pane_id, parent_run_id } => {
+            // A stale remote spool event is not evidence about the current run.
+            if db::active_run(app.db(), &bot.id).await?.is_some_and(|r| r.id == parent_run_id) {
+                crate::spawn_hints::claim_for_run(app, &bot.id, &parent_run_id, &pane_id).await?;
+            }
             Ok(())
         }
         HookKind::ClaimCollisionCheck { issue, title, child, child_bot_id, claim_id, branch } => {
@@ -5138,14 +5144,15 @@ mod external_claim_tests {
     }
 
     /// issue #1790：遠端 shim 開完子 agent 寫進 spool 的 `AmSpawnClaim`，`process` 記成「這顆 pane 是送這則的 bot 開的」；
-    /// 沒有 pane_id 的丟掉。不需要活著的 run、不動 Turn。
+    /// 沒有 pane_id 或 parent run 證據的丟掉；只接受仍 active 的 parent run，不動 Turn。
     #[tokio::test]
     async fn a_spooled_spawn_claim_is_recorded_against_the_bot_that_wrote_it() {
         let env = tt::env().await;
         let bot = tt::claude_bot(&env.app, &env.project_id, "alfa").await;
         assert!(matches!(classify("claude", &json!({"hook_event_name": "AmSpawnClaim"})), HookKind::Ignore(_)), "沒有 pane_id 不收");
 
-        process(&env.app, &stop_failure(&bot.id, json!({"hook_event_name": "AmSpawnClaim", "pane_id": "w1:p7"}))).await.unwrap();
+        let run = tt::fake_run(&env.app, &bot.id).await;
+        process(&env.app, &stop_failure(&bot.id, json!({"hook_event_name": "AmSpawnClaim", "pane_id": "w1:p7", "parent_run_id": run}))).await.unwrap();
 
         let recorded: Option<String> =
             sqlx::query_scalar("SELECT bot_id FROM spawn_claims WHERE pane_id = 'w1:p7'").fetch_optional(&env.app.db).await.unwrap();
@@ -5178,6 +5185,18 @@ mod external_claim_tests {
         assert_eq!(relay_source(&env.app, Some(&target_run), text).await.unwrap().from_bot, from.id);
         process(&env.app, &body).await.unwrap();
         assert_eq!(relay_source(&env.app, Some(&target_run), text).await, None, "同一 delivery 的重播不能再認領");
+    }
+
+    #[tokio::test]
+    async fn nr_claim_remote_spool_cannot_acquire_a_later_run() {
+        let env = tt::env().await;
+        let bot = tt::claude_bot(&env.app, &env.project_id, "original").await;
+        let old_run = tt::fake_run(&env.app, &bot.id).await;
+        sqlx::query("UPDATE runs SET state='stopped' WHERE id=?").bind(&old_run).execute(&env.app.db).await.unwrap();
+        tt::fake_run(&env.app, &bot.id).await;
+        process(&env.app, &stop_failure(&bot.id, json!({"hook_event_name":"AmSpawnClaim", "pane_id":"w1:p7", "parent_run_id":old_run}))).await.unwrap();
+        let n: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM spawn_claims").fetch_one(&env.app.db).await.unwrap();
+        assert_eq!(n, 0);
     }
 
     /// 2026-09-30：遠端 bot 直送的一句，回音先被存成使用者訊息，報備之後才從寄件者的 spool 收到——補標 `relay_from`。

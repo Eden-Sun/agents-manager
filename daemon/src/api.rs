@@ -562,11 +562,29 @@ async fn relay_kids(
     }
 }
 
+/// A shim freezes a selected name to a pane before announcing. Never reinterpret that pane as a name.
+async fn relay_target_run(app: &Arc<App>, sender: &str, target: &str) -> anyhow::Result<Option<db::Run>> {
+    let host = db::bot_host(&app.db, sender).await?;
+    let Some(fallback) = app.session_for_host(&host).await else { return Ok(None) };
+    let session = fallback.as_str();
+    let (bot_id, pane_id) = match target.strip_prefix("bot:") {
+        Some(id) => (Some(id), None),
+        None => (None, Some(target)),
+    };
+    let ids: Vec<String> = sqlx::query_scalar(
+        "SELECT r.id FROM runs r JOIN bots b ON b.id=r.bot_id JOIN projects p ON p.id=b.project_id
+         WHERE r.state='running' AND b.deleted_at IS NULL AND p.handed_off_to IS NULL AND p.host=?
+           AND COALESCE(r.herdr_session,?)=? AND (b.id=? OR r.pane_id=?) LIMIT 2")
+        .bind(&host).bind(&fallback).bind(session).bind(bot_id).bind(pane_id).fetch_all(&app.db).await?;
+    if ids.len() != 1 { return Ok(None); }
+    db::run(&app.db, &ids[0]).await
+}
+
 async fn relay_announce(
     State(app): State<Arc<App>>,
     headers: HeaderMap,
     // 表單而非 JSON：POSIX sh shim 用 `--data-urlencode` 對任意內容都安全。
-    axum::extract::Form(body): axum::extract::Form<RelayAnnounce>,
+    axum::extract::Form(mut body): axum::extract::Form<RelayAnnounce>,
 ) -> (StatusCode, Json<Value>) {
     let token = headers.get("X-AM-Bot-Token").and_then(|v| v.to_str().ok()).unwrap_or("");
     let ok = match db::bot(&app.db, &body.bot_id).await {
@@ -578,6 +596,17 @@ async fn relay_announce(
     }
     if crate::share::refuses_bot_principal(&app.db, &body.bot_id).await {
         return (StatusCode::FORBIDDEN, Json(json!({"error": "forbidden", "reason": "restricted_bot"})));
+    }
+    // A frozen pane or explicit bot selector supplies stable recipient evidence; never resolve display names.
+    if body.to_bot_id.as_deref().is_none_or(str::is_empty) && (body.to_agent.starts_with("bot:") || body.to_agent.contains(":p")) {
+        match relay_target_run(&app, &body.bot_id, &body.to_agent).await {
+            Ok(run) => {
+                body.to_bot_id = body.to_agent.strip_prefix("bot:").map(str::to_owned)
+                    .or_else(|| run.as_ref().map(|r| r.bot_id.clone()));
+                body.to_run_id = run.map(|r| r.id);
+            }
+            Err(e) => return (StatusCode::SERVICE_UNAVAILABLE, Json(json!({"error":"relay_watch_unavailable", "retryable":true, "detail":format!("{e:#}")}))),
+        }
     }
     // 舊 shim 只有顯示名稱：缺 ID 的報備保持未知，不攔進角色佇列、不標寄件來源。
     let Some(to_bot_id) = body.to_bot_id.as_deref().filter(|id| !id.is_empty()) else {

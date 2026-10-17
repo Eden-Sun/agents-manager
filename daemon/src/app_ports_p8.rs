@@ -362,11 +362,11 @@ impl IngressCommands for App {
     async fn prune_stale_spawn_hints(&self) {
         crate::spawn_hints::prune_stale(self).await
     }
-    async fn spawn_hints_for_host(&self, host: &str) -> Result<HashMap<String, String>> {
+    async fn spawn_hints_for_host(&self, host: &str, session: &str) -> Result<HashMap<String, String>> {
         // issue #1790：shim 登記的 claim 與 hook 撈到的 hint 都是「這個 pane 是這顆 bot 開的」；兩者不一致時 claim 為準。
         let app = self.shared();
         let mut owners = crate::spawn_hints::for_host(&app, host).await?;
-        owners.extend(crate::spawn_hints::claims_for_host(&app, host).await?);
+        owners.extend(crate::spawn_hints::claims_for_session(&app, host, session).await?);
         Ok(owners)
     }
     async fn consume_spawn_hint(&self, host: &str, pane_id: &str) {

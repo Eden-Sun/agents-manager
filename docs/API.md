@@ -1233,9 +1233,8 @@ herdr 成功後，shim 以 `X-AM-Bot-Token` 送 `finish` 的 `bot_id,permit_id,p
 herdr 回非 0 且輸出沒有 pane id，或 shim 被中斷時，送 `abort` 的 `bot_id,permit_id`（#664）。daemon 驗 bot token 後釋放 permit，回 `200 {"released":true}`；permit 已經不在也回 200（`released:false`）。permit 自 `begin` 起 60 秒沒 finish／abort 就不再算 in-flight（`agent start` 帶了 `timeout_ms` 時有效期是 `timeout_ms`＋30 秒、至少 60 秒、上限 330 秒，herdr 慢慢等子 agent 就緒時 finish 才不會因 permit 過期回 409）（curl 逾時但 daemon 已 reserve、以及沒跑到 abort 的 Ctrl-C）。過期不擋輪替。
 
 ### `POST /relay/spawn/claim`（表單，bot shim 專用，issue #1790）
-`agent start` 成功後，shim 以 `X-AM-Bot-Token` 送 `bot_id,pane_id`：登記「這顆 pane 是 `bot_id` 自己開的」。daemon 驗 token 屬於 `bot_id`（不符 401、分享用的受限 bot 403），
-記進 `spawn_claims`，回 `200 {"pane_id":"…","claimed":true}`；`pane_id` 空的 400、DB 寫不進 503（shim 只印 warn、`agent start` 照樣成功）。同一 `(host, pane_id)` 再登記以新的為準。
-daemon 之後認領子 agent 以它為 parent（優先於 spawn hint 與名字前綴），child 改名也不換 parent（SPEC §6.5a）。遠端沒有 `AM_PORT`，不打這條，改寫 `AmSpawnClaim` 進 hook spool。
+`agent start` 後，shim 以 `X-AM-Bot-Token` 送 `bot_id,pane_id,parent_run_id`。token 必須屬於 `bot_id`（不符 401，受限 bot 403）；pane ID 空白回 400。`parent_run_id` 必須是送出當下捕獲、接收時仍 active 的該 bot run，且 run 必須有非空 herdr session；缺證據／過期 run 不登記（503 `claim_unrecorded`，shim 印 warn，start 結果不變）。
+成功回 `200 {"pane_id":"…","claimed":true}`。claim 依 `(host,herdr_session,pane_id)` 儲存，同 session 重試更新 parent run 證據，不同 session 互不覆蓋；舊版無作用域的資料不參與歸屬。遠端 `AmSpawnClaim` payload 同樣攜帶 `pane_id,parent_run_id`，過期 spool 事件忽略。
 
 ### `GET /api/panes?unowned=1`
 全機的非 agent pane（列的形狀同上）；`unowned=1` 只回 `owned_by="none"`（連 cwd 都對不到專案）的那些，同一台的 scratch 排第一。
@@ -1987,6 +1986,9 @@ child 還原後不立即建立 run；daemon 給它十分鐘讓父 bot 在原 pan
 | 投影閘門擋下 | 同 §1 `projection_refused` |
 
 ### 10.5 `POST /relay/announce`
+
+`to_agent` 使用已固定的 pane ID 或 `bot:<bot_id>`；名稱只由 shim 做一次選取，不由 daemon 重新推斷身分。缺 ID 證據的舊名稱請求回 409 `target_id_required`，避免舊 shim 以直送繞過角色佇列。pane 查詢只比 `runs.pane_id`，限定寄件 host／herdr session，不比 `agent_name`。bot ID 可直接識別角色 bot；普通 bot 必須在同作用域有唯一 running run，成功回 `{"target_pane_id":"…"}`，缺證據回 409 `target_unknown`。shim 以回傳的 pane ID 送出；角色路由的 `routed` 與普通 pane 的 `{}` 回應保留。
+
 **不在 `/api` 下**，不吃 UI token：呼叫者是 pane 裡的 herdr shim，驗證用該 bot 的 hook token（`X-AM-Bot-Token`）。
 表單編碼 `bot_id`、`to_bot_id?`、`to_run_id?`、`delivery_id?`、`to_agent?`、`text` → `200 {"to_pane_id":"<穩定傳輸地址>"}`（已綁定的本機 run）或 `200 {}`（未知／移交）；bot 不存在、已刪或 token 不符 → 401。
 `to_agent` 只供顯示／shim 傳輸，不參與歸屬或角色判斷。角色收件只使用明確的 `to_bot_id`；一般報備還需要對應的 `to_run_id`，並限寄件方 host／herdr session 的 running run。bot／run 不符回 400 `relay_recipient_mismatch`。
@@ -2877,7 +2879,7 @@ CLI：`agents-managerd release-triage-check --kind <claude|codex> [--since <ver>
 - `POST /api/bots/{id}/prompt {text,client_request_id?,attachments?,relay_from:<bot id>,ack?,reply_to?}`（Bot principal 必須是成對 `X-AM-Bot-Id`／`X-AM-Bot-Token`；未帶 Bot proof 的 User 自稱 bot 來源 → 403 `relay_from_token_required`，不進收件匣（#410））→ **202**
   `{routed:"responder"|"patrol",queued:true,duplicate,wake,inbox_event_id,state,delivery:"queued",turn_id:null,message_id:null,note}`。
   沒有 `relay_from`（使用者）、目標不是角色 bot、協調者未建立 → 照舊 200 `PromptOut`（`relay_from:"daemon"` 從 HTTP 帶進來是 403，見 §5）。
-- `POST /relay/announce`（shim，`X-AM-Bot-Token`，表單 `bot_id,to_agent,text,ack?,reply_to?`）的 `to_agent` 對得上角色 bot（名字、agent 名、pane id）→ 200 同上形狀；shim 見 `routed` 不再轉給真的 herdr。其他 → `{}`（照舊記來源）。
+- `POST /relay/announce`（shim，`X-AM-Bot-Token`，表單 `bot_id,to_agent,text,ack?,reply_to?`）的 `to_agent` 為 `bot:<bot_id>` 或固定 pane ID，依穩定 ID 對得上角色 bot→ 200 同上形狀；shim 見 `routed` 不再轉給真的 herdr。其他 → `{}`（照舊記來源）。
 - 去重：同寄件者同 `client_request_id` 一筆（結案了也是同一筆）；沒 id 時同寄件者、同內容指紋、**還會被送出**（`pending`／`delivered`，`gave_up` 不算）、而且落在同一個十分鐘滑動視窗（錨在既有那筆的 `created_at`，不是固定格子，issue #442）的一筆——前一筆已 `handled` 就重新入列（新的 `inbox_event_id`、`duplicate:false`）。指紋 = 收件角色＋目標＋正文（逐字）＋附件。
   重複且指紋相同 → `duplicate:true`、同一個 `inbox_event_id`；指紋不同 → 409 `request_mismatch`（不寫入，回報既有事件 id）。
 - 寄件的那個**角色**登記了卻沒有 bot（`setup` 過但 bot 被刪）→ 409 `{"reason":"role_not_configured"}`：

@@ -284,6 +284,6 @@ pub trait IngressCommands {
     ) -> impl Future<Output = Result<RetireOutcome>> + 'a;
     async fn retirement_block(&self, bot_id: &str) -> Result<Option<String>>;
     async fn prune_stale_spawn_hints(&self);
-    async fn spawn_hints_for_host(&self, host: &str) -> Result<HashMap<String, String>>;
+    async fn spawn_hints_for_host(&self, host: &str, session: &str) -> Result<HashMap<String, String>>;
     async fn consume_spawn_hint(&self, host: &str, pane_id: &str);
 }

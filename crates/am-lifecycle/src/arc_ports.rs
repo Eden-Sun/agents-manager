@@ -337,7 +337,7 @@ mod arc_port_18_ingresscommands {
         ) -> impl Future<Output = Result<RetireOutcome>> + 'a { <T as crate::events::ports::IngressCommands>::retire_child(self.as_ref(), bot_id, why, mode) }
         async fn retirement_block(&self, bot_id: &str) -> Result<Option<String>> { <T as crate::events::ports::IngressCommands>::retirement_block(self.as_ref(), bot_id).await }
         async fn prune_stale_spawn_hints(&self) { <T as crate::events::ports::IngressCommands>::prune_stale_spawn_hints(self.as_ref()).await }
-        async fn spawn_hints_for_host(&self, host: &str) -> Result<HashMap<String, String>> { <T as crate::events::ports::IngressCommands>::spawn_hints_for_host(self.as_ref(), host).await }
+        async fn spawn_hints_for_host(&self, host: &str, session: &str) -> Result<HashMap<String, String>> { <T as crate::events::ports::IngressCommands>::spawn_hints_for_host(self.as_ref(), host, session).await }
         async fn consume_spawn_hint(&self, host: &str, pane_id: &str) { <T as crate::events::ports::IngressCommands>::consume_spawn_hint(self.as_ref(), host, pane_id).await }
     }
 }
