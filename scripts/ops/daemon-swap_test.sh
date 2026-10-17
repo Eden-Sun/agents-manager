@@ -1636,6 +1636,46 @@ for c in ended_late no_last_run agent_gone live_run; do
   teardown
 done
 
+# 34e. 父 bot 在窗口內 herdr pane close 收掉 child、沒有新 child（2026-10-17 16:10Z 回滾 978cf980，#1820）：
+#      cause=parent_replaced_child、pane=gone、last_run 因 herdr 事件 pane exited 結束、父仍有 active run → 不算遺失。
+setup 10 10
+export STUB_NAMES_BEFORE='["a","mom","kid"]' STUB_NAMES_AFTER='["a","mom"]'
+seed_audit "INSERT INTO bots (id,name,project_id,deleted_at,managed_by,parent_bot_id,created_at)
+    VALUES ('id-mom','mom','p1',NULL,'user',NULL,'2000-01-01T00:00:00.000Z'),
+           ('id-kid','kid','p1','2099-01-01T00:00:02.000Z','child','id-mom','2000-01-01T00:00:00.000Z');
+  INSERT INTO runs VALUES ('id-mom','running');
+  INSERT INTO intents VALUES ('it1','retire_child','id-kid','{\"why\":\"parent_replaced_child\",\"cause\":\"parent_replaced_child\",\"mode\":\"implicit\",\"pane\":\"gone\",\"parent_bot_id\":\"id-mom\",\"last_run\":{\"state\":\"exited\",\"ended_at\":\"2099-01-01T00:00:00.900Z\",\"exit_reason\":\"pane exited\"}}','done','2099-01-01T00:00:01.000Z');"
+rc=$(run)
+check_eq "父 bot 收掉 child（pane exited）：不回滾（rc=0）" "0" "$rc"
+check "被認成預期退役" 'missing=\[\] deleted_in_window=\[kid \]' "$SWAP_LOG"
+teardown
+
+# 34e 對照組：以下都照樣回滾（rc=7）。
+#   still_running：last_run 仍在跑；
+#   not_observed：exit_reason 不是 herdr 事件寫的 pane exited（對帳才發現的 pane gone）；
+#   pane_present：退役當下 pane 還在；
+#   parent_idle：父 bot 沒有 active run。
+for c in still_running not_observed pane_present parent_idle; do
+  setup 10 10
+  export STUB_NAMES_BEFORE='["a","mom","kid"]' STUB_NAMES_AFTER='["a","mom"]'
+  state=exited; reason='pane exited'; pane=gone; momrun="INSERT INTO runs VALUES ('id-mom','running');"
+  case "$c" in
+    still_running) state=running ;;
+    not_observed) reason='pane gone' ;;
+    pane_present) pane=present ;;
+    parent_idle) momrun="" ;;
+  esac
+  seed_audit "INSERT INTO bots (id,name,project_id,deleted_at,managed_by,parent_bot_id,created_at)
+      VALUES ('id-mom','mom','p1',NULL,'user',NULL,'2000-01-01T00:00:00.000Z'),
+             ('id-kid','kid','p1','2099-01-01T00:00:02.000Z','child','id-mom','2000-01-01T00:00:00.000Z');
+    $momrun
+    INSERT INTO intents VALUES ('it1','retire_child','id-kid','{\"why\":\"parent_replaced_child\",\"cause\":\"parent_replaced_child\",\"mode\":\"implicit\",\"pane\":\"$pane\",\"parent_bot_id\":\"id-mom\",\"last_run\":{\"state\":\"$state\",\"ended_at\":\"2099-01-01T00:00:00.900Z\",\"exit_reason\":\"$reason\"}}','done','2099-01-01T00:00:01.000Z');"
+  rc=$(run)
+  check_eq "34e 對照 ${c}：照樣回滾（rc=7）" "7" "$rc"
+  check "34e 對照 ${c}：child 列在 missing" 'missing=\[kid \]' "$SWAP_LOG"
+  teardown
+done
+
 # 35. rollback 還原 DB 前要辨認窗口中新 daemon 收編的 child，並在還原後明確警示它仍有 live pane
 #     （只有升過 schema、往前修失敗才會還原 DB，所以這案用 setup 11 10）。
 setup 11 10

@@ -1828,6 +1828,7 @@ herdr 還列著這個 agent（pane 被搬走）的不算，會被重新收編。
 | `unconfirmed`，開機 reconcile 的 child 退役 | `mode=implicit`、`why` 是 `reconcile_agent_gone`／`reconcile_run_already_ended`、`pane=gone`；payload 指向的 parent 仍有 active run，且仍在換版後名單 | 預期退役，不回滾；最多重查 5 秒等 intent 落地 |
 | 其他 `unconfirmed` | pane 不在但沒有人親眼看到它被關、問不到 herdr，或父 bot 不在／沒有 active run | 回滾 |
 | 換版前就已死掉的 child（任何 `cause`） | `mode=implicit`、`why=reconcile_run_already_ended`、payload 的 `last_run.ended_at` 早於換版窗口起點（`SWAP_T0`）且 `last_run.state` 不是 active、這顆 child 現在也沒有 active run（2026-10-16：66378ada 換版時，13:27 就 pane gone 的 child 被誤判遺失） | 換版沒弄丟它，不回滾。run 換版前還活著的 `agent_missing`、母 bot 消失仍回滾 |
+| `parent_replaced_child`，父 bot 在窗口內收掉 child | `managed_by=child`、`pane=gone`、`last_run.state=exited` 且 `last_run.exit_reason='pane exited'`（herdr 事件寫的），payload 指向的 parent 未刪且仍有 active run；不要求窗口內有新 child（2026-10-17 16:10Z：978cf980 換版時母 bot 收掉 p1814 被誤判遺失，#1820） | 刻意，不回滾。last_run 仍在跑、exit_reason 不是 `pane exited`、pane 還在、父 bot 沒有 active run 都照樣回滾 |
 
 依據：`daemon-swap.sh` 只重啟 daemon、herdr 不動，換版本身關不掉任何 pane。pane 還在、新 daemon 認不出裡面的 agent（`agent_missing`）仍回滾；
 pane 已 gone 但沒有關閉事件時，只容許窄例外：新 daemon 的 reconcile 寫下 `unconfirmed` 退役紀錄、child 有 parent、父 bot 的 run 仍 active，且父 bot 仍在新版名單。
