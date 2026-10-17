@@ -2,7 +2,6 @@ import test from 'node:test'
 import assert from 'node:assert/strict'
 import { routeDaemon } from './storeEnv.harness.ts'
 import { useStore } from './store.ts'
-import { startRouteSync } from './routeSync.ts'
 
 // 網址 ↔ store 的競態（#1808）：shell 深連結的 `fetchHostShells` 還在等的時候使用者點了別的 bot，
 // 舊的回應不可以把選取改回 shell，也不可以在失敗時把畫面送回首頁。
@@ -40,6 +39,22 @@ function reset() {
   useStore.setState({ selectedBotId: null, selectedProjectId: null, shellView: null, settingsBotId: null })
 }
 
+/**
+ * 開機：每次拿一份新的 `routeSync` 模組實例（`?boot=` 讓 bun 當成另一個模組），store 仍是同一個。
+ * 網址先設成要測的深連結，選取照 localStorage 的樣子先放進去，`ready` 之前不套用。
+ */
+let bootCount = 0
+async function bootAt(path: string, bots: Array<{ id: string }>) {
+  popListeners.length = 0
+  shellReplies = []
+  // 上一個實例的訂閱還活著：先清選取（它只會把網址寫回首頁），再設這次的網址。
+  useStore.setState({ selectedBotId: null, selectedProjectId: null, shellView: null, settingsBotId: null, bots: bots as never, projects: [], ready: false })
+  page.path = path
+  const mod = (await import('./routeSync.ts?boot=' + ++bootCount)) as typeof import('./routeSync.ts')
+  mod.startRouteSync()
+  useStore.setState({ ready: true })
+}
+
 test.before(() => {
   g.location = { get pathname() { return page.path }, search: '', protocol: 'http:', host: '127.0.0.1:7788' }
   g.history = {
@@ -66,12 +81,34 @@ test.before(() => {
     }
     return new Response('{}', { status: 200 })
   })
-  startRouteSync()
-  useStore.setState({ bots: [{ id: 'b', name: 'b' }] as never, projects: [], ready: true })
 })
 
-// 不還原全域：`startRouteSync` 的 store 訂閱是整個行程的（應用程式啟動時掛一次），拆掉 history 之後
-// 別的測試一改 store 就會呼叫 `history.replaceState` 丟例外。這些桩只讀寫網址，留著無害。
+// 開機路徑：深連結在途時，選取被還原（不是路由自己寫的）→ 網址與畫面必須一致，不能網址是 shell、畫面是別的。
+test('開機帶 shell 深連結，shell 還沒回來時選取被還原改掉：網址與畫面一致', async () => {
+  await bootAt('/hosts/remote/shells/p1', [{ id: 'b' }, { id: 'c' }])
+  await flush()
+  assert.equal(shellReplies.length, 1)
+
+  useStore.setState({ selectedBotId: 'b' })
+  shellReplies[0].resolve({ shells: [{ pane_id: 'p1', cwd: '/w' }] })
+  await flush()
+
+  const s = useStore.getState()
+  const onShell = s.shellView?.paneId === 'p1' && page.path === '/hosts/remote/shells/p1'
+  const onBot = s.selectedBotId === 'b' && s.shellView === null && page.path === '/bots/b'
+  assert.ok(onShell || onBot, `網址 ${page.path} 與畫面不一致：selected=${s.selectedBotId} shell=${s.shellView?.paneId ?? null}`)
+})
+
+test('開機帶 shell 深連結，shell 正常回來：顯示那個 shell，網址不變', async () => {
+  await bootAt('/hosts/remote/shells/p1', [{ id: 'b' }])
+  await flush()
+  shellReplies[0].resolve({ shells: [{ pane_id: 'p1', cwd: '/w' }] })
+  await flush()
+
+  const s = useStore.getState()
+  assert.equal(s.shellView?.paneId, 'p1')
+  assert.equal(page.path, '/hosts/remote/shells/p1')
+})
 
 test('shell 還沒回來時使用者改選別的 bot：舊結果不改選取，網址維持新的 bot', async () => {
   reset()
