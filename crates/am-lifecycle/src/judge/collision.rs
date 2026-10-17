@@ -10,7 +10,7 @@
 //! - 未結案交辦裡點名的 `#N`，以及 worktree 分支名尾端的 `-gN`／`issue-N`（已認領的票）
 //! - child 與 running 頂層 bot 的 worktree 分支（`.git/HEAD`，沒有就用 `.claude/worktrees/<名>`）
 //!
-//! 被派工那顆自己的卡不比。開票那條的專案看 `[release_triage] repo` 對得上哪個專案。
+//! 被派工那顆自己的卡不比。開票那條的專案看 `[release_triage] project_ids`。
 //!
 //! 路徑前綴的 `ownership_conflicts` 照舊、不跟這個機率加成一個分數。同一對只問一次。
 //! 超過 [`MAX_PAIRS`] 時先問票號或路徑 basename 有重疊的——那只是名額的順序，不是分數。
@@ -148,8 +148,13 @@ pub struct ClaimAsk {
     pub caller: String,
     pub issue: Option<u64>,
     pub title: String,
-    /// 被派去做的那顆（bot 名）。它自己在跑的卡不拿來比：同一顆接著做不是撞題。
+    /// 被派去做的那顆的名字，只做顯示：bot／agent 名稱可以改，不拿來找 bot、不進候選 key。
     pub child: String,
+    /// 被派去做的那顆的 bot ID（呼叫端明講才有）。它自己在跑的卡不拿來比：同一顆接著做不是撞題。
+    /// 沒有、或不是這個專案的存活 bot：候選記在呼叫端名下（缺證據＝未知，不用名字猜）。
+    pub child_bot_id: Option<String>,
+    /// 這次認領的穩定 ID（`agm issue claim` 的 `claim_id`）：候選 key 靠它，重送／spool 重放是同一個候選。
+    pub claim_id: Option<String>,
     pub branch: Option<String>,
 }
 
@@ -170,19 +175,27 @@ pub async fn check_claim(app: &(impl crate::capabilities::Cfg + crate::capabilit
     if !app.cfg().get().await.judge.enabled {
         return Ok(());
     }
-    // child 的 bot 名＝它在這個專案裡的那一顆；對不上就用呼叫端自己（它的卡同樣不比）。
-    let child: Option<(String, String, Option<String>)> =
-        sqlx::query_as("SELECT id, kind, parent_bot_id FROM bots WHERE project_id = ? AND name = ? AND deleted_at IS NULL LIMIT 1")
-            .bind(&ask.project_id)
-            .bind(&ask.child)
-            .fetch_optional(app.db())
-            .await?;
+    // child 只認呼叫端給的 bot ID（要在這個專案、還活著）；沒給或對不上就用呼叫端自己（它的卡同樣不比）。名字不拿來找 bot。
+    let child: Option<(String, String, Option<String>)> = match ask.child_bot_id.as_deref().filter(|id| !id.is_empty()) {
+        Some(id) => {
+            sqlx::query_as("SELECT id, kind, parent_bot_id FROM bots WHERE project_id = ? AND id = ? AND deleted_at IS NULL")
+                .bind(&ask.project_id)
+                .bind(id)
+                .fetch_optional(app.db())
+                .await?
+        }
+        None => None,
+    };
     let (bot_id, agent_kind, parent_bot_id) = child.unwrap_or_else(|| (ask.caller.clone(), String::new(), None));
     let mut summary = ask.title.clone();
     if let Some(branch) = &ask.branch {
         summary = format!("{summary}\nbranch {branch}");
     }
-    let key = format!("claim:{}:{}", ask.child, ask.issue.map_or_else(|| "-".to_string(), |n| n.to_string()));
+    // 候選 key 不放名字：有 claim ID 就用它，沒有（舊版 CLI）退回「呼叫端＋票號」。
+    let key = match ask.claim_id.as_deref().filter(|id| !id.is_empty()) {
+        Some(id) => format!("claim:{id}"),
+        None => format!("claim:{}:{}", ask.caller, ask.issue.map_or_else(|| "-".to_string(), |n| n.to_string())),
+    };
     // 呼叫端、候選（child 或呼叫端）與它的父 bot：提示會掛在後兩者之一，呼叫端也要還在（#1626）。
     let mut live_bots = vec![ask.caller.clone(), bot_id.clone()];
     live_bots.extend(parent_bot_id.clone());
@@ -481,19 +494,17 @@ async fn gate_after_asked_for_test(pair: &str) {
     }
 }
 
-/// release-triage 開的票屬於 `[release_triage] repo`（`owner/name`）。專案 label 或路徑最後一段等於 `name`
-/// 的才算「同專案」；對不上就不問——拿別的專案在跑的工作來比只會是雜訊。
+/// release-triage 開的票屬於 `[release_triage] repo`；同專案由 `[release_triage] project_ids` 明講（專案 ID，可多個）。
+/// 專案 label 與路徑都會改、也會有同名的別個專案，不拿來猜；沒設、或設的專案已刪，就不問——拿別的專案在跑的工作來比只會是雜訊。
 async fn repo_projects(app: &(impl crate::capabilities::Cfg + crate::capabilities::Db)) -> Result<Vec<String>> {
-    let repo = app.cfg().get().await.release_triage.repo.unwrap_or_default();
-    let Some(name) = repo.trim().trim_end_matches('/').rsplit('/').next().filter(|n| !n.is_empty()).map(str::to_string) else {
-        return Ok(Vec::new());
-    };
-    let rows: Vec<(String, String, String)> = sqlx::query_as("SELECT id, label, path FROM projects WHERE deleted_at IS NULL").fetch_all(app.db()).await?;
-    Ok(rows
-        .into_iter()
-        .filter(|(_, label, path)| *label == name || path.trim_end_matches('/').rsplit('/').next() == Some(name.as_str()))
-        .map(|(id, _, _)| id)
-        .collect())
+    let wanted = app.cfg().get().await.release_triage.project_ids;
+    let mut live = Vec::new();
+    for id in wanted {
+        if !live.contains(&id) && crate::db::project(app.db(), &id).await?.is_some_and(|p| p.deleted_at.is_none()) {
+            live.push(id);
+        }
+    }
+    Ok(live)
 }
 
 async fn running_cards(app: &impl crate::capabilities::Db, project_id: &str, skip_key: &str, skip_bot: &str) -> Result<Vec<Card>> {
@@ -1025,7 +1036,7 @@ mod tests {
         )
         .await
         .unwrap();
-        let pair = format!("claim:candidate:1499|asg:{}", existing.id);
+        let pair = format!("claim:{}:1499|asg:{}", caller.id, existing.id);
         let _gate = AskedRaceGateGuard::install(&pair, 2);
         let ask = || ClaimAsk {
             project_id: rig.env.project_id.clone(),
@@ -1033,6 +1044,8 @@ mod tests {
             issue: Some(1499),
             title: "修正同一個 Jev 撞題檢查的競態 #1499".into(),
             child: "candidate".into(),
+            child_bot_id: None,
+            claim_id: None,
             branch: None,
         };
 
@@ -1068,6 +1081,8 @@ mod tests {
             issue: Some(issue),
             title: format!("檢查獨立工作 {issue}"),
             child: "candidate".into(),
+            child_bot_id: None,
+            claim_id: None,
             branch: None,
         };
         let first_app = app.clone();
@@ -1204,6 +1219,8 @@ mod tests {
             issue: Some(1467),
             title: "修 sidebar 的捲動殘影".into(),
             child: "ops-web".into(),
+            child_bot_id: None,
+            claim_id: None,
             branch: None,
         };
         check_claim(&app, &ask).await.unwrap();
@@ -1262,6 +1279,8 @@ mod tests {
             issue: Some(1468),
             title: "Candidate issue #1468 title".into(),
             child: caller.name.clone(),
+            child_bot_id: None,
+            claim_id: None,
             branch: None,
         };
         check_claim(&app, &ask).await.unwrap();
@@ -1666,8 +1685,9 @@ mod tests {
     async fn an_opened_issue_is_compared_the_same_way() {
         let rig = stand(Mode::Noul(0.81), true, true).await;
         let app = rig.env.app.clone();
-        // 票開在 `[release_triage] repo`；label 對得上的專案才是「同專案」。
-        app.cfg.update(|c| { c.release_triage.repo = Some("owner/proj".into()); Ok(()) }).await.unwrap();
+        // 票開在 `[release_triage] repo`；`project_ids` 明講的專案才是「同專案」。
+        let pid = rig.env.project_id.clone();
+        app.cfg.update(move |c| { c.release_triage.repo = Some("owner/proj".into()); c.release_triage.project_ids = vec![pid]; Ok(()) }).await.unwrap();
         let parent = tt::claude_bot(&app, &rig.env.project_id, "parent").await;
         let wt = rig.dir.join("wt2");
         std::fs::create_dir_all(&wt).unwrap();
@@ -1693,16 +1713,24 @@ mod tests {
         assert_eq!(rig.seen.lock().unwrap().len(), n);
     }
 
+    /// 名稱不當參照：專案 label／路徑末段剛好等於 repo 名也不算「同專案」，只有 `project_ids` 明講的才是；
+    /// 沒設就不問。
     #[tokio::test]
-    async fn an_issue_in_a_repo_no_project_matches_is_not_compared_with_other_projects() {
+    async fn an_issue_is_only_compared_with_the_configured_project_ids_not_with_a_same_named_project() {
         let rig = stand(Mode::Noul(0.81), true, true).await;
         let app = rig.env.app.clone();
-        app.cfg.update(|c| { c.release_triage.repo = Some("owner/some-other-repo".into()); Ok(()) }).await.unwrap();
+        let label: String = sqlx::query_scalar("SELECT label FROM projects WHERE id = ?").bind(&rig.env.project_id).fetch_one(&app.db).await.unwrap();
+        let repo = format!("owner/{label}");
+        app.cfg.update(move |c| { c.release_triage.repo = Some(repo); Ok(()) }).await.unwrap();
         let parent = tt::claude_bot(&app, &rig.env.project_id, "parent").await;
         child(&app, &rig.env.project_id, &parent.id, "sib", rig.dir.to_str().unwrap(), "舊快照蓋掉額度").await;
         check_opened(&app, &[], &sample_row(404)).await.unwrap();
-        assert!(rig.seen.lock().unwrap().is_empty(), "別的 repo 開的票不拿來跟這個專案比");
+        assert!(rig.seen.lock().unwrap().is_empty(), "label 對得上 repo 名、但沒設 project_ids：不問");
         assert!(shadow_rows(&app).await.is_empty() && inbox(&app).await.is_empty());
+
+        app.cfg.update(|c| { c.release_triage.project_ids = vec!["no-such-project".into()]; Ok(()) }).await.unwrap();
+        check_opened(&app, &[], &sample_row(404)).await.unwrap();
+        assert!(rig.seen.lock().unwrap().is_empty(), "設的專案 ID 不存在：不問，也不退回用名字猜");
     }
 
     fn sample_row(number: i64) -> Row {
@@ -1811,13 +1839,15 @@ mod tests {
         (parent, newbie)
     }
 
-    fn claim_ask(project: &str, caller: &str, child: &str) -> ClaimAsk {
+    fn claim_ask(project: &str, caller: &str, child_bot_id: Option<&str>) -> ClaimAsk {
         ClaimAsk {
             project_id: project.into(),
             caller: caller.into(),
             issue: Some(1330),
             title: "修卡住的畫面判斷".into(),
-            child: child.into(),
+            child: "newbie".into(),
+            child_bot_id: child_bot_id.map(String::from),
+            claim_id: Some("claim-1330".into()),
             branch: Some("fix/newbie-g1330".into()),
         }
     }
@@ -1826,8 +1856,8 @@ mod tests {
     async fn a_claim_at_or_above_half_hints_once_per_pair_and_never_blocks() {
         let rig = stand(Mode::Noul(0.72), true, true).await;
         let app = rig.env.app.clone();
-        let (parent, _newbie) = claim_setup(&app, &rig.env.project_id, &rig.dir, "卡住的畫面判斷 #1330").await;
-        let ask = || claim_ask(&rig.env.project_id, &parent.id, "newbie");
+        let (parent, newbie) = claim_setup(&app, &rig.env.project_id, &rig.dir, "卡住的畫面判斷 #1330").await;
+        let ask = || claim_ask(&rig.env.project_id, &parent.id, Some(&newbie.id));
         check_claim(&app, &ask()).await.unwrap();
         let rows = shadow_rows(&app).await;
         assert_eq!(rows.len(), 1, "{rows:?}");
@@ -1842,8 +1872,8 @@ mod tests {
     async fn a_claim_below_half_only_lands_in_the_ledger() {
         let rig = stand(Mode::Noul(0.3), true, true).await;
         let app = rig.env.app.clone();
-        let (parent, _newbie) = claim_setup(&app, &rig.env.project_id, &rig.dir, "卡住的畫面判斷 #1330").await;
-        check_claim(&app, &claim_ask(&rig.env.project_id, &parent.id, "newbie")).await.unwrap();
+        let (parent, newbie) = claim_setup(&app, &rig.env.project_id, &rig.dir, "卡住的畫面判斷 #1330").await;
+        check_claim(&app, &claim_ask(&rig.env.project_id, &parent.id, Some(&newbie.id))).await.unwrap();
         assert_eq!(shadow_rows(&app).await.len(), 1, "帳本照寫");
         assert!(inbox(&app).await.is_empty(), "<0.5 不推提示");
     }
@@ -1853,8 +1883,8 @@ mod tests {
         for (enabled, listed) in [(false, true), (true, false)] {
             let rig = stand(Mode::Noul(0.9), enabled, listed).await;
             let app = rig.env.app.clone();
-            let (parent, _newbie) = claim_setup(&app, &rig.env.project_id, &rig.dir, "卡住的畫面判斷 #1330").await;
-            check_claim(&app, &claim_ask(&rig.env.project_id, &parent.id, "newbie")).await.unwrap();
+            let (parent, newbie) = claim_setup(&app, &rig.env.project_id, &rig.dir, "卡住的畫面判斷 #1330").await;
+            check_claim(&app, &claim_ask(&rig.env.project_id, &parent.id, Some(&newbie.id))).await.unwrap();
             assert!(rig.seen.lock().unwrap().is_empty(), "enabled={enabled} listed={listed}：不問");
             assert!(shadow_rows(&app).await.is_empty(), "enabled={enabled} listed={listed}：不寫帳本");
         }
@@ -1868,7 +1898,7 @@ mod tests {
         let own_run = tt::fake_run(&app, &newbie.id).await;
         sqlx::query("UPDATE runs SET agent_title=? WHERE id=?").bind("修卡住的畫面判斷 自己的 SELF-1330").bind(&own_run).execute(&app.db).await.unwrap();
         crate::supervisor::store::insert_assignment(&app.db, None, &newbie.id, "own-1330", "SELF-ASSIGNMENT 還沒驗收", &[], None, true).await.unwrap();
-        check_claim(&app, &claim_ask(&rig.env.project_id, &parent.id, "newbie")).await.unwrap();
+        check_claim(&app, &claim_ask(&rig.env.project_id, &parent.id, Some(&newbie.id))).await.unwrap();
         let asked = rig.seen.lock().unwrap().clone();
         assert_eq!(asked.len(), 1, "只問 sib，不問 child 自己的卡：{asked:?}");
         let text = asked[0].to_string();
@@ -1880,10 +1910,40 @@ mod tests {
         let rig = stand(Mode::Noul(0.9), true, true).await;
         let app = rig.env.app.clone();
         let (parent, _newbie) = claim_setup(&app, &rig.env.project_id, &rig.dir, "卡住的畫面判斷 #1330").await;
-        check_claim(&app, &claim_ask(&rig.env.project_id, &parent.id, "ghost-child")).await.unwrap();
+        check_claim(&app, &claim_ask(&rig.env.project_id, &parent.id, Some("ghost-child-id"))).await.unwrap();
         let bot: String = sqlx::query_scalar("SELECT bot_id FROM judge_shadow WHERE regex_verdict='same_work' LIMIT 1").fetch_one(&app.db).await.unwrap();
         assert_eq!(bot, parent.id, "對不上 bot 時記在呼叫端名下");
         assert_eq!(rig.seen.lock().unwrap().len(), 1);
+    }
+
+    /// 名稱不當參照：child 只認 bot ID。bot 改名後，帶 ID 的認領照樣把它自己的卡排除；
+    /// 只有名字（沒帶 ID）時，即使專案裡剛好有同名的 bot 也不當成 child——記在呼叫端名下，那顆同名 bot 的卡照常拿來比。
+    #[tokio::test]
+    async fn a_claim_finds_its_child_by_bot_id_never_by_name() {
+        let rig = stand(Mode::Noul(0.9), true, true).await;
+        let app = rig.env.app.clone();
+        let (parent, newbie) = claim_setup(&app, &rig.env.project_id, &rig.dir, "別的工作 #77").await;
+        let own_run = tt::fake_run(&app, &newbie.id).await;
+        sqlx::query("UPDATE runs SET agent_title=? WHERE id=?").bind("修卡住的畫面判斷 自己的 SELF-1330").bind(&own_run).execute(&app.db).await.unwrap();
+        sqlx::query("UPDATE bots SET name='renamed-newbie' WHERE id=?").bind(&newbie.id).execute(&app.db).await.unwrap();
+
+        check_claim(&app, &claim_ask(&rig.env.project_id, &parent.id, Some(&newbie.id))).await.unwrap();
+        let text = rig.seen.lock().unwrap().iter().map(|v| v.to_string()).collect::<String>();
+        assert!(!text.contains("SELF-1330"), "改名後仍靠 ID 認得 child，自己的卡不比：{text}");
+        let bot: String = sqlx::query_scalar("SELECT bot_id FROM judge_shadow WHERE regex_verdict='same_work' LIMIT 1").fetch_one(&app.db).await.unwrap();
+        assert_eq!(bot, newbie.id);
+
+        // 另一次認領：只帶名字 `newbie`（現在改叫別的，且另有一顆別人叫 `newbie`）。
+        let impostor = tt::claude_bot(&app, &rig.env.project_id, "newbie").await;
+        let impostor_run = tt::fake_run(&app, &impostor.id).await;
+        sqlx::query("UPDATE runs SET agent_title=? WHERE id=?").bind("修卡住的畫面判斷 同名者 NAMESAKE-1330").bind(&impostor_run).execute(&app.db).await.unwrap();
+        let mut ask = claim_ask(&rig.env.project_id, &parent.id, None);
+        ask.claim_id = Some("claim-by-name-only".into());
+        check_claim(&app, &ask).await.unwrap();
+        let text = rig.seen.lock().unwrap().iter().map(|v| v.to_string()).collect::<String>();
+        assert!(text.contains("NAMESAKE-1330"), "沒帶 ID 不用名字認 child，同名那顆的卡照常比：{text}");
+        let bots: Vec<String> = sqlx::query_scalar("SELECT bot_id FROM judge_shadow WHERE regex_verdict='same_work' AND run_id LIKE 'claim:claim-by-name-only%'").fetch_all(&app.db).await.unwrap();
+        assert!(!bots.is_empty() && bots.iter().all(|b| *b == parent.id), "記在呼叫端名下：{bots:?}");
     }
 
     /// #1421：移交出去的專案（`projects.handed_off_to`）不問撞題：不呼叫 Jev、不寫帳本、不推提示。
@@ -1892,9 +1952,9 @@ mod tests {
     async fn a_handed_off_project_is_not_asked_about_a_claim() {
         let rig = stand(Mode::Noul(0.9), true, true).await;
         let app = rig.env.app.clone();
-        let (parent, _newbie) = claim_setup(&app, &rig.env.project_id, &rig.dir, "卡住的畫面判斷 #1330").await;
+        let (parent, newbie) = claim_setup(&app, &rig.env.project_id, &rig.dir, "卡住的畫面判斷 #1330").await;
         sqlx::query("UPDATE projects SET handed_off_to='remote' WHERE id=?").bind(&rig.env.project_id).execute(&app.db).await.unwrap();
-        check_claim(&app, &claim_ask(&rig.env.project_id, &parent.id, "newbie")).await.unwrap();
+        check_claim(&app, &claim_ask(&rig.env.project_id, &parent.id, Some(&newbie.id))).await.unwrap();
         assert!(rig.seen.lock().unwrap().is_empty(), "移交中的專案不問 Jev");
         assert!(shadow_rows(&app).await.is_empty(), "不寫帳本");
         assert!(inbox(&app).await.is_empty(), "不推提示");

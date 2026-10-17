@@ -499,6 +499,9 @@ pub struct ReleaseTriageCfg {
     pub gh_bin: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub repo: Option<String>,
+    /// 這個 repo 對應的專案 ID（可多個）：開票撞題只拿這些專案在跑的工作來比。不用專案 label／路徑末段猜；沒設＝不問。
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub project_ids: Vec<String>,
 }
 
 impl ReleaseTriageCfg {
