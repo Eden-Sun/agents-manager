@@ -212,10 +212,51 @@ async fn write_bytes(host: &Arc<HostConn>, host_name: &str, project_dir: &str, d
             Ok(())
         })
         .await??;
+        // 先準備目錄與 .gitignore（連結就整個失敗），再寫附件本身；失敗由 save() 的 best_effort_cleanup 收。
+        host.ssh_exec(&remote_attachment_prepare_script(dir)).await.with_context(|| format!("prepare {dir} on {host_name}"))?;
         host.ssh_put(agent_path, data).await.with_context(|| format!("copy attachment to {host_name}:{agent_path}"))?;
-        let _ = host.ssh_exec(&format!("printf '*\\n' > {}", sh_quote(&format!("{dir}/.gitignore")))).await;
     }
     Ok(())
+}
+
+/// 遠端附件目錄的準備腳本（純函式）。`dir` 是 `{project}/.agents-manager/attachments`。
+/// 對齊本機 `create_bound_dirs`＋`write_new_file_in`：`.agents-manager`／`attachments` 任一是連結就失敗；
+/// `.gitignore` 在 `set -C`（noclobber）下建立——O_EXCL 不跟隨連結，已經存在（含懸空、或指向界線外的連結）就失敗，忽略，不覆寫。
+/// POSIX sh 沒有 O_NOFOLLOW，連結檢查與 mkdir 之間仍有極小的競爭窗（要同一個專案裡的 agent 在那一瞬間換連結）。
+pub(crate) fn remote_attachment_prepare_script(dir: &str) -> String {
+    format!(
+        "d1={}; d2={}\n\
+         for x in \"$d1\" \"$d2\"; do\n\
+         [ ! -L \"$x\" ] || {{ echo \"refusing: $x is a symlink\" >&2; exit 1; }}\n\
+         done\n\
+         mkdir -p \"$d2\" || exit 1\n\
+         set -C\n\
+         {{ printf '*\\n' > \"$d2/.gitignore\"; }} 2>/dev/null || true\n",
+        sh_quote(parent_of(dir)),
+        sh_quote(dir)
+    )
+}
+
+/// 遠端清掉單一附件的腳本（純函式）。`attachments`／`.agents-manager` 任一是連結就什麼都不刪，
+/// 不經由連結刪到界線外（與寫入側同一個界線）。
+pub(crate) fn remote_attachment_remove_script(agent_path: &str) -> String {
+    let dir = parent_of(agent_path);
+    format!(
+        "d1={}; d2={}; p={}\n\
+         if [ ! -L \"$d1\" ] && [ ! -L \"$d2\" ]; then rm -f \"$p\"; fi\n",
+        sh_quote(parent_of(dir)),
+        sh_quote(dir),
+        sh_quote(agent_path)
+    )
+}
+
+/// `path` 的父目錄；父目錄是根或沒有斜線時給 `/`／`.`。
+fn parent_of(path: &str) -> &str {
+    match path.rsplit_once('/') {
+        Some(("", _)) => "/",
+        Some((d, _)) => d,
+        None => ".",
+    }
 }
 
 /// Remove whatever [`write_bytes`] may have already put down. Best effort and idempotent — safe to
@@ -223,7 +264,7 @@ async fn write_bytes(host: &Arc<HostConn>, host_name: &str, project_dir: &str, d
 async fn best_effort_cleanup(host: &Arc<HostConn>, local_path: &str, agent_path: &str) {
     let _ = std::fs::remove_file(local_path);
     if !host.is_local() {
-        let _ = host.ssh_exec(&format!("rm -f {}", sh_quote(agent_path))).await;
+        let _ = host.ssh_exec(&remote_attachment_remove_script(agent_path)).await;
     }
 }
 
@@ -298,7 +339,7 @@ async fn remove_files(
             if unreachable.contains(host_name) {
                 false
             } else {
-                let ok = host.ssh_exec(&format!("rm -f {}", sh_quote(agent_path))).await.is_ok();
+                let ok = host.ssh_exec(&remote_attachment_remove_script(agent_path)).await.is_ok();
                 if !ok {
                     unreachable.insert(host_name.to_string());
                 }
@@ -642,4 +683,101 @@ pub fn is_inline(served: &str) -> bool {
 
 pub fn to_json(a: &Attachment) -> serde_json::Value {
     json!({"id": a.id, "name": a.name, "mime": a.mime, "size": a.size, "path": a.path})
+}
+
+#[cfg(test)]
+mod remote_script_tests {
+    use super::{remote_attachment_prepare_script, remote_attachment_remove_script};
+    use crate::hosts::remote_script_support::{run_sh, Scratch};
+    use std::os::unix::fs::symlink;
+
+    #[test]
+    fn prepare_creates_the_dirs_and_a_star_gitignore_when_there_is_none() {
+        let s = Scratch::new();
+        let dir = s.0.join(".agents-manager/attachments");
+        assert!(run_sh(&remote_attachment_prepare_script(dir.to_str().unwrap()), b""));
+        assert_eq!(std::fs::read(dir.join(".gitignore")).unwrap(), b"*\n");
+    }
+
+    #[test]
+    fn prepare_keeps_an_existing_gitignore() {
+        let s = Scratch::new();
+        let dir = s.0.join(".agents-manager/attachments");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join(".gitignore"), b"keep\n").unwrap();
+        run_sh(&remote_attachment_prepare_script(dir.to_str().unwrap()), b"");
+        assert_eq!(std::fs::read(dir.join(".gitignore")).unwrap(), b"keep\n", "已經有的 .gitignore 不覆寫");
+    }
+
+    #[test]
+    fn prepare_does_not_write_through_a_gitignore_symlink() {
+        let s = Scratch::new();
+        let dir = s.0.join(".agents-manager/attachments");
+        std::fs::create_dir_all(&dir).unwrap();
+        let outside = s.0.join("outside.txt");
+        std::fs::write(&outside, b"secret").unwrap();
+        symlink(&outside, dir.join(".gitignore")).unwrap();
+        run_sh(&remote_attachment_prepare_script(dir.to_str().unwrap()), b"");
+        assert_eq!(std::fs::read(&outside).unwrap(), b"secret", "被換成連結的 .gitignore 不能截斷界線外的檔");
+    }
+
+    #[test]
+    fn prepare_does_not_create_a_dangling_gitignore_symlink_target() {
+        let s = Scratch::new();
+        let dir = s.0.join(".agents-manager/attachments");
+        std::fs::create_dir_all(&dir).unwrap();
+        let outside = s.0.join("not-yet.txt");
+        symlink(&outside, dir.join(".gitignore")).unwrap();
+        run_sh(&remote_attachment_prepare_script(dir.to_str().unwrap()), b"");
+        assert!(!outside.exists(), "懸空的 .gitignore 連結不能經由它建立界線外的檔");
+    }
+
+    #[test]
+    fn prepare_refuses_a_symlinked_agents_manager_dir() {
+        let s = Scratch::new();
+        let elsewhere = s.0.join("elsewhere");
+        std::fs::create_dir_all(&elsewhere).unwrap();
+        std::fs::create_dir_all(s.0.join("project")).unwrap();
+        symlink(&elsewhere, s.0.join("project/.agents-manager")).unwrap();
+        let dir = s.0.join("project/.agents-manager/attachments");
+        assert!(!run_sh(&remote_attachment_prepare_script(dir.to_str().unwrap()), b""), "`.agents-manager` 是連結要失敗");
+        assert!(!elsewhere.join("attachments").exists(), "不能經由連結建出界線外的目錄");
+    }
+
+    #[test]
+    fn prepare_refuses_a_symlinked_attachments_dir() {
+        let s = Scratch::new();
+        let elsewhere = s.0.join("elsewhere");
+        std::fs::create_dir_all(&elsewhere).unwrap();
+        std::fs::create_dir_all(s.0.join("project/.agents-manager")).unwrap();
+        let dir = s.0.join("project/.agents-manager/attachments");
+        symlink(&elsewhere, &dir).unwrap();
+        assert!(!run_sh(&remote_attachment_prepare_script(dir.to_str().unwrap()), b""), "`attachments` 是連結要失敗");
+        assert!(!elsewhere.join(".gitignore").exists(), "不能經由連結在界線外寫 .gitignore");
+    }
+
+    #[test]
+    fn remove_deletes_a_normal_attachment() {
+        let s = Scratch::new();
+        let dir = s.0.join(".agents-manager/attachments");
+        std::fs::create_dir_all(&dir).unwrap();
+        let file = dir.join("a.png");
+        std::fs::write(&file, b"bytes").unwrap();
+        assert!(run_sh(&remote_attachment_remove_script(file.to_str().unwrap()), b""));
+        assert!(!file.exists());
+    }
+
+    #[test]
+    fn remove_does_not_delete_through_a_symlinked_attachments_dir() {
+        let s = Scratch::new();
+        let elsewhere = s.0.join("elsewhere");
+        std::fs::create_dir_all(&elsewhere).unwrap();
+        let victim = elsewhere.join("victim.png");
+        std::fs::write(&victim, b"not ours").unwrap();
+        std::fs::create_dir_all(s.0.join("project/.agents-manager")).unwrap();
+        let dir = s.0.join("project/.agents-manager/attachments");
+        symlink(&elsewhere, &dir).unwrap();
+        run_sh(&remote_attachment_remove_script(dir.join("victim.png").to_str().unwrap()), b"");
+        assert_eq!(std::fs::read(&victim).unwrap(), b"not ours", "經由連結的清理不能刪界線外的檔");
+    }
 }

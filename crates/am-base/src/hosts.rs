@@ -147,6 +147,107 @@ pub fn sh_quote(s: &str) -> String {
     format!("'{}'", s.replace('\'', "'\\''"))
 }
 
+/// `ssh_put` 在遠端跑的 sh 腳本（純函式：測試用本機 `/bin/sh` 直接跑同一段）。
+/// 先拒絕目標本身與父目錄是連結（不跟隨）；內容寫到同目錄的暫存檔（`set -C`，不會寫進既有的連結），
+/// 再 `mv -f` 過去——`mv` 替換的是目錄項本身，不會寫到連結指向的界線外。
+/// 父目錄以上的祖先不逐段檢查（`mkdir -p` 會跟隨）：要守那一段的呼叫端自己檢查（附件見 `attach::remote_attachment_prepare_script`）。
+pub fn ssh_put_script(path: &str) -> String {
+    let dir = match path.rsplit_once('/') {
+        Some((d, _)) if !d.is_empty() => d,
+        _ => ".",
+    };
+    format!(
+        "d={}; p={}\n\
+         [ ! -L \"$p\" ] || {{ echo \"refusing: $p is a symlink\" >&2; exit 1; }}\n\
+         [ ! -L \"$d\" ] || {{ echo \"refusing: $d is a symlink\" >&2; exit 1; }}\n\
+         mkdir -p \"$d\" || exit 1\n\
+         set -C\n\
+         t=\"$d/.am-put.$$\"\n\
+         cat > \"$t\" && mv -f \"$t\" \"$p\" || {{ rm -f \"$t\"; exit 1; }}\n",
+        sh_quote(dir),
+        sh_quote(path)
+    )
+}
+
+/// 測試用：本機臨時目錄（不碰真 HOME）與用 `/bin/sh` 跑遠端腳本的小工具，給 am-base 內會產生遠端 sh 腳本的測試共用。
+#[cfg(test)]
+pub(crate) mod remote_script_support {
+    use std::io::Write;
+    use std::path::PathBuf;
+    use std::process::{Command, Stdio};
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    /// 離開作用域就整個刪掉的臨時目錄。
+    pub(crate) struct Scratch(pub PathBuf);
+
+    impl Scratch {
+        pub(crate) fn new() -> Self {
+            static N: AtomicUsize = AtomicUsize::new(0);
+            let dir = std::env::temp_dir().join(format!("am-remote-script-{}-{}", std::process::id(), N.fetch_add(1, Ordering::SeqCst)));
+            let _ = std::fs::remove_dir_all(&dir);
+            std::fs::create_dir_all(&dir).unwrap();
+            Self(dir)
+        }
+    }
+
+    impl Drop for Scratch {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+
+    /// 用本機 `/bin/sh -c` 跑一段腳本，stdin 餵 `stdin`；回傳 exit 是否成功。
+    pub(crate) fn run_sh(script: &str, stdin: &[u8]) -> bool {
+        let mut child = Command::new("/bin/sh").arg("-c").arg(script).stdin(Stdio::piped()).spawn().unwrap();
+        // 腳本拒絕時會提早 exit、不讀 stdin，寫入會是 broken pipe：那是預期的，看 exit 狀態就好。
+        let _ = child.stdin.take().unwrap().write_all(stdin);
+        child.wait().unwrap().success()
+    }
+}
+
+#[cfg(test)]
+mod ssh_put_script_tests {
+    use super::remote_script_support::{run_sh, Scratch};
+    use super::ssh_put_script;
+    use std::os::unix::fs::symlink;
+
+    #[test]
+    fn ssh_put_creates_the_parent_dir_and_replaces_an_existing_file() {
+        let s = Scratch::new();
+        let target = s.0.join("sub/a.png");
+        let target = target.to_str().unwrap();
+        assert!(run_sh(&ssh_put_script(target), b"first"));
+        assert_eq!(std::fs::read(target).unwrap(), b"first");
+        assert!(run_sh(&ssh_put_script(target), b"second"));
+        assert_eq!(std::fs::read(target).unwrap(), b"second");
+    }
+
+    #[test]
+    fn ssh_put_refuses_a_symlink_leaf_and_leaves_the_outside_file_alone() {
+        let s = Scratch::new();
+        let outside = s.0.join("outside.txt");
+        std::fs::write(&outside, b"secret").unwrap();
+        let dir = s.0.join("attachments");
+        std::fs::create_dir_all(&dir).unwrap();
+        symlink(&outside, dir.join("a.png")).unwrap();
+
+        assert!(!run_sh(&ssh_put_script(dir.join("a.png").to_str().unwrap()), b"payload"), "連結目標要拒絕");
+        assert_eq!(std::fs::read(&outside).unwrap(), b"secret", "界線外的檔案不能被寫");
+    }
+
+    #[test]
+    fn ssh_put_refuses_a_symlinked_parent_dir() {
+        let s = Scratch::new();
+        let outside = s.0.join("elsewhere");
+        std::fs::create_dir_all(&outside).unwrap();
+        let link = s.0.join("attachments");
+        symlink(&outside, &link).unwrap();
+
+        assert!(!run_sh(&ssh_put_script(link.join("a.png").to_str().unwrap()), b"payload"), "父目錄是連結要拒絕");
+        assert!(!outside.join("a.png").exists(), "不能經由父目錄連結寫到界線外");
+    }
+}
+
 /// 本機跑一段 `/bin/sh -c` 的完整結果。逾時時 `status` 是 `None`、`timed_out` 為真，但**逾時前已讀到的 stdout／stderr 都留著**：
 /// 有些指令會先印出關鍵字再卡住等人（例如 `agy -p /usage` 印 `Authentication required` 後等人去開網址），
 /// 只回「逾時」會讓呼叫端認不出它其實是沒登入（issue #870）。
@@ -472,11 +573,7 @@ impl HostConn {
     /// Script in argv, stdin carries the file (`ssh_exec` already uses stdin for the script).
     pub async fn ssh_put(&self, path: &str, data: &[u8]) -> Result<()> {
         let Some(cfg) = &self.cfg else { bail!("ssh_put called on the local host") };
-        let dir = match path.rsplit_once('/') {
-            Some((d, _)) if !d.is_empty() => d,
-            _ => ".",
-        };
-        let script = format!("mkdir -p {} && cat > {}", sh_quote(dir), sh_quote(path));
+        let script = ssh_put_script(path);
         // ssh joins argv and hands it to the remote login shell: quote once more for that split.
         let remote = format!("/bin/sh -c {}", sh_quote(&script));
         let mut cmd = tokio::process::Command::new("ssh");
