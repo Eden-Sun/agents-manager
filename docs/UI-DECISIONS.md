@@ -1025,6 +1025,8 @@ tooltip 寫最後一次失敗的原因。主機一直離線時沒有任何事件
 
 使用者：「改用緊湊的方式表示這些資訊」（子列 kind 方框、身分、模型＋全名強度並排，模型被截成 `opus –`）。精簡列：身分用小字放在 kind 圖示正下方、模型標籤一行（同日使用者先說「身分可以在 model 下方小字標」，再改「在 kind 下就好了」；先前拼成一顆 `cc0│opus-M` 與拿掉 kind 方框都撤回——codex 圖示縮成一個點，「長得有點怪」）；強度寫縮寫（Medium→M、High→H、Xhigh→XH，全名在 tooltip）。分隔符仍是使用者指定的 `-`。一般列不變。
 
+**agy 的模型標籤（2026-10-17 使用者：「只要 3.8-flash 就好而 high 是 effort」）**：agy slug（`gemini-3.8-flash-high`）去掉 `gemini-`，尾巴的 `-low／-medium／-high` 當強度拆到強度那格（`3.8-flash-H`；一般列 `3.8-flash-High`），跟 codex 去掉 `gpt-` 同一個道理；完整 slug 留在 tooltip。statusLine 有報強度時以它為準。
+
 ## 主力晶片的快取倒數＝晶片底色（2026-10-04 使用者）
 
 - 先提的是另一條細倒數條，使用者改口：**不加元素，晶片原本的底色就是倒數**。兩層色調（`background-image` 加 `background-size`）：整顆一層淡的表示等級，

@@ -70,7 +70,7 @@ import { relayPreview } from '../lib/relayPreview'
 import { relayFromName } from '../lib/relayFromName'
 import { pastedFiles } from '../lib/pasteFiles'
 import { runtimeIdentity, runtimeSettingsKnown } from '../lib/runtimeDrift'
-import { shortModel } from '../lib/shortModel'
+import { agyEffort, shortModel } from '../lib/shortModel'
 import { QuotaStrip } from './QuotaStrip'
 import { PrimaryStar } from './PrimaryStar'
 import { JudgeBadge } from './JudgeBadge'
@@ -1097,10 +1097,11 @@ function derivedStatus(
 }
 
 /** `高 · fast` — the model's settings, shown beside the model badge. */
-function modelExtraOf(status: StatusInfo | null): string {
-  if (!status) return ''
+function modelExtraOf(status: StatusInfo | null, slugEffort: string | null): string {
+  // `slugEffort`：agy 的強度寫在 slug 尾巴（`agyEffort`），statusLine 不報強度。
+  const effort = status?.effort ?? slugEffort
   // 用 `·` 不用連字號（像 model id）；`thinking` 是常態不放（2026-09-11 使用者：「fable-Low 多一個 thinking 怪怪的」）。
-  return [status.effort ? effortLabel(status.effort) : null, status.fast_mode ? 'fast' : null]
+  return [effort ? effortLabel(effort) : null, status?.fast_mode ? 'fast' : null]
     .filter(Boolean)
     .join(' · ')
 }
@@ -1270,7 +1271,8 @@ export function ChatPanel({ onOpenSidebar }: { onOpenSidebar: () => void }) {
         : derived
     }),
   )
-  const modelExtra = modelExtraOf(statusInfo)
+  const slugEffort = bot ? agyEffort(bot.kind, bot.model ?? statusInfo?.model_name ?? null) : null
+  const modelExtra = modelExtraOf(statusInfo, slugEffort)
   // logo 上的閃電跟 model chip 的「· fast」同一個來源：正在跑的那一份，不是設定值（設定改了還沒重啟時兩者不同）。
   const codexFast = bot?.kind === 'codex' && Boolean(statusInfo?.fast_mode)
   const herdrId = herdrIdentity(run, bot?.agent_name)
@@ -1393,7 +1395,7 @@ export function ChatPanel({ onOpenSidebar }: { onOpenSidebar: () => void }) {
               {bot.model || statusInfo?.model_name ? (
                 <span className="mobile-bot-model">
                   {shortModel(bot.kind, bot.model ?? statusInfo?.model_name ?? null)}
-                  {statusInfo?.effort ? ` · ${effortLabel(statusInfo.effort)}` : ''}
+                  {statusInfo?.effort || slugEffort ? ` · ${effortLabel(statusInfo?.effort ?? slugEffort ?? '')}` : ''}
                 </span>
               ) : null}
               <span className="mobile-bot-ver">{statusInfo?.version?.match(/\d+\.\d+\.\d+(?:[-+][\w.-]+)?/)?.[0] ?? statusInfo?.version ?? '—'}</span>

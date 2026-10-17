@@ -1,6 +1,6 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
-import { shortModel } from './shortModel.ts'
+import { agyEffort, shortModel } from './shortModel.ts'
 
 test('claude 只留別名，認不得的原樣', () => {
   assert.equal(shortModel('claude', 'claude-fable-5-1'), 'fable')
@@ -19,4 +19,13 @@ test('codex 去掉每顆都一樣的 gpt- 前綴', () => {
 
 test('grok 不動', () => {
   assert.equal(shortModel('grok', 'grok-4.6'), 'grok-4.6')
+})
+
+test('agy 去掉 gemini-，尾巴的強度拆出去', () => {
+  assert.equal(shortModel('agy', 'gemini-3.8-flash-high'), '3.8-flash')
+  assert.equal(shortModel('agy', 'gemini-3.8-flash-medium'), '3.8-flash')
+  assert.equal(shortModel('agy', 'gemini-4-pro'), '4-pro')
+  assert.equal(agyEffort('agy', 'gemini-3.8-flash-high'), 'high')
+  assert.equal(agyEffort('agy', 'gemini-4-pro'), null)
+  assert.equal(agyEffort('claude', 'claude-x-high'), null)
 })
