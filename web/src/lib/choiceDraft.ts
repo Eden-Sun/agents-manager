@@ -333,7 +333,12 @@ export async function commit(
   if (cur.tabs.length !== draft.tabs.length) {
     return { ok: false, error: '畫面已經變了（分頁數不一樣），整批都沒送出，請重新讀取。' }
   }
-  let at = locate(draft, cur) ?? draft.startTab
+  // 起點分不出在哪一頁：不是 Review 就不猜，直接停（猜了會先送第一頁的答案、到導覽才停下，送了一部分）。
+  const start = locate(draft, cur)
+  if (start === null && !isSubmitMenu(cur)) {
+    return { ok: false, error: '分不出終端停在哪一頁，什麼都沒送出，請重新讀取', at: 0 }
+  }
+  let at = start ?? draft.startTab
 
   // 終端已經停在 Review：單選題終端上本來就是想要的答案的，不必再退回去重答。
   const onReview = isSubmitMenu(cur)
