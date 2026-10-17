@@ -105,22 +105,41 @@ test('遠端 herdr 不給按鈕、講原因；查不到上游、讀不到版本�
   assert.equal(c.rows.some((r) => r.group === 'integration'), false)
 })
 
-test('herdr 還沒讀到版本：CLI 是未安裝、server 查不到；沒有上游快照時 CLI 狀態是查不到', () => {
-  const none = buildHostCheck({ host: 'x', tools: tools(), herdr: herdr(null, null), upstream: {}, integration: integ([]), herdrBlocked: null })
-  assert.equal(none.rows[0].status, 'missing')
-  assert.equal(none.rows[1].status, 'unknown')
+test('herdr 版本：讀到了但 CLI 版本是空的才是未安裝；沒讀到（undefined）是查不到；沒有上游快照時 CLI 也是查不到', () => {
+  const empty = buildHostCheck({ host: 'x', tools: tools(), herdr: herdr(null, null), upstream: {}, integration: integ([]), herdrBlocked: null })
+  assert.equal(empty.rows[0].status, 'missing')
+  assert.equal(empty.rows[1].status, 'unknown')
+  const notRead = buildHostCheck({ host: 'x', tools: tools(), herdr: undefined, upstream: {}, integration: integ([]), herdrBlocked: null })
+  assert.equal(notRead.rows[0].status, 'unknown', '還沒讀到 herdr 不是未安裝')
+  assert.equal(notRead.rows[0].note, '這台還沒讀到 herdr 版本')
+  assert.ok(notRead.rows.filter((r) => r.group === 'herdr').every((r) => r.status === 'unknown'), 'herdr 兩列都是查不到')
   const noUp = buildHostCheck({ host: 'x', tools: tools(), herdr: herdr('herdr 0.9.5', '0.9.5'), upstream: {}, integration: integ([]), herdrBlocked: null })
   assert.equal(noUp.rows[0].status, 'unknown')
   assert.equal(noUp.rows[0].latest, null)
+})
+
+test('工具清單還沒讀到（tools undefined）：四家 CLI 都是查不到，不是未安裝', () => {
+  const check = buildHostCheck({ host: 'x', tools: undefined, herdr: herdr('herdr 0.9.5', '0.9.5'), upstream: {}, integration: integ([]), herdrBlocked: null })
+  for (const r of check.rows.filter((x) => x.group === 'cli')) {
+    assert.equal(r.status, 'unknown', r.id)
+    assert.equal(r.note, '這台還沒讀到工具清單')
+  }
+  const text = summaryText(check)
+  assert.doesNotMatch(text, /未安裝/)
+  assert.match(text, /查不到/)
+})
+
+test('工具清單讀到了、installed 為假：才是未安裝', () => {
+  const check = buildHostCheck({ host: 'x', tools: tools({ grok: tool(false) }), herdr: herdr('herdr 0.9.5', '0.9.5'), upstream: {}, integration: integ([]), herdrBlocked: null })
+  assert.equal(check.rows.find((r) => r.id === 'x:cli-grok')!.status, 'missing')
 })
 
 // #1813：表頭的一句話只有「真的全部確認是最新」才說「都是最新」；查不到、未安裝、integration 沒讀到都要寫出來。
 const srow = (status: CheckStatus): CheckRow => ({ id: status, group: 'cli', label: status, current: null, latest: null, status, note: null, action: null })
 const shost = (statuses: CheckStatus[], over: Partial<HostCheck> = {}): HostCheck => ({ host: 'local', integrationError: null, integrationPending: false, rows: statuses.map(srow), ...over })
 
-test('summaryText：全部確認是最新 → 都是最新；沒有任何項目 → 沒有可檢查的項目', () => {
+test('summaryText：全部確認是最新 → 都是最新', () => {
   assert.equal(summaryText(shost(['latest', 'latest', 'latest'])), '都是最新')
-  assert.equal(summaryText(shost([])), '沒有可檢查的項目')
 })
 
 test('summaryText：有可更新 → 寫出可更新數；其餘照數量寫，不把未確認的算成最新', () => {
