@@ -86,42 +86,29 @@
         }
 
         /// 上一輪 `workspace.close` 失敗（ssh 斷一下）留下的殘留，不能等 daemon 重啟才收：下一輪開新的之前先收。
-        /// 別人的 workspace（使用者的、grok 探測的）不碰。
+        /// 認的是登記過的 workspace id（#1795），不看 label：別人的 workspace 就算叫 `am-quota-…` 也不碰，
+        /// 登記過的殘留就算被改名也收得掉。
         #[tokio::test]
-        async fn a_leftover_from_a_failed_close_is_swept_by_the_next_probe() {
+        async fn a_leftover_from_a_failed_close_is_swept_by_the_next_probe_by_id() {
             let (h, c, dir) = herdr();
             c.workspace_create("/tmp", "proj", json!({})).await.unwrap();
-            c.workspace_create("/tmp", "am-quota-grok", json!({})).await.unwrap();
+            // 使用者自己的 workspace 取了探測的名字：不是我們開的，不能收。
+            c.workspace_create("/tmp", "am-quota-claude", json!({})).await.unwrap();
             h.set_screen("*", &finished_screen());
             h.fail_next("workspace.close", Fault::Refuse);
             run_probe_pane(&c, "/tmp", LABEL, json!({}), "true", Duration::from_secs(5)).await.unwrap();
             let mut left = open_labels(&h, 3).await;
             left.sort();
-            assert_eq!(left, vec!["am-quota-claude-zz92la", "am-quota-grok", "proj"], "前提：這一輪的 close 被拒");
+            assert_eq!(left, vec!["am-quota-claude", "am-quota-claude-zz92la", "proj"], "前提：這一輪的 close 被拒");
+            // 殘留被改名也還是它（認 ID 不認名字）。
+            let leftover = h.workspaces.lock().unwrap().iter().find(|(_, l)| l.as_str() == LABEL).map(|(id, _)| id.clone()).unwrap();
+            h.workspaces.lock().unwrap().insert(leftover, "renamed-by-user".into());
 
             run_probe_pane(&c, "/tmp", "am-quota-claude", json!({}), "true", Duration::from_secs(5)).await.unwrap();
             let mut left = open_labels(&h, 2).await;
             left.sort();
-            assert_eq!(left, vec!["am-quota-grok", "proj"], "殘留與這一輪的都收掉，別人的不動");
+            assert_eq!(left, vec!["am-quota-claude", "proj"], "登記過的殘留（改名後）與這一輪的都收掉，同名的別人那顆不動");
             std::fs::remove_dir_all(dir).ok();
-        }
-
-        /// #709：這一輪的 label 帶 `@<標記>`（共用 session 的主機）：只清同一個標記的殘留，別顆 daemon 的不動。
-        #[tokio::test]
-        async fn a_tagged_probe_sweeps_only_leftovers_with_its_own_tag() {
-            let (h, c, dir) = herdr();
-            c.workspace_create("/tmp", "am-quota-claude@mine", json!({})).await.unwrap();
-            c.workspace_create("/tmp", "am-quota-claude@other", json!({})).await.unwrap();
-            h.set_screen("*", &finished_screen());
-            run_probe_pane(&c, "/tmp", "am-quota-claude-cc1@mine", json!({}), "true", Duration::from_secs(5)).await.unwrap();
-            assert_eq!(open_labels(&h, 1).await, vec!["am-quota-claude@other"]);
-            std::fs::remove_dir_all(dir).ok();
-        }
-
-        #[test]
-        fn the_probe_labels_are_the_ones_the_pane_scan_leaves_out() {
-            assert!(crate::panes::is_daemon_probe_workspace(Some(PROBE_LABEL_PREFIX)));
-            assert!(crate::panes::is_daemon_probe_workspace(Some(&format!("{PROBE_LABEL_PREFIX}-cc1"))));
         }
     }
 

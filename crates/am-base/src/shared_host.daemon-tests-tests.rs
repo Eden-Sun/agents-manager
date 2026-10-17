@@ -308,14 +308,3 @@
         assert!(!owned.panes.contains("wT:p1"), "handed-off spawn hint belongs to the other daemon");
         assert!(!owned.panes.contains("wT:preview1"), "handed-off preview belongs to the other daemon");
     }
-
-    #[test]
-    fn only_our_tagged_probes_are_sweepable_on_a_shared_host() {
-        let is_probe = |l: &str| l.starts_with("am-quota-claude");
-        assert!(super::sweepable("am-quota-claude", None, is_probe), "一般主機照舊全清");
-        assert!(super::sweepable("am-quota-claude@x", None, is_probe));
-        assert!(super::sweepable("am-quota-claude-cc1@mine", Some("mine"), is_probe));
-        assert!(!super::sweepable("am-quota-claude@other", Some("mine"), is_probe));
-        assert!(!super::sweepable("am-quota-claude", Some("mine"), is_probe), "沒標記的可能是別顆舊版 daemon 的");
-        assert!(!super::sweepable("proj@mine", Some("mine"), is_probe));
-    }

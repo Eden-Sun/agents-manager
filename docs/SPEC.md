@@ -2131,9 +2131,10 @@ agent 自己 `herdr agent prompt <名字> …` 時 daemon 沒參與，那句話�
   但**預設永不自動關**——要它可 GC 只有一條路：`adopt` 帶 `allow_gc: true`，等於人簽過名（見下）。
 - **連 cwd 都對不到任何專案的 shell pane：全機只准有一顆**（使用者 2026-09-16 裁示）。那一顆是固定用途的雜事 pane，
   名字固定為 `[panes] scratch_name`（預設 `scratch`，選中時 daemon 就 `herdr pane rename` 成這個名字），**永不自動關**。
-  怎麼選（每輪**完整**掃描後重算，`panes.scratch` 記住）：候選只有「沒歸屬、不是孤兒」的 pane——名字已經是 `scratch_name` 的優先；
-  其次是上一輪選中的（裡面暫時跑 htop 變成 service 也還是它）；名字被一顆不是候選的 pane 佔著（例如 scratch 裡正在跑 claude）
-  那一輪不選；否則在 **`kind='shell'`** 裡取 `first_seen` 最早的。跑著 `tail -f` 的 service pane、刪掉專案留下的孤兒都搶不走。
+  怎麼選（每輪**完整**掃描後重算，`panes.scratch` 記住）：**只認 pane_id，不看 pane 名字**（使用者 2026-10-17「名稱不應該被任何的 ref」：
+  名字會被改、會被撞）。候選只有「沒歸屬、不是孤兒」的 pane——上一輪選中的優先（`panes.scratch`；裡面暫時跑 htop 變成 service、被使用者改名都還是它）；
+  原本那顆還活著卻不是候選（例如 scratch 裡正在跑 claude，變成 agent pane、列被刪，旗標靠記憶體記的 pane_id 保留）那一輪不選、不扶正別人，
+  它回來（或名單裡又出現）仍是它；原本那顆關掉了才在 **`kind='shell'`** 裡取 `first_seen` 最早的。名字只在選好之後拿來顯示（rename 成 `scratch_name`）。跑著 `tail -f` 的 service pane、刪掉專案留下的孤兒都搶不走。
   第二顆以後一律視為「該歸屬而沒歸屬」：UI 標示、推一則 inbox `pane_unowned`（去重規則同 `pane_orphaned`），
   並套用與有歸屬 shell pane **相同**的 GC 規則（同一個閒置門檻與三條守門）。理由是使用者的裁示是「只准一顆」，
   不是「都不要動」——但關掉的門檻一點都不放寬：行程樹只有 shell、關前留 20 行 log、取值失敗不關。
@@ -3569,7 +3570,8 @@ agm-host 的 daemon 以 `m4p` 接手 Mac 的專案，session 都是 `agents-mana
 - **連線**（§11.3 第 1 步）：session 在跑就原樣沿用（`AM_MODE=shared-running`），絕不 `herdr server stop`、不改交給 launchd——
   那是對方的 server（Mac 的 daemon 用 `herdr --session … server` 直接起，launchd 查不到它，以前這條會把它整個停掉）。沒在跑才照舊起。
 - **額度探測**（§12.6）：遠端探測借主 session 開 workspace，label 加上本 daemon 的標記 `…@<tag>`（資料目錄的 `daemon-tag`，第一次用到時隨機產生、
-  重啟不變）；開機清殘留與每輪開探測前清殘留，都只清帶自己標記的。不共用的主機 label 與清法照舊。
+  重啟不變），只是讓人分得出是哪顆 daemon 開的，**不拿來認殘留**；開機清殘留與每輪開探測前清殘留，都只清自己登記過的 `(socket, workspace id)`（`probe_ws`，
+  見 §12.6），別顆 daemon 的探測不在自己的登記檔裡，所以碰不到。
 - **遠端 bot 目錄**：遠端資料根目錄（`~/.config/agents-manager`）可能就是對方 daemon 自己的資料目錄，所以 `remote_purge` 的掃描、刪除當下那一趟
   與回收區清理在這台一律不做（不記成欠著）；已移交專案的 bot 目錄在原機器那邊也不刪（§6.5h）。shim 補版與 spool 只處理本 daemon DB 裡
   這台的 bot，本來就不碰別人的。
@@ -3685,7 +3687,7 @@ pane 寬度來自 attach 的 client，窄終端會把百分比截掉；沒有 cl
 流程：`workspace.create`（label `am-quota-grok`、cwd 家目錄）→ `agent.start` kind grok、名稱 `amquota<6碼>`（不在 DB，對帳不會當成 bot）→ **等 pane 本身**是 grok 且 idle／working／blocked（`pane.get` 輪詢，60 秒）再等 3 秒 →
 `pane.send_text "/usage"`、0.8 秒後 Enter → 每 0.9 秒 `pane.read visible 120`，最多 25 秒 → `workspace.close`（在 `Drop` 裡）。
 （grok 1.0.41 起 herdr 常在啟動當下就把名字從 pane 上拿掉，`agent.start` 回 `agent_name_not_found`、用名字 `agent.wait` 回 `agent_not_running`，grok 其實開著：名字掉了不算失敗，照等 pane；2026-09-28 使用者：額度好幾天大多讀不到。）
-poller 啟動時 `sweep_stale()` 關掉 `am-quota` 與本機 session 裡 label 為 `am-quota-grok` 的殘留。
+poller 啟動時 `sweep_stale()` 關掉 `am-quota` 與本機 session 裡登記過、還沒確認關掉的探測 workspace（認 `(socket, workspace id)`，不看 label；見 §14.2 `probe_ws`）。
 
 解析（`quota_grok.rs`）：標題 `<window> limit (<plan>)`，window 含 `week` → `seven_day`、含 `hour` → `five_hour`；百分比只認同列有 `█`/`░` 的（避開 Context usage 分頁）；
 `Resets:` 沒年份，本機按 daemon 時區、遠端按 `tools::detect` 記下的 UTC offset（`HostTools.utc_offset_secs`）解析；偏移未知就保留百分比並令 `resets_at = None`，不猜。本機或遠端時區下都補「最近的一次」（不早於一天前的最早一次，所以 1 月初可以回到去年 12 月底），已過期超過一天就進位隔年，輸出 RFC3339 UTC。頻率：啟動一次，之後每 30 秒（使用者指定）；`GET /api/quota?refresh=1` 也觸發。
@@ -3742,7 +3744,7 @@ agy 沒有每次啟動指定 hook 的旗標，設定又是使用者（和 Gemini
 - `cache_clock::ttl_secs("agy") = None`（TUI 路徑沒有 cache 讀數，網頁不畫倒數）。
 
 ### 12a.7 額度：`agy -p "/usage"`（`quota_agy.rs`）
-數字來自 `agy -p "/usage" --output-format json`——唯讀指令，**不開對話、不耗額度**，所以不開探測 pane（跟 grok 不同）：`d=$(mktemp -d); cd "$d"; AGY_CLI_DISABLE_AUTO_UPDATE=true <agy 路徑> -p /usage --output-format json </dev/null; rm -rf "$d"`，cwd 是拋棄式暫存目錄、不碰信任清單、40 秒逾時（`sh_local` 整個 process group 一起收）。本機直接跑；**遠端改在那台 herdr 的 pane 裡跑**（跟 claude 額度探測同一套 `run_marked_pane`，label 前綴 `am-quota-agy`、殘留各清各的）——macOS 的 agy 憑證在 login Keychain，純 ssh 讀不到（`agy -p /usage` 印 `Authentication required` 後卡住），pane 在 launchd 起的 herdr 底下才讀得到；pane 裡打的是同一段（stdout 與 stderr 都留在畫面、前後印 `AM_AGY_BEGIN`／`AM_AGY_DONE=<rc>` 標記）。畫面出現 `Authentication required` 就**不等逾時**，直接判定未登入（本機探測逾時時，逾時前已讀到的 stdout 若已有完整的額度 JSON 就照讀、不算逾時（#1725）；stdout／stderr 同樣會檢查這個字：agy 印了之後會卡住等人開網址，不能因為逾時丟掉輸出而認不出，#870）（`tools.agy.logged_in=false`，網頁出現登入鈕；登入偵測冷卻 5 分鐘，不因 Keychain 裡還有項目就翻回去）。其他失敗（逾時、讀不懂、agy 非 0 結束、pane 開不起來）**不改登入旗標**，原因記在記憶體、隨 `hosts[].tools.agy.quota_error`（`{reason,message,at}`）送出，下一次成功才清；網頁寫「已登入，但額度暫時拿不到：…」，不再停在永遠的「背景查詢中」。那台沒裝 agy（`tools` 偵測到的路徑為空）就不探測、不報錯。
+數字來自 `agy -p "/usage" --output-format json`——唯讀指令，**不開對話、不耗額度**，所以不開探測 pane（跟 grok 不同）：`d=$(mktemp -d); cd "$d"; AGY_CLI_DISABLE_AUTO_UPDATE=true <agy 路徑> -p /usage --output-format json </dev/null; rm -rf "$d"`，cwd 是拋棄式暫存目錄、不碰信任清單、40 秒逾時（`sh_local` 整個 process group 一起收）。本機直接跑；**遠端改在那台 herdr 的 pane 裡跑**（跟 claude 額度探測同一套 `run_marked_pane`，label 前綴 `am-quota-agy`；殘留看 `probe_ws` 的 ID 登記，不看 label）——macOS 的 agy 憑證在 login Keychain，純 ssh 讀不到（`agy -p /usage` 印 `Authentication required` 後卡住），pane 在 launchd 起的 herdr 底下才讀得到；pane 裡打的是同一段（stdout 與 stderr 都留在畫面、前後印 `AM_AGY_BEGIN`／`AM_AGY_DONE=<rc>` 標記）。畫面出現 `Authentication required` 就**不等逾時**，直接判定未登入（本機探測逾時時，逾時前已讀到的 stdout 若已有完整的額度 JSON 就照讀、不算逾時（#1725）；stdout／stderr 同樣會檢查這個字：agy 印了之後會卡住等人開網址，不能因為逾時丟掉輸出而認不出，#870）（`tools.agy.logged_in=false`，網頁出現登入鈕；登入偵測冷卻 5 分鐘，不因 Keychain 裡還有項目就翻回去）。其他失敗（逾時、讀不懂、agy 非 0 結束、pane 開不起來）**不改登入旗標**，原因記在記憶體、隨 `hosts[].tools.agy.quota_error`（`{reason,message,at}`）送出，下一次成功才清；網頁寫「已登入，但額度暫時拿不到：…」，不再停在永遠的「背景查詢中」。那台沒裝 agy（`tools` 偵測到的路徑為空）就不探測、不報錯。
 新版回應在 `command.data.groups[].buckets[]`；只讀 Gemini 組的 weekly 與 five-hour 桶，欄位含 `id`／`window`、`remaining_fraction`（0–1 的剩餘比例）與 `reset_time`（RFC3339）。Claude/GPT 組略過；兩個 Gemini 窗口都寫進唯一的 `agy` key，`window`／桶名辨認 weekly 與 5h 後分別填 `seven_day`／`five_hour`；`used_pct = (1 − remaining_fraction) × 100`，超出範圍或讀不懂就略過該桶，重置時間讀不出來就 `None`。舊版 tab 分隔 `response` 仍相容，只能填 Gemini 的 `seven_day`。`fable`／`plan` 仍為 `None`，`source = "agy-usage"`。不是 JSON 或沒有可讀 Gemini 窗口→解析回 `None`、呼叫端回錯、**不寫任何東西**，舊讀數留著（過 `STALE_AFTER` 自己標陳舊）。舊版保存的 `agy:claude-gpt` 本機與遠端快照在載入 cache 時刪除，之後也不接受寫入。
 輪詢每 5 分鐘（`AGY_POLL`，每次探測要起一個約 200 MB 的執行檔），失敗冷卻 15 分鐘；`GET /api/quota?refresh=1` 不走冷卻、一律真的探測。`quota::set` 對 agy 只寫 Gemini 的裸 `agy` key。
 agy 畫面／Stop hook 若回報 `Individual quota reached … Resets in …`，daemon 會把該 key 的 `five_hour` 標為 100% 並記 `limit_hit.bucket = five_hour`；讀數已有未來重置時間就沿用，否則解析橫幅相對時間，仍讀不出來時以 5 小時保底。
@@ -3860,9 +3862,14 @@ Bot 個別與專案群組的 `POST .../read` 都只接受 User principal；Bot�
 額度快取只改善可見性，不改額度判斷的來源優先序：快取中的 `stale` 讀數仍保留畫面與重置時間，但新探測回來以前不能被解讀成「剛確認」；`limit_hit` 的到期與清除規則照 §12.4。
   label 是 `am-quota-claude*` / `am-quota-grok`、agent 名 `amquota<6碼>`（不在 DB）；`sweep_stale()` 掃本機 `am-quota` 與每台已連線主機的 session。
   claude 探測的 workspace 在成功、RPC 失敗、逾時與 future 被丟棄（guard 的 `Drop`）時都會關；`workspace.close` 本身失敗留下的，
-  下一輪開新的之前先收掉同前綴的（呼叫端握著那台的 `probe_lock`，此刻同前綴的一定是殘留），不等 daemon 重啟（#408）。
-  `am-quota-` 前綴的 workspace 是 daemon 自己的：§6.5e 的 pane 掃描（`panes::scan_snapshot`）照同一份 snapshot 的 workspace label
-  整個跳過，不進 `panes`、不推 `pane_unowned`——遠端借主 session 開的那幾秒，它就是一顆前景跑 claude 的 shell。
+  下一輪開新的之前先收掉殘留，不等 daemon 重啟（#408）。**哪些 workspace 是自己開的探測只看 ID，不看 label**（#1795，使用者 2026-10-17
+  「名稱不應該被任何的 ref」）：`probe_ws` 登記每個探測 workspace 的 `(herdr socket, workspace id)`，`workspace.close` 成功才撤掉；
+  還沒撤掉的存在資料目錄的 `probe-workspaces.json`，重啟後載回來，所以開機（`sweep_stale()`）與每輪開探測前（claude／agy／grok 共用這一份）
+  都能收掉殘留；還在跑的探測不算殘留，不會互相收掉。登記是這顆 daemon 自己的，共用 session 的主機上別顆 daemon 的探測不在其中。
+  使用者把普通 workspace 取成 `am-quota-…` 不會被誤關，探測被改名也照收。（升級前舊版 daemon 留下、沒登記過的探測 workspace 不會被收，需要手動關一次。）
+  §6.5e 的 pane 掃描（`panes::scan_snapshot`）照同一份登記（`probe_ws::is_ours`，用該主機 herdr client 的 socket 加 workspace id）
+  跳過探測 workspace 裡的 pane，不進 `panes`、不推 `pane_unowned`——遠端借主 session 開的那幾秒，它就是一顆前景跑 claude 的 shell；
+  拿不到那台的 herdr client 就認不出、不排除。
   cwd 與 identity env 的 `~` 用那台主機的 `$HOME`（`HostConn::home()`）。
 
 ### 14.3 輪詢

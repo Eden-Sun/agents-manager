@@ -1240,7 +1240,7 @@ daemon 之後認領子 agent 以它為 parent（優先於 spawn hint 與名字�
 全機的非 agent pane（列的形狀同上）；`unowned=1` 只回 `owned_by="none"`（連 cwd 都對不到專案）的那些，同一台的 scratch 排第一。
 - `scratch: true`：這台那顆固定的 scratch（daemon 選的，規則見 SPEC §6.5e；前端不要自己重算）。其餘是「多出來的」。
 - `orphaned: true`：綁過的專案或擁有它的 bot 已經刪掉（推過 `pane_orphaned`），不會是 scratch。
-- `label`：herdr 上的 pane 名字；scratch 選中時會被改成 `[panes] scratch_name`。
+- `label`：herdr 上的 pane 名字；scratch 選中時會被改成 `[panes] scratch_name`（只是顯示，選哪一顆看 pane_id，不看名字）。
 
 ### `POST /api/panes/{id}/focus?host=local`
 把 herdr 的焦點切到那顆 pane，只動焦點。主機沒連上 502。

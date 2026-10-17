@@ -122,8 +122,8 @@ pub async fn owned(app: &impl SharedHostEnv, host: &str) -> Result<Owned> {
     Ok(o)
 }
 
-/// 本 daemon 的標記（共用主機上的額度探測 workspace label 帶著它，清殘留時只認自己的）。第一次用到時隨機產生、
-/// 存在資料目錄的 `daemon-tag`，daemon 重啟後不變——開機清上一輪留下的探測才認得出來。
+/// 本 daemon 的標記（共用主機上的額度探測 workspace label 帶著它，只讓人分得出是哪顆 daemon 開的；
+/// 清殘留與排除探測看 ID，見 `probe_ws`）。第一次用到時隨機產生、存在資料目錄的 `daemon-tag`，daemon 重啟後不變。
 pub fn daemon_tag(data_dir: &std::path::Path) -> String {
     let path = data_dir.join("daemon-tag");
     if let Ok(s) = std::fs::read_to_string(&path) {
@@ -155,13 +155,4 @@ pub async fn probe_tag(app: &impl SharedHostEnv, host: &str) -> Option<String> {
 /// 共用主機上探測 workspace 的 label：`<base>@<tag>`。
 pub fn tagged_label(base: &str, tag: &str) -> String {
     format!("{base}@{tag}")
-}
-
-/// 清殘留時認不認這個探測 label：一般主機全是自己的（帶不帶標記都認，從共用改回來時留下的才收得掉）；
-/// 共用主機只認帶自己標記的。
-pub fn sweepable(label: &str, own_tag: Option<&str>, is_probe: impl Fn(&str) -> bool) -> bool {
-    match own_tag {
-        None => is_probe(label.rsplit_once('@').map_or(label, |(base, _)| base)),
-        Some(tag) => label.strip_suffix(&format!("@{tag}")).is_some_and(is_probe),
-    }
 }

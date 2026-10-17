@@ -230,11 +230,3 @@
         assert_eq!(lines.next().unwrap(), "true -p /usage --output-format json");
         assert!(!pane_probe_command(None).contains(PANE_BEGIN) && !pane_probe_command(None).contains(PANE_DONE), "回顯的指令不能長得像標記");
     }
-
-    /// claude 與 agy 的探測 workspace 各清各的殘留：同台主機同時跑時，不能互相收掉對方正在跑的。
-    #[test]
-    fn claude_and_agy_probe_labels_do_not_sweep_each_other() {
-        assert!(is_probe_label("am-quota-agy") && !is_probe_label("am-quota-claude") && !is_probe_label("am-quota-claude-cc1") && !is_probe_label("am-quota-grok"));
-        assert!(crate::shared_host::sweepable("am-quota-agy@t", Some("t"), is_probe_label));
-        assert!(!crate::shared_host::sweepable("am-quota-agy@other", Some("t"), is_probe_label));
-    }
