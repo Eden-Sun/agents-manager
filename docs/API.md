@@ -1233,8 +1233,8 @@ herdr 成功後，shim 以 `X-AM-Bot-Token` 送 `finish` 的 `bot_id,permit_id,p
 herdr 回非 0 且輸出沒有 pane id，或 shim 被中斷時，送 `abort` 的 `bot_id,permit_id`（#664）。daemon 驗 bot token 後釋放 permit，回 `200 {"released":true}`；permit 已經不在也回 200（`released:false`）。permit 自 `begin` 起 60 秒沒 finish／abort 就不再算 in-flight（`agent start` 帶了 `timeout_ms` 時有效期是 `timeout_ms`＋30 秒、至少 60 秒、上限 330 秒，herdr 慢慢等子 agent 就緒時 finish 才不會因 permit 過期回 409）（curl 逾時但 daemon 已 reserve、以及沒跑到 abort 的 Ctrl-C）。過期不擋輪替。
 
 ### `POST /relay/spawn/claim`（表單，bot shim 專用，issue #1790）
-`agent start` 後，shim 以 `X-AM-Bot-Token` 送 `bot_id,pane_id,parent_run_id`。token 必須屬於 `bot_id`（不符 401，受限 bot 403）；pane ID 空白回 400。`parent_run_id` 必須是送出當下捕獲、接收時仍 active 的該 bot run，且 run 必須有非空 herdr session；缺證據／過期 run 不登記（503 `claim_unrecorded`，shim 印 warn，start 結果不變）。
-成功回 `200 {"pane_id":"…","claimed":true}`。claim 依 `(host,herdr_session,pane_id)` 儲存，同 session 重試更新 parent run 證據，不同 session 互不覆蓋；舊版無作用域的資料不參與歸屬。遠端 `AmSpawnClaim` payload 同樣攜帶 `pane_id,parent_run_id`，過期 spool 事件忽略。
+`agent start` 後，shim 以 `X-AM-Bot-Token` 送 `bot_id,pane_id,parent_run_id?`。token 必須屬於 `bot_id`（不符 401，受限 bot 403）；pane ID 空白回 400。`parent_run_id` 僅作稽核紀錄，不需仍是 active run，也可省略；parent 停止時一樣可依 bot ID 登記。session 取 host 目前設定，取不到才不登記（503 `claim_unrecorded`，shim 印 warn，start 結果不變）。
+成功回 `200 {"pane_id":"…","claimed":true}`。claim 依 `(host,herdr_session,pane_id)` 儲存，同 session 重試更新稽核紀錄，不同 session 互不覆蓋；v65 舊列從同 host 的 active run 回填唯一可確認的非空 herdr session，取不到或有歧義才保持未知。遠端 `AmSpawnClaim` payload 攜帶 `pane_id,parent_run_id?`，parent 換 run 或暫無 run 不影響登記與既有歸屬。
 
 ### `GET /api/panes?unowned=1`
 全機的非 agent pane（列的形狀同上）；`unowned=1` 只回 `owned_by="none"`（連 cwd 都對不到專案）的那些，同一台的 scratch 排第一。
@@ -1987,11 +1987,11 @@ child 還原後不立即建立 run；daemon 給它十分鐘讓父 bot 在原 pan
 
 ### 10.5 `POST /relay/announce`
 
-`to_agent` 使用已固定的 pane ID 或 `bot:<bot_id>`；名稱只由 shim 做一次選取，不由 daemon 重新推斷身分。缺 ID 證據的舊名稱請求回 409 `target_id_required`，避免舊 shim 以直送繞過角色佇列。pane 查詢只比 `runs.pane_id`，限定寄件 host／herdr session，不比 `agent_name`。bot ID 可直接識別角色 bot；普通 bot 必須在同作用域有唯一 running run，成功回 `{"target_pane_id":"…"}`，缺證據回 409 `target_unknown`。shim 以回傳的 pane ID 送出；角色路由的 `routed` 與普通 pane 的 `{}` 回應保留。
+shim 可將 `to_agent` 設為已固定的 pane ID 或 `bot:<bot_id>`；daemon 只從這些穩定 selector 補齊收件 bot／run，不按顯示名稱重新推斷。pane 查詢只比 `runs.pane_id`，限定寄件 host／目前 herdr session，不比 `agent_name`。bot ID 可直接識別角色 bot；普通 bot 必須在同作用域有唯一 running run，成功沿用 `{"to_pane_id":"…"}` 回應；缺證據保持未知，未解析的 `bot:` selector 由 shim 拒絕直送。
 
 **不在 `/api` 下**，不吃 UI token：呼叫者是 pane 裡的 herdr shim，驗證用該 bot 的 hook token（`X-AM-Bot-Token`）。
 表單編碼 `bot_id`、`to_bot_id?`、`to_run_id?`、`delivery_id?`、`to_agent?`、`text` → `200 {"to_pane_id":"<穩定傳輸地址>"}`（已綁定的本機 run）或 `200 {}`（未知／移交）；bot 不存在、已刪或 token 不符 → 401。
-`to_agent` 只供顯示／shim 傳輸，不參與歸屬或角色判斷。角色收件只使用明確的 `to_bot_id`；一般報備還需要對應的 `to_run_id`，並限寄件方 host／herdr session 的 running run。bot／run 不符回 400 `relay_recipient_mismatch`。
+`to_agent` 的普通名稱只供顯示；角色收件使用明確或由穩定 selector 解析的 `to_bot_id`；一般報備還需要對應的 `to_run_id`，並限寄件方 host／herdr session 的 running run。bot／run 不符回 400 `relay_recipient_mismatch`。
 shim 的 `agent prompt <傳輸目標> <文字> --to-bot-id <id> --to-run-id <id>` 會移除這兩個自有旗標，產生一次投遞共用的 `delivery_id`，供本機 curl 重試及遠端 spool v2 沿用。本機已綁定目標改用 daemon 回傳的 pane 地址送字，不再重查名字；遠端還需 `--to-pane-id <pane id>`，缺明確 pane 地址的報備保持未知。遠端 `AmRelayAnnounce` 必須攜帶 `to_bot_id`、`to_run_id`、`delivery_id`、`text`；舊的只有 `to_agent` 的事件保持未知，不用名稱補猜。
 daemon 記在行程內（5 分鐘、容量有界）；回音以穩定 run id 認領一次，delivery 重播不重複認領。此去重不跨 daemon 重啟持久化，無 schema 變動。
 缺穩定 ID 的舊 shim 仍可直送文字，但不開監看回合、不補標來源、不依名稱攔入 AGM 佇列。已移交的專案仍回 `200 {}`，不開回合、不盯 pane、不標來源，留 `relay_handoff_direct` log。遲到報備只補標明確綁定該 run 回合的 hook／terminal_fallback 訊息，不碰只有 conversation 證據的訊息。

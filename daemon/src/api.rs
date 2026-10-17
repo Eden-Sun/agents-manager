@@ -761,6 +761,40 @@ mod relay_announce_tests {
         assert_eq!(bot_requests(&app).await, 0);
     }
 
+    #[tokio::test]
+    async fn nr_claim_pane_targets_never_match_another_runs_agent_name() {
+        let env = crate::testing::env().await;
+        let sender = crate::testing::claude_bot(&env.app, &env.project_id, "sender").await;
+        let target = crate::testing::claude_bot(&env.app, &env.project_id, "target").await;
+        let stranger = crate::testing::claude_bot(&env.app, &env.project_id, "stranger").await;
+        crate::testing::fake_run(&env.app, &sender.id).await;
+        let run = crate::testing::fake_run(&env.app, &target.id).await;
+        let other = crate::testing::fake_run(&env.app, &stranger.id).await;
+        let pane = format!("pane-{}", target.id);
+        sqlx::query("UPDATE runs SET agent_name=? WHERE id=?").bind(&pane).bind(other).execute(&env.app.db).await.unwrap();
+        assert_eq!(relay_target_run(&env.app, &sender.id, &pane).await.unwrap().unwrap().id, run);
+        sqlx::query("UPDATE runs SET agent_name='renamed' WHERE id=?").bind(&run).execute(&env.app.db).await.unwrap();
+        assert_eq!(relay_target_run(&env.app, &sender.id, &format!("bot:{}",target.id)).await.unwrap().unwrap().id, run);
+        sqlx::query("UPDATE runs SET herdr_session='another-session' WHERE id=?").bind(&run).execute(&env.app.db).await.unwrap();
+        assert!(relay_target_run(&env.app, &sender.id, &pane).await.unwrap().is_none());
+    }
+
+    #[tokio::test]
+    async fn nr_claim_prompt_bot_selector_survives_rename() {
+        let app = flow_tests::app().await;
+        flow_tests::configure_responder(&app).await;
+        sqlx::query("UPDATE bots SET name='renamed-role' WHERE id='patrol'").execute(&app.db).await.unwrap();
+        sqlx::query("UPDATE bots SET name='AGM' WHERE id='w2'").execute(&app.db).await.unwrap();
+        let mut headers = HeaderMap::new();
+        headers.insert("X-AM-Bot-Token", "tok-w1".parse().unwrap());
+        let body = RelayAnnounce { bot_id:"w1".into(), to_agent:"bot:patrol".into(), to_bot_id:None,
+            to_run_id:None, delivery_id:Some("nr-claim-stable-selector".into()), text:"stable selector after rename".into(), ack:None, reply_to:None };
+        let (code, Json(body)) = relay_announce(State(app.clone()), headers, axum::extract::Form(body)).await;
+        assert_eq!(code, StatusCode::OK, "{body}");
+        assert_eq!(body["routed"], "responder");
+        assert_eq!(bot_requests(&app).await, 1);
+    }
+
     async fn bot_requests(app: &Arc<App>) -> i64 {
         sqlx::query_scalar("SELECT COUNT(*) FROM supervisor_inbox WHERE kind='bot_request'").fetch_one(&app.db).await.unwrap()
     }
