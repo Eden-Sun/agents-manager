@@ -4,7 +4,7 @@
  */
 import { ShareHttpError, shareBeforeCursor, toShareFiles, toShareMessage, toSharePage, toStatus, type ShareFile, type ShareMessage, type SharePage, type ShareStatus } from './shareModel'
 
-/** 單一 GET（headers 加讀完 body）等太久：放棄，不重送（只有 GET 有期限；POST 不動）。 */
+/** GET 或檔案下載的 headers 等太久，或讀 body 連續沒有新資料太久：放棄，不重送（只有 GET 有期限；POST 不動）。 */
 export class ShareTimeoutError extends Error {
   constructor() {
     super('分享頁請求逾時：伺服器沒有在期限內回應')
@@ -63,9 +63,12 @@ async function check(res: Response): Promise<Response> {
 const BLOB_RETRY_MAX = 6
 const BLOB_WAIT_MAX_S = 10
 
-/** GET 與檔案下載的期限（#1804）：涵蓋 headers 與讀完 body；到期就 abort，讓 `fileBlob` 的串列往下走。 */
-const GET_DEADLINE_MS = 30_000
-const BLOB_DEADLINE_MS = 60_000
+/**
+ * GET 與檔案下載的期限（#1804）：headers 最多等 `HEADERS_DEADLINE_MS`；讀 body 時每收到一塊資料就重設 `BODY_IDLE_MS`，
+ * 所以慢但持續有資料的大檔不會逾時，只有連續這麼久沒有新資料才 abort，讓 `fileBlob` 的串列往下走。
+ */
+const HEADERS_DEADLINE_MS = 30_000
+const BODY_IDLE_MS = 30_000
 
 export interface ShareClientOptions {
   /** 等多久（測試換掉）。 */
@@ -75,17 +78,61 @@ export interface ShareClientOptions {
 }
 
 /**
- * 整段（fetch、讀 body）的期限：到期時 abort 並以 `ShareTimeoutError` 結束。傳進去的 `run` 不一定理 signal，
- * 所以這裡自己跟 abort 賽跑，不會因為某個 fetch 或 body 永不結束而掛住。
+ * 一趟 GET（或檔案下載）的期限：headers 在 `HEADERS_DEADLINE_MS` 內要回來；之後讀 body 時 `read` 每收到一塊資料就呼叫 `touch()` 重設閒置計時器。
+ * 到期就 abort 並以 `ShareTimeoutError` 結束。傳進去的 `read` 不一定理 signal，所以這裡自己跟 abort 賽跑，
+ * 不會因為 fetch 或 body 永不結束而掛住；結束時兩個計時器都清掉。
  */
-function withDeadline<T>(timers: NonNullable<ShareClientOptions['timers']>, ms: number, run: (signal: AbortSignal) => Promise<T>): Promise<T> {
+function fetchWithDeadline<T>(
+  timers: NonNullable<ShareClientOptions['timers']>,
+  url: string,
+  init: RequestInit,
+  read: (res: Response, touch: () => void) => Promise<T>,
+): Promise<T> {
   const ctl = new AbortController()
   const expired = new Promise<never>((_, reject) => {
     ctl.signal.addEventListener('abort', () => reject(new ShareTimeoutError()))
   })
   expired.catch(() => {})
-  const id = timers.setTimeout(() => ctl.abort(), ms)
-  return Promise.race([run(ctl.signal), expired]).finally(() => timers.clearTimeout(id))
+  let headers: unknown = timers.setTimeout(() => ctl.abort(), HEADERS_DEADLINE_MS)
+  let idle: unknown = null
+  let done = false
+  const touch = () => {
+    if (done) return
+    if (idle !== null) timers.clearTimeout(idle)
+    idle = timers.setTimeout(() => ctl.abort(), BODY_IDLE_MS)
+  }
+  const run = async () => {
+    const res = await fetch(url, { ...init, signal: ctl.signal })
+    timers.clearTimeout(headers)
+    headers = null
+    touch()
+    return read(res, touch)
+  }
+  return Promise.race([run(), expired]).finally(() => {
+    done = true
+    if (headers !== null) timers.clearTimeout(headers)
+    if (idle !== null) timers.clearTimeout(idle)
+  })
+}
+
+/** 逐塊讀完 body；每塊進來就 `touch()`。沒有 body 的回應（舊 mock）就整段讀，閒置計時器仍然在看著。 */
+async function readBody(res: Response, touch: () => void): Promise<Uint8Array<ArrayBuffer>> {
+  if (!res.body) return new Uint8Array(await res.arrayBuffer())
+  const reader = res.body.getReader()
+  const parts: Uint8Array[] = []
+  for (;;) {
+    const { done, value } = await reader.read()
+    if (done) break
+    touch()
+    parts.push(value)
+  }
+  const out = new Uint8Array(new ArrayBuffer(parts.reduce((n, p) => n + p.byteLength, 0)))
+  let off = 0
+  for (const p of parts) {
+    out.set(p, off)
+    off += p.byteLength
+  }
+  return out
 }
 
 export function httpShareClient(token: string, opts: ShareClientOptions = {}): ShareClient {
@@ -95,11 +142,18 @@ export function httpShareClient(token: string, opts: ShareClientOptions = {}): S
   // 不帶 cookie、不帶 referrer：分享頁跟主 UI 沒有任何共用的身分。
   const init: RequestInit = { credentials: 'omit', referrerPolicy: 'no-referrer', cache: 'no-store' }
   const json = async (path: string, extra: RequestInit = {}) => (await check(await fetch(`${base}${path}`, { ...init, ...extra }))).json() as Promise<unknown>
-  const getJson = (path: string) => withDeadline(timers, GET_DEADLINE_MS, async (signal) => (await check(await fetch(`${base}${path}`, { ...init, signal }))).json() as Promise<unknown>)
+  const getJson = (path: string) =>
+    fetchWithDeadline(timers, `${base}${path}`, init, async (res, touch) => {
+      await check(res)
+      return JSON.parse(new TextDecoder().decode(await readBody(res, touch))) as unknown
+    })
   const fetchBlob = async (name: string): Promise<Blob> => {
     for (let attempt = 0; ; attempt++) {
       try {
-        return await withDeadline(timers, BLOB_DEADLINE_MS, async (signal) => (await check(await fetch(`${base}/files/${encodeURIComponent(name)}`, { ...init, signal }))).blob())
+        return await fetchWithDeadline(timers, `${base}/files/${encodeURIComponent(name)}`, init, async (res, touch) => {
+          await check(res)
+          return new Blob([await readBody(res, touch)], { type: res.headers.get('Content-Type') ?? '' })
+        })
       } catch (e) {
         if (!(e instanceof ShareHttpError) || (e.status !== 429 && e.status !== 503) || attempt >= BLOB_RETRY_MAX) throw e
         await sleep(Math.min(e.retryAfter ?? 2, BLOB_WAIT_MAX_S) * 1000)

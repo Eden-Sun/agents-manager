@@ -8,6 +8,15 @@ import { ShareHttpError } from './shareModel.ts'
 const TOKEN = 'TOKEN_abcdefghijklmnop'
 const tick = () => new Promise<void>((r) => setTimeout(r, 0))
 const hang = () => new Promise<never>(() => {})
+/** body 永遠不來（headers 已回）：讀 body 會一直等。 */
+const stalled = () => new Response(new ReadableStream<Uint8Array>({}), { status: 200 })
+/** 手動推資料的 body，模擬慢但持續有資料進來的大檔。 */
+function controlledBody() {
+  let ctl!: ReadableStreamDefaultController<Uint8Array>
+  const body = new ReadableStream<Uint8Array>({ start: (c) => { ctl = c } })
+  const enc = new TextEncoder()
+  return { body, push: (s: string) => ctl.enqueue(enc.encode(s)), close: () => ctl.close() }
+}
 
 function fakeTimers() {
   let next = 1
@@ -20,6 +29,7 @@ function fakeTimers() {
     },
     clearTimeout: (id: unknown) => void live.delete(id as number),
     pending: () => live.size,
+    live: () => new Set(live.keys()),
     fireAll: () => {
       for (const [id, fn] of [...live]) {
         live.delete(id)
@@ -40,7 +50,7 @@ async function waitForDeadline(timers: ReturnType<typeof fakeTimers>) {
 test('GET messages：body 讀到一半卡住，期限到就拋逾時，計時器清掉', async () => {
   const orig = globalThis.fetch
   const timers = fakeTimers()
-  globalThis.fetch = (async () => ({ ok: true, status: 200, headers: new Headers(), json: hang }) as unknown as Response) as unknown as typeof fetch
+  globalThis.fetch = (async () => stalled()) as unknown as typeof fetch
   try {
     const p = httpShareClient(TOKEN, { timers }).messages()
     await waitForDeadline(timers)
@@ -81,7 +91,7 @@ test('fileBlob：headers 已回、body 讀到一半卡住，期限到也會放�
   const urls: string[] = []
   globalThis.fetch = (async (url: string) => {
     urls.push(url)
-    if (url.includes('a.png')) return { ok: true, status: 200, headers: new Headers(), blob: hang } as unknown as Response
+    if (url.includes('a.png')) return stalled()
     return new Response('x', { status: 200 })
   }) as unknown as typeof fetch
   try {
@@ -123,6 +133,54 @@ test('POST 不重送：upload 回 503 只發一次，拋出原本的 ShareHttpEr
     const f = new File(['x'], 'a.txt')
     await assert.rejects(httpShareClient(TOKEN, { sleep: async () => {} }).upload(f), (e) => e instanceof ShareHttpError && e.status === 503)
     assert.equal(calls, 1)
+  } finally {
+    globalThis.fetch = orig
+  }
+})
+
+test('fileBlob：body 慢但持續有資料進來，每塊都重設閒置計時器，不會因為整段時間長而逾時', async () => {
+  const orig = globalThis.fetch
+  const timers = fakeTimers()
+  const b = controlledBody()
+  globalThis.fetch = (async () => new Response(b.body, { status: 200, headers: { 'Content-Type': 'image/png' } })) as unknown as typeof fetch
+  try {
+    const p = httpShareClient(TOKEN, { timers }).fileBlob('big.png')
+    await waitForDeadline(timers)
+    for (const part of ['aa', 'bb', 'cc', 'dd']) {
+      const before = timers.live()
+      b.push(part)
+      await tick()
+      const after = timers.live()
+      assert.equal(after.size, 1, '收到新資料後只留一個閒置計時器')
+      assert.ok([...before].every((id) => !after.has(id)), '上一個閒置計時器要清掉，改換新的')
+    }
+    b.close()
+    const blob = await p
+    assert.equal(await blob.text(), 'aabbccdd')
+    assert.equal(blob.type, 'image/png')
+    assert.equal(timers.pending(), 0)
+  } finally {
+    globalThis.fetch = orig
+  }
+})
+
+test('files：JSON 的 body 分批慢慢來，持續有資料就不逾時，解析照樣正確', async () => {
+  const orig = globalThis.fetch
+  const timers = fakeTimers()
+  const b = controlledBody()
+  globalThis.fetch = (async () => new Response(b.body, { status: 200 })) as unknown as typeof fetch
+  try {
+    const p = httpShareClient(TOKEN, { timers }).files()
+    await waitForDeadline(timers)
+    for (const part of ['{"files":[', '{"name":"a.png"}', ']}']) {
+      const before = timers.live()
+      b.push(part)
+      await tick()
+      assert.ok([...before].every((id) => !timers.live().has(id)), '每塊資料都要重設閒置計時器')
+    }
+    b.close()
+    assert.deepEqual((await p).map((f) => f.name), ['a.png'])
+    assert.equal(timers.pending(), 0)
   } finally {
     globalThis.fetch = orig
   }

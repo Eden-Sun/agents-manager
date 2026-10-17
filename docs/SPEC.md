@@ -5432,7 +5432,7 @@ daemon 要能在 Linux（目標：Ubuntu，外部編譯主機 192.168.1.46，#67
   - end user 訊息裡 daemon 加的前綴、附件標記，顯示前前端再拿掉一次（daemon 已拿掉；舊版 daemon 或 bot 照抄時也不會出現）。SSE 收到 `resync` 就整頁重抓並取代手上的清單。
   **上傳**（客訴 2026-10-04，`shareUpload.ts`）：一次選好幾個檔就**一張接一張傳**，每張旁邊寫「上傳中（第 N 張／共 M 張）」或「等待中」；遇到 429 照 `Retry-After` 自己等著重試（單次最多等 30 秒、最多 12 次），
   「太快」從不顯示給使用者。真的失敗才寫「這張沒傳上去」＋「再試一次」（打不開的照片、太大、不收的種類不給重試，只給移除）。移除正在傳的那張＝中止它（照片處理、429 退避、送出的請求都停），下一張馬上開始；離開頁面也中止（#1661）。還有檔沒傳完時送出鈕停用。
-  **GET 與下載有期限（#1804，`shareApi.ts`）**：`messages`、`files`、`fileBlob` 的每一趟請求（headers 加讀完 body）各有期限（30 秒／下載 60 秒），到期 abort 並拋 `ShareTimeoutError`；`fileBlob` 的串列在那張失敗後照樣往下走，第一張卡住不堵住後面的圖。只有 GET 有期限，POST（送出、上傳）不加期限也不重送。
+  **GET 與下載有期限（#1804，`shareApi.ts`）**：`messages`、`files`、`fileBlob` 的每一趟請求分兩段計時：headers 最多等 30 秒；讀 body 時每收到一塊資料就重設閒置計時器（30 秒），所以慢但持續有資料的大檔不會逾時，只有連續 30 秒沒有新資料才 abort。到期 abort 並拋 `ShareTimeoutError`；`fileBlob` 的串列在那張失敗後照樣往下走，第一張卡住不堵住後面的圖。只有 GET 有期限，POST（送出、上傳）不加期限也不重送。
   **手機照片先整理**：受限 bot 只能用 Read 看圖，claude 的 Read 只認 png／jpg／jpeg／gif／webp（2.1.289 binary 實查），daemon 也不收 HEIC，所以 HEIC／HEIF 在瀏覽器裡（`createImageBitmap`，照 EXIF 轉正）
   畫成 JPEG（品質 0.85、透明處鋪白、檔名改 `.jpg`），長邊超過 2048 一併縮小；JPEG 長邊超過 2048 也縮（縮完反而變大就送原檔）——模型看圖本來就會縮，原尺寸 3–8 MB 只是讓手機網路等更久、更快塞滿 `inbox/`。
   PNG／GIF／WebP（截圖）原樣送，轉 JPEG 會糊掉字。瀏覽器解不開的 HEIC 寫「這張照片打不開，請換一張或改用截圖」。25 MB 上限在整理之後才量。
