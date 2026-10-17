@@ -5,7 +5,9 @@
  */
 import test, { after, afterEach, before } from 'node:test'
 import assert from 'node:assert/strict'
-import { act, click, fakeApi, mount, settle, setupDom, teardownDom, unmountAll } from '../testing/domHarness'
+import { useState } from 'react'
+import { act, click, fakeApi, mount, settle, setupDom, teardownDom, typeInto, unmountAll } from '../testing/domHarness'
+import { useStore } from '../store/store'
 import { ScheduleEditor } from './ScheduleEditor'
 
 afterEach(unmountAll)
@@ -87,5 +89,86 @@ test('瀏覽器不認識排程的時區：編輯器照常 render（下次與最�
     assert.ok(history, '最近執行列表要 render 出來')
   } finally {
     Date.prototype.toLocaleString = original
+  }
+})
+
+test('只改時區：也算時間改了，PATCH 送 spec 與新的 tz（#1812）', async () => {
+  const { root, patches, save } = await openEditor(scheduleRow())
+  const tz = [...root.querySelectorAll<HTMLSelectElement>('select')].find((el) => [...el.options].some((o) => o.value === 'UTC'))!
+  assert.ok([...tz.options].some((o) => o.value === 'Asia/Taipei'), '測試環境要有 Asia/Taipei 選項')
+  await act(async () => {
+    Object.getOwnPropertyDescriptor(HTMLSelectElement.prototype, 'value')!.set!.call(tz, 'Asia/Taipei')
+    tz.dispatchEvent(new Event('change', { bubbles: true }))
+  })
+  await save()
+  assert.equal(patches()[0].tz, 'Asia/Taipei')
+  assert.deepEqual(patches()[0].spec, { mode: 'interval', every_secs: 61 }, '時區變了也要送 spec')
+})
+
+test('建立排程仍送 spec（create 路徑不走 baseline 比對）', async () => {
+  const prevBots = useStore.getState().bots
+  useStore.setState({ bots: [{ id: 'b1', name: 'b', kind: 'claude', project_id: 'p1', managed_by: 'user', parent_bot_id: null, share_profile: null }] } as never)
+  try {
+    const requests = fakeApi((req) => (req.method === 'POST' ? scheduleRow({ id: 's9' }) : undefined))
+    await mount(<ScheduleEditor projectId="p1" scheduleId={null} onClose={() => {}} onSelect={() => {}} />)
+    await settle()
+    await typeInto(document.querySelector<HTMLInputElement>('.schedule-editor input')!, '新排程')
+    await typeInto(document.querySelector<HTMLTextAreaElement>('.schedule-editor textarea')!, '整理進度')
+    await click([...document.querySelectorAll<HTMLButtonElement>('button')].find((b) => b.textContent?.trim() === '建立排程')!)
+    await settle()
+    const post = requests.find((r) => r.method === 'POST')!
+    assert.ok(post, '要打建立的 API')
+    assert.ok('spec' in (post.body as object), '建立一定要送 spec')
+  } finally {
+    useStore.setState({ bots: prevBots } as never)
+  }
+})
+
+test('切換排程：baseline 依排程重置，載入完成後的 no-op 儲存不送 spec；載入中先清空比對基準', async () => {
+  const row2 = scheduleRow({ id: 's2', name: '第二張', spec: { mode: 'interval', every_secs: 120, anchor: '2030-01-01T00:00:00.000Z' } })
+  let release: (() => void) | null = null
+  const requests = fakeApi((req) => {
+    if (req.method === 'PATCH') return scheduleRow()
+    if (req.method === 'GET' && req.path.endsWith('/schedules/s1')) return scheduleRow()
+    return undefined
+  })
+  // s2 的 GET 先扣住，才能在它載入之前檢查 baseline 是否已清空。
+  const fetchUntilReleased = globalThis.fetch
+  globalThis.fetch = (async (input: string, init?: { method?: string; body?: string }) => {
+    if (String(input).endsWith('/schedules/s2') && (init?.method ?? 'GET') === 'GET') {
+      await new Promise<void>((resolve) => (release = resolve))
+      return new Response(JSON.stringify(row2), { status: 200 })
+    }
+    return fetchUntilReleased(input, init)
+  }) as typeof fetch
+  try {
+    function Host() {
+      const [id, setId] = useState<string | null>('s1')
+      return (
+        <>
+          <button type="button" onClick={() => setId('s2')}>切到第二張</button>
+          <ScheduleEditor projectId="p1" scheduleId={id} onClose={() => {}} onSelect={() => {}} />
+        </>
+      )
+    }
+    await mount(<Host />)
+    await settle()
+    await click([...document.querySelectorAll<HTMLButtonElement>('button')].find((b) => b.textContent === '切到第二張')!)
+    const save = async () => {
+      await click([...document.querySelectorAll<HTMLButtonElement>('button')].find((b) => b.textContent?.trim() === '儲存')!)
+      await settle()
+    }
+    await save()
+    const pending = requests.filter((r) => r.method === 'PATCH').at(-1)!
+    assert.ok('spec' in (pending.body as object), '載入中 baseline 已清空，保守送 spec（不沿用 s1 的比對結果）')
+    await act(async () => release?.())
+    await settle()
+    requests.length = 0
+    await save()
+    const after = requests.filter((r) => r.method === 'PATCH')
+    assert.equal(after.length, 1)
+    assert.equal('spec' in (after[0].body as object), false, '載入完 s2 之後沒改時間就不送 spec')
+  } finally {
+    globalThis.fetch = fetchUntilReleased
   }
 })
