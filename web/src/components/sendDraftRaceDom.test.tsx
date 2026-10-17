@@ -29,8 +29,12 @@ const emptyPuts = (requests: FakeRequest[]) => draftPuts(requests).filter((r) =>
 /** 送出函式手動放行：`resolve` 之前 `await` 的送出都還在途中。 */
 function gate<T>() {
   let resolve!: (value: T) => void
-  const promise = new Promise<T>((r) => { resolve = r })
-  return { promise, resolve }
+  let reject!: (reason: unknown) => void
+  const promise = new Promise<T>((res, rej) => {
+    resolve = res
+    reject = rej
+  })
+  return { promise, resolve, reject }
 }
 
 /** 另一台裝置經 WS 把新草稿套進來（同 `draftSync` 的 `write`：直接改 store，不再觸發本機同步）。 */
@@ -315,4 +319,26 @@ test('交給 AGM：建任務失敗（resolve(null)）不清框，訂閱解除', 
   await settle(50)
   assert.equal(useStore.getState().drafts['group:gp'], '@gb first prompt', '失敗後草稿照舊')
   assert.equal(liveListeners.size, idle, '失敗後追蹤訂閱已解除')
+})
+
+test('一般送出：送出連線失敗（傳輸層 reject）不清框，訂閱解除', { timeout: 30_000 }, async () => {
+  fakeApi(() => undefined)
+  seedBot('first prompt', false)
+  // 不覆寫 `sendPrompt`：讓 store 的正式送出流程處理傳輸層的 reject（它自己接住，回 false），跟線上一樣。
+  const realFetch = globalThis.fetch
+  globalThis.fetch = (async (input: string, init?: { method?: string }) => {
+    if (init?.method === 'POST' && /\/prompt/.test(String(input))) throw new TypeError('network down')
+    return realFetch(input, init as RequestInit)
+  }) as typeof fetch
+  try {
+    await mount(<ChatPanel onOpenSidebar={() => {}} />)
+    await settle(50)
+    const idle = liveListeners.size
+    await keydown(textarea(), 'Enter')
+    await settle(300)
+    assert.equal(useStore.getState().drafts['bot:b'], 'first prompt', '連線失敗後草稿照舊')
+    assert.equal(liveListeners.size, idle, '連線失敗後追蹤訂閱已解除')
+  } finally {
+    globalThis.fetch = realFetch
+  }
 })
