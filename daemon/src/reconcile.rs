@@ -651,8 +651,14 @@ pub(crate) async fn reconcile_host_locked(app: &impl ReconcileHostEnv, host: &st
                 .bind(&bot.id).bind(&session).bind(&session).fetch_optional(app.db()).await?
         };
         if latest.is_none() { continue; }
-        if latest.as_ref().is_some_and(|r| r.pane_id.as_deref().is_none_or(str::is_empty) && r.native_session_id.as_deref().is_none_or(str::is_empty)) {
-            continue;
+        let missing_identity = latest.as_ref().is_some_and(|r| r.pane_id.as_deref().is_none_or(str::is_empty) && r.native_session_id.as_deref().is_none_or(str::is_empty));
+        let unmapped_start = missing_identity && active.as_ref().is_some_and(|r| r.state == "starting");
+        if missing_identity {
+            // A failed start can close its pane before its mapping/exit reaches the DB.
+            // Without IDs, only an empty agent list proves absence; re-read under the bot lock.
+            if !unmapped_start || !agents.is_empty() || !client.agent_list().await.is_ok_and(|agents| agents.is_empty()) {
+                continue;
+            }
         }
         if let Some(run) = latest.as_ref() {
             let matches: Vec<_> = agents.iter().filter(|a| matches_run(run, a, bot.managed_by == "child")).collect();
@@ -669,8 +675,7 @@ pub(crate) async fn reconcile_host_locked(app: &impl ReconcileHostEnv, host: &st
         // Re-read under the bot lock; a restart may have replaced the pre-lock snapshot.
         if let Some(run) = latest.as_ref() {
             let target = found.as_ref().map(|a| a.pane_id.as_str()).or(run.pane_id.as_deref()).filter(|p| !p.is_empty());
-            let Some(pane) = target else { continue };
-            {
+            if let Some(pane) = target {
                 match client.agent_get(pane).await {
                     Ok(Some(agent)) if matches_run(run, &agent, bot.managed_by == "child") && !claimed.contains(&agent.pane_id) => found = Some(agent),
                     Ok(Some(agent)) => {
@@ -686,6 +691,8 @@ pub(crate) async fn reconcile_host_locked(app: &impl ReconcileHostEnv, host: &st
                         continue;
                     }
                 }
+            } else if !unmapped_start {
+                continue;
             }
         }
         if let Some(agent) = found.as_ref() {
@@ -1670,6 +1677,25 @@ mod compat_tests {
             .fetch_optional(&app.db)
             .await
             .unwrap()
+    }
+
+    #[tokio::test]
+    async fn nr1791_unmapped_start_exits_only_when_herdr_confirms_no_agents() {
+        let env = tt::env().await;
+        let app = &env.app;
+        let bot = a_bot(&env, "alfa").await;
+        let run = db::ulid();
+        sqlx::query("INSERT INTO runs (id,bot_id,state,agent_status,herdr_session,started_at) VALUES (?,?,'starting','idle','test',?)")
+            .bind(&run).bind(&bot).bind(db::now()).execute(&app.db).await.unwrap();
+        *env.herdr.agents.lock().unwrap() = vec![json!({"name":"unidentified","agent":"claude","agent_status":"idle","workspace_id":"unknown-workspace","tab_id":"unknown-tab","pane_id":"unknown-pane"})];
+        super::reconcile_host(app, crate::config::LOCAL_HOST).await.unwrap();
+        assert_eq!(run_of(app, &bot).await.unwrap().state, "starting", "missing identity with a possible agent stays unknown");
+        env.herdr.agents.lock().unwrap().clear();
+        env.herdr.fail_next("agent.list", tt::Fault::RefuseWith("unavailable"));
+        assert!(super::reconcile_host(app, crate::config::LOCAL_HOST).await.is_err());
+        assert_eq!(run_of(app, &bot).await.unwrap().state, "starting", "RPC failure is not evidence of absence");
+        super::reconcile_host(app, crate::config::LOCAL_HOST).await.unwrap();
+        assert_eq!(run_of(app, &bot).await.unwrap().state, "exited", "confirmed empty herdr cannot keep a starting zombie");
     }
 
     // #1791: names are snapshots; only the pane/native session establishes identity.
