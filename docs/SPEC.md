@@ -1698,7 +1698,8 @@ tab 已被回收視為完成，`tab.list` 失敗不猜。沒有 `tab_id` 的 Run
    一般 active run 尚無 native session 時可依既有 pane ID 維持；child 必須有相符 native session 才確認仍為同一 instance。
    名稱只更新 `runs.agent_name` 快照，不以 bot 暱稱、歷史 agent 名或 project label 推算名稱查找。
    pane 有 occupant 但缺少／衝突的 child instance 證據時保持未知：不改 run、不退役，也不把這個 pane 再收成別人的 child。
-   缺 ID 或 RPC 讀失敗也保留；pane 上確認沒有 agent 才結束 run。
+   缺 ID 或 RPC 讀失敗也保留；pane 上確認沒有 agent 才結束 run。例外是啟動失敗留下尚無 pane/native ID 的 `starting` run：
+   若清單為空，且拿 bot 鎖後重讀 `agent.list` 仍確認沒有任何 agent，才收成 `exited`，避免阻擋下次啟動；有不明 agent 或讀取失敗仍保留未知。
 3. 沒有 active Run 時，只憑同 host/session 的既有 native session 身分接回 bot，建 `running`、`adopted=1` 的 Run；
    名稱重用不沿用舊 bot 的歷史與設定，沒有穩定身分證據就不自動接回。
 4. orphan pane 回收：`exited/stopped` Run 的 `pane_id` 仍在 snapshot 且沒有 agent → `pane.close`。

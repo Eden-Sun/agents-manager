@@ -95,7 +95,7 @@
     }
 
     /// 別顆 daemon 的 agent 名字剛好是 `<我的 bot>-<字尾>`、開在它自己的 workspace：共用主機上不認領；
-    /// 同名前綴、開在我自己 workspace 裡的照常認領。不共用時兩顆都認領（前綴跨 tab 本來就算）。
+    /// 自己 workspace 裡有明確 spawn claim 的才認領；關掉共用旗標也不靠前綴搶別人的。
     #[tokio::test]
     async fn a_foreign_agent_with_our_prefix_is_not_claimed_on_a_shared_host() {
         let env = tt::env().await;
@@ -113,12 +113,13 @@
             entry(&format!("{agent}-x"), &theirs.workspace_id, &their_root.tab_id, &their_root.pane_id),
         ];
 
+        crate::spawn_hints::claim(&app, &bot.id, &kid.pane_id).await.unwrap();
         crate::reconcile::reconcile_host(&app, HOST).await.unwrap();
         assert_eq!(children(&app).await, ["ui"], "只認領自己 workspace 裡的");
 
         set_shared(&app, false).await;
         crate::reconcile::reconcile_host(&app, HOST).await.unwrap();
-        assert_eq!(children(&app).await, ["ui", "x"], "不共用時前綴跨 workspace 照舊算");
+        assert_eq!(children(&app).await, ["ui"], "不共用時也不憑前綴認領別人的 agent");
     }
 
     /// 結束的 run 的 pane id 被別顆 daemon 的新 pane 用到（在它的 workspace 裡）：共用主機上不當孤兒關。
