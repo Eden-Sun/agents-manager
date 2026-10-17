@@ -65,7 +65,7 @@ test('沒有 resets_at、沒有額度資料：null（只能手動解除）', () 
 })
 
 test('被選為阻擋的窗口 reset 已過或壞掉：回 null，不借別的窗口', () => {
-  assert.equal(disableUntil(quota(win(-1), win(72)), now), null, '都正常時，過去的 5h 也算未知')
+  assert.equal(disableUntil(quota(win(-1), win(72)), now), at(72), '都正常時，過去的 5h 忽略，取有效的 7d')
   assert.equal(disableUntil(quota(win(-1, { critical: true }), win(72)), now), null, 'critical 但 reset 已過：不退回健康的 7d')
   assert.equal(disableUntil(quota(win(0), win(-5)), now), null, '剛好等於現在也算過去')
   const bad = win(2)
@@ -95,4 +95,13 @@ test('沒有 critical，low 的 reset 未知：null（不借健康窗口）', ()
 
 test('都正常、全部 reset 已知：取最早', () => {
   assert.equal(disableUntil(quota(win(72), win(2), win(24)), now), at(2))
+})
+
+test('都正常、其中一個 reset 缺失：忽略它，取其他有效的最早', () => {
+  assert.equal(disableUntil(quota(win(2), win(null)), now), at(2))
+  assert.equal(disableUntil(quota(win(null), win(72), win(24)), now), at(24))
+})
+
+test('都正常、所有 reset 都無效：null', () => {
+  assert.equal(disableUntil(quota(win(null), win(-1)), now), null)
 })
