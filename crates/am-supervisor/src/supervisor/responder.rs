@@ -112,31 +112,8 @@ pub async fn set_persona(db: &SqlitePool, text: &str, expected_version: Option<i
     Ok(roles::get(db, Role::Responder).await.map_err(up)?.persona_version)
 }
 
-fn claude_md(dir: &Path, bot_id: &str, port: u16) -> String {
-    format!(
-        r#"# AGM 協調者 — agents-manager
-
-你是 AGM 的協調者（responder）。角色前導詞由 daemon 以 persona 注入（同目錄 `persona.md` 是可讀副本）。
-
-## 執行期
-- AG Man daemon：`http://127.0.0.1:{port}`
-- 你自己的 bot id：`{bot_id}`
-- 工作目錄：`{dir}`（只屬於協調者；巡檢 AGM 在另一個目錄）
-- 執行期設定：`runtime.json`（`role` = `responder`；沒有 token）
-
-## 可用工具
-- `bin/agm`：先跑 `bin/agm --help`。沒出現在 `--help` 的子命令就是不存在。
-
-## 恢復流程
-讀 `handoff.md` → `bin/agm inbox --role responder` → `bin/agm assignments --awaiting-review` → 即時狀態。
-
-## 邊界
-- 這個目錄不是任何專案的原始碼，不要在這裡改程式。
-- 使用者入口是巡檢 AGM。
-- 不要把 token、登入秘密或完整環境變數寫進任何檔案或回覆。
-"#,
-        dir = dir.display(),
-    )
+fn claude_md(_dir: &Path, _bot_id: &str, _port: u16) -> String {
+    super::setup::shared_agent_md()
 }
 
 pub fn runtime_json(port: u16, self_id: &str, manager_id: Option<&str>, data_dir: &str) -> Value {
@@ -1974,6 +1951,11 @@ mod gave_up_report_tests {
         }
 
         deploy_files(&app, "bot-x", None, "新人設").unwrap();
+
+        let md = std::fs::read_to_string(d.join("CLAUDE.md")).unwrap();
+        assert_eq!(md, super::super::setup::shared_agent_md());
+        assert!(!md.contains("bot-x"));
+        assert!(!md.contains(&d.to_string_lossy().to_string()));
 
         assert_eq!(std::fs::read_to_string(&keep_persona).unwrap(), "KEEP", "persona 不能被原地改寫");
         assert_eq!(std::fs::read_to_string(&keep_agm).unwrap(), "KEEP", "bin/agm 不能被原地改寫");

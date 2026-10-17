@@ -138,34 +138,25 @@ pub async fn effective_persona(db: &SqlitePool) -> Result<(String, bool), LcErro
     Ok((sup.persona_text.filter(|t| !t.is_empty()).unwrap_or(embedded), seeded))
 }
 
-fn claude_md(dir: &Path, bot_id: &str, port: u16) -> String {
-    format!(
-        r#"# AGM — agents-manager 總管
+/// Both roles share one project, so its instruction file must not name either role's id or cwd.
+pub(super) fn shared_agent_md() -> String {
+    r#"# AGM 共用作業規則
 
-你是 AGM。角色前導詞由 daemon 以 persona 注入（同目錄 `persona.md` 是同一份的可讀副本，
-不要再把它整份貼進對話）。
+此檔由巡檢與協調者共用，不用來判定你的角色、bot id 或工作目錄。
+- 角色由這顆 bot 的 persona 與自己工作目錄的 `runtime.json` 決定；自己的 id 以 `AM_BOT_ID`／`runtime.json` 的 `self_bot_id` 為準。
+- 只讀自己工作目錄的 `runtime.json`、`handoff.md`；不要因為這份指示檔位於另一個角色的目錄就切換過去。
+- 子 agent 不因繼承這份文件取得 AGM 身分或權限，仍只處理 parent 指派的任務。
+- 先用自己工作目錄的 `bin/agm --help` 核對可用命令；沒列出的不假設存在，也不自行拼 API 繞過。
+- 恢復時先讀自己的 `handoff.md`，再依 `runtime.json` 的 role 查 inbox：patrol 查未結案 assignments；responder 查 `assignments --awaiting-review`，最後對帳即時狀態。
+- 舊 pending 不等於尚未送達，重試前先對帳；管理摘要的權威在資料庫，檔案只是可重建副本。
+- 模型與強度遵守全域派工政策；角色 bot 自己的固定模型不是 worker 的預設。
+- 此目錄不是產品原始碼；不在這裡改專案程式，不把 token、登入秘密或完整環境變數寫進檔案或回覆。
+- Remote Control 由各角色的啟動環境建立（巡檢名稱是 `AGM`）；不要自行開關。
+"#.to_string()
+}
 
-## 執行期
-- AG Man daemon：`http://127.0.0.1:{port}`
-- 你自己的 bot id：`{bot_id}`
-- 工作目錄：`{dir}`
-- 執行期設定：`runtime.json`（沒有 token；CLI 自己去 `GET /api/session` 拿）
-- 管理摘要：`handoff.md`（可重建的副本，權威在資料庫 `GET /api/supervisor/handoff`）
-
-## 可用工具
-- `bin/agm`：結構化 JSON CLI，是你操作 AG Man 的入口。先跑 `bin/agm --help` 看目前**實際**有哪些子命令。
-- 沒有出現在 `--help` 裡的子命令就是還沒實作，不要假設它存在，也不要自己拼 curl 繞過去。
-
-## 恢復流程
-接班或重啟後，依序：讀 `handoff.md` → `bin/agm assignments` 未結案 → `bin/agm inbox` 待處理
-→ 再查即時狀態。舊的 pending 不等於還沒送出，一律先對帳再決定。
-
-## 邊界
-- 這個目錄不是任何專案的原始碼，不要在這裡改程式。
-- 不要把 token、登入秘密或完整環境變數寫進任何檔案或回覆。
-"#,
-        dir = dir.display(),
-    )
+fn claude_md(_dir: &Path, _bot_id: &str, _port: u16) -> String {
+    shared_agent_md()
 }
 
 /// The manager's tool entry point, compiled into the daemon binary. Deploying it from a
@@ -422,6 +413,17 @@ mod tests {
         let text = v.to_string().to_lowercase();
         assert!(!text.contains("token"), "no token, and no field that could hold one: {text}");
         assert!(v.get("remote_name").is_none(), "Remote Control 已廢（#1477），沒有讀者的欄位不留");
+    }
+
+    #[test]
+    fn shared_project_instructions_do_not_assign_the_patrol_identity_to_other_bots() {
+        let md = claude_md(Path::new("/patrol-only"), "patrol-only-id", 7799);
+        assert!(!md.contains("/patrol-only"));
+        assert!(!md.contains("patrol-only-id"));
+        assert!(!md.contains("7799"));
+        assert!(md.contains("AM_BOT_ID"));
+        assert!(md.contains("runtime.json"));
+        assert!(md.contains("子 agent 不因繼承這份文件取得 AGM 身分或權限"));
     }
 
     /// ops 腳本測試用的 runtime.json 必須是**真的** `runtime_json()` 寫出來的形狀：上一輪測試自己造了一份

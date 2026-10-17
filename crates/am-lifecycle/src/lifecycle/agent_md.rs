@@ -43,20 +43,29 @@ pub async fn load(app: &(impl crate::capabilities::Cfg + crate::hosts::HostsAcce
     let agents = app.cfg().agents_fresh().await;
     let mut reads: Vec<Result<String, String>> = Vec::new();
     if let Some(f) = agents.global_file() {
-        reads.push(read_local(f).await);
+        reads.push(read_local(f).await.map(|text| source_document(f, LOCAL_HOST, text)));
     }
     let conn = if project.host == LOCAL_HOST { None } else { app.hosts().get(&project.host).await };
     for f in agents.project_files(&project.id, &project.label) {
         reads.push(if project.host == LOCAL_HOST {
-            read_local(f).await
+            read_local(f).await.map(|text| source_document(f, LOCAL_HOST, text))
         } else {
             match &conn {
-                Some(conn) => read_remote(conn, f).await,
+                Some(conn) => read_remote(conn, f).await.map(|text| source_document(f, &project.host, text)),
                 None => Err(format!("{f}：未知主機 `{}`", project.host)),
             }
         });
     }
     collect(reads)
+}
+
+/// Stable per-source fingerprints make startup snapshots identifiable without changing the
+/// prompt on every restart. Empty documents must still reach `collect` as empty documents.
+fn source_document(path: &str, host: &str, text: String) -> String {
+    use sha2::{Digest, Sha256};
+    if text.trim().is_empty() { return text; }
+    let digest = format!("{:x}", Sha256::digest(text.as_bytes()));
+    format!("[AG Man 指示來源：主機 {host}；檔案 {path}；SHA256 {digest}。此為啟動快照，檔案／主幹更新不代表這次 session 已重新載入。]\n\n{text}")
 }
 
 async fn read_local(f: &str) -> Result<String, String> {
@@ -286,6 +295,25 @@ fn remote_script_mode(path: &str, text: &str, mode: Option<&str>) -> String {
 #[cfg(all(test, feature = "daemon-test-harness"))]
 mod tests {
     use super::*;
+
+    #[test]
+    fn source_fingerprints_identify_the_loaded_snapshot_without_volatile_timestamps() {
+        let text = source_document("~/repo/AGENTS.md", "m4p", "rules v1".into());
+        assert!(text.contains("主機 m4p；檔案 ~/repo/AGENTS.md；SHA256 "));
+        assert!(text.ends_with("\n\nrules v1"));
+        assert_eq!(text, source_document("~/repo/AGENTS.md", "m4p", "rules v1".into()));
+        assert_ne!(text, source_document("~/repo/AGENTS.md", "m4p", "rules v2".into()));
+        assert!(text.contains("不代表這次 session 已重新載入"));
+    }
+
+    #[test]
+    fn source_annotations_do_not_hide_empty_or_missing_instruction_files() {
+        let md = collect(vec![Ok(source_document("empty.md", "local", " \n".into())), Err("missing.md".into())]);
+        assert!(md.text.is_empty());
+        assert_eq!(md.problems.len(), 2);
+        assert_eq!(md.unreadable, vec!["missing.md"]);
+        assert!(!md.cli_docs_disabled());
+    }
 
     #[test]
     fn the_project_file_is_found_by_id_before_label() {
