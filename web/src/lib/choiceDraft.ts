@@ -210,7 +210,8 @@ export function togglesFor(now: TuiChoiceMenu['choices'], want: boolean[]): numb
 export function locate(draft: Draft, now: TuiChoiceMenu): number | null {
   const pages = draft.pages.filter((p) => !p.isSubmit)
   const exact = pages.filter((p) => samePage(p, now))
-  const loose = pages.filter((p) => p.question === now.question && p.choices.length === now.choices.length)
+  // 題目是 null 時只剩選項數，對到一頁不代表是那一頁：不靠它猜（#1816 review）。
+  const loose = now.question === null ? [] : pages.filter((p) => p.question === now.question && p.choices.length === now.choices.length)
   const hits = exact.length ? exact : loose
   if (hits.length === 1) return hits[0].tab
   // 送出頁在草稿裡是合成的（沒有題目、沒有選項），照題目比永遠對不上：看畫面長得像送出頁就算（2026-10-02 事發：
@@ -350,7 +351,11 @@ export async function commit(
       const next = await moveTab(io, dir, cur)
       if (!next) return { ok: false, error: `走不到第 ${p.tab + 1} 題（${p.label}），後面的都沒送出。`, at: i }
       cur = next
-      at = locate(draft, cur) ?? at + dir
+      const found = locate(draft, cur)
+      if (found === null) {
+        return { ok: false, error: `導覽後的畫面對不上草稿，分不出終端停在哪一頁（題目或選項跟讀進來時不一樣），後面的都沒送出，請看終端。`, at: i }
+      }
+      at = found
     }
     if (!samePage(p, cur)) {
       return { ok: false, error: `第 ${p.tab + 1} 題（${p.label}）的選項跟讀進來時不一樣，沒有送出。`, at: i }
@@ -455,7 +460,11 @@ export async function commit(
     const next = await moveTab(io, dir, cur)
     if (!next) return { ok: false, error: '走不到送出頁，勾選已經送出去了，最後一步請自己按。' }
     cur = next
-    at = locate(draft, cur) ?? at + dir
+    const found = locate(draft, cur)
+    if (found === null) {
+      return { ok: false, error: '導覽後的畫面對不上草稿，分不出終端停在哪一頁（題目或選項跟讀進來時不一樣），勾選已經送出去了，最後一步請自己按。' }
+    }
+    at = found
   }
   const idx = cur.choices.findIndex((c) => /^submit answers$/i.test(c.title))
   if (idx < 0) return { ok: false, error: '送出頁上找不到「Submit answers」，最後一步請自己按。' }

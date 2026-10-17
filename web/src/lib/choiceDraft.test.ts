@@ -942,3 +942,46 @@ test('#1816 locate：兩頁完全一樣分不出來時回 null，不猜第一頁
   const draft: Draft = { pages, startTab: 0, tabs: PAGE_TABS }
   assert.equal(locate(draft, pageMenu(1, 'Pick one?', 'same')), null)
 })
+
+test('#1816 review：兩頁完全相同，commit 中 locate 認不出在哪一頁 → 不再送導覽鍵，回錯誤', async () => {
+  const tabs: TuiTab[] = [...PAGE_TABS]
+  const twin = (done: boolean): TuiChoiceMenu => ({ ...pageMenu(0, 'Pick one?', 'same'), tabs: tabs.map((t, i) => (i === 0 ? { ...t, done } : t)) })
+  const pageOfTwin = (tab: number): DraftPage => {
+    const m = pageMenu(tab, 'Pick one?', 'same')
+    return { tab, label: PAGE_TABS[tab].label, question: m.question, choices: m.choices, multi: false, hasSubmitRow: false, review: [], isSubmit: false }
+  }
+  const draft: Draft = { pages: [pageOfTwin(0), pageOfTwin(1)], startTab: 0, tabs }
+  // 第一鍵 right 之後畫面換了（tab 列的答過狀態變），但兩頁內容一樣，locate 分不出來。
+  const sent: string[] = []
+  let screen = twin(false)
+  const io: Io = {
+    read: async () => screen,
+    send: async (keys) => {
+      sent.push(...keys)
+      if (keys[0] === 'right') screen = twin(true)
+    },
+    wait: async () => {},
+    paste: async () => {},
+  }
+  const res = await commit(io, draft, [[false, false], [true, false]])
+  assert.equal(res.ok, false)
+  assert.match(res.error ?? '', /分不出/)
+  assert.deepEqual(sent, ['right'])
+})
+
+test('#1816 review：問句為 null 時，只靠選項數對到一頁的 locate 不認', () => {
+  const page = (tab: number, count: number): DraftPage => ({
+    tab,
+    label: PAGE_TABS[tab].label,
+    question: null,
+    choices: Array.from({ length: count }, (_, j) => ({ number: j + 1, title: `opt${tab}-${j}`, detail: '', preview: '', current: false, checked: null })),
+    multi: false,
+    hasSubmitRow: false,
+    review: [],
+    isSubmit: false,
+  })
+  const draft: Draft = { pages: [page(0, 2), page(1, 3)], startTab: 0, tabs: PAGE_TABS }
+  const now = pageMenu(0, null, 'other')
+  assert.equal(now.choices.length, 2)
+  assert.equal(locate(draft, now), null)
+})
