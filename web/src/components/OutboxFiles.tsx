@@ -30,7 +30,13 @@ export function OutboxFiles() {
   const [fetchedAt, setFetchedAt] = useState(0)
   /** 已經讀完哪一顆的清單。用它而不是 `loading` 旗標：effect 裡同步 setState 會多跑一輪 render。 */
   const [loadedFor, setLoadedFor] = useState<string | null>(null)
-  const [busy, setBusy] = useState<string | null>(null)
+  /** 正在下載的那一個：綁 bot 與檔名，換了 bot 不會把下載中的狀態畫到另一顆的同名檔上（#1805）。 */
+  const [busy, setBusy] = useState<{ bot: string; name: string } | null>(null)
+  /** 目前畫面是哪顆 bot：下載回來時拿來判斷那一趟還屬不屬於現在這顆（#1805）。 */
+  const botRef = useRef(botId)
+  useEffect(() => {
+    botRef.current = botId
+  }, [botId])
   /** 倒數用的時鐘：分鐘級的字，30 秒走一次就夠。 */
   const [now, setNow] = useState(() => Date.now())
 
@@ -102,7 +108,10 @@ export function OutboxFiles() {
 
   const download = async (name: string) => {
     if (!botId) return
-    setBusy(name)
+    // 這一趟是哪顆 bot 的：回來時 bot 可能已經換了。舊的只能把檔案交給使用者，不能動現在這顆的清單與下載狀態。
+    const mine = { bot: botId, name }
+    const kept0 = kept
+    setBusy(mine)
     try {
       // token 帶不進 `<a href>`，所以先抓成 blob 再按下去；抓完就釋放，不然大檔會一直佔記憶體。
       const url = await api.outboxFileUrl(botId, name)
@@ -114,16 +123,23 @@ export function OutboxFiles() {
       a.remove()
       setTimeout(() => URL.revokeObjectURL(url), 10_000)
     } catch (e) {
-      // 過期被清掉的那一列留在畫面上沒有意義：當場拿掉並重讀一次清單（issue #547）。
-      const { text, gone } = downloadFailure(name, e, kept)
-      if (gone) {
-        setFiles((fs) => fs.filter((f) => f.name !== name))
-        setLoadedFor(null)
-        setNonce((n) => n + 1)
+      const { text, gone } = downloadFailure(name, e, kept0)
+      if (botRef.current === botId) {
+        // 過期被清掉的那一列留在畫面上沒有意義：當場拿掉並重讀一次清單（issue #547）。
+        if (gone) {
+          setFiles((fs) => fs.filter((f) => f.name !== name))
+          setLoadedFor(null)
+          setNonce((n) => n + 1)
+        }
+        notify('error', text)
+      } else {
+        // 已經換到別的 bot：清單不動，訊息寫明是哪顆 bot 的檔。
+        const label = useStore.getState().bots.find((b) => b.id === botId)?.name ?? botId
+        notify('error', `${label} 的檔案：${text}`)
       }
-      notify('error', text)
     } finally {
-      setBusy(null)
+      // 只清自己設的那一格；別的下載（同一顆或切過去的）設的不碰。
+      setBusy((cur) => (cur === mine ? null : cur))
     }
   }
 
@@ -164,7 +180,7 @@ export function OutboxFiles() {
                 <button
                   type="button"
                   className="outbox-file"
-                  disabled={busy === f.name}
+                  disabled={busy?.bot === botId && busy.name === f.name}
                   title={`下載 ${f.name}`}
                   onClick={() => void download(f.name)}
                   onMouseEnter={(e) => showPeek(f, e.currentTarget)}
@@ -179,7 +195,7 @@ export function OutboxFiles() {
                   <span className={`outbox-meta${left !== null && left <= 600 ? ' soon' : ''}`}>
                     {fileSize(f.size)}
                     {left === null ? '' : ` · ${remainingLabel(left)}`}
-                    {busy === f.name ? ' · 下載中…' : ''}
+                    {busy?.bot === botId && busy.name === f.name ? ' · 下載中…' : ''}
                   </span>
                 </button>
               </li>
