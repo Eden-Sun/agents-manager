@@ -943,27 +943,28 @@ test('#1816 locate：兩頁完全一樣分不出來時回 null，不猜第一頁
   assert.equal(locate(draft, pageMenu(1, 'Pick one?', 'same')), null)
 })
 
-test('#1816 review：兩頁完全相同，commit 中 locate 認不出在哪一頁 → 不再送導覽鍵，回錯誤', async () => {
-  const tabs: TuiTab[] = [...PAGE_TABS]
-  const twin = (done: boolean): TuiChoiceMenu => ({ ...pageMenu(0, 'Pick one?', 'same'), tabs: tabs.map((t, i) => (i === 0 ? { ...t, done } : t)) })
-  const pageOfTwin = (tab: number): DraftPage => {
-    const m = pageMenu(tab, 'Pick one?', 'same')
-    return { tab, label: PAGE_TABS[tab].label, question: m.question, choices: m.choices, multi: false, hasSubmitRow: false, review: [], isSubmit: false }
+test('#1816 review：導覽途中 locate 認不出在哪一頁 → 不再送導覽鍵，回錯誤', async () => {
+  // 起點（第 1 頁）有獨特的選項，導覽後的畫面同時像第 2、3 頁，分不出在哪一頁。
+  const tabs: TuiTab[] = [...PAGE_TABS.slice(0, 2), { label: 'third', done: false, submit: false }, PAGE_TABS[2]]
+  const menu = (tab: number, option: string): TuiChoiceMenu => ({ ...pageMenu(tab, 'Pick one?', option), tabs })
+  const pageOf = (tab: number, option: string): DraftPage => {
+    const m = menu(tab, option)
+    return { tab, label: tabs[tab].label, question: m.question, choices: m.choices, multi: false, hasSubmitRow: false, review: [], isSubmit: false }
   }
-  const draft: Draft = { pages: [pageOfTwin(0), pageOfTwin(1)], startTab: 0, tabs }
-  // 第一鍵 right 之後畫面換了（tab 列的答過狀態變），但兩頁內容一樣，locate 分不出來。
+  const draft: Draft = { pages: [pageOf(0, 'start'), pageOf(1, 'same'), pageOf(2, 'same')], startTab: 0, tabs }
+  const screens = [menu(0, 'start'), menu(1, 'same')]
   const sent: string[] = []
-  let screen = twin(false)
+  let at = 0
   const io: Io = {
-    read: async () => screen,
+    read: async () => screens[at],
     send: async (keys) => {
       sent.push(...keys)
-      if (keys[0] === 'right') screen = twin(true)
+      if (keys[0] === 'right') at = 1
     },
     wait: async () => {},
     paste: async () => {},
   }
-  const res = await commit(io, draft, [[false, false], [true, false]])
+  const res = await commit(io, draft, [[], [true, false], []])
   assert.equal(res.ok, false)
   assert.match(res.error ?? '', /分不出/)
   assert.deepEqual(sent, ['right'])
@@ -984,4 +985,58 @@ test('#1816 review：問句為 null 時，只靠選項數對到一頁的 locate 
   const now = pageMenu(0, null, 'other')
   assert.equal(now.choices.length, 2)
   assert.equal(locate(draft, now), null)
+})
+
+test('#1816 起點分不出頁（兩頁完全相同）：一顆鍵都不送，直接回錯誤', async () => {
+  const tabs: TuiTab[] = [...PAGE_TABS]
+  const screen = pageMenu(0, 'Pick one?', 'same')
+  const pageOfTwin = (tab: number): DraftPage => {
+    const m = pageMenu(tab, 'Pick one?', 'same')
+    return { tab, label: PAGE_TABS[tab].label, question: m.question, choices: m.choices, multi: false, hasSubmitRow: false, review: [], isSubmit: false }
+  }
+  const draft: Draft = { pages: [pageOfTwin(0), pageOfTwin(1)], startTab: 0, tabs }
+  const sent: string[] = []
+  const io: Io = {
+    read: async () => screen,
+    send: async (keys) => {
+      sent.push(...keys)
+    },
+    wait: async () => {},
+    paste: async () => {},
+  }
+  const res = await commit(io, draft, [[true, false], [true, false]])
+  assert.equal(res.ok, false)
+  assert.match(res.error ?? '', /分不出終端停在哪一頁，什麼都沒送出/)
+  assert.deepEqual(sent, [])
+})
+
+test('#1816 起點停在 Review：起點照舊用 startTab，不走新的起點錯誤', async () => {
+  const tabs: TuiTab[] = [...PAGE_TABS]
+  const pageOfTwin = (tab: number): DraftPage => {
+    const m = pageMenu(tab, 'Pick one?', 'same')
+    return { tab, label: PAGE_TABS[tab].label, question: m.question, choices: m.choices, multi: false, hasSubmitRow: false, review: [], isSubmit: false }
+  }
+  const draft: Draft = { pages: [pageOfTwin(0), pageOfTwin(1)], startTab: 0, tabs }
+  // 終端停在 Review：分不出頁，但 isSubmitMenu 為真，照舊從 startTab 走向送出頁；畫面不動就在導覽時停下。
+  const review: TuiChoiceMenu = {
+    ...pageMenu(2, 'Review?', 'review'),
+    review: [{ question: 'server', answer: 'A' }],
+    choices: [
+      { number: 1, title: 'Submit answers', detail: '', preview: '', current: true, checked: null },
+      { number: 2, title: 'Cancel', detail: '', preview: '', current: false, checked: null },
+    ],
+  }
+  const sent: string[] = []
+  const io: Io = {
+    read: async () => review,
+    send: async (keys) => {
+      sent.push(...keys)
+    },
+    wait: async () => {},
+    paste: async () => {},
+  }
+  const res = await commit(io, draft, [[], []])
+  assert.equal(res.ok, false)
+  assert.match(res.error ?? '', /走不到送出頁/)
+  assert.deepEqual(sent, ['right', 'tab'])
 })
