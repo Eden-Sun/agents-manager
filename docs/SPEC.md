@@ -3657,6 +3657,8 @@ bot 用 `herdr agent start` 開的 claude 子 agent（本機或遠端）沒有 h
   `runs.transcript_baseline_at` 為 NULL＝這個 run 還沒讀過：第一次讀只把「已經結束的問」當基準——對得上既有回合的（派工開的在飛回合）照舊收掉，
   其餘不開回合、不通知，基準時間（已結束的最後一問的 user 行 `timestamp`）寫進該欄（檔裡沒有任何一問＝空字串）。之後只記 `timestamp` 比基準晚的問；
   第一次讀到時還沒結束的那一問不在基準裡，結束時照記。grok／agy 不用基準（它們的 session 是 run 自己開的）。
+- **idle 邊補讀**（issue #1798）：adopt 的 pane（`runs.adopted`）狀態轉成 `idle`（`prev != idle`）時，`handle_status` 排一個約 2 秒後的 `poller::spawn_idle_transcript_sync`，持 bot 鎖跑 `sync_idle_transcript_locked`：有回合在飛就不動（歸備援），否則只 `sync_locked`、不刮畫面。
+  用 argv 帶 prompt 起的子 agent 常常整段沒收到 working 邊（adopt 時狀態不是 working、herdr 一直回 unknown），沒有 in-flight 回合就不會有人讀對話檔，完成永遠補不進、parent 收不到 `child_done`；現在 idle 時補上，已記過的問不重記，有 hook 的 bot 不受影響。
 
 - **等人回答的提問（`GET /api/bots/{id}/pending-question`，issue #1476）**：遠端 claude bot 的「還沒被回答的 `AskUserQuestion`」也從同一個對話檔讀：`claude_child_log::pending_tail` 用上面同一條 `sh`（遠端走 ssh）、只讀最後 512 KiB（本機的 `pending_question::TAIL_BYTES`）、**不寫 DB**。
   路徑防護：檔案由這顆 bot 的 root（`CLAUDE_CONFIG_DIR`、身分在該主機的目錄、`~/.claude`）與 herdr 當下回報的 live session id 定位；只有 live session 通過驗證才讀，不用 run 裡可能過期的 `native_session_id` 或 `transcript_path` 決定 session。記錄路徑在這些 root 內且檔名符合 live session 時精確讀取；否則 discovery 必須在所有 root 合計只有一份候選；路徑無效、沒有檔或多份候選都不讀。
