@@ -64,11 +64,35 @@ test('沒有 resets_at、沒有額度資料：null（只能手動解除）', () 
   assert.equal(disableUntil(undefined, now), null)
 })
 
-test('resets_at 已經過去或壞掉的不算', () => {
-  assert.equal(disableUntil(quota(win(-1), win(72)), now), at(72), '過去的 5h 不拿來當最早')
-  assert.equal(disableUntil(quota(win(-1, { critical: true }), win(72)), now), at(72), 'critical 但 reset 已過：退回其他窗口')
+test('被選為阻擋的窗口 reset 已過或壞掉：回 null，不借別的窗口', () => {
+  assert.equal(disableUntil(quota(win(-1), win(72)), now), null, '都正常時，過去的 5h 也算未知')
+  assert.equal(disableUntil(quota(win(-1, { critical: true }), win(72)), now), null, 'critical 但 reset 已過：不退回健康的 7d')
   assert.equal(disableUntil(quota(win(0), win(-5)), now), null, '剛好等於現在也算過去')
   const bad = win(2)
   bad.resets_at = 'not a date'
-  assert.equal(disableUntil(quota(bad, win(72, { critical: true })), now), at(72))
+  assert.equal(disableUntil(quota(bad, win(72, { critical: true })), now), at(72), '阻擋的是 7d，5h 壞掉不影響')
+  assert.equal(disableUntil(quota(win(2), bad, win(100, { critical: true })), now), at(100), '阻擋的是 fable，5h 壞掉不影響')
+})
+
+test('7d 用完但 reset 未知、5h 正常有 reset：null，不准用 5h 的 reset 提前解除', () => {
+  assert.equal(disableUntil(quota(win(2), win(null, { critical: true, low: true })), now), null)
+  assert.equal(disableUntil(quota(win(2), win(-1, { critical: true, low: true })), now), null)
+})
+
+test('兩個 critical 其中一個 reset 未知：null', () => {
+  assert.equal(disableUntil(quota(win(2, { critical: true }), win(null, { critical: true })), now), null)
+  assert.equal(disableUntil(quota(win(null, { critical: true }), win(72, { critical: true })), now), null)
+})
+
+test('critical reset 已知、low 的 reset 未知：只看 critical，取它的 reset', () => {
+  assert.equal(disableUntil(quota(win(2, { critical: true }), win(null, { low: true })), now), at(2))
+})
+
+test('沒有 critical，low 的 reset 未知：null（不借健康窗口）', () => {
+  assert.equal(disableUntil(quota(win(2), win(null, { low: true })), now), null)
+  assert.equal(disableUntil(quota(win(2, { low: true }), win(null, { low: true }), null), now), null)
+})
+
+test('都正常、全部 reset 已知：取最早', () => {
+  assert.equal(disableUntil(quota(win(72), win(2), win(24)), now), at(2))
 })
