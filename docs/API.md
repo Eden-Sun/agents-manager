@@ -1081,6 +1081,7 @@ bot 或 active Run 不存在 404。
   - key 只收 `bot:<bot id>`、`group:<project id>`（id 字元 `[A-Za-z0-9._-]`、整串 ≤ 128），以及 host shell 面板的指令草稿 `shell:<host>/<pane id>`（#758；host、pane id 各一段，字元 `[A-Za-z0-9._:@+-]`，URL 裡 `/` 要編成 `%2F`）；否則 400 `bad_draft_key`。`DELETE /api/hosts/{name}/shells/{pane_id}` 成功後 daemon 把該 pane 的 `shell:` 草稿清成空字串並推 `draft_updated`（`client_id:""`）。`text` 超過 256 KiB（位元組）→ 400 `draft_too_large`（`max_bytes`）；`client_id` ≤ 64 字元。
   - `rev` **每個 key 單調遞增**：內容真的變了才加一；內容沒變的 PUT 回現有的 rev、不推事件（回的那一版與寫入同一個交易裡讀到的，不會是併發寫入者的版本）。刪除不整列刪（`text=''` 的墓碑），所以重建後 rev 接著加、不會從 1 重來；刪一個從沒寫過的 key 回 `rev:0`。
   - 最後寫入者贏，沒有 compare-and-set；網頁用 `rev` 丟掉晚到的舊事件。
+  - 非空的寫入只收**還活著的目標**：`bot:<id>` 要 bot 沒刪、所屬專案也沒刪，`group:<id>` 要專案沒刪；目標已刪（或不存在）回 404 `{"error":"draft_target_gone","key"}`，什麼都不寫、不推事件、rev 不動。存活檢查跟寫入在同一個交易（同一把寫鎖）裡判斷，所以刪除定案之後晚到的 PUT 不會把草稿復活。空字串（清除）不查目標，照舊冪等。`shell:` 目前不查 pane 世代。
 - 寫入後推 WS `draft_updated {key, text, rev, client_id, updated_at}`（耐久事件，進 200 則重播環）。`client_id` 是發出寫入的那個網頁分頁自己取的隨機字串，原樣帶回，讓它辨認自己的回音。
 - `DELETE /api/bots/{id}`、`DELETE /api/projects/{id}` 成功後 daemon 會把該 bot（含一併刪掉的 child）、該專案的 `group:` 草稿清成空字串，並推 `draft_updated`（`client_id:""`）。bot 復原後 key 沿用，rev 接著加。
 

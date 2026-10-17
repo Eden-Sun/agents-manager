@@ -60,12 +60,25 @@ async fn get<'c, E: sqlx::Executor<'c, Database = sqlx::Sqlite>>(ex: E, key: &st
     sqlx::query_as("SELECT key, text, rev, updated_at FROM composer_drafts WHERE key = ?").bind(key).fetch_optional(ex).await
 }
 
+/// 草稿的目標還活著：`bot:<id>` 要 bot 沒刪、所屬專案也沒刪；`group:<id>` 要專案沒刪；`shell:` 不查（見 #1806 範圍）。
+/// 非空寫入的 INSERT 與 no-op 後的讀取都用這一句，跟寫入同一個交易判斷，刪除定案之後晚到的 PUT 寫不回去。
+const LIVE_TARGET: &str = "(substr(?1, 1, 6) = 'shell:'
+    OR EXISTS (SELECT 1 FROM bots b JOIN projects p ON p.id = b.project_id
+               WHERE substr(?1, 1, 4) = 'bot:' AND b.id = substr(?1, 5) AND b.deleted_at IS NULL AND p.deleted_at IS NULL)
+    OR EXISTS (SELECT 1 FROM projects p WHERE substr(?1, 1, 6) = 'group:' AND p.id = substr(?1, 7) AND p.deleted_at IS NULL))";
+
+async fn target_live<'c, E: sqlx::Executor<'c, Database = sqlx::Sqlite>>(ex: E, key: &str) -> sqlx::Result<bool> {
+    let sql = format!("SELECT {LIVE_TARGET}");
+    sqlx::query_scalar(&sql).bind(key).fetch_one(ex).await
+}
+
 /// 寫一份草稿。回傳（現況, 這次有沒有真的改到）；沒改到時 rev 不動。空字串＝刪除（留墓碑）。
+/// 非空的寫入遇到目標（bot／專案）已經刪掉，什麼都不寫，回 `(None, false)`；呼叫端據此回 404。
 ///
 /// 改到的時候回報的是**這一次寫入產生的那一列**（`RETURNING`），不是寫完之後另外讀的：兩個分頁幾乎同時寫時，
 /// 先寫的那一個不能拿到後寫的版本當自己的回音（#1062）。沒回列＝內容沒變（或刪一份不存在的），才讀現況；
 /// 這次讀取跟那句寫入同一個交易，中間不能插進別的寫入者（否則 rev 是它的、text 卻是我們送來的那份，#1062 第 10 輪）。
-/// 交易第一句就是寫，寫鎖從那句開始就握著，不需要 `begin_write`。
+/// 交易第一句就是寫，寫鎖從那句開始就握著，不需要 `begin_write`。存活檢查併進那句 INSERT（`WHERE` 子句），同一個寫鎖。
 pub async fn put(pool: &SqlitePool, key: &str, text: &str) -> sqlx::Result<(Option<Draft>, bool)> {
     let now = crate::db::now();
     let mut tx = pool.begin().await?;
@@ -79,24 +92,24 @@ pub async fn put(pool: &SqlitePool, key: &str, text: &str) -> sqlx::Result<(Opti
         .fetch_optional(&mut *tx)
         .await?
     } else {
-        sqlx::query_as(
-            "INSERT INTO composer_drafts (key, text, rev, updated_at) VALUES (?, ?, 1, ?)
+        let sql = format!(
+            "INSERT INTO composer_drafts (key, text, rev, updated_at) SELECT ?1, ?2, 1, ?3 WHERE {LIVE_TARGET}
              ON CONFLICT(key) DO UPDATE SET text = excluded.text, rev = composer_drafts.rev + 1, updated_at = excluded.updated_at
              WHERE composer_drafts.text <> excluded.text
-             RETURNING key, text, rev, updated_at",
-        )
-        .bind(key)
-        .bind(text)
-        .bind(&now)
-        .fetch_optional(&mut *tx)
-        .await?
+             RETURNING key, text, rev, updated_at"
+        );
+        sqlx::query_as(&sql).bind(key).bind(text).bind(&now).fetch_optional(&mut *tx).await?
     };
     let out = match written {
         Some(d) => (Some(d), true),
         None => {
             #[cfg(test)]
             crate::lifecycle::race_point::hit("draft_put_after_noop", &crate::db::file_key(&mut tx).await).await;
-            (get(&mut *tx, key).await?, false)
+            if !text.is_empty() && !target_live(&mut *tx, key).await? {
+                (None, false)
+            } else {
+                (get(&mut *tx, key).await?, false)
+            }
         }
     };
     tx.commit().await?;
@@ -132,6 +145,10 @@ pub async fn put_http(State(app): State<Arc<App>>, Path(key): Path<String>, Json
     }
     let (draft, changed) = put(&app.db, &key, &b.text).await.map_err(|e| LcError::Upstream(e.to_string()))?;
     let Some(draft) = draft else {
+        // 非空寫入回 None＝目標已刪（見 [`put`]）：不能復活草稿。
+        if !b.text.is_empty() {
+            return Err(LcError::NotFoundValue(json!({"error": "draft_target_gone", "key": key})));
+        }
         // 從沒寫過、也沒東西可刪：rev 0。
         return Ok(Json(json!({"key": key, "rev": 0, "updated_at": null})));
     };
