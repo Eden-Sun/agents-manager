@@ -897,6 +897,8 @@ mod tests {
     #[tokio::test]
     async fn a_reused_pane_id_held_by_another_agent_is_not_the_old_run() {
         let f = fixture("reused-pane").await;
+        sqlx::query("UPDATE runs SET native_session_id='original-session' WHERE id=?")
+            .bind(&f.run_id).execute(&f.env.app.db).await.unwrap();
         f.env.herdr.set_agent("someone-else", &f.pane, true);
         let typed = super::super::send_text(&f.env.app, &f.bot_id, "hello", false, None).await;
         assert!(typed.is_err(), "打進被別人佔走的 pane id：{typed:?}");

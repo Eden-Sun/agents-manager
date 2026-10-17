@@ -134,6 +134,7 @@ async fn stop_locked_body(
         Some(fence) => client_for_run_with_host_fence(app, &run, fence).await?,
         None => client_for_run(app, &run).await?.client,
     };
+    let target = super::dead_panes::execution_target(&client, &run, &bot).await?;
     // 讀完 active run、還沒記 `stopping` 的那一瞬（測試在這裡插進不拿 bot 鎖的 pane-exit 事件）。
     #[cfg(all(test, feature = "daemon-test-harness"))]
     {
@@ -179,7 +180,6 @@ async fn stop_locked_body(
         }
     }
     app.notify_bot_status(bot_id).await;
-    let target = db::run_target(&run, &bot);
     // Close the in-flight turn and send ctrl+c as one fenced external handoff. Config replacement
     // uses the same per-host authority gate: it either wins first and this does nothing, or waits
     // while the RPC runs on the captured A client. It cannot resolve H to B in the middle of stop.
@@ -436,16 +436,18 @@ pub async fn finish_stop(app: &impl StopContext, run_id: &str) {
 
 /// stop (if running) + start. Used to make edited `model` / `args` / `identity` / `env` take effect.
 pub async fn run_alive(app: &(impl crate::capabilities::Db + crate::capabilities::HerdrRoutes + crate::hosts::HostsAccess), run: &db::Run, bot: &db::Bot) -> bool {
-    let Some(pane) = run.pane_id.as_deref() else { return false };
+    let target = db::run_target(run, bot);
+    if target.is_empty() { return true; }
+    let pane = target.as_str();
     let Ok(client) = client_for_run(app, run).await else { return true };
+    if super::dead_panes::pane_id_reused(&client, run).await { return false; }
     match client.pane_get(pane).await {
         Ok(None) => return false,
-        // The pane says an agent is in it: `agent.get` by name can briefly miss after a same-named
-        // restart on a new pane (2026-09-11).
+        // A live occupant is evidence of activity; mutable names are irrelevant.
         Ok(Some(p)) if p.agent.is_some() => return true,
         _ => {}
     }
-    !matches!(client.agent_get(&db::run_target(run, bot)).await, Ok(None))
+    !matches!(client.agent_get(pane).await, Ok(None))
 }
 
 /// #61: one-time purge of `bots/<id>/` for soft-deleted bots with no live run. Dirs no bot row
@@ -701,8 +703,8 @@ pub async fn interrupt_turn(app: &impl StopContext, bot_id: &str, expect_turn: O
     if let Some(t) = in_flight.as_ref().filter(|t| super::interruption::owes(bot_id, &t.id)) {
         return Err(super::interruption::uncommitted(&run.id, &t.id, settled.as_ref().err()));
     }
-    let target = db::run_target(&run, &bot);
     let client = client_for_run(app, &run).await?;
+    let target = super::dead_panes::execution_target(&client, &run, &bot).await?;
     // herdr 沒回時要拿它去 log 裡找這次 Esc 留下的中斷紀錄（#223）：取在按鍵**之前**。
     let esc_at = chrono::Utc::now();
     let sent = client.agent_send_keys(&target, &["esc".to_string()]).await;
@@ -884,9 +886,12 @@ pub async fn abort_turns(app: &impl StopContext, bot_id: &str) -> LcResult<Value
     let mut key_error: Option<String> = None;
     let mut client: Option<HerdrClient> = None;
     if let Some(r) = run.as_ref() {
-        let target = db::run_target(r, &bot);
         match client_for_run(app, r).await {
-            Ok(c) => match c.agent_send_keys(&target, &["esc".to_string()]).await {
+            Ok(c) => match async {
+                let target = super::dead_panes::execution_target(&c, r, &bot).await
+                    .map_err(|e| anyhow::anyhow!("{e:?}"))?;
+                c.agent_send_keys(&target, &["esc".to_string()]).await
+            }.await {
                 Ok(()) => {
                     keys_sent = true;
                     client = Some(c.client.clone());
@@ -1560,7 +1565,7 @@ mod stop_commit_tests {
         let bot = tt::claude_bot(&app, &env.project_id, "mine").await.id;
         sqlx::query("UPDATE bots SET herdr_session='default' WHERE id=?").bind(&bot).execute(app.db()).await.unwrap();
         let run = db::ulid();
-        // herdr 的目標寫成 pane id：mock 只照名字在 ctrl+c 時移除 agent，這顆就像不理 ctrl+c 的 agent。
+        // 明確模擬不理 Ctrl+C 的 agent，不以名字或目標格式影響它是否退出。
         sqlx::query(
             "INSERT INTO runs (id, bot_id, state, agent_status, workspace_id, tab_id, pane_id, agent_name, herdr_session, adopted, started_at)
              VALUES (?,?,'running','idle',?,?,?,?,'default',1,?)",
@@ -1576,7 +1581,7 @@ mod stop_commit_tests {
         .await
         .unwrap();
         *env.herdr.agents.lock().unwrap() = vec![json!({
-            "name": "mine", "agent": "claude", "agent_status": "idle",
+            "name": "mine", "agent": "claude", "agent_status": "idle", "ignore_ctrl_c": true,
             "workspace_id": ws.workspace_id, "tab_id": pane.tab_id, "pane_id": pane.pane_id, "cwd": "/tmp/p"})];
         let queued = rs::a_turn(&app, &bot, None, "queued").await;
 
@@ -1924,8 +1929,9 @@ mod stop_commit_tests {
         let env = tt::env().await;
         let app = env.app.clone();
         let (kid, run, _pane) = a_child(&env).await;
-        // 名字清掉的 agent：mock 只照名字在 ctrl+c 時移除，這顆就像不理 ctrl+c。
+        // 名字清掉與忽略 Ctrl+C 是兩件獨立的事。
         env.herdr.agents.lock().unwrap()[0]["name"] = serde_json::Value::Null;
+        env.herdr.agents.lock().unwrap()[0]["ignore_ctrl_c"] = json!(true);
         rs::refuse_run_state(&app, "running").await;
 
         assert!(restart_child_in_pane(&app, &kid).await.is_err());

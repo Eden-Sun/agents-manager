@@ -680,6 +680,7 @@ pub async fn final_agent_prompt_guard(
         || current.state != "running"
         || current.pane_id != run.pane_id
         || current.native_session_id != run.native_session_id
+        || current.herdr_session != run.herdr_session
     {
         return Err("run_changed");
     }
@@ -689,12 +690,17 @@ pub async fn final_agent_prompt_guard(
     if agent.agent_session.is_none() {
         return Err("agent_session_missing");
     }
+    if let (Some(expected), Some(actual)) = (run.native_session_id.as_deref(), super::dead_panes::herdr_session_id(&agent)) {
+        if expected.trim() != actual {
+            return Err("pane_reused");
+        }
+    }
     let pane = run
         .pane_id
         .as_deref()
         .map(str::trim)
         .filter(|pane| !pane.is_empty())
-        .unwrap_or(agent.pane_id.as_str());
+        .ok_or("pane_missing")?;
     if pane.is_empty()
         || run
             .pane_id
@@ -1199,7 +1205,7 @@ async fn prompt_inner(
           WHERE EXISTS (
               SELECT 1 FROM runs
                WHERE id = ? AND bot_id = ? AND state = 'running'
-                 AND agent_name IS ? AND pane_id IS ? AND herdr_session IS ?
+                 AND pane_id IS ? AND herdr_session IS ? AND native_session_id IS ?
           )",
     )
     .bind(&turn_id)
@@ -1210,9 +1216,9 @@ async fn prompt_inner(
     .bind(&deliver)
     .bind(&run.id)
     .bind(bot_id)
-    .bind(run.agent_name.as_deref())
     .bind(run.pane_id.as_deref())
     .bind(run.herdr_session.as_deref())
+    .bind(run.native_session_id.as_deref())
     .execute(&mut *tx)
     .await
     .map_err(up)?;
@@ -1523,6 +1529,11 @@ mod prompt_tests {
         .unwrap();
         // These exercise the agent.prompt path, which needs an agent herdr has a session bound to.
         env.herdr.set_agent("prompt-test", "pane-prompt-test", true);
+        // This pane belongs to the mock's test session, not an unavailable session.
+        if session == "test" {
+            sqlx::query("UPDATE runs SET pane_id='pane-prompt-test' WHERE id=?")
+                .bind(&run_id).execute(&app.db).await.unwrap();
+        }
         Fixture { env, bot_id, conv, run_id }
     }
 
@@ -1678,6 +1689,46 @@ mod prompt_tests {
     }
 
     #[tokio::test]
+    async fn nr_target_rename_before_turn_admission_preserves_the_same_run() {
+        let f = fixture("claude", "test").await;
+        let app = f.env.app.clone();
+        sqlx::query("UPDATE runs SET pane_id='pane-prompt-test', agent_name='prompt-test' WHERE id=?")
+            .bind(&f.run_id).execute(&app.db).await.unwrap();
+        let changing_app = app.clone();
+        let run_id = f.run_id.clone();
+        super::super::race_point::arm("prompt_before_turn_commit", &f.bot_id, move || async move {
+            sqlx::query("UPDATE runs SET agent_name='renamed' WHERE id=?")
+                .bind(&run_id).execute(&changing_app.db).await.unwrap();
+        });
+        let out = prompt(&app, &f.bot_id, "same pane after rename", "nr-target-rename").await;
+        assert!(out.is_ok(), "a display rename must not invalidate admission: {out:?}");
+        let count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM turns WHERE run_id=?")
+            .bind(&f.run_id).fetch_one(&app.db).await.unwrap();
+        assert_eq!(count, 1);
+    }
+
+    #[tokio::test]
+    async fn nr_target_native_session_change_before_admission_sends_nothing() {
+        let f = fixture("claude", "test").await;
+        let app = f.env.app.clone();
+        let changing_app = app.clone();
+        let run_id = f.run_id.clone();
+        super::super::race_point::arm("prompt_before_turn_commit", &f.bot_id, move || async move {
+            sqlx::query("UPDATE runs SET native_session_id='replacement-session' WHERE id=?")
+                .bind(&run_id).execute(&changing_app.db).await.unwrap();
+        });
+        let out = prompt(&app, &f.bot_id, "must not reach a replacement session", "nr-target-session-change").await;
+        let Err(LcError::Conflict(body)) = out else { panic!("session replacement must invalidate admission: {out:?}") };
+        assert_eq!(body["reason"], "run_ended");
+        let count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM turns WHERE run_id=?")
+            .bind(&f.run_id).fetch_one(&app.db).await.unwrap();
+        assert_eq!(count, 0);
+        for method in ["agent.prompt", "pane.send_text", "pane.send_keys"] {
+            assert!(f.env.herdr.calls_to(method).is_empty(), "no side effect after session replacement: {method}");
+        }
+    }
+
+    #[tokio::test]
     async fn a_run_exit_before_direct_turn_admission_sends_nothing_and_allows_a_clean_retry() {
         let f = fixture("claude", "test").await;
         let app = f.env.app.clone();
@@ -1701,7 +1752,7 @@ mod prompt_tests {
         }
 
         let new_run = db::ulid();
-        sqlx::query("INSERT INTO runs (id, bot_id, state, agent_status, herdr_session, started_at) VALUES (?, ?, 'running', 'idle', 'test', ?)")
+        sqlx::query("INSERT INTO runs (id, bot_id, state, agent_status, pane_id, herdr_session, started_at) VALUES (?, ?, 'running', 'idle', 'pane-prompt-test', 'test', ?)")
             .bind(&new_run).bind(&f.bot_id).bind(db::now()).execute(&app.db).await.unwrap();
         let retried = prompt(&app, &f.bot_id, "這句不能送進已結束的 run", "race-before-turn").await.unwrap();
         assert_eq!(retried.delivery, "unknown", "the mock accepts the new run's RPC path");
@@ -2989,7 +3040,7 @@ mod prompt_tests {
         // Model reconcile publishing a fresh active run against the now-authoritative B connection.
         assert_eq!(mark_run_exited(&app, &f.run_id, "host repointed").await, RunExit::Recorded);
         let new_run = db::ulid();
-        sqlx::query("INSERT INTO runs (id, bot_id, state, agent_status, herdr_session, started_at) VALUES (?, ?, 'running', 'idle', 'test', ?)")
+        sqlx::query("INSERT INTO runs (id, bot_id, state, agent_status, pane_id, herdr_session, started_at) VALUES (?, ?, 'running', 'idle', 'pane-prompt-test', 'test', ?)")
             .bind(&new_run)
             .bind(&f.bot_id)
             .bind(db::now())

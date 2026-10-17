@@ -14,8 +14,9 @@ pub async fn send_keys(app: &(impl crate::capabilities::BotLocks + crate::capabi
             return Err(LcError::conflict("run mismatch", json!({"run_id": run.id})));
         }
     }
-    let target = db::run_target(&run, &bot);
-    client_for_run(app, &run).await?.agent_send_keys(&target, &keys).await.map_err(up)?;
+    let client = client_for_run(app, &run).await?;
+    let target = super::dead_panes::execution_target(&client, &run, &bot).await?;
+    client.agent_send_keys(&target, &keys).await.map_err(up)?;
     Ok(())
 }
 
