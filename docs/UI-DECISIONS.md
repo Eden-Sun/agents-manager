@@ -837,7 +837,7 @@ cc1 的 bot 好幾個回合都收在 `authentication_failed`，對話只寫「�
 
 使用者：「herdr integration for claude codex agy grok 也是需要 check upgrade 的 list。把所有要 check upgrade 的 list 放在設定頁裡」。
 
-- **位置**：環境設定的一區，排在「主機」之後（EnvSection，手機同其他區預設收起）。每台主機（本機＋遠端）一張表，標題旁一句「N 項可更新／都是最新」。
+- **位置**：環境設定的一區，排在「主機」之後（EnvSection，手機同其他區預設收起）。每台主機（本機＋遠端）一張表，標題旁一句（`summaryText`，#1813）：有可更新寫「N 項可更新」；只有每一列都確認是最新（integration 也讀到）才寫「都是最新」；未安裝、查不到、integration 還沒讀到的照數量寫出來，不算最新。
 - **列的順序固定**：herdr CLI、herdr server、Claude／Codex／Grok／agy CLI、四家 integration。欄位：項目、目前、最新／需要、狀態徽章、動作。
   狀態四種：最新、可更新（強調色）、未安裝、查不到（灰）。**查不到不畫成最新**：抓不到上游、讀不到那台版本、herdr 印了不認得的 integration 狀態，都是「查不到」。
 - **動作沿用既有 API，不拆既有入口**：header 徽章還在。可更新的 Claude／Codex 列「更新…」→ 確認框 → `cli-update`；herdr 列是 danger 確認框（所有 Bot 中斷）；

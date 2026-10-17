@@ -177,3 +177,36 @@ export function buildHostCheck(input: HostCheckInput): HostCheck {
 export function updatableCount(rows: CheckRow[]): number {
   return rows.filter((r) => r.status === 'update').length
 }
+
+export interface StatusCounts {
+  latest: number
+  update: number
+  missing: number
+  unknown: number
+}
+
+export function statusCounts(rows: CheckRow[]): StatusCounts {
+  const c: StatusCounts = { latest: 0, update: 0, missing: 0, unknown: 0 }
+  for (const r of rows) c[r.status]++
+  return c
+}
+
+/**
+ * 表頭的一句話（#1813）：只有每一列都有版本、而且都是最新（integration 也讀到了）才說「都是最新」。
+ * 未安裝、查不到的不算最新，照數量寫出來；integration 還沒讀到或讀失敗也要講，不能因為它不在列裡就當成沒事。
+ */
+export function summaryText(check: HostCheck): string {
+  const { rows } = check
+  if (rows.length === 0) return '沒有可檢查的項目'
+  const c = statusCounts(rows)
+  const unloaded = check.integrationPending ? 'integration 還沒讀到' : check.integrationError ? 'integration 讀取失敗' : null
+  if (c.latest === rows.length && unloaded === null) return '都是最新'
+  const parts = [
+    c.update > 0 ? `${c.update} 項可更新` : null,
+    c.latest > 0 ? `${c.latest} 項最新` : null,
+    c.missing > 0 ? `${c.missing} 項未安裝` : null,
+    c.unknown > 0 ? `${c.unknown} 項查不到` : null,
+    unloaded,
+  ]
+  return parts.filter((p) => p !== null).join('、')
+}

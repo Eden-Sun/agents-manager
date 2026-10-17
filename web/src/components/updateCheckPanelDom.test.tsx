@@ -9,6 +9,7 @@ import type { FakeRequest } from '../testing/domHarness'
 import { sharedMock, virtualMockTime } from '../testing/sharedMock'
 import { resetStoreForTest, useStore } from '../store/store'
 import { UpdateCheckPanel } from './UpdateCheckPanel'
+import type { ToolMap } from '../api/types'
 
 virtualMockTime()
 afterEach(async () => {
@@ -64,4 +65,18 @@ it('沒裝的 integration 沒有按鈕；落後的 integration 按「更新…�
   assert.equal(row('local:integration-claude')!.querySelector('button'), null)
   assert.ok(row('local:integration-codex')!.querySelector('button'), 'codex 還是落後，沒被動到')
   assert.ok(useStore.getState().notices.some((n) => n.kind === 'info' && /claude integration 已更新/.test(n.text)))
+})
+
+it('表頭：每一列都是未安裝或查不到時，不說「都是最新」（#1813）', async () => {
+  mockApi(sharedMock)
+  await useStore.getState().refreshState()
+  useStore.setState({ localTools: {} as ToolMap, localHerdr: undefined, upstreamUpdates: {} })
+  await mount(<UpdateCheckPanel />)
+  await until(() => row('local:herdr-cli') !== null, 'herdr 列出現')
+  const head = document.querySelector('.update-host-count')?.textContent ?? ''
+  assert.doesNotMatch(head, /都是最新/, `表頭 ${head}`)
+  const ids = ['local:herdr-cli', 'local:herdr-server', 'local:cli-claude', 'local:cli-codex', 'local:cli-grok', 'local:cli-agy']
+  const statuses = ids.map((id) => row(id)?.querySelector('.update-badge')?.textContent)
+  assert.ok(statuses.every((t) => t === '未安裝' || t === '查不到'), `六列狀態 ${statuses}`)
+  assert.match(head, /項未安裝|項查不到/)
 })

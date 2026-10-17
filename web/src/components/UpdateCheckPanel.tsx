@@ -3,7 +3,7 @@ import { fetchIntegrationUpdates, installIntegration, integrationErrText, type I
 import { useHerdrPlan } from '../hooks/useHerdrPlan'
 import { herdrHostBlocked, startHerdr, useHerdrUpdate } from '../store/herdrUpdate'
 import { useStore } from '../store/store'
-import { STATUS_LABEL, buildHostCheck, updatableCount, type CheckAction, type CheckRow, type HostCheck } from '../store/updateCheck'
+import { STATUS_LABEL, buildHostCheck, summaryText, updatableCount, type CheckAction, type CheckRow, type HostCheck } from '../store/updateCheck'
 import { ConfirmDialog } from './ConfirmDialog'
 import './updateCheck.css'
 
@@ -170,7 +170,7 @@ function HostTable({
     <section className="update-host" aria-label={`${check.host === 'local' ? '本機' : check.host} 更新檢查`}>
       <h4 className="update-host-name">
         {check.host === 'local' ? '本機' : check.host}
-        <span className={`update-host-count${n > 0 ? ' has' : ''}`}>{n > 0 ? `${n} 項可更新` : '都是最新'}</span>
+        <span className={`update-host-count${n > 0 ? ' has' : ''}`}>{summaryText(check)}</span>
       </h4>
       <div className="update-rows" role="table">
         <div className="update-row update-head" role="row">

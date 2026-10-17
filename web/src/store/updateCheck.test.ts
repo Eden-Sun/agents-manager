@@ -3,7 +3,7 @@ import assert from 'node:assert/strict'
 import type { HerdrVersion, ToolMap } from '../api/types.ts'
 import type { IntegrationHost } from '../api/integrationUpdates.ts'
 import type { UpstreamItem } from './upstreamUpdate.ts'
-import { buildHostCheck, cleanVersion, updatableCount, versionLess } from './updateCheck.ts'
+import { buildHostCheck, cleanVersion, summaryText, updatableCount, versionLess, type CheckRow, type CheckStatus, type HostCheck } from './updateCheck.ts'
 
 const tool = (installed: boolean, version: string | null = null) => ({ installed, path: installed ? '/bin/x' : null, version, logged_in: null })
 const tools = (over: Partial<Record<'claude' | 'codex' | 'grok' | 'agy', ReturnType<typeof tool>>> = {}) =>
@@ -112,4 +112,45 @@ test('herdr 還沒讀到版本：CLI 是未安裝、server 查不到；沒有上
   const noUp = buildHostCheck({ host: 'x', tools: tools(), herdr: herdr('herdr 0.9.5', '0.9.5'), upstream: {}, integration: integ([]), herdrBlocked: null })
   assert.equal(noUp.rows[0].status, 'unknown')
   assert.equal(noUp.rows[0].latest, null)
+})
+
+// #1813：表頭的一句話只有「真的全部確認是最新」才說「都是最新」；查不到、未安裝、integration 沒讀到都要寫出來。
+const srow = (status: CheckStatus): CheckRow => ({ id: status, group: 'cli', label: status, current: null, latest: null, status, note: null, action: null })
+const shost = (statuses: CheckStatus[], over: Partial<HostCheck> = {}): HostCheck => ({ host: 'local', integrationError: null, integrationPending: false, rows: statuses.map(srow), ...over })
+
+test('summaryText：全部確認是最新 → 都是最新；沒有任何項目 → 沒有可檢查的項目', () => {
+  assert.equal(summaryText(shost(['latest', 'latest', 'latest'])), '都是最新')
+  assert.equal(summaryText(shost([])), '沒有可檢查的項目')
+})
+
+test('summaryText：有可更新 → 寫出可更新數；其餘照數量寫，不把未確認的算成最新', () => {
+  assert.equal(summaryText(shost(['update', 'latest', 'latest', 'latest'])), '1 項可更新、3 項最新')
+  assert.equal(summaryText(shost(['update', 'update', 'missing'])), '2 項可更新、1 項未安裝')
+})
+
+test('summaryText：未安裝或查不到的不算最新（即使其餘都最新）', () => {
+  assert.equal(summaryText(shost(['latest', 'latest', 'latest', 'missing', 'unknown'])), '3 項最新、1 項未安裝、1 項查不到')
+  assert.equal(summaryText(shost(['missing', 'missing', 'missing', 'missing', 'missing', 'missing'])), '6 項未安裝')
+  assert.equal(summaryText(shost(['unknown', 'unknown', 'unknown'])), '3 項查不到')
+  assert.equal(summaryText(shost(['latest', 'unknown'])), '1 項最新、1 項查不到')
+})
+
+test('summaryText：loading（integration 還沒讀到）不說都是最新；讀失敗也要講', () => {
+  assert.equal(summaryText(shost(['latest', 'latest'], { integrationPending: true })), '2 項最新、integration 還沒讀到')
+  assert.equal(summaryText(shost(['latest', 'update'], { integrationPending: true })), '1 項可更新、1 項最新、integration 還沒讀到')
+  assert.equal(summaryText(shost(['latest'], { integrationError: 'boom' })), '1 項最新、integration 讀取失敗')
+})
+
+test('summaryText 接在 buildHostCheck 後：沒有上游、讀不到版本的主機不會顯示都是最新', () => {
+  const check = buildHostCheck({
+    host: 'local',
+    tools: tools({ claude: tool(false), codex: tool(false), grok: tool(false), agy: tool(false) }),
+    herdr: undefined,
+    upstream: {},
+    integration: integ([irow('claude', 'unknown', null, null)]),
+    herdrBlocked: null,
+  })
+  const text = summaryText(check)
+  assert.doesNotMatch(text, /都是最新/)
+  assert.match(text, /查不到/)
 })
