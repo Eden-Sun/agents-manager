@@ -188,3 +188,131 @@ test('群組：草稿沒被改過，成功後照常清空並同步空字串', { 
   assert.equal(useStore.getState().drafts['group:gp'] ?? '', '')
   assert.equal(emptyPuts(requests).length, 1, '清空要同步回 daemon')
 })
+
+async function sendMission(text: string) {
+  seedGroup(text)
+  useStore.setState({ missionsSupported: true } as never)
+  const started = gate<string | null>()
+  useStore.setState({ startMission: () => started.promise } as never)
+  await mount(<GroupChatPanel projectId="gp" onOpenSidebar={() => {}} />)
+  await settle(50)
+  await act(async () => document.querySelector<HTMLButtonElement>('.agm-toggle')!.click())
+  await act(async () => document.querySelector<HTMLButtonElement>('.send-btn')!.click())
+  return { started }
+}
+
+test('交給 AGM：送出途中草稿被改過就保留文字，沒改過才清', { timeout: 30_000 }, async () => {
+  fakeApi(() => undefined)
+  const { started } = await sendMission('@gb first prompt')
+  await remoteDraft('group:gp', 'new text from another device')
+  await act(async () => started.resolve('mission-1'))
+  await settle(50)
+  assert.equal(useStore.getState().drafts['group:gp'], 'new text from another device', '新草稿還在')
+})
+
+test('交給 AGM：草稿沒被改過，成功後照常清空', { timeout: 30_000 }, async () => {
+  fakeApi(() => undefined)
+  const { started } = await sendMission('@gb first prompt')
+  await act(async () => started.resolve('mission-2'))
+  await settle(50)
+  assert.equal(useStore.getState().drafts['group:gp'] ?? '', '')
+})
+
+// 草稿追蹤的訂閱與 React 自己的訂閱都走 `useStore.subscribe`：包一層記下還活著的，數目回到原值就代表都解除了。
+const liveListeners = new Set<() => void>()
+const realSubscribe = useStore.subscribe
+before(() => {
+  ;(useStore as unknown as { subscribe: typeof realSubscribe }).subscribe = (listener) => {
+    const unsubscribe = realSubscribe(listener)
+    const tracked = () => {
+      liveListeners.delete(tracked)
+      unsubscribe()
+    }
+    liveListeners.add(tracked)
+    return tracked
+  }
+})
+after(() => {
+  ;(useStore as unknown as { subscribe: typeof realSubscribe }).subscribe = realSubscribe
+})
+
+test('一般送出：送出途中本機打字也保留，成功後訂閱解除', { timeout: 30_000 }, async () => {
+  const requests = fakeApi(() => undefined)
+  seedBot('first prompt', false)
+  const sent = gate<boolean>()
+  useStore.setState({ sendPrompt: () => sent.promise } as never)
+  await mount(<ChatPanel onOpenSidebar={() => {}} />)
+  await settle(50)
+  const idle = liveListeners.size
+  await keydown(textarea(), 'Enter')
+  await act(async () => useStore.getState().setDraft('bot:b', 'typed locally'))
+  await act(async () => sent.resolve(true))
+  await settle(50)
+  assert.equal(useStore.getState().drafts['bot:b'], 'typed locally', '本機打字還在')
+  assert.deepEqual(emptyPuts(requests), [])
+  assert.equal(liveListeners.size, idle, '送出成功後追蹤訂閱已解除')
+})
+
+test('一般送出：送出失敗（resolve(false)）不清框，訂閱解除', { timeout: 30_000 }, async () => {
+  const requests = fakeApi(() => undefined)
+  seedBot('first prompt', false)
+  const sent = gate<boolean>()
+  useStore.setState({ sendPrompt: () => sent.promise } as never)
+  await mount(<ChatPanel onOpenSidebar={() => {}} />)
+  await settle(50)
+  const idle = liveListeners.size
+  await keydown(textarea(), 'Enter')
+  await act(async () => sent.resolve(false))
+  await settle(50)
+  assert.equal(useStore.getState().drafts['bot:b'], 'first prompt', '失敗後草稿照舊')
+  assert.deepEqual(emptyPuts(requests), [])
+  assert.equal(liveListeners.size, idle, '送出失敗後追蹤訂閱已解除')
+})
+
+test('一般送出：送出在途中卸載，回來後訂閱解除', { timeout: 30_000 }, async () => {
+  fakeApi(() => undefined)
+  seedBot('first prompt', false)
+  const sent = gate<boolean>()
+  useStore.setState({ sendPrompt: () => sent.promise } as never)
+  const base = liveListeners.size
+  await mount(<ChatPanel onOpenSidebar={() => {}} />)
+  await settle(50)
+  await keydown(textarea(), 'Enter')
+  await unmountAll()
+  await act(async () => sent.resolve(true))
+  await settle(50)
+  assert.equal(liveListeners.size, base, '卸載後 ChatPanel 與送出追蹤的訂閱都回到原值')
+})
+
+test('群組：送出途中本機打字也保留；失敗（resolve(null)）不清框、訂閱解除', { timeout: 30_000 }, async () => {
+  fakeApi(() => undefined)
+  seedGroup('@gb first prompt')
+  const sent = gate<{ id: string } | null>()
+  useStore.setState({ sendGroupChat: () => sent.promise } as never)
+  await mount(<GroupChatPanel projectId="gp" onOpenSidebar={() => {}} />)
+  await settle(50)
+  const idle = liveListeners.size
+  await keydown(textarea(), 'Enter')
+  await act(async () => useStore.getState().setDraft('group:gp', '@gb typed locally'))
+  await act(async () => sent.resolve(null))
+  await settle(50)
+  assert.equal(useStore.getState().drafts['group:gp'], '@gb typed locally', '本機打字還在')
+  assert.equal(liveListeners.size, idle, '送出失敗後追蹤訂閱已解除')
+})
+
+test('交給 AGM：建任務失敗（resolve(null)）不清框，訂閱解除', { timeout: 30_000 }, async () => {
+  fakeApi(() => undefined)
+  seedGroup('@gb first prompt')
+  useStore.setState({ missionsSupported: true } as never)
+  const started = gate<string | null>()
+  useStore.setState({ startMission: () => started.promise } as never)
+  await mount(<GroupChatPanel projectId="gp" onOpenSidebar={() => {}} />)
+  await settle(50)
+  const idle = liveListeners.size
+  await act(async () => document.querySelector<HTMLButtonElement>('.agm-toggle')!.click())
+  await act(async () => document.querySelector<HTMLButtonElement>('.send-btn')!.click())
+  await act(async () => started.resolve(null))
+  await settle(50)
+  assert.equal(useStore.getState().drafts['group:gp'], '@gb first prompt', '失敗後草稿照舊')
+  assert.equal(liveListeners.size, idle, '失敗後追蹤訂閱已解除')
+})

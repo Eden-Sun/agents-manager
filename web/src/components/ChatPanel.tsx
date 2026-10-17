@@ -817,12 +817,11 @@ function Composer({
     // Enter always opts into daemon queueing; idle bots still follow the ordinary immediate-send path.
     void sendPrompt(botId, body, sent, false, Boolean(state.autoStart), undefined, true).then((ok) => {
       setSending(false)
-      edits.stop()
       if (ok) {
         if (edits.untouched()) setText('')
         files.clearSent(sent)
       }
-    })
+    }).finally(edits.stop)
   }
   const enterToSend = useEnterToSend()
 
@@ -845,9 +844,8 @@ function Composer({
     }
     setSending(true)
     const edits = trackDraftEdits(draftKey)
-    const ok = await sendPrompt(botId, body, ids, true)
+    const ok = await sendPrompt(botId, body, ids, true).finally(edits.stop)
     setSending(false)
-    edits.stop()
     if (ok) {
       if (edits.untouched()) setText('')
       files.clearSent(ids)
@@ -861,9 +859,8 @@ function Composer({
     setSending(true)
     // 整段走 `POST /bots/:id/text`、Enter 另送（見 store/alongside.ts）；拆鍵名會把 `\n` 當鍵弄丟內容。
     const edits = trackDraftEdits(draftKey)
-    const ok = await typeAlongside({ sendText }, botId, body)
+    const ok = await typeAlongside({ sendText }, botId, body).finally(edits.stop)
     setSending(false)
-    edits.stop()
     // 併送帶不了附件：附件列留著。
     if (ok && edits.untouched()) setText('')
   }
