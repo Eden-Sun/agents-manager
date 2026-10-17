@@ -80,3 +80,18 @@ it('表頭：每一列都是未安裝或查不到時，不說「都是最新」�
   assert.ok(statuses.every((t) => t === '未安裝' || t === '查不到'), `六列狀態 ${statuses}`)
   assert.match(head, /項未安裝|項查不到/)
 })
+
+it('表頭：工具清單還沒讀到（localTools undefined）時不是「未安裝」（#1813）', async () => {
+  mockApi(sharedMock)
+  await useStore.getState().refreshState()
+  useStore.setState({ localTools: undefined, localHerdr: undefined, upstreamUpdates: {} })
+  await mount(<UpdateCheckPanel />)
+  await until(() => row('local:cli-claude') !== null, 'CLI 列出現')
+  const head = document.querySelector('.update-host-count')?.textContent ?? ''
+  assert.doesNotMatch(head, /都是最新/, `表頭 ${head}`)
+  assert.match(head, /查不到/)
+  // integration 的未安裝來自 mock（那是真的沒裝）；這裡只看 herdr 與四家 CLI 這六列。
+  const ids = ['local:herdr-cli', 'local:herdr-server', 'local:cli-claude', 'local:cli-codex', 'local:cli-grok', 'local:cli-agy']
+  const statuses = ids.map((id) => row(id)?.querySelector('.update-badge')?.textContent)
+  assert.ok(statuses.every((t) => t === '查不到'), `六列狀態 ${statuses}`)
+})

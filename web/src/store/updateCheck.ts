@@ -72,7 +72,8 @@ function herdrRows(host: string, herdr: HerdrVersion | undefined, item: Upstream
   const entry = hostEntry(item, host)
   const behind = entry ? entry.behind : versionLess(cli, latest)
   const target = item?.target ?? latest
-  const cliStatus: CheckStatus = !herdr?.cli_version ? 'missing' : latest === null ? 'unknown' : behind === true ? 'update' : behind === false ? 'latest' : 'unknown'
+  // 還沒讀到 herdr（undefined）是查不到，不是未安裝；只有讀到了、版本欄位是空的才算未安裝。
+  const cliStatus: CheckStatus = herdr === undefined ? 'unknown' : !herdr.cli_version ? 'missing' : latest === null ? 'unknown' : behind === true ? 'update' : behind === false ? 'latest' : 'unknown'
   const cliRow: CheckRow = {
     id: `${host}:herdr-cli`,
     group: 'herdr',
@@ -83,9 +84,11 @@ function herdrRows(host: string, herdr: HerdrVersion | undefined, item: Upstream
     note:
       cliStatus === 'update'
         ? blockedWhy ?? '更新會重啟 herdr server，所有 Bot 中斷約 1 分鐘後接回'
-        : cliStatus === 'unknown' && latest === null
-          ? '查不到上游版本'
-          : null,
+        : herdr === undefined
+          ? '這台還沒讀到 herdr 版本'
+          : cliStatus === 'unknown' && latest === null
+            ? '查不到上游版本'
+            : null,
     action: cliStatus === 'update' && target && !blockedWhy ? { kind: 'herdr', target } : null,
   }
   const serverBehind = versionLess(server, latest)
@@ -105,7 +108,9 @@ function herdrRows(host: string, herdr: HerdrVersion | undefined, item: Upstream
 
 function cliRow(host: string, kind: string, tool: ToolStatus | undefined, item: UpstreamItem | undefined, updatable: boolean): CheckRow {
   const base = { id: `${host}:cli-${kind}`, group: 'cli' as const, label: CLI_LABEL[kind] ?? kind }
-  if (!tool?.installed) return { ...base, current: null, latest: item?.latest ?? null, status: 'missing', note: null, action: null }
+  // 工具清單還沒讀到（undefined）是查不到；讀到了、installed 為假才是未安裝。
+  if (tool === undefined) return { ...base, current: null, latest: null, status: 'unknown', note: '這台還沒讀到工具清單', action: null }
+  if (!tool.installed) return { ...base, current: null, latest: item?.latest ?? null, status: 'missing', note: null, action: null }
   const current = cleanVersion(tool.version) ?? tool.version
   // agy 沒有公開的版本來源：只列目前版本，狀態是「查不到」。
   if (kind === 'agy') return { ...base, current, latest: null, status: 'unknown', note: '沒有公開的版本來源，無法比對最新版', action: null }
@@ -197,10 +202,10 @@ export function statusCounts(rows: CheckRow[]): StatusCounts {
  */
 export function summaryText(check: HostCheck): string {
   const { rows } = check
-  if (rows.length === 0) return '沒有可檢查的項目'
+  // buildHostCheck 一定給 herdr 與四家 CLI 共 6 列，正常不會是空的；`rows.length > 0` 只是擋住空陣列被誤判成「都是最新」。
   const c = statusCounts(rows)
   const unloaded = check.integrationPending ? 'integration 還沒讀到' : check.integrationError ? 'integration 讀取失敗' : null
-  if (c.latest === rows.length && unloaded === null) return '都是最新'
+  if (rows.length > 0 && c.latest === rows.length && unloaded === null) return '都是最新'
   const parts = [
     c.update > 0 ? `${c.update} 項可更新` : null,
     c.latest > 0 ? `${c.latest} 項最新` : null,
