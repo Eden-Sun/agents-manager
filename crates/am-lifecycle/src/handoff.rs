@@ -64,14 +64,11 @@ pub struct Footprint {
     pub workspaces: HashSet<String>,
     pub tabs: HashSet<String>,
     pub panes: HashSet<String>,
-    /// 它們的 bot 在 herdr 上可能用的名字（算出來的名字＋每個 run 記過的名字）。
-    pub names: HashSet<String>,
 }
 
 impl Footprint {
     pub fn covers_agent(&self, a: &crate::herdr::AgentInfo) -> bool {
-        a.name.as_deref().is_some_and(|n| self.names.contains(n))
-            || self.panes.contains(&a.pane_id)
+        self.panes.contains(&a.pane_id)
             || self.tabs.contains(&a.tab_id)
             || self.workspaces.contains(&a.workspace_id)
     }
@@ -85,33 +82,29 @@ impl Footprint {
     }
 }
 
-pub async fn footprint(pool: &SqlitePool, host: &str) -> Result<Footprint> {
+pub async fn footprint(pool: &SqlitePool, host: &str, session: &str, host_session: &str) -> Result<Footprint> {
     let mut fp = Footprint::default();
     let projects = crate::db::live_projects(pool).await?;
     for p in projects.iter().filter(|p| p.host == host && p.handed_off_to.is_some()) {
-        if let Some(ws) = p.workspace_id.clone() {
-            fp.workspaces.insert(ws);
-        }
-        let bots: Vec<crate::db::Bot> =
-            sqlx::query_as("SELECT * FROM bots WHERE project_id = ? AND deleted_at IS NULL").bind(&p.id).fetch_all(pool).await?;
-        for b in &bots {
-            fp.names.insert(crate::config::agent_name(&p.label, &b.id));
-        }
-        type RunRow = (Option<String>, Option<String>, Option<String>, Option<String>, bool);
+        // A bare projects.workspace_id has no session evidence. Only scoped live
+        // runs establish a pane/tab/workspace footprint; NULL run sessions use the
+        // documented configured-host-session fallback.
+        type RunRow = (Option<String>, Option<String>, Option<String>, bool);
         let runs: Vec<RunRow> = sqlx::query_as(
-            "SELECT r.agent_name, r.pane_id, r.tab_id, r.workspace_id, r.state IN ('starting','running','stopping')
-               FROM runs r JOIN bots b ON b.id = r.bot_id WHERE b.project_id = ? AND b.deleted_at IS NULL",
+            "SELECT r.pane_id, r.tab_id, r.workspace_id, r.state IN ('starting','running','stopping')
+               FROM runs r JOIN bots b ON b.id = r.bot_id WHERE b.project_id = ? AND b.deleted_at IS NULL AND COALESCE(r.herdr_session, b.herdr_session, ?) = ?",
         )
         .bind(&p.id)
+        .bind(host_session)
+        .bind(session)
         .fetch_all(pool)
         .await?;
-        for (name, pane, tab, ws, active) in runs {
-            fp.names.extend(name.filter(|n| !n.is_empty()));
+        for (pane, tab, ws, active) in runs {
             // 結束的 run 的 pane id 會被 herdr 重用（#469），只有活著的才算它的。
             if active {
-                fp.panes.extend(pane);
-                fp.tabs.extend(tab);
-                fp.workspaces.extend(ws);
+                fp.panes.extend(pane.filter(|v| !v.is_empty()));
+                fp.tabs.extend(tab.filter(|v| !v.is_empty()));
+                fp.workspaces.extend(ws.filter(|v| !v.is_empty()));
             }
         }
     }
@@ -200,6 +193,33 @@ mod tests {
 
     /// 對帳的逐 bot 迴圈：agent 出現在 agent.list 上也不收編；收回之後下一輪照常收編。
     #[tokio::test]
+    async fn nr1791_footprint_does_not_protect_a_reused_agent_name() {
+        let env = tt::env().await;
+        let (ws, root) = client(&env).workspace_create("/tmp/p", "proj", json!({})).await.unwrap();
+        let bot = tt::claude_bot(&env.app, &env.project_id, "alfa").await;
+        run_row(&env.app, &bot.id, "running", &ws.workspace_id, &root.tab_id, &root.pane_id, "old").await;
+        hand_off(&env.app, &env.project_id, Some("other-host")).await;
+        sqlx::query("UPDATE projects SET workspace_id=? WHERE id=?").bind(&ws.workspace_id).bind(&env.project_id).execute(&env.app.db).await.unwrap();
+        let fp = super::footprint(&env.app.db, LOCAL_HOST, "test", "test").await.unwrap();
+        let mut agent: crate::herdr::AgentInfo = serde_json::from_value(entry("renamed", &ws.workspace_id, &root.tab_id, &root.pane_id)).unwrap();
+        assert!(fp.covers_agent(&agent), "renaming preserves the ID footprint");
+        let other_session = super::footprint(&env.app.db, LOCAL_HOST, "another-session", "test").await.unwrap();
+        assert!(!other_session.covers_agent(&agent), "same IDs in another session do not cover this agent");
+        assert!(!other_session.covers_pane(&entry("renamed", &ws.workspace_id, &root.tab_id, &root.pane_id)));
+
+        agent.name = Some("old".into());
+        agent.pane_id = "other-pane".into();
+        agent.tab_id = "other-tab".into();
+        agent.workspace_id = "other-workspace".into();
+        assert!(!fp.covers_agent(&agent), "reusing a name is not a handed-off footprint");
+        sqlx::query("UPDATE runs SET state='exited' WHERE bot_id=?").bind(&bot.id).execute(&env.app.db).await.unwrap();
+        let ended = super::footprint(&env.app.db, LOCAL_HOST, "test", "test").await.unwrap();
+        let reused = serde_json::from_value(entry("old", &ws.workspace_id, &root.tab_id, &root.pane_id)).unwrap();
+        assert!(!ended.covers_agent(&reused), "historical names/IDs and an unscoped project workspace cannot protect a new occupant");
+
+    }
+
+    #[tokio::test]
     async fn an_agent_of_a_handed_off_bot_is_not_adopted_until_the_project_is_taken_back() {
         let env = tt::env().await;
         let app = env.app.clone();
@@ -207,6 +227,9 @@ mod tests {
         let bot = tt::claude_bot(&app, &env.project_id, "alfa").await;
         let agent = crate::config::agent_name("proj", &bot.id);
         *env.herdr.agents.lock().unwrap() = vec![entry(&agent, &ws.workspace_id, &root.tab_id, &root.pane_id)];
+        let history = run_row(&app, &bot.id, "exited", &ws.workspace_id, &root.tab_id, &root.pane_id, &agent).await;
+        sqlx::query("UPDATE runs SET native_session_id='handed-off-instance' WHERE id=?").bind(history).execute(&app.db).await.unwrap();
+        env.herdr.agents.lock().unwrap()[0]["agent_session"] = json!({"kind":"id","value":"handed-off-instance"});
         hand_off(&app, &env.project_id, Some("agm-host")).await;
 
         crate::reconcile::reconcile_host(&app, LOCAL_HOST).await.unwrap();
@@ -314,6 +337,7 @@ mod tests {
         crate::reconcile::reconcile_host(&app, LOCAL_HOST).await.unwrap();
         assert!(children(&app).await.is_empty());
 
+        crate::spawn_hints::claim(&app, &bot.id, &kid_pane.pane_id).await.unwrap();
         hand_off(&app, &env.project_id, None).await;
         crate::reconcile::reconcile_host(&app, LOCAL_HOST).await.unwrap();
         assert_eq!(children(&app).await, ["ui"], "收回之後照常認領");
@@ -372,18 +396,20 @@ mod tests {
     async fn a_handed_off_projects_panes_are_not_scanned() {
         let env = tt::env().await;
         let app = env.app.clone();
-        let theirs = other_project(&app, "theirs", "zz92").await;
+        let theirs = other_project(&app, "theirs", LOCAL_HOST).await;
         sqlx::query("UPDATE projects SET workspace_id = 'wF', handed_off_to = 'agm-host' WHERE id = ?")
             .bind(&theirs)
             .execute(&app.db)
             .await
             .unwrap();
+        let owner = tt::claude_bot(&app, &theirs, "owner").await;
+        run_row(&app, &owner.id, "running", "wF", "wF:t1", "wF:pOwner", "display").await;
         let pane = |id: &str, ws: &str| json!({"pane_id": id, "workspace_id": ws, "tab_id": format!("{ws}:t1"), "cwd": "/home/u", "agent": null, "revision": 1});
         let snapshot = json!({
             "workspaces": [{"workspace_id": "w1", "label": "mine"}, {"workspace_id": "wF", "label": "theirs"}],
             "panes": [pane("w1:p1", "w1"), pane("wF:p1", "wF")],
         });
-        crate::panes::scan_snapshot(&app, "zz92", &snapshot).await.unwrap();
+        crate::panes::scan_snapshot(&app, LOCAL_HOST, &snapshot).await.unwrap();
         let ids: Vec<String> = sqlx::query_scalar("SELECT pane_id FROM panes ORDER BY pane_id").fetch_all(&app.db).await.unwrap();
         assert_eq!(ids, ["w1:p1"]);
     }

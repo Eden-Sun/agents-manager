@@ -209,7 +209,7 @@ pub trait BotOpsRepo {
 /// 專案移交（原 `handoff::*`）。實作在 `SqlitePool` 上。
 pub trait HandoffRepo {
     async fn bot_handed_off_to(&self, bot_id: &str) -> Result<Option<String>>;
-    async fn handoff_footprint(&self, host: &str) -> Result<Footprint>;
+    async fn handoff_footprint(&self, host: &str, session: &str, host_session: &str) -> Result<Footprint>;
 }
 
 /// 專案移交，在交易連線上讀（原 `handoff::bot_handed_off_to_on`）。

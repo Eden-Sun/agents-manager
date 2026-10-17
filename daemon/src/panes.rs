@@ -249,7 +249,8 @@ async fn scan_snapshot_on(app: &(impl crate::capabilities::Cfg + crate::capabili
         _ => false,
     };
     // #708：移交出去的專案的 pane（它的 workspace／tab／活著的 run 的 pane）不歸這顆 daemon：不記、不 GC、不通知。
-    let handed_off = crate::handoff::footprint(app.db(), host).await?;
+    let session = app.session_for_host(host).await.ok_or_else(|| anyhow::anyhow!("unknown host `{host}`"))?;
+    let handed_off = crate::handoff::footprint(app.db(), host, &session, &session).await?;
     // #709：共用 session 的主機只收自己的 pane；別顆 daemon 的不記，也就不 GC、不通知、不當 scratch、不改名。
     let owned = app.pane_host_ownership(host).await?;
     let panes: Vec<Value> = snapshot
@@ -2070,11 +2071,11 @@ mod tests {
             "workspaces": [{"workspace_id": "w1", "label": "am-quota-claude-mine"}, {"workspace_id": "wQ1795", "label": "renamed"}],
             "panes": [pane_in("w1:pB", "w1"), pane_in("wQ1795:p1", "wQ1795")],
         });
-        let scan = scan_snapshot_on(&app, "zz92", &snapshot, Some(app.herdr.socket_path())).await.unwrap();
+        let scan = scan_snapshot_on(&app, crate::config::LOCAL_HOST, &snapshot, Some(app.herdr.socket_path())).await.unwrap();
         assert_eq!(scan.panes, 1, "只收使用者那顆");
         let ids: Vec<String> = sqlx::query_scalar("SELECT pane_id FROM panes ORDER BY pane_id").fetch_all(&app.db).await.unwrap();
         assert_eq!(ids, vec!["w1:pB".to_string()], "探測 pane 不進表；叫 am-quota-* 的使用者 workspace 照收");
-        assert_eq!(notify_unowned_and_orphans(&app, "zz92").await.unwrap(), 1, "只有使用者那顆推 pane_unowned");
+        assert_eq!(notify_unowned_and_orphans(&app, crate::config::LOCAL_HOST).await.unwrap(), 1, "只有使用者那顆推 pane_unowned");
         drop(probe);
         crate::probe_ws::closed(app.herdr.socket_path(), "wQ1795");
         std::fs::remove_dir_all(&app.data_dir).ok();

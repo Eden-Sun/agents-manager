@@ -74,8 +74,8 @@ impl HandoffRepo for SqlitePool {
         handoff::bot_handed_off_to(self, bot_id).await
     }
 
-    async fn handoff_footprint(&self, host: &str) -> Result<handoff::Footprint> {
-        handoff::footprint(self, host).await
+    async fn handoff_footprint(&self, host: &str, session: &str, host_session: &str) -> Result<handoff::Footprint> {
+        handoff::footprint(self, host, session, host_session).await
     }
 }
 
