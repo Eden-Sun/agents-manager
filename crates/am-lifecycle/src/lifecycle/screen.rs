@@ -364,7 +364,7 @@ fn is_codex_status_row(s: &str) -> bool {
 }
 
 /// Codex empty-composer placeholder `› Ask Codex to do anything` — looks like an echo, isn't one.
-fn is_codex_idle_prompt(s: &str) -> bool {
+pub fn is_codex_idle_prompt(s: &str) -> bool {
     let t = s.trim_start();
     let body = t.strip_prefix("› ").unwrap_or(t).trim();
     body.to_ascii_lowercase().starts_with("ask codex to do")

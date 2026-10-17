@@ -205,6 +205,8 @@ fn is_chrome(s: &str) -> bool {
     s.is_empty()
         || s == "❯"
         || s == "›"
+        // codex 空輸入框的 placeholder：真畫面上錯誤橫幅底下一定有它，不認就永遠找不到橫幅（2026-10-17 w0:pDX）。
+        || lifecycle::screen::is_codex_idle_prompt(s)
         || lifecycle::is_noise(s)
         || lifecycle::is_activity_shape(s)
         // claude 自動更新提示釘在輸入框上方，不是 agent 說的話（2.1.266）。
@@ -275,11 +277,44 @@ fn is_model_at_capacity(line: &str) -> bool {
     line.starts_with('■') && body_of(undecorated(line)).to_ascii_lowercase().starts_with("selected model is at capacity")
 }
 
+/// codex 的資安過濾（2026-10-17 w0:pDX）：OpenAI 把整段回覆擋掉，畫面只剩 `ⓘ This content can’t be shown`
+/// 加幾行縮排說明（Daybreak 申請連結），rollout 的 `task_complete` 只有 `error`、沒有回覆。hook 不來、備援也撈不到字，
+/// 回合被靜靜收掉，使用者看起來就是卡住。釘上的是人話，原文附在後面。
+const CONTENT_BLOCKED: &str = "OpenAI 資安過濾擋掉了這次回覆，請改寫請求、避開觸發的內容後重送（This content can’t be shown）";
+
+/// 跟滿載橫幅同一條規則：`ⓘ` 要在原始行的行首，縮排的續行與 `•` 回覆是引文。
+fn is_content_blocked(line: &str) -> bool {
+    // `ⓘ` 在 Unicode 算字母（Other_Alphabetic），`body_of` 不會剝它，要自己剝。
+    let Some(rest) = line.strip_prefix('ⓘ') else { return false };
+    let body = rest.trim().to_lowercase().replace('’', "'");
+    body.starts_with("this content can't be shown")
+}
+
+/// 橫幅底下那幾行縮排說明：往上走過連續的縮排行，碰到的第一行是橫幅才算。說明最多四行，多看幾行留餘地。
+fn is_content_blocked_detail(lines: &[&str], at: usize) -> bool {
+    let indented = |l: &str| l.starts_with(' ') && !l.trim().is_empty();
+    if !indented(lines[at]) {
+        return false;
+    }
+    let mut i = at;
+    for _ in 0..8 {
+        let Some(prev) = i.checked_sub(1) else { return false };
+        if is_content_blocked(lines[prev]) {
+            return true;
+        }
+        if !indented(lines[prev]) {
+            return false;
+        }
+        i = prev;
+    }
+    false
+}
+
 /// 必須是「最後一件事」：重試成功後橫幅仍留在畫面上，但下面還有回覆，不算斷線。
 pub fn api_error_line(screen: &str) -> Option<String> {
     let lines: Vec<&str> = screen.lines().collect();
     let start = lines.len().saturating_sub(TAIL_LINES);
-    for line in lines[start..].iter().rev() {
+    for (i, line) in lines.iter().enumerate().skip(start).rev() {
         let raw = undecorated(line);
         let body = body_of(raw);
         if is_api_error(body) {
@@ -290,6 +325,9 @@ pub fn api_error_line(screen: &str) -> Option<String> {
         }
         if let Some(reason) = codex_json_error(line) {
             return Some(reason);
+        }
+        if is_content_blocked(line) || is_content_blocked_detail(&lines, i) {
+            return Some(CONTENT_BLOCKED.to_string());
         }
         // 用帶記號的那串：`is_noise` 靠 `✻` 認出 spinner 收尾行。
         if !is_chrome(raw) {
@@ -447,7 +485,7 @@ async fn last_turn(db: &DbContext<sqlx::SqlitePool>, run_id: &str) -> Result<Opt
 mod tests {
     use am_ports::DbContext;
     use crate::capabilities::Db;
-    use super::{agy_reset_until, api_error_line, is_quota_exhaustion, is_quota_limit, kind_of};
+    use super::{agy_reset_until, api_error_line, CONTENT_BLOCKED, is_quota_exhaustion, is_quota_limit, kind_of};
 
     /// 同一毫秒的兩個回合：「這個 run 的最後一回合」要看寫入順序，不是隨便一個（`created_at` 只到毫秒，id 的隨機段不遞增）。
     #[tokio::test]
@@ -598,6 +636,44 @@ mod tests {
         assert_eq!(api_error_line(&format!("› hi\n• 錯誤長這樣：\n  ■ {json}\n\n›\n")), None);
         assert_eq!(api_error_line("› hi\n■ {\"status\":200,\"ok\":true}\n\n›\n"), None);
         assert_eq!(api_error_line("› hi\n■ {壞掉的 JSON\n\n›\n"), None);
+    }
+
+    /// 2026-10-17 w0:pDX：codex 的回覆被 OpenAI 資安過濾擋掉，畫面只剩 `ⓘ` 橫幅與縮排說明。照原畫面驗。
+    #[test]
+    fn a_codex_content_blocked_banner_is_a_turn_error() {
+        let screen = "\
+› let it 同併children多一點
+
+• Ran sed -n '548,665p' crates/am-lifecycle/src/lifecycle/stop.rs
+  └ pub async fn purge_bot_dir(
+    +288 lines (^t to view transcript)
+
+ⓘ This content can’t be shown
+  We take extra care with some cybersecurity requests. If you’re doing authorized security work, apply for Daybreak to get broader access.
+  Learn more: https://help.openai.com/en/articles/20001326
+  Apply for Daybreak: https://openai.com/form/enterprise-trusted-access-for-cyber/
+
+
+› Ask Codex to do anything
+
+  GPT-6.1-Sol medium · ~/project/agents-manager · 優化 CICD 測試
+";
+        let line = api_error_line(screen).expect("資安過濾橫幅要命中");
+        assert_eq!(line, CONTENT_BLOCKED);
+        assert_eq!(kind_of(&line), "api_error");
+        assert!(!is_quota_limit(&line));
+        assert!(!is_quota_exhaustion(&line));
+        // 只剩橫幅那一行（說明被捲掉或沒印）也算。
+        assert_eq!(api_error_line("› hi\nⓘ This content can't be shown\n\n›\n").as_deref(), Some(CONTENT_BLOCKED));
+    }
+
+    /// 回覆談到這句話不算：`•` 回覆、縮排引文都不是行首的 `ⓘ`；橫幅之後又有回覆，代表已經過去了。
+    #[test]
+    fn a_reply_that_quotes_the_content_blocked_banner_is_not_an_error() {
+        assert_eq!(api_error_line("› 這是什麼\n• 畫面上的 ⓘ This content can’t be shown 是資安過濾。\n\n›\n"), None);
+        assert_eq!(api_error_line("› 這是什麼\n• 長這樣：\n  ⓘ This content can’t be shown\n  We take extra care…\n\n›\n"), None);
+        let recovered = "› hi\nⓘ This content can’t be shown\n  Learn more: https://help.openai.com/\n\n› 改問別的\n• 好了，已經改完。\n\n›\n";
+        assert_eq!(api_error_line(recovered), None);
     }
 
     #[test]
