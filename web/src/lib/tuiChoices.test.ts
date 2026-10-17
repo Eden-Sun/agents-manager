@@ -797,3 +797,33 @@ test('選項說明裡縮排的 ❯ 行不是游標：不能因此認不出整份
   )
   assert.equal(menu.cursor, 0)
 })
+
+test('#1818 多行自訂答案只看到第一行（說明沒留、沒有裁切記號）：不算出現', () => {
+  const firstOnly = { number: 3, title: '第一行', detail: '', checked: null, current: true, preview: '' }
+  assert.equal(customAnswerShown(firstOnly, '第一行\n第二行很重要'), false)
+  assert.equal(customAnswerShown(firstOnly, 'first line\nimportant second line'), false)
+  // 說明只留了一部分，但沒有裁切記號：不能判定是被裁，也不算出現。
+  const partial = { number: 3, title: '第一行', detail: '第二', checked: null, current: true, preview: '' }
+  assert.equal(customAnswerShown(partial, '第一行\n第二行很重要'), false)
+})
+
+test('#1818 多行自訂答案被裁切（說明結尾是 …，已見部分是完整前綴）：算出現', () => {
+  const cut = { number: 3, title: '第一行', detail: '第二…', checked: null, current: true, preview: '' }
+  assert.equal(customAnswerShown(cut, '第一行\n第二行很重要'), true)
+  // 已見部分不是答案的前綴，就不算。
+  const other = { number: 3, title: '別的字', detail: '第二…', checked: null, current: true, preview: '' }
+  assert.equal(customAnswerShown(other, '第一行\n第二行很重要'), false)
+})
+
+test('#1818 多行答案完整出現（折行、空白差異）：算出現', () => {
+  const full = { number: 3, title: '第一行', detail: '第二行 很重要', checked: null, current: true, preview: '' }
+  assert.equal(customAnswerShown(full, '第一行\n第二行很重要'), true)
+})
+
+test('#1818 單行答案行為不變：完整出現算數、只出現一部分不算', () => {
+  const one = { number: 3, title: 'let editors publish', detail: '', checked: null, current: true, preview: '' }
+  assert.equal(customAnswerShown(one, 'let editors publish'), true)
+  assert.equal(customAnswerShown(one, 'let editors publish posts'), false)
+  const cutOne = { number: 3, title: 'let editors publish…', detail: '', checked: null, current: true, preview: '' }
+  assert.equal(customAnswerShown(cutOne, 'let editors publish posts'), true)
+})
