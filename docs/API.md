@@ -2474,7 +2474,7 @@ row（`local_path`／`agent_path`／`host` 都已經定案），再真的寫檔�
 
 | 欄位 | 說明 |
 |---|---|
-| `agent_title` | herdr `agent.list` 的 `terminal_title_stripped`（agent 自己替工作取的名字）。herdr 沒有標題事件，daemon 每 4 秒輪詢，變了才寫並推。前後的 `-` 去掉；只是 CLI 名字（`Claude Code`、`codex`）當 `null`。run 結束不清，UI 只在 run 活著時讀 |
+| `agent_title` | herdr `agent.list` 的 `terminal_title_stripped`（agent 自己替工作取的名字）。herdr 沒有標題事件，daemon 每 4 秒輪詢，變了才寫並推；run 用 host＋herdr session＋`pane_id` 對應（不看 agent 名，改名不影響、跨 host 同 pane id 不會寫錯，#1797）。前後的 `-` 去掉；只是 CLI 名字（`Claude Code`、`codex`）當 `null`。run 結束不清，UI 只在 run 活著時讀 |
 | `status_line` | 使用者自己的 claude `statusLine` 命令輸出（ANSI 已去）。daemon 的 `agents-managerd statusline` 代跑它並把同一份輸出放進 POST `/hook/claude` 的 payload。claude 是這份輸出，沒設 `statusLine.command` 為 `null`；**codex** 是 daemon 每 60 秒讀 pane 底部的模型列（`<model> <effort> · <cwd> · Context N% used · …`，去掉右側 `⚠ N warning` 段，#1671）；變了才寫 |
 | `send_now_supported` | run 的即時計算布林值（#1672），GET `/api/state` 與 WS `bot_status` 都帶；沿用 prompt 的 send-now 閘門：claude 執行版本 ≥ 2.1.275，或 `[codex] instant_interrupt` 開且執行版本 ≥ 0.159.0。版本未知／不支援的 kind 為 false；舊 daemon 未帶時前端當 false。僅表示功能支援，送出時仍重新檢查回合與送達狀態 |
 | `status_json` | statusLine 壓縮前的原始 JSON（`transcript_path` 以外整份），daemon 補 `account_email`（讀該身份設定目錄 `.claude.json` 的 `oauthAccount.emailAddress`）。變了才寫。**codex** 只有 `{"context_window":{"used_percentage":N}}`（讀自模型列的 `Context N% used`，沒有該段為 `null`）。**agy** 沒有 statusLine 數字，是精簡版 `{"model":{"id","display_name"},"context_window":{"total_input_tokens":N}}`（N＝最後一筆回覆的 `input_tokens`；視窗大小不知道，沒有 `used_percentage`；SPEC §12a.9） |
