@@ -113,7 +113,8 @@ export function ApiModelFields({
   const pickModel = (id: string | null) => {
     onModel(id)
     const next = (id && models.find((m) => m.id === id)) || defaultModel
-    if (!(next?.service_tiers.some((t) => t.id === FAST_TIER) ?? false) && fast) onFast(false)
+    // 只有清單來自 API 才能斷定「不支援」；內建清單的 service_tiers 是空的，不代表沒有 Fast（同 modelSwitchPatch）。
+    if (fromApi && fast && !(next?.service_tiers.some((t) => t.id === FAST_TIER) ?? false)) onFast(false)
     if (effort !== null && !(next?.efforts ?? []).includes(effort)) onEffort(null)
   }
 
