@@ -2163,6 +2163,11 @@ def configured_data_dir(cfg_dir: Path) -> Path | None:
     return None
 
 
+def claim_identity_fields(payload: dict) -> dict:
+    """撞題檢查靠 child 的 bot ID 與這次認領的 claim ID 認人認單；`child`（名字）只做顯示。有才帶。"""
+    return {k: payload[k] for k in ("child_bot_id", "claim_id") if payload.get(k)}
+
+
 def spool_claim_collision(number: int, title: str, me: str, payload: dict) -> None:
     """遠端 pane 沒有本機 daemon runtime 時，把認領提示交給該 bot 的 hook spool。"""
     bot_id = os.environ.get("AM_BOT_ID", "")
@@ -2200,6 +2205,7 @@ def spool_claim_collision(number: int, title: str, me: str, payload: dict) -> No
                 "title": title,
                 "child": payload.get("child") or me,
                 "branch": payload.get("branch"),
+                **claim_identity_fields(payload),
             },
         }
         fd, temporary = tempfile.mkstemp(prefix=".tmp.", dir=spool_dir)
@@ -2225,7 +2231,7 @@ def collision_check_hint(args, number: int, title: str, me: str, payload: dict) 
         client = Client(daemon_url(rt), COLLISION_TIMEOUT, bot_auth_headers(rt))
         client.post(
             "/api/judge/collision-check",
-            {"issue": number, "title": title, "child": payload.get("child") or me, "branch": payload.get("branch")},
+            {"issue": number, "title": title, "child": payload.get("child") or me, "branch": payload.get("branch"), **claim_identity_fields(payload)},
         )
     except AgmError as e:
         status = e.extra.get("status")
@@ -2320,7 +2326,7 @@ def cmd_issue(_client, _cfg: dict, args) -> object:
     payload = {"bot": me, "at": now, "claim_id": uuid.uuid4().hex}
     if issue.get("updatedAt"):
         payload["observed_updated_at"] = issue["updatedAt"]
-    for key in ("child", "worktree", "branch"):
+    for key in ("child", "child_bot_id", "worktree", "branch"):
         val = getattr(args, key, None)
         if val:
             payload[key] = val
@@ -2823,7 +2829,8 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("number", type=_positive_int_arg, help="issue 編號")
     s.add_argument("--repo", help="owner/name；省略就讓 gh 從 cwd 的 remote 自己推")
     s.add_argument("--bot", help="認領人；省略取 AM_AGENT_NAME、再退 AM_BOT_ID")
-    s.add_argument("--child", help="claim：要派出去的 child agent 名")
+    s.add_argument("--child", help="claim：要派出去的 child agent 名（只做顯示，不拿來認 bot）")
+    s.add_argument("--child-bot-id", dest="child_bot_id", help="claim：child 的 bot ID（已存在的 bot 才有）；撞題檢查靠它排除 child 自己的工作")
     s.add_argument("--worktree", help="claim：child 會用的 worktree")
     s.add_argument("--branch", help="claim：child 會用的分支")
     s.set_defaults(func=cmd_issue, needs_client=False)

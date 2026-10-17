@@ -237,7 +237,7 @@ esac
         Self { dir }
     }
     fn cfg(&self, publish: bool) -> ReleaseTriageCfg {
-        ReleaseTriageCfg { publish, gh_bin: Some(self.dir.join("gh").display().to_string()), repo: Some("o/r".into()) }
+        ReleaseTriageCfg { publish, gh_bin: Some(self.dir.join("gh").display().to_string()), repo: Some("o/r".into()), project_ids: Vec::new() }
     }
     fn calls(&self) -> Vec<String> {
         std::fs::read_to_string(self.dir.join("calls.log")).map(|s| s.lines().map(String::from).collect()).unwrap_or_default()

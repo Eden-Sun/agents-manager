@@ -210,6 +210,11 @@ struct CollisionIn {
     issue: Option<u64>,
     title: String,
     child: String,
+    /// child 的 bot ID 與這次認領的 ID（`agm issue claim`）：撞題檢查靠它們，`child`（名字）只做顯示。
+    #[serde(default)]
+    child_bot_id: Option<String>,
+    #[serde(default)]
+    claim_id: Option<String>,
     #[serde(default)]
     branch: Option<String>,
 }
@@ -232,10 +237,12 @@ async fn post_collision_check(State(app): State<Arc<App>>, headers: HeaderMap, J
     let title = b.title.trim().to_string();
     let child = b.child.trim().to_string();
     let branch = b.branch.map(|s| s.trim().to_string()).filter(|s| !s.is_empty());
+    let child_bot_id = b.child_bot_id.map(|s| s.trim().to_string()).filter(|s| !s.is_empty());
+    let claim_id = b.claim_id.map(|s| s.trim().to_string()).filter(|s| !s.is_empty());
     if title.is_empty() || child.is_empty() {
         return Err(LcError::Bad("title 與 child 不能是空的".into()));
     }
-    for (label, value) in [("title", title.as_str()), ("child", child.as_str()), ("branch", branch.as_deref().unwrap_or(""))] {
+    for (label, value) in [("title", title.as_str()), ("child", child.as_str()), ("branch", branch.as_deref().unwrap_or("")), ("child_bot_id", child_bot_id.as_deref().unwrap_or("")), ("claim_id", claim_id.as_deref().unwrap_or(""))] {
         if value.chars().count() > MAX_CLAIM_TEXT_CHARS {
             return Err(LcError::Bad(format!("{label} 最多 {MAX_CLAIM_TEXT_CHARS} 字")));
         }
@@ -246,7 +253,7 @@ async fn post_collision_check(State(app): State<Arc<App>>, headers: HeaderMap, J
         .ok_or_else(|| bot_not_found(&caller))?;
     crate::judge::collision::schedule_claim(
         &app,
-        crate::judge::collision::ClaimAsk { project_id: bot.project_id, caller, issue: b.issue, title, child, branch },
+        crate::judge::collision::ClaimAsk { project_id: bot.project_id, caller, issue: b.issue, title, child, child_bot_id, claim_id, branch },
     )
     .await;
     Ok((StatusCode::ACCEPTED, Json(json!({"queued": true}))))
@@ -326,7 +333,7 @@ mod tests {
     use axum::http::HeaderMap;
 
     fn body(title: &str) -> CollisionIn {
-        CollisionIn { issue: Some(1330), title: title.into(), child: "newbie".into(), branch: Some("fix/newbie-g1330".into()) }
+        CollisionIn { issue: Some(1330), title: title.into(), child: "newbie".into(), child_bot_id: None, claim_id: None, branch: Some("fix/newbie-g1330".into()) }
     }
 
     /// #1384：bot 列讀不到＝404 `what:"bot"`（資源名，同 API.md §1），那句話放 message。

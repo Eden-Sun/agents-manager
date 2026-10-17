@@ -3008,8 +3008,33 @@ class IssueClaimTest(unittest.TestCase):
         hits = [c for c in FakeDaemon.seen if c["path"] == "/api/judge/collision-check"]
         self.assertEqual(len(hits), 1, FakeDaemon.seen)
         self.assertEqual(hits[0]["method"], "POST")
-        self.assertEqual(hits[0]["body"], {"issue": 1330, "title": "撞題提示要接上認領", "child": "newbie", "branch": "fix/newbie-g1330"})
+        body = dict(hits[0]["body"])
+        self.assertRegex(body.pop("claim_id"), r"^[0-9a-f]{32}$", "帶這次認領的穩定 ID")
+        self.assertEqual(body, {"issue": 1330, "title": "撞題提示要接上認領", "child": "newbie", "branch": "fix/newbie-g1330"})
         self.assertEqual(self._claim_spools(), [], "202 已確認收件，不再寫一份 spool")
+
+    def test_a_claim_with_a_child_bot_id_sends_it_to_the_collision_check_and_the_spool(self):
+        # 名稱不當參照：child 的名字只做顯示，撞題檢查靠 bot ID。
+        self._hint_daemon({"POST /api/judge/collision-check": (202, {"queued": True})})
+        self.issue(1331, title="child 用 ID 認")
+        code, out, err = self.run_cli("issue", "claim", "1331", "--bot", "newbie", "--child", "newbie", "--child-bot-id", "01CHILDBOTID")
+        self.assertEqual(code, 0, err)
+        hits = [c for c in FakeDaemon.seen if c["path"] == "/api/judge/collision-check"]
+        self.assertEqual(hits[0]["body"]["child_bot_id"], "01CHILDBOTID")
+        self.assertRegex(hits[0]["body"]["claim_id"], r"^[0-9a-f]{32}$")
+
+        os.environ["AM_BOT_ID"] = "remote-bot"
+        os.environ["AM_KIND"] = "codex"
+        os.environ["AM_DATA_DIR"] = str(Path(self.dir.name) / "spool-data")
+        FakeDaemon.drop = {"/api/judge/collision-check"}
+        self.issue(1338, title="child 用 ID 認（spool）")
+        code, out, err = self.run_cli("issue", "claim", "1338", "--bot", "newbie", "--child", "newbie", "--child-bot-id", "01CHILDBOTID")
+        self.assertEqual(code, 0, err)
+        spools = list((Path(self.dir.name) / "spool-data" / "bots" / "remote-bot" / "hook-spool.d").glob("*.json"))
+        self.assertEqual(len(spools), 1)
+        payload = json.loads(spools[0].read_text(encoding="utf-8"))["payload"]
+        self.assertEqual(payload["child_bot_id"], "01CHILDBOTID")
+        self.assertRegex(payload["claim_id"], r"^[0-9a-f]{32}$")
 
     def test_a_failing_collision_check_never_changes_the_claim_result(self):
         # #1330：舊 daemon 沒有這條路由（404）、或收了請求不回應：認領照樣成功、exit 0，撞題那一步什麼都不影響。
@@ -3099,7 +3124,9 @@ class IssueClaimTest(unittest.TestCase):
         event = json.loads(spools[0].read_text(encoding="utf-8"))
         self.assertEqual(event["bot_id"], "remote-bot")
         self.assertEqual(event["provider"], "codex")
-        self.assertEqual(event["payload"], {
+        payload = dict(event["payload"])
+        self.assertRegex(payload.pop("claim_id"), r"^[0-9a-f]{32}$", "帶這次認領的穩定 ID")
+        self.assertEqual(payload, {
             "hook_event_name": "AmClaimCollisionCheck",
             "issue": 1332,
             "title": "遠端認領要送進撞題檢查",

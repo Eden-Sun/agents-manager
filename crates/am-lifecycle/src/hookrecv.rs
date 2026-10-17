@@ -143,7 +143,7 @@ pub enum HookKind {
     /// 本機走 `/relay/spawn/claim`，遠端沒有 `AM_PORT`，跟 `RelayAnnounce` 同一條 spool。
     SpawnClaim { pane_id: String },
     /// 遠端 agm 認領票後交給 daemon 的撞題檢查（issue #1468）；耐久 hook worker 等檢查完成才 ACK。
-    ClaimCollisionCheck { issue: Option<u64>, title: String, child: String, branch: Option<String> },
+    ClaimCollisionCheck { issue: Option<u64>, title: String, child: String, child_bot_id: Option<String>, claim_id: Option<String>, branch: Option<String> },
     Ignore(String),
 }
 
@@ -356,13 +356,17 @@ pub fn classify(provider: &str, p: &Value) -> HookKind {
             return HookKind::Ignore("claim collision without child".into());
         };
         let branch = s("branch").map(|v| v.trim().to_string()).filter(|v| !v.is_empty());
+        let child_bot_id = s("child_bot_id").map(|v| v.trim().to_string()).filter(|v| !v.is_empty());
+        let claim_id = s("claim_id").map(|v| v.trim().to_string()).filter(|v| !v.is_empty());
         if title.chars().count() > MAX_CLAIM_COLLISION_TEXT_CHARS
             || child.chars().count() > MAX_CLAIM_COLLISION_TEXT_CHARS
+            || child_bot_id.as_ref().is_some_and(|v| v.chars().count() > MAX_CLAIM_COLLISION_TEXT_CHARS)
+            || claim_id.as_ref().is_some_and(|v| v.chars().count() > MAX_CLAIM_COLLISION_TEXT_CHARS)
             || branch.as_ref().is_some_and(|v| v.chars().count() > MAX_CLAIM_COLLISION_TEXT_CHARS)
         {
             return HookKind::Ignore("claim collision text too long".into());
         }
-        return HookKind::ClaimCollisionCheck { issue, title, child, branch };
+        return HookKind::ClaimCollisionCheck { issue, title, child, child_bot_id, claim_id, branch };
     }
     // shim 自己的事件，不分 claude／codex（寄件的 bot 可以是任何一種）。
     if p.get("hook_event_name").and_then(Value::as_str) == Some(RELAY_ANNOUNCE_EVENT) {
@@ -605,6 +609,26 @@ mod classify_tests {
                 }
                 other => panic!("{other:?}"),
             }
+        }
+    }
+
+    #[test]
+    fn a_claim_collision_spool_event_carries_the_child_bot_id_and_claim_id() {
+        let payload = json!({
+            "hook_event_name": "AmClaimCollisionCheck",
+            "issue": 1797,
+            "title": "遠端認領票",
+            "child": "worker",
+            "child_bot_id": " 01CHILD ",
+            "claim_id": "abc123",
+        });
+        match classify("claude", &payload) {
+            HookKind::ClaimCollisionCheck { child, child_bot_id, claim_id, .. } => {
+                assert_eq!(child, "worker");
+                assert_eq!(child_bot_id.as_deref(), Some("01CHILD"));
+                assert_eq!(claim_id.as_deref(), Some("abc123"));
+            }
+            other => panic!("{other:?}"),
         }
     }
 
@@ -1710,13 +1734,15 @@ async fn process_locked_for_with_outcome<H: HookHost>(
             crate::spawn_hints::claim(app, &bot.id, &pane_id).await?;
             Ok(())
         }
-        HookKind::ClaimCollisionCheck { issue, title, child, branch } => {
+        HookKind::ClaimCollisionCheck { issue, title, child, child_bot_id, claim_id, branch } => {
             app.check_claim_collision(crate::judge::collision::ClaimAsk {
                 project_id: bot.project_id.clone(),
                 caller: bot.id.clone(),
                 issue,
                 title,
                 child,
+                child_bot_id,
+                claim_id,
                 branch,
             })
             .await?;
