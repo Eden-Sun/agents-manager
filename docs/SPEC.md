@@ -2147,7 +2147,7 @@ agent 自己 `herdr agent prompt <名字> …` 時 daemon 沒參與，那句話�
 - 側欄（手機是選單抽屜）每個專案的 Bot 清單底下列該專案被 trace 的 pane（`SidebarPanes`，資料同 `GET /api/projects/{id}/panes`），
   **點一下在這個 app 裡打開那顆 pane**——沿用主機 shell 面板，手機上也進得去。專案頁「其他 pane」區塊的「聚焦」是 herdr
   `pane.focus`，只動得了那台機器的 TUI，兩者不互相取代。重整／深連結（`/hosts/<host>/shells/<pane>`）先查面板自己開的 shell，
-  查不到再查 `GET /api/panes`。
+  查不到再查 `GET /api/panes`。這段是非同步的：網址還原每次都有導覽世代，等待途中使用者改選了別的（點 bot、切分頁、關掉 shell…）或有更新的導覽，舊的結果與失敗一律丟掉，不改選取、不回首頁（#1808）。
 - **白名單兩份**（`shell::registered`）：面板自己開的（`app.host_shells`，只在記憶體）加上 `panes` 表。後者活過重啟。
 - **pane id 會被重用**（#1353）：登記的那顆的 workspace／tab 與 herdr 現在這個 id 的 pane 對不上，清單把它當成已死、清掉登記；關閉時不關現在佔用這個 id 的 pane（改走 `panes` 表那條守門），現在那顆若跑著 bot 的 agent 一律 403、登記留著。
 - **打字權限看是否在 listen，不看 `kind`**（`shell::typing_decision`，2026-09-16 統整者裁示、巡檢同意）。`kind` 只剩顯示、GC 與

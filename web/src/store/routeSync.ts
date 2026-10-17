@@ -61,8 +61,14 @@ const here = () => location.pathname + location.search
 let started = false
 /** 初始路由套用完前一律 replace：開頁不該先留一格空白歷史。 */
 let booted = false
-/** 網址 → store 套用中，不回寫。 */
+/** 網址 → store 套用中，不回寫。使用者在途中改了選取時由訂閱清掉。 */
 let applying = false
+/** 導覽世代：每次套用或使用者導覽都前進，非同步結果回來時對不上就丟棄（#1808）。 */
+let navGen = 0
+/** 路由正在寫 store（見 `write`）。 */
+let writing = false
+/** 上一次看到的路由，用來判斷選取有沒有變。 */
+let seenKey = ''
 let lastRoute: Route = { kind: 'home' }
 let drawerOpen = false
 let closeDrawer: (() => void) | null = null
@@ -88,55 +94,78 @@ function syncNow(force?: 'replace') {
   else history.pushState(mark, '', url)
 }
 
+/** 路由自己寫 store 的那段：訂閱看到時不當成使用者導覽，不會把自己的套用作廢。 */
+function write(fn: () => void) {
+  writing = true
+  try {
+    fn()
+  } finally {
+    writing = false
+  }
+}
+
 function backHome(why: string) {
   const s = useStore.getState()
   s.notify('info', `${why}，已回到首頁。`)
-  s.selectBot(null)
+  write(() => s.selectBot(null))
 }
 
-/** 網址 → store。連結會過期，找不到就回首頁並說一聲，別靜靜停在空畫面。 */
-async function applyRoute(r: Route) {
+/**
+ * 網址 → store。連結會過期，找不到就回首頁並說一聲，別靜靜停在空畫面。
+ * `gen` 是這一輪的導覽世代：await 回來若已經不是它（使用者又導覽了、或有新的套用），結果一律丟掉（#1808）。
+ */
+async function applyRoute(r: Route, gen: number) {
   const s = useStore.getState()
+  const current = () => gen === navGen
   switch (r.kind) {
     case 'home':
-      s.selectBot(null)
+      write(() => s.selectBot(null))
       return
     case 'bot': {
       if (!s.bots.some((b) => b.id === r.botId)) return backHome('這個 Bot 已經不在了')
       if (r.settings) {
-        s.openSettings(r.botId)
+        write(() => s.openSettings(r.botId))
         return
       }
-      s.selectBot(r.botId)
-      if (r.tab === 'terminal') s.setRightTab('terminal')
-      else if (r.tab === 'preview' && isTopLevelBot(s.bots.find((b) => b.id === r.botId))) s.setRightTab('preview')
+      write(() => {
+        s.selectBot(r.botId)
+        if (r.tab === 'terminal') s.setRightTab('terminal')
+        else if (r.tab === 'preview' && isTopLevelBot(s.bots.find((b) => b.id === r.botId))) s.setRightTab('preview')
+      })
       return
     }
     case 'project':
       if (!s.projects.some((p) => p.id === r.projectId)) return backHome('這個專案已經不在了')
-      s.selectProject(r.projectId)
+      write(() => s.selectProject(r.projectId))
       return
     case 'shell': {
       try {
         // pane 活不過 daemon 重啟，要對現況；順便補回網址裡沒有的 `cwd`。
         const shell = (await api.fetchHostShells(r.host)).find((x) => x.pane_id === r.paneId)
-        if (shell) return s.viewHostShell(shell)
+        if (!current()) return
+        if (shell) {
+          write(() => s.viewHostShell(shell))
+          return
+        }
         // 選單點進去的 pane（§6.5e）不在「自己開的」那份裡；它記在 daemon 的 pane 表，活得過重啟。
         const traced = (await api.fetchAllPanes()).find((x) => x.host === r.host && x.pane_id === r.paneId)
+        if (!current()) return
         if (!traced) return backHome('這個 shell 已經關掉了')
-        s.viewPane(traced)
+        write(() => s.viewPane(traced))
       } catch {
-        backHome('讀不到這台主機的 shell')
+        if (current()) backHome('讀不到這台主機的 shell')
       }
       return
     }
   }
 }
 
-/** 結束後再對一次帳（例如回了首頁，網址要跟著變）。 */
+/** 套用一條路由；結束後再對一次帳（例如回了首頁，網址要跟著變）。新的套用或使用者導覽會讓舊的結果作廢。 */
 function run(r: Route) {
+  const gen = ++navGen
   applying = true
-  void applyRoute(r).finally(() => {
+  void applyRoute(r, gen).finally(() => {
+    if (gen !== navGen) return
     applying = false
     syncNow('replace')
   })
@@ -186,10 +215,20 @@ export function startRouteSync() {
   started = true
   const initial = parseRoute(location.pathname)
   lastRoute = initial
+  seenKey = JSON.stringify(routeOf(useStore.getState()))
   window.addEventListener('popstate', onPop)
 
   let pending: Route | null = initial
   useStore.subscribe((s) => {
+    const key = JSON.stringify(routeOf(s))
+    if (key !== seenKey) {
+      seenKey = key
+      // 不是路由自己寫的選取變動就是使用者導覽（點 bot、切分頁、關 shell…）：還沒回來的套用作廢，網址跟著新的選取走。
+      if (!writing) {
+        navGen++
+        applying = false
+      }
+    }
     if (applying) return
     if (pending) {
       // 清單到齊才判斷得出網址指的東西還在不在。
@@ -198,11 +237,13 @@ export function startRouteSync() {
       pending = null
       // `/` 就尊重 localStorage 還原的選取，由 `syncNow` 寫成網址。
       if (r.kind !== 'home') {
+        const gen = ++navGen
         applying = true
-        void applyRoute(r).finally(() => {
+        void applyRoute(r, gen).finally(() => {
+          booted = true
+          if (gen !== navGen) return
           applying = false
           syncNow()
-          booted = true
         })
         return
       }
