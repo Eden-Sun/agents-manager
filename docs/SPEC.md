@@ -2518,7 +2518,7 @@ agents-manager = "/home/u/project/agents-manager/AGENTS.md"
 pt-hub = ["~/project/pt/CLAUDE.md", "~/project/pt/AGENTS.md"]      # 多份照順序接；CLAUDE.md 的 @匯入不展開，要就都列
 ```
 
-- **角色共用文件**：巡檢與協調者共用同一專案時，部署的 `CLAUDE.md` 使用同一份角色中立 bootstrap，不含任一角色的 bot id、cwd 或「你是巡檢／協調者」宣告。身分由該 bot 的 persona、`AM_BOT_ID` 與自己 cwd 下的 `runtime.json` 決定；子 agent 不因繼承共用文件取得 AGM 角色。兩份角色 persona 的 worker 模型選擇遵守全域政策，不把角色自身固定模型當作 worker 預設。
+- **角色共用文件**：巡檢與協調者共用同一專案時，部署的 `CLAUDE.md` 使用同一份角色中立 bootstrap，不含任一角色的 bot id、cwd 或「你是巡檢／協調者」宣告。身分由該 bot 的 persona、`AM_BOT_ID` 與自己 cwd 下的 `runtime.json` 決定；daemon 位址取同一份 `runtime.json` 的 `daemon_url`，不在共用文件寫死 port；子 agent 不因繼承共用文件取得 AGM 角色。兩份角色 persona 的 worker 模型選擇遵守全域政策，不把角色自身固定模型當作 worker 預設。
 - **載入來源**：每份非空 agent md 注入時附上來源主機、設定路徑與完整內容 SHA256，標明為啟動快照。來源內容不變時標頭穩定，不放每次重啟都改變的時間戳；讀不到／空檔仍沿用既有告警與 CLI 指示檔回退。檔案更新、main push 或衍生檔更新都不代表存活的 CLI 已重新載入，需由 AGM 排安全窗口重啟對應 bot。repo 常駐 `AGENTS.md` 保留收尾入口，驗證細則改按需讀 `docs/AGENT-VERIFY.md`，不降低驗證要求。
 - **注入順序**：`child_agent_rules`（§6.5c）→ 全域 agent md → 專案 agent md → bot 自己的 persona。三種 kind 同一份文字（claude `--append-system-prompt`、
   codex `developer_instructions`、grok `--rules`）。全域那份在 daemon 這台機器上讀；專案那份跟 repo 放在一起，在**專案所在的主機**上讀（遠端走 ssh，`~` 用那台的 HOME 展開）。每次啟動 bot 重讀，改檔不必重啟 daemon，重啟 bot 就生效。
