@@ -518,7 +518,7 @@ export interface StoreState {
   loadGroupMessages: (projectId: string) => Promise<void>
   loadEarlierGroupMessages: (projectId: string) => Promise<void>
   /** null = failed (reason already shown as a notice). */
-  sendGroupChat: (projectId: string, text: string, attachments?: string[]) => Promise<GroupChatResult | null>
+  sendGroupChat: (projectId: string, text: string, attachments?: string[], recipientIds?: string[]) => Promise<GroupChatResult | null>
   setRightTab: (tab: RightTab) => void
   openSettings: (botId: string, anchor?: SettingsAnchor | null) => void
   /** `beforeId = null` = 移到最後。同專案內才有效。 */
@@ -1096,7 +1096,8 @@ export const useStore = create<StoreState>((set, get) => {
       let botOrder = s.botOrder
       for (const b of s.bots) {
         if (!b.pending) continue
-        const real = st.bots.find((r) => r.project_id === b.project_id && r.name === b.name)
+        // 只認建立請求的冪等鍵（名字可改、也可能被同名既有 bot 佔著）；沒有鍵就是還沒到，佔位列留著（#1796）。
+        const real = b.create_request_id ? st.bots.find((r) => r.create_request_id === b.create_request_id) : undefined
         if (!real) {
           keptPending.push(b)
           continue
@@ -1267,15 +1268,15 @@ export const useStore = create<StoreState>((set, get) => {
     if (!recovered) get().notify('error', `載入更早的群組訊息失敗：${errText(lost)}`)
   },
 
-  async sendGroupChat(projectId, text, attachments = []) {
+  async sendGroupChat(projectId, text, attachments = [], recipientIds = []) {
     // 跟 `sendPrompt` 同一條規則（#367）：連線斷在 daemon 收下之後（回應遺失），使用者會再按一次同一句，
     // 要拿同一個 crid——daemon 以它冪等（API.md 11.2：重送回同一組 turn_id、不再打字）。每次都換新的鍵，
     // 等於把這個冪等關掉，N 顆 bot 各收到兩則。只有「沒收到任何回覆」的失敗才沿用；daemon 回了就作廢。
-    const reqKey = `group:${projectId}:${text}\u0000${attachments.join(',')}`
+    const reqKey = `group:${projectId}:${text}\u0000${attachments.join(',')}\u0000${recipientIds.join(',')}`
     // 同 `sendPrompt`：重送窗口過了就是新的動作。
     const crid = createRequestId(reqKey, { maxAgeMs: SEND_RETRY_WINDOW_MS })
     try {
-      const res = await api.sendGroupChat(projectId, text, crid, attachments)
+      const res = await api.sendGroupChat(projectId, text, crid, attachments, recipientIds)
       settleCreateRequest(reqKey)
       // Lock each recipient's composer right away (same as `sendPrompt`).
       set((s) => {
@@ -1990,7 +1991,8 @@ export const useStore = create<StoreState>((set, get) => {
     if (s.busy[key]) return null
     // 先放灰色佔位列（假 id）在本尊後面；`refreshState` 保留它到同名真 bot 出現。
     const tempId = `pending:${Date.now().toString(36)}`
-    const placeholder: Bot = { ...bot, id: tempId, name, parent_bot_id: null, pending: true }
+    const crid = createRequestId(key)
+    const placeholder: Bot = { ...bot, id: tempId, name, parent_bot_id: null, pending: true, create_request_id: crid }
     const dropPlaceholder = () =>
       set((st) => ({
         bots: st.bots.filter((b) => b.id !== tempId),
@@ -2007,7 +2009,7 @@ export const useStore = create<StoreState>((set, get) => {
         name,
         // 名字是瀏覽器從舊清單算的：回應遺失後重送時清單已同步、算出來的名字會變，讓 daemon 往後找（也不算請求內容，#352）。
         name_auto: true,
-        client_request_id: createRequestId(key),
+        client_request_id: crid,
         kind: bot.kind,
         model: bot.model,
         effort: bot.effort,

@@ -283,6 +283,8 @@ export interface Bot {
   preview?: { status: 'off' | 'starting' | 'running' | 'failed'; port: number | null } | null
   /** 只存在於瀏覽器的佔位列（`id` 以 `pending:` 開頭），daemon 建好後被取代。 */
   pending?: boolean
+  /** 建立時帶的 `client_request_id`（daemon 從 config 帶回；沒帶＝null／舊 daemon 沒這欄）：分身佔位列靠它對到真 bot，不靠名字（#1796）。 */
+  create_request_id?: string | null
   /** 有 active run 時是實際用的名字，否則是下次啟動會用的；debug 時拿去 herdr 對照 pane。 */
   agent_name: string | null
   /** daemon 算的未讀回合數（跨裝置共用，2026-09-15）；舊 daemon 沒有這欄就是 undefined。 */

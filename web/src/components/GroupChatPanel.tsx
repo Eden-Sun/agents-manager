@@ -2,7 +2,7 @@ import { useEffect, useId, useMemo, useRef, useState } from 'react'
 import type { RefObject } from 'react'
 import { useShallow } from 'zustand/react/shallow'
 import { parseMentions } from '../api/mentions'
-import { applyRecipients, hasAllMention, stripMentions } from '../lib/groupRecipients'
+import { applyRecipients, hasAllMention, nextMentionSnapshot, resolveTargetsById, stripMentions, type MentionSnapshot } from '../lib/groupRecipients'
 import type { Bot, GroupMessage } from '../api/types'
 import { useScrollTail } from '../hooks/useScrollTail'
 import { attachCommandOf, composerState, groupComposerState, projectHostName, useStore } from '../store/store'
@@ -274,9 +274,14 @@ function GroupComposer({
   const mentionListId = useId()
   const activeIdx = Math.min(active, Math.max(0, candidates.length - 1))
 
-  const targets = useMemo(() => parseMentions(text, members), [text, members])
+  // 文字裡的 `@名字` 用**打字當下**的成員名單解析成 bot id（#1796）：之後改名或舊名被別人接手，收件人仍是原本那顆；
+  // 收件 chip／送出都看 id，名字只做顯示。文字一變就用當下的名單重新對一次。
+  const [snapshot, setSnapshot] = useState<MentionSnapshot<Bot>>(() => nextMentionSnapshot(null, text, members))
+  const snapNow = nextMentionSnapshot(snapshot, text, members)
+  if (snapNow !== snapshot) setSnapshot(snapNow)
+  const targets = useMemo(() => resolveTargetsById(parseMentions(text, snapNow.members), members), [text, snapNow, members])
   const allSelected = hasAllMention(text)
-  const selectedNames = useMemo(() => new Set(targets.map((t) => t.name)), [targets])
+  const selectedIds = useMemo(() => new Set(targets.map((t) => t.id)), [targets])
   const skippedNow = targets.filter((b) => !sendable.includes(b.id))
 
   const writeDraft = (next: string) => {
@@ -291,19 +296,22 @@ function GroupComposer({
     })
   }
 
+  // 清掉舊文字裡的 mention 要用打字當下的名字（改名後文字裡還是舊名）；重寫的前綴一律用現在的名字。
   const memberNames = members.map((b) => b.name)
+  const staleNames = [...memberNames, ...snapNow.members.map((b) => b.name)]
+  const rewrite = (mode: 'all' | string[]) => applyRecipients(stripMentions(text, staleNames), mode, memberNames)
   const toggleAll = () => {
-    if (allSelected) writeDraft(stripMentions(text, memberNames))
-    else writeDraft(applyRecipients(text, 'all', memberNames))
+    if (allSelected) writeDraft(stripMentions(text, staleNames))
+    else writeDraft(rewrite('all'))
   }
 
-  const toggleBot = (name: string) => {
+  const toggleBot = (id: string) => {
     if (allSelected) {
-      writeDraft(applyRecipients(text, [name], memberNames))
+      writeDraft(rewrite([members.find((b) => b.id === id)?.name ?? '']))
       return
     }
-    const next = members.map((b) => b.name).filter((n) => (n === name ? !selectedNames.has(n) : selectedNames.has(n)))
-    writeDraft(applyRecipients(text, next, memberNames))
+    const next = members.filter((b) => (b.id === id ? !selectedIds.has(b.id) : selectedIds.has(b.id))).map((b) => b.name)
+    writeDraft(rewrite(next))
   }
 
   const pick = (c: Candidate) => {
@@ -357,7 +365,7 @@ function GroupComposer({
     }
     setSending(true)
     const sent = files.ids
-    void sendGroupChat(projectId, body, sent).then((res) => {
+    void sendGroupChat(projectId, body, sent, targets.map((t) => t.id)).then((res) => {
       setSending(false)
       if (res) {
         setText('')
@@ -409,7 +417,7 @@ function GroupComposer({
           @all · {members.length} 個 bot
         </button>
         {members.map((b) => {
-          const on = !allSelected && selectedNames.has(b.name)
+          const on = !allSelected && selectedIds.has(b.id)
           return (
             <button
               key={b.id}
@@ -418,7 +426,7 @@ function GroupComposer({
               aria-pressed={on}
               disabled={state.disabled || sending}
               title={`送給 @${b.name}`}
-              onClick={() => toggleBot(b.name)}
+              onClick={() => toggleBot(b.id)}
             >
               @{b.name}
             </button>

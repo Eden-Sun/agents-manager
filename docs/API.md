@@ -480,6 +480,7 @@ daemon 重啟後就是空的（那次不會再推 `herdr_update_done`，前端�
 - `queued_turn`：下一個送出的 Turn 投影（`status = "queued"`，§5），沒有就 `null`；同一顆 bot 有多筆 queued 時，依使用者、relay、daemon 通知的順序投影最先的一筆（#1685）；前端據此把輸入框畫成「已排隊」。生產者包含 AGM／bot relay、bot 沒在跑時帶 `start_if_stopped` 的送出（issue #122），以及回合中帶 `queue_if_busy:true` 的使用者送出（issue #733）。lane 由 daemon 寫入時按可信來源保存，`client_request_id` 前綴不會改變 lane。
 - `handed_off_to`（#708）：專案已移交給這台主機的 daemon 管（SPEC §6.5h），`null`＝這顆 daemon 管。有值時這個專案的 bot 列照最後的狀態凍結顯示，start／stop／restart／prompt／keys 一律 409 `handed_off`（帶 `bot_id`、`handed_off_to`、`message`）。
 - `unread`：daemon 依 `bot_reads` 算的未讀回合數（標記之後的 assistant 訊息依回合去重，排除 keep-warm 回合；沒有標記＝全部），`read_mark` 是跨裝置共用的已讀位置（`null`＝沒標過）；前端只在「正在看的那顆 bot」上以本機狀態為準，其餘用這個數字。標記怎麼寫見「`POST /api/bots/{id}/read`」（`bot_read` 事件同形，§8）。
+- `bots[].create_request_id`（#1796）：建立該 bot 時帶的 `client_request_id`（config.toml 的 `create_request_id`；沒帶或舊 bot＝`null`）。前端用它把「建立中」佔位列對到真 bot，不比對名字；Bot view 不含這個欄位。
 - 其他欄位（hosts、identities、bot 的 model/effort/fast/persona/identity/managed_by/parent_bot_id、run 的 runtime_* 等）見各節。
 
 ### `run` 物件（`null` = 沒有 active Run）
@@ -2023,7 +2024,7 @@ UI token 會取得 Project 底下所有存活 bot 的訊息合併。Bot token �
 ```
 
 ### 11.2 `POST /api/projects/{id}/chat`
-`{ "text": "@all Reply with exactly GROUP-OK", "client_request_id": "…", "attachments"?: [...] }`。`client_request_id` 即 `group_id`；每個 bot 的 prompt 用 `<crid>:<bot_id>` 冪等，重送回同一組 `turn_id`、不重寫註記。此格式是群組未讀查詢的穩定候選契約；前端仍需以同回合 user 訊息的 `group_id` 核實群組來源。
+`{ "text": "@all Reply with exactly GROUP-OK", "client_request_id": "…", "attachments"?: [...], "recipient_ids"?: ["bot_id", …] }`。**`recipient_ids`（#1796）**：有帶就以 bot id 決定收件人（依專案內 bot 順序），文字裡的 `@名字` 只是顯示、不再用來解析，所以輸入後改名或舊名被別人接手不會漏送／送錯；不在專案裡的 id 進 `skipped`（`reason:"not_found"`，`bot_name:""`）；沒帶就照文字裡的 mention 解析（原行為）。`client_request_id` 即 `group_id`；每個 bot 的 prompt 用 `<crid>:<bot_id>` 冪等，重送回同一組 `turn_id`、不重寫註記。此格式是群組未讀查詢的穩定候選契約；前端仍需以同回合 user 訊息的 `group_id` 核實群組來源。
 
 ```json
 200 { "group_id": "c-group-4", "project_id": "01M1...", "delivered": true,

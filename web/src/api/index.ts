@@ -104,11 +104,14 @@ export async function sendGroupChat(
   text: string,
   clientRequestId: string,
   attachments: string[] = [],
+  recipientIds: string[] = [],
 ): Promise<GroupChatResult> {
   const raw = await transport.request('POST', `/projects/${encodeURIComponent(projectId)}/chat`, {
     text,
     client_request_id: clientRequestId,
     ...(attachments.length ? { attachments } : {}),
+    // 收件人以 bot id 為準（#1796）：文字裡的 `@名字` 只是顯示，輸入後改名也不會漏送或送錯。
+    ...(recipientIds.length ? { recipient_ids: recipientIds } : {}),
   })
   const o = isRec(raw) ? raw : {}
   return {

@@ -1160,6 +1160,16 @@ test('群組送出時連線斷了（回應遺失）：再送同一句要沿用�
   assert.notEqual(last.client_request_id, crids[0], '成功之後同一句是新的動作')
 })
 
+test('群組送出帶 recipient_ids：收件人以 bot id 為準（#1796）', async () => {
+  seed()
+  routeDaemon(() => json({ group_id: 'g1', sent: [], skipped: [] }, 200))
+  await useStore.getState().sendGroupChat('p1', '@old 嗨', [], ['b1'])
+  await useStore.getState().sendGroupChat('p1', '@all 嗨')
+  const bodies = requests.filter((r) => r.path.endsWith('/chat')).map((r) => r.body as { recipient_ids?: string[] })
+  assert.deepEqual(bodies[0].recipient_ids, ['b1'])
+  assert.equal(bodies[1].recipient_ids, undefined, '沒帶就不送這個欄位（舊行為：daemon 解析文字）')
+})
+
 test('群組送出被 daemon 明確拒絕（400 no_mention）：下一次是新的動作，不沿用舊 crid', async () => {
   seed()
   let n = 0
