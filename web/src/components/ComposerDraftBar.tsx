@@ -1,4 +1,5 @@
 import { useStore } from '../store/store'
+import { trackDraftEdits } from '../store/draftEdits'
 import './composerDraftBar.css'
 
 /**
@@ -18,8 +19,8 @@ export function ComposerDraftBar({
   text: string
   attachments: string[]
   attachmentsBlocked?: 'uploading' | 'failed' | null
-  /** 自己這則送出去了：清輸入框與附件。 */
-  onSent: () => void
+  /** 自己這則送出去了：清附件；`textUntouched` ＝ 送出途中輸入框的字沒被改過，才可以清字（#1811）。 */
+  onSent: (textUntouched: boolean) => void
 }) {
   const block = useStore((s) => s.composerDrafts[botId])
   const sendPrompt = useStore((s) => s.sendPrompt)
@@ -34,9 +35,10 @@ export function ComposerDraftBar({
   }
   const clearAndSend = () => {
     if (attachmentsBlocked) return
+    const edits = trackDraftEdits(`bot:${botId}`)
     void sendPrompt(botId, mine, attachments, false, false, { action: 'clear', token: block.token }).then((ok) => {
-      if (ok) onSent()
-    })
+      if (ok) onSent(edits.untouched())
+    }).finally(edits.stop)
   }
 
   return (
