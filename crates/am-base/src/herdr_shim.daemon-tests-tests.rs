@@ -439,15 +439,19 @@
         std::fs::create_dir_all(spool.parent().unwrap()).unwrap();
         let home_s = home.to_string_lossy().to_string();
         let env = [("HOME", home_s.as_str()), ("AM_BOT_ID", "B-REMOTE"), ("AM_KIND", "claude"), ("AM_TEST_AGENTS", "robins-hub-3b84sb")];
-        let (out, _) = s.run(&env, &["agent", "prompt", "robins-hub-3b84sb", "我是 robins-hub-bf3xq3。PR #95 卡在排隊", "--wait"]);
-        assert_eq!(out, ["agent", "prompt", "robins-hub-3b84sb", "我是 robins-hub-bf3xq3。PR #95 卡在排隊", "--wait"], "照舊轉發");
+        let (out, _) = s.run(&env, &["agent", "prompt", "robins-hub-3b84sb", "我是 robins-hub-bf3xq3。PR #95 卡在排隊", "--wait", "--to-bot-id", "stable-recipient", "--to-run-id=stable-run", "--to-pane-id", "stable-pane"]);
+        assert_eq!(out, ["agent", "prompt", "stable-pane", "我是 robins-hub-bf3xq3。PR #95 卡在排隊", "--wait"], "照舊轉發");
         let files: Vec<_> = std::fs::read_dir(&spool).unwrap().map(|e| e.unwrap().path()).filter(|p| p.extension().is_some_and(|x| x == "json")).collect();
         assert_eq!(files.len(), 1, "一則報備：{files:?}");
         let body: serde_json::Value = serde_json::from_str(std::fs::read_to_string(&files[0]).unwrap().trim()).unwrap();
         assert_eq!(body["bot_id"], "B-REMOTE");
         assert_eq!(body["provider"], "claude");
         assert_eq!(body["payload"]["hook_event_name"], "AmRelayAnnounce");
-        assert_eq!(body["payload"]["to_agent"], "robins-hub-3b84sb");
+        assert_eq!(body["payload"]["to_agent"], "stable-pane");
+        assert_eq!(body["payload"]["version"], 2);
+        assert_eq!(body["payload"]["to_bot_id"], "stable-recipient");
+        assert_eq!(body["payload"]["to_run_id"], "stable-run");
+        assert!(!body["payload"]["delivery_id"].as_str().unwrap().is_empty());
         assert_eq!(body["payload"]["text"], "我是 robins-hub-bf3xq3。PR #95 卡在排隊", "--wait 不進正文");
         let at = body["received_at"].as_str().unwrap();
         assert!(crate::db::parse_ts(at).is_some() && at.len() == "2026-09-30T04:23:28.123Z".len() && at.ends_with('Z'), "毫秒 UTC 格式：{at}");
@@ -460,6 +464,17 @@
         let (out, _) = s2.run(&[("HOME", home2_s.as_str()), ("AM_BOT_ID", "B-NODIR")], &["agent", "prompt", "x-agent", "hello there relay"]);
         assert_eq!(out[..2], ["agent", "prompt"]);
         assert!(!home2.join(".config").exists(), "沒有 bot 目錄就不建");
+    }
+
+    #[test]
+    fn nr_relay_local_prompt_uses_the_resolved_pane_after_a_name_is_reused() {
+        let s = Sandbox::new();
+        s.install_fake_curl(r#"printf '%s\n' '{"to_pane_id":"w1:p7"}' 200"#);
+        let (out, err, rc) = s.run_full(&[("AM_BOT_ID","sender"), ("AM_BOT_TOKEN","token"),
+            ("AM_PORT","7788"), ("AM_TEST_AGENTS","reused-name")], &["agent","prompt","reused-name",
+            "交辦給穩定目標", "--to-bot-id", "target-bot", "--to-run-id", "target-run"]);
+        assert_eq!(rc, 0, "{err}");
+        assert_eq!(out, ["agent","prompt","w1:p7","交辦給穩定目標"]);
     }
 
     /// 既有目標（AGM、頂層 bot）不改名，否則 unknown_target。
@@ -754,7 +769,7 @@
         let run = |s: Sandbox, port: String| {
             tokio::task::spawn_blocking(move || {
                 let env = [("AM_AGENT_NAME", "fixer-abc"), ("AM_TEST_AGENTS", "AGM"), ("AM_BOT_ID", "w1"), ("AM_HOOK_TOKEN", "tok-w1"), ("AM_PORT", port.as_str())];
-                let r = s.run_full(&env, &["agent", "prompt", "AGM", text]);
+                let r = s.run_full(&env, &["agent", "prompt", "AGM", "--to-bot-id", "resp", text]);
                 (s, r)
             })
         };

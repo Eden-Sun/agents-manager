@@ -50,9 +50,8 @@ pub fn is_claim_collision(body: &HookBody) -> bool {
 }
 const MAX_CLAIM_COLLISION_TEXT_CHARS: usize = 500;
 
-/// 報備比收件方的回音晚到時補標：寄件者那台主機上、`agent_name` 是 `to_agent` 的在跑 run，它的對話裡
-/// 五分鐘內、還沒標來源、內容對得上的最新一則使用者訊息。補上就用掉那筆報備（同一句不標兩次）。
-async fn relay_backfill(app: &(impl crate::capabilities::Db + crate::events::ports::TurnCommands), from_bot: &str, from_turn: Option<&str>, to_agent: &str, text: &str) -> Result<()> {
+/// 遲到報備只補標已綁定指定 run 的回合訊息；conversation／名字不足以證明世代。
+async fn relay_backfill(app: &(impl crate::capabilities::Db + crate::events::ports::TurnCommands), from_bot: &str, from_turn: Option<&str>, to_run_id: &str, text: &str) -> Result<()> {
     let host = db::bot_host(app.db(), from_bot).await?;
     let since = (chrono::Utc::now() - chrono::Duration::minutes(5)).to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
     let rows: Vec<(String, String, String)> = sqlx::query_as(
@@ -60,12 +59,13 @@ async fn relay_backfill(app: &(impl crate::capabilities::Db + crate::events::por
            JOIN conversations c ON c.id = m.conversation_id
            JOIN bots b ON b.id = c.bot_id
            JOIN projects p ON p.id = b.project_id
-           JOIN runs r ON r.bot_id = b.id AND r.state = 'running' AND r.agent_name = ?
+           JOIN runs r ON r.bot_id = b.id AND r.state = 'running' AND r.id = ?
           WHERE p.host = ? AND b.id <> ? AND m.role = 'user' AND m.source IN ('hook','terminal_fallback')
             AND m.relay_from IS NULL AND m.created_at >= ?
+            AND EXISTS (SELECT 1 FROM turns t WHERE t.id = m.turn_id AND t.run_id = r.id)
           ORDER BY m.created_at DESC, m.rowid DESC LIMIT 20",
     )
-    .bind(to_agent)
+    .bind(to_run_id)
     .bind(&host)
     .bind(from_bot)
     .bind(&since)
@@ -81,19 +81,18 @@ async fn relay_backfill(app: &(impl crate::capabilities::Db + crate::events::por
         .bind(&msg_id)
         .execute(app.db())
         .await?;
-    let _ = crate::agent_relay::claim(&host, to_agent, &content);
+    let _ = crate::agent_relay::claim(&host, to_run_id, &content);
     let message: db::Message = sqlx::query_as("SELECT *, rowid AS seq FROM messages WHERE id = ?").bind(&msg_id).fetch_one(app.db()).await?;
-    tracing::info!(from = %from_bot, to = %to_agent, msg = %msg_id, "relay announce arrived after the echo; attributed it");
+    tracing::info!(from = %from_bot, to = %to_run_id, msg = %msg_id, "relay announce arrived after the echo; attributed it");
     app.emit_message_added(&to_bot, message).await;
     Ok(())
 }
 
 async fn relay_source(app: &impl crate::capabilities::Db, run: Option<&db::Run>, echo: &str) -> Option<crate::agent_relay::Relayed> {
     let run = run?;
-    let agent = run.agent_name.as_deref()?;
     // 讀不到主機＝認不出來就不標（寧可少標，不要錯標）。
     let host = db::bot_host(app.db(), &run.bot_id).await.ok()?;
-    crate::agent_relay::claim_relayed(&host, agent, echo)
+    crate::agent_relay::claim_relayed(&host, &run.id, echo)
 }
 
 pub enum HookKind {
@@ -138,7 +137,7 @@ pub enum HookKind {
     AskAnswered(crate::ask_answers::AskRecord),
     /// 遠端 bot 的 herdr shim 在 `agent prompt` 之前寫進自己 spool 的報備（SPEC §6.5d）：遠端沒有 `AM_PORT`，
     /// 打不到 `/relay/announce`，只能跟 hook 走同一條 spool。寄件者就是這則 body 的 bot（spool 在它自己的目錄）。
-    RelayAnnounce { to_agent: String, text: String },
+    RelayAnnounce { to_bot_id: String, to_run_id: String, delivery_id: String, text: String },
     /// 遠端 bot 的 herdr shim 在 `agent start` 成功後寫進自己 spool 的登記（issue #1790）：這顆 pane 是這顆 bot 開的。
     /// 本機走 `/relay/spawn/claim`，遠端沒有 `AM_PORT`，跟 `RelayAnnounce` 同一條 spool。
     SpawnClaim { pane_id: String },
@@ -370,9 +369,11 @@ pub fn classify(provider: &str, p: &Value) -> HookKind {
     }
     // shim 自己的事件，不分 claude／codex（寄件的 bot 可以是任何一種）。
     if p.get("hook_event_name").and_then(Value::as_str) == Some(RELAY_ANNOUNCE_EVENT) {
-        return match (s("to_agent"), s("text")) {
-            (Some(to_agent), Some(text)) if !to_agent.trim().is_empty() && !text.trim().is_empty() => HookKind::RelayAnnounce { to_agent, text },
-            _ => HookKind::Ignore("relay announce without to_agent/text".into()),
+        return match (s("to_bot_id"), s("to_run_id"), s("delivery_id"), s("text")) {
+            (Some(to_bot_id), Some(to_run_id), Some(delivery_id), Some(text))
+                if [&to_bot_id, &to_run_id, &delivery_id, &text].iter().all(|s| !s.trim().is_empty()) =>
+                HookKind::RelayAnnounce { to_bot_id, to_run_id, delivery_id, text },
+            _ => HookKind::Ignore("relay announce without stable recipient/delivery ids".into()),
         };
     }
     if p.get("hook_event_name").and_then(Value::as_str) == Some(SPAWN_CLAIM_EVENT) {
@@ -1720,14 +1721,24 @@ async fn process_locked_for_with_outcome<H: HookHost>(
         }
         // 2026-09-30 使用者：console-rpa（m4p）直送給 cicd 的一句被存成使用者訊息。spool 每 30 秒左右才收一次，
         // 收件方的回音常常比這則報備先到，所以除了照常記下，也回頭補標已經存下的那一則。
-        HookKind::RelayAnnounce { to_agent, text } => {
+        HookKind::RelayAnnounce { to_bot_id, to_run_id, delivery_id, text } => {
             // 讀不到寄件者的主機就不記（記了也沒人認得出是哪台）；補標那邊同樣要讀主機，會一起報錯。
             let host = db::bot_host(app.db(), &bot.id).await?;
             // 寄件 bot 送這句當下正在跑的回合：用 shim 寫進報備的 `received_at`（送出時間；spool 可能晚好幾秒才收到）。
             let sent_at = body.received_at.clone().unwrap_or_else(db::now);
             let from_turn = crate::lifecycle::relay_watch::sender_turn_at(app, &bot.id, &sent_at).await?;
-            crate::agent_relay::announce(&host, &bot.id, &to_agent, &text, from_turn.as_deref());
-            relay_backfill(app, &bot.id, from_turn.as_deref(), &to_agent, &text).await
+            let Some(run) = db::run(app.db(), &to_run_id).await? else { return Ok(()) };
+            if run.bot_id != to_bot_id || run.state != "running" || db::bot_host(app.db(), &to_bot_id).await? != host {
+                return Ok(());
+            }
+            let Some(recipient) = db::bot(app.db(), &to_bot_id).await? else { return Ok(()) };
+            let handed_off: Option<String> = sqlx::query_scalar("SELECT handed_off_to FROM projects WHERE id=?")
+                .bind(&recipient.project_id).fetch_one(app.db()).await?;
+            if recipient.deleted_at.is_some() || handed_off.is_some() { return Ok(()); }
+            if crate::agent_relay::announce_delivery(&host, &bot.id, &to_run_id, &delivery_id, &text, from_turn.as_deref()) {
+                relay_backfill(app, &bot.id, from_turn.as_deref(), &to_run_id, &text).await?;
+            }
+            Ok(())
         }
         // issue #1790：遠端 shim 開完子 agent 後的登記（本機走 `/relay/spawn/claim`）；只記「這顆 pane 是這顆 bot 開的」。
         HookKind::SpawnClaim { pane_id } => {
@@ -5141,6 +5152,34 @@ mod external_claim_tests {
         assert_eq!(recorded.as_deref(), Some(bot.id.as_str()));
     }
 
+    #[test]
+    fn nr_relay_legacy_name_only_spool_is_unknown() {
+        assert!(matches!(classify("claude", &json!({"hook_event_name": RELAY_ANNOUNCE_EVENT,
+            "to_agent": "old-name", "text": "不能以舊名猜測這句話的收件身分"})), HookKind::Ignore(_)));
+    }
+
+    #[tokio::test]
+    async fn nr_relay_spool_survives_rename_and_does_not_follow_the_reused_name() {
+        let env = tt::env().await;
+        let from = tt::claude_bot(&env.app, &env.project_id, "nr-relay-from").await;
+        let target = tt::claude_bot(&env.app, &env.project_id, "nr-relay-target").await;
+        let target_run = tt::fake_run(&env.app, &target.id).await;
+        sqlx::query("UPDATE runs SET agent_name='renamed-target' WHERE id=?").bind(&target_run).execute(&env.app.db).await.unwrap();
+        let other = tt::claude_bot(&env.app, &env.project_id, "nr-relay-reused").await;
+        let other_run = tt::fake_run(&env.app, &other.id).await;
+        let text = "延遲報備只歸穩定 run，舊名字被重用也不能改變收件者";
+        let body = HookBody { bot_id: from.id.clone(), provider: "claude".into(), received_at: None,
+            truncated: false, run_id: None, payload: json!({"hook_event_name":RELAY_ANNOUNCE_EVENT,
+                "to_agent":"agent", "to_bot_id":target.id, "to_run_id":target_run, "delivery_id":"nr-stable-delivery", "text":text}) };
+        process(&env.app, &body).await.unwrap();
+        let other_run = db::run(&env.app.db, &other_run).await.unwrap().unwrap();
+        assert_eq!(relay_source(&env.app, Some(&other_run), text).await, None);
+        let target_run = db::run(&env.app.db, &target_run).await.unwrap().unwrap();
+        assert_eq!(relay_source(&env.app, Some(&target_run), text).await.unwrap().from_bot, from.id);
+        process(&env.app, &body).await.unwrap();
+        assert_eq!(relay_source(&env.app, Some(&target_run), text).await, None, "同一 delivery 的重播不能再認領");
+    }
+
     /// 2026-09-30：遠端 bot 直送的一句，回音先被存成使用者訊息，報備之後才從寄件者的 spool 收到——補標 `relay_from`。
     /// 同一句不標兩次；對不上的、別人的對話都不動。
     #[tokio::test]
@@ -5152,7 +5191,10 @@ mod external_claim_tests {
         sqlx::query("UPDATE runs SET agent_name = 'robins-hub-3b84sb' WHERE id = ?").bind(&run).execute(&env.app.db).await.unwrap();
         let conv = db::conversation_id(&env.app.db, &to.id).await.unwrap();
         let text = "我是 robins-hub-bf3xq3。console PR #95 的 test／lint 卡在排隊";
-        let echo = lifecycle::insert_message(&env.app, &conv, None, "user", text, "hook", false, None).await.unwrap();
+        let turn = db::ulid();
+        sqlx::query("INSERT INTO turns (id,conversation_id,run_id,origin,status,delivery,created_at) VALUES (?,?,?,'external','in_flight','ok',?)")
+            .bind(&turn).bind(&conv).bind(&run).bind(db::now()).execute(&env.app.db).await.unwrap();
+        let echo = lifecycle::insert_message(&env.app, &conv, Some(&turn), "user", text, "hook", false, None).await.unwrap();
         let web = lifecycle::insert_message(&env.app, &conv, None, "user", text, "web", false, None).await.unwrap();
         sqlx::query("UPDATE messages SET created_at = strftime('%Y-%m-%dT%H:%M:%fZ','now','+1 second') WHERE id = ?")
             .bind(&web.id)
@@ -5162,7 +5204,7 @@ mod external_claim_tests {
         let announce = |t: &str| HookBody {
             bot_id: from.id.clone(),
             provider: "claude".into(),
-            payload: json!({"hook_event_name": RELAY_ANNOUNCE_EVENT, "to_agent": "robins-hub-3b84sb", "text": t}),
+            payload: json!({"hook_event_name": RELAY_ANNOUNCE_EVENT, "to_bot_id": to.id, "to_run_id": run, "delivery_id": "delivery-robins-hub-3b84sb", "text": t}),
             received_at: None,
             truncated: false,
             run_id: None,
@@ -5175,7 +5217,7 @@ mod external_claim_tests {
         };
         assert_eq!(relay(echo.id.clone()).await.as_deref(), Some(from.id.as_str()), "回音補標寄件者");
         assert_eq!(relay(web.id.clone()).await, None, "完全相同的 web 使用者訊息不動");
-        assert_eq!(crate::agent_relay::claim(crate::config::LOCAL_HOST, "robins-hub-3b84sb", text), None, "補標後報備已用掉，不會再標一次");
+        assert_eq!(crate::agent_relay::claim(crate::config::LOCAL_HOST, &run, text), None, "補標後報備已用掉，不會再標一次");
     }
 
     /// 同一毫秒的兩則備援回覆：遲到的 hook 要蓋「最新」那則（寫入順序），不是 id 字典序大的那則。
@@ -5251,7 +5293,7 @@ mod external_claim_tests {
         let announce = HookBody {
             bot_id: from.id.clone(),
             provider: "claude".into(),
-            payload: json!({"hook_event_name": RELAY_ANNOUNCE_EVENT, "to_agent": "proj-same-name-host", "text": text}),
+            payload: json!({"hook_event_name": RELAY_ANNOUNCE_EVENT, "to_bot_id": local.id, "to_run_id": local_run, "delivery_id": "delivery-proj-same-name-host", "text": text}),
             received_at: None,
             truncated: false,
             run_id: None,
@@ -5285,7 +5327,7 @@ mod external_claim_tests {
         let announce = HookBody {
             bot_id: from.id.clone(),
             provider: "claude".into(),
-            payload: json!({"hook_event_name": RELAY_ANNOUNCE_EVENT, "to_agent": "proj-relay-turn", "text": text}),
+            payload: json!({"hook_event_name": RELAY_ANNOUNCE_EVENT, "to_bot_id": local.id, "to_run_id": local_run, "delivery_id": "delivery-proj-relay-turn", "text": text}),
             received_at: None,
             truncated: false,
             run_id: None,
@@ -5307,11 +5349,14 @@ mod external_claim_tests {
         sqlx::query("UPDATE runs SET agent_name = 'robins-hub-terminal-734' WHERE id = ?").bind(&run).execute(&env.app.db).await.unwrap();
         let conv = db::conversation_id(&env.app.db, &to.id).await.unwrap();
         let text = "請幫我檢查 PR #95，終端截取的 prompt echo";
-        let echo = lifecycle::insert_message(&env.app, &conv, None, "user", text, "terminal_fallback", false, None).await.unwrap();
+        let turn = db::ulid();
+        sqlx::query("INSERT INTO turns (id,conversation_id,run_id,origin,status,delivery,created_at) VALUES (?,?,?,'external','in_flight','ok',?)")
+            .bind(&turn).bind(&conv).bind(&run).bind(db::now()).execute(&env.app.db).await.unwrap();
+        let echo = lifecycle::insert_message(&env.app, &conv, Some(&turn), "user", text, "terminal_fallback", false, None).await.unwrap();
         let announce = HookBody {
             bot_id: from.id.clone(),
             provider: "claude".into(),
-            payload: json!({"hook_event_name": RELAY_ANNOUNCE_EVENT, "to_agent": "robins-hub-terminal-734", "text": text}),
+            payload: json!({"hook_event_name": RELAY_ANNOUNCE_EVENT, "to_bot_id": to.id, "to_run_id": run, "delivery_id": "delivery-robins-hub-terminal-734", "text": text}),
             received_at: None,
             truncated: false,
             run_id: None,
@@ -5346,7 +5391,7 @@ mod external_claim_tests {
         let announce = HookBody {
             bot_id: from.id,
             provider: "claude".into(),
-            payload: json!({"hook_event_name": RELAY_ANNOUNCE_EVENT, "to_agent": "robins-hub-prefix-734", "text": text}),
+            payload: json!({"hook_event_name": RELAY_ANNOUNCE_EVENT, "to_bot_id": to.id, "to_run_id": run, "delivery_id": "delivery-robins-hub-prefix-734", "text": text}),
             received_at: None,
             truncated: false,
             run_id: None,

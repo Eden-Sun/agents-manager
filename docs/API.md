@@ -1988,10 +1988,11 @@ child 還原後不立即建立 run；daemon 給它十分鐘讓父 bot 在原 pan
 
 ### 10.5 `POST /relay/announce`
 **不在 `/api` 下**，不吃 UI token：呼叫者是 pane 裡的 herdr shim，驗證用該 bot 的 hook token（`X-AM-Bot-Token`）。
-表單編碼 `bot_id`、`to_agent`、`text` → `200 {}`；bot 不存在、已刪或 token 不符 → 401。
-daemon 記在行程內（5 分鐘、認領一次就用掉），該句回音進對話時帶上 `relay_from`（SPEC §6.5d）。
-若 announce 沒被角色 bot 路由攔截，盯梢解析只看寄件 bot 所在 host／herdr session 的 `agent_name` 或 pane id；舊 run 缺 session 時採用 host 設定。
-bot 資料庫名稱不算 herdr 目標，且只有唯一一筆 running run 符合才開始盯梢。收件方的專案已移交給別台主機（`projects.handed_off_to`）時不算這顆 daemon 的目標：仍回 `200 {}`，但不開 `external` 回合、不盯 pane（#1363）。字由 shim 直接送，本機與接手的 daemon 都不記這句（只留 log `relay_handoff_direct`，#1460）。
+表單編碼 `bot_id`、`to_bot_id?`、`to_run_id?`、`delivery_id?`、`to_agent?`、`text` → `200 {"to_pane_id":"<穩定傳輸地址>"}`（已綁定的本機 run）或 `200 {}`（未知／移交）；bot 不存在、已刪或 token 不符 → 401。
+`to_agent` 只供顯示／shim 傳輸，不參與歸屬或角色判斷。角色收件只使用明確的 `to_bot_id`；一般報備還需要對應的 `to_run_id`，並限寄件方 host／herdr session 的 running run。bot／run 不符回 400 `relay_recipient_mismatch`。
+shim 的 `agent prompt <傳輸目標> <文字> --to-bot-id <id> --to-run-id <id>` 會移除這兩個自有旗標，產生一次投遞共用的 `delivery_id`，供本機 curl 重試及遠端 spool v2 沿用。本機已綁定目標改用 daemon 回傳的 pane 地址送字，不再重查名字；遠端還需 `--to-pane-id <pane id>`，缺明確 pane 地址的報備保持未知。遠端 `AmRelayAnnounce` 必須攜帶 `to_bot_id`、`to_run_id`、`delivery_id`、`text`；舊的只有 `to_agent` 的事件保持未知，不用名稱補猜。
+daemon 記在行程內（5 分鐘、容量有界）；回音以穩定 run id 認領一次，delivery 重播不重複認領。此去重不跨 daemon 重啟持久化，無 schema 變動。
+缺穩定 ID 的舊 shim 仍可直送文字，但不開監看回合、不補標來源、不依名稱攔入 AGM 佇列。已移交的專案仍回 `200 {}`，不開回合、不盯 pane、不標來源，留 `relay_handoff_direct` log。遲到報備只補標明確綁定該 run 回合的 hook／terminal_fallback 訊息，不碰只有 conversation 證據的訊息。
 
 ### 10.6 hook 端點 `POST /hook/{claude|codex|grok|agy}`
 body `{bot_id, provider, payload, received_at, truncated?, run_id?}`，header `X-AM-Bot-Token`。`run_id` 是送出這則 hook 的 CLI 行程
@@ -2723,7 +2724,7 @@ CLI：`agents-managerd release-triage-check --kind <claude|codex> [--since <ver>
 ### 核准與租約（SPEC §18.10）
 - `GET /api/supervisor/approvals?id=<id>`：只回那一筆（清單本身只有最新 100 筆，排程腳本要確認的舊核准會被擠出去）。
 - `GET /api/supervisor/approvals` → `{approvals:[{id,requester,requester_unverified,purpose,scope,target_commit,status,decided_by,decided_at,reason,expires_at,client_request_id,wait_since,decisions:[{from,to,actor,reason,at}],…}]}`。
-  `requester_unverified`（issue #436）：`true`＝`requester` 只是申請時自稱的字串（沒帶 `X-AM-Bot-Id`，例如 `daemon-update-kick.sh` 這類 launchd 腳本），`false`＝申請時附了那顆 bot 自己的 hook token、確定是它本人。欄位加上去之前的舊列一律 `true`。
+  `requester_unverified`（issue #436）：`true`＝`requester` 只是申請時自稱的字串（沒帶 `X-AM-Bot-Id`，例如 `daemon-update-kick.sh` 這類 launchd 腳本），`false`＝申請時附了那顆 bot 自己的 hook token，或為經中介層認證的 User principal 以保留 ID `principal:user` 提出的申請。欄位加上去之前的舊列一律 `true`。
   `status`：`pending` | `approved` | `denied` | `revoked` | `consumed` | `superseded`。`consumed`／`superseded` 不覆寫 `decided_at`／`decided_by`（誰、何時核准的留著；誰用掉的在 `decisions`）。
   `decisions` 是 append-only 的決定歷程（那一列只留最後一個狀態）。
 - `target_commit`／acquire 的 `commit`／`restart-window` 的 `commit` 只收 7～64 碼十六進位（git sha），其他一律 400、什麼都不寫。
@@ -2731,7 +2732,7 @@ CLI：`agents-managerd release-triage-check --kind <claude|codex> [--since <ver>
   **沒帶 `supersedes` 時 daemon 自己找**（issue #421）：同一個 `requester`、同一個 `purpose`、而且還 `pending` 的最新那一筆，直接取代掉（回應的 `superseded` 會帶它的 id）。
   kick 記住舊 id 的狀態檔掉了就不會帶 `--supersedes`，以前每輪開一筆新的 pending——2026-09-23 累積了四筆，AGM 被叫醒四次講同一件事。
   **只自動取代 `pending`**：`approved` 是人做過的裁示，不會因為排程又跑一輪就消失（要動它得明講 `supersedes`）。自動挑到的那筆對不上（剛被裁示、剛過期）只是不取代，不會讓申請失敗。
-  **Bot principal 帶自己的 bot id 與 token 時，`requester` 只能是自己**（bot id 或全域唯一的 bot／herdr agent 名）：填別人或名字有歧義 → `403 {"reason":"requester_not_the_caller"}`，什麼都不寫；跨專案同名時改用 bot id。有效 User principal 不帶 Bot 身分照收，只是那筆記成 `requester_unverified:true`；無效或混用的 Bot／service 身分在全域中介層回 401（issue #415、#556）。
+  **Bot principal 帶自己的 bot id 與 token 時，`requester` 只能是自己**（必須逐字等於已驗證的 bot id）：填別人或顯示名稱 → `403 {"reason":"requester_not_the_caller"}`，什麼都不寫。有效 User principal 以保留 ID `requester:"principal:user"` 申請時記成已驗證的獨立人類 principal；其他自由文字照收，但記成 `requester_unverified:true`，不能據此核准；無效或混用的 Bot／service 身分在全域中介層回 401（issue #415、#556）。
   daemon **不會改寫** `requester`：它之後要跟 `lease acquire` 的 `owner` 逐字相等（下面的 `approval_owner_mismatch`），改寫等於讓申請人開不了自己的窗口。
   `supersedes=<舊的 approval id>`：**同一個 requester、同一個 purpose** 換 commit 重新申請。舊的還是 `pending`／`approved` 而且沒過期時，同一個 transaction 裡標 `superseded`、
   它還沒送出的 `approval_requested` 一起收掉（`acked_by:"daemon"`），新的 `wait_since` 接過舊的等待起點（舊的已核准＝它的 `min(wait_since, decided_at)`）；
@@ -2744,9 +2745,9 @@ CLI：`agents-managerd release-triage-check --kind <claude|codex> [--since <ver>
 - `POST /api/supervisor/approvals/{id}/decide {decision:"approve"|"deny"|"revoke",actor?,reason?,expires_in_secs?}`：同 decision 重送回 `idempotent:true`。
   **`approve` 只給驗過的 AGM 角色**（issue #447，同 `require_role`）：User principal 或有效但不是巡檢／協調者的 Bot → `403 {"reason":"role_required"}`；Bot／service 身分不完整、憑證錯誤或混帶 principal 由全域中介層回 401；那筆都不動。
   `deny`／`revoke` 不要求角色，只有 UI token 也收（人在一般 shell 裡還能叫停）。
-  **不能核准自己送出的申請**（issue #436）：`requester` 解析出來就是這個呼叫端那顆 bot 時，`approve` 回 `403 {"reason":"self_approval_forbidden"}`，那筆不動。`deny`／`revoke` 不擋——把自己的申請收回本來就該讓他做。
-  **不看那筆申請驗過沒**：只要呼叫端驗得過、而且 `requester` 指的就是它，照擋——否則守衛等於被約束者自己選配（申請時不帶 `X-AM-Bot-Id`、裁示時才帶，就整段跳過）。解析不到 bot 的 `requester`（`daemon-update-kick` 的 `agm-kick`）不受影響。
-  查不出申請人是誰時（DB 讀取失敗或名字對到多顆 bot）回 `503 {"reason":"requester_lookup_failed","retryable":true,"sent":false}`，**不放行**：這裡的「解析不到」等於通過，所以不能把讀取失敗或歧義吞成「不是它」。
+  **不能核准自己送出的申請**：核准時只讀申請交易同時寫入既有 `supervisor_notes` 的 `approval_principal` 證據，比較當時驗證的 bot id 與裁示 bot id；相同回 `403 {"reason":"self_approval_forbidden"}`。`deny`／`revoke` 不擋。
+  缺 `approval_principal` 證據的舊紀錄及外部申請（即使舊 `requester_unverified:false`）一律保持未知；`approve` 回 `503 {"reason":"requester_identity_unknown","retryable":false,"sent":false}`，須以可驗證 bot id 重新申請，不以名稱推斷外部人類或其他 bot。DB 讀取失敗仍回 `503 {"reason":"requester_lookup_failed","retryable":true,"sent":false}`。這份修正不新增 schema／principal 欄位。
+
   `decided_by` **不看 body**（issue #414）：驗過角色的是 `AGM:patrol`／`AGM:responder`，其餘一律 `user`，body 的 `actor` 只當未驗證的備註包成 `user(<自稱>)`（取前 64 字）。
   **第一個裁示定案**：`approve`／`deny` 只從 `pending` 條件寫入；`revoke` 從 `approved` 或 `pending`。寫不進去 → 409
   `{reason:"already_decided"|"decided_concurrently",status,decided_by,allowed_from}`，什麼都沒寫（後到的 deny 不會把 approved 改掉）。
@@ -2764,7 +2765,7 @@ CLI：`agents-managerd release-triage-check --kind <claude|codex> [--since <ver>
   `own:true` 就是發問者自己的。不帶 owner＝舊行為，每一把都算擋、`own` 一律 false；回傳的 `owner` 回聲讓呼叫端分得出舊 daemon 忽略了它。
   acquire 一律以自己的 `owner` 問（SPEC §18.10「自己的租約不擋自己」）。
 - `GET /api/supervisor/leases` → `{leases:[{resource,owner,approval_id,fence,target_commit,acquired_at,expires_at,released_at,held}]}`。
-- `POST /api/supervisor/leases/{rebuild|restart}/acquire {owner,approval_id,commit?,ttl_secs?,require_idle=true,exclude_bot_ids?,request_id?}` → `{lease,lease_token,approval,safety}`；帶 Bot proof 時 `owner` 必須解析回同一顆 bot（id、bot 名或 agent 名），否則 403 `requester_not_the_caller`；同 lock 內重驗核准與 idle，
+- `POST /api/supervisor/leases/{rebuild|restart}/acquire {owner,approval_id,commit?,ttl_secs?,require_idle=true,exclude_bot_ids?,request_id?}` → `{lease,lease_token,approval,safety}`；帶 Bot proof 時 `owner` 必須逐字等於驗證後的 bot id，否則 403 `requester_not_the_caller`；同 lock 內重驗核准與 idle，
   搶輸 409 `lease_held`。`owner` 必須等於核准的 `requester`，否則 409 `approval_owner_mismatch`（別人的核准開不了你的窗口，也借不走它的等待）。
   這張核准開過的窗口**過期沒 release**（執行端掛了），或已 release 卻因寫入失敗／daemon 中途死掉而沒記到 `consumed` 時，同一張再 acquire → 409 `approval_already_used`，並當場標 `consumed`（note `lease expired`）；要再開就重新申請。
   ttl 預設 900、上限 3600。`POST …/renew {owner,fence,ttl_secs?,lease_token}`、`POST …/release {owner,fence,lease_token}`；舊 fence 409 `lease_lost`；release 把核准標 `consumed`。

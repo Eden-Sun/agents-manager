@@ -2398,7 +2398,30 @@ pub async fn create_approval_superseding(
     request_reason: Option<&str>,
 ) -> Result<ApprovalOutcome> {
     // 沒有 HTTP 身分可驗（測試與舊呼叫端）：照 issue #436 的預設當成自稱。
-    create_approval_inner(pool, requester, purpose, scope, target_commit, expires_at, request_id, supersedes, request_reason, true, false).await
+    create_approval_inner(pool, requester, purpose, scope, target_commit, expires_at, request_id, supersedes, request_reason, true, false, None).await
+}
+
+/// 申請當下由認證中介層證明的 principal；舊 requester 顯示字串不能補猜成這份證據。
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum ApprovalPrincipal {
+    Bot { bot_id: String },
+    User,
+}
+
+pub async fn approval_principal(pool: &SqlitePool, approval_id: &str) -> Result<Option<ApprovalPrincipal>> {
+    let body: Option<String> = sqlx::query_scalar("SELECT body FROM supervisor_notes WHERE id=? AND supervisor_id=? AND kind='approval_principal'")
+        .bind(format!("approval-principal:{approval_id}")).bind(SUPERVISOR_ID).fetch_optional(pool).await?;
+    body.map(|body| serde_json::from_str(&body).map_err(Into::into)).transpose()
+}
+
+#[allow(clippy::too_many_arguments)]
+pub fn create_approval_principal_notifying<'a>(
+    pool: &'a SqlitePool, requester: &'a str, purpose: &'a str, scope: &'a str, target_commit: Option<&'a str>,
+    expires_at: Option<&'a str>, request_id: Option<&'a str>, supersedes: Option<&'a str>, request_reason: Option<&'a str>,
+    principal: &'a ApprovalPrincipal,
+) -> impl std::future::Future<Output = Result<ApprovalOutcome>> + Send + 'a {
+    Box::pin(create_approval_inner(pool, requester, purpose, scope, target_commit, expires_at, request_id, supersedes, request_reason, false, true, Some(principal)))
 }
 
 /// [`create_approval_superseding`]，新建時同一個交易推 `approval_requested` 叫醒 AGM（#320）：通知寫不進去整筆不成立，
@@ -2417,7 +2440,7 @@ pub async fn create_approval_notifying(
     // `requester` 驗過了沒（issue #436）：`true`＝只是自稱的。
     requester_unverified: bool,
 ) -> Result<ApprovalOutcome> {
-    create_approval_inner(pool, requester, purpose, scope, target_commit, expires_at, request_id, supersedes, request_reason, requester_unverified, true).await
+    create_approval_inner(pool, requester, purpose, scope, target_commit, expires_at, request_id, supersedes, request_reason, requester_unverified, true, None).await
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -2435,6 +2458,7 @@ async fn create_approval_inner(
     // `requester` 只是自稱的（issue #436）：建立時沒有驗過那顆 bot 的身分。
     requester_unverified: bool,
     notify: bool,
+    principal: Option<&ApprovalPrincipal>,
 ) -> Result<ApprovalOutcome> {
     let request_id = request_id.map(str::trim).filter(|s| !s.is_empty());
     let request_reason = request_reason.map(str::trim).filter(|s| !s.is_empty());
@@ -2555,6 +2579,11 @@ async fn create_approval_inner(
     .await;
     match insert {
         Ok(_) => {
+            if let Some(principal) = principal {
+                sqlx::query("INSERT INTO supervisor_notes (id,supervisor_id,kind,body,version,created_at) VALUES (?,?,'approval_principal',?,1,?)")
+                    .bind(format!("approval-principal:{id}")).bind(SUPERVISOR_ID).bind(serde_json::to_string(principal)?).bind(&now)
+                    .execute(&mut *tx).await?;
+            }
             if notify {
                 let row = sqlx::query_as::<_, Approval>("SELECT * FROM supervisor_approvals WHERE id=?").bind(&id).fetch_one(&mut *tx).await?;
                 push_inbox_tx(&mut tx, &format!("approval:{id}:requested"), "approval_requested", None, None, None, &row.to_json()).await?;

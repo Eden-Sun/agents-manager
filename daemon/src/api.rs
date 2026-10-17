@@ -482,7 +482,14 @@ async fn api_route_not_found() -> LcError {
 #[derive(serde::Deserialize)]
 struct RelayAnnounce {
     bot_id: String,
+    #[serde(default)]
     to_agent: String,
+    #[serde(default)]
+    to_bot_id: Option<String>,
+    #[serde(default)]
+    to_run_id: Option<String>,
+    #[serde(default)]
+    delivery_id: Option<String>,
     text: String,
     /// shim 的 `--ack`（`1`）／`--reply-to <id>`：寄件端明講是回覆才不叫醒 AGM（SPEC §18.15）。
     #[serde(default)]
@@ -572,6 +579,13 @@ async fn relay_announce(
     if crate::share::refuses_bot_principal(&app.db, &body.bot_id).await {
         return (StatusCode::FORBIDDEN, Json(json!({"error": "forbidden", "reason": "restricted_bot"})));
     }
+    // 舊 shim 只有顯示名稱：缺 ID 的報備保持未知，不攔進角色佇列、不標寄件來源。
+    let Some(to_bot_id) = body.to_bot_id.as_deref().filter(|id| !id.is_empty()) else {
+        return (StatusCode::OK, Json(json!({})));
+    };
+    let Some(delivery_id) = body.delivery_id.as_deref().filter(|id| !id.is_empty()) else {
+        return (StatusCode::OK, Json(json!({})));
+    };
     // 寫給 AGM 的：協調者存在時排進它的佇列，shim 看到 `routed` 就不再打進 pane（SPEC §18.15）。
     // 路由狀態**不知道**不等於「不是 AGM」（issue #143）：查不出目標是不是 AGM、或確定是 AGM 卻寫不進佇列，
     // 都回 503 `routing_unavailable`，shim 看到就明確失敗、不直送——直送會繞過 durable inbox、去重與 wake／ack 語意。
@@ -583,7 +597,7 @@ async fn relay_announce(
                         "message": "這則可能是寫給 AGM 的，但現在排不進協調佇列：沒有送出，也不會直接打進它的 pane，請稍後重試"})),
         )
     };
-    match crate::supervisor::bot_requests::role_bot_by_agent(&app, &body.to_agent).await {
+    match crate::supervisor::bot_requests::role_bot_by_id(&app, to_bot_id).await {
         Ok(Some(target)) => {
             let mark = crate::supervisor::bot_requests::ReplyMark {
                 ack: matches!(body.ack.as_deref().map(str::trim), Some("1" | "true")),
@@ -604,11 +618,11 @@ async fn relay_announce(
     let relay_run = if body.text.trim().is_empty() {
         None
     } else {
-        match crate::lifecycle::relay_watch::resolve(&app, &body.bot_id, &body.to_agent).await {
+        match crate::lifecycle::relay_watch::resolve(&app, &body.bot_id, body.to_run_id.as_deref().unwrap_or_default()).await {
             Ok(run) => {
                 // #1460：沒有目標（含移交出去的）就只看一眼是不是移交，留 log；正常路徑不多一次查詢。
                 if run.is_none() {
-                    crate::lifecycle::relay_watch::note_handoff_direct(&app, &body.bot_id, &body.to_agent).await;
+                    crate::lifecycle::relay_watch::note_handoff_direct(&app, &body.bot_id, body.to_run_id.as_deref().unwrap_or_default()).await;
                 }
                 run
             }
@@ -627,7 +641,12 @@ async fn relay_announce(
             }
         }
     };
-    // 報備記的是寄件者所在的主機（同名 agent 在別台主機不能認領）；讀不到就跟收件目標讀不到一樣，要 shim 重試。
+    if let Some(run) = relay_run.as_ref() {
+        if run.bot_id != to_bot_id {
+            return (StatusCode::BAD_REQUEST, Json(json!({"error": "relay_recipient_mismatch"})));
+        }
+    }
+    // 報備記的是寄件者所在的主機（收件 run 只能在同一台主機認領）；讀不到就跟收件目標讀不到一樣，要 shim 重試。
     let host = match db::bot_host(&app.db, &body.bot_id).await {
         Ok(host) => host,
         Err(e) => {
@@ -652,10 +671,16 @@ async fn relay_announce(
             None
         }
     };
-    crate::agent_relay::announce(&host, &body.bot_id, &body.to_agent, &body.text, from_turn.as_deref());
+    let Some(run) = relay_run.as_ref() else { return (StatusCode::OK, Json(json!({}))) };
+    let Some(pane_id) = run.pane_id.clone().filter(|p| !p.is_empty()) else {
+        return (StatusCode::OK, Json(json!({})));
+    };
+    if !crate::agent_relay::announce_delivery(&host, &body.bot_id, &run.id, delivery_id, &body.text, from_turn.as_deref()) {
+        return (StatusCode::OK, Json(json!({"to_pane_id": pane_id})));
+    }
     // #380：收件方 UI 看得出在跑，字卡在輸入列時補 Enter；先登記受關機屏障管理的 watcher，再回 2xx。
     crate::lifecycle::relay_watch::on_resolved_announce(&app, &body.bot_id, from_turn.as_deref(), &body.text, relay_run).await;
-    (StatusCode::OK, Json(json!({})))
+    (StatusCode::OK, Json(json!({"to_pane_id": pane_id})))
 }
 
 /// issue #143：寫給 AGM 的申請，路由狀態**不知道**不等於「不是 AGM」。
@@ -667,9 +692,44 @@ mod relay_announce_tests {
     async fn announce(app: &Arc<App>, to: &str, text: &str) -> (StatusCode, Value) {
         let mut headers = HeaderMap::new();
         headers.insert("X-AM-Bot-Token", "tok-w1".parse().unwrap());
-        let body = RelayAnnounce { bot_id: "w1".into(), to_agent: to.into(), text: text.into(), ack: None, reply_to: None };
+        let run_id = format!("relay-run-{to}");
+        // A concrete transport/run fixture, independent of the bot's display name.
+        let _ = sqlx::query("INSERT INTO runs (id,bot_id,state,agent_status,started_at,pane_id) SELECT ?,id,'running','idle',?,id FROM bots WHERE id=? AND NOT EXISTS (SELECT 1 FROM runs WHERE bot_id=? AND state='running')")
+            .bind(&run_id).bind(db::now()).bind(to).bind(to).execute(&app.db).await;
+        let target_run = db::active_run(&app.db, to).await.ok().flatten().map(|r| r.id).unwrap_or(run_id);
+        let body = RelayAnnounce { bot_id: "w1".into(), to_agent: "display-only".into(), to_bot_id: Some(to.into()),
+            to_run_id: Some(target_run), delivery_id: Some(format!("delivery-{to}-{text}")), text: text.into(), ack: None, reply_to: None };
         let (code, Json(v)) = relay_announce(State(app.clone()), headers, axum::extract::Form(body)).await;
         (code, v)
+    }
+
+    #[tokio::test]
+    async fn nr_relay_role_routing_survives_rename_and_does_not_follow_the_old_name() {
+        let app = flow_tests::app().await;
+        flow_tests::configure_responder(&app).await;
+        sqlx::query("UPDATE bots SET name='renamed-role' WHERE id='resp'").execute(&app.db).await.unwrap();
+        sqlx::query("UPDATE bots SET name='AGM-responder' WHERE id='w2'").execute(&app.db).await.unwrap();
+        let (code, body) = announce(&app, "resp", "交辦給穩定的角色身分").await;
+        assert_eq!(code, StatusCode::OK);
+        assert_eq!(body["routed"], "responder");
+        assert_eq!(bot_requests(&app).await, 1);
+        let (code, body) = announce(&app, "w2", "交辦給重用舊顯示名稱的一般 bot").await;
+        assert_eq!(code, StatusCode::OK);
+        assert_eq!(body["to_pane_id"], "w2");
+        assert_eq!(bot_requests(&app).await, 1, "一般 bot 不能因為同名被攔入角色佇列");
+    }
+
+    #[tokio::test]
+    async fn nr_relay_a_name_only_request_is_unknown_even_if_a_role_has_that_name() {
+        let app = flow_tests::app().await;
+        flow_tests::configure_responder(&app).await;
+        let mut headers = HeaderMap::new();
+        headers.insert("X-AM-Bot-Token", "tok-w1".parse().unwrap());
+        let body = RelayAnnounce { bot_id:"w1".into(), to_agent:"AGM".into(), text:"不能用角色暱稱猜收件人".into(),
+            to_bot_id:None, to_run_id:None, delivery_id:Some("nr-name-only".into()), ack:None, reply_to:None };
+        let (code, Json(body)) = relay_announce(State(app.clone()), headers, axum::extract::Form(body)).await;
+        assert_eq!((code,body), (StatusCode::OK,json!({})));
+        assert_eq!(bot_requests(&app).await, 0);
     }
 
     async fn bot_requests(app: &Arc<App>) -> i64 {
@@ -685,32 +745,32 @@ mod relay_announce_tests {
         flow_tests::configure_responder(&app).await;
 
         // 一般 bot：不是 AGM，照舊 announce、回 200 `{}`（shim 接著直送）。
-        let (code, v) = announce(&app, "builder", "幫我看一下 relay-143-plain").await;
-        assert_eq!((code, v), (StatusCode::OK, json!({})));
-        assert!(crate::agent_relay::claim(crate::config::LOCAL_HOST, "builder", "幫我看一下 relay-143-plain").is_some(), "一般目標照舊記下直送");
+        let (code, v) = announce(&app, "w2", "幫我看一下 relay-143-plain").await;
+        assert_eq!((code, v), (StatusCode::OK, json!({"to_pane_id":"w2"})));
+        assert!(crate::agent_relay::claim(crate::config::LOCAL_HOST, "relay-run-w2", "幫我看一下 relay-143-plain").is_some(), "一般目標照舊記下直送");
 
         // 目標是 AGM，但協調佇列寫不進去。
         sqlx::query("CREATE TRIGGER test_inbox_down BEFORE INSERT ON supervisor_inbox BEGIN SELECT RAISE(ABORT, 'disk I/O error'); END")
             .execute(&app.db)
             .await
             .unwrap();
-        let (code, v) = announce(&app, "AGM", "請核准重建 relay-143-queue").await;
+        let (code, v) = announce(&app, "patrol", "請核准重建 relay-143-queue").await;
         assert!(code.is_server_error(), "寫不進佇列不能假裝成「不是 AGM」：{code} {v}");
         assert_eq!(v["routing_unavailable"], true, "{v}");
-        assert!(crate::agent_relay::claim(crate::config::LOCAL_HOST, "AGM", "請核准重建 relay-143-queue").is_none(), "不能退回直接打進 pane");
+        assert!(crate::agent_relay::claim(crate::config::LOCAL_HOST, "relay-run-patrol", "請核准重建 relay-143-queue").is_none(), "不能退回直接打進 pane");
 
         // DB 恢復後重試：只有一筆 durable 申請。
         sqlx::query("DROP TRIGGER test_inbox_down").execute(&app.db).await.unwrap();
-        let (code, v) = announce(&app, "AGM", "請核准重建 relay-143-queue").await;
+        let (code, v) = announce(&app, "patrol", "請核准重建 relay-143-queue").await;
         assert_eq!(code, StatusCode::OK);
         assert_eq!(v["routed"], "responder", "{v}");
         assert_eq!(bot_requests(&app).await, 1);
 
         // 連「目標是不是 AGM」都查不出來（角色表讀不到）：一樣不能當成「不是」。
         sqlx::query("DROP TABLE supervisor_roles").execute(&app.db).await.unwrap();
-        let (code, v) = announce(&app, "AGM-responder", "請核准重啟 relay-143-lookup").await;
+        let (code, v) = announce(&app, "resp", "請核准重啟 relay-143-lookup").await;
         assert!(code.is_server_error(), "{code} {v}");
-        assert!(crate::agent_relay::claim(crate::config::LOCAL_HOST, "AGM-responder", "請核准重啟 relay-143-lookup").is_none());
+        assert!(crate::agent_relay::claim(crate::config::LOCAL_HOST, "relay-run-resp", "請核准重啟 relay-143-lookup").is_none());
     }
 
     /// #610：announce 的 managed-run 查詢讀不到時，不能先回 200 讓 shim 直送並永久略過 watchdog。
@@ -727,9 +787,11 @@ mod relay_announce_tests {
             .await
             .unwrap();
 
+        sqlx::query("INSERT INTO bots (id,project_id,name,kind,hook_token,created_at) VALUES (?,?,?,'claude','target-token',?)")
+            .bind(to).bind(&env.project_id).bind(to).bind(db::now()).execute(&app.db).await.unwrap();
         crate::testing::make_table_unreadable(&app, "runs").await;
         let (code, body) = announce(&app, to, text).await;
-        let announced = crate::agent_relay::claim(crate::config::LOCAL_HOST, to, text);
+        let announced = crate::agent_relay::claim(crate::config::LOCAL_HOST, &format!("relay-run-{to}"), text);
         crate::testing::make_table_readable(&app, "runs").await;
 
         assert_eq!(code, StatusCode::SERVICE_UNAVAILABLE, "讀不到收件 run 時 shim 必須重試，不能直送：{body}");
@@ -738,8 +800,8 @@ mod relay_announce_tests {
         assert!(announced.is_none(), "watcher admission 失敗時不能先宣告、放 shim 直送");
 
         let (retry_code, retry_body) = announce(&app, to, text).await;
-        assert_eq!((retry_code, retry_body), (StatusCode::OK, json!({})), "資料庫恢復後可正常重試");
-        assert!(crate::agent_relay::claim(crate::config::LOCAL_HOST, to, text).is_some(), "成功重試才記下直送 announce");
+        assert_eq!((retry_code, retry_body), (StatusCode::OK, json!({"to_pane_id":to})), "資料庫恢復後可正常重試");
+        assert!(crate::agent_relay::claim(crate::config::LOCAL_HOST, &format!("relay-run-{to}"), text).is_some(), "成功重試才記下直送 announce");
     }
 
     /// #1460：收件方的專案已移交給別台主機：announce 照舊回 200 `{}`（shim 直送），但這顆 daemon 不開 `external` 回合、
@@ -755,20 +817,20 @@ mod relay_announce_tests {
             .await
             .unwrap();
         let recipient = crate::testing::claude_bot(&app, &env.project_id, "handoff-recipient").await;
-        crate::testing::fake_run(&app, &recipient.id).await;
+        let run = crate::testing::fake_run(&app, &recipient.id).await;
         let text = "移交後的直送 relay-1460";
 
         // 移交前收件方認得到（同一組資料，所以下面的 None 只能是移交造成的）。
-        assert!(crate::lifecycle::relay_watch::resolve(&app, "w1", "agent").await.unwrap().is_some(), "移交前：收件方在這顆 daemon 底下");
+        assert!(crate::lifecycle::relay_watch::resolve(&app, "w1", &run).await.unwrap().is_some(), "移交前：收件方在這顆 daemon 底下");
         sqlx::query("UPDATE projects SET handed_off_to = 'agm-host' WHERE id = ?").bind(&env.project_id).execute(&app.db).await.unwrap();
 
         let calls_before = env.herdr.calls.lock().unwrap().len();
-        let (code, v) = announce(&app, "agent", text).await;
+        let (code, v) = announce(&app, &recipient.id, text).await;
         assert_eq!((code, v), (StatusCode::OK, json!({})), "移交的收件方照舊回 200，shim 才會直送");
         assert_eq!(env.herdr.calls.lock().unwrap().len(), calls_before, "不替它呼叫 herdr：不盯 pane、不補 Enter");
         let external: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM turns WHERE origin='external'").fetch_one(&app.db).await.unwrap();
         assert_eq!(external, 0, "不替已移交的 bot 開 external 回合");
-        assert!(crate::agent_relay::claim(crate::config::LOCAL_HOST, "agent", text).is_some(), "行程內的報備照舊記一筆（認回音用）");
+        assert!(crate::agent_relay::claim(crate::config::LOCAL_HOST, &run, text).is_none(), "移交後缺本機歸屬證據，不標記來源");
     }
 }
 
@@ -13335,6 +13397,7 @@ mod per_principal_auth_tests {
             let r = crate::runners::supervisor::api::post_approval(
                 State(e.app.clone()),
                 HeaderMap::new(),
+                Extension(RequestPrincipal::User),
                 Json(crate::runners::supervisor::api::ApprovalIn {
                     requester: "ops".into(), purpose: "rebuild".into(), scope: "x".into(), target_commit: Some(commit.into()),
                     expires_in_secs: None, request_id: None, supersedes: None, reason: None,
@@ -13355,6 +13418,7 @@ mod per_principal_auth_tests {
         let good = crate::runners::supervisor::api::post_approval(
             State(e.app.clone()),
             HeaderMap::new(),
+            Extension(RequestPrincipal::User),
             Json(crate::runners::supervisor::api::ApprovalIn {
                 requester: "ops".into(), purpose: "rebuild".into(), scope: "x".into(), target_commit: Some("0123456789abcdef0123456789abcdef01234567".into()),
                 expires_in_secs: None, request_id: None, supersedes: None, reason: None,

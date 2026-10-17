@@ -551,7 +551,7 @@ async fn import(app: &impl GrokTranscriptContext, bot: &db::Bot, run: &db::Run, 
 
 /// §6.5d：別的 agent 用 `herdr agent prompt` 交辦的這句。
 fn relay_from(host: &str, run: &db::Run, prompt: &str) -> Option<crate::agent_relay::Relayed> {
-    crate::agent_relay::claim_relayed(host, run.agent_name.as_deref()?, prompt)
+    crate::agent_relay::claim_relayed(host, &run.id, prompt)
 }
 
 /// `try_fallback` 先問這裡。`Some(true)`：回合已經由對話檔收掉；`Some(false)`：對話檔說這一問還沒結束，留在飛；
