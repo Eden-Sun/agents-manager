@@ -1787,8 +1787,8 @@ herdr server 重啟會讓**所有** pane 同時消失。照 §6.5 的規則，�
 
 對帳只用 `spawn_claims`／spawn hint 登記的 pane→parent bot ID 選 parent；parent 必須是目前 host/session 的有效 bot；有明確 claim 的具名 child，即使 parent 已無 active run 仍可認領。
 缺登記、登記指向不存在或不可確認的 parent，就保持未知，不用名稱前綴、同 tab、project label 或 argv `--name` 推測血緣（#1791）。
-claim 存在 `spawn_claims((host, herdr_session, pane_id) 唯一, bot_id, parent_run_id, created_at)`（schema v66，issue #1793）。本機表單與遠端 spool 都必須帶送出當下的 `parent_run_id`；daemon 核對它仍是該 bot 的 active run，並由該 run 取得非空的 herdr session。缺證據的舊 claim 不參與歸屬，也不以目前 run 補猜；延遲到下一代 run 的遠端事件不登記。
-認領只讀目前 snapshot session、parent run 仍 active 且 session 相符的 claim；parent 或 child 改名均不換 bot ID。不同 session 的同號 pane 可共存；同 session 再登記以新證據為準。claim 不按時間過期、認領不消耗；每輪只清該 snapshot session 裡已不在 herdr 的 pane（兩分鐘 grace／空 snapshot 保護照舊）。
+claim 存在 `spawn_claims((host, herdr_session, pane_id) 唯一, bot_id, parent_run_id, created_at)`（schema v66，issue #1793）。herdr session 一律取 host 目前的設定，不取 parent run 欄位。`parent_run_id` 僅作選填的稽核紀錄；parent 停止、重啟、resume 或 idle sleep 叫醒換 run，都不會撤銷 claim，延遲 spool 仍可依 bot ID 登記。v65 舊列升級時由同 host 的 active run 回填唯一可確認的非空 herdr session（run 未記 host 時以所屬 project 的 host 為準）；無證據或有歧義才留空且不參與歸屬。
+認領只讀目前 snapshot session、bot／project 未刪除、project host 相符且 session 相符的 claim；parent 或 child 改名均不換 bot ID。不同 session 的同號 pane 可共存；同 session 再登記以新證據為準。claim 不按時間過期、認領不消耗；每輪只清該 snapshot session 裡已不在 herdr 的 pane（兩分鐘 grace／空 snapshot 保護照舊）。
 claim 與 hint 衝突時以 claim 為準。它們只證明 parent，不證明同 pane 的 occupant 仍是先前那顆 child。
 對帳在目前 host/session 以 pane ID 去重，顯示名字重複或改名不會遮蔽另一顆 pane。
 
@@ -1933,7 +1933,7 @@ pane 打 `cargo` 就 permission denied）時，只 chmod 回 0755，不重寫內
 
 - `herdr agent start <name> …`：`<name>` 不以 `$AM_AGENT_NAME-` 開頭就補前綴。herdr 名稱上限 32 字。放得下就用 `<parent>-<suffix>`；放不下就把母名前綴截到 25 字再接字尾的 6 位數字雜湊（#665），**不會**截成母 bot 自己的名字，不同字尾也不會變成同一個前綴。算不出尾碼或結果仍是母名就 exit 75、不呼叫 herdr。頂層 `agent_name` 上限 24 字，留 8 字給 `-` 與子 agent 字尾。旗標可在名字前面，`--kind`/`--pane`/`--timeout` 的值不誤認，`--` 之後原封不動。
 - `herdr agent rename <目標> <新名字>`：名稱只作顯示，不再依 `$AM_AGENT_NAME-` 前綴拒絕改名或推斷 parent；歸屬由 scoped spawn claim 的 bot ID 決定。
-- `AM_CHILD_OF` 的新值是 parent **bot ID**，非空就禁止再開子 agent（舊 pane 的標記也有效）。parent run 世代由 `AM_RUN_ID` 隨 claim 傳送。
+- `AM_CHILD_OF` 的新值是 parent **bot ID**，非空就禁止再開子 agent（舊 pane 的標記也有效）。`AM_RUN_ID` 可隨 claim 傳送作為稽核紀錄，不限制 child 歸屬的存續。
   **模型沿用**：`--` 之後沒有 `--model` 且 `--kind` 與母 bot 相同（或沒寫）時補 `-- --model $AM_MODEL`，claude 再補 `--effort $AM_EFFORT`；
   子 agent 自己寫的一律尊重（`--model`、codex/grok 的 `-m`、codex 的 `-c model=` / `-c model_reasoning_effort=`）。
   **帳號／hook 補救（issue #57）**：`agent start` 沒有 `--env`，只能假設 `--pane` 指到的 pane 是 `pane split` 剛開的、帳號早注入了；
@@ -1998,7 +1998,7 @@ agent 自己 `herdr agent prompt <名字> …` 時 daemon 沒參與，那句話�
 
 1. shim 的 `agent prompt` 接受 pane ID、`bot:<bot_id>`，或作為一次性選取器的顯示名稱。child 簡稱先查顯示前綴補成的候選，再查原字串；選取成功後立即從 `agent get` 回應固定 pane ID。查不到 pane 證據就 exit 75，不猜名字。
    決定 ID 後先 `POST /relay/announce`（表單 `bot_id`／`to_bot_id`／`to_run_id`／`delivery_id`／`to_agent`／`text`／`ack`／`reply_to`，header `X-AM-Bot-Token`），再用固定 pane ID 轉給真的 herdr。daemon 不再按名字查身分；舊 shim 只送名稱而無 ID 證據時保持未知。
-   `bot:<bot_id>` 由 daemon 以 ID 路由角色 bot，或在寄件 host／session 範圍內取得唯一 running run 的 pane ID（缺證據回 409）。非角色解析成功回 `target_pane_id`，shim 使用該 ID；遠端無 daemon 時須直接使用 pane ID。
+   `bot:<bot_id>` 由 daemon 以 ID 路由角色 bot，或在寄件 host／session 範圍內取得唯一 running run 的 pane ID（缺證據時不解析，shim exit 75）。非角色解析成功回 `to_pane_id`，shim 使用該 ID；遠端無 daemon 時須直接使用 pane ID。
    `text` 只含 TEXT 位置參數（herdr 的 `--wait`／`--until`／`--timeout` 不算）；`--ack`、`--reply-to <id>` 是 shim 自己的旗標（§18.15），送給 daemon、不轉給 herdr。
    **「確定沒送到 daemon」與「送了但回覆不明」分開（issue #143）**：只有 **curl 7（連線根本沒建立，request 一定沒進 daemon）**才容許已固定 pane ID 的直送（尚未解析的 bot ID 仍拒絕）。
    其餘都不直送——逾時（28）、空回應（52）、連線被重置（56）、送到一半（55）、傳輸中斷（18）這類「request 可能已經進 daemon、只是回覆沒收完整」的，

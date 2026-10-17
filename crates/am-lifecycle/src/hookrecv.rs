@@ -378,10 +378,7 @@ pub fn classify(provider: &str, p: &Value) -> HookKind {
     }
     if p.get("hook_event_name").and_then(Value::as_str) == Some(SPAWN_CLAIM_EVENT) {
         return match s("pane_id").map(|v| v.trim().to_string()).filter(|v| !v.is_empty()) {
-            Some(pane_id) => match s("parent_run_id").filter(|s| !s.trim().is_empty()) {
-                Some(parent_run_id) => HookKind::SpawnClaim { pane_id, parent_run_id },
-                None => HookKind::Ignore("spawn claim without parent run evidence".into()),
-            },
+            Some(pane_id) => HookKind::SpawnClaim { pane_id, parent_run_id: s("parent_run_id").unwrap_or_default() },
             None => HookKind::Ignore("spawn claim without pane_id".into()),
         };
     }
@@ -1425,7 +1422,8 @@ async fn process_locked_for_with_outcome<H: HookHost>(
         }
         let ev = crate::lifecycle::fence::EventIdentity { run_id: body.run_id.as_deref(), session_id: hook_session_id(&body.payload) };
         let owner = app.db().classify_event_owner(&bot.id, r, ev).await;
-        if !owner.may_mutate() {
+        // Spawn claims describe a bot/pane fact, not a turn in the parent's current run.
+        if !owner.may_mutate() && !matches!(&kind, HookKind::SpawnClaim { .. }) {
             let (prior_run_id, why) = match &owner {
                 crate::lifecycle::fence::Ownership::Stale { prior_run_id, why } => (prior_run_id.as_str(), *why),
                 // `may_mutate()` 只有 `Stale` 會是 false；留著這一支是為了日後多一種歸屬時編譯器會提醒。
@@ -1745,10 +1743,8 @@ async fn process_locked_for_with_outcome<H: HookHost>(
         }
         // issue #1790：遠端 shim 開完子 agent 後的登記（本機走 `/relay/spawn/claim`）；只記「這顆 pane 是這顆 bot 開的」。
         HookKind::SpawnClaim { pane_id, parent_run_id } => {
-            // A stale remote spool event is not evidence about the current run.
-            if db::active_run(app.db(), &bot.id).await?.is_some_and(|r| r.id == parent_run_id) {
-                crate::spawn_hints::claim_for_run(app, &bot.id, &parent_run_id, &pane_id).await?;
-            }
+            // The parent may have slept or restarted while this event waited in the spool.
+            crate::spawn_hints::claim_for_run(app, &bot.id, &parent_run_id, &pane_id).await?;
             Ok(())
         }
         HookKind::ClaimCollisionCheck { issue, title, child, child_bot_id, claim_id, branch } => {
@@ -5144,7 +5140,7 @@ mod external_claim_tests {
     }
 
     /// issue #1790：遠端 shim 開完子 agent 寫進 spool 的 `AmSpawnClaim`，`process` 記成「這顆 pane 是送這則的 bot 開的」；
-    /// 沒有 pane_id 或 parent run 證據的丟掉；只接受仍 active 的 parent run，不動 Turn。
+    /// 沒有 pane_id 的丟掉；parent run 僅作紀錄，不動 Turn。
     #[tokio::test]
     async fn a_spooled_spawn_claim_is_recorded_against_the_bot_that_wrote_it() {
         let env = tt::env().await;
@@ -5188,15 +5184,25 @@ mod external_claim_tests {
     }
 
     #[tokio::test]
-    async fn nr_claim_remote_spool_cannot_acquire_a_later_run() {
+    async fn nr_claim_remote_spool_survives_parent_sleep_and_restart() {
         let env = tt::env().await;
         let bot = tt::claude_bot(&env.app, &env.project_id, "original").await;
         let old_run = tt::fake_run(&env.app, &bot.id).await;
         sqlx::query("UPDATE runs SET state='stopped' WHERE id=?").bind(&old_run).execute(&env.app.db).await.unwrap();
-        tt::fake_run(&env.app, &bot.id).await;
         process(&env.app, &stop_failure(&bot.id, json!({"hook_event_name":"AmSpawnClaim", "pane_id":"w1:p7", "parent_run_id":old_run}))).await.unwrap();
-        let n: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM spawn_claims").fetch_one(&env.app.db).await.unwrap();
-        assert_eq!(n, 0);
+        assert_eq!(crate::spawn_hints::claims_for_host(&env.app,"local").await.unwrap().get("w1:p7"), Some(&bot.id));
+        tt::fake_run(&env.app, &bot.id).await;
+        sqlx::query("UPDATE bots SET name='renamed' WHERE id=?").bind(&bot.id).execute(&env.app.db).await.unwrap();
+        let _reused = tt::claude_bot(&env.app, &env.project_id, "original").await;
+        assert_eq!(crate::spawn_hints::claims_for_host(&env.app,"local").await.unwrap().get("w1:p7"), Some(&bot.id));
+        // The real shim also puts the captured run ID in the outer hook envelope.
+        let mut delayed = stop_failure(&bot.id, json!({"hook_event_name":"AmSpawnClaim", "pane_id":"w1:p-replayed", "parent_run_id":old_run}));
+        delayed.run_id = Some(old_run.clone());
+        process(&env.app, &delayed).await.unwrap();
+        assert_eq!(crate::spawn_hints::claims_for_host(&env.app,"local").await.unwrap().get("w1:p-replayed"), Some(&bot.id));
+        // Old spool writers may omit the audit run ID entirely.
+        process(&env.app, &stop_failure(&bot.id, json!({"hook_event_name":"AmSpawnClaim", "pane_id":"w1:p8"}))).await.unwrap();
+        assert_eq!(crate::spawn_hints::claims_for_host(&env.app,"local").await.unwrap().get("w1:p8"), Some(&bot.id));
     }
 
     /// 2026-09-30：遠端 bot 直送的一句，回音先被存成使用者訊息，報備之後才從寄件者的 spool 收到——補標 `relay_from`。
@@ -7680,6 +7686,7 @@ pub trait ClassifyFailures: Send + Sync {
 /// 核心（`process*`、`drain_remote`、`replay_spool`）對它泛型，不知道 `App`；`impl HookHost for Arc<App>` 在 `runners/hookrecv.rs`。
 pub trait HookHost:
     crate::capabilities::Db
+    + crate::capabilities::HerdrRoutes
     + crate::capabilities::Emit
     + crate::capabilities::BotLocks
     + crate::capabilities::BotStatusEmit

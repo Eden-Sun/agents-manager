@@ -143,47 +143,43 @@ pub async fn prune_stale(app: &impl crate::capabilities::Db) {
 /// 新登記的 claim 在這段時間內不因「pane 不在 snapshot 裡」被清：snapshot 可能比 `agent start` 早拍。
 pub const CLAIM_GRACE_SECS: i64 = 2 * 60;
 
-/// Register a durable claim scoped to the parent's current run and herdr session.
-/// Names are display only; restarting the parent does not transfer an old claim to the new run.
-pub async fn claim(app: &impl crate::capabilities::Db, bot_id: &str, pane_id: &str) -> anyhow::Result<()> {
-    let run = db::active_run(app.db(), bot_id).await?.ok_or_else(|| anyhow::anyhow!("claim has no parent run"))?;
-    claim_for_run(app, bot_id, &run.id, pane_id).await
+/// A claim belongs to a bot and a host session, independently of the parent's run lifecycle.
+pub async fn claim(app: &(impl crate::capabilities::Db + crate::capabilities::HerdrRoutes), bot_id: &str, pane_id: &str) -> anyhow::Result<()> {
+    let run = db::active_run(app.db(), bot_id).await?;
+    claim_for_run(app, bot_id, run.as_ref().map(|r| r.id.as_str()).unwrap_or(""), pane_id).await
 }
 
-/// The sender's captured run is the generation proof; delayed spool events must not acquire a new run.
-pub async fn claim_for_run(app: &impl crate::capabilities::Db, bot_id: &str, run_id: &str, pane_id: &str) -> anyhow::Result<()> {
+/// `run_id` is audit data only: delayed spool events remain valid while a parent is stopped.
+pub async fn claim_for_run(app: &(impl crate::capabilities::Db + crate::capabilities::HerdrRoutes), bot_id: &str, run_id: &str, pane_id: &str) -> anyhow::Result<()> {
     let host = db::bot_host(app.db(), bot_id).await?;
-    let run = db::active_run(app.db(), bot_id).await?.filter(|r| r.id == run_id)
-        .ok_or_else(|| anyhow::anyhow!("claim parent run is not current"))?;
-    let session = run.herdr_session.as_deref().filter(|s| !s.trim().is_empty())
-        .ok_or_else(|| anyhow::anyhow!("claim has no herdr session evidence"))?;
+    let session = app.session_for_host(&host).await.filter(|s| !s.trim().is_empty())
+        .ok_or_else(|| anyhow::anyhow!("claim has no current host session evidence"))?;
     sqlx::query(
         "INSERT INTO spawn_claims (pane_id, host, bot_id, created_at, parent_run_id, herdr_session) VALUES (?,?,?,?,?,?)
          ON CONFLICT(host, herdr_session, pane_id) DO UPDATE SET bot_id=excluded.bot_id, created_at=excluded.created_at,
             parent_run_id=excluded.parent_run_id, herdr_session=excluded.herdr_session",
     )
-    .bind(pane_id).bind(&host).bind(bot_id).bind(db::now()).bind(run_id).bind(session)
+    .bind(pane_id).bind(&host).bind(bot_id).bind(db::now())
+    .bind((!run_id.is_empty()).then_some(run_id)).bind(&session)
     .execute(app.db()).await?;
     Ok(())
 }
 
-/// Only claims whose captured parent run and session still exist are usable. Legacy rows stay unknown.
-pub async fn claims_for_host(app: &impl crate::capabilities::Db, host: &str) -> anyhow::Result<HashMap<String, String>> {
-    claims_in_session(app, host, None).await
+/// Read only the host's currently configured session. A sleeping or restarted parent retains ownership.
+pub async fn claims_for_host(app: &(impl crate::capabilities::Db + crate::capabilities::HerdrRoutes), host: &str) -> anyhow::Result<HashMap<String, String>> {
+    let Some(session) = app.session_for_host(host).await else { return Ok(HashMap::new()) };
+    claims_for_session(app, host, &session).await
 }
 
+/// The caller supplies the current snapshot's host session; identical pane IDs in other sessions stay separate.
 pub async fn claims_for_session(app: &impl crate::capabilities::Db, host: &str, session: &str) -> anyhow::Result<HashMap<String, String>> {
-    claims_in_session(app, host, Some(session)).await
-}
-
-async fn claims_in_session(app: &impl crate::capabilities::Db, host: &str, session: Option<&str>) -> anyhow::Result<HashMap<String, String>> {
+    if session.trim().is_empty() { return Ok(HashMap::new()); }
     let rows: Vec<(String, String)> = sqlx::query_as(
         "SELECT c.pane_id, c.bot_id FROM spawn_claims c
-         JOIN runs r ON r.id=c.parent_run_id AND r.bot_id=c.bot_id AND r.state IN ('starting','running','stopping') AND r.herdr_session=c.herdr_session
          JOIN bots b ON b.id=c.bot_id JOIN projects p ON p.id=b.project_id
          WHERE c.host=? AND p.host=c.host AND b.deleted_at IS NULL AND p.deleted_at IS NULL
-           AND (? IS NULL OR c.herdr_session=?)")
-        .bind(host).bind(session).bind(session).fetch_all(app.db()).await?;
+           AND c.herdr_session=?")
+        .bind(host).bind(session).fetch_all(app.db()).await?;
     Ok(rows.into_iter().collect())
 }
 

@@ -592,14 +592,19 @@ async fn apply_migrations_inner(pool: &SqlitePool, fail_after_spawn_hints_drop: 
     // issue #635: pane ids are allocated independently by each herdr host. v29 keyed this
     // table globally by pane_id; rebuild transactionally so same-id hints on different hosts coexist.
     rebuild_spawn_hints_host_key(&mut tx, fail_after_spawn_hints_drop).await?;
-    // v66: pane IDs are scoped to herdr sessions. Old claims lack run/session proof and remain unknown.
+    // v66: scope pane IDs to host sessions; backfill legacy claims from unambiguous active host sessions.
     if !has_column(&mut *tx, "spawn_claims", "parent_run_id").await? {
         sqlx::query("CREATE TABLE spawn_claims_scoped (
             pane_id TEXT NOT NULL, host TEXT NOT NULL, bot_id TEXT NOT NULL REFERENCES bots(id),
             parent_run_id TEXT, herdr_session TEXT NOT NULL DEFAULT '',
             created_at TEXT NOT NULL, PRIMARY KEY(host, herdr_session, pane_id))").execute(&mut *tx).await?;
-        sqlx::query("INSERT INTO spawn_claims_scoped (pane_id,host,bot_id,created_at)
-            SELECT pane_id,host,bot_id,created_at FROM spawn_claims").execute(&mut *tx).await?;
+        sqlx::query("INSERT INTO spawn_claims_scoped (pane_id,host,bot_id,created_at,herdr_session)
+            SELECT old.pane_id,old.host,old.bot_id,old.created_at,
+                (SELECT CASE WHEN COUNT(DISTINCT r.herdr_session)=1 THEN MIN(r.herdr_session) ELSE '' END
+                 FROM runs r JOIN bots b ON b.id=r.bot_id JOIN projects p ON p.id=b.project_id
+                 WHERE COALESCE(r.host,p.host)=old.host AND r.state IN ('starting','running','stopping')
+                   AND b.deleted_at IS NULL AND p.deleted_at IS NULL AND TRIM(COALESCE(r.herdr_session,''))<>'')
+            FROM spawn_claims old").execute(&mut *tx).await?;
         sqlx::query("DROP TABLE spawn_claims").execute(&mut *tx).await?;
         sqlx::query("ALTER TABLE spawn_claims_scoped RENAME TO spawn_claims").execute(&mut *tx).await?;
     }
