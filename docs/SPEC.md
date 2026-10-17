@@ -3790,6 +3790,7 @@ hook 與 statusLine 只有 AG Man 自己啟動的 agy bot 才有（dispatcher �
 ### 13.1 資料模型
 - **一個 Project 就是一個群組**，成員 = 其下所有存活的 bot；不另設 conversation 型別。時間軸 = 成員所有訊息依 daemon 的 `seq`（rowid）插入序合併；舊 daemon 沒有 `seq` 時退回 `message.id`。每則附 `bot_id`、`bot_name`。
 - 群組發言以 §6.3 `prompt()` 送給每個目標：**各建一個 Turn 與一則 user Message**，`client_request_id = <crid>:<bot_id>`。
+- 群組重送的鍵（#1815，同 §6.3 `sendPrompt`）：回應遺失後同一句沿用原 crid；**只有每一個收件人的回合在本機都已是終態**才換新鍵（那件事做完了，再沿用會被 daemon 當重送、回舊結果）。有一個還在 in_flight／queued，或本機沒看到（未知），就沿用、維持冪等。
 - `messages.group_id`：同一次發言的 user 副本與「未送達」system 註記共用（= 該次 `client_request_id`）；回覆為 NULL。前端把同 `group_id` 的副本折成一則並列出目標。
 - 送給 agent 的文字去掉 mention。
 
