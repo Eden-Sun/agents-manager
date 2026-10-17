@@ -1273,6 +1273,9 @@ export const useStore = create<StoreState>((set, get) => {
     // 要拿同一個 crid——daemon 以它冪等（API.md 11.2：重送回同一組 turn_id、不再打字）。每次都換新的鍵，
     // 等於把這個冪等關掉，N 顆 bot 各收到兩則。只有「沒收到任何回覆」的失敗才沿用；daemon 回了就作廢。
     const reqKey = `group:${projectId}:${text}\u0000${attachments.join(',')}\u0000${recipientIds.join(',')}`
+    // 同 `sendPrompt`（#1815）：每個收件人的回合都已是終態＝那件事做完了，再用舊 crid 只會被 daemon 當重送；有一個還沒結束或本機沒看到，就沿用。
+    const held = peekRequestId(reqKey)
+    if (held && groupSendIsSpent(get().turns, held, recipientIds)) settleCreateRequest(reqKey)
     // 同 `sendPrompt`：重送窗口過了就是新的動作。
     const crid = createRequestId(reqKey, { maxAgeMs: SEND_RETRY_WINDOW_MS })
     try {
@@ -3769,6 +3772,11 @@ const SEND_RETRY_WINDOW_MS = 5 * 60 * 1000
 /** 這個 crid 在本機已經對應到一個終態的回合＝那件事做完（或撤回）了，再用它只會被 daemon 當成重送。 */
 function sendIdIsSpent(turns: Record<string, Turn> | undefined, crid: string): boolean {
   return Object.values(turns ?? {}).some((t) => t.client_request_id === crid && t.status !== 'queued' && t.status !== 'in_flight')
+}
+
+/** 群組這次送出的每個收件人（`<crid>:<bot_id>`）都已是終態才算消耗；沒有收件人、或有一個本機沒看到，就保守地不算（沿用，daemon 冪等）。 */
+function groupSendIsSpent(turns: Record<string, Record<string, Turn>>, crid: string, recipientIds: string[]): boolean {
+  return recipientIds.length > 0 && recipientIds.every((botId) => sendIdIsSpent(turns[botId], `${crid}:${botId}`))
 }
 
 function draftWithText(text: string, current: string): string {
