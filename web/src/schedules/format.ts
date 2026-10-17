@@ -1,12 +1,25 @@
 import type { OccurrenceStatus, Schedule } from '../api/schedules'
 
+/**
+ * 依排程自己的時區格式化，附上時區名稱。後端接受的合法時區瀏覽器 Intl 可能不認識（tzdb 版本差）：
+ * 那時退回 UTC 顯示，並明講這台瀏覽器不支援，不靜默當成本地時區（#1812）。
+ */
+export function formatZoned(iso: string, tz: string): string {
+  const d = new Date(iso)
+  if (Number.isNaN(d.getTime())) return iso
+  const options: Intl.DateTimeFormatOptions = { year: 'numeric', month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit', hour12: false }
+  try {
+    return `${d.toLocaleString('zh-TW', { ...options, timeZone: tz })}（${tz}）`
+  } catch (e) {
+    if (!(e instanceof RangeError)) throw e
+    return `${d.toLocaleString('zh-TW', { ...options, timeZone: 'UTC' })} UTC（${tz} 這台瀏覽器不支援，以 UTC 顯示）`
+  }
+}
+
 /** 下次執行時間，附上排程自己的時區名稱（不把 UTC 字串直接丟給使用者）。 */
 export function formatDue(iso: string | null, tz: string): string {
   if (!iso) return '沒有下一次（已完成或已停用）'
-  const d = new Date(iso)
-  if (Number.isNaN(d.getTime())) return iso
-  const when = d.toLocaleString('zh-TW', { timeZone: tz, year: 'numeric', month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit', hour12: false })
-  return `${when}（${tz}）`
+  return formatZoned(iso, tz)
 }
 
 export const OCCURRENCE_LABEL: Record<OccurrenceStatus, string> = {
