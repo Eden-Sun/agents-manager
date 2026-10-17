@@ -64,8 +64,10 @@ export function useWakeLockHolder(): void {
         held = lock
         setHolding(true)
         // 系統收回（切走分頁、鎖屏）時要知道，不然下次 `acquire` 以為還握著。
+        // 只有被收回的正是目前握著的那顆才清狀態；舊生命週期的鎖事件晚到（快速關→開）不能蓋掉新鎖。
         lock.addEventListener('release', () => {
-          if (held === lock) held = null
+          if (held !== lock) return
+          held = null
           setHolding(false)
         })
       } catch {
