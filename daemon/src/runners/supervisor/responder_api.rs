@@ -173,6 +173,8 @@ async fn get_persona(State(app): State<Arc<App>>) -> Result<Json<Value>, LcError
     let row = roles::get(&app.db, Role::Responder).await.map_err(up)?;
     let embedded = responder::persona_body();
     let embedded_hash = super::persona::hash(&embedded);
+    // A row without a stored hash is judged by the text it actually holds.
+    let stored_hash = row.persona_hash.clone().unwrap_or_else(|| super::persona::hash(&text));
     let run_started = match row.bot_id.as_deref() {
         Some(id) => crate::db::active_run(&app.db, id).await.map_err(up)?.map(|r| r.started_at),
         None => None,
@@ -191,7 +193,7 @@ async fn get_persona(State(app): State<Arc<App>>) -> Result<Json<Value>, LcError
         },
         "embedded": {"hash": embedded_hash, "length": embedded.chars().count()},
         "loaded": {"status": loaded.as_str(), "run_started_at": run_started},
-        "upgrade_available": row.persona_seed_hash.as_deref().is_some_and(|h| h != embedded_hash),
+        "upgrade_available": super::persona::upgrade_available(&stored_hash, row.persona_seed_hash.as_deref(), &embedded_hash),
         "needs_restart": loaded.needs_restart(),
     })))
 }
