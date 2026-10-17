@@ -8,21 +8,44 @@ import assert from 'node:assert/strict'
 import { useEffect, useState } from 'react'
 import { act, mount, setupDom, settle, teardownDom, unmountAll } from '../testing/domHarness'
 import { KeepAwakeToggle } from '../components/KeepAwakeToggle'
-import { setKeepAwake, useWakeLockHolder } from './useWakeLock'
+import { setKeepAwake, useWakeLock, useWakeLockHolder } from './useWakeLock'
+
+interface Sentinel {
+  released: boolean
+  release: () => Promise<void>
+  addEventListener: (type: 'release', cb: () => void) => void
+  /** 觸發 release 事件（系統收回，或 release() 之後事件才晚到）。 */
+  fireRelease: () => void
+}
 
 let requests = 0
 let released = 0
+let locks: Sentinel[] = []
 const sentinel = () => {
-  const s = {
+  const cbs: Array<() => void> = []
+  const s: Sentinel = {
     released: false,
     release: async () => {
       s.released = true
       released += 1
     },
-    addEventListener: () => {},
+    addEventListener: (_type, cb) => {
+      cbs.push(cb)
+    },
+    fireRelease: () => {
+      for (const cb of cbs) cb()
+    },
   }
+  locks.push(s)
   return s
 }
+
+/** 把全域 holding 狀態讀出來：DOM 上寫 active。 */
+function Status() {
+  const { active } = useWakeLock()
+  return <output data-active={String(active)} />
+}
+const active = () => document.querySelector('output')?.dataset.active
 
 /** App 根部的替身：一直掛著，負責握鎖。 */
 function Holder() {
@@ -46,6 +69,7 @@ before(setupDom)
 beforeEach(() => {
   requests = 0
   released = 0
+  locks = []
   Object.defineProperty(navigator, 'wakeLock', {
     configurable: true,
     value: {
@@ -110,4 +134,51 @@ it('開關顯示現在有沒有握住：拿到鎖之後寫「開著」', async (
   await settle()
   const note = document.querySelector('.keep-awake-note')?.textContent ?? ''
   assert.ok(note.startsWith('開著：'), `實際寫：${note}`)
+})
+
+it('快速關→開：舊鎖的 release 事件晚到，不可把新鎖的「握著」清成沒有', async () => {
+  setKeepAwake(true)
+  await mount(
+    <>
+      <Holder />
+      <Status />
+    </>,
+  )
+  await settle()
+  assert.equal(requests, 1)
+  await act(async () => setKeepAwake(false))
+  await settle()
+  assert.equal(released, 1, '關掉，舊鎖還')
+  await act(async () => setKeepAwake(true))
+  await settle()
+  assert.equal(requests, 2, '重新開，拿到新鎖')
+  assert.equal(active(), 'true')
+  // 舊鎖的 release 事件這時才到。
+  const [oldLock, newLock] = locks
+  await act(async () => {
+    oldLock.released = true
+    oldLock.fireRelease()
+  })
+  await settle()
+  assert.equal(active(), 'true', '新鎖還握著，不能被舊鎖的事件清掉')
+  assert.equal(newLock.released, false, '新鎖不該被釋放')
+})
+
+it('正常關閉：系統收回目前握著的鎖，狀態變回沒握住', async () => {
+  setKeepAwake(true)
+  await mount(
+    <>
+      <Holder />
+      <Status />
+    </>,
+  )
+  await settle()
+  assert.equal(active(), 'true')
+  const [lock] = locks
+  await act(async () => {
+    lock.released = true
+    lock.fireRelease()
+  })
+  await settle()
+  assert.equal(active(), 'false', '目前這顆被收回，要寫沒握住')
 })
