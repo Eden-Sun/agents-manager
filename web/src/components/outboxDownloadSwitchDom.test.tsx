@@ -16,6 +16,8 @@ interface Pending {
 const pending: Pending[] = []
 /** 清單的讀取（不含下載）：用來看有沒有被重讀。 */
 const listHits: string[] = []
+/** 每顆 bot 的清單還有沒有這個檔（false＝已經被清掉）。 */
+const serves: Record<string, boolean> = {}
 const realFetch = globalThis.fetch
 const realCreate = URL.createObjectURL
 const realRevoke = URL.revokeObjectURL
@@ -32,7 +34,8 @@ before(() => {
     }
     // 清單：兩顆 bot 都有同名檔。立刻回。
     listHits.push(url)
-    return Promise.resolve(json(listBody))
+    const bot = /\/bots\/(\w+)\/outbox/.exec(url)?.[1] ?? ''
+    return Promise.resolve(json(serves[bot] === false ? { ...listBody, files: [] } : listBody))
   }) as typeof fetch
   URL.createObjectURL = (() => 'blob:x') as typeof URL.createObjectURL
   URL.revokeObjectURL = (() => {}) as typeof URL.revokeObjectURL
@@ -42,6 +45,7 @@ afterEach(async () => {
   await unmountAll()
   pending.length = 0
   listHits.length = 0
+  for (const k of Object.keys(serves)) delete serves[k]
 })
 
 after(async () => {
@@ -135,4 +139,49 @@ test('A 下載中切到 B、B 還沒下載，A 晚回 404：B 的同名檔清單
   await settle(30)
   assert.equal(fileCount(), 1, 'B 的同名檔不能被 A 的 404 移除')
   assert.equal(listHits.filter((u) => u.includes('/bots/b/outbox')).length, bListsBefore, 'B 的清單不能因為 A 的 404 被重讀')
+})
+
+test('舊 bot 晚回 404：通知寫明是哪顆 bot 的檔；目前 bot 的 404 仍移除那一列並發通知', async () => {
+  useStore.setState({ selectedProjectId: null, selectedBotId: 'a', bots, previews: {}, notices: [] } as never)
+  await mount(<OutboxFiles />)
+  await until(listLoaded, 'bot a 的清單載入')
+  await click(fileButton()!)
+  await until(() => pending.length === 1, 'A 的下載請求送出')
+
+  useStore.setState({ selectedBotId: 'b' } as never)
+  await settle(50)
+  await until(listLoaded, 'bot b 的清單載入')
+  serves.a = false
+  pendingFor('a').respond(json({ error: 'not_found' }, 404))
+  await settle(30)
+  const staleNotices = useStore.getState().notices.filter((n) => n.kind === 'error')
+  assert.equal(staleNotices.length, 1, '舊 bot 的失敗要跳一則通知')
+  assert.ok(staleNotices[0].text.includes('alpha'), `通知要寫明是 alpha 的檔：${staleNotices[0].text}`)
+
+  // 目前的 bot（B）自己 404：那一列要移除，並發通知。
+  serves.b = false
+  await click(fileButton()!)
+  await until(() => pending.length === 2, 'B 的下載請求送出')
+  pendingFor('b').respond(json({ error: 'not_found' }, 404))
+  await until(() => fileCount() === 0, 'B 的 404 移除那一列')
+  const all = useStore.getState().notices.filter((n) => n.kind === 'error')
+  assert.equal(all.length, 2, '目前 bot 的 404 也要通知')
+  assert.ok(all[1].text.includes('不在了'))
+  assert.equal(all[1].text.includes('alpha'), false, '目前 bot 的通知不加舊 bot 的名字')
+})
+
+test('同一顆 bot 的 404：移除那一列並發通知（#547 回歸）', async () => {
+  useStore.setState({ selectedProjectId: null, selectedBotId: 'a', bots, previews: {}, notices: [] } as never)
+  await mount(<OutboxFiles />)
+  await until(listLoaded, 'bot a 的清單載入')
+  serves.a = false
+  await click(fileButton()!)
+  await until(() => pending.length === 1, 'A 的下載請求送出')
+  const before = listHits.filter((u) => u.includes('/bots/a/outbox')).length
+  pendingFor('a').respond(json({ error: 'not_found' }, 404))
+  await until(() => fileCount() === 0, '404 之後那一列要移除')
+  assert.ok(listHits.filter((u) => u.includes('/bots/a/outbox')).length > before, '移除後要重讀一次清單')
+  const notices = useStore.getState().notices.filter((n) => n.kind === 'error')
+  assert.equal(notices.length, 1)
+  assert.ok(notices[0].text.includes('不在了'))
 })
