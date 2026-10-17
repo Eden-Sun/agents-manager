@@ -526,6 +526,15 @@ am_agent_start() {
             exit 2
         }
     fi
+    # agy 子 agent 沒指定模型就用最低強度（2026-10-17 使用者：「除非 user 指定否則用最低 effort」）。
+    # agy 的強度寫在 slug 尾巴，它自己的預設是 high；母 bot 是 agy 時也不沿用母 bot 的模型。
+    if [ "$_has_model" = 0 ] && [ "${_kind:-${AM_KIND:-}}" = "agy" ]; then
+        [ "$_stop" = 1 ] || set -- "$@" --
+        _stop=1
+        set -- "$@" --model gemini-3.8-flash-low
+        _has_model=1
+        printf 'agents-manager: agy 子 agent 沒指定模型，用最低強度 `gemini-3.8-flash-low`\n' >&2
+    fi
     # 沒指定模型的子 agent 會跑 CLI 的預設（claude 現在是 fable），跟母 bot 明明選的 opus 對不上，
     # 側欄就多出一顆「claude-fable-5-1」看不懂的。母 bot 的模型／強度在 AM_MODEL / AM_EFFORT，
     # 同 kind 就補上；自己有寫 --model 的一律尊重。
