@@ -83,8 +83,8 @@ test.before(() => {
   })
 })
 
-// 開機路徑：深連結在途時，選取被還原（不是路由自己寫的）→ 網址與畫面必須一致，不能網址是 shell、畫面是別的。
-test('開機帶 shell 深連結，shell 還沒回來時選取被還原改掉：網址與畫面一致', async () => {
+// 開機深連結是使用者明確打開的網址：localStorage 還原（非使用者動作寫進來的選取）不蓋掉它。
+test('開機帶 shell 深連結，shell 還沒回來時選取被還原改掉：最後顯示那個 shell，網址仍是 shell', async () => {
   await bootAt('/hosts/remote/shells/p1', [{ id: 'b' }, { id: 'c' }])
   await flush()
   assert.equal(shellReplies.length, 1)
@@ -94,9 +94,23 @@ test('開機帶 shell 深連結，shell 還沒回來時選取被還原改掉：�
   await flush()
 
   const s = useStore.getState()
-  const onShell = s.shellView?.paneId === 'p1' && page.path === '/hosts/remote/shells/p1'
-  const onBot = s.selectedBotId === 'b' && s.shellView === null && page.path === '/bots/b'
-  assert.ok(onShell || onBot, `網址 ${page.path} 與畫面不一致：selected=${s.selectedBotId} shell=${s.shellView?.paneId ?? null}`)
+  assert.equal(s.shellView?.paneId, 'p1')
+  assert.equal(page.path, '/hosts/remote/shells/p1')
+})
+
+test('開機帶 shell 深連結，shell 還沒回來時使用者點了別的 bot：使用者的選擇贏，網址一致', async () => {
+  await bootAt('/hosts/remote/shells/p1', [{ id: 'b' }, { id: 'c' }])
+  await flush()
+  assert.equal(shellReplies.length, 1)
+
+  useStore.getState().selectBot('c')
+  shellReplies[0].resolve({ shells: [{ pane_id: 'p1', cwd: '/w' }] })
+  await flush()
+
+  const s = useStore.getState()
+  assert.equal(s.selectedBotId, 'c')
+  assert.equal(s.shellView, null)
+  assert.equal(page.path, '/bots/c')
 })
 
 test('開機帶 shell 深連結，shell 正常回來：顯示那個 shell，網址不變', async () => {

@@ -14,6 +14,7 @@ import { queueSlotNotice, slotHolderFrom } from '../lib/queueSlot'
 import { groupSendDelivered, groupSkipText } from './groupSend'
 import { UNKNOWN_GROUP_NOTICE, UNKNOWN_SENT_NOTICE, unknownLock } from './deliveryUnknown'
 import { create } from 'zustand'
+import { markUserNav } from './userNav'
 import * as api from '../api'
 import {
   frameBotId,
@@ -1191,6 +1192,7 @@ export const useStore = create<StoreState>((set, get) => {
   },
 
   selectBot: (botId) => {
+    markUserNav()
     set({ selectedBotId: botId, selectedProjectId: null, shellView: null, rightTab: 'chat', settingsBotId: null })
     // 視窗在前景才算看到（程式化選取可能發生在背景分頁）。
     if (botId && windowActive()) get().markBotRead(botId)
@@ -1203,6 +1205,7 @@ export const useStore = create<StoreState>((set, get) => {
   },
 
   selectProject: (projectId) => {
+    markUserNav()
     set({
       selectedProjectId: projectId,
       shellView: null,
@@ -1326,9 +1329,13 @@ export const useStore = create<StoreState>((set, get) => {
   },
 
   // 切分頁等於離開設定面板（面板是蓋在對話/終端上的）。
-  setRightTab: (rightTab) => set({ rightTab, settingsBotId: null }),
+  setRightTab: (rightTab) => {
+    markUserNav()
+    set({ rightTab, settingsBotId: null })
+  },
 
   openSettings: (botId, anchor = null) => {
+    markUserNav()
     // 面板只在 ChatPanel 渲染：不清 shellView 的話按齒輪畫面不動。
     set({
       selectedBotId: botId,
@@ -2591,16 +2598,23 @@ export const useStore = create<StoreState>((set, get) => {
   },
 
   // 同一個 shell 面板：面板只認 (host, paneId)，白名單在 daemon 那一側（`shell::registered`）。
-  viewPane: (pane) =>
+  viewPane: (pane) => {
+    markUserNav()
     set({
       shellView: { host: pane.host, paneId: pane.pane_id, cwd: pane.cwd ?? '', readOnly: paneReadOnly(pane), traced: true },
       settingsBotId: null,
-    }),
+    })
+  },
 
-  viewHostShell: (shell) =>
-    set({ shellView: { host: shell.host, paneId: shell.pane_id, cwd: shell.cwd }, settingsBotId: null }),
+  viewHostShell: (shell) => {
+    markUserNav()
+    set({ shellView: { host: shell.host, paneId: shell.pane_id, cwd: shell.cwd }, settingsBotId: null })
+  },
 
-  closeShellView: () => set({ shellView: null }),
+  closeShellView: () => {
+    markUserNav()
+    set({ shellView: null })
+  },
 
   lockShellView(host, paneId, reason) {
     set((s) =>
