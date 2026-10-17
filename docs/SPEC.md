@@ -3737,7 +3737,7 @@ agy 沒有每次啟動指定 hook 的旗標，設定又是使用者（和 Gemini
 agy 畫面／Stop hook 若回報 `Individual quota reached … Resets in …`，daemon 會把該 key 的 `five_hour` 標為 100% 並記 `limit_hit.bucket = five_hour`；讀數已有未來重置時間就沿用，否則解析橫幅相對時間，仍讀不出來時以 5 小時保底。
 agy 回合以授權失敗收尾（Stop 的 `error` 被分類為 Auth，`runners/agy_auth.rs`）→ 該主機 `tools.agy.logged_in=false`、清 agy 額度（推 `quota_updated` null）、清探測錯誤、推 `host_changed`，網頁出現登入鈕；冷卻 5 分鐘內登入偵測不因憑證檔還在而翻回。網路錯、逾時、429、500 這類不翻；已是未登入時重送同一則不再推。
 登出（`POST /api/hosts/{name}/agy/logout`，`quota_agy::logout`）：刪那台主機的 `~/.gemini/antigravity-cli/antigravity-oauth-token`（agy 沒有 `logout` 子命令，憑證就是這個檔；**macOS 沒有檔、放 login Keychain `gemini`／`antigravity`，一併 `security delete-generic-password`**）、清該主機唯一的 `agy` 快照並廣播，不跑 agy、不停正在跑的 agy bot（它們下次重啟才停在登入畫面）；拿探測的鎖，進行中的探測不會寫回。
-網頁（`QuotaStrip`）：agy 格只顯示 Gemini 的 `agy` key，桌機完整顯示 `5h` 與 `7d` 兩條，low／critical 照 daemon 既有旗標；手機及桌機空間不足時沿用 claude 格的縮合規則，popover 顯示 Gemini 的 5h／7d 與 `limit_hit`。登出按鈕保留。agy bot 在側欄的反灰／黃燈看 `agy` 這組額度。
+網頁（`QuotaStrip`）：agy 格只顯示 Gemini 的 `agy` key，桌機完整顯示 `5h` 與 `7d` 兩條，low／critical 照 daemon 既有旗標；手機及桌機空間不足時沿用 claude 格的縮合規則，popover 的窗口標籤只顯示 `5h`／`7d`，不重複標示 Gemini，並保留 `limit_hit`。登出按鈕保留。agy bot 在側欄的反灰／黃燈看 `agy` 這組額度。
 
 ### 12a.9 子 agent（`herdr agent start --kind agy`，沒有 hook，2026-10-04 a1）
 hook 與 statusLine 只有 AG Man 自己啟動的 agy bot 才有（dispatcher 看 pane env 的 `AM_BOT_ID`／`AM_HOOK_TOKEN`）；子 agent 的 pane env 是**父 bot 的**，它的 hook 看到 `AM_CHILD_OF` 就不送、也不 spool（本機 hook 與遠端 `hook.sh`／dispatcher 都是，#1004、#1031），所以跟 grok 子 agent（§12.5）一樣**改讀對話檔**，不去替子 agent 補寫設定檔（全域 `hooks.json`／`settings.json` 是使用者的、也繞不過 env）：

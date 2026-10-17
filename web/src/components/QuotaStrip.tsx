@@ -806,8 +806,8 @@ function PopRow({ entry, host, onAgyLogout }: { entry: QuotaEntry; host: string;
       ) : (
         entry.kind === 'agy' ? (
           <>
-            <PopWindow icon="⏱" name="Gemini · 5h" win="5h" w={q?.five_hour} now={now} />
-            <PopWindow icon="📅" name="Gemini · 7d" win="7d" w={q?.seven_day} now={now} />
+            <PopWindow icon="⏱" name="5h" win="5h" w={q?.five_hour} now={now} />
+            <PopWindow icon="📅" name="7d" win="7d" w={q?.seven_day} now={now} />
             <PopLimitHit hit={q?.limit_hit} />
           </>
         ) : (
