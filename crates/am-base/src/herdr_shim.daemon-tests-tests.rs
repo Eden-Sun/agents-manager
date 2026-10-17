@@ -35,7 +35,7 @@
             write_script(
                 &fake.join("herdr"),
                 "if [ \"$1\" = agent ] && [ \"$2\" = get ]; then\n\
-                   case \" ${AM_TEST_AGENTS:-} \" in *\" $3 \"*) exit 0 ;; *) exit 1 ;; esac\n\
+                   case \" ${AM_TEST_AGENTS:-} \" in *\" $3 \"*) printf '{\"result\":{\"agent\":{\"pane_id\":\"%s\"}}}\\n' \"$3\"; exit 0 ;; *) exit 1 ;; esac\n\
                  fi\n\
                  if [ \"$1\" = pane ] && [ \"$2\" = get ]; then\n\
                    [ -n \"${AM_TEST_PANE_JSON:-}\" ] || exit 1\n\
@@ -384,14 +384,13 @@
     }
 
     /// #1789：fork 出來的 bot 繼承了原 bot 的對話，會把子 agent 改名回原 bot 的前綴，daemon 就把它掛到原 bot 底下。
-    /// `agent start` 有補前綴，`agent rename` 不經那條規則；這裡擋掉別人的前綴，不呼叫 herdr。
+    /// A display rename cannot change the parent recorded by stable ID.
     #[test]
-    fn agent_rename_refuses_another_bots_prefix() {
+    fn agent_rename_does_not_treat_a_display_prefix_as_ownership() {
         let s = Sandbox::new();
         let (out, err, rc) = s.run_full(&[("AM_AGENT_NAME", "hub-bbbbbb")], &["agent", "rename", "old-name", "hub-aaaaaa-sd1"]);
-        assert!(out.is_empty(), "herdr 不該被呼叫：{out:?}");
-        assert_eq!(rc, 2, "{err}");
-        assert!(err.contains("hub-bbbbbb") && err.contains("hub-aaaaaa-sd1") && err.contains("沒有改名"), "{err}");
+        assert_eq!(rc, 0, "{err}");
+        assert_eq!(out, ["agent", "rename", "old-name", "hub-aaaaaa-sd1"], "display names do not encode ownership");
     }
 
     #[test]
@@ -422,7 +421,7 @@
     fn agent_prompt_prefixes_the_target_and_forwards_the_text() {
         let s = Sandbox::new();
         let (out, _) = s.run(
-            &[("AM_AGENT_NAME", "proj-abc123")],
+            &[("AM_AGENT_NAME", "proj-abc123"), ("AM_TEST_AGENTS", "proj-abc123-review")],
             &["agent", "prompt", "review", "把 daemon 重建一次，然後回報"],
         );
         // 整段文字仍是**一個**參數。
@@ -461,7 +460,7 @@
         let home2 = s2.dir.join("home");
         let home2_s = home2.to_string_lossy().to_string();
         std::fs::create_dir_all(&home2).unwrap();
-        let (out, _) = s2.run(&[("HOME", home2_s.as_str()), ("AM_BOT_ID", "B-NODIR")], &["agent", "prompt", "x-agent", "hello there relay"]);
+        let (out, _) = s2.run(&[("HOME", home2_s.as_str()), ("AM_BOT_ID", "B-NODIR"), ("AM_TEST_AGENTS", "x-agent")], &["agent", "prompt", "x-agent", "hello there relay"]);
         assert_eq!(out[..2], ["agent", "prompt"]);
         assert!(!home2.join(".config").exists(), "沒有 bot 目錄就不建");
     }
@@ -670,7 +669,7 @@
         std::fs::remove_file(s.dir.join("real/curl")).unwrap();
         let tools = s.dir.join("tools");
         std::fs::create_dir_all(&tools).unwrap();
-        for t in ["tr", "sed", "cut", "dirname", "head", "tail", "cat", "env", "sh"] {
+        for t in ["tr", "sed", "cut", "dirname", "head", "tail", "cat", "env", "sh", "python3"] {
             for base in ["/usr/bin", "/bin"] {
                 let src = std::path::Path::new(base).join(t);
                 if src.exists() {
@@ -769,7 +768,7 @@
         let run = |s: Sandbox, port: String| {
             tokio::task::spawn_blocking(move || {
                 let env = [("AM_AGENT_NAME", "fixer-abc"), ("AM_TEST_AGENTS", "AGM"), ("AM_BOT_ID", "w1"), ("AM_HOOK_TOKEN", "tok-w1"), ("AM_PORT", port.as_str())];
-                let r = s.run_full(&env, &["agent", "prompt", "AGM", "--to-bot-id", "resp", text]);
+                let r = s.run_full(&env, &["agent", "prompt", "bot:patrol", text]);
                 (s, r)
             })
         };
@@ -793,10 +792,11 @@
     }
 
     #[test]
-    fn an_agent_prompt_with_flags_first_is_forwarded_verbatim() {
+    fn an_agent_prompt_with_flags_first_requires_a_stable_target() {
         let s = Sandbox::new();
-        let (out, _) = s.run(&[("AM_AGENT_NAME", "proj-abc123")], &["agent", "prompt", "--json", "review", "hi"]);
-        assert_eq!(out, ["agent", "prompt", "--json", "review", "hi"]);
+        let (out, _, rc) = s.run_full(&[("AM_AGENT_NAME", "proj-abc123")], &["agent", "prompt", "--json", "review", "hi"]);
+        assert_eq!(rc, 75);
+        assert!(out.is_empty(), "missing a stable target must not reach herdr");
     }
 
     #[test]
@@ -1078,7 +1078,7 @@
         assert!(text.contains("export AM_HOOK_TOKEN='tok'"), "{text}");
         assert!(text.contains("export AM_INSTANCE='a1b2'"), "隔離實例的保留變數也補：{text}");
         assert!(text.contains("export AM_DATA_DIR='/data/iso'"), "{text}");
-        assert!(text.contains("export AM_CHILD_OF='p-1'"), "子 agent 的 pane 要標出 parent：{text}");
+        assert!(text.contains("export AM_CHILD_OF='b1'"), "子 agent 的 pane 要標出 parent：{text}");
     }
 
     /// issue #1775：`agent start --identity <名>` 用母 pane 的 `AM_IDENTITIES` 挑這台的身分。帳號目錄照那個身分走，
@@ -1271,14 +1271,14 @@
         assert!(!log.exists(), "沒有任何 send-text：{:?}", std::fs::read_to_string(&log));
     }
 
-    /// 使用者 2026-09-30：bot 開的 pane 標 `AM_CHILD_OF=<母名>`（子代再開的 pane 沿用同一個值、呼叫者偽造的剝掉），
+    /// Bot-created panes carry `AM_CHILD_OF=<parent bot ID>`; inherited legacy markers still block grandchildren.
     /// 有這個標記的 pane 開 `agent start` 一律拒絕，而且 herdr 根本沒被叫到。
     #[test]
     fn a_child_pane_is_marked_and_cannot_start_a_grandchild() {
         let s = Sandbox::new();
         let parent = [("AM_AGENT_NAME", "p-1"), ("AM_BOT_ID", "b1")];
         let (out, _) = s.run(&parent, &["pane", "split", "--pane", "w1:p1", "--env", "AM_CHILD_OF=forged"]);
-        assert_eq!(env_values(&out, "AM_CHILD_OF"), vec!["p-1".to_string()], "{out:?}");
+        assert_eq!(env_values(&out, "AM_CHILD_OF"), vec!["b1".to_string()], "{out:?}");
         let (out, _) = s.run(&[("AM_AGENT_NAME", "p-1")], &["pane", "split", "--pane", "w1:p1"]);
         assert!(env_values(&out, "AM_CHILD_OF").is_empty(), "沒有 bot 身分的人工 shell 不標：{out:?}");
 
@@ -1605,6 +1605,7 @@
         let s = Sandbox::new();
         let log = curl_log(&s);
         let env = [
+            ("AM_RUN_ID", "run-b1"),
             ("AM_AGENT_NAME", "parent"),
             ("AM_BOT_ID", "b1"),
             ("AM_HOOK_TOKEN", "tok"),
@@ -1617,6 +1618,7 @@
         let sent = std::fs::read_to_string(&log).unwrap();
         let claim: Vec<&str> = sent.lines().filter(|l| l.contains("/relay/spawn/claim")).collect();
         assert_eq!(claim.len(), 1, "登記一次：{sent}");
+        assert!(claim[0].contains("parent_run_id=run-b1"), "{}", claim[0]);
         assert!(claim[0].contains("bot_id=b1") && claim[0].contains("pane_id=w1:p1"), "{}", claim[0]);
     }
 
@@ -1654,6 +1656,7 @@
         std::fs::create_dir_all(spool.parent().unwrap()).unwrap();
         let home_s = home.to_string_lossy().to_string();
         let env = [
+            ("AM_RUN_ID", "run-b1"),
             ("HOME", home_s.as_str()),
             ("AM_AGENT_NAME", "parent"),
             ("AM_BOT_ID", "B-REMOTE"),
@@ -1670,6 +1673,8 @@
         assert_eq!(body["bot_id"], "B-REMOTE");
         assert_eq!(body["payload"]["hook_event_name"], "AmSpawnClaim");
         assert_eq!(body["payload"]["pane_id"], "w1:p1");
+        assert_eq!(body["payload"]["parent_run_id"], "run-b1");
+        assert_eq!(body["run_id"], "run-b1");
         assert!(!std::fs::read_to_string(&log).unwrap_or_default().contains("/relay/spawn/claim"), "遠端不打 curl");
     }
 
@@ -1682,6 +1687,7 @@
         std::fs::create_dir_all(spool.parent().unwrap()).unwrap();
         let home_s = home.to_string_lossy().to_string();
         let env = [
+            ("AM_RUN_ID", "run-b1"),
             ("HOME", home_s.as_str()),
             ("AM_AGENT_NAME", "parent"),
             ("AM_BOT_ID", "B-REMOTE"),
@@ -1697,6 +1703,8 @@
         assert_eq!(files.len(), 1, "start 失敗（timeout）也有一則登記：{files:?}");
         let body: serde_json::Value = serde_json::from_str(std::fs::read_to_string(&files[0]).unwrap().trim()).unwrap();
         assert_eq!(body["payload"]["pane_id"], "w1:p1");
+        assert_eq!(body["payload"]["parent_run_id"], "run-b1");
+        assert_eq!(body["run_id"], "run-b1");
     }
 
     /// #664：herdr 還在跑時被中斷，trap 也要 abort。
@@ -1762,7 +1770,9 @@
         }
         assert_ne!(names[0], names[1], "兩個字尾不能截成同一個名字：{names:?}");
 
-        let (out, err, rc) = s.run_full(&env, &["agent", "prompt", "review", "please check"]);
+        let mut prompt_env = env.to_vec();
+        prompt_env.push(("AM_TEST_AGENTS", names[0].as_str()));
+        let (out, err, rc) = s.run_full(&prompt_env, &["agent", "prompt", "review", "please check"]);
         assert_eq!(rc, 0, "{out:?} {err}");
         assert_eq!(out.first().map(String::as_str), Some("agent"));
         assert_eq!(out.get(1).map(String::as_str), Some("prompt"));
@@ -2223,4 +2233,55 @@
             let (out, _) = s.run(&env, &["agent", "start", "kid", "--kind", kind]);
             assert!(!out.iter().any(|a| a == "--no-daemon"), "{out:?}");
         }
+    }
+
+    #[test]
+    fn nr_claim_child_marker_survives_parent_rename_and_old_name_reuse() {
+        let s = Sandbox::new();
+        for name in ["original", "renamed"] {
+            let (out, _) = s.run(&[("AM_AGENT_NAME", name), ("AM_BOT_ID", "stable-bot")], &["pane", "split", "--pane", "w1:p1"]);
+            assert_eq!(env_values(&out, "AM_CHILD_OF"), vec!["stable-bot"]);
+        }
+        let (out, _) = s.run(&[("AM_AGENT_NAME", "original"), ("AM_BOT_ID", "other-bot")], &["pane", "split", "--pane", "w1:p1"]);
+        assert_eq!(env_values(&out, "AM_CHILD_OF"), vec!["other-bot"], "reusing a display name cannot reuse parent identity");
+        let (out, _, rc) = s.run_full(&[("AM_AGENT_NAME", "renamed"), ("AM_BOT_ID", "stable-bot")], &["agent", "rename", "w1:p2", "free-display-name"]);
+        assert_eq!(rc, 0);
+        assert_eq!(out, ["agent", "rename", "w1:p2", "free-display-name"]);
+    }
+
+    #[test]
+    fn nr_claim_prompt_freezes_the_child_pane_before_reusing_a_name() {
+        let s = Sandbox::new();
+        write_script(&s.dir.join("real/herdr"), r#"
+if [ "$1" = agent ] && [ "$2" = get ]; then
+    case "$3" in
+        parent-review) printf '%s\n' '{"result":{"agent":{"pane_id":"w1:p-child","name":"renamed"}}}' ;;
+        review) printf '%s\n' '{"result":{"agent":{"pane_id":"w1:p-stranger","name":"review"}}}' ;;
+        *) exit 1 ;;
+    esac
+    exit 0
+fi
+for a in "$@"; do printf '%s\n' "$a"; done
+"#);
+        let (out, _, rc) = s.run_full(&[("AM_AGENT_NAME", "parent")], &["agent", "prompt", "review", "hello"]);
+        assert_eq!(rc, 0);
+        assert_eq!(out, ["agent", "prompt", "w1:p-child", "hello"]);
+    }
+
+    #[test]
+    fn nr_claim_explicit_pane_ids_do_not_go_through_a_name_lookup() {
+        let s = Sandbox::new();
+        let (out, _, rc) = s.run_full(&[("AM_AGENT_NAME", "parent")], &["agent", "prompt", "w1:p2", "hello"]);
+        assert_eq!(rc, 0);
+        assert_eq!(out, ["agent", "prompt", "w1:p2", "hello"]);
+    }
+
+    #[test]
+    fn nr_claim_bot_id_uses_the_daemons_resolved_pane() {
+        let s = Sandbox::new();
+        s.install_fake_curl("printf '%s\\n200' '{\"target_pane_id\":\"w1:p-stable\"}'");
+        let (out, err, rc) = s.run_full(&[("AM_BOT_ID", "sender"), ("AM_BOT_TOKEN", "tok"), ("AM_PORT", "1")],
+            &["agent", "prompt", "bot:stable-id", "hello"]);
+        assert_eq!(rc, 0, "{err}");
+        assert_eq!(out, ["agent", "prompt", "w1:p-stable", "hello"]);
     }

@@ -143,46 +143,68 @@ pub async fn prune_stale(app: &impl crate::capabilities::Db) {
 /// 新登記的 claim 在這段時間內不因「pane 不在 snapshot 裡」被清：snapshot 可能比 `agent start` 早拍。
 pub const CLAIM_GRACE_SECS: i64 = 2 * 60;
 
-/// issue #1790：shim 開子 agent 成功後登記「這個 pane 是 `bot_id` 自己開的」（本機走 `/relay/spawn/claim`，遠端寫 spool
-/// 的 `AmSpawnClaim`）。比 [`record`] 的 hint 可靠——不靠 bot 把 herdr 的 JSON 留在 stdout，也不過期、認領後不消耗：
-/// pane 還活著就一直算那顆 bot 的，所以 child 之後被改名也不會因名字前綴換 parent。pane id 只在各自的 host 內唯一，
-/// 同一個 `(host, pane_id)` 再登記＝重試或 id 被回收給新 pane（新的才是真的）。
+/// Register a durable claim scoped to the parent's current run and herdr session.
+/// Names are display only; restarting the parent does not transfer an old claim to the new run.
 pub async fn claim(app: &impl crate::capabilities::Db, bot_id: &str, pane_id: &str) -> anyhow::Result<()> {
+    let run = db::active_run(app.db(), bot_id).await?.ok_or_else(|| anyhow::anyhow!("claim has no parent run"))?;
+    claim_for_run(app, bot_id, &run.id, pane_id).await
+}
+
+/// The sender's captured run is the generation proof; delayed spool events must not acquire a new run.
+pub async fn claim_for_run(app: &impl crate::capabilities::Db, bot_id: &str, run_id: &str, pane_id: &str) -> anyhow::Result<()> {
     let host = db::bot_host(app.db(), bot_id).await?;
+    let run = db::active_run(app.db(), bot_id).await?.filter(|r| r.id == run_id)
+        .ok_or_else(|| anyhow::anyhow!("claim parent run is not current"))?;
+    let session = run.herdr_session.as_deref().filter(|s| !s.trim().is_empty())
+        .ok_or_else(|| anyhow::anyhow!("claim has no herdr session evidence"))?;
     sqlx::query(
-        "INSERT INTO spawn_claims (pane_id, host, bot_id, created_at) VALUES (?,?,?,?)
-         ON CONFLICT(host, pane_id) DO UPDATE SET bot_id=excluded.bot_id, created_at=excluded.created_at",
+        "INSERT INTO spawn_claims (pane_id, host, bot_id, created_at, parent_run_id, herdr_session) VALUES (?,?,?,?,?,?)
+         ON CONFLICT(host, herdr_session, pane_id) DO UPDATE SET bot_id=excluded.bot_id, created_at=excluded.created_at,
+            parent_run_id=excluded.parent_run_id, herdr_session=excluded.herdr_session",
     )
-    .bind(pane_id)
-    .bind(&host)
-    .bind(bot_id)
-    .bind(db::now())
-    .execute(app.db())
-    .await?;
+    .bind(pane_id).bind(&host).bind(bot_id).bind(db::now()).bind(run_id).bind(session)
+    .execute(app.db()).await?;
     Ok(())
 }
 
-/// 這台主機所有的 claim，`pane_id -> bot_id`。
+/// Only claims whose captured parent run and session still exist are usable. Legacy rows stay unknown.
 pub async fn claims_for_host(app: &impl crate::capabilities::Db, host: &str) -> anyhow::Result<HashMap<String, String>> {
-    let rows: Vec<(String, String)> =
-        sqlx::query_as("SELECT pane_id, bot_id FROM spawn_claims WHERE host = ?").bind(host).fetch_all(app.db()).await?;
+    claims_in_session(app, host, None).await
+}
+
+pub async fn claims_for_session(app: &impl crate::capabilities::Db, host: &str, session: &str) -> anyhow::Result<HashMap<String, String>> {
+    claims_in_session(app, host, Some(session)).await
+}
+
+async fn claims_in_session(app: &impl crate::capabilities::Db, host: &str, session: Option<&str>) -> anyhow::Result<HashMap<String, String>> {
+    let rows: Vec<(String, String)> = sqlx::query_as(
+        "SELECT c.pane_id, c.bot_id FROM spawn_claims c
+         JOIN runs r ON r.id=c.parent_run_id AND r.bot_id=c.bot_id AND r.state IN ('starting','running','stopping') AND r.herdr_session=c.herdr_session
+         JOIN bots b ON b.id=c.bot_id JOIN projects p ON p.id=b.project_id
+         WHERE c.host=? AND p.host=c.host AND b.deleted_at IS NULL AND p.deleted_at IS NULL
+           AND (? IS NULL OR c.herdr_session=?)")
+        .bind(host).bind(session).bind(session).fetch_all(app.db()).await?;
     Ok(rows.into_iter().collect())
 }
 
 /// 已經不在 herdr 裡的 pane 的 claim 要清掉：herdr 重開後 pane id 會被回收，留著會把使用者新開的 agent 認給舊的 bot。
 /// `live_panes` 是這一輪 snapshot 的全部 pane id；空的（讀不到、不是真的一顆都沒有）就一個都不清，剛登記的也先留著。
-pub async fn prune_dead_claims(app: &impl crate::capabilities::Db, host: &str, live_panes: &[String]) {
-    if live_panes.is_empty() {
-        return;
-    }
+pub async fn prune_dead_claims(app: &impl crate::capabilities::Db, host: &str, session: &str, live_panes: &[String]) {
     let young = (chrono::Utc::now() - chrono::Duration::seconds(CLAIM_GRACE_SECS)).to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
-    let rows: Vec<(String,)> = sqlx::query_as("SELECT pane_id FROM spawn_claims WHERE host = ? AND created_at < ?")
+    prune_dead_claims_before(app, host, session, live_panes, &young).await;
+}
+
+/// The explicit cutoff keeps session-pruning tests independent of the wall clock.
+pub async fn prune_dead_claims_before(app: &impl crate::capabilities::Db, host: &str, session: &str, live_panes: &[String], young: &str) {
+    if live_panes.is_empty() { return; }
+    let rows: Vec<(String,)> = sqlx::query_as("SELECT pane_id FROM spawn_claims WHERE host = ? AND herdr_session = ? AND created_at < ?")
         .bind(host)
-        .bind(&young)
+        .bind(session)
+        .bind(young)
         .fetch_all(app.db())
         .await
         .unwrap_or_default();
     for (pane_id,) in rows.into_iter().filter(|(p,)| !live_panes.contains(p)) {
-        let _ = sqlx::query("DELETE FROM spawn_claims WHERE host = ? AND pane_id = ?").bind(host).bind(&pane_id).execute(app.db()).await;
+        let _ = sqlx::query("DELETE FROM spawn_claims WHERE host = ? AND herdr_session = ? AND pane_id = ?").bind(host).bind(session).bind(&pane_id).execute(app.db()).await;
     }
 }

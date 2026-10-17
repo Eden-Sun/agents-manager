@@ -202,7 +202,8 @@ CREATE TABLE IF NOT EXISTS spawn_hints (
 -- 認領後不消耗、也不照 10 分鐘過期，pane 還活著就一直算數（改名不換 parent；見 `spawn_hints::claim`）。
 CREATE TABLE IF NOT EXISTS spawn_claims (
   pane_id TEXT NOT NULL, host TEXT NOT NULL, bot_id TEXT NOT NULL REFERENCES bots(id),
-  created_at TEXT NOT NULL, PRIMARY KEY(host, pane_id)
+  parent_run_id TEXT, herdr_session TEXT NOT NULL DEFAULT '',
+  created_at TEXT NOT NULL, PRIMARY KEY(host, herdr_session, pane_id)
 );
 -- 預覽模式（issue #253）：頂層 bot 的專案起的 vite dev server。一顆 bot 一列；`status` 是 off／starting／running／failed，
 -- `pane_id` 是放在該 bot 那個 tab 裡的 service pane，`off` 時是 NULL、`port` 也不再算被佔用。
@@ -455,6 +456,8 @@ pub const SCHEMA_HISTORY: &[(i64, &str)] = &[
     (64, "18d72ba10ff77a10"),
     // issue #1790：`spawn_claims`（shim 登記「這個 pane 是 bot 開的」，子 agent 歸屬以它為準、改名不換 parent）。
     (65, "243128a550c2ec96"),
+    // issue #1793: scope spawn claims to the parent run and herdr session.
+    (66, "47e922c6f2ab97d9"),
 ];
 pub const SCHEMA_VERSION: i64 = SCHEMA_HISTORY[SCHEMA_HISTORY.len() - 1].0;
 
@@ -589,6 +592,17 @@ async fn apply_migrations_inner(pool: &SqlitePool, fail_after_spawn_hints_drop: 
     // issue #635: pane ids are allocated independently by each herdr host. v29 keyed this
     // table globally by pane_id; rebuild transactionally so same-id hints on different hosts coexist.
     rebuild_spawn_hints_host_key(&mut tx, fail_after_spawn_hints_drop).await?;
+    // v66: pane IDs are scoped to herdr sessions. Old claims lack run/session proof and remain unknown.
+    if !has_column(&mut *tx, "spawn_claims", "parent_run_id").await? {
+        sqlx::query("CREATE TABLE spawn_claims_scoped (
+            pane_id TEXT NOT NULL, host TEXT NOT NULL, bot_id TEXT NOT NULL REFERENCES bots(id),
+            parent_run_id TEXT, herdr_session TEXT NOT NULL DEFAULT '',
+            created_at TEXT NOT NULL, PRIMARY KEY(host, herdr_session, pane_id))").execute(&mut *tx).await?;
+        sqlx::query("INSERT INTO spawn_claims_scoped (pane_id,host,bot_id,created_at)
+            SELECT pane_id,host,bot_id,created_at FROM spawn_claims").execute(&mut *tx).await?;
+        sqlx::query("DROP TABLE spawn_claims").execute(&mut *tx).await?;
+        sqlx::query("ALTER TABLE spawn_claims_scoped RENAME TO spawn_claims").execute(&mut *tx).await?;
+    }
     // Additive columns for databases created before they existed.
     for (table, col, ddl) in [
         // 2026-09-14: daemon 對這個 pane 直接打過字（當場套用 slash、codex 選單、/login）。之後這個

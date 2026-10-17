@@ -1,5 +1,5 @@
-//! The `herdr` PATH shim (SPEC §6.5b): enforces `<parent>-<suffix>` child names (agents forget
-//! the persona rule) and passes account/hook env down, since herdr's *server* spawns panes and
+//! The `herdr` PATH shim (SPEC §6.5b): supplies display names and passes stable parent IDs
+//! and account/hook env down, since herdr's *server* spawns panes and
 //! a child inherits nothing.
 
 use std::path::{Path, PathBuf};
@@ -65,7 +65,7 @@ am_curl_bot() {
     printf 'X-AM-Bot-Token: %s\n' "$_tok" | curl -H @- "$@"
 }
 
-# 子 agent 的標記（使用者 2026-09-30）：bot 開出來的 pane 一律帶 `AM_CHILD_OF=<母 agent 名>`，
+# 子 agent 的標記（使用者 2026-09-30）：bot 開出來的 pane 一律帶 `AM_CHILD_OF=<母 bot_id>`，
 # 子代自己再開的 pane 沿用同一個值（不往下疊）。有這個值的 pane 就是子 agent，`agent start` 直接拒絕：
 # 子 agent 不再有子 agent，要人手由 parent 決定另派兄弟，狀態才都掛在同一層被追蹤。
 # 呼叫者自帶的 `--env AM_CHILD_OF=…` 一律剝掉（清掉它就能繞過），只認這裡算出來的值。
@@ -73,7 +73,7 @@ am_child_of_value() {
     if [ -n "${AM_CHILD_OF:-}" ]; then
         printf '%s' "$AM_CHILD_OF"
     elif [ -n "${AM_BOT_ID:-}" ]; then
-        printf '%s' "${AM_AGENT_NAME:-${AM_BOT_ID}}"
+        printf '%s' "${AM_BOT_ID}"
     fi
 }
 
@@ -228,22 +228,23 @@ am_spawn_claim() {
         if [ -n "$(am_bot_token)" ] && command -v curl >/dev/null 2>&1; then
             _cout=$(am_curl_bot -s -m 2 -w '\n%{http_code}' -X POST "http://127.0.0.1:${AM_PORT}/relay/spawn/claim" \
                 --data-urlencode "bot_id=${AM_BOT_ID}" \
-                --data-urlencode "pane_id=${_cpane}" 2>/dev/null)
+                --data-urlencode "pane_id=${_cpane}" \
+                --data-urlencode "parent_run_id=${AM_RUN_ID:-}" 2>/dev/null)
             [ "$(printf '%s\n' "$_cout" | tail -n 1)" = 200 ] && return 0
         fi
-        printf 'agents-manager: 子 agent 開成功了，但向 daemon 登記 pane %s 失敗；歸屬會退回名字推斷\n' "$_cpane" >&2
+        printf 'agents-manager: 子 agent 開成功了，但向 daemon 登記 pane %s 失敗；歸屬保持未知\n' "$_cpane" >&2
         return 0
     fi
     _sd="$HOME/.config/agents-manager${AM_INSTANCE:+/instances/$AM_INSTANCE}/bots/${AM_BOT_ID}"
     if [ -d "$_sd" ] && command -v python3 >/dev/null 2>&1 \
-        && python3 - "$_sd/hook-spool.d" "$AM_BOT_ID" "${AM_KIND:-claude}" "$_cpane" <<'AMPY' >/dev/null 2>&1
+        && python3 - "$_sd/hook-spool.d" "$AM_BOT_ID" "${AM_KIND:-claude}" "$_cpane" "${AM_RUN_ID:-}" <<'AMPY' >/dev/null 2>&1
 import datetime, json, os, sys, tempfile, time
-sd, bot, kind, pane = sys.argv[1:5]
+sd, bot, kind, pane, run = sys.argv[1:6]
 os.makedirs(sd, exist_ok=True)
 now = datetime.datetime.now(datetime.timezone.utc).isoformat(timespec="milliseconds").replace("+00:00", "Z")
-body = {"bot_id": bot, "provider": kind, "truncated": False, "run_id": "",
+body = {"bot_id": bot, "provider": kind, "truncated": False, "run_id": run,
         "received_at": now,
-        "payload": {"hook_event_name": "AmSpawnClaim", "pane_id": pane}}
+        "payload": {"hook_event_name": "AmSpawnClaim", "pane_id": pane, "parent_run_id": run}}
 fd, tmp = tempfile.mkstemp(prefix=".tmp.", dir=sd)
 with os.fdopen(fd, "w") as f:
     f.write(json.dumps(body, ensure_ascii=False) + "\n")
@@ -252,7 +253,7 @@ AMPY
     then
         return 0
     fi
-    printf 'agents-manager: 子 agent 開成功了，但寫不進 spool 登記 pane %s；歸屬會退回名字推斷\n' "$_cpane" >&2
+    printf 'agents-manager: 子 agent 開成功了，但寫不進 spool 登記 pane %s；歸屬保持未知\n' "$_cpane" >&2
     return 0
 }
 
@@ -303,7 +304,7 @@ am_child_name() {
             esac
             ;;
     esac
-    printf 'agents-manager: 子 agent 已改名為 `%s`，才會掛在 `%s` 底下被追蹤\n' "$_full" "$AM_AGENT_NAME" >&2
+    printf 'agents-manager: 子 agent 已改名為 `%s`，（母 bot 顯示名 `%s`）\n' "$_full" "$AM_AGENT_NAME" >&2
     printf '%s' "$_full"
 }
 
@@ -368,36 +369,11 @@ am_kv_get() {
     return 1
 }
 
-# `herdr agent rename <目標> <新名字>|--clear`（issue #1789）：fork 出來的 bot 會把子 agent 改名回原 bot 的前綴，
-# `agent start` 補前綴的規則不經這裡，daemon 就把它掛到原 bot 底下。只管 bot 自己的 pane（`AM_AGENT_NAME` 有值、沒有 `AM_CHILD_OF`）：
-# 新名字不是 `$AM_AGENT_NAME-` 開頭就 exit 2、不呼叫 herdr；`--clear` 沒有新名字，照舊轉發。
+# Names are display strings; changing one cannot change the durable spawn claim.
 am_agent_rename() {
-    if [ -z "${AM_AGENT_NAME:-}" ] || [ -n "${AM_CHILD_OF:-}" ]; then
-        exec "$AM_HERDR" "$@"
-    fi
-    # 位置參數：`agent rename` 之後第一個是目標、第二個才是新名字；旗標（`--clear`）不算。
-    _i=0
-    _n=0
-    _new=""
-    for _a in "$@"; do
-        _i=$((_i + 1))
-        [ "$_i" -le 2 ] && continue
-        case "$_a" in
-            -*) continue ;;
-        esac
-        _n=$((_n + 1))
-        [ "$_n" -eq 2 ] && _new=$_a
-    done
-    case "$_new" in
-        "" | "$AM_AGENT_NAME"-*) exec "$AM_HERDR" "$@" ;;
-    esac
-    printf 'agents-manager: 你的 agent 名稱是 `%s`，子 agent 只能叫 `%s-<字尾>`；`%s` 是別的 bot 的前綴（多半是 fork 前那顆），沒有改名\n' "$AM_AGENT_NAME" "$AM_AGENT_NAME" "$_new" >&2
-    exit 2
+    exec "$AM_HERDR" "$@"
 }
 
-# `herdr agent start [flags] <name> …` — rewrite the first bare word after `start`, which is
-# the agent name. Flags may come first, so skip options and the values of the ones that take
-# one, and stop at `--` (everything after it is the agent's own argv).
 am_agent_start() {
     shift 2
     # `--help` 只是查用法：不開 pane、不補 env。以前照樣走 spawn 流程，env 補送就打進呼叫者自己的 pane（目標預設是 ${HERDR_PANE_ID}）。
@@ -758,16 +734,36 @@ am_agent_prompt() {
     case "${1:-}" in
         -* | "")
             # 旗標在名字前面（或根本沒給名字）：交給真的 herdr 去講清楚，我們不猜。
-            exec "$AM_HERDR" agent prompt "$@"
+            am_announce_refuse 75 "${1:-}" "put a pane_id or bot:<bot_id> before flags"
             ;;
     esac
-    _name=$1
+    _requested=$1
     shift
-    # 原名本來就存在（AGM、其他頂層 bot、pane id）就照原名送；硬補前綴只會變成 unknown_target，
-    # 訊息沒送到、stderr 還說「已改名」。找不到才當成自己的子 agent 補前綴。
-    if ! "$AM_HERDR" agent get "$_name" >/dev/null 2>&1; then
-        _name=$(am_child_name "$_name") || exit $?
-    fi
+    _name=""
+    # Explicit IDs never go through name lookup. A bot ID needs daemon routing; remote callers use pane IDs.
+    case "$_requested" in
+        bot:*)
+            [ -n "${AM_PORT:-}" ] || am_announce_refuse 75 "$_requested" "bot_id requires daemon resolution; use pane_id on remote hosts"
+            _name=$_requested
+            ;;
+        *:p*) _name=$_requested ;;
+        *)
+            command -v python3 >/dev/null 2>&1 || am_announce_refuse 75 "$_requested" "cannot freeze a name without a JSON parser"
+            _candidate=$(am_child_name "$_requested" 2>/dev/null) || am_announce_refuse 75 "$_requested" "cannot select a child display name"
+            # Child shorthand first: a stranger holding the short name must not steal the prompt.
+            for _target in "$_candidate" "$_requested"; do
+                _agent_json=$("$AM_HERDR" agent get "$_target" 2>/dev/null) || continue
+                _name=$(printf '%s' "$_agent_json" | python3 -c 'import json,sys
+try:
+    pane=json.load(sys.stdin)["result"]["agent"]["pane_id"]
+    assert isinstance(pane,str) and pane and not any(ord(c)<33 or ord(c)==127 for c in pane)
+    print(pane)
+except Exception: sys.exit(1)' 2>/dev/null) || _name=""
+                [ -z "$_name" ] || break
+            done
+            [ -n "$_name" ] || am_announce_refuse 75 "$_requested" "no stable pane_id evidence; use pane_id or bot:<bot_id>"
+            ;;
+    esac
     # 我們自己的旗標（SPEC §18.15）：`--ack`（純告知，不叫醒 AGM）、`--reply-to <id>`（回哪一則事件／交辦）。
     # 真的 herdr 不認得，一律剝掉；沒帶就是新的事，AGM 會被叫醒。
     _to_pane_id=""
@@ -889,6 +885,9 @@ am_agent_prompt() {
                             _name=$_pane
                             ;;
                         '{}') : ;;
+                        *'"target_pane_id":'*)
+                            _name=$(printf '%s' "$_resp" | python3 -c 'import json,sys; print(json.load(sys.stdin)["target_pane_id"])') || exit 75
+                            ;;
                         *) am_announce_refuse 75 "$_name" "daemon 回了看不懂的內容：$(printf '%s' "$_resp" | cut -c1-200)" ;;
                     esac
                     ;;
@@ -910,6 +909,7 @@ am_agent_prompt() {
             am_spool_relay "$_name" "$_text"
         fi
     fi
+    case "$_name" in bot:*) am_announce_refuse 75 "$_name" "daemon did not resolve bot_id to a pane" ;; esac
     exec "$AM_HERDR" agent prompt "$_name" "$@"
 }
 

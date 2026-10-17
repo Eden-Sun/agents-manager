@@ -178,9 +178,11 @@
         let env = crate::testing::env().await;
         let first = crate::testing::claude_bot(&env.app, &env.project_id, "alfa").await;
         let second = crate::testing::claude_bot(&env.app, &env.project_id, "bravo").await;
+        crate::testing::fake_run(&env.app, &first.id).await;
+        crate::testing::fake_run(&env.app, &second.id).await;
         let old = (chrono::Utc::now() - chrono::Duration::seconds(MAX_AGE_SECS * 100)).to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
-        sqlx::query("INSERT INTO spawn_claims (pane_id, host, bot_id, created_at) VALUES ('w1:p2', 'local', ?, ?)")
-            .bind(&first.id)
+        claim(&env.app, &first.id, "w1:p2").await.unwrap();
+        sqlx::query("UPDATE spawn_claims SET created_at=? WHERE pane_id='w1:p2'")
             .bind(&old)
             .execute(&env.app.db)
             .await
@@ -199,24 +201,92 @@
     async fn dead_claims_are_pruned_but_young_and_live_ones_stay() {
         let env = crate::testing::env().await;
         let bot = crate::testing::claude_bot(&env.app, &env.project_id, "alfa").await;
+        crate::testing::fake_run(&env.app, &bot.id).await;
         let old = (chrono::Utc::now() - chrono::Duration::seconds(CLAIM_GRACE_SECS + 60)).to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
         for pane in ["w1:live", "w1:dead"] {
-            sqlx::query("INSERT INTO spawn_claims (pane_id, host, bot_id, created_at) VALUES (?, 'local', ?, ?)")
-                .bind(pane)
-                .bind(&bot.id)
+            claim(&env.app, &bot.id, pane).await.unwrap();
+            sqlx::query("UPDATE spawn_claims SET created_at=? WHERE pane_id=?")
                 .bind(&old)
+                .bind(pane)
                 .execute(&env.app.db)
                 .await
                 .unwrap();
         }
         claim(&env.app, &bot.id, "w1:young").await.unwrap();
 
-        prune_dead_claims(&env.app, crate::config::LOCAL_HOST, &[]).await;
+        prune_dead_claims(&env.app, crate::config::LOCAL_HOST, "test", &[]).await;
         assert_eq!(claims_for_host(&env.app, crate::config::LOCAL_HOST).await.unwrap().len(), 3, "snapshot 是空的一個都不清");
 
-        prune_dead_claims(&env.app, crate::config::LOCAL_HOST, &["w1:live".to_string(), "w1:other".to_string()]).await;
+        prune_dead_claims(&env.app, crate::config::LOCAL_HOST, "test", &["w1:live".to_string(), "w1:other".to_string()]).await;
         let left = claims_for_host(&env.app, crate::config::LOCAL_HOST).await.unwrap();
         let mut panes: Vec<&str> = left.keys().map(String::as_str).collect();
         panes.sort();
         assert_eq!(panes, ["w1:live", "w1:young"], "死掉的清掉，活著的與剛登記的留著");
+    }
+
+    #[tokio::test]
+    async fn nr_claim_legacy_and_previous_run_claims_are_unknown() {
+        let env = crate::testing::env().await;
+        let bot = crate::testing::claude_bot(&env.app, &env.project_id, "original").await;
+        let run = crate::testing::fake_run(&env.app, &bot.id).await;
+        sqlx::query("UPDATE runs SET herdr_session='session-a' WHERE id=?").bind(&run).execute(&env.app.db).await.unwrap();
+        sqlx::query("INSERT INTO spawn_claims (pane_id,host,bot_id,created_at) VALUES ('legacy','local',?,'2000-01-01T00:00:00.000Z')")
+            .bind(&bot.id).execute(&env.app.db).await.unwrap();
+        assert!(claims_for_host(&env.app, "local").await.unwrap().is_empty(), "legacy claims have no generation evidence");
+        claim(&env.app, &bot.id, "w1:p2").await.unwrap();
+        sqlx::query("UPDATE bots SET name='renamed' WHERE id=?").bind(&bot.id).execute(&env.app.db).await.unwrap();
+        let _reused_name = crate::testing::claude_bot(&env.app, &env.project_id, "original").await;
+        assert_eq!(claims_for_host(&env.app, "local").await.unwrap().get("w1:p2"), Some(&bot.id));
+        sqlx::query("UPDATE runs SET state='stopped' WHERE id=?").bind(&run).execute(&env.app.db).await.unwrap();
+        let next = crate::testing::fake_run(&env.app, &bot.id).await;
+        sqlx::query("UPDATE runs SET herdr_session='session-a' WHERE id=?").bind(next).execute(&env.app.db).await.unwrap();
+        assert!(claims_for_host(&env.app, "local").await.unwrap().is_empty(), "pane IDs from a previous run must not be reused");
+    }
+
+    #[tokio::test]
+    async fn nr_claim_sessions_do_not_overwrite_or_prune_each_other() {
+        let env = crate::testing::env().await;
+        let first = crate::testing::claude_bot(&env.app, &env.project_id, "first").await;
+        let second = crate::testing::claude_bot(&env.app, &env.project_id, "second").await;
+        for (bot, session) in [(&first, "session-a"), (&second, "session-b")] {
+            let run = crate::testing::fake_run(&env.app, &bot.id).await;
+            sqlx::query("UPDATE runs SET herdr_session=? WHERE id=?").bind(session).bind(run).execute(&env.app.db).await.unwrap();
+            claim(&env.app, &bot.id, "w1:p2").await.unwrap();
+        }
+        for (session, bot) in [("session-a", &first), ("session-b", &second)] {
+            assert_eq!(claims_for_session(&env.app, "local", session).await.unwrap().get("w1:p2"), Some(&bot.id));
+        }
+        sqlx::query("UPDATE spawn_claims SET created_at='2000-01-01T00:00:00.000Z'").execute(&env.app.db).await.unwrap();
+        prune_dead_claims_before(&env.app, "local", "session-a", &["w1:other".into()], "2001-01-01T00:00:00.000Z").await;
+        assert!(claims_for_session(&env.app, "local", "session-a").await.unwrap().is_empty());
+        assert_eq!(claims_for_session(&env.app, "local", "session-b").await.unwrap().get("w1:p2"), Some(&second.id));
+    }
+
+    #[tokio::test]
+    async fn nr_claim_v65_migration_keeps_unscoped_rows_unknown() {
+        let env = crate::testing::env().await;
+        let bot = crate::testing::claude_bot(&env.app, &env.project_id, "migration").await;
+        crate::testing::fake_run(&env.app, &bot.id).await;
+        sqlx::query("DROP TABLE spawn_claims").execute(&env.app.db).await.unwrap();
+        sqlx::query("CREATE TABLE spawn_claims (
+            pane_id TEXT NOT NULL, host TEXT NOT NULL, bot_id TEXT NOT NULL REFERENCES bots(id),
+            created_at TEXT NOT NULL, PRIMARY KEY(host,pane_id))").execute(&env.app.db).await.unwrap();
+        sqlx::query("INSERT INTO spawn_claims VALUES ('w1:p2','local',?,'2000-01-01T00:00:00.000Z')")
+            .bind(&bot.id).execute(&env.app.db).await.unwrap();
+        crate::runners::am_base_tests::apply_migrations(&env.app.db).await.unwrap();
+        assert!(claims_for_host(&env.app,"local").await.unwrap().is_empty());
+        claim(&env.app, &bot.id, "w1:p2").await.unwrap();
+        assert_eq!(claims_for_session(&env.app,"local","test").await.unwrap().get("w1:p2"), Some(&bot.id));
+    }
+
+    #[tokio::test]
+    async fn nr_claim_missing_session_or_wrong_run_never_creates_ownership() {
+        let env = crate::testing::env().await;
+        let bot = crate::testing::claude_bot(&env.app, &env.project_id, "unknown").await;
+        let run = crate::testing::fake_run(&env.app, &bot.id).await;
+        assert!(claim_for_run(&env.app, &bot.id, "previous-run", "w1:p2").await.is_err());
+        sqlx::query("UPDATE runs SET herdr_session=NULL WHERE id=?").bind(&run).execute(&env.app.db).await.unwrap();
+        assert!(claim_for_run(&env.app, &bot.id, &run, "w1:p2").await.is_err());
+        let n: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM spawn_claims").fetch_one(&env.app.db).await.unwrap();
+        assert_eq!(n, 0);
     }
