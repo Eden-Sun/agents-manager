@@ -889,8 +889,8 @@ function Composer({
         text={text}
         attachments={files.ids}
         attachmentsBlocked={files.uploading ? 'uploading' : files.failed ? 'failed' : null}
-        onSent={() => {
-          setText('')
+        onSent={(textUntouched) => {
+          if (textUntouched) setText('')
           files.clear()
         }}
       />
