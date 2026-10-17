@@ -9,6 +9,7 @@ import { popDecision } from '../lib/popGuard'
 import { buildRoute, parseRoute, screenKey, type Route } from '../lib/routes'
 import { settingsBlocksLeave } from '../lib/settingsLeaveGuard'
 import { useStore, type StoreState } from './store'
+import { userNavCount } from './userNav'
 
 /** 預覽分頁只給頂層 bot（issue #253）；`ChatPanel` 與網址還原共用這條。 */
 export function isTopLevelBot(b: { parent_bot_id: string | null; managed_by: string } | undefined): boolean {
@@ -67,8 +68,8 @@ let applying = false
 let navGen = 0
 /** 路由正在寫 store（見 `write`）。 */
 let writing = false
-/** 上一次看到的路由，用來判斷選取有沒有變。 */
-let seenKey = ''
+/** 上一次看到的使用者導覽計數（見 `store/userNav.ts`）。 */
+let seenNav = 0
 let lastRoute: Route = { kind: 'home' }
 let drawerOpen = false
 let closeDrawer: (() => void) | null = null
@@ -101,6 +102,7 @@ function write(fn: () => void) {
     fn()
   } finally {
     writing = false
+    seenNav = userNavCount()
   }
 }
 
@@ -215,15 +217,16 @@ export function startRouteSync() {
   started = true
   const initial = parseRoute(location.pathname)
   lastRoute = initial
-  seenKey = JSON.stringify(routeOf(useStore.getState()))
+  seenNav = userNavCount()
   window.addEventListener('popstate', onPop)
 
   let pending: Route | null = initial
   useStore.subscribe((s) => {
-    const key = JSON.stringify(routeOf(s))
-    if (key !== seenKey) {
-      seenKey = key
-      // 不是路由自己寫的選取變動就是使用者導覽（點 bot、切分頁、關 shell…）：還沒回來的套用作廢，網址跟著新的選取走。
+    // 使用者導覽（點 bot、切分頁、關 shell…）才作廢還沒回來的套用，網址跟著新的選取走。
+    // 還原／刷新直接寫選取不算：開機深連結在途時 localStorage 還原不會蓋掉它（#1808）。
+    const nav = userNavCount()
+    if (nav !== seenNav) {
+      seenNav = nav
       if (!writing) {
         navGen++
         applying = false
