@@ -33,7 +33,7 @@ check "share::tests::trusted::" "crates/am-share/src/share/trusted_tests.rs"
 check "share::portal::upload_tests::" "crates/am-share/src/share/portal_upload_tests.rs"
 # 模組自己（含子目錄）沒有測試：照檔名推的字串會選到零個，退到上一層（#1338）。
 check "share::" "crates/am-share/src/share/store.rs"
-check "lifecycle::" "crates/am-lifecycle/src/lifecycle/dead_panes.rs"
+check "lifecycle::" "crates/am-lifecycle/src/lifecycle/codex_steer.rs"
 check "runners::supervisor::" "daemon/src/runners/supervisor/health.rs"
 # 檔案自己沒有測試、但同名子目錄有測試：不退，留在這一層（runners::supervisor:: 底下有測試）。
 check "runners::supervisor::" "daemon/src/runners/supervisor.rs"

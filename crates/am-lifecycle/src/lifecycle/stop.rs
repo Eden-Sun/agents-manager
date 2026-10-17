@@ -227,7 +227,13 @@ async fn stop_locked_body(
             Some(p) => Some(client.pane_get(p).await),
             None => None,
         };
-        if matches!(agent, Ok(None)) || matches!(pane, Some(Ok(None))) {
+        // A missing agent binding alone does not prove exit when the pane is unreadable.
+        let confirmed_gone = match pane {
+            Some(Ok(None)) => true,
+            Some(Ok(Some(pane))) => pane.agent.is_none() && matches!(agent, Ok(None)),
+            _ => false,
+        };
+        if confirmed_gone {
             gone = true;
             break;
         }
@@ -437,7 +443,8 @@ pub async fn finish_stop(app: &impl StopContext, run_id: &str) {
 /// stop (if running) + start. Used to make edited `model` / `args` / `identity` / `env` take effect.
 pub async fn run_alive(app: &(impl crate::capabilities::Db + crate::capabilities::HerdrRoutes + crate::hosts::HostsAccess), run: &db::Run, bot: &db::Bot) -> bool {
     let target = db::run_target(run, bot);
-    if target.is_empty() { return true; }
+    // Without a pane ID, do not report the launch as live; recover the orphaned starting row.
+    if target.is_empty() { return false; }
     let pane = target.as_str();
     let Ok(client) = client_for_run(app, run).await else { return true };
     if super::dead_panes::pane_id_reused(&client, run).await { return false; }
