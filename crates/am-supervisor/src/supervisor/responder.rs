@@ -223,8 +223,9 @@ pub async fn ensure_env(
                 Some(id) => proj.bots.iter().position(|b| b.id.as_ref() == Some(id)),
                 // 還沒記過 bot：這時找到的專案只會是 daemon 自己目錄裡的那一個，同名的 `AGM-responder` 只可能是上一次設定寫進 config、
                 // 還沒來得及記進角色列就失敗的那一顆——接著用它（issue #181）。當成別人的回 `name_taken`，就永遠設定不起來。
-                // 只認 setup 自己留了記號的那一顆（`bot_requests::ROLE_SETUP_MARK_PREFIX`）：同名但沒記號的是別人建的。
-                None => proj.bots.iter().position(|b| b.name == BOT_NAME && b.create_request_id.as_deref() == Some(super::bot_requests::ROLE_SETUP_MARK_PREFIX_RESPONDER)),
+                // 只認 setup 自己留了記號的那一顆（`bot_requests::ROLE_SETUP_MARK_PREFIX`），不看名字：同名但沒記號的是別人建的，
+                // 而這顆被使用者改了名之後重跑也要找得回來。
+                None => proj.bots.iter().position(|b| b.create_request_id.as_deref() == Some(super::bot_requests::ROLE_SETUP_MARK_PREFIX_RESPONDER)),
             };
             let bidx = match bidx {
                 Some(i) => i,
@@ -1065,6 +1066,48 @@ mod tests {
             app.cfg.get().await.projects.iter().flat_map(|p| p.bots.iter()).filter(|b| b.name == BOT_NAME).filter_map(|b| b.id.clone()).collect();
         assert_eq!(named, vec![bot_id.clone()], "接著用上一次寫進去的那一顆，不另外長一顆");
         assert_eq!(roles::get(&app.db, Role::Responder).await.unwrap().bot_id.as_deref(), Some(bot_id.as_str()));
+    }
+
+    /// 名稱不當參照：做到一半失敗之後那顆 `AGM-responder` 被改名，重跑仍靠記號找回它（同 `setup` 那條）。
+    #[tokio::test]
+    async fn a_half_made_responder_is_found_by_its_mark_even_after_a_rename() {
+        let env = crate::testing::env().await;
+        let app = env.app.clone();
+        let row = roles::get(&app.db, Role::Responder).await.unwrap();
+        app.tools.lock().await.insert(
+            crate::config::LOCAL_HOST.to_string(),
+            crate::tools::HostTools {
+                tools: Default::default(),
+                identities: Default::default(),
+                shell_identities: vec![crate::config::IdentityCfg { name: row.identity.clone(), kind: "claude".into(), host: None, env: Default::default(), args: vec![] }],
+                utc_offset_secs: None, herdr_cli: None, checked_at: crate::db::now(),
+            },
+        );
+        let bin = dir(&app).join("bin");
+        std::fs::create_dir_all(dir(&app)).unwrap();
+        std::fs::write(&bin, "not a directory").unwrap();
+        assert!(ensure_env(&app, None, None, None).await.is_err(), "前提：做到一半失敗");
+        std::fs::remove_file(&bin).unwrap();
+
+        let half_made = app.cfg.get().await.projects.iter().flat_map(|p| p.bots.iter()).find(|b| b.name == BOT_NAME).and_then(|b| b.id.clone()).expect("config 已寫進協調者");
+        let id = half_made.clone();
+        app.cfg
+            .update(move |cfg| {
+                for b in cfg.projects.iter_mut().flat_map(|p| p.bots.iter_mut()) {
+                    if b.id.as_deref() == Some(id.as_str()) {
+                        b.name = "使用者改的名".into();
+                    }
+                }
+                Ok(())
+            })
+            .await
+            .unwrap();
+        crate::projection::project_config(&app.cfg, &app.db).await.unwrap();
+
+        let (_, bot_id, _) = ensure_env(&app, None, None, None).await.map_err(|e| format!("{e:?}")).expect("改名後重跑要能做完");
+        assert_eq!(bot_id, half_made, "靠記號找回改名後的那一顆");
+        let total: usize = app.cfg.get().await.projects.iter().flat_map(|p| p.bots.iter()).count();
+        assert_eq!(total, 1, "沒有另外長一顆");
     }
 
     /// config 上一顆 bot 的最小樣子（`toml::from_str` 省得把每個欄位寫一遍）。
