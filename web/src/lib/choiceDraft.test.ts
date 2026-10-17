@@ -1,7 +1,7 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
-import { commit, moveTab, pageNeedsCommit, preload, radioPick, samePage, togglesFor, wantOf, type Io } from './choiceDraft.ts'
-import { parseChoiceMenu, typedAnswerHere } from './tuiChoices.ts'
+import { commit, locate, moveTab, pageNeedsCommit, preload, radioPick, samePage, togglesFor, wantOf, type Draft, type DraftPage, type Io } from './choiceDraft.ts'
+import { parseChoiceMenu, typedAnswerHere, type TuiChoiceMenu, type TuiTab } from './tuiChoices.ts'
 
 /**
  * 假的 claude 問卷 TUI（兩題複選＋送出頁），版型照抄 `carbis-multiselect.txt`。
@@ -838,4 +838,107 @@ test('最後一顆 Enter 沒被吃掉：回一句看得懂的錯誤，不是靜�
   )
   assert.equal(res.ok, false)
   assert.match(res.error ?? '', /Submit answers/)
+})
+
+/** 翻頁偵測（2026-10-17，#1816）：兩頁題目都切掉（null）或問句相同時，只靠題目分不出換頁。 */
+const PAGE_TABS: TuiTab[] = [
+  { label: 'server', done: false, submit: false },
+  { label: 'client', done: false, submit: false },
+  { label: 'Submit', done: false, submit: true },
+]
+
+function pageMenu(tab: number, question: string | null, option: string): TuiChoiceMenu {
+  return {
+    question,
+    context: [],
+    command: [],
+    commandCut: false,
+    notes: [],
+    choices: [
+      { number: 1, title: `${option} A`, detail: '', preview: '', current: false, checked: null },
+      { number: 2, title: `${option} B`, detail: '', preview: '', current: false, checked: null },
+    ],
+    cursor: 0,
+    footer: false,
+    multi: false,
+    tabs: PAGE_TABS,
+    tabAt: tab,
+    review: [],
+    submit: null,
+  }
+}
+
+/** 假 TUI：`moves` 內的鍵才真的換頁（右為 +1、左為 -1），其餘鍵沒反應。 */
+function pagedIo(pages: TuiChoiceMenu[], start: number, moves: string[]) {
+  const sent: string[] = []
+  let at = start
+  const io: Io = {
+    read: async () => pages[at],
+    send: async (keys) => {
+      sent.push(...keys)
+      if (!moves.includes(keys[0])) return
+      const step = keys[0] === 'right' || keys[0] === 'tab' ? 1 : -1
+      at = Math.max(0, Math.min(pages.length - 1, at + step))
+    },
+    wait: async () => {},
+    paste: async () => {},
+  }
+  return { io, sent }
+}
+
+const reviewPage = (): TuiChoiceMenu => ({ ...pageMenu(2, null, 'review'), review: [{ question: 'server', answer: 'A' }] })
+
+test('#1816 題目切掉（兩頁都是 null）：按 right 已換頁就停在第 2 頁，不補 tab 跳過第 2 題', async () => {
+  const pages = [pageMenu(0, null, 'server'), pageMenu(1, null, 'client'), reviewPage()]
+  const { io, sent } = pagedIo(pages, 0, ['right', 'tab'])
+  const got = await moveTab(io, 1, pages[0])
+  assert.equal(got?.tabAt, 1)
+  assert.deepEqual(sent, ['right'])
+})
+
+test('#1816 兩題問句相同、選項不同：按 right 已換頁就停在第 2 頁，不補 tab', async () => {
+  const pages = [pageMenu(0, 'Pick one?', 'server'), pageMenu(1, 'Pick one?', 'client'), reviewPage()]
+  const { io, sent } = pagedIo(pages, 0, ['right', 'tab'])
+  const got = await moveTab(io, 1, pages[0])
+  assert.equal(got?.tabAt, 1)
+  assert.deepEqual(sent, ['right'])
+})
+
+test('#1816 真的沒換頁（有問句）：right 沒反應才照舊補 tab，tab 換頁就回傳', async () => {
+  const pages = [pageMenu(0, 'Pick one?', 'server'), pageMenu(1, 'Pick one?', 'client'), reviewPage()]
+  const { io, sent } = pagedIo(pages, 0, ['tab'])
+  const got = await moveTab(io, 1, pages[0])
+  assert.equal(got?.tabAt, 1)
+  assert.deepEqual(sent, ['right', 'tab'])
+})
+
+test('#1816 題目切掉又沒換頁：分不出是翻了還是沒翻，不補 tab，回 null', async () => {
+  const pages = [pageMenu(0, null, 'server'), pageMenu(1, null, 'client'), reviewPage()]
+  const { io, sent } = pagedIo(pages, 0, [])
+  assert.equal(await moveTab(io, 1, pages[0]), null)
+  assert.deepEqual(sent, ['right'])
+})
+
+test('#1816 locate：同問句、同選項數、選項不同，靠選項認出是哪一頁', () => {
+  const draft: Draft = {
+    pages: [0, 1].map((tab) => {
+      const m = pageMenu(tab, 'Pick one?', tab === 0 ? 'server' : 'client')
+      const page: DraftPage = { tab, label: PAGE_TABS[tab].label, question: m.question, choices: m.choices, multi: false, hasSubmitRow: false, review: [], isSubmit: false }
+      return page
+    }),
+    startTab: 0,
+    tabs: PAGE_TABS,
+  }
+  assert.equal(locate(draft, pageMenu(1, 'Pick one?', 'client')), 1)
+  assert.equal(locate(draft, pageMenu(0, 'Pick one?', 'server')), 0)
+})
+
+test('#1816 locate：兩頁完全一樣分不出來時回 null，不猜第一頁', () => {
+  const pages = [0, 1].map((tab) => {
+    const m = pageMenu(tab, 'Pick one?', 'same')
+    const page: DraftPage = { tab, label: PAGE_TABS[tab].label, question: m.question, choices: m.choices, multi: false, hasSubmitRow: false, review: [], isSubmit: false }
+    return page
+  })
+  const draft: Draft = { pages, startTab: 0, tabs: PAGE_TABS }
+  assert.equal(locate(draft, pageMenu(1, 'Pick one?', 'same')), null)
 })
