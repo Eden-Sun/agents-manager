@@ -821,12 +821,14 @@ export const CODEX_EFFORT_OPTIONS = ['none', 'minimal', 'low', 'medium', 'high',
 
 /** 不翻譯，用原廠的字（只首字母大寫），才對得上 CLI 畫面與文件。 */
 export function effortLabel(level: string): string {
+  // `default`＝TUI 明確寫的 CLI 預設（SPEC §4.4a），不是一個等級名稱，不能首字大寫成 `Default`。
+  if (level === 'default') return '（CLI 預設）'
   return level ? level.charAt(0).toUpperCase() + level.slice(1) : level
 }
 
 /** 精簡列用的強度縮寫（2026-10-04 使用者：子 agent 列「改用緊湊的方式表示」）：Medium→M、High→H、Xhigh→XH；`max` 本來就短。 */
 export function effortShort(level: string): string {
-  const short: Record<string, string> = { low: 'L', medium: 'M', high: 'H', xhigh: 'XH', minimal: 'Min', none: '-' }
+  const short: Record<string, string> = { low: 'L', medium: 'M', high: 'H', xhigh: 'XH', minimal: 'Min', none: '-', default: '預設' }
   return short[level.toLowerCase()] ?? effortLabel(level)
 }
 

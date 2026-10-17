@@ -827,8 +827,17 @@ claude 在對話裡印 `⎿  Set model to Sonnet 5.5 and saved …`／`⎿  Set 
 `--reasoning-effort`（#215）；唯一的現況是輸入框框底 `╰── Grok 4.7 (low) · always-approve ─╯`。畫面巡邏對 grok run 拿 bot 鎖
 （同 `codex_live::sync_runtime`，不會讀到啟動補 `/effort` 或當場套用切到一半的畫面）讀 `visible` 60 行，只取視窗底部最後一個 `╰` 開頭的框（窄 pane 斷行會接到下一行的 `╯`；再往上引用的完整舊框、以及底部沒有框時畫面上的舊框都不算），含
 `Grok <版本>` 的框底（`grok_live.rs`；對話裡的 `Switched to Grok 4.7 (low effort)` 不算）。當場套用的 grok 回讀用同一條框底，不取畫面上第一個 `Grok`。只寫讀到而且跟記著的不一樣的欄位。框底跟記著的一樣就不再讀第二次、也不握 bot 鎖。讀不到框底
-（選單蓋住、畫面清掉）、或只讀到其中一欄，其餘沿用最後已知值、不清空。一般 bot 只校正**已知**的 runtime（`NULL`＝啟動時沒指定、
-CLI 預設，拿畫面補上會多一條重啟也改不掉的假 drift），設定不動；child 未知也補。
+（選單蓋住、畫面清掉）、或只讀到其中一欄，其餘沿用最後已知值、不清空。一般 bot 只校正**已知**的 runtime，設定不動；child 未知也補。
+**`runtime_effort` 三態**（codex，`codex_live::CLI_DEFAULT_EFFORT`）：`NULL`＝未知（狀態列沒講強度字、也沒有 `default` 字，或收編時沒讀到）；
+`'default'`＝狀態列明確寫 `default`，即 TUI 的 CLI 預設。讀到的畫面只講了其中一欄時，沒講強度的那欄沿用上一輪已知值、不清成 `NULL`，
+model／fast 照常校正。子 agent 的 `bots.effort` 只在**上一輪是已知的具體值、這一輪變成明確 `default`**時清成 `NULL`
+（`child_runtime::EffortFollow::Clear`）；未知→`default` 保留設定（畫面與 web 照常警示「實際 CLI 預設、設定 High」，不認定已套用）；
+`default`→`default`、網頁另設但 runtime 未變，都不覆寫；一般 bot 不跟隨。網頁（`runtimeDrift`）：`NULL` 那欄不比，`'default'` 顯示
+「（CLI 預設）」並跟設定比（設定也是 `null` 時不標）。codex 套用／回讀時設定的 `default` 視為 CLI 預設（`(default)` 選單列），不當成具體等級送進去。
+**對帳不拿舊 argv 蓋回去**：收編 child 的對帳（`reconcile::sync_pane_model`）從 argv 補 `bots.effort` 只在兩個條件同時成立時做：
+`bots.effort` 是 `NULL`，而且 codex 的 active run 的 `runtime_effort` 仍是 `NULL`（未知）。畫面一旦記下具體值或 `default`，就以畫面為準；
+清成 `NULL` 後的下一輪對帳不會把啟動時的 `high` 補回來。條件在 SQL 的 UPDATE 裡再判一次（查 run 與寫入之間畫面可能剛記下），不靠先讀再寫。
+其他 kind 與 model／identity 的補值不受影響。
 子 agent 的設定一律跟著 runtime 的切換（`child_runtime::follow`）：claude 見上段；codex 的狀態列校正（下面「之後也持續校正」）、
 grok 的框底校正，**這一輪 runtime 真的變了**的模型／強度才寫進 `bots.model`／`effort`——網頁改了 child 設定還沒套用時狀態列沒變，
 不會被畫面蓋回去；fast 照舊只從收編時的 argv 補（#393）。先寫設定再寫 runtime：設定寫不進去這輪整個不寫，下一輪仍不同才重試（#743 同理）。

@@ -92,13 +92,14 @@ mod codex_0_160 {
         assert_eq!(parse_status_line(IDLE), None);
     }
 
-    /// 跑完一回合後的狀態列 `GPT-6.1-Sol default · <cwd> · Context 3% used · 5h 82% left`：模型轉小寫，`default` 不是強度。
+    /// 跑完一回合後的狀態列 `GPT-6.1-Sol default · <cwd> · Context 3% used · 5h 82% left`：模型轉小寫，
+    /// `default` 是 TUI 明確寫出的 CLI 預設強度（`CLI_DEFAULT_EFFORT`），不是未知。
     #[test]
-    fn the_status_footer_with_context_keeps_the_model_and_no_effort() {
+    fn the_status_footer_with_context_keeps_the_model_and_marks_the_cli_default() {
         let screen = "› Ask Codex to do anything\n\n  GPT-6.1-Sol default · ~/project/agents-manager · Context 3% used · 5h 82% left · weekly 97% left\n";
         let seen = parse_status_line(screen).expect("讀得到");
         assert_eq!(seen.model, "gpt-6.1-sol");
-        assert_eq!(seen.effort, None);
+        assert_eq!(seen.effort.as_deref(), Some("default"));
         assert!(!seen.fast);
     }
 }
