@@ -488,6 +488,26 @@ test('413 也一樣不重送', async () => {
   assert.deepEqual(r.rejected, ['bot:a'])
 })
 
+test('404（目標 bot／專案已刪）也是永久拒絕，不重送', async () => {
+  const r = rig({ debounceMs: 10 })
+  r.gate.failWith = new ApiError(404, { error: 'draft_target_gone' }, 'draft_target_gone')
+  r.type('bot:a', 'late')
+  await tick(30)
+  await tick(30_000)
+  assert.equal(r.puts.length, 1)
+  assert.deepEqual(r.rejected, ['bot:a'])
+})
+
+test('5xx 與斷線照舊重試，不會被當成永久拒絕', async () => {
+  const r = rig({ debounceMs: 10 })
+  r.gate.failWith = new ApiError(500, {}, 'boom')
+  r.type('bot:a', 'x')
+  await tick(30)
+  await tick(30_000)
+  assert.ok(r.puts.length > 1, 'should retry')
+  assert.deepEqual(r.rejected, [])
+})
+
 test('PUT 被拒的同時本機又改了：新的那段照樣排隊送出，不能因為舊字被拒就跟著丟掉', async () => {
   const r = rig({ debounceMs: 10 })
   let release = () => {}
