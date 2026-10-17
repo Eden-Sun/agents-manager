@@ -1,6 +1,6 @@
 import { useStore } from '../store/store'
 import { effortLabel, effortShort } from '../api/types'
-import { shortModel } from '../lib/shortModel'
+import { agyEffort, shortModel } from '../lib/shortModel'
 import { driftTitle, runningFast, runtimeDrift, runtimeSettingsKnown } from '../lib/runtimeDrift'
 
 /**
@@ -16,14 +16,14 @@ export function ModelTag({ botId, short = false }: { botId: string; /** 精簡�
   // SPEC §4.4a：顯示現在在跑什麼——CLI 回報 → `run.runtime_*` → `bots` 設定；drift 只做欄位說明。
   const drift = runtimeDrift(bot, run)
   const live = runtimeSettingsKnown(run)
-  const effort = reported?.effort ?? (live ? run!.runtime_effort : bot.effort)
+  const runningModel = live ? run!.runtime_model : bot.model
+  const effort = reported?.effort ?? (live ? run!.runtime_effort : bot.effort) ?? agyEffort(bot.kind, runningModel)
   const chipExtra = effort ? effortLabel(effort) : ''
   const shownExtra = effort ? (short ? effortShort(effort) : chipExtra) : ''
   const fast = runningFast(bot, run)
   const detail = [chipExtra, fast ? 'fast' : null, reported?.thinking ? 'thinking' : null].filter(Boolean).join(' · ')
 
   // Null model = CLI default: show the reported `model_name`, not `CLI 預設` that reads as another model (2026-09-08).
-  const runningModel = live ? run!.runtime_model : bot.model
   const shown = shortModel(bot.kind, runningModel ?? reported?.model_name ?? null)
   if (!shown && !chipExtra) return null
 

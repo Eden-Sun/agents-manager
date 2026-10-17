@@ -9,8 +9,19 @@ export function shortModel(kind: string, model: string | null): string | null {
   // 所以去掉 gpt-」）。留下來的是真正在區分的那半截（`gpt-6-astra` → `6-astra`），完整 id
   // 仍在 tooltip 裡。
   if (kind === 'codex') return model.replace(/^gpt-/, '')
+  // agy 只跑 Gemini，slug 尾巴的 high／medium／low 其實是強度（2026-10-17 使用者：「只要 3.8-flash 就好而 high 是 effort」），
+  // 強度由 [`agyEffort`] 拆出來放在強度那格。
+  if (kind === 'agy') return model.replace(/^gemini-/, '').replace(AGY_EFFORT_SUFFIX, '')
   if (kind !== 'claude') return model
   const m = /^claude-(fable|opus|sonnet|haiku)(?:-\d.*)?$/.exec(model)
   return m ? m[1] : model
 }
 
+
+const AGY_EFFORT_SUFFIX = /-(low|medium|high)$/
+
+/** agy slug 尾巴的強度（`gemini-3.8-flash-high` → `high`）；不是 agy 或沒有強度尾巴回 `null`。 */
+export function agyEffort(kind: string, model: string | null): string | null {
+  if (kind !== 'agy' || !model) return null
+  return AGY_EFFORT_SUFFIX.exec(model)?.[1] ?? null
+}

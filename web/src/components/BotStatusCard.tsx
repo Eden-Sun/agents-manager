@@ -5,7 +5,7 @@ import { useBotLamp } from '../hooks/useBotLamp'
 import { useDialogFocus } from '../hooks/useDialogFocus'
 import { backgroundTaskLines } from '../lib/backgroundJobs'
 import { contextLabel } from '../lib/contextLabel'
-import { shortModel } from '../lib/shortModel'
+import { agyEffort, shortModel } from '../lib/shortModel'
 import { liveReplyOf, useStore } from '../store/store'
 import { cleanLiveActivity } from '../store/liveText'
 import { StatusLamp } from './StatusLamp'
@@ -79,8 +79,9 @@ export function BotStatusCard({
   // agent_title 在 run 結束前不清（API.md）：閒置時它是上一個任務的標題，不能當成現在在做的事。
   const doing = run?.agent_status === 'working' || run?.agent_status === 'blocked' ? activity || title : ''
   const tasks = backgroundTaskLines(run)
-  const model = shortModel(bot.kind, run?.runtime_model ?? bot.model ?? status?.model_name ?? null)
-  const effort = status?.effort ?? run?.runtime_effort ?? bot.effort
+  const fullModel = run?.runtime_model ?? bot.model ?? status?.model_name ?? null
+  const model = shortModel(bot.kind, fullModel)
+  const effort = status?.effort ?? run?.runtime_effort ?? bot.effort ?? agyEffort(bot.kind, fullModel)
   const identity = run?.runtime_identity ?? bot.identity
   const ctx = contextLabel(status)
 
