@@ -71,3 +71,21 @@ test('真的改了分鐘：送新的 spec（秒數依輸入）', async () => {
   await save()
   assert.deepEqual(patches()[0].spec, { mode: 'interval', every_secs: 120 })
 })
+
+test('瀏覽器不認識排程的時區：編輯器照常 render（下次與最近執行都退回 UTC 並標示）', async () => {
+  // 假裝這台瀏覽器的 Intl 不認識 America/Coyhaique（後端 chrono-tz 認得）：非 UTC 的時區一律丟 RangeError。
+  const original = Date.prototype.toLocaleString
+  Date.prototype.toLocaleString = function (this: Date, locale?: string | string[], options?: Intl.DateTimeFormatOptions) {
+    if (options?.timeZone && options.timeZone !== 'UTC') throw new RangeError(`Invalid time zone specified: ${options.timeZone}`)
+    return original.call(this, locale, options)
+  }
+  try {
+    const occurrence = { id: 'o1', schedule_id: 's1', source: 'scheduled', scheduled_for: '2030-01-01T00:00:00.000Z', generation: 1, bot_id: 'b1', prompt: 'x', status: 'done', waiting_reason: null, merged_count: 0, conversation_id: null, turn_id: null, error: null, created_at: '', updated_at: '' }
+    const { root } = await openEditor(scheduleRow({ tz: 'America/Coyhaique', recent: [occurrence] }))
+    assert.match(root.textContent ?? '', /America\/Coyhaique 這台瀏覽器不支援，以 UTC 顯示/)
+    const history = root.querySelector('ul[aria-label="最近執行"]')
+    assert.ok(history, '最近執行列表要 render 出來')
+  } finally {
+    Date.prototype.toLocaleString = original
+  }
+})
