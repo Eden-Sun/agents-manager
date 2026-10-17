@@ -1671,7 +1671,8 @@ tab 已被回收視為完成，`tab.list` 失敗不猜。沒有 `tab_id` 的 Run
   - in-flight 那一筆收成 `failed`（跟說明同一個交易，`fail_in_flight`）也在動外面**之前**：寫不進去就一步都不做——這時 agent 還沒被打斷、
     那一回合真的還在跑——run 放回 `running`，回 `503 turn_state_unwritable`（可重試，#156）。以前寫失敗只記 warning，照樣 ctrl+c、記 `stopped`，
     DB 裡那一筆卻永遠在飛。
-  - 「agent 不在」只認 herdr 明確說不在；RPC 失敗不算。結果分成自己退出／pane 被強制關掉並確認不在／還活著／問不到。
+  - 確認退出須 pane 明確不存在，或可讀 pane 已沒有 agent 且 `agent.get` 也查不到；只缺 agent 綁定或 `pane.get` 失敗仍是未知，不能提前記 `stopped`。
+    結果分成自己退出／pane 被強制關掉並確認不在／還活著／問不到。
     後兩種不能記 `stopped`、不撤佇列，回 `502 stop_not_confirmed`：還活著（default session 的 pane 不能關，§6.5.1）就放回 `running`，
     問不到就留 `stopping` 排對帳。
   - `stopped` 以 CAS（from `stopping`）寫進去**之後**才撤孤兒佇列、關訂閱。寫不進去回 `503 stop_state_uncommitted`，
@@ -2021,6 +2022,7 @@ agent 自己 `herdr agent prompt <名字> …` 時 daemon 沒參與，那句話�
    **死 pane 的 run**（`lifecycle::dead_panes`，隨 60 秒的 stuck-turn sweeper 跑）：herdr 明確回 `pane_not_found` 的 running run 收成 exited。
    pane id 還在、但這顆 run 的 agent 已經不在、而且這個 id 上是別的 agent（herdr 重用 id）也收成 exited；RPC 失敗不是證據。
    **名稱不作執行身分（issue #1792）**：prompt、按鍵、停止與重啟的既有 run 只用該 run 的 host／herdr session client 與 pane_id，沒有 pane_id 就不送，不回退 bot／agent 名稱。
+   缺 pane_id 的 starting run 不能當成啟動成功，重試先由既有 restart 流程收掉孤兒列再啟動。
    pane 上的 native session 與 runs.native_session_id 都知道且不同，才證明地址已換人；缺少 session 證據維持未知，名字改掉、清掉或舊名被其他 pane 使用都不算回收。
    原 native session 仍在同一 herdr session 的另一 pane 時只拒絕舊地址的操作，不將 run 收成 exited；無法讀 agent list 時也不判定已退出。
    直接 prompt 的建回合 CAS 比對 run_id、bot_id、running、pane_id、herdr_session 與 native_session_id，不比較可改的 agent_name；plan 與送出前都驗證 native session。
