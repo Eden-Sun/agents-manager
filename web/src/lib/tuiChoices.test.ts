@@ -810,6 +810,9 @@ test('#1818 多行自訂答案只看到第一行（說明沒留、沒有裁切�
 test('#1818 多行自訂答案被裁切（說明結尾是 …，已見部分是完整前綴）：算出現', () => {
   const cut = { number: 3, title: '第一行', detail: '第二…', checked: null, current: true, preview: '' }
   assert.equal(customAnswerShown(cut, '第一行\n第二行很重要'), true)
+  // 第二行一個字都沒露（只剩一個 …）：首行之外沒有任何證據，不放行。
+  const onlyEllipsis = { number: 3, title: '第一行', detail: '…', checked: null, current: true, preview: '' }
+  assert.equal(customAnswerShown(onlyEllipsis, '第一行\n第二行很重要'), false)
   // 已見部分不是答案的前綴，就不算。
   const other = { number: 3, title: '別的字', detail: '第二…', checked: null, current: true, preview: '' }
   assert.equal(customAnswerShown(other, '第一行\n第二行很重要'), false)
@@ -825,5 +828,6 @@ test('#1818 單行答案行為不變：完整出現算數、只出現一部分�
   assert.equal(customAnswerShown(one, 'let editors publish'), true)
   assert.equal(customAnswerShown(one, 'let editors publish posts'), false)
   const cutOne = { number: 3, title: 'let editors publish…', detail: '', checked: null, current: true, preview: '' }
-  assert.equal(customAnswerShown(cutOne, 'let editors publish posts'), true)
+  // 單行被裁切：照舊不算出現。
+  assert.equal(customAnswerShown(cutOne, 'let editors publish posts'), false)
 })

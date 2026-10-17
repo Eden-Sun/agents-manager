@@ -575,9 +575,11 @@ export function customAnswerShown(choice: TuiChoice, text: string): boolean {
   const visible = `${choice.title.replace(/\s*✔\s*$/, '')} ${choice.detail ?? ''}`.trim()
   const shown = squash(visible)
   if (shown.includes(want)) return true
-  const cut = /…$/.test(visible)
+  // 只有多行答案才認裁切：單行被裁時照舊不算出現。已見部分還要比首行多至少一個字，第二行一個字都沒露就不放行。
+  if (!text.includes('\n') || !/…$/.test(visible)) return false
   const seen = squash(visible.replace(/…$/, ''))
-  return cut && seen !== '' && want.startsWith(seen)
+  const first = squash(text.split('\n')[0] ?? '')
+  return seen.length > first.length && want.startsWith(seen)
 }
 
 /** 送鍵前確認選單還是同一份（↓ 次數是相對的）。不比勾選與游標：那是我們自己按出來的。 */
