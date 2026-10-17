@@ -1,7 +1,8 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
 import type { Bot, Run } from '../api/types.ts'
-import { driftTitle, isFastOnlyDrift, quotaIdentity, runtimeDrift, runtimeKnown } from './runtimeDrift.ts'
+import { effortLabel, effortShort } from '../api/types.ts'
+import { driftLine, driftTitle, isFastOnlyDrift, quotaIdentity, runtimeDrift, runtimeKnown } from './runtimeDrift.ts'
 
 const bot = (over: Partial<Bot> = {}): Bot =>
   ({ id: 'b1', kind: 'codex', model: 'gpt-5.6-luna', effort: 'high', fast: true, identity: null, ...over }) as Bot
@@ -123,6 +124,38 @@ test('#541：查額度用 run 實際起來的身分，沒有 active run 才退�
   assert.equal(quotaIdentity(bot({ identity: 'cc2' }), null), 'cc2')
   assert.equal(quotaIdentity(null, run({ runtime_identity: 'cc1' })), 'cc1')
   assert.equal(quotaIdentity(bot({ identity: null }), null), null)
+})
+
+test('SPEC §4.4a：runtime_effort 為 null＝未知，強度那一欄不比；其他真落差照列', () => {
+  // 收編／沒讀到強度：設定 high 不能拿來猜 runtime 的強度；但模型確實不同，照列。
+  const d = runtimeDrift(bot({ model: 'gpt-6-luna', effort: 'high' }), run({ runtime_model: 'gpt-6-sol', runtime_effort: null }))
+  assert.deepEqual(d.map((x) => x.field), ['model'])
+})
+
+test('SPEC §4.4a：明確 default 是 CLI 預設，跟設定 high 不同就標，並標成「（CLI 預設）」', () => {
+  // 未知→明確 default：child 設定保留 high（後端不跟隨），這裡必須警示實際是 CLI 預設。
+  const d = runtimeDrift(bot({ effort: 'high', needs_restart: false }), run({ runtime_effort: 'default' }))
+  assert.deepEqual(d.map((x) => [x.field, x.running, x.configured]), [['effort', '（CLI 預設）', 'High']])
+  assert.equal(driftLine(d[0]), '強度 實際 （CLI 預設）、設定 High')
+})
+
+test('SPEC §4.4a：明確 default 跟設定 null（CLI 預設）一致，不標', () => {
+  assert.deepEqual(runtimeDrift(bot({ effort: null, needs_restart: false }), run({ runtime_effort: 'default' })), [])
+})
+
+test('SPEC §4.4a：default 與 high 都是落差時照列，不因 null 設定被靜音', () => {
+  // 設定清成 null 又待重啟：runtime 的 default 與 null 同義，不算；具體的 high 仍是真落差。
+  assert.deepEqual(runtimeDrift(bot({ effort: null, needs_restart: true }), run({ runtime_effort: 'default' })), [])
+  assert.deepEqual(
+    runtimeDrift(bot({ effort: null, needs_restart: true }), run({ runtime_effort: 'high' })).map((x) => x.field),
+    ['effort'],
+  )
+})
+
+test('SPEC §4.4a：CLI 預設的標籤不寫成首字大寫的 Default', () => {
+  assert.equal(effortLabel('default'), '（CLI 預設）')
+  assert.equal(effortLabel('high'), 'High')
+  assert.equal(effortShort('default'), '預設')
 })
 
 test('grok 在 TUI 打 /effort low：child 設定已跟上就不標，一般 bot 標出實際值', () => {

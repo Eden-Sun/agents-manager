@@ -4,8 +4,11 @@ import type { Bot, Run } from '../api/types.ts'
 
 /**
  * 設定與實際在跑的不一致（SPEC §4.4a）。2026-09-09：codex 改設定沒重啟，模型／強度只在啟動時吃，
- * UI 卻只顯示 DB 的設定。`run.runtime_*` 是 daemon 讀回的啟動 argv；`null`＝收編 pane，不比。
- * `runtime_identity` 的空字串是已知的本機預設帳號，`null` 才是未知。
+ * UI 卻只顯示 DB 的設定。現況：`run.runtime_*` 不只是啟動 argv，畫面巡邏會持續讀 TUI 的狀態列校正，
+ * 所以 TUI 裡手改的值也會進來。欄位語義：
+ * - `runtime_model`／`runtime_effort` 是 `null`＝未知（沒讀到、收編 pane），那一欄不比不標，其他有值的欄位照比。
+ * - `runtime_effort` 是 `'default'`＝畫面明確寫 CLI 預設，是已知的值，跟設定 `null` 同義；跟具體設定不同就標。
+ * - `runtime_fast` 是 `null`＝未知（只 codex 比）。`runtime_identity` 的空字串是已知的本機預設帳號，`null` 才是未知。
  */
 export interface RuntimeDriftField {
   field: 'model' | 'effort' | 'fast' | 'identity'
@@ -80,13 +83,25 @@ function sameModel(running: string | null | undefined, configured: string | null
   return (running ?? '').toLowerCase() === (configured ?? '').toLowerCase()
 }
 
+/**
+ * `runtime_effort` 三態（SPEC §4.4a）：`null`＝未知（沒讀到／收編），單欄不比；`'default'`＝畫面明確寫 CLI 預設，
+ * 跟設定 `null` 同義；其餘是具體等級。
+ */
+export const CLI_DEFAULT_EFFORT = 'default'
+
+/** 具體等級才有意義；`'default'` 正規化成 `null`（CLI 預設），未知另外判斷。 */
+function runningEffort(value: string | null): string | null {
+  return value === CLI_DEFAULT_EFFORT ? null : value
+}
+
 export function runtimeDrift(bot: Bot | null, run: Run | null): RuntimeDriftField[] {
   if (!bot || !run || !runtimeKnown(run)) return []
   const out: RuntimeDriftField[] = []
   // 設定是 null（CLI 預設）又沒有待重啟：runtime 記的是 CLI 實際挑的值（statusLine／狀態列讀回，ModelTag 要用），
   // 重啟也還是 CLI 預設，不是落差（#940）。有值→清成 null 會讓 `needs_restart` 為真，那一筆照列。
   const defaultsStay = (configured: string | null | undefined) => (configured ?? null) === null && !bot.needs_restart
-  if (runtimeSettingsKnown(run) && !defaultsStay(bot.model) && !sameModel(run.runtime_model, bot.model)) {
+  // runtime 那一欄是 null＝沒讀到（不是 CLI 預設）：不拿設定去猜，其他真的落差照列。
+  if (run.runtime_model !== null && !defaultsStay(bot.model) && !sameModel(run.runtime_model, bot.model)) {
     out.push({
       field: 'model',
       label: '模型',
@@ -94,11 +109,12 @@ export function runtimeDrift(bot: Bot | null, run: Run | null): RuntimeDriftFiel
       configured: bot.model ?? NONE,
     })
   }
-  if (runtimeSettingsKnown(run) && !defaultsStay(bot.effort) && (run.runtime_effort ?? null) !== (bot.effort ?? null)) {
+  const effort = runningEffort(run.runtime_effort)
+  if (run.runtime_effort !== null && !defaultsStay(bot.effort) && effort !== (bot.effort ?? null)) {
     out.push({
       field: 'effort',
       label: '強度',
-      running: run.runtime_effort ? effortLabel(run.runtime_effort) : NONE,
+      running: effort ? effortLabel(effort) : NONE,
       configured: bot.effort ? effortLabel(bot.effort) : NONE,
     })
   }

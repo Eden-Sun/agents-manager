@@ -19,9 +19,13 @@ use crate::db;
 use crate::herdr::HerdrClient;
 use std::time::Duration;
 
+/// `runs.runtime_effort` 裡表示「TUI 明確顯示 CLI 預設強度」的值。SQL NULL 仍是「未知」（沒讀到／收編）。
+pub const CLI_DEFAULT_EFFORT: &str = "default";
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CodexRuntime {
     pub model: String,
+    /// `None`＝狀態列沒講強度（未知）；`Some("default")`＝狀態列明確寫 `default`（CLI 預設，SPEC §4.4a）。
     pub effort: Option<String>,
     pub fast: bool,
 }
@@ -114,10 +118,32 @@ pub fn parse_status_line(screen: &str) -> Option<CodexRuntime> {
         let effort = rest
             .iter()
             .find(|w| crate::config::efforts_for_kind("codex").contains(&w.to_ascii_lowercase().as_str()))
-            .map(|w| w.to_ascii_lowercase());
+            .map(|w| w.to_ascii_lowercase())
+            // 明確的 `default` 字樣＝CLI 預設（不是未知）。沒有這個字也沒有強度字，才是未知。
+            .or_else(|| rest.iter().any(|w| w.eq_ignore_ascii_case("default")).then(|| CLI_DEFAULT_EFFORT.to_string()));
         out = Some(CodexRuntime { model, effort, fast });
     }
     out
+}
+
+/// 寫進 `runs.runtime_effort` 的值：狀態列講了就用它；沒講（未知）就沿用上一輪已知的值（SPEC §4.4a：只讀到其中一欄，其餘沿用）。
+fn effective_effort(seen: &CodexRuntime, run: &db::Run) -> Option<String> {
+    seen.effort.clone().or_else(|| run.runtime_effort.clone())
+}
+
+/// 畫面讀到的強度要怎麼動子 agent 的設定（SPEC §4.4a）。`prev` 是 run 上一輪記的值（`None`＝未知）。
+/// * 具體值且跟上一輪不同 → 設定跟著改（既有行為）。
+/// * 明確 `default`：只有上一輪是**已知的具體值**才清成 CLI 預設；未知→default 與 default→default 都不動設定，
+///   避免把「還沒讀到」當成「已經是預設」而蓋掉使用者設定的 high（那樣 ⟳ 也會跟著消失）。
+/// * 沒讀到強度（`None`）永遠不動設定。
+fn effort_follow<'a>(seen: Option<&'a str>, prev: Option<&str>) -> crate::child_runtime::EffortFollow<'a> {
+    use crate::child_runtime::EffortFollow;
+    match (seen, prev) {
+        (Some(CLI_DEFAULT_EFFORT), Some(p)) if p != CLI_DEFAULT_EFFORT => EffortFollow::Clear,
+        (Some(CLI_DEFAULT_EFFORT), _) => EffortFollow::Keep,
+        (Some(now), prev) if prev != Some(now) => EffortFollow::Set(now),
+        _ => EffortFollow::Keep,
+    }
 }
 
 /// 以畫面上的狀態列校正 `runs.runtime_*`（SPEC §4.4a）。回傳 `true` = 有改動。
@@ -127,8 +153,10 @@ pub fn parse_status_line(screen: &str) -> Option<CodexRuntime> {
 pub async fn correct_runtime_from_screen(app: &(impl crate::capabilities::BotStatusEmit + crate::capabilities::Db + crate::capabilities::Emit), run_id: &str, screen: &str) -> bool {
     let Some(seen) = parse_status_line(screen) else { return false };
     let Ok(Some(run)) = db::run(app.db(), run_id).await else { return false };
+    // 狀態列沒講強度（沒有強度字、也沒有 default）＝未知：沿用上一輪已知的值，不清成 NULL；model／fast 照常校正。
+    let effort = effective_effort(&seen, &run);
     let same = run.runtime_model.as_deref() == Some(seen.model.as_str())
-        && run.runtime_effort == seen.effort
+        && run.runtime_effort == effort
         && run.runtime_fast == Some(i64::from(seen.fast));
     if same {
         return false;
@@ -136,12 +164,11 @@ pub async fn correct_runtime_from_screen(app: &(impl crate::capabilities::BotSta
     // child 的設定跟著 TUI 的切換（只跟這一輪變了的模型／強度；fast 照舊只看 argv，#393）。先寫設定：寫不進去就連 runtime
     // 都不寫，下一輪仍不同才會再試。
     let model_moved = run.runtime_model.as_deref() != Some(seen.model.as_str());
-    let effort_moved = seen.effort.is_some() && run.runtime_effort != seen.effort;
-    if let Err(e) = crate::child_runtime::follow(
+    if let Err(e) = crate::child_runtime::follow_with(
         app,
         &run.bot_id,
         Some(seen.model.as_str()).filter(|_| model_moved),
-        seen.effort.as_deref().filter(|_| effort_moved),
+        effort_follow(seen.effort.as_deref(), run.runtime_effort.as_deref()),
     )
     .await
     {
@@ -150,7 +177,7 @@ pub async fn correct_runtime_from_screen(app: &(impl crate::capabilities::BotSta
     }
     let wrote = sqlx::query("UPDATE runs SET runtime_model = ?, runtime_effort = ?, runtime_fast = ? WHERE id = ?")
         .bind(&seen.model)
-        .bind(&seen.effort)
+        .bind(&effort)
         .bind(i64::from(seen.fast))
         .bind(run_id)
         .execute(app.db())
@@ -158,7 +185,7 @@ pub async fn correct_runtime_from_screen(app: &(impl crate::capabilities::BotSta
         .is_ok();
     if wrote {
         app.emit_bot_status(&run.bot_id).await;
-        tracing::info!(run = %run_id, model = %seen.model, effort = ?seen.effort, fast = seen.fast,
+        tracing::info!(run = %run_id, model = %seen.model, effort = ?effort, fast = seen.fast,
                        "codex runtime corrected from the status line");
     }
     wrote
@@ -191,7 +218,7 @@ pub async fn hint_moves_runtime(app: &impl crate::capabilities::Db, run_id: &str
     let Some(seen) = parse_status_line(screen) else { return false };
     let Ok(Some(run)) = db::run(app.db(), run_id).await else { return true };
     run.runtime_model.as_deref() != Some(seen.model.as_str())
-        || run.runtime_effort != seen.effort
+        || run.runtime_effort != effective_effort(&seen, &run)
         || run.runtime_fast != Some(i64::from(seen.fast))
 }
 
@@ -514,8 +541,7 @@ pub async fn apply(
     }
     if fields.iter().any(|f| *f == "model" || *f == "effort") {
         let model = bot.model.as_deref().map(str::trim).filter(|s| !s.is_empty());
-        let effort = bot.effort.as_deref().map(str::trim).filter(|s| !s.is_empty());
-        match apply_model_and_effort(client, pane_id, model, effort).await {
+        match apply_model_and_effort(client, pane_id, model, configured_effort(bot)).await {
             Ok(true) => {}
             Ok(false) => return Err("picker_failed"),
             Err(()) => return Err("pane_read_failed"),
@@ -564,6 +590,11 @@ async fn readback(client: &HerdrClient, pane_id: &str, bot: &db::Bot, fields: &[
     Ok(seen)
 }
 
+/// 設定的強度要送進 `/model` 選單的值。`default`（或空）＝CLI 預設，選單走 `(default)` 那一列；不把 `default` 當成具體等級傳進去。
+fn configured_effort(bot: &db::Bot) -> Option<&str> {
+    bot.effort.as_deref().map(str::trim).filter(|s| !s.is_empty() && *s != CLI_DEFAULT_EFFORT)
+}
+
 /// Does the status line show what the bot is configured for? The model is compared without case: 0.157 prints
 /// the display name (`GPT-6-Luna`) for the id `gpt-6-luna`, and a case-only mismatch used to fail every live
 /// apply — a fast-only change included — back to "needs restart" (#712).
@@ -573,7 +604,7 @@ pub fn verify(seen: &CodexRuntime, bot: &db::Bot, fields: &[&str]) -> Result<(),
             return Err("readback_model_mismatch");
         }
     }
-    if let Some(e) = bot.effort.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
+    if let Some(e) = configured_effort(bot) {
         if seen.effort.as_deref() != Some(e) {
             return Err("readback_effort_mismatch");
         }
@@ -960,6 +991,126 @@ mod tests {
         let screen = "  gpt-5.6-luna max fast · /tmp · Context 43% used · 5h 12% left\n";
         assert!(correct_runtime_from_screen(&env.app, &run, screen).await);
         assert_eq!(fast_of(&env, &run).await, Some(1));
+    }
+
+    /// 子 agent（`managed_by=child`）與 run 的強度設定；`prev` 是 run 上一輪記的 `runtime_effort`（`None`＝未知）。
+    async fn child_with_effort(env: &crate::testing::Env, managed_by: &str, effort: Option<&str>, prev: Option<&str>) -> (String, String) {
+        let bot = crate::testing::claude_bot(&env.app, &env.project_id, "payload").await;
+        let run = crate::testing::fake_run(&env.app, &bot.id).await;
+        sqlx::query("UPDATE bots SET managed_by=?, model='gpt-6-astra', effort=? WHERE id=?")
+            .bind(managed_by)
+            .bind(effort)
+            .bind(&bot.id)
+            .execute(&env.app.db)
+            .await
+            .unwrap();
+        sqlx::query("UPDATE runs SET runtime_model='gpt-6-astra', runtime_effort=?, runtime_fast=0 WHERE id=?")
+            .bind(prev)
+            .bind(&run)
+            .execute(&env.app.db)
+            .await
+            .unwrap();
+        (bot.id, run)
+    }
+
+    async fn bot_effort(env: &crate::testing::Env, bot: &str) -> Option<String> {
+        sqlx::query_scalar("SELECT effort FROM bots WHERE id=?").bind(bot).fetch_one(&env.app.db).await.unwrap()
+    }
+
+    async fn run_effort(env: &crate::testing::Env, run: &str) -> Option<String> {
+        db::run(&env.app.db, run).await.unwrap().unwrap().runtime_effort
+    }
+
+    const ASTRA_DEFAULT: &str = "› Ask Codex to do anything\n\n  GPT-6-Astra default · ~/project/agents-manager · Context 3% used\n  ? for shortcuts\n";
+    const ASTRA_HIGH: &str = "› Ask Codex to do anything\n\n  gpt-6-astra high · ~/project/agents-manager · Context 3% used\n  ? for shortcuts\n";
+
+    /// 未知→明確 default：runtime 記成 `default`（不是 NULL），但子 agent 設定保留 high，web 會照常警示「實際 CLI 預設、設定 High」。
+    #[tokio::test]
+    async fn unknown_to_default_records_the_cli_default_and_keeps_the_child_effort() {
+        let env = crate::testing::env().await;
+        let (bot, run) = child_with_effort(&env, "child", Some("high"), None).await;
+        assert!(correct_runtime_from_screen(&env.app, &run, ASTRA_DEFAULT).await);
+        assert_eq!(run_effort(&env, &run).await.as_deref(), Some("default"));
+        assert_eq!(bot_effort(&env, &bot).await.as_deref(), Some("high"), "未知不等於已套用 default");
+        // 再讀一次同一畫面：已經收斂，不改動。
+        assert!(!correct_runtime_from_screen(&env.app, &run, ASTRA_DEFAULT).await);
+    }
+
+    /// 已知具體值 high → 明確 default：子 agent 設定清成 NULL（CLI 預設），runtime 記 `default`。
+    #[tokio::test]
+    async fn a_known_high_switched_to_the_cli_default_clears_the_child_effort() {
+        let env = crate::testing::env().await;
+        let (bot, run) = child_with_effort(&env, "child", Some("high"), Some("high")).await;
+        assert!(correct_runtime_from_screen(&env.app, &run, ASTRA_DEFAULT).await);
+        assert_eq!(bot_effort(&env, &bot).await, None);
+        assert_eq!(run_effort(&env, &run).await.as_deref(), Some("default"));
+    }
+
+    /// default → default：已經是預設，不清也不寫設定（不會因為重複讀到 default 就把設定抹掉）。
+    #[tokio::test]
+    async fn a_default_that_stays_default_does_not_touch_the_child_effort() {
+        let env = crate::testing::env().await;
+        let (bot, run) = child_with_effort(&env, "child", Some("high"), Some("default")).await;
+        assert!(!correct_runtime_from_screen(&env.app, &run, ASTRA_DEFAULT).await);
+        assert_eq!(bot_effort(&env, &bot).await.as_deref(), Some("high"));
+    }
+
+    /// 一般 bot（`managed_by` 不是 child）：不跟隨，設定與 runtime 各自照規則走。
+    #[tokio::test]
+    async fn a_user_bot_keeps_its_effort_when_the_tui_goes_to_default() {
+        let env = crate::testing::env().await;
+        let (bot, run) = child_with_effort(&env, "user", Some("high"), Some("high")).await;
+        assert!(correct_runtime_from_screen(&env.app, &run, ASTRA_DEFAULT).await);
+        assert_eq!(bot_effort(&env, &bot).await.as_deref(), Some("high"));
+        assert_eq!(run_effort(&env, &run).await.as_deref(), Some("default"));
+    }
+
+    /// 讀不到強度的畫面（沒有 footer、或冷啟動兩段 footer）：runtime 與子 agent 設定都不清。
+    #[tokio::test]
+    async fn a_screen_without_a_readable_footer_clears_nothing() {
+        let env = crate::testing::env().await;
+        let (bot, run) = child_with_effort(&env, "child", Some("high"), Some("high")).await;
+        for screen in ["› Ask Codex to do anything\n", "  GPT-6-Astra default · ~/project/agents-manager\n"] {
+            assert!(!correct_runtime_from_screen(&env.app, &run, screen).await, "{screen:?}");
+        }
+        assert_eq!(bot_effort(&env, &bot).await.as_deref(), Some("high"));
+        assert_eq!(run_effort(&env, &run).await.as_deref(), Some("high"));
+    }
+
+    /// 網頁另設 low、還沒套用：畫面的 runtime 沒變（仍是 high），設定不能被蓋回去。
+    #[tokio::test]
+    async fn a_pending_web_change_is_kept_while_the_runtime_is_unchanged() {
+        let env = crate::testing::env().await;
+        let (bot, run) = child_with_effort(&env, "child", Some("low"), Some("high")).await;
+        assert!(!correct_runtime_from_screen(&env.app, &run, ASTRA_HIGH).await);
+        assert_eq!(bot_effort(&env, &bot).await.as_deref(), Some("low"));
+    }
+
+    /// 真的差異照列：畫面換成具體值，子 agent 設定跟著改（既有行為不變）。
+    #[tokio::test]
+    async fn a_real_effort_switch_still_follows_into_the_child_settings() {
+        let env = crate::testing::env().await;
+        let (bot, run) = child_with_effort(&env, "child", Some("high"), Some("high")).await;
+        let low = "› Ask Codex to do anything\n\n  gpt-6-astra low · ~/project/agents-manager · Context 3% used\n  ? for shortcuts\n";
+        assert!(correct_runtime_from_screen(&env.app, &run, low).await);
+        assert_eq!(bot_effort(&env, &bot).await.as_deref(), Some("low"));
+        assert_eq!(run_effort(&env, &run).await.as_deref(), Some("low"));
+    }
+
+    /// 有效的 footer 但沒有強度字、也沒有 default（未知）：已知的 high 保留，model／fast 仍照畫面校正。
+    #[tokio::test]
+    async fn a_valid_footer_without_an_effort_word_keeps_the_known_effort_and_still_corrects_model_and_fast() {
+        let env = crate::testing::env().await;
+        let (bot, run) = child_with_effort(&env, "child", Some("high"), Some("high")).await;
+        let footer = "› Ask Codex to do anything\n\n  gpt-6-luna fast · ~/project/agents-manager · Context 3% used\n  ? for shortcuts\n";
+        assert!(correct_runtime_from_screen(&env.app, &run, footer).await);
+        let row = db::run(&env.app.db, &run).await.unwrap().unwrap();
+        assert_eq!(row.runtime_model.as_deref(), Some("gpt-6-luna"), "model 照畫面校正");
+        assert_eq!(row.runtime_fast, Some(1), "fast 照畫面校正");
+        assert_eq!(row.runtime_effort.as_deref(), Some("high"), "未知的強度不清成 NULL");
+        assert_eq!(bot_effort(&env, &bot).await.as_deref(), Some("high"), "未知的強度不跟隨到子 agent 設定");
+        // 收斂：再讀同一畫面不改動。
+        assert!(!correct_runtime_from_screen(&env.app, &run, footer).await);
     }
 
     /// codex 子 agent l8 在 TUI 裡手動打 /fast 開了 fast，狀態列顯示主題段（無 Context）。
