@@ -702,6 +702,11 @@ async fn handle_status_try(app: &Arc<App>, host: &str, session: &str, ev: &crate
         app.schedule_flush_queued(&run.bot_id);
         app.schedule_deferred_live(&run.bot_id);
     }
+
+    // 沒有 hook 的被接管 pane（對話檔是唯一的完成證據）：沒收到 working 邊就沒有回合在飛，idle 時補讀對話檔（issue #1798）。
+    if prev != "idle" && status == "idle" && run.adopted != 0 {
+        crate::lifecycle::poller::spawn_idle_transcript_sync(app, &run.id, &run.bot_id);
+    }
 }
 
 // ---------------------------------------------------------------- agent titles

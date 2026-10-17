@@ -903,3 +903,74 @@ fn a_recorded_path_must_sit_under_a_roots_projects_dir() {
     assert!(!ok("/Users/m4p/.claude-x/projects/-work/s\n.jsonl"));
     assert!(!ok("/etc/passwd"));
 }
+
+/// issue #1798：子 agent 用 argv 帶 prompt 起、adopt 時那一問還沒結束，之後也沒收到 working 邊（沒有回合在飛）。
+/// 這一問結束後轉 idle：對話檔補讀，記成已完成的外部回合；同一個 idle 重放不重記。
+#[tokio::test]
+async fn an_idle_edge_with_no_turn_in_flight_records_the_exchange_that_finished_after_the_baseline() {
+    let cfg = tt::track(std::env::temp_dir().canonicalize().unwrap().join(format!("am-claude-cfg-{}", db::ulid())));
+    let c = claude_child(Some(&cfg), None).await;
+    let app = c.env.app.clone();
+    let prompt = "交貨預設序號填入";
+    write_log(&cfg, "sess-1", &log(&[user_at("u1", prompt, "2026-10-17T08:04:02.714Z"), assistant("我先讀 brief。", Some("tool_use"), true)]));
+    c.env.herdr.set_agent("hub-midplat", &c.pane, true);
+
+    // adopt 後的第一次讀：只建基準，這一問還在跑，不是回合。
+    assert_eq!(sync_locked(&app, &c.run_id).await.unwrap(), Synced::Read { imported: 0, pending: Some(prompt.into()) });
+    assert_eq!(baseline(&app, &c.run_id).await.as_deref(), Some(""));
+    assert_eq!(turn_count(&app, &c.conv).await, 0);
+
+    write_log(
+        &cfg,
+        "sess-1",
+        &log(&[user_at("u1", prompt, "2026-10-17T08:04:02.714Z"), assistant("我先讀 brief。", Some("tool_use"), true), tool_result(), assistant("已推上 origin main。", Some("end_turn"), false)]),
+    );
+    assert!(crate::lifecycle::poller::sync_idle_transcript_locked(&app, &c.run_id).await.unwrap());
+    let turns: Vec<(String, String)> =
+        sqlx::query_as("SELECT origin, status FROM turns WHERE conversation_id = ?").bind(&c.conv).fetch_all(&app.db).await.unwrap();
+    assert_eq!(turns, vec![("external".to_string(), "completed".to_string())]);
+    let got: Vec<(String, String)> = messages(&app, &c.conv).await.into_iter().map(|(r, t, _)| (r, t)).collect();
+    assert_eq!(got, vec![("user".to_string(), prompt.to_string()), ("assistant".to_string(), "已推上 origin main。".to_string())]);
+
+    // 同一個 idle 重報：不再記。
+    assert!(!crate::lifecycle::poller::sync_idle_transcript_locked(&app, &c.run_id).await.unwrap());
+    assert_eq!(turn_count(&app, &c.conv).await, 1);
+    assert_eq!(messages(&app, &c.conv).await.len(), 2);
+}
+
+/// 有 hook 的 bot 由 Stop hook 收回合，idle 補讀不能再記一次。
+#[tokio::test]
+async fn an_idle_edge_does_not_sync_the_transcript_of_a_bot_with_hooks() {
+    let cfg = tt::track(std::env::temp_dir().canonicalize().unwrap().join(format!("am-claude-cfg-{}", db::ulid())));
+    let c = claude_child(Some(&cfg), None).await;
+    let app = c.env.app.clone();
+    write_log(&cfg, "sess-1", &two_exchanges());
+    baselined(&app, &c.run_id).await;
+    c.env.herdr.set_agent("hub-midplat", &c.pane, true);
+    sqlx::query("UPDATE bots SET inject_hooks = 1 WHERE id = ?").bind(&c.bot.id).execute(&app.db).await.unwrap();
+
+    assert!(!crate::lifecycle::poller::sync_idle_transcript_locked(&app, &c.run_id).await.unwrap());
+    assert_eq!(turn_count(&app, &c.conv).await, 0);
+}
+
+/// 回合在飛時歸 `try_fallback`：idle 補讀不搶著記。
+#[tokio::test]
+async fn an_idle_edge_leaves_an_in_flight_turn_to_the_fallback() {
+    let cfg = tt::track(std::env::temp_dir().canonicalize().unwrap().join(format!("am-claude-cfg-{}", db::ulid())));
+    let c = claude_child(Some(&cfg), None).await;
+    let app = c.env.app.clone();
+    write_log(&cfg, "sess-1", &two_exchanges());
+    baselined(&app, &c.run_id).await;
+    c.env.herdr.set_agent("hub-midplat", &c.pane, true);
+    sqlx::query("INSERT INTO turns (id, conversation_id, run_id, origin, status, delivery, created_at) VALUES (?,?,?,'external','in_flight','ok',?)")
+        .bind(db::ulid())
+        .bind(&c.conv)
+        .bind(&c.run_id)
+        .bind(db::now())
+        .execute(&app.db)
+        .await
+        .unwrap();
+
+    assert!(!crate::lifecycle::poller::sync_idle_transcript_locked(&app, &c.run_id).await.unwrap());
+    assert_eq!(turn_count(&app, &c.conv).await, 1, "只有原本那筆在飛的");
+}

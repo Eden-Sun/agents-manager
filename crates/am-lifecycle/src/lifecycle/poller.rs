@@ -1842,6 +1842,36 @@ pub fn spawn_adopted_capture(app: &impl LcHost, run_id: &str, bot_id: &str) {
     });
 }
 
+/// Delay before reading the transcript at a `-> idle` edge: the CLI writes its last line a beat after herdr flips.
+const IDLE_TRANSCRIPT_SYNC_DELAY: Duration = Duration::from_secs(2);
+
+/// 沒有 hook 的 transcript run 轉成 idle：這一輪若沒有回合在飛（working 邊沒收到——adopt 時狀態不是 working、
+/// herdr 一直回 unknown），完成就只能靠對話檔補（issue #1798）。只同步、不刮畫面；已經記過的問不重記。
+/// 呼叫端拿著 bot 鎖；回傳有沒有新記下回合。
+pub(super) async fn sync_idle_transcript_locked(app: &impl LcHost, run_id: &str) -> anyhow::Result<bool> {
+    // 在飛的回合歸 `try_fallback`（它自己會問對話檔）。
+    if db::in_flight_turn(app.db(), run_id).await?.is_some() {
+        return Ok(false);
+    }
+    match super::grok_transcript::sync_locked(app, run_id).await? {
+        super::grok_transcript::Synced::Read { imported, .. } => Ok(imported > 0),
+        super::grok_transcript::Synced::Unavailable => Ok(false),
+    }
+}
+
+/// [`sync_idle_transcript_locked`] off the status-event task: it waits a moment and takes the bot lock itself.
+pub fn spawn_idle_transcript_sync(app: &impl LcHost, run_id: &str, bot_id: &str) {
+    let (app, run_id, bot_id) = ((*app).clone(), run_id.to_string(), bot_id.to_string());
+    tokio::spawn(async move {
+        tokio::time::sleep(IDLE_TRANSCRIPT_SYNC_DELAY).await;
+        let lock = app.bot_lock(&bot_id).await;
+        let _g = lock.lock().await;
+        if let Err(e) = sync_idle_transcript_locked(&app, &run_id).await {
+            tracing::warn!(run = %run_id, error = ?e, "idle transcript sync failed");
+        }
+    });
+}
+
 fn truncate_hookless_reply(reply: String) -> String {
     if reply.chars().count() <= HOOKLESS_REPLY_MAX {
         return reply;
