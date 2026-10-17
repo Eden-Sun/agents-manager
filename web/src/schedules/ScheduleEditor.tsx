@@ -114,8 +114,9 @@ export function ScheduleEditor({
     return () => window.removeEventListener('agm:schedules_changed', onChanged)
   }, [scheduleId, reload])
   const [form, setForm] = useState<FormState>(() => emptyForm(''))
-  // 載入當下的排程時間（`specOf`）：存檔時跟表單比，沒變就不送 spec（#1807）。
-  const [baseline, setBaseline] = useState<ScheduleSpecIn | null>(null)
+  // 載入當下的排程（id）、時區與時間（`specOf`）：存檔時跟表單比，沒變就不送 spec（#1807）。
+  // 帶 id：換了排程、還沒載入完成時對不上，保守送 spec（#1812）。
+  const [baseline, setBaseline] = useState<{ id: string; tz: string; spec: ScheduleSpecIn } | null>(null)
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState<string | null>(null)
   const [notice, setNotice] = useState<string | null>(null)
@@ -133,14 +134,15 @@ export function ScheduleEditor({
 
   useEffect(() => {
     if (!scheduleId) return
+    const id = scheduleId
     let alive = true
-    getSchedule(scheduleId)
+    getSchedule(id)
       .then((d) => {
         if (!alive) return
         setDetail(d)
         const loaded = fromDetail(d)
         setForm(loaded)
-        setBaseline(specOf(loaded))
+        setBaseline({ id, tz: loaded.tz, spec: specOf(loaded) })
         setLoadError(null)
       })
       .catch((e: unknown) => alive && setLoadError(errText(e)))
@@ -193,18 +195,19 @@ export function ScheduleEditor({
         onSelect(s.id)
       } else {
         // 只有排程時間真的變了才送 spec：後端每收到一次 spec 就重新錨定間隔、升 generation（#1807）。
-        const spec = specOf(form)
-        const timingChanged = JSON.stringify(spec) !== JSON.stringify(baseline)
+        const timing = { tz: form.tz, spec: specOf(form) }
+        const same = baseline !== null && baseline.id === scheduleId && JSON.stringify(timing) === JSON.stringify({ tz: baseline.tz, spec: baseline.spec })
+        const timingChanged = !same
         const d = await patchSchedule(scheduleId, {
           name: form.name.trim(),
           prompt: form.prompt,
           bot_id: effectiveBotId,
           tz: form.tz,
-          ...(timingChanged ? { spec } : {}),
+          ...(timingChanged ? { spec: timing.spec } : {}),
           notify: form.notify,
           clear_after: form.clearAfter,
         })
-        if (timingChanged) setBaseline(spec)
+        if (timingChanged) setBaseline({ id: scheduleId, ...timing })
         // 儲存回來的是 Schedule（不帶 recent）：合進既有詳情，不取代成缺欄位的物件。
         setDetail((prev) => (prev ? { ...prev, ...d, recent: prev.recent } : prev))
         setNotice('已儲存。已排的未送出執行會被撤回，已送出的照跑。')
