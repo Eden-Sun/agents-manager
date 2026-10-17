@@ -142,3 +142,41 @@ test('遠端圖換了 src 要重新手動授權，不沿用上一張已載入的
   assert.ok(document.querySelector('.md-image-remote')?.textContent?.includes('b.example'), '佔位要改成新網域')
   assert.ok(document.querySelector('button.mini-btn'), '新網域要重新按「載入圖片」才抓')
 })
+
+test('A→B→A：A 的 blob 已 revoke，換回 A 時不能再畫它（review #1801）', async () => {
+  const { Host, change } = host('old.png')
+  await mount(<Host />)
+  await until(() => localCalls.length === 1, 'old.png 送出請求')
+  localCall('old.png').ok('old')
+  await until(() => shownSrc() === 'blob:old', '先畫出 old.png')
+
+  await change('new.png')
+  await until(() => localCalls.length === 2, 'new.png 送出請求')
+  await change('old.png')
+  await until(() => localCalls.length === 3, '改回 old.png 再送出請求')
+
+  await settle(20)
+  assert.ok(revoked.includes('blob:old'), 'blob:old 已經被回收')
+  assert.notEqual(shownSrc(), 'blob:old', '改回 old.png 時不能畫已 revoke 的 blob:old')
+  assert.equal(shownSrc(), null, '還在載入，應該是載入中佔位')
+
+  localCalls[2].ok('old2')
+  await until(() => shownSrc() === 'blob:old2', '新的 old.png 結果到了才畫')
+})
+
+test('A 失敗→B→回 A：載入中不先畫上一次的缺圖', async () => {
+  const { Host, change } = host('old.png')
+  await mount(<Host />)
+  await until(() => localCalls.length === 1, 'old.png 送出請求')
+  localCall('old.png').fail()
+  await until(() => document.querySelector('.md-image-missing') !== null, 'old.png 失敗後畫出缺圖')
+
+  await change('new.png')
+  await until(() => localCalls.length === 2, 'new.png 送出請求')
+  await change('old.png')
+  await until(() => localCalls.length === 3, '改回 old.png 再送出請求')
+
+  await settle(20)
+  assert.equal(document.querySelector('.md-image-missing'), null, '重新載入中不能先顯示上一次的缺圖')
+  assert.ok(document.querySelector('.md-image-loading'), '應該是載入中佔位')
+})

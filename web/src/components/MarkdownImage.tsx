@@ -120,6 +120,8 @@ export function MarkdownImage({ botId, src, alt }: { botId: string | null | unde
     return () => {
       alive = false
       if (made) URL.revokeObjectURL(made)
+      // 離開這個來源就把它的結果清掉：blob 已經 revoke，失敗狀態也不該留給之後換回來的同一個來源（review #1801）。
+      setResult({ scope: '' })
     }
   }, [local, botId, raw, scope])
 
