@@ -1217,9 +1217,13 @@ export const useStore = create<StoreState>((set, get) => {
   },
 
   async loadGroupMessages(projectId) {
+    // 同 `loadMessages`（#1802）：逆序回應的舊頁丟掉。
+    advanceMessagePageGeneration('group', projectId)
+    const generation = messagePageGeneration('group', projectId)
     try {
       const startedAt = new Date().toISOString()
       const page = await api.fetchProjectMessages(projectId)
+      if (generation !== messagePageGeneration('group', projectId)) return
       noteGroupPrompts(page.messages)
       advanceMessagePageGeneration('group', projectId)
       set((s) => {
@@ -1412,17 +1416,21 @@ export const useStore = create<StoreState>((set, get) => {
   async loadMessages(botId) {
     // 重試時畫面回到轉圈（旗標先清）；成功或再次失敗才決定要不要換成重試鈕（#1240）。
     if (get().messageLoadFailed[botId]) set((s) => ({ messageLoadFailed: withoutKey(s.messageLoadFailed, botId) }))
+    // 整頁重載取一個世代：回來時若已有更新的整頁請求開始，這一頁是舊的，丟掉（#1802：逆序回應不蓋掉新的）。
+    advanceMessagePageGeneration('bot', botId)
+    const generation = messagePageGeneration('bot', botId)
     try {
       const startedAt = new Date().toISOString()
       const page = await api.fetchMessages(botId)
+      if (generation !== messagePageGeneration('bot', botId)) return
       noteGroupPrompts(page.messages)
       advanceMessagePageGeneration('bot', botId)
       set((s) => {
         const kept = keptAfterPage(s.messages[botId] ?? [], page.messages, startedAt)
         const turns: Record<string, Turn> = {}
-        // 請求飛出後 `sendPrompt` 塞的本地 in_flight turn 是輸入框的鎖，清掉會撞 409；頁裡有的以頁為準。
+        // 請求飛出後 `sendPrompt` 塞的本地 in_flight turn 是輸入框的鎖，清掉會撞 409；排進的 queued 也是（#1802）。頁裡有的以頁為準。
         for (const t of Object.values(s.turns[botId] ?? {})) {
-          if (t.status === 'in_flight' && t.created_at >= startedAt) turns[t.id] = t
+          if (turnStillOpen(t.status) && t.created_at >= startedAt) turns[t.id] = t
         }
         for (const t of page.turns) {
           // 請求在路上時 WS 可能已把這筆推成終態；舊頁的 in_flight／queued 不准蓋回去（#649）。
