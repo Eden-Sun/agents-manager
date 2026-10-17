@@ -60,6 +60,7 @@ test('逆序回應：較早發出的舊頁晚到，不蓋掉較新請求的整�
   waiting[0](page('old fallback'))
   await older
   assert.equal(useStore.getState().messages.b1?.[0]?.content, 'new transcript')
+  assert.equal(useStore.getState().loadedBots.b1, true, '新頁已經到了，對話要算載入完成')
 })
 
 test('整頁快照：請求在途時新排進的 queued 回合保留；快照之前就已不在的舊 queued 回合移除', async () => {
@@ -106,4 +107,53 @@ test('群組：逆序回應不蓋掉較新請求的整頁', async () => {
   waiting[0](page('old fallback'))
   await older
   assert.equal(useStore.getState().groupMessages.p1?.[0]?.content, 'new transcript')
+})
+
+const failure = () => new Response('{"error":"boom"}', { status: 500 })
+const loadFailedNotices = () => useStore.getState().notices.filter((n) => /載入(群組)?訊息失敗/.test(n.text))
+
+test('舊請求晚到失敗，新請求已成功：不設載入失敗、不跳錯誤通知', async () => {
+  reset()
+  const waiting = holdPages('/bots/b1/messages')
+  useStore.setState({ messages: {}, turns: {}, loadedBots: {}, messageLoadFailed: {}, notices: [] })
+  const older = useStore.getState().loadMessages('b1')
+  const newer = useStore.getState().loadMessages('b1')
+  waiting[1](page('new transcript'))
+  await newer
+  waiting[0](failure())
+  await older
+  const s = useStore.getState()
+  assert.equal(s.loadedBots.b1, true)
+  assert.equal(s.messageLoadFailed.b1, undefined, '舊請求的失敗不能把已載入的對話換成重試鈕')
+  assert.equal(loadFailedNotices().length, 0, '舊請求的失敗不能跳「載入訊息失敗」')
+})
+
+test('新請求失敗，舊請求成功晚到：對話保持未載入，畫面給重試鈕', async () => {
+  reset()
+  const waiting = holdPages('/bots/b1/messages')
+  useStore.setState({ messages: {}, turns: {}, loadedBots: {}, messageLoadFailed: {}, notices: [] })
+  const older = useStore.getState().loadMessages('b1')
+  const newer = useStore.getState().loadMessages('b1')
+  waiting[1](failure())
+  await newer
+  waiting[0](page('old fallback'))
+  await older
+  const s = useStore.getState()
+  assert.notEqual(s.loadedBots.b1, true, '舊頁不能把對話算成已載入')
+  assert.equal(s.messageLoadFailed.b1, true, '新請求失敗要給重試鈕')
+  assert.equal(loadFailedNotices().length, 1, '新請求的失敗要跳通知')
+})
+
+test('群組：舊請求晚到失敗，新請求已成功：不跳錯誤通知', async () => {
+  reset()
+  const waiting = holdPages('/projects/p1/messages')
+  useStore.setState({ groupMessages: {}, loadedProjects: {}, notices: [] })
+  const older = useStore.getState().loadGroupMessages('p1')
+  const newer = useStore.getState().loadGroupMessages('p1')
+  waiting[1](page('new transcript'))
+  await newer
+  waiting[0](failure())
+  await older
+  assert.equal(useStore.getState().loadedProjects.p1, true)
+  assert.equal(loadFailedNotices().length, 0, '舊請求的失敗不能跳通知')
 })
