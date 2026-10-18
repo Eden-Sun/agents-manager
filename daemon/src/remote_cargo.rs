@@ -1621,6 +1621,10 @@ fn rsync_rsh(remote: &BuildRemoteCfg, has_password: bool, askpass: bool) -> Stri
 /// `[workspace.metadata.agents-manager.remote-cargo].exclude` 明確宣告。
 const BASE_RSYNC_EXCLUDES: [&str; 2] = [".git", "/target"];
 
+/// #1861：工具狀態（worktree、skills…）不是 build 輸入，固定排除、只錨定根。只影響掃描與 rsync；
+/// 不進遠端清理（[`prune_remote_exclusions`]）：沒有任何專案設定排除時，同步不該多一趟 ssh，也不該因為遠端目錄還不存在而失敗。
+const IMPLICIT_RSYNC_EXCLUDES: [&str; 1] = ["/.claude"];
+
 /// checksum 讓相同大小與 mtime、但內容不同的來源也會傳輸；停用 mtime 保留，避免舊分支切回來時來源比 target 產物舊。
 const RSYNC_CACHE_FLAGS: [&str; 2] = ["--checksum", "--no-times"];
 const SOURCE_MANIFEST_MAGIC: &[u8] = b"AMRCM1\0";
@@ -1751,6 +1755,8 @@ fn rsync_exclusions(root: &Path) -> anyhow::Result<Vec<String>> {
             exclusions.push(path.to_string());
         }
     }
+    // #1861：`.claude/` 的 worktree 與其 target 合計十幾 GB，不能整個掃描、送上遠端；巢狀的 `.claude` 是原始碼，照送。
+    exclusions.extend(IMPLICIT_RSYNC_EXCLUDES.iter().map(|s| s.to_string()));
     Ok(exclusions)
 }
 
@@ -1849,7 +1855,7 @@ fn touch_remote_workspace(
     let pw = secret(data_dir, remote)?;
     let mut cmd = ssh_base(remote, pw.as_deref(), data_dir)?;
     let script = format!(
-        "set -eu\nlease_dir={}\n[ -d \"$lease_dir\" ] && [ ! -L \"$lease_dir\" ] || exit 2\nroot=$(cd -P -- \"$lease_dir\" && pwd) || exit 2\n[ \"$root\" = \"$lease_dir\" ] || exit 2\ncd -- \"$root\"\nfind -P . \\( -path './target' -o -path './.git' \\) -prune -o -type f -exec touch -m -- '{{}}' +\nfind -P . \\( -path './target' -o -path './.git' \\) -prune -o -type l -exec touch -h -m -- '{{}}' +",
+        "set -eu\nlease_dir={}\n[ -d \"$lease_dir\" ] && [ ! -L \"$lease_dir\" ] || exit 2\nroot=$(cd -P -- \"$lease_dir\" && pwd) || exit 2\n[ \"$root\" = \"$lease_dir\" ] || exit 2\ncd -- \"$root\"\nfind -P . \\( -path './target' -o -path './.git' -o -path './.claude' \\) -prune -o -type f -exec touch -m -- '{{}}' +\nfind -P . \\( -path './target' -o -path './.git' -o -path './.claude' \\) -prune -o -type l -exec touch -h -m -- '{{}}' +",
         sh_quote(dir)
     );
     cmd.arg(login_shell_arg(&script));
@@ -1934,6 +1940,7 @@ fn prune_remote_exclusions(
     let paths: Vec<_> = exclusions
         .iter()
         .skip(BASE_RSYNC_EXCLUDES.len())
+        .filter(|path| !IMPLICIT_RSYNC_EXCLUDES.contains(&path.as_str()))
         .map(|path| path.trim_start_matches('/'))
         .collect();
     if paths.is_empty() {
@@ -2297,7 +2304,7 @@ mod tests {
         assert_eq!(rsync_destination(&remote(), "/home/u/shared/"), "me@build-host:/home/u/shared/");
     }
 
-    /// #328、#1856：固定排除 git 與根 target；專案未明確排除時 node_modules 仍是輸入、必須同步。
+    /// #328、#1856、#1861：固定排除 git、根 target 與根 `.claude`；專案未明確排除時 node_modules 仍是輸入、必須同步。
     #[test]
     fn the_rsync_excludes_keep_source_dirs_named_target() {
         if !has_program(&rsync_program()) {
@@ -2312,6 +2319,8 @@ mod tests {
             "crates/target",
             "target/debug",
             "web/node_modules",
+            ".claude/worktrees/x/target",
+            "crates/.claude",
         ] {
             std::fs::create_dir_all(src.join(d)).unwrap();
         }
@@ -2319,6 +2328,8 @@ mod tests {
         std::fs::write(src.join("crates/target/Cargo.toml"), "x").unwrap();
         std::fs::write(src.join("target/debug/big"), "x").unwrap();
         std::fs::write(src.join("web/node_modules/package.json"), "{}").unwrap();
+        std::fs::write(src.join(".claude/worktrees/x/target/big"), "x").unwrap();
+        std::fs::write(src.join("crates/.claude/keep.rs"), "x").unwrap();
         let excludes = rsync_exclusions(&src).unwrap();
         let mut cmd = Command::new(rsync_program());
         cmd.args(["-a", "--delete"]);
@@ -2334,6 +2345,8 @@ mod tests {
         assert!(dst.join("src/target/mod.rs").exists(), "src/target 是原始碼，要送");
         assert!(dst.join("crates/target/Cargo.toml").exists(), "crates/target 是 workspace 成員，要送");
         assert!(!dst.join("target").exists(), "根目錄的 target 不送");
+        assert!(!dst.join(".claude").exists(), "根目錄的 .claude（含 worktree 的 target）不送");
+        assert!(dst.join("crates/.claude/keep.rs").is_file(), "巢狀的 .claude 是原始碼，要送");
         assert!(
             dst.join("web/node_modules/package.json").is_file(),
             "未設定排除政策時，保留 node_modules 輸入"
@@ -3648,6 +3661,26 @@ exit "$rc"
             b"current\n"
         );
         let _ = std::fs::remove_dir_all(base);
+    }
+
+    /// #1861 review：遠端殘留的根 `.claude`（worktree 與其 target 可能十幾 GB）不能被整棵 touch 遍歷；一般原始碼照樣 touch。
+    #[test]
+    fn the_remote_touch_skips_a_leftover_root_claude_tree() {
+        let base = base();
+        let (remote, _cwd, data) = fake_remote(&base, 60, "exit 0\n");
+        let dir = base.join("shared");
+        let old = std::time::SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(1_000_000);
+        let stale = dir.join(".claude/worktrees/x/target/big");
+        let live = dir.join("src/lib.rs");
+        for p in [&stale, &live] {
+            std::fs::create_dir_all(p.parent().unwrap()).unwrap();
+            std::fs::write(p, "x").unwrap();
+            std::fs::File::options().write(true).open(p).unwrap().set_times(std::fs::FileTimes::new().set_modified(old)).unwrap();
+        }
+        with_fake_transport(&base, || touch_remote_workspace(&remote, &data, &dir.display().to_string(), &Deadline::new(60))).expect("touch succeeds");
+        assert_eq!(std::fs::metadata(&stale).unwrap().modified().unwrap(), old, "遠端殘留的 .claude 不被 touch");
+        assert!(std::fs::metadata(&live).unwrap().modified().unwrap() > old, "一般原始碼照樣 touch");
+        let _ = std::fs::remove_dir_all(&base);
     }
 
     /// Exclusion cleanup must fail closed when an intermediate remote path is a symlink.

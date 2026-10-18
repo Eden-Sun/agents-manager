@@ -21,16 +21,28 @@ fn dirty_from_status(status: Option<&str>) -> bool {
     status.map_or(true, |s| !s.is_empty())
 }
 
+/// 讀不到 status 一律 fail closed（#884）。例外：dev／test 在沒有 `.git` 的來源（remote-cargo 的 shared 排除了 `.git`）
+/// 不標髒、也不警告（#1861）：那裡建出來的東西不會被部署，標髒只會每次都印 warning。release 仍照舊 fail closed。
+fn dirty_for(status: Option<&str>, in_git: bool, release: bool) -> bool {
+    if status.is_none() && !in_git && !release {
+        return false;
+    }
+    dirty_from_status(status)
+}
+
 fn main() {
+    // 部署用的 release build 才需要整個 workspace 的髒樹判斷（#884）；dev／test 不會被部署，只看自己的 `src`（#1861）。
+    let release = std::env::var("PROFILE").is_ok_and(|p| p == "release");
     // 完整 sha：`--version` 印它，daemon-swap 換 binary 之前拿它跟核准的 sha 比（`build_info::VERSION`）。
     let full = git(&["rev-parse", "HEAD"]).filter(|s| !s.is_empty()).unwrap_or_else(|| "unknown".to_string());
     let short = git(&["rev-parse", "--short", "HEAD"]).filter(|s| !s.is_empty()).unwrap_or_else(|| "unknown".to_string());
     // 髒樹（有未提交的改動）建出來的 binary 不是任何一個 commit：標記出來，不能冒充乾淨的 sha。
     // 只看追蹤中的檔案（`-uno`）：沒追蹤的檔案進不了 binary。讀不到 status 就 fail closed 標髒，避免不確定的 binary 冒充乾淨 commit。
     // `--no-optional-locks`：只讀，不去刷新／寫 index（自動部署的 checkout 同時還有別的 git 指令在跑，不要跟它搶 index.lock）。
+    let in_git = git(&["rev-parse", "--git-dir"]).is_some();
     let status = git(&["--no-optional-locks", "status", "--porcelain", "-uno"]);
-    let dirty = dirty_from_status(status.as_deref());
-    if status.is_none() {
+    let dirty = dirty_for(status.as_deref(), in_git, release);
+    if dirty && status.is_none() {
         println!("cargo:warning=git status failed; marking build dirty");
     }
     let changed = status.unwrap_or_default();
@@ -52,9 +64,11 @@ fn main() {
     }
     println!("cargo:rerun-if-changed=src");
     println!("cargo:rerun-if-changed=Cargo.toml");
-    // 同 `crates/am-supervisor/build.rs`：daemon 測試建置的 `build_info` env 來自這支，別的 crate 動了也要重跑（#884）。
-    for p in ["../crates", "../Cargo.toml", "../Cargo.lock"] {
-        println!("cargo:rerun-if-changed={p}");
+    // 同 `crates/am-supervisor/build.rs`：release 的 build_info env 要跟著整個 workspace 重算（#884）；dev／test 不監看（#1861）。
+    if release {
+        for p in ["../crates", "../Cargo.toml", "../Cargo.lock"] {
+            println!("cargo:rerun-if-changed={p}");
+        }
     }
 }
 
@@ -73,5 +87,27 @@ mod tests {
     #[test]
     fn a_nonempty_git_status_is_a_dirty_tree() {
         assert!(super::dirty_from_status(Some(" M src/main.rs")));
+    }
+
+    #[test]
+    fn a_dev_build_without_git_is_not_marked_dirty() {
+        assert!(!super::dirty_for(None, false, false));
+    }
+
+    #[test]
+    fn a_release_build_without_git_fails_closed() {
+        assert!(super::dirty_for(None, false, true));
+    }
+
+    #[test]
+    fn a_failed_status_inside_a_repo_fails_closed_in_both_profiles() {
+        assert!(super::dirty_for(None, true, false));
+        assert!(super::dirty_for(None, true, true));
+    }
+
+    #[test]
+    fn a_clean_status_is_clean_in_both_profiles() {
+        assert!(!super::dirty_for(Some(""), true, false));
+        assert!(!super::dirty_for(Some(""), true, true));
     }
 }
