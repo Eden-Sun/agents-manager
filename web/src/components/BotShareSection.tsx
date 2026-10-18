@@ -1,6 +1,7 @@
 import { useEffect, useState } from 'react'
-import { fetchShare, rotateShare, setShareEnabled, shareErrorText, type ShareState } from '../api/share'
+import { rotateShare, setShareEnabled, shareErrorText, type ShareState } from '../api/share'
 import { copyText } from '../lib/copyText'
+import { useShareRequests } from '../hooks/useShareRequests'
 import { useStore } from '../store/store'
 import { ConfirmDialog } from './ConfirmDialog'
 import './botShare.css'
@@ -20,52 +21,62 @@ export function BotShareSection({ botId }: { botId: string }) {
   const rev = useStore((s) => s.shareRev[botId] ?? 0)
   const notify = useStore((s) => s.notify)
   const online = useStore((s) => s.socket === 'open')
-  const [share, setShare] = useState<ShareState | null>(null)
+  const [share, setShare] = useState<{ rev: number; state: ShareState } | null>(null)
   const [error, setError] = useState<string | null>(null)
   const [busy, setBusy] = useState(false)
   const [confirm, setConfirm] = useState<'rotate' | 'off' | null>(null)
   const [attempt, setAttempt] = useState(0)
+  const { readAt, beginPost, applyPost, isCurrentPost } = useShareRequests(
+    botId,
+    (state, revision) => {
+      setShare({ rev: revision, state })
+      setError(null)
+    },
+    (e) => setError(shareErrorText(e)),
+  )
+  const currentShare = share?.rev === rev ? share.state : null
 
   /** 一次都沒讀到：開關是鎖著的，連回來要自己再抓。 */
-  const loadFailed = share === null && error !== null
+  const loadFailed = currentShare === null && error !== null
   useEffect(() => {
     if (online && loadFailed) setAttempt((n) => n + 1)
   }, [online, loadFailed])
 
   useEffect(() => {
     if (!restricted) return
-    let alive = true
-    fetchShare(botId).then(
-      (s) => {
-        if (!alive) return
-        setShare(s)
-        setError(null)
-      },
-      (e) => alive && setError(shareErrorText(e)),
-    )
-    return () => {
-      alive = false
-    }
-  }, [botId, restricted, sharing, rev, attempt])
+    void readAt(rev).promise.catch(() => {})
+  }, [botId, restricted, sharing, rev, attempt, readAt])
 
   if (!restricted) return null
 
   const run = async (what: () => Promise<ShareState>, done?: string) => {
     setBusy(true)
     setError(null)
+    const post = beginPost()
     try {
-      // 新回應沒帶 url（關掉）就清掉手上那條，不然畫面上還留著一條已失效的連結。
-      setShare(await what())
-      if (done) notify('info', done)
-    } catch (e) {
-      setError(shareErrorText(e))
+      let res: ShareState
+      try {
+        res = await what()
+      } catch (e) {
+        if (isCurrentPost(post)) setError(shareErrorText(e))
+        return
+      }
+
+      let effective = res
+      try {
+        effective = await applyPost(post, res)
+      } catch (e) {
+        setError(shareErrorText(e))
+        return
+      }
+      if (done) notify('info', res.enabled && !effective.enabled ? '分享已關閉' : done)
     } finally {
       setBusy(false)
     }
   }
 
   const copy = (url: string) => void copyText(url).then((ok) => notify(ok ? 'info' : 'error', ok ? '已複製分享連結' : '複製失敗，請手動選取連結'))
-  const enabled = share?.enabled ?? false
+  const enabled = currentShare?.enabled ?? false
 
   return (
     <section className="bs-share" aria-label="分享">
@@ -76,7 +87,7 @@ export function BotShareSection({ botId }: { botId: string }) {
             type="checkbox"
             role="switch"
             checked={enabled}
-            disabled={busy || share === null}
+            disabled={busy || currentShare === null}
             onChange={(e) => (e.target.checked ? void run(() => setShareEnabled(botId, true), '已開啟分享') : setConfirm('off'))}
           />
           {enabled ? '分享中' : '未分享'}
@@ -102,8 +113,8 @@ export function BotShareSection({ botId }: { botId: string }) {
               <label>
                 <input
                   type="checkbox"
-                  checked={share?.allow_embed ?? false}
-                  disabled={busy || share === null}
+                  checked={currentShare?.allow_embed ?? false}
+                  disabled={busy || currentShare === null}
                   onChange={(e) => void run(() => setShareEnabled(botId, true, e.target.checked), e.target.checked ? '已允許 iframe 嵌入' : '已關閉 iframe 嵌入')}
                 />{' '}
                 允許 iframe 嵌入
@@ -111,30 +122,30 @@ export function BotShareSection({ botId }: { botId: string }) {
               <p className="hint">任何網站都能把這個分享頁嵌進去；只在你要嵌到自己的網站時開。</p>
             </div>
           ) : null}
-          {share?.url ? (
+          {currentShare?.url ? (
             <>
               <div className="bs-share-url">
-                <input type="text" readOnly value={share.url} aria-label="分享連結" onFocus={(e) => e.currentTarget.select()} />
-                <button type="button" className="btn primary" onClick={() => copy(share.url!)}>
+                <input type="text" readOnly value={currentShare.url} aria-label="分享連結" onFocus={(e) => e.currentTarget.select()} />
+                <button type="button" className="btn primary" onClick={() => copy(currentShare.url!)}>
                   複製連結
                 </button>
               </div>
               <p className="hint">聊天區頂端的「🔗 複製連結」也能隨時複製。</p>
             </>
-          ) : share?.needs_rotate ? (
+          ) : currentShare?.needs_rotate ? (
             <p className="bs-share-hint">
-              目前的連結結尾 <code>{share.token_hint ?? '…'}</code>，是舊版開的（只存雜湊），拿不回完整網址；「重產連結」一次之後就會一直顯示在這裡。
+              目前的連結結尾 <code>{currentShare.token_hint ?? '…'}</code>，是舊版開的（只存雜湊），拿不回完整網址；「重產連結」一次之後就會一直顯示在這裡。
             </p>
           ) : (
             <p className="bs-share-hint">
-              目前的連結結尾 <code>{share?.token_hint ?? '…'}</code>。config.toml 的 [share] base_url 沒設，組不出完整網址。
+              目前的連結結尾 <code>{currentShare?.token_hint ?? '…'}</code>。config.toml 的 [share] base_url 沒設，組不出完整網址。
             </p>
           )}
           <dl className="bs-share-meta">
             <dt>建立於</dt>
-            <dd>{fmt(share?.created_at ?? null)}</dd>
+            <dd>{fmt(currentShare?.created_at ?? null)}</dd>
             <dt>最後使用</dt>
-            <dd>{fmt(share?.last_used_at ?? null)}</dd>
+            <dd>{fmt(currentShare?.last_used_at ?? null)}</dd>
           </dl>
           <div className="bs-share-actions">
             <button type="button" className="btn" disabled={busy} onClick={() => setConfirm('rotate')}>
