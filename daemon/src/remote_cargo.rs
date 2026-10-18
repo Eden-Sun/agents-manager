@@ -12,7 +12,7 @@ use axum::Json;
 use serde::Deserialize;
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::io::{BufRead, BufReader, Write as _};
 use std::path::{Path, PathBuf};
 use std::process::{Child, ChildStdin, ChildStdout, Command, ExitStatus, Stdio};
@@ -711,6 +711,14 @@ pub async fn install_settings(State(app): State<Arc<App>>) -> Result<Json<Value>
 /// 子指令前面可以有「原樣搬到遠端也是同一個意思」的全域旗標（`-v`／`-q`／`--locked`／`--color`，issue #195：`cargo --locked test` 也是驗證）。
 /// `+toolchain`（遠端不一定裝了）、`-C`／`--config`（本機路徑）、`--offline`／`--frozen`（取決於本機的快取）、`-Z` 不搬——回 false 讓它留在本機、照本機名額排。
 pub fn eligible(args: &[String]) -> bool {
+    // Cache invalidation must inspect the exact target/build directory used by Cargo.
+    // Command-line overrides may redirect the managed cache location; --config may set either.
+    if args.iter().take_while(|a| a.as_str() != "--").any(|a| {
+        a == "--target-dir" || a.starts_with("--target-dir=")
+            || a == "--config" || a.starts_with("--config=")
+    }) {
+        return false;
+    }
     let mut it = args.iter().map(String::as_str);
     while let Some(a) = it.next() {
         match a {
@@ -733,12 +741,14 @@ pub fn eligible(args: &[String]) -> bool {
 /// 例：`RUSTFLAGS="-D warnings" cargo clippy` 搬到遠端就沒有 `-D warnings`，遠端綠、本機會紅的假綠。
 /// 有設的話這次不轉遠端（退回本機，並講出來），不能悄悄用不同的設定驗。
 pub fn env_blocking_offload<I: IntoIterator<Item = (String, String)>>(vars: I) -> Option<String> {
-    const EXACT: [&str; 9] = [
+    const EXACT: [&str; 11] = [
         "RUSTFLAGS",
         "RUSTDOCFLAGS",
         "CARGO_ENCODED_RUSTFLAGS",
         "CARGO_ENCODED_RUSTDOCFLAGS",
         "CARGO_TARGET_DIR",
+        "CARGO_BUILD_TARGET_DIR",
+        "CARGO_BUILD_BUILD_DIR",
         "CARGO_BUILD_TARGET",
         "CARGO_BUILD_RUSTFLAGS",
         "CARGO_BUILD_RUSTDOCFLAGS",
@@ -1385,13 +1395,18 @@ impl Drop for Lease {
 fn run_script(dir: &str, sub: &str, token: &LeaseToken, jobs: usize, test_threads: usize, args: &[String]) -> String {
     let argv = args.iter().map(|a| sh_quote(a)).collect::<Vec<_>>().join(" ");
     let tok = token.as_str();
+    let cache_path = format!("{dir}/target");
     // `~/.cargo/bin` 要自己接：rustup 只改 shell profile，ssh 的非互動 shell 不讀（同 `PROBE_SH`）。
+    // Keep Cargo's cache under the inspected target without exporting cache overrides into
+    // tests/build scripts that spawn another Cargo for an unrelated temporary project.
     format!(
         "d={dir}; g=$(ps -o pgid= -p $$ | tr -d ' ') && printf '%s\\n' \"$g\" > \"$d.pgid-{tok}\" \
          && [ \"$(cat \"$d.owner\" 2>/dev/null)\" = {tok} ] \
          || {{ echo 'agents-manager: 遠端工作目錄已經還回去了（helper 中途被砍？），不跑 cargo' >&2; exit 126; }}; \
-         cd \"$d\"/{sub} && PATH=\"$HOME/.cargo/bin:$PATH\" CARGO_BUILD_JOBS={jobs}{threads} cargo {argv}",
+         cd \"$d\"/{sub} && PATH=\"$HOME/.cargo/bin:$PATH\" CARGO_BUILD_JOBS={jobs}{threads} env -u CARGO_TARGET_DIR -u CARGO_BUILD_TARGET_DIR -u CARGO_BUILD_BUILD_DIR cargo --config {target_config} --config {build_config} {argv}",
         dir = sh_quote(dir),
+        target_config = sh_quote(&format!("build.target-dir={cache_path:?}")),
+        build_config = sh_quote(&format!("build.build-dir={cache_path:?}")),
         sub = sh_quote(sub),
         jobs = jobs.max(1),
         threads = if test_threads > 0 { format!(" RUST_TEST_THREADS={test_threads}") } else { String::new() },
@@ -1621,7 +1636,8 @@ fn rsync_rsh(remote: &BuildRemoteCfg, has_password: bool, askpass: bool) -> Stri
 /// `[workspace.metadata.agents-manager.remote-cargo].exclude` 明確宣告。
 const BASE_RSYNC_EXCLUDES: [&str; 2] = [".git", "/target"];
 
-/// #1861：工具狀態（worktree、skills…）不是 build 輸入，固定排除、只錨定根。只影響掃描與 rsync；
+/// 工具狀態固定排除、只錨定根；前端產物仍是來源，因 release profile 與專案程式都可能讀取它。
+/// 只影響來源掃描、rsync 與失效 touch；
 /// 不進遠端清理（[`prune_remote_exclusions`]）：沒有任何專案設定排除時，同步不該多一趟 ssh，也不該因為遠端目錄還不存在而失敗。
 const IMPLICIT_RSYNC_EXCLUDES: [&str; 1] = ["/.claude"];
 
@@ -1755,7 +1771,8 @@ fn rsync_exclusions(root: &Path) -> anyhow::Result<Vec<String>> {
             exclusions.push(path.to_string());
         }
     }
-    // #1861：`.claude/` 的 worktree 與其 target 合計十幾 GB，不能整個掃描、送上遠端；巢狀的 `.claude` 是原始碼，照送。
+    // 根 `.claude/` 的 worktree 與其 target 合計十幾 GB，不能整個掃描、送上遠端；巢狀 `.claude` 是原始碼，照送。
+    // 前端產物可能是 release build 或專案自行 include 的輸入，照常同步。
     exclusions.extend(IMPLICIT_RSYNC_EXCLUDES.iter().map(|s| s.to_string()));
     Ok(exclusions)
 }
@@ -1779,6 +1796,13 @@ fn is_excluded_source_path(relative: &Path, exclusions: &[String]) -> bool {
             let prefix = entry.trim_start_matches('/').as_bytes();
             bytes == prefix || bytes.starts_with(&[prefix, b"/"].concat())
         })
+}
+
+fn is_implicit_source_exclusion(relative: &Path) -> bool {
+    IMPLICIT_RSYNC_EXCLUDES.iter().any(|entry| {
+        let excluded = Path::new(entry.trim_start_matches('/'));
+        relative == excluded || relative.starts_with(excluded)
+    })
 }
 
 fn scan_source_manifest(root: &Path, exclusions: &[String]) -> anyhow::Result<SourceManifest> {
@@ -1842,6 +1866,12 @@ fn scan_source_manifest(root: &Path, exclusions: &[String]) -> anyhow::Result<So
     }
 
     let mut entries = BTreeMap::new();
+    // build scripts may inspect permissions of the workspace root as well as its children.
+    entries.insert(b".".to_vec(), SourceEntry {
+        kind: b'D',
+        mode: std::fs::metadata(root)?.permissions().mode() & 0o7777,
+        value: Vec::new(),
+    });
     visit(root, root, exclusions, &mut entries)?;
     Ok(SourceManifest { entries })
 }
@@ -1854,14 +1884,415 @@ fn touch_remote_workspace(
 ) -> anyhow::Result<()> {
     let pw = secret(data_dir, remote)?;
     let mut cmd = ssh_base(remote, pw.as_deref(), data_dir)?;
-    let script = format!(
-        "set -eu\nlease_dir={}\n[ -d \"$lease_dir\" ] && [ ! -L \"$lease_dir\" ] || exit 2\nroot=$(cd -P -- \"$lease_dir\" && pwd) || exit 2\n[ \"$root\" = \"$lease_dir\" ] || exit 2\ncd -- \"$root\"\nfind -P . \\( -path './target' -o -path './.git' -o -path './.claude' \\) -prune -o -type f -exec touch -m -- '{{}}' +\nfind -P . \\( -path './target' -o -path './.git' -o -path './.claude' \\) -prune -o -type l -exec touch -h -m -- '{{}}' +",
+    let mut script = format!(
+        "set -eu\nlease_dir={}\n[ -d \"$lease_dir\" ] && [ ! -L \"$lease_dir\" ] || exit 2\nroot=$(cd -P -- \"$lease_dir\" && pwd) || exit 2\n[ \"$root\" = \"$lease_dir\" ] || exit 2\ncd -- \"$root\"\n",
         sh_quote(dir)
+    );
+    script.push_str(REMOTE_TOUCH_MTIME_SETUP);
+    script.push_str(
+        "if prepare_touch_stamp && find -P . \\( -path './target' -o -path './.git' -o -path './.claude' \\) -prune -o \\( -type f -o -type l \\) -exec touch -h -m -d \"@$touch_stamp\" -- '{}' + && verify_touch_mtimes && wait_for_touch_stamp; then\n  :\nelse\n  invalidate_target_fingerprints\n  find -P . \\( -path './target' -o -path './.git' -o -path './.claude' \\) -prune -o -type f -exec touch -m -- '{}' +\n  find -P . \\( -path './target' -o -path './.git' -o -path './.claude' \\) -prune -o -type l -exec touch -h -m -- '{}' +\nfi\n",
     );
     cmd.arg(login_shell_arg(&script));
     let status = run_status(cmd, "invalidate remote Cargo workspace sources", deadline)?;
     if !status.success() {
         anyhow::bail!("remote workspace source invalidation failed with exit {:?}", status.code());
+    }
+    Ok(())
+}
+
+#[derive(Debug, PartialEq, Eq)]
+enum SourceInvalidation {
+    Unchanged,
+    Files(Vec<PathBuf>),
+    Workspace,
+}
+
+#[derive(Debug, Default)]
+struct ManifestDiffCause {
+    count: usize,
+    paths: Vec<String>,
+}
+
+#[derive(Debug)]
+struct SourceInvalidationReport {
+    action: SourceInvalidation,
+    safe_files: Vec<PathBuf>,
+    touch_paths: BTreeSet<PathBuf>,
+    fallback: BTreeMap<&'static str, ManifestDiffCause>,
+}
+
+impl SourceInvalidationReport {
+    fn record_fallback(&mut self, cause: &'static str, path: Option<&[u8]>) {
+        let detail = self.fallback.entry(cause).or_default();
+        detail.count += 1;
+        if detail.paths.len() < 8 {
+            if let Some(path) = path {
+                detail.paths.push(String::from_utf8_lossy(path).into_owned());
+            }
+        }
+    }
+
+    fn log(&self) {
+        match &self.action {
+            SourceInvalidation::Unchanged => return,
+            SourceInvalidation::Files(paths) => {
+                let sample = paths
+                    .iter()
+                    .take(8)
+                    .map(|path| format!("{path:?}"))
+                    .collect::<Vec<_>>();
+                eprintln!(
+                    "agents-manager: source manifest: targeted touch ({} paths): {}",
+                    paths.len(),
+                    sample.join(", ")
+                );
+            }
+            SourceInvalidation::Workspace => {
+                let reasons = self
+                    .fallback
+                    .iter()
+                    .map(|(cause, detail)| {
+                        let paths = if detail.paths.is_empty() {
+                            String::new()
+                        } else {
+                            format!(" [{}]", detail.paths.join(", "))
+                        };
+                        format!("{cause} ({}{paths})", detail.count)
+                    })
+                    .collect::<Vec<_>>();
+                let safe = self
+                    .safe_files
+                    .iter()
+                    .take(8)
+                    .map(|path| format!("{path:?}"))
+                    .collect::<Vec<_>>();
+                let safe_note = if safe.is_empty() {
+                    String::new()
+                } else {
+                    format!(
+                        "; otherwise-safe files ({} total): {}",
+                        self.safe_files.len(),
+                        safe.join(", ")
+                    )
+                };
+                eprintln!(
+                    "agents-manager: source manifest: full-workspace touch fallback: {}{safe_note}",
+                    reasons.join("; ")
+                );
+            }
+        }
+    }
+}
+
+/// Build a timestamp strictly later than all Cargo fingerprints, dep-info and build-script output in the shared
+/// target. If the remote cannot read or set that timestamp, callers invalidate those records
+/// before falling back to the remote's ordinary `touch` behavior.
+const REMOTE_TOUCH_MTIME_SETUP: &str = r#"
+validate_target_cache_paths() {
+  [ ! -L target ] || { echo 'agents-manager: refusing a Cargo target symlink' >&2; return 1; }
+  [ ! -d target ] || {
+    cache_symlink=$(find -P target -type l -print -quit) || return 1
+    [ -z "$cache_symlink" ] || { echo 'agents-manager: refusing symlinks inside the Cargo target cache' >&2; return 1; }
+  }
+}
+invalidate_target_fingerprints() {
+  [ ! -L target ] || { echo 'agents-manager: refusing to invalidate through a target symlink' >&2; return 1; }
+  [ ! -d target ] || {
+    cache_symlink=$(find -P target -type l -print -quit) || return 1
+    if [ -n "$cache_symlink" ]; then
+      echo 'agents-manager: discarding Cargo target containing symlinks' >&2
+      rm -rf -- target
+      return
+    fi
+    find -P target -type d -name .fingerprint -prune -exec rm -rf -- '{}' +
+    find -P target -type f -name '*.d' -exec rm -f -- '{}' +
+  }
+}
+prepare_touch_stamp() {
+  validate_target_cache_paths || return 1
+  touch_now=$(LC_ALL=C date +%s.%N) || return 1
+  touch_artifact_mtimes=
+  if [ -d target ]; then
+    touch_artifact_mtimes=$(LC_ALL=C find -P target -type f \( -path '*/.fingerprint/*' -o -name '*.d' -o -path '*/build/*/output' \) -printf '%T@\n') || return 1
+  fi
+  touch_artifact_max=$(printf '%s\n%s\n' "$touch_now" "$touch_artifact_mtimes" | LC_ALL=C awk '
+    BEGIN { maximum = -1; valid = 1 }
+    NF == 0 { next }
+    NF != 1 || $1 !~ /^[0-9]+([.][0-9]+)?$/ { valid = 0; next }
+    { if ($1 > maximum) maximum = $1 }
+    END { if (!valid || maximum < 0) exit 1; printf "%.9f\n", maximum }
+  ') || return 1
+  LC_ALL=C awk -v now="$touch_now" -v artifact_max="$touch_artifact_max" 'BEGIN { exit !(artifact_max <= now) }' || return 1
+  touch_stamp=$(LC_ALL=C awk -v now="$touch_now" -v artifact_max="$touch_artifact_max" 'BEGIN { maximum = now; if (artifact_max > maximum) maximum = artifact_max; printf "%.0f\n", int(maximum) + 1 }') || return 1
+  [ -n "$touch_stamp" ]
+}
+touch_one_at_safe_mtime() {
+  touch_path=./$1
+  touch -m -d "@$touch_stamp" -- "$touch_path" || return 1
+  touch_actual=$(LC_ALL=C find -P "$touch_path" -maxdepth 0 -printf '%T@') || return 1
+  LC_ALL=C awk -v actual="$touch_actual" -v artifact_max="$touch_artifact_max" 'BEGIN { exit !(actual > artifact_max) }'
+}
+verify_touch_mtimes() {
+  touch_source_mtimes=$(LC_ALL=C find -P . \( -path './target' -o -path './.git' -o -path './.claude' \) -prune -o \( -type f -o -type l \) -printf '%T@\n') || return 1
+  printf '%s\n' "$touch_source_mtimes" | LC_ALL=C awk -v artifact_max="$touch_artifact_max" '
+    NF == 0 { next }
+    NF != 1 || $1 !~ /^[0-9]+([.][0-9]+)?$/ || $1 <= artifact_max { invalid = 1 }
+    END { exit invalid }
+  '
+}
+wait_for_touch_stamp() {
+  touch_after=$(LC_ALL=C date +%s) || return 1
+  if [ "$touch_after" -ge "$touch_stamp" ]; then return 0; fi
+  sleep 1 || return 1
+  touch_after=$(LC_ALL=C date +%s) || return 1
+  [ "$touch_after" -ge "$touch_stamp" ]
+}
+"#;
+
+/// Decide whether the last successful source manifest allows precise invalidation.
+/// Existing regular-file changes can be invalidated narrowly; removing one touches its surviving
+/// parent directory. Any added file can change module resolution or a proc macro directory listing
+/// while absent from old dep-info, so additions force workspace invalidation.
+/// Cargo's dep-info detects missing file inputs,
+/// while parent-directory mtimes cover build-script watches for directory contents. Structural
+/// changes, Cargo controls, and symlinks stay global.
+#[cfg(test)]
+fn source_invalidation(
+    root: &Path,
+    previous: Option<&SourceManifest>,
+    current: &SourceManifest,
+) -> SourceInvalidation {
+    source_invalidation_report(root, previous, current).action
+}
+
+fn source_invalidation_report(
+    root: &Path,
+    previous: Option<&SourceManifest>,
+    current: &SourceManifest,
+) -> SourceInvalidationReport {
+    let mut report = SourceInvalidationReport {
+        action: SourceInvalidation::Unchanged,
+        safe_files: Vec::new(),
+        touch_paths: BTreeSet::new(),
+        fallback: BTreeMap::new(),
+    };
+    let Some(previous) = previous else {
+        report.record_fallback("missing successful baseline", None);
+        report.action = SourceInvalidation::Workspace;
+        return report;
+    };
+    if previous == current {
+        return report;
+    }
+
+    // A directory symlink can feed include_* inputs in another package. A link outside the tree
+    // is also unknowable from this manifest. If either exists, any source change gets full touch.
+    for (bytes, entry) in &current.entries {
+        if entry.kind != b'L' {
+            continue;
+        }
+        let Some(path) = path_from_bytes(bytes) else {
+            report.record_fallback("unrepresentable symlink path", Some(bytes));
+            continue;
+        };
+        let Ok(target) = root.join(path).canonicalize() else {
+            report.record_fallback("unresolved symlink", Some(bytes));
+            continue;
+        };
+        if !target.starts_with(root) {
+            report.record_fallback("symlink target outside workspace", Some(bytes));
+        } else if target.is_dir() {
+            report.record_fallback("directory symlink", Some(bytes));
+        }
+    }
+
+    for (bytes, now) in &current.entries {
+        let Some(before) = previous.entries.get(bytes) else {
+            if is_cargo_control_path(bytes) {
+                report.record_fallback("Cargo control input added", Some(bytes));
+                continue;
+            }
+            // Compiler dep-info may list only existing files discovered by a proc macro.
+            // New inputs (with any extension, including assets) can change its expansion
+            // without a tracked directory, so no file addition is safe to narrow.
+            let cause = match now.kind {
+                b'D' => "added directory",
+                b'L' => "symlink added",
+                b'F' => "file added",
+                _ => "added non-file path",
+            };
+            report.record_fallback(cause, Some(bytes));
+            continue;
+        };
+        if before == now {
+            continue;
+        }
+        if before.kind != now.kind {
+            report.record_fallback("file type changed", Some(bytes));
+            continue;
+        }
+        if before.kind != b'F' || now.kind != b'F' {
+            report.record_fallback("non-file entry changed", Some(bytes));
+            continue;
+        }
+        if is_cargo_control_path(bytes) {
+            report.record_fallback("Cargo control input changed", Some(bytes));
+            continue;
+        }
+        let Some(path) = safe_source_path(bytes) else {
+            report.record_fallback("unsafe file path", Some(bytes));
+            continue;
+        };
+        report.safe_files.push(path.clone());
+        report.touch_paths.insert(path);
+    }
+    for bytes in previous.entries.keys() {
+        if !current.entries.contains_key(bytes) {
+            let before = &previous.entries[bytes];
+            if is_cargo_control_path(bytes) {
+                report.record_fallback("Cargo control input removed", Some(bytes));
+                continue;
+            }
+            if before.kind == b'F' && !is_cargo_control_path(bytes) {
+                if let Some(path) = safe_source_path(bytes) {
+                    let parent = source_parent(&path);
+                    if parent_dir_exists_in_manifest(current, &parent) {
+                        report.safe_files.push(path);
+                        report.touch_paths.insert(parent);
+                        continue;
+                    }
+                }
+            }
+            let cause = match before.kind {
+                b'D' => "removed directory",
+                b'L' => "symlink removed",
+                b'F' => "removed path",
+                _ => "removed non-file path",
+            };
+            report.record_fallback(cause, Some(bytes));
+        }
+    }
+
+    if report.fallback.is_empty() && report.touch_paths.is_empty() {
+        report.record_fallback("unclassified manifest difference", None);
+    }
+    report.action = if report.fallback.is_empty() {
+        if report.touch_paths.is_empty() {
+            SourceInvalidation::Unchanged
+        } else {
+            SourceInvalidation::Files(report.touch_paths.iter().cloned().collect())
+        }
+    } else {
+        SourceInvalidation::Workspace
+    };
+    report
+}
+
+fn safe_source_path(bytes: &[u8]) -> Option<PathBuf> {
+    let path = path_from_bytes(bytes)?;
+    if bytes.contains(&0)
+        || path.is_absolute()
+        || path.components().any(|part| {
+            matches!(
+                part,
+                std::path::Component::ParentDir
+                    | std::path::Component::RootDir
+                    | std::path::Component::Prefix(_)
+            )
+        })
+        || path.to_str().is_none()
+    {
+        None
+    } else {
+        Some(path)
+    }
+}
+
+fn source_parent(path: &Path) -> PathBuf {
+    path.parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+        .unwrap_or_else(|| Path::new("."))
+        .to_path_buf()
+}
+
+fn parent_dir_exists_in_manifest(manifest: &SourceManifest, parent: &Path) -> bool {
+    if parent == Path::new(".") {
+        return true;
+    }
+    use std::os::unix::ffi::OsStrExt as _;
+    manifest
+        .entries
+        .get(parent.as_os_str().as_bytes())
+        .is_some_and(|entry| entry.kind == b'D')
+}
+
+fn is_cargo_control_path(path: &[u8]) -> bool {
+    path.split(|byte| *byte == b'/').any(|component| {
+        component == b"Cargo.toml"
+            || component == b"Cargo.lock"
+            || component == b"build.rs"
+            || component == b".cargo"
+            || component == b"rust-toolchain"
+            || component == b"rust-toolchain.toml"
+    })
+}
+
+fn touch_remote_files(
+    remote: &BuildRemoteCfg,
+    data_dir: &Path,
+    dir: &str,
+    paths: &[PathBuf],
+    deadline: &Deadline,
+) -> anyhow::Result<()> {
+    // The root .claude tree is absent from rsync and manifests; do not touch stale leftovers even
+    // if a path is passed directly.
+    let paths: Vec<_> = paths
+        .iter()
+        .filter(|path| !is_implicit_source_exclusion(path))
+        .collect();
+    if paths.is_empty() {
+        return Ok(());
+    }
+    let mut script = format!(
+        "set -eu\nlease_dir={}\n[ -d \"$lease_dir\" ] && [ ! -L \"$lease_dir\" ] || exit 2\nroot=$(cd -P -- \"$lease_dir\" && pwd) || exit 2\n[ \"$root\" = \"$lease_dir\" ] || exit 2\ncd -- \"$root\"\n",
+        sh_quote(dir)
+    );
+    script.push_str(REMOTE_TOUCH_MTIME_SETUP);
+    script.push_str("touch_fallback=0\nif ! prepare_touch_stamp; then\n  invalidate_target_fingerprints\n  touch_fallback=1\nfi\n");
+    for path in &paths {
+        let relative = path
+            .to_str()
+            .ok_or_else(|| anyhow::anyhow!("non-UTF-8 path cannot be individually invalidated"))?;
+        script.push_str(&format!(
+            "if [ \"$touch_fallback\" = 1 ]; then\n  touch -m -- {}\nelse\n  if ! touch_one_at_safe_mtime {}; then\n    invalidate_target_fingerprints\n    touch_fallback=1\n    touch -m -- {}\n  fi\nfi\n",
+            sh_quote(relative),
+            sh_quote(relative),
+            sh_quote(relative)
+        ));
+    }
+    script.push_str(
+        "if [ \"$touch_fallback\" = 0 ] && ! wait_for_touch_stamp; then\n  invalidate_target_fingerprints\n  touch_fallback=1\nfi\nif [ \"$touch_fallback\" = 1 ]; then\n",
+    );
+    for path in &paths {
+        let relative = path
+            .to_str()
+            .ok_or_else(|| anyhow::anyhow!("non-UTF-8 path cannot be individually invalidated"))?;
+        script.push_str(&format!("  touch -m -- {}\n", sh_quote(relative)));
+    }
+    script.push_str("fi\n");
+    let pw = secret(data_dir, remote)?;
+    let mut cmd = ssh_base(remote, pw.as_deref(), data_dir)?;
+    cmd.arg(login_shell_arg(&script));
+    let status = run_status(
+        cmd,
+        "invalidate changed remote Cargo source files",
+        deadline,
+    )?;
+    if !status.success() {
+        anyhow::bail!(
+            "changed remote Cargo source invalidation failed with exit {:?}",
+            status.code()
+        );
     }
     Ok(())
 }
@@ -1878,10 +2309,16 @@ fn read_remote_manifest(
 ) -> anyhow::Result<Option<SourceManifest>> {
     let path = remote_manifest_path(dir);
     let mut cmd = ssh_base(remote, secret(data_dir, remote)?.as_deref(), data_dir)?;
-    cmd.arg(login_shell_arg(&format!(
-        "if [ -f {0} ]; then cat {0}; else exit 44; fi",
-        sh_quote(&path)
-    )));
+    // Validate before rsync, including unchanged hot runs: neither the lease nor Cargo's
+    // cache may redirect writes through symlinks. Reuse this mandatory SSH round trip.
+    let mut script = format!(
+        "set -eu\nlease_dir={}\n[ ! -L \"$lease_dir\" ] || exit 2\n[ -e \"$lease_dir\" ] || exit 44\n[ -d \"$lease_dir\" ] || exit 2\nroot=$(cd -P -- \"$lease_dir\" && pwd) || exit 2\n[ \"$root\" = \"$lease_dir\" ] || exit 2\ncd -- \"$root\"\n",
+        sh_quote(dir),
+    );
+    script.push_str(REMOTE_TOUCH_MTIME_SETUP);
+    script.push_str("if ! validate_target_cache_paths; then invalidate_target_fingerprints; fi\n");
+    script.push_str(&format!("if [ -f {0} ]; then cat {0}; else exit 44; fi", sh_quote(&path)));
+    cmd.arg(login_shell_arg(&script));
     let out = output_with_deadline(cmd, "read remote Cargo source manifest", deadline)?;
     if out.status.code() == Some(44) {
         return Ok(None);
@@ -2072,12 +2509,18 @@ fn sync_source(remote: &BuildRemoteCfg, data_dir: &Path, cwd: &Path, dir: &str, 
             continue;
         }
 
-        // The manifest is only a whole-workspace change detector. Avoid per-path inference:
-        // deleted entries and type swaps have no valid remote path to touch, while directory
-        // symlinks can feed include_* inputs in a different package. `find -P` invalidates all
-        // still-existing workspace files without following symlinks, and prunes target/.git.
-        if previous.as_ref() != Some(&after) {
-            touch_remote_workspace(remote, data_dir, dir, deadline)?;
+        let invalidation = source_invalidation_report(&root, previous.as_ref(), &after);
+        invalidation.log();
+        match invalidation.action {
+            SourceInvalidation::Unchanged => {}
+            SourceInvalidation::Files(paths) => {
+                touch_remote_files(remote, data_dir, dir, &paths, deadline)?;
+            }
+            SourceInvalidation::Workspace => {
+                // Full touch is the conservative path for structural changes and inputs whose
+                // dependency scope cannot be proven from the manifest.
+                touch_remote_workspace(remote, data_dir, dir, deadline)?;
+            }
         }
 
         // A source edit after rsync or while mtime updates ran must not be recorded as successfully
@@ -2304,7 +2747,7 @@ mod tests {
         assert_eq!(rsync_destination(&remote(), "/home/u/shared/"), "me@build-host:/home/u/shared/");
     }
 
-    /// #328、#1856、#1861：固定排除 git、根 target 與根 `.claude`；專案未明確排除時 node_modules 仍是輸入、必須同步。
+    /// #328、#1856、#1861、#1858：固定排除 git、根 target、根 `.claude`；`web/dist` 仍須同步，未明確排除時 node_modules 也是輸入。
     #[test]
     fn the_rsync_excludes_keep_source_dirs_named_target() {
         if !has_program(&rsync_program()) {
@@ -2328,9 +2771,16 @@ mod tests {
         std::fs::write(src.join("crates/target/Cargo.toml"), "x").unwrap();
         std::fs::write(src.join("target/debug/big"), "x").unwrap();
         std::fs::write(src.join("web/node_modules/package.json"), "{}").unwrap();
+        std::fs::create_dir_all(src.join("web/dist")).unwrap();
+        std::fs::write(src.join("web/dist/index.html"), "CURRENT FRONTEND").unwrap();
         std::fs::write(src.join(".claude/worktrees/x/target/big"), "x").unwrap();
         std::fs::write(src.join("crates/.claude/keep.rs"), "x").unwrap();
         let excludes = rsync_exclusions(&src).unwrap();
+        let manifest = scan_source_manifest(&src, &excludes).unwrap();
+        assert!(manifest.entries.contains_key(b"web/dist".as_slice()), "frontend directory is a build input");
+        assert!(manifest.entries.contains_key(b"web/dist/index.html".as_slice()), "frontend file is a build input");
+        std::fs::create_dir_all(dst.join("web/dist")).unwrap();
+        std::fs::write(dst.join("web/dist/index.html"), "STALE FRONTEND").unwrap();
         let mut cmd = Command::new(rsync_program());
         cmd.args(["-a", "--delete"]);
         for exclude in excludes {
@@ -2346,6 +2796,7 @@ mod tests {
         assert!(dst.join("crates/target/Cargo.toml").exists(), "crates/target 是 workspace 成員，要送");
         assert!(!dst.join("target").exists(), "根目錄的 target 不送");
         assert!(!dst.join(".claude").exists(), "根目錄的 .claude（含 worktree 的 target）不送");
+        assert_eq!(std::fs::read_to_string(dst.join("web/dist/index.html")).unwrap(), "CURRENT FRONTEND", "rsync replaces stale frontend content for every profile");
         assert!(dst.join("crates/.claude/keep.rs").is_file(), "巢狀的 .claude 是原始碼，要送");
         assert!(
             dst.join("web/node_modules/package.json").is_file(),
@@ -2411,6 +2862,13 @@ mod tests {
         }
         assert!(env_blocking_offload([("RUSTFLAGS".to_string(), String::new())]).is_none(), "空值不算");
         assert!(env_blocking_offload([("PATH".to_string(), "/x".to_string())]).is_none());
+        for key in ["CARGO_BUILD_TARGET_DIR", "CARGO_BUILD_BUILD_DIR"] {
+            match decide_offload(&write(good), &args, [(key.to_string(), "/outside-cache".to_string())]) {
+                Offload::Local(Some(why)) => assert!(why.contains(key), "{why}"),
+                _ => panic!("{key} must keep the invocation local"),
+            }
+            assert!(matches!(decide_offload(&write(good), &args, [(key.to_string(), String::new())]), Offload::Go(_)), "empty {key} must allow offloading");
+        }
         std::fs::remove_dir_all(&dir).ok();
     }
 
@@ -2457,7 +2915,7 @@ mod tests {
     fn an_empty_argument_survives_quoting() {
         assert_eq!(sh_quote(""), "''");
         let s = run_script("/r/0123456789abcdef/shared", "", &LeaseToken::new(), 1, 0, &["test".into(), "--".into(), String::new(), "a b".into()]);
-        assert!(s.ends_with("cargo test -- '' 'a b'"), "{s}");
+        assert!(s.ends_with(" test -- '' 'a b'"), "{s}");
     }
 
     use super::*;
@@ -2794,6 +3252,22 @@ exec /bin/sh -c "$inner"
         for remote in [&["clippy", "--all-targets", "-p", "x"][..], &["clippy", "--", "-D", "warnings"], &["clippy", "--", "--fix"]] {
             assert!(eligible(&v(remote)), "{remote:?}");
         }
+        for local in [
+            &["check", "--target-dir", "/other/cache"][..],
+            &["test", "--target-dir=/other/cache"],
+            &["clippy", "--config", "build.target-dir='elsewhere'"],
+            &["check", "--config=build.build-dir='elsewhere'"],
+        ] {
+            assert!(!eligible(&v(local)), "custom cache directories must remain local: {local:?}");
+        }
+        assert!(eligible(&v(&["test", "--", "--target-dir=filter"])));
+        for remote in [
+            &["check", "--release"][..],
+            &["test", "--profile", "release"],
+            &["clippy", "--profile=release"],
+        ] {
+            assert!(eligible(&v(remote)), "release checks are safe because all source inputs are synced: {remote:?}");
+        }
     }
 
     #[test]
@@ -2960,11 +3434,15 @@ exec /bin/sh -c "$inner"
         let s = run_script("/r/0123456789abcdef/shared", "", &tok, 4, 8, &["test".into(), "-p".into(), "x; rm -rf ~".into()]);
         let pgid = s.find("> \"$d.pgid-0123456789abcdef0123456789abcdef\"").expect(&s);
         let owner = s.find("\"$d.owner\"").expect(&s);
-        let cargo = s.find("cargo test").expect(&s);
+        let cargo = s.find("cargo --config").expect(&s);
         assert!(pgid < owner && owner < cargo, "{s}");
         assert!(s.contains("exit 126"), "{s}");
         assert!(s.contains("'x; rm -rf ~'"), "{s}");
-        assert!(s.contains("PATH=\"$HOME/.cargo/bin:$PATH\" CARGO_BUILD_JOBS=4 RUST_TEST_THREADS=8 cargo"), "{s}");
+        assert!(s.contains("PATH=\"$HOME/.cargo/bin:$PATH\" CARGO_BUILD_JOBS=4 RUST_TEST_THREADS=8 env -u CARGO_TARGET_DIR -u CARGO_BUILD_TARGET_DIR -u CARGO_BUILD_BUILD_DIR cargo --config"), "{s}");
+        assert!(s.contains("build.target-dir=\"/r/0123456789abcdef/shared/target\""), "{s}");
+        assert!(s.contains("build.build-dir=\"/r/0123456789abcdef/shared/target\""), "{s}");
+        assert!(!s.contains("CARGO_TARGET_DIR="), "nested Cargo calls must not inherit this cache: {s}");
+        assert!(s.contains("env -u CARGO_TARGET_DIR -u CARGO_BUILD_TARGET_DIR -u CARGO_BUILD_BUILD_DIR"), "remote cache environment must not escape the lease: {s}");
         // 0＝不設：不帶這個環境變數（libtest 用自己的預設）。
         let s = run_script("/r/0123456789abcdef/shared", "", &tok, 4, 0, &["test".into()]);
         assert!(!s.contains("RUST_TEST_THREADS"), "{s}");
@@ -3671,15 +4149,36 @@ exit "$rc"
         let dir = base.join("shared");
         let old = std::time::SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(1_000_000);
         let stale = dir.join(".claude/worktrees/x/target/big");
+        let stale_dist = dir.join("web/dist/index.html");
         let live = dir.join("src/lib.rs");
-        for p in [&stale, &live] {
+        for p in [&stale, &stale_dist, &live] {
             std::fs::create_dir_all(p.parent().unwrap()).unwrap();
             std::fs::write(p, "x").unwrap();
             std::fs::File::options().write(true).open(p).unwrap().set_times(std::fs::FileTimes::new().set_modified(old)).unwrap();
         }
         with_fake_transport(&base, || touch_remote_workspace(&remote, &data, &dir.display().to_string(), &Deadline::new(60))).expect("touch succeeds");
         assert_eq!(std::fs::metadata(&stale).unwrap().modified().unwrap(), old, "遠端殘留的 .claude 不被 touch");
+        assert!(std::fs::metadata(&stale_dist).unwrap().modified().unwrap() > old, "workspace touch includes frontend build inputs");
         assert!(std::fs::metadata(&live).unwrap().modified().unwrap() > old, "一般原始碼照樣 touch");
+
+        std::fs::File::options().write(true).open(&live).unwrap().set_times(std::fs::FileTimes::new().set_modified(old)).unwrap();
+        with_fake_transport(&base, || {
+            touch_remote_files(
+                &remote,
+                &data,
+                &dir.display().to_string(),
+                &[
+                    PathBuf::from(".claude/worktrees/x/target/big"),
+                    PathBuf::from("web/dist/index.html"),
+                    PathBuf::from("src/lib.rs"),
+                ],
+                &Deadline::new(60),
+            )
+        })
+        .expect("individual touch must skip the excluded root .claude tree");
+        assert_eq!(std::fs::metadata(&stale).unwrap().modified().unwrap(), old, "逐檔 touch 也略過根 .claude");
+        assert!(std::fs::metadata(&stale_dist).unwrap().modified().unwrap() > old, "individual touch includes frontend build inputs");
+        assert!(std::fs::metadata(&live).unwrap().modified().unwrap() > old, "逐檔 touch 仍更新一般原始碼");
         let _ = std::fs::remove_dir_all(&base);
     }
 
@@ -3756,6 +4255,871 @@ exit "$rc"
         assert!(!Path::new(&dir).join("removed").exists(), "deleted paths must not be recreated by invalidation");
         assert_eq!(std::fs::read(Path::new(&dir).join("switched")).unwrap(), b"now a regular file\n");
         assert_eq!(std::fs::metadata(&target_file).unwrap().modified().unwrap(), target_mtime, "workspace invalidation must leave target artifacts alone");
+        let _ = std::fs::remove_dir_all(base);
+    }
+
+    fn source_manifest(entries: &[(&str, u8, &[u8], u32)]) -> SourceManifest {
+        SourceManifest {
+            entries: entries
+                .iter()
+                .map(|(path, kind, value, mode)| {
+                    (
+                        path.as_bytes().to_vec(),
+                        SourceEntry {
+                            kind: *kind,
+                            mode: *mode,
+                            value: value.to_vec(),
+                        },
+                    )
+                })
+                .collect(),
+        }
+    }
+
+    #[test]
+    fn source_manifest_only_narrows_safe_regular_file_changes() {
+        let root = Path::new("/workspace");
+        let previous = source_manifest(&[
+            ("Cargo.toml", b'F', b"manifest", 0o644),
+            ("src/lib.rs", b'F', b"old", 0o644),
+            ("src/other.rs", b'F', b"same", 0o644),
+        ]);
+        let changed = source_manifest(&[
+            ("Cargo.toml", b'F', b"manifest", 0o644),
+            ("src/lib.rs", b'F', b"new", 0o644),
+            ("src/other.rs", b'F', b"same", 0o644),
+        ]);
+        assert_eq!(
+            source_invalidation(root, Some(&previous), &changed),
+            SourceInvalidation::Files(vec![PathBuf::from("src/lib.rs")]),
+            "an unchanged-type Rust file can be invalidated by itself"
+        );
+        assert_eq!(
+            source_invalidation(root, Some(&previous), &previous),
+            SourceInvalidation::Unchanged,
+            "an unchanged source tree must keep the hot target intact"
+        );
+
+        let mode_changed = source_manifest(&[
+            ("Cargo.toml", b'F', b"manifest", 0o644),
+            ("src/lib.rs", b'F', b"old", 0o755),
+            ("src/other.rs", b'F', b"same", 0o644),
+        ]);
+        assert_eq!(
+            source_invalidation(root, Some(&previous), &mode_changed),
+            SourceInvalidation::Files(vec![PathBuf::from("src/lib.rs")]),
+            "a permission-only change to a regular file can be invalidated by itself"
+        );
+
+        for path in [
+            "Cargo.toml",
+            "Cargo.lock",
+            "build.rs",
+            ".cargo/config.toml",
+            "rust-toolchain",
+            "rust-toolchain.toml",
+            "crates/core/Cargo.toml",
+            "crates/core/build.rs",
+            "crates/core/rust-toolchain.toml",
+        ] {
+            let before = source_manifest(&[(path, b'F', b"old", 0o644)]);
+            let after = source_manifest(&[(path, b'F', b"new", 0o644)]);
+            assert_eq!(
+                source_invalidation(root, Some(&before), &after),
+                SourceInvalidation::Workspace,
+                "Cargo control input {path:?} must invalidate the full workspace"
+            );
+            let added = source_manifest(&[(path, b'F', b"new", 0o644)]);
+            let removed = source_manifest(&[]);
+            assert_eq!(
+                source_invalidation(root, Some(&removed), &added),
+                SourceInvalidation::Workspace,
+                "adding Cargo control input {path:?} must invalidate the full workspace"
+            );
+            assert_eq!(
+                source_invalidation(root, Some(&added), &removed),
+                SourceInvalidation::Workspace,
+                "removing Cargo control input {path:?} must invalidate the full workspace"
+            );
+        }
+
+        let before = source_manifest(&[
+            ("src", b'D', b"", 0o755),
+            ("src/lib.rs", b'F', b"old", 0o644),
+            ("src/removed.rs", b'F', b"old", 0o644),
+        ]);
+        let added_and_removed = source_manifest(&[
+            ("src", b'D', b"", 0o755),
+            ("src/lib.rs", b'F', b"old", 0o644),
+            ("src/new.txt", b'F', b"new", 0o644),
+        ]);
+        let directory_changed = source_manifest(&[
+            ("src", b'D', b"", 0o755),
+            ("src/new-dir", b'D', b"", 0o755),
+        ]);
+        let type_changed = source_manifest(&[
+            ("src", b'D', b"", 0o755),
+            ("src/lib.rs", b'L', b"target.rs", 0o777),
+        ]);
+        assert_eq!(
+            source_invalidation(root, Some(&before), &added_and_removed),
+            SourceInvalidation::Workspace,
+            "even non-Rust additions may change untracked compile-time directory listings"
+        );
+        assert_eq!(
+            source_invalidation(root, Some(&before), &directory_changed),
+            SourceInvalidation::Workspace,
+            "directory changes are structural"
+        );
+        assert_eq!(
+            source_invalidation(root, Some(&before), &type_changed),
+            SourceInvalidation::Workspace,
+            "type changes must conservatively invalidate the workspace"
+        );
+        assert_eq!(
+            source_invalidation(root, None, &before),
+            SourceInvalidation::Workspace,
+            "missing or corrupt baselines must invalidate the workspace"
+        );
+
+        let existing_module_pair = source_manifest(&[
+            ("src", b'D', b"", 0o755),
+            ("src/lib.rs", b'F', b"mod foo;", 0o644),
+            ("src/foo", b'D', b"", 0o755),
+            ("src/foo/mod.rs", b'F', b"", 0o644),
+        ]);
+        let ambiguous_module = source_manifest(&[
+            ("src", b'D', b"", 0o755),
+            ("src/lib.rs", b'F', b"mod foo;", 0o644),
+            ("src/foo", b'D', b"", 0o755),
+            ("src/foo/mod.rs", b'F', b"", 0o644),
+            ("src/foo.rs", b'F', b"", 0o644),
+        ]);
+        let report = source_invalidation_report(root, Some(&existing_module_pair), &ambiguous_module);
+        assert_eq!(report.action, SourceInvalidation::Workspace);
+        assert_eq!(
+            report.fallback["file added"].paths,
+            vec!["src/foo.rs".to_string()],
+            "a new Rust module candidate can affect old dep-info inputs"
+        );
+    }
+
+    #[test]
+    fn workspace_root_permission_changes_are_manifest_inputs() {
+        use std::os::unix::fs::PermissionsExt as _;
+        let base = base();
+        let root = base.join("source");
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::set_permissions(&root, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let before = scan_source_manifest(&root, &[]).unwrap();
+        std::fs::set_permissions(&root, std::fs::Permissions::from_mode(0o750)).unwrap();
+        let after = scan_source_manifest(&root, &[]).unwrap();
+        assert_eq!(source_invalidation(&root, Some(&before), &after), SourceInvalidation::Workspace);
+        let _ = std::fs::remove_dir_all(base);
+    }
+
+    #[test]
+    fn source_manifest_report_lists_fallback_reasons_and_safe_files() {
+        let root = Path::new("/workspace");
+        let before = source_manifest(&[
+            ("src", b'D', b"", 0o755),
+            ("src/lib.rs", b'F', b"old", 0o644),
+            ("src/removed-dir", b'D', b"", 0o755),
+            ("Cargo.toml", b'F', b"old", 0o644),
+        ]);
+        let after = source_manifest(&[
+            ("src", b'D', b"", 0o755),
+            ("src/added-dir", b'D', b"", 0o755),
+            ("src/lib.rs", b'F', b"new", 0o644),
+            ("Cargo.toml", b'F', b"new", 0o644),
+        ]);
+
+        let report = source_invalidation_report(root, Some(&before), &after);
+        assert_eq!(report.action, SourceInvalidation::Workspace);
+        assert_eq!(report.safe_files, vec![PathBuf::from("src/lib.rs")]);
+        assert_eq!(
+            report.fallback["added directory"].paths,
+            vec!["src/added-dir".to_string()]
+        );
+        assert_eq!(
+            report.fallback["removed directory"].paths,
+            vec!["src/removed-dir".to_string()]
+        );
+        assert_eq!(
+            report.fallback["Cargo control input changed"].paths,
+            vec!["Cargo.toml".to_string()]
+        );
+        let added_control = source_invalidation_report(
+            root,
+            Some(&source_manifest(&[])),
+            &source_manifest(&[("rust-toolchain.toml", b'F', b"stable", 0o644)]),
+        );
+        assert_eq!(
+            added_control.fallback["Cargo control input added"].paths,
+            vec!["rust-toolchain.toml".to_string()]
+        );
+    }
+
+    #[test]
+    fn added_and_removed_frontend_files_are_source_inputs() {
+        let before = source_manifest(&[
+            ("web", b'D', b"", 0o755),
+            ("web/dist", b'D', b"", 0o755),
+            ("web/dist/assets", b'D', b"", 0o755),
+            ("web/dist/index.html", b'F', b"old frontend", 0o644),
+        ]);
+        let after = source_manifest(&[
+            ("web", b'D', b"", 0o755),
+            ("web/dist", b'D', b"", 0o755),
+            ("web/dist/assets", b'D', b"", 0o755),
+            ("web/dist/index.html", b'F', b"old frontend", 0o644),
+            ("web/dist/assets/new.js", b'F', b"new frontend", 0o644),
+        ]);
+
+        assert_eq!(
+            source_invalidation_report(Path::new("/workspace"), Some(&before), &after).action,
+            SourceInvalidation::Workspace,
+            "new generated assets may change compiler inputs absent from old dep-info"
+        );
+        assert_eq!(
+            source_invalidation_report(Path::new("/workspace"), Some(&after), &before).action,
+            SourceInvalidation::Files(vec![PathBuf::from("web/dist/assets")]),
+            "removing a generated asset invalidates via the surviving watched directory"
+        );
+    }
+
+    #[test]
+    fn directory_and_external_symlinks_force_workspace_invalidation() {
+        use std::os::unix::fs::symlink;
+
+        for target_is_directory in [false, true] {
+            let base = base();
+            let root = base.join("source");
+            let target = if target_is_directory {
+                base.join("outside-dir")
+            } else {
+                base.join("outside-file")
+            };
+            if target_is_directory {
+                std::fs::create_dir_all(&target).unwrap();
+                std::fs::write(target.join("input.txt"), "included\n").unwrap();
+            } else {
+                std::fs::write(&target, "included\n").unwrap();
+            }
+            std::fs::create_dir_all(root.join("src")).unwrap();
+            std::fs::write(root.join("src/lib.rs"), "old\n").unwrap();
+            symlink(&target, root.join("include-link")).unwrap();
+            let before = scan_source_manifest(&root, &[]).unwrap();
+            std::fs::write(root.join("src/lib.rs"), "new\n").unwrap();
+            let after = scan_source_manifest(&root, &[]).unwrap();
+            assert_eq!(
+                source_invalidation(&root, Some(&before), &after),
+                SourceInvalidation::Workspace,
+                "directory and workspace-external symlinks make changed-input scope unknown"
+            );
+            let _ = std::fs::remove_dir_all(base);
+        }
+
+        let base = base();
+        let root = base.join("source");
+        std::fs::create_dir_all(root.join("assets")).unwrap();
+        std::fs::create_dir_all(root.join("src")).unwrap();
+        std::fs::write(root.join("assets/value.txt"), "old included input\n").unwrap();
+        std::fs::write(root.join("src/lib.rs"), "old source\n").unwrap();
+        symlink("assets", root.join("assets-link")).unwrap();
+        let before = scan_source_manifest(&root, &[]).unwrap();
+        std::fs::write(root.join("assets/value.txt"), "new included input\n").unwrap();
+        let after = scan_source_manifest(&root, &[]).unwrap();
+        assert_eq!(
+            source_invalidation(&root, Some(&before), &after),
+            SourceInvalidation::Workspace,
+            "content changes below an unchanged in-workspace directory symlink must invalidate the full workspace"
+        );
+        let _ = std::fs::remove_dir_all(base);
+    }
+
+    fn fake_cargo_mtime_paths(dir: &Path) -> (PathBuf, PathBuf) {
+        let fingerprint = dir.join("target/debug/.fingerprint/test-crate-hash/lib-test_crate.json");
+        let dep_info = dir.join("target/debug/deps/test_crate-hash.d");
+        std::fs::create_dir_all(fingerprint.parent().unwrap()).unwrap();
+        std::fs::create_dir_all(dep_info.parent().unwrap()).unwrap();
+        std::fs::write(&fingerprint, "fingerprint\n").unwrap();
+        std::fs::write(&dep_info, "dep-info\n").unwrap();
+        (fingerprint, dep_info)
+    }
+
+    #[test]
+    fn file_touch_moves_past_equal_and_future_cargo_mtimes() {
+        for artifact_offset in [0, 3600] {
+            let base = base();
+            let (remote, _cwd, data) = fake_remote(&base, 60, "exit 0\n");
+            let dir = base.join("rc/shared");
+            std::fs::create_dir_all(dir.join("src")).unwrap();
+            let changed = dir.join("src/lib.rs");
+            std::fs::write(&changed, "source\n").unwrap();
+            let artifact_time = std::time::SystemTime::now()
+                + Duration::from_secs(artifact_offset);
+            set_mtime(&changed, artifact_time);
+            let (fingerprint, dep_info) = fake_cargo_mtime_paths(&dir);
+            set_mtime(&fingerprint, artifact_time);
+            set_mtime(&dep_info, artifact_time);
+
+            with_fake_transport(&base, || {
+                touch_remote_files(
+                    &remote,
+                    &data,
+                    &dir.display().to_string(),
+                    &[PathBuf::from("src/lib.rs")],
+                    &Deadline::new(60),
+                )
+            })
+            .expect("file invalidation should move beyond the Cargo cache baseline");
+
+            if artifact_offset == 0 {
+                let changed_mtime = std::fs::metadata(&changed).unwrap().modified().unwrap();
+                assert!(changed_mtime > std::fs::metadata(&fingerprint).unwrap().modified().unwrap());
+                assert!(changed_mtime > std::fs::metadata(&dep_info).unwrap().modified().unwrap());
+            } else {
+                assert!(!fingerprint.exists(), "future-dated Cargo fingerprints must be invalidated after a clock rollback");
+                assert!(!dep_info.exists(), "future-dated dep-info must be invalidated after a clock rollback");
+            }
+            let _ = std::fs::remove_dir_all(base);
+        }
+    }
+
+    #[test]
+    fn workspace_touch_moves_past_equal_and_future_cargo_mtimes() {
+        for artifact_offset in [0, 3600] {
+            let base = base();
+            let (remote, _cwd, data) = fake_remote(&base, 60, "exit 0\n");
+            let dir = base.join("rc/shared");
+            std::fs::create_dir_all(dir.join("src")).unwrap();
+            let source = dir.join("src/lib.rs");
+            std::fs::write(&source, "source\n").unwrap();
+            let artifact_time = std::time::SystemTime::now()
+                + Duration::from_secs(artifact_offset);
+            set_mtime(&source, artifact_time);
+            let (fingerprint, dep_info) = fake_cargo_mtime_paths(&dir);
+            set_mtime(&fingerprint, artifact_time);
+            set_mtime(&dep_info, artifact_time);
+
+            with_fake_transport(&base, || {
+                touch_remote_workspace(
+                    &remote,
+                    &data,
+                    &dir.display().to_string(),
+                    &Deadline::new(60),
+                )
+            })
+            .expect("workspace invalidation should move beyond the Cargo cache baseline");
+
+            if artifact_offset == 0 {
+                let source_mtime = std::fs::metadata(&source).unwrap().modified().unwrap();
+                assert!(source_mtime > std::fs::metadata(&fingerprint).unwrap().modified().unwrap());
+                assert!(source_mtime > std::fs::metadata(&dep_info).unwrap().modified().unwrap());
+            } else {
+                assert!(!fingerprint.exists(), "future-dated Cargo fingerprints must be invalidated after a clock rollback");
+                assert!(!dep_info.exists(), "future-dated dep-info must be invalidated after a clock rollback");
+            }
+            let _ = std::fs::remove_dir_all(base);
+        }
+    }
+
+    #[test]
+    fn cargo_target_symlinks_fail_closed_for_file_and_workspace_invalidation() {
+        for (link_path, external_name, external_artifact, visible_trigger) in [
+            (
+                "target/debug",
+                "external-debug",
+                ".fingerprint/test-crate-hash/lib-test_crate.json",
+                "target/release/deps/trigger.d",
+            ),
+            (
+                "target/debug/.fingerprint",
+                "external-fingerprint",
+                "test-crate-hash/lib-test_crate.json",
+                "target/debug/deps/test-crate-hash.d",
+            ),
+            (
+                "target/debug/deps",
+                "external-deps",
+                "test_crate-hash.d",
+                "target/debug/.fingerprint/test-crate-hash/lib-test_crate.json",
+            ),
+        ] {
+            let base = base();
+            let (remote, _cwd, data) = fake_remote(&base, 60, "exit 0\n");
+            let dir = base.join("rc/shared");
+            std::fs::create_dir_all(dir.join("src")).unwrap();
+            let changed = dir.join("src/lib.rs");
+            std::fs::write(&changed, "source\n").unwrap();
+            set_mtime(&changed, std::time::UNIX_EPOCH + Duration::from_secs(10));
+            let _ = fake_cargo_mtime_paths(&dir);
+
+            let link = dir.join(link_path);
+            let external = base.join(external_name);
+            std::fs::create_dir_all(external.parent().unwrap()).unwrap();
+            std::fs::rename(&link, &external).unwrap();
+            symlink(&external, &link).unwrap();
+
+            let future = std::time::SystemTime::now() + Duration::from_secs(3600);
+            let external_artifact = external.join(external_artifact);
+            set_mtime(&external_artifact, future);
+            let visible_trigger = dir.join(visible_trigger);
+            std::fs::create_dir_all(visible_trigger.parent().unwrap()).unwrap();
+            if !visible_trigger.exists() {
+                std::fs::write(&visible_trigger, "visible cache trigger\n").unwrap();
+            }
+            set_mtime(&visible_trigger, future);
+            let source_before = std::fs::metadata(&changed).unwrap().modified().unwrap();
+            let external_artifact_before = std::fs::metadata(&external_artifact).unwrap().modified().unwrap();
+
+            with_fake_transport(&base, || {
+                touch_remote_files(
+                    &remote,
+                    &data,
+                    &dir.display().to_string(),
+                    &[PathBuf::from("src/lib.rs")],
+                    &Deadline::new(60),
+                )
+            })
+            .expect("a symlinked Cargo cache path must discard the shared target before touching sources");
+            assert!(
+                !dir.join("target").exists(),
+                "a symlink at {link_path} must invalidate the complete local target tree"
+            );
+            assert!(std::fs::metadata(&changed).unwrap().modified().unwrap() > source_before);
+            assert!(external_artifact.exists(), "external cache artifacts must not be followed or removed");
+            assert_eq!(std::fs::metadata(&external_artifact).unwrap().modified().unwrap(), external_artifact_before);
+            let _ = std::fs::remove_dir_all(base);
+        }
+
+        let base = base();
+        let (remote, _cwd, data) = fake_remote(&base, 60, "exit 0\n");
+        let dir = base.join("rc/shared");
+        std::fs::create_dir_all(dir.join("src")).unwrap();
+        let source = dir.join("src/lib.rs");
+        std::fs::write(&source, "source\n").unwrap();
+        set_mtime(&source, std::time::UNIX_EPOCH + Duration::from_secs(10));
+        let (_, dep_info) = fake_cargo_mtime_paths(&dir);
+        let fingerprint_dir = dir.join("target/debug/.fingerprint");
+        let external = base.join("external-workspace-fingerprint");
+        std::fs::rename(&fingerprint_dir, &external).unwrap();
+        symlink(&external, &fingerprint_dir).unwrap();
+        let future = std::time::SystemTime::now() + Duration::from_secs(3600);
+        set_mtime(&external.join("test-crate-hash/lib-test_crate.json"), future);
+        set_mtime(&dep_info, future);
+        let source_before = std::fs::metadata(&source).unwrap().modified().unwrap();
+        let fingerprint_before = std::fs::metadata(&external.join("test-crate-hash/lib-test_crate.json"))
+            .unwrap()
+            .modified()
+            .unwrap();
+
+        with_fake_transport(&base, || {
+            touch_remote_workspace(
+                &remote,
+                &data,
+                &dir.display().to_string(),
+                &Deadline::new(60),
+            )
+        })
+        .expect("workspace invalidation must discard a target tree with nested cache symlinks");
+        assert!(!dir.join("target").exists());
+        assert!(std::fs::metadata(&source).unwrap().modified().unwrap() > source_before);
+        assert_eq!(
+            std::fs::metadata(&external.join("test-crate-hash/lib-test_crate.json"))
+                .unwrap()
+                .modified()
+                .unwrap(),
+            fingerprint_before
+        );
+        assert!(!dep_info.exists(), "discarding the target must remove its local dep-info");
+        let _ = std::fs::remove_dir_all(base);
+    }
+
+    #[test]
+    fn sync_touches_only_a_changed_regular_file() {
+        if !has_program("rsync") {
+            return;
+        }
+        let base = base();
+        let (remote, cwd, data) = fake_remote(&base, 60, "exit 0\n");
+        std::fs::write(cwd.join("src/lib.rs"), "old\n").unwrap();
+        std::fs::write(cwd.join("unrelated.txt"), "same\n").unwrap();
+        let dir = format!("{}/rc/{}/shared", base.display(), cache_hash(&cwd));
+        std::fs::create_dir_all(&dir).unwrap();
+        use_real_rsync_for_fake_remote(&base);
+        let sync = || {
+            with_fake_transport(&base, || {
+                sync_source(&remote, &data, &cwd, &dir, &Deadline::new(60))
+            })
+        };
+        sync().expect("initial sync should establish a successful manifest");
+
+        let unrelated = Path::new(&dir).join("unrelated.txt");
+        set_mtime(&unrelated, std::time::UNIX_EPOCH + Duration::from_secs(10));
+        let unrelated_mtime = std::fs::metadata(&unrelated).unwrap().modified().unwrap();
+        let changed = Path::new(&dir).join("src/lib.rs");
+        std::fs::write(cwd.join("src/lib.rs"), "new\n").unwrap();
+        sync().expect("one regular source-file change should synchronize");
+
+        assert_eq!(
+            std::fs::metadata(&unrelated).unwrap().modified().unwrap(),
+            unrelated_mtime,
+            "unrelated source files must keep their mtimes"
+        );
+        assert!(
+            std::fs::metadata(&changed).unwrap().modified().unwrap() > unrelated_mtime,
+            "the changed source file must be newer than the shared target baseline"
+        );
+        let _ = std::fs::remove_dir_all(base);
+    }
+
+    #[test]
+    fn unchanged_sync_refuses_lease_and_target_symlinks_before_rsync() {
+        if !has_program("rsync") {
+            return;
+        }
+        let base = base();
+        let (remote, cwd, data) = fake_remote(&base, 60, "exit 0\n");
+        std::fs::write(cwd.join("src/lib.rs"), "old source\n").unwrap();
+        let dir = base.join("rc").join(cache_hash(&cwd)).join("shared");
+        std::fs::create_dir_all(&dir).unwrap();
+        use_real_rsync_for_fake_remote(&base);
+        let sync = || with_fake_transport(&base, || sync_source(
+            &remote, &data, &cwd, &dir.display().to_string(), &Deadline::new(60),
+        ));
+        sync().unwrap();
+        let outside = base.join("outside-cache");
+        std::fs::create_dir_all(&outside).unwrap();
+        std::fs::write(outside.join("keep"), "must survive\n").unwrap();
+        symlink(&outside, dir.join("target")).unwrap();
+        assert!(sync().is_err(), "even unchanged inputs must refuse a target symlink");
+        std::fs::remove_file(dir.join("target")).unwrap();
+        std::fs::create_dir_all(dir.join("target")).unwrap();
+        symlink(&outside, dir.join("target/debug")).unwrap();
+        sync().expect("an unchanged run may safely discard a cache containing symlinks");
+        assert!(!dir.join("target").exists());
+        assert_eq!(std::fs::read_to_string(outside.join("keep")).unwrap(), "must survive\n");
+
+        let outside_lease = base.join("outside-lease");
+        std::fs::rename(&dir, &outside_lease).unwrap();
+        symlink(&outside_lease, &dir).unwrap();
+        std::fs::write(cwd.join("src/lib.rs"), "new source\n").unwrap();
+        assert!(sync().is_err(), "a lease symlink must fail before rsync can follow it");
+        assert_eq!(std::fs::read_to_string(outside_lease.join("src/lib.rs")).unwrap(), "old source\n");
+        let _ = std::fs::remove_dir_all(base);
+    }
+
+    #[test]
+    fn corrupt_source_manifest_falls_back_to_workspace_touch() {
+        if !has_program("rsync") {
+            return;
+        }
+        let base = base();
+        let (remote, cwd, data) = fake_remote(&base, 60, "exit 0\n");
+        std::fs::write(cwd.join("unrelated.txt"), "same\n").unwrap();
+        let dir = format!("{}/rc/{}/shared", base.display(), cache_hash(&cwd));
+        std::fs::create_dir_all(&dir).unwrap();
+        use_real_rsync_for_fake_remote(&base);
+        let sync = || {
+            with_fake_transport(&base, || {
+                sync_source(&remote, &data, &cwd, &dir, &Deadline::new(60))
+            })
+        };
+        sync().expect("initial sync should establish a successful manifest");
+
+        let unrelated = Path::new(&dir).join("unrelated.txt");
+        set_mtime(&unrelated, std::time::UNIX_EPOCH + Duration::from_secs(10));
+        let before = std::fs::metadata(&unrelated).unwrap().modified().unwrap();
+        std::fs::write(remote_manifest_path(&dir), b"corrupt manifest\n").unwrap();
+        sync().expect("a corrupt manifest should recover by syncing and full invalidation");
+        assert!(
+            std::fs::metadata(&unrelated).unwrap().modified().unwrap() > before,
+            "a corrupt baseline must full-touch the remote workspace"
+        );
+        let _ = std::fs::remove_dir_all(base);
+    }
+
+    #[test]
+    fn changing_one_crate_rechecks_only_it_and_its_dependent_crate() {
+        if !has_program("rsync") {
+            return;
+        }
+        let base = base();
+        let (remote, cwd, data) = fake_remote(&base, 60, "exit 0\n");
+        std::fs::write(
+            cwd.join("Cargo.toml"),
+            "[workspace]\nmembers = [\"crates/base\", \"apps/app\", \"crates/unrelated\"]\nresolver = \"2\"\n",
+        )
+        .unwrap();
+        std::fs::write(cwd.join("Cargo.lock"), "version = 4\n").unwrap();
+        for (name, path) in [
+            ("base", "crates/base"),
+            ("app", "apps/app"),
+            ("unrelated", "crates/unrelated"),
+        ] {
+            std::fs::create_dir_all(cwd.join(path).join("src")).unwrap();
+            if name == "base" {
+                std::fs::create_dir_all(cwd.join(path).join("src/assets")).unwrap();
+                std::fs::write(cwd.join(path).join("src/assets/one.txt"), "one\n").unwrap();
+                std::fs::write(
+                    cwd.join(path).join("build.rs"),
+                    "use std::{env, fs, path::Path};\nfn main() { let assets = Path::new(\"src/assets\"); println!(\"cargo:rerun-if-changed={}\", assets.display()); let count = fs::read_dir(assets).unwrap().count(); fs::write(Path::new(&env::var(\"OUT_DIR\").unwrap()).join(\"assets.rs\"), format!(\"pub const ASSET_COUNT: u32 = {count};\\n\")).unwrap(); }\n",
+                )
+                .unwrap();
+            }
+            let dependencies = if name == "app" {
+                "[dependencies]\nbase = { path = \"../../crates/base\" }\n"
+            } else {
+                ""
+            };
+            let build = if name == "base" { "build = \"build.rs\"\n" } else { "" };
+            std::fs::write(
+                cwd.join(path).join("Cargo.toml"),
+                format!("[package]\nname = \"{name}\"\nversion = \"0.1.0\"\nedition = \"2021\"\n{build}{dependencies}"),
+            )
+            .unwrap();
+            let source = if name == "base" {
+                "include!(concat!(env!(\"OUT_DIR\"), \"/assets.rs\"));\npub fn value() -> u32 { ASSET_COUNT + 1 }\n"
+            } else if name == "app" {
+                "pub fn value() -> u32 { base::value() }\n"
+            } else if name == "unrelated" {
+                std::fs::create_dir_all(cwd.join(path).join("src/foo")).unwrap();
+                std::fs::write(cwd.join(path).join("src/foo/mod.rs"), "pub fn nested() {}\n").unwrap();
+                "mod foo;\npub fn value() -> u32 { 9 }\n"
+            } else {
+                "pub fn value() -> u32 { 9 }\n"
+            };
+            std::fs::write(cwd.join(path).join("src/lib.rs"), source).unwrap();
+        }
+
+        let dir = format!("{}/rc/{}/shared", base.display(), cache_hash(&cwd));
+        std::fs::create_dir_all(&dir).unwrap();
+        let cargo = toolchain_cargo();
+        let cargo_home = base.join("cargo-home");
+        std::fs::create_dir_all(&cargo_home).unwrap();
+        let lock = Command::new(&cargo)
+            .args(["generate-lockfile", "--offline"])
+            .current_dir(&cwd)
+            .env("CARGO_HOME", &cargo_home)
+            .env("RUSTC", cargo.parent().unwrap().join("rustc"))
+            .output()
+            .unwrap();
+        assert!(
+            lock.status.success(),
+            "cargo generate-lockfile failed: {}",
+            String::from_utf8_lossy(&lock.stderr)
+        );
+        use_real_rsync_for_fake_remote(&base);
+        let sync = || {
+            with_fake_transport(&base, || {
+                sync_source(&remote, &data, &cwd, &dir, &Deadline::new(60))
+            })
+        };
+        sync().expect("initial workspace sync should succeed");
+        let check = || {
+            let output = Command::new(&cargo)
+                .args(["check", "--offline", "--workspace", "--target-dir"])
+                .arg(Path::new(&dir).join("target"))
+                .current_dir(&dir)
+                .env("CARGO_HOME", &cargo_home)
+                .env("RUSTC", cargo.parent().unwrap().join("rustc"))
+                .env("CARGO_TERM_COLOR", "never")
+                .output()
+                .unwrap();
+            let output_text = format!(
+                "{}{}",
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr)
+            );
+            assert!(output.status.success(), "cargo check failed: {output_text}");
+            output_text
+                .lines()
+                .filter_map(|line| {
+                    let line = line.trim_start();
+                    line.strip_prefix("Checking ")
+                        .or_else(|| line.strip_prefix("Compiling "))
+                })
+                .filter_map(|line| line.split_whitespace().next())
+                .collect::<BTreeSet<_>>()
+                .into_iter()
+                .map(str::to_owned)
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(
+            check().len(),
+            3,
+            "the cold check should build all workspace packages"
+        );
+
+        std::fs::write(
+            cwd.join("crates/base/src/lib.rs"),
+            "include!(concat!(env!(\"OUT_DIR\"), \"/assets.rs\"));\npub fn value() -> u32 { ASSET_COUNT + 2 }\n",
+        )
+        .unwrap();
+        sync().expect("one crate source-file change should sync");
+        let mut checked = check();
+        checked.sort();
+        assert_eq!(
+            checked,
+            vec!["app".to_owned(), "base".to_owned()],
+            "only the changed crate and its dependent should be checked"
+        );
+
+        std::fs::write(cwd.join("crates/base/src/assets/two.txt"), "two\n").unwrap();
+        sync().expect("adding a regular build input must invalidate the workspace");
+        let mut checked = check();
+        checked.sort();
+        assert_eq!(
+            checked,
+            vec!["app".to_owned(), "base".to_owned(), "unrelated".to_owned()],
+            "an added file must rebuild possible consumers absent from old dep-info"
+        );
+
+        std::fs::remove_file(cwd.join("crates/base/src/assets/one.txt")).unwrap();
+        sync().expect("deleting a regular build input should sync narrowly");
+        let mut checked = check();
+        checked.sort();
+        assert_eq!(
+            checked,
+            vec!["app".to_owned(), "base".to_owned()],
+            "the surviving parent-directory touch must rerun its build-script consumer"
+        );
+
+        std::fs::write(cwd.join("crates/unrelated/src/foo.rs"), "pub fn sibling() {}\n").unwrap();
+        sync().expect("adding a Rust module candidate should synchronize with full invalidation");
+        let ambiguous = Command::new(&cargo)
+            .args(["check", "--offline", "--workspace", "--target-dir"])
+            .arg(Path::new(&dir).join("target"))
+            .current_dir(&dir)
+            .env("CARGO_HOME", &cargo_home)
+            .env("RUSTC", cargo.parent().unwrap().join("rustc"))
+            .env("CARGO_TERM_COLOR", "never")
+            .output()
+            .unwrap();
+        let ambiguity_output = format!(
+            "{}{}",
+            String::from_utf8_lossy(&ambiguous.stdout),
+            String::from_utf8_lossy(&ambiguous.stderr)
+        );
+        assert!(!ambiguous.status.success(), "expected E0761 after adding an ambiguous module: {ambiguity_output}");
+        assert!(ambiguity_output.contains("E0761"), "expected Rust module ambiguity E0761: {ambiguity_output}");
+        let _ = std::fs::remove_dir_all(base);
+    }
+
+    #[test]
+    fn run_keeps_project_cache_overrides_inside_the_lease() {
+        if !has_program("rsync") {
+            return;
+        }
+        let base = base();
+        let cargo = toolchain_cargo();
+        let (remote, cwd, data) = fake_remote(&base, 60, &format!(
+            "RUSTC={} CARGO_HOME={} exec {} \"$@\"\n",
+            sh_quote(&cargo.parent().unwrap().join("rustc").display().to_string()),
+            sh_quote(&base.join("cargo-home").display().to_string()),
+            sh_quote(&cargo.display().to_string()),
+        ));
+        std::fs::write(cwd.join("src/lib.rs"), "pub fn value() {}\n").unwrap();
+        std::fs::create_dir_all(cwd.join(".cargo")).unwrap();
+        let outside_target = base.join("outside-target");
+        let outside_target_alias = base.join("outside-target-alias");
+        let outside_build = base.join("outside-build");
+        // Model variables inherited by the SSH shell; the helper must remove them before Cargo
+        // starts (some Cargo initialization happens before command-line config is applied).
+        write_exec(&base.join("fakebin/ssh"), &format!(
+            "for a; do last=$a; done\nHOME={} CARGO_TARGET_DIR={} CARGO_BUILD_TARGET_DIR={} CARGO_BUILD_BUILD_DIR={} exec setsid sh -c \"$last\"\n",
+            sh_quote(&base.join("home").display().to_string()),
+            sh_quote(&outside_target.display().to_string()),
+            sh_quote(&outside_target_alias.display().to_string()),
+            sh_quote(&outside_build.display().to_string()),
+        ));
+        std::fs::write(cwd.join(".cargo/config.toml"), format!(
+            "[build]\ntarget-dir = {:?}\nbuild-dir = {:?}\n", outside_target, outside_build,
+        )).unwrap();
+        use_real_rsync_for_fake_remote(&base);
+        let rc = with_fake_transport(&base, || run_offload(
+            &remote, &data, &cwd, &["check".into(), "--offline".into()], &Deadline::new(60),
+        ));
+        assert_eq!(rc, 0, "Cargo should run with its cache inside the shared lease");
+        let shared = base.join("rc").join(cache_hash(&cwd)).join("shared");
+        assert!(shared.join("target/debug/.fingerprint").is_dir());
+        assert!(!outside_target.exists(), "project target-dir must not evade invalidation: {}",
+            String::from_utf8_lossy(&Command::new("find").arg(&outside_target).args(["-maxdepth", "5"]).output().unwrap().stdout));
+        assert!(!outside_build.exists(), "project build-dir must not evade invalidation");
+        assert!(!outside_target_alias.exists(), "inherited CARGO_BUILD_TARGET_DIR must not escape the lease");
+        let _ = std::fs::remove_dir_all(base);
+    }
+
+    #[test]
+    fn added_non_rust_input_rebuilds_a_compile_time_directory_listing() {
+        if !has_program("rsync") {
+            return;
+        }
+        let base = base();
+        let (remote, cwd, data) = fake_remote(&base, 60, "exit 0\n");
+        std::fs::write(cwd.join("Cargo.toml"), r#"[package]
+name = "app"
+version = "0.1.0"
+edition = "2021"
+[dependencies]
+listing = { path = "listing" }
+[workspace]
+members = ["listing"]
+"#).unwrap();
+        std::fs::create_dir_all(cwd.join("listing/src")).unwrap();
+        std::fs::write(cwd.join("listing/Cargo.toml"), r#"[package]
+name = "listing"
+version = "0.1.0"
+edition = "2021"
+[lib]
+proc-macro = true
+"#).unwrap();
+        // Like asset embedding macros, this tracks every existing input through include_bytes!,
+        // but a newly discovered input is absent from the previous compiler dep-info.
+        std::fs::write(cwd.join("listing/src/lib.rs"), r#"extern crate proc_macro;
+#[proc_macro]
+pub fn count(_: proc_macro::TokenStream) -> proc_macro::TokenStream {
+    let root = std::path::PathBuf::from(std::env::var("CARGO_MANIFEST_DIR").unwrap());
+    let mut inputs = std::fs::read_dir(root.join("assets")).unwrap()
+        .map(|e| format!("include_bytes!({:?}).len()", e.unwrap().path()))
+        .collect::<Vec<_>>();
+    inputs.sort();
+    format!("[{}].len()", inputs.join(",")).parse().unwrap()
+}
+"#).unwrap();
+        std::fs::create_dir_all(cwd.join("assets")).unwrap();
+        std::fs::write(cwd.join("assets/one.txt"), "one").unwrap();
+        std::fs::write(cwd.join("src/lib.rs"), r#"pub const COUNT: usize = listing::count!();
+#[test]
+fn listing_matches_current_tree() {
+    assert_eq!(COUNT, std::fs::read_dir(concat!(env!("CARGO_MANIFEST_DIR"), "/assets")).unwrap().count());
+}
+"#).unwrap();
+        let dir = base.join("rc").join(cache_hash(&cwd)).join("shared");
+        std::fs::create_dir_all(&dir).unwrap();
+        use_real_rsync_for_fake_remote(&base);
+        let run = || {
+            with_fake_transport(&base, || sync_source(&remote, &data, &cwd, &dir.display().to_string(), &Deadline::new(60)))
+                .expect("source sync should succeed");
+            let cargo = toolchain_cargo();
+            let output = Command::new(&cargo)
+                .args(["test", "--offline", "-p", "app", "--target-dir"])
+                .arg(dir.join("target"))
+                .args(["--", "listing_matches_current_tree"])
+                .current_dir(&dir)
+                .env("CARGO_HOME", base.join("cargo-home"))
+                .env("RUSTC", cargo.parent().unwrap().join("rustc"))
+                .output().unwrap();
+            assert!(output.status.success(), "the embedded listing must match the synchronized tree: {}\n{}",
+                String::from_utf8_lossy(&output.stdout), String::from_utf8_lossy(&output.stderr));
+        };
+        run();
+        std::fs::write(cwd.join("assets/two.txt"), "two").unwrap();
+        run();
+        std::fs::remove_file(cwd.join("assets/one.txt")).unwrap();
+        run();
         let _ = std::fs::remove_dir_all(base);
     }
 
@@ -3889,7 +5253,7 @@ fn main() {
 
         let sync = || with_fake_transport(&base, || sync_source(&remote, &data, &cwd, &dir, &Deadline::new(60)));
         sync().expect("initial source sync should succeed");
-        let target = base.join("cargo-target");
+        let target = Path::new(&dir).join("target");
         let run_cargo = || {
             let output = Command::new(toolchain_cargo())
                 .args(["check", "--offline", "--quiet", "--target-dir"])
@@ -3913,6 +5277,11 @@ fn main() {
         let remote_tool = Path::new(&dir).join("tools/probe");
         let before = std::fs::metadata(&remote_tool).unwrap().modified().unwrap();
         let source_mtime = std::fs::metadata(&tool).unwrap().modified().unwrap();
+        // Cargo compares rerun-if-changed inputs against build/<hash>/output, not just
+        // .fingerprint or .d. A clock rollback may leave only that baseline in the future.
+        let build_output = runs.parent().unwrap().parent().unwrap().join("output");
+        assert!(build_output.is_file());
+        set_mtime(&build_output, std::time::SystemTime::now() + Duration::from_secs(3600));
         std::thread::sleep(Duration::from_millis(1100));
         std::fs::set_permissions(&tool, std::fs::Permissions::from_mode(0o755)).unwrap();
         assert_eq!(std::fs::metadata(&tool).unwrap().modified().unwrap(), source_mtime, "chmod must not change the source mtime");
