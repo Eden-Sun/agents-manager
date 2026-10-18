@@ -90,12 +90,27 @@ mod tests {
     async fn a_notice_that_cannot_be_typed_gives_way_after_its_short_limit() {
         let (env, bot, conv, turn) = stuck_head(Some("child-blocked:01CHILD:1:ff"), QueueClass::DaemonNotice).await;
         let app = env.app.clone();
+        let mut events = app.subscribe();
         flush_times(&app, &bot, &turn, RETRY_LIMIT).await;
         assert_eq!(status(&app, &turn).await.0, "queued", "上限之內照常放回");
+        assert!(std::iter::from_fn(|| events.try_recv().ok()).all(|event| {
+            event.kind != "message_added" || event.data["message"]["turn_id"] != turn
+        }), "daemon 通知上限之前不會推失敗說明");
         flush_times(&app, &bot, &turn, 1).await;
         assert_eq!(status(&app, &turn).await, ("failed".into(), "failed".into()));
         let notes = system_notes(&app, &turn).await;
         assert!(notes.len() == 1 && notes[0].contains("daemon 自動通知") && notes[0].contains("composer_busy"), "{notes:?}");
+        let message: db::Message = sqlx::query_as("SELECT *, rowid AS seq FROM messages WHERE turn_id=? AND role='system'")
+            .bind(&turn)
+            .fetch_one(&app.db)
+            .await
+            .unwrap();
+        let message_events: Vec<_> = std::iter::from_fn(|| events.try_recv().ok())
+            .filter(|event| event.kind == "message_added" && event.data["message"]["turn_id"] == turn)
+            .collect();
+        assert_eq!(message_events.len(), 1, "daemon 重試用盡時只推一次說明");
+        assert_eq!(message_events[0].data["bot_id"], bot);
+        assert_eq!(message_events[0].data["message"], serde_json::to_value(message).unwrap(), "event carries the committed DB message");
         assert!(
             queue_turn(&app, &conv, Some("web-behind"), QueueClass::User).await.is_ok(),
             "讓路：後面的使用者訊息排得進自己的 lane",

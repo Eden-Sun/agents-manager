@@ -1108,6 +1108,7 @@ mod arc_port_69_queueservices {
     use std::{future::Future, path::{Path, PathBuf}};
     impl<T: crate::lifecycle::s6_ports::QueueServices + ?Sized> crate::lifecycle::s6_ports::QueueServices for std::sync::Arc<T> {
         fn turn_changed(&self, turn_id: &str) -> impl Future<Output = ()> + Send { <T as crate::lifecycle::s6_ports::QueueServices>::turn_changed(self.as_ref(), turn_id) }
+        fn message_added(&self, bot_id: &str, message: db::Message) -> impl Future<Output = ()> + Send { <T as crate::lifecycle::s6_ports::QueueServices>::message_added(self.as_ref(), bot_id, message) }
         fn bot_status_changed(&self, bot_id: &str) -> impl Future<Output = ()> + Send { <T as crate::lifecycle::s6_ports::QueueServices>::bot_status_changed(self.as_ref(), bot_id) }
         fn announce_revoked(&self, turn_id: &str, revoked: crate::lifecycle::queue::Revoked) -> impl Future<Output = ()> + Send { <T as crate::lifecycle::s6_ports::QueueServices>::announce_revoked(self.as_ref(), turn_id, revoked) }
         fn note_run_gone(&self, bot_id: &str, why: &str) -> impl Future<Output = ()> + Send { <T as crate::lifecycle::s6_ports::QueueServices>::note_run_gone(self.as_ref(), bot_id, why) }

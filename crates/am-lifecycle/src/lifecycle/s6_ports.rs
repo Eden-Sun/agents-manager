@@ -498,6 +498,7 @@ impl<T> StopContext for T where
 
 pub trait QueueServices: Send + Sync {
     fn turn_changed(&self, turn_id: &str) -> impl Future<Output = ()> + Send;
+    fn message_added(&self, bot_id: &str, message: db::Message) -> impl Future<Output = ()> + Send;
     fn bot_status_changed(&self, bot_id: &str) -> impl Future<Output = ()> + Send;
     fn announce_revoked(&self, turn_id: &str, revoked: crate::lifecycle::queue::Revoked) -> impl Future<Output = ()> + Send;
     fn note_run_gone(&self, bot_id: &str, why: &str) -> impl Future<Output = ()> + Send;

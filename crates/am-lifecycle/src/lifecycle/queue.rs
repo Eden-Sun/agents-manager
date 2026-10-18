@@ -355,7 +355,10 @@ pub async fn put_back<C: QueueContext>(app: &C, bot_id: &str, conv: &str, turn_i
             tracing::warn!(bot = %bot_id, turn = %turn_id, %reason, retry_in_s = delay.as_secs(), "queued prompt put back on the queue");
             schedule_flush_retry(app, bot_id, delay);
         }
-        Deferred::GaveUp => tracing::warn!(bot = %bot_id, turn = %turn_id, %reason, "queued prompt gave up after its retry limit"),
+        Deferred::GaveUp(message) => {
+            tracing::warn!(bot = %bot_id, turn = %turn_id, %reason, "queued prompt gave up after its retry limit");
+            app.message_added(bot_id, message).await;
+        }
         Deferred::Settled(now) => tracing::info!(bot = %bot_id, turn = %turn_id, %reason, ?now, "要放回佇列時已經被別的路徑收掉：不重試"),
     }
     Ok(())
@@ -419,7 +422,7 @@ enum Deferred {
     /// 放回佇列了，這麼久之後再試。
     Requeued(std::time::Duration),
     /// 重試用完，收成 failed 並寫了說明。
-    GaveUp,
+    GaveUp(db::Message),
     /// 放回之前已經被別的路徑收掉（不拿 bot 鎖的 run 結束之類）：什麼都沒寫，不重試（issue #125）。
     Settled(super::turn_controller::Outcome),
 }
@@ -457,9 +460,9 @@ async fn defer_queued_turn(
         } else {
             format!("沒有送出：試了 {QUEUE_RETRY_LIMIT} 次都沒辦法打字（最後一次是 {reason}），已停止自動重試。請清空輸入框後重送。")
         };
-        insert_message_tx(&mut tx, conv, Some(turn_id), "system", &hint, "system", false, None).await?;
+        let message = insert_message_tx(&mut tx, conv, Some(turn_id), "system", &hint, "system", false, None).await?;
         tx.commit().await?;
-        return Ok(Deferred::GaveUp);
+        return Ok(Deferred::GaveUp(message));
     }
     let delay = queue_retry_delay(retries);
     let next = (chrono::Utc::now() + chrono::Duration::from_std(delay)?).to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
@@ -2078,6 +2081,7 @@ mod flush_queue_tests {
     async fn a_box_that_never_empties_ends_in_a_failed_turn_with_an_explanation() {
         let f = queued_kind("grok", "test").await;
         let app = f.env.app.clone();
+        let mut events = app.subscribe();
         db::set_pane_typed(app.db(), &f.run_id).await.unwrap();
         f.env.herdr.live_pane(
             "pane-1",
@@ -2094,6 +2098,9 @@ mod flush_queue_tests {
             assert_eq!(turn(&app, &f.turn_id).await.flush_retries, n, "early wake-ups do not spend retries");
             sqlx::query("UPDATE turns SET next_flush_at = NULL WHERE id = ?").bind(&f.turn_id).execute(app.db()).await.unwrap();
         }
+        assert!(std::iter::from_fn(|| events.try_recv().ok()).all(|event| {
+            event.kind != "message_added" || event.data["message"]["turn_id"] != f.turn_id
+        }), "重試上限之前不會先推失敗說明");
         flush_queued_locked(&app, &f.bot_id).await.unwrap();
         let t = turn(&app, &f.turn_id).await;
         assert_eq!((t.status.as_str(), t.delivery.as_str()), ("failed", "failed"));
@@ -2104,6 +2111,17 @@ mod flush_queue_tests {
             .unwrap();
         assert_eq!(hints.len(), 1);
         assert!(hints[0].contains("已停止自動重試"));
+        let message: db::Message = sqlx::query_as("SELECT *, rowid AS seq FROM messages WHERE turn_id = ? AND role = 'system'")
+            .bind(&f.turn_id)
+            .fetch_one(app.db())
+            .await
+            .unwrap();
+        let message_events: Vec<_> = std::iter::from_fn(|| events.try_recv().ok())
+            .filter(|event| event.kind == "message_added" && event.data["message"]["turn_id"] == f.turn_id)
+            .collect();
+        assert_eq!(message_events.len(), 1, "failed 說明只推一次");
+        assert_eq!(message_events[0].data["bot_id"], f.bot_id);
+        assert_eq!(message_events[0].data["message"], serde_json::to_value(message).unwrap(), "event carries the committed DB message");
         assert_eq!(f.env.herdr.methods().iter().filter(|m| m.starts_with("pane.send")).count(), 0, "從頭到尾沒打過字");
     }
 
@@ -2789,6 +2807,7 @@ mod flush_queue_tests {
     async fn a_put_back_that_loses_to_a_run_exit_does_not_pretend_it_requeued() {
         let f = queued("no-such-session").await;
         let app = f.env.app.clone();
+        let mut events = app.subscribe();
         forget_queue_retry_timer(&f.bot_id);
         let (app2, turn2) = (app.clone(), f.turn_id.clone());
         super::super::race_point::arm("defer_before_return", &f.turn_id, move || async move {
@@ -2803,6 +2822,9 @@ mod flush_queue_tests {
         assert_eq!(t.status, "failed", "別的路徑收掉的就是收掉了");
         assert_eq!((t.flush_retries, t.next_flush_at.clone()), (0, None), "沒有放回去，就不記一次重試");
         assert!(!queue_retry_timer_armed(&f.bot_id), "沒有東西在排隊，不掛 retry timer");
+        assert!(std::iter::from_fn(|| events.try_recv().ok()).all(|event| {
+            event.kind != "message_added" || event.data["message"]["turn_id"] != f.turn_id
+        }), "CAS 已輸掉時不會插入或廣播系統訊息");
     }
 
     /// #831：放回佇列讀完重試次數、還沒寫的那一瞬，一個不相干的 writer commit 了一筆。deferred 交易這時升級寫鎖直接 517，
@@ -2811,6 +2833,7 @@ mod flush_queue_tests {
     async fn an_unrelated_writer_between_the_retry_read_and_the_put_back_does_not_fail_it() {
         let f = queued("no-such-session").await;
         let app = f.env.app.clone();
+        let mut events = app.subscribe();
         forget_queue_retry_timer(&f.bot_id);
         let other = crate::testing::arm_app_foreign_writer(&app, "defer_after_retries_read", &f.turn_id);
 
@@ -2820,6 +2843,9 @@ mod flush_queue_tests {
         let t = turn(&app, &f.turn_id).await;
         assert_eq!((t.status.as_str(), t.flush_retries), ("queued", 1), "put back on the queue with one retry spent");
         assert!(queue_retry_timer_armed(&f.bot_id), "the retry timer is armed for it");
+        assert!(std::iter::from_fn(|| events.try_recv().ok()).all(|event| {
+            event.kind != "message_added" || event.data["message"]["turn_id"] != f.turn_id
+        }), "尚未達到重試上限時不會推失敗說明");
     }
 
     /// Once the RPC went out, a failure is not requeued (could deliver twice); `delivery='unknown'`

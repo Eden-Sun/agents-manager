@@ -631,6 +631,10 @@ impl s6_ports::QueueServices for App {
         crate::lifecycle::send_now::ports::turn_changed(&crate::app_ports_p4::AppTurnEvents::new(&self.shared()), turn_id).await;
     }
 
+    async fn message_added(&self, bot_id: &str, message: crate::db::Message) {
+        crate::lifecycle::messages::emit_message_added(self, bot_id, message).await;
+    }
+
     async fn bot_status_changed(&self, bot_id: &str) {
         crate::lifecycle::send_now::ports::bot_status(&crate::app_ports_p4::AppEventSink::new(&self.shared()), bot_id).await;
     }
