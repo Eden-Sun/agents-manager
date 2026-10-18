@@ -85,12 +85,18 @@ pub fn parse_reset<Tz: TimeZone>(rest: &str, now: DateTime<Tz>) -> Option<String
     let dt = match year {
         Some(y) => build(y)?,
         // 最近的一次：不早於一天前的最早那個。只看今年會在 1 月初把去年 12 月底剛過的重置推到明年。
-        // 日期不存在就跳過那一年；本地時間落在 DST 跳過的那一段就放棄，不換成別年的同一天。
+        // 先略過肯定早於門檻的候選，再解析本地時間；因此過去年份的 DST gap 不會中止搜尋。
+        // 仍在門檻內的候選若落在 DST gap 就放棄，不換成別年的同一天。
         None => {
             let nearest = || -> Option<DateTime<Tz>> {
-                for d in [now.year() - 1, now.year(), now.year() + 1].into_iter().filter_map(naive) {
+                let cutoff = now.clone() - chrono::Duration::days(1);
+                for year in [now.year() - 1, now.year(), now.year() + 1] {
+                    let Some(d) = naive(year) else { continue };
+                    if d < cutoff.naive_local() {
+                        continue;
+                    }
                     let dt = tz.from_local_datetime(&d).earliest()?;
-                    if dt >= now.clone() - chrono::Duration::days(1) {
+                    if dt >= cutoff {
                         return Some(dt);
                     }
                 }

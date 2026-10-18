@@ -289,3 +289,10 @@
         let r = parse_reset(" March 8, 02:30", now);
         assert!(r.as_deref().map_or(true, |s| s.starts_with("2026-03-08")), "{r:?}");
     }
+
+    #[test]
+    fn a_past_year_dst_gap_does_not_hide_a_valid_grok_reset_this_year() {
+        let now = chrono::DateTime::parse_from_rfc3339("2026-03-08T12:00:00-04:00").unwrap().with_timezone(&chrono_tz::America::New_York);
+        let r = parse_reset(" March 9, 02:30", now).unwrap();
+        assert_eq!(r, "2026-03-09T06:30:00.000Z");
+    }

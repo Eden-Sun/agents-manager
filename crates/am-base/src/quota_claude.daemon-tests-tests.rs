@@ -827,3 +827,9 @@ AM_USAGE_DONE=0
         let r = parse_claude_reset("Resets Mar 8 at 2:30am (America/New_York)", at("2026-03-07T10:00:00-05:00"));
         assert!(r.as_deref().map_or(true, |s| s.starts_with("2026-03-08")), "{r:?}");
     }
+
+    #[test]
+    fn a_past_year_dst_gap_does_not_hide_a_valid_claude_reset_this_year() {
+        let r = parse_claude_reset("Resets Mar 9 at 2:30am (America/New_York)", at("2026-03-08T12:00:00-04:00"));
+        assert_eq!(r.as_deref(), Some("2026-03-09T06:30:00.000Z"));
+    }
