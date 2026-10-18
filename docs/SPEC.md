@@ -4813,8 +4813,7 @@ incident 以資源為單位持久化（`supervisor_incidents`，`(kind, resource
 - **一代之內**：執行者被接受 → reviewer 被接受（或已經派過驗證者＝審查這關 AGM 放行了）→ 驗證者被接受並記 `verified(commit)` →
   `delivered(同一個 commit)` → 可結案。驗完又派了執行者（rebase、補改）回到**驗證**那一關，審查不重來。
 - **一般 Bot 記 `verified` 的資格**：只限目前這一代最後一件交辦的 verifier，且該交辦不能是 failed、cancelled 或 superseded；同一顆 Bot 不能也擔任過這個任務的 executor。資格在 `verified` 寫入交易的 snapshot 裡重查，舊一代 verifier 或失敗的 verifier 不能替新成果背書。
-- **失敗與重試**：交辦被 `fail`／`cancel`（bot 沒把工作做完）＝同一個角色再派一次，不換關、不算一輪；
-  工作做完但**成果**不行（am-review changes、am-verify 沒過）＝接受那件交辦、`mission round`，下一代從執行者重做。
+- **失敗與重試**：交辦被 `fail`／`cancel`（bot 沒把工作做完）＝同一個角色再派一次，不換關、不算一輪；同一代後續補做失敗時，即使前面已有被接受的成果或驗證，`flow.stage`／`next` 仍以最新未成功交辦的角色為準。重派成功後清除 `retry_of`，依新成果接續；執行者在驗證後補做成功仍要重新驗證。工作做完但**成果**不行（am-review changes、am-verify 沒過）＝接受那件交辦、`mission round`，下一代從執行者重做。
 - **分工**：交辦自己的 `status` 歸 #71（`supervisor::assignment_state`），任務流程只讀、不寫；要動交辦一律走 supervisor 的入口。
 - **接續**：任務停在「輪到 AGM」（`assign`／`record_verification`／`deliver`／`complete`）超過 10 分鐘，沒有開著的交辦、這個任務也沒有
   沒處理的 inbox，controller 推一則 `mission_next`（協調者、叫醒；payload 帶 `next`）。event_key 是那一步的簽名（動作、角色、代、交辦數、commit），

@@ -2942,7 +2942,7 @@ CLI：`agents-managerd release-triage-check --kind <claude|codex> [--since <ver>
 - `next`：daemon 從任務列、交辦與事件推出來的**下一步**（issue #74，`mission::flow`；規則見 SPEC §18.14）。
   `{action, role?, assignment_id?, retry_of?, rework?, sha?, worktree?, alternatives?, paused_reason?, then?, hint}`，
   `action ∈ assign | review | wait | record_verification | deliver | complete | paused | closed`。`alternatives` 是同一個判斷點上也合法的分支
-  （`skip_reviewer`、`round`），選哪一條是 AGM 的判斷；`paused` 時 `then` 是放行之後那一步。
+  （`skip_reviewer`、`round`），選哪一條是 AGM 的判斷；`paused` 時 `then` 是放行之後那一步。同一代最新的 failed／cancelled 交辦優先於舊的已接受成果：`flow.stage` 反映該交辦角色，`next` 以同角色重派並帶 `retry_of`。
 - `flow`：`{generation, stage, allowed_roles, verified: {event_id, sha, generation, stale}|null, delivered: {event_id, sha}|null}`。
   `generation`＝`round` 次數；`stage ∈ needs_executor | needs_review | needs_verification | needs_verdict | needs_delivery | delivered`；
   `verified.stale ∈ null | round | new_executor`（之後退回過、或又派了執行者，這則就放行不了交付）。
