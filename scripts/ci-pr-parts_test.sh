@@ -30,6 +30,7 @@ baseline_ref() { PATH="${AM_CANARY_DIR:+$AM_CANARY_DIR:}$PATH" python3 -B "$repo
 check() { local want="$1" actual; want="$want"$'\nops_base='"${3:-}"; export CI_TEST_PATHS="$2"; actual=$(run); [ "$actual" = "$want" ] || { echo "FAIL: $2 → $actual"; exit 1; }; }
 check $'ob=false\nops=false\nweb=false\ndaemon=false\nlint=false' docs/readme.md
 check $'ob=false\nops=false\nweb=true\ndaemon=false\nlint=false' web/src/x.ts
+check "$all" scripts/check.sh "$CI_BASE"
 check $'ob=false\nops=false\nweb=false\ndaemon=true\nlint=true' crates/am-share/src/share/store.rs
 check $'ob=false\nops=true\nweb=false\ndaemon=false\nlint=false' scripts/ops/outbox-gc.sh "$CI_BASE"
 check $'ob=true\nops=true\nweb=false\ndaemon=false\nlint=false' scripts/chatgpt-consult.sh "$CI_BASE"

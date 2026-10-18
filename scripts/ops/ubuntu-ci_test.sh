@@ -767,14 +767,14 @@ equals "同輪成功的 web 基準前進" "$(cat "$CI/part-success/web")" "$(cur
 equals "同輪紅的 daemon 基準不動" "$(cat "$CI/part-success/daemon")" "$(git -C "$ROOT/work" rev-parse HEAD~2)"
 teardown
 
-# 13e. 共用檔／未知路徑／分類器：scripts/check.sh 同時歸 ops+daemon；未知路徑全跑並前進完整基準。
+# 13e. 共用檔／未知路徑／分類器：scripts/check.sh 是四段驗證的入口，改動時四段都重跑；未知路徑全跑並前進完整基準。
 new_baseline
 push_file scripts/check.sh '#!/bin/bash'"
 "'part="$1"; echo "==> fake $part"; exit 0'
 : > "$FIX/gh.log"
 run >/dev/null
-equals "check.sh 改動跑 ops+daemon" "$(ran web)$(ran ob)$(ran ops)$(ran daemon)" "0011"
-check "description 是 scoped ops+daemon" "scoped ops+daemon（沿用完整成功基準 ${B8}）" "$FIX/gh.log"
+equals "check.sh 改動跑四段" "$(ran web)$(ran ob)$(ran ops)$(ran daemon)" "1111"
+check "description 是完整成功" "ob+ops+web+daemon 全綠" "$FIX/gh.log"
 push_file opaque-unknown x
 run >/dev/null
 equals "未知路徑四段全跑" "$(ran web)$(ran ob)$(ran ops)$(ran daemon)" "1111"

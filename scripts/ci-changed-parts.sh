@@ -20,7 +20,9 @@ while IFS= read -r f; do
         # 要先於下面的 daemon/*、scripts/*、*.md 規則。對應的 daemon 測試子集見 scripts/ci-daemon-filters.sh（兩邊要一起改）。
         crates/am-lifecycle/src/lifecycle/fixtures/*) daemon=1; web=1 ;;
         crates/am-base/src/db.rs | crates/am-supervisor/src/supervisor/store.rs | crates/am-supervisor/src/supervisor/roles.rs | crates/am-supervisor/src/mission/store.rs) daemon=1; ops=1 ;;
-        scripts/check.sh | scripts/ops/lint-shell-vars.sh | scripts/ops/fixtures/* | scripts/ops/claude-release-task.md | scripts/ops/codex-release-task.md) ops=1; daemon=1 ;;
+        # check.sh 定義 web、ob、ops、daemon 的驗證入口；改它會使四段舊成功基準都失效。
+        scripts/check.sh) web=1; daemon=1; ops=1; ob=1 ;;
+        scripts/ops/lint-shell-vars.sh | scripts/ops/fixtures/* | scripts/ops/claude-release-task.md | scripts/ops/codex-release-task.md) ops=1; daemon=1 ;;
         scripts/ops/release-triage-task.md) ops=1; daemon=1 ;;
         # scripts/ 底下的 .md 不是「只有文件」：任務檔被 install-manifest／ops 測試／daemon 讀，README 內容也有測試釘住。
         scripts/*.md) ops=1 ;;
