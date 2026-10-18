@@ -6,6 +6,9 @@ members = ["daemon", "desktop", "xtask", "crates/am-core", "crates/am-ports", "c
 default-members = ["daemon", "xtask"]
 resolver = "2"
 
+[workspace.metadata.agents-manager.remote-cargo]
+exclude = ["/web/node_modules"]
+
 [profile.release]
 strip = true
 lto = "thin"
