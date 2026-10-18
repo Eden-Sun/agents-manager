@@ -14,6 +14,10 @@ trap '/bin/rm -rf "$tmp"' EXIT
 
 fixture="$tmp/repo"
 mkdir -p "$fixture/scripts" "$fixture/web" "$fixture/bin"
+for crate in am-base am-config am-core am-lifecycle am-ports am-share am-supervisor; do
+    mkdir -p "$fixture/crates/$crate"
+    printf '[package]\nname = "%s"\nversion = "0.1.0"\nedition = "2021"\n' "$crate" >"$fixture/crates/$crate/Cargo.toml"
+done
 cp "$ROOT/scripts/check.sh" "$fixture/scripts/check.sh"
 cp "$ROOT/scripts/ci-changed-parts.sh" "$fixture/scripts/ci-changed-parts.sh"
 cp "$ROOT/scripts/ci-daemon-filters.sh" "$fixture/scripts/ci-daemon-filters.sh"
@@ -62,7 +66,14 @@ SH
 cat >"$fixture/bin/cargo" <<'SH'
 #!/usr/bin/env bash
 printf '%s\n' "$*" >>"$AM_TEST_CARGO_LOG"
-if [ "${1:-}" = test ] && [ -n "${AM_TEST_CARGO_FAIL_ON_TEST:-}" ]; then
+fail_test=0
+if [ "${1:-}" = test ]; then
+    [ -z "${AM_TEST_CARGO_FAIL_ON_TEST:-}" ] || fail_test=1
+    if [ "${2:-}" = -p ] && [ -n "${AM_TEST_CARGO_FAIL_PACKAGE:-}" ] && [ "${3:-}" = "$AM_TEST_CARGO_FAIL_PACKAGE" ]; then
+        fail_test=1
+    fi
+fi
+if [ "$fail_test" = 1 ]; then
     echo "test foo::bar ... FAILED" >&2
     exit 101
 fi
@@ -214,6 +225,7 @@ CHECK_TESTS=none changed >/dev/null || fail "crates 改動的 CHECK_TESTS=none �
 : >"$AM_TEST_CARGO_LOG"
 changed >/dev/null || fail "crates 改動的 changed 失敗"
 grep -qx 'test -p am-core --locked' "$AM_TEST_CARGO_LOG" || fail "沒設 CHECK_TESTS 時 crate 測試沒跑：$(cat "$AM_TEST_CARGO_LOG")"
+[ "$(cargo_tests | wc -l | tr -d ' ')" = 1 ] || fail "單一 crate 改動不該跑其他 crate 測試：$(cargo_tests)"
 CHECK_TESTS=prompt:: changed >/dev/null || fail "CHECK_TESTS=prompt:: 失敗"
 grep -qx 'test -p agents-managerd --locked prompt::' "$AM_TEST_CARGO_LOG" || fail "CHECK_TESTS 沒照給的跑：$(cat "$AM_TEST_CARGO_LOG")"
 
@@ -235,6 +247,33 @@ for path in daemon/build.rs Cargo.toml Cargo.lock .cargo/config.toml rust-toolch
     grep -qx 'test -p agents-managerd --locked' "$AM_TEST_CARGO_LOG" \
         || fail "$path 沒有跑完整 daemon 測試：$(cat "$AM_TEST_CARGO_LOG")"
 done
+
+# Workspace-wide manifests／lockfile／toolchain 設定讓所有獨立 crate 測試失效；CHECK_TESTS=none 仍明確略過。
+workspace_crates='am-base am-config am-core am-lifecycle am-ports am-share am-supervisor'
+for path in Cargo.toml Cargo.lock rust-toolchain.toml .cargo/config.toml; do
+    : >"$AM_TEST_CARGO_LOG"
+    export AM_TEST_DIFF_HEAD="$path"
+    output="$(changed 2>&1)" || fail "$path 的 changed 失敗：$output"
+    for crate in $workspace_crates; do
+        grep -qx "test -p $crate --locked" "$AM_TEST_CARGO_LOG" \
+            || fail "$path 沒有跑獨立 crate ${crate}：$(cat "$AM_TEST_CARGO_LOG")"
+    done
+    [ "$(cargo_tests | wc -l | tr -d ' ')" = 8 ] \
+        || fail "$path 沒有恰好跑 daemon＋七個 crate 測試：$(cargo_tests)"
+done
+
+: >"$AM_TEST_CARGO_LOG"
+export AM_TEST_DIFF_HEAD=Cargo.lock
+CHECK_TESTS=none changed >/dev/null || fail 'workspace Cargo.lock 搭配 CHECK_TESTS=none 失敗'
+[ -z "$(cargo_tests)" ] || fail "workspace Cargo.lock 的 CHECK_TESTS=none 還是跑了測試：$(cargo_tests)"
+
+: >"$AM_TEST_CARGO_LOG"
+if output="$(AM_TEST_CARGO_FAIL_PACKAGE=am-core changed 2>&1)"; then
+    fail "workspace am-core 測試失敗但 changed 放行：$output"
+fi
+grep -qx 'test -p am-core --locked' "$AM_TEST_CARGO_LOG" \
+    || fail "workspace 測試失敗前沒有執行 am-core：$(cat "$AM_TEST_CARGO_LOG")"
+
 : >"$AM_TEST_CARGO_LOG"
 export AM_TEST_DIFF_HEAD=$'daemon/build.rs\ndaemon/src/lifecycle/queue.rs'
 output="$(changed 2>&1)" || fail "build.rs 與模組一起改時 changed 失敗：$output"

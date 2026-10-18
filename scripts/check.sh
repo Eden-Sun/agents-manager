@@ -435,13 +435,29 @@ check_changed() {
             step "daemon: cargo check --all-targets"
             env -u AM_MODEL -u AM_EFFORT -u AM_DATA_DIR cargo check -p agents-managerd --all-targets --locked
         fi
-        # 從 daemon 抽出去的 crate（crates/am-*）自己的測試：改到哪個就跑哪個（不受 CHECK_TESTS 過濾字串影響）。
+        # 從 daemon 抽出去的 crate（crates/am-*）自己的測試：改到哪個就跑哪個；workspace-wide 輸入則全部跑。
         # CHECK_TESTS=none 連這段也不跑（#1251）：none 的意思是「不跑測試」，不是只關 daemon 那一段。
         if [ "${CHECK_TESTS:-}" != none ]; then
-            for f in $(printf '%s\n' "$files" | sed -n 's#^crates/\([^/]*\)/.*#\1#p' | sort -u); do
-                step "crate: cargo test -p ${f}"
-                env -u AM_MODEL -u AM_EFFORT -u AM_DATA_DIR cargo test -p "${f}" --locked
-            done
+            workspace_test_inputs=0
+            while IFS= read -r f; do
+                case "$f" in
+                    Cargo.toml | Cargo.lock | rust-toolchain* | .cargo/*) workspace_test_inputs=1 ;;
+                esac
+            done <<< "$files"
+            if [ "$workspace_test_inputs" = 1 ]; then
+                for d in crates/*/; do
+                    [ -f "${d}Cargo.toml" ] || continue
+                    f="${d%/}"
+                    f="${f##*/}"
+                    step "crate: cargo test -p ${f}（workspace-wide input）"
+                    env -u AM_MODEL -u AM_EFFORT -u AM_DATA_DIR cargo test -p "${f}" --locked
+                done
+            else
+                for f in $(printf '%s\n' "$files" | sed -n 's#^crates/\([^/]*\)/.*#\1#p' | sort -u); do
+                    step "crate: cargo test -p ${f}"
+                    env -u AM_MODEL -u AM_EFFORT -u AM_DATA_DIR cargo test -p "${f}" --locked
+                done
+            fi
         fi
         # 發行契約（#1185）不歸 CHECK_TESTS 管（#1258）：指定 daemon 過濾字串只換掉 daemon 那一段，契約照跑；
         # CHECK_TESTS=none 才連它一起略過（none 就是不跑測試，略過時明講）。
