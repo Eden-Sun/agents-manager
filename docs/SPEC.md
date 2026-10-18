@@ -3375,6 +3375,8 @@ claude 的 statusLine 每次重繪都呼叫、沒有回合語意，不進 spool�
 各上千筆、`~/.claude/projects/` 兩千多個 `am-test-*`，`~/.grok/hooks/agents-manager.json` 還被改成指到已刪的測試目錄。守護測試在 `test_home::tests`。
 新測試要驗「寫到哪」就看 `test_home::dir()`；不要自己再去碰真的 `~`。
 
+**除錯資訊等級（issue #1859）**：workspace `Cargo.toml` 的 `[profile.dev]` 設 `debug = "line-tables-only"`（dev 與 test 共用，只留行號表），`[profile.dev.package."*"]` 設 `debug = false`（依賴套件不留）。workspace 自己的程式碼的 backtrace 仍有檔名與行號（外部依賴的 frame 不保證有）；代價是 debugger 無法看區域變數與型別細節；要完整除錯資訊時改 `debug` 設定再編（未經 cargo shim 驗證的環境變數不列為做法）。release 不受影響。
+
 ### 11.9 專案移交到另一顆 daemon（issue #710，#678 的單一專案子集）
 一個專案從 A 機的 daemon（例：Mac，專案 `host = local`）交給 B 機的 daemon（例：agm-host），B 以遠端主機（例：`m4p`）接手；
 專案的 `path` 不變，檔案與 agent 仍在 A 機上。工具是 `scripts/ops/project-transfer`（python 3.11+，只用標準函式庫）。
