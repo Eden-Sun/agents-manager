@@ -896,6 +896,118 @@ test('resync 快照先完成時，較舊的訊息請求不能合回已移除的�
   await runResyncRace('resync-first', true)
 })
 
+test('SSE 重連補抓移除倒回訊息，並保留補抓期間到達的新訊息 (issue #1822)', async () => {
+  const pending: ((value: ReturnType<typeof page>) => void)[] = []
+  let calls = 0
+  let ev!: ShareEvents
+  const client = clientWith(
+    () => {
+      calls++
+      if (calls === 1) return Promise.resolve(page([msgAt('keep', 'user', 1), msgAt('rewound', 'assistant', 2)]))
+      return new Promise((resolve) => pending.push(resolve))
+    },
+    (events) => {
+      ev = events
+      return () => {}
+    },
+  )
+  const ids = () => [...document.querySelectorAll('.sh-bubble')].map((node) => node.textContent?.trim())
+  await mount(<ShareApp client={client} />)
+  await flushSharePromises()
+  assert.deepEqual(ids(), ['keep', 'rewound'])
+
+  await act(async () => {
+    ev.onDown()
+    ev.onUp?.()
+  })
+  assert.equal(calls, 2, '重連立刻發出 messages 補抓')
+  await act(async () => ev.onMessage(msgAt('after-rewind', 'assistant', 3)))
+  await act(async () => pending[0](page([msgAt('keep', 'user', 1)])))
+  await settle(50)
+  assert.deepEqual(ids(), ['keep', 'after-rewind'], '權威快照移除倒回訊息，補抓期間的新 SSE 訊息仍保留')
+})
+
+test('SSE 斷線期間每次輪詢都以快照移除倒回訊息 (issue #1822)', async () => {
+  const timers = installManualClockTimers()
+  let snapshot = page([msgAt('keep', 'user', 1), msgAt('rewound', 'assistant', 2)])
+  const client = clientWith(
+    async () => snapshot,
+    (events) => {
+      events.onDown()
+      return () => {}
+    },
+  )
+  const ids = () => [...document.querySelectorAll('.sh-bubble')].map((node) => node.textContent?.trim())
+  try {
+    await mount(<ShareApp client={client} />)
+    await flushSharePromises()
+    assert.deepEqual(ids(), ['keep', 'rewound'])
+
+    snapshot = page([msgAt('keep', 'user', 1)])
+    await act(async () => timers.clock.advance(POLL_WAIT))
+    await flushSharePromises()
+    assert.deepEqual(ids(), ['keep'], '斷線輪詢移除已倒回訊息')
+
+    snapshot = page([msgAt('keep', 'user', 1), msgAt('new', 'assistant', 3)])
+    await act(async () => timers.clock.advance(POLL_WAIT))
+    await flushSharePromises()
+    snapshot = page([msgAt('keep', 'user', 1)])
+    await act(async () => timers.clock.advance(POLL_WAIT))
+    await flushSharePromises()
+    assert.deepEqual(ids(), ['keep'], '後續輪詢同樣以新快照移除訊息')
+  } finally {
+    timers.restore()
+  }
+})
+
+test('重同步最新頁時保留已載入的較早歷史 (issue #1822)', async () => {
+  let ev!: ShareEvents
+  let snapshot = { ...page([msgAt('m3', 'user', 3), msgAt('m4', 'assistant', 4)]), has_more: true }
+  const client = clientWith(async () => snapshot, (events) => {
+    ev = events
+    return () => {}
+  })
+  client.messages = async (before) => before
+    ? { ...page([msgAt('m1', 'user', 1), msgAt('m2', 'assistant', 2)]), has_more: false }
+    : snapshot
+  await mount(<ShareApp client={client} />)
+  await flushSharePromises()
+  await click(document.querySelector('.sh-older')!)
+  await flushSharePromises()
+  assert.deepEqual([...document.querySelectorAll('.sh-bubble')].map((node) => node.textContent?.trim()), ['m1', 'm2', 'm3', 'm4'])
+
+  snapshot = page([msgAt('m3', 'user', 3)])
+  await act(async () => ev.onResync?.())
+  await settle(50)
+  assert.deepEqual([...document.querySelectorAll('.sh-bubble')].map((node) => node.textContent?.trim()), ['m1', 'm2', 'm3'], '倒回快照移除 m4，已載入較早的 m1、m2 留著')
+})
+
+test('SSE 重連快照淘汰已載入舊頁中倒回點之後的訊息 (issue #1822)', async () => {
+  let ev!: ShareEvents
+  let snapshot = { ...page([msgAt('m5', 'user', 5), msgAt('m6', 'assistant', 6)]), has_more: true }
+  const client = clientWith(async () => snapshot, (events) => {
+    ev = events
+    return () => {}
+  })
+  client.messages = async (before) => before
+    ? page([msgAt('m1', 'user', 1), msgAt('m2', 'assistant', 2), msgAt('m3', 'user', 3), msgAt('m4', 'assistant', 4)])
+    : snapshot
+
+  await mount(<ShareApp client={client} />)
+  await flushSharePromises()
+  await click(document.querySelector('.sh-older')!)
+  await flushSharePromises()
+  assert.deepEqual([...document.querySelectorAll('.sh-bubble')].map((node) => node.textContent?.trim()), ['m1', 'm2', 'm3', 'm4', 'm5', 'm6'])
+
+  snapshot = page([msgAt('m1', 'user', 1), msgAt('m2', 'assistant', 2)])
+  await act(async () => {
+    ev.onDown()
+    ev.onUp?.()
+  })
+  await settle(50)
+  assert.deepEqual([...document.querySelectorAll('.sh-bubble')].map((node) => node.textContent?.trim()), ['m1', 'm2'], '倒回點落在舊頁時，舊頁中更新的訊息也要移除')
+})
+
 test('assistant 回覆後才出現的檔案會在短暫背景輪詢中顯示', { timeout: 15_000 }, async () => {
   const timers = installManualClockTimers()
   try {
