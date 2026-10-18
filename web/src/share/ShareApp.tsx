@@ -185,6 +185,8 @@ export function ShareApp({ client }: { client: ShareClient }) {
   const restore = useRef<{ height: number; top: number } | null>(null)
   const stopLive = useRef<() => void>(() => {})
   const sawOlder = useRef(false)
+  /** 已載入的較早頁不在最新訊息快照內；重同步時仍要保留。 */
+  const loadedOlderMessages = useRef<ShareMessage[]>([])
   /** `load` 連續失敗幾次（非 404）；> 0 而且沒在輪詢時，自己排下一次重試。 */
   const [loadFails, setLoadFails] = useState(0)
   /** 訊息請求世代：較舊回應不更新 UI；待處理的 resync 由下一份成功快照消化。 */
@@ -251,12 +253,16 @@ export function ShareApp({ client }: { client: ShareClient }) {
     setBotName(page.bot_name)
     if (statusFresh) setStatus(page.status)
     if (replace) {
-      sawOlder.current = false
       // 快照是倒回之後才組的，但回來得晚：這個世代發出請求之後才從 SSE 收到的回覆照樣放回快照上面（#1684）。
       // 更早世代收到的，是倒回前的狀態，快照已經不含它，丟掉；之後的世代還要用，留著。
       const replay = resyncDelta.current.filter((d) => d.gen >= resyncGen)
       resyncDelta.current = resyncDelta.current.filter((d) => d.gen > resyncGen)
-      setMessages(mergeMessages(page.messages, replay.map((d) => d.msg)))
+      const snapshotTail = mergeMessages([], page.messages).at(-1)
+      const retainedOlder = snapshotTail
+        ? loadedOlderMessages.current.filter((m) => m.created_at < snapshotTail.created_at || (m.created_at === snapshotTail.created_at && m.id.localeCompare(snapshotTail.id) <= 0))
+        : []
+      loadedOlderMessages.current = retainedOlder
+      setMessages(mergeMessages(retainedOlder, mergeMessages(page.messages, replay.map((d) => d.msg))))
     } else setMessages((cur) => mergeMessages(cur, page.messages))
     const newest = page.messages.findLast((m) => m.role === 'assistant')?.id ?? null
     const first = !pageSeen.current
@@ -355,12 +361,14 @@ export function ShareApp({ client }: { client: ShareClient }) {
       },
       onDown: () => {
         wasDown.current = true
+        if (messageResyncGen.current <= appliedResyncGen.current) messageResyncGen.current++
         setPoll(true)
       },
       onUp: () => {
         setPoll(false)
         if (wasDown.current) {
           wasDown.current = false
+          if (messageResyncGen.current <= appliedResyncGen.current) messageResyncGen.current++
           void load()
           void loadFiles()
         }
@@ -376,7 +384,11 @@ export function ShareApp({ client }: { client: ShareClient }) {
   useEffect(() => {
     if (!poll || state === 'gone') return
     const id = setInterval(() => {
-      if (document.visibilityState === 'visible') void load()
+      if (document.visibilityState === 'visible') {
+        // 輪詢快照是目前可見對話的權威來源；斷線期間的倒回不會有 SSE resync 通知。
+        if (messageResyncGen.current <= appliedResyncGen.current) messageResyncGen.current++
+        void load()
+      }
     }, POLL_MS)
     return () => clearInterval(id)
   }, [poll, state, load])
@@ -524,6 +536,7 @@ export function ShareApp({ client }: { client: ShareClient }) {
       // 較早的訊息插在上面：畫完之後把多出來的高度補回去，人留在原來那一則。
       restore.current = el ? { height: el.scrollHeight, top: el.scrollTop } : null
       sawOlder.current = true
+      loadedOlderMessages.current = mergeMessages(loadedOlderMessages.current, page.messages)
       setMessages((cur) => mergeMessages(cur, page.messages))
       setHasMore(page.has_more)
       setState('ready')
