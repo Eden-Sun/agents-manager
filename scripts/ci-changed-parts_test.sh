@@ -26,6 +26,7 @@ check "ob" "scripts/ob.py"
 check "ops" ".claude/skills/verify/SKILL.md"
 check "web daemon ops ob" "web/src/a.ts" "daemon/src/b.rs" "scripts/check.sh"
 check "full" "web/src/a.ts" "somewhere/unknown.txt"
+check "full" "xtask/src/main.rs"
 check "" ""
 # 被 daemon include_str! 編進去的 .md／docs（supervisor::persona::BUILD_INPUTS）不是「只有文件」：改名、刪掉＝編不過。
 check "daemon" "docs/goals/agm-supervisor-persona.md"
