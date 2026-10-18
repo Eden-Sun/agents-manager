@@ -427,7 +427,7 @@ React 前端 (Vite) ◄── REST + WebSocket ──► Rust daemon (axum) ◄�
 
 ### 3.2 前端
 
-Vite + React + TypeScript + Zustand，只做 daemon 狀態的投影；正式版 rust-embed 進 daemon。真正的 modal 共用 `useDialogFocus`；對話框根節點設 `tabIndex={-1}`，點擊框內非可聚焦內容時焦點仍留在對話框，Esc 可依事件 target 判斷堆疊歸屬；負 tabindex 不會進 Tab 循環。多分頁問卷的最後一次交卷只有在成功讀取終端並觀測到離開 Submit 頁後才回成功；確認期間的終端讀取失敗會重試，若仍無法確認就顯示結果不明。約定見 `FRONTEND.md`，取捨見 `UI-DECISIONS.md`。
+Vite + React + TypeScript + Zustand，只做 daemon 狀態的投影；正式版 rust-embed 進 daemon。真正的 modal 共用 `useDialogFocus`；對話框根節點設 `tabIndex={-1}`，點擊框內非可聚焦內容時焦點仍留在對話框，Esc 可依事件 target 判斷堆疊歸屬；負 tabindex 不會進 Tab 循環。多分頁問卷的最後一次交卷只有在成功讀取終端並觀測到離開 Submit 頁後才回成功；確認期間的終端讀取失敗會重試，若仍無法確認就顯示結果不明。blocked 選單按鍵失敗會顯示一次通知與面板提示，按鍵佇列丟棄其餘待送鍵。約定見 `FRONTEND.md`，取捨見 `UI-DECISIONS.md`。
 
 ## 4. 回覆擷取
 
