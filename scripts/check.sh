@@ -3,7 +3,7 @@
 #
 #   scripts/check.sh            # OB + ops + web + daemon
 #   scripts/check.sh web        # bun install --frozen-lockfile、tsc、oxlint、bun test、vite build
-#   scripts/check.sh daemon     # cargo test -p agents-managerd（要先有 web/dist）
+#   scripts/check.sh daemon     # daemon、xtask 與 crates/* 的 cargo 測試（要先有 web/dist）
 #   scripts/check.sh ops        # shell 變數寫法的 lint，加上 scripts/*_test.sh 與 scripts/ops/*_test.sh（shell 腳本的隔離測試，假 agm／假 gh／假 sccache，不碰正式環境）
 #   scripts/check.sh ob         # 沒有被追蹤的 bytecode；OB queue/operator 與瀏覽器契約（隔離，不用登入）
 #   scripts/check.sh macos-local # shell／行程／signal 的原生 macOS 測試（不走 cargo shim）；開編前等可用記憶體 ≥ CHECK_MIN_FREE_MEM%（預設 30），編譯中壓力 critical 就中止（issue #1783）
@@ -125,6 +125,10 @@ check_daemon() {
     fi
     step "daemon: cargo test -p agents-managerd"
     run_daemon_tests
+    # Workspace 測試覆蓋政策：daemon 與 xtask 明確執行，crates/* 由目錄迴圈執行；desktop 明確排除，
+    # 它的 Tauri build script 需要打包流程複製進去的 agents-managerd sidecar。
+    step "workspace: cargo test -p xtask"
+    env -u AM_MODEL -u AM_EFFORT -u AM_DATA_DIR cargo test -p xtask --locked
     # 從 daemon 抽出去的 crate（crates/*）各自的測試：-p agents-managerd 不含它們。
     local d
     for d in crates/*/; do

@@ -9,6 +9,31 @@ unset CHECK_TESTS CHECK_MAX_LOAD
 unset CHECK_TESTS
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+# Every workspace member must have a test route or a documented exclusion in check_daemon:
+# daemon + xtask are explicit, crates/* are looped, and desktop needs the package sidecar.
+workspace_members="$(awk '
+    /^[[:space:]]*members[[:space:]]*=/ {
+        in_members = 1
+        sub(/^[[:space:]]*members[[:space:]]*=[[:space:]]*/, "")
+    }
+    in_members {
+        block = block " " $0
+        if (index($0, "]")) exit
+    }
+    END { print block }
+' "$ROOT/Cargo.toml" | grep -Eo '"[^"]+"' | tr -d '"' | LC_ALL=C sort)"
+expected_members="$({
+    printf '%s\n' daemon desktop xtask
+    for manifest in "$ROOT"/crates/*/Cargo.toml; do
+        [ -f "$manifest" ] || continue
+        printf '%s\n' "${manifest#"$ROOT"/}" | sed 's#/Cargo.toml$##'
+    done
+} | LC_ALL=C sort)"
+if [ "$workspace_members" != "$expected_members" ]; then
+    printf 'workspace member coverage needs an explicit update in check_daemon:\nactual:\n%s\nexpected policy:\n%s\n' \
+        "$workspace_members" "$expected_members" >&2
+    exit 1
+fi
 tmp="$(mktemp -d "${TMPDIR:-/tmp}/am-check-changed-daemon.XXXXXX")"
 trap '/bin/rm -rf "$tmp"' EXIT
 
@@ -74,6 +99,10 @@ if [ "${1:-}" = test ]; then
     fi
 fi
 if [ "$fail_test" = 1 ]; then
+    echo "test foo::bar ... FAILED" >&2
+    exit 101
+fi
+if [ "${1:-}" = test ] && [ -n "${AM_TEST_CARGO_FAIL_PACKAGE:-}" ] && [ "${3:-}" = "$AM_TEST_CARGO_FAIL_PACKAGE" ]; then
     echo "test foo::bar ... FAILED" >&2
     exit 101
 fi
@@ -148,6 +177,28 @@ changed >/dev/null || fail 'daemon changed failed when the optional mount checke
 
 fail() { printf '%s\n' "$1" >&2; exit 1; }
 cargo_tests() { grep -E '^test ' "$AM_TEST_CARGO_LOG" || true; }
+
+# The shared daemon/full gate must execute xtask and fail if its tests fail.
+mkdir -p "$fixture/web/dist" "$fixture/xtask" "$fixture/desktop" "$fixture/crates/am-core" "$fixture/crates/am-share"
+: >"$fixture/web/dist/index.html"
+: >"$AM_TEST_CARGO_LOG"
+(cd "$fixture" && PATH="$fixture/bin:$PATH" bash scripts/check.sh daemon) \
+    || fail "daemon gate failed with successful fake cargo: $(cat "$AM_TEST_CARGO_LOG")"
+for package in agents-managerd xtask am-core am-share; do
+    grep -qx "test -p ${package} --locked" "$AM_TEST_CARGO_LOG" \
+        || fail "daemon gate omitted workspace test package ${package}: $(cat "$AM_TEST_CARGO_LOG")"
+done
+: >"$AM_TEST_CARGO_LOG"
+if (cd "$fixture" && AM_TEST_CARGO_FAIL_PACKAGE=xtask PATH="$fixture/bin:$PATH" bash scripts/check.sh daemon) >"$tmp/xtask-fail.log" 2>&1; then
+    fail "daemon gate ignored a failing xtask test"
+fi
+grep -qx 'test -p xtask --locked' "$AM_TEST_CARGO_LOG" \
+    || fail "xtask failure fixture never ran xtask: $(cat "$AM_TEST_CARGO_LOG")"
+! grep -Eq '^test -p (am-core|am-share) --locked$' "$AM_TEST_CARGO_LOG" \
+    || fail "daemon gate continued to crates after xtask failed: $(cat "$AM_TEST_CARGO_LOG")"
+rm "$fixture/web/dist/index.html"
+rmdir "$fixture/web/dist"
+echo 'daemon/full workspace gate covers xtask and propagates its failures'
 
 # A daemon module test already compiles the same daemon targets as check --all-targets.
 : >"$AM_TEST_CARGO_LOG"
