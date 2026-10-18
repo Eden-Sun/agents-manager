@@ -575,6 +575,39 @@ class SearchCommandTest(CliCase):
 
 
 class MessagesCommandTest(CliCase):
+    def test_cursor_uses_oldest_seq_when_created_at_order_differs(self):
+        def messages_page(path):
+            before = urllib.parse.parse_qs(urllib.parse.urlparse(path).query).get("before", [""])[0]
+            if before == "oldest-insertion":
+                return (200, {
+                    "messages": [{
+                        "id": "older-page", "seq": 5, "created_at": "2026-09-10T10:02:00Z",
+                        "role": "assistant",
+                    }],
+                    "has_more": False,
+                })
+            return (200, {
+                "messages": [
+                    {"id": "newer-insertion", "seq": 20, "created_at": "2026-09-10T10:00:00Z", "role": "user"},
+                    {"id": "oldest-insertion", "seq": 10, "created_at": "2026-09-10T10:01:00Z", "role": "assistant"},
+                ],
+                "has_more": True,
+            })
+
+        FakeDaemon.routes["GET /api/bots/b1/messages"] = messages_page
+        first = self.ok("messages", "b1")
+        self.assertEqual([m["seq"] for m in first["messages"]], [20, 10])
+        self.assertEqual(first["next_cursor"], "oldest-insertion")
+
+        second = self.ok("messages", "b1", "--before", first["next_cursor"])
+        self.assertEqual([m["id"] for m in second["messages"]], ["older-page"])
+        self.assertTrue({m["id"] for m in first["messages"]}.isdisjoint(
+            {m["id"] for m in second["messages"]}
+        ))
+        requests = [r for r in FakeDaemon.seen if r["path"].startswith("/api/bots/b1/messages")]
+        second_query = urllib.parse.parse_qs(urllib.parse.urlparse(requests[1]["path"]).query)
+        self.assertEqual(second_query["before"], ["oldest-insertion"])
+
     def test_cursor_comes_from_the_oldest_message(self):
         FakeDaemon.routes["GET /api/bots/b1/messages"] = (
             200,

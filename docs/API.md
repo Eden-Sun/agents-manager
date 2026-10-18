@@ -821,7 +821,7 @@ codex 的 rollout 還沒寫出來時先放回等 3 次（只算這個原因，�
 
 ## 6. 讀訊息
 
-`GET /api/bots/{id}/messages?before=<message_id>&limit=100`：以插入順序倒序分頁（`before` 指向已載入訊息中 rowid 最小的一則；客戶端需依 `seq` 選游標，不能假定時間排序第一則就是游標），回傳的 `messages` 已依時間正序。可選 `turn_id` 限定該回合、`role=user|assistant|system` 限定角色，均在該 bot 的 conversation 內過濾後才分頁；不存在或其他 bot 的回合回空訊息清單，非法 role 回 400。不帶篩選參數沿用原行為。
+`GET /api/bots/{id}/messages?before=<message_id>&limit=100`：以插入順序倒序分頁（`before` 指向已載入訊息中 rowid 最小的一則；客戶端需依 `seq` 選游標，不能假定時間排序第一則就是游標），回傳的 `messages` 已依時間正序。`agm messages` 會保留回傳的 `seq`，並以本頁 `seq` 最小訊息的 id 作 `next_cursor`；舊 daemon 未回 `seq` 或值為 0 時沿用本頁時間正序第一筆。可選 `turn_id` 限定該回合、`role=user|assistant|system` 限定角色，均在該 bot 的 conversation 內過濾後才分頁；不存在或其他 bot 的回合回空訊息清單，非法 role 回 400。不帶篩選參數沿用原行為。
 
 代發訊息（`relay_from` 有值）另補 `relay_from_name`（來源 bot 的名字，來源已收掉也有）與 `relay_from_deleted`（來源 bot 已收掉）；只給 User principal，Bot principal 讀到的訊息不帶這兩欄，名字不外洩自己樹外的 bot。同樣的兩欄也補在群組訊息 `GET /api/projects/{id}/messages`（User principal）與 WS `message_added` 幀（WS 只接 User）。`relay_from` 為 `daemon` 或來源 bot 已不存在時不帶。前端另在本分頁記住曾解析到的名字，收掉後清單沒有、daemon 也沒補時仍顯示「名字（已收掉）」。
 Bot principal 只能讀自己的 bot 與 descendant bots 的對話；讀到 ancestor、sibling 或其他 bot 回 `403 bot_resource_scope`。User principal 維持完整讀取。`before` 空字串等同沒帶（回第一頁）。`before` 必須是這顆 bot 的 conversation 裡**還在**的訊息：被刪掉（例如撤回排隊的 prompt、撤掉過期的「未送達」note）或根本不存在 → **404** `{"error":"not_found","what":"before message","reason":"before_message_gone","message_id"}`；是別顆 bot 的訊息 → 404 `reason:"before_message_not_in_conversation"`。不會默默拿全域 rowid 切出錯的一頁；呼叫端的正解是重載第一頁（不是重試同一個游標）。
