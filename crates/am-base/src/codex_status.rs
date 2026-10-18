@@ -51,13 +51,12 @@ fn without_warning(row: &str) -> &str {
     }
 }
 
-/// `<model> [effort] [fast] · <cwd 或 Context／額度段…>`；模型名以英數字開頭、含 `-`（markdown 項目符號不算）。
+/// `<model> [effort] [fast] · <cwd 或 Context／額度段…>`；模型名以英數字開頭（markdown 項目符號不算）。
 fn is_model_row(row: &str) -> bool {
     let Some((head, rest)) = row.split_once('·') else { return false };
     let mut words = head.split_whitespace();
     let Some(model) = words.next() else { return false };
-    let model_like = model.contains('-')
-        && model.starts_with(|c: char| c.is_ascii_alphanumeric())
+    let model_like = model.starts_with(|c: char| c.is_ascii_alphanumeric())
         && model.chars().all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '.' | '_'));
     let rest = rest.trim();
     model_like && words.count() <= 2 && (rest.starts_with('/') || rest.starts_with('~') || rest.contains("Context") || rest.contains("% left"))
@@ -71,20 +70,9 @@ fn context_pct(row: &str) -> Option<f64> {
 
 /// 截點可能在任何字元；`%` 之後被截才讀得到，所以 `left` 不是必要的字。
 pub fn parse_status_quota(screen: &str) -> Option<CodexStatusQuota> {
-    let mut out = None;
-    for raw in screen.lines() {
-        let line = raw.trim();
-        // fork／resume 起來的 codex 狀態列可能沒有 `Context` 那一段；`% left` 也算。
-        if !line.contains('·') || !(line.contains("Context") || line.contains("% left")) {
-            continue;
-        }
-        let q = CodexStatusQuota { five_hour_left: pct_after(line, "5h"), weekly_left: pct_after(line, "weekly") };
-        if !q.is_empty() {
-            // 最後一個相符的才是現在那行（開頭的 banner 有同樣形狀）。
-            out = Some(q);
-        }
-    }
-    out
+    let footer = parse_footer(screen)?;
+    let q = CodexStatusQuota { five_hour_left: pct_after(&footer.line, "5h"), weekly_left: pct_after(&footer.line, "weekly") };
+    (!q.is_empty()).then_some(q)
 }
 
 fn pct_after(line: &str, label: &str) -> Option<f64> {
@@ -139,7 +127,49 @@ mod tests {
         let q = parse_status_quota("gpt-6-astra high · /tmp · Context 28% used · 5h 36% left · weekly 24%…").unwrap();
         assert_eq!((q.five_hour_left, q.weekly_left), (Some(36.0), Some(24.0)));
 
-        let q = parse_status_quota("m x · /tmp · Context 1% used · 5h 7.5% left, weekly 12%.").unwrap();
+        let q = parse_status_quota("m-x x · /tmp · Context 1% used · 5h 7.5% left, weekly 12%.").unwrap();
         assert_eq!((q.five_hour_left, q.weekly_left), (Some(7.5), Some(12.0)));
+    }
+
+    #[test]
+    fn a_truncated_current_footer_does_not_fall_back_to_an_older_quota_row() {
+        let old = "gpt-6-astra high · /old · Context 2% used · weekly 1% left";
+        let intervening = "ordinary output\n".repeat(10);
+        let current = "gpt-6-astra medium · /project · Context 28% used · weekly 4…";
+        let screen = format!("{old}\n{intervening}{current}");
+        assert_eq!(parse_status_quota(&screen), None);
+    }
+
+    #[test]
+    fn a_current_footer_without_quota_does_not_fall_back_to_an_older_quota_row() {
+        let old = "gpt-6-astra high · /old · Context 2% used · weekly 1% left";
+        let current = "gpt-6-astra medium · /project · Context 28% used";
+        assert_eq!(parse_status_quota(&format!("{old}\n{current}")), None);
+    }
+
+    #[test]
+    fn a_valid_current_footer_replaces_older_quota_and_keeps_only_complete_windows() {
+        let old = "gpt-6-astra high · /old · Context 2% used · weekly 1% left";
+        let current = "gpt-6-astra medium · /project · Context 28% used · 5h 90% left · weekly 4…";
+        assert_eq!(
+            parse_status_quota(&format!("{old}\n{current}")),
+            Some(CodexStatusQuota { five_hour_left: Some(90.0), weekly_left: None })
+        );
+
+        let current = "gpt-6-astra medium · /project · Context 28% used · 5h 36% left · weekly 24% left";
+        assert_eq!(
+            parse_status_quota(&format!("{old}\n{current}")),
+            Some(CodexStatusQuota { five_hour_left: Some(36.0), weekly_left: Some(24.0) })
+        );
+    }
+
+    #[test]
+    fn a_model_token_without_a_hyphen_is_still_a_footer() {
+        let row = "m x · /tmp · Context 1% used · 5h 7.5% left, weekly 12%.";
+        assert_eq!(
+            parse_footer(row),
+            Some(CodexFooter { line: row.into(), context_used_pct: Some(1.0) })
+        );
+        assert_eq!(parse_status_quota(row), Some(CodexStatusQuota { five_hour_left: Some(7.5), weekly_left: Some(12.0) }));
     }
 }
