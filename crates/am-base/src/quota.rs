@@ -9,7 +9,7 @@ use serde::ser::SerializeStruct;
 use serde::{Deserialize, Serialize, Serializer};
 use serde_json::{json, Value};
 use std::collections::HashMap;
-use std::sync::Arc;
+use std::sync::{Arc, Weak};
 use std::time::Duration;
 
 pub const CODEX_POLL: Duration = Duration::from_secs(300);
@@ -29,6 +29,26 @@ pub async fn probe_lock(host: &str) -> tokio::sync::OwnedMutexGuard<()> {
         std::sync::OnceLock::new();
     let map = LOCKS.get_or_init(|| tokio::sync::Mutex::new(HashMap::new()));
     let lock = map.lock().await.entry(host.to_string()).or_default().clone();
+    lock.lock_owned().await
+}
+
+/// A quota snapshot and its cache write must follow the same per-key order as the in-memory
+/// mutation. Keep the lock map weak so identities that disappear do not stay in memory.
+async fn cache_write_lock(key: &str) -> tokio::sync::OwnedMutexGuard<()> {
+    static LOCKS: std::sync::OnceLock<tokio::sync::Mutex<HashMap<String, Weak<tokio::sync::Mutex<()>>>>> =
+        std::sync::OnceLock::new();
+    let lock = {
+        let mut locks = LOCKS.get_or_init(|| tokio::sync::Mutex::new(HashMap::new())).lock().await;
+        locks.retain(|_, lock| lock.strong_count() > 0);
+        match locks.get(key).and_then(Weak::upgrade) {
+            Some(lock) => lock,
+            None => {
+                let lock = Arc::new(tokio::sync::Mutex::new(()));
+                locks.insert(key.to_string(), Arc::downgrade(&lock));
+                lock
+            }
+        }
+    };
     lock.lock_owned().await
 }
 
@@ -542,6 +562,12 @@ pub async fn load_cache(app: &(impl crate::capabilities::Db + crate::quota::Quot
 }
 
 pub async fn persist_cache(app: &impl crate::capabilities::Db, key: &str, q: &Quota) {
+    let _cache_write = cache_write_lock(key).await;
+    persist_cache_locked(app, key, q).await;
+}
+
+/// Caller holds [`cache_write_lock`] across the state mutation and this write.
+async fn persist_cache_locked(app: &impl crate::capabilities::Db, key: &str, q: &Quota) {
     let raw = match serde_json::to_string(q) {
         Ok(raw) => raw,
         Err(e) => {
@@ -576,6 +602,7 @@ async fn delete_cache(app: &impl crate::capabilities::Db, key: &str) {
 
 /// Remove a quota key that no longer belongs to a live identity/host, including its restart cache.
 pub async fn forget(app: &(impl crate::capabilities::Db + crate::quota::QuotaStaleKeys + crate::quota::QuotaTables), key: &str) {
+    let _cache_write = cache_write_lock(key).await;
     app.quotas().lock().await.remove(key);
     app.quota_stale().lock().await.remove(key);
     delete_cache(app, key).await;
@@ -873,6 +900,16 @@ async fn set_inner(
     }
     sanitize_percentages(&mut q, &key);
     let stale = if base.contains(':') { Vec::new() } else { stale_split_keys(app, host, base).await };
+    // This write can also delete split keys; lock every touched key in sorted order so an old
+    // in-flight split-key write cannot recreate a row after that deletion.
+    let mut write_keys = vec![key.clone()];
+    write_keys.extend(stale.iter().cloned());
+    write_keys.sort();
+    write_keys.dedup();
+    let mut cache_writes = Vec::with_capacity(write_keys.len());
+    for write_key in write_keys {
+        cache_writes.push(cache_write_lock(&write_key).await);
+    }
     // 撞限校正只看**這份讀數自己帶來的**窗；下面沿用的舊窗不是新證據。
     let brings_its_own_hit = q.limit_hit.is_some();
     let fresh = q.clone();
@@ -972,19 +1009,20 @@ async fn set_inner(
     for old in &stale {
         delete_cache(app, old).await;
     }
-    persist_cache(app, &key, &q).await;
+    persist_cache_locked(app, &key, &q).await;
     // 寫進記憶體之後、寫快取列之前主機被換掉：換連線那一側已經清過這把 key，這裡剛寫的列會把舊機器的讀數留到下次開機。
     // 讓快取列回到記憶體現在的樣子（被清掉就刪，新連線已寫了就用它的）。
     if let Some(f) = fence {
         if !app.hosts().is_current(f).await {
             let now = app.quotas().lock().await.get(&key).cloned();
             match now {
-                Some(cur) => persist_cache(app, &key, &cur).await,
+                Some(cur) => persist_cache_locked(app, &key, &cur).await,
                 None => delete_cache(app, &key).await,
             }
             return true;
         }
     }
+    drop(cache_writes);
     app.emit("quota_updated", json!({"kind": key, "host": host, "quota": quota_value(&q, false)})).await;
     true
 }
@@ -1161,6 +1199,7 @@ pub fn cleared_at_key(app: &impl crate::capabilities::DataDir, key: &str) -> Str
 /// 撞限可能在那之前已經自己過期、或是重啟後根本沒被回填。
 pub async fn clear_limit_hit(app: &(impl crate::capabilities::DataDir + crate::capabilities::Db + crate::capabilities::Emit + crate::quota::QuotaStaleKeys + crate::quota::QuotaTables), host: &str, base: &str) {
     let key = quota_key(host, base);
+    let _cache_write = cache_write_lock(&key).await;
     cleared_at().lock().unwrap().insert(cleared_at_key(app, &key), chrono::Utc::now());
     let mut quotas = app.quotas().lock().await;
     let Some(q) = quotas.get_mut(&key) else { return };
@@ -1171,7 +1210,8 @@ pub async fn clear_limit_hit(app: &(impl crate::capabilities::DataDir + crate::c
     let out = q.clone();
     drop(quotas);
     let stale = app.quota_stale().lock().await.contains(&key);
-    persist_cache(app, &key, &out).await;
+    persist_cache_locked(app, &key, &out).await;
+    drop(_cache_write);
     app.emit("quota_updated", json!({"kind": key, "host": host, "quota": quota_value(&out, stale)})).await;
 }
 
@@ -1195,6 +1235,7 @@ pub async fn seed_limit_hit(app: &(impl crate::capabilities::Db + crate::capabil
         return false;
     }
     let key = quota_key(host, base);
+    let _cache_write = cache_write_lock(&key).await;
     let mut quotas = app.quotas().lock().await;
     if let Some(hit) = quotas.get(&key).and_then(|q| q.limit_hit.as_ref()) {
         if !limit_hit_expired(Some(hit)) {
@@ -1228,7 +1269,8 @@ pub async fn seed_limit_hit(app: &(impl crate::capabilities::Db + crate::capabil
     quotas.insert(key.clone(), q);
     drop(quotas);
     let stale = app.quota_stale().lock().await.contains(&key);
-    persist_cache(app, &key, &out).await;
+    persist_cache_locked(app, &key, &out).await;
+    drop(_cache_write);
     app.emit("quota_updated", json!({"kind": key, "host": host, "quota": quota_value(&out, stale)})).await;
     true
 }
@@ -1244,6 +1286,7 @@ pub async fn restore_limit_hit(app: &(impl crate::capabilities::Db + crate::capa
         return false;
     }
     let key = quota_key(host, base);
+    let _cache_write = cache_write_lock(&key).await;
     let mut quotas = app.quotas().lock().await;
     // credits 撞限不由讀數解除（見 recalibrate_limit_hit）：權威讀數在它之後、格子卻已經沒有撞限，代表它已被方案變更或成功回合清掉，不寫回（#1576）。
     if quotas.get(&key).is_some_and(|q| q.limit_hit.is_none() && hit.bucket.is_none() && hit.until.is_none() && codex_reading_after_hit(&hit, q)) {
@@ -1285,7 +1328,8 @@ pub async fn restore_limit_hit(app: &(impl crate::capabilities::Db + crate::capa
     quotas.insert(key.clone(), q);
     drop(quotas);
     let stale = app.quota_stale().lock().await.contains(&key);
-    persist_cache(app, &key, &out).await;
+    persist_cache_locked(app, &key, &out).await;
+    drop(_cache_write);
     app.emit("quota_updated", json!({"kind": key, "host": host, "quota": quota_value(&out, stale)})).await;
     true
 }
@@ -1422,4 +1466,135 @@ pub trait QuotaStaleKeys: Send + Sync {
 pub trait HostIdentities: Send + Sync {
     fn identity_for_host(&self, host: &str, name: &str) -> impl std::future::Future<Output = Option<crate::config::IdentityCfg>> + Send;
     fn host_tools_detected(&self, host: &str) -> impl std::future::Future<Output = bool> + Send;
+}
+
+#[cfg(test)]
+mod cache_write_lock_tests {
+    use super::*;
+    use std::future::Future;
+    use std::path::{Path, PathBuf};
+
+    struct TestApp {
+        db: sqlx::SqlitePool,
+        data_dir: PathBuf,
+        quotas: tokio::sync::Mutex<std::collections::BTreeMap<String, Quota>>,
+        stale: tokio::sync::Mutex<std::collections::BTreeSet<String>>,
+    }
+
+    impl crate::capabilities::Db for TestApp {
+        fn db(&self) -> &sqlx::SqlitePool {
+            &self.db
+        }
+    }
+
+    impl crate::capabilities::DataDir for TestApp {
+        fn data_dir(&self) -> &Path {
+            &self.data_dir
+        }
+    }
+
+    impl crate::capabilities::Emit for TestApp {
+        fn emit(&self, _kind: &str, _data: Value) -> impl Future<Output = ()> + Send {
+            async {}
+        }
+
+        fn current_seq(&self) -> u64 {
+            0
+        }
+    }
+
+    impl QuotaTables for TestApp {
+        fn quotas(&self) -> &tokio::sync::Mutex<std::collections::BTreeMap<String, Quota>> {
+            &self.quotas
+        }
+    }
+
+    impl QuotaStaleKeys for TestApp {
+        fn quota_stale(&self) -> &tokio::sync::Mutex<std::collections::BTreeSet<String>> {
+            &self.stale
+        }
+    }
+
+    async fn test_app() -> TestApp {
+        let db = sqlx::sqlite::SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect("sqlite::memory:")
+            .await
+            .unwrap();
+        sqlx::query("CREATE TABLE quota_cache (key TEXT PRIMARY KEY, quota_json TEXT NOT NULL, updated_at TEXT NOT NULL)")
+            .execute(&db)
+            .await
+            .unwrap();
+        TestApp {
+            db,
+            data_dir: std::env::temp_dir().join("quota-cache-write-lock-test"),
+            quotas: tokio::sync::Mutex::new(Default::default()),
+            stale: tokio::sync::Mutex::new(Default::default()),
+        }
+    }
+
+    fn quota_with_hit() -> Quota {
+        Quota {
+            five_hour: None,
+            seven_day: None,
+            fable: None,
+            reset_credits: None,
+            limit_hit: Some(LimitHit {
+                message: "You've hit your usage limit".into(),
+                until: Some(crate::db::iso_at(chrono::Utc::now() + chrono::Duration::days(7))),
+                at: crate::db::now(),
+                bucket: Some("seven_day".into()),
+            }),
+            plan: None,
+            updated_at: crate::db::now(),
+            source: "test".into(),
+            account: None,
+            host: LOCAL_HOST.into(),
+        }
+    }
+
+    /// #1825：A 已取出撞限快照但延遲寫快取時，B 的成功回合清除必須排在 A 後面，且重載不能復活撞限。
+    #[tokio::test]
+    async fn clearing_a_limit_hit_serializes_behind_an_in_flight_cache_snapshot() {
+        let app = Arc::new(test_app().await);
+        let base = "codex:cache-write-race-unit";
+        let key = quota_key(LOCAL_HOST, base);
+        let before_clear = quota_with_hit();
+        app.quotas.lock().await.insert(key.clone(), before_clear.clone());
+        persist_cache(&app, &key, &before_clear).await;
+
+        // A 已複製舊快照、仍持有 key 的寫入鎖，尚未落地；B 不能先改記憶體並寫清除快照。
+        let a_write = cache_write_lock(&key).await;
+        let a_snapshot = app.quotas.lock().await[&key].clone();
+        let (started_tx, started_rx) = tokio::sync::oneshot::channel();
+        let clear_app = app.clone();
+        let mut clear = tokio::spawn(async move {
+            let _ = started_tx.send(());
+            clear_limit_hit(&clear_app, LOCAL_HOST, base).await;
+        });
+        started_rx.await.unwrap();
+        assert!(
+            tokio::time::timeout(Duration::from_millis(50), &mut clear).await.is_err(),
+            "clear must wait until the older snapshot write releases its key lock"
+        );
+        assert!(app.quotas.lock().await[&key].limit_hit.is_some(), "clear cannot mutate memory ahead of the older write");
+        persist_cache_locked(&app, &key, &a_snapshot).await;
+        drop(a_write);
+        clear.await.unwrap();
+
+        assert!(app.quotas.lock().await[&key].limit_hit.is_none(), "清除已更新記憶體狀態");
+        let mut older_reading = a_snapshot;
+        older_reading.updated_at = crate::db::iso_at(chrono::Utc::now() - chrono::Duration::minutes(1));
+        persist_cache(&app, &key, &older_reading).await;
+        let cached: String = sqlx::query_scalar("SELECT quota_json FROM quota_cache WHERE key = ?")
+            .bind(&key)
+            .fetch_one(&app.db)
+            .await
+            .unwrap();
+        assert!(serde_json::from_str::<Quota>(&cached).unwrap().limit_hit.is_none(), "較舊讀數不能覆蓋清除後的快取");
+
+        app.quotas.lock().await.remove(&key);
+        assert_eq!(load_cache(&app).await.unwrap(), 1);
+        assert!(app.quotas.lock().await[&key].limit_hit.is_none(), "重載快取不能復活撞限");
+    }
 }
