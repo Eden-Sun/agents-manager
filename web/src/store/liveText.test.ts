@@ -1,6 +1,6 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
-import { cleanLiveText } from './liveText.ts'
+import { cleanLiveActivity, cleanLiveText } from './liveText.ts'
 
 test('codex idle splash does not leak into the live bubble', () => {
   const splash = `
@@ -97,4 +97,22 @@ test('esc 按鍵提示只認 `esc to <動作>` 的形狀；以 Escape 開頭的�
   for (const hint of ['esc to interrupt', '(esc to interrupt)', 'esc to interrupt · ctrl+t to show todos']) {
     assert.equal(cleanLiveText(hint), null, hint)
   }
+})
+
+test('issue 1846: Unicode languages are preserved in live text and live activity', () => {
+  const cases = [
+    '你好，這是測試。',
+    'Hello world.',
+    'Привет, мир!',
+    'مرحبا بالعالم',
+    'Γεια σου κόσμε',
+    'สวัสดีชาวโลก',
+  ]
+  for (const text of cases) {
+    assert.equal(cleanLiveText(text), text, `cleanLiveText failed for: ${text}`)
+    assert.equal(cleanLiveActivity(text), text, `cleanLiveActivity failed for: ${text}`)
+  }
+  // Pure chrome / punctuation without letters should still be filtered out
+  assert.equal(cleanLiveText('─── ··· ───'), null)
+  assert.equal(cleanLiveActivity('─── ··· ───'), null)
 })

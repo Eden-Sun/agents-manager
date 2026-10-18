@@ -64,7 +64,7 @@ const TOOL_TAIL = /\([\d.]+\s*[smh]\s*·\s*\d+\s+lines?\)\s*$/
 /** ` · summarized` */
 const TRAILING_STATE = /\s*·\s*(?:summari[sz]ed|compacted|truncated|cancell?ed|interrupted)\s*$/i
 
-const HAS_WORD = /[a-z\u3400-\u9fff\u3040-\u30ff\uac00-\ud7af]/i
+const HAS_WORD = /\p{L}/u
 
 function isCliSummary(line: string): boolean {
   // 摘要行沒有句尾標點與中文，且一定帶數字。
