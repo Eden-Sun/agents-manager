@@ -17,8 +17,8 @@ fn mention_char(c: char) -> bool {
 }
 
 /// 名字裡有空白的成員（2026-09-19 使用者：「bot name should be able to include space」）：`@my bot` 在第一個空白就被
-/// `mention_char` 切斷，只剩 `my`。`@` 後面若正好接著某個成員的**整個**名字、而且名字後面是結尾或
-/// 非名字字元，就算提到它。最長的先比，`@my bot 2` 不會被 `my bot` 搶走。
+/// `mention_char` 切斷，只剩 `my`。`@` 後面若正好接著某個成員的**整個**名字、而且名字後面是結尾、分隔字元，或單獨的尾隨連接符，就算提到它。
+/// `-`／`_` 後面若還有名字字元就不是邊界。最長的先比，`@my bot 2` 不會被 `my bot` 搶走。
 /// 大小寫完全相同的優先；沒有完全相同、而且摺完只有一顆時才不分大小寫。兩顆只差大小寫時，
 /// `@Claude` 與 `@claude` 各打各的，摺過的 `@CLAUDE` 兩顆都不算（#657）。回 `(成員索引, 名字結束位置)`。
 fn spaced_member_at(chars: &[char], start: usize, members: &[Member]) -> Option<(usize, usize)> {
@@ -34,23 +34,35 @@ fn spaced_member_at(chars: &[char], start: usize, members: &[Member]) -> Option<
         if end > chars.len() {
             continue;
         }
-        if end < chars.len() && mention_char(chars[end]) && !matches!(chars[end], '-' | '_') {
-            continue;
-        }
+        let mention_end = if end < chars.len() && matches!(chars[end], '-' | '_') {
+            let mut suffix_end = end;
+            while suffix_end < chars.len() && matches!(chars[suffix_end], '-' | '_') {
+                suffix_end += 1;
+            }
+            if suffix_end < chars.len() && mention_char(chars[suffix_end]) {
+                continue;
+            }
+            suffix_end
+        } else {
+            if end < chars.len() && mention_char(chars[end]) {
+                continue;
+            }
+            end
+        };
         let exact = chars[start..end].iter().copied().eq(name.iter().copied());
         let folded = chars[start..end].iter().zip(&name).all(|(a, b)| a.to_lowercase().eq(b.to_lowercase()));
         if exact {
-            if best_exact.is_none_or(|(_, e)| end > e) {
-                best_exact = Some((idx, end));
+            if best_exact.is_none_or(|(_, e)| mention_end > e) {
+                best_exact = Some((idx, mention_end));
             }
         } else if folded {
             match best_fold {
-                Some((_, e)) if end > e => {
-                    best_fold = Some((idx, end));
+                Some((_, e)) if mention_end > e => {
+                    best_fold = Some((idx, mention_end));
                     fold_tie = false;
                 }
-                Some((_, e)) if end == e => fold_tie = true,
-                None => best_fold = Some((idx, end)),
+                Some((_, e)) if mention_end == e => fold_tie = true,
+                None => best_fold = Some((idx, mention_end)),
                 _ => {}
             }
         }
@@ -559,6 +571,38 @@ mod strip_tests {
         assert_eq!(pick("@my 自己"), ["my"], "沒空白的照舊");
         assert_eq!(strip_mentions("@my bot, 看一下", &ms), "看一下");
         assert_eq!(strip_mentions("@my bot 2 跟 @my 說", &ms), "跟 說");
+    }
+
+    #[test]
+    fn spaced_name_joiners_are_only_boundaries_at_the_end_of_a_mention() {
+        let short = [Member { id: "short".into(), name: "my bot".into() }];
+        let pick_ids = |text: &str, members: &[Member]| parse_mentions(text, members).into_iter().map(|m| m.id).collect::<Vec<_>>();
+        for suffix in ["-other", "_other"] {
+            let text = format!("@my bot{suffix} 看一下");
+            assert!(pick_ids(&text, &short).is_empty(), "中段連接符後仍有名字字元時不應命中短名稱：{text}");
+            assert_eq!(strip_mentions(&text, &short), text, "未知長名稱不得被剝成短名稱加殘留後綴");
+        }
+
+        assert_eq!(pick_ids("@my bot 看一下", &short), ["short"]);
+        assert_eq!(pick_ids("@my bot- 看一下", &short), ["short"]);
+        assert_eq!(pick_ids("@my bot_ 看一下", &short), ["short"]);
+        assert_eq!(strip_mentions("@my bot- 看一下", &short), "看一下");
+        assert_eq!(strip_mentions("@my bot_ 看一下", &short), "看一下");
+
+        let with_longer = [
+            Member { id: "short".into(), name: "my bot".into() },
+            Member { id: "long-dash".into(), name: "my bot-other".into() },
+            Member { id: "long-underscore".into(), name: "my bot_other".into() },
+        ];
+        assert_eq!(pick_ids("@my bot-other 看一下", &with_longer), ["long-dash"]);
+        assert_eq!(pick_ids("@my bot_other 看一下", &with_longer), ["long-underscore"]);
+        assert_eq!(strip_mentions("@my bot-other 看一下", &with_longer), "看一下");
+
+        let unspaced = [
+            Member { id: "base".into(), name: "mybot".into() },
+            Member { id: "long".into(), name: "mybot-other".into() },
+        ];
+        assert_eq!(pick_ids("@mybot-other 看一下", &unspaced), ["long"], "無空白名稱仍比對完整 token");
     }
 
     /// issue #897：只拿掉 mention 與緊貼它的空白，貼進來的程式碼縮排、連續空白、空行不能被壓掉。
