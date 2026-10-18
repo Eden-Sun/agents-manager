@@ -1,0 +1,11 @@
+# 來源檔（issue #1855）：main 的 HEAD 變了就在 r7 預熱遠端 cargo 快取。Linux 才有，沒有 launchd 對應檔（manifest 標 linux）。
+# 排程見 com.agm.remote-cargo-prewarm.timer；腳本本身每次都先比 sha，沒變就立刻退出。
+[Unit]
+Description=AGM remote-cargo-prewarm：main 更新就在 r7 預熱 cargo 快取（issue #1855）
+
+[Service]
+Type=oneshot
+Environment=PATH=%h/.local/bin:%h/.bun/bin:%h/.cargo/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin
+ExecStart=/bin/bash %h/.config/agents-manager/supervisor/AGM/bin/remote-cargo-prewarm.sh
+StandardOutput=append:%h/.config/agents-manager/supervisor/AGM/remote-cargo-prewarm.systemd.log
+StandardError=append:%h/.config/agents-manager/supervisor/AGM/remote-cargo-prewarm.systemd.log

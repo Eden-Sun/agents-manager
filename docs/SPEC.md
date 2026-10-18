@@ -2413,6 +2413,21 @@ rustup 換位置或遠端主機上反而是錯的——讓 shim 每次在 pane �
   測試行程照樣看不到它。改 `check`／`test`／`clippy` 前後的環境時不能拿掉 `AM_DAEMON_EXE`／`AM_CONFIG_PATH`——`cargo_shim.rs` 的
   `the_check_script_env_still_offloads_without_leaking_the_data_dir` 拿 `check.sh` 實際那一行去跑 shim，把兩邊綁在一起。
   daemon 連不上時遠端編譯照樣能跑（它不需要 daemon）。
+- **預熱 r7 的快取（issue #1855）**：`scripts/ops/remote-cargo-prewarm.sh`，由 Linux 的 systemd user timer `com.agm.remote-cargo-prewarm`（每 600 秒）叫一次。origin/main 的 sha 變了，就在專用的 detached worktree（`AGM_PREWARM_WORKTREE`，預設 `<repo>/.claude/worktrees/remote-cargo-prewarm`）依序跑 `agents-managerd remote-cargo … -- …`：`check -p agents-managerd --all-targets --locked`、`test -p agents-managerd --no-run --locked`、`test -p xtask --no-run --locked`、以及每個 `crates/*` 的 `test -p <包> --no-run --locked`。目標集合與逐包 `-p` 跟 `scripts/check.sh` 的 daemon／xtask／crates 測試一致；**不含 desktop**（它的 build script 要打包流程放進來的 sidecar），clippy 不預熱。同時只一輪（flock）。
+  - **專用 worktree 必須是腳本自己建的**：gitdir 裡有 marker（`.git/worktrees/<名>/agm-remote-cargo-prewarm`，不進工作樹）、同一個 git common dir、detached、乾淨。任一條不符就記 log 拒絕、**不碰它**（同名的既有 worktree 可能有人的 WIP）。新建時才會 `worktree add`；已存在且通過檢查才 checkout 到新 sha。
+  - **成功與失敗分開記**：成功的 sha 記在 `~/.cache/agents-manager/remote-cargo-prewarm.sha`，同一個 sha 只預熱一次。暫時失敗（helper 124 逾時、或 128 以上的訊號中斷）記在 `…sha.retry`（`sha 次數 還要跳過的輪數`）：同一個 sha 最多 3 次，第 2、3 次之間各隔一輪（退避），用完放棄，等下一版 main。其他 cargo 失敗（例如編譯錯）直接放棄那個 sha、不重試。換了 sha 重試記錄就從頭算。
+  - helper 回 125（沒啟用／連不上）、75（r7 名額滿）、126（設定錯）只跳過、不記次數、下一輪再試，**絕不在本機跑**（那會佔本機名額）。
+  - **首次啟用（手動）**：`ops-install` 不會裝這支腳本與 timer（dry-run 實測 `not-installed bin/remote-cargo-prewarm.sh`：新檔要手動第一次裝，`systemd/` 的 unit 也一律跳過）。在 repo 根目錄做一次：
+    ```sh
+    AGM_DIR="$HOME/.config/agents-manager/supervisor/AGM"
+    mkdir -p "$AGM_DIR/bin" "$HOME/.config/systemd/user"
+    install -m 755 scripts/ops/remote-cargo-prewarm.sh "$AGM_DIR/bin/remote-cargo-prewarm.sh"
+    cp scripts/ops/systemd/com.agm.remote-cargo-prewarm.{service,timer} "$HOME/.config/systemd/user/"
+    systemctl --user daemon-reload
+    systemctl --user enable --now com.agm.remote-cargo-prewarm.timer
+    ```
+    service 的 `ExecStart` 指向 `$AGM_DIR/bin/remote-cargo-prewarm.sh`，所以腳本要先放到那裡；之後 repo 的腳本改了，同一行 `install` 再跑一次即可（`ops-install` 之後會照對照表換已裝的檔，但 unit 仍要手動）。**停用**：`systemctl --user disable --now com.agm.remote-cargo-prewarm.timer`（要移除 unit 再 `rm` 兩個檔並 `daemon-reload`）。
+  - **快取是依 repo 分的（issue #1856）**：遠端目錄 hash＝`fnv1a64(git common dir 的本機路徑)`（`remote_cargo.rs` 的 `cache_hash`），同一個 repo 的主樹、預熱用的 detached worktree 與所有 child worktree 共用同一份 `shared/`，所以預熱熱的快取，新 child 從新 main 開工就吃得到。來源每次仍由 rsync 同步成該次 cwd 的樣子（`--delete` 與 manifest 處理差異），共用的是 `target/`。預熱與 child 同時碰 `shared/` 時由 `shared.lock` 排隊，等太久的呼叫改用獨立 `job-*` 冷編譯。
 - `CARGO_BUILD_JOBS` 由 daemon 的 acquire 回應決定（`build.cargo_jobs`，預設 2），不吃 cargo 自己抓核心數的預設值。
 - **測試執行緒跟著名額走（issue #813、#1711）**：名額罩住整個測試執行階段（cargo 退出才放），但 `CARGO_BUILD_JOBS` 只限 rustc；測試 runner 預設依 CPU 數平行，
   多個名額可能因此把整台機器壓滿。`test`／`t` 在呼叫端沒設 `RUST_TEST_THREADS` 時，shim 注入 acquire 回應的 `test_threads`（`build.test_threads`，預設 8；
