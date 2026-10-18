@@ -59,33 +59,46 @@ export function useDialogFocus(
     initialFocusRef.current = initialFocus
   })
 
+  // 彈窗開啟時記住觸發它的 opener。在 render 階段於 open: false -> true 轉換時捕捉，
+  // 避免子元件的 mount effect（如 NewBotForm autofocus）先奪走焦點而記錯成子元件自己。
+  const prevOpenRef = useRef(open)
+  const renderOpenerRef = useRef<HTMLElement | null>(null)
+  if (!prevOpenRef.current && open) {
+    renderOpenerRef.current = document.activeElement instanceof HTMLElement ? document.activeElement : null
+  }
+  prevOpenRef.current = open
+
   useEffect(() => {
     if (!open) return
 
     const token = Symbol('dialog-focus')
     activeDialogs.push(token)
     const isTop = () => activeDialogs[activeDialogs.length - 1] === token
-    const opener = document.activeElement instanceof HTMLElement ? document.activeElement : null
-    let openRoot = rootRef.current
+    const capturedOpener = renderOpenerRef.current
+    renderOpenerRef.current = null
+    const fallbackOpener = document.activeElement instanceof HTMLElement ? document.activeElement : null
+    const root = rootRef.current
+    const opener = (capturedOpener && (!root || !root.contains(capturedOpener))) ? capturedOpener : fallbackOpener
+    let openRoot = root
 
     const focusInside = () => {
-      const root = rootRef.current
-      if (!root) return
-      openRoot = root
+      const currentRoot = rootRef.current
+      if (!currentRoot) return
+      openRoot = currentRoot
       const preferred = initialFocusRef.current?.()
-      const tabbable = focusableIn(root)
-      const target = preferred && root.contains(preferred) && tabbable.includes(preferred) ? preferred : tabbable[0] ?? root
-      if (target === root && !root.hasAttribute('tabindex')) root.setAttribute('tabindex', '-1')
+      const tabbable = focusableIn(currentRoot)
+      const target = preferred && currentRoot.contains(preferred) && tabbable.includes(preferred) ? preferred : tabbable[0] ?? currentRoot
+      if (target === currentRoot && !currentRoot.hasAttribute('tabindex')) currentRoot.setAttribute('tabindex', '-1')
       target.focus()
     }
 
     const raf = requestAnimationFrame(focusInside)
     const onKeyDown = (event: KeyboardEvent) => {
       if (!isTop() || event.key !== 'Tab') return
-      const root = rootRef.current
-      if (!root) return
-      if (document.activeElement && inForeignModal(document.activeElement, root)) return
-      const tabbable = focusableIn(root)
+      const currentRoot = rootRef.current
+      if (!currentRoot) return
+      if (document.activeElement && inForeignModal(document.activeElement, currentRoot)) return
+      const tabbable = focusableIn(currentRoot)
       if (tabbable.length === 0) {
         event.preventDefault()
         focusInside()
@@ -94,11 +107,11 @@ export function useDialogFocus(
       const current = document.activeElement
       const first = tabbable[0]
       const last = tabbable[tabbable.length - 1]
-      const outside = !root.contains(current)
-      if (event.shiftKey && (outside || current === root || current === first)) {
+      const outside = !currentRoot.contains(current)
+      if (event.shiftKey && (outside || current === currentRoot || current === first)) {
         event.preventDefault()
         last.focus()
-      } else if (!event.shiftKey && (outside || current === root || current === last)) {
+      } else if (!event.shiftKey && (outside || current === currentRoot || current === last)) {
         event.preventDefault()
         first.focus()
       }
@@ -106,9 +119,9 @@ export function useDialogFocus(
 
     const onFocusIn = (event: FocusEvent) => {
       if (!isTop() || !(event.target instanceof Node)) return
-      const root = rootRef.current
-      if (!root || root.contains(event.target)) return
-      if (inForeignModal(event.target, root)) return
+      const currentRoot = rootRef.current
+      if (!currentRoot || currentRoot.contains(event.target)) return
+      if (inForeignModal(event.target, currentRoot)) return
       focusInside()
     }
 
