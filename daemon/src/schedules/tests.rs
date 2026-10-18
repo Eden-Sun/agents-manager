@@ -158,6 +158,68 @@ async fn materialize_twice_from_a_stale_snapshot_creates_one_occurrence() {
     assert_eq!(count(&e.app, "SELECT COUNT(*) FROM schedule_occurrences WHERE schedule_id = ?", &s.id).await, 1);
 }
 
+async fn interval_with_submillisecond_anchor(app: &std::sync::Arc<crate::state::App>, project: &str, bot: &str) -> Schedule {
+    let mut s = schedule(app, project, bot).await;
+    let anchor = "2026-10-17T12:00:00.123456789Z";
+    let due = "2026-10-17T12:01:00.123Z";
+    s.mode = "interval".into();
+    s.spec_json = format!(r#"{{"mode":"interval","every_secs":60,"anchor":"{anchor}"}}"#);
+    s.next_due = Some(due.into());
+    sqlx::query("UPDATE schedules SET mode = ?, spec_json = ?, next_due = ? WHERE id = ?")
+        .bind(&s.mode)
+        .bind(&s.spec_json)
+        .bind(&s.next_due)
+        .bind(&s.id)
+        .execute(&app.db)
+        .await
+        .unwrap();
+    s
+}
+
+#[tokio::test]
+async fn interval_materialize_advances_past_a_millisecond_due_with_submillisecond_anchor() {
+    let (e, bot) = setup().await;
+    let s = interval_with_submillisecond_anchor(&e.app, &e.project_id, &bot.id).await;
+    let before_due = "2026-10-17T12:01:00.122Z";
+    let due = "2026-10-17T12:01:00.123Z";
+    assert!(store::list_due(&e.app.db, before_due).await.unwrap().is_empty(), "到期前 1 毫秒不可列為到期");
+    let listed = store::list_due(&e.app.db, due).await.unwrap();
+    assert_eq!(listed.len(), 1, "到期毫秒應列為到期");
+
+    runner::materialize(&e.app.db, &listed[0], due).await.unwrap();
+    let next_due: String = sqlx::query_scalar("SELECT next_due FROM schedules WHERE id = ?").bind(&s.id).fetch_one(&e.app.db).await.unwrap();
+    assert_eq!(next_due, "2026-10-17T12:02:00.123Z", "到期當毫秒和晚 1 毫秒都必須越過已落帳 occurrence");
+    assert!(store::list_due(&e.app.db, "2026-10-17T12:01:00.124Z").await.unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn interval_pending_occurrence_merges_on_the_next_due_without_repeating_due() {
+    let (e, bot) = setup().await;
+    let s = interval_with_submillisecond_anchor(&e.app, &e.project_id, &bot.id).await;
+    let due = "2026-10-17T12:01:00.123Z";
+    runner::materialize(&e.app.db, &s, due).await.unwrap();
+
+    let next = store::get_schedule(&e.app.db, &s.id).await.unwrap().unwrap();
+    let next_due = next.next_due.clone().unwrap();
+    runner::materialize(&e.app.db, &next, &next_due).await.unwrap();
+    assert_eq!(count(&e.app, "SELECT COUNT(*) FROM schedule_occurrences WHERE schedule_id = ?", &s.id).await, 1);
+    assert_eq!(count(&e.app, "SELECT merged_count FROM schedule_occurrences WHERE schedule_id = ?", &s.id).await, 1);
+}
+
+#[tokio::test]
+async fn failed_interval_occurrence_does_not_retry_the_same_millisecond_due() {
+    let (e, bot) = setup().await;
+    let s = interval_with_submillisecond_anchor(&e.app, &e.project_id, &bot.id).await;
+    let due = "2026-10-17T12:01:00.123Z";
+    runner::materialize(&e.app.db, &s, due).await.unwrap();
+    let occurrence_id: String = sqlx::query_scalar("SELECT id FROM schedule_occurrences WHERE schedule_id = ?").bind(&s.id).fetch_one(&e.app.db).await.unwrap();
+    let mut tx = db::begin_write(&e.app.db).await.unwrap();
+    store::finish_open_tx(&mut tx, &occurrence_id, "failed", "test", due).await.unwrap();
+    tx.commit().await.unwrap();
+
+    assert!(store::list_due(&e.app.db, "2026-10-17T12:01:20.123Z").await.unwrap().is_empty(), "下一輪不能再次列出剛失敗 occurrence 的 due");
+}
+
 #[tokio::test]
 async fn delete_withdraws_a_queued_turn_before_it_is_sent() {
     let (e, bot) = setup().await;

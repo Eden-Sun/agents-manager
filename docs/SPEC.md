@@ -5570,7 +5570,7 @@ daemon 要能在 Linux（目標：Ubuntu，外部編譯主機 192.168.1.46，#67
 
 ## 專案排程（2026-10-13）
 
-- **模式**：單次、固定間隔、每天、每週。不做任意 cron。時區存 IANA 名稱（daemon 依賴 chrono-tz）。
+- **模式**：單次、固定間隔、每天、每週。不做任意 cron。時區存 IANA 名稱（daemon 依賴 chrono-tz）。固定間隔落帳後，`next_due` 必須嚴格晚於已消耗的毫秒精度 due；anchor 的奈秒精度不得讓同一個 due 重複落帳。
 - **DST**：單次在本地不存在的時間拒絕（要求重選）；重複時間取較早的一次。每天／每週遇不存在的時間跳過當天；重複時間只跑較早那次，不補跑第二次。固定間隔以建立時的 UTC 錨點計算，與上次完成時間無關。
 - **帳本**：`schedules` 是設定；`schedule_occurrences` 是每一次執行的帳本，凍結 prompt、bot、generation，綁定 `turn_id`／`conversation_id`。同一排程最多一筆未結束（pending／queued）；`scheduled_for` 在同排程內唯一。到期時若還有未結束的，只記 `merged_count`，不另開，不補跑風暴。
 - **綁定**：bot 鎖內，同一個 SQLite 交易裡寫 turn（`queued`，`awaits_idle=1`，沒有 run 或還在 starting 時 `awaits_start=1`）、message（`relay_from='daemon'`），並把 occurrence 設為 `queued` 綁 turn。commit 後放鎖，再叫既有 kick（沒有 run）與 flush。不 steer、不 interrupt、不覆蓋使用者已排的佇列（既有上限每個會話 1 筆 queued，已有人排著就等，`waiting_reason=bot_busy`）。Bot 停止中（`stopping`）不收不踢，`waiting_reason=stopping`。
