@@ -27,8 +27,8 @@ const MAX_CONCURRENT: usize = 64;
 /// 超過整體上限時 helper 的結束碼（跟 GNU `timeout` 一樣是 124）。shim 只把 125 當成「退回本機」，所以不會在本機重跑一次。
 pub const EXIT_TIMEOUT: i32 = 124;
 
-/// 排遠端名額排超過 [`QUEUE_WAIT_SECS`] 時 helper 的結束碼（EX_TEMPFAIL：稍後再試；跟 shim 自己「排程器用不了」的 75 同一個意思）。
-/// 這時遠端什麼都還沒跑；原因守門已經印在 stderr。
+/// 排遠端名額排超過 [`QUEUE_WAIT_SECS`] 時守門的交握結束碼。
+/// 這時遠端什麼都還沒跑；helper 轉成 125 讓 shim 排本機名額（#1853）。
 pub const EXIT_QUEUE_FULL: i32 = 75;
 
 /// 「這次不轉外部編譯，改在本機跑」的結束碼：shim 只認這一個，看到就往下去拿本機名額（`cargo_shim.rs`）。
@@ -772,9 +772,9 @@ const LOW_DISK_FREE_PCT: u64 = 25;
 /// 等它用完再增量編譯只要十幾秒；搶不到就冷編譯，不但自己要重編幾分鐘，還多佔一份遠端的 RAM 與 2～3G 磁碟——
 /// 等得比一次冷編譯還久就不划算了，所以抓一次冷編譯的時間。
 const SHARED_WAIT_SECS: u64 = 5 * 60;
-/// 遠端名額全滿時最多排這麼久（issue #104）。每個佔著名額的編譯都受 `timeout_secs`（預設 12 分鐘）管，正常兩輪內就排得到；
-/// 排更久＝有名額被卡住（例如守門那條連線半開，遠端 sshd 要等 TCP keepalive 約 2 小時才發現），回 [`EXIT_QUEUE_FULL`]，不無限等。
-const QUEUE_WAIT_SECS: u64 = 30 * 60;
+/// 遠端是額外名額：短暫等候仍全滿就退回本機名額（issue #1853）。
+/// 守門仍回 75 表示尚未開工；helper 將這個交握結果轉成 125。
+const QUEUE_WAIT_SECS: u64 = 3;
 /// `max_concurrent = 0`（自動）的記憶體帳：留給系統這麼多，每個遠端編譯算 [`AUTO_PER_JOB_KB`]。
 /// 2026-09-19 在 32 vCPU／64 GiB 的遠端量：一次冷的 `cargo test -p agents-managerd` 光主 crate 那顆 rustc 就多吃約 4.6 GiB，
 /// 兩次同時跑時全機用到 8.2 GiB；再加上測試本身（8 個執行緒、各自起子行程）與 lib／測試 harness 兩顆大 rustc 重疊，一次抓 8 GiB。
@@ -973,7 +973,7 @@ take_slot() {
     done
     # `-le` 不是 `-lt`（issue #486）：`date +%s` truncate 到整秒，`now - q0` 會比真實經過的時間**多算最多 1 秒**
     # （`q0` 落在某一秒的最後 10ms 時，真的過了 1.01 秒就已經算成 2）。用 `-lt` 的話 `qwait=2` 實際只等了約 1 秒。
-    # 改成等到「算出來的秒數**超過** qwait」才放棄：truncate 的誤差只會讓它多等，不會少等（正式設定是 1800 秒，多 1 秒無所謂）。
+    # 改成等到「算出來的秒數**超過** qwait」才放棄：truncate 的誤差只會讓它多等，不會少等（最多多等 1 秒）。
     [ $(($(date +%s) - q0)) -le "$qwait" ] || return 74
     [ -n "$said" ] || { echo "agents-manager: 遠端同時編譯已滿（$max 個，[build.remote] max_concurrent），排隊等名額（最多 $qwait 秒）…" >&2; said=1; }
     alive || return 73
@@ -1003,7 +1003,7 @@ queue_full() {
   # 印**量到的**秒數，不是設定值（issue #486）：log 自報「等了 2 秒」而外面量到 1.04 秒，
   # 比慢一秒難查得多。`q0` 還沒設過（沒排隊就走到這裡）時退回設定值。
   waited=${q0:+$(($(date +%s) - q0))}
-  echo "agents-manager: 等遠端名額等了 ${waited:-$qwait} 秒還是全滿（$max 個），這次沒跑；稍後再試（結束碼 75）" >&2
+  echo "agents-manager: 等遠端名額等了 ${waited:-$qwait} 秒還是全滿（$max 個），這次改在本機排隊" >&2
   exit 75
 }
 # 73＝排隊中發現本機已經斷線：沒人要結果了，直接結束（鎖跟著放）。
@@ -1811,11 +1811,11 @@ fn run_offload(remote: &BuildRemoteCfg, data_dir: &Path, cwd: &Path, args: &[Str
             note_health(remote, data_dir, false, Some(why));
             EXIT_RUN_LOCALLY
         }
-        // 遠端什麼都還沒跑：原因守門已經印了，回 75 讓呼叫端知道是「稍後再試」，不是驗證失敗。
+        // 守門尚未交目錄、遠端還沒開工：改排本機名額（issue #1853）。
         // 守門有回話＝連得上，只是滿了。
         Err(e) if e.downcast_ref::<QueueFull>().is_some() => {
             note_health(remote, data_dir, true, None);
-            EXIT_QUEUE_FULL
+            EXIT_RUN_LOCALLY
         }
         Err(e) if matches!(e.downcast_ref::<Stopped>(), Some(Stopped::TimedOut)) => {
             eprintln!(
@@ -2555,7 +2555,7 @@ exec /bin/sh -c "$inner"
         let adm = Admission::from_cfg(&set);
         assert_eq!((adm.max, adm.jobs, adm.shared_wait_secs, adm.queue_wait_secs), (3, 5, SHARED_WAIT_SECS, QUEUE_WAIT_SECS));
         let script = guard_script("/r", "0123456789abcdef", "job-1-1", &LeaseToken::new(), adm);
-        for want in ["max=3; jobs=5; swait=300; qwait=1800", &format!("(mem - {AUTO_RESERVE_KB}) / {AUTO_PER_JOB_KB}")] {
+        for want in ["max=3; jobs=5; swait=300; qwait=3", &format!("(mem - {AUTO_RESERVE_KB}) / {AUTO_PER_JOB_KB}")] {
             assert!(script.contains(want), "{want}");
         }
         assert!(!script.contains('@'), "沒替換乾淨");
@@ -3158,6 +3158,22 @@ mod guard_tests {
         let _ = std::fs::remove_dir_all(&base);
     }
 
+    /// #1853：遠端只有一個名額且被別的 worktree 佔滿，helper 必須讓 shim 排本機。
+    #[test]
+    fn a_full_remote_overflows_to_local_without_running_cargo() {
+        let base = base();
+        let (mut remote, cwd, data) = fake_remote(&base, 60, "exit 99\n");
+        remote.max_concurrent = 1;
+        let mut holder = guard_with(&base, "00000000000000a1", "job-1-1", Admission { max: 1, ..QUICK });
+        let t0 = Instant::now();
+        let rc = with_fake_transport(&base, || run_offload(&remote, &data, &cwd, &["test".to_string()], &Deadline::new(remote.timeout_secs)));
+        assert_eq!(rc, EXIT_RUN_LOCALLY, "滿額不能回 75 或執行遠端 cargo");
+        assert!(t0.elapsed() < Duration::from_secs(30), "應短暫等候後退回本機");
+        assert!(crate::remote_health::read(&data).unwrap().reachable);
+        holder.finish();
+        let _ = std::fs::remove_dir_all(base);
+    }
+
     /// 同一件事的另一面（issue #428）：連得上、是遠端的 cargo 自己失敗——那是**真的驗證失敗**，
     /// 原樣帶回它的退出碼，不能偷偷改成「在本機再跑一次」；而且這次算連得上。
     #[test]
@@ -3411,7 +3427,9 @@ mod guard_tests {
         let base = base();
         let (mut remote, cwd, data) = fake_remote(&base, 3, "sleep 1\nexit 0\n");
         remote.max_concurrent = 1;
-        let mut holder = guard_with(&base, "00000000000000a1", "job-1-1", Admission { max: 1, ..QUICK });
+        // #1853：名額只等 3 秒後會 overflow；改等同 worktree 的 shared 鎖，仍驗證排隊不算執行逾時。
+        let hash = format!("{:016x}", fnv1a64(&cwd.to_string_lossy()));
+        let mut holder = guard_with(&base, &hash, "job-1-1", Admission { max: 1, ..QUICK });
         let release = std::thread::spawn(move || {
             std::thread::sleep(Duration::from_secs(4));
             holder.finish();
