@@ -35,6 +35,10 @@ fn locked() -> std::sync::MutexGuard<'static, HashMap<String, Mark>> {
 pub fn begin(run_id: &str, now: DateTime<Utc>) -> bool {
     let mut m = locked();
     match m.get_mut(run_id) {
+        Some(mark) if (now - mark.since).num_seconds() > STALE_SECS => {
+            *mark = Mark { since: now, from_screen: false };
+            true
+        }
         Some(mark) => {
             mark.from_screen = false;
             false
@@ -55,8 +59,13 @@ pub fn end(run_id: &str) -> bool {
 pub fn observe_screen(run_id: &str, shown: bool, now: DateTime<Utc>) -> bool {
     let mut m = locked();
     if shown {
-        if m.contains_key(run_id) {
-            return false;
+        match m.get_mut(run_id) {
+            Some(mark) if (now - mark.since).num_seconds() > STALE_SECS => {
+                *mark = Mark { since: now, from_screen: true };
+                return true;
+            }
+            Some(_) => return false,
+            None => {}
         }
         m.insert(run_id.to_string(), Mark { since: now, from_screen: true });
         return true;
@@ -115,9 +124,13 @@ mod tests {
         let _serial = serial();
         let id = "compacting-hook-ends";
         assert!(begin(id, at(0)), "新開的標記要讓網頁重讀");
+        assert!(!begin(id, at(3)), "未過期的重複 hook 保留原標記");
         assert_eq!(json_at(id, at(5)), Value::String(crate::db::iso_at(at(0))));
         assert!(end(id), "SessionStart(compact)／Stop 收掉");
         assert_eq!(json_at(id, at(5)), Value::Null);
+        assert!(begin(id, at(6)), "正常 end 後的新一輪重新標記");
+        assert_eq!(json_at(id, at(7)), Value::String(crate::db::iso_at(at(6))));
+        assert!(end(id), "新一輪也能正常收掉");
         assert!(!end(id), "已經收掉就沒有變");
     }
 
@@ -128,6 +141,15 @@ mod tests {
         begin(id, at(0));
         assert!(since_at(id, at(STALE_SECS)).is_some(), "剛好十分鐘還算");
         assert_eq!(json_at(id, at(STALE_SECS + 1)), Value::Null, "超過就不帶");
+        assert!(begin(id, at(STALE_SECS + 1)), "超時後的新 hook 要開新一輪");
+        assert_eq!(since_at(id, at(STALE_SECS + 2)), Some(at(STALE_SECS + 1)));
+
+        let screen_id = "compacting-stale-screen";
+        begin(screen_id, at(0));
+        assert!(observe_screen(screen_id, true, at(STALE_SECS + 1)), "超時後的新 spinner 要開新一輪");
+        assert_eq!(since_at(screen_id, at(STALE_SECS + 2)), Some(at(STALE_SECS + 1)));
+        assert!(!begin(screen_id, at(STALE_SECS + 3)), "新一輪未超時時 hook 保留畫面較早的開始時間");
+        assert_eq!(since_at(screen_id, at(STALE_SECS + 4)), Some(at(STALE_SECS + 1)));
     }
 
     #[test]
