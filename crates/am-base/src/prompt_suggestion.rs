@@ -47,7 +47,14 @@ pub fn forget(run_id: &str) -> bool {
 
 /// 不在 `active` 裡的 run（結束了）不留記錄。
 pub fn retain_runs(active: &[String]) {
-    store().lock().unwrap_or_else(|e| e.into_inner()).retain(|id, _| active.contains(id));
+    let mut suggestions = store().lock().unwrap_or_else(|e| e.into_inner());
+    retain_runs_in(&mut suggestions, active);
+}
+
+/// Keep only active run suggestions in the supplied map.
+#[doc(hidden)]
+pub fn retain_runs_in(suggestions: &mut HashMap<String, String>, active: &[String]) {
+    suggestions.retain(|id, _| active.contains(id));
 }
 
 /// 放進 run JSON 的值：只在 run 現在是 `idle` 才帶建議，其他狀態（回合中、blocked）一律 `null`。

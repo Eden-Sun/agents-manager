@@ -7,6 +7,16 @@
 use crate::db::{FeatureMigration, FeatureMigrations, MigrationFuture};
 use sqlx::SqlitePool;
 
+#[cfg(test)]
+use sqlx::sqlite::{SqliteConnectOptions, SqliteJournalMode, SqlitePoolOptions};
+#[cfg(test)]
+use std::{
+    collections::HashMap,
+    io::Write,
+    path::Path,
+    sync::{Arc, OnceLock},
+};
+
 /// 一支 `migrate(pool)` 包成 db 認得的函式指標（不擷取任何東西，所以能放進 `static`）。
 macro_rules! feature {
     ($name:literal, $migrate:path) => {{
@@ -21,7 +31,113 @@ macro_rules! feature {
 /// 測試與工具路徑用這支，省得每個呼叫端都帶清單。
 #[cfg(test)]
 pub(crate) async fn open(path: &std::path::Path) -> anyhow::Result<SqlitePool> {
+    if path.exists() {
+        return open_uncached(path).await;
+    }
+
+    let template = test_schema_template().await?;
+    if path.exists() {
+        return open_uncached(path).await;
+    }
+    if !publish_test_template(path, &template)? {
+        return open_uncached(path).await;
+    }
+    open_template_copy(path).await
+}
+
+#[cfg(test)]
+fn publish_test_template(path: &Path, template: &[u8]) -> std::io::Result<bool> {
+    // Publish only a complete temporary file, and let hard_link fail if another opener won.
+    let parent = path.parent().unwrap_or_else(|| Path::new("."));
+    let name = path.file_name().ok_or_else(|| {
+        std::io::Error::new(std::io::ErrorKind::InvalidInput, "database path has no file name")
+    })?;
+    let temporary = parent.join(format!(
+        ".{}.{}.tmp",
+        name.to_string_lossy(),
+        crate::db::ulid()
+    ));
+    let mut file = std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&temporary)?;
+    let write = file.write_all(template);
+    drop(file);
+
+    let publish = match write {
+        Err(error) => Err(error),
+        Ok(()) => match std::fs::hard_link(&temporary, path) {
+            Ok(()) => Ok(true),
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => Ok(false),
+            Err(error) => Err(error),
+        },
+    };
+    let _ = std::fs::remove_file(temporary);
+    publish
+}
+
+#[cfg(test)]
+pub(crate) async fn open_uncached(path: &std::path::Path) -> anyhow::Result<SqlitePool> {
     crate::db::open_with(path, FEATURE_MIGRATIONS).await
+}
+
+#[cfg(test)]
+async fn open_template_copy(path: &std::path::Path) -> anyhow::Result<SqlitePool> {
+    let options = SqliteConnectOptions::new()
+        .filename(path)
+        .create_if_missing(false)
+        .foreign_keys(true)
+        .journal_mode(SqliteJournalMode::Wal)
+        .busy_timeout(std::time::Duration::from_secs(10));
+    Ok(SqlitePoolOptions::new()
+        .max_connections(8)
+        .connect_with(options)
+        .await?)
+}
+
+#[cfg(test)]
+async fn test_schema_template() -> anyhow::Result<Arc<[u8]>> {
+    static TEMPLATES: OnceLock<tokio::sync::Mutex<HashMap<String, Arc<[u8]>>>> = OnceLock::new();
+    let expected = crate::db::schema_guard::expected(FEATURE_MIGRATIONS).await?;
+    let fingerprint = crate::db::schema_guard::fingerprint(expected);
+    let history = crate::db::SCHEMA_HISTORY
+        .iter()
+        .map(|(version, hash)| format!("{version}:{hash}"))
+        .collect::<Vec<_>>()
+        .join(",");
+    let features = FEATURE_MIGRATIONS
+        .iter()
+        .map(|(name, _)| *name)
+        .collect::<Vec<_>>()
+        .join(",");
+    let key = format!(
+        "version={}:history={history}:features={features}:schema={fingerprint}",
+        crate::db::SCHEMA_VERSION
+    );
+    let cache = TEMPLATES.get_or_init(|| tokio::sync::Mutex::new(HashMap::new()));
+    let mut cache = cache.lock().await;
+    if let Some(template) = cache.get(&key) {
+        return Ok(template.clone());
+    }
+
+    // Use the normal full migration and schema check before serializing the stamped schema.
+    let options = SqliteConnectOptions::new()
+        .in_memory(true)
+        .create_if_missing(true)
+        .foreign_keys(true)
+        .journal_mode(SqliteJournalMode::Wal)
+        .busy_timeout(std::time::Duration::from_secs(10));
+    let pool = SqlitePoolOptions::new()
+        .max_connections(1)
+        .connect_with(options)
+        .await?;
+    crate::db::migrate_for_test(&pool, FEATURE_MIGRATIONS).await?;
+    let mut connection = pool.acquire().await?;
+    let template: Arc<[u8]> = Arc::from(&*connection.serialize(None).await?);
+    drop(connection);
+    pool.close().await;
+    cache.insert(key, template.clone());
+    Ok(template)
 }
 
 /// 順序即執行順序：先動 `supervisor::store`（它建的表別的 migration 可能引用），最後 `share::store`。
@@ -46,7 +162,7 @@ pub(crate) static FEATURE_MIGRATIONS: FeatureMigrations = &[
 mod tests {
     use super::*;
     use crate::db;
-    use std::sync::Mutex;
+    use std::sync::{Barrier, Mutex};
 
     fn tmp_db(tag: &str) -> std::path::PathBuf {
         let dir = crate::testing::track(std::env::temp_dir().join(format!("am-p1-{tag}-{}", db::ulid())));
@@ -109,11 +225,103 @@ mod tests {
             assert!(!core_tables.iter().any(|n| n == t), "db 單獨不該建 feature 的表 {t}");
         }
 
-        let full = crate::app_ports_p1::open(&tmp_db("full")).await.unwrap();
+        let full = crate::app_ports_p1::open_uncached(&tmp_db("full")).await.unwrap();
         let names = tables(&full).await;
         for t in ["bots", "turns", "shared_bots", "panes", "bot_reads"] {
             assert!(names.iter().any(|n| n == t), "{t} 缺：{names:?}");
         }
+    }
+
+    #[tokio::test]
+    async fn fresh_test_opens_copy_an_independent_current_schema_template() {
+        let first_path = tmp_db("template-first");
+        let second_path = tmp_db("template-second");
+        let first = open(&first_path).await.unwrap();
+        let second = open(&second_path).await.unwrap();
+
+        crate::db::schema_guard::check_drift_with(&first, FEATURE_MIGRATIONS).await.unwrap();
+        crate::db::schema_guard::check_drift_with(&second, FEATURE_MIGRATIONS).await.unwrap();
+        let version: i64 = sqlx::query_scalar("PRAGMA user_version")
+            .fetch_one(&first)
+            .await
+            .unwrap();
+        assert_eq!(version, crate::db::SCHEMA_VERSION);
+        sqlx::query(
+            "INSERT INTO projects (id,path,label,created_at) VALUES ('template-only','/tmp/template','template',?)",
+        )
+        .bind(crate::db::now())
+        .execute(&first)
+        .await
+        .unwrap();
+        let second_count: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM projects WHERE id='template-only'")
+                .fetch_one(&second)
+                .await
+                .unwrap();
+        assert_eq!(second_count, 0, "each copied database is independently writable");
+        first.close().await;
+        second.close().await;
+        let _ = std::fs::remove_file(first_path);
+        let _ = std::fs::remove_file(second_path);
+    }
+
+    #[tokio::test]
+    async fn concurrent_template_publishers_do_not_overwrite_committed_data() {
+        let path = tmp_db("template-publish-race");
+        let pool = SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect_with(
+                SqliteConnectOptions::new()
+                    .filename(&path)
+                    .create_if_missing(true)
+                    .journal_mode(SqliteJournalMode::Wal),
+            )
+            .await
+            .unwrap();
+        sqlx::query("CREATE TABLE committed (value INTEGER NOT NULL)")
+            .execute(&pool)
+            .await
+            .unwrap();
+        sqlx::query("INSERT INTO committed (value) VALUES (1)")
+            .execute(&pool)
+            .await
+            .unwrap();
+        pool.close().await;
+
+        let publishers = 8;
+        let barrier = Arc::new(Barrier::new(publishers));
+        let mut tasks = Vec::with_capacity(publishers);
+        for _ in 0..publishers {
+            let path = path.clone();
+            let barrier = barrier.clone();
+            tasks.push(tokio::task::spawn_blocking(move || {
+                barrier.wait();
+                publish_test_template(&path, b"replacement template")
+            }));
+        }
+        for task in tasks {
+            assert!(
+                !task.await.unwrap().unwrap(),
+                "an existing database must never be replaced"
+            );
+        }
+
+        let pool = SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect_with(
+                SqliteConnectOptions::new()
+                    .filename(&path)
+                    .create_if_missing(false),
+            )
+            .await
+            .unwrap();
+        let value: i64 = sqlx::query_scalar("SELECT value FROM committed")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert_eq!(value, 1);
+        pool.close().await;
+        let _ = std::fs::remove_file(path);
     }
 
     /// 失敗語意：任何一個 feature migration 回錯，`open` 就失敗，`user_version` 不蓋（回滾用的舊 binary 不會被版本閘擋住）。

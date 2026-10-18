@@ -1,6 +1,6 @@
 
     use crate::db::{ulid, SCHEMA_HISTORY, SCHEMA_VERSION};
-    use crate::runners::am_base_tests::{apply_migrations, composition_features, open_test_db as open};
+    use crate::runners::am_base_tests::{apply_migrations, composition_features, open_test_db_uncached as open};
     use super::*;
 
     async fn fresh() -> SqlitePool {
