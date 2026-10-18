@@ -1471,6 +1471,35 @@ mod sync_pane_model_effort_tests {
         assert_eq!(bot_effort(&env, &bot).await.as_deref(), Some("high"));
     }
 
+    #[tokio::test]
+    async fn sync_pane_model_does_not_import_options_from_the_literal_prompt() {
+        let env = testing::env().await;
+        let (bot_id, _run) = codex_child(&env, None, None).await;
+        sqlx::query("UPDATE bots SET model=NULL, fast=0 WHERE id=?").bind(&bot_id).execute(&env.app.db).await.unwrap();
+        env.herdr.set_argv(
+            PANE,
+            &[
+                "codex",
+                "--model",
+                "gpt-6.1-sol",
+                "--effort",
+                "high",
+                "-c",
+                "service_tier=\"standard\"",
+                "--",
+                "--model=haiku",
+                "--effort=low",
+                "--config=service_tier=priority",
+            ],
+        );
+
+        sync_round(&env, &bot_id).await;
+        let bot = db::bot(&env.app.db, &bot_id).await.unwrap().unwrap();
+        assert_eq!(bot.model.as_deref(), Some("gpt-6.1-sol"));
+        assert_eq!(bot.effort.as_deref(), Some("high"));
+        assert_eq!(bot.fast, 0, "literal prompt 的 priority 不可將 Fast 寫回 child 設定");
+    }
+
     /// 設定是 high、畫面是 default（真落差）：對帳不動設定，警示要保留。
     #[tokio::test]
     async fn sync_pane_model_leaves_a_real_high_versus_default_difference_alone() {
