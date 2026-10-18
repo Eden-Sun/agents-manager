@@ -3832,6 +3832,7 @@ Bot 個別與專案群組的 `POST .../read` 都只接受 User principal；Bot�
 - 每筆多 `host` 欄位。`quota::set(app, host, base_key, q)` 統一蓋章：呼叫端只給裸 key，沒有路徑能把遠端讀數存進本機那列。
 - 刪主機連同它的額度列；`GET /api/quota` 丟掉不屬於現存主機的 `<host>/…` key。
 - **重啟先顯示上一輪**（issue #392）：每次 `quota::set` 收到新的讀數，都把完整 `Quota` JSON、key 與 `updated_at` 寫進 DB 的 `quota_cache`。daemon 開機先載入仍存在的列到 `App.quotas`，但只標顯示用的 `stale = true`；第一次新的探測成功後才清除 stale 並覆寫快取。**執行中同樣會陳舊**（對抗式審查 2026-10-02）：`quota::snapshot` 另外把超過 `STALE_AFTER`（30 分鐘）沒人更新的讀數標 `stale`；協調者的 `quota_state` 只有新鮮的讀數才能回 `Available`（陳舊的是 `Unknown`，見底的照舊 `Blocked`）。**讀數出口**（`quota::set`）把百分比夾進 0–100，不是有限數的那一桶整格丟掉（沿用上一份），避免 `(100 − NaN)` 把身分判成見底。開機載入時照 `limit_hit_expired` 清掉已過 `until` 的舊撞限，不把舊讀數當成新的派工證據。
+- **快取寫入順序**（issue #1825）：同一 key 的額度狀態變更與快取寫入共用 per-key 序列化鎖；`set`、撞限清除與撞限回填完成該 key 的寫入後，後續狀態變更才會落地。`updated_at` 仍代表讀數時間，SQL 時間戳比較仍拒絕較舊讀數，不能把它當成狀態修訂號。
 
 ### 14.2 三個來源都跟著主機走
 - **codex**：`codex_rpc(app, host, "account/rateLimits/read")`，遠端走 `ssh_exec_path`。另外每 60 秒讀 running codex pane 底下的狀態列（`5h 90% left · weekly 48% left`，`source=codex-statusline`；app-server 每 5 分鐘才問一次、而且落後），寫同一把 key——狀態列是 CLI 當下拿來擋人的依據，但它是**畫面**，數字停在那顆 pane 最後一回合（`screen_at`＝最後一回合結束時間）：
