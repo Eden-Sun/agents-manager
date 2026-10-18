@@ -2387,8 +2387,8 @@ rustup 換位置或遠端主機上反而是錯的——讓 shim 每次在 pane �
   遠端那台的編譯本來就不受這台 daemon 的名額管。不把位址寫進遠端 shim：daemon 只聽本機 127.0.0.1，遠端連不到，寫了也是假的。
 - **轉到外部編譯主機的指令不佔本機名額（issue #155，使用者 2026-09-19 決定）**：本機名額管的是本機的 RAM／CPU。`check`／`test`／`clippy`
   （#104 的 verification 三個）在 pane 有 `AM_DAEMON_EXE`／`AM_CONFIG_PATH` 時，shim **先**叫 `remote-cargo` helper，
-  **不先 acquire**：不受本機 `max_concurrent` 限制；遠端有自己的名額（`[build.remote] max_concurrent`，預設依遠端核數與 RAM 算，滿了排隊，
-  排超過 30 分鐘回 75，issue #104，詳見 API.md「外部 Cargo 主機」）。
+  **不先 acquire**：不受本機 `max_concurrent` 限制；遠端有自己的名額（`[build.remote] max_concurrent`，預設依遠端核數與 RAM 算，滿了最多等 3 秒後 helper 回 125、改排本機名額；
+  shared 目錄鎖仍照舊等待，issue #1853，詳見 API.md「外部 Cargo 主機」）。
   helper 結束碼原樣帶出（非 125 一律 `exit`，不會偷偷在本機重跑；超過整體上限 `[build.remote] timeout_secs`，預設 12 分鐘，是 **124**，issue #194）；只有 **125＝根本沒有在遠端動手**（設定被關掉、不適合 offload）才落到下面，
   認證：密碼留空＝走 ssh 的 key／agent（`BatchMode=yes`，不碰 sshpass／askpass）；`[build.remote] identity_file = "<路徑>"` 讓 ssh 與 rsync 都帶同一把 `-i … -o IdentitiesOnly=yes`（只放路徑；設定指的檔案不存在＝設定錯，**126** 明確失敗，不退回本機，issue #104）。
   **信任模型（host key）**：ssh 與 rsync 都帶 `StrictHostKeyChecking=accept-new`＝**第一次連一台沒見過的主機自動信任並寫進 `known_hosts`（TOFU），之後 host key 變了一律拒絕（回 255、退回本機）**。
