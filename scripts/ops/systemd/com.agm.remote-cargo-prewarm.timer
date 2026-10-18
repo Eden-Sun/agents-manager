@@ -1,0 +1,11 @@
+# 來源檔（issue #1855）：開機（timer 啟動）10 分鐘後第一次，之後每 600 秒看一次 origin/main；上一輪還在跑就不會疊一個。
+[Unit]
+Description=AGM remote-cargo-prewarm 排程（每 600 秒）
+
+[Timer]
+OnActiveSec=600s
+OnUnitActiveSec=600s
+AccuracySec=1s
+
+[Install]
+WantedBy=timers.target
