@@ -172,3 +172,55 @@ test('切換排程：baseline 依排程重置，載入完成後的 no-op 儲存�
     globalThis.fetch = fetchUntilReleased
   }
 })
+
+test('#1839：排程編輯器初次載入期間顯示載入中且欄位 disabled，慢 GET 完成後不覆蓋使用者輸入', async () => {
+  let release: (() => void) | null = null
+  const originalFetch = globalThis.fetch
+  globalThis.fetch = (async (input: string, init?: { method?: string; body?: string }) => {
+    if (String(input).endsWith('/schedules/s1') && (init?.method ?? 'GET') === 'GET') {
+      await new Promise<void>((resolve) => (release = resolve))
+      return new Response(JSON.stringify(scheduleRow({ prompt: '伺服器原本的舊任務' })), { status: 200 })
+    }
+    return originalFetch(input, init)
+  }) as typeof fetch
+
+  try {
+    await mount(<ScheduleEditor projectId="p1" scheduleId="s1" onClose={() => {}} onSelect={() => {}} />)
+    const promptBox = document.querySelector<HTMLTextAreaElement>('.schedule-prompt')!
+    assert.equal(promptBox.disabled, true, '載入中表單欄位必須 disabled')
+    assert.ok(document.querySelector('.schedule-loading'), '必須顯示載入提示')
+
+    // 模擬使用者若在載入期間有修改或觸碰欄位，GET resolve 後不能被舊值蓋掉
+    await act(async () => {
+      // 模擬即便在 resolve 前有輸入（例如透過外部或 touched）
+      promptBox.disabled = false
+    })
+    await typeInto(promptBox, '使用者剛打好的新任務內容')
+
+    await act(async () => release?.())
+    await settle()
+
+    assert.equal(promptBox.value, '使用者剛打好的新任務內容', 'GET resolve 後不可無提示覆蓋使用者打好的內容')
+    assert.equal(promptBox.disabled, false, '載入完成後欄位解除 disabled')
+  } finally {
+    globalThis.fetch = originalFetch
+  }
+})
+
+test('#1839：初次 GET 失敗要明確顯示錯誤且儲存鈕維持禁用（不能錯存空白或預設表單）', async () => {
+  fakeApi((req) => {
+    if (req.method === 'GET' && req.path.endsWith('/schedules/s1')) {
+      return new Response(JSON.stringify({ message: '排程不存在或資料庫錯誤' }), { status: 500 })
+    }
+    return undefined
+  })
+  await mount(<ScheduleEditor projectId="p1" scheduleId="s1" onClose={() => {}} onSelect={() => {}} />)
+  await settle()
+
+  const errEl = document.querySelector('.schedule-error')
+  assert.ok(errEl, '初次 GET 失敗要明確顯示錯誤')
+  assert.match(errEl.textContent ?? '', /讀取失敗/)
+  const saveBtn = [...document.querySelectorAll<HTMLButtonElement>('button')].find((b) => b.textContent?.trim() === '儲存')!
+  assert.equal(saveBtn.disabled, true, '初次 GET 失敗後儲存按鈕必須禁用，避免錯存空白/預設表單')
+})
+
