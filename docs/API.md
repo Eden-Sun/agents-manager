@@ -1841,7 +1841,7 @@ readback_model_mismatch|readback_effort_mismatch|readback_fast_mismatch|busy_not
 
 **忙的時候（#393、#712）**：codex 只改 `fast` 時回合中直接送（`applied: true`，SPEC §4.4a「回合中只切 fast」）。送不進去、`reason` 是 `slash_gate: agent_busy`、`slash_gate: turn_in_flight` 或 `codex: busy_not_ready`（回合中輸入框有字／選單開著）時，
 `live_apply.deferred: true`、`needs_restart: false`——daemon 把要套的欄位與 revision 基準記在記憶體，等這顆 bot 的 idle 邊（working／blocked／unknown → idle）或回合收掉再走同一條 `apply_live_setting`
-（成功後收斂 runtime、`live_rev` 與 `launch_rev` 並推 `bot_changed`；已讀回的 bookkeeping debt 在 daemon 重啟後會自動恢復）。claude／grok 已經排著別的欄位時不排（`deferred: false`、`needs_restart: true`）。
+（成功後收斂 runtime、`live_rev` 與 `launch_rev` 並推 `bot_changed`；已讀回的 bookkeeping debt 在 daemon 重啟後會自動恢復）。claude／grok 已經排著別的欄位時不排（`deferred: false`、`needs_restart: true`）；idle 套用期間也保留欄位限制，避免忙時重排把不同欄位併成無法套用的一批。
 記憶體裡的排程 daemon 重啟就沒了：那時 `live_apply_deferred` 消失、`needs_restart` 依啟動版本回到 `true`，UI 的落差徽章仍在，再按一次「當場套用」（重送同一個 `fast`，冪等）即可。
 codex 的 `fast` **不再因為不知道現況而拒絕**（拿掉 `unknown_fast_tier`）：見 SPEC §4.4a。
 

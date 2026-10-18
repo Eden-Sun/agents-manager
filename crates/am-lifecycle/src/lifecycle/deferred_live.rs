@@ -19,10 +19,17 @@ struct PendingLive {
     fields: Vec<&'static str>,
     baseline_rev: String,
     target_rev: String,
+    single_field: bool,
 }
 
-fn pending() -> &'static Mutex<HashMap<String, PendingLive>> {
-    static P: OnceLock<Mutex<HashMap<String, PendingLive>>> = OnceLock::new();
+#[derive(Default)]
+struct DeferredLiveState {
+    pending: HashMap<String, PendingLive>,
+    applying: HashMap<String, PendingLive>,
+}
+
+fn pending() -> &'static Mutex<DeferredLiveState> {
+    static P: OnceLock<Mutex<DeferredLiveState>> = OnceLock::new();
     P.get_or_init(Default::default)
 }
 
@@ -45,14 +52,18 @@ pub fn is_busy_reason(reason: &str) -> bool {
 /// 排到下一次 idle。回 `false`＝沒排（呼叫端照舊回需重啟）：`single_field` 的 kind（claude／grok 的 slash 指令一次一個值）
 /// 已經排著**別的**欄位時不合併——合併後 idle 那次會以 `not_a_single_field` 失敗，而且被合進去的前一個也跟著丟掉。
 pub fn defer_live(bot_id: &str, fields: &[&str], baseline_rev: &str, target_rev: &str, single_field: bool) -> bool {
-    let mut m = pending().lock().unwrap_or_else(|e| e.into_inner());
-    if single_field && m.get(bot_id).is_some_and(|e| e.fields.iter().any(|f| !fields.contains(f))) {
+    let mut state = pending().lock().unwrap_or_else(|e| e.into_inner());
+    let incompatible = |current: &PendingLive| {
+        current.single_field != single_field || (single_field && current.fields.iter().any(|f| !fields.contains(f)))
+    };
+    if state.pending.get(bot_id).is_some_and(incompatible) || state.applying.get(bot_id).is_some_and(incompatible) {
         return false;
     }
-    let e = m.entry(bot_id.to_string()).or_insert_with(|| PendingLive {
+    let e = state.pending.entry(bot_id.to_string()).or_insert_with(|| PendingLive {
         fields: Vec::new(),
         baseline_rev: baseline_rev.to_string(),
         target_rev: target_rev.to_string(),
+        single_field,
     });
     // A later PATCH supersedes the desired config but must preserve the original loaded baseline.
     e.target_rev = target_rev.to_string();
@@ -73,12 +84,21 @@ pub fn defer_live(bot_id: &str, fields: &[&str], baseline_rev: &str, target_rev:
 /// 套用失敗（忙）時把 `take` 走的那筆放回。套用期間若又排進了較新的一筆：目標版本以新的為準，
 /// baseline 保留較早的那一份，欄位取聯集。不經 `defer_live`：它會把 `target_rev` 覆寫回舊的（#977）。
 fn requeue(bot_id: &str, queued: PendingLive) {
-    let mut m = pending().lock().unwrap_or_else(|e| e.into_inner());
-    match m.get_mut(bot_id) {
+    let mut state = pending().lock().unwrap_or_else(|e| e.into_inner());
+    state.applying.remove(bot_id);
+    match state.pending.get_mut(bot_id) {
         None => {
-            m.insert(bot_id.to_string(), queued);
+            state.pending.insert(bot_id.to_string(), queued);
         }
         Some(newer) => {
+            debug_assert_eq!(
+                queued.single_field, newer.single_field,
+                "one bot cannot change live field rules while an apply is in flight"
+            );
+            debug_assert!(
+                !queued.single_field || queued.fields.iter().all(|field| newer.fields.contains(field)),
+                "single-field pending state cannot merge different fields"
+            );
             newer.baseline_rev = queued.baseline_rev;
             for f in queued.fields {
                 if !newer.fields.contains(&f) {
@@ -91,15 +111,34 @@ fn requeue(bot_id: &str, queued: PendingLive) {
 
 /// 不在 `live` 裡的 bot 不留排著的即時套用：要等 idle 邊才套，bot 被刪掉就永遠等不到。
 pub fn retain_bots(live: &[String]) {
-    pending().lock().unwrap_or_else(|e| e.into_inner()).retain(|id, _| live.contains(id));
+    let mut state = pending().lock().unwrap_or_else(|e| e.into_inner());
+    state.pending.retain(|id, _| live.contains(id));
+    state.applying.retain(|id, _| live.contains(id));
 }
 
 pub fn is_deferred(bot_id: &str) -> bool {
-    pending().lock().unwrap_or_else(|e| e.into_inner()).contains_key(bot_id)
+    pending().lock().unwrap_or_else(|e| e.into_inner()).pending.contains_key(bot_id)
 }
 
+#[cfg(all(test, not(feature = "daemon-test-harness")))]
 fn take(bot_id: &str) -> Option<PendingLive> {
-    pending().lock().unwrap_or_else(|e| e.into_inner()).remove(bot_id)
+    pending().lock().unwrap_or_else(|e| e.into_inner()).pending.remove(bot_id)
+}
+
+/// Atomically move one item from pending to applying so a concurrent PATCH cannot bypass its
+/// single-field rule during the interval where the idle edge is applying it.
+fn take_for_apply(bot_id: &str) -> Option<PendingLive> {
+    let mut state = pending().lock().unwrap_or_else(|e| e.into_inner());
+    if state.applying.contains_key(bot_id) {
+        return None;
+    }
+    let queued = state.pending.remove(bot_id)?;
+    state.applying.insert(bot_id.to_string(), queued.clone());
+    Some(queued)
+}
+
+fn finish_apply(bot_id: &str) {
+    pending().lock().unwrap_or_else(|e| e.into_inner()).applying.remove(bot_id);
 }
 
 /// idle 邊叫一次：沒有排著的東西就什麼都不做。等一小段讓回合收尾（Stop hook、回讀狀態列）再套。
@@ -117,10 +156,10 @@ pub fn schedule_deferred_live<A: DeferredLiveContext + Clone>(app: &A, bot_id: &
 /// Apply the current pending item without the production idle-edge delay. Kept as a helper so the
 /// retry path can be tested at the exact handoff point without sleeping through a scheduler timer.
 pub async fn apply_deferred_once(
-    app: &impl DeferredLiveContext,
+    app: &(impl DeferredLiveContext + Clone),
     bot_id: &str,
 ) -> Option<super::LiveApplyOutcome> {
-    let queued = take(bot_id)?;
+    let queued = take_for_apply(bot_id)?;
     let fields = queued.fields.to_vec();
     let outcome = app.apply_live_setting_with_revision(
         bot_id,
@@ -130,20 +169,27 @@ pub async fn apply_deferred_once(
     )
     .await;
     match &outcome {
-        super::LiveApplyOutcome::Applied { .. } => {}
+        super::LiveApplyOutcome::Applied { .. } => finish_apply(bot_id),
         super::LiveApplyOutcome::Failed(why) if is_busy_reason(why) => {
             // 剛閒下來又被新回合搶走：再排一次。
             // 同一組欄位放回去（`take` 已清空）；套用期間若又排進新的，`requeue` 保留新的目標版本與較早的 baseline。
             requeue(bot_id, queued);
         }
         super::LiveApplyOutcome::BookkeepingPending { reason, .. } => {
+            finish_apply(bot_id);
             tracing::warn!(bot = %bot_id, ?fields, reason, "deferred live apply is waiting for DB-only bookkeeping");
         }
         super::LiveApplyOutcome::Failed(why) => {
+            finish_apply(bot_id);
             tracing::info!(bot = %bot_id, ?fields, reason = %why, "deferred live apply failed; the restart badge stays")
         }
     }
     app.emit("bot_changed", serde_json::json!({"bot_id": bot_id})).await;
+    if !matches!(&outcome, super::LiveApplyOutcome::Failed(why) if is_busy_reason(why)) && is_deferred(bot_id) {
+        // A PATCH can queue a follow-up while this item is in flight. If this apply settled, do
+        // not require another agent-status edge to make progress while the bot remains idle.
+        schedule_deferred_live(app, bot_id);
+    }
     Some(outcome)
 }
 
@@ -191,6 +237,7 @@ mod tests {
                 fields: vec!["fast", "effort"],
                 baseline_rev: "baseline-a".into(),
                 target_rev: "target-b".into(),
+                single_field: false,
             }),
             "coalescing retains the first loaded baseline and newest requested revision"
         );
@@ -208,10 +255,35 @@ mod tests {
         assert!(!defer_live(id, &["effort"], "base", "t3", true), "別的欄位：不排，回需重啟");
         assert_eq!(
             take(id),
-            Some(PendingLive { fields: vec!["model"], baseline_rev: "base".into(), target_rev: "t2".into() })
+            Some(PendingLive {
+                fields: vec!["model"], baseline_rev: "base".into(), target_rev: "t2".into(), single_field: true
+            })
         );
         assert!(defer_live(id, &["effort"], "base", "t4", true), "清空後新的一筆照排");
         take(id);
+    }
+
+    /// A different Claude/Grok field must still be rejected after idle handling takes the item
+    /// out of the pending map. A same-field PATCH can update the target during that interval.
+    #[test]
+    fn a_single_field_kind_keeps_its_rule_while_an_apply_is_in_flight() {
+        let _serial = pending_test_lock();
+        let id = "test-deferred-live-single-in-flight";
+        assert!(defer_live(id, &["model"], "base", "t1", true));
+        let queued = take_for_apply(id).unwrap();
+
+        assert!(
+            !defer_live(id, &["effort"], "base", "t2", true),
+            "in-flight model must not leave an empty-map window for effort"
+        );
+        assert!(defer_live(id, &["model"], "base", "t3", true), "same-field updates still defer");
+
+        requeue(id, queued); // old apply found the bot busy and restored the item
+        let got = take(id).unwrap();
+        assert_eq!(got.fields, vec!["model"]);
+        assert_eq!(got.baseline_rev, "base");
+        assert_eq!(got.target_rev, "t3");
+        assert!(got.single_field);
     }
 
     /// 套用中（忙）又被新 PATCH：放回時目標版本以新的為準、baseline 保留較早的，欄位取聯集（#977）。
@@ -220,7 +292,7 @@ mod tests {
         let _serial = pending_test_lock();
         let id = "test-deferred-requeue";
         assert!(defer_live(id, &["fast"], "b1", "t1", false));
-        let queued = take(id).unwrap(); // 套用開始
+        let queued = take_for_apply(id).unwrap(); // 套用開始
         assert!(defer_live(id, &["effort"], "b2", "t2", false)); // 套用期間又 PATCH
         requeue(id, queued); // 忙 → 放回
         let got = take(id).unwrap();
@@ -235,7 +307,7 @@ mod tests {
         let _serial = pending_test_lock();
         let id = "test-deferred-requeue-same";
         assert!(defer_live(id, &["model", "fast"], "b1", "t1", false));
-        let queued = take(id).unwrap();
+        let queued = take_for_apply(id).unwrap();
         requeue(id, queued.clone());
         assert_eq!(take(id), Some(queued));
     }
