@@ -588,7 +588,7 @@ def slim_state(state: object, manager_id: str = "") -> dict:
 def slim_message(m: object) -> dict:
     if not isinstance(m, dict):
         return {}
-    return {
+    slimmed = {
         "id": _s(m.get("id")),
         "bot_id": _s(m.get("bot_id")),
         "bot_name": _s(m.get("bot_name")),
@@ -610,6 +610,10 @@ def slim_message(m: object) -> dict:
         "content": _s(m.get("content") or m.get("text")),
         "created_at": _s(m.get("created_at") or m.get("ts")),
     }
+    # 舊 daemon 沒有 seq；保留新 daemon 提供的插入序，讓 CLI 輸出符合分頁契約。
+    if "seq" in m:
+        slimmed["seq"] = m["seq"]
+    return slimmed
 
 
 # -------------------------------------------------------------------- 子命令
@@ -672,11 +676,28 @@ def cmd_messages(client: Client, cfg: dict, args) -> object:
     )
     if not isinstance(page, dict):
         return page
-    msgs = [slim_message(m) for m in page.get("messages") or []]
+    raw_messages = page.get("messages") or []
+    msgs = [slim_message(m) for m in raw_messages]
     has_more = bool(page.get("has_more"))
-    # daemon 不回 cursor。它給的是「最後 limit 則、正序」，所以要再往前翻就拿第一則的
-    # id 當 `before`（端點的條件是 `id < before`）。沒有更早的就不要給游標。
-    next_cursor = msgs[0]["id"] if has_more and msgs else None
+    # daemon 不回 cursor。回傳訊息依時間正序，但 before 依插入序切頁；有完整 seq 時
+    # 必須取最小 seq 的 id，不能假設時間第一筆就是本頁最早插入的訊息。舊 daemon
+    # 沒有 seq（或回 0）時沿用時間正序第一筆，維持相容。
+    valid_seqs = [
+        (m["seq"], m)
+        for m in raw_messages
+        if isinstance(m, dict)
+        and isinstance(m.get("seq"), int)
+        and not isinstance(m.get("seq"), bool)
+        and m["seq"] > 0
+    ]
+    if has_more and raw_messages:
+        if len(valid_seqs) == len(raw_messages):
+            oldest = min(valid_seqs, key=lambda item: item[0])[1]
+            next_cursor = slim_message(oldest)["id"]
+        else:
+            next_cursor = msgs[0]["id"]
+    else:
+        next_cursor = None
     return {
         "bot_id": args.bot_id,
         "messages": msgs,
