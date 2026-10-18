@@ -4198,7 +4198,7 @@ AGM 控制面讀取（總管摘要、health、handoff、assignments、inbox、pe
 - **`scripts/ops/*.sh`（`daemon-update-kick.sh` 等）與 `*-task.md` 沒有內嵌，不會跟 daemon binary 一起換版**——改了就照 `scripts/ops/README.md` 安裝，並留備份。
   要裝哪些、裝到哪裡只寫在 `scripts/ops/install-manifest.tsv`；`agm ops-sync --check`（issue #418）唯讀比對安裝端與 `origin/main`，
   分開報 `drift`（安裝檔不是 repo 任何一版）、`behind`（落後，附 commit）、`missing`、`extra`（`bin/` 裡沒有版控的檔；`agm` 與 `*.bak*` 不算），
-  有落差 exit 1，加 `--alert` 推 `ops_alert`（`ops-sync`／`installed_out_of_sync`）。`drift`＝安裝端不是 repo 任何一版（腳本比位元組、plist／unit 比語意，都回頭找歷史；只跟最新一版比的話，unit 一落後就會被誤報成被手改過）；安裝的是舊版就是 `behind`。它不安裝任何東西，install 照舊由 AGM 核准後手動做。agm-host 上 `scripts/ops/ubuntu-ci.sh` 每輪順手排程它（預設每 6 小時最多一次、`AGM_CI_OPS_SYNC_INTERVAL` 可調，不靠新 commit 觸發），有落差由它推 `ops_alert`；檢查本身壞掉不影響 CI 結果。例外是旗標（預設關）：`scripts/ops/ops-install.sh`（備份、原子替換、自檢、壞了還原；只更新已安裝的、清單內的檔，不新增、不碰排程 unit）由 `daemon-update-kick.sh` 在換版成功後與「沒有進 binary 的差異」那輪叫起，見 `scripts/ops/README.md`。
+  有落差 exit 1，加 `--alert` 推 `ops_alert`（`ops-sync`／`installed_out_of_sync`）。`drift`＝安裝端不是 repo 任何一版（腳本比位元組、plist／unit 比語意，都回頭找歷史；systemd 反斜線續行中的整行 `#`／`;` 註解會略過並保留待續內容；只跟最新一版比的話，unit 一落後就會被誤報成被手改過）；安裝的是舊版就是 `behind`。它不安裝任何東西，install 照舊由 AGM 核准後手動做。agm-host 上 `scripts/ops/ubuntu-ci.sh` 每輪順手排程它（預設每 6 小時最多一次、`AGM_CI_OPS_SYNC_INTERVAL` 可調，不靠新 commit 觸發），有落差由它推 `ops_alert`；檢查本身壞掉不影響 CI 結果。例外是旗標（預設關）：`scripts/ops/ops-install.sh`（備份、原子替換、自檢、壞了還原；只更新已安裝的、清單內的檔，不新增、不碰排程 unit）由 `daemon-update-kick.sh` 在換版成功後與「沒有進 binary 的差異」那輪叫起，見 `scripts/ops/README.md`。
   判定歷史版本時依 manifest 在各 commit 對 target 的來源映射找 blob，來源路徑大幅改寫而沒被 Git 偵測成 rename 時也能正確回報 `behind`；來源在當時未映射到該 target 的版本不算。
 - **`bin/agm` 也要比對**（issue #532）：ops 腳本是手動裝的、`bin/agm` 是開機時從內嵌版寫出來的，兩邊各走各的，
   而「腳本比 CLI 新」以前一律回報 ok——那正是最會痛的組合：`daemon-swap.sh` 交還窗口用 `--lease-token-file`，
