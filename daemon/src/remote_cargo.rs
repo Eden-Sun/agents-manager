@@ -11,10 +11,13 @@ use axum::extract::State;
 use axum::Json;
 use serde::Deserialize;
 use serde_json::{json, Value};
+use sha2::{Digest, Sha256};
+use std::collections::BTreeMap;
 use std::io::{BufRead, BufReader, Write as _};
 use std::path::{Path, PathBuf};
 use std::process::{Child, ChildStdin, ChildStdout, Command, ExitStatus, Stdio};
 use std::sync::{Arc, Mutex};
+use std::sync::atomic::{AtomicU64, Ordering};
 
 const PASSWORD_FILE: &str = "remote-cargo-password";
 
@@ -584,6 +587,35 @@ fn output_with_timeout(mut cmd: Command, limit: std::time::Duration) -> anyhow::
     }
 }
 
+fn output_with_deadline(
+    mut cmd: Command,
+    what: &str,
+    deadline: &Deadline,
+) -> anyhow::Result<std::process::Output> {
+    cmd.stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    let child = cmd.spawn().map_err(|e| anyhow::anyhow!("{what}: {e}"))?;
+    let pid = child.id() as i32;
+    let (tx, rx) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let _ = tx.send(child.wait_with_output());
+    });
+    loop {
+        if let Some(why) = deadline.stop() {
+            unsafe { libc::kill(pid, libc::SIGKILL) };
+            anyhow::bail!("{what}: {why}");
+        }
+        match rx.recv_timeout(std::time::Duration::from_millis(20)) {
+            Ok(out) => return Ok(out?),
+            Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {}
+            Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
+                anyhow::bail!("{what}: output reader stopped")
+            }
+        }
+    }
+}
+
 fn probe(remote: &BuildRemoteCfg, data_dir: &Path) -> anyhow::Result<Value> {
     let pw = secret(data_dir, remote)?;
     let mut cmd = ssh_base(remote, pw.as_deref(), data_dir)?;
@@ -727,6 +759,28 @@ fn fnv1a64(s: &str) -> u64 {
     h
 }
 
+/// 同一個 repository 的 linked worktree 會回到同一個 git common dir；非 Git 目錄仍以自身隔離。
+/// canonicalize 讓從 symlink 進入的同一份 repo 也使用相同身分。
+fn cache_identity_path(cwd: &Path) -> PathBuf {
+    let cwd = cwd.canonicalize().unwrap_or_else(|_| cwd.to_path_buf());
+    let common = Command::new("git")
+        .args(["rev-parse", "--git-common-dir"])
+        .current_dir(&cwd)
+        .output()
+        .ok()
+        .filter(|o| o.status.success())
+        .and_then(|o| String::from_utf8(o.stdout).ok())
+        .map(|s| PathBuf::from(s.trim()))
+        .filter(|p| !p.as_os_str().is_empty())
+        .map(|p| if p.is_absolute() { p } else { cwd.join(p) })
+        .and_then(|p| p.canonicalize().ok());
+    common.unwrap_or(cwd)
+}
+
+fn cache_hash(cwd: &Path) -> String {
+    format!("{:016x}", fnv1a64(&cache_identity_path(cwd).to_string_lossy()))
+}
+
 /// ssh 把這條字串交給遠端的登入 shell（fish／tcsh 不吃 `VAR=value` 與 `$(…)`）。
 /// 跟守門腳本一樣先包一層 `sh -c`，登入 shell 只負責把引數交給 `/bin/sh`（#670）。
 pub fn login_shell_arg(script: &str) -> String {
@@ -744,8 +798,8 @@ pub fn sh_quote(s: &str) -> String {
 
 // ── 遠端工作目錄（issue #141）──────────────────────────────────────────────────────────────
 //
-// 版面：`<remote_root>/<worktree 路徑的 fnv1a64>/`
-//   - `shared/`＋`shared.lock`：同一棵 worktree 共用的原始碼＋`target/`，跨呼叫保留（增量編譯）。
+// 版面：`<remote_root>/<repo common dir 路徑的 fnv1a64>/`
+//   - `shared/`＋`shared.lock`：同一個 repo 的 worktree 共用原始碼＋`target/`，跨呼叫保留（增量編譯）。
 //   - `job-<pid>-<ms>/`＋`.lock`：`shared` 被另一次呼叫佔著、等了 [`SHARED_WAIT_SECS`] 還沒空出來時的退路，冷編譯，結束就刪。
 //   - 純數字的 `<pid>/`：#141 之前的版本留下的，沒有鎖，只能靠「沒行程在用＋放很久」回收。
 // 另有 `<remote_root>/.slots/<n>`：遠端名額（issue #104）。守門拿到目錄之後再搶一個 `flock`，拿著直到結束——同一個 remote_root
@@ -901,7 +955,7 @@ inventory() {
 }
 gc_rm() {
   [ "$1" != "$2" ] && ours "$1" && [ -d "$1" ] && [ ! -L "$1" ] || return 0
-  { flock -n 9 && same "$1.lock" 9 && ! cwds | grep -qF "$1/" && rm -rf "$1" && rm -f "$1.owner" "$1".pgid-* "$1.lock"; } 9>>"$1.lock"
+  { flock -n 9 && same "$1.lock" 9 && ! cwds | grep -qF "$1/" && rm -rf "$1" && rm -f "$1.owner" "$1".pgid-* "$1.lock" "$1.source-manifest" "$1".source-manifest.tmp-*; } 9>>"$1.lock"
   rmdir "${1%/*}" 2>/dev/null
   return 0
 }
@@ -996,7 +1050,7 @@ hold() {
   reap "$1"
   sweep "$1"
   rm -f "$1".pgid-*
-  if [ "${1##*/}" = shared ]; then touch "$1.lock"; else rm -rf "$1"; rm -f "$1.lock"; fi
+  if [ "${1##*/}" = shared ]; then touch "$1.lock"; else rm -rf "$1"; rm -f "$1.lock" "$1.source-manifest" "$1".source-manifest.tmp-*; fi
   return 0
 }
 queue_full() {
@@ -1503,15 +1557,19 @@ fn limit_text(secs: u64) -> String {
     }
 }
 
-/// 遠端該同步（也是遠端目錄 hash 的種子）的根，以及 cwd 相對於它的路徑（`""`＝cwd 就是根）。
+/// 遠端該同步的根，以及 cwd 相對於它的路徑（`""`＝cwd 就是根）。
 ///
 /// 跟 cargo 一樣往上找：最近一層宣告 `[workspace]` 的 `Cargo.toml` 就是工作區根；一路上都沒有就用最近的那個套件根；
 /// 完全不在 cargo 專案裡就是 cwd 本身。只同步 cwd（#177）的話，`cd daemon && cargo check` 到了遠端沒有根的
 /// `Cargo.lock`、`[profile.*]`、`.cargo/config.toml`——本機用鎖定的依賴，遠端重新解析、驗的不是同一份東西。
 fn source_root(cwd: &Path) -> (PathBuf, String) {
+    // A workspace member can be reached through a symlink. Walk the real path so we still find
+    // the workspace manifest above it; syncing the symlink itself would make --delete treat one
+    // member as the whole shared source tree.
+    let canonical_cwd = cwd.canonicalize().unwrap_or_else(|_| cwd.to_path_buf());
     let mut package: Option<&Path> = None;
     let mut root: Option<&Path> = None;
-    for dir in cwd.ancestors() {
+    for dir in canonical_cwd.ancestors() {
         let Ok(manifest) = std::fs::read_to_string(dir.join("Cargo.toml")) else { continue };
         package.get_or_insert(dir);
         if manifest.parse::<toml::Table>().is_ok_and(|t| t.contains_key("workspace")) {
@@ -1519,8 +1577,8 @@ fn source_root(cwd: &Path) -> (PathBuf, String) {
             break;
         }
     }
-    let root = root.or(package).unwrap_or(cwd);
-    let sub = cwd.strip_prefix(root).map(|r| r.to_string_lossy().into_owned()).unwrap_or_default();
+    let root = root.or(package).unwrap_or(&canonical_cwd);
+    let sub = canonical_cwd.strip_prefix(root).map(|r| r.to_string_lossy().into_owned()).unwrap_or_default();
     (root.to_path_buf(), sub)
 }
 
@@ -1529,7 +1587,7 @@ fn open_lease(remote: &BuildRemoteCfg, data_dir: &Path, cwd: &Path, ctl: &Deadli
         "" => crate::config::default_remote_build_root(),
         r => r.to_string(),
     };
-    let hash = format!("{:016x}", fnv1a64(&cwd.to_string_lossy()));
+    let hash = cache_hash(cwd);
     let millis = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_millis())
@@ -1559,10 +1617,351 @@ fn rsync_rsh(remote: &BuildRemoteCfg, has_password: bool, askpass: bool) -> Stri
     ssh
 }
 
-/// 同步原始碼時排除的東西（#328）。`target` 要**錨定在根**：不錨定的 `--exclude target` 會連 `src/target/mod.rs`、`crates/target/`、
-/// `tests/fixtures/target/` 這些原始碼一起濾掉，遠端編不過或行為不同。代價：巢狀的獨立 crate 建置輸出（`fuzz/target` 之類）
-/// 會被一起送（rsync 3.2 沒有 `--exclude-if-present`，認不出它們）；那是樹裡真實存在的東西，送過去不會錯。
-const RSYNC_EXCLUDES: [&str; 4] = ["--exclude", ".git", "--exclude", "/target"];
+/// `target` 要錨定在根，否則會把 `src/target` 這類來源目錄也濾掉。其他專案排除項只能由其
+/// `[workspace.metadata.agents-manager.remote-cargo].exclude` 明確宣告。
+const BASE_RSYNC_EXCLUDES: [&str; 2] = [".git", "/target"];
+
+/// checksum 讓相同大小與 mtime、但內容不同的來源也會傳輸；停用 mtime 保留，避免舊分支切回來時來源比 target 產物舊。
+const RSYNC_CACHE_FLAGS: [&str; 2] = ["--checksum", "--no-times"];
+const SOURCE_MANIFEST_MAGIC: &[u8] = b"AMRCM1\0";
+const MAX_SOURCE_MANIFEST_BYTES: usize = 256 * 1024 * 1024;
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct SourceEntry {
+    kind: u8,
+    mode: u32,
+    value: Vec<u8>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct SourceManifest {
+    entries: BTreeMap<Vec<u8>, SourceEntry>,
+}
+
+impl SourceManifest {
+    fn encode(&self) -> Vec<u8> {
+        let mut out = SOURCE_MANIFEST_MAGIC.to_vec();
+        out.extend_from_slice(&(self.entries.len() as u64).to_be_bytes());
+        for (path, entry) in &self.entries {
+            out.extend_from_slice(&(path.len() as u64).to_be_bytes());
+            out.extend_from_slice(path);
+            out.push(entry.kind);
+            out.extend_from_slice(&entry.mode.to_be_bytes());
+            out.extend_from_slice(&(entry.value.len() as u64).to_be_bytes());
+            out.extend_from_slice(&entry.value);
+        }
+        out
+    }
+
+    fn decode(bytes: &[u8]) -> Option<Self> {
+        if bytes.len() > MAX_SOURCE_MANIFEST_BYTES || !bytes.starts_with(SOURCE_MANIFEST_MAGIC) {
+            return None;
+        }
+        let mut at = SOURCE_MANIFEST_MAGIC.len();
+        let count = take_u64(bytes, &mut at)?;
+        if count > bytes.len() as u64 {
+            return None;
+        }
+        let mut entries = BTreeMap::new();
+        for _ in 0..count {
+            let path_len = usize::try_from(take_u64(bytes, &mut at)?).ok()?;
+            let path = take_bytes(bytes, &mut at, path_len)?.to_vec();
+            let kind = *bytes.get(at)?;
+            at += 1;
+            let mode = u32::from_be_bytes(take_bytes(bytes, &mut at, 4)?.try_into().ok()?);
+            let value_len = usize::try_from(take_u64(bytes, &mut at)?).ok()?;
+            let value = take_bytes(bytes, &mut at, value_len)?.to_vec();
+            let path_buf = path_from_bytes(&path)?;
+            if path.is_empty()
+                || path_buf.is_absolute()
+                || path_buf.components().any(|c| {
+                    matches!(
+                        c,
+                        std::path::Component::ParentDir
+                            | std::path::Component::RootDir
+                            | std::path::Component::Prefix(_)
+                    )
+                })
+                || entries
+                    .insert(path, SourceEntry { kind, mode, value })
+                    .is_some()
+            {
+                return None;
+            }
+        }
+        (at == bytes.len()).then_some(Self { entries })
+    }
+}
+
+fn take_bytes<'a>(bytes: &'a [u8], at: &mut usize, len: usize) -> Option<&'a [u8]> {
+    let end = at.checked_add(len)?;
+    let out = bytes.get(*at..end)?;
+    *at = end;
+    Some(out)
+}
+
+fn take_u64(bytes: &[u8], at: &mut usize) -> Option<u64> {
+    Some(u64::from_be_bytes(
+        take_bytes(bytes, at, 8)?.try_into().ok()?,
+    ))
+}
+
+fn path_from_bytes(bytes: &[u8]) -> Option<PathBuf> {
+    use std::os::unix::ffi::OsStringExt as _;
+    Some(PathBuf::from(std::ffi::OsString::from_vec(bytes.to_vec())))
+}
+
+fn rsync_exclusions(root: &Path) -> anyhow::Result<Vec<String>> {
+    let manifest = std::fs::read_to_string(root.join("Cargo.toml"))?;
+    let value: toml::Value = toml::from_str(&manifest)?;
+    let configured = value
+        .get("workspace")
+        .and_then(|w| w.get("metadata"))
+        .and_then(|m| m.get("agents-manager"))
+        .and_then(|a| a.get("remote-cargo"))
+        .and_then(|r| r.get("exclude"));
+    let mut exclusions = BASE_RSYNC_EXCLUDES
+        .iter()
+        .map(|s| s.to_string())
+        .collect::<Vec<_>>();
+    if let Some(configured) = configured {
+        let values = configured.as_array().ok_or_else(|| {
+            anyhow::anyhow!(
+                "workspace.metadata.agents-manager.remote-cargo.exclude must be an array of paths"
+            )
+        })?;
+        for value in values {
+            let path = value
+                .as_str()
+                .ok_or_else(|| anyhow::anyhow!("remote-cargo exclude entries must be strings"))?;
+            let Some(relative) = path.strip_prefix('/') else {
+                anyhow::bail!("remote-cargo exclude paths must start with `/`: {path:?}")
+            };
+            if relative.is_empty()
+                || relative
+                    .split('/')
+                    .any(|part| part.is_empty() || part == "." || part == "..")
+                || !path
+                    .bytes()
+                    .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'/' | b'_' | b'-' | b'.'))
+                || exclusions.contains(&path.to_string())
+            {
+                anyhow::bail!("invalid remote-cargo exclude path: {path:?}");
+            }
+            exclusions.push(path.to_string());
+        }
+    }
+    Ok(exclusions)
+}
+
+fn is_excluded_source_path(relative: &Path, exclusions: &[String]) -> bool {
+    use std::os::unix::ffi::OsStrExt as _;
+    if relative
+        .components()
+        .any(|c| c.as_os_str().as_bytes() == b".git")
+    {
+        return true;
+    }
+    let bytes = relative.as_os_str().as_bytes();
+    if bytes == b"target" || bytes.starts_with(b"target/") {
+        return true;
+    }
+    exclusions
+        .iter()
+        .skip(BASE_RSYNC_EXCLUDES.len())
+        .any(|entry| {
+            let prefix = entry.trim_start_matches('/').as_bytes();
+            bytes == prefix || bytes.starts_with(&[prefix, b"/"].concat())
+        })
+}
+
+fn scan_source_manifest(root: &Path, exclusions: &[String]) -> anyhow::Result<SourceManifest> {
+    use std::os::unix::ffi::OsStrExt as _;
+    use std::os::unix::fs::PermissionsExt as _;
+
+    fn visit(
+        root: &Path,
+        dir: &Path,
+        exclusions: &[String],
+        entries: &mut BTreeMap<Vec<u8>, SourceEntry>,
+    ) -> anyhow::Result<()> {
+        for child in std::fs::read_dir(dir)? {
+            let child = child?;
+            let path = child.path();
+            let relative = path.strip_prefix(root)?;
+            if is_excluded_source_path(relative, exclusions) {
+                continue;
+            }
+            let metadata = std::fs::symlink_metadata(&path)?;
+            let kind = metadata.file_type();
+            let (tag, value) = if kind.is_symlink() {
+                (
+                    b'L',
+                    std::fs::read_link(&path)?.as_os_str().as_bytes().to_vec(),
+                )
+            } else if kind.is_dir() {
+                (b'D', Vec::new())
+            } else if kind.is_file() {
+                let mut file = std::fs::File::open(&path)?;
+                let mut hash = Sha256::new();
+                std::io::copy(&mut file, &mut DigestWriter(&mut hash))?;
+                (b'F', hash.finalize().to_vec())
+            } else {
+                (b'O', Vec::new())
+            };
+            entries.insert(
+                relative.as_os_str().as_bytes().to_vec(),
+                SourceEntry {
+                    kind: tag,
+                    mode: metadata.permissions().mode() & 0o7777,
+                    value,
+                },
+            );
+            if kind.is_dir() {
+                visit(root, &path, exclusions, entries)?;
+            }
+        }
+        Ok(())
+    }
+
+    struct DigestWriter<'a>(&'a mut Sha256);
+    impl std::io::Write for DigestWriter<'_> {
+        fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+            self.0.update(bytes);
+            Ok(bytes.len())
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    let mut entries = BTreeMap::new();
+    visit(root, root, exclusions, &mut entries)?;
+    Ok(SourceManifest { entries })
+}
+
+fn touch_remote_workspace(
+    remote: &BuildRemoteCfg,
+    data_dir: &Path,
+    dir: &str,
+    deadline: &Deadline,
+) -> anyhow::Result<()> {
+    let pw = secret(data_dir, remote)?;
+    let mut cmd = ssh_base(remote, pw.as_deref(), data_dir)?;
+    let script = format!(
+        "set -eu\nlease_dir={}\n[ -d \"$lease_dir\" ] && [ ! -L \"$lease_dir\" ] || exit 2\nroot=$(cd -P -- \"$lease_dir\" && pwd) || exit 2\n[ \"$root\" = \"$lease_dir\" ] || exit 2\ncd -- \"$root\"\nfind -P . \\( -path './target' -o -path './.git' \\) -prune -o -type f -exec touch -m -- '{{}}' +\nfind -P . \\( -path './target' -o -path './.git' \\) -prune -o -type l -exec touch -h -m -- '{{}}' +",
+        sh_quote(dir)
+    );
+    cmd.arg(login_shell_arg(&script));
+    let status = run_status(cmd, "invalidate remote Cargo workspace sources", deadline)?;
+    if !status.success() {
+        anyhow::bail!("remote workspace source invalidation failed with exit {:?}", status.code());
+    }
+    Ok(())
+}
+
+fn remote_manifest_path(dir: &str) -> String {
+    format!("{}.source-manifest", dir.trim_end_matches('/'))
+}
+
+fn read_remote_manifest(
+    remote: &BuildRemoteCfg,
+    data_dir: &Path,
+    dir: &str,
+    deadline: &Deadline,
+) -> anyhow::Result<Option<SourceManifest>> {
+    let path = remote_manifest_path(dir);
+    let mut cmd = ssh_base(remote, secret(data_dir, remote)?.as_deref(), data_dir)?;
+    cmd.arg(login_shell_arg(&format!(
+        "if [ -f {0} ]; then cat {0}; else exit 44; fi",
+        sh_quote(&path)
+    )));
+    let out = output_with_deadline(cmd, "read remote Cargo source manifest", deadline)?;
+    if out.status.code() == Some(44) {
+        return Ok(None);
+    }
+    if !out.status.success() {
+        anyhow::bail!(
+            "read remote Cargo source manifest failed with exit {:?}: {}",
+            out.status.code(),
+            String::from_utf8_lossy(&out.stderr).trim()
+        );
+    }
+    Ok(SourceManifest::decode(&out.stdout))
+}
+
+fn write_remote_manifest(
+    remote: &BuildRemoteCfg,
+    data_dir: &Path,
+    dir: &str,
+    manifest: &[u8],
+    deadline: &Deadline,
+) -> anyhow::Result<()> {
+    let path = remote_manifest_path(dir);
+    let tmp = format!("{path}.tmp-{}", std::process::id());
+    let script = format!(
+        "umask 077; tmp={}; trap 'rm -f \"$tmp\"' EXIT; cat > \"$tmp\" && mv -f \"$tmp\" {}",
+        sh_quote(&tmp),
+        sh_quote(&path)
+    );
+    let mut cmd = ssh_base(remote, secret(data_dir, remote)?.as_deref(), data_dir)?;
+    cmd.arg(login_shell_arg(&script)).stdin(Stdio::piped());
+    let mut child = cmd
+        .spawn()
+        .map_err(|e| anyhow::anyhow!("write remote Cargo source manifest: {e}"))?;
+    child
+        .stdin
+        .take()
+        .ok_or_else(|| anyhow::anyhow!("write remote Cargo source manifest: no stdin"))?
+        .write_all(manifest)?;
+    let status = wait_child(child, "write remote Cargo source manifest", deadline)?;
+    if !status.success() {
+        anyhow::bail!(
+            "write remote Cargo source manifest failed with exit {:?}",
+            status.code()
+        );
+    }
+    Ok(())
+}
+
+fn prune_remote_exclusions(
+    remote: &BuildRemoteCfg,
+    data_dir: &Path,
+    dir: &str,
+    exclusions: &[String],
+    deadline: &Deadline,
+) -> anyhow::Result<()> {
+    let paths: Vec<_> = exclusions
+        .iter()
+        .skip(BASE_RSYNC_EXCLUDES.len())
+        .map(|path| path.trim_start_matches('/'))
+        .collect();
+    if paths.is_empty() {
+        return Ok(());
+    }
+    let mut script = format!(
+        "set -eu\nlease_dir={}\n[ -d \"$lease_dir\" ] && [ ! -L \"$lease_dir\" ] || exit 2\nroot=$(cd -P -- \"$lease_dir\" && pwd) || exit 2\n[ \"$root\" = \"$lease_dir\" ] || exit 2\ncd -- \"$root\"\nsafe_remove() {{\n  rel=$1; depth=$2\n  case \"$rel\" in ''|/*|../*|*/../*|*/..|.|./*) return 2 ;; esac\n  parent=${{rel%/*}}; if [ \"$parent\" = \"$rel\" ]; then parent=; fi\n  if [ -n \"$parent\" ]; then\n    oldifs=$IFS; IFS=/; set -- $parent; IFS=$oldifs\n    cursor=$root\n    for component do\n      cursor=$cursor/$component\n      if [ -L \"$cursor\" ]; then echo 'agents-manager: refusing remote exclusion under a symlink ancestor' >&2; return 1; fi\n      [ -d \"$cursor\" ] || return 0\n    done\n  fi\n  target=$root/$rel\n  case \"$target\" in \"$root\"/*) ;; *) return 2 ;; esac\n  find -P . -mindepth \"$depth\" -maxdepth \"$depth\" -path \"./$rel\" -prune -execdir rm -rf -- '{{}}' +\n}}\n",
+        sh_quote(dir)
+    );
+    for path in &paths {
+        let depth = path.split('/').count();
+        script.push_str(&format!("safe_remove {} {depth}\n", sh_quote(path)));
+    }
+    let mut cmd = ssh_base(remote, secret(data_dir, remote)?.as_deref(), data_dir)?;
+    cmd.arg(login_shell_arg(&script));
+    let status = run_status(
+        cmd,
+        "remove explicitly excluded remote Cargo inputs",
+        deadline,
+    )?;
+    if !status.success() {
+        anyhow::bail!(
+            "remove explicitly excluded remote Cargo inputs failed with exit {:?}",
+            status.code()
+        );
+    }
+    Ok(())
+}
 
 /// rsync 失敗是不是「來源樹在同步途中被改動」：掃完檔案清單之後檔案被刪／換名（`bun run build` 換掉 `web/dist` 的 hash 檔名）。
 /// 24＝rsync 自己說的 vanished；23（部分傳輸失敗）只有在它抱怨的是「找不到檔案」時才算，其他 23（權限等）照舊直接失敗。
@@ -1588,15 +1987,23 @@ fn sync_source(remote: &BuildRemoteCfg, data_dir: &Path, cwd: &Path, dir: &str, 
         anyhow::bail!("remote Cargo requires `rsync` on the daemon host");
     }
     check_identity(remote)?;
+    let root = std::fs::canonicalize(cwd)?;
     let pw = secret(data_dir, remote)?;
     let mode = match pw {
         Some(_) => Some(password_mode(data_dir)?),
         None => None,
     };
-    let ssh = rsync_rsh(remote, pw.is_some(), matches!(mode, Some(PwMode::Askpass(_))));
-    let source = format!("{}/", cwd.to_string_lossy().trim_end_matches('/'));
+    let ssh = rsync_rsh(
+        remote,
+        pw.is_some(),
+        matches!(mode, Some(PwMode::Askpass(_))),
+    );
+    let source = format!("{}/", root.to_string_lossy().trim_end_matches('/'));
     let dest = rsync_destination(remote, dir);
-    let command = || {
+    // The successful manifest is the baseline across every retry. A partial rsync may already
+    // have applied chmod or type changes before returning 23/24; those differences must survive.
+    let previous = read_remote_manifest(remote, data_dir, dir, deadline)?;
+    let command = |exclusions: &[String]| {
         let mut cmd = match &mode {
             Some(PwMode::Sshpass) => {
                 let mut c = Command::new("sshpass");
@@ -1615,37 +2022,86 @@ fn sync_source(remote: &BuildRemoteCfg, data_dir: &Path, cwd: &Path, dir: &str, 
                 }
             }
         }
-        cmd.args(["-az", "--delete"]).args(RSYNC_EXCLUDES).args(["-e", &ssh])
-            .arg(&source)
-            .arg(&dest);
+        cmd.args(["-az", "--delete"])
+            .args(RSYNC_CACHE_FLAGS)
+            .arg("--quiet");
+        for exclude in exclusions {
+            cmd.arg("--exclude").arg(exclude);
+        }
+        cmd.args(["-e", &ssh]).arg(&source).arg(&dest);
         cmd
     };
     // 共用主樹的 `web/dist` 會被別的 bot 的 `bun run build` 整批換掉；rsync 列完清單後舊檔消失就回 23/24。
     // 重送一次就是新的一致狀態（`--delete` 也會清掉遠端的舊 hash 檔），所以短暫重試，不把呼叫端的 cargo 判死。
     for attempt in 1..=SYNC_ATTEMPTS {
-        let (status, stderr) = run_status_tee_stderr(command(), "rsync source", deadline)?;
-        if status.success() {
-            return Ok(());
-        }
-        if !source_changed_during_sync(status.code(), &stderr) {
-            anyhow::bail!("rsync failed with exit {:?}", status.code());
-        }
-        if attempt == SYNC_ATTEMPTS {
-            anyhow::bail!(
-                "rsync failed with exit {:?}: 來源樹在同步時一直被改動（多半是別的 bot 正在 build web，換掉了 web/dist），重試 {SYNC_ATTEMPTS} 次仍失敗；等它 build 完再跑",
-                status.code()
-            );
-        }
-        eprintln!("agents-manager: 來源樹在同步時被改動（多半是別的 bot 正在 build web），{}ms 後重新同步（第 {} 次，共 {SYNC_ATTEMPTS} 次）", SYNC_RETRY_PAUSE.as_millis(), attempt + 1);
-        let until = std::time::Instant::now() + SYNC_RETRY_PAUSE;
-        while std::time::Instant::now() < until {
-            if let Some(why) = deadline.stop() {
-                return Err(anyhow::Error::new(why));
+        let exclusions = rsync_exclusions(&root)?;
+        let before = scan_source_manifest(&root, &exclusions)?;
+        prune_remote_exclusions(remote, data_dir, dir, &exclusions, deadline)?;
+        let (status, stderr) =
+            run_status_tee_stderr(command(&exclusions), "rsync source", deadline)?;
+        if !status.success() {
+            if !source_changed_during_sync(status.code(), &stderr) {
+                anyhow::bail!("rsync failed with exit {:?}", status.code());
             }
-            std::thread::sleep(std::time::Duration::from_millis(20));
+            if attempt == SYNC_ATTEMPTS {
+                anyhow::bail!(
+                    "rsync failed with exit {:?}: 來源樹在同步時一直被改動（多半是別的 bot 正在 build web，換掉了 web/dist），重試 {SYNC_ATTEMPTS} 次仍失敗；等它 build 完再跑",
+                    status.code()
+                );
+            }
+            wait_sync_retry(attempt, deadline)?;
+            continue;
         }
+
+        let current_exclusions = rsync_exclusions(&root)?;
+        let after = scan_source_manifest(&root, &current_exclusions)?;
+        if before != after {
+            if attempt == SYNC_ATTEMPTS {
+                anyhow::bail!(
+                    "來源樹在同步期間持續變動，重試 {SYNC_ATTEMPTS} 次仍無法得到一致快照"
+                );
+            }
+            wait_sync_retry(attempt, deadline)?;
+            continue;
+        }
+
+        // The manifest is only a whole-workspace change detector. Avoid per-path inference:
+        // deleted entries and type swaps have no valid remote path to touch, while directory
+        // symlinks can feed include_* inputs in a different package. `find -P` invalidates all
+        // still-existing workspace files without following symlinks, and prunes target/.git.
+        if previous.as_ref() != Some(&after) {
+            touch_remote_workspace(remote, data_dir, dir, deadline)?;
+        }
+
+        // A source edit after rsync or while mtime updates ran must not be recorded as successfully
+        // synchronized. Keep the prior manifest so the next attempt will invalidate all differences.
+        let verified_exclusions = rsync_exclusions(&root)?;
+        let verified = scan_source_manifest(&root, &verified_exclusions)?;
+        if after != verified {
+            if attempt == SYNC_ATTEMPTS {
+                anyhow::bail!(
+                    "來源樹在同步期間持續變動，重試 {SYNC_ATTEMPTS} 次仍無法提交一致快照"
+                );
+            }
+            wait_sync_retry(attempt, deadline)?;
+            continue;
+        }
+        write_remote_manifest(remote, data_dir, dir, &verified.encode(), deadline)?;
+        return Ok(());
     }
     unreachable!("the loop always returns or bails on the last attempt")
+}
+
+fn wait_sync_retry(attempt: u32, deadline: &Deadline) -> anyhow::Result<()> {
+    eprintln!("agents-manager: 來源樹在同步時被改動（多半是別的 bot 正在 build web），{}ms 後重新同步（第 {} 次，共 {SYNC_ATTEMPTS} 次）", SYNC_RETRY_PAUSE.as_millis(), attempt + 1);
+    let until = std::time::Instant::now() + SYNC_RETRY_PAUSE;
+    while std::time::Instant::now() < until {
+        if let Some(why) = deadline.stop() {
+            return Err(anyhow::Error::new(why));
+        }
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    }
+    Ok(())
 }
 
 /// 測試執行緒數：呼叫端自己設了 `RUST_TEST_THREADS`（正整數）就尊重它，沒有才用設定（`0`＝不設）。
@@ -1841,7 +2297,7 @@ mod tests {
         assert_eq!(rsync_destination(&remote(), "/home/u/shared/"), "me@build-host:/home/u/shared/");
     }
 
-    /// #328：同步的排除規則不能濾掉名叫 target 的原始碼目錄，但根目錄的 target 仍不送。
+    /// #328、#1856：固定排除 git 與根 target；專案未明確排除時 node_modules 仍是輸入、必須同步。
     #[test]
     fn the_rsync_excludes_keep_source_dirs_named_target() {
         if !has_program(&rsync_program()) {
@@ -1849,15 +2305,27 @@ mod tests {
         }
         let base = crate::testing::track(std::env::temp_dir().join(format!("am-rsync-{}", std::process::id())));
         let (src, dst) = (base.join("src"), base.join("dst"));
-        for d in ["src/target", "crates/target", "target/debug"] {
+        std::fs::create_dir_all(&src).unwrap();
+        std::fs::write(src.join("Cargo.toml"), "[workspace]\n").unwrap();
+        for d in [
+            "src/target",
+            "crates/target",
+            "target/debug",
+            "web/node_modules",
+        ] {
             std::fs::create_dir_all(src.join(d)).unwrap();
         }
         std::fs::write(src.join("src/target/mod.rs"), "x").unwrap();
         std::fs::write(src.join("crates/target/Cargo.toml"), "x").unwrap();
         std::fs::write(src.join("target/debug/big"), "x").unwrap();
-        let st = Command::new(rsync_program())
-            .args(["-a", "--delete"])
-            .args(RSYNC_EXCLUDES)
+        std::fs::write(src.join("web/node_modules/package.json"), "{}").unwrap();
+        let excludes = rsync_exclusions(&src).unwrap();
+        let mut cmd = Command::new(rsync_program());
+        cmd.args(["-a", "--delete"]);
+        for exclude in excludes {
+            cmd.arg("--exclude").arg(exclude);
+        }
+        let st = cmd
             .arg(format!("{}/", src.display()))
             .arg(format!("{}/", dst.display()))
             .output()
@@ -1866,6 +2334,10 @@ mod tests {
         assert!(dst.join("src/target/mod.rs").exists(), "src/target 是原始碼，要送");
         assert!(dst.join("crates/target/Cargo.toml").exists(), "crates/target 是 workspace 成員，要送");
         assert!(!dst.join("target").exists(), "根目錄的 target 不送");
+        assert!(
+            dst.join("web/node_modules/package.json").is_file(),
+            "未設定排除政策時，保留 node_modules 輸入"
+        );
         std::fs::remove_dir_all(&base).ok();
     }
 
@@ -2048,6 +2520,12 @@ mod tests {
         assert_eq!(source_root(&bare), (bare.clone(), String::new()), "不在 cargo 專案裡：cwd 本身，跟以前一樣");
         assert_eq!(source_root(&inner_src), (inner.clone(), "src".into()), "有自己 [workspace] 的算自己的根");
         assert_eq!(source_root(&broken), (broken.clone(), String::new()), "壞 manifest：當成一般套件根");
+        #[cfg(unix)]
+        {
+            let member_link = t.join("member-link");
+            std::os::unix::fs::symlink(&daemon, &member_link).unwrap();
+            assert_eq!(source_root(&member_link), (ws.clone(), "daemon".into()), "symlink 成員也必須同步 workspace 根");
+        }
         let _ = std::fs::remove_dir_all(t);
     }
 
@@ -2734,6 +3212,7 @@ exec /bin/sh -c "$inner"
 #[cfg(all(test, target_os = "linux"))]
 mod guard_tests {
     use super::*;
+    use std::os::unix::fs::symlink;
     use std::os::unix::process::{CommandExt as _, ExitStatusExt as _};
     use std::time::{Duration, Instant};
 
@@ -3093,6 +3572,584 @@ mod guard_tests {
         out
     }
 
+    /// 接上本機真 rsync，並要求生產程式傳入快取安全旗標。
+    fn use_real_rsync_for_fake_remote(base: &Path) {
+        write_exec(
+            &base.join("fakebin/rsync"),
+            r#"src=; dest=; skip=; checksum=; no_times=; exclude_count=0; e1=; e2=; e3=; e4=; e5=; e6=; e7=; e8=
+for a; do
+  if [ "$skip" = exclude ]; then
+    exclude_count=$((exclude_count + 1))
+    case "$exclude_count" in 1) e1=$a ;; 2) e2=$a ;; 3) e3=$a ;; 4) e4=$a ;; 5) e5=$a ;; 6) e6=$a ;; 7) e7=$a ;; 8) e8=$a ;; *) echo 'too many excludes' >&2; exit 98 ;; esac
+    skip=; continue
+  fi
+  if [ "$skip" = value ]; then skip=; continue; fi
+  case "$a" in
+    --checksum) checksum=1 ;;
+    --no-times) no_times=1 ;;
+    --exclude) skip=exclude ;;
+    -e) skip=value ;;
+    -az|--delete|--quiet) ;;
+    -*) ;;
+    *) if [ -z "$src" ]; then src=$a; else dest=$a; fi ;;
+  esac
+done
+[ -n "$checksum" ] && [ -n "$no_times" ] || { echo 'missing cache safety flags' >&2; exit 97; }
+d=${dest#*:}
+set -- -az --delete --checksum --no-times --quiet
+for e in "$e1" "$e2" "$e3" "$e4" "$e5" "$e6" "$e7" "$e8"; do [ -z "$e" ] || set -- "$@" --exclude "$e"; done
+set -- "$@" "$src" "$d"
+rsync "$@"; rc=$?
+fail_marker="${src%/}/../.rsync-fail-after-copy"
+if [ -f "$fail_marker" ]; then
+  n=$(cat "$fail_marker"); case "$n" in ''|*[!0-9]*) n=0 ;; esac
+  if [ "$n" -gt 0 ]; then n=$((n - 1)); if [ "$n" -eq 0 ]; then rm -f "$fail_marker"; else printf '%s\n' "$n" > "$fail_marker"; fi; echo 'rsync: vanished file: No such file or directory (2)' >&2; exit 24; fi
+fi
+exit "$rc"
+"#,
+        );
+    }
+
+    /// node_modules 只有專案明確選擇排除時才不傳；切換政策時也清掉遠端舊值。
+    #[test]
+    fn remote_cargo_exclusions_are_opt_in_and_prune_old_remote_inputs() {
+        if !has_program("rsync") {
+            return;
+        }
+        let base = base();
+        let (remote, cwd, data) = fake_remote(&base, 60, "exit 0\n");
+        std::fs::write(
+            cwd.join("Cargo.toml"),
+            "[workspace]\n[workspace.metadata.agents-manager.remote-cargo]\nexclude = [\"/web/node_modules\"]\n",
+        )
+        .unwrap();
+        std::fs::create_dir_all(cwd.join("web/node_modules")).unwrap();
+        std::fs::write(cwd.join("web/node_modules/package.json"), "current\n").unwrap();
+        let dir = format!("{}/rc/{}/shared", base.display(), cache_hash(&cwd));
+        std::fs::create_dir_all(Path::new(&dir).join("web/node_modules")).unwrap();
+        std::fs::write(Path::new(&dir).join("web/node_modules/stale.json"), "old\n").unwrap();
+        use_real_rsync_for_fake_remote(&base);
+
+        let sync = || {
+            with_fake_transport(&base, || {
+                sync_source(&remote, &data, &cwd, &dir, &Deadline::new(60))
+            })
+        };
+        sync().expect("explicit node_modules exclusion should sync");
+        assert!(
+            !Path::new(&dir).join("web/node_modules").exists(),
+            "excluded paths must not leave old remote inputs behind"
+        );
+
+        std::fs::write(cwd.join("Cargo.toml"), "[workspace]\n").unwrap();
+        sync().expect("default policy should preserve node_modules");
+        assert_eq!(
+            std::fs::read(Path::new(&dir).join("web/node_modules/package.json")).unwrap(),
+            b"current\n"
+        );
+        let _ = std::fs::remove_dir_all(base);
+    }
+
+    /// Exclusion cleanup must fail closed when an intermediate remote path is a symlink.
+    #[test]
+    fn remote_exclusion_pruning_refuses_symlink_ancestors() {
+        if !has_program("rsync") {
+            return;
+        }
+        let base = base();
+        let (remote, cwd, data) = fake_remote(&base, 60, "exit 0\n");
+        std::fs::write(
+            cwd.join("Cargo.toml"),
+            "[workspace]\n[workspace.metadata.agents-manager.remote-cargo]\nexclude = [\"/web/node_modules\"]\n",
+        )
+        .unwrap();
+        std::fs::create_dir_all(cwd.join("web/node_modules")).unwrap();
+        std::fs::write(cwd.join("web/node_modules/package.json"), "source\n").unwrap();
+
+        let dir = format!("{}/rc/{}/shared", base.display(), cache_hash(&cwd));
+        let outside = base.join("outside");
+        std::fs::create_dir_all(outside.join("node_modules")).unwrap();
+        std::fs::write(outside.join("node_modules/keep.json"), "must survive\n").unwrap();
+        std::fs::create_dir_all(Path::new(&dir)).unwrap();
+        symlink(&outside, Path::new(&dir).join("web")).unwrap();
+        use_real_rsync_for_fake_remote(&base);
+
+        let result = with_fake_transport(&base, || {
+            sync_source(&remote, &data, &cwd, &dir, &Deadline::new(60))
+        });
+        assert!(result.is_err(), "an excluded path behind a symlink ancestor must be refused");
+        assert_eq!(
+            std::fs::read(outside.join("node_modules/keep.json")).unwrap(),
+            b"must survive\n",
+            "cleanup must not traverse outside the leased directory"
+        );
+        assert!(std::fs::symlink_metadata(Path::new(&dir).join("web")).unwrap().file_type().is_symlink());
+        let _ = std::fs::remove_dir_all(base);
+    }
+
+    /// Removed parents and directory-to-file transitions must not be recreated or passed to touch.
+    #[test]
+    fn workspace_invalidation_ignores_removed_paths_and_prunes_target() {
+        if !has_program("rsync") {
+            return;
+        }
+        let base = base();
+        let (remote, cwd, data) = fake_remote(&base, 60, "exit 0\n");
+        std::fs::create_dir_all(cwd.join("removed/child")).unwrap();
+        std::fs::write(cwd.join("removed/child/input.txt"), "old\n").unwrap();
+        std::fs::create_dir_all(cwd.join("switched/child")).unwrap();
+        std::fs::write(cwd.join("switched/child/input.txt"), "old\n").unwrap();
+        let dir = format!("{}/rc/{}/shared", base.display(), cache_hash(&cwd));
+        std::fs::create_dir_all(Path::new(&dir)).unwrap();
+        use_real_rsync_for_fake_remote(&base);
+
+        let sync = || {
+            with_fake_transport(&base, || {
+                sync_source(&remote, &data, &cwd, &dir, &Deadline::new(60))
+            })
+        };
+        sync().expect("initial tree sync should succeed");
+        let target_file = Path::new(&dir).join("target/debug/sentinel");
+        std::fs::create_dir_all(target_file.parent().unwrap()).unwrap();
+        std::fs::write(&target_file, "keep target\n").unwrap();
+        let target_mtime = std::fs::metadata(&target_file).unwrap().modified().unwrap();
+        std::thread::sleep(Duration::from_millis(1100));
+
+        std::fs::remove_dir_all(cwd.join("removed")).unwrap();
+        std::fs::remove_dir_all(cwd.join("switched")).unwrap();
+        std::fs::write(cwd.join("switched"), "now a regular file\n").unwrap();
+        sync().expect("deletion and directory-to-file transition should synchronize");
+
+        assert!(!Path::new(&dir).join("removed").exists(), "deleted paths must not be recreated by invalidation");
+        assert_eq!(std::fs::read(Path::new(&dir).join("switched")).unwrap(), b"now a regular file\n");
+        assert_eq!(std::fs::metadata(&target_file).unwrap().modified().unwrap(), target_mtime, "workspace invalidation must leave target artifacts alone");
+        let _ = std::fs::remove_dir_all(base);
+    }
+
+    fn set_mtime(path: &Path, modified: std::time::SystemTime) {
+        std::fs::File::options().write(true).open(path).unwrap().set_times(std::fs::FileTimes::new().set_modified(modified)).unwrap();
+    }
+
+    fn add_linked_worktree(a: &Path, b: &Path) {
+        let git = |args: &[&str]| {
+            let out = Command::new("git").args(args).current_dir(a).output().unwrap();
+            assert!(out.status.success(), "git {args:?}: {}", String::from_utf8_lossy(&out.stderr));
+        };
+        git(&["init", "-q"]);
+        git(&["config", "user.email", "cache-test@example.invalid"]);
+        git(&["config", "user.name", "cache test"]);
+        git(&["add", "-A"]);
+        git(&["commit", "-qm", "initial"]);
+        git(&["worktree", "add", "-q", "-b", "cache-test-b", b.to_str().unwrap()]);
+    }
+
+    /// 同 repo 的第二個同時呼叫無法拿 shared.lock 時用獨立 job target；任何時刻都沒有兩個 writer 指向同一 target。
+    #[test]
+    fn concurrent_worktrees_never_write_the_same_shared_target() {
+        let base = base();
+        let a = base.join("repo-a");
+        std::fs::create_dir_all(a.join("src")).unwrap();
+        std::fs::write(a.join("Cargo.toml"), "[package]\nname = \"p\"\nversion = \"0.1.0\"\n").unwrap();
+        std::fs::write(a.join("src/value"), "A").unwrap();
+        let b = base.join("repo-b");
+        add_linked_worktree(&a, &b);
+        let hash_a = cache_hash(&a);
+        let hash_b = cache_hash(&b);
+        assert_eq!(hash_a, hash_b, "both callers must contend for the same repo lease");
+
+        let mut first = guard_with(&base, &hash_a, "job-1-1", QUICK);
+        let mut second = guard_with(&base, &hash_b, "job-2-2", QUICK);
+        assert_eq!(first.hs.dir, format!("{}/rc/{hash_a}/shared", base.display()));
+        assert_eq!(second.hs.dir, format!("{}/rc/{hash_b}/job-2-2", base.display()));
+        let a_target = PathBuf::from(&first.hs.dir).join("target");
+        let b_target = PathBuf::from(&second.hs.dir).join("target");
+        assert_ne!(a_target, b_target, "concurrent Cargo writers must never share target");
+        std::fs::create_dir_all(&a_target).unwrap();
+        std::fs::create_dir_all(&b_target).unwrap();
+        std::fs::write(a_target.join("marker"), "A").unwrap();
+        std::fs::write(b_target.join("marker"), "B").unwrap();
+        second.finish();
+        assert_eq!(std::fs::read(a_target.join("marker")).unwrap(), b"A", "the second writer must not corrupt shared artifacts");
+        assert!(!b_target.exists(), "the isolated job target is removed after its lease");
+        first.finish();
+        assert_eq!(std::fs::read(a_target.join("marker")).unwrap(), b"A", "the shared cache remains intact");
+        let _ = std::fs::remove_dir_all(base);
+    }
+
+    /// 兩棵 linked worktree 輪流使用同一個 target。B 的來源內容不同且 mtime 比舊產物早；rsync 必須更新遠端來源 mtime，
+    /// 才能讓 Cargo 的時間戳 freshness check 重編，而不是沿用 A 的產物。
+    #[test]
+    fn worktrees_share_cache_and_older_changed_sources_rebuild() {
+        if !has_program("rsync") {
+            return;
+        }
+        let base = base();
+        let (remote, a, data) = fake_remote(
+            &base,
+            60,
+            "mkdir -p target\nif [ ! -f target/fingerprint ] || [ src/value -nt target/fingerprint ]; then\n  echo build >> \"$HOME/build-count\"\n  cp src/value target/built-from\n  touch target/fingerprint\nfi\nexit 0\n",
+        );
+        std::fs::write(a.join("src/value"), "tree A\n").unwrap();
+        let b = base.join("worktree-b");
+        add_linked_worktree(&a, &b);
+        std::fs::write(b.join("src/value"), "tree B\n").unwrap();
+        set_mtime(&b.join("src/value"), std::time::UNIX_EPOCH + Duration::from_secs(10));
+        assert_eq!(cache_hash(&a), cache_hash(&b), "linked worktrees must share the repo cache key");
+
+        use_real_rsync_for_fake_remote(&base);
+        let rc_a = with_fake_transport(&base, || run_offload(&remote, &data, &a, &["check".into()], &Deadline::new(60)));
+        assert_eq!(rc_a, 0, "worktree A should populate the shared target");
+        let shared = base.join("rc").join(cache_hash(&a)).join("shared");
+        let fingerprint = shared.join("target/fingerprint");
+        assert!(fingerprint.is_file());
+        set_mtime(&fingerprint, std::time::UNIX_EPOCH + Duration::from_secs(20));
+        assert!(std::fs::metadata(b.join("src/value")).unwrap().modified().unwrap() < std::fs::metadata(&fingerprint).unwrap().modified().unwrap());
+
+        let rc_b = with_fake_transport(&base, || run_offload(&remote, &data, &b, &["check".into()], &Deadline::new(60)));
+        assert_eq!(rc_b, 0, "worktree B should use the same shared target");
+        assert_eq!(std::fs::read(shared.join("src/value")).unwrap(), b"tree B\n");
+        assert!(std::fs::metadata(shared.join("src/value")).unwrap().modified().unwrap() > std::time::UNIX_EPOCH + Duration::from_secs(20));
+        assert_eq!(std::fs::read(shared.join("target/built-from")).unwrap(), b"tree B\n", "the stale target artifact must rebuild from B");
+        assert_eq!(std::fs::read_to_string(base.join("home/build-count")).unwrap().lines().count(), 2, "A and then B both rebuild");
+        let _ = std::fs::remove_dir_all(base);
+    }
+
+    /// 權限變更會被 rsync 套用，但檔案內容不重傳；同步後必須推進遠端 mtime，Cargo 才會重跑監看的 build script。
+    #[test]
+    fn chmod_only_rsync_change_reruns_a_cargo_build_script() {
+        if !has_program("rsync") {
+            return;
+        }
+        use std::os::unix::fs::PermissionsExt as _;
+
+        let base = base();
+        let (remote, cwd, data) = fake_remote(&base, 60, "exit 0\n");
+        std::fs::write(
+            cwd.join("Cargo.toml"),
+            "[package]\nname = \"app\"\nversion = \"0.1.0\"\nedition = \"2021\"\nbuild = \"build.rs\"\n",
+        )
+        .unwrap();
+        std::fs::create_dir_all(cwd.join("tools")).unwrap();
+        let tool = cwd.join("tools/probe");
+        std::fs::write(&tool, "#!/bin/sh\nexit 0\n").unwrap();
+        std::fs::set_permissions(&tool, std::fs::Permissions::from_mode(0o644)).unwrap();
+        std::fs::write(
+            cwd.join("build.rs"),
+            r#"use std::{env, fs, os::unix::fs::PermissionsExt, path::PathBuf};
+fn main() {
+    let root = PathBuf::from(env::var("CARGO_MANIFEST_DIR").unwrap());
+    let tool = root.join("tools/probe");
+    println!("cargo:rerun-if-changed={}", tool.display());
+    let executable = fs::metadata(&tool).unwrap().permissions().mode() & 0o111 != 0;
+    let out = PathBuf::from(env::var("OUT_DIR").unwrap());
+    fs::write(out.join("mode.rs"), format!("pub const TOOL_EXECUTABLE: bool = {executable};")).unwrap();
+    use std::io::Write as _;
+    writeln!(fs::OpenOptions::new().create(true).append(true).open(out.join("runs")).unwrap(), "{executable}").unwrap();
+}
+"#,
+        )
+        .unwrap();
+        std::fs::write(cwd.join("src/lib.rs"), "include!(concat!(env!(\"OUT_DIR\"), \"/mode.rs\"));\n").unwrap();
+        let dir = format!("{}/rc/{}/shared", base.display(), cache_hash(&cwd));
+        std::fs::create_dir_all(&dir).unwrap();
+        use_real_rsync_for_fake_remote(&base);
+
+        let sync = || with_fake_transport(&base, || sync_source(&remote, &data, &cwd, &dir, &Deadline::new(60)));
+        sync().expect("initial source sync should succeed");
+        let target = base.join("cargo-target");
+        let run_cargo = || {
+            let output = Command::new(toolchain_cargo())
+                .args(["check", "--offline", "--quiet", "--target-dir"])
+                .arg(&target)
+                .current_dir(&dir)
+                .output()
+                .unwrap();
+            assert!(output.status.success(), "cargo check failed: {}", String::from_utf8_lossy(&output.stderr));
+        };
+        let runs_file = || {
+            std::fs::read_dir(target.join("debug/build"))
+                .unwrap()
+                .flatten()
+                .map(|entry| entry.path().join("out/runs"))
+                .find(|path| path.is_file())
+                .expect("build script should write its run counter")
+        };
+        run_cargo();
+        let runs = runs_file();
+        assert_eq!(std::fs::read_to_string(&runs).unwrap().lines().collect::<Vec<_>>(), ["false"]);
+        let remote_tool = Path::new(&dir).join("tools/probe");
+        let before = std::fs::metadata(&remote_tool).unwrap().modified().unwrap();
+        let source_mtime = std::fs::metadata(&tool).unwrap().modified().unwrap();
+        std::thread::sleep(Duration::from_millis(1100));
+        std::fs::set_permissions(&tool, std::fs::Permissions::from_mode(0o755)).unwrap();
+        assert_eq!(std::fs::metadata(&tool).unwrap().modified().unwrap(), source_mtime, "chmod must not change the source mtime");
+        sync().expect("permission-only source sync should succeed");
+        let after = std::fs::metadata(&remote_tool).unwrap().modified().unwrap();
+        assert!(after > before, "metadata-only rsync changes need a newer remote mtime");
+        run_cargo();
+
+        // Simulate rsync applying chmod before returning 23/24. The failed attempt must not
+        // replace the last successful manifest; the next successful call still touches the file.
+        std::thread::sleep(Duration::from_millis(1100));
+        std::fs::set_permissions(&tool, std::fs::Permissions::from_mode(0o644)).unwrap();
+        let baseline_manifest = with_fake_transport(&base, || {
+            read_remote_manifest(&remote, &data, &dir, &Deadline::new(60))
+        })
+        .unwrap()
+        .unwrap()
+        .encode();
+        std::fs::write(base.join(".rsync-fail-after-copy"), "3\n").unwrap();
+        assert!(sync().is_err(), "three rsync 24 exits should fail the sync");
+        let after_failed_manifest = with_fake_transport(&base, || {
+            read_remote_manifest(&remote, &data, &dir, &Deadline::new(60))
+        })
+        .unwrap()
+        .unwrap()
+        .encode();
+        assert_eq!(
+            after_failed_manifest, baseline_manifest,
+            "failed sync must preserve last successful manifest"
+        );
+        let failed_mtime = std::fs::metadata(&remote_tool).unwrap().modified().unwrap();
+        assert_eq!(
+            failed_mtime, after,
+            "chmod applied by failed retries must not be treated as invalidated"
+        );
+        sync().expect("the next successful sync must invalidate the earlier failed chmod");
+        let recovered_mtime = std::fs::metadata(&remote_tool).unwrap().modified().unwrap();
+        assert!(
+            recovered_mtime > failed_mtime,
+            "manifest difference from the last success must touch the source"
+        );
+        run_cargo();
+        assert_eq!(std::fs::read_to_string(&runs).unwrap().lines().collect::<Vec<_>>(), ["false", "true", "false"], "Cargo must rerun after permission-only changes even when an earlier rsync retry failed");
+        let _ = std::fs::remove_dir_all(base);
+    }
+
+    /// 長度前綴的二進位 manifest 可完整表示含 newline 的檔名，檔名內容也不能偽造成另一筆變更。
+    #[test]
+    fn source_manifest_handles_newline_names_without_forging_touch_paths() {
+        if !has_program("rsync") {
+            return;
+        }
+        use std::os::unix::ffi::OsStringExt as _;
+        use std::os::unix::fs::PermissionsExt as _;
+
+        let base = base();
+        let (remote, cwd, data) = fake_remote(&base, 60, "exit 0\n");
+        let name = std::ffi::OsString::from_vec(b"line\n[900] .f...p..... victim".to_vec());
+        let source = cwd.join(&name);
+        std::fs::write(&source, "script\n").unwrap();
+        std::fs::set_permissions(&source, std::fs::Permissions::from_mode(0o644)).unwrap();
+        let dir = format!("{}/rc/{}/shared", base.display(), cache_hash(&cwd));
+        std::fs::create_dir_all(&dir).unwrap();
+        use_real_rsync_for_fake_remote(&base);
+
+        let sync = || {
+            with_fake_transport(&base, || {
+                sync_source(&remote, &data, &cwd, &dir, &Deadline::new(60))
+            })
+        };
+        sync().expect("first source manifest should synchronize");
+        let remote_source = Path::new(&dir).join(&name);
+        let remote_forged_paths = [Path::new(&dir).join("line"), Path::new(&dir).join("victim")];
+        let before = std::fs::metadata(&remote_source)
+            .unwrap()
+            .modified()
+            .unwrap();
+        std::thread::sleep(Duration::from_millis(1100));
+        std::fs::set_permissions(&source, std::fs::Permissions::from_mode(0o755)).unwrap();
+        sync().expect("newline path metadata change should synchronize");
+
+        let after = std::fs::metadata(&remote_source)
+            .unwrap()
+            .modified()
+            .unwrap();
+        assert!(
+            after > before,
+            "the exact newline-containing path must be invalidated"
+        );
+        for forged in &remote_forged_paths {
+            assert!(!forged.exists(), "filename bytes must not forge a second path to touch: {forged:?}");
+        }
+        let manifest = with_fake_transport(&base, || {
+            read_remote_manifest(&remote, &data, &dir, &Deadline::new(60))
+        })
+        .unwrap()
+        .unwrap();
+        use std::os::unix::ffi::OsStrExt as _;
+        assert!(
+            manifest.entries.contains_key(name.as_bytes()),
+            "manifest must retain the complete filename bytes"
+        );
+        assert!(!manifest.entries.contains_key(b"victim".as_slice()), "the filename suffix must not become a second manifest path");
+        let _ = std::fs::remove_dir_all(base);
+    }
+
+    fn toolchain_cargo() -> PathBuf {
+        let rustup_home = std::env::var_os("RUSTUP_HOME")
+            .filter(|path| !path.is_empty())
+            .map(PathBuf::from)
+            .unwrap_or_else(|| PathBuf::from(std::env::var_os("HOME").unwrap()).join(".rustup"));
+        let mut toolchains: Vec<_> = std::fs::read_dir(rustup_home.join("toolchains"))
+            .unwrap()
+            .flatten()
+            .map(|e| e.path())
+            .collect();
+        toolchains.sort();
+        toolchains.into_iter().map(|p| p.join("bin/cargo")).find(|p| p.is_file()).expect("the active rustup toolchain must provide cargo")
+    }
+
+    /// 真 Cargo path dependency 的 A→B→A：同一個測試名稱每次讀取 rsync 過去的來源檔，並與編入 test artifact 的 crate 值比較。
+    /// 若沿用另一棵 worktree 的 crate artifact，當前來源檔與編入的回傳值不同，該次測試就會失敗。
+    #[test]
+    fn path_dependency_worktrees_rebuild_the_matching_real_cargo_artifacts() {
+        if !has_program("rsync") {
+            return;
+        }
+        let base = base();
+        let (remote, a, data) = fake_remote(&base, 60, "exit 0\n");
+        std::fs::write(a.join("Cargo.toml"), "[workspace]\nmembers = [\"crates/am-base\", \"app\"]\nresolver = \"2\"\n").unwrap();
+        std::fs::create_dir_all(a.join("crates/am-base/src")).unwrap();
+        std::fs::write(
+            a.join("crates/am-base/Cargo.toml"),
+            "[package]\nname = \"am-base\"\nversion = \"0.1.0\"\nedition = \"2021\"\n",
+        )
+        .unwrap();
+        std::fs::write(a.join("crates/am-base/src/a.txt"), "B\n").unwrap();
+        std::fs::write(a.join("crates/am-base/src/b.txt"), "B\n").unwrap();
+        symlink("a.txt", a.join("crates/am-base/src/input.txt")).unwrap();
+        std::fs::write(
+            a.join("crates/am-base/src/lib.rs"),
+            "pub fn marker() -> &'static str { include_str!(\"input.txt\").trim() }\n",
+        )
+        .unwrap();
+        std::fs::create_dir_all(a.join("app/src")).unwrap();
+        std::fs::write(a.join("app/Cargo.toml"), "[package]\nname = \"app\"\nversion = \"0.1.0\"\nedition = \"2021\"\n[dependencies]\nam-base = { path = \"../crates/am-base\" }\n").unwrap();
+        std::fs::write(a.join("app/src/lib.rs"), "#[cfg(test)] mod tests { #[test] fn source_matches_current_tree() { let source = std::fs::read_to_string(concat!(env!(\"CARGO_MANIFEST_DIR\"), \"/../crates/am-base/src/input.txt\")).unwrap(); assert_eq!(am_base::marker(), source.trim()); } }\n").unwrap();
+        let b = base.join("worktree-b");
+        add_linked_worktree(&a, &b);
+        std::fs::write(a.join("crates/am-base/src/a.txt"), "A\n").unwrap();
+        std::fs::remove_file(b.join("crates/am-base/src/input.txt")).unwrap();
+        symlink("b.txt", b.join("crates/am-base/src/input.txt")).unwrap();
+        let old_source_mtime = std::time::UNIX_EPOCH + Duration::from_secs(10);
+        set_mtime(&a.join("crates/am-base/src/a.txt"), old_source_mtime);
+        set_mtime(&b.join("crates/am-base/src/b.txt"), old_source_mtime);
+        assert_eq!(cache_hash(&a), cache_hash(&b));
+        let dir = base.join("rc").join(cache_hash(&a)).join("shared");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::create_dir_all(base.join("cargo-home")).unwrap();
+        let cargo = toolchain_cargo();
+        let rustc = cargo.parent().unwrap().join("rustc");
+        let run = |tree: &Path| {
+            let sync = with_fake_transport(&base, || sync_source(&remote, &data, tree, &dir.display().to_string(), &Deadline::new(60)));
+            sync.expect("source tree sync should succeed");
+            assert_eq!(
+                std::fs::read_to_string(dir.join("crates/am-base/src/input.txt")).unwrap(),
+                std::fs::read_to_string(tree.join("crates/am-base/src/input.txt")).unwrap(),
+                "the shared source tree must match the current worktree before Cargo runs"
+            );
+            let output = Command::new(&cargo)
+                .args(["test", "--offline", "-p", "app", "--target-dir"])
+                .arg(dir.join("target"))
+                .args(["--", "source_matches_current_tree"])
+                .current_dir(&dir)
+                .env("CARGO_HOME", base.join("cargo-home"))
+                .env("RUSTC", &rustc)
+                .output()
+                .unwrap();
+            let stdout = String::from_utf8_lossy(&output.stdout);
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            assert!(output.status.success() && stdout.contains("running 1 test") && stdout.contains("source_matches_current_tree"), "{tree:?}: {stdout}\n{stderr}");
+        };
+        use_real_rsync_for_fake_remote(&base);
+        run(&a);
+        run(&b);
+        run(&a);
+        let _ = std::fs::remove_dir_all(base);
+    }
+
+    /// Root-level directory symlinks can feed include_str! from another workspace package;
+    /// any manifest difference must invalidate the consumer crate's Cargo fingerprint.
+    #[test]
+    fn cross_package_directory_symlink_rebuilds_the_matching_real_cargo_artifacts() {
+        if !has_program("rsync") {
+            return;
+        }
+        let base = base();
+        let (remote, a, data) = fake_remote(&base, 60, "exit 0\n");
+        std::fs::write(
+            a.join("Cargo.toml"),
+            "[workspace]\nmembers = [\"crates/am-base\", \"app\"]\nresolver = \"2\"\n",
+        )
+        .unwrap();
+        std::fs::create_dir_all(a.join("crates/am-base/src")).unwrap();
+        std::fs::write(
+            a.join("crates/am-base/Cargo.toml"),
+            "[package]\nname = \"am-base\"\nversion = \"0.1.0\"\nedition = \"2021\"\n",
+        )
+        .unwrap();
+        std::fs::write(a.join("crates/am-base/src/lib.rs"), "pub fn marker() -> &'static str { \"ok\" }\n").unwrap();
+        std::fs::create_dir_all(a.join("app/src")).unwrap();
+        std::fs::write(
+            a.join("app/Cargo.toml"),
+            "[package]\nname = \"app\"\nversion = \"0.1.0\"\nedition = \"2021\"\n[dependencies]\nam-base = { path = \"../crates/am-base\" }\n",
+        )
+        .unwrap();
+        std::fs::write(
+            a.join("app/src/lib.rs"),
+            "pub const INCLUDED: &str = include_str!(\"../../assets/value.txt\");\n#[cfg(test)] mod tests { #[test] fn source_matches_current_tree() { let source = std::fs::read_to_string(concat!(env!(\"CARGO_MANIFEST_DIR\"), \"/../assets/value.txt\")).unwrap(); assert_eq!(super::INCLUDED.trim(), source.trim()); assert_eq!(am_base::marker(), \"ok\"); } }\n",
+        )
+        .unwrap();
+        std::fs::create_dir_all(a.join("assets-a")).unwrap();
+        std::fs::create_dir_all(a.join("assets-b")).unwrap();
+        std::fs::write(a.join("assets-a/value.txt"), "asset A\n").unwrap();
+        std::fs::write(a.join("assets-b/value.txt"), "asset B\n").unwrap();
+        symlink("assets-a", a.join("assets")).unwrap();
+
+        let b = base.join("worktree-b");
+        add_linked_worktree(&a, &b);
+        std::fs::remove_file(b.join("assets")).unwrap();
+        symlink("assets-b", b.join("assets")).unwrap();
+        let old_mtime = std::time::UNIX_EPOCH + Duration::from_secs(10);
+        set_mtime(&a.join("assets-a/value.txt"), old_mtime);
+        set_mtime(&a.join("assets-b/value.txt"), old_mtime);
+        set_mtime(&b.join("assets-a/value.txt"), old_mtime);
+        set_mtime(&b.join("assets-b/value.txt"), old_mtime);
+
+        assert_eq!(cache_hash(&a), cache_hash(&b), "linked worktrees must share the repo cache key");
+        let dir = base.join("rc").join(cache_hash(&a)).join("shared");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::create_dir_all(base.join("cargo-home")).unwrap();
+        let cargo = toolchain_cargo();
+        let rustc = cargo.parent().unwrap().join("rustc");
+        let run = |tree: &Path| {
+            let sync = with_fake_transport(&base, || {
+                sync_source(&remote, &data, tree, &dir.display().to_string(), &Deadline::new(60))
+            });
+            sync.expect("source tree sync should succeed");
+            let current = std::fs::read_to_string(tree.join("assets/value.txt")).unwrap();
+            assert_eq!(std::fs::read_to_string(dir.join("assets/value.txt")).unwrap(), current);
+            let output = Command::new(&cargo)
+                .args(["test", "--offline", "-p", "app", "--target-dir"])
+                .arg(dir.join("target"))
+                .args(["--", "source_matches_current_tree"])
+                .current_dir(&dir)
+                .env("CARGO_HOME", base.join("cargo-home"))
+                .env("RUSTC", &rustc)
+                .output()
+                .unwrap();
+            let stdout = String::from_utf8_lossy(&output.stdout);
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            assert!(output.status.success() && stdout.contains("running 1 test") && stdout.contains("source_matches_current_tree"), "{tree:?}: {stdout}\n{stderr}");
+        };
+        use_real_rsync_for_fake_remote(&base);
+        run(&a);
+        run(&b);
+        run(&a);
+        let _ = std::fs::remove_dir_all(base);
+    }
+
     /// 假 cargo 留下的 `cargo-started-<pid>`（在 `<root>/<hash>/`）裡的 pid。
     fn started_cargo_pids(base: &Path) -> Vec<i32> {
         let mut pids = Vec::new();
@@ -3406,6 +4463,11 @@ mod guard_tests {
             .map(|i| {
                 let cwd = base.join(format!("wt{i}"));
                 std::fs::create_dir_all(&cwd).unwrap();
+                std::fs::write(
+                    cwd.join("Cargo.toml"),
+                    format!("[package]\nname = \"wt{i}\"\nversion = \"0.1.0\"\n"),
+                )
+                .unwrap();
                 let (remote, data, base) = (remote.clone(), data.clone(), base.clone());
                 std::thread::spawn(move || {
                     with_fake_transport(&base, || run_offload(&remote, &data, &cwd, &["test".to_string()], &Deadline::new(remote.timeout_secs)))
@@ -3428,7 +4490,7 @@ mod guard_tests {
         let (mut remote, cwd, data) = fake_remote(&base, 3, "sleep 1\nexit 0\n");
         remote.max_concurrent = 1;
         // #1853：名額只等 3 秒後會 overflow；改等同 worktree 的 shared 鎖，仍驗證排隊不算執行逾時。
-        let hash = format!("{:016x}", fnv1a64(&cwd.to_string_lossy()));
+        let hash = cache_hash(&cwd);
         let mut holder = guard_with(&base, &hash, "job-1-1", Admission { max: 1, ..QUICK });
         let release = std::thread::spawn(move || {
             std::thread::sleep(Duration::from_secs(4));
