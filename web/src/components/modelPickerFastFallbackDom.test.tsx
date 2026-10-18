@@ -71,3 +71,49 @@ test('API 正常、新模型有 Fast tier：切過去時不動 Fast', async () =
   await click(other)
   assert.deepEqual(fastChanges, [])
 })
+
+test('API 失敗走內建清單：切模型時不動 effort（不把使用者設定的 effort 清成 null）(#1821)', async () => {
+  await act(() => useStore.setState({ models: { 'codex@local@': null } } as never))
+  const effortChanges: (string | null)[] = []
+  const [first, second] = MODEL_OPTIONS.codex
+  const el = await mount(
+    <ApiModelFields kind="codex" host="local" model={first} onModel={() => {}} effort="high" onEffort={(v) => effortChanges.push(v)} fast={false} onFast={() => {}} />,
+  )
+  const other = modelButtons(el).find((b) => b.title.startsWith(second))
+  assert.ok(other, '內建清單裡有另一個模型')
+  await click(other)
+  assert.deepEqual(effortChanges, [], '內建清單 efforts 為空時不動 effort')
+})
+
+test('API 清單 efforts 非空且不含目前 effort：改回 default_effort (#1821)', async () => {
+  const api: ModelInfo[] = [
+    { ...info('model-a', false), efforts: ['low', 'medium', 'high'], default_effort: 'medium' },
+    { ...info('model-b', false), efforts: ['low', 'medium'], default_effort: 'low' },
+  ]
+  await act(() => useStore.setState({ models: { 'codex@local@': api } } as never))
+  const effortChanges: (string | null)[] = []
+  const el = await mount(
+    <ApiModelFields kind="codex" host="local" model="model-a" onModel={() => {}} effort="high" onEffort={(v) => effortChanges.push(v)} fast={false} onFast={() => {}} />,
+  )
+  const bBtn = modelButtons(el).find((b) => b.title.startsWith('model-b'))
+  assert.ok(bBtn, 'API 清單裡有 model-b')
+  await click(bBtn)
+  assert.deepEqual(effortChanges, ['low'], '不支援目前 effort 時改回新模型的 default_effort')
+})
+
+test('API 清單 efforts 非空且包含目前 effort：不動 effort (#1821)', async () => {
+  const api: ModelInfo[] = [
+    { ...info('model-a', false), efforts: ['low', 'medium', 'high'], default_effort: 'medium' },
+    { ...info('model-b', false), efforts: ['low', 'medium', 'high'], default_effort: 'low' },
+  ]
+  await act(() => useStore.setState({ models: { 'codex@local@': api } } as never))
+  const effortChanges: (string | null)[] = []
+  const el = await mount(
+    <ApiModelFields kind="codex" host="local" model="model-a" onModel={() => {}} effort="high" onEffort={(v) => effortChanges.push(v)} fast={false} onFast={() => {}} />,
+  )
+  const bBtn = modelButtons(el).find((b) => b.title.startsWith('model-b'))
+  assert.ok(bBtn, 'API 清單裡有 model-b')
+  await click(bBtn)
+  assert.deepEqual(effortChanges, [], '新模型包含目前 effort 時不動 effort')
+})
+
