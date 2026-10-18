@@ -1391,7 +1391,7 @@ abort 之後照常 flush 出去（但先照下一段等寬限）。要取消排�
 下次時間存在 `turns.flush_retries`／`turns.next_flush_at`，時間未到的其他喚醒不動它，但**要補掛一個到期才燒的 timer**
 （叫醒它的那個 timer 燒掉後就不在了，不補的話這顆 bot 一個 timer 都沒有，排隊的派工要等 30 分鐘保險絲，review3 L1）；
 每顆 bot 同時只有一個重試 timer，**更早的會換掉已經掛著的**（差 1 秒以內算同一個，不換）；放回
-12 次仍送不出就標 failed 並插說明（同一個 transaction）。daemon 自己排的通知（turn 的可信 queue class 為 `daemon`，`lifecycle::daemon_notice`）上限只有 3 次（約兩分鐘）：用完就標 failed＋說明讓路（#562）。daemon 重啟（`reconcile::rearm_progress`）時掃描**所有** queued turn
+12 次仍送不出就標 failed 並插說明（同一個 transaction）；交易提交後推該 system 訊息的 `message_added`，讓聊天視窗即時顯示失敗原因。daemon 自己排的通知（turn 的可信 queue class 為 `daemon`，`lifecycle::daemon_notice`）上限只有 3 次（約兩分鐘）：用完就標 failed＋說明讓路（#562），提交後同樣推 `message_added`。若失敗收尾 CAS 已輸給別的路徑，不插說明也不推事件。daemon 重啟（`reconcile::rearm_progress`）時掃描**所有** queued turn
 （沒有 `next_flush_at` 的當作現在到期），以 `max(now, next_flush_at)` 為每顆 bot 重建唯一的 timer。直接送出的 409 回應則由呼叫端（或 AGM
 交辦的既有退避）重試。
 
