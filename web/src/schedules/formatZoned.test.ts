@@ -5,7 +5,7 @@
  */
 import test from 'node:test'
 import assert from 'node:assert/strict'
-import { formatDue, formatOccurrenceTime, formatZoned } from './format.ts'
+import { formatDue, formatOccurrenceTime, formatZoned, timeZoneOptions } from './format.ts'
 
 const ISO = '2030-01-01T00:00:00.000Z'
 
@@ -79,3 +79,35 @@ test('不認識的時區：最近執行列退回 UTC 並標出原時區與不支
     assert.match(out, /America\/Coyhaique 這台瀏覽器不支援，以 UTC 顯示/)
   })
 })
+
+test('#1844：即使 Intl.supportedValuesOf 不含 UTC，timeZoneOptions 仍永遠包含 UTC 且去重', () => {
+  const original = (Intl as unknown as { supportedValuesOf?: (k: string) => string[] }).supportedValuesOf
+  try {
+    // 模擬環境 1：supportedValuesOf 列舉不含 UTC（如 Node.js v22 原生環境）
+    ;(Intl as unknown as { supportedValuesOf?: (k: string) => string[] }).supportedValuesOf = (k: string) => {
+      if (k === 'timeZone') return ['Asia/Taipei', 'America/New_York']
+      return []
+    }
+    const options1 = timeZoneOptions('Asia/Taipei')
+    assert.ok(options1.includes('UTC'), '即使 current 非 UTC 且列舉不含 UTC，也必須包含 UTC')
+    assert.ok(options1.includes('Asia/Taipei'))
+    assert.equal(new Set(options1).size, options1.length, '不可有重複項')
+
+    // 模擬環境 2：supportedValuesOf 列舉已含 UTC（如 Bun 環境）
+    ;(Intl as unknown as { supportedValuesOf?: (k: string) => string[] }).supportedValuesOf = (k: string) => {
+      if (k === 'timeZone') return ['UTC', 'Asia/Taipei']
+      return []
+    }
+    const options2 = timeZoneOptions('UTC')
+    assert.ok(options2.includes('UTC'))
+    assert.equal(new Set(options2).size, options2.length, '包含 UTC 時不可重複')
+
+    // 模擬環境 3：不支援 supportedValuesOf 的舊瀏覽器
+    ;(Intl as unknown as { supportedValuesOf?: (k: string) => string[] }).supportedValuesOf = undefined
+    const options3 = timeZoneOptions('Asia/Taipei')
+    assert.deepEqual(options3, ['Asia/Taipei', 'UTC'])
+  } finally {
+    ;(Intl as unknown as { supportedValuesOf?: (k: string) => string[] }).supportedValuesOf = original
+  }
+})
+
