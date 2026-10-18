@@ -83,5 +83,12 @@ export function defaultTimeZone(): string {
 
 export function timeZoneOptions(current: string): string[] {
   const list = (Intl as unknown as { supportedValuesOf?: (k: string) => string[] }).supportedValuesOf?.('timeZone') ?? []
-  return list.includes(current) ? list : [current, ...list]
+  const set = new Set<string>()
+  if (current) set.add(current)
+  set.add('UTC')
+  for (const tz of list) {
+    set.add(tz)
+  }
+  return Array.from(set)
 }
+
