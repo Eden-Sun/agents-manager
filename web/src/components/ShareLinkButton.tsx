@@ -1,8 +1,9 @@
 import { useEffect, useRef, useState } from 'react'
-import { fetchShare, rotateShare, setShareEnabled, shareErrorText, type ShareState } from '../api/share'
+import { rotateShare, setShareEnabled, shareErrorText, type ShareState } from '../api/share'
 import { useMenuKeys } from '../hooks/useMenuKeys'
 import { asyncCopyAvailable, copyText } from '../lib/copyText'
 import { shareIcon } from '../lib/shareProfile'
+import { useShareRequests } from '../hooks/useShareRequests'
 import { useStore } from '../store/store'
 import { ConfirmDialog } from './ConfirmDialog'
 import './shareLinkButton.css'
@@ -53,19 +54,16 @@ export function ShareLinkButton({ botId }: { botId: string }) {
   const wrapRef = useRef<HTMLSpanElement>(null)
   const menuRef = useRef<HTMLSpanElement>(null)
   const mainRef = useRef<HTMLButtonElement>(null)
+  const { currentRev, readAt, beginPost, applyPost, isCurrentPost, isCurrentRead } = useShareRequests(
+    botId,
+    (state, revision) => setFetched({ rev: revision, share: state }),
+  )
 
-  // 分享中就先把連結抓好：按下去同步複製，不用等網路（剪貼簿要在使用者手勢裡）。
+  // 預先讀取分享狀態：按下去同步複製，不用等網路（剪貼簿要在使用者手勢裡）。
   useEffect(() => {
-    if (!restricted || !enabled) return
-    let alive = true
-    fetchShare(botId).then(
-      (s) => alive && setFetched({ rev, share: s }),
-      () => {},
-    )
-    return () => {
-      alive = false
-    }
-  }, [botId, restricted, enabled, rev])
+    if (!restricted) return
+    void readAt(rev).promise.catch(() => {})
+  }, [botId, restricted, rev, readAt])
 
   useEffect(() => {
     if (!menu) return
@@ -100,17 +98,29 @@ export function ShareLinkButton({ botId }: { botId: string }) {
 
   const run = async (what: () => Promise<ShareState>, done: string, selectDone?: string) => {
     setBusy(true)
+    const post = beginPost()
     try {
-      const s = await what()
-      setFetched({ rev, share: s })
+      let response: ShareState
+      try {
+        response = await what()
+      } catch (e) {
+        if (isCurrentPost(post)) notify('error', shareErrorText(e))
+        return
+      }
+
+      let effective = response
+      try {
+        effective = await applyPost(post, response)
+      } catch (e) {
+        notify('error', shareErrorText(e))
+        return
+      }
       // 不能寫剪貼簿：把選單打開，連結就在第一項（重產後 rev 一變，上面的 effect 會再抓一次新連結）。
-      if (s.enabled && selectOnly && selectDone) {
+      if (effective.enabled && selectOnly && selectDone) {
         openMenu()
         notify('info', selectDone)
-      } else if (s.enabled) copy(s, done)
-      else notify('info', done)
-    } catch (e) {
-      notify('error', shareErrorText(e))
+      } else if (effective.enabled) copy(effective, done)
+      else notify('info', response.enabled ? '分享已關閉' : done)
     } finally {
       setBusy(false)
     }
@@ -127,12 +137,12 @@ export function ShareLinkButton({ botId }: { botId: string }) {
   const onCopyFromMenu = () => {
     setMenu(false)
     // 複製是唯讀操作；重新讀取伺服器狀態，不能從過期的本機旗標重開分享。
-    const requestRev = rev
-    void fetchShare(botId).then(
+    const requestRev = currentRev()
+    const request = readAt(requestRev)
+    void request.promise.then(
       (s) => {
         // GET 期間若別處重產連結，這份回應已過期，不要複製舊 URL。
-        if ((useStore.getState().shareRev[botId] ?? 0) !== requestRev) return
-        setFetched({ rev: requestRev, share: s })
+        if (!isCurrentRead(request)) return
         if (!s.enabled) {
           useStore.setState((state) => ({
             bots: state.bots.map((b) => (b.id === botId ? { ...b, share_enabled: false } : b)),

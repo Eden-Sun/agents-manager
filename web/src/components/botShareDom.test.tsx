@@ -459,8 +459,10 @@ test('聊天分享鈕：複製連結重新讀取狀態，不會把別處剛關�
     await until(() => releaseGets.length === 1, '分享版本變更後的讀取開始')
     await click(mainBtn())
     await click(btn('複製連結'))
-    await until(() => releaseGets.length >= 2 || calls.some((c) => c.method === 'POST'), '選單複製期間讀取狀態')
-    releaseGets.forEach((release) => release())
+    await settle(20)
+    assert.equal(releaseGets.length, 1, '選單複製共用 rev 變更後已在途的 GET')
+    assert.equal(calls.filter((c) => c.method === 'GET' && c.path.endsWith('/share')).length, 1)
+    releaseGets[0]()
     await settle(50)
 
     assert.equal(calls.filter((c) => c.method === 'POST' && c.path.endsWith('/share')).length, 0, '只複製不能送出開啟分享的 POST')
@@ -605,3 +607,361 @@ test('讀取一直失敗時不會無限重試', async () => {
     globalThis.fetch = origFetch
   }
 })
+
+test('分享設定：晚到的 POST 回應不覆蓋較新 WS/GET，且仍執行通知（issue #1826 情境 a）', async () => {
+  const { rawTransport } = await import('../api/index')
+  const orig = rawTransport.request.bind(rawTransport)
+  const notifications: string[] = []
+  const state = (url: string) => ({
+    enabled: true,
+    url,
+    allow_embed: false,
+    needs_rotate: false,
+    token_hint: null,
+    created_at: null,
+    last_used_at: null,
+  })
+  let current = state('https://example.invalid/s/initial')
+  let resolvePost!: (x: unknown) => void
+
+  rawTransport.request = (async (method: string) =>
+    method === 'POST' ? await new Promise((r) => { resolvePost = r }) : current) as typeof rawTransport.request
+
+  try {
+    await act(async () =>
+      useStore.setState({
+        bots: [{ id: 'b-1826', share_profile: 'trusted', share_enabled: true }],
+        shareRev: { 'b-1826': 0 },
+        notify: (_k: string, msg: string) => void notifications.push(msg),
+      } as never),
+    )
+    await mount(<BotShareSection botId="b-1826" />)
+    await settle(50)
+    const value = () => document.querySelector<HTMLInputElement>('input[aria-label="分享連結"]')?.value
+    assert.equal(value(), current.url)
+
+    await click(btn('重產連結'))
+    await click(btn('重產'))
+    assert.ok(resolvePost)
+
+    // 別處重產觸發 WS/GET 最新狀態
+    current = state('https://example.invalid/s/latest-from-other-device')
+    await act(async () => useStore.setState({ shareRev: { 'b-1826': 2 } } as never))
+    await settle(50)
+    assert.equal(value(), current.url)
+
+    // 晚到的 POST 放行，不覆蓋較新狀態，但通知仍有發出
+    await act(async () => resolvePost(state('https://example.invalid/s/obsolete-local-post')))
+    await settle(50)
+    assert.equal(value(), 'https://example.invalid/s/latest-from-other-device')
+    assert.ok(notifications.some((m) => m.includes('已重產連結，舊連結已失效')))
+  } finally {
+    rawTransport.request = orig
+  }
+})
+
+test('分享面板：同 rev 的 share_enabled 變更後重新讀取狀態', async () => {
+  const { rawTransport } = await import('../api/index')
+  const orig = rawTransport.request.bind(rawTransport)
+  let getCalls = 0
+  const state = (enabled: boolean) => ({
+    enabled,
+    url: enabled ? 'https://example.invalid/s/current' : null,
+    allow_embed: false,
+    needs_rotate: false,
+    token_hint: null,
+    created_at: null,
+    last_used_at: null,
+  })
+  rawTransport.request = (async (method: string) => {
+    if (method === 'GET') return ++getCalls === 1 ? state(true) : state(false)
+    throw new Error(`unexpected ${method}`)
+  }) as typeof rawTransport.request
+
+  try {
+    await act(async () => useStore.setState({
+      bots: [{ id: 'b-1826-toggle', share_profile: 'restricted', share_enabled: true }],
+      shareRev: { 'b-1826-toggle': 0 },
+    } as never))
+    await mount(<BotShareSection botId="b-1826-toggle" />)
+    await settle(50)
+    assert.equal(getCalls, 1)
+    assert.equal(document.querySelector<HTMLInputElement>('input[aria-label="分享連結"]')?.value, state(true).url)
+
+    await act(async () => useStore.setState({
+      bots: [{ id: 'b-1826-toggle', share_profile: 'restricted', share_enabled: false }],
+      shareRev: { 'b-1826-toggle': 0 },
+    } as never))
+    await until(() => getCalls === 2, '同 rev 的開關變更觸發新的 GET')
+    await settle(50)
+    assert.equal(document.querySelector<HTMLInputElement>('.bs-share-toggle input')?.checked, false)
+    assert.equal(document.querySelector('input[aria-label="分享連結"]'), null)
+  } finally {
+    rawTransport.request = orig
+  }
+})
+
+test('分享面板：已有 URL 時，別處重產或關閉先隱藏舊連結', async () => {
+  const { rawTransport } = await import('../api/index')
+  const orig = rawTransport.request.bind(rawTransport)
+  const state = (enabled: boolean, url: string | null) => ({
+    enabled,
+    url,
+    allow_embed: false,
+    needs_rotate: false,
+    token_hint: null,
+    created_at: null,
+    last_used_at: null,
+  })
+  let getCalls = 0
+  let resolveRotate!: (share: unknown) => void
+  let resolveClose!: (share: unknown) => void
+  rawTransport.request = (async (method: string) => {
+    assert.equal(method, 'GET')
+    if (++getCalls === 1) return state(true, 'https://example.invalid/s/old')
+    if (getCalls === 2) return await new Promise((resolve) => { resolveRotate = resolve })
+    if (getCalls === 3) return await new Promise((resolve) => { resolveClose = resolve })
+    throw new Error(`unexpected GET ${getCalls}`)
+  }) as typeof rawTransport.request
+
+  try {
+    await act(async () => useStore.setState({
+      bots: [{ id: 'b-1826-rev', share_profile: 'restricted', share_enabled: true }],
+      shareRev: { 'b-1826-rev': 0 },
+    } as never))
+    await mount(<BotShareSection botId="b-1826-rev" />)
+    await until(() => getCalls === 1, '初始 GET 完成')
+    await settle(50)
+    assert.equal(document.querySelector<HTMLInputElement>('input[aria-label="分享連結"]')?.value, 'https://example.invalid/s/old')
+
+    await act(async () => useStore.setState({ shareRev: { 'b-1826-rev': 1 } } as never))
+    await until(() => getCalls === 2, '別處重產後發出 GET')
+    assert.equal(document.querySelector('input[aria-label="分享連結"]'), null, '新 URL 到達前不顯示／複製舊 URL')
+    await act(async () => resolveRotate(state(true, 'https://example.invalid/s/new')))
+    await until(
+      () => document.querySelector<HTMLInputElement>('input[aria-label="分享連結"]')?.value === 'https://example.invalid/s/new',
+      '顯示新 URL',
+    )
+
+    await act(async () => useStore.setState({
+      bots: [{ id: 'b-1826-rev', share_profile: 'restricted', share_enabled: false }],
+      shareRev: { 'b-1826-rev': 2 },
+    } as never))
+    await until(() => getCalls === 3, '別處關閉後發出 GET')
+    assert.equal(document.querySelector('input[aria-label="分享連結"]'), null, '關閉狀態確認前不顯示失效 URL')
+    await act(async () => resolveClose(state(false, null)))
+    await settle(50)
+    assert.equal(document.querySelector<HTMLInputElement>('.bs-share-toggle input')?.checked, false)
+  } finally {
+    rawTransport.request = orig
+  }
+})
+
+test('分享按鈕與面板：自己 POST 時 WS 事件先到、POST 回應後到 → 仍複製／通知且顯示正確連結（issue #1826 情境 b）', async () => {
+  const { rawTransport } = await import('../api/index')
+  const orig = rawTransport.request.bind(rawTransport)
+  const notifications: string[] = []
+  const copied: string[] = []
+  const nav = navigator as unknown as { clipboard?: unknown }
+  const origClip = nav.clipboard
+  Object.defineProperty(navigator, 'clipboard', {
+    configurable: true,
+    value: { writeText: async (t: string) => void copied.push(t) },
+  })
+  const origExec = document.execCommand
+  document.execCommand = () => false
+
+  const state = (url: string) => ({
+    enabled: true,
+    url,
+    allow_embed: false,
+    needs_rotate: false,
+    token_hint: null,
+    created_at: null,
+    last_used_at: null,
+  })
+
+  const newUrl = 'https://example.invalid/s/post-produced-link'
+  let getCalls = 0
+  let resolveGet!: (x: unknown) => void
+  let resolvePost!: (x: unknown) => void
+
+  rawTransport.request = (async (method: string) => {
+    if (method === 'POST') return await new Promise((r) => { resolvePost = r })
+    getCalls += 1
+    if (getCalls === 1) return state('https://example.invalid/s/initial-button')
+    return await new Promise((r) => { resolveGet = r })
+  }) as typeof rawTransport.request
+
+  try {
+    await act(async () =>
+      useStore.setState({
+        bots: [{ id: 'b-1826-b', share_profile: 'restricted', share_enabled: true }],
+        shareRev: { 'b-1826-b': 0 },
+        notify: (_k: string, msg: string) => void notifications.push(msg),
+      } as never),
+    )
+
+    await mount(<ShareLinkButton botId="b-1826-b" />)
+    await settle(50)
+
+    // 分享中點擊主按鈕開選單，點擊重產
+    await click(mainBtn())
+    await click(btn('重產連結'))
+    await click(btn('重產'))
+    assert.ok(resolvePost, 'POST /rotate 發出中')
+
+    // 模擬 daemon 先廣播 bot_share_changed，WS 讓 store 的 shareRev 推進
+    // 此時元件因 rev 推進發起新 GET（或者尚未完成套用）
+    await act(async () => {
+      useStore.setState({ shareRev: { 'b-1826-b': 1 } } as never)
+    })
+    await until(() => getCalls === 2, 'WS 事件後的 GET 已發出')
+
+    // 本頁 POST 的 WS 事件先到，但 POST 回應不能越過仍在途的 GET。
+    await act(async () => resolvePost(state(newUrl)))
+    await settle(50)
+    assert.equal(copied.length, 0, '權威 GET 尚未完成時不能複製 POST 回應')
+
+    await act(async () => resolveGet(state(newUrl)))
+    await until(() => copied.includes(newUrl), 'GET 完成後複製新連結')
+    assert.ok(copied.includes(newUrl), `複製陣列中應包含最新連結，實際: ${JSON.stringify(copied)}`)
+    assert.ok(
+      notifications.some((m) => m.includes('已重產並複製新連結')),
+      `通知中應有完成訊息，實際: ${JSON.stringify(notifications)}`,
+    )
+  } finally {
+    rawTransport.request = orig
+    Object.defineProperty(navigator, 'clipboard', { configurable: true, value: origClip })
+    document.execCommand = origExec
+  }
+})
+
+test('分享按鈕：rev 已更新但 GET 尚未完成時，不複製晚到 POST 的舊 URL（#1826）', async () => {
+  const { rawTransport } = await import('../api/index')
+  const orig = rawTransport.request.bind(rawTransport)
+  const notifications: string[] = []
+  const copied: string[] = []
+  const nav = navigator as unknown as { clipboard?: unknown }
+  const origClip = nav.clipboard
+  Object.defineProperty(navigator, 'clipboard', {
+    configurable: true,
+    value: { writeText: async (t: string) => void copied.push(t) },
+  })
+  const origExec = document.execCommand
+  document.execCommand = () => false
+
+  const state = (url: string) => ({
+    enabled: true,
+    url,
+    allow_embed: false,
+    needs_rotate: false,
+    token_hint: null,
+    created_at: null,
+    last_used_at: null,
+  })
+  let getCalls = 0
+  let resolveGet!: (x: unknown) => void
+  let resolvePost!: (x: unknown) => void
+  rawTransport.request = (async (method: string) => {
+    if (method === 'POST') return await new Promise((r) => { resolvePost = r })
+    getCalls += 1
+    if (getCalls === 1) return state('https://example.invalid/s/initial-pending')
+    return await new Promise((r) => { resolveGet = r })
+  }) as typeof rawTransport.request
+
+  try {
+    await act(async () => useStore.setState({
+      bots: [{ id: 'b-1826-pending', share_profile: 'restricted', share_enabled: true }],
+      shareRev: { 'b-1826-pending': 0 },
+      notify: (_k: string, msg: string) => void notifications.push(msg),
+    } as never))
+    await mount(<ShareLinkButton botId="b-1826-pending" />)
+    await settle(50)
+    await click(mainBtn())
+    await click(btn('重產連結'))
+    await click(btn('重產'))
+    assert.ok(resolvePost, 'POST /rotate 已發出')
+
+    await act(async () => useStore.setState({ shareRev: { 'b-1826-pending': 1 } } as never))
+    await until(() => getCalls === 2, '較新的 GET 已發出')
+    await act(async () => resolvePost(state('https://example.invalid/s/obsolete-post')))
+    await settle(50)
+    assert.deepEqual(copied, [], 'GET pending 時不可複製舊 POST URL')
+    assert.equal(notifications.some((m) => m.includes('已重產並複製新連結')), false, 'GET pending 時不可先發成功複製通知')
+
+    const latestUrl = 'https://example.invalid/s/latest-from-get'
+    await act(async () => resolveGet(state(latestUrl)))
+    await until(() => copied.length > 0, 'GET 完成後才複製')
+    assert.deepEqual(copied, [latestUrl], '剪貼簿只能收到 GET 的最新 URL')
+    assert.ok(notifications.some((m) => m.includes('已重產並複製新連結')))
+  } finally {
+    rawTransport.request = orig
+    Object.defineProperty(navigator, 'clipboard', { configurable: true, value: origClip })
+    document.execCommand = origExec
+  }
+})
+
+test('分享面板：別處關閉後，本頁晚到的成功 POST 不會重新顯示舊連結（#1826）', async () => {
+  const { rawTransport } = await import('../api/index')
+  const orig = rawTransport.request.bind(rawTransport)
+  const notifications: string[] = []
+  const disabled = {
+    enabled: false,
+    url: null,
+    allow_embed: false,
+    needs_rotate: false,
+    token_hint: null,
+    created_at: null,
+    last_used_at: null,
+  }
+  let getCalls = 0
+  let resolveGet!: (x: unknown) => void
+  let resolvePost!: (x: unknown) => void
+  rawTransport.request = (async (method: string) => {
+    if (method === 'POST') return await new Promise((r) => { resolvePost = r })
+    getCalls += 1
+    if (getCalls === 1) return disabled
+    return await new Promise((r) => { resolveGet = r })
+  }) as typeof rawTransport.request
+
+  try {
+    await act(async () => useStore.setState({
+      bots: [{ id: 'b-1826-close', share_profile: 'trusted', share_enabled: false }],
+      shareRev: { 'b-1826-close': 0 },
+      notify: (_k: string, msg: string) => void notifications.push(msg),
+    } as never))
+    await mount(<BotShareSection botId="b-1826-close" />)
+    await settle(50)
+    const toggle = document.querySelector<HTMLInputElement>('.bs-share-toggle input')!
+    assert.equal(toggle.disabled, false)
+    await click(toggle)
+    assert.ok(resolvePost, '開啟分享 POST 已發出')
+
+    await act(async () => useStore.setState({
+      bots: [{ id: 'b-1826-close', share_profile: 'trusted', share_enabled: false }],
+      shareRev: { 'b-1826-close': 1 },
+    } as never))
+    await until(() => getCalls === 2, '關閉事件後的 GET 已發出')
+    await act(async () => resolvePost({
+      enabled: true,
+      url: 'https://example.invalid/s/obsolete-after-close',
+      allow_embed: false,
+      needs_rotate: false,
+      token_hint: null,
+      created_at: null,
+      last_used_at: null,
+    }))
+    await settle(50)
+    assert.equal(document.querySelector('.bs-share-body'), null, 'GET pending 時不能重新顯示舊分享連結')
+
+    await act(async () => resolveGet(disabled))
+    await settle(50)
+    assert.equal(toggle.checked, false, '權威 GET 回來後分享保持關閉')
+    assert.equal(document.querySelector('input[aria-label="分享連結"]'), null)
+    assert.ok(notifications.includes('分享已關閉'), '成功通知反映最新狀態')
+  } finally {
+    rawTransport.request = orig
+  }
+})
+
