@@ -9,6 +9,14 @@ resolver = "2"
 [workspace.metadata.agents-manager.remote-cargo]
 exclude = ["/web/node_modules"]
 
+# 開發版（dev／test 繼承）只留行號表：workspace 自己的程式碼的 backtrace 仍有檔名與行號（外部依賴的 frame 不保證有），連結與 target 體積明顯變小（issue #1859）。
+# 依賴套件不要除錯資訊（`debug = false`），它們的 debuginfo 只會拖慢連結。
+[profile.dev]
+debug = "line-tables-only"
+
+[profile.dev.package."*"]
+debug = false
+
 [profile.release]
 strip = true
 lto = "thin"
