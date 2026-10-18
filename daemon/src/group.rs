@@ -13,7 +13,7 @@ pub struct Member {
 
 /// Excludes only whitespace and sentence punctuation, so CJK nicknames work (`@小幫手，看一下`).
 fn mention_char(c: char) -> bool {
-    !c.is_whitespace() && !"@,:;?!。，、！？()（）[]{}<>\"'".contains(c)
+    !c.is_whitespace() && !"@,:;?!。，、：；！？()（）[]{}<>\"'".contains(c)
 }
 
 /// 名字裡有空白的成員（2026-09-19 使用者：「bot name should be able to include space」）：`@my bot` 在第一個空白就被
@@ -629,6 +629,18 @@ mod strip_tests {
         let cjk = [m("小幫手")];
         assert_eq!(parse_mentions("@小幫手，看一下", &cjk).len(), 1);
         assert_eq!(strip_mentions("@小幫手，看一下", &cjk), "看一下");
+        assert_eq!(parse_mentions("@小幫手：看一下", &cjk).iter().map(|m| m.id.as_str()).collect::<Vec<_>>(), ["小幫手"]);
+        assert_eq!(parse_mentions("@小幫手；看一下", &cjk).iter().map(|m| m.id.as_str()).collect::<Vec<_>>(), ["小幫手"]);
+        assert_eq!(strip_mentions("@小幫手：看一下", &cjk), "看一下");
+        assert_eq!(strip_mentions("@小幫手；看一下", &cjk), "看一下");
+        assert_eq!(parse_mentions("@all：看一下", &cjk).iter().map(|m| m.id.as_str()).collect::<Vec<_>>(), ["小幫手"]);
+        assert_eq!(strip_mentions("@all：看一下", &cjk), "看一下");
+
+        let spaced_cjk = [m("小 幫手")];
+        assert_eq!(parse_mentions("@小 幫手：看一下", &spaced_cjk).iter().map(|m| m.id.as_str()).collect::<Vec<_>>(), ["小 幫手"]);
+        assert_eq!(parse_mentions("@小 幫手；看一下", &spaced_cjk).iter().map(|m| m.id.as_str()).collect::<Vec<_>>(), ["小 幫手"]);
+        assert_eq!(strip_mentions("@小 幫手：看一下", &spaced_cjk), "看一下");
+        assert_eq!(strip_mentions("@小 幫手；看一下", &spaced_cjk), "看一下");
     }
 }
 
