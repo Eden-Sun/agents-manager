@@ -942,13 +942,16 @@ pub async fn post_revise(
     let delivery_mode = b.delivery_mode.clone().unwrap_or_else(|| parent.delivery_mode.clone());
     let executor_kind = b.executor_kind.clone().unwrap_or_else(|| parent.executor_kind.clone());
     let on_5h_limit = b.on_5h_limit.clone().unwrap_or_else(|| parent.on_5h_limit.clone());
-    let max_rounds = b.max_rounds.unwrap_or(parent.max_rounds);
+    let max_rounds = match b.max_rounds {
+        Some(max_rounds) if !(0..=10).contains(&max_rounds) => {
+            return Err(LcError::Bad("max_rounds must be 0..=10".into()));
+        }
+        Some(max_rounds) => max_rounds,
+        None => parent.max_rounds,
+    };
     one_of("delivery_mode", &delivery_mode, &["push_main", "pr"])?;
     one_of("executor_kind", &executor_kind, &["claude", "codex", "grok"])?;
     one_of("on_5h_limit", &on_5h_limit, &["wait", "switch"])?;
-    if !(0..=10).contains(&max_rounds) {
-        return Err(LcError::Bad("max_rounds must be 0..=10".into()));
-    }
     // 專案還在、還是本機（跟 post_mission 同一條線）——原任務的專案可能已經被刪或改成遠端。
     let project = crate::db::project(&app.db, &parent.project_id)
         .await
@@ -2993,6 +2996,87 @@ mod tests {
         assert_eq!(again["created"], false);
         let err = post_revise(State(app.clone()), Path(id.clone()), HeaderMap::new(), Json(rev("不一樣的要求", "rev1"))).await.unwrap_err();
         assert_eq!(conflict_reason(err), "request_id_reused");
+    }
+
+    #[tokio::test]
+    async fn a_revision_inherits_the_parent_round_limit_and_validates_explicit_limits() {
+        let env = crate::testing::env().await;
+        let app = env.app.clone();
+        let mut input = new_mission("revise-limit-10", "pr");
+        input.max_rounds = Some(10);
+        let Json(parent) = post_mission(State(app.clone()), Path(env.project_id.clone()), Json(input)).await.unwrap();
+        let parent_id = parent["id"].as_str().unwrap().to_string();
+        let _ = post_complete(State(app.clone()), Path(parent_id.clone()), HeaderMap::new(), Json(done("完成", Some("no_changes"), None)))
+            .await
+            .unwrap();
+        let Json(child) = post_revise(State(app.clone()), Path(parent_id), HeaderMap::new(), Json(rev("續作 10 輪任務", "revise-inherit-10")))
+            .await
+            .unwrap();
+        assert_eq!(child["max_rounds"], 10, "省略時沿用 max_rounds=10");
+
+        // 從合法的上限 10 開始，依照 API 放行流程產生 11，再完成任務。
+        let env = crate::testing::env().await;
+        let app = env.app.clone();
+        let (_origin, worktree) = with_origin(&env);
+        let mut input = new_mission("revise-limit-resume", "pr");
+        input.max_rounds = Some(10);
+        let Json(parent) = post_mission(State(app.clone()), Path(env.project_id.clone()), Json(input)).await.unwrap();
+        let parent_id = parent["id"].as_str().unwrap().to_string();
+        let round = |crid: &str| {
+            post_round(
+                State(app.clone()),
+                Path(parent_id.clone()),
+                Some(Json(RoundIn { client_request_id: Some(crid.into()) })),
+            )
+        };
+        for n in 1..=10 {
+            let crid = format!("resume-round-{n}");
+            let Json(out) = round(&crid).await.unwrap();
+            assert_eq!(out["rounds_used"].as_i64(), Some(n));
+            let assignment_crid = format!("resume-executor-{n}");
+            mission_assignment(&app, &parent_id, &assignment_crid, "executor", "completed").await;
+        }
+        assert_eq!(conflict_reason(round("resume-limit").await.unwrap_err()), "max_rounds");
+        let Json(resumed) = post_resume(State(app.clone()), Path(parent_id.clone())).await.unwrap();
+        assert_eq!(resumed["max_rounds"], 11, "使用者放行 max_rounds 暫停會增加一輪");
+        let Json(last_round) = round("resume-round-11").await.unwrap();
+        assert_eq!(last_round["rounds_used"], 11);
+        let Json(completed) = post_complete(
+            State(app.clone()),
+            Path(parent_id.clone()),
+            HeaderMap::new(),
+            Json(done("完成", Some("no_changes"), Some(&worktree))),
+        )
+        .await
+        .unwrap();
+        assert_eq!(completed["status"], "done");
+        assert_eq!(load(&app, &parent_id).await.unwrap().max_rounds, 11, "結案保留合法放行後的上限");
+
+        let Json(inherited) = post_revise(State(app.clone()), Path(parent_id.clone()), HeaderMap::new(), Json(rev("續作 11 輪任務", "revise-inherit-11")))
+            .await
+            .unwrap();
+        assert_eq!(inherited["max_rounds"], 11, "省略時沿用合法繼承值 max_rounds=11");
+        let inherited_id = inherited["id"].as_str().unwrap().to_string();
+        let _ = post_complete(State(app.clone()), Path(inherited_id), HeaderMap::new(), Json(done("完成", Some("no_changes"), None)))
+            .await
+            .unwrap();
+
+        let mut explicit_ten = rev("續作明填 10", "revise-explicit-10");
+        explicit_ten.max_rounds = Some(10);
+        let Json(clamped) = post_revise(State(app.clone()), Path(parent_id.clone()), HeaderMap::new(), Json(explicit_ten)).await.unwrap();
+        assert_eq!(clamped["max_rounds"], 10, "明填 10 仍按新任務規則接受");
+        let clamped_id = clamped["id"].as_str().unwrap().to_string();
+        let _ = post_complete(State(app.clone()), Path(clamped_id), HeaderMap::new(), Json(done("完成", Some("no_changes"), None)))
+            .await
+            .unwrap();
+
+        let mut explicit_eleven = rev("續作明填 11", "revise-explicit-11");
+        explicit_eleven.max_rounds = Some(11);
+        assert!(matches!(
+            post_revise(State(app.clone()), Path(parent_id.clone()), HeaderMap::new(), Json(explicit_eleven)).await,
+            Err(LcError::Bad(message)) if message == "max_rounds must be 0..=10"
+        ));
+        assert_eq!(store::children(&app.db, &parent_id).await.unwrap().len(), 2, "拒絕明填 11 時不新增續作");
     }
 
     #[tokio::test]
