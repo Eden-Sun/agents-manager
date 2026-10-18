@@ -19,6 +19,11 @@ import { agoLabel } from '../lib/agoLabel'
 
 const STATE_KEY = 'am.issueState'
 type IssueState = 'open' | 'closed'
+type IssueScope = { projectId: string; githubUrl: string; repo: string; state: IssueState; query: string; generation: number }
+
+function sameIssueScope(a: IssueScope, b: IssueScope): boolean {
+  return a.projectId === b.projectId && a.githubUrl === b.githubUrl && a.repo === b.repo && a.state === b.state && a.query === b.query && a.generation === b.generation
+}
 
 function readState(): IssueState {
   try {
@@ -64,6 +69,7 @@ export function IssuesBar({
   const [authError, setAuthError] = useState(false)
   const [openCount, setOpenCount] = useState<number | null>(null)
   const [fetching, setFetching] = useState<number | null>(null)
+  const [issuesScope, setIssuesScope] = useState<IssueScope | null>(null)
   // `''` = 專案本身；掛在 projectId 上，換專案自然歸零，不用在 effect 裡 setState。
   const [subsFor, setSubsFor] = useState<{ pid: string; subs: ProjectSubmodule[] }>({ pid: '', subs: [] })
   const [repoFor, setRepoFor] = useState<{ pid: string; repo: string }>({ pid: '', repo: '' })
@@ -73,6 +79,8 @@ export function IssuesBar({
   const wrap = useRef<HTMLDivElement>(null)
   const searchRef = useRef<HTMLInputElement>(null)
   const seq = useRef(0)
+  const scopeGen = useRef(0)
+  const detailSeq = useRef(0)
   const tabsId = useId()
 
   useEffect(() => {
@@ -99,27 +107,53 @@ export function IssuesBar({
     }
   }, [projectId, githubUrl, repo])
 
+  useEffect(() => {
+    scopeGen.current++
+    seq.current++
+    detailSeq.current++
+    setIssues(null)
+    setIssuesScope(null)
+    setLoading(false)
+    setFetching(null)
+    setError(null)
+    setAuthError(false)
+  }, [projectId, githubUrl])
+
+  const invalidateScope = () => {
+    scopeGen.current++
+    seq.current++
+    detailSeq.current++
+    setLoading(false)
+    setFetching(null)
+    setError(null)
+    setAuthError(false)
+  }
+
   const load = useCallback(
     async (st: IssueState, query: string) => {
       const id = ++seq.current
+      const generation = scopeGen.current
+      const requestScope: IssueScope = { projectId, githubUrl: githubUrl ?? '', repo, state: st, query: query.trim(), generation }
       setLoading(true)
       setError(null)
       setAuthError(false)
       try {
         const list = await api.fetchIssues(projectId, { state: st, limit: ISSUE_PAGE_LIMIT, q: query.trim() || undefined, repo })
-        if (id !== seq.current) return
+        if (id !== seq.current || generation !== scopeGen.current) return
         setIssues(list)
+        setIssuesScope(requestScope)
         if (st === 'open' && !query.trim()) setOpenCount((prev) => openCountFromPage(prev, list.length))
       } catch (e) {
-        if (id !== seq.current) return
+        if (id !== seq.current || generation !== scopeGen.current) return
         setIssues(null)
+        setIssuesScope(null)
         setAuthError(isGhAuthError(e))
         setError(errorText(e))
       } finally {
-        if (id === seq.current) setLoading(false)
+        if (id === seq.current && generation === scopeGen.current) setLoading(false)
       }
     },
-    [projectId, repo],
+    [projectId, githubUrl, repo],
   )
 
   const retryIssues = useCallback(() => {
@@ -152,9 +186,12 @@ export function IssuesBar({
 
   if (!github) return null
 
+  const currentScope: IssueScope = { projectId, githubUrl: githubUrl ?? '', repo, state, query: q.trim(), generation: scopeGen.current }
+  const shownIssues = issuesScope && sameIssueScope(issuesScope, currentScope) ? issues : null
   const shown = submodules.find((s) => s.path === repo)?.github ?? github
 
   const pickState = (st: IssueState) => {
+    invalidateScope()
     setState(st)
     try {
       localStorage.setItem(STATE_KEY, st)
@@ -192,18 +229,25 @@ export function IssuesBar({
     })
   }
 
-  const insertRef = (i: Issue) => insert(formatGithubIssuePrompt(i))
+  const insertRef = (i: Issue, source: IssueScope) => {
+    if (source.generation !== scopeGen.current) return
+    insert(formatGithubIssuePrompt(i))
+  }
 
-  const insertFull = async (i: Issue) => {
+  const insertFull = async (i: Issue, source: IssueScope) => {
+    if (source.generation !== scopeGen.current) return
+    const detailId = ++detailSeq.current
     setFetching(i.number)
     try {
-      const d = await api.fetchIssue(projectId, i.number, repo)
+      const d = await api.fetchIssue(source.projectId, i.number, source.repo)
+      if (source.generation !== scopeGen.current) return
       const body = (d?.body ?? '').trim() || '（沒有內容）'
       insert(formatGithubIssuePrompt({ ...i, content_notice: d?.content_notice ?? i.content_notice }, body))
     } catch (e) {
+      if (source.generation !== scopeGen.current) return
       notify('error', `讀取 #${i.number} 失敗：${errorText(e)}`)
     } finally {
-      setFetching(null)
+      if (detailId === detailSeq.current) setFetching(null)
     }
   }
 
@@ -240,7 +284,10 @@ export function IssuesBar({
               placeholder="搜尋 issue（標題 / #號）…"
               aria-label="搜尋 issue（標題或 #號）"
               spellCheck={false}
-              onChange={(e) => setQ(e.target.value)}
+              onChange={(e) => {
+                invalidateScope()
+                setQ(e.target.value)
+              }}
             />
             {submodules.length > 0 ? (
               <select
@@ -249,8 +296,10 @@ export function IssuesBar({
                 title="這個專案有 submodule：選要看哪個 repo 的 issue"
                 value={repo}
                 onChange={(e) => {
+                  invalidateScope()
                   setRepo(e.target.value)
                   setIssues(null)
+                  setIssuesScope(null)
                 }}
               >
                 <option value="">{github.owner}/{github.repo}</option>
@@ -276,14 +325,14 @@ export function IssuesBar({
               <div>{error}</div>
               {authError ? <GhLoginButton host={host} onLoggedIn={retryIssues} /> : null}
             </div>
-          ) : loading && !issues ? (
+          ) : loading && !shownIssues ? (
             <div className="issues-status">載入中…</div>
-          ) : issues && issues.length === 0 ? (
+          ) : shownIssues && shownIssues.length === 0 ? (
             <div className="issues-status">沒有符合的 {state} issue{q ? `（${q}）` : ''}。</div>
           ) : null}
-          {issues && issues.length > 0 ? (
+          {shownIssues && shownIssues.length > 0 && issuesScope ? (
             <ul className={`issues-list${loading ? ' stale' : ''}`}>
-              {issues.map((i) => (
+              {shownIssues.map((i) => (
                 <li key={i.number} className="issue-row">
                   <div className="issue-main">
                     <a className="issue-title" href={safeHttpUrl(i.url)} target="_blank" rel="noopener noreferrer" title={i.body_excerpt || i.title}>
@@ -302,7 +351,7 @@ export function IssuesBar({
                     </div>
                   </div>
                   <div className="issue-actions">
-                    <button type="button" className="mini-btn" title="插入「#號 標題」與連結到輸入框游標處" onClick={() => insertRef(i)}>
+                    <button type="button" className="mini-btn" title="插入「#號 標題」與連結到輸入框游標處" onClick={() => insertRef(i, issuesScope)}>
                       插入
                     </button>
                     <button
@@ -310,7 +359,7 @@ export function IssuesBar({
                       className="mini-btn primary"
                       disabled={fetching === i.number}
                       title="再讀取完整內容，以引用區塊（> ）插入"
-                      onClick={() => void insertFull(i)}
+                      onClick={() => void insertFull(i, issuesScope)}
                     >
                       {fetching === i.number ? '讀取中…' : '插入完整內容'}
                     </button>
