@@ -38,9 +38,14 @@ fn the_store_reports_changes_and_forgets() {
     assert_eq!(of(&id).as_deref(), Some("乙"));
     assert!(forget(&id));
     assert_eq!(of(&id), None);
-    set(&id, Some("丙".into()));
-    retain_runs(&["other".to_string()]);
-    assert_eq!(of(&id), None, "run 結束（不在名單上）就清帳");
+
+    let mut suggestions = std::collections::HashMap::from([
+        (id.clone(), "丙".to_string()),
+        ("other".to_string(), "保留".to_string()),
+    ]);
+    retain_runs_in(&mut suggestions, &["other".to_string()]);
+    assert!(!suggestions.contains_key(&id), "run 結束（不在名單上）就清帳");
+    assert_eq!(suggestions.get("other").map(String::as_str), Some("保留"));
 }
 
 #[test]

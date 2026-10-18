@@ -10,6 +10,12 @@ pub(crate) async fn check_drift(pool: &SqlitePool) -> anyhow::Result<()> {
 }
 
 pub(crate) async fn open_test_db(path: &Path) -> anyhow::Result<SqlitePool> {
+    crate::app_ports_p1::open(path).await
+}
+
+/// Migration/schema-guard suites opt out here: `runners::am_base_tests::db`,
+/// `runners::am_base_tests::db_schema_guard`, and the app_ports composition test.
+pub(crate) async fn open_test_db_uncached(path: &Path) -> anyhow::Result<SqlitePool> {
     crate::db::open_with(path, composition_features()).await
 }
 

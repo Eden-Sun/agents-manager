@@ -1,6 +1,6 @@
 #![allow(unused_imports)]
-use super::{apply_migrations, apply_migrations_failing_after_spawn_hints_drop, migrate, open_test_db};
-use super::open_test_db as open;
+use super::{apply_migrations, apply_migrations_failing_after_spawn_hints_drop, migrate};
+use super::open_test_db_uncached as open;
 use crate::db::*;
 use anyhow::{Context, Result};
 use sqlx::sqlite::{SqliteConnectOptions, SqlitePoolOptions};
