@@ -10,7 +10,7 @@ use crate::db;
 use crate::lifecycle;
 use crate::state::App;
 use anyhow::{Context, Result};
-use chrono::{DateTime, SecondsFormat, Utc};
+use chrono::{DateTime, Duration, SecondsFormat, Utc};
 use serde_json::json;
 use crate::lifecycle::send_now::ports::MaintenancePort;
 use std::sync::Arc;
@@ -129,7 +129,13 @@ pub(crate) async fn materialize(pool: &sqlx::SqlitePool, s: &Schedule, now: &str
     let Some(due) = s.next_due.clone() else { return Ok(()) };
     let spec: Spec = serde_json::from_str(&s.spec_json).context("spec_json")?;
     let now_dt = DateTime::parse_from_rfc3339(now)?.with_timezone(&Utc);
-    let next = time::next_after(&spec, &s.tz, now_dt)?.map(fmt);
+    // `next_due` is stored to milliseconds while an interval anchor can retain
+    // nanoseconds. At the exact stored due millisecond, `next_after(now)` can
+    // still return the occurrence just materialized; move past the consumed
+    // due before calculating its successor.
+    let due_dt = DateTime::parse_from_rfc3339(&due)?.with_timezone(&Utc);
+    let after_due = due_dt.checked_add_signed(Duration::milliseconds(1)).unwrap_or(due_dt);
+    let next = time::next_after(&spec, &s.tz, now_dt.max(after_due))?.map(fmt);
     let mut tx = db::begin_write(pool).await?;
     // 交易內重讀：到期判斷與寫入之間可能被停用、編輯或刪除。
     let Some(cur) = store::get_schedule_tx(&mut tx, &s.id).await? else { return Ok(()) };
