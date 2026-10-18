@@ -1374,7 +1374,7 @@ PATH 上的 herdr 會補 `-p`、`--no-daemon`、`-c project_doc_max_bytes=0`：*
 在同一個 session 裡用 `open` 換頁，**禁止**另開 session、**禁止**一個網址開一個新分頁。\n\
 - **結束就關**：工作做完、或收掉子 agent 之前，**必須先** `agent-browser --session {agent_name} close`。\
 瀏覽器留著不關，RAM 就是這樣被吃光的。\n\
-- **登入態**（使用者 2026-10-15）：**禁止**替使用者登入；使用者可以在自己的環境用 agent-browser 登入，\
+- **登入態**（使用者 2026-10-15）：使用者要你登入時可以照做；使用者也可以在自己的環境用 agent-browser 登入，\
 再把登入態（`--state` 檔、cookie、session）交給你的 session 接著執行。登入態檔算憑證：**禁止**放 scratchpad、`$AM_OUTBOX` 或 repo，用完就刪。\n\
 \n\
 輸出檔案（同樣是硬規則，使用者 2026-09-16 裁示）：\n\
@@ -1388,8 +1388,7 @@ PATH 上的 herdr 會補 `-p`、`--no-daemon`、`-c project_doc_max_bytes=0`：*
 \n\
 CLI 登入／OAuth（同樣是硬規則，使用者 2026-10-03 裁示）：\n\
 \n\
-- **一律用不開瀏覽器的模式**：CLI 要做 OAuth 或登入時（gcloud、gh、az、aws sso、firebase…），**禁止**讓它在這台機器開瀏覽器，\
-**禁止**用 agent-browser 或其他瀏覽器替使用者登入。\n\
+- **一律用不開瀏覽器的模式**：CLI 要做 OAuth 或登入時（gcloud、gh、az、aws sso、firebase…），**禁止**讓它在這台機器開瀏覽器。\n\
 - **旗標**：`gcloud auth login --no-browser`（ADC 用 `gcloud auth application-default login --no-browser`）、`az login --use-device-code`、\
 `aws sso login --use-device-code`、`firebase login --no-localhost`、gh 用 `GH_BROWSER=echo gh auth login --web`（印出網址與一次性碼）。\
 使用者回覆手邊沒有裝 gcloud 的電腦時，gcloud 改用 `--no-launch-browser`（網址＋驗證碼，手機就能完成）。\n\
@@ -2193,7 +2192,8 @@ mod model_args_tests {
         for want in ["gcloud auth login --no-browser", "--use-device-code", "firebase login --no-localhost", "GH_BROWSER=echo", "--no-launch-browser"] {
             assert!(rule.contains(want), "要點名旗標：{want}");
         }
-        assert!(rule.contains("禁止**用 agent-browser 或其他瀏覽器替使用者登入"));
+        // 使用者 2026-10-18：拿掉「禁止替使用者登入」，兩處都不能再注入。
+        assert!(!rule.contains("替使用者登入"), "「禁止替使用者登入」已拿掉");
         // 使用者 2026-10-15：使用者自己登入後可以把登入態交給 bot 的 session；舊的「禁止搬 cookie」不能再注入。
         assert!(!rule.contains("搬瀏覽器的 cookie"), "舊規則要拿掉");
         assert!(rule.contains("**登入態**（使用者 2026-10-15）") && rule.contains("交給你的 session 接著執行"));
