@@ -1469,7 +1469,11 @@ def _unit_semantics(raw: bytes) -> dict:
     section = ""
     pending = ""
     for n, line in enumerate(text.splitlines(), 1):
-        line = pending + line.strip()
+        line = line.strip()
+        # systemd 在反斜線續行中允許完整註解行；跳過時不能清掉待接續的值。
+        if line and line[0] in "#;":
+            continue
+        line = pending + line
         pending = ""
         if line.endswith("\\"):
             pending = line[:-1] + " "

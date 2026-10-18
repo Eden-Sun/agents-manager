@@ -2443,6 +2443,44 @@ class OpsSyncTest(CliCase):
                          ["bin/a.sh", "bin/b.sh", "systemd/com.agm.x.service", "systemd/com.agm.x.timer", "t.md"])
         self.assertEqual(sorted(x["target"] for x in r["skipped"]), ["LaunchAgents/com.agm.x.plist", "bin/c.sh"])
 
+    def test_linux_ops_sync_ignores_comment_blocks_inside_unit_continuations(self):
+        self.with_units()
+        source = "scripts/ops/systemd/com.agm.x.service"
+        original = "ExecStart=/bin/bash %h/AGM/bin/x.sh\n"
+        repo_command = (
+            "ExecStart=/bin/bash \\\n"
+            "  --mode \\\n"
+            "  %h/AGM/bin/x.sh\n"
+        )
+        installed_command = (
+            "ExecStart=/bin/bash \\\n"
+            "  # first comment\n"
+            "  ; second comment\n"
+            "  # third comment\n"
+            "  --mode \\\n"
+            "  %h/AGM/bin/x.sh\n"
+        )
+        repo_service = self.SERVICE.replace(original, repo_command)
+        installed_service = self.SERVICE.replace(original, installed_command)
+        self.put(source, repo_service)
+        self.git("commit", "-qam", "unit ExecStart continuation")
+        self.git("update-ref", "refs/remotes/origin/main", "HEAD")
+        (self.units / "com.agm.x.service").write_text(installed_service, encoding="utf-8")
+        (self.units / "com.agm.x.timer").write_text(self.TIMER.format(1800), encoding="utf-8")
+
+        report = self.report()
+        self.assertTrue(report["in_sync"], report)
+        self.assertEqual(report["drift"], [])
+
+        changed_service = installed_service.replace("%h/AGM/bin/x.sh", "%h/AGM/bin/other.sh")
+        (self.units / "com.agm.x.service").write_text(changed_service, encoding="utf-8")
+        report = self.report()
+        self.assertFalse(report["in_sync"], report)
+        [row] = [item for item in report["drift"] if item["target"] == "systemd/com.agm.x.service"]
+        exec_start = row["diff"]["Service.ExecStart"]
+        self.assertIn("%h/AGM/bin/x.sh", exec_start["repo"][0])
+        self.assertIn("%h/AGM/bin/other.sh", exec_start["installed"][0])
+
     def test_linux_unit_interval_and_dropped_environment_are_drift(self):
         """#487 的本體換到 systemd：間隔改掉要講出兩邊的值；`Environment=` 整行掉了（job 少了 PATH）也是落差。"""
         self.with_units()
