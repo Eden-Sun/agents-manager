@@ -3,9 +3,9 @@
  * 送出時照差集逐頁驗證，對不上就停手。預載失敗整個退回即時模式（`BlockedChoices`），不留半套草稿。
  */
 import { useEffect, useRef, useState } from 'react'
-import { commit, pageNeedsCommit, preload, typeToPaste, wantOf, type Draft, type Io } from '../lib/choiceDraft'
+import { commit, pageNeedsCommit, preload, readChoiceMenu, typeToPaste, wantOf, type Draft, type Io } from '../lib/choiceDraft'
 import { acquirePreload, restartPreload } from '../lib/draftPreload'
-import { isTypeSomething, parseChoiceMenu, typedAnswerHere, type TuiChoiceMenu } from '../lib/tuiChoices'
+import { isTypeSomething, typedAnswerHere, type TuiChoiceMenu } from '../lib/tuiChoices'
 import { useStore } from '../store/store'
 import { BlockedChoices } from './BlockedChoices'
 import { TypeAnswerField } from './TypeAnswerField'
@@ -42,13 +42,7 @@ export function BlockedDraft({
 
   const io: Io = {
     // 讀取量收到 60 行：選單只佔畫面下半部，200 行太重（第五輪 B）。
-    read: async () => {
-      try {
-        return parseChoiceMenu((await readTerminal(botId, 'visible', 60)).text)
-      } catch {
-        return null
-      }
-    },
+    read: () => readChoiceMenu(async () => (await readTerminal(botId, 'visible', 60)).text),
     send: (keys) => sendKeys(botId, keys),
     wait: (ms) => new Promise((r) => setTimeout(r, ms)),
     paste: async (text) => {
@@ -93,6 +87,9 @@ export function BlockedDraft({
       setWant(d.pages.map((p) => wantOf(p)))
       setCustom(d.pages.map(() => ''))
       setPhase('ready')
+    }).catch(() => {
+      // 預載期間的終端讀取失敗就退回即時模式，不能把 rejected job 留成 unhandled rejection。
+      if (alive) setPhase('live')
     })
     return () => {
       alive = false

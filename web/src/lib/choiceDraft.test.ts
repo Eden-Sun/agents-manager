@@ -1,6 +1,6 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
-import { commit, locate, moveTab, pageNeedsCommit, preload, radioPick, samePage, togglesFor, wantOf, type Draft, type DraftPage, type Io } from './choiceDraft.ts'
+import { commit, locate, moveTab, pageNeedsCommit, preload, radioPick, readChoiceMenu, samePage, togglesFor, wantOf, type Draft, type DraftPage, type Io } from './choiceDraft.ts'
 import { parseChoiceMenu, typedAnswerHere, type TuiChoiceMenu, type TuiTab } from './tuiChoices.ts'
 
 /**
@@ -783,6 +783,11 @@ for (const wrap of [false, true]) {
 const SURVEY_WANT = [[false, false, true, false], [true, false, false, false], [true, false, false, false], []]
 const SURVEY_CUSTOM = ['拿掉拋單', '', '', '']
 
+test('讀取終端失敗保留為錯誤；成功讀取但沒有選單才回 null', async () => {
+  await assert.rejects(readChoiceMenu(async () => { throw new Error('GET terminal 503') }), /GET terminal 503/)
+  assert.equal(await readChoiceMenu(async () => '一般終端輸出，沒有選單'), null)
+})
+
 test('真機單選問卷：終端已經停在 Review（上一輪最後那顆 Enter 沒送到），再按一次送出 → 不重答、只按 Submit answers', async () => {
   const tui = new FakeAutoRadioTui()
   const draft = await preload(tui.io(), parseChoiceMenu(tui.screen())!)
@@ -838,6 +843,92 @@ test('最後一顆 Enter 沒被吃掉：回一句看得懂的錯誤，不是靜�
   )
   assert.equal(res.ok, false)
   assert.match(res.error ?? '', /Submit answers/)
+})
+
+test('交卷後 GET 503／逾時都讀不到：結果不明要回錯誤，不能當成已離開送出頁', async () => {
+  const tui = new FakeAutoRadioTui()
+  const draft = await preload(tui.io(), parseChoiceMenu(tui.screen())!)
+  assert.ok(draft)
+  const base = tui.io()
+  let finalEnter = false
+  let confirmationReads = 0
+  const io: Io = {
+    ...base,
+    send: async (keys) => {
+      await base.send(keys)
+      if (tui.tab === 3 && keys[0] === 'enter' && tui.submitted) finalEnter = true
+    },
+    read: async () => {
+      if (finalEnter) {
+        confirmationReads += 1
+        throw new Error(confirmationReads === 1 ? 'GET terminal 503' : 'GET terminal timeout')
+      }
+      return base.read()
+    },
+  }
+
+  const result = await commit(io, draft, SURVEY_WANT, undefined, SURVEY_CUSTOM)
+  assert.equal(result.ok, false)
+  assert.match(result.error ?? '', /無法確認是否交卷/)
+  assert.equal(confirmationReads, 6, '讀取失敗會用完剩餘確認次數，不回成功')
+  assert.equal(tui.submitted, true)
+})
+
+test('交卷確認先 GET 失敗、之後仍讀到 Submit：回未交卷錯誤', async () => {
+  const tui = new FakeAutoRadioTui()
+  const draft = await preload(tui.io(), parseChoiceMenu(tui.screen())!)
+  assert.ok(draft)
+  const base = tui.io()
+  let finalEnter = false
+  let confirmationReads = 0
+  const io: Io = {
+    ...base,
+    send: async (keys) => {
+      if (tui.tab === 3 && keys[0] === 'enter') {
+        finalEnter = true
+        return
+      }
+      await base.send(keys)
+    },
+    read: async () => {
+      if (finalEnter) {
+        confirmationReads += 1
+        if (confirmationReads === 1) throw new Error('GET terminal 503')
+      }
+      return base.read()
+    },
+  }
+
+  const result = await commit(io, draft, SURVEY_WANT, undefined, SURVEY_CUSTOM)
+  assert.equal(result.ok, false)
+  assert.match(result.error ?? '', /還停在送出頁/)
+  assert.ok(confirmationReads > 1)
+  assert.equal(tui.submitted, false)
+})
+
+test('交卷確認先 GET 失敗、之後成功讀到離開 Submit：才回成功', async () => {
+  const tui = new FakeAutoRadioTui()
+  const draft = await preload(tui.io(), parseChoiceMenu(tui.screen())!)
+  assert.ok(draft)
+  const base = tui.io()
+  let finalEnter = false
+  let confirmationReads = 0
+  const io: Io = {
+    ...base,
+    send: async (keys) => {
+      await base.send(keys)
+      if (tui.tab === 3 && keys[0] === 'enter' && tui.submitted) finalEnter = true
+    },
+    read: async () => {
+      if (finalEnter && confirmationReads++ === 0) throw new Error('GET terminal timeout')
+      return base.read()
+    },
+  }
+
+  const result = await commit(io, draft, SURVEY_WANT, undefined, SURVEY_CUSTOM)
+  assert.deepEqual(result, { ok: true })
+  assert.equal(tui.submitted, true)
+  assert.equal(confirmationReads, 2, '讀取錯誤後下一次有效觀測到離頁才算成功')
 })
 
 /** 翻頁偵測（2026-10-17，#1816）：兩頁題目都切掉（null）或問句相同時，只靠題目分不出換頁。 */
