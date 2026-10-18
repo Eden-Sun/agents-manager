@@ -93,26 +93,11 @@ export function ScheduleEditor({
   onSelect: (id: string) => void
 }) {
   const bots = useStore((s) => s.bots)
+  const schedulesRev = useStore((s) => s.schedulesRev)
   const selectBot = useStore((s) => s.selectBot)
   const [detail, setDetail] = useState<ScheduleDetail | null>(null)
   // 綁定 turn 的即時狀態（queued→in_flight→終態）：變了就重抓詳情；排程自己的事件也重抓。
   const liveStatus = useLiveTurnStatus(detail?.open?.bot_id, detail?.open?.turn_id)
-  const reload = useCallback(() => {
-    if (!scheduleId) return
-    getSchedule(scheduleId)
-      .then((d) => setDetail(d))
-      .catch(() => undefined)
-  }, [scheduleId])
-  useOnTurnChange(liveStatus, reload)
-  useEffect(() => {
-    if (!scheduleId) return
-    const onChanged = (ev: Event) => {
-      const d = (ev as CustomEvent<{ id?: string }>).detail
-      if (d?.id === scheduleId) reload()
-    }
-    window.addEventListener('agm:schedules_changed', onChanged)
-    return () => window.removeEventListener('agm:schedules_changed', onChanged)
-  }, [scheduleId, reload])
   const [form, setForm] = useState<FormState>(() => emptyForm(''))
   // 載入當下的排程（id）、時區與時間（`specOf`）：存檔時跟表單比，沒變就不送 spec（#1807）。
   // 帶 id：換了排程、還沒載入完成時對不上，保守送 spec（#1812）。
@@ -125,6 +110,58 @@ export function ScheduleEditor({
   const [loadError, setLoadError] = useState<string | null>(null)
   // 建立的冪等 key：重送同一張表單用同一個；後端說 key 已用在別的內容上才換新的。
   const [createKey, setCreateKey] = useState(() => newClientRequestId())
+  const detailRequestSequence = useRef(0)
+  const formLoadedFor = useRef<string | null>(null)
+
+  const loadLatestDetail = useCallback(async () => {
+    if (!scheduleId) return null
+    const requestId = ++detailRequestSequence.current
+    try {
+      const d = await getSchedule(scheduleId)
+      if (detailRequestSequence.current !== requestId) return null
+      setDetail(d)
+      // 若初次載入被較新的重抓取代，由第一筆最新成功的回應初始化表單。
+      if (formLoadedFor.current !== scheduleId) {
+        formLoadedFor.current = scheduleId
+        const loaded = fromDetail(d)
+        setForm((prev) => {
+          const next = { ...loaded }
+          for (const key of touchedRef.current) next[key] = prev[key] as never
+          return next
+        })
+        setBaseline({ id: scheduleId, tz: loaded.tz, spec: specOf(loaded) })
+      }
+      setLoadError(null)
+      setLoading(false)
+      return d
+    } catch (e) {
+      if (detailRequestSequence.current !== requestId) return null
+      if (formLoadedFor.current !== scheduleId) setLoadError(errText(e))
+      setLoading(false)
+      throw e
+    }
+  }, [scheduleId])
+  const reload = useCallback(() => {
+    void loadLatestDetail().catch(() => undefined)
+  }, [loadLatestDetail])
+
+  // 重連／resync 時重抓詳情；只更新 detail，不覆蓋使用者正在編輯的 form。
+  const seenScheduleRev = useRef({ scheduleId, rev: schedulesRev })
+  useEffect(() => {
+    const previous = seenScheduleRev.current
+    seenScheduleRev.current = { scheduleId, rev: schedulesRev }
+    if (previous.scheduleId === scheduleId && previous.rev !== schedulesRev) reload()
+  }, [reload, scheduleId, schedulesRev])
+  useOnTurnChange(liveStatus, reload)
+  useEffect(() => {
+    if (!scheduleId) return
+    const onChanged = (ev: Event) => {
+      const d = (ev as CustomEvent<{ id?: string }>).detail
+      if (d?.id === scheduleId) reload()
+    }
+    window.addEventListener('agm:schedules_changed', onChanged)
+    return () => window.removeEventListener('agm:schedules_changed', onChanged)
+  }, [scheduleId, reload])
 
   // 只列能接收排程的 Bot：同專案、一般 Bot、非 child／分享／受限（daemon 也會再驗一次）。
   const eligible = useMemo(
@@ -139,34 +176,17 @@ export function ScheduleEditor({
     if (!scheduleId) {
       setLoading(false)
       touchedRef.current.clear()
+      formLoadedFor.current = null
       return
     }
-    const id = scheduleId
-    let alive = true
     setLoading(true)
     touchedRef.current.clear()
-    getSchedule(id)
-      .then((d) => {
-        if (!alive) return
-        setDetail(d)
-        const loaded = fromDetail(d)
-        setForm((prev) => {
-          // 若已有使用者編輯過的欄位，保留使用者輸入，其餘欄位套用載入值
-          const next = { ...loaded }
-          for (const k of touchedRef.current) {
-            next[k] = prev[k] as never
-          }
-          return next
-        })
-        setBaseline({ id, tz: loaded.tz, spec: specOf(loaded) })
-        setLoadError(null)
-      })
-      .catch((e: unknown) => alive && setLoadError(errText(e)))
-      .finally(() => alive && setLoading(false))
+    formLoadedFor.current = null
+    void loadLatestDetail().catch(() => undefined)
     return () => {
-      alive = false
+      detailRequestSequence.current += 1
     }
-  }, [scheduleId])
+  }, [loadLatestDetail, scheduleId])
 
   // 建立時預設第一顆可用 Bot（之後使用者可改）：推導出來，不用 effect 寫回表單。
   const effectiveBotId = form.botId || (scheduleId ? '' : (eligible[0]?.id ?? ''))
@@ -257,8 +277,7 @@ export function ScheduleEditor({
       const r = await runScheduleNow(scheduleId, createRequestId(runKey))
       accepted = true
       setNotice(r.occurrence ? `已排進 Bot：${occurrenceLine(r.occurrence)}` : '已有未結束的執行，沿用它')
-      setDetail(await getSchedule(scheduleId))
-      settleCreateRequest(runKey)
+      if (await loadLatestDetail()) settleCreateRequest(runKey)
     } catch (e) {
       if (!accepted && e instanceof ApiError && e.status >= 400 && e.status < 500) settleCreateRequest(runKey)
       setError(errText(e))
@@ -273,7 +292,7 @@ export function ScheduleEditor({
     setError(null)
     try {
       await patchSchedule(scheduleId, { enabled: !detail.enabled })
-      setDetail(await getSchedule(scheduleId))
+      await loadLatestDetail()
     } catch (e) {
       setError(errText(e))
     } finally {

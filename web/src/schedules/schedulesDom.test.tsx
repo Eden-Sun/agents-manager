@@ -9,6 +9,7 @@ import assert from 'node:assert/strict'
 import { act, click, fakeApi, keydown, mount, settle, setupDom, teardownDom, typeInto, unmountAll } from '../testing/domHarness'
 import { useStore } from '../store/store'
 import { Sidebar } from '../components/Sidebar'
+import { ProjectSchedules } from './ProjectSchedules'
 
 afterEach(unmountAll)
 before(setupDom)
@@ -105,6 +106,77 @@ test('專案 menu 列出排程（點開進編輯器）', async () => {
   assert.ok(row, '專案底下要有排程列')
   assert.match(row!.textContent ?? '', /每日摘要/)
   await act(async () => {})
+})
+
+test('排程 rev 變更後列表重抓；一般 schedules_changed 仍只更新指定專案', async () => {
+  const schedule = (id: string, name: string, enabled = true) => ({
+    id, project_id: 'p1', bot_id: 'b1', name, prompt: 'x', mode: 'daily', tz: 'UTC', spec: {},
+    next_due: '2030-01-01T00:00:00.000Z', enabled, generation: 1, notify: 'failure', created_at: '', updated_at: '', open: null,
+  })
+  let rows = [schedule('s1', '斷線前')]
+  const requests = fakeApi((req) => (req.method === 'GET' && req.path.includes('/projects/p1/schedules')
+    ? { schedules: rows }
+    : undefined))
+  await mount(<ProjectSchedules projectId="p1" onOpen={() => {}} />)
+  await settle()
+  const rowTexts = () => [...document.querySelectorAll('.project-schedule-row')].map((row) => row.textContent ?? '')
+  const listGets = () => requests.filter((r) => r.method === 'GET' && r.path.includes('/projects/p1/schedules')).length
+  assert.match(rowTexts()[0], /斷線前/)
+  assert.equal(listGets(), 1)
+
+  rows = [schedule('s1', '斷線後改名', false), schedule('s2', '斷線期間新增')]
+  await act(async () => useStore.setState((s) => ({ schedulesRev: s.schedulesRev + 1 })))
+  await settle()
+  assert.equal(rowTexts().length, 2, '掛載中的列表要補上斷線期間新增的排程')
+  assert.match(rowTexts()[0], /斷線後改名/, '掛載中的列表要更新漏掉的改名')
+  assert.match(rowTexts()[0], /已停用/, '掛載中的列表要更新漏掉的停用狀態')
+  assert.match(rowTexts()[1], /斷線期間新增/)
+  assert.equal(listGets(), 2)
+
+  await act(async () => window.dispatchEvent(new CustomEvent('agm:schedules_changed', { detail: { project_id: 'p2', id: 's1' } })))
+  await settle()
+  assert.equal(listGets(), 2, '其他專案的正常事件不能觸發重抓')
+  await act(async () => window.dispatchEvent(new CustomEvent('agm:schedules_changed', { detail: { project_id: 'p1', id: 's1' } })))
+  await settle()
+  assert.equal(listGets(), 3, '同專案的正常事件仍要觸發重抓')
+})
+
+test('列表新 GET 先回時，較舊的排程回應不能覆蓋新資料', async () => {
+  const schedule = (name: string) => ({
+    id: 's1', project_id: 'p1', bot_id: 'b1', name, prompt: 'x', mode: 'daily', tz: 'UTC', spec: {},
+    next_due: '2030-01-01T00:00:00.000Z', enabled: true, generation: 1, notify: 'failure', created_at: '', updated_at: '', open: null,
+  })
+  const realFetch = globalThis.fetch
+  let listGets = 0
+  let releaseOld: ((response: Response) => void) | null = null
+  const response = (name: string) => new Response(JSON.stringify({ schedules: [schedule(name)] }), { status: 200 })
+  globalThis.fetch = (async () => {
+    listGets += 1
+    if (listGets === 1) return response('初始')
+    if (listGets === 2) return await new Promise<Response>((resolve) => { releaseOld = resolve })
+    return response('重連後最新')
+  }) as unknown as typeof fetch
+  try {
+    await mount(<ProjectSchedules projectId="p1" onOpen={() => {}} />)
+    await settle()
+    assert.equal(listGets, 1)
+
+    await act(async () => window.dispatchEvent(new CustomEvent('agm:schedules_changed', { detail: { project_id: 'p1', id: 's1' } })))
+    assert.equal(listGets, 2, '先發出較舊的事件重抓，並扣住回應')
+    await act(async () => useStore.setState((s) => ({ schedulesRev: s.schedulesRev + 1 })))
+    await settle()
+    const rowText = () => document.querySelector('.project-schedule-row')?.textContent ?? ''
+    assert.equal(listGets, 3)
+    assert.match(rowText(), /重連後最新/)
+
+    assert.ok(releaseOld)
+    await act(async () => releaseOld!(response('較舊事件回應')))
+    await settle()
+    assert.match(rowText(), /重連後最新/)
+    assert.doesNotMatch(rowText(), /較舊事件回應/)
+  } finally {
+    globalThis.fetch = realFetch
+  }
 })
 
 test('綁定 turn 的狀態：queued→in_flight→終態，列表即時跟上（不靠 schedules_changed）', async () => {

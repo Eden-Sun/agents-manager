@@ -105,6 +105,70 @@ test('只改時區：也算時間改了，PATCH 送 spec 與新的 tz（#1812）
   assert.deepEqual(patches()[0].spec, { mode: 'interval', every_secs: 61 }, '時區變了也要送 spec')
 })
 
+test('排程 rev 變更重抓已開啟詳情但保留未儲存表單；正常事件仍只看排程 id', async () => {
+  let row = scheduleRow()
+  const requests = fakeApi((req) => {
+    if (req.method === 'GET' && req.path.endsWith('/schedules/s1')) return row
+    return undefined
+  })
+  await mount(<ScheduleEditor projectId="p1" scheduleId="s1" onClose={() => {}} onSelect={() => {}} />)
+  await settle()
+  const nameInput = document.querySelector<HTMLInputElement>('.schedule-editor input')!
+  assert.equal(nameInput.value, '每分鐘摘要')
+  const detailGets = () => requests.filter((r) => r.method === 'GET' && r.path.endsWith('/schedules/s1')).length
+  assert.equal(detailGets(), 1)
+
+  await typeInto(nameInput, '尚未儲存的名稱')
+  row = scheduleRow({ name: '其他分頁已改名' })
+  await act(async () => useStore.setState((s) => ({ schedulesRev: s.schedulesRev + 1 })))
+  await settle()
+  assert.equal(detailGets(), 2, 'resync revision 要重抓已開啟的詳情')
+  assert.equal(nameInput.value, '尚未儲存的名稱', '重抓詳情不能覆寫未儲存表單')
+
+  await act(async () => window.dispatchEvent(new CustomEvent('agm:schedules_changed', { detail: { project_id: 'p1', id: 's2' } })))
+  await settle()
+  assert.equal(detailGets(), 2, '其他排程的正常事件不能觸發重抓')
+  await act(async () => window.dispatchEvent(new CustomEvent('agm:schedules_changed', { detail: { project_id: 'p1', id: 's1' } })))
+  await settle()
+  assert.equal(detailGets(), 3, '同排程的正常事件仍要觸發重抓')
+  assert.equal(nameInput.value, '尚未儲存的名稱')
+})
+
+test('詳情新 GET 先回時，較舊的排程回應不能覆蓋新狀態', async () => {
+  const realFetch = globalThis.fetch
+  let detailGets = 0
+  let releaseOld: ((response: Response) => void) | null = null
+  const response = (enabled: boolean) => new Response(JSON.stringify(scheduleRow({ enabled })), { status: 200 })
+  globalThis.fetch = (async () => {
+    detailGets += 1
+    if (detailGets === 1) return response(true)
+    if (detailGets === 2) return await new Promise<Response>((resolve) => { releaseOld = resolve })
+    return response(true)
+  }) as unknown as typeof fetch
+  try {
+    await mount(<ScheduleEditor projectId="p1" scheduleId="s1" onClose={() => {}} onSelect={() => {}} />)
+    await settle()
+    const status = () => document.querySelector('.schedule-status')?.textContent ?? ''
+    assert.equal(detailGets, 1)
+    assert.match(status(), /啟用中/)
+
+    await act(async () => useStore.setState((s) => ({ schedulesRev: s.schedulesRev + 1 })))
+    assert.equal(detailGets, 2, 'resync 重抓先發出較舊請求，並扣住回應')
+    await act(async () => window.dispatchEvent(new CustomEvent('agm:schedules_changed', { detail: { project_id: 'p1', id: 's1' } })))
+    await settle()
+    assert.equal(detailGets, 3)
+    assert.match(status(), /啟用中/)
+
+    assert.ok(releaseOld)
+    await act(async () => releaseOld!(response(false)))
+    await settle()
+    assert.match(status(), /啟用中/)
+    assert.doesNotMatch(status(), /已停用/)
+  } finally {
+    globalThis.fetch = realFetch
+  }
+})
+
 test('建立排程仍送 spec（create 路徑不走 baseline 比對）', async () => {
   const prevBots = useStore.getState().bots
   useStore.setState({ bots: [{ id: 'b1', name: 'b', kind: 'claude', project_id: 'p1', managed_by: 'user', parent_bot_id: null, share_profile: null }] } as never)

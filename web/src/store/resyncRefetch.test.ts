@@ -70,7 +70,7 @@ test('resync 之後輸入框草稿整份重拉（lag 期間漏掉的 draft_updat
   assert.equal(useStore.getState().drafts['bot:b-resync'], '別台打的')
 })
 
-test('resync 之後總管 rev 與每顆 bot 的分享 rev 都加一：這兩份只靠事件計數，漏掉的事件沒有別的來源', async () => {
+test('resync 之後總管、排程與每顆 bot 的分享 rev 都加一：只靠事件維護的資料要補抓', async () => {
   reset()
   routeDaemon((r) => {
     if (r.path.endsWith('/state')) return json(stateBody())
@@ -79,10 +79,12 @@ test('resync 之後總管 rev 與每顆 bot 的分享 rev 都加一：這兩份�
   await useStore.getState().refreshState()
   await settle()
   const sup = useStore.getState().supervisorRev
+  const schedules = useStore.getState().schedulesRev
   const share = useStore.getState().shareRev.b1 ?? 0
   dispatchFrameForTest({ type: 'resync', seq: 5 })
   await settle()
   assert.equal(useStore.getState().supervisorRev, sup + 1)
+  assert.equal(useStore.getState().schedulesRev, schedules + 1)
   assert.equal(useStore.getState().shareRev.b1 ?? 0, share + 1)
 })
 

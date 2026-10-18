@@ -28,6 +28,7 @@ test('重連（不是第一次連上）：state、額度、草稿、身分停用
   await mount(<ChatPanel onOpenSidebar={() => {}} />)
   await settle(200)
 
+  const schedulesRev = useStore.getState().schedulesRev
   const mark = requests.length
   const before = sockets.connects()
   await sockets.drop()
@@ -35,6 +36,7 @@ test('重連（不是第一次連上）：state、額度、草稿、身分停用
   await sockets.open()
   await settle(300)
 
+  assert.equal(useStore.getState().schedulesRev, schedulesRev + 1, '重連後要 bump 排程 revision')
   const gets = requests.slice(mark).filter((r) => r.method === 'GET').map((r) => r.path.split('?')[0])
   for (const want of ['/api/state', '/api/quota', '/api/drafts', `/api/bots/${bot.id}/messages`, '/api/panes']) {
     assert.ok(gets.includes(want), `重連後沒有重抓 ${want}（抓了：${[...new Set(gets)].join(', ')}）`)

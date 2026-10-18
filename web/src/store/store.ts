@@ -476,6 +476,8 @@ export interface StoreState {
   missionsSupported: boolean
   /** `supervisor_changed` 事件的累計次數：AGM 面板（本身不輪詢）開著時拿它當「該重讀了」的訊號。 */
   supervisorRev: number
+  /** 重連／resync 之後通知已掛載的排程列表與詳情重抓。 */
+  schedulesRev: number
   /** 已結案那兩段是不是被 `MISSION_CLOSED_LIMIT` 截掉了（標題要說「最近 N 筆」，不能冒充總數）。 */
   missionsCapped: Record<string, { done: boolean; cancelled: boolean }>
   loadMissions: (projectId: string) => Promise<void>
@@ -983,6 +985,7 @@ export const useStore = create<StoreState>((set, get) => {
   missionLoadErrors: {},
   missionsSupported: true,
   supervisorRev: 0,
+  schedulesRev: 0,
   missionsCapped: {},
   shellView: initialShellView,
   supervisorProjectId: null,
