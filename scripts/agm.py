@@ -876,7 +876,10 @@ def cmd_assignments(client: Client, cfg: dict, args) -> object:
             complete=complete,
         )
     if args.status:
-        items = [a for a in items if a.get("status") == args.status]
+        if args.status == "open":
+            items = [a for a in items if a.get("status") in OPEN_STATUSES]
+        else:
+            items = [a for a in items if a.get("status") == args.status]
     # 未結案 = 還在跑 + 等驗收 + 被標阻塞。回合跑完不等於結案，所以 awaiting_review 也算。
     if args.open:
         items = [a for a in items if a.get("status") in OPEN_STATUSES]

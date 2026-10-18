@@ -737,6 +737,38 @@ class AssignmentsCommandTest(CliCase):
         self.assertEqual(out["awaiting_review"], 1)
         self.assertEqual([a["id"] for a in self.ok("assignments", "--awaiting-review")["assignments"]], ["a3"])
 
+    def test_status_open_matches_open_flag_when_old_daemon_ignores_filter(self):
+        # 舊 daemon 可能不篩 `status=open`；CLI 的備援過濾仍要認得這個集合別名。
+        FakeDaemon.routes["GET /api/supervisor/assignments"] = (
+            200,
+            {
+                "assignments": [
+                    {"id": "a1", "status": "queued"},
+                    {"id": "a2", "status": "delivered"},
+                    {"id": "a3", "status": "unknown"},
+                    {"id": "a4", "status": "awaiting_review"},
+                    {"id": "a5", "status": "blocked"},
+                    {"id": "a6", "status": "quota_blocked"},
+                    {"id": "a7", "status": "completed"},
+                ],
+                "has_more": False,
+                "next_cursor": None,
+            },
+        )
+        by_status = self.ok("assignments", "--status", "open")
+        by_flag = self.ok("assignments", "--open")
+        self.assertEqual(
+            [a["id"] for a in by_status["assignments"]],
+            ["a1", "a2", "a3", "a4", "a5", "a6"],
+        )
+        self.assertEqual(by_status["assignments"], by_flag["assignments"])
+        self.assertEqual(by_status["open"], 6)
+        self.assertIs(by_status["complete"], True)
+        self.assertEqual(
+            [a["id"] for a in self.ok("assignments", "--status", "queued")["assignments"]],
+            ["a1"],
+        )
+
     def test_single_lookup_prefers_the_detail_endpoint(self):
         FakeDaemon.routes["GET /api/supervisor/assignments/a2"] = (
             200,

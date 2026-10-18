@@ -2791,7 +2791,7 @@ CLI：`agents-managerd release-triage-check --kind <claude|codex> [--since <ver>
   **在 SQL 裡篩**（issue #543）：呼叫端過濾等於為了 6 筆未結案把整張表搬過去一頁一頁翻，而未結案的那幾筆天生是最舊的。回應的 `status` 是回聲——舊 daemon 會忽略這個參數，呼叫端照它才知道自己那份過濾有沒有生效。
   **一次只回一頁**：未結案的交辦（尤其 `blocked`＝還在等，天生活得比一頁久）很容易在頁外，所以「有沒有這一筆」「還有幾件沒結案」一定要翻到 `has_more:false` 才算數（issue #515）。
   `bin/agm` 的 `assignments` 帶任何過濾條件（`--open`／`--status`／`--awaiting-review`／`--id`）或 `--all` 時會自己翻完，並在輸出加 `complete`（`false` = 沒撈完，數字只是下限）。
-  它把過濾條件也送進 `status`（`--id` 除外，那個要掃全部），客戶端那層過濾照舊留著給舊 daemon 用；沒有頁數上限，防無窮迴圈靠的是「游標必須往前走」。
+  它把過濾條件也送進 `status`（`--id` 除外，那個要掃全部），客戶端那層過濾照舊留著給舊 daemon 用；`--status open` 與 `--open` 都依未結案狀態集合過濾，其他 `--status` 則精確比對狀態。沒有頁數上限，防無窮迴圈靠的是「游標必須往前走」。
 - `POST /api/supervisor/assignments {target_bot_id,text,client_request_id,source_turn_id?,ownership?:[path],kind?:"task"|"notice",expects_review?,mission_id?,role?,review_role?:"patrol"|"responder"}` → 一筆 assignment（多 `review_role`）：
   `{id,target_bot_id,client_request_id,turn_id,status,text,delivery,result,error,attempts,request_id,created_at,updated_at,completed_at,turn_status,evidence_complete,open,awaiting_review,
   review:{decision,by,at,reason,followup_assignment_id},follow_up_of,legacy_closed,ownership,ownership_conflicts,resume_at,quota_retries,next_attempt_at,conflict_since,busy_rounds}`。
