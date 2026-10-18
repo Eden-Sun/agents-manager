@@ -919,7 +919,7 @@ StatusLine 分支（過世代圍籬之後，舊 run／舊 hook 進不來）發�
 - **忙的時候不重啟**（#393、#712）：碰不得的時候（上面以外的忙：working／blocked／有回合在飛），`PATCH` 不回退成重啟，而是把欄位、PATCH 前版本與目標版本記進 `lifecycle/deferred_live.rs`（排程本身在記憶體），
   等 idle 邊（`events.rs`：working→idle，以及 blocked／unknown→idle）或回合收掉（`messages::emit_turn`：agent 早已 idle、只剩回合紀錄在飛時不會再有 idle 邊）再套；
   排著的期間 `PATCH` 回 `needs_restart:false`、`live_apply.deferred:true`，state 的 bot 帶 `live_apply_deferred:true` 且 `needs_restart:false`。
-  claude／grok 一樣排，但它們的 slash 指令一次一個值：已經排著別的欄位時不合併（合併了 idle 那次整批 `not_a_single_field`），照舊回需重啟。
+  claude／grok 一樣排，但它們的 slash 指令一次一個值：已經排著別的欄位時不合併（合併了 idle 那次整批 `not_a_single_field`），照舊回需重啟；idle 套用已取出、尚未完成時也保留這項限制，避免忙時重排把不同欄位合併後整批失敗。
   套成功走上面的 runtime／`live_rev`／`launch_rev` 收斂流程並推 `bot_changed`，套不上才留下重啟徽章。已成功的 TUI 操作若 DB 收尾失敗，只保留 bookkeeping 債務，不再送第二次操作；一旦 readback snapshot 進入 `live_apply_debts`，daemon 重啟後也會做 DB-only recovery。
 - **子 agent 的 fast 從 argv 補**（#393）：收編的 codex 子 agent 若 argv 有 `-c service_tier="priority"`，`bots.fast` 記成 1，UI 就不會平白亮「fast 需重啟」。`sync_pane_model` 原本只在 model／effort 為 NULL 時才看 argv，
   model／effort 已有值（例如 fork 時帶入）的子 agent 永遠補不到；現在**收編後 10 分鐘內**也補 fast。刻意限縮在窗口內：`bots.fast=0` 分不出「沒設」與「使用者關掉了」，窗口外補會把使用者之後關掉的 fast 蓋回去。
