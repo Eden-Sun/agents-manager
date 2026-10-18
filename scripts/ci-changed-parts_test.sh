@@ -24,7 +24,7 @@ check "ops" "scripts/ops/daemon-swap.sh"
 check "daemon ops" "scripts/agm.py"
 check "ob" "scripts/ob.py"
 check "ops" ".claude/skills/verify/SKILL.md"
-check "web daemon ops" "web/src/a.ts" "daemon/src/b.rs" "scripts/check.sh"
+check "web daemon ops ob" "web/src/a.ts" "daemon/src/b.rs" "scripts/check.sh"
 check "full" "web/src/a.ts" "somewhere/unknown.txt"
 check "" ""
 # 被 daemon include_str! 編進去的 .md／docs（supervisor::persona::BUILD_INPUTS）不是「只有文件」：改名、刪掉＝編不過。
@@ -41,7 +41,7 @@ check "ob" "scripts/chatgpt-consult.mjs"
 # 2026-10-02 閘門審查：不是 daemon/ 底下、但 daemon 的測試會在執行期讀的檔案，改了就要跑 daemon 的測試。
 #   cargo_shim 的測試讀 scripts/check.sh、herdr_shim 的讀 scripts/ops/lint-shell-vars.sh、claude_review 的讀 scripts/ops/*-release-task.md、
 #   supervisor::setup 的讀 scripts/ops/fixtures/patrol-runtime.json。
-check "daemon ops" "scripts/check.sh"
+check "web daemon ops ob" "scripts/check.sh"
 check "daemon ops" "scripts/ops/lint-shell-vars.sh"
 check "daemon ops" "scripts/ops/codex-release-task.md"
 check "daemon ops" "scripts/ops/release-triage-task.md"
