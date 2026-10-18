@@ -155,6 +155,9 @@ export function BlockedChoices({
     setNote(null)
     try {
       setNote(await fn())
+    } catch {
+      // store.sendKeys 已經發通知；這裡只收住拒絕並在選單旁提示，不再發第二則通知。
+      setNote('按鍵沒有送出去，請查看終端位置後再試。')
     } finally {
       setBusy(null)
       onAnswered?.()

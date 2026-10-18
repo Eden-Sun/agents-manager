@@ -1872,6 +1872,7 @@ export const useStore = create<StoreState>((set, get) => {
       await sendWithFreshRun(get, botId, (runId) => api.sendKeys(botId, keys, runId))
     } catch (e) {
       get().notify('error', `送出按鍵失敗：${errText(e)}`)
+      throw e
     }
   },
 

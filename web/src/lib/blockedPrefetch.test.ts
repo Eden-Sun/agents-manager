@@ -106,6 +106,27 @@ test('多分頁問卷在看得見的分頁才背景預載，而且同一份只�
   resetBlockedPrefetch()
 })
 
+test('背景預載的 sendKeys 失敗會收成預載失敗，不留 unhandled rejection', async () => {
+  resetBlockedPrefetch()
+  const d = deps(TWO_QUESTIONS)
+  const base = d.io('b-prefetch-fail')
+  const failed: Io = { ...base, send: async () => { throw new Error('GET/keys 503') } }
+  const unhandled: unknown[] = []
+  const onUnhandled = (error: unknown) => unhandled.push(error)
+  process.on('unhandledRejection', onUnhandled)
+  try {
+    const menu = await prefetchBlocked('b-prefetch-fail', { ...d, io: () => failed })
+    assert.ok(menu)
+    const key = draftKey('b-prefetch-fail', menu)
+    for (let i = 0; i < 10 && hasPreload(key); i++) await new Promise<void>((resolve) => setImmediate(resolve))
+    assert.equal(hasPreload(key), false, 'draftPreload 把 sendKeys reject 收成 null 並移除失敗項')
+    assert.deepEqual(unhandled, [])
+  } finally {
+    process.off('unhandledRejection', onUnhandled)
+    resetBlockedPrefetch()
+  }
+})
+
 test('forgetBlockedExcept：刪掉的 bot 的快照與預載被放掉，還在的不動', async () => {
   resetBlockedPrefetch()
   await prefetchBlocked('b-live', deps(ONE_QUESTION))
