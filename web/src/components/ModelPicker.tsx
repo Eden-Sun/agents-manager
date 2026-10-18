@@ -115,7 +115,9 @@ export function ApiModelFields({
     const next = (id && models.find((m) => m.id === id)) || defaultModel
     // 只有清單來自 API 才能斷定「不支援」；內建清單的 service_tiers 是空的，不代表沒有 Fast（同 modelSwitchPatch）。
     if (fromApi && fast && next && !next.service_tiers.some((t) => t.id === FAST_TIER)) onFast(false)
-    if (effort !== null && !(next?.efforts ?? []).includes(effort)) onEffort(null)
+    if (effort !== null && next && next.efforts.length > 0 && !next.efforts.includes(effort)) {
+      onEffort(next.default_effort)
+    }
   }
 
   return (
