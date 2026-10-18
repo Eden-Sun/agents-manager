@@ -200,13 +200,19 @@ pub fn derive<'a>(assignments: &'a [Assignment], events: &'a [MissionEvent]) -> 
         .as_deref()
         .and_then(|sha| events.iter().rev().find(|e| e.kind == "delivered" && delivered_sha(e).as_deref() == Some(sha)));
 
-    let stage = match (&fresh_sha, delivered) {
-        (Some(_), Some(_)) => Stage::Delivered,
-        (Some(_), None) => Stage::NeedsDelivery,
-        (None, _) if executed && verifier_done => Stage::NeedsVerdict,
-        (None, _) if executed && past_review => Stage::NeedsVerification,
-        (None, _) if executed => Stage::NeedsReview,
-        (None, _) => Stage::NeedsExecutor,
+    let stage = match retry_of.map(role) {
+        // 最近一件未完成的交辦主導下一步；過去被接受的成果不能蓋過這次補做的失敗。
+        Some("executor") => Stage::NeedsExecutor,
+        Some("reviewer") => Stage::NeedsReview,
+        Some("verifier") => Stage::NeedsVerification,
+        _ => match (&fresh_sha, delivered) {
+            (Some(_), Some(_)) => Stage::Delivered,
+            (Some(_), None) => Stage::NeedsDelivery,
+            (None, _) if executed && verifier_done => Stage::NeedsVerdict,
+            (None, _) if executed && past_review => Stage::NeedsVerification,
+            (None, _) if executed => Stage::NeedsReview,
+            (None, _) => Stage::NeedsExecutor,
+        },
     };
     Flow {
         generation,
@@ -712,6 +718,41 @@ mod tests {
         let a = vec![asg("e1", "executor", "failed", 1), asg("e2", "executor", "completed", 2)];
         let n = next_of(&a, &[]);
         assert_eq!((n.role.as_deref(), n.retry_of.as_deref()), (Some("reviewer"), None));
+    }
+
+    #[test]
+    fn a_failed_or_cancelled_executor_redo_overrides_earlier_progress_until_it_succeeds() {
+        let sha = "a".repeat(40);
+        for status in ["failed", "cancelled"] {
+            for had_verification in [false, true] {
+                let mut assignments = vec![asg("e1", "executor", "completed", 1)];
+                let events = if had_verification {
+                    assignments.push(asg("v1", "verifier", "completed", 2));
+                    vec![verified("ver1", &sha, Some("v1"), 3)]
+                } else {
+                    vec![]
+                };
+                assignments.push(asg("e2", "executor", status, 4));
+
+                let flow = derive(&assignments, &events);
+                assert_eq!(flow.stage, Stage::NeedsExecutor, "{status}, had_verification={had_verification}");
+                assert_eq!(flow.allowed_roles(), &["executor"], "{status}, had_verification={had_verification}");
+                let next = flow.next(&mission(None));
+                assert_eq!(
+                    (next.action, next.role.as_deref(), next.retry_of.as_deref()),
+                    ("assign", Some("executor"), Some("e2")),
+                    "{status}, had_verification={had_verification}"
+                );
+
+                assignments.push(asg("e3", "executor", "completed", 5));
+                let flow = derive(&assignments, &events);
+                let expected = if had_verification { Stage::NeedsVerification } else { Stage::NeedsReview };
+                assert_eq!(flow.stage, expected, "成功補做後恢復正確關卡：{status}, had_verification={had_verification}");
+                let next = flow.next(&mission(None));
+                let role = if had_verification { "verifier" } else { "reviewer" };
+                assert_eq!((next.action, next.role.as_deref(), next.retry_of.as_deref()), ("assign", Some(role), None));
+            }
+        }
     }
 
     /// 驗收三＋八：成果被退回（round）＝新的一代，從執行者重做；reviewer／驗證者不能跳過重做直接重審舊的那份。
