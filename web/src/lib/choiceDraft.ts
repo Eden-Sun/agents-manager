@@ -16,12 +16,17 @@ import {
 } from './tuiChoices.ts'
 
 export interface Io {
-  /** 讀不到或認不出來回 `null`。 */
+  /** 成功讀取但沒有可解析的選單回 `null`；I/O 失敗 reject。 */
   read: () => Promise<TuiChoiceMenu | null>
   send: (keys: string[]) => Promise<void>
   wait: (ms: number) => Promise<void>
   /** `POST /bots/{id}/text`（`enter: false`）；`Type something.` 游標停上去直接貼，不必先 Enter（2026-09-13 真機）。 */
   paste: (text: string) => Promise<void>
+}
+
+/** 將成功讀到的終端文字解析為選單；讀取失敗要保留 reject，不能混成「沒有選單」。 */
+export async function readChoiceMenu(read: () => Promise<string>): Promise<TuiChoiceMenu | null> {
+  return parseChoiceMenu(await read())
 }
 
 export interface DraftPage {
@@ -479,10 +484,25 @@ export async function commit(
   await io.send(['enter'])
   onProgress?.(++done, total)
   // 按完要看到送出頁真的離開才算交卷；鍵沒送到（網路、daemon）或沒被吃掉時，別讓畫面靜靜停在 Review。
+  let lastReadFailed = false
   for (let i = 0; i < SETTLE_TRIES; i++) {
     await io.wait(SETTLE_STEP * 2)
-    const now = await io.read()
+    let now: TuiChoiceMenu | null
+    try {
+      now = await io.read()
+    } catch {
+      // 讀取失敗代表結果不明，不可當成送出頁已離開；剩餘次數再試。
+      lastReadFailed = true
+      continue
+    }
+    lastReadFailed = false
     if (!now || !isSubmitMenu(now)) return { ok: true }
+  }
+  if (lastReadFailed) {
+    return {
+      ok: false,
+      error: '已送出「Submit answers」，但讀取終端失敗，無法確認是否交卷。請回終端檢查；若仍停在送出頁，再按 Enter。',
+    }
   }
   return {
     ok: false,
