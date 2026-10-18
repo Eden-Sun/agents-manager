@@ -467,12 +467,27 @@ for part in ${PARTS}; do
         bash scripts/check.sh "${part}" >> "${log}" 2>&1 || prc=$?
     fi
     if [ "${part}" = daemon ] && [ -n "${real_herdr}" ] && [ "${bundle_failed}" = 0 ]; then
+        main_prc=${prc}
+        printf '\n==> [ubuntu-ci] daemon primary check rc=%s\n' "${main_prc}" >> "${log}"
         herdr_prc=0
         timeout -k "${KILL_AFTER}" "${TIMEOUT}" env -u AM_MODEL -u AM_EFFORT -u AM_DATA_DIR -u AM_DAEMON_EXE -u AM_CONFIG_PATH \
             AM_TEST_REAL_HERDR=1 AM_REAL_HERDR="${real_herdr}" cargo test -p agents-managerd --locked -- \
             the_generated_argv_parses_with_the_real_herdr >> "${log}" 2>&1 || herdr_prc=$?
-        printf '\n==> [ubuntu-ci] herdr argv parser rc=%s\n' "${herdr_prc}" >> "${log}"
-        if [ "${herdr_prc}" != 0 ]; then prc="${herdr_prc}"; fi
+        case "${herdr_prc}" in
+            0) herdr_result=success ;;
+            124|137|143) herdr_result=interrupted ;;
+            *) herdr_result=failure ;;
+        esac
+        printf '\n==> [ubuntu-ci] herdr argv parser rc=%s result=%s\n' "${herdr_prc}" "${herdr_result}" >> "${log}"
+        if [ "${herdr_prc}" != 0 ]; then
+            case "${prc}" in
+                0) prc="${herdr_prc}" ;;
+                124|137|143)
+                    # 明確失敗優先於中斷；兩個檢查都中斷時保留主檢查碼。
+                    case "${herdr_prc}" in 124|137|143) ;; *) prc="${herdr_prc}" ;; esac ;;
+                *) ;; # 主檢查已明確失敗，後續 parser 結果不能覆蓋它。
+            esac
+        fi
     fi
     part_secs=$((SECONDS - part_start))
     printf '\n==> [ubuntu-ci] %s rc=%s secs=%s\n' "${part}" "${prc}" "${part_secs}" >> "${log}"

@@ -70,7 +70,12 @@ GH
   cat > "$ROOT/bin/cargo" <<'CARGO'
 #!/bin/bash
 echo "AM_TEST_REAL_HERDR=${AM_TEST_REAL_HERDR:-} AM_REAL_HERDR=${AM_REAL_HERDR:-} $*" >> "$FIX/cargo.log"
-exit "$(cat "$FIX/cargo.rc" 2>/dev/null || echo 0)"
+rc_file="$FIX/cargo.rc"
+case " $* " in
+  *" the_generated_argv_parses_with_the_real_herdr "*)
+    [ -f "$FIX/parser.rc" ] && rc_file="$FIX/parser.rc" ;;
+esac
+exit "$(cat "$rc_file" 2>/dev/null || echo 0)"
 CARGO
   chmod +x "$ROOT/bin/cargo"
   # PATH shim 不算真 herdr；ubuntu-ci 不應只因 pane 注入的 shim 就啟用測試。
@@ -825,6 +830,65 @@ check "daemon 跑了（含 real-herdr smoke）" "the_generated_argv_parses_with_
 check "herdr smoke 失敗 → daemon 紅" "state=failure.*紅：daemon" "$FIX/gh.log"
 equals "herdr smoke 失敗不記 daemon 成功" "$(cat "$CI/part-success/daemon")" "$BASE"
 rm -f "$FIX/cargo.rc"; export AM_REAL_HERDR=""
+teardown
+
+# 13g2. daemon 主檢查與後續 herdr parser 結果分開保留：主檢查已知失敗時，parser 中斷不能把它降成 infra retry；
+#       任一檢查單獨中斷仍走 #885 的重試路徑。
+new_baseline
+export AM_REAL_HERDR=/bin/true
+echo 101 > "$FIX/rc.daemon"
+echo 0 > "$FIX/parser.rc"
+push_file daemon/src/rc-priority.rs main-fails-parser-passes
+SHA=$(cur)
+run >/dev/null
+check "101+0 保留主檢查 failure" 'state=failure.*紅：daemon' "$FIX/gh.log"
+check "101+0 保留主檢查 rc" '"rc":101' "$CI/status.json"
+check "101+0 記錄主檢查 rc" 'daemon primary check rc=101' "$CI/logs/$SHA.log"
+check "101+0 記錄 parser rc" 'herdr argv parser rc=0' "$CI/logs/$SHA.log"
+
+echo 124 > "$FIX/parser.rc"
+push_file daemon/src/rc-priority.rs main-fails-parser-times-out
+SHA=$(cur)
+: > "$FIX/gh.log"
+run >/dev/null
+check "101+124 保留程式失敗" 'state=failure.*紅：daemon' "$FIX/gh.log"
+check "101+124 status rc 不被覆蓋" '"rc":101' "$CI/status.json"
+check "101+124 附上 parser 中斷證據" 'herdr argv parser rc=124 result=interrupted' "$CI/logs/$SHA.log"
+check "101+124 最終 daemon rc 保留 101" 'daemon rc=101' "$CI/logs/$SHA.log"
+
+echo 137 > "$FIX/parser.rc"
+push_file daemon/src/rc-priority.rs main-fails-parser-killed
+SHA=$(cur)
+: > "$FIX/gh.log"
+run >/dev/null
+check "101+137 保留程式失敗" 'state=failure.*紅：daemon' "$FIX/gh.log"
+check "101+137 status rc 不被覆蓋" '"rc":101' "$CI/status.json"
+check "101+137 附上 parser 中斷證據" 'herdr argv parser rc=137 result=interrupted' "$CI/logs/$SHA.log"
+check "101+137 最終 daemon rc 保留 101" 'daemon rc=101' "$CI/logs/$SHA.log"
+
+echo 0 > "$FIX/rc.daemon"
+echo 124 > "$FIX/parser.rc"
+PRIOR=$(cat "$CI/last-sha")
+push_file daemon/src/rc-priority.rs main-passes-parser-times-out
+SHA=$(cur)
+: > "$FIX/gh.log"
+run >/dev/null
+check "0+124 純 parser 中斷仍重試" '中斷：daemon(rc=124)，會重跑' "$FIX/gh.log"
+check "0+124 仍分類為 interrupted" '"reason":"interrupted"' "$CI/status.json"
+check "0+124 主檢查為成功" 'daemon primary check rc=0' "$CI/logs/$SHA.log"
+check "0+124 parser 中斷有記錄" 'herdr argv parser rc=124' "$CI/logs/$SHA.log"
+equals "0+124 不前進 last-sha" "$(cat "$CI/last-sha")" "$PRIOR"
+
+echo 124 > "$FIX/rc.daemon"
+echo 0 > "$FIX/parser.rc"
+push_file daemon/src/rc-priority.rs main-times-out-parser-passes
+SHA=$(cur)
+: > "$FIX/gh.log"
+run >/dev/null
+check "124+0 純主檢查中斷仍重試" '中斷：daemon(rc=124)，會重跑' "$FIX/gh.log"
+check "124+0 仍分類為 interrupted" '"reason":"interrupted"' "$CI/status.json"
+check "124+0 主檢查中斷有記錄" 'daemon primary check rc=124' "$CI/logs/$SHA.log"
+check "124+0 parser 成功有記錄" 'herdr argv parser rc=0' "$CI/logs/$SHA.log"
 teardown
 
 # 13h. 定期完整四段：到期時同一個 sha 也補跑；失敗後不會每分鐘重跑；沒到期的同 sha 不跑。
