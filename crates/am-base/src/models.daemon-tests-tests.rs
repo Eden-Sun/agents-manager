@@ -250,6 +250,20 @@
         assert_eq!(fast_from_argv("claude", &argv(&["claude", "-c", "service_tier=\"priority\""])), None);
     }
 
+    #[test]
+    fn argv_model_effort_and_fast_scanning_stops_at_double_dash() {
+        let argv = |v: &[&str]| v.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+        assert_eq!(
+            model_effort_from_argv("claude", &argv(&["claude", "--model", "sonnet", "--", "--model=haiku"])),
+            (Some("sonnet".into()), None)
+        );
+        assert_eq!(
+            model_effort_from_argv("claude", &argv(&["claude", "--effort", "high", "--", "--effort=low"])),
+            (None, Some("high".into()))
+        );
+        assert_eq!(fast_from_argv("codex", &argv(&["codex", "--", "--config=service_tier=priority"])), None);
+    }
+
     /// Nothing is guessed: a bare CLI stays unset, and an effort the kind does not accept
     /// (`max` is claude/codex only) is dropped rather than stored for grok.
     #[test]

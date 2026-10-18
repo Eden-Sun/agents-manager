@@ -4032,7 +4032,7 @@ CLI 結束後重驗一次登入狀態並寫回快取；快取有變時用目前�
    kind 被改正時連同 `runtime_model` 等一起清成 NULL，下一輪依新 kind 重新偵測。讀不到、沒人認領的維持 NULL，UI 照舊說「未知」
    （`bots.identity` 那個抄來的值只是推測，不拿來冒充）。
 
-- **只動 `managed_by='child'`**（其他 bot 的 identity 是使用者設定、會投影回 config.toml；SQL `WHERE` 也帶著）。
+- **只動 `managed_by='child'`**（其他 bot 的 identity 是使用者設定、會投影回 config.toml；SQL `WHERE` 也帶著）。採納時從 argv 讀 model、effort、fast，遇到獨立 `--` 就停止；之後是 literal prompt，不作為 CLI 選項解析。
 - 從 argv 讀 model/effort 只補不改（argv 看不到之後打的 `/model`）；之後的切換由畫面巡邏跟（§4.4a「在 TUI 裡被換掉」）。identity 補也改（那是收編時抄錯的值）。
 - **預設帳號也認得**：沒有變數、或指向 CLI 預設目錄（`~/.claude`、`~/.codex`）= 空 env 的身份（cc0），多個時 config 優先、第一個贏。
 - **永遠不清成 NULL**：讀不到、沒人認領、該 kind 沒空 env 身份 → 維持現狀。

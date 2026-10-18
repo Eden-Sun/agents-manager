@@ -508,6 +508,9 @@ pub fn model_effort_from_argv(kind: &str, argv: &[String]) -> (Option<String>, O
     let mut i = 0;
     while i < argv.len() {
         let arg = argv[i].as_str();
+        if arg == "--" {
+            break;
+        }
         let (flag, inline) = match arg.split_once('=') {
             Some((f, v)) if f.starts_with('-') => (f, Some(v.to_string())),
             _ => (arg, None),
@@ -557,6 +560,9 @@ pub fn fast_from_argv(kind: &str, argv: &[String]) -> Option<bool> {
     let mut tier = None;
     while i < argv.len() {
         let arg = argv[i].as_str();
+        if arg == "--" {
+            break;
+        }
         let (flag, inline) = match arg.split_once('=') {
             Some((f, v)) if f.starts_with('-') => (f, Some(v.to_string())),
             _ => (arg, None),
