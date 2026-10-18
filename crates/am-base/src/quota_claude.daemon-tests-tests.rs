@@ -303,6 +303,18 @@ AM_USAGE_DONE=0
         assert!(r.starts_with("2026-09-06T"), "{r}");
     }
 
+    #[test]
+    fn time_only_reset_uses_the_next_occurrence_during_fall_dst_overlap() {
+        let line = "Resets 1:30am (America/New_York)";
+        let before_both = parse_claude_reset(line, at("2026-11-01T05:00:00Z")).unwrap();
+        assert_eq!(before_both, "2026-11-01T05:30:00.000Z", "{before_both}");
+        let between_occurrences = parse_claude_reset(line, at("2026-11-01T06:15:00Z")).unwrap();
+        assert_eq!(between_occurrences, "2026-11-01T06:30:00.000Z", "{between_occurrences}");
+        let after_both = parse_claude_reset(line, at("2026-11-01T06:45:00Z")).unwrap();
+        assert_eq!(after_both, "2026-11-02T06:30:00.000Z", "{after_both}");
+        assert!(parse_claude_reset("Resets 2:30am (America/New_York)", at("2026-03-08T07:00:00Z")).is_none());
+    }
+
     /// 只有時刻的重置滾到「明天」要是明天**同一個牆上時刻**，不是隔 24 小時：跨 DST 那一天 24 小時會差一個鐘頭。
     /// 紐約 2026-11-01 03:00 EST（＝08:00Z）看到 "1:30am"：今天 1:30 EDT 已過，應是 11-02 01:30 EST（06:30Z）。
     /// 2026-03-08 03:00 EDT（＝07:00Z）看到 "1:30am"：應是 03-09 01:30 EDT（05:30Z）。

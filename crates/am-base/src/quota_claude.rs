@@ -153,12 +153,19 @@ pub fn parse_claude_reset(line: &str, now: DateTime<Local>) -> Option<String> {
             // Time-only: today, or tomorrow if that time already passed (both in `tz`, not host local).
             // 明天是「日曆上的明天、同一個牆上時刻」，不能 `+ 24 小時`：跨 DST 的那一天會差一小時（#1743）。
             let today = now.date_naive().and_hms_opt(h, m, 0)?;
-            let mut dt = tz.from_local_datetime(&today).earliest()?;
-            if dt <= now {
+            let tomorrow = || -> Option<_> {
                 let tomorrow = now.date_naive().succ_opt()?.and_hms_opt(h, m, 0)?;
-                dt = tz.from_local_datetime(&tomorrow).earliest()?;
+                tz.from_local_datetime(&tomorrow).earliest()
+            };
+            match tz.from_local_datetime(&today) {
+                chrono::LocalResult::Single(dt) if dt > now => dt,
+                chrono::LocalResult::Single(_) => tomorrow()?,
+                chrono::LocalResult::Ambiguous(first, second) => {
+                    [first, second].into_iter().filter(|dt| dt > &now).min().or_else(tomorrow)?
+                }
+                // Preserve the existing behavior for a wall time that does not exist during a spring DST jump.
+                chrono::LocalResult::None => return None,
             }
-            dt
         }
     };
     Some(dt.with_timezone(&chrono::Utc).to_rfc3339_opts(chrono::SecondsFormat::Millis, true))
