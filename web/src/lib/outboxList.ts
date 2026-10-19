@@ -142,6 +142,15 @@ export function isPreviewableImage(name: string): boolean {
 }
 
 /**
+ * 瀏覽器能直接顯示且適合開新分頁預覽的格式（issue #1866）。
+ * PDF 為主；圖片（PNG/JPEG/GIF/WebP）、純文字／記錄檔／Markdown／CSV／TSV、JSON。
+ * 注意：SVG、HTML 等可執行腳本內容絕不允許（防範 XSS）。
+ */
+export function isBrowserPreviewable(name: string): boolean {
+  return /\.(pdf|png|jpe?g|gif|webp|txt|log|md|csv|tsv|json)$/i.test(name)
+}
+
+/**
  * 預覽框放在滑過的那一列**左邊**（清單貼著右側欄，右邊沒地方），上下夾在視窗內。
  * 左邊放不下（窄視窗）就改放在那一列下方。回傳 `left`/`top`，單位 px，給 `position: fixed` 用。
  */

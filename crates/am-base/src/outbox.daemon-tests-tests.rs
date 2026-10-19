@@ -202,11 +202,56 @@
     }
 
     async fn get_file(app: &Arc<App>, bot: &str, path: &str) -> (StatusCode, Vec<u8>) {
-        let q = Query([("path".to_string(), path.to_string())].into_iter().collect());
+        get_file_query(app, bot, [("path".to_string(), path.to_string())].into_iter().collect()).await
+    }
+
+    async fn get_file_query(app: &Arc<App>, bot: &str, q_map: std::collections::HashMap<String, String>) -> (StatusCode, Vec<u8>) {
+        let q = Query(q_map);
         match file(State(app.clone()), UrlPath(bot.to_string()), q).await {
             Ok(r) => body(r).await,
             Err(e) => body(e.into_response()).await,
         }
+    }
+
+    #[tokio::test]
+    async fn inline_preview_headers_and_whitelist_enforcement() {
+        let env = crate::testing::env().await;
+        let bot = crate::testing::claude_bot(&env.app, &env.project_id, "alfa").await;
+        let outbox = ensure(&env.app.data_dir, &bot.id).unwrap();
+        std::fs::write(outbox.join("test.pdf"), b"%PDF-1.4").unwrap();
+        std::fs::write(outbox.join("test.html"), b"<script>alert(1)</script>").unwrap();
+        std::fs::write(outbox.join("test.svg"), b"<svg><script>alert(1)</script></svg>").unwrap();
+
+        // 1. PDF 預覽：?inline=1 回 inline disposition、nosniff 與 CSP sandbox
+        let q_pdf: std::collections::HashMap<_, _> = [("path".to_string(), "test.pdf".to_string()), ("inline".to_string(), "1".to_string())].into();
+        let resp_pdf = file(State(env.app.clone()), UrlPath(bot.id.clone()), Query(q_pdf)).await.unwrap();
+        assert_eq!(resp_pdf.status(), StatusCode::OK);
+        assert_eq!(resp_pdf.headers().get(header::CONTENT_TYPE).unwrap(), "application/pdf");
+        assert!(resp_pdf.headers().get(header::CONTENT_DISPOSITION).unwrap().to_str().unwrap().starts_with("inline; filename="));
+        assert_eq!(resp_pdf.headers().get(header::CONTENT_SECURITY_POLICY).unwrap(), "sandbox; default-src 'none'");
+        assert_eq!(resp_pdf.headers().get(header::X_CONTENT_TYPE_OPTIONS).unwrap(), "nosniff");
+
+        // 2. HTML 或 SVG：即使帶 ?inline=1 也絕不 inline，仍是 attachment 且沒有 CSP sandbox
+        let q_html: std::collections::HashMap<_, _> = [("path".to_string(), "test.html".to_string()), ("inline".to_string(), "1".to_string())].into();
+        let resp_html = file(State(env.app.clone()), UrlPath(bot.id.clone()), Query(q_html)).await.unwrap();
+        assert_eq!(resp_html.status(), StatusCode::OK);
+        assert_eq!(resp_html.headers().get(header::CONTENT_TYPE).unwrap(), "application/octet-stream");
+        assert!(resp_html.headers().get(header::CONTENT_DISPOSITION).unwrap().to_str().unwrap().starts_with("attachment; filename="));
+        assert!(resp_html.headers().get(header::CONTENT_SECURITY_POLICY).is_none());
+
+        let q_svg: std::collections::HashMap<_, _> = [("path".to_string(), "test.svg".to_string()), ("inline".to_string(), "1".to_string())].into();
+        let resp_svg = file(State(env.app.clone()), UrlPath(bot.id.clone()), Query(q_svg)).await.unwrap();
+        assert_eq!(resp_svg.status(), StatusCode::OK);
+        assert_eq!(resp_svg.headers().get(header::CONTENT_TYPE).unwrap(), "application/octet-stream");
+        assert!(resp_svg.headers().get(header::CONTENT_DISPOSITION).unwrap().to_str().unwrap().starts_with("attachment; filename="));
+        assert!(resp_svg.headers().get(header::CONTENT_SECURITY_POLICY).is_none());
+
+        // 3. 一般下載：未帶 inline 參數時 PDF 仍為 attachment
+        let q_pdf_dl: std::collections::HashMap<_, _> = [("path".to_string(), "test.pdf".to_string())].into();
+        let resp_pdf_dl = file(State(env.app.clone()), UrlPath(bot.id.clone()), Query(q_pdf_dl)).await.unwrap();
+        assert_eq!(resp_pdf_dl.status(), StatusCode::OK);
+        assert!(resp_pdf_dl.headers().get(header::CONTENT_DISPOSITION).unwrap().to_str().unwrap().starts_with("attachment; filename="));
+        assert!(resp_pdf_dl.headers().get(header::CONTENT_SECURITY_POLICY).is_none());
     }
 
     /// 端到端：列表與下載只看 outbox。bot 的 scratchpad 就算有檔案、就算從 outbox 用符號連結指過去、

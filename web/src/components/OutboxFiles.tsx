@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState } from 'react'
 import * as api from '../api'
 import type { OutboxFile } from '../api'
-import { downloadFailure, emptyReason, fileSize, isPreviewableImage, lastSettledTurnKey, LOAD_FAILED, readOutbox, remainingLabel, remainingNow, splitOutboxName } from '../lib/outboxList'
+import { downloadFailure, emptyReason, fileSize, isBrowserPreviewable, isPreviewableImage, lastSettledTurnKey, LOAD_FAILED, readOutbox, remainingLabel, remainingNow, splitOutboxName } from '../lib/outboxList'
 import { clearOutboxPreviews } from '../lib/outboxPreviewCache'
 import { OutboxImagePreview } from './OutboxImagePreview'
 import { useStore } from '../store/store'
@@ -30,8 +30,8 @@ export function OutboxFiles() {
   const [fetchedAt, setFetchedAt] = useState(0)
   /** 已經讀完哪一顆的清單。用它而不是 `loading` 旗標：effect 裡同步 setState 會多跑一輪 render。 */
   const [loadedFor, setLoadedFor] = useState<string | null>(null)
-  /** 正在下載的那一個：綁 bot 與檔名，換了 bot 不會把下載中的狀態畫到另一顆的同名檔上（#1805）。 */
-  const [busy, setBusy] = useState<{ bot: string; name: string } | null>(null)
+  /** 正在處理的那一個：綁 bot、檔名與模式（download 或 preview），換了 bot 不會把狀態畫到另一顆的同名檔上（#1805）。 */
+  const [busy, setBusy] = useState<{ bot: string; name: string; mode: 'download' | 'preview' } | null>(null)
   /** 目前畫面是哪顆 bot：下載回來時拿來判斷那一趟還屬不屬於現在這顆（#1805）。 */
   const botRef = useRef(botId)
   useEffect(() => {
@@ -109,7 +109,7 @@ export function OutboxFiles() {
   const download = async (name: string) => {
     if (!botId) return
     // 這一趟是哪顆 bot 的：回來時 bot 可能已經換了。舊的只能把檔案交給使用者，不能動現在這顆的清單與下載狀態。
-    const mine = { bot: botId, name }
+    const mine = { bot: botId, name, mode: 'download' as const }
     const kept0 = kept
     setBusy(mine)
     try {
@@ -139,6 +139,65 @@ export function OutboxFiles() {
       }
     } finally {
       // 只清自己設的那一格；別的下載（同一顆或切過去的）設的不碰。
+      setBusy((cur) => (cur === mine ? null : cur))
+    }
+  }
+
+  const openPreview = async (name: string) => {
+    if (!botId) return
+    // 點擊當下同步開空白頁，保留 transient activation；不帶 noopener 以便取得 Window handle
+    const w = window.open('', '_blank')
+    if (!w) {
+      notify('error', '瀏覽器擋了彈出視窗')
+      return
+    }
+    // 取得 handle 後立即切斷 opener，防止子頁面存取父頁面
+    try {
+      w.opener = null
+    } catch {}
+
+    const mine = { bot: botId, name, mode: 'preview' as const }
+    const kept0 = kept
+    setBusy(mine)
+    try {
+      // 預覽走帶 token 的 blobUrl（避免 URL 洩漏 token 或新分頁認證缺失）
+      // 注意：預覽安全性靠後端與前端嚴格的 MIME 白名單，Blob URL 本身不繼承 HTTP 回應的 CSP
+      const url = await api.outboxFileUrl(botId, name, true)
+      try {
+        w.location.href = url
+      } catch {
+        w.close()
+        throw new Error('無法導向預覽分頁')
+      }
+      // 不要固定 60 秒 revoke：每 30 秒檢查分頁是否關閉，關閉後才釋放 Blob URL
+      const timer = setInterval(() => {
+        try {
+          if (w.closed) {
+            clearInterval(timer)
+            URL.revokeObjectURL(url)
+          }
+        } catch {
+          clearInterval(timer)
+          URL.revokeObjectURL(url)
+        }
+      }, 30_000)
+    } catch (e) {
+      try {
+        w.close()
+      } catch {}
+      const { text, gone } = downloadFailure(name, e, kept0)
+      if (botRef.current === botId) {
+        if (gone) {
+          setFiles((fs) => fs.filter((f) => f.name !== name))
+          setLoadedFor(null)
+          setNonce((n) => n + 1)
+        }
+        notify('error', text)
+      } else {
+        const label = useStore.getState().bots.find((b) => b.id === botId)?.name ?? botId
+        notify('error', `${label} 的檔案：${text}`)
+      }
+    } finally {
       setBusy((cur) => (cur === mine ? null : cur))
     }
   }
@@ -175,12 +234,15 @@ export function OutboxFiles() {
           {files.map((f) => {
             const left = remainingNow(f, fetchedAt, now)
             const { dir: folder, base } = splitOutboxName(f.name)
+            const itemBusy = busy?.bot === botId && busy.name === f.name ? busy.mode : null
+            const isBusy = itemBusy !== null
+            const canPreview = isBrowserPreviewable(f.name)
             return (
-              <li key={f.name}>
+              <li key={f.name} className="outbox-item">
                 <button
                   type="button"
                   className="outbox-file"
-                  disabled={busy?.bot === botId && busy.name === f.name}
+                  disabled={isBusy}
                   title={`下載 ${f.name}`}
                   onClick={() => void download(f.name)}
                   onMouseEnter={(e) => showPeek(f, e.currentTarget)}
@@ -195,9 +257,24 @@ export function OutboxFiles() {
                   <span className={`outbox-meta${left !== null && left <= 600 ? ' soon' : ''}`}>
                     {fileSize(f.size)}
                     {left === null ? '' : ` · ${remainingLabel(left)}`}
-                    {busy?.bot === botId && busy.name === f.name ? ' · 下載中…' : ''}
+                    {itemBusy === 'preview' ? ' · 開啟中…' : itemBusy === 'download' ? ' · 下載中…' : ''}
                   </span>
                 </button>
+                {canPreview ? (
+                  <button
+                    type="button"
+                    className="icon-btn outbox-preview-btn"
+                    disabled={isBusy}
+                    aria-label={`開新分頁預覽 ${f.name}`}
+                    title="開新分頁預覽（不下載）"
+                    onClick={(e) => {
+                      e.stopPropagation()
+                      void openPreview(f.name)
+                    }}
+                  >
+                    ↗
+                  </button>
+                ) : null}
               </li>
             )
           })}

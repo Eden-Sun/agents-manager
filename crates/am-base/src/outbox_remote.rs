@@ -457,7 +457,7 @@ pub fn parse_file(out: &str) -> Option<Fetched> {
     base64::engine::general_purpose::STANDARD.decode(b64).ok().map(Fetched::File)
 }
 
-pub async fn file(t: Target, requested: &str) -> Result<Response, LcError> {
+pub async fn file(t: Target, requested: &str, inline: bool) -> Result<Response, LcError> {
     if !t.conn.is_connected() {
         return Err(unreachable(&t.conn.name));
     }
@@ -482,15 +482,29 @@ pub async fn file(t: Target, requested: &str) -> Result<Response, LcError> {
         return Err(not_found());
     }
     let download_name = std::path::Path::new(name).file_name().and_then(std::ffi::OsStr::to_str).unwrap_or(name);
-    Ok((
+    let p = std::path::Path::new(download_name);
+    let is_inline = inline && crate::outbox::is_inline_allowed(p);
+    let disposition = if is_inline {
+        crate::outbox::content_disposition_inline(download_name)
+    } else {
+        content_disposition(download_name)
+    };
+    let mut resp = (
         StatusCode::OK,
         [
-            (header::CONTENT_TYPE, mime_of(std::path::Path::new(download_name)).to_string()),
-            (header::CONTENT_DISPOSITION, content_disposition(download_name)),
+            (header::CONTENT_TYPE, mime_of(p).to_string()),
+            (header::CONTENT_DISPOSITION, disposition),
             (header::CACHE_CONTROL, "private, no-store".to_string()),
             (header::X_CONTENT_TYPE_OPTIONS, "nosniff".to_string()),
         ],
         data,
     )
-        .into_response())
+        .into_response();
+    if is_inline {
+        resp.headers_mut().insert(
+            header::CONTENT_SECURITY_POLICY,
+            header::HeaderValue::from_static("sandbox; default-src 'none'"),
+        );
+    }
+    Ok(resp)
 }
