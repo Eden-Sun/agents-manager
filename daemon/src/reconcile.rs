@@ -4304,6 +4304,75 @@ mod compat_tests {
         assert_eq!(n, 3, "重跑一次不該重複建立");
     }
 
+    /// 2026-10-19 m4p：子 agent 出現時那輪對帳還沒有線索（遠端 hook 走 spool 晚到），之後沒有別的事件叫對帳。
+    /// 線索的 hook 一到就要自己排一輪對帳把它認領起來，不能等到下一個不相干的 pane 事件。
+    #[tokio::test]
+    async fn a_spawn_hint_that_arrives_after_the_pass_still_gets_the_child_adopted() {
+        let env = tt::env().await;
+        let app = env.app.clone();
+        let client = crate::herdr::HerdrClient::new(env.dir.join("data/herdr.sock"));
+        let (ws, root) = client.workspace_create("/tmp/p", "proj", json!({})).await.unwrap();
+        let kid_pane = client.pane_split(&root.pane_id, "right", "/tmp/p", json!({})).await.unwrap();
+
+        let parent = a_bot(&env, "alfa").await;
+        let parent_agent = crate::config::agent_name("proj", &parent);
+        sqlx::query(
+            "INSERT INTO runs (id, bot_id, state, agent_status, workspace_id, pane_id, tab_id, agent_name, herdr_session, started_at)
+             VALUES (?,?,'running','idle',?,?,?,?,'test',?)",
+        )
+        .bind(db::ulid())
+        .bind(&parent)
+        .bind(&ws.workspace_id)
+        .bind(&root.pane_id)
+        .bind(&root.tab_id)
+        .bind(&parent_agent)
+        .bind(db::now())
+        .execute(&app.db)
+        .await
+        .unwrap();
+        let agent_json = |name: &str, pane: &crate::herdr::PaneInfo| {
+            json!({"name": name, "agent": "grok", "agent_status": "working",
+                   "workspace_id": ws.workspace_id, "tab_id": pane.tab_id, "pane_id": pane.pane_id, "cwd": "/tmp/p"})
+        };
+        *env.herdr.agents.lock().unwrap() = vec![agent_json(&parent_agent, &root), agent_json(&format!("{parent_agent}-draft"), &kid_pane)];
+        bind_listed_instances(&env).await;
+
+        // 子 agent 出現的那一輪：還沒有線索，不認領。
+        super::reconcile_host(&app, crate::config::LOCAL_HOST).await.unwrap();
+        let n: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM bots WHERE parent_bot_id = ?").bind(&parent).fetch_one(&app.db).await.unwrap();
+        assert_eq!(n, 0, "沒有線索的那輪不該認領");
+
+        // 父 bot 的 PostToolUse 晚到；之後沒有任何人再叫 reconcile。
+        crate::hookrecv::process(
+            &app,
+            &crate::hookrecv::HookBody {
+                bot_id: parent.clone(),
+                provider: "claude".into(),
+                payload: json!({
+                    "hook_event_name": "PostToolUse",
+                    "tool_name": "Bash",
+                    "tool_input": {"command": format!("herdr agent start draft --kind grok --pane {}", kid_pane.pane_id)},
+                    "tool_response": {"stdout": format!(r#"{{"id":"cli:agent:start","result":{{"agent":{{"pane_id":"{}"}}}}}}"#, kid_pane.pane_id), "stderr": ""},
+                }),
+                received_at: None,
+                truncated: false,
+                run_id: None,
+            },
+        )
+        .await
+        .unwrap();
+
+        let mut adopted = 0i64;
+        for _ in 0..100 {
+            adopted = sqlx::query_scalar("SELECT COUNT(*) FROM bots WHERE parent_bot_id = ?").bind(&parent).fetch_one(&app.db).await.unwrap();
+            if adopted > 0 {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        }
+        assert_eq!(adopted, 1, "線索到了就該排一輪對帳把子 agent 認領起來");
+    }
+
     /// **#94 重開**：hint 讀不到不等於沒有 hint。父 agent 在新 tab 裡連開三顆、每一顆的 hint 都已經記在表裡，只是第二、三顆
     /// 出現的那一輪 SELECT 失敗——退回同 tab 推斷就會把 k2 掛到 k1 底下（串鏈、還因為短名字對錯 parent 取不到而長出重複 bot）。
     /// 讀不到的那一輪一顆都不認領；DB 恢復之後，延後的那一輪自己照 hint 認領（這之後沒有任何人叫 reconcile）。
