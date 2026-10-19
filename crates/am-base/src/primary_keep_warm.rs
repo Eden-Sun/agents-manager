@@ -168,10 +168,14 @@ pub fn is_warm_compact_echo(anchor: chrono::DateTime<chrono::Utc>, last_compact:
 /// codex 讀 rollout 最近一筆 `token_count`（[`crate::prompt_cache::codex_context_pct`]）；讀不到回 `None`。
 pub fn context_used_pct(kind: &str, run_id: &str, status_json: Option<&str>) -> Option<f64> {
     match kind {
-        "claude" => status_json
-            .and_then(|s| serde_json::from_str::<serde_json::Value>(s).ok())?
-            .pointer("/context_window/used_percentage")?
-            .as_f64(),
+        "claude" => {
+            let status: serde_json::Value = serde_json::from_str(status_json?).ok()?;
+            // Resume history is a display fallback, never evidence for automatic/frozen compaction.
+            if status.get("_agm_resumed_context").is_some() || status.get("_agm_context_invalidated").is_some() {
+                return None;
+            }
+            status.pointer("/context_window/used_percentage")?.as_f64()
+        }
         "codex" => crate::prompt_cache::codex_context_pct(run_id),
         _ => None,
     }

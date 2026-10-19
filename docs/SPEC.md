@@ -846,6 +846,10 @@ grok 的框底校正，**這一輪 runtime 真的變了**的模型／強度才�
 收編時 reconcile 補 codex 的 NULL runtime 走同一個校正（`reconcile::fill_codex_runtime` → `codex_live::correct_runtime_from_screen`），
 收編前就在 TUI 換過模型的 child 設定也跟著狀態列。
 
+**Claude resume 的 context 用量（#1869）**：接回原 session 時，只在同 bot／session 最近 64 筆候選 run 內尋找有效 context 測量，本機與遠端一致。來源 payload 的 `session_id`／`_agm_resumed_context` 必須明確且全部等於目標 session；舊資料沒有 payload session 身分就略過，不從 run 欄位猜。啟動模型須與來源的實際模型及已知啟動模型相容：相同 id 或裸 alias 對同系列完整 id 可沿用；不同模型（即使同視窗）、不同版本、視窗後綴不符或模型未知保守不還原。只帶 context 與驗證所需的私有標記，不帶舊帳號、額度、成本、快取熱度或 API 活動基準。
+
+CLI 全零／無用量重繪只保留相同 session、模型及已知視窗相容的暫存測量；新 StatusLine 明示不同視窗（例如 1M→200k）或不同模型時，保留新回報並撤掉舊比例。SessionStart 換 session、壓縮完成、resume 驗證不符及視窗／模型不相容會在既有 `status_json` 留下 `_agm_context_invalidated`（session id）界線；後續空重繪與再次 resume 都保留界線，歷史回溯不可越過它，直到同 session 的有效新用量（包含有實際 input token 的四捨五入 0%）取代。fork 與全新 session 不繼承來源 context。暫存測量與失效界線不作為快取計時基準，也不提供給自動／冰凍壓縮的 context 門檻判斷。
+
 **statusLine 校正 runtime_model（claude，#750）**：有掛 hook 的 claude run，statusLine 的 `model.id` 是「實際在跑」的權威。
 CLI 被 API 拒絕而 server 端 fallback（2.1.286：同級退回上一版）時，argv 與 `bots.model` 寫 A、實際在跑 B；`hookrecv` 的
 StatusLine 分支（過世代圍籬之後，舊 run／舊 hook 進不來）發現 `model.id` 跟 `runs.runtime_model` 不同就 CAS 改寫並推 `bot_status`，
