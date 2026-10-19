@@ -2297,6 +2297,7 @@ pid 不拿去對 listen port。agy 的登入 TUI 會在 127.0.0.1 自己開兩�
   子資料夾裡的檔顯示成 `資料夾/檔名`（資料夾前綴淡色），存檔名只取最後一段。
   圖檔（PNG/JPEG/GIF/WebP）滑鼠停 150ms 或鍵盤聚焦就在那一列左邊浮出預覽（使用者 2026-09-18），走同一支下載 API 抓成 blob，快取最多 12 張、換 bot 全部釋放；手機沒有 hover，照舊點一下下載。
   瀏覽器能直接顯示的格式（PDF 為主，以及點陣圖、純文字/Markdown/JSON 等；#1866）每列提供預覽按鈕（「↗」），點擊時以帶認證的 Blob URL 開啟新分頁展示且不觸發下載，關閉分頁後回收 Blob URL；非白名單格式或可執行檔案維持僅下載。
+  **預覽安全邊界（#1868）**：前端建立之 `blob:` URL 與主畫面同源，伺服器回應之 CSP sandbox 對該分頁無效；實際防止 XSS 的防線是後端嚴格的 MIME 白名單（只映射到純文字、圖片、JSON 與 PDF，排除所有可執行類型）。未來若要新增 SVG 或 HTML 預覽，不能依賴 CSP 擋腳本，必須另行設計隔離容器（如獨立 sandbox iframe）。
 - **驗證跟真正讀檔是同一個 fd（issue #89，2026-09-17）**：下載（`outbox::file`）與 `GET /api/bots/{id}/local-image`
   以前都是「驗證路徑（canonicalize＋containment＋metadata）」與「用路徑名字重新 open 讀內容」分開兩步，寫得到那個目錄的
   process（bot 自己）能在兩步之間把驗證通過的路徑換成指到界線外的符號連結。現在共用 `trusted_open`（`crates/am-base/src/trusted_open.rs`）：

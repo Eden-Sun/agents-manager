@@ -1,6 +1,6 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { downloadFailure, emptyReason, fileSize, isBrowserPreviewable, isPreviewableImage, lastSettledTurnKey, orderFiles, previewPlacement, readOutbox, remainingLabel, remainingNow, splitOutboxName } from './outboxList'
+import { downloadFailure, emptyReason, fileSize, INLINE_PREVIEW_EXTENSIONS, isBrowserPreviewable, isPreviewableImage, lastSettledTurnKey, orderFiles, previewPlacement, readOutbox, remainingLabel, remainingNow, splitOutboxName } from './outboxList'
 import { ApiError } from '../api/types'
 
 const file = (name: string, modified: number, remainingSecs: number | null = 3600) => ({ name, size: 1, modified, remainingSecs })
@@ -156,6 +156,22 @@ test('isBrowserPreviewable：PDF、點陣圖、純文字與 JSON 可開新分頁
   }
   for (const n of ['evil.svg', 'x.html', 'y.htm', 'z.xml', 'a.exe', 'b.sh', 'c.py', 'd.zip']) {
     assert.equal(isBrowserPreviewable(n), false, `${n} 絕不可預覽`)
+  }
+})
+
+test('前端 isBrowserPreviewable 白名單與後端 is_inline_allowed 完全相同（issue #1868）', () => {
+  // 後端 crates/am-base/src/outbox.rs 定義的 INLINE_PREVIEW_EXTENSIONS
+  const backendExtensions = [
+    'pdf', 'png', 'jpg', 'jpeg', 'gif', 'webp', 'txt', 'log', 'md', 'csv', 'tsv', 'json',
+  ]
+  assert.deepEqual(
+    [...INLINE_PREVIEW_EXTENSIONS].sort(),
+    [...backendExtensions].sort(),
+    '前端與後端 inline preview 副檔名白名單必須完全一致',
+  )
+  for (const ext of backendExtensions) {
+    assert.equal(isBrowserPreviewable(`file.${ext}`), true, `白名單副檔名 ${ext} 應被判定可預覽`)
+    assert.equal(isBrowserPreviewable(`file.${ext.toUpperCase()}`), true, `大寫副檔名 ${ext.toUpperCase()} 應被判定可預覽`)
   }
 })
 

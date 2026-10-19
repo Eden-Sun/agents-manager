@@ -254,6 +254,65 @@
         assert!(resp_pdf_dl.headers().get(header::CONTENT_SECURITY_POLICY).is_none());
     }
 
+    #[test]
+    fn inline_preview_whitelist_mime_is_never_executable() {
+        for &ext in INLINE_PREVIEW_EXTENSIONS {
+            let path_str = format!("sample.{}", ext);
+            let path = Path::new(&path_str);
+            assert!(is_inline_allowed(path), "{} 必須在 inline 白名單內", ext);
+            let mime = mime_of(path);
+            let mime_lower = mime.to_ascii_lowercase();
+
+            // 必須不是 text/html
+            assert_ne!(mime_lower, "text/html", "{} 不能是 text/html", ext);
+            assert!(!mime_lower.starts_with("text/html"), "{} 不能以 text/html 開頭", ext);
+
+            // 必須不是 image/svg+xml
+            assert_ne!(mime_lower, "image/svg+xml", "{} 不能是 image/svg+xml", ext);
+
+            // 不能是任何 *xml
+            assert!(!mime_lower.contains("xml"), "{} 的 MIME ({}) 不得包含 xml", ext, mime);
+
+            // 不能是任何 *javascript
+            assert!(!mime_lower.contains("javascript"), "{} 的 MIME ({}) 不得包含 javascript", ext, mime);
+        }
+    }
+
+    #[test]
+    fn frontend_and_backend_inline_preview_whitelists_match_exactly() {
+        const TS_SRC: &str = include_str!("../../../web/src/lib/outboxList.ts");
+        let start_marker = "export const INLINE_PREVIEW_EXTENSIONS: readonly string[] = [";
+        let start_idx = TS_SRC.find(start_marker)
+            .unwrap_or_else(|| panic!("無法在 outboxList.ts 中找到 `{}` 定義", start_marker));
+        let after_start = &TS_SRC[start_idx + start_marker.len()..];
+        let end_idx = after_start.find(']')
+            .unwrap_or_else(|| panic!("無法在 outboxList.ts 的 INLINE_PREVIEW_EXTENSIONS 中找到結尾 `]`"));
+        let array_content = &after_start[..end_idx];
+
+        let mut frontend_exts: Vec<&str> = Vec::new();
+        for line in array_content.lines() {
+            let trimmed = line.trim();
+            if trimmed.is_empty() || trimmed.starts_with("//") {
+                continue;
+            }
+            let item = trimmed.trim_matches(|c| c == '\'' || c == '"' || c == ',' || c == ' ');
+            if !item.is_empty() {
+                frontend_exts.push(item);
+            }
+        }
+
+        assert!(!frontend_exts.is_empty(), "解析 frontend INLINE_PREVIEW_EXTENSIONS 失敗，解析結果為空");
+
+        let mut backend_exts: Vec<&str> = INLINE_PREVIEW_EXTENSIONS.to_vec();
+        frontend_exts.sort();
+        backend_exts.sort();
+
+        assert_eq!(
+            frontend_exts, backend_exts,
+            "前端 web/src/lib/outboxList.ts 與後端 crates/am-base/src/outbox.rs 的 INLINE_PREVIEW_EXTENSIONS 必須完全相同"
+        );
+    }
+
     /// 端到端：列表與下載只看 outbox。bot 的 scratchpad 就算有檔案、就算從 outbox 用符號連結指過去、
     /// 就算直接給絕對路徑，一律 404；舊的 scratchpad 路徑也是 404。
     #[tokio::test]
