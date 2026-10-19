@@ -15,7 +15,7 @@ agent 一律由 **herdr**（terminal workspace manager，socket API protocol 20�
 |---|---|---|---|
 | **Project** | 以目錄為單位的分組，canonical path 唯一 | `project_id`（`[A-Za-z0-9_-]{1,64}`，缺省產生 ULID） | 一個 `workspace`（記 `workspace_id`；對帳發現不存在就設 NULL，下次啟動 bot 時重建） |
 | **Bot** | agent 設定：暱稱 `name`、kind、`model`、`effort`、args…，屬於一個 Project | `bot_id`（同上規則，永久） | — |
-| **Run** | Bot 的一次執行。**每個 Bot 最多一個 active Run（DB 部分唯一索引）**。含 `agent_name`、`native_session_id`、`transcript_path`（hook 回填） | `run_id`（ULID） | `pane_id` ＋ host ＋ herdr session；`native_session_id` 驗證 pane 是否換人，`agent_name` 只供顯示 |
+| **Run** | Bot 的一次執行。**每個 Bot 最多一個 active Run（DB 部分唯一索引）**。含 `agent_name`、`native_session_id`、`transcript_path`（hook 回填） | `run_id`（ULID） | `pane_id` ＋ host ＋ herdr session；`native_session_id` 驗證 pane 是否換人（herdr 沒回報 session 時——grok 一律如此——沒有反證，對帳照 pane_id 接回，子 agent 也一樣；2026-10-19），`agent_name` 只供顯示 |
 | **Conversation** | 與 Bot 1:1，跨 Run 延續，不拆分 | `conversation_id` | — |
 | **Turn** | 一次「prompt → 回覆完成」。**每個 active Run 最多一筆 in-flight** | `turn_id` | Claude `prompt_id` / Codex `turn-id` |
 | **Message** | `role ∈ {user, assistant, system}` | `message_id` | — |

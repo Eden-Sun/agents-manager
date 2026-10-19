@@ -464,6 +464,9 @@ fn matches_run(run: &db::Run, agent: &crate::herdr::AgentInfo, child: bool) -> b
     if !matches!(run.state.as_str(), "starting" | "running" | "stopping") && run.native_session_id.is_none() { return false; }
     match (run.native_session_id.as_deref(), crate::lifecycle::dead_panes::herdr_session_id(agent)) {
         (Some(expected), Some(observed)) => !expected.is_empty() && expected == observed,
+        // herdr 沒把 CLI session 綁上（grok 一律如此）：沒有反證，就以同 host／session 的 pane_id 當身分。
+        // 以前子 agent 走這裡一律 false，daemon 重啟後 grok 子 agent 再也接不回、狀態不再追蹤（2026-10-19 m4p）。
+        (Some(_), None) => run.pane_id.as_deref() == Some(agent.pane_id.as_str()),
         (None, _) if !child => run.pane_id.as_deref() == Some(agent.pane_id.as_str()),
         _ => false,
     }
@@ -4371,6 +4374,59 @@ mod compat_tests {
             tokio::time::sleep(std::time::Duration::from_millis(50)).await;
         }
         assert_eq!(adopted, 1, "線索到了就該排一輪對帳把子 agent 認領起來");
+    }
+
+    /// 2026-10-19 m4p：daemon 重啟後，herdr 沒綁 CLI session 的子 agent（grok）要靠 pane_id 接回來、繼續追蹤狀態；
+    /// 以前只認 native session，接不回，子 agent 的進度從此看不到。
+    #[tokio::test]
+    async fn a_child_without_a_herdr_session_is_kept_by_its_pane_after_a_restart() {
+        let env = tt::env().await;
+        let app = env.app.clone();
+        let client = crate::herdr::HerdrClient::new(env.dir.join("data/herdr.sock"));
+        let (ws, root) = client.workspace_create("/tmp/p", "proj", json!({})).await.unwrap();
+        let kid_pane = client.pane_split(&root.pane_id, "right", "/tmp/p", json!({})).await.unwrap();
+
+        let parent = a_bot(&env, "alfa").await;
+        let parent_agent = crate::config::agent_name("proj", &parent);
+        let kid = a_bot(&env, "grok").await;
+        sqlx::query("UPDATE bots SET kind='grok', managed_by='child', parent_bot_id=? WHERE id=?").bind(&parent).bind(&kid).execute(&app.db).await.unwrap();
+        let kid_agent = format!("{parent_agent}-grok");
+        let kid_run = db::ulid();
+        for (run, bot, pane, name, native) in [
+            (db::ulid(), &parent, &root, &parent_agent, None),
+            (kid_run.clone(), &kid, &kid_pane, &kid_agent, Some("01a1530b-226c-7883-a859-b274392a0dda")),
+        ] {
+            sqlx::query(
+                "INSERT INTO runs (id, bot_id, state, agent_status, workspace_id, pane_id, tab_id, agent_name, herdr_session, native_session_id, started_at)
+                 VALUES (?,?,'running','working',?,?,?,?,'test',?,?)",
+            )
+            .bind(&run)
+            .bind(bot)
+            .bind(&ws.workspace_id)
+            .bind(&pane.pane_id)
+            .bind(&pane.tab_id)
+            .bind(name)
+            .bind(native)
+            .bind(db::now())
+            .execute(&app.db)
+            .await
+            .unwrap();
+        }
+        // herdr 對 grok 不回 agent_session。
+        let agent_json = |name: &str, kind: &str, pane: &crate::herdr::PaneInfo| {
+            json!({"name": name, "agent": kind, "agent_status": "idle",
+                   "workspace_id": ws.workspace_id, "tab_id": pane.tab_id, "pane_id": pane.pane_id, "cwd": "/tmp/p"})
+        };
+        *env.herdr.agents.lock().unwrap() = vec![agent_json(&parent_agent, "claude", &root), agent_json(&kid_agent, "grok", &kid_pane)];
+
+        super::reconcile_host(&app, crate::config::LOCAL_HOST).await.unwrap();
+
+        let (state, status): (String, Option<String>) =
+            sqlx::query_as("SELECT state, agent_status FROM runs WHERE id=?").bind(&kid_run).fetch_one(&app.db).await.unwrap();
+        assert_eq!(state, "running");
+        assert_eq!(status.as_deref(), Some("idle"), "接回來的子 agent 要拿到 herdr 現在的狀態，不是停在舊的 working");
+        let kids: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM bots WHERE parent_bot_id=? AND deleted_at IS NULL").bind(&parent).fetch_one(&app.db).await.unwrap();
+        assert_eq!(kids, 1, "不會另外長出一顆重複的子 agent");
     }
 
     /// **#94 重開**：hint 讀不到不等於沒有 hint。父 agent 在新 tab 裡連開三顆、每一顆的 hint 都已經記在表裡，只是第二、三顆
