@@ -142,12 +142,40 @@ export function isPreviewableImage(name: string): boolean {
 }
 
 /**
- * 瀏覽器能直接顯示且適合開新分頁預覽的格式（issue #1866）。
+ * 允許在瀏覽器新分頁預覽的副檔名白名單（issue #1866、#1868）。
+ * 需與後端 `crates/am-base/src/outbox.rs` 的 `INLINE_PREVIEW_EXTENSIONS` 完全一致。
+ *
+ * **安全邊界提醒（issue #1868）**：
+ * 前端以 `fetch` 取回後轉為 `blob:` URL 開啟新分頁，該 blob URL 與主應用同源，
+ * 伺服器端 HTTP 回應帶的 CSP sandbox 對該分頁無效。實際防止 XSS 的關鍵防線為
+ * 嚴格的 MIME 白名單（只映射到純文字、圖片、JSON 與 PDF，排除所有可執行類型）。
+ * 未來若需支援 SVG、HTML 預覽，必須另行設計沙盒容器（如 sandboxed iframe），不可直接列入。
+ */
+export const INLINE_PREVIEW_EXTENSIONS: readonly string[] = [
+  'pdf',
+  'png',
+  'jpg',
+  'jpeg',
+  'gif',
+  'webp',
+  'txt',
+  'log',
+  'md',
+  'csv',
+  'tsv',
+  'json',
+]
+
+/**
+ * 瀏覽器能直接顯示且適合開新分頁預覽的格式（issue #1866、#1868）。
  * PDF 為主；圖片（PNG/JPEG/GIF/WebP）、純文字／記錄檔／Markdown／CSV／TSV、JSON。
- * 注意：SVG、HTML 等可執行腳本內容絕不允許（防範 XSS）。
+ * 副檔名需在 INLINE_PREVIEW_EXTENSIONS 白名單內。
  */
 export function isBrowserPreviewable(name: string): boolean {
-  return /\.(pdf|png|jpe?g|gif|webp|txt|log|md|csv|tsv|json)$/i.test(name)
+  const m = /\.([a-z0-9]+)$/i.exec(name)
+  if (!m) return false
+  const ext = m[1].toLowerCase()
+  return INLINE_PREVIEW_EXTENSIONS.includes(ext)
 }
 
 /**

@@ -362,15 +362,23 @@ pub fn mime_of(path: &Path) -> &'static str {
     }
 }
 
-/// 允許在瀏覽器直接 inline 預覽的格式（白名單）：
-/// PDF、常見點陣圖片（PNG/JPEG/GIF/WebP）、純文字／紀錄／Markdown／CSV／TSV、JSON。
-/// 注意：SVG、HTML、XML 等可執行腳本內容絕不允許 inline（防範 XSS）。
+/// 允許在瀏覽器新分頁預覽的副檔名白名單（issue #1866、#1868）：
+/// PDF、常見點陣圖片（PNG/JPEG/GIF/WebP）、純文字／記錄檔／Markdown／CSV／TSV、JSON。
+///
+/// **安全邊界提醒（issue #1868）**：
+/// 前端以 `fetch` 取回後轉為 `blob:` URL 開啟新分頁，該 blob URL 與主應用同源（same-origin），
+/// 伺服器端 HTTP 回應帶的 `Content-Security-Policy: sandbox` 對該 `blob:` 文件無效。
+/// 真正防止腳本執行的安全防線在於此處嚴格的 **MIME 白名單**（`mime_of` 僅對應到 `text/plain`、
+/// `application/json`、`image/*` 與 `application/pdf`，絕不對應可執行腳本類型）。
+/// 未來若需支援 SVG、HTML 等可執行格式的預覽，絕不可直接納入此處 inline 白名單，必須另行設計
+/// 專門的隔離沙盒容器（例如 sandboxed iframe 或獨立 origin）。
+pub const INLINE_PREVIEW_EXTENSIONS: &[&str] = &[
+    "pdf", "png", "jpg", "jpeg", "gif", "webp", "txt", "log", "md", "csv", "tsv", "json",
+];
+
 pub fn is_inline_allowed(path: &Path) -> bool {
     let ext = path.extension().and_then(|e| e.to_str()).unwrap_or("").to_ascii_lowercase();
-    matches!(
-        ext.as_str(),
-        "pdf" | "png" | "jpg" | "jpeg" | "gif" | "webp" | "txt" | "log" | "md" | "csv" | "tsv" | "json"
-    )
+    INLINE_PREVIEW_EXTENSIONS.contains(&ext.as_str())
 }
 
 /// `filename*=UTF-8''…`：中文檔名在 `filename=` 裡會變亂碼或被截斷。

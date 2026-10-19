@@ -1113,7 +1113,7 @@ bot 或 active Run 不存在 404。
 下載 outbox 裡的一個檔案。`path` 是清單裡的 `name`（可含子資料夾，如 `報價_Q-1/報價單.pdf`；要 URL-encode），逐段驗證（不准 `..`、空段、隱藏段、被擋的名字，最多 33 段）後從 outbox 起逐層 `openat(O_NOFOLLOW)` 打開；路徑上任何一層是符號連結、最後不是一般檔案，或是上面「一律不列」的那幾類，都是 `404 {"what":"file"}`（指到 scratchpad 的絕對路徑或符號連結一樣 404）；缺 `path` 400；bot 不存在 404；遠端主機的 bot 走 ssh 取檔（同樣逐段驗證、逐層確認不是符號連結），連不上那台 409 `outbox_remote_unreachable`；大於 64 MiB，或檢查大小後又長大的檔案，409 `file_too_large`。
 
 預設 `Content-Disposition: attachment`（檔名走 `filename` + RFC 5987 `filename*`），加 `X-Content-Type-Options: nosniff` 與 `Cache-Control: private, no-store`。`Content-Type` 只認白名單（文字/JSON/CSV/TSV/PNG/JPEG/GIF/WebP/PDF），其餘一律 `application/octet-stream`。只讀，沒有刪除或覆寫的端點。
-帶 `&inline=1` 或 `&inline=true` 時（issue #1866），若副檔名在安全預覽白名單內（PDF、點陣圖 PNG/JPEG/GIF/WebP、文字 txt/log/md/csv/tsv、JSON），改回 `Content-Disposition: inline` 並額外帶 `Content-Security-Policy: sandbox; default-src 'none'`；非白名單格式或可執行內容（如 SVG、HTML）絕不 inline，仍維持 `attachment`。
+帶 `&inline=1` 或 `&inline=true` 時（issue #1866），若副檔名在安全預覽白名單內（PDF、點陣圖 PNG/JPEG/GIF/WebP、文字 txt/log/md/csv/tsv、JSON），改回 `Content-Disposition: inline` 並額外帶 `Content-Security-Policy: sandbox; default-src 'none'`；非白名單格式或可執行內容（如 SVG、HTML）絕不 inline，仍維持 `attachment`。注意：前端若轉成 `blob:` URL 開啟新分頁，該頁與主畫面同源，伺服器的 CSP sandbox 對它無效，真正的安全防線在於 MIME 白名單（只對應純文字、圖片、JSON 與 PDF，不對應可執行腳本；issue #1868）；未來若要支援 SVG/HTML 預覽必須另行設計隔離容器，不能直接納入 inline 白名單。
 
 ### `GET /api/bots/{id}/scratchpad`、`GET /api/bots/{id}/scratchpad/file`（已移除）
 2026-09-16 起一律 `404 {"what":"scratchpad"}`：scratchpad 不再給使用者（它暴露過私鑰與正式 DB 複本）。明確回 404，不落到 SPA fallback 回 HTML。
