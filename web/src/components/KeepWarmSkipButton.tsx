@@ -2,7 +2,8 @@ import { useState } from 'react'
 import * as api from '../api'
 import { ApiError } from '../api/types'
 import { useStore } from '../store/store'
-import { keepWarmSkippable } from '../lib/keepWarm'
+import { keepWarmReplied, keepWarmSkippable } from '../lib/keepWarm'
+import { useCacheTick } from '../hooks/useCacheTick'
 import './compactButton.css'
 
 /**
@@ -11,11 +12,14 @@ import './compactButton.css'
  */
 export function KeepWarmSkipButton({ botId, touch = false }: { botId: string; touch?: boolean }) {
   const eligible = useStore((s) => keepWarmSkippable(s.bots.find((b) => b.id === botId)))
-  const skipping = useStore((s) => s.runs[botId]?.keep_warm_skip === true)
-  const hasRun = useStore((s) => Boolean(s.runs[botId]))
+  const run = useStore((s) => s.runs[botId])
+  const skipping = run?.keep_warm_skip === true
+  // 與主力晶片的 ♨ 同一判斷；即使沒有 run 廣播，TTL 到期也要換回文案。
+  const now = useCacheTick(eligible && !skipping && Boolean(run?.keep_warm_replied_at))
+  const warmed = keepWarmReplied(run, now)
   const notify = useStore((s) => s.notify)
   const [busy, setBusy] = useState(false)
-  if (!eligible || !hasRun) return null
+  if (!eligible || !run) return null
   const go = async () => {
     setBusy(true)
     try {
@@ -42,14 +46,16 @@ export function KeepWarmSkipButton({ botId, touch = false }: { botId: string; to
       title={
         skipping
           ? '已設定不用保溫：這一輪閒置不保溫、也不熱壓；有新活動就自動恢復。點一下取消'
-          : '這一輪閒置不要保溫（58 分的 any updates）與熱壓；有新活動就自動恢復'
+          : warmed
+            ? '保溫回覆已到、快取仍熱；點一下停止這一輪閒置保溫，有新活動就自動恢復'
+            : '這一輪閒置不要保溫（58 分的 any updates）與熱壓；有新活動就自動恢復'
       }
       onClick={(e) => {
         e.stopPropagation()
         void go()
       }}
     >
-      {skipping ? '不保溫中・取消' : '不用保溫'}
+      {skipping ? '不保溫中・取消' : warmed ? '保溫中・停止保溫' : '不用保溫'}
     </button>
   )
 }
