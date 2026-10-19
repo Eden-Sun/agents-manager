@@ -195,12 +195,56 @@ pub fn entry_matches(display: &str, target: &str) -> bool {
 
 /// 確認頁印的字是不是目標。整則對上最好；只對上前綴時，要確實是被截斷的長度（見 [`TRUNCATED_MIN_LINES`]）。
 pub fn confirm_matches(quoted: &[String], target: &str) -> bool {
+    confirm_matches_with_identity(quoted, target, false)
+}
+
+fn confirm_matches_with_identity(quoted: &[String], target: &str, unique_target: bool) -> bool {
     let shown = squash(&quoted.join("\n"));
     let want = squash(target);
     if shown.is_empty() {
         return false;
     }
-    shown == want || (want.starts_with(&shown) && quoted.len() >= TRUNCATED_MIN_LINES)
+    if shown == want {
+        return true;
+    }
+    if let Some((text, header, paths)) = attachment_tail(target) {
+        // The CLI can spend its four visible lines on the image placeholder, body,
+        // blank line and attachment heading, hiding every path. Only accept this
+        // shape only with independently verified identity, the full body and heading.
+        if squash(text).is_empty() {
+            return false; // Image-only prompts need the complete path identity.
+        }
+        let heading = squash(header);
+        if let Some((body, tail)) = shown.rsplit_once(&heading) {
+            let body_matches = body == squash(text);
+            return body_matches && ((!tail.is_empty() && tail == squash(paths)) || (tail.is_empty() && unique_target));
+        }
+        // Only the body can supply the existing long-message truncation proof.
+        return unique_target && squash(text).starts_with(&shown) && quoted.len() >= TRUNCATED_MIN_LINES;
+    }
+    want.starts_with(&shown) && quoted.len() >= TRUNCATED_MIN_LINES
+}
+
+/// Recognize only the terminal suffix produced by `attach::deliver_text`, with
+/// at least one absolute path. A heading in ordinary prose is not an attachment.
+fn attachment_tail(target: &str) -> Option<(&str, &str, &str)> {
+    for header in [
+        "附加圖片（請讀取這個檔案來查看）：",
+        "附加圖片（請讀取這些檔案來查看）：",
+        "附加檔案（請讀取這個檔案來查看）：",
+        "附加檔案（請讀取這些檔案來查看）：",
+    ] {
+        if let Some((text, suffix)) = target.rsplit_once(header) {
+            if !(text.is_empty() || text.ends_with("\n\n")) {
+                continue;
+            }
+            let Some(paths) = suffix.strip_prefix('\n') else { continue };
+            if !paths.is_empty() && paths.lines().all(|p| p.starts_with('/')) {
+                return Some((text, header, paths));
+            }
+        }
+    }
+    None
 }
 
 /// 目標在選單上要跳過幾則「第一行一樣」的較新訊息（由新到舊找，第 `skip+1` 個對上的才是）。
@@ -344,6 +388,12 @@ async fn back_out(pane: &dyn Pane) {
 /// 驅動 `/rewind` 倒回到 `target` 之前。`skip`：從新到舊，第一行一樣的較新訊息有幾則要跳過。
 /// 呼叫端持 bot 鎖、已確認閒著。
 pub async fn drive(pane: &dyn Pane, target: &str, skip: usize) -> Result<Done, Fail> {
+    drive_with_identity(pane, target, skip, false).await
+}
+
+/// `unique_target` requires exactly one matching first line in the stored history,
+/// including interrupted messages. Hidden paths also require a unique CLI entry.
+pub async fn drive_with_identity(pane: &dyn Pane, target: &str, skip: usize, unique_target: bool) -> Result<Done, Fail> {
     let s = read(pane).await?;
     if in_rewind_ui(&s) {
         return Err(Fail::UiBusy);
@@ -366,26 +416,51 @@ pub async fn drive(pane: &dyn Pane, target: &str, skip: usize) -> Result<Done, F
         return Err(Fail::MenuNotShown);
     };
 
+    let scan_all = unique_target && skip == 0 && attachment_tail(target).is_some();
     let mut remaining = skip;
-    let mut found = false;
+    let mut found_at = None;
+    let mut steps = 0;
+    let mut candidates = 0;
+    let mut reached_top = false;
     for _ in 0..MAX_STEPS {
         keys(pane, &["Up"]).await?;
         let prev = menu.block.clone();
-        // 游標沒動＝已經在最上面。
-        let Some(next) = wait_for(pane, STEP_WAIT_MS, |s| parse_menu(s).filter(|m| m.block != prev)).await? else { break };
+        // A stationary cursor is the top; without reaching it uniqueness is unproven.
+        let Some(next) = wait_for(pane, STEP_WAIT_MS, |s| parse_menu(s).filter(|m| m.block != prev)).await? else {
+            reached_top = true;
+            break;
+        };
+        steps += 1;
         menu = next;
         if menu.selected.as_deref().is_some_and(|d| entry_matches(d, target)) {
-            if remaining == 0 {
-                found = true;
-                break;
+            candidates += 1;
+            if found_at.is_none() {
+                if remaining == 0 {
+                    found_at = Some(steps);
+                    if !scan_all {
+                        break;
+                    }
+                } else {
+                    remaining -= 1;
+                }
             }
-            remaining -= 1;
         }
     }
-    if !found {
+    let Some(found_at) = found_at else {
         back_out(pane).await;
         return Err(Fail::NotInMenu);
+    };
+    // Return to the chosen entry after inspecting older, possibly identical entries.
+    for _ in found_at..steps {
+        keys(pane, &["Down"]).await?;
+        let prev = menu.block.clone();
+        let Some(next) = wait_for(pane, STEP_WAIT_MS, |s| parse_menu(s).filter(|m| m.block != prev)).await? else {
+            back_out(pane).await;
+            return Err(Fail::NotInMenu);
+        };
+        menu = next;
     }
+    let unique_target = scan_all && reached_top && candidates == 1;
 
     keys(pane, &["Enter"]).await?;
     let Some(_) = wait_for(pane, CONFIRM_WAIT_MS, parse_confirm).await? else {
@@ -399,7 +474,7 @@ pub async fn drive(pane: &dyn Pane, target: &str, skip: usize) -> Result<Done, F
         back_out(pane).await;
         return Err(Fail::ConfirmNotShown);
     };
-    if !confirm_matches(&confirm.quoted, target) {
+    if !confirm_matches_with_identity(&confirm.quoted, target, unique_target) {
         back_out(pane).await;
         return Err(Fail::TextMismatch(confirm.quoted.join("\n")));
     }

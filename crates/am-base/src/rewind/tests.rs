@@ -149,6 +149,61 @@ fn squash_ignores_whitespace_and_image_placeholders() {
     assert_eq!(squash("[Image #x] stays"), "[Image#x]stays");
 }
 
+fn attachment_prompt(text: &str, paths: &[&str]) -> String {
+    let header = if paths.len() == 1 { "附加圖片（請讀取這個檔案來查看）：" } else { "附加圖片（請讀取這些檔案來查看）：" };
+    format!("{}{header}\n{}", if text.is_empty() { String::new() } else { format!("{text}\n\n") }, paths.join("\n"))
+}
+
+fn quoted(text: &str) -> Vec<String> {
+    text.lines().map(str::to_owned).collect()
+}
+
+#[test]
+fn attachment_confirm_requires_identity_when_paths_are_hidden() {
+    for paths in [vec!["/project/.agents-manager/attachments/a.png"], vec!["/project/.agents-manager/attachments/a.png", "/project/.agents-manager/attachments/b.png"]] {
+        for body in ["saw this 所以這是包含 self-host的吧", "first line\nsecond line"] {
+            let target = attachment_prompt(body, &paths);
+            let header = target.lines().find(|l| l.starts_with("附加圖片")).unwrap();
+            let markers = if paths.len() == 1 { "[Image #1]" } else { "[Image #1][Image #12]" };
+            assert!(!confirm_matches(&quoted(&format!("{markers}{body}\n\n{header}")), &target));
+            assert!(confirm_matches(&quoted(&format!("{markers}{target}")), &target));
+            // TUI wrapping is immaterial, but every body character still matters.
+            assert!(!confirm_matches(&quoted(&format!("{markers}{}\n{header}", body.replace(' ', "\n"))), &target));
+            for wrong in [format!("{markers}{body} extra\n\n{header}"), format!("{markers}{}\n\n{header}", body.chars().take(4).collect::<String>()), format!("{markers}{body}\n\n{header}\n/other.png")] {
+                assert!(!confirm_matches(&quoted(&wrong), &target), "{wrong}");
+            }
+        }
+    }
+}
+
+#[test]
+fn image_only_confirmation_requires_complete_attachment_identity() {
+    let paths = ["/project/.agents-manager/attachments/a.png", "/project/.agents-manager/attachments/b.png"];
+    for count in 1..=2 {
+        let target = attachment_prompt("", &paths[..count]);
+        assert!(entry_matches(&format!("[Image #1]{}…", target.lines().next().unwrap()), &target));
+        assert!(confirm_matches(&quoted(&format!("[Image #1][Image #2]{target}")), &target));
+        assert!(!confirm_matches(&quoted(target.lines().next().unwrap()), &target));
+        assert!(!confirm_matches(&quoted(&target.replace("a.png", "other.png")), &target));
+        assert!(!confirm_matches(&quoted(&format!("[Image #1]\n\n{}\n/project/.agents-manager/attachments/", target.lines().next().unwrap())), &target));
+    }
+    assert!(!confirm_matches(&quoted(&attachment_prompt("", &paths[..1])), &attachment_prompt("", &paths)));
+    assert!(!confirm_matches(&quoted("[Image #1]"), ""));
+    assert!(!confirm_matches(&quoted(&attachment_prompt("", &[paths[1], paths[0]])), &attachment_prompt("", &paths)));
+}
+
+#[test]
+fn attachment_normalization_preserves_literal_headings_and_long_body_guards() {
+    let target = attachment_prompt("first\nsecond\nthird\nfourth\nfifth", &["/project/a.png"]);
+    assert!(!confirm_matches(&quoted("[Image #1]first\nsecond\nthird\nfourth"), &target));
+    assert!(!confirm_matches(&quoted("[Image #1]first\nsecond\nthird"), &target));
+    let literal = "hello\n\n附加圖片（請讀取這個檔案來查看）：\nthis is prose";
+    assert!(!confirm_matches(&quoted("hello\n\n附加圖片（請讀取這個檔案來查看）："), literal));
+    assert!(!confirm_matches(&quoted("hello\n\n附加圖片（請讀取這個檔案來查看）：\n/other.png"), "hello"));
+    let target = attachment_prompt("hello", &["/project/a.png", "/project/b.png"]);
+    assert!(!confirm_matches(&quoted("hello\n\n附加圖片（請讀取這些檔案來查看）：\n/project/a.png"), &target));
+}
+
 #[test]
 fn composer_cas_only_normalizes_crlf_line_endings() {
     assert!(same_composer("first\r\nsecond", "first\nsecond"));
@@ -428,6 +483,51 @@ async fn the_normal_path_restores_the_right_message_and_clears_the_pane() {
     assert_eq!(tui.log(), vec!["text:/rewind", "Enter", "Up", "Up", "Enter", "1", "ctrl+c"]);
 }
 
+#[tokio::test]
+async fn attachment_confirmation_restores_only_after_the_full_body_matches() {
+    let target = attachment_prompt("saw this 所以這是包含 self-host的吧", &["/project/a.png"]);
+    let heading = "附加圖片（請讀取這個檔案來查看）：";
+    for (body, succeeds) in [("saw this 所以這是包含 self-host的吧", true), ("saw this 所以這是包含", false)] {
+        let tui = FakeTui::new(&[A, &target, C], Faults {
+            confirm_text: Some(format!("[Image #1]{body}\n\n{heading}")),
+            ..Default::default()
+        });
+        let result = drive_with_identity(tui.as_ref(), &target, 0, true).await;
+        if succeeds {
+            assert!(result.unwrap().pane_cleared);
+            assert_eq!(tui.restored(), Some(1));
+        } else {
+            assert!(matches!(result, Err(Fail::TextMismatch(_))));
+            assert_eq!(tui.restored(), None);
+            assert!(!tui.log().iter().any(|k| k == "1"));
+        }
+    }
+}
+
+#[tokio::test]
+async fn hidden_attachment_paths_require_a_unique_cli_candidate_too() {
+    let target = attachment_prompt("same body", &["/project/a.png"]);
+    let other = attachment_prompt("same body", &["/project/b.png"]);
+    let tui = FakeTui::new(&[&other, &target], Faults {
+        confirm_text: Some("[Image #1]same body\n\n附加圖片（請讀取這個檔案來查看）：".into()),
+        ..Default::default()
+    });
+    assert!(matches!(drive_with_identity(tui.as_ref(), &target, 0, true).await, Err(Fail::TextMismatch(_))));
+    assert_eq!(tui.restored(), None);
+    assert!(!tui.log().iter().any(|k| k == "1"));
+}
+
+#[tokio::test]
+async fn image_only_confirmation_with_two_paths_can_rewind() {
+    let target = attachment_prompt("", &["/project/a.png", "/project/b.png"]);
+    let tui = FakeTui::new(&[A, &target, C], Faults {
+        confirm_text: Some(format!("[Image #1][Image #2]{target}")),
+        ..Default::default()
+    });
+    assert!(drive(tui.as_ref(), &target, 0).await.unwrap().pane_cleared);
+    assert_eq!(tui.restored(), Some(1));
+}
+
 /// 長的訊息放回輸入列時只看得到尾巴幾行：那也是目標的一段，照樣清掉。
 #[tokio::test]
 async fn a_long_refill_seen_only_by_its_tail_is_still_cleared() {
@@ -657,6 +757,78 @@ async fn a_rewind_marks_that_message_and_later_and_returns_its_text() {
         .unwrap();
     assert!(note.contains("已倒回"), "{note}");
     assert_eq!(reason(call(&r, &r.ids[2], &tui).await.unwrap_err()), "already_rewound");
+}
+
+#[tokio::test]
+async fn a_unique_attachment_message_can_restore_with_hidden_paths() {
+    for paths in [vec!["/project/a.png"], vec!["/project/a.png", "/project/b.png"]] {
+        let r = rig().await;
+        let target = attachment_prompt("look here", &paths);
+        let ids = insert_msgs(&r.e.app, &r.bot, &[("user", &target)]).await;
+        let hidden = target.lines().take(3).collect::<Vec<_>>().join("\n");
+        let tui = FakeTui::new(&[A, SECOND, C, &target], Faults {
+            confirm_text: Some(format!("[Image #1]{hidden}")), ..Default::default()
+        });
+        assert!(call(&r, &ids[0], &tui).await.is_ok());
+        assert_eq!(tui.restored(), Some(3));
+    }
+}
+
+#[tokio::test]
+async fn same_body_with_different_images_does_not_restore_without_path_identity() {
+    let r = rig().await;
+    let older = attachment_prompt("same body", &["/project/a.png"]);
+    let target = attachment_prompt("same body", &["/project/b.png"]);
+    let ids = insert_msgs(&r.e.app, &r.bot, &[("user", &older), ("user", &target)]).await;
+    let tui = FakeTui::new(&[A, SECOND, C, &older, &target], Faults {
+        confirm_text: Some("[Image #1]same body\n\n附加圖片（請讀取這個檔案來查看）：".into()),
+        ..Default::default()
+    });
+    assert_eq!(reason(call(&r, &ids[1], &tui).await.unwrap_err()), "text_mismatch");
+    assert_eq!(tui.restored(), None);
+    assert!(!tui.log().iter().any(|k| k == "1"));
+    // Ambiguous body is safe when the complete attachment path proves identity.
+    let tui = FakeTui::new(&[A, SECOND, C, &older, &target], Faults::default());
+    assert!(call(&r, &ids[1], &tui).await.is_ok());
+    assert_eq!(tui.restored(), Some(4));
+}
+
+#[tokio::test]
+async fn an_interrupted_attachment_cannot_shift_skip_to_an_older_different_image() {
+    let r = rig().await;
+    let older = attachment_prompt("same body", &["/project/a.png"]);
+    let target = attachment_prompt("same body", &["/project/b.png"]);
+    let dropped = attachment_prompt("same body", &["/project/c.png"]);
+    let ids = insert_msgs(&r.e.app, &r.bot, &[("user", &older), ("user", &target), ("user", &dropped)]).await;
+    turn_for(&r, &ids[2], "failed").await;
+    // The delivered-but-interrupted last message is absent in the CLI. skip=1
+    // therefore selects `older`, whose hidden-path confirmation looks identical.
+    let tui = FakeTui::new(&[A, SECOND, C, &older, &target], Faults {
+        confirm_text: Some("[Image #1]same body\n\n附加圖片（請讀取這個檔案來查看）：".into()),
+        ..Default::default()
+    });
+    assert_eq!(reason(call(&r, &ids[1], &tui).await.unwrap_err()), "text_mismatch");
+    assert_eq!(tui.restored(), None);
+    assert!(!tui.log().iter().any(|k| k == "1"));
+    let marked: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM messages WHERE rewound_at IS NOT NULL")
+        .fetch_one(&r.e.app.db).await.unwrap();
+    assert_eq!(marked, 0);
+}
+
+#[tokio::test]
+async fn an_interrupted_target_is_ambiguous_even_with_only_one_cli_candidate() {
+    let r = rig().await;
+    let older = attachment_prompt("same body", &["/project/a.png"]);
+    let target = attachment_prompt("same body", &["/project/b.png"]);
+    let ids = insert_msgs(&r.e.app, &r.bot, &[("user", &older), ("user", &target)]).await;
+    turn_for(&r, &ids[1], "failed").await;
+    let tui = FakeTui::new(&[A, SECOND, C, &older], Faults {
+        confirm_text: Some("[Image #1]same body\n\n附加圖片（請讀取這個檔案來查看）：".into()),
+        ..Default::default()
+    });
+    assert_eq!(reason(call(&r, &ids[1], &tui).await.unwrap_err()), "text_mismatch");
+    assert_eq!(tui.restored(), None);
+    assert!(!tui.log().iter().any(|k| k == "1"));
 }
 
 /// #656：第二次倒回在第一次還握著鎖、還沒標記時就通過了鎖外的檢查。進鎖後必須重讀，不能再按一次 Restore。

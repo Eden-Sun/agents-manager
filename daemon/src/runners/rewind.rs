@@ -8,7 +8,7 @@ use serde_json::{json, Value};
 use crate::db;
 use crate::lc_error::{LcError, LcResult};
 use crate::rewind::{
-    anchor, drive, in_rewind_ui, keys, read, rewind_dropped, same_composer, same_first_line,
+    anchor, drive_with_identity, in_rewind_ui, keys, read, rewind_dropped, same_composer, same_first_line,
     wait_for, Fail, HerdrPane, Pane, RewindIn, CLEAR_WAIT_MS, CTRL_C_HINT, HINT_WAIT_MS,
 };
 use crate::state::App;
@@ -146,8 +146,18 @@ pub async fn rewind_with(app: &Arc<App>, bot_id: &str, message_id: &str, pane: O
         None => false,
     };
     // 真的按了 Restore 的那一則（被丟掉的那種會改倒到下一則，或根本不按）：下一次 resume 要接到它之前（`anchor`）。
+    // A dropped message may be missing from the CLI menu while still shifting
+    // `skip`. Include all stored user messages, even rewound/interrupted ones,
+    // before allowing confirmation text with hidden attachment paths.
+    let history: Vec<(String, Option<String>)> = sqlx::query_as(
+        "SELECT m.content, t.prompt_text FROM messages m LEFT JOIN turns t ON t.id = m.turn_id
+         WHERE m.conversation_id = ? AND m.role = 'user'",
+    ).bind(&conv).fetch_all(&app.db).await.map_err(up)?;
+    let unique_target = history.iter().filter(|(text, delivered)| {
+        same_first_line(text, &target) || delivered.as_deref().is_some_and(|text| same_first_line(text, &target))
+    }).count() == 1;
     let mut restored = Some((target.clone(), skip));
-    let done = match drive(pane.as_ref(), &target, skip).await {
+    let done = match drive_with_identity(pane.as_ref(), &target, skip, unique_target).await {
         Ok(d) => d,
         Err(Fail::NotInMenu | Fail::ComposerBusy) if dropped => {
             let next = next_in_context(app, &conv, &msg.id).await.map_err(up)?;
