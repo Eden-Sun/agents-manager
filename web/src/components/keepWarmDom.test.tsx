@@ -75,6 +75,73 @@ test('「不用保溫」：沒釘成主力就不畫；daemon 對非主力回 400
   await mock.request('PATCH', `/bots/${id}`, { primary: true })
 })
 
+for (const [name, touch] of [['am-claude', false], ['am-codex', true]] as const) {
+  test(`保溫按鈕（${name}、touch=${touch}）：跟隨 ♨，停止與取消仍切換 skip`, async () => {
+    const { id, requests } = await running(name)
+    await mount(<KeepWarmSkipButton botId={id} touch={touch} />)
+    await mount(<UnreadChip />)
+    assert.equal(btn()!.textContent, '不用保溫')
+
+    mock.simulateKeepWarmReply(id)
+    await act(() => useStore.getState().refreshState())
+    assert.ok(chip(id)!.querySelector('.unread-chip-warm'))
+    assert.equal(btn()!.textContent, '保溫中・停止保溫')
+    assert.match(btn()!.title, /保溫回覆已到、快取仍熱/)
+    assert.equal(btn()!.getAttribute('aria-pressed'), 'false', 'aria-pressed 仍代表停用保溫')
+
+    await click(btn()!)
+    await until(() => btn()?.getAttribute('aria-pressed') === 'true', '停止保溫')
+    assert.equal(btn()!.textContent, '不保溫中・取消', '停用文案優先於仍在的保溫回覆')
+    await click(btn()!)
+    await until(() => btn()?.getAttribute('aria-pressed') === 'false', '取消停止')
+    assert.equal(btn()!.textContent, '保溫中・停止保溫')
+    assert.deepEqual(skipBodies(requests), [{ skip: true }, { skip: false }])
+
+    mock.setCacheAge(id, 65)
+    await act(() => useStore.getState().refreshState())
+    assert.equal(chip(id)!.querySelector('.unread-chip-warm'), null)
+    assert.equal(btn()!.textContent, '不用保溫', '過 TTL 後不再顯示保溫中')
+
+    mock.simulateKeepWarmReply(id)
+    await act(() => useStore.getState().refreshState())
+    assert.equal(btn()!.textContent, '保溫中・停止保溫')
+    await mock.request('POST', `/bots/${id}/prompt`, { text: '新活動', client_request_id: `warm-button-${id}` })
+    await act(() => useStore.getState().refreshState())
+    assert.equal(btn()!.textContent, '不用保溫', '新 prompt 清除 ♨ 時同步回復')
+    await until(async () => {
+      await act(() => useStore.getState().refreshState())
+      return useStore.getState().runs[id]?.agent_status === 'idle'
+    }, '新活動回合完成，不留給下一個測試')
+  })
+}
+
+test('保溫按鈕：沒有 run 廣播時也在 TTL 到期後更新', async () => {
+  const { id } = await running('am-claude')
+  const realNow = Date.now
+  const realInterval = window.setInterval
+  const original = useStore.getState().runs[id]!
+  const ticks: (() => void)[] = []
+  window.setInterval = ((fn: () => void, ms: number) => {
+    if (ms === 15_000) ticks.push(fn)
+    return realInterval(fn, ms)
+  }) as typeof window.setInterval
+  try {
+    const at = new Date().toISOString()
+    await act(() => useStore.setState((s) => ({ runs: { ...s.runs, [id]: { ...original, keep_warm_replied_at: at, cache_kept_warm_at: at } } })))
+    await mount(<KeepWarmSkipButton botId={id} />)
+    assert.equal(btn()!.textContent, '保溫中・停止保溫')
+    assert.ok(ticks.length > 0)
+    const later = realNow() + 65 * 60_000
+    Date.now = () => later
+    await act(() => ticks.forEach((tick) => tick()))
+    assert.equal(btn()!.textContent, '不用保溫')
+  } finally {
+    Date.now = realNow
+    window.setInterval = realInterval
+    await act(() => useStore.setState((s) => ({ runs: { ...s.runs, [id]: original } })))
+  }
+})
+
 test('保溫回覆：TTL 內帶 ♨ 提示、過 TTL 消失、送 prompt 立即消失', async () => {
   const { id } = await running('am-claude')
   await act(() => useStore.getState().refreshState())

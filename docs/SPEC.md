@@ -2634,6 +2634,7 @@ pt-hub = ["~/project/pt/CLAUDE.md", "~/project/pt/AGENTS.md"]      # 多份照�
   走同一條熱壓路徑（綁 run、收據 `primary_cache_actions`、系統訊息）。過了 TTL − 2 分就不壓（讓它涼掉），用量不夠同樣讓它涼；TTL 短於 12 分的 kind 不做。
   壓縮自己造成的活動（`is_warm_compact_echo`）不清掉「不用保溫」，所以壓完仍然冰凍，直到真的活動重新計時。
   **網頁**：冰凍的主力在快取晶片名字旁、側欄列的名字旁畫雪花（`FrozenBadge`，inline SVG、不用 emoji），tooltip 寫「不保溫：cache 到期前會自動壓縮（context 夠大時）」；不畫快取倒數底色。
+  桌面狀態列與手機狀態卡的切換鈕：未停用且 ♨ 有效時顯示「保溫中・停止保溫」，按下仍設定 `keep_warm_skip=true`；停用時優先顯示「不保溫中・取消」。取消後依目前 ♨ 狀態回復文案；TTL 到期或新 prompt 清除提示後顯示「不用保溫」（#1874）。不改冰凍熱壓規則。
 - **保溫回覆與未讀**：保溫回合的訊息（`any updates` 與 bot 的回覆）帶 `messages.keep_warm = 1`（trigger `messages_keep_warm_mark` 在寫入時蓋，舊列開 DB 時回填），訊息 JSON 的 `keep_warm`；
   daemon 算的未讀（`read_marks` 的 `unread`）一律不計這些回合。run JSON 的 `keep_warm_replied_at`＝最近一次保溫回覆完成時間，從回合紀錄推算：保溫回合完成後、還沒有任何非保溫回合才有值，
   使用者送出新的 prompt（新回合出現）就是 `null`（「之後」以寫入順序 `rowid` 判，同一毫秒也分得出先後；保溫在飛時排進來的使用者回合也算在保溫之後；「最近回合」的第二鍵同樣用 `rowid`，#867），隨 `bot_status` 廣播；網頁據此把主力晶片框上色。
