@@ -22,6 +22,7 @@ import { ApiError } from '../api/types'
 import { isImeEnter } from '../lib/ime'
 import { defaultTimeZone, formatDue, formatOccurrenceTime, OCCURRENCE_LABEL, occurrenceLine, timeZoneOptions } from './format'
 import { useLiveTurnStatus, useOnTurnChange } from './liveTurn'
+import { copyScheduleName } from './scheduleCopy'
 import './schedules.css'
 import './scheduleEditor.css'
 
@@ -46,7 +47,7 @@ function emptyForm(botId: string): FormState {
   return { name: '', prompt: '', botId, tz: defaultTimeZone(), notify: 'failure', mode: 'daily', at: '', everySecs: 3600, time: '09:00', weekdays: [0], clearAfter: false }
 }
 
-function fromDetail(d: ScheduleDetail): FormState {
+function fromDetail(d: Schedule): FormState {
   const spec = (d.spec ?? {}) as { at?: string; every_secs?: number; time?: string; weekdays?: number[] }
   return {
     name: d.name,
@@ -84,11 +85,14 @@ function errText(e: unknown): string {
 export function ScheduleEditor({
   projectId,
   scheduleId,
+  copyOf,
   onClose,
   onSelect,
 }: {
   projectId: string
   scheduleId: string | null
+  /** 複製只預填新建表單；狀態、執行紀錄與來源 id 都不帶入。 */
+  copyOf?: Schedule
   onClose: () => void
   onSelect: (id: string) => void
 }) {
@@ -98,7 +102,9 @@ export function ScheduleEditor({
   const [detail, setDetail] = useState<ScheduleDetail | null>(null)
   // 綁定 turn 的即時狀態（queued→in_flight→終態）：變了就重抓詳情；排程自己的事件也重抓。
   const liveStatus = useLiveTurnStatus(detail?.open?.bot_id, detail?.open?.turn_id)
-  const [form, setForm] = useState<FormState>(() => emptyForm(''))
+  const [form, setForm] = useState<FormState>(() =>
+    copyOf && !scheduleId ? { ...fromDetail(copyOf), name: copyScheduleName(copyOf.name) } : emptyForm(''),
+  )
   // 載入當下的排程（id）、時區與時間（`specOf`）：存檔時跟表單比，沒變就不送 spec（#1807）。
   // 帶 id：換了排程、還沒載入完成時對不上，保守送 spec（#1812）。
   const [baseline, setBaseline] = useState<{ id: string; tz: string; spec: ScheduleSpecIn } | null>(null)
@@ -313,6 +319,7 @@ export function ScheduleEditor({
 
   const body = (
     <div className="form schedule-editor">
+      {copyOf && !scheduleId ? <p className="hint">已帶入「{copyOf.name}」的設定。儲存後會建立並啟用新排程，與原排程各自執行。</p> : null}
       {loading ? <p className="hint schedule-loading">載入排程中…</p> : null}
       {loadError ? <p className="hint schedule-error">讀取失敗：{loadError}</p> : null}
       {detail ? (
@@ -498,7 +505,7 @@ export function ScheduleEditor({
   // 掛到 body：側欄是 transform 容器，裡面的 fixed 遮罩會被它限在側欄寬度內（手機上彈窗被裁）。只這裡處理，不動全站 Modal。
   return createPortal(
     <>
-      <Modal open width={760} title={scheduleId ? '排程' : '新增排程'} onClose={onClose}>
+      <Modal open width={760} title={scheduleId ? '排程' : copyOf ? '複製排程' : '新增排程'} onClose={onClose}>
         {body}
       </Modal>
       <Modal open={botSheet} title="新增專用 Bot" onClose={() => setBotSheet(false)}>

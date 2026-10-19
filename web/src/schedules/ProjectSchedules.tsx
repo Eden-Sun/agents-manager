@@ -3,17 +3,19 @@ import { listSchedules, type Schedule } from '../api/schedules'
 import { useStore } from '../store/store'
 import { scheduleStatusLine } from './format'
 import { useLiveTurnStatus, useOnTurnChange } from './liveTurn'
+import { ScheduleRowMenu } from './ScheduleRowMenu'
 import './schedules.css'
 
 function ScheduleRow({ s, onOpen, onTurnChange }: { s: Schedule; onOpen: (id: string) => void; onTurnChange: () => void }) {
   const live = useLiveTurnStatus(s.open?.bot_id, s.open?.turn_id)
   useOnTurnChange(live, onTurnChange)
   return (
-    <li>
+    <li className="project-schedule-item">
       <button type="button" className="project-schedule-row" onClick={() => onOpen(s.id)}>
         <span className="project-schedule-name">⏱ {s.name}</span>
         <span className="project-schedule-status">{scheduleStatusLine(s, live)}</span>
       </button>
+      <ScheduleRowMenu schedule={s} onOpen={onOpen} />
     </li>
   )
 }

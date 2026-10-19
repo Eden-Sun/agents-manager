@@ -9,7 +9,18 @@
   gap: 2px;
 }
 
+.project-schedule-item {
+  display: flex;
+  align-items: center;
+  min-width: 0;
+}
+
+.project-schedule-actions {
+  flex: 0 0 auto;
+}
+
 .project-schedule-row {
+  flex: 1 1 0;
   width: 100%;
   display: flex;
   flex-direction: column;
