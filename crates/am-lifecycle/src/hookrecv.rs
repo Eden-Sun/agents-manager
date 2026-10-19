@@ -1713,6 +1713,7 @@ async fn process_locked_for_with_outcome<H: HookHost>(
             for pane_id in pane_ids {
                 crate::spawn_hints::record(app, &bot.id, &pane_id).await?;
             }
+            reconcile_after_spawn_hint(app, &bot.id).await;
             Ok(())
         }
         // 2026-10-02 使用者：claude 問的題目與使用者的答案要留在對話裡（`ask_answers`）。
@@ -1745,6 +1746,7 @@ async fn process_locked_for_with_outcome<H: HookHost>(
         HookKind::SpawnClaim { pane_id, parent_run_id } => {
             // The parent may have slept or restarted while this event waited in the spool.
             crate::spawn_hints::claim_for_run(app, &bot.id, &parent_run_id, &pane_id).await?;
+            reconcile_after_spawn_hint(app, &bot.id).await;
             Ok(())
         }
         HookKind::ClaimCollisionCheck { issue, title, child, child_bot_id, claim_id, branch } => {
@@ -7699,6 +7701,7 @@ pub trait HookHost:
     + QuotaCommands
     + ProviderPort
     + ApiPort
+    + crate::events::ports::ReconcileCommands
     + Send
     + Sync
 {
@@ -7723,6 +7726,15 @@ pub trait HookHost:
     /// transcript 路徑是不是這顆 bot 讀得的（遠端／本機分別把關）。
     fn transcript_allowed<'a>(&'a self, bot: &'a db::Bot, path: &'a str) -> impl std::future::Future<Output = bool> + Send + 'a;
     fn local_transcript_allowed<'a>(&'a self, bot: &'a db::Bot, path: &'a str) -> impl std::future::Future<Output = bool> + Send + 'a;
+}
+
+/// 線索晚到（2026-10-19 m4p `hub-5j3cjh-draft`）：遠端 hook 走 spool，比 `pane_agent_detected` 觸發的那輪對帳晚 20～50 秒，
+/// 那輪沒有線索就不認領，之後要等不相干的事件才再對帳——子 agent 在側欄消失了 9 分鐘。線索一記下就排一輪延後對帳。
+async fn reconcile_after_spawn_hint<H: HookHost>(app: &H, bot_id: &str) {
+    match db::bot_host(app.db(), bot_id).await {
+        Ok(host) => app.schedule_deferred_pass(&host),
+        Err(e) => tracing::debug!(bot = bot_id, error = ?e, "spawn hint: cannot read the bot's host; adoption waits for the next pass"),
+    }
 }
 
 /// issue #1259：移交查詢讀不出來＝不知道專案歸誰，不准當成「我的」去處理。
