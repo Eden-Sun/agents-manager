@@ -4896,14 +4896,14 @@ exit "$rc"
 
         let dir = format!("{}/rc/{}/shared", base.display(), cache_hash(&cwd));
         std::fs::create_dir_all(&dir).unwrap();
-        let cargo = toolchain_cargo();
+        let cargo = TestToolchain::current();
         let cargo_home = base.join("cargo-home");
         std::fs::create_dir_all(&cargo_home).unwrap();
-        let lock = Command::new(&cargo)
+        let lock = cargo
+            .command()
             .args(["generate-lockfile", "--offline"])
             .current_dir(&cwd)
             .env("CARGO_HOME", &cargo_home)
-            .env("RUSTC", cargo.parent().unwrap().join("rustc"))
             .output()
             .unwrap();
         assert!(
@@ -4919,12 +4919,12 @@ exit "$rc"
         };
         sync().expect("initial workspace sync should succeed");
         let check = || {
-            let output = Command::new(&cargo)
+            let output = cargo
+                .command()
                 .args(["check", "--offline", "--workspace", "--target-dir"])
                 .arg(Path::new(&dir).join("target"))
                 .current_dir(&dir)
                 .env("CARGO_HOME", &cargo_home)
-                .env("RUSTC", cargo.parent().unwrap().join("rustc"))
                 .env("CARGO_TERM_COLOR", "never")
                 .output()
                 .unwrap();
@@ -4989,12 +4989,12 @@ exit "$rc"
 
         std::fs::write(cwd.join("crates/unrelated/src/foo.rs"), "pub fn sibling() {}\n").unwrap();
         sync().expect("adding a Rust module candidate should synchronize with full invalidation");
-        let ambiguous = Command::new(&cargo)
+        let ambiguous = cargo
+            .command()
             .args(["check", "--offline", "--workspace", "--target-dir"])
             .arg(Path::new(&dir).join("target"))
             .current_dir(&dir)
             .env("CARGO_HOME", &cargo_home)
-            .env("RUSTC", cargo.parent().unwrap().join("rustc"))
             .env("CARGO_TERM_COLOR", "never")
             .output()
             .unwrap();
@@ -5014,12 +5014,13 @@ exit "$rc"
             return;
         }
         let base = base();
-        let cargo = toolchain_cargo();
+        let cargo = TestToolchain::current();
         let (remote, cwd, data) = fake_remote(&base, 60, &format!(
-            "RUSTC={} CARGO_HOME={} exec {} \"$@\"\n",
-            sh_quote(&cargo.parent().unwrap().join("rustc").display().to_string()),
+            "RUSTC={} RUSTDOC={} CARGO_HOME={} exec {} \"$@\"\n",
+            sh_quote(&cargo.rustc.display().to_string()),
+            sh_quote(&cargo.rustdoc.display().to_string()),
             sh_quote(&base.join("cargo-home").display().to_string()),
-            sh_quote(&cargo.display().to_string()),
+            sh_quote(&cargo.cargo.display().to_string()),
         ));
         std::fs::write(cwd.join("src/lib.rs"), "pub fn value() {}\n").unwrap();
         std::fs::create_dir_all(cwd.join(".cargo")).unwrap();
@@ -5103,14 +5104,14 @@ fn listing_matches_current_tree() {
         let run = || {
             with_fake_transport(&base, || sync_source(&remote, &data, &cwd, &dir.display().to_string(), &Deadline::new(60)))
                 .expect("source sync should succeed");
-            let cargo = toolchain_cargo();
-            let output = Command::new(&cargo)
+            let cargo = TestToolchain::current();
+            let output = cargo
+                .command()
                 .args(["test", "--offline", "-p", "app", "--target-dir"])
                 .arg(dir.join("target"))
                 .args(["--", "listing_matches_current_tree"])
                 .current_dir(&dir)
                 .env("CARGO_HOME", base.join("cargo-home"))
-                .env("RUSTC", cargo.parent().unwrap().join("rustc"))
                 .output().unwrap();
             assert!(output.status.success(), "the embedded listing must match the synchronized tree: {}\n{}",
                 String::from_utf8_lossy(&output.stdout), String::from_utf8_lossy(&output.stderr));
@@ -5255,7 +5256,8 @@ fn main() {
         sync().expect("initial source sync should succeed");
         let target = Path::new(&dir).join("target");
         let run_cargo = || {
-            let output = Command::new(toolchain_cargo())
+            let output = TestToolchain::current()
+                .command()
                 .args(["check", "--offline", "--quiet", "--target-dir"])
                 .arg(&target)
                 .current_dir(&dir)
@@ -5388,18 +5390,41 @@ fn main() {
         let _ = std::fs::remove_dir_all(base);
     }
 
-    fn toolchain_cargo() -> PathBuf {
-        let rustup_home = std::env::var_os("RUSTUP_HOME")
-            .filter(|path| !path.is_empty())
-            .map(PathBuf::from)
-            .unwrap_or_else(|| PathBuf::from(std::env::var_os("HOME").unwrap()).join(".rustup"));
-        let mut toolchains: Vec<_> = std::fs::read_dir(rustup_home.join("toolchains"))
-            .unwrap()
-            .flatten()
-            .map(|e| e.path())
-            .collect();
-        toolchains.sort();
-        toolchains.into_iter().map(|p| p.join("bin/cargo")).find(|p| p.is_file()).expect("the active rustup toolchain must provide cargo")
+    struct TestToolchain {
+        cargo: PathBuf,
+        rustc: PathBuf,
+        rustdoc: PathBuf,
+    }
+
+    impl TestToolchain {
+        fn current() -> Self {
+            // Cargo supplies its own executable path. Enumerating rustup installations can pick
+            // an unrelated old release (CI also has 1.57), even when stable built these tests.
+            let cargo = PathBuf::from(
+                std::env::var_os("CARGO")
+                    .filter(|value| !value.is_empty())
+                    .unwrap_or_else(|| env!("CARGO").into()),
+            );
+            let bin = cargo.parent().expect("Cargo must have a parent directory");
+            let tool = |key, name| {
+                std::env::var_os(key)
+                    .filter(|value| !value.is_empty())
+                    .map(PathBuf::from)
+                    .unwrap_or_else(|| bin.join(name))
+            };
+            Self {
+                rustc: tool("RUSTC", "rustc"),
+                rustdoc: tool("RUSTDOC", "rustdoc"),
+                cargo,
+            }
+        }
+
+        fn command(&self) -> Command {
+            let mut command = Command::new(&self.cargo);
+            // rustdoc loads proc-macro metadata too; leaving it on PATH can mix compiler versions.
+            command.env("RUSTC", &self.rustc).env("RUSTDOC", &self.rustdoc);
+            command
+        }
     }
 
     /// 真 Cargo path dependency 的 A→B→A：同一個測試名稱每次讀取 rsync 過去的來源檔，並與編入 test artifact 的 crate 值比較。
@@ -5441,8 +5466,7 @@ fn main() {
         let dir = base.join("rc").join(cache_hash(&a)).join("shared");
         std::fs::create_dir_all(&dir).unwrap();
         std::fs::create_dir_all(base.join("cargo-home")).unwrap();
-        let cargo = toolchain_cargo();
-        let rustc = cargo.parent().unwrap().join("rustc");
+        let cargo = TestToolchain::current();
         let run = |tree: &Path| {
             let sync = with_fake_transport(&base, || sync_source(&remote, &data, tree, &dir.display().to_string(), &Deadline::new(60)));
             sync.expect("source tree sync should succeed");
@@ -5451,13 +5475,13 @@ fn main() {
                 std::fs::read_to_string(tree.join("crates/am-base/src/input.txt")).unwrap(),
                 "the shared source tree must match the current worktree before Cargo runs"
             );
-            let output = Command::new(&cargo)
+            let output = cargo
+                .command()
                 .args(["test", "--offline", "-p", "app", "--target-dir"])
                 .arg(dir.join("target"))
                 .args(["--", "source_matches_current_tree"])
                 .current_dir(&dir)
                 .env("CARGO_HOME", base.join("cargo-home"))
-                .env("RUSTC", &rustc)
                 .output()
                 .unwrap();
             let stdout = String::from_utf8_lossy(&output.stdout);
@@ -5523,8 +5547,7 @@ fn main() {
         let dir = base.join("rc").join(cache_hash(&a)).join("shared");
         std::fs::create_dir_all(&dir).unwrap();
         std::fs::create_dir_all(base.join("cargo-home")).unwrap();
-        let cargo = toolchain_cargo();
-        let rustc = cargo.parent().unwrap().join("rustc");
+        let cargo = TestToolchain::current();
         let run = |tree: &Path| {
             let sync = with_fake_transport(&base, || {
                 sync_source(&remote, &data, tree, &dir.display().to_string(), &Deadline::new(60))
@@ -5532,13 +5555,13 @@ fn main() {
             sync.expect("source tree sync should succeed");
             let current = std::fs::read_to_string(tree.join("assets/value.txt")).unwrap();
             assert_eq!(std::fs::read_to_string(dir.join("assets/value.txt")).unwrap(), current);
-            let output = Command::new(&cargo)
+            let output = cargo
+                .command()
                 .args(["test", "--offline", "-p", "app", "--target-dir"])
                 .arg(dir.join("target"))
                 .args(["--", "source_matches_current_tree"])
                 .current_dir(&dir)
                 .env("CARGO_HOME", base.join("cargo-home"))
-                .env("RUSTC", &rustc)
                 .output()
                 .unwrap();
             let stdout = String::from_utf8_lossy(&output.stdout);
