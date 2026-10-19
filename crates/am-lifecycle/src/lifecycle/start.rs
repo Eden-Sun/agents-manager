@@ -1455,6 +1455,9 @@ async fn start_inner_body(
             .execute(app.db())
             .await
             .map_err(up)?;
+        if bot.kind == "claude" {
+            super::resume_context::restore(app.db(), &bot.id, run_id, &session_id, crate::models::model_effort_from_argv(&bot.kind, &args).0.as_deref()).await.map_err(up)?;
+        }
     }
     args.extend(codex_pane_guard_args(&bot.kind));
 
@@ -2141,6 +2144,11 @@ pub async fn restart_child_in_pane_with(app: &impl StartContext, bot_id: &str, r
     .execute(app.db())
     .await
     .map_err(up)?;
+    if bot.kind == "claude" {
+        if let Some((sid, _)) = &resume {
+            super::resume_context::restore(app.db(), bot_id, &run_id, sid, crate::models::model_effort_from_argv(&bot.kind, &args).0.as_deref()).await.map_err(up)?;
+        }
+    }
     drop(restarting);
 
     let mut started = false;
@@ -2313,6 +2321,161 @@ mod resume_args_tests {
         let args = started_args(&e).pop().unwrap();
         assert!(!args.contains(&"--resume".into()));
         stop_bot(&e.app, &pm.id).await.unwrap();
+    }
+
+    /// #1869: sleeping runs keep their status, but a resumed run needs its own projection
+    /// before the next API turn. Empty startup redraws must not erase that projection.
+    #[tokio::test]
+    async fn resume_restores_context_before_any_new_turn_and_fresh_start_does_not() {
+        let e = env().await;
+        let bot = claude_bot(&e.app, &e.project_id, "resume-context").await;
+        sqlx::query("UPDATE bots SET model='opus' WHERE id=?").bind(&bot.id).execute(e.app.db()).await.unwrap();
+        let old_status = serde_json::json!({
+            "session_id": "native-context", "model": {"id": "opus"},
+            "context_window": {"used_percentage": 42, "context_window_size": 1000000},
+            "prompt_cache": {"warm": true}, "account_email": "previous@example.com"
+        });
+        sqlx::query("INSERT INTO runs (id, bot_id, state, agent_status, native_session_id, status_json, started_at, ended_at)
+            VALUES (?,?,'stopped','idle','native-context',?,'2026-09-07T00:00:00Z','2026-09-07T00:01:00Z')")
+            .bind(db::ulid()).bind(&bot.id).bind(old_status.to_string()).execute(e.app.db()).await.unwrap();
+        start_bot_with(&e.app, &bot.id, StartOpts { resume_native: true, ..Default::default() }).await.unwrap();
+        let run = db::active_run(e.app.db(), &bot.id).await.unwrap().unwrap();
+        let status: Value = serde_json::from_str(run.status_json.as_deref().unwrap()).unwrap();
+        assert_eq!(status["context_window"]["used_percentage"], 42);
+        assert!(status.get("prompt_cache").is_none() && status.get("account_email").is_none());
+
+        for payload in [
+            serde_json::json!({"hook_event_name": "SessionStart", "session_id": "native-context"}),
+            serde_json::json!({"hook_event_name": "StatusLine", "session_id": "native-context",
+                "model": {"id": "opus"}, "cost": {"total_api_duration_ms": 0},
+                "context_window": {"used_percentage": null, "total_input_tokens": 0, "total_output_tokens": 0}}),
+        ] {
+            let body = crate::hookrecv::HookBody {
+                bot_id: bot.id.clone(), provider: "claude".into(), payload,
+                ..serde_json::from_value(serde_json::json!({"bot_id": ""})).unwrap()
+            };
+            crate::hookrecv::process(&e.app, &body).await.unwrap();
+        }
+        let run = db::active_run(e.app.db(), &bot.id).await.unwrap().unwrap();
+        let status: Value = serde_json::from_str(run.status_json.as_deref().unwrap()).unwrap();
+        assert_eq!(status["context_window"]["used_percentage"], 42, "SessionStart + empty redraw must keep context");
+        assert!(crate::cache_clock::statusline_at(&run.id).is_none(), "restoring context must not restart cache warmth");
+        let compact = crate::hookrecv::HookBody {
+            bot_id: bot.id.clone(), provider: "claude".into(),
+            payload: serde_json::json!({"hook_event_name": "SessionStart", "source": "compact", "session_id": "native-context"}),
+            ..serde_json::from_value(serde_json::json!({"bot_id": ""})).unwrap()
+        };
+        crate::hookrecv::process(&e.app, &compact).await.unwrap();
+        let run = db::active_run(e.app.db(), &bot.id).await.unwrap().unwrap();
+        let status: Value = serde_json::from_str(run.status_json.as_deref().unwrap()).unwrap();
+        assert!(status.get("context_window").is_none(), "compaction invalidates the provisional measurement");
+        let body = crate::hookrecv::HookBody {
+            bot_id: bot.id.clone(), provider: "claude".into(),
+            payload: serde_json::json!({"hook_event_name": "StatusLine", "session_id": "native-context",
+                "context_window": {"used_percentage": 0, "total_input_tokens": 300, "context_window_size": 1000000}}),
+            ..serde_json::from_value(serde_json::json!({"bot_id": ""})).unwrap()
+        };
+        crate::hookrecv::process(&e.app, &body).await.unwrap();
+        let run = db::active_run(e.app.db(), &bot.id).await.unwrap().unwrap();
+        let status: Value = serde_json::from_str(run.status_json.as_deref().unwrap()).unwrap();
+        assert_eq!(status["context_window"]["used_percentage"], 0);
+        assert!(status.get("_agm_resumed_context").is_none());
+        stop_bot(&e.app, &bot.id).await.unwrap();
+
+        start_bot(&e.app, &bot.id).await.unwrap();
+        let run = db::active_run(e.app.db(), &bot.id).await.unwrap().unwrap();
+        assert!(run.status_json.is_none(), "a fresh session must not inherit old context");
+        stop_bot(&e.app, &bot.id).await.unwrap();
+    }
+
+    async fn context_hook(e: &Env, bot: &str, payload: Value) {
+        crate::hookrecv::process(&e.app, &crate::hookrecv::HookBody {
+            bot_id: bot.into(), provider: "claude".into(), payload,
+            ..serde_json::from_value(serde_json::json!({"bot_id": ""})).unwrap()
+        }).await.unwrap();
+    }
+
+    async fn seeded_context_bot(e: &Env, name: &str) -> db::Bot {
+        let bot = claude_bot(&e.app, &e.project_id, name).await;
+        sqlx::query("UPDATE bots SET model='opus' WHERE id=?").bind(&bot.id).execute(e.app.db()).await.unwrap();
+        sqlx::query("INSERT INTO runs (id,bot_id,state,native_session_id,status_json,started_at,ended_at)
+            VALUES (?,?,'stopped','context-A',?,'2026-09-01','2026-09-02')")
+            .bind(db::ulid()).bind(&bot.id).bind(serde_json::json!({
+                "session_id": "context-A", "model": {"id": "opus"},
+                "context_window": {"used_percentage": 42, "context_window_size": 1000000}
+            }).to_string()).execute(e.app.db()).await.unwrap();
+        db::bot(e.app.db(), &bot.id).await.unwrap().unwrap()
+    }
+
+    async fn active_context(e: &Env, bot: &str) -> Value {
+        let run = db::active_run(e.app.db(), bot).await.unwrap().unwrap();
+        run.status_json.map(|s| serde_json::from_str(&s).unwrap()).unwrap_or(Value::Null)
+    }
+
+    #[tokio::test]
+    async fn resume_after_measured_session_change_without_a_statusline_never_borrows_the_old_context() {
+        let e = env().await;
+        let bot = seeded_context_bot(&e, "context-session-change").await;
+        start_bot_with(&e.app, &bot.id, StartOpts { resume_native: true, ..Default::default() }).await.unwrap();
+        assert_eq!(active_context(&e, &bot.id).await["context_window"]["used_percentage"], 42);
+        context_hook(&e, &bot.id, serde_json::json!({"hook_event_name": "SessionStart", "session_id": "context-A"})).await;
+        context_hook(&e, &bot.id, serde_json::json!({"hook_event_name": "StatusLine", "session_id": "context-A",
+            "model": {"id": "opus"}, "context_window": {"used_percentage": 77,
+                "total_input_tokens": 770000, "context_window_size": 1000000}})).await;
+        assert_eq!(active_context(&e, &bot.id).await["context_window"]["used_percentage"], 77);
+        // /clear moves the same run to B, with no B StatusLine before it sleeps.
+        context_hook(&e, &bot.id, serde_json::json!({"hook_event_name": "SessionStart", "session_id": "context-B"})).await;
+        assert!(active_context(&e, &bot.id).await.get("context_window").is_none());
+        stop_bot(&e.app, &bot.id).await.unwrap();
+        start_bot_with(&e.app, &bot.id, StartOpts { resume_native: true, ..Default::default() }).await.unwrap();
+        let run = db::active_run(e.app.db(), &bot.id).await.unwrap().unwrap();
+        assert_eq!(run.resume_session_id.as_deref(), Some("context-B"));
+        assert!(active_context(&e, &bot.id).await.get("context_window").is_none());
+        context_hook(&e, &bot.id, serde_json::json!({"hook_event_name": "StatusLine", "session_id": "context-B",
+            "model": {"id": "opus"}, "context_window": {"used_percentage": 0, "context_window_size": 1000000}})).await;
+        assert_ne!(active_context(&e, &bot.id).await["context_window"]["used_percentage"], 77);
+        stop_bot(&e.app, &bot.id).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn resume_does_not_restore_when_the_launch_model_changed() {
+        let e = env().await;
+        for model in ["sonnet", "opus[1m]"] {
+            let bot = seeded_context_bot(&e, &format!("context-{model}")).await;
+            sqlx::query("UPDATE bots SET model=? WHERE id=?").bind(model).bind(&bot.id).execute(e.app.db()).await.unwrap();
+            start_bot_with(&e.app, &bot.id, StartOpts { resume_native: true, ..Default::default() }).await.unwrap();
+            assert!(active_context(&e, &bot.id).await.is_null(), "changed model must not inherit old percentage: {model}");
+            stop_bot(&e.app, &bot.id).await.unwrap();
+        }
+    }
+
+    #[tokio::test]
+    async fn resume_with_a_new_window_and_compaction_boundaries_survives_another_stop() {
+        let e = env().await;
+        for compact in [false, true] {
+            let bot = seeded_context_bot(&e, &format!("context-boundary-{compact}")).await;
+            let opts = StartOpts { resume_native: true, ..Default::default() };
+            start_bot_with(&e.app, &bot.id, opts.clone()).await.unwrap();
+            assert_eq!(active_context(&e, &bot.id).await["context_window"]["context_window_size"], 1000000);
+            context_hook(&e, &bot.id, if compact {
+                serde_json::json!({"hook_event_name": "SessionStart", "session_id": "context-A", "source": "compact"})
+            } else {
+                serde_json::json!({"hook_event_name": "StatusLine", "session_id": "context-A",
+                    "model": {"id": "opus"}, "context_window": {"used_percentage": 0,
+                        "total_input_tokens": 0, "context_window_size": 200000}})
+            }).await;
+            let status = active_context(&e, &bot.id).await;
+            assert_eq!(status["_agm_context_invalidated"], "context-A");
+            if !compact {
+                assert_eq!(status["context_window"]["context_window_size"], 200000);
+            }
+            stop_bot(&e.app, &bot.id).await.unwrap();
+            start_bot_with(&e.app, &bot.id, opts).await.unwrap();
+            let status = active_context(&e, &bot.id).await;
+            assert!(status.get("context_window").is_none(), "no resurrection across compact/window boundary");
+            assert_eq!(status["_agm_context_invalidated"], "context-A");
+            stop_bot(&e.app, &bot.id).await.unwrap();
+        }
     }
 
     #[tokio::test]
@@ -2911,7 +3074,14 @@ mod resume_args_tests {
         .await
         .unwrap();
 
+        sqlx::query("UPDATE runs SET status_json=? WHERE bot_id=? AND native_session_id='sid-src'")
+            .bind(serde_json::json!({"session_id": "sid-src", "model": {"id": "opus"},
+                "context_window": {"used_percentage": 77, "context_window_size": 1000000}}).to_string())
+            .bind(&src.id).execute(e.app.db()).await.unwrap();
         start_bot_with(&e.app, &fork.id, StartOpts { fork_session: Some("sid-src".into()), fork_source_bot: Some(src.id.clone()), ..Default::default() }).await.unwrap();
+        let fork_run = db::active_run(e.app.db(), &fork.id).await.unwrap().unwrap();
+        assert!(fork_run.status_json.is_none(), "a fork has a new session and must not inherit source context");
+        assert!(fork_run.resume_session_id.is_none());
         let staged = e.dir.join("own-cfg/projects/-own/sid-src.jsonl");
         assert_eq!(std::fs::read_to_string(&staged).unwrap(), "{}\n", "來源對話要搬到 fork 出來的身分底下");
         assert!(started_args(&e).pop().unwrap().windows(3).any(|w| w == ["--resume", "sid-src", "--fork-session"]), "{:?}", started_args(&e));

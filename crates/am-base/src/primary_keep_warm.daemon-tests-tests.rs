@@ -96,6 +96,17 @@
     }
 
     #[test]
+    fn provisional_resume_context_is_not_an_automatic_or_frozen_compaction_measurement() {
+        for marker in ["_agm_resumed_context", "_agm_context_invalidated"] {
+            let status = serde_json::json!({(marker): "s1",
+                "context_window": {"used_percentage": 95, "context_window_size": 1000000}});
+            assert_eq!(context_used_pct("claude", "r1", Some(&status.to_string())), None);
+        }
+        let measured = r#"{"context_window":{"used_percentage":95,"context_window_size":1000000}}"#;
+        assert_eq!(context_used_pct("claude", "r1", Some(measured)), Some(95.0));
+    }
+
+    #[test]
     fn only_an_idle_primary_claude_or_codex_with_nothing_pending_is_touched() {
         assert!(eligible("claude", true, "running", "idle", false, false));
         assert!(eligible("codex", true, "running", "idle", false, false));

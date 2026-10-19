@@ -1159,6 +1159,7 @@ pub async fn consume_resume_session(
         return Ok(());
     }
     if mismatch {
+        lifecycle::resume_context::invalidate(app.db(), &run.id, reported).await?;
         app.context_lost(bot, "resume_mismatch", Some(expected))
             .await
             .map_err(|e| anyhow::anyhow!("{e:?}"))?;
@@ -1638,11 +1639,20 @@ async fn process_locked_for_with_outcome<H: HookHost>(
                         o.insert("account_warning".into(), serde_json::json!(w));
                     }
                 }
+                if provider == "claude" {
+                    lifecycle::resume_context::retain_until_usage(&mut rich, r.status_json.as_deref());
+                }
                 let rich = serde_json::to_string(&rich).ok();
                 let changed = text != r.status_line.as_deref() || rich != r.status_json;
                 if changed {
                     // 快取倒數（`cache_clock`）：API 指紋真的動了才算一次 API 活動，閒置重繪不算。
-                    crate::cache_clock::on_statusline(&r.id, r.status_json.as_deref(), rich.as_deref(), &db::now());
+                    // A restored measurement is not an API baseline: startup redraws must not
+                    // make the old session's expired prompt cache look warm again (#1869).
+                    if !lifecycle::resume_context::is_restored(r.status_json.as_deref())
+                        && !lifecycle::resume_context::is_restored(rich.as_deref())
+                    {
+                        crate::cache_clock::on_statusline(&r.id, r.status_json.as_deref(), rich.as_deref(), &db::now());
+                    }
                     let _ = sqlx::query("UPDATE runs SET status_line = COALESCE(?, status_line), status_json = ? WHERE id = ?")
                         .bind(text)
                         .bind(&rich)
@@ -1781,6 +1791,10 @@ async fn process_locked_for_with_outcome<H: HookHost>(
                 .bind(&r.id)
                 .execute(app.db())
                 .await?;
+                if provider == "claude" {
+                    lifecycle::resume_context::on_identity(app.db(), r, session_id.as_deref(),
+                        body.payload.get("source").and_then(Value::as_str) == Some("compact")).await?;
+                }
                 app.emit_bot_status(&bot.id).await;
                 // #1759：壓縮做完的 SessionStart。說明寫不進去不擋身分更新。
                 if provider == "claude" && body.payload.get("source").and_then(Value::as_str) == Some("compact") {
@@ -6842,7 +6856,12 @@ mod resume_tests {
     #[tokio::test]
     async fn a_session_mismatch_leaves_a_visible_note_not_just_a_log_line() {
         let (e, bot, run) = fixture().await;
+        sqlx::query("UPDATE runs SET status_json = ? WHERE id = ?")
+            .bind(json!({"context_window": {"used_percentage": 42}, "_agm_resumed_context": "native-expected"}).to_string())
+            .bind(&run.id).execute(&e.app.db).await.unwrap();
         consume_resume_session(&e.app, &bot, &run, Some("native-other")).await.unwrap();
+        let status = db::run(&e.app.db, &run.id).await.unwrap().unwrap().status_json.unwrap();
+        assert!(serde_json::from_str::<Value>(&status).unwrap().get("context_window").is_none(), "a mismatched resume must not keep old context");
         let conv = db::conversation_id(&e.app.db, &bot.id).await.unwrap();
         let note: String = sqlx::query_scalar(
             "SELECT content FROM messages WHERE conversation_id=? AND role='system' ORDER BY created_at DESC LIMIT 1",

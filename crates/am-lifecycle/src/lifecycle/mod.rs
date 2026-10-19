@@ -55,6 +55,7 @@ pub mod grok_hook_tests;
 #[cfg(all(test, feature = "daemon-test-harness"))]
 pub mod suggestion_list_tests;
 pub mod start;
+pub(crate) mod resume_context;
 pub mod stop;
 pub mod deferred_live;
 pub mod live_apply_debt;
