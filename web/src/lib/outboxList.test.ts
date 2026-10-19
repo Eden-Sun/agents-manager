@@ -1,6 +1,6 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { downloadFailure, emptyReason, fileSize, isPreviewableImage, lastSettledTurnKey, orderFiles, previewPlacement, readOutbox, remainingLabel, remainingNow, splitOutboxName } from './outboxList'
+import { downloadFailure, emptyReason, fileSize, isBrowserPreviewable, isPreviewableImage, lastSettledTurnKey, orderFiles, previewPlacement, readOutbox, remainingLabel, remainingNow, splitOutboxName } from './outboxList'
 import { ApiError } from '../api/types'
 
 const file = (name: string, modified: number, remainingSecs: number | null = 3600) => ({ name, size: 1, modified, remainingSecs })
@@ -147,6 +147,16 @@ test('子資料夾裡的檔：相對路徑拆成資料夾前綴與檔名（存�
   assert.deepEqual(splitOutboxName('報價_晶輝企業_Q-2026-1009-01/報價單.pdf'), { dir: '報價_晶輝企業_Q-2026-1009-01/', base: '報價單.pdf' })
   assert.deepEqual(splitOutboxName('a/b/c.csv'), { dir: 'a/b/', base: 'c.csv' })
   assert.equal(isPreviewableImage('相簿/IMG_1.PNG'), true, '子資料夾裡的圖照樣能預覽')
+})
+
+test('isBrowserPreviewable：PDF、點陣圖、純文字與 JSON 可開新分頁預覽，可執行內容（SVG/HTML）不可', () => {
+  for (const n of ['demo.pdf', 'doc.PDF', 'a.png', 'b.jpg', 'c.jpeg', 'd.gif', 'e.webp', 'f.txt', 'g.log', 'h.md', 'i.csv', 'j.tsv', 'k.json']) {
+    assert.equal(isBrowserPreviewable(n), true, `${n} 應該可預覽`)
+    assert.equal(isBrowserPreviewable(`folder/${n}`), true, `子路徑 ${n} 應該可預覽`)
+  }
+  for (const n of ['evil.svg', 'x.html', 'y.htm', 'z.xml', 'a.exe', 'b.sh', 'c.py', 'd.zip']) {
+    assert.equal(isBrowserPreviewable(n), false, `${n} 絕不可預覽`)
+  }
 })
 
 

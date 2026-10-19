@@ -25,8 +25,40 @@ const realRevoke = URL.revokeObjectURL
 const json = (body: unknown, status = 200) => new Response(JSON.stringify(body), { status, headers: { 'content-type': 'application/json' } })
 const listBody = { dir: '/x', reason: null, ttl_secs: 3600, kept: false, files: [{ name: 'report.txt', size: 3, modified: 1, remaining_secs: 1800 }] }
 
+interface MockWindow {
+  opener: unknown
+  location: { href: string }
+  closed: boolean
+  close: () => void
+}
+
+let mockWindow: MockWindow | null = null
+let openCalledWith: { url: string; target?: string }[] = []
+let shouldBlockPopup = false
+const revokedUrls: string[] = []
+const activeIntervals: (() => void)[] = []
+const realOpen = window.open
+const realSetInterval = globalThis.setInterval
+
 before(() => {
   setupDom()
+  globalThis.setInterval = (((fn: () => void, ms?: number) => {
+    activeIntervals.push(fn)
+    return realSetInterval(fn, ms)
+  }) as unknown) as typeof setInterval
+  window.open = ((url: string, target?: string) => {
+    openCalledWith.push({ url, target })
+    if (shouldBlockPopup) return null
+    mockWindow = {
+      opener: window,
+      location: { href: url || '' },
+      closed: false,
+      close() {
+        this.closed = true
+      },
+    }
+    return mockWindow as unknown as Window
+  }) as typeof window.open
   globalThis.fetch = ((input: string) => {
     const url = String(input)
     if (url.includes('/outbox/file')) {
@@ -37,19 +69,28 @@ before(() => {
     const bot = /\/bots\/(\w+)\/outbox/.exec(url)?.[1] ?? ''
     return Promise.resolve(json(serves[bot] === false ? { ...listBody, files: [] } : listBody))
   }) as typeof fetch
-  URL.createObjectURL = (() => 'blob:x') as typeof URL.createObjectURL
-  URL.revokeObjectURL = (() => {}) as typeof URL.revokeObjectURL
+  URL.createObjectURL = ((b: Blob) => `blob:${b.type || 'x'}`) as typeof URL.createObjectURL
+  URL.revokeObjectURL = ((url: string) => {
+    revokedUrls.push(url)
+  }) as typeof URL.revokeObjectURL
 })
 
 afterEach(async () => {
   await unmountAll()
   pending.length = 0
   listHits.length = 0
+  openCalledWith.length = 0
+  revokedUrls.length = 0
+  activeIntervals.length = 0
+  shouldBlockPopup = false
+  mockWindow = null
   for (const k of Object.keys(serves)) delete serves[k]
 })
 
 after(async () => {
   globalThis.fetch = realFetch
+  globalThis.setInterval = realSetInterval
+  window.open = realOpen
   URL.createObjectURL = realCreate
   URL.revokeObjectURL = realRevoke
   resetStoreForTest()
@@ -184,4 +225,87 @@ test('同一顆 bot 的 404：移除那一列並發通知（#547 回歸）', asy
   const notices = useStore.getState().notices.filter((n) => n.kind === 'error')
   assert.equal(notices.length, 1)
   assert.ok(notices[0].text.includes('不在了'))
+})
+
+test('可預覽格式（如 PDF/文字）顯示預覽按鈕，點擊同步開窗、帶 inline=1，成功後導覽至 Blob URL', async () => {
+  useStore.setState({ selectedProjectId: null, selectedBotId: 'a', bots, previews: {}, notices: [] } as never)
+  await mount(<OutboxFiles />)
+  await until(listLoaded, 'bot a 的清單載入')
+
+  const previewBtn = document.querySelector<HTMLButtonElement>('button.outbox-preview-btn')
+  assert.ok(previewBtn, '應該要有預覽按鈕')
+
+  await click(previewBtn)
+  // 開窗先於 fetch 完成（同步開窗以保留 transient activation）
+  assert.equal(openCalledWith.length, 1, '點擊當下應立即 window.open')
+  assert.equal(openCalledWith[0].url, '', '應開啟空白頁')
+  assert.equal(openCalledWith[0].target, '_blank', 'target 應為 _blank')
+  assert.ok(mockWindow, '應取得 mockWindow handle')
+  assert.equal(mockWindow.opener, null, '取得 handle 後應立即將 opener 設為 null')
+
+  await until(() => pending.length === 1, '預覽請求送出')
+  assert.ok(pending[0].path.includes('inline=1'), `請求需帶 inline=1：${pending[0].path}`)
+  assert.ok(busyText().includes('開啟中…'), '預覽中狀態文字應顯示「開啟中…」')
+
+  pending[0].respond(new Response('dummy-content', { status: 200, headers: { 'content-type': 'text/plain' } }))
+  await until(() => Boolean(mockWindow?.location.href.startsWith('blob:')), '取檔完成後應導向 blob URL')
+  assert.ok(mockWindow.location.href.startsWith('blob:text/plain'), `導向的網址應為 blob URL：${mockWindow.location.href}`)
+})
+
+test('window.open 回 null（彈出視窗被瀏覽器擋下）時發出通知並不送出 fetch', async () => {
+  useStore.setState({ selectedProjectId: null, selectedBotId: 'a', bots, previews: {}, notices: [] } as never)
+  await mount(<OutboxFiles />)
+  await until(listLoaded, 'bot a 的清單載入')
+
+  shouldBlockPopup = true
+  const previewBtn = document.querySelector<HTMLButtonElement>('button.outbox-preview-btn')
+  await click(previewBtn!)
+
+  assert.equal(openCalledWith.length, 1, '有嘗試 window.open')
+  assert.equal(pending.length, 0, '被擋下時不應發起 fetch 請求')
+  const notices = useStore.getState().notices.filter((n) => n.kind === 'error')
+  assert.equal(notices.length, 1)
+  assert.equal(notices[0].text, '瀏覽器擋了彈出視窗')
+})
+
+test('取檔失敗時（如 404）會關閉分頁並發出錯誤通知', async () => {
+  useStore.setState({ selectedProjectId: null, selectedBotId: 'a', bots, previews: {}, notices: [] } as never)
+  await mount(<OutboxFiles />)
+  await until(listLoaded, 'bot a 的清單載入')
+
+  const previewBtn = document.querySelector<HTMLButtonElement>('button.outbox-preview-btn')
+  await click(previewBtn!)
+  await until(() => pending.length === 1, '預覽請求送出')
+  assert.ok(mockWindow && !mockWindow.closed, '開出的分頁目前為開啟狀態')
+
+  pending[0].respond(json({ error: 'not_found' }, 404))
+  await until(() => mockWindow?.closed === true, '取檔失敗時應關閉空白分頁')
+  const notices = useStore.getState().notices.filter((n) => n.kind === 'error')
+  assert.equal(notices.length, 1)
+  assert.ok(notices[0].text.includes('不在了'))
+})
+
+test('關窗後每 30 秒輪詢時才釋放 Blob URL', async () => {
+  useStore.setState({ selectedProjectId: null, selectedBotId: 'a', bots, previews: {}, notices: [] } as never)
+  await mount(<OutboxFiles />)
+  await until(listLoaded, 'bot a 的清單載入')
+
+  const previewBtn = document.querySelector<HTMLButtonElement>('button.outbox-preview-btn')
+  await click(previewBtn!)
+  await until(() => pending.length === 1, '預覽請求送出')
+  pending[0].respond(new Response('content', { status: 200, headers: { 'content-type': 'text/plain' } }))
+  await until(() => Boolean(mockWindow?.location.href.startsWith('blob:')), '取檔成功')
+
+  const url = mockWindow!.location.href
+  assert.equal(revokedUrls.length, 0, '分頁未關閉前不應 revoke')
+
+  // 分頁未關閉時，觸發 interval 也不應 revoke
+  assert.equal(activeIntervals.length > 0, true, '應註冊 interval 檢查')
+  activeIntervals.forEach((fn) => fn())
+  assert.equal(revokedUrls.includes(url), false, '分頁未關閉前 trigger interval 不得 revoke')
+
+  // 關閉分頁後觸發輪詢，應釋放 Blob URL
+  mockWindow!.closed = true
+  activeIntervals.forEach((fn) => fn())
+  assert.equal(revokedUrls.includes(url), true, '分頁關閉後應 revoke Blob URL')
 })

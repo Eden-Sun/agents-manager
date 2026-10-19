@@ -2292,6 +2292,7 @@ pid 不拿去對 listen port。agy 的登入 TUI 會在 127.0.0.1 自己開兩�
 - 網頁「檔案暫存」下半段「bot 給你的檔案」：每列標剩餘時間（剩不到 10 分鐘用警告色），附件下載（UI-DECISIONS）。下載中切到別的 bot 時，舊那趟回來的結果只交付檔案或通知（會寫明是哪顆 bot 的），不改目前 bot 的清單、重讀或下載中狀態（#1805）。
   子資料夾裡的檔顯示成 `資料夾/檔名`（資料夾前綴淡色），存檔名只取最後一段。
   圖檔（PNG/JPEG/GIF/WebP）滑鼠停 150ms 或鍵盤聚焦就在那一列左邊浮出預覽（使用者 2026-09-18），走同一支下載 API 抓成 blob，快取最多 12 張、換 bot 全部釋放；手機沒有 hover，照舊點一下下載。
+  瀏覽器能直接顯示的格式（PDF 為主，以及點陣圖、純文字/Markdown/JSON 等；#1866）每列提供預覽按鈕（「↗」），點擊時以帶認證的 Blob URL 開啟新分頁展示且不觸發下載，關閉分頁後回收 Blob URL；非白名單格式或可執行檔案維持僅下載。
 - **驗證跟真正讀檔是同一個 fd（issue #89，2026-09-17）**：下載（`outbox::file`）與 `GET /api/bots/{id}/local-image`
   以前都是「驗證路徑（canonicalize＋containment＋metadata）」與「用路徑名字重新 open 讀內容」分開兩步，寫得到那個目錄的
   process（bot 自己）能在兩步之間把驗證通過的路徑換成指到界線外的符號連結。現在共用 `trusted_open`（`crates/am-base/src/trusted_open.rs`）：

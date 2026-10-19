@@ -362,8 +362,27 @@ pub fn mime_of(path: &Path) -> &'static str {
     }
 }
 
+/// 允許在瀏覽器直接 inline 預覽的格式（白名單）：
+/// PDF、常見點陣圖片（PNG/JPEG/GIF/WebP）、純文字／紀錄／Markdown／CSV／TSV、JSON。
+/// 注意：SVG、HTML、XML 等可執行腳本內容絕不允許 inline（防範 XSS）。
+pub fn is_inline_allowed(path: &Path) -> bool {
+    let ext = path.extension().and_then(|e| e.to_str()).unwrap_or("").to_ascii_lowercase();
+    matches!(
+        ext.as_str(),
+        "pdf" | "png" | "jpg" | "jpeg" | "gif" | "webp" | "txt" | "log" | "md" | "csv" | "tsv" | "json"
+    )
+}
+
 /// `filename*=UTF-8''…`：中文檔名在 `filename=` 裡會變亂碼或被截斷。
 pub fn content_disposition(name: &str) -> String {
+    content_disposition_with_type(name, "attachment")
+}
+
+pub fn content_disposition_inline(name: &str) -> String {
+    content_disposition_with_type(name, "inline")
+}
+
+fn content_disposition_with_type(name: &str, disp_type: &str) -> String {
     let safe: String = name.chars().map(|c| if c.is_ascii_alphanumeric() || "-_.".contains(c) { c } else { '_' }).collect();
     let encoded: String = name
         .as_bytes()
@@ -376,7 +395,7 @@ pub fn content_disposition(name: &str) -> String {
             }
         })
         .collect();
-    format!("attachment; filename=\"{safe}\"; filename*=UTF-8''{encoded}")
+    format!("{disp_type}; filename=\"{safe}\"; filename*=UTF-8''{encoded}")
 }
 
 /// [`scan`]／[`scan_checked`] 共用的遞迴列舉：`dir` 是呼叫端已經驗證過（[`open_trusted_dir`]）拿到的目錄 fd，
@@ -620,8 +639,9 @@ pub async fn file_for(app: &impl crate::outbox_remote::OutboxRemoteEnv, id: Stri
     use std::os::unix::fs::MetadataExt as _;
     let not_found = || LcError::NotFound("file".into());
     let requested = q.get("path").ok_or_else(|| LcError::Bad("path required".into()))?.clone();
+    let inline_req = q.get("inline").map(|v| v == "1" || v == "true").unwrap_or(false);
     if let Some(t) = crate::outbox_remote::target(app, &id).await? {
-        return crate::outbox_remote::file(t, &requested).await;
+        return crate::outbox_remote::file(t, &requested, inline_req).await;
     }
     outbox_of(app, &id).await?; // 確認本機、bot 存在；拿到的路徑只是拿來確認，不再用它重新 open。
     let data_dir = app.data_dir().to_path_buf();
@@ -649,17 +669,31 @@ pub async fn file_for(app: &impl crate::outbox_remote::OutboxRemoteEnv, id: Stri
     if content_is_withheld(&data) {
         return Err(not_found());
     }
-    Ok((
+    let p = Path::new(&name);
+    let is_inline = inline_req && is_inline_allowed(p);
+    let disposition = if is_inline {
+        content_disposition_inline(&name)
+    } else {
+        content_disposition(&name)
+    };
+    let mut resp = (
         StatusCode::OK,
         [
-            (header::CONTENT_TYPE, mime_of(Path::new(&name)).to_string()),
-            (header::CONTENT_DISPOSITION, content_disposition(&name)),
+            (header::CONTENT_TYPE, mime_of(p).to_string()),
+            (header::CONTENT_DISPOSITION, disposition),
             (header::CACHE_CONTROL, "private, no-store".to_string()),
             (header::X_CONTENT_TYPE_OPTIONS, "nosniff".to_string()),
         ],
         data,
     )
-        .into_response())
+        .into_response();
+    if is_inline {
+        resp.headers_mut().insert(
+            header::CONTENT_SECURITY_POLICY,
+            header::HeaderValue::from_static("sandbox; default-src 'none'"),
+        );
+    }
+    Ok(resp)
 }
 
 /// 分享入口用的下載分類：確實不存在／遭黑名單擋下回 NotFound；可信邊界、DB、讀取或工作失敗保留成 Unavailable。

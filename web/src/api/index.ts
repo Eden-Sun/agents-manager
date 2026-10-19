@@ -397,9 +397,10 @@ export async function fetchOutbox(
   }
 }
 
-/** 下載 outbox 裡的一個檔案：帶 token 抓成 blob URL（`<a href>` 帶不了 header）。 */
-export function outboxFileUrl(botId: string, name: string): Promise<string> {
-  return transport.blobUrl(`/bots/${encodeURIComponent(botId)}/outbox/file?path=${encodeURIComponent(name)}`)
+/** 下載或預覽 outbox 裡的一個檔案：帶 token 抓成 blob URL（`<a href>` 或新分頁帶不了 header）。 */
+export function outboxFileUrl(botId: string, name: string, inline = false): Promise<string> {
+  const q = inline ? '&inline=1' : ''
+  return transport.blobUrl(`/bots/${encodeURIComponent(botId)}/outbox/file?path=${encodeURIComponent(name)}${q}`)
 }
 
 export async function deleteProject(projectId: string): Promise<void> {

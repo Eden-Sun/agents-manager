@@ -107,7 +107,7 @@
         let body: serde_json::Value = serde_json::from_slice(&body).unwrap();
         assert_eq!(body["reason"], json!("outbox_remote_unreachable"), "{body}");
 
-        match file(target_for_test(conn, "/remote/outbox/bot"), "report.txt").await {
+        match file(target_for_test(conn, "/remote/outbox/bot"), "report.txt", false).await {
             Err(LcError::Conflict(detail)) => assert_eq!(detail["reason"], json!("outbox_remote_unreachable"), "{detail}"),
             other => panic!("已知離線的下載應回 409：{other:?}"),
         }

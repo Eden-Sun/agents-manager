@@ -61,8 +61,15 @@
   min-height: 0;
 }
 
+.outbox-item {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+}
+
 .outbox-file {
-  width: 100%;
+  flex: 1;
+  min-width: 0;
   text-align: left;
   display: flex;
   flex-direction: column;
@@ -84,6 +91,26 @@
 .outbox-file:disabled {
   cursor: progress;
   opacity: 0.6;
+}
+
+.outbox-preview-btn {
+  flex-shrink: 0;
+  width: 26px;
+  height: 26px;
+  min-width: 26px;
+  min-height: 26px;
+  padding: 0;
+  font-size: 13px;
+  line-height: 1;
+  border-radius: var(--radius);
+  color: var(--text-faint);
+  opacity: 0.8;
+}
+
+.outbox-preview-btn:hover:not(:disabled) {
+  opacity: 1;
+  color: var(--text);
+  background: var(--bg-sunken, rgba(127, 127, 127, 0.12));
 }
 
 .outbox-name {
