@@ -1,6 +1,6 @@
 # agents-manager
 
-本機執行的多 agent 管理器。Web UI 把每個跑在 [herdr](https://herdr.dev) pane 裡的 coding agent CLI（**claude** / **codex** / **grok**）呈現成一個「bot」，以目錄為單位分組，用聊天視窗送訊息、看回覆、處理 blocked 提示。
+本機執行的多 agent 管理器。Web UI 把每個跑在 [herdr](https://herdr.dev) pane 裡的 coding agent CLI（**claude** / **codex** / **grok** / **agy**）呈現成一個「bot」，以目錄為單位分組，用聊天視窗送訊息、看回覆、處理 blocked 提示。
 
 終端裡同時開好幾隻 agent 時，輸出會互相擠、狀態看不清、也沒有跨 bot 的時間軸。這個專案不管 agent 程序本身——那是 herdr 的工作——它負責把它們編成 Project / Bot / Run / Turn，把 hook 回來的回覆收進對話，並在瀏覽器裡操作。
 
@@ -19,7 +19,7 @@ flowchart LR
     store[("SQLite + config.toml<br/>~/.config/agents-manager/")]
     subgraph herdr["herdr headless server (session=agents-manager)"]
         direction TB
-        panes["panes: claude / codex / grok"]
+        panes["panes: claude / codex / grok / agy"]
     end
 
     web <-- "REST + WebSocket" --> daemon
@@ -33,83 +33,42 @@ flowchart LR
 | 層 | 做什麼 | 不做什麼 |
 |---|---|---|
 | **web**（`web/`） | 側欄、對話、群組、群組任務、設定、額度條 | 不直接碰 agent 程序 |
-| **daemon**（`daemon/`，二進位 `agents-managerd`） | 對帳 herdr、注入 hook、配對 Turn、投影 TOML→SQLite、開 HTTP / WS | 不 `spawn` claude / codex / grok |
+| **daemon**（`daemon/`，二進位 `agents-managerd`） | 對帳 herdr、注入 hook、配對 Turn、投影 TOML→SQLite、開 HTTP / WS | 不直接啟動 agent CLI |
 | **herdr** | 真正的 pane / agent 生命週期、送 prompt、讀畫面 | 不理解 Bot / Turn / 群組 |
 
 設定檔 `~/.config/agents-manager/config.toml` 是 Project / Bot **期望設定**的權威；SQLite 保存 Run / Turn / Message 等執行期狀態。daemon 啟動與每次 TOML 寫回後做投影。
 
-## 畫面
+## 畫面與功能
 
-數字越大的檔名通常越新。下面幾張是目前 UI，不是早期 demo。
+以下截圖於 2026-10 使用本地 mock 資料拍攝，呈現目前介面；帳號、Bot、對話與額度皆為示範資料。
 
-**主畫面對話** — 側欄依專案列出 bot 與燈號；右側是選定 bot 的氣泡、即時輸出、排隊中的下一則與額度條。回覆來源標在氣泡上（`hook` 或 `terminal_fallback`）。側欄左上角是 `AG Man ｜ pane N ｜ RAM 已用 · 剩 可用/總量`：現在開著幾個 herdr pane、herdr 進程樹吃掉多少記憶體、整機還剩多少。
+**桌面與手機對話** — 側欄按專案分組，顯示 Bot、子 agent、燈號、未讀與排程；Bot 列的 `⋯` 集中操作，支援搜尋、拖曳排序與改暱稱。標題列顯示模型、強度、pane、額度與記憶體資訊。★ 主力列可釘選常用 Bot，對話與終端可隨時切換。
 
-標題列第一行是名字、★、⚙；第二行是 **kind 圖示 · 模型 · pane id**。kind 有品牌色（claude 橘、codex OpenAI 綠、grok 紫），模型 chip 跟著染同一色；codex 的模型名省掉每顆都一樣的 `gpt-`（`6-astra`，完整 id 在 tooltip）。標題列下面那排是 **★ 主力列**：釘選的 bot 常駐在前，剛跑完的與進行中的接在後面。
+![桌面深色主畫面與檔案暫存](docs/screenshots/readme/2026-10-desktop-dark.png)
 
-![主畫面對話](docs/screenshots/readme/450-readme-chat-dark.png)
+手機版保留對話、主力列與額度條，側欄收進選單。使用者訊息靠右；Bot 回覆、系統通知與其他 Bot 的轉述有各自的來源標示。回覆以 hook 為主，終端備援會標「可能不完整」。Bot 對 Bot 的驗證與來源認領契約見 [API 文件](docs/API.md)。
 
-**對話裡「誰說的」分得出來** — 靠右的藍泡泡**只屬於使用者**。其他來源一律靠左、換面板底色加左槓，並在上方標來源：
+![手機淺色對話](docs/screenshots/readme/2026-10-mobile-light.png)
 
-- `AGM → x`：總管經 daemon 派來的裁示／交辦（`messages.relay_from` 記的是 AGM 的 bot id）。
-- `x（轉述）`：沒有 `relay_from` 但第一行是 `AGM …：`、`[AGM …]` 或 `[來自 <bot> / <agent>]` 抬頭——使用者親手貼進來的總管訊息、或 bot 之間走 `herdr agent prompt` 而 daemon 沒認領到的那種。
-- `daemon 自動觸發`：排程腳本與 daemon 自己發的通知（`relay_from = "daemon"`）；`[AG Man 通知]` 另有黃槓。
+**需要回應與回合控制** — Bot 停在確認或選單時顯示「需要回應」，可開啟終端操作。Claude 的可辨識問卷會轉成可點選的清單；多題先選好再一次送出，送出前重新比對畫面。辨識不了的提示保留終端原文與按鍵。回合進行中仍可輸入並排隊，也能「中斷回覆」或「強制中止」。完成但尚未閱讀的回合保留未讀徽章。
 
-bot 對 bot 送訊息的慣例：走 `POST /api/bots/{id}/prompt` 的要用 `X-AM-Bot-Id: $AM_BOT_ID`、`X-AM-Bot-Token: $AM_BOT_TOKEN`；可以省略 `relay_from`（daemon 會用已驗證的 bot id），若帶就只能是自己的 id，不能藉此冒充其他 bot。未帶 Bot headers 且以共用 UI token 驗證的 User 請求仍有 #339／#410 的未驗證相容期，標「未驗證」；`relay_from=daemon` 從 API 帶進來 403；`relay_from` 指到收件的那顆自己回 400 `relay_self`。Bot header 缺漏、token 錯或混帶 UI token 都拒絕，不降級成 User。走 `herdr agent prompt` 的由 PATH shim 經 `/relay/announce` 認領，第一行再順手寫 `[來自 …]` 抬頭當備援。規格見 [`docs/API.md`](docs/API.md) 的 prompt 一節。
+![手機多題問卷與需要回應提示](docs/screenshots/readme/2026-10-blocked-mobile.png)
 
-![手機版對話與來源標示](docs/screenshots/readme/451-readme-mobile-light.png)
+**專案排程與複製** — 專案的 `＋` 可新增排程，支援單次、固定間隔、每天與每週，指定 Bot、時區及通知方式。排程列顯示下次執行與狀態，點入可看執行紀錄、立即執行或停用；`⋯` 提供編輯與複製。
 
-**需要你回應時不會被藏起來** — agent 停在 y/n、選單這類提示（`blocked`）時：
+![排程列的編輯與複製選單](docs/screenshots/readme/2026-10-schedule-menu.png)
 
-- 標題列第二行最前面常駐紅色 **`● 需要回應`**，不管在對話、終端還是 shell 分頁都在，點一下開全畫面終端；解除就消失。
-- ★ 主力列那顆變成紅框紅點；**在等子 agent** 的則是黃色（紅色只留給「要你本人動手」）。側欄的父列也會在燈號旁掛一顆黃點：實心＝子 agent 還在跑，空心＝子 agent 回報了還沒人看。
-- claude 的編號選單直接畫成可以點的清單，不必按 ↓ 找選項；**多分頁、複選的問卷先把每一頁讀完，離線勾好再一次送出**，送出前重讀畫面比對，對不上就整批不送。認不出來的畫面退回原本的終端快照＋按鍵面板。
+複製會取得來源最新設定、在名稱加上「副本」，開啟新建表單。儲存才建立並啟用新排程，來源與副本各自執行；不複製執行紀錄，也不另建 Bot。排程沿用所選 Bot 的對話；「跑完就清空對話」會影響該 Bot 的記憶，建議搭配專用 Bot。
 
-![blocked 的多分頁問卷](docs/screenshots/blocked-choices/draft-mobile-390-loaded.png)
+![手機複製排程表單](docs/screenshots/readme/2026-10-schedule-copy-mobile.png)
 
-側欄可以搜尋 bot、在列上直接改暱稱，每列的操作鈕（啟動 / 停止 / 設定 / 刪除）排成 2×2；燈號是環狀，看得出「連線中」與「在跑」的差別。
+**群組聊天與任務** — 點專案名稱進入群組，以 `@<bot>` 或 `@all` 指定收件者，每個 Bot 各自執行回合；沒有 mention 不送出。群組任務另有規劃、執行、審查、驗證與交付的狀態卡。
 
-回合狀態多了一段 **已完成（未讀）**：bot 回完但你還沒看，側欄列與折疊起來的專案標題都會掛上未讀徽章，切到那個對話（或分頁回到前景）才清掉；未讀狀態重新整理不會丟。
+**模型、強度與帳號** — 選項依該主機的 CLI 能力取得。Claude 可在執行中套用模型／強度，Codex 可套用模型／強度／Fast；Grok 可套用模型，強度需重啟。忙碌或無法套用時會顯示待套用或需要重啟，設定值與實際 runtime 分開呈現，見 [SPEC §4.4a](docs/SPEC.md)。Claude 的 `cc0`～`cc6` 身分可從各主機的 shell alias 自動發現；同名身分跟著所在主機的帳號走。
 
-![未讀徽章](docs/screenshots/unread/440-unread-badge.png)
+**額度與遠端主機** — 額度依主機與身分區分，選到遠端 Bot 就切換為那台主機的資料。Claude、Codex 與 agy 顯示各自的短期／每週視窗，Grok 顯示週視窗；畫面上的百分比是「剩餘」，過期讀數另有提示。低額度會在 Bot 列警告。遠端專案透過 SSH 與那台主機的 herdr 操作，也可從主機列開 shell、處理工具登入。
 
-**回合進行中可以中止** — 回合在跑時輸入框不鎖（可以先打、送出排隊），上面那條給兩個出口：「中斷回覆」請 agent 停手（送 `esc`）；**強制中止**不等 agent，直接把回合收掉、解開輸入框——`esc` 送不進去（pane 沒了、herdr 斷線、agent 不理）時就靠它，不必停掉整個 bot。
-
-![強制中止](docs/screenshots/358-abort-button.png)
-
-**群組聊天** — 一個 Project 就是一個群組。`@<bot>` / `@all` 扇出給成員，每人各自一個 Turn；時間軸把同一次發言折成一顆氣泡。沒寫 mention 不會送出。
-
-![群組聊天](docs/screenshots/361-readme-group-dark.png)
-
-**Bot 設定** — 暱稱可隨時改（不必重啟）。模型 / 強度依 kind：claude 有 `--effort`（low…max，2.1+），模型與強度都能靠 TUI 的 `/model` / `/effort` 當場套用；grok 的 reasoning effort 是 per-model（4.6 才有 `xhigh`，4.5 沒有），改了要重啟（`/effort` 會寫進 `~/.grok/config.toml`）；codex 一律重啟。身份（`cc0`～`cc6`）只對 claude。
-
-![Bot 設定](docs/screenshots/353-claude-effort.png)
-
-**額度** — 標題列常駐 claude / codex / grok 的 5h / 7d（grok 只有週視窗）。claude 可依身份拆條（cc0 / cc1 / …）。剩餘低於門檻時顯示數字；更低時側欄 bot 列會警告。門檻由 daemon 計算，前端只讀 `low` / `critical`。
-
-額度是**按主機**分的（[SPEC §14](docs/SPEC.md)）：這條列一次只看一台——預設本機，點進 ssh 主機上的 bot 或專案就換成那台，並掛上主機名牌。遠端的數字同樣是 daemon 去那台讀回來的（codex 走 ssh RPC，claude / grok 在那台開一個用完即丟的 pane 問 `/usage`）。
-
-![額度條](docs/screenshots/231-quota-order-labeled.png)
-![遠端主機的額度](docs/screenshots/341-quota-host-remote.png)
-
-**身份 cc0～cc6** — 多帳號不必再寫設定：daemon 會讀每台主機登入 shell 裡的 `alias ccN='CLAUDE_CONFIG_DIR=… claude …'`，把 `cc0`～`cc6` 當成可指派的身份（[SPEC §16](docs/SPEC.md)）。同一個 `cc1` 在本機和遠端可以是不同帳號——它跟著那台機器的 alias 走。手寫的 `[[identities]]` 仍然有效，同名時以它為準。
-
-![身份](docs/screenshots/350-identities-shell-local.png)
-
-**子 agent 追蹤** — bot 在 pane 裡用 herdr 再開子 agent（平行子任務、reviewer 之類）時，AG Man 會把它掛在父 bot 底下，而不是變成一個沒人管的 pane。這靠三層機制，不靠 agent 自覺：
-
-- **pane 血緣**：一個 bot 一個 tab，對帳時凡是 split 在某個 bot 活動 run 那個 tab 裡的 agent，一律當它的子代；名字前綴只是跨 tab 的備援。孫代照樣掛在子代下面。
-- **herdr PATH shim**：daemon 起的每個 pane，PATH 最前面放一支包裝過的 `herdr`。`agent start <name>` 自動補上 `<父 agent 名>-` 前綴；`pane split` / `tab create` 自動把父的帳號（`CLAUDE_CONFIG_DIR` / `CODEX_HOME`）與 hook 環境用 `--env` 帶下去——herdr 的 pane 是 server 生的，不會繼承呼叫端 shell，沒有這段子 pane 會用預設帳號起來、也收不到 hook。
-- **herdr skill**：啟動 claude bot 前，daemon 把 `herdr --skill` 寫進該身份的 `skills/herdr/SKILL.md`（內容相同就不動），前面插一段 AG Man 規則：先重用閒置的 child、命名、`pane split --pane "$HERDR_PANE_ID"`、不要 `git stash`。codex / grok 在 persona 裡拿到同一份文字。
-
-**主機 shell** — 主機列（含遠端）可以直接開一個 shell：裝工具、看 log、清 worktree，不必另外開終端 ssh。畫面是終端快照加一行指令輸入，附 Ctrl+C / Esc 鈕，↑↓ 翻歷史；只能操作 daemon 自己開的 pane。開著的 shell 列在主機列上，可以點回去或結束。
-
-![遠端主機 shell](docs/screenshots/host-shell/433-remote-shell-light.png)
-
-**遠端 `gh` 登入** — issue 列表靠該主機上的 `gh`。遠端沒登入時，主機列給一顆按鈕，daemon 依序試：切到已有效的帳號 → 丟掉失效的 active 帳號再切 → 把本機 `gh auth token` 經 ssh stdin 轉發過去（不進 argv、不落 log）→ 最後才走 GitHub 裝置碼，UI 顯示 `user_code` 與連結。
-
-**圖片暫存托盤** — 畫面右緣一條常駐托盤，圖片可以先 drop 進去再切到別的 bot，拖或點進那個對話的附件托盤一起送出。跨 bot / project 都在，只存記憶體，重新整理就清空。
-
-![圖片托盤](docs/screenshots/231-drop-tray-dark.png)
+**子 agent 與檔案** — 經 herdr 開出的 child 會縮排在父 Bot 底下，顯示狀態與回報提示；派工規則要求先重用閒置 child，由父 Bot 收尾。右側「檔案暫存」可跨 Bot 暫放圖片、PDF 與 log，重新整理仍保留，放入 30 分鐘後清除；「bot 給你的檔案」則列出可下載的輸出與剩餘保存時間。
 
 ## 安裝與啟動
 
@@ -119,7 +78,7 @@ Pull Request、每日排程與手動觸發會跑 GitHub Actions（macOS，daemon
 `scripts/ops/ubuntu-ci.sh` 在背景依各段成功基準驗受影響範圍，預設每 24 小時補完整四段，結果寫成 commit status `ubuntu-ci`。開發收尾前可在 repo 根目錄執行
 `scripts/check.sh changed`（只跑改到的部分）或 `scripts/check.sh`（不帶參數，全跑 ob、ops、web、daemon）；`web`／`daemon` 參數可只跑一側。
 
-需要：Rust（`cargo`）、[Bun](https://bun.sh)、已安裝的 [herdr](https://herdr.dev)（支援 socket protocol 20 與 22；0.8.2、0.9.1、0.9.3 實測過），以及至少一種 agent CLI（`claude` / `codex` / `grok`）。
+需要：Rust（`cargo`）、[Bun](https://bun.sh)、已安裝的 [herdr](https://herdr.dev)（支援 socket protocol 20 與 22；0.8.2、0.9.1、0.9.3 實測過），以及至少一種 agent CLI（`claude` / `codex` / `grok` / `agy`）。
 
 ```bash
 git clone git@github.com:Eden-Sun/agents-manager.git
@@ -178,17 +137,18 @@ VITE_MOCK=1 bun run dev
 
 ## 支援的 agent kind 與 hook
 
-回覆的主要來源是各 CLI 的 hook / notify，終端畫面只是備援。hook 身分是 **per-bot**（`bot_id` + `hook_token`），不改使用者的全域設定。
+回覆的主要來源是各 CLI 的 hook / notify，終端畫面只是備援。hook 身分是 **per-bot**（`bot_id` + `hook_token`）；注入方式依 CLI 而異，Grok 與 agy 會使用各自的設定目錄。
 
 | kind | 注入方式 | 回覆事件 |
 |---|---|---|
 | **claude** | 每次啟動 `--settings <daemon 產生的 json>`，內含 `SessionStart` / `Stop` 指到 `agents-managerd hook claude` | stdin JSON；`last_assistant_message` |
 | **codex** | 每次啟動 `-c notify=[agents-managerd, hook, codex, …]`（此實例會蓋掉使用者原本的 notify） | argv 最後一個參數是 JSON；`last-assistant-message` |
 | **grok** | **沒有**每次啟動的 hook 旗標。daemon 寫入 `<GROK_HOME>/hooks/agents-manager.json` + 固定分派腳本，靠 pane env `AM_BOT_ID` / `AM_HOOK_TOKEN` 找到 bot | stdin JSON，與 claude 同一條子命令 |
+| **agy** | 在 Antigravity CLI 設定中登記具名 hooks，靠 pane 環境辨識 Bot | `SessionStart` / `Stop` / `AfterAgent` 等事件；Stop 補取最後一輪對話 |
 
-三種 hook 子命令的契約相同：wall-clock ≤ 3 秒、永遠 exit 0、永遠空 stdout；失敗就 spool 到該 bot 目錄，daemon 重啟後重放。細節見 [`docs/HOOK.md`](docs/HOOK.md) 與規格書 §4、§12。
+四種 hook 子命令的契約相同：wall-clock ≤ 3 秒、永遠 exit 0、永遠空 stdout；失敗就 spool 到該 bot 目錄，daemon 重啟後重放。細節見 [`docs/HOOK.md`](docs/HOOK.md) 與規格書 §4、§12。
 
-`inject_hooks = false` 時不注入（grok 則不給 token），回覆改走終端備援，氣泡會標「可能不完整」。pane 太窄時 TUI 會把字排成一欄，備援會拒絕猜、改提示把 pane 拉寬（或移到自己的分頁）。
+`inject_hooks = false` 時不注入，回覆改走終端備援，氣泡會標「可能不完整」。pane 太窄時 TUI 會把字排成一欄，備援會拒絕猜、改提示把 pane 拉寬（或移到自己的分頁）。
 
 ## 文件
 
@@ -208,5 +168,5 @@ VITE_MOCK=1 bun run dev
 
 ## 現況
 
-- 單 bot 對話、群組 `@mention`、遠端 host（SSH 轉發 + herdr 事件／spool）、額度條、身份、圖片附件與暫存托盤、主機 shell、遠端 gh 登入、子 agent 血緣認領，是正在用的路徑。
+- 單 bot 對話、群組 `@mention`、遠端 host（SSH 轉發 + herdr 事件／spool）、額度條、身份、圖片附件與暫存托盤、主機 shell、遠端 gh 登入、子 agent 血緣認領、專案排程與複製，是正在用的路徑。
 - 判斷邏輯（專案刪除守門、bot 燈號）抽成純函式，用 `bun test` 跑（測試檔是 `node:test` 寫的，bun 直接吃；`scripts/check.sh web`）；daemon 端 `cargo test -p agents-managerd`，shim 腳本另有 `sh` 測試。
