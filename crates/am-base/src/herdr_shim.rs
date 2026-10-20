@@ -390,6 +390,7 @@ am_agent_start() {
     _n=$#
     _i=0
     _named=0
+    _child_name=""
     _stop=0
     _prev=""
     _kind=""
@@ -473,6 +474,7 @@ am_agent_start() {
                         -*) : ;;
                         *)
                             _a=$(am_child_name "$_a") || exit $?
+                            _child_name=$_a
                             _named=1
                             ;;
                     esac
@@ -619,19 +621,30 @@ am_agent_start() {
     if [ -z "${AM_BOT_ID:-}" ]; then
         exec "$AM_HERDR" agent start "$@"
     fi
-    _out=$("$AM_HERDR" agent start "$@")
+    _start_out=$("$AM_HERDR" agent start "$@")
     _rc=$?
-    [ -z "$_out" ] || printf '%s\n' "$_out"
     # 失敗也登記：上面已確認 `--pane` 是空的、是這顆 bot 要用的 pane。herdr 等不到 agent 起好就回 `timeout`，
     # 但 agent 常常隨後才起來、被 reconcile 收編（2026-10-16 m4p ro-ocr 開 cifable：start 回 timeout，沒有登記，
     # 歸屬又退回名字推斷）。真的沒起來的 pane 關掉後，claim 會被 reconcile 清掉。
     am_spawn_claim "$_pane"
     if [ "$_rc" -ne 0 ]; then
+        [ -z "$_start_out" ] || printf '%s\n' "$_start_out"
+        printf 'agents-manager: agent start 未完成（rc=%s），尚未確認名稱 %s 已登錄到 pane %s。child 可能已在執行，不要重複開啟；先 herdr agent list/get 核對。後續請先 start（不帶任務）、確認名稱與 pane，再 agent prompt 派工。\n' "$_rc" "$_child_name" "$_pane" >&2
         am_spawn_abort
         exit "$_rc"
     fi
+    # start 的成功回覆不是名稱登錄的證據。不能把名稱對到別顆 pane 的 child 當成這次派工成功。
+    _registration=$("$AM_HERDR" agent get "$_child_name" 2>/dev/null)
+    _registration_rc=$?
+    _registered_pane=$(printf '%s\n' "$_registration" | tr ',' '\n' | sed -n 's/.*"pane_id" *: *"\([^"]*\)".*/\1/p' | head -n 1)
+    if [ "$_registration_rc" -ne 0 ] || [ "$_registered_pane" != "$_pane" ]; then
+        printf 'agents-manager: agent start 的名稱登錄未確認：%s 沒有對到 pane %s。child 可能已在執行，禁止重複開啟或對該名稱派工；先 herdr agent list/get 核對。後續請先 start（不帶任務）、確認名稱與 pane，再 agent prompt 派工。\n' "$_child_name" "$_pane" >&2
+        am_spawn_abort
+        exit 1
+    fi
     trap - INT TERM
     am_spawn_finish "$_pane" "" || exit $?
+    [ -z "$_start_out" ] || printf '%s\n' "$_start_out"
     exit 0
 }
 

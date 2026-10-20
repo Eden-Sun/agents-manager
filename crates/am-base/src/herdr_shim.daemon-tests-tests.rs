@@ -34,14 +34,21 @@
             // `agent start` 跟 herdr ≥0.9.0 一樣擋控制字元（`char::is_control`：換行、tab、ESC…，#772），整套測試都在驗 herdr 收得下。
             write_script(
                 &fake.join("herdr"),
-                "if [ \"$1\" = agent ] && [ \"$2\" = get ]; then\n\
-                   case \" ${AM_TEST_AGENTS:-} \" in *\" $3 \"*) printf '{\"result\":{\"agent\":{\"pane_id\":\"%s\"}}}\\n' \"$3\"; exit 0 ;; *) exit 1 ;; esac\n\
+                "if [ -n \"${AM_TEST_CALL_LOG:-}\" ]; then printf '%s %s\\n' \"$1\" \"$2\" >> \"$AM_TEST_CALL_LOG\"; fi\n\
+                 if [ \"$1\" = agent ] && [ \"$2\" = get ]; then\n\
+                   case \" ${AM_TEST_AGENTS:-} \" in *\" $3 \"*) printf '{\"result\":{\"agent\":{\"pane_id\":\"%s\"}}}\\n' \"$3\"; exit 0 ;; esac\n\
+                   [ \"${AM_TEST_START_LOOKUP:-}\" != missing ] || exit 1\n\
+                   if [ -f \"$TMPDIR/started-$3\" ]; then\n\
+                     p=$(cat \"$TMPDIR/started-$3\"); [ \"${AM_TEST_START_LOOKUP:-}\" != wrong-pane ] || p=w9:p9\n\
+                     printf '{\"result\":{\"agent\":{\"pane_id\":\"%s\"}}}\\n' \"$p\"; exit 0\n\
+                   fi\n\
+                   exit 1\n\
                  fi\n\
                  if [ \"$1\" = pane ] && [ \"$2\" = get ]; then\n\
                    [ -n \"${AM_TEST_PANE_JSON:-}\" ] || exit 1\n\
                    printf '%s\\n' \"$AM_TEST_PANE_JSON\"; exit 0\n\
                  fi\n\
-                 if [ -n \"${AM_TEST_CREATE_JSON:-}\" ]; then printf '%s\\n' \"$AM_TEST_CREATE_JSON\"; exit 0; fi\n\
+                 if [ -n \"${AM_TEST_CREATE_JSON:-}\" ] && [ \"$1\" != agent ]; then printf '%s\\n' \"$AM_TEST_CREATE_JSON\"; exit 0; fi\n\
                  if [ \"$1\" = pane ] && [ \"$2\" = send-text ]; then\n\
                    { for a in \"$@\"; do printf '%s\\n' \"$a\"; done; printf -- '---\\n'; } >> \"${AM_TEST_SENDTEXT_LOG:-/dev/null}\"\n\
                    exit 0\n\
@@ -54,6 +61,15 @@
                    done\n\
                  fi\n\
                  if [ -n \"${AM_TEST_SIGNAL_PARENT:-}\" ]; then kill -INT \"$PPID\"; sleep 2; exit 1; fi\n\
+                 if [ \"$1 $2\" = 'agent start' ]; then\n\
+                   prev=; name=; pane=\n\
+                   for a in \"$@\"; do\n\
+                     case \"$a\" in agent|start) continue ;; --) break ;; esac\n\
+                     case \"$prev\" in --pane) pane=$a ;; --kind|--timeout) : ;; *) case \"$a\" in --pane=*) pane=${a#--pane=} ;; -*) : ;; *) [ -n \"$name\" ] || name=$a ;; esac ;; esac\n\
+                     prev=$a\n\
+                   done\n\
+                   printf '%s' \"$pane\" > \"$TMPDIR/started-$name.$$\"; mv \"$TMPDIR/started-$name.$$\" \"$TMPDIR/started-$name\"\n\
+                 fi\n\
                  for a in \"$@\"; do printf '%s\\n' \"$a\"; done\n\
                  [ -z \"${AM_TEST_HERDR_RC:-}\" ] || exit \"$AM_TEST_HERDR_RC\"\n",
             );
@@ -1699,12 +1715,54 @@
         ];
         let (out, err, rc) = s.run_full(&env, &["agent", "start", "kid", "--pane", "w1:p1"]);
         assert_eq!(rc, 1, "herdr 的失敗碼照樣傳回：{out:?} {err}");
+        assert!(err.contains("尚未確認名稱 parent-kid") && err.contains("不要重複開啟"), "{err}");
         let files: Vec<_> = std::fs::read_dir(&spool).unwrap().map(|e| e.unwrap().path()).filter(|p| p.extension().is_some_and(|x| x == "json")).collect();
         assert_eq!(files.len(), 1, "start 失敗（timeout）也有一則登記：{files:?}");
         let body: serde_json::Value = serde_json::from_str(std::fs::read_to_string(&files[0]).unwrap().trim()).unwrap();
         assert_eq!(body["payload"]["pane_id"], "w1:p1");
         assert_eq!(body["payload"]["parent_run_id"], "run-b1");
         assert_eq!(body["run_id"], "run-b1");
+    }
+
+    /// 成功回覆仍需查名稱；失敗時保留 parent claim，不自動重開或送任務。
+    #[test]
+    fn macos_local_child_start_requires_the_registered_name_to_match_its_pane() {
+        for (lookup, expected_rc) in [("", 0), ("missing", 1), ("wrong-pane", 1)] {
+            let s = Sandbox::new();
+            let home = s.dir.join("home");
+            let spool = home.join(".config/agents-manager/bots/B-REMOTE/hook-spool.d");
+            std::fs::create_dir_all(spool.parent().unwrap()).unwrap();
+            let home_s = home.to_string_lossy().to_string();
+            let calls_path = s.dir.join("calls.log");
+            let calls_s = calls_path.to_string_lossy().to_string();
+            let env = [
+                ("HOME", home_s.as_str()),
+                ("AM_AGENT_NAME", "parent"),
+                ("AM_BOT_ID", "B-REMOTE"),
+                ("AM_KIND", "codex"),
+                ("HERDR_PANE_ID", "w1:p0"),
+                ("AM_TEST_START_LOOKUP", lookup),
+                ("AM_TEST_CALL_LOG", calls_s.as_str()),
+            ];
+            let (out, err, rc) = s.run_full(&env, &["agent", "start", "kid", "--kind", "codex", "--pane", "w1:p1"]);
+            assert_eq!(rc, expected_rc, "{lookup}: {out:?} {err}");
+            if expected_rc == 0 {
+                assert_eq!(&out[..3], ["agent", "start", "parent-kid"]);
+            } else {
+                assert!(out.is_empty(), "do not emit an unverified success response: {out:?}");
+            }
+            assert_eq!(err.contains("名稱登錄未確認"), expected_rc != 0, "{err}");
+            if expected_rc != 0 {
+                assert!(err.contains("禁止重複開啟或對該名稱派工"), "{err}");
+            }
+            let claims: Vec<_> = std::fs::read_dir(&spool).unwrap().map(|e| e.unwrap().path()).collect();
+            assert_eq!(claims.len(), 1, "{lookup}: parent claim must survive");
+            let claim: serde_json::Value = serde_json::from_slice(&std::fs::read(&claims[0]).unwrap()).unwrap();
+            assert_eq!(claim["payload"]["pane_id"], "w1:p1");
+            let calls = std::fs::read_to_string(calls_path).unwrap();
+            assert_eq!(calls.lines().filter(|l| *l == "agent start").count(), 1, "no start retry: {calls}");
+            assert!(!calls.contains("agent prompt") && !calls.contains("agent rename") && !calls.contains("pane split"), "no automatic recovery actions: {calls}");
+        }
     }
 
     /// #664：herdr 還在跑時被中斷，trap 也要 abort。

@@ -1345,8 +1345,10 @@ PATH 上的 herdr 會幫你補，但你自己要寫對。\n\
 - **開 pane**：一律 `herdr pane split --pane \"$HERDR_PANE_ID\"`（或 `--current`）。\
 **禁止省略目標**——省略時 herdr 會去拆使用者正在看的那個 pane。\n\
 - **開 codex 子 agent 的完整寫法**（照抄、換掉 `<>`，**禁止**為此去讀 `herdr_shim.rs` 或 API 文件）：先 `herdr pane split --pane \"$HERDR_PANE_ID\"` 拿新 pane id，\
-全新題目 `herdr agent start <名稱> --kind codex --pane <新 pane> -- \"<派工 prompt>\"`；要接著你這段脈絡就 `herdr agent start <名稱> --kind codex --pane <新 pane> -- fork --last \"<派工 prompt>\"`。\
-要指定模型才加 `--model <模型>`，codex 的旗標一律放在 `--` 之後、子命令（`fork`／`resume`）之前，例：`-- --model <模型> fork --last \"…\"`。\
+全新題目 `herdr agent start <名稱> --kind codex --pane <新 pane>`；要接著你這段脈絡就 `herdr agent start <名稱> --kind codex --pane <新 pane> -- fork --last`。\
+要指定模型才加 `--model <模型>`，codex 的旗標一律放在 `--` 之後、子命令（`fork`／`resume`）之前，例：`-- --model <模型> fork --last`。\
+**啟動不帶派工 prompt**：先用 `herdr agent get <名稱>` 確認登錄的 pane 等於新 pane，並等到 idle／ready，再 `herdr agent prompt <名稱> \"<派工 prompt>\"`。\
+start 逾時或名稱查不到時，child 可能已在執行；先用 `herdr agent list`／`get` 核對，**禁止直接重開或對未確認的名稱派工**。\
 換身分就在 `--` 之前加 `--identity <身分>`（可用的身分看 `$AM_IDENTITIES`）。\
 **agy 子 agent 的模型**：除非使用者指定，**禁止**帶 `--model`，PATH 上的 herdr 會補最低強度 `gemini-3.8-flash-low`；使用者點名模型或強度才帶 `-- --model <slug>`（例 `gemini-3.8-flash-high`）。\
 PATH 上的 herdr 會補 `-p`、`--no-daemon`、`-c project_doc_max_bytes=0`：**禁止**自己補，也**禁止**用真 herdr 的絕對路徑繞過它。\n\
@@ -2174,9 +2176,13 @@ mod model_args_tests {
     fn the_rules_give_a_copy_paste_way_to_start_a_codex_child() {
         let rule = super::child_agent_rules("proj-abc123");
         for want in [
-            "herdr agent start <名稱> --kind codex --pane <新 pane> -- \"<派工 prompt>\"",
-            "herdr agent start <名稱> --kind codex --pane <新 pane> -- fork --last \"<派工 prompt>\"",
+            "herdr agent start <名稱> --kind codex --pane <新 pane>",
+            "herdr agent start <名稱> --kind codex --pane <新 pane> -- fork --last",
             "-- --model <模型> fork --last",
+            "**啟動不帶派工 prompt**",
+            "herdr agent get <名稱>",
+            "herdr agent prompt <名稱>",
+            "**禁止直接重開或對未確認的名稱派工**",
             "`--` 之後、子命令",
             "`--no-daemon`",
             "**禁止**自己補，也**禁止**用真 herdr 的絕對路徑繞過它",
