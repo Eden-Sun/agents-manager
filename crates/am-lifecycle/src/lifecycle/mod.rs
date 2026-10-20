@@ -87,6 +87,7 @@ pub mod fence;
 pub mod turn_controller;
 pub mod interrupt_grace;
 pub mod resume_gate;
+pub mod claude_resume_menu;
 /// 忙到一半被重啟的 claude 接回後補一句續行提示（claude 2.1.281 不再補隱藏的 Continue）。
 pub mod resume_nudge;
 /// daemon 自己排進佇列的通知：較短的重試上限、可以撤回（#562）。

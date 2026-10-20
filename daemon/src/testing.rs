@@ -128,11 +128,23 @@ pub struct LivePane {
     pub enter_redraws: Option<Vec<String>>,
     /// Enter 照常送出（寫進 transcript），但框裡接著出現這些列——別人開始打的下一則草稿（#1577 的測試用）。
     pub after_enter_composer: Option<Vec<String>>,
+    /// #1876：冷快取選單遮住 composer；Resume 只關框，下一個 Enter 才可能送原訊息。
+    pub cold_resume_menu: Option<String>,
+    /// 下一次送出時先跳額度警告，保留尚未送出的 composer（合成首訊息變體）。
+    pub cold_resume_on_submit: Option<String>,
+    /// idle 警告也可能在貼字後、第一次 Enter 之前打開。
+    pub cold_resume_on_type: Option<String>,
+    /// 某些 CLI 變體選 Resume 後自動繼續先前的送出；送達確認不能再多按 Enter。
+    pub cold_resume_submit_on_accept: bool,
 }
 
 /// 框裡的字送出去：進 transcript，有 transcript 檔就照 claude 的格式補一筆 user entry。
 /// Enter 與 send-now 和弦（issue #103）共用這一段——兩顆鍵對框的效果一樣。
 fn submit_composer(p: &mut LivePane) {
+    if let Some(menu) = p.cold_resume_on_submit.take() {
+        p.cold_resume_menu = Some(menu);
+        return;
+    }
     if let Some(redraw) = &p.enter_redraws {
         p.composer = redraw.clone();
         return;
@@ -173,6 +185,9 @@ fn submit_composer(p: &mut LivePane) {
 
 impl LivePane {
     pub fn render(&self) -> String {
+        if let Some(menu) = &self.cold_resume_menu {
+            return menu.clone();
+        }
         let mut out = String::new();
         if self.codex {
             for line in &self.transcript {
@@ -710,6 +725,9 @@ impl MockHerdr {
                                         }
                                     }
                                 }
+                                if let Some(menu) = p.cold_resume_on_type.take() {
+                                    p.cold_resume_menu = Some(menu);
+                                }
                             }
                             json!({"id": id, "result": {"type": "ok"}})
                         }
@@ -727,6 +745,20 @@ impl MockHerdr {
                             if let Some(p) = st.live.lock().unwrap().get_mut(&pid) {
                                 let mut prev = String::new();
                                 for k in &keys {
+                                    if let Some(menu) = &mut p.cold_resume_menu {
+                                        if k == "up" {
+                                            *menu = menu.replace("  ❯ Start a new conversation", "    Start a new conversation")
+                                                .replace("    Resume\n", "  ❯ Resume\n")
+                                                .replace("  ❯ 2. Start a new conversation", "    2. Start a new conversation")
+                                                .replace("    1. Resume\n", "  ❯ 1. Resume\n");
+                                        } else if k == "enter" && menu.lines().any(|l| matches!(l.trim(), "❯ Resume" | "❯ 1. Resume")) {
+                                            p.cold_resume_menu = None;
+                                            if p.cold_resume_submit_on_accept {
+                                                submit_composer(p);
+                                            }
+                                        }
+                                        continue;
+                                    }
                                     // claude 2.1.275 的 send-now 和弦（issue #103）：`ctrl+x ctrl+s` 跟 Enter
                                     // 一樣把框裡的字送出去，差別在真的 CLI 那邊會順便打斷當下那一回合。
                                     let send_now = k == "ctrl+s" && prev == "ctrl+x";

@@ -126,7 +126,13 @@ async fn flush_queued_inner<C: QueueContext>(app: &C, bot_id: &str) -> anyhow::R
         }
     }
     // One turn at a time, per SPEC §2: a queued prompt waits for the previous one to finish.
-    let Some(run) = db::active_run(app.db(), bot_id).await? else { return Ok(()) };
+    let Some(mut run) = db::active_run(app.db(), bot_id).await? else { return Ok(()) };
+    if run.state == "running" && matches!(run.agent_status.as_str(), "blocked" | "unknown")
+        && super::claude_resume_menu::accept_if_shown(app, &run).await.unwrap_or(false)
+    {
+        let Some(current) = db::active_run(app.db(), bot_id).await? else { return Ok(()) };
+        run = current;
+    }
     // `working` holds the queue too: a prompt pasted while claude is still drawing loses its
     // Enter and stalls (2026-09-07 11:21). The `working -> idle` edge re-schedules this flush.
     if run.state != "running" || run.agent_status == "blocked" || run.agent_status == "working" {

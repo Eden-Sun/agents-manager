@@ -1,0 +1,24 @@
+
+ ▐▛███▛█   Claude Code v2.1.304
+▝▜██████▀  Opus 4.6 (1M context) · Claude Max
+ ▝▝   ▝▝   /tmp/am-1876-recapture-4yojrxtk/project
+
+⚠ Safe mode: all customizations are disabled (CLAUDE.md, skills, plugins, hooks,
+  MCP, agents, and more)
+  Restart without --safe-mode to re-enable
+
+❯ Reply exactly AM1876_OK.
+
+● AM1876_OK
+
+────────────────────────────────────────────────────────────────────────────────
+  Resume this conversation?
+
+  This conversation has been inactive for 2h and is 1m tokens long. Resuming
+  it will use about 10% of your 5-hour usage limit.
+
+  ❯ 1. Resume
+    2. Start a new conversation  Claude can look this one up if you refer to
+                                 it later
+
+  Enter to confirm · Esc to resume

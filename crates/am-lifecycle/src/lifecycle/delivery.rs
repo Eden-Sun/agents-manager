@@ -200,10 +200,27 @@ fn is_rule_row(row: &str) -> bool {
 
 #[allow(unused_imports)]
 pub use crate::composer_parse::{
-    blank_codex_particles, box_state, box_state_within, composer_row, composer_tail, is_box_bottom,
+    blank_codex_particles, composer_row, composer_tail, is_box_bottom,
     is_hint_cell, plain_without_hints, prompt_suggestion, strip_ansi, styled_cells, styled_chars,
     BoxState, Cell, ComposerRow, SUGGESTION_MAX_CHARS,
 };
+
+/// 額度警告會保留舊的 composer 片段；它存在時不能借那格空框認定已 ready／已送出。
+pub fn box_state(kind: &str, screen: &str) -> BoxState {
+    if kind == "claude" && crate::tui_prompts::cold_resume_choice(screen).is_some() {
+        BoxState::Unready
+    } else {
+        crate::composer_parse::box_state(kind, screen)
+    }
+}
+
+pub fn box_state_within(kind: &str, screen: &str, tail: usize) -> BoxState {
+    if kind == "claude" && crate::tui_prompts::cold_resume_choice(screen).is_some() {
+        BoxState::Unready
+    } else {
+        crate::composer_parse::box_state_within(kind, screen, tail)
+    }
+}
 
 fn continuation_row(row: &str) -> bool {
     row.strip_prefix("  ").map(|rest| !rest.trim().is_empty()).unwrap_or(false)
@@ -458,6 +475,14 @@ async fn agent_prompt_usable(client: &HerdrClient, target: &str) -> bool {
 /// 打第一個字之前的輸入框判斷（計畫、準備、貼字前三處共用）。codex 的帳號安全提醒橫幅開著時框看起來是空的，但打進去的
 /// 開頭數字會被當成選項吃掉（#782）：整則不送、可重試，第一次看到時通知人；不按 Esc 或任何鍵。
 async fn composer_ready(app: &impl LcHost, run: &db::Run, kind: &str, screen: &str) -> Result<(), Delivered> {
+    let refreshed;
+    let screen = if kind == "claude" && crate::tui_prompts::cold_resume_choice(screen).is_some() {
+        let pending = || Delivered::NotAttempted { reason: super::claude_resume_menu::PENDING, retry: true };
+        super::claude_resume_menu::accept_if_shown(app, run).await.map_err(|_| pending())?;
+        let client = super::client_for_run(app, run).await.map_err(|_| pending())?;
+        refreshed = read_composer(&client, run.pane_id.as_deref().ok_or_else(pending)?).await.map_err(|_| pending())?;
+        &refreshed
+    } else { screen };
     if kind == "codex" {
         let banner = super::codex_banner::blocks_typing(screen);
         super::codex_banner::observe(app, run, banner).await;
@@ -498,7 +523,9 @@ pub async fn plan_delivery(
                 true
             }
         };
-    if !(force_pane || marked || !agent_prompt_usable(client, &target).await) {
+    // 接回後第一個 Enter 仍可能打開額度警告。不能交給沒有送達證據的 agent.prompt 後立刻回 Handed。
+    let resumed_claude = bot.kind == "claude" && (run.resume_session_id.is_some() || run.resume_outcome.is_some());
+    if !(force_pane || marked || resumed_claude || !agent_prompt_usable(client, &target).await) {
         return Ok(Ok(Plan::AgentPrompt { target }));
     }
     let Some(pane) = run.pane_id.as_deref().map(str::trim).filter(|p| !p.is_empty()).map(str::to_string) else {
@@ -820,6 +847,12 @@ pub async fn type_text(
     client.pane_send_text(&pane, text).await?;
     tokio::time::sleep(Duration::from_millis(TYPE_SETTLE_MS)).await;
     let mut seen = read().await?;
+    if bot.kind == "claude" && crate::tui_prompts::cold_resume_choice(&seen).is_some() {
+        if super::claude_resume_menu::accept_on(app, run, client).await.is_err() {
+            return Ok(Typing::Done(Delivered::Unproven(super::claude_resume_menu::PENDING)));
+        }
+        seen = read().await?;
+    }
     let box_empty = box_state_within(&bot.kind, &seen, typed_tail(text)) == BoxState::Empty;
     let evidence_grew = evidence(&bot.kind, &proof, offset, &seen, text)? > baseline;
     if should_repaste(&proof, box_empty, evidence_grew) {
@@ -930,7 +963,8 @@ fn text_still_in_box(kind: &str, screen: &str, text: &str) -> bool {
 
 /// 送出鍵按下去之後：先看送達證據，完整原文仍留在框裡才最多補按一次。
 pub async fn confirm_submitted(
-    app: &(impl crate::capabilities::Db + crate::lifecycle::send_now::ports::CodexSendPort),
+    app: &(impl crate::capabilities::Db + crate::lifecycle::send_now::ports::CodexSendPort
+        + crate::capabilities::HerdrRoutes + crate::hosts::HostsAccess),
     client: &HerdrClient,
     run: &db::Run,
     bot: &db::Bot,
@@ -948,6 +982,12 @@ pub async fn confirm_submitted(
     for _ in 0..SUBMIT_CHECKS {
         tokio::time::sleep(Duration::from_millis(SUBMIT_SETTLE_MS)).await;
         let now = read().await?;
+        if bot.kind == "claude" && crate::tui_prompts::cold_resume_choice(&now).is_some() {
+            if super::claude_resume_menu::accept_if_shown(app, run).await.is_err() {
+                return Ok(Delivered::Unproven(super::claude_resume_menu::PENDING));
+            }
+            continue;
+        }
         match same_session(app, &run.id, proof).await {
             SessionMatch::Same => {}
             SessionMatch::Changed => {

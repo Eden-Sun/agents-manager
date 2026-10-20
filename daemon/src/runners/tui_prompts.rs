@@ -2,6 +2,7 @@
 
 use crate::db;
 use crate::state::App;
+use crate::lifecycle::s6_ports::QueueServices;
 use crate::tui_prompts::dismiss_if_survey;
 use std::sync::Arc;
 use std::time::Duration;
@@ -15,6 +16,17 @@ pub fn spawn_survey_watcher(app: Arc<App>) {
         crate::session_paused::forget_ended(&app, &runs).await;
         crate::dangerous_rm::forget_ended(&app, &runs).await;
         for run in runs {
+            // #1876：啟動的一幀空框之後才跳警告、或事件漏掉的備援；跟送達共用 bot 鎖。
+            if matches!(run.agent_status.as_str(), "blocked" | "idle" | "unknown") {
+                let lock = app.bot_lock(&run.bot_id).await;
+                if let Ok(_guard) = lock.try_lock() {
+                    if crate::lifecycle::claude_resume_menu::accept_if_shown(&app, &run).await.unwrap_or(false) {
+                        app.bot_status_changed(&run.bot_id).await;
+                        crate::lifecycle::queue::schedule_flush_queued(&app, &run.bot_id);
+                        continue;
+                    }
+                };
+            }
             if run.agent_status == "blocked" || run.agent_status == "idle" || crate::dangerous_rm::is_open(&run.id) {
                 dismiss_if_survey(&app, &run).await;
                 // 防誤刪框：herdr 判成 idle 時的安全網，也負責框關掉之後的收尾（不按任何鍵）。

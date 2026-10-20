@@ -1482,7 +1482,7 @@ pub(super) async fn try_fallback(app: &impl LcHost, run_id: &str, expected_turn:
     }
     // 停在等人選的編號選單（權限框、Session paused…）：回合沒結束，選單那幾行也不是回覆（2026-09-25 cf-ox-fork-fork
     // 把 `2. Edit prompt and retry with …` 存成了回覆）。留在飛，等使用者選完由 hook／下一次 edge 收。
-    if crate::tui_prompts::awaits_menu_choice(&read.text) {
+    if crate::tui_prompts::awaits_menu_choice(&read.text) || crate::tui_prompts::cold_resume_choice(&read.text).is_some() {
         tracing::debug!(run_id, "pane is waiting at a numbered menu; not completing the turn from it");
         return Ok(false);
     }
@@ -1756,7 +1756,7 @@ pub(super) async fn capture_hookless_turn_locked(app: &impl LcHost, run_id: &str
         .ok_or_else(|| anyhow::anyhow!("no Herdr session is available for run `{}`", run.id))?;
     let read = client.pane_read(&pane_id, "recent_unwrapped", 200).await?;
     // 同 `try_fallback`：停在編號選單上不是回合結束，選單不是回覆。
-    if crate::tui_prompts::awaits_menu_choice(&read.text) {
+    if crate::tui_prompts::awaits_menu_choice(&read.text) || crate::tui_prompts::cold_resume_choice(&read.text).is_some() {
         return Ok(false);
     }
     let fresh = slice_after_cursor(&read.text, run.last_read_tail_hash.as_deref());

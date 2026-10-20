@@ -997,6 +997,9 @@ pub async fn apply_codex_limit_hit_quota(app: &impl ScreenServices, host: &str, 
 /// No reply marker: keep what follows the last prompt echo minus chrome. `⎿` lines stay — they
 /// usually carry the actual error ("Not logged in · Please run /login").
 pub fn clean_screen(kind: &str, text: &str) -> Option<String> {
+    if kind == "claude" && crate::tui_prompts::cold_resume_choice(text).is_some() {
+        return None;
+    }
     let lines: Vec<&str> = text.lines().collect();
     let start = after_last_prompt_echo(kind, &lines);
     let tool_rows = codex_tool_cell_mask(kind, &lines);
@@ -1101,6 +1104,9 @@ pub fn clean_screen(kind: &str, text: &str) -> Option<String> {
 
 /// Provider-specific reply extraction. grok has no reply marker (appendix F): always `clean_screen`.
 pub fn extract_reply(kind: &str, text: &str) -> Option<String> {
+    if kind == "claude" && crate::tui_prompts::cold_resume_choice(text).is_some() {
+        return None;
+    }
     if kind == "claude" {
         return crate::capture::claude::PARSER.extract_reply(text);
     }

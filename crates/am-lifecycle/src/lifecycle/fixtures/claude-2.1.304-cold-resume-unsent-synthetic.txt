@@ -1,0 +1,12 @@
+────────────────────────────────────────────────────────────────────────────────
+  Resume this conversation?
+
+  This conversation has been inactive for 2h and is 1m tokens long. Resuming
+  it will use about 10% of your 5-hour usage limit.
+  Your unsent message will still be there after you answer.
+
+    Resume
+  ❯ Start a new conversation
+    Claude can look this one up if you refer to it later
+
+  Enter to confirm · Esc to dismiss
