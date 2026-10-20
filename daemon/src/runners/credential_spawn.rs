@@ -227,7 +227,14 @@ pub async fn claim(State(app): State<Arc<App>>, headers: axum::http::HeaderMap, 
         return fail(StatusCode::BAD_REQUEST, "pane_id_missing", "herdr did not identify the started pane");
     }
     match crate::spawn_hints::claim_for_run(&app, &bot.id, &body.parent_run_id, pane_id).await {
-        Ok(()) => (StatusCode::OK, Json(json!({"pane_id": pane_id, "claimed": true}))),
+        Ok(()) => {
+            // 登記常比 `pane.agent_detected` 觸發的那輪對帳晚（grok 起得慢，2026-10-19 #1867）；那輪沒登記就不認領，
+            // 之後沒有別的事件叫對帳，子 agent 要等到 pane 關掉才被看見。登記一記下就排一輪延後對帳（同 hook 的 SpawnClaim）。
+            if let Ok(host) = crate::db::bot_host(&app.db, &bot.id).await {
+                crate::runners::reconcile::schedule_deferred_pass(&app, &host);
+            }
+            (StatusCode::OK, Json(json!({"pane_id": pane_id, "claimed": true})))
+        }
         Err(e) => {
             tracing::warn!(bot = %bot.id, pane = %pane_id, error = %e, "spawn claim could not be recorded");
             fail(StatusCode::SERVICE_UNAVAILABLE, "claim_unrecorded", "spawn claim could not be recorded")

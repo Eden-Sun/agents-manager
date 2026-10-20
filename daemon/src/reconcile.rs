@@ -4429,6 +4429,65 @@ mod compat_tests {
         assert_eq!(kids, 1, "不會另外長出一顆重複的子 agent");
     }
 
+    /// 2026-10-19 #1867：本機 shim 開完 grok 才 POST `/relay/spawn/claim`，比 `pane.agent_detected` 觸發的那輪對帳晚；
+    /// 那輪沒登記不認領，之後沒有別的事件叫對帳（要等 pane 關掉）。登記一記下就要自己排一輪對帳把子 agent 認領起來。
+    #[tokio::test]
+    async fn a_shim_spawn_claim_that_arrives_after_the_pass_still_gets_the_child_adopted() {
+        let env = tt::env().await;
+        let app = env.app.clone();
+        let client = crate::herdr::HerdrClient::new(env.dir.join("data/herdr.sock"));
+        let (ws, root) = client.workspace_create("/tmp/p", "proj", json!({})).await.unwrap();
+        let kid_pane = client.pane_split(&root.pane_id, "right", "/tmp/p", json!({})).await.unwrap();
+
+        let parent = a_bot(&env, "alfa").await;
+        let parent_agent = crate::config::agent_name("proj", &parent);
+        sqlx::query(
+            "INSERT INTO runs (id, bot_id, state, agent_status, workspace_id, pane_id, tab_id, agent_name, herdr_session, started_at)
+             VALUES (?,?,'running','idle',?,?,?,?,'test',?)",
+        )
+        .bind(db::ulid())
+        .bind(&parent)
+        .bind(&ws.workspace_id)
+        .bind(&root.pane_id)
+        .bind(&root.tab_id)
+        .bind(&parent_agent)
+        .bind(db::now())
+        .execute(&app.db)
+        .await
+        .unwrap();
+        let agent_json = |name: &str, pane: &crate::herdr::PaneInfo| {
+            json!({"name": name, "agent": "grok", "agent_status": "working",
+                   "workspace_id": ws.workspace_id, "tab_id": pane.tab_id, "pane_id": pane.pane_id, "cwd": "/tmp/p"})
+        };
+        *env.herdr.agents.lock().unwrap() = vec![agent_json(&parent_agent, &root), agent_json(&format!("{parent_agent}-draft"), &kid_pane)];
+        bind_listed_instances(&env).await;
+
+        super::reconcile_host(&app, crate::config::LOCAL_HOST).await.unwrap();
+        let n: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM bots WHERE parent_bot_id = ?").bind(&parent).fetch_one(&app.db).await.unwrap();
+        assert_eq!(n, 0, "沒有登記的那輪不該認領");
+
+        // shim 的 claim 晚到；之後沒有任何人再叫 reconcile。
+        let mut headers = axum::http::HeaderMap::new();
+        headers.insert("X-AM-Bot-Token", "tok".parse().unwrap());
+        let (status, _) = crate::runners::credential_spawn::claim(
+            axum::extract::State(app.clone()),
+            headers,
+            axum::extract::Form(crate::runners::credential_spawn::SpawnClaim { bot_id: parent.clone(), parent_run_id: String::new(), pane_id: kid_pane.pane_id.clone() }),
+        )
+        .await;
+        assert_eq!(status, axum::http::StatusCode::OK);
+
+        let mut adopted = 0i64;
+        for _ in 0..100 {
+            adopted = sqlx::query_scalar("SELECT COUNT(*) FROM bots WHERE parent_bot_id = ?").bind(&parent).fetch_one(&app.db).await.unwrap();
+            if adopted > 0 {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        }
+        assert_eq!(adopted, 1, "登記到了就該排一輪對帳把子 agent 認領起來");
+    }
+
     /// **#94 重開**：hint 讀不到不等於沒有 hint。父 agent 在新 tab 裡連開三顆、每一顆的 hint 都已經記在表裡，只是第二、三顆
     /// 出現的那一輪 SELECT 失敗——退回同 tab 推斷就會把 k2 掛到 k1 底下（串鏈、還因為短名字對錯 parent 取不到而長出重複 bot）。
     /// 讀不到的那一輪一顆都不認領；DB 恢復之後，延後的那一輪自己照 hint 認領（這之後沒有任何人叫 reconcile）。

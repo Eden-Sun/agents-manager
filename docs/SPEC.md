@@ -1812,7 +1812,7 @@ claim 與 hint 衝突時以 claim 為準。它們只證明 parent，不證明同
 同 pane 換 agent 卻缺少 child instance／replacement 證據時維持未知，不推定改名、不改 parent、不接上舊 child 設定。
 新 pane 的明確 ownership 可以認領新 child，但名稱相似不能證明舊 child 被刻意替換；replacement 判斷只接受明確 ownership，且舊 pane 已確認不存在。
 
-spawn hint 仍由 hook 的 Bash 工具輸出抽取 `herdr pane split`／`agent start` 的 pane ID，驗證清單上確有該 agent 後才採用。線索（spawn hint／遠端 spawn claim）一記下就排一輪延後對帳（15 秒）：遠端 hook 走 spool，常比子 agent 出現時那輪對帳晚到，不排的話要等下一個不相干的 pane 事件才認領（2026-10-19 m4p 實例晚了 9 分鐘）。
+spawn hint 仍由 hook 的 Bash 工具輸出抽取 `herdr pane split`／`agent start` 的 pane ID，驗證清單上確有該 agent 後才採用。線索（spawn hint／遠端 spawn claim／本機 shim 的 `POST /relay/spawn/claim`）一記下就排一輪延後對帳（15 秒）：遠端 hook 走 spool，常比子 agent 出現時那輪對帳晚到，不排的話要等下一個不相干的 pane 事件才認領（2026-10-19 m4p 實例晚了 9 分鐘；本機 grok 起得慢，shim 的 claim 晚於偵測那輪，#1867）。
 讀取 claim/hint 失敗時這一輪一顆都不認領、不改名，排延後補跑；讀到空集合也不退回名字／tab 猜測。
 共用 session 的主機（§11.10）只收自己 workspace／tab／pane 裡有明確 ownership 的 agent；已移交專案（§6.5h）的 agent 不認領，其 bot 不當父候選。
 認領記 `managed_by='child'`、`parent_bot_id` 與 `adopted=1` 的 run；可取得時一併保存 native session ID。
