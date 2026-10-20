@@ -647,6 +647,7 @@ async fn read_guard_screen(client: &HerdrClient, pane: &str, run: &db::Run, reas
 fn agent_prompt_dialog_reason(kind: &str, screen: &str) -> Option<&'static str> {
     match kind {
         "claude" if crate::tui_prompts::stuck_at_login(screen) => Some("needs_login"),
+        "claude" if crate::tui_prompts::cold_resume_choice(screen).is_some() => Some(super::claude_resume_menu::PENDING),
         "claude" if crate::tui_prompts::dangerous_rm_prompt(screen).is_some() => Some("dangerous_rm_pending"),
         "claude" if crate::tui_prompts::is_auto_mode_offer(screen)
             || crate::tui_prompts::is_switch_model_dialog(screen) => Some("dialog_open"),
@@ -734,11 +735,17 @@ pub async fn pane_ready_for_prompt(app: &impl LcHost, bot: &db::Bot, run: &db::R
         Some(_) => Some(client_for_run(app, run).await.map_err(|_| pane_guard_retry(run, "pane_unreadable"))?),
         None => None,
     };
-    let screen = match (pane, client.as_ref()) {
+    let mut screen = match (pane, client.as_ref()) {
         (Some(pane), Some(client)) => read_guard_screen(client, pane, run, "composer_unreadable").await?,
         _ => String::new(),
     };
 
+    if bot.kind == "claude" && crate::tui_prompts::cold_resume_choice(&screen).is_some() {
+        super::claude_resume_menu::accept_if_shown(app, run).await.map_err(|_| pane_guard_retry(run, super::claude_resume_menu::PENDING))?;
+        if let (Some(pane), Some(client)) = (pane, client.as_ref()) {
+            screen = read_guard_screen(client, pane, run, "composer_unreadable").await?;
+        }
+    }
     // An unlogged claude opens on "Select login method" and looks idle; a prompt would type into the menu.
     if bot.kind == "claude" && crate::tui_prompts::stuck_at_login(&screen) {
         let identity = bot.identity.clone().unwrap_or_default();
@@ -1051,11 +1058,18 @@ async fn prompt_inner(
     }
 
     // 1. preconditions
-    let run = db::active_run(app.db(), bot_id).await.map_err(up)?.ok_or_else(|| {
+    let mut run = db::active_run(app.db(), bot_id).await.map_err(up)?.ok_or_else(|| {
         LcError::conflict("bot has no active run", json!({}))
     })?;
     if run.state != "running" {
         return Err(LcError::conflict("run is not running", json!({"run_id": run.id, "state": run.state})));
+    }
+    if bot.kind == "claude" && run.agent_status == "blocked" {
+        if super::claude_resume_menu::accept_if_shown(app, &run).await
+            .map_err(|_| pane_guard_retry(&run, super::claude_resume_menu::PENDING))?
+        {
+            run = db::active_run(app.db(), bot_id).await.map_err(up)?.ok_or_else(|| pane_guard_retry(&run, "run_changed"))?;
+        }
     }
     if let Some(want) = expected_run {
         if run.id != want

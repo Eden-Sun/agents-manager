@@ -424,8 +424,60 @@ fn open_choice_menu(tail: &[&str]) -> Option<(usize, usize)> {
 /// `Session paused`…）。那不是回合結束，選單那幾行更不是回覆（2026-09-25 cf-ox-fork-fork：herdr 判 idle，
 /// 備援把 `2. Edit prompt and retry with …` 存成了回覆）。
 pub fn awaits_menu_choice(screen: &str) -> bool {
+    // daemon 接回原 session 的額度警告不是交給使用者的 blocked choice。
+    if cold_resume_choice(screen).is_some() {
+        return false;
+    }
     let raw: Vec<&str> = screen.lines().filter(|l| !l.trim().is_empty()).collect();
     open_choice_menu(&raw[raw.len().saturating_sub(CHOICE_MENU_TAIL_LINES)..]).is_some() || is_held_message_prompt(screen)
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ResumeChoice {
+    Resume,
+    NewConversation,
+    Unfocused,
+}
+
+/// Claude 2.1.304 的冷快取警告。只認最底下完整的框，不能把回覆引文或其他 Resume 選單當成授權。
+/// 啟動時選項帶編號；idle 變體沒有編號，輸入中的訊息由 CLI 自己保留。
+pub fn cold_resume_choice(screen: &str) -> Option<ResumeChoice> {
+    let plain = crate::composer_parse::strip_ansi(screen);
+    let raw: Vec<&str> = plain.lines().filter(|l| !l.trim().is_empty()).collect();
+    let tail = &raw[raw.len().saturating_sub(24)..];
+    let title = tail.iter().rposition(|l| norm_line(l) == "resume this conversation?")?;
+    if title == 0 || !is_solid_rule(tail[title - 1]) {
+        return None;
+    }
+    let body = &tail[title + 1..];
+    if composer_is_idle(body) || body.iter().any(|l| is_agent_output_line(l)) {
+        return None;
+    }
+    let normalized: Vec<String> = body.iter().map(|l| norm_line(l)).collect();
+    let resume = normalized.iter().position(|l| matches!(l.as_str(), "resume" | "1. resume"))?;
+    let new = normalized.iter().position(|l| {
+        let l = l.strip_prefix("2. ").unwrap_or(l);
+        l == "start a new conversation" || l.starts_with("start a new conversation claude can look this one up")
+    })?;
+    let explanation = flatten(&body[..resume].join(" "));
+    if resume >= new
+        || !explanation.contains("this conversation has been inactive for")
+        || !explanation.contains("resuming it will use")
+        || !explanation.contains("of your 5-hour usage limit")
+        || !normalized.last()?.starts_with("enter to confirm")
+    {
+        return None;
+    }
+    if body.iter().any(|l| is_solid_rule(l)) {
+        return None;
+    }
+    let cursor = |i: usize| body[i].trim_start().starts_with('❯');
+    match (cursor(resume), cursor(new)) {
+        (true, false) => Some(ResumeChoice::Resume),
+        (false, true) => Some(ResumeChoice::NewConversation),
+        (false, false) => Some(ResumeChoice::Unfocused),
+        _ => None,
+    }
 }
 
 /// 2.1.287 的 held message 框：別的 session 用 SendMessage 送來、但兩邊權限模式不同，訊息被扣住等使用者決定（#775）。
@@ -503,6 +555,7 @@ pub fn permission_prompt(screen: &str) -> Option<String> {
         || is_session_paused_menu(screen)
         || is_auto_mode_offer(screen)
         || is_switch_model_dialog(screen)
+        || cold_resume_choice(screen).is_some()
         || is_feedback_survey(screen)
     {
         return None;

@@ -168,6 +168,9 @@ fn fingerprint(s: &str) -> u64 {
 /// 問卷那一條要跟著 `tui_prompts::daemon_dismisses_survey()` 走（#485）：daemon 暫時不自動按鍵時
 /// 還把它排除掉，問卷就會變成「沒人按、也沒人知道」的靜默停擺——比誤按更糟。
 pub fn alertable_question(screen: &str) -> Option<String> {
+    if crate::tui_prompts::cold_resume_choice(screen).is_some() {
+        return None;
+    }
     if crate::tui_prompts::daemon_dismisses_survey() && crate::tui_prompts::is_feedback_survey(screen) {
         return None;
     }

@@ -1746,6 +1746,17 @@ herdr server 重啟會讓**所有** pane 同時消失。照 §6.5 的規則，�
    `rearm_queue_retries` 本來就把每一筆 queued 叫醒一次，flush 走到閘門照原本的到期時間重掛 timer。
    只有 claude＋`inject_hooks` 的 run 等：codex／grok 要等第一個回合結束才回報 session（`hookrecv`），在這裡等只會死結；
    沒有 hook 的 bot 沒有驗證來源。遲到的舊行程 hook 不會拿同一個 session 冒充新行程：見 §4.1 世代圍籬的 `run_id`。
+   **Claude 冷快取接回的額度警告（2.1.304，#1876）**：Pro／Max 接回時可能顯示 `Resume this conversation?`、
+   `Resuming it will use … of your 5-hour usage limit`，選項為 `Resume`／`Start a new conversation`。
+   啟動流程在 herdr ready 之後另讀畫面，待空輸入框穩定；警告開著不算 ready，預設只選 `Resume`，保留原 session。
+   `SessionStart` 可能先於警告抵達、已把接回 marker 清掉，仍要檢查警告；接回驗證仍以 hook 回報的 session id 為準，按鍵不等於驗證。
+   接回過的 claude 派送走有送達證據的 pane 路徑；打字前與送出後遇到此框都先選 Resume，CLI 保留的未送訊息不重貼，
+   需要再送出時只對仍逐字相符的草稿補 Enter，再由原 session transcript 證明送達。每顆鍵前重查 run／pane／host 世代與畫面，
+   不按 Start a new conversation；看不準時保留待重試，不當成錯誤、回答或交給使用者的 blocked choice。
+   背景巡邏共用 bot 鎖，補處理晚一幀才出現的框。這只是接回確認，不新增續行提示，`resume_nudge` 的中途工具候選規則不變。
+   測試畫面 `claude-2.1.304-cold-resume.txt` 是 Max 5x／Opus 4.6[1m] 的受控實機擷取：只修改拋棄式 transcript 的時間（2h）
+   與 usage／iterations（1M tokens），不是自然等待或真的發送 1M tokens。首訊息 `Your unsent message will still be there after you answer`
+   變體的 `*-unsent-synthetic.txt` 依 binary 固定字串合成，尚未實機驗證；觸發也受帳號旗標、模型與額度估算門檻影響。
    **忙到一半被重啟、被砍在工具中途的 claude 補一句續行提示**（claude 2.1.281 起手動 `--resume` 不再補隱藏的「Continue」，停在工具中間的
    對話接回來只會停在輸入框；`lifecycle::resume_nudge`，#424 裁示丙，疊在 #430 的條件上）。候選：`resume_native` 起的 claude，重啟前在做事——
    `restart_bot_with` 停之前在鎖裡讀到 `working`／還有一回合沒收；或 `start` 時上一個 run 是被外力收掉的（`exited`，herdr 整個重啟）且最後記著

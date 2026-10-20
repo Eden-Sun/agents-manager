@@ -1243,6 +1243,7 @@ async fn start_inner_body(
     fence: Option<&crate::hosts::HostFence>,
 ) -> LcResult<()> {
     let host = project.host.clone();
+    let ready_fence = app.hosts().fence(&host).await;
     let client = match fence {
         Some(fence) => app
             .herdr_for_host_fence(fence, session)
@@ -1624,6 +1625,7 @@ async fn start_inner_body(
             }
         }
     };
+    let status = super::claude_resume_menu::after_start(app, &bot.kind, run_id, status, fence.or(ready_fence.as_ref())).await;
     // agent 起來了、`running` 還沒記下的那一瞬（測試在這裡插進不拿 bot 鎖的 pane-exit 事件）。
     #[cfg(all(test, feature = "daemon-test-harness"))]
     {
@@ -2220,7 +2222,7 @@ pub async fn restart_child_in_pane_with(app: &impl StartContext, bot_id: &str, r
         // 新 run 以 `unknown` 起頭、`running` 時沒帶狀態；閒著的 codex（herdr 0.9.2+）不會再有狀態事件，
         // 不把 ready 的結果記下來就一直停在 `unknown`。只補還是 `unknown` 的，不蓋掉期間來的事件。
         Ok(info) => {
-            let ready = info.agent_status.normalized();
+            let ready = super::claude_resume_menu::after_start(app, &bot.kind, &run_id, info.agent_status.normalized(), Some(&client.fence)).await;
             if ready != AgentStatus::Unknown {
                 if let Err(e) = sqlx::query("UPDATE runs SET agent_status = ? WHERE id = ? AND agent_status = 'unknown'")
                     .bind(ready.as_str())
