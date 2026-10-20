@@ -1444,6 +1444,24 @@ async fn arm_fallback_after(app: &impl LcHost, run_id: &str, bot_id: &str, delay
     });
 }
 
+/// Read only this run's local rollout, using the same home/session binding as
+/// delivery evidence. Unavailable or remote logs are not positive evidence.
+async fn codex_compaction_pending(app: &impl LcHost, bot: &db::Bot, run: &db::Run, turn: &db::Turn) -> bool {
+    if !db::project(app.db(), &bot.project_id).await.ok().flatten().is_some_and(|p| p.host == LOCAL_HOST) {
+        return false;
+    }
+    let Some(session) = run.native_session_id.clone().filter(|s| !s.is_empty()) else { return false };
+    let Some(home) = super::s6_ports::StuckTurnServices::codex_home(app, bot).await else { return false };
+    // created_at is the enqueue time for queued turns, not this input's
+    // delivery boundary. Missing delivery metadata is not positive evidence.
+    let Some(since) = turn.delivered_at.clone() else { return false };
+    tokio::task::spawn_blocking(move || {
+        let path = super::delivery::codex_session_log(&home, &session)?;
+        let log = crate::transcript_read::read_tail(&path, 4 * 1024 * 1024)?;
+        Some(crate::compaction::codex_waiting_for_reply(&log, &since))
+    }).await.ok().flatten().unwrap_or(false)
+}
+
 /// Close the in-flight turn from the pane (§4.3). `Ok(false)`: nothing to fall back on (no turn,
 /// or untrusted delivery). A turn closed with zero reply can still be filled by hookrecv's late hook.
 ///
@@ -1512,8 +1530,40 @@ pub(super) async fn try_fallback(app: &impl LcHost, run_id: &str, expected_turn:
         None
     };
 
+    // The recorded input is the only evidence for a Codex compact turn. In
+    // particular, an empty external turn or compact-looking prose is not proof.
+    let compact_turn = if bot.kind == "codex" && codex_hit.is_none() {
+        let command = |s: &str| {
+            let s = s.trim();
+            s == "/compact" || s.starts_with("/compact ")
+        };
+        match turn.prompt_text.as_deref().filter(|s| !s.trim().is_empty()) {
+            // prompt_text is the actual sent input; user bubbles can retain
+            // routing mentions that were removed before delivery.
+            Some(input) => command(input),
+            None => {
+                let inputs = db::turn_user_messages(app.db(), &turn.id).await?;
+                !inputs.is_empty() && inputs.iter().all(|s| command(s))
+            }
+        }
+    } else {
+        false
+    };
+
+    // Auto-compaction can leave an idle-looking screen before the resumed
+    // answer. Only independent rollout evidence permits stripping its cell.
+    let compact_tail = if bot.kind == "codex" && !compact_turn && codex_hit.is_none() {
+        match codex_compaction_tail(&fresh) {
+            Some(tail) if codex_compaction_pending(app, &bot, &run, &turn).await => Some(tail),
+            _ => None,
+        }
+    } else {
+        None
+    };
+    let reply_screen = compact_tail.unwrap_or(&fresh);
+
     // Derive the reply before SQLite's write lock (`pane_columns` RPC, `turn_echo_texts` other conn).
-    let reply = if codex_hit.is_some() {
+    let reply = if codex_hit.is_some() || compact_turn {
         None
     } else {
     // Only the `❯` row counts as echo; lines 2..n would be stored as the answer. 讀不到送了什麼就不收（#193），
@@ -1521,7 +1571,7 @@ pub(super) async fn try_fallback(app: &impl LcHost, run_id: &str, expected_turn:
         let sent = turn_echo_texts(app, &turn.id).await?;
         #[cfg(all(test, feature = "daemon-test-harness"))]
         super::race_point::hit("fallback_after_echo", &turn.id).await;
-        match screen_reply(&bot.kind, &fresh, &sent).filter(|r| bot.kind != "grok" || !super::grok_transcript::is_startup_screen(r)) {
+        match screen_reply(&bot.kind, reply_screen, &sent).filter(|r| bot.kind != "grok" || !super::grok_transcript::is_startup_screen(r)) {
             None => None,
             Some(reply) => Some(if is_shredded(&reply) {
                 // Shredded = too narrow to read; name the pane and width so it's actionable.
@@ -1539,6 +1589,12 @@ pub(super) async fn try_fallback(app: &impl LcHost, run_id: &str, expected_turn:
         }
     };
 
+    if compact_tail.is_some() && reply.is_none() {
+        // No cursor advance: every later idle poll must keep waiting until an
+        // answer or hook arrives. The existing stuck-turn timeout remains active.
+        return Ok(false);
+    }
+
     // 沒有人送 prompt 的 external 回合（herdr 的 working→idle 抖一下就會開一個）：畫面上還是上一段回覆，游標又對不上
     // （尾端含 codex 狀態列的額度數字，一變就找不到）時，整個畫面被當成新內容，同一段回覆存第二次（am-lead 2026-09-25 10:36／11:27）。
     // 跟上一則 assistant 一樣就是同一段回覆，只收回合不存訊息；有人送過 prompt 的回合照舊（真的可能回一樣的話）。
@@ -1546,7 +1602,13 @@ pub(super) async fn try_fallback(app: &impl LcHost, run_id: &str, expected_turn:
         Some(r)
             if turn.origin == "external"
                 && turn_echo_texts(app, &turn.id).await?.is_empty()
-                && last_assistant_content(app, &turn.conversation_id).await?.as_deref().map(str::trim) == Some(r.trim()) =>
+                && last_assistant_content(app, &turn.conversation_id).await?.is_some_and(|previous| {
+                    if bot.kind == "codex" {
+                        previous.split_whitespace().eq(r.split_whitespace())
+                    } else {
+                        previous.trim() == r.trim()
+                    }
+                }) =>
         {
             tracing::info!(turn = %turn.id, "terminal fallback of a prompt-less external turn re-read the previous reply; not storing it again");
             None
@@ -1559,11 +1621,21 @@ pub(super) async fn try_fallback(app: &impl LcHost, run_id: &str, expected_turn:
         r => r,
     };
 
+    let compact_note = if compact_turn {
+        crate::compaction::codex_screen_note(
+            app.db(), &bot.id, &turn.conversation_id, codex_compaction_duration(&fresh).unwrap_or(""),
+        ).await?
+    } else {
+        None
+    };
+
     // CAS claim + reply in one transaction, so a completed turn never lacks its reply.
     let mut tx = app.db().begin().await?;
     // 撞限直接 `in_flight -> failed`：先落在 `completed_fallback` 再改 failed 不是合法邊，trigger 會把整個交易擋掉（#109）。
     let res = if codex_hit.is_some() {
         super::turn_controller::fail_on(&mut tx, &turn.id, super::turn_controller::DeliveryOnFail::Keep, "§4.3 備援看到撞限橫幅").await?
+    } else if compact_turn {
+        super::turn_controller::set_status_on(&mut tx, &turn.id, "in_flight", "completed", "Codex 壓縮完成，沒有 assistant 回覆").await?
     } else {
         super::turn_controller::set_status_on(&mut tx, &turn.id, "in_flight", "completed_fallback", "§4.3 終端快照備援").await?
     };
@@ -1607,11 +1679,19 @@ pub(super) async fn try_fallback(app: &impl LcHost, run_id: &str, expected_turn:
         return Ok(true);
     }
 
+    let compact_message = if let Some(note) = compact_note {
+        Some(insert_message_tx(&mut tx, &turn.conversation_id, Some(&turn.id), "system", &note, "system", false, Some(&read.text)).await?)
+    } else {
+        None
+    };
     let Some(reply) = reply else {
         // Only our own prompt: the turn is closed (composer unlocks); storing the echo would put words in the agent's mouth.
         tracing::info!(turn = %turn.id, "terminal fallback saw only our own prompt; storing no reply");
+        remember_pane_cursor_tx(&mut tx, run_id, &read).await?;
         tx.commit().await?;
-        remember_pane_cursor(app, run_id, &read).await?;
+        if let Some(m) = compact_message {
+            emit_message_added(app, &bot.id, m).await;
+        }
         emit_turn(app, &turn.id).await;
         return Ok(true);
     };
@@ -1629,6 +1709,9 @@ pub(super) async fn try_fallback(app: &impl LcHost, run_id: &str, expected_turn:
     .await?;
     remember_pane_cursor_tx(&mut tx, run_id, &read).await?;
     tx.commit().await?;
+    if let Some(m) = compact_message {
+        emit_message_added(app, &bot.id, m).await;
+    }
     emit_message_added(app, &bot.id, message).await;
     emit_turn(app, &turn.id).await;
     Ok(true)
@@ -2084,6 +2167,19 @@ mod hookless_capture_tests {
         .fetch_all(&app.db)
         .await
         .unwrap()
+    }
+
+    #[tokio::test]
+    async fn synthetic_hookless_codex_does_not_infer_compaction_from_answer_text() {
+        let screen = "› Reply with the requested text\nWorked for 21s • 11:03 AM\n• Context compacted · 3s\nWorked for 3s • 11:57 AM\n› \n";
+        let c = child("idle", screen, 0, 1).await;
+        let app = c.env.app.clone();
+        sqlx::query("UPDATE bots SET kind='codex' WHERE id=?").bind(&c.bot_id).execute(&app.db).await.unwrap();
+        assert!(capture_hookless_turn_locked(&app, &c.run_id, false).await.unwrap());
+        let msgs = messages(&app, &c.conv).await;
+        assert_eq!(msgs.len(), 2);
+        assert_eq!(msgs[1], ("assistant".into(), "Context compacted · 3s".into(), "terminal_fallback".into()));
+        assert!(!capture_hookless_turn_locked(&app, &c.run_id, false).await.unwrap());
     }
 
     /// The bug: a child adopted mid-answer hits `working -> idle` with no turn in flight, and
@@ -4506,6 +4602,177 @@ mod codex_0155_fallback_tests {
         sqlx::query("UPDATE turns SET prompt_text=? WHERE id=?").bind(prompt).bind(&turn).execute(&app.db).await.unwrap();
         env.herdr.set_screen(&format!("pane-{}", bot.id), screen);
         (env, run, turn)
+    }
+
+    // Synthetic fixture based on issue #1878's DB suffix, not a captured pane.
+    const SYNTHETIC_COMPACT: &str = "• 上一則已由 hook 落過的回覆。\n\n  Worked for 21s • 11:03 AM\n\n• Context compacted · 1m 14s\n\n  Worked for 1m 14s • 11:57 AM\n\n› \n";
+
+    #[tokio::test]
+    async fn synthetic_codex_manual_and_external_compact_store_only_a_system_note() {
+        for (origin, prompt) in [("external", "/compact"), ("web", "/compact"), ("external", "/compact 保留問題脈絡")] {
+            let (env, run, turn) = codex_turn(SYNTHETIC_COMPACT, prompt).await;
+            let app = env.app.clone();
+            let bot: String = sqlx::query_scalar("SELECT bot_id FROM runs WHERE id=?").bind(&run).fetch_one(&app.db).await.unwrap();
+            let conv = db::conversation_id(&app.db, &bot).await.unwrap();
+            sqlx::query("UPDATE turns SET origin=? WHERE id=?").bind(origin).bind(&turn).execute(&app.db).await.unwrap();
+            insert_message(&app, &conv, None, "assistant", "上一則已由 hook 落過的回覆。", "hook", false, None).await.unwrap();
+
+            assert!(try_fallback(&app, &run, Some(&turn)).await.unwrap());
+            assert_eq!(crate::lifecycle::run_state::turn_status(&app, &turn).await, "completed");
+            let messages: Vec<(String, String, String, i64)> = sqlx::query_as(
+                "SELECT role,content,source,incomplete FROM messages WHERE turn_id=?",
+            ).bind(&turn).fetch_all(&app.db).await.unwrap();
+            assert_eq!(messages, vec![("system".into(), "Codex 已壓縮 · 1m 14s".into(), "system".into(), 0)]);
+
+            // A repeated external edge with a mismatched cursor must not replay the
+            // old hook reply or duplicate the compaction note.
+            let again = crate::lifecycle::run_state::a_turn(&app, &bot, Some(&run), "in_flight").await;
+            sqlx::query("UPDATE turns SET origin='external',prompt_text='/compact' WHERE id=?").bind(&again).execute(&app.db).await.unwrap();
+            sqlx::query("UPDATE runs SET last_read_tail_hash='stale' WHERE id=?").bind(&run).execute(&app.db).await.unwrap();
+            assert!(try_fallback(&app, &run, Some(&again)).await.unwrap());
+            let count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM messages WHERE conversation_id=?").bind(&conv).fetch_one(&app.db).await.unwrap();
+            assert_eq!(count, 2);
+        }
+    }
+
+    #[tokio::test]
+    async fn synthetic_codex_compact_uses_delivered_input_instead_of_routing_mentions() {
+        let (env, run, turn) = codex_turn(SYNTHETIC_COMPACT, "/compact").await;
+        let app = env.app.clone();
+        let bot: String = sqlx::query_scalar("SELECT bot_id FROM runs WHERE id=?").bind(&run).fetch_one(&app.db).await.unwrap();
+        let conv = db::conversation_id(&app.db, &bot).await.unwrap();
+        insert_message(&app, &conv, Some(&turn), "user", "@cx /compact", "web", false, None).await.unwrap();
+        assert!(try_fallback(&app, &run, Some(&turn)).await.unwrap());
+        assert_eq!(crate::lifecycle::run_state::turn_status(&app, &turn).await, "completed");
+        let messages: Vec<(String,String)> = sqlx::query_as("SELECT role,content FROM messages WHERE turn_id=? AND role<>'user'")
+            .bind(&turn).fetch_all(&app.db).await.unwrap();
+        assert_eq!(messages, vec![("system".into(), "Codex 已壓縮 · 1m 14s".into())]);
+    }
+
+    #[tokio::test]
+    async fn synthetic_codex_compaction_words_are_stored_and_complete_normal_turns() {
+        for echo in ["", "› Reply with the requested text\n"] {
+            for answer in ["Context compacted", "Context compacted successfully; here is the summary.", "Context compacted · 3s"] {
+                let screen = format!(
+                    "• Previous answer\nWorked for 21s • 11:03 AM\n{echo}• {answer}\nWorked for 3s • 11:58 AM\n› \n"
+                );
+                let (env, run, turn) = codex_turn(&screen, "Reply with the requested text").await;
+                let app = env.app.clone();
+                assert!(try_fallback(&app, &run, Some(&turn)).await.unwrap(), "{answer}");
+                assert_eq!(crate::lifecycle::run_state::turn_status(&app, &turn).await, "completed_fallback");
+                let messages: Vec<(String, String, String)> = sqlx::query_as(
+                    "SELECT role,content,source FROM messages WHERE turn_id=?",
+                ).bind(&turn).fetch_all(&app.db).await.unwrap();
+                assert_eq!(messages, vec![("assistant".into(), answer.into(), "terminal_fallback".into())]);
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn synthetic_codex_warm_compact_keeps_the_existing_system_note() {
+        let (env, run, turn) = codex_turn(SYNTHETIC_COMPACT, "/compact").await;
+        let app = env.app.clone();
+        let bot: String = sqlx::query_scalar("SELECT bot_id FROM runs WHERE id=?").bind(&run).fetch_one(&app.db).await.unwrap();
+        let conv = db::conversation_id(&app.db, &bot).await.unwrap();
+        sqlx::query("UPDATE turns SET origin='external' WHERE id=?").bind(&turn).execute(&app.db).await.unwrap();
+        assert!(am_base::primary_keep_warm::claim_warm_compact(&app.db, &bot, &db::now(), &run, 50).await.unwrap());
+        insert_message(&app, &conv, None, "system", "主力熱壓", "system", false, None).await.unwrap();
+        assert!(try_fallback(&app, &run, Some(&turn)).await.unwrap());
+        let messages: Vec<(String, String)> = sqlx::query_as("SELECT role,content FROM messages WHERE conversation_id=?")
+            .bind(&conv).fetch_all(&app.db).await.unwrap();
+        assert_eq!(messages, vec![("system".into(), "主力熱壓".into())]);
+    }
+
+    #[tokio::test]
+    async fn synthetic_codex_auto_compact_without_an_answer_waits_then_records_one_reply() {
+        let (env, run, turn) = codex_turn(SYNTHETIC_COMPACT, "繼續修正").await;
+        let app = env.app.clone();
+        let bot: String = sqlx::query_scalar("SELECT bot_id FROM runs WHERE id=?").bind(&run).fetch_one(&app.db).await.unwrap();
+        sqlx::query("UPDATE turns SET delivered_at=created_at WHERE id=?").bind(&turn).execute(&app.db).await.unwrap();
+        let since: String = sqlx::query_scalar("SELECT delivered_at FROM turns WHERE id=?").bind(&turn).fetch_one(&app.db).await.unwrap();
+        let home = env.dir.join("synthetic-codex-home");
+        let day = home.join("sessions/2026/10/20");
+        std::fs::create_dir_all(&day).unwrap();
+        let log = day.join("rollout-2026-10-20T11-56-00-synthetic-compact.jsonl");
+        let event = json!({"timestamp": since, "type":"compacted", "payload":{"replacement_history":[{"role":"assistant","content":"old answer"}]}}).to_string();
+        std::fs::write(&log, format!("{event}\n")).unwrap();
+        sqlx::query("UPDATE bots SET env_json=? WHERE id=?")
+            .bind(json!({"CODEX_HOME":home.to_str().unwrap()}).to_string()).bind(&bot).execute(&app.db).await.unwrap();
+        sqlx::query("UPDATE runs SET native_session_id='synthetic-compact' WHERE id=?").bind(&run).execute(&app.db).await.unwrap();
+
+        for _ in 0..2 {
+            assert!(!try_fallback(&app, &run, Some(&turn)).await.unwrap());
+            assert_eq!(crate::lifecycle::run_state::turn_status(&app, &turn).await, "in_flight");
+            let count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM messages WHERE turn_id=?").bind(&turn).fetch_one(&app.db).await.unwrap();
+            assert_eq!(count, 0, "no chrome bubble or system message");
+        }
+        let screen = SYNTHETIC_COMPACT.replace("› \n", "• 修好了。\nWorked for 8s • 11:58 AM\n› \n");
+        env.herdr.set_screen(&format!("pane-{bot}"), &screen);
+        // The pane may show the answer before rollout appends the assistant item.
+        assert!(try_fallback(&app, &run, Some(&turn)).await.unwrap());
+        assert!(!try_fallback(&app, &run, Some(&turn)).await.unwrap());
+        assert_eq!(crate::lifecycle::run_state::turn_status(&app, &turn).await, "completed_fallback");
+        let messages: Vec<(String,String)> = sqlx::query_as("SELECT role,content FROM messages WHERE turn_id=?")
+            .bind(&turn).fetch_all(&app.db).await.unwrap();
+        assert_eq!(messages, vec![("assistant".into(), "修好了。".into())]);
+    }
+
+    #[tokio::test]
+    async fn synthetic_queued_codex_turn_does_not_adopt_compaction_before_delivery() {
+        for delivered_at in [Some("2026-10-20T11:20:00Z"), None, Some("invalid")] {
+            let screen = "Worked for 21s • 11:03 AM\n• Context compacted · 3s\nWorked for 3s • 11:58 AM\n› \n";
+            let (env, run, turn) = codex_turn(screen, "Reply with the requested text").await;
+            let app = env.app.clone();
+            let bot: String = sqlx::query_scalar("SELECT bot_id FROM runs WHERE id=?").bind(&run).fetch_one(&app.db).await.unwrap();
+            // Queued at 11:00; the preceding turn compacts at 11:10; this input
+            // is delivered only at 11:20. There is no later assistant in rollout.
+            sqlx::query("UPDATE turns SET created_at='2026-10-20T11:00:00Z',delivered_at=? WHERE id=?")
+                .bind(delivered_at).bind(&turn).execute(&app.db).await.unwrap();
+            let home = env.dir.join("synthetic-queued-codex-home");
+            let day = home.join("sessions/2026/10/20");
+            std::fs::create_dir_all(&day).unwrap();
+            let log = day.join("rollout-2026-10-20T11-00-00-synthetic-queue.jsonl");
+            let compact = json!({"timestamp":"2026-10-20T11:10:00Z","type":"compacted","payload":{}}).to_string();
+            let input = json!({"timestamp":"2026-10-20T11:20:00Z","type":"response_item","payload":{
+                "type":"message","role":"user","content":[{"type":"input_text","text":"Reply with the requested text"}]
+            }}).to_string();
+            std::fs::write(&log, format!("{compact}\n{input}\n")).unwrap();
+            sqlx::query("UPDATE bots SET env_json=? WHERE id=?")
+                .bind(json!({"CODEX_HOME":home.to_str().unwrap()}).to_string()).bind(&bot).execute(&app.db).await.unwrap();
+            sqlx::query("UPDATE runs SET native_session_id='synthetic-queue' WHERE id=?").bind(&run).execute(&app.db).await.unwrap();
+
+            assert!(try_fallback(&app, &run, Some(&turn)).await.unwrap(), "{delivered_at:?}");
+            assert_eq!(crate::lifecycle::run_state::turn_status(&app, &turn).await, "completed_fallback");
+            let messages: Vec<(String,String)> = sqlx::query_as("SELECT role,content FROM messages WHERE turn_id=?")
+                .bind(&turn).fetch_all(&app.db).await.unwrap();
+            assert_eq!(messages, vec![("assistant".into(), "Context compacted · 3s".into())]);
+        }
+    }
+
+    #[tokio::test]
+    async fn synthetic_codex_auto_compact_keeps_the_answer_and_closes_the_turn() {
+        let screen = SYNTHETIC_COMPACT.replace("› \n", "• 修好了。\n\n  Worked for 8s • 11:58 AM\n\n› \n");
+        let (env, run, turn) = codex_turn(&screen, "繼續修正").await;
+        let app = env.app.clone();
+        assert!(try_fallback(&app, &run, Some(&turn)).await.unwrap());
+        assert_eq!(crate::lifecycle::run_state::turn_status(&app, &turn).await, "completed_fallback");
+        let messages: Vec<(String, String)> = sqlx::query_as("SELECT role,content FROM messages WHERE turn_id=?")
+            .bind(&turn).fetch_all(&app.db).await.unwrap();
+        assert_eq!(messages, vec![("assistant".into(), "修好了。".into())]);
+    }
+
+    #[tokio::test]
+    async fn synthetic_codex_completion_chrome_cannot_defeat_hook_reply_dedupe() {
+        let screen = "• 已完成。\n  第二行。\n\nWorked for 21s • 11:03 AM\n\n› \n";
+        let (env, run, turn) = codex_turn(screen, "").await;
+        let app = env.app.clone();
+        sqlx::query("UPDATE turns SET origin='external' WHERE id=?").bind(&turn).execute(&app.db).await.unwrap();
+        let bot: String = sqlx::query_scalar("SELECT bot_id FROM runs WHERE id=?").bind(&run).fetch_one(&app.db).await.unwrap();
+        let conv = db::conversation_id(&app.db, &bot).await.unwrap();
+        insert_message(&app, &conv, None, "assistant", "已完成。\n第二行。", "hook", false, None).await.unwrap();
+        assert!(try_fallback(&app, &run, Some(&turn)).await.unwrap());
+        let count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM messages WHERE conversation_id=?").bind(&conv).fetch_one(&app.db).await.unwrap();
+        assert_eq!(count, 1);
     }
 
     /// 真畫面回合中：還在想，備援不收。summary 開著時字頭在撞限前仍是 `Working`；疊上 summary 字頭一樣不收。

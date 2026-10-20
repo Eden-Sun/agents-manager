@@ -772,7 +772,7 @@ pub fn compact_slash_command(kind: &str) -> Option<&'static str> {
 /// 與打字節奏；daemon 不等壓縮做完——之後的 statusLine 會回報新的 context 用量。
 ///
 /// `expected_run_id`（#872，主力熱壓）：計畫當時的 active run；鎖內 active run 已換掉或不再 idle 就回 409 `superseded_run`，一個鍵都不打。
-pub async fn compact(app: &(impl crate::capabilities::BotLocks + crate::capabilities::Db + crate::capabilities::HerdrRoutes + crate::hosts::HostsAccess), bot_id: &str, expected_run_id: Option<&str>) -> LcResult<LoginOut> {
+pub async fn compact(app: &impl LcHost, bot_id: &str, expected_run_id: Option<&str>) -> LcResult<LoginOut> {
     let lock = app.bot_lock(bot_id).await;
     let _g = lock.lock().await;
     let bot = db::bot(app.db(), bot_id).await.map_err(up)?.ok_or_else(|| LcError::NotFound("bot".into()))?;
@@ -800,6 +800,18 @@ pub async fn compact(app: &(impl crate::capabilities::BotLocks + crate::capabili
     let client = client_for_run(app, &run).await?;
     mark_pane_typed(app, &run.id).await.map_err(LcError::Upstream)?;
     send_slash_line(&client, &pane_id, line).await?;
+    if bot.kind == "codex" {
+        // The bot lock prevents the working edge from opening an anonymous turn
+        // before we record which command this daemon actually sent.
+        let conv = db::conversation_id(app.db(), bot_id).await.map_err(up)?;
+        let turn = db::ulid();
+        sqlx::query(
+            "INSERT INTO turns (id,conversation_id,run_id,origin,status,delivery,prompt_text,created_at)
+             VALUES (?,?,?,'external','in_flight','ok',?,?)",
+        ).bind(&turn).bind(&conv).bind(&run.id).bind(line).bind(db::now()).execute(app.db()).await.map_err(up)?;
+        emit_turn(app, &turn).await;
+        arm_progress(app, &run.id, bot_id, &turn).await;
+    }
     tracing::info!(bot_id, kind = %bot.kind, "sent /compact");
     Ok(LoginOut { run_id: run.id, kind: bot.kind, command: line.to_string() })
 }
@@ -847,6 +859,30 @@ mod live_slash_tests {
             other => panic!("{other:?}"),
         }
         assert!(env.herdr.calls_to("pane.send_text").is_empty() && env.herdr.calls_to("pane.send_keys").is_empty());
+    }
+
+    #[tokio::test]
+    async fn synthetic_codex_compact_records_the_sent_command_before_fallback() {
+        let env = tt::env().await;
+        let app = env.app.clone();
+        let bot = tt::claude_bot(&app, &env.project_id, "compact-proof").await;
+        sqlx::query("UPDATE bots SET kind='codex' WHERE id=?").bind(&bot.id).execute(&app.db).await.unwrap();
+        let run = tt::fake_run(&app, &bot.id).await;
+        let pane = format!("pane-{}", bot.id);
+        env.herdr.set_screen(&pane, "› \n");
+        super::compact(&app, &bot.id, Some(&run)).await.unwrap();
+        if let Some(poller) = app.progress_pollers.lock().await.remove(&run) {
+            poller.abort();
+        }
+        let turn = crate::db::in_flight_turn(&app.db, &run).await.unwrap().unwrap();
+        assert_eq!(turn.prompt_text.as_deref(), Some("/compact"));
+        assert_eq!(turn.delivery, "ok");
+        // No compact-looking text is necessary: the sent input is the evidence.
+        env.herdr.set_screen(&pane, "• An older answer still on screen\n› \n");
+        assert!(super::super::poller::try_fallback(&app, &run, Some(&turn.id)).await.unwrap());
+        let messages: Vec<(String,String)> = sqlx::query_as("SELECT role,content FROM messages WHERE turn_id=?")
+            .bind(&turn.id).fetch_all(&app.db).await.unwrap();
+        assert_eq!(messages, vec![("system".into(), "Codex 已壓縮對話。".into())]);
     }
 
     const SWITCH_MODEL: &str = "Switch model?\nYour next response will be slower\n❯ 1. Yes, switch to Claude Opus 5.5\n  2. No, go back\n";
