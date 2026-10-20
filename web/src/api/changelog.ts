@@ -212,7 +212,7 @@ export async function fetchTranslation(kind: string, host: string, from: string 
   }
 }
 
-/** 使用者按翻譯或「再試一次」。按鈕文字目前是「翻譯成繁中」。 */
+/** 使用者按翻譯或「再試一次」。 */
 export async function postTranslation(kind: string, host: string, from: string | null, to: string | null): Promise<TranslationView> {
   try {
     return toTranslation(await rawTransport.request('POST', `/changelog/translation?${translationQuery(kind, host, from, to)}`, {}))

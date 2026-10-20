@@ -14,7 +14,7 @@ import './updateChangelog.css'
  * 「有更新 · 重啟套用」確認框裡的 changelog（2026-09-10 使用者需求：先看改了什麼才重啟）。
  * 抓不到不擋重啟——那是使用者的決定，這裡只講清楚原因。
  * 翻譯是另外一層（#1870）：沒開、或還在查狀態時，不畫翻譯按鈕、也不畫錯誤。
- * 按鈕文字仍是「翻譯成繁中」；目標語言由 daemon 的 lang 設定決定。
+ * 翻譯鈕跟回應的 `lang`：沒有或不認得就不寫目標語言。
  */
 export function UpdateChangelog({
   kind,
@@ -172,6 +172,21 @@ export function UpdateChangelog({
   )
 }
 
+const TRANSLATE_TARGET: Record<string, string> = {
+  'zh-Hant': '繁中',
+  'zh-Hans': '簡中',
+  en: '英文',
+  ja: '日文',
+  ko: '韓文',
+}
+
+/** 只採用回應裡的 lang。沒有或不認得就寫「翻譯」，不猜成繁中。 */
+function translateButtonLabel(lang: string | null): string {
+  if (!lang) return '翻譯'
+  const name = TRANSLATE_TARGET[lang]
+  return name ? `翻譯成${name}` : '翻譯'
+}
+
 function retryReady(retryAfter: string | null, now: number): boolean {
   if (retryAfter == null || retryAfter === '') return true
   const at = Date.parse(retryAfter)
@@ -187,6 +202,7 @@ const ERROR_LABEL: Record<string, string> = {
   schema: '格式不符',
   sections: '段落對不上',
   summary: '摘要不符',
+  lang: '語言不在允許表',
   max_tokens: '輸出被截斷',
   refusal: '被拒絕',
   stop: '沒有正常結束',
@@ -226,7 +242,7 @@ function TranslationBar({
   if (view.status === 'absent') {
     return (
       <div className="update-changelog-tr">
-        <button type="button" onClick={onTranslate}>翻譯成繁中</button>
+        <button type="button" onClick={onTranslate}>{translateButtonLabel(view.lang)}</button>
       </div>
     )
   }

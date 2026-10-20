@@ -2880,7 +2880,7 @@ header 的 herdr 徽章確認後 `POST /api/hosts/{name}/herdr-update`（API §1
 
 ### 6.9d 更新框的翻譯（issue #1870）
 
-更新確認框在原文旁邊多一層摘要與譯文（`daemon/src/changelog_translate.rs`）。預設目標語言是繁中（`zh-Hant`）；prompt 改走設定裡驗證過的 `lang`，不是只會翻繁中。原文、來源連結，以及既有的「請 AGM 解析」（`claude_review`）都不改。不碰分診、帳本判決、自動開 issue 或升級。全站介面語言不在這裡。畫面上的翻譯鈕目前仍寫「翻譯成繁中」。
+更新確認框在原文旁邊多一層摘要與譯文（`daemon/src/changelog_translate.rs`）。預設目標語言是繁中（`zh-Hant`）；prompt 改走設定裡驗證過的 `lang`，不是只會翻繁中。原文、來源連結，以及既有的「請 AGM 解析」（`claude_review`）都不改。不碰分診、帳本判決、自動開 issue 或升級。全站介面語言不在這裡，也沒有語言選擇器。還沒翻時，按鈕跟這次回應的 `lang`：`zh-Hant` 寫「翻譯成繁中」、`zh-Hans`「翻譯成簡中」、`en`「翻譯成英文」、`ja`「翻譯成日文」、`ko`「翻譯成韓文」。沒有 `lang` 或不認得就只寫「翻譯」。摘要沒有固定的繁中標題。
 
 - **預設關**。`[changelog_translate]` 沒寫或 `enabled = false`，以及 key 檔讀不到：安靜停用。`GET`／`POST /api/changelog/translation` 回 `unconfigured`，不打 API、畫面不顯示錯誤、不擋解析、安裝或重啟。key 只放在 `key_file` 指到的 0600 檔，不進 `config.toml`、不進帳本、不進回應。
 - **只有使用者按下去才扣費**。`GET` 只讀狀態（開視窗、輪詢、再查一次都不送出）。`POST` 開始或重試。兩條都是 User-only；一般 Bot 與 AGM role Bot 均 → 403 `user_only`。
