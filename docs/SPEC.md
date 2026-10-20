@@ -2654,6 +2654,12 @@ pt-hub = ["~/project/pt/CLAUDE.md", "~/project/pt/AGENTS.md"]      # 多份照�
   daemon 起的 claude bot（parent）在 `claude-settings.json` 寫 `idleCompaction: false`（`lifecycle::setup::claude_settings`，本機與遠端同一份，issue #1756），閒置一律交給本節的保溫／熱壓；
   `herdr agent start` 開的 claude child 不帶 daemon 的 `--settings`，吃帳號自己的設定，**保留原生閒置壓縮**（child 不在保溫對象內，沒有別的機制替它省 context）。
   設定檔只在 bot 啟動時寫，修正前就在跑的 parent 要重啟一次才生效；不要在帳號層的 `settings.json` 關掉它，那樣 child 也一起關了。
+- **Codex 壓縮完成（issue #1878）**：只以本輪已記錄的輸入為證據：實際送出的 `prompt_text` 是 `/compact`（可帶參數），未記錄時才退回檢查 user 訊息全是該指令，才按壓縮收尾，只留系統訊息、不落 assistant。daemon 的 `lifecycle::compact`（主力熱壓與 context 旁的手動壓縮鈕）送出成功後，在同一個 bot 鎖內建立帶 `prompt_text=/compact` 的 external turn 並啟動進度備援，不等 working edge 建立無輸入的回合。
+  壓縮 turn 閒置完成時收為 completed；畫面上的 `Context compacted · <時間>` 只用來補系統訊息的時長，不能證明事件。主力熱壓已有說明時沿用，120 秒內的重播不重寫。
+  其他 turn（含對話中途自動壓縮、沒有 echo 的畫面）一律按普通回覆擷取與收尾；不得因 `Context compacted` 字樣丟棄回覆或保留 in_flight。終端擷取以完成列分隔 history cell、保留最新回覆並剝掉尾端 `Worked for …`；自動壓縮後若已有新回覆，保留新回覆，不把前一個壓縮 cell 拼進正文。正常回答即使完全等於 `Context compacted · 3s` 且緊接完成列，也照常落訊息。
+  例外是有獨立 rollout 證據的自動壓縮中間狀態：本輪實際送達時間 `turn.delivered_at` 之後有 `compacted`、且沒有後續 assistant item，才可剝除壓縮 history cell；剝完沒有正文就不落訊息、不收 turn、也不推進畫面游標，等 hook／後續畫面並沿用既有 stuck-turn 逾時。之後出現真正回答只落一次並收尾。
+  rollout 綁定本機 project host＋bot 的 CODEX_HOME＋run 的 native_session_id，讀尾端 4 MiB；不用排隊時的 `created_at` 當採證起點，缺少或無法解析 `delivered_at` 就不採證據。送達前的事件、replacement_history 裡重播的 assistant 都不算新輸出。rollout 不可讀（含遠端）時不憑相同字樣吞掉正常回答。
+  無 prompt 的 Codex external 回合比對上一則 assistant 時忽略排版空白，避免重落 hook 回覆；沒有已知 turn 輸入的 hookless 擷取不推斷壓縮事件。
 - **壓縮中（`compacting.rs`，issue #1770）**：claude 的 `PreCompact` hook（`claude_settings` 與遠端 hook.sh 同一份設定，手動、閒置、自動壓縮都送）把這顆 run 標成「壓縮中」，記憶體帳，投影成 run 的 `compacting_since`。收掉的時機是壓縮做完的 `SessionStart`（source=compact）、`Stop`／`StopFailure`，或超過 10 分鐘；超時後新 hook／spinner 會重開標記並以新時間計時，未超時的重複訊號保留原時間。終端備援讀到畫面上 `Compacting conversation…` spinner 也會標（畫面消失只收掉自己標的）。網頁側欄與對話區寫「壓縮中…」，燈號照舊。遠端 bot 要重啟才會裝上新的 `PreCompact` 設定。
 - **壓縮說明（`compaction.rs`，issue #1759）**：claude 壓縮對話不送 Stop，只送 SubagentStop 與 `SessionStart`（`source: "compact"`），pane 轉 working 時已開了一筆沒有 prompt 的 external 回合。
   收到 compact 的 SessionStart：讀 transcript 尾端最後一個 `compact_boundary`（本機 daemon 自己讀；遠端由 hook.sh 在那台讀好、帶 `agm_compact`），寫一則系統訊息——

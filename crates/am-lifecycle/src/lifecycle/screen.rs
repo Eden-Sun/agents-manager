@@ -471,6 +471,10 @@ pub fn is_codex_completion_line(s: &str) -> bool {
     let s = s.trim();
     let rest = match s.strip_prefix("Worked for ") {
         Some(r) => {
+            // Newer Codex uses a bullet before a bare clock (issue #1878).
+            if let Some((elapsed, clock)) = r.split_once(" • ") {
+                return is_codex_duration(elapsed) && is_codex_done_time(clock);
+            }
             let (elapsed, tail) = r.split_once(" · ").unwrap_or((r, ""));
             if !is_codex_duration(elapsed) {
                 return false;
@@ -994,6 +998,71 @@ pub async fn apply_codex_limit_hit_quota(app: &impl ScreenServices, host: &str, 
     app.apply_codex_limit_hit_quota(host, base, hit).await
 }
 
+/// A completed history cell followed by another assistant cell is a display
+/// boundary, regardless of its text. Never infer a compaction event from prose.
+fn reply_start(kind: &str, lines: &[&str]) -> usize {
+    let echo = after_last_prompt_echo(kind, lines);
+    if kind != "codex" {
+        return echo;
+    }
+    let tools = codex_tool_cell_mask(kind, lines);
+    let mut start = echo;
+    let mut fenced = false;
+    for i in echo..lines.len() {
+        if tools[i] {
+            continue;
+        }
+        let body = lines[i].trim_start().strip_prefix("• ").unwrap_or(lines[i].trim_start());
+        if body.starts_with("```") || body.starts_with("~~~") {
+            fenced = !fenced;
+        }
+        if fenced || !is_codex_completion_line(lines[i]) {
+            continue;
+        }
+        if let Some(j) = (i + 1..lines.len()).find(|&j| !lines[j].trim().is_empty()) {
+            if lines[j].starts_with("• ") && !tools[j] {
+                start = j;
+            }
+        }
+    }
+    start
+}
+
+/// Locate the display tail after a compact cell, only for a caller that already
+/// has rollout evidence. The text alone does not identify a compaction event.
+pub fn codex_compaction_tail(text: &str) -> Option<&str> {
+    let lines: Vec<&str> = text.lines().collect();
+    let tools = codex_tool_cell_mask("codex", &lines);
+    let echo = after_last_prompt_echo("codex", &lines);
+    let mut fenced = false;
+    let mut offset = 0;
+    let mut tail = None;
+    for (i, line) in text.split_inclusive('\n').enumerate() {
+        offset += line.len();
+        if i < echo || tools.get(i).copied().unwrap_or(false) {
+            continue;
+        }
+        let line = line.trim_end_matches(['\n', '\r']);
+        let body = line.trim_start().strip_prefix("• ").unwrap_or(line.trim_start());
+        if body.starts_with("```") || body.starts_with("~~~") {
+            fenced = !fenced;
+        }
+        if !fenced && line.strip_prefix("• Context compacted · ").is_some_and(|d| is_codex_duration(d.trim())) {
+            tail = Some(&text[offset..]);
+        }
+    }
+    tail
+}
+
+/// Only metadata for a turn whose recorded input is /compact. This text must
+/// never be used as evidence that an ordinary turn was a compaction.
+pub fn codex_compaction_duration(text: &str) -> Option<&str> {
+    text.lines().rev().find_map(|line| {
+        let duration = line.strip_prefix("• Context compacted · ")?.trim();
+        is_codex_duration(duration).then_some(duration)
+    })
+}
+
 /// No reply marker: keep what follows the last prompt echo minus chrome. `⎿` lines stay — they
 /// usually carry the actual error ("Not logged in · Please run /login").
 pub fn clean_screen(kind: &str, text: &str) -> Option<String> {
@@ -1001,7 +1070,7 @@ pub fn clean_screen(kind: &str, text: &str) -> Option<String> {
         return None;
     }
     let lines: Vec<&str> = text.lines().collect();
-    let start = after_last_prompt_echo(kind, &lines);
+    let start = reply_start(kind, &lines);
     let tool_rows = codex_tool_cell_mask(kind, &lines);
     let banner_at = if kind == "codex" { codex_inline_banner(&lines).map(|b| b.start) } else { None };
     let mut out: Vec<String> = Vec::new();
@@ -1116,7 +1185,7 @@ pub fn extract_reply(kind: &str, text: &str) -> Option<String> {
     };
     let lines: Vec<&str> = text.lines().collect();
     // A2: only this turn's output — else the previous turn's `⏺` line is returned as the answer.
-    let after_echo = after_last_prompt_echo(kind, &lines);
+    let after_echo = reply_start(kind, &lines);
     // codex 的 inline banner（#779）：標題、說明、選項都不是回覆，回覆最多到它上面為止。
     let lines = &lines[..codex_inline_banner(&lines).map_or(lines.len(), |b| b.start)];
     let tool_rows = codex_tool_cell_mask(kind, lines);
@@ -2956,5 +3025,50 @@ mod issue_1664_screenshot_tests {
         let reply = format!("› fix\n• 修復完成。\n\n{screenshot}");
         assert_eq!(extract_reply("codex", &reply).as_deref(), Some("修復完成。"));
         assert_eq!(crate::lifecycle::poller::live_reply("codex", &reply).as_deref(), Some("修復完成。"));
+    }
+}
+
+
+#[cfg(all(test, not(feature = "daemon-test-harness")))]
+mod synthetic_codex_compaction_tests {
+    use super::*;
+
+    #[test]
+    fn synthetic_completed_cells_keep_the_last_answer_without_inferring_compaction() {
+        let compact = "• Old answer\nWorked for 21s • 11:03 AM\n• Context compacted · 1m 14s\nWorked for 1m 14s • 11:57 AM\n› \n";
+        // With independent rollout evidence, stripping the compact cell leaves
+        // no answer. The generic extractor still preserves identical normal prose.
+        let tail = codex_compaction_tail(compact).unwrap();
+        assert_eq!(extract_reply("codex", tail).or_else(|| clean_screen("codex", tail)), None);
+        let continued = compact.replace("› \n", "• New answer\nWorked for 3s • 11:58 AM\n› \n");
+        assert_eq!(extract_reply("codex", &continued).as_deref(), Some("New answer"));
+        assert_eq!(clean_screen("codex", &continued).as_deref(), Some("• New answer"));
+    }
+
+    #[test]
+    fn synthetic_no_echo_compaction_words_remain_answers_after_a_completion_row() {
+        for answer in [
+            "Context compacted",
+            "Context compacted successfully; here is the summary.",
+            "Context compacted · 3s",
+        ] {
+            let screen = format!("Worked for 21s • 11:03 AM\n• {answer}\nWorked for 2s • 11:58 AM\n› \n");
+            assert_eq!(extract_reply("codex", &screen).as_deref(), Some(answer));
+            assert_eq!(clean_screen("codex", &screen).as_deref(), Some(format!("• {answer}").as_str()));
+        }
+    }
+
+    #[test]
+    fn synthetic_completion_rows_inside_quoted_code_are_not_cell_boundaries() {
+        let screen = "• Example:\n  ```text\nWorked for 21s • 11:03 AM\n• Context compacted · 3s\n  ```\n  This is quoted data.\n› \n";
+        assert!(extract_reply("codex", screen).unwrap().starts_with("Example:"));
+    }
+
+    #[test]
+    fn synthetic_bullet_completion_is_chrome_only_with_a_real_duration_and_clock() {
+        assert!(is_codex_completion_line("Worked for 21s • 11:03 AM"));
+        assert!(is_codex_completion_line("Worked for 1m 14s • 11:57 AM"));
+        assert!(!is_codex_completion_line("Worked for three days • on the fix"));
+        assert!(!is_codex_completion_line("Worked for 21s • not a clock"));
     }
 }

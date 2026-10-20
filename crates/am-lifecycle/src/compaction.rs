@@ -7,6 +7,7 @@
 //! 現在 `SessionStart` source=compact 一到：讀 transcript 尾端最後一個 `compact_boundary`（本機自己讀；遠端由 hook.sh
 //! 在那台讀好、帶成 `agm_compact`），寫一則系統訊息說明是哪種壓縮與 tokens 前後，並把壓縮開出來的空回合收掉。
 //! daemon 自己的熱壓已經有「主力熱壓」說明，不再重寫。
+//! Codex 沒有 compact 完成 hook；只有已記錄 /compact 輸入的 turn 按壓縮收尾，沿用熱壓說明去重。
 
 use crate::db;
 use crate::events::ports::{MessageTxOps, TurnConnOps};
@@ -112,6 +113,57 @@ pub fn is_screen_notice(text: &str) -> bool {
     text.chars().count() <= 2000
         && lines.iter().any(|l| l.to_lowercase().contains("compacted"))
         && lines.iter().all(|l| l.to_lowercase().contains("compacted") || restored(l))
+}
+
+/// Positive evidence after this input's actual delivery: a compaction happened
+/// and no subsequent assistant message exists. Enqueue time is not a boundary;
+/// replacement history is not new output.
+pub fn codex_waiting_for_reply(log: &str, delivered_at: &str) -> bool {
+    let Ok(since) = chrono::DateTime::parse_from_rfc3339(delivered_at) else { return false };
+    let mut pending = false;
+    for line in log.lines() {
+        let Ok(v) = serde_json::from_str::<Value>(line) else { continue };
+        let Some(at) = v.get("timestamp").and_then(Value::as_str)
+            .and_then(|s| chrono::DateTime::parse_from_rfc3339(s).ok()) else { continue };
+        if at < since {
+            continue;
+        }
+        match v.get("type").and_then(Value::as_str) {
+            Some("compacted") => pending = true,
+            Some("response_item") if v.pointer("/payload/role").and_then(Value::as_str) == Some("assistant") => pending = false,
+            Some("event_msg") if v.pointer("/payload/type").and_then(Value::as_str) == Some("agent_message") => pending = false,
+            _ => {}
+        }
+    }
+    pending
+}
+
+/// Screen-only Codex completions have no Stop hook. Fallback callers record this
+/// note with their turn update only when the recorded input is /compact.
+/// Ordinary prompts and hookless screenshots never establish that evidence.
+pub async fn codex_screen_note(
+    pool: &sqlx::SqlitePool,
+    bot_id: &str,
+    conversation: &str,
+    duration: &str,
+) -> Result<Option<String>> {
+    let warm = am_base::primary_keep_warm::last_warm_compact_at(pool, bot_id)
+        .await?
+        .is_some_and(|at| (chrono::Utc::now() - at).num_seconds() <= WARM_COMPACT_WINDOW_SECS);
+    if warm {
+        return Ok(None);
+    }
+    let recent: bool = sqlx::query_scalar(
+        "SELECT EXISTS(SELECT 1 FROM messages WHERE conversation_id=? AND role='system'
+         AND content LIKE 'Codex 已壓縮%' AND created_at>=?)",
+    )
+    .bind(conversation)
+    .bind(db::iso_in(-DEDUPE_SECS))
+    .fetch_one(pool)
+    .await?;
+    Ok((!recent).then(|| {
+        if duration.is_empty() { "Codex 已壓縮對話。".into() } else { format!("Codex 已壓縮 · {duration}") }
+    }))
 }
 
 fn is_compact_command(prompt: &str) -> bool {
@@ -238,6 +290,21 @@ mod tests {
         assert_eq!(note_text(carried(&p).as_ref()), "Claude 閒置壓縮：286K tokens → 摘要");
         assert_eq!(carried(&serde_json::json!({})), None);
         assert_eq!(note_text(None), "Claude 壓縮了對話。");
+    }
+
+    #[test]
+    fn synthetic_codex_rollout_requires_a_current_compaction_without_a_later_assistant() {
+        let compact = r#"{"timestamp":"2026-10-20T11:57:14.121Z","type":"compacted","payload":{"replacement_history":[{"role":"assistant"}]}}"#;
+        assert!(codex_waiting_for_reply(compact, "2026-10-20T11:56:00Z"));
+        assert!(!codex_waiting_for_reply(compact, "2026-10-20T11:58:00Z"));
+        assert!(!codex_waiting_for_reply(compact, "invalid"));
+        for reply in [
+            r#"{"timestamp":"2026-10-20T11:57:15Z","type":"response_item","payload":{"type":"message","role":"assistant"}}"#,
+            r#"{"timestamp":"2026-10-20T11:57:15Z","type":"event_msg","payload":{"type":"agent_message"}}"#,
+        ] {
+            assert!(!codex_waiting_for_reply(&format!("{compact}\n{reply}"), "2026-10-20T11:56:00Z"));
+        }
+        assert!(!codex_waiting_for_reply("", "2026-10-20T11:56:00Z"));
     }
 
     #[test]
