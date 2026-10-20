@@ -127,6 +127,7 @@ A 組與 `git/push` 標「待裁示」的原因：這幾支唯一的呼叫端是
 | GET | `/api/build/remote` | User-only；一般 Bot → 403 `user_only`；已登記 AGM 角色略過共用 fence，仍受既有路由／資源權限限制 |
 | GET | `/api/capabilities` | User 或 Bot principal；只回 static capability names；Service 僅可走其明列 method/path scope |
 | GET | `/api/changelog` | User-only；一般 Bot 與 AGM role Bot 均 → 403 `user_only`；此路由會查本機或遠端 CLI 版本 |
+| GET | `/api/changelog/translation` | User-only；一般 Bot 與 AGM role Bot 均 → 403 `user_only`；翻譯會打付費 API，只供使用者按鈕，輪詢 GET 不送出 |
 | GET | `/api/claude-update/review` | User-only；一般 Bot → 403 `user_only`；已驗證 AGM role 可讀 |
 | GET | `/api/deploy/status` | User-only；一般 Bot 與 AGM role Bot 均 → 403 `user_only`；含全域部署、工作中 Bot、repo 與 log 路徑 |
 | GET | `/api/drafts` | User-only；Bot 與 AGM role 均 → 403 `user_only`；Service 依明列 path scope（本路徑未授權） |
@@ -195,6 +196,7 @@ A 組與 `git/push` 標「待裁示」的原因：這幾支唯一的呼叫端是
 | HEAD | `/api/build/remote` | User-only；一般 Bot → 403 `user_only`；已登記 AGM 角色略過共用 fence，仍受既有路由／資源權限限制 |
 | HEAD | `/api/capabilities` | User 或 Bot principal；Service 僅可走其明列 method/path scope |
 | HEAD | `/api/changelog` | User-only；一般 Bot 與 AGM role Bot 均 → 403 `user_only`；此路由會查本機或遠端 CLI 版本 |
+| HEAD | `/api/changelog/translation` | User-only；一般 Bot 與 AGM role Bot 均 → 403 `user_only`；翻譯會打付費 API，只供使用者按鈕，輪詢 GET 不送出 |
 | HEAD | `/api/claude-update/review` | User-only；一般 Bot → 403 `user_only`；已驗證 AGM role 可讀 |
 | HEAD | `/api/deploy/status` | User-only；一般 Bot 與 AGM role Bot 均 → 403 `user_only`；含全域部署、工作中 Bot、repo 與 log 路徑 |
 | HEAD | `/api/drafts` | User-only；Bot 與 AGM role 均 → 403 `user_only`；Service 依明列 path scope（本路徑未授權） |
@@ -275,6 +277,7 @@ A 組與 `git/push` 標「待裁示」的原因：這幾支唯一的呼叫端是
 | POST | `/api/bots/{id}/text` | User-only；Bot 與 AGM role 均 → 403 `user_only`；Service 依明列 path scope（本路徑未授權） |
 | POST | `/api/build/remote/install-toolchain` | User-only；一般 Bot → 403 `user_only`；已登記 AGM 角色略過共用 fence，仍受既有路由／資源權限限制 |
 | POST | `/api/build/remote/test` | User-only；一般 Bot → 403 `user_only`；已登記 AGM 角色略過共用 fence，仍受既有路由／資源權限限制 |
+| POST | `/api/changelog/translation` | User-only；一般 Bot 與 AGM role Bot 均 → 403 `user_only`；翻譯會打付費 API，只供使用者按鈕，輪詢 GET 不送出 |
 | POST | `/api/claude-update/review` | User-only；一般 Bot → 403 `user_only`；已登記 AGM 角色略過共用 fence，仍受既有路由／資源權限限制 |
 | POST | `/api/deploy/now` | User-only；Bot → 403 `ui_only` |
 | POST | `/api/deploy/wait/escalate` | User-only；一般 Bot 與 AGM role Bot 均 → 403 `user_only` |
@@ -2538,6 +2541,16 @@ row（`local_path`／`agent_path`／`host` 都已經定案），再真的寫檔�
   "sections": [{ "version": "2.1.5", "body": "- …" }, { "version": "2.1.4", "body": "- …" }],
   "source_url": "https://raw.githubusercontent.com/anthropics/claude-code/main/CHANGELOG.md", "error": null }
 ```
+
+## 更新框的翻譯 `GET`／`POST /api/changelog/translation?kind=&host=&from=&to=`（SPEC §6.9d，issue #1870）
+
+跟上一節的 changelog 分開。`GET` 只回狀態，不排隊、不打翻譯 API。`POST` 才是使用者按翻譯或「再試一次」；同一條路徑，沒有第二條。業務狀態一律 200 JSON。PUT／PATCH／DELETE 沒有登記。目標語言來自 `[changelog_translate].lang`（預設 `zh-Hant`），不是寫死在 prompt。允許 `zh-Hant`、`zh-Hans`、`en`、`ja`、`ko`；空字串當 `zh-Hant`。prompt 只用這張表的固定語言名。不在表上：`failed`、`error:"lang"`、`error_kind:"bad_format"`，不打 API、不寫 attempt。快取鍵含這個 `lang`，不同語言不共用一筆，同一語言仍去重。回應的 `lang` 就是寫進 prompt 的那個標籤。
+
+- 設定 `[changelog_translate]` 預設 `enabled = false`。關掉，或 key 檔不存在／權限不對：`status:"unconfigured"`、`error:null`。不回 key、不回路徑。畫面不畫翻譯鈕、也不畫錯誤。之後若曾翻完，帶了 `to` 的 `GET` 仍可回那筆 `completed`。
+- `absent`：有開、key 讀得到、這份內容還沒翻。`skipped`：changelog 本身抓不到。`reserved`／`in_flight`：這一筆正在進行，輪詢 `GET` 不會再開一筆。
+- `completed` 帶 `summary`（3–5 點）、`sections`（只含實際送出的版本）與 `lang`（這次 prompt 的目標語言）。有省略或正文被截斷時 `coverage:"partial"`、`truncated_input:true` 只在正文被切斷時。失敗與中斷是 `failed`／`interrupted`，`error` 是短代碼（`timeout`、`rate_limited`、`http`、`missing_usage`、`schema`、`sections`、`summary`、`max_tokens`、`refusal`、`stop`、`ledger`、`restart`、`not_sent`、`in_flight`、`hourly`、`attempts`、`lang`），`error_kind` 是 `timeout`／`rate_limited`／`bad_format`／`budget`／`http`。不回上游內文。`lang` 這個錯誤是設定的語言不在允許表，沒有扣費。
+- `attempts[]` 每筆保留自己的 `usage`（`input_tokens`、`output_tokens`、`cache_creation_input_tokens`、`cache_read_input_tokens`）。缺用量是 `null`，不是 0。`retry_after` 沒過之前，再 `POST` 只回原狀態、不再打。
+- **權限**：User-only；一般 Bot 與 AGM role Bot 均 → 403 `user_only`。翻譯會打付費 API，只供使用者按鈕，輪詢 GET 不送出。
 
 ## 上游有新版可裝 `GET /api/upstream-updates`（SPEC §3.1「上游有新版」，issue #707）
 

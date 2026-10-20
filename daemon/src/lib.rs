@@ -227,6 +227,7 @@ mod drafts;
 mod promote_intents;
 mod autostart_revive;
 mod claude_review;
+pub mod changelog_translate;
 mod cli_update;
 mod app_ports_p0;
 mod app_ports_p1;

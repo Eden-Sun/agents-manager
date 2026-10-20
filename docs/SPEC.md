@@ -2878,6 +2878,33 @@ header 的 herdr 徽章確認後 `POST /api/hosts/{name}/herdr-update`（API §1
   遠端落後的那列照樣標「可更新」但不給按鈕、寫原因。
 - 更新動作都要確認：CLI 沿用 §6.9 的 `cli-update`（綁確認框那一版）；herdr 是危險樣式（所有 Bot 中斷）；integration 的確認框寫明會改那台的 agent 設定檔。
 
+### 6.9d 更新框的翻譯（issue #1870）
+
+更新確認框在原文旁邊多一層摘要與譯文（`daemon/src/changelog_translate.rs`）。預設目標語言是繁中（`zh-Hant`）；prompt 改走設定裡驗證過的 `lang`，不是只會翻繁中。原文、來源連結，以及既有的「請 AGM 解析」（`claude_review`）都不改。不碰分診、帳本判決、自動開 issue 或升級。全站介面語言不在這裡。畫面上的翻譯鈕目前仍寫「翻譯成繁中」。
+
+- **預設關**。`[changelog_translate]` 沒寫或 `enabled = false`，以及 key 檔讀不到：安靜停用。`GET`／`POST /api/changelog/translation` 回 `unconfigured`，不打 API、畫面不顯示錯誤、不擋解析、安裝或重啟。key 只放在 `key_file` 指到的 0600 檔，不進 `config.toml`、不進帳本、不進回應。
+- **只有使用者按下去才扣費**。`GET` 只讀狀態（開視窗、輪詢、再查一次都不送出）。`POST` 開始或重試。兩條都是 User-only；一般 Bot 與 AGM role Bot 均 → 403 `user_only`。
+- **同一份內容只翻一次**。帳本是 `{data_dir}/changelog-translate/{fingerprint}.json`（0600），不進 SQLite，所以不升 `SCHEMA_VERSION`。fingerprint 是下面這段 canonical 字串的 sha256 hex。host 不在裡面。kind、語言、模型、effort、輸入上限、prompt 版或正文變了就是另一個鍵。多台 host 同一 kind、同一段原文共用一筆。
+
+```
+prompt=1
+kind={kind}
+lang={lang}
+model={model}
+effort={effort}
+max_input_chars={n}
+---
+{version}
+{body_byte_len}
+{body}
+```
+
+`body_byte_len` 是該段正文的位元組長度。prompt 版目前是 `1`。`lang` 空了當 `zh-Hant`。送進 prompt 的目標語言只從這張表取固定句子，不把設定原文貼進去：`zh-Hant`（Traditional Chinese）、`zh-Hans`（Simplified Chinese）、`en`（English）、`ja`（Japanese）、`ko`（Korean）。不在表上的值 `GET`／`POST` 都回 `failed`、`error:"lang"`、`error_kind:"bad_format"`，不打 API、不寫 attempt。不同 `lang` 是不同的快取鍵，不共用譯文；同一個 `lang` 仍去重。回應裡的 `lang` 就是這次驗證過、寫進 prompt 與快取鍵的標籤。
+
+- **每次送出各記一筆** `attempts[]`（狀態、模型、`usage`、`retry_after`）。後來的重試不覆蓋已經花過錢的那筆。`usage` 兩個 token 欄都有才算數；缺了是 `null`（未知），不寫成 0，也不當成完成。明確的 0 照記。沒有自動重試。手動重試要等 `retry_after`：429 用 `Retry-After` 的秒數（1–3600，空的或 HTTP-date 用 15 秒）；逾時與 5xx 是 15 秒乘已送次數，上限 60 秒。次數預設 3（含第一次，1–8）。每小時已送出的次數預設 12；別的 fingerprint 佔滿同時上限（預設 1）時回 `failed`／`budget`／`in_flight`，不寫新 attempt，也不排隊。`max_queued` 這階段不拿來自動送。
+- **行程重啟不補送**。第一次 `GET` 或 `POST` 先把帳本裡的 `in_flight` 收成 `interrupted`（用量改未知、仍算已送出、`error:"restart"`），`reserved` 收成 `interrupted`（`sent:false`、`error:"not_sent"`，不算已送出）。壞掉的檔留著，不覆蓋、不扣費。
+- **模型從設定讀**。`model` 空了才用當下預設 `claude-haiku-5-5`。`effort` 只接受 `low`／`medium`／`high`／`max`，其他在那一次送出前改成 `low`，不改 effort 再打一次。輸入超過 `max_input_chars`（預設 6000，算字數）時留最新的段落，至少留一段並截斷；回應的 `sections` 必須正好是送出的版本、順序相同。有省略或截斷時 `coverage` 是 `partial`。`stop_reason` 必須是 `end_turn` 才算完成。
+
 ### 6.10 Fork 頂層 bot（接續對話脈絡）
 - 入口：側欄 bot 列 `⋯` →「開同類分身…」→ 選「接續對話（fork）」→ `POST /api/bots/:id/fork`（`daemon/src/fork.rs`）；選「全新對話」走原本的建 bot＋啟動。只給頂層 bot：child 的 pane 與帳號環境是母 agent 開的，daemon 重建不出來；從 default session 匯入的也不行（§6.5.1）。
 - 來源 session：來源 bot 最近一次有 `native_session_id` 的 run（跑著的也算——三家 CLI 的 fork 都是讀對話檔，不打擾原本那顆）。本機對話檔不在就拒絕，避免 CLI 找不到對話直接退出。
