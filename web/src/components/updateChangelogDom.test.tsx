@@ -1,5 +1,5 @@
 /**
- * 更新框的翻譯（#1870）：原文一直在，翻譯是另外一層。按鈕文字仍是「翻譯成繁中」。
+ * 更新框的翻譯（#1870）：原文一直在，翻譯是另外一層。翻譯鈕跟回應的 lang。
  * 輪詢上限用 `translationPollAction` 斷言，不真的等 40 次。
  */
 import test, { after, afterEach, before } from 'node:test'
@@ -59,6 +59,65 @@ test('未設定不畫翻譯鈕、也不畫錯誤', async () => {
   assert.equal([...root.querySelectorAll('button')].find((b) => b.textContent === '重啟套用')?.disabled, false)
 })
 
+function absentLang(lang: string | null) {
+  fakeApi((req) => {
+    const { pathname } = pathOf(req.path)
+    if (pathname === '/api/changelog') return CHANGELOG
+    if (pathname === '/api/changelog/translation') {
+      return { enabled: true, status: 'absent', lang, error: null, summary: [], sections: [] }
+    }
+    return {}
+  })
+}
+
+test('ja 的翻譯鈕寫日文，不寫繁中', async () => {
+  absentLang('ja')
+  const root = await mount(<UpdateChangelog kind="claude" host="local" from="2.1.3" to="2.1.5" />)
+  await until(() => [...root.querySelectorAll('button')].some((b) => b.textContent === '翻譯成日文'), '日文')
+  assert.equal([...root.querySelectorAll('button')].some((b) => b.textContent === '翻譯成繁中'), false)
+  assert.equal(root.textContent?.includes('繁中摘要'), false)
+})
+
+test('zh-Hant 的翻譯鈕寫繁中', async () => {
+  absentLang('zh-Hant')
+  const root = await mount(<UpdateChangelog kind="claude" host="local" from="2.1.3" to="2.1.5" />)
+  await until(() => [...root.querySelectorAll('button')].some((b) => b.textContent === '翻譯成繁中'), '繁中')
+})
+
+test('簡中的翻譯鈕跟 lang', async () => {
+  absentLang('zh-Hans')
+  const hans = await mount(<UpdateChangelog kind="claude" host="local" from="2.1.3" to="2.1.5" />)
+  await until(() => [...hans.querySelectorAll('button')].some((b) => b.textContent === '翻譯成簡中'), '簡中')
+})
+
+test('英文翻譯鈕', async () => {
+  absentLang('en')
+  const root = await mount(<UpdateChangelog kind="claude" host="local" from="2.1.3" to="2.1.5" />)
+  await until(() => [...root.querySelectorAll('button')].some((b) => b.textContent === '翻譯成英文'), '英文')
+  assert.equal([...root.querySelectorAll('button')].some((b) => b.textContent === '翻譯成繁中'), false)
+})
+
+test('韓文翻譯鈕', async () => {
+  absentLang('ko')
+  const root = await mount(<UpdateChangelog kind="claude" host="local" from="2.1.3" to="2.1.5" />)
+  await until(() => [...root.querySelectorAll('button')].some((b) => b.textContent === '翻譯成韓文'), '韓文')
+  assert.equal([...root.querySelectorAll('button')].some((b) => b.textContent === '翻譯成繁中'), false)
+})
+
+test('沒有 lang 或不認得時翻譯鈕不寫目標語言', async () => {
+  absentLang(null)
+  const root = await mount(<UpdateChangelog kind="claude" host="local" from="2.1.3" to="2.1.5" />)
+  await until(() => [...root.querySelectorAll('button')].some((b) => b.textContent === '翻譯'), '中立')
+  assert.equal([...root.querySelectorAll('button')].some((b) => b.textContent === '翻譯成繁中'), false)
+})
+
+test('不認得的 lang 不猜成繁中', async () => {
+  absentLang('fr')
+  const root = await mount(<UpdateChangelog kind="claude" host="local" from="2.1.3" to="2.1.5" />)
+  await until(() => [...root.querySelectorAll('button')].some((b) => b.textContent === '翻譯'), '不認得')
+  assert.equal([...root.querySelectorAll('button')].some((b) => b.textContent === '翻譯成繁中'), false)
+})
+
 test('absent 時按一次才 POST', async () => {
   const posts: string[] = []
   fakeApi((req) => {
@@ -72,7 +131,7 @@ test('absent 時按一次才 POST', async () => {
     return {}
   })
   const root = await mount(<UpdateChangelog kind="claude" host="local" from="2.1.3" to="2.1.5" />)
-  await until(() => root.querySelector('button')?.textContent === '翻譯成繁中', '翻譯鈕')
+  await until(() => root.querySelector('button')?.textContent === '翻譯', '翻譯鈕')
   await click(root.querySelector('button')!)
   await until(() => root.textContent?.includes('第一點') === true, '摘要')
   assert.equal(posts.length, 1)
@@ -180,7 +239,8 @@ test('換目標版本後舊摘要立刻消失', async () => {
   await until(() => root.textContent?.includes('舊摘要不該留下') === true, '舊摘要')
   await click([...root.querySelectorAll('button')].find((b) => b.textContent === '換版本')!)
   assert.equal(root.textContent?.includes('舊摘要不該留下'), false)
-  await until(() => root.textContent?.includes('翻譯成繁中') === true, '新版本還沒翻')
+  await until(() => [...root.querySelectorAll('button')].some((b) => b.textContent === '翻譯'), '新版本還沒翻')
+  assert.equal([...root.querySelectorAll('button')].some((b) => b.textContent === '翻譯成繁中'), false)
   assert.equal(root.textContent?.includes('舊摘要不該留下'), false)
 })
 
