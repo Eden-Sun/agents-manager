@@ -90,6 +90,8 @@ function triageRows(kind: string): Rec[] {
 export class MockReleaseTriage {
   private off = new Set<string>()
   private reviews = new Map<string, Rec>()
+  /** 同一 kind／from／to 只翻一次；host 不進這個鍵。 */
+  private translations = new Map<string, Rec>()
 
   triageOff(kind: string) {
     this.off.add(kind)
@@ -104,6 +106,9 @@ export class MockReleaseTriage {
       const all = CHANGELOG[kind] ?? []
       const sections = all.filter((s) => s.version <= to && (from ? s.version > from : s.version === to))
       return { kind, host: 'local', installed_version: to, from_version: from, found: sections.length > 0, sections, source_url: '', error: sections.length ? null : `沒有 ${to}` }
+    }
+    if ((method === 'GET' || method === 'POST') && rawPath === '/changelog/translation') {
+      return this.translation(method, q)
     }
     if (method === 'GET' && rawPath === '/release-triage') {
       const kind = q.get('kind') ?? 'claude'
@@ -121,5 +126,43 @@ export class MockReleaseTriage {
       return method === 'GET' ? { kind, version: to, review } : { kind, version: to, target_bot_name: 'AGM-responder', duplicate: true, review }
     }
     return undefined
+  }
+
+  /** GET 只回已有的結果；沒翻過是 `absent`。POST 才寫進記憶體。範例譯文是繁中。 */
+  private translation(method: string, q: URLSearchParams): Rec {
+    const kind = q.get('kind') ?? 'claude'
+    const from = q.get('from') ?? ''
+    const to = q.get('to') || DISK[kind] || ''
+    const key = `${kind}|${from}|${to}`
+    const cached = this.translations.get(key)
+    if (method === 'GET' || cached) return cached ?? { enabled: true, status: 'absent', error: null, summary: [], sections: [], attempts: [], coverage: null, retry_after: null }
+    const all = CHANGELOG[kind] ?? []
+    const sections = all.filter((s) => s.version <= to && (from ? s.version > from : s.version === to))
+    const done: Rec = {
+      enabled: true,
+      status: 'completed',
+      lang: 'zh-Hant',
+      model: 'claude-haiku-5-5',
+      requested_model: 'claude-haiku-5-5',
+      summary: ['這版補了更新視窗會用到的行為', '狀態列少掉的版本顯示補回來了', '原文與來源連結都還在'],
+      sections: sections.map((s) => ({ version: s.version, body: `繁中 ${s.version}\n${s.body}` })),
+      coverage: 'full',
+      truncated_input: false,
+      error: null,
+      error_kind: null,
+      retry_after: null,
+      included_versions: sections.map((s) => s.version),
+      omitted_versions: [],
+      attempts: [{
+        id: 'mock',
+        state: 'completed',
+        sent: true,
+        error: null,
+        model: 'claude-haiku-5-5',
+        usage: { input_tokens: 120, output_tokens: 45, cache_creation_input_tokens: 0, cache_read_input_tokens: 8 },
+      }],
+    }
+    this.translations.set(key, done)
+    return done
   }
 }

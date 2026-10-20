@@ -251,6 +251,8 @@ pub struct App {
     pub host_baseline: Mutex<HashMap<String, crate::host_baseline::BaselineReport>>,
     /// Claude Code CHANGELOG.md 全文快取（`GET /api/changelog`，10 分鐘）。
     pub changelog: crate::changelog::ChangelogCache,
+    /// issue #1870：更新框翻譯的檔案帳本與可注入的 client。目標語言看設定，不進 DB。
+    pub changelog_translate: crate::changelog_translate::Hub,
     /// v4.0: project id -> GitHub origin (`None` = checked, not GitHub).
     pub github: Mutex<HashMap<String, Option<crate::github::GithubInfo>>>,
     /// v4.0: `GET /projects/:id/issues` cache (2 min).
@@ -422,6 +424,7 @@ impl App {
             tools: Mutex::new(HashMap::new()),
             host_baseline: Mutex::new(HashMap::new()),
             changelog: Default::default(),
+            changelog_translate: crate::changelog_translate::Hub::new(),
             github: Mutex::new(HashMap::new()),
             issues_cache: Mutex::new(HashMap::new()),
             submodules_cache: Mutex::new(HashMap::new()),

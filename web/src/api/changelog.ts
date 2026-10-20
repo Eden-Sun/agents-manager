@@ -71,3 +71,152 @@ export async function fetchChangelog(
     return { kind, host, installedVersion: null, fromVersion: from, found: false, sections: [], sourceUrl: sourceFor(kind), error: msg }
   }
 }
+
+/** 輪詢只查狀態。超過這個次數就停，畫面上改按「再查一次」（仍是 GET）。 */
+export const TRANSLATION_POLL_MS = 1500
+export const TRANSLATION_POLL_MAX = 40
+
+/** `tick` 從 1 起算。第 41 次起停止，避免視窗開著就一直打。 */
+export function translationPollAction(tick: number): 'poll' | 'stop' {
+  return tick > TRANSLATION_POLL_MAX ? 'stop' : 'poll'
+}
+
+export interface TranslationUsage {
+  inputTokens: number | null
+  outputTokens: number | null
+  cacheCreationInputTokens: number | null
+  cacheReadInputTokens: number | null
+}
+
+export interface TranslationAttempt {
+  id: string
+  state: string
+  sent: boolean
+  error: string | null
+  usage: TranslationUsage | null
+}
+
+/** `unavailable` 只有瀏覽器自己用：翻譯這條連不上時，原文照舊，不當成 daemon 的狀態。 */
+export type TranslationStatus =
+  | 'unconfigured'
+  | 'skipped'
+  | 'absent'
+  | 'reserved'
+  | 'in_flight'
+  | 'completed'
+  | 'failed'
+  | 'interrupted'
+  | 'unavailable'
+
+export interface TranslationView {
+  enabled: boolean
+  status: TranslationStatus
+  summary: string[]
+  sections: ChangelogSection[]
+  coverage: 'full' | 'partial' | null
+  truncatedInput: boolean
+  errorKind: string | null
+  error: string | null
+  retryAfter: string | null
+  model: string | null
+  requestedModel: string | null
+  lang: string | null
+  attempts: TranslationAttempt[]
+}
+
+const TRANSLATION_STATUSES: readonly TranslationStatus[] = [
+  'unconfigured', 'skipped', 'absent', 'reserved', 'in_flight', 'completed', 'failed', 'interrupted',
+]
+
+function translationQuery(kind: string, host: string, from: string | null, to: string | null): string {
+  const q = new URLSearchParams({ kind, host })
+  if (from) q.set('from', from)
+  if (to) q.set('to', to)
+  return q.toString()
+}
+
+/** 缺欄或不是有限數字維持 null。明確的 0 是真的讀數，不改成「沒有」。 */
+function numOrNull(v: unknown): number | null {
+  return typeof v === 'number' && Number.isFinite(v) ? v : null
+}
+
+function toUsage(raw: unknown): TranslationUsage | null {
+  if (!isRec(raw)) return null
+  return {
+    inputTokens: numOrNull(raw.input_tokens),
+    outputTokens: numOrNull(raw.output_tokens),
+    cacheCreationInputTokens: numOrNull(raw.cache_creation_input_tokens),
+    cacheReadInputTokens: numOrNull(raw.cache_read_input_tokens),
+  }
+}
+
+function toTranslation(raw: unknown): TranslationView {
+  const r = isRec(raw) ? raw : {}
+  const statusRaw = typeof r.status === 'string' ? r.status : ''
+  const status = TRANSLATION_STATUSES.includes(statusRaw as TranslationStatus) ? (statusRaw as TranslationStatus) : 'unavailable'
+  const sections = Array.isArray(r.sections)
+    ? r.sections.filter(isRec).map((s) => ({ version: String(s.version ?? ''), body: String(s.body ?? '') })).filter((s) => s.version)
+    : []
+  const summary = Array.isArray(r.summary) ? r.summary.filter((s): s is string => typeof s === 'string' && s.trim() !== '') : []
+  const attempts = Array.isArray(r.attempts)
+    ? r.attempts.filter(isRec).map((a) => ({
+        id: typeof a.id === 'string' ? a.id : '',
+        state: typeof a.state === 'string' ? a.state : '',
+        sent: a.sent === true,
+        error: typeof a.error === 'string' ? a.error : null,
+        usage: toUsage(a.usage),
+      }))
+    : []
+  const coverage = r.coverage === 'full' || r.coverage === 'partial' ? r.coverage : null
+  return {
+    enabled: r.enabled === true,
+    status,
+    summary,
+    sections,
+    coverage,
+    truncatedInput: r.truncated_input === true,
+    errorKind: typeof r.error_kind === 'string' ? r.error_kind : null,
+    error: typeof r.error === 'string' ? r.error : null,
+    retryAfter: typeof r.retry_after === 'string' ? r.retry_after : null,
+    model: typeof r.model === 'string' ? r.model : null,
+    requestedModel: typeof r.requested_model === 'string' ? r.requested_model : null,
+    lang: typeof r.lang === 'string' ? r.lang : null,
+    attempts,
+  }
+}
+
+function unavailableTranslation(): TranslationView {
+  return {
+    enabled: false,
+    status: 'unavailable',
+    summary: [],
+    sections: [],
+    coverage: null,
+    truncatedInput: false,
+    errorKind: null,
+    error: null,
+    retryAfter: null,
+    model: null,
+    requestedModel: null,
+    lang: null,
+    attempts: [],
+  }
+}
+
+/** 只讀。開視窗、輪詢、再查一次都走這支，不會開始翻譯。 */
+export async function fetchTranslation(kind: string, host: string, from: string | null, to: string | null): Promise<TranslationView> {
+  try {
+    return toTranslation(await rawTransport.request('GET', `/changelog/translation?${translationQuery(kind, host, from, to)}`))
+  } catch {
+    return unavailableTranslation()
+  }
+}
+
+/** 使用者按翻譯或「再試一次」。按鈕文字目前是「翻譯成繁中」。 */
+export async function postTranslation(kind: string, host: string, from: string | null, to: string | null): Promise<TranslationView> {
+  try {
+    return toTranslation(await rawTransport.request('POST', `/changelog/translation?${translationQuery(kind, host, from, to)}`, {}))
+  } catch {
+    return unavailableTranslation()
+  }
+}

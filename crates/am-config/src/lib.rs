@@ -311,6 +311,9 @@ pub struct ConfigFile {
     /// issue #240：撞限偵測的第二意見（只記錄），預設關。
     #[serde(default, skip_serializing_if = "JudgeCfg::is_default")]
     pub judge: JudgeCfg,
+    /// issue #1870：更新框翻譯。預設關、預設語言 zh-Hant；沒寫這段，既有設定檔的長相不變。
+    #[serde(default, skip_serializing_if = "ChangelogTranslateCfg::is_default")]
+    pub changelog_translate: ChangelogTranslateCfg,
     /// 使用者 2026-10-01：bot 的指示檔（agent md）由這裡指定，CLI 自己的 CLAUDE.md／AGENTS.md 一律不讀（SPEC §6.5i）。
     #[serde(default, skip_serializing_if = "AgentsCfg::is_default")]
     pub agents: AgentsCfg,
@@ -484,6 +487,101 @@ impl Default for JudgeCfg {
 }
 
 impl JudgeCfg {
+    fn is_default(&self) -> bool {
+        *self == Self::default()
+    }
+}
+
+/// `[changelog_translate]`（SPEC §6.9d，issue #1870）：`enabled = false`（預設）時完全不打翻譯 API。
+/// `key_file` 只是路徑，key 本身不進設定檔。模型名稱從這裡讀，不在程式裡釘死舊版。
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ChangelogTranslateCfg {
+    #[serde(default)]
+    pub enabled: bool,
+    #[serde(default = "default_changelog_key_file")]
+    pub key_file: String,
+    #[serde(default = "default_changelog_endpoint")]
+    pub endpoint: String,
+    #[serde(default = "default_changelog_model")]
+    pub model: String,
+    #[serde(default = "default_changelog_lang")]
+    pub lang: String,
+    #[serde(default = "default_changelog_effort")]
+    pub effort: String,
+    #[serde(default = "default_changelog_timeout_ms")]
+    pub timeout_ms: u64,
+    #[serde(default = "default_changelog_max_input_chars")]
+    pub max_input_chars: u32,
+    #[serde(default = "default_changelog_max_tokens")]
+    pub max_tokens: u32,
+    #[serde(default = "default_changelog_max_in_flight")]
+    pub max_in_flight: u32,
+    #[serde(default = "default_changelog_max_queued")]
+    pub max_queued: u32,
+    #[serde(default = "default_changelog_max_per_hour")]
+    pub max_per_hour: u32,
+    #[serde(default = "default_changelog_max_attempts")]
+    pub max_attempts: u32,
+}
+
+fn default_changelog_key_file() -> String {
+    "~/.config/agents-manager/anthropic-api-key".into()
+}
+fn default_changelog_endpoint() -> String {
+    "https://api.anthropic.com/v1/messages".into()
+}
+fn default_changelog_model() -> String {
+    "claude-haiku-5-5".into()
+}
+fn default_changelog_lang() -> String {
+    "zh-Hant".into()
+}
+fn default_changelog_effort() -> String {
+    "low".into()
+}
+fn default_changelog_timeout_ms() -> u64 {
+    8000
+}
+fn default_changelog_max_input_chars() -> u32 {
+    6000
+}
+fn default_changelog_max_tokens() -> u32 {
+    2000
+}
+fn default_changelog_max_in_flight() -> u32 {
+    1
+}
+fn default_changelog_max_queued() -> u32 {
+    1
+}
+fn default_changelog_max_per_hour() -> u32 {
+    12
+}
+fn default_changelog_max_attempts() -> u32 {
+    3
+}
+
+impl Default for ChangelogTranslateCfg {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            key_file: default_changelog_key_file(),
+            endpoint: default_changelog_endpoint(),
+            model: default_changelog_model(),
+            lang: default_changelog_lang(),
+            effort: default_changelog_effort(),
+            timeout_ms: default_changelog_timeout_ms(),
+            max_input_chars: default_changelog_max_input_chars(),
+            max_tokens: default_changelog_max_tokens(),
+            max_in_flight: default_changelog_max_in_flight(),
+            max_queued: default_changelog_max_queued(),
+            max_per_hour: default_changelog_max_per_hour(),
+            max_attempts: default_changelog_max_attempts(),
+        }
+    }
+}
+
+impl ChangelogTranslateCfg {
     fn is_default(&self) -> bool {
         *self == Self::default()
     }
@@ -2240,6 +2338,20 @@ mod supervisor_cfg_tests {
         assert_eq!(on, back, "明寫開著要留得住");
         let off: ConfigFile = toml::from_str("[codex_history]\nenabled = false\n").unwrap();
         assert!(!off.codex_history.enabled);
+    }
+
+    #[test]
+    fn changelog_translate_is_off_unless_the_config_turns_it_on() {
+        let none: ConfigFile = toml::from_str("").unwrap();
+        assert!(!none.changelog_translate.enabled);
+        assert_eq!(none.changelog_translate.model, "claude-haiku-5-5");
+        assert!(!toml::to_string_pretty(&none).unwrap().contains("changelog_translate"));
+        let on: ConfigFile = toml::from_str("[changelog_translate]\nenabled = true\nmodel = \"claude-sonnet-5-5\"\n").unwrap();
+        assert!(on.changelog_translate.enabled);
+        assert_eq!(on.changelog_translate.model, "claude-sonnet-5-5");
+        assert_eq!(on.changelog_translate.effort, "low");
+        let back: ConfigFile = toml::from_str(&toml::to_string_pretty(&on).unwrap()).unwrap();
+        assert_eq!(on, back);
     }
 }
 

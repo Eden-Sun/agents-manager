@@ -354,6 +354,8 @@ fn rules() -> Vec<Rule> {
         rule("POST", "/api/deploy/now", Expect::Forbidden, None),
         rule("POST", "/api/mem/processes/kill", Expect::UserOnly, None),
         deny_rule("GET", "/api/changelog", Expect::UserOnly, "This User UI route runs a local or remote CLI version check and must not be a Bot command-execution entry point."),
+        deny_rule("GET", "/api/changelog/translation", Expect::UserOnly, "Paid changelog translation status is user-only; a Bot must not poll or read it."),
+        deny_rule("POST", "/api/changelog/translation", Expect::UserOnly, "Paid changelog translation is user-only; a Bot must not start a spend."),
         rule("POST", "/relay/announce", Expect::Allow, None),
         rule("POST", "/api/build/remote/install-toolchain", Expect::UserOnly, None),
         deny_rule("GET", "/ws", Expect::Unauthorized, "The WebSocket carries global UI events and accepts the UI token; Bot credentials do not authorize a subscription."),
