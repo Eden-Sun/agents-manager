@@ -29,6 +29,7 @@ wrapper_for() {
         scripts/ops/host-state-transfer_test.py) echo scripts/ops/cutover-to-host_test.sh ;;
         scripts/ops/project-transfer_test.py) echo scripts/ops/project-transfer_test.sh ;;
         scripts/ops/transcript-transfer_test.py) echo scripts/ops/transcript-transfer_test.sh ;;
+        scripts/claude-hook-debug_test.py) echo scripts/claude-hook-debug_test.sh ;;
         *) return 1 ;;
     esac
 }
