@@ -158,6 +158,7 @@ mod arc_port_8_quotacommands {
     use std::future::Future;
     impl<T: crate::events::ports::QuotaCommands + ?Sized> crate::events::ports::QuotaCommands for std::sync::Arc<T> {
         async fn clear_limit_hit_for_bot(&self, bot: &db::Bot) { <T as crate::events::ports::QuotaCommands>::clear_limit_hit_for_bot(self.as_ref(), bot).await }
+        async fn clear_limit_hit_for_bot_if_older_than(&self, bot: &db::Bot, success_at: chrono::DateTime<chrono::Utc>) -> bool { <T as crate::events::ports::QuotaCommands>::clear_limit_hit_for_bot_if_older_than(self.as_ref(), bot, success_at).await }
         async fn quota_base_for_host(&self, host: &str, kind: &str, identity: Option<&str>) -> String { <T as crate::events::ports::QuotaCommands>::quota_base_for_host(self.as_ref(), host, kind, identity).await }
         async fn set_quota(&self, host: &str, base: &str, q: Quota) { <T as crate::events::ports::QuotaCommands>::set_quota(self.as_ref(), host, base, q).await }
         async fn mark_claude_limit_hit(&self, bot: &db::Bot, line: &str) -> Result<()> { <T as crate::events::ports::QuotaCommands>::mark_claude_limit_hit(self.as_ref(), bot, line).await }

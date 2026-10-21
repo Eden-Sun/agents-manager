@@ -7,7 +7,7 @@ use serde_json::json;
 
 use crate::app_ports_r2a9::OwedLimitHitProbe;
 use crate::quota::{
-    billing_identity, clear_limit_hit, cleared_at, cleared_at_key,
+    billing_identity, clear_limit_hit, clear_limit_hit_if_older_than, cleared_at, cleared_at_key,
     for_each_host, keys_for_bot, limit_hit_blocks_model, limit_hit_expired,
     pane_window_used, parse_utc, pollable_hosts, quota_base_for_host,
     quota_from_codex, quota_from_codex_status, quota_key, running_model,
@@ -109,6 +109,33 @@ pub async fn clear_limit_hit_for_bot(app: &Arc<App>, bot: &crate::db::Bot) {
     let base = quota_base_for_host(&**app, &host, &bot.kind, identity.as_deref()).await;
     clear_limit_hit(app, &host, &base).await;
     crate::judge::note_cleared(&app.db, &bot.id).await;
+}
+
+/// 同 [`clear_limit_hit_for_bot`]，但只清 `success_at` 之前就命中的撞限（[`clear_limit_hit_if_older_than`]）。
+///
+/// 讀不到主機或身分就不清（warn，不退回 local）。真的清掉才通知 judge（[`crate::judge::note_cleared`]）；
+/// 沒清掉（沒有撞限、撞限不早於 `success_at`、時間解不開）什麼都不做。
+pub async fn clear_limit_hit_for_bot_if_older_than(app: &Arc<App>, bot: &crate::db::Bot, success_at: chrono::DateTime<chrono::Utc>) -> bool {
+    let host = match crate::db::bot_host(&app.db, &bot.id).await {
+        Ok(h) => h,
+        Err(e) => {
+            tracing::warn!(bot = %bot.id, error = %e, "cannot read the host of a bot; its limit hit is left in place");
+            return false;
+        }
+    };
+    let identity = match billing_identity(app, bot).await {
+        Ok(i) => i,
+        Err(e) => {
+            tracing::warn!(bot = %bot.id, error = %e, "cannot read the run of a bot; its limit hit is left in place");
+            return false;
+        }
+    };
+    let base = quota_base_for_host(&**app, &host, &bot.kind, identity.as_deref()).await;
+    let cleared = clear_limit_hit_if_older_than(app, &host, &base, success_at).await;
+    if cleared {
+        crate::judge::note_cleared(&app.db, &bot.id).await;
+    }
+    cleared
 }
 
 /// 這顆 bot 的帳號在 `since` 之後有沒有被成功回合清過撞限。`resume_quota_blocked` 用它分辨
