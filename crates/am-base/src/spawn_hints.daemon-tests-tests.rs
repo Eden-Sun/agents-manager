@@ -263,20 +263,42 @@
         assert_eq!(claims_for_session(&env.app, "local", "test").await.unwrap().get("w1:p2"), Some(&second.id));
     }
 
+    /// 改 schema 的測試要在**單一連線**上做（#1854）：連線池有好幾條連線時，DDL 在 A 連線做完，B 連線的 schema 快取還是舊的，
+    /// 在 B 上準備 `INSERT INTO spawn_claims VALUES (4 個值)` 就報 `table spawn_claims has 6 columns but 4 values were supplied`
+    /// （prepare 階段用快取的 schema 檢查，不會像 step 那樣因 schema cookie 不符而重 prepare）。負載高時池子會多開連線才偶發紅。
+    /// 先把 env 的池子關掉，改開 `max_connections(1)` 的池子做完整段改動；做完用 [`reopen_app`] 換一顆全新的 App 讀。
+    async fn legacy_pool(env: &crate::testing::Env) -> sqlx::SqlitePool {
+        env.app.db.close().await;
+        let options = sqlx::sqlite::SqliteConnectOptions::new()
+            .filename(env.dir.join("data/db.sqlite3"))
+            .create_if_missing(false)
+            .foreign_keys(true)
+            .journal_mode(sqlx::sqlite::SqliteJournalMode::Wal)
+            .busy_timeout(std::time::Duration::from_secs(10));
+        sqlx::sqlite::SqlitePoolOptions::new().max_connections(1).connect_with(options).await.unwrap()
+    }
+
+    async fn reopen_app(env: &crate::testing::Env, legacy: sqlx::SqlitePool) -> std::sync::Arc<crate::state::App> {
+        legacy.close().await;
+        crate::testing::restart_app(env).await
+    }
+
     #[tokio::test]
     async fn nr_claim_v65_migration_backfills_the_host_session() {
         let env = crate::testing::env().await;
         let bot = crate::testing::claude_bot(&env.app, &env.project_id, "migration").await;
         crate::testing::fake_run(&env.app, &bot.id).await;
-        sqlx::query("DROP TABLE spawn_claims").execute(&env.app.db).await.unwrap();
+        let legacy = legacy_pool(&env).await;
+        sqlx::query("DROP TABLE spawn_claims").execute(&legacy).await.unwrap();
         sqlx::query("CREATE TABLE spawn_claims (
             pane_id TEXT NOT NULL, host TEXT NOT NULL, bot_id TEXT NOT NULL REFERENCES bots(id),
-            created_at TEXT NOT NULL, PRIMARY KEY(host,pane_id))").execute(&env.app.db).await.unwrap();
+            created_at TEXT NOT NULL, PRIMARY KEY(host,pane_id))").execute(&legacy).await.unwrap();
         sqlx::query("INSERT INTO spawn_claims VALUES ('w1:p2','local',?,'2000-01-01T00:00:00.000Z')")
-            .bind(&bot.id).execute(&env.app.db).await.unwrap();
-        crate::runners::am_base_tests::apply_migrations(&env.app.db).await.unwrap();
-        assert_eq!(claims_for_host(&env.app,"local").await.unwrap().get("w1:p2"), Some(&bot.id), "migration must preserve the existing claim without requiring a new registration");
-        assert_eq!(claims_for_session(&env.app,"local","test").await.unwrap().get("w1:p2"), Some(&bot.id));
+            .bind(&bot.id).execute(&legacy).await.unwrap();
+        crate::runners::am_base_tests::apply_migrations(&legacy).await.unwrap();
+        let app = reopen_app(&env, legacy).await;
+        assert_eq!(claims_for_host(&app,"local").await.unwrap().get("w1:p2"), Some(&bot.id), "migration must preserve the existing claim without requiring a new registration");
+        assert_eq!(claims_for_session(&app,"local","test").await.unwrap().get("w1:p2"), Some(&bot.id));
     }
 
     #[tokio::test]
@@ -327,19 +349,21 @@
             sqlx::query("UPDATE projects SET host=? WHERE id=?").bind(host).bind(&env.project_id).execute(&env.app.db).await.unwrap();
             let run = crate::testing::fake_run(&env.app, &witness.id).await;
             sqlx::query("UPDATE runs SET host=?,herdr_session='agents-manager' WHERE id=?").bind(host).bind(&run).execute(&env.app.db).await.unwrap();
-            sqlx::query("DROP TABLE spawn_claims").execute(&env.app.db).await.unwrap();
+            let legacy = legacy_pool(&env).await;
+            sqlx::query("DROP TABLE spawn_claims").execute(&legacy).await.unwrap();
             sqlx::query("CREATE TABLE spawn_claims (pane_id TEXT NOT NULL,host TEXT NOT NULL,bot_id TEXT NOT NULL REFERENCES bots(id),created_at TEXT NOT NULL,PRIMARY KEY(host,pane_id))")
-                .execute(&env.app.db).await.unwrap();
-            sqlx::query("INSERT INTO spawn_claims VALUES ('w1:p-child',?,?,'2000-01-01T00:00:00.000Z')").bind(host).bind(&bot.id).execute(&env.app.db).await.unwrap();
-            sqlx::query("INSERT INTO spawn_claims VALUES ('w1:unknown','unseen-host',?,'2000-01-01T00:00:00.000Z')").bind(&bot.id).execute(&env.app.db).await.unwrap();
-            sqlx::query("PRAGMA user_version=65").execute(&env.app.db).await.unwrap();
-            crate::runners::am_base_tests::apply_migrations(&env.app.db).await.unwrap();
-            let session: String = sqlx::query_scalar("SELECT herdr_session FROM spawn_claims WHERE pane_id='w1:p-child'").fetch_one(&env.app.db).await.unwrap();
-            let unknown: String = sqlx::query_scalar("SELECT herdr_session FROM spawn_claims WHERE pane_id='w1:unknown'").fetch_one(&env.app.db).await.unwrap();
+                .execute(&legacy).await.unwrap();
+            sqlx::query("INSERT INTO spawn_claims VALUES ('w1:p-child',?,?,'2000-01-01T00:00:00.000Z')").bind(host).bind(&bot.id).execute(&legacy).await.unwrap();
+            sqlx::query("INSERT INTO spawn_claims VALUES ('w1:unknown','unseen-host',?,'2000-01-01T00:00:00.000Z')").bind(&bot.id).execute(&legacy).await.unwrap();
+            sqlx::query("PRAGMA user_version=65").execute(&legacy).await.unwrap();
+            crate::runners::am_base_tests::apply_migrations(&legacy).await.unwrap();
+            let app = reopen_app(&env, legacy).await;
+            let session: String = sqlx::query_scalar("SELECT herdr_session FROM spawn_claims WHERE pane_id='w1:p-child'").fetch_one(&app.db).await.unwrap();
+            let unknown: String = sqlx::query_scalar("SELECT herdr_session FROM spawn_claims WHERE pane_id='w1:unknown'").fetch_one(&app.db).await.unwrap();
             assert_eq!(unknown, "", "a different host's run must not supply the session");
             assert_eq!(session, "agents-manager", "{host} legacy claims retain their host session");
-            sqlx::query("UPDATE runs SET state='stopped' WHERE id=?").bind(run).execute(&env.app.db).await.unwrap();
-            assert_eq!(claims_for_session(&env.app,host,"agents-manager").await.unwrap().get("w1:p-child"), Some(&bot.id));
-            assert!(claims_for_session(&env.app,host,"other-session").await.unwrap().is_empty());
+            sqlx::query("UPDATE runs SET state='stopped' WHERE id=?").bind(run).execute(&app.db).await.unwrap();
+            assert_eq!(claims_for_session(&app,host,"agents-manager").await.unwrap().get("w1:p-child"), Some(&bot.id));
+            assert!(claims_for_session(&app,host,"other-session").await.unwrap().is_empty());
         }
     }
