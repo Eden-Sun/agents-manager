@@ -5758,8 +5758,20 @@ async fn forget_identity_models(app: &Arc<App>, name: &str) {
     app.models_cache.lock().await.retain(|k, _| k.splitn(3, '/').nth(2) != Some(name));
 }
 
+/// 身份 env 的值不能留空（#1750）：`CLAUDE_CONFIG_DIR=` 這種空值存下來，啟動時等於沒設，身份悄悄用了預設帳號。
+/// 只擋身份：bot 自己的 env 空值照舊（刻意清掉某個變數是合理的用法）。
+fn check_identity_env_values(env: &BTreeMap<String, String>) -> Result<(), LcError> {
+    match env.iter().find(|(_, v)| v.trim().is_empty()) {
+        Some((k, _)) => Err(LcError::Bad(format!(
+            "identity env `{k}` value is empty (an empty value is the same as not setting it, so the identity would silently use the default account); give it a value or remove the entry"
+        ))),
+        None => Ok(()),
+    }
+}
+
 async fn create_identity(State(app): State<Arc<App>>, Json(b): Json<NewIdentity>) -> Result<Response, LcError> {
     crate::bot_input::check_env(&b.env)?;
+    check_identity_env_values(&b.env)?;
     crate::bot_input::check_args(&b.args)?;
     if !valid_identity_name(&b.name) {
         return Err(LcError::Bad(format!("identity name must match {}", crate::config::SLUG_NAME_RE)));
@@ -10538,6 +10550,14 @@ mod bot_config_tests {
         let id = add(&e, json!({"name": "eok", "kind": "claude"})).await.unwrap();
         let err = patch(&e, &id, json!({"env": {"BAD NAME": "1"}})).await.unwrap_err();
         assert!(reason(err).contains("`BAD NAME`"), "patch bot");
+        // 值留空（#1750）：身份被點名拒絕、什麼都沒存；bot 自己的 env 空值照舊可以。
+        for empty in ["", "   "] {
+            let err = create_identity(State(e.app.clone()), Json(identity(json!({"CLAUDE_CONFIG_DIR": empty})))).await.unwrap_err();
+            let m = reason(err);
+            assert!(m.contains("`CLAUDE_CONFIG_DIR`") && m.contains("empty"), "身份空值要點名 key：{m}");
+        }
+        assert!(e.app.cfg.get().await.identities.iter().all(|i| i.name != "cc9"), "空值被拒的身份什麼都沒存");
+        assert!(patch(&e, &id, json!({"env": {"HTTP_PROXY": ""}})).await.is_ok(), "bot 的 env 空值不受影響");
         // 合法的照收。
         assert!(create_identity(State(e.app.clone()), Json(identity(json!({"CLAUDE_CONFIG_DIR": "$HOME/.claude-cc9", "_X1": "y"})))).await.is_ok());
         assert!(patch(&e, &id, json!({"env": {"GOOD_NAME": "1"}})).await.is_ok());

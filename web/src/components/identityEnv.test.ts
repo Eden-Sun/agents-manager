@@ -44,3 +44,10 @@ test('key 跟 Object.prototype 上的名字同名（constructor、__proto__）�
   assert.deepEqual(proto.errors, [])
   assert.deepEqual(Object.entries(proto.env), [['__proto__', 'x']], '不能被 __proto__ 的 setter 吃掉')
 })
+
+test('值是空的（例如把 `$HOME/.claude-` 的尾巴刪光）不能靜靜存下來：身份的 CLAUDE_CONFIG_DIR 變空，就悄悄用了預設帳號', () => {
+  const r = checkEnvText('CLAUDE_CONFIG_DIR=\nA=1\nB=   ')
+  assert.ok(r.errors.some((e) => e.includes('第 1 行') && e.includes('CLAUDE_CONFIG_DIR')), r.errors.join(' | '))
+  assert.ok(r.errors.some((e) => e.includes('第 3 行') && e.includes('B')), r.errors.join(' | '))
+  assert.deepEqual(r.env, { A: '1' }, '空值的那幾行不進 env，也不會讓送出被靜靜放行')
+})
