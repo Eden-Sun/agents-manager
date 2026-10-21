@@ -759,7 +759,7 @@ Jev 不負責回合收尾、額度記帳或競態判斷；這些依 run、turn�
 
 ### 4.4 hook 子命令（`agents-managerd hook claude|codex|grok|agy`）最低契約
 
-1. wall-clock ≤ 3 秒；**永遠 exit 0、永遠空 stdout**。
+1. wall-clock ≤ 3 秒；**永遠 exit 0、stdout 空**——唯一的例外是 §4.4c 的 PreToolUse 守門「要擋」時印的那一行決策 JSON。
 2. stdin（claude、grok）上限 1 MiB，超過截斷標 `truncated`；codex 取 argv 最後一個。
 3. POST `http://127.0.0.1:<port>/hook/<provider>`（寫死 IPv4 loopback、`NO_PROXY=127.0.0.1`、連線逾時 300 ms、總逾時 2 秒），header `X-AM-Bot-Token`，
    body `{bot_id, provider, payload, received_at, run_id?}`（`run_id`＝行程 env 的 `AM_RUN_ID`，只給 §4.1 的世代圍籬用）。
@@ -792,6 +792,45 @@ Jev 不負責回合收尾、額度記帳或競態判斷；這些依 run、turn�
 - **延遲**：本機 hook 的關鍵路徑多一次 INSERT＋COMMIT（本機 SQLite，遠小於 §4.4 的 2 秒 HTTP 預算）；處理仍是背景的，送端不會被配對邏輯卡住。worker 靠 notify 叫醒，正常情況下延遲與以前的「spawn 立刻處理」同級，另有 5 秒輪詢當保險。
 - **保留**：處理完的列留 24 小時供查「這則到底進來過沒有」，之後由 worker 順手刪掉。
 - **StatusLine 不進來**：它是單槽、最新的贏的重繪訊號（遠端就是寫 `hook-status.json`，不是 spool 佇列），送端 `statusline_cmd` fire-and-forget 不看回應也不重送。每次重繪寫一列只換來大量寫入，換不到任何保證；掉一格的代價就是晚一次重繪。本機送端讀 stdin 最多 1 MiB，超過就不回報；截點若落在 UTF-8 字元中間，只保留前面的完整文字。使用者 statusline 命令最多轉送 64 KiB，超過時仍轉送這段前綴但不把它存成 daemon 狀態。它與子行程共用 1.9 秒總預算，逾時會終止整個 process group。
+
+### 4.4c 廣域 kill 守門（PreToolUse，issue #1884）
+
+事故：m4p 上一顆子 bot 跑 `pkill -f "next-server" -P 1`。macOS／BSD 的 `pkill` 遇到第一個非選項參數就停止解析選項，`-P 1` 被當成**額外的比對字串**，
+結果殺掉所有命令列含「1」的行程——整台機器的 claude／codex／grok 與 Chrome 全滅。防範有兩層：共用規則（`child_agent_rules` 的「終止行程」：只准殺自己記下的 PID 或 port，
+`pkill` 選項必須寫在比對字串之前）與這個 hook。
+
+**判斷是純函式**（`crates/am-base/src/kill_guard.rs`，`check_command`），**只做靜態判斷，不跑任何外部指令**（不 `pgrep`、不 `ps`）：不會慢、不會卡、跟機器上跑著什麼無關。
+刻意不做「先數有幾個行程命中」：那要在 hook 裡跑外部指令，GNU／BSD 的 `pgrep` 旗標又不同，逾時與競態都得處理，為了擋一個確定錯的寫法不值得。
+解析不了、動態展開的 PID（`kill $(pgrep …)`）、不是 shell 指令的工具一律**放行**；hook 自己出任何錯都放行並只在 stderr 留一行，絕不因 hook 的錯擋掉正常指令。
+
+指令先切成簡單指令（`; & | \n ( )`、`$(…)`、反引號、引號、重導向），剝掉 `sudo`／`env`／`nohup`／`timeout`／`xargs`／`VAR=x` 這類前綴，`bash -c '…'`／`eval` 遞迴；只看 `kill`、`pkill`、`killall`（`pgrep` 只列不殺）。**只擋確定廣域的**：
+
+| 規則 | 擋 | 放行 |
+|---|---|---|
+| `pkill` 選項在 pattern 之後（BSD 當 pattern、GNU 當選項，兩邊語意不同；兩種解析都實作） | `pkill -f next-server -P 1`、`pkill x -9` | `pkill -P 1 -f next-server`、`pkill -f -- -weird` |
+| `pkill`／`killall` 的 pattern 會命中受保護行程 | `pkill -f claude`、`pkill -f 'cla.de'`、`killall node`、`pkill -f bots/01M` | `pkill -f next-server`、`pkill -x vite`、`killall vite` |
+| pattern 太短（非 `-x` 少於 3 字元）或空字串 | `pkill -f 1`、`pkill ''` | `pkill -x ab` |
+| 沒有 pattern、只靠 `-u`／`-U`／`-G`／`-g`／`-s`／`-t`／`-P 0`｜`-P 1`（`killall -u`／`-t`／`-c`） | `pkill -u me`、`pkill -P 1`、`killall -u me` | `pkill -P 4242` |
+| `kill` 的目標是 `-1`、`0`（含 `kill -1`、`kill -- -1`、`kill -s KILL -1`） | `kill -9 -1`、`kill 0` | `kill 12345`、`kill -1 4242`、`lsof -ti :3917 \| xargs kill`、`kill -l` |
+
+受保護名單（`PROTECTED_NAMES`，不加 `-f` 時比對行程名）：`claude codex grok herdr agents-managerd agy antigravity node sh bash zsh sshd`（`node`：claude／codex 的 npm 安裝版行程名就是 node；shell：herdr pane 的 shell）。
+`-f` 時比對整條命令列，拿 `PROTECTED_CMDLINES` 的樣本試（claude 帶 bot 的 `--settings …/bots/<id>/…`、npm 版 `node …/claude-code/cli.js`、codex、grok、`herdr server`、`agents-managerd serve`、agy）。
+pattern 用一個內建的迷你 ERE 試（`. * + ? | ( ) [ ] ^ $ \x`，語法壞掉就退回子字串）；`-x` 要整串相等，`-i` 忽略大小寫。短 pattern 門檻 `MIN_PATTERN_CHARS = 3`。名單與門檻只在這個檔，改了同步這張表。
+
+**被擋時**：hook 在 stdout 印一行決策 JSON，exit 0，agent 看到的原因（zh-TW）說明為什麼擋、並叫它改用自己記下的 PID 或 port（`lsof -ti :PORT | xargs kill`、`kill <PID>`）。
+形狀：claude／codex／grok 用 `{"hookSpecificOutput":{"hookEventName":"PreToolUse","permissionDecision":"deny","permissionDecisionReason":"…"}}`；agy 另加 `"decision":"deny","reason":"…"`（agy 的 deny 形狀文件沒寫清楚，兩種都給）。
+PreToolUse 呼叫**不送 daemon、不 spool**；`hook` 子命令依 payload 的 `hook_event_name`（agy 依 `--event PreToolUse`）分辨，所以放在「子 agent 的 pane 不送事件」的判斷**之前**（事故就是子 bot 跑的）。
+
+**各 CLI 現況**（誠實列出，沒有的就是沒有）：
+
+| CLI | 本機 bot | 子 agent | 遠端 bot |
+|---|---|---|---|
+| claude | ✅ 啟動時的 `--settings` 檔多一組 `PreToolUse`（`matcher: "Bash"`，同一支 hook 指令） | ❌ 子 pane 是 `herdr agent start` 開的，沒有 `--settings`；herdr shim 目前不注入 | ❌ 遠端 `hook.sh` 是 POSIX sh，沒有判斷邏輯 |
+| agy | ✅ 全域 `~/.gemini/config/hooks.json` 的具名項多一個 `PreToolUse`（包 `{matcher:"*",hooks}`，指向 dispatcher；dispatcher 對 PreToolUse 原樣轉出 hook 的決策 JSON） | ✅ 全域檔、dispatcher 靠 pane env（子 pane 繼承 `AM_BOT_ID`）判斷歸屬 | ❌ 同上 |
+| grok | ❌ 本版未接（grok 的 `PreToolUse` 可 deny，全域 `~/.grok/hooks/*.json`；要改 `grok_hook.rs` 的事件表與合併邏輯） | （同本機） | ❌ |
+| codex | ❌ codex 0.163 的 hooks 在 `~/.codex/hooks.json`／`config.toml`，**需要使用者在 `/hooks` 審核信任**（改了內容就要重審），不是 per-launch 旗標；本版不去改使用者的 `~/.codex` | ❌ | ❌ |
+
+沒被 hook 蓋到的路徑（子 claude、遠端、codex、grok）只剩共用規則；補洞的方向是 PATH 上的 `pkill`／`killall` shim（子 pane 繼承 PATH、遠端也有 PATH，argv 已經被 shell 切好，不必自己解析指令字串），尚未實作。
 
 ### 4.4a 模型／強度／fast／身份：runtime 與設定
 

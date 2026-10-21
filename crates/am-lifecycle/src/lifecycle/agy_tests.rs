@@ -105,6 +105,33 @@ fn the_dispatcher_always_answers_empty_json_for_hooks_nothing_for_the_status_lin
     assert!(!log.exists(), "沒有 AM_BOT_ID／AM_HOOK_TOKEN：不呼叫 daemon");
 }
 
+/// #1884：PreToolUse 是 agy 唯一會讀 hook stdout 當決策的事件之一——hook 要擋時印的決策 JSON 原樣交出去，其餘（沒印、印了別的、失敗）一律 `{}`。
+#[test]
+fn a_pre_tool_use_denial_reaches_agy_but_nothing_else_does() {
+    let deny = r#"{"hookSpecificOutput":{"permissionDecision":"deny"},"decision":"deny"}"#;
+    let stub = tt::scratch_dir("am-agy-stub-guard").join("daemon");
+    tt::write_exec(&stub, &format!("#!/bin/sh\ncat > /dev/null\necho \"$@\" >> \"$AM_TEST_LOG\"\necho '{deny}'\n"));
+    let log = stub.with_file_name("calls.log");
+    let script = dispatch_sh(stub.to_str().unwrap(), "/d", None);
+    let env = [("AM_BOT_ID", "b"), ("AM_HOOK_TOKEN", "t"), ("AM_TEST_LOG", log.to_str().unwrap())];
+    let (out, code) = run_dispatcher(&script, &["PreToolUse"], &env);
+    assert_eq!((out.trim(), code), (deny, 0));
+    assert!(std::fs::read_to_string(&log).unwrap().contains("--event PreToolUse"));
+    // 同一支 stub 在別的事件印的東西不能漏給 agy。
+    let (out, code) = run_dispatcher(&script, &["Stop"], &env);
+    assert_eq!((out.as_str(), code), ("{}\n", 0));
+    // hook 沒印決策（放行）、或掛掉：`{}`、exit 0。
+    let quiet = stub.with_file_name("quiet");
+    tt::write_exec(&quiet, "#!/bin/sh\nexit 7\n");
+    let (out, code) = run_dispatcher(&dispatch_sh(quiet.to_str().unwrap(), "/d", None), &["PreToolUse"], &env);
+    assert_eq!((out.as_str(), code), ("{}\n", 0));
+    // 不是 AG Man 的 pane：不呼叫、`{}`。
+    std::fs::remove_file(&log).unwrap();
+    let (out, _) = run_dispatcher(&script, &["PreToolUse"], &[("AM_TEST_LOG", log.to_str().unwrap())]);
+    assert_eq!(out, "{}\n");
+    assert!(!log.exists());
+}
+
 #[test]
 fn the_dispatcher_only_serves_its_own_daemon_instance() {
     let stub = tt::scratch_dir("am-agy-stub-inst").join("daemon");

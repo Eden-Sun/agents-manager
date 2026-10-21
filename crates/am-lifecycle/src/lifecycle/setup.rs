@@ -994,6 +994,7 @@ pub async fn injected_args(app: &(impl crate::capabilities::DataDir + crate::cap
             // Remote Control 明講，不要靠帳號的全域 settings 決定（見 `claude_settings`）。
             let wants_remote = bot.args().iter().any(|a| a == "--remote-control");
             let mut settings = claude_settings(&cmd, &statusline, wants_remote, bot.auto_approve != 0);
+            with_kill_guard(&mut settings, &cmd);
             if let Some(ws) = &restricted {
                 if bot.inject_hooks == 0 {
                     settings = json!({});
@@ -1028,6 +1029,13 @@ pub async fn injected_args(app: &(impl crate::capabilities::DataDir + crate::cap
     out.extend(hook_args);
     Ok(out)
 }
+/// issue #1884：Bash 工具跑之前先過廣域 kill 守門。同一支 `agents-managerd hook claude`——它看到 PreToolUse 只判斷、不送 daemon、
+/// 只有要擋時才印決策 JSON（`kill_guard`）。只給本機 bot：遠端的 `hook.sh` 是 POSIX sh、沒有這段邏輯，把 PreToolUse 交給它只會每個
+/// Bash 呼叫多 spool 一筆（SPEC「廣域 kill 守門」寫明遠端目前沒有守門）。
+fn with_kill_guard(settings: &mut Value, hook_cmd: &str) {
+    settings["hooks"]["PreToolUse"] = json!([{"matcher": "Bash", "hooks": [{"type": "command", "command": hook_cmd, "timeout": 5}]}]);
+}
+
 /// 每顆 claude bot 自己的 `claude-settings.json`。
 ///
 /// `remoteControlAtStartup` 明講而不是省略：使用者帳號的全域 `settings.json` 只要開了它，
@@ -1367,6 +1375,14 @@ PATH 上的 herdr 會補 `-p`、`--no-daemon`、`-c project_doc_max_bytes=0`：*
 - 工作太大、需要平行、或卡在範圍外的事時，**必須**停下來在回報裡寫清楚：要另派什麼、為什麼、跟你手上的工作怎麼切。\
 要不要開兄弟 agent、交給誰，由 parent 決定。\n\
 - 做完就回報 parent，由 parent 驗收並收掉你的 pane。\n\
+\n\
+終止行程（同樣是硬規則，issue #1884）：\n\
+\n\
+- **只准殺自己記下的 PID 或 port**：自己啟動的行程，啟動時就記下 PID（`$!`），收尾 `kill <PID>`；dev server 用 port：`lsof -ti :PORT | xargs kill`。\
+**禁止** `pkill`／`pkill -f`／`killall` 比對寬鬆的字串（`node`、`next`、`1`、agent 名稱…），也**禁止** `kill -9 -1`／`kill 0`。\
+同一台機器上有別的 bot 的 claude／codex／grok，字串比對錯一點就全部陪葬（2026-10-21 m4p 一條 `pkill -f \"next-server\" -P 1` 殺光整台機器的 agent）。\n\
+- macOS／BSD 的 `pkill` 遇到第一個非選項參數就停止解析選項，之後的 `-P 1` 會被當成**要殺的字串**：選項**必須全部寫在比對字串之前**\
+（`pkill -P 1 -f next-server`，不是 `pkill -f next-server -P 1`）。這台的 bot 有 hook 會擋下廣域的 kill 並告訴你原因，被擋就照訊息改用 PID 或 port，**禁止**換個寫法繞過。\n\
 \n\
 瀏覽器（同樣是硬規則）：\n\
 \n\
@@ -2135,6 +2151,16 @@ mod model_args_tests {
 
     /// 2026-09-13 使用者要求：人設與注入提示一律用命令語氣。客氣的寫法（「請…」「不要…比較好」）
     /// agent 會當成建議，實際上不照做；硬規則要寫成命令才會被執行。
+    #[test]
+    fn every_bot_is_told_to_kill_only_its_own_pid_or_port_and_to_put_pkill_options_first() {
+        let rule = super::child_agent_rules("proj-abc123");
+        assert!(rule.contains("只准殺自己記下的 PID 或 port"), "{rule}");
+        assert!(rule.contains("lsof -ti :PORT | xargs kill"));
+        assert!(rule.contains("`pkill -f next-server -P 1`") && rule.contains("`pkill -P 1 -f next-server`"), "附對／錯寫法");
+        assert!(rule.contains("kill -9 -1") && rule.contains("killall"));
+        assert!(rule.contains("選項**必須全部寫在比對字串之前**"));
+    }
+
     #[test]
     fn the_rules_read_as_orders_not_suggestions() {
         let rule = super::child_agent_rules("proj-abc123");
@@ -3592,6 +3618,21 @@ mod claude_settings_tests {
         let matchers: Vec<&str> = v["hooks"]["PostToolUse"].as_array().unwrap().iter().filter_map(|h| h["matcher"].as_str()).collect();
         assert_eq!(matchers, ["Bash", "AskUserQuestion"]);
         assert_eq!(v["hooks"]["PostToolUse"][1]["hooks"][0]["command"], "hook");
+    }
+
+    /// issue #1884：本機 claude bot 的 Bash 呼叫先過廣域 kill 守門（同一支 hook 指令，它自己分辨 PreToolUse）；
+    /// 遠端用的 `claude_settings` 本身不帶，因為遠端的 `hook.sh` 沒有守門邏輯。
+    #[test]
+    fn a_local_claude_bot_gets_a_bash_pre_tool_use_kill_guard_on_the_same_hook_command() {
+        let mut v = claude_settings("hook", "sl", false, true);
+        assert!(v["hooks"].get("PreToolUse").is_none(), "遠端那份不帶");
+        with_kill_guard(&mut v, "hook");
+        let groups = v["hooks"]["PreToolUse"].as_array().unwrap();
+        assert_eq!(groups.len(), 1);
+        assert_eq!(groups[0]["matcher"], json!("Bash"), "只在 shell 指令跑之前");
+        assert_eq!(groups[0]["hooks"][0]["command"], "hook");
+        assert_eq!(groups[0]["hooks"][0]["timeout"], json!(5));
+        assert_eq!(v["hooks"]["Stop"][0]["hooks"][0]["command"], "hook", "別的 hook 原樣");
     }
 
     /// issue #722：2.1.283 的 fullscreen 選單與 auto mode 選單都靠「較高層設定沒寫」才跳；

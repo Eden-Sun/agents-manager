@@ -62,6 +62,24 @@
         assert!(repointed.contains("/elsewhere/agy-hook.sh") && !repointed.contains("/my data/"));
     }
 
+    /// #1884：本機版多訂 `PreToolUse`，而且是**包 `{matcher, hooks}`** 的形狀（扁平的 agy 不認、整個檔會被丟掉）；遠端版沒有。
+    #[test]
+    fn the_local_hook_also_subscribes_to_a_wrapped_pre_tool_use_the_remote_one_does_not() {
+        let out = hooks_merge_guarded("{}", "agents-manager", "/d/agy-hook.sh").unwrap().expect("new entry");
+        let v: Value = serde_json::from_str(&out).unwrap();
+        let g = &v["agents-manager"]["PreToolUse"][0];
+        assert_eq!(g["matcher"], "*");
+        assert_eq!(g["hooks"][0]["type"], "command");
+        assert_eq!(g["hooks"][0]["command"], "'/d/agy-hook.sh' PreToolUse");
+        assert_eq!(g["hooks"][0]["timeout"], 5);
+        assert!(g.get("command").is_none(), "不是扁平 handler");
+        assert_eq!(hooks_merge_guarded(&out, "agents-manager", "/d/agy-hook.sh").unwrap(), None, "idempotent");
+        // 舊的（沒有 PreToolUse）安裝會被補上；遠端版的結果不含 PreToolUse。
+        let old = hooks_merge("{}", "agents-manager", "/d/agy-hook.sh").unwrap().unwrap();
+        assert!(!old.contains("PreToolUse"));
+        assert!(hooks_merge_guarded(&old, "agents-manager", "/d/agy-hook.sh").unwrap().expect("upgraded").contains("PreToolUse"));
+    }
+
     #[test]
     fn instances_get_their_own_hook_name() {
         assert_eq!(hook_name(None), "agents-manager");

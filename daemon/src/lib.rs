@@ -144,6 +144,7 @@ pub use am_base::{
     host_baseline,
     hosts,
     kids_cache,
+    kill_guard,
     kind_probe,
     launch_rev,
     lc_error,
