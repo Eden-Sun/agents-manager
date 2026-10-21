@@ -262,6 +262,7 @@ pub mod share;
 mod herdr_upgrade;
 mod herdr_integration;
 mod herdr_recovery;
+mod gone_burst;
 mod swap_window;
 #[cfg(test)]
 #[path = "../../crates/am-supervisor/src/mission/mod.rs"]
