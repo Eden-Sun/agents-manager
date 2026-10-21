@@ -143,6 +143,105 @@
         assert_eq!((b.model.as_deref(), b.effort.as_deref()), (Some("claude-sonnet-5-5"), Some("high")), "下一輪補上 model 與 effort");
     }
 
+    // 以下 `/effort auto` 的畫面是 **synthetic**：確認句來自 Claude Code 2.1.305 二進位字串，沒有在真 TUI 驗過
+    // （Ultracode 後綴、折行都沒驗）。parse 只認這兩句整句。
+    const AUTO: &str = "❯ /effort auto\n  ⎿  Effort level set to auto\n";
+
+    #[test]
+    fn effort_auto_is_recorded_as_the_cli_default_and_supersedes_an_earlier_level() {
+        assert_eq!(parse(AUTO).effort.as_deref(), Some("default"));
+        assert_eq!(parse("❯ /effort auto\n  ⎿  Effort level set to auto (this session only)\n").effort.as_deref(), Some("default"));
+        assert_eq!(parse(&format!("{SCREEN}\n{AUTO}")).effort.as_deref(), Some("default"), "high 之後 auto：取最後一次");
+        let back = format!("{AUTO}\n❯ /effort low\n  ⎿  Set effort level to low (this session only): x\n");
+        assert_eq!(parse(&back).effort.as_deref(), Some("low"), "auto 之後再選等級：取最後一次");
+    }
+
+    #[test]
+    fn effort_auto_needs_the_exact_sentence_in_a_real_slash_output() {
+        // 環境變數蓋住：實際強度由環境決定，不猜。
+        for line in [
+            "Effort set to auto for this session, but CLAUDE_CODE_EFFORT_LEVEL=high still controls this session",
+            "Cleared effort from settings, but CLAUDE_CODE_EFFORT_LEVEL=high still controls this session",
+            "Not applied: CLAUDE_CODE_EFFORT_LEVEL=high overrides effort this session, and auto is session-only (nothing saved)",
+            "Effort level set to auto · Ultracode off",
+            "Effort level set to automatic",
+        ] {
+            assert_eq!(parse(&format!("❯ /effort auto\n  ⎿  {line}\n")), Switch::default(), "{line}");
+        }
+        let tool_output = "⏺ Bash(cat log)\n  ⎿ Effort level set to auto\n";
+        assert_eq!(parse(tool_output), Switch::default(), "工具輸出裡的同一句不算");
+    }
+
+    async fn child_with_effort(env: &crate::testing::Env, name: &str, kind: &str, runtime_effort: Option<&str>) -> (String, String) {
+        let app = env.app.clone();
+        let bot = crate::testing::claude_bot(&app, &env.project_id, name).await;
+        sqlx::query("UPDATE bots SET managed_by = ?, effort = 'high' WHERE id = ?").bind(kind).bind(&bot.id).execute(&app.db).await.unwrap();
+        let run_id = crate::testing::fake_run(&app, &bot.id).await;
+        sqlx::query("UPDATE runs SET runtime_effort = ? WHERE id = ?").bind(runtime_effort).bind(&run_id).execute(&app.db).await.unwrap();
+        env.herdr.set_screen(&format!("pane-{}", bot.id), AUTO);
+        (bot.id, run_id)
+    }
+
+    async fn effort_of(env: &crate::testing::Env, bot: &str, run: &str) -> (Option<String>, Option<String>) {
+        let b = db::bot(&env.app.db, bot).await.unwrap().unwrap();
+        let r = db::run(&env.app.db, run).await.unwrap().unwrap();
+        (b.effort, r.runtime_effort)
+    }
+
+    #[tokio::test]
+    async fn effort_auto_clears_a_childs_setting_but_never_stores_the_word_default() {
+        let env = crate::testing::env().await;
+        let (bot, run_id) = child_with_effort(&env, "kidauto", "child", Some("high")).await;
+        let run = db::run(&env.app.db, &run_id).await.unwrap().unwrap();
+        observe(&env.app, &run, AUTO).await;
+        assert_eq!(effort_of(&env, &bot, &run_id).await, (None, Some("default".into())), "設定清成 NULL（CLI 預設），runtime 記 default");
+    }
+
+    #[tokio::test]
+    async fn effort_auto_does_not_clear_when_unknown_already_default_or_not_a_child() {
+        let env = crate::testing::env().await;
+        for (name, managed_by, runtime) in [("unk", "child", None), ("dflt", "child", Some("default")), ("user", "user", Some("high"))] {
+            let (bot, run_id) = child_with_effort(&env, name, managed_by, runtime).await;
+            let run = db::run(&env.app.db, &run_id).await.unwrap().unwrap();
+            if managed_by == "user" {
+                start_fresh(&run_id); // 一般 bot 第一次看到只當基準；fresh 才直接採用
+            }
+            observe(&env.app, &run, AUTO).await;
+            let (b, r) = effort_of(&env, &bot, &run_id).await;
+            assert_eq!(b.as_deref(), Some("high"), "{name}：設定不動");
+            assert_ne!(b.as_deref(), Some("default"));
+            assert_eq!(r.as_deref(), Some("default"), "{name}：runtime 照畫面");
+        }
+    }
+
+    /// Clear 失敗：runtime 不能先收斂成 default（否則下輪看不出上一輪是具體值，設定永遠清不掉）。
+    #[tokio::test]
+    async fn a_failed_clear_keeps_runtime_unconverged_so_the_next_sweep_retries() {
+        let env = crate::testing::env().await;
+        let (bot, run_id) = child_with_effort(&env, "kidclear", "child", Some("high")).await;
+        let run = db::run(&env.app.db, &run_id).await.unwrap().unwrap();
+        sqlx::query("CREATE TRIGGER fail_bot_update BEFORE UPDATE ON bots BEGIN SELECT RAISE(ABORT, 'boom'); END").execute(&env.app.db).await.unwrap();
+        observe(&env.app, &run, AUTO).await;
+        assert_eq!(effort_of(&env, &bot, &run_id).await, (Some("high".into()), Some("high".into())), "兩邊都沒動");
+        sqlx::query("DROP TRIGGER fail_bot_update").execute(&env.app.db).await.unwrap();
+        observe(&env.app, &run, AUTO).await;
+        assert_eq!(effort_of(&env, &bot, &run_id).await, (None, Some("default".into())), "下一輪補上");
+    }
+
+    /// Clear 成功、runtime 寫失敗：下輪 Clear 是 no-op，runtime 補上，不回頭把設定寫回去。
+    #[tokio::test]
+    async fn a_failed_runtime_write_after_clear_converges_on_the_next_sweep() {
+        let env = crate::testing::env().await;
+        let (bot, run_id) = child_with_effort(&env, "kidrt", "child", Some("high")).await;
+        let run = db::run(&env.app.db, &run_id).await.unwrap().unwrap();
+        sqlx::query("CREATE TRIGGER refuse_runtime BEFORE UPDATE OF runtime_effort ON runs BEGIN SELECT RAISE(ABORT, 'boom'); END").execute(&env.app.db).await.unwrap();
+        observe(&env.app, &run, AUTO).await;
+        assert_eq!(effort_of(&env, &bot, &run_id).await, (None, Some("high".into())), "設定已清，runtime 還沒收斂");
+        sqlx::query("DROP TRIGGER refuse_runtime").execute(&env.app.db).await.unwrap();
+        observe(&env.app, &run, AUTO).await;
+        assert_eq!(effort_of(&env, &bot, &run_id).await, (None, Some("default".into())));
+    }
+
     /// 2.1.286 同級 fallback：argv／設定是 Opus 5.5，server 退回上一版（statusLine 回的 id 不同）。
     fn statusline(model: serde_json::Value) -> crate::hookrecv::HookBody {
         crate::hookrecv::HookBody {
