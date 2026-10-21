@@ -6,7 +6,7 @@ import { ConfirmDialog } from './ConfirmDialog'
 import { KindTag } from './KindTag'
 import './identitiesPanel.css'
 
-import { checkEnvText, envDisplayText } from './identityEnv'
+import { checkEnvText, emptyEnvKeys, envDisplayText } from './identityEnv'
 import { useUnsavedGuard } from '../hooks/useUnsavedGuard'
 /** 身份預設（例如 `cc1` = 另一個 `CLAUDE_CONFIG_DIR`）：daemon 啟動 bot 時注入 `env`；`args` 契約仍在但 UI 不提供輸入。 */
 
@@ -229,6 +229,7 @@ function IdentityRow({ host, name }: { host: string; name: string }) {
   const [confirmDelete, setConfirmDelete] = useState(false)
   if (!ident) return null
   const envText = envDisplayText(ident.env)
+  const emptyKeys = emptyEnvKeys(ident.env)
   return (
     <div className="identity-row">
       <span className="identity-main">
@@ -240,6 +241,11 @@ function IdentityRow({ host, name }: { host: string; name: string }) {
           <span className="host-count">{used > 0 ? `${used} 個 Bot` : '未使用'}</span>
           <DisabledChip host={host} kind={ident.kind} name={ident.name} />
         </span>
+        {emptyKeys.length > 0 ? (
+          <span className="identity-empty-env" role="alert" title="空值等於沒設；要改請到 config.toml 該身份的 [identities.env] 寫上值，或刪掉這個身份重建">
+            ⚠ env {emptyKeys.join('、')} 的值是空的，這個身份會悄悄用預設帳號
+          </span>
+        ) : null}
         <span className="identity-detail" title={envText}>
           {envText ? envText.replace(/\n/g, ' ・ ') : '（無 env）'}
         </span>

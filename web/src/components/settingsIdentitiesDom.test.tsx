@@ -4,7 +4,7 @@
  */
 import test, { after, afterEach, before } from 'node:test'
 import assert from 'node:assert/strict'
-import { click, mockApi, mount, setupDom, teardownDom, typeInto, unmountAll, until } from '../testing/domHarness'
+import { act, click, mockApi, mount, setupDom, teardownDom, typeInto, unmountAll, until } from '../testing/domHarness'
 import type { FakeRequest } from '../testing/domHarness'
 import { advanceMockTime, sharedMock, virtualMockTime } from '../testing/sharedMock'
 import { dispatchFrameForTest, resetStoreForTest, useStore } from '../store/store'
@@ -193,3 +193,18 @@ it('新增身份完成時不清掉送出後又輸入的下一個身份名稱', a
     globalThis.fetch = originalFetch
   }
 })
+
+it('config 裡既有的空值 env 身份在列上標警告（只標示，不送任何改寫請求）；有值的身份不標', async () => {
+  const requests = await open()
+  await mount_with_identities()
+  assert.equal(row('cc1').querySelector('.identity-empty-env'), null, '有值的身份不標')
+  const warn = row('cc-empty').querySelector('.identity-empty-env')
+  assert.ok(warn, '空值身份要有警告')
+  assert.match(warn!.textContent ?? '', /CLAUDE_CONFIG_DIR.*預設帳號/)
+  assert.deepEqual(requests.filter((r) => r.method !== 'GET' && /identit/.test(r.path)), [], '設定頁只標示，不改寫')
+})
+
+async function mount_with_identities() {
+  const { identities } = useStore.getState()
+  await act(() => useStore.setState({ identities: [...identities, { name: 'cc-empty', kind: 'claude', env: { CLAUDE_CONFIG_DIR: '' }, args: [] }] }))
+}

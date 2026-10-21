@@ -17,6 +17,14 @@ export function envToText(env: Record<string, string>): string {
     .join('\n')
 }
 
+/**
+ * 跟 Rust `str::trim`（`char::is_whitespace`＝Unicode White_Space）同一組空白：daemon 用它判斷 env 值是不是空的（`check_identity_env_values`）。
+ * JS 的 `trim()` 集合不同：它多算 U+FEFF、少算 U+0085，同一個值前後端會判得不一樣。
+ */
+const RUST_WS = '\\t\\n\\v\\f\\r \\u0085\\u00a0\\u1680\\u2000-\\u200a\\u2028\\u2029\\u202f\\u205f\\u3000'
+const RUST_TRIM = new RegExp(`^[${RUST_WS}]+|[${RUST_WS}]+$`, 'g')
+export const rustTrim = (s: string): string => s.replace(RUST_TRIM, '')
+
 const ENV_NAME = /^[A-Za-z_][A-Za-z0-9_]*$/
 
 /**
@@ -28,7 +36,7 @@ export function checkEnvText(text: string): { env: Record<string, string>; error
   const env: Record<string, string> = {}
   const errors: string[] = []
   text.split('\n').forEach((raw, idx) => {
-    const line = raw.trim()
+    const line = rustTrim(raw)
     if (!line || line.startsWith('#')) return
     const n = idx + 1
     const i = line.indexOf('=')
@@ -36,7 +44,7 @@ export function checkEnvText(text: string): { env: Record<string, string>; error
       errors.push(`第 ${n} 行「${line}」沒有 =（要寫成 KEY=VALUE）`)
       return
     }
-    const key = line.slice(0, i).trim()
+    const key = rustTrim(line.slice(0, i))
     if (!key) {
       errors.push(`第 ${n} 行的 key 是空的（要寫成 KEY=VALUE）`)
       return
@@ -45,7 +53,7 @@ export function checkEnvText(text: string): { env: Record<string, string>; error
       errors.push(`第 ${n} 行 key「${key}」不是合法的環境變數名稱（只能英數與 _，不能數字開頭）`)
       return
     }
-    const value = line.slice(i + 1).trim()
+    const value = rustTrim(line.slice(i + 1))
     // 值留空（`CLAUDE_CONFIG_DIR=`，多半是把 `$HOME/.claude-` 的尾巴刪光）：daemon 照存，身份就悄悄用了預設帳號。
     if (!value) {
       errors.push(`第 ${n} 行 ${key} 的值是空的（空值等於沒設，身份會悄悄用預設帳號；要就寫上值，不要就刪掉這一行）`)
@@ -65,4 +73,14 @@ export function envDisplayText(env: Record<string, string>): string {
   return Object.entries(env)
     .map(([k, v]) => `${k}=${SECRET_KEY.test(k) && v ? '••••••' : v}`)
     .join('\n')
+}
+
+/**
+ * 設定檔裡既有的身份可能帶空值（#1750 之前存下的、或手寫的 `CLAUDE_CONFIG_DIR=`）：啟動時等於沒設，身份悄悄用預設帳號。
+ * 回傳值為空或全空白的 key（規則同 daemon 的 `check_identity_env_values`）；設定頁只標示，不改寫 config.toml。
+ */
+export function emptyEnvKeys(env: Record<string, string>): string[] {
+  return Object.entries(env)
+    .filter(([, v]) => !rustTrim(v))
+    .map(([k]) => k)
 }

@@ -10563,6 +10563,17 @@ mod bot_config_tests {
         assert!(patch(&e, &id, json!({"env": {"GOOD_NAME": "1"}})).await.is_ok());
     }
 
+    /// 前端 `identityEnv.rustTrim` 照這一組空白判空（#1883）：U+0085／U+3000 算空白被拒，U+FEFF 不算空白所以放行。
+    #[test]
+    fn identity_env_emptiness_uses_rust_whitespace() {
+        for empty in ["\u{85}", "\u{3000}", " \t\u{a0}\u{2003}\r\n"] {
+            let env = BTreeMap::from([("CLAUDE_CONFIG_DIR".to_string(), empty.to_string())]);
+            assert!(check_identity_env_values(&env).is_err(), "{empty:?} 應判空");
+        }
+        let env = BTreeMap::from([("CLAUDE_CONFIG_DIR".to_string(), "\u{feff}".to_string())]);
+        assert!(check_identity_env_values(&env).is_ok(), "U+FEFF 不是 Rust 空白");
+    }
+
     #[tokio::test]
     async fn identity_args_reject_nul_before_persistence() {
         let e = env().await;
