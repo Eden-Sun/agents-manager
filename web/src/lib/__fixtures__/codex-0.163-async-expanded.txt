@@ -1,0 +1,20 @@
+  >_ OpenAI Codex (v0.163.0)
+     ~/cxprobe
+  permissions: YOLO mode
+
+› Call the request_user_input_async tool once with one question titled "Which color?" and options ["red","blue","green"], then wait. Do not do anything else.
+
+• Which color?
+  • red
+  • blue
+  • green
+
+• Working (39s • esc to interrupt)
+
+• Queued follow-up inputs
+  Which color?
+  › 1. red
+    2. blue
+    3. green
+    4. Other
+  enter submit   ^] skip   shift+→ main prompt

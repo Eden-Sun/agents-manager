@@ -120,6 +120,7 @@ pub use am_base::{
     child_runtime,
     claude_live,
     claude_mode,
+    codex_async_question,
     codex_update,
     composer_parse,
     config_audit,

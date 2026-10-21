@@ -41,6 +41,7 @@ pub fn spawn_survey_watcher(app: Arc<App>) {
             // claude 停在一般權限確認選單：事件那一刻漏掉、或選單換了一種工具，這裡每輪重讀一次（只看、不按鍵）。
             if run.agent_status == "blocked" {
                 crate::blocked_reason::observe(&app, &run).await;
+                crate::runners::codex_async_question::observe(&app, &run).await;
             }
         }
     });

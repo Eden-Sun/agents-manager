@@ -19,6 +19,7 @@ import { isSurvey } from '../lib/choiceDraft'
 import { surveyDraftAllowed } from '../store/mobilePreview'
 import { BlockedDraft } from './BlockedDraft'
 import { CodexUpdateHint } from './CodexUpdateHint'
+import { CodexAsyncQuestion } from './CodexAsyncQuestion'
 
 /** 低於這個欄數，TUI 會把自己的輸出折成碎片，畫面本身就讀不了（同 TerminalTab）。 */
 const READABLE_COLUMNS = 60
@@ -161,6 +162,7 @@ export function BlockedModal({ botId, onClose }: { botId: string; onClose: () =>
         ) : null}
 
         <CodexUpdateHint botId={botId} text={snap?.text} onAnswered={refresh} />
+        <CodexAsyncQuestion botId={botId} text={snap?.text} questions={pending} onAnswered={refresh} />
 
         {pendingStatus === 'unavailable' ? <div role="status">暫時無法確認待答題目，請參考終端畫面。</div> : null}
         {/* 認不出選單時原題攤開、排在終端上面（那時它是唯一讀得懂的題目）；認得出時收進下面的主捲軸（#559）。 */}

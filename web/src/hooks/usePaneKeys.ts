@@ -13,6 +13,9 @@ export const KEYPAD: { label: string; keys: string[]; title: string }[] = [
   { label: '↑', keys: ['up'], title: '游標上移' },
   { label: '↓', keys: ['down'], title: '游標下移' },
   { label: 'ctrl+c', keys: ['ctrl+c'], title: '送出 ctrl+c' },
+  // codex 非同步提問（issue #1879）：收合的提問要 shift+← 展開才能作答；shift+→ 回到主輸入框。
+  { label: '⇧←', keys: ['shift+left'], title: '送出 shift+←（codex：展開非同步提問）' },
+  { label: '⇧→', keys: ['shift+right'], title: '送出 shift+→（codex：回到主輸入框）' },
 ]
 
 /**

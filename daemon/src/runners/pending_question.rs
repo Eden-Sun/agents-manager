@@ -22,6 +22,9 @@ pub async fn get_pending_question(State(app): State<Arc<App>>, Path(id): Path<St
     let bot = db::bot(&app.db, &id).await.map_err(up)?.ok_or_else(|| LcError::NotFound("bot".into()))?;
     let run = db::active_run(&app.db, &id).await.map_err(up)?.ok_or_else(|| LcError::NotFound("run".into()))?;
     let null = || Ok(Json(json!({"questions": null, "jev_options": null})));
+    if bot.kind == "codex" {
+        return codex_async(&app, &bot, &run).await;
+    }
     if bot.kind != "claude" {
         return null();
     }
@@ -41,6 +44,29 @@ pub async fn get_pending_question(State(app): State<Arc<App>>, Path(id): Path<St
     let Some((tool_use_id, input)) = entry else { return null() };
     let jev_options = crate::judge::ask_option::hint_for(&app, &bot, &run.id, &tool_use_id, &input, fresh).await;
     Ok(Json(json!({"questions": input.get("questions").cloned(), "jev_options": jev_options})))
+}
+
+/// codex 的非同步提問（`request_user_input_async`，issue #1879）：畫面上排著提問時，題目與選項從 rollout 讀，
+/// 形狀同 claude 的 `questions`（`header`／`multiSelect` 固定空與 `false`，另帶 `call_id`／`index`）；`async_screen` 是畫面狀態
+/// （`expanded`：已按 shift+← 展開；`count`：畫面上排著幾題），網頁作答前靠它與重讀畫面對帳。
+/// 畫面上沒有提問（含讀不到畫面）`questions` 與 `async_screen` 都是 `null`；遠端主機或找不到 rollout 時只有 `async_screen`。
+async fn codex_async(app: &Arc<App>, bot: &db::Bot, run: &db::Run) -> Result<Json<Value>, LcError> {
+    let Some(Some(snap)) = crate::runners::codex_async_question::snapshot(app, bot, run).await else {
+        return Ok(Json(json!({"questions": null, "jev_options": null, "async_screen": null})));
+    };
+    let questions: Vec<Value> = snap
+        .questions
+        .iter()
+        .map(|q| {
+            let options: Vec<Value> = q.options.iter().map(|o| json!({"label": o, "description": ""})).collect();
+            json!({"question": q.title, "header": "", "multiSelect": false, "options": options, "call_id": q.call_id, "index": q.index})
+        })
+        .collect();
+    Ok(Json(json!({
+        "questions": if questions.is_empty() { Value::Null } else { Value::Array(questions) },
+        "jev_options": null,
+        "async_screen": {"expanded": snap.screen.expanded, "count": snap.screen.count},
+    })))
 }
 
 #[cfg(test)]
@@ -68,6 +94,182 @@ mod path_guard_tests {
 
         let Json(body) = get_pending_question(State(app), Path(bot.id)).await.unwrap();
         assert_eq!(body["questions"], Value::Null, "未驗證的舊路徑不能讓任意本機 JSONL 內容出現在 API 回應");
+    }
+}
+
+/// codex 非同步提問（issue #1879）：題目從本機 rollout 讀，畫面是「排著幾題」的真相。
+#[cfg(test)]
+mod codex_async_tests {
+    use super::*;
+    use crate::testing as tt;
+
+    const SESSION: &str = "01a15bc3-38d3-78d2-8277-ce884f555ebc";
+    const COLLAPSED: &str = "• Queued follow-up inputs\n  ? 1 question · 7s\n    shift+← to answer\n› Ask Codex to do anything\n";
+
+    fn ask(call_id: &str, questions: Value) -> String {
+        json!({"type": "response_item", "payload": {"type": "function_call", "name": "request_user_input_async", "call_id": call_id,
+            "arguments": json!({"questions": questions}).to_string()}})
+        .to_string()
+    }
+
+    fn reply(call_id: &str, index: usize) -> String {
+        let items = json!([{"answer": "x", "question": "q", "questionItemId": json!(["request_user_input_async", call_id, index]).to_string()}]);
+        json!({"type": "response_item", "payload": {"type": "message", "role": "user",
+            "content": [{"type": "input_text", "text": format!("<send_user_message_question_reply>\n{items}\n</send_user_message_question_reply>")}]}})
+        .to_string()
+    }
+
+    /// 一顆本機 codex bot：自己的 CODEX_HOME 底下有這個 session 的 rollout（synthetic，形狀照 codex 0.163.0 真機）。
+    /// `live`：herdr 回報綁在這顆 pane 上的 session（`None`＝herdr 沒回報）；DB 記的 session 是 `db_session`。
+    async fn rig_with(files: &[(&str, Vec<String>)], screen: &str, live: Option<&str>, db_session: &str) -> (Arc<App>, String, tt::Env) {
+        let env = tt::env().await;
+        let app = env.app.clone();
+        let bot = tt::claude_bot(&app, &env.project_id, "async-api").await;
+        let home = tt::track(std::env::temp_dir().join(format!("am-codex-async-{}", db::ulid())));
+        let dir = home.join("sessions/2026/10/21");
+        std::fs::create_dir_all(&dir).unwrap();
+        for (session, rollout) in files {
+            std::fs::write(dir.join(format!("rollout-2026-10-21T00-00-00-{session}.jsonl")), rollout.join("\n")).unwrap();
+        }
+        sqlx::query("UPDATE bots SET kind='codex', env_json=? WHERE id=?")
+            .bind(json!({"CODEX_HOME": home.to_string_lossy()}).to_string())
+            .bind(&bot.id)
+            .execute(&app.db)
+            .await
+            .unwrap();
+        let run_id = tt::fake_run(&app, &bot.id).await;
+        sqlx::query("UPDATE runs SET pane_id='pane-async-api', agent_status='blocked', native_session_id=? WHERE id=?")
+            .bind(db_session)
+            .bind(&run_id)
+            .execute(&app.db)
+            .await
+            .unwrap();
+        env.herdr.set_screen("pane-async-api", screen);
+        if let Some(live) = live {
+            env.herdr.agents.lock().unwrap().push(json!({"name": "async-api", "agent": "codex", "agent_status": "blocked",
+                "workspace_id": "w0", "tab_id": "w0:t0", "pane_id": "pane-async-api", "agent_session": {"kind": "id", "value": live}}));
+        }
+        (app, bot.id, env)
+    }
+
+    /// herdr 回報了 live session、DB 也記同一個（常態）。
+    async fn rig(rollout: &[String], screen: &str) -> (Arc<App>, String, tt::Env) {
+        rig_with(&[(SESSION, rollout.to_vec())], screen, Some(SESSION), SESSION).await
+    }
+
+    #[tokio::test]
+    async fn the_collapsed_prompt_gets_its_question_and_options_from_the_rollout() {
+        let log = [ask("c1", json!([{"title": "「智選 hub 的 menu 最下方」是哪個選單？", "options": ["左側清單", "bot 的「⋯」選單"]}]))];
+        let (app, bot, env) = rig(&log, COLLAPSED).await;
+        let Json(body) = get_pending_question(State(app), Path(bot)).await.unwrap();
+        assert_eq!(body["questions"][0]["question"], "「智選 hub 的 menu 最下方」是哪個選單？");
+        assert_eq!(body["questions"][0]["options"][1]["label"], "bot 的「⋯」選單");
+        assert_eq!(body["questions"][0]["call_id"], "c1");
+        assert_eq!(body["async_screen"], json!({"expanded": false, "count": 1}));
+        assert!(env.herdr.calls_to("pane.send_keys").is_empty() && env.herdr.calls_to("pane.send_text").is_empty(), "只讀、不按鍵");
+    }
+
+    /// 答過的題目不再出現；畫面題數與沒作答的題數一致時全部都是。
+    #[tokio::test]
+    async fn answered_questions_are_not_returned() {
+        let log = [ask("done", json!([{"title": "答過的？"}])), reply("done", 0), ask("new", json!([{"title": "現在這題？"}]))];
+        let (app, bot, _env) = rig(&log, COLLAPSED).await;
+        let Json(body) = get_pending_question(State(app), Path(bot)).await.unwrap();
+        let qs = body["questions"].as_array().unwrap();
+        assert_eq!(qs.len(), 1);
+        assert_eq!(qs[0]["question"], "現在這題？");
+    }
+
+    /// 審查反例（P2）：同一個 call 問了 Q1、Q2，使用者在 TUI 切到 Q2 按 `^]` 跳過，畫面剩 1 題（Q1）；rollout 兩題都沒有 reply。
+    /// 兩題原文都在對話紀錄裡，分不出剩哪一題：降級成只有題數，絕不回 Q2。
+    #[tokio::test]
+    async fn a_skipped_question_degrades_instead_of_guessing_the_last_one() {
+        let log = [ask("c1", json!([{"title": "Pick a size?", "options": ["S", "M"]}, {"title": "Your name?"}]))];
+        let screen = format!("• Pick a size?\n  • S\n  • M\n  Your name?\n{COLLAPSED}");
+        let (app, bot, _env) = rig(&log, &screen).await;
+        let Json(body) = get_pending_question(State(app), Path(bot)).await.unwrap();
+        assert_eq!(body["questions"], Value::Null);
+        assert_eq!(body["async_screen"], json!({"expanded": false, "count": 1}));
+    }
+
+    /// 複審反例：Q1 待答但已捲出畫面，Q2 剛跳過、原文還在畫面上；畫面剩 1 題。沒作答 2 題 ≠ 畫面 1 題＝有跳過歧義：降級，
+    /// 對話紀錄裡看得到 Q2 不是證據，不可回 Q2。
+    #[tokio::test]
+    async fn a_visible_skipped_question_does_not_make_it_the_pending_one() {
+        let log = [ask("c1", json!([{"title": "Q1?"}])), ask("c2", json!([{"title": "Q2?"}]))];
+        let screen = format!("• Q2?\n{COLLAPSED}");
+        let (app, bot, _env) = rig(&log, &screen).await;
+        let Json(body) = get_pending_question(State(app), Path(bot)).await.unwrap();
+        assert_eq!(body["questions"], Value::Null);
+        assert_eq!(body["async_screen"], json!({"expanded": false, "count": 1}));
+    }
+
+    /// 審查反例（P3）：/new 或 resume 後 DB 的 native_session_id 還是舊的。以 herdr 當下綁的 session 為準：讀新 session 的 rollout，
+    /// 舊 session 檔裡沒作答的題目不會冒出來。
+    #[tokio::test]
+    async fn the_live_session_wins_over_a_stale_db_session() {
+        const OLD: &str = "01a15bc3-0000-0000-0000-000000000001";
+        let files = [(OLD, vec![ask("c-old", json!([{"title": "舊 session 的題目？"}]))]), (SESSION, vec![ask("c-new", json!([{"title": "新 session 的題目？"}]))])];
+        let (app, bot, _env) = rig_with(&files, COLLAPSED, Some(SESSION), OLD).await;
+        let Json(body) = get_pending_question(State(app), Path(bot)).await.unwrap();
+        assert_eq!(body["questions"][0]["question"], "新 session 的題目？");
+        assert_eq!(body["questions"].as_array().unwrap().len(), 1);
+    }
+
+    /// herdr 沒回報 session、只剩 DB 的（可能是舊的）：題目原文必須在畫面上看得到才認，否則降級。
+    #[tokio::test]
+    async fn without_a_live_session_the_question_must_be_visible_on_screen() {
+        let log = [ask("c1", json!([{"title": "舊 session 的題目？"}]))];
+        let (app, bot, _env) = rig_with(&[(SESSION, log.to_vec())], COLLAPSED, None, SESSION).await;
+        let Json(body) = get_pending_question(State(app), Path(bot)).await.unwrap();
+        assert_eq!(body["questions"], Value::Null, "畫面上沒有這題的原文：可能是 /new 之前的舊題");
+        assert_eq!(body["async_screen"], json!({"expanded": false, "count": 1}));
+
+        let screen = format!("• 舊 session 的題目？\n{COLLAPSED}");
+        let (app, bot, _env) = rig_with(&[(SESSION, log.to_vec())], &screen, None, SESSION).await;
+        let Json(body) = get_pending_question(State(app), Path(bot)).await.unwrap();
+        assert_eq!(body["questions"][0]["question"], "舊 session 的題目？");
+    }
+
+    /// 展開後（自由輸入題）：面板裡的題目原文對得上才回，網頁拿它當「這題」。
+    #[tokio::test]
+    async fn an_expanded_panel_returns_the_question_it_shows() {
+        let log = [ask("c1", json!([{"title": "Your name?"}])), ask("c2", json!([{"title": "別題？"}]))];
+        let screen = "• 別題？\n• Queued follow-up inputs\n  Your name?\n  Type your answer\n  enter submit   ^] skip   shift+→ main prompt\n";
+        let (app, bot, _env) = rig(&log, screen).await;
+        let Json(body) = get_pending_question(State(app), Path(bot)).await.unwrap();
+        let qs = body["questions"].as_array().unwrap();
+        assert_eq!(qs.len(), 1);
+        assert_eq!(qs[0]["question"], "Your name?");
+        assert_eq!(body["async_screen"], json!({"expanded": true, "count": 1}));
+    }
+
+    /// 複審 P2：面板上是「Full Name?」，rollout 裡舊的待答題是「Name?」——子字串不算同題，questions 是 null（降級）。
+    #[tokio::test]
+    async fn a_question_that_is_only_a_substring_of_the_panel_title_is_not_returned() {
+        let log = [ask("c1", json!([{"title": "Name?"}]))];
+        let screen = "• Queued follow-up inputs\n  Full Name?\n  Type your answer\n  enter submit   ^] skip   shift+→ main prompt\n";
+        let (app, bot, _env) = rig(&log, screen).await;
+        let Json(body) = get_pending_question(State(app), Path(bot)).await.unwrap();
+        assert_eq!(body["questions"], Value::Null);
+        assert_eq!(body["async_screen"], json!({"expanded": true, "count": 1}));
+    }
+
+    /// 畫面上沒有提問（作答了、跳過了）：什麼都不回，就算 rollout 裡還有沒對到 reply 的題目。
+    #[tokio::test]
+    async fn no_prompt_on_screen_means_no_question() {
+        let (app, bot, _env) = rig(&[ask("c1", json!([{"title": "Q?"}]))], "› Ask Codex to do anything\n").await;
+        let Json(body) = get_pending_question(State(app), Path(bot)).await.unwrap();
+        assert_eq!((body["questions"].clone(), body["async_screen"].clone()), (Value::Null, Value::Null));
+    }
+
+    /// 找不到 rollout（或遠端主機）：畫面狀態照給，`questions` 是 `null`。
+    #[tokio::test]
+    async fn without_a_rollout_only_the_screen_state_comes_back() {
+        let (app, bot, _env) = rig_with(&[], COLLAPSED, None, "no-such-session").await;
+        let Json(body) = get_pending_question(State(app), Path(bot)).await.unwrap();
+        assert_eq!(body["questions"], Value::Null);
+        assert_eq!(body["async_screen"], json!({"expanded": false, "count": 1}));
     }
 }
 

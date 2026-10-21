@@ -1,0 +1,21 @@
+  >_ OpenAI Codex (v0.163.0)
+     ~/cxprobe
+  permissions: YOLO mode
+
+› Call the request_user_input_async tool once with one question titled "Which color?" and options ["red","blue","green"], then wait. Do not do anything else.
+
+• Which color?
+  • red
+  • blue
+  • green
+
+• Working (39s • esc to interrupt)
+
+• Queued follow-up inputs
+  ? 1 question · 7s
+    shift+← to answer
+
+› Ask Codex to do anything
+
+  GPT-6.1-Sol default · ~/cxprobe · Ask for color choice
+  ← for agents · ? for shortcuts                                                                                                       ⚠ 1 warning · f2 to view

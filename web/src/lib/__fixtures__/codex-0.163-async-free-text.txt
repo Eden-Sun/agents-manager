@@ -1,0 +1,13 @@
+• Pick a size?
+  • S
+  • M
+  Your name?
+› > Pick a size?
+  S
+
+• Working (41s • esc to interrupt)
+
+• Queued follow-up inputs
+  Your name?
+  Type your answer
+  enter submit   ^] skip   shift+→ main prompt

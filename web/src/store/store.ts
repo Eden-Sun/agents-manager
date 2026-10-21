@@ -577,10 +577,11 @@ export interface StoreState {
   pruneLoginPromptDismissed: (pending: PendingLogin[]) => void
   /** 一鍵送出 claude 的建議下一句（`run.prompt_suggestion`）：daemon 對 pane 送 Tab 再送 Enter，跟終端一模一樣。`true`＝送出了；失敗已跳通知。 */
   acceptSuggestion: (botId: string) => Promise<boolean>
-  sendKeys: (botId: string, keys: string[]) => Promise<void>
+  /** `pinRunId`：作答流程固定的 Run（`lib/runPin.ts`）；帶了就只送給這個 Run，不符直接失敗，不走 fresh-run 重試。 */
+  sendKeys: (botId: string, keys: string[], pinRunId?: string | null) => Promise<void>
   /** 多行內容要走這裡：`sendKeys` 吃鍵名，`\n` 不是鍵名（見 `store/alongside.ts`）。 */
   /** `record`：見 `api.sendText`（網頁的「補充」才帶）。 */
-  sendText: (botId: string, text: string, enter: boolean, record?: boolean) => Promise<boolean>
+  sendText: (botId: string, text: string, enter: boolean, record?: boolean, pinRunId?: string | null) => Promise<boolean>
   abandonTurn: (botId: string, turnId: string) => Promise<void>
   addHost: (input: NewHostInput) => Promise<HostResult | null>
   addIdentity: (input: NewIdentityInput) => Promise<boolean>
@@ -1870,18 +1871,20 @@ export const useStore = create<StoreState>((set, get) => {
     return sent
   },
 
-  async sendKeys(botId, keys) {
+  async sendKeys(botId, keys, pinRunId) {
     try {
-      await sendWithFreshRun(get, botId, (runId) => api.sendKeys(botId, keys, runId))
+      if (pinRunId) await api.sendKeys(botId, keys, pinRunId)
+      else await sendWithFreshRun(get, botId, (runId) => api.sendKeys(botId, keys, runId))
     } catch (e) {
       get().notify('error', `送出按鍵失敗：${errText(e)}`)
       throw e
     }
   },
 
-  async sendText(botId, text, enter, record = false) {
+  async sendText(botId, text, enter, record = false, pinRunId) {
     try {
-      await sendWithFreshRun(get, botId, (runId) => api.sendText(botId, text, enter, runId, record))
+      if (pinRunId) await api.sendText(botId, text, enter, pinRunId, record)
+      else await sendWithFreshRun(get, botId, (runId) => api.sendText(botId, text, enter, runId, record))
       return true
     } catch (e) {
       get().notify('error', `送出文字失敗：${errText(e)}`)
