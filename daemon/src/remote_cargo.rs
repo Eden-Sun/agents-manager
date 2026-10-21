@@ -45,6 +45,8 @@ const SSH_FAILED: i32 = 255;
 #[cfg(test)]
 thread_local! {
     static TEST_PROGRAMS: std::cell::RefCell<Option<(String, String)>> = const { std::cell::RefCell::new(None) };
+    // 測試用：覆寫正式路徑（[`Admission::from_cfg`]）的排隊等待秒數；一樣是執行緒本地，要在呼叫 `run_offload` 的那條執行緒上設。
+    static TEST_QUEUE_WAIT_SECS: std::cell::Cell<Option<u64>> = const { std::cell::Cell::new(None) };
 }
 
 fn ssh_program() -> String {
@@ -864,8 +866,18 @@ impl Admission {
             max: remote.max_concurrent,
             jobs: remote.cargo_jobs.max(1),
             shared_wait_secs: SHARED_WAIT_SECS,
-            queue_wait_secs: QUEUE_WAIT_SECS,
+            queue_wait_secs: Self::queue_wait_secs(),
         }
+    }
+
+    fn queue_wait_secs() -> u64 {
+        #[cfg(test)]
+        {
+            if let Some(secs) = TEST_QUEUE_WAIT_SECS.with(|w| w.get()) {
+                return secs;
+            }
+        }
+        QUEUE_WAIT_SECS
     }
 }
 
@@ -5873,6 +5885,8 @@ fn main() {
 
     /// 端到端（真的 `run_offload`＋真的守門）：四棵 worktree 同時跑、上限 2，任何時刻最多兩個遠端 cargo，而且四個都跑完、結果原樣帶回。
     /// 修正前沒有遠端上限：四個一起跑（2026-09-19 就是 9 個冷編譯同時跑把遠端壓垮）。
+    /// 正式的排隊等待只有 3 秒（#1853），機器一忙前兩個超過 3 秒，後兩個就合法地退回本機（125）——這條驗的是上限與排隊，
+    /// 所以每條執行緒各自把排隊等待設長（#1880：thread_local 不會跟著 spawn 走）。
     #[test]
     fn concurrent_calls_from_different_worktrees_never_exceed_the_remote_cap() {
         let base = base();
@@ -5895,6 +5909,7 @@ fn main() {
                 .unwrap();
                 let (remote, data, base) = (remote.clone(), data.clone(), base.clone());
                 std::thread::spawn(move || {
+                    TEST_QUEUE_WAIT_SECS.with(|w| w.set(Some(60)));
                     with_fake_transport(&base, || run_offload(&remote, &data, &cwd, &["test".to_string()], &Deadline::new(remote.timeout_secs)))
                 })
             })
