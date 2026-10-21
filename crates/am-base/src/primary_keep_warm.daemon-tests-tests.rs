@@ -143,12 +143,45 @@
         age_window_closed_for_test(run, WINDOW_GRACE);
         settle_window(run, true);
         assert!(!window_open(run));
-        assert!(cache_clock::on_statusline(run, Some(b), Some(c), "2026-10-04T12:00:00.000Z"), "視窗關了，真的活動照算");
+        assert!(echo_open(run), "視窗收掉之後還有回音期");
+        age_echo_for_test(run, WINDOW_ECHO);
+        assert!(!echo_open(run));
+        assert!(cache_clock::on_statusline(run, Some(b), Some(c), "2026-10-04T12:00:00.000Z"), "視窗與回音期都過了，真的活動照算");
         // 視窗有最長期限。
         open_window(run);
         age_window_opened_for_test(run, WINDOW_MAX);
         assert!(!window_open(run));
         drop_window(run);
+    }
+
+    /// #1885：保溫收尾後約 5 分鐘，claude 的背景 API 呼叫（或晚到的遠端 statusLine）讓指紋變化；不能當成真的活動把錨點前移。
+    #[test]
+    fn a_statusline_change_after_the_window_settled_is_an_echo_not_activity() {
+        let run = "r-keep-warm-echo";
+        let a = r#"{"cost":{"total_api_duration_ms":100},"context_window":{"total_output_tokens":5}}"#;
+        let b = r#"{"cost":{"total_api_duration_ms":180},"context_window":{"total_output_tokens":9}}"#;
+        let c = r#"{"cost":{"total_api_duration_ms":260},"context_window":{"total_output_tokens":14}}"#;
+        open_window(run);
+        age_window_opened_for_test(run, WINDOW_MIN);
+        settle_window(run, true);
+        age_window_closed_for_test(run, WINDOW_GRACE);
+        settle_window(run, true);
+        assert!(!window_open(run) && echo_open(run));
+        // 收尾 5 分鐘後（回音期內）指紋變化：不記、不動錨點。
+        assert!(!cache_clock::on_statusline(run, Some(a), Some(b), "2026-10-04T11:05:00.000Z"));
+        assert_eq!(cache_clock::statusline_at(run), None);
+        // 回音期內再開新一輪保溫：舊回音期作廢、視窗接手，收掉時重新計。
+        open_window(run);
+        assert!(!echo_open(run) && window_open(run));
+        drop_window(run);
+        // 保溫沒送出去（撤回視窗）不留回音期。
+        assert!(!echo_open(run));
+        // 回音期過了，真的活動照算。
+        open_echo(run, WINDOW_ECHO);
+        age_echo_for_test(run, WINDOW_ECHO);
+        assert!(cache_clock::on_statusline(run, Some(b), Some(c), "2026-10-04T12:00:00.000Z"));
+        drop_window(run);
+        assert!(!echo_open(run));
     }
 
     #[test]
@@ -194,6 +227,60 @@
         drop_window(&run.id);
         assert_eq!(rearm_windows(&env.app.db).await.unwrap(), 0);
         assert!(!window_open(&run.id));
+    }
+
+    /// #1885：重啟時回音期也要補（記憶體帳）；收尾超過回音期的不補。
+    #[tokio::test]
+    async fn a_restart_rearms_the_echo_of_a_keep_warm_replied_recently() {
+        let env = tt::env().await;
+        let now = chrono::Utc::now();
+        let (bot, run) = primary(&env, "rearm-echo", "idle").await;
+        turn(&env, &bot, "kw-echo", Some("keep-warm:z"), "completed", &at(8, now), Some(&at(5, now))).await;
+        sqlx::query("UPDATE turns SET run_id = ? WHERE id = 'kw-echo'").bind(&run.id).execute(&env.app.db).await.unwrap();
+        drop_window(&run.id); // 重啟後記憶體是空的
+        assert!(!echo_open(&run.id));
+        assert_eq!(rearm_windows(&env.app.db).await.unwrap(), 0, "視窗已過，只補回音期");
+        assert!(echo_open(&run.id) && !window_open(&run.id));
+        let (bot2, run2) = primary(&env, "rearm-echo-old", "idle").await;
+        turn(&env, &bot2, "kw-echo-old", Some("keep-warm:w"), "completed", &at(40, now), Some(&at(30, now))).await;
+        sqlx::query("UPDATE turns SET run_id = ? WHERE id = 'kw-echo-old'").bind(&run2.id).execute(&env.app.db).await.unwrap();
+        rearm_windows(&env.app.db).await.unwrap();
+        assert!(!echo_open(&run2.id), "收尾超過回音期，真的活動不能被吞");
+        drop_window(&run.id);
+        drop_window(&run2.id);
+    }
+
+    /// #1885 回歸：保溫回覆收尾 5 分鐘後 statusLine 指紋變化，錨點仍是真的活動（回合），不前移，也不會每小時再保溫。
+    #[tokio::test]
+    async fn an_echo_after_the_keep_warm_does_not_move_the_anchor_or_keep_warming() {
+        let env = tt::env().await;
+        let now = chrono::Utc::now();
+        let (bot, run) = primary(&env, "kw-echo-plan", "idle").await;
+        turn(&env, &bot, "t-real", None, "completed", &at(64, now), Some(&at(59, now))).await;
+        let p = plan(&env.app, &bot, &run, now).await.unwrap().unwrap();
+        assert_eq!(p.step, Step::KeepWarm);
+        turn(&env, &bot, "t-keep", Some(&keep_warm_crid(&p.anchor)), "completed", &db::iso_at(now), Some(&db::iso_at(now))).await;
+        open_window(&run.id);
+        age_window_opened_for_test(&run.id, WINDOW_MIN);
+        settle_window(&run.id, true);
+        age_window_closed_for_test(&run.id, WINDOW_GRACE);
+        settle_window(&run.id, true);
+        // 收尾後 5 分鐘：背景 API 呼叫讓指紋變化。
+        let a = r#"{"cost":{"total_api_duration_ms":100},"context_window":{"total_output_tokens":5}}"#;
+        let b = r#"{"cost":{"total_api_duration_ms":180},"context_window":{"total_output_tokens":9}}"#;
+        let echo_at = now + chrono::Duration::minutes(5);
+        assert!(!cache_clock::on_statusline(&run.id, Some(a), Some(b), &db::iso_at(echo_at)));
+        for min in [6, 62, 63, 64] {
+            let later = now + chrono::Duration::minutes(min);
+            let after = plan(&env.app, &bot, &run, later).await.unwrap().unwrap();
+            assert_eq!((after.step, after.anchor.as_str()), (Step::Wait, at(59, now).as_str()), "{min} 分：錨點不前移、不再保溫");
+        }
+        // 真的活動（使用者回合）照樣更新錨點。
+        let fresh = now + chrono::Duration::minutes(20);
+        turn(&env, &bot, "t-user", None, "completed", &db::iso_at(fresh), Some(&db::iso_at(fresh))).await;
+        let p = plan(&env.app, &bot, &run, fresh + chrono::Duration::minutes(58)).await.unwrap().unwrap();
+        assert_eq!((p.step, p.anchor.as_str()), (Step::KeepWarm, db::iso_at(fresh).as_str()));
+        drop_window(&run.id);
     }
 
     async fn primary(env: &tt::Env, name: &str, agent_status: &str) -> (db::Bot, db::Run) {

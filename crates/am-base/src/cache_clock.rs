@@ -62,8 +62,9 @@ fn api_fingerprint(status_json: &str) -> Option<String> {
 
 /// statusLine 換了內容：API 指紋前後都讀得到而且不同，才記下 `at`（閒置重繪、剛起來的第一份都不算）。
 pub fn on_statusline(run_id: &str, old: Option<&str>, new: Option<&str>, at: &str) -> bool {
-    // 保溫回合造成的指紋變化不算活動，否則保溫一次年齡就歸零（`primary_keep_warm`）。
-    if crate::primary_keep_warm::window_open(run_id) {
+    // 保溫回合造成的指紋變化不算活動，否則保溫一次年齡就歸零（`primary_keep_warm`）；視窗收掉後的回音期（背景 API 呼叫、
+    // 遠端 statusLine 晚到，#1885）一樣不算，真的活動以回合紀錄為準。
+    if crate::primary_keep_warm::window_open(run_id) || crate::primary_keep_warm::echo_open(run_id) {
         return false;
     }
     let (Some(old), Some(new)) = (old.and_then(api_fingerprint), new.and_then(api_fingerprint)) else {
