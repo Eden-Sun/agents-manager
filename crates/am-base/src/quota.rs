@@ -1215,6 +1215,45 @@ pub async fn clear_limit_hit(app: &(impl crate::capabilities::DataDir + crate::c
     app.emit("quota_updated", json!({"kind": key, "host": host, "quota": quota_value(&out, stale)})).await;
 }
 
+/// 只清 `success_at` **之前**就命中的撞限，給「成功請求的送達時間」當界線（已關聯的成功回合，daemon 時鐘）。
+///
+/// 撞限的 `at` 與 `success_at` 都要以時刻比較，不比字串：不同 offset 與小數位數照時刻算。任一時間解不開、
+/// 沒有撞限、或撞限不早於 `success_at`，什麼都不動（不寫欄位、不寫 `cleared_at`），回 `false`。
+/// 只有真的清掉舊撞限才把 `cleared_at` 推到 `max(既有, success_at)`，不用 now，也不倒退。
+///
+/// 讀撞限、比較、清除、持久化都在同一把 `cache_write_lock` 內；鎖外不讀撞限，所以晚到的舊快照寫入
+/// 與同一把 key 的新撞限都排在這次判斷之後，不會被它蓋掉或被它清掉。
+pub async fn clear_limit_hit_if_older_than(
+    app: &(impl crate::capabilities::DataDir + crate::capabilities::Db + crate::capabilities::Emit + crate::quota::QuotaStaleKeys + crate::quota::QuotaTables),
+    host: &str,
+    base: &str,
+    success_at: chrono::DateTime<chrono::Utc>,
+) -> bool {
+    let key = quota_key(host, base);
+    let cache_write = cache_write_lock(&key).await;
+    let mut quotas = app.quotas().lock().await;
+    let Some(q) = quotas.get_mut(&key) else { return false };
+    let Some(hit_at) = q.limit_hit.as_ref().and_then(|h| parse_utc(&h.at)) else { return false };
+    if hit_at >= success_at {
+        return false;
+    }
+    q.limit_hit = None;
+    let out = q.clone();
+    drop(quotas);
+    {
+        let mut marks = cleared_at().lock().unwrap();
+        let slot = marks.entry(cleared_at_key(app, &key)).or_insert(success_at);
+        if *slot < success_at {
+            *slot = success_at;
+        }
+    }
+    let stale = app.quota_stale().lock().await.contains(&key);
+    persist_cache_locked(app, &key, &out).await;
+    drop(cache_write);
+    app.emit("quota_updated", json!({"kind": key, "host": host, "quota": quota_value(&out, stale)})).await;
+    true
+}
+
 /// 重啟後的回填來源：這一格的撞限是從「還在等額度的交辦」推回來的，不是誰真的看到橫幅。
 pub const PARKED_SOURCE: &str = "parked-assignment";
 /// 同上，但來源是排著的 prompt 自己記下的撞限（[`restore_limit_hit`]）。
@@ -1596,5 +1635,230 @@ mod cache_write_lock_tests {
         app.quotas.lock().await.remove(&key);
         assert_eq!(load_cache(&app).await.unwrap(), 1);
         assert!(app.quotas.lock().await[&key].limit_hit.is_none(), "重載快取不能復活撞限");
+    }
+}
+
+/// [`clear_limit_hit_if_older_than`]：時間界線、鎖內序列化、`cleared_at` 不倒退、其他欄位不動。
+#[cfg(test)]
+mod clear_if_older_tests {
+    use super::*;
+    use std::future::Future;
+    use std::path::{Path, PathBuf};
+
+    struct CleanApp {
+        db: sqlx::SqlitePool,
+        data_dir: PathBuf,
+        quotas: tokio::sync::Mutex<std::collections::BTreeMap<String, Quota>>,
+        stale: tokio::sync::Mutex<std::collections::BTreeSet<String>>,
+    }
+
+    impl crate::capabilities::Db for CleanApp {
+        fn db(&self) -> &sqlx::SqlitePool {
+            &self.db
+        }
+    }
+
+    impl crate::capabilities::DataDir for CleanApp {
+        fn data_dir(&self) -> &Path {
+            &self.data_dir
+        }
+    }
+
+    impl crate::capabilities::Emit for CleanApp {
+        fn emit(&self, _kind: &str, _data: Value) -> impl Future<Output = ()> + Send {
+            async {}
+        }
+
+        fn current_seq(&self) -> u64 {
+            0
+        }
+    }
+
+    impl QuotaTables for CleanApp {
+        fn quotas(&self) -> &tokio::sync::Mutex<std::collections::BTreeMap<String, Quota>> {
+            &self.quotas
+        }
+    }
+
+    impl QuotaStaleKeys for CleanApp {
+        fn quota_stale(&self) -> &tokio::sync::Mutex<std::collections::BTreeSet<String>> {
+            &self.stale
+        }
+    }
+
+    async fn app() -> CleanApp {
+        let db = sqlx::sqlite::SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect("sqlite::memory:")
+            .await
+            .unwrap();
+        sqlx::query("CREATE TABLE quota_cache (key TEXT PRIMARY KEY, quota_json TEXT NOT NULL, updated_at TEXT NOT NULL)")
+            .execute(&db)
+            .await
+            .unwrap();
+        CleanApp {
+            db,
+            data_dir: std::env::temp_dir().join("quota-clear-if-older-test"),
+            quotas: tokio::sync::Mutex::new(Default::default()),
+            stale: tokio::sync::Mutex::new(Default::default()),
+        }
+    }
+
+    fn t(s: &str) -> chrono::DateTime<chrono::Utc> {
+        chrono::DateTime::parse_from_rfc3339(s).unwrap().with_timezone(&chrono::Utc)
+    }
+
+    /// 帶一顆撞限（`at`）與一些其他欄位的讀數；其他欄位用來驗證清除時沒有被動到。
+    fn with_hit(at: &str) -> Quota {
+        Quota {
+            five_hour: Some(Window { observed_at: None, used_pct: 40.0, resets_at: Some("2026-10-21T05:00:00Z".into()) }),
+            seven_day: Some(Window { observed_at: None, used_pct: 100.0, resets_at: Some("2026-10-26T23:42:00Z".into()) }),
+            fable: None,
+            reset_credits: None,
+            limit_hit: Some(LimitHit {
+                message: "You hit your weekly limit.".into(),
+                until: Some("2026-10-26T23:42:00Z".into()),
+                at: at.into(),
+                bucket: Some("seven_day".into()),
+            }),
+            plan: Some("super".into()),
+            updated_at: "2026-10-20T00:17:12Z".into(),
+            source: "grok-limit-hit".into(),
+            account: Some("acct".into()),
+            host: LOCAL_HOST.into(),
+        }
+    }
+
+    async fn seed(app: &CleanApp, base: &str, q: Quota) -> String {
+        let key = quota_key(LOCAL_HOST, base);
+        app.quotas.lock().await.insert(key.clone(), q);
+        key
+    }
+
+    fn marked(app: &CleanApp, key: &str) -> Option<chrono::DateTime<chrono::Utc>> {
+        cleared_at().lock().unwrap().get(&cleared_at_key(app, key)).copied()
+    }
+
+    #[tokio::test]
+    async fn an_older_hit_is_cleared_and_only_the_limit_field_changes() {
+        let app = app().await;
+        let key = seed(&app, "grok:older-clears", with_hit("2026-10-20T00:17:11.218Z")).await;
+        let before = app.quotas.lock().await[&key].clone();
+        let success = t("2026-10-21T00:10:00Z");
+
+        assert!(clear_limit_hit_if_older_than(&app, LOCAL_HOST, "grok:older-clears", success).await);
+
+        let after = app.quotas.lock().await[&key].clone();
+        assert!(after.limit_hit.is_none(), "早於成功送達的撞限要清掉");
+        assert_eq!(after.five_hour, before.five_hour, "清撞限不動 5h 窗");
+        assert_eq!(after.seven_day, before.seven_day, "清撞限不動 7d 窗（28% 讀數也不拿來清）");
+        assert_eq!(after.plan, before.plan);
+        assert_eq!(after.updated_at, before.updated_at, "清撞限不改讀數時間");
+        assert_eq!(after.source, before.source);
+        assert_eq!(after.account, before.account);
+        assert_eq!(marked(&app, &key), Some(success), "cleared_at 取成功送達時間");
+        let cached: String = sqlx::query_scalar("SELECT quota_json FROM quota_cache WHERE key = ?").bind(&key).fetch_one(&app.db).await.unwrap();
+        assert!(serde_json::from_str::<Quota>(&cached).unwrap().limit_hit.is_none(), "清除要寫進快取");
+    }
+
+    #[tokio::test]
+    async fn an_equal_or_later_hit_is_kept_and_cleared_at_is_not_touched() {
+        let app = app().await;
+        let success = t("2026-10-21T00:10:00Z");
+
+        let equal = seed(&app, "grok:equal-kept", with_hit("2026-10-21T00:10:00.000Z")).await;
+        assert!(!clear_limit_hit_if_older_than(&app, LOCAL_HOST, "grok:equal-kept", success).await, "相等不清");
+        assert!(app.quotas.lock().await[&equal].limit_hit.is_some());
+        assert_eq!(marked(&app, &equal), None, "沒清掉就不寫 cleared_at");
+
+        let later = seed(&app, "grok:later-kept", with_hit("2026-10-21T00:30:00Z")).await;
+        assert!(!clear_limit_hit_if_older_than(&app, LOCAL_HOST, "grok:later-kept", success).await, "較新的撞限不清");
+        assert!(app.quotas.lock().await[&later].limit_hit.is_some());
+        assert_eq!(marked(&app, &later), None);
+    }
+
+    #[tokio::test]
+    async fn no_hit_or_an_unreadable_time_changes_nothing() {
+        let app = app().await;
+        let success = t("2026-10-21T00:10:00Z");
+
+        let mut no_hit = with_hit("2026-10-20T00:17:11Z");
+        no_hit.limit_hit = None;
+        let key = seed(&app, "grok:no-hit", no_hit.clone()).await;
+        assert!(!clear_limit_hit_if_older_than(&app, LOCAL_HOST, "grok:no-hit", success).await);
+        assert_eq!(app.quotas.lock().await[&key], no_hit, "沒有撞限：不動任何欄位");
+        assert_eq!(marked(&app, &key), None, "沒有撞限：不寫 cleared_at");
+
+        let bad = seed(&app, "grok:bad-at", with_hit("not-a-time")).await;
+        assert!(!clear_limit_hit_if_older_than(&app, LOCAL_HOST, "grok:bad-at", success).await, "撞限時間解不開：不清");
+        assert!(app.quotas.lock().await[&bad].limit_hit.is_some());
+        assert_eq!(marked(&app, &bad), None);
+
+        assert!(!clear_limit_hit_if_older_than(&app, LOCAL_HOST, "grok:never-read", success).await, "沒有這一格的讀數");
+    }
+
+    #[tokio::test]
+    async fn the_comparison_is_by_instant_not_by_text() {
+        let app = app().await;
+        // 同一時刻、不同 offset 與小數位數：相等，不清。
+        seed(&app, "grok:offset-equal", with_hit("2026-10-20T02:17:11.218+02:00")).await;
+        assert!(!clear_limit_hit_if_older_than(&app, LOCAL_HOST, "grok:offset-equal", t("2026-10-20T00:17:11.218Z")).await, "+02:00 的同一時刻要當相等");
+
+        // 字串上 `08:00+09:00` 比 `00:00Z` 大，但實際是 23:00Z（較早）：要清。
+        let earlier = seed(&app, "grok:offset-earlier", with_hit("2026-10-20T08:00:00+09:00")).await;
+        assert!(clear_limit_hit_if_older_than(&app, LOCAL_HOST, "grok:offset-earlier", t("2026-10-20T00:00:00Z")).await, "應按時刻比，不按字串");
+        assert!(app.quotas.lock().await[&earlier].limit_hit.is_none());
+
+        // 小數位數：`.2185` 比 `.218` 晚 0.5 毫秒，不清。
+        seed(&app, "grok:precision", with_hit("2026-10-20T00:17:11.2185Z")).await;
+        assert!(!clear_limit_hit_if_older_than(&app, LOCAL_HOST, "grok:precision", t("2026-10-20T00:17:11.218Z")).await, "較晚的小數不能被當成更早");
+    }
+
+    #[tokio::test]
+    async fn cleared_at_never_moves_backwards() {
+        let app = app().await;
+        let base = "grok:monotone";
+        let key = seed(&app, base, with_hit("2026-10-20T00:17:11Z")).await;
+        let late = t("2026-10-21T12:00:00Z");
+        assert!(clear_limit_hit_if_older_than(&app, LOCAL_HOST, base, late).await);
+        assert_eq!(marked(&app, &key), Some(late));
+
+        // 新撞限在 `earlier` 之前就命中，`earlier` 這次成功比上一次早：清得掉，但 cleared_at 仍是 `late`。
+        let earlier = t("2026-10-21T06:00:00Z");
+        app.quotas.lock().await.insert(key.clone(), with_hit("2026-10-21T01:00:00Z"));
+        assert!(clear_limit_hit_if_older_than(&app, LOCAL_HOST, base, earlier).await);
+        assert_eq!(marked(&app, &key), Some(late), "cleared_at 只能往後推，不能倒退");
+    }
+
+    /// #1825 型競爭：舊快照寫入持有 key 鎖時，清除要等它；它寫進的新撞限必須在鎖內被看見、不被清掉。
+    #[tokio::test]
+    async fn a_newer_hit_written_under_the_lock_is_not_cleared_by_an_older_success() {
+        let app = std::sync::Arc::new(app().await);
+        let base = "grok:race-newer-hit";
+        let key = seed(&app, base, with_hit("2026-10-20T00:17:11Z")).await;
+        let success = t("2026-10-21T00:10:00Z");
+
+        // 寫入端先拿鎖，把撞限換成比 `success` 還新的一顆，然後才放鎖。
+        let writer_lock = cache_write_lock(&key).await;
+        let mut newer = with_hit("2026-10-21T00:20:00Z");
+        newer.source = "race-writer".into();
+        app.quotas.lock().await.insert(key.clone(), newer.clone());
+
+        let (started_tx, started_rx) = tokio::sync::oneshot::channel();
+        let clear_app = app.clone();
+        let mut clear = tokio::spawn(async move {
+            let _ = started_tx.send(());
+            clear_limit_hit_if_older_than(&*clear_app, LOCAL_HOST, base, success).await
+        });
+        started_rx.await.unwrap();
+        assert!(
+            tokio::time::timeout(Duration::from_millis(50), &mut clear).await.is_err(),
+            "判斷必須排在寫入端的鎖後面，不能在鎖外先讀到舊撞限"
+        );
+        drop(writer_lock);
+
+        assert!(!clear.await.unwrap(), "鎖內看到的是較新的撞限，不能清");
+        assert_eq!(app.quotas.lock().await[&key], newer, "新撞限與其他欄位原樣保留");
+        assert_eq!(marked(&app, &key), None, "沒清掉就不推 cleared_at");
     }
 }

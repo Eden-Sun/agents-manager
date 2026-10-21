@@ -172,6 +172,8 @@ pub trait TurnFenceOps {
 /// quota：限額讀寫與撞限標記（原 `quota::*`、`turn_error::mark_*_limit_hit`）。
 pub trait QuotaCommands {
     async fn clear_limit_hit_for_bot(&self, bot: &db::Bot);
+    /// 只清 `success_at` 之前就命中的撞限；沒清掉回 `false`，什麼都不動。
+    async fn clear_limit_hit_for_bot_if_older_than(&self, bot: &db::Bot, success_at: chrono::DateTime<chrono::Utc>) -> bool;
     async fn quota_base_for_host(&self, host: &str, kind: &str, identity: Option<&str>) -> String;
     /// `quota::set`。
     async fn set_quota(&self, host: &str, base: &str, q: Quota);

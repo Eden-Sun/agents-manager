@@ -184,6 +184,9 @@ impl QuotaCommands for App {
     async fn clear_limit_hit_for_bot(&self, bot: &db::Bot) {
         crate::runners::quota::clear_limit_hit_for_bot(&self.shared(), bot).await
     }
+    async fn clear_limit_hit_for_bot_if_older_than(&self, bot: &db::Bot, success_at: chrono::DateTime<chrono::Utc>) -> bool {
+        crate::runners::quota::clear_limit_hit_for_bot_if_older_than(&self.shared(), bot, success_at).await
+    }
     async fn quota_base_for_host(&self, host: &str, kind: &str, identity: Option<&str>) -> String {
         quota::quota_base_for_host(&self.shared(), host, kind, identity).await
     }
