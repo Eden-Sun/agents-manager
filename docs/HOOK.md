@@ -51,3 +51,12 @@ scripts/hook-smoke.sh --live --bot <BOT_ID> --bot-token <T> --port 7788   # 打�
 ```
 
 兩邊都 `env -u CLAUDE_CODE_CHILD_SESSION -u CLAUDECODE`。CLI 自己失敗（未登入、額度用盡）且沒有任何 hook 活動時判 **SKIP** 不是 FAIL。
+
+## `scripts/claude-hook-debug.py`（離線 hook 耗時統計）
+
+Claude Code 2.1.296+ 的 `--debug` log 會在每個 command hook 結束時留一行 `Hooks: <event>[:<matcher>] [<command>] … finished with status N (Xms)`（官方 <https://code.claude.com/docs/en/hooks#debug-hooks>）。這支腳本統計那些行：`claude --debug-file <檔>` 之後 `python3 scripts/claude-hook-debug.py <檔>`，或 `… | python3 scripts/claude-hook-debug.py -`。
+
+- **輸入**：只讀使用者明確給的檔案或 stdin；不自己找 `~/.claude/debug`、不讀 session、不替 bot 開 `--debug`。總量 ≤64 MiB（每讀一個 chunk 就查，沒有換行的串流也在上限停下，標 `truncated`）、單行 ≤8 KiB（超過整行 skip）、數字最多 9 位（更長的整行 skip，不會崩潰）、每群組最多留 10000 筆耗時樣本。
+- **輸出**：JSON，只有 event（白名單）× outcome（`finished`／`completed`／`timed_out`／`cancelled`／`backgrounded`／`failed_to_start`）的 count、`nonzero_status`、`with_duration`（有耗時的總筆數）、p50／p95／max（最近鄰）。`max_ms` 與 `with_duration` 是全體；超過樣本上限時百分位只來自前 N 筆，`percentile_sample` 會標出 N。**不輸出**原始行、command、plugin、matcher、參數——那些是任意文字，不保證不含敏感內容。看不懂的行計入 `skipped_lines`；沒有耗時的行（`timed out`、`cancelled`、`completed with status`…）不算 0、不進百分位。
+- **限制**：量的是 Claude 眼中 hook 本身的耗時，**不能區分 MCP 或模型慢**；跟 `hook_events.received_at`／`processed_at` 的差值（送端戳到 daemon 處理完的延遲，含排隊與重試）是兩回事，不要互相替代。
+- 測試：`scripts/claude-hook-debug_test.sh`（包 `claude-hook-debug_test.py`，自造文字，不碰真實 log）。
