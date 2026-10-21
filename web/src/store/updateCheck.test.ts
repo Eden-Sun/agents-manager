@@ -5,7 +5,7 @@ import type { IntegrationHost } from '../api/integrationUpdates.ts'
 import type { UpstreamItem } from './upstreamUpdate.ts'
 import { buildHostCheck, cleanVersion, summaryText, updatableCount, versionLess, type CheckRow, type CheckStatus, type HostCheck } from './updateCheck.ts'
 
-const tool = (installed: boolean, version: string | null = null) => ({ installed, path: installed ? '/bin/x' : null, version, logged_in: null })
+const tool = (installed: boolean, version: string | null = null, logged_in: boolean | null = null) => ({ installed, path: installed ? '/bin/x' : null, version, logged_in })
 const tools = (over: Partial<Record<'claude' | 'codex' | 'grok' | 'agy', ReturnType<typeof tool>>> = {}) =>
   ({ claude: tool(true, '2.1.300 (Claude Code)'), codex: tool(true, 'codex-cli 0.157.0'), grok: tool(false), agy: tool(true, '1.2.0'), ...over }) as unknown as ToolMap
 const herdr = (cli: string | null, server: string | null): HerdrVersion => ({ server_version: server, protocol: 22, protocol_supported: true, cli_version: cli, mismatch: cli !== server })
@@ -20,13 +20,20 @@ const item = (kind: string, latest: string | null, hosts: UpstreamItem['hosts'],
 })
 const up = (installed: string | null, behind: boolean, error: string | null = null) => ({ host: 'local', installedVersion: installed, error, behind })
 const integ = (items: IntegrationHost['items'], error: string | null = null): IntegrationHost => ({ host: 'local', checked_at: 't', error, items })
-const irow = (name: string, state: IntegrationHost['items'][number]['state'], a: number | null, b: number | null) => ({
+const irow = (
+  name: string,
+  state: IntegrationHost['items'][number]['state'],
+  a: number | null,
+  b: number | null,
+  auto_install: IntegrationHost['items'][number]['auto_install'] = null,
+) => ({
   name,
   state,
   installed_version: a,
   required_version: b,
   path: null,
   detail: state === 'unknown' ? 'wedged' : null,
+  auto_install,
 })
 
 test('cleanVersion／versionLess：從 CLI 原文取版本號、逐段比較', () => {
@@ -172,4 +179,51 @@ test('summaryText 接在 buildHostCheck 後：沒有上游、讀不到版本的�
   const text = summaryText(check)
   assert.doesNotMatch(text, /都是最新/)
   assert.match(text, /查不到/)
+})
+
+test('integration 沒裝：grok／agy 已登入才有「安裝」鈕（fresh）；沒登入不給鈕；自動裝失敗講原因；claude／codex 照舊只顯示', () => {
+  const check = (t: ToolMap, items: IntegrationHost['items']) =>
+    buildHostCheck({ host: 'local', tools: t, herdr: herdr('herdr 0.9.4', '0.9.4'), upstream: {}, herdrBlocked: null, integration: integ(items) }).rows.filter((r) => r.group === 'integration')
+  const items = [
+    irow('antigravity-cli', 'not_installed', null, null),
+    irow('grok', 'not_installed', null, null, { ok: false, error: 'permission denied' }),
+    irow('codex', 'not_installed', null, null),
+  ]
+  // agy 已登入、grok 已登入（失敗過）、codex 登入也不給。
+  const t = tools({ agy: tool(true, '1.2.0', true), grok: tool(true, '1.0', true), codex: tool(true, 'codex-cli 0.157.0', true) })
+  const [agy, grok, codex] = check(t, items)
+  assert.deepEqual(agy.action, { kind: 'integration', name: 'antigravity-cli', fresh: true })
+  assert.match(agy.note ?? '', /已登入.*自動裝一次.*安裝/)
+  assert.deepEqual(grok.action, { kind: 'integration', name: 'grok', fresh: true })
+  assert.match(grok.note ?? '', /自動安裝失敗：permission denied.*不重試.*再試/)
+  assert.equal(codex.action, null)
+  assert.equal(codex.note, '還沒安裝；這裡只顯示，不自動裝')
+  // 沒登入（或沒裝 CLI、問不到登入）：沒有鈕，note 講原因。
+  for (const t2 of [tools({ agy: tool(true, '1.2.0', false) }), tools({ agy: tool(true, '1.2.0', null) }), tools({ agy: tool(false) })]) {
+    const [a] = check(t2, items)
+    assert.equal(a.action, null)
+    assert.match(a.note ?? '', /登入後/)
+  }
+})
+
+test('自動安裝失敗的原因不管這一列現在是什麼狀態都顯示：outdated／unknown／讀取失敗（not_installed 不變）；current 與非 grok／agy 不顯示', () => {
+  const t = tools({ agy: tool(true, '1.2.0', true), grok: tool(true, '1.0', true) })
+  const rows = (items: IntegrationHost['items']) =>
+    buildHostCheck({ host: 'local', tools: t, herdr: herdr('herdr 0.9.4', '0.9.4'), upstream: {}, herdrBlocked: null, integration: integ(items) }).rows.filter((r) => r.group === 'integration')
+  const fail = (error: string) => ({ ok: false, error })
+  const [outdated, unknown, reread] = rows([
+    irow('grok', 'outdated', 2, 3, fail('裝完狀態是 outdated，不是最新')),
+    irow('antigravity-cli', 'unknown', null, null, fail('裝完狀態是 unknown，不是最新')),
+    irow('claude', 'not_installed', null, null, fail('x')),
+  ])
+  assert.match(outdated.note ?? '', /自動安裝失敗：裝完狀態是 outdated.*不重試.*「更新」/)
+  assert.ok(outdated.action, '落後的仍可按更新')
+  assert.match(unknown.note ?? '', /自動安裝失敗：裝完狀態是 unknown.*不重試.*重啟 daemon.*wedged/)
+  assert.doesNotMatch(reread.note ?? '', /自動安裝失敗/, 'claude 不是自動裝的家')
+  // 裝完重讀失敗（state:null）：snapshot 的列仍是舊的 not_installed，原因照樣寫出來。
+  const [missing] = rows([irow('grok', 'not_installed', null, null, fail('裝完重讀狀態失敗：ssh 逾時'))])
+  assert.match(missing.note ?? '', /自動安裝失敗：裝完重讀狀態失敗：ssh 逾時.*不重試/)
+  // 已經是最新（使用者之後手動裝好）就不再掛舊的失敗。
+  const [cur] = rows([irow('grok', 'current', 3, 3, fail('舊的'))])
+  assert.equal(cur.note, null)
 })

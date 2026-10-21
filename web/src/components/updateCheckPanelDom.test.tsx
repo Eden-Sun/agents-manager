@@ -4,7 +4,7 @@
  */
 import test, { after, afterEach, before } from 'node:test'
 import assert from 'node:assert/strict'
-import { click, mockApi, mount, setupDom, teardownDom, unmountAll, until } from '../testing/domHarness'
+import { act, click, mockApi, mount, setupDom, teardownDom, unmountAll, until } from '../testing/domHarness'
 import type { FakeRequest } from '../testing/domHarness'
 import { sharedMock, virtualMockTime } from '../testing/sharedMock'
 import { resetStoreForTest, useStore } from '../store/store'
@@ -94,4 +94,49 @@ it('表頭：工具清單還沒讀到（localTools undefined）時不是「未�
   const ids = ['local:herdr-cli', 'local:herdr-server', 'local:cli-claude', 'local:cli-codex', 'local:cli-grok', 'local:cli-agy']
   const statuses = ids.map((id) => row(id)?.querySelector('.update-badge')?.textContent)
   assert.ok(statuses.every((t) => t === '查不到'), `六列狀態 ${statuses}`)
+})
+
+it('沒裝的 grok／agy：已登入才有「安裝…」，確認框寫明會改 hook 設定檔，確認後才送 POST；沒登入沒有鈕；codex 沒裝照舊沒有鈕（#1871）', async () => {
+  const requests = await open()
+  const t = (installed: boolean, logged_in: boolean | null) => ({ installed, path: installed ? '/bin/x' : null, version: installed ? '1.0' : null, logged_in })
+  await act(() => useStore.setState({ localTools: { claude: t(true, true), codex: t(true, true), grok: t(true, false), agy: t(true, true) } as unknown as ToolMap }))
+  const post = () => requests.filter((r) => r.method === 'POST' && /herdr-integration$/.test(r.path))
+  assert.equal(row('local:integration-grok')!.querySelector('button'), null, 'grok 沒登入不給鈕')
+  assert.match(text('local:integration-grok'), /登入後/)
+  const btn = row('local:integration-antigravity-cli')!.querySelector('button')
+  assert.ok(btn, 'agy 已登入有鈕')
+  assert.match(btn!.textContent ?? '', /安裝…/)
+  await click(btn!)
+  assert.equal(post().length, 0, '還沒確認，不能送')
+  const dialog = document.querySelector('[role="alertdialog"]')!
+  assert.match(dialog.textContent ?? '', /~\/\.gemini/, '確認框寫明會改 hook 設定檔')
+  await click([...dialog.querySelectorAll('button')].find((b) => b.textContent === '安裝')!)
+  await until(() => post().length === 1, '送了 POST')
+  assert.deepEqual(post()[0].body, { name: 'antigravity-cli' })
+  await until(() => /最新/.test(text('local:integration-antigravity-cli')), '那列變最新')
+  assert.ok(useStore.getState().notices.some((n) => n.kind === 'info' && /antigravity-cli integration 已安裝/.test(n.text)))
+})
+
+it('裝完重讀失敗（200＋state:null＋reread_error）：toast 寫「裝完重讀失敗：原因」，不是「還不是最新」（#1871）', async () => {
+  await open()
+  const t = (installed: boolean, logged_in: boolean | null) => ({ installed, path: installed ? '/bin/x' : null, version: installed ? '1.0' : null, logged_in })
+  await act(() => useStore.setState({ localTools: { claude: t(true, true), codex: t(true, true), grok: t(true, true), agy: t(true, true) } as unknown as ToolMap }))
+  const real = globalThis.fetch
+  globalThis.fetch = (async (input: string, init?: { method?: string; body?: string }) => {
+    if (init?.method === 'POST' && /herdr-integration$/.test(String(input))) {
+      return new Response(JSON.stringify({ host: 'local', name: 'grok', state: null, integration: null, reread_error: 'ssh 逾時', output: 'ok' }), { status: 200 })
+    }
+    return real(input as never, init as never)
+  }) as unknown as typeof fetch
+  try {
+    await click(row('local:integration-grok')!.querySelector('button')!)
+    const dialog = document.querySelector('[role="alertdialog"]')!
+    await click([...dialog.querySelectorAll('button')].find((b) => b.textContent === '安裝')!)
+    await until(() => useStore.getState().notices.some((n) => n.kind === 'error'), '跳錯誤 toast')
+    const n = useStore.getState().notices.find((x) => x.kind === 'error')!
+    assert.match(n.text, /grok integration 裝完重讀失敗：ssh 逾時/)
+    assert.doesNotMatch(n.text, /還不是最新/)
+  } finally {
+    globalThis.fetch = real
+  }
 })

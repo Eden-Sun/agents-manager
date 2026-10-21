@@ -2885,15 +2885,27 @@ header 的 herdr 徽章確認後 `POST /api/hosts/{name}/herdr-update`（API §1
   在每台連得上的主機跑**唯讀**的 `herdr integration status`（`daemon/src/herdr_integration.rs`），只留 `claude`、`codex`、`antigravity-cli`、`grok` 四家，
   快照給 `GET /api/integration-updates`（API §12.7c）。狀態：`current`、`outdated`、`not_installed`、`unknown`（herdr 印了不認得的狀態，原文放 `detail`，**不當成最新**）。
   這一輪讀失敗（ssh 逾時、主機未連線、找不到 herdr）時保留上次的 `items`、只寫 `error`；主機被刪就整筆丟掉。
-- **只在使用者按鈕時才改機器**：`POST /api/hosts/{name}/herdr-integration {name}` 才在那台跑 `herdr integration install <name>`（會改那台 `~/.claude`、`~/.codex` 的設定）。
-  帶 bot 身分一律 403 `ui_only`；`name` 只准那四家（400）；`not_installed` 的**只顯示、不裝**（409 `not_installed`）；已是 `current` 的 409 `already_current`；
-  還沒巡過的 409 `state_unknown`；同一台同時只跑一個（409 `install_in_progress`）。裝完立刻再讀一次那台的狀態，回的是實際狀態，不是「指令沒報錯」。daemon 不會自己跑 install。
+- **手動安裝只在使用者按鈕時才改機器**：`POST /api/hosts/{name}/herdr-integration {name}` 才在那台跑 `herdr integration install <name>`（會改那台 `~/.claude`、`~/.codex` 的設定）。
+  帶 bot 身分一律 403 `ui_only`；`name` 只准那四家（400）；`not_installed` 的 409 `not_installed`，**例外：`grok`、`antigravity-cli` 且那台那家已登入**（見下，跟自動安裝同一個判斷）才裝；
+  沒登入時照舊 409，回應帶 `logged_in:false` 與寫明原因的 `message`；`claude`、`codex` 沒裝照舊 409（登入也一樣）。已是 `current` 的 409 `already_current`；
+  還沒巡過的 409 `state_unknown`；同一台同時只跑一個（409 `install_in_progress`，與自動安裝同一把）。裝完立刻再讀一次那台的狀態，回的是實際狀態，不是「指令沒報錯」。
+- **唯一的自動安裝：grok／agy 已登入就必須裝好 integration**（issue #1871，使用者 2026-10-21：「用戶有登入時必裝，才能給使用 以免造成 bug」＋選「daemon 自動裝」）。
+  herdr 沒裝 grok／antigravity-cli 的 hook 時回報不到 `agent_session`，那台的 grok／agy 子 agent 會認領不到（#1867：agy 子 agent 曾拖 72 分鐘）。取代原本「not_installed 只顯示、不裝」。
+  - **三條件同時成立才裝**：① 那台工具探測（`app.tools[host].tools`，SPEC §16.5 的 `AM_LOGIN`：grok 看 `auth.json`、agy 看 `antigravity-oauth-token` 或 macOS Keychain）對應的 kind（`grok`／`agy`）`installed && logged_in == Some(true)`
+    （問不到＝`None` 不算已登入）；② 這一輪 `herdr integration status` 讀成功，且那一家（`grok`／`antigravity-cli`）是 `not_installed`（讀失敗的那輪不拿上次的舊資料決定）；③ 這個 daemon 行程對這台這一家還沒試過。
+    claude／codex 的 `outdated` 照舊只顯示、不自動升；其他狀態（`outdated`／`unknown`）也不自動裝。
+  - **只在既有的 10 分鐘巡檢那一輪觸發**（`sweep` 之後；開機後約 1 分鐘第一輪，工具探測還沒好就等下一輪），沒有另開迴圈。每台主機每一家每個 daemon 行程**最多試一次**：成功失敗都記在記憶體，**失敗不重試、不循環**，
+    再試靠設定頁的「安裝」鈕（手動，見上）或重啟 daemon。那台正被別的安裝佔著（`install_in_progress`）不算試過，下一輪再來。
+  - **沿用既有路徑**：同一個 `run_install`（本機 `/bin/sh -c`、遠端走該主機既有的 ssh 連線，逾時 60 秒）與同一把 `install_in_progress` 互斥；裝完立刻重讀狀態，回報實際結果（`current` 才算成功，否則記「裝完狀態是 …」；重讀失敗時 `state:null`、記「裝完重讀狀態失敗：原因」，不拿裝之前的舊資料）；設定頁不管該列現在是什麼狀態（`not_installed`／`outdated`／`unknown`）都顯示自動安裝失敗的原因與「不重試」。
+  - **不靜默**：每次自動安裝寫 `daemon.log`（成功 info、失敗 warn，帶主機與名稱），並推 WS `herdr_integration_auto_install {host,name,ok,state,error}`，網頁跳 toast（成功「已在 m4p 自動安裝 herdr grok integration」、失敗另一則帶原因；同一台同一家重播不重複）；
+    結果也放在 `GET /api/integration-updates` 該列的 `auto_install {ok,state,error,at}`，設定頁「更新檢查」該列顯示（失敗寫「自動安裝失敗：…；不重試，可按「安裝」再試，或重啟 daemon」）。
+  - 測試只用假的 `Ops`／主機狀態，不真的跑 `herdr integration install`，更不寫 `~/.grok`、`~/.gemini`。
 - **設定頁（環境設定 →「更新檢查」）每台主機一張表**，列：herdr CLI、herdr server、Claude／Codex／Grok／Antigravity（agy）CLI、四家 integration；
   欄位：目前版本、最新或需要的版本、狀態（最新／可更新／未安裝／查不到）、動作。資料全是既有的：`hosts[].herdr`／`tools`（工具探測）、`GET /api/upstream-updates`
   （上游版）與上面的 integration 快照；表是**總覽**，既有入口（header 徽章、`cli-update`、`herdr-update`）一個都沒拆，按鈕送的是同一批 API，只有 integration 是新的。
   agy 沒有公開的版本來源，只列目前版本、狀態「查不到」；Grok 沒有一鍵更新入口，只提示 `grok update`；herdr 的更新維持 §6.9b 的限制（只做本機、非 shared session），
   遠端落後的那列照樣標「可更新」但不給按鈕、寫原因。
-- 更新動作都要確認：CLI 沿用 §6.9 的 `cli-update`（綁確認框那一版）；herdr 是危險樣式（所有 Bot 中斷）；integration 的確認框寫明會改那台的 agent 設定檔。
+- 更新動作都要確認：CLI 沿用 §6.9 的 `cli-update`（綁確認框那一版）；herdr 是危險樣式（所有 Bot 中斷）；integration 的確認框寫明會改那台的 agent 設定檔（手動「安裝」鈕的確認框寫明改 `~/.grok`／`~/.gemini` 的 hook；只有 grok／agy 且工具探測已登入時才顯示鈕；自動安裝沒有確認框，改以通知與 log 讓使用者看得到）。
 
 ### 6.9d 更新框的翻譯（issue #1870）
 

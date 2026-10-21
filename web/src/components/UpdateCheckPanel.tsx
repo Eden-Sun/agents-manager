@@ -10,7 +10,7 @@ import './updateCheck.css'
 /**
  * 設定頁「更新檢查」（issue #1772）：每台主機一張表，列出所有要檢查升級的項目——herdr、各 agent CLI、herdr integration。
  * 這張表是總覽：資料與動作都沿用既有的（header 徽章、`cli-update`、`herdr-update`），只有 integration 是新的；
- * integration 的「更新」只在這裡按才會在那台跑 `herdr integration install`，沒裝的只顯示、不自動裝。
+ * integration 的「更新」只在這裡按才會在那台跑 `herdr integration install`，沒裝的只顯示（grok／agy 已登入時 daemon 會自動裝一次）。
  */
 export function UpdateCheckPanel() {
   const hosts = useStore((s) => s.hosts)
@@ -81,10 +81,11 @@ export function UpdateCheckPanel() {
       setBusy((b) => new Set(b).add(key))
       try {
         const r = await installIntegration(host, action.name)
-        if (r.state === 'current') notify('info', `${host} 的 ${action.name} integration 已更新`)
-        else notify('error', `${host} 的 ${action.name} integration 裝完還不是最新（${r.state ?? '讀不到狀態'}）`)
+        if (r.state === 'current') notify('info', `${host} 的 ${action.name} integration 已${action.fresh ? '安裝' : '更新'}`)
+        else if (r.state === null) notify('error', `${host} 的 ${action.name} integration 裝完重讀失敗：${r.rereadError ?? '讀不到狀態'}`)
+        else notify('error', `${host} 的 ${action.name} integration 裝完還不是最新（${r.state}）`)
       } catch (e) {
-        notify('error', `${host} 的 ${action.name} integration 更新失敗：${integrationErrText(e, host)}`)
+        notify('error', `${host} 的 ${action.name} integration ${action.fresh ? '安裝' : '更新'}失敗：${integrationErrText(e, host)}`)
       } finally {
         setBusy((b) => {
           const next = new Set(b)
@@ -100,7 +101,7 @@ export function UpdateCheckPanel() {
     <div className="update-check">
       <p className="hint">
         每台主機一張表：herdr、各 agent CLI、herdr integration。這裡是總覽，更新動作沿用既有入口；integration 只在你按「更新」時才會在那台跑
-        <code>herdr integration install</code>，沒裝的只顯示。
+        <code>herdr integration install</code>；沒裝的只顯示，只有 grok／agy 已登入時 daemon 會自動裝一次、也可以按「安裝」。
       </p>
       {loadError ? <p className="update-check-err" role="status">integration 狀態讀不到：{loadError}</p> : null}
       {checks.map((c) => (
@@ -115,7 +116,7 @@ export function UpdateCheckPanel() {
         open={ask !== null}
         title={ask ? confirmTitle(ask.row, ask.action) : ''}
         danger={ask?.action.kind === 'herdr'}
-        confirmLabel="更新"
+        confirmLabel={ask?.action.kind === 'integration' && ask.action.fresh ? '安裝' : '更新'}
         width={420}
         body={ask ? <ConfirmBody host={ask.host} row={ask.row} action={ask.action} willResume={herdrPlan?.host === ask.host ? herdrPlan.willResume.map((b) => b.name) : []} /> : null}
         onCancel={() => setAsk(null)}
@@ -126,11 +127,19 @@ export function UpdateCheckPanel() {
 }
 
 function confirmTitle(row: CheckRow, action: CheckAction): string {
-  if (action.kind === 'integration') return `更新 ${row.label}？`
+  if (action.kind === 'integration') return `${action.fresh ? '安裝' : '更新'} ${row.label}？`
   return `更新 ${row.label} 到 ${action.target}？`
 }
 
 function ConfirmBody({ host, row, action, willResume }: { host: string; row: CheckRow; action: CheckAction; willResume: string[] }) {
+  if (action.kind === 'integration' && action.fresh) {
+    return (
+      <>
+        在 <strong>{host}</strong> 跑 <code>herdr integration install {action.name}</code>，第一次安裝 hook 腳本。
+        會改那台 agent 的 hook 設定檔（grok 在 <code>~/.grok</code>、agy 在 <code>~/.gemini</code>）。
+      </>
+    )
+  }
   if (action.kind === 'integration') {
     return (
       <>
@@ -189,7 +198,7 @@ function HostTable({
             <span className="update-act" role="cell">
               {r.action ? (
                 <button type="button" className="btn" disabled={running(check.host, r.action)} onClick={() => onAsk(r, r.action!)}>
-                  {running(check.host, r.action) ? '更新中…' : '更新…'}
+                  {running(check.host, r.action) ? (r.action.kind === 'integration' && r.action.fresh ? '安裝中…' : '更新中…') : r.action.kind === 'integration' && r.action.fresh ? '安裝…' : '更新…'}
                 </button>
               ) : null}
               {r.note ? <span className="update-note">{r.note}</span> : null}
