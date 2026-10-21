@@ -2623,6 +2623,8 @@ pt-hub = ["~/project/pt/CLAUDE.md", "~/project/pt/AGENTS.md"]      # 多份照�
   送字進去會變成回答那個問題。主力本來就不被 idle_sleep 收起來。
 - **cache 年齡**＝距離 §6.5j `last_api_at` 的推算（最後一次**真的**活動）。**保溫回合本身不算活動**：保溫回合的 `turns.client_request_id` 是 `keep-warm:<錨點>`（舊資料是改名前的 `keepalive:<錨點>`，兩個前綴一律認得；不加欄位，前綴本身就持久、跨 daemon 重啟認得出來），
   `cache_clock` 的最近回合 SQL 排除它；保溫期間 claude statusLine 的 API 指紋變化與 `working` 也不算（`primary_keep_warm::window_open`，送出前開、回合收尾後寬限 20 秒、最長 15 分鐘）。
+  視窗收掉之後再有 **15 分鐘回音期**（`WINDOW_ECHO`、`primary_keep_warm::echo_open`，#1885）：期間 statusLine 的 API 指紋變化一樣不算活動——claude 在回覆後閒置約 5 分鐘會自己打背景 API、遠端 `hook-status.json` 也可能晚到，這些不是真的活動，否則錨點前移、每小時再保溫一次停不下來。
+  真的活動（使用者在 pane 打字、bot 自己開新回合）都有回合紀錄，錨點照回合時間算，不靠 statusLine，所以不會被回音期吞掉。回音期只在記憶體；daemon 重啟時 `rearm_windows` 依保溫回覆的完成時間補回。
   所以送完保溫年齡照樣往上數，直到使用者送真的 prompt 或 bot 自己有真的活動，錨點才更新、計數重來。
 - **58 分（`KEEP_WARM_AFTER_SECS`）**：年齡 ≥ 58 分且未滿該 kind 的 cache TTL（claude／codex 為 60 分）、這個錨點之後還沒保溫過（有沒有比錨點晚的保溫回合）：
   走一般送 prompt 的路徑（`lifecycle::prompt`，聊天室看得到）送 `any updates`，`client_request_id = keep-warm:<錨點>`（同一錨點冪等）。以 §6.5j 的

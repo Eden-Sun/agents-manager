@@ -62,6 +62,10 @@ pub const WINDOW_MIN: Duration = Duration::from_secs(60);
 pub const WINDOW_MAX: Duration = Duration::from_secs(15 * 60);
 /// 回合收尾後，statusLine 還會再來幾次重繪；視窗再撐這麼久才關。
 pub const WINDOW_GRACE: Duration = Duration::from_secs(20);
+/// 視窗收掉之後，statusLine 的 API 指紋變化還是當成保溫回音的時間（#1885）：claude 在回覆後閒置幾分鐘會自己打背景 API
+/// （實測約 5 分鐘），遠端 statusLine 也可能晚到；它們不是真的活動，否則錨點前移、每小時再保溫一次停不下來。
+/// 真的活動（使用者在 pane 打字、bot 自己開新回合）有回合紀錄，錨點照回合時間算，不靠 statusLine。
+pub const WINDOW_ECHO: Duration = Duration::from_secs(15 * 60);
 /// 熱壓之後這麼久內冒出來的「活動」算壓縮自己造成的（`/compact` 讓 statusLine 指紋變、hook 報 working），
 /// 不當成新的錨點；否則閒置的主力每兩小時就保溫＋壓縮一輪，永遠停不下來。真的活動晚於這段才重新計時。
 pub const WARM_COMPACT_ECHO_SECS: i64 = 10 * 60;
@@ -93,6 +97,20 @@ pub fn age_window_closed_for_test(run_id: &str, age: Duration) {
     }
 }
 
+/// run id → 回音期結束的時間（記憶體帳，同 [`windows`]）。
+fn echoes() -> &'static Mutex<HashMap<String, Instant>> {
+    static S: OnceLock<Mutex<HashMap<String, Instant>>> = OnceLock::new();
+    S.get_or_init(Default::default)
+}
+
+#[cfg(feature = "test-hooks")]
+#[doc(hidden)]
+pub fn age_echo_for_test(run_id: &str, age: Duration) {
+    if let Some(until) = echoes().lock().unwrap_or_else(|e| e.into_inner()).get_mut(run_id) {
+        *until -= age;
+    }
+}
+
 fn is_open(w: &Window, now: Instant) -> bool {
     now.checked_duration_since(w.opened).is_some_and(|d| d < WINDOW_MAX)
         && w.closed.is_none_or(|c| now.checked_duration_since(c).is_none_or(|d| d < WINDOW_GRACE))
@@ -103,11 +121,24 @@ pub fn window_open(run_id: &str) -> bool {
     windows().lock().unwrap_or_else(|e| e.into_inner()).get(run_id).is_some_and(|w| is_open(w, Instant::now()))
 }
 
+/// 這個 run 是否還在保溫視窗收掉之後的回音期（[`WINDOW_ECHO`]）：期間 statusLine 的 API 指紋變化不算活動。
+pub fn echo_open(run_id: &str) -> bool {
+    echoes().lock().unwrap_or_else(|e| e.into_inner()).get(run_id).is_some_and(|until| Instant::now() < *until)
+}
+
+/// 開回音期，`remaining` 後結束。
+pub fn open_echo(run_id: &str, remaining: Duration) {
+    echoes().lock().unwrap_or_else(|e| e.into_inner()).insert(run_id.to_string(), Instant::now() + remaining);
+}
+
 pub fn open_window(run_id: &str) {
+    // 新一輪保溫／熱壓：舊的回音期作廢，收視窗時重新計。
+    echoes().lock().unwrap_or_else(|e| e.into_inner()).remove(run_id);
     windows().lock().unwrap_or_else(|e| e.into_inner()).insert(run_id.to_string(), Window { opened: Instant::now(), closed: None });
 }
 
 pub fn drop_window(run_id: &str) {
+    echoes().lock().unwrap_or_else(|e| e.into_inner()).remove(run_id);
     windows().lock().unwrap_or_else(|e| e.into_inner()).remove(run_id);
 }
 
@@ -129,6 +160,26 @@ pub async fn rearm_windows(pool: &SqlitePool) -> anyhow::Result<usize> {
     for run_id in &runs {
         open_window(run_id);
     }
+    // 視窗已收、還在回音期（#1885）：重啟後第一個 statusLine 指紋變化一樣不算活動。
+    let replied: Vec<(String, String)> = sqlx::query_as(&format!(
+        "SELECT t.run_id, MAX(t.completed_at) FROM turns t JOIN runs r ON r.id = t.run_id
+          WHERE r.state IN ('starting','running') AND {}
+            AND t.status IN ('completed','completed_fallback') AND t.completed_at >= ?
+          GROUP BY t.run_id",
+        cache_clock::keep_warm_crid_sql("t.client_request_id")
+    ))
+    .bind(db::iso_in(-(WINDOW_ECHO.as_secs() as i64)))
+    .fetch_all(pool)
+    .await?;
+    let now = chrono::Utc::now();
+    for (run_id, completed_at) in replied {
+        if runs.contains(&run_id) {
+            continue;
+        }
+        let Some(done) = db::parse_ts(&completed_at) else { continue };
+        let elapsed = (now - done).to_std().unwrap_or_default();
+        open_echo(&run_id, WINDOW_ECHO.saturating_sub(elapsed));
+    }
     Ok(runs.len())
 }
 
@@ -142,6 +193,9 @@ pub fn settle_window(run_id: &str, idle_and_quiet: bool) {
     }
     if !is_open(w, now) {
         m.remove(run_id);
+        drop(m);
+        // 視窗收掉之後還有一段回音期：背景 API 呼叫、遠端 statusLine 晚到都不算活動（#1885）。
+        open_echo(run_id, WINDOW_ECHO);
     }
 }
 
@@ -149,6 +203,7 @@ pub fn settle_window(run_id: &str, idle_and_quiet: bool) {
 #[cfg_attr(test, allow(dead_code))]
 pub fn retain_runs(active: &[String]) {
     windows().lock().unwrap_or_else(|e| e.into_inner()).retain(|id, _| active.contains(id));
+    echoes().lock().unwrap_or_else(|e| e.into_inner()).retain(|id, _| active.contains(id));
 }
 
 /// 這一輪對一顆主力該做什麼。
