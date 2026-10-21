@@ -29,7 +29,14 @@ pub(super) fn dispatch_sh(exe: &str, data_dir: &str, instance: Option<&str>) -> 
          AM_EVENT=${{1:-}}\n\
          am_reply() {{ [ \"$AM_EVENT\" = state ] || printf '{{}}\\n'; }}\n\
          [ -n \"$AM_BOT_ID\" ] && [ -n \"$AM_HOOK_TOKEN\" ] || {{ am_reply; exit 0; }}\n\
-         {gate}{exe} hook agy --bot \"$AM_BOT_ID\" --port \"${{AM_PORT:-7788}}\" --data-dir {data_dir} --event \"$AM_EVENT\" >/dev/null || true\n\
+         {gate}\
+         if [ \"$AM_EVENT\" = PreToolUse ]; then\n\
+         # 廣域 kill 守門（#1884）：只有「要擋」時 hook 才印決策 JSON（以 `{{` 開頭），原樣交給 agy；其餘一律 `{{}}`。\n\
+         AM_OUT=$({exe} hook agy --bot \"$AM_BOT_ID\" --port \"${{AM_PORT:-7788}}\" --data-dir {data_dir} --event PreToolUse 2>/dev/null) || AM_OUT=\n\
+         case $AM_OUT in '{{'*) printf '%s\\n' \"$AM_OUT\"; exit 0 ;; esac\n\
+         am_reply; exit 0\n\
+         fi\n\
+         {exe} hook agy --bot \"$AM_BOT_ID\" --port \"${{AM_PORT:-7788}}\" --data-dir {data_dir} --event \"$AM_EVENT\" >/dev/null || true\n\
          am_reply\n\
          exit 0\n",
         exe = sh_quote(exe),
@@ -57,7 +64,7 @@ pub fn install_at(app: &(impl crate::capabilities::DataDir + crate::capabilities
     }
     let dispatcher = dispatcher.to_string_lossy().into_owned();
     let name = cfg::hook_name(app.instance().as_deref());
-    changed |= crate::trust::update_file(&cfg::hooks_path(home), |existing| cfg::hooks_merge(existing, &name, &dispatcher))?;
+    changed |= crate::trust::update_file(&cfg::hooks_path(home), |existing| cfg::hooks_merge_guarded(existing, &name, &dispatcher))?;
     let statusline = format!("{} state", sh_quote(&dispatcher));
     changed |= crate::trust::update_file(&cfg::settings_path(home), |existing| cfg::statusline_merge(existing, &statusline))?;
     if changed {

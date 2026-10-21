@@ -86,10 +86,7 @@ pub fn is_child_pane(child_of: Option<std::ffi::OsString>) -> bool {
 }
 
 fn inner(args: HookArgs) {
-    // 子 agent 的 hook 不送、也不 spool（#1004）：在讀 stdin 之前就回去，stdout 照舊空的。
-    if is_child_pane(std::env::var_os("AM_CHILD_OF")) {
-        return;
-    }
+    let child = is_child_pane(std::env::var_os("AM_CHILD_OF"));
     let deadline = Instant::now() + TOTAL_BUDGET;
     let data_dir = resolve_data_dir(&args.data_dir);
 
@@ -103,6 +100,22 @@ fn inner(args: HookArgs) {
         }
         None => read_stdin_capped(STDIN_BUDGET),
     };
+
+    // PreToolUse 是守門、不是事件（#1884）：擋廣域 kill，**不** POST、不 spool；只有要擋時才印 stdout（決策 JSON）。
+    // 子 agent 的 pane 也要擋（事故就是子 bot 跑的），所以放在下面那個 child 判斷之前；解析不了一律放行。
+    match crate::kill_guard::guard(&args.provider, &args.event, &text) {
+        crate::kill_guard::Guard::NotPreToolUse => {}
+        crate::kill_guard::Guard::Pass => return,
+        crate::kill_guard::Guard::Deny(decision) => {
+            let _ = writeln!(std::io::stdout(), "{decision}");
+            let _ = writeln!(std::io::stderr(), "agents-managerd hook: PreToolUse denied a broad kill");
+            return;
+        }
+    }
+    // 子 agent 的 hook 不送、也不 spool（#1004）：stdout 照舊空的。
+    if child {
+        return;
+    }
 
     let mut payload = parse_payload(&text);
     if args.provider == "agy" {

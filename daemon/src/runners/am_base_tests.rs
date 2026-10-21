@@ -112,6 +112,9 @@ mod hook_cmd;
 #[path = "am_base_tests/hosts.rs"]
 mod hosts;
 
+#[path = "am_base_tests/kill_guard.rs"]
+mod kill_guard;
+
 #[path = "am_base_tests/kind_probe.rs"]
 mod kind_probe;
 

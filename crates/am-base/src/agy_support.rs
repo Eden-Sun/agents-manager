@@ -92,12 +92,25 @@ pub fn statusline_merge(existing: &str, command: &str) -> Result<Option<String>>
 
 /// `hooks.json` 的具名 hook：整個 `<name>` 鍵是我們的（換成目前的 dispatcher），其他具名 hook、其他頂層鍵原樣保留。`None`＝已經對了。
 pub fn hooks_merge(existing: &str, name: &str, dispatcher: &str) -> Result<Option<String>> {
+    hooks_merge_with(existing, name, dispatcher, false)
+}
+
+/// 本機版：另外訂 `PreToolUse`（廣域 kill 守門，#1884）。**包 `{matcher, hooks}`**，不是扁平陣列。遠端用 [`hooks_merge`]：
+/// 遠端的 dispatcher 只會 spool、沒有守門邏輯，訂了只是每個工具呼叫多寫一筆。
+pub fn hooks_merge_guarded(existing: &str, name: &str, dispatcher: &str) -> Result<Option<String>> {
+    hooks_merge_with(existing, name, dispatcher, true)
+}
+
+fn hooks_merge_with(existing: &str, name: &str, dispatcher: &str, kill_guard: bool) -> Result<Option<String>> {
     let mut root = parse_object(existing, "agy `hooks.json`")?;
     let quoted = crate::hosts::sh_quote(dispatcher);
     let mut entry = serde_json::Map::new();
     entry.insert("enabled".into(), json!(true));
     for event in HOOK_EVENTS {
         entry.insert(event.into(), json!([{"type": "command", "command": format!("{quoted} {event}"), "timeout": 5}]));
+    }
+    if kill_guard {
+        entry.insert("PreToolUse".into(), json!([{"matcher": "*", "hooks": [{"type": "command", "command": format!("{quoted} PreToolUse"), "timeout": 5}]}]));
     }
     let entry = Value::Object(entry);
     if root.get(name) == Some(&entry) {
