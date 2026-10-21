@@ -3704,6 +3704,11 @@ export class MockTransport implements Transport {
     }
   }
 
+  /** 截圖用：設定裡既有的空值 env 身份（真 daemon 的 POST 會擋，這是 #1750 之前存下或手寫的情況，#1883）。 */
+  addEmptyEnvIdentity() {
+    this.identities.push({ name: 'cc-empty', kind: 'claude', env: { CLAUDE_CONFIG_DIR: '' }, args: [] })
+  }
+
   /** 截圖用：把 bot 綁到某個身份並把它標成沒登入（`__amMock.loggedOut('am-claude', 'cc1')`）。 */
   markLoggedOut(botId: string, identity: string) {
     const st = this.localIdentityStatus[identity]
@@ -4435,6 +4440,8 @@ export class MockTransport implements Transport {
 function installDevHelpers(mock: MockTransport) {
   ;(globalThis as unknown as Rec).__amMock = {
     resync: () => mock.forceResync(),
+    /** 設定頁的空值 env 身份警告（#1883）；加完到環境設定看（要重新整理身份清單）。 */
+    emptyEnvIdentity: () => mock.addEmptyEnvIdentity(),
     dropSocket: () => mock.dropSocket(),
     block: (botIdOrName: string) => mock.enterBlocked(mock.botIdByName(botIdOrName) ?? botIdOrName),
     /** 題目被裁掉的 AskUserQuestion（pane 太矮）：畫面只剩選項，題目只能從 pending-question 讀。回 bot id。 */

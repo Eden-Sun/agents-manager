@@ -4054,6 +4054,7 @@ printf '%s\n' "$al" | grep -E "(^|[[:space:]])(alias[[:space:]]+)?cc[0-6]="
   額度 key：遠端 bot 若因此改由那台自己的 shell 身分解析，key 可能從裸 `claude` 變成 `claude:<name>`（或相反）。`app.quotas` 只在記憶體、不落 DB，所以下一輪探測就收斂，沒有東西要搬。
   `POST /identities` 可帶 `host`（未知主機 409）；`DELETE /identities/{name}?host=` 刪的是那一台的那一筆，「還有 bot 在用」也只看同一台的 bot。
   `POST /identities` 的 `env` **值不得留空**（400，點名 key，#1750）：`CLAUDE_CONFIG_DIR=` 存下來等於沒設，身分悄悄變成預設帳號；網頁的新增身分表單在同一條規則下逐行擋（`identityEnv.checkEnvText`）。「env 整個沒有」仍合法（＝預設帳號，cc0），bot 自己的 env 空值也照舊。
+  身份目前**只有新增（POST）與刪除（DELETE）兩條寫入路徑**，沒有修改既有身份的路由（要改就刪掉重建，重建走同一條空值檢查）；手寫 config.toml 與 #1750 之前存下的空值 env **不擋載入**（擋了整份設定都讀不進來），改在設定頁身份清單用警示色標出「env X 的值是空的，這個身份會悄悄用預設帳號」（`identityEnv.emptyEnvKeys`，規則同 `check_identity_env_values`；只標示，不改寫 config.toml，#1883）。
 
 `identities_for_host(host)` 用在：啟動 bot 的 env／args、建立與 PATCH bot 及開團的身份驗證（在該 bot／專案的 host 上查）、claude 額度探測 targets、UI 身份選項與面板。
 `[[identities]]` 仍可手寫、可從 UI 新增刪除；shell 認來的唯讀（要改去改那台的 alias）。

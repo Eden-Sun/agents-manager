@@ -1,6 +1,6 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
-import { checkEnvText, envDisplayText, parseEnvText } from './identityEnv'
+import { checkEnvText, emptyEnvKeys, rustTrim, envDisplayText, parseEnvText } from './identityEnv'
 
 test('一行打錯（少了 =、名字不合法、重複）不能靜靜被丟掉：丟掉的話身份的 env 變成空的＝悄悄用了預設帳號', () => {
   const r = checkEnvText('CLAUDE_CONFIG_DIR ~/.claude-cc1\nBAD NAME=1\n9LIVES=x\nA=1\nA=2\n=novalue')
@@ -50,4 +50,19 @@ test('值是空的（例如把 `$HOME/.claude-` 的尾巴刪光）不能靜靜�
   assert.ok(r.errors.some((e) => e.includes('第 1 行') && e.includes('CLAUDE_CONFIG_DIR')), r.errors.join(' | '))
   assert.ok(r.errors.some((e) => e.includes('第 3 行') && e.includes('B')), r.errors.join(' | '))
   assert.deepEqual(r.env, { A: '1' }, '空值的那幾行不進 env，也不會讓送出被靜靜放行')
+})
+
+test('設定裡既有的空值 env：空字串與全空白的 key 都點名，有值的與沒有 env 的身份不標', () => {
+  assert.deepEqual(emptyEnvKeys({ CLAUDE_CONFIG_DIR: '', A: '1', B: '  ' }), ['CLAUDE_CONFIG_DIR', 'B'])
+  assert.deepEqual(emptyEnvKeys({ A: '1' }), [])
+  assert.deepEqual(emptyEnvKeys({}), [])
+})
+
+test('判空的空白集合跟 daemon（Rust char::is_whitespace）一致：U+0085、U+3000 算空白，U+FEFF 不算', () => {
+  assert.deepEqual(emptyEnvKeys({ A: '\u0085', B: '\u3000', C: ' \t\u00a0\u2003 ', D: '\ufeff', E: 'x' }), ['A', 'B', 'C'])
+  assert.equal(rustTrim('\ufeffx\u0085'), '\ufeffx')
+  const r = checkEnvText('A=\u0085\nB=\u3000\nC=\ufeff')
+  assert.equal(r.errors.length, 2, r.errors.join(' | '))
+  assert.ok(r.errors[0].includes('第 1 行') && r.errors[1].includes('第 2 行'))
+  assert.deepEqual(r.env, { C: '\ufeff' })
 })
