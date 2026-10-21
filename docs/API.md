@@ -301,7 +301,7 @@ A 組與 `git/push` 標「待裁示」的原因：這幾支唯一的呼叫端是
 | POST | `/api/hosts/{name}/shells/{pane_id}/text` | User-only；Bot 與 AGM role 均 → 403 `user_only`；Service 依明列 path scope（本路徑未授權） |
 | POST | `/api/hosts/{name}/tools/install` | User-only；一般 Bot → 403 `user_only`；已登記 AGM 角色略過共用 fence，仍受既有路由／資源權限限制 |
 | POST | `/api/hosts/{name}/tools/refresh` | User-only；一般 Bot → 403 `user_only`；已登記 AGM 角色略過共用 fence，仍受既有路由／資源權限限制 |
-| POST | `/api/identities` | User-only；一般 Bot → 403 `user_only`；已登記 AGM 角色略過共用 fence，仍受既有路由／資源權限限制 |
+| POST | `/api/identities` | User-only；一般 Bot → 403 `user_only`；已登記 AGM 角色略過共用 fence，仍受既有路由／資源權限限制。`env` 的值不得空白（`CLAUDE_CONFIG_DIR=` 這種空值＝沒設，身份會悄悄用預設帳號）→ 400，訊息點名該 key（#1750；bot 自己的 env 不受此限） |
 | POST | `/api/judge/collision-check` | Bot principal（驗過的 `X-AM-Bot-Id` 與 token）；只看呼叫端自己的專案，回 202，不等 Jev；專案已移交（`handed_off_to`）時靜默略過、不問不寫帳本（#1421）；一般 Bot 可用（#1330；body、錯誤碼見「撞限第二意見帳本」一節） |
 | POST | `/api/mem/processes/kill` | User-only；一般 Bot → 403 `user_only`；已登記 AGM 角色略過共用 fence，仍受既有路由／資源權限限制 |
 | POST | `/api/missions/{id}/answer` | User／AGM role；一般 Bot 只限自己或後代 child 有該 mission 交辦，否則 403 `mission_participant_required`；`relay_from` 必須是自己 |
