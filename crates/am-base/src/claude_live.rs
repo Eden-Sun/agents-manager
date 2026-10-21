@@ -24,6 +24,9 @@ use crate::db;
 use std::collections::HashMap;
 use std::sync::{Mutex, OnceLock};
 
+/// `runs.runtime_effort` 的 CLI 預設哨兵（SPEC §4.4a 三態；`/effort auto` 之後）。只進 runtime，**不可寫進 `bots.effort`**。
+const CLI_DEFAULT_EFFORT: &str = "default";
+
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Switch {
     pub model: Option<String>,
@@ -65,6 +68,10 @@ pub fn parse(screen: &str) -> Switch {
             if !level.is_empty() {
                 s.effort = Some(level.to_ascii_lowercase());
             }
+        } else if matches!(rest.trim_end(), "Effort level set to auto" | "Effort level set to auto (this session only)") {
+            // `/effort auto|unset`：回到模型預設。只認這兩句整句；`CLAUDE_CODE_EFFORT_LEVEL` 蓋住的變體
+            // （`Effort set to auto for this session, but …`）實際強度由環境決定，不猜、維持原值。
+            s.effort = Some(CLI_DEFAULT_EFFORT.into());
         }
     }
     s
@@ -183,8 +190,22 @@ pub async fn observe(app: &(impl crate::capabilities::BotLocks + crate::capabili
     let model = seen.model.clone().filter(|m| cur_model.as_deref() != Some(m.as_str()));
     let effort = seen.effort.clone().filter(|e| cur_effort.as_deref() != Some(e.as_str()));
     let bot_model = seen.model.filter(|m| child && bot.model.as_deref() != Some(m.as_str()));
-    let bot_effort = seen.effort.filter(|e| child && bot.effort.as_deref() != Some(e.as_str()));
+    // `default` 不是設定值：具體值 → 明確 default 才把 child 設定清成 NULL（同 codex_live::effort_follow）；
+    // 未知／已是 default／非 child 一律不動。
+    let clear_bot_effort = child
+        && seen.effort.as_deref() == Some(CLI_DEFAULT_EFFORT)
+        && cur_effort.as_deref().is_some_and(|p| p != CLI_DEFAULT_EFFORT);
+    let bot_effort = seen.effort.filter(|e| child && e != CLI_DEFAULT_EFFORT && bot.effort.as_deref() != Some(e.as_str()));
     let mut changed = false;
+    // Clear 要排在 runtime 之前：runtime 先收斂成 default，這一步失敗後下輪就看不出「上一輪是具體值」，設定永遠清不掉。
+    // 失敗就整輪不寫 runtime、基準不前進（child_runtime 的契約，#743）；成功但 runtime 寫失敗，下輪的 Clear 是 no-op。
+    if clear_bot_effort {
+        if let Err(e) = crate::child_runtime::follow_with(app, &bot.id, None, crate::child_runtime::EffortFollow::Clear).await {
+            tracing::warn!(run = %run.id, bot = %bot.name, error = %e, "could not clear the child's effort after /effort auto, retrying next sweep");
+            return;
+        }
+        changed = true;
+    }
     if model.is_some() || effort.is_some() {
         let wrote = sqlx::query("UPDATE runs SET runtime_model = COALESCE(?, runtime_model), runtime_effort = COALESCE(?, runtime_effort) WHERE id = ?")
             .bind(&model)
