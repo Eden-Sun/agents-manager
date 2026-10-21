@@ -71,7 +71,11 @@ impl TurnCommands for App {
         lifecycle::begin_external_turn(&self.shared(), run).await
     }
     async fn mark_run_exited(&self, run_id: &str, reason: &str) -> RunExit {
-        lifecycle::mark_run_exited(&self.shared(), run_id, reason).await
+        let app = self.shared();
+        let probe = crate::gone_burst::probe(&app, run_id, reason).await;
+        let exit = lifecycle::mark_run_exited(&app, run_id, reason).await;
+        crate::gone_burst::after_exit(&app, probe, exit);
+        exit
     }
     async fn context_lost(&self, bot: &db::Bot, why: &str, failed_session: Option<&str>) -> LcResult<()> {
         lifecycle::context_lost(&self.shared(), bot, why, failed_session).await
