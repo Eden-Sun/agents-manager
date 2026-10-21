@@ -946,6 +946,7 @@ tooltip 寫最後一次失敗的原因。主機一直離線時沒有任何事件
 ## blocked 的原因（2026-10）
 
 - daemon 在 run 物件帶 `blocked_reason {code, text}`（API.md `blocked_reason`）；網頁**只在 run 現在真的是 blocked 時**顯示：側欄 bot 列的狀態字旁一行小字原因（窄欄截斷，完整字在 hover），`botStateLabel`（標題燈、BotSwitcher、群組成員、手機主力晶片的 tooltip）寫成「等待回應：<原因>」。
+- codex 非同步提問（`codex_async_question`，issue #1879）：「需要回應」旁寫出題目（「codex 提問等你回答：<題目>」），不再只有 herdr 的「? 1 question」。
 - 沒有原因（舊 daemon、daemon 不知道）照舊只寫「等待回應」；claude 一般權限確認會寫「等待權限確認：<工具名>」（`permission_prompt`），不編原因。不認得的 `code` 照樣顯示 `text`：前端不維護代碼表。
 - 清除不靠前端記：原因跟著 run 物件走，選單關掉／狀態變了／run 結束，下一個 `bot_status` 就沒有它；前端另外只在 `agent_status==='blocked'` 且 run 還活著時才顯示，所以晚一格事件也不會掛著舊字。
 
@@ -1257,3 +1258,13 @@ Jev 超過門檻時只推 AGM inbox，使用者在 bot 畫面上看不到。
 - 原文一直留著。翻譯是另外一層：摘要加各版正文，可切回原文。來源連結不拿掉。預設目標語言是繁中；prompt 跟設定裡驗證過的 `lang` 走（`zh-Hant`、`zh-Hans`、`en`、`ja`、`ko`）。全站介面語言不在這裡。
 - 設定預設關，或沒有 key：框裡不出現翻譯按鈕、也不出現錯誤，不擋「請 AGM 解析」、安裝或重啟。
 - 還沒翻的按鈕跟回應的 `lang`（繁中、簡中、英文、日文、韓文）。沒有或不認得的 `lang` 只寫「翻譯」，不猜成繁中。沒有語言選擇器。只有使用者按那個按鈕或「再試一次」才會打付費 API。輪詢只查狀態。失敗會停下來等，不會自己一直重試。摘要不另加「繁中」標題。
+
+## codex 非同步提問在 blocked 面板的作答（2026-10-21，issue #1879）
+
+使用者回報：codex 呼叫 `request_user_input_async` 後 TUI 只剩 `? 1 question · shift+← to answer`，AG Man 標「需要回應」卻看不到題目，終端視窗也沒有 shift+← 鍵。
+
+- **題目從 daemon 來**（rollout，SPEC §12 codex 非同步提問；`GET /pending-question` 對 codex 也回 `questions`），沿用既有的「原題」卡（唯讀，認不出選單時攤開在終端上面）；沒有 rollout（遠端主機）時只說「有 N 題、要先展開」。
+- **收合時多一排「展開作答（shift+←）」**（`CodexAsyncQuestion`，`BlockedPanel`／`BlockedModal` 都有）：送鍵前重讀畫面確認仍是收合的提問；只送 shift+←；再重讀確認真的展開，沒展開就照實說、不補鍵。展開不替使用者選任何答案。
+- **展開後走既有流程**：編號選單由 `BlockedChoices` 點選作答（每步重讀、對不上放棄）；最後一列 `Other` 是打字列（`menu.asyncQueue` 才算，別的選單裡叫 Other 的是一般選項）；貼字前、送 Enter 前都用同一套檢查（面板展開、同題原文、游標在這一列、其他列沒變、字在這一列），不符就放棄；單選選項也一樣：方向鍵與 Enter 不同批，移動後重讀通過才送 Enter（只限這種選單，claude 與 codex 一般選單照舊批次送）。自由輸入題（展開後沒有編號選單）在這裡給打字框：貼字前、送 Enter 前各重讀畫面，確認提問面板仍展開、面板開頭的題目行完整等於這一題（`panelShows`，不是子字串）、貼字前輸入框是空的、送 Enter 前輸入框完整內容等於答案（`panelInput`，不是後綴），任一項不符就放棄；整個作答固定在同一個 Run（`runPin`，送鍵帶固定的 run id，Run 換了就放棄、不重試新 Run）；這題的原文要靠 daemon 回的題目對得上，讀不到就不給打字框、請使用者在終端作答；換行變空白。收合時只有 rollout 沒作答題數＝畫面題數才顯示題目，其餘（有題目被跳過、session 不一致）只講題數與展開鍵，展開後以畫面上的真題為準。
+- **按鍵面板補 `⇧←`／`⇧→`**（shift+←＝展開／下一題、shift+→＝回主輸入框）；鍵盤直通本來就吃 shift+方向鍵。
+- 不做：跳過（`^]`）按鈕、遠端主機讀 rollout。

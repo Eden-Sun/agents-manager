@@ -9,6 +9,7 @@ import { ApiError, BOT_KINDS } from './types'
 import type { BotKind } from './types'
 import { abortError } from './transport'
 import { TWO_ASK_QUESTIONS, twoAskKeys, twoAskScreen, twoAskStart, type TwoAskState } from './mockTwoAsk'
+import { CODEX_ASYNC_QUESTIONS, codexAsyncKeys, codexAsyncScreen, codexAsyncStart, type CodexAsyncState } from './mockCodexAsync'
 import { MockReleaseTriage } from './mockReleaseTriage'
 import { MockShares } from './mockShare'
 import { MockHerdrUpdate, type MockHerdrOpts } from './mockHerdrUpdate'
@@ -3500,6 +3501,10 @@ export class MockTransport implements Transport {
       // 兩題 AskUserQuestion、分頁列與題目都被裁掉（issue #559，`mockTwoAsk.ts`）。
       this.twoAsk.set(botId, twoAskStart())
       later(() => this.enterBlocked(botId), 900)
+    } else if (lowered.includes('codexasync') && this.bots.find((b) => b.id === botId)?.kind === 'codex') {
+      // codex 非同步提問（issue #1879）：畫面只剩 `? 1 question`，題目在 rollout（`mockCodexAsync.ts`）。
+      this.codexAsync.set(botId, codexAsyncStart())
+      later(() => this.enterBlocked(botId), 900)
     } else if (lowered.includes('tinyask')) {
       // pane 太矮、claude 把 AskUserQuestion 的題目裁掉（2026-09-23 真機）：畫面只剩選項，題目只在 transcript。
       this.tinyAsk.add(botId)
@@ -3715,6 +3720,7 @@ export class MockTransport implements Transport {
   /** 走 tinyask 情境的 bot：畫面是裁過的選單、pending-question 回原題。 */
   private tinyAsk = new Set<string>()
   private twoAsk = new Map<string, TwoAskState>()
+  private codexAsync = new Map<string, CodexAsyncState>()
   private bulletAsk = new Set<string>()
 
   /** 問句跟選項之間夾著條列說明的畫面（沒有 pending-question：這不是 AskUserQuestion）。回 bot id。 */
@@ -3732,6 +3738,8 @@ export class MockTransport implements Transport {
   private pendingQuestion(botId: string) {
     const run = this.activeRun(botId)
     if (run?.agent_status === 'blocked' && this.twoAsk.has(botId)) return { questions: TWO_ASK_QUESTIONS }
+    const asyncAsk = this.codexAsync.get(botId)
+    if (run?.agent_status === 'blocked' && asyncAsk) return { questions: CODEX_ASYNC_QUESTIONS, jev_options: null, async_screen: { expanded: asyncAsk.expanded, count: 1 } }
     if (!run || run.agent_status !== 'blocked' || !this.tinyAsk.has(botId)) return { questions: null }
     return { questions: MOCK_TINY_ASK_QUESTIONS }
   }
@@ -3749,6 +3757,18 @@ export class MockTransport implements Transport {
     if (!target) return null
     const id = target
     this.tinyAsk.add(id)
+    later(() => this.enterBlocked(id), toStart ? 2500 : 0)
+    return id
+  }
+
+  /** codex 非同步提問（issue #1879）：沒指定就挑第一顆在跑的 codex，沒有就起一顆。回 bot id。 */
+  enterCodexAsync(botId?: string): string | null {
+    const running = botId && this.activeRun(botId) ? botId : this.bots.find((b) => b.kind === 'codex' && this.activeRun(b.id))?.id
+    const toStart = running ? null : (botId ?? this.bots.find((b) => b.kind === 'codex')?.id)
+    if (toStart) this.start(toStart)
+    const id = running ?? toStart
+    if (!id) return null
+    this.codexAsync.set(id, codexAsyncStart())
     later(() => this.enterBlocked(id), toStart ? 2500 : 0)
     return id
   }
@@ -3790,6 +3810,19 @@ export class MockTransport implements Transport {
       this.twoAsk.delete(botId)
       // 交卷走下面 Enter 那條、取消走 Esc 那條。
       keys.splice(0, keys.length, outcome === 'done' ? 'enter' : 'esc')
+    }
+    const asyncAsk = run.agent_status === 'blocked' ? this.codexAsync.get(botId) : undefined
+    if (asyncAsk) {
+      const { state, outcome } = codexAsyncKeys(asyncAsk, keys)
+      if (outcome === null) {
+        this.codexAsync.set(botId, state)
+        return { ok: true, keys }
+      }
+      // 作答：提問消失、回合繼續。
+      this.codexAsync.delete(botId)
+      setAgentStatus(run, 'working')
+      this.emitBotStatus(botId)
+      return { ok: true, keys }
     }
     if (run.agent_status === 'blocked') {
       this.tinyAsk.delete(botId)
@@ -4270,8 +4303,11 @@ export class MockTransport implements Transport {
           ]
         : []
     const twoAsk = this.twoAsk.get(botId)
+    const codexAsync = this.codexAsync.get(botId)
     const body =
-      status === 'blocked' && twoAsk
+      status === 'blocked' && codexAsync
+        ? codexAsyncScreen(codexAsync)
+        : status === 'blocked' && twoAsk
         ? twoAskScreen(twoAsk)
         : status === 'blocked' && this.tinyAsk.has(botId)
         ? MOCK_TINY_ASK_SCREEN
@@ -4403,6 +4439,9 @@ function installDevHelpers(mock: MockTransport) {
     block: (botIdOrName: string) => mock.enterBlocked(mock.botIdByName(botIdOrName) ?? botIdOrName),
     /** 題目被裁掉的 AskUserQuestion（pane 太矮）：畫面只剩選項，題目只能從 pending-question 讀。回 bot id。 */
     tinyAsk: (botIdOrName?: string) => mock.enterTinyAsk(botIdOrName ? (mock.botIdByName(botIdOrName) ?? botIdOrName) : undefined),
+    /** codex 非同步提問：畫面只剩 `? 1 question`，題目在 pending-question（issue #1879）。回 bot id。 */
+    codexAsync: (botIdOrName?: string) =>
+      mock.enterCodexAsync(botIdOrName ? (mock.botIdByName(botIdOrName) ?? botIdOrName) : undefined),
     /** 兩題 AskUserQuestion、第二題可複選、分頁列與題目被裁掉（issue #559）。回 bot id。 */
     twoAsk: (botIdOrName?: string) => mock.enterTwoAsk(botIdOrName ? (mock.botIdByName(botIdOrName) ?? botIdOrName) : undefined),
     /** 問句跟選項之間夾著 `·` 條列說明（claude 2.1.280 fullscreen renderer 邀請）。回 bot id。 */

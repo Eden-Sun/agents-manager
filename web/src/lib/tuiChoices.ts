@@ -74,6 +74,12 @@ export interface TuiChoiceMenu {
   review: { question: string; answer: string }[]
   /** 沒編號的 `Submit` 列（多選才有）；`after` 是排在第幾個選項後面。 */
   submit: { after: number; current: boolean } | null
+  /**
+   * codex 的非同步提問展開後的選單（`Queued follow-up inputs`，腳註 `enter submit  ^] skip`，issue #1879）：
+   * 最後一列 `Other` 是打字列——游標停在上面直接貼字就把標題換成那段字，Enter 送出（codex 0.163.0 真機）。
+   * 只有認得這個腳註才是 `true`；舊版與其他選單沒有這個欄位。
+   */
+  asyncQueue?: boolean
 }
 
 /** 只看畫面底下這麼多行，正文裡的編號清單不算。 */
@@ -116,6 +122,12 @@ const TRANSCRIPT = /^[⏺⎿✽·✢✻✶*]/
 const BULLET = /^\s+[·•]\s/
 
 const ASKS = /[?？]$/
+
+/** codex 非同步提問展開後的腳註 `enter submit   ^] skip   shift+→ main prompt`（多題另加 `shift+← next question`）。 */
+const ASYNC_FOOTER = /^\s*enter submit\b.*\^\]\s*skip/i
+
+/** 多題時選單上面那行 `1 of 2`，不是題目的一部分。 */
+const PAGE_OF = /^\d+ of \d+$/
 
 /**
  * 沒有問號、但標題自己一行的 claude 對話框（2.1.281 `Session paused`：說明＋`Details:` 再接選項）。
@@ -266,6 +278,7 @@ export function parseChoiceMenu(text: string | null | undefined): TuiChoiceMenu 
   const optionCol = optionColumn(lines)
   let end = -1
   let footer = false
+  let asyncQueue = false
   let tail = 0
   for (let i = lines.length - 1; i >= 0; i--) {
     const row = matchRow(i, lines[i])
@@ -273,7 +286,8 @@ export function parseChoiceMenu(text: string | null | undefined): TuiChoiceMenu 
       end = i
       break
     }
-    if (FOOTER.test(lines[i])) footer = true
+    if (FOOTER.test(lines[i]) || ASYNC_FOOTER.test(lines[i])) footer = true
+    if (ASYNC_FOOTER.test(lines[i])) asyncQueue = true
     if (lines[i].trim() === '' || isDivider(lines[i])) continue
     if (++tail > TAIL_LIMIT) return null
   }
@@ -355,7 +369,7 @@ export function parseChoiceMenu(text: string | null | undefined): TuiChoiceMenu 
         if (idx + 1 < rows.length) continue
         break
       }
-      if (idx + 1 === rows.length && indentOf(s) < 2) break
+      if (idx + 1 === rows.length && (indentOf(s) < 2 || ASYNC_FOOTER.test(s))) break
       // 並排版面：`(Recommended)` 是標籤折下來的另一行，前面要留空白（不能被 CJK 的 joinWrapped 黏死）。
       const piece = s.trim()
       detail = side && piece.startsWith('(') && detail ? `${detail} ${piece}` : joinWrapped(detail, piece)
@@ -380,7 +394,7 @@ export function parseChoiceMenu(text: string | null | undefined): TuiChoiceMenu 
   while (q >= 0 && qs.length < 4) {
     const s = lines[q]
     if (s.trim() === '' || isDivider(s) || TRANSCRIPT.test(s.trim()) || matchRow(q, s)) break
-    if (parseTabs(s) || REVIEW_Q.test(s) || REVIEW_A.test(s)) break
+    if (parseTabs(s) || REVIEW_Q.test(s) || REVIEW_A.test(s) || PAGE_OF.test(s.trim())) break
     // `⚠` 倒數／警示是問句上面的另一段，不是問句折下來的列（中間沒空白列時不能黏進題目）。
     if (s.trim().startsWith('⚠')) break
     qs.unshift(s.trim())
@@ -505,6 +519,7 @@ export function parseChoiceMenu(text: string | null | undefined): TuiChoiceMenu 
     tabAt: at >= 0 ? at : null,
     review,
     submit: submitLine < 0 ? null : { after: submitAfter, current: hasMarker(lines[submitLine]) },
+    ...(asyncQueue ? { asyncQueue } : {}),
   }
 }
 
@@ -551,8 +566,9 @@ export function isTypeSomething(c: Pick<TuiChoice, 'title'>): boolean {
  * 並把標題換成打的字（不開輸入框、不必 Enter）；之後 Enter／space 只是翻轉那列的勾，字留著。
  * 所以複選頁也給打字框，送出時貼字、對帳「出現且已勾」，再走這一頁的 Submit 列。
  */
-export function typedAnswerHere(_menu: { multi: boolean }, c: Pick<TuiChoice, 'title'>): boolean {
-  return isTypeSomething(c)
+export function typedAnswerHere(menu: { multi: boolean; asyncQueue?: boolean }, c: Pick<TuiChoice, 'title'>): boolean {
+  // codex 非同步提問（#1879）的 `Other` 是打字列；只在認得那份選單的腳註時才算，別的選單裡叫 `Other` 的是一般選項。
+  return isTypeSomething(c) || (menu.asyncQueue === true && /^other$/i.test(c.title.trim()))
 }
 
 /** 複選頁貼字後：那列要同時「長出這段字」且「已勾起來」，才算終端收到自訂答案。 */

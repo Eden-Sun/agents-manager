@@ -9,7 +9,8 @@ export interface PendingQuestionSnapshot {
 }
 
 /**
- * claude 停著等回答時，從 daemon 讀 transcript 裡那一題（`lib/pendingQuestion.ts`）。
+ * claude 停著等回答時，從 daemon 讀 transcript 裡那一題（`lib/pendingQuestion.ts`）；codex 的非同步提問（issue #1879）
+ * 同一支 API 回 rollout 裡的題目（畫面上只剩 `? 1 question`）。
  * 5 秒重讀一次：答完（或換下一題）就換掉；讀不到則標為無法確認，不擋畫面上原本的按鍵面板。
  * 回應裡的 `jev_options`（Jev 的選項建議，issue #1475）掛在對應那一題的 `jev`；daemon 問完會發 WS `pending_question_hint`，
  * 網頁不另外訂它——下一輪 5 秒輪詢就帶到。
@@ -21,7 +22,7 @@ export function usePendingQuestion(botId: string, paused = false): PendingQuesti
   const [state, setState] = useState<PendingQuestionSnapshot & { scope: object }>({ scope, questions: [], status: 'loading' })
 
   useEffect(() => {
-    if (paused || kind !== 'claude') return
+    if (paused || (kind !== 'claude' && kind !== 'codex')) return
     let alive = true
     let requested = 0
     let applied = 0
@@ -58,7 +59,7 @@ export function usePendingQuestion(botId: string, paused = false): PendingQuesti
   }, [botId, kind, paused, scope])
 
   // 換 bot 時舊的那份不能算這顆的。
-  return state.scope === scope && kind === 'claude' && !paused
+  return state.scope === scope && (kind === 'claude' || kind === 'codex') && !paused
     ? state
     : { questions: [], status: 'loading' }
 }

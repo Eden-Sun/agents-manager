@@ -1,0 +1,15 @@
+› Call request_user_input_async once with two questions: first titled "Pick a size?" options ["S","M"]; second titled "Your name?" with no options.
+• Pick a size?
+  • S
+  • M
+  Your name?
+
+• Working (36s • esc to interrupt)
+
+• Queued follow-up inputs
+  1 of 2
+  Pick a size?
+  › 1. S
+    2. M
+    3. Other
+  enter submit   ^] skip   shift+→ main prompt   shift+← next question

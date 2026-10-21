@@ -11,6 +11,7 @@ import { isSurvey } from '../lib/choiceDraft'
 import { surveyDraftAllowed } from '../store/mobilePreview'
 import { BlockedDraft } from './BlockedDraft'
 import { CodexUpdateHint } from './CodexUpdateHint'
+import { CodexAsyncQuestion } from './CodexAsyncQuestion'
 import { linkifyTerm } from './termLinks'
 import { useTermWrap } from './termWrap'
 import './blockedPanel.css'
@@ -76,6 +77,7 @@ export function BlockedPanel({
         ) : null}
       </div>
       <CodexUpdateHint botId={botId} text={snap?.text} onAnswered={refresh} />
+      <CodexAsyncQuestion botId={botId} text={snap?.text} questions={pending} onAnswered={refresh} />
       {pendingStatus === 'unavailable' ? <div role="status">暫時無法確認待答題目，請參考終端畫面。</div> : null}
       {/* 同 `BlockedModal`：認得出選單時原題收成一行排在選項後面，認不出才攤開在最上面（issue #559）。 */}
       {showPending && !menu ? <PendingQuestionCard questions={pending} defaultOpen answerWhere="below" /> : null}

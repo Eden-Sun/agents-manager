@@ -647,6 +647,8 @@ async fn handle_status_try(app: &Arc<App>, host: &str, session: &str, ev: &crate
                 if let Ok(Some(fresh)) = crate::db::run(&app2.db, &run2.id).await {
                     if fresh.agent_status == "blocked" {
                         crate::blocked_reason::observe(&app2, &fresh).await;
+                        // codex 的非同步提問（#1879）：題目從 rollout 讀，寫進 blocked_reason。
+                        crate::runners::codex_async_question::observe(&app2, &fresh).await;
                     }
                 }
             });

@@ -15,12 +15,16 @@ import {
   type TuiChoiceMenu,
   type WalkTarget,
 } from '../lib/tuiChoices'
+import { panelShows } from '../lib/codexAsyncQuestion'
+import { runPin, type RunPin } from '../lib/runPin'
 import { jevMatchesTitle, type PendingAt } from '../lib/pendingQuestion'
 import { useStore } from '../store/store'
 import { TypeAnswerField } from './TypeAnswerField'
 import './blockedChoices.css'
 
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms))
+
+const squashText = (s: string) => s.replace(/\s+/g, '')
 
 /** 最近的捲動容器；`null` ＝整頁在捲，交給瀏覽器 scroll anchoring。 */
 function scroller(el: HTMLElement): HTMLElement | null {
@@ -164,6 +168,87 @@ export function BlockedChoices({
     }
   }
 
+  /**
+   * codex 非同步提問選單（#1879 複審）的作答：整個流程固定在同一個 Run（`lib/runPin.ts`，送鍵帶 id、Run 換了就放棄、不走 fresh-run 重試），
+   * 每一步送鍵前都用這個守門重讀畫面：提問面板展開、題目完整等於這一題、游標在第 `i` 列、每一列標題跟原來一樣
+   * （只有 Other 貼字後第 `i` 列的標題可以是貼的字，而且必須完整等於答案）。
+   */
+  const newPin = () => runPin(() => readTerminal(botId, 'visible', 200), () => useStore.getState().runs[botId]?.id)
+  const goneMsg = '這次作答的 Run 已經換了（bot 重啟過）或讀不到畫面，什麼都沒送出。'
+  const asyncGuard = async (pin: RunPin, i: number, typed?: string): Promise<boolean> => {
+    const raw = await pin.read()
+    const now = raw === null ? null : parseChoiceMenu(raw)
+    return Boolean(
+      menu.question &&
+        raw !== null &&
+        now?.asyncQueue &&
+        now.question === menu.question &&
+        now.cursor === i &&
+        now.choices.length === menu.choices.length &&
+        now.choices.every((c, j) =>
+          typed !== undefined && j === i ? squashText(c.title) === squashText(typed) : c.title === menu.choices[j].title,
+        ) &&
+        panelShows(raw, menu.question),
+    )
+  }
+
+  const pickAsync = (i: number) =>
+    run({ kind: 'choice', key: String(i) }, async () => {
+      const pin = newPin()
+      const raw = await pin.read()
+      if (raw === null) return goneMsg
+      const now = parseChoiceMenu(raw)
+      if (!stillHere(now)) return '畫面在這中間換過了，剛剛那一下沒有送出去——上面是重讀後的選單，請再點一次。'
+      const move = keysToMove(now, i)
+      if (!move) return '游標走不到這一項（畫面可能換了），什麼都沒送出。'
+      if (move.length) await sendKeys(botId, move, pin.id())
+      // 先只移動；游標停在目標、仍是同一題、每列標題都沒變，才送 Enter（Enter 前再讀一次）。
+      let there = false
+      for (let t = 0; t < TRIES && !there; t++) {
+        if (move.length) await sleep(STEP)
+        there = await asyncGuard(pin, i)
+        if (pin.changed()) return goneMsg
+      }
+      if (!there || !(await asyncGuard(pin, i))) return pin.changed() ? goneMsg : '移動後畫面不是同一題、游標不在這一項或有選項變了，沒有按 Enter；請查看終端。'
+      await sendKeys(botId, ['enter'], pin.id())
+      return null
+    })
+
+  /** `Other` 打字列（codex 非同步提問）：貼字前那一列必須還是原本的 `Other`（沒有舊字可疊）、貼字後那一列完整等於答案才送 Enter。 */
+  const typeAsync = (i: number) =>
+    run({ kind: 'choice', key: String(i) }, async () => {
+      const text = typeText.trim()
+      if (!text) return '請先打字，或改選別項。'
+      const pin = newPin()
+      const raw = await pin.read()
+      if (raw === null) return goneMsg
+      const first = parseChoiceMenu(raw)
+      if (!stillHere(first)) return '畫面在這中間換過了，什麼都沒送出；請再點一次。'
+      // 游標走到這一列：只移動，每步重讀。
+      let at = first
+      for (let t = 0; t < WALK_TRIES && at.cursor !== i; t++) {
+        const move = keysToMove(at, i)
+        if (!move?.length) return '游標走不到這一項（畫面可能換了），什麼都沒送出。'
+        await sendKeys(botId, move, pin.id())
+        await sleep(STEP)
+        const next = await pin.read()
+        const parsed = next === null ? null : parseChoiceMenu(next)
+        if (!parsed || !stillHere(parsed)) return pin.changed() ? goneMsg : '畫面在這中間換過了，什麼都沒送出。'
+        at = parsed
+      }
+      if (!(await asyncGuard(pin, i))) return pin.changed() ? goneMsg : '畫面已經不是這一題的選單（可能換題或切回主輸入框了），什麼都沒送出。'
+      if (!(await sendText(botId, text, false, false, pin.id()))) return '文字沒有送出去。'
+      let shown = false
+      for (let t = 0; t < TRIES && !shown; t++) {
+        await sleep(STEP)
+        shown = await asyncGuard(pin, i, text)
+        if (pin.changed()) return goneMsg
+      }
+      if (!shown || !(await asyncGuard(pin, i, text))) return pin.changed() ? goneMsg : '那一列的內容不等於要送的答案（或換題、游標不在這一列），沒有按 Enter；請查看終端。'
+      await sendKeys(botId, ['enter'], pin.id())
+      return null
+    })
+
   /** 單選：送出前重讀、走過去再 Enter 一批送完（2026-09-12 第一輪實測）。 */
   const pickOne = (i: number) =>
     run({ kind: 'choice', key: String(i) }, async () => {
@@ -223,6 +308,7 @@ export function BlockedChoices({
       setNote(null)
       return
     }
+    if (menu.asyncQueue) return pickAsync(i)
     return menu.multi && menu.choices[i].checked !== null ? toggle(i) : pickOne(i)
   }
 
@@ -484,7 +570,7 @@ export function BlockedChoices({
                     type="button"
                     className="bc-submit bc-type-send"
                     disabled={Boolean(busy) || !typeText.trim()}
-                    onClick={() => void sendTyped(i)}
+                    onClick={() => void (menu.asyncQueue ? typeAsync(i) : sendTyped(i))}
                   >
                     {busy?.kind === 'choice' && busy.key === String(i) ? '送出中…' : '用這段作答'}
                   </button>

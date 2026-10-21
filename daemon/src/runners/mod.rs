@@ -18,6 +18,7 @@ pub mod child_alerts;
 pub(crate) mod claude_child_log;
 pub mod child_done;
 pub mod child_retire;
+pub mod codex_async_question;
 pub mod codex_live;
 pub mod codex_history;
 pub mod codex_model_migration;

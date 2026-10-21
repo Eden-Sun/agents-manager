@@ -25,15 +25,33 @@ fn permission() -> &'static Mutex<HashMap<String, String>> {
     P.get_or_init(Default::default)
 }
 
+/// codex 非同步提問（`request_user_input_async`，issue #1879）：run id → 給人看的一句話（含題目）。
+/// 畫面上排著 `? N question · shift+← to answer` 時由 `runners::codex_async_question` 讀畫面與 rollout 後寫入。
+fn codex_async() -> &'static Mutex<HashMap<String, String>> {
+    static P: OnceLock<Mutex<HashMap<String, String>>> = OnceLock::new();
+    P.get_or_init(Default::default)
+}
+
+/// 記下或清掉這個 run 的 codex 非同步提問原因；回傳有沒有變（呼叫端據此推 `bot_status`）。
+pub fn set_codex_async(run_id: &str, text: Option<String>) -> bool {
+    let mut map = codex_async().lock().unwrap_or_else(|e| e.into_inner());
+    match text {
+        Some(t) => map.insert(run_id.to_string(), t.clone()).as_deref() != Some(t.as_str()),
+        None => map.remove(run_id).is_some(),
+    }
+}
+
 /// 不在 `active` 裡的 run（結束了）不留記錄。
 #[allow(dead_code)]
 pub fn retain_runs(active: &[String]) {
     permission().lock().unwrap_or_else(|e| e.into_inner()).retain(|id, _| active.contains(id));
+    codex_async().lock().unwrap_or_else(|e| e.into_inner()).retain(|id, _| active.contains(id));
 }
 
 /// 這個 run 不再是權限框（狀態離開 blocked、選單關了、run 結束）。
 pub fn forget(run_id: &str) {
     permission().lock().unwrap_or_else(|e| e.into_inner()).remove(run_id);
+    codex_async().lock().unwrap_or_else(|e| e.into_inner()).remove(run_id);
 }
 
 /// 讀一次畫面，判斷 blocked 的 claude run 是不是停在一般權限確認選單（[`crate::tui_prompts::permission_prompt`]）：是就記下工具名，
@@ -75,6 +93,9 @@ pub fn of(run_id: &str) -> Option<Reason> {
     // 一般權限確認（`permission_prompt`）：text 帶工具名。
     if let Some(tool) = permission().lock().unwrap_or_else(|e| e.into_inner()).get(run_id) {
         return Some(Reason { code: "permission_prompt", text: format!("等待權限確認：{tool}") });
+    }
+    if let Some(text) = codex_async().lock().unwrap_or_else(|e| e.into_inner()).get(run_id) {
+        return Some(Reason { code: "codex_async_question", text: text.clone() });
     }
     None
 }

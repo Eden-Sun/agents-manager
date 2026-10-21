@@ -1,0 +1,12 @@
+• Pick?
+  • a
+  • b
+
+• Working (3m 47s • esc to interrupt)
+
+• Queued follow-up inputs
+  Pick?
+    1. a
+    2. b
+  › 3. custom ans
+  enter submit   ^] skip   shift+→ main prompt

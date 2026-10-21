@@ -109,3 +109,18 @@ test('sendKeys 成功：佇列依序送下移與 Enter，沒有失敗通知', as
   assert.deepEqual(keyRequests().map((request) => (request.body as { expect_run_id?: string }).expect_run_id), ['r1', 'r1'])
   assert.deepEqual(useStore.getState().notices, [])
 })
+
+// issue #1879 複審：作答流程固定的 Run（`pinRunId`）不符時直接失敗，不能像一般送鍵那樣改送新 Run。
+test('固定 Run 的 sendKeys／sendText：run mismatch 不重試新 Run，只送一次並通知', async () => {
+  seed()
+  routeDaemon((request) =>
+    request.path.endsWith('/bots/b1/keys') || request.path.endsWith('/bots/b1/text')
+      ? json({ error: 'conflict', reason: 'run mismatch', run_id: 'r2' }, 409)
+      : json({}),
+  )
+  await assert.rejects(useStore.getState().sendKeys('b1', ['enter'], 'r1'))
+  assert.equal(await useStore.getState().sendText('b1', 'Bob', false, false, 'r1'), false)
+  const sent = requests.filter((r) => r.path.endsWith('/bots/b1/keys') || r.path.endsWith('/bots/b1/text'))
+  assert.equal(sent.length, 2, '各只送一次，沒有用 r2 重送')
+  assert.deepEqual(sent.map((r) => (r.body as { expect_run_id?: string }).expect_run_id), ['r1', 'r1'])
+})

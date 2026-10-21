@@ -8,6 +8,7 @@ pub use am_ports;
 mod arc_app_impls;
 mod quota_conversions;
 
+pub mod codex_async_question;
 pub mod codex_status;
 pub mod compacting;
 pub mod agent_relay;
