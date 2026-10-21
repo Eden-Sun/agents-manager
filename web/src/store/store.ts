@@ -1,4 +1,5 @@
 import { receiveCodexReset } from './codexReset'
+import { autoInstallNotice } from './integrationAutoInstall'
 import type { TerminalFooterView } from '../lib/codexTerminalFooter'
 /** Single Zustand store: server state from `GET /api/state` + `/ws`, plus UI state. Event flow / resync: SPEC §7.3. */
 
@@ -3344,6 +3345,11 @@ export function handleFrame(set: SetFn, get: GetFn, frame: { seq?: number; type:
       ].filter(Boolean).join('；')
       const text = `herdr 意外重啟：接回 ${resumed.length} 顆頂層 bot，${failed.length} 顆失敗，${children.length} 個 child pane 遺失。${detail}`
       get().notify(failed.length || bool(pick(data, 'limited')) ? 'error' : 'info', text.slice(0, 500))
+      return
+    }
+    case 'herdr_integration_auto_install': {
+      const n = autoInstallNotice(data)
+      if (n) get().notify(n.kind, n.text)
       return
     }
     case 'identity_prefs_changed': {

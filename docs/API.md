@@ -32,7 +32,7 @@ Vite proxy 要把 `/api`、`/ws`（含 upgrade）、`/hook` 轉到 daemon。daem
 | A | `GET /hosts/{name}/gh`、`POST /hosts/{name}/gh/{login,cancel}`、`POST /hosts/{name}/identities/{identity}/{login,logout}`、`POST /hosts/{name}/tools/{refresh,install}`、`POST /hosts/{name}/reconnect` | 只有網頁 | User principal；Bot／service principal 403 `user_only` | 操作 daemon 使用者的遠端 SSH、GitHub 或 CLI 身分 | 維持 |
 | A | `POST /hosts/{name}/cli-update` | 只有網頁（確認框之後） | UI token；帶 `X-AM-Bot-Id` 或 `X-AM-Bot-Token` 一律 403 `ui_only`；指令寫死、同一台 409 | 安裝該主機共用的 Claude 或 Codex CLI；Codex 安裝後 scoped restart，Claude 留待使用者另按「重啟套用」 | 維持（網頁已有確認框） |
 | A | `POST /hosts/{name}/herdr-update` | 只有網頁（確認框之後） | UI token；帶 Bot headers 一律 403 `ui_only`；只收 local、同時只跑一個 | 換 herdr binary、重啟這顆 daemon 的 herdr server（所有 bot 中斷約 1 分鐘，子 agent 結束） | 維持（網頁已有確認框） |
-| A | `POST /hosts/{name}/herdr-integration` | 只有網頁（設定頁「更新檢查」確認框之後） | UI token；帶 Bot headers 一律 403 `ui_only`；`name` 只收 claude／codex／antigravity-cli／grok、沒裝的與已最新的 409、同一台同時只跑一個 | 在該主機跑 `herdr integration install <name>`，改那台的 agent hook 設定（`~/.claude`、`~/.codex` 等） | 維持 User-only |
+| A | `POST /hosts/{name}/herdr-integration` | 只有網頁（設定頁「更新檢查」確認框之後） | UI token；帶 Bot headers 一律 403 `ui_only`；`name` 只收 claude／codex／antigravity-cli／grok、沒裝的（grok／antigravity-cli 且已登入除外）與已最新的 409、同一台同時只跑一個 | 在該主機跑 `herdr integration install <name>`，改那台的 agent hook 設定（`~/.claude`、`~/.codex` 等） | 維持 User-only |
 | A | `POST /bots/{id}/prompt`、`/text`、`/keys` | 網頁、`scripts/remote-loop-test.sh`、`scripts/hook-timing-test.sh`；Bot pane 內的 `agm`／shim | 網頁與測試腳本用 User `X-AM-Token`；Bot 用成對 Bot headers；`relay_from` 不能覆蓋已驗身分；寫給 AGM 的排進 inbox | 驅動任一顆 agent | 網頁維持 User；Bot principal 按 caller 身分驗證 |
 | A | `POST /bots/{id}/credential/rotate` | 只有網頁／User `agm` | User `X-AM-Token`；執行中的 bot 先在同一 SQLite transaction 記錄可恢復的 restart intent，再輪替 token；舊值失效並重啟，daemon 重啟會接續；live child／grandchild 仍繼承時先回 `409 live_children_use_credential`，不改 token；不回傳新值 | 使該 bot 的舊 hook/API proof 失效 | User-only，Bot／service principal 403 |
 | A | `PUT /build/remote`、`POST /build/remote/install-toolchain` | 只有網頁 | UI token | 改外部編譯主機＝之後的 cargo 送到哪台機器跑 | 待裁示 |
@@ -983,6 +983,7 @@ UI 標籤：`hook` 不標；`terminal_fallback` 或 `incomplete = 1` 標「終�
 | `bots_restart_progress` / `bots_restart_done` | 見 §10.3a |
 | `cli_update_progress` / `cli_update_done` | 見 §12.7a |
 | `herdr_update_progress` / `herdr_update_done` | 見 §12.7b |
+| `herdr_integration_auto_install` | `{"host","name","ok","state","error"}`：daemon 自動裝了某台的 grok／antigravity-cli herdr integration（SPEC §6.9c，issue #1871）；`ok:false` 時 `error` 是原因，不重試 |
 | `herdr_recovery_done` | `{"recovery_id","resumed":[{"bot_id","name","run_id"}],"failed":[{"bot_id","name","error"}],"children_lost":[{"bot_id","name","parent_bot_id","title"}],"limited","skipped"}`：本機 herdr 全域事件串流曾建立、之後中斷並重連，且 active run 的舊 pane 都已消失或不再有 agent occupant 時送出；重啟後仍存在的空 shell pane 也算遺失。只以原 native session 接回頂層 bot，child 不接回；既有 restart 流程會關閉舊空 pane/tab。側欄顯示摘要；同一 `recovery_id` 的 WS 重播只提示一次。AGM 同時收到一筆 `ops_alert`（`reason:"herdr_unexpected_restart"`），寫入後推 `supervisor_changed` |
 | `supervisor_health` | 見「總管」一節 |
 | `supervisor_changed` | 總管面板的失效通知，`data` 是一個小物件、形狀依觸發原因而不同（`{"bot_id"}`、`{"assignment_id","status"}`、`{"summary_version"}`、`{"acked"}`、`{"ops_alert"}`、`{"deploy_now":{"sha"}}`、`{"remote":true}`…）；客戶端不要靠欄位判斷，收到就重拉自己開著的總管資料（「總管 AGM」一節） |
@@ -2352,6 +2353,7 @@ WS（每則帶 `update_id`／`host`／`session`／`target_version`／`manual_upg
 - `items` 只有 `claude`、`codex`、`antigravity-cli`、`grok`（順序固定；herdr 印了別的 agent 的 integration 不列）。`state`：`current`｜`outdated`｜`not_installed`｜`unknown`（不認得的狀態，`detail` 是 herdr 原文，**不是最新**）。
   `installed_version`／`required_version` 是 hook 腳本的版本號（`v8` 的 8）。
 - `error`：這一輪讀不到的原因（`主機未連線`、ssh 逾時、`這台找不到 herdr`…）；此時 `items` 還是上一次成功的，不當成「沒有」。
+- `auto_install`（只有 daemon 自動裝過的列才有，`grok`／`antigravity-cli`，issue #1871）：`{"ok":bool,"state":"current"|…|null,"error":string|null,"at":"…"}`。該主機 grok／agy 已登入且那一家 `not_installed` 時，巡檢那一輪裝一次（每主機每家每個 daemon 行程最多一次，失敗不重試，重啟 daemon 才再試）；結果同時推 WS `herdr_integration_auto_install`。
 
 `POST /api/hosts/{name}/herdr-integration`：`{"name":"claude"}`。只由使用者在設定頁「更新檢查」確認後送；在那台跑 `herdr integration install <name>`（逾時 60 秒），再讀一次狀態。
 
@@ -2360,7 +2362,8 @@ WS（每則帶 `update_id`／`host`／`session`／`target_version`／`manual_upg
      "integration":{"name":"claude","state":"current","installed_version":11,"required_version":11,"path":"…","detail":null},"output":"…"}
 ```
 - 403 `{"reason":"ui_only"}`：帶 `X-AM-Bot-Id` 或 `X-AM-Bot-Token`。400：`name` 不是那四家。404：不認得的主機。
-- 409：`not_installed`（沒裝的只顯示，不自動裝）、`already_current`、`state_unknown`（還沒巡過這台）、`install_in_progress`（同一台同時只跑一個）；都帶寫好的 `message`。
+- 409：`not_installed`（沒裝的只有 `grok`、`antigravity-cli` 且那台那家工具探測已登入時才裝；沒登入的 409 帶 `logged_in:false` 與寫明原因的 `message`；`claude`、`codex` 沒裝一律 409）、`already_current`、`state_unknown`（還沒巡過這台）、`install_in_progress`（同一台同時只跑一個）；都帶寫好的 `message`。
+- 裝完重讀狀態失敗（ssh 逾時等）時仍是 200，但 `state`、`integration` 是 `null`、多一個 `reread_error`（原因）：不拿裝之前的舊資料當結果。
 - 502：指令失敗（訊息尾段含輸出）；快照不動。`state` 不是 `current` 時裝完仍落後，由畫面講清楚。
 
 ### 12.7 透過現有 agent 安裝 `POST /api/hosts/{name}/tools/install`

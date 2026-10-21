@@ -16,6 +16,8 @@ export interface IntegrationRow {
   required_version: number | null
   path: string | null
   detail: string | null
+  /** daemon 自動裝過這一列（grok／antigravity-cli 已登入時，#1871）；沒試過＝null。 */
+  auto_install: { ok: boolean; error: string | null } | null
 }
 
 export interface IntegrationHost {
@@ -30,6 +32,11 @@ const STATES: IntegrationState[] = ['current', 'outdated', 'not_installed', 'unk
 
 function num(v: unknown): number | null {
   return typeof v === 'number' && Number.isFinite(v) ? v : null
+}
+
+function toAutoInstall(raw: unknown): IntegrationRow['auto_install'] {
+  if (!isRec(raw)) return null
+  return { ok: pick(raw, 'ok') === true, error: str(pick(raw, 'error')) || null }
 }
 
 export function toIntegrationHosts(raw: unknown): IntegrationHost[] {
@@ -47,6 +54,7 @@ export function toIntegrationHosts(raw: unknown): IntegrationHost[] {
           required_version: num(pick(x, 'required_version')),
           path: str(pick(x, 'path')) || null,
           detail: str(pick(x, 'detail')) || null,
+          auto_install: toAutoInstall(pick(x, 'auto_install')),
         },
       ]
     })
@@ -64,6 +72,8 @@ export interface IntegrationInstallResult {
   /** 裝完重讀的實際狀態；讀不到＝null。 */
   state: IntegrationState | null
   output: string
+  /** 裝完重讀狀態失敗的原因（此時 `state` 是 null，daemon 不拿舊資料當結果）。 */
+  rereadError: string | null
 }
 
 export async function installIntegration(host: string, name: string): Promise<IntegrationInstallResult> {
@@ -75,6 +85,7 @@ export async function installIntegration(host: string, name: string): Promise<In
     name: str(pick(o, 'name'), name),
     state: STATES.includes(state) ? state : null,
     output: str(pick(o, 'output')),
+    rereadError: str(pick(o, 'reread_error')) || null,
   }
 }
 

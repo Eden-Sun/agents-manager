@@ -13,7 +13,8 @@ export type CheckGroup = 'herdr' | 'cli' | 'integration'
 export type CheckAction =
   | { kind: 'cli'; cliKind: 'claude' | 'codex'; target: string }
   | { kind: 'herdr'; target: string }
-  | { kind: 'integration'; name: string }
+  /** `fresh`：這家 integration 還沒裝，按下去是第一次安裝（grok／antigravity-cli 已登入時才有，#1871）。 */
+  | { kind: 'integration'; name: string; fresh?: true }
 
 export interface CheckRow {
   id: string
@@ -134,18 +135,38 @@ function cliRow(host: string, kind: string, tool: ToolStatus | undefined, item: 
   }
 }
 
-function integrationRow(host: string, row: IntegrationRow): CheckRow {
+/** integration 名 → 工具探測的 kind；只有這兩家已登入時能裝（daemon 自動裝一次、也可手動按，#1871）。 */
+const LOGIN_KIND: Record<string, string> = { grok: 'grok', 'antigravity-cli': 'agy' }
+
+/** daemon 自動裝過 grok／agy 但失敗（含裝完重讀狀態失敗，`error` 已寫明）：不管這一列現在是什麼狀態都要講原因與「不重試」。 */
+function autoInstallFailure(row: IntegrationRow, retry: string): string | null {
+  if (!(row.name in LOGIN_KIND) || row.auto_install?.ok !== false) return null
+  return `自動安裝失敗：${row.auto_install.error ?? '原因不明'}；不重試，${retry}`
+}
+
+/** 沒裝的 integration 的說明。`loggedIn`：這台那家 CLI 已裝且已登入（工具探測）。 */
+function notInstalledNote(row: IntegrationRow, loggedIn: boolean): string {
+  if (!(row.name in LOGIN_KIND)) return '還沒安裝；這裡只顯示，不自動裝'
+  const failed = autoInstallFailure(row, loggedIn ? '可按「安裝」再試，或重啟 daemon' : '重啟 daemon 才會再試')
+  if (failed) return failed
+  if (!loggedIn) return '還沒安裝；這台的 CLI 登入後 daemon 會自動裝一次，也才能手動安裝'
+  return '還沒安裝；已登入，daemon 會在巡檢自動裝一次，也可以現在按「安裝」'
+}
+
+function integrationRow(host: string, row: IntegrationRow, tools: ToolMap | undefined): CheckRow {
+  const t = (tools as Record<string, ToolStatus> | undefined)?.[LOGIN_KIND[row.name] ?? '']
+  const loggedIn = t?.installed === true && t.logged_in === true
   const v = (n: number | null) => (n === null ? null : `v${n}`)
   const base = { id: `${host}:integration-${row.name}`, group: 'integration' as const, label: INTEGRATION_LABEL[row.name] ?? `integration：${row.name}` }
   switch (row.state) {
     case 'outdated':
-      return { ...base, current: v(row.installed_version), latest: v(row.required_version), status: 'update', note: null, action: { kind: 'integration', name: row.name } }
+      return { ...base, current: v(row.installed_version), latest: v(row.required_version), status: 'update', note: autoInstallFailure(row, '可按「更新」再試，或重啟 daemon'), action: { kind: 'integration', name: row.name } }
     case 'current':
       return { ...base, current: v(row.installed_version), latest: v(row.required_version), status: 'latest', note: null, action: null }
     case 'not_installed':
-      return { ...base, current: null, latest: null, status: 'missing', note: '還沒安裝；這裡只顯示，不自動裝', action: null }
+      return { ...base, current: null, latest: null, status: 'missing', note: notInstalledNote(row, loggedIn), action: loggedIn ? { kind: 'integration', name: row.name, fresh: true } : null }
     default:
-      return { ...base, current: null, latest: null, status: 'unknown', note: row.detail, action: null }
+      return { ...base, current: null, latest: null, status: 'unknown', note: [autoInstallFailure(row, '重啟 daemon 才會再試'), row.detail].filter(Boolean).join('；') || null, action: null }
   }
 }
 
@@ -174,7 +195,7 @@ export function buildHostCheck(input: HostCheckInput): HostCheck {
   for (const kind of ['claude', 'codex', 'grok', 'agy']) {
     rows.push(cliRow(host, kind, (tools as Record<string, ToolStatus> | undefined)?.[kind], upstream[kind], true))
   }
-  for (const row of integration?.items ?? []) rows.push(integrationRow(host, row))
+  for (const row of integration?.items ?? []) rows.push(integrationRow(host, row, tools))
   return { host, integrationError: integration?.error ?? null, integrationPending: integration === null, rows }
 }
 
