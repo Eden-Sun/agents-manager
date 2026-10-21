@@ -545,7 +545,6 @@ pub(crate) async fn reconcile_host_locked(app: &impl ReconcileHostEnv, host: &st
     };
     app.spawn_detect_github_host(host.to_string());
     let mut lost_autostart: Vec<crate::autostart_revive::Lost> = Vec::new();
-    let mut gone_this_pass = 0usize;
     let snapshot = client.snapshot().await?;
     // A1 的同一條規則也要套在 snapshot 上：`panes`／`workspaces` 這兩個 key 不在（不是「陣列是空的」，
     // 是「連 key 都沒有」）＝這份回應不是我們認得的形狀，下面每一段都會把它讀成「什麼都不存在」，
@@ -766,9 +765,6 @@ pub(crate) async fn reconcile_host_locked(app: &impl ReconcileHostEnv, host: &st
             (Some(run), None) => {
                 tracing::info!(host, bot = %bot.name, run = %run.id, "reconcile: agent gone, marking run exited");
                 let exit = app.mark_run_exited(&run.id, "agent not found during reconcile").await;
-                if matches!(exit, crate::lc_error::RunExit::Recorded | crate::lc_error::RunExit::TurnOwed) {
-                    gone_this_pass += 1;
-                }
                 // A child exists only as long as its pane; its conversation is kept.
                 // 計畫中的 herdr 重啟期間不算：所有 pane 同時消失不是子 agent 做完了（§6.5.2）。
                 // 維護結束時仍沒接回的，由 `herdr_maintenance` 照同一條規則退休。
@@ -881,9 +877,6 @@ pub(crate) async fn reconcile_host_locked(app: &impl ReconcileHostEnv, host: &st
         }
         app.emit_bot_status(&bot.id).await;
     }
-
-    // #1884：同一台 host 短時間大量 agent 不見＝多半是外力，告警給巡檢（只告警，SPEC §6.5.2）。
-    crate::gone_burst::check(app, host, gone_this_pass).await;
 
     // Only explicit pane ownership may select a parent. Missing/unreadable claims stay unknown.
     let (hints, strangers): (HashMap<String, String>, &[crate::herdr::AgentInfo]) =

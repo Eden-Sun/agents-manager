@@ -822,11 +822,14 @@ impl s6_ports::RelayWatchServices for App {
     }
 
     async fn mark_run_exited(&self, run_id: &str, reason: &str) -> crate::lc_error::RunExit {
-        crate::lifecycle::queue::mark_run_exited(&self.shared(), run_id, reason).await
+        crate::gone_burst::mark_run_exited(&self.shared(), run_id, reason).await
     }
 
     async fn sweep_dead_panes(&self) -> Vec<String> {
-        crate::lifecycle::dead_panes::sweep(&self.shared()).await
+        let app = self.shared();
+        let swept = crate::lifecycle::dead_panes::sweep(&app).await;
+        crate::gone_burst::record_swept(&app, &swept).await;
+        swept
     }
 
     fn spawn_relay_watch(&self, watch: crate::lifecycle::relay_watch::Watch) {

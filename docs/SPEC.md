@@ -1482,11 +1482,14 @@ stall watchdog 的自動補送走同一條驗證路徑，次數記在 `turns.res
    只在該主機的開機 autostart 跑完之後才動（開機那輪由 autostart 負責，不搶著起第二次），herdr 計畫中維護期間不動；
    補開拿 bot 鎖**等到拿到為止，但關機一開始就放棄等**（#1429、#1470）：平常鎖被別的操作（hook、queue flush、spool 重放、對帳收尾）握著只是等它放開，之後照常判斷、補開或記退避並寫 `bot_lost`——「對帳判定遺失」（`agent not found during reconcile`）的 run 只會交進來這一次，定時掃描只撈 `pane gone`，這裡跳過就沒有任何路徑會再補開它；關機中（`shutdown` 已 cancel）不等鎖、不寫決定、不開 pane，交給下一次開機的對帳，補開收尾因此不會卡住優雅關機的 `wait()`。
    退避：同一顆 bot 30 分鐘內最多嘗試補開 3 次；計數依 durable `bot_lost` inbox 事件判斷，daemon 重啟不會重設。超過只推 `outcome=backoff`、不再開，交給 supervisor／探針。
-   **同一台主機短時間大量 agent 不見要告警（`gone_burst`，#1884）**：某顆 bot 的 `pkill` 範圍過大（BSD `pkill -f x -P 1` 的 `-P 1` 被當成比對字串）一次殺光整台的 agent 時，對帳只會安靜把每個 run 收成 `exited`。
-   每輪對帳尾端、**只有這一輪自己收了 run 才查**：數同一台主機上 `exit_reason` 為 `agent not found during reconcile`／`pane gone`、`ended_at` 在最近 **30 秒**內的 run，**≥ 3 顆**（子 agent 不算：它們做完就關 pane；移交出去的專案不算）就推一則 `ops_alert`（`reason=agents_gone_burst`；payload 帶 `host`、`count`、`bots[{bot_id,name,gone_at}]`／`bot_names`、`window_secs`、`first_gone_at`／`last_gone_at`、`detail`、`action`）。
-   **告警去向選 supervisor inbox 的 `ops_alert`，不另開 incident 也不用 `bot_lost`**：`ops_alert` 本來就是 daemon 通知巡檢「有東西不對、已擋下／沒動」的通道（`herdr_unexpected_restart`、`share_storage_full` 同一條），巡檢會被叫醒；`bot_lost` 是**每顆 bot** 一則且帶補開結果，一波 14 顆會洗版、也不表達「這是同一件事」。
-   去重：數的是 DB（跨輪、跨 daemon 重啟），同一台主機推過後 **5 分鐘內不再推**（一波掉落常跨好幾輪對帳、窗口會滑動）。**只告警**：不重啟、不改上一段 `autostart_revive` 的補開行為。
-   不誤報：herdr 計畫中維護期間（§6.5.2）不推（讀不到維護狀態也不推）；本機 herdr 非預期重啟 5 分鐘內已有 `herdr_unexpected_restart` 告警就不重複。整台主機斷線（ssh 掉）時 `session.snapshot`／`agent.list` 失敗、整輪對帳跳過，不會有 gone，所以不在這條。
+   **同一台主機短時間大量 agent 不見要告警（`gone_burst`，#1884）**：某顆 bot 的 `pkill` 範圍過大（BSD `pkill -f x -P 1` 的 `-P 1` 被當成比對字串）一次殺光整台的 agent 時，run 只會被安靜收成 `exited`。
+   **在 run 結束的當下記一筆（記憶體）**，不事後查 DB：run 可能被對帳（`agent not found during reconcile`）、herdr 事件（`pane exited`／`workspace closed`）、定時掃描（`pane gone`，含 `relay_watch`）、default session 同步任何一條路先收掉，「結束前是不是 `stopping`」「結束當下有沒有在維護」事後讀不回來。
+   入口是 `gone_burst::probe`／`after_exit`（`TurnCommands for App` 的 `mark_run_exited`，夾在 `lifecycle::mark_run_exited` 前後）、`gone_burst::mark_run_exited`（`RelayWatchServices` 的 wrapper）與 `gone_burst::record_swept`（`sweep_dead_panes` 的回傳）。記帳只動記憶體（不 await、不碰 DB），達門檻才另 spawn 一個任務寫 inbox。
+   **門檻：同一台主機 30 秒內有 ≥ 3 顆不同的頂層 bot** 被收成 exited 就推一則 `ops_alert`（`reason=agents_gone_burst`；payload 帶 `host`、`count`、`bots[{bot_id,name,run_id,gone_at}]`／`bot_names`、`window_secs`、`first_gone_at`／`last_gone_at`、`detail`、`action`）。
+   **只算**：這一條路真的寫下 exited（CAS 輸給別的路徑的不算）、結束前是 `running`／`starting`、不是子 agent、不是已刪的 bot；同一顆 bot 窗內重開再掉只算一顆。**不算**：`stopping`（使用者或 daemon 的 stop／restart／更新重啟）、herdr 計畫中維護期間（§6.5.2；讀不到維護狀態也不算）、其他原因的結束（`restart for the claude update failed` 等 daemon 自己的動作）。維護期間的退出一開始就不進窗，所以維護結束後 30 秒內再掉一顆，不會連同維護期間的算進來。
+   **去向選 supervisor inbox 的 `ops_alert`，不另開 incident 也不用 `bot_lost`**：`ops_alert` 本來就是 daemon 通知巡檢「有東西不對、已擋下／沒動」的通道（`herdr_unexpected_restart`、`share_storage_full` 同一條），巡檢會被叫醒；`bot_lost` 是每顆 bot 一則且帶補開結果，一波 14 顆會洗版、也不表達「這是同一件事」。
+   **同一台主機推過後 5 分鐘內不再推**（記憶體冷卻，推失敗就解除）；inbox 的 `event_key` 帶窗內最早那顆 run id，daemon 重啟後同一波重推會被去重擋掉。每台主機最多記 256 筆。**只告警**：不重啟、不改上一段 `autostart_revive` 的補開行為。
+   **取捨**：herdr 的 `pane exited` 分不出「外力殺掉 agent」與「使用者在 herdr 裡手動關 pane」，所以使用者 30 秒內手動關 ≥ 3 顆不同頂層 bot 的 pane 也會告警（`action` 有寫明）；告警只是通知、不動任何東西，所以接受。本機 herdr 非預期重啟（§6.5.2 之外的 `herdr_recovery`）時 `herdr_unexpected_restart` 與這則可能各推一則，不互相壓制。整台主機斷線（ssh 掉）時對帳整輪跳過，不會有 run 被收。
 
 ### 6.2 啟動 Bot（per-bot 鎖內）
 1. `INSERT runs (state='starting')`；違反 active Run 唯一索引 → 409 附既有 `run_id`。
