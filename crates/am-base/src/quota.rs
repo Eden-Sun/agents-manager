@@ -1650,6 +1650,7 @@ mod clear_if_older_tests {
         data_dir: PathBuf,
         quotas: tokio::sync::Mutex<std::collections::BTreeMap<String, Quota>>,
         stale: tokio::sync::Mutex<std::collections::BTreeSet<String>>,
+        emits: std::sync::atomic::AtomicUsize,
     }
 
     impl crate::capabilities::Db for CleanApp {
@@ -1666,6 +1667,7 @@ mod clear_if_older_tests {
 
     impl crate::capabilities::Emit for CleanApp {
         fn emit(&self, _kind: &str, _data: Value) -> impl Future<Output = ()> + Send {
+            self.emits.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
             async {}
         }
 
@@ -1701,6 +1703,7 @@ mod clear_if_older_tests {
             data_dir: std::env::temp_dir().join("quota-clear-if-older-test"),
             quotas: tokio::sync::Mutex::new(Default::default()),
             stale: tokio::sync::Mutex::new(Default::default()),
+            emits: std::sync::atomic::AtomicUsize::new(0),
         }
     }
 
@@ -1860,5 +1863,87 @@ mod clear_if_older_tests {
         assert!(!clear.await.unwrap(), "鎖內看到的是較新的撞限，不能清");
         assert_eq!(app.quotas.lock().await[&key], newer, "新撞限與其他欄位原樣保留");
         assert_eq!(marked(&app, &key), None, "沒清掉就不推 cleared_at");
+    }
+
+    async fn db_row(app: &CleanApp, key: &str) -> (String, String) {
+        sqlx::query_as("SELECT quota_json, updated_at FROM quota_cache WHERE key = ?").bind(key).fetch_one(&app.db).await.unwrap()
+    }
+
+    async fn db_limit_hit(app: &CleanApp, key: &str) -> Option<LimitHit> {
+        serde_json::from_str::<Quota>(&db_row(app, key).await.0).unwrap().limit_hit
+    }
+
+    /// #1825 形狀：寫入端持鎖複製一份**有撞限**的舊快照 → 條件清除排隊等鎖 → 寫入端把舊快照落地後放鎖 → 清除完成。
+    /// 清除之後 DB 與重載都不能復活撞限；較舊讀數晚到的持久化要被拒。
+    #[tokio::test]
+    async fn a_snapshot_copied_under_the_lock_cannot_resurrect_a_cleared_hit() {
+        let app = std::sync::Arc::new(app().await);
+        let base = "grok:snapshot-under-lock";
+        let key = seed(&app, base, with_hit("2026-10-20T00:17:11Z")).await;
+        let seeded = app.quotas.lock().await[&key].clone();
+        persist_cache(&*app, &key, &seeded).await;
+        let success = t("2026-10-21T00:10:00Z");
+
+        let writer_lock = cache_write_lock(&key).await;
+        let snapshot = app.quotas.lock().await[&key].clone();
+        let (started_tx, started_rx) = tokio::sync::oneshot::channel();
+        let clear_app = app.clone();
+        let mut clear = tokio::spawn(async move {
+            let _ = started_tx.send(());
+            clear_limit_hit_if_older_than(&*clear_app, LOCAL_HOST, base, success).await
+        });
+        started_rx.await.unwrap();
+        assert!(
+            tokio::time::timeout(Duration::from_millis(50), &mut clear).await.is_err(),
+            "清除必須等寫入端的鎖"
+        );
+        persist_cache_locked(&*app, &key, &snapshot).await;
+        drop(writer_lock);
+
+        assert!(clear.await.unwrap(), "舊撞限早於成功送達，要清");
+        assert!(app.quotas.lock().await[&key].limit_hit.is_none(), "記憶體已清");
+        assert!(db_limit_hit(&app, &key).await.is_none(), "DB 已清");
+        assert_eq!(app.emits.load(std::sync::atomic::Ordering::SeqCst), 1, "清掉時只發一次 quota_updated");
+
+        let mut older = snapshot.clone();
+        older.updated_at = crate::db::iso_at(t("2026-10-20T00:10:00Z"));
+        persist_cache(&*app, &key, &older).await;
+        assert!(db_limit_hit(&app, &key).await.is_none(), "較舊讀數晚到的持久化要被拒，撞限不能寫回 DB");
+
+        app.quotas.lock().await.remove(&key);
+        assert_eq!(load_cache(&*app).await.unwrap(), 1);
+        assert!(app.quotas.lock().await[&key].limit_hit.is_none(), "重載快取不能復活撞限");
+    }
+
+    /// 不清掉任何東西的情況（沒有撞限、撞限不早於成功、時間解不開）：不 emit、不寫 DB、不寫 cleared_at、不改記憶體。
+    /// DB 用哨兵列確認；任何一次寫入都會把哨兵覆蓋掉。
+    #[tokio::test]
+    async fn a_call_that_clears_nothing_has_no_side_effects() {
+        let app = app().await;
+        let success = t("2026-10-21T00:10:00Z");
+        let mut no_hit = with_hit("2026-10-20T00:17:11Z");
+        no_hit.limit_hit = None;
+        let cases = [
+            ("grok:fx-no-hit", no_hit),
+            ("grok:fx-equal", with_hit("2026-10-21T00:10:00.000Z")),
+            ("grok:fx-later", with_hit("2026-10-21T00:30:00Z")),
+            ("grok:fx-bad-at", with_hit("not-a-time")),
+        ];
+        for (base, q) in cases {
+            let key = seed(&app, base, q.clone()).await;
+            sqlx::query("INSERT OR REPLACE INTO quota_cache (key, quota_json, updated_at) VALUES (?, 'SENTINEL', 'SENTINEL')")
+                .bind(&key)
+                .execute(&app.db)
+                .await
+                .unwrap();
+            let emits_before = app.emits.load(std::sync::atomic::Ordering::SeqCst);
+
+            assert!(!clear_limit_hit_if_older_than(&app, LOCAL_HOST, base, success).await, "{base} 不該清");
+
+            assert_eq!(app.emits.load(std::sync::atomic::Ordering::SeqCst), emits_before, "{base} 不該 emit");
+            assert_eq!(db_row(&app, &key).await, ("SENTINEL".into(), "SENTINEL".into()), "{base} 不該寫 DB");
+            assert_eq!(app.quotas.lock().await[&key], q, "{base} 不改記憶體");
+            assert_eq!(marked(&app, &key), None, "{base} 不寫 cleared_at");
+        }
     }
 }
