@@ -3855,6 +3855,25 @@ poller 啟動時 `sweep_stale()` 關掉 `am-quota` 與本機 session 裡登記�
 解析（`quota_grok.rs`）：標題 `<window> limit (<plan>)`，window 含 `week` → `seven_day`、含 `hour` → `five_hour`；百分比只認同列有 `█`/`░` 的（避開 Context usage 分頁）；
 `Resets:` 沒年份，本機按 daemon 時區、遠端按 `tools::detect` 記下的 UTC offset（`HostTools.utc_offset_secs`）解析；偏移未知就保留百分比並令 `resets_at = None`，不猜。本機或遠端時區下都補「最近的一次」（不早於一天前的最早一次，所以 1 月初可以回到去年 12 月底），已過期超過一天就進位隔年，輸出 RFC3339 UTC。先略過早於門檻的候選再解析本地時間，因此過去年份的 DST gap 不會阻擋今年候選；門檻內的候選若落在 gap 則不猜別年（#1837）。頻率：啟動一次，之後每 30 秒（使用者指定）；`GET /api/quota?refresh=1` 也觸發。
 
+### 12.7 撞限解除（hook 路徑，#1872）
+
+Grok 撞限的回合不以 `end_turn` 收尾。`hookrecv` 對通過世代圍籬（`admitted`：run／session 對得上這一代）的 Grok `TurnComplete`（`reason=end_turn`、`stopHookActive=false`）呼叫 `clear_limit_hit_for_bot_if_older_than(bot, success_at)`，條件**全部**成立才清，少一個就不動：
+
+- 同一個 run 唯一的 `in_flight` 回合（`turns_one_in_flight`）是 daemon 送出的（`delivery='ok'`、非 external、有 `delivered_at`），`success_at` ＝它的 `delivered_at`，不是 Stop 的時間。要 `hit.at < delivered_at <= received_at`（前半由 `clear_limit_hit_if_older_than` 在鎖內比）：回合是撞限之後才送出、Stop 又是送出之後才觸發。先送出、撞限發生在回合中間的回合不清。
+- `received_at`（hook 行程觸發當下蓋的）要解得開、不比現在晚；缺或解不開都不清，不退回 daemon 收到的時間或 `now`。
+- 只清本機：`hit.at`、`delivered_at` 是 daemon 的時鐘，`received_at` 是 hook 所在機器的，遠端沒有可驗的偏差界線，一律不清。
+- 被備援收成 `completed_fallback` 的那一筆回合本身不清（它不是 in-flight，晚到的 Stop 補回它時不進這條路）。不看前序回合、也不看整個 run 的收尾方式，後續新回合自己的 Stop 照清。
+- 回覆非空，且不是撞限或 API 錯誤的字（`is_quota_exhaustion`、畫面的撞限行 `grok_limit_hit_line`、`Turn failed`／`API error` 開頭）。
+- 清的是 active run 身分那一格（`billing_identity` ＋ `quota_base_for_host`）；Codex 與其他 provider 不走這條路。
+
+**已知可能誤清（接受的殘餘風險）**：Grok 的 Stop 帶的 `promptId` 沒有在送出時存下來，歸屬靠「同 run 唯一 in-flight 回合」；舊回合被備援收掉、新回合送出後它的真 Stop 才觸發時，會被當成新回合的 Stop（`received_at` 也晚於新回合的 `delivered_at`），可能清掉仍有效的撞限；同身分的其他 bot 並行時也可能。這不是嚴格保證。恢復機制：撞限若仍在，下一次失敗的回合會經 `turn_error` 重新記下 hit（本節不保證只影響一個回合）。
+
+已知邊界（刻意接受的取捨，[#1872](https://github.com/Eden-Sun/agents-manager/issues/1872)）：
+- `turn_error::record_grok` 對「已記著、未過期、同一句」的橫幅沿用舊 `hit.at`，不往後推。所以舊 hit 一直沒被清、之後又真的撞限時，`hit.at` 仍是最早那一刻，跨過或晚於新撞限才送出的回合可能先誤清；之後若仍撞限，會由後續失敗的回合出現橫幅、經 `turn_error` 重新記下 hit。這個取捨是接受的，**不保證**並行的 bot 或身分最多只影響一個回合。
+- 畫面掃描（`capture_codex_usage_notices`）遇到 `Sighting::New`，或 daemon 重啟後第一次讀到仍在畫面上的舊橫幅且有回合在飛，可能把剛清掉的 hit 又記回來。這是既有行為，本節不處理。
+
+沒有 hook 的 Grok child（`inject_hooks=0`，走 §12.5）不經這條路。
+
 ## 12a. agy 支援（Google Antigravity CLI，使用者 2026-10-04）
 
 `kind = "agy"`：Antigravity CLI（`~/.local/bin/agy`，Go 單一執行檔；Google 自 2026-06-18 起對個人用戶停了 Gemini CLI，改用它）。herdr 內建 `agy` agent manifest，`agent.start {kind: "agy"}` 可用，但那份偵測規則是舊版（附錄 G.6），所以 daemon 自己認會停下來等人的畫面（§12a.4）。
