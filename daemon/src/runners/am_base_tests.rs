@@ -115,6 +115,9 @@ mod hosts;
 #[path = "am_base_tests/kill_guard.rs"]
 mod kill_guard;
 
+#[path = "am_base_tests/kill_shim.rs"]
+mod kill_shim;
+
 #[path = "am_base_tests/kind_probe.rs"]
 mod kind_probe;
 

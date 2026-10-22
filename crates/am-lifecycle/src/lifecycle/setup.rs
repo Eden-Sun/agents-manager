@@ -874,6 +874,9 @@ pub async fn install_shim(app: &(impl crate::capabilities::DataDir + crate::host
             if let Err(e) = app.install_local_cargo_shim(&dir) {
                 tracing::warn!(bot = %bot.name, error = ?e, "could not install the cargo build-slot shim");
             }
+            if let Err(e) = app.install_local_kill_shim(&dir) {
+                tracing::warn!(bot = %bot.name, error = ?e, "could not install the pkill/killall guard shim");
+            }
             Ok::<_, anyhow::Error>(bin.to_string_lossy().into_owned())
         })
     } else {
@@ -884,6 +887,9 @@ pub async fn install_shim(app: &(impl crate::capabilities::DataDir + crate::host
                     if dir.is_ok() {
                         if let Err(e) = app.install_remote_cargo_shim(&conn, &p.dir).await {
                             tracing::warn!(bot = %bot.name, host = %project.host, error = ?e, "could not install the remote cargo build-slot shim");
+                        }
+                        if let Err(e) = app.install_remote_kill_shim(&conn, &p.dir).await {
+                            tracing::warn!(bot = %bot.name, host = %project.host, error = ?e, "could not install the remote pkill/killall guard shim");
                         }
                     }
                     dir

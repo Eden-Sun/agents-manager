@@ -130,11 +130,17 @@ impl ShimInstallPort for App {
     fn install_local_cargo_shim(&self, bot_dir: &std::path::Path) -> std::io::Result<std::path::PathBuf> {
         crate::cargo_shim::install_local(bot_dir)
     }
+    fn install_local_kill_shim(&self, bot_dir: &std::path::Path) -> std::io::Result<std::path::PathBuf> {
+        am_base::kill_shim::install_local(bot_dir)
+    }
     async fn install_remote_herdr_shim(&self, conn: &crate::hosts::HostConn, remote_bot_dir: &str) -> Result<String> {
         crate::herdr_shim::install_remote(conn, remote_bot_dir).await
     }
     async fn install_remote_cargo_shim(&self, conn: &crate::hosts::HostConn, remote_bot_dir: &str) -> Result<String> {
         crate::cargo_shim::install_remote(conn, remote_bot_dir).await
+    }
+    async fn install_remote_kill_shim(&self, conn: &crate::hosts::HostConn, remote_bot_dir: &str) -> Result<String> {
+        am_base::kill_shim::install_remote(conn, remote_bot_dir).await
     }
 }
 

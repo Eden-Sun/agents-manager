@@ -21,8 +21,9 @@ use std::path::{Path, PathBuf};
 ///
 /// **本機開機掃描（[`refresh_all`]）與遠端同步（[`remote_sync_script`]）讀的是同一份**——兩邊不會各改各的、
 /// 飄成兩套 shim（issue #124）。
-pub fn shims() -> [(&'static str, &'static str); 2] {
-    [("herdr", crate::herdr_shim::SHIM_SH), ("cargo", crate::cargo_shim::SHIM_SH)]
+pub fn shims() -> [(&'static str, &'static str); 4] {
+    let kill = crate::kill_shim::shim_sh();
+    [("herdr", crate::herdr_shim::SHIM_SH), ("cargo", crate::cargo_shim::SHIM_SH), ("pkill", kill), ("killall", kill)]
 }
 
 /// shim 該有的權限。內容跟權限是兩件事，各自判：光內容對不代表 pane 打得起來。
@@ -92,6 +93,8 @@ pub struct LocalRefresh {
 ///
 /// **只補已經有的**：沒有 `bin/` 或沒有那支 shim 的 bot 不生出新檔案——那種 bot（遠端、從沒啟動過）
 /// 的 shim 由 `lifecycle::setup::install_shim` 在啟動時處理，這裡不替它決定。
+/// 唯一的例外是 `pkill`／`killall`（#1884）：這兩支是新加的守門，長跑的 bot 不會因為升級而重啟，
+/// 所以 `bin/` 裡已經有 `herdr`（＝這顆 bot 啟動過、PATH 前面就是這個目錄）的就補上，pane 下一次呼叫就生效。
 pub fn refresh_all(data_dir: &Path) -> LocalRefresh {
     let mut out = LocalRefresh::default();
     let Ok(entries) = std::fs::read_dir(data_dir.join("bots")) else { return out };
@@ -101,9 +104,10 @@ pub fn refresh_all(data_dir: &Path) -> LocalRefresh {
             continue;
         }
         let bin = bot_dir.join("bin");
+        let started = bin.join("herdr").exists();
         for (name, content) in shims() {
             let path = bin.join(name);
-            if !path.exists() {
+            if !path.exists() && !(started && crate::kill_shim::NAMES.contains(&name)) {
                 continue;
             }
             let who = format!("{}/{name}", entry.file_name().to_string_lossy());

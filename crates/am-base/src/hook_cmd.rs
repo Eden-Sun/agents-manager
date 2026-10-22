@@ -103,7 +103,12 @@ fn inner(args: HookArgs) {
 
     // PreToolUse 是守門、不是事件（#1884）：擋廣域 kill，**不** POST、不 spool；只有要擋時才印 stdout（決策 JSON）。
     // 子 agent 的 pane 也要擋（事故就是子 bot 跑的），所以放在下面那個 child 判斷之前；解析不了一律放行。
-    match crate::kill_guard::guard(&args.provider, &args.event, &text) {
+    // 「判不出來所以放行」的原因除了 stderr（agy 的 dispatcher 會丟掉它）也記進 hook.log。
+    let mut guard_log = |m: &str| {
+        let _ = writeln!(std::io::stderr(), "agents-managerd hook: kill_guard: {m}");
+        log_line_in(&data_dir, &args.bot, &format!("kill_guard: {m}"));
+    };
+    match crate::kill_guard::guard_logged(&args.provider, &args.event, &text, &mut guard_log) {
         crate::kill_guard::Guard::NotPreToolUse => {}
         crate::kill_guard::Guard::Pass => return,
         crate::kill_guard::Guard::Deny(decision) => {

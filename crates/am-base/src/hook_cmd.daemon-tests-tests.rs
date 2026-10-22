@@ -209,3 +209,26 @@
         assert!(log.contains("spool over cap") && log.contains("hook-spool.jsonl.replaying"), "{log}");
         let _ = std::fs::remove_dir_all(&data);
     }
+
+    /// #1884：PreToolUse 守門「判不出來所以放行」的原因要進 bot 的 hook.log（agy 的 dispatcher 把 hook 的 stderr 丟掉，只剩這份看得到）；
+    /// 乾淨的放行不寫；不 POST、不 spool。
+    #[test]
+    fn a_kill_guard_pass_with_a_reason_is_logged_to_hook_log_and_a_clean_one_is_not() {
+        let data = fresh_data_dir("killguard-log");
+        let args = |command: &str| HookArgs {
+            provider: "agy".into(),
+            bot: "b1".into(),
+            token: "t".into(),
+            port: 1, // 連不上：若真的去 POST 會留下 spool／log
+            data_dir: data.to_string_lossy().into_owned(),
+            event: "PreToolUse".into(),
+            payload_arg: Some(serde_json::json!({"toolCall": {"args": {"CommandLine": command}}}).to_string()),
+        };
+        run(args("pkill -f next-server"));
+        assert!(!data.join("bots/b1/hook.log").exists(), "乾淨的放行不寫 log");
+        run(args("pkill -f claude 'unterminated"));
+        let log = std::fs::read_to_string(data.join("bots/b1/hook.log")).unwrap();
+        assert!(log.contains("kill_guard:") && log.contains("解析失敗"), "{log}");
+        assert!(!data.join("bots/b1/hook-spool.jsonl").exists(), "守門不 spool");
+        let _ = std::fs::remove_dir_all(&data);
+    }
