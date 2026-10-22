@@ -804,7 +804,7 @@ Jev 不負責回合收尾、額度記帳或競態判斷；這些依 run、turn�
 解析不了、動態展開的 PID（`kill $(pgrep …)`）、不是 shell 指令的工具一律**放行**；每一種「判不出來所以放行」（壞 JSON、引號或 `$(` 沒閉合、pattern 超過資源上限、內部 panic）都在 stderr 留一行（`agents-managerd hook: kill_guard: …`；stdout 只留給決策 JSON），同時寫進 bot 的 `hook.log`（agy 的 dispatcher 丟掉 hook 的 stderr，只剩這份看得到），絕不因 hook 的錯擋掉正常指令。
 
 指令先切成簡單指令（`; & | \n ( )`、引號、重導向），剝掉 `sudo`／`env`（含 `-S "字串"`，那串字再切開；一次判斷最多展開 16 層，超過放行並記 log）／`nohup`／`timeout`／`xargs`／`VAR=x` 這類前綴，`bash -c '…'`／`eval` 遞迴；只看 `kill`、`pkill`、`killall`（`pgrep` 只列不殺）。
-`$(…)` 與反引號（雙引號裡也算，單引號、註解、`\$` 不算；括號判斷看引號與巢狀）裡的指令另外遞迴判斷。**註解與 heredoc 內文不是指令**：加引號終止字的 heredoc（`<<'EOF'`）內文完全略過；沒加引號的只看內文裡的 `$(…)`／反引號；餵給 shell 的（`bash <<EOF`、`sh -s <<EOF`、`bash <<< '…'`，沒有 `-c`、沒有 script 檔參數）內文當一份 script 判斷；`bash -n`／`-nv`／`-o noexec` 這類只檢查語法的不執行、照選項順序算最後的狀態（`bash -n +n -c '…'` 會再打開執行，照擋），noexec 時放行。
+`$(…)` 與反引號（雙引號裡也算，單引號、註解、`\$` 不算；括號判斷看引號與巢狀）裡的指令另外遞迴判斷。**註解與 heredoc 內文不是指令**：加引號終止字的 heredoc（`<<'EOF'`）內文完全略過；沒加引號的只看內文裡的 `$(…)`／反引號；餵給 shell 的（`bash <<EOF`、`sh -s <<EOF`、`bash <<< '…'`，沒有 `-c`、沒有 script 檔參數）內文當一份 script 判斷；`bash -n`／`-nv`／`-o noexec` 這類只檢查語法的不執行：shell 的選項照順序走完（`-o`／`+o`／`-O`／`+O`、`--rcfile`／`--init-file` 帶值，值一起吃掉），算最後的 noexec 狀態（`bash -n -O extglob +n -c '…'` 會再打開執行，照擋）；有不認得的選項就判斷不了、不當 noexec 放行。noexec 的 shell 只是不跑 script，外層 shell 展開的 heredoc 內文 `$(…)` 仍照判斷。
 引號或 `$(` 沒閉合時 shell 自己也語法錯誤、整串不會跑：丟掉那一行起的內容、其餘照判斷、記一筆 log（「解析失敗」），所以 `pkill -f claude 'oops` 放行，但前面已經完整的行（`pkill -f claude⏎echo 'oops`）照擋。**只擋確定廣域的**：
 
 | 規則 | 擋 | 放行 |
