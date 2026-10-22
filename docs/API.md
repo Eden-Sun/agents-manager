@@ -2089,6 +2089,8 @@ UI token 會取得 Project 底下所有存活 bot 的訊息合併。Bot token �
 
 ### 12.1 `GET /api/models?kind=claude|codex|grok|agy&host=<name>&identity=<name>&refresh=1`
 
+AGM CLI：`bin/agm models --kind codex --host m4p --refresh`，指定身分加 `--identity <name>`。沿用 CLI 的角色認證與 timeout，不將 token 放在 argv；一般 Bot 的 403／503 原樣回報，不換憑證或自動重試。省略 `--refresh` 為查詢，省略 `--host` 為 local。
+
 Bot 呼叫此路由時，連線目的地是 daemon，`host` 則是要執行 CLI 的主機，兩者不可混用。本機 Bot 以注入的 `AM_PORT` 連 loopback；遠端 Bot 沒有 `AM_PORT`（§11.4 的設計），使用部署共用指引提供的 daemon 入口，不能猜目前主機的 localhost 或自行補設 `AM_PORT`。使用 `X-AM-Bot-Id` 與 `X-AM-Bot-Token`，不是 Bearer，也不取共用 UI token；不跟隨 HTTP redirect。
 
 例如 child 在 m4p，查 `?kind=codex&host=m4p`，指定身分再加 `identity`，並確認回應的 `host`／`kind`。省略 host 會查 local，不能把這份清單視為遠端結果。連線失敗核對入口；401／403 核對 Bot 身分；503 `model_cache_miss` 請 AGM 刷新指定 host／kind／identity 的快取，不改用歷史模型、也不要求使用者重答已指定的模型。
