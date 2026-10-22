@@ -2082,6 +2082,10 @@ UI token 會取得 Project 底下所有存活 bot 的訊息合併。Bot token �
 
 ### 12.1 `GET /api/models?kind=claude|codex|grok|agy&host=<name>&identity=<name>&refresh=1`
 
+Bot 呼叫此路由時，連線目的地是 daemon，`host` 則是要執行 CLI 的主機，兩者不可混用。本機 Bot 以注入的 `AM_PORT` 連 loopback；遠端 Bot 沒有 `AM_PORT`（§11.4 的設計），使用部署共用指引提供的 daemon 入口，不能猜目前主機的 localhost 或自行補設 `AM_PORT`。使用 `X-AM-Bot-Id` 與 `X-AM-Bot-Token`，不是 Bearer，也不取共用 UI token；不跟隨 HTTP redirect。
+
+例如 child 在 m4p，查 `?kind=codex&host=m4p`，指定身分再加 `identity`，並確認回應的 `host`／`kind`。省略 host 會查 local，不能把這份清單視為遠端結果。連線失敗核對入口；401／403 核對 Bot 身分；503 `model_cache_miss` 請 AGM 刷新指定 host／kind／identity 的快取，不改用歷史模型、也不要求使用者重答已指定的模型。
+
 某 host 上某 kind 可用的模型。`host` 省略 = `local`；快取 10 分鐘（key = host+kind+identity），`refresh=1` 強制重抓；遠端經 ssh 跑同一條管線。一般 Bot 只讀新鮮快取；未命中或過期回 503 `model_cache_miss`，不執行本機或遠端 CLI。身分新增或刪除時，該名字（任何主機）的清單快取作廢，下一次讀取重抓（#1349）。一般 Bot 帶 `refresh=1|true|yes` 回 403 `user_only`；User 與已登記 AGM 角色維持現有即時探測行為。
 `identity` 決定這份清單是哪個身分的：claude 讀 `CLAUDE_CONFIG_DIR/settings.json`，算 `default_effort` 與 `is_default`（SPEC §17.1）；codex 以 `CODEX_HOME` 跑 `app-server` 並讀它的 `config.toml`（頂層 `model`／`model_reasoning_effort`）；grok 以 `GROK_HOME` 跑 `grok models` 並讀它的 `config.toml`／`models_cache.json`。省略或該身分沒設這個家目錄 → 預設家目錄（不是錯誤）。
 
