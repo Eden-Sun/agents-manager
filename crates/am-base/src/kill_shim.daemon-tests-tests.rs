@@ -204,9 +204,29 @@
             assert_eq!(out.status.code(), Some(127));
             assert!(String::from_utf8_lossy(&out.stderr).contains("找不到真的 pkill"));
         }
-        // 擋的判斷在找真的之前：沒有真的也一樣擋（而且不會 exec 任何東西）。
-        let out = Command::new("/bin/sh").arg(env.root.join("shim/pkill")).args(["-f", "claude"]).env("PATH", &path).output().unwrap();
-        assert_eq!(out.status.code(), Some(DENIED_EXIT));
+        // 擋的判斷在找真的之前（沒有真的也一樣擋）由 parity 測試（stub 當真的）涵蓋；這裡不再跑會真的 exec /usr/bin/pkill 的擋案例，
+        // 免得 shim 哪天回歸就真的去殺 claude。
+        let _ = path;
+    }
+
+    /// `pkill -x node`／`pkill -f node`／`killall node` 被擋時，訊息要說明原因（node 也是 claude／codex 的行程名）並直接給替代寫法。
+    #[test]
+    fn denying_node_explains_why_and_gives_the_alternative() {
+        let env = Env::new();
+        for (tool, args) in [("pkill", vec!["-x", "node"]), ("pkill", vec!["-f", "node"]), ("killall", vec!["node"]), ("killall", vec!["-r", "^node$"])] {
+            let (code, out, err) = env.run("sh", tool, &args);
+            assert_eq!(code, DENIED_EXIT, "{tool} {args:?}");
+            assert!(out.is_empty());
+            assert!(err.contains("也是 claude／codex") && err.contains("行程名"), "原因：{tool} {args:?}\n{err}");
+            assert!(err.contains("lsof -ti :PORT | xargs kill") && err.contains("kill <PID>"), "替代寫法：{tool} {args:?}\n{err}");
+            // Rust hook 同一段話。
+            let cmd = std::iter::once(tool.to_string()).chain(args.iter().map(|a| am_base::hosts::sh_quote(a))).collect::<Vec<_>>().join(" ");
+            let Verdict::Deny(r) = check_command(&cmd) else { panic!("{cmd}") };
+            assert!(r.contains("也是 claude／codex") && r.contains("lsof -ti :PORT | xargs kill") && r.contains("kill <PID>"), "{r}");
+        }
+        // 別的名字不帶這段。
+        let (_, _, err) = env.run("sh", "pkill", &["claude"]);
+        assert!(!err.contains("也是 claude／codex"), "{err}");
     }
 
     #[test]

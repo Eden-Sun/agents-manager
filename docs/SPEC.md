@@ -841,7 +841,7 @@ PreToolUse 呼叫**不送 daemon、不 spool**；`hook` 子命令依 payload 的
 - **被擋**：stderr 講原因與正確做法（`lsof -ti :PORT | xargs kill`、`kill <記下的 PID>`），exit 2（不是 1：1 是 pkill 的「沒有行程符合」，腳本會當成正常）。**放行**：`exec` 真的，參數原封不動。解析有疑義（regex 語法錯、pattern 超過長度上限）一律放行。
 - **找真的**：走 PATH，跳過自己、檔頭有 `AM_SHIM_MARKER` 的、任何 `…/bots/<id>/bin` 底下的（舊版沒 marker 也跳過，同 cargo shim，不遞迴），最後試 `/usr/bin`、`/bin`、`/usr/sbin`、`/sbin`；都沒有 exit 127 並說明。判斷在找真的之前：沒有真的也照擋。
 - **安裝**：bot 啟動時 `install_shim` 在 cargo shim 旁 best-effort 裝（本機、遠端；失敗只 warn，不擋啟動）；開機 `refresh_all` 對 `bin/` 已有 `herdr` 的 bot 補上（見 §6.5b），遠端重連補版走同一份 `shims()`。
-- **限制（照實）**：`kill` 是 shell 內建，shim 擋不到 `kill -9 -1`／`kill 0`（留給 PreToolUse）；`/usr/bin/pkill` 這類**絕對路徑會繞過 shim**；`pkill -x node`、`killall node` 會擋（npm 安裝版 claude／codex 的行程名就是 node），要殺自己的 node 請用記下的 PID／port。字元數用 shell 的字串長度（C locale 是位元組），非 ASCII 的單字 pattern 與 Rust 的字元數門檻可能差一點；`\d`、`{n,m}`、反向參照等 grep 與迷你 ERE 語意不同處以放行為準（保護名單是純英數，實務上不受影響）。
+- **限制（照實）**：`kill` 是 shell 內建，shim 擋不到 `kill -9 -1`／`kill 0`（留給 PreToolUse）；`/usr/bin/pkill` 這類**絕對路徑會繞過 shim**；`pkill -x node`、`killall node` 會擋（npm 安裝版 claude／codex 的行程名就是 node）——被擋的訊息（hook 與 shim 同一段，`NODE_NOTE`）會說明這個原因並直接給替代寫法 `lsof -ti :PORT | xargs kill`／`kill <PID>`。字元數用 shell 的字串長度（C locale 是位元組），非 ASCII 的單字 pattern 與 Rust 的字元數門檻可能差一點；`\d`、`{n,m}`、反向參照等 grep 與迷你 ERE 語意不同處以放行為準（保護名單是純英數，實務上不受影響）。
 
 ### 4.4a 模型／強度／fast／身份：runtime 與設定
 
