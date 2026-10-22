@@ -1613,6 +1613,9 @@
         let mut other_source = reading.clone();
         other_source.source = "claude-usage".into();
         assert!(!grok_reading_clears_hit(&hit, &other_source, now), "不是 grok-usage：不清");
+        let mut bad_reading = reading.clone();
+        bad_reading.updated_at = "not-a-time".into();
+        assert!(!grok_reading_clears_hit(&hit, &bad_reading, now), "讀數時間解不開：不清");
         let bad_at = LimitHit { at: "not-a-time".into(), ..hit };
         assert!(!grok_reading_clears_hit(&bad_at, &reading, now), "撞限時間解不開：不清");
     }
@@ -1639,6 +1642,14 @@
 
         set(&app, "m4p", "grok", reading()).await;
         set(&app, LOCAL_HOST, "grok:other", reading()).await;
+        {
+            let quotas = app.quotas.lock().await;
+            for key in [quota_key("m4p", "grok"), quota_key(LOCAL_HOST, "grok:other")] {
+                let written = quotas.get(&key).unwrap_or_else(|| panic!("前提：{key} 的讀數真的寫進去了"));
+                assert_eq!(written.seven_day.as_ref().unwrap().used_pct, 55.0, "{key}");
+                assert!(written.limit_hit.is_none(), "{key}：自己沒有撞限");
+            }
+        }
         assert!(app.quotas.lock().await[&quota_key(LOCAL_HOST, "grok")].limit_hit.is_some(), "別的 host／identity 的讀數不清");
 
         let mut critical = reading();
