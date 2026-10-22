@@ -198,3 +198,152 @@
         let nasty = format!(r#"{{"hook_event_name":"PreToolUse","tool_input":{{"command":{}}}}}"#, serde_json::to_string(&format!("echo '{}\"$(`", "x".repeat(100_000))).unwrap());
         assert_eq!(guard("claude", "", &nasty), Guard::Pass);
     }
+
+    // ───────────── review 修正（#1884 rv2）─────────────
+
+    fn notes(cmd: &str) -> Vec<String> {
+        check_command_logged(cmd).1
+    }
+
+    #[test]
+    fn hostile_regexes_are_bounded_and_let_through_with_a_log() {
+        let started = std::time::Instant::now();
+        // 災難性回溯：不能卡住。
+        let v = check_command_logged("pkill -f '(.*)*Z'");
+        assert_eq!(v.0, Verdict::Allow);
+        assert!(v.1.iter().any(|n| n.contains("上限")), "{:?}", v.1);
+        assert!(!denied("pkill -f '(a*)*(b*)*(c*)*Z'"));
+        // 兩萬層括號：不能 stack overflow（長度上限直接擋在 parse 之前）。
+        let deep = format!("pkill -f '{}x{}'", "(".repeat(20_000), ")".repeat(20_000));
+        let v = check_command_logged(&deep);
+        assert_eq!(v.0, Verdict::Allow);
+        assert!(v.1.iter().any(|n| n.contains("長度")), "{:?}", v.1);
+        // 長度在上限內、但巢狀超過群組上限。
+        let nested = format!("pkill -f '{}x{}'", "(".repeat(40), ")".repeat(40));
+        let v = check_command_logged(&nested);
+        assert_eq!(v.0, Verdict::Allow);
+        assert!(v.1.iter().any(|n| n.contains("巢狀")), "{:?}", v.1);
+        assert!(started.elapsed() < std::time::Duration::from_secs(2), "hook 不能慢：{:?}", started.elapsed());
+        // 一般 pattern 不受影響。
+        assert!(denied("pkill -f 'cla(u|a)de'"));
+        assert!(regex_match_limited("(.*)*Z", "claude --settings /x/y/z", false, false).is_err());
+        assert_eq!(regex_match_limited("cla.de", "claude", false, false), Ok(true));
+    }
+
+    #[test]
+    fn heredoc_bodies_comments_and_unterminated_quotes_are_not_commands() {
+        // 內文只是文字（引號終止字）：不是指令。
+        assert!(!denied("cat <<'EOF'\npkill -f claude\nEOF"));
+        assert!(!denied("cat > notes.md <<\"EOF\"\nrun pkill -f claude then\n$(pkill -f claude)\nEOF\necho done"));
+        assert!(!denied("cat <<-EOF\n\tpkill -f claude\n\tEOF\nls"));
+        assert!(!denied("cat << EOF\npkill -f claude\nEOF"));
+        // 註解：連 `$(…)` 都不執行。
+        assert!(!denied("# $(pkill -f claude)\nls"));
+        assert!(!denied("ls # `pkill -f claude`"));
+        // 未閉合引號／括號：shell 自己也語法錯誤，放行並記 log。
+        for cmd in ["pkill -f claude 'unterminated", "pkill -f claude \"unterminated", "echo $(pkill -f claude", "echo `pkill -f claude"] {
+            let (v, n) = check_command_logged(cmd);
+            assert_eq!(v, Verdict::Allow, "{cmd}");
+            assert!(n.iter().any(|x| x.contains("解析失敗")), "{cmd}: {n:?}");
+        }
+        // 之前已經完整的行還是會跑，照擋。
+        assert!(denied("pkill -f claude\necho 'unterminated"));
+        assert!(!denied("echo ok\npkill -f claude 'unterminated"));
+        // 但會被執行的 heredoc 還是要看：未加引號內文的 `$(…)`、餵給 shell 的 script。
+        assert!(denied("cat <<EOF\n$(pkill -f claude)\nEOF"));
+        assert!(denied("cat <<EOF\nx `killall node` y\nEOF"));
+        assert!(denied("bash <<'EOF'\npkill -f claude\nEOF"));
+        assert!(denied("sudo sh -s <<EOF\nkill -9 -1\nEOF"));
+        assert!(denied("bash <<< 'pkill -f claude'"));
+        assert!(!denied("bash -c 'echo hi' <<'EOF'\npkill -f claude\nEOF"), "-c 時 heredoc 是 stdin，不是 script");
+        assert!(!denied("grep pkill <<< 'pkill -f claude'"));
+        // heredoc 結束後同一行之後的指令、之後的行照看。
+        assert!(denied("cat <<'EOF' ; pkill -f claude\nbody\nEOF"));
+        assert!(denied("cat <<'EOF'\nbody\nEOF\npkill -f claude"));
+        // 沒有終止行：內文讀到結尾（bash 也是）。
+        assert!(!denied("cat <<'EOF'\npkill -f claude"));
+    }
+
+    #[test]
+    fn owner_conditions_are_denied_including_capital_u_and_wrapped() {
+        assert!(denied("pkill -U 1000"));
+        assert!(denied("pkill -U eddie"));
+        assert!(denied("sudo pkill -U 1000"));
+        assert!(denied("env FOO=1 pkill -U 1000"));
+        assert!(denied("timeout 5 pkill -U 1000"));
+        assert!(denied("nohup pkill -G staff &"));
+        assert!(!denied("pkill -U 1000 -f next-server"), "有窄 pattern 的不擋");
+        assert!(denied("pkill -f next-server -U 1000"), "選項寫在 pattern 之後");
+    }
+
+    #[test]
+    fn bsd_killall_dash_m_is_a_regex_like_dash_r() {
+        assert!(denied("killall -m '.*'"));
+        assert!(denied("killall -m 'cla.de'"));
+        assert!(denied("killall -r '.*'"));
+        assert!(denied("sudo killall -m node"));
+        assert!(!denied("killall -m 'next-server'"));
+        assert!(!denied("killall -m 'vite.*'"));
+    }
+
+    #[test]
+    fn substitutions_inside_double_quotes_are_found_whatever_quotes_surround_them() {
+        assert!(denied(r#"echo "'$(pkill -f claude)'""#), "雙引號裡的單引號只是字元，`$(…)` 照樣執行");
+        assert!(denied(r#"echo "a 'b' $(pkill -f claude) 'c'""#));
+        assert!(denied(r#"echo "$(echo "$(pkill -f claude)")""#), "巢狀");
+        assert!(denied(r#"x="$(kill -9 -1)""#));
+        assert!(!denied(r#"echo '$(pkill -f claude)'"#), "單引號裡不展開");
+        assert!(!denied(r#"echo "\$(pkill -f claude)""#), "跳脫的 `$` 不展開");
+        assert!(!denied(r#"echo "$(echo ')')""#), "引號裡的 `)` 不結束 `$(`");
+        assert!(!denied("kill $(cat /tmp/pid)"));
+        assert!(!denied("pkill -f $(cat /tmp/name)"), "動態 pattern 判不出來，放行");
+    }
+
+    #[test]
+    fn env_dash_s_split_string_is_unwrapped() {
+        assert!(denied(r#"env -S "pkill -f claude""#));
+        assert!(denied(r#"env -S 'FOO=1 pkill -f claude'"#));
+        assert!(denied(r#"env -iS "pkill -f claude""#));
+        assert!(denied(r#"env -S"pkill -f claude""#));
+        assert!(denied(r#"env --split-string="pkill -f claude""#));
+        assert!(denied(r#"env --split-string 'killall node'"#));
+        assert!(denied(r#"sudo env -S "kill -9 -1""#));
+        assert!(denied(r#"env -S "env -S 'pkill -f claude'""#));
+        assert!(!denied(r#"env -S "pkill -f next-server""#));
+        assert!(!denied(r#"env -S "echo pkill -f claude""#));
+        assert!(!denied("env -u FOO pkill -f next-server"));
+        assert!(denied("env -u FOO pkill -f claude"));
+    }
+
+    fn logged(provider: &str, event: &str, text: &str) -> (Guard, Vec<String>) {
+        let mut lines: Vec<String> = Vec::new();
+        let g = guard_logged(provider, event, text, &mut |m| lines.push(m.to_string()));
+        (g, lines)
+    }
+
+    #[test]
+    fn unreadable_payloads_are_let_through_and_logged() {
+        // agy：事件名在參數裡，壞 JSON 也是 PreToolUse。
+        let (g, l) = logged("agy", "PreToolUse", "not json");
+        assert_eq!(g, Guard::Pass);
+        assert!(l.len() == 1 && l[0].contains("JSON"), "{l:?}");
+        // 看得出是 PreToolUse、但被截斷的 JSON：交回事件流程，但留一行。
+        let (g, l) = logged("claude", "", r#"{"hook_event_name":"PreToolUse","tool_input":{"command":"pk"#);
+        assert_eq!(g, Guard::NotPreToolUse);
+        assert!(l.len() == 1 && l[0].contains("PreToolUse"), "{l:?}");
+        // 其他事件的壞 payload 是 daemon 的事，不吵。
+        let (g, l) = logged("claude", "", "not json");
+        assert_eq!(g, Guard::NotPreToolUse);
+        assert!(l.is_empty(), "{l:?}");
+        // 判不出來的指令：放行，原因進 log。
+        let unterminated = r#"{"hook_event_name":"PreToolUse","tool_input":{"command":"pkill -f claude 'oops"}}"#;
+        let (g, l) = logged("claude", "", unterminated);
+        assert_eq!(g, Guard::Pass);
+        assert!(l.iter().any(|x| x.contains("解析失敗")), "{l:?}");
+        // 乾淨的放行不寫 log。
+        let ok = r#"{"hook_event_name":"PreToolUse","tool_input":{"command":"pkill -f next-server"}}"#;
+        let (g, l) = logged("claude", "", ok);
+        assert_eq!(g, Guard::Pass);
+        assert!(l.is_empty(), "{l:?}");
+        assert!(notes("pkill -f next-server").is_empty());
+    }
