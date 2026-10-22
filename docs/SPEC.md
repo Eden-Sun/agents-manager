@@ -2625,6 +2625,12 @@ pt-hub = ["~/project/pt/CLAUDE.md", "~/project/pt/AGENTS.md"]      # 多份照�
   `cache_clock` 的最近回合 SQL 排除它；保溫期間 claude statusLine 的 API 指紋變化與 `working` 也不算（`primary_keep_warm::window_open`，送出前開、回合收尾後寬限 20 秒、最長 15 分鐘）。
   視窗收掉之後再有 **15 分鐘回音期**（`WINDOW_ECHO`、`primary_keep_warm::echo_open`，#1885）：期間 statusLine 的 API 指紋變化一樣不算活動——claude 在回覆後閒置約 5 分鐘會自己打背景 API、遠端 `hook-status.json` 也可能晚到，這些不是真的活動，否則錨點前移、每小時再保溫一次停不下來。
   真的活動（使用者在 pane 打字、bot 自己開新回合）都有回合紀錄，錨點照回合時間算，不靠 statusLine，所以不會被回音期吞掉。回音期只在記憶體；daemon 重啟時 `rearm_windows` 依保溫回覆的完成時間補回。
+  **取捨**：回音期內「只有 statusLine 指紋變化、沒有回合紀錄」的真實 API 活動（例如 claude 自己的背景呼叫，確實可能讓 cache 被刷新）不移動錨點。
+  這只會讓 daemon 以為 cache 比實際老，**不會漏保溫**：錨點沒前移，58 分時照常送一次 `any updates`（最壞是多保溫一次、cache 本來還熱，成本是一則極短回合）；
+  反方向（以為比實際新、該保溫沒保溫）不會發生，因為被忽略的只是「把錨點往後挪」的訊號。代價只有晶片倒數與 `last_api_at` 偏保守（顯示比實際涼）。
+  可接受的理由：①這類呼叫正是 #1885 的來源，把它們算活動會讓主力每小時被背景呼叫續命、永遠保溫；②保溫本身極便宜，多一次遠小於重寫 30–40 萬 token；
+  ③真的活動（web 送 prompt、pane 打字的外部回合、bot 自己開的回合）一定有回合紀錄，回音期內照樣前移錨點、之後照常保溫（`a_real_turn_inside_the_echo_period_still_moves_the_anchor`）；
+  ④回音期只有 15 分鐘，過了之後 statusLine 指紋變化又照常算。
   所以送完保溫年齡照樣往上數，直到使用者送真的 prompt 或 bot 自己有真的活動，錨點才更新、計數重來。
 - **58 分（`KEEP_WARM_AFTER_SECS`）**：年齡 ≥ 58 分且未滿該 kind 的 cache TTL（claude／codex 為 60 分）、這個錨點之後還沒保溫過（有沒有比錨點晚的保溫回合）：
   走一般送 prompt 的路徑（`lifecycle::prompt`，聊天室看得到）送 `any updates`，`client_request_id = keep-warm:<錨點>`（同一錨點冪等）。以 §6.5j 的
