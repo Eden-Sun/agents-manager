@@ -97,23 +97,20 @@ pub fn age_window_closed_for_test(run_id: &str, age: Duration) {
     }
 }
 
-/// run id → 回音期結束的時間（記憶體帳，同 [`windows`]）。
-fn echoes() -> &'static Mutex<HashMap<String, Instant>> {
-    static S: OnceLock<Mutex<HashMap<String, Instant>>> = OnceLock::new();
-    S.get_or_init(Default::default)
-}
-
-#[cfg(feature = "test-hooks")]
-#[doc(hidden)]
-pub fn age_echo_for_test(run_id: &str, age: Duration) {
-    if let Some(until) = echoes().lock().unwrap_or_else(|e| e.into_inner()).get_mut(run_id) {
-        *until -= age;
-    }
+/// 視窗結束的時間：送出起最長 [`WINDOW_MAX`]，回合收尾（`closed`）後最多再撐 [`WINDOW_GRACE`]，取先到的。
+/// 回音期從這一刻起算 [`WINDOW_ECHO`]；視窗與回音期用同一份時間戳即時推算，不靠巡邏在兩者之間接手（#1885）。
+fn window_end(w: &Window) -> Instant {
+    let max_end = w.opened + WINDOW_MAX;
+    w.closed.map_or(max_end, |c| max_end.min(c + WINDOW_GRACE))
 }
 
 fn is_open(w: &Window, now: Instant) -> bool {
-    now.checked_duration_since(w.opened).is_some_and(|d| d < WINDOW_MAX)
-        && w.closed.is_none_or(|c| now.checked_duration_since(c).is_none_or(|d| d < WINDOW_GRACE))
+    now >= w.opened && now < window_end(w)
+}
+
+fn is_echo(w: &Window, now: Instant) -> bool {
+    let end = window_end(w);
+    now >= end && now < end + WINDOW_ECHO
 }
 
 /// 這個 run 現在是否在保溫回合的視窗裡（送出保溫起、回合收尾後再寬限一下）。視窗裡的 statusLine API 指紋變化與 `working` 都不算活動。
@@ -121,29 +118,33 @@ pub fn window_open(run_id: &str) -> bool {
     windows().lock().unwrap_or_else(|e| e.into_inner()).get(run_id).is_some_and(|w| is_open(w, Instant::now()))
 }
 
-/// 這個 run 是否還在保溫視窗收掉之後的回音期（[`WINDOW_ECHO`]）：期間 statusLine 的 API 指紋變化不算活動。
+/// 這個 run 是否在保溫視窗收掉之後的回音期（[`WINDOW_ECHO`]）：期間 statusLine 的 API 指紋變化不算活動。
+/// 與 [`window_open`] 看同一筆時間戳，視窗一結束（寬限到期或最長期限到）回音期就即時接上。
 pub fn echo_open(run_id: &str) -> bool {
-    echoes().lock().unwrap_or_else(|e| e.into_inner()).get(run_id).is_some_and(|until| Instant::now() < *until)
-}
-
-/// 開回音期，`remaining` 後結束。
-pub fn open_echo(run_id: &str, remaining: Duration) {
-    echoes().lock().unwrap_or_else(|e| e.into_inner()).insert(run_id.to_string(), Instant::now() + remaining);
+    windows().lock().unwrap_or_else(|e| e.into_inner()).get(run_id).is_some_and(|w| is_echo(w, Instant::now()))
 }
 
 pub fn open_window(run_id: &str) {
-    // 新一輪保溫／熱壓：舊的回音期作廢，收視窗時重新計。
-    echoes().lock().unwrap_or_else(|e| e.into_inner()).remove(run_id);
     windows().lock().unwrap_or_else(|e| e.into_inner()).insert(run_id.to_string(), Window { opened: Instant::now(), closed: None });
 }
 
 pub fn drop_window(run_id: &str) {
-    echoes().lock().unwrap_or_else(|e| e.into_inner()).remove(run_id);
     windows().lock().unwrap_or_else(|e| e.into_inner()).remove(run_id);
 }
 
-/// daemon 重啟後把保溫視窗補回來（視窗只在記憶體，#1285）：還在跑的 run 上，保溫回合還在飛、或剛收尾不到
-/// `WINDOW_MIN + WINDOW_GRACE`，就重開視窗；之後照常由巡邏的 `settle_window` 收。回傳補回的 run 數。
+/// 重啟後補回已收掉的視窗（只剩回音期）：`closed_ago` 之前收尾。`Instant` 往回推不動（開機不久）就退成現在，保護只會偏長。
+fn restore_closed_window(run_id: &str, closed_ago: Duration) {
+    let now = Instant::now();
+    let ago = |d: Duration| now.checked_sub(d).unwrap_or(now);
+    let w = Window { opened: ago(closed_ago + WINDOW_MIN), closed: Some(ago(closed_ago)) };
+    windows().lock().unwrap_or_else(|e| e.into_inner()).insert(run_id.to_string(), w);
+}
+
+/// daemon 重啟後把保溫／熱壓視窗補回來（視窗只在記憶體，#1285）：還在跑的 run 上，保溫回合還在飛、或剛收尾不到
+/// `WINDOW_MIN + WINDOW_GRACE`，就重開視窗；之後照常由巡邏的 `settle_window` 收。回傳補回的視窗數。
+/// 已收掉、還在回音期（收尾後 `WINDOW_GRACE + WINDOW_ECHO` 內）的也補回，使重啟前後保護一致（#1885）：
+/// 收尾時間取保溫回覆的 `completed_at`、熱壓收據的 `done_at`（沒定案用 `claimed_at`）；正常執行取巡邏第一次看到閒置的時刻，
+/// 兩者最多差一個巡邏週期（重啟後的回音期只會偏短一點點）。
 /// 時間字串是 `db::now()` 那種定寬 UTC，字串比較就是時間比較。
 pub async fn rearm_windows(pool: &SqlitePool) -> anyhow::Result<usize> {
     let cutoff = db::iso_in(-((WINDOW_MIN + WINDOW_GRACE).as_secs() as i64));
@@ -160,30 +161,45 @@ pub async fn rearm_windows(pool: &SqlitePool) -> anyhow::Result<usize> {
     for run_id in &runs {
         open_window(run_id);
     }
-    // 視窗已收、還在回音期（#1885）：重啟後第一個 statusLine 指紋變化一樣不算活動。
-    let replied: Vec<(String, String)> = sqlx::query_as(&format!(
+    // 視窗已收、還在回音期：重啟後第一個 statusLine 指紋變化一樣不算活動。
+    let echo_cutoff = db::iso_in(-((WINDOW_GRACE + WINDOW_ECHO).as_secs() as i64));
+    let mut closed: Vec<(String, String)> = sqlx::query_as(&format!(
         "SELECT t.run_id, MAX(t.completed_at) FROM turns t JOIN runs r ON r.id = t.run_id
           WHERE r.state IN ('starting','running') AND {}
             AND t.status IN ('completed','completed_fallback') AND t.completed_at >= ?
           GROUP BY t.run_id",
         cache_clock::keep_warm_crid_sql("t.client_request_id")
     ))
-    .bind(db::iso_in(-(WINDOW_ECHO.as_secs() as i64)))
+    .bind(&echo_cutoff)
     .fetch_all(pool)
     .await?;
-    let now = chrono::Utc::now();
-    for (run_id, completed_at) in replied {
-        if runs.contains(&run_id) {
-            continue;
+    closed.extend(
+        sqlx::query_as::<_, (String, String)>(
+            "SELECT a.run_id, MAX(COALESCE(a.done_at, a.claimed_at)) FROM primary_cache_actions a JOIN runs r ON r.id = a.run_id
+              WHERE r.state IN ('starting','running') AND a.kind = 'warm_compact' AND COALESCE(a.done_at, a.claimed_at) >= ?
+              GROUP BY a.run_id",
+        )
+        .bind(&echo_cutoff)
+        .fetch_all(pool)
+        .await?,
+    );
+    let mut latest: HashMap<String, chrono::DateTime<chrono::Utc>> = HashMap::new();
+    for (run_id, at) in closed {
+        if let Some(t) = db::parse_ts(&at) {
+            latest.entry(run_id).and_modify(|cur| *cur = (*cur).max(t)).or_insert(t);
         }
-        let Some(done) = db::parse_ts(&completed_at) else { continue };
-        let elapsed = (now - done).to_std().unwrap_or_default();
-        open_echo(&run_id, WINDOW_ECHO.saturating_sub(elapsed));
+    }
+    let now = chrono::Utc::now();
+    for (run_id, at) in latest {
+        if !runs.contains(&run_id) {
+            restore_closed_window(&run_id, (now - at).to_std().unwrap_or_default());
+        }
     }
     Ok(runs.len())
 }
 
 /// 巡邏看到保溫回合已經收尾（閒置、沒有回合在飛）：開始倒數寬限。視窗開著不到 [`WINDOW_MIN`] 不關。
+/// 視窗與其後的回音期都過了才丟掉記錄（回音期由 [`echo_open`] 即時推算，不需要巡邏接手）。
 pub fn settle_window(run_id: &str, idle_and_quiet: bool) {
     let mut m = windows().lock().unwrap_or_else(|e| e.into_inner());
     let Some(w) = m.get_mut(run_id) else { return };
@@ -191,11 +207,8 @@ pub fn settle_window(run_id: &str, idle_and_quiet: bool) {
     if idle_and_quiet && w.closed.is_none() && now.checked_duration_since(w.opened).is_some_and(|d| d >= WINDOW_MIN) {
         w.closed = Some(now);
     }
-    if !is_open(w, now) {
+    if now >= window_end(w) + WINDOW_ECHO {
         m.remove(run_id);
-        drop(m);
-        // 視窗收掉之後還有一段回音期：背景 API 呼叫、遠端 statusLine 晚到都不算活動（#1885）。
-        open_echo(run_id, WINDOW_ECHO);
     }
 }
 
@@ -203,7 +216,6 @@ pub fn settle_window(run_id: &str, idle_and_quiet: bool) {
 #[cfg_attr(test, allow(dead_code))]
 pub fn retain_runs(active: &[String]) {
     windows().lock().unwrap_or_else(|e| e.into_inner()).retain(|id, _| active.contains(id));
-    echoes().lock().unwrap_or_else(|e| e.into_inner()).retain(|id, _| active.contains(id));
 }
 
 /// 這一輪對一顆主力該做什麼。
