@@ -1,13 +1,15 @@
 # agents-manager web UI
 
-React + TypeScript + Vite + Zustand front end for `agents-managerd` (SPEC 附錄 D 的 M7）。
+**English** | [繁體中文](README.zh-TW.md)
 
-完整說明、mock 模式與已知問題見 [`../docs/FRONTEND.md`](../docs/FRONTEND.md)。
+React + TypeScript + Vite + Zustand front end for `agents-managerd` (M7 in SPEC Appendix D).
+
+See [`../docs/FRONTEND.md`](../docs/FRONTEND.md) for full details, mock mode and known issues.
 
 ```bash
 bun install
-bun run dev              # 連真 daemon（127.0.0.1:7788），需先 cargo run -- serve
-VITE_MOCK=1 bun run dev  # 記憶體假後端，不需要 daemon
-bun run build            # 產物在 dist/，M8 由 rust-embed 內嵌
+bun run dev              # connect to the real daemon (127.0.0.1:7788); run cargo run -- serve first
+VITE_MOCK=1 bun run dev  # in-memory fake backend, no daemon needed
+bun run build            # output in dist/, embedded via rust-embed (M8)
 bun run lint
 ```
