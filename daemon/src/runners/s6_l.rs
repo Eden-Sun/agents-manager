@@ -828,7 +828,7 @@ impl s6_ports::RelayWatchServices for App {
     async fn sweep_dead_panes(&self) -> Vec<String> {
         let app = self.shared();
         let swept = crate::lifecycle::dead_panes::sweep(&app).await;
-        crate::gone_burst::record_swept(&app, &swept).await;
+        crate::gone_burst::after_sweep(&app, &swept);
         swept
     }
 
