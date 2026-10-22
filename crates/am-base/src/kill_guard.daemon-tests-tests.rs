@@ -142,13 +142,16 @@
         assert!(regex_match("^claude", "claude --x", false, false));
         assert!(!regex_match("^claude", "node claude", false, false));
         assert!(regex_match("(codex|grok)$", "grok", false, false));
-        assert!(regex_match("cl[a-c]ude+", "claudeee", false, false));
+        assert!(regex_match("cl[a-z]ude+", "claudeee", false, false));
         assert!(regex_match("CLAUDE", "claude", true, false));
         assert!(!regex_match("CLAUDE", "claude", false, false));
         assert!(regex_match("claude", "claude", false, true));
         assert!(!regex_match("claud", "claude", false, true), "-x 要整串相等");
         assert!(regex_match("a*b", "xaab", false, false));
-        assert!(regex_match("(", "a(b", false, false), "壞掉的 pattern 退回子字串");
+        // 可判斷語法以外（壞語法、`{n,m}`、`\d`、`[a-c]`…）是「判不出來」，不是「不命中」，也不退回子字串。
+        for bad in ["(", "claude**", "claude{0}", "cla\\dde", "cl[a-c]ude", "[[:alpha:]]", "claude|", "a$b", "x^y", "éé"] {
+            assert!(regex_match_limited(bad, "claude", false, false).is_err(), "{bad}");
+        }
     }
 
     fn deny_json(provider: &str, event: &str, text: &str) -> Option<Value> {
@@ -208,25 +211,36 @@
     #[test]
     fn hostile_regexes_are_bounded_and_let_through_with_a_log() {
         let started = std::time::Instant::now();
-        // 災難性回溯：不能卡住。
-        let v = check_command_logged("pkill -f '(.*)*Z'");
-        assert_eq!(v.0, Verdict::Allow);
-        assert!(v.1.iter().any(|n| n.contains("上限")), "{:?}", v.1);
-        assert!(!denied("pkill -f '(a*)*(b*)*(c*)*Z'"));
-        // 兩萬層括號：不能 stack overflow（長度上限直接擋在 parse 之前）。
+        // 災難性回溯的寫法：NFA 線性時間，照常判斷（沒命中就放行，不需要記 log）。
+        for cmd in ["pkill -f '(.*)*Z'", "pkill -f '(a*)*(b*)*(c*)*Z'", "pkill -f '(.|.)(.|.)(.|.)(.|.)(.|.)(.|.)(.|.)(.|.)Z'"] {
+            let v = check_command_logged(cmd);
+            assert_eq!(v.0, Verdict::Allow, "{cmd}");
+        }
+        // 會命中的也照擋（不會因為「太複雜」而漏掉）。
+        assert!(denied("pkill -f '(.*)*claude'"));
+        assert!(denied("pkill -f '(.|.)(.|.)(.|.)(.|.)(.|.)(.|.)(.|.)(.|.).*claude'"));
+        // 兩萬層括號：長度上限，直接放行並記 log（不 stack overflow）。
         let deep = format!("pkill -f '{}x{}'", "(".repeat(20_000), ")".repeat(20_000));
         let v = check_command_logged(&deep);
         assert_eq!(v.0, Verdict::Allow);
-        assert!(v.1.iter().any(|n| n.contains("長度")), "{:?}", v.1);
-        // 長度在上限內、但巢狀超過群組上限。
-        let nested = format!("pkill -f '{}x{}'", "(".repeat(40), ")".repeat(40));
-        let v = check_command_logged(&nested);
+        assert!(v.1.iter().any(|n| n.contains("可判斷")), "{:?}", v.1);
+        // 長度在上限內、但巢狀超過 8 層：放行並記 log。
+        for n in [9, 40] {
+            let nested = format!("pkill -f '{}claude{}'", "(".repeat(n), ")".repeat(n));
+            let v = check_command_logged(&nested);
+            assert_eq!(v.0, Verdict::Allow, "{n} 層");
+            assert!(v.1.iter().any(|x| x.contains("可判斷")), "{:?}", v.1);
+        }
+        assert!(denied("pkill -f '((((((((claude))))))))'"), "8 層還在範圍內");
+        // 超過一條指令最多比對的 pattern 數：多出來的不比對、放行並記 log。
+        let many = format!("pkill -f {} claude", (0..MAX_REGEX_PATTERNS).map(|i| format!("zz{i}x")).collect::<Vec<_>>().join(" "));
+        let v = check_command_logged(&many);
         assert_eq!(v.0, Verdict::Allow);
-        assert!(v.1.iter().any(|n| n.contains("巢狀")), "{:?}", v.1);
+        assert!(v.1.iter().any(|n| n.contains("最多比對")), "{:?}", v.1);
+        assert!(denied(&format!("pkill -f claude {}", (0..MAX_REGEX_PATTERNS).map(|i| format!("zz{i}x")).collect::<Vec<_>>().join(" "))));
         assert!(started.elapsed() < std::time::Duration::from_secs(2), "hook 不能慢：{:?}", started.elapsed());
-        // 一般 pattern 不受影響。
         assert!(denied("pkill -f 'cla(u|a)de'"));
-        assert!(regex_match_limited("(.*)*Z", "claude --settings /x/y/z", false, false).is_err());
+        assert!(regex_match_limited("(.*)*Z", "claude --settings /x/y/z", false, false) == Ok(false));
         assert_eq!(regex_match_limited("cla.de", "claude", false, false), Ok(true));
     }
 
@@ -377,5 +391,17 @@
         assert!(denied("bash -c 'pkill -f claude'"));
         assert!(denied("bash -lc 'pkill -f claude'"));
         assert!(denied("bash -x <<'EOF'\npkill -f claude\nEOF"));
+        // 後面的 `+n`／`+o noexec` 會再打開執行：照選項順序算最後的狀態。
+        assert!(denied("bash -n +n -c 'pkill -f claude'"));
+        assert!(denied("bash -n +n <<'EOF'\npkill -f claude\nEOF"));
+        assert!(denied("bash -o noexec +o noexec -c 'pkill -f claude'"));
+        assert!(denied("sudo bash -vn +n -c 'pkill -f claude'"));
+        assert!(!denied("bash +n -n -c 'pkill -f claude'"));
+        assert!(!denied("bash -o noexec -c 'pkill -f claude'"));
+        assert!(!denied("bash -nc 'pkill -f claude'"));
+        assert!(!denied("bash -n +x <<'EOF'\npkill -f claude\nEOF"));
+        assert!(!denied("bash -n -o noexec +o xtrace -c 'pkill -f claude'"));
+        // `-c` 之後的字是 `$0`／參數，不是選項。
+        assert!(!denied("bash -n -c 'pkill -f claude' +n"));
         assert!(denied("bash -c 'echo no' ; bash <<'EOF'\npkill -f claude\nEOF"));
     }

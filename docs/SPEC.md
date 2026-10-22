@@ -804,7 +804,7 @@ Jev 不負責回合收尾、額度記帳或競態判斷；這些依 run、turn�
 解析不了、動態展開的 PID（`kill $(pgrep …)`）、不是 shell 指令的工具一律**放行**；每一種「判不出來所以放行」（壞 JSON、引號或 `$(` 沒閉合、pattern 超過資源上限、內部 panic）都在 stderr 留一行（`agents-managerd hook: kill_guard: …`；stdout 只留給決策 JSON），同時寫進 bot 的 `hook.log`（agy 的 dispatcher 丟掉 hook 的 stderr，只剩這份看得到），絕不因 hook 的錯擋掉正常指令。
 
 指令先切成簡單指令（`; & | \n ( )`、引號、重導向），剝掉 `sudo`／`env`（含 `-S "字串"`，那串字再切開；一次判斷最多展開 16 層，超過放行並記 log）／`nohup`／`timeout`／`xargs`／`VAR=x` 這類前綴，`bash -c '…'`／`eval` 遞迴；只看 `kill`、`pkill`、`killall`（`pgrep` 只列不殺）。
-`$(…)` 與反引號（雙引號裡也算，單引號、註解、`\$` 不算；括號判斷看引號與巢狀）裡的指令另外遞迴判斷。**註解與 heredoc 內文不是指令**：加引號終止字的 heredoc（`<<'EOF'`）內文完全略過；沒加引號的只看內文裡的 `$(…)`／反引號；餵給 shell 的（`bash <<EOF`、`sh -s <<EOF`、`bash <<< '…'`，沒有 `-c`、沒有 script 檔參數）內文當一份 script 判斷；`bash -n`／`-nv` 這類只檢查語法的不執行，一律放行。
+`$(…)` 與反引號（雙引號裡也算，單引號、註解、`\$` 不算；括號判斷看引號與巢狀）裡的指令另外遞迴判斷。**註解與 heredoc 內文不是指令**：加引號終止字的 heredoc（`<<'EOF'`）內文完全略過；沒加引號的只看內文裡的 `$(…)`／反引號；餵給 shell 的（`bash <<EOF`、`sh -s <<EOF`、`bash <<< '…'`，沒有 `-c`、沒有 script 檔參數）內文當一份 script 判斷；`bash -n`／`-nv`／`-o noexec` 這類只檢查語法的不執行、照選項順序算最後的狀態（`bash -n +n -c '…'` 會再打開執行，照擋），noexec 時放行。
 引號或 `$(` 沒閉合時 shell 自己也語法錯誤、整串不會跑：丟掉那一行起的內容、其餘照判斷、記一筆 log（「解析失敗」），所以 `pkill -f claude 'oops` 放行，但前面已經完整的行（`pkill -f claude⏎echo 'oops`）照擋。**只擋確定廣域的**：
 
 | 規則 | 擋 | 放行 |
@@ -818,8 +818,12 @@ Jev 不負責回合收尾、額度記帳或競態判斷；這些依 run、turn�
 受保護名單（`PROTECTED_NAMES`，不加 `-f` 時比對行程名）：`claude codex grok herdr agents-managerd agy antigravity node sh bash zsh sshd`（`node`：claude／codex 的 npm 安裝版行程名就是 node；shell：herdr pane 的 shell）。
 `-f` 時比對整條命令列，拿 `PROTECTED_CMDLINES` 的樣本試（claude 帶 bot 的 `--settings …/bots/<id>/…`、npm 版 `node …/claude-code/cli.js`、codex、grok、`herdr server`、`agents-managerd serve`、agy）。
 `killall` 加 `-r`（Linux）或 `-m`（BSD）時名稱是 regex，一樣用下面的迷你 ERE 試。
-pattern 用一個內建的迷你 ERE 試（`. * + ? | ( ) [ ] ^ $ \x`，語法壞掉就退回子字串）；`-x` 要整串相等，`-i` 忽略大小寫。
-pattern 是 agent 隨手寫的字串，所以**有資源上限，超過就放行並記 log**（不是「不命中」，是「判不出來」）：pattern 長度 ≤ 256 字元、群組巢狀 ≤ 8 層、一次 `check_command` 的比對總步數 ≤ 100,000、比對遞迴深度 ≤ 256；比對仍是手寫的回溯，不另開執行緒或計時器（步數預算本身就是時限，`(.*)*Z` 這類災難性回溯在毫秒內被截斷）。短 pattern 門檻 `MIN_PATTERN_CHARS = 3`。名單與門檻只在這個檔，改了同步這張表。
+pattern 用一個內建的迷你 ERE 試；`-x` 要整串相等，`-i` 忽略大小寫。短 pattern 門檻 `MIN_PATTERN_CHARS = 3`（以**位元組**計，shim 的 `${#pat}` 在 C locale 同一個數字）。
+pattern 是 agent 隨手寫的字串，所以 **regex 只在「可判斷語法」裡比對**（`kill_guard::in_common_subset`，shim 的 `am_in_subset` 是同一條規則的 sh 版）：這個子集合在 Rust 與 `grep -E`（POSIX ERE，GNU／BSD 相同）語意完全一樣，所以兩邊對同一條指令給同一個答案。子集合以外一律是「判不出來」→ **放行並記 log**（不是「不命中」，也不退回子字串）。子集合：
+- atom：可印 ASCII 字面字元（`. * + ? | ( ) [ ] ^ $ { } \` 以外）、`.`、`\` 加上述任一個 metachar、非空括號群組（巢狀 ≤ 8）、字元集 `[abc0-9_]`／`[^…]`（內容只有英數、底線、空白、`. / : , @ =`；範圍只准 `0-9`、`a-z`、`A-Z`；至少一項）；
+- 量詞 `*`／`+`／`?` 一個，只接在 atom 或群組後面，不可疊（`a**`）、不可在開頭／`(`／`|` 後；`^` 只在最外層某個 seq 的最前、`$` 只在最外層某個 seq 的最後；不可有空的 seq（`a|`、`()`）、括號成對、長度 ≤ 256；
+- 所以 `claude**`、`claude{0}`、`\d`、`\b`、`[a-c]`、`[[:alpha:]]`、九層以上括號、非 ASCII、tab／換行…都在範圍外：hook 與 shim 都放行（parity 測試有這些反例）。
+比對是 Thompson NFA 模擬（時間 O(pattern × 文字)，沒有回溯），不需要步數預算，`(.*)*Z`、`(.|.)(.|.)…Z` 這類災難性回溯寫法照常在毫秒內判完（命中的照擋）。一條指令最多對 `MAX_REGEX_PATTERNS = 16` 個 pattern 做 regex 比對，多出來的判不出來→放行並記 log（shim 同一個數字，短 pattern 與選項順序的判斷不受影響）。
 
 **被擋時**：hook 在 stdout 印一行決策 JSON，exit 0，agent 看到的原因（zh-TW）說明為什麼擋、並叫它改用自己記下的 PID 或 port（`lsof -ti :PORT | xargs kill`、`kill <PID>`）。
 形狀：claude／codex／grok 用 `{"hookSpecificOutput":{"hookEventName":"PreToolUse","permissionDecision":"deny","permissionDecisionReason":"…"}}`；agy 另加 `"decision":"deny","reason":"…"`（agy 的 deny 形狀文件沒寫清楚，兩種都給）。
@@ -841,7 +845,7 @@ PreToolUse 呼叫**不送 daemon、不 spool**；`hook` 子命令依 payload 的
 - **被擋**：stderr 講原因與正確做法（`lsof -ti :PORT | xargs kill`、`kill <記下的 PID>`），exit 2（不是 1：1 是 pkill 的「沒有行程符合」，腳本會當成正常）。**放行**：`exec` 真的，參數原封不動。解析有疑義（regex 語法錯、pattern 超過長度上限）一律放行。
 - **找真的**：走 PATH，跳過自己、檔頭有 `AM_SHIM_MARKER` 的、任何 `…/bots/<id>/bin` 底下的（舊版沒 marker 也跳過，同 cargo shim，不遞迴），最後試 `/usr/bin`、`/bin`、`/usr/sbin`、`/sbin`；都沒有 exit 127 並說明。判斷在找真的之前：沒有真的也照擋。
 - **安裝**：bot 啟動時 `install_shim` 在 cargo shim 旁 best-effort 裝（本機、遠端；失敗只 warn，不擋啟動）；開機 `refresh_all` 對 `bin/` 已有 `herdr` 的 bot 補上（見 §6.5b），遠端重連補版走同一份 `shims()`。
-- **限制（照實）**：`kill` 是 shell 內建，shim 擋不到 `kill -9 -1`／`kill 0`（留給 PreToolUse）；`/usr/bin/pkill` 這類**絕對路徑會繞過 shim**；`pkill -x node`、`killall node` 會擋（npm 安裝版 claude／codex 的行程名就是 node）——被擋的訊息（hook 與 shim 同一段，`NODE_NOTE`）會說明這個原因並直接給替代寫法 `lsof -ti :PORT | xargs kill`／`kill <PID>`。字元數用 shell 的字串長度（C locale 是位元組），非 ASCII 的單字 pattern 與 Rust 的字元數門檻可能差一點；`\d`、`{n,m}`、反向參照等 grep 與迷你 ERE 語意不同處以放行為準（保護名單是純英數，實務上不受影響）。
+- **限制（照實）**：`kill` 是 shell 內建，shim 擋不到 `kill -9 -1`／`kill 0`（留給 PreToolUse）；`/usr/bin/pkill` 這類**絕對路徑會繞過 shim**；`pkill -x node`、`killall node` 會擋（npm 安裝版 claude／codex 的行程名就是 node）——被擋的訊息（hook 與 shim 同一段，`NODE_NOTE`）會說明這個原因並直接給替代寫法 `lsof -ti :PORT | xargs kill`／`kill <PID>`。regex 語法兩邊差異用上面的「可判斷語法」收斂（範圍外都放行），不再有「shim 比 Rust 嚴」的地方。選項順序：`bash -n`／`-o noexec` 照選項順序算最後的狀態（`bash -n +n -c '…'` 會再打開執行，照擋）。
 
 ### 4.4a 模型／強度／fast／身份：runtime 與設定
 

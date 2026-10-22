@@ -67,6 +67,9 @@
     /// (工具, 參數, 是否應該擋)。同一張表同時餵 Rust 的 `kill_guard` 和 sh shim，兩邊都要等於「期待」。
     fn cases() -> Vec<(&'static str, Vec<&'static str>, bool)> {
         let long_pattern: &'static str = Box::leak(format!("claude{}", "x".repeat(300)).into_boxed_str());
+        let nine_deep: &'static str = Box::leak(format!("{}claude{}", "(".repeat(9), ")".repeat(9)).into_boxed_str());
+        let eight_deep: &'static str = Box::leak(format!("{}claude{}", "(".repeat(8), ")".repeat(8)).into_boxed_str());
+        let too_long_regex: &'static str = Box::leak(format!("claude.{}", "a?".repeat(130)).into_boxed_str());
         let mut v: Vec<(&str, Vec<&str>, bool)> = Vec::new();
         let mut add = |tool: &'static str, args: &[&'static str], deny: bool| v.push((tool, args.to_vec(), deny));
         // ── 正常用法：放行 ──
@@ -83,6 +86,16 @@
         add("pkill", &["-P", "4242"], false);
         add("pkill", &["-f", "python3 -m http.server 8000"], false);
         add("pkill", &["-f", "(.*)*Z"], false);
+        // 可判斷語法以外（shim 的 grep 與 Rust 的迷你 ERE 語意不同的地方）：兩邊一律「判不出來」→ 放行。
+        for pat in ["claude**", "claude{0}", "claude{", "claude}", "claude|", "|claude", "(claude", "claude)", "()claude", "[claude", "claude]", "*claude", "+claude", "^*claude", "claude$x", "x^claude", "cla\\dde", "cla\\bde", "cl[a-c]ude", "cl[[:alpha:]]ude", "cl[]a]ude", "cl[a-]ude", "cl[^]ude", "cla\\ude", "cla\\", "cla\tde", "ééé", "claude\n"] {
+            add("pkill", &["-f", pat], false);
+            add("pkill", &[pat], false);
+            add("killall", &["-r", pat], false);
+        }
+        add("pkill", &["-f", nine_deep], false);
+        add("pkill", &["-f", too_long_regex], false);
+        add("pkill", &["é"], true); // 位元組數不到 3：兩邊都當太短
+        add("pkill", &["-x", "ééé"], false);
         add("pkill", &["-f", long_pattern], false);
         add("pkill", &[], false);
         add("killall", &["Chrome"], false);
@@ -108,6 +121,20 @@
         add("pkill", &["-f", "^claude"], true);
         add("pkill", &["-f", "cla(u|a)de"], true);
         add("pkill", &["-f", "bots/01M"], true);
+        // 可判斷語法以內：兩邊語意相同，照擋。
+        for pat in ["cl[a-z]ude+", "cl[^0-9]ude", "cl[ade]*u", "^cla", "cla.de|zzz", "^(claude|codex)", "(cla)(ude)?", "cla(u|a)de", "c.*e", "claude.?", "agents-managerd", "\\.*claude", "(.*)*claude", "((((((((claude))))))))", eight_deep, "claude.*settings", "zzz|claude", "codex|^zzz"] {
+            add("pkill", &["-f", pat], true);
+        }
+        add("pkill", &["claude$"], true);
+        add("pkill", &["(codex|grok)$"], true);
+        add("pkill", &["-f", "claude$"], false); // -f 比整條命令列，樣本沒有以 claude 結尾的
+        add("pkill", &["-x", "cla.de"], true);
+        add("pkill", &["-ix", "CLAUDE"], true);
+        add("pkill", &["-f", "zzz.*claude"], false);
+        add("pkill", &["-f", "cla(ud)+x"], false);
+        add("killall", &["-r", "cl[a-z]ude"], true);
+        add("killall", &["-r", "^claude$"], true);
+        add("killall", &["-r", "^(codex|grok)$"], true);
         add("pkill", &["-f", "node"], true);
         add("pkill", &["-x", "node"], true); // node 是 npm 安裝版 claude／codex 的行程名
         add("pkill", &["-x", "bash"], true);
@@ -133,6 +160,17 @@
         add("killall", &["-r", ".*"], true);
         add("killall", &["-r", "cla.de"], true);
         add("killall", &["-s", "KILL", "node"], true);
+        // 一條指令最多對 16 個 pattern 做 regex 比對：第 17 個起判不出來→放行；前 16 個內的照擋。
+        let benign: Vec<&'static str> = (0..16).map(|i| &*Box::leak(format!("zz{i}x").into_boxed_str())).collect();
+        let mut late = vec!["-f"];
+        late.extend(benign.iter().copied());
+        late.push("claude");
+        let late: &'static [&'static str] = Box::leak(late.into_boxed_slice());
+        let mut early = vec!["-f", "claude"];
+        early.extend(benign.iter().copied());
+        let early: &'static [&'static str] = Box::leak(early.into_boxed_slice());
+        add("pkill", late, false);
+        add("pkill", early, true);
         v
     }
 
@@ -297,15 +335,4 @@
         // 冪等。
         assert!(refresh_all(&d).changed.is_empty());
         let _ = std::fs::remove_dir_all(&d);
-    }
-
-    #[test]
-    fn a_pattern_that_grep_rejects_falls_back_to_substring_like_the_rust_guard() {
-        let env = Env::new();
-        // `(` 沒閉合：Rust 退回子字串；`claude(` 含有 `claude` 以外的字元，樣本裡沒有「claude(」→ 放行；`(claude` 同。
-        for args in [vec!["-f", "claude("], vec!["-f", "(claude"], vec!["-f", "[claude"]] {
-            let rust = rust_denies("pkill", &args);
-            let (code, _, _) = env.run("sh", "pkill", &args);
-            assert_eq!(code == DENIED_EXIT, rust, "{args:?}");
-        }
     }
