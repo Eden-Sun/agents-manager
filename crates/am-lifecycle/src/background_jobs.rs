@@ -194,6 +194,12 @@ pub fn retain_runs(app: &(impl crate::background_hook::HookSnapshots + crate::ba
 pub fn run_json<T: serde::Serialize>(app: &(impl crate::background_hook::HookSnapshots + crate::background_jobs::JobCounts), run: &Option<T>, run_id: Option<&str>) -> Value {
     let mut v = serde_json::to_value(run).unwrap_or(Value::Null);
     if let (Some(o), Some(id)) = (v.as_object_mut(), run_id) {
+        // #1892: diagnostic only; never infer a legacy child's identity from its pane/name.
+        let has_identity = ["native_session_id", "terminal_id"].iter()
+            .any(|key| o.get(*key).and_then(Value::as_str).is_some_and(|id| !id.trim().is_empty()));
+        let missing_identity = o.get("adopted").and_then(Value::as_i64) == Some(1) && !has_identity;
+        o.insert("identity_recovery_reason".into(),
+            if missing_identity { "missing_instance_identity".into() } else { Value::Null });
         // 沒觀察過是 `null`，不是 0（#767）。
         o.insert("background_jobs".into(), known(app, id).into());
         // #774：這一段背景從什麼時候開始、跑了多久、是不是可能卡住；沒有背景工作（或沒看過）是 null／false。
@@ -346,6 +352,26 @@ mod tests {
         assert_eq!((v["background_since"].clone(), v["background_stuck"].clone()), (Value::Null, false.into()));
         let health = crate::supervisor::health::snapshot(&app).await.unwrap();
         assert_eq!(health["background_stuck"], serde_json::json!([]));
+    }
+
+    #[tokio::test]
+    async fn nr1892_run_json_explains_missing_identity_without_changing_status_or_errors() {
+        let env = crate::testing::env().await;
+        for (adopted, native, terminal, reason) in [
+            (1, None, None, Some("missing_instance_identity")),
+            (1, Some(" "), Some(""), Some("missing_instance_identity")),
+            (1, Some("native"), None, None),
+            (1, None, Some("terminal"), None),
+            (0, None, None, None),
+        ] {
+            let input = Some(serde_json::json!({"adopted":adopted, "native_session_id":native,
+                "terminal_id":terminal, "state":"running", "agent_status":"idle", "turn_error":"original error"}));
+            let out = run_json(&env.app, &input, Some("test-run"));
+            assert_eq!(out["identity_recovery_reason"], serde_json::json!(reason));
+            assert_eq!(out["state"], "running");
+            assert_eq!(out["agent_status"], "idle");
+            assert_eq!(out["turn_error"], "original error");
+        }
     }
 
     /// #1674：回合錯誤的種類跟著 run 一起出去（`/api/state` 與 `bot_status` 共用這支），下一回合清掉就沒有。

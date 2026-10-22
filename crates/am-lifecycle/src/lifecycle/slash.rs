@@ -1286,6 +1286,7 @@ mod login_slash_tests {
             runtime_identity: None,
             update_notice: None,
             turn_error: None,
+            terminal_id: None,
             native_session_id: None,
             transcript_path: None,
             last_read_revision: None,

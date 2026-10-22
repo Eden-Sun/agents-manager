@@ -108,6 +108,9 @@ pub struct AgentInfo {
     /// (2026-09-14 wits-c1-op-xh), so the daemon types into the pane instead.
     #[serde(default)]
     pub agent_session: Option<Value>,
+    /// Herdr terminal instance, independent of the CLI session and scoped by host/session.
+    #[serde(default)]
+    pub terminal_id: Option<String>,
 
     /// Pane title minus spinner glyph (herdr 0.8.2 `agent.list` / `agent.get`).
     #[serde(default)]
