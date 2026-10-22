@@ -190,16 +190,22 @@ pub fn retain_runs(app: &(impl crate::background_hook::HookSnapshots + crate::ba
     crate::background_hook::retain_runs(app, active);
 }
 
+/// Diagnostic only: a legacy adopted run needs persisted evidence before it can reconnect.
+pub fn identity_recovery_reason(adopted: i64, native: Option<&str>, terminal: Option<&str>) -> Option<&'static str> {
+    let has_identity = [native, terminal].into_iter().flatten().any(|id| !id.trim().is_empty());
+    (adopted == 1 && !has_identity).then_some("missing_instance_identity")
+}
+
 /// API 的 run 物件加上 `background_jobs`（`GET /api/state` 與 `bot_status` 共用）。
 pub fn run_json<T: serde::Serialize>(app: &(impl crate::background_hook::HookSnapshots + crate::background_jobs::JobCounts), run: &Option<T>, run_id: Option<&str>) -> Value {
     let mut v = serde_json::to_value(run).unwrap_or(Value::Null);
     if let (Some(o), Some(id)) = (v.as_object_mut(), run_id) {
-        // #1892: diagnostic only; never infer a legacy child's identity from its pane/name.
-        let has_identity = ["native_session_id", "terminal_id"].iter()
-            .any(|key| o.get(*key).and_then(Value::as_str).is_some_and(|id| !id.trim().is_empty()));
-        let missing_identity = o.get("adopted").and_then(Value::as_i64) == Some(1) && !has_identity;
-        o.insert("identity_recovery_reason".into(),
-            if missing_identity { "missing_instance_identity".into() } else { Value::Null });
+        let reason = identity_recovery_reason(
+            o.get("adopted").and_then(Value::as_i64).unwrap_or_default(),
+            o.get("native_session_id").and_then(Value::as_str),
+            o.get("terminal_id").and_then(Value::as_str),
+        );
+        o.insert("identity_recovery_reason".into(), reason.into());
         // 沒觀察過是 `null`，不是 0（#767）。
         o.insert("background_jobs".into(), known(app, id).into());
         // #774：這一段背景從什麼時候開始、跑了多久、是不是可能卡住；沒有背景工作（或沒看過）是 null／false。

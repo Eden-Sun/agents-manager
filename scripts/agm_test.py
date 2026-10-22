@@ -538,6 +538,40 @@ class StateCommandTest(CliCase):
         self.assertEqual(out["bots"][0]["id"], "b1")
         self.assertNotIn("sekrit", json.dumps(out))
 
+    def test_preserves_identity_diagnostics_on_supervisor_and_raw_state_paths(self):
+        cases = [
+            (1, None, "missing_instance_identity"),
+            (1, " ", "missing_instance_identity"),
+            (1, "terminal", None),
+            (1, None, None),  # Native identity present upstream.
+            (0, None, None),
+            (None, None, None),  # Older daemons omit the new fields.
+        ]
+        bots = [{"id": f"b{i}", "env": {"SECRET": "private-fixture"}, "args": ["private-fixture"],
+                 "hook_token": "private-fixture", "run": {"id": f"r{i}", "state": "running",
+                 "adopted": adopted, "terminal_id": terminal, "identity_recovery_reason": reason,
+                 "native_session_id": "native" if i == 3 else None,
+                 "env": {"SECRET": "private-fixture"}, "token": "private-fixture"}}
+                for i, (adopted, terminal, reason) in enumerate(cases)]
+        for key in ("adopted", "terminal_id", "identity_recovery_reason"):
+            bots[-1]["run"].pop(key)
+        for source in ("supervisor", "raw"):
+            with self.subTest(source=source):
+                FakeDaemon.seen.clear()
+                FakeDaemon.routes["GET /api/supervisor/state"] = (
+                    (200, {"bots": bots}) if source == "supervisor" else (404, {}))
+                FakeDaemon.routes["GET /api/state"] = (200, {"projects": [{"id": "p1", "bots": bots}]})
+                out = self.ok("state")
+                self.assertEqual(len(out["bots"]), len(cases))
+                for row, (adopted, terminal, reason) in zip(out["bots"], cases):
+                    self.assertEqual(row["run"]["adopted"], adopted)
+                    self.assertIs(type(row["run"]["adopted"]), type(adopted))
+                    self.assertEqual(row["run"]["terminal_id"], terminal)
+                    self.assertEqual(row["run"]["identity_recovery_reason"], reason)
+                paths = [r["path"] for r in FakeDaemon.seen]
+                self.assertEqual("/api/state" in paths, source == "raw")
+                self.assertNotIn("private-fixture", json.dumps(out))
+
     def test_token_never_appears_in_output(self):
         FakeDaemon.routes["GET /api/state"] = (200, {"projects": []})
         code, out, err = self.run_cli("state")
