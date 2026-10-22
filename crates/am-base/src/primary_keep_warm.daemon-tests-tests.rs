@@ -261,7 +261,7 @@
         assert!(echo_open(&run.id) && !window_open(&run.id));
         assert!(!cache_clock::on_statusline(&run.id, Some(a), Some(b), &db::now()), "重啟後保溫回音一樣不算活動");
 
-        // 熱壓之後 11 分鐘重啟：既有熱壓抑制只有 10 分，回音期要接得上。
+        // 熱壓之後 11 分鐘重啟：既有熱壓抑制只有 10 分，保護要接得上（收據時間是送出時間，壓縮還可能在跑）。
         let (cbot, crun) = primary(&env, "rearm-echo-compact", "idle").await;
         assert!(claim_warm_compact(&env.app.db, &cbot.id, "anchor-1", &crun.id, 111).await.unwrap());
         settle_warm_compact(&env.app.db, &cbot.id, "anchor-1").await.unwrap();
@@ -274,8 +274,42 @@
             .unwrap();
         drop_window(&crun.id);
         rearm_windows(&env.app.db).await.unwrap();
-        assert!(echo_open(&crun.id), "熱壓後 11 分鐘重啟仍在回音期");
+        assert!(window_open(&crun.id) && !echo_open(&crun.id), "熱壓後 11 分鐘重啟：壓縮可能還在跑，視窗仍開著");
         assert!(!cache_clock::on_statusline(&crun.id, Some(a), Some(b), &db::now()));
+
+        // 送出與完成相隔數分鐘：壓縮 4 分鐘、送出後第 16 分重啟——收據時間是送出時間，完成時間不知道，
+        // 保守算「送出＋視窗上限＋回音期」，第 16 分仍在保護內（只用收據時間＋寬限＋回音期會漏掉）。
+        let (sbot, srun) = primary(&env, "rearm-echo-slow-compact", "idle").await;
+        assert!(claim_warm_compact(&env.app.db, &sbot.id, "anchor-3", &srun.id, 111).await.unwrap());
+        settle_warm_compact(&env.app.db, &sbot.id, "anchor-3").await.unwrap();
+        sqlx::query("UPDATE primary_cache_actions SET done_at = ?, claimed_at = ? WHERE bot_id = ?")
+            .bind(at(16, now))
+            .bind(at(16, now))
+            .bind(&sbot.id)
+            .execute(&env.app.db)
+            .await
+            .unwrap();
+        drop_window(&srun.id);
+        rearm_windows(&env.app.db).await.unwrap();
+        assert!(echo_open(&srun.id) && !window_open(&srun.id), "第 16 分：視窗上限（15 分）已過，進回音期");
+        assert!(!cache_clock::on_statusline(&srun.id, Some(a), Some(b), &db::now()));
+        // 壓縮還沒過 15 分上限（送出後 6 分）：視窗仍開著，working／指紋都不算活動。
+        let (wbot, wrun) = primary(&env, "rearm-window-compact", "idle").await;
+        assert!(claim_warm_compact(&env.app.db, &wbot.id, "anchor-4", &wrun.id, 111).await.unwrap());
+        sqlx::query("UPDATE primary_cache_actions SET claimed_at = ? WHERE bot_id = ?").bind(at(6, now)).bind(&wbot.id).execute(&env.app.db).await.unwrap();
+        drop_window(&wrun.id);
+        rearm_windows(&env.app.db).await.unwrap();
+        assert!(window_open(&wrun.id) && !echo_open(&wrun.id));
+        // 超過視窗上限＋回音期（送出後 31 分）：不補。
+        let (xbot, xrun) = primary(&env, "rearm-echo-too-old-compact", "idle").await;
+        assert!(claim_warm_compact(&env.app.db, &xbot.id, "anchor-5", &xrun.id, 111).await.unwrap());
+        sqlx::query("UPDATE primary_cache_actions SET claimed_at = ? WHERE bot_id = ?").bind(at(31, now)).bind(&xbot.id).execute(&env.app.db).await.unwrap();
+        drop_window(&xrun.id);
+        rearm_windows(&env.app.db).await.unwrap();
+        assert!(!window_open(&xrun.id) && !echo_open(&xrun.id));
+        for id in [&srun.id, &wrun.id, &xrun.id] {
+            drop_window(id);
+        }
 
         // 收尾超過寬限＋回音期：不補，真的活動不能被吞。
         let (obot, orun) = primary(&env, "rearm-echo-old", "idle").await;
@@ -283,7 +317,7 @@
         sqlx::query("UPDATE turns SET run_id = ? WHERE id = 'kw-echo-old'").bind(&orun.id).execute(&env.app.db).await.unwrap();
         let (dbot, drun) = primary(&env, "rearm-echo-old-compact", "idle").await;
         assert!(claim_warm_compact(&env.app.db, &dbot.id, "anchor-2", &drun.id, 111).await.unwrap());
-        sqlx::query("UPDATE primary_cache_actions SET claimed_at = ? WHERE bot_id = ?").bind(at(30, now)).bind(&dbot.id).execute(&env.app.db).await.unwrap();
+        sqlx::query("UPDATE primary_cache_actions SET claimed_at = ? WHERE bot_id = ?").bind(at(35, now)).bind(&dbot.id).execute(&env.app.db).await.unwrap();
         drop_window(&orun.id);
         drop_window(&drun.id);
         rearm_windows(&env.app.db).await.unwrap();

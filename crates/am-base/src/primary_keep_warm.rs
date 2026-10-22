@@ -132,20 +132,23 @@ pub fn drop_window(run_id: &str) {
     windows().lock().unwrap_or_else(|e| e.into_inner()).remove(run_id);
 }
 
-/// 重啟後補回已收掉的視窗（只剩回音期）：`closed_ago` 之前收尾。`Instant` 往回推不動（開機不久）就退成現在，保護只會偏長。
-fn restore_closed_window(run_id: &str, closed_ago: Duration) {
+/// 重啟補回用的視窗，`ago` 把「多久以前」換成 `Instant`（往回推不動、開機不久就退成現在，保護只會偏長）。
+/// `closed_ago`＝`Some`：收尾時間已知（保溫回覆的 `completed_at`），只剩回音期；`None`：只知道送出時間（熱壓收據），
+/// 不知道壓縮何時完成，保守當視窗從送出起一直開到 [`WINDOW_MAX`]（之後巡邏看到閒置再收，照常銜接回音期）。
+fn restored_window(opened_ago: Duration, closed_ago: Option<Duration>) -> Window {
     let now = Instant::now();
     let ago = |d: Duration| now.checked_sub(d).unwrap_or(now);
-    let w = Window { opened: ago(closed_ago + WINDOW_MIN), closed: Some(ago(closed_ago)) };
-    windows().lock().unwrap_or_else(|e| e.into_inner()).insert(run_id.to_string(), w);
+    Window { opened: ago(opened_ago), closed: closed_ago.map(ago) }
 }
 
 /// daemon 重啟後把保溫／熱壓視窗補回來（視窗只在記憶體，#1285）：還在跑的 run 上，保溫回合還在飛、或剛收尾不到
 /// `WINDOW_MIN + WINDOW_GRACE`，就重開視窗；之後照常由巡邏的 `settle_window` 收。回傳補回的視窗數。
-/// 已收掉、還在回音期（收尾後 `WINDOW_GRACE + WINDOW_ECHO` 內）的也補回，使重啟前後保護一致（#1885）：
-/// 收尾時間取保溫回覆的 `completed_at`、熱壓收據的 `done_at`（沒定案用 `claimed_at`）；正常執行取巡邏第一次看到閒置的時刻，
-/// 兩者最多差一個巡邏週期（重啟後的回音期只會偏短一點點）。
-/// 時間字串是 `db::now()` 那種定寬 UTC，字串比較就是時間比較。
+/// 已收掉、還在回音期的也補回，使重啟前後保護一致（#1885）：
+/// * 保溫回覆：收尾時間取回合 `completed_at`（真的完成時間），保護到收尾＋`WINDOW_GRACE`＋`WINDOW_ECHO`。
+/// * 熱壓：收據的 `done_at`／`claimed_at` 是 `/compact` **送出**的時間，壓縮要跑多久不知道，所以保守補回「從送出起視窗開到 `WINDOW_MAX`」，
+///   再接 `WINDOW_ECHO`（送出＋15 分＋15 分內都保護）；巡邏看到閒置後照常收，不會比正常執行短。
+/// 正常執行的收尾時刻是巡邏第一次看到閒置；保溫回覆補回用回合完成時間，兩者最多差一個巡邏週期（補回的回音期只會偏短一點點）。
+/// 同一個 run 兩種都有就取保護結束較晚的那個。時間字串是 `db::now()` 那種定寬 UTC，字串比較就是時間比較。
 pub async fn rearm_windows(pool: &SqlitePool) -> anyhow::Result<usize> {
     let cutoff = db::iso_in(-((WINDOW_MIN + WINDOW_GRACE).as_secs() as i64));
     let runs: Vec<String> = sqlx::query_scalar(&format!(
@@ -161,40 +164,50 @@ pub async fn rearm_windows(pool: &SqlitePool) -> anyhow::Result<usize> {
     for run_id in &runs {
         open_window(run_id);
     }
-    // 視窗已收、還在回音期：重啟後第一個 statusLine 指紋變化一樣不算活動。
-    let echo_cutoff = db::iso_in(-((WINDOW_GRACE + WINDOW_ECHO).as_secs() as i64));
-    let mut closed: Vec<(String, String)> = sqlx::query_as(&format!(
+    // 視窗已收（或熱壓還在跑）、還在回音期：重啟後第一個 statusLine 指紋變化一樣不算活動。
+    let replied: Vec<(String, String)> = sqlx::query_as(&format!(
         "SELECT t.run_id, MAX(t.completed_at) FROM turns t JOIN runs r ON r.id = t.run_id
           WHERE r.state IN ('starting','running') AND {}
             AND t.status IN ('completed','completed_fallback') AND t.completed_at >= ?
           GROUP BY t.run_id",
         cache_clock::keep_warm_crid_sql("t.client_request_id")
     ))
-    .bind(&echo_cutoff)
+    .bind(db::iso_in(-((WINDOW_GRACE + WINDOW_ECHO).as_secs() as i64)))
     .fetch_all(pool)
     .await?;
-    closed.extend(
-        sqlx::query_as::<_, (String, String)>(
-            "SELECT a.run_id, MAX(COALESCE(a.done_at, a.claimed_at)) FROM primary_cache_actions a JOIN runs r ON r.id = a.run_id
-              WHERE r.state IN ('starting','running') AND a.kind = 'warm_compact' AND COALESCE(a.done_at, a.claimed_at) >= ?
-              GROUP BY a.run_id",
-        )
-        .bind(&echo_cutoff)
-        .fetch_all(pool)
-        .await?,
-    );
-    let mut latest: HashMap<String, chrono::DateTime<chrono::Utc>> = HashMap::new();
-    for (run_id, at) in closed {
-        if let Some(t) = db::parse_ts(&at) {
-            latest.entry(run_id).and_modify(|cur| *cur = (*cur).max(t)).or_insert(t);
-        }
-    }
+    let compacts: Vec<(String, String)> = sqlx::query_as(
+        "SELECT a.run_id, MAX(COALESCE(a.done_at, a.claimed_at)) FROM primary_cache_actions a JOIN runs r ON r.id = a.run_id
+          WHERE r.state IN ('starting','running') AND a.kind = 'warm_compact' AND COALESCE(a.done_at, a.claimed_at) >= ?
+          GROUP BY a.run_id",
+    )
+    .bind(db::iso_in(-((WINDOW_MAX + WINDOW_ECHO).as_secs() as i64)))
+    .fetch_all(pool)
+    .await?;
     let now = chrono::Utc::now();
-    for (run_id, at) in latest {
-        if !runs.contains(&run_id) {
-            restore_closed_window(&run_id, (now - at).to_std().unwrap_or_default());
+    let ago = |at: &str| db::parse_ts(at).map(|t| (now - t).to_std().unwrap_or_default());
+    let mut restored: HashMap<String, Window> = HashMap::new();
+    let mut keep_latest = |run_id: String, w: Window| {
+        if restored.get(&run_id).is_none_or(|cur| window_end(&w) > window_end(cur)) {
+            restored.insert(run_id, w);
+        }
+    };
+    for (run_id, at) in replied {
+        if let Some(d) = ago(&at) {
+            keep_latest(run_id, restored_window(d + WINDOW_MIN, Some(d)));
         }
     }
+    for (run_id, at) in compacts {
+        if let Some(d) = ago(&at) {
+            keep_latest(run_id, restored_window(d, None));
+        }
+    }
+    let mut map = windows().lock().unwrap_or_else(|e| e.into_inner());
+    for (run_id, w) in restored {
+        if !runs.contains(&run_id) {
+            map.insert(run_id, w);
+        }
+    }
+    drop(map);
     Ok(runs.len())
 }
 
