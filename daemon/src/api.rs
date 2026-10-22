@@ -16081,6 +16081,32 @@ mod state_query_count_tests {
     }
 
     #[tokio::test]
+    async fn nr1892_state_json_projects_persisted_run_identity() {
+        let e = crate::testing::env().await;
+        for (i, (adopted, native, terminal, reason)) in [
+            (1, None, None, Some("missing_instance_identity")),
+            (1, Some(" "), Some("\t"), Some("missing_instance_identity")),
+            (1, Some("native"), None, None),
+            (1, None, Some("terminal"), None),
+            (0, None, None, None),
+        ].into_iter().enumerate() {
+            let bot = crate::testing::claude_bot(&e.app, &e.project_id, &format!("identity-{i}")).await;
+            let run_id = crate::testing::fake_run(&e.app, &bot.id).await;
+            sqlx::query("UPDATE runs SET adopted=?, native_session_id=?, terminal_id=?, turn_error='original error' WHERE id=?")
+                .bind(adopted).bind(native).bind(terminal).bind(&run_id).execute(&e.app.db).await.unwrap();
+            let state = state_json(&e.app).await.unwrap();
+            let row = state["projects"][0]["bots"].as_array().unwrap().iter().find(|b| b["id"] == bot.id).unwrap();
+            assert_eq!(row["run"]["adopted"], json!(adopted));
+            assert_eq!(row["run"]["native_session_id"], json!(native));
+            assert_eq!(row["run"]["terminal_id"], json!(terminal));
+            assert_eq!(row["run"]["identity_recovery_reason"], json!(reason));
+            assert_eq!(row["run"]["state"], "running");
+            assert_eq!(row["run"]["agent_status"], "idle");
+            assert_eq!(row["run"]["turn_error"], "original error");
+        }
+    }
+
+    #[tokio::test]
     async fn each_bots_run_lamp_and_queued_turn_are_still_its_own() {
         let env = crate::testing::env().await;
         let running = crate::testing::claude_bot(&env.app, &env.project_id, "running").await;

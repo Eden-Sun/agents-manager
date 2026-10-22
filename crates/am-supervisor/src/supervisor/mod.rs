@@ -679,6 +679,10 @@ pub async fn sanitized_state(app: &(impl crate::capabilities::Db + crate::capabi
                 // Whether the original conversation can be resumed at all, and on what the
                 // CLI is *actually* running — which is not always what the bot is configured with.
                 "native_session_id": r.native_session_id,
+                "adopted": r.adopted,
+                "terminal_id": r.terminal_id,
+                "identity_recovery_reason": ports::identity_recovery_reason(
+                    r.adopted, r.native_session_id.as_deref(), r.terminal_id.as_deref()),
                 "runtime_model": r.runtime_model,
                 "runtime_effort": r.runtime_effort,
                 "pane_id": r.pane_id,
@@ -717,6 +721,32 @@ mod tests {
             .unwrap_or_else(|| panic!("missing bot {bot_id}: {state}"))["queued_turns"]
             .as_i64()
             .unwrap()
+    }
+
+    #[tokio::test]
+    async fn nr1892_sanitized_state_preserves_run_identity_without_private_fields() {
+        let e = crate::testing::env().await;
+        for (i, (adopted, native, terminal, reason)) in [
+            (1, None, None, Some("missing_instance_identity")),
+            (1, Some(" "), Some("\t"), Some("missing_instance_identity")),
+            (1, Some("native"), None, None),
+            (1, None, Some("terminal"), None),
+            (0, None, None, None),
+        ].into_iter().enumerate() {
+            let bot = crate::testing::claude_bot(&e.app, &e.project_id, &format!("identity-{i}")).await;
+            let run_id = crate::testing::fake_run(&e.app, &bot.id).await;
+            sqlx::query("UPDATE bots SET env_json='{\"SECRET\":\"private-fixture\"}', args_json='[\"private-fixture\"]', hook_token='private-fixture' WHERE id=?")
+                .bind(&bot.id).execute(&e.app.db).await.unwrap();
+            sqlx::query("UPDATE runs SET adopted=?, native_session_id=?, terminal_id=?, runtime_identity='private-fixture' WHERE id=?")
+                .bind(adopted).bind(native).bind(terminal).bind(&run_id).execute(&e.app.db).await.unwrap();
+            let state = sanitized_state(&e.app).await.unwrap();
+            let row = state["bots"].as_array().unwrap().iter().find(|b| b["id"] == bot.id).unwrap();
+            assert_eq!(row["run"]["adopted"], serde_json::json!(adopted));
+            assert_eq!(row["run"]["native_session_id"], serde_json::json!(native));
+            assert_eq!(row["run"]["terminal_id"], serde_json::json!(terminal));
+            assert_eq!(row["run"]["identity_recovery_reason"], serde_json::json!(reason));
+            assert!(!state.to_string().contains("private-fixture"), "sanitization must still omit env/args/token/runtime identity");
+        }
     }
 
     #[tokio::test]

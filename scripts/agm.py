@@ -505,6 +505,9 @@ def _bot_row(b: dict, project_id: str, manager_id: str) -> dict:
             "runtime_effort": _s(run.get("runtime_effort")),
             # 有 native_session_id 才談得上「恢復原 session」。
             "native_session_id": _s(run.get("native_session_id")),
+            "adopted": run.get("adopted"),
+            "terminal_id": run.get("terminal_id"),
+            "identity_recovery_reason": run.get("identity_recovery_reason"),
             "pane_id": _s(run.get("pane_id")),
             "turn_error": _s(run.get("turn_error")),
             "started_at": _s(run.get("started_at")),

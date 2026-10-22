@@ -23,6 +23,11 @@ use serde_json::Value;
 use std::future::Future;
 use std::time::Duration;
 
+/// Pure value projection shared with run_json; no App capability or mutable account is needed.
+pub fn identity_recovery_reason(adopted: i64, native: Option<&str>, terminal: Option<&str>) -> Option<&'static str> {
+    crate::background_jobs::identity_recovery_reason(adopted, native, terminal)
+}
+
 /// lifecycle：啟停、送字、排隊撤回。語意＝同名的 `crate::lifecycle` 函式。
 pub trait TurnOps {
     async fn start_bot(&self, bot_id: &str) -> LcResult<String>;
