@@ -101,12 +101,29 @@ pub(crate) fn record_at(key: &str, gone: Gone, now: Instant) -> Option<Vec<Gone>
         return None;
     }
     st.quiet_until = None;
-    // 以每一筆為起點的 WINDOW 長區間，要包含這一筆而且有 ≥ THRESHOLD 筆。
-    let wave = (0..st.exits.len()).find_map(|i| {
-        let start = st.exits[i].seen;
-        let span: Vec<&Gone> = st.exits[i..].iter().take_while(|g| g.seen.saturating_duration_since(start) < WINDOW).collect();
-        (span.len() >= THRESHOLD && seen >= start && seen.saturating_duration_since(start) < WINDOW).then(|| span.into_iter().cloned().collect::<Vec<_>>())
-    })?;
+    let wave = find_wave(&st.exits, Some(seen))?;
+    st.quiet_until = Some(now + COOLDOWN);
+    Some(wave)
+}
+
+/// 任一段長 [`WINDOW`] 的時間裡有 ≥ [`THRESHOLD`] 筆（`exits` 已按事件時間排序）；`must` 有給就要包含那個時刻。
+fn find_wave(exits: &[Gone], must: Option<Instant>) -> Option<Vec<Gone>> {
+    (0..exits.len()).find_map(|i| {
+        let start = exits[i].seen;
+        let span: Vec<&Gone> = exits[i..].iter().take_while(|g| g.seen.saturating_duration_since(start) < WINDOW).collect();
+        let includes = must.is_none_or(|m| m >= start && m.saturating_duration_since(start) < WINDOW);
+        (span.len() >= THRESHOLD && includes).then(|| span.into_iter().cloned().collect::<Vec<_>>())
+    })
+}
+
+/// 候選被維護過濾掉之後，重新評估**累積的**記帳：過濾期間新進來的真實退出（因為冷卻當時沒排告警）可能已經自己湊成一波。
+/// 解除冷卻、找一波、有就重新設冷卻回傳，全在同一把鎖裡（不讓別的記帳插進來又各推一則）。
+fn requalify(key: &str, now: Instant) -> Option<Vec<Gone>> {
+    let mut table = table().lock().unwrap_or_else(|e| e.into_inner());
+    let st = table.get_mut(key)?;
+    st.exits.retain(|g| now.saturating_duration_since(g.seen) < RETAIN);
+    st.quiet_until = None;
+    let wave = find_wave(&st.exits, None)?;
     st.quiet_until = Some(now + COOLDOWN);
     Some(wave)
 }
@@ -268,20 +285,22 @@ fn in_span(spans: &[Span], at: &str) -> bool {
     spans.iter().any(|(from, to)| crate::db::cmp_ts(from, at).is_le() && crate::db::cmp_ts(at, to).is_lt())
 }
 
-/// 把轉移當下在維護中的幾筆拿掉（名單與記帳都拿掉，維護期間的退出不進窗）；剩下仍達門檻才回名單，否則解除冷卻、回 `None`。
-/// 讀不到維護歷史當全部在維護。
-async fn outside_maintenance(app: &Arc<App>, key: &str, wave: Vec<Gone>) -> Option<Vec<Gone>> {
-    let earliest = wave.iter().map(|g| g.at.as_str()).min().unwrap_or_default().to_string();
-    let spans = maintenance_spans(app, &earliest).await;
-    let (kept, dropped): (Vec<Gone>, Vec<Gone>) = wave.into_iter().partition(|g| spans.as_deref().is_some_and(|s| !in_span(s, &g.at)));
-    if !dropped.is_empty() {
-        forget(key, &dropped);
+/// 把轉移當下在維護中的幾筆拿掉（名單與記帳都拿掉，維護期間的退出不進窗）；剩下仍達門檻才回名單。
+/// 不夠的話重新評估累積的記帳（[`requalify`]），直到沒有可疑的或沒有新的一波。讀不到維護歷史當全部在維護。
+async fn outside_maintenance(app: &Arc<App>, key: &str, mut wave: Vec<Gone>) -> Option<Vec<Gone>> {
+    loop {
+        let earliest = wave.iter().map(|g| g.at.as_str()).min().unwrap_or_default().to_string();
+        let spans = maintenance_spans(app, &earliest).await;
+        let (kept, dropped): (Vec<Gone>, Vec<Gone>) = wave.into_iter().partition(|g| spans.as_deref().is_some_and(|s| !in_span(s, &g.at)));
+        if !dropped.is_empty() {
+            forget(key, &dropped);
+        }
+        if kept.len() >= THRESHOLD {
+            return Some(kept);
+        }
+        // 每圈至少拿掉一筆（kept 不夠就代表 dropped 非空），記帳只會變少，所以會結束。
+        wave = requalify(key, Instant::now())?;
     }
-    if kept.len() < THRESHOLD {
-        clear_quiet(key);
-        return None;
-    }
-    Some(kept)
 }
 
 async fn push(app: &Arc<App>, host: &str, wave: &[Gone]) -> anyhow::Result<()> {
@@ -386,6 +405,55 @@ mod tests {
         record_at(k, gone("a", at(0)), at(3));
         record_at(k, gone("b", at(14)), at(17));
         assert!(record_at(k, gone("c", at(31)), at(34)).is_none(), "a 與 c 相隔 31 秒，b、c 只有兩顆");
+    }
+
+    /// 維護期間的 M1–M3 湊成候選、等 DB 時維護結束後的真實退出 A–C 進了記帳（冷卻中不排告警）：
+    /// 候選被濾掉之後要重新評估累積的記帳，A–C 本身就是一波。
+    #[tokio::test]
+    async fn exits_recorded_while_a_filtered_candidate_was_waiting_are_re_evaluated() {
+        let env = tt::env().await;
+        let k = "t-requalify";
+        let now = Instant::now();
+        let ago = |s: u64| now - Duration::from_secs(s);
+        let at = |s: i64| db::iso_in(-s);
+        // 維護窗口：100 秒前開、20 秒前到期（還沒被關）；M 在窗內、A–C 在窗後。
+        sqlx::query("INSERT OR REPLACE INTO herdr_maintenance (id, opened_at, until, opened_by, reason) VALUES (1,?,?,'patrol','test')")
+            .bind(at(100))
+            .bind(at(20))
+            .execute(&env.app.db)
+            .await
+            .unwrap();
+        let mk = |bot: &str, s: u64| Gone { bot_id: bot.into(), name: bot.into(), run_id: format!("run-{bot}"), at: at(s as i64), seen: ago(s) };
+        record_at(k, mk("m1", 28), now);
+        record_at(k, mk("m2", 27), now);
+        let candidate = record_at(k, mk("m3", 26), now).expect("維護期間的三顆也湊成候選");
+        for (bot, s) in [("a", 5), ("b", 4), ("c", 3)] {
+            assert!(record_at(k, mk(bot, s), now).is_none(), "冷卻中，這一圈不排告警");
+        }
+        let wave = outside_maintenance(&env.app, k, candidate).await.expect("A–C 自己是一波");
+        let mut names: Vec<_> = wave.iter().map(|g| g.bot_id.clone()).collect();
+        names.sort();
+        assert_eq!(names, ["a", "b", "c"]);
+        assert!(table().lock().unwrap().get(k).unwrap().exits.iter().all(|g| !g.bot_id.starts_with('m')), "維護的從記帳拿掉");
+    }
+
+    /// 對照：被濾掉之後沒有新的真實退出，不告警、冷卻解除（之後第三顆照常湊成波）。
+    #[tokio::test]
+    async fn a_filtered_candidate_with_nothing_else_does_not_alert_and_frees_the_cooldown() {
+        let env = tt::env().await;
+        let k = "t-requalify-none";
+        let now = Instant::now();
+        sqlx::query("INSERT OR REPLACE INTO herdr_maintenance (id, opened_at, until, opened_by, reason) VALUES (1,?,'2999-01-01T00:00:00.000Z','patrol','test')")
+            .bind(db::iso_in(-100))
+            .execute(&env.app.db)
+            .await
+            .unwrap();
+        let mk = |bot: &str| Gone { bot_id: bot.into(), name: bot.into(), run_id: format!("run-{bot}"), at: db::iso_in(-5), seen: now - Duration::from_secs(5) };
+        record_at(k, mk("m1"), now);
+        record_at(k, mk("m2"), now);
+        let candidate = record_at(k, mk("m3"), now).unwrap();
+        assert!(outside_maintenance(&env.app, k, candidate).await.is_none());
+        assert!(table().lock().unwrap().get(k).unwrap().quiet_until.is_none());
     }
 
     #[test]
