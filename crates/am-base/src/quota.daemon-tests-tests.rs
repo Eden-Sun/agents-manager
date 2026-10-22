@@ -1558,6 +1558,98 @@
         }
     }
 
+    fn grok_reading(updated_at: &str, five: Option<f64>, seven: Option<f64>, seven_resets: Option<&str>) -> Quota {
+        Quota {
+            five_hour: five.map(|used_pct| Window { observed_at: None, used_pct, resets_at: None }),
+            seven_day: seven.map(|used_pct| Window { observed_at: None, used_pct, resets_at: seven_resets.map(String::from) }),
+            fable: None,
+            reset_credits: None,
+            limit_hit: None,
+            plan: Some("SuperGrok".into()),
+            updated_at: updated_at.into(),
+            source: "grok-usage".into(),
+            account: None,
+            host: LOCAL_HOST.into(),
+        }
+    }
+
+    /// #1900 的實際數字：本機 grok 週窗 10/19 23:42 就開了（`resets_at` 10/26 23:42），10/20 00:17:11 撞限；
+    /// 10/22 15:31 的權威讀數 seven_day 只用 55%。窗開在撞限之前，舊規則永遠清不掉。
+    #[test]
+    fn a_later_non_critical_grok_reading_clears_a_hit_whose_window_opened_before_it() {
+        let hit = LimitHit { message: "weekly limit".into(), until: Some("2026-10-26T23:42:00Z".into()),
+            at: "2026-10-20T00:17:11Z".into(), bucket: Some("seven_day".into()) };
+        let reading = grok_reading("2026-10-22T15:31:00Z", None, Some(55.0), Some("2026-10-26T23:42:00Z"));
+        let now = parse_utc("2026-10-22T15:35:00Z").unwrap();
+        assert!(grok_reading_clears_hit(&hit, &reading, now), "讀數晚於撞限、非 critical：清除");
+        // 前提：窗在撞限之前就開了，舊規則（窗起點）不清，只會把 until 對齊到 resets_at。換掉來源避開真實時鐘。
+        let mut old_rule = reading.clone();
+        old_rule.source = "agy-usage".into();
+        assert_eq!(recalibrate_limit_hit(hit.clone(), &old_rule), Some(hit.clone()));
+
+        let mut early = reading.clone();
+        early.updated_at = "2026-10-19T23:50:00Z".into();
+        assert!(!grok_reading_clears_hit(&hit, &early, parse_utc("2026-10-19T23:55:00Z").unwrap()), "讀數早於撞限：不清");
+        let mut equal = reading.clone();
+        equal.updated_at = hit.at.clone();
+        assert!(!grok_reading_clears_hit(&hit, &equal, parse_utc("2026-10-20T00:20:00Z").unwrap()), "讀數時間等於撞限：不是嚴格晚於，不清");
+
+        let long_after = parse_utc("2026-10-22T16:02:00Z").unwrap();
+        assert!(!grok_reading_clears_hit(&hit, &reading, long_after), "stale（讀數超過 30 分鐘沒更新）：不清");
+
+        let other_bucket = LimitHit { bucket: Some("five_hour".into()), ..hit.clone() };
+        assert!(!grok_reading_clears_hit(&other_bucket, &reading, now), "別的 bucket：讀數裡沒有 five_hour 窗，不清");
+        let with_five = grok_reading("2026-10-22T15:31:00Z", Some(10.0), Some(99.0), Some("2026-10-26T23:42:00Z"));
+        assert!(grok_reading_clears_hit(&other_bucket, &with_five, now), "對照：five_hour 窗存在且非 critical 才清");
+        assert!(!grok_reading_clears_hit(&hit, &with_five, now), "別的桶沒見底不能替 seven_day 作證（seven_day 99%）");
+
+        let critical = grok_reading("2026-10-22T15:31:00Z", None, Some(98.0), Some("2026-10-26T23:42:00Z"));
+        assert!(!grok_reading_clears_hit(&hit, &critical, now), "讀數是 critical：不清");
+
+        for bucket in [None, Some("fable"), Some("opus"), Some("sonnet")] {
+            let h = LimitHit { bucket: bucket.map(String::from), ..hit.clone() };
+            assert!(!grok_reading_clears_hit(&h, &reading, now), "{bucket:?}：沒有可對的窗，不清");
+        }
+        let mut other_source = reading.clone();
+        other_source.source = "claude-usage".into();
+        assert!(!grok_reading_clears_hit(&hit, &other_source, now), "不是 grok-usage：不清");
+        let bad_at = LimitHit { at: "not-a-time".into(), ..hit };
+        assert!(!grok_reading_clears_hit(&bad_at, &reading, now), "撞限時間解不開：不清");
+    }
+
+    /// 同一把 key 才清：別的 host、別的 identity 的讀數不能解除這一格的撞限。
+    #[tokio::test]
+    async fn only_the_same_host_and_identity_grok_reading_clears_the_hit() {
+        let app = crate::testing::env().await.app.clone();
+        let now = chrono::Utc::now();
+        let at = now - chrono::Duration::hours(2);
+        // 週窗在撞限之前就開了（resets_at − 7d < hit.at），所以只剩 #1900 這條能清。
+        let resets = iso(now + chrono::Duration::days(4));
+        let hit = LimitHit { message: "weekly limit".into(), until: Some(iso(now + chrono::Duration::days(4))),
+            at: iso(at), bucket: Some("seven_day".into()) };
+        let seed = |hit: &LimitHit| {
+            let mut q = grok_reading(&iso(at), None, Some(100.0), Some(&resets));
+            q.source = "grok-limit-hit".into();
+            q.limit_hit = Some(hit.clone());
+            q
+        };
+        let reading = || grok_reading(&iso(chrono::Utc::now()), None, Some(55.0), Some(&resets));
+        set(&app, LOCAL_HOST, "grok", seed(&hit)).await;
+        assert!(app.quotas.lock().await[&quota_key(LOCAL_HOST, "grok")].limit_hit.is_some(), "前提：撞限記下了");
+
+        set(&app, "m4p", "grok", reading()).await;
+        set(&app, LOCAL_HOST, "grok:other", reading()).await;
+        assert!(app.quotas.lock().await[&quota_key(LOCAL_HOST, "grok")].limit_hit.is_some(), "別的 host／identity 的讀數不清");
+
+        let mut critical = reading();
+        critical.seven_day.as_mut().unwrap().used_pct = 99.0;
+        set(&app, LOCAL_HOST, "grok", critical).await;
+        assert!(app.quotas.lock().await[&quota_key(LOCAL_HOST, "grok")].limit_hit.is_some(), "同一把 key 但 critical：不清");
+
+        set(&app, LOCAL_HOST, "grok", reading()).await;
+        assert!(app.quotas.lock().await[&quota_key(LOCAL_HOST, "grok")].limit_hit.is_none(), "同 key、同桶、非 critical：清除");
+    }
+
     #[test]
     fn authoritative_codex_hit_reconciliation_requires_new_evidence_and_the_matching_window() {
         let hit = |bucket: Option<&str>| LimitHit { message: "limit".into(), until: None,

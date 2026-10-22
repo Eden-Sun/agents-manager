@@ -1105,6 +1105,35 @@ fn codex_reading_after_hit(hit: &LimitHit, fresh: &Quota) -> bool {
         && parse_utc(&fresh.updated_at).zip(parse_utc(&hit.at)).is_some_and(|(reading, at)| reading >= at)
 }
 
+/// grok 的權威讀數解除撞限（#1900）。四項證據缺一不可：
+/// - 來源是 `grok-usage`，而且這份讀數是新的（[`reading_is_stale`]，不是開機回填或太久沒人更新的）；
+/// - 讀數時間**嚴格晚於** `hit.at`（兩邊任一解不開就不清）；
+/// - 撞限帶桶名，而且只認 `five_hour`／`seven_day`（`fable`／`opus`／`sonnet` 沒有自己的量表、無桶名的
+///   credits 用完更不是窗的百分比說得準的）；
+/// - 讀數裡那一桶的窗存在且不是 [`Window::critical`]。窗不在讀數裡不算「不見底」，不清。
+///
+/// 同 host、同 identity 由 [`set_inner`] 保證：撞限是從同一把 `quota_key` 的上一筆沿用來的。
+///
+/// 為什麼可以看百分比：`/usage` 的百分比是 grok 帳號端的計數，沒有證據證明它每一刻都即時反映撞限，
+/// 所以這裡**不**宣稱它一定準。看百分比的理由是誤清會自我修正：真的還在擋的話，下一個 turn 再撞限，
+/// 橫幅會再記一次 `limit_hit`。這跟 claude 的 `/usage` 不同（見 [`recalibrate_limit_hit`]：撞限前開始、撞限後
+/// 才回來的探測，百分比可能還沒到頂，而 claude 沒有橫幅之外的出口）。獨立於 codex 的 [`codex_reading_after_hit`]。
+pub fn grok_reading_clears_hit(hit: &LimitHit, fresh: &Quota, now: chrono::DateTime<chrono::Utc>) -> bool {
+    if fresh.source != "grok-usage" || reading_is_stale(fresh, false, now) {
+        return false;
+    }
+    let Some((reading, at)) = parse_utc(&fresh.updated_at).zip(parse_utc(&hit.at)) else { return false };
+    if reading <= at {
+        return false;
+    }
+    let window = match hit.bucket.as_deref() {
+        Some("five_hour") => fresh.five_hour.as_ref(),
+        Some("seven_day") => fresh.seven_day.as_ref(),
+        _ => None,
+    };
+    window.is_some_and(|w| !w.critical())
+}
+
 /// 知道桶名的撞限（claude 橫幅）遇到**那一桶的新讀數**時校正，不然保底時間（Fable 7 天）與橫幅當下讀到的
 /// `resets_at` 之後永遠不會被真讀數改寫——claude 沒有 `clear_limit_hit`，帳號恢復後照樣擋到 7 天（review 2026-09-16 M2）。
 ///
@@ -1118,6 +1147,8 @@ fn codex_reading_after_hit(hit: &LimitHit, fresh: &Quota) -> bool {
 /// **5h 與 7d 兩個窗都是撞限之後才開的**——兩桶同時重開只會是整個帳號重置（提早重置券、或週窗本身到期），
 /// 撞限作廢（2026-09-27 使用者：codex 提早重置後額度全滿，還掛著「被擋、下午 02:14 恢復」）。
 /// Codex app-server 的新完整讀數另可解除已消失或不再見底的桶，只有週窗時也適用；沒寫重置時間的（credits 用完）除外。
+/// 上面「用窗的起點而不是百分比」是針對 claude 的 `/usage`；grok 的 `grok-usage` 另有一條看百分比的解除
+/// （[`grok_reading_clears_hit`]，#1900），依據與限制寫在那個函式上：誤清會被下一個 turn 的橫幅自我修正。
 pub fn recalibrate_limit_hit(mut hit: LimitHit, fresh: &Quota) -> Option<LimitHit> {
     // credits 用完（codex 橫幅沒寫重置時間＝`until: None`，沒有桶名）：窗的讀數證明不了 credits 回來了，權威讀數不解除（#1576）。
     // 方案變了另由 `set` 的 plan_changed 分支處理。
@@ -1136,6 +1167,10 @@ pub fn recalibrate_limit_hit(mut hit: LimitHit, fresh: &Quota) -> Option<LimitHi
         if !full {
             return None;
         }
+    }
+    // grok：窗開在撞限之前時下面那條永遠清不掉（#1900），權威讀數說那一桶不見底就解除。
+    if grok_reading_clears_hit(&hit, fresh, chrono::Utc::now()) {
+        return None;
     }
     if hit.bucket.is_none() {
         return if both_windows_opened_after(&hit, fresh) { None } else { Some(hit) };
