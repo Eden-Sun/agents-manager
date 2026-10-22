@@ -75,6 +75,8 @@ struct HostState {
     recheck: bool,
     /// 已經排了一個背景重評估（每 host 合併成一個待辦）。
     recheck_scheduled: bool,
+    /// 正在評估的 [`alert`] 數（含等維護 DB 查詢的期間）。評估到完成之前，累積的記帳不照保留期清。
+    evaluating: usize,
 }
 
 fn table() -> &'static Mutex<HashMap<String, HostState>> {
@@ -93,8 +95,8 @@ pub(crate) fn record_at(key: &str, gone: Gone, now: Instant) -> Option<Vec<Gone>
     }
     let mut table = table().lock().unwrap_or_else(|e| e.into_inner());
     let st = table.entry(key.to_string()).or_default();
-    // 待評估期間不照年齡清（背景重評估會處理它們，不能先被保留期吃掉）；筆數仍有 MAX_RECORDS 上限。
-    if !st.recheck {
+    // 待評估、或有評估正在進行（等維護 DB 查詢）的期間不照年齡清：它們還沒被評估完，不能先被保留期吃掉；筆數仍有 MAX_RECORDS 上限。
+    if !st.recheck && st.evaluating == 0 {
         st.exits.retain(|g| now.saturating_duration_since(g.seen) < RETAIN);
     }
     if st.exits.iter().any(|g| g.bot_id == gone.bot_id && g.seen >= gone.seen) {
@@ -134,13 +136,45 @@ fn find_wave(exits: &[Gone], must: Option<Instant>) -> Option<Vec<Gone>> {
 fn requalify(key: &str, now: Instant) -> Option<Vec<Gone>> {
     let mut table = table().lock().unwrap_or_else(|e| e.into_inner());
     let st = table.get_mut(key)?;
-    if !st.recheck {
+    if !st.recheck && st.evaluating == 0 {
         st.exits.retain(|g| now.saturating_duration_since(g.seen) < RETAIN);
     }
     st.quiet_until = None;
     let wave = find_wave(&st.exits, None)?;
     st.quiet_until = Some(now + COOLDOWN);
     Some(wave)
+}
+
+/// 一次評估（[`alert`]）進行中的保護：到它結束（完成、確認無候選、或 [`defer`] 留下旗標）才放開，記帳期間不照保留期清。
+struct Evaluating(String);
+
+impl Evaluating {
+    fn enter(key: &str) -> Self {
+        table().lock().unwrap_or_else(|e| e.into_inner()).entry(key.to_string()).or_default().evaluating += 1;
+        Evaluating(key.to_string())
+    }
+}
+
+impl Drop for Evaluating {
+    fn drop(&mut self) {
+        if let Some(st) = table().lock().unwrap_or_else(|e| e.into_inner()).get_mut(&self.0) {
+            st.evaluating = st.evaluating.saturating_sub(1);
+        }
+    }
+}
+
+#[cfg(test)]
+thread_local! {
+    /// 測試用：讓評估期間「過了一段時間」，不真的睡。
+    static SKEW: std::cell::Cell<Duration> = const { std::cell::Cell::new(Duration::ZERO) };
+}
+
+/// 評估用的現在（背景任務與維護過濾迴圈用這個；測試可以撥快）。
+fn clock() -> Instant {
+    #[cfg(test)]
+    return Instant::now() + SKEW.with(|s| s.get());
+    #[cfg(not(test))]
+    Instant::now()
 }
 
 /// 維護過濾的輪數用完：解除冷卻、記下「累積的記帳還欠一次評估」。回「需要排背景重評估」（這個 host 還沒有排著的）。
@@ -337,7 +371,7 @@ async fn outside_maintenance(app: &Arc<App>, key: &str, host: &str, mut wave: Ve
         if round + 1 == MAX_ROUNDS {
             break;
         }
-        wave = requalify(key, Instant::now())?;
+        wave = requalify(key, clock())?;
     }
     if defer(key) {
         spawn_recheck(app, key.to_string(), host.to_string());
@@ -356,7 +390,7 @@ fn spawn_recheck(app: &Arc<App>, key: String, host: String) {
                 _ = tokio::time::sleep(RECHECK_DELAY) => {}
                 _ = app.shutdown.cancelled() => return,
             }
-            if let Some(wave) = take_pending(&key, Instant::now()) {
+            if let Some(wave) = take_pending(&key, clock()) {
                 alert(&app, &key, &host, wave).await;
             }
         }),
@@ -365,6 +399,7 @@ fn spawn_recheck(app: &Arc<App>, key: String, host: String) {
 
 /// 達門檻（或重評估找到一波）之後：過濾維護、仍達門檻才推。
 async fn alert(app: &Arc<App>, key: &str, host: &str, wave: Vec<Gone>) {
+    let _evaluating = Evaluating::enter(key);
     let Some(wave) = outside_maintenance(app, key, host, wave).await else { return };
     if let Err(e) = push(app, host, &wave).await {
         clear_quiet(key);
@@ -557,6 +592,37 @@ mod tests {
         let mk = |bot: &str, s: u64| Gone { bot_id: bot.into(), name: bot.into(), run_id: format!("run-{bot}"), at: db::iso_in(-(s as i64)), seen: now - Duration::from_secs(s) };
         let wave = record_at(k, mk("d", 5), now).expect("旗標讓累積的 A–C 被評估");
         let mut names: Vec<_> = wave.iter().map(|g| g.bot_id.clone()).filter(|b| !b.starts_with('m')).collect();
+        names.sort();
+        assert_eq!(names, ["a", "b", "c"]);
+    }
+
+    /// 評估（等維護 DB 查詢）的期間過了超過保留期：還沒評估的 A–C 不能被保留期清掉，濾掉 M 之後仍要告警。
+    #[tokio::test]
+    async fn an_evaluation_that_outlasts_the_retention_does_not_lose_the_unevaluated_exits() {
+        let env = tt::env().await;
+        let (k, now) = ("t-outlast", Instant::now());
+        let mk = |bot: &str, s: u64| Gone { bot_id: bot.into(), name: bot.into(), run_id: format!("run-{bot}"), at: db::iso_in(-(s as i64)), seen: now - Duration::from_secs(s) };
+        // 維護窗口：100 秒前開、57 秒前到期；M（59 秒前）在窗內，A–C（25 秒前）在窗後，離 M 超過一個窗口。
+        sqlx::query("INSERT OR REPLACE INTO herdr_maintenance (id, opened_at, until, opened_by, reason) VALUES (1,?,?,'patrol','test')")
+            .bind(db::iso_in(-100))
+            .bind(db::iso_in(-57))
+            .execute(&env.app.db)
+            .await
+            .unwrap();
+        for b in ["m1", "m2"] {
+            record_at(k, mk(b, 59), now);
+        }
+        let candidate = record_at(k, mk("m3", 59), now).unwrap();
+        for b in ["a", "b", "c"] {
+            assert!(record_at(k, mk(b, 25), now).is_none(), "冷卻中");
+        }
+        // 讀維護歷史的 DB 查詢「花了 40 秒」：A–C 已經比保留期（60 秒）還舊。
+        crate::race_point::arm("gone_burst_round", k, || async { SKEW.with(|s| s.set(Duration::from_secs(40))) });
+        alert(&env.app, k, config::LOCAL_HOST, candidate).await;
+        SKEW.with(|s| s.set(Duration::ZERO));
+        assert!(eventually!(alerts(&env.app).await.len() == 1), "A–C 沒有被保留期清掉");
+        let a = alerts(&env.app).await;
+        let mut names: Vec<_> = a[0]["bot_names"].as_array().unwrap().iter().map(|n| n.as_str().unwrap().to_string()).collect();
         names.sort();
         assert_eq!(names, ["a", "b", "c"]);
     }
