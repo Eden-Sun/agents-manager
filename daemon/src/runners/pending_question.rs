@@ -297,6 +297,9 @@ mod codex_async_tests {
         conn.connected.store(true, std::sync::atomic::Ordering::SeqCst);
         sqlx::query("UPDATE projects SET host=? WHERE id=?").bind(&host).bind(&env.project_id).execute(&app.db).await.unwrap();
         sqlx::query("UPDATE bots SET env_json=? WHERE id=?").bind(json!({"CODEX_HOME":"/Users/m4p/.codex"}).to_string()).bind(&bot).execute(&app.db).await.unwrap();
+        let current_bot = db::bot(&app.db, &bot).await.unwrap().unwrap();
+        sqlx::query("UPDATE runs SET runtime_identity='', launch_rev=? WHERE bot_id=?")
+            .bind(crate::launch_rev::of(&current_bot)).bind(&bot).execute(&app.db).await.unwrap();
         let reads = Arc::new(std::sync::atomic::AtomicUsize::new(0));
         let log = Arc::new(std::sync::Mutex::new(log.to_string()));
         let (seen, output) = (reads.clone(), log.clone());
@@ -328,6 +331,38 @@ mod codex_async_tests {
         assert_eq!(remote.reads(), 2, "cache expires after twenty seconds");
         assert!(remote.env.herdr.calls_to("pane.send_keys").is_empty());
         assert!(remote.env.herdr.calls_to("pane.send_text").is_empty());
+    }
+
+    #[tokio::test]
+    async fn changing_identity_or_env_while_running_never_reads_the_new_directory() {
+        let remote = remote_codex(&ask("old", json!([{"title":"Old account question?"}]))).await;
+        let app = &remote.env.app;
+        app.cfg.update(|cfg| {
+            cfg.identities = [
+                ("old-account", "/Users/m4p/.codex"),
+                ("new-account", "/Users/m4p/.codex-new"),
+            ].into_iter().map(|(name, home)| crate::config::IdentityCfg {
+                name: name.into(), kind: "codex".into(), host: Some(remote.host.clone()),
+                env: [("CODEX_HOME".into(), home.into())].into(), args: vec![],
+            }).collect();
+            Ok(())
+        }).await.unwrap();
+        sqlx::query("UPDATE bots SET identity='old-account', env_json='{}' WHERE id=?").bind(&remote.bot).execute(&app.db).await.unwrap();
+        let bot = db::bot(&app.db, &remote.bot).await.unwrap().unwrap();
+        let run = db::active_run(&app.db, &remote.bot).await.unwrap().unwrap();
+        sqlx::query("UPDATE runs SET runtime_identity='old-account', launch_rev=? WHERE id=?")
+            .bind(crate::launch_rev::of(&bot)).bind(&run.id).execute(&app.db).await.unwrap();
+        // No warm cache: the first read happens after the setting is changed.
+        sqlx::query("UPDATE bots SET identity='new-account' WHERE id=?").bind(&remote.bot).execute(&app.db).await.unwrap();
+        assert_eq!(remote.get().await["questions"][0]["question"], "Old account question?");
+        assert_eq!(remote.reads(), 1);
+        super::super::codex_async_question_remote::age_cache(&run.id, std::time::Duration::from_secs(21));
+        sqlx::query("UPDATE bots SET env_json=? WHERE id=?")
+            .bind(json!({"CODEX_HOME":"/Users/m4p/changed-env"}).to_string()).bind(&remote.bot).execute(&app.db).await.unwrap();
+        let body = remote.get().await;
+        assert_eq!(body["questions"], Value::Null, "changed env cannot be proven to be the launch env");
+        assert_eq!(body["async_screen"]["count"], 1);
+        assert_eq!(remote.reads(), 1, "do not read the new configured account or env directory");
     }
 
     #[tokio::test]

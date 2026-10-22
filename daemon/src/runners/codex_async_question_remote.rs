@@ -43,16 +43,23 @@ fn script(home: &str, session: &str) -> String {
     format!("python3 -c {} {} {} {}", sh_quote(include_str!("codex_async_question_tail.py")), sh_quote(home), sh_quote(session), sh_quote(&TAIL_BYTES.to_string()))
 }
 
-async fn home_setting(app: &Arc<App>, bot: &db::Bot, host: &str) -> String {
+async fn home_setting(app: &Arc<App>, bot: &db::Bot, run: &db::Run, host: &str) -> Option<String> {
+    // Identity changes apply at restart. Reconstruct the launch identity before comparing the
+    // launch revision; there is no persisted launch env, so an unprovable env must degrade.
+    let mut launched = bot.clone();
+    launched.identity = run.started_identity().unwrap_or_else(|| bot.identity.clone());
+    if run.launch_rev.as_deref() != Some(crate::launch_rev::of(&launched).as_str()) {
+        return None;
+    }
     let mut home = None;
-    if let Some(name) = bot.identity.as_deref().filter(|n| !n.is_empty()) {
-        home = crate::tools::identity_for_host(app, host, name).await.and_then(|id| id.env.get("CODEX_HOME").cloned());
+    if let Some(name) = launched.identity.as_deref().filter(|n| !n.is_empty()) {
+        home = crate::tools::identity_for_host(app, host, name).await?.env.get("CODEX_HOME").cloned();
     }
     if let Some(value) = bot.env().get("CODEX_HOME") {
         home = Some(value.clone());
     }
     // The reader expands ~ and $HOME on the target. No extra SSH just to discover HOME.
-    home.unwrap_or_else(|| "~/.codex".into())
+    Some(home.unwrap_or_else(|| "~/.codex".into()))
 }
 
 async fn current(app: &Arc<App>, bot: &db::Bot, run: &db::Run, host: &str, session: &str) -> bool {
@@ -71,43 +78,56 @@ async fn current(app: &Arc<App>, bot: &db::Bot, run: &db::Run, host: &str, sessi
         .as_deref() == Some(session)
 }
 
-pub async fn pending(app: &Arc<App>, bot: &db::Bot, run: &db::Run, host: &str, session: &str) -> Value {
-    // Includes waiting for a concurrent reader, identity lookup, SSH, parsing, and validation.
-    tokio::time::timeout(READ_TIMEOUT, pending_inner(app, bot, run, host, session)).await.ok().flatten()
+/// Start a negative cache entry before polling any work. Cancellation drops the lock but
+/// leaves this entry intact, including when a caller drops the entire pending-question future.
+async fn read_through<F, Fut>(slot: Slot, deadline: tokio::time::Instant, fetch: F) -> Value
+where
+    F: FnOnce() -> Fut,
+    Fut: std::future::Future<Output = Value>,
+{
+    let mut guard = tokio::time::timeout_at(deadline, slot.lock()).await.ok()?;
+    if let Some((_, value)) = guard.as_ref().filter(|(at, _)| at.elapsed() < FRESH_FOR) {
+        return value.clone();
+    }
+    *guard = Some((Instant::now(), None));
+    let value = tokio::time::timeout_at(deadline, fetch()).await.ok().flatten();
+    *guard = Some((Instant::now(), value.clone()));
+    value
 }
 
-async fn pending_inner(app: &Arc<App>, bot: &db::Bot, run: &db::Run, host: &str, session: &str) -> Value {
+pub async fn pending(app: &Arc<App>, bot: &db::Bot, run: &db::Run, host: &str, session: &str) -> Value {
+    let deadline = tokio::time::Instant::now() + READ_TIMEOUT;
     if session.is_empty() || !session.chars().all(|c| c.is_ascii_alphanumeric() || c == '-') {
         return None;
     }
-    let fence = app.hosts.fence(host).await?;
-    if !fence.conn().is_connected() || !current(app, bot, run, host, session).await {
-        return None;
-    }
-    let home = home_setting(app, bot, host).await;
-    let key = format!("{}\0{}\0{:?}\0{}\0{session}\0{home}", run.id, run.started_at, run.pane_id, fence.authority_scope());
+    let fence = tokio::time::timeout_at(deadline, app.hosts.fence(host)).await.ok()??;
+    // Mutable bot settings must not bypass the per-run/session failure backoff.
+    let key = format!("{}\0{}\0{:?}\0{}\0{session}", run.id, run.started_at, run.pane_id, fence.authority_scope());
     let slot = slot(&key)?;
-    let mut guard = slot.lock().await;
-    let value = if let Some((_, value)) = guard.as_ref().filter(|(at, _)| at.elapsed() < FRESH_FOR) {
-        value.clone()
-    } else {
-        // Cache failure too. Keep the outer deadline slightly longer than the transport deadline
-        // so a stalled SSH finishes here and its failure is stored, rather than retrying every poll.
-        let result = tokio::time::timeout(Duration::from_millis(1500), fence.conn().ssh_exec_path_timeout(&script(&home, session), Duration::from_secs(1))).await;
-        let value = match result {
-            Ok(Ok(log)) if !log.is_empty() && log.len() <= TAIL_BYTES as usize => {
-                tokio::task::spawn_blocking(move || pending_async_questions(&log)).await.ok()
-            }
-            _ => None,
-        };
-        *guard = Some((Instant::now(), value.clone()));
-        value
-    };
-    drop(guard);
-    if !app.hosts.is_current(&fence).await || !current(app, bot, run, host, session).await {
-        return None;
-    }
-    value
+    let value = read_through(slot, deadline, || async {
+        if !fence.conn().is_connected() || !current(app, bot, run, host, session).await {
+            return None;
+        }
+        let home = home_setting(app, bot, run, host).await?;
+        let log = fence.conn().ssh_exec_path_timeout(&script(&home, session), Duration::from_secs(1)).await.ok()?;
+        if log.is_empty() || log.len() > TAIL_BYTES as usize {
+            return None;
+        }
+        let value = tokio::task::spawn_blocking(move || pending_async_questions(&log)).await.ok()?;
+        if !app.hosts.is_current(&fence).await || !current(app, bot, run, host, session).await {
+            return None;
+        }
+        Some(value)
+    }).await;
+    // Cached tails also need the current run/session/host observation. Include this in the
+    // original deadline so validating a cached value cannot extend the read budget.
+    tokio::time::timeout_at(deadline, async {
+        if app.hosts.is_current(&fence).await && current(app, bot, run, host, session).await {
+            value
+        } else {
+            None
+        }
+    }).await.ok().flatten()
 }
 
 fn observations() -> &'static Mutex<HashSet<String>> {
@@ -185,11 +205,68 @@ with tempfile.TemporaryDirectory(dir=sys.argv[1]) as tmp:
         assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
     }
 
+    #[tokio::test(start_paused = true)]
+    async fn outer_deadline_and_caller_cancellation_leave_negative_cache_before_ssh_finishes() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        let slot: Slot = Default::default();
+        let calls = AtomicUsize::new(0);
+        let value = read_through(slot.clone(), tokio::time::Instant::now() + Duration::from_millis(80), || async {
+            // Front work consumes the budget before SSH starts. The transport deadline would
+            // be later than the outer deadline, reproducing the review's cancellation ordering.
+            tokio::time::sleep(Duration::from_millis(50)).await;
+            calls.fetch_add(1, Ordering::SeqCst);
+            tokio::time::sleep(Duration::from_secs(1)).await;
+            Some(vec![])
+        }).await;
+        assert_eq!(value, None);
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+        assert_eq!(read_through(slot.clone(), tokio::time::Instant::now() + READ_TIMEOUT, || async {
+            calls.fetch_add(1, Ordering::SeqCst);
+            Some(vec![])
+        }).await, None);
+        assert_eq!(calls.load(Ordering::SeqCst), 1, "an outer timeout must back off");
+
+        let cancelled: Slot = Default::default();
+        let (started, ready) = tokio::sync::oneshot::channel();
+        let work = cancelled.clone();
+        let task = tokio::spawn(async move {
+            read_through(work, tokio::time::Instant::now() + READ_TIMEOUT, || async {
+                started.send(()).unwrap();
+                std::future::pending::<Value>().await
+            }).await
+        });
+        ready.await.unwrap();
+        task.abort();
+        assert!(task.await.unwrap_err().is_cancelled());
+        assert_eq!(read_through(cancelled, tokio::time::Instant::now() + READ_TIMEOUT, || async {
+            panic!("a dropped caller must leave its negative entry");
+        }).await, None);
+    }
+
+    #[tokio::test]
+    async fn a_run_started_without_an_identity_does_not_switch_to_the_new_configured_identity() {
+        let env = crate::testing::env().await;
+        let mut bot = crate::testing::claude_bot(&env.app, &env.project_id, "default-home").await;
+        bot.identity = None;
+        let id = crate::testing::fake_run(&env.app, &bot.id).await;
+        let mut run = db::run(&env.app.db, &id).await.unwrap().unwrap();
+        run.runtime_identity = Some(String::new());
+        run.launch_rev = Some(crate::launch_rev::of(&bot));
+        bot.identity = Some("new-identity".into());
+        assert_eq!(home_setting(&env.app, &bot, &run, "m4p-test").await.as_deref(), Some("~/.codex"));
+        run.launch_rev = None;
+        assert_eq!(home_setting(&env.app, &bot, &run, "m4p-test").await, None);
+    }
+
     #[tokio::test]
     async fn remote_home_uses_that_hosts_identity_then_bot_override() {
         let env = crate::testing::env().await;
         let mut bot = crate::testing::claude_bot(&env.app, &env.project_id, "home-setting").await;
         bot.identity = Some("cx-test".into());
+        let id = crate::testing::fake_run(&env.app, &bot.id).await;
+        let mut run = db::run(&env.app.db, &id).await.unwrap().unwrap();
+        run.runtime_identity = Some("cx-test".into());
+        run.launch_rev = Some(crate::launch_rev::of(&bot));
         env.app.cfg.update(|c| {
             c.identities = vec![crate::config::IdentityCfg {
                 name: "cx-test".into(), kind: "codex".into(), host: Some("m4p-test".into()),
@@ -197,10 +274,12 @@ with tempfile.TemporaryDirectory(dir=sys.argv[1]) as tmp:
             }];
             Ok(())
         }).await.unwrap();
-        assert_eq!(home_setting(&env.app, &bot, "m4p-test").await, "$HOME/.codex-remote");
-        assert_eq!(home_setting(&env.app, &bot, "another-host").await, "~/.codex");
+        assert_eq!(home_setting(&env.app, &bot, &run, "m4p-test").await.as_deref(), Some("$HOME/.codex-remote"));
+        assert_eq!(home_setting(&env.app, &bot, &run, "another-host").await, None);
         bot.env_json = r#"{"CODEX_HOME":"~/bot override's home"}"#.into();
-        assert_eq!(home_setting(&env.app, &bot, "m4p-test").await, "~/bot override's home");
+        assert_eq!(home_setting(&env.app, &bot, &run, "m4p-test").await, None, "changed env has no proven launch snapshot");
+        run.launch_rev = Some(crate::launch_rev::of(&bot));
+        assert_eq!(home_setting(&env.app, &bot, &run, "m4p-test").await.as_deref(), Some("~/bot override's home"));
         assert!(script("~/bot override's home", "safe-session").contains("'\\''"));
     }
 }
