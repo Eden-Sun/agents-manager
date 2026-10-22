@@ -283,6 +283,38 @@
         drop_window(&run.id);
     }
 
+    /// #1885 反例：回音期內有真的回合（web 送 prompt、使用者在 pane 打字形成的外部回合）時，錨點照樣前移、之後照常保溫。
+    #[tokio::test]
+    async fn a_real_turn_inside_the_echo_period_still_moves_the_anchor() {
+        for origin in ["web", "external"] {
+            let env = tt::env().await;
+            let now = chrono::Utc::now();
+            let (bot, run) = primary(&env, &format!("kw-echo-real-{origin}"), "idle").await;
+            turn(&env, &bot, "t-real", None, "completed", &at(64, now), Some(&at(59, now))).await;
+            let p = plan(&env.app, &bot, &run, now).await.unwrap().unwrap();
+            assert_eq!(p.step, Step::KeepWarm);
+            turn(&env, &bot, "t-keep", Some(&keep_warm_crid(&p.anchor)), "completed", &db::iso_at(now), Some(&db::iso_at(now))).await;
+            open_window(&run.id);
+            age_window_opened_for_test(&run.id, WINDOW_MIN);
+            settle_window(&run.id, true);
+            age_window_closed_for_test(&run.id, WINDOW_GRACE);
+            settle_window(&run.id, true);
+            assert!(echo_open(&run.id), "{origin}：還在回音期");
+            // 回音期內（保溫收尾後 4 分鐘）使用者的真回合；statusLine 照樣在動，但錨點看的是回合。
+            let real_at = now + chrono::Duration::minutes(4);
+            turn(&env, &bot, "t-user", None, "completed", &db::iso_at(real_at), Some(&db::iso_at(real_at))).await;
+            sqlx::query("UPDATE turns SET origin = ? WHERE id = 't-user'").bind(origin).execute(&env.app.db).await.unwrap();
+            let a = r#"{"cost":{"total_api_duration_ms":100},"context_window":{"total_output_tokens":5}}"#;
+            let b = r#"{"cost":{"total_api_duration_ms":180},"context_window":{"total_output_tokens":9}}"#;
+            assert!(!cache_clock::on_statusline(&run.id, Some(a), Some(b), &db::iso_at(real_at)), "{origin}：回音期內 statusLine 不記");
+            let early = plan(&env.app, &bot, &run, real_at + chrono::Duration::minutes(1)).await.unwrap();
+            assert_eq!(early, None, "{origin}：錨點前移到真回合，年齡重來");
+            let p = plan(&env.app, &bot, &run, real_at + chrono::Duration::minutes(58)).await.unwrap().unwrap();
+            assert_eq!((p.step, p.anchor.as_str()), (Step::KeepWarm, db::iso_at(real_at).as_str()), "{origin}：之後照常保溫");
+            drop_window(&run.id);
+        }
+    }
+
     async fn primary(env: &tt::Env, name: &str, agent_status: &str) -> (db::Bot, db::Run) {
         let bot = tt::claude_bot(&env.app, &env.project_id, name).await;
         sqlx::query("UPDATE bots SET is_primary = 1 WHERE id = ?").bind(&bot.id).execute(&env.app.db).await.unwrap();
