@@ -78,6 +78,15 @@ pub async fn execution_target(client: &HerdrClient, run: &db::Run, bot: &db::Bot
 
 /// 掃所有 running 的 run，pane 明確不在的收成 exited；回收掉的 run id。
 pub async fn sweep(app: &(impl Db + DeadPanesServices + crate::lifecycle::s6_ports::QueueContext + crate::capabilities::HerdrRoutes + crate::hosts::HostsAccess)) -> Vec<String> {
+    sweep_each(app).await.into_iter().map(|(id, _, _)| id).collect()
+}
+
+/// [`sweep`]，只回**這一次自己**寫下 `exited` 的 run 與轉移的證據（`AlreadyEnded`、寫不進去的不在內）。回報用，不影響 `sweep` 的行為。
+pub async fn sweep_proved(app: &(impl Db + DeadPanesServices + crate::lifecycle::s6_ports::QueueContext + crate::capabilities::HerdrRoutes + crate::hosts::HostsAccess)) -> Vec<(String, ExitProof)> {
+    sweep_each(app).await.into_iter().filter_map(|(id, _, proof)| proof.map(|p| (id, p))).collect()
+}
+
+async fn sweep_each(app: &(impl Db + DeadPanesServices + crate::lifecycle::s6_ports::QueueContext + crate::capabilities::HerdrRoutes + crate::hosts::HostsAccess)) -> Vec<(String, RunExit, Option<ExitProof>)> {
     // 讀不到維護狀態就不動：寧可晚收，不在 herdr 重啟中把整批活的 run 收掉。
     if app.maintenance_window_active().await {
         return Vec::new();
@@ -85,9 +94,13 @@ pub async fn sweep(app: &(impl Db + DeadPanesServices + crate::lifecycle::s6_por
     let Ok(runs) = db::all_active_runs(app.db()).await else { return Vec::new() };
     let mut gone = Vec::new();
     for run in runs.into_iter().filter(|r| r.state == "running") {
-        if pane_gone(app, &run).await && mark_run_exited(app, &run.id, "pane gone").await != RunExit::NotRecorded {
+        if !pane_gone(app, &run).await {
+            continue;
+        }
+        let (exit, proof) = mark_run_exited_proved(app, &run.id, "pane gone").await;
+        if exit != RunExit::NotRecorded {
             tracing::warn!(run = %run.id, bot = %run.bot_id, "run's pane no longer exists; marked the run exited");
-            gone.push(run.id);
+            gone.push((run.id, exit, proof));
         }
     }
     gone
