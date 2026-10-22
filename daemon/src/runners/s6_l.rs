@@ -827,9 +827,10 @@ impl s6_ports::RelayWatchServices for App {
 
     async fn sweep_dead_panes(&self) -> Vec<String> {
         let app = self.shared();
-        let swept = crate::lifecycle::dead_panes::sweep(&app).await;
-        crate::gone_burst::after_sweep(&app, &swept);
-        swept
+        let swept = crate::lifecycle::dead_panes::sweep_proved(&app).await;
+        let ids = swept.iter().map(|(id, _)| id.clone()).collect();
+        crate::gone_burst::after_sweep(&app, swept);
+        ids
     }
 
     fn spawn_relay_watch(&self, watch: crate::lifecycle::relay_watch::Watch) {

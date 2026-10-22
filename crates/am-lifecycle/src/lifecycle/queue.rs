@@ -821,27 +821,42 @@ pub use crate::lc_error::RunExit;
 /// `exited` 的 durable commit 是後面每一步的前提（#135）：寫不進去就不能當它已經結束——
 /// 收 in-flight、撤佇列、拆 watcher 都留到寫進去之後（重試或下一個 pane 事件）。
 pub async fn mark_run_exited<C: QueueContext>(app: &C, run_id: &str, reason: &str) -> RunExit {
+    mark_run_exited_proved(app, run_id, reason).await.0
+}
+
+/// 這一次 `exited` 轉移的證據（只有真的由這條路寫下 `exited` 才有；見 [`mark_run_exited_proved`]）。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ExitProof {
+    /// 轉移前是 `stopping`（使用者或 daemon 的 stop／restart 已經在做）。CAS 自己回報，不是事後推論。
+    pub from_stopping: bool,
+    /// 轉移當下的時間（寫完 `exited` 之後立刻取，格式同 [`db::now`]）。
+    pub at: String,
+}
+
+/// [`mark_run_exited`] 加上轉移的證據。語意與原本的單一 CAS（`LIVE → exited`）完全等價，只是拆成兩步讓來源可知：
+/// 先 `starting`／`running → exited`，輸了才 `stopping → exited`；兩步都輸才是 `AlreadyEnded`，任一步寫不進去照原路（不做第二步）。
+pub async fn mark_run_exited_proved<C: QueueContext>(app: &C, run_id: &str, reason: &str) -> (RunExit, Option<ExitProof>) {
     let run = match db::run(app.db(), run_id).await {
         Ok(Some(run)) => run,
-        Ok(None) => return RunExit::AlreadyEnded,
+        Ok(None) => return (RunExit::AlreadyEnded, None),
         Err(e) => {
             tracing::warn!(run = run_id, reason, error = %e, "run exit not recorded: could not read the run; nothing torn down");
-            return RunExit::NotRecorded;
+            return (RunExit::NotRecorded, None);
         }
     };
     if !super::run_state::LIVE.contains(&run.state.as_str()) {
-        return RunExit::AlreadyEnded;
+        return (RunExit::AlreadyEnded, None);
     }
     // #708：專案移交出去了，run 的結束歸接手的 daemon 記；這裡一樣都不寫（讀不到就不動）。
     match app.bot_handed_off_to(&run.bot_id).await {
         Ok(None) => {}
         Ok(Some(to)) => {
             tracing::info!(run = run_id, reason, handed_off_to = %to, "run exit ignored: the project was handed off");
-            return RunExit::AlreadyEnded;
+            return (RunExit::AlreadyEnded, None);
         }
         Err(e) => {
             tracing::warn!(run = run_id, reason, error = %e, "run exit not recorded: could not tell whether the project was handed off");
-            return RunExit::NotRecorded;
+            return (RunExit::NotRecorded, None);
         }
     }
     // 讀完狀態、還沒寫 exited 的那一瞬（測試在這裡插進使用者 stop 的收尾寫入）。
@@ -851,19 +866,25 @@ pub async fn mark_run_exited<C: QueueContext>(app: &C, run_id: &str, reason: &st
     }
     // CAS 在 UPDATE 自己身上（#131）：這支不拿 bot 鎖，上面讀完之後使用者的 stop 可能剛寫下 `stopped`，
     // 無條件寫 `exited` 會把「使用者要它停」蓋掉。沒寫到就是別的路徑先收掉了，後續由那條路負責。
-    match super::run_state::transition(app.db(), run_id, super::run_state::LIVE, "exited", None).await {
-        Ok(super::run_state::Moved::Applied) => {}
-        Ok(super::run_state::Moved::Lost) => {
+    // 兩步合起來等於 `LIVE → exited`：先 [starting, running]，輸了才 [stopping]（第一步 Applied 就不做第二步；第一步寫不進去也不做）。
+    let moved = match super::run_state::transition(app.db(), run_id, &["starting", "running"], "exited", None).await {
+        Ok(super::run_state::Moved::Lost) => super::run_state::transition(app.db(), run_id, &["stopping"], "exited", None).await.map(|m| (m, true)),
+        other => other.map(|m| (m, false)),
+    };
+    let from_stopping = match moved {
+        Ok((super::run_state::Moved::Applied, from_stopping)) => from_stopping,
+        Ok((super::run_state::Moved::Lost, _)) => {
             tracing::info!(run = run_id, reason, "run exit: another path ended the run first (CAS lost); its cleanup is that path's");
-            return RunExit::AlreadyEnded;
+            return (RunExit::AlreadyEnded, None);
         }
         Err(e) => {
             tracing::warn!(run = run_id, reason, error = %e,
                 "run exit not recorded (DB write failed); in-flight turn, queue and watcher left as they are");
             app.schedule_reconcile_settle(run_id, &run.state);
-            return RunExit::NotRecorded;
+            return (RunExit::NotRecorded, None);
         }
-    }
+    };
+    let proof = ExitProof { from_stopping, at: db::now() };
     // 只有 CAS 真的寫下 exited 的這一條路記原因（每個 run 只會成功一次，後到的在上面就回 AlreadyEnded）。#554：
     // child 退役紀錄靠它分辨 pane 是 herdr 報關掉的還是對帳才發現不見。
     // 記不下來只是少一個證據：退役紀錄讀到 NULL 就當成沒親眼看到，偏向「不算刻意」。
@@ -893,11 +914,7 @@ pub async fn mark_run_exited<C: QueueContext>(app: &C, run_id: &str, reason: &st
         }
     }
     app.bot_status_changed(&run.bot_id).await;
-    if turn_owed {
-        RunExit::TurnOwed
-    } else {
-        RunExit::Recorded
-    }
+    (if turn_owed { RunExit::TurnOwed } else { RunExit::Recorded }, Some(proof))
 }
 
 /// 收掉這個 run 還在飛的那一筆（failed＋說明同一個交易，CAS 在 `status='in_flight'`，輸了就不寫說明）。
@@ -944,6 +961,66 @@ mod run_exit_race_tests {
 
         let state: String = sqlx::query_scalar("SELECT state FROM runs WHERE id=?").bind(&run).fetch_one(app.db()).await.unwrap();
         assert_eq!(state, "stopped", "使用者停的就是停的，不是 pane 自己死掉");
+    }
+
+    /// 證據：`running → exited` 不是從 stopping；`stopping → exited`（stop／restart 自己關 pane 引來的 pane-exit）是；
+    /// 兩步都輸（別的路徑先收了）是 `AlreadyEnded`、沒有證據。回傳值與原 `mark_run_exited` 一致。
+    #[tokio::test]
+    async fn the_exit_says_which_state_it_left() {
+        let env = tt::env().await;
+        let app = env.app.clone();
+        let bot = tt::claude_bot(&app, &env.project_id, "proof").await;
+
+        let live = tt::fake_run(&app, &bot.id).await;
+        let (exit, proof) = mark_run_exited_proved(&app, &live, "pane exited").await;
+        assert_eq!(exit, RunExit::Recorded);
+        let proof = proof.expect("自己寫下 exited");
+        assert!(!proof.from_stopping);
+        let ended: Option<String> = sqlx::query_scalar("SELECT ended_at FROM runs WHERE id=?").bind(&live).fetch_one(app.db()).await.unwrap();
+        assert!(db::cmp_ts(&ended.unwrap(), &proof.at).is_le(), "證據的時間在 ended_at 之後（同一個毫秒也算）");
+
+        let stopping = tt::fake_run(&app, &bot.id).await;
+        sqlx::query("UPDATE runs SET state='stopping' WHERE id=?").bind(&stopping).execute(app.db()).await.unwrap();
+        let (exit, proof) = mark_run_exited_proved(&app, &stopping, "pane exited").await;
+        assert_eq!((exit, proof.map(|p| p.from_stopping)), (RunExit::Recorded, Some(true)));
+        assert_eq!(run_state(&app, &stopping).await, "exited");
+
+        // 已經結束的：兩步都沒有可轉的。
+        let (exit, proof) = mark_run_exited_proved(&app, &stopping, "pane exited").await;
+        assert_eq!((exit, proof), (RunExit::AlreadyEnded, None));
+        assert_eq!(mark_run_exited(&app, &stopping, "pane exited").await, RunExit::AlreadyEnded);
+
+        // 讀了之後、CAS 之前別的路徑（使用者 stop 的收尾）先寫了 stopped：兩步都輸。
+        let raced = tt::fake_run(&app, &bot.id).await;
+        let (app2, raced2) = (app.clone(), raced.clone());
+        super::super::race_point::arm("mark_run_exited_after_read", &raced, move || async move {
+            sqlx::query("UPDATE runs SET state='stopped', ended_at=? WHERE id=?").bind(db::now()).bind(&raced2).execute(app2.db()).await.unwrap();
+        });
+        assert_eq!(mark_run_exited_proved(&app, &raced, "pane exited").await, (RunExit::AlreadyEnded, None));
+        assert_eq!(run_state(&app, &raced).await, "stopped");
+
+        // 讀到 running、CAS 前被 stop 改成 stopping：第二步接手，證據是 from_stopping。
+        let flipped = tt::fake_run(&app, &bot.id).await;
+        let (app3, flipped2) = (app.clone(), flipped.clone());
+        super::super::race_point::arm("mark_run_exited_after_read", &flipped, move || async move {
+            sqlx::query("UPDATE runs SET state='stopping' WHERE id=?").bind(&flipped2).execute(app3.db()).await.unwrap();
+        });
+        let (exit, proof) = mark_run_exited_proved(&app, &flipped, "pane exited").await;
+        assert_eq!((exit, proof.map(|p| p.from_stopping)), (RunExit::Recorded, Some(true)));
+    }
+
+    /// 第一步寫不進去：不做第二步、照原路 `NotRecorded`＋排對帳，run 照舊。
+    #[tokio::test]
+    async fn a_first_step_that_cannot_be_written_does_not_try_the_second() {
+        let env = tt::env().await;
+        let app = env.app.clone();
+        let bot = tt::claude_bot(&app, &env.project_id, "proof-err").await;
+        let run = tt::fake_run(&app, &bot.id).await;
+        rs::refuse_run_state(&app, "exited").await;
+        assert_eq!(mark_run_exited_proved(&app, &run, "pane exited").await, (RunExit::NotRecorded, None));
+        assert_eq!(run_state(&app, &run).await, "running");
+        assert_eq!(rs::scheduled(&run), vec![rs::Settle::Reconcile { stuck: "running".into() }]);
+        rs::accept_run_state(&app, "exited").await;
     }
 
     /// 沒有人搶的時候照舊：還活著的 run 碰到 pane-exit 就是 `exited`。

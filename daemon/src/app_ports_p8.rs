@@ -72,9 +72,8 @@ impl TurnCommands for App {
     }
     async fn mark_run_exited(&self, run_id: &str, reason: &str) -> RunExit {
         let app = self.shared();
-        let eligible = crate::gone_burst::eligible(&app, run_id, reason).await;
-        let exit = lifecycle::mark_run_exited(&app, run_id, reason).await;
-        crate::gone_burst::after_exit(&app, eligible, run_id, reason, exit);
+        let (exit, proof) = lifecycle::mark_run_exited_proved(&app, run_id, reason).await;
+        crate::gone_burst::after_exit(&app, run_id, reason, proof);
         exit
     }
     async fn context_lost(&self, bot: &db::Bot, why: &str, failed_session: Option<&str>) -> LcResult<()> {

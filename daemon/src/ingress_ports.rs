@@ -69,7 +69,8 @@ mod tests {
     fn feature_calls() -> Vec<String> {
         let mut v: Vec<String> = [
             "emit_message_added", "emit_turn", "schedule_flush_queued", "schedule_deferred_live", "schedule_codex_notice_capture",
-            "poke_resume_nudge", "cancel_stall", "arm_fallback", "arm_progress", "arm_stall", "begin_external_turn", "mark_run_exited",
+            // #1884：舊名 `lifecycle::mark_run_exited` 現在只是 `mark_run_exited_proved` 的包裝，adapter 一律呼叫 `_proved`（帶轉移的證據）。
+            "poke_resume_nudge", "cancel_stall", "arm_fallback", "arm_progress", "arm_stall", "begin_external_turn", "mark_run_exited_proved",
             "context_lost", "retire_context_lost", "settle_interruption", "settle_owed_deliveries", "settle_interrupt_echo",
             "start_bot", "start_bot_locked_with", "adopt_unbound_send_nows", "rearm_queue_retries", "adopt_turns_of_ended_runs",
             "rearm_queued_prompt_restamps", "adopt_interrupted_on_restart", "spawn_adopted_capture", "sweep_stuck_turns",
