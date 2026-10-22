@@ -1676,6 +1676,42 @@ for c in still_running not_observed pane_present parent_idle; do
   teardown
 done
 
+# 34f. #1895：12:27 換版期間，舊 child 因 parent_replaced_child 退役（exit_reason 是 reconcile 才發現 agent 不見），
+#      同 pane 的新 child 在窗口內認領後也因 pane_closed 退役；父 bot 一直 active，不該誤判遺失。
+#      只有新 child 未刪、或有窗口內 pane_closed 的 done 退役紀錄才可信；不放寬舊 child 的 exit_reason 判準。
+for c in pane_closed unconfirmed agent_missing parent_idle no_successor old_retire pending_retire; do
+  setup 10 10
+  export STUB_NAMES_BEFORE='["mom","kid"]' STUB_NAMES_AFTER='["mom"]'
+  successor_cause=pane_closed; successor_status=done; successor_retired_at='2099-01-01T12:27:27.000Z'
+  parent_run_sql="INSERT INTO runs VALUES ('id-mom','running');"
+  case "$c" in
+    unconfirmed|agent_missing) successor_cause="$c" ;;
+    parent_idle) parent_run_sql="" ;;
+    old_retire) successor_retired_at='2000-01-01T00:00:00.000Z' ;;
+    pending_retire) successor_status=pending ;;
+  esac
+  successor_sql="INSERT INTO bots (id,name,project_id,deleted_at,managed_by,parent_bot_id,created_at)
+    VALUES ('id-new-kid','new-kid','p1','2099-01-01T12:27:27.000Z','child','id-mom','2099-01-01T12:27:20.000Z');
+    INSERT INTO intents VALUES ('it-new','retire_child','id-new-kid','{\"why\":\"reconcile_run_already_ended\",\"cause\":\"$successor_cause\",\"parent_bot_id\":\"id-mom\",\"last_run\":{\"pane_id\":\"wBVC:pUX\",\"state\":\"exited\",\"exit_reason\":\"pane exited\"}}','$successor_status','$successor_retired_at');"
+  [ "$c" = no_successor ] && successor_sql=""
+  seed_audit "INSERT INTO bots (id,name,project_id,deleted_at,managed_by,parent_bot_id,created_at)
+      VALUES ('id-mom','mom','p1',NULL,'user',NULL,'2000-01-01T00:00:00.000Z'),
+             ('id-kid','kid','p1','2099-01-01T12:27:17.000Z','child','id-mom','2000-01-01T00:00:00.000Z');
+    $parent_run_sql
+    $successor_sql
+    INSERT INTO intents VALUES ('it-old','retire_child','id-kid','{\"why\":\"parent_replaced_child\",\"cause\":\"parent_replaced_child\",\"mode\":\"implicit\",\"pane\":\"gone\",\"parent_bot_id\":\"id-mom\",\"last_run\":{\"pane_id\":\"wBVC:pUX\",\"state\":\"exited\",\"ended_at\":\"2099-01-01T12:27:17.000Z\",\"exit_reason\":\"agent not found during reconcile\"}}','done','2099-01-01T12:27:17.000Z');"
+  rc=$(run)
+  if [ "$c" = pane_closed ]; then
+    check_eq "1895 同 pane successor 正常退役且父 active：不回滾（rc=0）" "0" "$rc"
+    check "1895 舊 child 被認成預期退役" 'missing=\[\] deleted_in_window=\[kid \]' "$SWAP_LOG"
+    check_no "1895 正常替換與收尾不回滾" "ROLLBACK" "$SWAP_LOG"
+  else
+    check_eq "1895 對照 ${c}：照樣回滾（rc=7）" "7" "$rc"
+    check "1895 對照 ${c}：舊 child 保持 missing" 'missing=\[kid \]' "$SWAP_LOG"
+  fi
+  teardown
+done
+
 # 35. rollback 還原 DB 前要辨認窗口中新 daemon 收編的 child，並在還原後明確警示它仍有 live pane
 #     （只有升過 schema、往前修失敗才會還原 DB，所以這案用 setup 11 10）。
 setup 11 10

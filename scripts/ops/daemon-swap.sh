@@ -1035,7 +1035,10 @@ deleted_on_purpose() { # $1=bot id → 印 1 才算
             AND EXISTS (SELECT 1 FROM bots p
               WHERE p.id = json_extract(i.payload_json, '\$.parent_bot_id') AND p.deleted_at IS NULL
                 AND EXISTS (SELECT 1 FROM runs r WHERE r.bot_id = p.id AND r.state IN ('starting', 'running', 'stopping'))
-                AND EXISTS (SELECT 1 FROM bots s WHERE s.managed_by = 'child' AND s.deleted_at IS NULL
+                AND EXISTS (SELECT 1 FROM bots s WHERE s.managed_by = 'child'
+                  AND (s.deleted_at IS NULL OR EXISTS (SELECT 1 FROM intents si
+                    WHERE si.kind = 'retire_child' AND si.status = 'done' AND si.subject_id = s.id
+                      AND si.created_at >= '$SWAP_T0' AND json_extract(si.payload_json, '\$.cause') = 'pane_closed'))
                   AND s.parent_bot_id = p.id AND s.id != b.id AND s.created_at >= '$SWAP_T0')))))
       OR EXISTS (SELECT 1 FROM intents i WHERE i.kind = 'retire_child' AND i.status = 'done'
         AND i.created_at >= '$SWAP_T0' AND i.subject_id = b.id AND b.managed_by = 'child'
