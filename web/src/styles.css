@@ -2698,7 +2698,7 @@ button.model-tag {
   margin: 0 1px 0 2px;
 }
 
-/* SPEC §4.4a：這格是「下次啟動才用的設定」，⟳ 只是記號，實際值在 tooltip（側欄放不下兩組數字）。 */
+/* SPEC §4.4a：這格是「下次啟動才用的設定」，⟳ 後面接差異的欄位字（#1903），實際值在 tooltip（側欄放不下兩組數字）。 */
 
 .model-tag.stale {
   border-color: color-mix(in srgb, var(--warn) 60%, var(--border));
@@ -2708,6 +2708,20 @@ button.model-tag {
   margin-left: 3px;
   color: var(--warn);
   font-weight: 700;
+  /* 欄位字不要被切：model 名先被 ellipsis。 */
+  flex: none;
+}
+
+.model-tag.stale {
+  display: inline-flex;
+  align-items: baseline;
+  min-width: 0;
+}
+
+.model-tag.stale > .model-tag-main {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 
 /* 同 `.update-badge` 形狀、換警示色：意思是「你看到的設定現在不是真的」。 */

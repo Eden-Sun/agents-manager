@@ -1,7 +1,7 @@
 import { useStore } from '../store/store'
 import { effortLabel, effortShort } from '../api/types'
 import { agyEffort, shortModel } from '../lib/shortModel'
-import { driftTitle, runningFast, runtimeDrift, runtimeSettingsKnown } from '../lib/runtimeDrift'
+import { driftFieldsLabel, driftTitle, runningFast, runtimeDrift, runtimeSettingsKnown } from '../lib/runtimeDrift'
 
 /**
  * The model a bot is on, with its reasoning effort. Separator `-` (`opus-高`) is user-specified — do not
@@ -32,14 +32,17 @@ export function ModelTag({ botId, short = false }: { botId: string; /** 精簡�
   return (
     <span
       className={`model-tag${runningModel ? '' : ' reported'}${drift.length ? ' stale' : ''}`}
-      title={drift.length ? `${title}\n\n需重啟才生效：\n${driftTitle(drift)}` : title}
+      title={drift.length ? `需重啟才生效：${driftFieldsLabel(drift)}\n${title}\n\n${driftTitle(drift)}` : title}
     >
-      {shown ?? 'CLI 預設'}
-      {/* 分隔符在 CSS 的 `.model-tag-extra::before`，不要在這裡再加一個。 */}
-      {shownExtra ? <span className="model-tag-extra">{shownExtra}</span> : null}
+      {/* 窄列放不下時先截模型名／強度，⟳ 與欄位字（`.model-tag-stale`）留著（#1903）。 */}
+      <span className="model-tag-main">
+        {shown ?? 'CLI 預設'}
+        {/* 分隔符在 CSS 的 `.model-tag-extra::before`，不要在這裡再加一個。 */}
+        {shownExtra ? <span className="model-tag-extra">{shownExtra}</span> : null}
+      </span>
       {drift.length ? (
-        <span className="model-tag-stale" aria-label="需重啟才生效">
-          ⟳
+        <span className="model-tag-stale" aria-label={`需重啟才生效：${driftFieldsLabel(drift)}`}>
+          ⟳{driftFieldsLabel(drift, short || drift.length > 1)}
         </span>
       ) : null}
     </span>

@@ -2,7 +2,7 @@ import test from 'node:test'
 import assert from 'node:assert/strict'
 import type { Bot, Run } from '../api/types.ts'
 import { effortLabel, effortShort } from '../api/types.ts'
-import { driftLine, driftTitle, isFastOnlyDrift, quotaIdentity, runtimeDrift, runtimeKnown } from './runtimeDrift.ts'
+import { driftFieldsLabel, driftLine, driftTitle, isFastOnlyDrift, quotaIdentity, runtimeDrift, runtimeKnown } from './runtimeDrift.ts'
 
 const bot = (over: Partial<Bot> = {}): Bot =>
   ({ id: 'b1', kind: 'codex', model: 'gpt-5.6-luna', effort: 'high', fast: true, identity: null, ...over }) as Bot
@@ -168,4 +168,19 @@ test('grok 在 TUI 打 /effort low：child 設定已跟上就不標，一般 bot
     d.map((f) => [f.field, f.running, f.configured]),
     [['effort', 'Low', 'High']],
   )
+})
+
+test('chip 的欄位字：強度 drift 寫「強度」，不是只有 ⟳（#1903）', () => {
+  const d = runtimeDrift(bot({ fast: false, effort: 'medium' }), run({ runtime_fast: false, runtime_effort: 'default' }))
+  assert.deepEqual(d.map((x) => x.field), ['effort'])
+  assert.equal(driftFieldsLabel(d), '強度')
+  assert.equal(driftFieldsLabel(d, true), '強')
+})
+
+test('chip 的欄位字：多欄用 / 連接、順序同落差清單；fast 與帳號各自有字', () => {
+  const d = runtimeDrift(bot({ model: 'gpt-5.6-sol', effort: 'medium', fast: false, identity: 'cx1' }), run({ runtime_fast: true, runtime_identity: '' }))
+  assert.deepEqual(d.map((x) => x.field), ['model', 'effort', 'fast', 'identity'])
+  assert.equal(driftFieldsLabel(d), '模型/強度/fast/帳號')
+  assert.equal(driftFieldsLabel(d, true), '模/強/fast/帳')
+  assert.equal(driftFieldsLabel([]), '')
 })

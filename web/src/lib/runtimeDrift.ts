@@ -141,6 +141,16 @@ export function driftLine(d: RuntimeDriftField): string {
   return `${d.label} 實際 ${d.running}、設定 ${d.configured}`
 }
 
+/**
+ * chip 上 ⟳ 後面的欄位字（#1903）：只有 ⟳ 看不出是哪一欄，強度 drift 曾被當成 fast。
+ * `short`（側欄精簡列）每欄只剩一個字（fast 維持原字），多欄用 `/` 連接；順序同 `runtimeDrift`。
+ */
+const SHORT_LABEL: Record<RuntimeDriftField['field'], string> = { model: '模', effort: '強', fast: 'fast', identity: '帳' }
+
+export function driftFieldsLabel(drift: RuntimeDriftField[], short = false): string {
+  return drift.map((d) => (short ? SHORT_LABEL[d.field] : d.label)).join('/')
+}
+
 export function driftTitle(drift: RuntimeDriftField[]): string {
   if (!drift.length) return ''
   return `${drift.map(driftLine).join('\n')}\n重啟這顆 bot 才會換成設定的值。`
