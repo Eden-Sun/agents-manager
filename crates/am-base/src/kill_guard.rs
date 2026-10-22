@@ -52,6 +52,9 @@ const MAX_GROUP_DEPTH: u32 = 8;
 const MAX_REGEX_STEPS: u32 = 100_000;
 const MAX_REGEX_DEPTH: u32 = 256;
 
+/// 命中 `node` 時多講的一段：agent 最常被這個擋到，而且看不出為什麼（`pkill -x node` 看起來很窄）。
+pub const NODE_NOTE: &str = "；`node` 也是 claude／codex（npm 安裝版）的行程名，殺掉同名行程會連 agent 自己一起殺掉。要停自己的 node 服務，請改用自己記下的 PID 或 port：`lsof -ti :PORT | xargs kill`，或 `kill <PID>`";
+
 pub const HOW_TO: &str = "只殺自己記下的 PID 或 port：`lsof -ti :PORT | xargs kill`，或 `kill <自己啟動時記下的 PID>`。不要用 pkill／killall 比對寬鬆的字串。";
 
 /// 一次判斷的共用狀態：regex 預算，和「判不出來所以放行」的原因（給 hook 寫 stderr）。
@@ -810,7 +813,7 @@ fn check_killall(args: &[String], ctx: &mut Ctx) -> Verdict {
         let hit = if regex {
             broad_pattern(name, false, false, icase, ctx)
         } else {
-            PROTECTED_NAMES.iter().find(|n| eq(n, name, icase)).map(|n| format!("就是受保護的行程名 `{n}`（killall 會殺掉同名的全部行程，包含其他 agent 與使用者的 session）"))
+            PROTECTED_NAMES.iter().find(|n| eq(n, name, icase)).map(|n| format!("就是受保護的行程名 `{n}`（killall 會殺掉同名的全部行程，包含其他 agent 與使用者的 session）{}", if *n == "node" { NODE_NOTE } else { "" }))
         };
         if let Some(why) = hit {
             return Verdict::Deny(format!("擋下 killall：`{name}` {why}。{HOW_TO}"));
@@ -847,7 +850,8 @@ fn broad_pattern(pat: &str, full: bool, exact: bool, icase: bool, ctx: &mut Ctx)
     }
     let hit = hit?;
     let name = if full { hit.split_whitespace().next().map(basename).unwrap_or(hit) } else { hit };
-    Some(format!("會命中受保護的 agent 行程（`{name}`）"))
+    let note = if name == "node" { NODE_NOTE } else { "" };
+    Some(format!("會命中受保護的 agent 行程（`{name}`）{note}"))
 }
 
 // ───────────────────────── 迷你 ERE ─────────────────────────

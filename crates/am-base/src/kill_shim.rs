@@ -40,6 +40,7 @@ AM_MIN_PATTERN=@AM_MIN_PATTERN@
 AM_MAX_PATTERN=@AM_MAX_PATTERN@
 AM_SIGNAMES='@AM_SIGNAMES@'
 AM_HOW_TO='@AM_HOW_TO@'
+AM_NODE_NOTE='@AM_NODE_NOTE@'
 AM_NL='
 '
 
@@ -246,6 +247,7 @@ AM_SUBJ_EOF
         _hit=${_w##*/}
     fi
     BROAD_WHY="會命中受保護的 agent 行程（\`$_hit\`）"
+    [ "$_hit" = node ] && BROAD_WHY="$BROAD_WHY$AM_NODE_NOTE"
     return 0
 }
 
@@ -365,7 +367,9 @@ am_check_killall() {
             [ "$_ic" = 1 ] && _lp=$(printf '%s' "$_p" | tr '[:upper:]' '[:lower:]')
             for _nm in $AM_PROTECTED_NAMES; do
                 if [ "$_nm" = "$_lp" ]; then
-                    am_deny "\`$_p\` 就是受保護的行程名 \`$_nm\`（killall 會殺掉同名的全部行程，包含其他 agent 與使用者的 session）。"
+                    _note=
+                    [ "$_nm" = node ] && _note=$AM_NODE_NOTE
+                    am_deny "\`$_p\` 就是受保護的行程名 \`$_nm\`（killall 會殺掉同名的全部行程，包含其他 agent 與使用者的 session）${_note}。"
                 fi
             done
         fi
@@ -394,13 +398,14 @@ pub fn shim_sh() -> &'static str {
     SH.get_or_init(|| {
         use crate::kill_guard::*;
         let signals = SIGNAL_NAMES.join(" ");
-        let fills: [(&str, String); 7] = [
+        let fills: [(&str, String); 8] = [
             ("@AM_PROTECTED_NAMES@", PROTECTED_NAMES.join("\n")),
             ("@AM_PROTECTED_CMDLINES@", PROTECTED_CMDLINES.join("\n")),
             ("@AM_MIN_PATTERN@", MIN_PATTERN_CHARS.to_string()),
             ("@AM_MAX_PATTERN@", MAX_PATTERN_CHARS.to_string()),
             ("@AM_SIGNAMES@", signals),
             ("@AM_HOW_TO@", HOW_TO.to_string()),
+            ("@AM_NODE_NOTE@", NODE_NOTE.to_string()),
             ("@AM_DENIED_EXIT@", DENIED_EXIT.to_string()),
         ];
         let mut s = TEMPLATE.to_string();
