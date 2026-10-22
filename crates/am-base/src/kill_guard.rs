@@ -15,7 +15,6 @@
 //! `kill <明確 PID>`、`lsof -ti :PORT | xargs kill`、`pkill -f "next-server"` 這類窄的一律放行。
 
 use serde_json::{json, Value};
-use std::cell::Cell;
 
 /// `Allow`＝放行；`Deny(原因)`＝擋下，原因直接給 agent 看（含正確做法）。
 #[derive(Debug, PartialEq, Eq)]
@@ -46,20 +45,19 @@ pub const MIN_PATTERN_CHARS: usize = 3;
 
 const MAX_DEPTH: u32 = 4;
 
-/// pattern（ERE）的長度、群組巢狀、整條指令的比對步數與遞迴深度上限；超過就放行並記 log（見「迷你 ERE」）。
+/// pattern（ERE）可判斷語法的長度與群組巢狀上限（見「迷你 ERE」）；超過就放行並記 log。
 pub const MAX_PATTERN_CHARS: usize = 256;
-const MAX_GROUP_DEPTH: u32 = 8;
-const MAX_REGEX_STEPS: u32 = 100_000;
-const MAX_REGEX_DEPTH: u32 = 256;
+pub const MAX_GROUP_DEPTH: u32 = 8;
+/// 一條指令最多對幾個 pattern 做 regex 比對（每個都要跑一輪 NFA；多出來的不比對、放行並記 log）。**shim 同一個數字。**
+pub const MAX_REGEX_PATTERNS: usize = 16;
 
 /// 命中 `node` 時多講的一段：agent 最常被這個擋到，而且看不出為什麼（`pkill -x node` 看起來很窄）。
 pub const NODE_NOTE: &str = "；`node` 也是 claude／codex（npm 安裝版）的行程名，殺掉同名行程會連 agent 自己一起殺掉。要停自己的 node 服務，請改用自己記下的 PID 或 port：`lsof -ti :PORT | xargs kill`，或 `kill <PID>`";
 
 pub const HOW_TO: &str = "只殺自己記下的 PID 或 port：`lsof -ti :PORT | xargs kill`，或 `kill <自己啟動時記下的 PID>`。不要用 pkill／killall 比對寬鬆的字串。";
 
-/// 一次判斷的共用狀態：regex 預算，和「判不出來所以放行」的原因（給 hook 寫 stderr）。
+/// 一次判斷的共用狀態：「判不出來所以放行」的原因（給 hook 寫 stderr）。
 struct Ctx {
-    budget: Budget,
     notes: Vec<String>,
 }
 
@@ -78,7 +76,7 @@ pub fn check_command(cmd: &str) -> Verdict {
 
 /// [`check_command`]＋放行時的備註（解析不了、pattern 超過上限…），hook 寫到 stderr。
 pub fn check_command_logged(cmd: &str) -> (Verdict, Vec<String>) {
-    let mut ctx = Ctx { budget: Budget::new(), notes: Vec::new() };
+    let mut ctx = Ctx { notes: Vec::new() };
     let v = check_depth(cmd, 0, &mut ctx);
     (v, ctx.notes)
 }
@@ -123,9 +121,8 @@ fn check_simple(simple: &Simple, depth: u32, ctx: &mut Ctx) -> Verdict {
         "pkill" => check_pkill(args, ctx),
         "killall" => check_killall(args, ctx),
         n if is_shell(n) => {
-            // `bash -n`／`-nv`：只檢查語法、不執行，裡面寫什麼都不會跑。
-            let noexec = args.iter().take_while(|a| a.starts_with('-')).any(|a| !a.starts_with("--") && a.len() > 1 && a[1..].contains('n'));
-            if noexec {
+            // `bash -n`／`-nv`：只檢查語法、不執行，裡面寫什麼都不會跑（但 `+n`、`+o noexec` 會再打開，所以照順序算最後的狀態）。
+            if shell_noexec(args) {
                 return Verdict::Allow;
             }
             // `bash -c '…'`、`bash -lc '…'`：-c 的下一個參數是一段 shell 指令。
@@ -146,7 +143,7 @@ fn check_simple(simple: &Simple, depth: u32, ctx: &mut Ctx) -> Verdict {
     }
     // heredoc／here-string：餵給 shell（沒有 -c、沒有 script 檔參數）的就是一份要跑的 script；其他指令的未加引號 heredoc 內文只有 `$(…)`、反引號會被執行。
     for doc in &simple.docs {
-        let v = if is_shell(name) && !dash_c && args.iter().all(|a| a.starts_with('-')) {
+        let v = if is_shell(name) && !dash_c && args.iter().all(|a| a.starts_with(['-', '+'])) {
             check_depth(&doc.body, depth + 1, ctx)
         } else if doc.expands {
             let mut out = Verdict::Allow;
@@ -165,6 +162,38 @@ fn check_simple(simple: &Simple, depth: u32, ctx: &mut Ctx) -> Verdict {
         }
     }
     Verdict::Allow
+}
+
+/// shell 的選項（到第一個非選項字為止；`-c` 的下一個字是指令、其後的字是 `$0` 與參數，不再是選項）照順序算完，最後是不是 noexec。
+fn shell_noexec(args: &[String]) -> bool {
+    let (mut noexec, mut i) = (false, 0);
+    while let Some(a) = args.get(i) {
+        let on = a.starts_with('-');
+        if a == "--" || !(on || a.starts_with('+')) || a.len() < 2 {
+            break;
+        }
+        if a.starts_with("--") {
+            i += 1;
+            continue;
+        }
+        let cluster = &a[1..];
+        if cluster.contains('n') {
+            noexec = on;
+        }
+        // `-o noexec`／`+o noexec`：選項名在下一個字。
+        if cluster.ends_with('o') {
+            if args.get(i + 1).is_some_and(|v| v == "noexec") {
+                noexec = on;
+            }
+            i += 2;
+            continue;
+        }
+        if cluster.contains('c') {
+            break;
+        }
+        i += 1;
+    }
+    noexec
 }
 
 fn basename(p: &str) -> &str {
@@ -780,8 +809,8 @@ fn check_pkill(args: &[String], ctx: &mut Ctx) -> Verdict {
         }
         return Verdict::Allow;
     }
-    for pat in &p.patterns {
-        if let Some(why) = broad_pattern(pat, full, exact, icase, ctx) {
+    for (i, pat) in p.patterns.iter().enumerate() {
+        if let Some(why) = broad_pattern(pat, full, exact, icase, i < MAX_REGEX_PATTERNS, ctx) {
             return Verdict::Deny(format!("擋下 pkill：比對字串 `{pat}` {why}。{HOW_TO}"));
         }
     }
@@ -809,9 +838,9 @@ fn check_killall(args: &[String], ctx: &mut Ctx) -> Verdict {
         }
         return Verdict::Allow;
     }
-    for name in &p.patterns {
+    for (i, name) in p.patterns.iter().enumerate() {
         let hit = if regex {
-            broad_pattern(name, false, false, icase, ctx)
+            broad_pattern(name, false, false, icase, i < MAX_REGEX_PATTERNS, ctx)
         } else {
             PROTECTED_NAMES.iter().find(|n| eq(n, name, icase)).map(|n| format!("就是受保護的行程名 `{n}`（killall 會殺掉同名的全部行程，包含其他 agent 與使用者的 session）{}", if *n == "node" { NODE_NOTE } else { "" }))
         };
@@ -827,38 +856,46 @@ fn eq(a: &str, b: &str, icase: bool) -> bool {
 }
 
 /// pattern 命中受保護行程、或太短，回原因。
-fn broad_pattern(pat: &str, full: bool, exact: bool, icase: bool, ctx: &mut Ctx) -> Option<String> {
-    if !exact && pat.chars().count() < MIN_PATTERN_CHARS {
-        return Some(format!("只有 {} 個字元，會命中大量不相干的行程（例如命令列含該字串的所有 agent）", pat.chars().count()));
+fn broad_pattern(pat: &str, full: bool, exact: bool, icase: bool, regex_ok: bool, ctx: &mut Ctx) -> Option<String> {
+    // 以位元組計：shim 的 `${#pat}` 在 C locale 也是位元組，兩邊同一個數字（非 ASCII 的 pattern 反正在可判斷語法之外）。
+    if !exact && pat.len() < MIN_PATTERN_CHARS {
+        return Some(format!("只有 {} 個字元，會命中大量不相干的行程（例如命令列含該字串的所有 agent）", pat.len()));
     }
-    let subjects: &[&str] = if full { PROTECTED_CMDLINES } else { PROTECTED_NAMES };
-    let mut hit: Option<&str> = None;
-    for s in subjects {
-        match regex_match_in(&ctx.budget, pat, s, icase, exact) {
-            Ok(true) => {
-                hit = Some(*s);
-                break;
-            }
-            Ok(false) => {}
-            Err(why) => {
-                // 判不出來不是「不命中」：放行，並留下原因。
-                let shown: String = pat.chars().take(40).collect();
-                ctx.note(format!("pattern `{shown}` {why}，放行"));
-                return None;
-            }
+    let shown = || pat.chars().take(40).collect::<String>();
+    if !regex_ok {
+        ctx.note(format!("pattern `{}` 超過一條指令最多比對 {MAX_REGEX_PATTERNS} 個 pattern 的上限，放行", shown()));
+        return None;
+    }
+    let compiled = match compile_pattern(pat) {
+        Ok(c) => c,
+        Err(why) => {
+            // 判不出來不是「不命中」：放行，並留下原因。
+            ctx.note(format!("pattern `{}` {why}，放行", shown()));
+            return None;
         }
-    }
-    let hit = hit?;
+    };
+    let subjects: &[&str] = if full { PROTECTED_CMDLINES } else { PROTECTED_NAMES };
+    let hit = subjects.iter().copied().find(|s| compiled.is_match(s, icase, exact))?;
     let name = if full { hit.split_whitespace().next().map(basename).unwrap_or(hit) } else { hit };
     let note = if name == "node" { NODE_NOTE } else { "" };
     Some(format!("會命中受保護的 agent 行程（`{name}`）{note}"))
 }
 
 // ───────────────────────── 迷你 ERE ─────────────────────────
-// pkill 的 pattern 是 ERE。這裡只需要「這個 pattern 會不會命中這個樣本」：支援 `. * + ? | ( ) [ ] ^ $ \x`，
-// 其他（`{n,m}`、反向參照…）一律當字面字元；pattern 語法壞掉就退回「樣本含有這串字」的子字串判斷。
-// pattern 是 agent 隨手寫的字串，不能信任：長度、群組巢狀、整條指令的比對步數與遞迴深度都有上限，
-// 超過就回 `Err`（呼叫端放行並記 log），不讓 hook 卡住或把堆疊吃光。
+// pkill 的 pattern 是 ERE，agent 隨手寫、不能信任。**只在「可判斷語法」裡比對**（[`in_common_subset`]）：
+// 這個子集合在 Rust 這邊與 PATH 上 shim 的 `grep -E`（POSIX ERE，GNU 與 BSD 都一樣）語意完全相同，
+// 所以兩邊對同一條指令給同一個答案；子集合以外（壞語法、`{n,m}`、`\d`、反向參照、`[[:alpha:]]`、過深的巢狀、非 ASCII…）
+// 兩邊都**判不出來**：放行，並記 log。判不出來不是「不命中」——寧可放行，不擋掉正常指令。
+//
+// 比對本身是 Thompson NFA 模擬（時間 O(pattern × 文字)，沒有回溯），所以不需要步數預算：子集合裡的任何 pattern 都在固定上限內跑完。
+//
+// 可判斷語法（`alt := seq ('|' seq)*`、`seq := item+`、`item := atom quant?`）：
+// * atom：可印 ASCII 字面字元（`. * + ? | ( ) [ ] ^ $ { } \` 以外）、`.`、`\` 加上述任一個 metachar（字面字元）、
+//   括號群組（巢狀 ≤ [`MAX_GROUP_DEPTH`]，不可空）、字元集 `[abc0-9_]`／`[^…]`（內容只有英數底線空白 `. / : , @ =`，
+//   範圍只准 `0-9`、`a-z`、`A-Z`，至少一項）；
+// * quant：`*`、`+`、`?` 各一個，只接在 atom 後面，不可疊（`a**`）、不可接在開頭／`(`／`|` 後面；
+// * `^` 只在最外層、某個 seq 的最前面；`$` 只在最外層、某個 seq 的最後面；
+// * 沒有空的 seq（`a|`、`()`、`(|a)`）、括號必須成對、長度 ≤ [`MAX_PATTERN_CHARS`]。
 
 #[derive(Debug, Clone)]
 enum Atom {
@@ -877,48 +914,110 @@ struct Item {
     max: usize,
 }
 
-/// 一次 `check_command` 共用的比對預算（含所有 pattern × 所有樣本）。
-struct Budget {
-    steps: Cell<u32>,
-    depth: Cell<u32>,
-    hit: Cell<Option<&'static str>>,
-}
-
-impl Budget {
-    fn new() -> Self {
-        Budget { steps: Cell::new(0), depth: Cell::new(0), hit: Cell::new(None) }
+/// 這個 pattern 在不在「可判斷語法」裡。**sh shim 的 `am_in_subset` 是同一條規則的 sh 版**，兩邊靠 parity 測試保持一致。
+pub fn in_common_subset(pat: &str) -> bool {
+    #[derive(Clone, Copy, PartialEq)]
+    enum Prev {
+        SeqStart,
+        Atom,
+        Quant,
+        Bol,
+        Eol,
     }
-    /// 進一層比對；超限時記下原因、回 false（呼叫端就地返回，不必 `leave`）。
-    fn enter(&self) -> bool {
-        if self.hit.get().is_some() {
+    let c: Vec<char> = pat.chars().collect();
+    if c.is_empty() || c.len() > MAX_PATTERN_CHARS {
+        return false;
+    }
+    let (mut i, mut depth, mut prev) = (0usize, 0u32, Prev::SeqStart);
+    const META: &str = ".*+?|()[]^${}\\";
+    while i < c.len() {
+        let ch = c[i];
+        if prev == Prev::Eol && ch != '|' && ch != ')' {
             return false;
         }
-        let steps = self.steps.get() + 1;
-        self.steps.set(steps);
-        if steps > MAX_REGEX_STEPS {
-            self.hit.set(Some("比對運算量超過上限"));
-            return false;
+        match ch {
+            '\\' => {
+                match c.get(i + 1) {
+                    Some(n) if META.contains(*n) => i += 1,
+                    _ => return false,
+                }
+                prev = Prev::Atom;
+            }
+            '[' => {
+                i += 1;
+                if c.get(i) == Some(&'^') {
+                    i += 1;
+                }
+                let mut tokens = 0;
+                loop {
+                    let Some(&x) = c.get(i) else { return false };
+                    if x == ']' {
+                        break;
+                    }
+                    let is_range = matches!((x, c.get(i + 1), c.get(i + 2)), ('0', Some('-'), Some('9')) | ('a', Some('-'), Some('z')) | ('A', Some('-'), Some('Z')));
+                    if is_range {
+                        i += 3;
+                    } else if x.is_ascii_alphanumeric() || " _./:,@=".contains(x) {
+                        i += 1;
+                    } else {
+                        return false;
+                    }
+                    tokens += 1;
+                }
+                if tokens == 0 {
+                    return false;
+                }
+                prev = Prev::Atom;
+            }
+            '(' => {
+                depth += 1;
+                if depth > MAX_GROUP_DEPTH {
+                    return false;
+                }
+                prev = Prev::SeqStart;
+            }
+            ')' => {
+                if depth == 0 || !matches!(prev, Prev::Atom | Prev::Quant) {
+                    return false;
+                }
+                depth -= 1;
+                prev = Prev::Atom;
+            }
+            '|' => {
+                if !matches!(prev, Prev::Atom | Prev::Quant | Prev::Eol) {
+                    return false;
+                }
+                prev = Prev::SeqStart;
+            }
+            '*' | '+' | '?' => {
+                if prev != Prev::Atom {
+                    return false;
+                }
+                prev = Prev::Quant;
+            }
+            '^' => {
+                if depth != 0 || prev != Prev::SeqStart {
+                    return false;
+                }
+                prev = Prev::Bol;
+            }
+            '$' => {
+                if depth != 0 || !matches!(prev, Prev::Atom | Prev::Quant | Prev::Bol) {
+                    return false;
+                }
+                prev = Prev::Eol;
+            }
+            '{' | '}' | ']' => return false,
+            '.' => prev = Prev::Atom,
+            x if (' '..='~').contains(&x) => prev = Prev::Atom,
+            _ => return false,
         }
-        if self.depth.get() >= MAX_REGEX_DEPTH {
-            self.hit.set(Some("比對遞迴深度超過上限"));
-            return false;
-        }
-        self.depth.set(self.depth.get() + 1);
-        true
+        i += 1;
     }
-    fn leave(&self) {
-        self.depth.set(self.depth.get() - 1);
-    }
+    depth == 0 && matches!(prev, Prev::Atom | Prev::Quant | Prev::Eol)
 }
 
-enum ParseErr {
-    /// 語法壞掉：退回子字串判斷。
-    Broken,
-    /// 超過資源上限：放行。
-    Limit,
-}
-
-fn parse_alt(c: &[char], i: &mut usize, nested: u32) -> Result<Vec<Vec<Item>>, ParseErr> {
+fn parse_alt(c: &[char], i: &mut usize, nested: u32) -> Option<Vec<Vec<Item>>> {
     let mut alts = vec![Vec::new()];
     while *i < c.len() {
         let ch = c[*i];
@@ -928,26 +1027,15 @@ fn parse_alt(c: &[char], i: &mut usize, nested: u32) -> Result<Vec<Vec<Item>>, P
                 alts.push(Vec::new());
                 continue;
             }
-            ')' if nested > 0 => return Ok(alts),
-            '(' => {
-                if nested >= MAX_GROUP_DEPTH {
-                    return Err(ParseErr::Limit);
-                }
-                Atom::Group(parse_alt(c, i, nested + 1)?)
-            }
+            ')' if nested > 0 => return Some(alts),
+            '(' => Atom::Group(parse_alt(c, i, nested + 1)?),
             '.' => Atom::Any,
             '^' => Atom::Bol,
             '$' => Atom::Eol,
             '\\' => {
-                let e = *c.get(*i).ok_or(ParseErr::Broken)?;
+                let e = *c.get(*i)?;
                 *i += 1;
-                match e {
-                    'b' | 'B' | '<' | '>' => continue, // 字界：不影響「會不會命中」的保守判斷
-                    'd' => Atom::Class(vec![('0', '9')], false),
-                    'w' => Atom::Class(vec![('a', 'z'), ('A', 'Z'), ('0', '9'), ('_', '_')], false),
-                    's' => Atom::Class(vec![(' ', ' '), ('\t', '\t')], false),
-                    other => Atom::Lit(other),
-                }
+                Atom::Lit(e)
             }
             '[' => {
                 let neg = c.get(*i) == Some(&'^');
@@ -955,14 +1043,12 @@ fn parse_alt(c: &[char], i: &mut usize, nested: u32) -> Result<Vec<Vec<Item>>, P
                     *i += 1;
                 }
                 let mut ranges = Vec::new();
-                let mut first = true;
                 loop {
-                    let x = *c.get(*i).ok_or(ParseErr::Broken)?;
+                    let x = *c.get(*i)?;
                     *i += 1;
-                    if x == ']' && !first {
+                    if x == ']' {
                         break;
                     }
-                    first = false;
                     if c.get(*i) == Some(&'-') && c.get(*i + 1).is_some_and(|&y| y != ']') {
                         ranges.push((x, c[*i + 1]));
                         *i += 2;
@@ -972,7 +1058,7 @@ fn parse_alt(c: &[char], i: &mut usize, nested: u32) -> Result<Vec<Vec<Item>>, P
                 }
                 Atom::Class(ranges, neg)
             }
-            '*' | '+' | '?' => return Err(ParseErr::Broken), // 前面沒有東西可重複
+            '*' | '+' | '?' => return None,
             other => Atom::Lit(other),
         };
         let (min, max) = match c.get(*i) {
@@ -984,9 +1070,9 @@ fn parse_alt(c: &[char], i: &mut usize, nested: u32) -> Result<Vec<Vec<Item>>, P
         if (min, max) != (1, 1) {
             *i += 1;
         }
-        alts.last_mut().ok_or(ParseErr::Broken)?.push(Item { atom, min, max });
+        alts.last_mut()?.push(Item { atom, min, max });
     }
-    if nested > 0 { Err(ParseErr::Broken) } else { Ok(alts) }
+    if nested > 0 { None } else { Some(alts) }
 }
 
 fn atom_one(a: &Atom, ch: char, icase: bool) -> bool {
@@ -999,98 +1085,159 @@ fn atom_one(a: &Atom, ch: char, icase: bool) -> bool {
     }
 }
 
-fn match_seq(seq: &[Item], text: &[char], pos: usize, icase: bool, b: &Budget, k: &mut dyn FnMut(usize) -> bool) -> bool {
-    if !b.enter() {
-        return false;
-    }
-    let r = match_seq_inner(seq, text, pos, icase, b, k);
-    b.leave();
-    r
+enum Inst {
+    Atom(Atom),
+    Split(usize, usize),
+    Jmp(usize),
+    Bol,
+    Eol,
+    Match,
 }
 
-fn match_seq_inner(seq: &[Item], text: &[char], pos: usize, icase: bool, b: &Budget, k: &mut dyn FnMut(usize) -> bool) -> bool {
-    let Some((item, rest)) = seq.split_first() else { return k(pos) };
-    match &item.atom {
-        Atom::Bol => pos == 0 && match_seq(rest, text, pos, icase, b, k),
-        Atom::Eol => pos == text.len() && match_seq(rest, text, pos, icase, b, k),
-        Atom::Group(alts) => {
-            #[allow(clippy::too_many_arguments)]
-            fn rep(item: &Item, alts: &[Vec<Item>], rest: &[Item], text: &[char], pos: usize, n: usize, icase: bool, b: &Budget, k: &mut dyn FnMut(usize) -> bool) -> bool {
-                if n < item.max {
-                    for alt in alts {
-                        let mut next = |p: usize| (p != pos || n < item.min) && rep(item, alts, rest, text, p, n + 1, icase, b, k);
-                        if match_seq(alt, text, pos, icase, b, &mut next) {
-                            return true;
-                        }
-                        if b.hit.get().is_some() {
-                            return false;
-                        }
+fn emit_alts(prog: &mut Vec<Inst>, alts: &[Vec<Item>]) {
+    let mut jmps = Vec::new();
+    for (i, alt) in alts.iter().enumerate() {
+        if i + 1 < alts.len() {
+            let split = prog.len();
+            prog.push(Inst::Split(split + 1, 0));
+            alt.iter().for_each(|it| emit_item(prog, it));
+            jmps.push(prog.len());
+            prog.push(Inst::Jmp(0));
+            let next = prog.len();
+            prog[split] = Inst::Split(split + 1, next);
+        } else {
+            alt.iter().for_each(|it| emit_item(prog, it));
+        }
+    }
+    let end = prog.len();
+    for j in jmps {
+        prog[j] = Inst::Jmp(end);
+    }
+}
+
+fn emit_atom(prog: &mut Vec<Inst>, atom: &Atom) {
+    match atom {
+        Atom::Group(alts) => emit_alts(prog, alts),
+        Atom::Bol => prog.push(Inst::Bol),
+        Atom::Eol => prog.push(Inst::Eol),
+        a => prog.push(Inst::Atom(a.clone())),
+    }
+}
+
+fn emit_item(prog: &mut Vec<Inst>, item: &Item) {
+    match (item.min, item.max) {
+        (0, 1) => {
+            let s = prog.len();
+            prog.push(Inst::Split(s + 1, 0));
+            emit_atom(prog, &item.atom);
+            let e = prog.len();
+            prog[s] = Inst::Split(s + 1, e);
+        }
+        (0, usize::MAX) => {
+            let s = prog.len();
+            prog.push(Inst::Split(s + 1, 0));
+            emit_atom(prog, &item.atom);
+            prog.push(Inst::Jmp(s));
+            let e = prog.len();
+            prog[s] = Inst::Split(s + 1, e);
+        }
+        (1, usize::MAX) => {
+            let s = prog.len();
+            emit_atom(prog, &item.atom);
+            let sp = prog.len();
+            prog.push(Inst::Split(s, sp + 1));
+        }
+        _ => emit_atom(prog, &item.atom),
+    }
+}
+
+/// 編好的 pattern。`Err`＝在可判斷語法之外（呼叫端放行並記 log）。
+pub struct Compiled(Vec<Inst>);
+
+pub fn compile_pattern(pat: &str) -> Result<Compiled, &'static str> {
+    if !in_common_subset(pat) {
+        return Err("超出可判斷的 regex 語法範圍");
+    }
+    let chars: Vec<char> = pat.chars().collect();
+    let mut i = 0;
+    let Some(alts) = parse_alt(&chars, &mut i, 0) else { return Err("超出可判斷的 regex 語法範圍") };
+    let mut prog = Vec::new();
+    emit_alts(&mut prog, &alts);
+    prog.push(Inst::Match);
+    Ok(Compiled(prog))
+}
+
+/// 把 `pc` 的 ε 閉包（含 `^`、`$` 在這個位置成不成立）加進 `set`；`mark[pc] == gen` 表示這一輪已經加過。
+fn add_state(prog: &[Inst], mark: &mut [usize], gen: usize, set: &mut Vec<usize>, pc: usize, pos: usize, len: usize) {
+    let mut stack = vec![pc];
+    while let Some(pc) = stack.pop() {
+        if mark[pc] == gen {
+            continue;
+        }
+        mark[pc] = gen;
+        match &prog[pc] {
+            Inst::Jmp(t) => stack.push(*t),
+            Inst::Split(a, b) => {
+                stack.push(*b);
+                stack.push(*a);
+            }
+            Inst::Bol => {
+                if pos == 0 {
+                    stack.push(pc + 1)
+                }
+            }
+            Inst::Eol => {
+                if pos == len {
+                    stack.push(pc + 1)
+                }
+            }
+            Inst::Atom(_) | Inst::Match => set.push(pc),
+        }
+    }
+}
+
+impl Compiled {
+    /// `exact`＝`pkill -x`（整串都要符合）；否則是子字串搜尋（`pkill`／`pgrep` 的預設）。
+    pub fn is_match(&self, text: &str, icase: bool, exact: bool) -> bool {
+        let prog = &self.0;
+        let t: Vec<char> = text.chars().collect();
+        let mut mark = vec![usize::MAX; prog.len()];
+        let (mut cur, mut next): (Vec<usize>, Vec<usize>) = (Vec::new(), Vec::new());
+        add_state(prog, &mut mark, 0, &mut cur, 0, 0, t.len());
+        for pos in 0..=t.len() {
+            if pos > 0 && !exact {
+                add_state(prog, &mut mark, pos, &mut cur, 0, pos, t.len());
+            }
+            if cur.iter().any(|&pc| matches!(prog[pc], Inst::Match)) && (!exact || pos == t.len()) {
+                return true;
+            }
+            if pos == t.len() {
+                break;
+            }
+            next.clear();
+            for &pc in &cur {
+                if let Inst::Atom(a) = &prog[pc] {
+                    if atom_one(a, t[pos], icase) {
+                        add_state(prog, &mut mark, pos + 1, &mut next, pc + 1, pos + 1, t.len());
                     }
                 }
-                n >= item.min && match_seq(rest, text, pos, icase, b, k)
             }
-            rep(item, alts, rest, text, pos, 0, icase, b, k)
+            std::mem::swap(&mut cur, &mut next);
         }
-        atom => {
-            let mut n = 0;
-            while n < item.max && pos + n < text.len() && atom_one(atom, text[pos + n], icase) {
-                n += 1;
-            }
-            loop {
-                if n >= item.min && match_seq(rest, text, pos + n, icase, b, k) {
-                    return true;
-                }
-                if n == 0 || n <= item.min || b.hit.get().is_some() {
-                    return false;
-                }
-                n -= 1;
-            }
-        }
+        false
     }
 }
 
-/// `exact`＝`pkill -x`（整串都要符合）；否則是子字串搜尋（`pkill`／`pgrep` 的預設）。
-/// `Err`＝超過資源上限（原因給 log）：不是「不命中」，呼叫端要放行。
-fn regex_match_in(b: &Budget, pat: &str, text: &str, icase: bool, exact: bool) -> Result<bool, &'static str> {
-    let chars: Vec<char> = pat.chars().collect();
-    if chars.len() > MAX_PATTERN_CHARS {
-        return Err("pattern 超過長度上限");
-    }
-    let mut i = 0;
-    let alts = match parse_alt(&chars, &mut i, 0) {
-        Ok(a) => a,
-        Err(ParseErr::Limit) => return Err("pattern 群組巢狀超過上限"),
-        Err(ParseErr::Broken) => {
-            let (p, t) = if icase { (pat.to_ascii_lowercase(), text.to_ascii_lowercase()) } else { (pat.to_string(), text.to_string()) };
-            return Ok(if exact { p == t } else { t.contains(&p) });
-        }
-    };
-    let t: Vec<char> = text.chars().collect();
-    let starts = if exact { 0..=0 } else { 0..=t.len() };
-    for s in starts {
-        for alt in &alts {
-            let mut k = |end: usize| !exact || end == t.len();
-            if match_seq(alt, &t, s, icase, b, &mut k) {
-                return Ok(true);
-            }
-            if let Some(why) = b.hit.get() {
-                return Err(why);
-            }
-        }
-    }
-    Ok(false)
-}
-
-/// 獨立一次比對（測試用）：超限當作「不命中」。
+/// 獨立一次比對（測試用）：超出可判斷語法當作「不命中」。
 #[doc(hidden)]
 pub fn regex_match(pat: &str, text: &str, icase: bool, exact: bool) -> bool {
-    regex_match_in(&Budget::new(), pat, text, icase, exact).unwrap_or(false)
+    compile_pattern(pat).map(|c| c.is_match(text, icase, exact)).unwrap_or(false)
 }
 
-/// 同 [`regex_match`]，但把「超限」跟「不命中」分開（測試用）。
+/// 同 [`regex_match`]，但把「判不出來」跟「不命中」分開（測試用）。
 #[doc(hidden)]
 pub fn regex_match_limited(pat: &str, text: &str, icase: bool, exact: bool) -> Result<bool, &'static str> {
-    regex_match_in(&Budget::new(), pat, text, icase, exact)
+    compile_pattern(pat).map(|c| c.is_match(text, icase, exact))
 }
 
 // ───────────────────────── hook 接線 ─────────────────────────

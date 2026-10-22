@@ -38,11 +38,17 @@ AM_PROTECTED_NAMES='@AM_PROTECTED_NAMES@'
 AM_PROTECTED_CMDLINES='@AM_PROTECTED_CMDLINES@'
 AM_MIN_PATTERN=@AM_MIN_PATTERN@
 AM_MAX_PATTERN=@AM_MAX_PATTERN@
+AM_MAX_GROUP=@AM_MAX_GROUP@
+AM_MAX_REGEX_PATTERNS=@AM_MAX_REGEX_PATTERNS@
 AM_SIGNAMES='@AM_SIGNAMES@'
 AM_HOW_TO='@AM_HOW_TO@'
 AM_NODE_NOTE='@AM_NODE_NOTE@'
 AM_NL='
 '
+# 字元數、字元範圍一律用位元組語意（跟 Rust 那邊「可判斷語法只有可印 ASCII」對齊）；exec 真的之前還原。
+AM_LC_SET=${LC_ALL+x}
+AM_LC_OLD=${LC_ALL-}
+LC_ALL=C
 
 am_is_shim() {
     head -n 12 "$1" 2>/dev/null | grep -q 'AM_SHIM_MARKER' 2>/dev/null
@@ -201,18 +207,98 @@ am_parse() {
 }
 
 # ── pattern 判斷 ──────────────────────────────────────────────────────
-# am_broad <pattern> <full> <exact> <icase>：pattern 太短、或會命中受保護的行程就回 0（原因放 BROAD_WHY）。
-# 比對交給 `grep -E`（線性時間、不會災難性回溯）；語法不被接受（grep 回 2）就退回「含有這串字」，跟 Rust 一致。
+# am_in_subset <pattern>：在不在「可判斷語法」裡（Rust `kill_guard::in_common_subset` 的 sh 版，規則逐條一樣，見該處說明）。
+# 在裡面的語法，Rust 的迷你 ERE 與 `grep -E`（GNU／BSD）語意相同；不在裡面就是「判不出來」，呼叫端放行。
+am_in_subset() {
+    _s=$1
+    [ -n "$_s" ] && [ "${#_s}" -le "$AM_MAX_PATTERN" ] || return 1
+    case $_s in *[![:print:]]*) return 1 ;; esac
+    _depth=0
+    _prev=S
+    while [ -n "$_s" ]; do
+        _c=${_s%"${_s#?}"}
+        _s=${_s#?}
+        if [ "$_prev" = E ]; then
+            case $_c in '|' | ')') ;; *) return 1 ;; esac
+        fi
+        case $_c in
+            '\')
+                _n=${_s%"${_s#?}"}
+                case $_n in
+                    '.' | '*' | '+' | '?' | '|' | '(' | ')' | '[' | ']' | '^' | '$' | '{' | '}' | '\') ;;
+                    *) return 1 ;;
+                esac
+                _s=${_s#?}
+                _prev=A
+                ;;
+            '[')
+                case $_s in '^'*) _s=${_s#?} ;; esac
+                _tok=0
+                while :; do
+                    [ -n "$_s" ] || return 1
+                    case $_s in
+                        ']'*) break ;;
+                        0-9* | a-z* | A-Z*) _s=${_s#???} ;;
+                        ' '*) _s=${_s#?} ;;
+                        [A-Za-z0-9_./:,@=]*) _s=${_s#?} ;;
+                        *) return 1 ;;
+                    esac
+                    _tok=$((_tok + 1))
+                done
+                [ "$_tok" -gt 0 ] || return 1
+                _s=${_s#?}
+                _prev=A
+                ;;
+            '(')
+                _depth=$((_depth + 1))
+                [ "$_depth" -le "$AM_MAX_GROUP" ] || return 1
+                _prev=S
+                ;;
+            ')')
+                [ "$_depth" -gt 0 ] || return 1
+                case $_prev in A | Q) ;; *) return 1 ;; esac
+                _depth=$((_depth - 1))
+                _prev=A
+                ;;
+            '|')
+                case $_prev in A | Q | E) ;; *) return 1 ;; esac
+                _prev=S
+                ;;
+            '*' | '+' | '?')
+                [ "$_prev" = A ] || return 1
+                _prev=Q
+                ;;
+            '^')
+                [ "$_depth" -eq 0 ] && [ "$_prev" = S ] || return 1
+                _prev=B
+                ;;
+            '$')
+                [ "$_depth" -eq 0 ] || return 1
+                case $_prev in A | Q | B) ;; *) return 1 ;; esac
+                _prev=E
+                ;;
+            '{' | '}' | ']') return 1 ;;
+            *) _prev=A ;;
+        esac
+    done
+    [ "$_depth" -eq 0 ] || return 1
+    case $_prev in A | Q | E) return 0 ;; *) return 1 ;; esac
+}
+
+# am_broad <pattern> <full> <exact> <icase> <可做regex比對>：pattern 太短、或會命中受保護的行程就回 0（原因放 BROAD_WHY）。
+# regex 只在可判斷語法裡比對（`grep -E`，線性時間、不會災難性回溯）；語法在範圍外、或超過一條指令最多比對的 pattern 數 → 判不出來，回 1（放行）。
 am_broad() {
     _pat=$1
     _full=$2
     _exact=$3
     _ic=$4
+    _rok=$5
     if [ "$_exact" != 1 ] && [ "${#_pat}" -lt "$AM_MIN_PATTERN" ]; then
         BROAD_WHY="只有 ${#_pat} 個字元，會命中大量不相干的行程（例如命令列含該字串的所有 agent）"
         return 0
     fi
-    [ "${#_pat}" -le "$AM_MAX_PATTERN" ] || return 1
+    [ "$_rok" = 1 ] || return 1
+    am_in_subset "$_pat" || return 1
     if [ "$_full" = 1 ]; then
         _subj=$AM_PROTECTED_CMDLINES
     else
@@ -221,26 +307,9 @@ am_broad() {
     _gopts=-E
     [ "$_ic" = 1 ] && _gopts=${_gopts}i
     [ "$_exact" = 1 ] && _gopts=${_gopts}x
-    _out=$(printf '%s\n' "$_subj" | LC_ALL=C grep "$_gopts" -e "$_pat" 2>/dev/null)
-    _rc=$?
-    _hit=
-    if [ "$_rc" -eq 0 ]; then
-        _hit=${_out%%"$AM_NL"*}
-    elif [ "$_rc" -ge 2 ]; then
-        _lp=$_pat
-        [ "$_ic" = 1 ] && _lp=$(printf '%s' "$_pat" | tr '[:upper:]' '[:lower:]')
-        while IFS= read -r _s; do
-            _ls=$_s
-            [ "$_ic" = 1 ] && _ls=$(printf '%s' "$_s" | tr '[:upper:]' '[:lower:]')
-            if [ "$_exact" = 1 ]; then
-                [ "$_ls" = "$_lp" ] && { _hit=$_s; break; }
-            else
-                case $_ls in *"$_lp"*) _hit=$_s; break ;; esac
-            fi
-        done <<AM_SUBJ_EOF
-$_subj
-AM_SUBJ_EOF
-    fi
+    _out=$(printf '%s\n' "$_subj" | grep "$_gopts" -e "$_pat" 2>/dev/null)
+    [ $? -eq 0 ] || return 1
+    _hit=${_out%%"$AM_NL"*}
     [ -n "$_hit" ] || return 1
     if [ "$_full" = 1 ]; then
         _w=${_hit%% *}
@@ -312,7 +381,9 @@ am_check_pkill() {
     _i=1
     while [ "$_i" -le "$P_N" ]; do
         eval "_p=\$P_$_i"
-        if am_broad "$_p" "$_full" "$_exact" "$_ic"; then
+        _rok=0
+        [ "$_i" -le "$AM_MAX_REGEX_PATTERNS" ] && _rok=1
+        if am_broad "$_p" "$_full" "$_exact" "$_ic" "$_rok"; then
             am_deny "比對字串 \`$_p\` $BROAD_WHY。"
         fi
         _i=$((_i + 1))
@@ -359,7 +430,9 @@ am_check_killall() {
     while [ "$_i" -le "$P_N" ]; do
         eval "_p=\$P_$_i"
         if [ "$_re" = 1 ]; then
-            if am_broad "$_p" 0 0 "$_ic"; then
+            _rok=0
+            [ "$_i" -le "$AM_MAX_REGEX_PATTERNS" ] && _rok=1
+            if am_broad "$_p" 0 0 "$_ic" "$_rok"; then
                 am_deny "\`$_p\` $BROAD_WHY。"
             fi
         else
@@ -389,6 +462,12 @@ if [ -z "$_real" ]; then
     printf 'agents-manager: 找不到真的 %s（PATH 上只有這支 shim，/usr/bin、/bin 也沒有）。\n' "$AM_TOOL" >&2
     exit 127
 fi
+if [ -n "$AM_LC_SET" ]; then
+    LC_ALL=$AM_LC_OLD
+    export LC_ALL
+else
+    unset LC_ALL
+fi
 exec "$_real" "$@"
 "####;
 
@@ -398,11 +477,13 @@ pub fn shim_sh() -> &'static str {
     SH.get_or_init(|| {
         use crate::kill_guard::*;
         let signals = SIGNAL_NAMES.join(" ");
-        let fills: [(&str, String); 8] = [
+        let fills: [(&str, String); 10] = [
             ("@AM_PROTECTED_NAMES@", PROTECTED_NAMES.join("\n")),
             ("@AM_PROTECTED_CMDLINES@", PROTECTED_CMDLINES.join("\n")),
             ("@AM_MIN_PATTERN@", MIN_PATTERN_CHARS.to_string()),
             ("@AM_MAX_PATTERN@", MAX_PATTERN_CHARS.to_string()),
+            ("@AM_MAX_GROUP@", MAX_GROUP_DEPTH.to_string()),
+            ("@AM_MAX_REGEX_PATTERNS@", MAX_REGEX_PATTERNS.to_string()),
             ("@AM_SIGNAMES@", signals),
             ("@AM_HOW_TO@", HOW_TO.to_string()),
             ("@AM_NODE_NOTE@", NODE_NOTE.to_string()),
