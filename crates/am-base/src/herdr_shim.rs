@@ -403,6 +403,10 @@ am_agent_start() {
     _has_no_daemon=0
     _idset=0
     _idn=""
+    _sub=0
+    _rootc=""
+    _emit_rootc=0
+    _us=$(printf '\037')
     while [ "$_i" -lt "$_n" ]; do
         _a=$1
         shift
@@ -455,6 +459,24 @@ am_agent_start() {
         if [ "$_stop" = 1 ]; then
             # codex / grok spell it `-m`, codex also `-c model=…`: all of them are "the child
             # picked its own model" and must not be overridden with the parent's.
+            # codex 0.163：子命令（resume／fork）自己帶了 `-c` 時，子命令前面那些 `-c` 整批被丟掉（#1902：
+            # `-c model_reasoning_effort=medium resume <id> -c project_doc_max_bytes=0` 狀態列變 default）。
+            # 所以子命令前的 `-c` 先記下來，等到子命令那個 token 後面原樣再補一份（呼叫者自己寫在子命令後的 `-c`
+            # 排在後面，同 key 仍以它為準）。
+            if [ "$_sub" = 0 ]; then
+                case "$_prev" in
+                    -c | --config) _rootc=${_rootc:+$_rootc$_us}$_a ;;
+                esac
+                case "$_a" in
+                    --config=*) _rootc=${_rootc:+$_rootc$_us}${_a#--config=} ;;
+                    resume | fork)
+                        case "$_prev" in
+                            -c | --config | -m | --model | -s | --sandbox | -a | --ask-for-approval | -p | --profile | -C | --cd | -i | --image) : ;;
+                            *) _sub=1; [ -z "$_rootc" ] || _emit_rootc=1 ;;
+                        esac
+                        ;;
+                esac
+            fi
             case "$_a" in
                 --model | --model=* | -m | -m=* | model=*) _has_model=1 ;;
                 --effort | --effort=*) _has_effort=1 ;;
@@ -487,6 +509,18 @@ am_agent_start() {
         fi
         _prev=$_orig
         set -- "$@" "$_a"
+        if [ "$_emit_rootc" = 1 ] && [ "${_kind:-${AM_KIND:-}}" = "codex" ]; then
+            _rest=$_rootc
+            while [ -n "$_rest" ]; do
+                _v=${_rest%%"$_us"*}
+                case "$_rest" in
+                    *"$_us"*) _rest=${_rest#*"$_us"} ;;
+                    *) _rest= ;;
+                esac
+                set -- "$@" -c "$_v"
+            done
+        fi
+        _emit_rootc=0
     done
     # `--identity`（issue #1775）：子 pane 用這台的哪一個帳號。這台沒有就 exit 2、不呼叫 herdr；kind 取 `--kind`，沒給用母 bot 的 `AM_KIND`。
     _idacct=""

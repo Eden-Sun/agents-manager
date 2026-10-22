@@ -1206,6 +1206,41 @@
         assert!(out.status.success(), "{}{}", String::from_utf8_lossy(&out.stdout), String::from_utf8_lossy(&out.stderr));
     }
 
+    /// #1902：codex 0.163 的 `resume`／`fork` 自己帶 `-c` 時，子命令前的 `-c` 整批被丟掉（狀態列強度變 default）。
+    /// shim 追加 `-c project_doc_max_bytes=0` 之後，子命令前的 `-c` 要在子命令 token 後面再補一份。
+    #[test]
+    fn root_level_codex_config_overrides_are_repeated_after_resume_and_fork() {
+        let s = Sandbox::new();
+        let env = [("AM_AGENT_NAME", "p-1"), ("AM_INSTRUCTIONS_FILE", "/nonexistent-instructions.md")];
+        let effort = "model_reasoning_effort=medium";
+        for sub in ["resume", "fork"] {
+            let (out, _) = s.run(
+                &env,
+                &["agent", "start", "kid", "--kind", "codex", "--pane", "w1:p9", "--", "--model", "gpt-6.1-sol", "-c", effort, "--sandbox", "danger-full-access", sub, "sid-1"],
+            );
+            assert_eq!(
+                &out[7..],
+                ["--", "--model", "gpt-6.1-sol", "-c", effort, "--sandbox", "danger-full-access", sub, "-c", effort, "sid-1", "-c", "project_doc_max_bytes=0", "--no-daemon"],
+                "{out:?}"
+            );
+        }
+        // 多個 `-c`、`--config=`、值含空白：全部原樣補在子命令後面；呼叫者子命令後自己的 `-c` 排在補的那份之後（同 key 以它為準）。
+        let (out, _) = s.run(
+            &env,
+            &["agent", "start", "kid", "--kind", "codex", "--pane", "w1:p9", "--", "-c", "a=1", "--config=b=\"x y\"", "resume", "sid-1", "-c", "a=2"],
+        );
+        assert_eq!(&out[8..], ["-c", "a=1", "--config=b=\"x y\"", "resume", "-c", "a=1", "-c", "b=\"x y\"", "sid-1", "-c", "a=2", "-c", "project_doc_max_bytes=0", "--no-daemon"], "{out:?}");
+        // 子命令前沒有 `-c`、沒有子命令、`resume` 是別個選項的值、別的 kind：不補。
+        let (out, _) = s.run(&env, &["agent", "start", "kid", "--kind", "codex", "--pane", "w1:p9", "--", "resume", "sid-1"]);
+        assert_eq!(out.iter().filter(|a| *a == "-c").count(), 1, "{out:?}");
+        let (out, _) = s.run(&env, &["agent", "start", "kid", "--kind", "codex", "--pane", "w1:p9", "--", "-c", effort, "go"]);
+        assert_eq!(out.iter().filter(|a| a.as_str() == effort).count(), 1, "{out:?}");
+        let (out, _) = s.run(&env, &["agent", "start", "kid", "--kind", "codex", "--pane", "w1:p9", "--", "-c", effort, "--profile", "resume", "go"]);
+        assert_eq!(out.iter().filter(|a| a.as_str() == effort).count(), 1, "{out:?}");
+        let (out, _) = s.run(&env, &["agent", "start", "kid", "--kind", "grok", "--pane", "w1:p9", "--", "-c", effort, "resume", "sid-1"]);
+        assert_eq!(out.iter().filter(|a| a.as_str() == effort).count(), 1, "{out:?}");
+    }
+
     /// §6.5i：子 agent 的指示跟母 bot 同一份（`AM_INSTRUCTIONS_FILE`），CLI 自己的指示檔不讀；呼叫者自己帶了就尊重。
     #[test]
     fn a_child_agent_gets_the_parents_instructions_file() {
