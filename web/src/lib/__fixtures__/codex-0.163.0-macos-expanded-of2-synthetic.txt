@@ -1,0 +1,32 @@
+[Synthetic multi-question variant of the captured macOS fruit panel]
+
+• Ran sleep 180
+  └ (no output)
+
+• 已呼叫 request_user_input_async，工具回傳 accepted: true。sleep 180 已完成；目前尚未收到你的選擇。
+
+  Worked for 3m 8s • 4:05 PM
+
+
+› 再一次：呼叫 request_user_input_async，questions=[{title:"測試題二：要選哪個水果？", options:["蘋果","香蕉"]}]，然後執行 sleep 240。
+
+
+• 我會送出水果測試題，接著執行 sleep 240。
+
+• 測試題二：要選哪個水果？
+
+  • 蘋果
+  • 香蕉
+
+• Working (44s • esc to interrupt) · 1 background terminal running · /ps to view · /stop to close
+
+• Queued follow-up inputs
+  1 of 2
+
+  測試題二：要選哪個水果？
+
+  › 1. 蘋果
+    2. 香蕉
+    3. Other
+
+  enter submit   ⌃] skip   ⇧→ main prompt   ⇧← next question

@@ -1,0 +1,74 @@
+[
+  {
+    "file": "codex-0.163-async-collapsed.txt",
+    "expected": {
+      "expanded": false,
+      "count": 1
+    }
+  },
+  {
+    "file": "codex-0.163-async-expanded.txt",
+    "expected": {
+      "expanded": true,
+      "count": 1
+    }
+  },
+  {
+    "file": "codex-0.163-async-expanded-of2.txt",
+    "expected": {
+      "expanded": true,
+      "count": 2
+    }
+  },
+  {
+    "file": "codex-0.163-async-free-text.txt",
+    "expected": {
+      "expanded": true,
+      "count": 1
+    }
+  },
+  {
+    "file": "codex-0.163-async-other-typed.txt",
+    "expected": {
+      "expanded": true,
+      "count": 1
+    }
+  },
+  {
+    "file": "codex-0.163.0-macos-collapsed.txt",
+    "expected": {
+      "expanded": false,
+      "count": 1
+    }
+  },
+  {
+    "file": "codex-0.163.0-macos-expanded.txt",
+    "expected": {
+      "expanded": true,
+      "count": 1
+    }
+  },
+  {
+    "file": "codex-0.163.0-macos-expanded-of2-synthetic.txt",
+    "expected": {
+      "expanded": true,
+      "count": 2
+    }
+  },
+  {
+    "file": "codex-async-quoted-hints.txt",
+    "expected": null
+  },
+  {
+    "file": "codex-async-unrelated-footer.txt",
+    "expected": null
+  },
+  {
+    "file": "codex-async-ordinary-menu.txt",
+    "expected": null
+  },
+  {
+    "file": "codex-async-control-hint-nonqueue.txt",
+    "expected": null
+  }
+]
