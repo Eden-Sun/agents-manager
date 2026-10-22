@@ -33,6 +33,7 @@ import {
   sortByTime,
   str,
   toMessage,
+  toBotLimitHit,
   toRun,
   toTurn,
   unwrap,
@@ -3421,8 +3422,12 @@ export function handleFrame(set: SetFn, get: GetFn, frame: { seq?: number; type:
         host,
         defaultSession,
       })
+      // #1899：撞限是 bot 的欄位，不是 run 的；frame 沒這個 key＝舊 daemon，不動。值變了才換掉 bots 陣列（避免整列重畫）。
+      const limitHit = record && 'limit_hit' in record ? toBotLimitHit(record.limit_hit) : undefined
+      const limitChanged = limitHit !== undefined && bot !== undefined && JSON.stringify(bot.limit_hit ?? null) !== JSON.stringify(limitHit)
       set((s) => ({
         runs: { ...s.runs, [botId]: run },
+        ...(limitChanged ? { bots: s.bots.map((b) => (b.id === botId ? { ...b, limit_hit: limitHit } : b)) } : {}),
         ...(target.kind === 'global' ? { connected: target.connected } : {}),
         ...(target.kind === 'default' ? { defaultConnected: target.connected } : {}),
         ...(target.kind === 'host'

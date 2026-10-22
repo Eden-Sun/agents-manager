@@ -2,6 +2,7 @@
 
 import type {
   BackgroundTask,
+  BotLimitHit,
   BlockedReason,
   SessionCron,
   HostBaseline,
@@ -355,6 +356,7 @@ export function toBot(v: unknown, projectId?: string): Bot | null {
     })(),
     herdr_session: optStr(pick(v, 'herdr_session')),
     agent_name: optStr(pick(v, 'agent_name')),
+    limit_hit: toBotLimitHit(pick(v, 'limit_hit')),
     ...(() => {
       const n = pick(v, 'unread')
       const m = pick(v, 'read_mark')
@@ -365,6 +367,20 @@ export function toBot(v: unknown, projectId?: string): Bot | null {
     })(),
     created_at: str(v.created_at),
   }
+}
+
+/**
+ * 主力 bot 撞限（#1899）：daemon 投影 `{until, message}`。非物件（含 child 的 `null`、舊 daemon 沒這欄）給 `null`；
+ * `message` 不是字串、或 `until` 不是字串也不是 null，整筆給 `null`（不把來路不明的值塞進 store）。
+ * 只取這兩個欄位，多出來的欄位不帶。`/api/state` 的 toBot 與 WS `bot_status` 都走這裡。
+ */
+export function toBotLimitHit(v: unknown): BotLimitHit | null {
+  if (!isRec(v)) return null
+  const message = v.message
+  const until = v.until
+  if (typeof message !== 'string') return null
+  if (until !== undefined && until !== null && typeof until !== 'string') return null
+  return { message, until: typeof until === 'string' ? until : null }
 }
 
 export function envMap(v: unknown): Record<string, string> {
