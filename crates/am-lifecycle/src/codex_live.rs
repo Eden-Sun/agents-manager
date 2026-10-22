@@ -148,18 +148,35 @@ fn effort_follow<'a>(seen: Option<&'a str>, prev: Option<&str>) -> crate::child_
 
 // A failed/cancelled edge is still an attempt: replaying it could erase a newer UI intent.
 const FAST_FOLLOW_LIMIT: usize = 1024;
+struct FastFollowEdge {
+    attempted: bool,
+    /// DB runtime at the last observation/commit, distinct from an uncommitted attempt.
+    runtime: bool,
+    warned: bool,
+}
 #[derive(Default)]
-struct FastFollowEdges(std::collections::HashMap<String, (bool, bool)>);
+struct FastFollowEdges(std::collections::HashMap<String, FastFollowEdge>);
 impl FastFollowEdges {
-    fn attempt(&mut self, run: &str, fast: bool) -> (bool, bool) {
-        if let Some((prev, _)) = self.0.get_mut(run) {
-            if *prev == fast { return (false, false); }
-            *prev = fast;
+    fn observe_runtime(&mut self, run: &str, runtime: bool, matches_screen: bool) {
+        if let Some(edge) = self.0.get_mut(run) {
+            // A live apply can advance runtime without this observer. A matching screen also
+            // establishes the current edge; an unchanged DB after a failed attempt does not.
+            if matches_screen || edge.runtime != runtime {
+                edge.attempted = runtime;
+                edge.runtime = runtime;
+            }
+        }
+    }
+    fn attempt(&mut self, run: &str, fast: bool, runtime: bool) -> (bool, bool) {
+        self.observe_runtime(run, runtime, false);
+        if let Some(edge) = self.0.get_mut(run) {
+            if edge.attempted == fast { return (false, false); }
+            edge.attempted = fast;
             return (true, false);
         }
         // No eviction of active edges: at capacity preserve settings rather than replay them.
         if self.0.len() >= FAST_FOLLOW_LIMIT { return (false, false); }
-        self.0.insert(run.to_string(), (fast, false));
+        self.0.insert(run.to_string(), FastFollowEdge { attempted: fast, runtime, warned: false });
         (true, true)
     }
 }
@@ -181,16 +198,16 @@ impl Drop for FastFollowAttempt {
     fn drop(&mut self) {
         if self.committed { return; }
         let mut edges = fast_follow_edges().lock().unwrap_or_else(|e| e.into_inner());
-        if let Some((_, warned)) = edges.0.get_mut(&self.run) {
-            if !*warned {
-                *warned = true;
+        if let Some(edge) = edges.0.get_mut(&self.run) {
+            if !edge.warned {
+                edge.warned = true;
                 tracing::warn!(run = %self.run, "child fast settings were not synchronized; this edge will not be replayed; check the UI before the next start");
             }
         }
     }
 }
-fn attempt_fast_follow(pool: &sqlx::SqlitePool, run: &str, fast: bool) -> Option<FastFollowAttempt> {
-    let (attempt, new) = fast_follow_edges().lock().unwrap_or_else(|e| e.into_inner()).attempt(run, fast);
+fn attempt_fast_follow(pool: &sqlx::SqlitePool, run: &str, fast: bool, runtime: bool) -> Option<FastFollowAttempt> {
+    let (attempt, new) = fast_follow_edges().lock().unwrap_or_else(|e| e.into_inner()).attempt(run, fast, runtime);
     if new {
         let (pool, run) = (pool.clone(), run.to_string());
         // One bounded cleanup task per retained run; ended runs disappear even without another poll.
@@ -213,6 +230,10 @@ pub async fn correct_runtime_from_screen(app: &(impl crate::capabilities::BotSta
     let Ok(Some(run)) = db::run(app.db(), run_id).await else { return false };
     // 狀態列沒講強度（沒有強度字、也沒有 default）＝未知：沿用上一輪已知的值，不清成 NULL；model／fast 照常校正。
     let effort = effective_effort(&seen, &run);
+    if let Some(runtime) = run.runtime_fast {
+        fast_follow_edges().lock().unwrap_or_else(|e| e.into_inner())
+            .observe_runtime(run_id, runtime != 0, runtime == i64::from(seen.fast));
+    }
     let same = run.runtime_model.as_deref() == Some(seen.model.as_str())
         && run.runtime_effort == effort
         && run.runtime_fast == Some(i64::from(seen.fast));
@@ -225,7 +246,7 @@ pub async fn correct_runtime_from_screen(app: &(impl crate::capabilities::BotSta
         Err(_) => return false,
     };
     let fast_edge = bot.managed_by == "child" && run.runtime_fast.is_some_and(|prev| prev != i64::from(seen.fast));
-    let mut attempt = if fast_edge { attempt_fast_follow(app.db(), run_id, seen.fast) } else { None };
+    let mut attempt = if fast_edge { attempt_fast_follow(app.db(), run_id, seen.fast, run.runtime_fast.unwrap_or(0) != 0) } else { None };
     let follow = !fast_edge || attempt.is_some();
     // 設定與 runtime 原子提交；失敗或取消一起 rollback，但嘗試記錄保留。
     let Ok(mut tx) = app.db().begin().await else { return false };
@@ -263,6 +284,7 @@ pub async fn correct_runtime_from_screen(app: &(impl crate::capabilities::BotSta
     if !matches!(wrote, Ok(ref result) if result.rows_affected() == 1) || tx.commit().await.is_err() {
         return false;
     }
+    fast_follow_edges().lock().unwrap_or_else(|e| e.into_inner()).observe_runtime(run_id, seen.fast, true);
     if let Some(attempt) = &mut attempt { attempt.committed = true; }
     if changed {
         app.emit("bot_changed", serde_json::json!({"bot_id": run.bot_id})).await;
@@ -1123,17 +1145,43 @@ mod tests {
     #[test]
     fn fast_follow_edges_keep_only_the_latest_edge_and_do_not_evict_active_runs_at_capacity() {
         let mut edges = super::FastFollowEdges::default();
-        assert_eq!(edges.attempt("one", false), (true, true));
-        assert_eq!(edges.attempt("one", false), (false, false));
-        assert_eq!(edges.attempt("one", true), (true, false));
-        assert_eq!(edges.attempt("one", false), (true, false));
+        assert_eq!(edges.attempt("one", false, true), (true, true));
+        assert_eq!(edges.attempt("one", false, true), (false, false));
+        assert_eq!(edges.attempt("one", true, true), (true, false));
+        assert_eq!(edges.attempt("one", false, true), (true, false));
         assert_eq!(edges.0.len(), 1);
         for i in 1..super::FAST_FOLLOW_LIMIT {
-            assert_eq!(edges.attempt(&format!("run-{i}"), false), (true, true));
+            assert_eq!(edges.attempt(&format!("run-{i}"), false, true), (true, true));
         }
-        assert_eq!(edges.attempt("overflow", true), (false, false));
+        assert_eq!(edges.attempt("overflow", true, false), (false, false));
         assert_eq!(edges.0.len(), super::FAST_FOLLOW_LIMIT);
-        assert_eq!(edges.attempt("one", false), (false, false), "active edge must remain protected");
+        assert_eq!(edges.attempt("one", false, true), (false, false), "active edge must remain protected");
+    }
+
+    #[tokio::test]
+    async fn a_tui_fast_switch_after_ui_live_apply_is_a_new_edge_with_or_without_a_matching_poll() {
+        for matching_poll in [false, true] {
+            let env = crate::testing::env().await;
+            let (bot, run) = child_with_effort(&env, "child", Some("high"), Some("high")).await;
+            sqlx::query("UPDATE bots SET fast=1 WHERE id=?").bind(&bot).execute(&env.app.db).await.unwrap();
+            sqlx::query("UPDATE runs SET runtime_fast=1 WHERE id=?").bind(&run).execute(&env.app.db).await.unwrap();
+            assert!(correct_runtime_from_screen(&env.app, &run, ASTRA_HIGH).await);
+            assert_eq!(db::bot(&env.app.db, &bot).await.unwrap().unwrap().fast, 0);
+            assert_eq!(fast_of(&env, &run).await, Some(0));
+
+            // UI live apply updates both rows, without passing through this screen observer.
+            sqlx::query("UPDATE bots SET fast=1 WHERE id=?").bind(&bot).execute(&env.app.db).await.unwrap();
+            sqlx::query("UPDATE runs SET runtime_fast=1 WHERE id=?").bind(&run).execute(&env.app.db).await.unwrap();
+            if matching_poll {
+                let on = ASTRA_HIGH.replace("astra high", "astra high fast");
+                assert!(!correct_runtime_from_screen(&env.app, &run, &on).await, "matching observation emits no change");
+                assert!(super::fast_follow_edges().lock().unwrap().0[&run].attempted);
+            }
+            assert!(correct_runtime_from_screen(&env.app, &run, ASTRA_HIGH).await);
+            assert_eq!(fast_of(&env, &run).await, Some(0));
+            assert_eq!(db::bot(&env.app.db, &bot).await.unwrap().unwrap().fast, 0, "the second TUI off must follow after UI live apply");
+            assert!(!correct_runtime_from_screen(&env.app, &run, ASTRA_HIGH).await);
+        }
     }
 
     #[tokio::test]
