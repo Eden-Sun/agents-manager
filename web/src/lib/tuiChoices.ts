@@ -105,7 +105,7 @@ const DETAIL_LIMIT = 8
 
 const ITEM = /^(\s*)([❯›▶>]\s)?(\d{1,2})[.)](\s+)(\S.*)$/
 
-const CHECKBOX = /^\[([ xX*✓✔])\]\s*(.*)$/
+const CHECKBOX = /^\[([ xX*✓✔☐☑☒])\]\s*(.*)$/
 
 const SUBMIT = /^\s*([❯›▶>]\s*)?Submit\s*$/
 
@@ -196,7 +196,7 @@ function matchRow(line: number, s: string): Row | null {
     col: indent.length + (marker?.length ?? 0),
     number: Number(num),
     title: (box ? box[2] : rest).trim(),
-    checked: box ? box[1] !== ' ' : null,
+    checked: box ? box[1] !== ' ' && box[1] !== '☐' : null,
   }
 }
 
@@ -357,6 +357,13 @@ export function parseChoiceMenu(text: string | null | undefined): TuiChoiceMenu 
   }
   if (markers !== 1) return null
 
+  // 上輪正文裡的表格也可能長得像預覽框。只有切欄真的影響目前選單時，
+  // 才能採用「左欄沒有說明、縮排行接回標題」的預覽規則（#1887）。
+  const offset = raw.length - lines.length
+  const choicePreview = Boolean(side && lines.slice(blockTop, blockEnd + 1).some((_, i) =>
+    side.lines[offset + blockTop + i] !== raw[offset + blockTop + i],
+  ))
+
   // 3. 說明接成一段；最後一項收到空白行／分隔線為止。
   const choices: TuiChoice[] = rows.map((row, idx) => {
     const stop = idx + 1 < rows.length ? rows[idx + 1].line : Math.min(lines.length, row.line + 1 + TAIL_LIMIT)
@@ -372,18 +379,18 @@ export function parseChoiceMenu(text: string | null | undefined): TuiChoiceMenu 
       if (idx + 1 === rows.length && (indentOf(s) < 2 || ASYNC_FOOTER.test(s))) break
       // 並排版面：`(Recommended)` 是標籤折下來的另一行，前面要留空白（不能被 CJK 的 joinWrapped 黏死）。
       const piece = s.trim()
-      detail = side && piece.startsWith('(') && detail ? `${detail} ${piece}` : joinWrapped(detail, piece)
+      detail = choicePreview && piece.startsWith('(') && detail ? `${detail} ${piece}` : joinWrapped(detail, piece)
     }
     // 並排版面的左欄只有標籤、沒有說明：下一行縮進的 `(Recommended)` 是標籤折下來的，接回標題。
     // claude 自己加的 ` (Recommended)` 前面本來就是空白，CJK 結尾時 joinWrapped 會把它黏死。
-    const title = side ? (detail.startsWith('(') ? `${row.title} ${detail}` : joinWrapped(row.title, detail)) : row.title
+    const title = choicePreview ? (detail.startsWith('(') ? `${row.title} ${detail}` : joinWrapped(row.title, detail)) : row.title
     return {
       number: row.number,
       title,
-      detail: side ? '' : detail,
+      detail: choicePreview ? '' : detail,
       current: row.marker,
       checked: row.checked,
-      preview: side && row.marker ? side.preview : '',
+      preview: choicePreview && side && row.marker ? side.preview : '',
     }
   })
 

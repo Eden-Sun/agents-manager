@@ -1,7 +1,72 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
+import { readFileSync } from 'node:fs'
 import { commit, locate, moveTab, pageNeedsCommit, preload, radioPick, readChoiceMenu, samePage, togglesFor, wantOf, type Draft, type DraftPage, type Io } from './choiceDraft.ts'
 import { parseChoiceMenu, typedAnswerHere, type TuiChoiceMenu, type TuiTab } from './tuiChoices.ts'
+
+// #1887：issue 裡的 repo 選項與說明縮排；保留打字列、Submit 與 Chat about this 分隔線。
+const REPO_MULTI = [
+  '────────────────────────────────────────────────────────────',
+  ' ☐ Repo  ✔ Submit',
+  '',
+  '下一個要 review 哪個 repo？',
+  '',
+  '❯ 1. [ ] robinstech-carbis-web',
+  '         carbis 前台（接 console 報價、評價）',
+  '  2. [ ] vehicleapi',
+  '         車籍查詢 API',
+  '  3. [ ] carmakerapi',
+  '         車廠代碼 API',
+  '  4. [ ] Type something.',
+  '     Submit',
+  '────────────────────────────────────────────────────────────',
+  '  5. Chat about this',
+  '',
+  'Enter to select · ↑/↓ to navigate · Esc to cancel',
+].join('\n')
+
+test('#1887 上輪回覆的表格不應讓重讀選單變成預覽標題', async () => {
+  const full = readFileSync(new URL('./__fixtures__/claude-repo-multiselect-1887.txt', import.meta.url), 'utf8')
+  const short = full.slice(full.indexOf('←  ☐ Repo'))
+  const menu = parseChoiceMenu(short)!
+  const draft = await preload({ read: async () => menu, send: async () => {}, paste: async () => {}, wait: async () => {} }, menu)
+  assert.ok(draft)
+  const now = await readChoiceMenu(async () => full)
+  assert.ok(now)
+  assert.equal(samePage(draft.pages[0], now), true)
+  assert.deepEqual(now.choices, menu.choices)
+  assert.equal(now.choices[1].detail, '車籍查詢 API')
+  assert.equal(now.choices[1].title, 'vehicleapi')
+})
+
+test('#1887 多選說明分開存放，面板預載與送出重讀仍是同一頁', async () => {
+  const menu = parseChoiceMenu(REPO_MULTI)
+  assert.ok(menu)
+  assert.equal(menu.multi, true)
+  assert.deepEqual(menu.choices.map(({ title, detail }) => ({ title, detail })), [
+    { title: 'robinstech-carbis-web', detail: 'carbis 前台（接 console 報價、評價）' },
+    { title: 'vehicleapi', detail: '車籍查詢 API' },
+    { title: 'carmakerapi', detail: '車廠代碼 API' },
+    { title: 'Type something.', detail: '' },
+    { title: 'Chat about this', detail: '' },
+  ])
+  assert.deepEqual(menu.submit, { after: 3, current: false })
+  const io: Io = {
+    read: () => readChoiceMenu(async () => REPO_MULTI),
+    send: async () => { assert.fail('單題加合成送出頁預載不應送鍵') },
+    paste: async () => { assert.fail('預載不應貼字') },
+    wait: async () => {},
+  }
+  const draft = await preload(io, menu)
+  assert.ok(draft)
+  const reread = await io.read()
+  assert.ok(reread)
+  assert.equal(samePage(draft.pages[0], reread), true)
+  // 真正換標題仍須拒絕，不能靠刪掉說明或模糊比對放行。
+  const changed = parseChoiceMenu(REPO_MULTI.replace('vehicleapi', 'different-api'))
+  assert.ok(changed)
+  assert.equal(samePage(draft.pages[0], changed), false)
+})
 
 /**
  * 假的 claude 問卷 TUI（兩題複選＋送出頁），版型照抄 `carbis-multiselect.txt`。
