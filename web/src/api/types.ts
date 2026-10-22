@@ -269,6 +269,8 @@ export interface Bot {
   primary: boolean
   /** 主力（★）那列的固定順序（issue #344，daemon 存 DB）；小的在前，沒拖過都是 0，舊 daemon 沒這欄＝0。 */
   primary_position: number
+  /** 主力 bot 撞限中（#1899，daemon 只給頂層 bot；child 與舊 daemon 沒有＝null）。過了 `until` 前端就不畫。 */
+  limit_hit?: BotLimitHit | null
   /** 執行中的 CLI 載入的啟動設定跟現在存的不同＝要重啟（#353，daemon 從資料算，PATCH 回應掉了也看得到）。 */
   needs_restart: boolean
   /** live 設定已排到這個回合結束後套用。 */
@@ -1038,6 +1040,13 @@ export interface KindQuota {
 
 /** key 見 `quotaKey`（SPEC §14，按主機分開）；null = 沒有額度資訊。 */
 export type QuotaMap = Record<string, KindQuota | null>
+
+/** 主力 bot 撞限（#1899）：只有 `until` 與訊息，判斷在 daemon。 */
+export interface BotLimitHit {
+  message: string
+  /** ISO；null = CLI 沒寫，daemon 等它清掉才消失。 */
+  until: string | null
+}
 
 export interface QuotaLimitHit {
   message: string
