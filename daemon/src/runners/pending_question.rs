@@ -49,7 +49,7 @@ pub async fn get_pending_question(State(app): State<Arc<App>>, Path(id): Path<St
 /// codex 的非同步提問（`request_user_input_async`，issue #1879）：畫面上排著提問時，題目與選項從 rollout 讀，
 /// 形狀同 claude 的 `questions`（`header`／`multiSelect` 固定空與 `false`，另帶 `call_id`／`index`）；`async_screen` 是畫面狀態
 /// （`expanded`：已按 shift+← 展開；`count`：畫面上排著幾題），網頁作答前靠它與重讀畫面對帳。
-/// 畫面上沒有提問（含讀不到畫面）`questions` 與 `async_screen` 都是 `null`；遠端主機或找不到 rollout 時只有 `async_screen`。
+/// 畫面上沒有提問（含讀不到畫面）`questions` 與 `async_screen` 都是 `null`；找不到 rollout 或遠端讀取失敗時只有 `async_screen`。
 async fn codex_async(app: &Arc<App>, bot: &db::Bot, run: &db::Run) -> Result<Json<Value>, LcError> {
     let Some(Some(snap)) = crate::runners::codex_async_question::snapshot(app, bot, run).await else {
         return Ok(Json(json!({"questions": null, "jev_options": null, "async_screen": null})));
@@ -97,7 +97,7 @@ mod path_guard_tests {
     }
 }
 
-/// codex 非同步提問（issue #1879）：題目從本機 rollout 讀，畫面是「排著幾題」的真相。
+/// codex 非同步提問（issue #1879）：題目從 rollout 讀，畫面是「排著幾題」的真相。
 #[cfg(test)]
 mod codex_async_tests {
     use super::*;
@@ -263,7 +263,7 @@ mod codex_async_tests {
         assert_eq!((body["questions"].clone(), body["async_screen"].clone()), (Value::Null, Value::Null));
     }
 
-    /// 找不到 rollout（或遠端主機）：畫面狀態照給，`questions` 是 `null`。
+    /// 找不到 rollout：畫面狀態照給，`questions` 是 `null`。
     #[tokio::test]
     async fn without_a_rollout_only_the_screen_state_comes_back() {
         let (app, bot, _env) = rig_with(&[], COLLAPSED, None, "no-such-session").await;
@@ -271,6 +271,166 @@ mod codex_async_tests {
         assert_eq!(body["questions"], Value::Null);
         assert_eq!(body["async_screen"], json!({"expanded": false, "count": 1}));
     }
+
+    struct RemoteCodex {
+        env: tt::Env,
+        bot: String,
+        host: String,
+        reads: Arc<std::sync::atomic::AtomicUsize>,
+        log: Arc<std::sync::Mutex<String>>,
+    }
+
+    impl RemoteCodex {
+        async fn get(&self) -> Value {
+            get_pending_question(State(self.env.app.clone()), Path(self.bot.clone())).await.unwrap().0
+        }
+        fn reads(&self) -> usize { self.reads.load(std::sync::atomic::Ordering::SeqCst) }
+    }
+
+    async fn remote_codex(log: &str) -> RemoteCodex {
+        let (app, bot, env) = rig(&[], COLLAPSED).await;
+        let host = format!("async-remote-{}", db::ulid());
+        let conn = app.hosts.insert_remote_with_client_for_test(crate::config::HostCfg {
+            shared_session: false, name: host.clone(), ssh: "unused".into(), ssh_port: 22,
+            ssh_opts: vec![], herdr_session: "test".into(), remote_path: String::new(),
+        }, crate::herdr::HerdrClient::new(env.dir.join("data/herdr.sock"))).await;
+        conn.connected.store(true, std::sync::atomic::Ordering::SeqCst);
+        sqlx::query("UPDATE projects SET host=? WHERE id=?").bind(&host).bind(&env.project_id).execute(&app.db).await.unwrap();
+        sqlx::query("UPDATE bots SET env_json=? WHERE id=?").bind(json!({"CODEX_HOME":"/Users/m4p/.codex"}).to_string()).bind(&bot).execute(&app.db).await.unwrap();
+        let reads = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let log = Arc::new(std::sync::Mutex::new(log.to_string()));
+        let (seen, output) = (reads.clone(), log.clone());
+        crate::hosts::set_ssh_fake(&host, move |script| {
+            assert!(script.contains("python3 -c") && script.contains("/Users/m4p/.codex") && script.contains("8388608"));
+            seen.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            let text = output.lock().unwrap().clone();
+            if text == "ERROR" { anyhow::bail!("offline") }
+            Ok(text)
+        });
+        RemoteCodex { env, bot, host, reads, log }
+    }
+
+    #[tokio::test]
+    async fn remote_codex_api_reads_options_and_single_flights_polling_for_twenty_seconds() {
+        let remote = remote_codex(&ask("remote", json!([{"title":"Remote question?", "options":["A", "B"]}]))).await;
+        crate::hosts::set_ssh_delay(&remote.host, std::time::Duration::from_millis(40));
+        let (a, b) = tokio::join!(remote.get(), remote.get());
+        assert_eq!(a, b);
+        assert_eq!(a["questions"][0]["question"], "Remote question?");
+        assert_eq!(a["questions"][0]["options"][1]["label"], "B");
+        *remote.log.lock().unwrap() = "ERROR".into();
+        let run = db::active_run(&remote.env.app.db, &remote.bot).await.unwrap().unwrap();
+        super::super::codex_async_question_remote::age_cache(&run.id, std::time::Duration::from_secs(15));
+        assert_eq!(remote.get().await, a);
+        assert_eq!(remote.reads(), 1);
+        super::super::codex_async_question_remote::age_cache(&run.id, std::time::Duration::from_secs(21));
+        assert_eq!(remote.get().await["questions"], Value::Null);
+        assert_eq!(remote.reads(), 2, "cache expires after twenty seconds");
+        assert!(remote.env.herdr.calls_to("pane.send_keys").is_empty());
+        assert!(remote.env.herdr.calls_to("pane.send_text").is_empty());
+    }
+
+    #[tokio::test]
+    async fn remote_codex_failure_and_timeout_are_cached_and_keep_screen_count() {
+        let failed = remote_codex("ERROR").await;
+        for _ in 0..2 {
+            let body = failed.get().await;
+            assert_eq!(body["questions"], Value::Null);
+            assert_eq!(body["async_screen"]["count"], 1);
+        }
+        assert_eq!(failed.reads(), 1);
+        let slow = remote_codex("not reached").await;
+        crate::hosts::set_ssh_delay(&slow.host, std::time::Duration::from_secs(30));
+        let at = std::time::Instant::now();
+        assert_eq!(slow.get().await["questions"], Value::Null);
+        assert!(at.elapsed() < std::time::Duration::from_secs(3));
+        let at = std::time::Instant::now();
+        assert_eq!(slow.get().await["async_screen"]["count"], 1);
+        assert!(at.elapsed() < std::time::Duration::from_millis(500), "timeout must be cached");
+        assert_eq!(slow.reads(), 0);
+    }
+
+    #[tokio::test]
+    async fn remote_codex_keeps_skip_and_reply_reconciliation_and_live_session_isolation() {
+        let remote = remote_codex(&[
+            ask("first", json!([{"title":"Skipped?"}])),
+            ask("second", json!([{"title":"Still queued?", "options":["Yes"]}])),
+        ].join("\n")).await;
+        assert_eq!(remote.get().await["questions"], Value::Null, "two unresolved calls for one queue item must degrade");
+        remote.env.herdr.set_screen("pane-async-api", "• Queued follow-up inputs\n  Still queued?\n  Type your answer\n  enter submit   ^] skip   shift+→ main prompt\n");
+        assert_eq!(remote.get().await["questions"][0]["question"], "Still queued?");
+        assert_eq!(remote.reads(), 1);
+        remote.env.herdr.agents.lock().unwrap()[0]["agent_session"]["value"] = json!("new-session");
+        *remote.log.lock().unwrap() = [ask("third", json!([{"title":"New question?"}])), reply("third", 0)].join("\n");
+        remote.env.herdr.set_screen("pane-async-api", COLLAPSED);
+        assert_eq!(remote.get().await["questions"], Value::Null, "answered question is not pending in new session");
+        assert_eq!(remote.reads(), 2, "new live session must not reuse old session cache");
+    }
+
+    #[tokio::test]
+    async fn remote_codex_discards_a_tail_when_the_session_changes_during_ssh() {
+        let remote = remote_codex(&ask("old", json!([{"title":"Old question?"}]))).await;
+        let agents = remote.env.herdr.agents.clone();
+        let reads = remote.reads.clone();
+        let log = remote.log.lock().unwrap().clone();
+        crate::hosts::set_ssh_fake(&remote.host, move |_| {
+            reads.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            agents.lock().unwrap()[0]["agent_session"]["value"] = json!("new-session");
+            Ok(log.clone())
+        });
+        let body = remote.get().await;
+        assert_eq!(body["questions"], Value::Null);
+        assert_eq!(body["async_screen"]["count"], 1);
+        assert_eq!(remote.reads(), 1);
+    }
+
+    #[tokio::test]
+    async fn remote_codex_losing_a_live_binding_during_ssh_cannot_relax_to_db_fallback() {
+        let remote = remote_codex(&ask("old", json!([{"title":"Old question?"}]))).await;
+        let agents = remote.env.herdr.agents.clone();
+        let log = remote.log.lock().unwrap().clone();
+        crate::hosts::set_ssh_fake(&remote.host, move |_| {
+            agents.lock().unwrap().clear();
+            Ok(log.clone())
+        });
+        let body = remote.get().await;
+        assert_eq!(body["questions"], Value::Null);
+        assert_eq!(body["async_screen"]["count"], 1);
+    }
+
+    #[tokio::test]
+    async fn remote_codex_db_session_fallback_still_requires_the_title_on_screen() {
+        let remote = remote_codex(&ask("fallback", json!([{"title":"Fallback question?"}]))).await;
+        remote.env.herdr.agents.lock().unwrap().clear();
+        assert_eq!(remote.get().await["questions"], Value::Null);
+        remote.env.herdr.set_screen("pane-async-api", &format!("Fallback question?\n{COLLAPSED}"));
+        assert_eq!(remote.get().await["questions"][0]["question"], "Fallback question?");
+        assert_eq!(remote.reads(), 1);
+    }
+
+    #[tokio::test]
+    async fn remote_codex_observation_does_not_block_patrol_or_hold_bot_lock() {
+        let remote = remote_codex("ERROR").await;
+        crate::hosts::set_ssh_delay(&remote.host, std::time::Duration::from_secs(30));
+        let app = &remote.env.app;
+        let bot = db::bot(&app.db, &remote.bot).await.unwrap().unwrap();
+        let run = db::active_run(&app.db, &remote.bot).await.unwrap().unwrap();
+        let at = std::time::Instant::now();
+        super::super::codex_async_question::observe(app, &run).await;
+        super::super::codex_async_question::observe(app, &run).await;
+        assert!(at.elapsed() < std::time::Duration::from_millis(500));
+        let lock = app.bot_lock(&bot.id).await;
+        assert!(lock.try_lock().is_ok());
+        tokio::time::timeout(std::time::Duration::from_secs(4), async {
+            loop {
+                let state = crate::api::state_json(app).await.unwrap();
+                if state.to_string().contains("codex 有 1 題非同步提問") { break; }
+                tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+            }
+        }).await.unwrap();
+        assert!(remote.env.herdr.calls_to("pane.send_keys").is_empty());
+    }
+
 }
 
 /// 遠端主機的 claude bot（issue #1476）：對話檔在那台機器上，經 §12.5b 的 `sh`／ssh 只讀檔尾。
