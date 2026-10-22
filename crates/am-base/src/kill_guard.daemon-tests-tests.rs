@@ -347,3 +347,35 @@
         assert!(l.is_empty(), "{l:?}");
         assert!(notes("pkill -f next-server").is_empty());
     }
+
+    #[test]
+    fn env_dash_s_expansion_is_bounded() {
+        let started = std::time::Instant::now();
+        // 一長串 `env -S env -S …`：每層都要複製剩餘參數，不能變成二次方；超限放行並記 log。
+        let flat = format!("{}echo hello", "env -S ".repeat(6000));
+        let (v, n) = check_command_logged(&flat);
+        assert_eq!(v, Verdict::Allow);
+        assert!(n.iter().any(|x| x.contains("env -S") && x.contains("上限")), "{n:?}");
+        // 同一串放進 `-S` 的值裡（一層引號、內容是長鏈）。
+        let quoted = format!("env -S '{}echo hello'", "env -S ".repeat(6000));
+        let (v, n) = check_command_logged(&quoted);
+        assert_eq!(v, Verdict::Allow);
+        assert!(n.iter().any(|x| x.contains("env -S")), "{n:?}");
+        assert!(started.elapsed() < std::time::Duration::from_secs(2), "{:?}", started.elapsed());
+        // 正常深度（含多層）照擋。
+        assert!(denied(r#"env -S "env -S 'pkill -f claude'""#));
+    }
+
+    #[test]
+    fn shells_that_only_check_syntax_never_run_their_script() {
+        assert!(!denied("bash -n <<'EOF'\npkill -f claude\nEOF"));
+        assert!(!denied("bash -nv <<'EOF'\npkill -f claude\nEOF"));
+        assert!(!denied("sh -n <<< 'pkill -f claude'"));
+        assert!(!denied("bash -n -c 'pkill -f claude'"));
+        assert!(!denied("sudo bash -vn -c 'pkill -f claude'"));
+        // 不是 -n 的照擋；`-c` 的字串裡出現 n 不算。
+        assert!(denied("bash -c 'pkill -f claude'"));
+        assert!(denied("bash -lc 'pkill -f claude'"));
+        assert!(denied("bash -x <<'EOF'\npkill -f claude\nEOF"));
+        assert!(denied("bash -c 'echo no' ; bash <<'EOF'\npkill -f claude\nEOF"));
+    }

@@ -57,6 +57,7 @@ pub mod hosts;
 pub mod kids_cache;
 pub mod kind_probe;
 pub mod kill_guard;
+pub mod kill_shim;
 pub mod launch_rev;
 pub mod lc_error;
 pub mod linux_proc;

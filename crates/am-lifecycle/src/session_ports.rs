@@ -69,12 +69,19 @@ pub trait SessionProviderPort {
 pub trait ShimInstallPort {
     fn install_local_herdr_shim(&self, bot_dir: &std::path::Path) -> std::io::Result<std::path::PathBuf>;
     fn install_local_cargo_shim(&self, bot_dir: &std::path::Path) -> std::io::Result<std::path::PathBuf>;
+    /// `pkill`／`killall` 的廣域 kill 守門（#1884）。
+    fn install_local_kill_shim(&self, bot_dir: &std::path::Path) -> std::io::Result<std::path::PathBuf>;
     fn install_remote_herdr_shim<'a>(
         &'a self,
         conn: &'a crate::hosts::HostConn,
         remote_bot_dir: &'a str,
     ) -> impl std::future::Future<Output = Result<String>> + Send + 'a;
     fn install_remote_cargo_shim<'a>(
+        &'a self,
+        conn: &'a crate::hosts::HostConn,
+        remote_bot_dir: &'a str,
+    ) -> impl std::future::Future<Output = Result<String>> + Send + 'a;
+    fn install_remote_kill_shim<'a>(
         &'a self,
         conn: &'a crate::hosts::HostConn,
         remote_bot_dir: &'a str,
@@ -166,6 +173,8 @@ mod tests {
         "herdr_shim::install_remote(",
         "cargo_shim::install_local(",
         "cargo_shim::install_remote(",
+        "kill_shim::install_local(",
+        "kill_shim::install_remote(",
         // 事件、bot 鎖走 am-ports 合約的 adapter。
         "emit_turn(",
         "emit_message_added(",
@@ -216,6 +225,8 @@ mod tests {
             "herdr_shim::install_remote(",
             "cargo_shim::install_local(",
             "cargo_shim::install_remote(",
+        "kill_shim::install_local(",
+        "kill_shim::install_remote(",
             "bot_lock(",
         ] {
             assert!(adapter.contains(pat), "adapter 不再含 {pat}");

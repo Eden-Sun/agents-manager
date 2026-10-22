@@ -650,6 +650,7 @@ mod arc_port_44_shiminstallport {
     impl<T: crate::lifecycle::start::ports::ShimInstallPort + ?Sized> crate::lifecycle::start::ports::ShimInstallPort for std::sync::Arc<T> {
         fn install_local_herdr_shim(&self, bot_dir: &std::path::Path) -> std::io::Result<std::path::PathBuf> { <T as crate::lifecycle::start::ports::ShimInstallPort>::install_local_herdr_shim(self.as_ref(), bot_dir) }
         fn install_local_cargo_shim(&self, bot_dir: &std::path::Path) -> std::io::Result<std::path::PathBuf> { <T as crate::lifecycle::start::ports::ShimInstallPort>::install_local_cargo_shim(self.as_ref(), bot_dir) }
+        fn install_local_kill_shim(&self, bot_dir: &std::path::Path) -> std::io::Result<std::path::PathBuf> { <T as crate::lifecycle::start::ports::ShimInstallPort>::install_local_kill_shim(self.as_ref(), bot_dir) }
         fn install_remote_herdr_shim<'a>(
             &'a self,
             conn: &'a crate::hosts::HostConn,
@@ -660,6 +661,11 @@ mod arc_port_44_shiminstallport {
             conn: &'a crate::hosts::HostConn,
             remote_bot_dir: &'a str,
         ) -> impl std::future::Future<Output = Result<String>> + Send + 'a { <T as crate::lifecycle::start::ports::ShimInstallPort>::install_remote_cargo_shim(self.as_ref(), conn, remote_bot_dir) }
+        fn install_remote_kill_shim<'a>(
+            &'a self,
+            conn: &'a crate::hosts::HostConn,
+            remote_bot_dir: &'a str,
+        ) -> impl std::future::Future<Output = Result<String>> + Send + 'a { <T as crate::lifecycle::start::ports::ShimInstallPort>::install_remote_kill_shim(self.as_ref(), conn, remote_bot_dir) }
     }
 }
 

@@ -25,10 +25,10 @@ pub enum Verdict {
 }
 
 /// 不論是否 `-f`，pattern 只要可能命中這些行程名就擋。`node` 在：claude／codex 的 npm 安裝版行程名就是 node。
-const PROTECTED_NAMES: &[&str] = &["claude", "codex", "grok", "herdr", "agents-managerd", "agy", "antigravity", "node", "sh", "bash", "zsh", "sshd"];
+pub const PROTECTED_NAMES: &[&str] = &["claude", "codex", "grok", "herdr", "agents-managerd", "agy", "antigravity", "node", "sh", "bash", "zsh", "sshd"];
 
 /// `pkill -f` 比對的是整條命令列：用各 agent 實際長相的樣本去試 pattern 會不會命中。
-const PROTECTED_CMDLINES: &[&str] = &[
+pub const PROTECTED_CMDLINES: &[&str] = &[
     "claude --settings /home/u/.config/agents-manager/bots/01MXXXXXXXXXXXXXXXXXXXXXXX/claude-settings.json --verbose",
     "/home/u/.local/bin/claude --dangerously-skip-permissions",
     "node /usr/lib/node_modules/@anthropic-ai/claude-code/cli.js",
@@ -47,12 +47,12 @@ pub const MIN_PATTERN_CHARS: usize = 3;
 const MAX_DEPTH: u32 = 4;
 
 /// pattern（ERE）的長度、群組巢狀、整條指令的比對步數與遞迴深度上限；超過就放行並記 log（見「迷你 ERE」）。
-const MAX_PATTERN_CHARS: usize = 256;
+pub const MAX_PATTERN_CHARS: usize = 256;
 const MAX_GROUP_DEPTH: u32 = 8;
 const MAX_REGEX_STEPS: u32 = 100_000;
 const MAX_REGEX_DEPTH: u32 = 256;
 
-const HOW_TO: &str = "只殺自己記下的 PID 或 port：`lsof -ti :PORT | xargs kill`，或 `kill <自己啟動時記下的 PID>`。不要用 pkill／killall 比對寬鬆的字串。";
+pub const HOW_TO: &str = "只殺自己記下的 PID 或 port：`lsof -ti :PORT | xargs kill`，或 `kill <自己啟動時記下的 PID>`。不要用 pkill／killall 比對寬鬆的字串。";
 
 /// 一次判斷的共用狀態：regex 預算，和「判不出來所以放行」的原因（給 hook 寫 stderr）。
 struct Ctx {
@@ -107,7 +107,10 @@ fn is_shell(name: &str) -> bool {
 }
 
 fn check_simple(simple: &Simple, depth: u32, ctx: &mut Ctx) -> Verdict {
-    let w = unwrap_wrappers(&simple.words);
+    let Some(w) = unwrap_wrappers(&simple.words) else {
+        ctx.note("`env -S` 展開次數超過上限，放行");
+        return Verdict::Allow;
+    };
     let Some(head) = w.first() else { return Verdict::Allow };
     let args = &w[1..];
     let name = basename(head);
@@ -117,6 +120,11 @@ fn check_simple(simple: &Simple, depth: u32, ctx: &mut Ctx) -> Verdict {
         "pkill" => check_pkill(args, ctx),
         "killall" => check_killall(args, ctx),
         n if is_shell(n) => {
+            // `bash -n`／`-nv`：只檢查語法、不執行，裡面寫什麼都不會跑。
+            let noexec = args.iter().take_while(|a| a.starts_with('-')).any(|a| !a.starts_with("--") && a.len() > 1 && a[1..].contains('n'));
+            if noexec {
+                return Verdict::Allow;
+            }
             // `bash -c '…'`、`bash -lc '…'`：-c 的下一個參數是一段 shell 指令。
             let c = args.iter().position(|a| a.starts_with('-') && !a.starts_with("--") && a.contains('c'));
             match c.and_then(|i| args.get(i + 1)) {
@@ -185,11 +193,19 @@ fn env_split_string(rest: &[String]) -> Option<(String, usize)> {
     if tail.is_empty() { Some((rest.get(1)?.clone(), 2)) } else { Some((tail.to_string(), 1)) }
 }
 
+/// `env -S` 一次判斷最多展開幾層（每層要複製剩餘參數、重切字串；`env -S env -S …` 排幾千個會變成二次方）。
+const MAX_ENV_S_EXPANSIONS: u32 = 16;
+
 /// 把 `VAR=x`、`sudo -u u`、`env -i`、`env -S "…"`、`nohup`、`timeout 5`、`xargs -n1`… 這些前綴剝掉，回真正的指令字起頭。
-fn unwrap_wrappers(words: &[String]) -> Vec<String> {
+/// `None`＝`env -S` 展開超過 [`MAX_ENV_S_EXPANSIONS`]（呼叫端放行並記 log）。
+fn unwrap_wrappers(words: &[String]) -> Option<Vec<String>> {
+    unwrap_budgeted(words, &mut 0)
+}
+
+fn unwrap_budgeted(words: &[String], expansions: &mut u32) -> Option<Vec<String>> {
     let mut w = words;
     loop {
-        let Some(head) = w.first() else { return Vec::new() };
+        let Some(head) = w.first() else { return Some(Vec::new()) };
         if is_assignment(head) || matches!(head.as_str(), "!" | "{" | "then" | "do" | "else" | "elif" | "if" | "while" | "until") {
             w = &w[1..];
             continue;
@@ -203,7 +219,7 @@ fn unwrap_wrappers(words: &[String]) -> Vec<String> {
             "timeout" => &["-s", "-k"],
             "xargs" => &["-n", "-I", "-P", "-L", "-d", "-E", "-s", "-a", "-J"],
             "command" | "exec" | "builtin" | "nohup" | "time" | "setsid" | "stdbuf" => &[],
-            _ => return w.to_vec(),
+            _ => return Some(w.to_vec()),
         };
         let name = basename(head);
         let mut i = 1;
@@ -216,9 +232,13 @@ fn unwrap_wrappers(words: &[String]) -> Vec<String> {
             if name == "env" {
                 // `-S` 的值是一整串要再切開的指令：切開後接上剩下的參數，從頭再剝。
                 if let Some((val, used)) = env_split_string(&w[i..]) {
+                    *expansions += 1;
+                    if *expansions > MAX_ENV_S_EXPANSIONS {
+                        return None;
+                    }
                     let mut nw = parse_shell(&val).cmds.into_iter().next().map(|s| s.words).unwrap_or_default();
                     nw.extend(w[i + used..].iter().cloned());
-                    return unwrap_wrappers(&nw);
+                    return unwrap_budgeted(&nw, expansions);
                 }
             }
             if valued.contains(&a) {
@@ -233,7 +253,7 @@ fn unwrap_wrappers(words: &[String]) -> Vec<String> {
             i += 1; // 時限
         }
         if i >= w.len() {
-            return Vec::new();
+            return Some(Vec::new());
         }
         w = &w[i..];
     }
@@ -666,7 +686,7 @@ impl Parsed {
     }
 }
 
-const SIGNAL_NAMES: &[&str] = &["HUP", "INT", "QUIT", "KILL", "TERM", "USR1", "USR2", "STOP", "CONT", "ALRM", "TSTP", "PIPE", "ABRT"];
+pub const SIGNAL_NAMES: &[&str] = &["HUP", "INT", "QUIT", "KILL", "TERM", "USR1", "USR2", "STOP", "CONT", "ALRM", "TSTP", "PIPE", "ABRT"];
 
 fn pkill_valued_short(c: char) -> bool {
     "PUugGstTFJjMN".contains(c)

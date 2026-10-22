@@ -47,7 +47,7 @@
         let data = tmp();
         let bin = seed(&data, "01OLD", "#!/bin/sh\n# 舊版，沒有 marker\nexec cargo \"$@\"\n");
         let changed = refresh_all(&data).changed;
-        assert_eq!(changed.len(), 2, "{changed:?}");
+        assert_eq!(changed.len(), 4, "cargo／herdr 換版＋pkill／killall（#1884）補上：{changed:?}");
         assert_eq!(std::fs::read_to_string(bin.join("cargo")).unwrap(), crate::cargo_shim::SHIM_SH);
         assert_eq!(std::fs::read_to_string(bin.join("herdr")).unwrap(), crate::herdr_shim::SHIM_SH);
         assert!(std::fs::read_to_string(bin.join("cargo")).unwrap().contains("AM_SHIM_MARKER"));
@@ -101,7 +101,7 @@
 
             let mut changed = refresh_all(&data).changed;
             changed.sort();
-            assert_eq!(changed, vec!["01MODE/cargo".to_string(), "01MODE/herdr".to_string()], "{broken:o} 要算修過：{changed:?}");
+            assert_eq!(changed, ["01MODE/cargo", "01MODE/herdr", "01MODE/killall", "01MODE/pkill"].map(String::from), "{broken:o} 要算修過：{changed:?}");
             for (i, (name, content)) in shims().iter().enumerate() {
                 let p = bin.join(name);
                 assert_eq!(mode_of(&p), 0o755, "{name} 從 {broken:o} 要修回 0755");
@@ -160,7 +160,7 @@
         let bin = seed(&data, "01SWAP", "#!/bin/sh\n# 舊版\n");
         let mut old_handle = std::fs::File::open(bin.join("cargo")).unwrap();
 
-        assert_eq!(refresh_all(&data).changed.len(), 2);
+        assert_eq!(refresh_all(&data).changed.len(), 4, "cargo／herdr 換版＋pkill／killall 補上");
 
         let mut seen_by_old_process = String::new();
         old_handle.read_to_string(&mut seen_by_old_process).unwrap();
@@ -412,9 +412,12 @@ case " $* " in *" -mmin +10 "*) rm -f "$1";; esac
         for bin in [local.join("bots/B/bin"), remote.join("bin")] {
             write_shim(&bin.join("herdr"), "#!/bin/sh\n# 舊\n", 0o755);
             write_shim(&bin.join("cargo"), crate::cargo_shim::SHIM_SH, 0o600);
+            for kill in ["pkill", "killall"] {
+                write_shim(&bin.join(kill), "#!/bin/sh\n# 舊\n", 0o755);
+            }
         }
         refresh_all(&local);
-        run_sync(&[&remote], &["herdr", "cargo"], false);
+        run_sync(&[&remote], &["herdr", "cargo", "pkill", "killall"], false);
         for (name, content) in shims() {
             let l = local.join("bots/B/bin").join(name);
             let r = remote.join("bin").join(name);

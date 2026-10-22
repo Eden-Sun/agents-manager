@@ -801,10 +801,10 @@ Jev 不負責回合收尾、額度記帳或競態判斷；這些依 run、turn�
 
 **判斷是純函式**（`crates/am-base/src/kill_guard.rs`，`check_command`），**只做靜態判斷，不跑任何外部指令**（不 `pgrep`、不 `ps`）：不會慢、不會卡、跟機器上跑著什麼無關。
 刻意不做「先數有幾個行程命中」：那要在 hook 裡跑外部指令，GNU／BSD 的 `pgrep` 旗標又不同，逾時與競態都得處理，為了擋一個確定錯的寫法不值得。
-解析不了、動態展開的 PID（`kill $(pgrep …)`）、不是 shell 指令的工具一律**放行**；每一種「判不出來所以放行」（壞 JSON、引號或 `$(` 沒閉合、pattern 超過資源上限、內部 panic）都在 stderr 留一行（`agents-managerd hook: kill_guard: …`；stdout 只留給決策 JSON），絕不因 hook 的錯擋掉正常指令。
+解析不了、動態展開的 PID（`kill $(pgrep …)`）、不是 shell 指令的工具一律**放行**；每一種「判不出來所以放行」（壞 JSON、引號或 `$(` 沒閉合、pattern 超過資源上限、內部 panic）都在 stderr 留一行（`agents-managerd hook: kill_guard: …`；stdout 只留給決策 JSON），同時寫進 bot 的 `hook.log`（agy 的 dispatcher 丟掉 hook 的 stderr，只剩這份看得到），絕不因 hook 的錯擋掉正常指令。
 
-指令先切成簡單指令（`; & | \n ( )`、引號、重導向），剝掉 `sudo`／`env`（含 `-S "字串"`，那串字再切開）／`nohup`／`timeout`／`xargs`／`VAR=x` 這類前綴，`bash -c '…'`／`eval` 遞迴；只看 `kill`、`pkill`、`killall`（`pgrep` 只列不殺）。
-`$(…)` 與反引號（雙引號裡也算，單引號、註解、`\$` 不算；括號判斷看引號與巢狀）裡的指令另外遞迴判斷。**註解與 heredoc 內文不是指令**：加引號終止字的 heredoc（`<<'EOF'`）內文完全略過；沒加引號的只看內文裡的 `$(…)`／反引號；餵給 shell 的（`bash <<EOF`、`sh -s <<EOF`、`bash <<< '…'`，沒有 `-c`、沒有 script 檔參數）內文當一份 script 判斷。
+指令先切成簡單指令（`; & | \n ( )`、引號、重導向），剝掉 `sudo`／`env`（含 `-S "字串"`，那串字再切開；一次判斷最多展開 16 層，超過放行並記 log）／`nohup`／`timeout`／`xargs`／`VAR=x` 這類前綴，`bash -c '…'`／`eval` 遞迴；只看 `kill`、`pkill`、`killall`（`pgrep` 只列不殺）。
+`$(…)` 與反引號（雙引號裡也算，單引號、註解、`\$` 不算；括號判斷看引號與巢狀）裡的指令另外遞迴判斷。**註解與 heredoc 內文不是指令**：加引號終止字的 heredoc（`<<'EOF'`）內文完全略過；沒加引號的只看內文裡的 `$(…)`／反引號；餵給 shell 的（`bash <<EOF`、`sh -s <<EOF`、`bash <<< '…'`，沒有 `-c`、沒有 script 檔參數）內文當一份 script 判斷；`bash -n`／`-nv` 這類只檢查語法的不執行，一律放行。
 引號或 `$(` 沒閉合時 shell 自己也語法錯誤、整串不會跑：丟掉那一行起的內容、其餘照判斷、記一筆 log（「解析失敗」），所以 `pkill -f claude 'oops` 放行，但前面已經完整的行（`pkill -f claude⏎echo 'oops`）照擋。**只擋確定廣域的**：
 
 | 規則 | 擋 | 放行 |
@@ -834,7 +834,14 @@ PreToolUse 呼叫**不送 daemon、不 spool**；`hook` 子命令依 payload 的
 | grok | ❌ 本版未接（grok 的 `PreToolUse` 可 deny，全域 `~/.grok/hooks/*.json`；要改 `grok_hook.rs` 的事件表與合併邏輯） | （同本機） | ❌ |
 | codex | ❌ codex 0.163 的 hooks 在 `~/.codex/hooks.json`／`config.toml`，**需要使用者在 `/hooks` 審核信任**（改了內容就要重審），不是 per-launch 旗標；本版不去改使用者的 `~/.codex` | ❌ | ❌ |
 
-沒被 hook 蓋到的路徑（子 claude、遠端、codex、grok）只剩共用規則；補洞的方向是 PATH 上的 `pkill`／`killall` shim（子 pane 繼承 PATH、遠端也有 PATH，argv 已經被 shell 切好，不必自己解析指令字串），尚未實作。
+沒被 hook 蓋到的路徑（子 claude、遠端、codex、grok）由 **PATH 上的 `pkill`／`killall` shim** 補（`crates/am-base/src/kill_shim.rs`）：子 pane 繼承 PATH、遠端也有，argv 已經被 shell 切好，不必解析指令字串。
+
+- **同一份規則**：一支 POSIX sh（macOS `/bin/sh`、Linux dash 都跑得動；不呼叫 daemon、不連網路、只用 `grep`／`tr`），`pkill`、`killall` 兩個檔名同一份內容，以 `basename $0` 分派。保護名單、cmdline 樣本、短 pattern 門檻、pattern 長度上限、訊號名單**由 `kill_guard` 的常數代入**（`shim_sh()`），不另抄；判斷邏輯是 `check_pkill`／`check_killall` 的 sh 版。regex 比對交給 `grep -E`（線性時間、不會災難性回溯），語法被 grep 拒絕就退回「含有這串字」，與 Rust 一致。**parity 測試**把同一張案例表（約 60 條）同時餵 `kill_guard` 與 shim（每個可用的 shell 各跑一遍），結果必須一致。
+- **不分作業系統**：BSD（macOS）遇到第一個非選項參數就停止解析選項、procps（Linux）會重排；選項寫在 pattern 之後的寫法本身就不可攜，所以兩邊都擋（與 hook 同一條規則），shim 不依 `uname` 分岔，不會對同一條指令跟 PreToolUse hook 給不同答案。
+- **被擋**：stderr 講原因與正確做法（`lsof -ti :PORT | xargs kill`、`kill <記下的 PID>`），exit 2（不是 1：1 是 pkill 的「沒有行程符合」，腳本會當成正常）。**放行**：`exec` 真的，參數原封不動。解析有疑義（regex 語法錯、pattern 超過長度上限）一律放行。
+- **找真的**：走 PATH，跳過自己、檔頭有 `AM_SHIM_MARKER` 的、任何 `…/bots/<id>/bin` 底下的（舊版沒 marker 也跳過，同 cargo shim，不遞迴），最後試 `/usr/bin`、`/bin`、`/usr/sbin`、`/sbin`；都沒有 exit 127 並說明。判斷在找真的之前：沒有真的也照擋。
+- **安裝**：bot 啟動時 `install_shim` 在 cargo shim 旁 best-effort 裝（本機、遠端；失敗只 warn，不擋啟動）；開機 `refresh_all` 對 `bin/` 已有 `herdr` 的 bot 補上（見 §6.5b），遠端重連補版走同一份 `shims()`。
+- **限制（照實）**：`kill` 是 shell 內建，shim 擋不到 `kill -9 -1`／`kill 0`（留給 PreToolUse）；`/usr/bin/pkill` 這類**絕對路徑會繞過 shim**；`pkill -x node`、`killall node` 會擋（npm 安裝版 claude／codex 的行程名就是 node），要殺自己的 node 請用記下的 PID／port。字元數用 shell 的字串長度（C locale 是位元組），非 ASCII 的單字 pattern 與 Rust 的字元數門檻可能差一點；`\d`、`{n,m}`、反向參照等 grep 與迷你 ERE 語意不同處以放行為準（保護名單是純英數，實務上不受影響）。
 
 ### 4.4a 模型／強度／fast／身份：runtime 與設定
 
@@ -1982,7 +1989,7 @@ daemon 啟動時掃 `<data_dir>/bots/*/bin`，把**已經存在**的 `herdr`／`
 正在執行的舊 shim 沿用舊 inode 不受影響；**內容一樣就不重寫**，免得每次重啟把 mtime 洗掉、看不出哪些真的換過版。
 內容與權限**分開判**（issue #126）：內容已是現行版、但權限掉了（舊版 `install_local` 寫完才 chmod，中間死掉會留下 0644，
 pane 打 `cargo` 就 permission denied）時，只 chmod 回 0755，不重寫內容；內容與權限都對才是真的 no-op。
-沒有 `bin/` 或本來就沒有那支 shim 的 bot 不會被生出新檔案（那是啟動時 `install_shim` 的事）。
+沒有 `bin/` 或本來就沒有那支 shim 的 bot 不會被生出新檔案（那是啟動時 `install_shim` 的事）；**唯一的例外是 `pkill`／`killall`（#1884，§4.4c）**：`bin/` 裡已經有 `herdr`（這顆 bot 啟動過、PATH 前面就是這個目錄）的就補上，長跑的 bot 不必重啟，pane 下一次打 `pkill` 就走守門。
 **換不動的要喊人**（issue #533）：某支 shim 寫不進去（目錄權限、磁碟滿、被改成目錄）時除了 warn，還推一則 `bot_shim_stale` inbox 給巡檢並叫醒，payload 帶 `bot_id`／`shim`／`path`／`embedded_hash`／`error`／`action`；event_key 帶內容雜湊，所以同一個版本換不動只有一則，下一顆 binary 帶新 shim 又失敗才是新的一則。這跟 `bin/agm` 的 `agm_cli_stale`（§18.2a）是同一種事：換不動的檔案不會自己好，而舊 cargo shim 的後果（工作沒轉到外部編譯主機、shim 互相當成真 cargo 而卡住）在畫面上只看得出「這顆 bot 很慢」。
 
 **遠端 bot 一樣就地換版**（issue #124）：長跑的遠端 bot 也可以跨好幾個 daemon 版本不重啟 pane，手上是舊 shim。host supervisor 每次連上
