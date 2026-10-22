@@ -30,17 +30,26 @@ pub struct AsyncQuestion {
 }
 
 /// 還沒作答的題目，照提問順序。一行一筆 JSON；第一行可能被檔尾讀取切壞，解析不了就跳過。
-/// 只認 `response_item`（`event_msg` 的 `item_completed` 是同一件事的副本）。
+/// 提問與回答只認 `response_item`；`event_msg` 的 `task_complete`／`turn_aborted` 會清掉該回合未答的題目（#1896）。
 pub fn pending_async_questions(log: &str) -> Vec<AsyncQuestion> {
     let mut pending: Vec<AsyncQuestion> = Vec::new();
     for line in log.lines() {
         // 檔尾幾 MB 幾乎都是工具輸出：先用子字串過濾，不對每一行做 JSON 解析。
         let ask = line.contains(ASK_TOOL);
         let reply = line.contains("send_user_message_question_reply");
-        if !ask && !reply {
+        let ended = line.contains("task_complete") || line.contains("turn_aborted");
+        if !ask && !reply && !ended {
             continue;
         }
         let Ok(entry) = serde_json::from_str::<Value>(line) else { continue };
+        // codex 0.163.0 的回合收尾會 take_pending_drafts → clear_pending；只接受完整的外層事件，
+        // 工具輸出／引文裡同名的字不算。task_started／turn_context 不是清佇列的證據。
+        if entry.get("type").and_then(Value::as_str) == Some("event_msg")
+            && matches!(entry.get("payload").and_then(|p| p.get("type")).and_then(Value::as_str), Some("task_complete" | "turn_aborted"))
+        {
+            pending.clear();
+            continue;
+        }
         if entry.get("type").and_then(Value::as_str) != Some("response_item") {
             continue;
         }
@@ -258,6 +267,121 @@ mod tests {
         json!({"type": "response_item", "payload": {"type": "message", "role": "user",
             "content": [{"type": "input_text", "text": format!("{REPLY_TAG}\n{items}\n</send_user_message_question_reply>")}]}})
         .to_string()
+    }
+
+    // #1896：m4p codex 0.163.0 真實測試 rollout 的去敏片段（顏色／水果／城市）。
+    // 原行號 1、2、8、14、62、64、65、70、112、114、115、120、170–174、179；
+    // 只留相關事件，移除路徑／帳號等 metadata，turn/call id 改成別名，沒有捏造 resume 事件。
+    const STALE_TURNS: &str = r#"{"timestamp":"2026-10-22T07:58:00.782Z","type":"session_meta","payload":{"cli_version":"0.163.0","source":"cli"}}
+{"timestamp":"2026-10-22T07:58:00.782Z","type":"event_msg","payload":{"type":"task_started","turn_id":"turn-1"}}
+{"timestamp":"2026-10-22T07:58:01.261Z","type":"turn_context","payload":{"turn_id":"turn-1"}}
+{"timestamp":"2026-10-22T07:58:03.975Z","type":"response_item","payload":{"type":"function_call","name":"request_user_input_async","call_id":"call-1","arguments":"{\"questions\":[{\"title\":\"測試題：要選哪個顏色？\",\"options\":[\"紅色\",\"藍色\"]}]}"}}
+{"timestamp":"2026-10-22T08:00:09.193Z","type":"event_msg","payload":{"type":"task_complete","turn_id":"turn-1"}}
+{"timestamp":"2026-10-22T08:01:57.146Z","type":"event_msg","payload":{"type":"task_started","turn_id":"turn-2"}}
+{"timestamp":"2026-10-22T08:01:57.160Z","type":"turn_context","payload":{"turn_id":"turn-2"}}
+{"timestamp":"2026-10-22T08:02:00.057Z","type":"response_item","payload":{"type":"function_call","name":"request_user_input_async","call_id":"call-2","arguments":"{\"questions\":[{\"title\":\"測試題：要選哪個顏色？\",\"options\":[\"紅色\",\"藍色\"]}]}"}}
+{"timestamp":"2026-10-22T08:05:05.193Z","type":"event_msg","payload":{"type":"task_complete","turn_id":"turn-2"}}
+{"timestamp":"2026-10-22T08:05:43.976Z","type":"event_msg","payload":{"type":"task_started","turn_id":"turn-3"}}
+{"timestamp":"2026-10-22T08:05:43.988Z","type":"turn_context","payload":{"turn_id":"turn-3"}}
+{"timestamp":"2026-10-22T08:05:46.211Z","type":"response_item","payload":{"type":"function_call","name":"request_user_input_async","call_id":"call-3","arguments":"{\"questions\":[{\"title\":\"測試題二：要選哪個水果？\",\"options\":[\"蘋果\",\"香蕉\"]}]}"}}
+{"timestamp":"2026-10-22T08:09:50.480Z","type":"event_msg","payload":{"type":"task_complete","turn_id":"turn-3"}}
+{"timestamp":"2026-10-22T12:37:00.472Z","type":"event_msg","payload":{"type":"thread_settings_applied"}}
+{"timestamp":"2026-10-22T12:37:05.354Z","type":"event_msg","payload":{"type":"thread_settings_applied"}}
+{"timestamp":"2026-10-22T12:37:05.360Z","type":"event_msg","payload":{"type":"task_started","turn_id":"turn-4"}}
+{"timestamp":"2026-10-22T12:37:05.649Z","type":"turn_context","payload":{"turn_id":"turn-4"}}
+{"timestamp":"2026-10-22T12:37:08.534Z","type":"response_item","payload":{"type":"function_call","name":"request_user_input_async","call_id":"call-4","arguments":"{\"questions\":[{\"title\":\"實測題：要選哪個城市？\",\"options\":[\"台北\",\"高雄\"]}]}"}}
+"#;
+
+    #[test]
+    fn completed_old_turns_do_not_hide_the_current_question() {
+        let meta: Value = serde_json::from_str(STALE_TURNS.lines().next().unwrap()).unwrap();
+        assert_eq!(meta["payload"]["cli_version"], "0.163.0");
+        let pending = pending_async_questions(STALE_TURNS);
+        assert_eq!(pending, vec![AsyncQuestion {
+            call_id: "call-4".into(), index: 0, title: "實測題：要選哪個城市？".into(), options: vec!["台北".into(), "高雄".into()],
+        }]);
+        let (screen, text) = collapsed("", 1);
+        assert_eq!(resolve(pending, &screen, &text).len(), 1);
+    }
+
+    #[test]
+    fn resumed_history_keeps_ended_questions_cleared_without_a_new_session_marker() {
+        // 真實的同檔續寫：只有第一次有 session_meta；恢復後先更新設定，再開始城市回合。
+        let before_new_question = STALE_TURNS.lines().take(17).collect::<Vec<_>>().join("\n");
+        assert_eq!(before_new_question.matches("session_meta").count(), 1);
+        assert!(pending_async_questions(&before_new_question).is_empty());
+        assert_eq!(pending_async_questions(STALE_TURNS)[0].call_id, "call-4");
+        // 原 rollout 第 241 行：城市回合也已結束時，城市題同樣失效。
+        let finished = format!("{STALE_TURNS}{}", json!({"type": "event_msg", "payload": {"type": "task_complete", "turn_id": "turn-4"}}));
+        assert!(pending_async_questions(&finished).is_empty());
+    }
+
+    #[test]
+    fn completion_and_interruption_clear_unanswered_questions() {
+        for kind in ["task_complete", "turn_aborted"] {
+            let log = [
+                ask("old", json!([{"title": "Old?"}])),
+                json!({"type": "event_msg", "payload": {"type": kind, "turn_id": "old-turn"}}).to_string(),
+            ].join("\n");
+            assert!(pending_async_questions(&log).is_empty(), "{kind}");
+            let log = format!("{log}\n{}", ask("new", json!([{"title": "New?"}])));
+            assert_eq!(pending_async_questions(&log), vec![q("new", "New?")]);
+        }
+    }
+
+    #[test]
+    fn answering_one_question_keeps_the_other_in_the_current_turn() {
+        let log = [
+            json!({"type": "event_msg", "payload": {"type": "task_started", "turn_id": "current"}}).to_string(),
+            ask("current", json!([{"title": "First?"}, {"title": "Second?"}])),
+            json!({"type": "turn_context", "payload": {"turn_id": "current"}}).to_string(),
+            reply("current", 0, "answer"),
+        ].join("\n");
+        let pending = pending_async_questions(&log);
+        assert_eq!(pending.len(), 1);
+        assert_eq!((pending[0].call_id.as_str(), pending[0].index, pending[0].title.as_str()), ("current", 1, "Second?"));
+        let (screen, text) = collapsed("", 1);
+        assert_eq!(resolve(pending, &screen, &text).len(), 1);
+    }
+
+    #[test]
+    fn a_cut_first_boundary_line_is_ignored_and_an_unproven_boundary_does_not_clear_questions() {
+        for kind in ["task_complete", "turn_aborted"] {
+            let boundary = json!({"type": "event_msg", "payload": {"type": kind}}).to_string();
+            let cut = &boundary[1..];
+            let current = ask("new", json!([{"title": "New?"}]));
+            assert_eq!(pending_async_questions(&format!("{cut}\n{current}")), vec![q("new", "New?")]);
+            // 中途有壞掉／截斷的事件時，不能只靠 type 的子字串把既有題目消掉而誤通過題數比對。
+            let log = format!("{}\n{cut}\n{current}", ask("old", json!([{"title": "Old?"}])));
+            let pending = pending_async_questions(&log);
+            assert_eq!(pending.len(), 2);
+            let (screen, text) = collapsed("", 1);
+            assert!(resolve(pending, &screen, &text).is_empty());
+        }
+    }
+
+    #[test]
+    fn quoted_or_nested_terminal_events_are_not_boundaries() {
+        let terminal = json!({"type": "event_msg", "payload": {"type": "task_complete"}});
+        let log = [
+            ask("old", json!([{"title": "Old?"}])),
+            json!({"type": "response_item", "payload": {"type": "function_call_output", "output": terminal.to_string()}}).to_string(),
+            json!({"type": "event_msg", "payload": {"type": "item_completed", "item": terminal}}).to_string(),
+            json!({"type": "turn_context", "payload": {"type": "turn_aborted"}}).to_string(),
+        ].join("\n");
+        assert_eq!(pending_async_questions(&log), vec![q("old", "Old?")]);
+    }
+
+    #[test]
+    fn clearing_a_completed_turn_does_not_guess_past_a_current_turn_skip() {
+        let log = [
+            STALE_TURNS.lines().take(13).collect::<Vec<_>>().join("\n"),
+            ask("current", json!([{"title": "Skipped?"}, {"title": "Still pending?"}])),
+        ].join("\n");
+        let pending = pending_async_questions(&log);
+        assert_eq!(pending.len(), 2);
+        let (screen, text) = collapsed("", 1);
+        assert!(resolve(pending, &screen, &text).is_empty(), "不取最後 N 題，當前回合 skip 歧義仍降級");
     }
 
     /// synthetic：形狀照 codex 0.163.0 真機 rollout（2026-10-21 隔離 session）寫的。
