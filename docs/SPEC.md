@@ -895,7 +895,7 @@ model／fast 照常校正。子 agent 的 `bots.effort` 只在**上一輪是已�
 其他 kind 與 model／identity 的補值不受影響。
 子 agent 的設定一律跟著 runtime 的切換（`child_runtime::follow`）：claude 見上段；codex 的狀態列校正（下面「之後也持續校正」）、
 grok 的框底校正，**這一輪 runtime 真的變了**的模型／強度才寫進 `bots.model`／`effort`——網頁改了 child 設定還沒套用時狀態列沒變，
-不會被畫面蓋回去；fast 照舊只從收編時的 argv 補（#393）。先寫設定再寫 runtime：設定寫不進去這輪整個不寫，下一輪仍不同才重試（#743 同理）。
+不會被畫面蓋回去；codex child 的 fast 也只在上一輪已知、這一輪真的切換時跟隨，未知初次觀察或重複巡邏不覆寫設定（#1894）。先寫設定再寫 runtime：設定寫不進去這輪整個不寫，下一輪仍不同才重試（#743 同理）。
 設定改了就推 `bot_changed`（`bot_status` 不帶設定，網頁要重抓 bots，否則 runtime 與設定已一致仍畫著 ⟳）；claude 的子 agent 跟隨也一樣推。
 收編時 reconcile 補 codex 的 NULL runtime 走同一個校正（`reconcile::fill_codex_runtime` → `codex_live::correct_runtime_from_screen`），
 收編前就在 TUI 換過模型的 child 設定也跟著狀態列。
@@ -980,7 +980,7 @@ StatusLine 分支（過世代圍籬之後，舊 run／舊 hook 進不來）發�
   claude／grok 一樣排，但它們的 slash 指令一次一個值：已經排著別的欄位時不合併（合併了 idle 那次整批 `not_a_single_field`），照舊回需重啟；idle 套用已取出、尚未完成時也保留這項限制，避免忙時重排把不同欄位合併後整批失敗。
   套成功走上面的 runtime／`live_rev`／`launch_rev` 收斂流程並推 `bot_changed`，套不上才留下重啟徽章。已成功的 TUI 操作若 DB 收尾失敗，只保留 bookkeeping 債務，不再送第二次操作；一旦 readback snapshot 進入 `live_apply_debts`，daemon 重啟後也會做 DB-only recovery。
 - **子 agent 的 fast 從 argv 補**（#393）：收編的 codex 子 agent 若 argv 有 `-c service_tier="priority"`，`bots.fast` 記成 1，UI 就不會平白亮「fast 需重啟」。`sync_pane_model` 原本只在 model／effort 為 NULL 時才看 argv，
-  model／effort 已有值（例如 fork 時帶入）的子 agent 永遠補不到；現在**收編後 10 分鐘內**也補 fast。刻意限縮在窗口內：`bots.fast=0` 分不出「沒設」與「使用者關掉了」，窗口外補會把使用者之後關掉的 fast 蓋回去。
+  model／effort 已有值（例如 fork 時帶入）的子 agent 永遠補不到；現在**收編後 10 分鐘內、active run 的 `runtime_fast` 仍未知**才補 fast。畫面一旦記下 fast 開／關，就不再拿舊 argv 補回；SQL 寫入時也再判一次，避免與畫面校正交錯（#1894）。`bots.fast=0` 分不出「沒設」與「使用者關掉了」，因此窗口外也不補。
 - **選單一律用讀的**：號碼、順序、`(default)`/`(current)` 會跑；每步回讀 pane，比對「號碼後到兩個空白為止」的 label（說明文字會含別的模型名）。
 - **最後回讀狀態列**（`<model> [<effort>] [fast] · <cwd> · Context …`）確認；`runtime_*` 存讀到的值，對不上回 `needs_restart`。
 - codex 會把選擇存成帳號預設（寫 `~/.codex/config.toml`），是 CLI 行為。

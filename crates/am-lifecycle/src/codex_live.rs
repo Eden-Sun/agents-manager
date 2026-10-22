@@ -161,14 +161,15 @@ pub async fn correct_runtime_from_screen(app: &(impl crate::capabilities::BotSta
     if same {
         return false;
     }
-    // child 的設定跟著 TUI 的切換（只跟這一輪變了的模型／強度；fast 照舊只看 argv，#393）。先寫設定：寫不進去就連 runtime
+    // child 的設定只跟這一輪觀察到改變的模型／強度／fast。先寫設定：寫不進去就連 runtime
     // 都不寫，下一輪仍不同才會再試。
     let model_moved = run.runtime_model.as_deref() != Some(seen.model.as_str());
-    if let Err(e) = crate::child_runtime::follow_with(
+    if let Err(e) = crate::child_runtime::follow_with_fast(
         app,
         &run.bot_id,
         Some(seen.model.as_str()).filter(|_| model_moved),
         effort_follow(seen.effort.as_deref(), run.runtime_effort.as_deref()),
+        run.runtime_fast.filter(|prev| *prev != i64::from(seen.fast)).map(|_| seen.fast),
     )
     .await
     {
@@ -991,6 +992,51 @@ mod tests {
         let screen = "  gpt-5.6-luna max fast · /tmp · Context 43% used · 5h 12% left\n";
         assert!(correct_runtime_from_screen(&env.app, &run, screen).await);
         assert_eq!(fast_of(&env, &run).await, Some(1));
+    }
+
+    #[tokio::test]
+    async fn fast_switches_follow_only_children_and_unchanged_runtime_keeps_pending_settings() {
+        for managed in ["child", "user"] {
+            let env = crate::testing::env().await;
+            let (bot, run) = child_with_effort(&env, managed, Some("high"), Some("high")).await;
+            sqlx::query("UPDATE bots SET fast=1 WHERE id=?").bind(&bot).execute(&env.app.db).await.unwrap();
+            sqlx::query("UPDATE runs SET runtime_fast=1 WHERE id=?").bind(&run).execute(&env.app.db).await.unwrap();
+            assert!(correct_runtime_from_screen(&env.app, &run, ASTRA_HIGH).await);
+            assert_eq!(db::bot(&env.app.db, &bot).await.unwrap().unwrap().fast, i64::from(managed != "child"));
+            assert_eq!(fast_of(&env, &run).await, Some(0));
+
+            // UI 再要求開 fast，尚未套用；即使這輪其他 runtime 欄位改變，也不能將 fast 蓋回關。
+            sqlx::query("UPDATE bots SET fast=1 WHERE id=?").bind(&bot).execute(&env.app.db).await.unwrap();
+            let low = ASTRA_HIGH.replace("astra high", "astra low");
+            assert!(correct_runtime_from_screen(&env.app, &run, &low).await);
+            assert_eq!(db::bot(&env.app.db, &bot).await.unwrap().unwrap().fast, 1);
+            assert!(!correct_runtime_from_screen(&env.app, &run, &low).await);
+            assert_eq!(db::bot(&env.app.db, &bot).await.unwrap().unwrap().fast, 1);
+
+            sqlx::query("UPDATE bots SET fast=0 WHERE id=?").bind(&bot).execute(&env.app.db).await.unwrap();
+            let on = low.replace("astra low", "astra low fast");
+            assert!(correct_runtime_from_screen(&env.app, &run, &on).await);
+            assert_eq!(db::bot(&env.app.db, &bot).await.unwrap().unwrap().fast, i64::from(managed == "child"));
+            assert_eq!(fast_of(&env, &run).await, Some(1));
+        }
+    }
+
+    #[tokio::test]
+    async fn fast_follow_failure_keeps_runtime_retryable_and_unknown_is_not_a_switch() {
+        let env = crate::testing::env().await;
+        let (bot, run) = child_with_effort(&env, "child", Some("high"), Some("high")).await;
+        sqlx::query("UPDATE bots SET fast=1 WHERE id=?").bind(&bot).execute(&env.app.db).await.unwrap();
+        sqlx::query("UPDATE runs SET runtime_fast=NULL WHERE id=?").bind(&run).execute(&env.app.db).await.unwrap();
+        assert!(correct_runtime_from_screen(&env.app, &run, ASTRA_HIGH).await);
+        assert_eq!(db::bot(&env.app.db, &bot).await.unwrap().unwrap().fast, 1, "初次觀察未知不是已知的切換");
+        sqlx::query("UPDATE runs SET runtime_fast=1 WHERE id=?").bind(&run).execute(&env.app.db).await.unwrap();
+        sqlx::query("CREATE TRIGGER reject_fast_follow BEFORE UPDATE OF fast ON bots BEGIN SELECT RAISE(FAIL, 'test fast write failure'); END").execute(&env.app.db).await.unwrap();
+        assert!(!correct_runtime_from_screen(&env.app, &run, ASTRA_HIGH).await);
+        assert_eq!(fast_of(&env, &run).await, Some(1));
+        sqlx::query("DROP TRIGGER reject_fast_follow").execute(&env.app.db).await.unwrap();
+        assert!(correct_runtime_from_screen(&env.app, &run, ASTRA_HIGH).await);
+        assert_eq!(db::bot(&env.app.db, &bot).await.unwrap().unwrap().fast, 0);
+        assert_eq!(fast_of(&env, &run).await, Some(0));
     }
 
     /// 子 agent（`managed_by=child`）與 run 的強度設定；`prev` 是 run 上一輪記的 `runtime_effort`（`None`＝未知）。

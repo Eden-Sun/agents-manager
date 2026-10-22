@@ -69,3 +69,12 @@ test('沒有 CLI 回報時看 runtime_fast（argv 收編來的），再退回設
   assert.ok(row('cfg').querySelector('.kind-fast'), '沒有 run 時退回設定值')
   assert.equal(row('stale').querySelector('.kind-fast'), null, '實際在跑的不是 fast，不畫')
 })
+
+test('#1894 child: configured Fast on but known runtime off never lights the sidebar bolt', async () => {
+  await render(
+    [bot('lead', { kind: 'claude' }), bot('kid', { parent_bot_id: 'lead', managed_by: 'child', fast: true })],
+    { kid: run('kid', { runtime_model: 'gpt-6-astra', runtime_effort: 'low', runtime_fast: false }) },
+  )
+  assert.equal(row('kid').querySelector('.kind-fast'), null)
+  assert.doesNotMatch(row('kid').querySelector('.model-tag')?.getAttribute('title')?.split('需重啟')[0] ?? '', / · fast/)
+})

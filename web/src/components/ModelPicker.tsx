@@ -6,6 +6,7 @@ import { CLAUDE_EFFORT_OPTIONS, CODEX_EFFORT_OPTIONS, EFFORT_OPTIONS, FAST_TIER,
 import { useMenuKeys } from '../hooks/useMenuKeys'
 import { modelMatches } from '../lib/modelMatches'
 import { modelSwitchPatch } from '../lib/modelSwitch'
+import { runningFast } from '../lib/runtimeDrift'
 import { useStore } from '../store/store'
 import { KindTag } from './KindTag'
 import './modelPicker.css'
@@ -271,6 +272,8 @@ export function ModelQuickPicker({
   children: ReactNode
 }) {
   const bot = useStore((s) => s.bots.find((b) => b.id === botId) ?? null)
+  const run = useStore((s) => s.runs[botId] ?? null)
+  const fast = bot ? runningFast(bot, run) : false
   const identity = bot?.identity ?? null
   const key = `${kind}@${host || 'local'}@${identity || ''}`
   const cached = useStore((s) => s.models[key])
@@ -381,7 +384,7 @@ export function ModelQuickPicker({
       return
     }
     setOpen(false)
-    void apply({ fast: !bot.fast })
+    void apply({ fast: !fast })
   }
 
   const hasFast = current?.service_tiers.some((t) => t.id === FAST_TIER) ?? false
@@ -454,9 +457,9 @@ export function ModelQuickPicker({
               <button
                 type="button"
                 role="menuitemcheckbox"
-                aria-checked={bot?.fast === true}
+                aria-checked={fast}
                 tabIndex={-1}
-                className={`opt${bot?.fast ? ' on' : ''}`}
+                className={`opt${fast ? ' on' : ''}`}
                 disabled={patching}
                 title={current?.service_tiers.find((t) => t.id === FAST_TIER)?.description || '優先佇列（service_tier=priority）'}
                 onClick={toggleFast}
