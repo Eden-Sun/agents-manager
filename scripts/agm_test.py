@@ -1466,6 +1466,37 @@ class IncidentsCommandTest(CliCase):
         self.assertEqual(self.bad("incidents")["error"], "unsupported")
 
 
+class ModelsCommandTest(CliCase):
+    @patch.dict(os.environ, {"AM_BOT_ID": "bot-agm", "AM_BOT_TOKEN": "model-test-proof"})
+    def test_remote_refresh_preserves_host_identity_and_bot_auth(self):
+        FakeDaemon.routes["GET /api/models"] = (200, {"host": "m4p", "models": [{"id": "test-model"}]})
+        out = self.ok("models", "--kind", "codex", "--host", "m4p", "--identity", "cc & 1", "--refresh")
+        self.assertEqual(out["host"], "m4p")
+        self.assertEqual(len(FakeDaemon.seen), 1, "Bot must not bootstrap a User credential")
+        req = FakeDaemon.seen[0]
+        self.assertEqual(urllib.parse.parse_qs(urllib.parse.urlsplit(req["path"]).query),
+                         {"kind": ["codex"], "host": ["m4p"], "identity": ["cc & 1"], "refresh": ["1"]})
+        self.assertEqual(req["bot_token"], "model-test-proof")
+
+    def test_plain_read_does_not_request_refresh(self):
+        FakeDaemon.routes["GET /api/models"] = (200, {"models": []})
+        self.ok("models", "--kind", "claude")
+        req = next(r for r in FakeDaemon.seen if r["path"].startswith("/api/models"))
+        self.assertEqual(urllib.parse.parse_qs(urllib.parse.urlsplit(req["path"]).query),
+                         {"kind": ["claude"], "host": ["local"]})
+
+    @patch.dict(os.environ, {"AM_BOT_ID": "ordinary-bot", "AM_BOT_TOKEN": "model-test-proof"})
+    def test_errors_keep_status_and_never_retry_with_another_credential(self):
+        for status, error in [(403, "user_only"), (503, "model_cache_miss")]:
+            with self.subTest(status=status):
+                FakeDaemon.seen = []
+                FakeDaemon.routes["GET /api/models"] = (status, {"error": error})
+                err = self.bad("models", "--kind", "codex", "--host", "m4p", "--refresh")
+                self.assertEqual(err["status"], status)
+                self.assertEqual(err["detail"]["error"], error)
+                self.assertEqual(len(FakeDaemon.seen), 1)
+
+
 class MiscCommandTest(CliCase):
     def test_handoff_read_and_write(self):
         FakeDaemon.routes["GET /api/supervisor/handoff"] = (200, {"summary": "舊摘要"})

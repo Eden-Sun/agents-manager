@@ -1890,6 +1890,13 @@ def _with_relay(body: dict, cfg: dict, args) -> None:
 QUOTA_PROBE_TIMEOUT = 300.0
 
 
+def cmd_models(client: Client, cfg: dict, args) -> object:
+    """模型查詢／刷新沿用 Client 的角色憑證，權限由 daemon 判定。"""
+    query = {"kind": args.kind, "host": args.host, "identity": args.identity,
+             "refresh": "1" if args.refresh else None}
+    return client.get("/api/models", query)
+
+
 def cmd_quota(client: Client, cfg: dict, args) -> object:
     if not getattr(args, "probe", False):
         if args.account or args.host:
@@ -2797,6 +2804,13 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("--summary")
     s.add_argument("--summary-file")
     s.set_defaults(func=cmd_handoff)
+
+    s = sub.add_parser("models", help="查可用模型；--refresh 由 AGM／User 更新指定主機與身分快取")
+    s.add_argument("--kind", required=True, choices=["claude", "codex", "grok", "agy"])
+    s.add_argument("--host", default="local", help="執行 CLI 的主機名；不是 daemon 的位址")
+    s.add_argument("--identity", help="身分名；省略＝該主機預設身分")
+    s.add_argument("--refresh", action="store_true", help="強制更新快取；一般 Bot 無此權限，403 不改用其他憑證")
+    s.set_defaults(func=cmd_models)
 
     s = sub.add_parser("quota", help="各身分的額度狀態；--probe 強制重跑 /usage 並覆寫 cache")
     s.add_argument("--probe", action="store_true", help="強制重跑該帳號的 /usage，結果蓋掉 statusLine 的值")
