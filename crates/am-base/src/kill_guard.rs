@@ -115,25 +115,22 @@ fn check_simple(simple: &Simple, depth: u32, ctx: &mut Ctx) -> Verdict {
     let Some(head) = w.first() else { return Verdict::Allow };
     let args = &w[1..];
     let name = basename(head);
-    let mut dash_c = false;
+    let mut shell: Option<ShellOpts> = None;
     let verdict = match name {
         "kill" => check_kill(args),
         "pkill" => check_pkill(args, ctx),
         "killall" => check_killall(args, ctx),
         n if is_shell(n) => {
-            // `bash -n`／`-nv`：只檢查語法、不執行，裡面寫什麼都不會跑（但 `+n`、`+o noexec` 會再打開，所以照順序算最後的狀態）。
-            if shell_noexec(args) {
-                return Verdict::Allow;
-            }
-            // `bash -c '…'`、`bash -lc '…'`：-c 的下一個參數是一段 shell 指令。
-            let c = args.iter().position(|a| a.starts_with('-') && !a.starts_with("--") && a.contains('c'));
-            match c.and_then(|i| args.get(i + 1)) {
-                Some(script) => {
-                    dash_c = true;
-                    check_depth(script, depth + 1, ctx)
-                }
+            let o = shell_opts(args);
+            let verdict = match o.command.and_then(|i| args.get(i)) {
+                // `bash -n`／`-o noexec`：只檢查語法、不執行，裡面寫什麼都不會跑。
+                Some(_) | None if o.noexec => Verdict::Allow,
+                // `bash -c '…'`、`bash -lc '…'`：第一個非選項字是一段 shell 指令。
+                Some(script) => check_depth(script, depth + 1, ctx),
                 None => Verdict::Allow,
-            }
+            };
+            shell = Some(o);
+            verdict
         }
         "eval" => check_depth(&args.join(" "), depth + 1, ctx),
         _ => Verdict::Allow,
@@ -143,7 +140,9 @@ fn check_simple(simple: &Simple, depth: u32, ctx: &mut Ctx) -> Verdict {
     }
     // heredoc／here-string：餵給 shell（沒有 -c、沒有 script 檔參數）的就是一份要跑的 script；其他指令的未加引號 heredoc 內文只有 `$(…)`、反引號會被執行。
     for doc in &simple.docs {
-        let v = if is_shell(name) && !dash_c && args.iter().all(|a| a.starts_with(['-', '+'])) {
+        // 餵給 shell 當 script：沒有 `-c`、沒有 script 檔參數（或有 `-s`）、不是 noexec。
+        let as_script = shell.as_ref().is_some_and(|o| !o.noexec && o.command.is_none() && (o.stdin_script || o.positional >= args.len()));
+        let v = if as_script {
             check_depth(&doc.body, depth + 1, ctx)
         } else if doc.expands {
             let mut out = Verdict::Allow;
@@ -164,36 +163,84 @@ fn check_simple(simple: &Simple, depth: u32, ctx: &mut Ctx) -> Verdict {
     Verdict::Allow
 }
 
-/// shell 的選項（到第一個非選項字為止；`-c` 的下一個字是指令、其後的字是 `$0` 與參數，不再是選項）照順序算完，最後是不是 noexec。
-fn shell_noexec(args: &[String]) -> bool {
-    let (mut noexec, mut i) = (false, 0);
+/// shell 命令列的選項照順序走完的結果。
+struct ShellOpts {
+    /// 最後是不是 noexec（`-n`、`-o noexec` 開、`+n`、`+o noexec` 關，照順序）。選項裡有不認得的就是 `false`（判斷不了，不當 noexec 放行）。
+    noexec: bool,
+    /// `-c` 的指令字在 `args` 的位置（第一個非選項字）。
+    command: Option<usize>,
+    /// 有 `-s`：script 從 stdin 讀，後面的字是位置參數。
+    stdin_script: bool,
+    /// 第一個非選項字的位置（沒有就是 `args.len()`）。
+    positional: usize,
+}
+
+/// 認得的不帶值的單字母選項（bash／sh／dash／zsh／ksh 共有或常見的）；不在這裡的選項字母＝判斷不了。
+const SHELL_FLAGS: &str = "abefhikmnprstuvxBCDEHIJLPTclsX";
+/// 認得的不帶值的長選項（bash）。
+const SHELL_LONG_FLAGS: &[&str] = &["posix", "noediting", "noprofile", "norc", "restricted", "verbose", "login", "debugger", "dump-strings", "dump-po-strings", "help", "version"];
+
+/// 把 `args`（shell 後面的參數）當 shell 的命令列選項照順序走完：`-o`／`+o`／`-O`／`+O` 與 `--rcfile`／`--init-file` 帶值、
+/// 要把值一起吃掉，不然 `bash -n -O extglob +n -c '…'` 會在 `extglob` 停下、把前面的 `-n` 當成最後狀態。
+/// 遇到不認得的選項（字母或長選項）：整個 `noexec` 當 `false`（照一般規則判斷，不放行）。
+fn shell_opts(args: &[String]) -> ShellOpts {
+    let mut o = ShellOpts { noexec: false, command: None, stdin_script: false, positional: args.len() };
+    let (mut noexec, mut c, mut i) = (false, false, 0usize);
+    let mut unknown = false;
     while let Some(a) = args.get(i) {
-        let on = a.starts_with('-');
-        if a == "--" || !(on || a.starts_with('+')) || a.len() < 2 {
-            break;
-        }
-        if a.starts_with("--") {
+        if a == "--" {
             i += 1;
-            continue;
-        }
-        let cluster = &a[1..];
-        if cluster.contains('n') {
-            noexec = on;
-        }
-        // `-o noexec`／`+o noexec`：選項名在下一個字。
-        if cluster.ends_with('o') {
-            if args.get(i + 1).is_some_and(|v| v == "noexec") {
-                noexec = on;
-            }
-            i += 2;
-            continue;
-        }
-        if cluster.contains('c') {
             break;
         }
-        i += 1;
+        let on = a.starts_with('-');
+        if !(on || a.starts_with('+')) || a.len() < 2 {
+            break;
+        }
+        if let Some(long) = a.strip_prefix("--") {
+            match long {
+                "rcfile" | "init-file" => i += 2,
+                l if SHELL_LONG_FLAGS.contains(&l) => i += 1,
+                _ => {
+                    unknown = true;
+                    i += 1;
+                }
+            }
+            continue;
+        }
+        let mut consumed = 1;
+        for ch in a[1..].chars() {
+            match ch {
+                'n' => noexec = on,
+                'c' => c = on,
+                's' => o.stdin_script = on,
+                'o' => {
+                    if args.get(i + consumed).is_some_and(|v| v == "noexec") {
+                        noexec = on;
+                    }
+                    consumed += 1;
+                }
+                'O' => consumed += 1,
+                x if SHELL_FLAGS.contains(x) => {}
+                _ => unknown = true,
+            }
+        }
+        i += consumed;
     }
-    noexec
+    o.positional = i.min(args.len());
+    if c {
+        o.command = (i < args.len()).then_some(i);
+        if o.command.is_some() {
+            o.positional = i + 1;
+        }
+    }
+    if unknown {
+        // 選項看不懂就看不準哪個字是值：指令字與 script 檔參數退回粗略的找法（含 `c` 的短選項叢的下一個字；第一個不以 `-`／`+` 開頭的字），
+        // 而且絕不當 noexec 放行。
+        o.command = args.iter().position(|a| a.starts_with('-') && !a.starts_with("--") && a.contains('c')).map(|p| p + 1).filter(|p| *p < args.len());
+        o.positional = args.iter().position(|a| !a.starts_with(['-', '+'])).unwrap_or(args.len());
+    }
+    o.noexec = noexec && !unknown;
+    o
 }
 
 fn basename(p: &str) -> &str {

@@ -401,6 +401,31 @@
         assert!(!denied("bash -nc 'pkill -f claude'"));
         assert!(!denied("bash -n +x <<'EOF'\npkill -f claude\nEOF"));
         assert!(!denied("bash -n -o noexec +o xtrace -c 'pkill -f claude'"));
+        // 帶值的選項（`-O`／`+O`、`-o`／`+o`、`--rcfile`）要把值一起吃掉，不能在值那裡停下、留著前面的 `-n`。
+        assert!(denied("bash -n -O extglob +n -c 'kill -9 -1'"));
+        assert!(denied("bash -n -O extglob +n -c 'pkill -f claude'"));
+        assert!(denied("bash -n +O extglob +n -c 'pkill -f claude'"));
+        assert!(denied("bash -n -o errexit +n -c 'pkill -f claude'"));
+        assert!(denied("bash -n --rcfile /tmp/x +n -c 'pkill -f claude'"));
+        assert!(denied("bash -n -O extglob +o noexec -c 'pkill -f claude'"));
+        assert!(denied("bash -no noexec +n -c 'pkill -f claude'"));
+        assert!(denied("bash -nO extglob +n <<'EOF'\npkill -f claude\nEOF"));
+        assert!(!denied("bash -O extglob -n -c 'pkill -f claude'"));
+        assert!(!denied("bash -n -O extglob -c 'pkill -f claude'"));
+        assert!(!denied("bash -n -O extglob -O globstar -o pipefail -c 'pkill -f claude'"));
+        assert!(!denied("bash -nO extglob -c 'pkill -f claude'"));
+        assert!(!denied("sh -n -o errexit <<'EOF'\npkill -f claude\nEOF"));
+        // 不認得的選項：判斷不了，不當 noexec 放行（照一般規則判斷）。
+        assert!(denied("bash -n -Z -c 'pkill -f claude'"));
+        assert!(denied("bash -n --frobnicate -c 'pkill -f claude'"));
+        assert!(denied("bash -n -O extglob -Z -c 'pkill -f claude'"));
+        // 位置參數／script 檔不是 stdin 的 script；`-s` 才是。
+        assert!(!denied("bash script.sh <<'EOF'\npkill -f claude\nEOF"));
+        assert!(!denied("bash -O extglob script.sh <<'EOF'\npkill -f claude\nEOF"));
+        assert!(denied("bash -s arg <<'EOF'\npkill -f claude\nEOF"));
+        assert!(denied("bash -O extglob <<'EOF'\npkill -f claude\nEOF"));
+        // noexec 的 shell 只是不跑 script；外層 shell 展開的 heredoc 內文 `$(…)` 照樣會執行。
+        assert!(denied("bash -n <<EOF\n$(pkill -f claude)\nEOF"));
         // `-c` 之後的字是 `$0`／參數，不是選項。
         assert!(!denied("bash -n -c 'pkill -f claude' +n"));
         assert!(denied("bash -c 'echo no' ; bash <<'EOF'\npkill -f claude\nEOF"));
