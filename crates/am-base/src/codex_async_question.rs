@@ -122,12 +122,12 @@ pub fn async_screen(text: &str) -> Option<AsyncScreen> {
         // 收合：`? 1 question · 7s`，下一個有字的行是 `shift+← to answer`。
         if let Some(count) = collapsed_count(line) {
             let next = lines[i + 1..].iter().find(|l| !l.is_empty());
-            if next.is_some_and(|l| l.starts_with("shift+← to answer")) {
+            if next.is_some_and(|l| l.starts_with("shift+← to answer") || l.starts_with("⇧← to answer")) {
                 return Some(AsyncScreen { expanded: false, count });
             }
         }
         // 展開：腳註 `enter submit   ^] skip   shift+→ main prompt`（多題另加 `shift+← next question`）。
-        if line.starts_with("enter submit") && line.contains("^] skip") {
+        if line.starts_with("enter submit") && (line.contains("^] skip") || line.contains("⌃] skip")) {
             let count = lines[..i]
                 .iter()
                 .rev()
@@ -351,6 +351,19 @@ mod tests {
         assert_eq!(async_screen(EXPANDED), Some(AsyncScreen { expanded: true, count: 1 }));
         assert_eq!(async_screen(EXPANDED_OF_TWO), Some(AsyncScreen { expanded: true, count: 2 }));
         assert_eq!(async_screen(&COLLAPSED.replace("? 1 question · 7s", "? 3 questions · 12s")), Some(AsyncScreen { expanded: false, count: 3 }));
+    }
+
+    /// The frontend reads this same fixture manifest, so Linux/macOS glyph support stays paired.
+    #[test]
+    fn shared_frontend_fixtures_have_the_same_async_screen_states() {
+        let cases: Vec<Value> = serde_json::from_str(include_str!("../../../web/src/lib/__fixtures__/codex-async-screen-cases.json")).unwrap();
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../web/src/lib/__fixtures__");
+        for case in cases {
+            let name = case["file"].as_str().unwrap();
+            let text = std::fs::read_to_string(root.join(name)).unwrap();
+            let got = async_screen(&text).map(|screen| json!({"expanded": screen.expanded, "count": screen.count}));
+            assert_eq!(got.unwrap_or(Value::Null), case["expected"], "{name}");
+        }
     }
 
     /// 對話紀錄裡引用的那幾行字、沒有 `shift+← to answer` 的問號行，都不算畫面上有提問。

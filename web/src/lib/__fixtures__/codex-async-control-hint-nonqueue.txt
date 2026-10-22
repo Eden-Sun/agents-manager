@@ -1,0 +1,5 @@
+Continue with this operation?
+› 1. Yes
+  2. Other
+
+Enter to select · ↑/↓ to navigate · ⌃C to cancel

@@ -11,6 +11,7 @@
  */
 
 import { splitPreviewPane } from './tuiPreviewPane.ts'
+import { ASYNC_QUESTION_FOOTER as ASYNC_FOOTER } from './codexAsyncQuestion.ts'
 
 export interface TuiChoice {
   /** 畫面上印的編號；送鍵時不靠它。 */
@@ -75,7 +76,7 @@ export interface TuiChoiceMenu {
   /** 沒編號的 `Submit` 列（多選才有）；`after` 是排在第幾個選項後面。 */
   submit: { after: number; current: boolean } | null
   /**
-   * codex 的非同步提問展開後的選單（`Queued follow-up inputs`，腳註 `enter submit  ^] skip`，issue #1879）：
+   * codex 的非同步提問展開後的選單（`Queued follow-up inputs`，腳註 `enter submit  ^] skip`／macOS `enter submit  ⌃] skip`，issue #1879）：
    * 最後一列 `Other` 是打字列——游標停在上面直接貼字就把標題換成那段字，Enter 送出（codex 0.163.0 真機）。
    * 只有認得這個腳註才是 `true`；舊版與其他選單沒有這個欄位。
    */
@@ -122,9 +123,6 @@ const TRANSCRIPT = /^[⏺⎿✽·✢✻✶*]/
 const BULLET = /^\s+[·•]\s/
 
 const ASKS = /[?？]$/
-
-/** codex 非同步提問展開後的腳註 `enter submit   ^] skip   shift+→ main prompt`（多題另加 `shift+← next question`）。 */
-const ASYNC_FOOTER = /^\s*enter submit\b.*\^\]\s*skip/i
 
 /** 多題時選單上面那行 `1 of 2`，不是題目的一部分。 */
 const PAGE_OF = /^\d+ of \d+$/

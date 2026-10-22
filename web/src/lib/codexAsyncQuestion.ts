@@ -18,7 +18,8 @@ export interface AsyncScreen {
 const SCAN = 40
 
 const COLLAPSED = /^\?\s+(\d+)\s+questions?(?:\s.*)?$/
-const EXPANDED_FOOTER = /^enter submit\b.*\^\]\s*skip/i
+/** Both platform renderings describe the same queue; these glyphs are never outgoing keys. */
+export const ASYNC_QUESTION_FOOTER = /^\s*enter submit\b.*(?:\^|⌃)\]\s*skip/i
 const PAGE_OF = /^\d+ of (\d+)$/
 
 /** 畫面上有沒有非同步提問、什麼狀態；沒有回 `null`。 */
@@ -30,9 +31,9 @@ export function parseAsyncScreen(text: string | null | undefined): AsyncScreen |
     const collapsed = COLLAPSED.exec(lines[i])
     if (collapsed && Number(collapsed[1]) > 0) {
       const next = lines.slice(i + 1).find((l) => l !== '')
-      if (next?.startsWith('shift+← to answer')) return { expanded: false, count: Number(collapsed[1]) }
+      if (next?.startsWith('shift+← to answer') || next?.startsWith('⇧← to answer')) return { expanded: false, count: Number(collapsed[1]) }
     }
-    if (EXPANDED_FOOTER.test(lines[i])) {
+    if (ASYNC_QUESTION_FOOTER.test(lines[i])) {
       const page = lines
         .slice(Math.max(0, i - 8), i)
         .reverse()

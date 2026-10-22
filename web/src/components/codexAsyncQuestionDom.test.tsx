@@ -4,6 +4,8 @@ import { readFileSync } from 'node:fs'
 import { act, click, mount, setupDom, teardownDom, typeInto, unmountAll, until } from '../testing/domHarness'
 import type { Bot, Run, TerminalSnapshot } from '../api/types.ts'
 import { CodexAsyncQuestion } from './CodexAsyncQuestion.tsx'
+import { BlockedChoices } from './BlockedChoices.tsx'
+import { parseChoiceMenu } from '../lib/tuiChoices.ts'
 
 const { resetStoreForTest, useStore } = await import('../store/store.ts')
 
@@ -76,6 +78,30 @@ test('收合的提問：按「展開作答」只送一下 shift+←，畫面展�
   await click(buttonByText('展開作答')!)
   await until(() => rig.keys.length === 1 && !root.querySelector('[role="status"]'), '送出 shift+←')
   assert.deepEqual(rig.keys, [['shift+left']], '只送展開，不替使用者選任何答案')
+  assert.deepEqual(rig.texts, [])
+})
+
+test('macOS glyphs: expand uses shift+left, then directions and Enter are separate pinned steps', async () => {
+  const collapsed = fx('codex-0.163.0-macos-collapsed.txt')
+  const expanded = fx('codex-0.163.0-macos-expanded.txt')
+  const moved = expanded.replace('› 1. 蘋果', '  1. 蘋果').replace('  2. 香蕉', '› 2. 香蕉')
+  const rig = await setup('codex', collapsed, { onKeys: (r, keys) => {
+    if (keys[0] === 'shift+left') r.screen.text = expanded
+    if (keys[0] === 'down') r.screen.text = moved
+  } })
+  const root = await mount(<CodexAsyncQuestion botId="b1" text={collapsed} />)
+  assert.ok(root.textContent?.includes('1 題非同步提問'))
+  await click(buttonByText('展開作答')!)
+  await until(() => rig.keys.length === 1 && !root.querySelector('[role="status"]'), 'macOS expand')
+  assert.deepEqual(rig.keys, [['shift+left']])
+  await unmountAll()
+  const menu = parseChoiceMenu(expanded)
+  assert.ok(menu?.asyncQueue)
+  const choices = await mount(<BlockedChoices botId="b1" menu={menu} />)
+  await click(choices.querySelectorAll<HTMLButtonElement>('.bc-item')[1])
+  await until(() => rig.keys.some((keys) => keys[0] === 'enter'), 'macOS answer after cursor confirmation')
+  assert.deepEqual(rig.keys, [['shift+left'], ['down'], ['enter']], 'never send display glyphs or combine movement with submit')
+  assert.deepEqual(rig.pins, ['r1', 'r1', 'r1'])
   assert.deepEqual(rig.texts, [])
 })
 

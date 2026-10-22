@@ -1,0 +1,2 @@
+• The screen says `? 1 question` and `⇧← to answer` (Linux: shift+← to answer).
+› Ask Codex to do anything

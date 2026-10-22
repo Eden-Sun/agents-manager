@@ -3,6 +3,7 @@ import assert from 'node:assert/strict'
 import { readFileSync } from 'node:fs'
 import { EMPTY_INPUT, asyncPanelText, inputEquals, panelInput, panelShows, parseAsyncScreen } from './codexAsyncQuestion.ts'
 import { keysToSelect, parseChoiceMenu, typedAnswerHere } from './tuiChoices.ts'
+import { KEYPAD, herdrKeyFromEvent } from '../hooks/usePaneKeys.ts'
 
 // 2026-10-21 真機（codex 0.163.0，隔離 tmux session；路徑與模型列已簡化）：issue #1879。
 const fx = (name: string) => readFileSync(new URL(`./__fixtures__/${name}`, import.meta.url), 'utf8')
@@ -11,6 +12,26 @@ const EXPANDED = fx('codex-0.163-async-expanded.txt')
 const OF_TWO = fx('codex-0.163-async-expanded-of2.txt')
 const FREE_TEXT = fx('codex-0.163-async-free-text.txt')
 const OTHER_TYPED = fx('codex-0.163-async-other-typed.txt')
+
+// Rust's codex_async_question test consumes this exact manifest and every listed file.
+const screenCases = JSON.parse(fx('codex-async-screen-cases.json')) as {
+  file: string
+  expected: { expanded: boolean; count: number } | null
+}[]
+for (const { file, expected } of screenCases) {
+  test(`Rust/TS async-screen parity: ${file}`, () => {
+    assert.deepEqual(parseAsyncScreen(fx(file)), expected)
+  })
+}
+
+test('macOS hint glyphs stay labels while outgoing keys use herdr names', () => {
+  assert.deepEqual(KEYPAD.filter((key) => key.label === '⇧←' || key.label === '⇧→').map((key) => key.keys), [
+    ['shift+left'], ['shift+right'],
+  ])
+  for (const [key, expected] of [['ArrowLeft', 'shift+left'], ['ArrowRight', 'shift+right']]) {
+    assert.equal(herdrKeyFromEvent({ key, shiftKey: true, metaKey: false, ctrlKey: false, altKey: false, isComposing: false } as KeyboardEvent), expected)
+  }
+})
 
 test('收合、展開、多題與自由輸入的畫面各自認得出狀態與題數', () => {
   assert.deepEqual(parseAsyncScreen(COLLAPSED), { expanded: false, count: 1 })
@@ -41,6 +62,28 @@ test('展開後的選單照編號選單認：腳註不再被當成 Other 的說�
   assert.equal(typedAnswerHere(menu, menu.choices[3]), true)
   assert.equal(typedAnswerHere(menu, menu.choices[0]), false)
 })
+
+test('macOS panels share asyncQueue footer detection and keep Other as a typing row', () => {
+  for (const name of ['codex-0.163.0-macos-expanded.txt', 'codex-0.163.0-macos-expanded-of2-synthetic.txt']) {
+    const menu = parseChoiceMenu(fx(name))
+    assert.ok(menu, name)
+    assert.equal(menu.asyncQueue, true, name)
+    assert.equal(menu.question, '測試題二：要選哪個水果？')
+    assert.deepEqual(menu.choices.map((c) => c.title), ['蘋果', '香蕉', 'Other'])
+    assert.equal(menu.choices[2].detail, '', 'macOS footer must not become Other detail')
+    assert.equal(typedAnswerHere(menu, menu.choices[2]), true)
+  }
+})
+
+for (const name of ['codex-async-ordinary-menu.txt', 'codex-async-control-hint-nonqueue.txt']) {
+  test(`ordinary menu is never asyncQueue: ${name}`, () => {
+    const menu = parseChoiceMenu(fx(name))
+    assert.ok(menu)
+    assert.equal(menu.asyncQueue, undefined)
+    assert.equal(parseAsyncScreen(fx(name)), null)
+    assert.ok(menu.choices.every((choice) => !typedAnswerHere(menu, choice)))
+  })
+}
 
 test('別的選單裡叫 Other 的是一般選項，不是打字列', () => {
   const plain = parseChoiceMenu('Pick one?\n❯ 1. Yes\n  2. Other\n\nEnter to select · ↑/↓ to navigate · Esc to cancel\n')
