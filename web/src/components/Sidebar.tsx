@@ -75,6 +75,7 @@ import { TabsBadge } from './TabsBadge'
 import { ModelTag } from './ModelTag'
 import { JudgeBadge } from './JudgeBadge'
 import { BotRowMenu } from './BotRowMenu'
+import { BotLimitBadge } from './BotLimitBadge'
 import { JudgePanel } from './JudgePanel'
 import { KindDisplayToggle, KindTag } from './KindTag'
 import { KIND_LABEL } from './kindMeta'
@@ -477,6 +478,9 @@ function BotRowImpl({
             />
           )}
           <ModelTag botId={botId} short={compact} />
+          {compact || bot.parent_bot_id ? null : (
+            <BotLimitBadge hit={bot.limit_hit} who={`${KIND_LABEL[bot.kind]} · ${quotaWho ?? '預設'}`} />
+          )}
           {quotaWarning ? (
             <span
               className="bot-quota-chip crit"
