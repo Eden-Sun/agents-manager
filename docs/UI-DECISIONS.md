@@ -116,7 +116,7 @@
 - 手機：★ 主力一排、在跑／剛完成的另一排（2026-09-16 使用者：「已完成放下一排，方便我點選」），兩排各自橫捲、各有 ◂ ▸；排內順序仍不重排（肌肉記憶）。哪一排空了就不畫。
   ![手機兩排各有箭頭](screenshots/fix3-web3/mock-mobile-two-rows-arrows.png)
 - 手機：每一排都是單行橫捲、**位置固定照側欄順序，不照緊急度重排**（使用者指定），有 ◂ ▸ 與 scroll shadow，正在看的那顆自動捲進畫面。
-- **主力撞限角標（#1899，使用者 2026-10-22 選 v1）**：頂層主力撞限、還沒過 `until` 時，★ 晶片右上角貼一個 13px 墨色圓、白色斜線（禁止符號），只有圖示、偏移 -3px，主力列不加留白。顏色走 token（`--limit-mark-ink`／`--limit-mark-slash`），深色主題墨與斜線對調，兩種主題都要看得到。title 與 sr-only label 寫「<kind> 已達用量上限，<時間> 恢復」；角標本身 `aria-hidden`，文字併進晶片 label，螢幕閱讀器只念一次。過了 `until` 自動消失；只讀 `bot.limit_hit`，判斷在 daemon。
+- **主力撞限角標（#1899，使用者 2026-10-22 選 v1）**：頂層主力撞限、還沒過 `until` 時，★ 晶片右上角貼一個 13px 墨色圓、白色斜線（禁止符號），只有圖示、偏移 -1px（收合時組只有 1px padding，-3px 會被裁），主力列不加留白。顏色走 token（`--limit-mark-ink`／`--limit-mark-slash`），深色主題墨與斜線對調，兩種主題都要看得到。title 與 sr-only label 寫「<kind> 已達用量上限，<時間> 恢復」；角標本身 `aria-hidden`，文字併進晶片 label，螢幕閱讀器只念一次。過了 `until` 自動消失；只讀 `bot.limit_hit`，判斷在 daemon。
 - 狀態 class 不叫 `blocked`（`styles.css` 有一條裸的 `.blocked` 會撞到），用 `needs-reply`／`quota-blocked`。
 - 桌機收合的行數用**排版位置**（`offsetTop`）量，主力的 FLIP 只在順序真的變了時播（`lib/chipOverflow.ts` 的 `layoutBoxes`／`orderChanged`）。
   以前 bot 狀態一變、晶片變寬換行就播 FLIP，量測又吃到動畫中的 transform，裁切在 13／43／63／91px 之間每幀亂跳，
