@@ -1629,6 +1629,12 @@ pub async fn state_json(app: &Arc<App>) -> Result<Value, LcError> {
         .flat_map(|p| p.bots.iter())
         .filter_map(|c| Some((c.id.as_deref()?, c.create_request_id.as_deref()?)))
         .collect();
+    // 撞限（#1899）：整份快照一次批次算完（查詢次數不隨 bot 數增加），逐顆只取值。
+    let limit_hits: HashMap<String, crate::quota::LimitHit> = bots
+        .iter()
+        .zip(crate::runners::quota::limit_hits_for_bots(app, &bots).await)
+        .filter_map(|(b, hit)| hit.map(|hit| (b.id.clone(), hit)))
+        .collect();
     let mut out = Vec::new();
     for p in projects {
         let mut bl = Vec::new();
@@ -1640,6 +1646,7 @@ pub async fn state_json(app: &Arc<App>) -> Result<Value, LcError> {
             let mut run_v = crate::background_jobs::run_json(app, &run, run.as_ref().map(|r| r.id.as_str()));
             crate::cache_clock::annotate(&mut run_v, &b.kind, last_turns.get(&b.id));
             crate::send_now_capability::annotate(&mut run_v, &b.kind, run.as_ref(), cfg.codex.instant_interrupt);
+            let limit_hit = crate::state::limit_hit_value(b, limit_hits.get(&b.id));
             bl.push(json!({
                 "id": b.id,
                 "project_id": b.project_id,
@@ -1663,6 +1670,8 @@ pub async fn state_json(app: &Arc<App>) -> Result<Value, LcError> {
                 "create_request_id": create_request_ids.get(b.id.as_str()),
                 // 使用者釘的主要 bot（純顯示）。
                 "primary": b.is_primary == 1,
+                // 頂層主力撞限中才有值（#1899，唯讀；判斷在 daemon）。child 與沒撞限一律 null。
+                "limit_hit": limit_hit,
                 // 主力那列的固定順序（#344）：1 起算，0＝沒排過；取消釘選不清。
                 "primary_position": b.primary_position,
                 // 執行中的 CLI 載入的啟動設定跟現在存的不同＝要重啟（#353）：從資料算，PATCH 回應掉了也看得到。
