@@ -42,6 +42,8 @@ const MAX_PENDING: usize = 256;
 const SWEEP_REASON: &str = "pane gone";
 /// 關窗的稽核 note（同一個交易刪窗口，所以現存那一列沒了，這裡還查得到）。
 const CLOSE_NOTES: [&str; 3] = ["herdr_maintenance_end", "herdr_maintenance_expired", "herdr_maintenance_superseded"];
+/// 維護過濾最多幾輪（每輪一次維護歷史查詢）；超過就留下待評估旗標，交給下一次記帳。
+const MAX_ROUNDS: usize = 4;
 /// 一次最多讀幾筆關窗 note。
 const MAX_CLOSE_NOTES: i64 = 32;
 
@@ -67,6 +69,8 @@ pub(crate) struct Gone {
 struct HostState {
     exits: Vec<Gone>,
     quiet_until: Option<Instant>,
+    /// 維護過濾的輪數用完、累積的記帳還沒評估完：下一次記帳要評估整份累積的（不要求包含那一筆），不能就這樣漏掉。
+    recheck: bool,
 }
 
 fn table() -> &'static Mutex<HashMap<String, HostState>> {
@@ -101,7 +105,9 @@ pub(crate) fn record_at(key: &str, gone: Gone, now: Instant) -> Option<Vec<Gone>
         return None;
     }
     st.quiet_until = None;
-    let wave = find_wave(&st.exits, Some(seen))?;
+    // 有待評估旗標：評估整份累積的記帳（旗標不管有沒有找到都清掉，找不到就是沒有東西欠著）。
+    let must = if std::mem::take(&mut st.recheck) { None } else { Some(seen) };
+    let wave = find_wave(&st.exits, must)?;
     st.quiet_until = Some(now + COOLDOWN);
     Some(wave)
 }
@@ -126,6 +132,14 @@ fn requalify(key: &str, now: Instant) -> Option<Vec<Gone>> {
     let wave = find_wave(&st.exits, None)?;
     st.quiet_until = Some(now + COOLDOWN);
     Some(wave)
+}
+
+/// 維護過濾的輪數用完：解除冷卻、記下「累積的記帳還欠一次評估」，下一次記帳（[`record_at`]）接手。
+fn defer(key: &str) {
+    if let Some(st) = table().lock().unwrap_or_else(|e| e.into_inner()).get_mut(key) {
+        st.quiet_until = None;
+        st.recheck = true;
+    }
 }
 
 /// 把這幾筆從記帳拿掉（轉移當下在維護中的）。
@@ -286,11 +300,15 @@ fn in_span(spans: &[Span], at: &str) -> bool {
 }
 
 /// 把轉移當下在維護中的幾筆拿掉（名單與記帳都拿掉，維護期間的退出不進窗）；剩下仍達門檻才回名單。
-/// 不夠的話重新評估累積的記帳（[`requalify`]），直到沒有可疑的或沒有新的一波。讀不到維護歷史當全部在維護。
+/// 不夠的話重新評估累積的記帳（[`requalify`]）：讀歷史期間新進來的退出（冷卻中不排告警）可能已自成一波。
+/// 最多 [`MAX_ROUNDS`] 輪（讀歷史的期間可能不斷有新的維護退出補進來）；用完還沒結論就 [`defer`]，留旗標給下一次記帳，不漏報。
+/// 讀不到維護歷史當全部在維護。
 async fn outside_maintenance(app: &Arc<App>, key: &str, mut wave: Vec<Gone>) -> Option<Vec<Gone>> {
-    loop {
+    for round in 0..MAX_ROUNDS {
         let earliest = wave.iter().map(|g| g.at.as_str()).min().unwrap_or_default().to_string();
         let spans = maintenance_spans(app, &earliest).await;
+        #[cfg(test)]
+        crate::race_point::hit("gone_burst_round", key).await;
         let (kept, dropped): (Vec<Gone>, Vec<Gone>) = wave.into_iter().partition(|g| spans.as_deref().is_some_and(|s| !in_span(s, &g.at)));
         if !dropped.is_empty() {
             forget(key, &dropped);
@@ -298,9 +316,13 @@ async fn outside_maintenance(app: &Arc<App>, key: &str, mut wave: Vec<Gone>) -> 
         if kept.len() >= THRESHOLD {
             return Some(kept);
         }
-        // 每圈至少拿掉一筆（kept 不夠就代表 dropped 非空），記帳只會變少，所以會結束。
+        if round + 1 == MAX_ROUNDS {
+            break;
+        }
         wave = requalify(key, Instant::now())?;
     }
+    defer(key);
+    None
 }
 
 async fn push(app: &Arc<App>, host: &str, wave: &[Gone]) -> anyhow::Result<()> {
@@ -435,6 +457,59 @@ mod tests {
         names.sort();
         assert_eq!(names, ["a", "b", "c"]);
         assert!(table().lock().unwrap().get(k).unwrap().exits.iter().all(|g| !g.bot_id.starts_with('m')), "維護的從記帳拿掉");
+    }
+
+    /// 每一輪讀維護歷史的 await 期間都有新的維護退出補進來：輪數有上限（不無限迴圈），超過就留旗標；
+    /// 之後的下一次記帳評估整份累積的記帳，最後一輪補進來的真實退出 A–C 不會因此漏報。
+    #[tokio::test]
+    async fn a_stream_of_maintenance_exits_ends_after_the_round_cap_and_leaves_a_recheck_for_the_next_record() {
+        static HITS: AtomicUsize = AtomicUsize::new(0);
+        fn arm(k: &'static str, now: Instant) {
+            crate::race_point::arm("gone_burst_round", k, move || async move {
+                let n = HITS.fetch_add(1, Ordering::SeqCst) + 1;
+                let mk = |bot: String, s: u64| Gone { bot_id: bot.clone(), name: bot.clone(), run_id: format!("run-{bot}"), at: db::iso_in(-(s as i64)), seen: now - Duration::from_secs(s) };
+                if n < MAX_ROUNDS {
+                    // 又一批維護期間的退出（窗內）。
+                    for i in 0..3 {
+                        record_at(k, mk(format!("m{n}-{i}"), 59), now);
+                    }
+                    arm(k, now);
+                } else {
+                    // 最後一輪：維護歷史已讀完之後才進來的真實退出（窗後）。
+                    for b in ["a", "b", "c"] {
+                        record_at(k, mk(b.into(), 50), now);
+                    }
+                }
+            });
+        }
+        let env = tt::env().await;
+        let k = "t-round-cap";
+        let now = Instant::now();
+        // 維護窗口：100 秒前開、57 秒前到期；M（59 秒前）在窗內，A–C（50 秒前）在窗後。
+        sqlx::query("INSERT OR REPLACE INTO herdr_maintenance (id, opened_at, until, opened_by, reason) VALUES (1,?,?,'patrol','test')")
+            .bind(db::iso_in(-100))
+            .bind(db::iso_in(-57))
+            .execute(&env.app.db)
+            .await
+            .unwrap();
+        let mk = |bot: &str, s: u64| Gone { bot_id: bot.into(), name: bot.into(), run_id: format!("run-{bot}"), at: db::iso_in(-(s as i64)), seen: now - Duration::from_secs(s) };
+        for b in ["m0-0", "m0-1"] {
+            record_at(k, mk(b, 59), now);
+        }
+        let candidate = record_at(k, mk("m0-2", 59), now).unwrap();
+        arm(k, now);
+        assert!(outside_maintenance(&env.app, k, candidate).await.is_none(), "輪數用完還沒結論");
+        assert_eq!(HITS.load(Ordering::SeqCst), MAX_ROUNDS, "每輪一次，沒有多跑");
+        {
+            let t = table().lock().unwrap();
+            let st = t.get(k).unwrap();
+            assert!(st.recheck && st.quiet_until.is_none(), "留下待評估旗標、冷卻解除");
+        }
+        // 下一次記帳：D 離 A–C 超過一個窗口，不靠旗標只會看到 D 一顆。
+        let wave = record_at(k, mk("d", 5), now).expect("旗標讓累積的 A–C 被評估");
+        let mut names: Vec<_> = wave.iter().map(|g| g.bot_id.clone()).filter(|b| !b.starts_with('m')).collect();
+        names.sort();
+        assert_eq!(names, ["a", "b", "c"]);
     }
 
     /// 對照：被濾掉之後沒有新的真實退出，不告警、冷卻解除（之後第三顆照常湊成波）。
