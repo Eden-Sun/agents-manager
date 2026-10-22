@@ -1,8 +1,8 @@
 import test, { after, afterEach, before } from 'node:test'
 import assert from 'node:assert/strict'
-import { mount, setupDom, teardownDom, unmountAll } from '../testing/domHarness'
+import { click, fakeApi, mount, setupDom, teardownDom, unmountAll, until } from '../testing/domHarness'
 import { resetStoreForTest, useStore } from '../store/store'
-import { ApiModelFields } from './ModelPicker'
+import { ApiModelFields, ModelQuickPicker } from './ModelPicker'
 import { effortLabel, type ModelInfo } from '../api/types'
 
 before(setupDom)
@@ -120,3 +120,30 @@ test('沒指定模型時標在預設那顆', async () => {
   assert.equal(checked.length, 1, '應恰好有一顆 radio 是 aria-checked="true"')
   assert.equal(checked[0].textContent?.trim(), 'Alpha', '應標在 is_default 那顆')
 })
+
+for (const [configured, runtime] of [[true, false], [false, true], [true, null]] as const) {
+  test(`quick Fast menu uses runtime ${runtime}, configured ${configured}, and sends the displayed inverse`, async () => {
+    resetStoreForTest()
+    const requests = fakeApi((req) => req.method === 'PATCH'
+      ? { needs_restart: false, live_apply: { applied: true } }
+      : { projects: [] })
+    useStore.setState({
+      bots: [{ id: 'b-fast', kind: 'codex', identity: null, model: 'alpha', effort: 'low', fast: configured }],
+      runs: runtime === null ? {} : { 'b-fast': { id: 'r-fast', bot_id: 'b-fast', state: 'running', runtime_model: 'alpha', runtime_effort: 'low', runtime_fast: runtime } },
+      models: { 'codex@local@': [{ ...testModels[0], service_tiers: [{ id: 'priority', name: 'Fast', description: '' }] }] },
+      busy: {},
+    } as never)
+    const root = await mount(<ModelQuickPicker botId="b-fast" kind="codex" host="local">Alpha</ModelQuickPicker>)
+    await click(root.querySelector<HTMLButtonElement>('button')!)
+    const fast = document.querySelector<HTMLButtonElement>('[role="menuitemcheckbox"]')!
+    assert.ok(fast)
+    const shown = runtime ?? configured
+    assert.equal(fast.getAttribute('aria-checked'), String(shown))
+    assert.equal(fast.classList.contains('on'), shown)
+    await click(fast)
+    await until(() => requests.some((r) => r.method === 'PATCH'), 'Fast PATCH')
+    assert.deepEqual(requests.filter((r) => r.method === 'PATCH'), [
+      { method: 'PATCH', path: '/api/bots/b-fast', body: { fast: !shown } },
+    ], 'including when the requested value already equals bots.fast')
+  })
+}

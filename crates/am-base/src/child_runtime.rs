@@ -27,29 +27,39 @@ pub async fn follow(app: &(impl crate::capabilities::Db + crate::capabilities::E
 
 /// 同 [`follow`]，但強度多一個 [`EffortFollow::Clear`]（codex 狀態列明確寫 `default`）。只動 `managed_by='child'`。
 pub async fn follow_with(app: &(impl crate::capabilities::Db + crate::capabilities::Emit), bot_id: &str, model: Option<&str>, effort: EffortFollow<'_>) -> Result<(), sqlx::Error> {
+    follow_with_fast(app, bot_id, model, effort, None).await
+}
+
+/// 同 [`follow_with`]，另接收這一輪已觀察到改變的 fast；`None` 保留設定。只動 child。
+pub async fn follow_with_fast(app: &(impl crate::capabilities::Db + crate::capabilities::Emit), bot_id: &str, model: Option<&str>, effort: EffortFollow<'_>, fast: Option<bool>) -> Result<(), sqlx::Error> {
+    let fast = fast.map(i64::from);
     let (value, clear) = match effort {
         EffortFollow::Keep => (None, 0_i64),
         EffortFollow::Set(e) => (Some(e), 0),
         EffortFollow::Clear => (None, 1),
     };
-    if model.is_none() && effort == EffortFollow::Keep {
+    if model.is_none() && effort == EffortFollow::Keep && fast.is_none() {
         return Ok(());
     }
     // `clear` 只在 Clear 時為 1：CASE 先判，才能把 NULL 寫進去（COALESCE 寫不進 NULL）。
     let r = sqlx::query(
         "UPDATE bots SET model = COALESCE(?, model),
-                effort = CASE WHEN ? = 1 THEN NULL ELSE COALESCE(?, effort) END
+                effort = CASE WHEN ? = 1 THEN NULL ELSE COALESCE(?, effort) END,
+                fast = COALESCE(?, fast)
           WHERE id = ? AND managed_by = 'child'
             AND (COALESCE(?, model) IS NOT model
-                 OR (CASE WHEN ? = 1 THEN NULL ELSE COALESCE(?, effort) END) IS NOT effort)",
+                 OR (CASE WHEN ? = 1 THEN NULL ELSE COALESCE(?, effort) END) IS NOT effort
+                 OR COALESCE(?, fast) IS NOT fast)",
     )
     .bind(model)
     .bind(clear)
     .bind(value)
+    .bind(fast)
     .bind(bot_id)
     .bind(model)
     .bind(clear)
     .bind(value)
+    .bind(fast)
     .execute(app.db())
     .await?;
     if r.rows_affected() > 0 {

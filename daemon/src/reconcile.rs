@@ -1300,7 +1300,9 @@ async fn sync_pane_model(app: &impl ReconcileHostEnv, host: &str, client: &crate
     // #393：子 agent 用 `-c service_tier="priority"` 起的，bots.fast 也要記成 1。model／effort 已有值時上面的
     // `want_model` 是 false，fast 就永遠沒被補到，UI 平白亮「fast 需重啟」。只在剛收編的窗口內補（不然使用者
     // 之後把 fast 關掉、argv 還是 priority，這裡會反過來把它改回去）。
-    let want_fast = bot.kind == "codex" && bot.fast == 0 && fresh_adoption(app, &bot.id).await;
+    let screen_fast_known = bot.kind == "codex"
+        && matches!(db::active_run(app.db(), &bot.id).await, Ok(Some(run)) if run.runtime_fast.is_some());
+    let want_fast = bot.kind == "codex" && bot.fast == 0 && !screen_fast_known && fresh_adoption(app, &bot.id).await;
     if !want_model && !want_identity && !want_fast {
         return;
     }
@@ -1325,7 +1327,7 @@ async fn sync_pane_model(app: &impl ReconcileHostEnv, host: &str, client: &crate
     let argv: &[String] = cli.map(|p| p.argv.as_slice()).unwrap_or(&[]);
     let (mut model, mut effort) = crate::models::model_effort_from_argv(&bot.kind, argv);
     let fast = crate::models::fast_from_argv(&bot.kind, argv)
-        .filter(|fast| *fast && bot.fast == 0)
+        .filter(|fast| *fast && bot.fast == 0 && !screen_fast_known)
         .map(|_| 1_i64);
     if bot.kind == "grok" && (model.is_none() || effort.is_none()) {
         let (tm, te) = crate::models::grok_title_model_effort(agent.terminal_title_stripped.as_deref().unwrap_or(""));
@@ -1364,7 +1366,10 @@ async fn sync_pane_model(app: &impl ReconcileHostEnv, host: &str, client: &crate
                     SELECT 1 FROM runs WHERE runs.bot_id = bots.id
                       AND runs.state IN ('starting','running','stopping') AND runs.runtime_effort IS NOT NULL
                 ) THEN effort ELSE COALESCE(?, effort) END,
-                fast = COALESCE(?, fast)
+                fast = CASE WHEN kind = 'codex' AND EXISTS (
+                    SELECT 1 FROM runs WHERE runs.bot_id = bots.id
+                      AND runs.state IN ('starting','running','stopping') AND runs.runtime_fast IS NOT NULL
+                ) THEN fast ELSE COALESCE(?, fast) END
           WHERE id = ?",
     )
         .bind(&model)
@@ -1465,6 +1470,25 @@ mod sync_pane_model_effort_tests {
 
     async fn run_effort(env: &testing::Env, run: &str) -> Option<String> {
         db::run(&env.app.db, run).await.unwrap().unwrap().runtime_effort
+    }
+
+    #[tokio::test]
+    async fn fast_argv_fills_only_unknown_runtime_and_never_refills_after_a_tui_switch() {
+        let env = testing::env().await;
+        let (bot, run) = codex_child(&env, Some("high"), Some("high")).await;
+        env.herdr.set_argv(PANE, &["codex", "--model", "gpt-6-astra", "-c", "service_tier=priority"]);
+        sqlx::query("UPDATE runs SET runtime_fast=NULL WHERE id=?").bind(&run).execute(&env.app.db).await.unwrap();
+        sync_round(&env, &bot).await;
+        assert_eq!(db::bot(&env.app.db, &bot).await.unwrap().unwrap().fast, 1, "未知仍從啟動 argv 補 fast");
+        sqlx::query("UPDATE runs SET runtime_fast=1 WHERE id=?").bind(&run).execute(&env.app.db).await.unwrap();
+        assert!(crate::codex_live::correct_runtime_from_screen(&env.app, &run, CODEX_DEFAULT).await);
+        assert_eq!(db::bot(&env.app.db, &bot).await.unwrap().unwrap().fast, 0);
+        // model 設為未知以強迫走到 argv UPDATE；SQL 也必須保護 fast。
+        sqlx::query("UPDATE bots SET model=NULL WHERE id=?").bind(&bot).execute(&env.app.db).await.unwrap();
+        sync_round(&env, &bot).await;
+        sync_round(&env, &bot).await;
+        assert_eq!(db::bot(&env.app.db, &bot).await.unwrap().unwrap().fast, 0, "收編窗口內也不可從舊 priority argv 補回");
+        assert_eq!(db::run(&env.app.db, &run).await.unwrap().unwrap().runtime_fast, Some(0));
     }
 
     /// 兩輪：第一輪畫面切到 default 並清掉子 agent 的 high；之後每一輪對帳都不能把 argv 的 high 補回來。
