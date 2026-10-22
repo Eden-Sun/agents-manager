@@ -586,6 +586,40 @@ test('警語與問句之間沒有空白列：⚠ 倒數不會黏進題目', () =
 /** 2026-10-12 真機（console-pm，213×55）：AskUserQuestion 帶 `preview`＝左邊編號選項、右邊是游標那一項的預覽框。 */
 const ASKQ_PREVIEW = readFileSync(new URL('./__fixtures__/claude-askq-preview-213x55.txt', import.meta.url), 'utf8')
 
+test('#1887 每個多選選項都有說明；各種方框與上輪表格不改變標題', () => {
+  for (const [box, checked] of [[' ', false], ['✔', true], ['☐', false], ['☑', true], ['☒', true]] as const) {
+    const menu = parseChoiceMenu([
+      '  ┌──────────────┐',
+      '  │ 上一輪表格   │',
+      '  └──────────────┘',
+      '────────────────────────────',
+      '下一個要 review 哪個 repo？',
+      `❯ 1. [${box}] vehicleapi`,
+      '         車籍查詢 API',
+      `  2. [${box}] carmakerapi`,
+      '         車廠代碼 API',
+      '',
+      '     Submit',
+      '',
+      'Enter to select · ↑/↓ to navigate · Esc to cancel',
+    ].join('\n'))
+    assert.ok(menu)
+    assert.equal(menu.multi, true)
+    assert.deepEqual(menu.choices.map((c) => [c.title, c.detail, c.checked, c.preview]), [
+      ['vehicleapi', '車籍查詢 API', checked, ''],
+      ['carmakerapi', '車廠代碼 API', checked, ''],
+    ])
+  }
+})
+
+test('#1887 真正選項旁的預覽框：長標題折行仍接回標題', () => {
+  const menu = parseChoiceMenu(ASKQ_PREVIEW.replace('(Recommended)', 'continued txt'))
+  assert.ok(menu)
+  assert.equal(menu.choices[0].title, '改回 200 正常訊息continued txt')
+  assert.equal(menu.choices[0].detail, '')
+  assert.ok(menu.choices[0].preview.includes('HTTP 200'))
+})
+
 test('並排預覽版面（左選項、右預覽框）：認得題目、兩個選項、游標與預覽 (issue #1473)', () => {
   const menu = parseChoiceMenu(ASKQ_PREVIEW)
   assert.ok(menu)
