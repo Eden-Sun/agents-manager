@@ -10,6 +10,7 @@ import { pruneDeadKeys } from './prune'
 import { forgetBlockedExcept } from '../lib/blockedPrefetch'
 import { shellDraftKey } from './shellDraft'
 import { createResyncRunner } from './resyncQueue'
+import { quotaLimitChanged } from './quotaLimitChange'
 import { createRequestId, peekRequestId, settleCreateRequest } from '../lib/createRequestId'
 import { queueSlotNotice, slotHolderFrom } from '../lib/queueSlot'
 import { groupSendDelivered, groupSkipText } from './groupSend'
@@ -3609,6 +3610,7 @@ export function handleFrame(set: SetFn, get: GetFn, frame: { seq?: number; type:
       // v4.0: `{kind, host, quota}` (or a whole `{kinds}` map). `kind` 是完整的 map key，
       // 遠端主機帶 `<host>/` 前綴（SPEC §14）。
       if (!isRec(data)) return
+      const before = get().quota
       const kinds = pick(data, 'kinds')
       if (isRec(kinds)) {
         const entries = Object.entries(kinds).map(([k, v]) => [k, toKindQuota(v, k)] as const)
@@ -3616,12 +3618,16 @@ export function handleFrame(set: SetFn, get: GetFn, frame: { seq?: number; type:
         set((s) => ({
           quota: { ...s.quota, ...Object.fromEntries(entries) },
         }))
+        // 撞限變了（#1899）：`bot.limit_hit` 在 /api/state，沿用既有的 refreshState（single-flight 會合併連續的事件）。
+        if (quotaLimitChanged(before, entries)) void get().refreshState()
         return
       }
       const kind = str(pick(data, 'kind'))
       if (!kind) return
       noteQuotaDirty([kind])
-      set((s) => ({ quota: { ...s.quota, [kind]: toKindQuota(pick(data, 'quota'), kind) } }))
+      const quota = toKindQuota(pick(data, 'quota'), kind)
+      set((s) => ({ quota: { ...s.quota, [kind]: quota } }))
+      if (quotaLimitChanged(before, [[kind, quota]])) void get().refreshState()
       return
     }
     case 'mission_updated': {

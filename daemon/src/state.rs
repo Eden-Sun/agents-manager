@@ -753,10 +753,12 @@ impl App {
         let last_turn = crate::cache_clock::last_turn_for_bot(&self.db, bot_id).await.ok().flatten();
         crate::cache_clock::annotate(&mut run_v, &bot.kind, last_turn.as_ref());
         crate::send_now_capability::annotate(&mut run_v, &bot.kind, run.as_ref(), self.cfg.get().await.codex.instant_interrupt);
+        let limit_hit = limit_hit_json(&self.shared(), &bot).await;
         self.emit(
             "bot_status",
             json!({
                 "bot_id": bot.id,
+                "limit_hit": limit_hit,
                 "run": run_v,
                 "host": host,
                 "herdr_session": bot.herdr_session,
@@ -766,6 +768,35 @@ impl App {
         .await;
     }
 }
+
+/// 頂層主力 bot 撞限中的 `limit_hit`（#1899）：`{until, message}`，沒有撞限、已過期、或 child 一律 `null`。
+/// `/api/state` 與 `bot_status` 共用這一份，判斷全在 [`crate::runners::quota::try_limit_hit_for_bot`]；逐顆呼叫、不快取。
+/// 讀不到（DB 或主機）就給 `null` 並記 debug：投影不能因為它失敗。
+pub async fn limit_hit_json(app: &Arc<App>, bot: &crate::db::Bot) -> Value {
+    if bot.parent_bot_id.is_some() {
+        return Value::Null;
+    }
+    match crate::runners::quota::try_limit_hit_for_bot(app, bot).await {
+        Ok(hit) => limit_hit_value(bot, hit.as_ref()),
+        Err(error) => {
+            tracing::debug!(bot = %bot.id, error = %error, "cannot tell whether this bot has hit its limit; limit_hit is null");
+            Value::Null
+        }
+    }
+}
+
+/// 投影成 `limit_hit` 欄位：只有頂層 bot 有撞限才給 `{until, message}`，child 一律 `null`。
+/// `/api/state`（批次）與 `bot_status`（單顆）都走這裡，子 bot 規則只有這一處。
+pub fn limit_hit_value(bot: &crate::db::Bot, hit: Option<&crate::quota::LimitHit>) -> Value {
+    match hit {
+        Some(hit) if bot.parent_bot_id.is_none() => json!({"until": hit.until, "message": hit.message}),
+        _ => Value::Null,
+    }
+}
+
+#[cfg(test)]
+#[path = "state_limit_hit_tests.rs"]
+mod limit_hit_tests;
 
 /// `hosts` map for `daemon_status` / `GET /api/state`.
 pub async fn hosts_json(app: &Arc<App>) -> Value {

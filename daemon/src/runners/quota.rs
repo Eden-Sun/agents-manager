@@ -1,5 +1,6 @@
 //! Quota runners and background pollers / limit hit checks for agents-managerd.
 
+use std::collections::{BTreeMap, HashMap};
 use std::sync::Arc;
 use std::time::Duration;
 use anyhow::Result;
@@ -8,10 +9,10 @@ use serde_json::json;
 use crate::app_ports_r2a9::OwedLimitHitProbe;
 use crate::quota::{
     billing_identity, clear_limit_hit, clear_limit_hit_if_older_than, cleared_at, cleared_at_key,
-    for_each_host, keys_for_bot, limit_hit_blocks_model, limit_hit_expired,
-    pane_window_used, parse_utc, pollable_hosts, quota_base_for_host,
+    for_each_host, identity_for_run, identity_shares_default, keys_for_bot, limit_hit_blocks_model, limit_hit_expired,
+    pane_window_used, parse_utc, pollable_hosts, quota_base_default_aware, quota_base_for_host,
     quota_from_codex, quota_from_codex_status, quota_key, running_model,
-    set_fenced, status_line_sighting, LimitHit, CODEX_PANE_POLL, CODEX_POLL,
+    set_fenced, status_line_sighting, LimitHit, Quota, CODEX_PANE_POLL, CODEX_POLL,
 };
 use crate::state::App;
 
@@ -28,14 +29,94 @@ pub async fn try_limit_hit_for_bot(app: &Arc<App>, bot: &crate::db::Bot) -> Resu
     let keys = keys_for_bot(&**app, &host, bot, identity.as_deref()).await;
     let model = running_model(app, bot).await;
     let q = app.quotas.lock().await;
+    Ok(pick_limit_hit(None, &keys, model.as_deref(), &q))
+}
+
+/// 撞限的判斷（純函式，單筆與批次共用）：欠著的撞限（已經過期與模型檢查）優先；否則看 `keys` 上的撞限，
+/// 沒過期、而且撞的那一桶管得到 `model` 才擋。
+pub fn pick_limit_hit(owed: Option<LimitHit>, keys: &[String], model: Option<&str>, quotas: &BTreeMap<String, Quota>) -> Option<LimitHit> {
+    if owed.is_some() {
+        return owed;
+    }
     for k in keys {
-        if let Some(hit) = q.get(&k).and_then(|x| x.limit_hit.clone()) {
-            if !limit_hit_expired(Some(&hit)) && limit_hit_blocks_model(&hit, model.as_deref()) {
-                return Ok(Some(hit));
+        if let Some(hit) = quotas.get(k).and_then(|x| x.limit_hit.clone()) {
+            if !limit_hit_expired(Some(&hit)) && limit_hit_blocks_model(&hit, model) {
+                return Some(hit);
             }
         }
     }
-    Ok(None)
+    None
+}
+
+/// [`try_limit_hit_for_bot`] 的批次版（給 `/api/state` 投影）：查詢次數是常數，不隨 bot 數增加。
+/// 結果逐顆與單筆版相同（見 `state_limit_hit_tests`）；讀不到的 bot 給 `None` 並記 debug。
+/// 身分表按主機各讀一次（同 [`keys_for_bot`] 的規則，見 [`base_from_identities`]），`quotas` 只拿一次鎖。
+pub async fn limit_hits_for_bots(app: &Arc<App>, bots: &[crate::db::Bot]) -> Vec<Option<LimitHit>> {
+    let runs = match crate::db::active_runs_by_bot(&app.db).await {
+        Ok(runs) => runs,
+        Err(e) => {
+            tracing::debug!(error = %e, "cannot read the active runs; no limit hits in the snapshot");
+            return vec![None; bots.len()];
+        }
+    };
+    let hosts = match bot_hosts(&app.db).await {
+        Ok(hosts) => hosts,
+        Err(e) => {
+            tracing::debug!(error = %e, "cannot read the hosts of the bots; no limit hits in the snapshot");
+            return vec![None; bots.len()];
+        }
+    };
+    let mut identities: HashMap<String, Vec<crate::config::IdentityCfg>> = HashMap::new();
+    for host in hosts.values() {
+        if !identities.contains_key(host) {
+            let list = crate::tools::identities_for_host_ref(&**app, host).await;
+            identities.insert(host.clone(), list);
+        }
+    }
+    // 撞限欠著的那一筆（`owed_limit_hit`）逐顆先算：沒欠著時只查記憶體，不碰 DB 或 quotas。
+    let mut owed = Vec::with_capacity(bots.len());
+    let mut identity_of = Vec::with_capacity(bots.len());
+    for bot in bots {
+        let identity = identity_for_run(bot, runs.get(&bot.id));
+        owed.push(app.owed_limit_hit(bot, identity.as_deref()).await);
+        identity_of.push(identity);
+    }
+    let quotas = app.quotas.lock().await;
+    bots.iter()
+        .zip(owed)
+        .zip(identity_of)
+        .map(|((bot, owed), identity)| {
+            let host = hosts.get(&bot.id).map(String::as_str).unwrap_or(crate::config::LOCAL_HOST);
+            let base = base_from_identities(&bot.kind, identity.as_deref(), identities.get(host).map(Vec::as_slice).unwrap_or(&[]));
+            let keys = [quota_key(host, &base)];
+            let model = model_of_run(bot, runs.get(&bot.id));
+            pick_limit_hit(owed, &keys, model.as_deref(), &quotas)
+        })
+        .collect()
+}
+
+/// 每顆 bot 所在的主機（一次讀完；同 [`crate::db::bot_host`]：找不到就是 `local`）。
+async fn bot_hosts(pool: &sqlx::SqlitePool) -> Result<HashMap<String, String>> {
+    let rows = sqlx::query_as::<_, (String, String)>("SELECT b.id, p.host FROM bots b JOIN projects p ON p.id = b.project_id")
+        .fetch_all(pool)
+        .await?;
+    Ok(rows.into_iter().collect())
+}
+
+/// [`crate::quota::quota_base_for_host`] 的純函式版：身分表由呼叫端給（同主機只讀一次）。規則逐行與單筆版相同。
+fn base_from_identities(kind: &str, identity: Option<&str>, identities: &[crate::config::IdentityCfg]) -> String {
+    let Some(idn) = identity.map(str::trim).filter(|s| !s.is_empty()) else { return kind.to_string() };
+    let shares = match identities.iter().find(|i| i.name == idn) {
+        Some(i) if i.kind != kind => true,
+        Some(i) => identity_shares_default(kind, &i.env),
+        None => false,
+    };
+    quota_base_default_aware(kind, Some(idn), shares)
+}
+
+/// [`crate::quota::running_model`] 的純函式版：run 記的模型，沒有才用設定值，空字串不算。
+fn model_of_run(bot: &crate::db::Bot, run: Option<&crate::db::Run>) -> Option<String> {
+    run.and_then(|r| r.runtime_model.clone()).or_else(|| bot.model.clone()).filter(|m| !m.trim().is_empty())
 }
 
 /// [`try_limit_hit_for_bot`]，讀不到時回 `None`（記 warn）。只剩 supervisor 的派送／重送在用：那邊拿到撞限會 park、

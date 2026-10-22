@@ -467,6 +467,7 @@ daemon 重啟後就是空的（那次不會再推 `herdr_update_done`，前端�
           "auto_approve": true,
           "primary": false,
           "primary_position": 0,
+          "limit_hit": null,
           "needs_restart": false,
           "run": null,
           "asleep": null,
@@ -556,6 +557,8 @@ daemon 重啟後就是空的（那次不會再推 `herdr_update_done`，前端�
 **`POST /api/order`**：側欄排序 = config.toml 的陣列順序，`GET /api/state` 的順序就是權威（前端不另存）。只送要改的那一半；沒列到的維持原相對順序接在後面；
 config.toml 裡沒有的 id（child、已刪）忽略。成功推 `project_changed`。
 
+**`limit_hit`（`GET /api/state` 的 bot 與 WS `bot_status`，#1899）**：`{"until": ISO|null, "message": string}`＝這顆**頂層**主力 bot 現在撞限中（同 `quota::try_limit_hit_for_bot`：沒過期、且桶擋得到它正在跑的模型）；沒撞限、已過 `until`、讀不到，或 child（`parent_bot_id` 有值）一律 `null`。唯讀，判斷只在 daemon；`until` 過了前端自己比時間，不等 daemon。`bot_status` 與 `/api/state` 給同一個值。`/api/state` 用 `runners::quota::limit_hits_for_bots` 整份批次算（查詢次數不隨 bot 數增加，守門 `the_snapshot_does_no_per_bot_lookups`）；`bot_status` 單顆用 `try_limit_hit_for_bot`。兩者判斷都在 `pick_limit_hit`，不快取。
+撞限出現、清掉、或 until 改變時，web 會重抓一次 `/api/state` 讓這個欄位跟上（quota 事件本身不帶它）。
 **`needs_restart`（`GET /api/state` 的 bot，#353）**：執行中的 CLI 載入的啟動設定（model／effort／fast／persona／args／identity／env／inject_hooks／auto_approve）跟現在存的不同＝`true`。從資料算：run 啟動時記下載入的版本（`runs.launch_rev`），bot 目前的版本對不上就是過期；`PATCH` 回應掉了、daemon 之後重啟，這個旗標都還在，重啟（新 run 載入新版本）或當場套用成功（`live_apply.applied`）才清掉。沒記版本的 run（adopt 來的、升版前的）不誤報，改設定的那一刻才開始追蹤。
 
 **`live_apply_deferred`（`GET /api/state` 的 bot，#712）**：只改可即時套用的欄位而 bot 正忙、這次送不進去時，`PATCH` 回 `needs_restart:false`、`live_apply.deferred:true`（`reason` 是 `slash_gate: agent_busy`／`slash_gate: turn_in_flight`／`codex: busy_not_ready`）；state 的 bot 帶 `live_apply_deferred:true`、`needs_restart:false`，回合結束後自動套用。codex 只改 `fast` 時回合中會直接送（`live_apply.applied:true`），只有輸入框有字或選單開著才排；改 model／effort 時回合中走「Esc 打斷 → 套用 → continue」（`live_apply.interrupted:true`，見 §10.2 #1681），打斷不了才排。回合結束後仍因選單或讀回失敗而套不上，才恢復 `needs_restart:true`。claude／grok 已經排著別的欄位時不合併，直接回 `needs_restart:true`。待套用狀態存在 daemon 記憶體，daemon 重啟後若設定仍有差異，會依啟動版本顯示需重啟。
