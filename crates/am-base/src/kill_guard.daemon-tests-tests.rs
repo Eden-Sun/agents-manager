@@ -400,7 +400,7 @@
         assert!(!denied("bash -o noexec -c 'pkill -f claude'"));
         assert!(!denied("bash -nc 'pkill -f claude'"));
         assert!(!denied("bash -n +x <<'EOF'\npkill -f claude\nEOF"));
-        assert!(!denied("bash -n -o noexec +o xtrace -c 'pkill -f claude'"));
+        assert!(denied("bash -n -o noexec +o xtrace -c 'pkill -f claude'"), "noexec 以外的 -o／+o 值一律取消快速放行");
         // 帶值的選項（`-O`／`+O`、`-o`／`+o`、`--rcfile`）要把值一起吃掉，不能在值那裡停下、留著前面的 `-n`。
         assert!(denied("bash -n -O extglob +n -c 'kill -9 -1'"));
         assert!(denied("bash -n -O extglob +n -c 'pkill -f claude'"));
@@ -412,9 +412,26 @@
         assert!(denied("bash -nO extglob +n <<'EOF'\npkill -f claude\nEOF"));
         assert!(!denied("bash -O extglob -n -c 'pkill -f claude'"));
         assert!(!denied("bash -n -O extglob -c 'pkill -f claude'"));
-        assert!(!denied("bash -n -O extglob -O globstar -o pipefail -c 'pkill -f claude'"));
+        assert!(!denied("bash -n -O extglob -O globstar -c 'pkill -f claude'"));
         assert!(!denied("bash -nO extglob -c 'pkill -f claude'"));
-        assert!(!denied("sh -n -o errexit <<'EOF'\npkill -f claude\nEOF"));
+        assert!(!denied("sh -n <<'EOF'\npkill -f claude\nEOF"));
+        // `-o`／`+o` 的值只有 noexec（及其等價寫法）才影響狀態；zsh 的 `-o exec` 會重新啟用執行，其他值一律取消快速放行。
+        assert!(denied("zsh -n -o exec -c 'kill -9 -1'"));
+        assert!(denied("zsh -n -o exec -c 'pkill -f claude'"));
+        assert!(denied("zsh -n +o noexec -c 'pkill -f claude'"));
+        assert!(denied("zsh -n +o NO_EXEC -c 'pkill -f claude'"));
+        assert!(denied("zsh -n -o EXEC -c 'pkill -f claude'"));
+        assert!(denied("zsh -n +o exec -c 'pkill -f claude'"));
+        assert!(denied("zsh -n -o errexit -c 'pkill -f claude'"));
+        assert!(denied("bash -n -o pipefail -c 'pkill -f claude'"));
+        assert!(denied("bash -n -o frobnicate -c 'pkill -f claude'"));
+        assert!(denied("zsh -n -O exec -c 'pkill -f claude'"));
+        assert!(denied("zsh -no exec -c 'pkill -f claude'"));
+        assert!(denied("zsh -n -o exec <<'EOF'\npkill -f claude\nEOF"));
+        assert!(!denied("zsh -n -o noexec -c 'pkill -f claude'"));
+        assert!(!denied("zsh -o NO_EXEC -c 'pkill -f claude'"));
+        assert!(!denied("zsh -o no_exec <<'EOF'\npkill -f claude\nEOF"));
+        assert!(!denied("zsh -n -o noexec -O extglob -c 'pkill -f claude'"));
         // 不認得的選項：判斷不了，不當 noexec 放行（照一般規則判斷）。
         assert!(denied("bash -n -Z -c 'pkill -f claude'"));
         assert!(denied("bash -n --frobnicate -c 'pkill -f claude'"));

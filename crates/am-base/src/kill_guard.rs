@@ -182,11 +182,12 @@ const SHELL_LONG_FLAGS: &[&str] = &["posix", "noediting", "noprofile", "norc", "
 
 /// 把 `args`（shell 後面的參數）當 shell 的命令列選項照順序走完：`-o`／`+o`／`-O`／`+O` 與 `--rcfile`／`--init-file` 帶值、
 /// 要把值一起吃掉，不然 `bash -n -O extglob +n -c '…'` 會在 `extglob` 停下、把前面的 `-n` 當成最後狀態。
-/// 遇到不認得的選項（字母或長選項）：整個 `noexec` 當 `false`（照一般規則判斷，不放行）。
+/// 遇到不認得的選項（字母、長選項、`-o` 的值不是 `noexec`）：整個 `noexec` 當 `false`（照一般規則判斷，不放行）。
 fn shell_opts(args: &[String]) -> ShellOpts {
     let mut o = ShellOpts { noexec: false, command: None, stdin_script: false, positional: args.len() };
     let (mut noexec, mut c, mut i) = (false, false, 0usize);
-    let mut unknown = false;
+    // `unsure`：看不懂的選項（字母、長選項），分不出哪個字是值；`cancel`：選項都看得懂，只是 `-o` 的值不是 noexec——只取消 noexec，位置照實。
+    let (mut unsure, mut cancel) = (false, false);
     while let Some(a) = args.get(i) {
         if a == "--" {
             i += 1;
@@ -201,7 +202,7 @@ fn shell_opts(args: &[String]) -> ShellOpts {
                 "rcfile" | "init-file" => i += 2,
                 l if SHELL_LONG_FLAGS.contains(&l) => i += 1,
                 _ => {
-                    unknown = true;
+                    unsure = true;
                     i += 1;
                 }
             }
@@ -214,14 +215,23 @@ fn shell_opts(args: &[String]) -> ShellOpts {
                 'c' => c = on,
                 's' => o.stdin_script = on,
                 'o' => {
-                    if args.get(i + consumed).is_some_and(|v| v == "noexec") {
-                        noexec = on;
+                    // 只有明確認得的 `noexec`（zsh 不分大小寫與底線：`NO_EXEC`、`no_exec`）才影響 noexec 狀態；
+                    // 其他值（含 zsh 的 `exec`／`+o exec`、不認得的）一律取消快速放行、走一般判斷。
+                    match args.get(i + consumed).map(|v| v.to_ascii_lowercase().replace('_', "")) {
+                        Some(v) if v == "noexec" => noexec = on,
+                        _ => cancel = true,
                     }
                     consumed += 1;
                 }
-                'O' => consumed += 1,
+                'O' => {
+                    // bash 的 `-O` 是 shopt 名（`extglob`…），不影響 noexec；但 `exec` 這個名字在別的 shell 可能是執行開關，保守起見也取消。
+                    if args.get(i + consumed).is_some_and(|v| v.to_ascii_lowercase().replace('_', "") == "exec") {
+                        cancel = true;
+                    }
+                    consumed += 1;
+                }
                 x if SHELL_FLAGS.contains(x) => {}
-                _ => unknown = true,
+                _ => unsure = true,
             }
         }
         i += consumed;
@@ -233,13 +243,13 @@ fn shell_opts(args: &[String]) -> ShellOpts {
             o.positional = i + 1;
         }
     }
-    if unknown {
+    if unsure {
         // 選項看不懂就看不準哪個字是值：指令字與 script 檔參數退回粗略的找法（含 `c` 的短選項叢的下一個字；第一個不以 `-`／`+` 開頭的字），
         // 而且絕不當 noexec 放行。
         o.command = args.iter().position(|a| a.starts_with('-') && !a.starts_with("--") && a.contains('c')).map(|p| p + 1).filter(|p| *p < args.len());
         o.positional = args.iter().position(|a| !a.starts_with(['-', '+'])).unwrap_or(args.len());
     }
-    o.noexec = noexec && !unknown;
+    o.noexec = noexec && !unsure && !cancel;
     o
 }
 
