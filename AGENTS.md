@@ -1,6 +1,6 @@
 # agents-manager — agent 工作規則
 
-這份給所有在這個 repo 裡工作的 agent（claude / codex / grok，含 AG Man 派出的子 agent）。檔名是 `AGENTS.md`（2026-10-04 使用者：「改使用 agents md」，原本叫 CLAUDE.md）：AG Man 的 bot 由 config 的 `[agents.projects]` 注入這份（SPEC §6.5i），改了重啟 bot 生效；直接在 repo 裡開的 claude 沒有 CLAUDE.md 時會自己讀 AGENTS.md、codex 本來就讀它。人類讀的說明在 `README.md`，規格在 `docs/SPEC.md`，API 在 `docs/API.md`，前端在 `docs/FRONTEND.md`，UI 取捨在 `docs/UI-DECISIONS.md`。
+這份給所有在這個 repo 裡工作的 agent（claude / codex / grok，含 AG Man 派出的子 agent）。檔名是 `AGENTS.md`（2026-10-04 使用者：「改使用 agents md」，原本叫 CLAUDE.md）：AG Man 的 bot 由 config 的 `[agents.projects]` 注入這份（SPEC §6.5i），改了重啟 bot 生效；直接在 repo 裡開的 claude 沒有 CLAUDE.md 時會自己讀 AGENTS.md、codex 本來就讀它。人類讀的說明在 `README.md`（英文為主，`README.zh-TW.md` 為繁中版；改一份要同步另一份），規格在 `docs/SPEC.md`，API 在 `docs/API.md`，前端在 `docs/FRONTEND.md`，UI 取捨在 `docs/UI-DECISIONS.md`。
 
 ## 修正 Bot 直接向 AGM 申請（使用者授權，2026-09-12）
 
