@@ -509,23 +509,6 @@
   color: var(--danger);
 }
 
-/* 主力撞限（#1899）：紅框＋紅字，跟量表 `quota-blocked` 同一組紅。 */
-.bot-limit-hit {
-  height: 20px;
-  display: inline-flex;
-  align-items: center;
-  flex: 0 0 auto;
-  padding: 0 6px;
-  border-radius: 8px;
-  border: 1px solid color-mix(in srgb, var(--danger) 55%, var(--border));
-  background: var(--danger-soft);
-  color: var(--danger);
-  font-size: 11px;
-  font-weight: 600;
-  white-space: nowrap;
-  cursor: default;
-}
-
 /* The lamp already says idle / offline; only transitional or attention states get words. */
 
 .bot-state {

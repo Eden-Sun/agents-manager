@@ -17,7 +17,9 @@ import { keepWarmReplied } from '../lib/keepWarm'
 import { CAPACITY_LABEL, modelAtCapacity } from '../lib/modelCapacity'
 import './modelCapacity.css'
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type CSSProperties, type RefObject } from 'react'
-import type { Bot } from '../api/types'
+import type { Bot, BotLimitHit } from '../api/types'
+import { limitHitWhen } from '../lib/limitHitWhen'
+import { KIND_LABEL } from './kindMeta'
 import { useMediaQuery } from '../hooks/useMediaQuery'
 import { clipAfterRows, layoutBoxes, lineBudget, moreTitle } from '../lib/chipOverflow'
 import { chipTracked } from '../lib/supervisorProject'
@@ -77,6 +79,20 @@ interface ChipItem {
   keepWarmReplied: boolean
   /** 主力：已按「不用保溫」→ 不畫倒數底色，tooltip 講「不保溫中」。 */
   noWarm: boolean
+  /** 主力撞限中（#1899）：有值就在右上角畫角標，文字併進 title 與 sr-only label；過了 `until` 是 `null`。 */
+  limitTitle: string | null
+}
+
+/**
+ * 主力撞限的文字（#1899）：`<kind> 已達用量上限，<時間> 恢復`。撞限還沒過 `until` 才有值（沒寫時間的照掛，等 daemon 清掉）。
+ * 只比時間；判斷在 daemon（`bot.limit_hit` 由 `/api/state` 與 `bot_status` 帶來）。
+ */
+function limitTitleOf(kind: Bot['kind'], hit: BotLimitHit | null | undefined, now: number): string | null {
+  if (!hit) return null
+  const until = hit.until ? Date.parse(hit.until) : NaN
+  if (!Number.isNaN(until) && until <= now) return null
+  const when = limitHitWhen(hit.until)
+  return `${KIND_LABEL[kind]} 已達用量上限${when ? `，${when} 恢復` : '，恢復時間 CLI 沒寫'}`
 }
 
 /** 子 agent 在跑：分叉圖示（形狀跟燈／點不同）＋多顆時的數字；文字說明在 `title` 與 sr-only。 */
@@ -124,7 +140,7 @@ function Chip({ it, dnd, lamp }: { it: ChipItem; dnd?: PinnedDnd; lamp?: boolean
       type="button"
       className={`${chipClass(it)}${cache ? ` cache-${cache.level}` : ''}${it.keepWarmReplied ? ' keep-warm-replied' : ''}${drag?.dragId === it.id ? ' dragging' : ''}${shifted ? ' shifted' : ''}${mark}`}
       // 電腦只有原生 tooltip，不 hover 開狀態卡（2026-10-08 使用者：桌面版不要 hover 就跳出）；狀態卡只剩手機長按。
-      title={[it.title, it.cache?.title ?? (it.noWarm ? NO_WARM_TEXT : null), it.keepWarmReplied ? KEEP_WARM_REPLIED_TEXT : null].filter(Boolean).join('\n')}
+      title={[it.title, it.limitTitle, it.cache?.title ?? (it.noWarm ? NO_WARM_TEXT : null), it.keepWarmReplied ? KEEP_WARM_REPLIED_TEXT : null].filter(Boolean).join('\n')}
       data-bot-id={it.pinned ? it.id : undefined}
       style={
         drag?.dragId === it.id
@@ -155,8 +171,10 @@ function Chip({ it, dnd, lamp }: { it: ChipItem; dnd?: PinnedDnd; lamp?: boolean
       {it.needsReply || it.atCapacity ? (
         <span className="unread-chip-dot" aria-hidden="true" />
       ) : null}
+      {it.limitTitle ? <span className="unread-chip-limit" aria-hidden="true" /> : null}
       {it.kidsRunning > 0 ? <KidsBadge n={it.kidsRunning} /> : null}
-      <span className="sr-only">{chipStateText({ ...it, kids: it.kidsRunning })}</span>
+      {/* 撞限文字併進既有的 label（角標本身 aria-hidden），螢幕閱讀器只念一次。 */}
+      <span className="sr-only">{[chipStateText({ ...it, kids: it.kidsRunning }), it.limitTitle].filter(Boolean).join('，')}</span>
     </button>
   )
 }
@@ -262,6 +280,7 @@ export function UnreadChip() {
         keepWarmReplied: pinned && keepWarmReplied(runs[b.id], now),
         cache: pinned ? chipCache(runs[b.id], now, working) : null,
         noWarm: pinned && runs[b.id]?.keep_warm_skip === true,
+        limitTitle: pinned ? limitTitleOf(b.kind, b.limit_hit, now) : null,
       })
     }
     return out

@@ -51,7 +51,7 @@
   這顆還沒記到 session（最近一個 run 沒有 `native_session_id`）時接續鈕灰掉並寫原因。焦點照確認框慣例落在取消，Enter 不會直接建。子 agent 列沒有這一項。
   新 bot（兩種都一樣）排在本尊**正下方**，不是專案最底下（使用者 2026-09-15）：fork 由 daemon 插在 config 陣列裡本尊的下一格；全新分身建好後前端存一次排序。
   ![分身框](screenshots/fork/clone-dialog-1440.png) ![還沒有對話](screenshots/fork/clone-dialog-no-session-1440.png) ![fork 之後](screenshots/fork/after-fork-1440.png) ![手機](screenshots/fork/clone-dialog-390.png)
-- **主力撞限標「到限」（#1899，使用者 2026-10-22）**：頂層 bot 的 `limit_hit` 生效中，列上 model 標籤後畫紅框小晶片「到限」（同量表 `quota-blocked` 的紅），title 寫「codex · 預設 已達用量上限，10/29 11:24 恢復」。child 與精簡列不畫（子列由母列代表）。判斷在 daemon，前端只比 `until` 與現在時間，到點自己消失。
+- **側欄不再標撞限（#1899，使用者 2026-10-22）**：撞限的標示改放在主力列（見下節「★ 主力與 bot 晶片」），側欄那一列不畫任何撞限晶片。
 - 子 agent：縮排樹，不另貼「子 worker」之類標籤；**子列整段（kind logo＋名字＋chip）可左右滑、同一組子列同步捲**（使用者指定），名字至少 3 字。
 - 子 bot 帳號跟母 bot 不同時，把子 bot 的身分標在**母 bot** 上（琥珀色，多個用 `/`）（使用者指定）。
 - 父列：收合時收合鈕帶子 agent 最要緊的燈（blocked > working）；收合與展開都在燈號旁畫 7px 黃點——實心＝子 agent 還在跑，空心＝子 agent 回報了還沒人看。
@@ -116,6 +116,7 @@
 - 手機：★ 主力一排、在跑／剛完成的另一排（2026-09-16 使用者：「已完成放下一排，方便我點選」），兩排各自橫捲、各有 ◂ ▸；排內順序仍不重排（肌肉記憶）。哪一排空了就不畫。
   ![手機兩排各有箭頭](screenshots/fix3-web3/mock-mobile-two-rows-arrows.png)
 - 手機：每一排都是單行橫捲、**位置固定照側欄順序，不照緊急度重排**（使用者指定），有 ◂ ▸ 與 scroll shadow，正在看的那顆自動捲進畫面。
+- **主力撞限角標（#1899，使用者 2026-10-22 選 v1）**：頂層主力撞限、還沒過 `until` 時，★ 晶片右上角貼一個 13px 墨色圓、白色斜線（禁止符號），只有圖示、偏移 -3px，主力列不加留白。顏色走 token（`--limit-mark-ink`／`--limit-mark-slash`），深色主題墨與斜線對調，兩種主題都要看得到。title 與 sr-only label 寫「<kind> 已達用量上限，<時間> 恢復」；角標本身 `aria-hidden`，文字併進晶片 label，螢幕閱讀器只念一次。過了 `until` 自動消失；只讀 `bot.limit_hit`，判斷在 daemon。
 - 狀態 class 不叫 `blocked`（`styles.css` 有一條裸的 `.blocked` 會撞到），用 `needs-reply`／`quota-blocked`。
 - 桌機收合的行數用**排版位置**（`offsetTop`）量，主力的 FLIP 只在順序真的變了時播（`lib/chipOverflow.ts` 的 `layoutBoxes`／`orderChanged`）。
   以前 bot 狀態一變、晶片變寬換行就播 FLIP，量測又吃到動畫中的 transform，裁切在 13／43／63／91px 之間每幀亂跳，
