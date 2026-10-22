@@ -653,3 +653,46 @@
     outline-offset: 1px;
   }
 }
+
+/* 主力撞限角標（#1899，使用者 2026-10-22 選 v1）：右上角 13px 墨色圓、白色斜線（禁止符號），只有圖示。
+   偏移 -3px、主力列不加留白。顏色走 token；深色主題墨與斜線對調，兩種主題都看得到。 */
+:root {
+  --limit-mark-ink: #1d1b19;
+  --limit-mark-slash: #ffffff;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    --limit-mark-ink: #f1ede6;
+    --limit-mark-slash: #1d1b19;
+  }
+}
+
+:root[data-theme="dark"] {
+  --limit-mark-ink: #f1ede6;
+  --limit-mark-slash: #1d1b19;
+}
+
+.unread-chip-limit {
+  position: absolute;
+  top: -3px;
+  right: -3px;
+  width: 13px;
+  height: 13px;
+  border-radius: 50%;
+  background: var(--limit-mark-ink);
+  pointer-events: none;
+}
+
+.unread-chip-limit::after {
+  content: '';
+  position: absolute;
+  left: 2px;
+  right: 2px;
+  top: 50%;
+  height: 1.5px;
+  margin-top: -0.75px;
+  border-radius: 1px;
+  background: var(--limit-mark-slash);
+  transform: rotate(-45deg);
+}
