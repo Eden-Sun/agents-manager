@@ -655,7 +655,7 @@
 }
 
 /* 主力撞限角標（#1899，使用者 2026-10-22 選 v1）：右上角 13px 墨色圓、白色斜線（禁止符號），只有圖示。
-   偏移 -3px、主力列不加留白。顏色走 token；深色主題墨與斜線對調，兩種主題都看得到。 */
+   偏移 -1px（桌機收合時組的 padding 只有 1px，-3px 會切到角標），主力列不加留白。顏色走 token；深色主題墨與斜線對調，兩種主題都看得到。 */
 :root {
   --limit-mark-ink: #1d1b19;
   --limit-mark-slash: #ffffff;
@@ -675,8 +675,8 @@
 
 .unread-chip-limit {
   position: absolute;
-  top: -3px;
-  right: -3px;
+  top: -1px;
+  right: -1px;
   width: 13px;
   height: 13px;
   border-radius: 50%;
