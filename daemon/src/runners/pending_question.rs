@@ -169,6 +169,31 @@ mod codex_async_tests {
         assert!(env.herdr.calls_to("pane.send_keys").is_empty() && env.herdr.calls_to("pane.send_text").is_empty(), "只讀、不按鍵");
     }
 
+    /// Codex acknowledges enqueueing immediately; only a user reply answers the question.
+    #[tokio::test]
+    async fn accepted_function_output_does_not_answer_an_async_question() {
+        let mut log = vec![
+            ask("accepted-call", json!([{"title":"Which account?", "options":["Current", "Another"]}])),
+            json!({"type":"response_item", "payload":{
+                "type":"function_call_output", "call_id":"accepted-call", "output":r#"{"accepted":true}"#
+            }}).to_string(),
+        ];
+        let pending = crate::codex_async_question::pending_async_questions(&log.join("\n"));
+        assert_eq!(pending.len(), 1, "accepted only acknowledges enqueueing");
+        assert_eq!(pending[0].call_id, "accepted-call");
+        assert_eq!(pending[0].options, ["Current", "Another"]);
+        let (app, bot, env) = rig(&log, COLLAPSED).await;
+        let Json(body) = get_pending_question(State(app.clone()), Path(bot.clone())).await.unwrap();
+        assert_eq!(body["questions"][0]["question"], "Which account?");
+        assert_eq!(body["questions"][0]["options"][1]["label"], "Another");
+        log.push(reply("accepted-call", 0));
+        assert!(crate::codex_async_question::pending_async_questions(&log.join("\n")).is_empty(), "only the user reply resolves it");
+        let (answered_app, answered_bot, _answered_env) = rig(&log, COLLAPSED).await;
+        let Json(answered) = get_pending_question(State(answered_app), Path(answered_bot)).await.unwrap();
+        assert_eq!(answered["questions"], Value::Null);
+        assert!(env.herdr.calls_to("pane.send_keys").is_empty() && env.herdr.calls_to("pane.send_text").is_empty());
+    }
+
     /// 答過的題目不再出現；畫面題數與沒作答的題數一致時全部都是。
     #[tokio::test]
     async fn answered_questions_are_not_returned() {
