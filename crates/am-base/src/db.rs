@@ -458,6 +458,8 @@ pub const SCHEMA_HISTORY: &[(i64, &str)] = &[
     (65, "243128a550c2ec96"),
     // issue #1793: scope spawn claims to the parent run and herdr session.
     (66, "47e922c6f2ab97d9"),
+    // #1892: persist the terminal instance used to reconnect adopted child runs.
+    (67, "14ee6138116e5ba4"),
 ];
 pub const SCHEMA_VERSION: i64 = SCHEMA_HISTORY[SCHEMA_HISTORY.len() - 1].0;
 
@@ -701,6 +703,8 @@ async fn apply_migrations_inner(pool: &SqlitePool, fail_after_spawn_hints_drop: 
             "ALTER TABLE messages ADD COLUMN sent_via TEXT CHECK (sent_via IN ('send_now','supplement'))",
         ),
         ("runs", "live_rev", "ALTER TABLE runs ADD COLUMN live_rev TEXT"),
+        // #1892: capture at adoption; never infer identity for legacy NULL rows.
+        ("runs", "terminal_id", "ALTER TABLE runs ADD COLUMN terminal_id TEXT"),
         // issue #879：沒有 hook 的 claude run 第一次讀對話檔時建的基準（那一輪已結束的最後一問的時間）；之後只記比它晚的問。
         // NULL＝還沒讀過（舊列、剛開的 run）。空字串＝讀過、檔裡當時沒有任何一問。
         ("runs", "transcript_baseline_at", "ALTER TABLE runs ADD COLUMN transcript_baseline_at TEXT"),
@@ -1336,6 +1340,9 @@ pub struct Run {
     pub runtime_identity: Option<String>,
     /// `API Error: …` that cut the last turn short; cleared when the next turn opens (`turn_error`).
     pub turn_error: Option<String>,
+    /// Herdr terminal identity captured while adopting a child; NULL is not evidence.
+    #[sqlx(default)]
+    pub terminal_id: Option<String>,
     pub native_session_id: Option<String>,
     pub transcript_path: Option<String>,
     pub last_read_revision: Option<i64>,

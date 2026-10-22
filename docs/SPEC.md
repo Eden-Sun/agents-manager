@@ -1872,12 +1872,13 @@ claim 與 hint 衝突時以 claim 為準。它們只證明 parent，不證明同
 
 既有 child 的接回／沿用須有同 parent、同 herdr session、同 kind 的 native session ID；子 bot 暱稱與歷史 `agent_name` 都不是 lookup key。
 同 pane 換 agent 卻缺少 child instance／replacement 證據時維持未知，不推定改名、不改 parent、不接上舊 child 設定。
+**daemon 重啟接回（#1892）**：認領 child 時保存 herdr `terminal_id`。既有 active child 的 native session ID 尚未取得時，只能以同 host／herdr session／pane 與非空且相同的已存 terminal ID 接回，重建狀態訂閱與完成回合擷取；不能以名字、parent claim 或 pane ID 單獨補認。native session 有衝突仍拒絕，成功接回後可補入 herdr 後來提供的 native ID。herdr server 自身 stop/start 會換 terminal ID，即使 pane ID 相同也拒絕 terminal fallback；這只保證 daemon 重啟的恢復，不保證 herdr 重建後恢復。舊列沒有 native 與 terminal 證據時保持未知，log 記 `instance_identity_unverified`，run 投影附 `identity_recovery_reason=missing_instance_identity`（純診斷，不改狀態）；parent 需手動讀報告、驗收，完成後正常收 pane 再建立新 child，不直接回填 DB。
 新 pane 的明確 ownership 可以認領新 child，但名稱相似不能證明舊 child 被刻意替換；replacement 判斷只接受明確 ownership，且舊 pane 已確認不存在。
 
 spawn hint 仍由 hook 的 Bash 工具輸出抽取 `herdr pane split`／`agent start` 的 pane ID，驗證清單上確有該 agent 後才採用。線索（spawn hint／遠端 spawn claim／本機 shim 的 `POST /relay/spawn/claim`）一記下就排一輪延後對帳（15 秒）：遠端 hook 走 spool，常比子 agent 出現時那輪對帳晚到，不排的話要等下一個不相干的 pane 事件才認領（2026-10-19 m4p 實例晚了 9 分鐘；本機 grok 起得慢，shim 的 claim 晚於偵測那輪，#1867）。
 讀取 claim/hint 失敗時這一輪一顆都不認領、不改名，排延後補跑；讀到空集合也不退回名字／tab 猜測。
 共用 session 的主機（§11.10）只收自己 workspace／tab／pane 裡有明確 ownership 的 agent；已移交專案（§6.5h）的 agent 不認領，其 bot 不當父候選。
-認領記 `managed_by='child'`、`parent_bot_id` 與 `adopted=1` 的 run；可取得時一併保存 native session ID。
+認領記 `managed_by='child'`、`parent_bot_id` 與 `adopted=1` 的 run；可取得時一併保存 native session ID 與 terminal ID。
 子 bot `name`：先去掉實際 parent 的 herdr 名稱前綴，再去掉 child suffix 中重複的專案 bot agent 前綴（`<專案 slug>-<bot id 尾 6 碼>-`），保存剩下的短名；herdr 名稱本身仍維持 `<parent>-<suffix>` 與 32 字元預算。沒有可識別前綴時沿用 herdr 名（去空白與 `@,:;`、截 32 字）。短名已被專案中的 live bot 使用時仍改存完整 herdr 名，以保持唯一。既有 child 列的重複前綴只在 `GET /api/state` 與 herdr 更新的 child-loss 清單顯示時移除，不改 DB，避免啟動時改名撞上專案唯一索引或改變歷史資料。
 每顆認領各自成敗：失敗只 log 跳過，不中止整台主機的對帳。
 **無名 agent（issue #1472）**：只有明確 spawn claim/hint 指向活著的 parent 才補顯示名稱並認領。

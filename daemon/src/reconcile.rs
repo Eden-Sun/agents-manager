@@ -458,6 +458,17 @@ async fn may_retire_child(app: &impl ReconcileHostEnv, host: &str, bot: &db::Bot
     }
 }
 
+// Bound repeated legacy identity diagnostics to once per run per hour.
+fn warn_unverified_run(run_id: &str) -> bool {
+    static SEEN: std::sync::OnceLock<std::sync::Mutex<std::collections::HashMap<String, std::time::Instant>>> = std::sync::OnceLock::new();
+    let now = std::time::Instant::now();
+    let mut seen = SEEN.get_or_init(Default::default).lock().unwrap_or_else(|e| e.into_inner());
+    seen.retain(|_, at| now.duration_since(*at) < std::time::Duration::from_secs(3600));
+    if seen.contains_key(run_id) { return false; }
+    seen.insert(run_id.to_owned(), now);
+    true
+}
+
 /// A parent claim proves ownership, never which child process occupies a reused pane.
 fn matches_run(run: &db::Run, agent: &crate::herdr::AgentInfo, child: bool) -> bool {
     if agent.pane_id.is_empty() { return false; }
@@ -468,7 +479,14 @@ fn matches_run(run: &db::Run, agent: &crate::herdr::AgentInfo, child: bool) -> b
         // 以前子 agent 走這裡一律 false，daemon 重啟後 grok 子 agent 再也接不回、狀態不再追蹤（2026-10-19 m4p）。
         (Some(_), None) => run.pane_id.as_deref() == Some(agent.pane_id.as_str()),
         (None, _) if !child => run.pane_id.as_deref() == Some(agent.pane_id.as_str()),
-        _ => false,
+        (None, _) => {
+            // The caller has already checked host/session. A name or parent claim cannot
+            // prove an instance; a persisted terminal can, even before the CLI binds a session.
+            run.pane_id.as_deref() == Some(agent.pane_id.as_str())
+                && run.terminal_id.as_deref().filter(|id| !id.trim().is_empty())
+                    .zip(agent.terminal_id.as_deref().filter(|id| !id.trim().is_empty()))
+                    .is_some_and(|(expected, observed)| expected == observed)
+        },
     }
 }
 
@@ -684,6 +702,10 @@ pub(crate) async fn reconcile_host_locked(app: &impl ReconcileHostEnv, host: &st
                     Ok(Some(agent)) => {
                         // Occupied but no child-instance evidence (or a conflicting native ID).
                         // Reserve the pane so the adoption pass cannot attach it to another bot.
+                        if warn_unverified_run(&run.id) {
+                            tracing::warn!(host, session = %session, bot = %bot.id, run = %run.id, pane = %agent.pane_id,
+                                reason = "instance_identity_unverified", "reconcile: keeping run without reconnecting an unverified pane");
+                        }
                         claimed.insert(agent.pane_id);
                         continue;
                     }
@@ -736,7 +758,7 @@ pub(crate) async fn reconcile_host_locked(app: &impl ReconcileHostEnv, host: &st
                 // `working -> idle` edge (review 2026-09-12 a).
                 let status = agent.agent_status.normalized().as_str().to_string();
                 // Preserve a committed restart stop for recovery; heal other stuck `stopping` runs too.
-                sqlx::query("UPDATE runs SET pane_id=?, workspace_id=?, tab_id=?, agent_status=?, agent_name=COALESCE(?, agent_name), herdr_session=COALESCE(herdr_session, ?), native_session_id=COALESCE(native_session_id, ?), state=CASE WHEN state='starting' OR (state='stopping' AND ?=0) THEN 'running' ELSE state END WHERE id=?")
+                sqlx::query("UPDATE runs SET pane_id=?, workspace_id=?, tab_id=?, agent_status=?, agent_name=COALESCE(?, agent_name), herdr_session=COALESCE(herdr_session, ?), native_session_id=COALESCE(native_session_id, ?), terminal_id=COALESCE(terminal_id, ?), state=CASE WHEN state='starting' OR (state='stopping' AND ?=0) THEN 'running' ELSE state END WHERE id=?")
                     .bind(&agent.pane_id)
                     .bind(&agent.workspace_id)
                     .bind(&agent.tab_id)
@@ -744,6 +766,7 @@ pub(crate) async fn reconcile_host_locked(app: &impl ReconcileHostEnv, host: &st
                     .bind(&found_name)
                     .bind(&session)
                     .bind(crate::lifecycle::dead_panes::herdr_session_id(agent))
+                    .bind(agent.terminal_id.as_deref().filter(|id| !id.trim().is_empty()))
                     .bind(preserve_stopping)
                     .bind(&run.id)
                     .execute(app.db())
@@ -1165,8 +1188,8 @@ async fn adopt_child(
     let run_id = db::ulid();
     let status = agent.agent_status.normalized().as_str().to_string();
     sqlx::query(
-        "INSERT INTO runs (id, bot_id, state, agent_status, workspace_id, pane_id, tab_id, adopted, agent_name, herdr_session, native_session_id, started_at)
-         VALUES (?,?,'running',?,?,?,?,1,?,?,?,?)",
+        "INSERT INTO runs (id, bot_id, state, agent_status, workspace_id, pane_id, tab_id, adopted, agent_name, herdr_session, native_session_id, terminal_id, started_at)
+         VALUES (?,?,'running',?,?,?,?,1,?,?,?,?,?)",
     )
     .bind(&run_id)
     .bind(&bot_id)
@@ -1177,6 +1200,7 @@ async fn adopt_child(
     .bind(name)
     .bind(session)
     .bind(&native_id)
+    .bind(agent.terminal_id.as_deref().filter(|id| !id.trim().is_empty()))
     .bind(&now)
     .execute(app.db())
     .await?;
@@ -4374,6 +4398,181 @@ mod compat_tests {
             tokio::time::sleep(std::time::Duration::from_millis(50)).await;
         }
         assert_eq!(adopted, 1, "線索到了就該排一輪對帳把子 agent 認領起來");
+    }
+
+    #[test]
+    fn nr1892_unverified_run_warning_is_deduplicated() {
+        let run = db::ulid();
+        let warnings = (0..2).filter(|_| super::warn_unverified_run(&run)).count();
+        assert_eq!(warnings, 1, "repeated reconciliation must not flood WARN");
+        assert!(super::warn_unverified_run(&db::ulid()), "different runs keep their diagnosis");
+    }
+
+    #[tokio::test]
+    async fn nr1892_terminal_migration_is_idempotent_and_keeps_legacy_identity_unknown() {
+        let env = tt::env().await;
+        let bot = a_bot(&env, "legacy").await;
+        let run_id = tt::fake_run(&env.app, &bot).await;
+        sqlx::query("ALTER TABLE runs DROP COLUMN terminal_id").execute(&env.app.db).await.unwrap();
+        sqlx::query(&format!("PRAGMA user_version = {}", db::SCHEMA_VERSION - 1)).execute(&env.app.db).await.unwrap();
+        for _ in 0..2 {
+            crate::runners::am_base_tests::migrate(&env.app.db).await.unwrap();
+            let run = db::run(&env.app.db, &run_id).await.unwrap().unwrap();
+            assert_eq!(run.terminal_id, None);
+            assert_eq!(run.bot_id, bot);
+        }
+        sqlx::query("UPDATE runs SET terminal_id='saved-terminal' WHERE id=?").bind(&run_id).execute(&env.app.db).await.unwrap();
+        crate::runners::am_base_tests::migrate(&env.app.db).await.unwrap();
+        assert_eq!(db::run(&env.app.db,&run_id).await.unwrap().unwrap().terminal_id.as_deref(), Some("saved-terminal"));
+    }
+
+    // Fake herdr replies deliberately omit agent_session, as they can at initial adoption.
+    fn nr1892_agent(pane: &crate::herdr::PaneInfo, name: &str, terminal: &str) -> Value {
+        json!({"name":name, "agent":"claude", "agent_status":"idle", "pane_id":pane.pane_id,
+            "workspace_id":pane.workspace_id, "tab_id":pane.tab_id, "terminal_id":terminal})
+    }
+
+    async fn nr1892_remote(app: &Arc<App>, env: &tt::Env, host: &str) {
+        if host == "local" { return; }
+        let cfg: crate::config::HostCfg = serde_json::from_value(json!({
+            "name":host, "ssh":"unused.invalid", "herdr_session":"test"
+        })).unwrap();
+        crate::hosts::set_ssh_fake(host, |_| anyhow::bail!("no real SSH in #1892 tests"));
+        app.hosts.insert_remote_with_client_for_test(cfg,
+            crate::herdr::HerdrClient::new(env.dir.join("data/herdr.sock"))).await;
+    }
+
+    #[tokio::test]
+    async fn macos_local_nr1892_terminal_restores_child_watch_and_completion_after_restart() {
+        for host in ["local".to_owned(), format!("nr1892-{}", db::ulid())] {
+            let env = tt::env().await;
+            nr1892_remote(&env.app, &env, &host).await;
+            sqlx::query("UPDATE projects SET host=? WHERE id=?").bind(&host).bind(&env.project_id)
+                .execute(&env.app.db).await.unwrap();
+            env.herdr.allow_subscribe.store(true, std::sync::atomic::Ordering::SeqCst);
+            let client = crate::herdr::HerdrClient::new(env.dir.join("data/herdr.sock"));
+            let (ws, root) = client.workspace_create("/tmp/p", "proj", json!({})).await.unwrap();
+            let pane = client.pane_split(&root.pane_id, "right", "/tmp/p", json!({})).await.unwrap();
+            let parent_id = a_bot(&env, "parent").await;
+            let parent = db::bot(&env.app.db, &parent_id).await.unwrap().unwrap();
+            sqlx::query("INSERT INTO runs (id,bot_id,state,agent_status,pane_id,herdr_session,started_at) VALUES (?,?,'running','idle',?,'test',?)")
+                .bind(db::ulid()).bind(&parent_id).bind(&root.pane_id).bind(db::now()).execute(&env.app.db).await.unwrap();
+            *env.herdr.agents.lock().unwrap() = vec![nr1892_agent(&root,"parent","parent-terminal"), nr1892_agent(&pane,"kid","child-terminal")];
+            let agent = client.agent_get(&pane.pane_id).await.unwrap().unwrap();
+            let kid = super::adopt_child(&env.app,&host,&client,"test",&agent,"kid",&parent,"kid","kid","claude").await.unwrap();
+            let run = db::active_run(&env.app.db, &kid).await.unwrap().unwrap();
+            assert_eq!(run.terminal_id.as_deref(), Some("child-terminal"));
+            assert_eq!(run.native_session_id, None);
+            // Let the original adoption seed read an empty screen before the new daemon exists.
+            assert!(tt::eventually!(env.herdr.calls.lock().unwrap().iter().any(|(method, args)|
+                method == "pane.read" && args["pane_id"] == pane.pane_id && args["source"] == "recent_unwrapped" && args["lines"] == 200)));
+            // The capture holds the bot lock through the read/store; wait until it has finished.
+            drop(env.app.bot_lock(&kid).await.lock_owned().await);
+            crate::events::unwatch_pane_on_session(&env.app, &host, "test", &pane.pane_id).await;
+            let subscriptions_before = env.herdr.calls_to("events.subscribe").iter()
+                .filter(|args| args["subscriptions"][0]["pane_id"] == pane.pane_id).count();
+            let restarted = tt::restart_app(&env).await;
+            nr1892_remote(&restarted, &env, &host).await;
+            let key = (host.clone(), "test".to_string(), pane.pane_id.clone());
+            assert!(!restarted.pane_watchers.lock().await.contains_key(&key));
+            env.herdr.set_screen(&pane.pane_id, "❯ 請檢查庫存\n\n⏺ 庫存檢查完成，測試通過。\n\n❯\n");
+            super::reconcile_host(&restarted, &host).await.unwrap();
+            assert!(restarted.pane_watchers.lock().await.contains_key(&key), "{host}: restart must restore the watcher");
+            assert!(tt::eventually!(env.herdr.calls_to("events.subscribe").iter()
+                .filter(|args| args["subscriptions"][0]["pane_id"] == pane.pane_id).count() > subscriptions_before));
+            let conv = db::conversation_id(&restarted.db, &kid).await.unwrap();
+            let turn_id = tokio::time::timeout(std::time::Duration::from_secs(12), async {
+                loop {
+                    // Capture inserts the completed turn before its messages; status alone
+                    // is not yet a completion that notify_turn can deliver.
+                    if let Some(id) = sqlx::query_scalar::<_, String>(
+                        "SELECT t.id FROM turns t WHERE t.conversation_id=? AND t.status='completed_fallback'
+                           AND t.completed_at IS NOT NULL
+                           AND EXISTS (SELECT 1 FROM messages m WHERE m.turn_id=t.id AND m.role='assistant' AND trim(m.content)<>'')")
+                        .bind(&conv).fetch_optional(&restarted.db).await.unwrap() { break id; }
+                    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+                }
+            }).await.expect("restarted reconcile must capture the child's completed reply");
+            // Wait for the same capture's cursor/emit work to finish, not an arbitrary delay.
+            let capture_lock = restarted.bot_lock(&kid).await;
+            let _capture_guard = capture_lock.lock().await;
+            let captured_reply: String = sqlx::query_scalar("SELECT content FROM messages WHERE turn_id=? AND role='assistant'")
+                .bind(&turn_id).fetch_one(&restarted.db).await.unwrap();
+            assert!(captured_reply.contains("庫存檢查完成，測試通過。"));
+            assert_eq!(db::run(&restarted.db, &run.id).await.unwrap().unwrap().agent_status, "idle");
+            drop(_capture_guard);
+            // Parent is mid-turn: the production path must durably queue the restored child's notice.
+            let parent_run = db::active_run(&restarted.db, &parent_id).await.unwrap().unwrap();
+            let parent_conv = db::conversation_id(&restarted.db, &parent_id).await.unwrap();
+            sqlx::query("INSERT INTO turns (id,conversation_id,run_id,origin,status,delivery,created_at) VALUES (?,?,?,'web','in_flight','ok',?)")
+                .bind(db::ulid()).bind(&parent_conv).bind(&parent_run.id).bind(db::now()).execute(&restarted.db).await.unwrap();
+            // Immediate notification is disabled under cfg(test); invoke its production handler.
+            crate::runners::child_done::notify_turn(&restarted, &turn_id).await.unwrap();
+            let crid = format!("child-done:{kid}:{turn_id}");
+            let notices: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM turns t JOIN conversations c ON c.id=t.conversation_id WHERE c.bot_id=? AND t.client_request_id=?")
+                .bind(&parent_id).bind(&crid).fetch_one(&restarted.db).await.unwrap();
+            assert_eq!(notices, 1, "{host}: the parent must get a durable completion notice");
+            // The CLI identity can arrive later; terminal evidence permits recording it.
+            env.herdr.agents.lock().unwrap()[1]["agent_session"] = json!({"kind":"id","value":"late-native"});
+            super::reconcile_host(&restarted, &host).await.unwrap();
+            assert_eq!(db::run(&restarted.db, &run.id).await.unwrap().unwrap().native_session_id.as_deref(), Some("late-native"));
+            let children = all_children(&restarted).await;
+            assert_eq!(children.len(), 1, "no duplicate adoption");
+            for p in [&root.pane_id, &pane.pane_id] {
+                crate::events::unwatch_pane_on_session(&restarted, &host, "test", p).await;
+            }
+            let _ = ws;
+        }
+    }
+
+    #[tokio::test]
+    async fn nr1892_terminal_matching_keeps_native_conflicts_and_legacy_nulls_closed() {
+        let env = tt::env().await;
+        let client = crate::herdr::HerdrClient::new(env.dir.join("data/herdr.sock"));
+        let (ws, pane) = client.workspace_create("/tmp/p", "proj", json!({})).await.unwrap();
+        let parent = a_bot(&env,"parent").await;
+        let (kid, id) = a_child(&env,&parent,"kid","old",&ws.workspace_id,&pane.tab_id,&pane.pane_id).await;
+        let mut run = db::run(&env.app.db, &id).await.unwrap().unwrap();
+        for (native, seen_native, terminal, seen_terminal, expected) in [
+            (None, None, None, None, false),
+            (None, None, None, Some("term"), false),
+            (None, Some("native"), None, Some("term"), false),
+            (None, None, Some(""), Some(""), false),
+            (None, None, Some(" "), Some(" "), false),
+            (None, None, Some("term"), None, false),
+            (None, None, Some("old"), Some("new"), false),
+            (None, None, Some("term"), Some("term"), true),
+            (None, Some("native"), Some("term"), Some("term"), true),
+            (Some("a"), Some("b"), Some("term"), Some("term"), false),
+            (Some("a"), Some("a"), Some("old"), Some("new"), true),
+            (Some("a"), None, None, None, true), // existing grok fallback remains unchanged
+        ] {
+            run.native_session_id = native.map(str::to_owned);
+            run.terminal_id = terminal.map(str::to_owned);
+            let mut value = nr1892_agent(&pane,"renamed",seen_terminal.unwrap_or(""));
+            value["agent_session"] = seen_native.map(|id| json!({"kind":"id","value":id})).unwrap_or(Value::Null);
+            let mut agent: crate::herdr::AgentInfo = serde_json::from_value(value).unwrap();
+            assert_eq!(super::matches_run(&run,&agent,true), expected, "{native:?}/{seen_native:?}/{terminal:?}/{seen_terminal:?}");
+            if native.is_none() { agent.pane_id = "another-pane".into(); assert!(!super::matches_run(&run,&agent,true)); }
+        }
+        // Legacy NULL cannot be backfilled from the current occupant, even with a parent claim.
+        crate::spawn_hints::claim(&env.app,&parent,&pane.pane_id).await.unwrap();
+        *env.herdr.agents.lock().unwrap() = vec![nr1892_agent(&pane,"old","new-terminal")];
+        super::reconcile_host(&env.app,"local").await.unwrap();
+        let kept = db::active_run(&env.app.db,&kid).await.unwrap().unwrap();
+        assert_eq!(kept.id,id);
+        assert_eq!(kept.terminal_id,None);
+        assert!(env.app.pane_watchers.lock().await.is_empty());
+        // Matching terminal IDs on the wrong host/session must not attach a child either.
+        sqlx::query("DELETE FROM spawn_claims WHERE pane_id=?").bind(&pane.pane_id).execute(&env.app.db).await.unwrap();
+        sqlx::query("UPDATE runs SET terminal_id='new-terminal' WHERE id=?").bind(&id).execute(&env.app.db).await.unwrap();
+        let other = format!("nr1892-other-{}", db::ulid());
+        nr1892_remote(&env.app, &env, &other).await;
+        super::reconcile_host(&env.app,&other).await.unwrap();
+        assert!(env.app.pane_watchers.lock().await.is_empty());
+        sqlx::query("UPDATE runs SET herdr_session='another-session' WHERE id=?").bind(&id).execute(&env.app.db).await.unwrap();
+        super::reconcile_host(&env.app,"local").await.unwrap();
+        assert!(env.app.pane_watchers.lock().await.is_empty());
     }
 
     /// 2026-10-19 m4p：daemon 重啟後，herdr 沒綁 CLI session 的子 agent（grok）要靠 pane_id 接回來、繼續追蹤狀態；
