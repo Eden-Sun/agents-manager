@@ -51,6 +51,8 @@ pub fn pick_limit_hit(owed: Option<LimitHit>, keys: &[String], model: Option<&st
 /// [`try_limit_hit_for_bot`] 的批次版（給 `/api/state` 投影）：查詢次數是常數，不隨 bot 數增加。
 /// 結果逐顆與單筆版相同（見 `state_limit_hit_tests`）；讀不到的 bot 給 `None` 並記 debug。
 /// 身分表按主機各讀一次（同 [`keys_for_bot`] 的規則，見 [`base_from_identities`]），`quotas` 只拿一次鎖。
+/// **副作用**：欠著的撞限（[`owed_limit_hit`]）會在這裡順手記進 `quotas`（寫入；冪等，跟派工閘同一件事）。
+/// 所以 `GET /api/state` 不是純讀取——讀的人要知道這一點。
 pub async fn limit_hits_for_bots(app: &Arc<App>, bots: &[crate::db::Bot]) -> Vec<Option<LimitHit>> {
     let runs = match crate::db::active_runs_by_bot(&app.db).await {
         Ok(runs) => runs,

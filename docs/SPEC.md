@@ -4686,7 +4686,7 @@ codex 橫幅的 `try again at` 沒有時區，印的是**那台主機**的當地
   **查不到（讀不到 bot 在哪台主機）不當成沒撞限**（#197）：派送 `hold` 10 秒、不花重試、不送；回合結束不結案、交給下一輪對帳；
   等額度的重送這一拍不動、不算次數；開機回填那一件跳過、不退回 `local`（會把遠端 bot 的撞限種進本機同名的 key），這台主機這一輪不算回填完，
   30 秒後（或那台下一次偵測完）重跑。
-- **側欄標記（#1899）**：`GET /api/state` 的**頂層**主力 bot 帶唯讀欄位 `limit_hit: {until, message} | null`，整份快照由 `runners::quota::limit_hits_for_bots` 批次算、`bot_status` 單顆用 `try_limit_hit_for_bot`，兩者都走 `pick_limit_hit`（web 不重寫判斷）；child 一律 `null`。側欄在頂層列 model 標籤後畫「到限」晶片，title 帶重置時間；過了 `until` 前端自己比時間隱藏。撞限出現、清掉或 until 改變時，web 的 `quota_updated` 會重抓一次 `/api/state` 讓這個欄位跟上。
+- **側欄標記（#1899）**：`GET /api/state` 的**頂層**主力 bot 帶唯讀欄位 `limit_hit: {until, message} | null`，整份快照由 `runners::quota::limit_hits_for_bots` 批次算、`bot_status` 單顆用 `try_limit_hit_for_bot`，兩者都走 `pick_limit_hit`（web 不重寫判斷）；child 一律 `null`。側欄在頂層列 model 標籤後畫「到限」晶片，title 帶重置時間；過了 `until` 前端自己比時間隱藏。撞限出現、清掉或 until 改變時，web 的 `quota_updated` 會重抓一次 `/api/state` 讓這個欄位跟上。**注意：`GET /api/state` 不是純讀取**——欠著的撞限（owed：回合錯誤先記下、還沒寫進 `quotas` 的撞限）會在投影時順手寫進 `quotas`（冪等，跟派工閘同一件事）。
 - **撞限看桶與模型**（`quota::bucket_blocks_model`）：5h、7d 與沒有桶名的撞限（codex、開機回填）擋整個帳號；模型專屬的桶（`fable`／`opus`／`sonnet`）
   只擋**正在跑那個模型**的 bot——看 run 的 `runtime_model`，沒有才看設定值，兩個都沒有就保守地照擋。`limit_hit_for_bot` 與協調者的額度判讀（§18.15）走同一條。
   以前不分桶：巡檢（cc0、fable）撞 Fable 上限，同帳號跑 opus 的協調者與交辦都被擋到 Fable 週窗重置（review3 c3 H2）。
