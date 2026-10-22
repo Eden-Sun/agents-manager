@@ -90,6 +90,12 @@ fn table() -> &'static Mutex<HashMap<String, HostState>> {
 /// 記帳會晚到（查 bot 的任務排程），所以第 0／14／28 秒各掉一顆、第 31 秒才記到第三顆時，前兩顆還留著（歷史留 [`RETAIN`]）。
 /// 同一顆 bot 只留最新的一筆（重開再掉不加數）；比保留期還舊的這一筆不記。
 pub(crate) fn record_at(key: &str, gone: Gone, now: Instant) -> Option<Vec<Gone>> {
+    record_guarded(key, gone, now).map(|(wave, _guard)| wave)
+}
+
+/// [`record_at`]，回一波時**在同一把鎖內**把評估保護一起交出去（[`Evaluating`]）：從領到這一波、到 [`alert`] 評估完成之間，
+/// 別的記帳不會把還沒評估的筆照保留期清掉。
+pub(crate) fn record_guarded(key: &str, gone: Gone, now: Instant) -> Option<(Vec<Gone>, Evaluating)> {
     if now.saturating_duration_since(gone.seen) >= RETAIN {
         return None;
     }
@@ -118,7 +124,7 @@ pub(crate) fn record_at(key: &str, gone: Gone, now: Instant) -> Option<Vec<Gone>
     let must = if std::mem::take(&mut st.recheck) { None } else { Some(seen) };
     let wave = find_wave(&st.exits, must)?;
     st.quiet_until = Some(now + COOLDOWN);
-    Some(wave)
+    Some((wave, Evaluating::handed_over(st, key)))
 }
 
 /// 任一段長 [`WINDOW`] 的時間裡有 ≥ [`THRESHOLD`] 筆（`exits` 已按事件時間排序）；`must` 有給就要包含那個時刻。
@@ -146,9 +152,16 @@ fn requalify(key: &str, now: Instant) -> Option<Vec<Gone>> {
 }
 
 /// 一次評估（[`alert`]）進行中的保護：到它結束（完成、確認無候選、或 [`defer`] 留下旗標）才放開，記帳期間不照保留期清。
-struct Evaluating(String);
+pub(crate) struct Evaluating(String);
 
 impl Evaluating {
+    /// 已經持有 `table()` 的鎖（`st` 就是那一份）時用：計數與保護的建立在同一把鎖內，不留空檔。
+    fn handed_over(st: &mut HostState, key: &str) -> Self {
+        st.evaluating += 1;
+        Evaluating(key.to_string())
+    }
+
+    #[cfg(test)]
     fn enter(key: &str) -> Self {
         table().lock().unwrap_or_else(|e| e.into_inner()).entry(key.to_string()).or_default().evaluating += 1;
         Evaluating(key.to_string())
@@ -188,7 +201,7 @@ fn defer(key: &str) -> bool {
 
 /// 背景重評估到點：還欠評估（沒被別的記帳接手）而且不在冷卻，就在整份累積的記帳（不照年齡清、不要求包含某一筆）裡找一波，
 /// 有就設冷卻回傳。找不到也清掉旗標。
-fn take_pending(key: &str, now: Instant) -> Option<Vec<Gone>> {
+fn take_pending(key: &str, now: Instant) -> Option<(Vec<Gone>, Evaluating)> {
     let mut table = table().lock().unwrap_or_else(|e| e.into_inner());
     let st = table.get_mut(key)?;
     st.recheck_scheduled = false;
@@ -197,7 +210,7 @@ fn take_pending(key: &str, now: Instant) -> Option<Vec<Gone>> {
     }
     let wave = find_wave(&st.exits, None)?;
     st.quiet_until = Some(now + COOLDOWN);
-    Some(wave)
+    Some((wave, Evaluating::handed_over(st, key)))
 }
 
 /// 把這幾筆從記帳拿掉（轉移當下在維護中的）。
@@ -306,14 +319,14 @@ fn note(app: &Arc<App>, who: Who, run_id: String, at: String) {
     let seen = now.checked_sub(age).unwrap_or(now);
     let key = key_of(app, &who.host);
     let gone = Gone { bot_id: who.bot_id, name: who.name, run_id, at, seen };
-    let Some(wave) = record_at(&key, gone, now) else { return };
+    let Some((wave, guard)) = record_guarded(&key, gone, now) else { return };
     let app = app.clone();
     let host = who.host;
     crate::background_loop::spawn_named(
         &app.background_tasks.clone(),
         "gone burst alert",
         // 達門檻才讀維護歷史（不在記帳的路徑上）。
-        Box::pin(async move { alert(&app, &key, &host, wave).await }),
+        Box::pin(async move { alert(&app, &key, &host, wave, guard).await }),
     );
 }
 
@@ -390,16 +403,15 @@ fn spawn_recheck(app: &Arc<App>, key: String, host: String) {
                 _ = tokio::time::sleep(RECHECK_DELAY) => {}
                 _ = app.shutdown.cancelled() => return,
             }
-            if let Some(wave) = take_pending(&key, clock()) {
-                alert(&app, &key, &host, wave).await;
+            if let Some((wave, guard)) = take_pending(&key, clock()) {
+                alert(&app, &key, &host, wave, guard).await;
             }
         }),
     );
 }
 
 /// 達門檻（或重評估找到一波）之後：過濾維護、仍達門檻才推。
-async fn alert(app: &Arc<App>, key: &str, host: &str, wave: Vec<Gone>) {
-    let _evaluating = Evaluating::enter(key);
+async fn alert(app: &Arc<App>, key: &str, host: &str, wave: Vec<Gone>, _evaluating: Evaluating) {
     let Some(wave) = outside_maintenance(app, key, host, wave).await else { return };
     if let Err(e) = push(app, host, &wave).await {
         clear_quiet(key);
@@ -618,13 +630,52 @@ mod tests {
         }
         // 讀維護歷史的 DB 查詢「花了 40 秒」：A–C 已經比保留期（60 秒）還舊。
         crate::race_point::arm("gone_burst_round", k, || async { SKEW.with(|s| s.set(Duration::from_secs(40))) });
-        alert(&env.app, k, config::LOCAL_HOST, candidate).await;
+        alert(&env.app, k, config::LOCAL_HOST, candidate, Evaluating::enter(k)).await;
         SKEW.with(|s| s.set(Duration::ZERO));
         assert!(eventually!(alerts(&env.app).await.len() == 1), "A–C 沒有被保留期清掉");
         let a = alerts(&env.app).await;
         let mut names: Vec<_> = a[0]["bot_names"].as_array().unwrap().iter().map(|n| n.as_str().unwrap().to_string()).collect();
         names.sort();
         assert_eq!(names, ["a", "b", "c"]);
+    }
+
+    /// 交接競態：領到候選（[`take_pending`]／[`record_guarded`]）到 [`alert`] 開始之間，別的記帳（超過保留期的 `now`）
+    /// 不能把還沒評估的 A–C 清掉——保護在領取的同一把鎖內就成立。
+    #[test]
+    fn the_evaluation_guard_is_taken_with_the_wave_so_another_record_cannot_expire_it() {
+        let t = Instant::now();
+        let mk = |bot: &str, s: u64| Gone { bot_id: bot.into(), name: bot.into(), run_id: format!("run-{bot}"), at: String::new(), seen: t - Duration::from_secs(s) };
+        let later = t + Duration::from_secs(40); // A–C 這時已經 65 秒前
+        let remaining = |k: &str| table().lock().unwrap().get(k).unwrap().exits.iter().filter(|g| ["a", "b", "c"].contains(&g.bot_id.as_str())).count();
+
+        // 路徑一：背景重評估領走待辦。
+        let k = "t-handoff-pending";
+        for b in ["a", "b", "c"] {
+            record_at(k, mk(b, 25), t);
+        }
+        {
+            let mut tb = table().lock().unwrap();
+            let st = tb.get_mut(k).unwrap();
+            st.recheck = true;
+            st.quiet_until = None;
+        }
+        let (wave, guard) = take_pending(k, t).expect("待辦領得到");
+        assert_eq!(wave.len(), 3);
+        record_at(k, mk("x", 0), later); // 另一個執行緒的記帳在這個空檔進來
+        assert_eq!(remaining(k), 3, "領取當下就有保護：A–C 沒被清");
+        drop(guard);
+
+        // 路徑二：記帳湊成一波，交給 alert 之前。
+        let k = "t-handoff-record";
+        record_at(k, mk("a", 25), t);
+        record_at(k, mk("b", 25), t);
+        let (wave, guard) = record_guarded(k, mk("c", 25), t).expect("第三顆");
+        assert_eq!(wave.len(), 3);
+        record_at(k, mk("y", 0), later);
+        assert_eq!(remaining(k), 3, "record_at 領到一波時保護也在同一把鎖內成立");
+        drop(guard);
+        record_at(k, mk("z", 0), later + Duration::from_secs(1));
+        assert_eq!(remaining(k), 0, "保護放開之後照保留期清");
     }
 
     /// 輪數用完之後**不再有任何新的記帳**，背景重評估仍把 A–C 推成告警（不依賴第四顆，也不被保留期先吃掉）。
@@ -635,7 +686,7 @@ mod tests {
         let (k, now) = ("t-bg-recheck", Instant::now());
         let candidate = stream_fixture(&env, k, now).await;
         arm_stream(k, now, &HITS);
-        alert(&env.app, k, config::LOCAL_HOST, candidate).await;
+        alert(&env.app, k, config::LOCAL_HOST, candidate, Evaluating::enter(k)).await;
         assert_eq!(HITS.load(Ordering::SeqCst), MAX_ROUNDS);
         assert!(eventually!(alerts(&env.app).await.len() == 1), "沒有第四顆也要收到告警");
         let a = alerts(&env.app).await;
