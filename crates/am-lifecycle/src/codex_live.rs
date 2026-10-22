@@ -146,6 +146,64 @@ fn effort_follow<'a>(seen: Option<&'a str>, prev: Option<&str>) -> crate::child_
     }
 }
 
+// A failed/cancelled edge is still an attempt: replaying it could erase a newer UI intent.
+const FAST_FOLLOW_LIMIT: usize = 1024;
+#[derive(Default)]
+struct FastFollowEdges(std::collections::HashMap<String, (bool, bool)>);
+impl FastFollowEdges {
+    fn attempt(&mut self, run: &str, fast: bool) -> (bool, bool) {
+        if let Some((prev, _)) = self.0.get_mut(run) {
+            if *prev == fast { return (false, false); }
+            *prev = fast;
+            return (true, false);
+        }
+        // No eviction of active edges: at capacity preserve settings rather than replay them.
+        if self.0.len() >= FAST_FOLLOW_LIMIT { return (false, false); }
+        self.0.insert(run.to_string(), (fast, false));
+        (true, true)
+    }
+}
+fn fast_follow_edges() -> &'static std::sync::Mutex<FastFollowEdges> {
+    static EDGES: std::sync::OnceLock<std::sync::Mutex<FastFollowEdges>> = std::sync::OnceLock::new();
+    EDGES.get_or_init(Default::default)
+}
+async fn clear_finished_fast_edge(pool: &sqlx::SqlitePool, run: &str) -> bool {
+    let active: Result<i64, _> = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM runs WHERE id=? AND state IN ('starting','running','stopping'))")
+        .bind(run).fetch_one(pool).await;
+    if matches!(active, Ok(0)) {
+        fast_follow_edges().lock().unwrap_or_else(|e| e.into_inner()).0.remove(run);
+        return true;
+    }
+    false
+}
+struct FastFollowAttempt { run: String, committed: bool }
+impl Drop for FastFollowAttempt {
+    fn drop(&mut self) {
+        if self.committed { return; }
+        let mut edges = fast_follow_edges().lock().unwrap_or_else(|e| e.into_inner());
+        if let Some((_, warned)) = edges.0.get_mut(&self.run) {
+            if !*warned {
+                *warned = true;
+                tracing::warn!(run = %self.run, "child fast settings were not synchronized; this edge will not be replayed; check the UI before the next start");
+            }
+        }
+    }
+}
+fn attempt_fast_follow(pool: &sqlx::SqlitePool, run: &str, fast: bool) -> Option<FastFollowAttempt> {
+    let (attempt, new) = fast_follow_edges().lock().unwrap_or_else(|e| e.into_inner()).attempt(run, fast);
+    if new {
+        let (pool, run) = (pool.clone(), run.to_string());
+        // One bounded cleanup task per retained run; ended runs disappear even without another poll.
+        tokio::spawn(Box::pin(async move {
+            loop {
+                tokio::time::sleep(Duration::from_secs(30)).await;
+                if clear_finished_fast_edge(&pool, &run).await { break; }
+            }
+        }));
+    }
+    attempt.then(|| FastFollowAttempt { run: run.to_string(), committed: false })
+}
+
 /// 以畫面上的狀態列校正 `runs.runtime_*`（SPEC §4.4a）。回傳 `true` = 有改動。
 /// * 讀不到狀態列（選單開著、畫面被清、CLI 剛啟動）什麼都不動：讀不到不是 fast=false。
 /// * 讀得到就一律以它為準：狀態列有 `fast` 字樣 = 開，**整行讀得到卻沒有 = 關**（tier 關掉時 codex 省略那個字）。
@@ -161,35 +219,58 @@ pub async fn correct_runtime_from_screen(app: &(impl crate::capabilities::BotSta
     if same {
         return false;
     }
-    // child 的設定只跟這一輪觀察到改變的模型／強度／fast。先寫設定：寫不進去就連 runtime
-    // 都不寫，下一輪仍不同才會再試。
-    let model_moved = run.runtime_model.as_deref() != Some(seen.model.as_str());
-    if let Err(e) = crate::child_runtime::follow_with_fast(
-        app,
-        &run.bot_id,
-        Some(seen.model.as_str()).filter(|_| model_moved),
-        effort_follow(seen.effort.as_deref(), run.runtime_effort.as_deref()),
-        run.runtime_fast.filter(|prev| *prev != i64::from(seen.fast)).map(|_| seen.fast),
-    )
-    .await
-    {
-        tracing::warn!(run = %run_id, error = %e, "could not follow the codex switch in the child's settings, retrying next sweep");
-        return false;
-    }
+    // Re-read the current user's settings on every attempt, including after daemon restart.
+    let bot: db::Bot = match sqlx::query_as("SELECT * FROM bots WHERE id=?").bind(&run.bot_id).fetch_one(app.db()).await {
+        Ok(bot) => bot,
+        Err(_) => return false,
+    };
+    let fast_edge = bot.managed_by == "child" && run.runtime_fast.is_some_and(|prev| prev != i64::from(seen.fast));
+    let mut attempt = if fast_edge { attempt_fast_follow(app.db(), run_id, seen.fast) } else { None };
+    let follow = !fast_edge || attempt.is_some();
+    // 設定與 runtime 原子提交；失敗或取消一起 rollback，但嘗試記錄保留。
+    let Ok(mut tx) = app.db().begin().await else { return false };
+    let model = Some(seen.model.as_str()).filter(|_| run.runtime_model.as_deref() != Some(seen.model.as_str()));
+    let effort_follow = effort_follow(seen.effort.as_deref(), run.runtime_effort.as_deref());
+    let (effort_value, clear) = match effort_follow {
+        crate::child_runtime::EffortFollow::Keep => (None, false),
+        crate::child_runtime::EffortFollow::Set(value) => (Some(value), false),
+        crate::child_runtime::EffortFollow::Clear => (None, true),
+    };
+    let fast = fast_edge.then_some(i64::from(seen.fast));
+    let changed = if follow && bot.managed_by == "child" && (model.is_some() || effort_value.is_some() || clear || fast.is_some()) {
+        match sqlx::query(
+            "UPDATE bots SET model=COALESCE(?, model), effort=CASE WHEN ? THEN NULL ELSE COALESCE(?, effort) END, fast=COALESCE(?, fast)
+             WHERE id=? AND managed_by='child'
+               AND (COALESCE(?, model) IS NOT model OR (CASE WHEN ? THEN NULL ELSE COALESCE(?, effort) END) IS NOT effort OR COALESCE(?, fast) IS NOT fast)",
+        ).bind(model).bind(clear).bind(effort_value).bind(fast).bind(&run.bot_id)
+            .bind(model).bind(clear).bind(effort_value).bind(fast).execute(&mut *tx).await {
+            Ok(result) => result.rows_affected() > 0,
+            Err(e) => {
+                tracing::debug!(run = %run_id, error = %e, "codex child follow transaction failed");
+                return false;
+            }
+        }
+    } else { false };
+    #[cfg(test)]
+    crate::race_point::hit("codex_follow_before_runtime_write", run_id).await;
     let wrote = sqlx::query("UPDATE runs SET runtime_model = ?, runtime_effort = ?, runtime_fast = ? WHERE id = ?")
         .bind(&seen.model)
         .bind(&effort)
         .bind(i64::from(seen.fast))
         .bind(run_id)
-        .execute(app.db())
-        .await
-        .is_ok();
-    if wrote {
-        app.emit_bot_status(&run.bot_id).await;
-        tracing::info!(run = %run_id, model = %seen.model, effort = ?effort, fast = seen.fast,
-                       "codex runtime corrected from the status line");
+        .execute(&mut *tx)
+        .await;
+    if !matches!(wrote, Ok(ref result) if result.rows_affected() == 1) || tx.commit().await.is_err() {
+        return false;
     }
-    wrote
+    if let Some(attempt) = &mut attempt { attempt.committed = true; }
+    if changed {
+        app.emit("bot_changed", serde_json::json!({"bot_id": run.bot_id})).await;
+    }
+    app.emit_bot_status(&run.bot_id).await;
+    tracing::info!(run = %run_id, model = %seen.model, effort = ?effort, fast = seen.fast,
+                   "codex runtime corrected from the status line");
+    true
 }
 
 /// 把畫面底部的模型列寫進 `runs.status_line`／`status_json`（網頁狀態列與 context 用量）。回傳 `true` = 有改動。
@@ -1022,7 +1103,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn fast_follow_failure_keeps_runtime_retryable_and_unknown_is_not_a_switch() {
+    async fn fast_follow_failure_is_not_replayed_and_unknown_is_not_a_switch() {
         let env = crate::testing::env().await;
         let (bot, run) = child_with_effort(&env, "child", Some("high"), Some("high")).await;
         sqlx::query("UPDATE bots SET fast=1 WHERE id=?").bind(&bot).execute(&env.app.db).await.unwrap();
@@ -1035,8 +1116,70 @@ mod tests {
         assert_eq!(fast_of(&env, &run).await, Some(1));
         sqlx::query("DROP TRIGGER reject_fast_follow").execute(&env.app.db).await.unwrap();
         assert!(correct_runtime_from_screen(&env.app, &run, ASTRA_HIGH).await);
-        assert_eq!(db::bot(&env.app.db, &bot).await.unwrap().unwrap().fast, 0);
+        assert_eq!(db::bot(&env.app.db, &bot).await.unwrap().unwrap().fast, 1, "失敗的 edge 不再回寫設定，只補 runtime");
         assert_eq!(fast_of(&env, &run).await, Some(0));
+    }
+
+    #[test]
+    fn fast_follow_edges_keep_only_the_latest_edge_and_do_not_evict_active_runs_at_capacity() {
+        let mut edges = super::FastFollowEdges::default();
+        assert_eq!(edges.attempt("one", false), (true, true));
+        assert_eq!(edges.attempt("one", false), (false, false));
+        assert_eq!(edges.attempt("one", true), (true, false));
+        assert_eq!(edges.attempt("one", false), (true, false));
+        assert_eq!(edges.0.len(), 1);
+        for i in 1..super::FAST_FOLLOW_LIMIT {
+            assert_eq!(edges.attempt(&format!("run-{i}"), false), (true, true));
+        }
+        assert_eq!(edges.attempt("overflow", true), (false, false));
+        assert_eq!(edges.0.len(), super::FAST_FOLLOW_LIMIT);
+        assert_eq!(edges.attempt("one", false), (false, false), "active edge must remain protected");
+    }
+
+    #[tokio::test]
+    async fn a_failed_or_cancelled_runtime_write_never_publishes_or_replays_child_settings() {
+        for cancel in [false, true] {
+            let env = crate::testing::env().await;
+            let (bot, run) = child_with_effort(&env, "child", Some("high"), Some("high")).await;
+            sqlx::query("UPDATE bots SET fast=1 WHERE id=?").bind(&bot).execute(&env.app.db).await.unwrap();
+            sqlx::query("UPDATE runs SET runtime_fast=1 WHERE id=?").bind(&run).execute(&env.app.db).await.unwrap();
+            let mut events = env.app.subscribe();
+            if cancel {
+                let entered = std::sync::Arc::new(tokio::sync::Notify::new());
+                let ready = entered.clone();
+                crate::race_point::arm("codex_follow_before_runtime_write", &run, move || async move {
+                    ready.notify_one();
+                    std::future::pending::<()>().await;
+                });
+                let app = env.app.clone();
+                let run_id = run.clone();
+                let task = tokio::spawn(async move { correct_runtime_from_screen(&app, &run_id, ASTRA_HIGH).await });
+                entered.notified().await;
+                task.abort();
+                assert!(task.await.unwrap_err().is_cancelled());
+            } else {
+                sqlx::query("CREATE TRIGGER reject_runtime_follow BEFORE UPDATE OF runtime_fast ON runs BEGIN SELECT RAISE(FAIL, 'test runtime write failure'); END").execute(&env.app.db).await.unwrap();
+                assert!(!correct_runtime_from_screen(&env.app, &run, ASTRA_HIGH).await);
+                sqlx::query("DROP TRIGGER reject_runtime_follow").execute(&env.app.db).await.unwrap();
+            }
+            assert_eq!(db::bot(&env.app.db, &bot).await.unwrap().unwrap().fast, 1, "child UPDATE must roll back with runtime");
+            assert_eq!(fast_of(&env, &run).await, Some(1));
+            assert!(events.try_recv().is_err(), "no event before atomic commit");
+            // 模擬使用者隨後另存開啟 fast；同畫面重試只能補 runtime，不能重放設定寫入。
+            sqlx::query("UPDATE bots SET fast=1 WHERE id=?").bind(&bot).execute(&env.app.db).await.unwrap();
+            assert!(correct_runtime_from_screen(&env.app, &run, ASTRA_HIGH).await);
+            assert_eq!(db::bot(&env.app.db, &bot).await.unwrap().unwrap().fast, 1, "preserve the newer UI intent");
+            assert_eq!(fast_of(&env, &run).await, Some(0));
+            assert!(!correct_runtime_from_screen(&env.app, &run, ASTRA_HIGH).await);
+            // 新 edge 可以再跟隨：先開再關，不能被前次失敗的標記永久擋住。
+            let on = ASTRA_HIGH.replace("astra high", "astra high fast");
+            assert!(correct_runtime_from_screen(&env.app, &run, &on).await);
+            assert!(correct_runtime_from_screen(&env.app, &run, ASTRA_HIGH).await);
+            assert_eq!(db::bot(&env.app.db, &bot).await.unwrap().unwrap().fast, 0);
+            sqlx::query("UPDATE runs SET state='exited' WHERE id=?").bind(&run).execute(&env.app.db).await.unwrap();
+            assert!(super::clear_finished_fast_edge(&env.app.db, &run).await);
+            assert!(!super::fast_follow_edges().lock().unwrap().0.contains_key(&run));
+        }
     }
 
     /// 子 agent（`managed_by=child`）與 run 的強度設定；`prev` 是 run 上一輪記的 `runtime_effort`（`None`＝未知）。
