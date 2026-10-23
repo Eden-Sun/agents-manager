@@ -2,6 +2,7 @@ import { useState } from 'react'
 import { useGrokPlan } from '../hooks/useGrokPlan'
 import { grokChipLabel } from '../lib/grokUpdate'
 import { changelogRange } from '../lib/upstreamRange'
+import { useReviewAsk } from '../hooks/useReviewAsk'
 import { ConfirmDialog } from './ConfirmDialog'
 import { UpgradeIcon } from './UpgradeIcon'
 import { UpstreamChangelogBox } from './UpstreamChangelogBox'
@@ -17,9 +18,10 @@ export function GrokUpdateChip({ control }: { control?: DialogControl } = {}) {
   const [localOpen, setLocalOpen] = useState(false)
   const open = control ? control.open : localOpen
   const setOpen = (v: boolean) => (control && !v ? control.close() : setLocalOpen(v))
+  const range = changelogRange(plan?.hosts ?? [])
+  const review = useReviewAsk('grok', range.host, range.from, plan?.target ?? null)
   if (!plan) return null
   const label = grokChipLabel(plan)
-  const range = changelogRange(plan.hosts)
   return (
     <>
       {control ? null : (
@@ -33,9 +35,10 @@ export function GrokUpdateChip({ control }: { control?: DialogControl } = {}) {
         title={`grok 有新版 ${plan.target}`}
         confirmLabel="知道了"
         cancelLabel="關閉"
+        {...review.dialog}
         body={
           <>
-            {open ? <UpstreamChangelogBox kind="grok" host={range.host} from={range.from} to={plan.target} /> : null}
+            {open ? <UpstreamChangelogBox kind="grok" host={range.host} from={range.from} to={plan.target} refreshKey={review.reviewKey} /> : null}
             <p>這些主機的 grok 還不是最新的正式版：</p>
             <ul className="confirm-choices">
               {plan.hosts.map((h) => (

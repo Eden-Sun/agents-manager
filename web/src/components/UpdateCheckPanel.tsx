@@ -8,6 +8,7 @@ import { ConfirmDialog } from './ConfirmDialog'
 import { AgyUpdateBody } from './AgyUpdateConfirm'
 import { agyUpdateTitle } from '../lib/agyUpdate'
 import { UpstreamChangelogBox } from './UpstreamChangelogBox'
+import { useReviewAsk } from '../hooks/useReviewAsk'
 import { changelogRange } from '../lib/upstreamRange'
 import './updateCheck.css'
 
@@ -33,6 +34,9 @@ export function UpdateCheckPanel() {
   const [loadError, setLoadError] = useState<string | null>(null)
   const [busy, setBusy] = useState<Set<string>>(new Set())
   const [ask, setAsk] = useState<{ host: string; row: CheckRow; action: CheckAction } | null>(null)
+  // agy 的確認框有「請 AGM 解析」（#1928）；只有按下去才會花 API，開框只讀。
+  const agyAsk = ask?.action.kind === 'agy' ? { host: ask.host, from: changelogRange([{ host: ask.host, from: ask.row.current }]).from, target: ask.action.target } : null
+  const agyReview = useReviewAsk('agy', agyAsk?.host ?? 'local', agyAsk?.from ?? null, agyAsk?.target ?? null)
 
   // 舊 daemon 沒有這支：其他列照常顯示，只有 integration 那段講「讀不到」。
   const load = useCallback(
@@ -126,8 +130,9 @@ export function UpdateCheckPanel() {
         title={ask ? confirmTitle(ask.row, ask.action) : ''}
         danger={ask?.action.kind === 'herdr'}
         confirmLabel={ask?.action.kind === 'integration' && ask.action.fresh ? '安裝' : '更新'}
+        {...(agyAsk ? agyReview.dialog : {})}
         width={420}
-        body={ask ? <ConfirmBody host={ask.host} row={ask.row} action={ask.action} willResume={herdrPlan?.host === ask.host ? herdrPlan.willResume.map((b) => b.name) : []} /> : null}
+        body={ask ? <ConfirmBody host={ask.host} row={ask.row} action={ask.action} willResume={herdrPlan?.host === ask.host ? herdrPlan.willResume.map((b) => b.name) : []} reviewKey={agyReview.reviewKey} /> : null}
         onCancel={() => setAsk(null)}
         onConfirm={() => void run()}
       />
@@ -141,7 +146,7 @@ function confirmTitle(row: CheckRow, action: CheckAction): string {
   return `更新 ${row.label} 到 ${action.target}？`
 }
 
-function ConfirmBody({ host, row, action, willResume }: { host: string; row: CheckRow; action: CheckAction; willResume: string[] }) {
+function ConfirmBody({ host, row, action, willResume, reviewKey }: { host: string; row: CheckRow; action: CheckAction; willResume: string[]; reviewKey: number }) {
   if (action.kind === 'integration' && action.fresh) {
     return (
       <>
@@ -162,7 +167,7 @@ function ConfirmBody({ host, row, action, willResume }: { host: string; row: Che
     const from = changelogRange([{ host, from: row.current }]).from
     return (
       <>
-        <UpstreamChangelogBox kind="agy" host={host} from={from} to={action.target} />
+        <UpstreamChangelogBox kind="agy" host={host} from={from} to={action.target} refreshKey={reviewKey} />
         <p>
           <AgyUpdateBody host={host} current={row.current} target={action.target} />
         </p>

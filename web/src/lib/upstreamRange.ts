@@ -19,8 +19,3 @@ export function changelogRange(hosts: RangeHost[]): RangeHost {
   const oldest = hosts.reduce((a, b) => (cmpVersion(b.from!.trim(), a.from!.trim()) < 0 ? b : a))
   return { host: oldest.host, from: oldest.from!.trim() }
 }
-
-/** agy、grok 的分診與 AGM 解析還沒接上時，兩邊都讀不到：寫一句話，不讓右半邊空著。claude／codex／herdr 維持整塊不畫。 */
-export function hasNoAnalysisNote(kind: string): boolean {
-  return kind === 'agy' || kind === 'grok'
-}

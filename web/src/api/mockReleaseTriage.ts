@@ -7,7 +7,7 @@
 type Rec = Record<string, unknown>
 
 /** 「磁碟上」的版本：claude 的新版已經下載好；codex 是舊版（新版還沒裝）。 */
-const DISK: Record<string, string> = { claude: '2.1.282', codex: '0.155.1', herdr: '0.9.1' }
+const DISK: Record<string, string> = { claude: '2.1.282', codex: '0.155.1', herdr: '0.9.1', agy: '1.4.5', grok: '1.0.66' }
 
 const CHANGELOG: Record<string, { version: string; body: string }[]> = {
   claude: [
@@ -19,6 +19,22 @@ const CHANGELOG: Record<string, { version: string; body: string }[]> = {
     { version: '0.156.1', body: '- Fixed resume picker ordering' },
     { version: '0.156.0', body: '- Background app-server starts automatically\n- `codex exec --json` adds `turn.usage`' },
   ],
+  // agy／grok：實際抓下來的上游原文節錄（#1928）。
+  agy: [
+    {
+      version: '1.4.6',
+      body: [
+        '- Improved permission prompts so that allowing an action for the conversation, in the main agent or in a subagent, applies across the main conversation and all of its subagents instead of asking again for the same action.',
+        '- Improved the in-progress status line to show what the agent is waiting on, such as initializing MCP servers or retrying an unavailable model.',
+        '- Fixed sign-in not persisting across restarts on macOS and Windows for enterprise accounts, because the saved credential exceeded the system keychain\'s size limit.',
+      ].join('\n'),
+    },
+    { version: '1.4.5', body: '- Improved idle CPU usage by pausing screen refreshes while nothing on screen changes, roughly halving the CLI\'s CPU use when it is idle.' },
+  ],
+  grok: [
+    { version: '1.0.67', body: '- **Quitting a session with hooks configured** is faster: the session-end `Stop` hook runs at the same time as the `SessionEnd` hooks and gets at most 1.5 seconds.' },
+    { version: '1.0.66', body: '- **`/theme`** restores your previous theme when you leave the picker any way other than `Enter`.' },
+  ],
   herdr: [
     { version: '0.9.3', body: '- Agents can report their own resume command\n- Codex idle detection no longer flips to working on spinner redraws' },
     { version: '0.9.2', body: '- Removed `pane.graphics.*`\n- Event subscriptions that fall too far behind now get an `events_lost` error instead of silently skipping' },
@@ -26,8 +42,9 @@ const CHANGELOG: Record<string, { version: string; body: string }[]> = {
 }
 
 function triageRows(kind: string): Rec[] {
+  // agy／grok 的帳本還是空的（新版剛出、kick 還沒跑）：更新框寫「尚未分析」，按「請 AGM 解析」才派。
   // daemon：herdr 還沒有分診規則，`GET /api/release-triage?kind=herdr` 回空的 rows（API.md）。
-  if (kind === 'herdr') return []
+  if (kind === 'herdr' || kind === 'agy' || kind === 'grok') return []
   if (kind === 'claude') {
     return [
       {
