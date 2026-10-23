@@ -189,7 +189,7 @@ async fn stop_locked_body(
         }
         for _ in 0..2 {
             let _ = client.agent_send_keys(&target, &["ctrl+c".to_string()]).await;
-            tokio::time::sleep(Duration::from_millis(500)).await;
+            tokio::time::sleep(pane_settle(Duration::from_millis(500))).await;
         }
         Ok(())
     };
@@ -237,7 +237,7 @@ async fn stop_locked_body(
             gone = true;
             break;
         }
-        tokio::time::sleep(Duration::from_millis(500)).await;
+        tokio::time::sleep(pane_settle(Duration::from_millis(500))).await;
     }
     // Close the Run's pane (and its tab if owned) so no bare shell lingers — except in the user's
     // `default` session (SPEC §6.5.1): only ctrl+c; closing took their terminal (review 2026-09-12 #4).
@@ -789,7 +789,7 @@ async fn clear_restored_prompt(app: &impl crate::capabilities::Db, client: &Herd
     }
     let Some(pane) = run.pane_id.as_deref().map(str::trim).filter(|p| !p.is_empty()) else { return };
     let Some(expected_prompt) = expected_prompt.filter(|p| !p.trim().is_empty()) else { return };
-    tokio::time::sleep(Duration::from_millis(400)).await;
+    tokio::time::sleep(pane_settle(Duration::from_millis(400))).await;
     #[cfg(all(test, feature = "daemon-test-harness"))]
     super::race_point::hit("abort_after_settle", &bot.id).await;
     if !abort_binding_is_current(app, run).await {
@@ -826,7 +826,7 @@ async fn clear_restored_prompt(app: &impl crate::capabilities::Db, client: &Herd
         tracing::warn!(run = %run.id, error = ?e, "could not clear the restored prompt from the composer");
         return;
     }
-    tokio::time::sleep(Duration::from_millis(400)).await;
+    tokio::time::sleep(pane_settle(Duration::from_millis(400))).await;
     let after = read_styled(client, pane, SCAN_SOURCE, DELIVER_SCAN_LINES).await.map(|s| box_state(&bot.kind, &s));
     match after {
         Ok(BoxState::Empty) => tracing::info!(run = %run.id, "interrupt put the prompt back into the composer; cleared it"),

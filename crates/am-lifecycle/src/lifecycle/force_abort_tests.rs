@@ -149,9 +149,9 @@ async fn a_force_abort_preserves_a_new_draft_typed_during_the_settle_window() {
     let f = claude_with(vec!["aborted prompt A".into()]).await;
     let turn = run_state::a_turn(&f.env.app, &f.bot_id, Some(&f.run_id), "in_flight").await;
     bind_turn_prompt(&f, &turn, "aborted prompt A").await;
+    // 草稿在 settle 視窗內打進來：用固定的 race point 插入，不靠計時（測試裡 settle 只等 10 毫秒，#781）。
     let live = f.env.herdr.live.clone();
-    let edit = tokio::spawn(async move {
-        tokio::time::sleep(std::time::Duration::from_millis(150)).await;
+    super::super::race_point::arm("abort_after_settle", &f.bot_id, move || async move {
         let mut live = live.lock().unwrap();
         let pane = live.get_mut("pane-a").unwrap();
         pane.composer = vec!["user draft B".into()];
@@ -159,7 +159,6 @@ async fn a_force_abort_preserves_a_new_draft_typed_during_the_settle_window() {
     });
 
     abort_turns(&f.env.app, &f.bot_id).await.unwrap();
-    edit.await.unwrap();
 
     assert!(!f.cleared(), "new user draft must receive no Ctrl+C: {:?}", f.env.herdr.calls_to("pane.send_keys"));
     assert_eq!(f.env.herdr.pane("pane-a").unwrap().composer, ["user draft B"]);
