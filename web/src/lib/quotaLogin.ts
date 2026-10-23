@@ -65,3 +65,6 @@ export function identityEnv(s: StoreState, host: string, kind: BotKind, identity
 function shellQuote(v: string): string {
   return `'${v.replaceAll("'", `'\\''`)}'`
 }
+
+/** agy 登入的說明：它在 SSH 底下印授權網址（不是自己開瀏覽器），授權後要把授權碼貼回 TUI。 */
+export const AGY_LOGIN_GUIDE = 'agy 的 TUI 會引導登入：SSH 底下它會印出一個授權網址，在瀏覽器完成授權後，把授權碼貼回那個終端。登好後輸入 /quit 離開。'

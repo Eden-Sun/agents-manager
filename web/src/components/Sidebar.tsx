@@ -74,6 +74,8 @@ import { BotRowMenu } from './BotRowMenu'
 import { KindTag } from './KindTag'
 import { KIND_LABEL } from './kindMeta'
 import { QuickAddBots } from './QuickAddBots'
+import { loginKindOnHost } from '../lib/onboardingActions'
+import { ADD_PROJECT_EVENT } from '../lib/onboarding'
 import { UpdateAllBanner } from './UpdateAllBanner'
 import { ApiModelFields } from './ModelPicker'
 import { InstallToolButton } from './Tools'
@@ -828,6 +830,9 @@ export function NewBotForm({ onDone, initialProjectId, onCreated }: { onDone: ()
       {defaultLoggedOut ? (
         <span className="hint identity-selection-warning" role="status">
           {host === 'local' ? '本機' : host} 上的 {kind} 預設帳號還沒登入：bot 起來會停在登入畫面。先登入，或在上面選一個已登入的身份。
+          <button type="button" className="btn" onClick={() => void loginKindOnHost(host, kind, null)}>
+            登入 {kind}
+          </button>
         </span>
       ) : null}
       <label className="field">
@@ -1189,6 +1194,13 @@ export function Sidebar() {
     openBotSheet(openBotSheetFor)
     clearOpenBotSheet()
   }, [openBotSheetFor, clearOpenBotSheet])
+
+  // 主畫面「環境準備」清單的「新增 Project」（issue #1931）。
+  useEffect(() => {
+    const onAdd = () => setOpen('project')
+    window.addEventListener(ADD_PROJECT_EVENT, onAdd)
+    return () => window.removeEventListener(ADD_PROJECT_EVENT, onAdd)
+  }, [])
 
   const botSheetProject = botFormFor ? projects.find((p) => p.id === botFormFor) : null
   const botSheetLabel = botSheetProject?.label ?? '選擇 Project'

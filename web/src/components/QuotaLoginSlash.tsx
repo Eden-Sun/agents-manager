@@ -1,12 +1,9 @@
 import { useState } from 'react'
 import type { BotKind } from '../api/types'
 import { useStore } from '../store/store'
-import { canLoginInSession, cliLoginCommand, findLoginTargetId, identityEnv, shouldUseIdentityLogin } from '../lib/quotaLogin'
+import { AGY_LOGIN_GUIDE, canLoginInSession, cliLoginCommand, findLoginTargetId, identityEnv, shouldUseIdentityLogin } from '../lib/quotaLogin'
 import { QuotaLoginShell } from './QuotaLoginShell'
 import { ConfirmDialog } from './ConfirmDialog'
-
-/** agy 登入的說明：它在 SSH 底下印授權網址（不是自己開瀏覽器），授權後要把授權碼貼回 TUI。 */
-const AGY_LOGIN_GUIDE = 'agy 的 TUI 會引導登入：SSH 底下它會印出一個授權網址，在瀏覽器完成授權後，把授權碼貼回那個終端。登好後輸入 /quit 離開。'
 
 /**
  * 額度 popover「未登入」列的登入鈕。命名身份走 daemon 的 host-aware 登入；預設 grok 有在跑的 bot 時送 `/login`，否則開主機 shell。

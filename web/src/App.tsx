@@ -12,6 +12,7 @@ import { dialogOpen } from './lib/dialogOpen'
 import { ChatPanel } from './components/ChatPanel'
 import { HostOfflineBanner } from './components/HostOffline'
 import { LoginPromptBanner } from './components/LoginPromptBanner'
+import { OnboardingBanner } from './components/OnboardingChecklist'
 import { GroupChatPanel } from './components/GroupChatPanel'
 import { HostShellPanel } from './components/HostShellPanel'
 import { ImageShelf } from './components/ImageShelf'
@@ -234,6 +235,7 @@ export default function App() {
         <ConnBanner />
         <HostOfflineBanner />
         <LoginPromptBanner />
+        <OnboardingBanner compact={Boolean(botId || groupProjectId || shellView)} />
         {/* 選著 bot 時 shell 是 ChatPanel 的分頁；group／沒選才整個換成 shell 面板。 */}
         {shellView && (groupProjectId || !botId) ? (
           <HostShellPanel

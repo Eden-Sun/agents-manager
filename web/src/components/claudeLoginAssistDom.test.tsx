@@ -29,12 +29,17 @@ afterEach(async () => {
   await unmountAll()
 })
 before(setupDom)
+const mock = sharedMock
+// 登入 cc1 會在共用 mock 上留下「已登入」；整個行程只有一個 mock，後面要「cc1 未登入」前提的檔（settingsIdentitiesDom）會被它弄紅。
+type MockIds = { localIdentityStatus: Record<string, unknown> }
+const idsBefore = structuredClone((mock as unknown as MockIds).localIdentityStatus)
 after(() => {
+  const m = mock as unknown as MockIds
+  for (const k of Object.keys(m.localIdentityStatus)) delete m.localIdentityStatus[k]
+  Object.assign(m.localIdentityStatus, structuredClone(idsBefore))
   resetStoreForTest()
   teardownDom()
 })
-
-const mock = sharedMock
 const assist = () => document.querySelector<HTMLElement>('.login-assist')
 const openLink = () => document.querySelector<HTMLAnchorElement>('a.login-assist-open')
 const codeInput = () => document.querySelector<HTMLInputElement>('.login-assist-code')!

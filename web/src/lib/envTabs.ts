@@ -1,4 +1,4 @@
-export type EnvTabId = 'hosts' | 'updates' | 'identities' | 'deleted' | 'judge' | 'claude-api' | 'display'
+export type EnvTabId = 'setup' | 'hosts' | 'updates' | 'identities' | 'deleted' | 'judge' | 'claude-api' | 'display'
 
 export interface EnvTabMeta {
   id: EnvTabId
@@ -7,6 +7,7 @@ export interface EnvTabMeta {
 }
 
 export const ENV_TABS: readonly EnvTabMeta[] = [
+  { id: 'setup', label: '環境準備', panelTitle: '環境準備' },
   { id: 'hosts', label: '主機', panelTitle: '主機' },
   { id: 'updates', label: '更新檢查', panelTitle: '更新檢查' },
   { id: 'identities', label: '身分', panelTitle: '身分' },

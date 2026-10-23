@@ -1291,3 +1291,15 @@ bot 其實還在正常回合（codex 7d 寫 0、codex-sol 還在回）。
 - **展開後走既有流程**：編號選單由 `BlockedChoices` 點選作答（每步重讀、對不上放棄）；最後一列 `Other` 是打字列（`menu.asyncQueue` 才算，別的選單裡叫 Other 的是一般選項）；貼字前、送 Enter 前都用同一套檢查（面板展開、同題原文、游標在這一列、其他列沒變、字在這一列），不符就放棄；單選選項也一樣：方向鍵與 Enter 不同批，移動後重讀通過才送 Enter（只限這種選單，claude 與 codex 一般選單照舊批次送）。自由輸入題（展開後沒有編號選單）在這裡給打字框：貼字前、送 Enter 前各重讀畫面，確認提問面板仍展開、面板開頭的題目行完整等於這一題（`panelShows`，不是子字串）、貼字前輸入框是空的、送 Enter 前輸入框完整內容等於答案（`panelInput`，不是後綴），任一項不符就放棄；整個作答固定在同一個 Run（`runPin`，送鍵帶固定的 run id，Run 換了就放棄、不重試新 Run）；這題的原文要靠 daemon 回的題目對得上，讀不到就不給打字框、請使用者在終端作答；換行變空白。收合時只有 rollout 沒作答題數＝畫面題數才顯示題目，其餘（有題目被跳過、session 不一致）只講題數與展開鍵，展開後以畫面上的真題為準。
 - **按鍵面板補 `⇧←`／`⇧→`**（shift+←＝展開／下一題、shift+→＝回主輸入框）；鍵盤直通本來就吃 shift+方向鍵。
 - 不做：跳過（`^]`）按鈕、遠端主機讀 rollout。
+
+## 首次啟動的「環境準備」清單（2026-10-23，issue #1931）
+
+使用者：「一個 kind 都沒登入時，是否先幫整個環境做 prepare →『fix them all』」。全新使用者一個 CLI 都沒裝、沒登入時，主畫面主動帶他把環境準備好，不再只說「請新增 Project」。
+
+- **清單內容**（`OnboardingChecklist`）：herdr 連線、claude／codex／grok／agy 各一列（未安裝／已安裝・未登入／已登入／已安裝・登入狀態問不到），旁邊的鈕：未安裝→「安裝」（claude／codex／grok 不帶 `via_bot_id`，daemon 開臨時 shell 跑官方安裝指令、畫面切到那顆 pane 看進度；agy 沿用既有的確認框＋`agy/install`），已安裝未登入→既有的「開 shell 登入」（`QuotaLoginShell`，含 agy 的 TUI 說明）。`logged_in === null` 是「問不到」：標「登入狀態問不到」、不給登入鈕、不說成未登入，已安裝就算可用。只看**本機**。
+- **何時出現**（`OnboardingBanner`，掛在主畫面 banner 區）：沒有 Project、或本機沒有任何可用（已安裝且已登入／問不到；有已登入的命名身分也算）的 kind、或 herdr 連不上。都好了自動收起，不留「已完成」的殘影；選著 Bot／群組／shell 時收成一行（「環境準備　…（N/4 CLI 就緒）　展開」），空畫面時整張攤開。
+- **安裝收尾**（WS `tool_install_done`，API.md §8／§12.7）：按「安裝」後那一列維持「安裝中…」到收到事件。`installed:true`＝通知「已安裝」、重新偵測讓那一列翻成已安裝・未登入，使用者正看著的安裝 shell 一起收掉（daemon 關了 pane）；`installed:false` 且 `pane_kept:true`＝通知講原因（`timed_out` 寫「等了 15 分鐘還沒結束（逾時）」）並把畫面切到 `pane_id` 的終端讓使用者看錯誤，看完自己關；`pane_kept:false`＝pane 被使用者關了，通知叫他再按一次「安裝」。事件漏了的保險是 16 分鐘後放開鈕。
+- **引導**：清單底下 `安裝並登入至少一種 CLI → 新增 Project → 新增 Bot`，目前這一步粗體；前一步沒完成的鈕 disabled。「新增 Project」打 `am:add-project` 事件讓 Sidebar 開既有的視窗，「新增 Bot」走 `requestOpenBotSheet`。
+- **環境設定裡找得到**：環境設定第一個分頁「環境準備」放同一份清單（清單出現時才有「N 待處理」徽章，此時第一次打開預設停這頁；平常預設仍是主機）；全部就緒仍看得到，底下寫「環境已就緒」。
+- **新增 Bot 的快速鈕**（`QuickAddBots`）：未登入的 kind／身分改成可點，標「未登入・點此登入」，點了直接開登入流程（命名身分走 `identities/{id}/login`＝登入協助面板；預設帳號開 shell 打 `<cli> login`），不新增 Bot；登好後再點一次才是新增。新增 Bot 表單的「預設帳號還沒登入」提示旁加「登入 <kind>」鈕。已在額度條停用的仍是不可點。
+- **已登出橫幅不變**（`LoginPromptBanner`）：仍只提示有 bot 綁著的 claude 身分；沒有 bot 綁著的登出身分不提示，**一個 kind 都沒登入**時由上面的清單負責。
