@@ -1312,7 +1312,7 @@ codex 的新版還沒安裝、磁碟是舊的，所以先取 `release_triage` �
 一則 assistant 訊息（派給 AGM 角色一律走交接佇列，不會有 assignment，2026-09-19 上線後實測踩過）。
 
 ### `POST /api/claude-update/review`
-`{kind?, host?, from?, to?}`（預設 `kind=claude`、`host=local`、`to` 見上）。把這一版的 changelog 組成交辦派給**協調者**，
+`{kind?, host?, from?, to?, deep?}`（預設 `kind=claude`、`host=local`、`to` 見上）。把這一版的 changelog 組成交辦派給**協調者**（`[claude_api]` 與 `changelog_review` 用途都開、key 可讀時改走下面的 API 快速解析；`deep:true` 一律派協調者），
 唯讀——只建交辦，不 build、不重啟、不碰 CLI 的檔案。內容與 `scripts/ops/<kind>-release-task.md` 同一套規則，
 結論照那份任務的指示回到使用者入口。
 
@@ -1338,6 +1338,11 @@ codex 的新版還沒安裝、磁碟是舊的，所以先取 `release_triage` �
   不先查會撞上 `text_mismatch` 409；
 - 派給誰：`AGM_RELEASE_BOT` ＞ `runtime.json` 的 `release_bot_id` ＞ `responder_bot_id`，**絕不派給巡檢**
   （daemon 擋「總管對自己下交辦」）。都沒設 → 409 `no_target`，`message` 就是給使用者看的原因；
+- **API 快速解析**（#1919，SPEC §4.3d／§18.5a）：`[claude_api] enabled` ＋ `[claude_api.uses.changelog_review] enabled` ＋ key 可讀時，
+  claude／codex／herdr 都不開 session、不派 bot：先占位（`changelog-review` 帳本 `pending`）、API 呼叫在背景跑，回應 `mode:"api"`、
+  `review.state:"pending"`，網頁輪詢 `GET` 取結論。`review` 多兩個欄位：`source:"api"`、`model`；結論尾巴由 daemon 寫死「未實測」。
+  API 任何一步不順（保險絲用完、逾時、HTTP 錯、JSON 不合 schema）→ 帳本記 `failed`、背景接回上面的派協調者；沒開 API 時行為與以前完全一樣。
+  `deep:true`（網頁 codex 的「深入驗證」）不走 API、只看 bot 那條路的冪等，不被 API 的快速結論擋住；bot 做完的結論蓋過 API 的。
 - 那台主機還讀不到版本、也沒給 `to` → 409 `no_version`（帶 `kind`）；
 - changelog 原文框成引用（反引號數比原文最長那串多一個）並註明是資料，上限 8000 字，超過截斷並註明；
   抓不到 changelog 照樣派，正文請協調者改用 diff binary 的做法。

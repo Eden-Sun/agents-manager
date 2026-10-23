@@ -4637,6 +4637,8 @@ Linux `com.agm.browser-gc` systemd timer 每 1800 秒執行 `browser_gc_linux.py
 ### 18.5a Claude Code 換版就解析（使用者 2026-09-16）
 
 既有 `com.agm.claude-release` 排程仍呼叫 `bin/claude-release-kick.sh`，該檔是 `release-triage-kick.sh` 的相容入口；排程 binary diff 現在由 §18.2c 的同一則分診交辦處理。
+更新框的「請 AGM 解析」可走 Claude API 快速解析（issue #1919，用途 `changelog_review`，`daemon/src/claude_review_api.rs`）：兩層開關與 key 都在時，daemon 直接把 changelog（≤8000 字；claude 另附 `scripts/ops/claude_binary_diff.py` 的決定性差集報告，以外部行程跑、逾時就略過；codex 另附分診帳本的非 `none` verdict；herdr 只有 changelog）連同任務檔的「用得上」標準丟給 Sonnet，要求 3–5 行結論＋建議（`upgrade_now｜can_wait｜hold｜unknown`）＋≤5 項提防清單。外部文字一律框在 `fence_for` 圍欄內並寫明是資料；回傳只當資料、驗證 schema 才落帳；結論尾巴（來源、模型、**未實測**）由 daemon 寫死，codex 另提示可按「深入驗證」，herdr 註明只解析、驗證與升級窗口另請 AGM。狀態是 `{data_dir}/changelog-review/<kind>-<版>.json` 帳本（0600）：`review_state` 先看 bot 做完的結論、其次帳本 `completed`、再來 bot 進行中／帳本 `pending`（>5 分鐘當中斷）；成功後同一版不再被按鈕派 bot，herdr 另把版本寫進排程 kick 的去重檔 `supervisor/AGM/herdr-update.last`，kick 不會再派一次。任何失敗（沒 key、關閉、保險絲、逾時、HTTP 錯、JSON 不合）都退回下面的派協調者；`deep:true` 一律派協調者（codex 的快速版之後要實測才按）。以下是派協調者的路徑：
+
 更新框的「請 AGM 解析」仍由 daemon 直接派 `claude-release-task.md` 給**協調者**（巡檢不能對自己下交辦；`AGM_RELEASE_BOT` ＞ `runtime.json` 的 `release_bot_id` ＞ `responder_bot_id`，
 都沒有就跳過），`--review-by patrol`、request id `agm-claude-release-<版本>`，協調者解析完把通知交給巡檢，使用者才看得到。規則：
 
