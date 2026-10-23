@@ -5,7 +5,7 @@
  * 選項也只剩捲動中的一段（`↓ 3.`、跳到 `5.`），網頁從畫面怎麼 parse 都拿不到。transcript 裡有完整的題目。
  */
 import { JEV_ADVISORY_NOTE, JEV_FULL_NAME } from './jevLabel'
-import { t, tr } from './i18n'
+import { msg, t, tr } from './i18n'
 
 export interface PendingOption {
   label: string
@@ -23,6 +23,8 @@ export interface JevPick {
 }
 
 /** 選單與原題卡共用的一行說明（標籤本身是 `JevLabel`；issue #1912）。 */
+export const JEV_ASK_NOTE = msg('Jev（TypeSafe 型別判斷）的建議，只是建議，不會自動動作，不會替你作答；請自己選。')
+
 export function jevAskNote(): string {
   return t('{name}的建議，{note}，不會替你作答；請自己選。', {
     name: tr(JEV_FULL_NAME),
