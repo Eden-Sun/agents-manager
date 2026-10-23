@@ -185,9 +185,9 @@ async fn a_force_abort_rechecks_the_composer_before_clearing_it() {
     assert_eq!(f.env.herdr.pane("pane-a").unwrap().composer, ["user draft B"]);
 }
 
-/// An unchanged string still loses authority if the pane revision changed after the candidate read.
+/// An unchanged string still loses authority if the composer frame moves after the candidate read.
 #[tokio::test]
-async fn a_force_abort_rejects_a_revision_change_with_the_same_composer_text() {
+async fn a_force_abort_rejects_a_frame_position_change_with_the_same_composer_text() {
     let f = claude_with(vec!["aborted prompt A".into()]).await;
     let turn = run_state::a_turn(&f.env.app, &f.bot_id, Some(&f.run_id), "in_flight").await;
     bind_turn_prompt(&f, &turn, "aborted prompt A").await;
@@ -196,11 +196,12 @@ async fn a_force_abort_rejects_a_revision_change_with_the_same_composer_text() {
         let mut live = live.lock().unwrap();
         let pane = live.get_mut("pane-a").unwrap();
         pane.revision = pane.revision.max(1) + 1;
+        pane.transcript.push("composer moved one row".into());
     });
 
     abort_turns(&f.env.app, &f.bot_id).await.unwrap();
 
-    assert!(!f.cleared(), "a revised pane must receive no Ctrl+C: {:?}", f.env.herdr.calls_to("pane.send_keys"));
+    assert!(!f.cleared(), "a moved composer frame must receive no Ctrl+C: {:?}", f.env.herdr.calls_to("pane.send_keys"));
     assert_eq!(f.env.herdr.pane("pane-a").unwrap().composer, ["aborted prompt A"]);
 }
 
@@ -364,4 +365,23 @@ async fn nr1913_zero_revision_abort_rejects_changed_screen_with_same_prompt() {
     abort_turns(&f.env.app, &f.bot_id).await.unwrap();
     assert!(!f.cleared());
     assert_eq!(f.env.herdr.pane("pane-a").unwrap().composer, ["aborted prompt A"]);
+}
+
+#[tokio::test]
+async fn nr1936_abort_clears_restored_prompt_while_working_timer_changes() {
+    let f = claude_with(vec!["aborted prompt A".into()]).await;
+    {
+        let mut live = f.env.herdr.live.lock().unwrap();
+        let pane = live.get_mut("pane-a").unwrap();
+        pane.no_spinner = false;
+        pane.zero_revision = true;
+    }
+    sqlx::query("UPDATE runs SET agent_status='working' WHERE id=?").bind(&f.run_id).execute(&f.env.app.db).await.unwrap();
+    let turn = run_state::a_turn(&f.env.app, &f.bot_id, Some(&f.run_id), "in_flight").await;
+    bind_turn_prompt(&f, &turn, "aborted prompt A").await;
+    abort_turns(&f.env.app, &f.bot_id).await.unwrap();
+    assert!(f.cleared());
+    let pane = f.env.herdr.pane("pane-a").unwrap();
+    assert!(pane.composer.is_empty());
+    assert!(pane.reads >= 2);
 }

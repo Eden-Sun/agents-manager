@@ -37,7 +37,7 @@ pub struct Watch {
     /// 宣告的字第一次被看到留在輸入列（agent idle）的時刻；看不到就清掉。
     held_since: Option<Instant>,
     nudges: u32,
-    /// 上次補 Enter 的完整畫面；沒有可觀察的變化就停止重試，不推論按鍵是否送達。
+    /// 上次補 Enter 的讀值；草稿框與位置未變就停止重試，不推論按鍵是否送達。
     snapshot_at_nudge: Option<crate::herdr::PaneRead>,
     /// 這筆回合的盯梢登記（#1366）；`Watch` 被 drop＝盯梢結束，登記跟著放掉。
     _registered: Option<Registered>,
@@ -258,8 +258,8 @@ pub async fn step(app: &impl RelayWatchContext, w: &mut Watch, now: Instant) -> 
     let since = *w.held_since.get_or_insert(now);
     if let (Some(before), Some((_, _, current))) = (&w.snapshot_at_nudge, read.as_ref()) {
         // An unchanged pane.get/read revision is not evidence that Enter failed. With no
-        // visible change, conservatively stop retries; eventual completion still wins.
-        if before.text == current.text {
+        // composer change, conservatively stop retries; eventual completion still wins.
+        if super::composer_draft::same_snapshot(&bot.kind, before, current) {
             tracing::warn!(run = %w.run_id, "relayed composer unchanged after Enter; not retrying");
             w.nudges = MAX_NUDGES;
         }
@@ -271,7 +271,9 @@ pub async fn step(app: &impl RelayWatchContext, w: &mut Watch, now: Instant) -> 
     #[cfg(all(test, feature = "daemon-test-harness"))]
     super::race_point::hit("relay_before_nudge", &bot.id).await;
     let Ok(fresh) = super::delivery::read_styled_snapshot(&client, &pane, "visible", 80).await else { return Step::Waiting };
-    if !super::composer_draft::same_snapshot(&candidate, &fresh) {
+    if !super::composer_draft::same_snapshot(&bot.kind, &candidate, &fresh)
+        || !composer_holds_prompt(&bot.kind, &fresh.text, &w.text)
+    {
         w.held_since = None;
         return Step::Waiting;
     }
@@ -776,6 +778,18 @@ mod tests {
         assert_eq!(step(&app, &mut w, t0 + NUDGE_AFTER).await, Step::Nudged);
         assert_eq!(keys_sent(&f), 1);
         assert_eq!(f.env.herdr.pane(&f.pane).unwrap().transcript.len(), 1, "字送出去了");
+    }
+
+    #[tokio::test]
+    async fn nr1936_relay_never_nudges_a_working_agent_with_a_live_timer() {
+        let f = fixture("working-timer").await;
+        let app = f.env.app.clone();
+        f.env.herdr.live_pane(&f.pane, tt::LivePane { zero_revision: true, composer: vec![TEXT.into()], width: Some(120), ..Default::default() });
+        sqlx::query("UPDATE runs SET agent_status='working' WHERE id=?").bind(&f.run_id).execute(app.db()).await.unwrap();
+        let t0 = Instant::now();
+        let mut w = watch(&f, None, t0);
+        assert_eq!(step(&app, &mut w, t0 + NUDGE_AFTER).await, Step::Done);
+        assert_eq!(keys_sent(&f), 0);
     }
 
     #[tokio::test]

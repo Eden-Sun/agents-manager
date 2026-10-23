@@ -1273,7 +1273,7 @@ codex 0.159.3 的帳號安全提醒 inline banner（`› 1. Set up security`／`
   清框鍵三種 kind 都是一次 `ctrl+c`：2026-09-26 在隔離的 herdr session（`env -i` + `--session`，daemon 看不到）實測 claude 2.1.281、codex 0.155.1、
   grok 1.0.41 的單行、多行與 claude 的十四列長段，一次就清空（fixtures `*-draft.ansi`／`*-cleared.ansi`）。框本來就空不按（空框的 `ctrl+c` 是
   「再按一次離開」）；有回合在跑不按（`ctrl+c` 會打斷它，插隊送出時回 `draft_clear_while_busy`）。
-409 給網頁顯示的 `draft` 最多 500 字；動作要回傳同一個 body 裡的 `draft_token`（`expect_draft_token`）。token 是完整正規化草稿的 SHA-256，並綁定當時的 run 與 pane，因此隱藏後綴改變或 token 從另一個 run/pane 搬用都會 409 `draft_changed`，不送出、不清掉使用者沒看過的字。清草稿時若框已空或 run 沒有 pane，回 409 `draft_gone`（`sent:false`），不把「清掉再送」降成一般送出。按 Enter 或 Ctrl+C 前會重讀 composer，要求完整 token、pane id/source/format、未截斷的完整畫面與 active run/session 都未改變；revision 僅保留變動時拒絕的額外守門，不能以相等（尤其恆為 0）證明未改變；submit 在 turn/message 寫入後才發現改變時會先撤回未送出的回合。Herdr `pane.send_keys` 尚無條件 revision/CAS 參數，最後重讀與按鍵實際送達之間仍有短暫非原子窗口。不要把完整長草稿送到網頁只為了做比對。
+409 給網頁顯示的 `draft` 最多 500 字；動作要回傳同一個 body 裡的 `draft_token`（`expect_draft_token`）。token 是完整正規化草稿的 SHA-256，並綁定當時的 run 與 pane，因此隱藏後綴改變或 token 從另一個 run/pane 搬用都會 409 `draft_changed`，不送出、不清掉使用者沒看過的字。清草稿時若框已空或 run 沒有 pane，回 409 `draft_gone`（`sent:false`），不把「清掉再送」降成一般送出。按 Enter 或 Ctrl+C 前會重讀 composer，要求完整 token、pane id/source/format、未截斷的完整草稿與 composer 框線／列位置都未改變，並重驗 active run/session；submit 在 turn/message 寫入後才發現改變時會先撤回未送出的回合。pane-wide revision（包含非零）不作為草稿證據：它可能只反映背景輸出，或恆為 0。spinner、計時、statusline 等 composer 外的內容不納入比對；框線幾何與位置仍納入，Grok 框底內嵌的額度／模型標籤只取邊界幾何。`submit_gates` 不強制 idle（無在飛回合的 working 可能通過），中斷後清框也可能仍有計時；有在飛回合時 submit 拒絕，clear 的 busy/send-now 守門照舊，suggestion 額外要求 idle，relay watch 遇 working/blocked 直接停手。Herdr `pane.send_keys` 尚無條件 revision/CAS 參數，最後重讀與按鍵實際送達之間仍有短暫非原子窗口。不要把完整長草稿送到網頁只為了做比對。
 只給使用者自己的 prompt，bot 轉送的不收。讀草稿時 grok 框底那一列（`╰── Grok 4.7 (high) · … ─╯`，寫著字）是框的下緣，不算草稿。
 
 **空框的判定依各 provider 的實機畫面**（`screen.rs` 的真 fixture 都有測）：
@@ -1329,7 +1329,7 @@ marker 列與框的邊之間多出任何一列（含空白列）、marker 後多
 `poller::composer_text` 共用同一個範圍，所以這種框判成有草稿（`composer_busy` 帶草稿與動作）。框裡有一整列 `─`、或框頂下方不是 `❯` 就照舊 `Unready`。
 網頁 Esc 與強制中止之後的清框（`stop::clear_restored_prompt`）只在這筆被中斷 Turn 有可讀 `prompt_text`，而且 composer parser 從 `recent_unwrapped` 400 列讀到的完整內容（含中間空白行）
 （還原 CLI 貼上標記後）與該 prompt 逐字相同時才按 `ctrl+c`；不清任意非空草稿。只有原 prompt 含 Tab 時才另試 TUI 吃掉 Tab 的候選，普通空白與硬換行維持原樣。
-讀到候選後立刻重讀，要求 pane id/source/format、未截斷的完整畫面、內容及 active run/pane/session 都相同；revision 相等本身不是證據；空框、不同／編輯過的字、讀取失敗或身份改變都不按。按完重讀一次，
+讀到候選後立刻重讀，要求 pane id/source/format、未截斷的完整草稿、composer 框線／位置及 active run/pane/session 都相同；composer 外的計時與狀態列不比，pane-wide revision 不是證據；空框、不同／編輯過的字、讀取失敗或身份改變都不按。按完重讀一次，
 框沒空只記 warn、不再按（空框的 `ctrl+c` 是「再按一次離開」）；Herdr 尚無條件 revision/CAS 按鍵，最後重讀到按鍵實際送達仍有窄競態。真畫面：`fixtures/claude-2.1.281-tall-draft-after-interrupt.ansi`。
 
 **誰會建 `queued` turn**：AGM 派工／通知由 `supervisor::controller::dispatch` →
@@ -2171,7 +2171,7 @@ agent 自己 `herdr agent prompt <名字> …` 時 daemon 沒參與，那句話�
    以前這句直接丟掉，父 bot 的第一份長交辦因此沒進對話（2026-10-03 g8）。同時背景每 2 秒看一次那顆 pane：宣告的字還留在輸入列（`composer_holds_prompt`，比對文字）、
    agent 仍 idle 滿 4 秒就補一次 Enter（最多 2 次；使用者自己打的字不是宣告的那句，不動）；agent 開始 working 或回合被收掉就收工；
    補 Enter 前先確認 pane 還在（`pane.get` 回 `pane_not_found`＝收件方死了：收掉那顆 run、不重試、announce 時也不開回合）；
-   補完 Enter 後完整畫面沒有可觀察的變化就保守停止重試，不推論按鍵是否送達；不用 pane.get/read revision 相等當證據。每次補鍵前重讀同 pane/source/format 的未截斷完整畫面，並重驗 active run/session、狀態與在飛回合；不同或讀不到就不按。完整畫面重繪可能令本輪保守拒絕；最後讀取到送鍵仍有非原子窗口。
+   補完 Enter 後composer 框與草稿沒有可觀察的變化就保守停止重試，不推論按鍵是否送達；不用 pane.get/read revision 相等當證據。每次補鍵前重讀同 pane/source/format 的未截斷草稿框與位置，並重驗 active run/session、狀態與在飛回合；不同或讀不到就不按。草稿框移位可能令本輪保守拒絕；最後讀取到送鍵仍有非原子窗口。
    90 秒內字既沒進輸入列、agent 也沒接手，回合標 `failed` 並留一則系統說明。
    watcher 由 daemon 的 `TaskTracker` 管理；shutdown 會等目前的 pane RPC／DB 更新完成，再停止後續輪詢。未完成的 relay external turn 保留在 DB，daemon 啟動或該 host 重連且完成 reconcile 後，依回合與使用者訊息重建 watcher。
    **死 pane 的 run**（`lifecycle::dead_panes`，隨 60 秒的 stuck-turn sweeper 跑）：herdr 明確回 `pane_not_found` 的 running run 收成 exited。

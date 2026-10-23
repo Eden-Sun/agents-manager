@@ -816,7 +816,7 @@ async fn clear_restored_prompt(app: &impl crate::capabilities::Db, client: &Herd
     // immediately before Ctrl+C; a change after this read remains a narrow non-atomic window.
     let Ok(fresh) = read_styled_snapshot(client, pane, SCAN_SOURCE, DELIVER_SCAN_LINES).await else { return };
     if fresh.pane_id != pane
-        || !super::composer_draft::same_snapshot(&candidate, &fresh)
+        || !super::composer_draft::same_snapshot(&bot.kind, &candidate, &fresh)
         || !restored_prompt_matches(&bot.kind, &fresh.text, expected_prompt)
         || !abort_binding_is_current(app, run).await
     {

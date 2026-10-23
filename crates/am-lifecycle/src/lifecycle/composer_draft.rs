@@ -6,7 +6,7 @@
 //!
 //! 兩件事都先確認框裡**還是使用者看到的那一段**（`expect_draft_token`＝409 回的 `draft_token`）：token 綁完整草稿、run
 //! 與 pane；畫面用的 `draft` 仍可截短。框在這之間換了字（有人在終端打字、CLI 自己放回一段），就回 409 `draft_changed`
-//! 帶新的草稿與 token，一個鍵都不按。按鍵前再檢查完整畫面、草稿和 run/session；Herdr 尚無條件按鍵 API，最後重讀
+//! 帶新的草稿與 token，一個鍵都不按。按鍵前再檢查草稿框的邊界／位置、完整草稿和 run/session；Herdr 尚無條件按鍵 API，最後重讀
 //! 到 key 實際送達之間仍留有一個很短、無法原子封閉的窗口。
 
 #[cfg(all(test, feature = "daemon-test-harness"))]
@@ -99,15 +99,61 @@ pub(super) async fn read_draft(client: &HerdrClient, pane: &str, kind: &str) -> 
     Ok((state, text, read))
 }
 
-/// A zero revision carries no freshness evidence. Compare complete read content and metadata;
-/// nonzero revision changes remain an additional veto, never the authorization itself.
-pub(super) fn same_snapshot(before: &crate::herdr::PaneRead, after: &crate::herdr::PaneRead) -> bool {
+/// Pane-wide revisions (including nonzero ones) cannot prove composer stability: background
+/// output advances independently. Require the same complete composer frame and metadata instead.
+pub(super) fn same_snapshot(kind: &str, before: &crate::herdr::PaneRead, after: &crate::herdr::PaneRead) -> bool {
     before.pane_id == after.pane_id
         && before.source == after.source
         && before.format == after.format
         && !before.truncated && !after.truncated
-        && before.text == after.text
-        && before.revision == after.revision
+        && composer_frame(kind, &before.text).is_some_and(|frame| Some(frame) == composer_frame(kind, &after.text))
+}
+
+#[derive(PartialEq, Eq)]
+struct ComposerFrame {
+    top: usize,
+    marker: usize,
+    column: usize,
+    bottom: usize,
+    upper_edge: String,
+    lower_edge: String,
+    rows: Vec<String>,
+    draft: String,
+}
+
+/// Use the existing draft parser, keeping the styled composer rows and their position. Outside
+/// rows are irrelevant. Boxed footer labels may contain live quota/clock text, so only their
+/// border geometry belongs to the frame. An incomplete/unrecognised frame is not evidence.
+fn composer_frame(kind: &str, text: &str) -> Option<ComposerFrame> {
+    use crate::composer_parse::{composer_row, strip_ansi};
+    let lines: Vec<&str> = text.lines().collect();
+    let marker = composer_row(kind, &lines)?;
+    let plain: Vec<String> = lines.iter().map(|line| strip_ansi(line)).collect();
+    let rule = |line: &str| !line.trim().is_empty() && line.trim().chars().all(|c| matches!(c, '─' | '━'));
+    let boxed = plain[marker].trim_start().starts_with('│');
+    let (top, bottom, upper_edge, lower_edge) = if boxed {
+        let top = (0..marker).rev().find(|&i| plain[i].trim().starts_with('╭') && plain[i].trim().ends_with('╮'))?;
+        let bottom = (marker + 1..lines.len()).find(|&i| crate::composer_parse::is_box_bottom(&plain[i]))?;
+        let edge = |line: &str, left, right| -> Option<String> {
+            let chars: Vec<char> = line.chars().collect();
+            Some(format!("{}:{}", chars.iter().position(|&c| c == left)?, chars.iter().rposition(|&c| c == right)?))
+        };
+        (top, bottom, edge(&plain[top], '╭', '╮')?, edge(&plain[bottom], '╰', '╯')?)
+    } else if matches!(kind, "claude" | "agy") {
+        let top = (0..marker).rev().find(|&i| rule(&plain[i]))?;
+        let bottom = (marker + 1..lines.len()).find(|&i| rule(&plain[i]))?;
+        (top, bottom, plain[top].clone(), plain[bottom].clone())
+    } else {
+        let bottom = (marker + 1..lines.len()).find(|&i| plain[i].trim().is_empty())?;
+        (marker, bottom, String::new(), String::new())
+    };
+    let glyph = match kind { "codex" => '›', "agy" => '>', "claude" | "grok" => '❯', _ => return None };
+    let column = plain[marker].chars().position(|c| c == glyph)?;
+    Some(ComposerFrame {
+        top, marker, column, bottom, upper_edge, lower_edge,
+        rows: lines[top + usize::from(top != marker)..bottom].iter().map(|line| line.to_string()).collect(),
+        draft: composer_text_whole(kind, text)?,
+    })
 }
 
 /// Recheck that the action still targets the active run, pane and native session it planned against.
@@ -188,14 +234,14 @@ pub async fn clear(
     #[cfg(all(test, feature = "daemon-test-harness"))]
     super::race_point::hit("draft_before_clear_key", &bot.id).await;
     // Herdr has no conditional `pane.send_keys` revision parameter. Preserve the authorized snapshot,
-    // reread immediately before Ctrl+C, and fail closed on any visible change. A change after this
+    // reread immediately before Ctrl+C, and fail closed on any composer change. A change after this
     // last read but before Herdr applies the key remains a narrow, non-atomic window.
     let (fresh_state, fresh, fresh_snapshot) = read_draft(client, &pane, &bot.kind).await.map_err(|_| unreadable(run))?;
     if fresh_state == BoxState::Unready {
         return Err(unreadable(run));
     }
     let unchanged = fresh_state == BoxState::NonEmpty
-        && same_snapshot(&authorized_snapshot, &fresh_snapshot)
+        && same_snapshot(&bot.kind, &authorized_snapshot, &fresh_snapshot)
         && fresh.as_deref().is_some_and(|d| same_draft(expect_token, &run.id, &pane, d));
     let same_run = planned_authority_matches(app, run, None).await;
     if !unchanged || !same_run {
@@ -635,7 +681,7 @@ pub async fn submit_locked(app: &impl LcHost, bot_id: &str, expect_token: &str, 
     #[cfg(all(test, feature = "daemon-test-harness"))]
     super::race_point::hit("draft_before_enter", bot_id).await;
     // Herdr has no conditional `pane.send_keys` revision parameter. Preserve the authorized snapshot,
-    // reread immediately before Enter, and fail closed on any visible change. A change after this
+    // reread immediately before Enter, and fail closed on any composer change. A change after this
     // last read but before Herdr applies the key remains a narrow, non-atomic window.
     let (final_state, fresh, final_snapshot) = match read_draft(&client, &pane, &bot.kind).await {
         Ok(snapshot) => snapshot,
@@ -648,7 +694,7 @@ pub async fn submit_locked(app: &impl LcHost, bot_id: &str, expect_token: &str, 
         let gone = refusal("draft_gone", &run, false, &bot.kind, None);
         return withdraw_unsubmitted(app, bot_id, &run, &turn_id, &msg_id, gone).await;
     }
-    let same_composer = same_snapshot(&authorized_snapshot, &final_snapshot)
+    let same_composer = same_snapshot(&bot.kind, &authorized_snapshot, &final_snapshot)
         && fresh.as_deref().is_some_and(|d| same_draft(expect_token, &run.id, &pane, d));
     let same_authority = planned_authority_matches(app, &run, Some(&proof)).await;
     if !same_composer || !same_authority {
