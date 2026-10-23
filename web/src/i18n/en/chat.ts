@@ -39,10 +39,12 @@ export default {
   '另有 {n} 個': '{n} more',
   '另有 {n} 個排程會叫醒它': { one: '{n} more schedule will wake it up', other: '{n} more schedules will wake it up' },
   // lib/childNotice.ts
-  '子 agent 已回報完成：{names}': 'Sub-agents reported completion: {names}',
-  '子 agent 正在等人回答：{names}': 'Sub-agents are waiting for a reply: {names}',
-  '↳ {parts} ({n})': '↳ {parts} ({n})',
-  '↳ {parts}': '↳ {parts}',
+  '、': ', ',
+  '；': '; ',
+  '（{n}）': ' ({n})',
+  'child {names} 回報完成': 'Sub-agent report complete: {names}',
+  'child {names} 在等人回答': 'Sub-agent awaiting a reply: {names}',
+  '↳ {parts}{count}': '↳ {parts}{count}',
   // lib/compactRefusal.ts
   '它沒有在跑，沒辦法壓縮': 'It is not running, so it cannot be compacted',
   '它正在回合中，等這一回合做完再壓縮': 'It is in a turn. Wait for the turn to finish before compacting it',
