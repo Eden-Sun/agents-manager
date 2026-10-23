@@ -682,6 +682,7 @@ export interface StoreState {
 }
 
 let noticeSeq = 0
+const noticeTimers = new Map<number, ReturnType<typeof setTimeout>>()
 
 /**
  * fork 的錯誤說人話。405／404（不是 `bot` 找不到）＝daemon 還沒有這支 API：開發用的前端常常比跑著的 daemon 新
@@ -1021,10 +1022,21 @@ export const useStore = create<StoreState>((set, get) => {
     const id = noticeSeq
     set((s) => ({ notices: [...s.notices, { id, kind, text, action }] }))
     // 帶動作的通知留久一點：4 秒不夠一個人意識到自己按錯了。
-    setTimeout(() => get().dismiss(id), action ? 15000 : kind === 'error' ? 8000 : 4000)
+    const timer = setTimeout(() => {
+      noticeTimers.delete(id)
+      get().dismiss(id)
+    }, action ? 15000 : kind === 'error' ? 8000 : 4000)
+    noticeTimers.set(id, timer)
   },
 
-  dismiss: (id) => set((s) => ({ notices: s.notices.filter((n) => n.id !== id) })),
+  dismiss: (id) => {
+    const timer = noticeTimers.get(id)
+    if (timer !== undefined) {
+      clearTimeout(timer)
+      noticeTimers.delete(id)
+    }
+    set((s) => ({ notices: s.notices.filter((n) => n.id !== id) }))
+  },
 
   async bootstrap() {
     try {
@@ -3036,6 +3048,8 @@ function turnStillOpen(status: Turn['status']): boolean {
  * 把「只做一次」的旗標與 seq 歸零、state 換回初始值，下一個測試檔才拿到乾淨的 store。
  */
 export function resetStoreForTest(): void {
+  for (const timer of noticeTimers.values()) clearTimeout(timer)
+  noticeTimers.clear()
   for (const slot of liveThrottle.values()) clearTimeout(slot.timer)
   liveThrottle.clear()
   knownBotIds = new Set()

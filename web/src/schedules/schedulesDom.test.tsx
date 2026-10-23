@@ -15,8 +15,8 @@ import { ProjectSchedules } from './ProjectSchedules'
 afterEach(unmountAll)
 // 時區下拉約 445 個 <option>，在 happy-dom 裡每次開／重繪編輯器要 ~0.2 秒；這個檔案不測時區選項本身。
 let tzList: ReturnType<typeof shortTimeZoneList>
-before(() => {
-  setupDom()
+before(async () => {
+  await setupDom()
   tzList = shortTimeZoneList()
 })
 after(async () => {

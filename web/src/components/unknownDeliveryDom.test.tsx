@@ -17,7 +17,7 @@ afterEach(async () => {
   await advanceMockTime(10_000)
 })
 before(async () => {
-  setupDom()
+  await setupDom()
   await advanceMockTime(10_000)
 })
 after(async () => {

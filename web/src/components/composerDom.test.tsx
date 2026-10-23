@@ -24,7 +24,7 @@ afterEach(async () => {
   await advanceMockTime(10_000)
 })
 before(async () => {
-  setupDom()
+  await setupDom()
   // 整個行程共用一個手動時鐘：前面檔案留下的 timer 在這個檔案開始前走完（#1374）。
   await advanceMockTime(10_000)
 })

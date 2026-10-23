@@ -981,6 +981,7 @@ export class MockTransport implements Transport {
       this.emit('quota_updated', { kind: 'codex', host: 'local', quota: withQuotaFlags(q) })
     }, 20000)
     return () => {
+      clearInterval(drift)
       if (this.handlers === handlers) {
         this.handlers = null
         this.socketOpen = false

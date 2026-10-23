@@ -50,8 +50,6 @@ test('#1887 手機草稿從短快照載入，完整快照重讀後仍能送出�
     assert.equal(stage, 'done')
     assert.equal(checked, true)
     assert.deepEqual(sent, ['space', 'down', 'down', 'down', 'down', 'down', 'enter', 'enter'])
-    // 最後一個 enter 之後 commit() 還要等 SETTLE_STEP 才回來、send() 才 setPhase('ready')；不等的話 teardownDom 之後才 setState，
-    // 錯誤落在下一個正在跑的測試上（window is not defined）。
     await until(() => !root.querySelector<HTMLButtonElement>('.bc-submit')?.disabled, 'send() 收尾（setPhase ready）')
   } finally {
     Object.defineProperty(window, 'innerWidth', { configurable: true, value: width })

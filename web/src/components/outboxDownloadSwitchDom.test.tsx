@@ -11,6 +11,7 @@ import { OutboxFiles } from './OutboxFiles'
 interface Pending {
   path: string
   respond: (r: Response) => void
+  reject: (reason: Error) => void
 }
 
 const pending: Pending[] = []
@@ -41,8 +42,8 @@ const activeIntervals: (() => void)[] = []
 let realOpen: typeof window.open
 const realSetInterval = globalThis.setInterval
 
-before(() => {
-  setupDom()
+before(async () => {
+  await setupDom()
   realOpen = window.open
   globalThis.setInterval = (((fn: () => void, ms?: number) => {
     activeIntervals.push(fn)
@@ -64,7 +65,7 @@ before(() => {
   globalThis.fetch = ((input: string) => {
     const url = String(input)
     if (url.includes('/outbox/file')) {
-      return new Promise<Response>((respond) => pending.push({ path: url, respond }))
+      return new Promise<Response>((respond, reject) => pending.push({ path: url, respond, reject }))
     }
     // 清單：兩顆 bot 都有同名檔。立刻回。
     listHits.push(url)
@@ -79,6 +80,9 @@ before(() => {
 
 afterEach(async () => {
   await unmountAll()
+  // 檔案切換測試刻意讓舊下載掛住；拒絕它，避免 transport 的逾時 callback 跑進下一個測試。
+  for (const request of pending) request.reject(new Error('test cleanup'))
+  await settle()
   pending.length = 0
   listHits.length = 0
   openCalledWith.length = 0
@@ -86,6 +90,7 @@ afterEach(async () => {
   activeIntervals.length = 0
   shouldBlockPopup = false
   mockWindow = null
+  for (const n of useStore.getState().notices) useStore.getState().dismiss(n.id)
   for (const k of Object.keys(serves)) delete serves[k]
 })
 

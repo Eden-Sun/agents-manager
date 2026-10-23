@@ -71,8 +71,8 @@ const update = (fn: () => void) =>
 
 let originalStorage: unknown
 
-before(() => {
-  setupDom()
+before(async () => {
+  await setupDom()
   originalStorage = window.localStorage
 })
 afterEach(async () => {

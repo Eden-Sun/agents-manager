@@ -15,8 +15,8 @@ import { mockShareClient } from './shareMock'
 afterEach(unmountAll)
 // share mock 每個請求固定睡 120ms（`guard()`）：那是假的網路延遲，不是要測的行為，略過它。
 let fast: ReturnType<typeof skipTimerDelays>
-before(() => {
-  setupDom()
+before(async () => {
+  await setupDom()
   fast = skipTimerDelays([120])
 })
 after(async () => {
