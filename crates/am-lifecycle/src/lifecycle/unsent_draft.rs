@@ -135,7 +135,10 @@ async fn press_enter_once(app: &impl StuckTurnContext, run: &db::Run, kind: &str
                 if !still_the_same(app, run, turn).await? {
                     return anyhow::Ok(false);
                 }
-                let screen = super::delivery::read_styled(&client, &pane, "visible", 80).await?;
+                // 讀不到＝無從確認字還是這一則；鍵還沒送，當成沒按（額度照退）。
+                let Ok(screen) = super::delivery::read_styled(&client, &pane, "visible", 80).await else {
+                    return anyhow::Ok(false);
+                };
                 if !sent.iter().any(|p| super::poller::composer_holds_prompt(kind, &screen, p)) {
                     return anyhow::Ok(false);
                 }

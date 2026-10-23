@@ -204,6 +204,24 @@ async fn a_composer_edited_after_the_first_read_is_not_pressed() {
     assert_eq!(turn(&f).await.status, "in_flight");
 }
 
+/// fence 內重讀畫面失敗：鍵還沒送，不按，額度退回，這一輪不收。
+#[tokio::test]
+async fn an_unreadable_screen_inside_the_fence_refunds_the_resend_without_pressing() {
+    let f = fixture(&[PROMPT], false).await;
+    let app = f.env.app.clone();
+    let run = db::run(app.db(), &f.run_id).await.unwrap().unwrap();
+    let t = turn(&f).await;
+    let sent = vec![PROMPT.to_string()];
+    assert!(db::claim_resend(app.db(), &t.id, crate::lifecycle::poller::MAX_PROMPT_RESENDS).await.unwrap());
+    assert_eq!(resends(&f).await, 1);
+    f.env.herdr.fail_next("pane.read", tt::Fault::Refuse);
+
+    assert_eq!(press_enter_once(&app, &run, "codex", &t, &sent).await.unwrap(), Recovery::Wait);
+    assert_eq!(enters(&f), 0, "讀不到畫面就不按");
+    assert_eq!(resends(&f).await, 0, "鍵沒送就退還額度");
+    assert_eq!(turn(&f).await.status, "in_flight");
+}
+
 /// 讀不到的計數表滿了：新的 turn 先淘汰最舊的一筆，仍然可以等滿 UNREADABLE_ROUNDS 輪。
 #[test]
 fn a_full_unreadable_table_evicts_the_oldest_so_a_new_turn_still_waits() {
