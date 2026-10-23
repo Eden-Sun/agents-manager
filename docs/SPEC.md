@@ -688,6 +688,19 @@ R-部署console-fork `01M2MG74HFY3PYD8FMBJKEJX8J` 是 AskUserQuestion 被中斷�
   回覆以 `source = transcript` 補進對話（已經有 assistant 訊息就不寫第二份）；證不出（遠端、grok、被中斷、只有 error）→ `completed_fallback`，
   並插一則 system 訊息寫明「閒置 N 分鐘仍 in_flight，由 reconcile 收尾」。**不標 `failed`**：回合多半做完了，只是結束沒被看見。
   讀不到主機或送了什麼（要拿去對 transcript）就這一輪不收、下一輪再看（#193），不當成「證不出」。
+- **送達證不出來的先看框**（#1897，`lifecycle/unsent_draft.rs`）：`delivery='unknown'` 且 `delivery_verified=0` 的回合（打過字、送出證不出來），
+  idle 收尾前先讀一次畫面——stall watchdog、重送與 `late_proof` 都不處理「字還留在框裡」的 unknown，以前這種回合直接收成 `completed_fallback`，
+  字在框裡留了 34 小時（a-ci優化 2026-10-21），之後的送達全被框裡的字擋住。
+  - 框裡逐列對得上這一則（`poller::composer_holds_prompt`）：用掉唯一一次重送額度（`claim_resend`，寫在 DB，重啟後不會再按第二次），
+    在 host 世代的 fence 裡重讀 run（running、idle、pane 與 herdr session 沒變）與 in-flight turn（同一筆、仍是 unknown）才補按一次 Enter；
+    這一輪不收、閒置重新計時，送出去了就交回 Stop hook 與一般收尾。沒按成（fence 失效、run 或 turn 變了）退還額度、這一輪不收。
+  - 額度已用掉、字還在框裡：收成 `failed`（送達欄位不動）＋一則系統訊息＋`ops_alert`（key `undelivered_draft:<turn>`）。**不清框**，由人決定送或清。
+  - 框裡有字但對不上這一則（TUI 把長段貼上摺起來、使用者改過）：一個鍵都不按，`ops_alert`（key `undelivered_draft_suspect:<turn>`，
+    同一個 key 只寫一次）之後照原本收尾。
+  - 框是空的：照原本收尾。
+  - 讀不到畫面：最多等 3 輪掃描、期間不收；第 3 輪還讀不到就記一次 WARN（`reason=screen_unreadable`）、照原本收尾。
+    讀不到的輪數在記憶體（以 turn 為鍵，最多 256 筆），daemon 重啟後重算。
+  有證據的（`delivery_verified=1`）、`ok`、`pending` 不走這一步；Session paused 的收尾也不走。
 - **之後**：走 `emit_turn`（交辦照一般回合結束流程：notice 自動結案、task 進 `awaiting_review`），並在同一把 bot 鎖裡立刻 flush 這顆 bot 的 `queued`。
 
 ### 4.3a 回合被 API 中斷
@@ -1156,7 +1169,8 @@ user 文字先照 CLI 自己的拆法還原（`lifecycle::pasted_content`，只�
   不受 60 秒認領期限影響。升級只用 CAS（`status='in_flight' AND delivery='unknown'`）：Stop hook、放棄、run 結束先到就什麼都不寫；成功後推 `turn_updated`、
   掛 stall／progress 看門狗（跟一般 `ok`／`unverified` 同一套）。daemon 啟動在 reconcile／`rearm_progress` 後，只恢復仍有效、pane/session 相符的
   `in_flight/unknown` turn；補證仍不送 prompt，仍以原基準觀察並走同一個 CAS。只有 `not_proven_submitted`（框已空）才有基準可認領；字還在框裡
-  （`still_in_box`）、框狀態讀不到（`composer_unreadable`）、`nothing_typed` 等原因沒有基準可看，維持原行為。session 確認的 DB 暫時讀取錯誤、
+  （`still_in_box`）、框狀態讀不到（`composer_unreadable`）、`nothing_typed` 等原因沒有基準可看，維持原行為；字還留在框裡的 unknown
+  由 §4.3b 的 idle 收尾前檢查補按一次 Enter 或收成 failed＋`ops_alert`（#1897）。session 確認的 DB 暫時讀取錯誤、
   transcript 暫時讀取錯誤都回 `Wait`，下一輪重試；run 已消失或 session 確認不相符才停止。持久 watcher 最多保留 10 分鐘；若一次 60 次觀察仍無結論，
   保留原基準到 TTL，讓下一次 daemon 重啟仍能恢復觀察。補證 watcher 登記在背景任務內，關機時取消（列保留，下次開機照樣接回）；
   開機恢復時單筆清理失敗只記 log、不中止同批其餘的恢復；欠帳補寫成 unknown 後若記憶體登錄已無此筆，改從持久列接回同一回合的基準。

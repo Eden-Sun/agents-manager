@@ -278,6 +278,14 @@ async fn close_stuck(app: &impl StuckTurnContext, run: &db::Run, turn: &db::Turn
     if turn.delivery == "pending" {
         return fail_never_sent(app, run, turn).await;
     }
+    // 送達證不出來的：先看字是不是還留在框裡（#1897），補按 Enter／收成 failed／照原本的收尾。
+    if matches!(why, CloseWhy::Idle(_)) {
+        match super::unsent_draft::before_idle_close(app, run, turn).await? {
+            super::unsent_draft::Recovery::Proceed => {}
+            super::unsent_draft::Recovery::Wait => return Ok(false),
+            super::unsent_draft::Recovery::Failed => return Ok(true),
+        }
+    }
     close_locked(app, run, turn, why).await
 }
 
