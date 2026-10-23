@@ -565,6 +565,20 @@ async fn cold_resume_cursor_not_on_resume_never_sends_a_key_or_moves_the_cursor(
     }
 }
 
+#[tokio::test]
+async fn cold_resume_give_up_survives_a_poisoned_warn_table() {
+    let _ = std::thread::spawn(|| {
+        let _guard = gave_up().lock().unwrap();
+        panic!("poison the shared warn table");
+    })
+    .join();
+    assert!(gave_up().is_poisoned());
+    let (env, _, run, _) = fixture(Some(SYNTHETIC)).await;
+    let err = accept_if_shown(&env.app, &run).await.unwrap_err();
+    assert_eq!(err.to_string(), PENDING);
+    assert!(env.herdr.calls_to("pane.send_keys").is_empty());
+}
+
 #[test]
 fn cold_resume_warn_table_writes_each_reason_once_per_run() {
     let t0 = std::time::Instant::now();

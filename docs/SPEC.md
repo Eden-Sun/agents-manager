@@ -350,8 +350,11 @@ React 前端 (Vite) ◄── REST + WebSocket ──► Rust daemon (axum) ◄�
   不補 Enter、下一輪也不再按。已知的殘留：`showTurnDuration` 關掉（沒有 `✻ … · done`）且回覆**以**逐字照抄的問卷結尾時仍會誤認，
   最壞是在空的輸入列留下一個 `0`。
   每個自動按鍵前都要重讀：run 仍是同一個 running run、pane／有效 Herdr host/session/socket 未換、pane id 相同，且畫面仍是
-  同 revision、同文字的問卷並有空閒 composer；第二階段 Enter 以按過 `0` 後新讀到的 revision／文字為基準再做同一檢查。
-  權限或 pane 讀取有任何錯誤、截斷或不連續都不按，並清掉相符的 survey 去重 revision，讓後續巡檢重新判斷。
+  同文字的問卷並有空閒 composer；第二階段 Enter 以按過 `0` 後新讀到的文字為基準再做同一檢查。**不用 `pane.read` 的 revision 當證據**
+  （herdr 0.9.5 實測恆回 0，舊的 `revision == 0` 守門讓問卷在真環境從沒被關過，#1910）。
+  權限或 pane 讀取有任何錯誤、截斷或不連續都不按，並清掉相符的 survey 去重指紋，讓後續巡檢重新判斷；放棄時每個 (run, 原因) 只寫一次 WARN
+  （`survey_screen_changed_or_unreadable_before_key`、`survey_run_host_session_or_pane_changed`，與冷快取 Resume 共用去重表）。
+  去重指紋是畫面文字的 `DefaultHasher` 雜湊，只在記憶體、不持久化、不跨 process；問卷離開畫面就忘掉，之後再跳出的問卷重新處理。
   Herdr 尚無帶 `expected_revision` 的條件式 `send_keys`，最後一次成功讀取到按鍵 RPC 之間仍有極窄的非原子窗口；#485 接受以按鍵前重讀縮小此窗口，未來有 CAS 時應改用。
   自動送 `0` 由 `PRESS_KEYS_ON_SURVEY` 控制（目前開著）；關掉時問卷自動改算成「該吵父 agent」的畫面
   （§10 的 `alertable_question` 跟著 `daemon_dismisses_survey()` 走），不會變成沒人按也沒人知道的靜默停擺。

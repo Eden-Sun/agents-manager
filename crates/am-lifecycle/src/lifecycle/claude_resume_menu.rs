@@ -108,11 +108,11 @@ const GIVE_UP_CAP: usize = 256;
 const GIVE_UP_TTL: Duration = Duration::from_secs(24 * 60 * 60);
 
 #[derive(Default)]
-struct GiveUps(std::collections::HashMap<(String, &'static str), std::time::Instant>);
+pub(crate) struct GiveUps(std::collections::HashMap<(String, &'static str), std::time::Instant>);
 
 impl GiveUps {
     /// 這個 run 的這個原因是不是第一次（順手記下來）。`now` 由呼叫端給，測試不必真的等。
-    fn first_time(&mut self, run_id: &str, reason: &'static str, now: std::time::Instant) -> bool {
+    pub(crate) fn first_time(&mut self, run_id: &str, reason: &'static str, now: std::time::Instant) -> bool {
         let key = (run_id.to_string(), reason);
         if let Some(at) = self.0.get(&key).copied() {
             if now.saturating_duration_since(at) <= GIVE_UP_TTL {
@@ -130,14 +130,14 @@ impl GiveUps {
     }
 }
 
-fn gave_up() -> &'static std::sync::Mutex<GiveUps> {
+pub(crate) fn gave_up() -> &'static std::sync::Mutex<GiveUps> {
     static T: std::sync::OnceLock<std::sync::Mutex<GiveUps>> = std::sync::OnceLock::new();
     T.get_or_init(Default::default)
 }
 
 /// 放棄自動確認：同一個原因每個 run 只寫一次 WARN，然後回 `PENDING`（呼叫端據此重試）。
 fn give_up(run: &db::Run, reason: &'static str) -> anyhow::Error {
-    if gave_up().lock().unwrap().first_time(&run.id, reason, std::time::Instant::now()) {
+    if gave_up().lock().unwrap_or_else(|e| e.into_inner()).first_time(&run.id, reason, std::time::Instant::now()) {
         tracing::warn!(run = %run.id, bot = %run.bot_id, reason, "冷快取的 Resume 選單沒有自動確認，保持 cold_resume_pending");
     }
     anyhow::anyhow!(PENDING)
