@@ -36,6 +36,7 @@ web/src/
               unread.ts · shelf*.ts · quotaHide.ts · queuedSend.ts 等（有 .test.ts 的是純函式）
   lib/        純函式：routes · tuiChoices（終端快照 → 選單）· choiceDraft／draftPreload（多分頁問卷草稿）· missionView（任務卡推導）
               agmQuote（轉述來源）· shortModel · updateBatch（與 daemon bulk_restart::plan 同規則）· runtimeDrift …
+  i18n/en/    英文字典，一個區塊一個檔（見〈多語系〉）；工具在 lib/i18n/
   hooks/      useTerminalSnapshot · usePaneKeys（鍵名對照＋依序送鍵佇列）· useChoiceMenu · useDialogFocus · useComposerFocus · useMediaQuery …
   components/ 依畫面分：Sidebar／ChatPanel／GroupChatPanel／BotSettingsPanel／QuotaStrip／UnreadChip／Blocked*／Missions*／HostShellPanel／MemPopover …
               元件專屬 CSS 放同目錄（*.css），其餘在 styles.css
@@ -95,9 +96,76 @@ store 與元件就直接 import 它（例：`store.ts` 的 `toPreviewEvent`、`f
 - **全域鍵盤**：⌥↑／⌥↓ 換 bot（bot 列內與對話框開著時不接）；**Control+1…9 跳到側欄第 n 個專案的群組對話、把側欄捲到那一列並 focus 輸入框**（2026-09-16 使用者；「第 n 個」＝側欄**畫出來**的第 n 個，搜尋時沒命中的專案整塊不畫，不算在內）——認 `event.code` 的 `Digit1…9`，所以中文輸入法照樣有效；用 Control 而非 ⌘（⌘1…9 是瀏覽器換分頁）；正在組字、對話框開著、事件已被處理就不接；第 n 個專案不存在就什麼都不做。
 - **群組任務入口**：`/api/missions` 不存在時整個入口靜默不出現，不重試不報錯。
 - **Mock**：`api/mock.ts` 的回應形狀刻意與 `daemon/src/api.rs` 一致。訊息含 `blocked`／`rm -rf` → 進 blocked；`tinyask`（或 `__amMock.tinyAsk()`）→ 題目被裁掉的 AskUserQuestion（畫面只剩選項、題目只在 `pending-question`）；`twoask`（或 `__amMock.twoAsk()`）→ 兩題（第二題可複選）、分頁列被裁掉，能一題一題答完送出（`api/mockTwoAsk.ts`，`scripts/verify-blocked-mobile.mjs` 用）；`codexasync`（或 `__amMock.codexAsync()`，要 codex bot）→ codex 非同步提問（畫面只剩 `? 1 question · shift+← to answer`、題目在 `pending-question`，shift+← 展開成編號選單，`api/mockCodexAsync.ts`，issue #1879）；`__amMock.bulletAsk()` → 問句跟選項之間夾著 `·` 條列說明的 claude 提示（2.1.280 fullscreen renderer 邀請）；`fallback` → terminal_fallback 回覆；`authfail` → 回合收在「失敗收尾（帳號或授權）」（對話長出「立即登入」，搭 `__amMock.loggedOut(bot, 'cc1')` 把 bot 綁到沒登入的身份）；
-  `slow` → 延遲 8 秒；`outbox` → 回合裡放一個 `download-test-N.txt` 進「bot 給你的檔案」（回合結束就該自己出現）。console 有 `__amMock.dropSocket() / resync() / block(name) / disconnect() / reconnect()`，另有 `failNext(method, 路徑正規式, status, body)`——下一個符合的請求回那個錯（手動看錯誤路徑、截圖用，用過一次就拿掉）。更新框（`api/mockReleaseTriage.ts`，issue #561）：`__amMock.updateNotice(bot, 通知字)` 給 bot 掛更新通知（沒在跑就先啟動），`__amMock.triageOff('codex')` 清掉那個 kind 的分診帳本（演「尚未分析」）。herdr 一鍵更新（`api/mockHerdrUpdate.ts`）：`__amMock.herdrUpdate()` 推一筆 `kind:"herdr"` 的上游快照（local／m4p 都落後）並把本機 bot 開起來，header 出現 herdr 徽章；`{failOne: true}`／`{reason: 'busy_timeout'}`／`{reason: 'restart_failed'}`／`{hold: 'waiting_idle'}` 演沒接回／整次沒做／換回舊版／停在某一步；形狀照 daemon `herdr_upgrade.rs`，分診帳本跟 daemon 一樣對 herdr 回空的 rows。`__amMock.freshStart()` 演首次啟動（issue #1931）：清掉 Project／Bot 與本機身分狀態、四種 CLI 都沒裝，主畫面出現「環境準備」清單；`POST /hosts/local/tools/install` 不帶 `via_bot_id` 會開 shell 演安裝、幾秒後那個 CLI 變已安裝・未登入，shell 裡打 `<cli> login` 幾秒後變已登入；成功時推 `tool_install_done`（pane 關掉），`__amMock.installFail('claude')` 演沒裝成（pane 留著、推 `installed:false, pane_kept:true`），`installFail('claude', 'timeout')` 演逾時，`installFail('claude', null)` 恢復。`__amMock.remoteDemo()` 加一台遠端主機 `m4p`＋專案＋在跑的 bot、五格額度都有（cc0／cc1／cc2／codex／grok），回 bot id——重現遠端標題列最擠的情況（名牌＋遠端記憶體）。`__amMock.patchBot(bot, body)` 直接 PATCH 設定；`__amMock.keepWarmSkip(bot, skip)` 按／取消「不用保溫」（冰凍，晶片與側欄畫雪花；要先啟動 bot）；`__amMock.runtime(bot, {runtime_model, runtime_fast, agent_status})` 改 active run 讀回的值（演 codex 0.157 狀態列的顯示名 `GPT-6-Luna`、TUI 裡手切的 fast、在忙；#712）。
+  `slow` → 延遲 8 秒；`outbox` → 回合裡放一個 `download-test-N.txt` 進「bot 給你的檔案」（回合結束就該自己出現）。網址 `?lang=en`（或 `zh`）固定介面語言（只有 mock 認、不寫入儲存，拍英文截圖用；console 的 `__amI18n.missing()` 列出還沒有英文的句子）。console 有 `__amMock.dropSocket() / resync() / block(name) / disconnect() / reconnect()`，另有 `failNext(method, 路徑正規式, status, body)`——下一個符合的請求回那個錯（手動看錯誤路徑、截圖用，用過一次就拿掉）。更新框（`api/mockReleaseTriage.ts`，issue #561）：`__amMock.updateNotice(bot, 通知字)` 給 bot 掛更新通知（沒在跑就先啟動），`__amMock.triageOff('codex')` 清掉那個 kind 的分診帳本（演「尚未分析」）。herdr 一鍵更新（`api/mockHerdrUpdate.ts`）：`__amMock.herdrUpdate()` 推一筆 `kind:"herdr"` 的上游快照（local／m4p 都落後）並把本機 bot 開起來，header 出現 herdr 徽章；`{failOne: true}`／`{reason: 'busy_timeout'}`／`{reason: 'restart_failed'}`／`{hold: 'waiting_idle'}` 演沒接回／整次沒做／換回舊版／停在某一步；形狀照 daemon `herdr_upgrade.rs`，分診帳本跟 daemon 一樣對 herdr 回空的 rows。`__amMock.freshStart()` 演首次啟動（issue #1931）：清掉 Project／Bot 與本機身分狀態、四種 CLI 都沒裝，主畫面出現「環境準備」清單；`POST /hosts/local/tools/install` 不帶 `via_bot_id` 會開 shell 演安裝、幾秒後那個 CLI 變已安裝・未登入，shell 裡打 `<cli> login` 幾秒後變已登入；成功時推 `tool_install_done`（pane 關掉），`__amMock.installFail('claude')` 演沒裝成（pane 留著、推 `installed:false, pane_kept:true`），`installFail('claude', 'timeout')` 演逾時，`installFail('claude', null)` 恢復。`__amMock.remoteDemo()` 加一台遠端主機 `m4p`＋專案＋在跑的 bot、五格額度都有（cc0／cc1／cc2／codex／grok），回 bot id——重現遠端標題列最擠的情況（名牌＋遠端記憶體）。`__amMock.patchBot(bot, body)` 直接 PATCH 設定；`__amMock.keepWarmSkip(bot, skip)` 按／取消「不用保溫」（冰凍，晶片與側欄畫雪花；要先啟動 bot）；`__amMock.runtime(bot, {runtime_model, runtime_fast, agent_status})` 改 active run 讀回的值（演 codex 0.157 狀態列的顯示名 `GPT-6-Luna`、TUI 裡手切的 fast、在忙；#712）。
   被 trace 的 pane（§6.5e）跟 daemon 一樣分兩份白名單：看過畫面不會變成「自己開的 shell」，有 port 的每次打字都 403；第一個專案底下有 dev server（唯讀）、跑 vim 的 shell（沒 port，打得進去）、手開的 shell，另有對不到專案的 scratch 與「多出來的」各一顆。
 - 深淺色：側欄左上角一顆主題鈕三段輪流切換（跟隨系統 → 淺 → 深，存這台瀏覽器；`components/ThemeToggle.tsx`、`lib/theme.ts`）；`prefers-reduced-motion` 關掉所有動畫。
 
 ## 環境準備清單（issue #1931）
 `lib/onboarding.ts`（純函式：`onboardingModel` 算每個 kind 的狀態與「該做哪一步」）、`lib/useOnboarding.ts`（讀本機 tools／身分／herdr／Project 數）、`lib/onboardingActions.ts`（`installKindOnHost`：claude／codex／grok 打不帶 `via_bot_id` 的 `tools/install` 並切到回的 shell pane，agy 走 `installAgy`；`loginKindOnHost`：命名身分走 `loginIdentity`，預設帳號開新 shell 打登入指令）。`components/OnboardingChecklist.tsx` 有兩個出口：`OnboardingBanner`（App 的 `main` 頂端，`needed` 才畫）與環境設定「環境準備」分頁用的 `OnboardingChecklist`。`QuickAddBots` 與新增 Bot 表單的未登入提示也用 `loginKindOnHost`。決定見 UI-DECISIONS「首次啟動的環境準備清單」。
+
+## 多語系（issue #1932）
+介面有繁中（原文）與英文兩種，預設跟隨瀏覽器（`navigator.language` 以 zh 開頭→繁中，其餘→英文），環境設定→顯示可切「跟隨瀏覽器／繁體中文／English」，存 localStorage `am-lang`，`<html lang>` 跟著換。自寫、不加依賴：`lib/i18n/`（核心）＋ `i18n/en/<區塊>.ts`（英文字典）。測試環境固定繁中（`test/node-test-shim.ts`），既有斷言繁中字串的測試不受影響。
+
+### 怎麼寫
+**繁中原句就是 key**，英文放字典，缺了退回繁中（畫面不會空白）。
+
+```tsx
+import { useT } from '../lib/i18n'
+const t = useT()                                   // 元件裡一律用 hook：切語言會重繪
+<button title={t('重新問本機的 CLI 現在裝了什麼')}>{t('重新偵測')}</button>
+t('（{done}/4 CLI 就緒）', { done })               // 插值：{名稱}，值給字串或數字
+t('{n} 可更新', { n })                             // 複數：用 {n}，字典給 { one, other }
+t.x('或改用 {cmd} 開發', { cmd: <code>VITE_MOCK=1</code> })   // 句子裡要塞元件
+```
+- **非元件**（`lib/`、store 的 `notify` 文字）：`import { t } from '../lib/i18n'` 直接呼叫，用呼叫當下的語言。**不要在模組載入時呼叫 `t()` 把結果存進常數**（切語言不會更新）。吃這種文字的元件自己要有 `useT()`（或 `useLang()`）才會重繪。
+- **標籤表／依狀態挑文字**：常數裡寫 `msg('未安裝')`（原樣回傳，只讓掃描抓得到 key），顯示處 `t.tr(LABEL[state])`。`t()` 的 key 只收字面字串（型別就擋），動態 key 只走 `tr`。例：`lib/onboarding.ts` 的 `KIND_STATE_LABEL`、`lib/envTabs.ts`、`ThemeToggle`。
+- 數字／日期：`fmtNumber(n)`、`fmtDate(ms)`（`lib/i18n`，跟語言的 locale）。「N 分鐘前」這類：整句一個 key＋複數（`'{n} 分鐘前'`: `{ one: '{n} minute ago', other: '{n} minutes ago' }`）。
+- 範本（照著寫）：`components/LanguageToggle.tsx`（含 `msg`）、`OnboardingChecklist.tsx`（元件、插值、屬性）、`EnvShell.tsx`（複數、標籤表）、`KeepAwakeToggle.tsx` ＋ `lib/wakeLock.ts`（lib 函式回傳文字）；字典範本 `i18n/en/updates.ts`；測試範本 `components/languageToggle.test.tsx`、`onboardingChecklist.test.tsx` 最後一條。`EnvSubTabs` 本身沒有字串（label 由呼叫端傳），呼叫端各自抽。
+
+### key 規則
+1. key 必須是**字面字串**（單引號或沒有 `${}` 的反引號），原句照抄，**不要為了好看改字**——改了原句字典也要同步改。
+2. **整句一個 key**，不要拼接（`t('已') + t('連線')`、`` `${n} 個` `` 都不行）：英文語序不同。有變動的部分用 `{name}`（名稱 `[A-Za-z_]\w*`）；元件夾在句中用 `t.x`。
+3. 全形標點跟著原句留在 key 裡，英文字典改成半形＋空格（`'（{account}）'` → `' ({account})'`）。
+4. 同一句出現在多處、或不同區塊重複：**英文相同就沒事**，各寫一份不必協調；英文不同會被測試擋下（兩處語境不同就把 key 寫得不一樣）。
+5. 字典檔 `i18n/en/<區塊>.ts`：`export default { '原句': 'English', '{n} 個': { one: '{n} item', other: '{n} items' } } satisfies Dict`。key 一律加單引號、依出現順序，同一元件的放一起（註解標檔名）。需要拆小時在自己的區塊檔裡 import 子檔；**不要改 `i18n/en/index.ts`**。
+6. 不確定是否該翻、或刻意不翻的寫死中文：行尾（或獨立的上一行）寫 `// i18n-ignore`（JSX 文字旁用 `{/* i18n-ignore */}`），掃描就不再報。
+
+### 哪些不翻
+- **daemon 回傳的錯誤與系統訊息**、`ApiError.message`、daemon 事件裡的文字、bot 的對話內容、轉述的使用者內容與檔名——原樣顯示。前端自己產生的（「讀取失敗：」前綴、狀態字、按鈕）才翻；`${前綴}：${daemon 訊息}` 寫成 `t('讀取失敗：{reason}', { reason })`。
+- 模型名、指令與旗標（`herdr`、`claude login`、`--no-browser`）、kind 名（claude／codex／grok／agy）、branch／路徑／port／版本號。
+- 拿來**跟 daemon 或終端文字比對**的中文字串、regex（`lib/tui*`、`lib/blockedReason` 這類）：不翻、行尾加 `// i18n-ignore`。
+- 語言自稱（「繁體中文」「English」）。
+- `api/mock*.ts`、`share/shareMock.ts`、`testing/`、測試檔：假 daemon 的資料與測試不翻（掃描自動略過）。
+- 註解、`console.*`、throw 給開發者看的 Error 訊息不翻；**會顯示給使用者的 Error 訊息要翻**。
+
+### 英文用語表（固定譯名，大小寫照此）
+| 繁中 | English | | 繁中 | English |
+|---|---|---|---|---|
+| Bot | Bot（不譯） | | 額度 | quota |
+| Project | Project（不譯） | | 5 小時窗／7 天窗 | 5-hour／7-day window |
+| 群組（對話） | Group chat | | 重置 | reset |
+| 任務（mission） | Mission | | 身分 | Identity／Identities |
+| 回合 | turn | | 主機／本機 | Host／This machine（host 名 `local` 不動） |
+| 對話／終端 | Chat／Terminal | | 環境設定／環境準備 | Settings／Setup |
+| 訊息／草稿／附件 | message／draft／attachment | | 啟動／停止／重啟 | Start／Stop／Restart |
+| 倒回 | Rewind | | 保溫／冰凍 | Keep warm／Frozen |
+| 子 agent | sub-agent | | 主力（★） | Primary |
+| 更新／部署 | update／deploy | | 離線／已連線 | offline／Connected |
+| 安裝／登入／未登入 | install／sign in／signed out | | 未讀 | unread |
+| 預覽／排程 | Preview／Schedule | | 審查／監督 | Review／Supervisor |
+| Jev 建議 | Jev suggestions | | 最近刪除 | Recently deleted |
+
+不譯：agent、herdr、pane、shell、CLI、token、commit、issue、PR、AGM／AG Man、Jev、MOCK。文字風格：按鈕與標題用 Sentence case（`Add Bot`、`Re-check`）、句子結尾有句號才留；`…` 沿用；欄位分隔 `・` 改 ` · `。
+
+### 並行抽字串的分區
+分區表在 `lib/i18n/areas.ts`（檔案歸屬的唯一來源，凍結的快照、沒列到的新檔歸 `core`）；一個人負責一個區塊，**只改自己區塊的檔案與 `i18n/en/<區塊>.ts`**，區塊之間不共用檔案。`bun scripts/i18n-report.ts --area <區塊>` 列剩下的寫死中文（逐檔；`--lines <檔>` 看每一處）；`--missing` 列用到了 `t()` 卻還沒有英文的句子。
+
+| 區塊 | 內容 | 檔數 | 寫死中文處數（起始） |
+|---|---|---|---|
+| `chat` | 對話與輸入：ChatPanel、GroupChatPanel、Blocked\*、問答卡、附件與 outbox、Markdown、終端分頁、回合錯誤；`lib/` 的 choiceDraft／composer\*／attachment\*／tui\*；store 的 send／draft／unread 小檔 | 67 | 880 |
+| `bots` | 側欄與 Bot／Project：Sidebar\*、BotSettingsPanel、Bot\* 選單與分享、預覽、模型選擇、記憶體徽章、KindTag、晶片 | 43 | 891 |
+| `hosts` | 額度／身分／主機／登入：Quota\*、IdentitiesPanel、HostsPanel、HostShell、登入相關元件、JudgePanel／SupervisorPanel／ClaudeApiPanel | 40 | 882 |
+| `updates` | 更新／安裝／部署：\*UpdateChip、Update\*、Deploy\*、\*InstallChip、環境準備、EnvShell、`store/*Update*` | 48 | 851（已含範本，實際更少） |
+| `core` | `store/store.ts`（notify 文字）、`api/*`、`schedules/*`、`share/*`（公開分享頁，自己的入口）、`App.tsx`、任務／issue／git 列、Modal／ConfirmDialog、其餘小檔 | 38 | 680 |
+
+每個區塊做完的驗收：`bun scripts/i18n-report.ts --area <區塊>` 剩 0（或只剩加了 `i18n-ignore` 的）；`bun test src/lib/i18n`（字典與原始碼對帳）；`bunx tsc -p tsconfig.app.json --noEmit`；`bunx oxlint src`；`CHECK_MAX_LOAD=40 scripts/check.sh changed`；英文畫面用 `VITE_MOCK=1 bunx vite --port <自己的>` 開 `/?lang=en` 以 agent-browser 走過自己的畫面，`__amI18n.missing()` 應為空。

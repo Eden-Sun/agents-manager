@@ -6,6 +6,7 @@
  * 已安裝但問不到的 kind 算可用（不拿它擋住使用者、也不把它說成未登入）。
  */
 import type { BotKind, IdentityStatusMap, ToolMap } from '../api/types'
+import { msg } from './i18n'
 import { BOT_KINDS } from '../api/types'
 
 export type OnbKindState = 'missing' | 'out' | 'ok' | 'unknown'
@@ -63,11 +64,12 @@ export function onboardingModel(i: OnbInput): OnbModel {
   }
 }
 
+/** 標籤表用 `msg()` 標記，顯示處 `tr(KIND_STATE_LABEL[state])`（見 docs/FRONTEND.md〈多語系〉）。 */
 export const KIND_STATE_LABEL: Record<OnbKindState, string> = {
-  missing: '未安裝',
-  out: '已安裝・未登入',
-  ok: '已登入',
-  unknown: '已安裝・登入狀態問不到',
+  missing: msg('未安裝'),
+  out: msg('已安裝・未登入'),
+  ok: msg('已登入'),
+  unknown: msg('已安裝・登入狀態問不到'),
 }
 
 /** 讓 Sidebar 打開「新增 Project」視窗的事件（Sidebar 的 modal state 是區域的，清單不 import 它以免循環）。 */

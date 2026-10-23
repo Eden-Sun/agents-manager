@@ -12,6 +12,7 @@ import * as api from '../api'
 import { buildHostCheck, updatableCount } from '../store/updateCheck'
 import { fetchIntegrationUpdates, type IntegrationHost } from '../api/integrationUpdates'
 import { herdrHostBlocked } from '../store/herdrUpdate'
+import { useT } from '../lib/i18n'
 
 import { OnboardingChecklist } from './OnboardingChecklist'
 import { useOnboarding } from '../lib/useOnboarding'
@@ -23,9 +24,11 @@ import { JudgePanel } from './JudgePanel'
 import { ClaudeApiPanel } from './ClaudeApiPanel'
 import { KindDisplayToggle } from './KindTag'
 import { KeepAwakeToggle } from './KeepAwakeToggle'
+import { LanguageToggle } from './LanguageToggle'
 import './envShell.css'
 
 export function EnvShell() {
+  const t = useT()
   const hosts = useStore((s) => s.hosts)
   const localTools = useStore((s) => s.localTools)
   const localHerdr = useStore((s) => s.localHerdr)
@@ -99,10 +102,10 @@ export function EnvShell() {
 
   // 整理 badges
   const badges: EnvTabBadges = {
-    setup: onboarding.needed && onboarding.pending > 0 ? { text: `${onboarding.pending} 待處理`, tone: 'warn' } : null,
-    hosts: hostsDown > 0 ? { text: `${hostsDown} 未連線`, tone: 'bad' } : null,
-    updates: updatesCount > 0 ? { text: `${updatesCount} 可更新`, tone: 'warn' } : null,
-    deleted: deletedCount !== null && deletedCount > 0 ? { text: `${deletedCount} 個`, tone: 'dim' } : null,
+    setup: onboarding.needed && onboarding.pending > 0 ? { text: t('{n} 待處理', { n: onboarding.pending }), tone: 'warn' } : null,
+    hosts: hostsDown > 0 ? { text: t('{n} 未連線', { n: hostsDown }), tone: 'bad' } : null,
+    updates: updatesCount > 0 ? { text: t('{n} 可更新', { n: updatesCount }), tone: 'warn' } : null,
+    deleted: deletedCount !== null && deletedCount > 0 ? { text: t('{n} 個', { n: deletedCount }), tone: 'dim' } : null,
   }
 
   // 決定當前分頁（初次載入由 resolveInitialEnvTab 計算）
@@ -142,7 +145,7 @@ export function EnvShell() {
 
   return (
     <div className="env-shell env-panel">
-      <div className="env-nav" role="tablist" aria-label="環境設定分類">
+      <div className="env-nav" role="tablist" aria-label={t('環境設定分類')}>
         {ENV_TABS.map((tab, idx) => {
           const isSelected = activeTab === tab.id
           const badge = badges[tab.id]
@@ -158,7 +161,7 @@ export function EnvShell() {
               onClick={() => selectTab(tab.id)}
               onKeyDown={(e) => handleKeyDown(e, idx)}
             >
-              <span className="env-nav-label">{tab.label}</span>
+              <span className="env-nav-label">{t.tr(tab.label)}</span>
               {badge ? (
                 <span className={`env-nav-meta${badge.tone ? ` ${badge.tone}` : ''}`}>{badge.text}</span>
               ) : null}
@@ -175,7 +178,7 @@ export function EnvShell() {
           className="env-tabpanel"
           hidden={activeTab !== 'setup'}
         >
-          <h2 className="page-title">環境準備</h2>
+          <h2 className="page-title">{t('環境準備')}</h2>
           <OnboardingChecklist />
         </section>
 
@@ -186,7 +189,7 @@ export function EnvShell() {
           className="env-tabpanel"
           hidden={activeTab !== 'hosts'}
         >
-          <h2 className="page-title">主機</h2>
+          <h2 className="page-title">{t('主機')}</h2>
           <HostsPanel />
         </section>
 
@@ -197,7 +200,7 @@ export function EnvShell() {
           className="env-tabpanel"
           hidden={activeTab !== 'updates'}
         >
-          <h2 className="page-title">更新檢查</h2>
+          <h2 className="page-title">{t('更新檢查')}</h2>
           <UpdateCheckPanel />
         </section>
 
@@ -208,7 +211,7 @@ export function EnvShell() {
           className="env-tabpanel"
           hidden={activeTab !== 'identities'}
         >
-          <h2 className="page-title">身分</h2>
+          <h2 className="page-title">{t('身分')}</h2>
           <IdentitiesPanel />
         </section>
 
@@ -219,7 +222,7 @@ export function EnvShell() {
           className="env-tabpanel"
           hidden={activeTab !== 'deleted'}
         >
-          <h2 className="page-title">最近刪除</h2>
+          <h2 className="page-title">{t('最近刪除')}</h2>
           <DeletedBotsPanel />
         </section>
 
@@ -230,7 +233,7 @@ export function EnvShell() {
           className="env-tabpanel"
           hidden={activeTab !== 'judge'}
         >
-          <h2 className="page-title">Jev 建議</h2>
+          <h2 className="page-title">{t('Jev 建議')}</h2>
           <JudgePanel />
         </section>
 
@@ -252,7 +255,8 @@ export function EnvShell() {
           className="env-tabpanel"
           hidden={activeTab !== 'display'}
         >
-          <h2 className="page-title">顯示</h2>
+          <h2 className="page-title">{t('顯示')}</h2>
+          <LanguageToggle />
           <KindDisplayToggle />
           <KeepAwakeToggle />
         </section>
