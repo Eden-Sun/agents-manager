@@ -17,10 +17,20 @@
 }
 
 .env-shell {
-  display: flex;
+  display: flex !important;
+  flex-direction: row;
   flex: 1;
   min-height: 0;
   width: 100%;
+  gap: 0 !important;
+  padding: 0 !important;
+}
+
+h2.page-title {
+  margin: 0 0 10px;
+  font-size: 13px;
+  font-weight: 650;
+  color: var(--text);
 }
 
 .env-nav {
@@ -155,7 +165,7 @@
 /* 手機（≤640px）：標題下折行分頁、觸控目標 ≥44px、不橫向捲動 */
 @media (width <= 640px) {
   .env-shell {
-    flex-direction: column;
+    flex-direction: column !important;
   }
 
   .env-nav {
