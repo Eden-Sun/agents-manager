@@ -20,6 +20,7 @@ bun test                        # 單元測試（見下：走 bunfig.toml 的 pr
 
 - `bun test`（`scripts/check.sh web`／CI）經 `web/bunfig.toml` 的 preload 把 `node:test` 對到 `bun:test`：bun 1.3.14 內建的 node:test 墊片在一條 async 測試失敗後會讓之後每個檔都報 `test() inside another test()`（#426）。測試用到新的 node:test API 時要補進 `web/test/node-test-shim.ts`。
 - 測試不要用固定毫秒等非同步結果（負載高就假紅，#426）：等條件成立——假 fetch 由測試手動放行、逾時由注入的 signal 手動 abort，只用 `setTimeout(r, 0)` 清一輪 macrotask。
+- 同一 Bun process 內的 DOM 測試檔會依序取得 happy-dom lease，上一檔 teardown 完成並釋放後，下一檔才開始測試，避免共用的 global window 在 callback 執行時被拆除。teardown 會在 happy-dom 還存在時收束 2 秒內到期的 timeout callback 及其 Promise 後續；未清 interval 或短 timer 超過 2 秒仍未收束，會以測試名稱與排程堆疊讓當檔測試失敗。無論成功或失敗都會解除 DOM 並清掉剩餘 timer；較長 timeout（例如網路逾時與 Blob URL 清理）不阻塞 teardown，並在 teardown 前取消，避免 callback 跑進下一個測試檔。
 
 - `vite.config.ts` 把 `/api`、`/hook` 轉 http、`/ws` 轉 ws，**`changeOrigin: true` 必要**（daemon 檢查 `Host`）；`server.host: true` 讓手機／LAN 連得到。proxy 把 Host／Origin 改成 daemon 自己的位址，所以不管用 IP、`.ts.net` 還是 `localhost` 連 5173，daemon 的 Host／Origin 檢查（含 `allow_lan` 的名稱白名單，API.md §0）都看到 loopback、不會 403；也因此 5173 自己才是擋 DNS rebinding 的那道：`server.allowedHosts`（`src/lib/devHosts.ts`，只放 IP／localhost／`agm`／`.ts.net`）擋一般 HTTP，proxy 的 WebSocket upgrade 不經過它，`/ws` 的 `bypass` 用同一份名單補上。`.env*`、`/@fs/` 越界、`../` 路徑 vite 預設就擋（fs.strict／fs.deny），ui-token 在 web 根目錄之外取不到。
 - 有 AGM 的機器上 5173 由看門狗維護、只跟 `origin/main`（SPEC §18.1）；驗自己未提交的改動用自己的 port。

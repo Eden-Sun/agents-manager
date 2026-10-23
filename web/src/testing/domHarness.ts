@@ -17,6 +17,7 @@ const originalFetch = globalThis.fetch
 // 2. 共用的 store／mock 在檔案結束時還有 `setTimeout` 在等（例如 mock 的 60ms 延遲）：timer 被清掉、promise 永遠不 resolve，
 //    `singleFlight(refreshState)` 就永遠卡在那一趟，下一個檔案的 `refreshState()` 全部跟著卡死。
 // 所以一律用原生的：timer 不隨 window 消失。
+// DOM 測試中的 timer 使用原生計時器（不隨 happy-dom window 消失），但 teardown 前必須收束，不可讓 callback 跑進下一個測試。
 const nativeTimers = {
   queueMicrotask: globalThis.queueMicrotask,
   setTimeout: globalThis.setTimeout,
@@ -24,16 +25,180 @@ const nativeTimers = {
   setInterval: globalThis.setInterval,
   clearInterval: globalThis.clearInterval,
 }
+const monotonicNow = globalThis.performance.now.bind(globalThis.performance)
+
+interface PendingDomTimer {
+  kind: 'timeout' | 'interval'
+  timeout: number
+  dueAt: number
+  testName: string
+  stack: string
+}
+const trackedDomTimeouts = new Map<unknown, PendingDomTimer>()
+const trackedDomIntervals = new Map<unknown, PendingDomTimer>()
+const DOM_TIMER_DRAIN_TIMEOUT_MS = 2000
+let domLeaseTail: Promise<void> = Promise.resolve()
+let releaseDomLease: (() => void) | null = null
+
+function trackedSetTimeout(handler: TimerHandler, timeout?: number, ...args: unknown[]): ReturnType<typeof setTimeout> {
+  const ms = typeof timeout === 'number' && Number.isFinite(timeout) ? Math.max(0, timeout) : 0
+  const stack = new Error().stack ?? ''
+  let id: ReturnType<typeof setTimeout>
+  id = nativeTimers.setTimeout.call(globalThis, () => {
+    trackedDomTimeouts.delete(id)
+    if (typeof handler === 'function') {
+      ;(handler as (...a: unknown[]) => void)(...args)
+    } else if (typeof handler === 'string') {
+      throw new TypeError('字串形式的 setTimeout handler 不支援於 DOM 測試 harness')
+    }
+  }, ms)
+  trackedDomTimeouts.set(id, {
+    kind: 'timeout',
+    timeout: ms,
+    dueAt: monotonicNow() + ms,
+    testName: currentTestScope()?.name ?? '<測試 hook／模組初始化>',
+    stack,
+  })
+  return id
+}
+
+function trackedClearTimeout(id?: ReturnType<typeof setTimeout>): void {
+  if (id !== undefined) trackedDomTimeouts.delete(id)
+  nativeTimers.clearTimeout.call(globalThis, id)
+}
+
+function trackedSetInterval(handler: TimerHandler, timeout?: number, ...args: unknown[]): ReturnType<typeof setInterval> {
+  const ms = typeof timeout === 'number' && Number.isFinite(timeout) ? Math.max(0, timeout) : 0
+  const stack = new Error().stack ?? ''
+  let id: ReturnType<typeof setInterval>
+  id = nativeTimers.setInterval.call(globalThis, () => {
+    if (typeof handler === 'function') {
+      ;(handler as (...a: unknown[]) => void)(...args)
+    } else if (typeof handler === 'string') {
+      throw new TypeError('字串形式的 setInterval handler 不支援於 DOM 測試 harness')
+    }
+  }, ms)
+  trackedDomIntervals.set(id, {
+    kind: 'interval',
+    timeout: ms,
+    dueAt: monotonicNow() + ms,
+    testName: currentTestScope()?.name ?? '<測試 hook／模組初始化>',
+    stack,
+  })
+  return id
+}
+
+function trackedClearInterval(id?: ReturnType<typeof setInterval>): void {
+  if (id !== undefined) trackedDomIntervals.delete(id)
+  nativeTimers.clearInterval.call(globalThis, id)
+}
+
+function pendingTimers(): PendingDomTimer[] {
+  return [...trackedDomTimeouts.values(), ...trackedDomIntervals.values()]
+}
+
+function pendingTimerError(reason: string): Error {
+  const details = pendingTimers().map((timer) =>
+    `- ${timer.kind}（${timer.timeout}ms），測試「${timer.testName}」\n${timer.stack}`,
+  )
+  return new Error(`${reason}\n未收束的 DOM timer：\n${details.join('\n')}`)
+}
+
+function clearPendingDomTimers(): void {
+  for (const id of trackedDomTimeouts.keys()) {
+    nativeTimers.clearTimeout.call(globalThis, id as ReturnType<typeof setTimeout>)
+  }
+  trackedDomTimeouts.clear()
+  for (const id of trackedDomIntervals.keys()) {
+    nativeTimers.clearInterval.call(globalThis, id as ReturnType<typeof setInterval>)
+  }
+  trackedDomIntervals.clear()
+}
+
+/** 等待已排定的 timeout 與其 microtask 後續；無法收束時以來源測試及呼叫堆疊失敗。 */
+async function drainDomTimers(): Promise<void> {
+  const deadline = monotonicNow() + DOM_TIMER_DRAIN_TIMEOUT_MS
+  while (true) {
+    if (trackedDomIntervals.size > 0) {
+      throw pendingTimerError('DOM 測試結束時仍有未清除的 interval')
+    }
+    while ([...trackedDomTimeouts.values()].some((timer) => timer.timeout <= DOM_TIMER_DRAIN_TIMEOUT_MS)) {
+      const pending = [...trackedDomTimeouts.values()].filter((timer) => timer.timeout <= DOM_TIMER_DRAIN_TIMEOUT_MS)
+      const remaining = deadline - monotonicNow()
+      if (remaining <= 0) {
+        throw pendingTimerError(`DOM timer 超過 ${DOM_TIMER_DRAIN_TIMEOUT_MS}ms 仍未收束`)
+      }
+      const nextDueAt = Math.min(...pending.map((timer) => timer.dueAt))
+      if (nextDueAt > deadline) {
+        throw pendingTimerError(`DOM timer 超過 ${DOM_TIMER_DRAIN_TIMEOUT_MS}ms 仍未到期`)
+      }
+      const delay = Math.min(Math.max(0, nextDueAt - monotonicNow()), remaining)
+      await new Promise<void>((resolve) => nativeTimers.setTimeout.call(globalThis, resolve, delay))
+    }
+
+    // 讓 timeout callback 排下的 Promise continuation 有機會再排出 timer；如有，回到上方繼續收束。
+    await new Promise<void>((resolve) => nativeTimers.setTimeout.call(globalThis, resolve, 0))
+    if (!([...trackedDomTimeouts.values()].some((timer) => timer.timeout <= DOM_TIMER_DRAIN_TIMEOUT_MS)) && trackedDomIntervals.size === 0) return
+  }
+}
+
 const originalWebSocket = (globalThis as { WebSocket?: unknown }).WebSocket
 const originalXhr = (globalThis as { XMLHttpRequest?: unknown }).XMLHttpRequest
 
-/** 註冊全域 DOM（已經註冊就不動）。fetch 換成不碰網路的空回應，`fakeApi` 可以再換。 */
-export function setupDom(): void {
-  if (GlobalRegistrator.isRegistered) return
-  GlobalRegistrator.register({ url: 'http://localhost:5173' })
-  Object.assign(globalThis, nativeTimers)
+/** 查詢目前尚未觸發的 DOM timer（除錯或守門斷言用）。 */
+export function pendingDomTimers(): PendingDomTimer[] {
+  return pendingTimers()
+}
+
+/** 安裝一個 happy-dom global；呼叫時必須持有 DOM test lease。 */
+function registerDom(): void {
+  if (!GlobalRegistrator.isRegistered) GlobalRegistrator.register({ url: 'http://localhost:5173' })
+  Object.assign(globalThis, {
+    ...nativeTimers,
+    setTimeout: trackedSetTimeout,
+    clearTimeout: trackedClearTimeout,
+    setInterval: trackedSetInterval,
+    clearInterval: trackedClearInterval,
+  })
+  const windowTimers = globalThis.window === globalThis
+    ? {
+        setTimeout: trackedSetTimeout,
+        clearTimeout: trackedClearTimeout,
+        setInterval: trackedSetInterval,
+        clearInterval: trackedClearInterval,
+      }
+    : {
+        // Happy-dom's `window` is separate from globalThis. Delegate dynamically so a test that replaces
+        // global timers with a manual clock also controls timers scheduled through `window`.
+        setTimeout: (...args: Parameters<typeof setTimeout>) => globalThis.setTimeout(...args),
+        clearTimeout: (...args: Parameters<typeof clearTimeout>) => globalThis.clearTimeout(...args),
+        setInterval: (...args: Parameters<typeof setInterval>) => globalThis.setInterval(...args),
+        clearInterval: (...args: Parameters<typeof clearInterval>) => globalThis.clearInterval(...args),
+      }
+  Object.assign(globalThis.window, {
+    setTimeout: windowTimers.setTimeout as unknown as Window['setTimeout'],
+    clearTimeout: windowTimers.clearTimeout as unknown as Window['clearTimeout'],
+    setInterval: windowTimers.setInterval as unknown as Window['setInterval'],
+    clearInterval: windowTimers.clearInterval as unknown as Window['clearInterval'],
+  })
   globalThis.fetch = (async () => new Response('{}', { status: 200 })) as typeof fetch
   ;(globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true
+}
+
+/** 註冊全域 DOM（已經註冊就沿用）；同一 process 的 DOM 測試檔共用 global，必須持有互斥 lease。 */
+export async function setupDom(): Promise<void> {
+  const previous = domLeaseTail
+  let release!: () => void
+  domLeaseTail = new Promise<void>((resolve) => { release = resolve })
+  await previous
+  releaseDomLease = release
+  try {
+    registerDom()
+  } catch (error) {
+    releaseDomLease = null
+    release()
+    throw error
+  }
 }
 
 /** `MockTransport` 的最小介面（`request`／`upload`）。 */
@@ -183,16 +348,40 @@ export async function imeEnter(el: Element, how: 'composing' | 'keycode229' = 'c
 
 /** 拆掉全域 DOM、還原 fetch／WebSocket／XHR，讓後面不碰 DOM 的測試檔回到原來的環境。 */
 export async function teardownDom(): Promise<void> {
-  if (!GlobalRegistrator.isRegistered) return
-  await GlobalRegistrator.unregister()
-  globalThis.fetch = originalFetch
-  ;(globalThis as { WebSocket?: unknown }).WebSocket = originalWebSocket
-  ;(globalThis as { XMLHttpRequest?: unknown }).XMLHttpRequest = originalXhr
-  ;(globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = false
+  if (!releaseDomLease) return
+
+  let cleanupError: unknown
+  let hasCleanupError = false
+  try {
+    // 先把還沒卸載的元件樹卸掉，避免在拆 window 時 unmount 觸發 DOM 操作衝突。
+    // drain 留在檔案 teardown 邊界，避免每條測試的 afterEach 把測試刻意保留的 timer 當成洩漏。
+    await unmountAll()
+    await drainDomTimers()
+  } catch (error) {
+    cleanupError = error
+    hasCleanupError = true
+  } finally {
+    // 長逾時不阻塞 teardown；成功或失敗都取消剩餘計時器，避免 callback 跑進下一個測試檔。
+    clearPendingDomTimers()
+    try {
+      await GlobalRegistrator.unregister()
+    } finally {
+      Object.assign(globalThis, nativeTimers)
+      globalThis.fetch = originalFetch
+      ;(globalThis as { WebSocket?: unknown }).WebSocket = originalWebSocket
+      ;(globalThis as { XMLHttpRequest?: unknown }).XMLHttpRequest = originalXhr
+      ;(globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = false
+      const release = releaseDomLease
+      releaseDomLease = null
+      release?.()
+    }
+  }
+
+  if (hasCleanupError) throw cleanupError
 }
 
 // `react-dom/client` 在載入時就看有沒有 `window`：要在有 DOM 的時候第一次載入。
-setupDom()
+registerDom()
 const React = await import('react')
 const { createRoot } = await import('react-dom/client')
 

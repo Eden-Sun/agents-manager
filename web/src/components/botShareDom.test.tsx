@@ -24,8 +24,8 @@ afterEach(async () => {
 })
 // 預設當成 https（剪貼簿可用）；非 secure context 的行為由專門那條測試覆寫。要在 setupDom 之後設：
 // 整套一起跑時前一個測試檔 teardown 掉了 window，這裡才註冊新的（#1765：模組載入時設在舊的 window 上）。
-before(() => {
-  setupDom()
+before(async () => {
+  await setupDom()
   Object.defineProperty(window, 'isSecureContext', { configurable: true, value: true })
 })
 after(async () => {

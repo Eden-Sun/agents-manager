@@ -107,7 +107,7 @@ it('#755 happy-dom 重建後仍接收別的分頁 storage 事件', async () => {
   })
   await unmountAll()
   await teardownDom()
-  setupDom()
+  await setupDom()
 
   await open()
   await otherTabWrites({ [STRIP_KEY]: Date.now() + 3_600_000 })

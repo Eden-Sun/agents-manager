@@ -6,7 +6,10 @@ import { useStore } from '../store/store'
 import { ProjectSchedules } from './ProjectSchedules'
 
 before(setupDom)
-after(teardownDom)
+after(async () => {
+  for (const notice of useStore.getState().notices) useStore.getState().dismiss(notice.id)
+  await teardownDom()
+})
 afterEach(unmountAll)
 beforeEach(() => {
   useStore.setState({

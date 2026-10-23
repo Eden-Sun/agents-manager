@@ -11,8 +11,8 @@ const { resetStoreForTest, useStore } = await import('../store/store.ts')
 
 // 元件送鍵後固定等 STEP（260ms）讓畫面反應；rig 的畫面是立刻換好的，不必睡過去。
 let fast: ReturnType<typeof skipTimerDelays>
-before(() => {
-  setupDom()
+before(async () => {
+  await setupDom()
   fast = skipTimerDelays([260])
 })
 afterEach(unmountAll)

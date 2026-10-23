@@ -433,7 +433,7 @@ React 前端 (Vite) ◄── REST + WebSocket ──► Rust daemon (axum) ◄�
 
 ### 3.2 前端
 
-Vite + React + TypeScript + Zustand，只做 daemon 狀態的投影；正式版 rust-embed 進 daemon。真正的 modal 共用 `useDialogFocus`；對話框根節點設 `tabIndex={-1}`，點擊框內非可聚焦內容時焦點仍留在對話框，Esc 可依事件 target 判斷堆疊歸屬；負 tabindex 不會進 Tab 循環。多分頁問卷的最後一次交卷只有在成功讀取終端並觀測到離開 Submit 頁後才回成功；確認期間的終端讀取失敗會重試，若仍無法確認就顯示結果不明。blocked 選單按鍵失敗會顯示一次通知與面板提示，按鍵佇列丟棄其餘待送鍵。約定見 `FRONTEND.md`，取捨見 `UI-DECISIONS.md`。
+Vite + React + TypeScript + Zustand，只做 daemon 狀態的投影；正式版 rust-embed 進 daemon。真正的 modal 共用 `useDialogFocus`；對話框根節點設 `tabIndex={-1}`，點擊框內非可聚焦內容時焦點仍留在對話框，Esc 可依事件 target 判斷堆疊歸屬；負 tabindex 不會進 Tab 循環。多分頁問卷的最後一次交卷只有在成功讀取終端並觀測到離開 Submit 頁後才回成功；確認期間的終端讀取失敗會重試，若仍無法確認就顯示結果不明。blocked 選單按鍵失敗會顯示一次通知與面板提示，按鍵佇列丟棄其餘待送鍵。DOM 測試 harness 以 lease 串行化同一 Bun process 的 DOM 測試檔，上一檔 teardown 完成後下一檔才開始；teardown 時於 happy-dom 尚存在期間收束 2 秒內到期的 timeout callback 與其 microtask 後續。未清 interval 或短 timer 2 秒內未收束時，會以來源測試與排程堆疊讓該檔測試失敗；較長 timeout 不阻塞 teardown，會在拆 DOM 前取消所有剩餘 timer。約定見 `FRONTEND.md`，取捨見 `UI-DECISIONS.md`。
 
 ## 4. 回覆擷取
 

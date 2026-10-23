@@ -23,8 +23,8 @@ const realFetch = globalThis.fetch
 const realCreate = URL.createObjectURL
 const realRevoke = URL.revokeObjectURL
 
-before(() => {
-  setupDom()
+before(async () => {
+  await setupDom()
   globalThis.fetch = ((input: string) => {
     const url = String(input)
     if (url.includes('/local-image')) {
@@ -51,6 +51,9 @@ before(() => {
 
 afterEach(async () => {
   await unmountAll()
+  // 這組測試會刻意留下尚未回應的圖片 fetch；元件卸載後拒絕它們，讓 transport 清掉 30 秒逾時計時器。
+  for (const call of localCalls) call.fail()
+  await settle()
   localCalls.length = 0
   revoked.length = 0
 })

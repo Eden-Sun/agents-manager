@@ -12,8 +12,8 @@ import { useTapCopy } from './useTapCopy'
 const copies: string[] = []
 let realExecCommand: typeof document.execCommand
 
-before(() => {
-  setupDom()
+before(async () => {
+  await setupDom()
   realExecCommand = document.execCommand
   document.execCommand = ((command: string) => {
     copies.push(command)

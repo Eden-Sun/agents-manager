@@ -13,8 +13,8 @@ const VIEWPORT = 1600
 let originalMatchMedia: typeof window.matchMedia
 let originalInnerWidth: number
 
-before(() => {
-  setupDom()
+before(async () => {
+  await setupDom()
   originalMatchMedia = window.matchMedia
   originalInnerWidth = window.innerWidth
 })

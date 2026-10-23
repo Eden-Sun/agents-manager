@@ -14,8 +14,8 @@ import { ScheduleEditor } from './ScheduleEditor'
 afterEach(unmountAll)
 // 時區下拉約 445 個 <option>，在 happy-dom 裡每次開／重繪編輯器要 ~0.2 秒；短清單仍含測試用的 Asia/Taipei。
 let tzList: ReturnType<typeof shortTimeZoneList>
-before(() => {
-  setupDom()
+before(async () => {
+  await setupDom()
   tzList = shortTimeZoneList()
 })
 after(async () => {

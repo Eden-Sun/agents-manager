@@ -9,11 +9,13 @@ import { resetStoreForTest, useStore } from '../store/store'
 import type { Bot } from '../api/types'
 import { BotSettingsPanel } from './BotSettingsPanel'
 
-// App.tsx 載入時就讀 document.title：前一個測試檔 teardownDom 之後沒有 DOM，所以先 setupDom 再動態載入（shard 平行跑會輪到）。
-setupDom()
-const { Notices } = await import('../App')
+// App.tsx 載入時就讀 document.title：取得 DOM lease 後才載入。
+let noticesComponent: typeof import('../App').Notices | undefined
 
-before(setupDom)
+before(async () => {
+  await setupDom()
+  noticesComponent = (await import('../App')).Notices
+})
 afterEach(async () => {
   await unmountAll()
 })
@@ -32,6 +34,11 @@ function Harness() {
 }
 
 const text = () => document.body.textContent ?? ''
+function NoticesForTest() {
+  const Notices = noticesComponent
+  if (!Notices) throw new Error('Notices 元件尚未載入')
+  return <Notices />
+}
 const pointerDown = (el: Element) =>
   act(() => {
     el.dispatchEvent(new PointerEvent('pointerdown', { bubbles: true, clientX: 10, clientY: 10, pointerType: 'mouse', button: 0, pointerId: 1 }))
@@ -55,7 +62,7 @@ test('按通知的 ✕：設定卡留著', async () => {
   await mount(
     <>
       <Harness />
-      <Notices />
+      <NoticesForTest />
     </>,
   )
   act(() => useStore.getState().notify('info', 'hello'))
@@ -70,7 +77,7 @@ test('有未儲存變更時按通知：不跳「放棄未儲存的變更？」',
   await mount(
     <>
       <Harness />
-      <Notices />
+      <NoticesForTest />
     </>,
   )
   await typeInto(document.querySelector<HTMLInputElement>('input[type="text"]')!, 'alpha-改')
