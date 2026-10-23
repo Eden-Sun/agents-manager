@@ -32,7 +32,7 @@ AGM 定期交辦：Claude Code 出新版了，請解析這一版有什麼**這�
 
 - 額度：`quota_claude.rs` 讀 `/usage`（2.1.273 起已改吃 `usage_report` 結構化 JSON，舊版退回文字解析）、codex 狀態列、撞上限橫幅。
 - 送達與回合：hook（SessionStart／Stop）、statusLine 回報、打字送達的證據、`--resume`／`--fork-session`／`codex fork`。
-- 隔離與身分：`--settings`、`CLAUDE_CONFIG_DIR`、權限與 bypass、背景 session（`--bg`、`claude agents --json`）。
+- 隔離與身份：`--settings`、`CLAUDE_CONFIG_DIR`、權限與 bypass、背景 session（`--bg`、`claude agents --json`）。
 - 子 agent：`herdr` shim 帶下去的 env、subagent 相關旗標與設定。
 
 回報（就是給使用者的通知，三到五行）：新版版本號、值得用的項目（每項一句：是什麼、對應我們哪個痛點、要改哪個檔）、明確沒用的略過不列、以及你建議的下一步（要不要派人改）。沒有值得用的就一句「本次無」。**不要**在這則交辦裡直接改程式或部署；要改另外走既有的派工與核准流程。

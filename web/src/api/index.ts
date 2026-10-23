@@ -481,7 +481,7 @@ export async function promoteBot(botId: string, name?: string): Promise<PromoteR
 }
 
 /**
- * `resumeNative`：帶 `?resume=native` 接回 DB 記的原生對話（換身分後重啟要接續，SPEC §6.5.2）。
+ * `resumeNative`：帶 `?resume=native` 接回 DB 記的原生對話（換身份後重啟要接續，SPEC §6.5.2）。
  * 接不回時 daemon 回 409 `cannot_resume`——呼叫端（`store.restartBot`）決定要不要改成不帶這個旗標重送。
  */
 export async function restartBot(botId: string, resumeNative?: boolean): Promise<string> {
@@ -1090,7 +1090,7 @@ export async function sendHostShellText(host: string, paneId: string, text: stri
   )
 }
 
-/** daemon 為 claude 身分登入開的 pane 上，從畫面取出的登入進度（#838）；網址只在這個回應裡，不進事件。 */
+/** daemon 為 claude 身份登入開的 pane 上，從畫面取出的登入進度（#838）；網址只在這個回應裡，不進事件。 */
 export interface LoginStatus {
   host: string
   pane_id: string
@@ -1125,7 +1125,7 @@ export async function fetchLoginStatus(host: string, paneId: string): Promise<Lo
 }
 
 export interface LoginCodeResult {
-  /** `failed`＝CLI 說登入失敗（`message`）；`finished`＝CLI 結束了（成功與否看身分列重驗）；`pending`＝還在等 CLI 回應。 */
+  /** `failed`＝CLI 說登入失敗（`message`）；`finished`＝CLI 結束了（成功與否看身份列重驗）；`pending`＝還在等 CLI 回應。 */
   outcome: 'failed' | 'finished' | 'pending'
   message: string | null
 }

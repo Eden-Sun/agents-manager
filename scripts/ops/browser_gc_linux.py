@@ -321,7 +321,7 @@ def run_once(
                 reason = "CDP 連線存在或狀態無法判定"
 
         if reason is None and not _same_process(process, proc_root, uid):
-            reason = "掃描後行程身分已改變"
+            reason = "掃描後行程身份已改變"
 
         if reason is None and _terminate(process, proc_root, uid, send_signal, pid_exists, sleep_fn):
             result.killed_pids.append(process.pid)

@@ -39,7 +39,7 @@ export default {
   '環境設定分類': 'Settings sections',
   '主機': 'Hosts',
   '更新檢查': 'Update check',
-  '身分': 'Identities',
+  '身份': 'Identities',
   '最近刪除': 'Recently deleted',
   'Jev 建議': 'Jev suggestions',
   '顯示': 'Display',

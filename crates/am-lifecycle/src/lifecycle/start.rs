@@ -262,7 +262,7 @@ async fn start_bot_locked_with_host_fence_body(
     // 上一個 run 被外力收掉時還在忙：接回之後補一句續行提示（claude 2.1.281，`resume_nudge`）。要在新 run 寫進去之前讀。
     let nudge = super::resume_nudge::prior_run_ended_busy(app, &bot, &opts).await;
     // 1. INSERT Run before touching herdr (SPEC §6.2.1).
-    // 身分跟著 run 走（issue #238）：pane 用這一刻的身分起來，之後 PATCH 改身分要重啟才生效，額度要記在這個身分上。
+    // 身份跟著 run 走（issue #238）：pane 用這一刻的身份起來，之後 PATCH 改身份要重啟才生效，額度要記在這個身份上。
     let run_id = db::ulid();
     let started_identity = bot.identity.as_deref().map(str::trim).unwrap_or("").to_string();
     // 遠端 run 記下啟動當下所在主機的目標指紋（#1035，#1773）：之後 `?confirm=repoint` 把名字指到別台，舊 run 的 hook 就認得出是上一代。
@@ -368,9 +368,9 @@ impl NativeResumeFailure {
 /// （`no_session_id` 沒有 session，其餘失敗保留實際嘗試的 id）。`include_active`：重啟前查——
 /// 那時現在這一個 run 還沒結束，它的 session 才是要接的那段。
 ///
-/// 換身分（`PATCH /bots/:id` 改 `identity`）後 `bot.identity` 已經是新的，但上一段對話的 jsonl
-/// 還躺在**舊**身分的 `CLAUDE_CONFIG_DIR/projects/…` 下；兩個目錄不是同一份（symlink 除外）時
-/// `--resume` 在新身分下找不到檔案。先把檔案複製過去再放行，複製不了就回退開新對話，不硬失敗
+/// 換身份（`PATCH /bots/:id` 改 `identity`）後 `bot.identity` 已經是新的，但上一段對話的 jsonl
+/// 還躺在**舊**身份的 `CLAUDE_CONFIG_DIR/projects/…` 下；兩個目錄不是同一份（symlink 除外）時
+/// `--resume` 在新身份下找不到檔案。先把檔案複製過去再放行，複製不了就回退開新對話，不硬失敗
 /// （2026-09-17 AGM 手動搶救的兩顆 bot：`resume_session_id` 一直是空的）。
 pub async fn native_resume_plan(
     app: &(impl crate::capabilities::DataDir + crate::capabilities::Db + crate::capabilities::ExePath + crate::hosts::HostInstance + crate::hosts::HostsAccess + IdentityAccess),
@@ -380,7 +380,7 @@ pub async fn native_resume_plan(
     override_session: Option<&str>,
 ) -> LcResult<Result<(String, Vec<String>), NativeResumeFailure>> {
     let last = if let Some(sid) = override_session {
-        // 指名的 session：transcript 路徑盡量從記過這段的 run 帶出來（換身分時要複製），沒有就讓 CLI 自己找。
+        // 指名的 session：transcript 路徑盡量從記過這段的 run 帶出來（換身份時要複製），沒有就讓 CLI 自己找。
         let transcript: Option<String> = sqlx::query_scalar(
             // 第二鍵用 `rowid`（寫入順序），不是 `id`：`started_at` 只到毫秒（`db::now`），
             // 同一顆 bot 快速重啟時兩個 run 會擠進同一毫秒，而 ULID 的亂數段在同一毫秒內不保證遞增
@@ -412,7 +412,7 @@ pub async fn native_resume_plan(
     if session_id.trim().is_empty() {
         return Ok(Err(NativeResumeFailure::without_session("no_session_id")));
     }
-    // 倒回過、之後沒有新回合：先把倒回點補進 transcript（換身分的話在複製之前），`--resume` 才不會接回舊分支（SPEC §6.13）。
+    // 倒回過、之後沒有新回合：先把倒回點補進 transcript（換身份的話在複製之前），`--resume` 才不會接回舊分支（SPEC §6.13）。
     // 重啟前的檢查（`include_active`）那時 CLI 還開著，它結束時會蓋掉，不在那裡補。
     if !include_active && bot.kind == "claude" {
         crate::rewind::anchor::ensure(app, &session_id).await;
@@ -431,7 +431,7 @@ pub async fn native_resume_plan(
         .map_err(|why| NativeResumeFailure::for_session(why, &session_id)))
 }
 
-/// 這個身分實際用的 `CLAUDE_CONFIG_DIR`（沒設、或身分未知都算預設帳號 `~/.claude`）。
+/// 這個身份實際用的 `CLAUDE_CONFIG_DIR`（沒設、或身份未知都算預設帳號 `~/.claude`）。
 pub async fn identity_config_dir(app: &(impl crate::hosts::HostsAccess + IdentityAccess), host: &str, identity: Option<&str>) -> anyhow::Result<String> {
     let fence = app.hosts().fence(host).await.ok_or_else(|| anyhow::anyhow!("unknown host `{host}`"))?;
     identity_config_dir_for_fence(app, host, identity, &fence).await
@@ -456,13 +456,13 @@ pub async fn identity_config_dir_for_fence(
     Ok(dir.unwrap_or_else(|| format!("{home}/.claude")))
 }
 
-/// 把 `transcript` 複製到目前身分的 `projects/<同一個 cwd 目錄名>/` 下，讓 `--resume` 在那個身分
+/// 把 `transcript` 複製到目前身份的 `projects/<同一個 cwd 目錄名>/` 下，讓 `--resume` 在那個身份
 /// 底下找得到。本機與遠端分開實作：遠端主機上舊/新 `projects/` 都在**那台機器**上，是同機複製，
 /// 透過 ssh 執行一段 shell script，不是本機↔遠端搬檔（issue #95：以前只做本機這半，遠端完全跳過，
-/// 換身分後 `--resume` 在遠端主機上一樣找不到檔案，只是要等 CLI 真的跑起來才會發現）。
+/// 換身份後 `--resume` 在遠端主機上一樣找不到檔案，只是要等 CLI 真的跑起來才會發現）。
 async fn stage_cross_identity_transcript(app: &(impl crate::hosts::HostsAccess + IdentityAccess), bot: &db::Bot, host: &str, transcript: &str) -> Result<(), &'static str> {
     // 只有 claude 的 session 檔住在 `<CLAUDE_CONFIG_DIR>/projects/` 底下。codex／grok 的對話檔不歸這個目錄管：
-    // 以前照樣複製，把 codex 的 rollout 整份丟進 `<claude 身分>/projects/<日>/`（資料安全審查）。
+    // 以前照樣複製，把 codex 的 rollout 整份丟進 `<claude 身份>/projects/<日>/`（資料安全審查）。
     if bot.kind != "claude" {
         return Ok(());
     }
@@ -525,16 +525,16 @@ fn stage_cross_identity_transcript_local_fs(
     let staged = match super::transcript_stage::stage_file(src, &dest_dir, fname) {
         Ok(staged) => staged,
         Err(e) => {
-            tracing::warn!(bot = %bot_name, from = %src.display(), to = %dest_dir.display(), error = %e, "identity switch：複製 session 檔到新身分失敗，改開新對話");
+            tracing::warn!(bot = %bot_name, from = %src.display(), to = %dest_dir.display(), error = %e, "identity switch：複製 session 檔到新身份失敗，改開新對話");
             return Err("transcript_missing");
         }
     };
     match &staged {
         super::transcript_stage::Staged::KeptLongerDestination => {
-            tracing::info!(bot = %bot_name, dest = %dest_dir.join(fname).display(), "identity switch：新身分那邊的 session 檔已經比來源長，沿用它不覆蓋");
+            tracing::info!(bot = %bot_name, dest = %dest_dir.join(fname).display(), "identity switch：新身份那邊的 session 檔已經比來源長，沿用它不覆蓋");
         }
         super::transcript_stage::Staged::Diverged { set_aside } => {
-            tracing::warn!(bot = %bot_name, set_aside = %set_aside.display(), "identity switch：新身分那邊的 session 檔跟來源分岔，舊的改名留在旁邊");
+            tracing::warn!(bot = %bot_name, set_aside = %set_aside.display(), "identity switch：新身份那邊的 session 檔跟來源分岔，舊的改名留在旁邊");
         }
         _ => {}
     }
@@ -547,7 +547,7 @@ fn stage_cross_identity_transcript_local_fs(
             }
         }
     }
-    tracing::info!(bot = %bot_name, from = %src.display(), to = %dest_dir.join(fname).display(), "identity switch：session 檔已搬到新身分的 projects 目錄，可以接回對話");
+    tracing::info!(bot = %bot_name, from = %src.display(), to = %dest_dir.join(fname).display(), "identity switch：session 檔已搬到新身份的 projects 目錄，可以接回對話");
     Ok(())
 }
 
@@ -571,7 +571,7 @@ async fn stage_cross_identity_transcript_remote(app: &(impl crate::hosts::HostsA
     let new_dir = match identity_config_dir_for_fence(app, host, bot.identity.as_deref(), &fence).await {
         Ok(dir) => dir,
         Err(e) => {
-            tracing::warn!(bot = %bot.name, host, error = %e, "identity switch：無法確認遠端身分目錄，改開新對話");
+            tracing::warn!(bot = %bot.name, host, error = %e, "identity switch：無法確認遠端身份目錄，改開新對話");
             return Err("transcript_missing");
         }
     };
@@ -596,7 +596,7 @@ async fn stage_cross_identity_transcript_remote(app: &(impl crate::hosts::HostsA
     };
     match parse_stage_output(&out) {
         Ok(()) => {
-            tracing::info!(bot = %bot.name, host, "identity switch：遠端 session 檔已搬到新身分的 projects 目錄，可以接回對話");
+            tracing::info!(bot = %bot.name, host, "identity switch：遠端 session 檔已搬到新身份的 projects 目錄，可以接回對話");
             Ok(())
         }
         Err(why) => {
@@ -606,7 +606,7 @@ async fn stage_cross_identity_transcript_remote(app: &(impl crate::hosts::HostsA
     }
 }
 
-/// 純函式：組出「在同一台遠端主機上把 session 檔從舊身分的 projects/ 搬到新身分」的 shell script。
+/// 純函式：組出「在同一台遠端主機上把 session 檔從舊身份的 projects/ 搬到新身份」的 shell script。
 /// 每個路徑各自 `sh_quote` 過再組合，不把 `cwd_key`／`fname` 未加引號地黏進雙引號字串裡——這兩個
 /// 值來自 session id／專案路徑衍生的目錄名，理論上不含特殊字元，但構造 remote shell 指令本來就該
 /// 每一段都當危險字串處理。`ssh_exec` 只回 stdout（沒有 exit code），靠印出的 `AM_*` 標記讓呼叫端
@@ -659,8 +659,8 @@ am_size() {{
 case "$K" in ''|.|..|*/*|*[[:cntrl:]]*) am_missing;; esac
 case "$N" in ''|.|..|*/*|*[[:cntrl:]]*) am_missing;; esac
 case "$N" in *.jsonl) ;; *) am_missing;; esac
-# 兩個身分共用同一個 projects（一邊是指向另一邊的 symlink；m4p 的 `~/.claude-cc1/projects` → `~/.claude/projects`）：
-# 檔案本來就在新身分讀得到的位置，不用搬。2026-10-13 ops-web 從 cc1 換回 cc0，來源那邊是 symlink，被下面
+# 兩個身份共用同一個 projects（一邊是指向另一邊的 symlink；m4p 的 `~/.claude-cc1/projects` → `~/.claude/projects`）：
+# 檔案本來就在新身份讀得到的位置，不用搬。2026-10-13 ops-web 從 cc1 換回 cc0，來源那邊是 symlink，被下面
 # 「來源不能是 symlink」擋成 AM_MISSING、開了新對話；反方向（目的是 symlink）一直都回 AM_SAME。
 # 只在兩邊解析後是同一個目錄時才放行，而且那個檔本身仍然不能是 symlink——沒有任何東西被複製。
 if [ -d "$OLD" ] && [ -d "$NEW" ]; then
@@ -832,7 +832,7 @@ fn parse_stage_output(out: &str) -> Result<(), &'static str> {
     }
 }
 
-/// 這個身分的 `.claude.json` 所在目錄：設了 `CLAUDE_CONFIG_DIR` 就在裡面；沒設是 `~/.claude.json`（**不是**
+/// 這個身份的 `.claude.json` 所在目錄：設了 `CLAUDE_CONFIG_DIR` 就在裡面；沒設是 `~/.claude.json`（**不是**
 /// `~/.claude/.claude.json`，同 `trust::store_path`）。#1125：以前沒設時算成 `~/.claude`，旗標永遠補不上。
 fn claude_account_file_dir(identity_env: &std::collections::BTreeMap<String, String>, home: &str) -> String {
     identity_env
@@ -862,7 +862,7 @@ pub fn fork_args_by_kind(kind: &str, session_id: &str) -> Result<Vec<String>, &'
 
 /// 這顆 bot 之前從來沒有 run、對話裡也沒有任何 user／assistant 訊息（#1001）。`run_id` 是這次啟動剛插進去的那一列，不算。
 /// #1761：這顆 bot 是 fork 出來的（`fork_ops` 有它），但任何一代都還沒記到自己的 native session——第一代還沒回報就被重啟
-/// （剛 fork 就換身分；遠端 hook 經 spool 晚幾秒才到）。回傳 fork 的來源 session 與來源 bot，讓這次啟動再從來源分一次；
+/// （剛 fork 就換身份；遠端 hook 經 spool 晚幾秒才到）。回傳 fork 的來源 session 與來源 bot，讓這次啟動再從來源分一次；
 /// 第一代沒有回合（有回合就會有 session），重分一次的脈絡跟原本一樣。查不到（舊 DB 沒有這張表）當作不是。
 async fn unsettled_fork(app: &impl Db, bot_id: &str) -> Option<(String, String)> {
     sqlx::query_as::<_, (String, String)>(
@@ -898,14 +898,14 @@ async fn is_first_contact(app: &impl Db, bot: &db::Bot, run_id: &str) -> LcResul
 ///
 /// 這件事一定要在聊天室裡看得見：以前只寫一行 `tracing::info!`，使用者（或 AGM）看到的是
 /// 一顆重啟成功、狀態正常的 bot，實際上脈絡已經悄悄斷了，要等到回覆內容不對勁才會發現
-/// （issue #92：換身分接不回原對話那次，靠人工翻 log 才查到；`resume_mismatch`——hook 回報的
+/// （issue #92：換身份接不回原對話那次，靠人工翻 log 才查到；`resume_mismatch`——hook 回報的
 /// session 跟預期的不是同一個——更隱蔽，CLI 自己開了新對話卻沒有任何錯誤）。同一交易寫入系統訊息與
 /// 對應的 session metadata，前端仍直接顯示一般系統訊息。
 pub async fn context_lost(app: &(impl crate::capabilities::Db + crate::capabilities::Emit + crate::capabilities::BotStatusEmit + StartServices), bot: &db::Bot, why: &str, failed_session: Option<&str>) -> LcResult<()> {
     tracing::warn!(bot = %bot.name, why, failed_session = ?failed_session, "native session continuation unavailable; starting a new conversation");
     let reason = match why {
         "no_session_id" => "沒有記到上一段對話的 session id",
-        "transcript_missing" => "上一段對話的紀錄檔不見了（換身分時可能沒搬過去，或檔案被清掉）",
+        "transcript_missing" => "上一段對話的紀錄檔不見了（換身份時可能沒搬過去，或檔案被清掉）",
         "resume_mismatch" => "接回去之後，實際回報的對話跟原本要接的不是同一個",
         "unsupported_kind" => "這個 CLI 種類不支援接續原生對話",
         other => other,
@@ -1168,7 +1168,7 @@ fn has_profile_arg<'a>(args: impl IntoIterator<Item = &'a String>) -> bool {
     args.into_iter().any(|a| a == "-p" || a == "--profile" || a.starts_with("--profile="))
 }
 
-/// codex 母 bot 那台主機的 CODEX_HOME：pane env 已經合併過身分與 bot 自己的 env（`~` 展開成那台主機的 HOME），有就用；
+/// codex 母 bot 那台主機的 CODEX_HOME：pane env 已經合併過身份與 bot 自己的 env（`~` 展開成那台主機的 HOME），有就用；
 /// 都沒有才退回 `<那台的 HOME>/.codex`。遠端 HOME 讀不到就回 None（不借用 daemon 這台的 HOME）。
 async fn codex_home_dir(app: &impl HostsAccess, project: &db::Project, env: &Value) -> Option<String> {
     if let Some(v) = env.get("CODEX_HOME").and_then(Value::as_str).map(str::trim).filter(|s| !s.is_empty()) {
@@ -1362,7 +1362,7 @@ async fn start_inner_body(
     let injected = injected_args(app, bot, project, &env).await.map_err(up)?;
     let mut args = injected;
     if let Some(ws) = &restricted {
-        // 受限 bot 不吃 bot／身分自訂的 args（那是加 `--dangerously-skip-permissions` 之類旗標的地方）。
+        // 受限 bot 不吃 bot／身份自訂的 args（那是加 `--dangerously-skip-permissions` 之類旗標的地方）。
         let prompt = app.install_restricted_prompt(bot, &host, ws, &env).await.map_err(up)?;
         args.extend(app.restricted_launch_args(&env, std::path::Path::new(&prompt)));
         args.extend(model_args(&effort_checked(app, bot, &project.host).await));
@@ -1380,7 +1380,7 @@ async fn start_inner_body(
         match native_resume_plan(app, bot, &host, false, opts.resume_session.as_deref()).await? {
             Ok(plan) => Some(plan),
             Err(failure) if failure.reason == "no_session_id" && opts.fork_session.is_none() && unsettled_fork(app, &bot.id).await.is_some() => {
-                // #1761：還沒記到自己 session 的 fork（剛 fork 就換身分重啟、遠端 hook 晚到）：再從來源分一次，不開空白新對話。
+                // #1761：還沒記到自己 session 的 fork（剛 fork 就換身份重啟、遠端 hook 晚到）：再從來源分一次，不開空白新對話。
                 let (from, source) = unsettled_fork(app, &bot.id).await.unwrap_or_default();
                 tracing::info!(bot = %bot.name, from = %from, "fork has no session of its own yet; forking again from its source");
                 opts.fork_session = Some(from);
@@ -1412,8 +1412,8 @@ async fn start_inner_body(
         let fork = fork_args_by_kind(&bot.kind, from).map_err(|why| LcError::Bad(format!("cannot fork: {why}")))?;
         if bot.kind == "claude" {
             crate::rewind::anchor::ensure(app, from).await;
-            // 來源那段對話的檔可能還在別的身分底下（來源 bot 改了身分還沒重啟就被 fork）：照接回的做法先複製到這顆 bot 的
-            // 身分（#1124）。只看來源 bot 自己的 run（#1168）：`native_session_id` 是 provider 的 id，別顆 bot 的同 sid 不算。
+            // 來源那段對話的檔可能還在別的身份底下（來源 bot 改了身份還沒重啟就被 fork）：照接回的做法先複製到這顆 bot 的
+            // 身份（#1124）。只看來源 bot 自己的 run（#1168）：`native_session_id` 是 provider 的 id，別顆 bot 的同 sid 不算。
             // 搬不成就不啟動：以前只記 warn 照樣啟動，claude 接不到對話會直接退出，等於假裝 fork 成功。
             let source = opts.fork_source_bot.as_deref().ok_or_else(|| LcError::Bad("cannot fork: 沒有來源 bot".into()))?;
             let transcript: Option<String> = sqlx::query_scalar(
@@ -1425,9 +1425,9 @@ async fn start_inner_body(
             .fetch_optional(app.db())
             .await
             .map_err(up)?;
-            // #1265：沒有記到對話檔的位置（NULL／空字串）就沒有證據證明對話在新身分底下找得到，不能當成「沒有東西要搬」照樣啟動。
+            // #1265：沒有記到對話檔的位置（NULL／空字串）就沒有證據證明對話在新身份底下找得到，不能當成「沒有東西要搬」照樣啟動。
             let Some(t) = transcript.filter(|t| !t.trim().is_empty()) else {
-                return Err(LcError::conflict("no_source_transcript", json!({"session_id": from, "message": "來源對話的檔案位置沒有記下來，無法確認新身分底下找得到這段對話，不啟動。"})));
+                return Err(LcError::conflict("no_source_transcript", json!({"session_id": from, "message": "來源對話的檔案位置沒有記下來，無法確認新身份底下找得到這段對話，不啟動。"})));
             };
             if let Err(why) = stage_cross_identity_transcript(app, bot, &host, &t).await {
                 // `cause` 不能叫 `reason`：conflict() 會用 extra 覆蓋 reason，外層代碼就丟了（#1265）。
@@ -1465,7 +1465,7 @@ async fn start_inner_body(
     let cwd = restricted.as_deref().unwrap_or_else(|| bot_cwd(bot, project));
     // A new dir opens on "trust this project?" with the cursor on *No*: claude quits, codex eats
     // the first message. Record trust first (local, only when not yet trusted).
-    // 遠端也要（#407）：換身分＝換一個從沒信任過的設定目錄，不寫的話每次都停在提示上等人按。
+    // 遠端也要（#407）：換身份＝換一個從沒信任過的設定目錄，不寫的話每次都停在提示上等人按。
     for w in app.pretrust_for_start(bot, &project.host, cwd).await {
         tracing::warn!(bot = %bot.name, cwd, warning = %w, "could not pre-trust the working directory");
     }
@@ -2919,8 +2919,8 @@ mod resume_args_tests {
         assert!(note.contains("接不回"), "{note}");
     }
 
-    /// 這個 bot 自己身分的 `projects/` 底下的 transcript 路徑（檔還沒寫）：身分的 config dir 就是它所在的那一份，
-    /// 所以「換身分複製」判成同一份、不碰測試機器真正的 `~/.claude`。
+    /// 這個 bot 自己身份的 `projects/` 底下的 transcript 路徑（檔還沒寫）：身份的 config dir 就是它所在的那一份，
+    /// 所以「換身份複製」判成同一份、不碰測試機器真正的 `~/.claude`。
     async fn own_transcript(e: &crate::testing::Env, bot: &db::Bot, name: &str) -> std::path::PathBuf {
         let dir = e.dir.join("own-cfg");
         let d = dir.to_str().unwrap().to_string();
@@ -3056,8 +3056,8 @@ mod resume_args_tests {
         assert!(!notes.iter().any(|n| n.contains(CONTEXT_LOST_PREFIX)), "不該說接不回又開了新對話：{notes:?}");
     }
 
-    /// #1124：來源 bot 改了身分還沒重啟就 fork：來源那段對話的檔在舊身分的 `projects/` 底下，fork 出來的 bot 要先把它
-    /// 複製到自己的身分，`--resume <sid> --fork-session` 才找得到（以前直接啟動，claude 報 No conversation found 退出）。
+    /// #1124：來源 bot 改了身份還沒重啟就 fork：來源那段對話的檔在舊身份的 `projects/` 底下，fork 出來的 bot 要先把它
+    /// 複製到自己的身份，`--resume <sid> --fork-session` 才找得到（以前直接啟動，claude 報 No conversation found 退出）。
     #[tokio::test]
     async fn a_fork_stages_the_source_transcript_into_the_forks_identity() {
         let e = env().await;
@@ -3087,11 +3087,11 @@ mod resume_args_tests {
         assert!(fork_run.status_json.is_none(), "a fork has a new session and must not inherit source context");
         assert!(fork_run.resume_session_id.is_none());
         let staged = e.dir.join("own-cfg/projects/-own/sid-src.jsonl");
-        assert_eq!(std::fs::read_to_string(&staged).unwrap(), "{}\n", "來源對話要搬到 fork 出來的身分底下");
+        assert_eq!(std::fs::read_to_string(&staged).unwrap(), "{}\n", "來源對話要搬到 fork 出來的身份底下");
         assert!(started_args(&e).pop().unwrap().windows(3).any(|w| w == ["--resume", "sid-src", "--fork-session"]), "{:?}", started_args(&e));
     }
 
-    /// #1761：剛 fork 就換身分重啟，第一代還沒回報 session（遠端 hook 晚到）：接回原對話時改從 fork 的來源再分一次，
+    /// #1761：剛 fork 就換身份重啟，第一代還沒回報 session（遠端 hook 晚到）：接回原對話時改從 fork 的來源再分一次，
     /// 不寫「接不回」、不開空白新對話；`resume_required` 也不擋。這顆 bot 一旦記到自己的 session 就不再重分。
     #[tokio::test]
     async fn a_fork_restarted_before_its_session_is_known_forks_again_from_the_source() {
@@ -3288,7 +3288,7 @@ mod resume_args_tests {
         stop_bot(&e.app, &pm.id).await.unwrap();
     }
 
-    /// 換身分後重啟要接得回原對話：新舊身分的 `CLAUDE_CONFIG_DIR` 是同一份（symlink）就不用搬檔，
+    /// 換身份後重啟要接得回原對話：新舊身份的 `CLAUDE_CONFIG_DIR` 是同一份（symlink）就不用搬檔，
     /// 不是同一份就要把 jsonl 複製過去。兩顆都用 `native_resume_plan` 直接驗，不用真的啟動一次 CLI。
     mod cross_identity_transcript_tests {
         use super::*;
@@ -3320,7 +3320,7 @@ mod resume_args_tests {
                 .unwrap();
         }
 
-        /// (a) 新身分的 `projects/` 是舊身分那份的 symlink → 不搬檔，直接接得回。
+        /// (a) 新身份的 `projects/` 是舊身份那份的 symlink → 不搬檔，直接接得回。
         #[tokio::test]
         async fn symlinked_projects_dir_needs_no_copy() {
             let e = env().await;
@@ -3329,7 +3329,7 @@ mod resume_args_tests {
             let old_dir = e.dir.join("cc-old");
             let transcript = write_jsonl(&old_dir, "-Users-m4p-project-x", "sid-same");
 
-            // 新身分：自己的目錄下 `projects` 是指到舊身分那份 `projects` 的 symlink（同一份東西）。
+            // 新身份：自己的目錄下 `projects` 是指到舊身份那份 `projects` 的 symlink（同一份東西）。
             let new_dir = e.dir.join("cc-symlinked");
             std::fs::create_dir_all(&new_dir).unwrap();
             std::os::unix::fs::symlink(old_dir.join("projects"), new_dir.join("projects")).unwrap();
@@ -3359,7 +3359,7 @@ mod resume_args_tests {
             assert_eq!(std::fs::read_dir(old_dir.join("projects").join("-Users-m4p-project-x")).unwrap().count(), 1, "沒有多出檔案");
         }
 
-        /// (b) 新舊身分的 `projects/` 是不相干的兩個目錄 → 接回前先把 jsonl 複製過去，複製出的是獨立的檔案。
+        /// (b) 新舊身份的 `projects/` 是不相干的兩個目錄 → 接回前先把 jsonl 複製過去，複製出的是獨立的檔案。
         #[tokio::test]
         async fn different_config_dirs_copy_the_transcript_before_resuming() {
             let e = env().await;
@@ -3390,12 +3390,12 @@ mod resume_args_tests {
             assert!(args.windows(2).any(|w| w == ["--resume", "sid-move"]));
 
             let dest = new_dir.join("projects").join("-Users-m4p-project-y").join("sid-move.jsonl");
-            assert!(dest.exists(), "jsonl 沒有被複製到新身分的 projects 目錄");
+            assert!(dest.exists(), "jsonl 沒有被複製到新身份的 projects 目錄");
             assert_eq!(std::fs::read_to_string(&dest).unwrap(), std::fs::read_to_string(&transcript).unwrap());
             assert_ne!(std::fs::metadata(&dest).unwrap().ino(), std::fs::metadata(&transcript).unwrap().ino(), "應該是獨立複製出的檔案，不是同一個 inode");
         }
 
-        /// 來源檔不見了：不硬擋，退回開新對話（跟原本沒換身分時「transcript_missing」一致）。
+        /// 來源檔不見了：不硬擋，退回開新對話（跟原本沒換身份時「transcript_missing」一致）。
         #[tokio::test]
         async fn missing_source_falls_back_to_a_new_conversation() {
             let e = env().await;
@@ -3423,11 +3423,11 @@ mod resume_args_tests {
             assert_eq!(failure.session_id.as_deref(), Some("sid-gone"), "失敗通知需要綁定本次實際接回的 session");
         }
 
-        // ---- 對抗式審查（資料安全）：以下測的都是「換身分複製 transcript」的失敗與邊界 ----
+        // ---- 對抗式審查（資料安全）：以下測的都是「換身份複製 transcript」的失敗與邊界 ----
 
         use std::os::unix::fs::PermissionsExt;
 
-        /// 把一段 run 記在 DB 裡，回新身分（`cc9`）的 config dir。
+        /// 把一段 run 記在 DB 裡，回新身份（`cc9`）的 config dir。
         async fn seed(e: &crate::testing::Env, bot: &db::Bot, kind: &str, sid: &str, transcript: &std::path::Path) -> std::path::PathBuf {
             let new_dir = e.dir.join(format!("new-{sid}"));
             set_identity_dir(&e.app, "cc9", &new_dir).await;
@@ -3466,7 +3466,7 @@ mod resume_args_tests {
         }
 
         /// codex／grok 的對話檔不在 claude 的 `projects/` 底下，也不歸 `CLAUDE_CONFIG_DIR` 管：以前照樣複製進
-        /// `<claude 身分>/projects/<日>/rollout-….jsonl`，把整段 codex 對話複製到 claude 的目錄裡當垃圾專案。
+        /// `<claude 身份>/projects/<日>/rollout-….jsonl`，把整段 codex 對話複製到 claude 的目錄裡當垃圾專案。
         #[tokio::test]
         async fn a_codex_rollout_is_never_copied_into_a_claude_projects_dir() {
             let e = env().await;
@@ -3480,7 +3480,7 @@ mod resume_args_tests {
         }
 
         /// 來源路徑來自 hook payload 記下的 `transcript_path`：不是 `…/projects/<key>/<sid>.jsonl` 的形狀、或是符號連結
-        /// （指到別的檔），都不能被「換身分」複製到另一個身分的目錄。
+        /// （指到別的檔），都不能被「換身份」複製到另一個身份的目錄。
         #[tokio::test]
         async fn only_a_regular_jsonl_inside_a_projects_dir_is_ever_staged() {
             let e = env().await;
@@ -3540,7 +3540,7 @@ mod resume_args_tests {
             std::fs::create_dir_all(dest.parent().unwrap()).unwrap();
             std::fs::write(&dest, "{\"a\":1}\n{\"b\":2}\n").unwrap();
             plan_of(&e, &bot).await.expect("resumable");
-            assert_eq!(std::fs::read_to_string(&dest).unwrap(), "{\"a\":1}\n{\"b\":2}\n", "新身分那邊多出來的回合被蓋掉了");
+            assert_eq!(std::fs::read_to_string(&dest).unwrap(), "{\"a\":1}\n{\"b\":2}\n", "新身份那邊多出來的回合被蓋掉了");
         }
 
         /// 兩邊各自長出不同的內容（不是前綴關係）：照 run 記的來源為準，但被換掉的那份留在旁邊，不是直接消失。
@@ -3581,7 +3581,7 @@ mod resume_args_tests {
         }
     }
 
-    /// issue #95：換身分後 transcript 只搬本機，遠端主機的對話接不回來。這裡測遠端那條路：純函式
+    /// issue #95：換身份後 transcript 只搬本機，遠端主機的對話接不回來。這裡測遠端那條路：純函式
     /// 部分（組 script、解析輸出）直接驗內容；連線失敗時的 fail-closed 用一個刻意連不上的假 host
     /// 驗證（沒有可重用的 live-SSH 測試環境，這是能不碰任何真實遠端主機驗到的最大範圍）。
     mod remote_cross_identity_transcript_tests {
@@ -3594,7 +3594,7 @@ mod resume_args_tests {
         /// `cp ... ||`）活在產生出來的 shell 語法裡——只驗「文字裡有沒有出現某個標記」測不到
         /// 那些守衛是不是真的接對了地方（q4queue／is5859 今晚踩到同一類問題：trigger 測得到欄位
         /// 變化，測不到 WHERE 子句擋不擋得住）。這裡直接把腳本丟給本機 `/bin/sh` 跑：語法跟
-        /// `ssh_exec` 遠端執行的是同一顆直譯器，用本機暫存目錄冒充「舊／新身分的 projects/」，
+        /// `ssh_exec` 遠端執行的是同一顆直譯器，用本機暫存目錄冒充「舊／新身份的 projects/」，
         /// 不連任何真實遠端主機。
         fn run_script_locally(script: &str) -> String {
             let out = std::process::Command::new("/bin/sh").arg("-c").arg(script).output().expect("run script locally");
@@ -3761,7 +3761,7 @@ esac
             let out = String::from_utf8_lossy(&out.stdout).into_owned();
             assert!(out.contains("AM_STAGED"), "BSD stat 的 /dev/fd 裝置編號不同也要搬得過去：{out}");
             assert_eq!(std::fs::read_to_string(new.join("k/sid.jsonl")).unwrap(), "{\"a\":1}\n");
-            // 同一個 projects（console-rpa 的情形：身分沒換）回 AM_SAME。
+            // 同一個 projects（console-rpa 的情形：身份沒換）回 AM_SAME。
             let same = remote_stage_script(&old.to_string_lossy(), &old.to_string_lossy(), "k", "sid.jsonl", None);
             let path = format!("{}:{}", bsd_stat_dir().display(), std::env::var("PATH").unwrap_or_default());
             let out = std::process::Command::new("/bin/sh").arg("-c").arg(&same).env("PATH", path).output().unwrap();
@@ -4185,7 +4185,7 @@ mod identity_login_gate_tests {
         sqlx::query("UPDATE bots SET identity='cc-lock' WHERE id=?").bind(&bot.id).execute(e.app.db()).await.unwrap();
         identity_with_recheck_answer(&e.app, &e.dir, "cc-lock", false).await;
 
-        let err = start_bot(&e.app, &bot.id).await.expect_err("身分確認未登入：不能啟動");
+        let err = start_bot(&e.app, &bot.id).await.expect_err("身份確認未登入：不能啟動");
         let body = conflict(err);
         assert_eq!(body["reason"], "identity_not_logged_in");
         assert_eq!(body["identity"], "cc-lock");
@@ -4822,7 +4822,7 @@ mod idle_restart_tests {
         }
     }
 
-    /// 重啟時 stop 成功、start 在前置檢查就失敗（這裡是身分在這台主機不存在）：剛停掉的 run 不能留成
+    /// 重啟時 stop 成功、start 在前置檢查就失敗（這裡是身份在這台主機不存在）：剛停掉的 run 不能留成
     /// `stopped`——那代表「使用者要它停」，incident 探針就永遠不替這顆 autostart bot 開 `bot_stopped`
     /// （review 2026-09-16 c1 L3）。使用者自己 stop 的照舊是 `stopped`。
     #[tokio::test]
@@ -4831,7 +4831,7 @@ mod idle_restart_tests {
         let app = env.app.clone();
         let (bot_id, run_id) = bot_with_run(&env, "user", "idle").await;
         sqlx::query("UPDATE bots SET identity='nope-not-on-this-host', autostart=1 WHERE id=?").bind(&bot_id).execute(app.db()).await.unwrap();
-        let err = restart_bot(&app, &bot_id).await.expect_err("身分不在這台主機：start 一定失敗");
+        let err = restart_bot(&app, &bot_id).await.expect_err("身份不在這台主機：start 一定失敗");
         assert!(matches!(err, LcError::Conflict(_)), "{err:?}");
         let state: String = sqlx::query_scalar("SELECT state FROM runs WHERE id=?").bind(&run_id).fetch_one(app.db()).await.unwrap();
         assert_eq!(state, "exited", "重啟沒開回來，不是使用者停的");
@@ -5013,7 +5013,7 @@ mod run_state_commit_tests {
         assert_eq!(live_runs(&app, &bot.id).await, 1);
     }
 
-    /// 同驗收 1，走重啟（換身分、`?resume=native`、一鍵重啟）而且 AGM 有一則排著的派工：重啟中不撤（#106），但對帳把新 run
+    /// 同驗收 1，走重啟（換身份、`?resume=native`、一鍵重啟）而且 AGM 有一則排著的派工：重啟中不撤（#106），但對帳把新 run
     /// 收成 `running` 不會叫 flush（#152 在 start_send 補過同一個洞），它起來時的 idle 邊又早在 `starting` 就過了——要自己等它
     /// 收斂再叫，不然那一則要等 30 分鐘的排隊保險絲把它撤掉、交辦停在 blocked。
     #[tokio::test]
@@ -5264,7 +5264,7 @@ mod retire_context_lost_tests {
         assert_eq!(active_notice_sessions(&app, &bot.id).await, vec![None]);
 
         retire_context_lost(&app, &bot.id, "sess-A").await;
-        assert_eq!(notes(&app, &conv).await.len(), 1, "無法證明身分的通知保守保留");
+        assert_eq!(notes(&app, &conv).await.len(), 1, "無法證明身份的通知保守保留");
     }
 
     /// issue #852: 跨 session 接回不能誤撤其他 session 仍屬實的警告。
@@ -5368,7 +5368,7 @@ mod retire_context_lost_tests {
     }
 }
 
-/// agy 的 resume：`--conversation=<id>` 單一 argv，不用 `-c`；接不回要在聊天室看得見（本機、單一身分的第一版）。
+/// agy 的 resume：`--conversation=<id>` 單一 argv，不用 `-c`；接不回要在聊天室看得見（本機、單一身份的第一版）。
 #[cfg(all(test, feature = "daemon-test-harness"))]
 mod agy_resume_tests {
     use super::*;
@@ -5545,7 +5545,7 @@ mod agy_resume_tests {
 mod account_file_tests {
     use std::collections::BTreeMap;
 
-    /// #1125：身分沒設 `CLAUDE_CONFIG_DIR` 時，`.claude.json` 在家目錄（不是 `~/.claude/`）；設了就在那個目錄裡。
+    /// #1125：身份沒設 `CLAUDE_CONFIG_DIR` 時，`.claude.json` 在家目錄（不是 `~/.claude/`）；設了就在那個目錄裡。
     #[test]
     fn the_account_file_of_an_identity_without_a_config_dir_is_in_home() {
         let none = BTreeMap::new();

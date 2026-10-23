@@ -3619,7 +3619,7 @@ button.model-tag:hover:not(:disabled) {
 /* 手機額度：chip 寫窗口剩多少，明細在 sheet。 */
 
 @media (width <= 640px) {
-  /* 一顆 chip 只能代表目前 bot 的 kind，改成標題列下獨立一列，所有身分橫捲。 */
+  /* 一顆 chip 只能代表目前 bot 的 kind，改成標題列下獨立一列，所有身份橫捲。 */
 
   .main-head {
     flex-wrap: wrap;
@@ -3822,7 +3822,7 @@ button.model-tag:hover:not(:disabled) {
   }
 }
 
-/* 母 bot 的身分徽章不再描琥珀色（2026-09-18 使用者：「cc2 不要有 border」）：
+/* 母 bot 的身份徽章不再描琥珀色（2026-09-18 使用者：「cc2 不要有 border」）：
    那圈框看起來像另一種狀態，真正要說的是後面那個小字＝子 bot 用的帳號。 */
 .identity-diverged .identity-badge {
   border-color: transparent;

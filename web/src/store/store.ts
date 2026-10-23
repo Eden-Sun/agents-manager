@@ -575,7 +575,7 @@ export interface StoreState {
   dismissComposerDraft: (botId: string) => void
   /**
    * 「被登出」提示關掉過的記錄：`host/identity` → 那一次登出的識別（`lib/loginPrompt`）。只存這一頁的記憶體：
-   * 關掉是「這個畫面先別吵我」，不是跨裝置的事實；重整或換一台裝置會再看到（身分真的還登出著的話）。不用 localStorage、也不存 daemon。
+   * 關掉是「這個畫面先別吵我」，不是跨裝置的事實；重整或換一台裝置會再看到（身份真的還登出著的話）。不用 localStorage、也不存 daemon。
    */
   loginPromptDismissed: Record<string, string>
   dismissLoginPrompt: (host: string, identity: string, episode: string) => void
@@ -604,7 +604,7 @@ export interface StoreState {
   /** `null`＝沒送出或失敗（原因已跳通知）。 */
   patchBot: (botId: string, input: PatchBotInput) => Promise<PatchBotOutcome | null>
   patchProject: (projectId: string, input: PatchProjectInput) => Promise<boolean>
-  /** `resumeNative`：換身分後重啟要接回原對話（`?resume=native`），接不回自動退回不帶旗標重送一次。 */
+  /** `resumeNative`：換身份後重啟要接回原對話（`?resume=native`），接不回自動退回不帶旗標重送一次。 */
   restartBot: (botId: string, resumeNative?: boolean) => Promise<boolean>
   /** SPEC §6.9：閒置的 claude bot 全部 exit + resume；忙的跳過。 */
   restartIdleBots: () => Promise<void>
@@ -792,7 +792,7 @@ function errText(e: unknown): string {
 }
 
 /**
- * 明確指定的 identity 確認沒登入（GH #83）：daemon 的 409 已經把身分／主機／怎麼登入寫成人話放在
+ * 明確指定的 identity 確認沒登入（GH #83）：daemon 的 409 已經把身份／主機／怎麼登入寫成人話放在
  * `hint`，直接顯示它，不要漏成原始的 `identity_not_logged_in` 代碼。
  */
 function startErrText(e: unknown): string {
@@ -1044,7 +1044,7 @@ export const useStore = create<StoreState>((set, get) => {
     void get().loadQuota()
     void get().loadMem()
     void draftSync.load().catch(() => {})
-    // 安全網：daemon 不重啟也可能在執行中清掉某個額度 key（例如收掉 kind 不符的身分），WS 不會說。
+    // 安全網：daemon 不重啟也可能在執行中清掉某個額度 key（例如收掉 kind 不符的身份），WS 不會說。
     // 每 5 分鐘整份換一次，最慢 5 分鐘內消失；GET /api/quota 很便宜。
     if (!quotaSweep) quotaSweep = setInterval(() => void get().loadQuota(), QUOTA_SWEEP_MS)
   },
@@ -1987,7 +1987,7 @@ export const useStore = create<StoreState>((set, get) => {
     const key = `add-bot:${projectId}:${input.name}`
     if (get().busy[key]) return null
     set((st) => ({ busy: { ...st.busy, [key]: true } }))
-    // 冪等鍵（#352）：同一個動作（快速新增：專案＋kind＋身分，名字只是提示）失敗後重試沿用同一個鍵，成功才作廢。
+    // 冪等鍵（#352）：同一個動作（快速新增：專案＋kind＋身份，名字只是提示）失敗後重試沿用同一個鍵，成功才作廢。
     const reqKey = input.name_auto ? `add:${projectId}:${input.kind}:${input.identity ?? ''}` : `add:${projectId}:${input.name}`
     try {
       const { id, name, remapped_model: remapped } = await api.createBot(projectId, { ...input, client_request_id: createRequestId(reqKey) })
@@ -2141,7 +2141,7 @@ export const useStore = create<StoreState>((set, get) => {
   },
 
   // 一律接回原對話（2026-10-02 使用者：console-rpa 換身分後按 ⟳ 重啟，起了全新的 session、整個失憶）。
-  // 以前只有設定面板換身分時才帶；⟳、單顆更新重啟、改模型後的重啟都開新對話。接不回才退回開新對話（下面）。
+  // 以前只有設定面板換身份時才帶；⟳、單顆更新重啟、改模型後的重啟都開新對話。接不回才退回開新對話（下面）。
   async restartBot(botId, resumeNative = true) {
     let ok = false
     await guarded(set, get, `restart:${botId}`, async () => {
@@ -3089,7 +3089,7 @@ function connectSocket(set: SetFn, get: GetFn) {
         void get().loadQuota()
         // 草稿也整份重拉：斷線期間別的瀏覽器改的、被刪的都在這裡補上，本機還沒送出的接著送。
         void draftSync.load().catch(() => {})
-        // 身分停用只靠事件更新；第一次連上由 `refreshState` 抓，重連要整份重抓（斷線期間的事件不一定補得回來）。
+        // 身份停用只靠事件更新；第一次連上由 `refreshState` 抓，重連要整份重抓（斷線期間的事件不一定補得回來）。
         if (openedBefore) void get().loadIdentityPrefs()
         // 上游更新也一樣：斷線期間 daemon 推的 `upstream_update` 可能漏掉（#1340）。
         if (openedBefore) reloadUpstreamUpdates(set, get)
@@ -4073,7 +4073,7 @@ export function adjacentBotId(
  * 一個 bot 身上「可以被搜到」的全部文字。
  *
  * 搜尋要能用你**記得的任何一件事**找到它——不只是名字。實務上你會記得的是「那個在 pt 上
- * 跑 opus 的」「那個 reviewer」「那個標題寫著資料夾選擇的」，所以專案、主機、kind、身分、
+ * 跑 opus 的」「那個 reviewer」「那個標題寫著資料夾選擇的」，所以專案、主機、kind、身份、
  * 模型、人設、agent 目前的標題全都算進去。
  */
 export function botSearchText(state: StoreState, bot: Bot): string {
@@ -4200,12 +4200,12 @@ export function toolsOfHost(state: StoreState, host: string): ToolMap {
 const SHELL_IDENTITY_NAMES = ['cc0', 'cc1', 'cc2', 'cc3', 'cc4', 'cc5', 'cc6']
 
 /**
- * 這台主機能用的身分，**跟 daemon `tools::merge_identities` 同一條優先序**（SPEC §16.2），同名前面的贏：
+ * 這台主機能用的身份，**跟 daemon `tools::merge_identities` 同一條優先序**（SPEC §16.2），同名前面的贏：
  * ① config 明寫這一台的 → ② 本機才有：沒寫 host 的 config → ③ 那台自己的 shell `ccN`
  * → ④ 遠端才有：沒寫 host 的 config（讓位給那台同名的；名字是 cc0…cc6 時要等那台偵測過才給）。
  *
  * 以前前端是「沒寫 host＝只有本機」，daemon 改成「所有主機都適用」之後（dca3c4c），遠端的 bot 在
- * daemon 那邊拿得到身分，選單與額度條卻看不到它。
+ * daemon 那邊拿得到身份，選單與額度條卻看不到它。
  */
 export function identitiesOfHost(all: Identity[], status: IdentityStatusMap, host = LOCAL_HOST): Identity[] {
   const want = host || LOCAL_HOST
@@ -4221,7 +4221,7 @@ export function identitiesOfHost(all: Identity[], status: IdentityStatusMap, hos
     push({ name: st.name, kind: st.kind, env: st.config_dir ? { CLAUDE_CONFIG_DIR: st.config_dir } : {}, args: [] })
   }
   if (want !== LOCAL_HOST) {
-    // 那台的身分狀態還沒到＝alias 還沒偵測過（daemon 的 `shell: None`）。
+    // 那台的身份狀態還沒到＝alias 還沒偵測過（daemon 的 `shell: None`）。
     const detected = Object.keys(status).length > 0
     for (const i of all) {
       if (!hostless(i)) continue
@@ -4233,7 +4233,7 @@ export function identitiesOfHost(all: Identity[], status: IdentityStatusMap, hos
 }
 
 /**
- * 停用的身份不出現在**任何**地方：額度條、快速新增、身份選單、側欄的身分計數（使用者 2026-09-16）。
+ * 停用的身份不出現在**任何**地方：額度條、快速新增、身份選單、側欄的身份計數（使用者 2026-09-16）。
  * 唯一的例外是環境設定那一頁自己——不然沒有地方可以把它按回來。
  */
 export function enabledIdentities(disabled: string[], host: string, list: Identity[]): Identity[] {
@@ -4242,7 +4242,7 @@ export function enabledIdentities(disabled: string[], host: string, list: Identi
 }
 
 /**
- * 參與「額度落點」（`quotaLookup`，誰認領裸 key）的身分清單：那台主機的全集扣掉停用的。
+ * 參與「額度落點」（`quotaLookup`，誰認領裸 key）的身份清單：那台主機的全集扣掉停用的。
  * 頂端額度條與側欄**都**走這一支——以前頂端先濾停用、側欄沒濾，停用 cc0 之後頂端把裸 key 給了
  * `main` 畫紅燈，側欄的 `main` 卻查 `claude:main` 查不到、不反灰（第二輪 review M1）。
  */

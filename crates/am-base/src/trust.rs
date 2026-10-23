@@ -22,10 +22,10 @@ use crate::hosts::HostsAccess;
 
 pub const CLAUDE_KEY: &str = "hasTrustDialogAccepted";
 
-/// 預先信任工作目錄需要從 `App` 拿的外部事實（`App` 在 `app_ports_p3` 實作）：主機表，以及某台主機上某個身分的環境變數
+/// 預先信任工作目錄需要從 `App` 拿的外部事實（`App` 在 `app_ports_p3` 實作）：主機表，以及某台主機上某個身份的環境變數
 /// （`[[identities]]` 加上那台 shell 偵測到的 `ccN`，SPEC §16）。
 pub trait TrustEnv: HostsAccess + 'static {
-    /// `host` 上名叫 `name` 的身分的 env（沒有這個身分＝`None`）。
+    /// `host` 上名叫 `name` 的身份的 env（沒有這個身份＝`None`）。
     fn identity_env(app: &Arc<Self>, host: &str, name: &str) -> impl std::future::Future<Output = Option<BTreeMap<String, String>>> + Send;
 }
 

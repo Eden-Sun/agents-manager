@@ -1,4 +1,4 @@
-/** `useStableCallback`：身分不變，但呼叫時永遠跑最新一次 render 的閉包（不能拿到過期的 state）。 */
+/** `useStableCallback`：身份不變，但呼叫時永遠跑最新一次 render 的閉包（不能拿到過期的 state）。 */
 import test, { afterEach, before, after } from 'node:test'
 import assert from 'node:assert/strict'
 import { act, setupDom, teardownDom, unmountAll } from '../testing/domHarness'
@@ -8,7 +8,7 @@ afterEach(unmountAll)
 before(setupDom)
 after(teardownDom)
 
-test('函式身分不變，呼叫的是最新一次 render 的閉包', async () => {
+test('函式身份不變，呼叫的是最新一次 render 的閉包', async () => {
   const seen: Array<(x: number) => number> = []
   function Probe({ n }: { n: number }) {
     const fn = useStableCallback((x: number) => x + n)

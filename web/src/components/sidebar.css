@@ -787,7 +787,7 @@ p.project-quota-hidden {
   }
 }
 
-/* 子 bot 用別的帳號：母 bot 的身分徽章照常，後面掛一個更小的字＝子 bot 用的帳號（2026-09-18 使用者）。 */
+/* 子 bot 用別的帳號：母 bot 的身份徽章照常，後面掛一個更小的字＝子 bot 用的帳號（2026-09-18 使用者）。 */
 
 .identity-diverged {
   display: inline-flex;
@@ -797,7 +797,7 @@ p.project-quota-hidden {
 }
 
 .identity-diverged-mark {
-  /* 比身分徽章小一號：它是附註，不是第二個身分（2026-09-18 使用者：「讓字更小」）。 */
+  /* 比身份徽章小一號：它是附註，不是第二個身份（2026-09-18 使用者：「讓字更小」）。 */
   font-size: 9px;
   font-weight: 650;
   font-family: var(--font-mono);
@@ -829,7 +829,7 @@ p.project-quota-hidden {
 
 /* `.compact.compact`：main 的 styles.css 比這支晚載入，同權重的舊規則會蓋過來，所以多一級。
    子 agent 精簡列（2026-10-04 使用者：「改用緊湊的方式表示這些資訊」→「身分在 kind 下就好了」）：
-   身分用小字放在 kind 圖示正下方（`.kind-identity`），模型標籤一行、強度縮寫（ModelTag 的 `short`）。 */
+   身份用小字放在 kind 圖示正下方（`.kind-identity`），模型標籤一行、強度縮寫（ModelTag 的 `short`）。 */
 .bot-row.compact.compact .bot-kind-wrap {
   flex-direction: column;
   align-items: center;
@@ -853,7 +853,7 @@ p.project-quota-hidden {
   color: var(--text-dim);
 }
 
-/* kind 18px＋身分 9px 要塞進 32px 列高：中段上下留白從 5px 收到 2px（更新記號仍凸得出去）。 */
+/* kind 18px＋身份 9px 要塞進 32px 列高：中段上下留白從 5px 收到 2px（更新記號仍凸得出去）。 */
 .bot-row.compact.compact .bot-main {
   padding-top: 2px;
   padding-bottom: 2px;

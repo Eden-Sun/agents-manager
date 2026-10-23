@@ -131,7 +131,7 @@ pub async fn note_user_interrupt_of(app: &impl LcHost, bot: &db::Bot, run: &db::
     );
 }
 
-/// 一則 `StopFailure` 自己說得出來的身分。
+/// 一則 `StopFailure` 自己說得出來的身份。
 #[derive(Debug, Clone, Copy, Default)]
 pub struct FailureEvidence<'a> {
     pub session_id: Option<&'a str>,

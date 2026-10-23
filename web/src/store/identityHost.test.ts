@@ -1,4 +1,4 @@
-/** 身分是每台一份（SPEC §16.2）：沒寫 host 的只適用本機，不能遮蔽遠端同名的 `ccN`。 */
+/** 身份是每台一份（SPEC §16.2）：沒寫 host 的只適用本機，不能遮蔽遠端同名的 `ccN`。 */
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import { identitiesOfHost } from './store'
@@ -47,8 +47,8 @@ test('明寫 host 的只在那一台生效，而且蓋過那台的 shell 同名'
   assert.deepEqual(identitiesOfHost(rows, {}, 'local'), [], '別台的不會出現在本機')
 })
 
-/** daemon dca3c4c：沒寫 host 的 config 身分**所有主機**都適用，只讓位給那台同名的（`tools::merge_identities`）。 */
-test('沒寫 host 的身分遠端也拿得到，但讓位給那台同名的 shell ccN', () => {
+/** daemon dca3c4c：沒寫 host 的 config 身份**所有主機**都適用，只讓位給那台同名的（`tools::merge_identities`）。 */
+test('沒寫 host 的身份遠端也拿得到，但讓位給那台同名的 shell ccN', () => {
   const main: Identity = { name: 'main', host: null, kind: 'claude', env: {}, args: [] }
   const list = identitiesOfHost([configured(null, '/home/me/.claude-cc1'), main], shell('/home/m4p/.claude-ccompany'), 'm4p')
   assert.deepEqual(list.map((i) => i.name), ['cc1', 'main'], '遠端 shell 的 cc1 先、沒寫 host 的 main 也在')

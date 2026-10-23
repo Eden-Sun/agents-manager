@@ -66,7 +66,7 @@ export function BlockedDraft({
 
   /**
    * 預載，`round` 變了就重跑。同一份問卷只准跑一份：面板與全畫面視窗（及 StrictMode）會重複掛載，兩份同時送導覽鍵會互相插隊，
-   * 所以掛在 module 層（`lib/draftPreload`），以 bot + 問卷身分為 key 共用結果。
+   * 所以掛在 module 層（`lib/draftPreload`），以 bot + 問卷身份為 key 共用結果。
    */
   useEffect(() => {
     let alive = true

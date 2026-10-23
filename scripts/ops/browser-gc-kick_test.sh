@@ -289,23 +289,23 @@ check    "lsof 權限不足：log 說無法判定" "keep headless pid 1102（por
 exists   "lsof 權限不足：profile 還在" "$TMPD/am-lsof-fail"
 teardown
 
-# ── #1305：TERM 之後到 KILL 之前，PID 可能已被別的行程取用；身分（啟動時間＋命令列）變了就不送 KILL。
+# ── #1305：TERM 之後到 KILL 之前，PID 可能已被別的行程取用；身份（啟動時間＋命令列）變了就不送 KILL。
 setup
 mkprofile "$TMPD/am-reuse"
 chrome 1201 1 "10:00" 9701 "$TMPD/am-reuse"; touch "$FIX/alive.1201"
 echo "Mon Oct 11 10:05:00 2026 /usr/bin/sleep 999" > "$FIX/reuse.1201"   # TERM 時 PID 被換成無關的行程
 run >/dev/null
 check    "有送 TERM" "kill -TERM 1201" "$FIX/kills.log"
-check_no "身分變了（PID 被回收）：不送 KILL 給無關的行程" "kill -KILL 1201" "$FIX/kills.log"
-check    "log 說身分改變、不送 KILL" "pid 1201 已不是原來的行程" "$LOG"
+check_no "身份變了（PID 被回收）：不送 KILL 給無關的行程" "kill -KILL 1201" "$FIX/kills.log"
+check    "log 說身份改變、不送 KILL" "pid 1201 已不是原來的行程" "$LOG"
 teardown
 setup
 mkprofile "$TMPD/am-noid"
-chrome 1202 1 "10:00" 9702 "$TMPD/am-noid"; rm "$FIX/fp.1202"; touch "$FIX/alive.1202"   # ps 讀不到身分
+chrome 1202 1 "10:00" 9702 "$TMPD/am-noid"; rm "$FIX/fp.1202"; touch "$FIX/alive.1202"   # ps 讀不到身份
 run >/dev/null
-check_no "讀不到行程身分：不送任何訊號（fail closed）" "kill -" "$FIX/kills.log"
-check    "讀不到身分：log 保留" "keep headless pid 1202（讀不到行程身分" "$LOG"
-exists   "讀不到身分：profile 還在" "$TMPD/am-noid"
+check_no "讀不到行程身份：不送任何訊號（fail closed）" "kill -" "$FIX/kills.log"
+check    "讀不到身份：log 保留" "keep headless pid 1202（讀不到行程身份" "$LOG"
+exists   "讀不到身份：profile 還在" "$TMPD/am-noid"
 teardown
 
 # ── #1306：使用者自己的 GUI Chrome 用的 profile 也算在用，不能被 rm -rf。

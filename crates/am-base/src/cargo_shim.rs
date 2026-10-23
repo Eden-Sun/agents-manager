@@ -137,7 +137,7 @@ am_remote_cargo_missing() {
 # `http://127.0.0.1:$AM_PORT` 的埠。**本機** bot 的 pane 一定有 `AM_PORT`（daemon 注入）；人工 host shell 沒有，
 # 用文件寫的預設埠（SPEC：daemon 在 127.0.0.1:7788）。
 #
-# 有 bot 身分（`AM_BOT_ID`／`AM_BOT_TOKEN`）卻沒有 `AM_PORT` 的 pane 不能猜預設值（issue #153）：**遠端主機**上的 bot
+# 有 bot 身份（`AM_BOT_ID`／`AM_BOT_TOKEN`）卻沒有 `AM_PORT` 的 pane 不能猜預設值（issue #153）：**遠端主機**上的 bot
 # 就是這樣——遠端沒有 daemon、也不開反向埠（SPEC §11.4），127.0.0.1 是那台機器自己，猜 7788 打到的是不知道什麼東西
 # （那台剛好也跑一份 agents-manager 的話，會把名額要求送給別顆 daemon）。回失敗，由呼叫端明講並直接跑。
 am_build_port() {
@@ -153,7 +153,7 @@ am_build_port() {
 
 # 認證：bot 用自己的 API token（hook disabled 時也注入；舊 pane fallback 到同值的 hook token），人工 host shell 用一般 UI token（讀
 # `~/.config/agents-manager/ui-token`，daemon 的預設位置）。兩個都沒有就回傳空字串，呼叫端看到空字串
-# 就該直接跳過排程——沒有身分，daemon 也不可能認得這個名額。
+# 就該直接跳過排程——沒有身份，daemon 也不可能認得這個名額。
 am_build_auth_header() {
     if [ -n "${AM_BOT_ID:-}" ] || [ -n "${AM_BOT_TOKEN:-}" ] || [ -n "${AM_HOOK_TOKEN:-}" ]; then
         _bot_token=${AM_BOT_TOKEN:-${AM_HOOK_TOKEN:-}}
@@ -212,7 +212,7 @@ am_release_lease() {
 
 # 受管的 bot pane：本機 bot（daemon 注入 `AM_BOT_ID`、bot token、`AM_PORT`）。這種 pane 的 cargo 不能因為排程器出問題就悄悄變成
 # 沒有名額的 cargo（issue #128：daemon 重啟／升級／DB 出問題的瞬間，所有 bot 同時開編就繞過了 `max_concurrent`，
-# 而那正是最需要保護本機的時候）。沒有 bot 身分的人工 host shell 才有「排程器出問題就直接跑」的隱式 bypass；bot 要繞過得明講
+# 而那正是最需要保護本機的時候）。沒有 bot 身份的人工 host shell 才有「排程器出問題就直接跑」的隱式 bypass；bot 要繞過得明講
 # （`AM_CARGO_BYPASS_SCHEDULER=1`），不是由連線錯誤自動取得。遠端 bot pane（沒有 `AM_PORT`）不是：那台機器的編譯本來就不受這台 daemon 管。
 am_is_managed() {
     { [ -n "${AM_BOT_ID:-}" ] || [ -n "${AM_BOT_TOKEN:-}" ] || [ -n "${AM_HOOK_TOKEN:-}" ]; } && [ -n "${AM_PORT:-}" ]
@@ -521,13 +521,13 @@ am_cargo() {
             printf 'agents-manager: 遠端 Bot 沒有 AM_PORT 或 bot credential，不問本機 scheduler，直接跑 cargo\n' >&2
             exec "$_real" "$@"
         fi
-        printf 'agents-manager: 沒有 bot／管理員身分，這次 cargo 不經過排程器，直接跑\n' >&2
+        printf 'agents-manager: 沒有 bot／管理員身份，這次 cargo 不經過排程器，直接跑\n' >&2
         exec "$_real" "$@"
     }
     # 不知道 daemon 在哪（遠端 bot 的 pane）：不猜位址、一通 curl 都不打，明講原因、直接跑。遠端那台的編譯本來就
     # 不受這台 daemon 的名額管；外部編譯（`remote-cargo`）也用不上——那是本機 pane 的事，遠端 pane 沒有 helper 的環境變數。
     _port=$(am_build_port) || {
-        printf 'agents-manager: 這個 pane 有 bot 身分卻沒有 AM_PORT（遠端主機連不到 daemon，或環境變數沒帶進來），不知道 daemon 在哪、不會去猜 127.0.0.1，這次 cargo 不排程，直接跑\n' >&2
+        printf 'agents-manager: 這個 pane 有 bot 身份卻沒有 AM_PORT（遠端主機連不到 daemon，或環境變數沒帶進來），不知道 daemon 在哪、不會去猜 127.0.0.1，這次 cargo 不排程，直接跑\n' >&2
         exec "$_real" "$@"
     }
     # 順手收掉沒人在用的租約狀態目錄（issue #154）：被 SIGKILL 的 shim 沒機會自己清。
@@ -570,10 +570,10 @@ am_cargo() {
         exec "$_real" "$@"
     fi
 
-    # 問不到排程器（連不上、回應看不懂、身分被拒）時：受管的 bot 每 3 秒重試（`AM_SHIM_SCHEDULER_PAUSE` 可調，預設 3）、最多等
+    # 問不到排程器（連不上、回應看不懂、身份被拒）時：受管的 bot 每 3 秒重試（`AM_SHIM_SCHEDULER_PAUSE` 可調，預設 3）、最多等
     # `AM_BUILD_SCHEDULER_WAIT_SECS`（預設 120 秒，daemon 重啟／升級夠了），之後 fail closed（exit 75）——**不自動變成沒有名額的 cargo**
     # （issue #128）；排程器回來了就照常排隊。
-    # 人工 shell（沒有 bot 身分）維持明講的 bypass：直接跑。名額滿了（granted:false）是排程器有在回答，另一條路：一直等到有名額。
+    # 人工 shell（沒有 bot 身份）維持明講的 bypass：直接跑。名額滿了（granted:false）是排程器有在回答，另一條路：一直等到有名額。
     _wait=${AM_BUILD_SCHEDULER_WAIT_SECS:-120}
     case "$_wait" in *[!0-9]* | '') _wait=120 ;; esac
     AM_SHIM_SCHEDULER_PAUSE=${AM_SHIM_SCHEDULER_PAUSE:-3}
@@ -581,7 +581,7 @@ am_cargo() {
     _down_max=$((_wait / 3))
     [ "$_down_max" -ge 1 ] || _down_max=1
     # 等名額途中放棄（Ctrl-C、被砍、呼叫端走了）要把排隊的號碼牌退掉（issue #913）：空 token 的 release＝取消這個 holder 的
-    # waiting 列，沒有這一步它會留到 daemon 的 60 秒 stale 才被收，後面的人有空名額也要空等。要帶跟 acquire 一樣的身分。
+    # waiting 列，沒有這一步它會留到 daemon 的 60 秒 stale 才被收，後面的人有空名額也要空等。要帶跟 acquire 一樣的身份。
     _cancel_wait() {
         if [ -n "${AM_BOT_ID:-}" ]; then
             am_curl_auth -s -m 5 -X POST "${_url}/release" -H "X-AM-Bot-Id: ${AM_BOT_ID}" \
@@ -649,9 +649,9 @@ am_cargo() {
                     sleep "$_retry"
                     continue
                     ;;
-                # 身分被拒不會在幾秒內自己好：不必等滿再說。
+                # 身份被拒不會在幾秒內自己好：不必等滿再說。
                 *'"error":"unauthorized"'*)
-                    _bad="不認得這顆 bot 的身分（unauthorized）"
+                    _bad="不認得這顆 bot 的身份（unauthorized）"
                     _fatal=1
                     ;;
                 # 這個 holder 是別顆 bot 的（issue #460 的守衛）：`<agent 名>:<pid>` 撞到還沒過期的舊列，
@@ -664,7 +664,7 @@ am_cargo() {
             esac
         fi
         if ! am_is_managed; then
-            printf 'agents-manager: build scheduler %s，這次不排程，直接跑（沒有 bot 身分的人工 shell）\n' "$_bad" >&2
+            printf 'agents-manager: build scheduler %s，這次不排程，直接跑（沒有 bot 身份的人工 shell）\n' "$_bad" >&2
             exec "$_real" "$@"
         fi
         _down=$((_down + 1))

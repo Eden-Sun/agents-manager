@@ -119,10 +119,10 @@ async function openNewBotWithKind(kind: string) {
 }
 const hasHint = () => (document.body.textContent ?? '').includes(LOGGED_OUT_HINT)
 
-test('預設帳號沒登入、不指定身分：表單寫出警示，送出鈕仍可按', async () => {
+test('預設帳號沒登入、不指定身份：表單寫出警示，送出鈕仍可按', async () => {
   useStore.setState({ localTools: toolsWithCodex(false) } as never)
   await openNewBotWithKind('codex')
-  assert.ok(hasHint(), '不指定身分而預設帳號沒登入，要寫出提示')
+  assert.ok(hasHint(), '不指定身份而預設帳號沒登入，要寫出提示')
   const submit = [...document.querySelectorAll<HTMLButtonElement>('button')].find((b) => b.textContent?.trim() === '新增並啟動')!
   assert.equal(submit.disabled, false, '只提示、不擋送出')
 })

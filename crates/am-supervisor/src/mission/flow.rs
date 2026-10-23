@@ -368,7 +368,7 @@ impl Flow<'_> {
                 alternatives: vec!["skip_reviewer"],
                 ..Next::assign(
                     "reviewer",
-                    "`mission pick --role reviewer --exclude <執行者身分>` → `assign --mission <id> --role reviewer`；回 no_independent_reviewer 就記 note、直接派驗證者",
+                    "`mission pick --role reviewer --exclude <執行者身份>` → `assign --mission <id> --role reviewer`；回 no_independent_reviewer 就記 note、直接派驗證者",
                 )
             },
             Stage::NeedsVerification => Next {

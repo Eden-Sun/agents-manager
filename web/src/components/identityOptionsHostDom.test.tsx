@@ -40,7 +40,7 @@ test('本機：第一顆照舊', async () => {
   await mount(<IdentityOptions kind="claude" host="local" value="" onChange={() => {}} />)
   const buttons = document.querySelectorAll('[role="radiogroup"] button')
   assert.ok(buttons.length > 0)
-  assert.equal(buttons[0].textContent?.trim(), '不指定身分（本機預設）')
+  assert.equal(buttons[0].textContent?.trim(), '不指定身份（本機預設）')
 })
 
 test('遠端：寫那台主機', async () => {
@@ -53,7 +53,7 @@ test('遠端：寫那台主機', async () => {
   await mount(<IdentityOptions kind="claude" host="m4p" value="" onChange={(v) => { picked = v }} />)
   const buttons = document.querySelectorAll('[role="radiogroup"] button')
   assert.ok(buttons.length > 0)
-  assert.equal(buttons[0].textContent?.trim(), '不指定身分（m4p 的預設帳號）')
+  assert.equal(buttons[0].textContent?.trim(), '不指定身份（m4p 的預設帳號）')
 
   await click(buttons[0])
   assert.equal(picked, '')
@@ -73,12 +73,12 @@ test('身份選項是 radio：選中的那顆 aria-checked=true，其餘 false',
   })
   await mount(<IdentityOptions kind="claude" host="local" value="cc1" onChange={() => {}} />)
   const radios = [...document.querySelectorAll<HTMLButtonElement>('[role="radiogroup"][aria-label="身份"] [role="radio"]')]
-  assert.equal(radios.length, localIdentities.length + 1, '「不指定身分」加上每個身份各一顆')
+  assert.equal(radios.length, localIdentities.length + 1, '「不指定身份」加上每個身份各一顆')
   const checked = radios.filter((b) => b.getAttribute('aria-checked') === 'true').map((b) => b.textContent?.trim())
   assert.deepEqual(checked, ['cc1'])
 })
 
-test('未選任何身份：「不指定身分」那顆是 aria-checked=true', async () => {
+test('未選任何身份：「不指定身份」那顆是 aria-checked=true', async () => {
   useStore.setState({
     identities: localIdentities,
     localIdentityStatus: { work: status('work', true), cc1: status('cc1', true) },
@@ -87,7 +87,7 @@ test('未選任何身份：「不指定身分」那顆是 aria-checked=true', as
   await mount(<IdentityOptions kind="claude" host="local" value="" onChange={() => {}} />)
   const first = document.querySelector<HTMLButtonElement>('[role="radiogroup"][aria-label="身份"] [role="radio"]')
   assert.equal(first?.getAttribute('aria-checked'), 'true')
-  assert.equal(first?.textContent?.trim(), '不指定身分（本機預設）')
+  assert.equal(first?.textContent?.trim(), '不指定身份（本機預設）')
 })
 
 test('未登入的身份：名稱帶狀態，已登入的沒有 aria-label', async () => {

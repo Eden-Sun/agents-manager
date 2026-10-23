@@ -43,7 +43,7 @@ native transport 沒有對等的東西——要嘛請某個活著的 agent sessi
 
 ### cross-session delivery identity（怎麼定位對方）
 
-- **ListAgents 看到的身分是 session 的顯示名稱**，不是 agents-manager 的 `bot_id`。實測
+- **ListAgents 看到的身份是 session 的顯示名稱**，不是 agents-manager 的 `bot_id`。實測
   （見上面「方法論」第 2 點）看到的名字（例如 `wt-is63web-9b`）恰好跟這台機器上那顆 bot 的
   worktree 目錄同名，但那是巧合，不是 agents-manager 設的——`git grep -n '"--name"\|"-n"'`
   daemon/src/lifecycle/start.rs 完全沒有結果：agents-manager 啟動 claude bot 時**從來沒有
@@ -66,7 +66,7 @@ cross-session messages for its user's approval (and may let them expire)」。�
 agents-manager 的 autostart bot 常常跑在 `--dangerously-skip-permissions`（`bypass-permissions`）；
 如果 daemon 或某個 relay agent 用**不同**的 permission mode 發送，訊息就可能卡住甚至消失，
 而且卡住這件事只有本機才有 `[Cross-session delivery notice]` 回報——這對「自動化、不盯著人」
-的派工管線是硬傷：現有 herdr 那條路完全沒有這種「因為身分／模式不同被人類卡住」的中間狀態。
+的派工管線是硬傷：現有 herdr 那條路完全沒有這種「因為身份／模式不同被人類卡住」的中間狀態。
 
 ### remote host / different identity 是否可用
 
@@ -119,7 +119,7 @@ session」（因此 SendMessage 認不認得同一個名字接得回去）**沒�
 | 卡住等人核准 | 沒有這種中間態 | 有（權限模式不同時），且可能過期，現有四個 `delivery` 值裝不下 |
 | 跨機器／跨帳號 | 需要 SSH＋對方也跑 herdr | 原生支援，但完全沒有 ack |
 | 對 agents-manager 的可觀測性 | 全部經過 daemon，寫進 `turns`/`messages`，UI／歷史查得到 | 完全在 daemon 之外，agents-manager 對這個交換一無所知，除非額外教 agent 自己回報 |
-| 需要新增整合工作 | 無（已在用） | 至少要：daemon 傳穩定 `--name`、決定 relay 架構、擴充 `delivery` 的狀態空間（等核准／過期）、驗證 restart 後身分是否延續 |
+| 需要新增整合工作 | 無（已在用） | 至少要：daemon 傳穩定 `--name`、決定 relay 架構、擴充 `delivery` 的狀態空間（等核准／過期）、驗證 restart 後身份是否延續 |
 
 ## 建議
 

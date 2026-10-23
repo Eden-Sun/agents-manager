@@ -566,7 +566,7 @@ mod tests {
         let e = tt::env().await;
         let (bot, _run1) = running_bot(&e, "doomed").await;
         die_at(&e, &bot.id, "restart_after_stop").await;
-        // 之後 start 一定失敗：身分不存在。
+        // 之後 start 一定失敗：身份不存在。
         sqlx::query("UPDATE bots SET identity = 'no-such-identity' WHERE id = ?").bind(&bot.id).execute(&e.app.db).await.unwrap();
 
         let app2 = tt::restart_app(&e).await;
@@ -616,7 +616,7 @@ mod tests {
         let second = drive_once(&app2, &intent_id).await;
         assert!(matches!(second, Outcome::Retry(_)), "沒有別條在補：不能再被當成 InProgress：{second:?}");
 
-        // 環境恢復：拆掉 trigger、身分改回 → 下一輪續做到收尾。
+        // 環境恢復：拆掉 trigger、身份改回 → 下一輪續做到收尾。
         sqlx::query("DROP TRIGGER refuse_pending").execute(&app2.db).await.unwrap();
         sqlx::query("UPDATE bots SET identity = NULL WHERE id = ?").bind(&bot.id).execute(&app2.db).await.unwrap();
         let third = drive_once(&app2, &intent_id).await;

@@ -10,7 +10,7 @@
 # 這份是 repo 裡的原始檔；資料目錄那份（~/.config/agents-manager/ops/herdr-upgrade/）是下次維護窗口前
 # 從這裡複製過去的副本，不要只改副本。
 #
-# daemon API 身分（issue #556）：launchd 跑的是獨立的 **service principal** `herdr-upgrade`，不是使用者、
+# daemon API 身份（issue #556）：launchd 跑的是獨立的 **service principal** `herdr-upgrade`，不是使用者、
 # 也不冒充任何 bot。憑證是 daemon 建的 `<資料目錄>/service-tokens/herdr-upgrade.token`（目錄 0700、檔 0600），
 # 只在 python 程式裡讀進 header，不進 argv（`curl -H` 會出現在 `ps`）、環境變數或 log。能打的路徑由 daemon
 # 的 `service_auth::allows` 限定：唯讀的 capabilities／supervisor/state／panes／supervisor/health，

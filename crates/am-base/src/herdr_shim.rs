@@ -142,7 +142,7 @@ _AM_SPAWN_TIMEOUT_MS=""
 # Rotation raises the matching daemon fence before its descendant snapshot; an unreadable / refused
 # gate means we do not run herdr. The permit remains open until the created pane is registered.
 #
-# 遠端主機上的 bot（有 bot 身分、沒有 `AM_PORT`）不走 fence：遠端沒有 daemon、不開反向埠（SPEC §11.4），
+# 遠端主機上的 bot（有 bot 身份、沒有 `AM_PORT`）不走 fence：遠端沒有 daemon、不開反向埠（SPEC §11.4），
 # daemon 本來就不注入 `AM_PORT`，跟 cargo shim 的 #153 同一條判準。以前這裡把它當成「確認不了」而 fail closed，
 # 遠端 bot 就一顆子 pane／子 agent 都開不出來。遠端子 pane 本來也登記不到 daemon（/relay/pane 一樣要 AM_PORT），
 # fence 在那邊保護不到任何東西。
@@ -308,7 +308,7 @@ am_child_name() {
     printf '%s' "$_full"
 }
 
-# `--identity <名>`（issue #1775）：`$AM_IDENTITIES` 是 daemon 注入的這台身分清單，單行、`;` 分隔，格式
+# `--identity <名>`（issue #1775）：`$AM_IDENTITIES` 是 daemon 注入的這台身份清單，單行、`;` 分隔，格式
 # `<kind>/<名稱>[:KEY=路徑,KEY=路徑…]`（見 lifecycle/pane_identities.rs）。am_identity_find 印出那一筆的 KEY=路徑
 # （沒有就空），找不到回 1；am_identity_names 列出同 kind 的名字給錯誤訊息用。
 am_identity_find() {
@@ -416,7 +416,7 @@ am_agent_start() {
         if [ "$_stop" = 0 ]; then
             case "$_a" in
                 --identity)
-                    [ "$_i" -lt "$_n" ] || { printf 'agents-manager: --identity 後面要接身分名\n' >&2; exit 2; }
+                    [ "$_i" -lt "$_n" ] || { printf 'agents-manager: --identity 後面要接身份名\n' >&2; exit 2; }
                     _idn=$1
                     _idset=1
                     shift
@@ -534,7 +534,7 @@ am_agent_start() {
         esac
         _idkv=$(am_identity_find "$_ik" "$_idn") || {
             _names=$(am_identity_names "$_ik")
-            printf 'agents-manager: 這台沒有 %s 身分 %s；可用：%s\n' "$_ik" "$_idn" "${_names:-（無）}" >&2
+            printf 'agents-manager: 這台沒有 %s 身份 %s；可用：%s\n' "$_ik" "$_idn" "${_names:-（無）}" >&2
             exit 2
         }
     fi
@@ -688,8 +688,8 @@ am_agent_start() {
 # pty 會緩衝這行輸入，pane 還沒起殻也不怕；pane 早有正確值時只是重覆設一次，無害。
 am_reexport_env_before_start() {
     _pane=$1
-    # `--identity` 指定了身分（issue #1775）：$2 是那個身分的 KEY=路徑、$3 是那個 kind 的帳號目錄 key。
-    # 帳號目錄照身分走，母 pane 自己的值不帶過去（見下面）。沒有身分時兩個都是空字串，行為照舊。
+    # `--identity` 指定了身份（issue #1775）：$2 是那個身份的 KEY=路徑、$3 是那個 kind 的帳號目錄 key。
+    # 帳號目錄照身份走，母 pane 自己的值不帶過去（見下面）。沒有身份時兩個都是空字串，行為照舊。
     _acct_kv=$2
     _acct_key=$3
     [ -n "$_pane" ] || return 0
@@ -752,7 +752,7 @@ am_announce_refuse() {
     exit "$1"
 }
 
-# 遠端 bot（有 bot 身分、沒有 `AM_PORT`：遠端不開回 daemon 的埠）打不到 `/relay/announce`，收件方的回音就會被當成
+# 遠端 bot（有 bot 身份、沒有 `AM_PORT`：遠端不開回 daemon 的埠）打不到 `/relay/announce`，收件方的回音就會被當成
 # 使用者打的字（2026-09-30 使用者）。改寫一則報備進自己 bot 目錄的 hook spool，daemon 收 hook 時一起收。
 # 寫不了（沒有目錄、沒有 python3）就算了，照舊直送：標不出來源不是送不出去的理由。
 am_spool_relay() {
@@ -880,7 +880,7 @@ except Exception: sys.exit(1)' 2>/dev/null) || _name=""
         # 「確定沒送到 daemon」與「送了但回覆不明」要分清楚（issue #143）。直送 pane 只有一種情形站得住腳：**連線根本沒建立**
         # （curl 7，daemon 不在），request 一定沒進 daemon。其餘——逾時、空回應、連線被重置、任何非 2xx、看不懂的 2xx——
         # request 可能已經進了 daemon（durable 的 bot_request 可能已經 commit，只是回覆沒收完整）：直送會變成佇列一份、pane 一份，
-        # 而且 401／403 這種身分被拒也不能變成繞過控制面的旁路。這些一律明確失敗（exit 75／77），讓寄件端自己重試。
+        # 而且 401／403 這種身份被拒也不能變成繞過控制面的旁路。這些一律明確失敗（exit 75／77），讓寄件端自己重試。
         if ! command -v curl >/dev/null 2>&1; then
             am_announce_refuse 75 "$_name" "這台機器沒有 curl，問不了 daemon 這句要不要走協調佇列"
         fi
@@ -939,7 +939,7 @@ except Exception: sys.exit(1)' 2>/dev/null) || _name=""
                     esac
                     ;;
                 401 | 403)
-                    am_announce_refuse 77 "$_name" "daemon 不認這顆 bot 的身分（HTTP ${_code}）：$(printf '%s' "$_resp" | cut -c1-200)"
+                    am_announce_refuse 77 "$_name" "daemon 不認這顆 bot 的身份（HTTP ${_code}）：$(printf '%s' "$_resp" | cut -c1-200)"
                     ;;
                 *)
                     am_announce_refuse 75 "$_name" "daemon 回 HTTP ${_code}：$(printf '%s' "$_resp" | cut -c1-200)"
@@ -947,7 +947,7 @@ except Exception: sys.exit(1)' 2>/dev/null) || _name=""
             esac
         fi
     elif [ -n "${AM_BOT_ID:-}" ] && [ -z "${AM_PORT:-}" ]; then
-        # 遠端沒有 daemon 可以解 run→pane；沒有明確 pane 地址的舊呼叫不報備身分。
+        # 遠端沒有 daemon 可以解 run→pane；沒有明確 pane 地址的舊呼叫不報備身份。
         if [ -n "$_to_pane_id" ]; then
             am_spool_relay "$_name" "$_text"
         else

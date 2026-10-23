@@ -2397,7 +2397,7 @@ pub async fn create_approval_superseding(
     supersedes: Option<&str>,
     request_reason: Option<&str>,
 ) -> Result<ApprovalOutcome> {
-    // 沒有 HTTP 身分可驗（測試與舊呼叫端）：照 issue #436 的預設當成自稱。
+    // 沒有 HTTP 身份可驗（測試與舊呼叫端）：照 issue #436 的預設當成自稱。
     create_approval_inner(pool, requester, purpose, scope, target_commit, expires_at, request_id, supersedes, request_reason, true, false, None).await
 }
 
@@ -2455,7 +2455,7 @@ async fn create_approval_inner(
     supersedes: Option<&str>,
     // 申請者寫的理由（`approval request --reason`）。AGM 裁示時看的就是這段。
     request_reason: Option<&str>,
-    // `requester` 只是自稱的（issue #436）：建立時沒有驗過那顆 bot 的身分。
+    // `requester` 只是自稱的（issue #436）：建立時沒有驗過那顆 bot 的身份。
     requester_unverified: bool,
     notify: bool,
     principal: Option<&ApprovalPrincipal>,

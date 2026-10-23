@@ -17,7 +17,7 @@
 | `POST /api/bots/{id}/start?resume=native` | `POST /api/services/herdr-upgrade/resume/{id}`：daemon 固定 native resume，不收其他選項 |
 | `POST /api/bots/{AGM}/prompt`，`relay_from` 填某顆 bot | `POST /api/services/herdr-upgrade/notify`，body 只有 `{"text":"…"}`：daemon 只送協調者、來源固定 daemon |
 
-`scripts/ops/herdr-upgrade_test.sh` 對假 daemon 驗身分標頭與憑證檔檢查，並靜態檢查原始碼沒有退回 UI token 或冒名。
+`scripts/ops/herdr-upgrade_test.sh` 對假 daemon 驗身份標頭與憑證檔檢查，並靜態檢查原始碼沒有退回 UI token 或冒名。
 
 ## 為什麼升級後一定要驗本機網路
 

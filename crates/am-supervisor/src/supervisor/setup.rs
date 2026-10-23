@@ -146,7 +146,7 @@ pub(super) fn shared_agent_md() -> String {
 - 角色由這顆 bot 的 persona 與自己工作目錄的 `runtime.json` 決定；自己的 id 以 `AM_BOT_ID`／`runtime.json` 的 `self_bot_id` 為準。
 - 只讀自己工作目錄的 `runtime.json`、`handoff.md`；不要因為這份指示檔位於另一個角色的目錄就切換過去。
 - daemon 位址讀自己 `runtime.json` 的 `daemon_url`（loopback URL，含實際 port）；不要沿用另一個角色的位址或自行猜 port。
-- 子 agent 不因繼承這份文件取得 AGM 身分或權限，仍只處理 parent 指派的任務。
+- 子 agent 不因繼承這份文件取得 AGM 身份或權限，仍只處理 parent 指派的任務。
 - 先用自己工作目錄的 `bin/agm --help` 核對可用命令；沒列出的不假設存在，也不自行拼 API 繞過。
 - 恢復時先讀自己的 `handoff.md`，再依 `runtime.json` 的 role 查 inbox：patrol 查未結案 assignments；responder 查 `assignments --awaiting-review`，最後對帳即時狀態。
 - 舊 pending 不等於尚未送達，重試前先對帳；管理摘要的權威在資料庫，檔案只是可重建副本。
@@ -187,7 +187,7 @@ fn runtime_json(port: u16, bot_id: &str, responder_id: Option<&str>, data_dir: &
         // deployment cannot be broken by whichever half is upgraded first.
         "bot_id": bot_id,
         // 雙角色（SPEC §18.15）：這個目錄是巡檢的。`bin/agm` 用它決定預設看哪個角色的 inbox、
-        // 回報時以誰的名義；真正的身分驗證靠 pane 環境裡的 bot token，不靠這個字串。
+        // 回報時以誰的名義；真正的身份驗證靠 pane 環境裡的 bot token，不靠這個字串。
         "role": "patrol",
         "self_bot_id": bot_id,
         "data_dir": data_dir,
@@ -425,7 +425,7 @@ mod tests {
         assert!(!md.contains("7799"));
         assert!(md.contains("AM_BOT_ID"));
         assert!(md.contains("runtime.json"));
-        assert!(md.contains("子 agent 不因繼承這份文件取得 AGM 身分或權限"));
+        assert!(md.contains("子 agent 不因繼承這份文件取得 AGM 身份或權限"));
     }
 
     /// ops 腳本測試用的 runtime.json 必須是**真的** `runtime_json()` 寫出來的形狀：上一輪測試自己造了一份

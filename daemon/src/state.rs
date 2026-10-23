@@ -81,7 +81,7 @@ fn is_credential_key(key: &str) -> bool {
     !usage_counter && (key.contains("token") || key.contains("secret"))
 }
 
-/// 這幾個鍵底下的 object 是「名字當 key」的 map（主機名、身分名、kind 名由使用者決定，`secret-lab`、`tokenbox/claude` 都可能）：
+/// 這幾個鍵底下的 object 是「名字當 key」的 map（主機名、身份名、kind 名由使用者決定，`secret-lab`、`tokenbox/claude` 都可能）：
 /// 那一層不拿 key 判斷，只往 value 裡遞迴。
 const NAME_KEYED_PARENTS: [&str; 4] = ["hosts", "identities", "shell_identities", "kinds"];
 
@@ -271,11 +271,11 @@ pub struct App {
     pub background_hook: crate::background_hook::Snapshots,
     /// Per-host serialization for shell opens: the cap check stays exclusive through pane creation and registration.
     pub host_shell_open_locks: Mutex<HashMap<String, Arc<Mutex<()>>>>,
-    /// claude 身分的登入 pane（手機版登入協助，`login_assist.rs`）：`(host, pane_id)` → 帳。只在記憶體。
+    /// claude 身份的登入 pane（手機版登入協助，`login_assist.rs`）：`(host, pane_id)` → 帳。只在記憶體。
     pub login_panes: crate::login_assist::Registry,
-    /// 開啟 claude 身分登入 pane 的短期排他 reservation，完成註冊後轉成 `login_panes` entry。
+    /// 開啟 claude 身份登入 pane 的短期排他 reservation，完成註冊後轉成 `login_panes` entry。
     pub login_reservations: crate::login_assist::Reservations,
-    /// 回合授權失敗記下的「這個身分要重新登入」（`login_prompt.rs`）：`(host, identity)` → 帳。只在記憶體。
+    /// 回合授權失敗記下的「這個身份要重新登入」（`login_prompt.rs`）：`(host, identity)` → 帳。只在記憶體。
     pub login_needed: crate::login_prompt::Registry,
     /// 被 trace 的 pane 打字前的即時複查結果，幾秒內重用（`shell::live_verdict`）。
     pub pane_live: crate::api::shell::LiveCache,
@@ -939,7 +939,7 @@ mod scrub_tests {
         assert_eq!(v, json!({}), "service token collections must not leave in an event");
     }
 
-    /// 名字當 key 的 map：主機／身分／kind 的名字含 token／secret 不能整筆消失，但裡面的憑證欄位照刪。
+    /// 名字當 key 的 map：主機／身份／kind 的名字含 token／secret 不能整筆消失，但裡面的憑證欄位照刪。
     #[test]
     fn names_used_as_map_keys_are_kept_but_their_credential_fields_are_not() {
         let v = scrubbed(json!({"hosts": {"secret-lab": {"connected": true, "access_token": "z"}}}));

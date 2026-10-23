@@ -47,7 +47,7 @@ pub(crate) const COMPOSE_WAIT: std::time::Duration = std::time::Duration::from_s
 /// 快取總量（data URI 的位元組數）。
 const CACHE_MAX: usize = 64 * 1024 * 1024;
 
-/// 引用檔的身分：同一個來源（本機資料夾，或「主機＋遠端資料夾」，兩台同路徑不串）、同一條相對路徑、同一個 inode／大小／mtime 才算同一張。
+/// 引用檔的身份：同一個來源（本機資料夾，或「主機＋遠端資料夾」，兩台同路徑不串）、同一條相對路徑、同一個 inode／大小／mtime 才算同一張。
 #[derive(Clone, PartialEq, Eq, Hash)]
 struct Key {
     scope: String,
@@ -60,7 +60,7 @@ struct Key {
 /// 一張的結果：data URI，或跳過的理由（理由也快取，壞檔不用每次重解）。
 type Embedded = Result<Arc<str>, &'static str>;
 
-/// 引用檔的身分資料（快取鍵用）。
+/// 引用檔的身份資料（快取鍵用）。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct PhotoMeta {
     pub ino: u64,
@@ -188,7 +188,7 @@ pub fn referenced_rels(svg: &[u8]) -> Vec<Vec<String>> {
     rec.wanted.into_inner()
 }
 
-/// 這張照片（依來源＋路徑＋身分）的縮圖結果已在快取裡嗎？命中的不必再從遠端抓。
+/// 這張照片（依來源＋路徑＋身份）的縮圖結果已在快取裡嗎？命中的不必再從遠端抓。
 pub fn is_cached(scope: &str, rel: &[String], meta: &PhotoMeta) -> bool {
     cache_get(&key_of(scope, &rel.join("/"), meta)).is_some()
 }
@@ -516,14 +516,14 @@ fn resolve(src: &dyn PhotoSource, href: &str) -> Embedded {
     Err(why)
 }
 
-/// 查身分（不跟連結）、查快取、不在快取就讀檔縮圖。
+/// 查身份（不跟連結）、查快取、不在快取就讀檔縮圖。
 fn load(src: &dyn PhotoSource, parts: &[&str]) -> Embedded {
     let meta = src.stat(parts)?;
     let key = key_of(&src.scope(), &parts.join("/"), &meta);
     if let Some(hit) = cache_get(&key) {
         return hit;
     }
-    // 只快取跟照片內容綁定的結果。讀取階段的失敗（遠端這一趟沒抓到、單次合計上限、檔案剛好在改）跟這張照片的身分無關：不快取，下次再試（#1393）。
+    // 只快取跟照片內容綁定的結果。讀取階段的失敗（遠端這一趟沒抓到、單次合計上限、檔案剛好在改）跟這張照片的身份無關：不快取，下次再試（#1393）。
     if meta.len > SOURCE_MAX {
         let result = Err("source_too_large");
         cache_put(key, result.clone());
@@ -531,7 +531,7 @@ fn load(src: &dyn PhotoSource, parts: &[&str]) -> Embedded {
     }
     let bytes = match src.read(parts, SOURCE_MAX) {
         Ok(bytes) => bytes,
-        // 永久讀不到（遠端 stat 成功、讀檔被拒）：身分沒變就不會好，負快取，下一次不用再抓（#1434）。其他讀取階段的失敗照舊不快取。
+        // 永久讀不到（遠端 stat 成功、讀檔被拒）：身份沒變就不會好，負快取，下一次不用再抓（#1434）。其他讀取階段的失敗照舊不快取。
         Err("not_found") => {
             let result = Err("not_found");
             cache_put(key, result.clone());
@@ -875,7 +875,7 @@ mod tests {
         }
     }
 
-    /// #1393：讀取階段的失敗（遠端這一趟沒抓到）跟這張照片的身分無關，不能記死：下一次分享頁重新整理就要能嵌進去。
+    /// #1393：讀取階段的失敗（遠端這一趟沒抓到）跟這張照片的身份無關，不能記死：下一次分享頁重新整理就要能嵌進去。
     #[test]
     fn a_read_stage_failure_is_not_cached_and_the_next_attempt_embeds() {
         let ws = format!("/remote/ws-{}", crate::db::ulid());
@@ -936,7 +936,7 @@ mod tests {
         assert_eq!(images(&out), vec![(None, Some("not_found".to_string()))], "第二次直接用負快取");
     }
 
-    /// 防止改過頭：照片內容本身壞掉（不是圖）是這張照片的身分，照樣快取，不用每次重解。
+    /// 防止改過頭：照片內容本身壞掉（不是圖）是這張照片的身份，照樣快取，不用每次重解。
     #[test]
     fn a_bad_image_is_still_cached() {
         let ws = format!("/remote/ws-{}", crate::db::ulid());

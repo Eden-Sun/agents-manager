@@ -25,7 +25,7 @@ pub const WARN: &str = "warn";
 /// 每台主機都該有的工具（claude／codex／grok 是各主機自己決定要不要裝，由 `tools` 回報，不在這裡）。
 pub const REQUIRED_TOOLS: [&str; 6] = ["herdr", "rtk", "zsh", "bun", "jq", "gh"];
 
-/// 每個 claude 身分的設定目錄裡該有的檔案：`(檔名, 嚴重度)`。
+/// 每個 claude 身份的設定目錄裡該有的檔案：`(檔名, 嚴重度)`。
 const CLAUDE_FILES: [(&str, &str); 4] =
     [("settings.json", CRITICAL), ("statusline-command.sh", CRITICAL), ("CLAUDE.md", WARN), ("RTK.md", WARN)];
 /// `settings.json` 該有的鍵（只看有沒有，不比內容：內容是各主機自己的）。
@@ -87,7 +87,7 @@ pub async fn note_failure(app: &impl BaselineEnv, host: &str, err: &anyhow::Erro
 /// 腳本裡的 `MAC_ONLY_PLUGINS` 與這裡同步（`mac_only_plugins_match_the_script` 測試守著）。
 pub const MAC_ONLY_PLUGINS: [&str; 2] = ["imessage", "discord"];
 
-/// 只讀。接在 `PROBE_SH` 後面（用它定義的 `am_abs`）。身分＝`$CLAUDE_CONFIG_DIR`、`~/.claude`、`~/.claude-cc<N>`。
+/// 只讀。接在 `PROBE_SH` 後面（用它定義的 `am_abs`）。身份＝`$CLAUDE_CONFIG_DIR`、`~/.claude`、`~/.claude-cc<N>`。
 pub const BASELINE_SH: &str = r#"
 printf 'AM_BL begin\n'
 MAC_ONLY_PLUGINS="imessage discord"
@@ -140,7 +140,7 @@ bl_features_hooks() {
     END { exit !found }
   ' "$1" && printf 1 || printf 0
 }
-# 同一個目錄只查一次。身分名只認一般字元；路徑不印出來。
+# 同一個目錄只查一次。身份名只認一般字元；路徑不印出來。
 bl_seen="|"
 bl_claude() {
   d=$1
@@ -283,7 +283,7 @@ pub fn evaluate(out: &str) -> Option<Vec<BaselineIssue>> {
     }
     let mac = os_of(out).as_deref() == Some("Darwin");
     let mut issues = Vec::new();
-    // 目前這個 claude 身分的 settings.json 在不在、codex 的 config.toml 在不在：決定要不要看裡面的鍵。
+    // 目前這個 claude 身份的 settings.json 在不在、codex 的 config.toml 在不在：決定要不要看裡面的鍵。
     let mut claude_settings = true;
     let mut codex_config = true;
     for line in out.lines() {
@@ -307,7 +307,7 @@ pub fn evaluate(out: &str) -> Option<Vec<BaselineIssue>> {
                     issues.push(issue(
                         format!("claude.{}.{}", f[2], f[3]),
                         severity_of(&CLAUDE_FILES, f[3]),
-                        format!("claude 身分 {}：缺 {}", f[2], f[3]),
+                        format!("claude 身份 {}：缺 {}", f[2], f[3]),
                     ));
                 }
             }
@@ -317,13 +317,13 @@ pub fn evaluate(out: &str) -> Option<Vec<BaselineIssue>> {
                     issues.push(issue(
                         format!("claude.{}.settings.json:json", f[2]),
                         CRITICAL,
-                        format!("claude 身分 {}：settings.json 不是合法 JSON，裡面有沒有那些鍵看不出來", f[2]),
+                        format!("claude 身份 {}：settings.json 不是合法 JSON，裡面有沒有那些鍵看不出來", f[2]),
                     ));
                 } else if claude_settings && f.get(4).copied() != Some("?") && !present(f.get(4)) {
                     issues.push(issue(
                         format!("claude.{}.settings.json:{}", f[2], f[3]),
                         severity_of(&CLAUDE_KEYS, f[3]),
-                        format!("claude 身分 {}：settings.json 沒有 {}", f[2], f[3]),
+                        format!("claude 身份 {}：settings.json 沒有 {}", f[2], f[3]),
                     ));
                 }
             }
@@ -333,7 +333,7 @@ pub fn evaluate(out: &str) -> Option<Vec<BaselineIssue>> {
                     issues.push(issue(
                         format!("claude.{}.plugin:{}", f[2], f[3]),
                         WARN,
-                        format!("claude 身分 {}：沒有啟用 {} plugin（Mac 專用）", f[2], f[3]),
+                        format!("claude 身份 {}：沒有啟用 {} plugin（Mac 專用）", f[2], f[3]),
                     ));
                 }
             }

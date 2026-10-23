@@ -1,7 +1,7 @@
 //! 遠端檔案原語與傳輸（SPEC §20、remote-share-design §3）。
 //!
 //! 所有遠端檔案動作走同一個模組：POSIX sh 腳本、逐段 `cd -P` 不跟符號連結、
-//! 開檔 `exec 3< "$F"` 後以 `am_same` 與 `am_singlelink` 驗證身分，
+//! 開檔 `exec 3< "$F"` 後以 `am_same` 與 `am_singlelink` 驗證身份，
 //! 輸出使用長度框（`AM_RFS1` 協定）傳回。任何一步對不上或出現不確定一律 fail closed。
 
 use std::collections::HashMap;
@@ -620,7 +620,7 @@ printf 'AM_RFS1\nOK 0\n\nAM_RFS_DONE\n'
     )
 }
 
-/// `race`：測試用注入點，插在身分驗證之後、寫入之前（正式路徑一律是空字串）。
+/// `race`：測試用注入點，插在身份驗證之後、寫入之前（正式路徑一律是空字串）。
 pub fn inbox_write_script(
     workspace: &str,
     stored_name: &str,
@@ -1720,7 +1720,7 @@ impl RemoteSite {
         self.inbox_write_with(stored_name, data, max_bytes, max_files, "").await
     }
 
-    /// 測試用：在身分驗證與寫入之間塞一段 shell（模擬同一個 SSH 使用者的並行攻擊者）。
+    /// 測試用：在身份驗證與寫入之間塞一段 shell（模擬同一個 SSH 使用者的並行攻擊者）。
     #[cfg(test)]
     pub async fn inbox_write_racing(&self, stored_name: &str, data: &[u8], max_bytes: u64, max_files: usize, race: &str) -> Result<(), InboxError> {
         self.inbox_write_with(stored_name, data, max_bytes, max_files, race).await

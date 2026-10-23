@@ -1,8 +1,8 @@
 /**
- * 「這顆 bot／這個身分的額度落在哪一格」只有這一份規則。
+ * 「這顆 bot／這個身份的額度落在哪一格」只有這一份規則。
  *
  * 以前頂端 QuotaStrip 與側欄各寫一套：一套認「名字是 cc0 **或** env 是空的」而且裸 key 有互斥
- * （一個身分認領走就不給第二個），另一套只認字面上的 `cc0`。於是 `[[identities]] name = "main"`、
+ * （一個身份認領走就不給第二個），另一套只認字面上的 `cc0`。於是 `[[identities]] name = "main"`、
  * env 留空（SPEC §16 的合法設定）時，頂端讀裸 `claude` 畫紅燈、側欄查 `claude:main` 查不到而不反灰，
  * 使用者照常派工給已經沒額度的 bot——正是側欄那段註解說要避免的畫面。
  *
@@ -19,7 +19,7 @@ export function weeklyOnlyKind(kind: BotKind): boolean {
   return kind === 'grok'
 }
 
-/** 共用工具預設帳號的身分名。 */
+/** 共用工具預設帳號的身份名。 */
 export const DEFAULT_IDENTITY = 'cc0'
 
 /** 每個 kind 用哪個環境變數指到自己的帳號目錄（daemon `pane_identity::config_dir_var`）。 */
@@ -28,7 +28,7 @@ const HOME_VAR: Partial<Record<BotKind, string>> = { claude: 'CLAUDE_CONFIG_DIR'
 /**
  * 共用預設帳號：它的 statusline 數字落在裸的 `<kind>` key 上。**跟 daemon `quota::identity_shares_default`
  * 同一條**——看 env 裡有沒有**那個 kind 的 home 變數**，不看名字。以前前端是「名字叫 cc0 或 env 整個空」：
- * 只帶 `ANTHROPIC_API_KEY` 的身分 daemon 寫裸 key、前端找分開那格；叫 cc0 卻設了 `CLAUDE_CONFIG_DIR` 的
+ * 只帶 `ANTHROPIC_API_KEY` 的身份 daemon 寫裸 key、前端找分開那格；叫 cc0 卻設了 `CLAUDE_CONFIG_DIR` 的
  * daemon 寫 `claude:cc0`、前端卻去讀裸 key。
  */
 export function sharesBareQuotaKey(idn: Identity): boolean {
@@ -37,10 +37,10 @@ export function sharesBareQuotaKey(idn: Identity): boolean {
 }
 
 /**
- * 裸 key 歸誰。只有一個身分能認領，否則兩個身分會顯示同一組數字。
- * 身分清單還沒到（側欄比 `GET /api/state` 早畫）時保底沿用 `cc0` 這條字面規則。
+ * 裸 key 歸誰。只有一個身份能認領，否則兩個身份會顯示同一組數字。
+ * 身份清單還沒到（側欄比 `GET /api/state` 早畫）時保底沿用 `cc0` 這條字面規則。
  *
- * 不看傳進來的順序：頂端照字母排過、側欄是 config 原順序，兩個都不叫 cc0 的空 env 身分
+ * 不看傳進來的順序：頂端照字母排過、側欄是 config 原順序，兩個都不叫 cc0 的空 env 身份
  * 以前會各挑到不同人（第二輪 review M1）。
  */
 export function bareQuotaOwner(identities: readonly Identity[], kind: BotKind): string | null {
@@ -55,11 +55,11 @@ export function bareQuotaOwner(identities: readonly Identity[], kind: BotKind): 
 /**
  * 落點的 key（不含 host 前綴）。
  *
- * 身分表查得到這個身分時，**照 daemon 同一條規則**（`quota::quota_base_for_host`）決定，不看哪一格碰巧有數字：
- * 共用預設帳號的身分讀裸 key（只給一個主人），有自己 home 變數的讀自己那一格。
- * 以前是「分開那格存在就用它」——daemon 重啟那一秒身分還沒偵測完，cc0 的 statusline 會先寫進 `claude:cc0`，
+ * 身份表查得到這個身份時，**照 daemon 同一條規則**（`quota::quota_base_for_host`）決定，不看哪一格碰巧有數字：
+ * 共用預設帳號的身份讀裸 key（只給一個主人），有自己 home 變數的讀自己那一格。
+ * 以前是「分開那格存在就用它」——daemon 重啟那一秒身份還沒偵測完，cc0 的 statusline 會先寫進 `claude:cc0`，
  * 偵測完之後改寫裸 `claude`，那一格就停在啟動當下、沒有 Fable；頂端一直讀它，Fable 就「又不見了」（2026-09-16 使用者回報）。
- * 身分表還沒到的時候才保底：有自己那一格就用自己的，否則只有裸 key 的主人退回裸 key。
+ * 身份表還沒到的時候才保底：有自己那一格就用自己的，否則只有裸 key 的主人退回裸 key。
  */
 export function quotaBaseKey(
   quota: QuotaMap,
@@ -69,11 +69,11 @@ export function quotaBaseKey(
   identities: readonly Identity[],
 ): string {
   if (!identity) return kind
-  // 別的 kind 的身分（codex bot 身上的 claude `cc1`）不是這個 CLI 的帳號代號：daemon 一律寫裸 kind。
+  // 別的 kind 的身份（codex bot 身上的 claude `cc1`）不是這個 CLI 的帳號代號：daemon 一律寫裸 kind。
   const own = identities.find((i) => i.name === identity)
   if (own && own.kind !== kind) return kind
   const keyed = `${kind}:${identity}`
-  // `bareQuotaOwner` 只會挑共用預設帳號的身分：有自己帳號目錄的永遠落在自己那一格。
+  // `bareQuotaOwner` 只會挑共用預設帳號的身份：有自己帳號目錄的永遠落在自己那一格。
   if (own) return bareQuotaOwner(identities, kind) === identity ? kind : keyed
   if (quota[quotaKey(host, keyed)] != null) return keyed
   const bare = quotaKey(host, kind)

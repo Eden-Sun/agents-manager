@@ -598,7 +598,7 @@ pub enum KillDenied {
 /// `screen_kill` 放行時帶回來的東西：訊號要送給哪些 pid、回報要說釋放多少、以及送之前要比對的起始時間。
 #[derive(Debug)]
 struct Target {
-    /// 要確認身分的那一顆（使用者按的那一列）。
+    /// 要確認身份的那一顆（使用者按的那一列）。
     pid: i32,
     exe: String,
     freed: u64,
@@ -1035,7 +1035,7 @@ mod tests {
     }
 
     /// #526 那顆的行為版：`set` 空著跑真的腳本，兩條路都走一遍——一個訊號都不會送出去
-    /// （硬規則：測試不對真實行程送訊號）。身分用的是**本測試行程自己**的 pid 與起始時間，只讀。
+    /// （硬規則：測試不對真實行程送訊號）。身份用的是**本測試行程自己**的 pid 與起始時間，只讀。
     #[test]
     fn the_kill_script_stops_at_the_check_when_the_pid_changed() {
         let me = std::process::id() as i32;

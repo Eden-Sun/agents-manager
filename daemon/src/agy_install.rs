@@ -6,7 +6,7 @@
 //! （`AGY_CLI_DISABLE_AUTO_UPDATE=true`）、同目錄複製後 `mv` 蓋過 `~/.local/bin/agy`。任何一步失敗都不碰既有的 agy。
 //!
 //! 刻意的邊界：
-//! - 只給使用者按（帶 bot 身分的請求 403，同 `agy/logout`）；指令不接受呼叫端傳入，要裝哪一版只看官方 manifest。
+//! - 只給使用者按（帶 bot 身份的請求 403，同 `agy/logout`）；指令不接受呼叫端傳入，要裝哪一版只看官方 manifest。
 //! - 同一台同時只裝一次：行程內一個集合擋同實例，主機端另有安裝鎖（[`crate::cli_update`] 那套 process-group 鎖、換一條鎖檔）擋隔離實例與重啟後殘留的安裝。
 //! - 裝完重新偵測那台的 CLI（`tools::detect`）：偵測到的版本要等於 manifest 版本，否則回錯（常見原因是 `~/.local/bin` 不在那台的 PATH）。
 //! - 登入不在這裡：agy 沒有 `login` 子命令，由使用者在 host shell 跑 `agy`（額度欄「開 shell 登入」），憑證檔出現後 [`crate::runners::quota_agy::spawn_agy_login_watcher`] 翻成已登入。

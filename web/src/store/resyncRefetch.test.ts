@@ -1,6 +1,6 @@
 /**
  * `resync`／重連之後，只靠 WS 事件維持的資料也要整份重拉：事件漏掉就沒有別的來源會補。
- * 身分停用（`identity_prefs_changed`）以前整個分頁只在第一次 `refreshState` 抓一次。
+ * 身份停用（`identity_prefs_changed`）以前整個分頁只在第一次 `refreshState` 抓一次。
  */
 import test from 'node:test'
 import assert from 'node:assert/strict'
@@ -17,7 +17,7 @@ const bot = (id: string) => ({ id, name: id, project_id: 'p1', kind: 'claude', i
 
 const stateBody = () => ({ daemon_seq: 1, projects: [{ ...project(), bots: [bot('b1')] }], bots: [bot('b1')], runs: [], turns: [] })
 
-test('resync 之後身分停用名單整份重拉：別的分頁停用／恢復的、漏掉的事件都補上', async () => {
+test('resync 之後身份停用名單整份重拉：別的分頁停用／恢復的、漏掉的事件都補上', async () => {
   reset()
   let disabled: { host: string; kind: string; identity: string }[] = []
   routeDaemon((r) => {
@@ -39,7 +39,7 @@ test('resync 之後身分停用名單整份重拉：別的分頁停用／恢復�
   assert.deepEqual(useStore.getState().disabledIdentities, [identityPrefKey('local', 'claude', 'cc1')])
 })
 
-test('第一次讀身分停用名單失敗：之後的快照刷新會再試，不是整個分頁都不再問', async () => {
+test('第一次讀身份停用名單失敗：之後的快照刷新會再試，不是整個分頁都不再問', async () => {
   reset()
   useStore.setState({ disabledIdentities: [] })
   let fail = true

@@ -1,4 +1,4 @@
-/* components/LoginPromptBanner.tsx：身分被登出的主動提示條。每個身分一行；手機窄螢幕文字一行、兩顆鍵一行。 */
+/* components/LoginPromptBanner.tsx：身份被登出的主動提示條。每個身份一行；手機窄螢幕文字一行、兩顆鍵一行。 */
 
 .login-prompt-banner {
   display: flex;

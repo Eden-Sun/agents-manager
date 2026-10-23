@@ -41,7 +41,7 @@ after(async () => {
 
 const it = (name: string, fn: () => Promise<void>) => test(name, { timeout: 30_000 }, fn)
 
-it('codex bot 用 work 身分：只亮 codex:work 那一格', async () => {
+it('codex bot 用 work 身份：只亮 codex:work 那一格', async () => {
   await render(quotaFor('codex', 'codex:work'), [
     { name: 'work', kind: 'codex', env: { CODEX_HOME: '/tmp/x' }, args: [], host: null },
   ], 'work')
@@ -60,7 +60,7 @@ it('codex bot 用預設帳號：只亮裸 codex 那一格', async () => {
   assert.equal(lit[0].querySelector('.quota-identity')?.textContent, 'codex')
 })
 
-it('身分那一格沒有讀數時退回預設帳號那一格', async () => {
+it('身份那一格沒有讀數時退回預設帳號那一格', async () => {
   await render(quotaFor('codex'), [
     { name: 'work', kind: 'codex', env: { CODEX_HOME: '/tmp/x' }, args: [], host: null },
   ], 'work')
@@ -69,7 +69,7 @@ it('身分那一格沒有讀數時退回預設帳號那一格', async () => {
   assert.equal(lit[0].querySelector('.quota-identity')?.textContent, 'codex')
 })
 
-it('claude 仍只亮指定的 cc1 身分', async () => {
+it('claude 仍只亮指定的 cc1 身份', async () => {
   await render(quotaFor('claude', 'claude:cc1'), [
     { name: 'cc0', kind: 'claude', env: {}, args: [], host: null },
     { name: 'cc1', kind: 'claude', env: { CLAUDE_CONFIG_DIR: '/tmp/cc1' }, args: [], host: null },

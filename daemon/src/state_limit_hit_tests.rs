@@ -168,7 +168,7 @@ async fn codex_bot(app: &Arc<App>, project_id: &str, name: &str) -> crate::db::B
     crate::db::bot(&app.db, &bot.id).await.unwrap().unwrap()
 }
 
-/// #1907：欠著的撞限。`remote1` 的身分表還沒偵測完、bot 又用手寫身分 `ghost`，`resolve_key` 回錯，撞限記不進去而欠著；
+/// #1907：欠著的撞限。`remote1` 的身份表還沒偵測完、bot 又用手寫身份 `ghost`，`resolve_key` 回錯，撞限記不進去而欠著；
 /// 把專案改到 `local`、並讓 `local` 的偵測快照存在（`repair`）就補得上（`bot_host` 每次重讀）。回傳 (bot, 欠著的那一筆)。
 async fn owed_bot(app: &Arc<App>) -> (crate::db::Bot, LimitHit) {
     let pid = crate::db::ulid();

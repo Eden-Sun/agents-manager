@@ -1158,7 +1158,7 @@ async fn upload<H: PortalEnv>(
     crate::race_point::hit("share_upload_after_authority_lock", &bot_id).await;
     let stored = format!("{}-{name}", db::ulid());
     let len = data.len();
-    // 遠端專案（#955）：在 bot 鎖內經 ssh 寫進遠端 inbox（同一趟檢查配額、`set -C` 建檔、驗長度與身分）。解析不出來＝503。
+    // 遠端專案（#955）：在 bot 鎖內經 ssh 寫進遠端 inbox（同一趟檢查配額、`set -C` 建檔、驗長度與身份）。解析不出來＝503。
     match crate::share::remote_io::remote_site(&*st.app, &bot_id).await {
         Err(()) => return unavailable(),
         Ok(Some(site)) => {

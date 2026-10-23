@@ -279,7 +279,7 @@ fn the_real_script_reads_a_fake_home_and_writes_nothing() {
 
 #[test]
 fn an_alias_outside_the_claude_cc_glob_is_still_checked() {
-    // 票面：每個 claude 身分看它自己的 CLAUDE_CONFIG_DIR，不只有 ~/.claude 與 ~/.claude-cc<數字>。
+    // 票面：每個 claude 身份看它自己的 CLAUDE_CONFIG_DIR，不只有 ~/.claude 與 ~/.claude-cc<數字>。
     let home = FakeHome::new();
     let h = home.path();
     fs::create_dir_all(h.join(".claude-work")).unwrap();

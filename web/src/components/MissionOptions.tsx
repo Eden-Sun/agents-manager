@@ -4,7 +4,7 @@
  * 三個都是**開任務時就要決定**的事，不是偏好設定：
  * - 交付方式（D2）：直接推 main／開 PR 給我看。
  * - 執行者 kind（D7）：claude／codex／grok；帳號輪換只對 claude 有效。
- * - 5h 撞限（D5）：等重置／不等直接換下一個身分。7d 撞限一律換，沒得選。
+ * - 5h 撞限（D5）：等重置／不等直接換下一個身份。7d 撞限一律換，沒得選。
  *
  * 選項本身與它的記憶在 `lib/missionOpts.ts`。
  */
@@ -85,20 +85,20 @@ export function MissionOptions({
         hint={t('用哪一種 CLI 跑這個任務；撞限自動換帳號只有 claude 有')}
         value={opts.executor_kind}
         options={[
-          { v: 'claude', label: 'claude', title: t('撞限時自動照 cc2 → cc1 → cc0 換身分') },
-          { v: 'codex', label: 'codex', title: t('沒有身分可以輪換，撞限只能等重置或停下來問你') },
-          { v: 'grok', label: 'grok', title: t('沒有身分可以輪換，撞限只能等重置或停下來問你') },
+          { v: 'claude', label: 'claude', title: t('撞限時自動照 cc2 → cc1 → cc0 換身份') },
+          { v: 'codex', label: 'codex', title: t('沒有身份可以輪換，撞限只能等重置或停下來問你') },
+          { v: 'grok', label: 'grok', title: t('沒有身份可以輪換，撞限只能等重置或停下來問你') },
         ]}
         disabled={disabled}
         onPick={(v) => set({ executor_kind: v })}
       />
       <Row
         label={t('撞到 5h 上限')}
-        hint={t('7d 上限一律換下一個身分，這裡只管 5h 那一桶')}
+        hint={t('7d 上限一律換下一個身份，這裡只管 5h 那一桶')}
         value={opts.on_5h_limit}
         options={[
-          { v: 'wait', label: t('等重置'), title: t('原地等這個身分的 5h 桶回來再繼續') },
-          { v: 'switch', label: t('不等，換下一個'), title: t('立刻換下一個身分接手（同一個 worktree、新的 session）') },
+          { v: 'wait', label: t('等重置'), title: t('原地等這個身份的 5h 桶回來再繼續') },
+          { v: 'switch', label: t('不等，換下一個'), title: t('立刻換下一個身份接手（同一個 worktree、新的 session）') },
         ]}
         disabled={disabled}
         onPick={(v) => set({ on_5h_limit: v })}

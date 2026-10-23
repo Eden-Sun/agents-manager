@@ -1188,7 +1188,7 @@ rc=$(run ap-1)
 check_eq "舊 daemon 用 approval bootstrap 完成 swap（rc=0）" "0" "$rc"
 check "舊路徑以 approval 取得 restart lease" "lease acquire restart --owner bot-me --approval ap-1 --commit $SHA --ttl 900 --exclude-bot bot-me" "$AGM_DIR/calls.log"
 check "舊路徑 safety 綁定同一 approval" "lease safety --approval ap-1 --owner bot-me --exclude-bot bot-me" "$AGM_DIR/calls.log"
-check "舊路徑清掉 service/bot 身分，使用本機 User token" "identity service= bot=" "$AGM_DIR/identity.log"
+check "舊路徑清掉 service/bot 身份，使用本機 User token" "identity service= bot=" "$AGM_DIR/identity.log"
 teardown
 
 setup 10 10

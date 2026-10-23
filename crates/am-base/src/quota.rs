@@ -68,7 +68,7 @@ pub fn quota_base(kind: &str, identity: Option<&str>) -> String {
     }
 }
 
-/// 這個身分**對這個 kind** 是不是就是預設帳號？
+/// 這個身份**對這個 kind** 是不是就是預設帳號？
 ///
 /// 看的是**該 kind 的 home 變數**（codex＝`CODEX_HOME`、claude＝`CLAUDE_CONFIG_DIR`、grok＝`GROK_HOME`，
 /// 見 `pane_identity::config_dir_var`），不是「env 空不空」。
@@ -85,7 +85,7 @@ pub fn identity_shares_default(kind: &str, env: &std::collections::BTreeMap<Stri
     }
 }
 
-/// 同 [`quota_base`]，但身分對這個 kind 就是預設帳號時（見 [`identity_shares_default`]）寫回裸 kind。
+/// 同 [`quota_base`]，但身份對這個 kind 就是預設帳號時（見 [`identity_shares_default`]）寫回裸 kind。
 pub fn quota_base_default_aware(kind: &str, identity: Option<&str>, shares_default: bool) -> String {
     match identity.map(str::trim).filter(|s| !s.is_empty()) {
         Some(_) if shares_default => kind.to_string(),
@@ -93,16 +93,16 @@ pub fn quota_base_default_aware(kind: &str, identity: Option<&str>, shares_defau
     }
 }
 
-/// [`quota_base_default_aware`]，身分的 env 從那台主機的身分表查（§16.2）。**寫入端與查詢端都走這支**：
+/// [`quota_base_default_aware`]，身份的 env 從那台主機的身份表查（§16.2）。**寫入端與查詢端都走這支**：
 /// codex statusline、撞限橫幅、claude statusLine、`limit_hit_for_bot`／`next_reset_for_bot`、
-/// supervisor 的額度判讀、mission 挑身分。查不到那個身分就當它有自己的帳號——寧可多開一格，
+/// supervisor 的額度判讀、mission 挑身份。查不到那個身份就當它有自己的帳號——寧可多開一格，
 /// 也不要把兩個帳號的數字疊在一起。
 pub async fn quota_base_for_host(app: &impl HostIdentities, host: &str, kind: &str, identity: Option<&str>) -> String {
     let Some(idn) = identity.map(str::trim).filter(|s| !s.is_empty()) else { return kind.to_string() };
     let found = app.identity_for_host(host, idn).await;
-    // 身分有 kind（`identity_kind`）：別的 kind 的身分（codex bot 身上的 claude `cc1`）根本不是這個 CLI 的
+    // 身份有 kind（`identity_kind`）：別的 kind 的身份（codex bot 身上的 claude `cc1`）根本不是這個 CLI 的
     // 帳號代號，一律寫裸 kind——codex 不該有任何 `codex:ccN`（2026-09-14 使用者指正）。
-    // 同 kind 才看 home 變數那條保險；查不到那個身分（主機的身分還沒偵測完）維持分開，免得把兩個
+    // 同 kind 才看 home 變數那條保險；查不到那個身份（主機的身份還沒偵測完）維持分開，免得把兩個
     // claude 帳號的數字疊進同一格。
     let shares = match &found {
         Some(i) if i.kind != kind => true,
@@ -113,20 +113,20 @@ pub async fn quota_base_for_host(app: &impl HostIdentities, host: &str, kind: &s
 }
 
 /// [`quota_base_for_host`]，但**算不準就回錯**：寫撞限要落在查詢端之後會讀的那一把 key（#108 重開）。
-/// 那台主機的身分表還沒偵測完（重啟後、`tools::detect` 之前）又不是手寫的 `[[identities]]` 時，共用預設帳號的
+/// 那台主機的身份表還沒偵測完（重啟後、`tools::detect` 之前）又不是手寫的 `[[identities]]` 時，共用預設帳號的
 /// `cc0` 會被算成 `claude:cc0`：偵測完之後查詢端讀裸 `claude`，那一格的撞限就沒人看得到。
 pub async fn resolve_quota_base(app: &impl HostIdentities, host: &str, kind: &str, identity: Option<&str>) -> Result<String> {
     if let Some(idn) = identity.map(str::trim).filter(|s| !s.is_empty()) {
         if app.identity_for_host(host, idn).await.is_none() && !app.host_tools_detected(host).await {
-            anyhow::bail!("`{host}` 的身分表還沒偵測完，算不出身分 `{idn}` 的額度 key");
+            anyhow::bail!("`{host}` 的身份表還沒偵測完，算不出身份 `{idn}` 的額度 key");
         }
     }
     Ok(quota_base_for_host(app, host, kind, identity).await)
 }
 
-/// 額度記在哪個身分上（issue #238）：pane 裡實際的帳號＝這個 run 起來時的身分。PATCH 改了身分、還沒重啟時，
+/// 額度記在哪個身份上（issue #238）：pane 裡實際的帳號＝這個 run 起來時的身份。PATCH 改了身份、還沒重啟時，
 /// `bots.identity` 已經是新的、pane 還是舊帳號——讀數、撞限、閘門都要跟著 run 走，不然舊帳號用盡記到新帳號名下
-/// （新帳號被誤擋、舊帳號的其他 bot 照樣被派工）。沒有 run、或 run 沒記身分（不是 daemon 起的、升級前的舊列）才用設定的。
+/// （新帳號被誤擋、舊帳號的其他 bot 照樣被派工）。沒有 run、或 run 沒記身份（不是 daemon 起的、升級前的舊列）才用設定的。
 pub fn identity_for_run(bot: &crate::db::Bot, run: Option<&crate::db::Run>) -> Option<String> {
     match run.and_then(|r| r.started_identity()) {
         Some(started) => started,
@@ -134,14 +134,14 @@ pub fn identity_for_run(bot: &crate::db::Bot, run: Option<&crate::db::Run>) -> O
     }
 }
 
-/// [`identity_for_run`]，run 用這顆 bot 現在的 active run。讀不到 run 回錯：不能拿設定的身分猜（那正是會記錯格的那一個）。
+/// [`identity_for_run`]，run 用這顆 bot 現在的 active run。讀不到 run 回錯：不能拿設定的身份猜（那正是會記錯格的那一個）。
 pub async fn billing_identity(app: &impl crate::capabilities::Db, bot: &crate::db::Bot) -> Result<Option<String>> {
     let run = crate::db::active_run(app.db(), &bot.id).await?;
     Ok(identity_for_run(bot, run.as_ref()))
 }
 
 /// 查詢端：這顆 bot 的讀數在哪幾把 key。先查它自己那一把（收斂規則同寫入端），**只有**收斂到裸 kind
-/// 的身分才會落在裸 key——有自己 home 的身分（cc2 帶 `CODEX_HOME`）不借預設帳號的數字。身分是 [`billing_identity`]。
+/// 的身份才會落在裸 key——有自己 home 的身份（cc2 帶 `CODEX_HOME`）不借預設帳號的數字。身份是 [`billing_identity`]。
 pub async fn keys_for_bot(app: &impl HostIdentities, host: &str, bot: &crate::db::Bot, identity: Option<&str>) -> Vec<String> {
     let base = quota_base_for_host(app, host, &bot.kind, identity).await;
     vec![quota_key(host, &base)]
@@ -325,11 +325,11 @@ impl Window {
     /// 已經反映了重置後的狀態；它說見底就是真的見底。
     ///
     /// **解不開的 `resets_at` 當成已經過去**，沿用 `supervisor::policy::past` 的先例（那裡的註解：
-    /// 「An unreadable timestamp must not park the manager forever」）：一筆壞資料不該把一個身分永久排除。
+    /// 「An unreadable timestamp must not park the manager forever」）：一筆壞資料不該把一個身份永久排除。
     ///
     /// ⚠️ **這裡的 `true` 與 [`already_past`] 的 `true` 安全方向相反**（i264 review，#489）：
     /// 四處對「解不開」的約定都是「當成已過去」，但後果不一樣——`already_past` 回 `true` 是**丟棄**那個值
-    /// （嚴格、安全），這支回 `true` 卻是**放行**（`exhausted_at` 變 `false`，身分看起來有額度）。
+    /// （嚴格、安全），這支回 `true` 卻是**放行**（`exhausted_at` 變 `false`，身份看起來有額度）。
     /// 兩者現在相容，只因為壞值在生產路徑上到不了這裡：寫 `Window.resets_at` 的入口
     /// （claude `/usage`、claude statusline 的 `unix_to_rfc3339`、grok 的 `parse_reset`、快取載入）
     /// 都自己算出來或驗過格式。**要是有人新增一個不驗格式的入口，這一行就會變成「壞值＝有額度」。**
@@ -358,7 +358,7 @@ impl Window {
 
     /// 見底**而且還沒重置**才算用盡（issue #464）。
     ///
-    /// 三處共用這一份：`mission::pick`（選身分）、`supervisor::policy`（換模型）、
+    /// 三處共用這一份：`mission::pick`（選身份）、`supervisor::policy`（換模型）、
     /// `supervisor::responder`（協調者能不能答）。以前各寫一份，其中 `mission::pick` 那份連
     /// 「重置過沒有」都不看，另外兩份對解不開的時間戳又跟它相反（i407 review，#464）。
     pub fn exhausted_at(&self, now: chrono::DateTime<chrono::Utc>) -> bool {
@@ -464,7 +464,7 @@ impl Quota {
             Some(at) => now - at >= b.len(),
             // **兩個時間戳都解不開＝當成已經過期**（i267 review，#518）：跟其他四處「解不開＝已過去」同向。
             //
-            // 第一版回 `false`（＝「這筆讀數還很新」），方向剛好相反，於是 #475 那個「永久擋住一個身分」
+            // 第一版回 `false`（＝「這筆讀數還很新」），方向剛好相反，於是 #475 那個「永久擋住一個身份」
             // 原封不動回來：`resets_at` 被丟成 `None`（#489 那顆）收不掉、`reset_passed` 回 false、
             // `exhausted` 永遠 true。這裡的嚴格方向是「寧可放掉，也不要永久擋住」——跟 #464／#475
             // 整條線的取捨一致，而且 [`load_cache`] 已經先把這兩個欄位驗過，壞值不該從那條路進來。
@@ -476,7 +476,7 @@ impl Quota {
     ///
     /// 「見底、沒有 `resets_at`」的讀數在 [`Window::exhausted_at`] 眼裡永遠算用盡——沒有時間可以
     /// 讓它翻回來。這種讀數真的會產生（`quota_claude` 的 statusline 路徑解不出重置時間就是 `None`，
-    /// 而百分比照樣可能見底），於是那個身分在**同一次 uptime 內**被永久排除；而這台 daemon 常連跑好幾天。
+    /// 而百分比照樣可能見底），於是那個身份在**同一次 uptime 內**被永久排除；而這台 daemon 常連跑好幾天。
     ///
     /// 規則：`resets_at` 是 `None` 而且這筆讀數比那一桶的窗長還舊 → 當成**沒有讀數**。一筆比窗長
     /// 還舊的讀數必定跨過了一次重置，不管它當時是幾 %。有 `resets_at` 的**不套這條**——那時
@@ -535,7 +535,7 @@ pub async fn load_cache(app: &(impl crate::capabilities::Db + crate::quota::Quot
         q.updated_at = if updated_at.trim().is_empty() { q.updated_at } else { updated_at };
         // 快取列的 `resets_at` 也要驗一次（i264 review，#489）：`load_cache` 是裸的
         // `serde_json::from_str`，而 `Window` 只 derive `Deserialize`，所以解不開的值**不是被丟掉，
-        // 是原樣載回記憶體**——接著 `reset_passed` 把它讀成「已經跨過重置」，那個身分一路看起來有額度，
+        // 是原樣載回記憶體**——接著 `reset_passed` 把它讀成「已經跨過重置」，那個身份一路看起來有額度，
         // 直到下一次探測成功才好，而 `unix_to_rfc3339`／`already_past` 的兩個 warn 都不在這條路上。
         drop_unparseable_resets(&mut q, &key);
         q.host = key.split_once('/').map_or(LOCAL_HOST, |(host, _)| host).to_string();
@@ -633,7 +633,7 @@ pub fn unix_to_rfc3339(v: Option<&Value>) -> Option<String> {
             } else {
                 // 已經是時間字串：**至少驗一次解得開**再放行（i204 review，#489）。原本是原樣回傳，
                 // 所以格式漂移時一串亂碼會直接變成 `resets_at`，而解不開的重置時間會被
-                // `Window::reset_passed` 讀成「已經跨過重置」——那個身分就永遠看起來有額度。
+                // `Window::reset_passed` 讀成「已經跨過重置」——那個身份就永遠看起來有額度。
                 // 解不開就丟掉：`resets_at: None` 是「不知道」，由 `usable_window` 的窗長規則收尾（#475），
                 // 比一個會讓人誤判成「有額度」的壞值安全。
                 // 只驗、不改寫：格式正規化不是這張票的事，而且下游一律 `parse_utc`／`cmp_ts` 比時刻。
@@ -742,9 +742,9 @@ pub fn quota_from_statusline(payload: &Value, account: Option<&str>) -> Option<Q
 }
 
 /// `base` is the host-less key; stored key and `quota.host` derive from `host`.
-/// 身分偵測完之前寫進分開那一格、現在已經收斂到裸 `kind` 的 key（daemon 重啟那一秒最常見：第一筆 statusline
-/// 比身分偵測先到，[`quota_base_for_host`] 查不到身分就寧可分開）。之後的讀數都寫裸 key，那一格停在啟動當下、
-/// 沒有 Fable，留著就會被讀到（2026-09-16 使用者：「怎麼又看不見 Fable 的剩餘」）。查不到的身分照舊保留。
+/// 身份偵測完之前寫進分開那一格、現在已經收斂到裸 `kind` 的 key（daemon 重啟那一秒最常見：第一筆 statusline
+/// 比身份偵測先到，[`quota_base_for_host`] 查不到身份就寧可分開）。之後的讀數都寫裸 key，那一格停在啟動當下、
+/// 沒有 Fable，留著就會被讀到（2026-09-16 使用者：「怎麼又看不見 Fable 的剩餘」）。查不到的身份照舊保留。
 async fn stale_split_keys(app: &(impl crate::quota::HostIdentities + crate::quota::QuotaTables), host: &str, kind: &str) -> Vec<String> {
     let prefix = quota_key(host, &format!("{kind}:"));
     let candidates: Vec<String> = app.quotas().lock().await.keys().filter(|k| k.starts_with(&prefix)).cloned().collect();
@@ -783,7 +783,7 @@ pub async fn set_fenced(
 /// 快取列載回來時把解不開的 `resets_at` 設成 `None`（i264 review，#489）。
 ///
 /// `None` ＝「不知道」，由 [`Quota::usable_window`] 的窗長規則收尾（#475）；留著壞值會被
-/// [`Window::reset_passed`] 讀成「已重置」而放行一個可能真的見底的身分。
+/// [`Window::reset_passed`] 讀成「已重置」而放行一個可能真的見底的身份。
 fn drop_unparseable_resets(q: &mut Quota, key: &str) {
     if parse_utc(&q.updated_at).is_none() {
         // 不編一個時間出來（那等於謊報新鮮度）：只記下來。年齡判斷那一側對解不開的已經當成過期
@@ -813,7 +813,7 @@ fn drop_unparseable_resets(q: &mut Quota, key: &str) {
 ///
 /// 第一版這裡回 `false`（＝沿用看不懂的值，交給讀取端判），跟 [`Window::reset_passed`] 把解不開當成
 /// 「已經跨過重置」**方向相反**，兩者接起來就重現了這張票要修的問題，而且更糟——它會一直黏著：
-/// 解不開的值被 `set` 一路沿用，而 `reset_passed` 每次都說「重置過了」，於是那個身分從此永遠看起來
+/// 解不開的值被 `set` 一路沿用，而 `reset_passed` 每次都說「重置過了」，於是那個身份從此永遠看起來
 /// 有額度，即使 97% 用掉。過期的時刻至少會隨著新讀數自己好，解不開的不會。
 ///
 /// 寫成具名函式而不是 `is_some_and(|t| t <= now)`：`timestamp_compat_tests` 那條原始碼 lint 認得
@@ -836,7 +836,7 @@ fn already_past(resets_at: Option<&str>) -> bool {
 
 /// 讀數出口的最後一道檢查（對抗式審查）：入口（statusLine、app-server、`/usage` 文字、grok 長條）各自 parse 出裸 `f64`，
 /// 只有少數幾條有夾值。百分比一律夾進 0–100；不是有限數（`NaN`／`inf`）整格丟掉——留著的話
-/// `(100 - NaN).max(0)` 是 0，那個身分會被判成見底。丟掉之後 [`set_inner`] 會沿用上一份的同一桶，不是填 0。
+/// `(100 - NaN).max(0)` 是 0，那個身份會被判成見底。丟掉之後 [`set_inner`] 會沿用上一份的同一桶，不是填 0。
 fn sanitize_percentages(q: &mut Quota, key: &str) {
     for (bucket, w) in [("five_hour", &mut q.five_hour), ("seven_day", &mut q.seven_day), ("fable", &mut q.fable)] {
         let Some(win) = w.as_mut() else { continue };
@@ -1667,7 +1667,7 @@ pub trait QuotaStaleKeys: Send + Sync {
     fn quota_stale(&self) -> &tokio::sync::Mutex<std::collections::BTreeSet<String>>;
 }
 
-/// 身分表查詢介面，供額度收斂計算身分設定
+/// 身份表查詢介面，供額度收斂計算身份設定
 pub trait HostIdentities: Send + Sync {
     fn identity_for_host(&self, host: &str, name: &str) -> impl std::future::Future<Output = Option<crate::config::IdentityCfg>> + Send;
     fn host_tools_detected(&self, host: &str) -> impl std::future::Future<Output = bool> + Send;

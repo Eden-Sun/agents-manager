@@ -16,7 +16,7 @@ type Choice = {
   label: string
   title: string
   loggedOut: boolean
-  /** 這個身分在額度條上被勾成「暫時停用」了（見 store/quotaHide.ts）。 */
+  /** 這個身份在額度條上被勾成「暫時停用」了（見 store/quotaHide.ts）。 */
   quotaOff: boolean
 }
 
@@ -133,7 +133,7 @@ export function QuickAddBots({ projectId }: { projectId: string }) {
           key={c.key}
           type="button"
           className={`quick-add-chip${c.quotaOff ? ' quota-off' : ''}`}
-          // 停用中的身分點下去只會多一顆同樣沒額度的 bot——列出來但不給點；未登入的點了去登入。
+          // 停用中的身份點下去只會多一顆同樣沒額度的 bot——列出來但不給點；未登入的點了去登入。
           disabled={busy !== null || c.quotaOff}
           title={c.title}
           onClick={() => pick(c)}

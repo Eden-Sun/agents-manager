@@ -143,7 +143,7 @@ export interface IdentityStatus {
   /** `cc0` 這種預設帳號沒有 */
   config_dir: string | null
   /**
-   * daemon 記下「這個身分要重新登入」（#838 補充：綁著它的 bot 回合因授權失敗收尾；遠端 claude 探測問不出未登入，這是唯一來源）。
+   * daemon 記下「這個身份要重新登入」（#838 補充：綁著它的 bot 回合因授權失敗收尾；遠端 claude 探測問不出未登入，這是唯一來源）。
    * `since` 是這一次的識別（網頁拿它判斷「關掉過的是同一次」）；沒有／舊 daemon＝null。
    */
   login_needed?: { since: string; via: string } | null
@@ -303,7 +303,7 @@ export type BotManagedBy = 'user' | 'child'
 /** 身份預設（例如 `cc1` = 另一個 `CLAUDE_CONFIG_DIR`）；`args` 接在 daemon 注入參數之後。 */
 export interface Identity {
   name: string
-  /** 哪一台主機的身分（SPEC §16.2）。`null`／缺 = 只適用本機。同名的 `cc1` 在不同機器上是不同帳號。 */
+  /** 哪一台主機的身份（SPEC §16.2）。`null`／缺 = 只適用本機。同名的 `cc1` 在不同機器上是不同帳號。 */
   host?: string | null
   kind: BotKind
   env: Record<string, string>
@@ -1095,7 +1095,7 @@ export interface IssueDetail extends Issue {
 /** D2 */
 export type MissionDelivery = 'push_main' | 'pr'
 
-/** D5：5h 撞限時等重置或換身分；7d 撞限一律換。 */
+/** D5：5h 撞限時等重置或換身份；7d 撞限一律換。 */
 export type MissionOn5h = 'wait' | 'switch'
 
 /** 由欄位推導：`cancelled_at → done_at → paused_reason → open`。 */

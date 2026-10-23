@@ -121,7 +121,7 @@ class TranscriptTransfer(unittest.TestCase):
         self.assertEqual(r.returncode, 0, r.stderr)
         new_wt = DST_PROJ + "/.claude/worktrees/am-x1"
         self.assertIn(f'"cwd": "{new_wt}"', e.dst_read(f".claude-cc1/projects/{claude_key(new_wt)}/s-wt.jsonl"),
-                      "身分的 config 目錄（.claude-cc1）照原樣、目錄名由新的 worktree 路徑算")
+                      "身份的 config 目錄（.claude-cc1）照原樣、目錄名由新的 worktree 路徑算")
 
     def test_codex_keeps_its_dated_path_and_rewrites_content(self):
         e = self.env
@@ -203,7 +203,7 @@ class TranscriptTransfer(unittest.TestCase):
         b = e.bundle([bot("b1", "claude")], [run("r1", "b1", "s-two", cc2)])
         r, rep, _ = e.run(b, maps=self.maps)
         self.assertEqual(r.returncode, 0, r.stdout)
-        self.assertEqual(rep["sessions"][0]["from"], cc2, "DB 記的那份（換過身分只有它知道是哪個 config 目錄）")
+        self.assertEqual(rep["sessions"][0]["from"], cc2, "DB 記的那份（換過身份只有它知道是哪個 config 目錄）")
         self.assertTrue(rep["sessions"][0]["to"].startswith(os.path.join(e.dst, ".claude-cc2/")))
 
     def test_a_cwd_outside_every_map_falls_back_to_the_target_home(self):

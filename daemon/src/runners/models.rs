@@ -47,7 +47,7 @@ async fn codex_rpc_local(exe: &str, lines: &[String], id: u64, home: Option<&str
         .stderr(std::process::Stdio::null())
         .process_group(0)
         .kill_on_drop(true);
-    // 身分的 `CODEX_HOME`：model/list 的結果（含預設模型）跟著這個家目錄走。沒有身分就照 daemon 的環境。
+    // 身份的 `CODEX_HOME`：model/list 的結果（含預設模型）跟著這個家目錄走。沒有身份就照 daemon 的環境。
     if let Some(dir) = home {
         cmd.env("CODEX_HOME", dir);
     }
@@ -84,7 +84,7 @@ pub async fn codex_rpc(app: &Arc<App>, host: &str, method: &str, params: Value) 
     codex_rpc_in(app, host, None, method, params).await
 }
 
-/// 同 [`codex_rpc`]，但 `home` 是身分的 `CODEX_HOME`（絕對路徑）；`None` ＝ daemon 預設家目錄。
+/// 同 [`codex_rpc`]，但 `home` 是身份的 `CODEX_HOME`（絕對路徑）；`None` ＝ daemon 預設家目錄。
 pub async fn codex_rpc_in(app: &Arc<App>, host: &str, home: Option<&str>, method: &str, params: Value) -> Result<Value> {
     const ID: u64 = 2;
     let lines = rpc_lines(ID, method, &params);
@@ -125,7 +125,7 @@ async fn agy_model_list(app: &Arc<App>, host: &str) -> (&'static str, Vec<Value>
 pub async fn fetch(app: &Arc<App>, host: &str, kind: &str, identity: Option<&str>) -> Result<Value> {
     let (source, models) = match kind {
         "codex" => {
-            // 身分的 CODEX_HOME：app-server 的 model/list 與這個身分 config.toml 的預設才會是它自己的。
+            // 身份的 CODEX_HOME：app-server 的 model/list 與這個身份 config.toml 的預設才會是它自己的。
             let home = identity_home_dir(app, host, identity, "codex", "CODEX_HOME").await?;
             let r = codex_rpc_in(app, host, home.as_deref(), "model/list", json!({"includeHidden": false})).await?;
             let m = codex_models_from_rpc(&r);
@@ -136,7 +136,7 @@ pub async fn fetch(app: &Arc<App>, host: &str, kind: &str, identity: Option<&str
             ("codex-app-server", codex_apply_identity_config(m, &cfg_text))
         }
         "grok" => {
-            // 身分的 GROK_HOME：`grok models` 與兩個檔都讀這個家目錄（沒有身分＝`~/.grok`）。
+            // 身份的 GROK_HOME：`grok models` 與兩個檔都讀這個家目錄（沒有身份＝`~/.grok`）。
             let home = identity_home_dir(app, host, identity, "grok", "GROK_HOME").await?;
             let env = home.as_deref().map(|dir| home_env_prefix("GROK_HOME", dir)).unwrap_or_default();
             let exe = crate::tools::cached_path(app, host, "grok").await.unwrap_or_else(|| "grok".into());

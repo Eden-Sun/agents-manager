@@ -189,7 +189,7 @@ export function IdentityOptions({
       </span>
       <div className="opt-group" role="radiogroup" aria-label={t('身份')}>
         <button type="button" role="radio" aria-checked={value === ''} className={`opt${value === '' ? ' on' : ''}`} onClick={() => onChange('')}>
-          {t('不指定身分（{account}）', { account: !host || host === 'local' ? t('本機預設') : t('{host} 的預設帳號', { host }) })}
+          {t('不指定身份（{account}）', { account: !host || host === 'local' ? t('本機預設') : t('{host} 的預設帳號', { host }) })}
         </button>
         {identities.map((i) => {
           const st = status[i.name]
@@ -508,7 +508,7 @@ export function BotSettingsPanel({ botId }: { botId: string }) {
             disabled={restarting}
             onClick={() => {
               setRestarting(true)
-              // 重啟一律接回原對話（store 的預設；接不回才退回開新對話）。以前只有換過身分才帶（#658），
+              // 重啟一律接回原對話（store 的預設；接不回才退回開新對話）。以前只有換過身份才帶（#658），
               // 改模型等其他設定後的重啟會開新對話、整個失憶。
               void restartBot(botId).then((ok) => {
                 setRestarting(false)

@@ -68,7 +68,7 @@ pub fn reserve(app: &Arc<App>, host: &str, identity: &str) -> LcResult<IdentityR
 fn identity_login_in_progress(host: &str, identity: &str) -> LcError {
     LcError::conflict(
         "identity_login_in_progress",
-        json!({"host": host, "identity": identity, "message": "這個身分已有登入程序；先完成或關閉原登入終端再重試"}),
+        json!({"host": host, "identity": identity, "message": "這個身份已有登入程序；先完成或關閉原登入終端再重試"}),
     )
 }
 
@@ -140,7 +140,7 @@ fn code_already_sent() -> LcError {
 /// `POST /api/hosts/:name/shells/:pane_id/login/code`：確認畫面還在等 code 才把它打進去、按 Enter。
 /// 兩段式送出：先打字（不按 Enter）、再複查同一顆 claude 還在才按 Enter；不在就送 ctrl+u 清掉命令列、回 `not_awaiting`。
 /// 殘餘窗口：複查到 Enter 之間 claude 剛好結束，Enter 仍會落進 shell；要根治需要 herdr 的條件式輸入（#787，issue #846）。
-/// 回 `{sent:true, outcome}`：`failed`（帶 `message`＝CLI 的 `Login failed: …`）／`finished`（CLI 結束了或 pane 已收掉，成功與否看身分列重驗）／`pending`。
+/// 回 `{sent:true, outcome}`：`failed`（帶 `message`＝CLI 的 `Login failed: …`）／`finished`（CLI 結束了或 pane 已收掉，成功與否看身份列重驗）／`pending`。
 pub async fn submit_code(app: &Arc<App>, host: &str, pane_id: &str, code: &str) -> LcResult<Value> {
     let code = code.trim();
     if !valid_code(code) {

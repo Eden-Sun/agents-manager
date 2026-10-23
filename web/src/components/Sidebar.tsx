@@ -197,7 +197,7 @@ function BotRowImpl({
   const quotaWarning = useStore(
     useShallow((s) => {
       const b = s.bots.find((x) => x.id === botId)
-      // 額度按主機分（SPEC §14）；身分清單也跟著那台（同名身分在各主機可能是不同帳號）。
+      // 額度按主機分（SPEC §14）；身份清單也跟著那台（同名身份在各主機可能是不同帳號）。
       if (!b) return null
       const host = projectHostName(s, b.project_id)
       // 同下面的模型：run 實際在用的優先（issue #541）。
@@ -231,7 +231,7 @@ function BotRowImpl({
   })
 
   const hasUpdate = useStore((s) => s.runs[botId]?.update_notice ?? null)
-  // 使用者 2026-09-10：子 bot 用不同帳號時標在母 bot 上，免得默默吃光另一帳號額度。未指定身分＝cc0。
+  // 使用者 2026-09-10：子 bot 用不同帳號時標在母 bot 上，免得默默吃光另一帳號額度。未指定身份＝cc0。
   const divergedChildren = useStore(
     useShallow((s) => {
       const b = s.bots.find((x) => x.id === botId)
@@ -412,7 +412,7 @@ function BotRowImpl({
           <span className={`bot-kind-wrap${hasUpdate ? ' has-update' : ''}`}>
             <KindTag kind={bot.kind} className="bot-kind" fast={fast} />
             <UpdateBadge botId={botId} variant="dot" />
-            {/* 精簡列：身分用小字放在 kind 圖示正下方（2026-10-04 使用者：「在 kind 下就好了」）。 */}
+            {/* 精簡列：身份用小字放在 kind 圖示正下方（2026-10-04 使用者：「在 kind 下就好了」）。 */}
             {compact && showIdentity ? (
               <span className="kind-identity">
                 <IdentityBadge
@@ -673,7 +673,7 @@ export function NewBotForm({ onDone, initialProjectId, onCreated }: { onDone: ()
   // 驗 trim 過的：打到一半的 `my ` 不該先閃紅字；送出也送 trim 過的。
   const nameOk = isValidBotName(name.trim())
   const cliOk = Boolean(tools[kind]?.installed)
-  /** 不指定身分＝用那台的預設帳號；它沒登入時 bot 會停在登入畫面（`logged_in === null` 是問不到，不下結論）。 */
+  /** 不指定身份＝用那台的預設帳號；它沒登入時 bot 會停在登入畫面（`logged_in === null` 是問不到，不下結論）。 */
   const defaultLoggedOut = cliOk && identity === '' && tools[kind]?.logged_in === false
   const shareOn = shareProfile !== null && !shareProfileBlocked(kind)
   const folderIn = shareOn ? shareFolderInput(shareFolder, name) : null
@@ -1044,7 +1044,7 @@ export function Sidebar() {
   const kidsWheelRef = useWheelRef<HTMLDivElement>(kidsWheel)
   const [drag, setDrag] = useState<DragState>(null)
   const openHostShell = useStore((s) => s.openHostShell)
-  /** 額度卡片上暫時停用的身分／kind，其 bot 先收起；reset 時 quotaHide 的 timer 會自動放回。 */
+  /** 額度卡片上暫時停用的身份／kind，其 bot 先收起；reset 時 quotaHide 的 timer 會自動放回。 */
   // 同一份名單也給鍵盤導覽、晶片列與分頁標題用，所以讀 store 的投影而不是自己再算一次。
   const hiddenQuotaIds = useStore(useShallow((s) => s.hiddenBotIds))
   const hiddenQuota = useMemo(() => new Set(hiddenQuotaIds), [hiddenQuotaIds])
@@ -1304,7 +1304,7 @@ export function Sidebar() {
               hit.has(b.id) ||
               (b.parent_bot_id ? hit.has(b.parent_bot_id) : every.some((c) => c.parent_bot_id === b.id && hit.has(c.id))),
           )
-          // 停用身分的 bot 收起；搜尋中不收。
+          // 停用身份的 bot 收起；搜尋中不收。
           const shown = query ? all : all.filter((b) => !hiddenQuota.has(b.id))
           const hiddenCount = all.length - shown.length
           // 父列不在這一份清單裡（被刪、被收起）的子 agent 沒有地方掛：照頂層列畫，不然整顆從側欄消失。
@@ -1516,7 +1516,7 @@ export function Sidebar() {
           <span className="disclosure-note">
             {hosts.length === 0 ? t('本機') : t('本機 + {n}', { n: hosts.length })}
             {hostsDown > 0 ? t('・ {n} 未連線', { n: hostsDown }) : ''}
-            {t('・ 身分 {n}', { n: identityCount })}
+            {t('・ 身份 {n}', { n: identityCount })}
           </span>
         </button>
       </div>

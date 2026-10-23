@@ -23,7 +23,7 @@ test('八個分頁都在 DOM 裡，預設選中主機，其餘 7 個面板帶 hi
   assert.equal(tabs.length, 8)
   assert.deepEqual(
     tabs.map((t) => t.querySelector('.env-nav-label')?.textContent),
-    ['環境準備', '主機', '更新檢查', '身分', '最近刪除', 'Jev 建議', 'Claude API', '顯示'],
+    ['環境準備', '主機', '更新檢查', '身份', '最近刪除', 'Jev 建議', 'Claude API', '顯示'],
   )
 
   const selected = tabs.find((t) => t.getAttribute('aria-selected') === 'true')

@@ -177,7 +177,7 @@ FINDERS = {"claude": find_claude, "codex": find_codex, "grok": find_grok}
 
 
 def locate(kind, sid, recorded, home):
-    """DB 記的路徑還在就用它（身分換過時只有它知道是哪一個 config 目錄）；不在才照 kind 找。"""
+    """DB 記的路徑還在就用它（身份換過時只有它知道是哪一個 config 目錄）；不在才照 kind 找。"""
     if recorded and os.path.isfile(recorded):
         return recorded
     if kind == "grok" and recorded and os.path.isdir(os.path.dirname(recorded)):

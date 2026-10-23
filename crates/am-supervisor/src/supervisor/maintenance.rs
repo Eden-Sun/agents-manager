@@ -421,7 +421,7 @@ pub async fn safety_for(app: &(impl crate::capabilities::Db + crate::supervisor:
     safety_as(app, exclude, approval_id, None).await
 }
 
-/// 再多一個 `owner`：以這個人的身分問，**他自己握的租約不算擋**（只在縮小封鎖面時有差，
+/// 再多一個 `owner`：以這個人的身份問，**他自己握的租約不算擋**（只在縮小封鎖面時有差，
 /// 全靜止模式本來就不看租約）。不給 `owner` 就是舊行為：每一把租約都算擋。
 pub async fn safety_as(
     app: &(impl crate::capabilities::Db + crate::supervisor::ports::HostProbes + crate::supervisor::ports::LocalAccountView),
@@ -504,7 +504,7 @@ pub async fn safety_as(
         // `own: true` 的是發問者自己握的，不算擋。
         "delivering": delivering,
         "held_leases": held,
-        // 以誰的身分問的（沒給就是 null＝每一把租約都算擋）。回聲出來，呼叫端才分得出是不是舊 daemon 忽略了它。
+        // 以誰的身份問的（沒給就是 null＝每一把租約都算擋）。回聲出來，呼叫端才分得出是不是舊 daemon 忽略了它。
         "owner": owner,
         "working": working,
         "in_flight": in_flight,
@@ -521,7 +521,7 @@ pub async fn safety_as(
 }
 
 /// Take a window: approval checked, safety re-checked and the lease taken, all under the
-/// requester 只接受穩定 bot id；人類／外部腳本沒有 bot 身分，不由顯示名稱推斷。
+/// requester 只接受穩定 bot id；人類／外部腳本沒有 bot 身份，不由顯示名稱推斷。
 pub async fn requester_bot_id(app: &impl crate::capabilities::Db, owner: &str) -> Option<String> {
     try_requester_bot_id(app.db(), owner).await.unwrap_or(None)
 }
@@ -1431,9 +1431,9 @@ mod tests {
         .bind(&now).execute(&app.db).await.unwrap();
 
         assert_eq!(requester_bot_id(app, "b-m3").await.as_deref(), Some("b-m3"), "bot id");
-        assert_eq!(requester_bot_id(app, "AM-m3").await.as_deref(), None, "bot 名不是身分");
-        assert_eq!(requester_bot_id(app, "agents-manager-15m2dg").await.as_deref(), None, "agent 名不是身分");
-        assert!(requester_bot_id(app, "daemon-update-kick").await.is_none(), "腳本身分對不到 bot");
+        assert_eq!(requester_bot_id(app, "AM-m3").await.as_deref(), None, "bot 名不是身份");
+        assert_eq!(requester_bot_id(app, "agents-manager-15m2dg").await.as_deref(), None, "agent 名不是身份");
+        assert!(requester_bot_id(app, "daemon-update-kick").await.is_none(), "腳本身份對不到 bot");
         assert!(requester_bot_id(app, "  ").await.is_none());
     }
 
@@ -1452,15 +1452,15 @@ mod tests {
             sqlx::query("INSERT INTO runs (id,bot_id,state,agent_status,agent_name,started_at) VALUES (?,?,'running','idle',?,?)")
                 .bind(format!("run-{id}")).bind(id).bind(agent).bind(&now).execute(&app.db).await.unwrap();
         }
-        assert_eq!(try_requester_bot_id(&app.db, "agent-a").await.unwrap().as_deref(), None, "唯一 agent 名也不是身分");
+        assert_eq!(try_requester_bot_id(&app.db, "agent-a").await.unwrap().as_deref(), None, "唯一 agent 名也不是身份");
         // 同一個 agent 名可能出現在不同 live bot 的 run 上，也必須拒絕猜第一筆。
         sqlx::query("UPDATE runs SET agent_name='shared-agent' WHERE bot_id IN ('fixer-a','fixer-b')")
             .execute(&app.db).await.unwrap();
 
         assert_eq!(try_requester_bot_id(&app.db, "fixer-a").await.unwrap().as_deref(), Some("fixer-a"), "bot id 無歧義");
-        assert_eq!(try_requester_bot_id(&app.db, "fixer").await.unwrap(), None, "名稱不是身分");
+        assert_eq!(try_requester_bot_id(&app.db, "fixer").await.unwrap(), None, "名稱不是身份");
         assert_eq!(requester_bot_id(app, "fixer").await, None, "舊呼叫端遇到歧義必須 fail closed");
-        assert_eq!(try_requester_bot_id(&app.db, "shared-agent").await.unwrap(), None, "名稱不是身分");
+        assert_eq!(try_requester_bot_id(&app.db, "shared-agent").await.unwrap(), None, "名稱不是身份");
     }
 
     #[tokio::test]

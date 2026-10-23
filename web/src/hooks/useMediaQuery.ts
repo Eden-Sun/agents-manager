@@ -9,7 +9,7 @@ export const DRAWER_QUERY = '(max-width: 1024px)'
 export const PHONE_QUERY = '(max-width: 640px)'
 
 export function useMediaQuery(query: string): boolean {
-  // subscribe 要跟著 query 穩定：行內箭頭函式每次 render 身分都變，React 會 unsubscribe 再 subscribe（#1643）。
+  // subscribe 要跟著 query 穩定：行內箭頭函式每次 render 身份都變，React 會 unsubscribe 再 subscribe（#1643）。
   const subscribe = useCallback(
     (onChange: () => void) => {
       const mq = window.matchMedia(query)

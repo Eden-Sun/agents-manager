@@ -1,6 +1,6 @@
 import type { Dict } from '../../lib/i18n/types'
 
-// 區塊：hosts（額度、身分、主機、登入、Jev／監督面板）。檔案歸屬見 lib/i18n/areas.ts。
+// 區塊：hosts（額度、身份、主機、登入、Jev／監督面板）。檔案歸屬見 lib/i18n/areas.ts。
 export default {
   // lib/supervisorLabels.ts（AGM 面板標籤）
   '待送出': 'Queued',
@@ -119,7 +119,7 @@ export default {
   '在 {host} 替 {identity} 開登入：打開登入網站、貼回 code': 'Sign in to {identity} on {host}: open the sign-in site and paste the code back',
   '開啟中…': 'Opening…',
   '立即登入': 'Sign in now',
-  '這一次先不提示（這個畫面；身分又被登出時會再提示）': 'Do not remind me this time (this screen only; it will remind you again if the identity signs out again)',
+  '這一次先不提示（這個畫面；身份又被登出時會再提示）': 'Do not remind me this time (this screen only; it will remind you again if the identity signs out again)',
   '先關掉': 'Dismiss',
   '{name}的建議，機率 {p}；{note}': '{name} suggestion, probability {p}; {note}',
   '{name}的建議；{note}': '{name} suggestion; {note}',
@@ -181,7 +181,7 @@ export default {
   '主機 {host} 缺少 {tag} {kind}': 'Host {host} is missing {tag} {kind}',
   '關閉提示': 'Dismiss hint',
   '這次不再提示': 'Do not show this again',
-  // components/identityEnv.ts（身分 env 檢查）
+  // components/identityEnv.ts（身份 env 檢查）
   '第 {n} 行「{line}」沒有 =（要寫成 KEY=VALUE）': 'Line {n} “{line}” has no = (write it as KEY=VALUE)',
   '第 {n} 行的 key 是空的（要寫成 KEY=VALUE）': 'The key on line {n} is empty (write it as KEY=VALUE)',
   '第 {n} 行 key「{key}」不是合法的環境變數名稱（只能英數與 _，不能數字開頭）': 'Line {n}: key “{key}” is not a valid environment variable name (letters, digits and _ only; it cannot start with a digit)',
@@ -240,9 +240,9 @@ export default {
   'CLI 回報登入失敗': 'The CLI reported a sign-in failure',
   '送不出去': 'Could not send',
   '登入 {identity}': 'Sign in {identity}',
-  '登入 claude 身分 {identity}（{where}）': 'Sign in claude identity {identity} ({where})',
+  '登入 claude 身份 {identity}（{where}）': 'Sign in claude identity {identity} ({where})',
   '已登入（{account}）': 'Signed in ({account})',
-  '登入程序已結束，但這個身分還是未登入——重新按「登入」再試一次。': 'The sign-in process has ended, but this identity is still signed out. Press “Sign in” to try again.',
+  '登入程序已結束，但這個身份還是未登入——重新按「登入」再試一次。': 'The sign-in process has ended, but this identity is still signed out. Press “Sign in” to try again.',
   '登入程序已結束；這台主機問不出登入狀態，請以實際使用為準。': 'The sign-in process has ended, but this host cannot report the sign-in status. Go by actual use.',
   '重新偵測': 'Re-check',
   '打開登入網站': 'Open sign-in site',
@@ -421,7 +421,7 @@ export default {
   '交辦': 'Assignments',
   '目前沒有交辦。AGM 只有在你明確說「交給它」時才會派工。': 'No assignments right now. AGM only dispatches work when you explicitly say “hand it over”.',
   '設定裡有 AGM，但目前的清單找不到這顆 bot（可能還沒同步或已被移除）。': 'AGM is in the settings, but this bot is not in the current list (it may not have synced yet or was removed).',
-  // components/IdentitiesPanel.tsx（身分列表）
+  // components/IdentitiesPanel.tsx（身份列表）
   '身份：未知（這個 Run 沒有記錄啟動身份）': 'Identity: unknown (this run did not record its starting identity)',
   '未知': 'Unknown',
   '身份：不指定（本機預設）': 'Identity: unset (local default)',

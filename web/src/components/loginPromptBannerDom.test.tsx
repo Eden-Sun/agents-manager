@@ -1,5 +1,5 @@
 /**
- * 身分被登出的主動提示條（#838 補充）：真的掛 `LoginPromptBanner` 進 happy-dom，store 直接種資料。
+ * 身份被登出的主動提示條（#838 補充）：真的掛 `LoginPromptBanner` 進 happy-dom，store 直接種資料。
  * 「立即登入」走 `loginIdentity`（打開登入協助面板）；「先關掉」只對這一次登出有效。
  */
 import test, { after, afterEach, before } from 'node:test'
@@ -49,7 +49,7 @@ test('已登入：沒有提示條', async () => {
   assert.equal(banner(), null)
 })
 
-test('遠端探測問不出未登入、但回合授權失敗：出現「cc1（m4p）已登出」，點「立即登入」打開那個身分的登入', async () => {
+test('遠端探測問不出未登入、但回合授權失敗：出現「cc1（m4p）已登出」，點「立即登入」打開那個身份的登入', async () => {
   seed(st({ logged_in: null, login_needed: { since: 'T1', via: 'turn_auth_failure' } }))
   await mount(<LoginPromptBanner />)
   assert.ok(banner(), '出現提示條')
@@ -74,14 +74,14 @@ test('先關掉：同一次登出不再出現；登入成功後提示消失，�
   // 之後探測說又被登出：再提示。
   await setStatus(st({ logged_in: false }))
   assert.ok(banner(), '新的一次登出：再提示')
-  // 同一個身分的另一次回合授權失敗（新的 since）也會再提示。
+  // 同一個身份的另一次回合授權失敗（新的 since）也會再提示。
   await click(document.querySelector<HTMLButtonElement>('.lpb-dismiss')!)
   assert.equal(banner(), null)
   await setStatus(st({ logged_in: false, login_needed: { since: 'T2', via: 'turn_auth_failure' } }))
   assert.ok(banner())
 })
 
-test('沒有 bot 綁著這個身分、或主機連不上：不提示', async () => {
+test('沒有 bot 綁著這個身份、或主機連不上：不提示', async () => {
   seed(st({ logged_in: false }))
   useStore.setState({ bots: [] })
   await mount(<LoginPromptBanner />)

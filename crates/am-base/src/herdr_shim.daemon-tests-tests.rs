@@ -606,7 +606,7 @@
 
     /// issue #143（重開）：daemon 有回、但不是「排進佇列」也不是明確的 `{}`——非 2xx（400／401／403／404／5xx，body 沒有 `routing_unavailable`）、
     /// 或 2xx 卻是看不懂的內容。以前一律退回直送 pane：佇列的申請可能已經 commit，直送就是佇列一份、pane 一份；401／403 更是把認證失敗變成繞過控制面的旁路。
-    /// 現在一律不直送、明確失敗（75；身分被拒 77）。每一種都驗真的 herdr 沒被叫到 `agent prompt`。
+    /// 現在一律不直送、明確失敗（75；身份被拒 77）。每一種都驗真的 herdr 沒被叫到 `agent prompt`。
     #[test]
     fn a_daemon_that_refuses_or_answers_nonsense_never_gets_a_direct_prompt() {
         let cases: [(&str, &str, i32); 9] = [
@@ -677,8 +677,8 @@
         }
     }
 
-    /// 受管的 bot（有 bot 身分與 `AM_PORT`）而這台機器沒有 curl：問不了 daemon 這句要不要走佇列——一樣不直送，明確失敗。
-    /// 沒有 bot 身分的人工 shell 照舊直送（daemon 根本不知道它）。
+    /// 受管的 bot（有 bot 身份與 `AM_PORT`）而這台機器沒有 curl：問不了 daemon 這句要不要走佇列——一樣不直送，明確失敗。
+    /// 沒有 bot 身份的人工 shell 照舊直送（daemon 根本不知道它）。
     #[test]
     fn a_managed_bot_without_curl_does_not_type_into_the_pane() {
         let s = Sandbox::new();
@@ -700,7 +700,7 @@
         assert!(out.is_empty(), "{out:?} {err}");
         assert_eq!(rc, 75, "{err}");
         assert!(err.contains("沒有 curl"), "{err}");
-        // 人工 shell：沒有 bot 身分，直送。
+        // 人工 shell：沒有 bot 身份，直送。
         let (out, _, rc) = s.run_with_path(None, Some(path), &[("AM_TEST_AGENTS", "agm-pxf2pv")], &["agent", "prompt", "agm-pxf2pv", "hi"]);
         assert_eq!((rc, out), (0, vec!["agent".to_string(), "prompt".into(), "agm-pxf2pv".into(), "hi".into()]));
     }
@@ -1097,7 +1097,7 @@
         assert!(text.contains("export AM_CHILD_OF='b1'"), "子 agent 的 pane 要標出 parent：{text}");
     }
 
-    /// issue #1775：`agent start --identity <名>` 用母 pane 的 `AM_IDENTITIES` 挑這台的身分。帳號目錄照那個身分走，
+    /// issue #1775：`agent start --identity <名>` 用母 pane 的 `AM_IDENTITIES` 挑這台的身份。帳號目錄照那個身份走，
     /// 母 pane 自己的 `CLAUDE_CONFIG_DIR` 不帶過去；`--identity` 只在 shim 這裡認，不轉給 herdr。
     #[test]
     fn an_identity_start_unsets_the_account_dir_the_parent_had_and_strips_the_flag() {
@@ -1139,7 +1139,7 @@
         assert!(!text.contains("unset CLAUDE_CONFIG_DIR"), "{text}");
     }
 
-    /// 這台沒有那個身分：exit 2、不呼叫 herdr、不送任何東西進 pane，stderr 列出這台同 kind 可用的身分。
+    /// 這台沒有那個身份：exit 2、不呼叫 herdr、不送任何東西進 pane，stderr 列出這台同 kind 可用的身份。
     #[test]
     fn an_identity_this_host_does_not_have_stops_before_herdr_or_any_pane() {
         let s = Sandbox::new();
@@ -1154,7 +1154,7 @@
         assert_eq!(rc, 2, "{err}");
         assert!(out.is_empty(), "沒有呼叫 herdr：{out:?}");
         assert!(!log.exists(), "沒有送任何東西進 pane");
-        assert!(err.contains("nope") && err.contains("cc0") && err.contains("cc1"), "要列出可用的身分：{err}");
+        assert!(err.contains("nope") && err.contains("cc0") && err.contains("cc1"), "要列出可用的身份：{err}");
     }
 
     /// 遠端 bot（沒有 `AM_PORT`，不走 spawn fence）同樣能用 `--identity`，`--identity=` 寫在名字前面也一樣。
@@ -1331,7 +1331,7 @@
         let (out, _) = s.run(&parent, &["pane", "split", "--pane", "w1:p1", "--env", "AM_CHILD_OF=forged"]);
         assert_eq!(env_values(&out, "AM_CHILD_OF"), vec!["b1".to_string()], "{out:?}");
         let (out, _) = s.run(&[("AM_AGENT_NAME", "p-1")], &["pane", "split", "--pane", "w1:p1"]);
-        assert!(env_values(&out, "AM_CHILD_OF").is_empty(), "沒有 bot 身分的人工 shell 不標：{out:?}");
+        assert!(env_values(&out, "AM_CHILD_OF").is_empty(), "沒有 bot 身份的人工 shell 不標：{out:?}");
 
         let child = [("AM_AGENT_NAME", "p-1"), ("AM_BOT_ID", "b1"), ("AM_CHILD_OF", "p-1")];
         let (out, _) = s.run(&child, &["pane", "split", "--pane", "w1:p2"]);
@@ -1455,7 +1455,7 @@
         let s = Sandbox::new();
         let log = s.dir.join("sendtext.log");
         let base = [("AM_AGENT_NAME", "p-1"), ("HERDR_PANE_ID", "w1:p1"), ("AM_TEST_SENDTEXT_LOG", log.to_str().unwrap()), ("TMPDIR", s.dir.to_str().unwrap())];
-        // 人工 shell（沒有 bot 身分）：照舊轉給 herdr（它自己會因為缺 --pane 報錯），但不補送。
+        // 人工 shell（沒有 bot 身份）：照舊轉給 herdr（它自己會因為缺 --pane 報錯），但不補送。
         let (out, _) = s.run(&base, &["agent", "start", "kid", "--kind", "claude", "--pane", ""]);
         assert_eq!(&out[..3], ["agent", "start", "p-1-kid"]);
         // 受管的 bot：沒帶／空的 --pane 直接拒絕，herdr 也不叫。

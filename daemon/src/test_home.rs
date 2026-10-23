@@ -1,6 +1,6 @@
 //! 測試行程的 `$HOME`（資料安全審查，2026-10-02）。
 //!
-//! 很多程式碼用 `dirs::home_dir()` 找身分目錄、信任清單、CLI 設定（`~/.claude*`、`~/.claude.json`、`~/.codex`、`~/.grok`）。
+//! 很多程式碼用 `dirs::home_dir()` 找身份目錄、信任清單、CLI 設定（`~/.claude*`、`~/.claude.json`、`~/.codex`、`~/.grok`）。
 //! 測試以前直接用跑測試那個人的真 HOME：這台的 `~/.claude.json` 累積了 3 萬多筆 `/tmp/am-test-…` 專案（6.5 MB，每次 claude
 //! 啟動都要讀）、`~/.codex/config.toml` 與 `~/.grok/trusted_folders.toml` 各上千筆，`~/.claude/projects/` 有兩千多個 `am-test-*` 目錄，
 //! 更糟的是 `~/.grok/hooks/agents-manager.json`（使用者真的 grok 在用的 hook）被改成指到已經不存在的測試目錄。
@@ -8,7 +8,7 @@
 //! 所以測試行程**開始前**（`.init_array`／`__mod_init_func`，在 `main` 與任何執行緒之前）就把 `HOME` 換成一個拋棄式目錄，
 //! 行程結束時刪掉。測試要驗「寫到哪裡」的，改看 [`dir`]。
 //!
-//! 守護測試在最下面：HOME 真的換了、預設身分目錄與信任檔真的落在裡面。
+//! 守護測試在最下面：HOME 真的換了、預設身份目錄與信任檔真的落在裡面。
 
 use std::sync::OnceLock;
 
@@ -51,7 +51,7 @@ mod tests {
         assert_eq!(std::env::var_os("HOME").as_deref(), Some(home.as_os_str()));
     }
 
-    /// 沒設 `CLAUDE_CONFIG_DIR` 的預設身分目錄、以及預先信任寫的檔，都落在拋棄式 HOME 裡，不是真的 `~`。
+    /// 沒設 `CLAUDE_CONFIG_DIR` 的預設身份目錄、以及預先信任寫的檔，都落在拋棄式 HOME 裡，不是真的 `~`。
     #[tokio::test]
     async fn default_identity_dir_and_trust_stores_never_point_at_the_real_home() {
         let e = crate::testing::env().await;

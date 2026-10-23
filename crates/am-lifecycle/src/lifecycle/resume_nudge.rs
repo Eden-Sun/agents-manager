@@ -12,14 +12,14 @@
 //! - **尾巴要是被砍的工具**（[`ends_mid_tool`]）：要接回的 transcript 結尾是沒有結果的 `tool_use`（herdr 砍 pane），
 //!   或是 `tool_result`（daemon／SIGTERM，實測 exit 137）且其後沒有模型回覆。正常的模型回覆、使用者打的字（含
 //!   `[Request interrupted by user…]`）、空檔、讀不到的，都不補。檔案照這顆 bot 實際帳號的 `CLAUDE_CONFIG_DIR` 找
-//!   （[`account_transcript`]）：換過身分的話，CLI 接著寫的是複製進新帳號那一份，舊帳號那份停在接回之前。
+//!   （[`account_transcript`]）：換過身份的話，CLI 接著寫的是複製進新帳號那一份，舊帳號那份停在接回之前。
 //! - **啟動當下不佔 queued 槽**：只記在記憶體裡（[`arm`]）。`resume_outcome = verified` 且畫面 `idle` 之後再等
 //!   [`IDLE_WAIT`]；期間仍是同一個 run、仍 idle、沒有回合在飛、佇列一直是空的、這個 run 上沒有送過別的回合，
 //!   時間到才排一則（[`check_at`]）。這段期間變成 `working`／`blocked`、有人排了派工、接回不是 `verified`、使用者中斷，
 //!   這一輪就取消。AGM 或使用者的派工因此可以先佔，不會跟續行提示做成兩回合。
 //!
 //! 「重啟前在忙」有兩種讀法：
-//! - **重啟**（`restart_bot_with`：`?resume=native` restart、換身分）：停之前在鎖裡讀（[`busy_before_restart`]）。
+//! - **重啟**（`restart_bot_with`：`?resume=native` restart、換身份）：停之前在鎖裡讀（[`busy_before_restart`]）。
 //!   一鍵重啟要求閒置（`require_idle`），不會遇到。
 //! - **啟動**（herdr 整個重啟後 `start?resume=native`）：舊 run 已經被 pane 消失收成 `exited`，看它最後記的
 //!   `agent_status`（[`prior_run_ended_busy`]）。pane 是被外力收掉的，最後一次狀態就是當時的狀態。使用者自己停的
@@ -313,7 +313,7 @@ pub async fn check_at(app: &impl ResumeNudgeContext, bot_id: &str, now: Instant)
 }
 
 /// 這段對話在這個帳號底下的 transcript：`<CLAUDE_CONFIG_DIR>/projects/<cwd 目錄名>/<session>.jsonl`（`--resume` 自己也是
-/// 這樣找）。cwd 目錄名取記過的那個路徑：換身分時那份記在舊帳號底下，但 `stage_cross_identity_transcript` 照同一個名字複製過來。
+/// 這樣找）。cwd 目錄名取記過的那個路徑：換身份時那份記在舊帳號底下，但 `stage_cross_identity_transcript` 照同一個名字複製過來。
 fn account_transcript(config_dir: &str, recorded: &str, session: &str) -> Option<std::path::PathBuf> {
     let cwd_key = std::path::Path::new(recorded).parent()?.file_name()?;
     Some(std::path::Path::new(config_dir).join("projects").join(cwd_key).join(format!("{session}.jsonl")))
@@ -772,7 +772,7 @@ mod tests {
         }
     }
 
-    /// transcript 照這顆 bot 實際帳號的 `CLAUDE_CONFIG_DIR` 找：換身分後 CLI 接著寫的是複製進新帳號那份，
+    /// transcript 照這顆 bot 實際帳號的 `CLAUDE_CONFIG_DIR` 找：換身份後 CLI 接著寫的是複製進新帳號那份，
     /// 舊帳號那份（run 上記的路徑）停在接回之前，不看它。
     #[tokio::test]
     async fn the_transcript_is_read_from_the_accounts_config_dir() {
@@ -796,7 +796,7 @@ mod tests {
             .unwrap();
             let account = use_account(&e, &bot.id, &format!("cc-new-{want}")).await;
             let run = crate::lifecycle::start_bot_with(&e.app, &bot.id, strict()).await.unwrap();
-            // 換身分：啟動時把舊帳號那份複製進新帳號；之後 CLI 接著寫的是新帳號那份。
+            // 換身份：啟動時把舊帳號那份複製進新帳號；之後 CLI 接著寫的是新帳號那份。
             write_transcript(&account, &bot.id, &account_body);
             settle(&e, &bot.id, &run, Some("verified")).await;
             assert_eq!(wait_out(&e, &bot.id).await, want, "{case}");

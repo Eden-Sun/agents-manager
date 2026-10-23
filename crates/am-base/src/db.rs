@@ -71,8 +71,8 @@ CREATE TABLE IF NOT EXISTS runs (
   -- SPEC §4.4a: what this run is *actually* on — stamped from the argv it was started with,
   -- and updated when a slash command changes it live. NULL = the daemon did not start it.
   runtime_model TEXT, runtime_effort TEXT, runtime_fast INTEGER,
-  -- 這個 run 用哪個身分起來的（issue #238）：pane 裡實際的帳號。'' ＝沒有身分（預設帳號）；NULL＝沒記（不是 daemon 起的、
-  -- 或加這一欄之前的舊列），退回 bot 設定的身分。PATCH 改身分要重啟才生效，這段時間額度要記在這個身分上。
+  -- 這個 run 用哪個身份起來的（issue #238）：pane 裡實際的帳號。'' ＝沒有身份（預設帳號）；NULL＝沒記（不是 daemon 起的、
+  -- 或加這一欄之前的舊列），退回 bot 設定的身份。PATCH 改身份要重啟才生效，這段時間額度要記在這個身份上。
   runtime_identity TEXT,
   -- Native session requested by a `resume_native` start. Cleared by the first identity/turn hook.
   resume_session_id TEXT,
@@ -336,7 +336,7 @@ pub const SCHEMA_HISTORY: &[(i64, &str)] = &[
     (5, "519fd4f808b8ac5b"),
     // issue #213：`bots.instruction_files`（claude bot 讀哪份專案指示檔）。
     (6, "f75ac921663299da"),
-    // issue #238：`runs.runtime_identity`（run 用哪個身分起來的，額度記在它上面）。
+    // issue #238：`runs.runtime_identity`（run 用哪個身份起來的，額度記在它上面）。
     (7, "7372788a43638544"),
     // issue #240：`judge_shadow`（撞限第二意見的帳本，只記錄）。
     (8, "3b7f1d3c6f8712de"),
@@ -646,7 +646,7 @@ async fn apply_migrations_inner(pool: &SqlitePool, fail_after_spawn_hints_drop: 
         // issue #738: delivery is durable before the queued prompt's message timestamp and event are restamped.
         ("turns", "restamp_pending", "ALTER TABLE turns ADD COLUMN restamp_pending INTEGER NOT NULL DEFAULT 0"),
         // 排著的這一則被 flush 的額度閘擋下時看到的撞限（issue #108，`lifecycle::quota_hold`，JSON）。
-        // `app.quotas` 只在記憶體：沒有這一欄，重啟後開機叫醒的 flush 會把它送進同一個還沒額度的身分。
+        // `app.quotas` 只在記憶體：沒有這一欄，重啟後開機叫醒的 flush 會把它送進同一個還沒額度的身份。
         ("turns", "quota_hold", "ALTER TABLE turns ADD COLUMN quota_hold TEXT"),
         // 送出時 bot 沒在跑、daemon 先收下再替它啟動的那一則（issue #122，`lifecycle::start_send`）：
         // 沒有 run 也不當孤兒撤，啟動失敗只記原因（`start_error`），等使用者重新啟動或取消。
@@ -673,7 +673,7 @@ async fn apply_migrations_inner(pool: &SqlitePool, fail_after_spawn_hints_drop: 
         ("runs", "resume_outcome", "ALTER TABLE runs ADD COLUMN resume_outcome TEXT"),
         // 已棄用的 `bots.instruction_files`（issue #213，現在不讀寫）；留著 ALTER 讓更舊的 DB 開起來欄位齊全、`check_schema_drift` 不炸。
         ("bots", "instruction_files", "ALTER TABLE bots ADD COLUMN instruction_files TEXT"),
-        // run 用哪個身分起來的（issue #238）；舊列 NULL＝沒記，額度照 bot 設定的身分算，跟加這一欄之前一樣。
+        // run 用哪個身份起來的（issue #238）；舊列 NULL＝沒記，額度照 bot 設定的身份算，跟加這一欄之前一樣。
         ("runs", "runtime_identity", "ALTER TABLE runs ADD COLUMN runtime_identity TEXT"),
         // 預覽（issue #253 v2）：`spawned`（自己起的）／`attached`（接上既有的 vite）與被接上的 pid；舊列都是 spawned。
         ("bot_previews", "source", "ALTER TABLE bot_previews ADD COLUMN source TEXT NOT NULL DEFAULT 'spawned'"),
@@ -1336,7 +1336,7 @@ pub struct Run {
     pub runtime_effort: Option<String>,
     /// See [`Run::runtime_model`].
     pub runtime_fast: Option<i64>,
-    /// 啟動時的身分（issue #238），解讀見 [`Run::started_identity`]。
+    /// 啟動時的身份（issue #238），解讀見 [`Run::started_identity`]。
     pub runtime_identity: Option<String>,
     /// `API Error: …` that cut the last turn short; cleared when the next turn opens (`turn_error`).
     pub turn_error: Option<String>,
@@ -1368,8 +1368,8 @@ pub struct Run {
 }
 
 impl Run {
-    /// 這個 run 是用哪個身分起來的（issue #238）：`Some(Some(名字))`、`Some(None)`＝沒有身分（預設帳號）、
-    /// `None`＝沒記（不是 daemon 起的、或加欄位之前的舊列）——呼叫端退回 bot 設定的身分。
+    /// 這個 run 是用哪個身份起來的（issue #238）：`Some(Some(名字))`、`Some(None)`＝沒有身份（預設帳號）、
+    /// `None`＝沒記（不是 daemon 起的、或加欄位之前的舊列）——呼叫端退回 bot 設定的身份。
     pub fn started_identity(&self) -> Option<Option<String>> {
         let v = self.runtime_identity.as_deref()?;
         let v = v.trim();
@@ -1731,7 +1731,7 @@ pub async fn bot_host(pool: &SqlitePool, bot_id: &str) -> Result<String> {
 /// A live run under an identity proves that account is logged in on `host`, whatever
 /// `claude auth status` said (`quota_claude`); survives a daemon restart.
 pub async fn live_identities_on_host(pool: &SqlitePool, host: &str) -> Result<BTreeSet<String>> {
-    // run 實際的身分（issue #238）：記了就用它，沒記才用 bot 設定的。
+    // run 實際的身份（issue #238）：記了就用它，沒記才用 bot 設定的。
     let rows = sqlx::query_scalar::<_, String>(
         "SELECT DISTINCT ident FROM (
            SELECT CASE WHEN r.runtime_identity IS NULL THEN b.identity ELSE r.runtime_identity END AS ident
@@ -1777,7 +1777,7 @@ pub async fn is_caged(pool: &SqlitePool, bot_id: &str) -> std::result::Result<bo
     Ok(caged_workspace(pool, bot_id).await?.is_some())
 }
 
-/// 受限 bot 的 hook token 只用來打自己的 hook（信任分享不算）：其他任何拿 bot 身分進來的路一律擋。讀不到 DB 也擋（fail closed）。
+/// 受限 bot 的 hook token 只用來打自己的 hook（信任分享不算）：其他任何拿 bot 身份進來的路一律擋。讀不到 DB 也擋（fail closed）。
 pub async fn refuses_bot_principal(db: &SqlitePool, bot_id: &str) -> bool {
     !matches!(is_caged(db, bot_id).await, Ok(false))
 }

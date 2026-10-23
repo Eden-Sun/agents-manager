@@ -32,11 +32,11 @@ use crate::share::site::{self, FencedConn, RemoteSite, ShareSite, SiteEnv};
 /// 受限 bot 的 claude 最低版本：籠子的旗標與行為是照這版驗的（R-S2 §4.1）。
 pub const MIN_CLAUDE: &str = "2.1.288";
 
-/// 受限 bot 啟動／建立要從 `App` 拿的外部事實（`App` 在 `app_ports_p10` 實作）：本機身分的 env、bot 目錄、claude 模型清單。
+/// 受限 bot 啟動／建立要從 `App` 拿的外部事實（`App` 在 `app_ports_p10` 實作）：本機身份的 env、bot 目錄、claude 模型清單。
 ///
-/// 身分表與模型清單的既有函式要的是 `&Arc<App>`，所以這兩個是以 `&Arc<Self>` 為參數的關聯函式（`App` 實作；`Arc<App>` 不能在 daemon 實作外來 trait）。
+/// 身份表與模型清單的既有函式要的是 `&Arc<App>`，所以這兩個是以 `&Arc<Self>` 為參數的關聯函式（`App` 實作；`Arc<App>` 不能在 daemon 實作外來 trait）。
 pub trait CageEnv: ShareStorage {
-    /// 本機名叫 `identity` 的身分的 env（沒有＝空）。
+    /// 本機名叫 `identity` 的身份的 env（沒有＝空）。
     fn local_identity_env(app: &std::sync::Arc<Self>, identity: &str) -> impl std::future::Future<Output = BTreeMap<String, String>> + Send;
     /// 這顆 bot 在 daemon 資料目錄底下的目錄（id 不合法＝錯誤）。
     fn bot_dir(&self, bot_id: &str) -> anyhow::Result<PathBuf>;
@@ -171,12 +171,12 @@ const BLANK: &[&str] = &[
     "AM_REAL_CARGO",
 ];
 
-/// 把 `pane_env` 的結果收成受限 bot 的：只留 [`KEEP_AM`]、[`KEEP_CLAUDE`] 與身分（帳號）的 env，bot 自訂 env 一律丟掉，
+/// 把 `pane_env` 的結果收成受限 bot 的：只留 [`KEEP_AM`]、[`KEEP_CLAUDE`] 與身份（帳號）的 env，bot 自訂 env 一律丟掉，
 /// shim 的 `PATH` 也丟掉（不能開子 agent）；再把可能繼承來的憑證類變數蓋成空的。CLAUDE.md 一律不讀。
 pub fn cage_env(env: &mut Value, identity_env: &BTreeMap<String, String>, home: &str) {
     let Some(map) = env.as_object_mut() else { return };
     map.retain(|k, _| KEEP_AM.contains(&k.as_str()) || KEEP_CLAUDE.contains(&k.as_str()));
-    // 身分的值重算一次：bot env 可能蓋過同名的鍵，那是使用者自訂，不算數。
+    // 身份的值重算一次：bot env 可能蓋過同名的鍵，那是使用者自訂，不算數。
     for (k, v) in identity_env {
         if k.starts_with("AM_") || k == "PATH" {
             continue;
@@ -197,7 +197,7 @@ pub fn remote_cage_path(remote_path: &str, home: &str) -> String {
     dirs.join(":")
 }
 
-/// 啟動時重算 [`cage_env`] 要的身分 env（本機）。
+/// 啟動時重算 [`cage_env`] 要的身份 env（本機）。
 pub async fn identity_env(app: &std::sync::Arc<impl CageEnv>, bot: &db::Bot) -> BTreeMap<String, String> {
     match bot.identity.as_deref().filter(|s| !s.trim().is_empty()) {
         Some(idn) => CageEnv::local_identity_env(app, idn).await,
@@ -275,7 +275,7 @@ pub fn cage_settings(settings: &mut Value, workspace: &str, env: &Value) {
     map.remove("skipDangerousModePermissionPrompt");
 }
 
-/// 受限 bot 的 argv（daemon 注入的那段之後、model 之前）。不帶 bot 自訂的 args 與身分的 args：
+/// 受限 bot 的 argv（daemon 注入的那段之後、model 之前）。不帶 bot 自訂的 args 與身份的 args：
 /// 那兩個是一般 bot 用來加旗標的地方（`--dangerously-skip-permissions`、`--remote-control`…），受限 bot 一律不吃。
 /// 系統提示走檔案（`--append-system-prompt-file`，2.1.288 實測可用）：herdr 把整行啟動指令壓在 900 bytes 內、
 /// 超過就從最長的參數砍尾巴，主人寫的 persona 在最後面，會是被砍掉的那段。
@@ -356,7 +356,7 @@ pub fn system_prompt(workspace: &str, outbox: Option<&str>, persona: Option<&str
     p
 }
 
-/// 本機的家目錄字串（拿來展開身分 env）。
+/// 本機的家目錄字串（拿來展開身份 env）。
 pub fn local_home() -> String {
     crate::home::dir().map(|p| p.to_string_lossy().into_owned()).unwrap_or_default()
 }

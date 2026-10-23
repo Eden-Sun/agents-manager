@@ -85,7 +85,7 @@
         assert!(matches!(acquire(&app, "b:1", Some("BOTB"), "x", "local").await.unwrap(), Acquired::Waiting { .. }));
         let rows: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM build_slots").fetch_one(&app.db).await.unwrap();
         assert_eq!(rows as usize, MAX_ROWS_PER_BOT + 1, "表不會被撐大");
-        // 手動（UI token，沒有 bot 身分）不受這個上限管：那是人在操作。
+        // 手動（UI token，沒有 bot 身份）不受這個上限管：那是人在操作。
         assert!(matches!(acquire(&app, "manual:1", None, "x", "local").await.unwrap(), Acquired::Waiting { .. }));
     }
 
@@ -413,7 +413,7 @@
         assert!(!waiting().await, "自己的可以取消");
     }
 
-    /// HTTP 層：空 token 沒帶身分 → 403；帶 bot 身分只能取消自己的；一般 token 的放名額照舊不需要標頭。
+    /// HTTP 層：空 token 沒帶身份 → 403；帶 bot 身份只能取消自己的；一般 token 的放名額照舊不需要標頭。
     #[tokio::test]
     async fn cancelling_a_wait_over_http_needs_an_identity() {
         let env = tt::env().await;
@@ -423,7 +423,7 @@
         acquire(&app, "H:1", None, "test", "local").await.unwrap();
         let Acquired::Waiting { .. } = acquire(&app, "W:2", Some(&bot), "test", "local").await.unwrap() else { panic!("滿了應該要等") };
         let (code, _) = post_release(State(app.clone()), HeaderMap::new(), Form(ReleaseIn { holder: "W:2".into(), token: String::new(), bot_id: None })).await;
-        assert_eq!(code, axum::http::StatusCode::FORBIDDEN, "沒有身分不能取消");
+        assert_eq!(code, axum::http::StatusCode::FORBIDDEN, "沒有身份不能取消");
         let mut headers = HeaderMap::new();
         headers.insert("X-AM-Bot-Id", bot.parse().unwrap());
         headers.insert("X-AM-Bot-Token", "tok-a".parse().unwrap());

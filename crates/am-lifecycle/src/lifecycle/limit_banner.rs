@@ -17,7 +17,7 @@
 use std::collections::HashMap;
 use std::sync::{Mutex, OnceLock};
 
-/// 一張橫幅的身分：空白收斂後的 `try again at …` 那段（沒有就用整句）。畫面折行會把時間拆到下一行，
+/// 一張橫幅的身份：空白收斂後的 `try again at …` 那段（沒有就用整句）。畫面折行會把時間拆到下一行，
 /// 所以比對一律在收斂過空白的文字上做。
 fn banner_key(notice: &str) -> String {
     let squashed = squash(notice);

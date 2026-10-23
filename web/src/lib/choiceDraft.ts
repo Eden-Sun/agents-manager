@@ -75,7 +75,7 @@ function submitPage(tab: number, label: string): DraftPage {
 }
 
 /**
- * 頁面身分：題目、選項（編號與標題）、分頁列（名稱與答過與否）、review。游標位置不算，它在同一頁裡也會動。
+ * 頁面身份：題目、選項（編號與標題）、分頁列（名稱與答過與否）、review。游標位置不算，它在同一頁裡也會動。
  * 只比題目分不出換頁：pane 太矮時題目會被切成 `null`，兩頁問句相同的也分不出（2026-10-17，#1816）。
  */
 export function pageKey(menu: TuiChoiceMenu): string {
@@ -89,7 +89,7 @@ export function pageKey(menu: TuiChoiceMenu): string {
 
 /**
  * 走一格分頁並確認畫面換了。先 ←／→（別處無副作用），沒反應才 `tab`／`shift+tab`；走不動回 `null`。
- * 身分換了才算翻頁（見 `pageKey`）。題目是 `null` 時分不出「翻了」與「沒翻」，這時不補第二顆鍵（補了會跳題），直接回 `null`。
+ * 身份換了才算翻頁（見 `pageKey`）。題目是 `null` 時分不出「翻了」與「沒翻」，這時不補第二顆鍵（補了會跳題），直接回 `null`。
  * `signal` 中止後不再送任何鍵（issue #908：bot 已經離開 blocked，導覽鍵會打進正在工作的 TUI）。
  */
 export async function moveTab(io: Io, dir: 1 | -1, from: TuiChoiceMenu, signal?: AbortSignal): Promise<TuiChoiceMenu | null> {

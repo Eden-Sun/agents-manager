@@ -622,7 +622,7 @@ EOF
         local cmd="python3 $(q "$ddir/project-transfer") import --bundle $(q "$ddir/$id-moved.json.gz") --host local $(q "${pmap[@]}") --config $(q "$ddir/data/config.toml") $sup"
         rsh "$cmd --dry-run" > "$STATE/import-dry-$id.json" || die "import --dry-run $id 失敗：$(tail -3 "$STATE/import-dry-$id.json")"
         rsh "$cmd" > "$STATE/import-$id.json" || die "import $id 失敗：$(tail -3 "$STATE/import-$id.json")"
-        log "  ${id}：$("$PY" -c 'import json,sys; d=json.load(open(sys.argv[1])); print("inserted", d["inserted"]); d.get("supervisor") and print("    supervisor:", json.dumps(d["supervisor"], ensure_ascii=False)[:600]); [print("    warn:", w) for w in d["warnings"] if "用身分" not in w]' "$STATE/import-$id.json")"
+        log "  ${id}：$("$PY" -c 'import json,sys; d=json.load(open(sys.argv[1])); print("inserted", d["inserted"]); d.get("supervisor") and print("    supervisor:", json.dumps(d["supervisor"], ensure_ascii=False)[:600]); [print("    warn:", w) for w in d["warnings"] if "用身份" not in w]' "$STATE/import-$id.json")"
     done
     step_end import
 

@@ -139,7 +139,7 @@ pub async fn fork_bot(
     if source.kind == "claude" && source_transcript_path(&app, &source.id, &session_id).await?.is_none() {
         return Err(LcError::conflict(
             "no_source_transcript",
-            json!({"session_id": session_id, "message": format!("{} 的對話檔位置沒有記下來，fork 無法確認新身分底下找得到這段對話，所以不建立。", source.name)}),
+            json!({"session_id": session_id, "message": format!("{} 的對話檔位置沒有記下來，fork 無法確認新身份底下找得到這段對話，所以不建立。", source.name)}),
         ));
     }
 
@@ -250,7 +250,7 @@ async fn finish(app: &Arc<App>, mut op: ForkOp) -> Result<Response, LcError> {
     }
 
     if op.state == "created" {
-        // 來源身分是 ForkOp 持久化的 `source_bot_id`：重送時搬的還是同一顆來源 bot 的對話（#1168）。
+        // 來源身份是 ForkOp 持久化的 `source_bot_id`：重送時搬的還是同一顆來源 bot 的對話（#1168）。
         let opts = StartOpts { fork_session: Some(op.session_id.clone()), fork_source_bot: Some(op.source_bot_id.clone()), ..Default::default() };
         let (run_id, start_error) = start_fork_target_locked(app, &new_id, opts).await?;
         if let Some(error) = start_error.as_deref() {
@@ -552,7 +552,7 @@ mod tests {
         let names: Vec<String> = e.app.cfg.get().await.projects[0].bots.iter().map(|b| b.name.clone()).collect();
         assert!(!names.iter().any(|n| n.ends_with("-fork")), "{names:?}");
     }
-    /// #1265：來源 run 沒記對話檔的位置（NULL 或空字串）：沒有證據證明對話在新身分底下找得到，不能當成「沒有東西要搬」照樣 fork。
+    /// #1265：來源 run 沒記對話檔的位置（NULL 或空字串）：沒有證據證明對話在新身份底下找得到，不能當成「沒有東西要搬」照樣 fork。
     /// 在建 bot 之前就拒絕，不留下一顆啟動不了的 bot。
     #[tokio::test]
     async fn a_claude_fork_without_a_recorded_transcript_path_is_refused_before_creating_anything() {

@@ -13,7 +13,7 @@ const q = (usedPct: number) => ({ five_hour: win(usedPct), seven_day: null, fabl
  * 回歸：`[[identities]] name = "main"`、env 留空是 SPEC §16 的合法設定，它的 statusline 數字落在
  * 裸的 `claude` 上。以前側欄只認字面上的 `cc0`，於是頂端畫紅燈、側欄一片正常。
  */
-test('env 留空的身分（名字不是 cc0）也認得裸 key，頂端與側欄查到同一格', () => {
+test('env 留空的身份（名字不是 cc0）也認得裸 key，頂端與側欄查到同一格', () => {
   const quota: QuotaMap = { claude: q(97) }
   const identities = [idn('main')]
   assert.equal(quotaBaseKey(quota, 'local', 'claude', 'main', identities), 'claude')
@@ -21,7 +21,7 @@ test('env 留空的身分（名字不是 cc0）也認得裸 key，頂端與側�
   assert.equal(botQuotaLevel(quota, 'claude', 'main', 'local', null, identities)?.level, 'crit')
 })
 
-test('裸 key 只給一個身分：其他身分查不到自己那格就是沒有數字', () => {
+test('裸 key 只給一個身份：其他身份查不到自己那格就是沒有數字', () => {
   const quota: QuotaMap = { claude: q(97) }
   const identities = [idn('cc0'), idn('main'), idn('cc1', { CLAUDE_CONFIG_DIR: '/x' })]
   assert.equal(bareQuotaOwner(identities, 'claude'), 'cc0')
@@ -31,7 +31,7 @@ test('裸 key 只給一個身分：其他身分查不到自己那格就是沒有
   assert.equal(botQuotaLevel(quota, 'claude', 'cc1', 'local', null, identities), null)
 })
 
-test('有自己帳號目錄的身分讀自己那一格，不退回裸 key', () => {
+test('有自己帳號目錄的身份讀自己那一格，不退回裸 key', () => {
   const quota: QuotaMap = { claude: q(10), 'claude:cc0': q(97) }
   const own = [idn('cc0', { CLAUDE_CONFIG_DIR: '/home/me/.claude-cc0' })]
   assert.equal(quotaBaseKey(quota, 'local', 'claude', 'cc0', own), 'claude:cc0')
@@ -39,18 +39,18 @@ test('有自己帳號目錄的身分讀自己那一格，不退回裸 key', () =
 })
 
 /**
- * 回歸（2026-09-16 使用者：「怎麼又看不見 Fable 的剩餘」）：daemon 重啟那一秒身分還沒偵測完，cc0 的 statusline
+ * 回歸（2026-09-16 使用者：「怎麼又看不見 Fable 的剩餘」）：daemon 重啟那一秒身份還沒偵測完，cc0 的 statusline
  * 先寫進 `claude:cc0`；偵測完之後 daemon 改寫裸 `claude`（有 `/usage` 補的 Fable），分開那格停在啟動當下。
  * 共用預設帳號的 cc0 要讀裸 key，不因為分開那格碰巧存在就讀到過期、沒有 Fable 的數字。
  */
-test('共用預設帳號的身分讀裸 key，啟動時殘留的分開那格不蓋過它', () => {
+test('共用預設帳號的身份讀裸 key，啟動時殘留的分開那格不蓋過它', () => {
   const fresh = { five_hour: win(25), seven_day: win(76), fable: win(83) } as unknown as KindQuota
   const stale = { five_hour: win(1), seven_day: win(70), fable: null } as unknown as KindQuota
   const quota: QuotaMap = { claude: fresh, 'claude:cc0': stale }
   const identities = [idn('cc0'), idn('cc1', { CLAUDE_CONFIG_DIR: '/x' })]
   assert.equal(quotaBaseKey(quota, 'local', 'claude', 'cc0', identities), 'claude')
   assert.equal(quotaForIdentity(quota, 'local', 'claude', 'cc0', identities)?.fable?.used_pct, 83)
-  // 身分表還沒到的保底規則不變。
+  // 身份表還沒到的保底規則不變。
   assert.equal(quotaBaseKey(quota, 'local', 'claude', 'cc0', []), 'claude:cc0')
 })
 
@@ -60,7 +60,7 @@ test('額度按主機分（SPEC §14）：遠端只看它自己那台的數字',
   assert.equal(botQuotaLevel(quota, 'claude', 'cc0', 'm4p', null, [idn('cc0')]), null)
 })
 
-test('身分清單還沒到時保底沿用 cc0 這條字面規則', () => {
+test('身份清單還沒到時保底沿用 cc0 這條字面規則', () => {
   assert.equal(bareQuotaOwner([], 'claude'), 'cc0')
   assert.equal(quotaBaseKey({ claude: q(97) }, 'local', 'claude', 'cc0', []), 'claude')
 })
@@ -82,13 +82,13 @@ test('停用 cc0 之後，頂端與側欄對 main 查到同一格', () => {
   assert.equal(botQuotaWarning(quota, 'claude', 'main', 'local', claimants)?.critical, true)
 })
 
-test('兩個都不叫 cc0 的空 env 身分：誰認領裸 key 不看傳進來的順序', () => {
+test('兩個都不叫 cc0 的空 env 身份：誰認領裸 key 不看傳進來的順序', () => {
   assert.equal(bareQuotaOwner([idn('zeta'), idn('alpha')], 'claude'), 'alpha')
   assert.equal(bareQuotaOwner([idn('alpha'), idn('zeta')], 'claude'), 'alpha')
 })
 
 /** 跟 daemon `quota::identity_shares_default` 同一條：看那個 kind 的 home 變數，不看名字。 */
-test('只帶 API key 的身分仍用預設帳號；叫 cc0 卻設了自己 config dir 的有自己那一格', () => {
+test('只帶 API key 的身份仍用預設帳號；叫 cc0 卻設了自己 config dir 的有自己那一格', () => {
   const quota: QuotaMap = { claude: q(97), 'claude:cc0': q(10) }
   const apiKeyOnly = idn('work', { ANTHROPIC_API_KEY: 'x' })
   const ownCc0 = idn('cc0', { CLAUDE_CONFIG_DIR: '/home/me/.claude-cc0' })

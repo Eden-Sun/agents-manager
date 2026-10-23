@@ -401,7 +401,7 @@ AM_USAGE_DONE=0
     /// #80：quota probe 只問登入狀態跟 `/usage`，從不用工具，MCP server 起得慢或掛掉不該拖慢探測、
     /// 甚至把探測拖到 timeout。claude 2.1.274 起 `CLAUDE_CODE_MCP_STARTUP_WAIT_MS=0` 讓第一個
     /// non-interactive turn 跳過等 MCP 連線；三個會跑 `claude` 的地方（auth status、結構化
-    /// `/usage`、退回的純文字 `/usage`）都要吃得到，因為它跟身分自己的 env 一樣放進共用的 `pfx`。
+    /// `/usage`、退回的純文字 `/usage`）都要吃得到，因為它跟身份自己的 env 一樣放進共用的 `pfx`。
     #[test]
     fn the_probe_command_skips_mcp_startup_wait() {
         let cmd = probe_command("/bin/claude", &BTreeMap::new(), true);
@@ -445,7 +445,7 @@ AM_USAGE_DONE=0
     }
 
     /// 結構化的 `usage_report` 是一行完整 JSON（一次寫完，不會少桶子）。印完它之後 pipeline 卡住、`DONE` 標記一直
-    /// 等不到，也不能把它丟掉：否則逾時、這一輪讀數全沒，身分還要停 5 分鐘（同 agy #1725）。截斷的 JSON 仍不算答案。
+    /// 等不到，也不能把它丟掉：否則逾時、這一輪讀數全沒，身份還要停 5 分鐘（同 agy #1725）。截斷的 JSON 仍不算答案。
     #[test]
     fn a_complete_usage_report_printed_before_a_hang_still_counts() {
         let line = r#"{"usage_report":{"rate_limits":{"limits":[{"kind":"session","percent":30,"resets_at":"2026-09-15T23:50:00.594923+00:00"},{"kind":"weekly_all","percent":66,"resets_at":"2026-09-21T04:00:00.594948+00:00"}]}}}"#;
@@ -499,7 +499,7 @@ AM_USAGE_DONE=0
     }
 
     /// M4：裸的預設帳號以前「永不 park」——`/usage` 一壞，cc0 這種一直有 bot 在講話的帳號每 60 秒開一個 pane。
-    /// 現在它跟其他身分一樣吃退避，證據只影響退避長度。
+    /// 現在它跟其他身份一樣吃退避，證據只影響退避長度。
     #[test]
     fn the_default_account_target_backs_off_like_any_other() {
         let identities = vec![ident("cc0", &[]), ident("cc1", &[("CLAUDE_CONFIG_DIR", "$HOME/.claude-cc1")])];
@@ -535,7 +535,7 @@ AM_USAGE_DONE=0
         let input = PlanInput { host: "local", home: "/h", identities: &identities, logins: &logins, live: &live, off: &[], unnamed_running: false, statusline_keys: &statusline };
         let ts = plan_targets(&input, |_, _, _| false);
         assert_eq!(ts.len(), 2);
-        assert_eq!((ts[0].key.as_str(), ts[0].names.clone(), ts[0].login_only), ("claude", vec!["cc0".to_string()], false), "裸 target 只代表 env 真的是空的身分");
+        assert_eq!((ts[0].key.as_str(), ts[0].names.clone(), ts[0].login_only), ("claude", vec!["cc0".to_string()], false), "裸 target 只代表 env 真的是空的身份");
         assert_eq!((ts[1].key.as_str(), ts[1].login_only), ("claude:api", true));
         assert_eq!(ts[1].env.get("ANTHROPIC_API_KEY").map(String::as_str), Some("sk-test"), "登入答案要帶它自己的 env 問");
         let cmd = probe_command("/bin/claude", &ts[1].env, false);
@@ -543,8 +543,8 @@ AM_USAGE_DONE=0
         assert_eq!(crate::quota::quota_base_default_aware("claude", Some("api"), crate::quota::identity_shares_default("claude", &identities[1].env)), "claude", "額度落點規則不變");
     }
 
-    /// #404：`POST /api/quota/probe` 探的是那個身分的**額度落點**：cc0／只帶 API key 的身分都記在裸 `claude`，
-    /// 有自己 `CLAUDE_CONFIG_DIR` 的探自己那一格；沒這個身分就沒有 target（API 回 404）。
+    /// #404：`POST /api/quota/probe` 探的是那個身份的**額度落點**：cc0／只帶 API key 的身份都記在裸 `claude`，
+    /// 有自己 `CLAUDE_CONFIG_DIR` 的探自己那一格；沒這個身份就沒有 target（API 回 404）。
     #[test]
     fn a_forced_probe_targets_where_that_accounts_quota_is_stored() {
         let identities = vec![
@@ -706,7 +706,7 @@ AM_USAGE_DONE=0
         let _ = std::fs::remove_file(socket);
     }
 
-    /// 沒這個身分：什麼都不探、不開 pane，直接回 `UnknownAccount`（API 404）。
+    /// 沒這個身份：什麼都不探、不開 pane，直接回 `UnknownAccount`（API 404）。
     #[tokio::test]
     async fn a_forced_probe_of_an_unknown_account_opens_nothing() {
         let app = crate::testing::env().await.app.clone();
@@ -715,8 +715,8 @@ AM_USAGE_DONE=0
         assert!(app.quotas.lock().await.is_empty());
     }
 
-    /// L4（review 2026-09-16）：共用預設帳號的身分（cc0）停用了、沒有 run，也沒有不帶身分的 claude bot 在跑，
-    /// 裸 `claude` 就不再探測（SPEC §16.3b）。沒有任何身分指到預設帳號時照探——沒有東西可以停用。
+    /// L4（review 2026-09-16）：共用預設帳號的身份（cc0）停用了、沒有 run，也沒有不帶身份的 claude bot 在跑，
+    /// 裸 `claude` 就不再探測（SPEC §16.3b）。沒有任何身份指到預設帳號時照探——沒有東西可以停用。
     #[test]
     fn the_default_account_is_skipped_only_when_everything_on_it_is_disabled_and_idle() {
         let off = vec!["cc0".to_string()];
@@ -725,11 +725,11 @@ AM_USAGE_DONE=0
         let names = vec!["cc0".to_string()];
         assert!(skip_disabled_default(&off, &idle, &names, false));
         assert!(!skip_disabled_default(&off, &busy, &names, false), "cc0 還有 run 在跑");
-        assert!(!skip_disabled_default(&off, &idle, &names, true), "不帶身分的 claude bot 也吃預設帳號");
+        assert!(!skip_disabled_default(&off, &idle, &names, true), "不帶身份的 claude bot 也吃預設帳號");
         assert!(!skip_disabled_default(&[], &idle, &names, false), "沒停用");
-        assert!(!skip_disabled_default(&off, &idle, &[], false), "沒有身分指到預設帳號");
+        assert!(!skip_disabled_default(&off, &idle, &[], false), "沒有身份指到預設帳號");
         let two = vec!["cc0".to_string(), "main".to_string()];
-        assert!(!skip_disabled_default(&off, &idle, &two, false), "還有一個共用預設帳號的身分沒停用");
+        assert!(!skip_disabled_default(&off, &idle, &two, false), "還有一個共用預設帳號的身份沒停用");
     }
 
     #[test]
@@ -773,7 +773,7 @@ AM_USAGE_DONE=0
         assert!(!cooling_down_at(&k, false, false, std::time::Instant::now() + RETRY_AFTER_FAILURE), "a cool-down in the past is over");
     }
 
-    /// 重新驗證登入成功要把退避收掉。共用預設帳號的身分（`cc0`）的額度與退避都記在**裸 `claude`** 那把 key，
+    /// 重新驗證登入成功要把退避收掉。共用預設帳號的身份（`cc0`）的額度與退避都記在**裸 `claude`** 那把 key，
     /// 只收 `claude:cc0` 的話，使用者剛重新登入、那一格還要再被「沒登入」的 30 分鐘退避擋著。
     #[test]
     fn a_login_recheck_unparks_the_bare_default_account() {
@@ -782,7 +782,7 @@ AM_USAGE_DONE=0
         park(&bare, true);
         assert!(cooling_down(&bare, false, false));
         unpark_identity(&host, "cc0", true);
-        assert!(!cooling_down(&bare, false, false), "共用預設帳號的身分重驗成功要收掉裸 key 的退避");
+        assert!(!cooling_down(&bare, false, false), "共用預設帳號的身份重驗成功要收掉裸 key 的退避");
     }
 
     /// #892：移除／改指主機要把那台的探測退避與 usage_seen 清掉，其他主機與本機不受影響。

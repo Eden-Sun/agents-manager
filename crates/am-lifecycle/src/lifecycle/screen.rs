@@ -25,7 +25,7 @@ pub fn schedule_codex_notice_capture<C: ScreenContext>(app: &C, bot_id: &str, ru
 
 /// Persist newly seen Codex account notices (reset available or hard limit). Caller holds the bot lock.
 ///
-/// 撞限記不進正確那一格（讀不到主機、身分表還沒偵測完、排著的蓋不上憑據）時欠著（[`crate::turn_error::mark_codex_limit_hit`]，
+/// 撞限記不進正確那一格（讀不到主機、身份表還沒偵測完、排著的蓋不上憑據）時欠著（[`crate::turn_error::mark_codex_limit_hit`]，
 /// #198），回合照樣收，錯誤最後回給呼叫端。
 pub async fn capture_codex_usage_notices(app: &(impl crate::capabilities::Db + ScreenServices), bot_id: &str, expected_run_id: &str) -> anyhow::Result<()> {
     let Some(run) = db::active_run(app.db(), bot_id).await? else { return Ok(()) };
@@ -88,7 +88,7 @@ pub async fn capture_codex_usage_notices(app: &(impl crate::capabilities::Db + S
             if !fresh && in_flight.is_none() {
                 continue;
             }
-            // 記在這顆 bot 的主機與身分那一格；讀不到主機不退回 `local`（那會把本機帳號標成用盡，遠端那個用盡的身分
+            // 記在這顆 bot 的主機與身份那一格；讀不到主機不退回 `local`（那會把本機帳號標成用盡，遠端那個用盡的身份
             // 反而沒擋），記不進去就欠著，派送前與 flush 照欠著的那一筆擋（#198）。
             // 第二意見只記錄（#240）：鎖外去問，回合與額度照下面的收。
             app.shadow_limit_hit(crate::judge::Sample {
@@ -991,8 +991,8 @@ pub fn codex_limit_hit(notice: &str, at: String) -> crate::quota::LimitHit {
 /// Mirror a Codex hard limit-hit onto that host's quota row immediately (the rate-limits RPC lags).
 /// 回傳記憶體裡擋著的那一筆（同一張還沒過期的橫幅就是原本那筆）。
 ///
-/// `base` 由呼叫端算（[`crate::turn_error::mark_codex_limit_hit`]）：寫進這顆 bot 身分的 key——查詢端先查
-/// `codex:<identity>`，以前寫裸 `codex` 對不上（2026-09-13 AGM）；讀不到主機、身分表還沒偵測完都不猜（#198）。
+/// `base` 由呼叫端算（[`crate::turn_error::mark_codex_limit_hit`]）：寫進這顆 bot 身份的 key——查詢端先查
+/// `codex:<identity>`，以前寫裸 `codex` 對不上（2026-09-13 AGM）；讀不到主機、身份表還沒偵測完都不猜（#198）。
 #[allow(dead_code)]
 pub async fn apply_codex_limit_hit_quota(app: &impl ScreenServices, host: &str, base: &str, hit: crate::quota::LimitHit) -> crate::quota::LimitHit {
     app.apply_codex_limit_hit_quota(host, base, hit).await
@@ -2892,7 +2892,7 @@ mod limit_hit_quota_tests {
         app.quotas.lock().await.iter().filter(|(_, q)| q.limit_hit.is_some()).map(|(k, _)| k.clone()).collect()
     }
 
-    /// #198：畫面上的撞限橫幅記不進正確那一格（身分表還沒偵測完，算不出 `cx0` 是不是預設帳號）就欠著，不猜一格
+    /// #198：畫面上的撞限橫幅記不進正確那一格（身份表還沒偵測完，算不出 `cx0` 是不是預設帳號）就欠著，不猜一格
     /// `codex:cx0`；回合照樣收成 failed，派送前照欠著的那一筆擋。
     #[tokio::test]
     async fn a_limit_notice_whose_key_is_unknown_is_owed_not_guessed() {

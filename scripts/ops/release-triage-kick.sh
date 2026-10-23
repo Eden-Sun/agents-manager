@@ -335,7 +335,7 @@ for r in rows:
   done <<< "$TODO"
 done
 
-# 額度閘門（issue #204 §3）：該 bot 身分的 5h ≥ 門檻或有 limit_hit → 不派，列維持 pending，下一輪再看。
+# 額度閘門（issue #204 §3）：該 bot 身份的 5h ≥ 門檻或有 limit_hit → 不派，列維持 pending，下一輪再看。
 # 查不到（端點壞、找不到這顆 bot 的額度格）照派並記 log，不要因為端點壞了就永遠不做。
 # 只在真的有 pending 時才查（沒事的輪次不打 API），且一輪只查一次（兩個 kind 派給同一顆 bot）。
 QUOTA_STATE=""   # ""＝還沒查；ok／blocked

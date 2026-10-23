@@ -71,7 +71,7 @@ store 與元件就直接 import 它（例：`store.ts` 的 `toPreviewEvent`、`f
     現在只在確認框打開的當下才數（`RewindControl` 的 `afterOf`），不可倒回的泡泡只掛一個布林 selector。新加的泡泡功能不要在 selector 裡 `find`／`filter` 整段訊息。
   - **點擊才用的東西（`notify` 這類）用 `useStore.getState()`**，不為它掛 selector。
   - **Markdown 解析快取**（`lib/markdownCache.tsx`）：換 bot 再換回來，清單整個重掛，每則 assistant 訊息的 parse＋轉 React 樹約 3–5 ms；
-    快取 `react-markdown` 的輸出樹（鍵＝原文＋bot id＋元件／URL transform 身分），上限 300 則／100 萬字，單則超過 5 萬字不快取，LRU；手動展開的超長／太深訊息不快取，渲染失敗的樹會淘汰。`Bubble` 的 `memo` 只擋同一次掛載內的重 render。
+    快取 `react-markdown` 的輸出樹（鍵＝原文＋bot id＋元件／URL transform 身份），上限 300 則／100 萬字，單則超過 5 萬字不快取，LRU；手動展開的超長／太深訊息不快取，渲染失敗的樹會淘汰。`Bubble` 的 `memo` 只擋同一次掛載內的重 render。
   - **`turn_progress`（每個 run 每秒約 4 幀）不為 seq 單獨 `set`**：`lastSeq` 沒有人訂閱，只記在模組變數、併進下一次耐久幀／快照；liveReply 本來就 250 ms 節流。
   - 沒做、已知：清單沒有虛擬化（上限 500 則 DOM）；逛過的 bot 的訊息陣列（各最多 500 則）留在 store 裡，只有 bot 被刪才釋放（`prune.ts`）——
     要釋放就得連未讀計數（`recountBot` 讀 `messages`）一起改，這一輪沒碰。
@@ -83,7 +83,7 @@ store 與元件就直接 import 它（例：`store.ts` 的 `toPreviewEvent`、`f
   ② 退避只在連線**活過 10 秒**後才歸零（開成功又馬上被關的連線不再讓退避卡在 250 ms、每次都整份重抓）；
   ③ 延遲改成一半固定一半隨機（equal jitter，封頂仍約 3 秒），一群分頁同時重連不再全落在同一個 150 ms 內；
   ④ 重連與 `resync` 後也重抓 pane 清單（原本只靠 `panes_changed` 與 30 秒輪詢）。
-  已確認完整的：重連會重抓 state（bot／run／turn／queued_turn／未讀與已讀標記／主機）、額度、草稿、身分停用、已載入與有開啟回合的對話；daemon 重啟後 seq 變小由 `resync` 與 `refreshState` 的 `lastSeq` 降階處理。
+  已確認完整的：重連會重抓 state（bot／run／turn／queued_turn／未讀與已讀標記／主機）、額度、草稿、身份停用、已載入與有開啟回合的對話；daemon 重啟後 seq 變小由 `resync` 與 `refreshState` 的 `lastSeq` 降階處理。
   已知沒做：切回前景／`online` 的立即重連沒有抖動（多分頁同時醒來會同刻打回去）。
 - **blocked**：`BlockedModal`（全畫面，blocked 1 秒後自動彈出，只彈正在看的 bot，關過就不再彈直到下一次 blocked）與
   `BlockedPanel`（對話上方，全畫面開著時暫停輪詢）共用 `useTerminalSnapshot` 與 `usePaneKeys`。
@@ -96,12 +96,12 @@ store 與元件就直接 import 它（例：`store.ts` 的 `toPreviewEvent`、`f
 - **全域鍵盤**：⌥↑／⌥↓ 換 bot（bot 列內與對話框開著時不接）；**Control+1…9 跳到側欄第 n 個專案的群組對話、把側欄捲到那一列並 focus 輸入框**（2026-09-16 使用者；「第 n 個」＝側欄**畫出來**的第 n 個，搜尋時沒命中的專案整塊不畫，不算在內）——認 `event.code` 的 `Digit1…9`，所以中文輸入法照樣有效；用 Control 而非 ⌘（⌘1…9 是瀏覽器換分頁）；正在組字、對話框開著、事件已被處理就不接；第 n 個專案不存在就什麼都不做。
 - **群組任務入口**：`/api/missions` 不存在時整個入口靜默不出現，不重試不報錯。
 - **Mock**：`api/mock.ts` 的回應形狀刻意與 `daemon/src/api.rs` 一致。訊息含 `blocked`／`rm -rf` → 進 blocked；`tinyask`（或 `__amMock.tinyAsk()`）→ 題目被裁掉的 AskUserQuestion（畫面只剩選項、題目只在 `pending-question`）；`twoask`（或 `__amMock.twoAsk()`）→ 兩題（第二題可複選）、分頁列被裁掉，能一題一題答完送出（`api/mockTwoAsk.ts`，`scripts/verify-blocked-mobile.mjs` 用）；`codexasync`（或 `__amMock.codexAsync()`，要 codex bot）→ codex 非同步提問（畫面只剩 `? 1 question · shift+← to answer`、題目在 `pending-question`，shift+← 展開成編號選單，`api/mockCodexAsync.ts`，issue #1879）；`__amMock.bulletAsk()` → 問句跟選項之間夾著 `·` 條列說明的 claude 提示（2.1.280 fullscreen renderer 邀請）；`fallback` → terminal_fallback 回覆；`authfail` → 回合收在「失敗收尾（帳號或授權）」（對話長出「立即登入」，搭 `__amMock.loggedOut(bot, 'cc1')` 把 bot 綁到沒登入的身份）；
-  `slow` → 延遲 8 秒；`outbox` → 回合裡放一個 `download-test-N.txt` 進「bot 給你的檔案」（回合結束就該自己出現）。網址 `?lang=en`（或 `zh`）固定介面語言（只有 mock 認、不寫入儲存，拍英文截圖用；console 的 `__amI18n.missing()` 列出還沒有英文的句子）。console 有 `__amMock.dropSocket() / resync() / block(name) / disconnect() / reconnect()`，另有 `failNext(method, 路徑正規式, status, body)`——下一個符合的請求回那個錯（手動看錯誤路徑、截圖用，用過一次就拿掉）。更新框（`api/mockReleaseTriage.ts`，issue #561）：`__amMock.updateNotice(bot, 通知字)` 給 bot 掛更新通知（沒在跑就先啟動），`__amMock.triageOff('codex')` 清掉那個 kind 的分診帳本（演「尚未分析」）。herdr 一鍵更新（`api/mockHerdrUpdate.ts`）：`__amMock.herdrUpdate()` 推一筆 `kind:"herdr"` 的上游快照（local／m4p 都落後）並把本機 bot 開起來，header 出現 herdr 徽章；`{failOne: true}`／`{reason: 'busy_timeout'}`／`{reason: 'restart_failed'}`／`{hold: 'waiting_idle'}` 演沒接回／整次沒做／換回舊版／停在某一步；形狀照 daemon `herdr_upgrade.rs`，分診帳本跟 daemon 一樣對 herdr 回空的 rows。`__amMock.freshStart()` 演首次啟動（issue #1931）：清掉 Project／Bot 與本機身分狀態、四種 CLI 都沒裝，主畫面出現「環境準備」清單；`POST /hosts/local/tools/install` 不帶 `via_bot_id` 會開 shell 演安裝、幾秒後那個 CLI 變已安裝・未登入，shell 裡打 `<cli> login` 幾秒後變已登入；成功時推 `tool_install_done`（pane 關掉），`__amMock.installFail('claude')` 演沒裝成（pane 留著、推 `installed:false, pane_kept:true`），`installFail('claude', 'timeout')` 演逾時，`installFail('claude', null)` 恢復。`__amMock.remoteDemo()` 加一台遠端主機 `m4p`＋專案＋在跑的 bot、五格額度都有（cc0／cc1／cc2／codex／grok），回 bot id——重現遠端標題列最擠的情況（名牌＋遠端記憶體）。`__amMock.patchBot(bot, body)` 直接 PATCH 設定；`__amMock.keepWarmSkip(bot, skip)` 按／取消「不用保溫」（冰凍，晶片與側欄畫雪花；要先啟動 bot）；`__amMock.runtime(bot, {runtime_model, runtime_fast, agent_status})` 改 active run 讀回的值（演 codex 0.157 狀態列的顯示名 `GPT-6-Luna`、TUI 裡手切的 fast、在忙；#712）。
+  `slow` → 延遲 8 秒；`outbox` → 回合裡放一個 `download-test-N.txt` 進「bot 給你的檔案」（回合結束就該自己出現）。網址 `?lang=en`（或 `zh`）固定介面語言（只有 mock 認、不寫入儲存，拍英文截圖用；console 的 `__amI18n.missing()` 列出還沒有英文的句子）。console 有 `__amMock.dropSocket() / resync() / block(name) / disconnect() / reconnect()`，另有 `failNext(method, 路徑正規式, status, body)`——下一個符合的請求回那個錯（手動看錯誤路徑、截圖用，用過一次就拿掉）。更新框（`api/mockReleaseTriage.ts`，issue #561）：`__amMock.updateNotice(bot, 通知字)` 給 bot 掛更新通知（沒在跑就先啟動），`__amMock.triageOff('codex')` 清掉那個 kind 的分診帳本（演「尚未分析」）。herdr 一鍵更新（`api/mockHerdrUpdate.ts`）：`__amMock.herdrUpdate()` 推一筆 `kind:"herdr"` 的上游快照（local／m4p 都落後）並把本機 bot 開起來，header 出現 herdr 徽章；`{failOne: true}`／`{reason: 'busy_timeout'}`／`{reason: 'restart_failed'}`／`{hold: 'waiting_idle'}` 演沒接回／整次沒做／換回舊版／停在某一步；形狀照 daemon `herdr_upgrade.rs`，分診帳本跟 daemon 一樣對 herdr 回空的 rows。`__amMock.freshStart()` 演首次啟動（issue #1931）：清掉 Project／Bot 與本機身份狀態、四種 CLI 都沒裝，主畫面出現「環境準備」清單；`POST /hosts/local/tools/install` 不帶 `via_bot_id` 會開 shell 演安裝、幾秒後那個 CLI 變已安裝・未登入，shell 裡打 `<cli> login` 幾秒後變已登入；成功時推 `tool_install_done`（pane 關掉），`__amMock.installFail('claude')` 演沒裝成（pane 留著、推 `installed:false, pane_kept:true`），`installFail('claude', 'timeout')` 演逾時，`installFail('claude', null)` 恢復。`__amMock.remoteDemo()` 加一台遠端主機 `m4p`＋專案＋在跑的 bot、五格額度都有（cc0／cc1／cc2／codex／grok），回 bot id——重現遠端標題列最擠的情況（名牌＋遠端記憶體）。`__amMock.patchBot(bot, body)` 直接 PATCH 設定；`__amMock.keepWarmSkip(bot, skip)` 按／取消「不用保溫」（冰凍，晶片與側欄畫雪花；要先啟動 bot）；`__amMock.runtime(bot, {runtime_model, runtime_fast, agent_status})` 改 active run 讀回的值（演 codex 0.157 狀態列的顯示名 `GPT-6-Luna`、TUI 裡手切的 fast、在忙；#712）。
   被 trace 的 pane（§6.5e）跟 daemon 一樣分兩份白名單：看過畫面不會變成「自己開的 shell」，有 port 的每次打字都 403；第一個專案底下有 dev server（唯讀）、跑 vim 的 shell（沒 port，打得進去）、手開的 shell，另有對不到專案的 scratch 與「多出來的」各一顆。
 - 深淺色：側欄左上角一顆主題鈕三段輪流切換（跟隨系統 → 淺 → 深，存這台瀏覽器；`components/ThemeToggle.tsx`、`lib/theme.ts`）；`prefers-reduced-motion` 關掉所有動畫。
 
 ## 環境準備清單（issue #1931）
-`lib/onboarding.ts`（純函式：`onboardingModel` 算每個 kind 的狀態與「該做哪一步」）、`lib/useOnboarding.ts`（讀本機 tools／身分／herdr／Project 數）、`lib/onboardingActions.ts`（`installKindOnHost`：claude／codex／grok 打不帶 `via_bot_id` 的 `tools/install` 並切到回的 shell pane，agy 走 `installAgy`；`loginKindOnHost`：命名身分走 `loginIdentity`，預設帳號開新 shell 打登入指令）。`components/OnboardingChecklist.tsx` 有兩個出口：`OnboardingBanner`（App 的 `main` 頂端，`needed` 才畫）與環境設定「環境準備」分頁用的 `OnboardingChecklist`。`QuickAddBots` 與新增 Bot 表單的未登入提示也用 `loginKindOnHost`。決定見 UI-DECISIONS「首次啟動的環境準備清單」。
+`lib/onboarding.ts`（純函式：`onboardingModel` 算每個 kind 的狀態與「該做哪一步」）、`lib/useOnboarding.ts`（讀本機 tools／身份／herdr／Project 數）、`lib/onboardingActions.ts`（`installKindOnHost`：claude／codex／grok 打不帶 `via_bot_id` 的 `tools/install` 並切到回的 shell pane，agy 走 `installAgy`；`loginKindOnHost`：命名身份走 `loginIdentity`，預設帳號開新 shell 打登入指令）。`components/OnboardingChecklist.tsx` 有兩個出口：`OnboardingBanner`（App 的 `main` 頂端，`needed` 才畫）與環境設定「環境準備」分頁用的 `OnboardingChecklist`。`QuickAddBots` 與新增 Bot 表單的未登入提示也用 `loginKindOnHost`。決定見 UI-DECISIONS「首次啟動的環境準備清單」。
 
 ## 多語系（issue #1932）
 介面有繁中（原文）與英文兩種，預設跟隨瀏覽器（`navigator.language` 以 zh 開頭→繁中，其餘→英文），環境設定→顯示可切「跟隨瀏覽器／繁體中文／English」，存 localStorage `am-lang`，`<html lang>` 跟著換。自寫、不加依賴：`lib/i18n/`（核心）＋ `i18n/en/<區塊>.ts`（英文字典）。測試環境固定繁中（`test/node-test-shim.ts`），既有斷言繁中字串的測試不受影響。
@@ -144,7 +144,7 @@ t.x('或改用 {cmd} 開發', { cmd: <code>VITE_MOCK=1</code> })   // 句子裡�
 | Bot | Bot（不譯） | | 額度 | quota |
 | Project | Project（不譯） | | 5 小時窗／7 天窗 | 5-hour／7-day window |
 | 群組（對話） | Group chat | | 重置 | reset |
-| 任務（mission） | Mission | | 身分 | Identity／Identities |
+| 任務（mission） | Mission | | 身份 | Identity／Identities |
 | 回合 | turn | | 主機／本機 | Host／This machine（host 名 `local` 不動） |
 | 對話／終端 | Chat／Terminal | | 環境設定／環境準備 | Settings／Setup |
 | 訊息／草稿／附件 | message／draft／attachment | | 啟動／停止／重啟 | Start／Stop／Restart |
@@ -164,7 +164,7 @@ t.x('或改用 {cmd} 開發', { cmd: <code>VITE_MOCK=1</code> })   // 句子裡�
 |---|---|---|---|
 | `chat` | 對話與輸入：ChatPanel、GroupChatPanel、Blocked\*、問答卡、附件與 outbox、Markdown、終端分頁、回合錯誤；`lib/` 的 choiceDraft／composer\*／attachment\*／tui\*；store 的 send／draft／unread 小檔 | 67 | 880 |
 | `bots` | 側欄與 Bot／Project：Sidebar\*、BotSettingsPanel、Bot\* 選單與分享、預覽、模型選擇、記憶體徽章、KindTag、晶片 | 43 | 891 |
-| `hosts` | 額度／身分／主機／登入：Quota\*、IdentitiesPanel、HostsPanel、HostShell、登入相關元件、JudgePanel／SupervisorPanel／ClaudeApiPanel | 40 | 882 |
+| `hosts` | 額度／身份／主機／登入：Quota\*、IdentitiesPanel、HostsPanel、HostShell、登入相關元件、JudgePanel／SupervisorPanel／ClaudeApiPanel | 40 | 882 |
 | `updates` | 更新／安裝／部署：\*UpdateChip、Update\*、Deploy\*、\*InstallChip、環境準備、EnvShell、`store/*Update*` | 48 | 851（已含範本，實際更少） |
 | `core` | `store/store.ts`（notify 文字）、`api/*`、`schedules/*`、`share/*`（公開分享頁，自己的入口）、`App.tsx`、任務／issue／git 列、Modal／ConfirmDialog、其餘小檔 | 38 | 680 |
 

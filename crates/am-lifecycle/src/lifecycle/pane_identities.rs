@@ -1,9 +1,9 @@
-//! `AM_IDENTITIES`（issue #1775）：這台主機看得到的身分清單，注入母 bot 的 pane。herdr shim 在那個 pane 裡查
-//! `herdr agent start --identity <名>`，挑出子 pane 要用的帳號目錄；以前子 agent 只能吃母 pane 的帳號，要換身分就只剩自己起 CLI 這條路。
+//! `AM_IDENTITIES`（issue #1775）：這台主機看得到的身份清單，注入母 bot 的 pane。herdr shim 在那個 pane 裡查
+//! `herdr agent start --identity <名>`，挑出子 pane 要用的帳號目錄；以前子 agent 只能吃母 pane 的帳號，要換身份就只剩自己起 CLI 這條路。
 
 use crate::config::{expand_home, IdentityCfg};
 
-/// 身分裡帶進清單的 key：只有帳號目錄（shim 的 `AM_RESERVED_ENV_KEYS` 也只認這三個）。其他 key 可能是憑證，不進 pane env。
+/// 身份裡帶進清單的 key：只有帳號目錄（shim 的 `AM_RESERVED_ENV_KEYS` 也只認這三個）。其他 key 可能是憑證，不進 pane env。
 const ACCOUNT_KEYS: [&str; 3] = ["CLAUDE_CONFIG_DIR", "CODEX_HOME", "GROK_HOME"];
 
 /// 名稱與 kind 不能含的字元：`/`（kind 與名稱的分界）、`:`（名稱與 KEY 的分界）、`;`（筆與筆）、`,`（KEY 與 KEY）。
@@ -11,8 +11,8 @@ const BAD_NAME: [char; 4] = ['/', ':', ';', ','];
 /// 路徑值不能含的字元：`;` 與 `,`（同上）。`:` 與 `=` 在路徑裡合法，shim 會切在第一個。
 const BAD_VALUE: [char; 2] = [';', ','];
 
-/// 一台主機的身分清單，單行、`;` 分隔，格式 `<kind>/<名稱>[:KEY=路徑,KEY=路徑…]`。路徑已展開成那台的家目錄。
-/// 含控制字元或分隔字元的身分整個略過：寧可不列，也不讓一筆壞資料把整串切錯。
+/// 一台主機的身份清單，單行、`;` 分隔，格式 `<kind>/<名稱>[:KEY=路徑,KEY=路徑…]`。路徑已展開成那台的家目錄。
+/// 含控制字元或分隔字元的身份整個略過：寧可不列，也不讓一筆壞資料把整串切錯。
 pub fn identities_env(identities: &[IdentityCfg], home: &str) -> String {
     identities.iter().filter_map(|i| identity_entry(i, home)).collect::<Vec<_>>().join(";")
 }
@@ -55,7 +55,7 @@ mod tests {
         }
     }
 
-    /// 預設帳號（cc0）沒有目錄 key，只列名字；其他身分列出帳號目錄，`$HOME`／`~` 展開成那台的家目錄。
+    /// 預設帳號（cc0）沒有目錄 key，只列名字；其他身份列出帳號目錄，`$HOME`／`~` 展開成那台的家目錄。
     #[test]
     fn each_identity_is_named_and_its_account_dir_is_expanded_on_that_host() {
         let list = [
@@ -88,18 +88,18 @@ mod tests {
         assert_eq!(identities_env(&list, "/h"), "claude/ok");
     }
 
-    /// 呼叫端（`pane_env_for_fence`）會拿這台 `identities_for_host` 的結果；沒有任何身分時是空字串，shim 就回「沒有這個身分」。
+    /// 呼叫端（`pane_env_for_fence`）會拿這台 `identities_for_host` 的結果；沒有任何身份時是空字串，shim 就回「沒有這個身份」。
     #[test]
     fn no_identities_gives_an_empty_list() {
         assert_eq!(identities_env(&[], "/h"), "");
     }
 
-    /// 規則文字：換身分要用 `--identity`、清單看 `$AM_IDENTITIES`，禁止自己 export／unset，也禁止用 pane run 換帳號。
+    /// 規則文字：換身份要用 `--identity`、清單看 `$AM_IDENTITIES`，禁止自己 export／unset，也禁止用 pane run 換帳號。
     #[test]
     fn the_rules_switch_identity_with_the_flag_not_by_hand() {
         let rule = super::super::setup::child_agent_rules("proj-abc123");
-        assert!(rule.contains("--identity <身分>"), "要說明換身分的旗標：{rule}");
-        assert!(rule.contains("$AM_IDENTITIES"), "要說明這台可用的身分看哪裡");
+        assert!(rule.contains("--identity <身份>"), "要說明換身份的旗標：{rule}");
+        assert!(rule.contains("$AM_IDENTITIES"), "要說明這台可用的身份看哪裡");
         assert!(rule.contains("**禁止**自己 export／`env -u`／`unset`"), "禁止自己動帳號變數");
         assert!(rule.contains("**禁止**用 `herdr pane run <pane> \"claude …\"` 之類自己起 CLI 來換帳號"), "禁止用 pane run 換帳號");
         assert!(!rule.contains("禁止覆蓋"), "舊的「禁止覆蓋」規則要拿掉");

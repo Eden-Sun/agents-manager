@@ -10,7 +10,7 @@ use crate::db;
 use crate::state::App;
 use crate::transcript_read::{self, TranscriptRoots};
 
-/// 一顆 bot 的 transcript 來源事實（主機、身分目錄、codex home）從 `App` 取。
+/// 一顆 bot 的 transcript 來源事實（主機、身份目錄、codex home）從 `App` 取。
 struct AppTranscriptRoots<'a> {
     app: &'a Arc<App>,
     bot: &'a db::Bot,
@@ -58,7 +58,7 @@ pub(crate) async fn local_transcript_allowed(app: &Arc<App>, bot: &db::Bot, path
     transcript_read::local_transcript_allowed_for(&AppTranscriptRoots { app, bot }, path).await
 }
 
-/// 跨模組的 transcript 安全測試（讀的人、收路徑的人、App 的身分／主機事實）：它們量的是整個 daemon 接起來之後的行為，所以留在 composition 層。
+/// 跨模組的 transcript 安全測試（讀的人、收路徑的人、App 的身份／主機事實）：它們量的是整個 daemon 接起來之後的行為，所以留在 composition 層。
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -166,9 +166,9 @@ mod tests {
         sqlx::query_scalar("SELECT transcript_path FROM runs WHERE id=?").bind(run).fetch_one(&app.db).await.unwrap()
     }
 
-    /// hook 是 pane 裡的行程送的：它說 transcript 在 `/etc/passwd`、在別顆 bot（別的身分）的目錄、或用 `..` 爬出去，
+    /// hook 是 pane 裡的行程送的：它說 transcript 在 `/etc/passwd`、在別顆 bot（別的身份）的目錄、或用 `..` 爬出去，
     /// daemon 之後每次輪詢都會去讀那個檔（回合結束判斷、AskUserQuestion 補抓、`GET /pending-question`…），
-    /// 把別人的對話內容當成這顆 bot 的。路徑要在這顆 bot 自己身分的 `projects/` 底下才收。
+    /// 把別人的對話內容當成這顆 bot 的。路徑要在這顆 bot 自己身份的 `projects/` 底下才收。
     #[tokio::test]
     async fn a_hook_cannot_point_the_transcript_outside_the_bots_own_projects_dir() {
         let e = tt::env().await;

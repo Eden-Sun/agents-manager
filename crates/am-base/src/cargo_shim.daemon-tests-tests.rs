@@ -467,7 +467,7 @@ esac"#
         assert!(!err.contains("scheduler"), "{err}");
     }
 
-    /// 沒有 bot token 也沒有 UI token 檔：直接跳過排程，不假裝有身分（issue #90 的「明講的 bypass」）。
+    /// 沒有 bot token 也沒有 UI token 檔：直接跳過排程，不假裝有身份（issue #90 的「明講的 bypass」）。
     #[test]
     fn no_identity_available_bypasses_with_a_warning() {
         let s = Sandbox::new();
@@ -532,7 +532,7 @@ esac"#
         }
     }
 
-    /// 排程器回 `unauthorized`（bot 身分被拒）不會在幾秒內自己好：不等滿重試，馬上 fail closed（77），不是把認證失敗變成 bypass。
+    /// 排程器回 `unauthorized`（bot 身份被拒）不會在幾秒內自己好：不等滿重試，馬上 fail closed（77），不是把認證失敗變成 bypass。
     #[test]
     fn a_rejected_bot_identity_stops_at_once_instead_of_waiting_or_bypassing() {
         let s = Sandbox::new();
@@ -544,7 +544,7 @@ esac"#
         let t0 = std::time::Instant::now();
         let (_, err, rc) = s.run(&as_refs(&env), &["build"]);
         assert_eq!(rc, 77, "{err}");
-        assert!(t0.elapsed() < std::time::Duration::from_secs(60), "身分被拒不該等重試：{:?}", t0.elapsed());
+        assert!(t0.elapsed() < std::time::Duration::from_secs(60), "身份被拒不該等重試：{:?}", t0.elapsed());
         assert!(!log.exists(), "{err}");
         assert!(err.contains("unauthorized"), "{err}");
     }
@@ -568,7 +568,7 @@ esac"#
         assert!(err.contains("holder_bot_mismatch"), "訊息要講得出是哪一種拒絕：{err}");
     }
 
-    /// 人工 host shell（沒有 bot 身分）維持**明講的** bypass：排程器問不到就直接跑，stderr 說一聲。
+    /// 人工 host shell（沒有 bot 身份）維持**明講的** bypass：排程器問不到就直接跑，stderr 說一聲。
     #[test]
     fn a_manual_shell_keeps_the_announced_bypass_when_the_scheduler_is_down() {
         let s = Sandbox::new();
@@ -692,7 +692,7 @@ esac"#
     /// issue #153：遠端主機上的 bot pane 沒有 `AM_PORT`（遠端沒有 daemon，也不開反向埠，SPEC §11.4；daemon 不注入），
     /// 但有 `AM_BOT_ID`／`AM_HOOK_TOKEN`。以前 shim 在 `AM_PORT` 缺席時預設打 `127.0.0.1:7788`——在遠端那是**那台機器自己**，
     /// 名額要求打到不知道是誰的東西上（那台剛好也跑一份 agents-manager 的話，還會打到別顆 daemon）。
-    /// 現在有 bot 身分卻沒有 `AM_PORT` 就是「不知道 daemon 在哪」：一通 curl 都不打，stderr 明講缺 `AM_PORT`，cargo 直接跑
+    /// 現在有 bot 身份卻沒有 `AM_PORT` 就是「不知道 daemon 在哪」：一通 curl 都不打，stderr 明講缺 `AM_PORT`，cargo 直接跑
     /// （遠端那台的編譯本來就不受這台 daemon 的名額管）。每一種 shell 都驗（含 macOS 的 bash 3.2）。
     #[test]
     fn a_bot_pane_without_am_port_never_talks_to_loopback_7788() {
@@ -716,7 +716,7 @@ esac"#
         }
     }
 
-    /// 反面：預設 7788 只留給**人工 host shell**（沒有 bot 身分、用 `~/.config/agents-manager/ui-token`，SPEC 寫明的預設埠）；
+    /// 反面：預設 7788 只留給**人工 host shell**（沒有 bot 身份、用 `~/.config/agents-manager/ui-token`，SPEC 寫明的預設埠）；
     /// 有 `AM_PORT` 的（本機 bot）照它走。
     #[test]
     fn a_manual_shell_keeps_the_documented_default_port_and_a_set_am_port_wins() {
@@ -747,7 +747,7 @@ esac"#
         assert_eq!(rc, 0, "{err}");
         let request = acquire_url();
         assert!(request.contains("http://127.0.0.1:4243/"), "本機 bot 照 AM_PORT");
-        assert!(request.contains("X-AM-Bot-Id: b1") && request.contains("X-AM-Bot-Token: tok"), "Bot 請求帶成對身分：{request}");
+        assert!(request.contains("X-AM-Bot-Id: b1") && request.contains("X-AM-Bot-Token: tok"), "Bot 請求帶成對身份：{request}");
         assert!(!request.contains("X-AM-Token"), "Bot 不得同時帶共用 User token：{request}");
 
         let (_, err, rc) = s.run(
@@ -1248,7 +1248,7 @@ esac
 
     /// #1441：libtest 的命令列 `--test-threads` 優先於環境變數，shim 原本不看 `--` 之後的參數，受管的 bot 可以用
     /// `cargo test -- --test-threads=128` 握著 1 個名額開 128 條。只看第一個 `--` 之後的參數，超過名額就夾成名額的上限，
-    /// 其餘參數順序不動；`--` 之前出現的字樣不動；名額回應 `0`（daemon 明講不設）與沒有 bot 身分的人工 shell 完全不動。
+    /// 其餘參數順序不動；`--` 之前出現的字樣不動；名額回應 `0`（daemon 明講不設）與沒有 bot 身份的人工 shell 完全不動。
     #[test]
     fn a_managed_bot_cannot_raise_the_test_threads_on_the_command_line_above_its_grant() {
         let s = Sandbox::new();
@@ -1381,7 +1381,7 @@ esac
 
     /// issue #128（重開）的驗收：`max_concurrent=1`，排程器整個沒開（沒有人在聽那個埠），同時起兩顆**受管的** bot 的 cargo——
     /// 撐過整段 outage，任何時刻都不能有 cargo 在跑（沒有名額）；排程器回來之後照常排隊，兩顆各自跑完、同時在跑的最多 1 顆。
-    /// **真的** router（同 daemon 一份）＋**真的** curl＋**真的** shim；bot 身分是真的資料列（router 用 hook token 認證）。
+    /// **真的** router（同 daemon 一份）＋**真的** curl＋**真的** shim；bot 身份是真的資料列（router 用 hook token 認證）。
     /// 以前 curl 連不上就 `exec` 真的 cargo：兩顆一起編。
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn a_scheduler_that_is_down_never_lets_two_managed_cargos_compile_and_the_queue_resumes() {
@@ -1464,7 +1464,7 @@ esac
         ["/bin/sh", "/bin/bash", "/bin/dash"].into_iter().filter(|p| std::path::Path::new(p).exists()).collect()
     }
 
-    /// 租約守衛用的環境：有 bot 身分、暫存目錄指到沙盒裡（才看得出有沒有留下狀態目錄）。
+    /// 租約守衛用的環境：有 bot 身份、暫存目錄指到沙盒裡（才看得出有沒有留下狀態目錄）。
     /// 子行程（shim）開場的 SIGHUP 處置。測試行程本身可能是 `nohup` 起的（SIG_IGN 會被子行程繼承），所以要明確設：
     /// 要測「shim 會接 HUP」就 `SIG_DFL`，要測「父行程忽略 HUP」就 `SIG_IGN`（#1464）。pre_exec 裡只呼叫 `signal(2)`（async-signal-safe）。
     fn set_child_hup(cmd: &mut Command, disposition: libc::sighandler_t) {
@@ -1809,7 +1809,7 @@ esac"#,
         s.assert_group_gone(group);
         let released = std::fs::read_to_string(s.dir.join("release.log")).unwrap_or_default();
         assert!(released.contains("/build-slots/release") && released.contains("token="), "TERM 要退號碼牌：{released:?}");
-        assert!(released.contains("bot_id=b1"), "取消等待要帶 bot 身分（daemon 只讓自己取消自己的）：{released:?}");
+        assert!(released.contains("bot_id=b1"), "取消等待要帶 bot 身份（daemon 只讓自己取消自己的）：{released:?}");
         assert_eq!(status.code(), Some(130), "退出碼 130");
     }
 
@@ -1846,7 +1846,7 @@ esac"#,
         s.assert_group_gone(group);
         let released = std::fs::read_to_string(s.dir.join("release.log")).unwrap_or_default();
         assert!(released.contains("/build-slots/release") && released.contains("token="), "HUP 要退號碼牌：{released:?}");
-        assert!(released.contains("bot_id=b1"), "取消等待要帶 bot 身分：{released:?}");
+        assert!(released.contains("bot_id=b1"), "取消等待要帶 bot 身份：{released:?}");
         assert_eq!(status.code(), Some(129), "HUP 的退出碼 129");
     }
 

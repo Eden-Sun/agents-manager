@@ -24,7 +24,7 @@ import 是「目標 daemon 停著」的離線路徑：目標 daemon 沒有匯入
 hook token 重新產生；native_session_id 保留（接回用）；
 還在跑的 run 收成 exited、排隊／送出中的 turn 收成 failed（接手後由目標 `start?resume=native` 接回）；
 config.toml 裡的 bot 一律 `autostart = false`（來源還在跑時目標開機不能自己再起一份）；
-`handed_off_to`（#708）清掉；`--host local` 時 `workspace_id` 也清成 NULL（那是來源那台 herdr 的 id）。不搬憑證／身分（identity 只帶名字，目標要自己有同名身分）。
+`handed_off_to`（#708）清掉；`--host local` 時 `workspace_id` 也清成 NULL（那是來源那台 herdr 的 id）。不搬憑證／身份（identity 只帶名字，目標要自己有同名身份）。
 """
 
 import argparse
@@ -649,7 +649,7 @@ def config_warnings(cfg, bots, host):
     for b in bots:
         ident = b.get("identity")
         if ident and (ident, b["kind"]) not in have:
-            out.append(f"bot {b['name']} 用身分 {ident}（{b['kind']}）：目標 config 沒有這個身分，"
+            out.append(f"bot {b['name']} 用身份 {ident}（{b['kind']}）：目標 config 沒有這個身份，"
                        f"要看 {host} 那台自己的 alias 是否認得（SPEC §16.2），否則啟動會 409")
         if b.get("herdr_session"):
             out.append(f"bot {b['name']} 釘在 herdr session {b['herdr_session']!r}（從 default session 收編的）："

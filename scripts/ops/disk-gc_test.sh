@@ -122,7 +122,7 @@ old "$UNREAD/target/debug/.fingerprint/bar-xyz" "$UNREAD/target/debug/.fingerpri
 echo x > "$UNREAD/target/keep-me"; old "$UNREAD/target/keep-me"   # 可讀、很舊的哨兵：整棵刪的話它會跟著被刪
 chmod 000 "$UNREAD/target/debug/.fingerprint/bar-xyz"
 if [ -r "$UNREAD/target/debug/.fingerprint/bar-xyz" ]; then
-  echo "FAIL - 無法模擬讀不到（以 root 跑？）：這條測試需要非 root 身分"; FAIL=$((FAIL + 1))
+  echo "FAIL - 無法模擬讀不到（以 root 跑？）：這條測試需要非 root 身份"; FAIL=$((FAIL + 1))
 fi
 equals "exit 0" "$(run)" "0"
 exists "讀不完的 unit 子樹：target/ 整棵保留，哨兵也還在（不因為 find 沒輸出就當成久沒用）" "$UNREAD/target/keep-me"

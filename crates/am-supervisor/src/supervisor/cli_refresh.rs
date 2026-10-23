@@ -4,7 +4,7 @@
 //! 換版不會重寫——2026-09-16 線上 daemon 已經要求 lease_token，裝好的 CLI 卻沒有這個參數，租約還不回去。
 //!
 //! 規則寫死在這裡：**只動 `bin/agm`**。setup 會一併重寫 `CLAUDE.md`／`persona.md`／`runtime.json`，
-//! 協調者那條還會重設身分／model／effort，開機不能走那條。沒設定的角色、不存在的目錄一律跳過，不代建。
+//! 協調者那條還會重設身份／model／effort，開機不能走那條。沒設定的角色、不存在的目錄一律跳過，不代建。
 //! 寫不進去只記 warn 並推一則 inbox，daemon 照樣開機。`scripts/ops/*.sh` 沒有內嵌，仍要手動安裝。
 
 #[cfg(all(test, feature = "daemon-test-harness"))]

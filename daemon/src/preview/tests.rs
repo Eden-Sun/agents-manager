@@ -1117,7 +1117,7 @@ async fn an_attached_preview_does_not_silently_follow_an_unrelated_process_that_
     r.fake.server(200, 5180, "/other/web", "vite");
     let seq = r.e.app.current_seq();
     assert_eq!(status(&get(&r.e.app, &bot).await.unwrap()), "off");
-    assert!(r.e.app.current_seq() > seq, "身分變了要推 preview_changed");
+    assert!(r.e.app.current_seq() > seq, "身份變了要推 preview_changed");
     // 不相干的服務（掃不到是 dev server）也一樣。
     r.fake.vite_exits(5180);
     r.fake.vite(300, 5180, &web_dir(&r));

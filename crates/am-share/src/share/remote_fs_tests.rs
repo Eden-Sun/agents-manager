@@ -237,7 +237,7 @@ async fn inbox_write_dangling_symlink_refused() {
     assert_eq!(err, InboxError::Unavailable);
 }
 
-/// #1030：身分驗證之後、寫入之前，同一個 SSH 使用者把 inbox 裡的檔換成指向 workspace 外的連結（符號連結、硬連結），
+/// #1030：身份驗證之後、寫入之前，同一個 SSH 使用者把 inbox 裡的檔換成指向 workspace 外的連結（符號連結、硬連結），
 /// 或改名、放一個新檔。寫入只能經過建檔時握著的那個 fd：canary 的位元組不能變，上傳回失敗；攻擊者換進來的檔也不能被清掉。
 #[tokio::test]
 async fn inbox_write_never_follows_a_name_swapped_after_the_identity_check() {

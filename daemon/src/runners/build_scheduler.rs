@@ -128,7 +128,7 @@ pub async fn post_release(
             })),
         );
     }
-    // 空 token＝取消等待（#913）：沒有 token 可以證明這個 holder 是你的，所以要驗身分，而且只能取消自己的號碼牌。
+    // 空 token＝取消等待（#913）：沒有 token 可以證明這個 holder 是你的，所以要驗身份，而且只能取消自己的號碼牌。
     // 帶 token 的放名額維持原樣（token 本身就是憑證，shim 的 `trap … EXIT` 不用帶標頭）。
     let bot_id = if body.token.is_empty() {
         match authenticate(app.as_ref(), &headers, body.bot_id.as_deref()).await {
@@ -136,7 +136,7 @@ pub async fn post_release(
             Err(_) => {
                 return (
                     axum::http::StatusCode::FORBIDDEN,
-                    Json(json!({"released": false, "error": "unauthorized", "message": "取消等待要帶 bot 身分或 UI token"})),
+                    Json(json!({"released": false, "error": "unauthorized", "message": "取消等待要帶 bot 身份或 UI token"})),
                 )
             }
         }

@@ -1,5 +1,5 @@
 #!/bin/bash
-# herdr-upgrade.sh 的 daemon API 身分（issue #556）：launchd 的 service principal，不冒充 bot、不退回 UI token。
+# herdr-upgrade.sh 的 daemon API 身份（issue #556）：launchd 的 service principal，不冒充 bot、不退回 UI token。
 # 不跑升級本身（要真的 herdr／brew）；把 `svc` 函式抽出來對一顆假 daemon 打，另外對原始碼做靜態檢查。
 set -u
 HERE="$(cd "$(dirname "$0")" && pwd)"
@@ -16,7 +16,7 @@ ROOT=$(mktemp -d)
 # 收掉自己起的假 daemon 並等它結束（不 wait 的話 bash 會在結尾印一行「Terminated」，看起來像出錯）。
 trap '[ -n "${SRV_PID:-}" ] && { kill "$SRV_PID" 2>/dev/null; wait "$SRV_PID" 2>/dev/null; }; rm -rf "$ROOT"' EXIT
 
-# 假 daemon：記下每個請求的 method、path 與身分標頭，/api/supervisor/health 回 200，其他 404。
+# 假 daemon：記下每個請求的 method、path 與身份標頭，/api/supervisor/health 回 200，其他 404。
 cat > "$ROOT/server.py" <<'PY'
 import http.server, json, socketserver, sys
 log, portfile = sys.argv[1], sys.argv[2]
@@ -80,14 +80,14 @@ fresh_creds() { # fresh_creds <dir mode> <file mode>
   : > "$ROOT/requests.log"
 }
 
-# 1. 正常：帶 service 身分、不帶 UI token／bot 身分；token 不在 argv（python 讀檔）。
+# 1. 正常：帶 service 身份、不帶 UI token／bot 身份；token 不在 argv（python 讀檔）。
 fresh_creds 700 600
 check_eq "health 回 200" "200" "$(svc_code GET /api/supervisor/health)"
 last=$(tail -n 1 "$ROOT/requests.log")
 check_eq "帶 service id" "herdr-upgrade" "$(printf '%s' "$last" | python3 -c 'import json,sys; print(json.load(sys.stdin)["service_id"])')"
 check_eq "帶 service token" "svc-test-token" "$(printf '%s' "$last" | python3 -c 'import json,sys; print(json.load(sys.stdin)["service_token"])')"
 check_eq "不帶 UI token" "None" "$(printf '%s' "$last" | python3 -c 'import json,sys; print(json.load(sys.stdin)["ui_token"])')"
-check_eq "不帶 bot 身分" "None" "$(printf '%s' "$last" | python3 -c 'import json,sys; print(json.load(sys.stdin)["bot_id"])')"
+check_eq "不帶 bot 身份" "None" "$(printf '%s' "$last" | python3 -c 'import json,sys; print(json.load(sys.stdin)["bot_id"])')"
 
 # 2. notify 只送 text，不自己宣告來源。
 printf '{"text":"hi"}' > "$ROOT/notify.json"

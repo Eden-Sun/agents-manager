@@ -59,7 +59,7 @@ const STALE_WAITING: Duration = Duration::from_secs(60);
 const FIFO_LIVE_WAITER: Duration = Duration::from_secs(20);
 
 /// 每顆 bot 同時最多佔幾列（held＋waiting）。`holder` 是呼叫端自己取的，不設上限的話一顆 bot 就能用不同 holder 把佇列塞滿
-/// （FIFO 擋在最前面的是幽靈）、把表撐大。正常用法是每個進行中的 cargo 一列，遠低於這個數字。沒有 bot 身分的人工呼叫不受限。
+/// （FIFO 擋在最前面的是幽靈）、把表撐大。正常用法是每個進行中的 cargo 一列，遠低於這個數字。沒有 bot 身份的人工呼叫不受限。
 pub const MAX_ROWS_PER_BOT: usize = 32;
 
 /// holder／purpose／host 的長度上限（字元）：呼叫端給的字串原樣進 DB 再顯示在網頁。
@@ -295,7 +295,7 @@ pub async fn release(app: &(impl crate::build_scheduler::BuildSlotLock + crate::
     release_as(app, holder, token, None).await
 }
 
-/// [`release`]，多一個驗過身分的呼叫端 `bot_id`。
+/// [`release`]，多一個驗過身份的呼叫端 `bot_id`。
 ///
 /// **token 是空字串＝取消等待**（issue #913）：`waiting` 列沒有 token，等名額途中被中斷（Ctrl-C、被砍、呼叫端走了）的 shim
 /// 沒東西可以拿來放，以前號碼牌就一直留到 `STALE_WAITING`（60 秒）才被收，排在後面的人有空名額也要空等。
@@ -407,7 +407,7 @@ pub struct RenewIn {
 #[derive(Deserialize)]
 pub struct ReleaseIn {
     pub holder: String,
-    /// 空字串＝取消這個 holder 的 `waiting` 列（見 [`release_as`]）；此時要帶 bot 身分（同 acquire）或 UI token。
+    /// 空字串＝取消這個 holder 的 `waiting` 列（見 [`release_as`]）；此時要帶 bot 身份（同 acquire）或 UI token。
     pub token: String,
     /// 只有空 token（取消等待）才看；跟 acquire 的 `bot_id` 同一套驗證。
     #[serde(default)]
@@ -423,8 +423,8 @@ pub fn up<E: std::fmt::Display>(e: E) -> LcError {
 }
 
 /// Bot 請求用該 bot 的 per-bot token；有 `X-AM-Bot-Id` 時還必須與 body `bot_id` 相同。
-/// 舊 shim 在 body 帶 id、只送 `X-AM-Bot-Token`，仍可在相容期間驗證。出現任何 Bot 身分欄位後，
-/// partial／錯誤／混合 UI 憑證都拒絕，不降級成 User。沒有 Bot 身分的人工 host shell 可用 UI token。
+/// 舊 shim 在 body 帶 id、只送 `X-AM-Bot-Token`，仍可在相容期間驗證。出現任何 Bot 身份欄位後，
+/// partial／錯誤／混合 UI 憑證都拒絕，不降級成 User。沒有 Bot 身份的人工 host shell 可用 UI token。
 pub async fn authenticate(app: &(impl crate::capabilities::Db + crate::capabilities::UiToken), headers: &HeaderMap, bot_id: Option<&str>) -> Result<Option<String>, LcError> {
     let id_header_present = headers.contains_key("X-AM-Bot-Id");
     let token_header_present = headers.contains_key("X-AM-Bot-Token");

@@ -243,7 +243,7 @@ fn transcript_discovery_fails_closed_when_a_session_id_is_ambiguous() {
         .output()
         .unwrap();
     assert!(out.status.success());
-    assert_eq!(split_output(&String::from_utf8(out.stdout).unwrap()), None, "有兩份候選 transcript 時不能讓 glob 順序決定 run 身分");
+    assert_eq!(split_output(&String::from_utf8(out.stdout).unwrap()), None, "有兩份候選 transcript 時不能讓 glob 順序決定 run 身份");
 
     let other_root = dir.join("other-root");
     let folder = other_root.join("projects/-c");
@@ -494,7 +494,7 @@ async fn without_a_bound_session_the_pane_is_the_fallback() {
     assert_eq!(sync_locked(&app, &c.run_id).await.unwrap(), Synced::Unavailable);
 }
 
-/// 有 session 但對話檔不在 root 底下（別的身分的目錄）：讀不到＝Unavailable，不從別處猜。
+/// 有 session 但對話檔不在 root 底下（別的身份的目錄）：讀不到＝Unavailable，不從別處猜。
 #[tokio::test]
 async fn a_transcript_outside_the_config_roots_is_not_read() {
     let cfg = tt::track(std::env::temp_dir().canonicalize().unwrap().join(format!("am-claude-cfg-{}", db::ulid())));
@@ -894,7 +894,7 @@ fn a_recorded_path_must_sit_under_a_roots_projects_dir() {
     let ok = |p: &str| within_projects(p, &roots);
     assert!(ok("/Users/m4p/.claude-x/projects/-work/s.jsonl"));
     assert!(ok("/Users/m4p/.claude/projects/-work/s.jsonl"), "~/.claude 也是這顆 bot 的 root");
-    assert!(!ok("/Users/m4p/.claude-y/projects/-work/s.jsonl"), "別的身分");
+    assert!(!ok("/Users/m4p/.claude-y/projects/-work/s.jsonl"), "別的身份");
     assert!(!ok("/Users/m4p/.claude-xx/projects/-work/s.jsonl"), "前綴相同不算（比的是路徑元件）");
     assert!(!ok("/Users/m4p/.claude-x/projects/../../.claude-y/projects/-w/s.jsonl"));
     assert!(!ok("/Users/m4p/.claude-x/other/s.jsonl"));

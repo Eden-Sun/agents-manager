@@ -36,7 +36,7 @@ export const tr = (key: string, vars?: Vars): string => translate(getLang(), EN,
 /** 標記「這個字串是要翻譯的 key」，原樣回傳。放在模組層級的標籤表，顯示時再 `tr()`。 */
 export const msg = <K extends string>(key: LiteralKey<K>): K => key as unknown as K
 
-/** 元件用：訂閱語言，切換時重繪；回傳綁定目前語言的 `t`（含 `t.tr` 動態查詢），語言不變時身分穩定。 */
+/** 元件用：訂閱語言，切換時重繪；回傳綁定目前語言的 `t`（含 `t.tr` 動態查詢），語言不變時身份穩定。 */
 export function useT() {
   const lang = useLang()
   return useMemo(() => make(lang), [lang])

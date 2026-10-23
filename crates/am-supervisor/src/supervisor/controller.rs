@@ -169,7 +169,7 @@ pub async fn dispatch(app: &(impl crate::capabilities::Db + crate::capabilities:
     // 帳號正被 CLI 擋著（`You've hit your usage limit …`）：送出去只會換來一句系統錯誤，
     // 而 `queued` 的重試會在 backoff 用完之後把它變成 dispatch_failed——工作就這樣無聲斷掉。
     // 停在 `quota_blocked` 等額度回來，時間到了 controller 自己重送。
-    // 查不到（讀不到這顆 bot 在哪台主機，#197）不當成沒撞限——那樣會送進一個已經用盡的遠端身分：跟讀不到任務、讀不到窗口
+    // 查不到（讀不到這顆 bot 在哪台主機，#197）不當成沒撞限——那樣會送進一個已經用盡的遠端身份：跟讀不到任務、讀不到窗口
     // 同一個做法，`hold` 幾秒再看，不花重試。
     match app.try_limit_hit_for_bot(&target).await {
         Ok(Some(hit)) => {
@@ -531,7 +531,7 @@ enum MissionQuota {
     Handled,
     /// 確定不歸任務的規則管（不是任務的交辦、任務已經關了、`pick` 說原地等）：走一般的 `quota_blocked`。
     NotApplicable,
-    /// 判斷要讀的東西讀不到（任務、bot、主機、停用清單、執行者的身分）：什麼都不做，下一輪再判。
+    /// 判斷要讀的東西讀不到（任務、bot、主機、停用清單、執行者的身份）：什麼都不做，下一輪再判。
     Unavailable(String),
 }
 
@@ -545,13 +545,13 @@ const POLICY_RETRY_SECS: i64 = 10;
 
 /// 群組任務的交辦撞到額度（`docs/goals/agm-missions.md` D4–D6）。
 ///
-/// 規則在 `mission::pick`（純函式，有測試）：同一身分同一模型仍被挑中 → 照原本的等待；
-/// 挑到別的身分或要換模型 → 這件交辦進 `awaiting_review`（`turn_status=identity_switch`），
-/// 通知 AGM 用挑到的身分開 followup 接手——換身分不能續接 session（各身分的 CLAUDE_CONFIG_DIR
+/// 規則在 `mission::pick`（純函式，有測試）：同一身份同一模型仍被挑中 → 照原本的等待；
+/// 挑到別的身份或要換模型 → 這件交辦進 `awaiting_review`（`turn_status=identity_switch`），
+/// 通知 AGM 用挑到的身份開 followup 接手——換身份不能續接 session（各身份的 CLAUDE_CONFIG_DIR
 /// 不同），所以是新 bot＋新 session，不是在原 bot 上重送；驗證者找不到 Fable → 停下任務問人。
 ///
-/// 會改變派工身分、reviewer 的獨立性、任務要不要停下來的讀取一律三態（issue #160）：以前任務／bot 讀錯回「不適用」
-/// （退回一般等待），主機讀錯退回 `local`（遠端任務用本機的身分與額度），停用清單讀錯當「沒有停用」，執行者的身分讀錯
+/// 會改變派工身份、reviewer 的獨立性、任務要不要停下來的讀取一律三態（issue #160）：以前任務／bot 讀錯回「不適用」
+/// （退回一般等待），主機讀錯退回 `local`（遠端任務用本機的身份與額度），停用清單讀錯當「沒有停用」，執行者的身份讀錯
 /// 就拿掉 reviewer 的排除條件——「不知道政策」被當成政策允許。現在讀不到就 [`MissionQuota::Unavailable`]。
 async fn mission_quota(app: &(impl crate::capabilities::Db + crate::capabilities::Emit + crate::supervisor::ports::MissionOps), a: &store::Assignment, mission_id: &str, hit: &crate::quota::LimitHit, where_seen: &str) -> MissionQuota {
     match mission_quota_inner(app, a, mission_id, hit, where_seen).await {
@@ -572,12 +572,12 @@ async fn mission_quota_inner(app: &(impl crate::capabilities::Db + crate::capabi
     let raw = unavailable("identity candidates", app.mission_candidates(&host, kind).await)?;
     let cands: Vec<pick::Candidate> = raw.iter().map(|(n, d, q)| pick::Candidate { name: n, disabled: *d, quota: q.as_ref() }).collect();
     let on_5h = if m.on_5h_limit == "switch" { pick::On5hLimit::Switch } else { pick::On5hLimit::Wait };
-    // reviewer 換手時要排除執行者的身分（runbook 第 3 步的 `--exclude`）：以前固定傳 None，撞限換手挑出來的
-    // 可能就是執行者自己那個帳號，「reviewer 必須是另一個身分」被悄悄打破（review3 c1 L11）。挑不到別的身分時
-    // `pick` 回 `NoIndependentReviewer`，`quota_policy` 當成 Wait——原地等，不會退而求其次用同一個身分。
+    // reviewer 換手時要排除執行者的身份（runbook 第 3 步的 `--exclude`）：以前固定傳 None，撞限換手挑出來的
+    // 可能就是執行者自己那個帳號，「reviewer 必須是另一個身份」被悄悄打破（review3 c1 L11）。挑不到別的身份時
+    // `pick` 回 `NoIndependentReviewer`，`quota_policy` 當成 Wait——原地等，不會退而求其次用同一個身份。
     let exclude = if role == pick::Role::Reviewer { unavailable("executor identity", executor_identity(app, mission_id).await)? } else { None };
     let decision = pick::pick(role, &cands, on_5h, exclude.as_deref(), chrono::Utc::now());
-    // 撞限的是 pane 裡實際的帳號（run 起來時的身分，issue #238），而「跑 CLI 預設帳號」要解析成
+    // 撞限的是 pane 裡實際的帳號（run 起來時的身份，issue #238），而「跑 CLI 預設帳號」要解析成
     // 候選清單裡的名字才比得起來（issue #468）：以前 `unwrap_or_default()` 把它壓成空字串，
     // 而候選清單裡永遠沒有空字串，於是那種 bot 第一次撞限就換手——換手是開新 bot＋新 session。
     let current = unavailable("bot identity", app.mission_billing_identity(&host, &bot).await)?;
@@ -676,7 +676,7 @@ async fn settle_and_pause(app: &(impl crate::capabilities::Db + crate::superviso
 /// 超過 [`MAX_QUOTA_RETRIES`] 就不再等了：那通常代表額度不是「等一下就回來」的那種
 /// （credits 用完），交給 AGM 決定要換帳號、換 bot 還是放掉。
 async fn park_quota(app: &(impl crate::capabilities::Db + crate::capabilities::Emit + MissionOps + QuotaOps + JudgeOps), a: &store::Assignment, hit: &crate::quota::LimitHit, where_seen: &str) {
-    // 群組任務的交辦先照任務的規則判斷：要換手（換身分／換模型）或停下問人就不進 quota_blocked。
+    // 群組任務的交辦先照任務的規則判斷：要換手（換身份／換模型）或停下問人就不進 quota_blocked。
     if let Some(mission_id) = a.mission_id.as_deref() {
         match mission_quota(app, a, mission_id, hit, where_seen).await {
             MissionQuota::Handled => return,
@@ -770,7 +770,7 @@ pub async fn backfill_quota_limits(app: &(impl crate::capabilities::Db + crate::
         if bot_host != host {
             continue;
         }
-        // park 時撞到的是 pane 裡實際的帳號（run 起來時的身分，issue #238）；讀不到 run 同讀不到主機，這一件跳過、稍後重跑。
+        // park 時撞到的是 pane 裡實際的帳號（run 起來時的身份，issue #238）；讀不到 run 同讀不到主機，這一件跳過、稍後重跑。
         let identity = match app.billing_identity(&bot).await {
             Ok(i) => i,
             Err(e) => {
@@ -794,9 +794,9 @@ pub async fn backfill_quota_limits(app: &(impl crate::capabilities::Db + crate::
 
 /// App-backed startup retry for quota backfill lives in `runners::supervisor::runtime`.
 
-/// 這個任務的執行者現在掛在哪個身分上（最新一筆 executor 交辦的 bot）。挑 reviewer 時要排除它。
+/// 這個任務的執行者現在掛在哪個身份上（最新一筆 executor 交辦的 bot）。挑 reviewer 時要排除它。
 ///
-/// `Ok(None)` ＝ 確定沒有（沒派過執行者、那顆 bot 不在了、它沒設身分）；讀不到回 `Err`（issue #160）——以前 `.ok()?` 讓讀錯
+/// `Ok(None)` ＝ 確定沒有（沒派過執行者、那顆 bot 不在了、它沒設身份）；讀不到回 `Err`（issue #160）——以前 `.ok()?` 讓讀錯
 /// 變成 `None`，排除條件跟著消失，reviewer 可能被換到執行者自己的帳號上。
 async fn executor_identity(app: &(impl crate::capabilities::Db + crate::supervisor::ports::MissionOps), mission_id: &str) -> anyhow::Result<Option<String>> {
     let rows = store::mission_assignments(app.db(), mission_id).await?;
@@ -804,7 +804,7 @@ async fn executor_identity(app: &(impl crate::capabilities::Db + crate::supervis
     let Some(bot) = crate::db::bot(app.db(), &executor.target_bot_id).await? else { return Ok(None) };
     // 實際在跑的帳號（issue #238），預設帳號要解析成候選清單裡的名字（issue #468）——不解析的話
     // 執行者跑預設帳號時這裡回 `None`，`pick` 的 `exclude` 就是空的，reviewer 可能被挑成執行者
-    // 正在用的那個帳號，「reviewer 必須是另一個身分」被悄悄打破（同 review3 c1 L11 要擋的那件事）。
+    // 正在用的那個帳號，「reviewer 必須是另一個身份」被悄悄打破（同 review3 c1 L11 要擋的那件事）。
     let host = crate::db::bot_host(app.db(), &bot.id).await?;
     app.mission_billing_identity(&host, &bot).await
 }
@@ -1137,7 +1137,7 @@ async fn settle_finished_turn(app: &(impl crate::capabilities::Db + crate::capab
     // 回合「結束」了，但 CLI 其實是回了一句「你的用量上限到了」——那不是工作的結果。
     // 這種回合跟正常的 completed 分開處理：assignment 進 `quota_blocked` 等重送，
     // 那句系統訊息記在 `error`（不是 `result`），免得 AGM 把它讀成 bot 的回覆。
-    // 只有**這一回合**被撞限打斷才算：帳號上有撞限、這顆卻正常答完（同身分別的 bot 撞的），照常結案（review3 c1 H1）。
+    // 只有**這一回合**被撞限打斷才算：帳號上有撞限、這顆卻正常答完（同身份別的 bot 撞的），照常結案（review3 c1 H1）。
     // 所以撞限只在這一回合看起來被打斷時才查；查不到（讀不到主機，#197）不當成沒撞限。
     let end = TurnEnd { status, reply: reply.as_deref(), turn_error: turn_error.as_deref() };
     if end.cut_by_limit() {
@@ -1190,7 +1190,7 @@ impl TurnEnd<'_> {
     ///
     /// - run 記下了這回合的中斷原因：是撞限橫幅才算；斷線之類別的錯誤不算。
     /// - 正常答完（`completed`／`completed_fallback`，有回覆、回覆本身不是撞限橫幅）：不算。帳號上的撞限可能是
-    ///   同身分另一顆 bot 撞的，這顆的工作已經做完——以前照樣 park，結果沒進 `result`，之後重送再做一次，
+    ///   同身份另一顆 bot 撞的，這顆的工作已經做完——以前照樣 park，結果沒進 `result`，之後重送再做一次，
     ///   或重送用完被報成 `quota_exhausted`（review3 c1 H1）。
     /// - 其餘（失敗、沒有回覆、回覆就是橫幅）：算。codex 對排隊送進去的回合回同一張橫幅時，撞限的 `at` 不會更新，
     ///   所以不拿「撞限晚於回合開始」當必要條件。
@@ -1344,7 +1344,7 @@ pub async fn block_stale_queues(app: &(impl crate::capabilities::Cfg + crate::ca
             continue;
         }
         let why = match &hit {
-            Some(h) => format!("排進佇列等了 {} 分鐘：目標身分沒有額度（{}），看不到什麼時候回來，沒有送出", waited / 60, h.message.trim()),
+            Some(h) => format!("排進佇列等了 {} 分鐘：目標身份沒有額度（{}），看不到什麼時候回來，沒有送出", waited / 60, h.message.trim()),
             None => format!("排進佇列等了 {} 分鐘，對方一直沒有回合結束的空檔，沒有送出", waited / 60),
         };
         let text = format!("排隊中的這則沒有送出：交辦 {} {why}，已停在 blocked，一併撤回，不會再送。", a.id);
@@ -1807,7 +1807,7 @@ pub async fn apply_quota_policy(app: &(impl crate::capabilities::Db + crate::cap
     }
 }
 
-/// AGM 自己那個身分的額度讀數，走跟寫入端同一條 key 規則（`quota::quota_base_for_host`）。
+/// AGM 自己那個身份的額度讀數，走跟寫入端同一條 key 規則（`quota::quota_base_for_host`）。
 ///
 /// 以前手拼 `claude:{identity}`、查不到就借裸 `claude`：cc0 若有自己的 `CLAUDE_CONFIG_DIR`，讀到的是
 /// **預設帳號**的數字，AGM 會因為別的帳號見底而換模型或停下來等（review2 quota L3）。查不到就是沒有讀數，
@@ -2655,7 +2655,7 @@ mod manager_quota_tests {
                 updated_at: crate::db::now(), source: "test".into(), account: None, host: "local".into() }
     }
 
-    /// 身分查不到（還沒偵測、或有自己的 config dir）：key 是 `claude:<name>`。只有預設帳號有讀數時不能拿它來用。
+    /// 身份查不到（還沒偵測、或有自己的 config dir）：key 是 `claude:<name>`。只有預設帳號有讀數時不能拿它來用。
     #[tokio::test]
     async fn the_manager_never_borrows_the_default_accounts_reading() {
         let env = crate::testing::env().await;
@@ -3004,8 +3004,8 @@ mod mission_quota_tests {
         assert!(inbox_kinds(&app).await.contains(&"mission_identity_switch".to_string()));
     }
 
-    /// review3 c1 L11：reviewer 撞限換手時要排除**執行者現在的身分**。以前固定傳 `exclude=None`：
-    /// 挑出來的常常就是執行者自己那個帳號，「reviewer 必須是另一個身分」被悄悄打破。
+    /// review3 c1 L11：reviewer 撞限換手時要排除**執行者現在的身份**。以前固定傳 `exclude=None`：
+    /// 挑出來的常常就是執行者自己那個帳號，「reviewer 必須是另一個身份」被悄悄打破。
     #[tokio::test]
     async fn a_reviewer_handover_excludes_the_executors_identity() {
         let app = app().await;
@@ -3019,13 +3019,13 @@ mod mission_quota_tests {
             let mut q = app.quotas.lock().await;
             q.insert("claude:cc2".into(), quota(10.0, 10.0, 10.0)); // 額度很夠，但它是執行者
             q.insert("claude:cc1".into(), quota(10.0, 100.0, 10.0));
-            q.insert("claude:cc0".into(), quota(10.0, 100.0, 10.0)); // 其他身分都用盡：唯一「還能跑」的就是執行者
+            q.insert("claude:cc0".into(), quota(10.0, 100.0, 10.0)); // 其他身份都用盡：唯一「還能跑」的就是執行者
         }
 
         park_quota(&app, &reviewer, &hit(), "turn").await;
 
         let row = store::assignment(&app.db, &reviewer.id).await.unwrap().unwrap();
-        assert_eq!(row.status, "quota_blocked", "沒有別的身分可挑就原地等，不換到執行者身上");
+        assert_eq!(row.status, "quota_blocked", "沒有別的身份可挑就原地等，不換到執行者身上");
         assert!(
             !inbox_kinds(&app).await.contains(&"mission_identity_switch".to_string()),
             "不能換手到執行者自己的帳號"
@@ -3209,9 +3209,9 @@ mod mission_quota_tests {
         (a.status, a.quota_retries, inbox_kinds(app).await.contains(&"mission_identity_switch".to_string()))
     }
 
-    /// 驗收 2＋5：reviewer 換手要排除執行者的身分，而**執行者那顆 bot 讀不到**時以前 `executor_identity` 回 `None`，
-    /// 排除條件消失——挑出來的就是執行者自己的帳號（cc2），「reviewer 必須是另一個身分」被悄悄打破。讀不到就不判、
-    /// 不換手、不收成任何東西；DB 恢復之後照原本的規則走一次（這裡沒有別的身分可挑：原地等）。
+    /// 驗收 2＋5：reviewer 換手要排除執行者的身份，而**執行者那顆 bot 讀不到**時以前 `executor_identity` 回 `None`，
+    /// 排除條件消失——挑出來的就是執行者自己的帳號（cc2），「reviewer 必須是另一個身份」被悄悄打破。讀不到就不判、
+    /// 不換手、不收成任何東西；DB 恢復之後照原本的規則走一次（這裡沒有別的身份可挑：原地等）。
     #[tokio::test]
     async fn a_reviewer_is_not_moved_onto_the_executor_when_the_executor_cannot_be_read() {
         let app = app().await;
@@ -3229,14 +3229,14 @@ mod mission_quota_tests {
         // 執行者那顆 bot 的列解不開（讀得到、decode 失敗）。
         sqlx::query("UPDATE bots SET inject_hooks='corrupt' WHERE id='b-cc2'").execute(&app.db).await.unwrap();
         park_quota(&app, &reviewer, &hit(), "turn").await;
-        assert_eq!(snapshot(&app, &reviewer.id).await, ("queued".into(), 0, false), "讀不到執行者的身分：不換手、不收成，留著下一輪再判");
+        assert_eq!(snapshot(&app, &reviewer.id).await, ("queued".into(), 0, false), "讀不到執行者的身份：不換手、不收成，留著下一輪再判");
 
         sqlx::query("UPDATE bots SET inject_hooks=1 WHERE id='b-cc2'").execute(&app.db).await.unwrap();
         park_quota(&app, &reviewer, &hit(), "turn").await;
-        assert_eq!(snapshot(&app, &reviewer.id).await, ("quota_blocked".into(), 0, false), "讀得到了：沒有別的身分可挑，原地等");
+        assert_eq!(snapshot(&app, &reviewer.id).await, ("quota_blocked".into(), 0, false), "讀得到了：沒有別的身份可挑，原地等");
     }
 
-    /// 驗收 3＋5：使用者停用的身分讀不到（`identity_prefs` 讀錯）時以前當成「沒有停用」，被停用的 cc1 又被挑去接手。
+    /// 驗收 3＋5：使用者停用的身份讀不到（`identity_prefs` 讀錯）時以前當成「沒有停用」，被停用的 cc1 又被挑去接手。
     /// controller 的換手與 API 的 `pick` 都不能拿它當候選；恢復之後換到 cc0，只換一次。
     #[tokio::test]
     async fn a_disabled_identity_is_not_offered_when_the_preferences_cannot_be_read() {
@@ -3257,7 +3257,7 @@ mod mission_quota_tests {
         assert_eq!(snapshot(&app, &a.id).await, ("queued".into(), 0, false), "停用清單讀不到：不換手");
         let q = std::collections::HashMap::from([("role".to_string(), "executor".to_string())]);
         let res = crate::mission::api::get_pick(axum::extract::State(app.clone()), axum::extract::Path(mid.clone()), axum::extract::Query(q)).await;
-        assert!(matches!(res, Err(LcError::Unavailable(_))), "API 的挑身分也不能拿「讀不到」當「沒有停用」：{:?}", res.map(|j| j.0));
+        assert!(matches!(res, Err(LcError::Unavailable(_))), "API 的挑身份也不能拿「讀不到」當「沒有停用」：{:?}", res.map(|j| j.0));
 
         sqlx::query("ALTER TABLE identity_prefs_unreadable RENAME TO identity_prefs").execute(&app.db).await.unwrap();
         park_quota(&app, &a, &hit(), "turn").await;
@@ -3269,7 +3269,7 @@ mod mission_quota_tests {
         assert_eq!(switches, 1, "只換一次");
     }
 
-    /// 驗收 4：bot 在哪台主機讀不到時以前退回 `local`——遠端任務的換手用的是本機的身分與額度。讀不到就不判。
+    /// 驗收 4：bot 在哪台主機讀不到時以前退回 `local`——遠端任務的換手用的是本機的身份與額度。讀不到就不判。
     #[tokio::test]
     async fn a_handover_is_not_decided_on_local_identities_when_the_host_cannot_be_read() {
         let app = app().await;
@@ -3283,7 +3283,7 @@ mod mission_quota_tests {
         }
         sqlx::query("ALTER TABLE projects RENAME TO projects_unreadable").execute(&app.db).await.unwrap();
         park_quota(&app, &a, &hit(), "turn").await;
-        assert_eq!(snapshot(&app, &a.id).await, ("queued".into(), 0, false), "主機讀不到：不拿本機的身分換手");
+        assert_eq!(snapshot(&app, &a.id).await, ("queued".into(), 0, false), "主機讀不到：不拿本機的身份換手");
 
         sqlx::query("ALTER TABLE projects_unreadable RENAME TO projects").execute(&app.db).await.unwrap();
         park_quota(&app, &a, &hit(), "turn").await;
@@ -3729,7 +3729,7 @@ mod queue_dispatch_tests {
         assert_eq!(again, 1);
     }
 
-    /// issue #108：派工被 flush 的額度閘門刻意留在佇列（目標身分沒額度）。保險絲只在「看不到盡頭」時撤，
+    /// issue #108：派工被 flush 的額度閘門刻意留在佇列（目標身份沒額度）。保險絲只在「看不到盡頭」時撤，
     /// 理由寫額度，不寫「對方沒有回合結束的空檔」；撞限剛解除、flush 下一次重看就會送的那一段也不撤。
     #[tokio::test]
     async fn the_fuse_leaves_a_dispatch_held_for_quota_alone_while_the_hold_has_an_end() {
@@ -4012,7 +4012,7 @@ mod quota_restart_tests {
         sqlx::query("ALTER TABLE projects_unreadable RENAME TO projects").execute(&app.db).await.unwrap();
     }
 
-    /// #197：派送時查撞限讀不到這顆 bot 在哪台主機——以前當成沒撞限照送，可能送進一個已經用盡的遠端身分。現在 `hold`
+    /// #197：派送時查撞限讀不到這顆 bot 在哪台主機——以前當成沒撞限照送，可能送進一個已經用盡的遠端身份。現在 `hold`
     /// 幾秒、不花重試、一個字都不送；讀得到之後照撞限停進 quota_blocked。
     #[tokio::test]
     async fn a_dispatch_that_cannot_read_the_targets_host_holds_instead_of_sending() {
@@ -4033,7 +4033,7 @@ mod quota_restart_tests {
         assert_eq!(status_of(&app, &a.id).await.0, "quota_blocked", "讀得到了：照撞限停下");
     }
 
-    /// #197：時間到了、要重送之前查撞限讀不到主機——以前當成「沒人說還在擋」照樣重送（送進可能還用盡的身分，還算一次重送）。
+    /// #197：時間到了、要重送之前查撞限讀不到主機——以前當成「沒人說還在擋」照樣重送（送進可能還用盡的身份，還算一次重送）。
     /// 現在原地不動、不算次數；讀得到之後照常重送。
     #[tokio::test]
     async fn a_resume_that_cannot_read_the_targets_host_stays_parked() {
@@ -4254,7 +4254,7 @@ mod quota_restart_tests {
         }
     }
 
-    /// M3：回填要等那台的身分表進來才算 key。shell 的 cc0 是預設帳號，讀數與撞限都在裸 `claude`；
+    /// M3：回填要等那台的身份表進來才算 key。shell 的 cc0 是預設帳號，讀數與撞限都在裸 `claude`；
     /// 偵測前就回填會寫進沒人讀的 `claude:cc0`，`dispatch` 照樣看不到「還在擋」，額度列還多一格。
     #[tokio::test]
     async fn the_backfill_waits_for_the_identity_table_and_lands_where_dispatch_reads() {
@@ -4293,7 +4293,7 @@ mod quota_restart_tests {
         assert!(app.quotas.lock().await.get("claude:cc2").and_then(|q| q.limit_hit.as_ref()).is_none(), "同一台只回填一次");
     }
 
-    /// M7：回填的格子帶回 park 時那張橫幅的桶名，`mission::pick` 才不會把 5h 的等待判成週窗、把身分換掉。
+    /// M7：回填的格子帶回 park 時那張橫幅的桶名，`mission::pick` 才不會把 5h 的等待判成週窗、把身份換掉。
     #[tokio::test]
     async fn the_backfill_keeps_the_banners_bucket() {
         let app = app().await;
@@ -4684,7 +4684,7 @@ mod turn_done_quota_tests {
         store::assignment(&app.db, &a.id).await.unwrap().unwrap()
     }
 
-    /// 同身分另一顆 bot 在這回合跑到一半時撞了 5h 上限（`at` 晚於回合開始、擋整個帳號）。
+    /// 同身份另一顆 bot 在這回合跑到一半時撞了 5h 上限（`at` 晚於回合開始、擋整個帳號）。
     async fn account_hit(app: &Arc<App>) {
         let q = crate::quota::Quota {
             five_hour: None,
@@ -5093,7 +5093,7 @@ mod role_dispatch_read_failure_tests {
             dispatch(&app, &assignment_id).await;
         }
         let handed_off = store::assignment(&app.db, &assignment_id).await.unwrap().unwrap();
-        assert_eq!(handed_off.status, "awaiting_review", "讀回 responder 身分後改走角色 handoff");
+        assert_eq!(handed_off.status, "awaiting_review", "讀回 responder 身份後改走角色 handoff");
         assert!(env.herdr.calls_to("pane.send_text").iter().all(|p| p["pane_id"] != pane), "角色 handoff 不得 prompt 進角色 pane");
     }
 }
@@ -5181,7 +5181,7 @@ mod responder_attribution_read_failure_tests {
             dispatch(&app, &assignment_id).await;
         }
         let held = store::assignment(&app.db, &assignment_id).await.unwrap().unwrap();
-        assert_eq!(held.status, "queued", "responder 身分讀不到時不可送出");
+        assert_eq!(held.status, "queued", "responder 身份讀不到時不可送出");
         assert_eq!(held.attempts, 0, "歸屬查詢故障不花派送次數");
         assert!(held.next_attempt_at.is_some(), "讀取失敗後要安排重試");
         assert!(env.herdr.calls_to("pane.send_text").iter().all(|p| p["pane_id"] != pane), "不可把 patrol attribution 送進 worker pane");

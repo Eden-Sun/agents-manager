@@ -1,6 +1,6 @@
 //! `--resume` 接回之後、驗證之前，prompt 不准進去（issue #92）。
 //!
-//! 換身分（撞額度 → 換帳號）或閒置叫醒用 `--resume <session>` 把原本那段對話接回來。CLI 接不接得回，
+//! 換身份（撞額度 → 換帳號）或閒置叫醒用 `--resume <session>` 把原本那段對話接回來。CLI 接不接得回，
 //! 要等它自己回報 session 才知道：claude 起來時的 `SessionStart` hook 帶的 session 跟要接的一樣就是接回了
 //! （`hookrecv::consume_resume_session` 記成 `verified`）；不一樣就是 CLI 默默開了新對話（`mismatch`，
 //! 聊天室裡會有一則 `context_lost` 說明）。以前兩件事都在，**中間沒有閘門**：run 一變成 running＋idle，
@@ -34,7 +34,7 @@ pub const VERIFY_WINDOW: Duration = Duration::from_secs(120);
 /// 時間不算進 [`VERIFY_WINDOW`]。人按下去之後，回報還要走一趟遠端 spool 掃描（30 秒一輪）才回得到 daemon，
 /// 所以狀態真的變了之後至少再等這麼久才肯走退路。
 ///
-/// #92 的 live-SSH 端到端撞到的就是這個：換身分之後的新設定目錄沒信任過專案目錄，遠端的 claude 停在
+/// #92 的 live-SSH 端到端撞到的就是這個：換身份之後的新設定目錄沒信任過專案目錄，遠端的 claude 停在
 /// 「❯ No, exit」等了四分半（`agent_status='blocked'`）。窗口是從 `runs.started_at` 算的，早就過了；
 /// 人一按下去、`blocked → idle` 那一瞬 flush 回來，閘門會當場記 `unverified`、在聊天室留一則說錯話的
 /// 提醒，然後把排著的派工送進一段還沒確認的對話——而真正的 `SessionStart` 下一輪掃描就到了。
@@ -297,7 +297,7 @@ mod tests {
     async fn a_queued_prompt_waits_until_the_resumed_session_is_confirmed() {
         let (e, bot, run) = bot_and_run("claude", 1, Some("s-keep"), &db::now()).await;
         let app = e.app.clone();
-        let queued = queue_one(&app, &bot.id, "換身分之後的第一句").await;
+        let queued = queue_one(&app, &bot.id, "換身份之後的第一句").await;
         forget_queue_retry_timer(&bot.id);
 
         flush_queued_locked(&app, &bot.id).await.unwrap();
@@ -441,7 +441,7 @@ mod tests {
         forget_queue_retry_timer(&bot.id);
     }
 
-    /// #92 live-SSH（2026-09-23）：換身分之後的新設定目錄沒信任過專案目錄，遠端的 claude 停在信任提示
+    /// #92 live-SSH（2026-09-23）：換身份之後的新設定目錄沒信任過專案目錄，遠端的 claude 停在信任提示
     /// （`agent_status='blocked'`）四分半。窗口是從 `runs.started_at` 算的，這段時間 CLI 根本還沒起來、
     /// 不可能有回報——不能讓它燒掉窗口，人按掉之後也要留一輪遠端 spool 掃描的時間。
     #[tokio::test]
@@ -483,7 +483,7 @@ mod tests {
         let long_ago = db::iso_at(chrono::Utc::now() - chrono::Duration::seconds(600));
         let (e, bot, run) = bot_and_run("claude", 1, Some("s-trust"), &long_ago).await;
         let app = e.app.clone();
-        let queued = queue_one(&app, &bot.id, "換身分之後排著的派工").await;
+        let queued = queue_one(&app, &bot.id, "換身份之後排著的派工").await;
         // 十分鐘都卡在信任提示，然後人按下去：`blocked → idle` 讓 trigger 蓋上 `agent_status_since`。
         for st in ["blocked", "idle"] {
             sqlx::query("UPDATE runs SET agent_status = ? WHERE id = ?").bind(st).bind(&run.id).execute(&app.db).await.unwrap();

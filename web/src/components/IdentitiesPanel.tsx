@@ -34,7 +34,7 @@ export function IdentityBadge({
   // 沒指定身份也要標出來，不然本機預設和 cc1 在列表上長得一樣。
   if (!name) {
     if (!showDefault) return null
-    // claude 的本機預設帳號就是 cc0；其他 kind 沒有這套身分。
+    // claude 的本機預設帳號就是 cc0；其他 kind 沒有這套身份。
     if (kind && kind !== 'claude') {
       return (
         <span className="identity-badge is-default" title={t('身份：不指定（本機預設）')}>
@@ -61,7 +61,7 @@ function IdentityHostLogins({ name, kind, only }: { name: string; kind?: string;
   const localStatus = useStore((s) => s.localIdentityStatus[name])
   const localConnected = useStore((s) => s.connected)
   const allHosts = useStore((s) => s.hosts)
-  // 明寫 host 的身分只屬於那一台：別台同名的登入狀態是別的帳號，不能掛在這一列。
+  // 明寫 host 的身份只屬於那一台：別台同名的登入狀態是別的帳號，不能掛在這一列。
   const pinned = only && only !== 'local' ? only : null
   const hosts = pinned ? allHosts.filter((h) => h.name === pinned) : allHosts
   const rows: { host: string; label: string; state: boolean | null; account: string | null; reason: string | null; connected: boolean }[] = pinned
@@ -251,7 +251,7 @@ function IdentityRow({ host, name }: { host: string; name: string }) {
         <span className="identity-name">
           <IdentityBadge name={ident.name} />
           <KindTag kind={ident.kind} />
-          {/* 身分是每台一份（SPEC §16.2）：同名的 cc1 在別台是別的帳號，列上要看得出是哪一台。 */}
+          {/* 身份是每台一份（SPEC §16.2）：同名的 cc1 在別台是別的帳號，列上要看得出是哪一台。 */}
           <span className="host-count">{hostLabel(host)}</span>
           <span className="host-count">{used > 0 ? t('{n} 個 Bot', { n: used }) : t('未使用')}</span>
           <DisabledChip host={host} kind={ident.kind} name={ident.name} />
@@ -313,7 +313,7 @@ const ENV_PREFILL: Record<BotKind, string> = {
   claude: 'CLAUDE_CONFIG_DIR=$HOME/.claude-',
   codex: 'CODEX_HOME=$HOME/.codex-',
   grok: 'GROK_HOME=$HOME/.grok-',
-  // agy 的設定目錄只認 `$HOME`、沒有環境變數可換（第一階段單一身分，這個表單不提供 agy）。
+  // agy 的設定目錄只認 `$HOME`、沒有環境變數可換（第一階段單一身份，這個表單不提供 agy）。
   agy: '',
 }
 
