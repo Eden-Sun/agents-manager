@@ -1843,7 +1843,7 @@
         let hit = LimitHit { message: "You hit your weekly limit.".into(), until: Some(resets.clone()),
             at: iso(now - chrono::Duration::hours(2)), bucket: Some("seven_day".into()) };
         let cached = grok_reading(&iso(now - chrono::Duration::minutes(1)), None, Some(55.0), Some(&resets));
-        persist_cache(&app, &key, &cached).await;
+        persist_cache_for_test(&app, &key, &cached).await;
         app.quotas.lock().await.clear();
         load_cache(&app).await.unwrap();
         assert!(app.quota_stale.lock().await.contains(&key), "前提：開機回填，旗標掛著");
