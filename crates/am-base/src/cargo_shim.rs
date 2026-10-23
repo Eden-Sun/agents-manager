@@ -192,6 +192,10 @@ am_curl_lease() {
 # 放名額（issue #1443）：以前只打一通、5 秒逾時、不看結果，那一列就要白佔到 TTL（agm-host 是 180 秒）。現在最多試 3 次（每次 10 秒，
 # 中間等 1 秒），回應含 `"released":true` 就停。連不上（curl 結束碼 7，daemon 沒開）當場放棄：那時多等沒有意義，列本來就只能等 TTL。
 # 這個函式也會在 EXIT／INT／TERM 的 trap 裡跑，最壞情況多等約 30 秒。
+#
+# 兩次嘗試之間的停頓與殺行程樹的寬限每一格，都是 `AM_SHIM_PAUSE`（預設 1 秒）：只給測試縮短，正式路徑不設。
+AM_SHIM_PAUSE=${AM_SHIM_PAUSE:-1}
+
 am_release_lease() {
     _rl_try=0
     while [ "$_rl_try" -lt 3 ]; do
@@ -201,7 +205,7 @@ am_release_lease() {
         case "$_rl_resp" in *'"released":true'*) return 0 ;; esac
         [ "$_rl_rc" -ne 7 ] || return 0
         [ "$_rl_try" -lt 3 ] || break
-        sleep 1
+        sleep "$AM_SHIM_PAUSE"
     done
     return 0
 }
@@ -290,7 +294,7 @@ am_kill_tree() {
     # 寬限最多兩秒：TERM 之後一秒內都死光了就不必多等，還活著的才補 KILL。
     _kt_wait=0
     while [ "$_kt_wait" -lt 2 ]; do
-        sleep 1
+        sleep "$AM_SHIM_PAUSE"
         _kt_alive=""
         for _kt_p in $_kt_set; do
             kill -0 "$_kt_p" 2>/dev/null && _kt_alive="$_kt_alive $_kt_p"
@@ -566,11 +570,14 @@ am_cargo() {
         exec "$_real" "$@"
     fi
 
-    # 問不到排程器（連不上、回應看不懂、身分被拒）時：受管的 bot 每 3 秒重試、最多等 `AM_BUILD_SCHEDULER_WAIT_SECS`（預設 120 秒，
-    # daemon 重啟／升級夠了），之後 fail closed（exit 75）——**不自動變成沒有名額的 cargo**（issue #128）；排程器回來了就照常排隊。
+    # 問不到排程器（連不上、回應看不懂、身分被拒）時：受管的 bot 每 3 秒重試（`AM_SHIM_SCHEDULER_PAUSE` 可調，預設 3）、最多等
+    # `AM_BUILD_SCHEDULER_WAIT_SECS`（預設 120 秒，daemon 重啟／升級夠了），之後 fail closed（exit 75）——**不自動變成沒有名額的 cargo**
+    # （issue #128）；排程器回來了就照常排隊。
     # 人工 shell（沒有 bot 身分）維持明講的 bypass：直接跑。名額滿了（granted:false）是排程器有在回答，另一條路：一直等到有名額。
     _wait=${AM_BUILD_SCHEDULER_WAIT_SECS:-120}
     case "$_wait" in *[!0-9]* | '') _wait=120 ;; esac
+    AM_SHIM_SCHEDULER_PAUSE=${AM_SHIM_SCHEDULER_PAUSE:-3}
+    # 重試次數上限照以前的 `wait / 3` 算（與預設停頓 3 秒對應）；只縮短停頓時次數不變，測試不會因此多打幾十通 curl。
     _down_max=$((_wait / 3))
     [ "$_down_max" -ge 1 ] || _down_max=1
     # 等名額途中放棄（Ctrl-C、被砍、呼叫端走了）要把排隊的號碼牌退掉（issue #913）：空 token 的 release＝取消這個 holder 的
@@ -667,14 +674,14 @@ am_cargo() {
             exit 75
         fi
         if [ "$_down" = 1 ]; then
-            printf 'agents-manager: build scheduler %s；受管的 bot 不會在沒有名額時跑 cargo，每 3 秒重試、最多等 %s 秒……\n' "$_bad" "$_wait" >&2
+            printf 'agents-manager: build scheduler %s；受管的 bot 不會在沒有名額時跑 cargo，每 %s 秒重試、最多等 %s 秒……\n' "$_bad" "$AM_SHIM_SCHEDULER_PAUSE" "$_wait" >&2
         fi
         if am_caller_gone; then
             printf 'agents-manager: 呼叫端已經結束，不再等 build scheduler\n' >&2
             _cancel_wait
             exit 1
         fi
-        sleep 3
+        sleep "$AM_SHIM_SCHEDULER_PAUSE"
     done
 
     _token=$(am_json_field token "$_resp")
