@@ -415,6 +415,69 @@ pub async fn hint_moves_runtime(app: &impl crate::capabilities::Db, run_id: &str
         || run.runtime_fast != Some(i64::from(seen.fast))
 }
 
+/// 開機畫面重試次數（第一次讀之後，最多再讀這麼多次）。
+const BOOT_VERSION_RETRIES: u32 = 2;
+
+/// run 啟動當下，背景從開機畫面（`>_ OpenAI Codex (vX)`）記一次版本（#1924）。巡邏要等到第一輪才會記，
+/// 這段空窗內 `/model` 會被當成版本未知而退回選單、寫進帳號預設。只對 codex 讀；讀不到就維持未知，不擋啟動。
+pub fn spawn_boot_version_read(
+    pool: &sqlx::SqlitePool,
+    client: &HerdrClient,
+    fence: Option<&crate::hosts::HostFence>,
+    kind: &str,
+    bot_id: &str,
+    run_id: &str,
+    pane_id: &str,
+) {
+    let (pool, client, fence) = (pool.clone(), client.clone(), fence.cloned());
+    let (kind, bot_id, run_id, pane_id) = (kind.to_string(), bot_id.to_string(), run_id.to_string(), pane_id.to_string());
+    tokio::spawn(Box::pin(async move {
+        let read = move || {
+            let (client, pane_id) = (client.clone(), pane_id.clone());
+            async move { read(&client, &pane_id).await.ok() }
+        };
+        remember_boot_version(&pool, fence.as_ref(), &kind, &bot_id, &run_id, read, boot_version_retry_delay()).await;
+    }));
+}
+
+fn boot_version_retry_delay() -> Duration {
+    Duration::from_millis(if cfg!(test) { 1 } else { 1000 })
+}
+
+/// 讀到開機畫面就記（`codex_update::remember_running`）。第一次讀可能還沒畫出來，最多再讀 [`BOOT_VERSION_RETRIES`] 次。
+/// 寫入前 run 必須還是這個 bot 的當前 run、host fence 也還是當前的，否則不記。
+async fn remember_boot_version<F, Fut>(
+    pool: &sqlx::SqlitePool,
+    fence: Option<&crate::hosts::HostFence>,
+    kind: &str,
+    bot_id: &str,
+    run_id: &str,
+    mut read: F,
+    delay: Duration,
+) where
+    F: FnMut() -> Fut,
+    Fut: std::future::Future<Output = Option<String>>,
+{
+    if kind != "codex" {
+        return;
+    }
+    for attempt in 0..=BOOT_VERSION_RETRIES {
+        if attempt > 0 {
+            tokio::time::sleep(delay).await;
+        }
+        let Some(screen) = read().await else { continue };
+        if crate::codex_update::parse_running_version(&screen).is_none() {
+            continue;
+        }
+        let current = matches!(db::active_run(pool, bot_id).await, Ok(Some(r)) if r.id == run_id)
+            && fence.is_none_or(|f| f.is_current_now());
+        if current {
+            crate::codex_update::remember_running(run_id, &screen, None);
+        }
+        return;
+    }
+}
+
 pub use am_base::codex_status::{parse_status_quota, CodexStatusQuota};
 
 /// Digit for the one row whose **label** exactly matches `needle`. Descriptions are excluded;
@@ -2755,5 +2818,69 @@ mod tests {
         let next = fixture_1671().replace("Context 17% used", "Context 18% used");
         assert!(record_footer_from_screen(&env.app, &run, &next).await);
         assert!(read(&env, &run).await.0.unwrap().contains("Context 18% used"));
+    }
+
+    /// #1924：run 啟動後從開機畫面記版本，不等巡邏。
+    async fn codex_boot_run(name: &str) -> (crate::testing::Env, String, String) {
+        let env = crate::testing::env().await;
+        let bot = crate::testing::claude_bot(&env.app, &env.project_id, name).await;
+        sqlx::query("UPDATE bots SET kind = 'codex' WHERE id = ?").bind(&bot.id).execute(&env.app.db).await.unwrap();
+        let run = crate::testing::fake_run(&env.app, &bot.id).await;
+        (env, bot.id, run)
+    }
+
+    const BOOT_164: &str = include_str!("lifecycle/fixtures/codex-0.164-startup.txt");
+
+    #[tokio::test]
+    async fn the_boot_banner_is_recorded_even_when_it_only_shows_on_a_later_read() {
+        let (env, bot_id, run) = codex_boot_run("boot-late").await;
+        let reads = std::cell::Cell::new(0);
+        let read = || {
+            reads.set(reads.get() + 1);
+            let n = reads.get();
+            async move { (n >= 2).then(|| BOOT_164.to_string()) }
+        };
+        remember_boot_version(&env.app.db, None, "codex", &bot_id, &run, read, Duration::from_millis(1)).await;
+        assert_eq!(reads.get(), 2, "第一次讀還沒畫出來，第二次讀到就停");
+        assert_eq!(crate::codex_update::running_version_of(&run).as_deref(), Some("0.164.0"));
+    }
+
+    #[tokio::test]
+    async fn an_unreadable_boot_screen_leaves_the_version_unknown() {
+        let (env, bot_id, run) = codex_boot_run("boot-blank").await;
+        let reads = std::cell::Cell::new(0);
+        let no_banner = || {
+            reads.set(reads.get() + 1);
+            async { Some("› Ask Codex to do anything\n".to_string()) }
+        };
+        remember_boot_version(&env.app.db, None, "codex", &bot_id, &run, no_banner, Duration::from_millis(1)).await;
+        assert_eq!(reads.get(), 3, "第一次讀加兩次重試，共三次讀取，全部讀不到就停");
+        assert_eq!(crate::codex_update::running_version_of(&run), None, "解析不到維持未知，照舊退回選單");
+
+        let pane_failed = || async { None::<String> };
+        remember_boot_version(&env.app.db, None, "codex", &bot_id, &run, pane_failed, Duration::from_millis(1)).await;
+        assert_eq!(crate::codex_update::running_version_of(&run), None, "pane 讀失敗也維持未知");
+    }
+
+    #[tokio::test]
+    async fn only_codex_reads_the_boot_screen() {
+        let (env, bot_id, run) = codex_boot_run("boot-claude").await;
+        let reads = std::cell::Cell::new(0);
+        let read = || {
+            reads.set(reads.get() + 1);
+            async { Some(BOOT_164.to_string()) }
+        };
+        remember_boot_version(&env.app.db, None, "claude", &bot_id, &run, read, Duration::from_millis(1)).await;
+        assert_eq!(reads.get(), 0, "非 codex 一次都不讀畫面");
+        assert_eq!(crate::codex_update::running_version_of(&run), None);
+    }
+
+    #[tokio::test]
+    async fn a_boot_banner_is_not_recorded_once_the_run_is_no_longer_the_current_one() {
+        let (env, bot_id, run) = codex_boot_run("boot-stale").await;
+        sqlx::query("UPDATE runs SET state = 'exited' WHERE id = ?").bind(&run).execute(&env.app.db).await.unwrap();
+        let read = || async { Some(BOOT_164.to_string()) };
+        remember_boot_version(&env.app.db, None, "codex", &bot_id, &run, read, Duration::from_millis(1)).await;
+        assert_eq!(crate::codex_update::running_version_of(&run), None, "已經不是當前的 run 不記");
     }
 }

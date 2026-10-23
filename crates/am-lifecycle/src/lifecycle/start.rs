@@ -1626,6 +1626,7 @@ async fn start_inner_body(
         }
     };
     let status = super::claude_resume_menu::after_start(app, &bot.kind, run_id, status, fence.or(ready_fence.as_ref())).await;
+    crate::codex_live::spawn_boot_version_read(app.db(), &client, fence.or(ready_fence.as_ref()), &bot.kind, &bot.id, run_id, &pane_id);
     // agent 起來了、`running` 還沒記下的那一瞬（測試在這裡插進不拿 bot 鎖的 pane-exit 事件）。
     #[cfg(all(test, feature = "daemon-test-harness"))]
     {
@@ -2223,6 +2224,7 @@ pub async fn restart_child_in_pane_with(app: &impl StartContext, bot_id: &str, r
         // 不把 ready 的結果記下來就一直停在 `unknown`。只補還是 `unknown` 的，不蓋掉期間來的事件。
         Ok(info) => {
             let ready = super::claude_resume_menu::after_start(app, &bot.kind, &run_id, info.agent_status.normalized(), Some(&client.fence)).await;
+            crate::codex_live::spawn_boot_version_read(app.db(), &client, Some(&client.fence), &bot.kind, bot_id, &run_id, &pane_id);
             if ready != AgentStatus::Unknown {
                 if let Err(e) = sqlx::query("UPDATE runs SET agent_status = ? WHERE id = ? AND agent_status = 'unknown'")
                     .bind(ready.as_str())
