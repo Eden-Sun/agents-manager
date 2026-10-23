@@ -4,7 +4,7 @@
  */
 import test, { after, afterEach, before, beforeEach } from 'node:test'
 import assert from 'node:assert/strict'
-import { act, click, mockApi, mount, settle, setupDom, teardownDom, unmountAll, until } from '../testing/domHarness'
+import { act, click, mockApi, mount, settle, setupDom, teardownDom, unmountAll, until, type FakeRequest } from '../testing/domHarness'
 import { sharedMock, virtualMockTime } from '../testing/sharedMock'
 import { resetStoreForTest, useStore } from '../store/store'
 import { HostShellPanel } from './HostShellPanel'
@@ -35,13 +35,19 @@ function asPhone(): () => void {
   return () => (window.matchMedia = original)
 }
 
+/** 面板掛上後第一趟快照讀完（元件一掛上就先讀一次）。 */
+async function firstSnapshot(requests: FakeRequest[]) {
+  await until(() => requests.some((r) => r.method === 'GET' && r.path.includes('/shells/')), '第一趟快照')
+  await settle()
+}
+
 async function openShell() {
-  mockApi(mock)
+  const requests = mockApi(mock)
   await useStore.getState().refreshState()
   const shell = (await mock.request('POST', '/hosts/local/shells', {})) as { pane_id: string; cwd: string }
   opened.push(shell.pane_id)
   await mount(<HostShellPanel host="local" paneId={shell.pane_id} cwd={shell.cwd} embedded />)
-  await settle(300)
+  await firstSnapshot(requests)
   return shell
 }
 
@@ -76,9 +82,10 @@ test('手機明確打開直通：記進 am.shellKeySyncOn（並移出 off），�
     assert.deepEqual(JSON.parse(localStorage.getItem('am.shellKeySyncOn') ?? '[]'), [target])
     assert.deepEqual(JSON.parse(localStorage.getItem('am.shellKeySyncOff') ?? '[]'), [])
     // 同一顆 pane 重新掛上來：記著開就是開。
+    const requests = mockApi(mock)
     await unmountAll()
     await mount(<HostShellPanel host="local" paneId={shell.pane_id} cwd={shell.cwd} embedded />)
-    await settle(300)
+    await firstSnapshot(requests)
     assert.equal(input(), null, '記著開：手機也照記錄')
     await act(async () => (document.activeElement as HTMLElement | null)?.blur())
     assert.match(document.querySelector('.shell-sync-note')?.textContent ?? '', /手機沒有實體鍵盤：關掉鍵盤直通改用下方輸入框/, '焦點不在終端上：手機不叫人「點一下畫面收鍵盤」')
@@ -95,6 +102,7 @@ test('手機明確打開直通：記進 am.shellKeySyncOn（並移出 off），�
 test('手機：送出中接著打的下一行不會被清掉（沒改字的送出照舊清空）', async () => {
   const restore = asPhone()
   const fetchBefore = globalThis.fetch
+  let posted = 0 // 送出的 POST 已經回來的次數
   let release!: () => void
   const gate = new Promise<void>((r) => (release = r))
   try {
@@ -103,7 +111,12 @@ test('手機：送出中接著打的下一行不會被清掉（沒改字的送�
     const textPath = `/shells/${encodeURIComponent(shell.pane_id)}/text`
     const fetchNow = globalThis.fetch
     globalThis.fetch = (async (url: string, init?: { method?: string; body?: string }) => {
-      if (init?.method === 'POST' && String(url).endsWith(textPath)) await gate
+      if (init?.method === 'POST' && String(url).endsWith(textPath)) {
+        await gate
+        const res = await fetchNow(url, init as RequestInit)
+        posted++
+        return res
+      }
       return fetchNow(url, init as RequestInit)
     }) as unknown as typeof fetch
     const cmdInput = () => document.querySelector<HTMLInputElement>('.shell-cmd')!
@@ -121,13 +134,15 @@ test('手機：送出中接著打的下一行不會被清掉（沒改字的送�
     await act(async () => enter())
     await type('pwd')
     release()
-    await settle(300)
+    await until(() => posted === 1, '第一行送完')
+    await settle()
     assert.equal(cmdInput().value, 'pwd', '送出期間打的下一行留著')
 
     // 對照：沒有改字的送出，送完框是空的。
     await type('uptime')
     await act(async () => enter())
-    await settle(300)
+    await until(() => posted === 2, '第二行送完')
+    await settle()
     assert.equal(cmdInput().value, '')
   } finally {
     release()

@@ -6,7 +6,7 @@ import test, { after, afterEach, before } from 'node:test'
 import assert from 'node:assert/strict'
 import { act, click, keydown, mockApi, mount, settle, setupDom, teardownDom, typeInto, unmountAll, until } from '../testing/domHarness'
 import type { FakeRequest } from '../testing/domHarness'
-import { sharedMock, virtualMockTime } from '../testing/sharedMock'
+import { advanceMockTime, sharedMock, virtualMockTime } from '../testing/sharedMock'
 import { ApiError } from '../api/types'
 import { ATTACHMENT_FAILED_NOTICE } from '../lib/composerLabels'
 import { groupComposerState, resetStoreForTest, useStore } from '../store/store'
@@ -57,12 +57,13 @@ test('#917 群組輸入區：附件上傳失敗後 Enter／送出鈕不送出、
     const bot = useStore.getState().bots.find((b) => b.name === 'gaf-claude')!
     assert.ok(bot, `建好 bot（${JSON.stringify(created)}）`)
     await mock.request('POST', `/bots/${bot.id}/start`)
+    await advanceMockTime(2500) // mock 的 bot 啟動要 2.5 秒（虛擬時間）
     await until(async () => {
       await useStore.getState().refreshState()
       return useStore.getState().runs[bot.id]?.state === 'running' && !groupComposerState(useStore.getState(), projectId).disabled
     }, 'gaf-claude running 且群組輸入區可送出')
     await mount(<GroupChatPanel projectId={projectId} onOpenSidebar={() => {}} />)
-    await settle(200)
+    await settle(20)
 
     const input = document.querySelector<HTMLInputElement>('input[type=file]')!
     const file = new File([new Uint8Array([137, 80, 78, 71])], 'shot.png', { type: 'image/png' })
@@ -80,7 +81,7 @@ test('#917 群組輸入區：附件上傳失敗後 Enter／送出鈕不送出、
     assert.match(sendBtn.title, /附件上傳失敗/)
 
     await keydown(textarea(), 'Enter')
-    await settle(200)
+    await settle(20)
     assert.equal(chats(requests).length, 0, 'Enter 沒有送出群組訊息')
     assert.equal(textarea().value, '@gaf-claude with a file', '字還在輸入框')
     assert.equal(document.querySelectorAll('.attach-thumb.failed').length, 1, '失敗卡片還在')
@@ -105,15 +106,16 @@ test('交給 AGM 模式：打 @ 不彈候選，Enter 直接建任務、文字不
   await useStore.getState().refreshState()
   const bot = useStore.getState().bots.find((b) => b.name === 'gag-claude')!
   await mock.request('POST', `/bots/${bot.id}/start`)
+  await advanceMockTime(2500) // mock 的 bot 啟動要 2.5 秒（虛擬時間）
   await until(async () => {
     await useStore.getState().refreshState()
     return useStore.getState().runs[bot.id]?.state === 'running' && !groupComposerState(useStore.getState(), projectId).disabled
   }, 'gag-claude running 且群組輸入區可送出')
   await mount(<GroupChatPanel projectId={projectId} onOpenSidebar={() => {}} />)
-  await settle(200)
+  await settle(20)
 
   await click(document.querySelector<HTMLElement>('.agm-toggle')!)
-  await settle(50)
+  await settle(20)
   await typeInto(textarea(), '請看 @')
   assert.equal(document.querySelector('.mention-pop'), null, '交給 AGM 時不彈 @ 候選')
   assert.notEqual(textarea().getAttribute('aria-expanded'), 'true')
@@ -125,7 +127,7 @@ test('交給 AGM 模式：打 @ 不彈候選，Enter 直接建任務、文字不
 
   // 對照組：沒開「交給 AGM」時打 @ 照樣彈候選。
   await click(document.querySelector<HTMLElement>('.agm-toggle')!)
-  await settle(50)
+  await settle(20)
   await typeInto(textarea(), '@')
   assert.ok(document.querySelector('.mention-pop'), '一般模式打 @ 要彈候選')
 })
@@ -137,12 +139,13 @@ test('群組輸入框：Office 類複製的文字不變成附件；只有 Files 
   await useStore.getState().refreshState()
   const bot = useStore.getState().bots.find((b) => b.name === 'gop-claude')!
   await mock.request('POST', `/bots/${bot.id}/start`)
+  await advanceMockTime(2500) // mock 的 bot 啟動要 2.5 秒（虛擬時間）
   await until(async () => {
     await useStore.getState().refreshState()
     return useStore.getState().runs[bot.id]?.state === 'running' && !groupComposerState(useStore.getState(), projectId).disabled
   }, 'gop-claude running 且群組輸入區可送出')
   await mount(<GroupChatPanel projectId={projectId} onOpenSidebar={() => {}} />)
-  await settle(200)
+  await settle(20)
 
   const image = new File([new Uint8Array([1])], 'image.png', { type: 'image/png' })
   const paste = async (clipboardData: { files: File[]; types: string[]; getData(type: string): string }) => {
@@ -168,12 +171,13 @@ test('群組：送出期間加進來的附件留在托盤', { timeout: 30_000 },
   await useStore.getState().refreshState()
   const bot = useStore.getState().bots.find((b) => b.name === 'gla-claude')!
   await mock.request('POST', `/bots/${bot.id}/start`)
+  await advanceMockTime(2500) // mock 的 bot 啟動要 2.5 秒（虛擬時間）
   await until(async () => {
     await useStore.getState().refreshState()
     return useStore.getState().runs[bot.id]?.state === 'running' && !groupComposerState(useStore.getState(), projectId).disabled
   }, 'gla-claude running 且群組輸入區可送出')
   await mount(<GroupChatPanel projectId={projectId} onOpenSidebar={() => {}} />)
-  await settle(200)
+  await settle(20)
 
   const originalFetch = globalThis.fetch
   let releaseChat!: () => void

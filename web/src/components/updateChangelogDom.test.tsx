@@ -8,6 +8,7 @@ import { useState } from 'react'
 import { TRANSLATION_POLL_MAX, translationPollAction } from '../api/changelog'
 import { UpdateChangelog } from './UpdateChangelog'
 import { click, fakeApi, mount, setupDom, settle, teardownDom, unmountAll, until, type FakeRequest } from '../testing/domHarness'
+import { virtualTime } from '../testing/virtualTime'
 
 afterEach(unmountAll)
 before(setupDom)
@@ -169,47 +170,57 @@ test('失敗時原文還在，再試一次只 POST 一次；未來的 retry_afte
 })
 
 test('retry_after 過了之後再試一次才 POST', async () => {
-  const posts: string[] = []
-  const soon = new Date(Date.now() + 400).toISOString()
-  fakeApi((req) => {
-    const { pathname } = pathOf(req.path)
-    if (pathname === '/api/changelog') return CHANGELOG
-    if (pathname === '/api/changelog/translation' && req.method === 'POST') {
-      posts.push('POST')
-      return { enabled: true, status: 'completed', summary: ['補翻完成', '第二點', '第三點'], sections: [{ version: '2.1.5', body: '繁中 2.1.5' }], coverage: 'full', error: null }
-    }
-    if (pathname === '/api/changelog/translation') {
-      return { enabled: true, status: 'failed', error: 'timeout', retry_after: soon, summary: [], sections: [] }
-    }
-    return {}
-  })
-  const root = await mount(<UpdateChangelog kind="claude" host="local" from="2.1.3" to="2.1.5" />)
-  await until(() => root.textContent?.includes('再試一次') === true, '再試')
-  const button = () => [...root.querySelectorAll('button')].find((b) => b.textContent === '再試一次')
-  assert.equal(button()?.disabled, true)
-  await until(() => button()?.disabled === false, '退避結束', 3000)
-  await click(button()!)
-  await until(() => root.textContent?.includes('補翻完成') === true, '完成')
-  assert.equal(posts.length, 1)
+  const vt = virtualTime()
+  try {
+    const posts: string[] = []
+    const soon = new Date(vt.base + 400).toISOString()
+    fakeApi((req) => {
+      const { pathname } = pathOf(req.path)
+      if (pathname === '/api/changelog') return CHANGELOG
+      if (pathname === '/api/changelog/translation' && req.method === 'POST') {
+        posts.push('POST')
+        return { enabled: true, status: 'completed', summary: ['補翻完成', '第二點', '第三點'], sections: [{ version: '2.1.5', body: '繁中 2.1.5' }], coverage: 'full', error: null }
+      }
+      if (pathname === '/api/changelog/translation') {
+        return { enabled: true, status: 'failed', error: 'timeout', retry_after: soon, summary: [], sections: [] }
+      }
+      return {}
+    })
+    const root = await mount(<UpdateChangelog kind="claude" host="local" from="2.1.3" to="2.1.5" />)
+    await vt.waitFor(() => root.textContent?.includes('再試一次') === true, '再試')
+    const button = () => [...root.querySelectorAll('button')].find((b) => b.textContent === '再試一次')
+    assert.equal(button()?.disabled, true)
+    await vt.waitFor(() => button()?.disabled === false, '退避結束', 3000)
+    await click(button()!)
+    await vt.waitFor(() => root.textContent?.includes('補翻完成') === true, '完成')
+    assert.equal(posts.length, 1)
+  } finally {
+    vt.restore()
+  }
 })
 
 test('讀不到 retry_after 時再試一次維持停用', async () => {
-  const posts: string[] = []
-  fakeApi((req) => {
-    const { pathname } = pathOf(req.path)
-    if (pathname === '/api/changelog') return CHANGELOG
-    if (req.method === 'POST') posts.push('POST')
-    if (pathname === '/api/changelog/translation') return { enabled: true, status: 'failed', error: 'http', retry_after: 'not-a-date', summary: [], sections: [] }
-    return {}
-  })
-  const root = await mount(<UpdateChangelog kind="claude" host="local" from="2.1.3" to="2.1.5" />)
-  await until(() => root.textContent?.includes('再試一次') === true, '再試')
-  const retry = [...root.querySelectorAll('button')].find((b) => b.textContent === '再試一次')
-  assert.equal(retry?.disabled, true)
-  if (retry) await click(retry)
-  await settle(600)
-  assert.equal(retry?.disabled, true)
-  assert.equal(posts.length, 0)
+  const vt = virtualTime()
+  try {
+    const posts: string[] = []
+    fakeApi((req) => {
+      const { pathname } = pathOf(req.path)
+      if (pathname === '/api/changelog') return CHANGELOG
+      if (req.method === 'POST') posts.push('POST')
+      if (pathname === '/api/changelog/translation') return { enabled: true, status: 'failed', error: 'http', retry_after: 'not-a-date', summary: [], sections: [] }
+      return {}
+    })
+    const root = await mount(<UpdateChangelog kind="claude" host="local" from="2.1.3" to="2.1.5" />)
+    await vt.waitFor(() => root.textContent?.includes('再試一次') === true, '再試')
+    const retry = [...root.querySelectorAll('button')].find((b) => b.textContent === '再試一次')
+    assert.equal(retry?.disabled, true)
+    if (retry) await click(retry)
+    await vt.tick(600)
+    assert.equal(retry?.disabled, true)
+    assert.equal(posts.length, 0)
+  } finally {
+    vt.restore()
+  }
 })
 
 test('換目標版本後舊摘要立刻消失', async () => {
@@ -245,22 +256,27 @@ test('換目標版本後舊摘要立刻消失', async () => {
 })
 
 test('進行中只輪詢 GET，不 POST', async () => {
-  const methods: string[] = []
-  fakeApi((req) => {
-    const { pathname } = pathOf(req.path)
-    if (pathname === '/api/changelog') return CHANGELOG
-    if (pathname === '/api/changelog/translation') {
-      methods.push(req.method)
-      return { enabled: true, status: 'in_flight', error: null, summary: [], sections: [], attempts: [] }
-    }
-    return {}
-  })
-  const root = await mount(<UpdateChangelog kind="claude" host="local" from="2.1.3" to="2.1.5" />)
-  await until(() => root.textContent?.includes('正在翻譯') === true, '進行中')
-  const before = methods.filter((m) => m === 'GET').length
-  await until(() => methods.filter((m) => m === 'GET').length > before, '下一輪 GET', 4000)
-  assert.equal(methods.filter((m) => m === 'POST').length, 0)
-  assert.ok(root.querySelector('a.update-changelog-src'))
+  const vt = virtualTime()
+  try {
+    const methods: string[] = []
+    fakeApi((req) => {
+      const { pathname } = pathOf(req.path)
+      if (pathname === '/api/changelog') return CHANGELOG
+      if (pathname === '/api/changelog/translation') {
+        methods.push(req.method)
+        return { enabled: true, status: 'in_flight', error: null, summary: [], sections: [], attempts: [] }
+      }
+      return {}
+    })
+    const root = await mount(<UpdateChangelog kind="claude" host="local" from="2.1.3" to="2.1.5" />)
+    await vt.waitFor(() => root.textContent?.includes('正在翻譯') === true, '進行中')
+    const before = methods.filter((m) => m === 'GET').length
+    await vt.waitFor(() => methods.filter((m) => m === 'GET').length > before, '下一輪 GET', 4000)
+    assert.equal(methods.filter((m) => m === 'POST').length, 0)
+    assert.ok(root.querySelector('a.update-changelog-src'))
+  } finally {
+    vt.restore()
+  }
 })
 
 test('翻譯連不上時留一行，原文與旁邊的按鈕都還在', async () => {
