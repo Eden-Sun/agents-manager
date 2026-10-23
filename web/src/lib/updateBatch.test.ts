@@ -380,3 +380,10 @@ test('grok 徽章也算一種更新 chip：手機單獨出現照舊一顆，跟�
   assert.equal(mergeUpdateChips(true, false, false, false, true, true), true, 'grok 跟 herdr 並存要合成一顆')
   assert.equal(mergeUpdateChips(false, true, true, true, true, true), false, '桌機照舊並排')
 })
+
+test('agy 徽章也算一種更新 chip：手機單獨出現照舊一顆，跟別種並存就合成一顆（#1921）', () => {
+  assert.equal(mergeUpdateChips(true, false, false, false, false, false, true), false, '只有 agy 一顆不合併')
+  assert.equal(mergeUpdateChips(true, true, false, false, false, false, true), true, 'agy 跟重啟並存要合成一顆')
+  assert.equal(mergeUpdateChips(true, false, false, false, false, true, true), true, 'agy 跟 grok 並存要合成一顆')
+  assert.equal(mergeUpdateChips(false, true, true, true, true, true, true), false, '桌機照舊並排')
+})

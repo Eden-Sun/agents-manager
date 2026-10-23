@@ -219,6 +219,7 @@ export function mergeUpdateChips(
   claudeShown = false,
   herdrShown = false,
   grokShown = false,
+  agyShown = false,
 ): boolean {
-  return phone && Number(restartShown) + Number(codexShown) + Number(claudeShown) + Number(herdrShown) + Number(grokShown) > 1
+  return phone && Number(restartShown) + Number(codexShown) + Number(claudeShown) + Number(herdrShown) + Number(grokShown) + Number(agyShown) > 1
 }

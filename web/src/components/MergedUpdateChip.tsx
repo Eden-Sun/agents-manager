@@ -11,9 +11,12 @@ import { ClaudeInstallChip } from './ClaudeInstallChip'
 import { RestartChip } from './UpdateQuotaChip'
 import { HerdrUpdateChip } from './HerdrUpdateChip'
 import { GrokUpdateChip } from './GrokUpdateChip'
+import { AgyUpdateChip } from './AgyUpdateChip'
 import { useHerdrPlan } from '../hooks/useHerdrPlan'
 import { useGrokPlan } from '../hooks/useGrokPlan'
+import { useAgyBusy, useAgyPlan } from '../hooks/useAgyPlan'
 import { grokMenuItem } from '../lib/grokUpdate'
+import { agyMenuItem } from '../lib/agyUpdate'
 import { herdrMenuItem, useHerdrUpdate } from '../store/herdrUpdate'
 
 /** 由外面代為開關的確認框（手機合成那顆用）。 */
@@ -69,10 +72,13 @@ export function MergedUpdateChip() {
   const herdrItem = herdrMenuItem(herdrActive, herdrResult, herdrPlan)
   const grokPlan = useGrokPlan()
   const grokItem = grokPlan ? grokMenuItem(grokPlan) : null
+  const agyPlan = useAgyPlan()
+  const agyBusy = useAgyBusy()
+  const agyItem = agyPlan ? agyMenuItem(agyPlan) : null
   const [open, setOpen] = useState(false)
   // 標題列一路有 overflow 裁切與 transform（fixed 也會被帶偏），選單用 portal 掛到 body、fixed 在按鈕下緣。
   const [at, setAt] = useState<CSSProperties>({})
-  const [which, setWhich] = useState<'restart' | 'codex' | 'claude' | 'herdr' | 'grok' | null>(null)
+  const [which, setWhich] = useState<'restart' | 'codex' | 'claude' | 'herdr' | 'grok' | 'agy' | null>(null)
   const btn = useRef<HTMLButtonElement>(null)
   const pop = useRef<HTMLDivElement>(null)
   const menuKeys = useMenuKeys(open, pop, btn, () => setOpen(false))
@@ -104,6 +110,7 @@ export function MergedUpdateChip() {
     codexShown,
     herdrItem,
     grokItem,
+    agyItem,
   })
   const close = () => setWhich(null)
 
@@ -189,6 +196,16 @@ export function MergedUpdateChip() {
               >
                 {grokItem}
               </button> : null}
+              {agyItem ? <button
+                type="button"
+                className="head-menu-item"
+                role="menuitem"
+                tabIndex={-1}
+                disabled={agyBusy}
+                onClick={() => setWhich('agy')}
+              >
+                {agyItem}
+              </button> : null}
             </div>,
             document.body,
           )
@@ -198,6 +215,7 @@ export function MergedUpdateChip() {
       <ClaudeInstallChip control={{ open: which === 'claude', close }} />
       <HerdrUpdateChip control={{ open: which === 'herdr', close }} />
       <GrokUpdateChip control={{ open: which === 'grok', close }} />
+      <AgyUpdateChip control={{ open: which === 'agy', close }} />
     </>
   )
 }
