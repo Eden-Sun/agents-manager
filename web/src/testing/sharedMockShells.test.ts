@@ -1,6 +1,15 @@
 import assert from 'node:assert/strict'
-import test, { describe } from 'node:test'
+import test, { afterEach, beforeEach, describe } from 'node:test'
+import { useManualMockClock } from '../api/mockClock'
 import { closeLeakedShells, sharedMock, virtualMockTime } from './sharedMock'
+
+// mock 每個請求的延遲（約 60ms）走虛擬時鐘：這支測的是 shell 上限與清理，不是延遲，約 20 個請求不必真的等。
+beforeEach(() => {
+  useManualMockClock(true)
+})
+afterEach(() => {
+  useManualMockClock(false)
+})
 
 const shellCount = async () => ((await sharedMock.request('GET', '/hosts/local/shells')) as { shells: unknown[] }).shells.length
 const reason = (e: unknown) => (e as { body?: { reason?: string } }).body?.reason

@@ -96,7 +96,10 @@ class FakeSocket {
 }
 g.WebSocket = FakeSocket
 
-const settle = () => new Promise((r) => setTimeout(r, 20))
+// 假的 fetch／socket 都只有 promise 鏈，沒有 timer：讓出幾輪 macrotask 就把 store 的 async 流程跑完，不必真的睡 20ms。
+const settle = async () => {
+  for (let i = 0; i < 8; i++) await new Promise((r) => setImmediate(r))
+}
 
 const { useStore } = await import('./store.ts')
 await useStore.getState().bootstrap()

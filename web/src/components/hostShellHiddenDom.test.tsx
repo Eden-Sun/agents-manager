@@ -4,7 +4,8 @@
  */
 import test, { after, afterEach, before, beforeEach } from 'node:test'
 import assert from 'node:assert/strict'
-import { mockApi, mount, settle, setupDom, teardownDom, unmountAll } from '../testing/domHarness'
+import { mockApi, mount, setupDom, teardownDom, unmountAll } from '../testing/domHarness'
+import { virtualTime } from '../testing/virtualTime'
 import { sharedMock, virtualMockTime } from '../testing/sharedMock'
 import { resetStoreForTest, useStore } from '../store/store'
 import { HostShellPanel } from './HostShellPanel'
@@ -33,22 +34,27 @@ test('分頁在背景時不輪詢快照，回前景立刻補讀', async () => {
   await useStore.getState().refreshState()
   const shell = (await mock.request('POST', '/hosts/local/shells', {})) as { pane_id: string; cwd: string }
   opened.push(shell.pane_id)
-  await mount(<HostShellPanel host="local" paneId={shell.pane_id} cwd={shell.cwd} embedded />)
-  await settle(300)
-  const snapReads = () => requests.filter((r) => r.method === 'GET' && r.path.includes('/shells/')).length
-  const setVisibility = (v: string) => Object.defineProperty(document, 'visibilityState', { configurable: true, get: () => v })
+  // 面板的輪詢 timer 走虛擬時間：背景 2.5 秒＝推進 2500ms，不等牆鐘。
+  const vt = virtualTime()
   try {
-    setVisibility('hidden')
-    const n0 = snapReads()
-    await settle(2500)
-    // 容許正在飛的那一趟。
-    assert.ok(snapReads() <= n0 + 1, `背景不該再讀快照：${n0} → ${snapReads()}`)
+    await mount(<HostShellPanel host="local" paneId={shell.pane_id} cwd={shell.cwd} embedded />)
+    const snapReads = () => requests.filter((r) => r.method === 'GET' && r.path.includes('/shells/')).length
+    await vt.waitFor(() => snapReads() >= 1, '掛上後第一趟快照')
+    const setVisibility = (v: string) => Object.defineProperty(document, 'visibilityState', { configurable: true, get: () => v })
+    try {
+      setVisibility('hidden')
+      const n0 = snapReads()
+      await vt.tick(2500)
+      // 容許正在飛的那一趟。
+      assert.ok(snapReads() <= n0 + 1, `背景不該再讀快照：${n0} → ${snapReads()}`)
 
-    setVisibility('visible')
-    document.dispatchEvent(new Event('visibilitychange'))
-    await settle(200)
-    assert.ok(snapReads() > n0, '回前景要立刻補讀一次')
+      setVisibility('visible')
+      document.dispatchEvent(new Event('visibilitychange'))
+      await vt.waitFor(() => snapReads() > n0, '回前景要立刻補讀一次', 200)
+    } finally {
+      delete (document as unknown as { visibilityState?: string }).visibilityState
+    }
   } finally {
-    delete (document as unknown as { visibilityState?: string }).visibilityState
+    vt.restore()
   }
 })

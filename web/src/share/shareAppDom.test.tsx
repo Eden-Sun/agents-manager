@@ -4,7 +4,7 @@
  */
 import test, { after, afterEach, before } from 'node:test'
 import assert from 'node:assert/strict'
-import { act, click, imeEnter, keydown, mount, settle, setupDom, teardownDom, unmountAll, until } from '../testing/domHarness'
+import { act, click, imeEnter, keydown, mount, settle, setupDom, teardownDom, unmountAll } from '../testing/domHarness'
 import { ShareApp } from './ShareApp'
 import { httpShareClient, type ShareClient, type ShareEvents } from './shareApi'
 import { mockShareClient } from './shareMock'
@@ -17,11 +17,47 @@ afterEach(unmountAll)
 before(setupDom)
 after(teardownDom)
 
+/**
+ * 用 `mockShareClient` 的測試：mock 的 120ms 守門、思考中 300ms、回覆 2600ms，以及元件自己的 timer（429 重試等）
+ * 都走手動時鐘，`settleV`／`untilV` 才往前，不等牆鐘。換上去後 `settle`／`until` 會卡住（它們靠真 timer），所以這些測試用 V 版；
+ * 測試結束先還原真 timer，`unmountAll` 才能用 `settle`。
+ */
+let vclock!: ReturnType<typeof installManualClockTimers>['clock']
+function vtest(name: string, fnOrOpts: (() => Promise<void>) | { timeout: number }, maybeFn?: () => Promise<void>) {
+  const fn = typeof fnOrOpts === 'function' ? fnOrOpts : maybeFn!
+  const wrapped = async () => {
+    const timers = installManualClockTimers()
+    vclock = timers.clock
+    try {
+      await fn()
+    } finally {
+      timers.restore()
+    }
+  }
+  if (typeof fnOrOpts === 'function') test(name, wrapped)
+  else test(name, fnOrOpts, wrapped)
+}
+/** 虛擬 `settle(ms)`：手動時鐘往前 `ms`，再讓 promise 鏈跑完。 */
+async function settleV(ms = 0): Promise<void> {
+  await act(async () => {
+    await vclock.advance(ms)
+    await new Promise<void>((resolve) => setImmediate(resolve))
+  })
+}
+/** 虛擬 `until`：每輪往前 50ms，最多 `ms`（虛擬）；失敗訊息同 `until`。 */
+async function untilV(cond: () => boolean | Promise<boolean>, what: string, ms = 8000): Promise<void> {
+  for (let spent = 0; spent <= ms; spent += 50) {
+    if (await cond()) return
+    await settleV(50)
+  }
+  throw new Error(`等不到：${what}`)
+}
+
 const TOKEN = 'demo_share_token_0123456789'
 
-test('載入對話與檔案；沒有通往主 UI 的連結', async () => {
+vtest('載入對話與檔案；沒有通往主 UI 的連結', async () => {
   await mount(<ShareApp client={mockShareClient(TOKEN)} />)
-  await settle(300)
+  await settleV(300)
   assert.equal(document.querySelector('.sh-title h1')!.textContent, 'support-bot')
   assert.equal(document.querySelectorAll('.sh-msg').length, 4)
   assert.deepEqual([...document.querySelectorAll('.sh-file-name')].map((x) => x.textContent), ['config.toml', '安裝步驟.md', '星期日早安圖卡'])
@@ -32,9 +68,9 @@ test('載入對話與檔案；沒有通往主 UI 的連結', async () => {
   }
 })
 
-test('送出：輸入框清空、出現思考中，回覆到了思考中消失', async () => {
+vtest('送出：輸入框清空、出現思考中，回覆到了思考中消失', async () => {
   await mount(<ShareApp client={mockShareClient(TOKEN)} />)
-  await settle(300)
+  await settleV(300)
   const ta = document.querySelector('textarea')!
   await act(async () => {
     const set = Object.getOwnPropertyDescriptor(Object.getPrototypeOf(ta), 'value')!.set!
@@ -42,11 +78,11 @@ test('送出：輸入框清空、出現思考中，回覆到了思考中消失',
     ta.dispatchEvent(new Event('input', { bubbles: true }))
   })
   await click(document.querySelector('.sh-send')!)
-  await settle(500)
+  await settleV(500)
   assert.equal(ta.value, '')
   assert.ok(document.querySelector('.sh-thinking'), '送出後要看得到思考中')
   assert.match([...document.querySelectorAll('.sh-msg.user')].at(-1)!.textContent!, /退款/)
-  await settle(2600)
+  await settleV(2600)
   assert.equal(document.querySelector('.sh-thinking'), null)
   assert.match([...document.querySelectorAll('.sh-msg.assistant')].at(-1)!.textContent!, /mock 的回覆/)
 })
@@ -288,12 +324,12 @@ async function typeText(text: string) {
   return ta
 }
 
-test('bot 思考中（含 blocked）：送出鈕停用、寫「等 bot 回完再送」，回完才能送', async () => {
+vtest('bot 思考中（含 blocked）：送出鈕停用、寫「等 bot 回完再送」，回完才能送', async () => {
   let live: ShareEvents | null = null
   const base = mockShareClient(TOKEN)
   const client: ShareClient = { ...base, subscribe: (ev) => ((live = ev), () => {}) }
   await mount(<ShareApp client={client} />)
-  await settle(300)
+  await settleV(300)
   await typeText('下一題')
   const send = document.querySelector<HTMLButtonElement>('.sh-send')!
   assert.equal(send.disabled, false)
@@ -305,7 +341,7 @@ test('bot 思考中（含 blocked）：送出鈕停用、寫「等 bot 回完再
   assert.equal(document.querySelector('.sh-wait'), null)
 })
 
-test('還是撞到 409（上一則還在排）：字留在輸入框、提示等回完再送', async () => {
+vtest('還是撞到 409（上一則還在排）：字留在輸入框、提示等回完再送', async () => {
   const base = mockShareClient(TOKEN)
   let sent = 0
   const client: ShareClient = {
@@ -316,27 +352,27 @@ test('還是撞到 409（上一則還在排）：字留在輸入框、提示等�
     },
   }
   await mount(<ShareApp client={client} />)
-  await settle(300)
+  await settleV(300)
   const ta = await typeText('這段很長的問題不能被吃掉')
   await click(document.querySelector('.sh-send')!)
-  await settle(300)
+  await settleV(300)
   assert.equal(sent, 1)
   assert.equal(ta.value, '這段很長的問題不能被吃掉')
   assert.match(document.querySelector('.sh-send-err')!.textContent!, /等 bot 回完再送；你打的字還在/)
   assert.equal(document.querySelector('.sh-thinking'), null, '沒送出去就不該卡在思考中')
 })
 
-test('連結失效（404）：只有失效說明，沒有輸入框', async () => {
+vtest('連結失效（404）：只有失效說明，沒有輸入框', async () => {
   await mount(<ShareApp client={mockShareClient('expired_0123456789abcdef')} />)
-  await settle(300)
+  await settleV(300)
   assert.match(document.body.textContent!, /這個分享連結已失效/)
   assert.equal(document.querySelector('textarea'), null)
 })
 
-test('圖片：bot 那一回合做的圖直接畫在回覆下面，按鈕是「分享／存到手機」，畫面上沒有格式名稱或技術字', async () => {
+vtest('圖片：bot 那一回合做的圖直接畫在回覆下面，按鈕是「分享／存到手機」，畫面上沒有格式名稱或技術字', async () => {
   // 轉檔停在進行中：按鈕先出現（轉好前 disabled）。happy-dom 沒有 canvas，不讓它走到失敗。
   await mount(<ShareApp client={{ ...mockShareClient(TOKEN), fileBlob: () => new Promise<Blob>(() => {}) }} />)
-  await settle(300)
+  await settleV(300)
   const bubble = [...document.querySelectorAll('.sh-msg.assistant')].at(-1)!
   assert.ok(bubble.querySelector('.sh-imgs .sh-thumb.big img'), 'bot 這一回合做的圖要直接畫在那則回覆下面')
   assert.equal(bubble.querySelector('.sh-png-btn')?.textContent, '存到手機', '桌機（不能分享檔案）退回「存到手機」')
@@ -366,7 +402,7 @@ test('圖片：bot 那一回合做的圖直接畫在回覆下面，按鈕是「�
   assert.equal(document.querySelector('.sh-viewer'), null, 'Esc 關掉')
 })
 
-test('能分享檔案的手機上，按鈕叫「分享」', async () => {
+vtest('能分享檔案的手機上，按鈕叫「分享」', async () => {
   const origMatch = window.matchMedia
   const nav = navigator as Navigator & { canShare?: unknown; share?: unknown }
   const origShare = nav.share
@@ -377,7 +413,7 @@ test('能分享檔案的手機上，按鈕叫「分享」', async () => {
   try {
     const card = { name: '早安.png', size: 3, modified_at: null }
     await mount(<ShareApp client={{ ...mockShareClient(TOKEN), files: async () => [card], fileBlob: async () => new Blob(['png'], { type: 'image/png' }) }} />)
-    await settle(300)
+    await settleV(300)
     assert.equal(document.querySelector('.sh-file-list .sh-png-btn')!.textContent, '分享')
   } finally {
     window.matchMedia = origMatch
@@ -386,7 +422,7 @@ test('能分享檔案的手機上，按鈕叫「分享」', async () => {
   }
 })
 
-test('引用外部資源的向量圖：不給按鈕，只說沒辦法分享', async () => {
+vtest('引用外部資源的向量圖：不給按鈕，只說沒辦法分享', async () => {
   const base = mockShareClient(TOKEN)
   const evil = '<svg xmlns="http://www.w3.org/2000/svg" width="10" height="10"><image href="https://evil.example/x.png"/></svg>'
   const client: ShareClient = {
@@ -395,13 +431,13 @@ test('引用外部資源的向量圖：不給按鈕，只說沒辦法分享', as
     fileBlob: async () => new Blob([evil]),
   }
   await mount(<ShareApp client={client} />)
-  await settle(300)
+  await settleV(300)
   const row = document.querySelector('.sh-file-list li')!
   assert.equal(row.querySelector('.sh-png-btn'), null)
   assert.equal(row.querySelector('.sh-png-note')!.textContent, '這張圖沒辦法分享')
 })
 
-test('載不出來的圖（bot 寫壞、網路斷）：講「還在修」不嚇人、不給按鈕；跟引用外部資源的講法不同', async () => {
+vtest('載不出來的圖（bot 寫壞、網路斷）：講「還在修」不嚇人、不給按鈕；跟引用外部資源的講法不同', async () => {
   const base = mockShareClient(TOKEN)
   // 標籤沒配好（測試環境的 DOMParser 認得的那種壞法；真瀏覽器連屬性之間少空格也認得）。
   const broken = '<svg xmlns="http://www.w3.org/2000/svg" width="10" height="10"><g><text x="5" y="5">嗨</text></svg>'
@@ -419,7 +455,7 @@ test('載不出來的圖（bot 寫壞、網路斷）：講「還在修」不嚇�
     },
   }
   await mount(<ShareApp client={client} />)
-  await settle(300)
+  await settleV(300)
   const note = (name: string) => [...document.querySelectorAll('.sh-file-list li')].find((li) => li.textContent?.includes(name.replace(/\.\w+$/, '')))!.querySelector('.sh-png-note')?.textContent
   assert.equal(note('broken.svg'), '這張圖還在修，請稍等')
   assert.equal(note('offline.png'), '這張圖還在修，請稍等')
@@ -427,7 +463,7 @@ test('載不出來的圖（bot 寫壞、網路斷）：講「還在修」不嚇�
   assert.equal(document.querySelectorAll('.sh-file-list .sh-png-btn').length, 0, '都不給按鈕')
 })
 
-test('檔案換版（bot 修好、SSE resync 重抓清單）就重試：「還在修」變回按鈕', async () => {
+vtest('檔案換版（bot 修好、SSE resync 重抓清單）就重試：「還在修」變回按鈕', async () => {
   let ev: ShareEvents | null = null
   let fixed = false
   const client: ShareClient = {
@@ -443,18 +479,18 @@ test('檔案換版（bot 修好、SSE resync 重抓清單）就重試：「還�
     },
   }
   await mount(<ShareApp client={client} />)
-  await settle(300)
+  await settleV(300)
   assert.equal(document.querySelector('.sh-file-list .sh-png-note')!.textContent, '這張圖還在修，請稍等')
   fixed = true
   await act(async () => {
     ev!.onResync?.()
   })
-  await settle(300)
+  await settleV(300)
   assert.ok(document.querySelector('.sh-file-list .sh-png-btn'), '修好的那一版有按鈕')
   assert.equal(document.querySelector('.sh-file-list .sh-png-note'), null)
 })
 
-test('同秒同大小重寫（時間、大小都沒變，只有 version 變）也算換版：重抓檔案、「還在修」變回按鈕 (issue #843)', async () => {
+vtest('同秒同大小重寫（時間、大小都沒變，只有 version 變）也算換版：重抓檔案、「還在修」變回按鈕 (issue #843)', async () => {
   let ev: ShareEvents | null = null
   let fixed = false
   let fetches = 0
@@ -472,20 +508,20 @@ test('同秒同大小重寫（時間、大小都沒變，只有 version 變）�
     },
   }
   await mount(<ShareApp client={client} />)
-  await settle(300)
+  await settleV(300)
   assert.equal(document.querySelector('.sh-file-list .sh-png-note')!.textContent, '這張圖還在修，請稍等')
   const before = fetches
   fixed = true
   await act(async () => {
     ev!.onResync?.()
   })
-  await settle(300)
+  await settleV(300)
   assert.ok(fetches > before, 'version 變了就重抓')
   assert.ok(document.querySelector('.sh-file-list .sh-png-btn'), '修好的那一版有按鈕')
   assert.equal(document.querySelector('.sh-file-list .sh-png-note'), null)
 })
 
-test('同一張點陣圖只抓一次：清單、對話泡泡、放大檢視共用', async () => {
+vtest('同一張點陣圖只抓一次：清單、對話泡泡、放大檢視共用', async () => {
   const T = Date.UTC(2026, 9, 4)
   const iso = (ms: number) => new Date(T + ms).toISOString()
   let count = 0
@@ -508,16 +544,16 @@ test('同一張點陣圖只抓一次：清單、對話泡泡、放大檢視共�
     subscribe: () => () => {},
   }
   await mount(<ShareApp client={client} />)
-  await settle(300)
+  await settleV(300)
   assert.equal(document.querySelectorAll('.sh-png-btn').length, 2)
   assert.equal(count, 1)
   await click(document.querySelector('.sh-msg.assistant .sh-thumb')!)
-  await settle(50)
+  await settleV(50)
   assert.equal((document.querySelector('.sh-viewer .sh-png-btn') as HTMLButtonElement | null)?.disabled, false)
   assert.equal(count, 1)
 })
 
-test('抓失敗不留快取：之後再掛上的（放大檢視）會重抓', async () => {
+vtest('抓失敗不留快取：之後再掛上的（放大檢視）會重抓', async () => {
   const T = Date.UTC(2026, 9, 4)
   const iso = (ms: number) => new Date(T + ms).toISOString()
   let count = 0
@@ -541,16 +577,16 @@ test('抓失敗不留快取：之後再掛上的（放大檢視）會重抓', as
     subscribe: () => () => {},
   }
   await mount(<ShareApp client={client} />)
-  await settle(300)
+  await settleV(300)
   assert.equal(document.querySelector('.sh-file-list .sh-png-note')?.textContent, '這張圖還在修，請稍等')
   assert.equal(count, 1)
   await click(document.querySelector('.sh-msg.assistant .sh-thumb')!)
-  await settle(100)
+  await settleV(100)
   assert.ok(document.querySelector('.sh-viewer .sh-png-btn'))
   assert.equal(count, 2)
 })
 
-test('resync（對話被倒回）：整頁重抓並取代手上的清單；前綴不顯示', async () => {
+vtest('resync（對話被倒回）：整頁重抓並取代手上的清單；前綴不顯示', async () => {
   let ev: ShareEvents | null = null
   let page: ShareMessage[] = [
     { id: 'a', role: 'user', text: '〔分享使用者〕 早安', created_at: '2026-10-04T00:00:00Z', attachments: [] },
@@ -566,19 +602,19 @@ test('resync（對話被倒回）：整頁重抓並取代手上的清單；前�
     },
   }
   await mount(<ShareApp client={client} />)
-  await settle(100)
+  await settleV(100)
   assert.equal(document.querySelectorAll('.sh-msg').length, 2)
   assert.equal(document.querySelector('.sh-msg.user')!.textContent!.includes('分享使用者'), false, '她看到的是自己打的原文')
   page = [page[0]]
   await act(async () => {
     ev!.onResync?.()
   })
-  await settle(50)
+  await settleV(50)
   assert.equal(document.querySelectorAll('.sh-msg').length, 1, '倒回掉的那則要消失')
 })
 
 /** 客訴 2026-10-04：一次選 5 個檔，原本同時送出、第三張起「傳得太快了」。現在一張接一張、看得到第幾張／共幾張，429 自己重試。 */
-test('一次選好幾個檔：依序上傳、顯示第幾張，429 自動重試、不顯示「太快」', async () => {
+vtest('一次選好幾個檔：依序上傳、顯示第幾張，429 自動重試、不顯示「太快」', async () => {
   let inFlight = 0
   let maxInFlight = 0
   let calls = 0
@@ -595,18 +631,18 @@ test('一次選好幾個檔：依序上傳、顯示第幾張，429 自動重試�
     return { id: `att-${f.name}`, name: f.name }
   }
   await mount(<ShareApp client={client} />)
-  await settle(300)
+  await settleV(300)
   const input = document.querySelector('input[type=file]') as HTMLInputElement
   const picked = [1, 2, 3, 4, 5].map((i) => new File([`photo ${i}`], `p${i}.txt`, { type: 'text/plain' }))
   await act(async () => {
     Object.defineProperty(input, 'files', { configurable: true, value: picked })
     input.dispatchEvent(new Event('change', { bubbles: true }))
   })
-  await settle(20)
+  await settleV(20)
   assert.match(document.querySelector('.sh-pending')!.textContent!, /第 1 張／共 5 張/)
   assert.match(document.querySelector('.sh-pending')!.textContent!, /等待中/)
   // act 外完成的上傳要到下一個 act 才 render：分段等，每段都讓佇列往前走。
-  for (let i = 0; i < 40 && document.querySelectorAll('.sh-pending li.ok').length < 5; i++) await settle(100)
+  for (let i = 0; i < 40 && document.querySelectorAll('.sh-pending li.ok').length < 5; i++) await settleV(100)
   assert.equal(maxInFlight, 1, '一次只傳一張')
   assert.deepEqual(order, ['p1.txt', 'p2.txt', 'p3.txt', 'p4.txt', 'p5.txt'])
   assert.equal(calls, 6, '第 2 張 429 之後自己再傳一次')
@@ -614,7 +650,7 @@ test('一次選好幾個檔：依序上傳、顯示第幾張，429 自動重試�
   assert.equal(document.querySelectorAll('.sh-pending li.ok').length, 5)
 })
 
-test('真的沒傳上去：寫「這張沒傳上去」，按「再試一次」重傳那一張', async () => {
+vtest('真的沒傳上去：寫「這張沒傳上去」，按「再試一次」重傳那一張', async () => {
   let fail = true
   const client = mockShareClient(TOKEN)
   client.upload = async (f: File) => {
@@ -622,19 +658,19 @@ test('真的沒傳上去：寫「這張沒傳上去」，按「再試一次」�
     return { id: 'att-x', name: f.name }
   }
   await mount(<ShareApp client={client} />)
-  await settle(300)
+  await settleV(300)
   const input = document.querySelector('input[type=file]') as HTMLInputElement
   await act(async () => {
     Object.defineProperty(input, 'files', { configurable: true, value: [new File(['x'], 'x.txt', { type: 'text/plain' })] })
     input.dispatchEvent(new Event('change', { bubbles: true }))
   })
-  await settle(50)
-  await settle(50)
+  await settleV(50)
+  await settleV(50)
   assert.match(document.querySelector('.sh-pending')!.textContent!, /這張沒傳上去/)
   fail = false
   await click(document.querySelector('.sh-retry')!)
-  await settle(50)
-  await settle(50)
+  await settleV(50)
+  await settleV(50)
   assert.equal(document.querySelectorAll('.sh-pending li.ok').length, 1)
   assert.equal(document.querySelector('.sh-retry'), null)
 })
@@ -662,11 +698,11 @@ function gatedSendClient(): { client: ShareClient; release: () => void; sent: Ar
   return { client, release, sent, uploaded }
 }
 
-test('送出中打的下一則不會被清掉', async () => {
+vtest('送出中打的下一則不會被清掉', async () => {
   const { client, release, sent } = gatedSendClient()
   try {
     await mount(<ShareApp client={client} />)
-    await settle(300)
+    await settleV(300)
     const ta = document.querySelector('textarea')!
     const setTa = (v: string) =>
       act(async () => {
@@ -676,10 +712,10 @@ test('送出中打的下一則不會被清掉', async () => {
       })
     await setTa('第一則')
     await click(document.querySelector('.sh-send')!)
-    await settle(50)
+    await settleV(50)
     await setTa('第二則')
     release()
-    await settle(300)
+    await settleV(300)
     assert.equal(ta.value, '第二則')
     assert.equal(sent[0].text, '第一則')
   } finally {
@@ -687,11 +723,11 @@ test('送出中打的下一則不會被清掉', async () => {
   }
 })
 
-test('送出中才傳好的附件留著', async () => {
+vtest('送出中才傳好的附件留著', async () => {
   const { client, release, sent, uploaded } = gatedSendClient()
   try {
     await mount(<ShareApp client={client} />)
-    await settle(300)
+    await settleV(300)
     const ta = document.querySelector('textarea')!
     await act(async () => {
       const set = Object.getOwnPropertyDescriptor(Object.getPrototypeOf(ta), 'value')!.set!
@@ -699,21 +735,21 @@ test('送出中才傳好的附件留著', async () => {
       ta.dispatchEvent(new Event('input', { bubbles: true }))
     })
     await click(document.querySelector('.sh-send')!)
-    await settle(50)
+    await settleV(50)
     // 送出期間才選的檔：傳好（拿到 id）但沒有跟這一則送出。
     const fi = document.querySelector<HTMLInputElement>('input[type="file"]')!
     Object.defineProperty(fi, 'files', { configurable: true, value: [new File(['hi'], 'late.png', { type: 'image/png' })] })
     await act(async () => fi.dispatchEvent(new Event('change', { bubbles: true })))
-    await until(() => document.querySelector('.sh-pending li.ok') !== null, '附件傳好')
+    await untilV(() => document.querySelector('.sh-pending li.ok') !== null, '附件傳好')
     release()
-    await settle(300)
+    await settleV(300)
     assert.equal(sent[0].attachments.length, 0, '第一則送出時沒帶附件')
     assert.equal(document.querySelectorAll('.sh-pending li').length, 1, '送出期間才傳好的附件還在清單上')
     assert.equal(document.querySelector('.sh-pending li')!.className, 'ok')
     // 等 bot 回完、送出鈕恢復，再按送出：這次附件要跟上。
-    await until(() => !document.querySelector<HTMLButtonElement>('.sh-send')!.disabled, '可以再送')
+    await untilV(() => !document.querySelector<HTMLButtonElement>('.sh-send')!.disabled, '可以再送')
     await click(document.querySelector('.sh-send')!)
-    await settle(300)
+    await settleV(300)
     assert.deepEqual(sent[1].attachments, uploaded)
   } finally {
     release()
@@ -1405,7 +1441,7 @@ test('SSE 模式不重複抓：收到回覆事件已經抓過，載入頁面不�
 })
 
 /** #1095：超過 20 個附件在送出前就擋（daemon 會回 400，畫面原本只寫「送出失敗」）；移到 20 個就能送。 */
-test('超過 20 個附件：送出鈕停用並說明要移除幾個；移到 20 個就能送', { timeout: 20_000 }, async () => {
+vtest('超過 20 個附件：送出鈕停用並說明要移除幾個；移到 20 個就能送', { timeout: 20_000 }, async () => {
   const client = mockShareClient(TOKEN)
   client.upload = async (f) => ({ id: `att-${f.name}`, name: f.name })
   const sent: string[][] = []
@@ -1413,14 +1449,14 @@ test('超過 20 個附件：送出鈕停用並說明要移除幾個；移到 20 
     sent.push(ids)
   }
   await mount(<ShareApp client={client} />)
-  await settle(300)
+  await settleV(300)
   const input = document.querySelector('input[type=file]') as HTMLInputElement
   const files = Array.from({ length: 21 }, (_, i) => new File(['x'], `p${i}.txt`, { type: 'text/plain' }))
   await act(async () => {
     Object.defineProperty(input, 'files', { configurable: true, value: files })
     input.dispatchEvent(new Event('change', { bubbles: true }))
   })
-  for (let i = 0; i < 60 && document.querySelectorAll('.sh-pending li.ok').length < 21; i++) await settle(50)
+  for (let i = 0; i < 60 && document.querySelectorAll('.sh-pending li.ok').length < 21; i++) await settleV(50)
   assert.equal(document.querySelectorAll('.sh-pending li.ok').length, 21)
   assert.equal((document.querySelector('.sh-send') as HTMLButtonElement).disabled, true)
   const err = document.querySelector('.sh-send-err')!.textContent!
@@ -1429,12 +1465,12 @@ test('超過 20 個附件：送出鈕停用並說明要移除幾個；移到 20 
   assert.equal(sent.length, 0)
 
   await click(document.querySelector('.sh-pending li button[aria-label^="移除"]')!)
-  await settle(50)
+  await settleV(50)
   assert.equal(document.querySelectorAll('.sh-pending li').length, 20)
   assert.equal((document.querySelector('.sh-send') as HTMLButtonElement).disabled, false)
   assert.equal(document.querySelector('.sh-send-err'), null)
   await click(document.querySelector('.sh-send')!)
-  await settle(100)
+  await settleV(100)
   assert.equal(sent.length, 1)
   assert.equal(sent[0].length, 20)
 })
@@ -1488,10 +1524,10 @@ test('載入較早訊息後留在原來那一則，不跳到最舊', { timeout: 
   assert.equal(list.scrollTop, 200, '多出來的兩則（200px）補回 scrollTop，人留在原來那一則')
 })
 
-test('輸入法選字的 Enter（isComposing 或 keyCode 229）不送出；一般 Enter 才送', async () => {
+vtest('輸入法選字的 Enter（isComposing 或 keyCode 229）不送出；一般 Enter 才送', async () => {
   let sent = 0
   await mount(<ShareApp client={{ ...mockShareClient(TOKEN), send: async () => { sent++ } }} />)
-  await settle(300)
+  await settleV(300)
   const ta = document.querySelector('textarea')!
   await act(async () => {
     const set = Object.getOwnPropertyDescriptor(Object.getPrototypeOf(ta), 'value')!.set!
@@ -1499,19 +1535,19 @@ test('輸入法選字的 Enter（isComposing 或 keyCode 229）不送出；一�
     ta.dispatchEvent(new Event('input', { bubbles: true }))
   })
   await imeEnter(ta, 'composing')
-  await settle(100)
+  await settleV(100)
   assert.equal(sent, 0, 'isComposing 時不送')
   assert.equal(ta.value, '注音打到一半')
   await imeEnter(ta, 'keycode229')
-  await settle(100)
+  await settleV(100)
   assert.equal(sent, 0, 'WebKit 選字確認那一下（keyCode 229）不送')
   assert.equal(ta.value, '注音打到一半')
   await keydown(ta, 'Enter')
-  await settle(100)
+  await settleV(100)
   assert.equal(sent, 1, '一般 Enter 才送')
 })
 
-test('放大檢視開著時檔案換版：檢視裡的「還在修」也變回按鈕', async () => {
+vtest('放大檢視開著時檔案換版：檢視裡的「還在修」也變回按鈕', async () => {
   let ev: ShareEvents | null = null
   let fixed = false
   const client: ShareClient = {
@@ -1527,15 +1563,15 @@ test('放大檢視開著時檔案換版：檢視裡的「還在修」也變回�
     },
   }
   await mount(<ShareApp client={client} />)
-  await settle(300)
+  await settleV(300)
   await click(document.querySelector('.sh-file-list .sh-thumb')!)
-  await settle(300)
+  await settleV(300)
   assert.equal(document.querySelector('.sh-viewer .sh-png-note')!.textContent, '這張圖還在修，請稍等')
   fixed = true
   await act(async () => {
     ev!.onResync?.()
   })
-  await settle(300)
+  await settleV(300)
   assert.ok(document.querySelector('.sh-viewer .sh-png-btn'), '檢視裡修好的那一版要有按鈕')
   assert.equal(document.querySelector('.sh-viewer .sh-png-note'), null)
 })
