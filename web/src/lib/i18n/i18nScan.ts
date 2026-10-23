@@ -23,7 +23,7 @@ export interface CjkHit {
 }
 
 const CJK = /[㐀-鿿＀-￯　-〿]/
-const I18N_IMPORT = /from\s+['"][^'"]*\/i18n(?:\/index)?(?:\.ts)?['"]/
+const I18N_IMPORT = /from\s+['"][^'"]*(?:\/i18n(?:\/index)?(?:\.ts)?|\/shareI18n(?:\.ts)?)['"]/ // 分享頁用自己的 shareI18n
 const PLACEHOLDER = /\{([A-Za-z_]\w*)\}/g
 
 export function placeholderNames(s: string): string[] {
@@ -122,6 +122,6 @@ export function findHardcodedCjk(file: string, text: string): CjkHit[] {
 export function isUiSource(path: string): boolean {
   if (!/\.(ts|tsx)$/.test(path)) return false
   if (/\.(test|harness)\.(ts|tsx)$/.test(path)) return false
-  if (/(^|\/)api\/mock[A-Za-z]*\.ts$|(^|\/)share\/shareMock\.ts$/.test(path)) return false
+  if (/(^|\/)api\/mock[A-Za-z]*\.ts$|(^|\/)share\/shareMock\.ts$|(^|\/)share\/shareI18n\.ts$/.test(path)) return false // 分享頁字典本身（字典不掃）
   return !/(^|\/)(testing|i18n|__fixtures__)\//.test(path)
 }

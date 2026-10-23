@@ -1,0 +1,56 @@
+/**
+ * 分享頁的多語系（issue #1932）：只含分享頁的句子，不碰主 UI 的字典。
+ *
+ * 打包邊界：分享頁不 import `lib/i18n/index.ts`（會帶進整份 EN 字典與主 UI 字串），只用兩個純模組
+ * `lib/i18n/translate`、`lib/i18n/lang`（見 `shareIsolation.test.ts`）。
+ * key 規則同主 UI：繁中原句就是 key、字面字串、插值用 `{name}`；缺英文退回繁中。
+ */
+import { useSyncExternalStore } from 'react'
+import { getLang, subscribeLang } from '../lib/i18n/lang'
+import { translate } from '../lib/i18n/translate'
+
+export const SHARE_EN: Record<string, string | { one: string; other: string }> = {
+  '連結不完整': 'Incomplete link',
+  '請確認你打開的是完整的分享連結。': 'Make sure you opened the full share link.',
+  '分享頁請求逾時：伺服器沒有在期限內回應': 'The share page request timed out: the server did not respond in time',
+  '這張照片打不開，請換一張或改用截圖': 'This photo cannot be opened; use another one or a screenshot',
+  '這個檔案太大了': 'This file is too large',
+  '這種檔案沒辦法傳': 'This file type cannot be sent',
+  '空間滿了，請跟分享給你的人說一聲': 'Storage is full; let the person who shared this know',
+  '這個分享連結已失效': 'This share link has expired',
+  '這張沒傳上去': 'This one did not upload',
+  '…（內容過長，已截斷）': '…(content too long, truncated)',
+  '傳得太快了，請 {sec} 秒後再試。': 'Too many requests; try again in {sec} seconds.',
+  '傳得太快了，請稍等一下再試。': 'Too many requests; please wait a moment and try again.',
+  '這個分享連結已失效。': 'This share link has expired.',
+  '檔案太大了（單檔上限 25 MB）。': 'The file is too large (25 MB max per file).',
+  '訊息太長了，請分成幾段送。': 'The message is too long; please split it into parts.',
+  '不支援這種檔案。': 'This file type is not supported.',
+  '空間滿了，請跟分享給你的人說一聲；你打的字還在。': 'Storage is full; let the person who shared this know. Your text is still here.',
+  '上一則還沒回完，等 bot 回完再送；你打的字還在。': 'The previous message is still being answered; send again once the Bot finishes. Your text is still here.',
+  '有附件已經不在了，請把附件移除、重新選一次再送；你打的字還在。': 'An attachment is gone; remove it, pick it again and send. Your text is still here.',
+  '上傳失敗，請再試一次。': 'Upload failed; please try again.',
+  '送出失敗，請再試一次；你打的字還在。': 'Send failed; please try again. Your text is still here.',
+  '連不上，請按重試再試一次。': 'Cannot connect; press Retry and try again.',
+  '連不上，正在重試…': 'Cannot connect; retrying…',
+  '這張圖太大了，沒辦法分享': 'This image is too large to share',
+  '這張圖沒辦法分享': 'This image cannot be shared',
+  '這張圖還在修，請稍等': 'This image is still being repaired; please wait',
+  '存好了': 'Saved',
+  '分享': 'Share',
+  '存到手機': 'Save to phone',
+  '放大 {name}': 'Enlarge {name}',
+  '關閉': 'Close',
+  '這則訊息的格式太複雜，無法轉成 Markdown。': 'This message is too complex to render as Markdown.',
+}
+
+/** 目前語言的翻譯（非元件，例如 `shareErrorText`）。 */
+export function t(key: string, vars?: Record<string, string | number>): string {
+  return translate(getLang(), SHARE_EN, key, vars)
+}
+
+/** 元件用：訂閱語言，切換時重繪；回傳綁定目前語言的 `t`。 */
+export function useT(): typeof t {
+  useSyncExternalStore(subscribeLang, getLang, getLang)
+  return t
+}

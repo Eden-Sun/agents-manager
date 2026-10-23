@@ -3,11 +3,12 @@
  * mock（VITE_MOCK=1）走 `shareMock.ts`，同一個介面。
  */
 import { ShareHttpError, shareBeforeCursor, toShareFiles, toShareMessage, toSharePage, toStatus, type ShareFile, type ShareMessage, type SharePage, type ShareStatus } from './shareModel'
+import { t } from './shareI18n'
 
 /** GET 或檔案下載的 headers 等太久，或讀 body 連續沒有新資料太久：放棄，不重送（只有 GET 有期限；POST 不動）。 */
 export class ShareTimeoutError extends Error {
   constructor() {
-    super('分享頁請求逾時：伺服器沒有在期限內回應')
+    super(t('分享頁請求逾時：伺服器沒有在期限內回應'))
   }
 }
 
