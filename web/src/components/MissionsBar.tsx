@@ -458,7 +458,7 @@ function MissionCard({ mission, onNavigate }: { mission: Mission; onNavigate: Na
             className={`mission-step${i < view.step ? ' past' : i === view.step ? ' at' : ''}${waiting && i === view.step ? ' stopped' : ''}`}
           >
             <span className="mission-dot" aria-hidden="true" />
-            {PHASE_LABEL[p]}
+            {t.tr(PHASE_LABEL[p])}
           </li>
         ))}
       </ol>
@@ -467,7 +467,7 @@ function MissionCard({ mission, onNavigate }: { mission: Mission; onNavigate: Na
         <ul className="mission-actors">
           {view.actors.map((a) => (
             <li key={a.role}>
-              <span className="mission-role">{ROLE_LABEL[a.role]}</span>
+              <span className="mission-role">{t.tr(ROLE_LABEL[a.role])}</span>
               <span className="mission-who">
                 {a.bot ? botLabel(a.bot) : '—'}
                 {a.identity ? ` · ${a.identity}` : ''}
@@ -491,7 +491,7 @@ function MissionCard({ mission, onNavigate }: { mission: Mission; onNavigate: Na
         <ul className="mission-asgs">
           {view.assignments.map((a) => (
             <li key={a.id} className={assignmentOpen(a) ? 'open' : ''}>
-              <span className="mission-role">{a.role ? ROLE_LABEL[a.role] : '—'}</span>
+              <span className="mission-role">{a.role ? t.tr(ROLE_LABEL[a.role]) : '—'}</span>
               <span className={`mission-asg-state${a.turn_error || a.turn_status === 'quota_exhausted' ? ' warn' : ''}`}>
                 {assignmentLabel(a, view.assignments.some((c) => c.follow_up_of === a.id))}
               </span>

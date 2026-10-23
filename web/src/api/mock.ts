@@ -20,17 +20,18 @@ import { MockRemoteCargo } from './mockRemoteCargo'
 import { MockIntegrationUpdates } from './mockIntegrationUpdates'
 import type { HttpMethod, SocketHandlers, Transport, UploadOptions } from './transport'
 import { MockComposerDrafts } from './mockComposerDraft'
+import { L } from './mockText'
 
 /** 未知 kind 一律當 claude（與 daemon 的 400 不同，mock 寬鬆處理）。 */
 /** 2026-09-23 真機（pane 只有 14 行）：claude 把 AskUserQuestion 的題目裁掉，只剩捲動中的選項。 */
-const MOCK_TINY_ASK_SCREEN = [
+const mockTinyAskScreen = () => [
   '',
-  '❯ 1. 內網 http (Recommended)',
-  '     改 console：production 允許連私有網段的 http。流量留在 VPC 內、不出公網。',
-  '  2. 公網 https，拿掉 IP 白名單',
-  '     prod 改用 https://rpa-hub.example.com，並拿掉 IP 白名單，只靠 API key＋限流。',
-  '↓ 3. 公網 https＋固定出口 IP',
-  '     Cloud NAT 改用固定 IP，把該 IP 加進白名單。安全面最好，但最慢。',
+  L('❯ 1. 內網 http (Recommended)', '❯ 1. Internal http (Recommended)'),
+  L('     改 console：production 允許連私有網段的 http。流量留在 VPC 內、不出公網。', '     Change the console: let production use http on private ranges. Traffic stays inside the VPC.'),
+  L('  2. 公網 https，拿掉 IP 白名單', '  2. Public https, drop the IP allowlist'),
+  L('     prod 改用 https://rpa-hub.example.com，並拿掉 IP 白名單，只靠 API key＋限流。', '     Move prod to https://rpa-hub.example.com and drop the IP allowlist; rely on the API key and rate limiting only.'),
+  L('↓ 3. 公網 https＋固定出口 IP', '↓ 3. Public https + fixed egress IP'),
+  L('     Cloud NAT 改用固定 IP，把該 IP 加進白名單。安全面最好，但最慢。', '     Use a fixed IP on Cloud NAT and allowlist it. Best for security, but slowest.'),
   '──────────────────────────────────────────────────────────────',
   '  5. Chat about this',
   '',
@@ -55,15 +56,15 @@ const MOCK_BULLET_ASK_SCREEN = [
 ]
 
 /** 同一題在 transcript 裡的樣子（daemon `GET /api/bots/{id}/pending-question`）。 */
-const MOCK_TINY_ASK_QUESTIONS = [
+const mockTinyAskQuestions = () => [
   {
-    question: 'prod console 連 prod RPA 要走哪條路？（現在失敗是因為 console 規定 RPA 位址必須 https，我設了內網 http）',
-    header: '連線方式',
+    question: L('prod console 連 prod RPA 要走哪條路？（現在失敗是因為 console 規定 RPA 位址必須 https，我設了內網 http）', 'Which route should the prod console take to the prod RPA? (It fails now because the console requires an https RPA address and I set an internal http one)'),
+    header: L('連線方式', 'Connection'),
     multiSelect: false,
     options: [
-      { label: '內網 http (Recommended)', description: '改 console：production 允許連私有網段的 http。流量留在 VPC 內、不出公網。' },
-      { label: '公網 https，拿掉 IP 白名單', description: 'prod 改用 https，並拿掉 IP 白名單，只靠 API key＋限流。' },
-      { label: '公網 https＋固定出口 IP', description: 'Cloud NAT 改用固定 IP，把該 IP 加進白名單。安全面最好，但最慢。' },
+      { label: L('內網 http (Recommended)', 'Internal http (Recommended)'), description: L('改 console：production 允許連私有網段的 http。流量留在 VPC 內、不出公網。', 'Change the console: let production use http on private ranges. Traffic stays inside the VPC.') },
+      { label: L('公網 https，拿掉 IP 白名單', 'Public https, drop the IP allowlist'), description: L('prod 改用 https，並拿掉 IP 白名單，只靠 API key＋限流。', 'Move prod to https and drop the IP allowlist; rely on the API key and rate limiting only.') },
+      { label: L('公網 https＋固定出口 IP', 'Public https + fixed egress IP'), description: L('Cloud NAT 改用固定 IP，把該 IP 加進白名單。安全面最好，但最慢。', 'Use a fixed IP on Cloud NAT and allowlist it. Best for security, but slowest.') },
     ],
   },
 ]
@@ -277,15 +278,15 @@ interface MockProject {
   created_at: string
 }
 
-const ISSUES: Rec[] = [
-  { number: 42, title: '群組聊天：刪掉的 bot 歷史不再出現在合併時間軸', state: 'open', labels: [{ name: 'bug', color: 'd73a4a' }, { name: 'group-chat', color: '0e8a16' }], author: 'edansun', updated_at: inHours(-3), body: '重現步驟：\n1. 在群組視圖送 `@all` \n2. 刪掉其中一個 bot\n3. 重新整理\n\n預期：歷史仍在；實際：只剩存活 bot 的訊息。\n\n相關：`GET /projects/:id/messages` 只合併現存 bot。' },
-  { number: 41, title: '即時輸出前幾幀是 TUI 雜訊（✢ Improvising…）', state: 'open', labels: [{ name: 'daemon', color: '1d76db' }, { name: 'polish', color: 'fbca04' }], author: 'edansun', updated_at: inHours(-9), body: '`turn_progress` 的前 1–2 幀會帶 Claude Code 的 spinner 文字，應在 daemon 端過濾。' },
-  { number: 40, title: 'Bot 設定：codex 模型 / effort / fast 從 `GET /api/models` 取', state: 'open', labels: [{ name: 'enhancement', color: 'a2eeef' }, { name: 'web', color: '5319e7' }], author: 'edansun', updated_at: inHours(-20), body: '目前是靜態清單。改為 API 驅動，失敗退回靜態清單。' },
-  { number: 39, title: '主機面板顯示三個 kind 的工具偵測徽章', state: 'open', labels: [{ name: 'enhancement', color: 'a2eeef' }], author: 'm4p-bot', updated_at: inHours(-30), body: '已安裝 ✓ / 未安裝 ✗ / 未登入 !，附「安裝」按鈕。' },
-  { number: 38, title: '額度徽章：低於 20% 用警示色', state: 'open', labels: [{ name: 'web', color: '5319e7' }, { name: 'good first issue', color: '7057ff' }], author: 'edansun', updated_at: inHours(-50), body: '剩餘 = 100 − used_pct。' },
-  { number: 37, title: '長訊息不要預先收合', state: 'closed', labels: [{ name: 'web', color: '5319e7' }], author: 'edansun', updated_at: inHours(-60), body: '已在 v3.9 UI polish 移除 isLong / clamped。' },
-  { number: 35, title: 'hash 式 herdr agent name', state: 'closed', labels: [{ name: 'daemon', color: '1d76db' }], author: 'edansun', updated_at: inHours(-100), body: '`<project slug>-<bot id 尾 6 碼>`。' },
-  { number: 33, title: 'grok kind：hook 不走 argv', state: 'closed', labels: [{ name: 'daemon', color: '1d76db' }, { name: 'grok', color: '000000' }], author: 'edansun', updated_at: inHours(-140), body: '改寫入 `<GROK_HOME>/hooks/agents-manager.json`。' },
+const issues = (): Rec[] => [
+  { number: 42, title: L('群組聊天：刪掉的 bot 歷史不再出現在合併時間軸', 'Group chat: history of deleted bots no longer appears in the merged timeline'), state: 'open', labels: [{ name: 'bug', color: 'd73a4a' }, { name: 'group-chat', color: '0e8a16' }], author: 'edansun', updated_at: inHours(-3), body: L('重現步驟：\n1. 在群組視圖送 `@all` \n2. 刪掉其中一個 bot\n3. 重新整理\n\n預期：歷史仍在；實際：只剩存活 bot 的訊息。\n\n相關：`GET /projects/:id/messages` 只合併現存 bot。', 'Steps to reproduce:\n1. Send `@all` in the group view\n2. Delete one of the bots\n3. Refresh\n\nExpected: history stays; actual: only messages from live bots remain.\n\nRelated: `GET /projects/:id/messages` only merges existing bots.') },
+  { number: 41, title: L('即時輸出前幾幀是 TUI 雜訊（✢ Improvising…）', 'Live output\'s first few frames are TUI noise (✢ Improvising…)'), state: 'open', labels: [{ name: 'daemon', color: '1d76db' }, { name: 'polish', color: 'fbca04' }], author: 'edansun', updated_at: inHours(-9), body: L('`turn_progress` 的前 1–2 幀會帶 Claude Code 的 spinner 文字，應在 daemon 端過濾。', 'The first 1–2 frames of `turn_progress` carry Claude Code\'s spinner text; the daemon should filter them.') },
+  { number: 40, title: L('Bot 設定：codex 模型 / effort / fast 從 `GET /api/models` 取', 'Bot settings: take codex model / effort / fast from `GET /api/models`'), state: 'open', labels: [{ name: 'enhancement', color: 'a2eeef' }, { name: 'web', color: '5319e7' }], author: 'edansun', updated_at: inHours(-20), body: L('目前是靜態清單。改為 API 驅動，失敗退回靜態清單。', 'It is a static list today. Make it API-driven and fall back to the static list on failure.') },
+  { number: 39, title: L('主機面板顯示三個 kind 的工具偵測徽章', 'Host panel shows tool-detection badges for the three kinds'), state: 'open', labels: [{ name: 'enhancement', color: 'a2eeef' }], author: 'm4p-bot', updated_at: inHours(-30), body: L('已安裝 ✓ / 未安裝 ✗ / 未登入 !，附「安裝」按鈕。', 'Installed ✓ / not installed ✗ / not logged in !, with an "Install" button.') },
+  { number: 38, title: L('額度徽章：低於 20% 用警示色', 'Quota badge: warning color below 20%'), state: 'open', labels: [{ name: 'web', color: '5319e7' }, { name: 'good first issue', color: '7057ff' }], author: 'edansun', updated_at: inHours(-50), body: L('剩餘 = 100 − used_pct。', 'Remaining = 100 − used_pct.') },
+  { number: 37, title: L('長訊息不要預先收合', 'Don\'t pre-collapse long messages'), state: 'closed', labels: [{ name: 'web', color: '5319e7' }], author: 'edansun', updated_at: inHours(-60), body: L('已在 v3.9 UI polish 移除 isLong / clamped。', 'Removed isLong / clamped in the v3.9 UI polish.') },
+  { number: 35, title: L('hash 式 herdr agent name', 'hash-style herdr agent name'), state: 'closed', labels: [{ name: 'daemon', color: '1d76db' }], author: 'edansun', updated_at: inHours(-100), body: L('`<project slug>-<bot id 尾 6 碼>`。', '`<project slug>-<last 6 chars of bot id>`.') },
+  { number: 33, title: L('grok kind：hook 不走 argv', 'grok kind: hooks don\'t go through argv'), state: 'closed', labels: [{ name: 'daemon', color: '1d76db' }, { name: 'grok', color: '000000' }], author: 'edansun', updated_at: inHours(-140), body: L('改寫入 `<GROK_HOME>/hooks/agents-manager.json`。', 'Now written to `<GROK_HOME>/hooks/agents-manager.json`.') },
 ]
 
 /** SPEC §11.2 `[[hosts]]` + runtime connection state. */
@@ -390,60 +391,61 @@ const TOOLS_ALL_OK: Record<BotKind, MockTool> = {
 /** Codex 0.157.0 catalogue after retired 5.6 ids are hidden; claude effort 每個 alias 同一組。 */
 const CLAUDE_EFFORTS = ['low', 'medium', 'high', 'xhigh', 'max']
 
-const MODELS: Record<BotKind, Rec[]> = {
+/** 函式：說明文字依語言，要等 `?lang=` 套用後才取。 */
+const models = (): Record<BotKind, Rec[]> => ({
   claude: [
-    { id: 'opus', display_name: 'Opus', description: '最強推理', is_default: false, default_effort: null, efforts: CLAUDE_EFFORTS, service_tiers: [] },
-    { id: 'sonnet', display_name: 'Sonnet', description: '速度與品質平衡', is_default: true, default_effort: null, efforts: CLAUDE_EFFORTS, service_tiers: [] },
-    { id: 'haiku', display_name: 'Haiku', description: '最快、最省', is_default: false, default_effort: null, efforts: CLAUDE_EFFORTS, service_tiers: [] },
+    { id: 'opus', display_name: 'Opus', description: L('最強推理', 'Strongest reasoning'), is_default: false, default_effort: null, efforts: CLAUDE_EFFORTS, service_tiers: [] },
+    { id: 'sonnet', display_name: 'Sonnet', description: L('速度與品質平衡', 'Balance of speed and quality'), is_default: true, default_effort: null, efforts: CLAUDE_EFFORTS, service_tiers: [] },
+    { id: 'haiku', display_name: 'Haiku', description: L('最快、最省', 'Fastest and cheapest'), is_default: false, default_effort: null, efforts: CLAUDE_EFFORTS, service_tiers: [] },
     { id: 'fable', display_name: 'Fable', description: 'Fable 5.1', is_default: false, default_effort: null, efforts: CLAUDE_EFFORTS, service_tiers: [] },
   ],
   codex: [
     {
       id: 'gpt-6-luna',
       display_name: 'GPT-6 Luna',
-      description: '快速、經濟，適合一般工作',
+      description: L('快速、經濟，適合一般工作', 'Fast and economical, for everyday work'),
       is_default: false,
       default_effort: 'low',
       efforts: ['low', 'medium', 'high', 'xhigh'],
       service_tiers: [
-        { id: 'default', name: 'Standard', description: '一般佇列' },
-        { id: 'priority', name: 'Fast', description: '優先佇列，較快但額度消耗較高' },
+        { id: 'default', name: 'Standard', description: L('一般佇列', 'Standard queue') },
+        { id: 'priority', name: 'Fast', description: L('優先佇列，較快但額度消耗較高', 'Priority queue: faster but uses more quota') },
       ],
     },
     {
       id: 'gpt-6-sol',
       display_name: 'GPT-6 Sol',
-      description: '寫程式與日常工作的全能模型',
+      description: L('寫程式與日常工作的全能模型', 'All-round model for coding and daily work'),
       is_default: false,
       default_effort: 'medium',
       efforts: ['low', 'medium', 'high', 'xhigh', 'max', 'ultra'],
       service_tiers: [
-        { id: 'default', name: 'Standard', description: '一般佇列' },
-        { id: 'priority', name: 'Fast', description: '優先佇列，較快但額度消耗較高' },
+        { id: 'default', name: 'Standard', description: L('一般佇列', 'Standard queue') },
+        { id: 'priority', name: 'Fast', description: L('優先佇列，較快但額度消耗較高', 'Priority queue: faster but uses more quota') },
       ],
     },
     {
       id: 'gpt-6-astra',
       display_name: 'GPT-6 Astra',
-      description: '規格審視 / 深度推理（無 fast tier）',
+      description: L('規格審視 / 深度推理（無 fast tier）', 'Spec review / deep reasoning (no fast tier)'),
       is_default: true,
       default_effort: 'low',
       efforts: ['high', 'xhigh'],
-      service_tiers: [{ id: 'default', name: 'Standard', description: '一般佇列' }],
+      service_tiers: [{ id: 'default', name: 'Standard', description: L('一般佇列', 'Standard queue') }],
     },
   ],
   grok: [
-    { id: 'grok-4.7', display_name: 'Grok 4.7', description: 'grok CLI 預設', is_default: true, default_effort: 'high', efforts: ['low', 'medium', 'high', 'xhigh'], service_tiers: [] },
-    { id: 'grok-4.7-build-fast', display_name: 'Grok 4.7 Fast', description: '較快變體', is_default: false, default_effort: 'high', efforts: ['low', 'medium', 'high', 'xhigh'], service_tiers: [] },
-    { id: 'grok-4.6', display_name: 'Grok 4.6', description: '上一代', is_default: false, default_effort: 'high', efforts: ['low', 'medium', 'high', 'xhigh'], service_tiers: [] },
-    { id: 'grok-4.5', display_name: 'Grok 4.5', description: '上一代', is_default: false, default_effort: 'high', efforts: ['low', 'medium', 'high'], service_tiers: [] },
+    { id: 'grok-4.7', display_name: 'Grok 4.7', description: L('grok CLI 預設', 'grok CLI default'), is_default: true, default_effort: 'high', efforts: ['low', 'medium', 'high', 'xhigh'], service_tiers: [] },
+    { id: 'grok-4.7-build-fast', display_name: 'Grok 4.7 Fast', description: L('較快變體', 'Faster variant'), is_default: false, default_effort: 'high', efforts: ['low', 'medium', 'high', 'xhigh'], service_tiers: [] },
+    { id: 'grok-4.6', display_name: 'Grok 4.6', description: L('上一代', 'Previous generation'), is_default: false, default_effort: 'high', efforts: ['low', 'medium', 'high', 'xhigh'], service_tiers: [] },
+    { id: 'grok-4.5', display_name: 'Grok 4.5', description: L('上一代', 'Previous generation'), is_default: false, default_effort: 'high', efforts: ['low', 'medium', 'high'], service_tiers: [] },
   ],
   agy: [
     { id: 'gemini-3.8-flash-medium', display_name: 'gemini-3.8-flash-medium', description: '', is_default: true, default_effort: null, efforts: [], service_tiers: [] },
     { id: 'gemini-3.8-flash-high', display_name: 'gemini-3.8-flash-high', description: '', is_default: false, default_effort: null, efforts: [], service_tiers: [] },
     { id: 'gemini-3.8-flash-low', display_name: 'gemini-3.8-flash-low', description: '', is_default: false, default_effort: null, efforts: [], service_tiers: [] },
   ],
-}
+})
 
 /**
  * claude `default_effort` 是廠商內建預設；`account_default_effort` 來自帳號 settings.json 的全域＋per-model `effortLevel`（SPEC §17.1），數字照真機實測。
@@ -460,7 +462,7 @@ const CLAUDE_ACCOUNT_EFFORT: Record<string, { global?: string; overrides?: Recor
 
 function claudeModelsForIdentity(identity: string): Rec[] {
   const cfg = CLAUDE_ACCOUNT_EFFORT[identity] ?? CLAUDE_ACCOUNT_EFFORT['']
-  return MODELS.claude.map((m) => {
+  return models().claude.map((m) => {
     const builtin = CLAUDE_BUILTIN_DEFAULT_EFFORT
     const account = cfg.overrides?.[String(m.id)] ?? cfg.global ?? null
     // 廠推薦每個帳號一樣；帳號記住的值另放 account_default_effort，跟內建相同就不給（#1679）。
@@ -482,10 +484,20 @@ function inHours(h: number): string {
   return new Date(Date.now() + h * 3600_000).toISOString()
 }
 
-const REPLIES = [
-  '好的，我看了一下 `src/api/transport.ts`：token 會在 `GET /api/session` 之後快取，後續 REST 都帶 `X-AM-Token`。\n\n需要我把重連的退避上限調整成 30 秒嗎？',
-  '已完成。修改重點：\n\n1. `runs_one_active` 部分唯一索引避免重複啟動\n2. per-bot mutex 包住 start / stop / prompt\n3. hook 早於 RPC 回應時仍能配對 in-flight Turn\n\n測試都過了。',
-  '這段的問題在於 `agent.start` 是非同步的，socket 立刻回 `launch_pending:true`，所以必須接 `agent.wait {until:[idle,done,blocked]}` 才能確定就緒。',
+/** 函式：要等 `?lang=` 固定語言套用後才取原文（模組載入時語言還沒定）。 */
+const replies = () => [
+  L(
+    '好的，我看了一下 `src/api/transport.ts`：token 會在 `GET /api/session` 之後快取，後續 REST 都帶 `X-AM-Token`。\n\n需要我把重連的退避上限調整成 30 秒嗎？',
+    "Sure, I looked at `src/api/transport.ts`: the token is cached after `GET /api/session`, and every later REST call carries `X-AM-Token`.\n\nWant me to raise the reconnect backoff cap to 30 seconds?",
+  ),
+  L(
+    '已完成。修改重點：\n\n1. `runs_one_active` 部分唯一索引避免重複啟動\n2. per-bot mutex 包住 start / stop / prompt\n3. hook 早於 RPC 回應時仍能配對 in-flight Turn\n\n測試都過了。',
+    'Done. Key changes:\n\n1. A partial unique index `runs_one_active` prevents duplicate starts\n2. A per-bot mutex wraps start / stop / prompt\n3. A hook that arrives before the RPC response still matches the in-flight Turn\n\nAll tests pass.',
+  ),
+  L(
+    '這段的問題在於 `agent.start` 是非同步的，socket 立刻回 `launch_pending:true`，所以必須接 `agent.wait {until:[idle,done,blocked]}` 才能確定就緒。',
+    'The catch here is that `agent.start` is asynchronous: the socket returns `launch_pending:true` right away, so you need `agent.wait {until:[idle,done,blocked]}` to know it is ready.',
+  ),
   'PONG',
   // Fenced one-liner (what `echo 1` really produced).
   '```\n1\n```',
@@ -737,7 +749,7 @@ export class MockTransport implements Transport {
       model: null,
       effort: null,
       fast: 0,
-      persona: '你是 agents-manager 的 PM。回覆用繁體中文，先給結論再列理由；改動前先說明影響範圍。',
+      persona: L('你是 agents-manager 的 PM。回覆用繁體中文，先給結論再列理由；改動前先說明影響範圍。', 'You are the PM of agents-manager. Reply with the conclusion first, then the reasons; explain the blast radius before changing anything.'),
       args_json: '[]',
       autostart: 1,
       inject_hooks: 1,
@@ -851,20 +863,20 @@ export class MockTransport implements Transport {
   /** 分享用的受限 bot（SPEC「分享 bot」）：已開分享，對話裡有分享使用者與你自己發的訊息，截圖與分享頁 mock 用。 */
   private seedSharedBot() {
     const p: MockProject = {
-      id: ulid('proj'), path: '/Users/me/.local/share/agents-manager/shared-bots/support', label: '客服分享', workspace_id: null, host: 'local', github: null, created_at: now(),
+      id: ulid('proj'), path: '/Users/me/.local/share/agents-manager/shared-bots/support', label: L('客服分享', 'Support share'), workspace_id: null, host: 'local', github: null, created_at: now(),
     }
     this.projects.push(p)
     const bot: MockBot = {
-      id: ulid('bot'), project_id: p.id, name: 'support-bot', kind: 'claude', model: null, effort: null, fast: 0, persona: '你是產品客服，回答要簡短。', args_json: '[]',
+      id: ulid('bot'), project_id: p.id, name: 'support-bot', kind: 'claude', model: null, effort: null, fast: 0, persona: L('你是產品客服，回答要簡短。', 'You are product support. Keep answers short.'), args_json: '[]',
       autostart: 0, inject_hooks: 1, auto_approve: 0, identity: null, env_json: '{}', managed_by: 'user', cwd: null, share_profile: 'restricted', created_at: now(),
     }
     this.bots.push(bot)
     this.shares.seed(bot.id)
     const base = { conversation_id: this.conv(bot.id), turn_id: null, bot_id: bot.id, incomplete: 0 }
-    this.addMessage({ ...base, role: 'user', source: 'web', content: '這顆是給客戶用的，先自我介紹一下。' })
-    this.addMessage({ ...base, role: 'assistant', source: 'hook', content: '你好，我是產品客服助理，可以回答安裝與帳號相關的問題，也可以看你上傳的設定檔。' })
-    this.addMessage({ ...base, role: 'user', source: 'share', content: '我的 config.toml 裝完之後一直說 port 被佔用，幫我看一下', attachments_json: JSON.stringify([{ id: 'att_share_demo', name: 'config.toml', mime: 'text/plain', size: 412, path: 'inbox/config.toml' }]) })
-    this.addMessage({ ...base, role: 'assistant', source: 'hook', content: '看了你的設定：`listen = "127.0.0.1:7788"` 跟另一個服務撞了。改成 `7789` 之後重開就好，我把改好的檔放在「bot 給你的檔案」裡。' })
+    this.addMessage({ ...base, role: 'user', source: 'web', content: L('這顆是給客戶用的，先自我介紹一下。', 'This one is for customers. Introduce yourself first.') })
+    this.addMessage({ ...base, role: 'assistant', source: 'hook', content: L('你好，我是產品客服助理，可以回答安裝與帳號相關的問題，也可以看你上傳的設定檔。', "Hi, I'm the product support assistant. I can answer install and account questions, and look at config files you upload.") })
+    this.addMessage({ ...base, role: 'user', source: 'share', content: L('我的 config.toml 裝完之後一直說 port 被佔用，幫我看一下', 'After installing, my config.toml keeps saying the port is in use. Can you take a look?'), attachments_json: JSON.stringify([{ id: 'att_share_demo', name: 'config.toml', mime: 'text/plain', size: 412, path: 'inbox/config.toml' }]) })
+    this.addMessage({ ...base, role: 'assistant', source: 'hook', content: L('看了你的設定：`listen = "127.0.0.1:7788"` 跟另一個服務撞了。改成 `7789` 之後重開就好，我把改好的檔放在「bot 給你的檔案」裡。', 'I read your config: `listen = "127.0.0.1:7788"` collides with another service. Change it to `7789` and restart. I put the fixed file under "Files from the bot".') })
   }
 
   /** 使用者發 vs AGM 代發並排：P4 驗收缺陷 3 是兩者畫得一樣。 */
@@ -880,10 +892,10 @@ export class MockTransport implements Transport {
       source: 'web' as const,
       incomplete: 0,
     }
-    this.addMessage({ ...base, content: '先看一下 README 的安裝步驟還對不對', group_id: ulid('grp') })
+    this.addMessage({ ...base, content: L('先看一下 README 的安裝步驟還對不對', 'First check whether the install steps in the README are still right'), group_id: ulid('grp') })
     this.addMessage({
       ...base,
-      content: '任務 01M2C：先把設定頁的錯字修掉，做完回報，我會派 reviewer。',
+      content: L('任務 01M2C：先把設定頁的錯字修掉，做完回報，我會派 reviewer。', 'Task 01M2C: fix the typos on the settings page first, report when done, and I will assign a reviewer.'),
       group_id: ulid('grp'),
       relay_from: agm?.id ?? 'daemon',
     })
@@ -904,8 +916,8 @@ export class MockTransport implements Transport {
     }
     for (let i = 1; i <= 120; i++) {
       const turnId = ulid('turn')
-      this.addMessage({ ...base, turn_id: turnId, role: 'user', content: `第 ${i} 輪：把這段的測試補上` })
-      this.addMessage({ ...base, turn_id: turnId, role: 'assistant', content: `第 ${i} 輪：補好了，兩條都綠。` })
+      this.addMessage({ ...base, turn_id: turnId, role: 'user', content: L(`第 ${i} 輪：把這段的測試補上`, `Round ${i}: add tests for this part`) })
+      this.addMessage({ ...base, turn_id: turnId, role: 'assistant', content: L(`第 ${i} 輪：補好了，兩條都綠。`, `Round ${i}: done, both tests are green.`) })
     }
   }
 
@@ -1180,7 +1192,7 @@ export class MockTransport implements Transport {
     const p = this.projects.find((x) => x.id === projectId)
     if (!p) throw new ApiError(404, { error: 'not_found', what: 'project' }, 'not found')
     if (!p.github) throw new ApiError(400, { error: 'bad_request', message: 'project has no GitHub remote' }, 'bad request')
-    const list: Rec[] = ISSUES.map((i) => ({ ...i, url: `${p.github?.url}/issues/${String(i.number)}` }))
+    const list: Rec[] = issues().map((i) => ({ ...i, url: `${p.github?.url}/issues/${String(i.number)}` }))
     if (number) {
       const one = list.find((i) => String(i.number) === number)
       if (!one) throw new ApiError(404, { error: 'not_found', what: 'issue' }, 'not found')
@@ -1212,8 +1224,8 @@ export class MockTransport implements Transport {
     if (remote && !remote.connected) {
       throw new ApiError(502, { error: 'upstream', message: `主機 ${remote.name} 未連線` }, 'upstream')
     }
-    const models = kind === 'claude' ? claudeModelsForIdentity(identity) : MODELS[kind as BotKind]
-    return { kind, host: remote?.name ?? 'local', models }
+    const list = kind === 'claude' ? claudeModelsForIdentity(identity) : models()[kind as BotKind]
+    return { kind, host: remote?.name ?? 'local', models: list }
   }
 
   /** 官方安裝指令（API.md §12.7）；mock 的 shell pane 照這幾行演一遍。 */
@@ -1780,7 +1792,7 @@ export class MockTransport implements Transport {
       files: [
         ...(this.outboxAdded.get(botId) ?? []).map((name) => file(name, 141, 5)),
         file('tracking.tsv', 18_432, 120),
-        file('出貨追蹤 v2.md', 4_096, 1_500),
+        file(L('出貨追蹤 v2.md', 'shipment-tracking v2.md'), 4_096, 1_500),
         file('run.log', 1_204_233, 3_300),
       ],
     }
@@ -2221,7 +2233,7 @@ export class MockTransport implements Transport {
     this.touchMission(m)
     // demo：AGM 隔一會兒回一句。
     later(() => {
-      const a = this.missionEvent(id, 'answer', '看過了：這個改動只動到文案，不影響登入流程。', null, 'bot-agm', e.id)
+      const a = this.missionEvent(id, 'answer', L('看過了：這個改動只動到文案，不影響登入流程。', 'Looked at it: this change only touches copy and does not affect the login flow.'), null, 'bot-agm', e.id)
       a.client_request_id = `${e.client_request_id}-reply`
       this.touchMission(m)
     }, 900)
@@ -2237,7 +2249,7 @@ export class MockTransport implements Transport {
     if (resumed) {
       m.paused_reason = null
       m.paused_detail = null
-      this.missionEvent(id, 'resumed', '繼續', null, 'daemon')
+      this.missionEvent(id, 'resumed', L('繼續', 'Resumed'), null, 'daemon')
     }
     this.touchMission(m)
     return { event: e, replayed: false, resumed, mission: this.missionJson(m) }
@@ -2267,7 +2279,7 @@ export class MockTransport implements Transport {
     }
     this.missions.unshift(child)
     this.missionEvent(child.id, 'instruction', child.text)
-    this.missionEvent(id, 'note', `追加修改：已開續作任務 ${child.id}`, { revision_mission_id: child.id }, 'daemon')
+    this.missionEvent(id, 'note', L(`追加修改：已開續作任務 ${child.id}`, `Follow-up change: opened continuation mission ${child.id}`), { revision_mission_id: child.id }, 'daemon')
     this.touchMission(parent)
     this.emit('mission_updated', { mission_id: child.id, project_id: child.project_id, status: 'open' })
     return { ...this.missionJson(child), created: true }
@@ -2284,16 +2296,16 @@ export class MockTransport implements Transport {
       }
       m.paused_reason = b.reason.trim()
       m.paused_detail = b.detail ? String(b.detail) : null
-      this.missionEvent(id, 'paused', m.paused_detail ?? '已暫停', null, 'daemon')
+      this.missionEvent(id, 'paused', m.paused_detail ?? L('已暫停', 'Paused'), null, 'daemon')
     }
     if (action === 'resume') {
       m.paused_reason = null
       m.paused_detail = null
-      this.missionEvent(id, 'resumed', '繼續', null, 'daemon')
+      this.missionEvent(id, 'resumed', L('繼續', 'Resumed'), null, 'daemon')
     }
     if (action === 'cancel') {
       m.cancelled_at = now()
-      this.missionEvent(id, 'cancelled', '已取消', null, 'daemon')
+      this.missionEvent(id, 'cancelled', L('已取消', 'Cancelled'), null, 'daemon')
     }
     this.touchMission(m)
     return { mission: this.missionJson(m) }
@@ -2326,10 +2338,10 @@ export class MockTransport implements Transport {
       ...over,
     })
 
-    const running = mk({ text: '把設定頁的錯字修掉，順便補一個 tsc 的 CI 檢查', delivery_mode: 'push_main', rounds_used: 1 })
+    const running = mk({ text: L('把設定頁的錯字修掉，順便補一個 tsc 的 CI 檢查', 'Fix the typos on the settings page and add a tsc CI check'), delivery_mode: 'push_main', rounds_used: 1 })
     this.missions.push(running)
     this.missionEvent(running.id, 'instruction', running.text)
-    this.missionEvent(running.id, 'report', '拆成兩塊：錯字（4 處）與 CI workflow', null, 'bot-agm')
+    this.missionEvent(running.id, 'report', L('拆成兩塊：錯字（4 處）與 CI workflow', 'Split into two parts: typos (4 places) and the CI workflow'), null, 'bot-agm')
     const first = this.missionAssignment(running.id, {
       role: 'executor',
       target_bot_id: 'mission-exec',
@@ -2337,7 +2349,7 @@ export class MockTransport implements Transport {
       turn_status: 'identity_switch',
       turn_error: "You've hit your usage limit",
     })
-    this.missionEvent(running.id, 'note', 'cc2 撞到用量上限，換 cc1 接手', {
+    this.missionEvent(running.id, 'note', L('cc2 撞到用量上限，換 cc1 接手', 'cc2 hit its usage limit; cc1 takes over'), {
       mission_id: running.id,
       assignment_id: first.id,
       role: 'executor',
@@ -2345,13 +2357,13 @@ export class MockTransport implements Transport {
       from_identity: 'cc2',
       to_identity: 'cc1',
       model: null,
-      reason: 'cc2 的週額度用完，換下一個身份',
+      reason: L('cc2 的週額度用完，換下一個身份', 'cc2\'s weekly quota is used up; switching to the next identity'),
       message: "You've hit your usage limit",
       needs_review: true,
     }, 'daemon')
-    this.missionEvent(running.id, 'report', '錯字改好了，CI workflow 還在寫', null, 'bot-agm')
-    this.missionEvent(running.id, 'report', 'changes：workflow 少了 bun install 的快取', null, 'bot-agm')
-    this.missionEvent(running.id, 'round', '第 1 輪退回（上限 2）', { rounds_used: 1 }, 'daemon')
+    this.missionEvent(running.id, 'report', L('錯字改好了，CI workflow 還在寫', 'Typos fixed; the CI workflow is still being written'), null, 'bot-agm')
+    this.missionEvent(running.id, 'report', L('changes：workflow 少了 bun install 的快取', 'changes: the workflow is missing a bun install cache'), null, 'bot-agm')
+    this.missionEvent(running.id, 'round', L('第 1 輪退回（上限 2）', 'Round 1 sent back (limit 2)'), { rounds_used: 1 }, 'daemon')
     this.missionAssignment(running.id, { role: 'executor', target_bot_id: 'mission-exec-2', follow_up_of: first.id })
     this.missionAssignment(running.id, {
       role: 'reviewer',
@@ -2361,22 +2373,22 @@ export class MockTransport implements Transport {
     })
 
     const asking = mk({
-      text: '把 blocked 選單那幾個元件的測試補起來',
+      text: L('把 blocked 選單那幾個元件的測試補起來', 'Add tests for the blocked-menu components'),
       paused_reason: 'no_fable_for_verifier',
-      paused_detail: '三個身份的 Fable 週桶都見底了',
+      paused_detail: L('三個身份的 Fable 週桶都見底了', 'The Fable weekly bucket is empty on all three identities'),
     })
     this.missions.push(asking)
     this.missionEvent(asking.id, 'instruction', asking.text)
-    this.missionEvent(asking.id, 'report', '補了 12 個測試，tsc 與 lint 都過', null, 'bot-agm')
+    this.missionEvent(asking.id, 'report', L('補了 12 個測試，tsc 與 lint 都過', 'Added 12 tests; tsc and lint both pass'), null, 'bot-agm')
     this.missionEvent(
       asking.id,
       'paused',
-      '暫停：三個身份的 Fable 週桶都見底了，等使用者決定',
+      L('暫停：三個身份的 Fable 週桶都見底了，等使用者決定', 'Paused: the Fable weekly bucket is empty on all three identities; waiting for the user'),
       {
         reason: 'no_fable_for_verifier',
         decision: {
           decision: 'ask_user',
-          reason: '三個身份的 Fable 週桶都見底了',
+          reason: L('三個身份的 Fable 週桶都見底了', 'The Fable weekly bucket is empty on all three identities'),
           resets: [{ identity: 'cc2', resets_at: inHours(9) }, { identity: 'cc1', resets_at: inHours(31) }],
         },
       },
@@ -2385,21 +2397,21 @@ export class MockTransport implements Transport {
     this.missionAssignment(asking.id, { role: 'executor', target_bot_id: 'mission-exec-3' })
 
     // P1b `awaiting_agm`：交辦都結案、任務還開著。
-    const idle = mk({ text: '把群組未讀數改成只算 bot 的回覆', delivery_mode: 'push_main' })
+    const idle = mk({ text: L('把群組未讀數改成只算 bot 的回覆', 'Count only bot replies in the group unread number'), delivery_mode: 'push_main' })
     this.missions.push(idle)
     this.missionEvent(idle.id, 'instruction', idle.text)
-    this.missionEvent(idle.id, 'report', '第一版做完，等 AGM 派 reviewer', null, 'bot-agm')
+    this.missionEvent(idle.id, 'report', L('第一版做完，等 AGM 派 reviewer', 'First version done; waiting for AGM to assign a reviewer'), null, 'bot-agm')
     this.missionAssignment(idle.id, { role: 'executor', target_bot_id: 'mission-exec-5' })
     this.missionEvent(
       idle.id,
       'note',
-      '找不到跟執行者不同的身份當 reviewer：改走執行者自審＋驗證者把關',
-      { decision: { decision: 'no_independent_reviewer', reason: '只有 cc2 還有額度' } },
+      L('找不到跟執行者不同的身份當 reviewer：改走執行者自審＋驗證者把關', 'No identity different from the executor is available as reviewer: falling back to executor self-review plus verifier sign-off'),
+      { decision: { decision: 'no_independent_reviewer', reason: L('只有 cc2 還有額度', 'Only cc2 has quota left') } },
       'daemon',
     )
 
     // 等額度：交辦停在 quota_blocked。
-    const quota = mk({ text: '把 hosts 面板的錯誤訊息翻成中文', on_5h_limit: 'wait' })
+    const quota = mk({ text: L('把 hosts 面板的錯誤訊息翻成中文', 'Translate the error messages in the hosts panel'), on_5h_limit: 'wait' })
     this.missions.push(quota)
     this.missionEvent(quota.id, 'instruction', quota.text)
     this.missionAssignment(quota.id, {
@@ -2411,25 +2423,25 @@ export class MockTransport implements Transport {
     })
 
     const done = mk({
-      text: '群組訊息的時間戳改成本地時區',
+      text: L('群組訊息的時間戳改成本地時區', 'Show group message timestamps in the local time zone'),
       completed_at: now(),
-      result_summary: '改了 3 個檔案，時間戳統一走 Intl；驗證者跑過 tsc / oxlint / build 與 390px 截圖。',
+      result_summary: L('改了 3 個檔案，時間戳統一走 Intl；驗證者跑過 tsc / oxlint / build 與 390px 截圖。', 'Changed 3 files; timestamps now go through Intl; the verifier ran tsc / oxlint / build and 390px screenshots.'),
     })
     this.missions.push(done)
     this.missionEvent(done.id, 'instruction', done.text)
-    this.missionEvent(done.id, 'report', '改好了', null, 'bot-agm')
+    this.missionEvent(done.id, 'report', L('改好了', 'Done'), null, 'bot-agm')
     this.missionEvent(done.id, 'report', 'approve', null, 'bot-agm')
-    this.missionEvent(done.id, 'verified', 'tsc 0 錯、oxlint 0 新警告、build 過、390px 截圖 2 張', { sha: '3f2a9c1d0b7e4a5f6c8d9e0a1b2c3d4e5f6a7b8c' }, 'bot-agm')
-    this.missionEvent(done.id, 'delivered', '已開 PR', { mode: 'pr', branch: 'mission/demo', url: 'https://github.com/edansun/agents-manager/pull/42' }, 'daemon')
+    this.missionEvent(done.id, 'verified', L('tsc 0 錯、oxlint 0 新警告、build 過、390px 截圖 2 張', 'tsc 0 errors, oxlint 0 new warnings, build passes, 2 screenshots at 390px'), { sha: '3f2a9c1d0b7e4a5f6c8d9e0a1b2c3d4e5f6a7b8c' }, 'bot-agm')
+    this.missionEvent(done.id, 'delivered', L('已開 PR', 'PR opened'), { mode: 'pr', branch: 'mission/demo', url: 'https://github.com/edansun/agents-manager/pull/42' }, 'daemon')
     this.missionEvent(done.id, 'completed', done.result_summary ?? '', null, 'daemon')
     this.missionAssignment(done.id, { role: 'executor', target_bot_id: 'mission-exec-4' })
     this.missionAssignment(done.id, { role: 'reviewer', target_bot_id: 'mission-rev-2' })
     this.missionAssignment(done.id, { role: 'verifier', target_bot_id: 'mission-ver' })
 
-    const killed = mk({ text: '把側欄改成可以拖曳排序', cancelled_at: now() })
+    const killed = mk({ text: L('把側欄改成可以拖曳排序', 'Make the sidebar drag-sortable'), cancelled_at: now() })
     this.missions.push(killed)
     this.missionEvent(killed.id, 'instruction', killed.text)
-    this.missionEvent(killed.id, 'cancelled', '使用者取消', null, 'daemon')
+    this.missionEvent(killed.id, 'cancelled', L('使用者取消', 'Cancelled by the user'), null, 'daemon')
   }
 
   remoteDraft(key: string, text: string) {
@@ -2960,7 +2972,7 @@ export class MockTransport implements Transport {
         turn_id: null,
         bot_id: botId,
         role: 'system',
-        content: '套用新設定，重新啟動中（mock）。',
+        content: L('套用新設定，重新啟動中（mock）。', 'Applying the new settings and restarting (mock).'),
         source: 'system',
         incomplete: 0,
       })
@@ -3185,7 +3197,7 @@ export class MockTransport implements Transport {
         // 帶 update_notice，演 UpdateBadge。
         if (this.bot(botId).name === 'am-claude') run.update_notice = 'Update installed · Restart to update'
         // 演建議下一句（claude 回合結束後輸入框裡的灰字）。
-        if (this.bot(botId).name === 'am-claude') run.prompt_suggestion = '跑一次完整測試，確認都綠再收尾'
+        if (this.bot(botId).name === 'am-claude') run.prompt_suggestion = L('跑一次完整測試，確認都綠再收尾', 'Run the full test suite and wrap up once it is green')
         // 這顆在忙，批次重啟會跳過（SPEC §6.9）。
         if (this.bot(botId).name === 'am-claude-2') {
           run.update_notice = 'Update installed · Restart to update'
@@ -3202,7 +3214,7 @@ export class MockTransport implements Transport {
         turn_id: null,
         bot_id: botId,
         role: 'system',
-        content: `Run ${run.id} 已啟動（mock）。`,
+        content: L(`Run ${run.id} 已啟動（mock）。`, `Run ${run.id} started (mock).`),
         source: 'system',
         incomplete: 0,
       })
@@ -3309,7 +3321,7 @@ export class MockTransport implements Transport {
         turn_id: null,
         bot_id: botId,
         role: 'system',
-        content: 'Bot 已停止（mock）。',
+        content: L('Bot 已停止（mock）。', 'Bot stopped (mock).'),
         source: 'system',
         incomplete: 0,
       })
@@ -3337,7 +3349,7 @@ export class MockTransport implements Transport {
       turn_id: null,
       bot_id: botId,
       role: 'system',
-      content: '已送出 esc（interrupt）。',
+      content: L('已送出 esc（interrupt）。', 'Sent esc (interrupt).'),
       source: 'system',
       incomplete: 0,
     })
@@ -3731,7 +3743,8 @@ export class MockTransport implements Transport {
   }
 
   private nextReply(): string {
-    return REPLIES[this.replyIndex++ % REPLIES.length]
+    const all = replies()
+    return all[this.replyIndex++ % all.length]
   }
 
   private finishTurn(botId: string, turn: MockTurn, source: 'hook' | 'terminal_fallback', reply = this.nextReply()) {
@@ -3820,7 +3833,7 @@ export class MockTransport implements Transport {
     const asyncAsk = this.codexAsync.get(botId)
     if (run?.agent_status === 'blocked' && asyncAsk) return { questions: CODEX_ASYNC_QUESTIONS, jev_options: null, async_screen: { expanded: asyncAsk.expanded, count: 1 } }
     if (!run || run.agent_status !== 'blocked' || !this.tinyAsk.has(botId)) return { questions: null }
-    return { questions: MOCK_TINY_ASK_QUESTIONS, jev_options: MOCK_TINY_ASK_JEV }
+    return { questions: mockTinyAskQuestions(), jev_options: MOCK_TINY_ASK_JEV }
   }
 
   /** 沒指定、或指定的那顆沒在跑：挑第一顆在跑的 claude。回實際用的 bot id（沒有就 null）。 */
@@ -3958,7 +3971,7 @@ export class MockTransport implements Transport {
     }
     this.turns.push(turn)
     this.addMessage({ conversation_id: turn.conversation_id, turn_id: turn.id, bot_id: botId, role: 'user', content: 'any updates', source: 'web', incomplete: 0, keep_warm: true })
-    this.addMessage({ conversation_id: turn.conversation_id, turn_id: turn.id, bot_id: botId, role: 'assistant', content: '目前沒有新進度。', source: 'hook', incomplete: 0, keep_warm: true })
+    this.addMessage({ conversation_id: turn.conversation_id, turn_id: turn.id, bot_id: botId, role: 'assistant', content: L('目前沒有新進度。', 'No new progress yet.'), source: 'hook', incomplete: 0, keep_warm: true })
     this.emit('turn_updated', { bot_id: botId, turn })
     run.cache_kept_warm_at = now()
     run.keep_warm_replied_at = now()
@@ -4394,7 +4407,7 @@ export class MockTransport implements Transport {
         : status === 'blocked' && twoAsk
         ? twoAskScreen(twoAsk)
         : status === 'blocked' && this.tinyAsk.has(botId)
-        ? MOCK_TINY_ASK_SCREEN
+        ? mockTinyAskScreen()
         : status === 'blocked' && this.bulletAsk.has(botId)
         ? MOCK_BULLET_ASK_SCREEN
         : status === 'blocked'

@@ -4,6 +4,7 @@
  * key 只往 daemon 送、永遠不回來：讀到的只有 `key_present` 與不能用的原因（比照 Jev，`api/judge.ts`）。
  */
 import { t } from '../lib/i18n'
+import { L } from './mockText'
 import { rawTransport } from './index'
 import { ApiError } from './types'
 import { judgeApiMissing } from './judge'
@@ -74,10 +75,13 @@ export interface ClaudeApiLedger {
 const MODELS = ['claude-haiku-5-5', 'claude-sonnet-5-5']
 const EFFORTS = ['low', 'medium', 'high', 'xhigh', 'max']
 const mockUses = (): ClaudeApiUse[] => [
-  { id: 'changelog_review', label: 'AGM 解析 changelog', enabled: false, model: 'claude-sonnet-5-5', effort: 'medium', max_per_hour: 30, default_model: 'claude-sonnet-5-5', default_effort: 'medium', default_max_per_hour: 30, legacy_section: null }, // i18n-ignore：假資料
-  { id: 'changelog_translate', label: '更新框翻譯', enabled: false, model: 'claude-haiku-5-5', effort: 'low', max_per_hour: 12, default_model: 'claude-haiku-5-5', default_effort: 'low', default_max_per_hour: 12, legacy_section: 'changelog_translate' }, // i18n-ignore：假資料
+  { id: 'changelog_review', label: L('AGM 解析 changelog', 'AGM changelog analysis'), enabled: false, model: 'claude-sonnet-5-5', effort: 'medium', max_per_hour: 30, default_model: 'claude-sonnet-5-5', default_effort: 'medium', default_max_per_hour: 30, legacy_section: null }, // i18n-ignore：假資料
+  { id: 'changelog_translate', label: L('更新框翻譯', 'Update box translation'), enabled: false, model: 'claude-haiku-5-5', effort: 'low', max_per_hour: 12, default_model: 'claude-haiku-5-5', default_effort: 'low', default_max_per_hour: 12, legacy_section: 'changelog_translate' }, // i18n-ignore：假資料
 ]
-let mockState: ClaudeApiSettings = { enabled: false, key_present: false, key_error: 'key file unreadable', models: MODELS, efforts: EFFORTS, uses: mockUses() }
+/** 延後建立：示範文字依語言，要等 `?lang=` 套用後才取。 */
+let mockStateValue: ClaudeApiSettings | null = null
+const initialMockState = (): ClaudeApiSettings => ({ enabled: false, key_present: false, key_error: 'key file unreadable', models: MODELS, efforts: EFFORTS, uses: mockUses() })
+const mockStateOf = (): ClaudeApiSettings => (mockStateValue ??= initialMockState())
 const mockLedger: ClaudeApiLedger = {
   totals: { calls: 3, ok: 2, errors: 1, input_tokens: 9120, output_tokens: 1480 },
   by_use: { changelog_review: { calls: 3, ok: 2, errors: 1, input_tokens: 9120, output_tokens: 1480 } },
@@ -159,7 +163,7 @@ function parseLedger(raw: unknown): ClaudeApiLedger {
 
 /** 舊 daemon 沒有這個端點（404／405）→ `null`，整個區塊顯示「需要更新 daemon」。其餘錯誤往外丟。 */
 export async function fetchClaudeApiSettings(): Promise<ClaudeApiSettings | null> {
-  if (rawTransport.mock) return mockState
+  if (rawTransport.mock) return mockStateOf()
   try {
     return parse(await rawTransport.request('GET', '/claude-api/settings'))
   } catch (e) {
@@ -177,12 +181,13 @@ export type ClaudeApiSaveResult = { ok: true; settings: ClaudeApiSettings } | { 
 
 export async function saveClaudeApiSettings(patch: ClaudeApiPatch): Promise<ClaudeApiSaveResult> {
   if (rawTransport.mock) {
+    const mockState = mockStateOf()
     const hasKey = mockState.key_present || !!patch.token?.trim()
     const uses = mockState.uses.map((u) => ({ ...u, ...(patch.uses?.[u.id] ?? {}) }))
     const turningOn = (patch.enabled === true && !mockState.enabled) || uses.some((u, i) => u.enabled && !mockState.uses[i]?.enabled)
     if (turningOn && !hasKey) return { ok: false, message: t('還沒有可用的 API key，先貼上 key 再開。') }
-    mockState = { ...mockState, enabled: patch.enabled ?? mockState.enabled, key_present: hasKey, key_error: hasKey ? null : mockState.key_error, uses }
-    return { ok: true, settings: mockState }
+    mockStateValue = { ...mockState, enabled: patch.enabled ?? mockState.enabled, key_present: hasKey, key_error: hasKey ? null : mockState.key_error, uses }
+    return { ok: true, settings: mockStateValue }
   }
   try {
     const settings = parse(await rawTransport.request('PUT', '/claude-api/settings', patch))

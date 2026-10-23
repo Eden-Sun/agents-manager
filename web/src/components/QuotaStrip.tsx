@@ -164,14 +164,14 @@ function label(entry: QuotaEntry, q: KindQuota | null, loggedOut: boolean, now: 
   }
   if (q?.fable?.resets_at) parts.push(t('Fable {time} 重置', { time: fmtTime(q.fable.resets_at) }))
   // 沿用上一份的那幾桶要點名（#540）：整筆的 `stale`講的是另一件事（開機從快取回填）。
-  for (const [name, w] of [['5 小時', q?.five_hour], [weekLabel(entry.kind) === '週' ? '每週' : '7 天', q?.seven_day], ['Fable', q?.fable]] as const) { // i18n-ignore: 內部窗口名標籤
+  for (const [name, w] of [[t('5 小時'), q?.five_hour], [weekLabel(entry.kind) === '週' ? t('每週') : t('7 天'), q?.seven_day], ['Fable', q?.fable]] as const) { // i18n-ignore: 內部窗口名
     const at = carriedOverAt(w, q?.updated_at)
     if (!at) continue
     const age = staleAge(at, now, t)
     parts.push(age ? t('{name}是沿用 {age}前的讀數', { name, age }) : t('{name}是沿用的讀數', { name }))
   }
   if (q?.stale) parts.push(staleSuffix(q, now, t))
-  return parts.join('，') /* i18n-ignore：分隔符 */
+  return parts.join(t('，'))
 }
 
 function parseQuotaKey(key: string): QuotaEntry | null {
@@ -374,7 +374,7 @@ function resetLineOf(rows: { name: WindowName; back: string; resetsAt: string }[
     const at = new Date(r.resetsAt).getTime()
     if (!groups.some((g) => Math.abs(g.at - at) <= SHARED_RESET_MS)) groups.push({ name: r.name, back: r.back, at })
   }
-  const title = rows.map((r) => t('{name} 還有 {back} 重置', { name: r.name, back: r.back })).join('；') /* i18n-ignore：分隔符 */
+  const title = rows.map((r) => t('{name} 還有 {back} 重置', { name: r.name, back: r.back })).join(t('；'))
   // 一律一行：格子高度只放得下三列加這一行（2026-10-16 使用者截圖：換成兩行就蓋到底下那排）。兩組時間時省掉空白，`└5h 1h14·7d 0h44`。
   if (groups.length === 1) return { text: `└\u00a0${groups[0]!.back}`, title }
   return { text: `└${groups.map((g) => `${g.name}\u00a0${g.back}`).join('·')}`, title }
@@ -400,6 +400,11 @@ function moreUrgent(w: WindowBar, best: WindowBar): boolean {
   const rank = (x: WindowBar) => (x.critical ? 2 : x.low ? 1 : 0)
   if (rank(w) !== rank(best)) return rank(w) > rank(best)
   return (w.pct ?? 100) < (best.pct ?? 100)
+}
+
+/** 窗口名顯示字：grok 的「週」在英文介面寫 7d，其餘窗口名（5h／7d／F）本來就是英文。 */
+function windowText(name: WindowName, t: ReturnType<typeof useT>): string {
+  return name === '週' ? t('週') : name // i18n-ignore
 }
 
 /** grok reports a weekly-only window and labels it 週; agy shows its week as 7d like claude. */
@@ -480,7 +485,7 @@ function Gauge({
     return (
       <span key={w.name} className="quota-window">
         <span className={`quota-window-name${soon ? ' soon' : ''}${w.staleAt ? ' carried' : ''}`} title={soon ? t('{name} 還有 {soon} 重置', { name: w.name, soon }) : undefined}>
-          {soon ?? w.name}
+          {soon ?? windowText(w.name, t)}
           {w.staleAt ? <StaleWindowMark at={w.staleAt} name={w.name} now={now} /> : null}
         </span>
         <Bar
@@ -568,7 +573,7 @@ function Gauge({
             return (
             <span key={w.name} className={`quota-compact-win ${levelOf(w)}`}>
               <span className={`quota-window-name${soon ? ' soon' : ''}${w.staleAt ? ' carried' : ''}`} title={soon ? t('{name} 還有 {soon} 重置', { name: w.name, soon }) : undefined}>
-                {soon ?? w.name}
+                {soon ?? windowText(w.name, t)}
                 {w.staleAt ? <StaleWindowMark at={w.staleAt} name={w.name} now={now} /> : null}
               </span>
               {back ? (

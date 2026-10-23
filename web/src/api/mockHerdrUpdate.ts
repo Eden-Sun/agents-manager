@@ -5,6 +5,7 @@
  */
 import { later } from './mockClock'
 import { ApiError } from './types'
+import { L } from './mockText'
 
 type Rec = Record<string, unknown>
 
@@ -35,11 +36,11 @@ const STEPS: [number, string][] = [
   [6400, 'resuming'],
 ]
 
-const DETAIL: Record<string, string> = {
-  busy_timeout: '等了 1800s 仍有 bot 在忙：am-claude (working)；什麼都沒動',
-  restart_failed: '新版 2 分鐘內沒以 0.9.3 回來，已換回 herdr.bak-0.9.1 再重啟',
-  download_failed: '下載 herdr-linux-x86_64 失敗：HTTP 404',
-}
+const detail = (): Record<string, string> => ({
+  busy_timeout: L('等了 1800s 仍有 bot 在忙：am-claude (working)；什麼都沒動', 'Waited 1800s and a bot is still busy: am-claude (working); nothing was changed'),
+  restart_failed: L('新版 2 分鐘內沒以 0.9.3 回來，已換回 herdr.bak-0.9.1 再重啟', 'The new version did not come back as 0.9.3 within 2 minutes; rolled back to herdr.bak-0.9.1 and restarted'),
+  download_failed: L('下載 herdr-linux-x86_64 失敗：HTTP 404', 'Downloading herdr-linux-x86_64 failed: HTTP 404'),
+})
 
 export class MockHerdrUpdate {
   private running: { update_id: string; host: string; target_version: string; phase: string; started_at: string } | null = null
@@ -69,7 +70,10 @@ export class MockHerdrUpdate {
       hosts,
       // 同 daemon `upstream_update::notice_text` 的 herdr 那句。
       text: behind.length
-        ? `herdr 上游有新版 ${this.target}（${behind.map((h) => `${h.host} 是 ${h.installed_version}`).join('、')}）：更新會重啟 herdr server，所有 bot 中斷約 1 分鐘後自動接回`
+        ? L(
+            `herdr 上游有新版 ${this.target}（${behind.map((h) => `${h.host} 是 ${h.installed_version}`).join('、')}）：更新會重啟 herdr server，所有 bot 中斷約 1 分鐘後自動接回`,
+            `herdr ${this.target} is available upstream (${behind.map((h) => `${h.host} is on ${h.installed_version}`).join(', ')}): updating restarts the herdr server, and all bots disconnect for about 1 minute, then resume automatically`,
+          )
         : null,
     }
   }
@@ -128,7 +132,7 @@ export class MockHerdrUpdate {
       // daemon 的 `to` 一律是目標版（失敗也是）。
       this.ctx.emit('herdr_update_done', {
         update_id, host, ok, from: this.installed, to: this.target,
-        ...(reason ? { reason, detail: DETAIL[reason] ?? reason } : {}),
+        ...(reason ? { reason, detail: detail()[reason] ?? reason } : {}),
         resumed,
         failed: fail ? [{ ...fail, error: 'resume 失敗：找不到 session，要重開' }] : [],
         children_lost: reason && reason !== 'restart_failed' ? [] : children_lost,

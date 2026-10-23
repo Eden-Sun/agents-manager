@@ -52,9 +52,15 @@ import type {
   TurnDelivery,
 ProjectSubmodule,
 } from './types'
-import { t } from '../lib/i18n'
+import { t, langFromSearch, setLangOverride } from '../lib/i18n'
 
 export const MOCK_MODE = import.meta.env.VITE_MOCK === '1' || import.meta.env.VITE_MOCK === 'true'
+
+// mock 的示範資料依語言產生，所以 `?lang=` 要在建立 MockTransport 之前套用（拍截圖用，不寫入儲存）。
+if (MOCK_MODE && typeof location !== 'undefined') {
+  const forced = langFromSearch(location.search)
+  if (forced) setLangOverride(forced)
+}
 
 const transport: Transport = MOCK_MODE ? new MockTransport() : new HttpTransport()
 

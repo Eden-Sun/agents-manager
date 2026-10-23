@@ -6,6 +6,7 @@
  */
 import { rawTransport } from './index'
 import { ApiError } from './types'
+import { L } from './mockText'
 import type { DeployCommit, DeployRunning, DeployStatus } from '../lib/deployNow'
 
 export interface DeploySnapshot {
@@ -58,7 +59,7 @@ function toStatus(raw: unknown): DeployStatus | null {
 }
 
 /** mock：落後 4 個、其中 2 個動到程式碼，有一顆 bot 在 working。按下去之後變成「部署中」。 */
-const MOCK: DeployStatus = {
+const mock = (): DeployStatus => ({
   live_sha: '74b6142e',
   target_sha: '9f3c2a1d0b7e4c5f8a6d2e1f0c9b8a7d6e5f4c3b',
   target_short: '9f3c2a1d',
@@ -66,10 +67,10 @@ const MOCK: DeployStatus = {
   code_commits: 2,
   code_changed: true,
   commits: [
-    { sha: '9f3c2a1', subject: 'docs(spec): 補 §18.2 立即部署' }, // i18n-ignore
+    { sha: '9f3c2a1', subject: L('docs(spec): 補 §18.2 立即部署', 'docs(spec): add §18.2 deploy now') }, // i18n-ignore
     { sha: '5e8d7c6', subject: 'fix(daemon): keep queued prompts across a restart window' },
     { sha: '2b4a6c8', subject: 'fix(web): contain clipboard and DOM exceptions' },
-    { sha: '1a3b5c7', subject: 'docs: 截圖更新' }, // i18n-ignore
+    { sha: '1a3b5c7', subject: L('docs: 截圖更新', 'docs: refresh screenshots') }, // i18n-ignore
   ],
   commits_truncated: false,
   running: null,
@@ -77,12 +78,13 @@ const MOCK: DeployStatus = {
   log_path: '~/.config/agents-manager/supervisor/AGM/daemon-update.log',
   kick_ready: true,
   error: null,
-}
+})
 let mockStarted = false
 
 export async function fetchDeployStatus(): Promise<DeploySnapshot> {
   if (rawTransport.mock) {
-    return { status: mockStarted ? { ...MOCK, running: { kind: 'requested', sha: MOCK.target_sha } } : MOCK, offline: false }
+    const m = mock()
+    return { status: mockStarted ? { ...m, running: { kind: 'requested', sha: m.target_sha } } : m, offline: false }
   }
   try {
     return { status: toStatus(await rawTransport.request('GET', '/deploy/status')), offline: false }
@@ -102,7 +104,7 @@ export interface DeployStarted {
 export async function startDeployNow(sha: string): Promise<DeployStarted> {
   if (rawTransport.mock) {
     mockStarted = true
-    return { started: true, sha, short: sha.slice(0, 8), log_path: MOCK.log_path }
+    return { started: true, sha, short: sha.slice(0, 8), log_path: mock().log_path }
   }
   const raw = (await rawTransport.request('POST', '/deploy/now', { sha })) as Record<string, unknown>
   return { started: raw.started === true, sha: str(raw.sha), short: str(raw.short), log_path: str(raw.log_path) }

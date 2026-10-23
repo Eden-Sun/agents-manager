@@ -57,6 +57,11 @@
     min-width: 36px;
   }
 
+  .main-head.bot-head:lang(en) .main-title-row > .bot-switcher > .bot-name-btn {
+    font-size: 14px;
+    padding-inline: 2px;
+  }
+
   /* 「claude 有更新」在 ★ 左邊，跟 ★／⚙ 一樣絕對定位；有它時名字行右內距再讓 40px。 */
   .main-head.bot-head .main-title-row > .quota-update {
     position: absolute;
@@ -98,6 +103,13 @@
     grid-area: 1 / 3;
     align-self: start;
     justify-self: end;
+  }
+
+  /* 英文分頁字比「對話／終端／預覽」寬約 50px，名字行被擠成「a…」：英文時分頁左右內距收窄（#1932）。 */
+  .main-head.bot-head > .tabs:lang(en) > * {
+    padding-inline: 1px;
+    font-size: 11px;
+    min-width: 30px;
   }
 
   .main-head.bot-head > .quota-strip {

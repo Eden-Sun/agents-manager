@@ -4,9 +4,9 @@
 
 Manage coding agents on your local machine and on SSH hosts from one web UI. agents-manager turns every **Claude Code**, **Codex**, **Grok** and **Antigravity (agy)** CLI session running in a [herdr](https://herdr.dev) pane into a "bot", so you can follow conversations, answer prompts, watch quota and coordinate several bots from your desktop or phone. It is not an IDE and it does not spawn agents itself: herdr owns the terminals, the daemon talks to herdr and to the CLIs' hooks.
 
-![Desktop dark theme: project tree with a child agent, quota chips for each CLI, chat and scratch tray](docs/screenshots/readme/2026-10-23-desktop-dark.png)
+![Desktop dark theme: project tree with a child agent, quota chips for each CLI, chat and scratch tray](docs/screenshots/readme/en/desktop-dark.png)
 
-Screenshots use the built-in mock backend (`VITE_MOCK=1`); accounts, bots and messages are demo data. The UI is currently in Traditional Chinese.
+Screenshots use the built-in mock backend (`VITE_MOCK=1`); accounts, bots and messages are demo data. The UI supports Traditional Chinese and English: it follows the browser language by default, and Settings → Display switches it. The Traditional Chinese screenshots are in [`docs/screenshots/readme/zh-TW/`](docs/screenshots/readme/zh-TW/).
 
 ## Key features
 
@@ -38,7 +38,7 @@ Screenshots use the built-in mock backend (`VITE_MOCK=1`); accounts, bots and me
 
 Details and limits live in [`docs/SPEC.md`](docs/SPEC.md).
 
-![Mobile light theme: chat with quota chips and bot switcher](docs/screenshots/readme/2026-10-23-mobile-light.png)
+![Mobile light theme: chat with quota chips and bot switcher](docs/screenshots/readme/en/mobile-light.png)
 
 ## Compared with Orca
 
@@ -61,7 +61,7 @@ Details and limits live in [`docs/SPEC.md`](docs/SPEC.md).
 | Tooling updates | Version overview and one-click update of herdr, CLIs and hooks per host; upstream changelog triage | Not described in its docs |
 | Editor and preview | No editor; embedded preview of a bot's local dev server | VS Code editor, Design Mode, Markdown / PDF / image previews |
 | Scripting | HTTP / WebSocket API ([`docs/API.md`](docs/API.md)), `bin/agm` | `orca` CLI (worktree create, snapshot, click, fill) |
-| UI language | Traditional Chinese | English, with translated READMEs |
+| UI language | Traditional Chinese and English (follows the browser, switchable in Settings) | English, with translated READMEs |
 | License | MIT | MIT |
 
 Pick Orca when you want an IDE that opens ten worktrees and reviews their diffs. Pick agents-manager when your agents already run in terminals, possibly on other machines, and you want to steer them from a browser, let them delegate to each other, and keep an eye on quota and schedules. They can coexist.
@@ -136,7 +136,7 @@ These are optional and off until configured.
 - **Share bots** — restricted or trusted bots exposed through a separate share entry point. [SPEC §20](docs/SPEC.md).
 - **Update checks** — one settings tab lists herdr, agent CLIs and hook integrations per host. [SPEC §6.9c](docs/SPEC.md).
 
-![Settings, update check: CLI and herdr integration versions per host](docs/screenshots/readme/2026-10-23-settings-updates.png)
+![Settings, update check: CLI and herdr integration versions per host](docs/screenshots/readme/en/settings-updates.png)
 
 ## How it works
 

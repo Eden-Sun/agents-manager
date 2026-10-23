@@ -107,7 +107,7 @@ export function MergedUpdateChip() {
     claudeInstallCount: claudePlan?.installHosts.length ?? 0,
     claudeTarget: claudePlan?.target ?? null,
     claudeShown: claudeVisible,
-    claudeSummary: claudePlan?.hosts.map((host) => `${host.host} ${host.installedVersion ?? host.error ?? t('讀取失敗')} → ${claudePlan.target}`).join('；'), // i18n-ignore
+    claudeSummary: claudePlan?.hosts.map((host) => `${host.host} ${host.installedVersion ?? host.error ?? t('讀取失敗')} → ${claudePlan.target}`).join(t('；')),
     restartShown,
     codexShown,
     herdrItem,
