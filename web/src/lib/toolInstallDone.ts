@@ -3,6 +3,8 @@ import type { BotKind } from '../api/types'
 import { BOT_KINDS } from '../api/types'
 import { useStore } from '../store/store'
 import { installBusyKey, releaseInstall } from './onboardingActions'
+import { hostLabel } from '../components/toolsHelpers'
+import { t } from './i18n'
 
 /** WS `tool_install_done`（API.md §8／§12.7）：不帶 `via_bot_id` 的直接安裝收尾。借 bot 安裝不推這個事件。 */
 export interface ToolInstallDone {
@@ -37,13 +39,13 @@ export function toToolInstallDone(data: unknown): ToolInstallDone | null {
 
 /** 給使用者看的結果（純函式，方便測）。 */
 export function toolInstallDoneText(ev: ToolInstallDone): { level: 'info' | 'error'; text: string; openPane: boolean } {
-  const where = ev.host === 'local' ? '本機' : ev.host
-  if (ev.outcome === 'superseded') return { level: 'error', text: `${where} 的安裝追蹤已失聯（主機連線或偵測已換代），請重新偵測並確認原安裝程序`, openPane: false }
-  if (ev.timed_out) return { level: 'error', text: `${where} 安裝 ${ev.kind} 等了 15 分鐘仍未確認結束（逾時）；請檢查保留的安裝終端`, openPane: true }
-  if (ev.installed) return { level: 'info', text: `${where} 已安裝 ${ev.kind}`, openPane: false }
-  const why = '安裝結束後仍偵測不到'
-  if (ev.pane_kept && ev.pane_id) return { level: 'error', text: `${where} 沒裝成 ${ev.kind}：${why}；安裝終端留著，錯誤輸出在裡面`, openPane: true }
-  return { level: 'error', text: `${where} 沒裝成 ${ev.kind}：${why}；安裝終端已關閉，請再按一次「安裝」`, openPane: false }
+  const where = hostLabel(ev.host === 'local' ? 'local' : ev.host)
+  if (ev.outcome === 'superseded') return { level: 'error', text: t('{where} 的安裝追蹤已失聯（主機連線或偵測已換代），請重新偵測並確認原安裝程序', { where }), openPane: false }
+  if (ev.timed_out) return { level: 'error', text: t('{where} 安裝 {kind} 等了 15 分鐘仍未確認結束（逾時）；請檢查保留的安裝終端', { where, kind: ev.kind }), openPane: true }
+  if (ev.installed) return { level: 'info', text: t('{where} 已安裝 {kind}', { where, kind: ev.kind }), openPane: false }
+  const why = t('安裝結束後仍偵測不到')
+  if (ev.pane_kept && ev.pane_id) return { level: 'error', text: t('{where} 沒裝成 {kind}：{why}；安裝終端留著，錯誤輸出在裡面', { where, kind: ev.kind, why }), openPane: true }
+  return { level: 'error', text: t('{where} 沒裝成 {kind}：{why}；安裝終端已關閉，請再按一次「安裝」', { where, kind: ev.kind, why }), openPane: false }
 }
 
 /** 收尾：放開那一列的「安裝中…」、講結果；保留原安裝終端，不重新按舊 pane ID 開啟主機終端。 */

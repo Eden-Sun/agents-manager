@@ -1,4 +1,5 @@
 import type { ToolStatus } from '../api/types'
+import { t } from './i18n'
 
 /**
  * agy 額度探測這一輪失敗的原因（daemon 的 `tools.agy.quota_error`）翻成人話。
@@ -8,16 +9,16 @@ import type { ToolStatus } from '../api/types'
 export function agyQuotaErrorText(err: NonNullable<ToolStatus['quota_error']>): string {
   switch (err.reason) {
     case 'timeout':
-      return '探測逾時（agy 一直沒有回應）'
+      return t('探測逾時（agy 一直沒有回應）')
     case 'unreadable':
-      return 'agy /usage 的輸出讀不懂'
+      return t('agy /usage 的輸出讀不懂')
     case 'exit':
-      return 'agy 執行失敗'
+      return t('agy 執行失敗')
     case 'pane':
-      return '這台主機的 herdr pane 開不起來'
+      return t('這台主機的 herdr pane 開不起來')
     case 'not_connected':
-      return '主機尚未連線'
+      return t('主機尚未連線')
     default:
-      return err.message || '原因不明'
+      return err.message || t('原因不明')
   }
 }

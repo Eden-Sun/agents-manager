@@ -18,6 +18,7 @@ import { useAgyBusy, useAgyPlan } from '../hooks/useAgyPlan'
 import { grokMenuItem } from '../lib/grokUpdate'
 import { agyMenuItem } from '../lib/agyUpdate'
 import { herdrMenuItem, useHerdrUpdate } from '../store/herdrUpdate'
+import { useT } from '../lib/i18n'
 
 /** 由外面代為開關的確認框（手機合成那顆用）。 */
 export interface DialogControl {
@@ -31,6 +32,7 @@ export interface DialogControl {
  * 點開是兩項的小選單，各自打開原本那個確認框——兩件事的代價不同，確認框照舊分開。
  */
 export function MergedUpdateChip() {
+  const t = useT()
   const batch = useStore((s) => s.restartBatch)
   const clear = useStore((s) => s.clearRestartBatch)
   const cli = useStore((s) => s.cliUpdates)
@@ -105,7 +107,7 @@ export function MergedUpdateChip() {
     claudeInstallCount: claudePlan?.installHosts.length ?? 0,
     claudeTarget: claudePlan?.target ?? null,
     claudeShown: claudeVisible,
-    claudeSummary: claudePlan?.hosts.map((host) => `${host.host} ${host.installedVersion ?? host.error ?? '讀取失敗'} → ${claudePlan.target}`).join('；'),
+    claudeSummary: claudePlan?.hosts.map((host) => `${host.host} ${host.installedVersion ?? host.error ?? t('讀取失敗')} → ${claudePlan.target}`).join('；'), // i18n-ignore
     restartShown,
     codexShown,
     herdrItem,
@@ -143,7 +145,7 @@ export function MergedUpdateChip() {
               className="head-menu-pop update-menu-pop"
               style={at}
               role="menu"
-              aria-label="更新"
+              aria-label={t('更新')}
               onClick={() => setOpen(false)}
               onKeyDown={menuKeys}
             >

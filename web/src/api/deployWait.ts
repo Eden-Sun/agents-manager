@@ -3,6 +3,7 @@
  * 狀態來源：`GET /api/state` 的 `deploy_wait` 與 WS `deploy_wait`。按鈕：`POST /api/deploy/wait/{escalate,dismiss}`（只收 UI token）。
  */
 import { rawTransport } from './index'
+import { msg } from '../lib/i18n'
 
 export type DeployWaitPhase = 'waiting' | 'swapping' | 'done' | 'abandoned'
 
@@ -65,8 +66,8 @@ export async function dismissDeployWait(id: string): Promise<DeployWait | null> 
 }
 
 export const BLOCKER_WHY: Record<string, string> = {
-  working: '工作中',
-  delivering: '正在送訊息或排隊待送',
-  unreadable: '讀不到狀態',
-  lease: '握著窗口',
+  working: msg('工作中'),
+  delivering: msg('正在送訊息或排隊待送'),
+  unreadable: msg('讀不到狀態'),
+  lease: msg('握著窗口'),
 }

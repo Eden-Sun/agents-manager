@@ -66,10 +66,10 @@ const MOCK: DeployStatus = {
   code_commits: 2,
   code_changed: true,
   commits: [
-    { sha: '9f3c2a1', subject: 'docs(spec): 補 §18.2 立即部署' },
+    { sha: '9f3c2a1', subject: 'docs(spec): 補 §18.2 立即部署' }, // i18n-ignore
     { sha: '5e8d7c6', subject: 'fix(daemon): keep queued prompts across a restart window' },
     { sha: '2b4a6c8', subject: 'fix(web): contain clipboard and DOM exceptions' },
-    { sha: '1a3b5c7', subject: 'docs: 截圖更新' },
+    { sha: '1a3b5c7', subject: 'docs: 截圖更新' }, // i18n-ignore
   ],
   commits_truncated: false,
   running: null,

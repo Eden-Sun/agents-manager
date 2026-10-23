@@ -5,6 +5,7 @@
  * （路徑同 `daemon-update-kick.sh` 的 build-inputs；docs-only 不算）、現在有沒有部署在跑。
  */
 import { ApiError } from '../api/types'
+import { t } from './i18n'
 
 export interface DeployCommit {
   sha: string
@@ -46,11 +47,11 @@ export function deployVisible(s: DeployStatus | null): boolean {
 export function runningText(r: DeployRunning): string {
   switch (r.kind) {
     case 'requested':
-      return `已按下立即部署${r.sha ? `（${r.sha.slice(0, 8)}）` : ''}，等自動部署接手、建置或等安全窗口`
+      return t('已按下立即部署{sha}，等自動部署接手、建置或等安全窗口', { sha: r.sha ? `（${r.sha.slice(0, 8)}）` : '' }) // i18n-ignore
     case 'lease':
-      return `${r.owner || '有人'}正握著 ${r.resource ?? ''} 窗口（重建或換版進行中）`
+      return t('{owner}正握著 {resource} 窗口（重建或換版進行中）', { owner: r.owner || t('有人'), resource: r.resource ?? '' })
     default:
-      return '有部署在跑'
+      return t('有部署在跑')
   }
 }
 
@@ -64,17 +65,17 @@ export function deployNowNotice(result: { short?: string; log_path?: string } | 
   if (result) {
     return {
       level: 'info',
-      text: `已開始立即部署 ${result.short ?? ''}：不等 ubuntu-ci，在專用 checkout 建置，沒人 working 才換 binary。進度看 ${result.log_path ?? 'daemon-update.log'}`,
+      text: t('已開始立即部署 {short}：不等 ubuntu-ci，在專用 checkout 建置，沒人 working 才換 binary。進度看 {log}', { short: result.short ?? '', log: result.log_path ?? 'daemon-update.log' }),
     }
   }
   if (error instanceof ApiError) {
     const b = error.body as Record<string, unknown>
     const msg = typeof b.message === 'string' && b.message ? b.message : error.message
-    if (error.status === 409 && b.reason === 'deploy_in_progress') return { level: 'error', text: `沒有再開一趟：${msg}` }
-    if (error.status === 409 && b.reason === 'nothing_to_deploy') return { level: 'info', text: `不用部署：${msg}` }
-    if (error.status === 409 && b.reason === 'target_older_than_live') return { level: 'error', text: `部署已拒絕：${msg}` }
-    if (error.status === 403) return { level: 'error', text: `不能從這裡部署：${msg}` }
-    return { level: 'error', text: `立即部署沒有開始：${msg}` }
+    if (error.status === 409 && b.reason === 'deploy_in_progress') return { level: 'error', text: t('沒有再開一趟：{msg}', { msg }) }
+    if (error.status === 409 && b.reason === 'nothing_to_deploy') return { level: 'info', text: t('不用部署：{msg}', { msg }) }
+    if (error.status === 409 && b.reason === 'target_older_than_live') return { level: 'error', text: t('部署已拒絕：{msg}', { msg }) }
+    if (error.status === 403) return { level: 'error', text: t('不能從這裡部署：{msg}', { msg }) }
+    return { level: 'error', text: t('立即部署沒有開始：{msg}', { msg }) }
   }
-  return { level: 'error', text: `立即部署沒有開始：${error instanceof Error ? error.message : String(error)}` }
+  return { level: 'error', text: t('立即部署沒有開始：{msg}', { msg: error instanceof Error ? error.message : String(error) }) }
 }

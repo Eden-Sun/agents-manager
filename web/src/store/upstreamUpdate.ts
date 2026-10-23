@@ -6,6 +6,7 @@
  * 所以開機時再讀一次 `GET /api/upstream-updates` 補上。抓不到上游（`notify: "error"`）照樣講，只在 daemon 推的那一次。
  */
 import { writeShared } from './mobilePreview'
+import { t } from '../lib/i18n'
 
 const KEY = 'am.upstreamUpdate.seen'
 
@@ -108,7 +109,7 @@ export function applyUpstreamItem(raw: unknown, notify: Notify): UpstreamItem | 
   if (!n) return item
   if (n.kind === 'info' && item.latest) markSeen(item.kind, item.latest)
   // 帶一顆「知道了」讓它停久一點（純資訊通知 4 秒就消失，這則是要人去處理的）。
-  notify(n.kind, n.text, { label: '知道了', run: () => {} })
+  notify(n.kind, n.text, { label: t('知道了'), run: () => {} })
   return item
 }
 
