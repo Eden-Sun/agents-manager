@@ -67,7 +67,9 @@ it('claude 安裝：不帶 via_bot_id，daemon 開 shell；裝好後那列翻成
   await click(btn(row('claude'), '安裝')!)
   const post = requests.find((r) => r.method === 'POST' && /\/hosts\/local\/tools\/install$/.test(r.path))
   assert.ok(post, '打了 tools/install')
-  assert.deepEqual(post.body, { kind: 'claude' }, '不帶 via_bot_id')
+  assert.equal((post.body as Record<string, unknown>).kind, 'claude')
+  assert.equal((post.body as Record<string, unknown>).via_bot_id, undefined)
+  assert.equal(typeof (post.body as Record<string, unknown>).install_id, 'string')
   assert.ok(useStore.getState().shellView, '畫面切到安裝的 shell pane')
   // 測試沒有 socket：daemon 的 `host_changed` 用重新偵測代替。
   await until(async () => {
@@ -125,20 +127,25 @@ it('新增 Bot 快速鈕：未登入的 kind 可點、點了開登入終端（�
   await click(chip)
   await until(() => requests.some((r) => r.method === 'POST' && /\/hosts\/local\/shells$/.test(r.path)), '開了登入 shell')
   assert.equal(requests.some((r) => /\/projects\/p1\/bots$/.test(r.path)), false, '沒有新增 Bot')
+  await until(() => Boolean(btn(document.body, '登入好了，重新偵測')), '提供重驗入口')
+  internals.localTools = fresh({ codex: { installed: true, path: '/bin/codex', version: '0.1.0', logged_in: true } })
+  await click(btn(document.body, '登入好了，重新偵測')!)
+  await until(() => !btn(document.body, 'codex')?.textContent?.includes('未登入'), '重驗後 chip 恢復新增')
+  assert.ok(requests.some((r) => /tools\/refresh$/.test(r.path)))
 })
 
-it('安裝中鈕維持「安裝中…」，tool_install_done 沒裝成：放開鈕、講逾時、打開留著的 pane', async () => {
+it('安裝中鈕維持「安裝中…」，tool_install_done 沒裝成：放開鈕、講逾時、不重新解析舊 pane', async () => {
   await setLocal(fresh())
-  mockApi(sharedMock)
+  const requests = mockApi(sharedMock)
   await mount(<OnboardingBanner compact={false} />)
   await click(btn(row('codex'), '安裝')!)
   assert.match(row('codex').textContent ?? '', /安裝中…/)
   const pane = useStore.getState().shellView!.paneId
   await act(async () => {
     useStore.setState({ shellView: null, notices: [] })
-    dispatchFrameForTest({ type: 'tool_install_done', data: { host: 'local', kind: 'codex', installed: false, pane_id: pane, pane_kept: true, timed_out: true } })
+    dispatchFrameForTest({ type: 'tool_install_done', data: { host: 'local', kind: 'codex', install_id: (requests.find((r) => /tools\/install$/.test(r.path))!.body as Record<string, unknown>).install_id, installed: false, pane_id: pane, pane_kept: true, timed_out: true } })
   })
-  await until(() => useStore.getState().shellView?.paneId === pane, '打開安裝的 pane 讓使用者看錯誤')
+  assert.equal(useStore.getState().shellView, null, '完成事件不可按舊 pane ID 重新開主機終端')
   assert.match(row('codex').textContent ?? '', /安裝/)
   assert.doesNotMatch(row('codex').textContent ?? '', /安裝中…/)
   assert.ok(useStore.getState().notices.some((n) => /逾時/.test(n.text)), '通知講清楚是逾時')
@@ -146,13 +153,60 @@ it('安裝中鈕維持「安裝中…」，tool_install_done 沒裝成：放開�
 
 it('tool_install_done 裝成功：放開鈕、不開 pane', async () => {
   await setLocal(fresh())
-  mockApi(sharedMock)
+  const requests = mockApi(sharedMock)
   await mount(<OnboardingBanner compact={false} />)
   await click(btn(row('grok'), '安裝')!)
   await act(async () => {
     useStore.setState({ shellView: null })
-    dispatchFrameForTest({ type: 'tool_install_done', data: { host: 'local', kind: 'grok', installed: true, pane_id: 'w9:s9', pane_kept: false, timed_out: false } })
+    dispatchFrameForTest({ type: 'tool_install_done', data: { host: 'local', kind: 'grok', install_id: (requests.find((r) => /tools\/install$/.test(r.path))!.body as Record<string, unknown>).install_id, installed: true, pane_id: 'w9:s9', pane_kept: false, timed_out: false } })
   })
   assert.equal(useStore.getState().shellView, null)
   assert.doesNotMatch(row('grok').textContent ?? '', /安裝中…/)
+})
+
+
+it('舊完成事件不能解除新安裝，superseded 只解除自己的請求且不開 pane', async () => {
+  useStore.setState({ busy: {}, shellView: null })
+  await setLocal(fresh())
+  const requests = mockApi(sharedMock)
+  await mount(<OnboardingBanner compact={false} />)
+  await click(btn(row('codex'), '安裝')!)
+  const first = (requests.find((r) => /tools\/install$/.test(r.path))!.body as Record<string, unknown>).install_id
+  const done = { host: 'local', kind: 'codex', install_id: first, outcome: 'superseded', installed: false, pane_id: '', pane_kept: false, timed_out: false }
+  await act(async () => { dispatchFrameForTest({ type: 'tool_install_done', data: done }) })
+  assert.doesNotMatch(row('codex').textContent ?? '', /安裝中/)
+  await click(btn(row('codex'), '安裝')!)
+  await act(async () => {
+    useStore.setState({ shellView: null })
+    dispatchFrameForTest({ type: 'tool_install_done', data: done })
+  })
+  assert.match(row('codex').textContent ?? '', /安裝中/)
+  assert.equal(useStore.getState().shellView, null)
+  const second = (requests.filter((r) => /tools\/install$/.test(r.path)).at(-1)!.body as Record<string, unknown>).install_id
+  assert.notEqual(first, second)
+  await act(async () => { dispatchFrameForTest({ type: 'tool_install_done', data: { ...done, install_id: second } }) })
+  assert.doesNotMatch(row('codex').textContent ?? '', /安裝中/)
+})
+
+
+it('完成事件先於 HTTP 回應到達，不重新打開已失效的安裝 pane', async () => {
+  const { installKindOnHost } = await import('../lib/onboardingActions')
+  useStore.setState({ busy: {}, shellView: null })
+  mockApi({
+    request: async (method, path, body) => {
+      if (/tools\/install$/.test(path)) {
+        const req = body as Record<string, unknown>
+        dispatchFrameForTest({ type: 'tool_install_done', data: {
+          host: 'local', kind: 'codex', install_id: req.install_id, outcome: 'superseded',
+          installed: false, pane_id: '', pane_kept: false, timed_out: false,
+        } })
+        return { pane_id: 'old-pane', mode: 'shell', install_id: req.install_id }
+      }
+      return sharedMock.request(method, path, body)
+    },
+    upload: (...args) => sharedMock.upload(...args),
+  })
+  await act(async () => { await installKindOnHost('local', 'codex') })
+  assert.equal(useStore.getState().busy['install:local:codex'], undefined)
+  assert.equal(useStore.getState().shellView, null)
 })

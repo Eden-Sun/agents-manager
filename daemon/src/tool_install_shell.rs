@@ -67,7 +67,12 @@ pub fn installer_busy(shell: &am_base::herdr::PaneShell) -> bool {
 }
 
 /// 開 pane、打指令、起收尾 watcher。回 `{pane_id, mode:"shell"}`。
-pub async fn start(app: &Arc<crate::state::App>, host: &str, kind: &str) -> LcResult<serde_json::Value> {
+pub async fn start(app: &Arc<crate::state::App>, host: &str, kind: &str, requested_id: Option<&str>) -> LcResult<serde_json::Value> {
+    let install_id = match requested_id {
+        Some(id) if !id.is_empty() && id.len() <= 128 && id.bytes().all(|b| b.is_ascii_alphanumeric() || b"-_.".contains(&b)) => id.to_string(),
+        Some(_) => return Err(LcError::Bad("invalid install_id".into())),
+        None => ulid::Ulid::new().to_string(),
+    };
     let command = install_command(kind).ok_or_else(|| {
         if kind == "agy" {
             LcError::Bad("agy 不走 tools/install，請用 POST /api/hosts/{name}/agy/install".into())
@@ -91,8 +96,8 @@ pub async fn start(app: &Arc<crate::state::App>, host: &str, kind: &str) -> LcRe
         })
         .await;
     let shell = opened.ok_or_else(|| LcError::Upstream(format!("host `{host}` changed before the install started")))??;
-    spawn_watch(app.clone(), host.to_string(), kind.to_string(), shell.pane_id.clone(), fence, slot);
-    Ok(json!({"pane_id": shell.pane_id, "mode": "shell"}))
+    spawn_watch(app.clone(), host.to_string(), kind.to_string(), shell.pane_id.clone(), install_id.clone(), fence, slot);
+    Ok(json!({"pane_id": shell.pane_id, "mode": "shell", "install_id": install_id}))
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -121,6 +126,9 @@ pub struct Tracker {
 
 impl Tracker {
     pub fn step(&mut self, seen: Observed, elapsed: Duration) -> Option<End> {
+        if elapsed >= DEADLINE {
+            return Some(End::Timeout);
+        }
         match seen {
             Observed::Unreadable => {
                 self.unreadable += 1;
@@ -139,21 +147,46 @@ impl Tracker {
                 }
             }
         }
-        (elapsed >= DEADLINE).then_some(End::Timeout)
+        None
     }
 }
 
-/// 結束後的收尾：重新偵測、推 `host_changed`，再推 `tool_install_done`。
-/// 裝好了才關 pane；沒裝成（或偵測失敗）pane 留著，讓使用者在終端看到錯誤（API §12.7）。`slot` 活到這裡才放，收尾期間重複請求仍 409。
-fn spawn_watch(app: Arc<crate::state::App>, host: String, kind: String, pane_id: String, fence: HostFence, slot: Slot) {
-    tokio::spawn(async move {
+/// A superseded result only releases its original request. Never expose an old pane on a new host.
+fn completion(host: &str, kind: &str, pane: &str, id: &str, end: End, detected: bool, superseded: bool) -> serde_json::Value {
+    let installed = !superseded && end == End::Finished && detected;
+    json!({"host": host, "kind": kind, "install_id": id,
+        "outcome": if superseded { "superseded" } else if end == End::Timeout { "timeout" } else if installed { "installed" } else { "failed" },
+        "installed": installed, "pane_id": if superseded { "" } else { pane },
+        "pane_kept": !superseded && end != End::PaneGone && !installed,
+        "timed_out": end == End::Timeout})
+}
+
+/// Close and publish under the same authority gate; a reconnect cannot retarget cleanup.
+async fn finish(app: &Arc<crate::state::App>, fence: &HostFence, host: &str, kind: &str, pane: &str, id: &str, end: End, detected: bool) {
+    let done = completion(host, kind, pane, id, end, detected, false);
+    let published = app
+        .hosts
+        .run_if_current(fence, async {
+            if done["installed"] == true {
+                let _ = crate::api::shell::close(app, host, pane).await;
+            }
+            app.emit("tool_install_done", done).await;
+        })
+        .await;
+    if published.is_none() {
+        app.emit("tool_install_done", completion(host, kind, pane, id, end, false, true)).await;
+    }
+}
+
+fn spawn_watch(app: Arc<crate::state::App>, host: String, kind: String, pane_id: String, install_id: String, fence: HostFence, slot: Slot) {
+    tokio::spawn(Box::pin(async move {
         let _slot = slot;
         let started = tokio::time::Instant::now();
         let mut tracker = Tracker::default();
         let end = loop {
             tokio::time::sleep(POLL).await;
             if !app.hosts.is_current(&fence).await {
-                tracing::info!(%host, %pane_id, "host was reconnected/reconfigured; install watcher gives up on the old connection");
+                app.emit("tool_install_done", completion(&host, &kind, &pane_id, &install_id, End::PaneGone, false, true)).await;
                 return;
             }
             let seen = match fence.conn().client.pane_shell(&pane_id).await {
@@ -170,22 +203,17 @@ fn spawn_watch(app: Arc<crate::state::App>, host: String, kind: String, pane_id:
                 crate::state::emit_host_changed(&app, &fence).await;
                 ht.tools.get(&kind).is_some_and(|t| t.installed)
             }
+            Err(e) if e.is::<crate::tools::Superseded>() => {
+                app.emit("tool_install_done", completion(&host, &kind, &pane_id, &install_id, end, false, true)).await;
+                return;
+            }
             Err(e) => {
                 tracing::warn!(%host, error = %format!("{e:#}"), "re-detect after tool install failed");
                 false
             }
         };
-        let pane_exists = end != End::PaneGone;
-        let kept = pane_exists && !installed;
-        if pane_exists && installed && app.hosts.is_current(&fence).await {
-            let _ = crate::api::shell::close(&app, &host, &pane_id).await;
-        }
-        app.emit(
-            "tool_install_done",
-            json!({"host": host, "kind": kind, "installed": installed, "pane_id": pane_id, "pane_kept": kept, "timed_out": end == End::Timeout}),
-        )
-        .await;
-    });
+        finish(&app, &fence, &host, &kind, &pane_id, &install_id, end, installed).await;
+    }));
 }
 
 #[cfg(test)]
@@ -263,4 +291,61 @@ mod tests {
         let mut t = Tracker::default();
         assert_eq!(t.step(Observed::Busy, DEADLINE), Some(End::Timeout));
     }
+
+    #[test]
+    fn timeout_never_closes_a_detectable_but_running_installer() {
+        let done = completion("local", "codex", "pane", "attempt", End::Timeout, true, false);
+        assert_eq!(done["installed"], false);
+        assert_eq!(done["pane_kept"], true);
+        assert_eq!(done["timed_out"], true);
+        assert_eq!(Tracker::default().step(Observed::Idle, DEADLINE), Some(End::Timeout));
+    }
+
+    #[tokio::test]
+    async fn stale_completion_releases_only_its_request_without_exposing_a_pane() {
+        let e = crate::testing::env().await;
+        let host = crate::config::LOCAL_HOST;
+        let fence = e.app.hosts.fence(host).await.unwrap();
+        fence.conn().bump_generation_for_test();
+        let mut events = e.app.subscribe();
+        finish(&e.app, &fence, host, "codex", "old-pane", "attempt-old", End::Finished, true).await;
+        let event = events.recv().await.unwrap();
+        assert_eq!(event.kind, "tool_install_done");
+        assert_eq!(event.data["install_id"], "attempt-old");
+        assert_eq!(event.data["outcome"], "superseded");
+        assert_eq!(event.data["pane_id"], "");
+        assert_eq!(event.data["installed"], false);
+        assert_eq!(event.data["pane_kept"], false);
+    }
+
+    #[tokio::test]
+    async fn current_timeout_publishes_failure_and_preserves_the_pane() {
+        let e = crate::testing::env().await;
+        let host = crate::config::LOCAL_HOST;
+        let fence = e.app.hosts.fence(host).await.unwrap();
+        let mut events = e.app.subscribe();
+        finish(&e.app, &fence, host, "codex", "still-running", "attempt", End::Timeout, true).await;
+        let event = events.recv().await.unwrap();
+        assert_eq!(event.data["outcome"], "timeout");
+        assert_eq!(event.data["installed"], false);
+        assert_eq!(event.data["pane_kept"], true);
+    }
+
+
+    #[tokio::test]
+    async fn watcher_reconnect_emits_superseded_and_releases_slot() {
+        let e = crate::testing::env().await;
+        let host = crate::config::LOCAL_HOST;
+        let fence = e.app.hosts.fence(host).await.unwrap();
+        let mut events = e.app.subscribe();
+        let slot = Slot::take(host, "claude").unwrap();
+        fence.conn().bump_generation_for_test();
+        spawn_watch(e.app.clone(), host.into(), "claude".into(), "old-pane".into(), "watch-attempt".into(), fence, slot);
+        let event = tokio::time::timeout(Duration::from_secs(5), events.recv()).await.unwrap().unwrap();
+        assert_eq!(event.data["outcome"], "superseded");
+        assert_eq!(event.data["install_id"], "watch-attempt");
+        tokio::task::yield_now().await;
+        assert!(Slot::take(host, "claude").is_some());
+    }
+
 }

@@ -35,6 +35,9 @@ export function QuickAddBots({ projectId }: { projectId: string }) {
   const allIdentities = useStore((s) => s.identities)
   const status = useStore((s) => identityStatusOfHost(s, host))
   const disabledQuota = useDisabledQuota()
+  const [loginPending, setLoginPending] = useState<string | null>(null)
+  const refreshTools = useStore((s) => s.refreshTools)
+  const toolsBusy = useStore((s) => s.busy[`tools:${host || 'local'}`] === true)
   const [busy, setBusy] = useState<string | null>(null)
   const hostLabel = !host || host === 'local' ? '本機' : host
 
@@ -90,7 +93,9 @@ export function QuickAddBots({ projectId }: { projectId: string }) {
   const pick = (c: Choice) => {
     // 未登入的開出來只會停在登入畫面：點下去直接開登入流程（issue #1931），登好後再點一次就是新增。
     if (c.loggedOut) {
-      void loginKindOnHost(host, c.kind, c.identity)
+      void loginKindOnHost(host, c.kind, c.identity).then((opened) => {
+        if (opened && !c.identity) setLoginPending(host)
+      })
       return
     }
     setBusy(c.key)
@@ -113,6 +118,11 @@ export function QuickAddBots({ projectId }: { projectId: string }) {
 
   return (
     <div className="quick-add" role="group" aria-label="快速新增 Bot">
+      {loginPending === host ? (
+        <button type="button" className="btn identity-recheck" disabled={toolsBusy} onClick={() => void refreshTools(host).then((ok) => { if (ok) setLoginPending(null) })}>
+          {toolsBusy ? '偵測中…' : '登入好了，重新偵測'}
+        </button>
+      ) : null}
       {choices.map((c) => (
         <button
           key={c.key}

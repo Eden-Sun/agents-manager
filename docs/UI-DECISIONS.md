@@ -1299,8 +1299,8 @@ bot 其實還在正常回合（codex 7d 寫 0、codex-sol 還在回）。
 
 - **清單內容**（`OnboardingChecklist`）：herdr 連線、claude／codex／grok／agy 各一列（未安裝／已安裝・未登入／已登入／已安裝・登入狀態問不到），旁邊的鈕：未安裝→「安裝」（claude／codex／grok 不帶 `via_bot_id`，daemon 開臨時 shell 跑官方安裝指令、畫面切到那顆 pane 看進度；agy 沿用既有的確認框＋`agy/install`），已安裝未登入→既有的「開 shell 登入」（`QuotaLoginShell`，含 agy 的 TUI 說明）。`logged_in === null` 是「問不到」：標「登入狀態問不到」、不給登入鈕、不說成未登入，已安裝就算可用。只看**本機**。
 - **何時出現**（`OnboardingBanner`，掛在主畫面 banner 區）：沒有 Project、或本機沒有任何可用（已安裝且已登入／問不到；有已登入的命名身分也算）的 kind、或 herdr 連不上。都好了自動收起，不留「已完成」的殘影；選著 Bot／群組／shell 時收成一行（「環境準備　…（N/4 CLI 就緒）　展開」），空畫面時整張攤開。
-- **安裝收尾**（WS `tool_install_done`，API.md §8／§12.7）：按「安裝」後那一列維持「安裝中…」到收到事件。`installed:true`＝通知「已安裝」、重新偵測讓那一列翻成已安裝・未登入，使用者正看著的安裝 shell 一起收掉（daemon 關了 pane）；`installed:false` 且 `pane_kept:true`＝通知講原因（`timed_out` 寫「等了 15 分鐘還沒結束（逾時）」）並把畫面切到 `pane_id` 的終端讓使用者看錯誤，看完自己關；`pane_kept:false`＝pane 被使用者關了，通知叫他再按一次「安裝」。事件漏了的保險是 16 分鐘後放開鈕。
+- **安裝收尾**（WS `tool_install_done`，API.md §8／§12.7）：按「安裝」後那一列維持「安裝中…」到收到事件。`installed:true`＝通知「已安裝」、重新偵測讓那一列翻成已安裝・未登入，使用者正看著的安裝 shell 一起收掉（daemon 關了 pane）；`installed:false` 且 `pane_kept:true`＝通知講原因（逾時優先呈現），保留發起時的安裝終端，看完自己關；完成事件不重新按 pane ID 切換畫面，避免重連後操作到新主機。事件與 16 分鐘保險計時器都只解除同一 `install_id`；`outcome:superseded` 只回報原請求已失聯，不開 pane；`pane_kept:false`＝pane 被使用者關了，通知叫他再按一次「安裝」。事件漏了的保險是 16 分鐘後放開鈕。
 - **引導**：清單底下 `安裝並登入至少一種 CLI → 新增 Project → 新增 Bot`，目前這一步粗體；前一步沒完成的鈕 disabled。「新增 Project」打 `am:add-project` 事件讓 Sidebar 開既有的視窗，「新增 Bot」走 `requestOpenBotSheet`。
 - **環境設定裡找得到**：環境設定第一個分頁「環境準備」放同一份清單（清單出現時才有「N 待處理」徽章，此時第一次打開預設停這頁；平常預設仍是主機）；全部就緒仍看得到，底下寫「環境已就緒」。
-- **新增 Bot 的快速鈕**（`QuickAddBots`）：未登入的 kind／身分改成可點，標「未登入・點此登入」，點了直接開登入流程（命名身分走 `identities/{id}/login`＝登入協助面板；預設帳號開 shell 打 `<cli> login`），不新增 Bot；登好後再點一次才是新增。新增 Bot 表單的「預設帳號還沒登入」提示旁加「登入 <kind>」鈕。已在額度條停用的仍是不可點。
+- **新增 Bot 的快速鈕**（`QuickAddBots`）：未登入的 kind／身分改成可點，標「未登入・點此登入」，點了直接開登入流程（命名身分走 `identities/{id}/login`＝登入協助面板；預設帳號開 shell 打 `<cli> login`），不新增 Bot；預設帳號登好後按快捷列的「登入好了，重新偵測」，狀態更新後再點才是新增。新增 Bot 表單的「預設帳號還沒登入」提示旁加「登入 <kind>」鈕。已在額度條停用的仍是不可點。
 - **已登出橫幅不變**（`LoginPromptBanner`）：仍只提示有 bot 綁著的 claude 身分；沒有 bot 綁著的登出身分不提示，**一個 kind 都沒登入**時由上面的清單負責。
