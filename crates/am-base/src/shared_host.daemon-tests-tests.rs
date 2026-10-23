@@ -157,6 +157,14 @@
         crate::panes::scan_snapshot(&app, HOST, &snapshot).await.unwrap();
         let ids: Vec<String> = sqlx::query_scalar("SELECT pane_id FROM panes ORDER BY pane_id").fetch_all(&app.db).await.unwrap();
         assert_eq!(ids, ["wM:p1"]);
+        // The pane must outlive the new notification grace period before this test checks it is reported.
+        let aged = (chrono::Utc::now() - chrono::Duration::seconds(61)).to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
+        sqlx::query("UPDATE panes SET first_seen=? WHERE host=? AND pane_id='wM:p1'")
+            .bind(aged)
+            .bind(HOST)
+            .execute(&app.db)
+            .await
+            .unwrap();
         crate::panes::notify_unowned_and_orphans(&app, HOST).await.unwrap();
         let notified: Vec<String> =
             sqlx::query_scalar("SELECT pane_id FROM panes WHERE unowned_notified_at IS NOT NULL").fetch_all(&app.db).await.unwrap();
