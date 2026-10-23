@@ -1,6 +1,7 @@
 import { useEffect, useState } from 'react'
 import {
   fetchChangelog,
+  hasOwnSource,
   fetchTranslation,
   postTranslation,
   TRANSLATION_POLL_MS,
@@ -106,14 +107,23 @@ export function UpdateChangelog({
         : null
 
   if (!reply.found) {
+    const official = hasOwnSource(kind)
     return (
       <div className="update-changelog missing" role="status">
-        <strong>找不到 changelog</strong>
+        <strong>{official ? '找不到這一版的更新說明' : '找不到 changelog'}</strong>
         {head ? <span className="update-changelog-ver">{head}</span> : null}
         <div className="update-changelog-why">{reply.error ?? '沒有拿到任何段落'}</div>
         <a href={reply.sourceUrl} target="_blank" rel="noreferrer">
-          自己到 GitHub 看 CHANGELOG ↗
+          {official ? '看官方更新說明 ↗' : '自己到 GitHub 看 CHANGELOG ↗'}
         </a>
+        {reply.altUrl ? (
+          <>
+            {' '}
+            <a href={reply.altUrl} target="_blank" rel="noreferrer">
+              備援：官方 releases ↗
+            </a>
+          </>
+        ) : null}
       </div>
     )
   }

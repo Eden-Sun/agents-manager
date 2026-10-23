@@ -2,9 +2,11 @@ import { useState } from 'react'
 import { useStore } from '../store/store'
 import { useAgyBusy, useAgyPlan } from '../hooks/useAgyPlan'
 import { agyChipLabel, agyUpdateTitle } from '../lib/agyUpdate'
+import { changelogRange } from '../lib/upstreamRange'
 import { ConfirmDialog } from './ConfirmDialog'
 import { UpgradeIcon } from './UpgradeIcon'
 import { AgyUpdateBody } from './AgyUpdateConfirm'
+import { UpstreamChangelogBox } from './UpstreamChangelogBox'
 import type { DialogControl } from './MergedUpdateChip'
 
 /**
@@ -21,6 +23,7 @@ export function AgyUpdateChip({ control }: { control?: DialogControl } = {}) {
   const setOpen = (v: boolean) => (control && !v ? control.close() : setLocalOpen(v))
   if (!plan) return null
   const label = busy ? 'agy 更新中…' : agyChipLabel(plan)
+  const range = changelogRange(plan.hosts)
   return (
     <>
       {control ? null : (
@@ -41,11 +44,16 @@ export function AgyUpdateChip({ control }: { control?: DialogControl } = {}) {
         title={agyUpdateTitle(plan.target)}
         confirmLabel="更新"
         width={420}
-        body={plan.hosts.map((h) => (
-          <p key={h.host}>
-            <AgyUpdateBody host={h.host} current={h.from} target={plan.target} />
-          </p>
-        ))}
+        body={
+          <>
+            {open ? <UpstreamChangelogBox kind="agy" host={range.host} from={range.from} to={plan.target} /> : null}
+            {plan.hosts.map((h) => (
+              <p key={h.host}>
+                <AgyUpdateBody host={h.host} current={h.from} target={plan.target} />
+              </p>
+            ))}
+          </>
+        }
         onCancel={() => setOpen(false)}
         onConfirm={() => {
           setOpen(false)

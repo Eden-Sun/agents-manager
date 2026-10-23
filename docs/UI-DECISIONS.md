@@ -158,8 +158,8 @@
   **手機 menu 與手機群組頁也放**（2026-09-30 使用者：打開 menu 時名字旁那顆被側欄蓋住，看得到 Bot 的更新箭頭卻找不到一鍵重啟）：menu 最上面那列（部署 chip 右邊，不畫分組線），群組頁放在額度列左邊。
   **沒有 codex 在跑也出現**（2026-09-29 使用者：上游有新版卻只有一則「需先安裝」通知、沒有按鈕）：沒有 run 帶「需安裝」時照上游快照（`GET /api/upstream-updates`）
   取第一台落後的主機（本機優先），只畫 ⌃⌃ 不帶數字（沒有「幾顆」可講），確認框一樣有 changelog 與 AGM 解析，確認鈕「只安裝」（那台沒有閒置 codex 時）。
-  **grok 只提示**（#761）：上游有新版、有主機落後就出現一顆 `grok` 徽章（跟 herdr 同一個位置），點開只列落後的主機與官方指令 `grok update`，沒有安裝鈕——grok 的升級在那台主機上跑自己的 installer，我們沒有可代跑的固定流程。每台都追上就收起。手機跟其他更新 chip 同一條規則：單獨出現照舊一顆，跟別種並存時併進合成選單的一項（點下去開同一個提示框）。
-  **agy 有一鍵安裝**（#1921）：上游有新版、有主機落後就出現一顆 `agy` 徽章（跟 grok 同一個位置），點下去開設定頁「更新檢查」**同一個確認框**（標題與內文共用 `AgyUpdateConfirm.tsx`），確認後每台落後的主機各跑一次 `installAgy`（`POST /api/hosts/{name}/agy/install`）；安裝中鈕停用、字改「agy 更新中…」。跟其他 chip 同樣的手機合併規則。
+  **grok 只提示**（#761）：上游有新版、有主機落後就出現一顆 `grok` 徽章（跟 herdr 同一個位置），點開只列落後的主機與官方指令 `grok update`，沒有安裝鈕——grok 的升級在那台主機上跑自己的 installer，我們沒有可代跑的固定流程。每台都追上就收起。手機跟其他更新 chip 同一條規則：單獨出現照舊一顆，跟別種並存時併進合成選單的一項（點下去開同一個提示框）。 框上方跟 claude／codex 一樣左右分欄放「這次更新改了什麼」（`UpdateChangelog`）與「分析」（`AgmReviewBox`），共用 `UpstreamChangelogBox`（#1930）；多台落後時 changelog 從最舊那台起算，任何一台版本讀不到就不傳起點（`lib/upstreamRange.ts`）。後端抓不到時寫「找不到這一版的更新說明」＋官方連結（連結由前端自己給，不信後端回的 `source_url`）；分析兩路都讀不到時只有 agy、grok 寫「這個版本沒有分析」，claude／codex／herdr 照舊整塊不畫。
+  **agy 有一鍵安裝**（#1921）：上游有新版、有主機落後就出現一顆 `agy` 徽章（跟 grok 同一個位置），點下去開設定頁「更新檢查」**同一個確認框**（標題與內文共用 `AgyUpdateConfirm.tsx`），確認後每台落後的主機各跑一次 `installAgy`（`POST /api/hosts/{name}/agy/install`）；安裝中鈕停用、字改「agy 更新中…」。跟其他 chip 同樣的手機合併規則。 確認框（兩處共用）上方跟 claude／codex 一樣左右分欄放「這次更新改了什麼」（`UpdateChangelog`）與「分析」（`AgmReviewBox`），共用 `UpstreamChangelogBox`（#1930）；多台落後時 changelog 從最舊那台起算，任何一台版本讀不到就不傳起點（`lib/upstreamRange.ts`）。後端抓不到時寫「找不到這一版的更新說明」＋官方連結（連結由前端自己給，不信後端回的 `source_url`）；分析兩路都讀不到時只有 agy、grok 寫「這個版本沒有分析」，claude／codex／herdr 照舊整塊不畫。
   **不合成一個框分兩段**：兩件事的代價不同——claude 那顆只是重啟；codex 這顆會先換掉那台所有 codex 共用的 binary、失敗就一顆都不重啟——
   塞在同一個確認鈕後面，使用者很難分清楚按下去會發生哪幾件事；各自一個框也各自只有一份 changelog 與一份 AGM 解析。
   一般那顆的「在忙」名單不再列需安裝的 codex（由旁邊這顆負責），只剩需安裝時一般那顆不出現。

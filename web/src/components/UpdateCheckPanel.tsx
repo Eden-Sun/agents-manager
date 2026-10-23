@@ -7,6 +7,8 @@ import { STATUS_LABEL, buildHostCheck, summaryText, updatableCount, type CheckAc
 import { ConfirmDialog } from './ConfirmDialog'
 import { AgyUpdateBody } from './AgyUpdateConfirm'
 import { agyUpdateTitle } from '../lib/agyUpdate'
+import { UpstreamChangelogBox } from './UpstreamChangelogBox'
+import { changelogRange } from '../lib/upstreamRange'
 import './updateCheck.css'
 
 /**
@@ -156,7 +158,17 @@ function ConfirmBody({ host, row, action, willResume }: { host: string; row: Che
       </>
     )
   }
-  if (action.kind === 'agy') return <AgyUpdateBody host={host} current={row.current} target={action.target} />
+  if (action.kind === 'agy') {
+    const from = changelogRange([{ host, from: row.current }]).from
+    return (
+      <>
+        <UpstreamChangelogBox kind="agy" host={host} from={from} to={action.target} />
+        <p>
+          <AgyUpdateBody host={host} current={row.current} target={action.target} />
+        </p>
+      </>
+    )
+  }
   if (action.kind === 'herdr') {
     return (
       <>

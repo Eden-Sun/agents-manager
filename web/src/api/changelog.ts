@@ -17,6 +17,8 @@ export interface ChangelogReply {
   found: boolean
   sections: ChangelogSection[]
   sourceUrl: string
+  /** 主要來源之外的備援連結（agy 的 releases 頁）；沒有就是 null。 */
+  altUrl: string | null
   error: string | null
 }
 
@@ -24,9 +26,27 @@ const CLAUDE_SOURCE = 'https://github.com/anthropics/claude-code/blob/main/CHANG
 const CODEX_SOURCE = 'https://github.com/openai/codex/releases'
 const HERDR_SOURCE = 'https://github.com/herdrdev/herdr/releases'
 
+// agy、grok 的官方來源，跟後端 `changelog.rs` 的常數一致，且只用這三個主機。
+const AGY_SOURCE = 'https://raw.githubusercontent.com/google-antigravity/antigravity-cli/refs/heads/main/CHANGELOG.md'
+const AGY_ALT_SOURCE = 'https://github.com/google-antigravity/antigravity-cli/releases'
+const GROK_SOURCE_BASE = 'https://storage.googleapis.com/grok-build-public-artifacts/cli/changelogs/'
+
+/** agy、grok 的連結一律用前端自己的：後端還沒認得這兩個 kind 時，回應的 `source_url` 會是 claude 的。 */
+export function hasOwnSource(kind: string): boolean {
+  return kind === 'agy' || kind === 'grok'
+}
+
+/** grok 一版一個檔，要有純數字版本才組得出網址；其餘退回該版以前的目錄。 */
+function grokSource(to: string | null): string {
+  const v = to?.trim().replace(/^v/, '') ?? ''
+  return /^\d+(\.\d+)*$/.test(v) ? `${GROK_SOURCE_BASE}${v}.external.md` : GROK_SOURCE_BASE
+}
+
 /** codex 沒有 CHANGELOG.md，只有 releases。 */
-function sourceFor(kind: string): string {
+function sourceFor(kind: string, to: string | null = null): string {
   if (kind === 'herdr') return HERDR_SOURCE
+  if (kind === 'agy') return AGY_SOURCE
+  if (kind === 'grok') return grokSource(to)
   return kind === 'codex' ? CODEX_SOURCE : CLAUDE_SOURCE
 }
 
@@ -34,7 +54,7 @@ function isRec(v: unknown): v is Record<string, unknown> {
   return typeof v === 'object' && v !== null
 }
 
-function toReply(raw: unknown, kind: string, host: string): ChangelogReply {
+function toReply(raw: unknown, kind: string, host: string, to: string | null = null): ChangelogReply {
   const r = isRec(raw) ? raw : {}
   const sections = Array.isArray(r.sections)
     ? r.sections
@@ -49,7 +69,8 @@ function toReply(raw: unknown, kind: string, host: string): ChangelogReply {
     fromVersion: typeof r.from_version === 'string' ? r.from_version : null,
     found: r.found === true && sections.length > 0,
     sections,
-    sourceUrl: typeof r.source_url === 'string' ? r.source_url : sourceFor(kind),
+    sourceUrl: hasOwnSource(kind) ? sourceFor(kind, to) : typeof r.source_url === 'string' ? r.source_url : sourceFor(kind),
+    altUrl: kind === 'agy' ? AGY_ALT_SOURCE : null,
     error: typeof r.error === 'string' ? r.error : null,
   }
 }
@@ -65,10 +86,10 @@ export async function fetchChangelog(
   // codex 新版還沒進磁碟，目標版本取自 pane 上的 `a -> b`。
   if (to) q.set('to', to)
   try {
-    return toReply(await rawTransport.request('GET', `/changelog?${q.toString()}`), kind, host)
+    return toReply(await rawTransport.request('GET', `/changelog?${q.toString()}`), kind, host, to)
   } catch (e) {
     const msg = e instanceof Error ? e.message : String(e)
-    return { kind, host, installedVersion: null, fromVersion: from, found: false, sections: [], sourceUrl: sourceFor(kind), error: msg }
+    return { kind, host, installedVersion: null, fromVersion: from, found: false, sections: [], sourceUrl: sourceFor(kind, to), altUrl: kind === 'agy' ? AGY_ALT_SOURCE : null, error: msg }
   }
 }
 

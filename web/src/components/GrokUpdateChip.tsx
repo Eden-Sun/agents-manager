@@ -1,8 +1,10 @@
 import { useState } from 'react'
 import { useGrokPlan } from '../hooks/useGrokPlan'
 import { grokChipLabel } from '../lib/grokUpdate'
+import { changelogRange } from '../lib/upstreamRange'
 import { ConfirmDialog } from './ConfirmDialog'
 import { UpgradeIcon } from './UpgradeIcon'
+import { UpstreamChangelogBox } from './UpstreamChangelogBox'
 import type { DialogControl } from './MergedUpdateChip'
 
 /**
@@ -17,6 +19,7 @@ export function GrokUpdateChip({ control }: { control?: DialogControl } = {}) {
   const setOpen = (v: boolean) => (control && !v ? control.close() : setLocalOpen(v))
   if (!plan) return null
   const label = grokChipLabel(plan)
+  const range = changelogRange(plan.hosts)
   return (
     <>
       {control ? null : (
@@ -32,6 +35,7 @@ export function GrokUpdateChip({ control }: { control?: DialogControl } = {}) {
         cancelLabel="關閉"
         body={
           <>
+            {open ? <UpstreamChangelogBox kind="grok" host={range.host} from={range.from} to={plan.target} /> : null}
             <p>這些主機的 grok 還不是最新的正式版：</p>
             <ul className="confirm-choices">
               {plan.hosts.map((h) => (
