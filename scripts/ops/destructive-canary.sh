@@ -188,7 +188,7 @@ STUB
                 # 只認「直譯器＋腳本在同一行」這種看得出來是在執行的：光比副檔名會把
                 # 「skip - 沒有 bun，跳過 dev-server-kick.ts 的測試」這種說明文字、
                 # 以及 fixture 裡的假 pane 標題（`/opt/x/gcloud.py auth login`）全部誤判（實測）。
-                # 用變數叫的（`"${BUN}" "${SCRIPT}"`）比不出來，那類靠 README 的規則約束。
+                # 用變數叫的（`"${BUN}" "${SCRIPT}"`）比不出來，那類靠 README “Guardrails for destructive commands” 的規則約束。
                 *python3' '*.py*|*python' '*.py*|*bun' '*.ts*|*node' '*.ts*|*node' '*.mjs*)
                     case "${line}" in
                         *AM_CANARY_DIR*) : ;;
