@@ -22,8 +22,8 @@
 
 **主機、帳號與額度**
 - 其他機器上的專案經 SSH 操作那台的 herdr：遠端 Bot、主機 shell、CLI 登入，以及把專案移交給另一顆 daemon。
-- Claude 身分 `cc0`～`cc6` 從 shell alias 認出來，每台主機各一份，可一鍵登入與停用。
-- 依主機與身分顯示額度與重置時間、低額度警告；內容以各供應商提供的資料為準（Claude、Codex、Grok；agy 只讀 Gemini 桶）。
+- Claude 身份 `cc0`～`cc6` 從 shell alias 認出來，每台主機各一份，可一鍵登入與停用。
+- 依主機與身份顯示額度與重置時間、低額度警告；內容以各供應商提供的資料為準（Claude、Codex、Grok；agy 只讀 Gemini 桶）。
 - CLI 支援時，模型、強度與 fast 模式可在執行中切換。
 
 **自動化**
@@ -54,7 +54,7 @@
 | git worktree | 產品不管理；agent 依各 repo 規範自行建立 | 核心功能：每個任務一個隔離 worktree，一個 prompt 扇出到多個 agent，比較後合併 |
 | diff／PR 審閱 | 不提供（明列為非目標） | diff 註解回送 agent，整合 GitHub 與 Linear |
 | 遠端主機 | 整個專案放在 SSH 主機上、經那台的 herdr 操作；主機 shell、CLI 登入、各主機額度；專案可在 daemon 間移交 | SSH worktrees：遠端終端、檔案、git、自動重連與 port forwarding |
-| 帳號與額度 | 每台主機的 Claude `cc0`～`cc6` 身分；Claude、Codex、Grok、agy（Gemini 桶）的額度視窗 | 帳號切換器與用量追蹤，涵蓋 Claude、Codex、Gemini、Antigravity、OpenCode、Kimi、MiniMax 等 |
+| 帳號與額度 | 每台主機的 Claude `cc0`～`cc6` 身份；Claude、Codex、Grok、agy（Gemini 桶）的額度視窗 | 帳號切換器與用量追蹤，涵蓋 Claude、Codex、Gemini、Antigravity、OpenCode、Kimi、MiniMax 等 |
 | 多 agent 協作 | 子 agent 掛在父 Bot 下並通知卡住／完成；`@bot` 群組聊天；mission 卡片；AGM 總管 | 實驗性 Orchestration：run、task、dispatch、受監督 worker、decision gate、跨主機 worker |
 | 閒置 agent | 總管收起閒置 Bot（預設 90 分鐘，可調）並保留 resume 資訊 | 實驗性 hibernation（預設關閉，30 分鐘），重開 worktree 時以 resume 旗標重啟 CLI |
 | 排程 | 單次／間隔／每天／每週排進 Bot 佇列 | 其文件未提及 |
@@ -119,7 +119,7 @@ agents-managerd serve   # 正式版 daemon，UI 已嵌入：http://127.0.0.1:778
 
 | Kind | 回覆來源 | 備註 |
 |---|---|---|
-| **claude** | `--settings` hooks（`SessionStart`／`Stop`） | 身分 `cc0`～`cc6`；執行中套用模型／強度 |
+| **claude** | `--settings` hooks（`SessionStart`／`Stop`） | 身份 `cc0`～`cc6`；執行中套用模型／強度 |
 | **codex** | 每次啟動的 `notify` hook | 執行中套用模型／強度／Fast |
 | **grok** | `GROK_HOME` 裡的 hook 檔 | 模型可即時套用，強度要重啟；[SPEC §12](docs/SPEC.md) |
 | **agy** | Antigravity CLI 設定裡的具名 hook | 標題列有更新提示；[SPEC §12a](docs/SPEC.md) |
@@ -201,7 +201,7 @@ VITE_MOCK=1 bun run dev
 
 | 文件 | 內容 |
 |---|---|
-| [`docs/SPEC.md`](docs/SPEC.md) | 現行行為規格：資料模型、hook、對帳、遠端主機、額度、身分、AGM、群組任務 |
+| [`docs/SPEC.md`](docs/SPEC.md) | 現行行為規格：資料模型、hook、對帳、遠端主機、額度、身份、AGM、群組任務 |
 | [`docs/API.md`](docs/API.md) | HTTP／WebSocket 契約，含 bot 的認證範圍 |
 | [`docs/FRONTEND.md`](docs/FRONTEND.md) | 前端結構、指令與不顯眼的慣例 |
 | [`docs/UI-DECISIONS.md`](docs/UI-DECISIONS.md) | 已定案的 UI 取捨 |
