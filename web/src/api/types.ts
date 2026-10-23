@@ -438,7 +438,8 @@ export interface StatusInfo {
   model_id: string | null
   effort: string | null
   thinking: boolean
-  fast_mode: boolean
+  /** CLI 有回報才是 true／false；沒有這個欄位（codex）＝null，`runningFast` 會回退到 `run.runtime_fast`（#1914）。 */
+  fast_mode: boolean | null
   context_used_pct: number | null
   context_used_tokens: number | null
   context_size: number | null

@@ -440,7 +440,8 @@ export function toStatusInfo(v: unknown): StatusInfo | null {
     model_id: optStr(pick(model, 'id')),
     effort: optStr(isRec(raw.effort) ? pick(raw.effort, 'level') : undefined),
     thinking: isRec(raw.thinking) ? bool(pick(raw.thinking, 'enabled')) : false,
-    fast_mode: bool(raw.fast_mode),
+    // 沒有這個欄位（codex 的狀態列只有 context_window）＝null，不是 false：false 會蓋掉 runtime_fast（#1914）。
+    fast_mode: typeof raw.fast_mode === 'boolean' ? raw.fast_mode : null,
     context_used_pct: numOrNull(pick(ctx, 'used_percentage')),
     context_used_tokens: numOrNull(pick(ctx, 'total_input_tokens')),
     context_size: numOrNull(pick(ctx, 'context_window_size')),
