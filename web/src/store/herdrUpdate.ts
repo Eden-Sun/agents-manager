@@ -10,6 +10,7 @@
  */
 import { create } from 'zustand'
 import { arr, isRec, pick, str } from '../api/normalize'
+import { msg, t, tr } from '../lib/i18n'
 import { startHerdrUpdate, herdrStartErrText, toChildrenLost, type HerdrBotRef, type HerdrChildLost } from '../api/herdrUpdate'
 import type { Bot, Run } from '../api/types'
 import type { UpstreamItem } from './upstreamUpdate'
@@ -19,13 +20,13 @@ type Rec = Record<string, unknown>
 export type HerdrPhase = 'starting' | 'downloading' | 'waiting_idle' | 'stopping' | 'restarting' | 'rolling_back' | 'resuming'
 
 export const HERDR_PHASE_LABEL: Record<HerdrPhase, string> = {
-  starting: '準備更新',
-  downloading: '下載新版',
-  waiting_idle: '等所有 Bot 閒下來',
-  stopping: '停下 herdr',
-  restarting: '重啟 herdr',
-  rolling_back: '新版起不來，換回舊版',
-  resuming: '接回 Bot',
+  starting: msg('準備更新'),
+  downloading: msg('下載新版'),
+  waiting_idle: msg('等所有 Bot 閒下來'),
+  stopping: msg('停下 herdr'),
+  restarting: msg('重啟 herdr'),
+  rolling_back: msg('新版起不來，換回舊版'),
+  resuming: msg('接回 Bot'),
 }
 
 const PHASES = new Set<HerdrPhase>(['downloading', 'waiting_idle', 'stopping', 'restarting', 'rolling_back', 'resuming'])
@@ -115,42 +116,52 @@ export function parseHerdrDone(data: Rec): HerdrUpdateResult {
 
 /** 「server 跑的」「CLI／shim 解析到的」＋路徑＋版本；舊的那份標出來。 */
 export function herdrBinaryText(b: HerdrBinary): string {
-  const who = b.role === 'server' ? 'server 跑的' : 'CLI／shim 解析到的'
-  return `${who} ${b.path}：${b.version ?? '讀不到版本'}${b.stale ? '（舊）' : ''}`
+  const who = b.role === 'server' ? t('server 跑的') : t('CLI／shim 解析到的')
+  return t('{who} {path}：{version}{stale}', {
+    who,
+    path: b.path,
+    version: b.version ?? t('讀不到版本'),
+    stale: b.stale ? t('（舊）') : '',
+  })
 }
 
 /** daemon `herdr_upgrade.rs` 的 `reason`（API.md §12.7b）。`restart_failed` 以外都沒動到 server。 */
 const REASON: Record<string, string> = {
-  install_path_unsupported: 'server 跑的或 CLI 那份 herdr 是套件管理器的 symlink（或找不到），不能原地換，什麼都沒動；請在那台跑手動升級指令',
-  restart_unsupported: 'herdr server 不是 systemd／launchd 管的，或服務跑的不是要換的 binary，什麼都沒動',
-  checksum_mismatch: '下載的檔案沒通過 sha256 校驗，什麼都沒動',
-  rollback_failed: '新版起不來、換回舊版也失敗，要人工處理',
-  resume_failed: 'herdr 已升級，但有 Bot 沒接回',
-  download_failed: '下載新版失敗，什麼都沒動',
-  version_mismatch: '下載的檔案版本不是目標版，什麼都沒動',
-  busy_timeout: '等了 30 分鐘還有 Bot 在忙，什麼都沒動',
-  maintenance_busy: '別人開著 herdr 維護窗口，什麼都沒動',
-  swap_failed: '換 binary 失敗，herdr 沒有重啟',
-  restart_failed: '新版 herdr 起不來，已換回舊版',
+  install_path_unsupported: msg('server 跑的或 CLI 那份 herdr 是套件管理器的 symlink（或找不到），不能原地換，什麼都沒動；請在那台跑手動升級指令'),
+  restart_unsupported: msg('herdr server 不是 systemd／launchd 管的，或服務跑的不是要換的 binary，什麼都沒動'),
+  checksum_mismatch: msg('下載的檔案沒通過 sha256 校驗，什麼都沒動'),
+  rollback_failed: msg('新版起不來、換回舊版也失敗，要人工處理'),
+  resume_failed: msg('herdr 已升級，但有 Bot 沒接回'),
+  download_failed: msg('下載新版失敗，什麼都沒動'),
+  version_mismatch: msg('下載的檔案版本不是目標版，什麼都沒動'),
+  busy_timeout: msg('等了 30 分鐘還有 Bot 在忙，什麼都沒動'),
+  maintenance_busy: msg('別人開著 herdr 維護窗口，什麼都沒動'),
+  swap_failed: msg('換 binary 失敗，herdr 沒有重啟'),
+  restart_failed: msg('新版 herdr 起不來，已換回舊版'),
 }
 
 export function herdrReasonText(reason: string | null): string {
-  return reason ? (REASON[reason] ?? reason) : '失敗'
+  return reason ? tr(REASON[reason] ?? reason) : t('失敗')
 }
 
 /** 給 notify 的一句話。 */
 export function herdrDoneMessage(r: HerdrUpdateResult): string {
   const back = r.resumed.length || r.failed.length
-    ? `接回 ${r.resumed.length} 顆${r.failed.length ? `，${r.failed.length} 顆沒接回` : ''}`
+    ? r.failed.length
+      ? t('接回 {n} 顆，{failed} 顆沒接回', { n: r.resumed.length, failed: r.failed.length })
+      : t('接回 {n} 顆', { n: r.resumed.length })
     : ''
-  const kids = r.childrenLost.length ? `${r.childrenLost.length} 個子 agent 已結束，已請母 Bot 視需要重開` : ''
-  const tail = [back, kids].filter(Boolean).join('；')
+  const kids = r.childrenLost.length ? t('{n} 個子 agent 已結束，已請母 Bot 視需要重開', { n: r.childrenLost.length }) : ''
+  const tail = [back, kids].filter(Boolean).join(t('；'))
   if (r.ok) {
-    const up = r.from && r.to && r.from !== r.to ? `${r.from} → ${r.to}` : (r.to ?? '新版')
-    return `${r.host} 的 herdr 已升到 ${up}${tail ? `；${tail}` : ''}（點 header 的 ✓ 看名單）`
+    const up = r.from && r.to && r.from !== r.to ? `${r.from} → ${r.to}` : (r.to ?? t('新版'))
+    return tail
+      ? t('{host} 的 herdr 已升到 {up}；{tail}（點 header 的 ✓ 看名單）', { host: r.host, up, tail })
+      : t('{host} 的 herdr 已升到 {up}（點 header 的 ✓ 看名單）', { host: r.host, up })
   }
-  const head = `${r.host} 的 herdr 沒有升級（${herdrReasonText(r.reason)}）`
-  return `${head}${r.detail ? `：${r.detail}` : ''}${tail ? `；${tail}` : ''}`
+  const head = t('{host} 的 herdr 沒有升級（{reason}）', { host: r.host, reason: herdrReasonText(r.reason) })
+  const detail = r.detail ? t('：{detail}', { detail: r.detail }) : ''
+  return `${head}${detail}${tail ? t('；{tail}', { tail }) : ''}`
 }
 
 /**
@@ -200,7 +211,7 @@ export interface HerdrUpdatePlan {
 /** 只有 shared_session 的主機不能從這裡更新（遠端主機也能，#1752）。 */
 export function herdrHostBlocked(host: string, sharedHosts: ReadonlySet<string>): string | null {
   if (sharedHosts.has(host)) {
-    return '共用 session：別的 daemon 也在用這台的 herdr，不能從這裡重啟；確認沒有別的 daemon 之後，到主機設定把「共用 session」關掉再試'
+    return t('共用 session：別的 daemon 也在用這台的 herdr，不能從這裡重啟；確認沒有別的 daemon 之後，到主機設定把「共用 session」關掉再試')
   }
   return null
 }
@@ -226,7 +237,7 @@ export function herdrUpdatePlan(
   const blockedWhy = chosen ? null : (hosts.find((h) => h.behind)?.blocked ?? null)
   const on = chosen?.host ?? 'local'
   const live = bots.filter((b) => !b.pending && runs[b.id] && hostOf(b) === on)
-  const nameOf = (id: string | null) => bots.find((b) => b.id === id)?.name ?? '（已不在）'
+  const nameOf = (id: string | null) => bots.find((b) => b.id === id)?.name ?? t('（已不在）')
   return {
     target: item.target,
     hosts,
@@ -265,7 +276,7 @@ export async function startHerdr(host: string, target: string, notify: Notify): 
     })
   } catch (e) {
     useHerdrUpdate.setState((s) => (s.active?.phase === 'starting' ? { active: null } : {}))
-    notify('error', `herdr 更新沒開始：${herdrStartErrText(e, host)}`)
+    notify('error', t('herdr 更新沒開始：{reason}', { reason: herdrStartErrText(e, host) }))
   }
 }
 
@@ -301,8 +312,14 @@ export function dismissHerdrResult() {
 
 /** 手機合成那顆（`MergedUpdateChip`）選單裡 herdr 那一項的文案；`null`＝這顆不出現。 */
 export function herdrMenuItem(active: HerdrUpdateActive | null, result: HerdrUpdateResult | null, plan: HerdrUpdatePlan | null): string | null {
-  if (active) return `herdr 更新中：${HERDR_PHASE_LABEL[active.phase]}…`
-  if (result) return result.ok ? `herdr 已升到 ${result.to ?? '新版'}（看名單）` : `herdr 沒有升級（${herdrReasonText(result.reason)}）`
+  if (active) return t('herdr 更新中：{phase}…', { phase: tr(HERDR_PHASE_LABEL[active.phase]) })
+  if (result) {
+    return result.ok
+      ? t('herdr 已升到 {to}（看名單）', { to: result.to ?? t('新版') })
+      : t('herdr 沒有升級（{reason}）', { reason: herdrReasonText(result.reason) })
+  }
   if (!plan) return null
-  return plan.host ? `更新 herdr ${plan.target}（所有 Bot 中斷約 1 分鐘）` : `herdr ${plan.target}：不能從這裡更新`
+  return plan.host
+    ? t('更新 herdr {target}（所有 Bot 中斷約 1 分鐘）', { target: plan.target })
+    : t('herdr {target}：不能從這裡更新', { target: plan.target })
 }

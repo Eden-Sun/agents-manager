@@ -3,6 +3,7 @@ import * as api from '../api'
 import { useStore } from '../store/store'
 import { useHerdrPlan } from '../hooks/useHerdrPlan'
 import { reviewErrText } from '../lib/claudeReviewErr'
+import { useT } from '../lib/i18n'
 import {
   HERDR_PHASE_LABEL,
   dismissHerdrResult,
@@ -26,6 +27,7 @@ import './herdrUpdate.css'
  * 數字位置寫 `herdr` 而不是顆數：三顆並排時要一眼分得出這顆是哪一種。
  */
 export function HerdrUpdateChip({ control }: { control?: DialogControl } = {}) {
+  const t = useT()
   const plan = useHerdrPlan()
   const active = useHerdrUpdate((s) => s.active)
   const result = useHerdrUpdate((s) => s.result)
@@ -39,9 +41,12 @@ export function HerdrUpdateChip({ control }: { control?: DialogControl } = {}) {
 
   if (active) {
     if (control) return null
-    const label = `herdr 更新中：${HERDR_PHASE_LABEL[active.phase]}（${active.host}${active.target ? ` → ${active.target}` : ''}）${
-      active.phase === 'waiting_idle' ? '。等所有 Bot 都閒下來才重啟，最多 30 分鐘' : ''
-    }${active.willResume.length ? `\n重啟後接回：${active.willResume.map((b) => b.name).join('、')}` : ''}`
+    const label = t('herdr 更新中：{phase}（{where}）{wait}{resume}', {
+      phase: t.tr(HERDR_PHASE_LABEL[active.phase]),
+      where: `${active.host}${active.target ? ` → ${active.target}` : ''}`,
+      wait: active.phase === 'waiting_idle' ? t('。等所有 Bot 都閒下來才重啟，最多 30 分鐘') : '',
+      resume: active.willResume.length ? t('\n重啟後接回：{names}', { names: active.willResume.map((b) => b.name).join(t('、')) }) : '',
+    })
     return (
       <button type="button" className="quota-update install running" disabled title={label} aria-label={label}>
         <span aria-hidden="true"><UpgradeIcon /></span>
@@ -57,8 +62,12 @@ export function HerdrUpdateChip({ control }: { control?: DialogControl } = {}) {
   const from = plan.from
   const host = plan.host
   const label = host
-    ? `herdr 有新版 ${target}（${host}：${from ?? '讀取失敗'}）· 點一下更新：herdr 會整個重啟，所有 Bot 中斷約 1 分鐘後接回`
-    : `herdr 有新版 ${target}，但不能從這裡更新：${plan.blockedWhy ?? ''}`
+    ? t('herdr 有新版 {target}（{host}：{from}）· 點一下更新：herdr 會整個重啟，所有 Bot 中斷約 1 分鐘後接回', {
+        target,
+        host,
+        from: from ?? t('讀取失敗'),
+      })
+    : t('herdr 有新版 {target}，但不能從這裡更新：{why}', { target, why: plan.blockedWhy ?? '' })
 
   return (
     <>
@@ -76,7 +85,7 @@ export function HerdrUpdateChip({ control }: { control?: DialogControl } = {}) {
       )}
       <ConfirmDialog
         open={open}
-        title={`更新 herdr 到 ${target} 並重啟？`}
+        title={t('更新 herdr 到 {target} 並重啟？', { target })}
         danger
         body={
           <>
@@ -87,23 +96,31 @@ export function HerdrUpdateChip({ control }: { control?: DialogControl } = {}) {
               </div>
             ) : null}
             <p className="herdr-update-warn" role="alert">
-              <strong>所有 Bot 會中斷約 1 分鐘</strong>：herdr server 要整個重啟，每顆 Bot 的終端都會斷掉，再用同一個 session 接回來。
+              {t.x('{bold}：herdr server 要整個重啟，每顆 Bot 的終端都會斷掉，再用同一個 session 接回來。', { bold: <strong>{t('所有 Bot 會中斷約 1 分鐘')}</strong> })}
             </p>
             {host ? (
               <>
                 <p>
-                  先在 <strong>{host}</strong> 下載 {target} 並驗證版本（這時還不換），再等所有頂層 Bot 都閒下來（最多 30 分鐘，等不到就什麼都不動），
-                  然後換上新版、重啟 herdr。新版起不來會自動換回 {from ?? '舊版'}。
+                  {t.x(
+                    '先在 {host} 下載 {target} 並驗證版本（這時還不換），再等所有頂層 Bot 都閒下來（最多 30 分鐘，等不到就什麼都不動），然後換上新版、重啟 herdr。新版起不來會自動換回 {from}。',
+                    { host: <strong>{host}</strong>, target, from: from ?? t('舊版') },
+                  )}
                 </p>
                 {herdrVersions?.mismatch ? (
                   <p className="confirm-note herdr-update-sub">
-                    目前 server 是 {herdrVersions.server_version ?? '讀不到'}、CLI 是 {herdrVersions.cli_version ?? '讀不到'}：
-                    {herdrOlder(herdrVersions.server_version, herdrVersions.cli_version)}那一份比較舊；同一台有兩份 herdr（launchd／systemd 跑的與 shim 用的不同檔）時，兩份會一起換。
+                    {t.x(
+                      '目前 server 是 {server}、CLI 是 {cli}：{older}那一份比較舊；同一台有兩份 herdr（launchd／systemd 跑的與 shim 用的不同檔）時，兩份會一起換。',
+                      {
+                        server: herdrVersions.server_version ?? t('讀不到'),
+                        cli: herdrVersions.cli_version ?? t('讀不到'),
+                        older: herdrOlder(herdrVersions.server_version, herdrVersions.cli_version),
+                      },
+                    )}
                   </p>
                 ) : null}
                 {plan.willResume.length > 0 ? (
                   <>
-                    <p className="confirm-note herdr-update-sub">重啟後接回這 {plan.willResume.length} 顆：</p>
+                    <p className="confirm-note herdr-update-sub">{t('重啟後接回這 {n} 顆：', { n: plan.willResume.length })}</p>
                     <ul className="confirm-list">
                       {plan.willResume.map((b) => (
                         <li key={b.botId}>{b.name}</li>
@@ -111,17 +128,17 @@ export function HerdrUpdateChip({ control }: { control?: DialogControl } = {}) {
                     </ul>
                   </>
                 ) : (
-                  <p className="confirm-note">{host} 現在沒有在跑的 Bot，重啟後沒有要接回的。</p>
+                  <p className="confirm-note">{t('{host} 現在沒有在跑的 Bot，重啟後沒有要接回的。', { host })}</p>
                 )}
                 {plan.childrenLost.length > 0 ? (
                   <>
                     <p className="confirm-note herdr-update-lost">
-                      這 {plan.childrenLost.length} 個子 agent 會被結束、<strong>不會自動接回</strong>；更新完會通知它們的母 Bot，由母 Bot 視需要重開：
+                      {t('這 {n} 個子 agent 會被結束、不會自動接回；更新完會通知它們的母 Bot，由母 Bot 視需要重開：', { n: plan.childrenLost.length })}
                     </p>
                     <ul className="confirm-list dim">
                       {plan.childrenLost.map((b) => (
                         <li key={b.botId}>
-                          {b.name}（母：{b.parentName}）
+                          {t('{name}（母：{parent}）', { name: b.name, parent: b.parentName })}
                         </li>
                       ))}
                     </ul>
@@ -135,18 +152,21 @@ export function HerdrUpdateChip({ control }: { control?: DialogControl } = {}) {
               <ul className="confirm-list dim herdr-update-hosts">
                 {plan.hosts.map((h) => (
                   <li key={h.host}>
-                    {h.host}：{h.installed ?? `讀取失敗${h.error ? `（${h.error}）` : ''}`}
-                    {h.behind ? ` → ${target}` : '（已是最新）'}
-                    {h.behind && h.blocked ? ` · ${h.blocked.split('：')[0]}` : ''}
+                    {t('{host}：{state}{arrow}{blocked}', {
+                      host: h.host,
+                      state: h.installed ?? (h.error ? t('讀取失敗（{error}）', { error: h.error }) : t('讀取失敗')),
+                      arrow: h.behind ? ` → ${target}` : t('（已是最新）'),
+                      blocked: h.behind && h.blocked ? ` · ${h.blocked.split('：')[0]}` : '', // i18n-ignore：拆 daemon 的說明句，中文分隔符是資料格式
+                    })}
                   </li>
                 ))}
               </ul>
             ) : null}
           </>
         }
-        confirmLabel={host ? `更新並重啟 herdr` : '無法從這裡更新'}
+        confirmLabel={host ? t('更新並重啟 herdr') : t('無法從這裡更新')}
         confirmDisabled={!host}
-        secondaryLabel={asking ? '派工中…' : '請 AGM 解析'}
+        secondaryLabel={asking ? t('派工中…') : t('請 AGM 解析')}
         secondaryDisabled={asking}
         onSecondary={() => {
           setAsking(true)
@@ -157,11 +177,11 @@ export function HerdrUpdateChip({ control }: { control?: DialogControl } = {}) {
               notify(
                 'info',
                 r.duplicate
-                  ? `herdr ${r.version} 已經派給 ${r.target_bot_name || 'AGM'} 解析過了，結論會回到這裡`
-                  : `已請 ${r.target_bot_name} 解析 herdr ${r.version} 的 changelog，結論會回到這裡`,
+                  ? t('herdr {version} 已經派給 {bot} 解析過了，結論會回到這裡', { version: r.version, bot: r.target_bot_name || 'AGM' })
+                  : t('已請 {bot} 解析 herdr {version} 的 changelog，結論會回到這裡', { version: r.version, bot: r.target_bot_name }),
               )
             })
-            .catch((e: unknown) => notify('error', `派不出去：${reviewErrText(e)}`))
+            .catch((e: unknown) => notify('error', t('派不出去：{reason}', { reason: reviewErrText(e) })))
             .finally(() => setAsking(false))
         }}
         width={480}
@@ -187,22 +207,26 @@ function herdrOlder(server: string | null, cli: string | null): string {
 
 /** 更新跑完：✓／⚠ 留在 header，點開看誰接回、誰沒接回、哪些子 agent 沒了；「知道了」才收起。 */
 function ResultChip({ result, control }: { result: HerdrUpdateResult; control?: DialogControl }) {
+  const t = useT()
   const bots = useStore((s) => s.bots)
   const [localOpen, setLocalOpen] = useState(false)
   const open = control ? control.open : localOpen
   const close = () => (control ? control.close() : setLocalOpen(false))
   const bad = !result.ok || result.failed.length > 0
-  const nameOf = (id: string) => bots.find((b) => b.id === id)?.name ?? '（已不在）'
+  const nameOf = (id: string) => bots.find((b) => b.id === id)?.name ?? t('（已不在）')
+  const to = result.to ?? t('新版')
   const summary = result.ok
-    ? `herdr 已升到 ${result.to ?? '新版'} · 接回 ${result.resumed.length} 顆${result.failed.length ? ` · ${result.failed.length} 顆沒接回` : ''}`
-    : `herdr 沒有升級（${herdrReasonText(result.reason)}）`
+    ? result.failed.length
+      ? t('herdr 已升到 {to} · 接回 {n} 顆 · {failed} 顆沒接回', { to, n: result.resumed.length, failed: result.failed.length })
+      : t('herdr 已升到 {to} · 接回 {n} 顆', { to, n: result.resumed.length })
+    : t('herdr 沒有升級（{reason}）', { reason: herdrReasonText(result.reason) })
   return (
     <>
       {control ? null : (
         <button
           type="button"
           className={`quota-update running done${bad ? ' bad' : ''}`}
-          title={`${summary}（點一下看名單）`}
+          title={t('{summary}（點一下看名單）', { summary })}
           aria-label={summary}
           onClick={() => setLocalOpen(true)}
         >
@@ -212,17 +236,21 @@ function ResultChip({ result, control }: { result: HerdrUpdateResult; control?: 
       )}
       <ConfirmDialog
         open={open}
-        title={result.ok ? `herdr 已升到 ${result.to ?? '新版'}` : 'herdr 沒有升級'}
+        title={result.ok ? t('herdr 已升到 {to}', { to }) : t('herdr 沒有升級')}
         body={
           <>
             <p>
               {result.ok
-                ? `${result.host}：${result.from ?? '舊版'} → ${result.to ?? '新版'}。`
-                : `${result.host}：${herdrReasonText(result.reason)}${result.detail ? `（${result.detail}）` : ''}。`}
+                ? t('{host}：{from} → {to}。', { host: result.host, from: result.from ?? t('舊版'), to })
+                : t('{host}：{reason}{detail}。', {
+                    host: result.host,
+                    reason: herdrReasonText(result.reason),
+                    detail: result.detail ? t('（{detail}）', { detail: result.detail }) : '',
+                  })}
             </p>
             {result.binaries.length > 1 || (result.binaries.length === 1 && !result.ok) ? (
               <>
-                <p className="confirm-note herdr-update-sub">這台的 herdr：</p>
+                <p className="confirm-note herdr-update-sub">{t('這台的 herdr：')}</p>
                 <ul className="confirm-list dim">
                   {result.binaries.map((b) => (
                     <li key={b.path}>{herdrBinaryText(b)}</li>
@@ -232,13 +260,15 @@ function ResultChip({ result, control }: { result: HerdrUpdateResult; control?: 
             ) : null}
             {!result.ok && result.manualCommand && (result.reason === 'install_path_unsupported' || result.reason === 'restart_unsupported') ? (
               <>
-                <p className="confirm-note herdr-update-sub">在 {result.host} 上手動升級（只換 binary；升完再回來按更新，或自己重啟 herdr server）：</p>
+                <p className="confirm-note herdr-update-sub">
+                  {t('在 {host} 上手動升級（只換 binary；升完再回來按更新，或自己重啟 herdr server）：', { host: result.host })}
+                </p>
                 <pre className="herdr-update-cmd">{result.manualCommand}</pre>
               </>
             ) : null}
             {result.resumed.length > 0 ? (
               <>
-                <p className="confirm-note herdr-update-sub">已接回 {result.resumed.length} 顆：</p>
+                <p className="confirm-note herdr-update-sub">{t('已接回 {n} 顆：', { n: result.resumed.length })}</p>
                 <ul className="confirm-list">
                   {result.resumed.map((b) => (
                     <li key={b.bot_id}>{b.name}</li>
@@ -248,12 +278,12 @@ function ResultChip({ result, control }: { result: HerdrUpdateResult; control?: 
             ) : null}
             {result.failed.length > 0 ? (
               <>
-                <p className="confirm-note herdr-update-lost">沒接回 {result.failed.length} 顆（到那顆按「啟動」再試）：</p>
+                <p className="confirm-note herdr-update-lost">{t('沒接回 {n} 顆（到那顆按「啟動」再試）：', { n: result.failed.length })}</p>
                 <ul className="confirm-list">
                   {result.failed.map((b) => (
                     <li key={b.bot_id}>
                       {b.name}
-                      {b.error ? `（${b.error}）` : ''}
+                      {b.error ? t('（{error}）', { error: b.error }) : ''}
                     </li>
                   ))}
                 </ul>
@@ -261,11 +291,11 @@ function ResultChip({ result, control }: { result: HerdrUpdateResult; control?: 
             ) : null}
             {result.childrenLost.length > 0 ? (
               <>
-                <p className="confirm-note">已結束的子 agent（已通知母 Bot 視需要重開）：</p>
+                <p className="confirm-note">{t('已結束的子 agent（已通知母 Bot 視需要重開）：')}</p>
                 <ul className="confirm-list dim">
                   {result.childrenLost.map((b) => (
                     <li key={b.bot_id}>
-                      {b.name}（母：{nameOf(b.parent_bot_id)}）
+                      {t('{name}（母：{parent}）', { name: b.name, parent: nameOf(b.parent_bot_id) })}
                     </li>
                   ))}
                 </ul>
@@ -273,8 +303,8 @@ function ResultChip({ result, control }: { result: HerdrUpdateResult; control?: 
             ) : null}
           </>
         }
-        confirmLabel="知道了"
-        cancelLabel="先留著"
+        confirmLabel={t('知道了')}
+        cancelLabel={t('先留著')}
         width={440}
         onCancel={close}
         onConfirm={() => {

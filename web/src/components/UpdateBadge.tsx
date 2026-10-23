@@ -2,6 +2,7 @@ import { useState, type ReactNode } from 'react'
 import * as api from '../api'
 import { inFlightTurn, projectHostName, useStore } from '../store/store'
 import { reviewErrText } from '../lib/claudeReviewErr'
+import { useT } from '../lib/i18n'
 import { updateRange } from '../lib/updateRange'
 import { isChildBot, passiveUpdateHint, updateBatchCounts } from '../lib/updateBatch'
 import { ConfirmDialog } from './ConfirmDialog'
@@ -17,8 +18,9 @@ import './updateBadge.css'
  * 2026-09-19：「蓋得到」含在忙那組——額度列 chip 一樣畫著它。
  */
 export function UpdateBadge({ botId, variant = 'chip' }: { botId: string; variant?: 'chip' | 'dot' | 'inline' }) {
+  const t = useT()
   const run = useStore((s) => s.runs[botId] ?? null)
-  const botName = useStore((s) => s.bots.find((b) => b.id === botId)?.name ?? '這個 Bot')
+  const botName = useStore((s) => s.bots.find((b) => b.id === botId)?.name ?? t('這個 Bot'))
   const botKind = useStore((s) => s.bots.find((b) => b.id === botId)?.kind ?? 'claude')
   const host = useStore((s) => projectHostName(s, s.bots.find((b) => b.id === botId)?.project_id ?? null))
   const runningVersion = useStore((s) => s.runs[botId]?.status?.version ?? null)
@@ -53,10 +55,10 @@ export function UpdateBadge({ botId, variant = 'chip' }: { botId: string; varian
   const notice = run?.update_notice ?? null
   if (!notice) return null
   if (isChild) {
-    const hint = passiveHint ?? '由父 Bot 安排重啟'
+    const hint = passiveHint ?? t('由父 Bot 安排重啟')
     if (variant === 'dot') {
       return (
-        <span className="bot-update-dot passive" role="img" aria-label={`${botName}：${hint}`} title={`${hint}\n${notice}`}>
+        <span className="bot-update-dot passive" role="img" aria-label={t('{name}：{hint}', { name: botName, hint })} title={`${hint}\n${notice}`}>
           <UpgradeIcon size={8} />
         </span>
       )
@@ -64,7 +66,7 @@ export function UpdateBadge({ botId, variant = 'chip' }: { botId: string; varian
     if (variant === 'inline') {
       return (
         <span className="sl-update passive" title={`${hint}\n${notice}`}>
-          <UpgradeIcon size={9} /> 由父 Bot 重啟
+          <UpgradeIcon size={9} /> {t('由父 Bot 重啟')}
         </span>
       )
     }
@@ -78,7 +80,7 @@ export function UpdateBadge({ botId, variant = 'chip' }: { botId: string; varian
   // 「請 AGM 解析」claude 與 codex 同一套（issue #561）；其他 kind 沒有 changelog 來源也沒有任務檔。
   const canReview = botKind === 'claude' || botKind === 'codex'
   // codex 的新版通常還沒安裝（issue #388）：重啟換不到任何東西，先講清楚要裝；裝好之後（通知寫「已安裝」）才是重啟套用。
-  const needsInstall = botKind !== 'claude' && !notice.includes('已安裝')
+  const needsInstall = botKind !== 'claude' && !notice.includes('已安裝') // i18n-ignore：比對 daemon 通知原文
   const restart = () => {
     if (needsInstall) {
       setConfirming(false)
@@ -88,7 +90,7 @@ export function UpdateBadge({ botId, variant = 'chip' }: { botId: string; varian
     setRestarting(true)
     void restartBot(botId).then((ok) => {
       setRestarting(false)
-      if (ok) notify('info', `${botName} 已用新版 ${botKind} 重新啟動`)
+      if (ok) notify('info', t('{name} 已用新版 {kind} 重新啟動', { name: botName, kind: botKind }))
     })
   }
 
@@ -105,11 +107,11 @@ export function UpdateBadge({ botId, variant = 'chip' }: { botId: string; varian
           'info',
           // 已經派過（自己按過，或 30 分鐘那支排程先派了）不是錯誤，照實說一次就好。
           r.duplicate
-            ? `${botKind} ${r.version} 已經派給 ${r.target_bot_name || 'AGM'} 解析過了，結論會回到這裡`
-            : `已請 ${r.target_bot_name} 解析 ${botKind} ${r.version} 的 changelog，結論會回到這裡`,
+            ? t('{kind} {version} 已經派給 {bot} 解析過了，結論會回到這裡', { kind: botKind, version: r.version, bot: r.target_bot_name || 'AGM' })
+            : t('已請 {bot} 解析 {kind} {version} 的 changelog，結論會回到這裡', { kind: botKind, version: r.version, bot: r.target_bot_name }),
         )
       })
-      .catch((e: unknown) => notify('error', `派不出去：${reviewErrText(e)}`))
+      .catch((e: unknown) => notify('error', t('派不出去：{reason}', { reason: reviewErrText(e) })))
       .finally(() => setAsking(false))
   }
 
@@ -136,6 +138,9 @@ export function UpdateBadge({ botId, variant = 'chip' }: { botId: string; varian
     />
   )
 
+  const busyNote = busy ? t('\n它正在忙，重啟會打斷這一回合') : ''
+  const passivePrefix = passiveHint ? `${passiveHint}\n` : ''
+
   if (variant === 'dot') {
     return (
       <>
@@ -143,8 +148,8 @@ export function UpdateBadge({ botId, variant = 'chip' }: { botId: string; varian
           type="button"
           className={`bot-update-dot${restarting ? ' busy' : ''}`}
           disabled={restarting}
-          aria-label={`${botName}：有更新，點一下套用`}
-          title={`${passiveHint ? `${passiveHint}\n` : ''}${notice}｜點一下先看新版改了什麼，確認後重啟這個 bot（session 會 --resume）${busy ? '\n它正在忙，重啟會打斷這一回合' : ''}`}
+          aria-label={t('{name}：有更新，點一下套用', { name: botName })}
+          title={`${passivePrefix}${t('{notice}｜點一下先看新版改了什麼，確認後重啟這個 bot（session 會 --resume）{busy}', { notice, busy: busyNote })}`}
           // 疊在 bot 列上：按更新不該順便觸發列的切換。
           onClick={(e) => {
             e.stopPropagation()
@@ -166,11 +171,11 @@ export function UpdateBadge({ botId, variant = 'chip' }: { botId: string; varian
           type="button"
           className={`sl-update${restarting ? ' busy' : ''}`}
           disabled={restarting}
-          aria-label={`${botName}：${botKind} 有更新，點一下先看新版改了什麼，確認後重啟`}
-          title={`${passiveHint ? `${passiveHint}\n` : ''}${notice}\n點一下先看新版改了什麼，確認後重啟這個 bot（session 會 --resume）${busy ? '\n它正在忙，重啟會打斷這一回合' : ''}`}
+          aria-label={t('{name}：{kind} 有更新，點一下先看新版改了什麼，確認後重啟', { name: botName, kind: botKind })}
+          title={`${passivePrefix}${notice}\n${t('點一下先看新版改了什麼，確認後重啟這個 bot（session 會 --resume）{busy}', { busy: busyNote })}`}
           onClick={() => setConfirming(true)}
         >
-          {restarting ? '重啟中…' : <><UpgradeIcon size={9} /> 升級</>}
+          {restarting ? t('重啟中…') : <><UpgradeIcon size={9} /> {t('升級')}</>}
         </button>
         {confirmDialog}
       </>
@@ -186,11 +191,11 @@ export function UpdateBadge({ botId, variant = 'chip' }: { botId: string; varian
         type="button"
         className={`update-badge${restarting ? ' busy' : ''}`}
         disabled={restarting}
-        aria-label={`${botName}：${botKind} 有更新，點一下先看新版改了什麼，確認後重啟`}
-        title={`${passiveHint ? `${passiveHint}\n` : ''}${notice}\n點一下先看新版改了什麼，確認後重啟這個 bot（session 會 --resume）${busy ? '\n它正在忙，重啟會打斷這一回合' : ''}`}
+        aria-label={t('{name}：{kind} 有更新，點一下先看新版改了什麼，確認後重啟', { name: botName, kind: botKind })}
+        title={`${passivePrefix}${notice}\n${t('點一下先看新版改了什麼，確認後重啟這個 bot（session 會 --resume）{busy}', { busy: busyNote })}`}
         onClick={() => setConfirming(true)}
       >
-        {restarting ? '重啟中…' : <><UpgradeIcon /> <span className="update-badge-text">{botKind} 有更新</span></>}
+        {restarting ? t('重啟中…') : <><UpgradeIcon /> <span className="update-badge-text">{t('{kind} 有更新', { kind: botKind })}</span></>}
       </button>
       {confirmDialog}
     </>
@@ -230,32 +235,45 @@ function ConfirmRestart({
   onConfirm: () => void
   onAskAgm?: () => void
 }) {
+  const t = useT()
   return (
     <ConfirmDialog
       open={open}
-      title={needsInstall ? `${kind} 有新版，還沒安裝` : `套用 ${kind} 更新？`}
+      title={needsInstall ? t('{kind} 有新版，還沒安裝', { kind }) : t('套用 {kind} 更新？', { kind })}
       body={
         <>
           {changelog}
           {needsInstall ? (
             <p>
-              {notice}。重啟 <strong>{name}</strong> 換不到新版：請先在終端跑 {kind} 的安裝指令（畫面上那句 <code>Run … to update</code>，或選單的
-              <code>Update now</code>），裝好之後這裡會改成「重啟套用」。AG Man 不會自動安裝。
+              {t.x('{notice}。重啟 {name} 換不到新版：請先在終端跑 {kind} 的安裝指令（畫面上那句 {hint}，或選單的 {cmd}），裝好之後這裡會改成「重啟套用」。AG Man 不會自動安裝。', {
+                notice,
+                name: <strong>{name}</strong>,
+                kind,
+                hint: <code>Run … to update</code>,
+                cmd: <code>Update now</code>,
+              })}
             </p>
           ) : busy ? (
             <p>
-              <strong>{name}</strong> 正在忙，現在重啟會打斷這一回合。新版 {kind} 會 <code>--resume</code>{' '}
-              接著同一個 session 跑，但這一輪沒說完的話會斷在那裡。
+              {t.x('{name} 正在忙，現在重啟會打斷這一回合。新版 {kind} 會 {resume} 接著同一個 session 跑，但這一輪沒說完的話會斷在那裡。', {
+                name: <strong>{name}</strong>,
+                kind,
+                resume: <code>--resume</code>,
+              })}
             </p>
           ) : (
             <p>
-              重啟 <strong>{name}</strong> 會用新版 {kind} 接著跑（session 會 <code>--resume</code>，上下文不會掉）。
+              {t.x('重啟 {name} 會用新版 {kind} 接著跑（session 會 {resume}，上下文不會掉）。', {
+                name: <strong>{name}</strong>,
+                kind,
+                resume: <code>--resume</code>,
+              })}
             </p>
           )}
         </>
       }
-      confirmLabel={needsInstall ? '知道了' : '重啟套用'}
-      secondaryLabel={onAskAgm ? (asking ? '派工中…' : '請 AGM 解析') : undefined}
+      confirmLabel={needsInstall ? t('知道了') : t('重啟套用')}
+      secondaryLabel={onAskAgm ? (asking ? t('派工中…') : t('請 AGM 解析')) : undefined}
       secondaryDisabled={asking}
       onSecondary={onAskAgm}
       danger={busy}

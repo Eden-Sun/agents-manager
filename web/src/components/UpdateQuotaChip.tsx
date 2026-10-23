@@ -5,6 +5,7 @@ import { inFlightTurn, projectHostName, useStore } from '../store/store'
 import { readyLabel, updateBatchCounts } from '../lib/updateBatch'
 import { reviewErrText } from '../lib/claudeReviewErr'
 import { updateRange } from '../lib/updateRange'
+import { useT } from '../lib/i18n'
 import { ConfirmDialog } from './ConfirmDialog'
 import { UpgradeIcon } from './UpgradeIcon'
 import { UpdateChangelog } from './UpdateChangelog'
@@ -64,6 +65,7 @@ export function UpdateQuotaChip() {
 
 /** `control`：手機合成的那顆（`MergedUpdateChip`）代為開框，這裡只畫確認框、不畫按鈕。 */
 export function RestartChip({ control }: { control?: DialogControl } = {}) {
+  const t = useT()
   const batch = useStore((s) => s.restartBatch)
   const restartIdleBots = useStore((s) => s.restartIdleBots)
   const clear = useStore((s) => s.clearRestartBatch)
@@ -81,7 +83,7 @@ export function RestartChip({ control }: { control?: DialogControl } = {}) {
     useShallow((s) =>
       updateBatchCounts(s.bots, s.runs, (id) => inFlightTurn(s, id) !== null)
         .busy.filter((b) => !b.install)
-        .map((b) => `${b.name}（${b.why}）`),
+        .map((b) => t('{name}（{why}）', { name: b.name, why: b.why })),
     ),
   )
   const busyCount = busyLines.length
@@ -115,15 +117,17 @@ export function RestartChip({ control }: { control?: DialogControl } = {}) {
   if (batch && !control) {
     const { total, done, ok, failed, finished } = batch
     const summary = finished
-      ? `重啟完成 · 成功 ${ok.length} 顆${failed.length ? ` · 失敗 ${failed.length} 顆` : ''}`
-      : `重啟中 ${done}/${total}`
+      ? failed.length
+        ? t('重啟完成 · 成功 {ok} 顆 · 失敗 {failed} 顆', { ok: ok.length, failed: failed.length })
+        : t('重啟完成 · 成功 {ok} 顆', { ok: ok.length })
+      : t('重啟中 {done}/{total}', { done, total })
     return (
       // 未完成也可以收起（issue #492）：以前 `disabled={!finished}`，`bots_restart_done` 收不到時
       // 這顆會永遠停用，而它又蓋住一鍵重啟的觸發鈕，等於連再按一次都不行。收起不中斷批次。
       <button
         type="button"
         className={`quota-update running${finished ? ' done' : ''}${failed.length ? ' bad' : ''}`}
-        title={`${summary}（點一下收起，詳細名單在側欄${finished ? '' : '；不會中斷重啟'}）`}
+        title={t('{summary}（點一下收起，詳細名單在側欄{tail}）', { summary, tail: finished ? '' : t('；不會中斷重啟') })}
         aria-label={summary}
         onClick={clear}
       >
@@ -137,11 +141,11 @@ export function RestartChip({ control }: { control?: DialogControl } = {}) {
 
   if (readyCount === 0 && busyCount === 0 && !control) return null
 
-  const busyNote = busyCount > 0 ? `\n${busyCount} 顆在忙，會先跳過：\n${busyLines.join('\n')}` : ''
+  const busyNote = busyCount > 0 ? t('\n{n} 顆在忙，會先跳過：\n{names}', { n: busyCount, names: busyLines.join('\n') }) : ''
   const label =
     readyCount === 0
-      ? '有 CLI 更新，但這些 Bot 現在都在忙——閒下來再按'
-      : `有 CLI 更新 · 重啟 ${readyCount} 顆閒置的 Bot（結束目前的 agent，再用同一個 session --resume 接回來，上下文不會掉）`
+      ? t('有 CLI 更新，但這些 Bot 現在都在忙——閒下來再按')
+      : t('有 CLI 更新 · 重啟 {n} 顆閒置的 Bot（結束目前的 agent，再用同一個 session --resume 接回來，上下文不會掉）', { n: readyCount })
 
   return (
     <>
@@ -149,7 +153,7 @@ export function RestartChip({ control }: { control?: DialogControl } = {}) {
         type="button"
         className={`quota-update${readyCount === 0 ? ' waiting' : ''}`}
         disabled={sending || readyCount === 0}
-        title={`${label}${readyCount > 0 ? `：\n${readyNames.join('、')}` : ''}${busyNote}`}
+        title={`${label}${readyCount > 0 ? t('：\n{names}', { names: readyNames.join(t('、')) }) : ''}${busyNote}`}
         aria-label={label}
         onClick={() => setConfirming(true)}
       >
@@ -160,7 +164,7 @@ export function RestartChip({ control }: { control?: DialogControl } = {}) {
       </button>}
       <ConfirmDialog
         open={confirming}
-        title="重啟這些 Bot 來套用更新？"
+        title={t('重啟這些 Bot 來套用更新？')}
         body={
           <>
             {confirming ? (
@@ -173,8 +177,10 @@ export function RestartChip({ control }: { control?: DialogControl } = {}) {
               </div>
             ) : null}
             <p>
-              以下 <strong>{readyCount}</strong> 顆會結束目前的 agent，再用同一個 session <code>--resume</code>{' '}
-              接回來——上下文不會掉，但重啟要花幾秒，這段時間它們不會回話。
+              {t.x('以下 {n} 顆會結束目前的 agent，再用同一個 session {resume} 接回來——上下文不會掉，但重啟要花幾秒，這段時間它們不會回話。', {
+                n: <strong>{readyCount}</strong>,
+                resume: <code>--resume</code>,
+              })}
             </p>
             <ul className="confirm-list">
               {readyNames.map((n, i) => (
@@ -183,12 +189,12 @@ export function RestartChip({ control }: { control?: DialogControl } = {}) {
             </ul>
             {unknownCount > 0 ? (
               <p className="confirm-note">
-                標「背景狀態未知」的 {unknownCount} 顆，daemon 還沒讀過它們畫面底部有沒有背景工作（剛重啟）；若有，重啟會一起結束。要保險就等 30 秒再按。
+                {t('標「背景狀態未知」的 {n} 顆，daemon 還沒讀過它們畫面底部有沒有背景工作（剛重啟）；若有，重啟會一起結束。要保險就等 30 秒再按。', { n: unknownCount })}
               </p>
             ) : null}
             {busyCount > 0 ? (
               <>
-                <p className="confirm-note">另外 {busyCount} 顆在忙，這次會跳過：</p>
+                <p className="confirm-note">{t('另外 {n} 顆在忙，這次會跳過：', { n: busyCount })}</p>
                 <ul className="confirm-list dim">
                   {busyLines.map((n, i) => (
                     <li key={`${i}:${n}`}>{n}</li>
@@ -198,11 +204,11 @@ export function RestartChip({ control }: { control?: DialogControl } = {}) {
             ) : null}
           </>
         }
-        confirmLabel={`重啟 ${readyCount} 顆`}
+        confirmLabel={t('重啟 {n} 顆', { n: readyCount })}
         // 批次框跟單顆框同一顆按鈕：更新的解析是**版本層級**的事，跟要重啟幾顆無關。
         // 單顆的 chip 在批次蓋得到時會自己隱藏，所以只做在 UpdateBadge 上等於多數情況看不到
         // （使用者 2026-09-19：「還是沒見按鈕」）。claude 與 codex 同一套（issue #561）。
-        secondaryLabel={canReview ? (asking ? '派工中…' : '請 AGM 解析') : undefined}
+        secondaryLabel={canReview ? (asking ? t('派工中…') : t('請 AGM 解析')) : undefined}
         secondaryDisabled={asking}
         onSecondary={canReview ? () => {
           setAsking(true)
@@ -214,11 +220,11 @@ export function RestartChip({ control }: { control?: DialogControl } = {}) {
               notify(
                 'info',
                 r.duplicate
-                  ? `${changelogKind} ${r.version} 已經派給 ${r.target_bot_name || 'AGM'} 解析過了，結論會回到這裡`
-                  : `已請 ${r.target_bot_name} 解析 ${changelogKind} ${r.version} 的 changelog，結論會回到這裡`,
+                  ? t('{kind} {version} 已經派給 {bot} 解析過了，結論會回到這裡', { kind: changelogKind, version: r.version, bot: r.target_bot_name || 'AGM' })
+                  : t('已請 {bot} 解析 {kind} {version} 的 changelog，結論會回到這裡', { bot: r.target_bot_name, kind: changelogKind, version: r.version }),
               )
             })
-            .catch((e: unknown) => notify('error', `派不出去：${reviewErrText(e)}`))
+            .catch((e: unknown) => notify('error', t('派不出去：{reason}', { reason: reviewErrText(e) })))
             .finally(() => setAsking(false))
         } : undefined}
         width={440}

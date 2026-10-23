@@ -6,6 +6,7 @@
 import type { HerdrVersion, ToolMap, ToolStatus } from '../api/types'
 import type { IntegrationHost, IntegrationRow } from '../api/integrationUpdates'
 import type { UpstreamItem } from './upstreamUpdate'
+import { msg, t } from '../lib/i18n'
 
 export type CheckStatus = 'latest' | 'update' | 'missing' | 'unknown'
 export type CheckGroup = 'herdr' | 'cli' | 'integration'
@@ -31,10 +32,10 @@ export interface CheckRow {
 }
 
 export const STATUS_LABEL: Record<CheckStatus, string> = {
-  latest: '最新',
-  update: '可更新',
-  missing: '未安裝',
-  unknown: '查不到',
+  latest: msg('最新'),
+  update: msg('可更新'),
+  missing: msg('未安裝'),
+  unknown: msg('查不到'),
 }
 
 /** `herdr 0.9.5`、`2.1.300 (Claude Code)`、`codex-cli 0.157.0` → `0.9.5`／`2.1.300`／`0.157.0`；認不出來回 null。 */
@@ -56,12 +57,13 @@ export function versionLess(a: string | null, b: string | null): boolean | null 
   return false
 }
 
-const CLI_LABEL: Record<string, string> = { claude: 'Claude CLI', codex: 'Codex CLI', grok: 'Grok CLI', agy: 'Antigravity（agy）CLI' }
+const CLI_LABEL: Record<string, string> = { claude: 'Claude CLI', codex: 'Codex CLI', grok: 'Grok CLI', agy: 'Antigravity（agy）CLI' } // i18n-ignore
+// integration 名稱是 daemon 的識別字，不翻；前綴的「integration：」照原樣顯示。
 const INTEGRATION_LABEL: Record<string, string> = {
-  claude: 'integration：claude',
-  codex: 'integration：codex',
-  'antigravity-cli': 'integration：antigravity-cli',
-  grok: 'integration：grok',
+  claude: 'integration：claude', // i18n-ignore
+  codex: 'integration：codex', // i18n-ignore
+  'antigravity-cli': 'integration：antigravity-cli', // i18n-ignore
+  grok: 'integration：grok', // i18n-ignore
 }
 
 function hostEntry(item: UpstreamItem | undefined, host: string) {
@@ -86,11 +88,11 @@ function herdrRows(host: string, herdr: HerdrVersion | undefined, item: Upstream
     status: cliStatus,
     note:
       cliStatus === 'update'
-        ? blockedWhy ?? '更新會重啟 herdr server，所有 Bot 中斷約 1 分鐘後接回'
+        ? blockedWhy ?? t('更新會重啟 herdr server，所有 Bot 中斷約 1 分鐘後接回')
         : herdr === undefined
-          ? '這台還沒讀到 herdr 版本'
+          ? t('這台還沒讀到 herdr 版本')
           : cliStatus === 'unknown' && latest === null
-            ? '查不到上游版本'
+            ? t('查不到上游版本')
             : null,
     action: cliStatus === 'update' && target && !blockedWhy ? { kind: 'herdr', target } : null,
   }
@@ -103,7 +105,7 @@ function herdrRows(host: string, herdr: HerdrVersion | undefined, item: Upstream
     current: server,
     latest,
     status: serverStatus,
-    note: !server ? '主機沒連上，讀不到 server 版本' : server && cli && server !== cli ? `server 與 CLI 不同版（CLI ${cli}），重啟 herdr server 後才換` : null,
+    note: !server ? t('主機沒連上，讀不到 server 版本') : server && cli && server !== cli ? t('server 與 CLI 不同版（CLI {cli}），重啟 herdr server 後才換', { cli }) : null,
     action: null,
   }
   return [cliRow, serverRow]
@@ -112,12 +114,12 @@ function herdrRows(host: string, herdr: HerdrVersion | undefined, item: Upstream
 function cliRow(host: string, kind: string, tool: ToolStatus | undefined, item: UpstreamItem | undefined, updatable: boolean): CheckRow {
   const base = { id: `${host}:cli-${kind}`, group: 'cli' as const, label: CLI_LABEL[kind] ?? kind }
   // 工具清單還沒讀到（undefined）是查不到；讀到了、installed 為假才是未安裝。
-  if (tool === undefined) return { ...base, current: null, latest: null, status: 'unknown', note: '這台還沒讀到工具清單', action: null }
+  if (tool === undefined) return { ...base, current: null, latest: null, status: 'unknown', note: t('這台還沒讀到工具清單'), action: null }
   if (!tool.installed) return { ...base, current: null, latest: item?.latest ?? null, status: 'missing', note: null, action: null }
   const current = cleanVersion(tool.version) ?? tool.version
   const entry = hostEntry(item, host)
-  if (!item || item.latest === null) return { ...base, current, latest: null, status: 'unknown', note: kind === 'agy' ? '查不到官方 manifest 的版本' : '查不到上游版本', action: null }
-  if (entry?.error) return { ...base, current, latest: item.latest, status: 'unknown', note: `讀不到這台的版本：${entry.error}`, action: null }
+  if (!item || item.latest === null) return { ...base, current, latest: null, status: 'unknown', note: kind === 'agy' ? t('查不到官方 manifest 的版本') : t('查不到上游版本'), action: null }
+  if (entry?.error) return { ...base, current, latest: item.latest, status: 'unknown', note: t('讀不到這台的版本：{error}', { error: entry.error }), action: null }
   const behind = entry ? entry.behind : versionLess(cleanVersion(current), item.target ?? item.latest)
   if (behind === null) return { ...base, current, latest: item.latest, status: 'unknown', note: null, action: null }
   if (!behind) return { ...base, current, latest: item.latest, status: 'latest', note: null, action: null }
@@ -126,14 +128,14 @@ function cliRow(host: string, kind: string, tool: ToolStatus | undefined, item: 
     return { ...base, current, latest: target, status: 'update', note: null, action: { kind: 'cli', cliKind: kind, target } }
   }
   if (updatable && kind === 'agy') {
-    return { ...base, current, latest: target, status: 'update', note: '跑著的 agy bot 不會被打斷，重啟才換版', action: { kind: 'agy', target } }
+    return { ...base, current, latest: target, status: 'update', note: t('跑著的 agy bot 不會被打斷，重啟才換版'), action: { kind: 'agy', target } }
   }
   return {
     ...base,
     current,
     latest: target,
     status: 'update',
-    note: kind === 'grok' ? '沒有一鍵更新，請在那台跑 grok update' : null,
+    note: kind === 'grok' ? t('沒有一鍵更新，請在那台跑 grok update') : null,
     action: null,
   }
 }
@@ -144,32 +146,32 @@ const LOGIN_KIND: Record<string, string> = { grok: 'grok', 'antigravity-cli': 'a
 /** daemon 自動裝過 grok／agy 但失敗（含裝完重讀狀態失敗，`error` 已寫明）：不管這一列現在是什麼狀態都要講原因與「不重試」。 */
 function autoInstallFailure(row: IntegrationRow, retry: string): string | null {
   if (!(row.name in LOGIN_KIND) || row.auto_install?.ok !== false) return null
-  return `自動安裝失敗：${row.auto_install.error ?? '原因不明'}；不重試，${retry}`
+  return t('自動安裝失敗：{error}；不重試，{retry}', { error: row.auto_install.error ?? t('原因不明'), retry })
 }
 
 /** 沒裝的 integration 的說明。`loggedIn`：這台那家 CLI 已裝且已登入（工具探測）。 */
 function notInstalledNote(row: IntegrationRow, loggedIn: boolean): string {
-  if (!(row.name in LOGIN_KIND)) return '還沒安裝；這裡只顯示，不自動裝'
-  const failed = autoInstallFailure(row, loggedIn ? '可按「安裝」再試，或重啟 daemon' : '重啟 daemon 才會再試')
+  if (!(row.name in LOGIN_KIND)) return t('還沒安裝；這裡只顯示，不自動裝')
+  const failed = autoInstallFailure(row, loggedIn ? t('可按「安裝」再試，或重啟 daemon') : t('重啟 daemon 才會再試'))
   if (failed) return failed
-  if (!loggedIn) return '還沒安裝；這台的 CLI 登入後 daemon 會自動裝一次，也才能手動安裝'
-  return '還沒安裝；已登入，daemon 會在巡檢自動裝一次，也可以現在按「安裝」'
+  if (!loggedIn) return t('還沒安裝；這台的 CLI 登入後 daemon 會自動裝一次，也才能手動安裝')
+  return t('還沒安裝；已登入，daemon 會在巡檢自動裝一次，也可以現在按「安裝」')
 }
 
 function integrationRow(host: string, row: IntegrationRow, tools: ToolMap | undefined): CheckRow {
-  const t = (tools as Record<string, ToolStatus> | undefined)?.[LOGIN_KIND[row.name] ?? '']
-  const loggedIn = t?.installed === true && t.logged_in === true
+  const probe = (tools as Record<string, ToolStatus> | undefined)?.[LOGIN_KIND[row.name] ?? '']
+  const loggedIn = probe?.installed === true && probe.logged_in === true
   const v = (n: number | null) => (n === null ? null : `v${n}`)
-  const base = { id: `${host}:integration-${row.name}`, group: 'integration' as const, label: INTEGRATION_LABEL[row.name] ?? `integration：${row.name}` }
+  const base = { id: `${host}:integration-${row.name}`, group: 'integration' as const, label: INTEGRATION_LABEL[row.name] ?? `integration：${row.name}` } // i18n-ignore
   switch (row.state) {
     case 'outdated':
-      return { ...base, current: v(row.installed_version), latest: v(row.required_version), status: 'update', note: autoInstallFailure(row, '可按「更新」再試，或重啟 daemon'), action: { kind: 'integration', name: row.name } }
+      return { ...base, current: v(row.installed_version), latest: v(row.required_version), status: 'update', note: autoInstallFailure(row, t('可按「更新」再試，或重啟 daemon')), action: { kind: 'integration', name: row.name } }
     case 'current':
       return { ...base, current: v(row.installed_version), latest: v(row.required_version), status: 'latest', note: null, action: null }
     case 'not_installed':
       return { ...base, current: null, latest: null, status: 'missing', note: notInstalledNote(row, loggedIn), action: loggedIn ? { kind: 'integration', name: row.name, fresh: true } : null }
     default:
-      return { ...base, current: null, latest: null, status: 'unknown', note: [autoInstallFailure(row, '重啟 daemon 才會再試'), row.detail].filter(Boolean).join('；') || null, action: null }
+      return { ...base, current: null, latest: null, status: 'unknown', note: [autoInstallFailure(row, t('重啟 daemon 才會再試')), row.detail].filter(Boolean).join(t('；')) || null, action: null }
   }
 }
 
@@ -228,14 +230,14 @@ export function summaryText(check: HostCheck): string {
   const { rows } = check
   // buildHostCheck 一定給 herdr 與四家 CLI 共 6 列，正常不會是空的；`rows.length > 0` 只是擋住空陣列被誤判成「都是最新」。
   const c = statusCounts(rows)
-  const unloaded = check.integrationPending ? 'integration 還沒讀到' : check.integrationError ? 'integration 讀取失敗' : null
-  if (rows.length > 0 && c.latest === rows.length && unloaded === null) return '都是最新'
+  const unloaded = check.integrationPending ? t('integration 還沒讀到') : check.integrationError ? t('integration 讀取失敗') : null
+  if (rows.length > 0 && c.latest === rows.length && unloaded === null) return t('都是最新')
   const parts = [
-    c.update > 0 ? `${c.update} 項可更新` : null,
-    c.latest > 0 ? `${c.latest} 項最新` : null,
-    c.missing > 0 ? `${c.missing} 項未安裝` : null,
-    c.unknown > 0 ? `${c.unknown} 項查不到` : null,
+    c.update > 0 ? t('{n} 項可更新', { n: c.update }) : null,
+    c.latest > 0 ? t('{n} 項最新', { n: c.latest }) : null,
+    c.missing > 0 ? t('{n} 項未安裝', { n: c.missing }) : null,
+    c.unknown > 0 ? t('{n} 項查不到', { n: c.unknown }) : null,
     unloaded,
   ]
-  return parts.filter((p) => p !== null).join('、')
+  return parts.filter((p) => p !== null).join(t('、'))
 }
