@@ -775,6 +775,18 @@ Jev 不負責回合收尾、額度記帳或競態判斷；這些依 run、turn�
 - **遠端主機的專案（#1467）**：四個場景的觸發點都不看主機，遠端專案跟本機專案同一條路——卡畫面掃描經 `herdr_for_run` 從那台主機自己的 herdr 讀畫面，派工撞題與完成回報只看 bot 與專案，撞限橫幅經 `read_run_pane`（run 所在主機）讀。終端備援（`try_fallback`）把畫面上的撞限橫幅收成失敗回合時，也走同一個閘門把這次命中交給 Jev（備援先下手時 `capture_codex_usage_notices` 會因「已寫過、回合不在飛」跳過，所以備援自己要交）。**限制與候選範圍**：(1) 認領撞題提示不是即時 HTTP：沒有 `runtime.json` 時 `agm` 把 `AmClaimCollisionCheck` 寫入該 bot 的 `hook-spool.d/`，等 daemon 收 spool 後交給 durable hook worker 執行撞題檢查（#1468），不開反向埠；本機 pane 使用 daemon 保留的 `AM_DATA_DIR` 寫入該資料目錄下的 bot spool，遠端 pane 沒有此變數時照遠端 daemon 的資料目錄：讀 `~/.config/agents-manager/config.toml` 的 `[server] data_dir`（`~` 展開，相對路徑接在設定檔目錄後面）；沒有就 `~/.config/agents-manager`，隔離實例（`AM_INSTANCE`）再加 `instances/<AM_INSTANCE>`（#1497）。HTTP 2xx 確認收件後不重複 spool；runtime 不在、連線未建立／中斷、逾時或 5xx 時寫入同一 `claim:<claim_id>` 候選身分的 spool，daemon 重放時同一候選只評分一次；4xx 等不可重試回應不 spool，`agm` 在 stderr 留下狀態與原因。(2) 撞限這個場景只看 codex／grok 的畫面橫幅，claude bot 不問（額度走 statusLine 的數字）；(3) 撞題候選包含同專案目前有 running run 的頂層 bot 標題與分支；閒置頂層 bot 的歷史標題不納入，未結案交辦仍只問要驗收且尚會開始的工作；完成回報只問 hook 回報的 `completed`，通知型交辦（`expects_review=0`）照樣問。「帳本沒有遠端列」要先分辨是這三條還是單純沒有觸發事件（2026-10-12 的帳本：m4p 最後一筆 AGM 派工是 09-22，早於撞題與完成回報上線）。
 - 模型釘 `jev-1.13.0`。離線量測與題目來源在 `reports/jev-spike/`。Jev 的答案目前**不**作為否決票；要升級得先看帳本的數字。
 
+### 4.3d Claude API key：一次性 LLM 工作不開 Claude Code session（`[claude_api]`，issue #1919）
+
+把「不需要工具、不需要 repo」的一次性 LLM 工作（例如請 AGM 解析 changelog）改走 Anthropic Messages API，不開 Claude Code session，不吃訂閱用量，改按 API 計費（`daemon/src/claude_api.rs`）。各用途自己組 prompt、自己決定失敗時退回哪條路（沒 key、關閉、逾時、被限流都退回原本的 Claude Code 路徑）；這個模組只管 client、開關、保險絲、帳本與設定。
+
+- **client 只有一份**：`MessagesClient`／`MessagesRequest`／`AnthropicHttpClient`（`POST https://api.anthropic.com/v1/messages`，`x-api-key`、`anthropic-version: 2023-06-01`；不跟隨 redirect、有逾時、`Debug` 與 log 不印 key）。#1870 的更新框翻譯（§6.9d）也走這一份，不另有第二套。**不送 `temperature`／`top_p`／`top_k`，也不送 `thinking`**（新模型拒收或預設自適應）；只送 `output_config.effort` 與選用的 `output_config.format`（結構化輸出）。回應只收 `text` 區塊，`stop_reason: refusal` 或沒有文字算 `bad_response`。
+- **入口 `claude_api::complete(app, ClaudeRequest{use_case, system, prompt, max_tokens, format})`**：模型與 effort 由設定決定、呼叫端不指定。**不重試**：一個請求一次送出，失敗就回錯，由用途決定退回哪條路。失敗分類（`ClaudeError::kind()`）：`disabled`／`no_key`／`budget`（這三種沒送出、不進帳本）、`auth`（401／403）、`rate_limited`（429，帶 `Retry-After` 秒數）、`server`（5xx 含 529）、`timeout`、`network`、`rejected`（其他 4xx）、`bad_response`。
+- **兩層開關＋保險絲**：`[claude_api] enabled` 總開關與 `[claude_api.uses.<用途>] enabled` 都要開才會呼叫（預設全關）；每個用途一小時最多 `max_per_hour` 次（先占名額再送，滿了回 `budget`）。沒有可用 key 時任何一層都不給開（409 `needs_key`）。
+- **已知用途**（`am_config::CLAUDE_API_USES`，要加用途就加一行）：`changelog_review`（AGM 解析 changelog，預設 `claude-sonnet-5-5`／effort `medium`／30 次每小時）、`changelog_translate`（更新框翻譯 §6.9d，預設 `claude-haiku-5-5`／`low`／12 次）。預設模型：純摘要／翻譯用 Haiku，需要判斷的用 Sonnet，不預設 Opus／Fable；模型欄可填任何 `claude-` 開頭的安全 id，設定頁下拉給最新的 Haiku／Sonnet。**`changelog_translate` 的設定仍存在 `[changelog_translate]`**（舊設定檔照舊有效；設定頁讀寫那一段），不受總開關管；它與 `[claude_api]` 讀同一個 key 檔，只有 `[changelog_translate] key_file` 被明確改成非預設路徑時才用舊路徑。
+- **key**：`[claude_api] key_file`（預設 `~/.config/agents-manager/anthropic-api-key`，與翻譯共用）只是路徑；key 由 daemon 寫成 600 的檔（`key_file` 模組，Jev 共用同一套讀寫），不進 `config.toml`、DB、log、帳本，任何 API 都不回 key，只回 `key_present`／`key_error`。檔案對 group／other 可讀就拒用。
+- **帳本**：記憶體（daemon 重啟歸零），最近 200 筆＋累計與每個用途的累計：用途、模型、input／output tokens、耗時、成功或錯誤分類、`stop_reason`；**不存 prompt 與回覆**。設定頁顯示累計 tokens 與最近幾筆，讓人看得到這些工作沒走訂閱額度。
+- **設定入口**：網頁「環境設定 → Claude API」（或 `PUT /api/claude-api/settings`）：貼 key、總開關、每個用途的開關／模型／思考強度／每小時上限。存檔當下生效，不用重啟。User／AGM 可讀寫；一般 Bot 一律 403。
+
 ### 4.4 hook 子命令（`agents-managerd hook claude|codex|grok|agy`）最低契約
 
 1. wall-clock ≤ 3 秒；**永遠 exit 0、stdout 空**——唯一的例外是 §4.4c 的 PreToolUse 守門「要擋」時印的那一行決策 JSON。
@@ -3019,7 +3031,7 @@ header 的 herdr 徽章確認後 `POST /api/hosts/{name}/herdr-update`（API §1
 
 更新確認框在原文旁邊多一層摘要與譯文（`daemon/src/changelog_translate.rs`）。預設目標語言是繁中（`zh-Hant`）；prompt 改走設定裡驗證過的 `lang`，不是只會翻繁中。原文、來源連結，以及既有的「請 AGM 解析」（`claude_review`）都不改。不碰分診、帳本判決、自動開 issue 或升級。全站介面語言不在這裡，也沒有語言選擇器。還沒翻時，按鈕跟這次回應的 `lang`：`zh-Hant` 寫「翻譯成繁中」、`zh-Hans`「翻譯成簡中」、`en`「翻譯成英文」、`ja`「翻譯成日文」、`ko`「翻譯成韓文」。沒有 `lang` 或不認得就只寫「翻譯」。摘要沒有固定的繁中標題。
 
-- **預設關**。`[changelog_translate]` 沒寫或 `enabled = false`，以及 key 檔讀不到：安靜停用。`GET`／`POST /api/changelog/translation` 回 `unconfigured`，不打 API、畫面不顯示錯誤、不擋解析、安裝或重啟。key 只放在 `key_file` 指到的 0600 檔，不進 `config.toml`、不進帳本、不進回應。
+- **預設關**。`[changelog_translate]` 沒寫或 `enabled = false`，以及 key 檔讀不到：安靜停用。`GET`／`POST /api/changelog/translation` 回 `unconfigured`，不打 API、畫面不顯示錯誤、不擋解析、安裝或重啟。key 只放在 `key_file` 指到的 0600 檔，不進 `config.toml`、不進帳本、不進回應；網頁「環境設定 → Claude API」（§4.3d）貼的 key 就寫到這個檔，翻譯與 `[claude_api]` 共用同一把、同一份 client。
 - **只有使用者按下去才扣費**。`GET` 只讀狀態（開視窗、輪詢、再查一次都不送出）。`POST` 開始或重試。兩條都是 User-only；一般 Bot 與 AGM role Bot 均 → 403 `user_only`。
 - **同一份內容只翻一次**。帳本是 `{data_dir}/changelog-translate/{fingerprint}.json`（0600），不進 SQLite，所以不升 `SCHEMA_VERSION`。fingerprint 是下面這段 canonical 字串的 sha256 hex。host 不在裡面。kind、語言、模型、effort、輸入上限、prompt 版或正文變了就是另一個鍵。多台 host 同一 kind、同一段原文共用一筆。
 

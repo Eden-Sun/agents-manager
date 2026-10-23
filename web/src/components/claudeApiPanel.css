@@ -1,0 +1,129 @@
+/* 環境設定 → Claude API（SPEC §4.3d）。樣式照 judgePanel.css 的做法，不去動共用檔。 */
+.claude-api-panel .claude-api-key {
+  font-style: normal;
+  color: var(--warn);
+}
+.claude-api-panel .claude-api-key.ok {
+  color: var(--status-ok);
+}
+.claude-api-panel .claude-api-switch {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  min-height: 28px;
+}
+.claude-api-panel .claude-api-uses {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.claude-api-panel .claude-api-use {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin: 0;
+  min-width: 0;
+  padding: 8px 10px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+}
+.claude-api-panel .claude-api-use:disabled {
+  opacity: 0.55;
+}
+.claude-api-panel .claude-api-use-fields {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
+  gap: 8px;
+}
+.claude-api-panel .claude-api-use-fields .field {
+  min-width: 0;
+}
+.claude-api-panel .claude-api-note {
+  margin-right: auto;
+  font-size: 12px;
+}
+.claude-api-panel .claude-api-note.err {
+  color: var(--danger);
+}
+.claude-api-panel .field input[type='password'],
+.claude-api-panel .field input[type='number'],
+.claude-api-panel .field select {
+  width: 100%;
+  padding: 5px 8px;
+  color: inherit;
+  background: var(--bg-sunken);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+}
+.claude-api-panel .field input:focus,
+.claude-api-panel .field select:focus {
+  border-color: var(--accent);
+  outline: none;
+}
+.claude-api-ledger {
+  margin-top: 12px;
+  min-width: 0;
+}
+.claude-api-ledger h4 {
+  margin: 8px 0 4px;
+}
+.claude-api-ledger-scroll {
+  overflow-x: auto;
+  -webkit-overflow-scrolling: touch;
+  max-width: 100%;
+}
+.claude-api-ledger table {
+  border-collapse: collapse;
+  font-size: 12px;
+  white-space: nowrap;
+}
+.claude-api-ledger th,
+.claude-api-ledger td {
+  padding: 2px 8px;
+  text-align: left;
+}
+.claude-api-ledger td.ok {
+  color: var(--status-ok);
+}
+.claude-api-ledger td.err {
+  color: var(--danger);
+}
+/* 手機：表格攤成一列一張卡片（比照 Jev 帳本，issue #1466），不橫向撐破 sheet。 */
+@media (width <= 640px) {
+  .claude-api-panel .claude-api-use-fields {
+    grid-template-columns: 1fr;
+  }
+  .claude-api-ledger-scroll {
+    overflow-x: visible;
+  }
+  .claude-api-ledger table,
+  .claude-api-ledger tbody,
+  .claude-api-ledger tr,
+  .claude-api-ledger td {
+    display: block;
+    white-space: normal;
+  }
+  .claude-api-ledger thead {
+    position: absolute;
+    width: 1px;
+    height: 1px;
+    overflow: hidden;
+    clip-path: inset(50%);
+  }
+  .claude-api-ledger table {
+    font-size: 13px;
+  }
+  .claude-api-ledger tr {
+    padding: 6px 0;
+    border-bottom: 1px solid var(--border);
+  }
+  .claude-api-ledger td {
+    padding: 1px 0;
+    overflow-wrap: anywhere;
+  }
+  .claude-api-ledger td::before {
+    content: attr(data-label) '：';
+    color: var(--text-dim, inherit);
+    opacity: 0.7;
+  }
+}

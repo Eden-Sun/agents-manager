@@ -132,6 +132,7 @@ pub use am_base::{
     git_sh,
     github,
     herdr,
+    key_file,
     herdr_maintenance,
     herdr_shim,
     herdr_unit,
@@ -230,6 +231,7 @@ mod promote_intents;
 mod autostart_revive;
 mod claude_review;
 pub mod changelog_translate;
+pub mod claude_api;
 mod cli_update;
 mod app_ports_p0;
 mod app_ports_p1;
